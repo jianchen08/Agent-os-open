@@ -19,7 +19,7 @@
         "lifecycle_hooks": ["on_load", "on_unload"]
     },
     "dependencies": [],
-    "capabilities_required": ["human-interaction", "pipeline-executor"],
+    "capabilities_required": ["human-interaction", "pipeline-executor", "event-bus"],
     "permissions": {},
     "error_policy": "abort",
     "priority": 60,
@@ -28,8 +28,8 @@
             {
                 "id": "approval_panel",
                 "type": "review_document",
-                "space": "workspace",
-                "trigger": "on_route_signal:wait",
+                "space": "fullscreen",
+                "trigger": "on_event:approval.created",
                 "props": {
                     "diff_view": true,
                     "annotation": true

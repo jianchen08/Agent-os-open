@@ -3,7 +3,7 @@
 import { lazy, Suspense, useEffect, useCallback } from 'react'
 import { createBrowserRouter, Navigate, useNavigate } from 'react-router-dom'
 import { GlobalInteractionOverlay } from './components/chat/GlobalInteractionOverlay'
-import { ApprovalReviewOverlay } from './components/approval'
+import { SchemaFullscreenHost } from './components/schema/SchemaFullscreenHost'
 import { ChatPanelShell } from './components/layout/ChatPanelShell'
 import { Sidebar } from './components/layout/Sidebar'
 import { ROUTES } from './constants/routes'
@@ -173,8 +173,8 @@ function ProtectedRoute({ children }: { children: ReactNode }): ReactNode {
       {children}
       {/* 全局交互浮层：在所有受保护页面中显示待处理交互 */}
       <GlobalInteractionOverlay />
-      {/* 审批审阅浮层：监听 approval.created 事件，展示审阅界面（v0.2 P1-2） */}
-      <ApprovalReviewOverlay />
+      {/* 全屏声明浮层：订阅插件 ui_schema 声明的事件（on_event:*），渲染 fullscreen 空间 widget */}
+      <SchemaFullscreenHost />
     </>
   )
 }

@@ -3,11 +3,13 @@
 
 职责收窄为"管道挂起/恢复 + 审批语义"——交互请求的创建、前端通知、
 用户响应等待统一委托给 human-interaction capability（交互工具插件）。
-approval 不再自建 request 结构、不再自己发 event-bus。
+approval 不自建 request 结构；仅在创建审批后发一条 ``approval.created``
+事件（fire-and-forget），驱动前端全屏审批浮层（SchemaFullscreenHost）。
 
 能力依赖（由内核 initialize 注入）：
 - human-interaction: create_choice/create_conversation/wait_for_choice——交互请求全权委托
 - pipeline-executor: suspend/resume——挂起/恢复管道（approval 独有职责）
+- event-bus: emit approval.created——通知前端全屏审批浮层
 - logger: 结构化日志
 
 闭环：
@@ -66,6 +68,35 @@ def _get_cap(name: str) -> Any | None:
         return plugin.get_capability(name)
     except KeyError:
         return None
+
+
+async def _emit_approval_created(
+    request_id: str, title: str, options: list[str], run_id: str | None = None
+) -> None:
+    """通知前端审批已创建（fire-and-forget，失败不影响审批主链路）。
+
+    前端 SchemaFullscreenHost 订阅 ``approval.created`` 事件（ui_schema 声明
+    ``trigger: "on_event:approval.created"`` + ``space: "fullscreen"``），
+    据此打开全屏审批浮层。payload 与前端 ApprovalCreatedPayload 对齐。
+    """
+    bus = _get_cap("event-bus")
+    if bus is None:
+        logger.warning("[approval] event-bus not injected; skip approval.created")
+        return
+    try:
+        await bus.notify("emit", {
+            "event": "approval.created",
+            "payload": {
+                "request_id": request_id,
+                "title": title,
+                "options": options,
+                "mode": "choice",
+                "run_id": run_id or "",
+            },
+            "thread_id": run_id or "",
+        })
+    except Exception:
+        logger.exception("[approval] emit approval.created failed")
 
 
 async def _suspend_pipeline(run_id: str, approval_id: str) -> dict[str, Any] | None:
@@ -181,6 +212,9 @@ async def create_choice(
     if not isinstance(create_res, dict) or create_res.get("error"):
         return {"error": f"create_choice failed: {create_res}"}
     request_id = create_res.get("request_id", "")
+
+    # 通知前端全屏审批浮层（SchemaFullscreenHost）；fire-and-forget，失败不阻塞。
+    await _emit_approval_created(request_id=request_id, title=title, options=options, run_id=run_id)
 
     # 第二步：挂起管道（approval 独有职责）
     suspend_handle = None
