@@ -9,6 +9,8 @@ members = [
     "crates/invoker",
     "crates/tenant",
     "crates/api",
+    "crates/http",
+    "crates/db-admin",
     "crates/hooks",
     "crates/engine",
     "crates/session",
@@ -86,5 +88,7 @@ agentos-invoker = { path = "crates/invoker" }
 agentos-engine = { path = "crates/engine" }
 agentos-tenant = { path = "crates/tenant" }
 agentos-api = { path = "crates/api" }
+agentos-http = { path = "crates/http" }
+agentos-db-admin = { path = "crates/db-admin" }
 agentos-session = { path = "crates/session" }
 agentos-hooks = { path = "crates/hooks" }

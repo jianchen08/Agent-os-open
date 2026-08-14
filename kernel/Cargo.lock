@@ -8,8 +8,10 @@ version = "0.2.0"
 dependencies = [
  "agentos-config",
  "agentos-core",
+ "agentos-db-admin",
  "agentos-engine",
  "agentos-hooks",
+ "agentos-http",
  "agentos-invoker",
  "agentos-mcp",
  "agentos-plugin-loader",
@@ -74,6 +76,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "agentos-db-admin"
+version = "0.2.0"
+dependencies = [
+ "agentos-core",
+ "agentos-engine",
+ "agentos-http",
+ "axum",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tower",
+]
+
+[[package]]
 name = "agentos-engine"
 version = "0.2.0"
 dependencies = [
@@ -107,6 +124,18 @@ dependencies = [
  "thiserror 2.0.18",
  "tokio",
  "tracing",
+]
+
+[[package]]
+name = "agentos-http"
+version = "0.2.0"
+dependencies = [
+ "agentos-core",
+ "axum",
+ "base64 0.22.1",
+ "chrono",
+ "serde_json",
+ "thiserror 2.0.18",
 ]
 
 [[package]]

@@ -16,6 +16,10 @@ from functools import lru_cache
 # + system/llm（复用 _config_models 配置注入桥，与 system/llm/server.py 共享）
 _this_dir = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, _this_dir)
+# pipeline/core 目录：llm_provider_* 提供者适配插件（deepseek/minimax/keypool）
+# 作为可导入包存在（task_kernel_cleanup_and_split 3a，注册表按模型名懒加载）。
+_core_dir = os.path.join(_this_dir, "..")
+sys.path.insert(1, _core_dir)
 _shared_dir = os.path.join(_this_dir, "..", "..", "..")
 sys.path.insert(0, _shared_dir)
 _system_llm_dir = os.path.join(_shared_dir, "system", "llm")

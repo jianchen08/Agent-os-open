@@ -54,6 +54,7 @@ use crate::routes::{
     put_pipeline_config_handler, put_plugin_config_handler, schema_handler, tools_handler,
     AppState,
 };
+use agentos_db_admin::DbAdminState;
 
 /// WebSocket 消息请求体。
 #[derive(Debug, Deserialize, Serialize)]
@@ -87,6 +88,12 @@ pub struct WsResponse {
 /// 动态端点统一走 `dispatch_http`（raw body/headers 透传 + 插件自定义响应 +
 /// per-endpoint timeout/concurrency）。
 pub fn build_router(state: AppState) -> Router {
+    // DB Admin 后台（db-admin crate）：从 AppState 克隆 store/db 注入其自有状态
+    // （api 仅负责挂载，端点逻辑与鉴权在 db-admin crate 内自洽）。
+    let db_admin_state = DbAdminState {
+        store: state.store.clone(),
+        db: state.db.clone(),
+    };
     let static_router = Router::new()
         // AC-06-3: 健康检查
         .route("/health", get(health_handler))
@@ -163,20 +170,9 @@ pub fn build_router(state: AppState) -> Router {
         .route("/api/v1/auth/refresh", post(refresh_handler))
         .route("/api/v1/auth/logout", post(logout_handler))
         .route("/api/v1/auth/register", post(register_handler))
-        // 统一通用数据接口（task_01：表驱动动态枚举，不改持久化）
-        .route("/api/v1/db/tables", get(crate::db_routes::list_tables_handler))
-        .route(
-            "/api/v1/db/table/{table}",
-            get(crate::db_routes::query_rows_handler)
-                .post(crate::db_routes::insert_row_handler),
-        )
-        .route(
-            "/api/v1/db/table/{table}/{pk_value}",
-            get(crate::db_routes::get_row_handler)
-                .patch(crate::db_routes::update_row_handler)
-                .delete(crate::db_routes::delete_row_handler),
-        )
-        .route("/api/v1/db/execute", post(crate::db_routes::execute_sql_handler));
+        // 统一通用数据接口（task_01：表驱动动态枚举，不改持久化）——
+        // 独立 db-admin crate（DB Admin 管理后台：通用 CRUD + SQL 执行器）
+        .nest("/api/v1/db", agentos_db_admin::router().with_state(db_admin_state));
 
     // P3：动态挂载插件 HTTP 端点（http_routes → dispatcher）
     let router = crate::http_dispatcher::build_router_with_http_routes(state.clone(), static_router);
@@ -193,8 +189,8 @@ pub fn build_router(state: AppState) -> Router {
 
 /// F-API-1：配置写入面 + compat 会话/插件生命周期鉴权中间件。
 ///
-/// 按路径白名单 + method 区分：写面（POST/PUT/PATCH/DELETE）→ require_admin_role；
-/// 读面（GET）→ require_read_role（admin/viewer）。白名单覆盖：
+/// 按路径白名单 + method 区分：写面（POST/PUT/PATCH/DELETE）→ require_surface_role
+/// （admin）；读面（GET）→ require_surface_role（admin/viewer）。白名单覆盖：
 /// - `/api/v1/threads*`（会话 CRUD）
 /// - `/api/v1/plugins/*`（status/history/reload/enabled/config）
 /// - `/api/v1/actions/execute`、`/api/v1/interaction/response`
@@ -220,12 +216,40 @@ async fn write_surface_auth(
     }
 
     let result = match method {
-        Method::GET => crate::db_routes::require_read_role(&state, req.headers()).await,
-        _ => crate::db_routes::require_admin_role(&state, req.headers()).await,
+        Method::GET => require_surface_role(&state, req.headers(), false).await,
+        _ => require_surface_role(&state, req.headers(), true).await,
     };
     match result {
         Ok(_) => Ok(next.run(req).await),
         Err(e) => Err(e),
+    }
+}
+
+/// compat 会话/插件生命周期白名单面的角色校验（原 db_routes::require_read_role /
+/// require_admin_role 的 api 侧等价实现——db_routes 已拆至 db-admin crate，
+/// 此处用 api 自身的 resolve_request_user（agentos-http 单一实现），
+/// 语义与错误消息保持与拆分前一致）。
+async fn require_surface_role(
+    state: &AppState,
+    headers: &HeaderMap,
+    write: bool,
+) -> Result<(), ApiError> {
+    let (_, _, role, _) = crate::auth::resolve_request_user(state.store.as_ref(), headers).await?;
+    let ok = if write {
+        role == "admin"
+    } else {
+        role == "admin" || role == "viewer"
+    };
+    if ok {
+        Ok(())
+    } else if write {
+        Err(ApiError::Forbidden {
+            message: "写操作需要 admin 角色".to_string(),
+        })
+    } else {
+        Err(ApiError::Forbidden {
+            message: "需要 admin 或 viewer 角色".to_string(),
+        })
     }
 }
 
