@@ -290,6 +290,76 @@ async def hindsight_reflect(bank_id: str = "", query: str = "") -> dict[str, Any
         return {"error": str(e)}
 
 
+def _extract_summary_text(result: Any) -> str:
+    """从容错提取 reflect 输出中的摘要文本（字段名多样，逐个尝试）。
+
+    Returns:
+        摘要文本；无法提取时返回空串（调用方降级）。
+    """
+    if isinstance(result, str):
+        return result
+    if isinstance(result, dict):
+        for key in ("summary", "text", "content", "result", "reflection", "response"):
+            val = result.get(key)
+            if isinstance(val, str) and val.strip():
+                return val
+        parts = [str(v) for v in result.values() if isinstance(v, (str, int, float)) and str(v).strip()]
+        return "\n".join(parts)
+    return str(result) if result is not None else ""
+
+
+@plugin.tool(
+    name="hindsight.summarize",
+    schema={
+        "type": "object",
+        "properties": {
+            "bank_id": {
+                "type": "string",
+                "description": "Memory bank id (tenant isolation key)",
+            },
+            "query": {"type": "string", "description": "摘要聚焦的查询（缺省总结最近记忆）"},
+            "top_k": {"type": "integer", "default": 20, "description": "recall 检索条数"},
+            "memory_type": {"type": "string", "description": "按记忆类型过滤检索"},
+        },
+    },
+    description="Summarize relevant memories via recall + reflection (SUMMARY injection)",
+)
+async def hindsight_summarize(
+    bank_id: str = "", query: str = "", top_k: int = 20, memory_type: str = ""
+) -> dict[str, Any]:
+    """摘要注入：recall 检索相关记忆 → reflect 反思整合 → 返回摘要文本。
+
+    供 memory_read 的 SUMMARY 注入经 tool-executor.invoke 跨进程调用；
+    失败返回降级 dict（含 error），不抛异常。
+    """
+    if _client is None:
+        return _degrade_dict("summarize")
+
+    try:
+        bank = _resolve_bank_id(bank_id)
+        recall_kwargs: dict[str, Any] = {"bank_id": bank, "query": query or "", "top_k": top_k}
+        if memory_type:
+            recall_kwargs["memory_type"] = memory_type
+        recall = await _client.arecall(**recall_kwargs)
+        recalled_count = 0
+        if isinstance(recall, dict):
+            items = recall.get("results")
+            recalled_count = len(items) if isinstance(items, list) else 0
+
+        reflect = await _client.areflect(bank_id=bank, query=query or "总结最近的记忆和经验")
+        summary_text = _extract_summary_text(reflect)
+        if not summary_text:
+            summary_text = "（无摘要内容）"
+        return {
+            "summary": summary_text,
+            "recalled": recalled_count,
+            "operation": "summarize",
+        }
+    except Exception as e:
+        logger.warning("[hindsight.summarize] 调用失败 | error=%s", e)
+        return {"error": str(e), "operation": "summarize"}
+
+
 @plugin.tool(
     name="hindsight.delete",
     schema={

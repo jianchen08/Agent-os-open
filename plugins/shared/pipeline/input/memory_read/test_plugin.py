@@ -220,3 +220,70 @@ class TestBackendError:
 
         assert result.state_updates["memory.retrieved"] == []
         assert result.error is not None
+
+
+# ═══════════════════════════════════════════════════════════
+# 6. SUMMARY 注入：caller → hindsight.summarize；无 caller / 出错降级拼接
+# ═══════════════════════════════════════════════════════════
+
+
+class FakeCaller:
+    """记录调用的伪 capability_caller（async fn `(method, params) -> Any`）。"""
+
+    def __init__(self, result: Any) -> None:
+        self._result = result
+        self.calls: list[tuple[str, dict[str, Any]]] = []
+
+    async def __call__(self, method: str, params: dict[str, Any]) -> Any:
+        self.calls.append((method, params))
+        return self._result
+
+
+class TestSummaryInjection:
+    def test_summary_calls_hindsight_summarize(self) -> None:
+        """inject_type=summary + caller 注入 → 经 tool-executor 调 hindsight.summarize，注入整合摘要。"""
+        mod = _load_plugin_module()
+        mod.set_memory_backend(FakeBackend(results=[_SAMPLE]))
+        caller = FakeCaller({"summary": "整合后的记忆摘要：用户偏好 X", "recalled": 1})
+        mod.set_capability_caller(caller)
+        plugin = mod.MemoryReadPlugin(config={"inject_type": "summary", "top_k": 5, "memory_type": "semantic"})
+        ctx = _make_ctx({"user_message": "总结一下我的偏好", "user_id": "u-1"})
+
+        result = _run(plugin.execute(ctx))
+
+        assert caller.calls, "应调用 capability_caller"
+        method, params = caller.calls[0]
+        assert method == "tool-executor.invoke"
+        assert params["tool_name"] == "hindsight.summarize"
+        assert params["args"]["bank_id"] == "u-1"
+        assert params["args"]["query"] == "总结一下我的偏好"
+        assert params["args"]["memory_type"] == "semantic"
+        assert result.state_updates["memory.retrieved"] == "整合后的记忆摘要：用户偏好 X"
+
+    def test_summary_degrades_to_concat_when_caller_errors(self) -> None:
+        """caller 返回 error → 降级为检索拼接（不抛异常）。"""
+        mod = _load_plugin_module()
+        mod.set_memory_backend(FakeBackend(results=[_SAMPLE]))
+        mod.set_capability_caller(FakeCaller({"error": "hindsight not initialized", "operation": "summarize"}))
+        plugin = mod.MemoryReadPlugin(config={"inject_type": "summary", "top_k": 5})
+        ctx = _make_ctx({"user_message": "q", "user_id": "u-1"})
+
+        result = _run(plugin.execute(ctx))
+
+        injected = result.state_updates["memory.retrieved"]
+        assert isinstance(injected, str)
+        assert "记忆内容1" in injected  # 拼接路径包含检索内容
+
+    def test_summary_degrades_to_concat_without_caller(self) -> None:
+        """无 caller → 直接降级拼接（保持原行为）。"""
+        mod = _load_plugin_module()
+        mod.set_memory_backend(FakeBackend(results=[_SAMPLE]))
+        mod.set_capability_caller(None)
+        plugin = mod.MemoryReadPlugin(config={"inject_type": "summary", "top_k": 5})
+        ctx = _make_ctx({"user_message": "q", "user_id": "u-1"})
+
+        result = _run(plugin.execute(ctx))
+
+        injected = result.state_updates["memory.retrieved"]
+        assert isinstance(injected, str)
+        assert "记忆内容1" in injected

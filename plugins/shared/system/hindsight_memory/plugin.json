@@ -21,6 +21,10 @@
                 "description": "Trigger hindsight reflection/consolidation on a bank"
             },
             {
+                "name": "hindsight.summarize",
+                "description": "Summarize relevant memories via recall + reflection (SUMMARY injection)"
+            },
+            {
                 "name": "hindsight.delete",
                 "description": "Delete memories from a hindsight bank"
             },

@@ -34,6 +34,10 @@ logger = logging.getLogger(__name__)
 # 长期记忆后端（IMemoryBackend，Hindsight/Kernel 统一形态）；None 时跳过记忆检索
 _memory_backend: Any | None = None
 
+# 能力调用器（wiring.make_capability_caller 注入：tool-executor/service-registry 优先）；
+# SUMMARY 注入经它跨进程调 hindsight.summarize；None 时降级拼接
+_capability_caller: Any | None = None
+
 
 def set_memory_backend(backend: Any | None) -> None:
     """注入长期记忆后端（IMemoryBackend 实例或兼容 duck-type）。
@@ -46,6 +50,17 @@ def set_memory_backend(backend: Any | None) -> None:
     """
     global _memory_backend
     _memory_backend = backend
+
+
+def set_capability_caller(caller: Any | None) -> None:
+    """注入能力调用器（async fn `(method, params) -> Any`）。
+
+    由 server.py on_load 经 wiring.make_capability_caller 注入；
+    SUMMARY 注入用 tool-executor.invoke 跨进程调 hindsight.summarize。
+    传 None 清空（降级为检索拼接）。
+    """
+    global _capability_caller
+    _capability_caller = caller
 
 
 # 注入方式常量
@@ -238,7 +253,30 @@ class MemoryReadPlugin(IInputPlugin):
             except Exception as e:
                 logger.warning("[%s] summarizer 服务调用失败，降级拼接: %s", self.name, e)
 
-        # 降级：检索后拼接（TODO: 接入 memory.summarize 工具后启用真实 LLM 摘要）
+        # 其次：经 capability_caller 跨进程调 hindsight.summarize（recall + reflect 真摘要）
+        if _capability_caller is not None:
+            try:
+                query = ctx.state.get("user_message", "")
+                params = {
+                    "tool_name": "hindsight.summarize",
+                    "args": {
+                        "bank_id": user_id,
+                        "query": query,
+                        "top_k": top_k,
+                        "memory_type": memory_type,
+                    },
+                }
+                result = await _capability_caller("tool-executor.invoke", params)
+                if isinstance(result, dict) and result.get("summary"):
+                    return str(result["summary"])
+                if isinstance(result, dict) and result.get("error"):
+                    logger.warning(
+                        "[%s] hindsight.summarize 不可用降级拼接: %s", self.name, result.get("error")
+                    )
+            except Exception as e:
+                logger.warning("[%s] hindsight.summarize 调用失败，降级拼接: %s", self.name, e)
+
+        # 兜底：检索后拼接（hindsight 不可用 / 无 caller 时的保险路径）
         query = ctx.state.get("user_message", "")
         if query:
             results = await backend.search(query=query, user_id=user_id, top_k=top_k, memory_type=memory_type)
