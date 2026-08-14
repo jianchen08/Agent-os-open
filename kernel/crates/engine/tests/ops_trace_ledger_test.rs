@@ -24,10 +24,10 @@ use std::collections::HashMap;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 
-use agentos_config::load_pipeline_definition;
 use agentos_core::traits::{MessageQueryOpts, PluginInvoker, StorageBackend};
 use agentos_core::types::{
-    PluginContext, PluginError, PluginResult, TenantContext, ToolExecutionResult,
+    LoopBody, LoopConfig, PluginContext, PluginError, PluginResult, PipelineConfig, PipelineStep,
+    Route, RouteAction, RouteNext, TenantContext, ToolExecutionResult,
 };
 use agentos_engine::{PipelineExecutor, SqliteStore};
 use async_trait::async_trait;
@@ -169,57 +169,75 @@ impl PluginInvoker for MockInvoker {
     }
 }
 
-fn write_default_pipeline(config_dir: &Path) {
-    let pipelines = config_dir.join("pipelines");
-    std::fs::create_dir_all(&pipelines).unwrap();
-    std::fs::write(
-        pipelines.join("default.yaml"),
-        r#"
-name: agentos_agent
-
-input_routes:
-  - name: llm_call
-    condition: "core_type == 'llm_call'"
-    target: core
-    plugins: [multimodal_preprocessor, context_window_guard, tool_schema, prompt_build]
-    priority: 20
-  - name: default
-    condition: "True"
-    target: core
-    plugins: [pause_guard, tool_schema, param_inject, prompt_build]
-    priority: 30
-
-output_routes:
-  - route_type: next_tool
-    condition: "raw_tool_calls != []"
-    priority: 1
-  - route_type: end
-    condition: "True"
-    priority: 99
-
-plugins:
-  - name: tool_schema
-    config:
-      enabled: true
-  - name: prompt_build
-    config:
-      enabled: true
-  - name: stop_check
-    config:
-      enabled: true
-  - name: result_format
-    config:
-      max_result_length: 2000
-
-core_plugins:
-  llm_call:
-    class: plugins.shared.core.llm_core.plugin.LLMCore
-    config:
-      default_params:
-        temperature: 0.7
-"#,
-    )
-    .unwrap();
+/// 构造新格式（多循环体）管道配置：main 体 = prepare/core/post + 路由。
+fn make_engine_config() -> PipelineConfig {
+    let prepare_plugins = [
+        "pipeline_tool_schema",
+        "pipeline_param_inject",
+        "pipeline_multimodal_preprocessor",
+        "pipeline_context_window_guard",
+        "pipeline_prompt_build",
+        "pipeline_pause_guard",
+    ]
+    .map(|s| s.to_string())
+    .to_vec();
+    PipelineConfig {
+        name: "agentos_agent".into(),
+        loop_bodies: vec![LoopBody {
+            id: "main".into(),
+            steps: vec![
+                PipelineStep {
+                    id: "prepare".into(),
+                    steps: prepare_plugins,
+                    context: HashMap::new(),
+                    routes: vec![],
+                    loop_config: None,
+                },
+                PipelineStep {
+                    id: "core".into(),
+                    steps: vec!["{{state.core_plugin}}".into()],
+                    context: HashMap::new(),
+                    routes: vec![],
+                    loop_config: None,
+                },
+                PipelineStep {
+                    id: "post".into(),
+                    steps: vec![
+                        "pipeline_stop_check".into(),
+                        "pipeline_result_format".into(),
+                    ],
+                    context: HashMap::new(),
+                    routes: vec![
+                        Route {
+                            when: "raw_tool_calls != [] and raw_tool_calls != None".into(),
+                            then: RouteAction {
+                                next: RouteNext::Loop,
+                                set: HashMap::from([
+                                    ("core_type".to_string(), json!("tool_execute")),
+                                    ("core_plugin".to_string(), json!("pipeline_tool_core")),
+                                ]),
+                            },
+                        },
+                        Route {
+                            when: "True".into(),
+                            then: RouteAction {
+                                next: RouteNext::End,
+                                set: HashMap::new(),
+                            },
+                        },
+                    ],
+                    loop_config: None,
+                },
+            ],
+            loop_config: Some(LoopConfig {
+                enabled: true,
+                max_iterations: -1,
+            }),
+            exit_routes: vec![],
+            run_on_error: false,
+        }],
+        checkpoint: Default::default(),
+    }
 }
 
 /// 跑一条真实管道（MockInvoker + SqliteStore）：core 插件 emit messages ops + 标量。
@@ -229,10 +247,7 @@ async fn run_pipeline_emit_ops(
     pipeline_id: &str,
     ops: Vec<Value>,
 ) {
-    let tmp = tempfile::tempdir().unwrap();
-    write_default_pipeline(tmp.path());
-    let def = load_pipeline_definition(tmp.path(), "default").expect("load pipeline");
-    let engine_cfg = def.to_engine_config();
+    let engine_cfg = make_engine_config();
 
     let plugin_ids = [
         "pipeline_tool_schema",

@@ -1,5 +1,5 @@
 // @ci: rust-test
-//! GET /api/v1/threads/{id}/messages 工具字段内容契约测试（TDD）。
+//! GET /api/v1/sessions/{id}/messages 工具字段内容契约测试（TDD）。
 //!
 //! 契约：持久化了 `tool_result_json` envelope 的 tool 消息，HTTP 返回必须携带
 //! 结构化字段（camelCase，对齐前端 BackendMessageResponse）：
@@ -108,7 +108,7 @@ async fn get_messages_json(app: &axum::Router, token: &str) -> Value {
         .oneshot(
             Request::builder()
                 .method(Method::GET)
-                .uri(format!("/api/v1/threads/thr-tool-1/messages?pipeline_run_id={PID}"))
+                .uri(format!("/api/v1/sessions/thr-tool-1/messages?pipeline_run_id={PID}"))
                 .header("authorization", format!("Bearer {token}"))
                 .body(Body::empty())
                 .unwrap(),
@@ -183,6 +183,13 @@ async fn tool_message_returns_structured_envelope_fields() {
         tool_msg["containerTaskId"], "task_api_1",
         "envelope.metadata.container_task_id 存在时必须返回 containerTaskId"
     );
+
+    // ── content 契约：必须返回纯文本，而非整条消息 envelope JSON ──
+    // （回归保护：blob 存的是整条消息 JSON，HTTP 读路径曾误把裸 blob 当 content，
+    //   导致前端气泡显示 {"content":"...","role":"..."} 原始字段。）
+    let user_msg = messages.iter().find(|m| m["role"] == "user").expect("user 消息必须存在");
+    assert_eq!(user_msg["content"], "写文件", "user 消息 content 必须是纯文本，不能是 envelope JSON");
+    assert_eq!(tool_msg["content"], "added: 2\nlines: 1\n", "tool 消息 content 必须是纯文本，不能是 envelope JSON");
 
     // ── 既有字段回归 ──
     assert_eq!(tool_msg["toolCallId"], "call_a1");

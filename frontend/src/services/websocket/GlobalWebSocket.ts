@@ -1,9 +1,9 @@
 /** 全局单连接 WebSocket 服务 设计原则： */
 
 import { buildGlobalWebSocketUrl } from '@/constants/websocket'
-import { useLayoutModeStore } from '@/stores/layoutModeStore'
-import { useAuthStore, isAuthFailureFromError } from '@/stores/authStore'
 import { triggerAuthExpired } from '@/services/authCallbacks'
+import { useAuthStore, isAuthFailureFromError } from '@/stores/authStore'
+import { useLayoutModeStore } from '@/stores/layoutModeStore'
 import { loggers } from '@/utils/logger'
 
 const _wsLogger = loggers.websocket
@@ -239,6 +239,8 @@ class GlobalWebSocketService {
     pipelineId?: string
     attachments?: unknown[]
     enableThinking?: boolean
+    /** 思考强度（off/low/medium/high；内核透传 → llm_core 路由模型参数） */
+    thinkingStrength?: 'off' | 'low' | 'medium' | 'high'
     clientMessageId?: string
   }): void {
     const msg: PendingMessage = {
@@ -248,6 +250,7 @@ class GlobalWebSocketService {
       pipeline_id: opts?.pipelineId || '',
       attachments: opts?.attachments || [],
       enable_thinking: opts?.enableThinking || false,
+      thinking_strength: opts?.thinkingStrength || '',
       client_message_id: opts?.clientMessageId || '',
     }
 

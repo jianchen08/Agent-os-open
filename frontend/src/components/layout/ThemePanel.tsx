@@ -5,8 +5,8 @@
  * - ThemePopover：悬停小窗，附着在 ThemeButton 旁
  */
 
-import { Check } from '@/assets/icons'
 import { useEffect } from 'react'
+import { Check } from '@/assets/icons'
 import { cn } from '@/lib/utils'
 import { useThemeStore } from '@/stores/themeStore'
 import type { ThemeInfo } from '@/types/theme'

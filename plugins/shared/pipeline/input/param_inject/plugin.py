@@ -216,15 +216,23 @@ class ParamInjectPlugin(IInputPlugin):
                 if pipeline_id:
                     args["pipeline_id"] = pipeline_id
 
-            if "workspace" not in args:
+            # ── workspace / isolation_level：task_submit 不注入 ──
+            # 这两个参数已拆分为 task_submit 的显式选择项（workspace 目标路径 +
+            # workspace_mode 拓扑 + isolation_level 执行环境），由 agent 按任务
+            # 类型直接填写（容器直接子任务不可填、普通任务可填）。注入父管道值
+            # 会与显式选择混淆（子任务继承语义下造成路径双重嵌套），故对
+            # task_submit 跳过注入；其他工具照旧注入（workspace_aware 等消费）。
+            _tool_name = injected_tc.get("name", "")
+            _skip_task_ctx = _tool_name == "task_submit"
+
+            if "workspace" not in args and not _skip_task_ctx:
                 workspace = ctx.state.get("workspace", "")
                 if workspace:
                     args["workspace"] = workspace
 
-            # 注入 isolation_level（会话级隔离模式，task_submit 继承到子任务 metadata）
-            # 与 workspace 注入同源：主会话由会话创建时写入 tags → state；
-            # 子任务管道由任务执行器写入 tags → state。
-            if "isolation_level" not in args:
+            # 会话级隔离模式注入（task_submit 跳过：隔离由 agent 显式选择或
+            # 任务类型默认，不再经 state 继承）
+            if "isolation_level" not in args and not _skip_task_ctx:
                 isolation_level = ctx.state.get("isolation_level", "")
                 if isolation_level:
                     args["isolation_level"] = isolation_level

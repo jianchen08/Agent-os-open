@@ -13,6 +13,8 @@
  * - 新增: 移动端响应式支持
  */
 
+import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { useNavigate } from 'react-router-dom'
 import {
   Bell,
   ChatIcon,
@@ -22,14 +24,13 @@ import {
   User,
   X,
 } from '@/assets/icons'
-import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { useNavigate } from 'react-router-dom'
+import { LoginModal } from '@/components/auth/LoginModal'
+import { NotificationCenter } from '@/components/chat/NotificationCenter'
+import { PluginStatusItems } from '@/components/layout/StatusItems'
+import { ThemeButton } from '@/components/layout/ThemeButton'
 import { SessionEditModal, type SessionCreateOptions } from '@/components/session/SessionEditModal'
 import { SessionList } from '@/components/session/SessionList'
 import { SessionSearch } from '@/components/session/SessionSearch'
-import { NotificationCenter } from '@/components/chat/NotificationCenter'
-import { LoginModal } from '@/components/auth/LoginModal'
-import { ThemeButton } from '@/components/layout/ThemeButton'
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -38,17 +39,14 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu'
-import { WS_SERVER_EVENTS } from '@/constants/websocket'
 import { cn } from '@/lib/utils'
-import { reportError } from '@/services/errorReporting'
 import { searchGlobal, type SessionSearchHit, type MessageSearchHit } from '@/services/api/search'
+import { reportError } from '@/services/errorReporting'
+import { contributionRegistry } from '@/services/schema/ContributionRegistry'
 import {
   openWorkspacePanel,
   openWorkspacePanelByPath,
 } from '@/services/workspacePanelOpener'
-import { contributionRegistry } from '@/services/schema/ContributionRegistry'
-import type { PageDeclaration } from '@/services/schema/ContributionRegistry'
-import { globalWS } from '@/services/websocket/GlobalWebSocket'
 import { useAgentStore } from '@/stores/agentStore'
 import { useAgentTabStore } from '@/stores/agentTabStore'
 import { useAuthStore } from '@/stores/authStore'
@@ -56,6 +54,7 @@ import { useNotificationStore } from '@/stores/notificationStore'
 import { useSessionListStore } from '@/stores/sessionListStore'
 import { useSessionStore } from '@/stores/sessionStore'
 import { useUIStore } from '@/stores/uiStore'
+import type { PageDeclaration } from '@/services/schema/ContributionRegistry'
 import type { Session } from '@/types'
 
 /** fixed sessions + plugin container id */
@@ -180,16 +179,8 @@ export const Sidebar = memo<SidebarProps>(({ isMobile = false }) => {
     })
   }, [authToken])
 
-  // 监听 WS session_update 事件，事件驱动刷新会话列表
-  useEffect(() => {
-    const handleSessionUpdate = () => {
-      fetchSessions({ background: true }).catch(() => {})
-    }
-    globalWS.subscribe(WS_SERVER_EVENTS.SESSION_UPDATE, handleSessionUpdate)
-    return () => {
-      globalWS.unsubscribe(WS_SERVER_EVENTS.SESSION_UPDATE, handleSessionUpdate)
-    }
-  }, [fetchSessions])
+  // 注：0.1 的 WS session_update 事件订阅已删除（0.2 内核无该事件发射源，
+  // 休眠路径；会话列表刷新由页面加载/操作触发，见 task_kernel_cleanup_and_split 任务 2）。
 
   /**
    * 统一搜索：防抖调用后端搜索 API（/ext/channel_api/search）。
@@ -745,6 +736,8 @@ export const Sidebar = memo<SidebarProps>(({ isMobile = false }) => {
             </div>
 
             {/* 底栏：紧凑单行，不占大空白 */}
+            {/* 插件状态项条带（dock/status 贡献，原 StatusBar 迁移；无项不渲染） */}
+            <PluginStatusItems />
             <div
               className="border-border mt-auto flex h-9 shrink-0 items-center gap-0.5 border-t px-1.5"
               data-testid="sidebar-footer"

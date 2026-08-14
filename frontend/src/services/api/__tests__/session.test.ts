@@ -51,7 +51,7 @@ describe('会话和消息API服务', () => {
       ]
 
       // 模拟后端 Thread API 响应
-      mockAxios.onGet(API_ENDPOINTS.THREADS.LIST).reply(200, {
+      mockAxios.onGet(API_ENDPOINTS.SESSIONS.LIST).reply(200, {
         threads: mockThreads,
       })
 
@@ -68,7 +68,7 @@ describe('会话和消息API服务', () => {
 
     it('应该在网络错误时抛出异常', async () => {
       // 模拟网络错误
-      mockAxios.onGet(API_ENDPOINTS.THREADS.LIST).networkError()
+      mockAxios.onGet(API_ENDPOINTS.SESSIONS.LIST).networkError()
 
       // 验证抛出错误
       await expect(getSessions()).rejects.toThrow()
@@ -77,9 +77,9 @@ describe('会话和消息API服务', () => {
     it('应该在服务器错误时支持重试', async () => {
       // 第一次请求失败，第二次成功
       mockAxios
-        .onGet(API_ENDPOINTS.THREADS.LIST)
+        .onGet(API_ENDPOINTS.SESSIONS.LIST)
         .replyOnce(500)
-        .onGet(API_ENDPOINTS.THREADS.LIST)
+        .onGet(API_ENDPOINTS.SESSIONS.LIST)
         .replyOnce(200, { threads: [] })
 
       // 调用API（启用重试）
@@ -99,7 +99,7 @@ describe('会话和消息API服务', () => {
       const sessionId = 'session-to-delete'
 
       // 模拟API响应
-      mockAxios.onDelete(API_ENDPOINTS.THREADS.DELETE(sessionId)).reply(204)
+      mockAxios.onDelete(API_ENDPOINTS.SESSIONS.DELETE(sessionId)).reply(204)
 
       // 调用API
       await expect(deleteSession(sessionId)).resolves.toBeUndefined()
@@ -117,7 +117,7 @@ describe('会话和消息API服务', () => {
       const sessionId = 'non-existent-session'
 
       // 模拟API错误
-      mockAxios.onDelete(API_ENDPOINTS.THREADS.DELETE(sessionId)).reply(404, {
+      mockAxios.onDelete(API_ENDPOINTS.SESSIONS.DELETE(sessionId)).reply(404, {
         code: 'NOT_FOUND',
         message: '会话不存在',
       })
@@ -191,7 +191,7 @@ describe('会话和消息API服务', () => {
       let attemptCount = 0
 
       // 模拟前两次失败，第三次成功
-      mockAxios.onGet(API_ENDPOINTS.THREADS.LIST).reply(() => {
+      mockAxios.onGet(API_ENDPOINTS.SESSIONS.LIST).reply(() => {
         attemptCount++
         if (attemptCount < 3) {
           return [500, { error: '服务器错误' }]

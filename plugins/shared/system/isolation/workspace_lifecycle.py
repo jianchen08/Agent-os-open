@@ -60,32 +60,28 @@ class WorkspaceLifecycleManager(_GitOpsMixin, _MergeOpsMixin):
     # ── 容器空间初始化 ──────────────────────────────────────────
 
     def init_container_workspace(self, container_task_id: str, workspace: str | None, task_data: dict) -> dict:
-        """容器任务的空间初始化（由 TaskWorker 在跳过执行前调用）"""
-        isolation_mode = task_data.get("isolation_mode", "") or ""
+        """容器任务的空间初始化（由 TaskWorker 在跳过执行前调用）。
+
+        容器任务不直接执行、不可选隔离/拓扑（task_submit 已拒绝）→
+        恒为隔离复制：把源项目复制到容器空间并 git init。
+        """
         ws_base = self._get_workspace_root()
 
-        if workspace and isolation_mode == "non_isolated":
-            path = Path(workspace)
-            self._ensure_dir_and_git(path)
-            logger.debug(
-                "[WorkspaceLifecycle] non_isolated模式复用原空间: task_id=%s, path=%s", container_task_id, path
-            )
+        path = ws_base / f"container_{container_task_id}"
+        if not path.exists():
+            path.mkdir(parents=True, exist_ok=True)
+            if workspace:
+                src_path = Path(workspace)
+                if not src_path.is_absolute():
+                    src_path = self._base_path / src_path
+                copied = self._copy_project_to_container(path, src=src_path)
+                logger.debug(
+                    "[WorkspaceLifecycle] 容器空间已复制文件: task_id=%s, files=%d", container_task_id, copied
+                )
+            if not self._git_init_and_initial_commit(path, "chore: initial container project"):
+                raise RuntimeError(f"容器空间初始化失败（git init）: {path}")
         else:
-            path = ws_base / f"container_{container_task_id}"
-            if not path.exists():
-                path.mkdir(parents=True, exist_ok=True)
-                if workspace:
-                    src_path = Path(workspace)
-                    if not src_path.is_absolute():
-                        src_path = self._base_path / src_path
-                    copied = self._copy_project_to_container(path, src=src_path)
-                    logger.debug(
-                        "[WorkspaceLifecycle] 容器空间已复制文件: task_id=%s, files=%d", container_task_id, copied
-                    )
-                if not self._git_init_and_initial_commit(path, "chore: initial container project"):
-                    raise RuntimeError(f"容器空间初始化失败（git init）: {path}")
-            else:
-                self._ensure_dir_and_git(path)
+            self._ensure_dir_and_git(path)
 
         meta = {
             "mode": "project_root",
@@ -130,18 +126,23 @@ class WorkspaceLifecycleManager(_GitOpsMixin, _MergeOpsMixin):
         return meta
 
     def _start_subtask(self, task_id: str, workspace: str, task_data: dict) -> dict:
-        """子任务启动：通过 TaskService API 查找父任务，共享父工作空间"""
-        _isolation_mode = task_data.get("isolation_mode", "") or self._config.get("coordinator", {}).get(
-            "default_level", ""
+        """子任务启动：通过 TaskService API 查找父任务，共享父工作空间
+
+        拓扑由 workspace_mode 决定（与隔离解耦）：
+        - plain → 直接共享宿主目录（容器空间或显式 workspace）
+        - 其他（默认 worktree 语义的父链共享）→ 共享父任务工作空间
+        """
+        _ws_mode = task_data.get("workspace_mode", "") or self._config.get("workspace", {}).get(
+            "default_mode", "worktree"
         )
-        if _isolation_mode == "non_isolated":
+        if _ws_mode == "plain":
             container_ws = self._find_container_workspace(task_id)
             host_path = container_ws or workspace
             if host_path:
                 meta = {"mode": "shared", "path": host_path}
                 self._ws_meta_store[task_id] = meta
                 logger.debug(
-                    "[WorkspaceLifecycle] non_isolated 隔离模式(子任务): 共享目录 task_id=%s, path=%s, container_ws=%s",
+                    "[WorkspaceLifecycle] plain 拓扑(子任务): 共享目录 task_id=%s, path=%s, container_ws=%s",
                     task_id,
                     host_path,
                     container_ws,
@@ -241,14 +242,15 @@ class WorkspaceLifecycleManager(_GitOpsMixin, _MergeOpsMixin):
             self._ws_meta_store[task_id] = meta
             return meta
 
-        # ── Non-isolated isolation mode ──
-        # non_isolated 模式不建 worktree、不切分支，但通过 task_id + project_root
+        # ── workspace_mode 拓扑决策（与隔离解耦）──
+        # plain 模式不建 worktree、不切分支，但通过 task_id + project_root
         # 让 on_before_evaluate 把产出 commit 到当前分支，
         # 避免改动被后续任务的 auto-save 混入错误的 commit message。
-        _isolation_mode = task_data.get("isolation_mode", "") or self._config.get("coordinator", {}).get(
-            "default_level", ""
+        # 默认（未指定/配置缺省）→ worktree 拓扑（隔离副本）。
+        _ws_mode = task_data.get("workspace_mode", "") or self._config.get("workspace", {}).get(
+            "default_mode", "worktree"
         )
-        if _isolation_mode == "non_isolated":
+        if _ws_mode == "plain":
             container_ws = self._find_container_workspace(task_id)
             host_path = container_ws or workspace
             if host_path:
@@ -260,7 +262,7 @@ class WorkspaceLifecycleManager(_GitOpsMixin, _MergeOpsMixin):
                 }
                 self._ws_meta_store[task_id] = meta
                 logger.debug(
-                    "[WorkspaceLifecycle] non_isolated 隔离模式: 直接操作目录 "
+                    "[WorkspaceLifecycle] plain 拓扑: 直接操作目录 "
                     "task_id=%s, path=%s, container_ws=%s（无 git worktree/branch）",
                     task_id,
                     host_path,
@@ -322,11 +324,13 @@ class WorkspaceLifecycleManager(_GitOpsMixin, _MergeOpsMixin):
             except Exception:
                 logger.warning("[WorkspaceLifecycle] 工作空间初始化异常", exc_info=True)
 
-        # NON_ISOLATED 模式：直接操作项目目录，不创建 worktree 隔离
+        # PLAIN 拓扑：直接操作项目目录，不创建 worktree 隔离
         # 同上：保留 task_id + project_root，供 on_before_evaluate 用准确的
         # commit message 提交，避免被其他任务的 auto-save 顺手带走。
-        isolation_level = task_data.get("isolation_level", "")
-        if isolation_level == "non_isolated":
+        _ws_mode = task_data.get("workspace_mode", "") or self._config.get("workspace", {}).get(
+            "default_mode", "worktree"
+        )
+        if _ws_mode == "plain":
             scenario, project_root = self._detect_scenario(workspace, task_data)
             root_path = Path(project_root)
             if not root_path.exists():
@@ -339,7 +343,7 @@ class WorkspaceLifecycleManager(_GitOpsMixin, _MergeOpsMixin):
             }
             self._ws_meta_store[task_id] = meta
             logger.debug(
-                "[WorkspaceLifecycle] NON_ISOLATED模式: task_id=%s, 直接操作项目目录: %s",
+                "[WorkspaceLifecycle] PLAIN拓扑: task_id=%s, 直接操作项目目录: %s",
                 task_id,
                 root_path,
             )

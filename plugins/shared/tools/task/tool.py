@@ -37,18 +37,15 @@ logger = logging.getLogger(__name__)
 class TaskTool(BuiltinTool):
     """任务管理工具（简化版）。"""
 
-    def __init__(self, pipeline_caller: Any = None) -> None:
+    def __init__(self) -> None:
         """初始化任务管理工具。
 
-        Args:
-            pipeline_caller: 注入的 pipeline-executor 能力调用 async fn
-                `(method, params) -> Any`（如 start_run/resume）。sidecar 经
-                server.py 从内核 CapabilityHandle 构造（memory 工具同款模式）；
-                为 None 时恢复/重试只改任务状态、不自动执行（优雅降级）。
+        0.2 收尾：pipeline-executor.start_run 占位能力已随旧引擎移除——
+        resume/retry 仅改任务状态，任务管道执行由会话对话 / chat.send_message
+        → PipelineExecutor 驱动（不再经 capability 提交占位 run）。
         """
 
         self._task_service: TaskService | None = None
-        self._pipeline_caller = pipeline_caller
 
     def _get_execution_record_storage(self):
         """获取全局 ExecutionRecordStorage 实例。
@@ -892,39 +889,11 @@ class TaskTool(BuiltinTool):
         # 触发 TaskWorker 重新执行（resume 只改状态，不启动执行）。
         # 复用 retry 场景的 task_data 构造。_execute_background_task 会从
         # task.pipeline_run_id 取 existing_pipeline_id 复用管道。
-        target_id = task.metadata.get("target_id", "") or task.agent_name or ""
-        _ws_meta = task.metadata.get("ws_meta", {})
-        _workspace = task.metadata.get("workspace", "") or _ws_meta.get("path", "")
-
+        # 0.2 收尾：pipeline-executor.start_run 占位能力已随旧引擎 AdrEngineImpl
+        # 移除——resume 仅恢复任务状态，任务管道执行由会话对话 /
+        # chat.send_message → PipelineExecutor 驱动。
+        logger.info("[TaskTool] resume 完成（仅状态恢复，执行由会话对话驱动）: task_id=%s", task.id)
         execution_warning = None
-        try:
-            if self._pipeline_caller is not None:
-                task_data = {
-                    "task_id": task.id,
-                    "pipeline_id": task.parent_pipeline_id or "",
-                    "pipeline_run_id": task.pipeline_run_id or "",
-                    "target_type": task.target_type or "agent",
-                    "target_id": target_id,
-                    "user_input": task.title,
-                    "description": task.description,
-                    "acceptance_criteria": task.metadata.get("acceptance_criteria", {}),
-                    "workspace": _workspace,
-                    "isolation_level": task.metadata.get("isolation_level", ""),
-                    "_prepared_context": {
-                        "workspace": _workspace,
-                        "ws_meta": _ws_meta,
-                        "full_input": task.title,
-                        "isolation_mode": task.metadata.get("isolation_level", ""),
-                        "has_explicit_workspace": True,
-                        "agent_config_validated": True,
-                    },
-                }
-                await self._pipeline_caller("pipeline-executor.start_run", task_data)
-                logger.info("[TaskTool] resume 已提交到 pipeline-executor: task_id=%s", task.id)
-            else:
-                execution_warning = "执行器未注入，任务已恢复但不会自动执行"
-        except Exception as submit_exc:
-            execution_warning = f"提交执行失败: {submit_exc}"
 
         result_data: dict[str, Any] = {
             "task_id": task.id,
@@ -1019,58 +988,11 @@ class TaskTool(BuiltinTool):
 
         _workspace = task.metadata.get("workspace", "") or _ws_meta.get("path", "")
 
-        try:
-            if self._pipeline_caller is not None:
-                # 恢复 pipe 继承信息：从源任务获取 pipeline_run_id
-
-                _inherit_pipe_from = task.metadata.get("inherit_pipe_from")
-
-                _inherit_pipe_pipeline_id = ""
-
-                if _inherit_pipe_from:
-                    try:
-                        source_task = await service.get_task(_inherit_pipe_from)
-
-                        if source_task and hasattr(source_task, "pipeline_run_id"):
-                            _inherit_pipe_pipeline_id = source_task.pipeline_run_id or ""
-
-                    except Exception:
-                        pass
-
-                task_data = {
-                    "task_id": task.id,
-                    "pipeline_id": task.parent_pipeline_id or "",
-                    "pipeline_run_id": task.pipeline_run_id or "",
-                    "target_type": task.target_type or "agent",
-                    "target_id": target_id,
-                    "user_input": task.title,
-                    "description": task.description,
-                    "acceptance_criteria": task.metadata.get("acceptance_criteria", {}),
-                    "workspace": _workspace,
-                    "isolation_level": task.metadata.get("isolation_level", ""),
-                    "_prepared_context": {
-                        "workspace": _workspace,
-                        "ws_meta": _ws_meta,
-                        "full_input": task.title,
-                        "isolation_mode": task.metadata.get("isolation_level", ""),
-                        "has_explicit_workspace": True,
-                        "agent_config_validated": True,
-                    },
-                }
-
-                if _inherit_pipe_pipeline_id:
-                    task_data["_inherit_pipe_pipeline_id"] = _inherit_pipe_pipeline_id
-
-                await self._pipeline_caller("pipeline-executor.start_run", task_data)
-                logger.info("[TaskTool] retry 已提交到 pipeline-executor: task_id=%s", task.id)
-
-            else:
-                execution_warning = "后台执行器不可用，任务已重置为 pending 但不会自动执行"
-
-        except Exception as submit_exc:
-            logger.warning("[TaskTool] retry 提交任务失败: %s", submit_exc)
-
-            execution_warning = f"任务提交失败: {submit_exc}"
+        # 0.2 收尾：pipeline-executor.start_run 占位能力已随旧引擎 AdrEngineImpl
+        # 移除——retry 仅重置任务状态，任务管道执行由会话对话 /
+        # chat.send_message → PipelineExecutor 驱动。
+        logger.info("[TaskTool] retry 完成（仅状态重置，执行由会话对话驱动）: task_id=%s", task.id)
+        execution_warning = None
 
         result_data: dict[str, Any] = {
             "task_id": task.id,

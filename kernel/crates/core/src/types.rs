@@ -522,6 +522,48 @@ pub struct RunRecord {
 /// - `content_preview` 仅存极短摘要（ADR ④废除完整 preview 机制）
 ///
 /// [来源: docs/working/adr_engine_design.md §4.2 表2]
+/// 管道运行快照（统一管道管理查询：`GET /api/v1/pipelines/runs`）。
+///
+/// runs × message_slots × pipeline_sessions × pipeline_run_summaries 四表联结：
+/// - run → pipeline 映射经 message_slots.run_id（op-based 落槽时写入）；
+/// - pipeline → 会话映射经 pipeline_sessions；
+/// - 消耗账本（total_tokens/total_seconds）经 pipeline_run_summaries（sidecar 写，可为空）。
+/// 无消息槽的 run（旧引擎 start_run 占位）在查询层被过滤，只呈现真实执行的管道。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PipelineRunInfo {
+    /// 运行实例唯一 ID（UUID）
+    pub run_id: String,
+    /// 所属管道 ID（消息层主键，可空——理论上查询层已过滤）
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pipeline_id: Option<String>,
+    /// 归属会话（thread）ID，可空（pipeline_sessions 未建映射的历史数据）
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub thread_id: Option<String>,
+    /// 运行状态
+    pub status: RunStatus,
+    /// 创建时间（ISO8601，即开始时间）
+    pub started_at: String,
+    /// 结束时间（None = 未结束）
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ended_at: Option<String>,
+    /// token 用量明细（input/output/... 键值 JSON，sidecar 汇总写入；未汇总时为 None）
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub total_tokens: Option<serde_json::Value>,
+    /// 总耗时秒（sidecar 汇总写入；未汇总时为 None）
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub total_seconds: Option<f64>,
+}
+
+/// messages 表记录——消息表（含分支标识）。
+///
+/// 对应 SQLite 四表中的 `messages` 表。
+///
+/// **关键设计**（ADR ⑤⑦）：
+/// - `branch_id` + `seq_in_branch` 实现多分支模型
+/// - `blob_id` 指向 blobs 表，内容懒加载
+/// - `content_preview` 仅存极短摘要（ADR ④废除完整 preview 机制）
+///
+/// [来源: docs/working/adr_engine_design.md §4.2 表2]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MessageRecord {
     /// 消息唯一 ID（UUID）
@@ -924,18 +966,7 @@ pub struct CompositePluginConfig {
 
 // ── ADR ①：引擎结果类型 ──────────────────────────────────────
 
-/// 步骤执行结果（AdrEngine::execute_step 返回）。
-///
-/// [来源: docs/working/adr_engine_design.md §3.3]
-#[derive(Debug, Clone)]
-pub struct StepResult {
-    /// 状态更新 Patch（追加到 traces 表）
-    pub state_updates: HashMap<String, serde_json::Value>,
-    /// 路由信号（决定下一步走向）
-    pub route_signal: Option<RouteSignal>,
-}
-
-/// 挂起句柄（AdrEngine::suspend 返回）。
+/// 挂起句柄（旧引擎 AdrEngine::suspend 返回；审批闭环 resume 协议沿用）。
 ///
 /// 保存当前分支状态，等待外部事件恢复执行。
 /// [来源: docs/working/adr_engine_design.md §3.3]
@@ -947,22 +978,6 @@ pub struct SuspendHandle {
     pub branch_id: String,
     /// 当前序列号
     pub seq: u32,
-}
-
-/// 唤醒事件（AdrEngine::resume 参数）。
-///
-/// [来源: docs/working/adr_engine_design.md §3.3]
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum WakeEvent {
-    /// 手动唤醒
-    Manual,
-    /// 定时器触发
-    Timer,
-    /// 外部 API 调用触发
-    External,
-    /// 工具执行完成
-    ToolCompleted,
 }
 
 /// 引擎错误。
@@ -1040,6 +1055,9 @@ pub enum RouteNext {
     Wait,
     /// 跳转到指定 step id
     Step(String),
+    /// 转移到指定循环体（`exit_routes` / step 级路由使用；step 级路由设置后
+    /// 在本循环体结束时生效）
+    Phase(String),
 }
 
 /// 路由分支的 then 动作。
@@ -1144,22 +1162,46 @@ pub struct PipelineStep {
     pub loop_config: Option<LoopConfig>,
 }
 
+/// 管道循环体：管道由多个循环体顺序组成（如 init → main → exit）。
+///
+/// 每个循环体拥有独立的 steps 与循环配置：
+/// - `loop_config` 缺省/disabled → 单次执行（前处理/后处理体，如 init/exit）；
+/// - `loop_config` enabled → 循环执行直至 `ended` / `suspended` / `max_iterations`；
+/// - 循环体结束后的转移：`exit_routes` 命中（`RouteNext::Phase`）→ 跳转到指定循环体；
+///   未命中/未声明 → 默认顺序进入下一个循环体；最后一个循环体结束 = run 结束。
+/// - `run_on_error`：管道提前终止（`ended` / 出错）时仍执行本循环体（收尾语义，
+///   如 exit 体的 workspace 合并与环境释放）。挂起（`suspended`）不触发。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LoopBody {
+    /// 循环体标识（执行期间写入 `state["current_phase"]`，插件据此分发）
+    pub id: String,
+    /// 循环体内的步骤（三级命中：当前管道 step id / 公共 step 库 / 插件名）
+    #[serde(default)]
+    pub steps: Vec<PipelineStep>,
+    /// 本循环体的循环配置；None/disabled = 单次执行
+    #[serde(default)]
+    pub loop_config: Option<LoopConfig>,
+    /// 循环体结束后的转移路由（默认顺序进入下一个循环体）
+    #[serde(default)]
+    pub exit_routes: Vec<Route>,
+    /// 提前终止后仍执行本循环体（收尾语义）
+    #[serde(default)]
+    pub run_on_error: bool,
+}
+
 /// 管道配置（配置驱动的执行流程定义）。
 ///
-/// 引擎作为配置解释执行器：读 PipelineConfig，按 steps 顺序执行，
-/// 据 loop/routes 决定循环与分支。一套引擎 + 不同 YAML = 不同行为。
+/// 引擎作为配置解释执行器：读 PipelineConfig，按 `loop_bodies` 顺序执行每个
+/// 循环体（各自独立的 steps 与循环配置），据 exit_routes/routes 决定循环、
+/// 分支与循环体间转移。一套引擎 + 不同 YAML = 不同行为。
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct PipelineConfig {
     /// 管道名
     pub name: String,
-    /// 管道级循环配置
-    ///
-    /// 兼容 YAML 中 `loop:` 简写（`config/pipelines/*.yaml` 约定），
-    /// 同时保留 `loop_config` 作为序列化字段名（JSON / Rust 直构造）。
-    #[serde(default, alias = "loop")]
-    pub loop_config: LoopConfig,
-    /// 有序步骤
-    pub steps: Vec<PipelineStep>,
+    /// 有序循环体序列（默认顺序推进；`exit_routes` / step 级 `RouteNext::Phase`
+    /// 可显式转移到指定循环体）
+    #[serde(default)]
+    pub loop_bodies: Vec<LoopBody>,
     /// 检查点配置：每 N 步把完整 state 复制到 pipeline_checkpoints 留档，
     /// 供冷启动重建时优先恢复（O(1) 取基线 + 回放其后增量）。
     #[serde(default)]
@@ -1167,14 +1209,50 @@ pub struct PipelineConfig {
 }
 
 impl PipelineConfig {
-    /// 按 id 查找步骤（命中规则①：当前管道 step id）。
+    /// 按 id 查找步骤（命中规则①：当前管道 step id，跨全部循环体）。
     pub fn find_step(&self, id: &str) -> Option<&PipelineStep> {
-        self.steps.iter().find(|s| s.id == id)
+        self.loop_bodies
+            .iter()
+            .flat_map(|b| b.steps.iter())
+            .find(|s| s.id == id)
     }
 
-    /// 收集所有 step id（用于重名检测）。
+    /// 收集所有 step id（用于重名检测，跨全部循环体）。
     pub fn step_ids(&self) -> Vec<&str> {
-        self.steps.iter().map(|s| s.id.as_str()).collect()
+        self.loop_bodies
+            .iter()
+            .flat_map(|b| b.steps.iter())
+            .map(|s| s.id.as_str())
+            .collect()
+    }
+
+    /// 按 id 查找循环体。
+    pub fn find_body(&self, id: &str) -> Option<&LoopBody> {
+        self.loop_bodies.iter().find(|b| b.id == id)
+    }
+
+    /// 按 id 定位循环体下标（供转移跳转用）。
+    pub fn body_index(&self, id: &str) -> Option<usize> {
+        self.loop_bodies.iter().position(|b| b.id == id)
+    }
+
+    /// 单循环体便捷构造（测试用）：一个 main 体承载全部 steps。
+    pub fn single_body(
+        name: impl Into<String>,
+        loop_config: LoopConfig,
+        steps: Vec<PipelineStep>,
+    ) -> Self {
+        Self {
+            name: name.into(),
+            loop_bodies: vec![LoopBody {
+                id: "main".to_string(),
+                steps,
+                loop_config: Some(loop_config),
+                exit_routes: vec![],
+                run_on_error: false,
+            }],
+            checkpoint: Default::default(),
+        }
     }
 }
 

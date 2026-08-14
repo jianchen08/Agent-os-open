@@ -120,7 +120,7 @@ describe('client.ts 404 收敛行为（P4）', () => {
   it('5xx 错误仍保持 ERROR severity（不误降级）', async () => {
     const handler = getResponseErrorHandler()
     const err = {
-      config: { url: '/api/v1/threads/abc', _retryCount: 0 },
+      config: { url: '/api/v1/sessions/abc', _retryCount: 0 },
       response: { status: 500, data: { detail: 'Internal Error' } },
       message: 'Request failed with status code 500',
     }

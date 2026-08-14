@@ -33,6 +33,18 @@ vi.mock('@/utils/logger', () => ({
 vi.mock('@/services/api/session', () => ({
   getMessages: vi.fn().mockResolvedValue({ messages: [], total: 0, session_id: '' }),
   mergeConsecutiveAssistantMessages: (msgs: any[]) => msgs,
+  // messageHandler 的 data.message 完整形态路径依赖共享 mapper（本文件不测该路径，
+  // 提供最小实现保持模块契约有效；完整行为见 newMessageFullShape.test.ts）
+  mapBackendMessageToMessage: (m: any, sessionId: string) => ({
+    id: m.id,
+    sessionId,
+    sequence: m.sequence ?? 0,
+    role: m.role,
+    content: m.content || '',
+    timestamp: m.timestamp || '',
+    status: m.status || 'completed',
+    parts: [],
+  }),
 }))
 
 vi.mock('@/utils/retry', () => ({

@@ -20,6 +20,90 @@
 }
 
 /* ============================================ */
+/* 触控命中区扩展（task_layout_responsive 任务 3）  */
+/* -------------------------------------------- */
+/* 小屏 + 粗指针（触屏手机/平板）：交互元素命中区   */
+/* 扩展至 ≥44px，不改布局（视觉尺寸保持），避免小   */
+/* 图标按钮误触。配合 .touch-expand 类或全局规则。  */
+/* ============================================ */
+
+/* 显式类：命中区以元素中心扩展至 44×44（视觉不变） */
+@layer utilities {
+  .touch-expand {
+    position: relative;
+  }
+  .touch-expand::after {
+    content: '';
+    position: absolute;
+    left: 50%;
+    top: 50%;
+    transform: translate(-50%, -50%);
+    min-width: 44px;
+    min-height: 44px;
+  }
+}
+
+/* 全局规则（仅触屏小屏生效，不污染桌面鼠标交互）：
+   所有按钮/链接的命中区以中心扩展至 44×44。 */
+@media (pointer: coarse) and (max-width: 767px) {
+  button,
+  [role='button'],
+  a {
+    position: relative;
+  }
+  button::after,
+  [role='button']::after,
+  a::after {
+    content: '';
+    position: absolute;
+    left: 50%;
+    top: 50%;
+    transform: translate(-50%, -50%);
+    min-width: 44px;
+    min-height: 44px;
+  }
+}
+
+/* ============================================ */
+/* safe-area 适配（iOS 刘海/底部横条）             */
+/* 依赖 index.html viewport 的 viewport-fit=cover */
+/* ============================================ */
+
+@layer utilities {
+  .safe-area-pb {
+    padding-bottom: env(safe-area-inset-bottom);
+  }
+  .safe-area-pl {
+    padding-left: env(safe-area-inset-left);
+  }
+  .safe-area-pr {
+    padding-right: env(safe-area-inset-right);
+  }
+  .safe-area-pt {
+    padding-top: env(safe-area-inset-top);
+  }
+}
+
+/* 移动端键盘适配：输入框固定底部时，用 dvh + interactive-widget=resizes-content
+   （index.html）让可视高度随键盘收缩；此处兜底 safe-area 横条留白。 */
+@media (max-width: 767px) {
+  .keyboard-safe-input {
+    padding-bottom: max(env(safe-area-inset-bottom), 4px);
+  }
+}
+
+/* ============================================ */
+/* 移动端顶栏高度（task_layout_responsive 任务 1） */
+/* -------------------------------------------- */
+/* 桌面顶栏 32px（主题变量 --layout-titlebar-height）；
+   移动端抬到 44px 标准触摸高度（按钮命中区由 touch-expand 扩展）。 */
+@media (max-width: 767px) {
+  :root {
+    --layout-titlebar-height: 44px;
+  }
+}
+
+/* ============================================ */
 /* 减少动画（用户偏好 + 小屏）                     */
 /* ============================================ */
 

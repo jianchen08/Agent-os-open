@@ -78,12 +78,11 @@ def _inject_pipeline_capability(
 ) -> None:
     """注入 fake pipeline-executor 能力（F-REVIEW-2 轮询链路）。
 
-    call_fn 支持 start_run（返回 run_id）与 get_run_status（返回配置的 status）。
+    0.2 收尾：start_run 占位已随旧引擎移除（trigger_review 走本地降级），
+    此处仅 mock get_run_status（get_report 轮询链路）。
     """
 
     async def fake_call(method: str, params: dict[str, Any]) -> dict[str, Any]:
-        if method == "start_run":
-            return {"status": "started", "run_id": run_id}
         if method == "get_run_status":
             return {"run_id": run_id, "status": status}
         raise AssertionError(f"unexpected capability method: {method}")
@@ -275,36 +274,15 @@ class TestGetReportRunStatusPolling:
         assert got["status"] == "running"
 
 
-class TestTriggerReviewRealCompletion:
-    """完整链路：trigger_review 起子管道 → get_report 轮询到真实完成。"""
+class TestTriggerReviewDegrade:
+    """trigger_review 行为（0.2 收尾：start_run 占位已移除，固定本地降级）。
 
-    async def test_trigger_then_poll_to_completed(self, mod: Any) -> None:
-        """start_run 返回 run_id → status running；run 完成后 get_report 落 completed。"""
-        _inject_pipeline_capability(mod, status="completed")
+    review_agent 深度复盘待接入 chat.send_message → PipelineExecutor 路径
+    （见 server.py 模块头注释），届时恢复 running/轮询链路测试。
+    """
 
-        triggered = await mod.trigger_review(
-            task_id="task-9", summary="已完成任务复盘"
-        )
-        assert triggered["status"] == "running"
-        assert triggered["run_id"] == "run-abc"
-        assert triggered["review_id"] in mod._run_ids
-
-        got = await mod.get_report(triggered["review_id"])
-        assert got["status"] == "completed"
-        assert got["run_status"] == "completed"
-        assert got["task_id"] == "task-9"
-
-    async def test_trigger_keeps_running_while_pipeline_inflight(self, mod: Any) -> None:
-        """子管道仍进行中 → get_report 保持 running（不提前 completed）。"""
-        _inject_pipeline_capability(mod, status="running")
-
-        triggered = await mod.trigger_review(task_id="task-10", summary="复盘中")
-        got = await mod.get_report(triggered["review_id"])
-        assert got["status"] == "running"
-        assert got.get("run_status") == "running"
-
-    async def test_trigger_without_capability_degrades_locally(self, mod: Any) -> None:
-        """能力未注入 → 降级本地报告（status=completed, mode=local_degrade）。"""
+    async def test_trigger_degrades_locally(self, mod: Any) -> None:
+        """trigger 直接本地降级报告（status=completed, mode=local_degrade）。"""
         triggered = await mod.trigger_review(
             task_id="task-11",
             summary="无能力环境",

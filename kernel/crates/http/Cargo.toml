@@ -1,0 +1,15 @@
+[package]
+name = "agentos-http"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "AgentOS 内核 HTTP 共享基础 — 统一错误信封 + 用户解析/token 编解码（api 与 db-admin 共用，鉴权单一来源）"
+
+[dependencies]
+agentos-core.workspace = true
+axum = { version = "0.8" }
+base64 = "0.22"
+chrono.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true

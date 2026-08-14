@@ -1,19 +1,19 @@
 // @feature: FP-0.2.〇 管道引擎 | @vision: V3 可嵌入 | @ci: rust-test
-//! P7: 引擎执行验证 — config crate 转换产物可被 PipelineExecutor 正确执行
+//! P7: 引擎执行验证 — 多循环体 PipelineConfig 可被 PipelineExecutor 正确执行
 //!
 //! 验证链路（AC5）：
-//! config/pipelines/default.yaml（0.1 扁平格式）→ load_pipeline_definition →
-//! to_engine_config（steps 模型）→ PipelineExecutor.run（MockInvoker + NullStorage）
+//! 构造（或 YAML 直解析）PipelineConfig（loop_bodies）→ PipelineExecutor.run
+//! （MockInvoker + NullStorage / SqliteStore）
 
 use std::collections::HashMap;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 
-use agentos_config::load_pipeline_definition;
 use agentos_core::traits::{MessageQueryOpts, PluginInvoker, StorageBackend};
 use agentos_core::types::{
-    Branch, Message, MessageRecord, PluginContext, PluginError, PluginResult, RunRecord,
-    RunStatus, ToolExecutionResult, TraceEntry,
+    Branch, LoopBody, LoopConfig, MessageRecord, PluginContext, PluginError, PluginResult,
+    PipelineConfig, PipelineStep, Route, RouteAction, RouteNext, RunRecord, RunStatus,
+    StepLibrary, ToolExecutionResult, TraceEntry,
 };
 use agentos_engine::{PipelineExecutor, SqliteStore};
 use async_trait::async_trait;
@@ -294,70 +294,81 @@ impl StorageBackend for NullStorage {
     }
 }
 
-/// 写入一份 default.yaml 形态的管道配置（0.1 扁平格式，含 input/output 路由 + 插件链 + 核心插件）。
-fn write_default_pipeline(config_dir: &Path) {
-    let pipelines = config_dir.join("pipelines");
-    std::fs::create_dir_all(&pipelines).unwrap();
-    std::fs::write(
-        pipelines.join("default.yaml"),
-        r#"
-name: agentos_agent
+/// 构造新格式（多循环体）管道配置：main 体 = prepare/core/post，语义对齐
+/// 原 0.1 平铺 default.yaml 的转换产物（插件链 + 路由仲裁）。
+fn make_engine_config(max_iterations: i32) -> PipelineConfig {
+    let prepare_plugins = [
+        "pipeline_tool_schema",
+        "pipeline_param_inject",
+        "pipeline_security_check",
+        "pipeline_multimodal_preprocessor",
+        "pipeline_context_window_guard",
+        "pipeline_prompt_build",
+        "pipeline_pause_guard",
+    ]
+    .map(|s| s.to_string())
+    .to_vec();
 
-input_routes:
-  - name: tool_execute
-    condition: "core_type == 'tool_execute'"
-    target: core
-    plugins: [tool_schema, param_inject, security_check]
-    priority: 10
-  - name: llm_call
-    condition: "core_type == 'llm_call'"
-    target: core
-    plugins: [multimodal_preprocessor, context_window_guard, tool_schema, prompt_build]
-    priority: 20
-  - name: default
-    condition: "True"
-    target: core
-    plugins: [pause_guard, tool_schema, param_inject, prompt_build]
-    priority: 30
+    // post 路由：有工具调用 → 切 tool_execute 循环；其余（纯文本/工具已执行完）→ end
+    let post_routes = vec![
+        Route {
+            when: "raw_tool_calls != [] and raw_tool_calls != None".into(),
+            then: RouteAction {
+                next: RouteNext::Loop,
+                set: HashMap::from([
+                    ("core_type".to_string(), json!("tool_execute")),
+                    ("core_plugin".to_string(), json!("pipeline_tool_core")),
+                ]),
+            },
+        },
+        Route {
+            when: "True".into(),
+            then: RouteAction {
+                next: RouteNext::End,
+                set: HashMap::new(),
+            },
+        },
+    ];
 
-output_routes:
-  - route_type: next_tool
-    condition: "raw_tool_calls != []"
-    priority: 1
-  - route_type: next_llm
-    condition: "True"
-    priority: 50
-  - route_type: end
-    condition: "True"
-    priority: 99
-
-plugins:
-  - name: tool_schema
-    config:
-      enabled: true
-  - name: prompt_build
-    config:
-      enabled: true
-  - name: stop_check
-    config:
-      enabled: true
-  - name: result_format
-    config:
-      max_result_length: 2000
-
-core_plugins:
-  llm_call:
-    class: plugins.shared.core.llm_core.plugin.LLMCore
-    config:
-      default_params:
-        temperature: 0.7
-  tool_execute:
-    class: plugins.shared.core.tool_core.plugin.ToolCore
-    config:
-      timeout: 300
-"#,
-    )
-    .unwrap();
+    PipelineConfig {
+        name: "agentos_agent".into(),
+        loop_bodies: vec![LoopBody {
+            id: "main".into(),
+            steps: vec![
+                PipelineStep {
+                    id: "prepare".into(),
+                    steps: prepare_plugins,
+                    context: HashMap::new(),
+                    routes: vec![],
+                    loop_config: None,
+                },
+                PipelineStep {
+                    id: "core".into(),
+                    steps: vec!["{{state.core_plugin}}".into()],
+                    context: HashMap::new(),
+                    routes: vec![],
+                    loop_config: None,
+                },
+                PipelineStep {
+                    id: "post".into(),
+                    steps: vec![
+                        "pipeline_stop_check".into(),
+                        "pipeline_result_format".into(),
+                    ],
+                    context: HashMap::new(),
+                    routes: post_routes,
+                    loop_config: None,
+                },
+            ],
+            loop_config: Some(LoopConfig {
+                enabled: true,
+                max_iterations,
+            }),
+            exit_routes: vec![],
+            run_on_error: false,
+        }],
+        checkpoint: Default::default(),
+    }
 }
 
 /// 构造 PipelineExecutor（MockInvoker + NullStorage）。
@@ -393,39 +404,36 @@ fn make_executor_with_store(
     )
 }
 
-// ── AC5: 转换产物可被 PipelineExecutor 正确执行 ─────────────────
+/// 默认插件 id 集合（对齐 make_engine_config 的 prepare/core/post 引用）。
+const DEFAULT_PLUGIN_IDS: [&str; 10] = [
+    "pipeline_tool_schema",
+    "pipeline_param_inject",
+    "pipeline_security_check",
+    "pipeline_multimodal_preprocessor",
+    "pipeline_context_window_guard",
+    "pipeline_prompt_build",
+    "pipeline_pause_guard",
+    "pipeline_llm_core",
+    "pipeline_stop_check",
+    "pipeline_result_format",
+];
 
-/// 全链路：default.yaml → PipelineDefinition → PipelineConfig → executor.run。
+// ── AC5: 多循环体配置可被 PipelineExecutor 正确执行 ─────────────
+
+/// 全链路：PipelineConfig（main 循环体）→ executor.run。
 ///
 /// 验证：
-/// 1. 转换不报错（to_engine_config 产出合法 PipelineConfig）
-/// 2. prepare 阶段 input 插件被调用（pipeline_tool_schema 等，带 pipeline_ 前缀）
-/// 3. core 阶段动态 core_plugin 被调用（pipeline_llm_core）
-/// 4. post 阶段 output 插件被调用（pipeline_stop_check / pipeline_result_format）
-/// 5. 无工具调用时 end 路由终止管道（ended=true），raw_result 保留
+/// 1. prepare 阶段 input 插件被调用（pipeline_tool_schema 等）
+/// 2. core 阶段动态 core_plugin 被调用（pipeline_llm_core）
+/// 3. post 阶段 output 插件被调用（pipeline_stop_check / pipeline_result_format）
+/// 4. 无工具调用时 end 路由终止管道（ended=true），raw_result 保留
+/// 5. state["current_phase"] 记录当前循环体 id
 #[tokio::test]
-async fn test_converted_pipeline_executes_steps() {
-    let tmp = tempfile::tempdir().unwrap();
-    write_default_pipeline(tmp.path());
-
-    let def = load_pipeline_definition(tmp.path(), "default").expect("load pipeline");
-    let engine_cfg = def.to_engine_config();
+async fn test_pipeline_executes_steps() {
+    let engine_cfg = make_engine_config(-1);
     assert_eq!(engine_cfg.name, "agentos_agent");
-    assert!(engine_cfg.loop_config.enabled);
-
-    // 插件 id 集合（含 pipeline_ 前缀，对齐转换器）
-    let plugin_ids = [
-        "pipeline_tool_schema",
-        "pipeline_param_inject",
-        "pipeline_security_check",
-        "pipeline_multimodal_preprocessor",
-        "pipeline_context_window_guard",
-        "pipeline_prompt_build",
-        "pipeline_pause_guard",
-        "pipeline_llm_core",
-        "pipeline_stop_check",
-        "pipeline_result_format",
-    ];
+    assert_eq!(engine_cfg.loop_bodies.len(), 1);
+    assert!(engine_cfg.loop_bodies[0].loop_config.as_ref().unwrap().enabled);
 
     let invoker = Arc::new(MockInvoker::new());
     // llm_core 返回纯文本回复（无工具调用）→ end 路由终止
@@ -439,7 +447,7 @@ async fn test_converted_pipeline_executes_steps() {
             ..Default::default()
         },
     );
-    let executor = make_executor(Arc::clone(&invoker), &plugin_ids);
+    let executor = make_executor(Arc::clone(&invoker), &DEFAULT_PLUGIN_IDS);
 
     let initial_state = json!({
         "message": "你好",
@@ -452,24 +460,24 @@ async fn test_converted_pipeline_executes_steps() {
     let final_state = executor
         .run(
             &engine_cfg,
-            &agentos_core::types::StepLibrary::default(),
+            &StepLibrary::default(),
             initial_state,
         )
         .await
         .expect("executor run should succeed");
 
-    // prepare 阶段 input 插件被调用（去重后仍在链中）
+    // prepare 阶段 input 插件被调用
     assert!(
         invoker.call_count("pipeline_tool_schema") >= 1,
         "pipeline_tool_schema should be invoked"
     );
     assert!(
         invoker.call_count("pipeline_pause_guard") >= 1,
-        "pipeline_pause_guard should be invoked (default route)"
+        "pipeline_pause_guard should be invoked"
     );
     assert!(
         invoker.call_count("pipeline_multimodal_preprocessor") >= 1,
-        "pipeline_multimodal_preprocessor should be invoked (llm_call route)"
+        "pipeline_multimodal_preprocessor should be invoked"
     );
 
     // core 阶段动态 core_plugin 被调用
@@ -498,26 +506,24 @@ async fn test_converted_pipeline_executes_steps() {
         final_state.get("raw_result").and_then(|v| v.as_str()),
         Some("你好，我是灵汐")
     );
+    // current_phase 记录当前循环体
+    assert_eq!(
+        final_state.get("current_phase").and_then(|v| v.as_str()),
+        Some("main")
+    );
 }
 
 /// 有工具调用时：next_tool 路由 → 循环切到 tool_execute 核心插件。
 ///
 /// 验证：
-/// 1. llm_core 返回非空 raw_tool_calls → next_tool 路由（priority 1）命中
+/// 1. llm_core 返回非空 raw_tool_calls → next_tool 路由命中
 /// 2. 路由 set core_type=tool_execute + core_plugin=pipeline_tool_core
 /// 3. 下一轮 core 调用 pipeline_tool_core（工具执行）
 /// 4. tool_core 返回空工具调用 + 文本 → end 路由终止
 #[tokio::test]
-async fn test_converted_pipeline_routes_tool_calls_to_loop() {
-    let tmp = tempfile::tempdir().unwrap();
-    write_default_pipeline(tmp.path());
-
-    let def = load_pipeline_definition(tmp.path(), "default").unwrap();
-    let mut engine_cfg = def.to_engine_config();
-    // 安全阀：测试防挂死。0.1 语义是无限循环靠 end 路由终止（转换器默认 -1），
-    // 此处仅测试侧设有限值——若路由逻辑有 bug 导致循环无法终止，会在第 10 轮
-    // 被安全阀截断并暴露断言失败，而非 SIGKILL 无诊断。
-    engine_cfg.loop_config.max_iterations = 10;
+async fn test_pipeline_routes_tool_calls_to_loop() {
+    // 安全阀：测试防挂死（路由 bug 时第 10 轮截断暴露断言失败）
+    let engine_cfg = make_engine_config(10);
 
     let plugin_ids = [
         "pipeline_tool_schema",
@@ -572,7 +578,7 @@ async fn test_converted_pipeline_routes_tool_calls_to_loop() {
     let final_state = executor
         .run(
             &engine_cfg,
-            &agentos_core::types::StepLibrary::default(),
+            &StepLibrary::default(),
             initial_state,
         )
         .await
@@ -606,24 +612,7 @@ async fn test_converted_pipeline_routes_tool_calls_to_loop() {
 // 详见 docs/message_persistence_design.md。
 #[tokio::test]
 async fn wiring_messages_ops_applied_to_state_and_table() {
-    let tmp = tempfile::tempdir().unwrap();
-    write_default_pipeline(tmp.path());
-
-    let def = load_pipeline_definition(tmp.path(), "default").expect("load pipeline");
-    let engine_cfg = def.to_engine_config();
-
-    let plugin_ids = [
-        "pipeline_tool_schema",
-        "pipeline_param_inject",
-        "pipeline_security_check",
-        "pipeline_multimodal_preprocessor",
-        "pipeline_context_window_guard",
-        "pipeline_prompt_build",
-        "pipeline_pause_guard",
-        "pipeline_llm_core",
-        "pipeline_stop_check",
-        "pipeline_result_format",
-    ];
+    let engine_cfg = make_engine_config(-1);
 
     let invoker = Arc::new(MockInvoker::new());
     // llm_core emit messages op（新模型）+ 纯文本回复（→ end 路由终止）
@@ -650,7 +639,7 @@ async fn wiring_messages_ops_applied_to_state_and_table() {
     let store = Arc::new(SqliteStore::open_memory().unwrap());
     let executor = make_executor_with_store(
         Arc::clone(&invoker),
-        &plugin_ids,
+        &DEFAULT_PLUGIN_IDS,
         Arc::clone(&store),
         "run_wiring",
     );
@@ -668,7 +657,7 @@ async fn wiring_messages_ops_applied_to_state_and_table() {
     let final_state = executor
         .run(
             &engine_cfg,
-            &agentos_core::types::StepLibrary::default(),
+            &StepLibrary::default(),
             initial_state,
         )
         .await

@@ -9,8 +9,9 @@ export { FloatingWindowManager } from './FloatingWindowManager'
 export type { FloatingWindowInstance } from '@/types/layout'
 export { WorkspacePanel } from './WorkspacePanel'
 export type { WorkspaceTab } from '@/types/layout'
-export { StatusBar } from './StatusBar'
-export type { StatusBarProps } from './StatusBar'
+export { AlertBanner } from './AlertBanner'
+export type { AlertBannerItem } from './AlertBanner'
+export { PluginStatusItems } from './StatusItems'
 export { FullscreenOverlay } from './FullscreenOverlay'
 
 // 适配的旧布局组件

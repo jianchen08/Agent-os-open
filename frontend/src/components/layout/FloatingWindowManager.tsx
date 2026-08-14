@@ -5,11 +5,11 @@
  */
 
 import React, { useState, useCallback, useRef } from 'react'
-import type { ReactNode } from 'react'
-import type { FloatingWindowInstance } from '@/types/layout'
+import { renderPageContent } from '@/components/schema/PageRenderer'
 import { contributionRegistry } from '@/services/schema/ContributionRegistry'
 import { widgetRegistry } from '@/services/schema/WidgetRegistry'
-import { renderPageContent } from '@/components/schema/PageRenderer'
+import type { FloatingWindowInstance } from '@/types/layout'
+import type { ReactNode } from 'react'
 
 /**
  * 从 FloatingWindowInstance 解析 pageId
@@ -74,6 +74,8 @@ interface FloatingWindowManagerProps {
   onCloseWindow: (id: string) => void
   /** 渲染悬浮窗内容的函数 */
   renderContent: (window: FloatingWindowInstance) => React.ReactNode
+  /** 移动端：floating 窗口改为底部 sheet 滑入（非桌面式拖拽，见 task_layout_responsive 任务 3） */
+  isMobile?: boolean
 }
 
 /**
@@ -86,6 +88,7 @@ export function FloatingWindowManager({
   onUpdateWindow,
   onCloseWindow,
   renderContent,
+  isMobile = false,
 }: FloatingWindowManagerProps) {
   const [dragState, setDragState] = useState<{
     windowId: string
@@ -135,6 +138,51 @@ export function FloatingWindowManager({
 
   if (windows.length === 0) return null
 
+  // 移动端：底部 sheet 滑入（非全屏遮罩，非桌面式拖拽）——小屏拖拽易误触，
+  // sheet 最大化可用性；返回按钮在内容内/关闭按钮在标题栏。
+  if (isMobile) {
+    return (
+      <div
+        className="pointer-events-auto fixed inset-x-0 bottom-0 z-50 flex flex-col items-center justify-end"
+        data-testid="floating-sheet-host"
+      >
+        <div
+          className="animate-in slide-in-from-bottom-8 bg-background text-foreground border-border w-full rounded-t-xl border shadow-2xl duration-200"
+          style={{ maxHeight: '70dvh' }}
+          data-testid="floating-sheet"
+        >
+          {windows.map((win) => (
+            <div key={win.id} className="flex flex-col">
+              {/* 拖拽把手（视觉提示，无拖拽逻辑） */}
+              <div className="flex justify-center pt-2">
+                <span className="bg-muted-foreground/30 h-1 w-10 rounded-full" />
+              </div>
+              {/* 标题栏 */}
+              <div className="border-border flex items-center justify-between border-b px-4 py-2">
+                <span className="text-foreground truncate text-sm font-medium">
+                  {win.icon && <span className="mr-2">{win.icon}</span>}
+                  {win.title}
+                </span>
+                <div className="flex items-center gap-1">
+                  <button
+                    className="hover:bg-accent text-muted-foreground flex h-8 w-8 items-center justify-center rounded-md text-base"
+                    onClick={() => onCloseWindow(win.id)}
+                    aria-label={`关闭${win.title ?? ''}`}
+                    data-testid="floating-sheet-close"
+                  >
+                    ×
+                  </button>
+                </div>
+              </div>
+              {/* 内容区 */}
+              <div className="max-h-[60dvh] overflow-auto p-3 pb-4">{renderContent(win)}</div>
+            </div>
+          ))}
+        </div>
+      </div>
+    )
+  }
+
   return (
     <>
       {windows.map((win) => (
@@ -149,11 +197,13 @@ export function FloatingWindowManager({
             zIndex: win.zIndex,
             transition: dragState?.windowId === win.id ? 'none' : 'all 0.2s ease',
           }}
+          data-testid="floating-window"
         >
           {/* 标题栏 */}
           <div
             className="bg-muted/50 border-border flex cursor-move items-center justify-between border-b px-3 py-2"
             onMouseDown={(e) => handleDragStart(win.id, e)}
+            data-testid="floating-window-titlebar"
           >
             <span className="text-foreground truncate text-sm font-medium">
               {win.icon && <span className="mr-2">{win.icon}</span>}

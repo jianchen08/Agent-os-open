@@ -71,7 +71,7 @@ export function PluginsSettingsPage({
     setIsLoading(true)
     setError(null)
     try {
-      const res = await apiClient.get<PluginStatus[]>('/api/v1/plugins/status')
+      const res = await apiClient.get<PluginStatus[]>('/api/v1/plugins')
       setPlugins(res.data)
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : '获取插件状态失败')

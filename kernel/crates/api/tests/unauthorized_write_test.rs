@@ -5,7 +5,7 @@
 //! - routes.rs 三个 PUT config handler（agent / plugin / pipeline 配置写盘）
 //! - routes.rs actions_execute_handler（可触发插件命令执行）
 //! - server.rs interaction_response_handler（可提交人类交互响应）
-//! - compat_routes.rs 全部端点（threads CRUD、plugins reload/status/enabled）
+//! - session_routes.rs 会话 CRUD + routes.rs 插件 enabled（原 compat_routes.rs 转正）
 //!
 //! 意图（WHY）：这些端点要么写磁盘配置文件、要么触发插件命令/交互响应、要么读写
 //! 会话与插件生命周期。匿名可调用 = 任意人可篡改配置、操纵插件、读取会话——多用户
@@ -202,27 +202,24 @@ fn write_surface_cases() -> Vec<(Method, &'static str, Option<Value>)> {
             "/api/v1/interaction/response",
             Some(json!({"request_id": "r1"})),
         ),
-        // compat_routes：threads 写面（create/update/update-agent/delete）
+        // 会话管理（session_routes）：写面（create/update/update-agent/delete）
         (
             Method::POST,
-            "/api/v1/threads",
+            "/api/v1/sessions",
             Some(json!({"title": "t"})),
         ),
         (
             Method::PATCH,
-            "/api/v1/threads/thr-1",
+            "/api/v1/sessions/thr-1",
             Some(json!({"intent": "x"})),
         ),
         (
             Method::PATCH,
-            "/api/v1/threads/thr-1/agent",
+            "/api/v1/sessions/thr-1/agent",
             Some(json!({"agent_id": "a"})),
         ),
-        (Method::DELETE, "/api/v1/threads/thr-1", None),
-        // compat_routes：plugins 写面（reload / reload-all / reload-by-id / enabled）
-        (Method::POST, "/api/v1/plugins/reload", None),
-        (Method::POST, "/api/v1/plugins/reload-all", None),
-        (Method::POST, "/api/v1/plugins/llm_service/reload", None),
+        (Method::DELETE, "/api/v1/sessions/thr-1", None),
+        // 插件监管：写面（enabled；reload* 死端点已删除）
         (
             Method::PUT,
             "/api/v1/plugins/llm_service/enabled",
@@ -260,18 +257,16 @@ async fn test_write_surface_rejects_non_admin_403() {
     }
 }
 
-/// 读面端点（compat threads 读 + plugins status/history）：
+/// 读面端点（sessions 读 + plugins 状态）：
 /// 无 token → 401；普通用户 → 403（仅 admin/viewer，对齐 db_routes 只读角色）。
 #[tokio::test]
 async fn test_read_surface_requires_auth_401_and_403() {
     let (_tmp, app) = app_with_deps();
     let user = user_token(&app).await;
     for (method, uri) in [
-        (Method::GET, "/api/v1/threads"),
-        (Method::GET, "/api/v1/threads/thr-1"),
-        (Method::GET, "/api/v1/threads/thr-1/messages"),
-        (Method::GET, "/api/v1/plugins/status"),
-        (Method::GET, "/api/v1/plugins/history"),
+        (Method::GET, "/api/v1/sessions"),
+        (Method::GET, "/api/v1/sessions/thr-1/messages"),
+        (Method::GET, "/api/v1/plugins"),
     ] {
         let status = send(&app, method.clone(), uri, None, None).await;
         assert_eq!(status, StatusCode::UNAUTHORIZED, "匿名读 {uri} 应 401（当前 {status}）");
@@ -342,22 +337,22 @@ async fn test_admin_token_passes_write_and_read() {
     .await;
     assert_eq!(status, StatusCode::OK, "admin PUT plugin config 应通过（当前 {status}）");
 
-    // POST /api/v1/threads → 200（创建会话）
+    // POST /api/v1/sessions → 200（创建会话）
     let status = send(
         &app,
         Method::POST,
-        "/api/v1/threads",
+        "/api/v1/sessions",
         Some(&admin),
         Some(json!({"title": "t"})),
     )
     .await;
-    assert_eq!(status, StatusCode::OK, "admin POST threads 应通过（当前 {status}）");
+    assert_eq!(status, StatusCode::OK, "admin POST sessions 应通过（当前 {status}）");
 
-    // GET /api/v1/threads → 200
-    let status = send(&app, Method::GET, "/api/v1/threads", Some(&admin), None).await;
-    assert_eq!(status, StatusCode::OK, "admin GET threads 应通过（当前 {status}）");
+    // GET /api/v1/sessions → 200
+    let status = send(&app, Method::GET, "/api/v1/sessions", Some(&admin), None).await;
+    assert_eq!(status, StatusCode::OK, "admin GET sessions 应通过（当前 {status}）");
 
-    // GET /api/v1/plugins/status → 200
-    let status = send(&app, Method::GET, "/api/v1/plugins/status", Some(&admin), None).await;
-    assert_eq!(status, StatusCode::OK, "admin GET plugins/status 应通过（当前 {status}）");
+    // GET /api/v1/plugins → 200
+    let status = send(&app, Method::GET, "/api/v1/plugins", Some(&admin), None).await;
+    assert_eq!(status, StatusCode::OK, "admin GET plugins 应通过（当前 {status}）");
 }

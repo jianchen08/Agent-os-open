@@ -1,0 +1,8 @@
+[gd_scene format=3]
+
+[node name="DemoMain" type="Node2D"]
+
+[node name="Player" type="Sprite2D" parent="."]
+position = Vector2(320, 180)
+
+[node name="Camera2D" type="Camera2D" parent="."]

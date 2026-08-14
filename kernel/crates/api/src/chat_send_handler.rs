@@ -76,8 +76,9 @@ impl CapabilityHandler for ChatSendHandler {
                 // dispatch_user_input 内部会 resolve 真实 route_id 并发 stream_start →
                 // process_via_engine → new_message，前端按既有协议流式渲染回复。
                 // tenant 由 dispatch_user_input 用 user_id 反查（与 WS 路径同源）。
+                // thinking_strength：HTTP 通道暂不携带（"" = 引擎不覆盖参数）。
                 self.dispatcher
-                    .dispatch_user_input(pipeline_id, user_id, message, pipeline_id)
+                    .dispatch_user_input(pipeline_id, user_id, message, pipeline_id, "")
                     .await
                     .map(|_| json!({"status": "dispatched", "pipeline_id": pipeline_id}))
                     .map_err(|e| McpError::Protocol {

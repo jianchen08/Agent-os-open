@@ -15,7 +15,7 @@ export const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || ''
  *
  * 所有端点路径与后端FastAPI路由对齐：
  * - 认证端点：/api/v1/auth/*
- * - 线程端点：/api/v1/threads/*
+ * - 会话端点：/api/v1/sessions/*
  * - 记忆端点：/api/v1/memory/*
  * - 评估端点：/api/v1/evaluation/*
  */
@@ -33,27 +33,28 @@ export const API_ENDPOINTS = {
     /** 获取当前用户信息 */
     ME: '/api/v1/auth/me',
   },
-  /** 线程/会话相关 - 对应后端 /api/v1/threads/* */
-  THREADS: {
-    /** 获取线程列表 */
-    LIST: '/api/v1/threads',
-    /** 创建线程 */
-    CREATE: '/api/v1/threads',
-    /** 获取线程详情 */
-    GET: (id: string) => `/api/v1/threads/${id}`,
-    /** 删除线程 */
-    DELETE: (id: string) => `/api/v1/threads/${id}`,
-    /** 更新线程 - Requirements: 6.2 */
-    UPDATE: (id: string) => `/api/v1/threads/${id}`,
+  /** 会话相关 - 对应后端 /api/v1/sessions/*（compat /threads 转正，见 task_kernel_cleanup_and_split 任务 2） */
+  SESSIONS: {
+    /** 获取会话列表 */
+    LIST: '/api/v1/sessions',
+    /** 创建会话 */
+    CREATE: '/api/v1/sessions',
+    /** 删除会话 */
+    DELETE: (id: string) => `/api/v1/sessions/${id}`,
+    /** 更新会话 - Requirements: 6.2 */
+    UPDATE: (id: string) => `/api/v1/sessions/${id}`,
     /** 更新会话绑定的 Agent */
-    UPDATE_AGENT: (id: string) => `/api/v1/threads/${id}/agent`,
+    UPDATE_AGENT: (id: string) => `/api/v1/sessions/${id}/agent`,
   },
-  /** 消息相关 - 对应后端 /api/v1/threads/{id}/messages */
+  /** 管道相关 - 运行快照走内核 /api/v1/pipelines/runs（/api/v1/pipelines 为配置清单，勿混用） */
+  PIPELINES: {
+    /** 管道运行快照列表（统一管道管理数据源） */
+    RUNS: '/api/v1/pipelines/runs',
+  },
+  /** 消息相关 - 对应后端 /api/v1/sessions/{id}/messages */
   MESSAGES: {
-    /** 获取线程消息列表（从数据库ExecutionRecord表读取执行记录） */
-    LIST: (threadId: string) => `/api/v1/threads/${threadId}/messages`,
-    /** 发送消息（通过 WebSocket 发送，此端点仅用于历史消息） */
-    SEND: (threadId: string) => `/api/v1/threads/${threadId}/messages`,
+    /** 获取会话消息列表（从数据库ExecutionRecord表读取执行记录） */
+    LIST: (sessionId: string) => `/api/v1/sessions/${sessionId}/messages`,
   },
   /** 记忆管理相关 - 4c 迁移：已切 /ext/channel_api/memory/*（进程态 store stopgap） */
   MEMORY: {

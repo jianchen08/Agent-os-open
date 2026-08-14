@@ -28,49 +28,17 @@ logger = logging.getLogger(__name__)
 # 0.1 的工具经 infrastructure.service_provider 拿 task_worker /
 # workspace_lifecycle_manager / agent_registry / execution_record_storage。
 # 0.2 无该单例层，内核能力经 sidecar 注入：
-# - task_worker：由 pipeline-executor.start_run 能力替代（server.py 注入 _launcher）；
+# - task_worker：0.2 收尾已移除——pipeline-executor.start_run 占位能力随旧引擎
+#   AdrEngineImpl 清理（占位 run 无 execute_step 驱动、从不真正执行）。任务提交
+#   即落库；任务管道执行由会话对话 / chat.send_message → PipelineExecutor 驱动。
 # - workspace_lifecycle_manager / agent_registry / execution_record_storage：
 #   0.2 sidecar 无等价实例 → None（调用方已有降级守卫/磁盘回退，文档化降级）。
 # 迁移测试可 monkeypatch 模块级 _get_service_provider 注入 mock。
-
-_launcher: Any = None
-
-
-def _configure_launcher(caller: Any) -> None:
-    """注入 pipeline-executor 能力调用器（server.py 启动时调用，模块级单例）。"""
-    global _launcher  # noqa: PLW0603
-    _launcher = caller
-
-
-class _TaskWorkerShim:
-    """0.1 task_worker.submit_task 的 0.2 适配：提交 → pipeline-executor.start_run。
-
-    契约保持同步返回 bool（调用方 `if not task_worker.submit_task(...)`）：
-    0.2 的 start_run 是 async 能力调用，这里经 create_task 后台调度（fire-and-forget），
-    返回 True 表示已受理；launcher 未注入或调度失败返回 False → 调用方降级。
-    """
-
-    def __init__(self, caller: Any) -> None:
-        self._caller = caller
-
-    def submit_task(self, task_data: dict[str, Any]) -> bool:
-        if self._caller is None:
-            return False
-        try:
-            asyncio.get_running_loop().create_task(
-                self._caller("pipeline-executor.start_run", task_data)
-            )
-            return True
-        except RuntimeError:
-            return False
-
 
 class _ServiceProviderShim:
     """0.2 服务提供者适配：get(key) 返回 0.2 等价或 None（文档化降级）。"""
 
     def get(self, key: str) -> Any:
-        if key == "task_worker":
-            return _TaskWorkerShim(_launcher)
         # workspace_lifecycle_manager / agent_registry / execution_record_storage
         # 0.2 sidecar 无等价实例：调用方已有降级守卫（agent_registry 有磁盘回退）。
         return None
@@ -360,24 +328,36 @@ class TaskSubmitTool(BuiltinTool):
                     "workspace": {
                         "type": "string",
                         "description": (
-                            "目标项目路径。指定任务需要操作（读取或修改）的项目目录，"
-                            "系统会在工作空间中基于该目录创建隔离的 worktree 副本进行操作。"
+                            "目标项目路径。指定任务需要操作（读取或修改）的项目目录。"
                             "**重要**：当任务需要对某个特定文件夹进行读取或修改时，"
                             "必须设置此参数为该目标文件夹的路径，否则任务将无法定位到正确的目标目录。"
-                            "容器任务：传入目标项目目录时，系统会复制到隔离空间中操作；"
-                            "不设置则创建空的工作空间。"
-                            "非容器任务（子任务）：不设置时系统自动基于父容器空间创建 worktree；"
-                            "传入目标项目路径时基于该项目创建 worktree。"
-                            "如需直接在目标项目目录工作（不隔离），设置 isolation_level 为 non_isolated。"
+                            "可用范围（按任务类型）：普通任务可填；容器任务可填（作为容器空间的源项目，"
+                            "系统复制到隔离空间操作，不设置则创建空容器空间）；"
+                            "容器直接子任务**不可填**——工作空间继承容器，显式指定会被拒绝。"
+                            "工作空间拓扑由 workspace_mode 决定（worktree=在目标项目上建隔离副本；"
+                            "plain=直接操作目标目录）；执行环境隔离由 isolation_level 决定，两者独立。"
+                        ),
+                    },
+                    "workspace_mode": {
+                        "type": "string",
+                        "enum": ["worktree", "plain"],
+                        "description": (
+                            "工作空间拓扑（普通任务可选，默认 worktree）。"
+                            "worktree：在目标项目上创建 git worktree 隔离操作，不影响原项目（默认）。"
+                            "plain：直接在目标目录工作，不建 worktree、不切分支。"
+                            "与 isolation_level（执行环境容器/宿主）相互独立。"
+                            "容器任务与容器直接子任务**不可选**（容器不直接执行；子任务继承容器空间）。"
                         ),
                     },
                     "isolation_level": {
                         "type": "string",
                         "enum": ["non_isolated", "isolated"],
                         "description": (
-                            "隔离级别（可选，默认使用系统配置）。"
-                            "non_isolated：非隔离，直接在原空间工作。适合在已有项目上直接修改。"
-                            "isolated：隔离，在隔离的工作空间中工作，不影响原项目。"
+                            "执行环境隔离级别（普通任务可选，默认使用系统配置）。"
+                            "non_isolated：非隔离，直接在宿主环境执行。"
+                            "isolated：隔离，在容器执行环境中工作。"
+                            "只决定执行环境，不决定工作空间拓扑（拓扑由 workspace_mode 决定）。"
+                            "容器任务与容器直接子任务**不可选**（容器不直接执行；子任务继承容器）。"
                         ),
                     },
                     "inherit_from": {
@@ -458,10 +438,13 @@ class TaskSubmitTool(BuiltinTool):
                     "max_visible_level": 1,  # L2/L3 系统自动注入，不应手动指定
                 },
                 "workspace": {
-                    "max_visible_level": 1,  # L2/L3 子任务自动继承父工作空间
+                    "max_visible_level": 3,  # 普通任务由 agent 直接选（容器直接子任务执行期拒绝）
+                },
+                "workspace_mode": {
+                    "max_visible_level": 3,  # worktree/plain 由 agent 直接选
                 },
                 "isolation_level": {
-                    "max_visible_level": 1,  # L2/L3 子任务自动继承隔离级别
+                    "max_visible_level": 3,  # 执行环境由 agent 直接选
                 },
             },
         )
@@ -661,16 +644,142 @@ class TaskSubmitTool(BuiltinTool):
                 parent_task_id,
             )
 
-        # ── 子任务：清除自动注入的 workspace ──
-        # ParamInjectPlugin 会将当前管道的 workspace 注入所有工具调用，
-        # 但子任务的工作空间由父任务链自动解析，不能使用注入值，否则路径双重嵌套。
-        if parent_task_id and inputs.get("workspace"):
-            logger.info(
-                "[TaskSubmit] 子任务清除自动注入的 workspace | parent_task_id=%s | workspace=%s",
-                parent_task_id,
-                inputs["workspace"],
+        # ── 任务类型 × 参数可用性（workspace 拓扑与隔离已拆分为显式选择）──
+        # - 容器任务：workspace 可填（容器空间源项目）；workspace_mode / isolation_level 不可选
+        # - 容器直接子任务：workspace_mode / isolation_level 可自选（决定 worktree 与执行环境）；
+        #   workspace 不可设置（工作空间继承容器，无需/不允许指定路径）；
+        #   但可 inherit workspace——仅限父容器下的 worktree 源空间（源任务源空间与容器一致）
+        # - 普通子任务：只允许 inherit pipe（管道继承）；workspace / workspace_mode /
+        #   isolation_level / inherit workspace 一律拒绝（继承父任务）
+        # - 普通根任务（无父任务）：三者均可填
+        # param_inject 已对 task_submit 跳过 workspace/isolation_level 注入，
+        # 此处 inputs 中的值即为 agent 显式选择，按任务类型强制校验。
+        _parent_scope = "non_container"
+        _parent_ws_root: str | None = None  # 父容器任务的源空间（ws_meta.project_root/path）
+        if parent_task_id:
+            try:
+                _svc = self._get_task_service()
+                if _svc:
+                    _parent_task = _svc.get_task(parent_task_id)
+                    if _parent_task and _parent_task.metadata:
+                        _parent_scope = _parent_task.metadata.get("task_scope", "non_container")
+                        _parent_ws_meta = _parent_task.metadata.get("ws_meta")
+                        if isinstance(_parent_ws_meta, dict):
+                            _parent_ws_root = _parent_ws_meta.get("project_root") or _parent_ws_meta.get("path")
+            except Exception:
+                pass
+
+        def _same_workspace_root(path_a: str | None, path_b: str | None) -> bool:
+            """规范化比较两个路径是否同一源空间（Windows 忽略大小写）。"""
+            if not path_a or not path_b:
+                return False
+            try:
+                norm = os.path.normpath
+                a = norm(path_a).lower() if os.name == "nt" else norm(path_a)
+                b = norm(path_b).lower() if os.name == "nt" else norm(path_b)
+                return a == b
+            except (ValueError, TypeError):
+                return False
+
+        # ── 容器直接子任务：可自选拓扑/隔离；workspace 不可设置（继承容器）──
+        if _parent_scope == "container":
+            if inputs.get("workspace"):
+                logger.warning(
+                    "[TaskSubmit] 容器直接子任务设置 workspace 被拒绝（继承容器）| "
+                    "parent_task_id=%s | workspace=%s",
+                    parent_task_id,
+                    inputs["workspace"],
+                )
+                return create_failure_result(
+                    error=(
+                        "容器直接子任务的工作空间继承容器任务，不能设置 workspace。"
+                        "请去掉该参数重新提交（不填即继承容器空间）。"
+                    ),
+                    error_code="CONTAINER_CHILD_PARAM_FORBIDDEN",
+                )
+            # workspace_mode / isolation_level 允许自选 → 不做任何拦截
+            # inherit workspace：允许，但只能继承父容器下的 worktree 源空间
+            # （源任务的 worktree 源空间必须与容器任务一致）
+            _inherit_from_id = inputs.get("inherit_from")
+            _inherit_mode = inputs.get("inherit_mode") or (
+                inputs.get("inherit", {}).get("mode") if isinstance(inputs.get("inherit"), dict) else None
             )
-            del inputs["workspace"]
+            _inherit_modes = (
+                {_inherit_mode}
+                if isinstance(_inherit_mode, str)
+                else set(_inherit_mode) if isinstance(_inherit_mode, (list, tuple)) else set()
+            )
+            if _inherit_from_id and "workspace" in _inherit_modes:
+                _inherit_ws_root: str | None = None
+                try:
+                    _svc2 = self._get_task_service()
+                    if _svc2:
+                        _src_task = _svc2.get_task(_inherit_from_id)
+                        if _src_task and isinstance(_src_task.metadata, dict):
+                            _src_ws = _src_task.metadata.get("ws_meta")
+                            if isinstance(_src_ws, dict):
+                                _inherit_ws_root = _src_ws.get("project_root") or _src_ws.get("path")
+                except Exception:
+                    pass
+                if not _same_workspace_root(_inherit_ws_root, _parent_ws_root):
+                    logger.warning(
+                        "[TaskSubmit] 容器直接子任务 inherit workspace 源空间不一致被拒绝 | "
+                        "parent_task_id=%s | inherit_from=%s | src_root=%s | container_root=%s",
+                        parent_task_id,
+                        _inherit_from_id,
+                        _inherit_ws_root,
+                        _parent_ws_root,
+                    )
+                    return create_failure_result(
+                        error=(
+                            "容器直接子任务只能继承父容器下的 worktree 工作空间："
+                            "源任务的 worktree 源空间必须与容器任务一致。"
+                            f"源任务源空间: {_inherit_ws_root or '未知'}，容器源空间: {_parent_ws_root or '未知'}。"
+                            "如需继承对话历史，请使用 inherit_mode=['pipe']。"
+                        ),
+                        error_code="CONTAINER_CHILD_WORKSPACE_MISMATCH",
+                    )
+
+        # ── 普通子任务：只允许 inherit pipe；其余一律继承父任务 ──
+        elif parent_task_id and _parent_scope != "container":
+            # inherit workspace：普通子任务只能继承管道，工作空间继承被拒绝
+            _inherit_mode = inputs.get("inherit_mode") or (
+                inputs.get("inherit", {}).get("mode") if isinstance(inputs.get("inherit"), dict) else None
+            )
+            _inherit_modes = (
+                {_inherit_mode}
+                if isinstance(_inherit_mode, str)
+                else set(_inherit_mode) if isinstance(_inherit_mode, (list, tuple)) else set()
+            )
+            if inputs.get("inherit_from") and "workspace" in _inherit_modes:
+                logger.warning(
+                    "[TaskSubmit] 普通子任务 inherit workspace 被拒绝（只能继承管道）| "
+                    "parent_task_id=%s | inherit_from=%s",
+                    parent_task_id,
+                    inputs.get("inherit_from"),
+                )
+                return create_failure_result(
+                    error=(
+                        "普通子任务只能继承管道（inherit_mode=['pipe']，对话历史），"
+                        "工作空间一律继承父任务，不能继承其它任务的工作空间。"
+                    ),
+                    error_code="SUBTASK_INHERITS_PARAMS",
+                )
+            for _p in ("workspace", "workspace_mode", "isolation_level"):
+                if inputs.get(_p):
+                    logger.warning(
+                        "[TaskSubmit] 普通子任务显式指定 %s 被拒绝（继承父任务）| parent_task_id=%s | value=%s",
+                        _p,
+                        parent_task_id,
+                        inputs.get(_p),
+                    )
+                    return create_failure_result(
+                        error=(
+                            f"普通子任务继承父任务的工作空间与隔离配置，不能指定 {_p}。"
+                            "如需继承对话历史，请使用 inherit_from + inherit_mode=['pipe']。"
+                        ),
+                        error_code="SUBTASK_INHERITS_PARAMS",
+                    )
 
         # ── L2/L3 层级校验：自动注入后仍无 parent_task_id → 拒绝创建根任务 ──
         if parent_agent_level >= 2 and task_scope != "container" and parent_task_id is None:
@@ -960,46 +1069,9 @@ class TaskSubmitTool(BuiltinTool):
                 error_code="SERVICE_UNAVAILABLE",
             )
 
-        # ── 5.5 解析子任务隔离模式（继承规则）──
-        # 源空间（workspace）沿父任务链解析，与隔离模式无关；此处只决定隔离模式：
-        # - 父任务是 container（容器任务）→ 直接子任务不继承，使用默认隔离（isolated）模式，
-        #   清除 LLM 传入值。
-        # - 父任务非 container（含容器孙任务、非容器根任务的子任务）→ 子任务继承直接父任务的
-        #   isolation_level，一律忽略 LLM 显式传入的值（隔离模式为系统控制项）。
-        # 最终「实际 ws」由隔离模式决定：non_isolated → 源空间本身；isolated → 源空间的 worktree。
-        if parent_task_id:
-            _parent_task = None
-            try:
-                _parent_task = task_service.get_task(parent_task_id)
-            except Exception:
-                pass
-            _parent_meta = (_parent_task.metadata or {}) if _parent_task else {}
-            _parent_scope = _parent_meta.get("task_scope", "non_container")
-
-            if _parent_scope == "container":
-                # 容器直接子任务：清除 LLM 值 → 走默认隔离模式
-                if inputs.get("isolation_level"):
-                    logger.info(
-                        "[TaskSubmit] 容器直接子任务不继承 isolation_level，清除 LLM 值 | "
-                        "parent_task_id=%s | isolation_level=%s",
-                        parent_task_id,
-                        inputs["isolation_level"],
-                    )
-                    del inputs["isolation_level"]
-            else:
-                # 非容器父任务的子任务：继承父任务 isolation_level，忽略 LLM 值
-                _parent_iso = _parent_meta.get("isolation_level")
-                if inputs.get("isolation_level"):
-                    logger.info(
-                        "[TaskSubmit] 非容器子任务忽略 LLM 传入的 isolation_level，改为继承父任务 | "
-                        "parent_task_id=%s | llm_value=%s | inherited=%s",
-                        parent_task_id,
-                        inputs["isolation_level"],
-                        _parent_iso,
-                    )
-                    del inputs["isolation_level"]
-                if _parent_iso:
-                    inputs["isolation_level"] = _parent_iso
+        # 任务类型 × 参数可用性校验已在 parent_task_id 注入后完成（见上文）：
+        # - 容器直接子任务：workspace / workspace_mode / isolation_level 已拒绝或清除（继承容器）；
+        # - 普通任务：三者保留（agent 显式选择，直接进入 _build_metadata 与 task_data）。
 
         # ── 6. 创建任务 ──
         raw_priority = inputs.get("priority", 5)
@@ -1040,15 +1112,8 @@ class TaskSubmitTool(BuiltinTool):
         _t_create = _time.monotonic()
         logger.info("[TaskSubmit] PERF | create_task=%.1fms", (_t_create - _t0) * 1000)
 
-        # ── 7. 提交到后台执行器 ──
-        task_worker = _get_service_provider().get("task_worker")
-        if not task_worker:
-            await task_service.hard_delete(task.id)
-            return create_failure_result(
-                error="后台执行器不可用，任务提交失败",
-                error_code="SUBMIT_FAILED",
-            )
-
+        # ── 7. 提交完成（0.2 收尾：start_run 占位已移除，任务提交即落库；
+        #    任务管道执行由会话对话 / chat.send_message → PipelineExecutor 驱动）──
         is_root = True
         if parent_task_id and task_service:
             try:
@@ -1073,6 +1138,12 @@ class TaskSubmitTool(BuiltinTool):
             "workspace": workspace,
             "priority": inputs.get("priority", 5),
             "is_root": is_root,
+            # 工作空间拓扑（worktree/plain，与隔离解耦）：普通任务由 agent 显式选择，
+            # 容器直接子任务/未指定时为空（父链解析 + 系统默认）
+            "workspace_mode": inputs.get("workspace_mode", ""),
+            # 执行环境隔离（容器/宿主，与拓扑解耦）：普通任务显式选择；
+            # 容器直接子任务/未指定时为空（系统默认策略）
+            "isolation_level": inputs.get("isolation_level", ""),
             "_has_explicit_workspace": bool(workspace),
             "_inherit_workspace_resolved": _inherit_resolved,
             "_source_ws_meta": old_ws_meta if _inherit_resolved else None,
@@ -1147,13 +1218,6 @@ class TaskSubmitTool(BuiltinTool):
                     error_code="INHERIT_PIPE_FAILED",
                 )
 
-        if not task_worker.submit_task(task_data):
-            await task_service.hard_delete(task.id)
-            return create_failure_result(
-                error="后台执行器未启动，任务提交失败",
-                error_code="SUBMIT_FAILED",
-            )
-
         _t_submit = _time.monotonic()
         logger.info(
             "[TaskSubmit] PERF | submit_task=%.1fms | total=%.1fms",
@@ -1204,6 +1268,19 @@ class TaskSubmitTool(BuiltinTool):
                 "description": inputs.get("goal_description", ""),
             }
         parent_agent_level = inputs.get("parent_agent_level")
+
+        # ── 容器任务参数可用性：workspace_mode / isolation_level 不可选 ──
+        # 容器任务只做组织框架、不直接执行：空间拓扑恒为 container_copy（复制到
+        # 容器空间），执行环境由系统默认——agent 无法（也无需）选择这两项。
+        for _p in ("workspace_mode", "isolation_level"):
+            if inputs.get(_p):
+                return create_failure_result(
+                    error=(
+                        f"容器任务不能指定 {_p}（容器不直接执行，工作空间恒为容器副本，"
+                        "隔离由系统默认）。请去掉该参数重新提交。"
+                    ),
+                    error_code="CONTAINER_PARAM_FORBIDDEN",
+                )
 
         # ── 目标空间安全检查 ──
         workspace = inputs.get("workspace", "")
@@ -1299,12 +1376,14 @@ class TaskSubmitTool(BuiltinTool):
         container_workspace_path = resolve_container_workspace_path(
             inputs.get("workspace"),
             task.id,
-            isolation_mode=inputs.get("isolation_level"),
+            # 容器任务不可选隔离（校验已拒绝）→ 恒为隔离复制（isolated）
+            isolation_mode="isolated",
         )
 
         # ── 同步初始化容器工作空间 ──
         # 与非容器任务一致：submit 返回前必须完成工作空间创建。
-        _container_task_data = {"isolation_mode": inputs.get("isolation_level", "")}
+        # 容器空间恒复制（isolated），不再携带 isolation_mode 分支。
+        _container_task_data = {"isolation_mode": "isolated"}
         task, ws_err = await self._init_workspace(
             task,
             inputs.get("workspace") or "",
@@ -1320,22 +1399,6 @@ class TaskSubmitTool(BuiltinTool):
         _ws_meta_path = (task.metadata or {}).get("ws_meta", {}).get("path", "")
         if _ws_meta_path:
             container_workspace_path = _ws_meta_path
-
-        task_worker = _get_service_provider().get("task_worker")
-        if task_worker:
-            task_worker.submit_task(
-                {
-                    "task_id": task.id,
-                    "target_type": None,
-                    "target_id": None,
-                    "user_input": goal.get("title", ""),
-                    "description": description or goal.get("description", ""),
-                    "acceptance_criteria": {},
-                    "workspace": inputs.get("workspace"),
-                    "parent_task_id": None,
-                    "is_root": True,
-                }
-            )
 
         result_data = {
             "task_id": task.id,
@@ -1384,7 +1447,8 @@ class TaskSubmitTool(BuiltinTool):
             )
             return task, None
 
-        # 注入 isolation_mode（lifecycle 内部依赖此字段决策 worktree/non_isolated 模式）
+        # 兼容注入 isolation_mode（0.1 lifecycle 其余消费者仍读此字段；
+        # 拓扑决策已改读 workspace_mode，见 workspace_lifecycle._start_root_task）
         if "isolation_mode" not in task_data:
             iso_level = (task.metadata or {}).get("isolation_level", "")
             if iso_level:
@@ -1542,12 +1606,18 @@ class TaskSubmitTool(BuiltinTool):
             metadata["submitted_by_level"] = parent_agent_level
 
         # 存储执行相关参数
-        if inputs.get("workspace") and (not inputs.get("parent_task_id") or inputs.get("inherit_workspace_from")):
+        # workspace：仅存 agent 显式值（param_inject 已跳过注入、容器直接子任务
+        # 已被拒绝清除），inherit_workspace_from 回写的旧路径同样落账
+        if inputs.get("workspace"):
             metadata["workspace"] = inputs["workspace"]
         if inputs.get("max_retries"):
             metadata["max_retries"] = inputs["max_retries"]
         if inputs.get("task_scope"):
             metadata["task_scope"] = inputs["task_scope"]
+        # 工作空间拓扑（worktree/plain）：agent 显式选择，仅普通任务可填
+        if inputs.get("workspace_mode"):
+            metadata["workspace_mode"] = inputs["workspace_mode"]
+        # 执行环境隔离（isolated/non_isolated）：agent 显式选择，仅普通任务可填
         if inputs.get("isolation_level"):
             metadata["isolation_level"] = inputs["isolation_level"]
 

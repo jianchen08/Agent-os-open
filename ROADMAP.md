@@ -664,6 +664,46 @@ DSH 进程内的真实 service / 装载的第三方 cordis 插件
 
 **参考**：DSH 源码 `packages/subagent/`（service 契约 + 各 provider 实现）、`packages/acp/`（ACP server，跨进程 agent 通信协议）。
 
+### 兼容 ACP（Agent Client Protocol）实现跨 agent 互通
+
+**触发条件**：用户场景出现"需要和其他 agent 框架（DSH / 任意 ACP 兼容 agent）互通或委派任务"的真实需求。当前本项目 agent 只能和自身生态内的 agent 协作。
+
+**可行性**：ACP 是开放协议，实现一个 ACP server/client 即可让本项目 agent 与 DSH（及任何 ACP 兼容 agent）互相通信/委派。这是"借 DSH/外部 agent 生态"的最轻量路径——不 fork 它的 runtime，只说它的协议。比"fork DSH SDK 接生态"便宜得多。
+
+**落地方向**（条件成熟后）：
+1. 实现 ACP server（把本项目的 agent 能力暴露给外部 ACP client）
+2. 实现 ACP client（本项目 agent 能调外部 ACP server，如 DSH/Codex/Claude Code 的 ACP 接口）
+3. 作为 subagent capability 的一个 provider（`subagent-acp`）接入
+
+**参考**：DSH 源码 `packages/acp/`（ACP server 实现）、`@agentclientprotocol/sdk`（ACP 标准 SDK）。与上方"subagent 桥接外部 agent"协同——ACP 是桥接的具体协议之一。
+
+### 工程基础设施补全（测试 / CI / 质量门禁）
+
+**触发条件**：0.2 迁移收尾后，作为"用户可信度"的硬基础。当前 mypy 仍有约 470 个类型检查错误（ROADMAP 已知技术债），测试覆盖率无硬门禁。
+
+**现状对比**：DSH 有完整工程基础设施——oxlint + knip（未用依赖检测）+ jscpd（重复码检测）+ publint + lefthook + Vitest e2e/snapshot test，且 `test:coverage` 是 CI 硬门禁（per-file 100%）。本项目在测试/CI 门禁上明显弱于 DSH，这直接影响用户/开发者对项目的信任度。
+
+**落地方向**：
+1. mypy 类型错误清零（470 → 0），CI typecheck job 取消 `continue-on-error` 恢复硬门禁
+2. 测试覆盖率门禁（先设底线，如 60%，逐步提到 DSH 的 per-file 100%）
+3. 引入 knip（未用依赖/导出检测）、jscpd（重复码）等质量工具
+4. e2e/snapshot test 基础设施（对标 DSH 的 vitest e2e + keyless snapshot replay）
+
+**优先级**：🟡 P1——不是"可选"，是"必须"，只是排在 0.2 迁移收尾之后。
+
+### 文档国际化（i18n）基础设施
+
+**触发条件**：希望获得国际影响力（不只是国内用户）时。当前文档中文为主，英文 README 存在但不完整。
+
+**现状对比**：DSH 几乎每个文件都有 `README.i18n.yaml` + 中英双语，website 用 VitePress 投影双语文档。本项目英文 README 是单文件，模块级文档未双语化。
+
+**落地方向**：
+1. 核心文档（README / ARCHITECTURE / ROADMAP / CONTRIBUTING）中英双语对齐
+2. 引入 i18n 文档机制（参考 DSH 的 `README.i18n.yaml` + VitePress，或用更轻的Crowdin/MDX 方案）
+3. 代码注释/错误信息的英文覆盖（可选，按需）
+
+**优先级**：🟢 P2——国际化是影响力放大器，但不是功能/架构阻塞项。
+
 ---
 
 ## 🤝 社区贡献优先级

@@ -57,6 +57,8 @@ export interface SendMessageParams {
   attachments?: Attachment[]
   /** 是否启用思考模式 */
   enableThinking?: boolean
+  /** 思考强度（off/low/medium/high，随消息传给后端 llm_core 路由到模型参数） */
+  thinkingStrength?: 'off' | 'low' | 'medium' | 'high'
   /** 子 Tab 发消息时的目标管道 ID，后端直接用它路由 */
   pipelineId?: string
 }
@@ -215,10 +217,14 @@ export interface ChatInputProps {
   totalTokens?: number
   /** 是否启用思考模式切换 */
   enableThinkingMode?: boolean
-  /** 思考模式状态 */
-  thinkingMode?: ThinkingModeState
-  /** 思考模式切换回调 */
-  toggleThinkingMode?: (enabled: boolean) => Promise<void>
+  /** 当前思考强度（off/low/medium/high；随消息传给后端 llm_core 路由模型参数） */
+  thinkingStrength?: 'off' | 'low' | 'medium' | 'high'
+  /** 切换思考强度回调（调用方负责本地记忆 + 后端覆盖） */
+  onThinkingStrengthChange?: (strength: 'off' | 'low' | 'medium' | 'high') => void
+  /** 本轮缓存命中 token（悬停 title 详情用） */
+  cachedTokens?: number
+  /** 本轮缓存命中率 0-1（悬停 title 详情用） */
+  hitRatio?: number
   /** 自定义类名 */
   className?: string
   /** 草稿保存的 key（通常是 tabId 或 sessionId），切换 Tab 时保留未发送文本 */

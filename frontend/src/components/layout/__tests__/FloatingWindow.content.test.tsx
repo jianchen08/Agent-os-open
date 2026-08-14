@@ -11,9 +11,9 @@
  * 这里直接测试内容解析函数，确保 page→widget/schema 分发链路接通。
  */
 
-import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { render } from '@testing-library/react'
 import React from 'react'
+import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { renderFloatingWindowContent } from '@/components/layout/FloatingWindowManager'
 import { contributionRegistry } from '@/services/schema/ContributionRegistry'
 import { widgetRegistry } from '@/services/schema/WidgetRegistry'

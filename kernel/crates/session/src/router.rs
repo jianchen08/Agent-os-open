@@ -21,12 +21,17 @@ pub trait PipelineDispatcher: Send + Sync {
     ///
     /// pipeline_id 是前端消息路由键（后端创建会话时回填），引擎回推流式事件时
     /// 用它定位前端占位气泡。缺失时引擎可回退 thread_id。
+    ///
+    /// thinking_strength 是前端思考强度（off/low/medium/high，空串=未指定），
+    /// 注入引擎初始状态后由 llm_core 路由到具体模型参数（temperature/max_tokens/
+    /// reasoning_effort）。
     async fn dispatch_user_input(
         &self,
         thread_id: &str,
         user_id: &str,
         content: &str,
         pipeline_id: &str,
+        thinking_strength: &str,
     ) -> Result<(), String>;
 
     /// 转发人工交互响应（审批/选择）。
@@ -114,9 +119,21 @@ impl InboundRouter {
             .or_else(|| msg.get("data").and_then(|d| d.get("pipeline_id")).and_then(|v| v.as_str()))
             .unwrap_or("")
             .to_string();
+        // thinking_strength：思考强度（off/low/medium/high），顶层优先、
+        // data 信封兜底（与 pipeline_id 同法）。缺失为空串 = 引擎不覆盖参数。
+        let thinking_strength = msg
+            .get("thinking_strength")
+            .and_then(|v| v.as_str())
+            .or_else(|| {
+                msg.get("data")
+                    .and_then(|d| d.get("thinking_strength"))
+                    .and_then(|v| v.as_str())
+            })
+            .unwrap_or("")
+            .to_string();
         match self
             .dispatcher
-            .dispatch_user_input(&thread_id, user_id, &content, &pipeline_id)
+            .dispatch_user_input(&thread_id, user_id, &content, &pipeline_id, &thinking_strength)
             .await
         {
             Ok(()) => RouteOutcome::Handled,

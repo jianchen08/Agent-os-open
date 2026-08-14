@@ -108,13 +108,16 @@ export function WorkspaceExplorerPanel() {
         </div>
       </div>
       <div className="min-h-0 flex-1 overflow-auto p-3">
-        {/* dataSource 由任务/容器注入时用真实 workspace://；此处占位说明 */}
+        {/* pipelineView：统一管道管理（任务树超集）——任务树 + 所有执行中的管道（会话/任务）
+            实时状态/耗时/token，点击管道行打开对应标签。dataSource 由任务/容器注入时
+            用真实 workspace:// 显示文件树；此处无数据源时仅显示管道管理视图。 */}
         <FileTreeWidget
           showSearch
           expandLevel={1}
           nodeTitleField="name"
           nodeChildrenField="children"
           dataSource={undefined}
+          pipelineView
         />
         <p className="text-muted-foreground mt-4 text-center text-xs">
           打开会话任务工作空间后，文件树将显示在此处。也可通过聊天中的文件卡片打开文件查看。

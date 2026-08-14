@@ -35,6 +35,58 @@ logger = logging.getLogger(__name__)
 # 日志中单条 content 最大长度，超过则截断
 _LOG_CONTENT_MAX_LEN = 200
 
+# ── 思考强度 → 模型参数（思考强度全链路）────────────────────────────
+# 前端 user_input 携带 thinking_strength（off/low/medium/high），内核透传注入
+# state；llm_core 在请求构造时按档位覆盖**思考相关参数**（reasoning_effort /
+# thinking），与 default_params 合并后进 kwargs。reasoning_effort 经
+# _provider_registry.apply_pre_send 对 openai/ 前缀 provider 自动挪进 extra_body
+# 透传（DeepSeek 等）。off/缺失 → 不覆盖（保持 llm.yaml default_params 现状）。
+#
+# 决策（用户确认）：temperature / max_tokens 等采样参数**不随强度覆盖**——
+# 强度只路由思考参数，采样参数始终用模型 default_params。
+#
+# 路由规则（模型配置优先）：模型可在 llm.yaml 的 models.<id>.thinking_strength_params
+# 定义自己的强度→参数映射（不同模型思考参数不一致：DeepSeek reasoning_effort /
+# MiniMax adaptive thinking / 无 reasoning 的普通模型）。模型配置了某档位 →
+# 用模型配置；未配置的档位 → 回退内置默认表。内置表是各模型的兜底基线。
+_THINKING_STRENGTH_PARAMS: dict[str, dict[str, Any]] = {
+    "low": {"reasoning_effort": "low"},
+    "medium": {"reasoning_effort": "medium"},
+    "high": {"reasoning_effort": "high"},
+}
+
+# 思考强度允许覆盖的参数白名单：只含思考相关字段；
+# temperature/max_tokens 等采样参数不随强度覆盖（即使用户配置里写了也过滤）。
+_THINKING_STRENGTH_ALLOWED = {"reasoning_effort", "thinking"}
+
+
+def resolve_thinking_strength_params(
+    strength: str,
+    model_params: dict[str, dict[str, Any]] | None = None,
+) -> dict[str, Any] | None:
+    """思考强度 → 思考参数覆盖集；off/未知/空 → None（不覆盖）。
+
+    Args:
+        strength: 思考强度档位（off/low/medium/high）
+        model_params: 模型级路由规则（llm.yaml models.<id>.thinking_strength_params），
+            配置了该档位则优先使用（缺失字段用内置表补全）；None 或未配置该档位
+            时回退内置默认表。仅白名单内思考参数生效（temperature/max_tokens 忽略）。
+    """
+    if not strength or strength == "off":
+        return None
+    if model_params and isinstance(model_params, dict):
+        override = model_params.get(strength)
+        if isinstance(override, dict):
+            base = _THINKING_STRENGTH_PARAMS.get(strength, {})
+            merged = {**base, **override}
+        else:
+            merged = _THINKING_STRENGTH_PARAMS.get(strength, {})
+    else:
+        merged = _THINKING_STRENGTH_PARAMS.get(strength, {})
+    if not merged:
+        return None
+    return {k: v for k, v in merged.items() if k in _THINKING_STRENGTH_ALLOWED}
+
 
 def _summarize_content_for_log(content: Any) -> str:
     """将消息内容转换为日志友好的简短摘要。
@@ -175,6 +227,11 @@ class LLMCore(ICorePlugin):
         self._model: str = self._config.get("model_name", "gpt-4")
         self._api_base: str | None = self._config.get("api_base")
         self._api_key: str | None = self._config.get("api_key")
+        # 模型级思考强度路由规则（llm.yaml models.<id>.thinking_strength_params）：
+        # 由 _apply_model_from_state 解析模型时更新；None = 未配置 → 用内置默认表。
+        self._thinking_strength_params: dict[str, dict[str, Any]] | None = (
+            self._config.get("thinking_strength_params")
+        )
         self._context_window: int | None = self._config.get("context_window")
         if not self._context_window:
             logger.warning(
@@ -275,6 +332,10 @@ class LLMCore(ICorePlugin):
         self._context_window = llm_conf.get("context_window") or self._context_window
         if llm_conf.get("default_params"):
             self._default_params = llm_conf["default_params"]
+        # 模型级思考强度路由规则（llm.yaml models.<id>.thinking_strength_params）：
+        # 随模型解析更新；未配置 → None（_call_llm 回退内置默认表）。
+        if "thinking_strength_params" in llm_conf:
+            self._thinking_strength_params = llm_conf["thinking_strength_params"]
         logger.info(
             "[%s] model resolved: model_id=%s provider=%s model=%s",
             self.name,
@@ -842,6 +903,22 @@ class LLMCore(ICorePlugin):
             if self._num_retries:
                 kwargs["num_retries"] = self._num_retries
                 kwargs["retry_delay"] = self._retry_delay
+
+        # 思考强度 → 模型参数覆盖：state.thinking_strength 非空（low/medium/high）
+        # 时覆盖采样参数（与 default_params 合并）；off/缺失不覆盖（现状不变）。
+        # 路由规则：模型级 thinking_strength_params 优先，未配置回退内置默认表。
+        thinking_strength = str(ctx.state.get("thinking_strength") or "")
+        strength_params = resolve_thinking_strength_params(
+            thinking_strength, self._thinking_strength_params
+        )
+        if strength_params:
+            kwargs.update(strength_params)
+            logger.info(
+                "[%s] thinking_strength=%s → params=%s",
+                self.name,
+                thinking_strength,
+                strength_params,
+            )
 
         tool_schemas = ctx.state.get("tool_schemas", [])
         if tool_schemas:

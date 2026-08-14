@@ -9,6 +9,7 @@ import { useLayoutModeStore } from '@/stores/layoutModeStore'
 import { useLongTermTaskStore } from '@/stores/longTermTaskStore'
 import { useNotificationStore } from '@/stores/notificationStore'
 import { usePipelineMessageStore } from '@/stores/pipelineMessageStore'
+import { usePipelineRegistryStore } from '@/stores/pipelineRegistryStore'
 import { useSessionStore } from '@/stores/sessionStore'
 import { generateUUID } from '@/utils/uuid'
 import type { ExecutionEvent, InteractionRequest } from '@/stores/layoutModeStore'
@@ -27,6 +28,8 @@ export function useRealtimeEvents(): void {
 
     /** WS 重连后重新加载当前会话消息，1 秒防抖避免频繁调用。 流式事件（stream_start 等）由 streaming/index.ts 统一处理，此处不重复订阅。 */
     const handleWsReconnect = () => {
+      // 重连后补拉管道运行快照（断线期间的 stream_* 增量丢失，以快照对账）
+      usePipelineRegistryStore.getState().fetch()
       // 防抖：1 秒内不重复调用 fetchMessages
       const now = Date.now()
       if (now - lastFetchTimeRef.current < 1000) {

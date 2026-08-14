@@ -26,7 +26,7 @@ use agentos_core::traits::{
     CapabilityRegistry, PluginLoader, PluginType, StorageBackend, ToolDescriptor,
 };
 use agentos_core::types::{ToolCategory, ToolSource, UserRecord};
-use agentos_engine::{AdrEngineImpl, SqliteStore};
+use agentos_engine::SqliteStore;
 use agentos_invoker::PluginInvokerImpl;
 use agentos_plugin_loader::{
     CapabilityRegistryImpl, NativePluginLoader, PluginLoaderImpl, WasmRuntime,
@@ -391,10 +391,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // 旁路 fan-out 给审计/指标订阅者（与 engine 的 OnPipelineStart/End 同一总线）。
     // 必须在 spawn 任何 sidecar 前完成（start_idle_gc 之后、请求接入之前即满足）。
     invoker.set_hook_bus(hook_bus.clone());
-    let engine = Arc::new(
-        AdrEngineImpl::new(store.clone(), invoker.clone(), "default")
-            .with_hook_bus(hook_bus.clone()),
-    );
 
     // 监控 M1：创建指标聚合器（三通道汇聚：内核自采 + 插件 record_metric + invoker 代采进程态）。
     // M4：router 持聚合器，metrics.record 反向调用写入它。
@@ -443,7 +439,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let router = Arc::new(
         KernelCapabilityRouter::with_metrics(
-            engine.clone(),
             metrics_aggregator.clone(),
         )
         .with_invoker(invoker.clone())
@@ -493,7 +488,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         target: "agentos-kernel",
         "Loaded pipeline '{}' with {} steps, step library with {} entries",
         pipeline_config.name,
-        pipeline_config.steps.len(),
+        pipeline_config.loop_bodies.len(),
         step_library.steps.len()
     );
 
@@ -537,7 +532,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let state = AppState::with_plugins(
         manifests.clone(),
         registry,
-        engine,
         Arc::new(pipeline_config),
         Arc::new(step_library),
         invoker_dyn,

@@ -39,18 +39,15 @@ use crate::auth::{
     resolve_request_tenant_id,
 };
 use crate::error::ApiError;
-use crate::compat_routes::{
-    create_thread_handler, delete_thread_handler,
-    get_thread_handler, list_thread_messages_handler,
-    list_threads_handler, plugins_history_handler,
-    plugins_reload_all_handler, plugins_reload_by_id_handler, plugins_reload_handler,
-    plugins_set_enabled_handler, plugins_status_handler, update_thread_agent_handler,
-    update_thread_handler,
+use crate::session_routes::{
+    create_session_handler, delete_session_handler, list_session_messages_handler,
+    list_sessions_handler, update_session_agent_handler, update_session_handler,
 };
 use crate::routes::{
     actions_execute_handler, agents_handler, agents_schema_handler, get_agent_config_handler,
     get_pipeline_config_with_etag, get_plugin_config_with_etag, health_handler,
-    metrics_prometheus_handler, metrics_query_handler, pipelines_handler, put_agent_config_handler,
+    metrics_prometheus_handler, metrics_query_handler, pipelines_handler, pipelines_runs_handler,
+    plugins_set_enabled_handler, plugins_status_handler, put_agent_config_handler,
     put_pipeline_config_handler, put_plugin_config_handler, schema_handler, tools_handler,
     AppState,
 };
@@ -110,6 +107,7 @@ pub fn build_router(state: AppState) -> Router {
         // 命令面板/快捷键/菜单触发 → 查找声明该 command 的插件 → 执行或占位
         .route("/api/v1/actions/execute", post(actions_execute_handler))
         .route("/api/v1/pipelines", get(pipelines_handler))
+        .route("/api/v1/pipelines/runs", get(pipelines_runs_handler))
         .route("/api/v1/tools", get(tools_handler))
         // P7: 管道配置查询/更新（内核承载 config/pipelines/*.yaml）
         .route(
@@ -121,37 +119,27 @@ pub fn build_router(state: AppState) -> Router {
             "/api/v1/plugins/{id}/config/{file_id}",
             get(get_plugin_config_with_etag).put(put_plugin_config_handler),
         )
-        // 前端兼容端点（对齐 0.1 channel_api，消除 404）
+        // 会话管理原生端点（task_kernel_cleanup_and_split 任务 2：compat threads 转正
+        // 为 /api/v1/sessions*，实现与响应形状不变——前端 mappers 契约无感知）
         .route(
-            "/api/v1/threads",
-            get(list_threads_handler).post(create_thread_handler),
+            "/api/v1/sessions",
+            get(list_sessions_handler).post(create_session_handler),
         )
         .route(
-            "/api/v1/threads/{id}",
-            get(get_thread_handler)
-                .patch(update_thread_handler)
-                .delete(delete_thread_handler),
+            "/api/v1/sessions/{id}",
+            axum::routing::patch(update_session_handler).delete(delete_session_handler),
         )
         .route(
-            "/api/v1/threads/{id}/agent",
-            axum::routing::patch(update_thread_agent_handler),
+            "/api/v1/sessions/{id}/agent",
+            axum::routing::patch(update_session_agent_handler),
         )
         .route(
-            "/api/v1/threads/{id}/messages",
-            get(list_thread_messages_handler),
+            "/api/v1/sessions/{id}/messages",
+            get(list_session_messages_handler),
         )
-        .route("/api/v1/plugins/status", get(plugins_status_handler))
-        .route("/api/v1/plugins/history", get(plugins_history_handler))
-        .route("/api/v1/plugins/reload", post(plugins_reload_handler))
-        .route(
-            "/api/v1/plugins/{id}/reload",
-            post(plugins_reload_by_id_handler),
-        )
+        // 插件监管端点（compat plugins/status 转正；history/reload* 死端点已删除）
+        .route("/api/v1/plugins", get(plugins_status_handler))
         .route("/api/v1/plugins/{id}/enabled", axum::routing::put(plugins_set_enabled_handler))
-        .route(
-            "/api/v1/plugins/reload-all",
-            post(plugins_reload_all_handler),
-        )
         // 监控 M5/M5b：指标查询 + Prometheus 导出（监控设计 §五/§十一）
         .route("/api/v1/metrics", get(metrics_query_handler))
         .route("/metrics", get(metrics_prometheus_handler))
@@ -176,7 +164,7 @@ pub fn build_router(state: AppState) -> Router {
 
     // P3：动态挂载插件 HTTP 端点（http_routes → dispatcher）
     let router = crate::http_dispatcher::build_router_with_http_routes(state.clone(), static_router);
-    // F-API-1：配置写入面 + compat 会话/插件生命周期鉴权（白名单路径 + method 分写/读）。
+    // F-API-1：配置写入面 + 会话/插件生命周期鉴权（白名单路径 + method 分写/读）。
     let auth_layer = from_fn_with_state(state.clone(), write_surface_auth);
     // CORS：开发期前端通过 VITE_API_BASE_URL 直连内核（http://localhost:9100），
     // 浏览器跨域请求需要预检（OPTIONS）+ 响应头带 Access-Control-Allow-Origin。
@@ -187,12 +175,12 @@ pub fn build_router(state: AppState) -> Router {
         .layer(from_fn(cors_middleware))
 }
 
-/// F-API-1：配置写入面 + compat 会话/插件生命周期鉴权中间件。
+/// F-API-1：配置写入面 + 会话/插件生命周期鉴权中间件。
 ///
 /// 按路径白名单 + method 区分：写面（POST/PUT/PATCH/DELETE）→ require_surface_role
 /// （admin）；读面（GET）→ require_surface_role（admin/viewer）。白名单覆盖：
-/// - `/api/v1/threads*`（会话 CRUD）
-/// - `/api/v1/plugins/*`（status/history/reload/enabled/config）
+/// - `/api/v1/sessions*`（会话 CRUD）
+/// - `/api/v1/plugins*`（status/enabled/config；注意 /api/v1/plugins 裸路径也需鉴权）
 /// - `/api/v1/actions/execute`、`/api/v1/interaction/response`
 /// - `PUT /api/v1/agents/{id}/config`、`PUT /api/v1/config/pipelines/{name}`
 /// 其余路径放行（/health、/api/v1/auth/*、/ws、/api/v1/db/* 等）。
@@ -204,8 +192,8 @@ async fn write_surface_auth(
     let path = req.uri().path();
     let method = req.method().clone();
 
-    let needs_auth = path.starts_with("/api/v1/threads")
-        || path.starts_with("/api/v1/plugins/")
+    let needs_auth = path.starts_with("/api/v1/sessions")
+        || path.starts_with("/api/v1/plugins")
         || path == "/api/v1/actions/execute"
         || path == "/api/v1/interaction/response"
         || (path.starts_with("/api/v1/agents/") && path.ends_with("/config") && method == Method::PUT)
@@ -225,7 +213,7 @@ async fn write_surface_auth(
     }
 }
 
-/// compat 会话/插件生命周期白名单面的角色校验（原 db_routes::require_read_role /
+/// 会话/插件生命周期白名单面的角色校验（原 db_routes::require_read_role /
 /// require_admin_role 的 api 侧等价实现——db_routes 已拆至 db-admin crate，
 /// 此处用 api 自身的 resolve_request_user（agentos-http 单一实现），
 /// 语义与错误消息保持与拆分前一致）。
@@ -577,10 +565,23 @@ fn maybe_reload_pipeline_configs(
     }
     info!(
         pipeline = %new_pipeline.name,
-        steps = new_pipeline.steps.len(),
+        steps = new_pipeline.loop_bodies.len(),
         "Pipeline config hot-reloaded successfully"
     );
     (Arc::new(new_pipeline), Arc::new(new_steps))
+}
+
+/// 引擎执行结果。
+///
+/// - `content`：纯文本回复（raw_result/message 提取），HTTP/回退路径直接消费；
+/// - `final_assistant`：本轮最终 assistant 消息的完整持久形态（含
+///   `tool_calls`/`reasoning_content`/`seq`），WS 路径 new_message 携带它，
+///   前端用与 DB 加载相同的 mapper 生成 parts——流式事件与 DB 冷热同构；
+/// - `failed`：executor.run 返回 Err（WS 路径据此推 stream_error 收尾）。
+pub(crate) struct EngineOutcome {
+    pub content: String,
+    pub final_assistant: Option<serde_json::Value>,
+    pub failed: bool,
 }
 
 pub(crate) async fn process_via_engine(
@@ -592,11 +593,20 @@ pub(crate) async fn process_via_engine(
     thread_id: &str,
     message_id: &str,
     user_id: &str,
-) -> String {
+    thinking_strength: &str,
+) -> EngineOutcome {
     // Box::pin 到堆上：回写段 + executor.run 的深 sidecar 调用链让 Future 状态机
     // 在 release 下也接近 tokio worker 2MB 栈极限，堆分配规避溢出。
     Box::pin(process_via_engine_inner(
-        state, message, agent_id, history, pipeline_id, thread_id, message_id, user_id,
+        state,
+        message,
+        agent_id,
+        history,
+        pipeline_id,
+        thread_id,
+        message_id,
+        user_id,
+        thinking_strength,
     ))
     .await
 }
@@ -611,32 +621,45 @@ async fn process_via_engine_inner(
     thread_id: &str,
     message_id: &str,
     user_id: &str,
-) -> String {
+    thinking_strength: &str,
+) -> EngineOutcome {
     let invoker = match state.invoker.clone() {
         Some(i) => i,
         None => {
-            return format!(
-                "[echo-fallback: engine not available] {}",
-                message
-            );
+            return EngineOutcome {
+                content: format!(
+                    "[echo-fallback: engine not available] {}",
+                    message
+                ),
+                final_assistant: None,
+                failed: false,
+            };
         }
     };
     let store = match state.store.clone() {
         Some(s) => s,
         None => {
-            return format!(
-                "[echo-fallback: store not available] {}",
-                message
-            );
+            return EngineOutcome {
+                content: format!(
+                    "[echo-fallback: store not available] {}",
+                    message
+                ),
+                final_assistant: None,
+                failed: false,
+            };
         }
     };
     let project_root = match state.project_root.clone() {
         Some(p) => p,
         None => {
-            return format!(
-                "[echo-fallback: project_root not configured] {}",
-                message
-            );
+            return EngineOutcome {
+                content: format!(
+                    "[echo-fallback: project_root not configured] {}",
+                    message
+                ),
+                final_assistant: None,
+                failed: false,
+            };
         }
     };
 
@@ -675,7 +698,45 @@ async fn process_via_engine_inner(
         // assistant message_id：内核权威生成，sidecar 流式 chunk 携带它，
         // 前端 handleStreamChunk 据此把 chunk 路由到 stream_start 建立的占位气泡。
         "message_id": message_id,
+        // 思考强度（off/low/medium/high；空串=未指定）：透传给 llm_core，
+        // 由插件在请求构造时路由到具体模型参数（temperature/max_tokens/reasoning_effort）。
+        "thinking_strength": thinking_strength,
     });
+
+    // 1a. 会话级 execution_context 注入：thread metadata 的 workspace / isolation_mode
+    // （会话创建时由 channel_api 写入）组装为结构化 execution_context，随 initial_state
+    // 进入管道——init 体的 workspace_lifecycle / environment_lifecycle 插件据此执行
+    // （工作空间解析 + 环境基线），checkpoint 自动持久化。
+    //
+    // 任务级 execution_context（task_submit 提交的 workspace_mode/isolation_level）
+    // 经任务管道执行入口透传（待任务执行器接线，见 dispatch 路径扩展），此处只做
+    // 会话级来源；两者结构一致：{"workspace": {source_path, mode}, "isolation": {level}}。
+    if let Ok(Some(sess)) = store.get_session(thread_id).await {
+        if let Some(meta) = sess.metadata {
+            let mut ec = serde_json::Map::new();
+            if let Some(ws) = meta.get("workspace").and_then(|v| v.as_str()).filter(|s| !s.is_empty()) {
+                ec.insert(
+                    "workspace".to_string(),
+                    serde_json::json!({"source_path": ws, "mode": "plain"}),
+                );
+            }
+            if let Some(iso) = meta
+                .get("isolation_mode")
+                .and_then(|v| v.as_str())
+                .filter(|s| !s.is_empty())
+            {
+                ec.insert(
+                    "isolation".to_string(),
+                    serde_json::json!({"level": iso}),
+                );
+            }
+            if !ec.is_empty() {
+                if let Some(obj) = initial_state.as_object_mut() {
+                    obj.insert("execution_context".to_string(), serde_json::Value::Object(ec));
+                }
+            }
+        }
+    }
 
     // 1b. 多轮上下文装配：state.messages 是 LLMCore._build_messages 读取的对话历史。
     // 单一权威（不搞降级路径）：
@@ -773,6 +834,14 @@ async fn process_via_engine_inner(
     if let Some(obj) = initial_state.as_object_mut() {
         obj.insert("messages".to_string(), serde_json::Value::Array(history_prefix));
     }
+    // A1：复位"本轮首个 assistant 已注入 id"标志（checkpoint/registry 恢复可能带旧值，
+    // 必须在恢复合并之后、管道执行之前强制复位，保证每 run 恰好注入一次 message_id）。
+    if let Some(obj) = initial_state.as_object_mut() {
+        obj.insert(
+            "_assistant_id_assigned".to_string(),
+            serde_json::json!(false),
+        );
+    }
     // user 经 append op(无 seq → 引擎分配 next seq)+ 落 message_slots。
     // 指纹实录塞 _pending_message_ops（内部字段）：executor.persist_run_start 落一条
     // user_input 轨迹后移除——首轮 user 由此进入审计/回放范围（ops 即轨迹）。
@@ -826,7 +895,6 @@ async fn process_via_engine_inner(
     // 在 project_root 被 move 给 executor 之前算出 config_root。
     let config_root = project_root.join("config");
     let (pipeline_cfg, step_lib) = maybe_reload_pipeline_configs(state, &config_root);
-
     let executor = agentos_engine::PipelineExecutor::new(
         invoker,
         project_root,
@@ -883,7 +951,11 @@ async fn process_via_engine_inner(
             {
                 warn!(run_id = %run_id, error = %pe, "update_run_status(Failed) 失败（继续）");
             }
-            return format!("[engine-run-failed] {}", message);
+            return EngineOutcome {
+                content: format!("[engine-run-failed] {}", message),
+                final_assistant: None,
+                failed: true,
+            };
         }
     };
 
@@ -901,14 +973,30 @@ async fn process_via_engine_inner(
     }
 
     // 4. 提取响应：优先 raw_result，回退 state.message，再回退原消息
-    if let Some(raw) = final_state.get("raw_result").and_then(|v| v.as_str()) {
-        return raw.to_string();
+    let content = if let Some(raw) = final_state.get("raw_result").and_then(|v| v.as_str()) {
+        raw.to_string()
+    } else if let Some(msg) = final_state.get("message").and_then(|v| v.as_str()) {
+        msg.to_string()
+    } else {
+        // 没有 raw_result / message 字段：pretty-print 整个 state（便于调试）
+        serde_json::to_string_pretty(&final_state).unwrap_or_else(|_| message.to_string())
+    };
+    // A2：本轮最终 assistant 消息（完整持久形态，含 tool_calls/reasoning_content/seq），
+    // WS 路径 new_message 携带它——前端与 DB 加载共用 mapper，冷热路径同构。
+    let final_assistant = final_state
+        .get("messages")
+        .and_then(|v| v.as_array())
+        .and_then(|msgs| {
+            msgs.iter()
+                .rev()
+                .find(|m| m.get("role").and_then(|v| v.as_str()) == Some("assistant"))
+                .cloned()
+        });
+    EngineOutcome {
+        content,
+        final_assistant,
+        failed: false,
     }
-    if let Some(msg) = final_state.get("message").and_then(|v| v.as_str()) {
-        return msg.to_string();
-    }
-    // 没有 raw_result / message 字段：pretty-print 整个 state（便于调试）
-    serde_json::to_string_pretty(&final_state).unwrap_or_else(|_| message.to_string())
 }
 
 /// 框架级强制工具：无视 agent `tool_ids`，只要 registry 里存在就注入。
@@ -1153,8 +1241,9 @@ async fn handle_ws_connection(socket: WebSocket, state: AppState, headers: Heade
                 // TODO: agent_id 暂用默认（chat 协议暂未携带；后续从请求体取）
                 let tenant_ctx = request_tenant_ctx(state.store.as_ref(), &headers, &req.session_id).await;
                 let content =
-                    agentos_tenant::scope(tenant_ctx, process_via_engine(&state, &req.message, if req.agent_id.is_empty() { "agentos" } else { req.agent_id.as_str() }, &req.history, "", "", "", ""))
-                        .await;
+                    agentos_tenant::scope(tenant_ctx, process_via_engine(&state, &req.message, if req.agent_id.is_empty() { "agentos" } else { req.agent_id.as_str() }, &req.history, "", "", "", "", ""))
+                        .await
+                        .content;
 
                 // 构造响应
                 let response = WsResponse {
@@ -1214,8 +1303,9 @@ async fn chat_handler(
         .map(|(uid, _, _, _)| uid)
         .unwrap_or_default();
     let content =
-        agentos_tenant::scope(tenant_ctx, process_via_engine(&state, &req.message, if req.agent_id.is_empty() { "agentos" } else { req.agent_id.as_str() }, &req.history, &pipeline_id, &req.session_id, "", &user_id))
-            .await;
+        agentos_tenant::scope(tenant_ctx, process_via_engine(&state, &req.message, if req.agent_id.is_empty() { "agentos" } else { req.agent_id.as_str() }, &req.history, &pipeline_id, &req.session_id, "", &user_id, ""))
+            .await
+            .content;
 
     let response = WsResponse {
         r#type: "message".to_string(),
@@ -1749,7 +1839,7 @@ mod tests {
         std::fs::create_dir_all(&cfg_dir).unwrap();
         std::fs::write(
             cfg_dir.join("autonomous.yaml"),
-            "name: test_multi_turn\nloop:\n  enabled: false\nsteps:\n  - id: llm\n    steps:\n      - mock_llm_core\n",
+            "name: test_multi_turn\nloop_bodies:\n  - id: main\n    steps:\n      - id: llm\n        steps:\n          - mock_llm_core\n",
         )
         .unwrap();
         let mut state = AppState::new();
@@ -1759,13 +1849,18 @@ mod tests {
         // 兜底配置（与临时 YAML 一致；临时 YAML 加载成功时此值被覆盖）
         state.pipeline_config = Arc::new(agentos_core::types::PipelineConfig {
             name: "test_multi_turn".to_string(),
-            loop_config: Default::default(),
-            steps: vec![agentos_core::types::PipelineStep {
+            loop_bodies: vec![agentos_core::types::LoopBody {
                 id: "llm".to_string(),
-                steps: vec!["mock_llm_core".to_string()],
-                context: std::collections::HashMap::new(),
-                routes: vec![],
+                steps: vec![agentos_core::types::PipelineStep {
+                    id: "llm".to_string(),
+                    steps: vec!["mock_llm_core".to_string()],
+                    context: std::collections::HashMap::new(),
+                    routes: vec![],
+                    loop_config: None,
+                }],
                 loop_config: None,
+                exit_routes: vec![],
+                run_on_error: false,
             }],
             checkpoint: Default::default(),
         });
@@ -1786,18 +1881,18 @@ mod tests {
         // 第一轮：pipeline_id=pipe_mt 非空（WS 路径 route_id 语义）
         let r1 = agentos_tenant::scope(
             tenant.clone(),
-            process_via_engine(&state, "第一轮：我叫小明", "agentos", &[], pipe, thread, "m1", ""),
+            process_via_engine(&state, "第一轮：我叫小明", "agentos", &[], pipe, thread, "m1", "", ""),
         )
         .await;
-        assert!(!r1.is_empty(), "第一轮应返回 assistant 回复");
+        assert!(!r1.content.is_empty(), "第一轮应返回 assistant 回复");
 
         // 第二轮：同 pipeline_id，应看到第一轮 user+assistant 上下文
         let r2 = agentos_tenant::scope(
             tenant,
-            process_via_engine(&state, "第二轮：我叫什么？", "agentos", &[], pipe, thread, "m2", ""),
+            process_via_engine(&state, "第二轮：我叫什么？", "agentos", &[], pipe, thread, "m2", "", ""),
         )
         .await;
-        assert!(!r2.is_empty(), "第二轮应返回 assistant 回复");
+        assert!(!r2.content.is_empty(), "第二轮应返回 assistant 回复");
 
         // 断言：第二轮 LLM 收到的 messages 是完整序列（历史 + 当前）
         let seen = invoker.seen.lock().unwrap();
@@ -1828,17 +1923,17 @@ mod tests {
 
         let r1 = agentos_tenant::scope(
             tenant.clone(),
-            process_via_engine(&state, "HTTP 第一轮", "agentos", &[], "", thread, "h1", ""),
+            process_via_engine(&state, "HTTP 第一轮", "agentos", &[], "", thread, "h1", "", ""),
         )
         .await;
-        assert!(!r1.is_empty());
+        assert!(!r1.content.is_empty());
 
         let r2 = agentos_tenant::scope(
             tenant,
-            process_via_engine(&state, "HTTP 第二轮", "agentos", &[], "", thread, "h2", ""),
+            process_via_engine(&state, "HTTP 第二轮", "agentos", &[], "", thread, "h2", "", ""),
         )
         .await;
-        assert!(!r2.is_empty());
+        assert!(!r2.content.is_empty());
 
         let seen = invoker.seen.lock().unwrap();
         assert_eq!(seen.len(), 2);
@@ -1886,10 +1981,10 @@ mod tests {
 
         let r = agentos_tenant::scope(
             tenant,
-            process_via_engine(&state, "冷启动第二轮", "agentos", &[], pipe, thread, "c2", ""),
+            process_via_engine(&state, "冷启动第二轮", "agentos", &[], pipe, thread, "c2", "", ""),
         )
         .await;
-        assert!(!r.is_empty(), "冷启动第二轮应返回 assistant 回复");
+        assert!(!r.content.is_empty(), "冷启动第二轮应返回 assistant 回复");
 
         let seen = invoker.seen.lock().unwrap();
         assert_eq!(seen.len(), 1, "冷启动应从 store 恢复历史并调用 LLM");
@@ -1949,18 +2044,18 @@ mod tests {
         // alice 发消息（在 alice 的 tenant scope 内，模拟 dispatch_user_input）
         let r_a = agentos_tenant::scope(
             TenantContext::new("tenant_alice", thread_a),
-            process_via_engine(&state, "alice 的消息", "agentos", &[], pipe_a, thread_a, "a1", ""),
+            process_via_engine(&state, "alice 的消息", "agentos", &[], pipe_a, thread_a, "a1", "", ""),
         )
         .await;
-        assert!(!r_a.is_empty(), "alice 发消息应返回 assistant 回复");
+        assert!(!r_a.content.is_empty(), "alice 发消息应返回 assistant 回复");
 
         // bob 发消息（在 bob 的 tenant scope 内）
         let r_b = agentos_tenant::scope(
             TenantContext::new("tenant_bob", thread_b),
-            process_via_engine(&state, "bob 的消息", "agentos", &[], pipe_b, thread_b, "b1", ""),
+            process_via_engine(&state, "bob 的消息", "agentos", &[], pipe_b, thread_b, "b1", "", ""),
         )
         .await;
-        assert!(!r_b.is_empty(), "bob 发消息应返回 assistant 回复");
+        assert!(!r_b.content.is_empty(), "bob 发消息应返回 assistant 回复");
 
         // alice 在自己 scope 内能读到自己的消息（user + assistant ≥ 2 条）
         let store_a = store.clone();
@@ -2065,18 +2160,23 @@ mod tests {
         std::fs::create_dir_all(&cfg_dir).unwrap();
         std::fs::write(
             cfg_dir.join("autonomous.yaml"),
-            "name: t\nloop:\n  enabled: false\nsteps:\n  - id: llm\n    steps:\n      - mock_llm_core\n",
+            "name: t\nloop_bodies:\n  - id: main\n    steps:\n      - id: llm\n        steps:\n          - mock_llm_core\n",
         ).unwrap();
         state.project_root = Some(tmp_root);
         state.pipeline_config = Arc::new(agentos_core::types::PipelineConfig {
             name: "t".to_string(),
-            loop_config: Default::default(),
-            steps: vec![agentos_core::types::PipelineStep {
+            loop_bodies: vec![agentos_core::types::LoopBody {
                 id: "llm".to_string(),
-                steps: vec!["mock_llm_core".to_string()],
-                context: std::collections::HashMap::new(),
-                routes: vec![],
+                steps: vec![agentos_core::types::PipelineStep {
+                    id: "llm".to_string(),
+                    steps: vec!["mock_llm_core".to_string()],
+                    context: std::collections::HashMap::new(),
+                    routes: vec![],
+                    loop_config: None,
+                }],
                 loop_config: None,
+                exit_routes: vec![],
+                run_on_error: false,
             }],
             checkpoint: Default::default(),
         });
@@ -2088,10 +2188,10 @@ mod tests {
         // frank 发消息（tenant = frank_id）
         let r = agentos_tenant::scope(
             TenantContext::new(&frank_id, thread),
-            process_via_engine(&state, "frank 的问题", "agentos", &[], pipe, thread, "f1", ""),
+            process_via_engine(&state, "frank 的问题", "agentos", &[], pipe, thread, "f1", "", ""),
         )
         .await;
-        assert!(!r.is_empty(), "frank 发消息应成功");
+        assert!(!r.content.is_empty(), "frank 发消息应成功");
 
         // frank 能读到自己的历史
         let store_read = store.clone();

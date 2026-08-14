@@ -3,6 +3,7 @@ import { useAgentTabStore } from '@/stores/agentTabStore'
 import { useContextUsageStore } from '@/stores/contextUsageStore'
 import { useNotificationStore } from '@/stores/notificationStore'
 import { usePipelineMessageStore as pipelineStore } from '@/stores/pipelineMessageStore'
+import { usePipelineRegistryStore } from '@/stores/pipelineRegistryStore'
 import { useSessionListStore } from '@/stores/sessionListStore'
 import { loggers } from '@/utils/logger'
 
@@ -117,6 +118,9 @@ export function handleStreamStart(eventData: any) {
   const messageId = extractMessageId(eventData)
   if (!messageId) return
 
+  // 管道注册表实时同步：running（在相关性门控之前——面板要展示未打开/未注册的管道）
+  usePipelineRegistryStore.getState().applyStreamStatus(pipelineId, 'running')
+
   // 相关性门控：非关注 pipeline（非活跃/未注册/未开 Tab）的事件直接丢弃，
   // 不创建占位消息、不写 store。pipeline 仅由前端主动注册（如 agentHandler
   // 在用户实际打开/创建子任务时 registerPipeline），后端广播的事件不再触发注册。
@@ -198,6 +202,8 @@ export function handleStreamEnd(eventData: any) {
 
   if (pipelineId) {
     terminatePipeline(pipelineId, threadId)
+    // 管道注册表实时同步：completed
+    usePipelineRegistryStore.getState().applyStreamStatus(pipelineId, 'completed')
     // 子管道 stream_end 携带的 threadId 与 pipelineId 不同时，单独终止该 threadId 的流。
     if (threadId && threadId !== pipelineId) {
       pipelineStore.getState().stopStreaming(threadId)
@@ -316,6 +322,8 @@ export function handleStreamError(eventData: any) {
   if (pipelineId) {
     // 标记管道已终止（错误），防止 ensureStreamingPlaceholder 重新启动
     terminatePipeline(pipelineId, threadId)
+    // 管道注册表实时同步：failed
+    usePipelineRegistryStore.getState().applyStreamStatus(pipelineId, 'failed')
   } else if (threadId) {
     pipelineStore.getState().stopStreaming(threadId)
   }

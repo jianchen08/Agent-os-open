@@ -167,6 +167,11 @@ class ModelConfigLoaderShim:
         default_params = model_conf.get(
             "default_params", {"temperature": 0.7, "max_tokens": 4096}
         )
+        # 模型级思考强度路由规则（models.<id>.thinking_strength_params）：
+        # 不同模型的 think 参数不一致（DeepSeek reasoning_effort / MiniMax adaptive
+        # thinking / 无 reasoning 的普通模型），每个模型配置自己的档位参数；
+        # llm_core 按此映射，未配置档位回退内置默认表。无配置时省略（不破坏旧配置）。
+        thinking_strength_params = model_conf.get("thinking_strength_params")
 
         defaults = self._load_llm_data().get("defaults", {})
         call_timeout = model_conf.get("call_timeout", defaults.get("call_timeout", 300))
@@ -177,7 +182,7 @@ class ModelConfigLoaderShim:
             "stream_idle_timeout", defaults.get("stream_idle_timeout", 600)
         )
 
-        return {
+        result: dict[str, Any] = {
             "provider": provider_name,
             "model_name": model_conf.get("model_name", model_id),
             "model_id": model_id,
@@ -189,4 +194,7 @@ class ModelConfigLoaderShim:
             "first_token_timeout": first_token_timeout,
             "stream_idle_timeout": stream_idle_timeout,
         }
+        if thinking_strength_params:
+            result["thinking_strength_params"] = thinking_strength_params
+        return result
 

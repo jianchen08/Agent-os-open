@@ -9,8 +9,9 @@
 //!   外部文件引用 `{{path:filename}}`、组合插件 YAML 解析（ADR ⑥）
 //! - `config_center`: 配置中心——基于 notify 的热重载、500ms 防抖 + 内容哈希去重、
 //!   读写锁并发安全、加载失败回滚 + 审计日志
-//! - `pipeline`: 管道配置承载（P7）——0.1 扁平格式管道定义（input/output 路由 +
-//!   插件链 + 核心插件）解析、转引擎 steps 模型、Agent 配置加载
+//! - `pipeline`: 管道配置承载（P7）——Agent 配置加载（config_id/level/model_tier/
+//!   system_prompt/tool_ids/max_iterations）；管道配置（多循环体）由 api crate 的
+//!   pipeline_loader 直接解析为引擎模型
 //! - `error`: 配置系统错误类型
 //!
 //! ## 设计决策
@@ -34,4 +35,4 @@ pub use agent_loader::load_agent_into_state;
 pub use config_center::{AuditEntry, ConfigCenter, ConfigChangeEvent, ConfigEventType};
 pub use error::ConfigError;
 pub use loader::{CompositePluginYaml, ConfigLoader, StepConfig};
-pub use pipeline::{AgentConfig, PipelineDefinition, load_agent_config, load_pipeline_definition};
+pub use pipeline::{AgentConfig, load_agent_config};

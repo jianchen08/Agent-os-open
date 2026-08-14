@@ -15,7 +15,6 @@ use agentos_core::traits::{
     PluginType, StorageBackend,
 };
 use agentos_core::types::{PipelineConfig, StepLibrary};
-use agentos_engine::AdrEngineImpl;
 use agentos_plugin_loader::CapabilityRegistryImpl;
 use axum::response::IntoResponse;
 use serde::{Deserialize, Serialize};
@@ -64,8 +63,6 @@ pub struct AppState {
     pub manifests: Arc<Vec<PluginManifest>>,
     /// 能力注册表（工具/资源/路由信号）
     pub capability_registry: Option<Arc<CapabilityRegistryImpl>>,
-    /// 管道引擎（保留：旧的 AdrEngine 入口，schema/health 等查询用；chat 不再走它）
-    pub engine: Option<Arc<AdrEngineImpl>>,
     /// ── 0.2 引擎接线所需资源（process_via_engine 用）──
     /// 管道配置（config/pipelines/autonomous.yaml 加载）
     pub pipeline_config: Arc<PipelineConfig>,
@@ -119,11 +116,9 @@ impl AppState {
             config: json!({}),
             manifests: Arc::new(Vec::new()),
             capability_registry: None,
-            engine: None,
             pipeline_config: Arc::new(PipelineConfig {
                 name: "default".to_string(),
-                loop_config: Default::default(),
-                steps: Vec::new(),
+                loop_bodies: Vec::new(),
                 checkpoint: Default::default(),
             }),
             step_library: Arc::new(StepLibrary::default()),
@@ -147,11 +142,9 @@ impl AppState {
             config,
             manifests: Arc::new(Vec::new()),
             capability_registry: None,
-            engine: None,
             pipeline_config: Arc::new(PipelineConfig {
                 name: "default".to_string(),
-                loop_config: Default::default(),
-                steps: Vec::new(),
+                loop_bodies: Vec::new(),
                 checkpoint: Default::default(),
             }),
             step_library: Arc::new(StepLibrary::default()),
@@ -179,7 +172,6 @@ impl AppState {
     pub fn with_plugins(
         manifests: Vec<PluginManifest>,
         registry: Arc<CapabilityRegistryImpl>,
-        engine: Arc<AdrEngineImpl>,
         pipeline_config: Arc<PipelineConfig>,
         step_library: Arc<StepLibrary>,
         invoker: Arc<dyn PluginInvoker>,
@@ -216,7 +208,6 @@ impl AppState {
             config,
             manifests: Arc::new(manifests),
             capability_registry: Some(registry),
-            engine: Some(engine),
             pipeline_config,
             step_library,
             invoker: Some(invoker),
@@ -752,6 +743,49 @@ pub async fn pipelines_handler(
     axum::Json(pipelines)
 }
 
+/// GET /api/v1/pipelines/runs——管道运行快照（统一管道管理数据源）。
+///
+/// runs × message_slots × pipeline_sessions × pipeline_run_summaries 四表联结
+/// （store.list_pipelines_inner）：run → pipeline 映射经 message_slots.run_id，
+/// pipeline → 会话经 pipeline_sessions，消耗账本经 pipeline_run_summaries
+/// （sidecar 汇总写入，可为空）。无消息槽的 run（旧引擎 start_run 占位）被过滤。
+/// 返回按 started_at 倒序的运行列表，供前端管道管理面板初始化/兜底刷新。
+///
+/// 查询参数：`status`（可选：running/suspended/completed/failed）、
+/// `limit`（可选，默认 100，上限 500）。
+///
+/// 与 `/api/v1/pipelines`（管道插件清单，配置级）路径区分，两者互不覆盖。
+pub async fn pipelines_runs_handler(
+    axum::extract::State(state): axum::extract::State<AppState>,
+    axum::extract::Query(params): axum::extract::Query<HashMap<String, String>>,
+    headers: axum::http::HeaderMap,
+) -> Result<axum::Json<serde_json::Value>, ApiError> {
+    let db = state.db.clone().ok_or_else(|| ApiError::NotFound {
+        message: "db store not injected".to_string(),
+    })?;
+    let tenant_ctx = crate::server::request_tenant_ctx(state.store.as_ref(), &headers, "").await;
+    let status = params
+        .get("status")
+        .filter(|s| !s.is_empty())
+        .cloned();
+    let limit = params
+        .get("limit")
+        .and_then(|v| v.parse::<u32>().ok())
+        .unwrap_or(100)
+        .min(500);
+    let rows = tokio::task::spawn_blocking(move || {
+        db.list_pipelines_inner(&tenant_ctx.tenant_id, status.as_deref(), limit)
+    })
+    .await
+    .map_err(|e| ApiError::Internal {
+        message: format!("list_pipelines join 失败: {e}"),
+    })?
+    .map_err(|e| ApiError::Internal {
+        message: format!("list_pipelines 查询失败: {e}"),
+    })?;
+    Ok(axum::Json(json!({ "items": rows })))
+}
+
 /// /api/v1/tools 端点处理器。
 ///
 /// 从 CapabilityRegistry 返回已注册的工具列表。
@@ -959,6 +993,170 @@ pub async fn get_plugin_config_with_etag(
     .await?;
     let etag = resp.etag.clone();
     Ok(([(axum::http::header::ETAG, etag)], axum::Json(resp)).into_response())
+}
+
+// ── 插件管理端点（/api/v1/plugins）——loader 监管能力（内核职责）──
+//
+// 转正说明（task_kernel_cleanup_and_split 任务 2）：由 compat_routes.rs 平移而来，
+// 实现深度绑定 0.2 运行态（manifests / enabled_plugin_ids / default_profile.yaml），
+// 非空 stub。GET /api/v1/plugins（原 /api/v1/plugins/status）与
+// PUT /api/v1/plugins/{id}/enabled 保留转正；history/reload* 4 个死端点已删除
+// （无任何前端/客户端消费者，见任务文档死代码清单）。
+
+/// GET /api/v1/plugins — 从 manifests 派生插件状态列表。
+pub async fn plugins_status_handler(
+    axum::extract::State(state): axum::extract::State<AppState>,
+) -> axum::Json<serde_json::Value> {
+    let enabled_ids = state.enabled_plugin_ids.read().await;
+    let items: Vec<serde_json::Value> = state
+        .manifests
+        .iter()
+        .map(|m| {
+            let config_type = match m.plugin_type {
+                agentos_core::traits::PluginType::System => "system",
+                agentos_core::traits::PluginType::Pipeline => "pipeline",
+                agentos_core::traits::PluginType::Tool => "tool",
+                agentos_core::traits::PluginType::Composite => "composite",
+            };
+            let enabled = enabled_ids.contains(&m.id);
+            // 运行态：enabled 且是 sidecar → Active（按需 lazy 时实为 Idle，但无法从静态状态区分，
+            // 统一标 active）；enabled 非 sidecar → active；disabled → disabled
+            let run_status = if enabled { "active" } else { "disabled" };
+            let activation = match m.activation {
+                Some(agentos_core::traits::ActivationPolicy::Eager) => "eager",
+                Some(agentos_core::traits::ActivationPolicy::Manual) => "manual",
+                _ => "lazy", // None = 走 default_profile 默认 lazy
+            };
+            let host_type = match m.host_type {
+                agentos_core::traits::HostType::InProcess => "in_process",
+                agentos_core::traits::HostType::Sidecar => "sidecar",
+                agentos_core::traits::HostType::Wasm => "wasm",
+            };
+            json!({
+                "plugin_id": m.id,
+                "name": m.name,
+                "config_type": config_type,
+                "host_type": host_type,
+                "version": m.version,
+                "enabled": enabled,
+                "activation": activation,
+                "status": run_status,
+                "config_files": m.config_files.iter().map(|c| json!({
+                    "id": c.id,
+                    "label": c.label,
+                    "path": c.path,
+                })).collect::<Vec<_>>(),
+                "has_contributes": m.contributes.is_some(),
+                "has_http_endpoints": !m.http_endpoints.is_empty(),
+                "error": null,
+            })
+        })
+        .collect();
+    axum::Json(json!(items))
+}
+
+/// PUT /api/v1/plugins/{id}/enabled — 切换插件启用状态（写 default_profile.yaml）。
+///
+/// 安装触发模型 L1：改 profile 文件后热更新内存状态；启用需重启内核完全生效
+/// （axum 路由树启动期固定），禁用立即生效（摘除 capability registry）。
+/// 返回 {success, enabled, restart_required}。
+pub async fn plugins_set_enabled_handler(
+    axum::extract::Path(plugin_id): axum::extract::Path<String>,
+    axum::extract::State(state): axum::extract::State<AppState>,
+    axum::Json(body): axum::Json<EnabledBody>,
+) -> axum::Json<serde_json::Value> {
+    let new_enabled = body.enabled;
+    let project_root = match &state.project_root {
+        Some(p) => p,
+        None => {
+            return axum::Json(json!({
+                "success": false,
+                "error": "project_root not available",
+            }))
+        }
+    };
+    let profile_path = project_root.join("config").join("plugins").join("default_profile.yaml");
+
+    // 读现有 profile（不存在则用空结构）
+    let raw = std::fs::read_to_string(&profile_path).unwrap_or_default();
+    let mut doc: serde_yaml::Value = serde_yaml::from_str(&raw).unwrap_or_else(|_| {
+        serde_yaml::from_str("version: 1\nplugins:\ndefaults:\n  enabled: true\n  activation: lazy\n")
+            .unwrap()
+    });
+
+    // 改 plugins.<id>.enabled（手动操作 serde_yaml Mapping）
+    if let serde_yaml::Value::Mapping(ref mut top) = doc {
+        // 确保 plugins 键存在且是 Mapping
+        let plugins_key = serde_yaml::Value::String("plugins".into());
+        if !top.contains_key(&plugins_key) {
+            top.insert(plugins_key.clone(), serde_yaml::Value::Mapping(serde_yaml::Mapping::new()));
+        }
+        if let Some(serde_yaml::Value::Mapping(ref mut plugins_map)) = top.get_mut(&plugins_key) {
+            let pid_key = serde_yaml::Value::String(plugin_id.clone());
+            // 确保该插件条目存在
+            if !plugins_map.contains_key(&pid_key) {
+                plugins_map.insert(pid_key.clone(), serde_yaml::Value::Mapping(serde_yaml::Mapping::new()));
+            }
+            if let Some(serde_yaml::Value::Mapping(ref mut entry)) = plugins_map.get_mut(&pid_key) {
+                entry.insert(
+                    serde_yaml::Value::String("enabled".into()),
+                    serde_yaml::Value::Bool(new_enabled),
+                );
+            }
+        }
+    }
+
+    // 写回
+    let new_raw = serde_yaml::to_string(&doc).unwrap_or_default();
+    match std::fs::write(&profile_path, new_raw) {
+        Ok(_) => {
+            // ── 热加载：立即改内存状态，不用重启 ──
+            // 1) 改 enabled_plugin_ids（schema 出口的 contributes/configs 立即生效）
+            {
+                let mut ids = state.enabled_plugin_ids.write().await;
+                if new_enabled {
+                    ids.insert(plugin_id.clone());
+                } else {
+                    ids.remove(&plugin_id);
+                }
+            }
+            // 2) 禁用时立即从 CapabilityRegistry 摘掉（tools/http_routes 立即不可用）
+            //    启用时重新注册需要重启（axum 路由树在启动期固定，运行时无法动态加路由）
+            if !new_enabled {
+                if let Some(registry) = &state.capability_registry {
+                    use agentos_core::traits::CapabilityRegistry;
+                    registry.clear_plugin(&plugin_id);
+                }
+            }
+            let restart_needed = new_enabled; // 启用需重启（路由重建），禁用立即生效
+            tracing::info!(
+                target: "plugin-enablement",
+                "plugin {} enabled={} (hot-reloaded: contributes + registry updated, restart={})",
+                plugin_id, new_enabled, restart_needed
+            );
+            axum::Json(json!({
+                "success": true,
+                "plugin_id": plugin_id,
+                "enabled": new_enabled,
+                "restart_required": restart_needed,
+                "message": if restart_needed {
+                    format!("已启用插件 {}（重启后完全生效，contributes 已立即更新）", plugin_id)
+                } else {
+                    format!("已禁用插件 {}（立即生效）", plugin_id)
+                },
+            }))
+        }
+        Err(e) => axum::Json(json!({
+            "success": false,
+            "error": format!("写入 profile 失败: {}", e),
+        })),
+    }
+}
+
+/// PUT /api/v1/plugins/{id}/enabled 请求体。
+#[derive(Debug, Deserialize)]
+pub struct EnabledBody {
+    pub enabled: bool,
 }
 
 // ── 监控 M5/M5b：指标查询与导出端点（监控设计 §五）──

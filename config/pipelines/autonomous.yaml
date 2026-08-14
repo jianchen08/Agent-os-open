@@ -1,7 +1,20 @@
-# 通用自主循环管道配置
+# 通用自主循环管道配置（多循环体模型）
 #
-# 引擎作为配置解释执行器：读此配置，按 steps 执行，据 loop/routes 决定循环与分支。
-# 所有 Agent 共用此管道，差异由 Agent 配置（system_prompt/tool_ids/model_tier）体现。
+# 引擎作为配置解释执行器：读此配置，按 loop_bodies 顺序执行每个循环体
+# （各自独立的 steps 与循环配置），据 exit_routes/routes 决定循环、分支与
+# 循环体间转移。所有 Agent 共用此管道，差异由 Agent 配置
+# （system_prompt/tool_ids/model_tier）体现。
+#
+# 循环体语义：
+# - init：前处理（工作空间/环境解析），单次执行，顺序推进到 main；
+# - main：agent 循环（llm_call ↔ tool_execute），ended 只结束本体的循环，
+#   之后仍顺序推进到 exit；
+# - exit：后处理（workspace 合并/环境释放），run_on_error=true 保证
+#   提前终止（ended/出错）时仍执行收尾；挂起（suspended）不触发。
+# 转移：step 级路由设置的 state.next_phase > 循环体 exit_routes（Phase）>
+# 默认顺序进入下一循环体；最后一个循环体结束 = run 结束。
+# （init/exit 体待 workspace_lifecycle / environment_lifecycle 插件就绪后挂载，
+#   当前仅 main 体，行为与旧单循环一致。）
 #
 # 一切皆 step：steps 字段引用的内容按三级命中规则解析：
 #   ① 当前管道 step id → 组合节点递归
@@ -12,65 +25,68 @@
 
 name: autonomous
 
-loop:
-  enabled: true
-  max_iterations: -1          # -1=无限循环（由 Agent 配置的 max_iterations 覆盖）
+loop_bodies:
+  # ── main：agent 自主循环（LLM ↔ 工具执行）──
+  - id: main
+    loop_config:
+      enabled: true
+      max_iterations: -1          # -1=无限循环（由 Agent 配置的 max_iterations 覆盖）
 
-steps:
-  # ── 上下文准备（input 插件链）──
-  - id: prepare
-    steps:                    # 插件 id（manifest 里的 id，带 pipeline_ 前缀）
-      - pipeline_tool_schema
-      - pipeline_param_inject
-      - pipeline_memory_read
-      - pipeline_knowledge_inject
-      - pipeline_prompt_build
-      - pipeline_isolation_guard   # 工具执行前决策隔离级别（写 state["execution_contexts"]）
-      - pipeline_cost_control      # 预算统计（task_observability 1c：默认预算放大到实际不触达）
-      - pipeline_termination_advisor  # 主动终止判断（整合 cost_control/stuck/track 信号，task_observability 1c）
-    context:                  # 自由 key-value，merge 进 state 供插件读取
-      agent_id: "{{state.agent_id}}"
-      model_tier: "{{state.model_tier}}"
-
-  # ── LLM 或工具执行（由 core_type 决定）──
-  - id: core
     steps:
-      - "{{state.core_plugin}}"   # 动态：pipeline_llm_core 或 pipeline_tool_core
-      # spill_guard（大输出兜底）：必须与 tool_core 同 step 后置组合——
-      # tool_core 大结果 merge 进内存 state（纯内存未落轨迹）→ spill_guard
-      # 立刻替换成小的 → step 末尾才落轨迹/messages 收尾，落的是小结果。
-      # llm_core 轮次天然 no-op（tool_results 已小/已标记，幂等透传）。
-      - pipeline_spill_guard
-    context:
-      agent_id: "{{state.agent_id}}"
-      temperature: 0.7
+      # ── 上下文准备（input 插件链）──
+      - id: prepare
+        steps:                    # 插件 id（manifest 里的 id，带 pipeline_ 前缀）
+          - pipeline_tool_schema
+          - pipeline_param_inject
+          - pipeline_memory_read
+          - pipeline_knowledge_inject
+          - pipeline_prompt_build
+          - pipeline_isolation_guard   # 工具执行前决策隔离级别（写 state["execution_contexts"]）
+          - pipeline_cost_control      # 预算统计（task_observability 1c：默认预算放大到实际不触达）
+          - pipeline_termination_advisor  # 主动终止判断（整合 cost_control/stuck/track 信号，task_observability 1c）
+        context:                  # 自由 key-value，merge 进 state 供插件读取
+          agent_id: "{{state.agent_id}}"
+          model_tier: "{{state.model_tier}}"
 
-  # ── 输出处理 + 路由仲裁 ──
-  - id: post
-    steps:
-      - pipeline_track             # token/耗时统计 + cache 可观测 + cost_update 推送（首位：提前 end 也不丢统计）
-      - pipeline_stop_check
-      - pipeline_duplicate_check
-      - pipeline_stuck_detector
-      - pipeline_result_format
-    routes:                   # 配置驱动的路由分支
-      # 有非空工具调用 → 继续循环执行工具（明确判断非空列表，避免缺失字段误命中）
-      - when: "raw_tool_calls != [] and raw_tool_calls != None"
-        then:
-          next: loop
-          set:
-            core_type: tool_execute
-            core_plugin: pipeline_tool_core
-      # 工具刚执行完（core_type=tool_execute，raw_tool_calls 已被 tool_core 清空）
-      # → 回 LLM 让它看到 tool_results 产生下一轮或文本回复（对齐 0.1 handle_no_route_signals
-      #   的 "tool_execute 后自动 next_llm" 逻辑）
-      - when: "core_type == 'tool_execute'"
-        then:
-          next: loop
-          set:
-            core_type: llm_call
-            core_plugin: pipeline_llm_core
-      # 其余情况（纯文本回复 / 字段缺失）→ 结束，避免无限循环
-      - when: "True"
-        then:
-          next: end
+      # ── LLM 或工具执行（由 core_type 决定）──
+      - id: core
+        steps:
+          - "{{state.core_plugin}}"   # 动态：pipeline_llm_core 或 pipeline_tool_core
+          # spill_guard（大输出兜底）：必须与 tool_core 同 step 后置组合——
+          # tool_core 大结果 merge 进内存 state（纯内存未落轨迹）→ spill_guard
+          # 立刻替换成小的 → step 末尾才落轨迹/messages 收尾，落的是小结果。
+          # llm_core 轮次天然 no-op（tool_results 已小/已标记，幂等透传）。
+          - pipeline_spill_guard
+        context:
+          agent_id: "{{state.agent_id}}"
+          temperature: 0.7
+
+      # ── 输出处理 + 路由仲裁 ──
+      - id: post
+        steps:
+          - pipeline_track             # token/耗时统计 + cache 可观测 + cost_update 推送（首位：提前 end 也不丢统计）
+          - pipeline_stop_check
+          - pipeline_duplicate_check
+          - pipeline_stuck_detector
+          - pipeline_result_format
+        routes:                   # 配置驱动的路由分支
+          # 有非空工具调用 → 继续循环执行工具（明确判断非空列表，避免缺失字段误命中）
+          - when: "raw_tool_calls != [] and raw_tool_calls != None"
+            then:
+              next: loop
+              set:
+                core_type: tool_execute
+                core_plugin: pipeline_tool_core
+          # 工具刚执行完（core_type=tool_execute，raw_tool_calls 已被 tool_core 清空）
+          # → 回 LLM 让它看到 tool_results 产生下一轮或文本回复（对齐 0.1 handle_no_route_signals
+          #   的 "tool_execute 后自动 next_llm" 逻辑）
+          - when: "core_type == 'tool_execute'"
+            then:
+              next: loop
+              set:
+                core_type: llm_call
+                core_plugin: pipeline_llm_core
+          # 其余情况（纯文本回复 / 字段缺失）→ 结束，避免无限循环
+          - when: "True"
+            then:
+              next: end

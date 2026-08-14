@@ -104,17 +104,22 @@ impl PluginInvoker for HookRecordingInvoker {
     }
 }
 
-/// 最小管道配置：单个 step，含一个无产出插件，无循环。
+/// 最小管道配置：单个 step，含一个无产出插件，无循环（单循环体 main）。
 fn minimal_config() -> agentos_core::types::PipelineConfig {
     agentos_core::types::PipelineConfig {
         name: "end_hook_test".into(),
-        loop_config: agentos_core::types::LoopConfig::default(),
-        steps: vec![agentos_core::types::PipelineStep {
-            id: "only".into(),
-            steps: vec!["pipeline_dummy".into()],
-            context: HashMap::new(),
-            routes: vec![],
+        loop_bodies: vec![agentos_core::types::LoopBody {
+            id: "main".into(),
+            steps: vec![agentos_core::types::PipelineStep {
+                id: "only".into(),
+                steps: vec!["pipeline_dummy".into()],
+                context: HashMap::new(),
+                routes: vec![],
+                loop_config: None,
+            }],
             loop_config: None,
+            exit_routes: vec![],
+            run_on_error: false,
         }],
         checkpoint: agentos_core::types::CheckpointConfig::default(),
     }

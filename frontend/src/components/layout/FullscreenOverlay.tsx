@@ -1,7 +1,8 @@
 /**
  * 全屏覆盖层组件
  *
- * 支持进入/退出全屏模式，按 Schema 渲染内容
+ * 支持进入/退出全屏模式，按 Schema 渲染内容。
+ * 顶栏样式与轻顶栏统一（44px、panel 背景，见 task_layout_responsive 任务 4）。
  */
 
 import React from 'react'
@@ -28,11 +29,18 @@ export function FullscreenOverlay({ isActive, title, onExit, children }: Fullscr
 
   return (
     <div className="bg-background text-foreground fixed inset-0 z-[100] flex flex-col">
-      {/* 顶部工具栏 */}
-      <div className="border-border flex items-center justify-between border-b px-4 py-2">
-        <span className="text-foreground text-sm font-medium">{title ?? '全屏模式'}</span>
+      {/* 顶部工具栏（与轻顶栏同一高度/背景体系） */}
+      <div
+        className="border-border flex items-center justify-between border-b px-2 md:px-3"
+        style={{
+          height: 'var(--layout-titlebar-height, 44px)',
+          background: 'var(--ds-bg-panel, hsl(var(--card)))',
+        }}
+        data-testid="fullscreen-toolbar"
+      >
+        <span className="text-foreground truncate text-[13px] font-medium">{title ?? '全屏模式'}</span>
         <button
-          className="hover:bg-accent text-muted-foreground rounded-md px-3 py-1 text-sm"
+          className="text-muted-foreground hover:bg-accent hover:text-foreground flex h-7 items-center justify-center rounded-md px-2.5 text-xs transition-colors"
           onClick={onExit}
         >
           退出全屏 (Esc)

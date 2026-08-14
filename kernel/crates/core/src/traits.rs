@@ -22,10 +22,9 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
 use crate::types::{
-    Branch, CompositeStep, EngineError, ErrorPolicy, ExecutionRecord, MemoryRecord, Message,
-    MessageRecord, PipelineRunSummary, PluginContext, PluginError, PluginResult, RouteType,
-    RunRecord, RunStatus, SessionRecord, StepResult, StorageError, SuspendHandle, ToolCategory,
-    ToolExecutionResult, ToolSource, TraceEntry, UserRecord, WakeEvent,
+    Branch, ErrorPolicy, ExecutionRecord, MemoryRecord, MessageRecord, PipelineRunSummary,
+    PluginContext, PluginError, PluginResult, RouteType, RunRecord, RunStatus, SessionRecord,
+    StorageError, ToolCategory, ToolExecutionResult, ToolSource, TraceEntry, UserRecord,
 };
 
 // ── 1. 插件基础 Trait ───────────────────────────────────────────
@@ -1646,77 +1645,3 @@ pub struct SessionListFilter {
     pub limit: Option<usize>,
 }
 
-// ═════════════════════════════════════════════════════════════════
-// ADR ①：AdrEngine trait——极简调度器 + 状态账本
-// ═════════════════════════════════════════════════════════════════
-
-/// ADR 引擎：调度器 + 状态账本（ADR ①）。
-///
-/// 设计原则（ADR ①）：
-/// - 引擎不含业务逻辑，只负责按配置顺序调用插件、维护状态一致性、记录变更日志
-/// - 状态以 SQLite 为正本（ADR ③④），所有变更以追加 Patch 记录（ADR ③）
-/// - 回滚通过创建新分支 + 正向重放 Patch（ADR ⑤）
-///
-/// 引擎核心循环：
-/// ```text
-/// 1. 从 config 加载步骤序列（YAML 定义）
-/// 2. for each step in steps:
-///    a. 构造 PluginContext（从 SQLite 读取当前状态 + 按需加载 BLOB 内容）
-///    b. 通过 PluginInvoker 调用插件 execute(ctx) -> PluginResult
-///    c. 将 PluginResult.state_updates 作为 Patch 追加到 traces 表
-///    d. 如果 PluginResult 有 route_signal：
-///       - NextLlm → 下一步调用 LLM 原子插件
-///       - NextTool → 下一步调用 Tool 原子插件
-///       - End → 结束循环
-///       - Wait → 挂起，保存分支状态
-///    e. 如果出错：按 ErrorPolicy 处理（Abort/Skip/Retry/Fallback）
-/// 3. 记录运行结束到 runs 表
-/// ```
-///
-/// [来源: docs/working/adr_engine_design.md §3.3]
-#[async_trait]
-pub trait AdrEngine: Send + Sync {
-    /// 启动一次运行实例。
-    ///
-    /// 在 runs 表创建记录，初始化主分支。
-    ///
-    /// # Returns
-    /// 运行实例 ID
-    async fn start_run(&self, config: &serde_json::Value) -> Result<String, EngineError>;
-
-    /// 执行一个步骤（原子插件或组合插件中的一个 step）。
-    ///
-    /// 1. 构造 PluginContext（从 SQLite 读取当前状态 + 按需加载 BLOB 内容）
-    /// 2. 通过 PluginInvoker 调用插件 execute(ctx) -> PluginResult
-    /// 3. 将 PluginResult.state_updates 作为 Patch 追加到 traces 表
-    async fn execute_step(
-        &self,
-        run_id: &str,
-        step: &CompositeStep,
-    ) -> Result<StepResult, EngineError>;
-
-    /// 挂起运行（ADR ⑤：保存分支状态，等待外部事件）。
-    ///
-    /// 将 runs 表状态更新为 Suspended，保存当前分支和序列号。
-    async fn suspend(&self, run_id: &str) -> Result<SuspendHandle, EngineError>;
-
-    /// 恢复运行（ADR ⑤：从分支状态恢复）。
-    ///
-    /// 将 runs 表状态更新为 Running，根据唤醒事件继续执行。
-    async fn resume(&self, handle: &SuspendHandle, event: WakeEvent) -> Result<(), EngineError>;
-
-    /// 回滚（ADR ⑤：创建新分支 + 正向重放 Patch 恢复状态）。
-    ///
-    /// 1. 创建新分支（branch_id = "{parent}.rollback.{n}"）
-    /// 2. 从 parent_branch 的 seq=0 到 target_seq 正向重放 Patch
-    /// 3. 恢复状态到 target_seq 的快照
-    ///
-    /// # Returns
-    /// 新分支 ID
-    async fn rollback(&self, run_id: &str, target_seq: u32) -> Result<String, EngineError>;
-
-    /// 结束运行。
-    ///
-    /// 将 runs 表状态更新为 Completed/Failed，记录结束时间。
-    async fn end_run(&self, run_id: &str) -> Result<(), EngineError>;
-}

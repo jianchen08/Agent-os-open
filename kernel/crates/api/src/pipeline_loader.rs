@@ -18,7 +18,7 @@
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
-use agentos_core::types::{PipelineConfig, PipelineStep, StepLibrary};
+use agentos_core::types::{PipelineConfig, PipelineStep, RouteNext, StepLibrary};
 
 /// 加载管道配置（`config/pipelines/autonomous.yaml` → [`PipelineConfig`]）。
 ///
@@ -30,13 +30,12 @@ pub fn load_pipeline_config(config_root: &Path) -> Result<PipelineConfig, Pipeli
     let path = config_root.join("pipelines").join("autonomous.yaml");
     if !path.exists() {
         tracing::warn!(
-            "Pipeline config not found at {}, using default (loop disabled, empty steps)",
+            "Pipeline config not found at {}, using default (empty loop bodies)",
             path.display()
         );
         return Ok(PipelineConfig {
             name: "default".to_string(),
-            loop_config: Default::default(),
-            steps: Vec::new(),
+            loop_bodies: Vec::new(),
             checkpoint: Default::default(),
         });
     }
@@ -118,10 +117,13 @@ pub fn load_step_library(config_root: &Path) -> Result<StepLibrary, PipelineLoad
 
 /// 重名检测：在 pipeline 配置、公共 step 库、插件 id 集合三者间检测命名冲突。
 ///
-/// 三类冲突（任一命中返回 `Err`，信息含具体冲突 id 与来源）：
-/// ① pipeline.steps 的 id 之间重复：`"step id 'X' 重复（在 pipeline 配置中）"`
-/// ② pipeline.steps 的 id 在 `plugin_ids` 中：`"step id 'X' 与插件 id 冲突"`
-/// ③ step_library 的 id 在 `plugin_ids` 中：`"step id 'X' 与插件 id 冲突"`
+/// 冲突类型（任一命中返回 `Err`，信息含具体冲突 id 与来源）：
+/// ① 循环体 id 之间重复：`"循环体 id 'X' 重复（在 pipeline 配置中）"`
+/// ② 全部循环体内的 step id 之间重复：`"step id 'X' 重复（在 pipeline 配置中）"`
+/// ③ 全部循环体内的 step id 与插件 id 冲突：`"step id 'X' 与插件 id 冲突"`
+/// ④ step_library 的 id 与插件 id 冲突：`"step id 'X' 与插件 id 冲突"`
+/// ⑤ `RouteNext::Phase` 转移目标（step 级路由 / 循环体 exit_routes）指向
+///    不存在的循环体：`"路由 Phase 目标 'X' 不存在（pipeline 配置）"`
 ///
 /// 设计取舍：所有冲突一次性收集后返回第一条（首个报错即退出，避免错误信息噪声）。
 pub fn validate_no_name_conflicts(
@@ -129,34 +131,68 @@ pub fn validate_no_name_conflicts(
     step_library: &StepLibrary,
     plugin_ids: &HashSet<String>,
 ) -> Result<(), String> {
-    // ① pipeline.steps id 之间不能重复
+    // ① 循环体 id 之间不能重复
+    let mut seen_body: HashSet<&str> = HashSet::new();
+    for body in &pipeline.loop_bodies {
+        if !seen_body.insert(body.id.as_str()) {
+            return Err(format!("循环体 id '{}' 重复（在 pipeline 配置中）", body.id));
+        }
+    }
+
+    // ② 全部循环体内的 step id 之间不能重复
     let mut seen: HashSet<&str> = HashSet::new();
-    for step in &pipeline.steps {
-        if !seen.insert(step.id.as_str()) {
-            return Err(format!(
-                "step id '{}' 重复（在 pipeline 配置中）",
-                step.id
-            ));
+    for step in pipeline.step_ids() {
+        if !seen.insert(step) {
+            return Err(format!("step id '{step}' 重复（在 pipeline 配置中）"));
         }
     }
 
-    // ② pipeline.steps id 不能与插件 id 冲突
-    for step in &pipeline.steps {
-        if plugin_ids.contains(&step.id) {
-            return Err(format!(
-                "step id '{}' 与插件 id 冲突（pipeline 配置）",
-                step.id
-            ));
+    // ③ 全部循环体内的 step id 不能与插件 id 冲突
+    for step in pipeline.step_ids() {
+        if plugin_ids.contains(step) {
+            return Err(format!("step id '{step}' 与插件 id 冲突（pipeline 配置）"));
         }
     }
 
-    // ③ step_library id 不能与插件 id 冲突
+    // ④ step_library id 不能与插件 id 冲突
     for id in step_library.steps.keys() {
         if plugin_ids.contains(id) {
-            return Err(format!(
-                "step id '{}' 与插件 id 冲突（公共 step 库）",
-                id
-            ));
+            return Err(format!("step id '{id}' 与插件 id 冲突（公共 step 库）"));
+        }
+    }
+
+    // ⑤ Phase 转移目标必须存在（step 级路由 + 循环体 exit_routes）
+    let body_ids: HashSet<&str> = pipeline
+        .loop_bodies
+        .iter()
+        .map(|b| b.id.as_str())
+        .collect();
+    for step in pipeline
+        .loop_bodies
+        .iter()
+        .flat_map(|b| b.steps.iter())
+    {
+        for route in &step.routes {
+            if let RouteNext::Phase(id) = &route.then.next {
+                if !body_ids.contains(id.as_str()) {
+                    return Err(format!(
+                        "路由 Phase 目标 '{id}' 不存在（pipeline 配置，step '{}'）",
+                        step.id
+                    ));
+                }
+            }
+        }
+    }
+    for body in &pipeline.loop_bodies {
+        for route in &body.exit_routes {
+            if let RouteNext::Phase(id) = &route.then.next {
+                if !body_ids.contains(id.as_str()) {
+                    return Err(format!(
+                        "exit_routes Phase 目标 '{id}' 不存在（pipeline 配置，循环体 '{}'）",
+                        body.id
+                    ));
+                }
+            }
         }
     }
 
@@ -199,6 +235,7 @@ impl std::error::Error for PipelineLoadError {}
 #[cfg(test)]
 mod tests {
     use super::*;
+    use agentos_core::types::{LoopBody, Route, RouteAction};
     use std::collections::HashMap;
     use std::fs;
     use tempfile::TempDir;
@@ -210,27 +247,39 @@ mod tests {
         let root = tmp.path();
         let yaml = r#"
 name: test_pipeline
-loop:
-  enabled: true
-  max_iterations: 5
-steps:
-  - id: prepare
+loop_bodies:
+  - id: init
     steps:
-      - tool_schema
-    context:
-      agent_id: "A1"
+      - id: setup
+        steps:
+          - env_resolver
+  - id: main
+    loop_config:
+      enabled: true
+      max_iterations: 5
+    steps:
+      - id: prepare
+        steps:
+          - tool_schema
+        context:
+          agent_id: "A1"
 "#;
         fs::create_dir_all(root.join("pipelines")).unwrap();
         fs::write(root.join("pipelines/autonomous.yaml"), yaml).unwrap();
 
         let cfg = load_pipeline_config(root).expect("should load");
         assert_eq!(cfg.name, "test_pipeline");
-        assert!(cfg.loop_config.enabled);
-        assert_eq!(cfg.loop_config.max_iterations, 5);
-        assert_eq!(cfg.steps.len(), 1);
-        assert_eq!(cfg.steps[0].id, "prepare");
-        assert_eq!(cfg.steps[0].steps, vec!["tool_schema".to_string()]);
-        assert_eq!(cfg.steps[0].context.get("agent_id").unwrap(), "A1");
+        assert_eq!(cfg.loop_bodies.len(), 2);
+        assert_eq!(cfg.loop_bodies[0].id, "init");
+        assert!(!cfg.loop_bodies[0].loop_config.as_ref().map(|c| c.enabled).unwrap_or(false));
+        let main = &cfg.loop_bodies[1];
+        assert_eq!(main.id, "main");
+        assert!(main.loop_config.as_ref().unwrap().enabled);
+        assert_eq!(main.loop_config.as_ref().unwrap().max_iterations, 5);
+        assert_eq!(main.steps.len(), 1);
+        assert_eq!(main.steps[0].id, "prepare");
+        assert_eq!(main.steps[0].steps, vec!["tool_schema".to_string()]);
+        assert_eq!(main.steps[0].context.get("agent_id").unwrap(), "A1");
     }
 
     /// 文件不存在 → 返回默认配置（不报错）。
@@ -238,8 +287,7 @@ steps:
     fn test_load_pipeline_config_missing_returns_default() {
         let tmp = TempDir::new().unwrap();
         let cfg = load_pipeline_config(tmp.path()).expect("missing config should not error");
-        assert!(!cfg.loop_config.enabled);
-        assert!(cfg.steps.is_empty());
+        assert!(cfg.loop_bodies.is_empty());
     }
 
     /// 坏 YAML → 返回 ParseYaml 错误（含路径）。
@@ -282,57 +330,61 @@ steps:
         assert!(lib.steps.is_empty());
     }
 
+    /// 构造单循环体 pipeline（测试便捷函数）。
+    fn single_body_pipeline(name: &str, steps: Vec<PipelineStep>) -> PipelineConfig {
+        PipelineConfig {
+            name: name.into(),
+            loop_bodies: vec![LoopBody {
+                id: "main".into(),
+                steps,
+                loop_config: None,
+                exit_routes: vec![],
+                run_on_error: false,
+            }],
+            checkpoint: Default::default(),
+        }
+    }
+
+    fn make_step(id: &str) -> PipelineStep {
+        PipelineStep {
+            id: id.into(),
+            steps: vec![],
+            context: HashMap::new(),
+            routes: vec![],
+            loop_config: None,
+        }
+    }
+
     /// validate_no_name_conflicts：无冲突 → Ok。
     #[test]
     fn test_validate_no_conflicts_ok() {
-        let pipeline = PipelineConfig {
-            name: "p".into(),
-            loop_config: Default::default(),
-            steps: vec![PipelineStep {
-                id: "s1".into(),
-                steps: vec![],
-                context: HashMap::new(),
-                routes: vec![],
-                loop_config: None,
-            }],
-            checkpoint: Default::default(),
-        };
+        let pipeline = single_body_pipeline("p", vec![make_step("s1")]);
         let mut lib = StepLibrary::default();
-        lib.steps.insert(
-            "lib_a".into(),
-            PipelineStep {
-                id: "lib_a".into(),
-                steps: vec![],
-                context: HashMap::new(),
-                routes: vec![],
-                loop_config: None,
-            },
-        );
+        lib.steps.insert("lib_a".into(), make_step("lib_a"));
         let mut plugin_ids = HashSet::new();
         plugin_ids.insert("plugin_x".to_string());
         assert!(validate_no_name_conflicts(&pipeline, &lib, &plugin_ids).is_ok());
     }
 
-    /// 冲突①：pipeline.steps id 重复。
+    /// 冲突①：循环体 id 重复。
     #[test]
-    fn test_validate_conflict_duplicate_pipeline_step_id() {
+    fn test_validate_conflict_duplicate_body_id() {
         let pipeline = PipelineConfig {
             name: "p".into(),
-            loop_config: Default::default(),
-            steps: vec![
-                PipelineStep {
-                    id: "dup".into(),
+            loop_bodies: vec![
+                LoopBody {
+                    id: "main".into(),
                     steps: vec![],
-                    context: HashMap::new(),
-                    routes: vec![],
                     loop_config: None,
+                    exit_routes: vec![],
+                    run_on_error: false,
                 },
-                PipelineStep {
-                    id: "dup".into(),
+                LoopBody {
+                    id: "main".into(),
                     steps: vec![],
-                    context: HashMap::new(),
-                    routes: vec![],
                     loop_config: None,
+                    exit_routes: vec![],
+                    run_on_error: false,
                 },
             ],
             checkpoint: Default::default(),
@@ -340,25 +392,25 @@ steps:
         let lib = StepLibrary::default();
         let plugin_ids = HashSet::new();
         let err = validate_no_name_conflicts(&pipeline, &lib, &plugin_ids).unwrap_err();
+        assert!(err.contains("main"), "err should name the conflicting id: {err}");
+        assert!(err.contains("循环体"));
+    }
+
+    /// 冲突②：pipeline step id 重复。
+    #[test]
+    fn test_validate_conflict_duplicate_pipeline_step_id() {
+        let pipeline = single_body_pipeline("p", vec![make_step("dup"), make_step("dup")]);
+        let lib = StepLibrary::default();
+        let plugin_ids = HashSet::new();
+        let err = validate_no_name_conflicts(&pipeline, &lib, &plugin_ids).unwrap_err();
         assert!(err.contains("dup"), "err should name the conflicting id: {err}");
         assert!(err.contains("重复"));
     }
 
-    /// 冲突②：pipeline.steps id 与插件 id 冲突。
+    /// 冲突③：pipeline step id 与插件 id 冲突。
     #[test]
     fn test_validate_conflict_pipeline_step_vs_plugin_id() {
-        let pipeline = PipelineConfig {
-            name: "p".into(),
-            loop_config: Default::default(),
-            steps: vec![PipelineStep {
-                id: "shared".into(),
-                steps: vec![],
-                context: HashMap::new(),
-                routes: vec![],
-                loop_config: None,
-            }],
-            checkpoint: Default::default(),
-        };
+        let pipeline = single_body_pipeline("p", vec![make_step("shared")]);
         let lib = StepLibrary::default();
         let mut plugin_ids = HashSet::new();
         plugin_ids.insert("shared".to_string());
@@ -367,31 +419,44 @@ steps:
         assert!(err.contains("插件"));
     }
 
-    /// 冲突③：step_library id 与插件 id 冲突。
+    /// 冲突④：step_library id 与插件 id 冲突。
     #[test]
     fn test_validate_conflict_library_step_vs_plugin_id() {
-        let pipeline = PipelineConfig {
-            name: "p".into(),
-            loop_config: Default::default(),
-            steps: vec![],
-            checkpoint: Default::default(),
-        };
+        let pipeline = single_body_pipeline("p", vec![]);
         let mut lib = StepLibrary::default();
-        lib.steps.insert(
-            "doc_extract".into(),
-            PipelineStep {
-                id: "doc_extract".into(),
-                steps: vec![],
-                context: HashMap::new(),
-                routes: vec![],
-                loop_config: None,
-            },
-        );
+        lib.steps.insert("doc_extract".into(), make_step("doc_extract"));
         let mut plugin_ids = HashSet::new();
         plugin_ids.insert("doc_extract".to_string());
         let err = validate_no_name_conflicts(&pipeline, &lib, &plugin_ids).unwrap_err();
         assert!(err.contains("doc_extract"));
         assert!(err.contains("插件"));
+    }
+
+    /// 冲突⑤：exit_routes 的 Phase 目标不存在 → 校验失败。
+    #[test]
+    fn test_validate_conflict_phase_target_missing() {
+        let pipeline = PipelineConfig {
+            name: "p".into(),
+            loop_bodies: vec![LoopBody {
+                id: "init".into(),
+                steps: vec![],
+                loop_config: None,
+                exit_routes: vec![Route {
+                    when: "True".into(),
+                    then: RouteAction {
+                        next: RouteNext::Phase("nonexistent".into()),
+                        set: HashMap::new(),
+                    },
+                }],
+                run_on_error: false,
+            }],
+            checkpoint: Default::default(),
+        };
+        let lib = StepLibrary::default();
+        let plugin_ids = HashSet::new();
+        let err = validate_no_name_conflicts(&pipeline, &lib, &plugin_ids).unwrap_err();
+        assert!(err.contains("nonexistent"), "err: {err}");
+        assert!(err.contains("Phase"));
     }
 
     /// 端到端：用真实 autonomous.yaml + doc_extract.yaml 形态构造配置，
@@ -407,15 +472,17 @@ steps:
             root.join("pipelines/autonomous.yaml"),
             r#"
 name: autonomous
-loop:
-  enabled: true
-  max_iterations: -1
-steps:
-  - id: prepare
+loop_bodies:
+  - id: main
+    loop_config:
+      enabled: true
+      max_iterations: -1
     steps:
-      - tool_schema
-    context:
-      agent_id: "{{state.agent_id}}"
+      - id: prepare
+        steps:
+          - tool_schema
+        context:
+          agent_id: "{{state.agent_id}}"
 "#,
         )
         .unwrap();
@@ -441,8 +508,10 @@ routes:
 
         let cfg = load_pipeline_config(root).expect("pipeline config");
         assert_eq!(cfg.name, "autonomous");
-        assert_eq!(cfg.steps.len(), 1);
-        assert_eq!(cfg.steps[0].id, "prepare");
+        assert_eq!(cfg.loop_bodies.len(), 1);
+        assert_eq!(cfg.loop_bodies[0].id, "main");
+        assert_eq!(cfg.loop_bodies[0].steps.len(), 1);
+        assert_eq!(cfg.loop_bodies[0].steps[0].id, "prepare");
 
         let lib = load_step_library(root).expect("step library");
         assert!(lib.steps.contains_key("doc_extract"));

@@ -7,7 +7,7 @@ import type { Session } from '../types/models'
 
 /**
  * 后端线程状态响应类型
- * 与后端 /api/v1/threads 返回格式对齐
+ * 与后端 /api/v1/sessions 返回格式对齐
  */
 export interface ThreadStateResponse {
   /** 线程ID */

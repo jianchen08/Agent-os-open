@@ -1,32 +1,19 @@
 /**
- * TitleBar · Deep Space v2 App Shell 顶栏
+ * AppHeader · 轻顶栏（AI app 标准，task_layout_responsive 任务 1）
  *
- * 通用 AI 产品做法：
- * - 左侧：折叠侧边栏 + 品牌
- * - 中部：会话标题
- * - 右侧：功能入口（设置 / 监控）
+ * 三段式（≤44px）：
+ * - 左：`☰` 侧栏入口（桌面折叠/展开，移动打开侧滑抽屉）
+ * - 中：`灵汐 · 当前对话标题`（无标题显示品牌）+ 连接状态小圆点
+ * - 右：高频动作——「工作区」按钮（桌面切换工作区显隐，移动端打开工作区全屏视图）
  *
- * 用户 / 主题 / 通知 只放在侧栏底部，不在顶栏重复。
+ * 设计决策（调研固化）：
+ * - 导航本体归侧栏（历史对话 + 设置/监控/插件 + 用户 + 新建对话），顶栏只是侧栏入口，不存在两套导航
+ * - 去掉 MaximizeWindow/RestoreWindow 图标（用系统原生窗口控制）
+ * - 右区仅保留一个高频动作「工作区」；extraRight prop 保留（pending 计数等挂右侧）
  */
 
-import {
-  Menu,
-  PanelLeftClose,
-  PanelLeftOpen,
-  PanelRightIcon,
-  MaximizeWindowIcon,
-  RestoreWindowIcon,
-} from '@/assets/icons'
-import { useNavigate, useLocation } from 'react-router-dom'
-import {
-  DropdownMenu,
-  DropdownMenuContent,
-  DropdownMenuItem,
-  DropdownMenuTrigger,
-} from '@/components/ui/dropdown-menu'
-import { getTitleBarNavItems } from '@/constants/navItems'
-import { cn } from '@/lib/utils'
-import { openWorkspacePanelByPath } from '@/services/workspacePanelOpener'
+import { Menu, PanelRightIcon } from '@/assets/icons'
+import { useLayoutModeStore } from '@/stores/layoutModeStore'
 import { useSessionStore } from '@/stores/sessionStore'
 import { useUIStore } from '@/stores/uiStore'
 
@@ -34,152 +21,111 @@ import { useUIStore } from '@/stores/uiStore'
 interface AppHeaderProps {
   /** 额外的右侧内容（如 pending 计数） */
   extraRight?: React.ReactNode
+  /** 移动端：点击「工作区」打开工作区全屏视图 */
+  onOpenWorkspaceView?: () => void
+  /** 是否为移动端形态（移动端「工作区」走 onOpenWorkspaceView） */
+  isMobile?: boolean
+}
+
+/** 连接状态文案 */
+const CONNECTION_LABEL: Record<string, string> = {
+  connected: '内核已连接',
+  connecting: '连接中…',
+  reconnecting: '重连中…',
+  disconnected: '连接已断开',
+  failed: '连接失败',
 }
 
 /**
- * 统一应用顶栏（设计稿 TitleBar）
+ * 统一应用轻顶栏（设计稿 TitleBar 精简版）
  */
-export function AppHeader({ extraRight }: AppHeaderProps) {
-  const navigate = useNavigate()
-  const location = useLocation()
-  const navItems = getTitleBarNavItems()
+export function AppHeader({ extraRight, onOpenWorkspaceView, isMobile = false }: AppHeaderProps) {
   const sessions = useSessionStore((s) => s.sessions)
   const activeSessionId = useSessionStore((s) => s.activeSessionId)
   const activeSession = sessions.find((s) => s.id === activeSessionId)
-  const sessionTitle = activeSession?.title || 'AgentOS'
+  const sessionTitle = activeSession?.title
+  // 中段上下文标识：`灵汐 · 会话标题`；无标题时仅品牌
+  const title = sessionTitle ? `灵汐 · ${sessionTitle}` : '灵汐'
 
   const sidebarCollapsed = useUIStore((s) => s.sidebarCollapsed)
   const toggleSidebar = useUIStore((s) => s.toggleSidebar)
   const workspaceCollapsed = useUIStore((s) => s.workspaceCollapsed)
   const toggleWorkspace = useUIStore((s) => s.toggleWorkspace)
-  const workspaceMaximized = useUIStore((s) => s.workspaceMaximized)
-  const toggleWorkspaceMaximize = useUIStore((s) => s.toggleWorkspaceMaximize)
+  const connectionStatus = useLayoutModeStore((s) => s.connectionStatus)
 
-  const openNav = (path: string) => {
-    const opened = openWorkspacePanelByPath(path)
-    if (!opened) navigate(path)
+  const connected = connectionStatus.state === 'connected'
+  const connecting =
+    connectionStatus.state === 'connecting' || connectionStatus.state === 'reconnecting'
+  const dotColor = connected
+    ? 'var(--ds-status-success, #34D399)'
+    : connecting
+      ? 'var(--ds-status-waiting, #FBBF24)'
+      : 'var(--ds-status-error, #F87171)'
+  const connectionLabel = CONNECTION_LABEL[connectionStatus.state] ?? '未知状态'
+
+  /** 工作区入口：桌面切换显隐；移动端打开工作区全屏视图 */
+  const handleWorkspace = () => {
+    if (isMobile && onOpenWorkspaceView) {
+      onOpenWorkspaceView()
+    } else {
+      toggleWorkspace()
+    }
   }
 
   return (
     <header
       className="border-border relative grid shrink-0 grid-cols-[1fr_auto_1fr] items-center border-b px-2 md:px-3"
       style={{
-        height: 'var(--layout-titlebar-height, 32px)',
+        height: 'var(--layout-titlebar-height, 44px)',
         background: 'var(--ds-bg-panel, hsl(var(--card)))',
       }}
       data-testid="app-header"
     >
-      {/* 左侧 · 侧栏折叠 + 品牌 */}
-      <div className="flex min-w-0 shrink-0 items-center gap-1.5 md:gap-2.5">
+      {/* 左侧 · 侧栏入口 ☰（桌面折叠/展开，移动打开抽屉） */}
+      <div className="flex min-w-0 shrink-0 items-center gap-2">
         <button
           type="button"
           onClick={toggleSidebar}
-          className="text-muted-foreground hover:bg-accent hover:text-foreground flex h-7 w-7 items-center justify-center rounded-md transition-colors"
+          className="text-muted-foreground hover:bg-accent hover:text-foreground touch-expand flex h-7 w-7 items-center justify-center rounded-md transition-colors"
           title={sidebarCollapsed ? '展开侧边栏' : '隐藏侧边栏'}
           aria-label={sidebarCollapsed ? '展开侧边栏' : '隐藏侧边栏'}
           data-testid="titlebar-toggle-sidebar"
         >
-          {sidebarCollapsed ? (
-            <PanelLeftOpen className="h-4 w-4" />
-          ) : (
-            <PanelLeftClose className="h-4 w-4" />
-          )}
+          <Menu className="h-4 w-4" />
         </button>
-
-        <div
-          className="h-[22px] w-[22px] shrink-0 rounded-md"
-          style={{
-            background: 'linear-gradient(135deg, var(--ds-accent-primary, #22D3EE) 0%, var(--ds-accent-ai, #A78BFA) 100%)',
-          }}
-          aria-hidden
-        />
-        <h1 className="text-foreground text-[13px] font-semibold leading-none">AgentOS</h1>
       </div>
 
-      {/* 中部 · 会话标题 */}
-      <div className="pointer-events-none flex items-center justify-center">
-        <span className="text-muted-foreground max-w-[280px] truncate text-[12px]">
-          {sessionTitle}
+      {/* 中部 · 连接状态小圆点 + 上下文标识（灵汐 · 会话标题） */}
+      <div className="flex min-w-0 items-center justify-center gap-1.5">
+        <span
+          className="inline-block h-2 w-2 shrink-0 rounded-full"
+          style={{ backgroundColor: dotColor }}
+          title={connectionLabel}
+          aria-label={connectionLabel}
+          data-testid="titlebar-connection-dot"
+        />
+        <span
+          className="text-foreground min-w-0 truncate text-[13px] font-medium"
+          data-testid="titlebar-title"
+        >
+          {title}
         </span>
       </div>
 
-      {/* 右侧 · 功能入口（设置/监控）+ 工作区窗口控制 + 可选 extra */}
-      <div className="flex shrink-0 items-center justify-end gap-2 md:gap-3">
+      {/* 右侧 · 高频动作：extra + 工作区 */}
+      <div className="flex shrink-0 items-center justify-end gap-1 md:gap-2">
         {extraRight}
 
-        <nav className="hidden items-center gap-0.5 md:flex" data-testid="titlebar-nav">
-          {navItems.map((item) => (
-            <button
-              key={item.path}
-              type="button"
-              onClick={() => openNav(item.path)}
-              className={cn(
-                'rounded px-1.5 py-0.5 text-[11px] transition-colors',
-                location.pathname === item.path ||
-                  location.pathname.startsWith(item.path + '/')
-                  ? 'text-[var(--ds-accent-primary,#22D3EE)]'
-                  : 'text-muted-foreground hover:text-foreground',
-              )}
-              title={`打开「${item.label}」面板`}
-            >
-              {item.label}
-            </button>
-          ))}
-        </nav>
-
-        {/* 工作区窗口控制（工作区在右侧，故控制按钮置右） */}
-        <div className="flex items-center gap-0.5">
-          {/* 工作区显隐（对齐 VS Code View: Toggle Panel） */}
-          <button
-            type="button"
-            onClick={toggleWorkspace}
-            className="text-muted-foreground hover:bg-accent hover:text-foreground flex h-7 w-7 items-center justify-center rounded-md transition-colors"
-            title={workspaceCollapsed ? '显示工作区' : '隐藏工作区'}
-            aria-label={workspaceCollapsed ? '显示工作区' : '隐藏工作区'}
-            data-testid="titlebar-toggle-workspace"
-          >
-            <PanelRightIcon className="h-4 w-4" />
-          </button>
-
-          {/* 工作区最大化（保留顶栏/状态栏，仅折叠侧栏+聊天）。工作区隐藏时禁用 */}
-          <button
-            type="button"
-            onClick={toggleWorkspaceMaximize}
-            disabled={workspaceCollapsed}
-            className="text-muted-foreground hover:bg-accent hover:text-foreground flex h-7 w-7 items-center justify-center rounded-md transition-colors disabled:pointer-events-none disabled:opacity-40"
-            title={workspaceMaximized ? '还原最大化' : '最大化'}
-            aria-label={workspaceMaximized ? '还原最大化' : '最大化'}
-            data-testid="titlebar-toggle-maximize"
-          >
-            {workspaceMaximized ? (
-              <RestoreWindowIcon className="h-4 w-4" />
-            ) : (
-              <MaximizeWindowIcon className="h-4 w-4" />
-            )}
-          </button>
-        </div>
-
-        {/* 移动端：设置/监控收进菜单 */}
-        <div className="md:hidden">
-          <DropdownMenu>
-            <DropdownMenuTrigger asChild>
-              <button
-                type="button"
-                className="text-muted-foreground hover:text-foreground transition-colors"
-                aria-label="导航菜单"
-              >
-                <Menu className="h-4 w-4" />
-              </button>
-            </DropdownMenuTrigger>
-            <DropdownMenuContent align="end" className="w-40">
-              {navItems.map((item) => (
-                <DropdownMenuItem key={item.path} onClick={() => openNav(item.path)}>
-                  {item.label}
-                </DropdownMenuItem>
-              ))}
-            </DropdownMenuContent>
-          </DropdownMenu>
-        </div>
+        <button
+          type="button"
+          onClick={handleWorkspace}
+          className="text-muted-foreground hover:bg-accent hover:text-foreground touch-expand flex h-7 w-7 items-center justify-center rounded-md transition-colors"
+          title={isMobile ? '打开工作区' : workspaceCollapsed ? '显示工作区' : '隐藏工作区'}
+          aria-label="工作区"
+          data-testid="titlebar-workspace"
+        >
+          <PanelRightIcon className="h-4 w-4" />
+        </button>
       </div>
     </header>
   )

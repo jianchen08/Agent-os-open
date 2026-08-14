@@ -10,9 +10,9 @@ use std::sync::Mutex;
 /// 记录型 mock dispatcher，捕获每次调用。
 #[derive(Default)]
 struct MockDispatcher {
-    user_inputs: Arc<Mutex<Vec<(String, String, String)>>>, // (thread_id, user_id, content)
-    interactions: Arc<Mutex<Vec<(String, String)>>>,        // (thread_id, request_id)
-    stops: Arc<Mutex<Vec<String>>>,                          // thread_id
+    user_inputs: Arc<Mutex<Vec<(String, String, String, String)>>>, // (thread_id, user_id, content, thinking_strength)
+    interactions: Arc<Mutex<Vec<(String, String)>>>,                // (thread_id, request_id)
+    stops: Arc<Mutex<Vec<String>>>,                                 // thread_id
 }
 
 #[async_trait]
@@ -23,11 +23,14 @@ impl PipelineDispatcher for MockDispatcher {
         user_id: &str,
         content: &str,
         _pipeline_id: &str,
+        thinking_strength: &str,
     ) -> Result<(), String> {
-        self.user_inputs
-            .lock()
-            .unwrap()
-            .push((thread_id.into(), user_id.into(), content.into()));
+        self.user_inputs.lock().unwrap().push((
+            thread_id.into(),
+            user_id.into(),
+            content.into(),
+            thinking_strength.into(),
+        ));
         Ok(())
     }
     async fn dispatch_interaction_response(
@@ -69,6 +72,36 @@ async fn user_input_routed_to_dispatcher() {
     assert_eq!(inputs[0].0, "thread-1");
     assert_eq!(inputs[0].1, "user-A");
     assert_eq!(inputs[0].2, "hello");
+    assert_eq!(inputs[0].3, "", "未指定强度 → 空串");
+}
+
+#[tokio::test]
+async fn user_input_carries_thinking_strength() {
+    let (router, dispatcher) = router();
+    let msg = serde_json::json!({
+        "type": "user_input",
+        "thread_id": "thread-1",
+        "content": "hi",
+        "thinking_strength": "high",
+    });
+    let outcome = router.route(&msg, "user-A").await;
+    assert_eq!(outcome, RouteOutcome::Handled);
+    let inputs = dispatcher.user_inputs.lock().unwrap();
+    assert_eq!(inputs[0].3, "high", "顶层 thinking_strength 应透传");
+}
+
+#[tokio::test]
+async fn user_input_carries_thinking_strength_via_data_envelope() {
+    let (router, dispatcher) = router();
+    let msg = serde_json::json!({
+        "type": "user_input",
+        "thread_id": "thread-1",
+        "data": {"content": "hi", "thinking_strength": "low"},
+    });
+    let outcome = router.route(&msg, "user-A").await;
+    assert_eq!(outcome, RouteOutcome::Handled);
+    let inputs = dispatcher.user_inputs.lock().unwrap();
+    assert_eq!(inputs[0].3, "low", "data 信封 thinking_strength 应透传");
 }
 
 #[tokio::test]
@@ -146,7 +179,14 @@ async fn dispatcher_failure_returns_error() {
     struct FailingDispatcher;
     #[async_trait]
     impl PipelineDispatcher for FailingDispatcher {
-        async fn dispatch_user_input(&self, _: &str, _: &str, _: &str, _: &str) -> Result<(), String> {
+        async fn dispatch_user_input(
+            &self,
+            _: &str,
+            _: &str,
+            _: &str,
+            _: &str,
+            _: &str,
+        ) -> Result<(), String> {
             Err("boom".into())
         }
         async fn dispatch_interaction_response(&self, _: &str, _: &str, _: &serde_json::Value) -> Result<(), String> {

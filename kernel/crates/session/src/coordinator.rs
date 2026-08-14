@@ -97,46 +97,13 @@ impl SessionCoordinator {
         self.bus.register_thread(thread_id, user_id);
     }
 
-    /// emit widget 事件到 thread scope，并记录到重放缓冲。
-    pub async fn emit_widget(
-        &self,
-        thread_id: &str,
-        widget_id: &str,
-        event: &str,
-        data: Value,
-        plugin_id: &str,
-    ) -> usize {
-        let (delivered, seq) = self
-            .bus
-            .emit_with_sequence(
-                widget_id,
-                event,
-                data.clone(),
-                EmitScope::Thread(thread_id.to_string()),
-                plugin_id,
-            )
-            .await;
-        // 监控 M2：记录 push / dropped（delivered=0 但 emit 已分配 seq → 被限流丢弃）
-        if delivered > 0 {
-            self.metrics.inc_event_bus_push(1);
-        } else {
-            self.metrics.inc_event_bus_dropped();
-        }
-        // 记录到重放缓冲（widget 族）
-        let payload = serde_json::to_string(&widget_envelope(widget_id, event, data, seq, plugin_id))
-            .unwrap_or_default();
-        self.replay
-            .record(thread_id, ReplayEvent::widget(seq, widget_id, payload))
-            .await;
-        delivered
-    }
-
     /// 发送任意类型事件到 thread scope（绕过 widget_envelope 硬编码）。
     ///
-    /// 与 emit_widget/emit_stream 的区别：那两个方法最终都走 bus.emit_inner，
-    /// 而 build_envelope 硬编码 type="widget_event"（见 event_bus.rs:236），
-    /// 发不出 new_message / stream_start / stream_end 等聊天协议事件。
-    /// 本方法直接构建 payload + registry.send_to_thread，支持任意 type。
+    /// 与已删除的 emit_widget/emit_stream 的区别：那两个方法最终都走 bus.emit_inner，
+    /// 而 build_envelope 硬编码 type="widget_event"（见 event_bus.rs），发不出
+    /// new_message / stream_start / stream_end 等聊天协议事件。本方法直接构建
+    /// payload + registry.send_to_thread，支持任意 type，是**唯一的 thread 单播出口**
+    /// （widget 单播/流式 chunk/聊天事件全走它；全局广播走 broadcast_widget）。
     ///
     /// 用于聊天流式闭环：dispatch_user_input 把引擎结果包成 new_message 推回前端。
     /// 不经限流（聊天事件低频，单次推送）。
@@ -166,34 +133,10 @@ impl SessionCoordinator {
         delivered
     }
 
-    /// emit 流式 chunk 到 thread scope，并记录到重放缓冲。
-    pub async fn emit_stream(&self, thread_id: &str, chunk: &str) -> usize {
-        let (delivered, seq) = self
-            .bus
-            .emit_with_sequence(
-                "",
-                "stream_chunk",
-                json!({"chunk": chunk}),
-                EmitScope::Thread(thread_id.to_string()),
-                "stream",
-            )
-            .await;
-        if delivered > 0 {
-            self.metrics.inc_event_bus_push(1);
-        } else {
-            self.metrics.inc_event_bus_dropped();
-        }
-        let payload = serde_json::to_string(&stream_envelope(chunk, seq)).unwrap_or_default();
-        self.replay
-            .record(thread_id, ReplayEvent::new(seq, payload))
-            .await;
-        delivered
-    }
-
     /// 广播一个 widget 事件到**全部活跃连接**（EmitScope::Broadcast，
     /// 监控设计 §六 形态2 statusBar 实时数字）。
     ///
-    /// 与 emit_widget（thread 单播）的区别：本方法广播给所有连接，
+    /// 与 emit_event（thread 单播）的区别：本方法广播给所有连接，
     /// 且不进 thread 级重放缓冲（广播事件不重放）。用于状态栏类全局推送。
     pub async fn broadcast_widget(
         &self,
@@ -306,31 +249,6 @@ impl Default for SessionCoordinator {
     fn default() -> Self {
         Self::new()
     }
-}
-
-/// widget 信封（与 FrontendEventBus::build_envelope 对齐，供重放记录用）。
-fn widget_envelope(
-    widget_id: &str,
-    event: &str,
-    data: Value,
-    sequence: u64,
-    plugin_id: &str,
-) -> Value {
-    json!({
-        "type": "widget_event",
-        "data": {"widget_id": widget_id, "event": event, "data": data},
-        "metadata": {"source_plugin": plugin_id},
-        "sequence": sequence,
-    })
-}
-
-/// 流式 chunk 信封。
-fn stream_envelope(chunk: &str, sequence: u64) -> Value {
-    json!({
-        "type": "stream_chunk",
-        "data": {"chunk": chunk},
-        "sequence": sequence,
-    })
 }
 
 #[allow(dead_code)]

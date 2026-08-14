@@ -4,6 +4,49 @@
 
 export type ThinkingModeType = 'parameter_switch' | 'model_switch'
 
+/** 思考强度档位：关闭 / 低 / 中 / 高 */
+export type ThinkingStrength = 'off' | 'low' | 'medium' | 'high'
+
+/** 默认思考强度（中） */
+export const DEFAULT_THINKING_STRENGTH: ThinkingStrength = 'medium'
+
+/** 强度 → 是否启用思考（off 关闭，其余启用） */
+export const STRENGTH_TO_ENABLE: Record<ThinkingStrength, boolean> = {
+  off: false,
+  low: true,
+  medium: true,
+  high: true,
+}
+
+/**
+ * 强度 → 思考参数映射（随消息传给后端 llm_core 路由；模型级配置
+ * thinking_strength_params 优先，本表为兜底基线）。
+ * 决策：只覆盖思考相关参数（reasoning_effort）；
+ * temperature/max_tokens 等采样参数不随强度变化（始终用模型 default_params）。
+ * off → 不覆盖（保持 llm.yaml default_params 现状）。
+ */
+export const STRENGTH_TO_PARAMS: Record<
+  ThinkingStrength,
+  { reasoning_effort?: string } | null
+> = {
+  off: null,
+  low: { reasoning_effort: 'low' },
+  medium: { reasoning_effort: 'medium' },
+  high: { reasoning_effort: 'high' },
+}
+
+/** 强度选择项（UI 菜单） */
+export const THINKING_STRENGTH_OPTIONS: {
+  value: ThinkingStrength
+  label: string
+  description: string
+}[] = [
+  { value: 'off', label: '关闭', description: '普通模式，不启用思考' },
+  { value: 'low', label: '低', description: '轻量思考，响应更快' },
+  { value: 'medium', label: '中', description: '标准思考（默认）' },
+  { value: 'high', label: '高', description: '深度思考，耗时更长' },
+]
+
 export interface ThinkingModeState {
   /** 是否启用思考模式 */
   enabled: boolean

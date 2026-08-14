@@ -125,6 +125,13 @@
   border-radius: 4px;
 }
 
+/* 文本输入控件（textarea）：焦点反馈由 caret 承担，不叠加全局 focus-visible 外框。
+   注意 Tailwind 的 focus:outline-none 位于 utilities layer，无法压过本文件
+   unlayered 规则（unlayered > layered），必须在此显式关闭。 */
+textarea:focus-visible {
+  outline: none;
+}
+
 *:focus:not(:focus-visible) {
   outline: none;
 }

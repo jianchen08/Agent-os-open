@@ -12,24 +12,15 @@
  */
 
 import { render, screen } from '@testing-library/react'
-import { MemoryRouter } from 'react-router-dom'
 import React from 'react'
+import { MemoryRouter } from 'react-router-dom'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
-import type { PageDeclaration } from '@/services/schema/ContributionRegistry'
+import { Sidebar } from '@/components/layout/Sidebar'
+import { PluginStatusItems } from '@/components/layout/StatusItems'
 import { contributionRegistry } from '@/services/schema/ContributionRegistry'
 import { widgetRegistry } from '@/services/schema/WidgetRegistry'
 import { PageRenderer, renderPageContent, schemaToFields } from '../PageRenderer'
-import { Sidebar } from '@/components/layout/Sidebar'
-import { StatusBar } from '@/components/layout/StatusBar'
-
-// 成本统计在 StatusBar 挂载即拉取，mock 掉避免测试环境网络请求
-vi.mock('@/services/api/costControl', () => ({
-  getBudgetStatus: vi.fn().mockResolvedValue({}),
-  getUsageStatistics: vi.fn().mockResolvedValue({ global_stats: null }),
-  getCostConfig: vi.fn().mockResolvedValue({}),
-  getCostReport: vi.fn().mockResolvedValue({}),
-  resetBudget: vi.fn(),
-}))
+import type { PageDeclaration } from '@/services/schema/ContributionRegistry'
 
 function makePage(overrides: Partial<PageDeclaration> = {}): PageDeclaration {
   return { type: 'pages', id: 'p1', space: 'workspace', ...overrides } as PageDeclaration
@@ -214,19 +205,19 @@ describe('Sidebar 迁移 — 消费 getPagesBySpace("workspace") + slot=activity
   })
 })
 
-describe('StatusBar 迁移 — 消费 getPagesBySpace("dock") + slot=status', () => {
+describe('StatusBar 迁移 — 插件状态项消费 getPagesBySpace("dock") + slot=status（挂载侧栏底部）', () => {
   beforeEach(() => {
     contributionRegistry.clear()
     widgetRegistry.clear()
     vi.restoreAllMocks()
   })
 
-  it('dock/status 页渲染为状态栏条目；slot=item 页不渲染', () => {
+  it('dock/status 页渲染为状态条目；slot=item 页不渲染', () => {
     const spy = vi.spyOn(contributionRegistry, 'getPagesBySpace')
     registerPage({ id: 'st1', title: '我的状态', space: 'dock', slot: 'status' })
     registerPage({ id: 'it1', title: '普通条目', space: 'dock', slot: 'item' })
 
-    render(<StatusBar />)
+    render(<PluginStatusItems />)
 
     expect(screen.getByText('我的状态')).toBeInTheDocument()
     expect(screen.queryByText('普通条目')).not.toBeInTheDocument()
@@ -236,7 +227,7 @@ describe('StatusBar 迁移 — 消费 getPagesBySpace("dock") + slot=status', ()
   it('when 条件不满足的 status 页隐藏', () => {
     registerPage({ id: 'st2', title: '条件状态', space: 'dock', slot: 'status', when: 'no.such.key' })
 
-    render(<StatusBar />)
+    render(<PluginStatusItems />)
 
     expect(screen.queryByText('条件状态')).not.toBeInTheDocument()
   })

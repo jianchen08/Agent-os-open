@@ -7,13 +7,12 @@ trigger_review → review_agent 子管道（B 路径）链路。
 review_agent 子管道，由 LLM 做深度复盘。报告回写通过 store_report 内部方法
 （由 memory 侧 / event-bus 完成事件触发）。
 
-真实完成语义（F-REVIEW-2）：
-- 内核 start_run 是 fire-and-forget（只 create_run 返回 run_id，无完成事件/wait）。
-- 本插件在 trigger_review 后记 running+run_id；get_report 时经
-  pipeline-executor.get_run_status 能力（内核 capability_router 新增，查 runs 表）
-  惰性轮询子管道真实状态：run 完成才落 status=completed，失败落 failed，
-  进行中保持 running——不再"启动即 completed"。
-- 报告正文（lessons 等）仍由 store_report 回写（事件接线为后续 P1，见审计）。
+0.2 收尾（旧引擎 AdrEngineImpl 已清理）：
+- 内核 pipeline-executor.start_run 占位能力随旧引擎移除——它只 create_run
+  返回 run_id，无 execute_step/end_run 驱动，子管道从不真正执行。
+- trigger_review 当前直接走本地降级（_local_degrade_report）；review_agent
+  深度复盘待接入 chat.send_message → PipelineExecutor 路径（与任务执行同构）。
+- get_report 的 get_run_status 惰性轮询能力保留（未来子管道接入后复用）。
 
 agent_id/source 命名沿用 src/memory/maintenance/service.py 约定：
 - agent_id = "review_agent"（config/agents/system/review_agent.yaml）
@@ -118,77 +117,6 @@ async def store_report(review_id: str, report: dict[str, Any]) -> None:
     )
 
 
-async def _trigger_review_agent_subpipeline(
-    review_id: str,
-    task_id: str,
-    summary: str,
-    artifacts: list[str],
-    metrics: dict[str, Any],
-) -> str | None:
-    """通过 pipeline-executor 能力起 review_agent 子管道。
-
-    能力未注入（独立进程/降级运行）时返回 None，由调用方降级处理。
-
-    Returns:
-        子管道 run_id，能力不可用时返回 None。
-    """
-    try:
-        pipeline = plugin.get_capability("pipeline-executor")
-    except KeyError:
-        logger.warning(
-            "[Review] pipeline-executor 能力未注入，无法起 review_agent 子管道，降级本地分析"
-        )
-        return None
-
-    # start_run 参数格式参考 kernel/crates/api/src/capability_router.rs 的
-    # ("pipeline-executor","start_run") handler——它把整个 params 透传给
-    # engine.start_run(&params)。params 即 run 配置。
-    config = {
-        "agent_id": _REVIEW_AGENT_ID,
-        "input": {
-            "task_id": task_id,
-            "summary": summary,
-            "artifacts": artifacts,
-            "metrics": metrics,
-            "review_id": review_id,
-        },
-        # 触发来源溯源（沿用现有 tags 命名，不自创字段）
-        "tags": {
-            "agent_id": _REVIEW_AGENT_ID,
-            "source": _REVIEW_SOURCE,
-            "parent_review_id": review_id,
-        },
-    }
-
-    try:
-        result = await pipeline.call("start_run", config)
-    except Exception as exc:  # noqa: BLE001 — 内核/管道层错误统一降级，不崩 trigger
-        logger.warning(
-            "[Review] 起 review_agent 子管道失败 (review_id=%s): %s", review_id, exc
-        )
-        return None
-
-    run_id: str | None = None
-    if isinstance(result, dict):
-        run_id = result.get("run_id")
-    if not run_id:
-        # review_agent 在 config/agents/ 不存在时 start_run 会失败——这是配置问题，
-        # 不崩 trigger，日志告警即可。result 通常已含错误信息。
-        logger.warning(
-            "[Review] start_run 未返回 run_id (review_id=%s, result=%s)",
-            review_id,
-            result,
-        )
-        return None
-
-    logger.info(
-        "[Review] review_agent 子管道已启动 review_id=%s run_id=%s",
-        review_id,
-        run_id,
-    )
-    return run_id
-
-
 def _local_degrade_report(
     review_id: str,
     task_id: str,
@@ -246,51 +174,25 @@ async def trigger_review(
 ) -> dict[str, Any]:
     """Trigger a post-task review via review_agent sub-pipeline (B path).
 
-    通过 pipeline-executor 能力起 review_agent 子管道做 LLM 深度复盘。
-    能力未注入时降级为本地简单分析，绝不抛错。
+    0.2 收尾：旧引擎 start_run 占位能力已移除（子管道从不真正执行），
+    trigger 直接本地降级产出基础报告；review_agent 深度复盘待接入
+    chat.send_message → PipelineExecutor 路径（见模块头注释）。
 
     Returns:
         review_id + status:
-        - running: 子管道已起，报告待回写（get_report 轮询）
-        - completed (local_degrade): 能力不可用，已本地降级产出基础报告
+        - completed (local_degrade): 本地降级产出基础报告
     """
     review_id = f"review_{uuid.uuid4().hex[:8]}"
     artifacts = artifacts or []
     metrics = metrics or {}
 
-    run_id = await _trigger_review_agent_subpipeline(
-        review_id, task_id, summary, artifacts, metrics
-    )
-
-    if run_id is None:
-        # 降级：能力不可用，本地生成基础报告
-        report = _local_degrade_report(review_id, task_id, summary, artifacts, metrics)
-        _reports[review_id] = report
-        return {
-            "review_id": review_id,
-            "status": "completed",
-            "mode": "local_degrade",
-            "lessons_count": len(report["lessons"]),
-        }
-
-    # 子管道已起：先登记 pending 记录，报告待 store_report 回写
-    _run_ids[review_id] = run_id
-    _reports[review_id] = {
-        "review_id": review_id,
-        "task_id": task_id,
-        "summary": summary,
-        "artifacts": artifacts,
-        "metrics": metrics,
-        "status": "running",
-        "run_id": run_id,
-        "created_at": time.time(),
-    }
-
+    report = _local_degrade_report(review_id, task_id, summary, artifacts, metrics)
+    _reports[review_id] = report
     return {
         "review_id": review_id,
-        "status": "running",
-        "run_id": run_id,
-        "message": "review_agent 子管道已启动，通过 review.get_report 查询报告",
+        "status": "completed",
+        "mode": "local_degrade",
+        "lessons_count": len(report["lessons"]),
     }
 
 

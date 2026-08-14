@@ -3,8 +3,8 @@
  *
  * 支持拖拽调整宽度、折叠展开
  */
-import { ChevronLeft, ChevronRight } from '@/assets/icons'
 import { useState, useRef, useCallback } from 'react'
+import { ChevronLeft, ChevronRight } from '@/assets/icons'
 import { cn } from '@/lib/utils'
 
 export interface SplitPaneProps {

@@ -1,17 +1,28 @@
 /** 聊天容器组件 整合消息列表、Agent Tab 导航和输入区域的完整聊天界面。 */
 
-import { Loader2 } from '@/assets/icons'
 import { useCallback, useEffect, useMemo, useState } from 'react'
+import { Loader2 } from '@/assets/icons'
 import { useModelContextInfo } from '@/hooks/useModelContextInfo'
-import { getDefaults, type LLMDefaults } from '@/services/api/config'
-import { resolveModelDisplayName, type ModelTiers } from '@/utils/modelName'
+import { getDefaults, getLLMConfig, type LLMDefaults } from '@/services/api/config'
+import { switchThinkingMode } from '@/services/api/thinkingMode'
 import { useAgentStore } from '@/stores/agentStore'
 import { useAgentTabStore } from '@/stores/agentTabStore'
 import { useContextUsageStore } from '@/stores/contextUsageStore'
 import { usePipelineMessageStore } from '@/stores/pipelineMessageStore'
 import { useSessionStore } from '@/stores/sessionStore'
+import {
+  useThinkingModeStore,
+  useExplicitThinkingStrength,
+} from '@/stores/thinkingModeStore'
 import { useUIStore } from '@/stores/uiStore'
 import { useVotingStore } from '@/stores/votingStore'
+import {
+  DEFAULT_THINKING_STRENGTH,
+  STRENGTH_TO_ENABLE,
+  type ThinkingStrength,
+} from '@/types/thinkingMode'
+import { resolveModelDisplayName, type ModelTiers } from '@/utils/modelName'
+import { findModelParams, mapParamsToStrength } from '@/utils/thinkingStrength'
 import { AgentTabBar } from './AgentTabBar'
 import { ChatInput } from './ChatInput'
 import { MessageList } from './MessageList'
@@ -86,8 +97,6 @@ export const ChatContainer = ({
   onStopGenerate,
   currentTokenUsage: _externalTokenUsage = 0,
   maxTokens: _externalMaxTokens = 0,
-  thinkingMode,
-  toggleThinkingMode,
   className = '',
   hasMoreMessages = false,
   isLoadingMoreMessages = false,
@@ -129,6 +138,23 @@ export const ChatContainer = ({
       })
       .catch(() => {
         // 静默：模型名解析失败不影响主流程（回退显示原始值）
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [])
+
+  /** 完整 LLM 配置（models: model_id → ModelConfig，含 default_params）：
+   *  供「新会话/切管道标签时，从管道实际参数反向映射思考强度」。失败静默。 */
+  const [llmConfig, setLlmConfig] = useState<Awaited<ReturnType<typeof getLLMConfig>> | null>(null)
+  useEffect(() => {
+    let cancelled = false
+    getLLMConfig()
+      .then((data) => {
+        if (!cancelled) setLlmConfig(data)
+      })
+      .catch(() => {
+        // 静默：参数映射失败回退默认强度，不影响主流程
       })
     return () => {
       cancelled = true
@@ -207,6 +233,39 @@ export const ChatContainer = ({
   const currentPipelineId = currentTabPipelineId || ''
   const pipelineUsage = useContextUsageStore((s) => s.usageByPipeline[currentPipelineId])
   const effectiveTokenUsage = pipelineUsage?.promptTokens ?? 0
+
+  /** 思考强度：显式设置（标签记忆）优先；未设置时从当前管道模型参数反向映射
+   *  （新会话/切标签自动应用管道实际档位），映射不出回退默认。 */
+  const explicitThinkingStrength = useExplicitThinkingStrength()
+  const pipelineParams = useMemo(
+    () => findModelParams(llmConfig?.models, effectiveModelName),
+    [llmConfig, effectiveModelName],
+  )
+  const activeThinkingStrength: ThinkingStrength =
+    explicitThinkingStrength ??
+    mapParamsToStrength(pipelineParams) ??
+    DEFAULT_THINKING_STRENGTH
+  const setThinkingStrength = useThinkingModeStore((s) => s.setStrength)
+
+  /**
+   * 切换思考强度（覆盖当前标签对应管道的思考模式）：
+   * 1. 本地标签级记忆（localStorage，随路由联动）
+   * 2. 调后端 switchThinkingMode 覆盖管道思考模式（参谋接口，失败静默——
+   *    本地记忆不受阻，实际参数由消息级 thinking_strength 路由）
+   */
+  const handleThinkingStrengthChange = useCallback(
+    (strength: ThinkingStrength) => {
+      const tabId = useAgentTabStore.getState().activeTabId
+      if (tabId) setThinkingStrength(tabId, strength)
+      const model = useAgentTabStore.getState().activeTabId ? effectiveModelName : ''
+      if (model && model !== 'unknown') {
+        switchThinkingMode(model, STRENGTH_TO_ENABLE[strength]).catch(() => {
+          // 后端覆盖失败不影响本地强度记忆（发送时仍按强度路由参数）
+        })
+      }
+    },
+    [setThinkingStrength, effectiveModelName],
+  )
 
   /** 最终的 maxTokens 和 currentTokenUsage */
   const effectiveMaxTokens = modelContextWindow
@@ -350,8 +409,10 @@ export const ChatContainer = ({
           maxTokens={effectiveMaxTokens}
           completionTokens={pipelineUsage?.completionTokens ?? 0}
           totalTokens={pipelineUsage?.totalTokens ?? 0}
-          thinkingMode={thinkingMode}
-          toggleThinkingMode={toggleThinkingMode}
+          cachedTokens={pipelineUsage?.cachedTokens ?? 0}
+          hitRatio={pipelineUsage?.hitRatio ?? 0}
+          thinkingStrength={activeThinkingStrength}
+          onThinkingStrengthChange={handleThinkingStrengthChange}
         />
       </div>
     </div>

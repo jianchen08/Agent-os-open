@@ -9,7 +9,7 @@
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
-use agentos_core::traits::AdrEngine;
+use agentos_core::traits::StorageBackend;
 use agentos_session::auth::HandshakeAuth;
 use agentos_session::router::{InboundRouter, PipelineDispatcher, RouteOutcome};
 use agentos_session::{EventSink, SessionCoordinator};
@@ -239,6 +239,7 @@ impl PipelineDispatcher for EngineDispatcher {
         user_id: &str,
         content: &str,
         pipeline_id: &str,
+        thinking_strength: &str,
     ) -> Result<(), String> {
         use agentos_core::types::TenantContext;
         // tenant_id 必须用真正的租户 ID（与 HTTP 路径 resolve_request_tenant_id 同源），
@@ -287,27 +288,86 @@ impl PipelineDispatcher for EngineDispatcher {
 
         // 在租户上下文内执行管道。message_id 注入 state 供 sidecar 流式 chunk 携带
         // （sidecar on_chunk notify 时带上，前端据此把 chunk 路由到占位气泡）。
-        let response =
-            agentos_tenant::scope(tenant, crate::server::process_via_engine(&state, &content, "agentos", &[], &route_id, thread_id, &message_id, user_id))
-                .await;
+        let outcome = agentos_tenant::scope(
+            tenant,
+            crate::server::process_via_engine(
+                &state,
+                &content,
+                "agentos",
+                &[],
+                &route_id,
+                thread_id,
+                &message_id,
+                user_id,
+                thinking_strength,
+            ),
+        )
+        .await;
 
-        // 引擎完成后发 new_message 收尾（填充完整内容 + 标记 completed）。
-        // 对照 0.1 bridge.emit_finish：完整内容由最终事件推送，chunk 只负责逐字显示。
-        if let Some(session) = state.session.as_ref() {
-            let delivered = session
-                .emit_event(thread_id, "new_message", serde_json::json!({
+        let Some(session) = state.session.as_ref() else {
+            tracing::warn!(thread = thread_id, "session 未启用，引擎结果无法推回前端");
+            return Ok(());
+        };
+
+        // 失败路径：引擎执行失败（executor.run Err）→ stream_error 收尾，
+        // 前端立即解除生成态（不再依赖 90s 强制收尾兜底）。
+        if outcome.failed {
+            let _ = session
+                .emit_event(thread_id, "stream_error", serde_json::json!({
                     "pipeline_id": route_id,
                     "message_id": message_id,
                     "_threadId": thread_id,
-                    "content": response,
-                    "parts": [{ "type": "text", "text": response }],
-                    "sequence": 1,
+                    "error": outcome.content,
                 }))
                 .await;
-            info!(thread = thread_id, delivered = delivered, "new_message 推送完成");
-        } else {
-            tracing::warn!(thread = thread_id, "session 未启用，引擎结果无法推回前端");
+            return Ok(());
         }
+
+        // 成功路径：new_message 携带本轮最终 assistant 消息的完整持久形态
+        // （content/reasoningContent/toolCalls/sequence），前端与 DB 加载共用
+        // 同一个 mapper 生成 parts——流式事件与历史加载冷热同构（不再硬编码
+        // [{type:"text"}] 形态）。无 assistant 产出（如仅工具调用未落文本）时
+        // 回退纯 content 形态。
+        let seq = outcome
+            .final_assistant
+            .as_ref()
+            .and_then(|m| m.get("seq").and_then(|v| v.as_u64()))
+            .unwrap_or(1);
+        let fa = outcome.final_assistant.clone().unwrap_or_else(|| {
+            serde_json::json!({"role": "assistant", "content": outcome.content})
+        });
+        let delivered = session
+            .emit_event(thread_id, "new_message", serde_json::json!({
+                "pipeline_id": route_id,
+                "message_id": message_id,
+                "_threadId": thread_id,
+                "sequence": seq,
+                "content": outcome.content,
+                "message": {
+                    "id": message_id,
+                    "role": fa["role"],
+                    "content": outcome.content,
+                    "sequence": seq,
+                    "reasoningContent": fa.get("reasoning_content"),
+                    "toolCalls": fa.get("tool_calls").unwrap_or(&serde_json::Value::Null),
+                    "timestamp": chrono::Utc::now().to_rfc3339(),
+                    "status": "completed",
+                    "thread_id": thread_id,
+                },
+            }))
+            .await;
+        info!(thread = thread_id, delivered = delivered, "new_message 推送完成");
+
+        // stream_end 收尾：成功路径的终止信号（携带 final_sequence 同步占位 seq），
+        // 前端 handleStreamEnd 据此终止流式状态并做最终合并。
+        let _ = session
+            .emit_event(thread_id, "stream_end", serde_json::json!({
+                "pipeline_id": route_id,
+                "message_id": message_id,
+                "_threadId": thread_id,
+                "final_sequence": seq,
+            }))
+            .await;
         Ok(())
     }
 
@@ -349,16 +409,20 @@ impl PipelineDispatcher for EngineDispatcher {
             match db.find_suspended_run_by_request_id(request_id) {
                 Ok(Some(run)) => {
                     let meta = run.metadata.clone().unwrap_or_default();
-                    let handle = agentos_core::types::SuspendHandle {
-                        run_id: run.run_id.clone(),
-                        branch_id: meta.get("suspend_branch_id").and_then(|v| v.as_str()).unwrap_or(&run.current_branch).to_string(),
-                        seq: meta.get("suspend_seq").and_then(|v| v.as_u64()).unwrap_or(run.current_seq as u64) as u32,
-                    };
-                    if let Some(engine) = self.state.engine.as_ref() {
-                        match engine.resume(&handle, agentos_core::types::WakeEvent::Manual).await {
-                            Ok(()) => info!(run_id = %run.run_id, request_id = request_id, "interaction_response 已唤醒 suspended run"),
-                            Err(e) => warn!(request_id = request_id, error = %e, "suspended run resume 失败"),
-                        }
+                    // 0.2 收尾：旧引擎已清理，resume 即 runs 表状态簿记
+                    // （新引擎执行流由 state.suspended 插件机制控制，此处恢复
+                    // 状态供查询/复盘语义，与 capability pipeline-executor.resume 一致）。
+                    match db
+                        .update_run_status(
+                            &run.run_id,
+                            agentos_core::types::RunStatus::Running,
+                            None,
+                            None,
+                        )
+                        .await
+                    {
+                        Ok(()) => info!(run_id = %run.run_id, request_id = request_id, "interaction_response 已唤醒 suspended run"),
+                        Err(e) => warn!(request_id = request_id, error = %e, "suspended run resume 失败"),
                     }
                 }
                 Ok(None) => tracing::debug!(request_id = request_id, "无 suspended run（LLM 直调路径），仅 interaction.respond"),

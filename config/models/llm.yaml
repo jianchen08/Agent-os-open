@@ -30,6 +30,17 @@ models:
     model_name: deepseek-v4-flash
     provider: deepseek
     reasoning_model: true
+    # 思考强度 → 思考参数路由规则（模型级，不同模型可不同；未配置档位回退
+    # llm_core 内置默认表）。只覆盖思考相关参数（reasoning_effort / thinking）；
+    # temperature/max_tokens 等采样参数不随强度变化（始终用 default_params）。
+    # DeepSeek 经 openai 中转时 reasoning_effort 自动进 extra_body 透传。
+    thinking_strength_params:
+      low:
+        reasoning_effort: low
+      medium:
+        reasoning_effort: medium
+      high:
+        reasoning_effort: max
   deepseek-v4-pro:
     api_base: https://api.deepseek.com/v1
     api_key: ${DEEPSEEK_API_KEY}

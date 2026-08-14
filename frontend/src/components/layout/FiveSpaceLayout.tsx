@@ -1,32 +1,32 @@
 /** Five Space Layout Component Implements the five-rendering-space layout: */
 
-import { Minimize2, FolderOpen } from '@/assets/icons'
+import Splitter from 'antd/es/splitter'
 import React, { useCallback, useMemo, useState, useEffect, useRef } from 'react'
+import { useNavigate } from 'react-router-dom'
+import { Minimize2, FolderOpen } from '@/assets/icons'
+import { HtmlPreviewWidget } from '@/components/schema/widgets/HtmlPreviewWidget'
 import { getEditorForFile } from '@/config/fileEditors'
 // 按需引入 antd Splitter 子模块，避免加载 antd 全量入口（26+ 组件 → 全部 icons →
 // 触发 847 项 @ant-design/icons-svg/lib/asn/* 全量预构建，首屏 JS 与启动预构建时间双高）
-import Splitter from 'antd/es/splitter'
+import { ROUTES } from '@/constants/routes'
 import apiClient from '@/services/api/client'
 import { safeLoadLayout } from '@/services/layout/resolver'
-import type { LayoutConfig } from '@/types/layout'
-import { widgetRegistry } from '@/services/schema/WidgetRegistry'
 import { navigateToPipeline } from '@/services/pipelineNavigator'
+import { widgetRegistry } from '@/services/schema/WidgetRegistry'
+import { ensureDefaultWorkspacePanels } from '@/services/workspacePanelOpener'
 import { getFileEditorData, registerFileEditor, removeFileEditorData, updateFileEditorData, emitFileChange } from '@/stores/fileEditorRegistry'
 import { useLayoutModeStore } from '@/stores/layoutModeStore'
 import { useSessionStore } from '@/stores/sessionStore'
 import { useThemeStore } from '@/stores/themeStore'
-
 import { useUIStore } from '@/stores/uiStore'
-import { ensureDefaultWorkspacePanels } from '@/services/workspacePanelOpener'
+import { AlertBanner, useLayoutAlerts, type AlertBannerItem } from './AlertBanner'
 import { AppHeader } from './AppHeader'
 import { FloatingWindowManager, renderFloatingWindowContent } from './FloatingWindowManager'
 import { FullscreenOverlay } from './FullscreenOverlay'
-import { StatusBar } from './StatusBar'
 import { WorkspaceHost } from './WorkspaceHost'
 import { CodeEditor } from '../workspace/CodeEditor'
 import { FilePreview } from '../workspace/FilePreview'
-import { HtmlPreviewWidget } from '@/components/schema/widgets/HtmlPreviewWidget'
-import type { ViewportBreakpoint, FloatingWindowInstance, WorkspaceTab } from '@/types/layout'
+import type { LayoutConfig, FloatingWindowInstance, WorkspaceTab  } from '@/types/layout'
 import type { AgentTab } from '@/types/task'
 
 /** Props for the FiveSpaceLayout component */
@@ -50,15 +50,10 @@ export interface FiveSpaceLayoutProps {
   onLogout?: () => void
 }
 
-/** Get viewport breakpoint from width */
-function getBreakpoint(
-  width: number,
-  breakpoints: { mobile: number; tablet: number; desktop: number; widescreen: number },
-): ViewportBreakpoint {
-  if (width < breakpoints.mobile) return 'mobile'
-  if (width < breakpoints.tablet) return 'tablet'
-  if (width < breakpoints.desktop) return 'desktop'
-  return 'widescreen'
+/** 移动端/桌面两档断点分界（平板=触屏桌面，不单独设计形态）。
+ * 值取布局配置 mobile 断点（默认 768px，可被主题覆盖）。 */
+function isMobileViewport(width: number, mobileBreakpoint: number): boolean {
+  return width < mobileBreakpoint
 }
 
 /** Five Space Layout Component Arranges the UI into five rendering spaces: */
@@ -90,6 +85,7 @@ export function FiveSpaceLayout({
   const [viewportWidth, setViewportWidth] = useState(
     typeof window !== 'undefined' ? window.innerWidth : 1280,
   )
+  const navigate = useNavigate()
 
   // Store state
   const floatingWindows = useLayoutModeStore((s) => s.floatingWindows)
@@ -185,12 +181,8 @@ export function FiveSpaceLayout({
     frozenLayoutRef.current = safeLoadLayout(themeLayoutRaw)
   }
   const layoutConfig = frozenLayoutRef.current
-  const breakpoint = useMemo(
-    () => getBreakpoint(viewportWidth, layoutConfig.breakpoints),
-    [viewportWidth, layoutConfig.breakpoints],
-  )
-
-  const isMobile = breakpoint === 'mobile'
+  // 两档断点：< mobile（768px）移动形态；≥ mobile 桌面/平板（触屏桌面）同一形态
+  const isMobile = isMobileViewport(viewportWidth, layoutConfig.breakpoints.mobile)
 
   const mobileInitRef = useRef(false)
 
@@ -211,6 +203,24 @@ export function FiveSpaceLayout({
   }, [isMobile])
 
   const toggleWorkspaceFullscreen = useCallback(() => setWorkspaceFullscreen((prev) => !prev), [])
+
+  /** 打开移动端工作区全屏视图（顶栏 ⋯ → 工作区） */
+  const handleOpenWorkspaceView = useCallback(() => {
+    setWorkspaceCollapsed(false)
+    setMobileWorkspaceOpen(true)
+  }, [setWorkspaceCollapsed])
+
+  /** 异常提示条点击：连接 → 打开监控面板；审批 → 审批弹窗全局可见，无需跳转 */
+  const handleAlertAction = useCallback(
+    (item: AlertBannerItem) => {
+      if (item.kind === 'connection') {
+        const opened = openWorkspacePanelByPath(ROUTES.MONITORING)
+        if (!opened) navigate(ROUTES.MONITORING)
+      }
+    },
+    [navigate],
+  )
+  const layoutAlerts = useLayoutAlerts()
 
   /** 处理任务树节点点击（对话按钮）。 通过全局管道导航服务（pipelineNavigator）实现跨会话跳转： */
   const handleTaskNodeClick = useCallback(async (node: Record<string, unknown>) => {
@@ -496,8 +506,10 @@ export function FiveSpaceLayout({
         </div>
       ) : workspaceMaximized ? (
         <>
-          {/* 最大化模式：保留顶栏 + 状态栏，仅折叠侧栏与聊天面板 */}
+          {/* 最大化模式：保留顶栏（工作区 100% 占满） */}
           <AppHeader
+            isMobile={isMobile}
+            onOpenWorkspaceView={handleOpenWorkspaceView}
             extraRight={
               pendingInteractions.length > 0 ? (
                 <div className="flex items-center gap-1 rounded-md bg-status-running/10 px-2 py-0.5 text-xs text-status-running">
@@ -507,6 +519,7 @@ export function FiveSpaceLayout({
               ) : undefined
             }
           />
+          <AlertBanner alerts={layoutAlerts} onAction={handleAlertAction} />
           <div className="min-h-0 flex-1 overflow-hidden">
             <WorkspaceHost
               tabs={workspaceTabs}
@@ -523,6 +536,8 @@ export function FiveSpaceLayout({
         <>
           {/* ---- Top Navigation Bar (shared AppHeader) ---- */}
           <AppHeader
+            isMobile={isMobile}
+            onOpenWorkspaceView={handleOpenWorkspaceView}
             extraRight={
               pendingInteractions.length > 0 ? (
                 <div className="flex items-center gap-1 rounded-md bg-status-running/10 px-2 py-0.5 text-xs text-status-running">
@@ -533,6 +548,9 @@ export function FiveSpaceLayout({
             }
           />
 
+          {/* ---- 异常浮现提示条（无常驻底栏；连接断开/审批待处理时出现） ---- */}
+          <AlertBanner alerts={layoutAlerts} onAction={handleAlertAction} />
+
           {/* ---- Main Content Area ---- */}
           <div className="relative flex min-h-0 flex-1 overflow-hidden">
             {/* 移动端侧边栏：抽屉，隐藏时完全不占位 */}
@@ -540,13 +558,15 @@ export function FiveSpaceLayout({
               <div
                 className="fixed inset-0 z-40"
                 style={{ top: 'var(--layout-titlebar-height, 32px)' }}
+                data-testid="mobile-sidebar-drawer"
               >
                 <div
                   className="absolute inset-0 bg-[var(--overlay-bg)]"
                   onClick={() => useUIStore.getState().setSidebarCollapsed(true)}
+                  data-testid="mobile-sidebar-backdrop"
                 />
                 <aside
-                  className="absolute bottom-0 left-0 top-0 z-50 flex w-[78%] max-w-[320px] flex-col border-r shadow-xl"
+                  className="absolute bottom-0 left-0 top-0 z-50 flex w-[78%] max-w-[320px] flex-col border-r shadow-xl safe-area-pb"
                   style={{ background: 'var(--ds-bg-panel, hsl(var(--card)))' }}
                 >
                   {sidebarContent}
@@ -671,14 +691,15 @@ export function FiveSpaceLayout({
             )}
           </div>
 
-          {/* ---- StatusBar 22px（替代 DockBar，设计稿 49:331） ---- */}
-          <StatusBar />
+          {/* ---- StatusBar 已移除（task_layout_responsive 任务 2：无常驻底栏，
+               状态信息并入各区——连接小圆点在顶栏、成本在输入框、插件项在侧栏底部） ---- */}
 
           {/* 移动端工作区全屏覆盖层 */}
           {isMobile && mobileWorkspaceOpen && (
             <div
               className="fixed inset-0 z-30 flex flex-col bg-background"
               style={{ top: 'var(--layout-titlebar-height, 32px)' }}
+              data-testid="mobile-workspace-overlay"
             >
               {/* 工作区顶部操作栏 */}
               <div className="border-border flex h-9 shrink-0 items-center justify-between border-b px-2">
@@ -686,14 +707,15 @@ export function FiveSpaceLayout({
                 <button
                   onClick={() => setMobileWorkspaceOpen(false)}
                   className="hover:bg-accent text-muted-foreground flex items-center gap-1 rounded-md px-2 py-1 text-xs transition-colors"
-                  title="关闭工作区"
+                  title="返回对话"
+                  data-testid="mobile-workspace-back"
                 >
                   <Minimize2 className="h-3.5 w-3.5" />
-                  <span>关闭</span>
+                  <span>返回对话</span>
                 </button>
               </div>
               {/* 工作区内容 */}
-              <div className="min-h-0 flex-1 overflow-hidden">
+              <div className="safe-area-pb min-h-0 flex-1 overflow-hidden">
                 <WorkspaceHost
                   tabs={workspaceTabs}
                   onTabChange={setActiveTab}
@@ -725,6 +747,7 @@ export function FiveSpaceLayout({
           onUpdateWindow={updateFloatingWindow}
           onCloseWindow={closeFloatingWindow}
           renderContent={renderFloatingContent}
+          isMobile={isMobile}
         />
       </div>
 

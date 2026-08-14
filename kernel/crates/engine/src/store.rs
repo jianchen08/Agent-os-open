@@ -12,8 +12,9 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use agentos_core::traits::{MessageQueryOpts, SessionListFilter, StorageBackend};
 use agentos_core::types::{
-    BlobRecord, Branch, ExecutionRecord, MemoryRecord, Message, MessageRecord, PipelineRunSummary,
-    PatchType, RunRecord, RunStatus, SessionRecord, StorageError, TraceEntry, UserRecord,
+    BlobRecord, Branch, ExecutionRecord, MemoryRecord, Message, MessageRecord, PipelineRunInfo,
+    PipelineRunSummary, PatchType, RunRecord, RunStatus, SessionRecord, StorageError, TraceEntry,
+    UserRecord,
 };
 use parking_lot::Mutex;
 use rusqlite::Connection;
@@ -606,7 +607,65 @@ impl SqliteStore {
         Ok(None)
     }
 
-
+    /// 管道运行快照列表（统一管道管理查询，`GET /api/v1/pipelines/runs`）。
+    ///
+    /// runs × message_slots × pipeline_sessions × pipeline_run_summaries 四表联结：
+    /// run → pipeline 映射经 message_slots.run_id（op-based 落槽时写入），pipeline → 会话
+    /// 经 pipeline_sessions，消耗账本经 pipeline_run_summaries（sidecar 汇总，可为空）。
+    /// 无消息槽的 run（旧引擎 start_run 占位/孤儿）被过滤——只呈现真实执行的管道。
+    /// 按 started_at（created_at）倒序；`status` 传 None 返回全部状态；limit 由调用方给。
+    pub fn list_pipelines_inner(
+        &self,
+        tenant_id: &str,
+        status: Option<&str>,
+        limit: u32,
+    ) -> Result<Vec<PipelineRunInfo>, StorageError> {
+        let conn = self.conn.lock();
+        let mut stmt = conn.prepare(
+            "SELECT r.run_id, r.status, r.created_at, r.ended_at, \
+                    ms.pipeline_id, ps.thread_id, \
+                    s.total_tokens, s.total_seconds \
+             FROM runs r \
+             LEFT JOIN (SELECT run_id, MAX(pipeline_id) AS pipeline_id \
+                        FROM message_slots \
+                        WHERE pipeline_id IS NOT NULL \
+                        GROUP BY run_id) ms ON ms.run_id = r.run_id \
+             LEFT JOIN pipeline_sessions ps \
+                    ON ps.pipeline_id = ms.pipeline_id AND ps.tenant_id = ?1 \
+             LEFT JOIN pipeline_run_summaries s ON s.run_id = r.run_id \
+             WHERE r.tenant_id = ?1 \
+               AND ms.pipeline_id IS NOT NULL \
+               AND (?2 IS NULL OR r.status = ?2) \
+             ORDER BY r.created_at DESC \
+             LIMIT ?3",
+        )?;
+        let rows = stmt.query_map(rusqlite::params![tenant_id, status, limit], |row| {
+            let status_str: String = row.get(1)?;
+            let tokens_str: Option<String> = row.get(6)?;
+            Ok(PipelineRunInfo {
+                run_id: row.get(0)?,
+                status: match status_str.as_str() {
+                    "suspended" => RunStatus::Suspended,
+                    "completed" => RunStatus::Completed,
+                    "failed" => RunStatus::Failed,
+                    _ => RunStatus::Running,
+                },
+                started_at: row.get(2)?,
+                ended_at: row.get(3)?,
+                pipeline_id: row.get(4)?,
+                thread_id: row.get(5)?,
+                total_tokens: tokens_str
+                    .filter(|s| !s.is_empty())
+                    .and_then(|s| serde_json::from_str(&s).ok()),
+                total_seconds: row.get(7)?,
+            })
+        })?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row?);
+        }
+        Ok(out)
+    }
 
     /// 存储 BLOB 数据（内容寻址去重）。
     pub fn store_blob(&self, data: &[u8], mime_type: &str) -> Result<String, StorageError> {
@@ -671,8 +730,13 @@ impl SqliteStore {
                             let run_id = op
                                 .get("_run_id")
                                 .and_then(|v| v.as_str());
+                            // A1：op 上的内部字段 `_message_id`（内核注入的流式 message_id）
+                            // 优先作 record_id；缺省回退内容指纹。
+                            let preferred_id = op
+                                .get("_message_id")
+                                .and_then(|v| v.as_str());
                             self.write_slot_to_table_locked(
-                                &conn, tenant_id, &pid, seq as i64, msg, run_id, &now,
+                                &conn, tenant_id, &pid, seq as i64, msg, preferred_id, run_id, &now,
                             )?;
                         }
                         _ => {
@@ -706,7 +770,7 @@ impl SqliteStore {
                          WHERE tenant_id=?2 AND pipeline_id=?3 AND seq >= ?4",
                         rusqlite::params![BIG - 1, tenant_id, pid, BIG],
                     )?;
-                    self.write_slot_to_table_locked(&conn, tenant_id, &pid, at, msg, None, &now)?;
+                    self.write_slot_to_table_locked(&conn, tenant_id, &pid, at, msg, None, None, &now)?;
                 }
                 _ => {
                     // 未知 op 忽略（前向兼容）。
@@ -728,6 +792,7 @@ impl SqliteStore {
         pid: &str,
         seq: i64,
         msg: &serde_json::Value,
+        preferred_id: Option<&str>,
         run_id: Option<&str>,
         now: &str,
     ) -> Result<(), StorageError> {
@@ -735,7 +800,12 @@ impl SqliteStore {
         // 序列化进 blob——消息是不可变值，全文唯一存储在 blobs。
         let msg_json = serde_json::to_string(msg).unwrap_or_default();
         let (blob_id, _) = self.ensure_blob_locked(conn, &msg_json)?;
-        let message_id = agentos_core::ids::compute_message_id(msg);
+        // A1：内核注入的流式 message_id 优先（流式占位与 DB record_id 对齐），
+        // 缺省回退内容指纹。preferred_id 只影响 record_id，blob 全文不含它。
+        let message_id = preferred_id
+            .filter(|s| !s.is_empty())
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| agentos_core::ids::compute_message_id(msg));
         conn.execute(
             "INSERT INTO message_slots
                (tenant_id, pipeline_id, seq, message_id, blob_id, run_id, created_at)
@@ -2832,6 +2902,88 @@ mod tests {
         assert_eq!(run.status, RunStatus::Running);
         assert_eq!(run.current_branch, "main");
         assert_eq!(run.current_seq, 0);
+    }
+
+    /// 统一管道管理查询：runs × message_slots × pipeline_sessions × summaries 四表联结。
+    ///
+    /// 覆盖：真实执行管道（带消息槽+会话映射+汇总账本）可查出且字段齐全；
+    /// 无消息槽的占位 run（旧引擎 start_run 产物）被过滤；status 过滤生效；
+    /// 完成后 ended_at 可见。
+    #[tokio::test]
+    async fn test_list_pipelines_join() {
+        let store = SqliteStore::open_memory().unwrap();
+        store.create_run("run_1", "hash_1", "default").unwrap();
+        store
+            .link_pipeline_session("pipe_1", "thread_1", "default")
+            .await
+            .unwrap();
+        store
+            .apply_messages_ops_to_table(
+                "pipe_1",
+                "default",
+                &[json!({
+                    "op": "set",
+                    "seq": 0,
+                    "_run_id": "run_1",
+                    "msg": {"role": "user", "content": "hi"},
+                })],
+            )
+            .unwrap();
+        store
+            .save_run_summary(&PipelineRunSummary {
+                run_id: "run_1".to_string(),
+                thread_id: "thread_1".to_string(),
+                total_iterations: 1,
+                total_tokens: json!({"input": 10, "output": 5, "total": 15}),
+                total_seconds: 3.5,
+                total_records: 1,
+                status: "running".to_string(),
+                final_output: String::new(),
+                error: None,
+                review_status: "pending".to_string(),
+                reviewed_at: None,
+                created_at: String::new(),
+            })
+            .await
+            .unwrap();
+
+        // 占位 run：无消息槽 → 不应出现在管道快照
+        store.create_run("run_orphan", "hash_2", "default").unwrap();
+
+        let rows = store.list_pipelines_inner("default", None, 100).unwrap();
+        assert_eq!(rows.len(), 1, "仅真实执行管道应出现，实际: {rows:?}");
+        let r = &rows[0];
+        assert_eq!(r.run_id, "run_1");
+        assert_eq!(r.pipeline_id.as_deref(), Some("pipe_1"));
+        assert_eq!(r.thread_id.as_deref(), Some("thread_1"));
+        assert_eq!(r.status, RunStatus::Running);
+        assert!(r.ended_at.is_none());
+        let total = r
+            .total_tokens
+            .as_ref()
+            .and_then(|v| v.get("total"))
+            .and_then(|v| v.as_u64());
+        assert_eq!(total, Some(15));
+        assert_eq!(r.total_seconds, Some(3.5));
+
+        // status 过滤：completed 尚无为空；完成后可查到且 ended_at 就位
+        let completed = store
+            .list_pipelines_inner("default", Some("completed"), 100)
+            .unwrap();
+        assert!(completed.is_empty());
+        store
+            .update_run_status("run_1", RunStatus::Completed, None, None)
+            .await
+            .unwrap();
+        let completed = store
+            .list_pipelines_inner("default", Some("completed"), 100)
+            .unwrap();
+        assert_eq!(completed.len(), 1);
+        assert!(completed[0].ended_at.is_some());
+
+        // 多租户隔离
+        let other = store.list_pipelines_inner("other_tenant", None, 100).unwrap();
+        assert!(other.is_empty());
     }
 
     #[tokio::test]

@@ -1,5 +1,6 @@
 /** 统一的聊天输入组件 支持三种模式： */
 
+import { useCallback, useEffect, useRef, useState, type KeyboardEvent } from 'react'
 import {
   AlertCircle,
   File as FileIcon,
@@ -12,9 +13,6 @@ import {
   Square,
   X,
 } from '@/assets/icons'
-import { ChatInputActions } from './ChatInputActions'
-import { ContextUsageIndicator } from './ContextUsageIndicator'
-import { useCallback, useEffect, useRef, useState, type KeyboardEvent } from 'react'
 import { Button } from '@/components/ui/button'
 import { useModelCapabilities } from '@/hooks/useModelCapabilities'
 import { useVoiceInput } from '@/hooks/useVoiceInput'
@@ -22,10 +20,16 @@ import { cn } from '@/lib/utils'
 import { uploadFile, validateFile } from '@/services/api/files'
 import { ErrorSeverity, ErrorType, reportError } from '@/services/errorReporting'
 import { useChatInputStore } from '@/stores/chatInputStore'
+import {
+  DEFAULT_THINKING_STRENGTH,
+  STRENGTH_TO_ENABLE,
+  type ThinkingStrength,
+} from '@/types/thinkingMode'
+import { ChatInputActions } from './ChatInputActions'
+import { ContextUsageIndicator } from './ContextUsageIndicator'
 import { ThinkingModeToggle } from './ThinkingModeToggle'
 import { VoiceInputButton } from './VoiceInputButton'
 import type { Attachment, ChatInputProps, PendingFile, SendMessageParams } from './types'
-import type { ThinkingModeState } from '@/types/thinkingMode'
 
 /** 格式化文件大小 */
 const formatFileSize = (bytes: number): string => {
@@ -123,9 +127,11 @@ export const ChatInput = ({
   maxTokens = 0,
   completionTokens: _completionTokens = 0,
   totalTokens: _totalTokens = 0,
+  cachedTokens = 0,
+  hitRatio = 0,
   enableThinkingMode = false,
-  thinkingMode,
-  toggleThinkingMode,
+  thinkingStrength: _externalThinkingStrength,
+  onThinkingStrengthChange,
   className = '',
   draftKey,
 }: ChatInputProps) => {
@@ -152,17 +158,14 @@ export const ChatInput = ({
   /** 语音实时识别：临时文字在 text 中的起始偏移量，-1 表示无未确认临时文字 */
   const interimVoiceStartRef = useRef(-1)
 
-  /** 思考模式状态：优先使用外部传入的值 */
-  const currentThinkingMode: ThinkingModeState = thinkingMode || {
-    enabled: false,
-    currentModel: modelName || '',
-    switching: false,
-  }
-  const currentToggleThinkingMode =
-    toggleThinkingMode ||
-    (async (_enabled: boolean) => {
-      // 思考模式切换由外部控制
-    })
+  /** 思考强度：优先使用外部传入值（随标签路由自动变化），默认中档 */
+  const currentThinkingStrength: ThinkingStrength = _externalThinkingStrength ?? DEFAULT_THINKING_STRENGTH
+  const handleStrengthChange = useCallback(
+    (strength: ThinkingStrength) => {
+      onThinkingStrengthChange?.(strength)
+    },
+    [onThinkingStrengthChange],
+  )
 
   /** 必须声明在使用它的回调（handleVoiceInterim / handleVoiceTranscriptionComplete 等）之前，
    *  否则在依赖数组中访问会触发 TDZ（Cannot access ... before initialization）。
@@ -472,7 +475,8 @@ export const ChatInput = ({
     const params: SendMessageParams = {
       content: trimmedText,
       attachments: allAttachments.length > 0 ? allAttachments : undefined,
-      enableThinking: currentThinkingMode?.enabled ?? false,
+      enableThinking: STRENGTH_TO_ENABLE[currentThinkingStrength],
+      thinkingStrength: currentThinkingStrength,
     }
 
     onSendMessage(params)
@@ -492,7 +496,7 @@ export const ChatInput = ({
       textareaRef.current.style.height = 'auto'
     }
     setIsExpanded(false)
-  }, [text, attachments, pendingFiles, disabled, isExecuting, onSendMessage, currentThinkingMode])
+  }, [text, attachments, pendingFiles, disabled, isExecuting, onSendMessage, currentThinkingStrength])
 
   /** 处理文件输入变化 */
   const handleFileInputChange = useCallback(
@@ -657,16 +661,12 @@ export const ChatInput = ({
         </div>
       )}
 
-      {/* 输入框容器 · Deep Space v2: r-xl 12, border-active 青色 */}
+      {/* 输入框容器：输入区域与下方图标工具栏一体，不显示分割边框 */}
       <div
         className={cn(
-          'relative rounded-xl border transition-shadow duration-200',
+          'relative rounded-xl transition-shadow duration-200',
           'bg-[var(--hover-overlay)]',
         )}
-        style={{
-          borderColor: 'var(--ds-border-active, rgba(34, 211, 238, 0.45))',
-          boxShadow: '0 0 0 1px transparent',
-        }}
       >
         {/* 展开/收起编辑器按钮：固定在输入框右上角，悬浮于文本之上 */}
         <Button
@@ -752,15 +752,16 @@ export const ChatInput = ({
           )}
         />
 
-        {/* 底部工具栏 */}
-        <div className="flex items-center justify-between gap-2 px-3 pb-3">
-          <div className="flex items-center gap-1.5">
+        {/* 底部工具栏：左组可收缩（min-w-0 flex-1），发送按钮 shrink-0——
+            大字体主题/插件动作多时左组先截断收缩，发送按钮不被挤出容器 */}
+        <div className="flex min-w-0 items-center justify-between gap-2 px-3 pb-3">
+          <div className="flex min-w-0 flex-1 items-center gap-1.5">
             {/* 附件按钮 */}
             {enableFileUpload && !isCompactMode && inputCapabilities.showAttachmentButton && (
               <Button
                 variant="ghost"
                 size="icon"
-                className="text-muted-foreground hover:text-foreground hover:bg-muted h-11 w-11 rounded-lg sm:h-8 sm:w-8"
+                className="text-muted-foreground hover:text-foreground hover:bg-muted h-11 w-11 shrink-0 rounded-lg sm:h-8 sm:w-8"
                 onClick={triggerFileSelect}
                 disabled={disabled || isExecuting}
                 title="添加附件"
@@ -796,58 +797,64 @@ export const ChatInput = ({
               />
             )}
 
-            {/* 思考模式切换按钮 */}
+            {/* 思考强度选择器（四档：关闭/低/中/高；随消息路由后端模型参数） */}
             {enableThinkingMode && !isCompactMode && (
               <ThinkingModeToggle
                 currentModel={modelName || 'unknown'}
-                thinkingMode={currentThinkingMode}
-                onToggle={currentToggleThinkingMode}
+                strength={currentThinkingStrength}
+                onStrengthChange={handleStrengthChange}
                 disabled={disabled || isExecuting || !modelName || modelName === 'unknown'}
               />
             )}
 
-            {/* 模型名 + 上下文进度条（与原输入栏一致） */}
+            {/* 模型名 + 上下文圈型进度（可收缩：空间不足时先截断模型名/数字；
+                总量/缓存命中详情在悬停 title） */}
             <ContextUsageIndicator
               modelName={modelName}
               currentTokenUsage={currentTokenUsage}
               maxTokens={maxTokens}
+              totalTokens={_totalTokens || undefined}
+              cachedTokens={cachedTokens || undefined}
+              hitRatio={hitRatio || undefined}
             />
 
             {/* 插件声明的聊天输入动作（chat 空间 input-action 声明驱动） */}
             <ChatInputActions />
           </div>
 
-          {/* 发送/停止按钮 */}
-          {isExecuting && onStopGenerate ? (
-            <Button
-              variant="destructive"
-              size="icon"
-              className="h-11 w-11 rounded-lg sm:h-8 sm:w-8"
-              onClick={onStopGenerate}
-              title="停止生成"
-              aria-label="停止生成"
-            >
-              <Square className="h-icon-md w-icon-md" />
-            </Button>
-          ) : (
-            <Button
-              variant="default"
-              size="icon"
-              className={cn(
-                'h-11 w-11 rounded-lg transition-all duration-200 sm:h-8 sm:w-8',
-                canSend
-                  ? 'bg-primary hover:bg-primary/90 shadow-sm'
-                  : 'bg-muted text-muted-foreground',
-              )}
-              onClick={handleSend}
-              disabled={!canSend}
-              title="发送消息"
-              aria-label="发送消息"
-              data-testid="chat-send-button"
-            >
-              <Send className="h-icon-md w-icon-md" />
-            </Button>
-          )}
+          {/* 发送/停止按钮（shrink-0：不被压缩，也不被左组挤出） */}
+          <div className="flex shrink-0 items-center">
+            {isExecuting && onStopGenerate ? (
+              <Button
+                variant="destructive"
+                size="icon"
+                className="h-11 w-11 rounded-lg sm:h-8 sm:w-8"
+                onClick={onStopGenerate}
+                title="停止生成"
+                aria-label="停止生成"
+              >
+                <Square className="h-icon-md w-icon-md" />
+              </Button>
+            ) : (
+              <Button
+                variant="default"
+                size="icon"
+                className={cn(
+                  'h-11 w-11 rounded-lg transition-all duration-200 sm:h-8 sm:w-8',
+                  canSend
+                    ? 'bg-primary hover:bg-primary/90 shadow-sm'
+                    : 'bg-muted text-muted-foreground',
+                )}
+                onClick={handleSend}
+                disabled={!canSend}
+                title="发送消息"
+                aria-label="发送消息"
+                data-testid="chat-send-button"
+              >
+                <Send className="h-icon-md w-icon-md" />
+              </Button>
+            )}
+          </div>
         </div>
       </div>
 

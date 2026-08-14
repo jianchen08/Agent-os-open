@@ -11,38 +11,11 @@
 use std::sync::Arc;
 
 use agentos_api::capability_router::KernelCapabilityRouter;
-use agentos_core::traits::AdrEngine;
-use agentos_core::types::{CompositeStep, EngineError, StepResult, SuspendHandle, WakeEvent};
 use agentos_mcp::CapabilityRouter;
-use serde_json::{json, Value};
-
-/// 不做任何事的 AdrEngine stub（tenant-context 查询不依赖引擎行为）。
-struct StubEngine;
-
-#[async_trait::async_trait]
-impl AdrEngine for StubEngine {
-    async fn start_run(&self, _c: &Value) -> Result<String, EngineError> {
-        Ok("stub".to_string())
-    }
-    async fn execute_step(&self, _: &str, _: &CompositeStep) -> Result<StepResult, EngineError> {
-        unimplemented!()
-    }
-    async fn suspend(&self, _: &str) -> Result<SuspendHandle, EngineError> {
-        unimplemented!()
-    }
-    async fn resume(&self, _: &SuspendHandle, _: WakeEvent) -> Result<(), EngineError> {
-        unimplemented!()
-    }
-    async fn rollback(&self, _: &str, _: u32) -> Result<String, EngineError> {
-        unimplemented!()
-    }
-    async fn end_run(&self, _: &str) -> Result<(), EngineError> {
-        Ok(())
-    }
-}
+use serde_json::json;
 
 fn router() -> KernelCapabilityRouter {
-    KernelCapabilityRouter::new(Arc::new(StubEngine))
+    KernelCapabilityRouter::new()
 }
 
 #[tokio::test]

@@ -1,7 +1,7 @@
 /** 工作区面板 管理工作区 Tab 切换，支持从悬浮窗拖拽吸附 */
 
-import { FullscreenIcon, FullscreenExitIcon } from '@/assets/icons'
 import React from 'react'
+import { FullscreenIcon, FullscreenExitIcon } from '@/assets/icons'
 import { useNonPassiveWheel } from '@/hooks/useNonPassiveWheel'
 import type { WorkspaceTab } from '@/types/layout'
 

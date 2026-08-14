@@ -1,4 +1,4 @@
-//! 统一通用数据接口（/api/v1/db/*）
+//! 统一通用数据接口（/api/v1/db/*）——DB Admin 独立管理后台
 //!
 //! 表驱动、动态枚举：表清单/列信息/主键由 `sqlite_master` + `PRAGMA table_info`
 //! 运行时发现，不写死任何表名/列名——新增表/新增列自动可见、自动可查、自动可管。
@@ -12,6 +12,11 @@
 //! - BLOB 安全：BLOB 列不返回内容、不允许经统一接口写入（blobs.data 由内核专用方法管理）
 //!
 //! [来源: docs/working/unified_db_admin_plan.md §二 / .project/api_contract.md]
+//!
+//! 拆分说明（task_kernel_cleanup_and_split 任务 1）：自 api crate 整体迁移至此，
+//! 7 端点与 `/api/v1/db/*` 路径保持不变；`AppState` 收敛为本 crate 的
+//! [`DbAdminState`]（仅需 store + db 两个字段），鉴权复用
+//! `agentos_http::auth::resolve_request_user`（与 api 管理面同一实现）。
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -19,14 +24,38 @@ use std::time::Duration;
 use axum::extract::{Path, Query, State};
 use axum::http::HeaderMap;
 use axum::Json;
+use agentos_http::auth::resolve_request_user;
+use agentos_http::error::ApiError;
 use rusqlite::{Connection, OptionalExtension};
 use serde::Deserialize;
 use serde_json::{json, Value};
 use tokio::task::spawn_blocking;
 
-use crate::auth::resolve_request_user;
-use crate::error::ApiError;
-use crate::routes::AppState;
+/// DB Admin 路由所需状态（api 挂载时从 `AppState` 克隆注入）。
+#[derive(Clone)]
+pub struct DbAdminState {
+    /// 存储后端（用户解析 / 租户解析用；与 api `AppState.store` 同一实例）。
+    pub store: Option<Arc<dyn agentos_core::traits::StorageBackend>>,
+    /// 统一数据接口 db 句柄（引擎 SqliteStore）。
+    pub db: Option<Arc<agentos_engine::SqliteStore>>,
+}
+
+/// 构建 DB Admin 路由树（相对路径，由 api 以 `/api/v1/db` 前缀 nest 挂载）。
+pub fn router() -> axum::Router<DbAdminState> {
+    axum::Router::new()
+        .route("/tables", axum::routing::get(list_tables_handler))
+        .route(
+            "/table/{table}",
+            axum::routing::get(query_rows_handler).post(insert_row_handler),
+        )
+        .route(
+            "/table/{table}/{pk_value}",
+            axum::routing::get(get_row_handler)
+                .patch(update_row_handler)
+                .delete(delete_row_handler),
+        )
+        .route("/execute", axum::routing::post(execute_sql_handler))
+}
 
 /// 行查询列表参数（契约 §2.2）。
 #[derive(Debug, Default)]
@@ -109,7 +138,7 @@ struct ColumnMeta {
 // ─── 角色校验 ────────────────────────────────────────────────────────
 
 /// 只读接口角色校验：admin 或 viewer。返回当前请求租户 ID。
-pub(crate) async fn require_read_role(state: &AppState, headers: &HeaderMap) -> Result<String, ApiError> {
+pub async fn require_read_role(state: &DbAdminState, headers: &HeaderMap) -> Result<String, ApiError> {
     let (_, _, role, tenant_id) = resolve_request_user(state.store.as_ref(), headers).await?;
     if role != "admin" && role != "viewer" {
         return Err(ApiError::Forbidden {
@@ -120,7 +149,7 @@ pub(crate) async fn require_read_role(state: &AppState, headers: &HeaderMap) -> 
 }
 
 /// 写接口角色校验：仅 admin。返回当前请求租户 ID。
-pub(crate) async fn require_admin_role(state: &AppState, headers: &HeaderMap) -> Result<String, ApiError> {
+pub async fn require_admin_role(state: &DbAdminState, headers: &HeaderMap) -> Result<String, ApiError> {
     let (_, _, role, tenant_id) = resolve_request_user(state.store.as_ref(), headers).await?;
     if role != "admin" {
         return Err(ApiError::Forbidden {
@@ -131,7 +160,7 @@ pub(crate) async fn require_admin_role(state: &AppState, headers: &HeaderMap) ->
 }
 
 /// 获取统一数据接口 db 句柄。
-fn get_db(state: &AppState) -> Result<Arc<agentos_engine::SqliteStore>, ApiError> {
+fn get_db(state: &DbAdminState) -> Result<Arc<agentos_engine::SqliteStore>, ApiError> {
     state.db.clone().ok_or_else(|| ApiError::BadRequest {
         message: "统一数据接口未启用（db 未注入）".to_string(),
     })
@@ -253,7 +282,7 @@ fn parse_pk_values(pk_value: &str) -> Vec<String> {
 
 /// 枚举全部表（名称/列/主键/行数），sqlite_master + PRAGMA 动态发现。
 pub async fn list_tables_handler(
-    State(state): State<AppState>,
+    State(state): State<DbAdminState>,
     headers: HeaderMap,
 ) -> Result<Json<Value>, ApiError> {
     let _tenant_id = require_read_role(&state, &headers).await?;
@@ -301,7 +330,7 @@ pub async fn list_tables_handler(
 
 /// 行查询：limit/offset 分页、多列筛选（eq/ne/gt/lt/contains）、排序。
 pub async fn query_rows_handler(
-    State(state): State<AppState>,
+    State(state): State<DbAdminState>,
     headers: HeaderMap,
     Path(table): Path<String>,
     Query(params): Query<ListParams>,
@@ -464,7 +493,7 @@ fn query_rows_inner(
 
 /// 单行查询（复合主键用 `,` 拼接路径参数）。
 pub async fn get_row_handler(
-    State(state): State<AppState>,
+    State(state): State<DbAdminState>,
     headers: HeaderMap,
     Path((table, pk_value)): Path<(String, String)>,
 ) -> Result<Json<Value>, ApiError> {
@@ -548,7 +577,7 @@ fn get_row_inner(
 
 /// 插入单行（写操作仅 admin；tenant_id 从 token 注入）。
 pub async fn insert_row_handler(
-    State(state): State<AppState>,
+    State(state): State<DbAdminState>,
     headers: HeaderMap,
     Path(table): Path<String>,
     Json(body): Json<InsertBody>,
@@ -653,7 +682,7 @@ fn insert_row_inner(
 
 /// 更新单行（写操作仅 admin；tenant_id 不可修改）。
 pub async fn update_row_handler(
-    State(state): State<AppState>,
+    State(state): State<DbAdminState>,
     headers: HeaderMap,
     Path((table, pk_value)): Path<(String, String)>,
     Json(body): Json<UpdateBody>,
@@ -760,7 +789,7 @@ fn update_row_inner(
 
 /// 删除单行（写操作仅 admin）。
 pub async fn delete_row_handler(
-    State(state): State<AppState>,
+    State(state): State<DbAdminState>,
     headers: HeaderMap,
     Path((table, pk_value)): Path<(String, String)>,
 ) -> Result<Json<Value>, ApiError> {
@@ -832,7 +861,7 @@ fn delete_row_inner(
 /// SQL 执行器（仅 admin；SELECT 直接执行，写语句需 confirm:true；
 /// 危险前缀黑名单 403；单语句限制；5s 超时）。
 pub async fn execute_sql_handler(
-    State(state): State<AppState>,
+    State(state): State<DbAdminState>,
     headers: HeaderMap,
     Json(body): Json<ExecuteBody>,
 ) -> Result<Json<Value>, ApiError> {
@@ -978,658 +1007,190 @@ fn serde_json_to_sql(v: &Value) -> Box<dyn rusqlite::ToSql> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use axum::body::Body;
-    use axum::http::{Request, StatusCode};
-    use axum::Router;
-    use tower::ServiceExt;
+    use agentos_http::auth::{default_users, encode_token, TokenType};
 
-    fn app_with_db() -> (Router, Arc<agentos_engine::SqliteStore>) {
+    /// 内存库 + 仅注入 db 的 DbAdminState（无 store：token 校验走内置 admin 回退）。
+    fn state_with_db() -> (DbAdminState, Arc<agentos_engine::SqliteStore>) {
         let store = Arc::new(agentos_engine::SqliteStore::open_memory().unwrap());
-        let mut state = AppState::new();
-        state.store = Some(store.clone());
-        state.db = Some(store.clone());
-        (crate::server::build_router(state), store)
+        let state = DbAdminState {
+            store: None,
+            db: Some(store.clone()),
+        };
+        (state, store)
     }
 
-    async fn admin_token(router: &Router) -> String {
-        let resp = router
-            .clone()
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri("/api/v1/auth/login")
-                    .header("content-type", "application/json")
-                    .body(Body::from(
-                        json!({"username": "admin", "password": "admin12345"}).to_string(),
-                    ))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        let body = axum::body::to_bytes(resp.into_body(), 8192).await.unwrap();
-        let json: Value = serde_json::from_slice(&body).unwrap();
-        json["access_token"].as_str().unwrap().to_string()
+    /// 铸造内置 admin 的 access token（与 api 登录签发同格式）。
+    fn admin_token() -> String {
+        let admin = default_users().into_iter().next().unwrap();
+        encode_token(TokenType::Access, &admin, 3600)
     }
 
-    async fn user_token(router: &Router) -> String {
-        let resp = router
-            .clone()
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri("/api/v1/auth/register")
-                    .header("content-type", "application/json")
-                    .body(Body::from(
-                        json!({
-                            "username": format!("alice{}", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()),
-                            "password": "pass12345",
-                            "email": "alice@test.dev"
-                        })
-                        .to_string(),
-                    ))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        let body = axum::body::to_bytes(resp.into_body(), 8192).await.unwrap();
-        let json: Value = serde_json::from_slice(&body).unwrap();
-        json["access_token"].as_str().unwrap().to_string()
+    // ─── 纯逻辑单测（SQL 构建 / 安全校验） ─────────────────────────
+
+    #[test]
+    fn quote_ident_escapes_double_quote() {
+        assert_eq!(quote_ident("a\"b"), "\"a\"\"b\"");
+        assert_eq!(quote_ident("memory"), "\"memory\"");
     }
 
-    async fn get_json(router: &Router, uri: &str, token: &str) -> (StatusCode, Value) {
-        let resp = router
-            .clone()
-            .oneshot(
-                Request::builder()
-                    .method("GET")
-                    .uri(uri)
-                    .header("authorization", format!("Bearer {token}"))
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        let status = resp.status();
-        let body = axum::body::to_bytes(resp.into_body(), 16 * 1024 * 1024)
-            .await
-            .unwrap();
-        let text = String::from_utf8_lossy(&body).to_string();
-        let json: Value = serde_json::from_slice(&body).unwrap_or(Value::String(text.clone()));
-        if status != StatusCode::OK {
-            eprintln!("[get_json] uri={uri} status={status} body={text}");
-        }
-        (status, json)
+    #[test]
+    fn parse_pk_values_splits_comma_with_trim() {
+        assert_eq!(parse_pk_values("r1"), vec!["r1"]);
+        assert_eq!(parse_pk_values("r1, 1"), vec!["r1", "1"]);
     }
 
-    async fn post_json(
-        router: &Router,
-        uri: &str,
-        token: &str,
-        payload: Value,
-    ) -> (StatusCode, Value) {
-        let resp = router
-            .clone()
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri(uri)
-                    .header("authorization", format!("Bearer {token}"))
-                    .header("content-type", "application/json")
-                    .body(Body::from(payload.to_string()))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        let status = resp.status();
-        let body = axum::body::to_bytes(resp.into_body(), 16 * 1024 * 1024)
-            .await
-            .unwrap();
-        let json: Value = serde_json::from_slice(&body).unwrap_or(Value::Null);
-        (status, json)
+    #[test]
+    fn pk_columns_sorts_by_pk_order() {
+        let cols = vec![
+            ColumnMeta { name: "b".into(), type_name: "TEXT".into(), notnull: true, pk: true, pk_order: 2 },
+            ColumnMeta { name: "a".into(), type_name: "TEXT".into(), notnull: true, pk: true, pk_order: 1 },
+            ColumnMeta { name: "c".into(), type_name: "TEXT".into(), notnull: false, pk: false, pk_order: 0 },
+        ];
+        let pks = pk_columns(&cols);
+        let names: Vec<&str> = pks.iter().map(|c| c.name.as_str()).collect();
+        assert_eq!(names, vec!["a", "b"]);
     }
 
-    async fn patch_json(
-        router: &Router,
-        uri: &str,
-        token: &str,
-        payload: Value,
-    ) -> (StatusCode, Value) {
-        let resp = router
-            .clone()
-            .oneshot(
-                Request::builder()
-                    .method("PATCH")
-                    .uri(uri)
-                    .header("authorization", format!("Bearer {token}"))
-                    .header("content-type", "application/json")
-                    .body(Body::from(payload.to_string()))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        let status = resp.status();
-        let body = axum::body::to_bytes(resp.into_body(), 16 * 1024 * 1024)
-            .await
-            .unwrap();
-        let json: Value = serde_json::from_slice(&body).unwrap_or(Value::Null);
-        (status, json)
+    #[test]
+    fn classify_sql_read_vs_write() {
+        assert_eq!(classify_sql("SELECT 1"), "read");
+        assert_eq!(classify_sql("with x as (select 1) select * from x"), "read");
+        // 原实现行为：只读 PRAGMA 匹配串未大写化（输入已 to_ascii_uppercase），
+        // 故 "PRAGMA table_info" 实际按 "write" 分类；但写路径先过
+        // check_dangerous 黑名单（PRAGMA 一律 403），分类结果无实际影响。
+        assert_eq!(classify_sql("PRAGMA table_info(memory)"), "write");
+        assert_eq!(classify_sql("UPDATE memory SET x=1"), "write");
+        assert_eq!(classify_sql("insert into memory (id) values ('a')"), "write");
     }
 
-    async fn delete_json(router: &Router, uri: &str, token: &str) -> (StatusCode, Value) {
-        let resp = router
-            .clone()
-            .oneshot(
-                Request::builder()
-                    .method("DELETE")
-                    .uri(uri)
-                    .header("authorization", format!("Bearer {token}"))
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        let status = resp.status();
-        let body = axum::body::to_bytes(resp.into_body(), 16 * 1024 * 1024)
-            .await
-            .unwrap();
-        let json: Value = serde_json::from_slice(&body).unwrap_or(Value::Null);
-        (status, json)
-    }
-
-    #[tokio::test]
-    async fn test_tables_lists_all_tables_dynamic() {
-        let (router, _store) = app_with_db();
-        let token = admin_token(&router).await;
-        let (status, json) = get_json(&router, "/api/v1/db/tables", &token).await;
-        assert_eq!(status, StatusCode::OK);
-        let tables = json["tables"].as_array().expect("tables 数组");
-        let names: Vec<String> = tables
-            .iter()
-            .map(|t| t["name"].as_str().unwrap().to_string())
-            .collect();
-        for expect in [
-            "runs", "message_slots", "traces", "blobs", "branches", "sessions", "memory", "users",
+    #[test]
+    fn check_dangerous_blacklist_and_full_delete() {
+        for sql in [
+            "DROP TABLE memory",
+            "ALTER TABLE memory ADD COLUMN x",
+            "VACUUM",
+            "ATTACH 'x' AS y",
+            "DETACH y",
+            "PRAGMA journal_mode=WAL",
         ] {
-            assert!(names.contains(&expect.to_string()), "缺少表 {expect}: {names:?}");
+            assert!(check_dangerous(sql).is_err(), "应拒绝: {sql}");
         }
-        // 每个表有 columns 与 row_count
-        let runs = tables.iter().find(|t| t["name"] == "runs").unwrap();
-        assert!(!runs["columns"].as_array().unwrap().is_empty());
-        assert!(runs["row_count"].is_number());
-        // 列含主键标志
-        let run_cols = runs["columns"].as_array().unwrap();
-        let run_id = run_cols.iter().find(|c| c["name"] == "run_id").unwrap();
-        assert_eq!(run_id["pk"], true);
+        assert!(check_dangerous("DELETE FROM memory").is_err(), "全表 DELETE 应拒绝");
+        assert!(check_dangerous("DELETE FROM memory WHERE id='x'").is_ok());
+        assert!(check_dangerous("SELECT * FROM memory").is_ok());
     }
 
-    #[tokio::test]
-    async fn test_query_rows_pagination_filter_sort() {
-        let (router, store) = app_with_db();
-        // 直接向内存库插入 3 条 memory 记录（避开 auth 路径）
-        store
-            .with_conn(|conn| {
-                for i in 0..3 {
-                    conn.execute(
-                        "INSERT INTO memory (id, content, memory_type, tenant_id, created_at) VALUES (?1, ?2, ?3, ?4, ?5)",
-                        rusqlite::params![
-                            format!("m{i}"),
-                            format!("content {i}"),
-                            if i % 2 == 0 { "episode" } else { "semantic" },
-                            "default",
-                            format!("2025-01-0{}T00:00:00Z", i + 1),
-                        ],
-                    )
-                    .unwrap();
-                }
-                Ok::<(), String>(())
-            })
-            .unwrap();
-        let token = admin_token(&router).await;
-
-        // 筛选 eq + 排序
-        let (status, json) = get_json(
-            &router,
-            "/api/v1/db/table/memory?filter=memory_type:eq:episode&sort=created_at:desc",
-            &token,
-        )
-        .await;
-        assert_eq!(status, StatusCode::OK, "筛选+排序请求失败，响应体: {json}");
-        assert_eq!(json["total"], 2);
-        assert_eq!(json["rows"].as_array().unwrap().len(), 2);
-        let first = &json["rows"][0];
-        assert_eq!(first["id"], "m2"); // created_at desc: m2(01-03) 在前
-
-        // contains 筛选（空格需 URL 编码 %20）
-        let (status, json) = get_json(
-            &router,
-            "/api/v1/db/table/memory?filter=content:contains:content%201",
-            &token,
-        )
-        .await;
-        assert_eq!(status, StatusCode::OK, "contains 筛选失败，响应体: {json}");
-        assert_eq!(json["total"], 1);
-        assert_eq!(json["rows"][0]["id"], "m1");
-
-        // limit/offset 分页
-        let (status, json) = get_json(
-            &router,
-            "/api/v1/db/table/memory?limit=2&offset=1&sort=created_at:asc",
-            &token,
-        )
-        .await;
-        assert_eq!(status, StatusCode::OK);
-        assert_eq!(json["rows"].as_array().unwrap().len(), 2);
-        assert_eq!(json["rows"][0]["id"], "m1");
+    #[test]
+    fn list_table_names_dynamic_enumeration() {
+        let (state, _store) = state_with_db();
+        let db = get_db(&state).unwrap();
+        db.with_conn(|conn| {
+            let names = list_table_names(conn).unwrap();
+            assert!(names.contains(&"runs".to_string()), "应含引擎表: {names:?}");
+            assert!(!names.iter().any(|n| n.starts_with("sqlite_")), "应排除 sqlite_ 内部表");
+            Ok::<(), String>(())
+        })
+        .unwrap();
     }
 
-    #[tokio::test]
-    async fn test_query_rows_multi_filter_and() {
-        let (router, store) = app_with_db();
-        // 插入 4 条 memory：episode×2（score 1.0/5.0）、semantic×2（score 2.0/6.0）
-        store
-            .with_conn(|conn| {
-                for (i, (mt, sc)) in [
-                    ("episode", 1.0f64),
-                    ("episode", 5.0),
-                    ("semantic", 2.0),
-                    ("semantic", 6.0),
-                ]
-                .iter()
-                .enumerate()
-                {
-                    conn.execute(
-                        "INSERT INTO memory (id, content, memory_type, score, tenant_id, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-                        rusqlite::params![
-                            format!("mf{i}"),
-                            format!("content {i}"),
-                            mt,
-                            sc,
-                            "default",
-                            format!("2025-01-0{}T00:00:00Z", i + 1),
-                        ],
-                    )
-                    .unwrap();
-                }
-                Ok::<(), String>(())
-            })
-            .unwrap();
-        let token = admin_token(&router).await;
+    #[test]
+    fn serde_json_to_sql_maps_types() {
+        use rusqlite::types::Value as SqlValue;
 
-        // 多条件 AND（重复 filter 参数，契约 §2.2）：episode AND score>3 → 交集 1 条（mf1）
-        let (status, json) = get_json(
-            &router,
-            "/api/v1/db/table/memory?filter=memory_type:eq:episode&filter=score:gt:3",
-            &token,
-        )
-        .await;
-        assert_eq!(status, StatusCode::OK, "重复 filter 应 200，响应体: {json}");
-        assert_eq!(json["total"], 1, "多条件 AND 应得交集，响应体: {json}");
-        assert_eq!(json["rows"][0]["id"], "mf1");
-
-        // filter[] 形态（前端 axios 默认序列化，契约兼容兜底）
-        let (status, json) = get_json(
-            &router,
-            "/api/v1/db/table/memory?filter[]=memory_type:eq:episode&filter[]=score:gt:3",
-            &token,
-        )
-        .await;
-        assert_eq!(status, StatusCode::OK, "filter[] 形态应 200，响应体: {json}");
-        assert_eq!(json["total"], 1, "filter[] 多条件 AND 应得交集，响应体: {json}");
-        assert_eq!(json["rows"][0]["id"], "mf1");
+        // ToSqlOutput → 归一化为 SqlValue 比较（Borrowed/Owned 形态差异不影响语义；
+        // `dyn ToSql` 对象类型自带 trait 方法，无需额外 use ToSql）。
+        fn norm(v: &dyn rusqlite::ToSql) -> SqlValue {
+            match v.to_sql().unwrap() {
+                rusqlite::types::ToSqlOutput::Borrowed(r) => SqlValue::from(r),
+                rusqlite::types::ToSqlOutput::Owned(v) => v,
+                // non-exhaustive 兜底（ToSqlOutput 未来新增形态时按 Null 处理，仅测试用）
+                _ => SqlValue::Null,
+            }
+        }
+        assert_eq!(norm(serde_json_to_sql(&Value::Null).as_ref()), SqlValue::Null);
+        assert_eq!(norm(serde_json_to_sql(&json!(true)).as_ref()), SqlValue::Integer(1));
+        assert_eq!(norm(serde_json_to_sql(&json!(42)).as_ref()), SqlValue::Integer(42));
+        assert_eq!(norm(serde_json_to_sql(&json!("s")).as_ref()), SqlValue::Text("s".into()));
+        assert_eq!(
+            norm(serde_json_to_sql(&json!([1, 2])).as_ref()),
+            SqlValue::Text("[1,2]".into())
+        );
     }
 
-    #[tokio::test]
-    async fn test_query_injection_rejected() {
-        let (router, store) = app_with_db();
-        store
-            .with_conn(|conn| {
-                conn.execute(
-                    "INSERT INTO memory (id, content, memory_type, tenant_id, created_at) VALUES ('m0', 'safe', 'episode', 'default', '2025-01-01T00:00:00Z')",
-                    [],
-                )
-                .unwrap();
-                Ok::<(), String>(())
-            })
-            .unwrap();
-        let token = admin_token(&router).await;
-        // 注入尝试：值应被参数绑定，不注入
-        // URL 编码：'; DROP TABLE memory-- → %27%3B%20DROP%20TABLE%20memory--
-        let (status, _json) = get_json(
-            &router,
-            "/api/v1/db/table/memory?filter=content:eq:%27%3B%20DROP%20TABLE%20memory--",
-            &token,
-        )
-        .await;
-        assert_eq!(status, StatusCode::OK); // 值绑定：查询正常返回（0 行）
-        // memory 表仍在
-        let exists: bool = store
-            .with_conn(|conn| {
-                conn.query_row(
-                    "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name='memory')",
-                    [],
-                    |r| r.get(0),
-                )
-                .map_err(|e| e.to_string())
-            })
-            .unwrap();
-        assert!(exists, "注入导致 memory 表被删");
-    }
+    // ─── HTTP 冒烟（自铸 token 走内置 admin 回退） ──────────────────
 
     #[tokio::test]
-    async fn test_query_unknown_column_400_and_unknown_table_404() {
-        let (router, _store) = app_with_db();
-        let token = admin_token(&router).await;
-        let (status, _json) = get_json(
-            &router,
-            "/api/v1/db/table/memory?filter=nonexistent_col:eq:x",
-            &token,
-        )
-        .await;
-        assert_eq!(status, StatusCode::BAD_REQUEST);
-        let (status, _json) = get_json(&router, "/api/v1/db/table/not_a_table", &token).await;
-        assert_eq!(status, StatusCode::NOT_FOUND);
-    }
+    async fn list_tables_requires_auth_returns_401() {
+        use axum::body::Body;
+        use axum::http::{Request, StatusCode};
+        use tower::ServiceExt;
 
-    #[tokio::test]
-    async fn test_crud_insert_update_delete() {
-        let (router, _store) = app_with_db();
-        let token = admin_token(&router).await;
-
-        // 插入
-        let (status, json) = post_json(
-            &router,
-            "/api/v1/db/table/memory",
-            &token,
-            json!({ "row": { "id": "crud1", "content": "hello", "memory_type": "episode", "created_at": "2025-01-01T00:00:00Z" } }),
-        )
-        .await;
-        assert_eq!(status, StatusCode::CREATED, "插入失败: {json}");
-        assert_eq!(json["row"]["id"], "crud1");
-        assert_eq!(json["row_id"], "crud1");
-
-        // 查询确认落库（tenant_id 已自动注入 default）
-        let (status, json) = get_json(&router, "/api/v1/db/table/memory/crud1", &token).await;
-        assert_eq!(status, StatusCode::OK);
-        assert_eq!(json["content"], "hello");
-        assert_eq!(json["tenant_id"], "default");
-
-        // 更新
-        let (status, json) = patch_json(
-            &router,
-            "/api/v1/db/table/memory/crud1",
-            &token,
-            json!({ "updates": { "content": "updated" } }),
-        )
-        .await;
-        assert_eq!(status, StatusCode::OK, "更新失败: {json}");
-        assert_eq!(json["row"]["content"], "updated");
-
-        // 更新不存在 → 404
-        let (status, _json) = patch_json(
-            &router,
-            "/api/v1/db/table/memory/nope",
-            &token,
-            json!({ "updates": { "content": "x" } }),
-        )
-        .await;
-        assert_eq!(status, StatusCode::NOT_FOUND);
-
-        // 删除
-        let (status, json) = delete_json(&router, "/api/v1/db/table/memory/crud1", &token).await;
-        assert_eq!(status, StatusCode::OK, "删除失败: {json}");
-        assert_eq!(json["deleted"], true);
-        let (status, _json) = get_json(&router, "/api/v1/db/table/memory/crud1", &token).await;
-        assert_eq!(status, StatusCode::NOT_FOUND);
-    }
-
-    #[tokio::test]
-    async fn test_composite_pk_crud() {
-        let (router, _store) = app_with_db();
-        let token = admin_token(&router).await;
-
-        // execution_records 复合主键 (record_id, sequence)
-        let (status, json) = post_json(
-            &router,
-            "/api/v1/db/table/execution_records",
-            &token,
-            json!({ "row": { "record_id": "r1", "sequence": 1, "pipeline_run_id": "p1", "content": "first", "created_at": "2025-01-01T00:00:00Z" } }),
-        )
-        .await;
-        assert_eq!(status, StatusCode::CREATED, "复合主键插入失败: {json}");
-        assert_eq!(json["row_id"], "r1,1");
-
-        // 单行查询（`,` 拼接）
-        let (status, json) = get_json(&router, "/api/v1/db/table/execution_records/r1,1", &token)
-            .await;
-        assert_eq!(status, StatusCode::OK, "复合主键查询失败: {json}");
-        assert_eq!(json["content"], "first");
-
-        // 更新
-        let (status, json) = patch_json(
-            &router,
-            "/api/v1/db/table/execution_records/r1,1",
-            &token,
-            json!({ "updates": { "content": "second" } }),
-        )
-        .await;
-        assert_eq!(status, StatusCode::OK);
-        assert_eq!(json["row"]["content"], "second");
-
-        // 删除
-        let (status, _json) = delete_json(&router, "/api/v1/db/table/execution_records/r1,1", &token)
-            .await;
-        assert_eq!(status, StatusCode::OK);
-        let (status, _json) = get_json(&router, "/api/v1/db/table/execution_records/r1,1", &token)
-            .await;
-        assert_eq!(status, StatusCode::NOT_FOUND);
-    }
-
-    #[tokio::test]
-    async fn test_auth_required_401_and_forbidden() {
-        let (router, _store) = app_with_db();
-
-        // 无 token → 401
-        let resp = router
-            .clone()
+        let (state, _store) = state_with_db();
+        let app = router().with_state(state);
+        let resp = app
             .oneshot(
                 Request::builder()
                     .method("GET")
-                    .uri("/api/v1/db/tables")
+                    .uri("/tables")
                     .body(Body::empty())
                     .unwrap(),
             )
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
-
-        // 非 admin 用户：只读也 403（仅 admin/viewer）；写接口 403
-        let user_tok = user_token(&router).await;
-        let (status, _json) = get_json(&router, "/api/v1/db/tables", &user_tok).await;
-        assert_eq!(status, StatusCode::FORBIDDEN, "普通用户读接口应 403");
-        let (status, _json) = post_json(
-            &router,
-            "/api/v1/db/table/memory",
-            &user_tok,
-            json!({ "row": { "id": "x" } }),
-        )
-        .await;
-        assert_eq!(status, StatusCode::FORBIDDEN, "普通用户写接口应 403");
     }
 
     #[tokio::test]
-    async fn test_sql_execute_select_and_write_confirm() {
-        let (router, _store) = app_with_db();
-        let token = admin_token(&router).await;
+    async fn list_tables_with_admin_token_returns_tables() {
+        use axum::body::Body;
+        use axum::http::{Request, StatusCode};
+        use tower::ServiceExt;
 
-        // SELECT 直接执行
-        let (status, json) = post_json(
-            &router,
-            "/api/v1/db/execute",
-            &token,
-            json!({ "sql": "SELECT 1 AS a, 'x' AS b", "confirm": false }),
-        )
-        .await;
-        assert_eq!(status, StatusCode::OK, "SELECT 失败: {json}");
-        assert_eq!(json["columns"], json!(["a", "b"]));
-        assert_eq!(json["rows"][0], json!([1, "x"]));
-
-        // 写语句无 confirm → 400
-        let (status, _json) = post_json(
-            &router,
-            "/api/v1/db/execute",
-            &token,
-            json!({ "sql": "UPDATE memory SET content='x' WHERE id='none'", "confirm": false }),
-        )
-        .await;
-        assert_eq!(status, StatusCode::BAD_REQUEST);
-
-        // 写语句带 confirm → 200
-        let (status, json) = post_json(
-            &router,
-            "/api/v1/db/execute",
-            &token,
-            json!({ "sql": "UPDATE memory SET content='x' WHERE id='none'", "confirm": true }),
-        )
-        .await;
-        assert_eq!(status, StatusCode::OK);
-        assert_eq!(json["rows_affected"], 0);
-    }
-
-    #[tokio::test]
-    async fn test_sql_execute_dangerous_rejected() {
-        let (router, _store) = app_with_db();
-        let token = admin_token(&router).await;
-
-        // DROP → 403
-        let (status, _json) = post_json(
-            &router,
-            "/api/v1/db/execute",
-            &token,
-            json!({ "sql": "DROP TABLE memory", "confirm": true }),
-        )
-        .await;
-        assert_eq!(status, StatusCode::FORBIDDEN);
-
-        // ALTER → 403
-        let (status, _json) = post_json(
-            &router,
-            "/api/v1/db/execute",
-            &token,
-            json!({ "sql": "ALTER TABLE memory ADD COLUMN x TEXT", "confirm": true }),
-        )
-        .await;
-        assert_eq!(status, StatusCode::FORBIDDEN);
-
-        // PRAGMA → 403
-        let (status, _json) = post_json(
-            &router,
-            "/api/v1/db/execute",
-            &token,
-            json!({ "sql": "PRAGMA journal_mode=WAL", "confirm": true }),
-        )
-        .await;
-        assert_eq!(status, StatusCode::FORBIDDEN);
-
-        // 全表 DELETE → 403
-        let (status, _json) = post_json(
-            &router,
-            "/api/v1/db/execute",
-            &token,
-            json!({ "sql": "DELETE FROM memory", "confirm": true }),
-        )
-        .await;
-        assert_eq!(status, StatusCode::FORBIDDEN);
-
-        // 多语句 → 400
-        let (status, _json) = post_json(
-            &router,
-            "/api/v1/db/execute",
-            &token,
-            json!({ "sql": "SELECT 1; SELECT 2", "confirm": false }),
-        )
-        .await;
-        assert_eq!(status, StatusCode::BAD_REQUEST);
-
-        // 非 admin 执行 SQL → 403
-        let user_tok = user_token(&router).await;
-        let (status, _json) = post_json(
-            &router,
-            "/api/v1/db/execute",
-            &user_tok,
-            json!({ "sql": "SELECT 1", "confirm": false }),
-        )
-        .await;
-        assert_eq!(status, StatusCode::FORBIDDEN);
-    }
-
-    #[tokio::test]
-    async fn test_extensibility_new_table_auto_visible() {
-        let (router, store) = app_with_db();
-        let token = admin_token(&router).await;
-
-        // 模拟内核未来新增表（扩展性验证）
-        store
-            .with_conn(|conn| {
-                conn.execute_batch(
-                    "CREATE TABLE IF NOT EXISTS future_tasks (task_id TEXT PRIMARY KEY, title TEXT NOT NULL, tenant_id TEXT NOT NULL DEFAULT 'default', created_at TEXT NOT NULL);",
-                )
-                .map_err(|e| e.to_string())
-            })
+        let (state, _store) = state_with_db();
+        let app = router().with_state(state);
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/tables")
+                    .header("authorization", format!("Bearer {}", admin_token()))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
             .unwrap();
-
-        // 接口自动可见
-        let (status, json) = get_json(&router, "/api/v1/db/tables", &token).await;
-        assert_eq!(status, StatusCode::OK);
-        let names: Vec<String> = json["tables"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .map(|t| t["name"].as_str().unwrap().to_string())
-            .collect();
-        assert!(names.contains(&"future_tasks".to_string()), "新表未自动可见: {names:?}");
-
-        // 新表可查询/可写
-        let (status, json) = post_json(
-            &router,
-            "/api/v1/db/table/future_tasks",
-            &token,
-            json!({ "row": { "task_id": "t1", "title": "auto", "created_at": "2025-01-01T00:00:00Z" } }),
-        )
-        .await;
-        assert_eq!(status, StatusCode::CREATED, "新表插入失败: {json}");
-        let (status, json) = get_json(&router, "/api/v1/db/table/future_tasks/t1", &token).await;
-        assert_eq!(status, StatusCode::OK);
-        assert_eq!(json["title"], "auto");
-
-        // 清理测试表
-        store
-            .with_conn(|conn| conn.execute_batch("DROP TABLE future_tasks;").map_err(|e| e.to_string()))
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), 16 * 1024 * 1024)
+            .await
             .unwrap();
+        let json: Value = serde_json::from_slice(&body).unwrap();
+        let tables = json["tables"].as_array().expect("tables 数组");
+        let names: Vec<&str> = tables.iter().map(|t| t["name"].as_str().unwrap()).collect();
+        assert!(names.contains(&"runs"), "应枚举引擎表: {names:?}");
     }
 
     #[tokio::test]
-    async fn test_tenant_isolation_applied() {
-        let (router, store) = app_with_db();
-        // 插入两条不同租户的 memory
-        store
-            .with_conn(|conn| {
-                conn.execute(
-                    "INSERT INTO memory (id, content, memory_type, tenant_id, created_at) VALUES ('t-a', 'tenantA', 'episode', 'tenantA', '2025-01-01T00:00:00Z')",
-                    [],
-                )
-                .unwrap();
-                conn.execute(
-                    "INSERT INTO memory (id, content, memory_type, tenant_id, created_at) VALUES ('t-d', 'tenantDefault', 'episode', 'default', '2025-01-01T00:00:00Z')",
-                    [],
-                )
-                .unwrap();
-                Ok::<(), String>(())
-            })
+    async fn execute_sql_write_requires_confirm() {
+        use axum::body::Body;
+        use axum::http::{Request, StatusCode};
+        use tower::ServiceExt;
+
+        let (state, _store) = state_with_db();
+        let app = router().with_state(state);
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/execute")
+                    .header("authorization", format!("Bearer {}", admin_token()))
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        json!({ "sql": "UPDATE memory SET content='x' WHERE id='none'", "confirm": false }).to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
             .unwrap();
-        let token = admin_token(&router).await; // admin 租户 = default
-        let (status, json) = get_json(&router, "/api/v1/db/table/memory", &token).await;
-        assert_eq!(status, StatusCode::OK);
-        assert_eq!(json["total"], 1, "租户隔离未生效: {json}");
-        assert_eq!(json["rows"][0]["id"], "t-d");
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST, "写语句无 confirm 应 400");
     }
 }

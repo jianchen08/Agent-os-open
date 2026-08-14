@@ -6,8 +6,8 @@
  * 实现 ChatPanel↔WorkspacePanel 的拖拽分屏（§5.5 拖拽布局维度）。
  */
 
-import { describe, it, expect, vi } from 'vitest'
 import { render, screen, fireEvent } from '@testing-library/react'
+import { describe, it, expect, vi } from 'vitest'
 import { WorkspacePanel } from '@/components/layout/WorkspacePanel'
 import type { WorkspaceTab } from '@/types/layout'
 

@@ -14,7 +14,6 @@
 pub mod auth;
 pub mod capability_router;
 pub mod chat_send_handler;
-pub mod compat_routes;
 pub mod config_service;
 pub mod error;
 pub mod http_dispatcher;
@@ -24,6 +23,7 @@ pub mod plugin_lifecycle;
 pub mod plugin_watcher;
 pub mod routes;
 pub mod server;
+pub mod session_routes;
 pub mod ws_session;
 
 pub use auth::{

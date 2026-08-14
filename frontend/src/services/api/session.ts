@@ -53,8 +53,8 @@ interface ThreadCreateResponse {
   active_pipeline_id?: string | null
 }
 
-/** 后端消息响应类型 */
-interface BackendMessageResponse {
+/** 后端消息响应类型（DB 加载与 new_message 流式事件共用——冷热路径同构的输入契约） */
+export interface BackendMessageResponse {
   id: string
   thread_id: string
   sequence?: number
@@ -117,7 +117,14 @@ function validateSessionId(sessionId: string): void {
   }
 }
 
-function mapBackendMessageToMessage(
+/**
+ * 后端消息 → 前端 Message 共享映射。
+ *
+ * 冷热路径同构的唯一入口：DB 历史加载（getMessages）与 new_message 流式事件
+ * （messageHandler）都经它生成 parts[]——流式收到的消息与刷新后从数据库加载
+ * 的数据形态一致，不再有两套 parts 构造逻辑。
+ */
+export function mapBackendMessageToMessage(
   backendMessage: BackendMessageResponse,
   sessionId: string,
 ): Message {
@@ -425,7 +432,7 @@ export function mergeConsecutiveAssistantMessages(messages: Message[]): Message[
 export async function getSessions(options: RetryOptions = {}): Promise<Session[]> {
   return requestWithRetry(async () => {
     // 只获取主管道会话（session_type=main_pipeline），过滤子任务管道
-    const response = await apiClient.get<any>(API_ENDPOINTS.THREADS.LIST, {
+    const response = await apiClient.get<any>(API_ENDPOINTS.SESSIONS.LIST, {
       params: { session_type: 'main_pipeline', limit: 100 },
     })
 
@@ -474,7 +481,7 @@ export async function createSession(
     }
 
     const response = await apiClient.post<ThreadCreateResponse>(
-      API_ENDPOINTS.THREADS.CREATE,
+      API_ENDPOINTS.SESSIONS.CREATE,
       requestData,
       {
         headers: {
@@ -504,7 +511,7 @@ export async function deleteSession(sessionId: string, options: RetryOptions = {
   validateSessionId(sessionId)
 
   return requestWithRetry(async () => {
-    await apiClient.delete(API_ENDPOINTS.THREADS.DELETE(sessionId))
+    await apiClient.delete(API_ENDPOINTS.SESSIONS.DELETE(sessionId))
   }, options)
 }
 
@@ -596,7 +603,7 @@ export async function updateSessionAgent(
   return requestWithRetry(async () => {
     // PATCH 现在返回完整的 ThreadResponse，无需二次 GET
     const response = await apiClient.patch<ThreadStateResponse>(
-      API_ENDPOINTS.THREADS.UPDATE_AGENT(sessionId),
+      API_ENDPOINTS.SESSIONS.UPDATE_AGENT(sessionId),
       { agent_id: agentId },
     )
 
@@ -637,7 +644,7 @@ export async function updateSession(
     }
 
     const response = await apiClient.patch<ThreadUpdateResponse>(
-      API_ENDPOINTS.THREADS.UPDATE(sessionId),
+      API_ENDPOINTS.SESSIONS.UPDATE(sessionId),
       requestData,
     )
 

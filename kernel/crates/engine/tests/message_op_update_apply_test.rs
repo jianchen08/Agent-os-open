@@ -195,3 +195,129 @@ async fn op_update_append_into_empty_starts_at_seq_zero() {
         1
     );
 }
+
+#[tokio::test]
+async fn message_id_injected_once_into_first_assistant_append() {
+    // A1：state["message_id"] 存在时，本轮首个 assistant 追加 op 的 record_id
+    // 用内核 message_id（`_message_id` 内部字段），与前端流式占位对齐；
+    // 多轮迭代的后续 assistant 追加不再注入（_assistant_id_assigned 置位）；
+    // modify 旧槽位的 op（显式旧 seq）不注入。
+    let store = SqliteStore::open_memory().unwrap();
+    let backend: &dyn StorageBackend = &store;
+    let mut state = json!({
+        "pipeline_id": "p5",
+        "message_id": "a_run_001",
+        "_assistant_id_assigned": false,
+        "messages": []
+    });
+
+    // 历史已有 user（seq 0）——用显式 seq 模拟已存在槽位
+    apply_messages_op_update(
+        &mut state,
+        backend,
+        "default",
+        &[set(0, json!({ "role": "user", "content": "你好" }))],
+    )
+    .await
+    .unwrap();
+
+    // 本轮首个 assistant 追加（无 seq → 引擎分配 seq 1）：应注入 message_id
+    apply_messages_op_update(
+        &mut state,
+        backend,
+        "default",
+        &[json!({ "op": "set", "msg": { "role": "assistant", "content": "第一轮回复" } })],
+    )
+    .await
+    .unwrap();
+
+    let rec = store
+        .get_slot_messages_by_pipeline("p5", "default", MessageQueryOpts::default())
+        .unwrap();
+    let first = rec.iter().find(|r| r.seq_in_branch == 1).expect("seq1 存在");
+    assert_eq!(
+        first.message_id, "a_run_001",
+        "首个 assistant 的 record_id 应为内核 message_id"
+    );
+
+    // 第二轮迭代的 assistant 追加（seq 2）：不再注入，回退内容指纹
+    apply_messages_op_update(
+        &mut state,
+        backend,
+        "default",
+        &[json!({ "op": "set", "msg": { "role": "assistant", "content": "第二轮回复" } })],
+    )
+    .await
+    .unwrap();
+    let rec = store
+        .get_slot_messages_by_pipeline("p5", "default", MessageQueryOpts::default())
+        .unwrap();
+    let second = rec.iter().find(|r| r.seq_in_branch == 2).expect("seq2 存在");
+    assert_ne!(
+        second.message_id, "a_run_001",
+        "后续 assistant 不应复用同一 message_id"
+    );
+    assert!(
+        second.message_id.starts_with("mc_"),
+        "无注入时回退内容指纹（mc_ 前缀）"
+    );
+
+    // 内存消息不带 id（注入只影响表侧 record_id）
+    let arr = state["messages"].as_array().unwrap();
+    assert!(arr.iter().all(|m| m.get("id").is_none()), "内存消息不应携带 id");
+
+    // 标志已置位
+    assert_eq!(
+        state["_assistant_id_assigned"].as_bool(),
+        Some(true),
+        "本轮已注入过 message_id"
+    );
+}
+
+#[tokio::test]
+async fn message_id_injection_skips_modify_ops_on_old_slots() {
+    // A1：对旧槽位的 modify op（显式旧 seq）不注入 message_id——
+    // 防止 context_window_guard 等改写历史 assistant 时误挂本轮 message_id。
+    let store = SqliteStore::open_memory().unwrap();
+    let backend: &dyn StorageBackend = &store;
+    let mut state = json!({
+        "pipeline_id": "p6",
+        "message_id": "a_run_002",
+        "_assistant_id_assigned": false,
+        "messages": []
+    });
+    apply_messages_op_update(
+        &mut state,
+        backend,
+        "default",
+        &[set(0, json!({ "role": "assistant", "content": "历史回复" }))],
+    )
+    .await
+    .unwrap();
+
+    // 同批 op 含：历史槽位 modify（seq 0，assistant）+ 新 append（无 seq，user）
+    apply_messages_op_update(
+        &mut state,
+        backend,
+        "default",
+        &[
+            set(0, json!({ "role": "assistant", "content": "历史回复(改写)" })),
+            json!({ "op": "set", "msg": { "role": "user", "content": "新消息" } }),
+        ],
+    )
+    .await
+    .unwrap();
+
+    let rec = store
+        .get_slot_messages_by_pipeline("p6", "default", MessageQueryOpts::default())
+        .unwrap();
+    let mod_row = rec.iter().find(|r| r.seq_in_branch == 0).expect("seq0 存在");
+    assert_ne!(
+        mod_row.message_id, "a_run_002",
+        "modify 旧槽位不得注入本轮 message_id"
+    );
+    assert!(
+        mod_row.message_id.starts_with("mc_"),
+        "modify 回退内容指纹（内容变了指纹也变）"
+    );
+}
