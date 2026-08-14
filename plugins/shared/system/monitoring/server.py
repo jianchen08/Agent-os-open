@@ -571,7 +571,7 @@ def _read_payload_diag(name: str) -> dict[str, Any]:
     if not os.path.isfile(fpath):
         return {"error": "file not found", "name": name}
     try:
-        with open(fpath, "r", encoding="utf-8") as fh:
+        with open(fpath, encoding="utf-8") as fh:
             return {"name": name, "content": fh.read()}
     except OSError as exc:
         return {"error": str(exc)}
@@ -626,11 +626,15 @@ def _query_tool_calls(q: dict[str, str]) -> dict[str, Any]:
     elif status_filter == "error":
         sql += " AND json_extract(item.value, '$.success') = 0"
     if min_duration:
+        # 先解析再追加 SQL：非法 min_duration 只忽略过滤条件，
+        # 不能让 SQL 已含占位符而 params 缺绑定（报 binding 数不匹配）
         try:
+            min_duration_f = float(min_duration)
+        except (TypeError, ValueError):
+            min_duration_f = None
+        if min_duration_f is not None:
             sql += " AND CAST(json_extract(item.value, '$.duration_ms') AS REAL) >= ?"
-            params.append(float(min_duration))
-        except ValueError:
-            pass
+            params.append(min_duration_f)
     sql += " ORDER BY t.created_at DESC LIMIT ?"
     params.append(limit)
 

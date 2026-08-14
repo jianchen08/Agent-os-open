@@ -447,11 +447,10 @@ class TestToolCalls:
         # 按最小耗时
         by_dur = mod._query_tool_calls({"min_duration": "1000"})
         assert by_dur["total"] == 1 and by_dur["items"][0]["tool_name"] == "file_write"
-        # 非法 min_duration：已知缺陷——SQL 已追加 >= ? 但参数未绑定，
-        # 查询以 sqlite 错误收尾（返回 error，不崩溃）。此处断言实际行为，
-        # 缺陷记录见最终报告。
+        # 非法 min_duration：忽略过滤条件（修复后：不追加 SQL 占位符、
+        # 查询正常返回全部结果，不再因绑定数不匹配报错）
         ok = mod._query_tool_calls({"min_duration": "abc"})
-        assert ok["items"] == [] and ok["error"]
+        assert ok["total"] == 2
         # limit 钳制
         clamped = mod._query_tool_calls({"limit": "999"})
         assert clamped["total"] == 2

@@ -88,7 +88,10 @@ class GitHelpers:
                 process.communicate(),
                 timeout=timeout,
             )
-            stdout = stdout_bytes.decode("utf-8", errors="replace").strip()
+            # 注意：stdout 只用 rstrip（保留行首空白）——`git status --porcelain`
+            # 的 XY 码第一位可能是空格（unstaged 修改 " M file"），整体 strip
+            # 会吞掉它导致解析错位（误判 staged + 文件名校错位）。
+            stdout = stdout_bytes.decode("utf-8", errors="replace").rstrip()
             stderr = stderr_bytes.decode("utf-8", errors="replace").strip()
             return process.returncode or 0, stdout, stderr
         except asyncio.TimeoutError:

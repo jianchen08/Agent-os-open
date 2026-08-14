@@ -32,6 +32,8 @@ from typing import Any
 from urllib.parse import unquote, urlparse
 
 import httpx
+from url_security import validate_url
+from workspace_aware import WorkspaceAwareMixin
 
 from agentos_plugin_sdk import (
     BuiltinTool,
@@ -43,8 +45,6 @@ from agentos_plugin_sdk import (
     create_failure_result,
     create_success_result,
 )
-from url_security import is_private_ip, resolve_hostname_ips, validate_url
-from workspace_aware import WorkspaceAwareMixin
 
 logger = logging.getLogger(__name__)
 
@@ -580,6 +580,12 @@ class DownloadTool(WorkspaceAwareMixin, BuiltinTool):
 
                 resp = await client.get(url, headers=headers)
                 resp.raise_for_status()
+
+                # 服务器不支持 Range 时忽略请求头、返回 200 全量内容：
+                # 此时若仍按 append 模式写，会把完整内容追加到已有部分之后
+                # 导致文件翻倍——检测到 200（非 206）即重置为从头写。
+                if resume_from > 0 and resp.status_code == 200:
+                    resume_from = 0
 
                 total_downloaded = resume_from
 

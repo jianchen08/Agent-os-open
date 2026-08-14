@@ -1279,6 +1279,9 @@ class IsolationManager:
 
         # 从 /mnt/d/myproject/xxx 提取 /mnt/d（WSL 路径的前两段）
         # 同时从 /mnt/d 反推 Windows 盘符 D:（drvfs mount 用）
+        # 注意：Windows 宿主上 PurePath("/mnt/d/...").parts[0] 恒为 "\\"
+        # （pathlib 按宿主平台解析），"/mnt" 判断恒假——本分支是 WSL/Linux
+        # 专用修复，Windows 直跑时走日志告警并跳过（预期行为，非 bug）。
         parts = PurePath(workspace).parts
         if len(parts) < 2 or parts[0] != "/mnt" or len(parts[1]) != 1:
             logger.warning(
