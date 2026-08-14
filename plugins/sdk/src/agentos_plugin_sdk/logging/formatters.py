@@ -10,7 +10,7 @@ from __future__ import annotations
 import json
 import logging
 import traceback
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 
 from agentos_plugin_sdk.logging.context import LogContext
@@ -152,7 +152,7 @@ class JsonFormatter(logging.Formatter):
 
 def _iso_timestamp(created: float) -> str:
     """将 log record 的 created 浮点时间戳转为 ISO 8601 字符串。"""
-    dt = datetime.fromtimestamp(created, tz=timezone.utc)
+    dt = datetime.fromtimestamp(created, tz=UTC)
     return dt.strftime("%Y-%m-%dT%H:%M:%S.") + f"{dt.microsecond // 1000:03d}Z"
 
 

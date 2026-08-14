@@ -12,10 +12,8 @@
 
 from __future__ import annotations
 
-import io
 import json
 import logging
-import os
 
 import pytest
 
@@ -27,7 +25,6 @@ from agentos_plugin_sdk.logging import (
     get_logger,
     setup_logging,
 )
-
 
 # ── LoggingConfig 测试 ──────────────────────────────────────────
 

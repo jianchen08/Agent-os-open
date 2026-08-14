@@ -20,11 +20,10 @@ from unittest.mock import patch
 import pytest
 
 from agentos_plugin_sdk.logging import get_logger, setup_logging
-from agentos_plugin_sdk.logging.config import LoggingConfig, OutputTarget, _LEVEL_MAP, _parse_output
+from agentos_plugin_sdk.logging.config import _LEVEL_MAP, LoggingConfig, _parse_output
 from agentos_plugin_sdk.logging.context import LogContext
 from agentos_plugin_sdk.logging.filters import ContextFilter
 from agentos_plugin_sdk.logging.formatters import JsonFormatter, StructuredFormatter
-
 
 # ═══════════════════════════════════════════════════════════════════
 # LoggingConfig 测试
@@ -743,7 +742,6 @@ class TestSetupLogging:
         """reset=True 时清除已有 handler。"""
         root = logging.getLogger()
         root.addHandler(logging.StreamHandler())
-        initial_count = len(root.handlers)
 
         config = LoggingConfig(level=logging.INFO, output="console")
         setup_logging(config, reset=True)

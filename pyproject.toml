@@ -156,7 +156,8 @@ select = [
 # 忽略部分严格规则（避免一次性报大量错误）
 # 重构类规则（PLR0911/0912/0915）标注为技术债，见 ROADMAP，后续单独治理
 ignore = [
-    "E501",   # 行长度由 line-length 控制
+    "E501",   # 行长度检查整体关闭（注释修正：line-length 只是 E501 的阈值，
+              # E501 被 ignore 后行长度不再检查；如需恢复按 line-length=120 执行）
     "B008",   # 函数调用作为默认参数（FastAPI Depends 等）
     "PLR0913", # 参数过多
     "PLR2004", # magic value
@@ -196,7 +197,7 @@ unfixable = ["F401"]  # 不自动删除未使用 import（可能是 re-export）
 
 [tool.ruff.lint.per-file-ignores]
 "__init__.py" = ["F401", "F403"]  # __init__.py 允许未使用 import
-"tests/**" = ["B011", "PT009", "PT027"]  # 测试文件允许 assert
+"tests/**" = ["B011", "PT009", "PT027"]  # 测试文件：允许 assert 调试残留与 unittest 风格断言
 "plugins/shared/system/channel_cli/**" = ["T201"]  # CLI 允许 print
 # isolation/manager.py 的函数内 docker 延迟导入（已标 noqa: PLC0415），
 # 其 import 排序对延迟加载场景意义有限，避免与延迟加载意图冲突

@@ -5,8 +5,9 @@
 # 流程：代码提交 → Rust Lint → Rust Build → Rust Test → Python Lint → Python Test
 #
 # 触发条件：
-#   - push 到 main / develop 分支
-#   - Pull Request 到 main / develop 分支
+#   - push 到 main / dev/* 分支（实际开发分支是 dev/0.2；此前误写 develop，
+#     远端不存在该分支 → CI 从未在开发分支上触发）
+#   - Pull Request 到 main / dev/* 分支
 #
 # 缓存策略：
 #   - Swatinem/rust-cache 跨 job 共享（shared-key: agentos-0.2）
@@ -23,9 +24,9 @@ name: CI
 
 on:
   push:
-    branches: [main, develop]
+    branches: [main, "dev/*"]
   pull_request:
-    branches: [main, develop]
+    branches: [main, "dev/*"]
 
 concurrency:
   group: ci-${{ github.ref }}

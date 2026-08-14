@@ -29,7 +29,7 @@ import logging
 from collections.abc import Callable, Coroutine
 from dataclasses import dataclass
 from datetime import datetime
-from enum import Enum
+from enum import StrEnum
 from typing import Any
 
 from pydantic import BaseModel, Field, field_validator
@@ -56,7 +56,7 @@ logger = logging.getLogger(__name__)
 ToolResult = ToolExecutionResult
 
 
-class ToolSource(str, Enum):
+class ToolSource(StrEnum):
     """工具来源"""
 
     CODE = "code"  # Python 代码
@@ -66,7 +66,7 @@ class ToolSource(str, Enum):
     DATABASE = "database"  # 数据库配置
 
 
-class ToolCategory(str, Enum):
+class ToolCategory(StrEnum):
     """工具功能分类"""
 
     FILE = "file"  # 文件操作
@@ -83,7 +83,7 @@ class ToolCategory(str, Enum):
     MONITORING = "monitoring"  # 监控
 
 
-class ToolLevel(str, Enum):
+class ToolLevel(StrEnum):
     """工具级别分类"""
 
     SYSTEM = "system"  # 系统级：内置、常用、每次都用
@@ -93,7 +93,7 @@ class ToolLevel(str, Enum):
     ALL = "all"  # 所有层级都能使用
 
 
-class ToolStatus(str, Enum):
+class ToolStatus(StrEnum):
     """工具状态"""
 
     ACTIVE = "active"  # 活跃
@@ -171,7 +171,8 @@ class Tool(BaseModel):
     # 注入参数声明（运行时注入，不传给 LLM）
     injected_params: list[str] = Field(
         default_factory=list,
-        description="注入参数列表：这些参数由系统在运行时注入，不暴露给 LLM 决策。如 session_id, user_id, tool_record_id",
+        description="注入参数列表：这些参数由系统在运行时注入，不暴露给 LLM 决策。"
+        "如 session_id, user_id, tool_record_id",
     )
 
     # 参数层级限制：声明哪些参数/枚举值只在特定 Agent 层级可见

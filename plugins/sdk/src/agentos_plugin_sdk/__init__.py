@@ -5,7 +5,8 @@
 [来源: docs/tasks/task_08_python_sdk.md AC-07-1]
 """
 
-from importlib.metadata import PackageNotFoundError, version as _pkg_version
+from importlib.metadata import PackageNotFoundError
+from importlib.metadata import version as _pkg_version
 
 from agentos_plugin_sdk.builtin_tool import BuiltinTool, register_builtin_tool
 from agentos_plugin_sdk.capability import (

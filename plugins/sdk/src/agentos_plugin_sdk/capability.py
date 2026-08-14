@@ -133,7 +133,7 @@ class FrontendEmitter:
         self._handle = handle
 
     @classmethod
-    def from_plugin(cls, plugin: Any) -> "FrontendEmitter | None":
+    def from_plugin(cls, plugin: Any) -> FrontendEmitter | None:
         """从 AgentOSPlugin 实例解析 frontend capability。
 
         内核未声明 frontend（旧内核）时 get_capability 抛 KeyError，
@@ -161,7 +161,6 @@ class FrontendEmitter:
             return
         try:
             await self._handle.notify("emit", {"event": event, "payload": payload})
-        except Exception:
-            # 通道异常静默：观测推送失败不影响插件主流程
+        except Exception:  # noqa: S110 —— 观测推送失败不影响插件主流程（有注释说明意图）
             pass
 

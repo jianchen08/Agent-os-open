@@ -17,7 +17,7 @@ task_submit 四个工具共同依赖，属于跨插件共享类型，故上提�
 from __future__ import annotations
 
 from datetime import UTC, datetime
-from enum import Enum
+from enum import StrEnum
 from typing import Any, Generic, TypeVar
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -42,7 +42,7 @@ T = TypeVar("T")  # 输出数据类型
 _SLIM_OUTPUT_EXCLUDE = frozenset({"old_content", "new_content", "diff_omitted"})
 
 
-class ExecutionStatus(str, Enum):
+class ExecutionStatus(StrEnum):
     """统一执行状态。
 
     用于 Task、Agent、Workflow、Tool 等执行实体的状态管理。
@@ -237,18 +237,18 @@ class ExecutionResult(BaseModel, Generic[T]):
     # === 工厂方法 ===
 
     @classmethod
-    def create_running(cls, **kwargs: Any) -> "ExecutionResult[T]":
+    def create_running(cls, **kwargs: Any) -> ExecutionResult[T]:
         """创建运行中状态的结果"""
         return cls(status=ExecutionStatus.RUNNING, started_at=datetime.now(UTC), **kwargs)
 
     @classmethod
-    def create_completed(cls, output: T, **kwargs: Any) -> "ExecutionResult[T]":
+    def create_completed(cls, output: T, **kwargs: Any) -> ExecutionResult[T]:
         """创建成功完成的结果"""
         now = datetime.now(UTC)
         return cls(status=ExecutionStatus.COMPLETED, output=output, completed_at=now, **kwargs)
 
     @classmethod
-    def create_failed(cls, error: str, error_code: str | None = None, **kwargs: Any) -> "ExecutionResult[T]":
+    def create_failed(cls, error: str, error_code: str | None = None, **kwargs: Any) -> ExecutionResult[T]:
         """创建失败结果"""
         return cls(
             status=ExecutionStatus.FAILED, error=error, error_code=error_code, completed_at=datetime.now(UTC), **kwargs

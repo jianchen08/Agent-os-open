@@ -32,13 +32,17 @@ where = ["src"]
 
 [tool.ruff]
 target-version = "py311"
-line-length = 100
+# 与根 pyproject.toml 统一（120），避免同一代码库两套行宽标准
+line-length = 120
 
 [tool.ruff.lint]
 select = ["E", "F", "W", "I", "N", "UP", "B", "S", "C4"]
 
 [tool.ruff.lint.per-file-ignores]
-"tests/**/*.py" = ["S101"]  # assert is standard in pytest tests
+# 测试代码：assert 是标准用法；临时文件/except-pass 是测试桩的合理写法
+"tests/**/*.py" = ["S101", "S108", "S110"]
+# 公开 API 异常基类名保持 BaseAppException（改名破坏下游兼容）
+"src/agentos_plugin_sdk/exceptions/**" = ["N818"]
 
 [tool.mypy]
 python_version = "3.11"

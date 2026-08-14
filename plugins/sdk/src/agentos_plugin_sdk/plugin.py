@@ -10,7 +10,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from typing import Any
 
-from agentos_plugin_sdk.capability import STANDARD_CAPABILITIES, CapabilityHandle
+from agentos_plugin_sdk.capability import CapabilityHandle
 from agentos_plugin_sdk.server import KernelChannel, McpServer
 from agentos_plugin_sdk.types import LifecycleEvent, ResourceDef, ToolDef
 
