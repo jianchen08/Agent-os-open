@@ -24,7 +24,16 @@ import pytest
 
 from e2e_helpers import create_session, ws_chat_url
 
-pytestmark = pytest.mark.e2e
+import os
+
+pytestmark = [
+    pytest.mark.e2e,
+    # 依赖真实 LLM 流式回复：无 key 时跳过（CI 有 secrets.ZHIPU_API_KEY 才跑全量）
+    pytest.mark.skipif(
+        not os.environ.get("ZHIPU_API_KEY"),
+        reason="需要 ZHIPU_API_KEY（真实 LLM 流式回复）",
+    ),
+]
 
 CHAT_PROMPT = "你好，请回复一句话介绍你自己"
 

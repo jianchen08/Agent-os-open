@@ -50,6 +50,8 @@ dev = [
     "pytest-cov>=4.0",
     "mypy>=1.10",
     "ruff>=0.5",
+    # e2e（tests/e2e_02）：WS 流式链路测试需要
+    "websockets>=13.0",
 ]
 document = [
     "markitdown[docx,xlsx]>=0.1.0",

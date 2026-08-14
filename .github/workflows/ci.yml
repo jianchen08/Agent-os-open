@@ -520,3 +520,64 @@ jobs:
 
       - name: Check test traceability markers
         run: python scripts/check_test_traceability.py
+
+  # ── Python 0.2 端到端（内核二进制 + 内存库 + 功能点 e2e）───────────────
+  # 覆盖 tests/e2e_02 的功能点级 e2e：审批闭环（FP-0.2.五，schema 声明 +
+  # LLM 触发审批 + interaction/response 回路）、管道 chat（FP-0.2.〇）、
+  # WS 流式全链路（FP-0.2.〇）。依赖真实 LLM 的用例带 skipif 守卫：
+  # 无 secrets.ZHIPU_API_KEY 时自动跳过，有 key 时全量跑（含 LLM 触发审批）。
+  # 内核以内存库（AGENTOS_DB_PATH=:memory:）启动，不碰 CI 持久数据。
+  python-e2e:
+    name: Python E2E (kernel + e2e_02)
+    runs-on: ubuntu-latest
+    needs: rust-build
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v4
+        with:
+          enable-cache: true
+          cache-dependency-glob: "uv.lock"
+
+      - name: Sync dependencies + SDK
+        run: |
+          uv sync --frozen --extra dev
+          uv pip install -e ./plugins/sdk
+
+      - name: Build kernel (release, sccache cached)
+        working-directory: kernel
+        run: |
+          cargo install sccache || true
+          cargo +stable build --release --bin agentos-kernel
+
+      - name: Start kernel (in-memory DB, :9100)
+        env:
+          ZHIPU_API_KEY: ${{ secrets.ZHIPU_API_KEY }}
+        run: |
+          AGENTOS_DB_PATH=":memory:" AGENTOS_KERNEL_PORT=9100 \
+            ./kernel/target/release/agentos-kernel > /tmp/kernel.log 2>&1 &
+          for i in $(seq 1 45); do
+            curl -sf http://localhost:9100/health >/dev/null 2>&1 && break
+            sleep 2
+          done
+          curl -sf http://localhost:9100/health && echo " [kernel ready]"
+
+      - name: Run e2e_02 (功能点 e2e；LLM 用例无 key 自动 skip)
+        env:
+          ZHIPU_API_KEY: ${{ secrets.ZHIPU_API_KEY }}
+        run: |
+          PYTHONPATH=${{ github.workspace }}/plugins:${{ github.workspace }}/plugins/sdk/src \
+            uv run --frozen python -m pytest -q \
+              tests/e2e_02/test_04_approval_flow.py \
+              tests/e2e_02/test_05_pipeline_chat.py \
+              tests/e2e_02/test_06_ws_stream.py
+
+      - name: Show kernel log on failure
+        if: failure()
+        run: tail -60 /tmp/kernel.log
