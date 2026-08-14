@@ -1,8 +1,10 @@
 //! Capability 路由器实现——处理 sidecar 插件反向调用内核能力。
 //!
-//! 持有引擎句柄，把 sidecar 的 `<capability>.<method>` 反向调用路由到内核实现：
-//! - pipeline-executor.{suspend, resume, start_run, get_run_status} → AdrEngine/
-//!   StorageBackend（get_run_status 查 run 状态，供复盘轮询真实完成，F-REVIEW-2）
+//! 把 sidecar 的 `<capability>.<method>` 反向调用路由到内核实现：
+//! - pipeline-executor.{suspend, resume, get_run_status} → 直接操作 runs 表
+//!   （0.2 收尾：旧引擎 AdrEngineImpl 已清理，审批挂起/恢复与复盘轮询
+//!   改走 StorageBackend；start_run 占位能力随旧引擎移除，任务执行
+//!   统一走 chat.send_message → PipelineExecutor）
 //! - event-bus.emit → 广播事件（当前记录日志，前端推送留 P1）
 //! - config-reader.get → 读取配置节（从 AppState 配置缓存）
 //! - metrics.record → 写入指标聚合器（监控设计 §三 通道2，第 6 个 capability）
@@ -17,7 +19,7 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use agentos_core::traits::{AdrEngine, CapabilityRegistry, MessageQueryOpts, StorageBackend};
+use agentos_core::traits::{CapabilityRegistry, MessageQueryOpts, StorageBackend};
 use agentos_core::types::{ExecutionRecord, MemoryRecord, PipelineRunSummary};
 use agentos_mcp::{CapabilityRouter, McpError};
 use serde_json::{json, Value};
@@ -33,8 +35,6 @@ const ERR_SERVICE_REGISTRY: i64 = -32020;
 
 /// Capability 路由器实现。
 pub struct KernelCapabilityRouter {
-    /// 管道引擎（处理 pipeline-executor.* 调用）
-    engine: Arc<dyn AdrEngine>,
     /// 指标聚合器（处理 metrics.record 调用，监控设计 §三 通道2）。
     /// None = 不接受插件指标上报（聚合器未启用）。
     metrics: Option<MetricsAggregator>,
@@ -58,9 +58,8 @@ pub struct KernelCapabilityRouter {
 
 impl KernelCapabilityRouter {
     /// 创建路由器（不带指标聚合器，兼容旧调用方）。
-    pub fn new(engine: Arc<dyn AdrEngine>) -> Self {
+    pub fn new() -> Self {
         Self {
-            engine,
             metrics: None,
             invoker: None,
             registry: None,
@@ -71,9 +70,8 @@ impl KernelCapabilityRouter {
     }
 
     /// 创建带指标聚合器的路由器（生产用，启用 metrics.record 反向调用）。
-    pub fn with_metrics(engine: Arc<dyn AdrEngine>, metrics: MetricsAggregator) -> Self {
+    pub fn with_metrics(metrics: MetricsAggregator) -> Self {
         Self {
-            engine,
             metrics: Some(metrics),
             invoker: None,
             registry: None,
@@ -235,7 +233,16 @@ impl CapabilityRouter for KernelCapabilityRouter {
                 // 对齐 0.1 协议（bridge_events._make_event）：信封必须含 pipeline_id +
                 // message_id，否则前端 resolvePipelineId/extractMessageId 失败丢弃。
                 // thinking 系列让前端渲染思考卡片（thinkingHandler.ts）。
-                let stream_events = ["stream_chunk", "thinking_start", "thinking_chunk", "thinking_end"];
+                // stream_end / stream_error：内核收尾裁决也会发（dispatch_user_input），
+                // 插件侧想发同样放行（如 llm_core 感知流中途断掉时主动上报）。
+                let stream_events = [
+                    "stream_chunk",
+                    "thinking_start",
+                    "thinking_chunk",
+                    "thinking_end",
+                    "stream_end",
+                    "stream_error",
+                ];
                 if stream_events.contains(&event_name) {
                     if let Some(session) = &self.session {
                         let thread_id = payload
@@ -352,12 +359,40 @@ impl CapabilityRouter for KernelCapabilityRouter {
                     return Ok(json!({"status": "emitted", "event": event_name}));
                 }
 
-                // 其他未识别 event 暂只记日志
-                tracing::debug!(
-                    target: "capability:event-bus",
-                    "plugin event: {} payload={}",
-                    event_name, payload
-                );
+                // 其他事件名：透传转发（补路由键）。插件自定义事件（如审批类、
+                // widget 交互反馈）经此直接到达前端——"插件经内核推"通道的通用出口，
+                // 前端按 type 订阅即可。与 frontend.emit 同构：payload 整体透传 +
+                // 补 pipeline_id/message_id/_threadId 路由键。
+                if let Some(session) = &self.session {
+                    let thread_id = payload
+                        .get("thread_id")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("");
+                    if !thread_id.is_empty() {
+                        let pipeline_id = payload
+                            .get("pipeline_id")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("");
+                        let message_id = payload
+                            .get("message_id")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("");
+                        let mut data = payload.clone();
+                        if let Some(obj) = data.as_object_mut() {
+                            obj.insert("pipeline_id".to_string(), serde_json::Value::String(pipeline_id.to_string()));
+                            obj.insert("message_id".to_string(), serde_json::Value::String(message_id.to_string()));
+                            obj.insert("_threadId".to_string(), serde_json::Value::String(thread_id.to_string()));
+                        }
+                        let _ = session.emit_event(thread_id, event_name, data).await;
+                        return Ok(json!({"status": "emitted", "event": event_name}));
+                    } else {
+                        tracing::debug!(
+                            target: "capability:event-bus",
+                            event = %event_name,
+                            "透传事件被丢弃（thread_id 空）"
+                        );
+                    }
+                }
                 Ok(json!({"status": "emitted", "event": event_name}))
             }
 
@@ -538,7 +573,7 @@ impl CapabilityRouter for KernelCapabilityRouter {
                 // 纯函数工具（file_read 等）不受影响：SDK 的 _filter_handler_kwargs
                 // (agentos_plugin_sdk/server.py:54) 按 handler 签名过滤参数——无 **kwargs
                 // 的工具自动丢弃这些字段，不会因 unexpected keyword argument 崩溃。
-                let internal_keys = ["_owner", "_log_ctx", "tenant_id", "_call_context"];
+                let internal_keys = ["_owner", "_log_ctx", "tenant_id", "_call_context", "plugin_id"];
                 let mut tool_args = tool_args_raw;
                 if let Some(obj) = tool_args.as_object_mut() {
                     for k in internal_keys {
@@ -557,13 +592,23 @@ impl CapabilityRouter for KernelCapabilityRouter {
                         }
                     }
                 }
-                // 从 CapabilityRegistry 反查 tool_name → plugin_id（tool 插件的 manifest id）
-                let plugin_id = self
-                    .registry
-                    .as_ref()
-                    .and_then(|r| r.get_tool(tool_name))
-                    .map(|td| td.plugin_id.clone())
-                    .unwrap_or_else(|| tool_name.to_string());
+                // 解析目标插件：调用方可显式传 plugin_id（系统插件工具如
+                // hindsight.recall 不在 CapabilityRegistry——ADR 附录D① 只注册
+                // tool 类插件工具给 LLM，反查必然失败）；缺省时从注册表反查
+                // tool_name → plugin_id（tool_core 走 LLM 工具链的既有路径）。
+                let explicit_plugin_id = params
+                    .get("plugin_id")
+                    .and_then(|v| v.as_str())
+                    .filter(|s| !s.is_empty());
+                let plugin_id = match explicit_plugin_id {
+                    Some(pid) => pid.to_string(),
+                    None => self
+                        .registry
+                        .as_ref()
+                        .and_then(|r| r.get_tool(tool_name))
+                        .map(|td| td.plugin_id.clone())
+                        .unwrap_or_else(|| tool_name.to_string()),
+                };
                 let invoker = self.invoker.as_ref().ok_or_else(|| McpError::Protocol {
                     message: "tool-executor 未配置 invoker".to_string(),
                 })?;

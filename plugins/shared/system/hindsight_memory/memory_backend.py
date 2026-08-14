@@ -162,6 +162,7 @@ class HindsightBackend(IMemoryBackend):
             metadata["source"] = source
         params = {
             "tool_name": "hindsight.retain",
+            "plugin_id": "hindsight_memory_service",
             "args": {
                 "bank_id": user_id,
                 "content": content,
@@ -194,7 +195,7 @@ class HindsightBackend(IMemoryBackend):
         }
         if memory_type:
             args["memory_type"] = memory_type
-        params = {"tool_name": "hindsight.recall", "args": args}
+        params = {"tool_name": "hindsight.recall", "plugin_id": "hindsight_memory_service", "args": args}
         try:
             result = await self._call("tool-executor.invoke", params)
         except Exception as e:
@@ -207,7 +208,7 @@ class HindsightBackend(IMemoryBackend):
         args: dict[str, Any] = {"bank_id": user_id}
         if memory_id:
             args["memory_id"] = memory_id
-        params = {"tool_name": "hindsight.delete", "args": args}
+        params = {"tool_name": "hindsight.delete", "plugin_id": "hindsight_memory_service", "args": args}
         try:
             result = await self._call("tool-executor.invoke", params)
         except Exception as e:
@@ -232,7 +233,7 @@ class HindsightBackend(IMemoryBackend):
             args["file_path"] = file_path
         if name:
             args["knowledge_name"] = name
-        params = {"tool_name": "hindsight.import_document", "args": args}
+        params = {"tool_name": "hindsight.import_document", "plugin_id": "hindsight_memory_service", "args": args}
         try:
             result = await self._call("tool-executor.invoke", params)
         except Exception as e:
