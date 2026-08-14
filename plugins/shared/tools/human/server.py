@@ -26,22 +26,27 @@ from typing import Any
 
 sys.path.insert(0, os.path.dirname(__file__))
 
+# 包路径导入（human.models / human.service 等）需要 tools 目录在 sys.path
+_TOOLS_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if _TOOLS_DIR not in sys.path:
+    sys.path.insert(0, _TOOLS_DIR)
+
 # 将 0.1 源码目录加入 sys.path，使老代码的 from tools.* 导入可用
 _PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..', '..', '..'))
 _SRC_ROOT = os.path.join(_PROJECT_ROOT, 'src')
 if os.path.isdir(_SRC_ROOT):
     sys.path.insert(0, _SRC_ROOT)
 
-from agentos_plugin_sdk import AgentOSPlugin  # noqa: E402
-
-from interfaces import IInteractionNotifier  # noqa: E402
-from models import InteractionMode, Priority, ResponseType  # noqa: E402
-from service import (  # noqa: E402
+from human.interfaces import IInteractionNotifier  # noqa: E402
+from human.models import InteractionMode, Priority, ResponseType  # noqa: E402
+from human.service import (  # noqa: E402
     HumanInteractionService,
     InteractionCancelledError,
     InteractionDeniedError,
     InteractionTimeoutError,
 )
+
+from agentos_plugin_sdk import AgentOSPlugin  # noqa: E402
 
 logger = logging.getLogger(__name__)
 plugin = AgentOSPlugin("human_interaction_tool")

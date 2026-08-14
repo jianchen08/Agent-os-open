@@ -20,11 +20,11 @@ from datetime import UTC, datetime
 from typing import Any
 from uuid import uuid4
 
-from interfaces import (
+from human.interfaces import (
     IHumanInteractionService,
     IInteractionNotifier,
 )
-from models import (
+from human.models import (
     InteractionMode,
     InteractionStatus,
     Priority,

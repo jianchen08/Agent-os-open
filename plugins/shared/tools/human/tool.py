@@ -26,6 +26,15 @@ import logging
 from asyncio import CancelledError
 from typing import Any
 
+from human.models import InteractionMode, Priority
+from human.service import (
+    HumanInteractionService,
+    InteractionCancelledError,
+    InteractionDeniedError,
+    InteractionTimeoutError,
+)
+from workspace_aware import WorkspaceAwareMixin
+
 from agentos_plugin_sdk import (
     BuiltinTool,
     Tool,
@@ -36,14 +45,6 @@ from agentos_plugin_sdk import (
     create_failure_result,
     create_success_result,
 )
-from models import InteractionMode, Priority
-from service import (
-    HumanInteractionService,
-    InteractionCancelledError,
-    InteractionDeniedError,
-    InteractionTimeoutError,
-)
-from workspace_aware import WorkspaceAwareMixin
 
 logger = logging.getLogger(__name__)
 

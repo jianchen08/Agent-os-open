@@ -207,7 +207,7 @@ class TestHumanInteractionErrors:
     @pytest.mark.asyncio
     async def test_timeout_maps_to_error_code(self, mod):
         """等待超时 → INTERACTION_TIMEOUT（Agent 可据上下文继续）。"""
-        from service import InteractionTimeoutError
+        from human.service import InteractionTimeoutError
 
         service = _make_service()
         service.wait_for_choice.side_effect = InteractionTimeoutError("req-choice-1", 30)
@@ -219,7 +219,7 @@ class TestHumanInteractionErrors:
     @pytest.mark.asyncio
     async def test_cancelled_maps_to_error_code(self, mod):
         """用户取消 → INTERACTION_CANCELLED。"""
-        from service import InteractionCancelledError
+        from human.service import InteractionCancelledError
 
         service = _make_service()
         service.wait_for_choice.side_effect = InteractionCancelledError("req-choice-1", "用户取消")
@@ -231,7 +231,7 @@ class TestHumanInteractionErrors:
     @pytest.mark.asyncio
     async def test_denied_returns_denied_result(self, mod):
         """用户拒绝 → 成功结果（status=denied），非错误（拒绝是合法结果）。"""
-        from service import InteractionDeniedError
+        from human.service import InteractionDeniedError
 
         service = _make_service()
         service.wait_for_choice.side_effect = InteractionDeniedError("req-choice-1", "我不批准")

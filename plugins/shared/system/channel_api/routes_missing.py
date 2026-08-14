@@ -13,16 +13,15 @@ import time
 from collections.abc import Callable
 from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException, Query
-
 from deps import require_auth
+from fastapi import APIRouter, Depends, HTTPException, Query
 
 logger = logging.getLogger(__name__)
 
 
 def _get_human_interaction_service():
     """延迟加载 human_interaction 服务（0.2 位于 tools/human/service.py）。"""
-    from service import get_human_interaction_service  # noqa: PLC0415
+    from human.service import get_human_interaction_service  # noqa: PLC0415
 
     return get_human_interaction_service()
 

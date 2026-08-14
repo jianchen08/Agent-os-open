@@ -349,9 +349,14 @@ export function useInteractionHandler(sessionId: string | undefined) {
 
   const respondChoice = useCallback(
     async (requestId: string, selectedOption?: string, feedback?: string) => {
-      const sid = useSessionStore.getState().activeSessionId
+      // 优先用交互自身的 sessionId：触发器/后台管道触发的审批没有全局活跃会话，
+      // 依赖 activeSessionId 会让点击静默中止（"审批窗口没有作用"的根因之一）。
+      const interaction = useInteractionStore
+        .getState()
+        .pendingInteractions.find((i) => i.requestId === requestId)
+      const sid = interaction?.sessionId || useSessionStore.getState().activeSessionId
       if (!sid) {
-        console.warn('[InteractionHandler] respondChoice 中止: activeSessionId 为空!')
+        console.warn('[InteractionHandler] respondChoice 中止: 无可用 sessionId!', requestId)
         return
       }
       await globalWS.sendInteractionResponse(sid, requestId, {
@@ -366,9 +371,13 @@ export function useInteractionHandler(sessionId: string | undefined) {
 
   const respondConversation = useCallback(
     async (requestId: string, feedback: string) => {
-      const sid = useSessionStore.getState().activeSessionId
+      // 同 respondChoice：优先交互自身 sessionId（触发器/后台管道场景）
+      const interaction = useInteractionStore
+        .getState()
+        .pendingInteractions.find((i) => i.requestId === requestId)
+      const sid = interaction?.sessionId || useSessionStore.getState().activeSessionId
       if (!sid) {
-        console.warn('[InteractionHandler] respondConversation 中止: activeSessionId 为空!')
+        console.warn('[InteractionHandler] respondConversation 中止: 无可用 sessionId!', requestId)
         return
       }
       await globalWS.sendInteractionResponse(sid, requestId, {

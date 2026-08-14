@@ -14,16 +14,15 @@ from typing import Any
 
 sys.path.insert(0, os.path.dirname(__file__))
 
-from agentos_plugin_sdk import AgentOSPlugin  # noqa: E402
-
 # capabilities.py 的 get_capability() / get_adapter_for_model() 已改为可选导入：
 # 先尝试 from llm_config / from router_factory（本地未提供时 ImportError），
 # 找不到则走 fallback（返回默认空能力 / DefaultAdapter）。
 # 0.1 时代曾用 sys.modules 注入 src.* stub 的兼容层，现已移除——src/ 不再存在。
-
 from adapter import DefaultAdapter, MultimodalAdapter  # noqa: E402
 from capabilities import ModelCapabilityRegistry  # noqa: E402
 from mm_types import AttachmentInfo, MediaType  # noqa: E402
+
+from agentos_plugin_sdk import AgentOSPlugin  # noqa: E402
 
 logger = logging.getLogger(__name__)
 plugin = AgentOSPlugin("multimodal_service")

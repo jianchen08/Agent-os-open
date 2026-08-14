@@ -9,7 +9,7 @@
 from abc import ABC, abstractmethod
 from typing import Any
 
-from models import Priority
+from human.models import Priority
 
 
 class IInteractionNotifier(ABC):

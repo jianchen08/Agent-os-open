@@ -18,7 +18,7 @@
 
 from abc import ABC, abstractmethod
 
-from mm_types import AttachmentInfo, MediaType, ModelCapability
+from multimodal.mm_types import AttachmentInfo, MediaType, ModelCapability
 
 
 class MultimodalAdapter(ABC):

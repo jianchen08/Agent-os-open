@@ -28,11 +28,10 @@ from typing import Any
 # scene 等），以及 tools/human（平铺 `from service import ...`）和 hindsight_memory
 # （`from memory_backend import ...`）。把这些目录加入 sys.path。
 _SYSTEM_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
-_HUMAN_DIR = os.path.abspath(
-    os.path.join(os.path.dirname(__file__), "..", "..", "tools", "human")
-)
+_TOOLS_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "tools"))
+_HUMAN_DIR = os.path.abspath(os.path.join(_TOOLS_DIR, "human"))
 _HINDSIGHT_MEMORY_DIR = os.path.abspath(os.path.join(_SYSTEM_DIR, "hindsight_memory"))
-for _extra in (_SYSTEM_DIR, _HUMAN_DIR, _HINDSIGHT_MEMORY_DIR):
+for _extra in (_SYSTEM_DIR, _TOOLS_DIR, _HUMAN_DIR, _HINDSIGHT_MEMORY_DIR):
     if os.path.isdir(_extra) and _extra not in sys.path:
         sys.path.insert(0, _extra)
 
@@ -819,6 +818,7 @@ async def _handle_asr_domain(
     ASR 未配置时 503（对齐原 handler）。
     """
     import base64 as _b64  # noqa: PLC0415
+
     from fastapi import HTTPException  # noqa: PLC0415
     from multimodal import get_asr_service  # noqa: PLC0415
 
@@ -1057,8 +1057,8 @@ async def _handle_tasks_domain(
     + routes_missing.py task_phase_router（9，/tasks/{id}/phase|ac）。前端 4 块（TASKS/
     PROJECTS/TASK_PHASES/TASK_EVALUATION）全切到此。pydantic 返回值统一 model_dump。
     """
-    import routes_tasks as rt  # noqa: PLC0415
     import routes_missing as rm  # noqa: PLC0415
+    import routes_tasks as rt  # noqa: PLC0415
     from fastapi import HTTPException  # noqa: PLC0415
 
     def _qint(key: str, default: int) -> int | None:
@@ -1458,6 +1458,7 @@ async def _handle_review_media_upload(raw_body: str, headers: dict[str, str]) ->
 
     import os  # noqa: PLC0415
     import tempfile  # noqa: PLC0415
+
     from fastapi import HTTPException  # noqa: PLC0415
 
     try:
@@ -1535,7 +1536,7 @@ def _parse_multipart(content_type: str, body_bytes: bytes) -> dict[str, Any]:
     from email.policy import default as default_policy  # noqa: PLC0415
 
     # 构造一个完整 multipart 消息让 email 解析
-    header = f"Content-Type: {content_type}\r\n\r\n".encode("utf-8")
+    header = f"Content-Type: {content_type}\r\n\r\n".encode()
     msg = email.message_from_bytes(header + body_bytes, policy=default_policy)
     fields: dict[str, Any] = {}
     if not msg.is_multipart():
@@ -1660,6 +1661,7 @@ async def _handle_artifact_upload(raw_body: str, headers: dict[str, str]) -> dic
     import base64 as _b64  # noqa: PLC0415
     import os  # noqa: PLC0415
     import uuid  # noqa: PLC0415
+
     import routes_artifacts as ra  # noqa: PLC0415
     from fastapi import HTTPException  # noqa: PLC0415
 

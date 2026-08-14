@@ -9,13 +9,13 @@
 - ModelCapabilityRegistry：注册表类
 """
 
-from adapter import (
+from multimodal.adapter import (
     ClaudeVisionAdapter,
     DefaultAdapter,
     MultimodalAdapter,
     OpenAIVisionAdapter,
 )
-from mm_types import ModelCapability
+from multimodal.mm_types import ModelCapability
 
 
 class ModelCapabilityRegistry:
