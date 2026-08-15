@@ -3,7 +3,8 @@
 //! 把入站 HTTP 请求路由到插件贡献的端点：
 //! 1. 按 path+method 查 [`CapabilityRegistry`] 的 `http_routes`；
 //! 2. 经 [`HttpHandleCapability`] 把 raw body(base64) + 全量 headers + query
-//!    透传给插件 `http.handle`（**绝不反序列化 body 再转发**——企微 SHA1 验签 + AES 解密吃 raw body）；
+//!    （多值形态 `query_multi`，重复 key 不塌缩；单值 `query` 由其派生）透传给插件
+//!    `http.handle`（**绝不反序列化 body 再转发**——企微 SHA1 验签 + AES 解密吃 raw body）；
 //! 3. 插件返回 `{status, headers, body, body_encoding}`，dispatcher 原样回写（**插件全权控制响应**）；
 //! 4. per-endpoint `timeout_ms`（默认 30000）超时返回 504；
 //!    per-endpoint `max_concurrency`（默认 16）超限返回 503。
@@ -37,7 +38,10 @@ pub struct HttpDispatcher {
 
 impl HttpDispatcher {
     /// 创建 dispatcher。
-    pub fn new(registry: Arc<CapabilityRegistryImpl>, handler: Arc<dyn HttpHandleCapability>) -> Self {
+    pub fn new(
+        registry: Arc<CapabilityRegistryImpl>,
+        handler: Arc<dyn HttpHandleCapability>,
+    ) -> Self {
         Self {
             registry,
             handler,
@@ -47,15 +51,10 @@ impl HttpDispatcher {
 
     /// 获取（或创建）某路由的并发信号量。
     async fn semaphore_for(&self, route: &HttpRouteDescriptor) -> Arc<Semaphore> {
-        let key = (
-            route.endpoint.path.clone(),
-            route.endpoint.method.clone(),
-        );
+        let key = (route.endpoint.path.clone(), route.endpoint.method.clone());
         let mut sems = self.semaphores.lock().await;
         sems.entry(key)
-            .or_insert_with(|| {
-                Arc::new(Semaphore::new(route.max_concurrency() as usize))
-            })
+            .or_insert_with(|| Arc::new(Semaphore::new(route.max_concurrency() as usize)))
             .clone()
     }
 }
@@ -83,14 +82,17 @@ pub enum DispatchOutcome {
 /// * `dispatcher` - dispatcher 实例
 /// * `path` / `method` - 请求路径与方法（路由查找键）
 /// * `raw_body` - 原始请求字节（不反序列化）
-/// * `headers` / `query` - 全量 headers 与查询参数
+/// * `headers` - 全量 headers
+/// * `query_multi` - 查询参数多值形态（key → 全量 value 列表，保序）。单值
+///   `query`（last-wins）由此派生，保证 `query[k] == query_multi[k].last()`——
+///   重复 key（如 `filter=a&filter=b`）不塌缩，多条件 AND 筛选全量到达插件。
 pub async fn dispatch_http(
     dispatcher: &HttpDispatcher,
     path: &str,
     method: &str,
     raw_body: Vec<u8>,
     headers: HashMap<String, String>,
-    query: HashMap<String, String>,
+    query_multi: HashMap<String, Vec<String>>,
 ) -> DispatchOutcome {
     let Some(route) = dispatcher.registry.find_http_route(path, method) else {
         return DispatchOutcome::NotFound;
@@ -110,6 +112,12 @@ pub async fn dispatch_http(
         }
     };
 
+    // 单值 query 从多值派生（last-wins，与旧 HashMap 覆盖语义一致）。
+    let query: HashMap<String, String> = query_multi
+        .iter()
+        .filter_map(|(k, vs)| vs.last().map(|v| (k.clone(), v.clone())))
+        .collect();
+
     // 构造 capability RPC 入参：raw_body base64 透传（绝不反序列化）。
     let req = HttpHandleRequest {
         method: method.to_string(),
@@ -118,6 +126,7 @@ pub async fn dispatch_http(
         raw_body: base64::engine::general_purpose::STANDARD.encode(&raw_body),
         headers,
         query,
+        query_multi,
     };
 
     // per-endpoint timeout（默认 30000ms）。
@@ -149,15 +158,26 @@ pub async fn dispatch_http(
 /// 设计依据 ADR 命名陷阱治理 D.4 / 附录 E.1.3：冲突/越界 fail-closed，
 /// 但**聚合报错而非逐个 panic**——收集所有失败项一次性返回，启动期据此决定是否中止。
 ///
+/// M1：`scopes` 为 Some 时经 guarded 注册并把撤销 guard 登记进 PluginScope。
 /// 返回的错误列表（空 = 全部注册成功）。
 pub fn register_manifest_http_routes(
-    registry: &CapabilityRegistryImpl,
+    registry: &std::sync::Arc<CapabilityRegistryImpl>,
     manifests: &[PluginManifest],
+    scopes: Option<&agentos_plugin_loader::PluginScopeRegistry>,
 ) -> Vec<String> {
     let mut errors = Vec::new();
     for manifest in manifests {
+        let scope = scopes.map(|s| s.scope_of(&manifest.id));
         for ep in &manifest.http_endpoints {
-            if let Err(e) = registry.register_http_route(&manifest.id, ep.clone()) {
+            let result = match &scope {
+                Some(s) => registry
+                    .register_http_route_guarded(&manifest.id, ep.clone())
+                    .map(|(_d, guard)| s.track(guard)),
+                None => registry
+                    .register_http_route(&manifest.id, ep.clone())
+                    .map(|_| ()),
+            };
+            if let Err(e) = result {
                 errors.push(format!("plugin {}: {}", manifest.id, e));
             }
         }
@@ -213,70 +233,87 @@ fn build_wildcard_handler(
     use axum::response::IntoResponse;
 
     // axum::routing::any 注册——任何 method 都走同一 handler。
-    let handler = move |method: Method,
-                         uri: axum::http::Uri,
-                         headers: HeaderMap,
-                         query: axum::extract::Query<HashMap<String, String>>,
-                         body: axum::body::Bytes| {
-        let dispatcher = dispatcher.clone();
-        let plugin_dirs = plugin_dirs.clone();
-        async move {
-            let path = uri.path().to_string();
-
-            // 1) 静态资源直读：命中则直接返回（200 + mime / 404）。
-            if let Some(resp) = try_serve_static_asset(&path, &plugin_dirs) {
-                return resp;
-            }
-
-            // 2) 否则走 dispatcher（若有）。无 dispatcher → 404。
-            let Some(dispatcher) = dispatcher else {
-                return (StatusCode::NOT_FOUND, "route not found").into_response();
-            };
-
-            let method_str = method.as_str().to_string();
-            let headers_map = header_map_to_hashmap(&headers);
-            let raw_body = body.to_vec();
-            let outcome =
-                dispatch_http(&dispatcher, &path, &method_str, raw_body, headers_map, query.0).await;
-            match outcome {
-                DispatchOutcome::Handled(resp) => {
-                    let mut builder = axum::response::Response::builder().status(
-                        StatusCode::from_u16(resp.status).unwrap_or(StatusCode::OK),
-                    );
-                    for (k, v) in &resp.headers {
-                        if let (Ok(name), Ok(val)) =
-                            (HeaderName::try_from(k), HeaderValue::try_from(v))
-                        {
-                            builder = builder.header(name, val);
+    // query 多值解析用 form_urlencoded 手动收集（A1）：serde_urlencoded 的
+    // Query 提取器对重复 key 直接报错（duplicate field → 400），不支持
+    // HashMap<String, Vec<String>> 多值收集；form_urlencoded 逐对解析天然
+    // 保序全量（filter=a&filter=b → filter: [a, b]，不塌缩）。
+    let handler =
+        move |method: Method, uri: axum::http::Uri, headers: HeaderMap, body: axum::body::Bytes| {
+            let dispatcher = dispatcher.clone();
+            let plugin_dirs = plugin_dirs.clone();
+            async move {
+                let path = uri.path().to_string();
+                let query_multi: HashMap<String, Vec<String>> = uri
+                    .query()
+                    .map(|q| {
+                        let mut m: HashMap<String, Vec<String>> = HashMap::new();
+                        for (k, v) in form_urlencoded::parse(q.as_bytes()) {
+                            m.entry(k.to_string()).or_default().push(v.to_string());
                         }
-                    }
-                    let body_bytes = if resp.body.is_empty() {
-                        Vec::new()
-                    } else {
-                        base64::engine::general_purpose::STANDARD
-                            .decode(&resp.body)
-                            .unwrap_or_default()
-                    };
-                    builder.body(Body::from(body_bytes)).unwrap_or_else(|_| {
-                        (StatusCode::INTERNAL_SERVER_ERROR, "response build failed")
-                            .into_response()
+                        m
                     })
+                    .unwrap_or_default();
+
+                // 1) 静态资源直读：命中则直接返回（200 + mime / 404）。
+                if let Some(resp) = try_serve_static_asset(&path, &plugin_dirs) {
+                    return resp;
                 }
-                DispatchOutcome::NotFound => {
-                    (StatusCode::NOT_FOUND, "route not found").into_response()
-                }
-                DispatchOutcome::Timeout => {
-                    (StatusCode::GATEWAY_TIMEOUT, "endpoint timeout").into_response()
-                }
-                DispatchOutcome::ConcurrencyLimited => {
-                    (StatusCode::SERVICE_UNAVAILABLE, "concurrency limit").into_response()
-                }
-                DispatchOutcome::HandlerError(msg) => {
-                    (StatusCode::BAD_GATEWAY, msg).into_response()
+
+                // 2) 否则走 dispatcher（若有）。无 dispatcher → 404。
+                let Some(dispatcher) = dispatcher else {
+                    return (StatusCode::NOT_FOUND, "route not found").into_response();
+                };
+
+                let method_str = method.as_str().to_string();
+                let headers_map = header_map_to_hashmap(&headers);
+                let raw_body = body.to_vec();
+                let outcome = dispatch_http(
+                    &dispatcher,
+                    &path,
+                    &method_str,
+                    raw_body,
+                    headers_map,
+                    query_multi,
+                )
+                .await;
+                match outcome {
+                    DispatchOutcome::Handled(resp) => {
+                        let mut builder = axum::response::Response::builder()
+                            .status(StatusCode::from_u16(resp.status).unwrap_or(StatusCode::OK));
+                        for (k, v) in &resp.headers {
+                            if let (Ok(name), Ok(val)) =
+                                (HeaderName::try_from(k), HeaderValue::try_from(v))
+                            {
+                                builder = builder.header(name, val);
+                            }
+                        }
+                        let body_bytes = if resp.body.is_empty() {
+                            Vec::new()
+                        } else {
+                            base64::engine::general_purpose::STANDARD
+                                .decode(&resp.body)
+                                .unwrap_or_default()
+                        };
+                        builder.body(Body::from(body_bytes)).unwrap_or_else(|_| {
+                            (StatusCode::INTERNAL_SERVER_ERROR, "response build failed")
+                                .into_response()
+                        })
+                    }
+                    DispatchOutcome::NotFound => {
+                        (StatusCode::NOT_FOUND, "route not found").into_response()
+                    }
+                    DispatchOutcome::Timeout => {
+                        (StatusCode::GATEWAY_TIMEOUT, "endpoint timeout").into_response()
+                    }
+                    DispatchOutcome::ConcurrencyLimited => {
+                        (StatusCode::SERVICE_UNAVAILABLE, "concurrency limit").into_response()
+                    }
+                    DispatchOutcome::HandlerError(msg) => {
+                        (StatusCode::BAD_GATEWAY, msg).into_response()
+                    }
                 }
             }
-        }
-    };
+        };
 
     axum::routing::any(handler)
 }
@@ -351,7 +388,10 @@ fn try_serve_static_asset(
     };
 
     let mime = mime_for_extension(
-        canonical_file.extension().and_then(|s| s.to_str()).unwrap_or(""),
+        canonical_file
+            .extension()
+            .and_then(|s| s.to_str())
+            .unwrap_or(""),
     );
 
     let mut builder = axum::response::Response::builder().status(StatusCode::OK);
@@ -420,9 +460,9 @@ fn manifest_path_to_axum(manifest_path: &str) -> String {
             if seg.starts_with('{') && seg.ends_with('}') {
                 let inner = &seg[1..seg.len() - 1]; // 去掉 { }
                 if let Some(name) = inner.strip_suffix(":path") {
-                    format!("{{*{name}}}")  // axum 0.8 多段通配语法 {*name}
+                    format!("{{*{name}}}") // axum 0.8 多段通配语法 {*name}
                 } else {
-                    format!("{{{inner}}}")  // axum 0.8 单段捕获语法 {name}
+                    format!("{{{inner}}}") // axum 0.8 单段捕获语法 {name}
                 }
             } else {
                 seg.to_string()

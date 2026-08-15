@@ -269,7 +269,6 @@ impl ContentLoader {
         }
     }
 
-
     /// 按需加载指定 blob_id 的内容。
     pub async fn load_blob(&self, blob_id: &str) -> Result<Vec<u8>, StorageError> {
         self.store.get_blob(blob_id).await
@@ -426,6 +425,9 @@ pub enum ToolSource {
     Custom,
     /// 数据库配置
     Database,
+    /// 运行时动态注册（G3：插件经 registry.register_tool capability 注册，
+    /// 非 manifest 静态声明；持久化于 dynamic_tools 表，禁用插件即收回）。
+    Dynamic,
 }
 
 /// 工具执行结果。
@@ -512,22 +514,13 @@ pub struct RunRecord {
     pub metadata: Option<serde_json::Value>,
 }
 
-/// messages 表记录——消息表（含分支标识）。
-///
-/// 对应 SQLite 四表中的 `messages` 表。
-///
-/// **关键设计**（ADR ⑤⑦）：
-/// - `branch_id` + `seq_in_branch` 实现多分支模型
-/// - `blob_id` 指向 blobs 表，内容懒加载
-/// - `content_preview` 仅存极短摘要（ADR ④废除完整 preview 机制）
-///
-/// [来源: docs/working/adr_engine_design.md §4.2 表2]
 /// 管道运行快照（统一管道管理查询：`GET /api/v1/pipelines/runs`）。
 ///
 /// runs × message_slots × pipeline_sessions × pipeline_run_summaries 四表联结：
 /// - run → pipeline 映射经 message_slots.run_id（op-based 落槽时写入）；
 /// - pipeline → 会话映射经 pipeline_sessions；
 /// - 消耗账本（total_tokens/total_seconds）经 pipeline_run_summaries（sidecar 写，可为空）。
+///
 /// 无消息槽的 run（旧引擎 start_run 占位）在查询层被过滤，只呈现真实执行的管道。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PipelineRunInfo {
@@ -1033,8 +1026,8 @@ pub enum StorageError {
 }
 
 /// 自动将 [`rusqlite::Error`] 转为 [`StorageError::Database`]，
-/// 错误消息与历史手写 `map_err(|e| StorageError::Database(e.to_string()))` 完全一致。
-/// 这样调用处可直接用 `?` 自动转换，消除重复样板。
+/// 消息格式为 `database error: <rusqlite>`，与 `StorageError::Database` 的 Display 契约一致。
+/// 这样子调用处可直接用 `?` 自动转换，消除重复样板。
 impl From<rusqlite::Error> for StorageError {
     fn from(e: rusqlite::Error) -> Self {
         StorageError::Database(e.to_string())
@@ -1138,6 +1131,60 @@ impl Default for CheckpointConfig {
     }
 }
 
+/// step 列表项：step id / step 库 id / 插件名的引用，可带可选 when 门。
+///
+/// YAML 两种形态（untagged，同一字段集）：
+/// - 裸字符串：`- pipeline_tool_schema`（无 when 门，缺省 True）；
+/// - 对象：`- name: pipeline_godot_context` + `when: "state.selected != ''"`。
+///
+/// 门语义（G9）：引擎在该项 invoke **前**对 state 求值（复用 `eval_condition`
+/// 安全求值器，与路由 when 同语法同求值器），假则整项跳过（零调用）；
+/// 表达式非法按求值器现行兜底返回 false = 跳过。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum StepItem {
+    /// 裸引用（三级命中：当前管道 step id → 公共 step 库 → 插件名）。
+    Bare(String),
+    /// 带 when 门的引用。
+    Gated {
+        /// 引用名（三级命中，同 Bare）。
+        name: String,
+        /// 进入门条件；None 等价 Bare。
+        #[serde(default)]
+        when: Option<String>,
+    },
+}
+
+impl StepItem {
+    /// 引用名（三级命中目标）。
+    pub fn name(&self) -> &str {
+        match self {
+            StepItem::Bare(n) => n,
+            StepItem::Gated { name, .. } => name,
+        }
+    }
+
+    /// when 门条件（None = 无条件执行）。
+    pub fn when(&self) -> Option<&str> {
+        match self {
+            StepItem::Bare(_) => None,
+            StepItem::Gated { when, .. } => when.as_deref(),
+        }
+    }
+}
+
+impl From<&str> for StepItem {
+    fn from(s: &str) -> Self {
+        StepItem::Bare(s.to_string())
+    }
+}
+
+impl From<String> for StepItem {
+    fn from(s: String) -> Self {
+        StepItem::Bare(s)
+    }
+}
+
 /// 管道步骤（统一 step 模型：原子插件和组合节点都是 step）。
 ///
 /// `steps` 字段引用的内容按三级命中规则解析：
@@ -1148,9 +1195,13 @@ impl Default for CheckpointConfig {
 pub struct PipelineStep {
     /// 步骤标识（可被其他 step 的 steps 引用）
     pub id: String,
-    /// 要执行的内容（step id 或插件名，三级命中）
+    /// 要执行的内容（step id 或插件名，三级命中）；项可带 when 门（G9）
     #[serde(default)]
-    pub steps: Vec<String>,
+    pub steps: Vec<StepItem>,
+    /// 本步骤的进入门（G9）：对 state 求值，假则整组跳过（组内零调用）。
+    /// 缺省 None = 无条件执行。语法/求值器与列表项 when、路由 when 同源。
+    #[serde(default)]
+    pub when: Option<String>,
     /// 上下文注入（自由 key-value，执行时 merge 进 state 供插件读取）
     #[serde(default)]
     pub context: HashMap<String, serde_json::Value>,
@@ -1165,12 +1216,18 @@ pub struct PipelineStep {
 /// 管道循环体：管道由多个循环体顺序组成（如 init → main → exit）。
 ///
 /// 每个循环体拥有独立的 steps 与循环配置：
-/// - `loop_config` 缺省/disabled → 单次执行（前处理/后处理体，如 init/exit）；
-/// - `loop_config` enabled → 循环执行直至 `ended` / `suspended` / `max_iterations`；
+/// - `loop_config` 缺省/disabled 且无 `while_cond` → 单次执行（前处理/后处理体，如 init/exit）；
+/// - `loop_config` enabled 或 `while_cond` 存在 → 循环执行直至 `ended` / `suspended` /
+///   `while_cond` 为假 / `max_iterations`；
 /// - 循环体结束后的转移：`exit_routes` 命中（`RouteNext::Phase`）→ 跳转到指定循环体；
 ///   未命中/未声明 → 默认顺序进入下一个循环体；最后一个循环体结束 = run 结束。
 /// - `run_on_error`：管道提前终止（`ended` / 出错）时仍执行本循环体（收尾语义，
 ///   如 exit 体的 workspace 合并与环境释放）。挂起（`suspended`）不触发。
+///
+/// `while_cond` 与 `loop_config` 的关系（G10 统一 DSL）：`while: "expr"` 是循环体
+/// 循环继续条件的表达式形态（条件永远 `when`/`while`、目标永远 `then`、缺省顺序
+/// 推进的单一风格），与 `loop_config.enabled` 兼容并存——任一开启即循环模式，
+/// 每轮循环开头对 `while_cond` 求值（同一 `eval_condition` 求值器），假则退出循环。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LoopBody {
     /// 循环体标识（执行期间写入 `state["current_phase"]`，插件据此分发）
@@ -1178,9 +1235,13 @@ pub struct LoopBody {
     /// 循环体内的步骤（三级命中：当前管道 step id / 公共 step 库 / 插件名）
     #[serde(default)]
     pub steps: Vec<PipelineStep>,
-    /// 本循环体的循环配置；None/disabled = 单次执行
+    /// 本循环体的循环配置；None/disabled 且无 while_cond = 单次执行
     #[serde(default)]
     pub loop_config: Option<LoopConfig>,
+    /// 循环继续条件表达式（G10 新 DSL `while: "expr"`）；None = 无条件。
+    /// YAML 书写键为 `while`（Rust 关键字规避，serde rename）。
+    #[serde(default, skip_serializing_if = "Option::is_none", rename = "while")]
+    pub while_cond: Option<String>,
     /// 循环体结束后的转移路由（默认顺序进入下一个循环体）
     #[serde(default)]
     pub exit_routes: Vec<Route>,
@@ -1248,6 +1309,7 @@ impl PipelineConfig {
                 id: "main".to_string(),
                 steps,
                 loop_config: Some(loop_config),
+                while_cond: None,
                 exit_routes: vec![],
                 run_on_error: false,
             }],

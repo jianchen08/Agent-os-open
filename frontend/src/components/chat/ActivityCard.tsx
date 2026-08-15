@@ -25,6 +25,7 @@ import {
 import { useEffect, useRef, useState } from 'react'
 import { TextDiffView } from '@/components/approval'
 import { MarkdownRenderer } from '@/components/chat/markdown/MarkdownRenderer'
+import { DiffBlock, ReadBlock, SearchBlock, TerminalBlock, WebBlock } from '@/components/vendor/dsh'
 import { TOOL_CONTENT_SCROLL_CLASS } from '@/lib/toolCardStyles'
 import { cn } from '@/lib/utils'
 import { formatDuration } from '@/types/activity'
@@ -304,6 +305,94 @@ const LogBlockView: FC<{ content: string }> = ({ content }) => {
 }
 
 /**
+ * DSH vendor 卡渲染（task_dsh_plugin_adapter 任务 3）。
+ *
+ * render 意图路由（dshRenderIntent.ts）产出的 `dsh:*` 区块在此落到移植的
+ * DSH 组件；props 由纯函数构造，此处只做窄化断言。未知/坏 payload 降级为
+ * JSON 预览（不崩渲染）。
+ */
+const DshBlockView: FC<{ contentType: string; props: Record<string, unknown> }> = ({ contentType, props }) => {
+  try {
+    switch (contentType) {
+      case 'dsh:diff': {
+        const diffs = Array.isArray(props.diffs) ? props.diffs as { path: string; oldText: string | null; newText: string }[] : []
+        return <DiffBlock diffs={diffs} />
+      }
+      case 'dsh:read': {
+        return (
+          <ReadBlock
+            label={typeof props.label === 'string' ? props.label : undefined}
+            lines={Array.isArray(props.lines) ? props.lines as { number: number; text: string }[] : []}
+            totalLines={typeof props.totalLines === 'number' ? props.totalLines : 0}
+            lang={typeof props.lang === 'string' ? props.lang : undefined}
+          />
+        )
+      }
+      case 'dsh:terminal': {
+        return (
+          <TerminalBlock
+            command={typeof props.command === 'string' ? props.command : ''}
+            cwd={typeof props.cwd === 'string' ? props.cwd : undefined}
+            output={typeof props.output === 'string' ? props.output : undefined}
+            exitCode={typeof props.exitCode === 'number' ? props.exitCode : undefined}
+            running={props.running === true}
+          />
+        )
+      }
+      case 'dsh:search': {
+        if (props.kind === 'paths') {
+          return (
+            <SearchBlock
+              kind="paths"
+              paths={Array.isArray(props.paths) ? props.paths as string[] : []}
+              truncated={props.truncated === true}
+              total={typeof props.total === 'number' ? props.total : 0}
+            />
+          )
+        }
+        return (
+          <SearchBlock
+            kind="matches"
+            files={Array.isArray(props.files) ? props.files as { path: string; matches: { lineNumber: number; line: string }[] }[] : []}
+            truncated={props.truncated === true}
+            total={typeof props.total === 'number' ? props.total : 0}
+          />
+        )
+      }
+      case 'dsh:web': {
+        if (props.kind === 'fetch') {
+          return (
+            <WebBlock
+              kind="fetch"
+              url={typeof props.url === 'string' ? props.url : ''}
+              statusCode={typeof props.statusCode === 'number' ? props.statusCode : 0}
+              truncated={props.truncated === true}
+            />
+          )
+        }
+        return (
+          <WebBlock
+            kind="search"
+            answer={typeof props.answer === 'string' ? props.answer : undefined}
+            sources={Array.isArray(props.sources) ? props.sources as { url: string; title?: string; snippet?: string; publishedAt?: string }[] : []}
+            truncated={props.truncated === true}
+          />
+        )
+      }
+      default:
+        break
+    }
+  } catch {
+    // 坏 payload 落入下方 JSON 兜底
+  }
+  return (
+    <pre className={`bg-muted/30 ${TOOL_CONTENT_SCROLL_CLASS} rounded p-2 text-xs`}>
+      {JSON.stringify(props, null, 2)}
+    </pre>
+  )
+}
+
+/**
  * 详情区块组件
  */
 const DetailBlock: FC<{ block: ActivityDetailBlock }> = ({ block }) => {
@@ -313,6 +402,13 @@ const DetailBlock: FC<{ block: ActivityDetailBlock }> = ({ block }) => {
   const renderContent = () => {
     const content = block.content
     const contentType = block.contentType || 'text'
+
+    // DSH vendor 卡（task_dsh_plugin_adapter 任务 3）：render 意图路由产物。
+    // 必须先于下方 object→JSON 兜底（dsh 卡的 content 是结构化 props 而非
+    // 待展示 JSON）；payload 由 dshRenderIntent 的纯函数构造，字段类型可控。
+    if (contentType.startsWith('dsh:')) {
+      return <DshBlockView contentType={contentType} props={block.dshProps ?? {}} />
+    }
 
     if (typeof content === 'object') {
       const text = JSON.stringify(content, null, 2)

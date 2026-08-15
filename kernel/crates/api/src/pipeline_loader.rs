@@ -14,11 +14,247 @@
 //!   缺省配置下仍可启动（降级为 echo）。
 //! - 文件存在但解析失败：返回 `Err`（带上下文，方便定位）。
 //! - 重名检测在 [`bin/agentos-kernel.rs`] 调用，冲突则 panic 退出。
+//!
+//! ## G10 统一 DSL（2026-08-15）
+//!
+//! YAML 侧新增新 DSL 形态（条件永远 `when`、目标永远 `then`、缺省顺序推进）：
+//! - 转移写在 `next:` 列表：`- when: "expr"` + `then: <目标>`，目标为
+//!   `end` / `loop` / step id（step 级）/ 循环体 id；`set:` 可附带 state 写入。
+//! - 循环体循环条件：`while: "expr"`（与 `loop_config` 兼容并存，任一开启即循环）。
+//! - 旧形态（`routes:` / `exit_routes:` 的 `{when, then:{next,set}}` 对象）兼容解析。
+//!
+//! 解析分两层：`*File` 结构（YAML 直译，承载两种形态）→ 归一为内部
+//! [`PipelineConfig`]（[`PipelineFile::to_internal`]：`next` 的 `then` 字符串在
+//! 归一阶段解析为 [`RouteNext`]——body/step 目标全集在本文件内即可判定，未知目标
+//! 在加载期报错，不静默）。
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
-use agentos_core::types::{PipelineConfig, PipelineStep, RouteNext, StepLibrary};
+use serde::Deserialize;
+
+use agentos_core::types::{
+    CheckpointConfig, LoopBody, LoopConfig, PipelineConfig, PipelineStep, Route, RouteAction,
+    RouteNext, StepItem, StepLibrary,
+};
+
+// ═════════════════════════════════════════════════════════════════
+// YAML 文件形态（G10：新旧 DSL 双形态解析层）
+// ═════════════════════════════════════════════════════════════════
+
+/// 转移分支：新 DSL 形态 `{when?, then: 目标字符串, set?}` 或旧形态
+/// `{when, then: {next, set}}`（untagged 按声明顺序尝试，`then` 字符串 vs 对象天然区分）。
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+enum TransitionFile {
+    /// 新 DSL：目标为字符串（end / loop / step id / body id），归一时解析。
+    New {
+        /// 条件表达式；缺省 None = 恒真（True）。
+        #[serde(default)]
+        when: Option<String>,
+        /// 目标字符串。
+        then: String,
+        /// 命中时写入 state 的字段（可省）。
+        #[serde(default)]
+        set: HashMap<String, serde_json::Value>,
+    },
+    /// 旧形态：`then` 为 `{next, set}` 对象（0.2 早期 routes/exit_routes 写法）。
+    Legacy(Route),
+}
+
+impl TransitionFile {
+    /// 归一为内部 [`Route`]。
+    ///
+    /// `then` 目标解析（新 DSL）：`end` / `loop` / 循环体 id（Phase）/ step id（Step，
+    /// 仅 step 级转移，目标须在当前 body 的 step id 集内）。未知目标 → 语义错误。
+    ///
+    /// # Arguments
+    /// - `body_ids`：全部循环体 id 集（Phase 目标判定）。
+    /// - `local_step_ids`：当前 body 内 step id 集（Step 目标判定；None = 循环体级
+    ///   转移，不接受 step 目标）。
+    /// - `location`：定位串（如 `"step 'post'"`），错误信息用。
+    fn into_route(
+        self,
+        body_ids: &HashSet<String>,
+        local_step_ids: Option<&HashSet<String>>,
+        location: &str,
+    ) -> Result<Route, PipelineLoadError> {
+        let (when, then, set) = match self {
+            TransitionFile::New { when, then, set } => {
+                let next = match then.as_str() {
+                    "end" => RouteNext::End,
+                    "loop" => RouteNext::Loop,
+                    "wait" => {
+                        return Err(PipelineLoadError::InvalidConfig(format!(
+                            "{location}: 转移目标 'wait' 已不支持的 DSL（挂起由插件设 state.suspended 表达）"
+                        )))
+                    }
+                    target => {
+                        if let Some(local) = local_step_ids {
+                            if local.contains(target) {
+                                RouteNext::Step(target.to_string())
+                            } else if body_ids.contains(target) {
+                                RouteNext::Phase(target.to_string())
+                            } else {
+                                return Err(PipelineLoadError::InvalidConfig(format!(
+                                    "{location}: 转移目标 '{target}' 未知（期望 end / loop / 本循环体内 step id / 循环体 id）"
+                                )));
+                            }
+                        } else if body_ids.contains(target) {
+                            RouteNext::Phase(target.to_string())
+                        } else {
+                            return Err(PipelineLoadError::InvalidConfig(format!(
+                                "{location}: 循环体出口转移目标 '{target}' 未知（期望 end / 循环体 id）"
+                            )));
+                        }
+                    }
+                };
+                (when.unwrap_or_else(|| "True".to_string()), next, set)
+            }
+            TransitionFile::Legacy(route) => return Ok(route),
+        };
+        Ok(Route {
+            when,
+            then: RouteAction { next: then, set },
+        })
+    }
+}
+
+/// 管道 YAML 文件形态（`*File` 结构直接对应 YAML 书写，归一后才进引擎类型）。
+#[derive(Debug, Deserialize)]
+struct PipelineFile {
+    name: String,
+    #[serde(default)]
+    loop_bodies: Vec<LoopBodyFile>,
+    #[serde(default)]
+    checkpoint: CheckpointConfig,
+}
+
+impl PipelineFile {
+    /// 归一为内部 [`PipelineConfig`]（`next`/`while` → `exit_routes`/`while_cond`）。
+    #[allow(clippy::wrong_self_convention)] // 消费型转换（File 结构一次性归一到内部类型）
+    fn to_internal(self) -> Result<PipelineConfig, PipelineLoadError> {
+        let body_ids: HashSet<String> = self.loop_bodies.iter().map(|b| b.id.clone()).collect();
+        let mut loop_bodies = Vec::with_capacity(self.loop_bodies.len());
+        for body in self.loop_bodies {
+            loop_bodies.push(body.to_internal(&body_ids)?);
+        }
+        Ok(PipelineConfig {
+            name: self.name,
+            loop_bodies,
+            checkpoint: self.checkpoint,
+        })
+    }
+}
+
+/// 循环体 YAML 形态。
+#[derive(Debug, Deserialize)]
+struct LoopBodyFile {
+    id: String,
+    #[serde(default)]
+    steps: Vec<StepFile>,
+    #[serde(default)]
+    loop_config: Option<LoopConfig>,
+    /// 新 DSL：循环体循环继续条件（YAML 键 `while`）。
+    #[serde(default, rename = "while")]
+    while_cond: Option<String>,
+    /// 新 DSL：循环体出口转移（目标 = end / 循环体 id）。
+    #[serde(default)]
+    next: Vec<TransitionFile>,
+    /// 旧形态兼容：循环体出口转移对象形态。
+    #[serde(default)]
+    exit_routes: Vec<Route>,
+    #[serde(default)]
+    run_on_error: bool,
+}
+
+#[allow(clippy::wrong_self_convention)] // 消费型转换
+impl LoopBodyFile {
+    fn to_internal(self, body_ids: &HashSet<String>) -> Result<LoopBody, PipelineLoadError> {
+        // step 级转移的 Step 目标判定需要本 body 的 step id 全集
+        let local_step_ids: HashSet<String> = self.steps.iter().map(|s| s.id.clone()).collect();
+        let location = format!("循环体 '{}'", self.id);
+
+        let mut next_routes: Vec<Route> =
+            Vec::with_capacity(self.next.len() + self.exit_routes.len());
+        // 循环体级转移：目标只接受 end / 循环体 id（step 级转移才接受 step id）
+        for t in self.next {
+            next_routes.push(t.into_route(body_ids, None, &location)?);
+        }
+        // 旧形态 exit_routes 与新形态 next 并存时以 next 为准（warn 提示）
+        if !self.exit_routes.is_empty() {
+            if !next_routes.is_empty() {
+                tracing::warn!("{location}: 同时声明 next 与 exit_routes，以 next 为准");
+            } else {
+                next_routes = self.exit_routes;
+            }
+        }
+
+        let mut steps = Vec::with_capacity(self.steps.len());
+        for step in self.steps {
+            steps.push(step.to_internal(body_ids, &local_step_ids, &location)?);
+        }
+        Ok(LoopBody {
+            id: self.id,
+            steps,
+            loop_config: self.loop_config,
+            while_cond: self.while_cond,
+            exit_routes: next_routes,
+            run_on_error: self.run_on_error,
+        })
+    }
+}
+
+/// step YAML 形态。
+#[derive(Debug, Deserialize)]
+struct StepFile {
+    id: String,
+    #[serde(default)]
+    steps: Vec<StepItem>,
+    #[serde(default)]
+    when: Option<String>,
+    #[serde(default)]
+    context: HashMap<String, serde_json::Value>,
+    /// 新 DSL：出口转移（目标 = end / loop / 本循环体内 step id / 循环体 id）。
+    #[serde(default)]
+    next: Vec<TransitionFile>,
+    /// 旧形态兼容：出口转移对象形态。
+    #[serde(default)]
+    routes: Vec<Route>,
+    #[serde(default)]
+    loop_config: Option<LoopConfig>,
+}
+
+#[allow(clippy::wrong_self_convention)] // 消费型转换
+impl StepFile {
+    fn to_internal(
+        self,
+        body_ids: &HashSet<String>,
+        local_step_ids: &HashSet<String>,
+        body_location: &str,
+    ) -> Result<PipelineStep, PipelineLoadError> {
+        let location = format!("{body_location} / step '{}'", self.id);
+        let mut next_routes: Vec<Route> = Vec::with_capacity(self.next.len() + self.routes.len());
+        for t in self.next {
+            next_routes.push(t.into_route(body_ids, Some(local_step_ids), &location)?);
+        }
+        if !self.routes.is_empty() {
+            if !next_routes.is_empty() {
+                tracing::warn!("{location}: 同时声明 next 与 routes，以 next 为准");
+            } else {
+                next_routes = self.routes;
+            }
+        }
+        Ok(PipelineStep {
+            id: self.id,
+            steps: self.steps,
+            when: self.when,
+            context: self.context,
+            routes: next_routes,
+            loop_config: self.loop_config,
+        })
+    }
+}
 
 /// 加载管道配置（`config/pipelines/autonomous.yaml` → [`PipelineConfig`]）。
 ///
@@ -41,8 +277,9 @@ pub fn load_pipeline_config(config_root: &Path) -> Result<PipelineConfig, Pipeli
     }
     let raw = std::fs::read_to_string(&path)
         .map_err(|e| PipelineLoadError::ReadFile(path.clone(), e.to_string()))?;
-    let config: PipelineConfig = serde_yaml::from_str(&raw)
+    let file: PipelineFile = serde_yaml::from_str(&raw)
         .map_err(|e| PipelineLoadError::ParseYaml(path.clone(), e.to_string()))?;
+    let config = file.to_internal().map_err(|e| e.with_path(path.clone()))?;
     Ok(config)
 }
 
@@ -135,7 +372,10 @@ pub fn validate_no_name_conflicts(
     let mut seen_body: HashSet<&str> = HashSet::new();
     for body in &pipeline.loop_bodies {
         if !seen_body.insert(body.id.as_str()) {
-            return Err(format!("循环体 id '{}' 重复（在 pipeline 配置中）", body.id));
+            return Err(format!(
+                "循环体 id '{}' 重复（在 pipeline 配置中）",
+                body.id
+            ));
         }
     }
 
@@ -162,16 +402,8 @@ pub fn validate_no_name_conflicts(
     }
 
     // ⑤ Phase 转移目标必须存在（step 级路由 + 循环体 exit_routes）
-    let body_ids: HashSet<&str> = pipeline
-        .loop_bodies
-        .iter()
-        .map(|b| b.id.as_str())
-        .collect();
-    for step in pipeline
-        .loop_bodies
-        .iter()
-        .flat_map(|b| b.steps.iter())
-    {
+    let body_ids: HashSet<&str> = pipeline.loop_bodies.iter().map(|b| b.id.as_str()).collect();
+    for step in pipeline.loop_bodies.iter().flat_map(|b| b.steps.iter()) {
         for route in &step.routes {
             if let RouteNext::Phase(id) = &route.then.next {
                 if !body_ids.contains(id.as_str()) {
@@ -208,6 +440,20 @@ pub enum PipelineLoadError {
     ReadDir(PathBuf, String),
     /// YAML 解析失败（路径 + 原因）
     ParseYaml(PathBuf, String),
+    /// 配置语义错误（如新 DSL 转移目标不存在；归一阶段产生，可携带路径）
+    InvalidConfig(String),
+}
+
+impl PipelineLoadError {
+    /// 把语义错误（无路径）绑定到触发文件路径。
+    fn with_path(self, path: PathBuf) -> Self {
+        match self {
+            PipelineLoadError::InvalidConfig(msg) => {
+                PipelineLoadError::InvalidConfig(format!("{}: {msg}", path.display()))
+            }
+            other => other,
+        }
+    }
 }
 
 impl std::fmt::Display for PipelineLoadError {
@@ -222,6 +468,7 @@ impl std::fmt::Display for PipelineLoadError {
             PipelineLoadError::ParseYaml(p, why) => {
                 write!(f, "解析 YAML {} 失败: {}", p.display(), why)
             }
+            PipelineLoadError::InvalidConfig(msg) => write!(f, "配置语义错误: {msg}"),
         }
     }
 }
@@ -271,15 +518,57 @@ loop_bodies:
         assert_eq!(cfg.name, "test_pipeline");
         assert_eq!(cfg.loop_bodies.len(), 2);
         assert_eq!(cfg.loop_bodies[0].id, "init");
-        assert!(!cfg.loop_bodies[0].loop_config.as_ref().map(|c| c.enabled).unwrap_or(false));
+        assert!(!cfg.loop_bodies[0]
+            .loop_config
+            .as_ref()
+            .map(|c| c.enabled)
+            .unwrap_or(false));
         let main = &cfg.loop_bodies[1];
         assert_eq!(main.id, "main");
         assert!(main.loop_config.as_ref().unwrap().enabled);
         assert_eq!(main.loop_config.as_ref().unwrap().max_iterations, 5);
         assert_eq!(main.steps.len(), 1);
         assert_eq!(main.steps[0].id, "prepare");
-        assert_eq!(main.steps[0].steps, vec!["tool_schema".to_string()]);
+        assert_eq!(
+            main.steps[0].steps,
+            vec![agentos_core::types::StepItem::Bare(
+                "tool_schema".to_string()
+            )]
+        );
         assert_eq!(main.steps[0].context.get("agent_id").unwrap(), "A1");
+    }
+
+    /// G9：steps 列表项的 when 门 YAML 形态解析（裸串 + 对象两种写法共存）。
+    #[test]
+    fn test_step_item_when_gate_yaml_forms() {
+        let yaml = r#"
+name: gate_pipeline
+loop_bodies:
+  - id: main
+    steps:
+      - id: body
+        when: "state.turn_count > 1"
+        steps:
+          - tool_schema
+          - name: godot_context
+            when: "state.selected != ''"
+"#;
+        let config: PipelineConfig = serde_yaml::from_str(yaml).unwrap();
+        let body = &config.loop_bodies[0].steps[0];
+        assert_eq!(
+            body.when.as_deref(),
+            Some("state.turn_count > 1"),
+            "组级 when 门"
+        );
+        assert_eq!(body.steps.len(), 2);
+        assert_eq!(body.steps[0].name(), "tool_schema");
+        assert!(body.steps[0].when().is_none(), "裸串形态无门");
+        assert_eq!(body.steps[1].name(), "godot_context");
+        assert_eq!(
+            body.steps[1].when(),
+            Some("state.selected != ''"),
+            "对象形态带门"
+        );
     }
 
     /// 文件不存在 → 返回默认配置（不报错）。
@@ -338,6 +627,7 @@ loop_bodies:
                 id: "main".into(),
                 steps,
                 loop_config: None,
+                while_cond: None,
                 exit_routes: vec![],
                 run_on_error: false,
             }],
@@ -349,6 +639,7 @@ loop_bodies:
         PipelineStep {
             id: id.into(),
             steps: vec![],
+            when: None,
             context: HashMap::new(),
             routes: vec![],
             loop_config: None,
@@ -376,6 +667,7 @@ loop_bodies:
                     id: "main".into(),
                     steps: vec![],
                     loop_config: None,
+                    while_cond: None,
                     exit_routes: vec![],
                     run_on_error: false,
                 },
@@ -383,6 +675,7 @@ loop_bodies:
                     id: "main".into(),
                     steps: vec![],
                     loop_config: None,
+                    while_cond: None,
                     exit_routes: vec![],
                     run_on_error: false,
                 },
@@ -392,7 +685,10 @@ loop_bodies:
         let lib = StepLibrary::default();
         let plugin_ids = HashSet::new();
         let err = validate_no_name_conflicts(&pipeline, &lib, &plugin_ids).unwrap_err();
-        assert!(err.contains("main"), "err should name the conflicting id: {err}");
+        assert!(
+            err.contains("main"),
+            "err should name the conflicting id: {err}"
+        );
         assert!(err.contains("循环体"));
     }
 
@@ -403,7 +699,10 @@ loop_bodies:
         let lib = StepLibrary::default();
         let plugin_ids = HashSet::new();
         let err = validate_no_name_conflicts(&pipeline, &lib, &plugin_ids).unwrap_err();
-        assert!(err.contains("dup"), "err should name the conflicting id: {err}");
+        assert!(
+            err.contains("dup"),
+            "err should name the conflicting id: {err}"
+        );
         assert!(err.contains("重复"));
     }
 
@@ -424,7 +723,8 @@ loop_bodies:
     fn test_validate_conflict_library_step_vs_plugin_id() {
         let pipeline = single_body_pipeline("p", vec![]);
         let mut lib = StepLibrary::default();
-        lib.steps.insert("doc_extract".into(), make_step("doc_extract"));
+        lib.steps
+            .insert("doc_extract".into(), make_step("doc_extract"));
         let mut plugin_ids = HashSet::new();
         plugin_ids.insert("doc_extract".to_string());
         let err = validate_no_name_conflicts(&pipeline, &lib, &plugin_ids).unwrap_err();
@@ -441,6 +741,7 @@ loop_bodies:
                 id: "init".into(),
                 steps: vec![],
                 loop_config: None,
+                while_cond: None,
                 exit_routes: vec![Route {
                     when: "True".into(),
                     then: RouteAction {
@@ -457,6 +758,231 @@ loop_bodies:
         let err = validate_no_name_conflicts(&pipeline, &lib, &plugin_ids).unwrap_err();
         assert!(err.contains("nonexistent"), "err: {err}");
         assert!(err.contains("Phase"));
+    }
+
+    /// G10 统一 DSL：next 形态解析——then 目标字符串归一为 RouteNext
+    /// （end / loop / 本循环体内 step id / 循环体 id），while 归一为 while_cond。
+    #[test]
+    fn test_g10_next_dsl_forms() {
+        let yaml = r#"
+name: dsl_pipeline
+loop_bodies:
+  - id: main
+    while: "state.turn < 5"
+    steps:
+      - id: core
+        steps:
+          - a
+        next:
+          - when: "core_type == 'tool_execute'"
+            then: core
+            set:
+              core_type: llm_call
+          - when: "raw_tool_calls != []"
+            then: loop
+          - then: end
+  - id: exit
+    run_on_error: true
+    steps:
+      - id: fin
+        steps:
+          - b
+        next:
+          - when: "True"
+            then: main
+"#;
+        let config: PipelineConfig = serde_yaml::from_str::<PipelineFile>(yaml)
+            .unwrap()
+            .to_internal()
+            .unwrap();
+        let main = &config.loop_bodies[0];
+        assert_eq!(
+            main.while_cond.as_deref(),
+            Some("state.turn < 5"),
+            "while 归一"
+        );
+        let core = &main.steps[0];
+        assert_eq!(core.routes.len(), 3, "next 三条全部归一为 routes");
+        // then: core（本 body step id）→ Step
+        assert_eq!(core.routes[0].then.next, RouteNext::Step("core".into()));
+        assert_eq!(
+            core.routes[0].then.set.get("core_type").unwrap(),
+            "llm_call",
+            "set 保留"
+        );
+        // then: loop → Loop（when 保留原文）
+        assert_eq!(core.routes[1].then.next, RouteNext::Loop);
+        assert_eq!(core.routes[1].when, "raw_tool_calls != []");
+        // then: end + 缺省 when → True
+        assert_eq!(core.routes[2].then.next, RouteNext::End);
+        assert_eq!(core.routes[2].when, "True");
+        // step 级 then: main（循环体 id，跨体）→ Phase
+        assert_eq!(
+            config.loop_bodies[1].steps[0].routes[0].then.next,
+            RouteNext::Phase("main".into())
+        );
+    }
+
+    /// G10 统一 DSL：循环体级 next 的目标只接受 end / 循环体 id。
+    #[test]
+    fn test_g10_body_next_phase_target() {
+        let yaml = r#"
+name: dsl_pipeline
+loop_bodies:
+  - id: init
+    steps: []
+    next:
+      - when: "done == true"
+        then: main
+      - when: "True"
+        then: end
+  - id: main
+    steps: []
+"#;
+        let config: PipelineConfig = serde_yaml::from_str::<PipelineFile>(yaml)
+            .unwrap()
+            .to_internal()
+            .unwrap();
+        let init = &config.loop_bodies[0];
+        assert_eq!(init.exit_routes.len(), 2);
+        assert_eq!(
+            init.exit_routes[0].then.next,
+            RouteNext::Phase("main".into())
+        );
+        assert_eq!(init.exit_routes[1].then.next, RouteNext::End);
+    }
+
+    /// G10 统一 DSL：未知 then 目标 → 加载期语义错误（不静默）。
+    #[test]
+    fn test_g10_unknown_then_target_errors() {
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path();
+        fs::create_dir_all(root.join("pipelines")).unwrap();
+        fs::write(
+            root.join("pipelines/autonomous.yaml"),
+            r#"
+name: bad
+loop_bodies:
+  - id: main
+    steps:
+      - id: core
+        steps: []
+        next:
+          - then: ghost_step
+"#,
+        )
+        .unwrap();
+        let err = load_pipeline_config(root).unwrap_err();
+        assert!(
+            matches!(err, PipelineLoadError::InvalidConfig(_)),
+            "期望语义错误，got {err:?}"
+        );
+        let msg = err.to_string();
+        assert!(msg.contains("ghost_step"), "错误应点名未知目标: {msg}");
+        assert!(msg.contains("core"), "错误应带定位: {msg}");
+    }
+
+    /// G10 统一 DSL：循环体级 next 不接受 step id 目标。
+    #[test]
+    fn test_g10_body_next_rejects_step_target() {
+        let yaml = r#"
+name: bad
+loop_bodies:
+  - id: main
+    steps:
+      - id: core
+        steps: []
+    next:
+      - then: core
+"#;
+        let err = serde_yaml::from_str::<PipelineFile>(yaml)
+            .unwrap()
+            .to_internal()
+            .unwrap_err();
+        assert!(matches!(err, PipelineLoadError::InvalidConfig(_)));
+        assert!(err.to_string().contains("循环体出口转移"));
+    }
+
+    /// G10 端到端：仓库真实 config/pipelines/autonomous.yaml 用新 DSL 形态加载。
+    /// （加载 + 归一成功即证明迁移后的 YAML 可被引擎消费；编译校验在启动期 fail-fast。）
+    #[test]
+    fn test_real_autonomous_yaml_loads_after_dsl_migration() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../..")
+            .join("config");
+        if !root.join("pipelines/autonomous.yaml").exists() {
+            eprintln!("跳过：仓库 config 目录不存在（{root:?}）");
+            return;
+        }
+        let cfg = load_pipeline_config(&root).expect("真实 autonomous.yaml 应能加载");
+        assert_eq!(cfg.name, "autonomous");
+        // 三个循环体：init / main / exit
+        assert_eq!(
+            cfg.loop_bodies.len(),
+            3,
+            "bodies: {:?}",
+            cfg.loop_bodies.iter().map(|b| &b.id).collect::<Vec<_>>()
+        );
+        // main / post：新 DSL next 归一为 routes（3 条：loop + loop + end）
+        let main = cfg
+            .loop_bodies
+            .iter()
+            .find(|b| b.id == "main")
+            .expect("main");
+        let post = main
+            .steps
+            .iter()
+            .find(|s| s.id == "post")
+            .expect("post step");
+        assert_eq!(post.routes.len(), 3, "post next 三条");
+        assert_eq!(post.routes[0].then.next, RouteNext::Loop);
+        assert_eq!(
+            post.routes[0].when,
+            "raw_tool_calls != [] and raw_tool_calls != None"
+        );
+        assert_eq!(post.routes[2].then.next, RouteNext::End);
+        assert_eq!(post.routes[2].when, "True", "缺省 when 归一为 True");
+        // 动态 core_plugin 项保留（引擎动态点）
+        let core = main
+            .steps
+            .iter()
+            .find(|s| s.id == "core")
+            .expect("core step");
+        assert_eq!(core.steps[0].name(), "{{state.core_plugin}}");
+        // steps 库可加载
+        let lib = load_step_library(&root).expect("steps 库应能加载");
+        assert!(
+            lib.steps.contains_key("doc_extract") || lib.steps.is_empty(),
+            "库加载不报错"
+        );
+    }
+
+    /// G10 统一 DSL：新旧形态共存——next 优先，routes/exit_routes 兼容。
+    #[test]
+    fn test_g10_legacy_routes_still_parse() {
+        let yaml = r#"
+name: legacy
+loop_bodies:
+  - id: main
+    exit_routes:
+      - when: "True"
+        then:
+          next: end
+    steps:
+      - id: core
+        steps: []
+        routes:
+          - when: "True"
+            then:
+              next: loop
+"#;
+        let config: PipelineConfig = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(config.loop_bodies[0].exit_routes.len(), 1);
+        assert_eq!(config.loop_bodies[0].steps[0].routes.len(), 1);
+        assert_eq!(
+            config.loop_bodies[0].steps[0].routes[0].then.next,
+            RouteNext::Loop
+        );
     }
 
     /// 端到端：用真实 autonomous.yaml + doc_extract.yaml 形态构造配置，

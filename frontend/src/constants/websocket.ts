@@ -198,6 +198,8 @@ export const WS_SERVER_EVENTS = {
   RESYNC_REQUIRED: 'resync_required',
   /** widget 事件（内核 PluginWidgetBroadcaster 周期快照 + 插件 widget 交互，ADR §3.5'） */
   WIDGET_EVENT: 'widget_event',
+  /** Godot 选中引用变化（pipeline_godot_context 插件转发 Godot 宿主推送） */
+  GODOT_SELECTION_CHANGED: 'godot_selection_changed',
 } as const
 
 /**

@@ -30,7 +30,7 @@ class RateLimitError(LLMException):
         message: str = "API 速率限制",
         retry_after: float | None = None,
         details: dict[str, Any] | None = None,
-    ):
+    ) -> None:
         """初始化速率限制错误异常
 
         Args:
@@ -55,7 +55,7 @@ class AuthenticationError(LLMException):
         self,
         message: str = "API 认证失败",
         details: dict[str, Any] | None = None,
-    ):
+    ) -> None:
         """初始化认证错误异常
 
         Args:
@@ -75,7 +75,7 @@ class InvalidRequestError(LLMException):
         self,
         message: str = "无效的请求",
         details: dict[str, Any] | None = None,
-    ):
+    ) -> None:
         """初始化无效请求错误异常
 
         Args:
@@ -98,7 +98,7 @@ class ModelNotAvailableError(LLMException):
         self,
         model: str,
         details: dict[str, Any] | None = None,
-    ):
+    ) -> None:
         """初始化模型不可用错误异常
 
         Args:
@@ -121,7 +121,7 @@ class LLMTimeoutError(LLMException):
         self,
         message: str = "请求超时",
         details: dict[str, Any] | None = None,
-    ):
+    ) -> None:
         """初始化 LLM 超时错误异常
 
         Args:
@@ -141,7 +141,7 @@ class ContentFilterError(LLMException):
         self,
         message: str = "内容被过滤",
         details: dict[str, Any] | None = None,
-    ):
+    ) -> None:
         """初始化内容过滤错误异常
 
         Args:
@@ -167,7 +167,7 @@ class BudgetExhaustedError(LLMException):
         remaining_tokens: int = 0,
         usage_percent: float = 100.0,
         details: dict[str, Any] | None = None,
-    ):
+    ) -> None:
         """初始化预算耗尽错误异常
 
         Args:

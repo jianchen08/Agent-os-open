@@ -102,7 +102,6 @@ class GlobalWebSocketService {
 
     this._connectionTimeoutTimer = setTimeout(() => {
       if (this._status === 'connecting') {
-        // -M03: WS handler 层 console 残留
         _wsLogger.warn('[GlobalWS] 连接超时，关闭并重连')
         if (this.ws) {
           this.ws.onclose = null
@@ -257,6 +256,17 @@ class GlobalWebSocketService {
     this._send(msg)
   }
 
+  /**
+   * 上报当前选中的会话切换（排队优先级键，ADR-2026-08-15）。
+   * 内核据此把该用户的活跃管道更新为当前选中管道——全局并发闸门有排队时，
+   * 活跃管道的 run 优先获得槽位。通知性消息：离线时直接丢弃（后端以最近
+   * user_input 派发兜底），不进离线队列。
+   */
+  sendActiveThread(threadId: string, pipelineId?: string): void {
+    if (this._status !== 'connected') return
+    this._send({ type: 'active_thread_changed', thread_id: threadId, pipeline_id: pipelineId || '' })
+  }
+
   /** 发送审批决策 */
   sendApproval(threadId: string, decision: string, reason?: string): void {
     this._send({ type: 'approval', thread_id: threadId, decision, reason })
@@ -382,7 +392,7 @@ class GlobalWebSocketService {
         this._clearHeartbeatTimeout()
         this._heartbeatTimeoutTimer = setTimeout(() => {
           // 连续失败容错：单次 ack 超时不立即断连，累计达到 HEARTBEAT_MAX_MISS 才判定死亡。
-          // 避免局域网抖动/后端繁忙时的误断（曾导致每 30-45s 反复断连、流式 chunk 丢失）。
+          // 避免局域网抖动/后端繁忙时的误断。
           this._heartbeatMissCount += 1
           if (this._heartbeatMissCount >= HEARTBEAT_MAX_MISS) {
             _wsLogger.warn(

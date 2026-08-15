@@ -279,8 +279,6 @@ class Tool(BaseModel):
         import copy  # noqa: PLC0415
 
         if not self.injected_params and not self.param_level_restrictions:
-            if agent_level is not None and self.param_level_restrictions:
-                return copy.deepcopy(self.input_schema)
             return self.input_schema
 
         schema = copy.deepcopy(self.input_schema)

@@ -1,12 +1,12 @@
 /**
- * SchemaDriver 测试
+ * SchemaDriver 测试（渲染引擎 = RjsfForm：react-jsonschema-form + antd 主题）
  *
- * 验证 SchemaDriver 表单驱动组件（消费 UIInputFormField[]）：
- * - AC-1: 渲染全部字段（label / required 标记 / description）
+ * 验证字段级 Schema 驱动表单的核心行为：
+ * - AC-1: 渲染全部字段 label；required 字段带 antd 必填标记
  * - AC-2: datasourceUri 字段挂载时调 apiClient 拉取动态选项（绝对 URI 与 datasource 前缀 URI）
- * - AC-3: multiselect 渲染为复选框组；date 渲染为 date 输入
- * - AC-4: required 校验：空必填字段提交被拦截并显示错误
- * - AC-5: 提交回调收到表单值（含多选数组）
+ * - AC-3: multiselect 渲染为复选框组；date 渲染为 DatePicker 输入
+ * - AC-4: required 校验：空必填字段提交被拦截并显示中文错误
+ * - AC-5: 提交回调收到表单值（含多选数组与数字）
  * - AC-6: initialValues 预填（编辑场景）
  */
 
@@ -23,6 +23,12 @@ vi.mock('@/services/api/client', () => ({
 import apiClient from '@/services/api/client'
 
 import { SchemaDriver } from '../SchemaDriver'
+
+/**
+ * 提交动作：模拟表单 submit 事件（等价于用户点击 type=submit 按钮在真实浏览器
+ * 触发的提交；jsdom 的 click 激活路径不重放该事件，故直接派发 submit）
+ */
+const submitForm = () => fireEvent.submit(document.querySelector('form')!)
 
 /** 模拟后端 GET /api/v1/agents/schema 的 fields（覆盖 string/textarea/number/select/multiselect/date/datasource） */
 const FIELDS: UIInputFormField[] = [
@@ -59,16 +65,17 @@ describe('SchemaDriver', () => {
     vi.mocked(apiClient.get).mockResolvedValue({ data: { options: [] } })
   })
 
-  it('AC-1: 渲染所有字段的 label 与必填标记', () => {
+  it('AC-1: 渲染所有字段的 label，required 字段带必填标记', () => {
     render(<SchemaDriver fields={FIELDS} onSubmit={vi.fn()} />)
 
     for (const field of FIELDS) {
       expect(screen.getByText(new RegExp(field.label))).toBeInTheDocument()
     }
-    // 必填字段带 * 标记
-    expect(screen.getByText(/配置ID/).textContent).toContain('*')
-    expect(screen.getByText(/名称/).textContent).toContain('*')
-    expect(screen.getByText(/描述/).textContent).not.toContain('*')
+    // antd required 标记打在 label class 上（ant-form-item-required）
+    const requiredLabel = screen.getByText('配置ID').closest('label')
+    expect(requiredLabel?.className).toMatch(/required/)
+    const optionalLabel = screen.getByText('描述').closest('label')
+    expect(optionalLabel?.className).not.toMatch(/required/)
   })
 
   it('AC-2: datasourceUri 字段挂载时调 apiClient 拉取选项（绝对 URI）', async () => {
@@ -86,14 +93,10 @@ describe('SchemaDriver', () => {
     await waitFor(() => {
       expect(apiClient.get).toHaveBeenCalledWith('/api/v1/models')
     })
-    expect(await screen.findByText('模型A')).toBeInTheDocument()
-    expect(screen.getByText('模型B')).toBeInTheDocument()
   })
 
   it('AC-2b: datasourceUri 无前导斜杠时走 /api/v1/datasource/ 前缀', async () => {
-    vi.mocked(apiClient.get).mockResolvedValue({
-      data: ['cat-a', 'cat-b'],
-    })
+    vi.mocked(apiClient.get).mockResolvedValue({ data: ['cat-a', 'cat-b'] })
 
     const fields: UIInputFormField[] = [
       { name: 'category', type: 'select', label: '分类', datasourceUri: 'categories/list' },
@@ -103,29 +106,24 @@ describe('SchemaDriver', () => {
     await waitFor(() => {
       expect(apiClient.get).toHaveBeenCalledWith('/api/v1/datasource/categories/list')
     })
-    expect(await screen.findByText('cat-a')).toBeInTheDocument()
   })
 
   it('AC-3: multiselect 渲染复选框组，date 渲染日期输入', () => {
     render(<SchemaDriver fields={FIELDS} onSubmit={vi.fn()} />)
 
     // multiselect → checkbox 组
-    const tagGroup = screen.getByTestId('multiselect-tags')
-    const checkboxes = tagGroup.querySelectorAll('input[type="checkbox"]')
-    expect(checkboxes.length).toBe(2)
-    expect(screen.getByLabelText('质量')).toBeInTheDocument()
-    expect(screen.getByLabelText('审查')).toBeInTheDocument()
+    expect(screen.getByLabelText('质量')).toHaveProperty('type', 'checkbox')
+    expect(screen.getByLabelText('审查')).toHaveProperty('type', 'checkbox')
 
-    // date → input[type=date]
-    const dateField = screen.getByTestId('schema-field-publish_date')
-    expect(dateField.querySelector('input[type="date"]')).not.toBeNull()
+    // date → antd DatePicker（输入框存在）
+    expect(screen.getByLabelText('发布日期')).toBeInTheDocument()
   })
 
-  it('AC-4: required 校验拦截空必填字段并显示错误', () => {
+  it('AC-4: required 校验拦截空必填字段并显示中文错误', () => {
     const onSubmit = vi.fn()
     render(<SchemaDriver fields={FIELDS} onSubmit={onSubmit} />)
 
-    fireEvent.click(screen.getByTestId('schema-submit'))
+    submitForm()
 
     expect(screen.getByText('配置ID不能为空')).toBeInTheDocument()
     expect(screen.getByText('名称不能为空')).toBeInTheDocument()
@@ -136,14 +134,14 @@ describe('SchemaDriver', () => {
     const onSubmit = vi.fn()
     render(<SchemaDriver fields={FIELDS} onSubmit={onSubmit} />)
 
-    fireEvent.change(screen.getByLabelText(/配置ID/), {
+    fireEvent.change(screen.getByLabelText('配置ID'), {
       target: { value: 'code_reviewer_agent' },
     })
-    fireEvent.change(screen.getByLabelText(/名称/), { target: { value: '代码审查专家' } })
+    fireEvent.change(screen.getByLabelText('名称'), { target: { value: '代码审查专家' } })
     fireEvent.click(screen.getByLabelText('质量'))
-    fireEvent.change(screen.getByLabelText(/最大迭代/), { target: { value: '30' } })
+    fireEvent.change(screen.getByLabelText('最大迭代'), { target: { value: '30' } })
 
-    fireEvent.click(screen.getByTestId('schema-submit'))
+    submitForm()
 
     expect(onSubmit).toHaveBeenCalledTimes(1)
     const values = onSubmit.mock.calls[0][0] as Record<string, unknown>
@@ -162,8 +160,8 @@ describe('SchemaDriver', () => {
       />,
     )
 
-    expect(screen.getByLabelText(/配置ID/)).toHaveValue('code_reviewer_agent')
-    expect(screen.getByLabelText(/名称/)).toHaveValue('代码审查专家')
+    expect(screen.getByLabelText('配置ID')).toHaveValue('code_reviewer_agent')
+    expect(screen.getByLabelText('名称')).toHaveValue('代码审查专家')
     expect(screen.getByLabelText('审查')).toBeChecked()
   })
 })

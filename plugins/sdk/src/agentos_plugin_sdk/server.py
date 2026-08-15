@@ -1,12 +1,26 @@
-"""MCP JSON-RPC 服务端。
+"""MCP 服务端（官方 mcp SDK v2 承载）。
 
-自研轻量级 JSON-RPC 2.0 over stdio 实现，不依赖外部 MCP 包。
-响应 initialize / tools/list / tools/call / resources/read / notifications 请求。
+传输/协议层复用官方 ``mcp`` 包（``mcp.server.lowlevel.Server`` + stdio transport），
+与 Rust 内核 rmcp 同源不同实现，协议合规由官方维护。AgentOS 私有协议扩展以
+最小侵入方式挂接：
 
-双向通信：
-- 入站（内核→sidecar）：initialize / tools/list / tools/call / notifications/*
-- 出站（sidecar→内核）：capability 反向调用（如 pipeline-executor.resume）
-  通过 KernelChannel 发出 JSON-RPC request，内核 reader loop 识别后路由并回写响应。
+- **initialize 依赖注入**：内核在标准 initialize params 之外附送 ``capabilities``
+  （可反调的内核能力命名空间）与 ``config``（插件配置）。经 ServerMiddleware
+  观察原始 params（pydantic 校验前，自定义字段不受模型约束），回调
+  ``on_initialize`` 完成 CapabilityHandle 注入。
+- **生命周期通知**：内核以自定义通知 ``notifications/<hook>`` 推送生命周期事件
+  （on_load / on_unload / on_config_change / on_pipeline_start / on_pipeline_end /
+  on_error），经 ``add_notification_handler`` 注册分发。params 为任意 JSON
+  （config / tags），从 ``ctx.params`` 原始 mapping 读取。
+- **反向 capability 调用**：插件通过 KernelChannel 持连接级 ``Outbound`` 通道，
+  以 ``send_raw_request("<capability>.<method>")`` / ``notify`` 发起反向调用，
+  内核 reader loop 路由回写——与内核 ``McpClient::handle_incoming_request``
+  对齐。请求/响应关联、并发分发、stdout 串行化均由官方 SDK 的 dispatcher 负责。
+
+入站请求（tools/call 等）由官方 dispatcher 每消息独立 task 分发，工具 handler
+内部发起的反向调用不会被读循环阻塞（无死锁）。
+
+``AgentOSPlugin`` 基类 API 不变；插件代码零改动。
 
 [来源: docs/tasks/task_08_python_sdk.md AC-07-2]
 """
@@ -18,13 +32,39 @@ import contextlib
 import inspect
 import json
 import logging
-import sys
-import uuid
 from typing import Any
+
+import mcp_types as types
+from mcp.server.lowlevel import Server
+from mcp.server.stdio import stdio_server
+from mcp.shared.exceptions import MCPError
+from mcp_types.jsonrpc import INVALID_PARAMS
 
 from agentos_plugin_sdk.types import LifecycleEvent, ResourceDef, ToolDef
 
 logger = logging.getLogger(__name__)
+
+SERVER_NAME = "agentos-plugin-sdk"
+SERVER_VERSION = "0.2.0"
+
+
+def _augment_description(description: str, output_schema: dict[str, Any] | None) -> str:
+    """声明了 output_schema 时，description 追加单行输出契约摘要。
+
+    模型/客户端不解析结构化 outputSchema 字段时，仍能从描述读到输出形状
+    （task_dsh_plugin_adapter 任务 1：输出契约"模型可读"）。
+    """
+    if not output_schema:
+        return description
+    try:
+        compact = json.dumps(output_schema, ensure_ascii=False, separators=(",", ":"))
+    except (TypeError, ValueError):
+        return description
+    line = f"Output contract: {compact}"
+    return f"{description}\n{line}" if description else line
+
+# 反向 capability 调用等待内核响应的超时（与旧自研通道一致的 30s 默认）。
+CAPABILITY_CALL_TIMEOUT_S = 30.0
 
 
 def _bind_log_context(log_ctx: dict[str, Any]) -> contextlib.AbstractContextManager[Any]:
@@ -115,41 +155,36 @@ def _coerce_args_by_schema(
 class KernelChannel:
     """sidecar→内核反向调用通道。
 
-    插件通过 CapabilityHandle.call() 发起反向调用时，本通道：
-    1. 生成 JSON-RPC request（method=`<capability>.<method>`），写入 stdout
-    2. 注册 pending future，等待内核回写的 response
+    插件通过 CapabilityHandle.call()/notify() 发起反向调用时，本通道经
+    官方 SDK 的连接级 ``Outbound``（与入站共用同一 stdio 连接）发出：
 
-    response 通过 McpServer.run() 的 stdin 读取循环到达（与入站请求复用同一 stdin），
-    由 McpServer._dispatch_response 解析并 resolve 对应 future。
+    - request（``send_raw_request``）：method 形如 ``<capability>.<method>``
+      （如 ``pipeline-executor.resume``），内核 reader loop 识别后路由到
+      CapabilityRouter 并回写响应，SDK dispatcher 自动完成 id 关联。
+    - notification（``notify``）：fire-and-forget（如 ``event-bus.emit`` 流式
+      chunk 推送），内核不回响应。
 
-    线程/协程安全：pending 表用 asyncio.Lock 保护；stdout 写入串行化。
+    通道在首条入站消息（initialize）到达时由 McpServer 的 middleware 绑定；
+    此前调用会抛 RuntimeError（与旧通道"未连接"语义一致）。
     """
 
     def __init__(self) -> None:
-        self._stdout_lock = asyncio.Lock()
-        self._pending: dict[str, asyncio.Future[Any]] = {}
-        self._pending_lock = asyncio.Lock()
+        self._outbound: Any | None = None
 
-    def register_pending(self, req_id: str, future: asyncio.Future[Any]) -> None:
-        """注册一个等待内核响应的 future（由 McpServer.run 的同步包装调用）。"""
-        self._pending[req_id] = future
+    def attach(self, outbound: Any) -> None:
+        """绑定连接级 Outbound 通道（由 McpServer middleware 在首条消息时调用）。"""
+        self._outbound = outbound
 
-    def resolve_pending(self, req_id: str, result: Any, error: Any) -> bool:
-        """内核响应到达时 resolve 对应 future。
+    def is_attached(self) -> bool:
+        """通道是否已绑定（initialize 握手后为 True）。"""
+        return self._outbound is not None
 
-        Returns:
-            True 表示该 id 是反向调用的响应（已处理）；False 表示不是（交给入站分发）。
-        """
-        future = self._pending.pop(req_id, None)
-        if future is None or future.done():
-            return False
-        if error is not None:
-            future.set_exception(
-                RuntimeError(f"kernel capability call failed: {error}")
+    def _require_outbound(self) -> Any:
+        if self._outbound is None:
+            raise RuntimeError(
+                "kernel channel not attached (initialize handshake not received)"
             )
-        else:
-            future.set_result(result)
-        return True
+        return self._outbound
 
     async def send_request(self, method: str, params: dict[str, Any]) -> Any:
         """向内核发起一次反向 capability 调用，等待响应。
@@ -159,69 +194,53 @@ class KernelChannel:
             params: 调用参数
 
         Returns:
-            内核返回的 result 字段
+            内核返回的 result（dict）
 
         Raises:
-            RuntimeError: 内核返回 error，或超时（30s）
+            RuntimeError: 内核返回 error、超时（CAPABILITY_CALL_TIMEOUT_S），
+                或通道未绑定（initialize 前）。
         """
-        req_id = uuid.uuid4().hex
-        request = {
-            "jsonrpc": "2.0",
-            "id": req_id,
-            "method": method,
-            "params": params,
-        }
-        loop = asyncio.get_event_loop()
-        future: asyncio.Future[Any] = loop.create_future()
-        self.register_pending(req_id, future)
-
-        async with self._stdout_lock:
-            sys.stdout.write(json.dumps(request) + "\n")
-            sys.stdout.flush()
-
+        outbound = self._require_outbound()
         try:
-            return await asyncio.wait_for(future, timeout=30.0)
-        except TimeoutError:
-            self._pending.pop(req_id, None)
-            raise RuntimeError(f"kernel capability call timeout: {method}") from None
+            return await outbound.send_raw_request(
+                method,
+                params or {},
+                {"timeout": CAPABILITY_CALL_TIMEOUT_S},
+            )
+        except MCPError as e:
+            raise RuntimeError(
+                f"kernel capability call failed [{e.error.code}] {method}: {e.error.message}"
+            ) from None
 
     async def send_notification(self, method: str, params: dict[str, Any]) -> None:
         """向内核发起一次 fire-and-forget 的 capability 通知（不等响应）。
 
         用于流式 chunk 推送：sidecar 每生成一个 chunk 就发一个 notification，
-        内核收到后直接推前端。不等响应避免每个 chunk 阻塞 30s（send_request
-        不可用于高频流式）。无 id，内核不回 response，无 pending future 泄漏。
+        内核收到后直接推前端。不等响应避免每个 chunk 阻塞（send_request
+        不可用于高频流式）。无 id，内核不回 response。
 
         Args:
             method: 形如 "event-bus.emit" 的命名空间方法名
             params: 通知参数（如 {"event": "stream_chunk", "thread_id": ..., "chunk": ...}）
+
+        Raises:
+            RuntimeError: 通道未绑定（initialize 前）。
         """
-        notification = {
-            "jsonrpc": "2.0",
-            # 注意：无 id 字段 → JSON-RPC notification（内核不回 response）
-            "method": method,
-            "params": params,
-        }
-        async with self._stdout_lock:
-            sys.stdout.write(json.dumps(notification) + "\n")
-            sys.stdout.flush()
+        outbound = self._require_outbound()
+        await outbound.notify(method, params or {})
 
 
 class McpServer:
-    """MCP JSON-RPC 服务端。
+    """MCP 服务端（官方 ``mcp.server.lowlevel.Server`` 门面）。
 
-    通过 stdin/stdout 收发 JSON-RPC 2.0 消息，与 Rust 内核 McpClient 对接。
+    把 AgentOSPlugin 注册的 tools / resources / lifecycle handlers 桥接到
+    官方 SDK 的 handler 体系，通过 stdio transport 与 Rust 内核 McpClient 对接。
 
-    支持的 MCP 方法：
-    - initialize: 协议握手 + 依赖注入
-    - tools/list: 列出已注册工具
-    - tools/call: 调用工具
-    - resources/read: 读取资源
-    - notifications/*: 生命周期通知（fire-and-forget）
+    私有协议扩展的挂接点：
+    - initialize 依赖注入：middleware 观察 initialize 原始 params
+    - 生命周期通知：``notifications/<hook>`` 自定义通知分发
+    - 反向调用通道：initialize 时绑定 KernelChannel
     """
-
-    PROTOCOL_VERSION = "2024-11-05"
-    SERVER_INFO = {"name": "agentos-plugin-sdk", "version": "0.2.0"}
 
     def __init__(
         self,
@@ -236,194 +255,94 @@ class McpServer:
         self._lifecycle_handlers = lifecycle_handlers
         self._on_initialize = on_initialize
         self._kernel_channel = kernel_channel
-        self._running = False
+        self._sdk = self._build_sdk_server()
 
-    async def run(self) -> None:
-        """启动服务端，从 stdin 读取 JSON-RPC 请求，向 stdout 写入响应。
+    # ── 官方 SDK 装配 ────────────────────────────────────
 
-        阻塞运行直到 stdin EOF 或收到 shutdown 信号。
-
-        Windows 兼容：Python 3.14 的 ProactorEventLoop 对 `connect_read_pipe(sys.stdin)`
-        支持不稳定（_ProactorReadPipeTransport._loop_reading 崩溃），故 Windows 上改用
-        线程内同步读取 stdin + run_coroutine_threadsafe 回到事件循环处理消息。
-        """
-        self._running = True
-        if sys.platform == "win32":
-            await self._run_win32()
-        else:
-            await self._run_unix()
-
-    async def _run_unix(self) -> None:
-        """Unix：用 asyncio stream reader 读 stdin（原生异步）。"""
-        reader = asyncio.StreamReader()
-        protocol = asyncio.StreamReaderProtocol(reader)
-        await asyncio.get_event_loop().connect_read_pipe(lambda: protocol, sys.stdin)
-
-        while self._running:
-            line = await reader.readline()
-            if not line:
-                break
-            await self._process_line(line)
-
-    async def _run_win32(self) -> None:
-        """Windows：线程内同步读 stdin，通过 run_coroutine_threadsafe 回事件循环。
-
-        connect_read_pipe 在 Windows ProactorEventLoop 上会崩溃（Python 3.14），
-        故用阻塞 IO 读 stdin，每读到一行就调度回事件循环处理（保持 _handle_message
-        的 async 语义和 KernelChannel 的 future 归属正确）。
-        """
-        import threading  # noqa: PLC0415
-
-        loop = asyncio.get_running_loop()
-        lines_queue: asyncio.Queue[bytes | None] = asyncio.Queue()
-
-        def _stdin_reader() -> None:
-            """同步阻塞读 stdin，投递到队列；EOF 投 None。"""
-            try:
-                for raw in sys.stdin.buffer:
-                    asyncio.run_coroutine_threadsafe(lines_queue.put(raw), loop).result()
-            except (OSError, ValueError):
-                pass
-            finally:
-                asyncio.run_coroutine_threadsafe(lines_queue.put(None), loop).result()
-
-        threading.Thread(target=_stdin_reader, daemon=True).start()
-
-        while self._running:
-            raw = await lines_queue.get()
-            if raw is None:
-                break
-            await self._process_line(raw)
-
-    async def _process_line(self, raw: bytes) -> None:
-        """处理一行原始字节消息。"""
-        line_str = raw.decode("utf-8", errors="replace").strip()
-        if not line_str:
-            return
-        try:
-            msg = json.loads(line_str)
-        except json.JSONDecodeError:
-            return
-        await self._handle_message(msg)
-
-    async def _handle_message(self, msg: dict[str, Any]) -> None:
-        """处理单条 JSON-RPC 消息。
-
-        三类消息分流：
-        1. response（无 method，有 id，有 result/error）：内核对 sidecar 反向调用的响应
-           → 交给 KernelChannel.resolve_pending
-        2. notification（有 method，无 id）：fire-and-forget 生命周期通知
-        3. request（有 method + id）：内核发起的请求，需响应
-        """
-        method = msg.get("method")
-        msg_id: str | None = msg.get("id")
-
-        # 分支1：内核对反向调用的响应（无 method，有 id，且 kernel_channel 在等）
-        if method is None and msg_id is not None and self._kernel_channel is not None:
-            result = msg.get("result")
-            error = msg.get("error")
-            # resolve_pending 返回 True 表示这是反向调用的响应，已处理
-            if self._kernel_channel.resolve_pending(msg_id, result, error):
-                return
-            # 不是反向调用响应 → 落到下面的 request 处理（罕见）
-
-        # 分支2：notification（无 id）—— fire-and-forget
-        if msg_id is None:
-            # notification 必须有 method（类型收窄断言，逻辑已保证）
-            assert method is not None  # noqa: S101
-            await self._handle_notification(method, params=msg.get("params", {}))
-            return
-
-        # 分支3：request（有 id）—— 需要响应
-        # 类型收窄断言：分支 2 已处理 msg_id None；request 必须有 method
-        assert msg_id is not None  # noqa: S101
-        assert method is not None  # noqa: S101
-        # 用 create_task 并发处理，不阻塞主读取循环。
-        # 原因：工具 handler 内部可能发起反向 capability 调用（cap.call），
-        # 该调用的 response 会通过 stdin 到达。若 await dispatch 阻塞主循环，
-        # response 永远进不来 → handler 的 future 永不 resolve → 死锁。
-        # create_task 让主循环立即回到 lines_queue.get() 读下一条消息
-        #（含反向调用的 response），handler 在后台 task 里 await 完成。
-        asyncio.create_task(self._handle_request_async(msg_id, method, msg.get("params", {})))
-
-    async def _handle_request_async(
-        self, msg_id: Any, method: str, params: dict[str, Any]
-    ) -> None:
-        """异步处理单个 JSON-RPC request 并回写 response。"""
-        try:
-            result = await self._dispatch(method, params)
-            await self._send_response_async(msg_id, result)
-        except Exception as e:
-            await self._send_error_async(msg_id, -32603, str(e))
-
-    async def _send_response_async(self, msg_id: Any, result: Any) -> None:
-        """向 stdout 发送 JSON-RPC 成功响应（加锁，与 KernelChannel 共享同一 lock）。"""
-        response = {"jsonrpc": "2.0", "id": msg_id, "result": result}
-        # 复用 KernelChannel 的 _stdout_lock，保证 response / 反向 request / notification
-        # 三类 stdout 写入互斥（create_task 并发后必须有锁，否则行交错）。
-        lock = self._kernel_channel._stdout_lock if self._kernel_channel else _dummy_lock()
-        async with lock:
-            sys.stdout.write(json.dumps(response) + "\n")
-            sys.stdout.flush()
-
-    async def _send_error_async(self, msg_id: Any, code: int, message: str) -> None:
-        """向 stdout 发送 JSON-RPC 错误响应（加锁，与 KernelChannel 共享同一 lock）。"""
-        response = {
-            "jsonrpc": "2.0",
-            "id": msg_id,
-            "error": {"code": code, "message": message},
-        }
-        lock = self._kernel_channel._stdout_lock if self._kernel_channel else _dummy_lock()
-        async with lock:
-            sys.stdout.write(json.dumps(response) + "\n")
-            sys.stdout.flush()
-
-    async def _dispatch(self, method: str, params: dict[str, Any]) -> Any:
-        """分发 JSON-RPC 请求到对应处理器。"""
-        if method == "initialize":
-            return self._handle_initialize(params)
-        if method == "tools/list":
-            return self._handle_tools_list()
-        if method == "tools/call":
-            return await self._handle_tools_call(params)
-        if method == "resources/read":
-            return await self._handle_resources_read(params)
-        raise ValueError(f"unknown method: {method}")
-
-    def _handle_initialize(self, params: dict[str, Any]) -> dict[str, Any]:
-        """处理 initialize 请求——协议握手 + 接收依赖注入。"""
-        if self._on_initialize is not None:
-            self._on_initialize(params)
-        return {
-            "protocolVersion": self.PROTOCOL_VERSION,
-            "serverInfo": self.SERVER_INFO,
-            "capabilities": {
-                "tools": {},
-                "resources": {},
-            },
-        }
-
-    def _handle_tools_list(self) -> dict[str, Any]:
-        """处理 tools/list 请求——返回已注册工具列表。"""
-        tools = []
-        for td in self._tools.values():
-            tools.append(
-                {
-                    "name": td.name,
-                    "description": td.description,
-                    "inputSchema": td.schema,
-                }
+    def _build_sdk_server(self) -> Server:
+        """构建官方 low-level Server 并挂接 AgentOS 私有扩展。"""
+        server: Server = Server(
+            SERVER_NAME,
+            version=SERVER_VERSION,
+            on_list_tools=self._on_list_tools,
+            on_call_tool=self._on_call_tool,
+            on_list_resources=self._on_list_resources,
+            on_read_resource=self._on_read_resource,
+        )
+        server.middleware.append(self._kernel_bridge_middleware)
+        for event in LifecycleEvent:
+            server.add_notification_handler(
+                f"notifications/{event.value}",
+                types.NotificationParams,
+                self._make_lifecycle_handler(event.value),
             )
-        return {"tools": tools}
+        return server
 
-    async def _handle_tools_call(self, params: dict[str, Any]) -> dict[str, Any]:
-        """处理 tools/call 请求——调用指定工具并返回结果。"""
+    async def _kernel_bridge_middleware(self, ctx: Any, call_next: Any) -> Any:
+        """AgentOS 私有扩展与官方协议的桥接 middleware。
+
+        覆盖每条入站消息（含 initialize）：
+
+        1. 首条消息到达时，把连接级 Outbound 绑定到 KernelChannel（此后插件
+           可发起反向 capability 调用）。stdio 单连接生命周期内只需绑一次。
+        2. initialize 握手时，把原始 params（内核附送 capabilities/config 自定义
+           字段，pydantic 模型会忽略、原始 mapping 保留全量）回调给
+           ``on_initialize`` 完成依赖注入。
+
+        注意：initialize 由官方 runner inline 处理（读循环停靠等待），此处
+        绝不能 await 反向请求（会死锁）——仅做同步引用记录，安全。
+        """
+        if self._kernel_channel is not None and not self._kernel_channel.is_attached():
+            # ServerSession 未公开 connection，经 _connection 取连接级通道
+            # （与 ServerSession.send_request 无 related_request_id 时同一通道）。
+            connection = getattr(ctx.session, "_connection", None)
+            if connection is not None:
+                self._kernel_channel.attach(connection.outbound)
+
+        if ctx.method == "initialize" and self._on_initialize is not None:
+            raw = dict(ctx.params) if ctx.params else {}
+            self._on_initialize(raw)
+
+        return await call_next(ctx)
+
+    # ── tools/list · tools/call ──────────────────────────
+
+    async def _on_list_tools(self, ctx: Any, params: Any) -> types.ListToolsResult:
+        """tools/list——返回已注册工具（schema 以 ToolDef 声明为准，不从签名推导）。
+
+        output_schema 经 MCP 标准 ``outputSchema`` 字段下发（2025-06-18 结构化输出）；
+        render 意图经 ``_meta`` 透传（协议安全通道）。声明了 output_schema 的工具，
+        description 追加单行输出契约摘要——消费端（模型/客户端）不读结构化字段也能
+        知道输出形状（task_dsh_plugin_adapter 任务 1）。
+        """
+        tools: list[types.Tool] = []
+        for td in self._tools.values():
+            tool = types.Tool(
+                name=td.name,
+                description=_augment_description(td.description, td.output_schema),
+                input_schema=td.schema,
+            )
+            if td.output_schema is not None:
+                tool.output_schema = td.output_schema
+            if td.render is not None:
+                tool.meta = {"render": td.render}
+            tools.append(tool)
+        return types.ListToolsResult(tools=tools)
+
+    async def _on_call_tool(self, ctx: Any, params: types.CallToolRequestParams) -> types.CallToolResult:
+        """tools/call——调用指定工具并返回结果（原始 dict 分发层见 _handle_tools_call）。"""
+        return await self._handle_tools_call(
+            {"name": params.name, "arguments": dict(params.arguments or {})}
+        )
+
+    async def _handle_tools_call(self, params: dict[str, Any]) -> types.CallToolResult:
+        """分发 tools/call 到已注册 handler（保留旧分发语义，供单测直调）。"""
         name = params.get("name", "")
         arguments = dict(params.get("arguments") or {})
 
         td = self._tools.get(name)
         if td is None:
-            raise ValueError(f"tool not found: {name}")
+            raise MCPError(code=INVALID_PARAMS, message=f"tool not found: {name}")
 
         # 内核在 tool_args 注入 _log_ctx（per-request 上下文：pipeline_id 等）。
         # 在调 handler 前绑定到日志上下文（contextvars，async 安全），请求结束自动恢复。
@@ -447,11 +366,11 @@ class McpServer:
                 logger.warning(
                     "[mcp] 工具 %s 参数绑定失败: %s | kwargs=%s", name, e, list(kwargs)
                 )
-                return {
-                    "content": [
-                        {
-                            "type": "text",
-                            "text": json.dumps(
+                return types.CallToolResult(
+                    content=[
+                        types.TextContent(
+                            type="text",
+                            text=json.dumps(
                                 {
                                     "success": False,
                                     "error": f"参数不匹配: {e}",
@@ -459,10 +378,10 @@ class McpServer:
                                 },
                                 default=str,
                             ),
-                        }
+                        )
                     ],
-                    "isError": True,
-                }
+                    is_error=True,
+                )
             result = td.handler(**kwargs)
             if asyncio.iscoroutine(result):
                 result = await result
@@ -473,35 +392,79 @@ class McpServer:
         if hasattr(result, "to_dict") and callable(result.to_dict):
             result = result.to_dict()
 
-        return {
-            "content": [{"type": "text", "text": json.dumps(result, default=str)}],
-            "isError": False,
-        }
+        return types.CallToolResult(
+            content=[types.TextContent(type="text", text=json.dumps(result, default=str))],
+            is_error=False,
+        )
 
-    async def _handle_resources_read(self, params: dict[str, Any]) -> dict[str, Any]:
-        """处理 resources/read 请求——读取指定资源。"""
+    async def _on_list_resources(self, ctx: Any, params: Any) -> types.ListResourcesResult:
+        """resources/list——返回已注册资源。"""
+        resources = [
+            types.Resource(
+                uri=rd.uri,
+                name=rd.name or rd.uri,
+                description=rd.description or None,
+                mime_type=rd.mime_type,
+            )
+            for rd in self._resources.values()
+        ]
+        return types.ListResourcesResult(resources=resources)
+
+    # ── resources/read ───────────────────────────────────
+
+    async def _on_read_resource(
+        self, ctx: Any, params: types.ReadResourceRequestParams
+    ) -> types.ReadResourceResult:
+        """resources/read——读取指定资源。"""
+        return await self._handle_resources_read({"uri": str(params.uri)})
+
+    async def _handle_resources_read(self, params: dict[str, Any]) -> types.ReadResourceResult:
+        """分发 resources/read（保留旧分发语义，供单测直调）。"""
         uri = params.get("uri", "")
         rd = self._resources.get(uri)
         if rd is None:
-            raise ValueError(f"resource not found: {uri}")
+            raise MCPError(code=INVALID_PARAMS, message=f"resource not found: {uri}")
 
         result = rd.handler()
         if asyncio.iscoroutine(result):
             result = await result
 
-        return {
-            "contents": [
-                {
-                    "uri": uri,
-                    "mimeType": rd.mime_type,
-                    "text": json.dumps(result, default=str),
-                }
+        return types.ReadResourceResult(
+            contents=[
+                types.TextResourceContents(
+                    uri=uri,
+                    mime_type=rd.mime_type,
+                    text=json.dumps(result, default=str),
+                )
             ],
-        }
+        )
+
+    # ── 生命周期通知 ─────────────────────────────────────
+
+    def _make_lifecycle_handler(self, event_value: str) -> Any:
+        """构造 notifications/<hook> 处理器（闭包捕获事件名）。
+
+        params 从 ctx.params 原始 mapping 读取——内核推送的 config/tags 是
+        任意 JSON，NotificationParams 模型只声明 _meta，校验模型会丢弃
+        其余字段。
+        """
+
+        async def _handler(ctx: Any, params: Any) -> None:
+            handler = self._lifecycle_handlers.get(event_value)
+            if handler is None:
+                return
+            raw = dict(ctx.params) if ctx.params else {}
+            result = handler(raw)
+            if asyncio.iscoroutine(result):
+                await result
+
+        return _handler
 
     async def _handle_notification(self, method: str, params: dict[str, Any]) -> None:
-        """处理 notification（生命周期事件）。"""
-        # 映射 MCP notification 方法到生命周期事件
+        """分发生命周期通知（保留旧入口，供单测直调）。
+
+        非生命周期方法（含协议通知 notifications/initialized）安全忽略。
+        """
         event_map = {
             "notifications/on_load": LifecycleEvent.ON_LOAD,
             "notifications/on_unload": LifecycleEvent.ON_UNLOAD,
@@ -509,7 +472,7 @@ class McpServer:
             "notifications/on_pipeline_start": LifecycleEvent.ON_PIPELINE_START,
             "notifications/on_pipeline_end": LifecycleEvent.ON_PIPELINE_END,
             "notifications/on_error": LifecycleEvent.ON_ERROR,
-            "notifications/initialized": None,  # 协议通知，忽略
+            "notifications/domain_event": LifecycleEvent.DOMAIN_EVENT,
         }
 
         event = event_map.get(method)
@@ -518,41 +481,23 @@ class McpServer:
 
         handler = self._lifecycle_handlers.get(event.value)
         if handler is not None:
-            result = handler(params)
+            result = handler(dict(params))
             if asyncio.iscoroutine(result):
                 await result
 
-    def _send_response(self, msg_id: str, result: Any) -> None:
-        """向 stdout 发送 JSON-RPC 成功响应。"""
-        response = {"jsonrpc": "2.0", "id": msg_id, "result": result}
-        sys.stdout.write(json.dumps(response) + "\n")
-        sys.stdout.flush()
+    # ── 启动 ─────────────────────────────────────────────
 
-    def _send_error(self, msg_id: str, code: int, message: str) -> None:
-        """向 stdout 发送 JSON-RPC 错误响应。"""
-        response = {
-            "jsonrpc": "2.0",
-            "id": msg_id,
-            "error": {"code": code, "message": message},
-        }
-        sys.stdout.write(json.dumps(response) + "\n")
-        sys.stdout.flush()
+    async def run(self) -> None:
+        """启动服务端——官方 stdio transport，阻塞运行直到 stdin EOF。
 
-    def stop(self) -> None:
-        """停止服务端。"""
-        self._running = False
-
-
-class _DummyLock:
-    """无 channel 时的空 lock 兜底（测试场景 / initialize 前）。"""
-    async def __aenter__(self) -> None:
-        pass
-    async def __aexit__(self, *args: Any) -> None:
-        pass
-
-
-_DUMMY_LOCK = _DummyLock()
-
-
-def _dummy_lock() -> _DummyLock:
-    return _DUMMY_LOCK
+        Windows 兼容由官方 stdio_server 保证：底层以线程池包裹阻塞 IO，
+        不依赖 ProactorEventLoop 的 pipe 支持；服务期间 fd0/fd1 重定向
+        （fd1 → stderr 副本），插件代码的 stray print 不会污染协议通道。
+        """
+        async with stdio_server() as (read_stream, write_stream):
+            await self._sdk.run(
+                read_stream,
+                write_stream,
+                self._sdk.create_initialization_options(),
+                raise_exceptions=False,
+            )

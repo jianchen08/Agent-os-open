@@ -128,14 +128,37 @@ export async function navigateToPipeline(
   // 刷新 tabStore 引用（会话切换后状态已更新）
   const currentTabStore = useAgentTabStore.getState()
 
-  // 统一查找已有标签：通过 pipelineRunId 匹配
+  // 统一查找已有标签：通过 pipelineRunId 匹配（主标签 main-xxx 与子标签都在 tabs 中）
   const existingTab = currentTabStore.tabs.find((t) => t.pipelineRunId === pipelineId)
   if (existingTab) {
     currentTabStore.switchToTab(existingTab.id)
     return true
   }
 
-  // 创建新标签
+  // 主管道特判：会话主标签（main-${sessionId}）不建子标签——主标签是会话创建时
+  // 固定存在的不变量（initSessionTabs 保证），走到缺失分支即数据不一致 bug，
+  // 显式报错暴露，不做静默兜底（静默激活会掩盖根因）。
+  const targetSession = useSessionStore.getState().sessions.find(
+    (s) => s.id === targetSessionId,
+  )
+  const isMainPipeline =
+    !!targetSession && targetSession.pipelineIds?.[0] === pipelineId
+  if (isMainPipeline) {
+    const mainTab = currentTabStore.tabs.find((t) => t.id === `main-${targetSessionId}`)
+    if (mainTab) {
+      currentTabStore.switchToTab(mainTab.id)
+      return true
+    }
+    console.error(
+      '[navigateToPipeline] 主标签缺失（数据不一致 bug）: sessionId=%s pipelineId=%s tabs=%o',
+      targetSessionId,
+      pipelineId,
+      currentTabStore.tabs.map((t) => ({ id: t.id, level: t.agentLevel, pid: t.pipelineRunId })),
+    )
+    return false
+  }
+
+  // 子管道：创建新标签
   const tabId = `sub-${pipelineId}`
 
   const pipelineStore = usePipelineMessageStore.getState()

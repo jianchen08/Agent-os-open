@@ -1,24 +1,37 @@
 {
-    "id": "rollback_service",
-    "name": "Rollback Service",
-    "version": "1.0.0",
-    "plugin_type": "system",
-    "language": "python",
-    "host_type": "sidecar",
-    "entry": "python server.py",
-    "capabilities": {
-        "tools": [
-            {"name": "rollback.create_checkpoint", "description": "Create a rollback checkpoint for a task"},
-            {"name": "rollback.record_operation", "description": "Record an operation log entry (file write, git commit, API call, etc.)"},
-            {"name": "rollback.execute", "description": "Roll back task operations to a checkpoint or N steps back"}
-        ],
-        "resources": [],
-        "route_signals": [],
-        "lifecycle_hooks": ["on_load", "on_unload"]
-    },
-    "dependencies": [],
-    "permissions": {},
-    "error_policy": "skip",
-    "priority": 35,
-    "requires_content": 3
+  "id": "rollback_service",
+  "name": "Rollback Service",
+  "version": "1.0.0",
+  "plugin_type": "system",
+  "language": "python",
+  "host_type": "sidecar",
+  "entry": "python server.py",
+  "capabilities": {
+    "tools": [],
+    "resources": [],
+    "route_signals": [],
+    "lifecycle_hooks": [
+      "on_load",
+      "on_unload"
+    ],
+    "services": [
+      {
+        "name": "rollback.create_checkpoint",
+        "description": "Create a rollback checkpoint for a task"
+      },
+      {
+        "name": "rollback.record_operation",
+        "description": "Record an operation log entry (file write, git commit, API call, etc.)"
+      },
+      {
+        "name": "rollback.execute",
+        "description": "Roll back task operations to a checkpoint or N steps back"
+      }
+    ]
+  },
+  "dependencies": [],
+  "permissions": {},
+  "error_policy": "skip",
+  "priority": 35,
+  "requires_content": 3
 }

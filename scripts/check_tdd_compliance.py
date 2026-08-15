@@ -66,8 +66,8 @@ EXEMPT_PATHS = [
 ]
 
 
-def _run_git(args: list[str]) -> str:
-    """运行 git 命令，返回 stdout。"""
+def _run_git(args: list[str]) -> str | None:
+    """运行 git 命令，返回 stdout；失败返回 None（与合法空输出区分，禁止静默吞错）。"""
     try:
         proc = subprocess.run(
             ["git"] + args,
@@ -76,25 +76,42 @@ def _run_git(args: list[str]) -> str:
             text=True,
             timeout=30,
         )
-        return proc.stdout.strip()
-    except (subprocess.TimeoutExpired, FileNotFoundError):
-        return ""
+    except (subprocess.TimeoutExpired, FileNotFoundError) as e:
+        print(f"[tdd-gate] git {args[0]} 调用异常: {e}", file=sys.stderr)
+        return None
+    if proc.returncode != 0:
+        print(f"[tdd-gate] git {args[0]} 失败: {proc.stderr.strip()}", file=sys.stderr)
+        return None
+    return proc.stdout.strip()
 
 
-def get_changed_files(base: str = "main") -> list[str]:
-    """获取相对 base 分支变更的文件列表。"""
+def get_changed_files(base: str = "main") -> list[str] | None:
+    """获取相对 base 分支变更的文件列表；git 不可用时返回 None（门禁须失败）。"""
     # 优先用 GitHub Actions 的环境变量（PR base）
     if not base:
         base = os.environ.get("GITHUB_BASE_REF", "main")
 
     # merge-base 确保 fork point 对齐（避免目标分支自身演进导致的全量 diff）
     merge_base = _run_git(["merge-base", f"origin/{base}", "HEAD"]) or f"origin/{base}"
-    diff_output = _run_git(["diff", "--name-only", "--diff-filter=AMR", merge_base])
-    if not diff_output:
+    candidates = [
+        ["diff", "--name-only", "--diff-filter=AMR", merge_base],
         # 回退：工作区 vs HEAD（本地开发场景）
-        diff_output = _run_git(["diff", "--name-only", "--diff-filter=AMR", "HEAD"])
-    if not diff_output:
-        diff_output = _run_git(["diff", "--name-only", "--cached", "--diff-filter=AMR"])
+        ["diff", "--name-only", "--diff-filter=AMR", "HEAD"],
+        ["diff", "--name-only", "--cached", "--diff-filter=AMR"],
+    ]
+    ran_any = False
+    diff_output = ""
+    for args in candidates:
+        out = _run_git(args)
+        if out is None:
+            continue
+        ran_any = True
+        if out:
+            diff_output = out
+            break
+    if not ran_any:
+        # 三级 diff 全部无法执行：无法判定变更面，门禁必须失败而非假绿
+        return None
     return [f for f in diff_output.splitlines() if f.strip()]
 
 
@@ -122,6 +139,9 @@ def main() -> int:
     args = parser.parse_args()
 
     changed = get_changed_files(args.base)
+    if changed is None:
+        print("[tdd-gate] ❌ git 不可用/命令失败，无法获取变更列表——门禁失败（禁止假绿）", file=sys.stderr)
+        return 1
     if not changed:
         print("[tdd-gate] 无变更文件，跳过检查")
         return 0
@@ -154,7 +174,7 @@ def main() -> int:
     # 有源码变更但零测试变更 → 检查是否声明 skip
     # GitHub Actions 的 PR 标题在 GITHUB_REF 或 commit message
     skip_markers = ["[skip-tdd]", "[no-tdd]"]
-    commit_msg = _run_git(["log", "--format=%s%n%b", "-1"])
+    commit_msg = _run_git(["log", "--format=%s%n%b", "-1"]) or ""
     if any(marker in commit_msg for marker in skip_markers):
         print(
             f"[tdd-gate] ⚠️ 源码变更 {len(source_changes)} 个但零测试变更——"

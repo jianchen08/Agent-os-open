@@ -12,6 +12,17 @@
 # 环境变量：
 #   AGENTOS_KERNEL_PORT  内核端口（默认 9100）
 #   AGENTOS_FRONTEND_PORT 前端端口（默认 6390，避开 container_22404 的 5289/5290/6290）
+#
+# [监督形态说明 / 剩余项清仓批次 A2] 两套监督者可能并存：
+#   1. 本脚本的 kernel_supervisor（G8 生命周期监督者）：只在退出码 75
+#      （restart-as-unload：POST /api/v1/system/restart、watcher 的 cdylib
+#      集合变更自动重启——A3）时拉起新进程；其它退出码诚实停机（崩溃不做
+#      自动掩蔽）。
+#   2. 外部会话监督者 .zcode_tmp_kernel_supervisor.sh（仓库根，由前一个
+#      ZCode 会话的后台任务持有；写 .kernel_supervisor.log /
+#      .vite_supervised.log）：每 5s 轮询 :9100，内核不在线即拉起（另每
+#      10 周期拉起 vite :6390）。它会掩蔽诚实停机——若停掉内核后 ~5s 内
+#      又自己回来，属主即该循环；处置：kill 其 bash 进程或移除脚本。
 # ============================================================
 
 set -e
@@ -244,6 +255,7 @@ cleanup() {
     echo ""
     echo -e "${YELLOW}[STOP] 正在停止所有服务...${NC}"
     [ -n "$KERNEL_PID" ] && kill "$KERNEL_PID" 2>/dev/null || true
+    pkill -f "$KERNEL_BIN" 2>/dev/null || true
     [ -n "$FRONTEND_PID" ] && kill "$FRONTEND_PID" 2>/dev/null || true
     rm -f "$PORTS_FILE"
     echo -e "${GREEN}[OK] 已停止${NC}"
@@ -255,7 +267,26 @@ trap cleanup INT TERM
 echo -e "${YELLOW}[2/4] 启动 Rust 内核 (端口 :$KERNEL_PORT)...${NC}"
 export AGENTOS_KERNEL_PORT=$KERNEL_PORT
 export AGENTOS_KERNEL_HOST=0.0.0.0
-"$KERNEL_BIN" &
+# G8 监督者循环：退出码 75 = restart requested（POST /api/v1/system/restart 或
+# watcher 的 cdylib 集合变更自动重启排空后退出），自动拉起新进程；
+# 其它退出码不重启（崩溃/启动错误不做自动掩蔽）。
+# 注意（A2）：外部会话监督者（.zcode_tmp_kernel_supervisor.sh）可能同时在线，
+# 会在任何停机后 ~5s 内拉起内核并掩蔽本循环的诚实停机——见文件头说明。
+kernel_supervisor() {
+    while true; do
+        # 退出码必须经 || 捕获：set -e 下裸命令非零退出会在 rc=$? 执行前终止本子 shell，
+        # 导致监督者不 respawn、退出码 75 的重启语义失效。
+        rc=0
+        "$KERNEL_BIN" || rc=$?
+        if [ "$rc" -ne 75 ]; then
+            echo "[supervisor] kernel exited (code $rc), supervisor stops."
+            return "$rc"
+        fi
+        echo "[supervisor] G8 restart requested (exit 75) — respawning in 1s..."
+        sleep 1
+    done
+}
+kernel_supervisor &
 KERNEL_PID=$!
 
 # 等待内核就绪

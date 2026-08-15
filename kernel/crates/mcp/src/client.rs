@@ -108,11 +108,10 @@ pub struct McpClient {
     router: Option<Arc<dyn CapabilityRouter>>,
     /// JSON-RPC 请求等待响应的超时（默认 300s）。
     ///
-    /// 背景（llm_core.execute 120s 超时修复）：原实现硬编码 120s，与 sidecar 端
-    /// LLM 调用的 first_token_timeout（llm.yaml 默认 120s）形成竞态——reasoning
-    /// model 首 token 接近 120s 时，内核先超时掐断，sidecar 的最终响应永远到不了
-    /// 内核（pending 已被移除）。默认 300s 覆盖 sidecar 端默认 first_token_timeout
-    /// （120s）并留足余量；调用方可用 [`McpClient::with_request_timeout`] 覆盖。
+    /// 300s 须覆盖 sidecar 端 LLM 调用的 first_token_timeout（llm.yaml 默认
+    /// 120s）并留足余量——否则 reasoning model 首 token 接近 120s 时内核先
+    /// 超时掐断，sidecar 的最终响应永远到不了内核（pending 已被移除）。
+    /// 调用方可用 [`McpClient::with_request_timeout`] 覆盖。
     request_timeout: Duration,
     /// HTTP transport 的 reqwest 客户端（connect 时构建，含解析后的 auth 默认头）。
     /// stdio 模式为 None。
@@ -247,6 +246,14 @@ impl McpClient {
                     cmd.envs(self.extra_env.iter().map(|(k, v)| (k.as_str(), v.as_str())));
                 }
 
+                // .env 增量叠加：用户在设置页填写的 API Key 写入 .env 后，
+                // 内核进程环境仍是启动时的旧值——spawn 时把 .env 的增量
+                // （新变量 + .env 自身的更新）直接叠加给子进程，sidecar
+                // 无需重启内核即可拿到新 key（见 env_file 模块说明）。
+                for (k, v) in crate::env_file::env_delta_overlay() {
+                    cmd.env(k, v);
+                }
+
                 let mut child = cmd.spawn().map_err(|e| McpError::SpawnFailed {
                     command: command.clone(),
                     message: e.to_string(),
@@ -294,10 +301,15 @@ impl McpClient {
 
     /// 启动 stdout 读取循环
     ///
-    /// 区分两类消息：
+    /// 区分三类消息：
     /// - response（对内核之前请求的响应）：有 id 且在 pending 表中 → resolve oneshot
-    /// - incoming request（sidecar 主动反向调用）：有 method 且不在 pending 表 → 路由到 router
-    /// - notification（sidecar 单向通知）：有 method 无 id → 当前忽略（无标准场景）
+    /// - incoming request（sidecar 主动反向调用）：有 method 且有 id → 路由到 router
+    /// - notification（sidecar 单向通知）：有 method 无 id → 记录后交给 router（异步）
+    ///
+    /// id 类型：JSON-RPC 2.0 允许 string / number。内核自身出站请求用 uuid 字符串，
+    /// 但 sidecar 反向请求的 id 由对端 SDK 生成——官方 Python SDK（mcp v2）用自增
+    /// 整数 id。反向调用分支必须同时接受两种 id，响应按原始 id 值回显（JSON-RPC
+    /// 要求 response.id === request.id，含类型）。
     async fn start_reader_loop(&self) {
         if let Some(stdout) = &self.stdout {
             let stdout = Arc::clone(stdout);
@@ -318,15 +330,12 @@ impl McpClient {
                     line.clear();
                     match reader.read_line(&mut line).await {
                         Ok(0) => {
-                            // sidecar stdout 关闭（进程退出/崩溃）。原静默 break 会导致
-                            // 进行中的 send_request（如 initialize）等到 120s 超时才失败，
-                            // 这里记 warn 让"sidecar 崩溃"在日志里可见。
+                            // sidecar stdout 关闭（进程退出/崩溃）：记 warn 让
+                            // 崩溃在日志里可见，进行中的 send_request 不静默等满超时。
                             tracing::warn!("[mcp] sidecar stdout EOF（进程退出）");
-                            // 关键修复（工具调用"调用前卡死"根因之二）：
-                            // sidecar 崩溃时，进行中的 send_request 的 oneshot 若不 resolve，
-                            // 调用方只能等满 120s 超时——用户感知为"工具调用卡死"。
-                            // 这里清空 pending（drop 所有 oneshot sender）→ rx 端立即收到
-                            // channel closed → send_request 快速失败返回错误，不阻塞调用方。
+                            // EOF 即清空 pending（drop 所有 oneshot sender）→ rx 端
+                            // 立即收到 channel closed → send_request 快速失败返回
+                            // 错误，不阻塞调用方至超时。
                             let mut pending_map = pending.lock().await;
                             pending_map.clear();
                             break; // EOF
@@ -361,26 +370,40 @@ impl McpClient {
                             }
 
                             // 分支2：sidecar 主动发起的 request（有 method + id）
+                            // id 可为 string 或 number（官方 Python SDK v2 反向请求用
+                            // 整数 id）——仅认字符串会漏到分支3被当 notification 处理，
+                            // router 照常被调但不回响应，sidecar 反向调用必超时。
                             if let (Some(method), Some(id)) = (
                                 msg.get("method").and_then(|v| v.as_str()),
-                                msg.get("id").and_then(|v| v.as_str()).map(String::from),
+                                msg.get("id").filter(|v| !v.is_null()),
                             ) {
-                                handle_incoming_request(method, &msg, &id, &router, &stdin)
-                                    .await;
+                                let raw_id = id.clone();
+                                // 日志/错误消息用规范化字符串形式（数值 id 转十进制）
+                                let id_repr = match id {
+                                    Value::String(s) => s.clone(),
+                                    other => other.to_string(),
+                                };
+                                handle_incoming_request(
+                                    method, &msg, &raw_id, &id_repr, &router, &stdin,
+                                )
+                                .await;
                                 continue;
                             }
                             // 分支3：sidecar 主动发起的 notification（有 method 无 id）
                             // 用于流式 chunk 推送：fire-and-forget，内核不回 response。
-                            if let Some(method) = msg.get("method").and_then(|v| v.as_str()).map(String::from) {
+                            if let Some(method) =
+                                msg.get("method").and_then(|v| v.as_str()).map(String::from)
+                            {
                                 let params = msg.get("params").cloned().unwrap_or(Value::Null);
                                 // 关键：notification 处理用 spawn 并发，不阻塞 reader loop！
                                 // handle_incoming_notification 内部会 await session.emit_event
-                                //（WS 发送），若串行 await 会让后续 notification 攒批排队
-                                // （sidecar 实时写了 45 个跨 11s，内核却攒批 2s 内才处理完）。
+                                // （WS 发送），若串行 await 会让后续 notification 攒批排队，
+                                // 破坏流式 chunk 的实时推送。
                                 // notification 是 fire-and-forget，无需等结果，spawn 后继续读下一行。
                                 let router_clone = router.clone();
                                 tokio::spawn(async move {
-                                    handle_incoming_notification(&method, params, &router_clone).await;
+                                    handle_incoming_notification(&method, params, &router_clone)
+                                        .await;
                                 });
                             }
                             // 其余忽略
@@ -404,13 +427,12 @@ impl McpClient {
     /// 若 sidecar 行内已含 `ERROR`/`WARNING` 等关键字，仍按 INFO 转发（保真原文），
     /// 由日志聚合工具按内容过滤。
     ///
-    /// 非 UTF-8 容错（llm_core.execute 120s 超时修复根因）：原实现用
-    /// `read_line`（严格 UTF-8 解码），Windows 宿主上 Python sidecar 的 stderr
-    /// （如含 GBK 中文路径的 traceback）产生非法字节时返回 `InvalidData` →
-    /// break 退出消费循环 → sidecar 继续写 stderr 管道，缓冲填满（~64KB）后
-    /// `write` 阻塞 → sidecar 进程卡死 → 无法响应 MCP 请求 → 内核等待超时。
-    /// 改为 `read_until(b'\n')` 按原始字节读行 + `String::from_utf8_lossy`
-    /// 解码（非法字节替换为 U+FFFD），读取永不因编码中断，杜绝管道阻塞。
+    /// 非 UTF-8 容错：stderr 按原始字节读行（`read_until(b'\n')`）+
+    /// `String::from_utf8_lossy` 解码（非法字节替换为 U+FFFD）。Windows 宿主上
+    /// Python sidecar 的 stderr（如含 GBK 中文路径的 traceback）可能含非法
+    /// UTF-8 字节——严格 UTF-8 解码会返回 `InvalidData` 中断消费循环，sidecar
+    /// 继续写 stderr 填满管道缓冲（~64KB）后 `write` 阻塞、进程卡死、无法响应
+    /// MCP 请求。按字节读行 + lossy 解码保证读取永不因编码中断，杜绝管道反压。
     async fn start_stderr_reader(&self) {
         if let Some(stderr) = &self.stderr {
             let stderr = Arc::clone(stderr);
@@ -482,11 +504,7 @@ impl McpClient {
                     header_map.append(name, val);
                 }
                 _ => {
-                    tracing::warn!(
-                        "[mcp] HTTP 端点非法 header 跳过 | {}={}",
-                        k,
-                        v
-                    );
+                    tracing::warn!("[mcp] HTTP 端点非法 header 跳过 | {}={}", k, v);
                 }
             }
         }
@@ -500,10 +518,14 @@ impl McpClient {
                         format!("Bearer {}", resolved),
                     ),
                     AuthType::ApiKey => {
-                        let name = HeaderName::try_from(a.header_name.as_str())
-                            .map_err(|e| McpError::ConnectionFailed {
-                                message: format!("invalid auth header_name {}: {}", a.header_name, e),
-                            })?;
+                        let name = HeaderName::try_from(a.header_name.as_str()).map_err(|e| {
+                            McpError::ConnectionFailed {
+                                message: format!(
+                                    "invalid auth header_name {}: {}",
+                                    a.header_name, e
+                                ),
+                            }
+                        })?;
                         (name, resolved)
                     }
                     AuthType::None => unreachable!(),
@@ -529,24 +551,22 @@ impl McpClient {
     /// 绕开 stdio 的 pending/reader-loop（外部第三方 MCP server 不会反向调用内核
     /// capability，无需异步配对通道）。SSE 流式响应（`text/event-stream`）暂不支持，
     /// 命中时返回清晰错误（plain JSON 覆盖标准非流式调用，流式留作后续）。
-    async fn http_post(
-        &self,
-        url: &str,
-        request: &JsonRpcRequest,
-    ) -> Result<Value, McpError> {
-        let client = self.http_client.as_ref().ok_or_else(|| {
-            McpError::ConnectionFailed {
+    async fn http_post(&self, url: &str, request: &JsonRpcRequest) -> Result<Value, McpError> {
+        let client = self
+            .http_client
+            .as_ref()
+            .ok_or_else(|| McpError::ConnectionFailed {
                 message: "http client not built (connect not called)".to_string(),
-            }
-        })?;
-        let resp = client
-            .post(url)
-            .json(request)
-            .send()
-            .await
-            .map_err(|e| McpError::Transport {
-                message: format!("http post: {}", e),
             })?;
+        let resp =
+            client
+                .post(url)
+                .json(request)
+                .send()
+                .await
+                .map_err(|e| McpError::Transport {
+                    message: format!("http post: {}", e),
+                })?;
         let status = resp.status();
         if !status.is_success() {
             let body = resp.text().await.unwrap_or_default();
@@ -557,7 +577,8 @@ impl McpClient {
         }
         // SSE 流式暂不支持：探测 content-type，给出清晰错误而非解析失败。
         if let Some(ct) = resp.headers().get(reqwest::header::CONTENT_TYPE) {
-            if ct.as_bytes()
+            if ct
+                .as_bytes()
                 .windows(b"text/event-stream".len())
                 .any(|w| w.eq_ignore_ascii_case(b"text/event-stream"))
             {
@@ -630,10 +651,9 @@ impl McpClient {
         }
 
         // 等待响应（超时默认 300s：LLM 调用尤其是 reasoning model 首次可能较慢。
-        // 原硬编码 120s 与 sidecar 端 first_token_timeout（llm.yaml 默认 120s）
-        // 形成竞态——reasoning model 首 token 接近 120s 时内核先掐断，sidecar 的
-        // 最终响应永远到不了内核。默认 300s 覆盖并留足余量，可用
-        // with_request_timeout 按插件覆盖。）
+        // 300s 须覆盖 sidecar 端 first_token_timeout（llm.yaml 默认 120s）并留足
+        // 余量——否则 reasoning model 首 token 接近上限时内核先掐断，sidecar 的
+        // 最终响应永远到不了内核。可用 with_request_timeout 按插件覆盖。）
         let response = tokio::time::timeout(self.request_timeout, rx)
             .await
             .map_err(|_| McpError::Timeout {
@@ -661,7 +681,10 @@ impl McpClient {
     /// # Deprecated
     ///
     /// 请使用 `initialize(&config)` 传递插件配置。
-    #[deprecated(since = "0.2.1", note = "use initialize(&config) to pass plugin config")]
+    #[deprecated(
+        since = "0.2.1",
+        note = "use initialize(&config) to pass plugin config"
+    )]
     pub async fn initialize_without_config(&self) -> Result<Value, McpError> {
         self.initialize(&Value::Null).await
     }
@@ -740,11 +763,12 @@ impl McpClient {
             })?;
         } else if let McpTransport::Http { url, .. } = &self.transport {
             // HTTP transport：fire-and-forget POST notification（忽略响应体）。
-            let client = self.http_client.as_ref().ok_or_else(|| {
-                McpError::ConnectionFailed {
+            let client = self
+                .http_client
+                .as_ref()
+                .ok_or_else(|| McpError::ConnectionFailed {
                     message: "http client not built (connect not called)".to_string(),
-                }
-            })?;
+                })?;
             let _ = client
                 .post(url)
                 .header(reqwest::header::CONTENT_TYPE, "application/json")
@@ -827,10 +851,9 @@ impl McpClient {
 
     /// 终止子进程及其整棵进程树
     ///
-    /// 治理缺口修复：原实现只 kill 直接子进程（sidecar 本体），bash 工具
-    /// 拉起的孙进程会变孤儿。现在先整树杀（kill_process_tree），再对直接
-    /// 子进程 kill 兜底。idle GC 卸载 / 崩溃清理 / 热重载 respawn 三条
-    /// kill 路径均收敛到此方法。
+    /// 只 kill 直接子进程（sidecar 本体）会让 bash 工具拉起的孙进程变孤儿；
+    /// 先整树杀（kill_process_tree），再对直接子进程 kill 兜底。idle GC 卸载 /
+    /// 崩溃清理 / 热重载 respawn 三条 kill 路径均收敛到此方法。
     pub async fn kill(&mut self) -> Result<(), McpError> {
         if let Some(child) = &self.child {
             let mut child = child.lock().await;
@@ -902,9 +925,12 @@ async fn write_raw_line(
         .map_err(|e| McpError::Transport {
             message: format!("write error: {}", e),
         })?;
-    writer.write_all(b"\n").await.map_err(|e| McpError::Transport {
-        message: format!("write newline error: {}", e),
-    })?;
+    writer
+        .write_all(b"\n")
+        .await
+        .map_err(|e| McpError::Transport {
+            message: format!("write newline error: {}", e),
+        })?;
     writer.flush().await.map_err(|e| McpError::Transport {
         message: format!("flush error: {}", e),
     })?;
@@ -914,11 +940,14 @@ async fn write_raw_line(
 /// 处理 sidecar 主动发起的 JSON-RPC request。
 ///
 /// method 形如 `pipeline-executor.resume`，拆分后路由到 CapabilityRouter；
-/// 结果通过 stdin 回写为 JSON-RPC response（相同 id）。
+/// 结果通过 stdin 回写为 JSON-RPC response。`raw_id` 为请求的原始 id 值
+/// （string 或 number，按 JSON-RPC 2.0 要求原样回显），`id_repr` 为其字符串
+/// 形式（仅用于日志）。
 async fn handle_incoming_request(
     method: &str,
     msg: &Value,
-    id: &str,
+    raw_id: &Value,
+    id_repr: &str,
     router: &Option<Arc<dyn CapabilityRouter>>,
     stdin: &Arc<Mutex<tokio::process::ChildStdin>>,
 ) {
@@ -935,12 +964,12 @@ async fn handle_incoming_request(
     let Some((capability, cap_method)) = parse_capability_method_with(method, &known_ns) else {
         let resp = serde_json::json!({
             "jsonrpc": "2.0",
-            "id": id,
+            "id": raw_id,
             "error": {"code": -32601, "message": format!("method not found: {method}")}
         });
         if let Err(e) = write_raw_line(stdin, &resp.to_string()).await {
             tracing::warn!(
-                "[mcp] failed to write -32601 (method not found) response for id={id}: {e}"
+                "[mcp] failed to write -32601 (method not found) response for id={id_repr}: {e}"
             );
         }
         return;
@@ -949,12 +978,12 @@ async fn handle_incoming_request(
     let Some(router) = router else {
         let resp = serde_json::json!({
             "jsonrpc": "2.0",
-            "id": id,
+            "id": raw_id,
             "error": {"code": -32601, "message": "no capability router configured"}
         });
         if let Err(e) = write_raw_line(stdin, &resp.to_string()).await {
             tracing::warn!(
-                "[mcp] failed to write -32601 (no router) response for id={id}: {e}"
+                "[mcp] failed to write -32601 (no router) response for id={id_repr}: {e}"
             );
         }
         return;
@@ -964,17 +993,17 @@ async fn handle_incoming_request(
     let resp = match result {
         Ok(value) => serde_json::json!({
             "jsonrpc": "2.0",
-            "id": id,
+            "id": raw_id,
             "result": value
         }),
         Err(e) => serde_json::json!({
             "jsonrpc": "2.0",
-            "id": id,
+            "id": raw_id,
             "error": {"code": -32603, "message": e.to_string()}
         }),
     };
     if let Err(e) = write_raw_line(stdin, &resp.to_string()).await {
-        tracing::warn!("[mcp] failed to write JSON-RPC response for id={id}: {e}");
+        tracing::warn!("[mcp] failed to write JSON-RPC response for id={id_repr}: {e}");
     }
 }
 
@@ -1043,12 +1072,15 @@ pub fn build_declared_capabilities(router_present: bool) -> Value {
 /// 这让运行时注册的 namespace（如插件通过 manifest `provides.capabilities`
 /// 注册的 `human-interaction`）自动出现在 initialize 声明里，sidecar SDK
 /// 据此创建对应的 `CapabilityHandle`，无需改内核常量。
-pub fn build_declared_capabilities_from_namespaces<T: AsRef<str>>(
-    namespaces: &[T],
-) -> Value {
+pub fn build_declared_capabilities_from_namespaces<T: AsRef<str>>(namespaces: &[T]) -> Value {
     namespaces
         .iter()
-        .map(|ns| (ns.as_ref().to_string(), Value::Object(serde_json::Map::new())))
+        .map(|ns| {
+            (
+                ns.as_ref().to_string(),
+                Value::Object(serde_json::Map::new()),
+            )
+        })
         .collect()
 }
 
@@ -1076,13 +1108,8 @@ pub fn resolve_env_placeholders(raw: &str) -> Result<String, McpError> {
                     }
                     Some(end) => {
                         let var = &after[..end];
-                        let val = std::env::var(var).map_err(|_| {
-                            McpError::ConnectionFailed {
-                                message: format!(
-                                    "HTTP MCP 端点引用了未设置的环境变量: ${{{}}}",
-                                    var
-                                ),
-                            }
+                        let val = std::env::var(var).map_err(|_| McpError::ConnectionFailed {
+                            message: format!("HTTP MCP 端点引用了未设置的环境变量: ${{{}}}", var),
                         })?;
                         out.push_str(&val);
                         rest = &after[end + 1..];
@@ -1225,10 +1252,7 @@ mod tests {
     /// （headers+body）存入共享 state 供断言。返回 (url, captured_raw_request)。
     async fn spawn_mock_mcp_server(
         result: Value,
-    ) -> (
-        String,
-        Arc<std::sync::Mutex<Option<Vec<u8>>>>,
-    ) {
+    ) -> (String, Arc<std::sync::Mutex<Option<Vec<u8>>>>) {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
         use tokio::net::TcpListener;
 
@@ -1258,7 +1282,9 @@ mod tests {
             }
             *cap2.lock().unwrap() = Some(data.clone());
             // 解析 body 取 id 回显
-            let body_start = subseq(&data, b"\r\n\r\n").map(|p| p + 4).unwrap_or(data.len());
+            let body_start = subseq(&data, b"\r\n\r\n")
+                .map(|p| p + 4)
+                .unwrap_or(data.len());
             let body_str = String::from_utf8_lossy(&data[body_start..]);
             let id = serde_json::from_str::<Value>(&body_str)
                 .ok()
@@ -1338,8 +1364,7 @@ mod tests {
             header_name: "Authorization".to_string(),
             value: "${MCP_TEST_KEY_DEFINITELY_UNSET}".to_string(),
         };
-        let mut client =
-            McpClient::new_http("http://127.0.0.1:1", HashMap::new(), Some(auth));
+        let mut client = McpClient::new_http("http://127.0.0.1:1", HashMap::new(), Some(auth));
         let res = client.connect().await;
         assert!(res.is_err(), "connect should fail on missing env var");
     }
@@ -1386,9 +1411,15 @@ mod tests {
         }"#;
         let m: agentos_core::traits::PluginManifest = serde_json::from_str(json).unwrap();
         let cfg = m.mcp.expect("mcp config should deserialize");
-        assert_eq!(cfg.transport, agentos_core::traits::McpTransport::StreamableHttp);
+        assert_eq!(
+            cfg.transport,
+            agentos_core::traits::McpTransport::StreamableHttp
+        );
         let ep = cfg.endpoint.expect("endpoint should deserialize");
-        assert_eq!(ep.url.as_deref(), Some("https://registry.modelcontextprotocol.io"));
+        assert_eq!(
+            ep.url.as_deref(),
+            Some("https://registry.modelcontextprotocol.io")
+        );
         assert_eq!(ep.headers.get("X-Also-Search").unwrap(), "smithery.ai");
         let auth = ep.auth.expect("auth present");
         assert_eq!(auth.auth_type, AuthType::ApiKey);

@@ -36,7 +36,6 @@ async fn admin_token(app: &axum::Router) -> String {
     v["access_token"].as_str().unwrap().to_string()
 }
 
-
 /// 在临时 config/pipelines/ 下写一份 default.yaml。
 /// 注意：project_root 语义 = 项目根（config/ 的父目录），
 /// handler 读取 `project_root/config/pipelines/{name}.yaml`（对齐 0.1 白名单）。
@@ -77,9 +76,14 @@ async fn test_get_pipeline_config_returns_yaml_content() {
         .unwrap();
 
     assert_eq!(response.status(), StatusCode::OK);
-    assert!(response.headers().get("etag").is_some(), "ETag header missing");
+    assert!(
+        response.headers().get("etag").is_some(),
+        "ETag header missing"
+    );
 
-    let body = axum::body::to_bytes(response.into_body(), 8192).await.unwrap();
+    let body = axum::body::to_bytes(response.into_body(), 8192)
+        .await
+        .unwrap();
     let json: Value = serde_json::from_slice(&body).unwrap();
     assert_eq!(json["data"]["name"], "agentos_agent");
     assert_eq!(json["name"], "default");
@@ -162,7 +166,10 @@ async fn test_put_pipeline_config_writes_atomically() {
 
     // 磁盘文件已更新（含新插件）
     let raw = fs::read_to_string(tmp.path().join("config/pipelines/default.yaml")).unwrap();
-    assert!(raw.contains("security_check"), "disk content should be updated: {raw}");
+    assert!(
+        raw.contains("security_check"),
+        "disk content should be updated: {raw}"
+    );
 }
 
 /// PUT 非法 name（路径穿越）→ 400。

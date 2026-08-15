@@ -17,13 +17,13 @@ from playwright.sync_api import sync_playwright
 BASE_URL = "http://127.0.0.1:5290"
 OUT_DIR = "/workspace/docs/working/browser_tool_call_evidence"
 CHROME = "/opt/ms-playwright/chromium-1234/chrome-linux64/chrome"
-USERNAME = "admin"
-PASSWORD = "admin12345"
+USERNAME = os.environ.get("AGENTOS_ADMIN_USER", "admin")
+PASSWORD = os.environ.get("AGENTOS_ADMIN_PWD", "admin12345")
 MESSAGE = "用计算工具算一下 5+3"
 POLL_SECONDS = 60  # 工具执行链路约 10-30s，轮询放宽到 60s
 
 
-def find_chrome() -> str:
+def find_chrome() -> str | None:
     """定位 chromium 可执行文件"""
     if os.path.exists(CHROME):
         return CHROME

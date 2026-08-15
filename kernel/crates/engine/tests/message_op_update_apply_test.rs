@@ -234,7 +234,10 @@ async fn message_id_injected_once_into_first_assistant_append() {
     let rec = store
         .get_slot_messages_by_pipeline("p5", "default", MessageQueryOpts::default())
         .unwrap();
-    let first = rec.iter().find(|r| r.seq_in_branch == 1).expect("seq1 存在");
+    let first = rec
+        .iter()
+        .find(|r| r.seq_in_branch == 1)
+        .expect("seq1 存在");
     assert_eq!(
         first.message_id, "a_run_001",
         "首个 assistant 的 record_id 应为内核 message_id"
@@ -252,7 +255,10 @@ async fn message_id_injected_once_into_first_assistant_append() {
     let rec = store
         .get_slot_messages_by_pipeline("p5", "default", MessageQueryOpts::default())
         .unwrap();
-    let second = rec.iter().find(|r| r.seq_in_branch == 2).expect("seq2 存在");
+    let second = rec
+        .iter()
+        .find(|r| r.seq_in_branch == 2)
+        .expect("seq2 存在");
     assert_ne!(
         second.message_id, "a_run_001",
         "后续 assistant 不应复用同一 message_id"
@@ -264,7 +270,10 @@ async fn message_id_injected_once_into_first_assistant_append() {
 
     // 内存消息不带 id（注入只影响表侧 record_id）
     let arr = state["messages"].as_array().unwrap();
-    assert!(arr.iter().all(|m| m.get("id").is_none()), "内存消息不应携带 id");
+    assert!(
+        arr.iter().all(|m| m.get("id").is_none()),
+        "内存消息不应携带 id"
+    );
 
     // 标志已置位
     assert_eq!(
@@ -290,7 +299,10 @@ async fn message_id_injection_skips_modify_ops_on_old_slots() {
         &mut state,
         backend,
         "default",
-        &[set(0, json!({ "role": "assistant", "content": "历史回复" }))],
+        &[set(
+            0,
+            json!({ "role": "assistant", "content": "历史回复" }),
+        )],
     )
     .await
     .unwrap();
@@ -301,7 +313,10 @@ async fn message_id_injection_skips_modify_ops_on_old_slots() {
         backend,
         "default",
         &[
-            set(0, json!({ "role": "assistant", "content": "历史回复(改写)" })),
+            set(
+                0,
+                json!({ "role": "assistant", "content": "历史回复(改写)" }),
+            ),
             json!({ "op": "set", "msg": { "role": "user", "content": "新消息" } }),
         ],
     )
@@ -311,7 +326,10 @@ async fn message_id_injection_skips_modify_ops_on_old_slots() {
     let rec = store
         .get_slot_messages_by_pipeline("p6", "default", MessageQueryOpts::default())
         .unwrap();
-    let mod_row = rec.iter().find(|r| r.seq_in_branch == 0).expect("seq0 存在");
+    let mod_row = rec
+        .iter()
+        .find(|r| r.seq_in_branch == 0)
+        .expect("seq0 存在");
     assert_ne!(
         mod_row.message_id, "a_run_002",
         "modify 旧槽位不得注入本轮 message_id"

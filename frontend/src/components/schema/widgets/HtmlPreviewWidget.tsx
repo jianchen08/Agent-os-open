@@ -27,7 +27,7 @@ export interface HtmlPreviewWidgetProps {
 /**
  * HTML 预览组件
  *
- * 将 HTML 内容通过 iframe 的 srcDoc 渲染，无 sandbox 限制以支持完整交互。
+ * 通过 iframe srcDoc 渲染，sandbox 授予 scripts/same-origin/forms/popups/modals 以支持完整交互。
  * 优先使用传入的 html 属性，其次通过 filePath + API 读取。
  * 使用 absolute 定位确保 iframe 填满父容器，不受 flex/overflow 嵌套影响。
  *

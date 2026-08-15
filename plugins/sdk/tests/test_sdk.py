@@ -110,7 +110,7 @@ class TestToolRegistration:
 
 
 class TestMcpServer:
-    """验证 MCP JSON-RPC 服务端功能。"""
+    """验证 MCP 服务端功能（官方 mcp SDK v2 承载）。"""
 
     def _make_server(self) -> tuple[McpServer, dict[str, ToolDef], dict]:
         tools = {
@@ -126,31 +126,36 @@ class TestMcpServer:
         server = McpServer(tools, resources, handlers)
         return server, tools, handlers
 
-    def test_initialize(self) -> None:
+    def test_server_identity(self) -> None:
+        """官方 SDK Server 以 agentos-plugin-sdk 身份对外声明。"""
         server, _, _ = self._make_server()
-        result = server._handle_initialize({"capabilities": {}, "config": {}})
-        assert result["protocolVersion"] == "2024-11-05"
-        assert result["serverInfo"]["name"] == "agentos-plugin-sdk"
+        assert server._sdk.name == "agentos-plugin-sdk"
+        assert server._sdk.version == "0.2.0"
 
-    def test_tools_list(self) -> None:
+    @pytest.mark.asyncio
+    async def test_tools_list(self) -> None:
         server, _, _ = self._make_server()
-        result = server._handle_tools_list()
-        assert len(result["tools"]) == 1
-        assert result["tools"][0]["name"] == "echo"
-        assert result["tools"][0]["description"] == "Echo tool"
+        result = await server._on_list_tools(None, None)
+        assert len(result.tools) == 1
+        assert result.tools[0].name == "echo"
+        assert result.tools[0].description == "Echo tool"
+        assert result.tools[0].input_schema == {
+            "type": "object",
+            "properties": {"text": {"type": "string"}}
+        }
 
     @pytest.mark.asyncio
     async def test_tools_call_async(self) -> None:
         server, _, _ = self._make_server()
         result = await server._handle_tools_call({"name": "echo", "arguments": {"text": "hello"}})
-        assert result["isError"] is False
-        content_text = json.loads(result["content"][0]["text"])
+        assert result.is_error is False
+        content_text = json.loads(result.content[0].text)
         assert content_text == {"echo": "hello"}
 
     @pytest.mark.asyncio
     async def test_tools_call_unknown_tool(self) -> None:
         server, _, _ = self._make_server()
-        with pytest.raises(ValueError, match="tool not found"):
+        with pytest.raises(Exception, match="tool not found"):
             await server._handle_tools_call({"name": "nonexistent", "arguments": {}})
 
     @pytest.mark.asyncio
@@ -171,7 +176,7 @@ class TestMcpServer:
         result = await server._handle_tools_call(
             {"name": "sync_echo", "arguments": {"text": "world"}}
         )
-        content = json.loads(result["content"][0]["text"])
+        content = json.loads(result.content[0].text)
         assert content == {"echo": "world"}
 
     @pytest.mark.asyncio
@@ -214,7 +219,7 @@ class TestMcpServer:
             "name": "ranged",
             "arguments": {"path": "x.txt", "start_line": "2", "end_line": "4"},
         })
-        assert result["isError"] is False
+        assert result.is_error is False
         assert seen["start_line"] == 2 and isinstance(seen["start_line"], int)
         assert seen["end_line"] == 4 and isinstance(seen["end_line"], int)
 
@@ -248,8 +253,8 @@ class TestMcpServer:
             "name": "trigger_review",
             "arguments": {"summary": "only summary"},
         })
-        assert result["isError"] is True
-        body = json.loads(result["content"][0]["text"])
+        assert result.is_error is True
+        body = json.loads(result.content[0].text)
         assert body["success"] is False
         assert body["error_code"] == "INVALID_ARGUMENTS"
         assert "task_id" in body["error"]
@@ -271,15 +276,15 @@ class TestMcpServer:
         }
         server = McpServer({}, resources, {})
         result = await server._handle_resources_read({"uri": "config://app"})
-        assert len(result["contents"]) == 1
-        assert result["contents"][0]["uri"] == "config://app"
-        content = json.loads(result["contents"][0]["text"])
+        assert len(result.contents) == 1
+        assert result.contents[0].uri == "config://app"
+        content = json.loads(result.contents[0].text)
         assert content == {"setting": "value"}
 
     @pytest.mark.asyncio
     async def test_resources_read_unknown(self) -> None:
         server = McpServer({}, {}, {})
-        with pytest.raises(ValueError, match="resource not found"):
+        with pytest.raises(Exception, match="resource not found"):
             await server._handle_resources_read({"uri": "unknown://x"})
 
     @pytest.mark.asyncio

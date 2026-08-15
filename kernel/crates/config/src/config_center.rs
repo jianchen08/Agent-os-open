@@ -3,14 +3,8 @@
 //! 对应 0.1 的 `src/config/config_center.py ConfigCenter`。
 //! 基于 notify crate 实现文件监听，支持 500ms 防抖 + 内容哈希去重。
 //!
-//! ⚠️ **未接线（截至 0.2）**：本模块实现了热重载能力，但在运行期尚未启用——
-//! 没有任何 crate 依赖 `agentos-config`、`start_watching()` 从未被调用。
-//! 管道配置（config/pipelines/autonomous.yaml）目前只在启动期由
-//! `pipeline_loader::load_pipeline_config` 加载一次到 `Arc<PipelineConfig>`，
-//! 运行期不可变。修改管道配置的唯一生效方式是重启内核进程。
-//!
-//! 接线涉及 main.rs 启动流程 + 将 AppState.pipeline_config 从 `Arc`
-//! 改为可替换容器 + 并发安全，留作独立任务，不属本次持久化修复范围。
+//! ⚠️ **push 模式未接线**：`start_watching()`/notify 推送未被任何调用方启用；
+//! pull 模式（`load` 的 mtime 缓存）已由 engine 在管道循环按迭代调用。
 //!
 //! [来源: src/config/config_center.py]
 
@@ -186,7 +180,9 @@ impl ConfigCenter {
         let current_mtime = abs_path
             .metadata()
             .and_then(|m| m.modified())
-            .map_err(|e| ConfigError::Io { message: e.to_string() })?;
+            .map_err(|e| ConfigError::Io {
+                message: e.to_string(),
+            })?;
 
         // ② 需要重读：调 reload（复用其缓存写入 + 审计 + 回滚）
         let (ok, _rolled_back, err) = self.reload(&path_str);
@@ -195,7 +191,9 @@ impl ConfigCenter {
                 message: err.unwrap_or_else(|| "reload failed".to_string()),
             });
         }
-        self.mtime_cache.write().insert(path_str.clone(), current_mtime);
+        self.mtime_cache
+            .write()
+            .insert(path_str.clone(), current_mtime);
 
         self.config_cache
             .read()
@@ -229,17 +227,26 @@ impl ConfigCenter {
 
         // 建父目录（支持 agents/sub/deep.yaml 这种深路径）
         if let Some(parent) = abs_path.parent() {
-            std::fs::create_dir_all(parent).map_err(|e| ConfigError::Io { message: e.to_string() })?;
+            std::fs::create_dir_all(parent).map_err(|e| ConfigError::Io {
+                message: e.to_string(),
+            })?;
         }
 
         // 原子写：先写隐藏 .tmp，再 rename 替换
         let tmp_path = abs_path.with_extension("yaml.tmp");
-        std::fs::write(&tmp_path, content).map_err(|e| ConfigError::Io { message: e.to_string() })?;
-        std::fs::rename(&tmp_path, &abs_path).map_err(|e| ConfigError::Io { message: e.to_string() })?;
+        std::fs::write(&tmp_path, content).map_err(|e| ConfigError::Io {
+            message: e.to_string(),
+        })?;
+        std::fs::rename(&tmp_path, &abs_path).map_err(|e| ConfigError::Io {
+            message: e.to_string(),
+        })?;
 
         // 刷新缓存：直接用新内容 + 新 mtime，让 load() 立即读到
-        let new_value: serde_json::Value = serde_yaml::from_str(content)
-            .map_err(|e| ConfigError::YamlParse { path: path_str.clone(), message: e.to_string() })?;
+        let new_value: serde_json::Value =
+            serde_yaml::from_str(content).map_err(|e| ConfigError::YamlParse {
+                path: path_str.clone(),
+                message: e.to_string(),
+            })?;
         let new_mtime = abs_path
             .metadata()
             .and_then(|m| m.modified())
@@ -296,8 +303,9 @@ impl ConfigCenter {
         dir: &Path,
         config_map: &mut serde_json::Map<String, serde_json::Value>,
     ) -> Result<(), ConfigError> {
-        let entries = std::fs::read_dir(dir)
-            .map_err(|e| ConfigError::Io { message: e.to_string() })?;
+        let entries = std::fs::read_dir(dir).map_err(|e| ConfigError::Io {
+            message: e.to_string(),
+        })?;
 
         for entry in entries.flatten() {
             let path = entry.path();
@@ -981,7 +989,8 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let cc = ConfigCenter::new(temp.path());
 
-        cc.store("agents/sub/deep.yaml", "key: val\n").expect("应自动创建子目录");
+        cc.store("agents/sub/deep.yaml", "key: val\n")
+            .expect("应自动创建子目录");
 
         assert!(temp.path().join("agents/sub/deep.yaml").exists());
     }
@@ -994,8 +1003,14 @@ mod tests {
 
         cc.store("cfg.yaml", "x: 1\n").unwrap();
 
-        assert!(!temp.path().join("cfg.yaml.tmp").exists(), "不应残留 .tmp 文件");
-        assert!(!temp.path().join(".cfg.yaml.tmp").exists(), "不应残留隐藏 .tmp 文件");
+        assert!(
+            !temp.path().join("cfg.yaml.tmp").exists(),
+            "不应残留 .tmp 文件"
+        );
+        assert!(
+            !temp.path().join(".cfg.yaml.tmp").exists(),
+            "不应残留隐藏 .tmp 文件"
+        );
     }
 
     // ════════════════════════════════════════════════════════════════

@@ -13,12 +13,20 @@
 //!
 //! ## 契约
 //!
-//! 插件 cdylib export 一个 `extern "C" fn plugin_create() -> *mut ()`，返回
+//! 插件 cdylib export 一个 `extern "C" fn agentos_plugin_create() -> *mut ()`，返回
 //! `Box<dyn PipelinePlugin>` 的裸指针（堆分配，所有权转移给内核）。内核 dlopen
 //! 拿到符号、调用、把指针还原为 `Box<dyn PipelinePlugin>`。
 //!
 //! unsafe 仅存在于 loader 的指针还原（和插件侧的 `Box::into_raw`），由 SDK 封装。
 //! 插件作者的业务代码（impl 块）零 unsafe。
+//!
+//! ## 调用语义（B2：同一 execute 入口，约定字段区分）
+//!
+//! `execute` 承载两种语义，经 [`PluginCtx::tool_call_json`] 约定字段区分：
+//! - `None`（缺省）：pipeline 语义，返回 state_updates JSON；
+//! - `Some({"name": ...})`：工具调用语义（InProcess 工具插件），返回
+//!   ToolExecutionResult 形状 JSON（`{success, data}` / `{success:false, error}`）。
+//!   旧插件不认识该字段 → 按 pipeline 逻辑返回，调用侧归一（零破坏）。
 //!
 //! ## 依赖方向
 //!
@@ -81,7 +89,7 @@ pub trait PipelinePlugin: Send + Sync {
 /// `host` 是内核注入的 capability 句柄（`None` = 未注入，插件降级跳过 capability）。
 #[derive(Clone, Default, Serialize, Deserialize)]
 pub struct PluginCtx {
-    /// 管道状态（JSON 字符串）。
+    /// 管道状态（JSON 字符串）。工具调用语义下是工具入参（inputs）。
     pub state_json: String,
     /// 插件配置（JSON 字符串）。
     pub config_json: String,
@@ -93,6 +101,25 @@ pub struct PluginCtx {
     pub task_id: String,
     /// 管道 ID。
     pub pipeline_id: String,
+    /// 工具调用语义标记（B2：native 工具插件，M2 计划任务 B）。
+    ///
+    /// 与生命周期钩子 `hook` 字段同构的约定字段模式：**同一 `execute` C-ABI 入口，
+    /// 约定字段区分调用语义**。概念上等价于 PluginInput 的
+    /// `{state: inputs, config: ..., tool_call: {name: tool_name}}`：
+    /// - `None` → 原 pipeline 语义：execute 返回 state_updates JSON；
+    /// - `Some(json)` → 本次是**工具调用**，值为 `{"name": tool_name}` JSON 字符串
+    ///   （入参在 `state_json`）：插件走工具逻辑，返回 ToolExecutionResult 形状 JSON
+    ///   （`{"success": true, "data": ...}` 或 `{"success": false, "error": "..."}`）。
+    ///
+    /// 旧插件不认识该字段（编译时无此字段，运行时直调无反序列化开销）→ 忽略，
+    /// 按 pipeline 逻辑返回 state_updates；调用侧（invoker `invoke_native_tool`）
+    /// 检测返回形状归一（能解析成 ToolExecutionResult 信封就用，否则包 success
+    /// 信封）——旧插件零破坏。
+    ///
+    /// 注：跨 cdylib 边界按引用传 `PluginCtx` 本体（非序列化），本字段的
+    /// `#[serde(default)]` 仅为 JSON 兼容（测试/日志序列化时缺省为 None）。
+    #[serde(default)]
+    pub tool_call_json: Option<String>,
 }
 
 impl PluginCtx {
@@ -104,6 +131,28 @@ impl PluginCtx {
     /// 解析 config_json 为 serde_json::Value。
     pub fn config_value(&self) -> serde_json::Value {
         serde_json::from_str(&self.config_json).unwrap_or(serde_json::Value::Null)
+    }
+
+    /// 解析 tool_call_json（插件侧便利方法，B2 工具调用语义）。
+    ///
+    /// - `Some(value)` → 本次 execute 是工具调用，value 形如 `{"name": "bash_execute"}`；
+    /// - `None` → 原 pipeline 语义。
+    ///
+    /// 插件典型写法：
+    /// ```ignore
+    /// fn execute(&self, ectx: &ExecContext) -> Result<String, String> {
+    ///     if let Some(tool_call) = ectx.ctx.tool_call_value() {
+    ///         let name = tool_call.get("name").and_then(|v| v.as_str()).unwrap_or("");
+    ///         let args = ectx.ctx.state_value();
+    ///         return Ok(format!(r#"{{"success": true, "data": {{}}"}}"#)); // 工具逻辑
+    ///     }
+    ///     // …原 pipeline 逻辑…
+    /// }
+    /// ```
+    pub fn tool_call_value(&self) -> Option<serde_json::Value> {
+        self.tool_call_json
+            .as_deref()
+            .and_then(|s| serde_json::from_str(s).ok())
     }
 }
 
@@ -155,7 +204,8 @@ pub unsafe fn box_from_raw(ptr: *mut ()) -> Option<Box<dyn PipelinePlugin>> {
     }
     // SAFETY: 调用方保证 ptr 来自 plugin_into_raw（外层 Box<Box<dyn PipelinePlugin>>）。
     // 还原外层 Box，取出内层 Box<dyn PipelinePlugin>（所有权转移给调用方）。
-    let outer: Box<Box<dyn PipelinePlugin>> = unsafe { Box::from_raw(ptr as *mut Box<dyn PipelinePlugin>) };
+    let outer: Box<Box<dyn PipelinePlugin>> =
+        unsafe { Box::from_raw(ptr as *mut Box<dyn PipelinePlugin>) };
     Some(*outer)
 }
 
@@ -172,6 +222,41 @@ mod tests {
         assert_eq!(ctx.state_value()["k"], 1);
     }
 
+    #[test]
+    fn plugin_ctx_tool_call_value_parses() {
+        // B2：tool_call_json 解析为 {"name": ...}（Some = 工具调用语义）。
+        let ctx = PluginCtx {
+            tool_call_json: Some(r#"{"name": "bash_execute"}"#.into()),
+            ..PluginCtx::default()
+        };
+        let tc = ctx.tool_call_value().expect("tool_call 应解析为 Some");
+        assert_eq!(tc["name"], "bash_execute");
+    }
+
+    #[test]
+    fn plugin_ctx_tool_call_value_none_for_pipeline() {
+        // 旧 pipeline 调用路径：tool_call_json 为 None → None（零破坏）。
+        let ctx = PluginCtx::default();
+        assert!(ctx.tool_call_value().is_none());
+        // 非法 JSON 字符串也降级为 None（不 panic）
+        let bad = PluginCtx {
+            tool_call_json: Some("not json".into()),
+            ..PluginCtx::default()
+        };
+        assert!(bad.tool_call_value().is_none());
+    }
+
+    #[test]
+    fn plugin_ctx_serde_deserialize_without_tool_call_field() {
+        // JSON 兼容：旧形态（无 tool_call_json 字段）反序列化 → None（#[serde(default)]）。
+        let ctx: PluginCtx = serde_json::from_str(
+            r#"{"state_json": "{}", "config_json": "{}", "tenant_id": "t", "session_id": "s", "task_id": "", "pipeline_id": "p"}"#,
+        )
+        .unwrap();
+        assert!(ctx.tool_call_json.is_none());
+        assert!(ctx.tool_call_value().is_none());
+    }
+
     struct DummyPlugin;
     impl PipelinePlugin for DummyPlugin {
         fn execute(&self, _ectx: &ExecContext) -> Result<String, String> {
@@ -185,7 +270,10 @@ mod tests {
         assert!(!ptr.is_null());
         // SAFETY: ptr 来自 plugin_into_raw，仅还原一次。
         let boxed = unsafe { box_from_raw(ptr) }.unwrap();
-        let ectx = ExecContext { ctx: PluginCtx::default(), host: None };
+        let ectx = ExecContext {
+            ctx: PluginCtx::default(),
+            host: None,
+        };
         assert_eq!(boxed.execute(&ectx).unwrap(), r#"{"ok":true}"#);
     }
 

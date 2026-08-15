@@ -4,7 +4,7 @@
  * 验证统一数据接口客户端的请求构造（URL/方法/参数/请求体）与响应解包，
  * 对齐 .project/api_contract.md §4 契约。
  *
- * 背景：task_01 新增 /api/v1/db/* 统一数据接口 + 前端 DB 管理页，
+ * 背景：task_01 新增 /ext/db_admin/* 统一数据接口 + 前端 DB 管理页，
  * 需确认 dbAdmin.ts 的每个函数正确映射到后端端点。
  */
 
@@ -38,7 +38,7 @@ afterEach(() => {
 })
 
 describe('dbAdmin API 客户端', () => {
-  it('fetchDbTables 请求 GET /api/v1/db/tables 并返回表数组', async () => {
+  it('fetchDbTables 请求 GET /ext/db_admin/tables 并返回表数组', async () => {
     mockGet.mockResolvedValue({
       data: {
         tables: [
@@ -53,14 +53,14 @@ describe('dbAdmin API 客户端', () => {
 
     const result = await dbAdmin.fetchDbTables()
 
-    expect(mockGet).toHaveBeenCalledWith('/api/v1/db/tables')
+    expect(mockGet).toHaveBeenCalledWith('/ext/db_admin/tables')
     expect(result).toHaveLength(1)
     expect(result[0].name).toBe('memory')
     expect(result[0].columns[0].pk).toBe(true)
     expect(result[0].row_count).toBe(3)
   })
 
-  it('fetchDbRows 请求 GET /api/v1/db/table/{table} 并携带分页/筛选/排序参数', async () => {
+  it('fetchDbRows 请求 GET /ext/db_admin/table/{table} 并携带分页/筛选/排序参数', async () => {
     mockGet.mockResolvedValue({
       data: {
         table: 'memory',
@@ -78,7 +78,7 @@ describe('dbAdmin API 客户端', () => {
       sort: 'created_at:desc',
     })
 
-    expect(mockGet).toHaveBeenCalledWith('/api/v1/db/table/memory', {
+    expect(mockGet).toHaveBeenCalledWith('/ext/db_admin/table/memory', {
       params: {
         limit: 10,
         offset: 20,
@@ -115,13 +115,13 @@ describe('dbAdmin API 客户端', () => {
 
     await dbAdmin.fetchDbRows('memory')
 
-    expect(mockGet).toHaveBeenCalledWith('/api/v1/db/table/memory', {
+    expect(mockGet).toHaveBeenCalledWith('/ext/db_admin/table/memory', {
       params: {},
       paramsSerializer: expect.any(Object),
     })
   })
 
-  it('insertDbRow 请求 POST /api/v1/db/table/{table} 携带 row 并返回 row/row_id', async () => {
+  it('insertDbRow 请求 POST /ext/db_admin/table/{table} 携带 row 并返回 row/row_id', async () => {
     mockPost.mockResolvedValue({
       data: {
         row: { id: 'new1', content: 'x', tenant_id: 'default' },
@@ -131,36 +131,36 @@ describe('dbAdmin API 客户端', () => {
 
     const result = await dbAdmin.insertDbRow('memory', { id: 'new1', content: 'x' })
 
-    expect(mockPost).toHaveBeenCalledWith('/api/v1/db/table/memory', {
+    expect(mockPost).toHaveBeenCalledWith('/ext/db_admin/table/memory', {
       row: { id: 'new1', content: 'x' },
     })
     expect(result.row_id).toBe('new1')
     expect(result.row.content).toBe('x')
   })
 
-  it('updateDbRow 请求 PATCH /api/v1/db/table/{table}/{pk} 携带 updates', async () => {
+  it('updateDbRow 请求 PATCH /ext/db_admin/table/{table}/{pk} 携带 updates', async () => {
     mockPatch.mockResolvedValue({
       data: { row: { id: 'm1', content: 'updated' } },
     })
 
     const result = await dbAdmin.updateDbRow('memory', 'm1', { content: 'updated' })
 
-    expect(mockPatch).toHaveBeenCalledWith('/api/v1/db/table/memory/m1', {
+    expect(mockPatch).toHaveBeenCalledWith('/ext/db_admin/table/memory/m1', {
       updates: { content: 'updated' },
     })
     expect(result.row.content).toBe('updated')
   })
 
-  it('deleteDbRow 请求 DELETE /api/v1/db/table/{table}/{pk}', async () => {
+  it('deleteDbRow 请求 DELETE /ext/db_admin/table/{table}/{pk}', async () => {
     mockDelete.mockResolvedValue({ data: { deleted: true, row_id: 'm1' } })
 
     const result = await dbAdmin.deleteDbRow('memory', 'm1')
 
-    expect(mockDelete).toHaveBeenCalledWith('/api/v1/db/table/memory/m1')
+    expect(mockDelete).toHaveBeenCalledWith('/ext/db_admin/table/memory/m1')
     expect(result.deleted).toBe(true)
   })
 
-  it('executeDbSql 请求 POST /api/v1/db/execute 携带 sql 与 confirm', async () => {
+  it('executeDbSql 请求 POST /ext/db_admin/execute 携带 sql 与 confirm', async () => {
     mockPost.mockResolvedValue({
       data: {
         columns: ['id', 'content'],
@@ -171,7 +171,7 @@ describe('dbAdmin API 客户端', () => {
 
     const result = await dbAdmin.executeDbSql('SELECT * FROM memory', true)
 
-    expect(mockPost).toHaveBeenCalledWith('/api/v1/db/execute', {
+    expect(mockPost).toHaveBeenCalledWith('/ext/db_admin/execute', {
       sql: 'SELECT * FROM memory',
       confirm: true,
     })

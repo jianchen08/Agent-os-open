@@ -32,6 +32,13 @@ const ISOLATION_LEVELS = [
   { value: 'non_isolated', label: '非隔离' },
 ] as const
 
+/** 工作空间拓扑选项（与隔离解耦，agent 直接选） */
+const WORKSPACE_MODES = [
+  { value: '', label: '默认（worktree）' },
+  { value: 'worktree', label: 'worktree（隔离副本，不影响原项目）' },
+  { value: 'plain', label: 'plain（直接操作目标目录）' },
+] as const
+
 /** 表单字段 input 通用样式（与 SessionEditModal 一致） */
 const fieldClass =
   'bg-muted/50 border-border/50 focus:border-primary w-full rounded-md border px-3 py-1.5 text-sm outline-none transition-colors'
@@ -46,6 +53,7 @@ export const CreateTaskModal = memo<CreateTaskModalProps>(
     const [taskScope, setTaskScope] = useState<'container' | 'non_container'>('non_container')
     const [targetId, setTargetId] = useState('')
     const [workspace, setWorkspace] = useState('')
+    const [workspaceMode, setWorkspaceMode] = useState('')
     const [isolationLevel, setIsolationLevel] = useState('')
     const [isSubmitting, setIsSubmitting] = useState(false)
     const [parentTaskId, setParentTaskId] = useState('')
@@ -59,6 +67,11 @@ export const CreateTaskModal = memo<CreateTaskModalProps>(
 
     // 选了父容器 → 子任务必然 non_container，workspace 继承父容器（隐藏该字段）
     const isChildTask = parentTaskId.trim().length > 0
+    // 容器任务不直接执行：不可选拓扑与隔离（对齐 task_submit 参数矩阵）
+    const isContainerTask = !isChildTask && taskScope === 'container'
+    // 字段可用性（对齐参数矩阵）：
+    // - workspace_mode / isolation_level：容器任务不可选；非容器根任务与容器直接子任务可选
+    const canChooseMode = !isContainerTask
 
     // 打开时重置字段 + 拉取当前会话的容器任务（供选父容器）
     useEffect(() => {
@@ -68,6 +81,7 @@ export const CreateTaskModal = memo<CreateTaskModalProps>(
         setTaskScope('non_container')
         setTargetId('')
         setWorkspace('')
+        setWorkspaceMode('')
         setIsolationLevel('')
         setParentTaskId('')
         if (sessionId) {
@@ -94,7 +108,8 @@ export const CreateTaskModal = memo<CreateTaskModalProps>(
           task_scope: effectiveScope,
           target_id: effectiveScope === 'non_container' ? targetId.trim() : '',
           workspace: workspace.trim(),
-          isolation_level: isolationLevel,
+          workspace_mode: canChooseMode ? workspaceMode : '',
+          isolation_level: canChooseMode ? isolationLevel : '',
           thread_id: sessionId,
           parent_task_id: parentTaskId.trim() || undefined,
         })
@@ -116,8 +131,8 @@ export const CreateTaskModal = memo<CreateTaskModalProps>(
       }
     }, [
       canSubmit, isSubmitting, sessionId,
-      title, description, taskScope, targetId, workspace, isolationLevel, parentTaskId,
-      isChildTask,
+      title, description, taskScope, targetId, workspace, workspaceMode, isolationLevel, parentTaskId,
+      isChildTask, canChooseMode,
       onCreated, onClose,
     ])
 
@@ -226,21 +241,47 @@ export const CreateTaskModal = memo<CreateTaskModalProps>(
             </div>
           )}
 
-          {/* 隔离模式 */}
-          <div>
-            <label className="text-foreground mb-1 block text-sm font-medium">隔离模式</label>
-            <select
-              value={isolationLevel}
-              onChange={(e) => setIsolationLevel(e.target.value)}
-              className={fieldClass}
-            >
-              {ISOLATION_LEVELS.map((opt) => (
-                <option key={opt.value} value={opt.value}>
-                  {opt.label}
-                </option>
-              ))}
-            </select>
-          </div>
+          {/* 工作空间拓扑（容器任务不可选；非容器根任务与容器直接子任务可选） */}
+          {canChooseMode && (
+            <div>
+              <label className="text-foreground mb-1 block text-sm font-medium">工作空间拓扑</label>
+              <select
+                value={workspaceMode}
+                onChange={(e) => setWorkspaceMode(e.target.value)}
+                className={fieldClass}
+              >
+                {WORKSPACE_MODES.map((opt) => (
+                  <option key={opt.value} value={opt.value}>
+                    {opt.label}
+                  </option>
+                ))}
+              </select>
+              <p className="text-muted-foreground mt-1 text-xs">
+                worktree 在目标项目上建隔离副本（默认）；plain 直接操作目标目录。与隔离模式相互独立
+              </p>
+            </div>
+          )}
+
+          {/* 隔离模式（容器任务不可选——容器不直接执行，恒隔离复制） */}
+          {canChooseMode && (
+            <div>
+              <label className="text-foreground mb-1 block text-sm font-medium">隔离模式</label>
+              <select
+                value={isolationLevel}
+                onChange={(e) => setIsolationLevel(e.target.value)}
+                className={fieldClass}
+              >
+                {ISOLATION_LEVELS.map((opt) => (
+                  <option key={opt.value} value={opt.value}>
+                    {opt.label}
+                  </option>
+                ))}
+              </select>
+              <p className="text-muted-foreground mt-1 text-xs">
+                执行环境（容器/宿主）；容器任务恒为隔离复制，不显示此选项
+              </p>
+            </div>
+          )}
         </div>
 
         {/* 底部操作按钮 */}

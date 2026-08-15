@@ -20,16 +20,38 @@ pytestmark = pytest.mark.unit
 
 _SYSTEM_DIR = Path(__file__).resolve().parent.parent / "plugins" / "shared" / "system"
 _ISOLATION_DIR = _SYSTEM_DIR / "isolation"
-for _p in (_SYSTEM_DIR, _ISOLATION_DIR):
-    if str(_p) not in sys.path:
-        sys.path.insert(0, str(_p))
-
-from workspace_lifecycle import WorkspaceLifecycleManager  # noqa: E402
 
 
-def make_manager(**overrides):
+@pytest.fixture(scope="module", autouse=True)
+def _module_sys_path():
+    """模块级 sys.path 注入（teardown 恢复）。
+
+    isolation 目录含 workspace.py（模块），system 目录含 workspace/（包）——
+    对 `import workspace` 解析冲突。本测试懒加载 workspace_lifecycle 需要
+    isolation 目录，用 fixture 管理并恢复，避免污染同进程其它测试
+    （如 channel_api 的 routes_workspaces 依赖 system/workspace/ 包）。
+    """
+    added: list[str] = []
+    for _p in (_SYSTEM_DIR, _ISOLATION_DIR):
+        s = str(_p)
+        if s not in sys.path:
+            sys.path.insert(0, s)
+            added.append(s)
+    yield
+    for s in added:
+        sys.path.remove(s)
+
+@pytest.fixture(scope="module")
+def manager_cls():
+    """懒加载 WorkspaceLifecycleManager（isolation 目录经 fixture 注入 path）。"""
+    from workspace_lifecycle import WorkspaceLifecycleManager
+
+    return WorkspaceLifecycleManager
+
+
+def make_manager(manager_cls, **overrides):
     """构造 WorkspaceLifecycleManager（轻量 stub：无 git 依赖路径）。"""
-    manager = WorkspaceLifecycleManager(
+    manager = manager_cls(
         resource_merge=None,
         config={"workspace": {"default_mode": "worktree"}},
         task_tree=overrides.get("task_tree"),
@@ -41,9 +63,9 @@ def make_manager(**overrides):
     return manager
 
 
-def test_root_task_plain_mode_uses_directory_directly():
+def test_root_task_plain_mode_uses_directory_directly(manager_cls):
     """_start_root_task：workspace_mode=plain → 直接操作目录，无 worktree。"""
-    manager = make_manager(container_ws=None)
+    manager = make_manager(manager_cls, container_ws=None)
     meta = manager._start_root_task(
         "task_plain",
         "/tmp/proj_x",
@@ -53,9 +75,9 @@ def test_root_task_plain_mode_uses_directory_directly():
     assert meta["path"] == "/tmp/proj_x"
 
 
-def test_root_task_plain_mode_uses_container_ws_when_present():
+def test_root_task_plain_mode_uses_container_ws_when_present(manager_cls):
     """plain 拓扑下优先使用容器工作空间（容器存在时）。"""
-    manager = make_manager(container_ws="/tmp/container_abc")
+    manager = make_manager(manager_cls, container_ws="/tmp/container_abc")
     meta = manager._start_root_task(
         "task_plain2",
         "/tmp/proj_x",
@@ -65,9 +87,9 @@ def test_root_task_plain_mode_uses_container_ws_when_present():
     assert meta["path"] == "/tmp/container_abc"
 
 
-def test_root_task_default_mode_is_worktree():
+def test_root_task_default_mode_is_worktree(manager_cls):
     """缺省 workspace_mode → 走 worktree 分支（不进 plain 直接返回）。"""
-    manager = make_manager(container_ws="/tmp/container_abc")
+    manager = make_manager(manager_cls, container_ws="/tmp/container_abc")
     # worktree 分支需要 git 仓库操作——用 stub 验证不会落入 plain 分支：
     # 若误入 plain 分支会直接返回 mode=plain，此处应抛错/走 worktree 流程。
     manager._find_container_workspace = lambda task_id: None
@@ -87,9 +109,9 @@ def test_root_task_default_mode_is_worktree():
     assert meta["mode"] == "worktree", "默认拓扑应为 worktree"
 
 
-def test_subtask_plain_mode_shares_host_dir():
+def test_subtask_plain_mode_shares_host_dir(manager_cls):
     """_start_subtask：workspace_mode=plain → 共享宿主目录（mode=shared）。"""
-    manager = make_manager(container_ws="/tmp/container_abc")
+    manager = make_manager(manager_cls, container_ws="/tmp/container_abc")
     meta = manager._start_subtask(
         "task_sub",
         "/tmp/whatever",
@@ -99,9 +121,9 @@ def test_subtask_plain_mode_shares_host_dir():
     assert meta["path"] == "/tmp/container_abc"
 
 
-def test_init_container_workspace_always_copies():
+def test_init_container_workspace_always_copies(manager_cls):
     """容器空间恒复制：无隔离字段也走复制路径（不依赖 isolation_mode 分支）。"""
-    manager = make_manager(container_ws=None)
+    manager = make_manager(manager_cls, container_ws=None)
     manager._get_workspace_root = lambda: Path("/tmp/ws_root")
     manager._copy_project_to_container = lambda path, src: 0
     manager._git_init_and_initial_commit = lambda *a, **k: True

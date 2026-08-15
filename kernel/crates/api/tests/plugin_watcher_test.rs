@@ -7,7 +7,7 @@
 
 use std::collections::HashSet;
 use std::path::Path;
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -173,7 +173,10 @@ async fn watcher_detects_new_plugin_via_polling_fallback() {
 /// 标 ignore；Linux/macOS 上验证 notify 接线正确（polling 设 30s 确保不会先于 notify 触发）。
 #[tokio::test]
 #[serial]
-#[cfg_attr(windows, ignore = "notify timing unreliable on Windows; polling fallback covers it")]
+#[cfg_attr(
+    windows,
+    ignore = "notify timing unreliable on Windows; polling fallback covers it"
+)]
 async fn watcher_detects_new_plugin_dir_via_notify() {
     let tmp = tempfile::tempdir().unwrap();
     std::env::set_var("AGENTOS_PLUGINS_DIR", tmp.path());
@@ -210,4 +213,119 @@ async fn watcher_detects_new_plugin_dir_via_notify() {
         appeared.is_ok(),
         "notify watcher should detect new plugin dir within 5s (polling disabled at 30s)"
     );
+}
+
+/// A3：运行时新增 InProcess(cdylib) 插件 → watcher 检测集合变更并触发注入的
+/// restart hook（env 开关 AGENTOS_AUTO_RESTART_ON_CDYLIB_CHANGE 默认开；
+/// 生产 hook 走 routes::drain_and_exit75 排空 + exit 75，逃生门语义在函数内部）。
+#[tokio::test]
+#[serial]
+async fn watcher_fires_restart_hook_on_cdylib_addition() {
+    let tmp = tempfile::tempdir().unwrap();
+    std::env::set_var("AGENTOS_PLUGINS_DIR", tmp.path());
+
+    let loader: Arc<dyn PluginLoader> = Arc::new(PluginLoaderImpl::new(tmp.path(), None));
+    let invoker = Arc::new(PluginInvokerImpl::new(loader));
+    let registry = Arc::new(CapabilityRegistryImpl::new());
+    let fired = Arc::new(AtomicBool::new(false));
+    let flag = Arc::clone(&fired);
+    let hook: Arc<dyn Fn() + Send + Sync> = Arc::new(move || flag.store(true, Ordering::Relaxed));
+    let handle = PluginWatcher::new(
+        tmp.path().to_path_buf(),
+        invoker as Arc<dyn agentos_core::traits::PluginInvoker>,
+        registry,
+        HashSet::new(),
+    )
+    .with_debounce(Duration::from_millis(50))
+    .with_initial_cdylib_ids(HashSet::new()) // boot 期无 cdylib：首轮 diff 即可报新增
+    .with_restart_hook(hook)
+    .spawn();
+
+    // create_plugin_dir 写的是 host_type: in_process（cdylib 轨）。
+    create_plugin_dir(tmp.path(), "native_new", &["tn"]);
+    handle_trigger_and_wait(&handle, &fired).await;
+    assert!(
+        fired.load(Ordering::Relaxed),
+        "cdylib 插件新增应触发 restart hook（3s 内）"
+    );
+}
+
+/// A3 对照组：只新增 sidecar 插件（热注册可达，无需重启）→ hook 不触发。
+#[tokio::test]
+#[serial]
+async fn watcher_does_not_fire_restart_hook_for_sidecar_only() {
+    let tmp = tempfile::tempdir().unwrap();
+    std::env::set_var("AGENTOS_PLUGINS_DIR", tmp.path());
+
+    let loader: Arc<dyn PluginLoader> = Arc::new(PluginLoaderImpl::new(tmp.path(), None));
+    let invoker = Arc::new(PluginInvokerImpl::new(loader));
+    let registry = Arc::new(CapabilityRegistryImpl::new());
+    let fired = Arc::new(AtomicBool::new(false));
+    let flag = Arc::clone(&fired);
+    let hook: Arc<dyn Fn() + Send + Sync> = Arc::new(move || flag.store(true, Ordering::Relaxed));
+    let handle = PluginWatcher::new(
+        tmp.path().to_path_buf(),
+        invoker as Arc<dyn agentos_core::traits::PluginInvoker>,
+        // clone：watcher 持有一份，本测试保留一份轮询注册结果。
+        registry.clone(),
+        HashSet::new(),
+    )
+    .with_debounce(Duration::from_millis(50))
+    .with_initial_cdylib_ids(HashSet::new())
+    .with_restart_hook(hook)
+    .spawn();
+
+    // sidecar 插件目录（host_type: sidecar）。
+    let dir = tmp.path().join("sidecar_new");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        dir.join("plugin.json"),
+        r#"{
+    "id": "sidecar_new", "name": "sidecar_new", "version": "1.0.0",
+    "plugin_type": "tool", "language": "python",
+    "host_type": "sidecar", "entry": "python server.py",
+    "capabilities": { "tools": [{"name":"ts","description":"ts"}] }
+}"#,
+    )
+    .unwrap();
+
+    handle.trigger.send(()).unwrap();
+    // 等 sync 完成（sidecar 插件注册出现在 registry = sync 已跑完）+ 缓冲。
+    let synced = timeout(Duration::from_secs(3), async {
+        loop {
+            if registry
+                .list_tools()
+                .iter()
+                .any(|t| t.plugin_id == "sidecar_new")
+            {
+                return Ok::<(), ()>(());
+            }
+            tokio::time::sleep(Duration::from_millis(30)).await;
+        }
+    })
+    .await;
+    assert!(synced.is_ok(), "sidecar 插件应正常热注册");
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert!(
+        !fired.load(Ordering::Relaxed),
+        "sidecar-only 变更不应触发 restart hook"
+    );
+    drop(handle);
+}
+
+/// 手动触发一次同步并轮询 flag（最多 3s）。
+async fn handle_trigger_and_wait(
+    handle: &agentos_api::plugin_watcher::WatcherHandle,
+    flag: &Arc<AtomicBool>,
+) {
+    handle.trigger.send(()).unwrap();
+    let _ = timeout(Duration::from_secs(3), async {
+        loop {
+            if flag.load(Ordering::Relaxed) {
+                return Ok::<(), ()>(());
+            }
+            tokio::time::sleep(Duration::from_millis(30)).await;
+        }
+    })
+    .await;
 }

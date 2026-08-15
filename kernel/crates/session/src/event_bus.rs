@@ -93,9 +93,9 @@ pub struct FrontendEventBus {
     /// per-plugin 令牌桶。
     buckets: Mutex<HashMap<String, TokenBucket>>,
     /// 全局 sequence 计数器（widget_event 与流式族共享，跨所有 thread 单调递增）。
-    /// 0.2：改为全局空间——前端 GlobalWebSocket 只维护一个全局 last_sequence，
-    /// 后端必须用同一全局空间才能让单 cursor 正确 watermark（旧 per-thread 计数器
-    /// 会让别 thread 的新事件 seq 低于全局 watermark 而漏回放）。
+    /// 全局空间——前端 GlobalWebSocket 只维护一个全局 last_sequence，后端必须用
+    /// 同一全局空间才能让单 cursor 正确 watermark；per-thread 计数器会让别
+    /// thread 的新事件 seq 低于全局 watermark 而漏回放。
     global_sequence: AsyncMutex<u64>,
     /// 广播 sequence 计数器（广播不进 thread 重放缓冲，但仍带 sequence 排序）。
     broadcast_sequence: AsyncMutex<u64>,

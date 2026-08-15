@@ -23,17 +23,15 @@ from agentos_plugin_sdk import (
 
 logger = logging.getLogger(__name__)
 
-# ── 0.2 服务提供者适配（FP-MIGR：infrastructure.service_provider 已废弃）──
+# ── 服务提供者解析 ──
 #
-# 0.1 的工具经 infrastructure.service_provider 拿 task_worker /
-# workspace_lifecycle_manager / agent_registry / execution_record_storage。
-# 0.2 无该单例层，内核能力经 sidecar 注入：
-# - task_worker：0.2 收尾已移除——pipeline-executor.start_run 占位能力随旧引擎
-#   AdrEngineImpl 清理（占位 run 无 execute_step 驱动、从不真正执行）。任务提交
-#   即落库；任务管道执行由会话对话 / chat.send_message → PipelineExecutor 驱动。
+# 内核能力经 sidecar 注入，服务解析统一走 _get_service_provider：
+# - task_worker：无可用实例——pipeline-executor.start_run 为占位能力
+#   （占位 run 无 execute_step 驱动、从不真正执行）。任务提交即落库；
+#   任务管道执行由会话对话 / chat.send_message → PipelineExecutor 驱动。
 # - workspace_lifecycle_manager / agent_registry / execution_record_storage：
-#   0.2 sidecar 无等价实例 → None（调用方已有降级守卫/磁盘回退，文档化降级）。
-# 迁移测试可 monkeypatch 模块级 _get_service_provider 注入 mock。
+#   sidecar 无等价实例 → None（调用方已有降级守卫/磁盘回退，文档化降级）。
+# 测试可 monkeypatch 模块级 _get_service_provider 注入 mock。
 
 class _ServiceProviderShim:
     """0.2 服务提供者适配：get(key) 返回 0.2 等价或 None（文档化降级）。"""
@@ -45,7 +43,7 @@ class _ServiceProviderShim:
 
 
 def _get_service_provider() -> Any:
-    """0.2 服务提供者获取（FP-MIGR：替代已废弃的 infrastructure.service_provider）。"""
+    """获取 0.2 服务提供者 shim（sidecar 模式下的服务解析入口）。"""
     return _ServiceProviderShim()
 
 
@@ -1620,6 +1618,33 @@ class TaskSubmitTool(BuiltinTool):
         # 执行环境隔离（isolated/non_isolated）：agent 显式选择，仅普通任务可填
         if inputs.get("isolation_level"):
             metadata["isolation_level"] = inputs["isolation_level"]
+
+        # 结构化 execution_context（任务级）：供任务执行器经 chat.send_message
+        # 透传 → 内核 initial_state 并入 → init 体 workspace_lifecycle /
+        # environment_lifecycle 插件消费。容器任务拓扑恒为 container_copy。
+        _ec: dict[str, Any] = {}
+        if inputs.get("workspace"):
+            _ec["workspace"] = {
+                "source_path": inputs["workspace"],
+                "mode": inputs.get("workspace_mode")
+                or ("container_copy" if inputs.get("task_scope") == "container" else "worktree"),
+                "explicit": True,
+            }
+        elif inputs.get("workspace_mode") or inputs.get("task_scope") == "container":
+            # 无显式 workspace（继承父链）但有拓扑/容器声明
+            _ec["workspace"] = {
+                "source_path": "",
+                "mode": inputs.get("workspace_mode")
+                or ("container_copy" if inputs.get("task_scope") == "container" else "worktree"),
+            }
+        if inputs.get("isolation_level"):
+            _ec["isolation"] = {"level": inputs["isolation_level"]}
+        # 父任务链信息：供 init 体插件做容器直接子任务的父链查询
+        # （0.2 sidecar 无 task_service，插件经此重建最小 task_tree）
+        if inputs.get("parent_task_id"):
+            _ec["parent_task_id"] = inputs["parent_task_id"]
+        if _ec:
+            metadata["execution_context"] = _ec
 
         # 存储执行者信息
         if inputs.get("target_id"):

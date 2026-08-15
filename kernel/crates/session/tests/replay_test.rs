@@ -3,9 +3,7 @@
 //! 断线重放测试——per-thread 环形缓冲 / last_sequence 续传 / 溢出 resync /
 //! B9 交互族不进重放 / widget 溢出保留最新帧（ADR §7.2）。
 
-use agentos_session::replay::{
-    EventFamily, ReplayBuffer, ReplayConfig, ReplayEvent, ReplayResult,
-};
+use agentos_session::replay::{EventFamily, ReplayBuffer, ReplayConfig, ReplayEvent, ReplayResult};
 
 fn stream_event(seq: u64, payload: &str) -> ReplayEvent {
     let _ = EventFamily::Stream; // 触发 import 使用
@@ -27,7 +25,8 @@ async fn replay_returns_events_after_last_sequence() {
     let buf = ReplayBuffer::new(ReplayConfig::default());
     // 记录 seq 1..=3
     for s in 1..=3 {
-        buf.record("thread-1", stream_event(s, &format!("m{s}"))).await;
+        buf.record("thread-1", stream_event(s, &format!("m{s}")))
+            .await;
     }
     // 客户端上报 last_sequence=1，应回放 (1, 3] = seq 2,3
     let result = buf.replay("thread-1", 1).await;
@@ -138,9 +137,12 @@ async fn widget_overflow_keeps_latest_frame_per_widget_id() {
         capacity: 2,
         ttl_secs: 300,
     });
-    buf.record("thread-1", widget_event(1, "cost_panel", "v1")).await;
-    buf.record("thread-1", widget_event(2, "cost_panel", "v2")).await;
-    buf.record("thread-1", widget_event(3, "cost_panel", "v3")).await;
+    buf.record("thread-1", widget_event(1, "cost_panel", "v1"))
+        .await;
+    buf.record("thread-1", widget_event(2, "cost_panel", "v2"))
+        .await;
+    buf.record("thread-1", widget_event(3, "cost_panel", "v3"))
+        .await;
 
     // last_sequence=0 请求全部：流式族无丢失，widget 最新帧 v3 应可见
     let result = buf.replay("thread-1", 0).await;
@@ -169,10 +171,7 @@ async fn interaction_events_not_recorded_in_replay_buffer() {
     let buf = ReplayBuffer::new(ReplayConfig::default());
     // 交互族记录时应被拒绝（不进缓冲）
     let accepted = buf.record("thread-1", interaction_event(1, "req-1")).await;
-    assert!(
-        !accepted,
-        "B9：interaction_request 类事件不进重放缓冲"
-    );
+    assert!(!accepted, "B9：interaction_request 类事件不进重放缓冲");
     // 回放应无该事件
     let result = buf.replay("thread-1", 0).await;
     if let ReplayResult::Events { events, .. } = result {

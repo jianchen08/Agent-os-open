@@ -1,3 +1,4 @@
+/** @feature FP-T12 前端适配 | @ci: frontend-test */
 /**
  * 功能测试：FloatingWindowManager 移动端底部 sheet（task_layout_responsive 任务 3/4）
  *

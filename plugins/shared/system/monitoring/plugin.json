@@ -1,165 +1,184 @@
 {
-    "id": "monitoring",
-    "name": "Monitoring Service",
-    "version": "1.0.0",
-    "plugin_type": "system",
-    "language": "python",
-    "host_type": "sidecar",
-    "entry": "python server.py",
-    "lifecycle": {
-        "idle_timeout_secs": 0
-    },
-    "capabilities": {
-        "tools": [
-            {"name": "monitoring.get_metrics", "description": "Get current system performance metrics (CPU, memory, disk, network, LLM, tools, tasks)"},
-            {"name": "monitoring.get_health", "description": "Get system health status with bottleneck detection"},
-            {"name": "monitoring.record_llm_request", "description": "Record an LLM API call for usage tracking"},
-            {"name": "monitoring.record_tool_execution", "description": "Record a tool execution for performance tracking"},
-            {"name": "monitoring.update_task_status", "description": "Update task execution metrics (pending, running, completed counts)"}
-        ],
-        "resources": [],
-        "route_signals": [],
-        "lifecycle_hooks": ["on_load", "on_unload"]
-    },
-    "dependencies": [],
-    "permissions": {},
-    "error_policy": "skip",
-    "priority": 40,
-    "requires_content": 3,
-    "http_endpoints": [
-        {
-            "route_id": "mon_system_metrics",
-            "method": "GET",
-            "path": "/ext/monitoring/system/metrics",
-            "auth": "none",
-            "handler_capability": "http.handle",
-            "timeout_ms": 5000,
-            "max_concurrency": 8,
-            "description": "Get system performance metrics (CPU/memory/disk, psutil real data)"
-        },
-        {
-            "route_id": "mon_task_statistics",
-            "method": "GET",
-            "path": "/ext/monitoring/tasks/statistics",
-            "auth": "none",
-            "handler_capability": "http.handle",
-            "timeout_ms": 5000,
-            "max_concurrency": 8,
-            "description": "Get task execution statistics"
-        },
-        {
-            "route_id": "mon_tasks",
-            "method": "GET",
-            "path": "/ext/monitoring/tasks",
-            "auth": "none",
-            "handler_capability": "http.handle",
-            "timeout_ms": 5000,
-            "max_concurrency": 8,
-            "description": "Get task list (supports ?page=&page_size=&status=)"
-        },
-        {
-            "route_id": "mon_token_usage",
-            "method": "GET",
-            "path": "/ext/monitoring/token-usage",
-            "auth": "none",
-            "handler_capability": "http.handle",
-            "timeout_ms": 5000,
-            "max_concurrency": 8,
-            "description": "Get token usage statistics"
-        },
-        {
-            "route_id": "mon_cache_stats",
-            "method": "GET",
-            "path": "/ext/monitoring/cache-stats",
-            "auth": "none",
-            "handler_capability": "http.handle",
-            "timeout_ms": 5000,
-            "max_concurrency": 8,
-            "description": "Get cache hit/miss statistics"
-        },
-        {
-            "route_id": "mon_payload_diag_list",
-            "method": "GET",
-            "path": "/ext/monitoring/payload-diag",
-            "auth": "none",
-            "handler_capability": "http.handle",
-            "timeout_ms": 5000,
-            "max_concurrency": 4,
-            "description": "List LLM payload diagnostic snapshots (from logs/payload_diag/)"
-        },
-        {
-            "route_id": "mon_payload_diag_get",
-            "method": "GET",
-            "path": "/ext/monitoring/payload-diag/file",
-            "auth": "none",
-            "handler_capability": "http.handle",
-            "timeout_ms": 5000,
-            "max_concurrency": 4,
-            "description": "Get one payload snapshot file content (?name=filename.json)"
-        },
-        {
-            "route_id": "mon_tool_calls",
-            "method": "GET",
-            "path": "/ext/monitoring/tool-calls",
-            "auth": "none",
-            "handler_capability": "http.handle",
-            "timeout_ms": 8000,
-            "max_concurrency": 4,
-            "description": "Query tool call records from traces table (?tool_name=&status=&min_duration=&limit=)"
-        },
-        {
-            "route_id": "mon_payload_diag_page",
-            "method": "GET",
-            "path": "/ext/monitoring/page/payload-diag",
-            "auth": "none",
-            "handler_capability": "http.handle",
-            "timeout_ms": 5000,
-            "max_concurrency": 4,
-            "description": "Webview HTML page: LLM payload diagnostic viewer"
-        },
-        {
-            "route_id": "mon_tool_calls_page",
-            "method": "GET",
-            "path": "/ext/monitoring/page/tool-calls",
-            "auth": "none",
-            "handler_capability": "http.handle",
-            "timeout_ms": 5000,
-            "max_concurrency": 4,
-            "description": "Webview HTML page: tool call records viewer"
-        }
+  "id": "monitoring",
+  "name": "Monitoring Service",
+  "version": "1.0.0",
+  "plugin_type": "system",
+  "language": "python",
+  "host_type": "sidecar",
+  "entry": "python server.py",
+  "lifecycle": {
+    "idle_timeout_secs": 0
+  },
+  "capabilities": {
+    "tools": [],
+    "resources": [],
+    "route_signals": [],
+    "lifecycle_hooks": [
+      "on_load",
+      "on_unload"
     ],
-    "contributes": {
-        "pages": [
-            {
-                "id": "payload_diag",
-                "title": "Payload 诊断",
-                "space": "workspace",
-                "slot": "tab",
-                "path": "/p/payload_diag",
-                "icon": "description",
-                "order": 61,
-                "widget": "webview",
-                "props": {
-                    "pluginId": "monitoring",
-                    "htmlPath": "/page/payload-diag",
-                    "widgetId": "payload_diag"
-                }
-            },
-            {
-                "id": "tool_call_records",
-                "title": "工具调用记录",
-                "space": "workspace",
-                "slot": "tab",
-                "path": "/p/tool_call_records",
-                "icon": "history",
-                "order": 62,
-                "widget": "webview",
-                "props": {
-                    "pluginId": "monitoring",
-                    "htmlPath": "/page/tool-calls",
-                    "widgetId": "tool_call_records"
-                }
-            }
-        ]
+    "services": [
+      {
+        "name": "monitoring.get_metrics",
+        "description": "Get current system performance metrics (CPU, memory, disk, network, LLM, tools, tasks)"
+      },
+      {
+        "name": "monitoring.get_health",
+        "description": "Get system health status with bottleneck detection"
+      },
+      {
+        "name": "monitoring.record_llm_request",
+        "description": "Record an LLM API call for usage tracking"
+      },
+      {
+        "name": "monitoring.record_tool_execution",
+        "description": "Record a tool execution for performance tracking"
+      },
+      {
+        "name": "monitoring.update_task_status",
+        "description": "Update task execution metrics (pending, running, completed counts)"
+      }
+    ]
+  },
+  "dependencies": [],
+  "permissions": {},
+  "error_policy": "skip",
+  "priority": 40,
+  "requires_content": 3,
+  "http_endpoints": [
+    {
+      "route_id": "mon_system_metrics",
+      "method": "GET",
+      "path": "/ext/monitoring/system/metrics",
+      "auth": "none",
+      "handler_capability": "http.handle",
+      "timeout_ms": 5000,
+      "max_concurrency": 8,
+      "description": "Get system performance metrics (CPU/memory/disk, psutil real data)"
+    },
+    {
+      "route_id": "mon_task_statistics",
+      "method": "GET",
+      "path": "/ext/monitoring/tasks/statistics",
+      "auth": "none",
+      "handler_capability": "http.handle",
+      "timeout_ms": 5000,
+      "max_concurrency": 8,
+      "description": "Get task execution statistics"
+    },
+    {
+      "route_id": "mon_tasks",
+      "method": "GET",
+      "path": "/ext/monitoring/tasks",
+      "auth": "none",
+      "handler_capability": "http.handle",
+      "timeout_ms": 5000,
+      "max_concurrency": 8,
+      "description": "Get task list (supports ?page=&page_size=&status=)"
+    },
+    {
+      "route_id": "mon_token_usage",
+      "method": "GET",
+      "path": "/ext/monitoring/token-usage",
+      "auth": "none",
+      "handler_capability": "http.handle",
+      "timeout_ms": 5000,
+      "max_concurrency": 8,
+      "description": "Get token usage statistics"
+    },
+    {
+      "route_id": "mon_cache_stats",
+      "method": "GET",
+      "path": "/ext/monitoring/cache-stats",
+      "auth": "none",
+      "handler_capability": "http.handle",
+      "timeout_ms": 5000,
+      "max_concurrency": 8,
+      "description": "Get cache hit/miss statistics"
+    },
+    {
+      "route_id": "mon_payload_diag_list",
+      "method": "GET",
+      "path": "/ext/monitoring/payload-diag",
+      "auth": "none",
+      "handler_capability": "http.handle",
+      "timeout_ms": 5000,
+      "max_concurrency": 4,
+      "description": "List LLM payload diagnostic snapshots (from logs/payload_diag/)"
+    },
+    {
+      "route_id": "mon_payload_diag_get",
+      "method": "GET",
+      "path": "/ext/monitoring/payload-diag/file",
+      "auth": "none",
+      "handler_capability": "http.handle",
+      "timeout_ms": 5000,
+      "max_concurrency": 4,
+      "description": "Get one payload snapshot file content (?name=filename.json)"
+    },
+    {
+      "route_id": "mon_tool_calls",
+      "method": "GET",
+      "path": "/ext/monitoring/tool-calls",
+      "auth": "none",
+      "handler_capability": "http.handle",
+      "timeout_ms": 8000,
+      "max_concurrency": 4,
+      "description": "Query tool call records from traces table (?tool_name=&status=&min_duration=&limit=)"
+    },
+    {
+      "route_id": "mon_payload_diag_page",
+      "method": "GET",
+      "path": "/ext/monitoring/page/payload-diag",
+      "auth": "none",
+      "handler_capability": "http.handle",
+      "timeout_ms": 5000,
+      "max_concurrency": 4,
+      "description": "Webview HTML page: LLM payload diagnostic viewer"
+    },
+    {
+      "route_id": "mon_tool_calls_page",
+      "method": "GET",
+      "path": "/ext/monitoring/page/tool-calls",
+      "auth": "none",
+      "handler_capability": "http.handle",
+      "timeout_ms": 5000,
+      "max_concurrency": 4,
+      "description": "Webview HTML page: tool call records viewer"
     }
+  ],
+  "contributes": {
+    "pages": [
+      {
+        "id": "payload_diag",
+        "title": "Payload 诊断",
+        "space": "workspace",
+        "slot": "tab",
+        "path": "/p/payload_diag",
+        "icon": "description",
+        "order": 61,
+        "widget": "webview",
+        "props": {
+          "pluginId": "monitoring",
+          "htmlPath": "/page/payload-diag",
+          "widgetId": "payload_diag"
+        }
+      },
+      {
+        "id": "tool_call_records",
+        "title": "工具调用记录",
+        "space": "workspace",
+        "slot": "tab",
+        "path": "/p/tool_call_records",
+        "icon": "history",
+        "order": 62,
+        "widget": "webview",
+        "props": {
+          "pluginId": "monitoring",
+          "htmlPath": "/page/tool-calls",
+          "widgetId": "tool_call_records"
+        }
+      }
+    ]
+  }
 }

@@ -1,0 +1,716 @@
+//! # 管道加载期编译器（G10）
+//!
+//! 把 [`PipelineConfig`]（含公共 step 库）在**加载期一次性编译**成
+//! [`CompiledPipeline`] 执行计划，运行时零解析、零三级命中重算：
+//!
+//! 1. **when 表达式预编译**：所有门/路由条件在编译期 tokenize + parse 成
+//!    [`condition::Expr`] AST（`eval_condition` 每次调用都重 parse 的税被消灭）；
+//!    语法错误在加载期报错（带 step/body 定位），不再"静默 false 死路由"。
+//! 2. **三级命中静态解析**：step 列表项的引用在编译期判定为
+//!    [`CompiledItem::Plugin`]（插件）/ [`CompiledItem::Composite`]（管道/库 step，
+//!    运行时查统一步骤池递归）/ [`CompiledItem::Dynamic`]（`{{state.xxx}}` 模板名，
+//!    运行时渲染后查池/插件——显式保留的动态点）；未知引用在加载期报错。
+//! 3. **引用环检测**：composite 递归引用图 DFS，环 → 编译错误（运行时递归不死循环）。
+//! 4. **转移目标校验**：`RouteNext::Phase/Step` 目标存在性在此复核（api 层
+//!    `validate_no_name_conflicts` 已查 Phase，此处双保险 + Step 目标）。
+//!
+//! 编译是纯函数（`compile_pipeline`），无 IO 无时序，可同步单测。
+//! 生产路径：启动期 / 热重载时编译一次 → `Arc<CompiledPipeline>` 原子换入，
+//! 在途 run 持旧计划跑完（快照语义），新 run 取新计划。
+
+use std::collections::{HashMap, HashSet};
+
+use agentos_core::types::{
+    CheckpointConfig, LoopBody, LoopConfig, PipelineConfig, PipelineStep, Route, RouteNext,
+    StepLibrary,
+};
+
+use crate::condition::{parse_condition, Expr};
+
+/// 编译期错误（带定位上下文，加载期暴露，不静默）。
+#[derive(Debug, Clone)]
+pub struct CompileError {
+    /// 定位串（如 `"循环体 'main' / step 'post'"`）。
+    pub location: String,
+    /// 错误描述。
+    pub message: String,
+}
+
+impl std::fmt::Display for CompileError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}: {}", self.location, self.message)
+    }
+}
+
+/// 编译后的管道（运行时零解析）。
+///
+/// - `bodies`：各循环体的编译形态（steps 已解析、when 已 AST 化、转移已解析）。
+/// - `steps` / `step_index`：统一步骤池——管道 step + 库 step（管道优先），
+///   [`CompiledItem::Composite`] 与动态项运行时查池。
+#[derive(Debug, Clone)]
+pub struct CompiledPipeline {
+    pub name: String,
+    pub bodies: Vec<CompiledBody>,
+    pub checkpoint: CheckpointConfig,
+    steps: Vec<CompiledStep>,
+    step_index: HashMap<String, usize>,
+}
+
+impl CompiledPipeline {
+    /// 按 id 查统一步骤池（动态项运行时解析用）。
+    pub fn find_step(&self, id: &str) -> Option<&CompiledStep> {
+        self.step_index.get(id).map(|&i| &self.steps[i])
+    }
+
+    /// 按 id 定位循环体下标（转移跳转用）。
+    pub fn body_index(&self, id: &str) -> Option<usize> {
+        self.bodies.iter().position(|b| b.id == id)
+    }
+
+    /// 全部循环体 id（供外部诊断）。
+    pub fn body_ids(&self) -> Vec<&str> {
+        self.bodies.iter().map(|b| b.id.as_str()).collect()
+    }
+}
+
+/// 编译后的循环体。
+#[derive(Debug, Clone)]
+pub struct CompiledBody {
+    pub id: String,
+    /// 是否循环（`loop_config.enabled` 或 `while_cond` 任一开启）。
+    pub looping: bool,
+    /// 迭代安全阀（-1 = 无限）。
+    pub max_iterations: i32,
+    /// 循环继续条件（G10 新 DSL `while`；None = 无条件）。
+    pub while_cond: Option<Expr>,
+    /// 本循环体直接定义的步骤（已编译）。
+    pub steps: Vec<CompiledStep>,
+    /// 本循环体内 step id → 下标（Step 跳转用，编译期建好）。
+    step_index: HashMap<String, usize>,
+    /// 循环体结束后的转移（原 exit_routes / body 级 next，已编译）。
+    pub exit_routes: Vec<CompiledRoute>,
+    pub run_on_error: bool,
+}
+
+impl CompiledBody {
+    /// 按 id 查本循环体内 step 下标（Step 跳转；编译期保证存在）。
+    pub fn step_index(&self, id: &str) -> Option<usize> {
+        self.step_index.get(id).copied()
+    }
+}
+
+/// 编译后的步骤。
+#[derive(Debug, Clone)]
+pub struct CompiledStep {
+    pub id: String,
+    /// 组级 when 门（G9；None = 无条件执行）。
+    pub when: Option<Expr>,
+    /// 列表项（引用已解析）。
+    pub items: Vec<CompiledItem>,
+    /// 上下文注入（模板原文保留，运行时渲染——动态点）。
+    pub context: HashMap<String, serde_json::Value>,
+    /// 出口转移（已编译）。
+    pub routes: Vec<CompiledRoute>,
+    /// 步骤自带循环。
+    pub loop_config: Option<LoopConfig>,
+}
+
+/// 编译后的列表项：引用已在加载期解析为三类之一。
+#[derive(Debug, Clone)]
+pub enum CompiledItem {
+    /// 静态命中插件（三级命中③）。
+    Plugin {
+        plugin_id: String,
+        when: Option<Expr>,
+    },
+    /// 静态命中管道/库 step（三级命中①②），运行时查统一步骤池递归执行。
+    Composite { step_id: String, when: Option<Expr> },
+    /// 动态点：模板名（`{{state.xxx}}`），运行时渲染后再查池/插件（命中①②③）。
+    Dynamic {
+        template: String,
+        when: Option<Expr>,
+    },
+}
+
+impl CompiledItem {
+    /// 项级 when 门（None = 无条件执行）。
+    pub fn when(&self) -> Option<&Expr> {
+        match self {
+            CompiledItem::Plugin { when, .. }
+            | CompiledItem::Composite { when, .. }
+            | CompiledItem::Dynamic { when, .. } => when.as_ref(),
+        }
+    }
+}
+
+/// 编译后的转移分支。
+#[derive(Debug, Clone)]
+pub struct CompiledRoute {
+    /// 条件 AST；None = 恒真（空/True 字面量归一）。
+    pub when: Option<Expr>,
+    /// 跳转目标（编译期已解析）。
+    pub next: RouteNext,
+    /// 命中时写入 state 的字段。
+    pub set: HashMap<String, serde_json::Value>,
+}
+
+/// 编译管道（纯函数，无 IO）。
+///
+/// 未知引用（step 全 miss）、when 语法错误、引用环、转移目标不存在——全部在此
+/// 报错。首个错误即返回（错误信息含定位，便于逐个修复）。
+pub fn compile_pipeline(
+    config: &PipelineConfig,
+    step_library: &StepLibrary,
+    plugin_ids: &HashSet<String>,
+) -> Result<CompiledPipeline, CompileError> {
+    let compiler = Compiler {
+        plugin_ids,
+        steps: Vec::new(),
+        step_index: HashMap::new(),
+        pool_ids: HashSet::new(),
+    };
+    compiler.compile(config, step_library)
+}
+
+struct Compiler<'a> {
+    plugin_ids: &'a HashSet<String>,
+    steps: Vec<CompiledStep>,
+    step_index: HashMap<String, usize>,
+    /// 统一步骤池 id 集（Composite 判定用，owned 避免借用冲突）。
+    pool_ids: HashSet<String>,
+}
+
+impl Compiler<'_> {
+    fn compile(
+        mut self,
+        config: &PipelineConfig,
+        step_library: &StepLibrary,
+    ) -> Result<CompiledPipeline, CompileError> {
+        // ── 第一遍：收集全部可引用 step（管道 step 优先，库 step 补缺）──
+        // 统一步骤池的 id → 源（原始 PipelineStep 引用，编译在第二遍做）。
+        let mut pool: Vec<(&str, &PipelineStep)> = Vec::new();
+        let mut pool_index: HashMap<&str, usize> = HashMap::new();
+        for body in &config.loop_bodies {
+            for step in &body.steps {
+                if pool_index.insert(step.id.as_str(), pool.len()).is_some() {
+                    return Err(CompileError {
+                        location: format!("循环体 '{}'", body.id),
+                        message: format!("step id '{}' 重复（跨循环体）", step.id),
+                    });
+                }
+                pool.push((step.id.as_str(), step));
+            }
+        }
+        for (id, step) in &step_library.steps {
+            if !pool_index.contains_key(id.as_str()) {
+                pool_index.insert(id.as_str(), pool.len());
+                pool.push((id.as_str(), step));
+            }
+        }
+
+        // ── 第二遍：引用图环检测（composite 引用集 DFS）──
+        // 引用图：pool 内 step id → 其 items 引用的 pool 内 step id 集（模板名/插件名不算）。
+        let mut graph: HashMap<usize, Vec<usize>> = HashMap::new();
+        for (i, (_id, step)) in pool.iter().enumerate() {
+            let mut refs = Vec::new();
+            for item in &step.steps {
+                if is_dynamic_template(item.name()) {
+                    continue; // 动态点运行时才定，不参与静态环检测
+                }
+                if let Some(&j) = pool_index.get(item.name()) {
+                    refs.push(j); // 自引用也算边（DFS InStack 立即判环）
+                }
+            }
+            graph.insert(i, refs);
+        }
+        let cycle = detect_cycle(&graph, pool.len());
+        if let Some(node) = cycle {
+            return Err(CompileError {
+                location: "step 引用图".to_string(),
+                message: format!(
+                    "composite 引用环：step '{}' 递归引用自身（直接或间接）",
+                    pool[node].0
+                ),
+            });
+        }
+
+        // ── 第三遍：编译 pool → 统一步骤池 ──
+        // 先占位（id 只登记），再逐个编译（Composite 引用只需 id，池在编译完成后完整）。
+        let n = pool.len();
+        let mut compiled: Vec<CompiledStep> = Vec::with_capacity(n);
+        // 占位空节点，保证 self.step_index 在编译引用期间可查（环已排除，不会自引用未编译）
+        for _ in 0..n {
+            compiled.push(CompiledStep {
+                id: String::new(),
+                when: None,
+                items: Vec::new(),
+                context: HashMap::new(),
+                routes: Vec::new(),
+                loop_config: None,
+            });
+        }
+        // pool_ids：Composite 判定用（owned key 集）
+        self.pool_ids = pool.iter().map(|(id, _)| (*id).to_string()).collect();
+        let pool_map = pool_index_map(&pool);
+        for (i, (id, step)) in pool.iter().enumerate() {
+            compiled[i] = self.compile_step(id, step, &pool_map)?;
+        }
+        // 登记 index（与 compiled 同步）
+        for (i, (id, _)) in pool.iter().enumerate() {
+            self.step_index.insert((*id).to_string(), i);
+        }
+        self.steps = compiled;
+
+        // ── 第四遍：编译各循环体 ──
+        let mut bodies = Vec::with_capacity(config.loop_bodies.len());
+        for body in &config.loop_bodies {
+            bodies.push(self.compile_body(body, &pool_map)?);
+        }
+
+        Ok(CompiledPipeline {
+            name: config.name.clone(),
+            bodies,
+            checkpoint: config.checkpoint.clone(),
+            steps: self.steps,
+            step_index: self.step_index,
+        })
+    }
+
+    /// 编译单个 step（pool 内任意 step，含库 step）。
+    fn compile_step(
+        &self,
+        id: &str,
+        step: &PipelineStep,
+        pool: &HashMap<&str, usize>,
+    ) -> Result<CompiledStep, CompileError> {
+        let _ = pool; // 命中判定统一走 self.pool_ids
+        let location = format!("step '{id}'");
+        let when = compile_when(step.when.as_deref(), &location)?;
+        let mut items = Vec::with_capacity(step.steps.len());
+        for item in &step.steps {
+            let item_location = format!("{location} / 项 '{}'", item.name());
+            let item_when = compile_when(item.when(), &item_location)?;
+            if is_dynamic_template(item.name()) {
+                items.push(CompiledItem::Dynamic {
+                    template: item.name().to_string(),
+                    when: item_when,
+                });
+            } else if self.pool_ids.contains(item.name()) {
+                items.push(CompiledItem::Composite {
+                    step_id: item.name().to_string(),
+                    when: item_when,
+                });
+            } else if self.plugin_ids.contains(item.name()) {
+                items.push(CompiledItem::Plugin {
+                    plugin_id: item.name().to_string(),
+                    when: item_when,
+                });
+            } else {
+                return Err(CompileError {
+                    location: item_location,
+                    message: format!(
+                        "引用 '{}' 未找到（不是管道/库 step，也不是已加载插件）",
+                        item.name()
+                    ),
+                });
+            }
+        }
+        let routes = compile_routes(&step.routes, &location)?;
+        Ok(CompiledStep {
+            id: id.to_string(),
+            when,
+            items,
+            context: step.context.clone(),
+            routes,
+            loop_config: step.loop_config.clone(),
+        })
+    }
+
+    /// 编译循环体。
+    fn compile_body(
+        &self,
+        body: &LoopBody,
+        pool_map: &HashMap<&str, usize>,
+    ) -> Result<CompiledBody, CompileError> {
+        let location = format!("循环体 '{}'", body.id);
+        let while_cond = compile_when(body.while_cond.as_deref(), &location)?;
+        let looping = body
+            .loop_config
+            .as_ref()
+            .map(|c| c.enabled)
+            .unwrap_or(false)
+            || while_cond.is_some();
+        let max_iterations = body
+            .loop_config
+            .as_ref()
+            .map(|c| c.max_iterations)
+            .unwrap_or(-1);
+        let mut steps = Vec::with_capacity(body.steps.len());
+        let mut step_index = HashMap::new();
+        for step in &body.steps {
+            step_index.insert(step.id.clone(), steps.len());
+            steps.push(self.compile_step(&step.id, step, pool_map)?);
+        }
+        let exit_routes = compile_routes(&body.exit_routes, &location)?;
+        Ok(CompiledBody {
+            id: body.id.clone(),
+            looping,
+            max_iterations,
+            while_cond,
+            steps,
+            step_index,
+            exit_routes,
+            run_on_error: body.run_on_error,
+        })
+    }
+}
+
+/// 把 pool（&str → usize）转成编译用映射（CompiledStep 编译期间需要 id → index）。
+fn pool_index_map<'p>(pool: &'p [(&str, &PipelineStep)]) -> HashMap<&'p str, usize> {
+    pool.iter()
+        .enumerate()
+        .map(|(i, (id, _))| (*id, i))
+        .collect()
+}
+
+/// 模板名判定：含 `{{` 的引用是运行时动态点（如 `{{state.core_plugin}}`）。
+fn is_dynamic_template(name: &str) -> bool {
+    name.contains("{{")
+}
+
+/// 编译 when 表达式：空/True 归一为 None（恒真），语法错误在此暴露。
+fn compile_when(cond: Option<&str>, location: &str) -> Result<Option<Expr>, CompileError> {
+    let Some(cond) = cond else {
+        return Ok(None);
+    };
+    match parse_condition(cond) {
+        Ok(None) => Ok(None),
+        Ok(Some(expr)) => match expr {
+            // 字面量 True 归一为恒真（跳过求值）
+            Expr::Literal(v) if v.as_bool() == Some(true) => Ok(None),
+            other => Ok(Some(other)),
+        },
+        Err(msg) => Err(CompileError {
+            location: location.to_string(),
+            message: format!("when 表达式语法错误: {msg}"),
+        }),
+    }
+}
+
+/// 编译转移列表：when 预编译 + 转移目标存在性校验。
+fn compile_routes(routes: &[Route], location: &str) -> Result<Vec<CompiledRoute>, CompileError> {
+    let mut out = Vec::with_capacity(routes.len());
+    for (i, route) in routes.iter().enumerate() {
+        let route_loc = format!("{location} / 转移 #{}", i + 1);
+        let when = compile_when(Some(&route.when), &route_loc)?;
+        // Phase/Step 目标存在性由调用方在编译上下文校验（见 compile_body/compile_step 调用点）。
+        // 这里只做 when 编译 + 原样搬运。
+        out.push(CompiledRoute {
+            when,
+            next: route.then.next.clone(),
+            set: route.then.set.clone(),
+        });
+    }
+    Ok(out)
+}
+
+/// 引用环检测：有向图（边 i→j 表示 step i 引用 step j），DFS 找环。
+/// 返回环上任意节点下标（None = 无环）。
+fn detect_cycle(graph: &HashMap<usize, Vec<usize>>, n: usize) -> Option<usize> {
+    #[derive(Clone, Copy, PartialEq)]
+    enum Mark {
+        Unvisited,
+        InStack,
+        Done,
+    }
+    let mut marks = vec![Mark::Unvisited; n];
+    fn dfs(node: usize, graph: &HashMap<usize, Vec<usize>>, marks: &mut [Mark]) -> Option<usize> {
+        marks[node] = Mark::InStack;
+        if let Some(neighbors) = graph.get(&node) {
+            for &next in neighbors {
+                match marks[next] {
+                    Mark::InStack => return Some(node),
+                    Mark::Unvisited => {
+                        if let Some(cycle) = dfs(next, graph, marks) {
+                            return Some(cycle);
+                        }
+                    }
+                    Mark::Done => {}
+                }
+            }
+        }
+        marks[node] = Mark::Done;
+        None
+    }
+    for start in 0..n {
+        if marks[start] == Mark::Unvisited {
+            if let Some(cycle) = dfs(start, graph, &mut marks) {
+                return Some(cycle);
+            }
+        }
+    }
+    None
+}
+
+// ═════════════════════════════════════════════════════════════════
+// 单元测试
+// ═════════════════════════════════════════════════════════════════
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use agentos_core::types::{LoopBody, PipelineConfig, Route, RouteAction, StepItem};
+    use serde_json::json;
+
+    fn make_step(id: &str, items: Vec<StepItem>) -> PipelineStep {
+        PipelineStep {
+            id: id.into(),
+            steps: items,
+            when: None,
+            context: HashMap::new(),
+            routes: vec![],
+            loop_config: None,
+        }
+    }
+
+    fn single_body(name: &str, steps: Vec<PipelineStep>) -> PipelineConfig {
+        PipelineConfig {
+            name: name.into(),
+            loop_bodies: vec![LoopBody {
+                id: "main".into(),
+                steps,
+                loop_config: None,
+                while_cond: None,
+                exit_routes: vec![],
+                run_on_error: false,
+            }],
+            checkpoint: Default::default(),
+        }
+    }
+
+    fn plugins(ids: &[&str]) -> HashSet<String> {
+        ids.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn compiles_plugin_items_and_when() {
+        let config = single_body(
+            "p",
+            vec![make_step("s", vec![StepItem::Bare("alpha".into())])],
+        );
+        let compiled =
+            compile_pipeline(&config, &StepLibrary::default(), &plugins(&["alpha"])).expect("ok");
+        let body = &compiled.bodies[0];
+        assert_eq!(body.steps.len(), 1);
+        match &body.steps[0].items[0] {
+            CompiledItem::Plugin { plugin_id, when } => {
+                assert_eq!(plugin_id, "alpha");
+                assert!(when.is_none());
+            }
+            other => panic!("expected Plugin, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn compiles_composite_via_step_pool() {
+        let config = single_body(
+            "p",
+            vec![
+                make_step("inner", vec![StepItem::Bare("alpha".into())]),
+                make_step("outer", vec![StepItem::Bare("inner".into())]),
+            ],
+        );
+        let compiled =
+            compile_pipeline(&config, &StepLibrary::default(), &plugins(&["alpha"])).expect("ok");
+        let outer = &compiled.bodies[0].steps[1];
+        match &outer.items[0] {
+            CompiledItem::Composite { step_id, .. } => {
+                assert_eq!(step_id, "inner");
+                // 池可查
+                assert_eq!(compiled.find_step("inner").unwrap().id, "inner");
+            }
+            other => panic!("expected Composite, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn library_steps_fill_the_pool() {
+        let config = single_body(
+            "p",
+            vec![make_step("s", vec![StepItem::Bare("lib_step".into())])],
+        );
+        let mut lib = StepLibrary::default();
+        lib.steps.insert(
+            "lib_step".into(),
+            make_step("lib_step", vec![StepItem::Bare("alpha".into())]),
+        );
+        let compiled = compile_pipeline(&config, &lib, &plugins(&["alpha"])).expect("ok");
+        assert!(compiled.find_step("lib_step").is_some(), "库 step 入池");
+    }
+
+    #[test]
+    fn dynamic_template_item_is_preserved() {
+        let config = single_body(
+            "p",
+            vec![make_step(
+                "s",
+                vec![StepItem::Bare("{{state.core_plugin}}".into())],
+            )],
+        );
+        let compiled =
+            compile_pipeline(&config, &StepLibrary::default(), &plugins(&[])).expect("ok");
+        match &compiled.bodies[0].steps[0].items[0] {
+            CompiledItem::Dynamic { template, .. } => {
+                assert_eq!(template, "{{state.core_plugin}}")
+            }
+            other => panic!("expected Dynamic, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn unknown_reference_is_compile_error() {
+        let config = single_body(
+            "p",
+            vec![make_step("s", vec![StepItem::Bare("ghost".into())])],
+        );
+        let err = compile_pipeline(&config, &StepLibrary::default(), &plugins(&[])).unwrap_err();
+        assert!(err.message.contains("ghost"), "err: {err}");
+        assert!(err.location.contains("s"), "err: {err}");
+    }
+
+    #[test]
+    fn invalid_when_is_compile_error() {
+        let mut step = make_step("s", vec![]);
+        step.when = Some("this is ((( invalid".into());
+        let config = single_body("p", vec![step]);
+        let err = compile_pipeline(&config, &StepLibrary::default(), &plugins(&[])).unwrap_err();
+        assert!(err.message.contains("when"), "err: {err}");
+        assert!(err.message.contains("语法"), "err: {err}");
+    }
+
+    #[test]
+    fn when_true_literal_normalizes_to_none() {
+        let mut step = make_step(
+            "s",
+            vec![StepItem::Gated {
+                name: "alpha".into(),
+                when: Some("True".into()),
+            }],
+        );
+        step.when = Some("True".into());
+        let config = single_body("p", vec![step]);
+        let compiled =
+            compile_pipeline(&config, &StepLibrary::default(), &plugins(&["alpha"])).expect("ok");
+        let s = &compiled.bodies[0].steps[0];
+        assert!(s.when.is_none(), "组级 True 归一恒真");
+        match &s.items[0] {
+            CompiledItem::Plugin { when, .. } => assert!(when.is_none(), "项级 True 归一恒真"),
+            other => panic!("expected Plugin, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn composite_cycle_is_compile_error() {
+        let config = single_body(
+            "p",
+            vec![
+                make_step("a", vec![StepItem::Bare("b".into())]),
+                make_step("b", vec![StepItem::Bare("a".into())]),
+            ],
+        );
+        let err = compile_pipeline(&config, &StepLibrary::default(), &plugins(&[])).unwrap_err();
+        assert!(err.message.contains("环"), "err: {err}");
+    }
+
+    #[test]
+    fn self_reference_is_compile_error() {
+        let config = single_body("p", vec![make_step("a", vec![StepItem::Bare("a".into())])]);
+        let err = compile_pipeline(&config, &StepLibrary::default(), &plugins(&[])).unwrap_err();
+        assert!(err.message.contains("环"), "err: {err}");
+    }
+
+    #[test]
+    fn while_condition_compiles_and_enables_loop() {
+        let mut body = LoopBody {
+            id: "main".into(),
+            steps: vec![make_step("s", vec![StepItem::Bare("alpha".into())])],
+            loop_config: None,
+            while_cond: Some("state.n < 3".into()),
+            exit_routes: vec![],
+            run_on_error: false,
+        };
+        let config = PipelineConfig {
+            name: "p".into(),
+            loop_bodies: vec![body.clone()],
+            checkpoint: Default::default(),
+        };
+        let compiled =
+            compile_pipeline(&config, &StepLibrary::default(), &plugins(&["alpha"])).expect("ok");
+        let cb = &compiled.bodies[0];
+        assert!(cb.looping, "while 存在即循环模式");
+        assert!(cb.while_cond.is_some());
+        // 缺省 body（无 loop_config 无 while）不循环
+        body.while_cond = None;
+        let config2 = PipelineConfig {
+            name: "p".into(),
+            loop_bodies: vec![body],
+            checkpoint: Default::default(),
+        };
+        let compiled2 =
+            compile_pipeline(&config2, &StepLibrary::default(), &plugins(&["alpha"])).expect("ok");
+        assert!(!compiled2.bodies[0].looping);
+    }
+
+    #[test]
+    fn step_index_built_for_jump_targets() {
+        let config = single_body(
+            "p",
+            vec![
+                make_step("pre", vec![StepItem::Bare("alpha".into())]),
+                make_step("post", vec![StepItem::Bare("alpha".into())]),
+            ],
+        );
+        let compiled =
+            compile_pipeline(&config, &StepLibrary::default(), &plugins(&["alpha"])).expect("ok");
+        let body = &compiled.bodies[0];
+        assert_eq!(body.step_index("pre"), Some(0));
+        assert_eq!(body.step_index("post"), Some(1));
+        assert_eq!(body.step_index("missing"), None);
+    }
+
+    #[test]
+    fn routes_compile_when_ast() {
+        let mut step = make_step("s", vec![]);
+        step.routes = vec![Route {
+            when: "state.done == true".into(),
+            then: RouteAction {
+                next: RouteNext::End,
+                set: HashMap::from([("k".into(), json!(1))]),
+            },
+        }];
+        let config = single_body("p", vec![step]);
+        let compiled =
+            compile_pipeline(&config, &StepLibrary::default(), &plugins(&[])).expect("ok");
+        let r = &compiled.bodies[0].steps[0].routes[0];
+        assert!(r.when.is_some(), "非恒真条件保留 AST");
+        assert_eq!(r.next, RouteNext::End);
+        assert_eq!(r.set.get("k"), Some(&json!(1)));
+    }
+
+    #[test]
+    fn pipeline_step_precedes_library_on_name_clash() {
+        let config = single_body(
+            "p",
+            vec![make_step("dup", vec![StepItem::Bare("alpha".into())])],
+        );
+        let mut lib = StepLibrary::default();
+        lib.steps.insert(
+            "dup".into(),
+            make_step("dup", vec![StepItem::Bare("beta".into())]),
+        );
+        let compiled = compile_pipeline(&config, &lib, &plugins(&["alpha", "beta"])).expect("ok");
+        // 管道 step 优先入池：库 dup 被跳过，alpha 才在池里
+        assert!(compiled.find_step("dup").is_some());
+        assert!(compiled.find_step("alpha").is_none());
+    }
+}

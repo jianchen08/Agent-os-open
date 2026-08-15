@@ -1,4 +1,4 @@
-//! 统一错误类型（api 与 db-admin 共用，原 api/src/error.rs 原样迁移）
+//! 统一错误类型（api 与 db-admin 共用）
 
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};

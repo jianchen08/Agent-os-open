@@ -43,12 +43,9 @@ impl LifecycleMetricsHandles {
         Self {
             pipeline_start: counters
                 .register_counter("lifecycle.pipeline_start_total", Labels::new()),
-            pipeline_end: counters
-                .register_counter("lifecycle.pipeline_end_total", Labels::new()),
-            plugin_load: counters
-                .register_counter("lifecycle.plugin_load_total", Labels::new()),
-            plugin_error: counters
-                .register_counter("lifecycle.plugin_error_total", Labels::new()),
+            pipeline_end: counters.register_counter("lifecycle.pipeline_end_total", Labels::new()),
+            plugin_load: counters.register_counter("lifecycle.plugin_load_total", Labels::new()),
+            plugin_error: counters.register_counter("lifecycle.plugin_error_total", Labels::new()),
         }
     }
 }
@@ -76,6 +73,9 @@ pub fn spawn_lifecycle_metrics_subscriber(
                     LifecycleHook::OnError => handles.plugin_error.inc(1),
                     // OnUnload 当前无发射点（见报告 emit 点表），暂不计单独计数，预留。
                     LifecycleHook::OnUnload => {}
+                    // 域事件不逐类计数（事件名在 ctx["event"]，名字空间开放不可
+                    // 枚举）；需要按事件名聚合的订阅者自行读标签。
+                    LifecycleHook::DomainEvent => {}
                 },
                 Err(RecvError::Lagged(n)) => {
                     warn!(

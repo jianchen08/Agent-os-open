@@ -1,3 +1,4 @@
+# @feature: FP-MIGR 0.1→0.2迁移（0.1 遗留测试） | @ci: python-plugins-test
 """配置读写回环 E2E 测试。
 
 验证 PUT 配置 → 文件已写入 → GET 读回内容一致。

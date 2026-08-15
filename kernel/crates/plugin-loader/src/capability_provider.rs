@@ -18,9 +18,7 @@
 use std::sync::Arc;
 
 use agentos_core::traits::{PluginInvoker, PluginManifest, ProvidedCapability};
-use agentos_mcp::{
-    CapabilityHandler, CapabilityHandlerRegistry, McpError,
-};
+use agentos_mcp::{CapabilityHandler, CapabilityHandlerRegistry, McpError};
 use async_trait::async_trait;
 use serde_json::Value;
 
@@ -133,8 +131,7 @@ pub fn register_provided_capabilities(
             continue;
         };
         for cap in &provides.capabilities {
-            let mut handler =
-                ProvidedCapabilityHandler::new(manifest.id.clone(), cap);
+            let mut handler = ProvidedCapabilityHandler::new(manifest.id.clone(), cap);
             if let Some(b) = &bridge {
                 handler = handler.with_bridge(Arc::clone(b));
             }
@@ -196,7 +193,9 @@ impl McpBridge {
     /// 未声明时从 namespace 派生（连字符转下划线）作为合理默认。
     pub fn add_routes_from_manifests(&self, manifests: &[PluginManifest]) {
         for manifest in manifests {
-            let Some(provides) = &manifest.provides else { continue };
+            let Some(provides) = &manifest.provides else {
+                continue;
+            };
             for cap in &provides.capabilities {
                 let prefix = cap
                     .tool_prefix
@@ -223,14 +222,17 @@ impl CapabilityBridge for McpBridge {
         method: &str,
         params: Value,
     ) -> Result<Value, McpError> {
-        let route = self.routes.read().get(namespace).cloned().ok_or_else(|| {
-            McpError::Protocol {
-                message: format!(
-                    "McpBridge has no route for namespace '{namespace}' (known: {:?})",
-                    self.routes.read().keys().collect::<Vec<_>>()
-                ),
-            }
-        })?;
+        let route =
+            self.routes
+                .read()
+                .get(namespace)
+                .cloned()
+                .ok_or_else(|| McpError::Protocol {
+                    message: format!(
+                        "McpBridge has no route for namespace '{namespace}' (known: {:?})",
+                        self.routes.read().keys().collect::<Vec<_>>()
+                    ),
+                })?;
 
         let tool_name = format!("{}.{}", route.tool_prefix, method);
         let result = self
@@ -238,14 +240,19 @@ impl CapabilityBridge for McpBridge {
             .invoke_tool(&route.plugin_id, &tool_name, &params)
             .await
             .map_err(|e| McpError::Protocol {
-                message: format!("invoke_tool({}/{tool_name}) failed: {}", route.plugin_id, e.message),
+                message: format!(
+                    "invoke_tool({}/{tool_name}) failed: {}",
+                    route.plugin_id, e.message
+                ),
             })?;
 
         if result.success {
             Ok(result.data)
         } else {
             Err(McpError::Protocol {
-                message: result.error.unwrap_or_else(|| "tool returned failure".to_string()),
+                message: result
+                    .error
+                    .unwrap_or_else(|| "tool returned failure".to_string()),
             })
         }
     }
@@ -255,9 +262,8 @@ impl CapabilityBridge for McpBridge {
 mod tests {
     use super::*;
     use agentos_core::traits::{
-        HostType, LifecycleHook, HookContext, ManifestCapabilities,
-        PluginInvoker, PluginManifest, PluginType,
-        ProvidedCapability, ProvidedCapabilityHost, ProvidesCapabilities,
+        HookContext, HostType, LifecycleHook, ManifestCapabilities, PluginInvoker, PluginManifest,
+        PluginType, ProvidedCapability, ProvidedCapabilityHost, ProvidesCapabilities,
     };
     use agentos_core::types::{PluginContext, PluginError, PluginResult, ToolExecutionResult};
     use agentos_mcp::CapabilityRouter;
@@ -281,7 +287,7 @@ mod tests {
             mcp: None,
             lifecycle: None,
             native: None,
-            wasm: None,
+            granted_capabilities: vec![],
             requires_content: None,
             invoke_entry: None,
             config_files: vec![],
@@ -313,11 +319,9 @@ mod tests {
         let count = register_provided_capabilities(&registry, &manifests, None);
         assert_eq!(count, 1);
         assert!(registry.has_namespace("human-interaction"));
-        assert!(
-            registry
-                .namespaces()
-                .contains(&"human-interaction".to_string())
-        );
+        assert!(registry
+            .namespaces()
+            .contains(&"human-interaction".to_string()));
     }
 
     #[test]
@@ -332,7 +336,7 @@ mod tests {
                         namespace: "my-cap".to_string(),
                         methods: vec!["do".to_string()],
                         host: ProvidedCapabilityHost::InProcess,
-                    tool_prefix: None,
+                        tool_prefix: None,
                     }],
                 }),
             ),
@@ -364,7 +368,10 @@ mod tests {
         let err = registry.route("ns1", "do_something", json!({})).await;
         assert!(err.is_err());
         let msg = format!("{}", err.unwrap_err());
-        assert!(msg.contains("not declared"), "未声明的 method 应被拒绝: {msg}");
+        assert!(
+            msg.contains("not declared"),
+            "未声明的 method 应被拒绝: {msg}"
+        );
     }
 
     #[tokio::test]
@@ -524,22 +531,28 @@ mod tests {
     #[async_trait]
     impl PluginInvoker for MockInvoker {
         async fn invoke_pipeline_plugin(
-            &self, _: &str, _: &PluginContext,
+            &self,
+            _: &str,
+            _: &PluginContext,
         ) -> Result<PluginResult, PluginError> {
             unreachable!("McpBridge 不调 invoke_pipeline_plugin")
         }
         async fn invoke_tool(
-            &self, plugin_id: &str, tool_name: &str, inputs: &Value,
+            &self,
+            plugin_id: &str,
+            tool_name: &str,
+            inputs: &Value,
         ) -> Result<ToolExecutionResult, PluginError> {
-            self.calls.lock().push((
-                plugin_id.to_string(),
-                tool_name.to_string(),
-                inputs.clone(),
-            ));
+            self.calls
+                .lock()
+                .push((plugin_id.to_string(), tool_name.to_string(), inputs.clone()));
             Ok(self.return_result.clone())
         }
         async fn send_lifecycle_hook(
-            &self, _: &str, _: LifecycleHook, _: &HookContext,
+            &self,
+            _: &str,
+            _: LifecycleHook,
+            _: &HookContext,
         ) -> Result<(), PluginError> {
             unreachable!("McpBridge 不调 send_lifecycle_hook")
         }
@@ -564,7 +577,12 @@ mod tests {
         );
 
         let result = bridge
-            .forward("ignored", "human-interaction", "create_choice", json!({"title": "T"}))
+            .forward(
+                "ignored",
+                "human-interaction",
+                "create_choice",
+                json!({"title": "T"}),
+            )
             .await
             .unwrap();
         assert_eq!(result["request_id"], "r1");
@@ -586,7 +604,10 @@ mod tests {
 
         let err = bridge.forward("p", "unknown-ns", "m", json!({})).await;
         assert!(err.is_err());
-        assert!(calls_ref.lock().is_empty(), "未注册 namespace 不应调 invoker");
+        assert!(
+            calls_ref.lock().is_empty(),
+            "未注册 namespace 不应调 invoker"
+        );
     }
 
     #[tokio::test]
@@ -605,7 +626,9 @@ mod tests {
             },
         );
 
-        let err = bridge.forward("p", "human-interaction", "wait_for_choice", json!({})).await;
+        let err = bridge
+            .forward("p", "human-interaction", "wait_for_choice", json!({}))
+            .await;
         assert!(err.is_err());
         let msg = format!("{}", err.unwrap_err());
         assert!(msg.contains("timed out"), "应传播工具错误: {msg}");

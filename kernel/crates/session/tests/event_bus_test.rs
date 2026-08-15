@@ -77,11 +77,20 @@ async fn emit_assigns_monotonic_sequence_per_thread() {
     bus.register_thread("thread-1", "user-A");
 
     for _ in 0..3 {
-        bus.emit("w", "e", serde_json::json!({}), EmitScope::Thread("thread-1".into()), "p")
-            .await;
+        bus.emit(
+            "w",
+            "e",
+            serde_json::json!({}),
+            EmitScope::Thread("thread-1".into()),
+            "p",
+        )
+        .await;
     }
     let msgs = received.lock().unwrap();
-    let seqs: Vec<u64> = msgs.iter().map(|m| m["sequence"].as_u64().unwrap()).collect();
+    let seqs: Vec<u64> = msgs
+        .iter()
+        .map(|m| m["sequence"].as_u64().unwrap())
+        .collect();
     assert_eq!(seqs.len(), 3);
     assert!(seqs.windows(2).all(|w| w[1] > w[0]), "sequence 应严格递增");
 }
@@ -95,7 +104,13 @@ async fn emit_thread_routes_via_registry_thread_map() {
     let bus = FrontendEventBus::new(registry);
 
     let delivered = bus
-        .emit("w", "e", json!({}), EmitScope::Thread("thread-1".into()), "p")
+        .emit(
+            "w",
+            "e",
+            json!({}),
+            EmitScope::Thread("thread-1".into()),
+            "p",
+        )
         .await;
     assert!(delivered > 0, "thread scope 有连接应投递成功");
     assert_eq!(received.lock().unwrap().len(), 1);
@@ -148,7 +163,13 @@ async fn rate_limit_drops_events_beyond_burst() {
     let mut delivered_count = 0usize;
     for _ in 0..10 {
         if bus
-            .emit("w", "e", json!({}), EmitScope::Thread("thread-1".into()), "p")
+            .emit(
+                "w",
+                "e",
+                json!({}),
+                EmitScope::Thread("thread-1".into()),
+                "p",
+            )
             .await
             > 0
         {
@@ -159,11 +180,7 @@ async fn rate_limit_drops_events_beyond_burst() {
         delivered_count, 5,
         "突发 5 条后应丢弃（令牌桶耗尽），实际投递 {delivered_count}"
     );
-    assert_eq!(
-        received.lock().unwrap().len(),
-        5,
-        "sink 应只收到 5 条"
-    );
+    assert_eq!(received.lock().unwrap().len(), 5, "sink 应只收到 5 条");
 }
 
 #[tokio::test]
@@ -183,12 +200,24 @@ async fn rate_limit_is_per_plugin_independent() {
 
     // plugin-A 发 3 条（满突发），plugin-B 也发 3 条（独立桶）
     for _ in 0..3 {
-        bus.emit("w", "e", json!({}), EmitScope::Thread("thread-1".into()), "plugin-A")
-            .await;
+        bus.emit(
+            "w",
+            "e",
+            json!({}),
+            EmitScope::Thread("thread-1".into()),
+            "plugin-A",
+        )
+        .await;
     }
     for _ in 0..3 {
-        bus.emit("w", "e", json!({}), EmitScope::Thread("thread-1".into()), "plugin-B")
-            .await;
+        bus.emit(
+            "w",
+            "e",
+            json!({}),
+            EmitScope::Thread("thread-1".into()),
+            "plugin-B",
+        )
+        .await;
     }
     assert_eq!(
         received.lock().unwrap().len(),

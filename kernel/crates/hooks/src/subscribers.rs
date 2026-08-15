@@ -99,12 +99,18 @@ mod tests {
         // 给订阅者一点时间消费。
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
         // 任务仍在运行（未因消费事件 panic/退出）。
-        assert!(!handle.is_finished(), "audit subscriber should still be running");
+        assert!(
+            !handle.is_finished(),
+            "audit subscriber should still be running"
+        );
 
         // 关闭总线（drop 所有 Sender）让订阅者优雅退出。
         drop(bus);
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
         // 此时任务应已退出（Closed 分支 break）。
-        assert!(handle.is_finished(), "audit subscriber should exit after bus closed");
+        assert!(
+            handle.is_finished(),
+            "audit subscriber should exit after bus closed"
+        );
     }
 }

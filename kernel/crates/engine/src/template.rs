@@ -182,10 +182,7 @@ mod tests {
             "[]"
         );
         // 中间节点缺失也应当返回空串
-        assert_eq!(
-            render_template("[{{state.user.name}}]", &state, root),
-            "[]"
-        );
+        assert_eq!(render_template("[{{state.user.name}}]", &state, root), "[]");
     }
 
     #[test]
@@ -197,22 +194,14 @@ mod tests {
         f.write_all(b"hello persona").expect("write");
         drop(f);
 
-        let out = render_template(
-            "{{path:persona.md}}",
-            &json!({}),
-            dir.path(),
-        );
+        let out = render_template("{{path:persona.md}}", &json!({}), dir.path());
         assert_eq!(out, "hello persona");
     }
 
     #[test]
     fn test_render_path_missing() {
         let dir = tempfile::tempdir().expect("create tempdir");
-        let out = render_template(
-            "[{{path:does/not/exist.md}}]",
-            &json!({}),
-            dir.path(),
-        );
+        let out = render_template("[{{path:does/not/exist.md}}]", &json!({}), dir.path());
         assert_eq!(out, "[]");
     }
 

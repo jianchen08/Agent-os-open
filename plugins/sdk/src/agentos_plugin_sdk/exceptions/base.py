@@ -28,7 +28,7 @@ class BaseAppException(Exception):
         code: str | None = None,
         details: dict[str, Any] | None = None,
         cause: Exception | None = None,
-    ):
+    ) -> None:
         """初始化基础异常
 
         Args:
@@ -116,7 +116,7 @@ class ValidationException(DomainException):
         field: str | None = None,
         details: dict[str, Any] | None = None,
         code: str | None = None,
-    ):
+    ) -> None:
         """初始化验证异常
 
         Args:
@@ -151,7 +151,7 @@ class NotFoundException(DomainException):
         resource_id: str | None = None,
         details: dict[str, Any] | None = None,
         code: str | None = None,
-    ):
+    ) -> None:
         """初始化未找到异常
 
         Args:
@@ -188,7 +188,7 @@ class ConflictException(DomainException):
         conflict_type: str | None = None,
         details: dict[str, Any] | None = None,
         code: str | None = None,
-    ):
+    ) -> None:
         """初始化冲突异常
 
         Args:
@@ -221,7 +221,7 @@ class PermissionException(DomainException):
         required_permission: str | None = None,
         details: dict[str, Any] | None = None,
         code: str | None = None,
-    ):
+    ) -> None:
         """初始化权限异常
 
         Args:
@@ -254,7 +254,7 @@ class BusinessRuleException(DomainException):
         rule: str | None = None,
         details: dict[str, Any] | None = None,
         code: str | None = None,
-    ):
+    ) -> None:
         """初始化业务规则异常
 
         Args:
@@ -309,7 +309,7 @@ class DatabaseException(SystemException):
         details: dict[str, Any] | None = None,
         cause: Exception | None = None,
         code: str | None = None,
-    ):
+    ) -> None:
         """初始化数据库异常
 
         Args:
@@ -345,7 +345,7 @@ class CacheException(SystemException):
         details: dict[str, Any] | None = None,
         cause: Exception | None = None,
         code: str | None = None,
-    ):
+    ) -> None:
         """初始化缓存异常
 
         Args:
@@ -381,7 +381,7 @@ class ExternalServiceException(SystemException):
         details: dict[str, Any] | None = None,
         cause: Exception | None = None,
         code: str | None = None,
-    ):
+    ) -> None:
         """初始化外部服务异常
 
         Args:
@@ -420,7 +420,7 @@ class ConfigurationException(SystemException):
         config_key: str | None = None,
         details: dict[str, Any] | None = None,
         code: str | None = None,
-    ):
+    ) -> None:
         """初始化配置异常
 
         Args:
@@ -460,7 +460,7 @@ class TimeoutException(SystemException):
         operation: str | None = None,
         details: dict[str, Any] | None = None,
         code: str | None = None,
-    ):
+    ) -> None:
         """初始化超时异常
 
         Args:

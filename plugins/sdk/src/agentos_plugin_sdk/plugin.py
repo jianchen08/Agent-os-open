@@ -51,6 +51,7 @@ class AgentOSPlugin:
         handler: Callable[..., Any],
         description: str = "",
         output_schema: dict[str, Any] | None = None,
+        render: dict[str, Any] | None = None,
     ) -> None:
         """注册工具。
 
@@ -60,6 +61,7 @@ class AgentOSPlugin:
             handler: 处理函数（async 或 sync）。
             description: 工具描述。
             output_schema: 输出 JSON Schema（可选）。
+            render: 渲染意图声明（可选），见 ToolDef.render。
         """
         self._tools[name] = ToolDef(
             name=name,
@@ -67,6 +69,7 @@ class AgentOSPlugin:
             handler=handler,
             description=description,
             output_schema=output_schema,
+            render=render,
         )
 
     def tool(
@@ -74,6 +77,8 @@ class AgentOSPlugin:
         name: str,
         schema: dict[str, Any],
         description: str = "",
+        output_schema: dict[str, Any] | None = None,
+        render: dict[str, Any] | None = None,
     ) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
         """装饰器快捷方式——注册工具。
 
@@ -84,7 +89,7 @@ class AgentOSPlugin:
         """
 
         def decorator(func: Callable[..., Any]) -> Callable[..., Any]:
-            self.register_tool(name, schema, func, description)
+            self.register_tool(name, schema, func, description, output_schema, render)
             return func
 
         return decorator
@@ -146,6 +151,23 @@ class AgentOSPlugin:
     def on_config_change(self, func: Callable[..., Any]) -> Callable[..., Any]:
         """装饰器——注册 on_config_change 钩子。"""
         self._lifecycle_handlers[LifecycleEvent.ON_CONFIG_CHANGE.value] = func
+        return func
+
+    def on_domain_event(self, func: Callable[..., Any]) -> Callable[..., Any]:
+        """装饰器——注册域事件钩子（通用域事件通道）。
+
+        内核在域事件锚点（会话创建/删除/活跃切换等）发 notifications/domain_event，
+        params 携带 ``event``（事件名，如 "session.created"）+ 任意标签
+        （session_id/pipeline_id/user_id 等）。订阅前提：plugin.json 的
+        ``capabilities.lifecycle_hooks`` 含 ``"domain_event"``。
+
+        Usage:
+            @plugin.on_domain_event
+            async def handle_domain(params: dict) -> None:
+                if params.get("event") == "session.created":
+                    ...
+        """
+        self._lifecycle_handlers[LifecycleEvent.DOMAIN_EVENT.value] = func
         return func
 
     # ── 能力句柄 ──────────────────────────────────────────
@@ -271,7 +293,8 @@ class AgentOSPlugin:
         从 stdin 读取 JSON-RPC 请求，向 stdout 写入响应。
         与 Rust 内核 McpClient 对接。
 
-        反向调用通道（KernelChannel）随服务端一起启动，共享 stdin 多路复用。
+        反向调用通道（KernelChannel）由服务端 middleware 在 initialize 握手时
+        绑定到官方 SDK 的连接级通道。
         """
         import asyncio
 

@@ -125,6 +125,15 @@ export default defineConfig(({ mode }) => {
       noDiscovery: true,
       include: [
         '@ant-design/colors',
+        // —— RJSF 表单引擎依赖链（@rjsf/utils → fast-uri 为 CJS）——
+        // noDiscovery 下不进白名单则浏览器逐文件加载原始源码，fast-uri 的
+        // CJS export 命中 "does not provide an export named 'default'"，
+        // 模块求值失败 → React 挂载中断 → 整页白屏（2026-08-15 实测根因）。
+        '@rjsf/antd',
+        '@rjsf/core',
+        '@rjsf/utils',
+        '@rjsf/validator-ajv8',
+        'ajv',
         // —— 应用 UI 栈（不预构建 → 逐文件加载 → 首屏 7-8s）——
         'antd',
         'antd/es/splitter',

@@ -37,7 +37,11 @@ fn app_with_deps() -> (tempfile::TempDir, axum::Router) {
 
     let agent_dir = tmp.path().join("config").join("agents").join("main");
     fs::create_dir_all(&agent_dir).unwrap();
-    fs::write(agent_dir.join("test_agent.yaml"), "config_id: test_agent\nname: t\n").unwrap();
+    fs::write(
+        agent_dir.join("test_agent.yaml"),
+        "config_id: test_agent\nname: t\n",
+    )
+    .unwrap();
 
     let pipe_dir = tmp.path().join("config").join("pipelines");
     fs::create_dir_all(&pipe_dir).unwrap();
@@ -45,7 +49,11 @@ fn app_with_deps() -> (tempfile::TempDir, axum::Router) {
 
     let model_dir = tmp.path().join("config").join("models");
     fs::create_dir_all(&model_dir).unwrap();
-    fs::write(model_dir.join("llm.yaml"), "name: glm\napi_key: ${ENV_KEY}\n").unwrap();
+    fs::write(
+        model_dir.join("llm.yaml"),
+        "name: glm\napi_key: ${ENV_KEY}\n",
+    )
+    .unwrap();
 
     let manifest = PluginManifest {
         id: "llm_service".to_string(),
@@ -64,7 +72,7 @@ fn app_with_deps() -> (tempfile::TempDir, axum::Router) {
         mcp: None,
         lifecycle: None,
         native: None,
-        wasm: None,
+        granted_capabilities: vec![],
         requires_content: None,
         invoke_entry: None,
         config_files: vec![ConfigFileMapping {
@@ -269,7 +277,11 @@ async fn test_read_surface_requires_auth_401_and_403() {
         (Method::GET, "/api/v1/plugins"),
     ] {
         let status = send(&app, method.clone(), uri, None, None).await;
-        assert_eq!(status, StatusCode::UNAUTHORIZED, "匿名读 {uri} 应 401（当前 {status}）");
+        assert_eq!(
+            status,
+            StatusCode::UNAUTHORIZED,
+            "匿名读 {uri} 应 401（当前 {status}）"
+        );
         let status = send(&app, method, uri, Some(&user), None).await;
         assert_eq!(
             status,
@@ -294,7 +306,11 @@ async fn test_admin_token_passes_write_and_read() {
         Some(json!({"yaml": "config_id: test_agent\nname: 新名\n"})),
     )
     .await;
-    assert_eq!(status, StatusCode::OK, "admin PUT agent config 应通过（当前 {status}）");
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "admin PUT agent config 应通过（当前 {status}）"
+    );
 
     // PUT pipeline config → 200（原子写回）
     let status = send(
@@ -305,7 +321,11 @@ async fn test_admin_token_passes_write_and_read() {
         Some(json!({"data": {"name": "default"}})),
     )
     .await;
-    assert_eq!(status, StatusCode::OK, "admin PUT pipeline config 应通过（当前 {status}）");
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "admin PUT pipeline config 应通过（当前 {status}）"
+    );
 
     // PUT plugin config（先 GET 拿 ETag 满足 If-Match 乐观锁）→ 200
     let get_resp = app
@@ -335,7 +355,11 @@ async fn test_admin_token_passes_write_and_read() {
         Some(json!({"data": {"name": "glm", "limit": 200}, "if_match": etag})),
     )
     .await;
-    assert_eq!(status, StatusCode::OK, "admin PUT plugin config 应通过（当前 {status}）");
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "admin PUT plugin config 应通过（当前 {status}）"
+    );
 
     // POST /api/v1/sessions → 200（创建会话）
     let status = send(
@@ -346,13 +370,25 @@ async fn test_admin_token_passes_write_and_read() {
         Some(json!({"title": "t"})),
     )
     .await;
-    assert_eq!(status, StatusCode::OK, "admin POST sessions 应通过（当前 {status}）");
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "admin POST sessions 应通过（当前 {status}）"
+    );
 
     // GET /api/v1/sessions → 200
     let status = send(&app, Method::GET, "/api/v1/sessions", Some(&admin), None).await;
-    assert_eq!(status, StatusCode::OK, "admin GET sessions 应通过（当前 {status}）");
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "admin GET sessions 应通过（当前 {status}）"
+    );
 
     // GET /api/v1/plugins → 200
     let status = send(&app, Method::GET, "/api/v1/plugins", Some(&admin), None).await;
-    assert_eq!(status, StatusCode::OK, "admin GET plugins 应通过（当前 {status}）");
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "admin GET plugins 应通过（当前 {status}）"
+    );
 }

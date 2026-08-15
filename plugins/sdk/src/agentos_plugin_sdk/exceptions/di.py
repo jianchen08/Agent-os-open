@@ -23,7 +23,7 @@ class ServiceNotFoundError(DIException):
         service_name: 服务名称
     """
 
-    def __init__(self, service_name: str, details: dict[str, Any] | None = None):
+    def __init__(self, service_name: str, details: dict[str, Any] | None = None) -> None:
         """初始化服务未找到异常
 
         Args:
@@ -47,7 +47,7 @@ class ServiceAlreadyRegisteredError(DIException):
         service_name: 服务名称
     """
 
-    def __init__(self, service_name: str, details: dict[str, Any] | None = None):
+    def __init__(self, service_name: str, details: dict[str, Any] | None = None) -> None:
         """初始化服务已注册异常
 
         Args:
@@ -75,7 +75,7 @@ class CircularDependencyError(DIException):
         self,
         dependency_chain: list[str],
         details: dict[str, Any] | None = None,
-    ):
+    ) -> None:
         """初始化循环依赖异常
 
         Args:
@@ -100,7 +100,7 @@ class InvalidServiceFactoryError(DIException):
         self,
         message: str = "Invalid service factory",
         details: dict[str, Any] | None = None,
-    ):
+    ) -> None:
         """初始化无效的服务工厂异常
 
         Args:
@@ -117,7 +117,7 @@ class ServiceValidationError(DIException):
         self,
         message: str = "Service validation failed",
         details: dict[str, Any] | None = None,
-    ):
+    ) -> None:
         """初始化服务验证异常
 
         Args:

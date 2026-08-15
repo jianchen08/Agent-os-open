@@ -1,69 +1,70 @@
 {
-    "id": "connectors_service",
-    "name": "Connectors Service",
-    "version": "1.0.0",
-    "plugin_type": "system",
-    "language": "python",
-    "host_type": "sidecar",
-    "entry": "python server.py",
-    "capabilities": {
-        "tools": [
-            {
-                "name": "connector.register",
-                "description": "Register a connector instance"
-            },
-            {
-                "name": "connector.unregister",
-                "description": "Unregister a connector by type"
-            },
-            {
-                "name": "connector.list",
-                "description": "List all registered connectors"
-            },
-            {
-                "name": "connector.get_active",
-                "description": "Get the active connector (highest priority)"
-            },
-            {
-                "name": "connector.get_status",
-                "description": "Get connector status summary"
-            },
-            {
-                "name": "connector.get_adapter_status",
-                "description": "Get adapter configuration status summary"
-            },
-            {
-                "name": "connector.degrade",
-                "description": "Execute action with fallback degradation"
-            }
-        ],
-        "resources": [],
-        "route_signals": [],
-        "lifecycle_hooks": [
-            "on_load",
-            "on_unload"
-        ]
-    },
-    "dependencies": [],
-    "permissions": {},
-    "error_policy": "skip",
-    "priority": 50,
-    "requires_content": 5,
-    "config_files": [
-        {
-            "id": "godot",
-            "path": "config/external_tools/godot.yaml",
-            "label": "Godot 工具配置"
-        },
-        {
-            "id": "vscode",
-            "path": "config/external_tools/vscode.yaml",
-            "label": "VS Code 工具配置"
-        },
-        {
-            "id": "capability_adapters",
-            "path": "config/capability_adapters.yaml",
-            "label": "能力适配器配置"
-        }
+  "id": "connectors_service",
+  "name": "Connectors Service",
+  "version": "1.0.0",
+  "plugin_type": "system",
+  "language": "python",
+  "host_type": "sidecar",
+  "entry": "python server.py",
+  "capabilities": {
+    "tools": [],
+    "resources": [],
+    "route_signals": [],
+    "lifecycle_hooks": [
+      "on_load",
+      "on_unload"
+    ],
+    "services": [
+      {
+        "name": "connector.register",
+        "description": "Register a connector instance"
+      },
+      {
+        "name": "connector.unregister",
+        "description": "Unregister a connector by type"
+      },
+      {
+        "name": "connector.list",
+        "description": "List all registered connectors"
+      },
+      {
+        "name": "connector.get_active",
+        "description": "Get the active connector (highest priority)"
+      },
+      {
+        "name": "connector.get_status",
+        "description": "Get connector status summary"
+      },
+      {
+        "name": "connector.get_adapter_status",
+        "description": "Get adapter configuration status summary"
+      },
+      {
+        "name": "connector.degrade",
+        "description": "Execute action with fallback degradation"
+      }
     ]
+  },
+  "dependencies": [],
+  "permissions": {},
+  "error_policy": "skip",
+  "priority": 50,
+  "requires_content": 5,
+  "config_files": [
+    {
+      "id": "godot",
+      "path": "config/external_tools/godot.yaml",
+      "label": "Godot 工具配置"
+    },
+    {
+      "id": "vscode",
+      "path": "config/external_tools/vscode.yaml",
+      "label": "VS Code 工具配置"
+    },
+    {
+      "id": "capability_adapters",
+      "path": "config/capability_adapters.yaml",
+      "label": "能力适配器配置"
+    }
+  ]
 }

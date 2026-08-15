@@ -16,9 +16,9 @@ use std::sync::{Arc, Mutex};
 
 use agentos_core::traits::{PluginInvoker, StorageBackend};
 use agentos_core::types::{
-    Branch, LoopBody, LoopConfig, MessageRecord, PluginContext, PluginError, PluginResult,
-    PipelineConfig, PipelineStep, Route, RouteAction, RouteNext, RunRecord, RunStatus,
-    StepLibrary, TenantContext, ToolExecutionResult, TraceEntry,
+    Branch, LoopBody, LoopConfig, MessageRecord, PipelineConfig, PipelineStep, PluginContext,
+    PluginError, PluginResult, Route, RouteAction, RouteNext, RunRecord, RunStatus, StepLibrary,
+    TenantContext, ToolExecutionResult, TraceEntry,
 };
 use agentos_engine::PipelineExecutor;
 use async_trait::async_trait;
@@ -123,10 +123,16 @@ impl StorageBackend for NullStorage {
     async fn get_blob(&self, _blob_id: &str) -> Result<Vec<u8>, agentos_core::types::StorageError> {
         Ok(vec![])
     }
-    async fn append_trace(&self, _entry: TraceEntry) -> Result<(), agentos_core::types::StorageError> {
+    async fn append_trace(
+        &self,
+        _entry: TraceEntry,
+    ) -> Result<(), agentos_core::types::StorageError> {
         Ok(())
     }
-    async fn create_branch(&self, _branch: Branch) -> Result<(), agentos_core::types::StorageError> {
+    async fn create_branch(
+        &self,
+        _branch: Branch,
+    ) -> Result<(), agentos_core::types::StorageError> {
         Ok(())
     }
     async fn update_run_status(
@@ -146,7 +152,11 @@ impl StorageBackend for NullStorage {
     ) -> Result<(), agentos_core::types::StorageError> {
         Ok(())
     }
-    async fn store_blob(&self, _data: &[u8], _mime_type: &str) -> Result<String, agentos_core::types::StorageError> {
+    async fn store_blob(
+        &self,
+        _data: &[u8],
+        _mime_type: &str,
+    ) -> Result<String, agentos_core::types::StorageError> {
         Ok("null".to_string())
     }
     async fn create_session(
@@ -173,7 +183,10 @@ impl StorageBackend for NullStorage {
     ) -> Result<(), agentos_core::types::StorageError> {
         Ok(())
     }
-    async fn delete_session(&self, _thread_id: &str) -> Result<(), agentos_core::types::StorageError> {
+    async fn delete_session(
+        &self,
+        _thread_id: &str,
+    ) -> Result<(), agentos_core::types::StorageError> {
         Ok(())
     }
     async fn link_pipeline_session(
@@ -211,10 +224,16 @@ impl StorageBackend for NullStorage {
     ) -> Result<Vec<agentos_core::types::ExecutionRecord>, agentos_core::types::StorageError> {
         Ok(vec![])
     }
-    async fn count_execution_records(&self, _pipeline_run_id: &str) -> Result<u64, agentos_core::types::StorageError> {
+    async fn count_execution_records(
+        &self,
+        _pipeline_run_id: &str,
+    ) -> Result<u64, agentos_core::types::StorageError> {
         Ok(0)
     }
-    async fn delete_execution_records_by_session(&self, _pipeline_run_id: &str) -> Result<u64, agentos_core::types::StorageError> {
+    async fn delete_execution_records_by_session(
+        &self,
+        _pipeline_run_id: &str,
+    ) -> Result<u64, agentos_core::types::StorageError> {
         Ok(0)
     }
     async fn save_run_summary(
@@ -226,7 +245,8 @@ impl StorageBackend for NullStorage {
     async fn get_run_summary(
         &self,
         _run_id: &str,
-    ) -> Result<Option<agentos_core::types::PipelineRunSummary>, agentos_core::types::StorageError> {
+    ) -> Result<Option<agentos_core::types::PipelineRunSummary>, agentos_core::types::StorageError>
+    {
         Ok(None)
     }
     async fn update_run_summary(
@@ -239,7 +259,8 @@ impl StorageBackend for NullStorage {
     async fn list_run_summaries(
         &self,
         _limit: Option<usize>,
-    ) -> Result<Vec<agentos_core::types::PipelineRunSummary>, agentos_core::types::StorageError> {
+    ) -> Result<Vec<agentos_core::types::PipelineRunSummary>, agentos_core::types::StorageError>
+    {
         Ok(vec![])
     }
     async fn create_memory(
@@ -281,15 +302,13 @@ impl StorageBackend for NullStorage {
     async fn get_user_by_id(
         &self,
         _user_id: &str,
-    ) -> Result<Option<agentos_core::types::UserRecord>, agentos_core::types::StorageError>
-    {
+    ) -> Result<Option<agentos_core::types::UserRecord>, agentos_core::types::StorageError> {
         Ok(None)
     }
     async fn get_user_by_username(
         &self,
         _username: &str,
-    ) -> Result<Option<agentos_core::types::UserRecord>, agentos_core::types::StorageError>
-    {
+    ) -> Result<Option<agentos_core::types::UserRecord>, agentos_core::types::StorageError> {
         Ok(None)
     }
     async fn list_users(
@@ -303,10 +322,7 @@ impl StorageBackend for NullStorage {
     ) -> Result<(), agentos_core::types::StorageError> {
         Ok(())
     }
-    async fn delete_user(
-        &self,
-        _user_id: &str,
-    ) -> Result<bool, agentos_core::types::StorageError> {
+    async fn delete_user(&self, _user_id: &str) -> Result<bool, agentos_core::types::StorageError> {
         Ok(false)
     }
 }
@@ -321,11 +337,13 @@ fn make_three_body_config(exit_routes: Vec<Route>) -> PipelineConfig {
                 steps: vec![PipelineStep {
                     id: "init_s".into(),
                     steps: vec!["p_init".into()],
+                    when: None,
                     context: HashMap::new(),
                     routes: vec![],
                     loop_config: None,
                 }],
                 loop_config: None,
+                while_cond: None,
                 exit_routes,
                 run_on_error: false,
             },
@@ -334,6 +352,7 @@ fn make_three_body_config(exit_routes: Vec<Route>) -> PipelineConfig {
                 steps: vec![PipelineStep {
                     id: "main_s".into(),
                     steps: vec!["p_main".into()],
+                    when: None,
                     context: HashMap::new(),
                     routes: vec![],
                     loop_config: None,
@@ -342,6 +361,7 @@ fn make_three_body_config(exit_routes: Vec<Route>) -> PipelineConfig {
                     enabled: true,
                     max_iterations: 5,
                 }),
+                while_cond: None,
                 exit_routes: vec![],
                 run_on_error: false,
             },
@@ -350,11 +370,13 @@ fn make_three_body_config(exit_routes: Vec<Route>) -> PipelineConfig {
                 steps: vec![PipelineStep {
                     id: "exit_s".into(),
                     steps: vec!["p_exit".into()],
+                    when: None,
                     context: HashMap::new(),
                     routes: vec![],
                     loop_config: None,
                 }],
                 loop_config: None,
+                while_cond: None,
                 exit_routes: vec![],
                 run_on_error: true,
             },
@@ -407,7 +429,10 @@ async fn test_init_main_exit_sequential() {
     assert_eq!(seq[1], ("p_main".to_string(), "main".to_string()));
     assert_eq!(seq[2], ("p_exit".to_string(), "exit".to_string()));
     // ended 保持 true（exit 收尾不改写）；current_phase 停在 exit
-    assert_eq!(final_state.get("ended").and_then(|v| v.as_bool()), Some(true));
+    assert_eq!(
+        final_state.get("ended").and_then(|v| v.as_bool()),
+        Some(true)
+    );
     assert_eq!(
         final_state.get("current_phase").and_then(|v| v.as_str()),
         Some("exit")
@@ -456,10 +481,25 @@ async fn test_run_on_error_runs_exit_when_ended_at_start() {
         .await
         .expect("run ok");
 
-    assert_eq!(invoker.call_count("p_init"), 0, "init 非收尾体，ended 时跳过");
-    assert_eq!(invoker.call_count("p_main"), 0, "main 非收尾体，ended 时跳过");
-    assert_eq!(invoker.call_count("p_exit"), 1, "exit run_on_error 必须执行");
-    assert_eq!(final_state.get("ended").and_then(|v| v.as_bool()), Some(true));
+    assert_eq!(
+        invoker.call_count("p_init"),
+        0,
+        "init 非收尾体，ended 时跳过"
+    );
+    assert_eq!(
+        invoker.call_count("p_main"),
+        0,
+        "main 非收尾体，ended 时跳过"
+    );
+    assert_eq!(
+        invoker.call_count("p_exit"),
+        1,
+        "exit run_on_error 必须执行"
+    );
+    assert_eq!(
+        final_state.get("ended").and_then(|v| v.as_bool()),
+        Some(true)
+    );
 }
 
 /// 转移死循环防护：Phase 在 init 与 exit 间互跳 → run 报错而非死循环。
@@ -511,9 +551,5 @@ async fn test_phase_target_missing_errors() {
     let result = executor
         .run(&config, &StepLibrary::default(), json!({}))
         .await;
-    assert!(
-        result.is_err(),
-        "Phase 目标不存在应报错：{:?}",
-        result
-    );
+    assert!(result.is_err(), "Phase 目标不存在应报错：{:?}", result);
 }

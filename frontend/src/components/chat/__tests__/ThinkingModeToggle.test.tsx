@@ -1,3 +1,4 @@
+/** @feature FP-T12 前端适配 | @ci: frontend-test */
 /**
  * 功能测试：ThinkingModeToggle 思考强度四档选择器
  *

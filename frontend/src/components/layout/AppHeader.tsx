@@ -13,6 +13,7 @@
  */
 
 import { Menu, PanelRightIcon } from '@/assets/icons'
+import { ensureDefaultTaskPanel } from '@/services/workspacePanelOpener'
 import { useLayoutModeStore } from '@/stores/layoutModeStore'
 import { useSessionStore } from '@/stores/sessionStore'
 import { useUIStore } from '@/stores/uiStore'
@@ -63,13 +64,15 @@ export function AppHeader({ extraRight, onOpenWorkspaceView, isMobile = false }:
       : 'var(--ds-status-error, #F87171)'
   const connectionLabel = CONNECTION_LABEL[connectionStatus.state] ?? '未知状态'
 
-  /** 工作区入口：桌面切换显隐；移动端打开工作区全屏视图 */
+  /** 面板入口：桌面切换显隐；移动端打开面板全屏视图。
+   *  展开时确保默认「任务管理」标签存在（面板直接展示任务管理，非钉住可关闭）。 */
   const handleWorkspace = () => {
     if (isMobile && onOpenWorkspaceView) {
       onOpenWorkspaceView()
     } else {
       toggleWorkspace()
     }
+    ensureDefaultTaskPanel()
   }
 
   return (
@@ -120,8 +123,8 @@ export function AppHeader({ extraRight, onOpenWorkspaceView, isMobile = false }:
           type="button"
           onClick={handleWorkspace}
           className="text-muted-foreground hover:bg-accent hover:text-foreground touch-expand flex h-7 w-7 items-center justify-center rounded-md transition-colors"
-          title={isMobile ? '打开工作区' : workspaceCollapsed ? '显示工作区' : '隐藏工作区'}
-          aria-label="工作区"
+          title={isMobile ? '打开面板' : workspaceCollapsed ? '显示面板' : '隐藏面板'}
+          aria-label="面板"
           data-testid="titlebar-workspace"
         >
           <PanelRightIcon className="h-4 w-4" />

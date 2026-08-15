@@ -189,9 +189,8 @@ pub trait OutputPipelinePlugin: PipelinePlugin {
 /// - `sidecar`：通过 rmcp 客户端走 MCP 协议调用（进程隔离）
 /// - 两种路径对管道引擎透明——统一返回 `PluginResult`
 ///
-/// **ADR ⑧ 更新**：所有插件（含工具插件、系统插件）均支持 InProcess 和 Sidecar
-/// 两种执行路径。原"工具/系统插件推荐用 Python 边车"的措辞已废除。
-/// 由开发者根据性能需求自行选择，不因插件类型限制可选路径。
+/// 所有插件（含工具插件、系统插件）均支持 InProcess 和 Sidecar 两种执行路径
+/// （ADR ⑧），由开发者根据性能需求自行选择，不因插件类型限制可选路径。
 #[async_trait]
 pub trait PluginInvoker: Send + Sync {
     /// 调用管道插件执行。
@@ -226,7 +225,6 @@ pub trait PluginInvoker: Send + Sync {
     /// 强制卸载插件（热重载/崩溃恢复用）。
     ///
     /// 对 sidecar：kill 子进程 + 从客户端缓存移除，下次调用自动 respawn 加载最新代码。
-    /// 对 wasm：从模块缓存移除，下次调用重新编译加载。
     /// 对 cdylib：返回不支持错误（Windows dlclose 限制）。
     /// 默认实现返回 Ok（），供无此能力的实现（如 MockInvoker）不破坏编译。
     async fn force_unload(&self, _plugin_id: &str) -> Result<(), PluginError> {
@@ -240,6 +238,21 @@ pub trait PluginInvoker: Send + Sync {
     /// 默认实现返回空（无 discover 能力），供 MockInvoker 不破坏编译。
     async fn discover_new_plugins(&self) -> Result<Vec<PluginManifest>, PluginError> {
         Ok(Vec::new())
+    }
+
+    /// 拉取插件实际上报的工具清单（G2 双写一致性校验的"实际"侧）。
+    ///
+    /// sidecar：spawn/复用 MCP 连接 → `tools/list`，返回**原始 JSON**
+    /// （`{tools: [{name, description, inputSchema}]}`）——core 不依赖 invoker
+    /// 的具体类型，解析/对照由调用方用 `agentos_invoker::verify` 完成。
+    /// 若本次是新 spawn 的连接，校验后回收（kill）——安装期校验不破坏懒加载。
+    /// 默认实现返回不支持错误（无此能力 / 未实现 host），供 MockInvoker 不破坏编译。
+    async fn list_plugin_tools(&self, _plugin_id: &str) -> Result<serde_json::Value, PluginError> {
+        Err(PluginError {
+            message: "list_plugin_tools not supported by this invoker".into(),
+            code: None,
+            source: None,
+        })
     }
 }
 
@@ -255,6 +268,12 @@ pub enum LifecycleHook {
     OnPipelineStart,
     OnPipelineEnd,
     OnError,
+    /// 通用域事件通道（一次性枚举扩展点）：具体事件名放 [`HookContext`] 的
+    /// `event` 标签（如 "session.created" / "session.deleted" /
+    /// "session.active_changed"）。此后新增域事件类型不再改本枚举——发射点
+    /// 在内核锚点（或终局的 session_manager 插件内），订阅侧走 manifest
+    /// `capabilities.lifecycle_hooks` 既有注册制。
+    DomainEvent,
 }
 
 /// 生命周期钩子上下文（ADR ⑨ 标签化动态上下文）。
@@ -329,6 +348,40 @@ impl Default for HookContext {
 /// 1. **Tools**: 工具插件/系统插件提供的工具（供 LLM 选择和调用）
 /// 2. **Resources**: 插件暴露的数据源（MCP resources 机制）
 /// 3. **RouteSignals**: 管道插件声明的可能路由信号（供路由表校验）
+///
+/// 单条内核注册的 RAII 撤销句柄（M1 PluginScope + RegistrationGuard）。
+///
+/// 内核每个注册面（工具/资源/路由信号/HTTP 路由/hooks 订阅/widget 绑定…）在注册时
+/// 返回一个 guard，guard drop 即精确注销该条注册；guard 也可登记进 per-plugin 的
+/// PluginScope，插件禁用/卸载时一次性结构性收回（见 plugin-loader::registry）。
+///
+/// 撤销动作持弱引用语义（由构造方决定），注册表本身先行 drop 时 revoke 静默 no-op。
+pub struct RegistrationGuard {
+    revoke: Option<Box<dyn FnOnce() + Send + Sync>>,
+}
+
+impl RegistrationGuard {
+    /// 用撤销闭包构造 guard。闭包必须是幂等的（Drop 与显式 revoke 可能竞争重复调用）。
+    pub fn new(revoke: impl FnOnce() + Send + Sync + 'static) -> Self {
+        Self {
+            revoke: Some(Box::new(revoke)),
+        }
+    }
+
+    /// 放弃撤销（注册所有权转交他人、或内核停机整体清算时避免逐条重复注销）。
+    pub fn disarm(mut self) {
+        self.revoke = None;
+    }
+}
+
+impl Drop for RegistrationGuard {
+    fn drop(&mut self) {
+        if let Some(revoke) = self.revoke.take() {
+            revoke();
+        }
+    }
+}
+
 #[async_trait]
 pub trait CapabilityRegistry: Send + Sync {
     /// 注册插件提供的工具。
@@ -399,6 +452,12 @@ pub struct ToolDescriptor {
     /// 透传的 UI 声明（如 `chat_card`），由 manifest `capabilities.tools[].ui` 提供。
     #[serde(skip_serializing_if = "Option::is_none")]
     pub ui: Option<serde_json::Value>,
+    /// 渲染意图声明（对齐 DSH ToolResultView 词汇表）：`{card: "terminal"|"diff"|
+    /// "read"|"web"|"search"|"generic", ...绑定}`。工具结果按此路由到前端渲染
+    /// 组件；未声明时回退现有 chat_card/推理级联。由 manifest
+    /// `capabilities.tools[].render` 提供（task_dsh_plugin_adapter 任务 1）。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub render: Option<serde_json::Value>,
 }
 
 /// Resource 描述符（对内表示）。
@@ -770,12 +829,14 @@ pub struct PluginManifest {
     /// 指定的 C-ABI 符号（默认 `plugin_execute`）。仅 host_type==InProcess 时有意义。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub native: Option<NativeArtifact>,
-    /// WASM 插件产物（task_11：HostType::Wasm 必填）。
+    /// 能力信封（G6/G3：全轨统一授权面）。
     ///
-    /// 指向 `.wasm` 文件 + host 能力白名单。loader 用 wasmtime 加载执行。
-    /// 仅 host_type==Wasm 时有意义。
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub wasm: Option<WasmArtifact>,
+    /// 插件经反向 capability 调用内核时可调用的能力白名单
+    /// （如 `["config-reader", "tool-executor"]`）。空 = 未声明，
+    /// 按向后兼容默认全授予（存量插件零迁移）；一旦声明非空即白名单制，
+    /// 越权调用在 CapabilityRouter 分发前单点拒绝（G6）。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub granted_capabilities: Vec<String>,
     /// 内容懒加载声明（ADR ⑦）。
     ///
     /// 声明插件需要多少条最近消息的完整内容。
@@ -1030,8 +1091,17 @@ pub struct HttpHandleRequest {
     pub raw_body: String,
     /// 全量原始 headers（key → value，多值用逗号拼接或取首个）。
     pub headers: HashMap<String, String>,
-    /// 查询参数（key → value）。
+    /// 查询参数（key → value，单值 last-wins 形态；兼容旧插件的 `query.get(k)` 消费）。
     pub query: HashMap<String, String>,
+    /// 查询参数多值形态（key → 全量 value 列表，保持出现顺序）。
+    ///
+    /// 多值语义：重复 key（如 `filter=a&filter=b`）的全量值经本字段透传给插件；
+    /// 单值 `query` 为 last-wins 投影（`query[k] == query_multi[k].last()`）。
+    ///
+    /// 向后兼容：`#[serde(default)]`——旧序列化负载（无此字段）反序列化得空 map；
+    /// SDK 侧按 handler 签名过滤 kwargs，不声明本字段的插件不受影响。
+    #[serde(default)]
+    pub query_multi: HashMap<String, Vec<String>>,
 }
 
 /// HTTP 端点出站响应（插件 → HTTP 响应，ADR 附录 E.1.2）。
@@ -1070,7 +1140,10 @@ fn default_priority() -> u32 {
 /// 由开发者根据性能需求自行选择，不因插件类型限制可选路径：
 /// - `InProcess`：Rust 原生 cdylib 进程内调用（libloading + C-ABI），零 IPC 开销，适合高频热路径
 /// - `Sidecar`：独立进程通过 MCP 协议通信，进程隔离，适合低频或第三方（Python）插件
-/// - `Wasm`：WASM 插件经 wasmtime 沙箱执行，跨语言 + 热重载 + 沙箱隔离
+///
+/// （`wasm` 轨已关闭——见
+/// `docs/decisions/2026-08-15-plugin-two-track-and-cordis-mechanisms.md` §八.1；
+/// 决策标注可逆，wasm 是 S1 受阻时的回退位。）
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum HostType {
@@ -1079,8 +1152,6 @@ pub enum HostType {
     /// 独立进程通过 MCP 协议通信
     #[default]
     Sidecar,
-    /// WASM 插件经 wasmtime 沙箱执行（task_11 新增）
-    Wasm,
 }
 
 /// 原生插件产物描述（task_11：HostType::InProcess 的 manifest 字段）。
@@ -1095,38 +1166,37 @@ pub struct NativeArtifact {
     pub artifact: String,
 }
 
-/// WASM 插件产物描述（task_11：HostType::Wasm 的 manifest 字段）。
-///
-/// `artifact` 指向 `.wasm` 文件（wasm32-wasip2 或 core wasm），
-/// `granted_capabilities` 是插件被授予的 host 能力白名单（如 `["host.log"]`），
-/// 越权调用会被内核拒绝（N9）。
-///
-/// 完整 WIT 组件模型工具链（wit-bindgen）集成待 PoC（计划文档 §八 #1），
-/// 当前采用"JSON 经 WASM 线性内存传递"的简化契约，`wit_interface` 字段保留但可选。
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
-pub struct WasmArtifact {
-    /// `.wasm` 文件名（相对插件目录）。
-    pub artifact: String,
-    /// WIT 接口文件名（可选，完整 WIT 待工具链 PoC）。
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub wit_interface: Option<String>,
-    /// 授予插件的 host 能力白名单（如 `["host.log", "host.record_metric"]`）。
-    /// 越权调用被内核拒绝（N9）。
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub granted_capabilities: Vec<String>,
-}
-
 /// Manifest 能力声明（运行时表示）。
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ManifestCapabilities {
+    /// 给 LLM 的工具声明——**声明即注册**（D.6 槽位拆分）：
+    /// 不按 plugin_type 门控，任何类型插件声明 tools 即进
+    /// CapabilityRegistry 暴露给 LLM 面。多职能插件
+    /// （system 适配器等）自然成立：声明 tools + services 两块即可。
     #[serde(default)]
     pub tools: Vec<ToolCapability>,
+    /// 内核/插件间服务方法声明（D.6 槽位拆分）：不进 LLM 面；
+    /// 调用走既有通道——invoke_entry（管道）、
+    /// http_endpoints（面板）、tool-executor 显式 plugin_id（跨插件）、
+    /// provides 命名空间。wire 协议不变（仍是 MCP tools/call，ADR D.3）。
+    #[serde(default)]
+    pub services: Vec<ServiceCapability>,
     #[serde(default)]
     pub resources: Vec<ResourceCapability>,
     #[serde(default)]
     pub route_signals: Vec<RouteType>,
     #[serde(default)]
     pub lifecycle_hooks: Vec<LifecycleHook>,
+}
+
+/// 服务方法声明（D.6 槽位拆分）。结构是 ToolCapability 的子集（迁移期
+/// manifest 条目只搬 name/description），语义是"内部服务入口"——不注册
+/// 进 LLM 面。serde 宽松：多余字段忽略，迁移期条目原样可解析。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ServiceCapability {
+    pub name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
 }
 
 /// 配置文件映射项（ADR §4.2/§4.3 `config_files[]`）。
@@ -1162,6 +1232,11 @@ pub struct ToolCapability {
     /// 透传的 UI 声明（如 `chat_card`），原样出口到 ToolDescriptor。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ui: Option<serde_json::Value>,
+    /// 渲染意图声明（DSH ToolResultView 词汇表：card=terminal/diff/read/web/
+    /// search/generic + 字段绑定），原样出口到 ToolDescriptor，供前端按意图
+    /// 路由渲染（task_dsh_plugin_adapter 任务 1）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub render: Option<serde_json::Value>,
 }
 
 /// Resource 能力声明。
@@ -1365,7 +1440,6 @@ pub trait StorageBackend: Send + Sync {
     /// 获取运行实例记录。
     async fn get_run(&self, run_id: &str) -> Result<RunRecord, StorageError>;
 
-
     /// 按 pipeline_id 查询历史消息（消息层自治查询主键）。
     ///
     /// 两域解耦：消息层只按 pipeline_id 查询，不关心会话（thread）归属。
@@ -1376,7 +1450,6 @@ pub trait StorageBackend: Send + Sync {
         pipeline_id: &str,
         opts: MessageQueryOpts,
     ) -> Result<Vec<MessageRecord>, StorageError>;
-
 
     /// 获取指定 blob_id 的原始数据。
     async fn get_blob(&self, blob_id: &str) -> Result<Vec<u8>, StorageError>;
@@ -1404,13 +1477,11 @@ pub trait StorageBackend: Send + Sync {
         tenant_id: &str,
     ) -> Result<(), StorageError>;
 
-
     /// 存储不可变原始数据到 blobs 表（内容寻址去重，blob_id = SHA256）。
     /// 返回 blob_id 供 messages 表引用。
     async fn store_blob(&self, data: &[u8], mime_type: &str) -> Result<String, StorageError>;
 
     // ── 域10：分层持久化投影（messages 增量对齐 + 标量快照 + checkpoint）────
-
 
     /// 应用身份/seq 感知的 messages ops 到 message_slots 表（op-based 新模型单写入器）。
     /// 引擎把插件 emit 的 `set/insert` op 落表（与 `apply_slot_ops_to_array` 落内存是同一组 op）。
@@ -1529,10 +1600,7 @@ pub trait StorageBackend: Send + Sync {
 
     /// 追加一条执行记录（composite key `(record_id, sequence)`）。
     /// 对齐 0.1 `ExecutionRecordStorage.save(record)`。幂等：同 (record_id, sequence) 覆盖。
-    async fn append_execution_record(
-        &self,
-        record: &ExecutionRecord,
-    ) -> Result<(), StorageError>;
+    async fn append_execution_record(&self, record: &ExecutionRecord) -> Result<(), StorageError>;
 
     /// 按 pipeline_run_id 游标分页查询执行记录（对齐 0.1 `list_by_pipeline`）。
     /// opts 复用 MessageQueryOpts（before_sequence/after_sequence/limit）。
@@ -1543,8 +1611,7 @@ pub trait StorageBackend: Send + Sync {
     ) -> Result<Vec<ExecutionRecord>, StorageError>;
 
     /// 统计某 pipeline_run_id 的记录数（对齐 0.1 `count_by_session`）。
-    async fn count_execution_records(&self, pipeline_run_id: &str)
-        -> Result<u64, StorageError>;
+    async fn count_execution_records(&self, pipeline_run_id: &str) -> Result<u64, StorageError>;
 
     /// 删除某 pipeline_run_id 的全部执行记录（对齐 0.1 `delete_by_session`）。
     /// 返回删除条数；无记录返回 0（幂等）。
@@ -1556,8 +1623,7 @@ pub trait StorageBackend: Send + Sync {
     // ── 域4：pipeline_run_summaries（对齐 0.1 PipelineRunSummary）──────
 
     /// upsert 管道运行汇总（存在则替换，对齐 0.1 `save_summary`）。
-    async fn save_run_summary(&self, summary: &PipelineRunSummary)
-        -> Result<(), StorageError>;
+    async fn save_run_summary(&self, summary: &PipelineRunSummary) -> Result<(), StorageError>;
 
     /// 取单个汇总（对齐 0.1 `get_summary`）。
     async fn get_run_summary(
@@ -1644,4 +1710,3 @@ pub struct SessionListFilter {
     /// 最多返回条数
     pub limit: Option<usize>,
 }
-

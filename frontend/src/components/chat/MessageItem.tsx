@@ -30,6 +30,7 @@ import { safeParseResult } from '@/utils/toolCardRegistry'
 import useMessageRender from './hooks/useMessageRender'
 import { MessageActions } from './MessageActions'
 import MessageContentRenderer from './MessageContentRenderer'
+import { parseReferenceMessage, ReferenceChip } from './ReferenceChip'
 import type { MessageItemProps } from './types'
 
 /** 消息编辑组件 */
@@ -411,6 +412,27 @@ export const MessageItem = memo(function MessageItem({
               )
 
               if (isUser) {
+                // 插件注入的 Godot 引用消息（<reference source="godot">）：渲染为引用卡片行而非普通气泡
+                const refParsed = parseReferenceMessage(renderContext.displayContent || message.content)
+                if (refParsed && refParsed.items.length > 0) {
+                  return (
+                    <div
+                      className="flex w-full flex-wrap items-center gap-2 py-0.5"
+                      data-role="reference"
+                      data-reference-source={refParsed.source}
+                    >
+                      <span className="text-muted-foreground shrink-0 text-[11px]">
+                        Godot 引用{refParsed.scene ? ` · ${refParsed.scene}` : ''}
+                      </span>
+                      {refParsed.items.map((it) => (
+                        <ReferenceChip
+                          key={it.path}
+                          data={{ kind: 'godot-node', title: it.name, subtitle: `${it.type} @ ${it.path}` }}
+                        />
+                      ))}
+                    </div>
+                  )
+                }
                 const userContent = renderContext.displayContent || message.content
                 const userAttachments = message.attachments || []
                 // 兼容两种字段命名：前端 Attachment.type 和后端持久化的 mime_type
@@ -486,14 +508,23 @@ export const MessageItem = memo(function MessageItem({
               const _rawFallback = renderContext.displayContent || message.content
               const _displayFallback = _rawFallback?.trim() ? _rawFallback : ''
 
-              if (!isMessageStreaming && renderContext.fragments.length === 0 && !_displayFallback) {
+              // 挂起等待用户交互的 assistant 消息（工具阻塞中、无文本输出）不能整块隐藏：
+              // 否则只剩头像/时间戳的空气泡，用户看不到"agent 正在等我审批"。
+              const _waitingInteraction = isAssistant && hasPendingInteraction
+
+              if (
+                !isMessageStreaming &&
+                renderContext.fragments.length === 0 &&
+                !_displayFallback &&
+                !_waitingInteraction
+              ) {
                 return null
               }
 
               return (
                 <div className={bubbleCls} style={bubbleStyle}>
                   {renderContext.fragments.length === 0 ? (
-                    isMessageStreaming ? (
+                    isMessageStreaming || _waitingInteraction ? (
                       <div className="flex items-center gap-2">
                         {hasPendingInteraction ? (
                           <>

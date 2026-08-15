@@ -33,7 +33,7 @@ fn manifest_with_ui(
         mcp: None,
         lifecycle: None,
         native: None,
-        wasm: None,
+        granted_capabilities: vec![],
         requires_content: None,
         invoke_entry: None,
         config_files: vec![],
@@ -74,7 +74,11 @@ async fn schema_aggregates_ui_schema_for_system_plugin() {
     let ui = json!({
         "widgets": [{"type": "status_bar", "id": "approval_status"}],
     });
-    let manifests = vec![manifest_with_ui("approval", PluginType::System, Some(ui.clone()))];
+    let manifests = vec![manifest_with_ui(
+        "approval",
+        PluginType::System,
+        Some(ui.clone()),
+    )];
     let schema = fetch_schema(manifests).await;
 
     let agents = schema["agents"].as_array().unwrap();

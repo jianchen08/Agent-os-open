@@ -80,14 +80,7 @@ impl MetricsStore {
             for sample in &s.samples {
                 conn.execute(
                     sql,
-                    rusqlite::params![
-                        s.plugin_id,
-                        s.name,
-                        lh,
-                        sample.ts,
-                        sample.value,
-                        typ,
-                    ],
+                    rusqlite::params![s.plugin_id, s.name, lh, sample.ts, sample.value, typ,],
                 )?;
                 count += 1;
             }
@@ -110,16 +103,13 @@ impl MetricsStore {
              WHERE plugin_id = ?1 AND name = ?2 AND bucket_ts >= ?3 AND bucket_ts <= ?4 \
              ORDER BY bucket_ts ASC",
         )?;
-        let rows = stmt.query_map(
-            rusqlite::params![plugin_id, name, from_ts, to_ts],
-            |row| {
-                Ok(HistorySample {
-                    ts: row.get(0)?,
-                    value: row.get(1)?,
-                    metric_type: row.get(2)?,
-                })
-            },
-        )?;
+        let rows = stmt.query_map(rusqlite::params![plugin_id, name, from_ts, to_ts], |row| {
+            Ok(HistorySample {
+                ts: row.get(0)?,
+                value: row.get(1)?,
+                metric_type: row.get(2)?,
+            })
+        })?;
         let mut out = Vec::new();
         for r in rows {
             out.push(r?);
@@ -159,10 +149,15 @@ impl HistorySample {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use super::super::aggregator::{labels_hash, Labels, MetricType, Sample};
+    use super::*;
 
-    fn make_view(plugin: &str, name: &str, typ: MetricType, samples: Vec<(i64, f64)>) -> MetricSeriesView {
+    fn make_view(
+        plugin: &str,
+        name: &str,
+        typ: MetricType,
+        samples: Vec<(i64, f64)>,
+    ) -> MetricSeriesView {
         MetricSeriesView {
             plugin_id: plugin.to_string(),
             name: name.to_string(),

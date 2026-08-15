@@ -38,7 +38,6 @@ async fn admin_token(app: &axum::Router) -> String {
     v["access_token"].as_str().unwrap().to_string()
 }
 
-
 /// 在临时项目根构造 config/agents/main/<id>.yaml 的测试环境。
 fn state_with_agent(id: &str, yaml_content: &str) -> (tempfile::TempDir, AppState) {
     let tmp = tempfile::tempdir().unwrap();
@@ -55,7 +54,7 @@ fn state_with_agent(id: &str, yaml_content: &str) -> (tempfile::TempDir, AppStat
 #[tokio::test]
 async fn test_agent_schema_returns_fields_array() {
     let app = build_router(AppState::new());
-    let token = admin_token(&app).await;
+    let _token = admin_token(&app).await; // schema 端点无鉴权；token 仅保留下行改动空间
     let response = app
         .oneshot(
             Request::builder()
@@ -75,10 +74,7 @@ async fn test_agent_schema_returns_fields_array() {
     assert!(!fields.is_empty(), "fields 不应为空");
 
     // 关键字段存在
-    let names: Vec<&str> = fields
-        .iter()
-        .filter_map(|f| f["name"].as_str())
-        .collect();
+    let names: Vec<&str> = fields.iter().filter_map(|f| f["name"].as_str()).collect();
     assert!(names.contains(&"config_id"), "缺少 config_id: {names:?}");
     assert!(names.contains(&"name"), "缺少 name: {names:?}");
     assert!(names.contains(&"agent_type"), "缺少 agent_type: {names:?}");
@@ -128,8 +124,14 @@ async fn test_get_agent_config_returns_yaml() {
     let json: Value = serde_json::from_slice(&body).unwrap();
     assert_eq!(json["config_id"], "test_agent");
     let yaml_back = json["yaml"].as_str().expect("应返回 yaml 字符串");
-    assert!(yaml_back.contains("name: 测试Agent"), "yaml 内容不符: {yaml_back}");
-    assert!(yaml_back.contains("agent_type: main"), "yaml 内容不符: {yaml_back}");
+    assert!(
+        yaml_back.contains("name: 测试Agent"),
+        "yaml 内容不符: {yaml_back}"
+    );
+    assert!(
+        yaml_back.contains("agent_type: main"),
+        "yaml 内容不符: {yaml_back}"
+    );
 }
 
 /// GET /api/v1/agents/{id}/config 对不存在的 id 返回 404。
@@ -178,9 +180,14 @@ async fn test_put_agent_config_then_get_reads_back_new_content() {
     assert_eq!(response.status(), StatusCode::OK, "PUT 应成功");
 
     // 磁盘文件已更新
-    let disk =
-        fs::read_to_string(state.project_root.as_ref().unwrap().join("config/agents/main/round_trip_agent.yaml"))
-            .unwrap();
+    let disk = fs::read_to_string(
+        state
+            .project_root
+            .as_ref()
+            .unwrap()
+            .join("config/agents/main/round_trip_agent.yaml"),
+    )
+    .unwrap();
     assert!(disk.contains("新名"), "磁盘文件应写入新内容: {disk}");
     assert!(disk.contains("level: L2"), "磁盘文件应写入新内容: {disk}");
 
@@ -211,8 +218,9 @@ async fn test_put_agent_config_creates_backup() {
     let original = "config_id: backup_agent\nname: 备份前\n";
     let (tmp, state) = state_with_agent("backup_agent", original);
 
-    let put_body = serde_json::to_string(&json!({ "yaml": "config_id: backup_agent\nname: 备份后\n" }))
-        .unwrap();
+    let put_body =
+        serde_json::to_string(&json!({ "yaml": "config_id: backup_agent\nname: 备份后\n" }))
+            .unwrap();
     let app = build_router(state);
     let token = admin_token(&app).await;
     let response = app
@@ -230,9 +238,7 @@ async fn test_put_agent_config_creates_backup() {
     assert_eq!(response.status(), StatusCode::OK);
 
     // 备份文件存在(同目录 .bak 后缀),内容为原内容
-    let backup = tmp
-        .path()
-        .join("config/agents/main/backup_agent.yaml.bak");
+    let backup = tmp.path().join("config/agents/main/backup_agent.yaml.bak");
     assert!(backup.is_file(), "备份文件应存在: {}", backup.display());
     let backup_content = fs::read_to_string(&backup).unwrap();
     assert_eq!(backup_content, original, "备份内容应为原内容");

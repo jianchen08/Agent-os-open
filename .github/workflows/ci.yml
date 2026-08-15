@@ -1,23 +1,28 @@
 # ============================================================
-# CI/CD 流水线 — 灵汐 AgentOS 0.2（Rust + Python 混合）
+# CI/CD 流水线 — 灵汐 AgentOS 0.2（Rust + Python + 前端 + Electron）
 # ============================================================
 #
-# 流程：代码提交 → Rust Lint → Rust Build → Rust Test → Python Lint → Python Test
+# 机械门禁原则（DSH quality-gates 适配，见 docs/working/机械门禁统一入口与覆盖率豁免.md）：
+#   - 每个可机械检查的承诺都有非零退出命令；命令统一在
+#     scripts/run_gates.py 定义一次，CI job 与本地调用同一入口（--filter），
+#     不存在第二套口径。
+#   - 覆盖率豁免重型套件：插件测试拆两个并行 job——python-coverage（插桩，
+#     fail-under=50 阈值自动守护豁免名单）+ python-heavy-suites（免插桩跑
+#     94 插件子进程冒烟矩阵，正确性信号不缩水）。名单单点：
+#     scripts/coverage_exempt.py。
+#
+# 流程：push/PR → Rust Lint → Rust Build → Rust Test / Rust Coverage
+#        → SDK Lint → SDK Test → Python Coverage（插桩）/ Python Heavy（免插桩）
+#        → Timing → Frontend Test/E2E → Electron Compile
+#        → Pre-commit / TDD / Traceability → Python E2E（内核+LLM）
 #
 # 触发条件：
-#   - push 到 main / dev/* 分支（实际开发分支是 dev/0.2；此前误写 develop，
-#     远端不存在该分支 → CI 从未在开发分支上触发）
+#   - push 到 main / dev/* 分支（实际开发分支是 dev/0.2）
 #   - Pull Request 到 main / dev/* 分支
 #
 # 缓存策略：
 #   - Swatinem/rust-cache 跨 job 共享（shared-key: agentos-0.2）
 #   - sccache 加速 Rust 编译（RUSTC_WRAPPER）
-#
-# 产出物：
-#   - Rust 编译产物（debug + release）
-#   - Rust 测试报告
-#   - Python lint 报告
-#   - Python 测试报告
 # ============================================================
 
 name: CI
@@ -37,6 +42,8 @@ env:
   RUST_BACKTRACE: 1
   RUSTC_WRAPPER: sccache
   SCCACHE_DIR: /home/runner/.cache/sccache
+  # 门禁输出全量打印（基线锁计数等便于排查）
+  AGENTOS_GATE_VERBOSE: "1"
 
 jobs:
   # ── Rust Lint ──────────────────────────────────────────────
@@ -57,11 +64,14 @@ jobs:
       - name: Install sccache
         run: cargo install sccache || true
 
-      - name: Cargo fmt check
-        run: cargo fmt --all -- --check
+      - name: Set up Python (gate runner)
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
 
-      - name: Cargo clippy
-        run: cargo clippy --all-targets -- -D warnings
+      - name: Run gates (kernel-fmt, kernel-clippy)
+        working-directory: ${{ github.workspace }}
+        run: python scripts/run_gates.py --filter kernel-fmt,kernel-clippy
 
       - name: Cache Rust artifacts
         uses: Swatinem/rust-cache@v2
@@ -74,17 +84,24 @@ jobs:
     name: Rust Build
     runs-on: ubuntu-latest
     needs: rust-lint
-    defaults:
-      run:
-        working-directory: kernel
     steps:
       - uses: actions/checkout@v4
 
       - name: Install Rust toolchain
         run: rustup show
+        working-directory: kernel
 
       - name: Install sccache
         run: cargo install sccache || true
+        working-directory: kernel
+
+      - name: Set up Python (gate runner)
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Run gates (kernel-build, kernel-build-release)
+        run: python scripts/run_gates.py --filter kernel-build,kernel-build-release
 
       - name: Cache Rust artifacts
         uses: Swatinem/rust-cache@v2
@@ -92,28 +109,36 @@ jobs:
           workspaces: kernel
           shared-key: agentos-0.2
 
-      - name: Build (debug)
-        run: cargo build --verbose
-
-      - name: Build (release)
-        run: cargo build --release --verbose
-
-  # ── Rust Test ──────────────────────────────────────────────
+  # ── Rust Test ─────────────────────────────────────────────
+  # 覆盖全插件热加载单测（invoker 的指纹/TTL/force_unload 单测在 agentos-invoker crate 内）：
+  #   test_compute_plugin_fingerprint_stable_for_unchanged_dir
+  #   test_compute_plugin_fingerprint_changes_on_file_edit
+  #   test_is_plugin_stale_ttl_short_circuits
+  #   test_force_unload_via_trait_method
+  # 这些单测零外部依赖（不启 kernel/LLM），适合 CI。
+  # 失败数走基线锁（.github/rust-test-baseline.txt，只许减不许增）。
   rust-test:
     name: Rust Test
     runs-on: ubuntu-latest
     needs: rust-build
-    defaults:
-      run:
-        working-directory: kernel
     steps:
       - uses: actions/checkout@v4
 
       - name: Install Rust toolchain
         run: rustup show
+        working-directory: kernel
 
       - name: Install sccache
         run: cargo install sccache || true
+        working-directory: kernel
+
+      - name: Set up Python (gate runner)
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Run gates (kernel-test + 失败数基线锁)
+        run: python scripts/run_gates.py --filter kernel-test
 
       - name: Cache Rust artifacts
         uses: Swatinem/rust-cache@v2
@@ -121,56 +146,40 @@ jobs:
           workspaces: kernel
           shared-key: agentos-0.2
 
-      - name: Run tests (with baseline lock)
-        # 覆盖全插件热加载单测（invoker 的指纹/TTL/force_unload 单测在 agentos-invoker crate 内）：
-        #   test_compute_plugin_fingerprint_stable_for_unchanged_dir
-        #   test_compute_plugin_fingerprint_changes_on_file_edit
-        #   test_is_plugin_stale_ttl_short_circuits
-        #   test_force_unload_via_trait_method
-        # 这些单测零外部依赖（不启 kernel/LLM），适合 CI。
-        # 失败数走基线锁（.github/rust-test-baseline.txt，只许减不许增），
-        # 与 Python test-batch-baseline 同构。
-        run: |
-          cargo test --all 2>&1 | tee /tmp/rust_test_output.txt
-          # 基线锁复用上方已 tee 的输出（--from-file），不重复跑 cargo test（N4 修复）。
-          python ../scripts/check_rust_test_baseline.py --from-file /tmp/rust_test_output.txt
-
-  # ── Rust Coverage（阶段 2.3：line% 基线锁）──────────────────────────────
+  # ── Rust Coverage（line% 基线锁，只升不降）──────────────────────────────
   # cargo-llvm-cov 产出 lcov，check_rust_coverage_baseline.py 解析 line% 对照
-  # .github/rust-coverage-baseline.txt（只升不降）。
-  # invoker 的 native cdylib 插桩 STATUS_ACCESS_VIOLATION 用 --ignore-run-fail 容错；
-  # integration-tests 的 /tmp mock + 跨平台噪音用 --exclude 排除。
+  # .github/rust-coverage-baseline.txt。与 kernel-test 分离 = 天然双 gate 形态
+  # （测试免插桩快跑 / 覆盖率插桩单独量）。invoker 的 native cdylib 插桩
+  # STATUS_ACCESS_VIOLATION 用 --ignore-run-fail 容错；integration-tests 的
+  # /tmp mock + 跨平台噪音用 --exclude 排除。
   rust-coverage:
     name: Rust Coverage (llvm-cov line% 基线锁)
     runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: kernel
     steps:
       - uses: actions/checkout@v4
 
       - name: Install Rust toolchain
         run: rustup show
+        working-directory: kernel
 
       - name: Install cargo-llvm-cov
         uses: taiki-e/install-action@v2
         with:
           tool: cargo-llvm-cov
 
+      - name: Set up Python (gate runner)
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Run gates (kernel-coverage)
+        run: python scripts/run_gates.py --filter kernel-coverage
+
       - name: Cache Rust artifacts
         uses: Swatinem/rust-cache@v2
         with:
           workspaces: kernel
           shared-key: agentos-0.2
-
-      - name: Generate coverage (lcov)
-        run: |
-          cargo llvm-cov --workspace --exclude agentos-integration-tests \
-            --lcov --output-path coverage.lcov --ignore-run-fail
-
-      - name: Coverage baseline gate (line% 只升不降)
-        working-directory: ${{ github.workspace }}
-        run: python scripts/check_rust_coverage_baseline.py --lcov kernel/coverage.lcov
 
   # ── E2E Manual（手动触发占位，不跑测试）─────────────────────────────────
   # 注意：本 job 是 workflow_dispatch 占位——**不执行任何测试**，仅打印手动/本地
@@ -198,13 +207,13 @@ jobs:
           echo "核心热加载逻辑已由 rust-test job 的单测覆盖（零 LLM 依赖）。"
 
 
-  # ── Python Lint ────────────────────────────────────────────
+  # ── Python Lint（插件 SDK）─────────────────────────────────
+  # 注：sdk-mypy 的路径参数由 run_gates.py 统一持有（cwd=plugins/sdk 下
+  # mypy src/agentos_plugin_sdk）；此前 ci.yml 在 plugins/sdk 目录下误写
+  # 相对路径 plugins/sdk/src/...（解析到不存在的嵌套路径），本次重构修正。
   python-lint:
-    name: Python Lint (ruff + mypy)
+    name: Python Lint (SDK ruff + mypy)
     runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: plugins/sdk
     steps:
       - uses: actions/checkout@v4
 
@@ -218,20 +227,14 @@ jobs:
           python -m pip install --upgrade pip
           pip install "ruff>=0.5" "mypy>=1.10"
 
-      - name: Ruff check
-        run: ruff check .
+      - name: Run gates (sdk-lint, sdk-mypy)
+        run: python scripts/run_gates.py --filter sdk-lint,sdk-mypy
 
-      - name: Mypy check
-        run: mypy plugins/sdk/src/agentos_plugin_sdk
-
-  # ── Python Test ────────────────────────────────────────────
+  # ── Python Test（插件 SDK）─────────────────────────────────
   python-test:
-    name: Python Test (pytest)
+    name: Python Test (SDK pytest)
     runs-on: ubuntu-latest
     needs: python-lint
-    defaults:
-      run:
-        working-directory: plugins/sdk
     steps:
       - uses: actions/checkout@v4
 
@@ -241,28 +244,28 @@ jobs:
           python-version: "3.11"
 
       - name: Install dependencies
+        working-directory: plugins/sdk
         run: |
           python -m pip install --upgrade pip
           pip install -e ".[dev]"
 
-      - name: Run tests
-        run: pytest -v
+      - name: Run gates (sdk-test)
+        run: python scripts/run_gates.py --filter sdk-test
 
-  # ── Python Plugins Test（插件体系 + 全插件 E2E 冒烟矩阵 + tests/ 顶层有价值测试）──
-  # 覆盖：
+  # ── Python Coverage（插桩 gate：插件测试 + 覆盖率阈值 + mypy 基线锁）──
+  # 覆盖（豁免名单之外的全部）：
   #   1. 全部插件测试（system/tools/pipeline 目录下的 test_*.py）
-  #   2. tests/plugins/ 冒烟矩阵：94 个插件（85 sidecar + 8 external_mcp + 1 native）
-  #      逐个以子进程 sidecar 方式加载、注册校验、生命周期触发、精选工具真实执行
-  #      （见 tests/plugins/plugin_probe.py）
-  #   3. MCP 服务（bing-search/demo-tools/llm-sidecar）与 skills 清单校验
-  #   4. tests/suites/ 插件单元测试矩阵（plugins + m6_plugins：路径修复 + 接口同步）
-  #   5. tests/ 顶层有价值回归/安全/时序测试（P0 回归、isolation、security_check、
-  #      llm_timeout、track 契约、process_watchdog）——此前未进 CI，现纳入。
-  # marker 过滤：排除需要真实外部服务（API/Redis/DB/bwrap）的测试；manual/ 已由
-  # tests/conftest.py collect_ignore 排除（手动脚本，非 CI）。
-  # PYTHONPATH 与本地开发一致：plugins（插件）+ sdk（SDK 源码）
-  python-plugins-test:
-    name: Python Plugins Test (pytest)
+  #   2. tests/suites/ 插件单元测试矩阵（plugins + m6_plugins：路径修复 + 接口同步）
+  #   3. MCP 服务与 skills 清单校验、tests/channels/、tests/ 顶层回归/安全/时序外的
+  #      有价值测试（P0 回归、isolation、security_check、track 契约、process_watchdog）
+  # 豁免（scripts/coverage_exempt.py 单一名单点）：
+  #   tests/plugins/test_plugin_smoke_matrix.py——94 插件子进程冒烟矩阵，
+  #   子进程加载的插件代码父进程 coverage 测不到，插桩纯缴税；
+  #   由 python-heavy-suites job 免插桩并排执行，正确性信号不缩水。
+  # 阈值守护：fail-under=50 会自动验证豁免名单正确性——若豁免套件实际
+  # 独家贡献了覆盖率，本 job 当场红（misconfiguration fails loud）。
+  python-coverage:
+    name: Python Coverage (插桩 + fail-under=50 + mypy 基线)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -281,65 +284,57 @@ jobs:
       - name: Sync dependencies from uv.lock (frozen, reproducible)
         # 从 uv.lock 安装根项目依赖（全量锁定、可复现构建），不再 pip 在线解析。
         # 注：plugins/sdk 是独立包（自身无锁文件、其依赖 mcp 未纳入根 uv.lock），
-        # 故单独 editable 安装以补齐 SDK 源码与其依赖；根依赖（123 包）均由锁文件锁定。
+        # 故单独 editable 安装以补齐 SDK 源码与其依赖；根依赖均由锁文件锁定。
         run: |
           uv sync --frozen --extra dev
           uv pip install -e ./plugins/sdk
 
-      - name: Run plugin tests + E2E smoke matrix + suite tests + tests/ 顶层回归
-        env:
-          # 0.2 架构：插件运行时依赖 plugins（平铺模块）+ SDK 源码，不再需要 src/
-          PYTHONPATH: ${{ github.workspace }}/plugins:${{ github.workspace }}/plugins/sdk/src
+      # 门禁：plugins-coverage-pairing（名单配对校验，瞬时）
+      #     + plugins-coverage（插桩：pytest || true 经 tee 捕获 → 失败数基线锁
+      #       .github/pytest-failure-baseline.txt 只减不增 → coverage report
+      #       --fail-under=44 地板（独立执行不被 || true 吞掉；44 为 2026-08-15
+      #       dev/0.2 实测，只升不降棘轮至 50→80%；coverage.xml 供矩阵回填消费））
+      #     + plugins-mypy-baseline（plugins/shared mypy 只减不增，
+      #       基线 .github/mypy-baseline.txt；uv run 保证与本地计数口径一致）
+      - name: Run gates (pairing + coverage + mypy baseline)
+        run: python scripts/run_gates.py --filter plugins-coverage-pairing,plugins-coverage,plugins-mypy-baseline
+
+  # ── Python Heavy Suites（免插桩 gate：重型套件并排执行）────────────────
+  # 与 python-coverage 并行（无 needs 依赖）：94 插件（85 sidecar + 8
+  # external_mcp + 1 native）逐个以子进程 sidecar 方式加载、注册校验、
+  # 生命周期触发、精选工具真实执行（tests/plugins/plugin_probe.py）。
+  # 不加 --cov：子进程执行的插件代码父进程 coverage 本就测不到，
+  # 免插桩后整条车道收敛于本 job 与插桩 job 的较慢者，而非两者串行之和。
+  python-heavy-suites:
+    name: Python Heavy (免插桩冒烟矩阵)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v4
+        with:
+          enable-cache: true
+          cache-dependency-glob: "uv.lock"
+
+      - name: Sync dependencies from uv.lock (frozen, reproducible)
         run: |
-          uv run --frozen python -m pytest -v \
-            plugins/test_system_plugins.py \
-            plugins/shared/system/llm/ \
-            plugins/shared/system/tasks/ \
-            plugins/shared/system/test_migration_batch3.py \
-            plugins/shared/tools/task/ \
-            plugins/shared/tools/tests/ \
-            plugins/shared/tools/builtin_tools/tests/ \
-            tests/plugins/ \
-            tests/suites/plugins/ \
-            tests/channels/ \
-            tests/test_p0_regression.py \
-            tests/test_security_check_allow_priority.py \
-            tests/test_track_ai_record_id_contract.py \
-            tests/test_track_cost_update_event.py \
-            tests/test_process_watchdog_integration.py \
-            tests/test_isolation_docker_timeout.py \
-            tests/test_isolation_container_self_heal.py \
-            -m "not requires_api and not requires_redis and not requires_db and not requires_bwrap" \
-            --ignore=tests/manual \
-            --cov=plugins \
-            --cov-report=term-missing \
-            --cov-report=xml:coverage.xml \
-            --cov-fail-under=50
-          # 阶段 2.1 覆盖率门禁：fail-under=50 为保守起手下限（现状 54%，见 test_traceability
-          # 表 D），CI 首次确认实测值后收紧至 54→55→...（目标 P2 80%）。coverage.xml 供阶段 5.3
-          # 矩阵自动回填消费。
+          uv sync --frozen --extra dev
+          uv pip install -e ./plugins/sdk
 
-      # ── Mypy 基线门禁（plugins/shared 类型错误"只减不增"）──────────────────
-      # 此前 scripts/check_mypy_baseline.py 是孤儿——无 CI job 调用，基线锁形同虚设。
-      # 本 step 把它接入：跑 plugins/shared 的 mypy（根 pyproject [tool.mypy] 配置），
-      # 错误数不得超过 .github/mypy-baseline.txt（当前基线 223）；新增类型错误 → 本步失败
-      # → job 红 → 拦截合并。
-      # 复用本 job 已 `uv sync` 装好的 uv.lock 锁定版 mypy（2.2.0），用 `uv run` 调脚本，
-      # 保证 CI 与本地计数口径一致（mypy 版本漂移会让计数不稳）。--explicit-package-bases
-      # 由脚本内部传入（平铺插件架构：88 个同名 server.py 不加此标志会 Duplicate module
-      # 阻断、只报 1 个错，门禁失效）。详见 scripts/check_mypy_baseline.py 头注释。
-      - name: Mypy baseline gate (plugins/shared, 只减不增)
-        run: uv run --frozen python scripts/check_mypy_baseline.py
+      - name: Run gates (plugins-heavy)
+        run: python scripts/run_gates.py --filter plugins-heavy
 
-  # ── Timing Gate（关键时序不变量，独立阻塞 stage，§9.4/§6.4）──────────────
+  # ── Timing Gate（关键时序不变量，独立阻塞，§9.4/§6.4）──────────────
   # 专门运行标记了 @pytest.mark.timing 的用例（事件顺序 / 间隔 / 超时边界）。
   # 与单元测试 stage 隔离运行（避免真实延迟影响主套件稳定性）；
   # 失败**直接拦截合并**，与单测同级，禁止降级为 warning 或 `|| true`。
   # 当前覆盖：isolation docker 超时边界（3）+ rate_limiter 窗口过期边界（2）。
-  # 注：tests/test_llm_timeout_protection.py 暂未纳入——其 SUT
-  #   (pipeline.stream_bridge / channels.websocket.stream_handler) 在 0.2 已移除，
-  #   该文件为 0.1 遗留、当前全量 ModuleNotFoundError，标记会让门禁永久红，待移植后再加。
-  #   tests/test_watchdog_per_process_memory.py 断言的是内存阈值而非时序边界，故未标记。
   timing:
     name: Timing Gate (时序不变量, 独立阻塞)
     runs-on: ubuntu-latest
@@ -359,31 +354,26 @@ jobs:
 
       - name: Sync dependencies from uv.lock (frozen)
         # 需要 --extra isolation：isolation 超时测试 patch docker.from_env，
-        # 需 docker 包（已在 uv.lock 内锁定）。其余根依赖亦由 lock 全量锁定。
+        # 需 docker 包（已在 uv.lock 内锁定）。
         run: uv sync --frozen --extra dev --extra isolation
 
-      - name: Run timing tests (-m timing)
-        env:
-          PYTHONPATH: ${{ github.workspace }}/plugins:${{ github.workspace }}/plugins/sdk/src
-        run: |
-          uv run --frozen python -m pytest -m timing \
-            tests/test_isolation_docker_timeout.py \
-            tests/test_rate_limiter.py
+      - name: Run gates (timing-gate)
+        run: python scripts/run_gates.py --filter timing-gate
 
   # ── Frontend Test（vitest 单测 + typecheck + lint）─────────────────────
-  # 此前前端 137 单测 0% CI 覆盖（vitest/playwright 基建已备齐却没 job）。
-  # 本 job 接入：typecheck(tsc) + lint(eslint) + vitest 单测。
-  # 注：src/ 现存 lint error（含 1 个 @ts-ignore）按 §9.3 Lint 分层——error=0 阻断；
-  # 若存量 error 阻碍接入，先用 `npm run lint:fix` 清格式类 + 手工修实质 error，
-  # 或临时挂 `continue-on-error` 并开 issue 跟踪，禁止长期放任。
+  # typecheck(tsc) + lint(eslint 基线锁) + vitest 覆盖率(基线锁)。
+  # vitest/eslint 存量失败走"只减不增"基线锁（.github/frontend-baseline.txt）：
+  # 失败/error 数增长 → CI 红；减少或持平 → 放行。
   frontend-test:
     name: Frontend Test (tsc + lint + vitest)
     runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: frontend
     steps:
       - uses: actions/checkout@v4
+
+      - name: Set up Python (gate runner + 基线锁脚本)
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
 
       - name: Set up Node
         uses: actions/setup-node@v4
@@ -394,41 +384,25 @@ jobs:
 
       - name: Install dependencies
         run: npm ci
+        working-directory: frontend
 
-      - name: Typecheck
-        run: npm run typecheck
+      - name: Run gates (typecheck + lint 基线 + coverage 基线)
+        run: python scripts/run_gates.py --filter frontend-typecheck,frontend-lint,frontend-coverage
 
-      # ── 前端基线锁（阶段 2.4，N1 修复）+ 覆盖率门禁（阶段 2.2）────────────
-      # vitest/eslint 存在迁移遗留失败（React19/jsdom 渲染 + chat_card 存量 error）。
-      # 用 `|| true` 放行 + tee 捕获输出，交由基线锁（.github/frontend-baseline.txt，
-      # 只减不增）管控：失败/error 数增长 → CI 红；减少或持平 → 放行。
-      # test:coverage（Node20 v8 provider）同时产出 lcov/json-summary，供阶段 5.3 消费。
-      # 覆盖率阈值（vitest.config thresholds）起步=1 非阻塞，CI 跑出基线后按表 D 上调。
-      - name: Lint (capture for baseline)
-        run: npm run lint 2>&1 | tee /tmp/eslint_output.txt || true
-
-      - name: Unit tests + coverage (capture for baseline)
-        run: npm run test:coverage 2>&1 | tee /tmp/vitest_output.txt || true
-
-      - name: Frontend baseline gate (vitest+eslint 只减不增)
-        working-directory: ${{ github.workspace }}
-        run: |
-          python scripts/check_frontend_baseline.py \
-            --vitest-file /tmp/vitest_output.txt \
-            --eslint-file /tmp/eslint_output.txt
-
-  # ── Frontend E2E 冒烟（阶段 3.1，T5#2/#5）────────────────────────────────
+  # ── Frontend E2E 冒烟（零后端依赖）──────────────────────────────────────
   # PR 级 e2e 门禁：构建前端 → vite preview 服务于 5188 → 跑零外部依赖冒烟子集
   # (e2e/specs/ci-smoke.spec.ts，不依赖 kernel/LLM)。journey_* 全流程需后端，
-  # 仍归本地/手动（见 e2e-manual）。本 job 消除"有 e2e 覆盖"的假象。
+  # 仍归本地/手动（见 e2e-manual）。
   frontend-e2e:
     name: Frontend E2E (冒烟子集, 零后端依赖)
     runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: frontend
     steps:
       - uses: actions/checkout@v4
+
+      - name: Set up Python (gate runner)
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
 
       - name: Set up Node
         uses: actions/setup-node@v4
@@ -439,32 +413,49 @@ jobs:
 
       - name: Install dependencies
         run: npm ci
+        working-directory: frontend
 
       - name: Install Playwright chromium
         run: npx playwright install --with-deps chromium
+        working-directory: frontend
 
-      - name: Build frontend
-        run: npm run build
+      - name: Run gates (frontend-e2e-smoke)
+        run: python scripts/run_gates.py --filter frontend-e2e-smoke
 
-      - name: Run E2E smoke (preview server + ci-smoke)
-        run: |
-          # 后台启动 preview 服务于 5188（playwright baseURL），跑完即杀
-          npm run preview -- --port 5188 --strictPort &
-          PREVIEW_PID=$!
-          # 等待服务就绪（curl 轮询，便携）
-          for i in $(seq 1 30); do curl -sf http://localhost:5188 >/dev/null && break; sleep 2; done
-          if ! curl -sf http://localhost:5188 >/dev/null; then
-            echo "❌ preview 服务未就绪"; kill $PREVIEW_PID || true; exit 1
-          fi
-          # 仅跑零后端依赖冒烟子集
-          npx playwright test e2e/specs/ci-smoke.spec.ts
-          RC=$?
-          kill $PREVIEW_PID || true
-          exit $RC
+  # ── Electron 主进程编译门禁 ─────────────────────────────────────────────
+  # electron/ 桌面壳（main/preload/tray/window-info）此前无任何 CI 覆盖。
+  # tsc 编译门禁（electron:compile，与 electron:build 共用同一命令）；
+  # ELECTRON_SKIP_BINARY_DOWNLOAD=1 跳过 100MB+ 二进制下载，类型检查无需它。
+  electron-compile:
+    name: Electron Compile (主进程 tsc)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python (gate runner)
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: package-lock.json
+
+      - name: Install dependencies (跳过 Electron 二进制下载)
+        env:
+          ELECTRON_SKIP_BINARY_DOWNLOAD: "1"
+        run: npm ci
+
+      - name: Run gates (electron-compile)
+        run: python scripts/run_gates.py --filter electron-compile
 
   # ── Pre-commit（项目代码质量门禁入口）────────────────────────────────
-  # .pre-commit-config.yaml 自述为"项目代码质量门禁的入口"，但此前 CI 从未运行它。
-  # 本 job 让远端 CI 真正执行声明的门禁（ruff + mypy + 基础检查）。
+  # .pre-commit-config.yaml 自述为"项目代码质量门禁的入口"。
+  # 归属说明：pre-commit 的承诺由本 job（pre-commit/action，非零退出）持有，
+  # 不进 run_gates.py（避免同一承诺两个所有者）。
   pre-commit:
     name: Pre-commit (ruff + mypy + 基础检查)
     runs-on: ubuntu-latest
@@ -496,17 +487,15 @@ jobs:
         with:
           python-version: "3.11"
 
-      - name: Check TDD compliance
+      - name: Run gates (tdd-gate)
         env:
           GITHUB_BASE_REF: ${{ github.base_ref }}
-        run: python scripts/check_tdd_compliance.py
+        run: python scripts/run_gates.py --filter tdd-gate
 
-  # ── Traceability Gate（测试追溯标记闭环，阶段 5.1/5.2）────────────────────
+  # ── Traceability Gate（测试追溯标记闭环）────────────────────────────────
   # 强制每个测试文件带合法 @feature（引用闭环到 docs/test_traceability.md）。
   # 非法标记（引用不存在的功能点/愿景/审查号）→ 硬失败；
-  # 未标记文件数走"只减不增"基线锁（.github/traceability-baseline.txt），
-  # 首次接入用基线锁（316）避免一次性锁死全仓，鼓励逐步补标记。
-  # 详见 scripts/check_test_traceability.py、config/rules/testing_rules.md §9。
+  # 未标记文件数走"只减不增"基线锁（.github/traceability-baseline.txt）。
   traceability-gate:
     name: Traceability Gate (@feature 追溯闭环)
     runs-on: ubuntu-latest
@@ -518,15 +507,14 @@ jobs:
         with:
           python-version: "3.11"
 
-      - name: Check test traceability markers
-        run: python scripts/check_test_traceability.py
+      - name: Run gates (traceability-gate)
+        run: python scripts/run_gates.py --filter traceability-gate
 
   # ── Python 0.2 端到端（内核二进制 + 内存库 + 功能点 e2e）───────────────
-  # 覆盖 tests/e2e_02 的功能点级 e2e：审批闭环（FP-0.2.五，schema 声明 +
-  # LLM 触发审批 + interaction/response 回路）、管道 chat（FP-0.2.〇）、
-  # WS 流式全链路（FP-0.2.〇）。依赖真实 LLM 的用例带 skipif 守卫：
-  # 无 secrets.ZHIPU_API_KEY 时自动跳过，有 key 时全量跑（含 LLM 触发审批）。
-  # 内核以内存库（AGENTOS_DB_PATH=:memory:）启动，不碰 CI 持久数据。
+  # 覆盖 tests/e2e_02 的功能点级 e2e：审批闭环、管道 chat、WS 流式全链路。
+  # 依赖真实 LLM 的用例带 skipif 守卫：无 secrets.ZHIPU_API_KEY 时自动跳过。
+  # 归属说明：需内核二进制 + 进程管理 + LLM key，保持 CI 专用 job 车道，
+  # 不进 run_gates.py（与 pre-commit 同理，承诺由本 job 持有）。
   python-e2e:
     name: Python E2E (kernel + e2e_02)
     runs-on: ubuntu-latest

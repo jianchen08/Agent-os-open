@@ -6,6 +6,15 @@
 //! 两条路径，经防抖后串行调用既有 `discover_new_plugins()` + `register_new_plugins()`，
 //! 让丢进 `plugins/` 的新插件 tools/route_signals 立即生效，无需重启内核。
 //!
+//! cdylib 集合变更自动重启（剩余项清仓批次 A3）：sidecar 插件可热注册，但
+//! InProcess(cdylib) 插件的装/卸/换受 dlclose 死结限制无法热更新（invoker 侧只
+//! warn "restart kernel"）。watcher 在每轮 sync 时对比 InProcess 插件 id 集合，
+//! 新增或消失都视为变更 → 经注入的 restart hook 触发 G8 优雅重启（排空 + exit 75，
+//! 复用 `routes::drain_and_exit75`）。开关：`AGENTOS_AUTO_RESTART_ON_CDYLIB_CHANGE`
+//! （默认开，设 `0` 关闭只记日志）；`AGENTOS_DISABLE_SELF_EXIT=1` 逃生门语义由
+//! 排空函数内部复用（只排空不退出）。产物文件变化检测（同 id 换 .dll）属 invoker
+//! 面，不在此处。
+//!
 //! 设计：把"发现→diff→注册"的核心逻辑下沉为纯函数 [`apply_discovered_plugins`]，
 //! 时序/IO（notify、轮询、mpsc）只负责触发，便于无 flaky 单测。
 //!
@@ -17,9 +26,12 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
-use agentos_core::traits::{CapabilityRegistry, PluginInvoker, PluginManifest};
+use agentos_core::traits::{CapabilityRegistry, HostType, PluginInvoker, PluginManifest};
 use agentos_core::types::PluginError;
-use agentos_plugin_loader::CapabilityRegistryImpl;
+use agentos_invoker::verify::{
+    compare_tools, declared_with_services, parse_actual_tools, rejected_tool_names,
+};
+use agentos_plugin_loader::{CapabilityRegistryImpl, PluginScopeRegistry};
 use tokio::sync::mpsc::{self, UnboundedSender};
 use tracing::{info, warn};
 
@@ -31,6 +43,18 @@ pub const DEFAULT_DEBOUNCE: std::time::Duration = std::time::Duration::from_mill
 /// 默认轮询兜底间隔：notify 不可靠环境（Docker/WSL）下保底发现新插件。
 pub const DEFAULT_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_secs(5);
 
+/// cdylib（InProcess）插件集合变更（A3：触发 G8 优雅重启的判据）。
+///
+/// 只看插件 id 集合的进出（新增/消失）；同 id 换产物文件（.dll 重编译）属
+/// invoker 面的 stale 检测，不在此处。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CdylibChange {
+    /// 本轮新出现的 InProcess 插件 id。
+    pub added: Vec<String>,
+    /// 本轮消失（目录被删/manifest 不再扫描到）的 InProcess 插件 id。
+    pub removed: Vec<String>,
+}
+
 /// 一次发现同步的结果（纯数据，便于断言）。
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct SyncReport {
@@ -40,6 +64,12 @@ pub struct SyncReport {
     pub tools_registered: usize,
     /// 本次注册的插件 HTTP 端点数（写入 capability_registry → /ext/* catch-all 立即转发）。
     pub http_routes_registered: usize,
+    /// G2：本次发现但**拒绝注册漂移工具**的插件 id（安装期一致性校验——声明 vs
+    /// 实际暴露不一致的贡献被拒绝，其余能力照常注册；报告可见不静默）。
+    pub drifted_plugins: Vec<String>,
+    /// A3：本轮检测到的 InProcess(cdylib) 插件集合变更（无变更为 None）。
+    /// consumer 据此经 restart hook 触发 G8 优雅重启。
+    pub cdylib_change: Option<CdylibChange>,
 }
 
 impl SyncReport {
@@ -49,18 +79,106 @@ impl SyncReport {
     }
 }
 
+/// L0 纯函数：对比本轮全量 manifests 的 InProcess 插件 id 集合与已知集合。
+///
+/// `known` 为 `None` 时本轮只建立基线（返回 `None`，不触发重启）——避免"启动后
+/// 首轮 sync 把启动期已存在的 cdylib 插件误判为新增"。之后每轮 diff：
+/// 新增或消失都返回 `Some(CdylibChange)`，并把 `known` 推进为本轮集合。
+/// 无 IO、无时序，可同步单测。
+pub fn diff_cdylib_change(
+    all_manifests: &[PluginManifest],
+    known: &mut Option<HashSet<String>>,
+) -> Option<CdylibChange> {
+    let current: HashSet<String> = all_manifests
+        .iter()
+        .filter(|m| m.host_type == HostType::InProcess)
+        .map(|m| m.id.clone())
+        .collect();
+    match known {
+        None => {
+            *known = Some(current);
+            None
+        }
+        Some(prev) => {
+            let added: Vec<String> = current.difference(prev).cloned().collect();
+            let removed: Vec<String> = prev.difference(&current).cloned().collect();
+            let change = if added.is_empty() && removed.is_empty() {
+                None
+            } else {
+                Some(CdylibChange { added, removed })
+            };
+            *prev = current;
+            change
+        }
+    }
+}
+
+/// 解析 `AGENTOS_AUTO_RESTART_ON_CDYLIB_CHANGE`（A3 开关，默认开）。
+///
+/// 未设 / 设任意非 "0" 值 → 开；仅显式 `0`（trim 后）关闭。
+/// 纯函数（吃 Option<String> 而非直接读 env）——避免测试设置进程级环境变量的
+/// 并发污染。
+pub fn auto_restart_env_enabled(value: Option<String>) -> bool {
+    !matches!(value, Some(v) if v.trim() == "0")
+}
+
+/// 检测到 cdylib 集合变更后的重启决策（纯逻辑，可单测）。
+///
+/// `enabled=false`（env 开关关闭）或无 hook 接线时只记日志不动作，返回是否触发。
+/// hook 由装配方（agentos-kernel bin）注入：内部调 `routes::drain_and_exit75`
+/// （排空在途 runs → AGENTOS_DISABLE_SELF_EXIT 未设时延迟 exit 75）。
+fn trigger_cdylib_restart_if_enabled(
+    change: &CdylibChange,
+    hook: &Option<Arc<dyn Fn() + Send + Sync>>,
+    enabled: bool,
+) -> bool {
+    if !enabled {
+        warn!(
+            target: "plugin_watcher",
+            added = ?change.added,
+            removed = ?change.removed,
+            "InProcess(cdylib) plugin set changed but auto-restart disabled (AGENTOS_AUTO_RESTART_ON_CDYLIB_CHANGE=0); manual restart required"
+        );
+        return false;
+    }
+    match hook {
+        Some(h) => {
+            info!(
+                target: "plugin_watcher",
+                added = ?change.added,
+                removed = ?change.removed,
+                "InProcess(cdylib) plugin set changed -> triggering G8 graceful restart (drain + exit 75)"
+            );
+            h();
+            true
+        }
+        None => {
+            warn!(
+                target: "plugin_watcher",
+                added = ?change.added,
+                removed = ?change.removed,
+                "InProcess(cdylib) plugin set changed but no restart hook wired; manual restart required"
+            );
+            false
+        }
+    }
+}
+
 /// L0 纯函数：给定全量 manifests + 已知 id 集 + registry，注册新增插件的 tools/route_signals。
 ///
 /// 幂等：注册后把新 id 并入 `known_ids`，重复调用不再注册。
 /// 无 IO、无时序，可同步单测。复用 [`register_new_plugins`] 与 [`has_http_endpoints`]，
 /// 行为对齐 `reload-all` 端点的新插件序列。
+/// M1：`scopes` 为 Some 时经 guarded 注册入 scope（disable 时结构性收回）。
 pub fn apply_discovered_plugins(
     all_manifests: &[PluginManifest],
     known_ids: &mut HashSet<String>,
-    registry: &CapabilityRegistryImpl,
+    registry: &Arc<CapabilityRegistryImpl>,
+    scopes: Option<&PluginScopeRegistry>,
 ) -> SyncReport {
     // 复用 reload-all 的新插件序列：跳过已知 id，注册 tools/route_signals。
-    let (new_ids, tools_registered) = register_new_plugins(all_manifests, known_ids, registry);
+    let (new_ids, tools_registered) =
+        register_new_plugins(all_manifests, known_ids, registry, scopes);
     // 注册新插件的 http_endpoints 到 capability_registry。内核用单条 /ext/{*rest} catch-all
     // （server.rs）+ registry 数据驱动分发：端点写进 registry 后立即生效，无需重启、无需
     // 动态挂 axum 路由。register_new_plugins 只处理 tools/route_signals，http_endpoints 在此
@@ -71,9 +189,17 @@ pub fn apply_discovered_plugins(
         if !new_id_set.contains(&m.id) {
             continue;
         }
+        let scope = scopes.map(|s| s.scope_of(&m.id));
         for ep in &m.http_endpoints {
             // 冲突（同 path+method 已存在）忽略：新插件 id 唯一，正常不冲突。
-            if registry.register_http_route(&m.id, ep.clone()).is_ok() {
+            let ok = match &scope {
+                Some(s) => registry
+                    .register_http_route_guarded(&m.id, ep.clone())
+                    .map(|(_d, guard)| s.track(guard))
+                    .is_ok(),
+                None => registry.register_http_route(&m.id, ep.clone()).is_ok(),
+            };
+            if ok {
                 http_routes_registered += 1;
             }
         }
@@ -86,20 +212,86 @@ pub fn apply_discovered_plugins(
         new_plugin_ids: new_ids,
         tools_registered,
         http_routes_registered,
+        drifted_plugins: Vec::new(),
+        cdylib_change: None,
     }
 }
 
-/// L1 async 编排：拉取全量 manifests → 调 L0 注册新增。
+/// L1 async 编排：拉取全量 manifests → 调 L0 注册新增 + cdylib 集合 diff。
 ///
 /// `invoker.discover_new_plugins()` 内部重扫插件目录（幂等），故本函数可被任意触发源
 /// （notify / 轮询 / 手动）反复调用，无新插件时 no-op。
+///
+/// `known_cdylib`：InProcess 插件 id 已知集合（`None` = 基线未建立，本轮只建基线）。
 pub async fn sync_once(
     invoker: &dyn PluginInvoker,
-    registry: &CapabilityRegistryImpl,
+    registry: &Arc<CapabilityRegistryImpl>,
+    scopes: Option<&PluginScopeRegistry>,
     known_ids: &mut HashSet<String>,
+    known_cdylib: &mut Option<HashSet<String>>,
 ) -> Result<SyncReport, PluginError> {
     let all = invoker.discover_new_plugins().await?;
-    Ok(apply_discovered_plugins(&all, known_ids, registry))
+    // A3：InProcess(cdylib) 集合 diff 先行（下方 for 循环会 move `all`）。
+    // 首轮建基线，之后新增/消失都报变更；用全量 `all`（G2 过滤只动 tools，
+    // 不动 host_type 归属）。
+    let cdylib_change = diff_cdylib_change(&all, known_cdylib);
+    // G2 安装期一致性校验：对新发现的 tool 插件 spawn → tools/list → 对照
+    // manifest 声明。漂移工具的贡献**拒绝注册**（克隆 manifest 剔除该工具），
+    // 其余能力照常；校验失败（spawn 失败等）不阻断安装（warn 记录）。
+    let mut filtered: Vec<PluginManifest> = Vec::with_capacity(all.len());
+    let mut drifted_plugins = Vec::new();
+    for m in all {
+        if known_ids.contains(&m.id) || m.capabilities.tools.is_empty() {
+            filtered.push(m);
+            continue;
+        }
+        match invoker.list_plugin_tools(&m.id).await {
+            Ok(raw) => {
+                let (actual, _malformed) = parse_actual_tools(&raw);
+                let mismatches = compare_tools(&declared_with_services(&m), &actual);
+                let rejected = rejected_tool_names(&mismatches);
+                if rejected.is_empty() {
+                    if !mismatches.is_empty() {
+                        // 仅 undeclared（实际多暴露）——不拒绝注册，但记录
+                        warn!(
+                            target: "plugin_watcher",
+                            plugin = %m.id,
+                            mismatches = mismatches.len(),
+                            "G2 校验：插件存在未声明暴露的工具（不拒绝注册）"
+                        );
+                    }
+                    filtered.push(m);
+                } else {
+                    warn!(
+                        target: "plugin_watcher",
+                        plugin = %m.id,
+                        rejected = ?rejected,
+                        "G2 校验：插件声明与实现漂移，拒绝注册漂移工具（其余能力照常）"
+                    );
+                    drifted_plugins.push(m.id.clone());
+                    let mut sanitized = m;
+                    sanitized
+                        .capabilities
+                        .tools
+                        .retain(|t| !rejected.contains(&t.name));
+                    filtered.push(sanitized);
+                }
+            }
+            Err(e) => {
+                warn!(
+                    target: "plugin_watcher",
+                    plugin = %m.id,
+                    error = %e.message,
+                    "G2 校验失败（spawn/上报不可用），不阻断安装"
+                );
+                filtered.push(m);
+            }
+        }
+    }
+    let mut report = apply_discovered_plugins(&filtered, known_ids, registry, scopes);
+    report.drifted_plugins = drifted_plugins;
+    report.cdylib_change = cdylib_change;
+    Ok(report)
 }
 
 /// 运行时插件自动发现器（notify watch + 轮询兜底，二选一或并存均可）。
@@ -111,7 +303,14 @@ pub struct PluginWatcher {
     plugins_dir: PathBuf,
     invoker: Arc<dyn PluginInvoker>,
     registry: Arc<CapabilityRegistryImpl>,
+    /// M1：guard 化注册的 scope 表（None = 旧路径不入账本）。
+    scopes: Option<Arc<PluginScopeRegistry>>,
     known_ids: HashSet<String>,
+    /// A3：InProcess 插件 id 已知集合（None = 未建基线，首轮 sync 建立）。
+    known_cdylib: Option<HashSet<String>>,
+    /// A3：cdylib 集合变更时的重启回调（None = 只记日志；bin 装配时注入，
+    /// 内部走 routes::drain_and_exit75——排空 + exit 75 / 逃生门）。
+    restart_hook: Option<Arc<dyn Fn() + Send + Sync>>,
     debounce: Duration,
     poll_interval: Duration,
 }
@@ -127,10 +326,34 @@ impl PluginWatcher {
             plugins_dir,
             invoker,
             registry,
+            scopes: None,
             known_ids: initial_ids,
+            known_cdylib: None,
+            restart_hook: None,
             debounce: DEFAULT_DEBOUNCE,
             poll_interval: DEFAULT_POLL_INTERVAL,
         }
+    }
+
+    /// M1：注入 scope 表（guarded 注册入账本，disable 时结构性收回）。
+    pub fn with_scopes(mut self, scopes: Arc<PluginScopeRegistry>) -> Self {
+        self.scopes = Some(scopes);
+        self
+    }
+
+    /// A3：注入启动期 InProcess 插件 id 基线（boot manifests 派生）。
+    ///
+    /// 显式给基线时首轮 sync 即可 diff（能捕捉 boot→首轮 sync 窗口内的变更）；
+    /// 不给则首轮只建基线（保守，不误触发）。
+    pub fn with_initial_cdylib_ids(mut self, ids: HashSet<String>) -> Self {
+        self.known_cdylib = Some(ids);
+        self
+    }
+
+    /// A3：注入 cdylib 集合变更的重启回调（生产由 bin 接线 drain_and_exit75）。
+    pub fn with_restart_hook(mut self, hook: Arc<dyn Fn() + Send + Sync>) -> Self {
+        self.restart_hook = Some(hook);
+        self
     }
 
     /// 自定义防抖窗口（测试用短值加速）。
@@ -158,7 +381,10 @@ impl PluginWatcher {
             plugins_dir,
             invoker,
             registry,
+            scopes,
             known_ids,
+            known_cdylib,
+            restart_hook,
             debounce,
             poll_interval,
         } = self;
@@ -195,6 +421,7 @@ impl PluginWatcher {
             // 持有 notify_watcher 保活（drop 即停止监听）；与 consumer 同生命周期。
             let _notify = notify_watcher;
             let mut known = known_ids;
+            let mut known_cdylib = known_cdylib;
 
             loop {
                 // 等首个触发事件；所有 sender drop → 退出。
@@ -206,7 +433,15 @@ impl PluginWatcher {
                     // 匹配到事件即继续等（重置防抖窗口）；超时或 channel 关闭则结束。
                 }
                 // 执行一次同步（幂等：无新插件则 no-op）。
-                let report = match sync_once(invoker.as_ref(), registry.as_ref(), &mut known).await {
+                let report = match sync_once(
+                    invoker.as_ref(),
+                    &registry,
+                    scopes.as_deref(),
+                    &mut known,
+                    &mut known_cdylib,
+                )
+                .await
+                {
                     Ok(r) => r,
                     Err(e) => {
                         warn!(target: "plugin_watcher", error = %e.message, "discover sync failed");
@@ -214,14 +449,23 @@ impl PluginWatcher {
                     }
                 };
                 sync_count_task.fetch_add(1, Ordering::Relaxed);
-                if !report.is_empty() {
+                if !report.is_empty() || !report.drifted_plugins.is_empty() {
                     info!(
                         target: "plugin_watcher",
                         new_plugins = report.new_plugin_ids.len(),
                         tools = report.tools_registered,
                         http_routes = report.http_routes_registered,
-                        "auto-discovered new plugins"
+                        drifted = report.drifted_plugins.len(),
+                        "auto-discovered new plugins (G2 drift-rejected: {:?})",
+                        report.drifted_plugins
                     );
+                }
+                // A3：cdylib 集合变更 → 优雅重启（env 开关 + 注入 hook；无 hook 只记日志）。
+                if let Some(change) = &report.cdylib_change {
+                    let enabled = auto_restart_env_enabled(
+                        std::env::var("AGENTOS_AUTO_RESTART_ON_CDYLIB_CHANGE").ok(),
+                    );
+                    trigger_cdylib_restart_if_enabled(change, &restart_hook, enabled);
                 }
             }
         });
@@ -328,11 +572,16 @@ mod tests {
         serde_json::from_value(v).expect("valid manifest")
     }
 
-    /// 测试用 PluginInvoker：仅 discover_new_plugins 有意义，其余方法不可达。
-    /// （仿 invoker.rs 的 MockLoader 风格手写，仓库无 mockall。）
+    /// 测试用 PluginInvoker：仅 discover_new_plugins / list_plugin_tools 有意义，
+    /// 其余方法不可达。（仿 invoker.rs 的 MockLoader 风格手写，仓库无 mockall。）
     struct MockInvoker {
         manifests: Vec<PluginManifest>,
         fail: bool,
+        /// G2：list_plugin_tools 的可编程响应（plugin_id → tools/list 原始 JSON）。
+        /// 缺省 = 返回空工具列表（等价"声明有实际无"——测试中显式给）。
+        list_tools: std::collections::HashMap<String, serde_json::Value>,
+        /// 置 true 时 list_plugin_tools 返回错误（模拟 spawn/上报失败）。
+        list_tools_fail: bool,
     }
 
     #[async_trait]
@@ -371,70 +620,120 @@ mod tests {
                 Ok(self.manifests.clone())
             }
         }
+        async fn list_plugin_tools(
+            &self,
+            plugin_id: &str,
+        ) -> Result<serde_json::Value, PluginError> {
+            if self.list_tools_fail {
+                return Err(PluginError {
+                    message: "list_tools boom".into(),
+                    code: None,
+                    source: None,
+                });
+            }
+            Ok(self
+                .list_tools
+                .get(plugin_id)
+                .cloned()
+                .unwrap_or(serde_json::json!({ "tools": [] })))
+        }
+    }
+
+    impl MockInvoker {
+        /// 构造并**自动回填与 manifest 一致的上报**（G2 默认一致——漂移场景测试
+        /// 再显式覆盖 `list_tools` 或置 `list_tools_fail`）。
+        fn new(manifests: Vec<PluginManifest>) -> Self {
+            let mut list_tools = std::collections::HashMap::new();
+            for m in &manifests {
+                list_tools.insert(
+                    m.id.clone(),
+                    json!({ "tools": m.capabilities.tools.iter().map(|t| {
+                        json!({"name": t.name, "description": t.description})
+                    }).collect::<Vec<_>>() }),
+                );
+            }
+            Self {
+                manifests,
+                fail: false,
+                list_tools,
+                list_tools_fail: false,
+            }
+        }
     }
 
     #[tokio::test]
     async fn sync_once_discovers_and_applies() {
-        let invoker = MockInvoker {
-            manifests: vec![mk_manifest("a", "tool", &["ta"], false), mk_manifest("b", "tool", &["tb"], false)],
-            fail: false,
-        };
-        let registry = CapabilityRegistryImpl::new();
+        let invoker = MockInvoker::new(vec![
+            mk_manifest("a", "tool", &["ta"], false),
+            mk_manifest("b", "tool", &["tb"], false),
+        ]);
+        let registry_arc = std::sync::Arc::new(CapabilityRegistryImpl::new());
         let mut known = HashSet::new();
-        let report = sync_once(&invoker, &registry, &mut known).await.unwrap();
+        let report = sync_once(&invoker, &registry_arc, None, &mut known, &mut None)
+            .await
+            .unwrap();
         assert_eq!(report.new_plugin_ids.len(), 2);
         assert_eq!(report.tools_registered, 2);
         assert_eq!(known.len(), 2);
-        assert_eq!(registry.list_tools().len(), 2);
+        assert_eq!(registry_arc.list_tools().len(), 2);
     }
 
     #[tokio::test]
     async fn sync_once_idempotent_across_calls() {
-        let invoker = MockInvoker {
-            manifests: vec![mk_manifest("a", "tool", &["ta"], false)],
-            fail: false,
-        };
-        let registry = CapabilityRegistryImpl::new();
+        let invoker = MockInvoker::new(vec![mk_manifest("a", "tool", &["ta"], false)]);
+        let registry_arc = std::sync::Arc::new(CapabilityRegistryImpl::new());
         let mut known = HashSet::new();
-        let first = sync_once(&invoker, &registry, &mut known).await.unwrap();
+        let first = sync_once(&invoker, &registry_arc, None, &mut known, &mut None)
+            .await
+            .unwrap();
         assert_eq!(first.tools_registered, 1);
-        let second = sync_once(&invoker, &registry, &mut known).await.unwrap();
+        let second = sync_once(&invoker, &registry_arc, None, &mut known, &mut None)
+            .await
+            .unwrap();
         assert!(second.is_empty());
     }
 
     #[tokio::test]
     async fn sync_once_propagates_discover_error() {
-        let invoker = MockInvoker { manifests: vec![], fail: true };
-        let registry = CapabilityRegistryImpl::new();
+        let invoker = MockInvoker {
+            manifests: vec![],
+            fail: true,
+            list_tools: std::collections::HashMap::new(),
+            list_tools_fail: false,
+        };
+        let registry_arc = std::sync::Arc::new(CapabilityRegistryImpl::new());
         let mut known = HashSet::new();
-        let err = sync_once(&invoker, &registry, &mut known).await.unwrap_err();
+        let err = sync_once(&invoker, &registry_arc, None, &mut known, &mut None)
+            .await
+            .unwrap_err();
         assert!(err.message.contains("boom"));
         assert!(known.is_empty());
-        assert!(registry.list_tools().is_empty());
+        assert!(registry_arc.list_tools().is_empty());
     }
 
     #[test]
     fn apply_empty_manifests_noop() {
-        let registry = CapabilityRegistryImpl::new();
+        let registry_arc = std::sync::Arc::new(CapabilityRegistryImpl::new());
         let mut known = HashSet::new();
-        let report = apply_discovered_plugins(&[], &mut known, &registry);
+        let report = apply_discovered_plugins(&[], &mut known, &registry_arc, None);
         assert!(report.new_plugin_ids.is_empty());
         assert_eq!(report.tools_registered, 0);
         assert_eq!(report.http_routes_registered, 0);
         assert!(known.is_empty());
-        assert!(registry.list_tools().is_empty());
+        assert!(registry_arc.list_tools().is_empty());
     }
 
     #[test]
     fn apply_registers_new_tool_plugin_and_updates_known() {
-        let registry = CapabilityRegistryImpl::new();
+        let registry_arc = std::sync::Arc::new(CapabilityRegistryImpl::new());
         let mut known = HashSet::new();
         let m = mk_manifest("p1", "tool", &["t1", "t2"], false);
-        let report = apply_discovered_plugins(std::slice::from_ref(&m), &mut known, &registry);
+        let report =
+            apply_discovered_plugins(std::slice::from_ref(&m), &mut known, &registry_arc, None);
         assert_eq!(report.new_plugin_ids, vec!["p1".to_string()]);
         assert_eq!(report.tools_registered, 2);
         assert!(known.contains("p1"));
-        let p1_tools: Vec<_> = registry
+        let p1_tools: Vec<_> = registry_arc
             .list_tools()
             .into_iter()
             .filter(|t| t.plugin_id == "p1")
@@ -444,57 +743,232 @@ mod tests {
 
     #[test]
     fn apply_is_idempotent() {
-        let registry = CapabilityRegistryImpl::new();
+        let registry_arc = std::sync::Arc::new(CapabilityRegistryImpl::new());
         let mut known = HashSet::new();
         let m = mk_manifest("p1", "tool", &["t1"], false);
-        let first = apply_discovered_plugins(std::slice::from_ref(&m), &mut known, &registry);
+        let first =
+            apply_discovered_plugins(std::slice::from_ref(&m), &mut known, &registry_arc, None);
         assert_eq!(first.tools_registered, 1);
         // 第二次：p1 已知，应跳过。
-        let second = apply_discovered_plugins(std::slice::from_ref(&m), &mut known, &registry);
+        let second =
+            apply_discovered_plugins(std::slice::from_ref(&m), &mut known, &registry_arc, None);
         assert!(second.new_plugin_ids.is_empty());
         assert_eq!(second.tools_registered, 0);
     }
 
     #[test]
     fn apply_skips_known_plugin() {
-        let registry = CapabilityRegistryImpl::new();
+        let registry_arc = std::sync::Arc::new(CapabilityRegistryImpl::new());
         let mut known = HashSet::from(["p1".to_string()]);
         let m = mk_manifest("p1", "tool", &["t1"], false);
-        let report = apply_discovered_plugins(std::slice::from_ref(&m), &mut known, &registry);
+        let report =
+            apply_discovered_plugins(std::slice::from_ref(&m), &mut known, &registry_arc, None);
         assert!(report.new_plugin_ids.is_empty());
         assert_eq!(report.tools_registered, 0);
-        assert!(registry.list_tools().is_empty());
+        assert!(registry_arc.list_tools().is_empty());
     }
 
     #[test]
     fn apply_registers_http_endpoints_for_new_plugin() {
-        let registry = CapabilityRegistryImpl::new();
+        let registry_arc = std::sync::Arc::new(CapabilityRegistryImpl::new());
         let mut known = HashSet::new();
         let m = mk_manifest("p1", "tool", &["t1"], true); // 带 /ext/p1/foo GET
-        let report = apply_discovered_plugins(std::slice::from_ref(&m), &mut known, &registry);
+        let report =
+            apply_discovered_plugins(std::slice::from_ref(&m), &mut known, &registry_arc, None);
         assert_eq!(report.new_plugin_ids, vec!["p1".to_string()]);
         // http_endpoints 写进 registry → /ext/* catch-all 的 find_http_route 能查到（无需重启）。
-        assert!(registry.find_http_route("/ext/p1/foo", "GET").is_some());
+        assert!(registry_arc.find_http_route("/ext/p1/foo", "GET").is_some());
         assert_eq!(report.http_routes_registered, 1);
         // tools 仍注册。
         assert_eq!(report.tools_registered, 1);
     }
 
+    /// G2：新插件上报与声明一致 → 全部注册，drifted_plugins 为空。
+    #[tokio::test]
+    async fn sync_once_consistent_plugin_registers_all_tools() {
+        let invoker = MockInvoker::new(vec![mk_manifest("p1", "tool", &["t1", "t2"], false)]);
+        let registry_arc = std::sync::Arc::new(CapabilityRegistryImpl::new());
+        let mut known = HashSet::new();
+        let report = sync_once(&invoker, &registry_arc, None, &mut known, &mut None)
+            .await
+            .unwrap();
+        assert_eq!(report.tools_registered, 2);
+        assert!(report.drifted_plugins.is_empty());
+        assert_eq!(registry_arc.list_tools().len(), 2);
+    }
+
+    /// G2：新插件声明有、实际无（missing）→ 漂移工具拒绝注册，其余照常。
+    #[tokio::test]
+    async fn sync_once_drifted_tool_is_rejected_from_registration() {
+        let mut invoker =
+            MockInvoker::new(vec![mk_manifest("p1", "tool", &["t1", "ghost"], false)]);
+        // 覆盖上报：只报 t1（ghost 声明有实际无 → missing 漂移）
+        invoker.list_tools.insert(
+            "p1".into(),
+            json!({ "tools": [{"name": "t1", "description": "t1"}] }),
+        );
+        let registry_arc = std::sync::Arc::new(CapabilityRegistryImpl::new());
+        let mut known = HashSet::new();
+        let report = sync_once(&invoker, &registry_arc, None, &mut known, &mut None)
+            .await
+            .unwrap();
+        assert_eq!(
+            report.drifted_plugins,
+            vec!["p1".to_string()],
+            "漂移插件报告可见"
+        );
+        assert_eq!(
+            report.tools_registered, 1,
+            "漂移工具 ghost 被拒绝，t1 照常注册"
+        );
+        let names: Vec<String> = registry_arc
+            .list_tools()
+            .into_iter()
+            .map(|t| t.name)
+            .collect();
+        assert_eq!(names, vec!["t1".to_string()]);
+    }
+
+    /// G2：校验失败（list_tools 报错）不阻断安装（工具照常注册 + warn）。
+    #[tokio::test]
+    async fn sync_once_verify_failure_does_not_block_install() {
+        let mut invoker = MockInvoker::new(vec![mk_manifest("p1", "tool", &["t1"], false)]);
+        invoker.list_tools_fail = true;
+        let registry_arc = std::sync::Arc::new(CapabilityRegistryImpl::new());
+        let mut known = HashSet::new();
+        let report = sync_once(&invoker, &registry_arc, None, &mut known, &mut None)
+            .await
+            .unwrap();
+        assert!(report.drifted_plugins.is_empty());
+        assert_eq!(report.tools_registered, 1, "校验失败不拒绝注册");
+    }
+
     #[test]
     fn apply_multiple_new_mixed() {
-        let registry = CapabilityRegistryImpl::new();
+        let registry_arc = std::sync::Arc::new(CapabilityRegistryImpl::new());
         let mut known = HashSet::new();
         let m1 = mk_manifest("p1", "tool", &["t1"], false);
         let m2 = mk_manifest("p2", "tool", &["t2"], true);
         let m3 = mk_manifest("p3", "pipeline", &[], false);
         let all = vec![m1, m2, m3];
-        let report = apply_discovered_plugins(&all, &mut known, &registry);
+        let report = apply_discovered_plugins(&all, &mut known, &registry_arc, None);
         assert_eq!(report.new_plugin_ids.len(), 3);
         // p1/p2 各 1 tool；p3 是 pipeline，其 capabilities.tools 不注册 → 共 2。
         assert_eq!(report.tools_registered, 2);
         // 仅 p2 带 http_endpoints（1 条端点），写进 registry 后 catch-all 立即转发。
         assert_eq!(report.http_routes_registered, 1);
-        assert!(registry.find_http_route("/ext/p2/foo", "GET").is_some());
+        assert!(registry_arc.find_http_route("/ext/p2/foo", "GET").is_some());
         assert_eq!(known.len(), 3);
+    }
+
+    // ── A3：cdylib 集合变更检测 / 自动重启开关 ─────────────────
+
+    /// 构造指定 host_type 的 manifest。
+    fn mk_manifest_host(id: &str, host_type: &str) -> PluginManifest {
+        let v = json!({
+            "id": id, "name": id, "version": "1.0.0",
+            "plugin_type": "tool", "language": "rust",
+            "host_type": host_type, "entry": "x",
+            "capabilities": {},
+        });
+        serde_json::from_value(v).expect("valid manifest")
+    }
+
+    /// 首轮只建基线：启动期已存在的 cdylib 插件不误判为新增。
+    #[test]
+    fn diff_first_round_establishes_baseline() {
+        let all = vec![mk_manifest_host("native_a", "in_process")];
+        let mut known: Option<HashSet<String>> = None;
+        assert_eq!(diff_cdylib_change(&all, &mut known), None);
+        assert_eq!(known, Some(HashSet::from(["native_a".to_string()])));
+    }
+
+    /// 显式基线（with_initial_cdylib_ids 路径）：首轮即可 diff 出新增。
+    #[tokio::test]
+    async fn sync_once_with_explicit_baseline_detects_addition() {
+        let invoker = MockInvoker::new(vec![mk_manifest_host("native_a", "in_process")]);
+        let registry_arc = std::sync::Arc::new(CapabilityRegistryImpl::new());
+        let mut known = HashSet::new();
+        let mut known_cdylib = Some(HashSet::new()); // boot 期无 cdylib
+        let report = sync_once(&invoker, &registry_arc, None, &mut known, &mut known_cdylib)
+            .await
+            .unwrap();
+        assert_eq!(
+            report.cdylib_change,
+            Some(CdylibChange {
+                added: vec!["native_a".to_string()],
+                removed: vec![],
+            })
+        );
+    }
+
+    /// 新增 + 消失都算变更；sidecar 插件进出不算。
+    #[test]
+    fn diff_detects_addition_and_removal_ignoring_sidecar() {
+        let mut known: Option<HashSet<String>> = None;
+        // 基线：native_a + sidecar_x
+        let base = vec![
+            mk_manifest_host("native_a", "in_process"),
+            mk_manifest_host("sidecar_x", "sidecar"),
+        ];
+        assert_eq!(diff_cdylib_change(&base, &mut known), None);
+        // 本轮：native_a 消失、native_b 新增、sidecar_x→sidecar_y（sidecar 不算）
+        let next = vec![
+            mk_manifest_host("native_b", "in_process"),
+            mk_manifest_host("sidecar_y", "sidecar"),
+        ];
+        assert_eq!(
+            diff_cdylib_change(&next, &mut known),
+            Some(CdylibChange {
+                added: vec!["native_b".to_string()],
+                removed: vec!["native_a".to_string()],
+            })
+        );
+        // 集合稳定 → 无变更
+        assert_eq!(diff_cdylib_change(&next, &mut known), None);
+    }
+
+    /// 开关解析：未设/非 "0" → 开；仅 "0"（含空白）→ 关。
+    #[test]
+    fn auto_restart_env_switch_parsing() {
+        assert!(auto_restart_env_enabled(None));
+        assert!(auto_restart_env_enabled(Some("1".to_string())));
+        assert!(auto_restart_env_enabled(Some("yes".to_string())));
+        assert!(!auto_restart_env_enabled(Some("0".to_string())));
+        assert!(!auto_restart_env_enabled(Some(" 0 ".to_string())));
+    }
+
+    /// 触发决策：enabled + hook → 调用；enabled=false / 无 hook → 不调用。
+    #[test]
+    fn restart_trigger_respects_switch_and_hook() {
+        use std::sync::atomic::AtomicBool;
+        let change = CdylibChange {
+            added: vec!["native_a".to_string()],
+            removed: vec![],
+        };
+        let fired = Arc::new(AtomicBool::new(false));
+        let flag = Arc::clone(&fired);
+        let hook: Arc<dyn Fn() + Send + Sync> =
+            Arc::new(move || flag.store(true, Ordering::Relaxed));
+
+        // enabled + hook → 触发
+        assert!(trigger_cdylib_restart_if_enabled(
+            &change,
+            &Some(Arc::clone(&hook)),
+            true
+        ));
+        assert!(fired.load(Ordering::Relaxed));
+
+        // 开关关 → 不触发
+        fired.store(false, Ordering::Relaxed);
+        assert!(!trigger_cdylib_restart_if_enabled(
+            &change,
+            &Some(Arc::clone(&hook)),
+            false
+        ));
+        assert!(!fired.load(Ordering::Relaxed));
+
+        // 无 hook → 不触发（诚实降级，只记日志）
+        assert!(!trigger_cdylib_restart_if_enabled(&change, &None, true));
     }
 }

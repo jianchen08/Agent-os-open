@@ -69,7 +69,7 @@ fn tool_msg_with_envelope() -> Value {
 fn blob_count(store: &SqliteStore) -> i64 {
     store
         .with_conn(|c| -> Result<i64, rusqlite::Error> {
-            Ok(c.query_row("SELECT COUNT(*) FROM blobs", [], |r| r.get(0))?)
+            c.query_row("SELECT COUNT(*) FROM blobs", [], |r| r.get(0))
         })
         .expect("数 blobs 应成功")
 }
@@ -79,7 +79,7 @@ fn table_columns(store: &SqliteStore, table: &str) -> Vec<String> {
         .with_conn(|c| -> Result<Vec<String>, rusqlite::Error> {
             let mut stmt = c.prepare(&format!("PRAGMA table_info({table})"))?;
             let rows = stmt.query_map([], |r| r.get::<_, String>(1))?;
-            Ok(rows.collect::<Result<Vec<_>, _>>()?)
+            rows.collect::<Result<Vec<_>, _>>()
         })
         .expect("读表结构应成功")
 }
@@ -168,7 +168,10 @@ fn load_message_history_preserves_tool_result_envelope() {
         .and_then(|v| v.as_object())
         .expect("tool_result envelope 应保留在返回消息里");
     assert_eq!(env.get("call_id").and_then(|v| v.as_str()), Some("call_1"));
-    assert_eq!(env.get("tool_name").and_then(|v| v.as_str()), Some("file_read"));
+    assert_eq!(
+        env.get("tool_name").and_then(|v| v.as_str()),
+        Some("file_read")
+    );
     assert_eq!(env.get("success").and_then(|v| v.as_bool()), Some(true));
 }
 
@@ -192,9 +195,17 @@ fn identical_message_written_twice_stores_single_blob() {
 
     // 两个槽位、同内容
     store
-        .apply_messages_ops_to_table("p_dedup", "default", &[set(0, msg.clone()), set(1, msg.clone())])
+        .apply_messages_ops_to_table(
+            "p_dedup",
+            "default",
+            &[set(0, msg.clone()), set(1, msg.clone())],
+        )
         .unwrap();
-    assert_eq!(blob_count(&store), 1, "同内容消息 → blobs 只一份（内容寻址去重）");
+    assert_eq!(
+        blob_count(&store),
+        1,
+        "同内容消息 → blobs 只一份（内容寻址去重）"
+    );
 
     // 再整体写一遍：blob 数不变
     store
@@ -207,7 +218,10 @@ fn identical_message_written_twice_stores_single_blob() {
         .apply_messages_ops_to_table(
             "p_dedup",
             "default",
-            &[set(2, json!({ "role": "user", "content": "DEDUP_MARKER 另一条不同消息" }))],
+            &[set(
+                2,
+                json!({ "role": "user", "content": "DEDUP_MARKER 另一条不同消息" }),
+            )],
         )
         .unwrap();
     assert_eq!(blob_count(&store), 2, "不同内容才有新 blob");
@@ -223,7 +237,10 @@ fn slot_read_rebuilds_full_content_preview() {
         .apply_messages_ops_to_table(
             "p_preview",
             "default",
-            &[set(0, json!({ "role": "assistant", "content": long_content }))],
+            &[set(
+                0,
+                json!({ "role": "assistant", "content": long_content }),
+            )],
         )
         .unwrap();
 
@@ -259,7 +276,15 @@ fn message_slots_table_is_pure_index_without_content_columns() {
             cols
         );
     }
-    for required in ["tenant_id", "pipeline_id", "seq", "message_id", "blob_id", "run_id", "created_at"] {
+    for required in [
+        "tenant_id",
+        "pipeline_id",
+        "seq",
+        "message_id",
+        "blob_id",
+        "run_id",
+        "created_at",
+    ] {
         assert!(
             cols.iter().any(|c| c == required),
             "纯索引列 {required} 应保留，实际列：{:?}",

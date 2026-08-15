@@ -1,4 +1,4 @@
-﻿#!/usr/bin/env node
+#!/usr/bin/env node
 console.error('Web Search MCP Server starting...');
 
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
@@ -361,16 +361,12 @@ class WebSearchMCPServer {
   private async handleWebSearch(input: WebSearchToolInput): Promise<WebSearchToolOutput> {
     const startTime = Date.now();
     const { query, limit = 5, includeContent = true } = input;
-    
-    console.error(`[web-search-mcp] DEBUG: handleWebSearch called with limit=${limit}, includeContent=${includeContent}`);
 
     try {
       // Request extra search results to account for potential PDF files that will be skipped
       // Request up to 2x the limit or at least 5 extra results, capped at 10 (Google's max)
       const searchLimit = includeContent ? Math.min(limit * 2 + 2, 10) : limit;
-      
-      console.error(`[web-search-mcp] DEBUG: Requesting ${searchLimit} search results to get ${limit} non-PDF content results`);
-      
+
       // Perform the search
       const searchResponse = await this.searchEngine.search({
         query,
@@ -381,7 +377,6 @@ class WebSearchMCPServer {
       // Log search summary
       const pdfCount = searchResults.filter(result => isPdfUrl(result.url)).length;
       const followedCount = searchResults.length - pdfCount;
-      console.error(`[web-search-mcp] DEBUG: Search engine: ${searchResponse.engine}; ${limit} requested/${searchResults.length} obtained; PDF: ${pdfCount}; ${followedCount} followed.`);
 
       // Extract content from each result if requested, with target count
       const enhancedResults = includeContent 
@@ -398,9 +393,7 @@ class WebSearchMCPServer {
         
         const failureReasons = this.categorizeFailureReasons(failedResults);
         const failureReasonText = failureReasons.length > 0 ? ` (${failureReasons.join(', ')})` : '';
-        
-        console.error(`[web-search-mcp] DEBUG: Links requested: ${limit}; Successfully extracted: ${successCount}; Failed: ${failedCount}${failureReasonText}; Results: ${enhancedResults.length}.`);
-        
+
         // Add extraction info to combined status
         combinedStatus += `; Successfully extracted: ${successCount}; Failed: ${failedCount}; Results: ${enhancedResults.length}`;
       }

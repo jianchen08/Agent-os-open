@@ -25,6 +25,7 @@ import { resolveModelDisplayName, type ModelTiers } from '@/utils/modelName'
 import { findModelParams, mapParamsToStrength } from '@/utils/thinkingStrength'
 import { AgentTabBar } from './AgentTabBar'
 import { ChatInput } from './ChatInput'
+import { GodotSelectionRow } from './GodotSelectionRow'
 import { MessageList } from './MessageList'
 import { SubTabRouter } from './SubTabRouter'
 import { VotingPanel } from './VotingPanel'
@@ -385,6 +386,8 @@ export const ChatContainer = ({
         className="relative shrink-0 border-t px-3 py-3"
         style={{ borderColor: 'var(--ds-border-subtle, rgba(148,163,184,0.12))' }}
       >
+        {/* Godot 选中引用（实时镜像：选中出现 / 取消消失；选中非空发送时插件随消息注入引用） */}
+        <GodotSelectionRow threadId={activeTabId || sessionId} />
         {/* key 强制切换标签时重建 ChatInput，使每个标签的输入状态（text/attachments/pendingFiles）独立 */}
         <ChatInput
           key={`input-${activeTabId || sessionId}`}

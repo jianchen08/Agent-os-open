@@ -21,13 +21,9 @@ from __future__ import annotations
 
 import argparse
 import re
-import sys
 from pathlib import Path
 
-# 确保能导入 src 下模块
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
-
-import yaml  # noqa: E402
+import yaml
 
 # 触发修复的脏标记文案
 DIRTY_ENGINE_MARK = "引擎状态丢失"

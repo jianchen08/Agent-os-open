@@ -6,3 +6,4 @@
 
 export { globalWS } from './GlobalWebSocket'
 export type { ConnectionStatus } from './GlobalWebSocket'
+export { initResyncOnSchema, disposeResyncOnSchema } from './resync'

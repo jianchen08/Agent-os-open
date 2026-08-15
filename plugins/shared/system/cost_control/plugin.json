@@ -1,79 +1,101 @@
 {
-    "id": "cost_control",
-    "name": "Cost Control Service",
-    "version": "1.0.0",
-    "plugin_type": "system",
-    "language": "python",
-    "host_type": "sidecar",
-    "entry": "python server.py",
-    "capabilities": {
-        "tools": [
-            {"name": "cost_control.check_budget", "description": "Check if budget allows the estimated token usage"},
-            {"name": "cost_control.record_usage", "description": "Record token usage and check for budget alerts"},
-            {"name": "cost_control.get_status", "description": "Get current budget status for a scope"},
-            {"name": "cost_control.get_statistics", "description": "Get global usage statistics"},
-            {"name": "cost_control.reset_task_budget", "description": "Reset budget tracking for a specific task"},
-            {"name": "cost_control.reset_session_budget", "description": "Reset budget tracking for a specific session"}
-        ],
-        "resources": [],
-        "route_signals": [],
-        "lifecycle_hooks": ["on_load", "on_unload"]
-    },
-    "dependencies": [],
-    "permissions": {},
-    "error_policy": "skip",
-    "priority": 50,
-    "requires_content": 5,
-    "http_endpoints": [
-        {
-            "route_id": "cost_budget_status",
-            "method": "GET",
-            "path": "/ext/cost_control/budget/status",
-            "auth": "none",
-            "handler_capability": "http.handle",
-            "timeout_ms": 5000,
-            "max_concurrency": 8,
-            "description": "Get current budget status (frontend CostDashboardWidget / StatusBar)"
-        },
-        {
-            "route_id": "cost_usage_statistics",
-            "method": "GET",
-            "path": "/ext/cost_control/usage/statistics",
-            "auth": "none",
-            "handler_capability": "http.handle",
-            "timeout_ms": 5000,
-            "max_concurrency": 8,
-            "description": "Get global usage statistics"
-        },
-        {
-            "route_id": "cost_config",
-            "method": "GET",
-            "path": "/ext/cost_control/config",
-            "auth": "none",
-            "handler_capability": "http.handle",
-            "timeout_ms": 5000,
-            "max_concurrency": 8,
-            "description": "Get cost control config (flattened)"
-        },
-        {
-            "route_id": "cost_report",
-            "method": "GET",
-            "path": "/ext/cost_control/report",
-            "auth": "none",
-            "handler_capability": "http.handle",
-            "timeout_ms": 5000,
-            "max_concurrency": 8,
-            "description": "Get cost report by period (?period=daily|weekly|monthly)"
-        },
-        {
-            "route_id": "cost_budget_reset",
-            "method": "POST",
-            "path": "/ext/cost_control/budget/reset",
-            "auth": "none",
-            "handler_capability": "http.handle",
-            "timeout_ms": 5000,
-            "max_concurrency": 4,
-            "description": "Reset global budget tracking"
-        }
+  "id": "cost_control",
+  "name": "Cost Control Service",
+  "version": "1.0.0",
+  "plugin_type": "system",
+  "language": "python",
+  "host_type": "sidecar",
+  "entry": "python server.py",
+  "capabilities": {
+    "tools": [],
+    "resources": [],
+    "route_signals": [],
+    "lifecycle_hooks": [
+      "on_load",
+      "on_unload"
+    ],
+    "services": [
+      {
+        "name": "cost_control.check_budget",
+        "description": "Check if budget allows the estimated token usage"
+      },
+      {
+        "name": "cost_control.record_usage",
+        "description": "Record token usage and check for budget alerts"
+      },
+      {
+        "name": "cost_control.get_status",
+        "description": "Get current budget status for a scope"
+      },
+      {
+        "name": "cost_control.get_statistics",
+        "description": "Get global usage statistics"
+      },
+      {
+        "name": "cost_control.reset_task_budget",
+        "description": "Reset budget tracking for a specific task"
+      },
+      {
+        "name": "cost_control.reset_session_budget",
+        "description": "Reset budget tracking for a specific session"
+      }
     ]
+  },
+  "dependencies": [],
+  "permissions": {},
+  "error_policy": "skip",
+  "priority": 50,
+  "requires_content": 5,
+  "http_endpoints": [
+    {
+      "route_id": "cost_budget_status",
+      "method": "GET",
+      "path": "/ext/cost_control/budget/status",
+      "auth": "none",
+      "handler_capability": "http.handle",
+      "timeout_ms": 5000,
+      "max_concurrency": 8,
+      "description": "Get current budget status (frontend CostDashboardWidget / StatusBar)"
+    },
+    {
+      "route_id": "cost_usage_statistics",
+      "method": "GET",
+      "path": "/ext/cost_control/usage/statistics",
+      "auth": "none",
+      "handler_capability": "http.handle",
+      "timeout_ms": 5000,
+      "max_concurrency": 8,
+      "description": "Get global usage statistics"
+    },
+    {
+      "route_id": "cost_config",
+      "method": "GET",
+      "path": "/ext/cost_control/config",
+      "auth": "none",
+      "handler_capability": "http.handle",
+      "timeout_ms": 5000,
+      "max_concurrency": 8,
+      "description": "Get cost control config (flattened)"
+    },
+    {
+      "route_id": "cost_report",
+      "method": "GET",
+      "path": "/ext/cost_control/report",
+      "auth": "none",
+      "handler_capability": "http.handle",
+      "timeout_ms": 5000,
+      "max_concurrency": 8,
+      "description": "Get cost report by period (?period=daily|weekly|monthly)"
+    },
+    {
+      "route_id": "cost_budget_reset",
+      "method": "POST",
+      "path": "/ext/cost_control/budget/reset",
+      "auth": "none",
+      "handler_capability": "http.handle",
+      "timeout_ms": 5000,
+      "max_concurrency": 4,
+      "description": "Reset global budget tracking"
+    }
+  ]
 }

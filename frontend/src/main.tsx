@@ -1,3 +1,4 @@
+
 /**
  * 应用入口文件
  *
@@ -27,10 +28,9 @@ if ('scrollRestoration' in history) {
  * 核心策略：先渲染 React（用户立刻看到页面，不再白屏等待），再异步初始化主题/认证。
  *
  * 为什么先渲染：
- * - 旧实现中 `await initializeTheme()`（含 persist rehydrate 兜底 500ms）与
- *   `await import('@/services/schema/registerWidgets')`（26 个 widget 组件动态 chunk）
- *   都在 createRoot().render() 之前串行 await，首屏必须等这些异步工作全部完成
- *   才渲染 → 内网/慢环境下面临十几秒白屏（"前端进不去"根因之一）。
+ * - initializeTheme()（含 persist rehydrate 兜底 500ms）与 registerWidgets 的
+ *   26 个 widget 动态 chunk 均为慢路径，若在 createRoot().render() 之前串行 await，
+ *   首屏必须等这些异步工作全部完成才渲染 → 内网/慢环境下面临十几秒白屏。
  * - 主题 CSS 变量有 design-tokens.css :root 默认值兜底（非白屏），且 index.html
  *   内联脚本已按 localStorage 的 theme-storage 提前加 dark/light class，
  *   因此先渲染不会出现主题缺失的白屏，主题在异步初始化完成后无缝刷新。

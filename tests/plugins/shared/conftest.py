@@ -1,3 +1,4 @@
+# @feature: FP-0.2.八 多租户 | @ci: python-coverage
 """tests/plugins/shared conftest — 把 ``plugins/shared`` 推上 sys.path。
 
 本目录测试共享咽喉点 ``plugins/shared/tenant_data.py`` 等跨插件工具。

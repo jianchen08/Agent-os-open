@@ -17,7 +17,7 @@
                     "properties": {
                         "tool_call_id": {
                             "type": "string",
-                            "description": "要取回的工具调用 ID（spill_guard 替换文本中定位符携带）"
+                            "description": "要取回的工具调用 ID（spill_guard 替换文本中定位符携带的 tool_call_id）"
                         },
                         "pipeline_id": {
                             "type": "string",

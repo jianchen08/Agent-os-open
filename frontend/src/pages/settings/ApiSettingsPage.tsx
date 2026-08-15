@@ -168,27 +168,12 @@ export function ApiSettingsPage() {
         </div>
       </Section>
 
-      {/* API Key 管理 */}
+      {/* API Key 管理指引（真实的密钥管理在 模型设置 → 提供商与密钥） */}
       <Section title="API Key 管理">
-        <p className="text-muted-foreground mb-3 text-xs">API 密钥由后端安全存储，此处仅显示状态</p>
-        <div className="space-y-2">
-          {['primary', 'fallback'].map((keyType) => (
-            <div
-              key={keyType}
-              className="bg-card flex items-center gap-3 rounded-lg border px-3 py-2"
-            >
-              <span className="min-w-[80px] text-sm font-medium">
-                {keyType === 'primary' ? '主密钥' : '备用密钥'}
-              </span>
-              <span className="text-muted-foreground flex-1 font-mono text-xs">
-                ••••••••••••••••
-              </span>
-              <span className="rounded bg-status-success/10 px-2 py-0.5 text-xs text-status-success">
-                已配置
-              </span>
-            </div>
-          ))}
-        </div>
+        <p className="text-muted-foreground text-xs">
+          大模型提供商的 API Key 在「模型设置 → 提供商与密钥」中统一管理：
+          选择提供者填入 Key 即可（自动写入 .env，立即生效）。
+        </p>
       </Section>
 
       {/* 限流配置 */}

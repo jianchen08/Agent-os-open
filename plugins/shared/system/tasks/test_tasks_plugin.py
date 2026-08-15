@@ -23,10 +23,10 @@ import pytest
 pytestmark = pytest.mark.unit
 
 
-# 确保插件目录在 sys.path 前面
+# 插件目录（fixture 内注入 sys.path 并在 teardown 恢复——模块级插入会污染
+# 同进程其它测试：tasks/workspace.py 与 system/workspace/ 包对 `import workspace`
+# 解析冲突，破坏 channel_api 的 routes_workspaces 等）
 _PLUGIN_DIR = Path(__file__).resolve().parent
-if str(_PLUGIN_DIR) not in sys.path:
-    sys.path.insert(0, str(_PLUGIN_DIR))
 
 
 @pytest.fixture(autouse=True)
@@ -41,6 +41,7 @@ def _isolate_tasks_plugin_modules():
     强制按本目录重新解析。Windows/Ubuntu 通用。
     """
     d = str(_PLUGIN_DIR)
+    _was_present = d in sys.path
     if d in sys.path:
         sys.path.remove(d)
     sys.path.insert(0, d)
@@ -61,6 +62,11 @@ def _isolate_tasks_plugin_modules():
     ):
         sys.modules.pop(m, None)
     yield
+    # teardown：恢复 sys.path（仅移除本 fixture 插入的项）
+    if d in sys.path:
+        sys.path.remove(d)
+    if _was_present:
+        sys.path.insert(0, d)
 
 
 # ═══════════════════════════════════════════════════════════
@@ -129,7 +135,7 @@ class TestPluginJson:
 
     def test_has_tools(self, config: dict) -> None:
         """声明了工具列表。"""
-        tools = config.get("capabilities", {}).get("tools", [])
+        tools = config.get("capabilities", {}).get("services", [])
         assert len(tools) > 0, "Must have at least one tool"
 
     def test_has_lifecycle_hooks(self, config: dict) -> None:
@@ -140,7 +146,7 @@ class TestPluginJson:
 
     def test_tools_cover_core_operations(self, config: dict) -> None:
         """工具列表覆盖核心操作（create/get/transition/list/cancel）。"""
-        tool_names = {t["name"] for t in config["capabilities"]["tools"]}
+        tool_names = {t["name"] for t in config["capabilities"]["services"]}
         expected = {"task.create", "task.get", "task.transition", "task.list", "task.cancel"}
         missing = expected - tool_names
         assert not missing, f"Missing core tools: {missing}"

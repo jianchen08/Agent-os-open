@@ -115,11 +115,10 @@ def _metric_to_response(raw: dict[str, Any]) -> dict[str, Any]:
         "avg_execution_time": None,
         "created_at": "",
         "updated_at": None,
-        # 兼容内核旧 handler 曾返回的字段名（前端 service 有兜底映射）
+        # 字段别名映射：前端 service 依赖旧字段名，此处做双向兼容
         "metric_type": str(raw.get("category", raw.get("evaluator_type", ""))),
     }
 
-# 评估结果存储
 _results: dict[str, dict[str, Any]] = {}
 
 # 内置指标注册表

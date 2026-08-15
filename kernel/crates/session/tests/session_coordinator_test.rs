@@ -103,21 +103,28 @@ async fn emit_event_records_chat_events_for_reconnect_replay() {
     coord.register("user-A", sink1);
     coord.register_thread("thread-1", "user-A");
 
-    coord.emit_event("thread-1", "new_message", serde_json::json!({"content": "hi"})).await;
-    coord.emit_event("thread-1", "stream_start", serde_json::json!({"message_id": "m1"})).await;
+    coord
+        .emit_event(
+            "thread-1",
+            "new_message",
+            serde_json::json!({"content": "hi"}),
+        )
+        .await;
+    coord
+        .emit_event(
+            "thread-1",
+            "stream_start",
+            serde_json::json!({"message_id": "m1"}),
+        )
+        .await;
 
     // 重连，last_sequence=0 → 应回放全部聊天事件
     let (sink2, recv2) = MockSink::online();
-    let outcome = coord
-        .handle_reconnect("thread-1", "user-A", sink2, 0)
-        .await;
+    let outcome = coord.handle_reconnect("thread-1", "user-A", sink2, 0).await;
     assert!(outcome.replayed, "应成功回放（无溢出）");
 
     let msgs = recv2.lock().unwrap();
-    let types: Vec<&str> = msgs
-        .iter()
-        .filter_map(|m| m["type"].as_str())
-        .collect();
+    let types: Vec<&str> = msgs.iter().filter_map(|m| m["type"].as_str()).collect();
     assert!(types.contains(&"new_message"), "应回放 new_message");
     assert!(types.contains(&"stream_start"), "应回放 stream_start");
 }
@@ -130,7 +137,13 @@ async fn emit_event_skips_interaction_family_in_replay() {
     coord.register("user-A", sink1);
     coord.register_thread("thread-1", "user-A");
 
-    coord.emit_event("thread-1", "interaction_request", serde_json::json!({"req": "x"})).await;
+    coord
+        .emit_event(
+            "thread-1",
+            "interaction_request",
+            serde_json::json!({"req": "x"}),
+        )
+        .await;
 
     let (sink2, recv2) = MockSink::online();
     coord.handle_reconnect("thread-1", "user-A", sink2, 0).await;
@@ -151,7 +164,9 @@ async fn replay_missed_delivers_buffered_events_to_current_connection() {
     coord.register_thread("thread-1", "user-A");
     // emit 3 条聊天事件（经 emit_event，B4 已记录进缓冲；全局 seq 1,2,3）
     for i in 1..=3 {
-        coord.emit_event("thread-1", "new_message", serde_json::json!({"i": i})).await;
+        coord
+            .emit_event("thread-1", "new_message", serde_json::json!({"i": i}))
+            .await;
     }
 
     // 模拟重连：新连接（踢旧），replay_missed(last=1) → 投递 seq 2,3
@@ -179,14 +194,16 @@ async fn reconnect_returns_resync_when_buffer_overflowed() {
     // emit 5 条聊天事件（逐条存，溢出丢旧，触发 resync）
     for i in 1..=5 {
         coord
-            .emit_event("thread-1", "stream_chunk", serde_json::json!({"chunk": format!("chunk{i}")}))
+            .emit_event(
+                "thread-1",
+                "stream_chunk",
+                serde_json::json!({"chunk": format!("chunk{i}")}),
+            )
             .await;
     }
 
     let (sink2, _recv2) = MockSink::online();
-    let outcome = coord
-        .handle_reconnect("thread-1", "user-A", sink2, 0)
-        .await;
+    let outcome = coord.handle_reconnect("thread-1", "user-A", sink2, 0).await;
     assert!(
         outcome.resync_required,
         "缓冲溢出（请求区间含已丢失流式事件）应返回 resync_required"
@@ -201,9 +218,7 @@ async fn reconnect_kicks_old_connection() {
 
     // 重连（同 user 新 sink）应踢旧
     let (sink2, _recv2) = MockSink::online();
-    let kicked = coord
-        .handle_reconnect("thread-1", "user-A", sink2, 0)
-        .await;
+    let kicked = coord.handle_reconnect("thread-1", "user-A", sink2, 0).await;
     assert!(kicked.kicked_old_sink_id.is_some(), "应踢出旧连接");
     assert_eq!(
         kicked.kicked_old_sink_id,
@@ -236,7 +251,10 @@ async fn metrics_emit_widget_increments_push_counter() {
         .emit_event("thread-1", "widget_event", serde_json::json!({}))
         .await;
     let snap = coord.metrics().snapshot();
-    assert_eq!(snap.event_bus_push_total, 1, "emit_event 投递成功应 inc push");
+    assert_eq!(
+        snap.event_bus_push_total, 1,
+        "emit_event 投递成功应 inc push"
+    );
     assert_eq!(snap.event_bus_dropped_total, 0);
 }
 
@@ -260,7 +278,13 @@ async fn metrics_resync_increments_replay_miss() {
     coord.register("user-A", sink1);
     coord.register_thread("thread-1", "user-A");
     for i in 1..=5 {
-        coord.emit_event("thread-1", "stream_chunk", serde_json::json!({"chunk": format!("c{i}")})).await;
+        coord
+            .emit_event(
+                "thread-1",
+                "stream_chunk",
+                serde_json::json!({"chunk": format!("c{i}")}),
+            )
+            .await;
     }
     let (sink2, _recv2) = MockSink::online();
     let outcome = coord.handle_reconnect("thread-1", "user-A", sink2, 0).await;

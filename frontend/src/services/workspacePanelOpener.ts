@@ -66,13 +66,12 @@ export const TOP_NAV_PANELS: Record<string, WorkspacePanelSpec> = {
     icon: 'brain',
     moduleId: '__panel_memory__',
   },
-  workspace: {
-    id: 'ws-panel-workspace',
-    title: '工作区',
-    component: 'workspace_explorer',
+  '/tasks': {
+    id: 'ws-panel-tasks',
+    title: '任务管理',
+    component: 'pipeline_manager',
     icon: 'folder',
-    moduleId: '__panel_workspace__',
-    isPinned: true,
+    moduleId: '__panel_tasks__',
   },
 }
 
@@ -149,29 +148,29 @@ export function openWorkspacePanelByPath(path: string): boolean {
 }
 
 /**
- * 确保工作区默认页签存在（可关闭的“打开即可”模型 + 1 个钉住工作��）
+ * 确保默认「任务管理」页签存在（右侧面板打开即直接展示任务管理，非钉住可关闭）。
+ * 面板是内容承载区：默认展示任务管理，用户可关闭后经入口重新打开。
  */
-export function ensureDefaultWorkspacePanels(): void {
+export function ensureDefaultTaskPanel(): void {
   const store = useLayoutModeStore.getState()
-  const hasWorkspace = store.workspaceTabs.some((t) => t.id === 'ws-panel-workspace')
-  if (!hasWorkspace) {
-    // 先 push 不激活占用，再按是否空决定激活
-    const shouldActivate = store.workspaceTabs.length === 0
-    const tab: WorkspaceTab = {
-      id: TOP_NAV_PANELS.workspace.id,
-      title: TOP_NAV_PANELS.workspace.title,
-      icon: TOP_NAV_PANELS.workspace.icon,
-      moduleId: TOP_NAV_PANELS.workspace.moduleId!,
-      component: TOP_NAV_PANELS.workspace.component,
-      isActive: shouldActivate,
-      isPinned: true,
-    }
-    if (shouldActivate) {
-      store.addWorkspaceTab(tab)
-    } else {
-      useLayoutModeStore.setState((s) => ({
-        workspaceTabs: [...s.workspaceTabs, { ...tab, isActive: false }],
-      }))
-    }
+  const hasTaskPanel = store.workspaceTabs.some((t) => t.id === 'ws-panel-tasks')
+  if (hasTaskPanel) return
+  const shouldActivate = store.workspaceTabs.length === 0
+  const spec = TOP_NAV_PANELS['/tasks']
+  const tab: WorkspaceTab = {
+    id: spec.id,
+    title: spec.title,
+    icon: spec.icon,
+    moduleId: spec.moduleId || `__panel__${spec.id}`,
+    component: spec.component,
+    isActive: shouldActivate,
+    isPinned: false,
+  }
+  if (shouldActivate) {
+    store.addWorkspaceTab(tab)
+  } else {
+    useLayoutModeStore.setState((s) => ({
+      workspaceTabs: [...s.workspaceTabs, { ...tab, isActive: false }],
+    }))
   }
 }

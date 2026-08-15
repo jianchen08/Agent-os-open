@@ -281,10 +281,9 @@ class _GitOpsMixin:
             elif rc < 0:
                 # 瞬态失败（超时 / 找不到 git / OSError）——绝不能据此删除 .git。
                 # _run_git 把这三类异常统一映射成 rc=-1（git 自身退出码恒为正），
-                # 历史上这里的 else 分支不区分二者，一次 30s 超时或 WinError 267
-                # 就被误判为"仓库损坏"而 _force_rmtree 整个 .git，导致对象库
-                # 物理删除、提交永久丢失。失败闭合：保留 .git，返回 False 让上层
-                # （workspace_lifecycle.py 的调用方）抛 RuntimeError 介入。
+                # 必须与 git 自身非零退出（仓库空/损坏）区分：瞬态失败走失败闭合，
+                # 保留 .git，返回 False 让上层（workspace_lifecycle.py 的调用方）
+                # 抛 RuntimeError 介入。
                 logger.error(
                     "[WorkspaceLifecycle] rev-parse HEAD 失败但属瞬态（rc=%d，疑似超时/IO），"
                     "拒绝删除 .git 以防数据丢失: %s | %s",
@@ -408,8 +407,7 @@ class _GitOpsMixin:
             # 校验命令失败（瞬态超时/IO 或真实 git 错误）= 无法确认工作区是否干净。
             # 放行会让可能存在的脏已跟踪改动随 worktree 建在旧 HEAD 上，合并回来时
             # 永久丢失——这正是本函数 docstring 所立"宁可任务失败，也不丢数据"契约
-            # 要防止的。历史此处选择放行（避免偶发 git 故障放大成任务失败），但与
-            # 数据安全契约相悖：校验失败时失败闭合，让上层重新派发，而非赌"应该是干净的"。
+            # 要防止的。校验失败时失败闭合，让上层重新派发，而非赌"应该是干净的"。
             raise RuntimeError(
                 f"auto-save 后状态校验失败(rc={rc})，无法确认工作区干净，"
                 f"为避免数据丢失中止 worktree 创建: task_id={task_id}, path={cwd}"

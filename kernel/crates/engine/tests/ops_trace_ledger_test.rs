@@ -26,8 +26,8 @@ use std::sync::{Arc, Mutex};
 
 use agentos_core::traits::{MessageQueryOpts, PluginInvoker, StorageBackend};
 use agentos_core::types::{
-    LoopBody, LoopConfig, PluginContext, PluginError, PluginResult, PipelineConfig, PipelineStep,
-    Route, RouteAction, RouteNext, TenantContext, ToolExecutionResult,
+    LoopBody, LoopConfig, PipelineConfig, PipelineStep, PluginContext, PluginError, PluginResult,
+    Route, RouteAction, RouteNext, StepItem, TenantContext, ToolExecutionResult,
 };
 use agentos_engine::{PipelineExecutor, SqliteStore};
 use async_trait::async_trait;
@@ -54,10 +54,9 @@ fn all_traces(store: &SqliteStore) -> Vec<(String, String)> {
         .with_conn(|c| -> Result<Vec<(String, String)>, rusqlite::Error> {
             let mut stmt =
                 c.prepare("SELECT patch_type, patch_data FROM traces ORDER BY rowid ASC")?;
-            let rows = stmt.query_map([], |r| {
-                Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
-            })?;
-            Ok(rows.collect::<Result<Vec<_>, _>>()?)
+            let rows =
+                stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?;
+            rows.collect::<Result<Vec<_>, _>>()
         })
         .expect("读 traces 应成功")
 }
@@ -67,7 +66,11 @@ fn ledger_entries(store: &SqliteStore) -> Vec<Value> {
     all_traces(store)
         .into_iter()
         .filter_map(|(_, data)| serde_json::from_str::<Value>(&data).ok())
-        .filter(|d| d.pointer("/messages/_ops").and_then(|v| v.as_array()).is_some())
+        .filter(|d| {
+            d.pointer("/messages/_ops")
+                .and_then(|v| v.as_array())
+                .is_some()
+        })
         .collect()
 }
 
@@ -103,7 +106,8 @@ fn assert_ledger_op_shape(op: &Value) {
     }
     let keys: Vec<&str> = op.as_object().unwrap().keys().map(|k| k.as_str()).collect();
     assert!(
-        keys.iter().all(|k| matches!(*k, "op" | "seq" | "at" | "message_id" | "blob_id")),
+        keys.iter()
+            .all(|k| matches!(*k, "op" | "seq" | "at" | "message_id" | "blob_id")),
         "实录 op 绝无 msg 全文字段（只允许 op/seq/at/message_id/blob_id 定位字段），实际字段：{:?}",
         keys
     );
@@ -188,7 +192,11 @@ fn make_engine_config() -> PipelineConfig {
             steps: vec![
                 PipelineStep {
                     id: "prepare".into(),
-                    steps: prepare_plugins,
+                    steps: prepare_plugins
+                        .iter()
+                        .map(|s| StepItem::Bare(s.to_string()))
+                        .collect(),
+                    when: None,
                     context: HashMap::new(),
                     routes: vec![],
                     loop_config: None,
@@ -196,6 +204,7 @@ fn make_engine_config() -> PipelineConfig {
                 PipelineStep {
                     id: "core".into(),
                     steps: vec!["{{state.core_plugin}}".into()],
+                    when: None,
                     context: HashMap::new(),
                     routes: vec![],
                     loop_config: None,
@@ -206,6 +215,7 @@ fn make_engine_config() -> PipelineConfig {
                         "pipeline_stop_check".into(),
                         "pipeline_result_format".into(),
                     ],
+                    when: None,
                     context: HashMap::new(),
                     routes: vec![
                         Route {
@@ -233,6 +243,7 @@ fn make_engine_config() -> PipelineConfig {
                 enabled: true,
                 max_iterations: -1,
             }),
+            while_cond: None,
             exit_routes: vec![],
             run_on_error: false,
         }],
@@ -266,10 +277,7 @@ async fn run_pipeline_emit_ops(
         "pipeline_llm_core",
         PluginResult {
             state_updates: HashMap::from([
-                (
-                    "messages".to_string(),
-                    json!({ "_ops": ops }),
-                ),
+                ("messages".to_string(), json!({ "_ops": ops })),
                 ("turn_count".to_string(), json!(7)),
                 ("raw_result".to_string(), json!("STEP_DIFF_MARKER 回复文本")),
                 ("raw_tool_calls".to_string(), json!([])),
@@ -378,9 +386,9 @@ async fn delete_op_ledger_records_null_fingerprint() {
     assert_eq!(ops.len(), 4, "4 个 op（3 set + 1 delete）应各留一条实录");
 
     // delete 实录：seq=1 且指纹为 null/缺失
-    let del = ops.iter().find(|o| {
-        o["seq"].as_u64() == Some(1) && o.get("message_id").map_or(true, |v| v.is_null())
-    });
+    let del = ops
+        .iter()
+        .find(|o| o["seq"].as_u64() == Some(1) && o.get("message_id").is_none_or(|v| v.is_null()));
     assert!(
         del.is_some(),
         "delete（set seq, null）的实录 message_id 应为 null 或缺失，全部实录：{:?}",
@@ -392,9 +400,13 @@ async fn delete_op_ledger_records_null_fingerprint() {
         o["seq"].as_u64() == Some(1)
             && o.get("message_id")
                 .and_then(|v| v.as_str())
-                .map_or(false, |s| s.starts_with("mc_"))
+                .is_some_and(|s| s.starts_with("mc_"))
     });
-    assert!(set1.is_some(), "槽 1 的 set 实录应带 mc_ 指纹，全部实录：{:?}", ops);
+    assert!(
+        set1.is_some(),
+        "槽 1 的 set 实录应带 mc_ 指纹，全部实录：{:?}",
+        ops
+    );
 
     // 表侧 delete 已生效：槽位 0,2（1 为 gap）
     let rows = store
@@ -432,7 +444,10 @@ async fn ledger_fingerprint_matches_slot_message_id() {
     let rows = store
         .get_slot_messages_by_pipeline("p_ledger_c", "default", MessageQueryOpts::default())
         .unwrap();
-    let row0 = rows.iter().find(|r| r.seq_in_branch == 0).expect("槽 0 应在表");
+    let row0 = rows
+        .iter()
+        .find(|r| r.seq_in_branch == 0)
+        .expect("槽 0 应在表");
     assert_eq!(
         row0.message_id, seq0_fingerprint,
         "实录指纹应与表侧 message_id 同源（内容锚一处定义）"
@@ -450,8 +465,14 @@ async fn step_trace_keeps_scalar_diff_besides_messages_ledger() {
         "run_ledger_d",
         "p_ledger_d",
         vec![
-            set(0, json!({ "role": "user", "content": "FULLTEXT_MARKER_d_用户问" })),
-            set(1, json!({ "role": "assistant", "content": "FULLTEXT_MARKER_d_助手答" })),
+            set(
+                0,
+                json!({ "role": "user", "content": "FULLTEXT_MARKER_d_用户问" }),
+            ),
+            set(
+                1,
+                json!({ "role": "assistant", "content": "FULLTEXT_MARKER_d_助手答" }),
+            ),
         ],
     )
     .await;
@@ -498,8 +519,14 @@ async fn get_step_traces_by_thread_reads_back_ledger_content() {
         run_id,
         pipeline_id,
         vec![
-            set(0, json!({ "role": "user", "content": "FULLTEXT_MARKER_e_问" })),
-            set(1, json!({ "role": "assistant", "content": "FULLTEXT_MARKER_e_答" })),
+            set(
+                0,
+                json!({ "role": "user", "content": "FULLTEXT_MARKER_e_问" }),
+            ),
+            set(
+                1,
+                json!({ "role": "assistant", "content": "FULLTEXT_MARKER_e_答" }),
+            ),
         ],
     )
     .await;
@@ -515,10 +542,10 @@ async fn get_step_traces_by_thread_reads_back_ledger_content() {
     // (a) 目标架构：message_slots.run_id（任务 7 后 slots 纯索引含 run_id）；
     store
         .with_conn(|c| -> Result<usize, rusqlite::Error> {
-            Ok(c.execute(
+            c.execute(
                 "UPDATE message_slots SET run_id = ?1 WHERE tenant_id = ?2 AND pipeline_id = ?3",
                 rusqlite::params![run_id, "default", pipeline_id],
-            )?)
+            )
         })
         .unwrap();
     // (b) 现状：经 messages 表反查 run_id（表退役后此 INSERT 失败，忽略——路径 (a) 兜底）。

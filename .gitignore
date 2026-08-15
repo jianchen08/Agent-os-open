@@ -162,3 +162,5 @@ agentos_kernel.db-shm
 
 # Godot 编辑器缓存（hosts/godot-demo 首次打开生成）
 hosts/godot-demo/.godot/
+.zcode_tmp_*
+kernel/schema_tmp.json

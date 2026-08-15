@@ -478,7 +478,7 @@ class PluginContext:
     state: dict[str, Any]
     config: dict[str, Any] = field(default_factory=dict)
     _services: dict[str, Any] = field(default_factory=dict)
-    plugin_types: PluginTypeSlot = field(default=None)  # type: ignore[assignment]
+    plugin_types: PluginTypeSlot = field(default_factory=PluginTypeSlot)
 
     def __post_init__(self) -> None:
         if self.plugin_types is None:

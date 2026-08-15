@@ -18,11 +18,11 @@ use std::fs;
 use std::sync::Arc;
 use std::time::Duration;
 
-use async_trait::async_trait;
-use agentos_core::traits::{PluginInvoker,
-    LoadedPlugin, PluginLoader, PluginManifest, PluginStatus, PluginType,
+use agentos_core::traits::{
+    LoadedPlugin, PluginInvoker, PluginLoader, PluginManifest, PluginStatus, PluginType,
 };
 use agentos_mcp::McpClient;
+use async_trait::async_trait;
 use parking_lot::RwLock;
 use serde_json::{json, Value};
 
@@ -213,7 +213,7 @@ fn make_sidecar_manifest(id: &str, entry: &str) -> PluginManifest {
         mcp: None,
         lifecycle: None,
         native: None,
-        wasm: None,
+        granted_capabilities: vec![],
         requires_content: None,
         invoke_entry: None,
         config_files: vec![],
@@ -235,11 +235,13 @@ async fn fp1_load_config_reads_yaml_files() {
     fs::write(
         config_dir.path().join("memory_storage.yaml"),
         "storage_backend: sqlite\ncache_size: 1000\n",
-    ).unwrap();
+    )
+    .unwrap();
     fs::write(
         config_dir.path().join("api_config.yaml"),
         "timeout: 30\nhost: localhost\n",
-    ).unwrap();
+    )
+    .unwrap();
 
     let loader = agentos_plugin_loader::PluginLoaderImpl::new("/tmp/nonexistent", None)
         .with_config_root(config_dir.path());
@@ -263,7 +265,10 @@ async fn fp1_load_config_reads_yaml_files() {
 // ═══ FP2: McpClient::initialize params 包含 config 字段 ═══
 
 #[tokio::test]
-#[cfg_attr(windows, ignore = "mock server 依赖 Unix bash+stdio,Windows 本地不可靠;CI(Ubuntu)覆盖")]
+#[cfg_attr(
+    windows,
+    ignore = "mock server 依赖 Unix bash+stdio,Windows 本地不可靠;CI(Ubuntu)覆盖"
+)]
 async fn fp2_initialize_includes_config_in_params() {
     let result_file = tmp_result_file("fp2_verify_result.json");
     clear_result_file(&result_file);
@@ -287,14 +292,20 @@ async fn fp2_initialize_includes_config_in_params() {
     assert_eq!(received["event"], "initialize");
 
     let received_config = &received["received_config"];
-    assert!(received["config_is_null"] == false, "config must NOT be null");
+    assert!(
+        received["config_is_null"] == false,
+        "config must NOT be null"
+    );
     assert!(received_config.is_object(), "config should be JSON object");
     assert!(received_config["memory_storage"]["storage_backend"] == "sqlite");
     assert!(received_config["memory_storage"]["cache_size"] == 1000);
 }
 
 #[tokio::test]
-#[cfg_attr(windows, ignore = "mock server 依赖 Unix bash+stdio,Windows 本地不可靠;CI(Ubuntu)覆盖")]
+#[cfg_attr(
+    windows,
+    ignore = "mock server 依赖 Unix bash+stdio,Windows 本地不可靠;CI(Ubuntu)覆盖"
+)]
 async fn fp2_initialize_with_null_config() {
     let result_file = tmp_result_file("fp2b_verify_result.json");
     clear_result_file(&result_file);
@@ -318,7 +329,10 @@ async fn fp2_initialize_with_null_config() {
 // ═══ FP3: invoker 在创建 MCP client 时加载并注入配置 ═══
 
 #[tokio::test]
-#[cfg_attr(windows, ignore = "mock server 依赖 Unix bash+stdio,Windows 本地不可靠;CI(Ubuntu)覆盖")]
+#[cfg_attr(
+    windows,
+    ignore = "mock server 依赖 Unix bash+stdio,Windows 本地不可靠;CI(Ubuntu)覆盖"
+)]
 async fn fp3_invoker_loads_and_injects_config() {
     let result_file = tmp_result_file("fp3_verify_result.json");
     clear_result_file(&result_file);
@@ -345,8 +359,15 @@ async fn fp3_invoker_loads_and_injects_config() {
         .invoke_tool("test_plugin", "execute", &json!({"input": "test"}))
         .await;
 
-    assert!(result.is_ok(), "invoke_tool should succeed, got: {:?}", result.err());
-    assert!(loader.get_load_config_count() >= 1, "load_config called >= 1");
+    assert!(
+        result.is_ok(),
+        "invoke_tool should succeed, got: {:?}",
+        result.err()
+    );
+    assert!(
+        loader.get_load_config_count() >= 1,
+        "load_config called >= 1"
+    );
 
     let received = read_result_file(&result_file);
     assert_eq!(received["event"], "initialize");
@@ -359,7 +380,10 @@ async fn fp3_invoker_loads_and_injects_config() {
 }
 
 #[tokio::test]
-#[cfg_attr(windows, ignore = "mock server 依赖 Unix bash+stdio,Windows 本地不可靠;CI(Ubuntu)覆盖")]
+#[cfg_attr(
+    windows,
+    ignore = "mock server 依赖 Unix bash+stdio,Windows 本地不可靠;CI(Ubuntu)覆盖"
+)]
 async fn fp3_config_change_triggers_reload() {
     let result_file = tmp_result_file("fp3b_verify_result.json");
     let _script_dir = create_mock_server_script(&result_file);
@@ -377,7 +401,9 @@ async fn fp3_config_change_triggers_reload() {
     let invoker = agentos_invoker::PluginInvokerImpl::new(loader.clone());
 
     clear_result_file(&result_file);
-    let _ = invoker.invoke_tool("reload_plugin", "execute", &json!({})).await;
+    let _ = invoker
+        .invoke_tool("reload_plugin", "execute", &json!({}))
+        .await;
     let received_v1 = read_result_file(&result_file);
     assert_eq!(received_v1["received_config"]["version"], "v1");
 
@@ -386,13 +412,21 @@ async fn fp3_config_change_triggers_reload() {
 
     invoker.force_unload("reload_plugin").await.unwrap();
     clear_result_file(&result_file);
-    let _ = invoker.invoke_tool("reload_plugin", "execute", &json!({})).await;
+    let _ = invoker
+        .invoke_tool("reload_plugin", "execute", &json!({}))
+        .await;
 
     let count_after = loader.get_load_config_count();
-    assert!(count_after > count_before, "load_config called again after reload");
+    assert!(
+        count_after > count_before,
+        "load_config called again after reload"
+    );
 
     let received_v2 = read_result_file(&result_file);
-    assert_eq!(received_v2["received_config"]["version"], "v2", "After reload config should be v2");
+    assert_eq!(
+        received_v2["received_config"]["version"], "v2",
+        "After reload config should be v2"
+    );
 }
 
 // ═══ FP4: 无配置时降级为空 {}，不报错 ═══
@@ -413,7 +447,10 @@ async fn fp4_nonexistent_dir_returns_empty() {
 }
 
 #[tokio::test]
-#[cfg_attr(windows, ignore = "mock server 依赖 Unix bash+stdio,Windows 本地不可靠;CI(Ubuntu)覆盖")]
+#[cfg_attr(
+    windows,
+    ignore = "mock server 依赖 Unix bash+stdio,Windows 本地不可靠;CI(Ubuntu)覆盖"
+)]
 async fn fp4_invoker_works_with_empty_config() {
     let result_file = tmp_result_file("fp4_verify_result.json");
     clear_result_file(&result_file);
@@ -430,22 +467,31 @@ async fn fp4_invoker_works_with_empty_config() {
 
     let invoker = agentos_invoker::PluginInvokerImpl::new(loader);
 
-    let result = invoker.invoke_tool("empty_config_plugin", "execute", &json!({})).await;
-    assert!(result.is_ok(), "invoke_tool with empty config should succeed");
+    let result = invoker
+        .invoke_tool("empty_config_plugin", "execute", &json!({}))
+        .await;
+    assert!(
+        result.is_ok(),
+        "invoke_tool with empty config should succeed"
+    );
 
     let received = read_result_file(&result_file);
     assert_eq!(received["event"], "initialize");
     let config = &received["received_config"];
     assert!(
         config.is_object() && config.as_object().map(|o| o.is_empty()).unwrap_or(false),
-        "config should be empty object {{}}, got: {}", config
+        "config should be empty object {{}}, got: {}",
+        config
     );
 }
 
 // ═══ FP5: 配置热重载通知 ═══
 
 #[tokio::test]
-#[cfg_attr(windows, ignore = "mock server 依赖 Unix bash+stdio,Windows 本地不可靠;CI(Ubuntu)覆盖")]
+#[cfg_attr(
+    windows,
+    ignore = "mock server 依赖 Unix bash+stdio,Windows 本地不可靠;CI(Ubuntu)覆盖"
+)]
 async fn fp5_send_config_change_notification() {
     let result_file = tmp_result_file("fp5_verify_result.json");
     clear_result_file(&result_file);
@@ -479,7 +525,10 @@ async fn fp5_send_config_change_notification() {
 // ═══ E2E: YAML → load_config → initialize params ═══
 
 #[tokio::test]
-#[cfg_attr(windows, ignore = "mock server 依赖 Unix bash+stdio,Windows 本地不可靠;CI(Ubuntu)覆盖")]
+#[cfg_attr(
+    windows,
+    ignore = "mock server 依赖 Unix bash+stdio,Windows 本地不可靠;CI(Ubuntu)覆盖"
+)]
 async fn e2e_full_config_injection_chain() {
     let result_file = tmp_result_file("e2e_verify_result.json");
     clear_result_file(&result_file);
@@ -488,11 +537,13 @@ async fn e2e_full_config_injection_chain() {
     fs::write(
         config_dir.path().join("memory_storage.yaml"),
         "storage_backend: redis\ncache_size: 2048\n",
-    ).unwrap();
+    )
+    .unwrap();
     fs::write(
         config_dir.path().join("api_config.yaml"),
         "timeout: 45\nhost: 0.0.0.0\n",
-    ).unwrap();
+    )
+    .unwrap();
 
     let _script_dir = create_mock_server_script(&result_file);
     let script_path = _script_dir.path().join("mock_server.sh");
@@ -520,7 +571,11 @@ async fn e2e_full_config_injection_chain() {
         .invoke_tool("e2e_plugin", "execute", &json!({"input": "e2e_test"}))
         .await;
 
-    assert!(result.is_ok(), "E2E invoke_tool should succeed, error: {:?}", result.err());
+    assert!(
+        result.is_ok(),
+        "E2E invoke_tool should succeed, error: {:?}",
+        result.err()
+    );
 
     let received = read_result_file(&result_file);
     assert_eq!(received["event"], "initialize");

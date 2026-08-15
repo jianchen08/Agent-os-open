@@ -1,4 +1,4 @@
-# @feature: task_manage 0.2 服务接线 | @ci: python-plugins-test
+# @feature: FP-0.2.二 内部模块 manifest（task_manage 0.2 服务接线） | @ci: python-coverage
 """task_manage 0.2 接线回归测试。
 
 历史 bug：TaskTool 依赖已废弃的 0.1 `infrastructure.service_provider`，

@@ -1,3 +1,4 @@
+# @feature: FP-0.2.五 审批闭环 | @ci: python-coverage
 """human 插件测试 conftest——把插件目录注入 sys.path。
 
 插件位于 plugins/shared/tools/human/，内部用平铺 import

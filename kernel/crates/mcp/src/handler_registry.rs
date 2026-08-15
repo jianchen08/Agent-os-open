@@ -7,8 +7,8 @@
 //!
 //! ## 为什么需要注册表
 //!
-//! 历史 `KernelCapabilityRouter::handle` 是一个巨大的 `match (capability, method)`，
-//! 新增一个能力 namespace（如 `human-interaction`）要同时改：
+//! 集中式 `match (capability, method)` 分派下，新增一个能力 namespace
+//! （如 `human-interaction`）要同时改：
 //! 1. `STANDARD_CAPABILITIES` 白名单常量；
 //! 2. `build_declared_capabilities` 声明；
 //! 3. `handle` 的 match 分支。
@@ -93,13 +93,13 @@ impl CapabilityHandlerRegistry {
     /// Returns:
     /// - `Ok(value)`: handler 返回的成功结果；
     /// - `Err(McpError)`: namespace 未注册（method not found 语义）或 handler 内部失败。
-    pub async fn route(&self, namespace: &str, method: &str, params: Value) -> Result<Value, McpError> {
-        let handler = {
-            self.handlers
-                .read()
-                .get(namespace)
-                .cloned()
-        };
+    pub async fn route(
+        &self,
+        namespace: &str,
+        method: &str,
+        params: Value,
+    ) -> Result<Value, McpError> {
+        let handler = { self.handlers.read().get(namespace).cloned() };
         match handler {
             Some(h) => h.handle(method, params).await,
             None => Err(McpError::Protocol {
@@ -125,7 +125,12 @@ impl CapabilityRouter for CapabilityHandlerRegistry {
     ///
     /// 这让注册表本身可以作为一个 `CapabilityRouter` 注入到 McpClient，
     /// 内核无需再维护单独的 router 实现即可获得动态路由能力。
-    async fn handle(&self, capability: &str, method: &str, params: Value) -> Result<Value, McpError> {
+    async fn handle(
+        &self,
+        capability: &str,
+        method: &str,
+        params: Value,
+    ) -> Result<Value, McpError> {
         self.route(capability, method, params).await
     }
 
@@ -188,7 +193,10 @@ mod tests {
     async fn test_route_rejects_unregistered_namespace() {
         let registry = CapabilityHandlerRegistry::new();
         let err = registry.route("unknown", "method", json!({})).await;
-        assert!(err.is_err(), "未注册的 namespace 必须返回错误，不能静默成功");
+        assert!(
+            err.is_err(),
+            "未注册的 namespace 必须返回错误，不能静默成功"
+        );
         let msg = format!("{}", err.unwrap_err());
         assert!(
             msg.contains("not registered"),
@@ -251,10 +259,7 @@ mod tests {
         }));
 
         let router: Arc<dyn CapabilityRouter> = Arc::new(registry);
-        let result = router
-            .handle("via-trait", "ping", json!({}))
-            .await
-            .unwrap();
+        let result = router.handle("via-trait", "ping", json!({})).await.unwrap();
         assert_eq!(result["namespace"], "via-trait");
         assert_eq!(result["method"], "ping");
     }
@@ -306,12 +311,11 @@ mod tests {
                         .and_then(|v| v.as_str())
                         .unwrap_or("unknown")
                         .to_string();
-                    let name = params
-                        .get("name")
-                        .and_then(|v| v.as_str())
-                        .ok_or_else(|| McpError::Protocol {
+                    let name = params.get("name").and_then(|v| v.as_str()).ok_or_else(|| {
+                        McpError::Protocol {
                             message: "metrics.record 缺少 name 参数".to_string(),
-                        })?;
+                        }
+                    })?;
                     let value = params
                         .get("value")
                         .and_then(|v| v.as_f64())
@@ -386,7 +390,11 @@ mod tests {
 
         let router: Arc<dyn CapabilityRouter> = Arc::new(registry);
         let err = router
-            .handle("metrics", "record", json!({"_plugin_id": "p1", "value": 1.0}))
+            .handle(
+                "metrics",
+                "record",
+                json!({"_plugin_id": "p1", "value": 1.0}),
+            )
             .await;
         assert!(err.is_err(), "缺少 name 参数应返回错误");
     }

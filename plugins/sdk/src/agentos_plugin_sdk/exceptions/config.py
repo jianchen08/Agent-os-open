@@ -23,7 +23,7 @@ class ConfigNotFoundError(ConfigException):
         path: 配置文件路径
     """
 
-    def __init__(self, path: str, details: dict[str, Any] | None = None):
+    def __init__(self, path: str, details: dict[str, Any] | None = None) -> None:
         """初始化配置文件不存在异常
 
         Args:
@@ -51,7 +51,7 @@ class ConfigValidationError(ConfigException):
         self,
         errors: list[str],
         details: dict[str, Any] | None = None,
-    ):
+    ) -> None:
         """初始化配置验证失败异常
 
         Args:
@@ -75,7 +75,7 @@ class ModelNotFoundError(ConfigException):
         alias: 模型别名
     """
 
-    def __init__(self, alias: str, details: dict[str, Any] | None = None):
+    def __init__(self, alias: str, details: dict[str, Any] | None = None) -> None:
         """初始化模型别名不存在异常
 
         Args:
@@ -99,7 +99,7 @@ class ProviderNotFoundError(ConfigException):
         provider: 提供商名称
     """
 
-    def __init__(self, provider: str, details: dict[str, Any] | None = None):
+    def __init__(self, provider: str, details: dict[str, Any] | None = None) -> None:
         """初始化提供商不存在异常
 
         Args:
@@ -123,7 +123,7 @@ class EndpointNotFoundError(ConfigException):
         endpoint: 端点名称
     """
 
-    def __init__(self, endpoint: str, details: dict[str, Any] | None = None):
+    def __init__(self, endpoint: str, details: dict[str, Any] | None = None) -> None:
         """初始化端点不存在异常
 
         Args:
@@ -147,7 +147,7 @@ class EnvVarNotFoundError(ConfigException):
         var_name: 环境变量名称
     """
 
-    def __init__(self, var_name: str, details: dict[str, Any] | None = None):
+    def __init__(self, var_name: str, details: dict[str, Any] | None = None) -> None:
         """初始化环境变量未设置异常
 
         Args:

@@ -259,10 +259,8 @@ class PerformanceMonitor:
         if metric_type not in self._metrics_history:
             self._metrics_history[metric_type] = []
 
-        # 记录指标
         self._metrics_history[metric_type].append({"timestamp": time.time(), "metrics": metrics.model_dump()})
 
-        # 限制历史记录长度
         if len(self._metrics_history[metric_type]) > self._max_history_size:
             self._metrics_history[metric_type] = self._metrics_history[metric_type][-self._max_history_size :]
 

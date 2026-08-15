@@ -89,9 +89,10 @@ describe('PageRenderer — 按 space 分发', () => {
       },
     })
     render(<PageRenderer pages={[page]} />)
-    expect(screen.getByTestId('schema-field-model')).toBeInTheDocument()
-    expect(screen.getByTestId('schema-field-name')).toBeInTheDocument()
-    expect(screen.getByTestId('schema-submit')).toBeInTheDocument()
+    // RjsfForm（antd 主题）渲染：label 即字段存在证明，保存按钮由 SchemaDriver 透传
+    expect(screen.getByText('模型')).toBeInTheDocument()
+    expect(screen.getByText('名称')).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: /保\s*存/ })).toBeInTheDocument()
   })
 
   it('dock page（slot=status）→ 渲染状态条目', () => {

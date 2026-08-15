@@ -1,0 +1,9 @@
+# model_prompt_adapter 插件配置（内核按 manifest config_files 注入 sidecar get_config）。
+#
+# default_model：state 无 model_id/model_tier 时的模型匹配回退值。
+# 必须与 config/models/llm.yaml 的 defaults.chat 保持同步：
+#   实际选模 = state.model_id（恒空，见插件注释）→ state.model_tier →
+#   defaults.chat（llm_core 内部解析，prepare 链插件看不到最终模型，
+#   故用本值做接线）。把 defaults.chat 切到 deepseek-v4-pro 时，同步把
+#   本值改为 deepseek-v4-pro，rules.yaml 的 pro 规则才会命中。
+default_model: deepseek-v4-flash

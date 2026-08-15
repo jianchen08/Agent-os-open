@@ -103,6 +103,44 @@ class HumanInteractionTool(BuiltinTool, WorkspaceAwareMixin):
         return self._service
 
     @staticmethod
+    def _normalize_options(raw: Any) -> list[dict[str, Any]] | None:
+        """归一化 LLM 传参形态的 options 为 [{id, label}] 列表。
+
+        实测 MiniMax-M3 会把字符串数组包成对象（options={"item": ["批准","拒绝"]}），
+        也有裸字符串数组（["批准","拒绝"]）与对象数组。未归一化时前端拿不到合法
+        选项 → 审批卡片只剩输入框无选项按钮。统一在工具入口收敛，后续
+        record/事件/selected_option 全链路只见干净形态。
+        """
+        items: list[Any] | None = None
+        if isinstance(raw, list):
+            items = raw
+        elif isinstance(raw, dict):
+            # 取第一个数组值（item/list/values/options 等任意键）
+            for v in raw.values():
+                if isinstance(v, list):
+                    items = v
+                    break
+        if not items:
+            return None
+        out: list[dict[str, Any]] = []
+        for i, item in enumerate(items):
+            if isinstance(item, str):
+                if item.strip():
+                    out.append({"id": str(i), "label": item.strip()})
+            elif isinstance(item, dict):
+                label = item.get("label") or item.get("text") or item.get("name")
+                if not label:
+                    continue
+                entry = {
+                    "id": str(item.get("id") if item.get("id") is not None else i),
+                    "label": str(label),
+                }
+                if item.get("description"):
+                    entry["description"] = str(item["description"])
+                out.append(entry)
+        return out or None
+
+    @staticmethod
     def get_tool_definition() -> Tool:
         """获取工具定义"""
         return Tool(
@@ -133,7 +171,7 @@ class HumanInteractionTool(BuiltinTool, WorkspaceAwareMixin):
                                 "label": {"type": "string"},
                             },
                         },
-                        "description": "选项列表（选择模式）",
+                        "description": "选项列表（选择模式）。必须是 JSON 数组，例如 [\"批准\",\"拒绝\"] 或 [{\"id\":\"1\",\"label\":\"批准\"},{\"id\":\"2\",\"label\":\"拒绝\"}]。禁止包一层对象（如 {\"item\":[...]}）",
                     },
                     "questions": {
                         "type": "array",
@@ -339,7 +377,8 @@ class HumanInteractionTool(BuiltinTool, WorkspaceAwareMixin):
 
         title = inputs.get("title", "")
         description = inputs.get("description", "")
-        options = inputs.get("options")
+        # LLM 传参形态归一化（{"item": [...]} / ["a","b"] / [{id,label}] → [{id,label}]）
+        options = self._normalize_options(inputs.get("options"))
         questions = inputs.get("questions")
         timeout_seconds = inputs.get("timeout_seconds", 86400)
         priority_str = inputs.get("priority", "normal")

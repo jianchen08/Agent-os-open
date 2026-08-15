@@ -19,7 +19,6 @@ from __future__ import annotations
 import locale
 import logging
 import platform
-from typing import ClassVar  # noqa: F401
 
 logger = logging.getLogger(__name__)
 

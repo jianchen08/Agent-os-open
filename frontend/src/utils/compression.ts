@@ -1,7 +1,8 @@
 /**
  * WebSocket 消息压缩工具
  *
- * 简化版本，暂时禁用压缩功能，避免pako依赖问题
+ * DEBT: WS 负载压缩禁用——pako 依赖引入被搁置。妥协：明文 JSON 传输（仅前置 1 字节未压缩标记）；
+ * 触发条件：WS 消息 P99 > 256KB 或网关带宽成为瓶颈时启用 pako/CompressionStream；复查：0.3 规划期。
  */
 
 /**
@@ -49,12 +50,12 @@ export interface DecompressionResult {
 }
 
 /**
- * 默认压缩配置（暂时禁用压缩）
+ * 默认压缩配置（压缩禁用，DEBT 说明见文件头）
  */
 const DEFAULT_CONFIG: CompressionConfig = {
   threshold: 1024, // 1KB
   level: 6, // 平衡压缩率和速度
-  enabled: false, // 暂时禁用压缩
+  enabled: false, // DEBT: 压缩禁用——明文 JSON 传输；触发条件/复查见文件头
 }
 
 /**
@@ -77,7 +78,7 @@ export class MessageCompressor {
     this.config = {
       ...DEFAULT_CONFIG,
       ...config,
-      enabled: false, // 强制禁用压缩
+      enabled: false, // DEBT: 构造时无视传入 config 强制禁用（债务说明见文件头）
     }
   }
 
@@ -168,7 +169,7 @@ export class MessageCompressor {
     this.config = {
       ...this.config,
       ...config,
-      enabled: false, // 强制禁用压缩
+      enabled: false, // DEBT: 更新配置时仍强制禁用（债务说明见文件头）
     }
 
   }

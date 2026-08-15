@@ -241,6 +241,22 @@ export const useAgentTabStore = create<AgentTabState>((set, get) => ({
         }
         return tab
       })
+      // 不变量：主标签（main-${sessionId}）必须存在——旧 localStorage 数据可能
+      // 只存了子标签（历史版本/异常写入），缺失时补建，否则主管道跳转会找不到
+      // 主标签而误走"新建子标签"路径（统一跳转逻辑依赖此不变量）。
+      if (!tabs.some((t) => t.agentLevel === 1)) {
+        tabs = [
+          {
+            id: `main-${sessionId}`,
+            agentId: mainAgentId, agentName: '主Agent', agentLevel: 1,
+            taskId: undefined, parentRecordId: undefined,
+            pipelineRunId: mainPipelineId || undefined,
+            path: ['主Agent'], status: 'running', hasUnread: false,
+            canClose: false, messages: [],
+          },
+          ...tabs,
+        ]
+      }
       activeTabId = saved.activeTabId || tabs[0].id
     } else {
       // 新会话：建主 Tab
@@ -284,7 +300,7 @@ export const useAgentTabStore = create<AgentTabState>((set, get) => ({
     // 历史子 Tab 的消息在用户真正切换到该 Tab 时由 switchToTab/setActiveTab
     // 触发 loadTabMessages 加载（IndexedDB 有缓存时秒开，无缓存才发请求）。
     // 这样把进会话的并发消息请求从 N（历史累积的子 Tab 数）降到最多 1，
-    // 避免会话切换瞬间打爆后端（曾出现 14 个子 Tab 并发 fetch 全部超时雪崩）。
+    // 避免会话切换瞬间打爆后端。
     const pipelineStore = usePipelineMessageStore.getState()
     tabs.forEach((tab) => {
       if (tab.agentLevel !== 1 && tab.pipelineRunId) {
@@ -601,7 +617,7 @@ export const useAgentTabStore = create<AgentTabState>((set, get) => ({
     // 确保后台管道在切标签期间产生的新消息能被显示
     get().loadTabMessages(tabId)
 
-    // 刷新页面后恢复到错误的标签（如上次选中的子标签而非当前主标签）。
+    // 持久化当前标签状态：刷新页面后恢复到当前激活标签（而非残留的其他标签）。
     get().saveCurrentTabs()
   },
 
@@ -785,7 +801,7 @@ export const useAgentTabStore = create<AgentTabState>((set, get) => ({
     return get().pipelineTabMap[pipelineId]
   },
 
-  /** 从后端 API 加载子 Tab 消息（持久化恢复） 历史修复记录（逻辑已被 pipelineStore.fetchMessages 替代）： */
+  /** 从后端 API 加载子 Tab 消息（持久化恢复）统一走 loadPipelineMessages / pipelineStore.fetchMessages（含并发防重与 404 静默） */
   loadTabMessages: async (tabId, pipelineRunId) => {
     const state = get()
 

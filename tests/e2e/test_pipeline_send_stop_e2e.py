@@ -1,3 +1,4 @@
+# @feature: FP-MIGR 0.1→0.2迁移（0.1 遗留测试） | @ci: python-plugins-test
 """管道 send/stop/信号路径 E2E 测试。
 
 针对管道解耦重构（I1-I6）验证 WS 真实链路：

@@ -6,10 +6,7 @@
 
 from __future__ import annotations
 
-import asyncio
 import json
-import os
-import tempfile
 from pathlib import Path
 
 import pytest
@@ -25,8 +22,8 @@ from agentos_builtin_tools.fs_tools import (
     move_file,
 )
 from agentos_builtin_tools.search_tool import enhanced_search
-from agentos_builtin_tools.web_tool import WEB_OPERATE_SCHEMA, web_operate
 from agentos_builtin_tools.server import TOOL_REGISTRY
+from agentos_builtin_tools.web_tool import WEB_OPERATE_SCHEMA, web_operate
 
 pytestmark = pytest.mark.unit
 
@@ -402,6 +399,7 @@ class TestEnhancedSearch:
         McpServer._handle_tools_call（与内核→sidecar 同路径）传字符串验证。
         """
         from agentos_plugin_sdk import McpServer
+
         from agentos_builtin_tools.server import create_plugin
 
         f = tmp_path / "lines.txt"
@@ -413,8 +411,8 @@ class TestEnhancedSearch:
             "name": "file_read",
             "arguments": {"path": str(f), "start_line": "2", "end_line": "4"},
         })
-        assert call_result["isError"] is False
-        content = json.loads(call_result["content"][0]["text"])
+        assert call_result.is_error is False
+        content = json.loads(call_result.content[0].text)
         assert content["success"] is True
         body = content["output"]["content"]
         assert "L2" in body and "L4" in body
@@ -462,6 +460,7 @@ class TestMcpServerWrapper:
     async def test_tool_call_via_server(self, tmp_path: Path) -> None:
         """模拟 MCP tools/call 流程：通过 server 的 McpServer handler 调用工具。"""
         from agentos_plugin_sdk import McpServer
+
         from agentos_builtin_tools.server import create_plugin
 
         plugin = create_plugin()
@@ -472,8 +471,8 @@ class TestMcpServerWrapper:
         )
 
         # 模拟 tools/list
-        result = server._handle_tools_list()
-        assert len(result["tools"]) == 10
+        result = await server._on_list_tools(None, None)
+        assert len(result.tools) == 10
 
         # 模拟 tools/call (file_read on temp file)
         f = tmp_path / "mcp_test.txt"
@@ -482,9 +481,9 @@ class TestMcpServerWrapper:
             "name": "file_read",
             "arguments": {"path": str(f)},
         })
-        assert call_result["isError"] is False
+        assert call_result.is_error is False
         import json
 
-        content = json.loads(call_result["content"][0]["text"])
+        content = json.loads(call_result.content[0].text)
         assert content["success"] is True
         assert "mcp_content" in content["output"]["content"]

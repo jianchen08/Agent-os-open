@@ -3,6 +3,7 @@
 //!
 //! 验证 ADR §3.3 / 附录 E.1.2 / E.1.3：
 //! - raw body(base64) + 全量 headers + query 透传给插件 http.handle（不反序列化）
+//! - query 多值形态（query_multi，重复 key 如 filter=a&filter=b 全量到达插件——A1 修复）
 //! - 插件自定义响应（status/headers/body）原样回写 HTTP
 //! - per-endpoint timeout（慢插件 → 504）
 //! - per-endpoint max_concurrency（超限 → 503）
@@ -16,8 +17,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use agentos_core::traits::{
-    CapabilityRegistry, HttpEndpoint, HttpHandleCapability, HttpHandleRequest,
-    HttpHandleResponse,
+    CapabilityRegistry, HttpEndpoint, HttpHandleCapability, HttpHandleRequest, HttpHandleResponse,
 };
 use agentos_plugin_loader::CapabilityRegistryImpl;
 use base64::Engine;
@@ -105,6 +105,158 @@ async fn test_dispatcher_passes_raw_body_bytes_untouched() {
         }
         other => panic!("expected Handled, got {other:?}"),
     }
+}
+
+// ── 多值 query 透传（A1：重复 key 不塌缩） ─────────────────────
+
+/// 捕获型 handler：把收到的 query_multi 序列化为 JSON 塞进响应 body（回显验证）。
+struct QueryEchoHandler;
+
+#[async_trait::async_trait]
+impl HttpHandleCapability for QueryEchoHandler {
+    async fn handle(&self, req: HttpHandleRequest) -> Result<HttpHandleResponse, String> {
+        let payload = serde_json::json!({
+            "query": req.query,
+            "query_multi": req.query_multi,
+        });
+        Ok(HttpHandleResponse {
+            status: 200,
+            headers: HashMap::new(),
+            body: base64::engine::general_purpose::STANDARD.encode(payload.to_string().as_bytes()),
+            body_encoding: "base64".to_string(),
+        })
+    }
+}
+
+/// 直接调 dispatch_http：重复 key（filter=a&filter=b&filter=c 的多值 map）全量
+/// 到达插件——query_multi 保序全量，单值 query 取最后一个（last-wins 旧语义）。
+#[tokio::test]
+async fn test_dispatcher_passes_multi_value_query_untouched() {
+    let registry = Arc::new(CapabilityRegistryImpl::new());
+    registry
+        .register_http_route("p1", endpoint("r", "GET", "/ext/p1/list"))
+        .unwrap();
+    let dispatcher = HttpDispatcher::new(registry, Arc::new(QueryEchoHandler));
+
+    let query_multi = HashMap::from([(
+        "filter".to_string(),
+        vec![
+            "memory_type:eq:episode".to_string(),
+            "score:gt:3".to_string(),
+            "status:eq:active".to_string(),
+        ],
+    )]);
+    let outcome = dispatch_http(
+        &dispatcher,
+        "/ext/p1/list",
+        "GET",
+        vec![],
+        HashMap::new(),
+        query_multi,
+    )
+    .await;
+
+    match outcome {
+        DispatchOutcome::Handled(resp) => {
+            let body = base64::engine::general_purpose::STANDARD
+                .decode(&resp.body)
+                .unwrap();
+            let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+            // query_multi：filter 是全量数组，保序（db_admin 多条件 AND 的输入）
+            let filter = json["query_multi"]["filter"].as_array().unwrap();
+            assert_eq!(
+                filter,
+                &[
+                    serde_json::json!("memory_type:eq:episode"),
+                    serde_json::json!("score:gt:3"),
+                    serde_json::json!("status:eq:active"),
+                ],
+                "重复 filter key 应全量保序到达插件"
+            );
+            // 单值 query：last-wins（与旧 HashMap 覆盖语义一致，旧插件不受影响）
+            assert_eq!(json["query"]["filter"], "status:eq:active");
+        }
+        other => panic!("expected Handled, got {other:?}"),
+    }
+}
+
+/// 经 build_router 的 /ext 通配端点全链路：axum 提取（serde_urlencoded 多值收集）
+/// → dispatch_http → 插件收到的 query_multi 里 filter 是全量数组。
+#[tokio::test]
+async fn test_router_multi_value_query_reaches_plugin() {
+    use agentos_api::routes::AppState;
+    use agentos_api::server::build_router;
+    use axum::body::Body;
+    use axum::http::{Request, StatusCode};
+    use tower::ServiceExt;
+
+    let mut state = AppState::new();
+    let registry = Arc::new(CapabilityRegistryImpl::new());
+    registry
+        .register_http_route(
+            "db_admin",
+            endpoint("r", "GET", "/ext/db_admin/table/memory"),
+        )
+        .unwrap();
+    state.capability_registry = Some(registry);
+    state.http_handler = Some(Arc::new(QueryEchoHandler));
+
+    let app = build_router(state);
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/ext/db_admin/table/memory?filter=memory_type:eq:episode&filter=score:gt:3&limit=10")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(resp.into_body(), 1 << 20)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    let filter = json["query_multi"]["filter"].as_array().unwrap();
+    assert_eq!(
+        filter,
+        &[
+            serde_json::json!("memory_type:eq:episode"),
+            serde_json::json!("score:gt:3"),
+        ],
+        "经 axum 通配端点的重复 filter key 应全量到达插件（A1 修复）"
+    );
+    // 其他 key 不受影响
+    assert_eq!(json["query_multi"]["limit"], serde_json::json!(["10"]));
+    assert_eq!(json["query"]["limit"], "10");
+}
+
+/// 向后兼容：旧负载（无 query_multi 字段）反序列化得空 map，不报错。
+#[test]
+fn test_http_handle_request_deserializes_legacy_payload() {
+    let legacy = serde_json::json!({
+        "method": "GET",
+        "path": "/ext/p/cb",
+        "plugin_id": "p",
+        "raw_body": "",
+        "headers": {},
+        "query": {"a": "1"},
+    });
+    let req: HttpHandleRequest = serde_json::from_value(legacy).expect("旧负载应可反序列化");
+    assert!(req.query_multi.is_empty());
+    assert_eq!(req.query.get("a").map(|s| s.as_str()), Some("1"));
+    // 新负载 roundtrip 保序
+    let full = serde_json::json!({
+        "method": "GET",
+        "path": "/ext/p/cb",
+        "plugin_id": "p",
+        "raw_body": "",
+        "headers": {},
+        "query": {"a": "2"},
+        "query_multi": {"a": ["1", "2"]},
+    });
+    let req: HttpHandleRequest = serde_json::from_value(full).unwrap();
+    assert_eq!(req.query_multi.get("a").unwrap(), &vec!["1", "2"]);
 }
 
 // ── 插件自定义响应（status/headers/body） ────────────────────
@@ -294,8 +446,8 @@ async fn test_dispatcher_unknown_route() {
 /// 且内核静态路由（/health）不受影响。
 #[tokio::test]
 async fn test_build_router_mounts_plugin_routes() {
-    use agentos_api::server::build_router;
     use agentos_api::routes::AppState;
+    use agentos_api::server::build_router;
     use axum::body::Body;
     use axum::http::{Request, StatusCode};
     use tower::ServiceExt;
@@ -314,7 +466,12 @@ async fn test_build_router_mounts_plugin_routes() {
     // 内核静态路由仍在
     let resp = app
         .clone()
-        .oneshot(Request::builder().uri("/health").body(Body::empty()).unwrap())
+        .oneshot(
+            Request::builder()
+                .uri("/health")
+                .body(Body::empty())
+                .unwrap(),
+        )
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
@@ -364,7 +521,7 @@ async fn test_register_manifest_http_routes_aggregates_errors() {
         mcp: None,
         lifecycle: None,
         native: None,
-        wasm: None,
+        granted_capabilities: vec![],
         requires_content: None,
         invoke_entry: None,
         config_files: vec![],
@@ -393,7 +550,7 @@ async fn test_register_manifest_http_routes_aggregates_errors() {
         mcp: None,
         lifecycle: None,
         native: None,
-        wasm: None,
+        granted_capabilities: vec![],
         requires_content: None,
         invoke_entry: None,
         config_files: vec![],
@@ -407,7 +564,7 @@ async fn test_register_manifest_http_routes_aggregates_errors() {
         provides: None,
     };
 
-    let errors = register_manifest_http_routes(&registry, &[good, bad]);
+    let errors = register_manifest_http_routes(&registry, &[good, bad], None);
     // 合法的注册成功，越界的报错——聚合返回 1 个错误（不 panic）
     assert_eq!(
         errors.len(),

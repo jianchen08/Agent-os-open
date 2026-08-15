@@ -11,8 +11,8 @@
  * 需用 MemoryRouter 包裹。
  */
 import { render, screen, waitFor, fireEvent } from '@testing-library/react'
-import { MemoryRouter } from 'react-router-dom'
 import React from 'react'
+import { MemoryRouter } from 'react-router-dom'
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 
 // ── Mock 外部依赖 ──
@@ -26,6 +26,10 @@ vi.mock('@/services/api/schema', () => ({
 vi.mock('@/services/api/pipelineConfig', () => ({
   getPipelineConfig: (...args: unknown[]) => mockGetPipelineConfig(...args),
   savePipelineConfig: (...args: unknown[]) => mockSavePipelineConfig(...args),
+}))
+
+vi.mock('@/services/api/pipelines', () => ({
+  fetchPipelinePluginCatalog: vi.fn().mockResolvedValue([]),
 }))
 
 // 无关页面 mock（避免引入复杂依赖）
@@ -64,22 +68,27 @@ vi.mock('lucide-react', () => ({
   Plus: () => <span data-testid="plus" />,
 }))
 
-/** 样例管道配置（0.1 扁平格式） */
+/** 样例管道配置（0.2 多循环体格式，内核实际执行的 autonomous.yaml） */
 const samplePipeline = {
-  name: 'agentos_agent',
-  task_worker: { pipeline_timeout: 7200 },
-  input_routes: [
+  name: 'autonomous',
+  loop_bodies: [
     {
-      name: 'tool_execute',
-      condition: "core_type == 'tool_execute'",
-      target: 'core',
-      plugins: ['tool_schema', 'param_inject'],
-      priority: 10,
+      id: 'main',
+      loop_config: { enabled: true, max_iterations: -1 },
+      steps: [
+        {
+          id: 'prepare',
+          steps: ['pipeline_tool_schema'],
+          context: { agent_id: '{{state.agent_id}}' },
+        },
+        {
+          id: 'post',
+          steps: ['pipeline_track'],
+          routes: [{ when: 'True', then: { next: 'end' } }],
+        },
+      ],
     },
   ],
-  output_routes: [],
-  plugins: [],
-  core_plugins: {},
 }
 
 import { SettingsPage } from '../SettingsPage'
@@ -87,8 +96,8 @@ import { SettingsPage } from '../SettingsPage'
 describe('SettingsPage — 管道配置入口与内联渲染（场景1/2/3）', () => {
   beforeEach(() => {
     vi.clearAllMocks()
-    mockGetPipelineConfig.mockResolvedValue({ name: 'default', data: samplePipeline, etag: 'e1' })
-    mockSavePipelineConfig.mockResolvedValue({ name: 'default', etag: 'e2' })
+    mockGetPipelineConfig.mockResolvedValue({ name: 'autonomous', data: samplePipeline, etag: 'e1' })
+    mockSavePipelineConfig.mockResolvedValue({ name: 'autonomous', etag: 'e2' })
   })
 
   it('场景1：左侧「内核设置」分组出现「管道配置」设置栏', async () => {
@@ -104,7 +113,7 @@ describe('SettingsPage — 管道配置入口与内联渲染（场景1/2/3）', 
     expect(screen.getByText('管道配置', { exact: true })).toBeInTheDocument()
   })
 
-  it('场景1：点击「管道配置」→ 右侧内联显示标题「管道配置」+ tabs（默认/L1/L2）', async () => {
+  it('场景1：点击「管道配置」→ 右侧内联显示标题「管道配置」', async () => {
     render(
       <MemoryRouter>
         <SettingsPage />
@@ -121,7 +130,7 @@ describe('SettingsPage — 管道配置入口与内联渲染（场景1/2/3）', 
 
   })
 
-  it('场景2：默认 tab 加载 → 调用 getPipelineConfig(\'default\') → 展示 name 字段与 input_routes', async () => {
+  it('场景2：加载 autonomous → 可视化渲染循环体/step/插件组合', async () => {
     render(
       <MemoryRouter>
         <SettingsPage />
@@ -133,22 +142,24 @@ describe('SettingsPage — 管道配置入口与内联渲染（场景1/2/3）', 
     })
     fireEvent.click(screen.getByText('管道配置', { exact: true }))
 
-    // 调用 getPipelineConfig('default')
+    // 调用 getPipelineConfig('autonomous')
     await waitFor(() => {
-      expect(mockGetPipelineConfig).toHaveBeenCalledWith('default')
+      expect(mockGetPipelineConfig).toHaveBeenCalledWith('autonomous')
     })
 
-    // name 字段（string → Input）
+    // 管道名 Input + 循环体/step 卡片 + 插件 chip（短名）
     await waitFor(() => {
-      expect(screen.getByDisplayValue('agentos_agent')).toBeInTheDocument()
+      expect(screen.getByDisplayValue('autonomous')).toBeInTheDocument()
     })
-    // input_routes 数组 → JSON textarea（匹配插件名）
-    expect(screen.getByDisplayValue(/tool_schema/)).toBeInTheDocument()
+    expect(screen.getByTestId('loop-body-main')).toBeInTheDocument()
+    expect(screen.getByTestId('step-node-prepare')).toBeInTheDocument()
+    // 插件目录为空时 chip 回退为完整引用名
+    expect(screen.getByText('pipeline_tool_schema')).toBeInTheDocument()
     // 保存按钮
     expect(screen.getByText('保存配置', { exact: true })).toBeInTheDocument()
   })
 
-  it('场景3：修改字段 → 点击保存 → 调用 savePipelineConfig(\'default\', config) → 显示「已保存」', async () => {
+  it('场景3：修改管道名 → 点击保存 → 调用 savePipelineConfig(\'autonomous\', config) → 显示「已保存」', async () => {
     render(
       <MemoryRouter>
         <SettingsPage />
@@ -161,18 +172,18 @@ describe('SettingsPage — 管道配置入口与内联渲染（场景1/2/3）', 
     fireEvent.click(screen.getByText('管道配置', { exact: true }))
 
     await waitFor(() => {
-      expect(screen.getByDisplayValue('agentos_agent')).toBeInTheDocument()
+      expect(screen.getByDisplayValue('autonomous')).toBeInTheDocument()
     })
 
-    // 修改 name 字段（状态传递：修改值 → 保存的 data）
-    const nameInput = screen.getByDisplayValue('agentos_agent')
-    fireEvent.change(nameInput, { target: { value: 'agentos_agent_modified' } })
+    // 修改管道名字段（状态传递：修改值 → 保存的 data）
+    const nameInput = screen.getByLabelText('管道名')
+    fireEvent.change(nameInput, { target: { value: 'autonomous_v2' } })
 
     fireEvent.click(screen.getByTestId('save-btn'))
 
     await waitFor(() => {
-      expect(mockSavePipelineConfig).toHaveBeenCalledWith('default', expect.objectContaining({
-        name: 'agentos_agent_modified',
+      expect(mockSavePipelineConfig).toHaveBeenCalledWith('autonomous', expect.objectContaining({
+        name: 'autonomous_v2',
       }))
     })
     expect(screen.getByText('已保存', { exact: true })).toBeInTheDocument()

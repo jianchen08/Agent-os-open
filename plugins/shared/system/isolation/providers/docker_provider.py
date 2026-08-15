@@ -711,8 +711,8 @@ class DockerProvider(IsolationProvider):
         反而是 runc 卡死的直接触发因素。故撤掉，回到只杀本地客户端的最小干预策略。
         容器内残留进程由 --pids-limit 兜住，坏掉的容器由 setns 自愈（检测+重建）处理。
 
-        保留：显式捕获 subprocess.TimeoutExpired（继承 SubprocessError 非 TimeoutError，
-        旧 except TimeoutError 接不住，会误报"执行命令失败"）。
+        显式捕获 subprocess.TimeoutExpired 与 TimeoutError（前者继承 SubprocessError
+        而非 TimeoutError，单捕 TimeoutError 接不住、会误报"执行命令失败"）。
         """
         import subprocess as _sp  # noqa: PLC0415
 
@@ -754,8 +754,7 @@ class DockerProvider(IsolationProvider):
             )
 
         except (_sp.TimeoutExpired, TimeoutError):
-            # subprocess.TimeoutExpired 继承 SubprocessError（非 TimeoutError），
-            # 旧 except TimeoutError 接不住 → 落到 except Exception 误报"执行命令失败"。
+            # subprocess.TimeoutExpired 继承 SubprocessError 而非 TimeoutError，须显式双捕。
             # 超时只杀本地 docker exec 客户端（_run_cmd 的 subprocess 已做），
             # 不在容器内做任何进程操作（避免触发 runc cgroup shim race）。
             return ExecutionResult(

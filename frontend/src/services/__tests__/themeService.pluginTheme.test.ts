@@ -1,3 +1,4 @@
+/** @feature FP-0.2.四 前端Schema | @ci: frontend-test */
 /**
  * themeService — 插件主题（contributes.themes）应用测试
  *

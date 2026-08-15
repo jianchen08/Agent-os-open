@@ -605,7 +605,14 @@
 
 ### 接入 DeepSeek Harness（DSH）插件生态
 
-**触发条件**：DSH（`github.com/deepseek-ai/deepseek-harness`，MIT）出现规模化的**第三方插件生态**（非官方 monorepo 内部包）。当前 DSH 24 万 star，但其 54 个 package 仍是官方内部 workspace 包，npm 上第三方 `@someone/dsh-*` 插件尚未形成规模。**生态空置期投入转接层 = 基础设施先于需求，沉没成本高，故暂缓。**
+**触发条件**：DSH（`github.com/deepseek-ai/deepseek-harness`，MIT）出现规模化的**第三方插件生态**（非官方 monorepo 内部包）。当前 DSH 24 万 star，但其 54 个 package 仍是官方内部 workspace 包，npm 上第三方 `@someone/dsh-*` 插件尚未形成规模。**生态空置期投入"嵌套 runtime 转接层" = 基础设施先于需求，沉没成本高，故暂缓**；但"适配层移植"路线（见下）不受此限——前端视觉组件 MIT 直接可抄（P2），后端工具/策略类按需移植（已在进行的 spill_guard / 压缩优化即 DSH 决策的适配层移植实例）。
+
+**两条接入路径（按"搬运行时 vs 翻译接口"分）**：
+
+| 路径 | 做法 | 适用 | 前置 |
+|------|------|------|------|
+| **适配层移植（轻，推荐先行）** | 不搬 Cordis 运行时，翻译"数据/契约接口"：前端 = 视觉组件 + 数据映射层；后端 = 工具/策略逻辑翻译 + 契约映射 | 前端视觉组件（P2 可先行）、后端工具类/策略类插件 | 无，随时可做 |
+| **嵌套 runtime（重，等生态）** | fork DSH SDK + RPC 暴露 service，sidecar 宿主驱动 DSH 进程 | 深度绑定 Cordis 的插件（self-modification、复杂 provider） | 等第三方生态成熟 |
 
 **可行性结论（已调研，基于 DSH 源码）**：
 
@@ -620,9 +627,21 @@ DSH 是基于 Cordis（Koishi 同源 DI 框架）的 TypeScript agent harness，
 | Slot/UI 注入（`ctx.slots`） | contributes + WidgetRegistry | — 概念等价，实现不同 |
 | 自修改运行时（`cordis_define/run`） | hot_swap（持久化 + 回滚） | — 本项目实现更工程化，无需转接 |
 
-**核心技术障碍与解法**：
+#### 路径 A：前端视觉组件适配层（P2，无需等生态）
 
-DSH 插件是 **in-process Cordis 函数**（非服务/sidecar 形态），强依赖 `@deepseek-ai/cordis` 运行时 + `ctx.on/inject/provide/get` 机制，无法"拔出来"直接装入本项目的 sidecar。**唯一可行的转接路径是"嵌套 runtime + 改 SDK 暴露 service"**：
+对应 `docs/tasks/task_plugin_frontend_customization.md` 任务 5。三层可拿性：设计层（design-tokens / 主题机制）直接抄；组件层（渲染卡 / markdown 全家桶）移植改写；运行时层（Cordis / slot / 事件投影）不拿。适配层 = 纯函数数据结构映射（DSH toolCall/toolResult → TOOL_RESULTS/messages），试点组件：DiffBlock / CodeBlock / JsonTree / read-row 等 8 个 🟢 低成本组件。备选方案 B：Webview 包装器（组件零改动打包进 WebviewWidget）。
+
+#### 路径 B：后端功能性插件适配层（同前端道理，条件成熟后）
+
+后端功能性插件与前端同理：**能翻译接口的走适配层，深度绑定 Cordis 的才走嵌套 runtime**。
+
+- **工具类**：DSH 工具多为标准 MCP 或纯函数 → 已可通过 `external_mcp` 直连（smithery 等已启用 streamable_http）；非 MCP 工具走 TS→Python 逻辑翻译 + ToolSchema 契约映射（灵汐工具契约对照 DSH `{name, description, parameters}`）
+- **策略类**（压缩/spill/审批/超时）：决策适配移植已在推进——`task_spill_guard`、`task_compression_optimization`、`task_observability` 即 DSH 对应决策的适配层落地；插件本体移植的翻译表 = DSH 事件（`tools/pre-execute` / `post-execute` / `agent/pre-step`）↔ 灵汐 state_updates / RouteSignal
+- **深度绑定 Cordis 的**（自修改运行时、复杂 capability provider）：仍走下方"嵌套 runtime"方案（fork SDK + RPC）
+
+**核心技术障碍与解法（嵌套 runtime——路径 B 的"深度绑定"子集专用）**：
+
+DSH 插件是 **in-process Cordis 函数**（非服务/sidecar 形态），强依赖 `@deepseek-ai/cordis` 运行时 + `ctx.on/inject/provide/get` 机制，无法"拔出来"直接装入本项目的 sidecar。**对深度绑定 Cordis 的插件，唯一可行的转接路径是"嵌套 runtime + 改 SDK 暴露 service"**：
 
 ```
 本项目 sidecar 适配器
@@ -681,11 +700,13 @@ DSH 进程内的真实 service / 装载的第三方 cordis 插件
 
 **触发条件**：0.2 迁移收尾后，作为"用户可信度"的硬基础。当前 mypy 仍有约 470 个类型检查错误（ROADMAP 已知技术债），测试覆盖率无硬门禁。
 
+**已落地（2026-08-15，机械门禁部分）**：统一机械门禁入口 `scripts/run_gates.py`（21 个门禁单一事实源，CI 跑穷尽集 + 本地 fast 廉价检查，每个承诺都有非零退出命令）+ 覆盖率豁免重型套件 `scripts/coverage_exempt.py`（94 插件子进程冒烟矩阵免插桩、与插桩 gate 并行，实测对父进程覆盖率零贡献；覆盖率地板 44% 只升不降 + 失败数基线锁只减不增自动守护名单与车道）+ electron 桌面壳编译门禁（新增 CI job）+ 修复一批门禁接入后机械暴露的既有破损（python-lint mypy 路径 bug、SDK 5 处类型错误、10 处非法追溯标记、47 个新测试文件未标记、kernel fmt 漂移、root 死 test 脚本）。详见 `docs/working/机械门禁统一入口与覆盖率豁免.md`。
+
 **现状对比**：DSH 有完整工程基础设施——oxlint + knip（未用依赖检测）+ jscpd（重复码检测）+ publint + lefthook + Vitest e2e/snapshot test，且 `test:coverage` 是 CI 硬门禁（per-file 100%）。本项目在测试/CI 门禁上明显弱于 DSH，这直接影响用户/开发者对项目的信任度。
 
 **落地方向**：
 1. mypy 类型错误清零（470 → 0），CI typecheck job 取消 `continue-on-error` 恢复硬门禁
-2. 测试覆盖率门禁（先设底线，如 60%，逐步提到 DSH 的 per-file 100%）
+2. 测试覆盖率门禁收紧（✅ 底线已设：Python fail-under=50、Rust line% 基线锁只升不降、前端 vitest thresholds；逐步收紧 Python 50→80%，对标 DSH 的 per-file 100%）
 3. 引入 knip（未用依赖/导出检测）、jscpd（重复码）等质量工具
 4. e2e/snapshot test 基础设施（对标 DSH 的 vitest e2e + keyless snapshot replay）
 

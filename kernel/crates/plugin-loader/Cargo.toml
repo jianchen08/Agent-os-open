@@ -24,18 +24,6 @@ sha2 = "0.10"
 libloading = "0.8"
 # 原生插件 interface crate（PipelinePlugin trait 契约）。
 agentos-native-sdk.workspace = true
-# WASM 插件运行时（task_11 N5-N10）。
-# 锁定 wasmtime 25：更高版本（≥28）的若干传递依赖需 rustc>1.85；
-# 25.0.3 在 rustc 1.85 可编译（配合下方 Cargo.lock 中对 windows-sys/memchr 等的精确降级）。
-# 见计划文档 §八 #1/#3 与本 crate 顶部文档。
-wasmtime = { version = "25", default-features = false, features = [
-    "cranelift",
-    "runtime",
-    "cache",        # Module::serialize 预编译缓存（计划文档 §八 #5）
-] }
-# WAT 文本解析（load_bytes 支持 WAT，免去 wasm32 工具链依赖）。
-# wasmtime 25 的 "wat" feature 即转发到此 crate；显式依赖避免版本漂移。
-wat = "1"
 
 [dev-dependencies]
 tempfile = "3"

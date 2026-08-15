@@ -7,12 +7,15 @@ use async_trait::async_trait;
 use std::sync::Arc;
 use std::sync::Mutex;
 
+/// (thread_id, user_id, content, thinking_strength)
+type UserInputRecord = (String, String, String, String);
+
 /// 记录型 mock dispatcher，捕获每次调用。
 #[derive(Default)]
 struct MockDispatcher {
-    user_inputs: Arc<Mutex<Vec<(String, String, String, String)>>>, // (thread_id, user_id, content, thinking_strength)
-    interactions: Arc<Mutex<Vec<(String, String)>>>,                // (thread_id, request_id)
-    stops: Arc<Mutex<Vec<String>>>,                                 // thread_id
+    user_inputs: Arc<Mutex<Vec<UserInputRecord>>>,
+    interactions: Arc<Mutex<Vec<(String, String)>>>, // (thread_id, request_id)
+    stops: Arc<Mutex<Vec<String>>>,                  // thread_id
 }
 
 #[async_trait]
@@ -24,6 +27,7 @@ impl PipelineDispatcher for MockDispatcher {
         content: &str,
         _pipeline_id: &str,
         thinking_strength: &str,
+        _execution_context: Option<&serde_json::Value>,
     ) -> Result<(), String> {
         self.user_inputs.lock().unwrap().push((
             thread_id.into(),
@@ -186,10 +190,16 @@ async fn dispatcher_failure_returns_error() {
             _: &str,
             _: &str,
             _: &str,
+            _: Option<&serde_json::Value>,
         ) -> Result<(), String> {
             Err("boom".into())
         }
-        async fn dispatch_interaction_response(&self, _: &str, _: &str, _: &serde_json::Value) -> Result<(), String> {
+        async fn dispatch_interaction_response(
+            &self,
+            _: &str,
+            _: &str,
+            _: &serde_json::Value,
+        ) -> Result<(), String> {
             Ok(())
         }
         async fn dispatch_stop(&self, _: &str) -> Result<(), String> {

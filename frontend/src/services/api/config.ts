@@ -84,14 +84,28 @@ export interface ProviderKeyEntry {
  *
  * 与后端 llm.yaml 中 providers 的结构对齐。
  * 注意：api_key 字段在 keys 数组中，后端返回时已脱敏。
+ * has_key/env_var 由后端按「${VAR} 占位符能否解析出真实 key」计算，
+ * 未配置时 has_key=false（预置提供者的占位符不算已配置）。
  */
 export interface ProviderConfig {
-  /** 提供商类型（如 openai/deepseek/zai/minimax） */
+  /** 提供商类型（litellm 前缀，如 openai/deepseek/zai/minimax） */
   type: string
   /** API 基础 URL */
   api_base?: string
   /** API Key 列表（后端返回时 api_key 已脱敏） */
   keys: ProviderKeyEntry[]
+  /** 是否已配置可用的 API Key（按环境变量解析结果） */
+  has_key?: boolean
+  /** 占位符对应的环境变量名（如 OPENAI_API_KEY），明文 key 时为 null */
+  env_var?: string | null
+}
+
+/** 远端模型条目（GET /llm/providers/{id}/remote-models 返回） */
+export interface RemoteModel {
+  /** 模型 ID（远端真实模型名） */
+  id: string
+  /** 归属方（可能为空） */
+  owned_by: string
 }
 
 /**
@@ -178,10 +192,44 @@ export async function getLLMConfig(options: RetryOptions = {}): Promise<LLMConfi
  * @returns 提供商列表
  */
 export async function getProviders(options: RetryOptions = {}): Promise<{
-  providers: Record<string, { api_base?: string; has_key: boolean }>
+  providers: Record<string, { api_base?: string; has_key: boolean; env_var?: string | null }>
 }> {
   return requestWithRetry(async () => {
     const response = await apiClient.get(API_ENDPOINTS.CONFIG.LLM_PROVIDERS)
+    return response.data
+  }, options)
+}
+
+/**
+ * 获取 litellm 支持的提供者类型清单
+ *
+ * 后端运行时读取已安装 litellm 的 provider_list——litellm pip 升级后
+ * 新提供者自动出现，供「添加自定义提供商」的类型下拉使用。
+ */
+export async function getProviderTypes(
+  options: RetryOptions = {},
+): Promise<{ types: string[] }> {
+  return requestWithRetry(async () => {
+    const response = await apiClient.get<{ types: string[] }>(
+      API_ENDPOINTS.CONFIG.LLM_PROVIDER_TYPES,
+    )
+    return response.data
+  }, options)
+}
+
+/**
+ * 从提供商 API 实时拉取该 Key 可用的模型列表
+ *
+ * @param providerId 提供商 ID（须已配置 Key，否则后端返回 400）
+ */
+export async function getRemoteModels(
+  providerId: string,
+  options: RetryOptions = {},
+): Promise<{ provider: string; models: RemoteModel[] }> {
+  return requestWithRetry(async () => {
+    const response = await apiClient.get<{ provider: string; models: RemoteModel[] }>(
+      API_ENDPOINTS.CONFIG.LLM_REMOTE_MODELS(providerId),
+    )
     return response.data
   }, options)
 }

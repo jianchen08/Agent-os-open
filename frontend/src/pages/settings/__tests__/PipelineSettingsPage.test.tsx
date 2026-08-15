@@ -1,18 +1,17 @@
 /**
- * PipelineSettingsPage 组件测试
+ * PipelineSettingsPage 组件测试（0.2 多循环体可视化版）
  *
  * 覆盖管道配置设置页核心功能：
- * - 加载中状态显示
- * - 加载成功渲染配置表单（tabs + 字段）
- * - 加载失败显示错误提示
- * - 修改字段后保存（PUT）成功/失败反馈
- * - 切换 tab 加载不同管道配置
- * - embedded 模式（嵌入设置页右侧，无独立全屏头）
+ * - 加载：getPipelineConfig('autonomous') + fetchPipelinePluginCatalog()
+ * - 可视化渲染：循环体卡片 / step 卡片 / 插件组合 chips / 动态模板 chip / 路由规则
+ * - 编辑：移除插件 chip、添加插件（选择弹窗）、保存 PUT 透传 raw data
+ * - 视图切换：可视化 ↔ 源码；非 0.2 格式自动落源码视图
+ * - 加载失败 / 保存失败反馈、embedded 模式
  *
  * 测试策略：Mock 仅外部依赖（API 层 + UI 基础组件），组件真实渲染。
  */
 
-import { screen, waitFor, fireEvent } from '@testing-library/react'
+import { screen, waitFor, fireEvent, within } from '@testing-library/react'
 import React from 'react'
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { renderWithProviders } from '@/test/renderWithProviders'
@@ -21,10 +20,15 @@ import { PipelineSettingsPage } from '../PipelineSettingsPage'
 // ── Mock API 层 ──
 const mockGetPipelineConfig = vi.fn()
 const mockSavePipelineConfig = vi.fn()
+const mockFetchCatalog = vi.fn()
 
 vi.mock('@/services/api/pipelineConfig', () => ({
   getPipelineConfig: (...args: unknown[]) => mockGetPipelineConfig(...args),
   savePipelineConfig: (...args: unknown[]) => mockSavePipelineConfig(...args),
+}))
+
+vi.mock('@/services/api/pipelines', () => ({
+  fetchPipelinePluginCatalog: (...args: unknown[]) => mockFetchCatalog(...args),
 }))
 
 // ── Mock UI 基础组件（简化依赖，聚焦业务行为）──
@@ -49,34 +53,125 @@ vi.mock('@/components/ui/sonner', () => ({
   },
 }))
 
-vi.mock('lucide-react', () => ({
-  Loader2: () => <span data-testid="loader" />,
-}))
-
-/** 样例管道配置（0.1 扁平格式） */
-const samplePipeline = {
-  name: 'agentos_agent',
-  task_worker: { pipeline_timeout: 7200 },
-  input_routes: [
+/** 样例管道配置（0.2 多循环体格式，结构对齐 autonomous.yaml） */
+const sampleV2 = {
+  name: 'autonomous',
+  loop_bodies: [
+    { id: 'init', steps: [{ id: 'init', steps: ['pipeline_workspace_lifecycle'] }] },
     {
-      name: 'tool_execute',
-      condition: "core_type == 'tool_execute'",
-      target: 'core',
-      plugins: ['tool_schema', 'param_inject'],
-      priority: 10,
+      id: 'main',
+      loop_config: { enabled: true, max_iterations: -1 },
+      steps: [
+        {
+          id: 'prepare',
+          steps: ['pipeline_tool_schema', 'pipeline_param_inject'],
+          context: { agent_id: '{{state.agent_id}}' },
+        },
+        {
+          id: 'core',
+          steps: ['{{state.core_plugin}}', 'pipeline_spill_guard'],
+          context: { temperature: 0.7 },
+        },
+        {
+          id: 'post',
+          steps: ['pipeline_track', 'pipeline_result_format'],
+          routes: [
+            {
+              when: 'raw_tool_calls != [] and raw_tool_calls != None',
+              then: {
+                next: 'loop',
+                set: { core_type: 'tool_execute', core_plugin: 'pipeline_tool_core' },
+              },
+            },
+            { when: 'True', then: { next: 'end' } },
+          ],
+        },
+      ],
+    },
+    {
+      id: 'exit',
+      run_on_error: true,
+      steps: [{ id: 'exit', steps: ['pipeline_workspace_lifecycle'] }],
     },
   ],
+}
+
+/** 样例插件目录（join 产物） */
+const sampleCatalog = [
+  {
+    id: 'pipeline_tool_schema',
+    name: 'Tool Schema',
+    role: 'input',
+    hostType: 'sidecar',
+    version: '1.0.0',
+    enabled: true,
+    configFiles: [],
+  },
+  {
+    id: 'pipeline_param_inject',
+    name: 'Param Inject',
+    role: 'input',
+    hostType: 'sidecar',
+    version: '1.0.0',
+    enabled: true,
+    configFiles: [],
+  },
+  {
+    id: 'pipeline_spill_guard',
+    name: 'Spill Guard',
+    role: 'core',
+    hostType: 'in_process',
+    version: '1.0.0',
+    enabled: true,
+    configFiles: [],
+  },
+  {
+    id: 'pipeline_track',
+    name: 'Track',
+    role: 'output',
+    hostType: 'sidecar',
+    version: '1.0.0',
+    enabled: true,
+    configFiles: [],
+  },
+  {
+    id: 'pipeline_result_format',
+    name: 'Result Format',
+    role: 'output',
+    hostType: 'sidecar',
+    version: '1.0.0',
+    enabled: false,
+    configFiles: [{ id: 'config', label: '配置', path: 'result_format.yaml' }],
+  },
+]
+
+/** 0.1 扁平格式（非 0.2，用于自动落源码视图断言） */
+const sampleV1 = {
+  name: 'agentos_agent',
+  task_worker: { pipeline_timeout: 7200 },
+  input_routes: [{ name: 'tool_execute', plugins: ['tool_schema'] }],
   output_routes: [],
-  plugins: [],
-  core_plugins: {},
+}
+
+async function renderLoaded(
+  data: Record<string, unknown> = sampleV2,
+  catalog: unknown[] = sampleCatalog,
+) {
+  mockGetPipelineConfig.mockResolvedValue({ name: 'autonomous', data, etag: 'e1' })
+  mockFetchCatalog.mockResolvedValue(catalog)
+  renderWithProviders(<PipelineSettingsPage />)
+  await waitFor(() => {
+    expect(screen.getByText('保存配置')).toBeInTheDocument()
+  })
 }
 
 describe('PipelineSettingsPage', () => {
   beforeEach(() => {
     vi.clearAllMocks()
+    mockFetchCatalog.mockResolvedValue([])
   })
 
-  describe('加载状态', () => {
+  describe('加载', () => {
     it('初始渲染显示加载中', () => {
       mockGetPipelineConfig.mockReturnValue(new Promise(() => {}))
       renderWithProviders(<PipelineSettingsPage />)
@@ -84,128 +179,175 @@ describe('PipelineSettingsPage', () => {
       expect(screen.getByText(/加载配置/)).toBeInTheDocument()
     })
 
-    it('加载时调用 getPipelineConfig 读取默认管道', () => {
+    it('加载 autonomous 配置与插件目录', () => {
       mockGetPipelineConfig.mockReturnValue(new Promise(() => {}))
       renderWithProviders(<PipelineSettingsPage />)
 
-      expect(mockGetPipelineConfig).toHaveBeenCalledWith('default')
+      expect(mockGetPipelineConfig).toHaveBeenCalledWith('autonomous')
+      expect(mockFetchCatalog).toHaveBeenCalled()
     })
-  })
 
-  describe('加载成功', () => {
-    it('渲染管道 tabs（默认/L1/L2 等）', async () => {
-      mockGetPipelineConfig.mockResolvedValue({ name: 'default', data: samplePipeline, etag: 'e1' })
+    it('插件目录获取失败不阻塞编辑（显示降级提示）', async () => {
+      mockGetPipelineConfig.mockResolvedValue({ name: 'autonomous', data: sampleV2, etag: 'e1' })
+      mockFetchCatalog.mockRejectedValue(new Error('catalog down'))
       renderWithProviders(<PipelineSettingsPage />)
 
       await waitFor(() => {
-        expect(screen.getByText('默认')).toBeInTheDocument()
-        expect(screen.getByText('L1 主 Agent')).toBeInTheDocument()
-      })
-    })
-
-    it('渲染配置字段（管道名称、input_routes 等）', async () => {
-      mockGetPipelineConfig.mockResolvedValue({ name: 'default', data: samplePipeline, etag: 'e1' })
-      renderWithProviders(<PipelineSettingsPage />)
-
-      await waitFor(() => {
-        // name 字段（string → Input）
-        expect(screen.getByDisplayValue('agentos_agent')).toBeInTheDocument()
-        // input_routes 数组（渲染为 JSON textarea，用正则匹配插件名）
-        expect(screen.getByDisplayValue(/tool_schema/)).toBeInTheDocument()
-      })
-    })
-
-    it('显示保存按钮', async () => {
-      mockGetPipelineConfig.mockResolvedValue({ name: 'default', data: samplePipeline, etag: 'e1' })
-      renderWithProviders(<PipelineSettingsPage />)
-
-      await waitFor(() => {
-        expect(screen.getByText('保存配置')).toBeInTheDocument()
-      })
-    })
-  })
-
-  describe('加载失败', () => {
-    it('显示错误提示', async () => {
-      mockGetPipelineConfig.mockRejectedValue(new Error('Network error'))
-      renderWithProviders(<PipelineSettingsPage />)
-
-      await waitFor(() => {
-        expect(screen.getByText('无法加载配置')).toBeInTheDocument()
-      })
-    })
-
-    it('空配置显示「该配置暂无字段」且保存按钮可用', async () => {
-      mockGetPipelineConfig.mockResolvedValue({ name: 'default', data: {}, etag: 'e-empty' })
-      renderWithProviders(<PipelineSettingsPage />)
-
-      await waitFor(() => {
-        expect(screen.getByText('该配置暂无字段')).toBeInTheDocument()
+        expect(screen.getByText(/插件目录获取失败/)).toBeInTheDocument()
       })
       expect(screen.getByText('保存配置')).toBeInTheDocument()
-      const saveBtn = screen.getByTestId('save-btn')
-      expect(saveBtn).toBeEnabled()
     })
   })
 
+  describe('可视化渲染', () => {
+    it('渲染循环体卡片（init/main/exit）与语义徽标', async () => {
+      await renderLoaded()
 
+      expect(screen.getByTestId('loop-body-init')).toBeInTheDocument()
+      expect(screen.getByTestId('loop-body-main')).toBeInTheDocument()
+      expect(screen.getByTestId('loop-body-exit')).toBeInTheDocument()
+      // main 循环体（∞=无限迭代）/ exit 错误必经
+      expect(screen.getByText('循环体', { exact: true })).toBeInTheDocument()
+      expect(screen.getByText('∞', { exact: true })).toBeInTheDocument()
+      expect(screen.getByText('错误必经')).toBeInTheDocument()
+      expect(screen.getAllByText(/顺序推进/).length).toBeGreaterThan(0)
+    })
 
-  describe('保存流程', () => {
-    it('点击保存调用 savePipelineConfig 并显示已保存', async () => {
-      mockGetPipelineConfig.mockResolvedValue({ name: 'default', data: samplePipeline, etag: 'e1' })
-      mockSavePipelineConfig.mockResolvedValue({ name: 'default', etag: 'e2' })
-      renderWithProviders(<PipelineSettingsPage />)
+    it('渲染 step 卡片与插件组合 chips（短名 + role + 动态模板）', async () => {
+      await renderLoaded()
 
-      await waitFor(() => {
-        expect(screen.getByText('保存配置')).toBeInTheDocument()
-      })
+      expect(screen.getByTestId('step-node-prepare')).toBeInTheDocument()
+      expect(screen.getByTestId('step-node-core')).toBeInTheDocument()
+      expect(screen.getByTestId('step-node-post')).toBeInTheDocument()
+
+      // 插件短名（去 pipeline_ 前缀）
+      expect(screen.getByText('tool_schema')).toBeInTheDocument()
+      expect(screen.getByText('param_inject')).toBeInTheDocument()
+      expect(screen.getByText('spill_guard')).toBeInTheDocument()
+      // 动态模板引用原样展示
+      expect(screen.getByText('{{state.core_plugin}}')).toBeInTheDocument()
+    })
+
+    it('渲染路由规则（when 条件与 set 字段值）', async () => {
+      await renderLoaded()
+
+      expect(
+        screen.getByLabelText('规则 1 when 条件'),
+      ).toHaveValue('raw_tool_calls != [] and raw_tool_calls != None')
+      expect(screen.getByDisplayValue('tool_execute')).toBeInTheDocument()
+      expect(screen.getByDisplayValue('pipeline_tool_core')).toBeInTheDocument()
+    })
+
+    it('context 键值渲染', async () => {
+      await renderLoaded()
+
+      expect(screen.getByLabelText('agent_id 键名')).toBeInTheDocument()
+      expect(screen.getByDisplayValue('{{state.agent_id}}')).toBeInTheDocument()
+    })
+  })
+
+  describe('编辑与保存', () => {
+    it('移除插件 chip 后保存透传更新后的 data', async () => {
+      await renderLoaded()
+
+      // prepare step 组合的第一个 chip（tool_schema）移除
+      const prepareNode = screen.getByTestId('step-node-prepare')
+      const removeButtons = within(prepareNode).getAllByLabelText('移除')
+      fireEvent.click(removeButtons[0])
 
       fireEvent.click(screen.getByTestId('save-btn'))
 
-      expect(mockSavePipelineConfig).toHaveBeenCalledWith('default', samplePipeline)
+      await waitFor(() => {
+        expect(mockSavePipelineConfig).toHaveBeenCalledWith(
+          'autonomous',
+          expect.objectContaining({
+            loop_bodies: expect.any(Array),
+          }),
+        )
+      })
+      const saved = mockSavePipelineConfig.mock.calls[0][1] as typeof sampleV2
+      const prepare = saved.loop_bodies[1].steps[0]
+      expect(prepare.steps).toEqual(['pipeline_param_inject'])
+    })
 
+    it('通过选择弹窗向 step 添加插件', async () => {
+      await renderLoaded()
+
+      fireEvent.click(screen.getByLabelText('向 step prepare 添加插件'))
+      // 弹窗内点击目录中未被排除的插件
+      fireEvent.click(await screen.findByLabelText('添加 pipeline_track'))
+
+      // prepare 组合出现新 chip（短名 track）
+      await waitFor(() => {
+        expect(screen.getByTestId('step-node-prepare').textContent).toContain('track')
+      })
+
+      // 保存后 data 中 prepare.steps 追加
+      fireEvent.click(screen.getByTestId('save-btn'))
+      await waitFor(() => {
+        expect(mockSavePipelineConfig).toHaveBeenCalled()
+      })
+      const saved = mockSavePipelineConfig.mock.calls[0][1] as typeof sampleV2
+      expect(saved.loop_bodies[1].steps[0].steps).toEqual([
+        'pipeline_tool_schema',
+        'pipeline_param_inject',
+        'pipeline_track',
+      ])
+    })
+
+    it('保存成功显示已保存；失败显示保存失败', async () => {
+      mockSavePipelineConfig.mockResolvedValue({ name: 'autonomous', etag: 'e2' })
+      await renderLoaded()
+
+      fireEvent.click(screen.getByTestId('save-btn'))
       await waitFor(() => {
         expect(screen.getByText('已保存')).toBeInTheDocument()
       })
-    })
 
-    it('保存失败显示错误提示', async () => {
-      mockGetPipelineConfig.mockResolvedValue({ name: 'default', data: samplePipeline, etag: 'e1' })
-      mockSavePipelineConfig.mockRejectedValue(new Error('Save failed'))
-      renderWithProviders(<PipelineSettingsPage />)
-
-      await waitFor(() => {
-        expect(screen.getByText('保存配置')).toBeInTheDocument()
-      })
-
+      mockSavePipelineConfig.mockRejectedValue(new Error('disk full'))
       fireEvent.click(screen.getByTestId('save-btn'))
-
       await waitFor(() => {
         expect(screen.getByText('保存失败')).toBeInTheDocument()
       })
     })
   })
 
-  describe('切换 tab', () => {
-    it('切换 tab 后加载对应管道配置', async () => {
-      mockGetPipelineConfig.mockResolvedValue({ name: 'default', data: samplePipeline, etag: 'e1' })
+  describe('视图切换', () => {
+    it('切换到源码视图渲染 ConfigObject 通用表单', async () => {
+      await renderLoaded()
+
+      fireEvent.click(screen.getByRole('tab', { name: /源码/ }))
+
+      // loop_bodies 数组渲染为 JSON textarea（内容含插件引用）
+      expect(await screen.findByDisplayValue(/pipeline_tool_schema/)).toBeInTheDocument()
+      // 可视化编辑器已卸载
+      expect(screen.queryByTestId('pipeline-flow-editor')).not.toBeInTheDocument()
+    })
+
+    it('非 0.2 格式配置自动落源码视图并提示', async () => {
+      await renderLoaded(sampleV1)
+
+      expect(screen.getByText(/非 0\.2 多循环体格式/)).toBeInTheDocument()
+      expect(screen.queryByTestId('pipeline-flow-editor')).not.toBeInTheDocument()
+      expect(screen.getByDisplayValue(/tool_schema/)).toBeInTheDocument()
+    })
+  })
+
+  describe('加载失败', () => {
+    it('显示错误提示且保存按钮可用', async () => {
+      mockGetPipelineConfig.mockRejectedValue(new Error('Network error'))
       renderWithProviders(<PipelineSettingsPage />)
 
       await waitFor(() => {
-        expect(screen.getByText('L1 主 Agent')).toBeInTheDocument()
+        expect(screen.getByText('无法加载配置')).toBeInTheDocument()
       })
-
-      fireEvent.click(screen.getByText('L1 主 Agent'))
-
-      await waitFor(() => {
-        expect(mockGetPipelineConfig).toHaveBeenCalledWith('l1-main')
-      })
+      expect(screen.getByTestId('save-btn')).toBeEnabled()
     })
   })
 
   describe('embedded 模式', () => {
     it('embedded 时不渲染独立页面头（返回链接）', async () => {
-      mockGetPipelineConfig.mockResolvedValue({ name: 'default', data: samplePipeline, etag: 'e1' })
+      mockGetPipelineConfig.mockResolvedValue({ name: 'autonomous', data: sampleV2, etag: 'e1' })
       renderWithProviders(<PipelineSettingsPage embedded />)
 
       await waitFor(() => {

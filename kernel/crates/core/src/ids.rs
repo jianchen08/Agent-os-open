@@ -62,14 +62,21 @@ mod tests {
             id,
             "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824"
         );
-        assert_eq!(compute_blob_id(b""), "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855");
+        assert_eq!(
+            compute_blob_id(b""),
+            "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        );
     }
 
     #[test]
     fn same_message_same_id() {
         let a = json!({"role": "user", "content": "你好"});
         let b = json!({"content": "你好", "role": "user"}); // key 序不同
-        assert_eq!(compute_message_id(&a), compute_message_id(&b), "key 序不应影响 id");
+        assert_eq!(
+            compute_message_id(&a),
+            compute_message_id(&b),
+            "key 序不应影响 id"
+        );
     }
 
     #[test]
@@ -95,8 +102,16 @@ mod tests {
         let plain = json!({"role": "user", "content": "hi"});
         let with_seq = json!({"role": "user", "content": "hi", "seq": 42});
         let with_internal = json!({"role": "user", "content": "hi", "_record_sequence": 7});
-        assert_eq!(compute_message_id(&plain), compute_message_id(&with_seq), "槽位 seq 不是内容");
-        assert_eq!(compute_message_id(&plain), compute_message_id(&with_internal), "内部标记不是内容");
+        assert_eq!(
+            compute_message_id(&plain),
+            compute_message_id(&with_seq),
+            "槽位 seq 不是内容"
+        );
+        assert_eq!(
+            compute_message_id(&plain),
+            compute_message_id(&with_internal),
+            "内部标记不是内容"
+        );
     }
 
     #[test]

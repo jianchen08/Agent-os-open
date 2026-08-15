@@ -1,0 +1,46 @@
+/*
+ * DSH (--dsw-*) → AgentOS design token 映射层（task_dsh_plugin_adapter 任务 3 批次 3）。
+ *
+ * DSH ui-primitives 组件只通过 --dsw-* 令牌取色/取字（组件源码零改动移植），
+ * 本文件把这些令牌重绑定到灵汐 design-tokens.css / theme.css 的对应物。
+ * 灵汐令牌多为 HSL 通道值（`210 40% 96%`，消费形式 hsl(var(--x))），引用而非
+ * 求值——.dark 主题切换时本层自动跟随，无需 JS 介入。
+ *
+ * 对齐原则（DSH 自己规定"字号间距不 token 化"）：字号/行高/圆角等几何值
+ * 保留 DSH 组件内的 CSS 自定义属性（--dsl-*），只重绑颜色与字体族。
+ */
+
+:root {
+  /* 文本三级（DSH alias-label → 灵汐 foreground 系） */
+  --dsw-alias-label-primary: hsl(var(--foreground));
+  --dsw-alias-label-secondary: hsl(var(--muted-foreground));
+  --dsw-alias-label-tertiary: color-mix(in srgb, hsl(var(--muted-foreground)) 62%, transparent);
+
+  /* 代码/卡片表面（markdown 代码块底 → 灵汐 muted；横幅 → secondary） */
+  --dsw-alias-markdown-code-block: hsl(var(--muted));
+  --dsw-alias-markdown-code-block-banner: hsl(var(--secondary));
+
+  /* 分层背景 */
+  --dsw-alias-bg-layer-1: hsl(var(--card));
+  --dsw-alias-bg-layer-2: hsl(var(--secondary));
+
+  /* 边框与交互 */
+  --dsw-alias-border-l2: hsl(var(--border));
+  --dsw-alias-interactive-bg-hover: hsl(var(--accent));
+  --dsw-alias-button-ghost-active-fill: hsl(var(--secondary));
+  --dsw-alias-button-ghost-active-border: hsl(var(--border));
+
+  /* 状态色（theme.css 直接色值） */
+  --dsw-alias-state-error-primary: var(--accent-error, #ef4444);
+  --dsw-alias-state-success-primary: var(--accent-success, #10b981);
+  --dsw-alias-state-warn-primary: var(--accent-pending, #f59e0b);
+  --dsw-alias-state-business-primary: hsl(var(--primary));
+
+  /* 运行中的像素追逐点（DSH 静态色阶 450 → 灵汐 accent-running） */
+  --dsw-static-deepseek-450: var(--accent-running, #3b82f6);
+
+  /* 字体：代码族对齐 markdown.css 的等宽栈 */
+  --ds-font-family-code: ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, monospace;
+  --dsw-font-markdown-code-block: 500 12.5px/22px var(--ds-font-family-code);
+  --dsw-font-xs-13: 400 13px/18px inherit;
+}

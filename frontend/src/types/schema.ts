@@ -167,8 +167,26 @@ export interface ClientCapabilities {
 export interface UIInputFormField {
   /** 字段名 */
   name: string
-  /** 字段类型 */
-  type: 'string' | 'number' | 'boolean' | 'select' | 'multiselect' | 'textarea' | 'date' | 'file'
+  /**
+   * 字段类型（统一词汇表：SchemaDriver 与 FormWidget 原两套词汇已合并）
+   * input/toggle/slider/color/radio/checkbox 为原 FormWidget 词汇；
+   * input≈string、toggle≈boolean，RjsfForm 映射时归一
+   */
+  type:
+    | 'string'
+    | 'number'
+    | 'boolean'
+    | 'select'
+    | 'multiselect'
+    | 'textarea'
+    | 'date'
+    | 'file'
+    | 'input'
+    | 'toggle'
+    | 'slider'
+    | 'color'
+    | 'radio'
+    | 'checkbox'
   /** 标签文本 */
   label: string
   /** 描述/提示 */
@@ -177,12 +195,16 @@ export interface UIInputFormField {
   default?: unknown
   /** 是否必填 */
   required?: boolean
-  /** 选择项（type 为 select/multiselect 时使用） */
+  /** 选择项（type 为 select/multiselect/radio/checkbox 时使用） */
   options?: Array<{ label: string; value: string | number }>
   /** 动态数据源 URI（调用内核代理端点获取选项列表） */
   datasourceUri?: string
   /** 占位符 */
   placeholder?: string
+  /** 数值范围与步长（number/slider 类型） */
+  min?: number
+  max?: number
+  step?: number
   /** 验证规则 */
   validation?: {
     min?: number

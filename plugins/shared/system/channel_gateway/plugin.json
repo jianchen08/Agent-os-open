@@ -1,24 +1,37 @@
 {
-    "id": "channel_gateway",
-    "name": "Multi-Channel Gateway",
-    "version": "1.0.0",
-    "plugin_type": "system",
-    "language": "python",
-    "host_type": "sidecar",
-    "entry": "python server.py",
-    "capabilities": {
-        "tools": [
-            {"name": "gateway.handle_message", "description": "Handle incoming message from any registered channel, normalize and route to pipeline"},
-            {"name": "gateway.send_response", "description": "Send a unified response to a specific channel via its adapter"},
-            {"name": "gateway.get_adapters", "description": "List all registered channel adapters"}
-        ],
-        "resources": [],
-        "route_signals": [],
-        "lifecycle_hooks": ["on_load", "on_unload"]
-    },
-    "dependencies": [],
-    "permissions": {},
-    "error_policy": "skip",
-    "priority": 50,
-    "requires_content": 5
+  "id": "channel_gateway",
+  "name": "Multi-Channel Gateway",
+  "version": "1.0.0",
+  "plugin_type": "system",
+  "language": "python",
+  "host_type": "sidecar",
+  "entry": "python server.py",
+  "capabilities": {
+    "tools": [],
+    "resources": [],
+    "route_signals": [],
+    "lifecycle_hooks": [
+      "on_load",
+      "on_unload"
+    ],
+    "services": [
+      {
+        "name": "gateway.handle_message",
+        "description": "Handle incoming message from any registered channel, normalize and route to pipeline"
+      },
+      {
+        "name": "gateway.send_response",
+        "description": "Send a unified response to a specific channel via its adapter"
+      },
+      {
+        "name": "gateway.get_adapters",
+        "description": "List all registered channel adapters"
+      }
+    ]
+  },
+  "dependencies": [],
+  "permissions": {},
+  "error_policy": "skip",
+  "priority": 50,
+  "requires_content": 5
 }

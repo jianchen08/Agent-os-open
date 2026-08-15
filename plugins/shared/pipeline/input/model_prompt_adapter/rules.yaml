@@ -1,0 +1,86 @@
+# 模型提示词适配规则（管理员配置面）。
+#
+# 注意：能注入 assistant+reasoning_content 等于能伪造模型输出历史，
+# 本文件归管理员配置管理，不作为用户级运行时定制点。
+#
+# 规则字段：
+#   name      规则名（仅标识/日志用）
+#   enabled   开关（默认 true）
+#   when      命中条件（全部满足才注入）：
+#               model_id —— 匹配 state.model_id / state.model_tier /
+#                 插件 config 的 default_model（同 llm_core 选模优先级），
+#                 fnmatch 通配（deepseek-*），支持列表（任一命中）。
+#                 ⚠️ 实测：state.model_id 在真实运行中恒不存在（initial_state /
+#                 agent yaml / WS 消息均无 model 字段），实际选模走
+#                 model_tier → llm.yaml defaults.chat（llm_core 内部解析）。
+#                 model_id 条件必须配合 config/plugins/model_prompt_adapter.yaml
+#                 的 default_model 接线（与 defaults.chat 同步）才可命中。
+#               state    —— 键值匹配（fnmatch 通配，布尔 true/false 通吃、
+#                 数字 str 化、缺键 → 空串），全部满足才通过。
+#                 prepare 链执行时可路由的实测 state 键：
+#                 - 内核 initial_state：message / input / agent_id /
+#                   core_type / core_plugin / ended / suspended /
+#                   pipeline_id / session_id / user_id / message_id /
+#                   thinking_strength
+#                 - agent yaml（config/agents/<id>.yaml）顶层泛化注入：
+#                   model_tier / level / category / agent_type / ...
+#                 - execution_context：workspace.{source_path,mode} /
+#                   isolation.{level}
+#                 - prepare 链前序插件产物：tool_schemas 等
+#   inject    消息组（role 限 user/assistant；字段限 role/content/
+#             reasoning_content/name，其余丢弃；一次只应用首个命中规则）
+#
+# 注入时机与位置：仅任务首轮（len(messages) <= 1）、历史头部（system
+# 之后的第一个位置，构成稳定 cache 前缀）。判据自幂等——插入后长度
+# 必然 > 1，后续轮次不再命中。不做每轮重插：示例的使命是在开头建立
+# 思维链分布痕迹，模型输出过真实 reasoning_content 后由真实痕迹接管，
+# 被上下文压缩裁掉也不补。末尾位置不开放（assistant 是 prefill 续写
+# Beta，user 与 dynamic_vars 职责重叠）。
+#
+# ── 示例内容纪律 ──
+# 思维链示例必须从目标模型真实输出的思维链实例改写而来（保留形式
+# 与口吻，只改思考内容），不是从零编写；模型版本更新后失效即删。
+# deepseek-v4-pro 示例的改写素材：2026-08-15 本机 DSH 3080 完整 Web
+# 环境实跑（v4-pro + effort=max + 极简/标准两种 Agent 预设），真实
+# reasoning_content 样本共 6 个会话 751 行，归档在
+# ~/.dsh/reasoning_samples/（web_v4pro_reasoning.txt / user_session* /
+# minimal_mode_reasoning.txt / adr_task_reasoning.txt）：
+#   - 真实分布：中文对话 + 英文思维链；开头不变式 "The user [is]
+#     ask[s] ... in Chinese"（6 个样本全部命中，变体有 asking me,
+#     in Chinese: / asking in Chinese to / asks in Chinese:）
+#   - 真实骨架（逐句对应实跑样本）：
+#     ① 开头复述 + 模糊点自问（样本原文 '"这个仓库" (this
+#     repository) - which repository?' → 示例 '"当前的状态" - what
+#     does that cover?'）；
+#     ② 评判标准先行（样本 "the ideal first doc: explains..." 的
+#     (a)(b)(c) 式 → 示例同构）；
+#     ③ 自我追问权衡（样本 "Hmm, but which single one to pick?" /
+#     "Let me consider:" → 示例 "Hmm, should I ask ...? Let me
+#     consider:"）；
+#     ④ "Let me ..." 行动收尾；缩写口吻 There's/I'll/it's 贯穿。
+#   - 内容教"怎么思考"，**不绑定任何具体任务**（user 消息中性化、
+#     rc 不引用具体对象/动作）：先判断任务类型（build → 直接产出并
+#     验证；fix → 先检查再动手，见 dsh-routing-suite P11/P23 实测：
+#     build/fix 分类指令对 v4-pro 行为引导最有效）→ 事实先行 → 权衡
+#     是否提问 → 行动收尾。
+# assistant 轮无 tool_calls、自洽完整，避免模型学到"声称调工具但
+# 不带 tool_calls"的坏格式。
+
+rules:
+  - name: deepseek-v4-pro-cot-fewshot
+    enabled: true
+    when:
+      model_id: deepseek-v4-pro
+    inject:
+      - role: user
+        content: "请帮我处理一个新任务。"
+      - role: assistant
+        reasoning_content: |
+          The user is asking me, in Chinese, to handle a new task. This is an open-ended request - no specific goal is given, so I need to find out what's actually being asked before doing anything. Guessing at solutions without understanding the task first would make things worse, not better.
+
+          The right approach depends on the task type: for a build task I work directly and verify by reading and running; for a fix task I inspect first and plan, then fix only what's confirmed broken. So first I should decide the task type (build or fix) and adopt the matching style, gathering facts along the way - check what's available, look at the current state, see what the tools return - then form a hypothesis and act on it, verifying each step against the goal before reporting back.
+
+          Hmm, should I ask the user for more details first? Let me consider: the request is generic, but the intent is clear enough (handle the task), and a quick look around is read-only and costs little. I'll proceed and only come back to the user if something looks risky or the intent turns out to be ambiguous.
+
+          Let me start by understanding what this task actually involves.
+        content: "好的，我先弄清楚这个任务的具体要求，判断它是构建类还是修复类，再采用匹配的方式处理——构建类直接产出并验证，修复类先检查再动手；每步都会先验证再向你汇报，有风险或意图不明的地方我会先回来和你确认。"

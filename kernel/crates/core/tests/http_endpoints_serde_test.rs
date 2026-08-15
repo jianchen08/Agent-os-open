@@ -5,7 +5,7 @@
 //! 设计依据：ADR §3.3 + 附录 E.1.2（http_endpoints: route_id/method/path/auth/
 //! handler_capability/timeout_ms/max_concurrency/description）。
 
-use agentos_core::traits::{HttpEndpoint, HostType, PluginManifest, PluginType};
+use agentos_core::traits::{HostType, HttpEndpoint, PluginManifest, PluginType};
 
 /// 反序列化含 http_endpoints 的 manifest——应解析出企微双方法（GET 验证 + POST 回调）。
 /// 设计依据：ADR §3.3 示例（同 path 不同 method 不冲突）。
@@ -103,7 +103,7 @@ fn test_empty_http_endpoints_omitted_in_serialization() {
         mcp: None,
         lifecycle: None,
         native: None,
-        wasm: None,
+        granted_capabilities: vec![],
         requires_content: None,
         invoke_entry: None,
         config_files: vec![],

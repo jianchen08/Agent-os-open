@@ -2,10 +2,10 @@
 //!
 //! 按 host_type 透明分发调用：
 //! - InProcess: 经 `NativePluginLoader` 加载 cdylib，走 C-ABI 调用（JSON 经内存传递）
-//! - Wasm: 经 `WasmRuntime`（wasmtime）加载执行 `.wasm`（JSON 经线性内存传递）
 //! - Sidecar: 通过 MCP 客户端走 JSON-RPC 协议调用（进程隔离）
 //!
-//! 三种 host_type 共用 PluginInput / PluginResult JSON 契约，invoker 透明分发。
+//! 两种 host_type 共用 PluginInput / PluginResult JSON 契约，invoker 透明分发。
+//! （原 Wasm 轨已按两轨终局决策关闭摘除，见 core::traits::HostType 文档。）
 //!
 //! [来源: docs/tasks/task_05_plugin_system.md AC-04-5/AC-04-6]
 
@@ -14,14 +14,14 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime};
 
-use async_trait::async_trait;
 use agentos_core::traits::{
     HookContext, HostType, LifecycleHook, PluginInvoker, PluginLoader, PluginManifest, PluginType,
 };
 use agentos_core::types::{PluginContext, PluginError, PluginResult, ToolExecutionResult};
 use agentos_hooks::{EventTarget, HookEventBus, LifecycleEvent};
 use agentos_mcp::{resolve_env_placeholders, CapabilityRouter, McpClient, McpError};
-use agentos_plugin_loader::{NativePluginLoader, WasmRuntime};
+use agentos_plugin_loader::NativePluginLoader;
+use async_trait::async_trait;
 use parking_lot::RwLock;
 use serde_json::{json, Value};
 use tracing::{error, info, warn};
@@ -39,7 +39,7 @@ const PLUGIN_FINGERPRINT_TTL: Duration = Duration::from_secs(1);
 ///   热路径上 stat 性能可接受，mtime 精度足够捕获代码/配置修改。
 /// - **只扫源码文件**（.py/.rs/.js/.ts/.wasm/.json/.yaml/.yml/.toml），跳过运行时
 ///   产生的杂物（.log/.pyc/__pycache__/临时文件）。否则 sidecar 运行时若在插件目录
-///   写入临时文件（如诊断日志），会误触发 respawn——实测踩过这个坑。
+///   写入临时文件（如诊断日志），会误触发 respawn。
 /// - config_files 指向的配置文件可能在插件目录外（如 config/models/llm.yaml），
 ///   单独 stat 纳入指纹，配置变更也能触发 respawn。
 fn compute_plugin_fingerprint(plugin_dir: &Path, manifest: &PluginManifest) -> u64 {
@@ -104,6 +104,15 @@ fn compute_plugin_fingerprint(plugin_dir: &Path, manifest: &PluginManifest) -> u
         hasher.write(b";");
     }
 
+    // 项目根 .env 指纹：API Key 更新走 .env（写 .env 不一定改变 llm.yaml
+    // 内容——占位符已是 ${VAR} 时 yaml 不变），必须靠 .env mtime 触发
+    // sidecar 热重启，respawn 时经 env_delta_overlay 拿到新 key。
+    if let Some(env_path) = agentos_mcp::env_file::project_env_path() {
+        hasher.write(b".env|");
+        hasher.write(mtime_str(&env_path).as_bytes());
+        hasher.write(b";");
+    }
+
     hasher.finish()
 }
 
@@ -126,7 +135,10 @@ impl CapabilityRouter for PluginScopedRouter {
         // 在 params 注入 _plugin_id（内核侧 metrics.record 读取它做命名空间）。
         // 这是信任锚点：plugin_id 来自 invoker 的 manifest，不是 sidecar 上报。
         if let Some(obj) = params.as_object_mut() {
-            obj.insert("_plugin_id".to_string(), Value::String(self.plugin_id.clone()));
+            obj.insert(
+                "_plugin_id".to_string(),
+                Value::String(self.plugin_id.clone()),
+            );
         } else {
             params = json!({ "_plugin_id": self.plugin_id, "value": params });
         }
@@ -190,13 +202,56 @@ fn extract_mcp_content(mcp_result: &serde_json::Value) -> serde_json::Value {
     }
 }
 
+/// B2：native 工具调用返回归一（对齐 [`PluginInvokerImpl::invoke_tool`] sidecar
+/// 决策树的归一层：纯业务数据包 success 信封）。
+///
+/// 插件 execute 的返回 JSON 按形状分流：
+/// - 带 `success`（bool）→ ToolExecutionResult 信封形态（新工具插件的约定返回）：
+///   - `success=true` → success(data 字段，缺省 Null)，保留 duration_ms；
+///   - `success=false` → failure(error 字段，缺省通用文案)。
+/// - 无 `success` → 旧 pipeline 插件（忽略 tool_call，返回 state_updates）→ 纯业务
+///   数据包 success 信封——旧插件零破坏。
+///
+/// 与 sidecar 决策树的差异（有意）：sidecar 另有「`{error}` 无 success → failure」
+/// 分支（MCP isError=true 提取的产物）；native 路径 execute 失败走 Err 错误通道、
+/// 不产该形态，且旧插件 state_updates 可能天然含 `error` 键，误判会破坏零兼容
+/// 承诺，故不设该分支。
+fn normalize_native_tool_output(inner: &Value) -> ToolExecutionResult {
+    match inner.get("success").and_then(|v| v.as_bool()) {
+        Some(true) => {
+            let mut result =
+                ToolExecutionResult::success(inner.get("data").cloned().unwrap_or(Value::Null));
+            result.duration_ms = inner.get("duration_ms").and_then(|v| v.as_u64());
+            result
+        }
+        Some(false) => {
+            let err_msg = inner
+                .get("error")
+                .and_then(|v| v.as_str())
+                .unwrap_or("native tool execution failed");
+            ToolExecutionResult::failure(err_msg)
+        }
+        None => ToolExecutionResult::success(inner.clone()),
+    }
+}
+
 /// 内核侧 HostServices 实现：包 `CapabilityRouter`，供原生插件调 capability。
 ///
-/// 与 sidecar（JSON-RPC 反调）、wasm（host.call import）走同一 router，三家对齐。
+/// 与 sidecar（JSON-RPC 反调）走同一 router，两轨对齐。
 /// trait 方法是 sync（插件经 C-ABI 同步调），内部用 block_in_place + block_on
 /// 跑 async router.handle。
+///
+/// G6：`plugin_id` 是信任锚点（invoker 从 manifest 注入，插件无法伪造），
+/// 每次调用自动写入 params._plugin_id——与 sidecar 的 PluginScopedRouter 同构，
+/// 使 CapabilityRouter 单点授权校验对两轨同判。
 struct NativeHostServices {
     router: Arc<dyn CapabilityRouter>,
+    /// 调用方插件 id（信任锚点，G6 授权粒度统一）。
+    plugin_id: String,
+    /// G7：execute 是否跑在 spawn_blocking 线程上。blocking 线程不是
+    /// runtime worker，`block_in_place` 在其上会 panic——改用直接
+    /// `Handle::block_on`（blocking 线程不参与调度，阻塞安全）。
+    on_blocking_thread: bool,
 }
 
 impl agentos_native_sdk::HostServices for NativeHostServices {
@@ -209,13 +264,31 @@ impl agentos_native_sdk::HostServices for NativeHostServices {
         let router = Arc::clone(&self.router);
         let cap = capability.to_string();
         let mth = method.to_string();
-        let params: Value = serde_json::from_str(params_json).unwrap_or(Value::Null);
-        // sync→async：多线程 runtime 下 block_in_place 让出 worker 再 block_on，避免死锁。
-        let result = tokio::task::block_in_place(|| {
-            tokio::runtime::Handle::current().block_on(async move {
-                router.handle(&cap, &mth, params).await
-            })
-        });
+        // G6：注入 _plugin_id 信任锚点（插件侧参数不可覆盖——已存在时以内核注入为准）。
+        let mut params: Value = serde_json::from_str(params_json).unwrap_or(Value::Null);
+        if let Value::Object(ref mut map) = params {
+            map.insert(
+                "_plugin_id".to_string(),
+                Value::String(self.plugin_id.clone()),
+            );
+        } else {
+            let mut map = serde_json::Map::new();
+            map.insert(
+                "_plugin_id".to_string(),
+                Value::String(self.plugin_id.clone()),
+            );
+            params = Value::Object(map);
+        }
+        // sync→async（G7 上下文感知）：
+        // - async worker 线程：block_in_place 让出 worker 再 block_on，避免死锁；
+        // - spawn_blocking 线程：直接 block_on（blocking 线程不参与调度，阻塞安全；
+        //   block_in_place 在非 worker 线程会 panic）。
+        let fut = async move { router.handle(&cap, &mth, params).await };
+        let result = if self.on_blocking_thread {
+            tokio::runtime::Handle::current().block_on(fut)
+        } else {
+            tokio::task::block_in_place(|| tokio::runtime::Handle::current().block_on(fut))
+        };
         match result {
             Ok(v) => Ok(serde_json::to_string(&v).unwrap_or_default()),
             Err(e) => Err(format!("{e}")),
@@ -234,7 +307,7 @@ pub struct PluginInvokerImpl {
     mcp_clients: RwLock<HashMap<String, Arc<tokio::sync::RwLock<McpClient>>>>,
     /// per-plugin spawn 互斥锁（single-flight，防并发请求竞态 spawn 多个 sidecar）。
     /// 同一 plugin_id 的 spawn 串行化：首个请求持锁 spawn 并写缓存，后续请求拿锁后
-    /// 二次查缓存命中直接复用。修复「并发触发 → 竞态创建多个孤儿 sidecar」泄漏。
+    /// 二次查缓存命中直接复用。single-flight 锁保证并发触发只创建一个 sidecar。
     spawn_locks: RwLock<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
     /// 崩溃回调（插件崩溃时调用）
     #[allow(clippy::type_complexity)]
@@ -249,9 +322,6 @@ pub struct PluginInvokerImpl {
     /// fan-out 给订阅者（审计/指标），best-effort、非阻塞。镜像 `router` 字段的
     /// `RwLock<Option<Arc<_>>>` 形态，经 [`set_hook_bus`] 在构造后注入。
     hook_bus: RwLock<Option<Arc<HookEventBus>>>,
-    /// WASM 插件运行时（task_11 N7）：host_type==Wasm 时用于加载/执行 .wasm。
-    /// None 时 WASM 插件调用返回 WASM_RUNTIME_NOT_CONFIGURED。
-    wasm_runtime: Option<Arc<WasmRuntime>>,
     /// 原生插件加载器（task_11 N2）：host_type==InProcess 时用于加载/执行 cdylib。
     /// None 时原生插件调用返回 NATIVE_LOADER_NOT_CONFIGURED。
     native_loader: Option<Arc<NativePluginLoader>>,
@@ -263,8 +333,6 @@ pub struct PluginInvokerImpl {
     /// sidecar 最后调用时刻 {plugin_id: Instant}——空闲软卸载依据。
     /// 每次 get_or_create_mcp_client 命中/创建时刷新；后台 GC 据此判定是否空闲超时。
     last_used: RwLock<HashMap<String, Instant>>,
-    /// wasm 最后调用时刻 {plugin_id: Instant}——同上，wasm 模块的空闲软卸载依据。
-    wasm_last_used: RwLock<HashMap<String, Instant>>,
     /// 注入给 sidecar 子进程的 PYTHONPATH 项目根目录（project_root）。
     ///
     /// sidecar 的 import 有两种历史写法并存（见 `resolve_pythonpath_src` 注释）：
@@ -273,10 +341,10 @@ pub struct PluginInvokerImpl {
     ///
     /// 因此实际注入的 PYTHONPATH 同时含 project_root 和 project_root/src。
     ///
-    /// 历史上 PYTHONPATH 注入依赖 `AGENTOS_PLUGINS_DIR` 环境变量推算，但启动方式
-    /// （如 Git Bash 的 start_web_02.sh）未必设置该变量，导致 sidecar 的 plugin.py
-    /// 无法 import 公共包，sidecar 启动即崩溃、initialize 永久卡到超时。这里改由内核
-    /// 构造期显式注入 project_root，环境变量仅作向后兼容兜底。
+    /// PYTHONPATH 注入由内核构造期显式注入 project_root，不依赖
+    /// `AGENTOS_PLUGINS_DIR` 环境变量（启动方式如 Git Bash 的 start_web_02.sh
+    /// 未必设置它，sidecar 的 plugin.py 会因无法 import 公共包而启动即崩溃、
+    /// initialize 永久卡到超时）；环境变量仅作向后兼容兜底。
     pythonpath_src: RwLock<Option<std::path::PathBuf>>,
 }
 
@@ -290,32 +358,9 @@ impl PluginInvokerImpl {
             crash_callbacks: RwLock::new(Vec::new()),
             router: RwLock::new(None),
             hook_bus: RwLock::new(None),
-            wasm_runtime: None,
             native_loader: None,
             fingerprints: RwLock::new(HashMap::new()),
             last_used: RwLock::new(HashMap::new()),
-            wasm_last_used: RwLock::new(HashMap::new()),
-            pythonpath_src: RwLock::new(None),
-        }
-    }
-
-    /// 创建带 WASM 运行时的 PluginInvoker（task_11 N7）。
-    ///
-    /// `wasm_runtime` 由调用方（engine 启动期）构造并注入，便于共享 host 能力注册表
-    /// 与白名单校验器。None 等价于 [`Self::new`]。
-    pub fn with_wasm_runtime(loader: Arc<dyn PluginLoader>, wasm_runtime: Arc<WasmRuntime>) -> Self {
-        Self {
-            loader,
-            mcp_clients: RwLock::new(HashMap::new()),
-            spawn_locks: RwLock::new(HashMap::new()),
-            crash_callbacks: RwLock::new(Vec::new()),
-            router: RwLock::new(None),
-            hook_bus: RwLock::new(None),
-            wasm_runtime: Some(wasm_runtime),
-            native_loader: None,
-            fingerprints: RwLock::new(HashMap::new()),
-            last_used: RwLock::new(HashMap::new()),
-            wasm_last_used: RwLock::new(HashMap::new()),
             pythonpath_src: RwLock::new(None),
         }
     }
@@ -340,7 +385,7 @@ impl PluginInvokerImpl {
 
     /// 解析注入给 sidecar 的完整 PYTHONPATH 字符串（多路径，用 OS 分隔符连接）。
     ///
-    /// sidecar 的 import 历史上有两种写法并存，必须同时满足：
+    /// sidecar 的 import 存在两种写法并存，必须同时满足：
     /// - `from src.core.logging import ...`（带 src. 前缀）→ 需 **project_root** 在
     ///   sys.path，Python 才在 `<project_root>/src/core/...` 解析。
     /// - `from config.settings import ...`（不带前缀）→ 需 **project_root/src** 在
@@ -381,7 +426,7 @@ impl PluginInvokerImpl {
 
         // PYTHONPATH 是 env 变量，路径间用 **环境变量分隔符**（Windows ';'、Unix ':'）
         // 连接——注意这跟路径组件分隔符 MAIN_SEPARATOR（Windows '\'、Unix '/'）是两回事。
-        // 历史实现误用 MAIN_SEPARATOR 导致路径粘连成 "D:\...\D:\...\src"（实测踩过）。
+        // 误用 MAIN_SEPARATOR 会把路径粘连成 "D:\...\D:\...\src"。
         const ENV_PATH_SEP: char = if cfg!(windows) { ';' } else { ':' };
         let existing = std::env::var("PYTHONPATH").unwrap_or_default();
         let joined = dirs
@@ -397,12 +442,6 @@ impl PluginInvokerImpl {
         Some(result)
     }
 
-    /// 链式注入 WASM 运行时（启动期装配用）。
-    pub fn set_wasm_runtime(mut self, wasm_runtime: Arc<WasmRuntime>) -> Self {
-        self.wasm_runtime = Some(wasm_runtime);
-        self
-    }
-
     /// 链式注入原生插件加载器（启动期装配用）。
     ///
     /// 启用 `host_type == InProcess` 的 cdylib 插件：放进插件目录 + 重启即用，
@@ -412,38 +451,9 @@ impl PluginInvokerImpl {
         self
     }
 
-    /// 解析 WASM 插件产物路径（manifest.wasm.artifact 相对插件目录）。
-    fn resolve_wasm_artifact(
-        &self,
-        plugin_id: &str,
-        manifest: &PluginManifest,
-    ) -> Result<std::path::PathBuf, PluginError> {
-        let artifact = manifest
-            .wasm
-            .as_ref()
-            .map(|w| w.artifact.as_str())
-            .ok_or_else(|| PluginError {
-                message: format!(
-                    "Wasm plugin '{}' missing manifest.wasm.artifact (ADR 附录 D②)",
-                    plugin_id
-                ),
-                code: Some("MISSING_WASM_ARTIFACT".to_string()),
-                source: Some("plugin-invoker".to_string()),
-            })?;
-        let dir = self.loader.get_plugin_dir(plugin_id).ok_or_else(|| PluginError {
-            message: format!(
-                "Wasm plugin '{}' directory not found (not discovered?)",
-                plugin_id
-            ),
-            code: Some("WASM_PLUGIN_DIR_NOT_FOUND".to_string()),
-            source: Some("plugin-invoker".to_string()),
-        })?;
-        Ok(std::path::PathBuf::from(dir).join(artifact))
-    }
-
     /// 解析原生插件产物路径（manifest.native.artifact 相对插件目录）。
     ///
-    /// 与 [`Self::resolve_wasm_artifact`] 对称：`artifact` 可写裸名（如 `my_plugin`）
+    /// `artifact` 可写裸名（如 `my_plugin`）
     /// 或带平台后缀（如 `my_plugin.dll`）。裸名时按平台补 `.dll`/`.so`/`.dylib`
     /// （[`NativePluginLoader::platform_artifact_name`]）。
     fn resolve_native_artifact(
@@ -463,21 +473,27 @@ impl PluginInvokerImpl {
                 code: Some("MISSING_NATIVE_ARTIFACT".to_string()),
                 source: Some("plugin-invoker".to_string()),
             })?;
-        let dir = self.loader.get_plugin_dir(plugin_id).ok_or_else(|| PluginError {
-            message: format!(
-                "Native plugin '{}' directory not found (not discovered?)",
-                plugin_id
-            ),
-            code: Some("NATIVE_PLUGIN_DIR_NOT_FOUND".to_string()),
-            source: Some("plugin-invoker".to_string()),
-        })?;
+        let dir = self
+            .loader
+            .get_plugin_dir(plugin_id)
+            .ok_or_else(|| PluginError {
+                message: format!(
+                    "Native plugin '{}' directory not found (not discovered?)",
+                    plugin_id
+                ),
+                code: Some("NATIVE_PLUGIN_DIR_NOT_FOUND".to_string()),
+                source: Some("plugin-invoker".to_string()),
+            })?;
         // 裸名自动补平台后缀，带后缀的原样保留
         let resolved = NativePluginLoader::platform_artifact_name(artifact);
         Ok(std::path::PathBuf::from(dir).join(resolved))
     }
 
     /// 取 native loader 或返回配置缺失错误（三个 native 调用路径共用）。
-    fn native_loader_or_err(&self, plugin_id: &str) -> Result<&Arc<NativePluginLoader>, PluginError> {
+    fn native_loader_or_err(
+        &self,
+        plugin_id: &str,
+    ) -> Result<&Arc<NativePluginLoader>, PluginError> {
         self.native_loader.as_ref().ok_or_else(|| PluginError {
             message: format!(
                 "Native plugin '{}' invoked but no NativePluginLoader configured",
@@ -500,11 +516,11 @@ impl PluginInvokerImpl {
         Ok(())
     }
 
-    /// 崩溃回调：调用失败且为 panic/fatal 时通知（native pipeline/tool 共用）。
-    fn notify_if_crash(&self, plugin_id: &str, result: &Result<PluginResult, PluginError>) {
+    /// 崩溃回调：调用失败且为 panic/fatal 时通知（native pipeline/tool 共用，
+    /// 泛型 T——只看 Err 侧错误码，pipeline 与 tool 两种结果类型通用）。
+    fn notify_if_crash<T>(&self, plugin_id: &str, result: &Result<T, PluginError>) {
         if let Err(ref e) = result {
-            if e
-                .code
+            if e.code
                 .as_deref()
                 .map(|c| c.contains("PANICKED") || c.contains("FATAL"))
                 .unwrap_or(false)
@@ -514,28 +530,300 @@ impl PluginInvokerImpl {
         }
     }
 
-    /// 取 wasm runtime 或返回配置缺失错误（wasm 调用路径共用）。
-    fn wasm_runtime_or_err(&self, plugin_id: &str) -> Result<&Arc<WasmRuntime>, PluginError> {
-        self.wasm_runtime.as_ref().ok_or_else(|| PluginError {
-            message: format!(
-                "Wasm plugin '{}' invoked but no WasmRuntime configured",
-                plugin_id
-            ),
-            code: Some("WASM_RUNTIME_NOT_CONFIGURED".to_string()),
-            source: Some("plugin-invoker".to_string()),
-        })
+    /// B1（M2-reactive 第一刀）：判定 MCP 客户端是否为「已死亡的 stdio sidecar 进程」。
+    ///
+    /// `is_alive()` 对 HTTP transport 恒为 false（无子进程），不能单独作死亡信号
+    /// （会把外部远程 MCP 误判为崩溃）。`pid()` 仅 stdio spawn 后有值：
+    /// - `Some(pid)` + `!is_alive()` → stdio sidecar 进程已退出（真死亡）；
+    /// - `None` → HTTP transport（无进程概念，不判死，调用走网络错误语义）。
+    async fn is_dead_sidecar(client: &McpClient) -> bool {
+        client.pid().await.is_some() && !client.is_alive().await
     }
 
-    /// 加载 wasm 模块（resolve artifact + load，wasm 路径共用）。
-    fn load_wasm(
+    /// B1：错误是否为「sidecar 死亡/传输断开」——可透明恢复类失败。
+    ///
+    /// 仅 `PLUGIN_CRASHED`（attempt 侧经 [`Self::is_dead_sidecar`] 判定）触发恢复；
+    /// `MCP_CALL_FAILED`/`MCP_TOOL_CALL_FAILED`（进程仍存活的协议/工具错误）、
+    /// `MCP_CONNECT_FAILED`（spawn 失败，重试同样失败）等不重试。
+    fn is_recoverable_sidecar_death(err: &PluginError) -> bool {
+        err.code.as_deref() == Some("PLUGIN_CRASHED")
+    }
+
+    /// B1（M2-reactive 第一刀）：sidecar 死亡**透明恢复**（brokered transparent
+    /// recovery）。
+    ///
+    /// 计划 §9.4 缺口：长事务在途调用时其依赖 B 被 idle GC 杀掉，现状是错误返回
+    /// 而非通知+等待，违反空间可组合性。修复：首次尝试失败且判定目标死亡
+    /// （`PLUGIN_CRASHED`，见 [`Self::is_recoverable_sidecar_death`]）时：
+    ///
+    /// 1. `force_unload_impl` 清缓存（kill 残尸 + 清指纹/last_used + OnUnload 事件）；
+    /// 2. attempt 内部经 `get_or_create_mcp_client` 重新 spawn；
+    /// 3. **重试一次（仅一次，防循环）**；重试成功 → 对调用方完全透明；
+    ///    重试仍失败 → 返回第一次的**原错误**（语义仍是「目标插件崩溃」）。
+    ///
+    /// 可观测性：重试路径记 info 日志（respawn 标记）；最终失败才 `notify_crash`
+    /// （崩溃回调语义保留给「恢复失败」——透明恢复成功时不卸载能力、不记
+    /// last_crash_ts，插件实际可用）。
+    async fn with_transparent_recovery<T, F, Fut>(
         &self,
-        runtime: &WasmRuntime,
+        plugin_id: &str,
+        mut attempt: F,
+    ) -> Result<T, PluginError>
+    where
+        F: FnMut() -> Fut,
+        Fut: std::future::Future<Output = Result<T, PluginError>>,
+    {
+        let err = match attempt().await {
+            Ok(v) => return Ok(v),
+            Err(e) => e,
+        };
+        if !Self::is_recoverable_sidecar_death(&err) {
+            return Err(err);
+        }
+
+        // 透明恢复：force_unload 清缓存（best-effort，失败也继续 respawn——
+        // get_or_create_mcp_client 自身有「缓存进程已死 → kill+respawn」兜底）。
+        info!(
+            plugin_id = plugin_id,
+            respawn = true,
+            "M2-reactive: sidecar died mid-call, transparent recovery (force_unload + respawn + retry once)"
+        );
+        if let Err(unload_err) = self.force_unload_impl(plugin_id).await {
+            warn!(
+                plugin_id = plugin_id,
+                error = %unload_err.message,
+                "transparent recovery: force_unload failed (respawn anyway)"
+            );
+        }
+
+        match attempt().await {
+            Ok(v) => {
+                info!(
+                    plugin_id = plugin_id,
+                    respawn = true,
+                    recovered = true,
+                    "M2-reactive: transparent recovery succeeded"
+                );
+                Ok(v)
+            }
+            Err(retry_err) => {
+                warn!(
+                    plugin_id = plugin_id,
+                    respawn = true,
+                    recovered = false,
+                    retry_error = %retry_err.message,
+                    "M2-reactive: retry after respawn failed, returning original error"
+                );
+                // 恢复失败 → 保留崩溃回调语义（卸载能力 + 告警 + last_crash_ts）。
+                self.notify_crash(plugin_id);
+                Err(err)
+            }
+        }
+    }
+
+    /// sidecar pipeline 调用**单次尝试**（B1：不含恢复逻辑，供
+    /// [`Self::with_transparent_recovery`] 重试）。
+    ///
+    /// 死亡判定（`PLUGIN_CRASHED`，可透明恢复）出现在两处：
+    /// ① 调用前存活检查（stdio 进程已死；HTTP transport 无进程不判死）；
+    /// ② call_tool 失败后复查存活——在途调用中死亡（依赖被 idle GC 杀掉的
+    ///    §9.4 场景；进程仍存活则归 MCP_CALL_FAILED，协议/工具错误重试无益）。
+    async fn attempt_sidecar_pipeline(
+        &self,
         plugin_id: &str,
         manifest: &PluginManifest,
-    ) -> Result<(), PluginError> {
-        let wasm_path = self.resolve_wasm_artifact(plugin_id, manifest)?;
-        runtime.load(plugin_id, &wasm_path)?;
-        Ok(())
+        ctx: &PluginContext,
+    ) -> Result<PluginResult, PluginError> {
+        // ADR 附录 D③（P6 命名治理）：从 manifest.invoke_entry 取 MCP 入口名
+        // （如 "context_build.execute"）。不再回退 capabilities.tools 或字面量
+        // "execute"——缺 invoke_entry 是 manifest 错误，必须显式暴露。
+        // 启动期 discover 聚合校验是主门；此处为运行期防线（深度防御）。
+        let tool_name = manifest
+            .invoke_entry
+            .as_deref()
+            .ok_or_else(|| PluginError {
+                message: format!(
+                    "pipeline plugin '{}' missing manifest.invoke_entry (ADR 附录 D②)",
+                    plugin_id
+                ),
+                code: Some("MISSING_INVOKE_ENTRY".to_string()),
+                source: Some("plugin-invoker".to_string()),
+            })?;
+
+        // Sidecar 模式：通过 MCP 客户端调用
+        let client_arc = self.get_or_create_mcp_client(manifest).await?;
+        let client = client_arc.read().await;
+
+        // ① 调用前存活检查（B1：死亡 → PLUGIN_CRASHED，交由恢复包装器 respawn+重试）
+        if Self::is_dead_sidecar(&client).await {
+            return Err(PluginError {
+                message: format!("plugin process crashed: {}", plugin_id),
+                code: Some("PLUGIN_CRASHED".to_string()),
+                source: Some("plugin-invoker".to_string()),
+            });
+        }
+
+        // 调用 tools/call
+        // _log_ctx：per-request 日志上下文，从 ctx.state 抽取（真实数据所在，
+        // 见 server.rs 把 pipeline_id/session_id 写进 state）。SDK 在调 handler
+        // 前 LogContext.bind，使 sidecar 日志能带 pipeline_id 关联内核日志。
+        let log_ctx = serde_json::json!({
+            "pipeline_id": ctx.state.get("pipeline_id").cloned().unwrap_or(Value::Null),
+            "request_id": ctx.state.get("request_id").cloned().unwrap_or(Value::Null),
+            "session_id": ctx.state.get("session_id").cloned().unwrap_or(Value::Null),
+            "agent_name": ctx.state.get("agent_id").cloned().unwrap_or(Value::Null),
+        });
+        let tool_args = serde_json::json!({
+            "state": ctx.state,
+            "config": ctx.config,
+            "_log_ctx": log_ctx,
+        });
+
+        let result = match client.call_tool(tool_name, &tool_args).await {
+            Ok(v) => v,
+            Err(e) => {
+                // ② 失败后复查存活：死亡（含在途死亡）→ PLUGIN_CRASHED（可透明恢复）；
+                //    存活 → MCP_CALL_FAILED 语义（协议/工具错误）。
+                //    （call_tool 已把底层错误统一包成 ToolCallFailed，无法按错误
+                //    类型区分崩溃，故用存活复查作权威判定。）
+                let died_mid_call = Self::is_dead_sidecar(&client).await;
+                return Err(if died_mid_call {
+                    PluginError {
+                        message: format!("plugin process died mid-call: {}: {}", plugin_id, e),
+                        code: Some("PLUGIN_CRASHED".to_string()),
+                        source: Some("plugin-invoker".to_string()),
+                    }
+                } else {
+                    PluginError {
+                        message: format!("MCP call failed: {}", e),
+                        code: Some("MCP_CALL_FAILED".to_string()),
+                        source: Some("plugin-invoker".to_string()),
+                    }
+                });
+            }
+        };
+
+        // 解析 MCP 响应——Python SDK 返回格式为：
+        // { "content": [{ "type": "text", "text": "<json_string>" }], "isError": false }
+        // 提取 content[0].text 并反序列化为 PluginResult
+        let inner = extract_mcp_content(&result);
+        let plugin_result: PluginResult =
+            serde_json::from_value(inner).map_err(|e| PluginError {
+                message: format!("failed to parse MCP response as PluginResult: {}", e),
+                code: Some("PARSE_ERROR".to_string()),
+                source: Some("plugin-invoker".to_string()),
+            })?;
+
+        Ok(plugin_result)
+    }
+
+    /// sidecar tool 调用**单次尝试**（B1：与 [`Self::attempt_sidecar_pipeline`] 同构）。
+    async fn attempt_sidecar_tool(
+        &self,
+        plugin_id: &str,
+        manifest: &PluginManifest,
+        tool_name: &str,
+        inputs: &Value,
+    ) -> Result<ToolExecutionResult, PluginError> {
+        let client_arc = self.get_or_create_mcp_client(manifest).await?;
+        let client = client_arc.read().await;
+
+        // ① 调用前存活检查（B1：死亡 → PLUGIN_CRASHED，可透明恢复）
+        if Self::is_dead_sidecar(&client).await {
+            return Err(PluginError {
+                message: format!("plugin process crashed: {}", plugin_id),
+                code: Some("PLUGIN_CRASHED".to_string()),
+                source: Some("plugin-invoker".to_string()),
+            });
+        }
+
+        let result = match client.call_tool(tool_name, inputs).await {
+            Ok(v) => v,
+            Err(e) => {
+                // ② 失败后复查存活（在途死亡 → PLUGIN_CRASHED；否则原
+                //    MCP_TOOL_CALL_FAILED 语义）
+                let died_mid_call = Self::is_dead_sidecar(&client).await;
+                return Err(if died_mid_call {
+                    PluginError {
+                        message: format!("plugin process died mid-call: {}: {}", plugin_id, e),
+                        code: Some("PLUGIN_CRASHED".to_string()),
+                        source: Some("plugin-invoker".to_string()),
+                    }
+                } else {
+                    PluginError {
+                        message: format!("MCP tool call failed: {}", e),
+                        code: Some("MCP_TOOL_CALL_FAILED".to_string()),
+                        source: Some("plugin-invoker".to_string()),
+                    }
+                });
+            }
+        };
+
+        // 解析 MCP 响应：extract_mcp_content 已提取 content[0].text 并反序列化为
+        // 工具 handler 的原始返回（业务 dict，如 {"result": ...} / {"error": ...}）。
+        //
+        // 工具返回的是**纯业务数据**，不带 ToolExecutionResult 的 success/data 信封
+        // （那是内核内部结构，插件不该感知）。所以这里不能直接 from_value 成
+        // ToolExecutionResult——否则业务 dict 缺 success 字段会报
+        // "missing field `success`"。这里按三层优先级智能构造：
+        //   ① 若 isError=true（已被 extract 转成 {"error": "..."}）→ failure；
+        //   ② 若返回值恰好已是 ToolExecutionResult 信封（带 success 字段）→ 直接用；
+        //   ③ 否则视为纯业务数据 → success(data=inner)，与 pipeline 路径
+        //      （ToolExecutionResult::success(to_value(plugin_result))）对齐。
+        let inner = extract_mcp_content(&result);
+        // 决策树（统一 Python ToolResult 与 ToolExecutionResult 两种信封）：
+        //   ②-a 返回已是 ToolExecutionResult 信封（同时带 success + data）→ 直接 from_value
+        //   ②-b Python ToolResult 形状（带 success 但无 data，有 output/error）→ 归一化：
+        //        success=true  → success(data=output)
+        //        success=false → failure(error)
+        //   ①   MCP isError=true / 工具返回 {"error":"..."}（无 success）→ failure
+        //   ③   纯业务数据（无 success 无 error）→ success(data=inner)
+        let tool_result = if inner.get("success").is_some() && inner.get("data").is_some() {
+            // ②-a 真 ToolExecutionResult 信封
+            serde_json::from_value(inner).map_err(|e| PluginError {
+                message: format!("failed to parse MCP response as ToolExecutionResult: {}", e),
+                code: Some("PARSE_ERROR".to_string()),
+                source: Some("plugin-invoker".to_string()),
+            })?
+        } else if inner.get("success").is_some() {
+            // ②-b 带 success 但无 data 字段。两种实际形态：
+            //   (A) builtin_tools 的 ToolResult.to_dict() 信封 {success, output, error, metadata}
+            //       → 业务数据在 output 里，取 output 作为 data。
+            //   (B) memory 等 server.py 把 result.output 解包后直接返回（inner 本身就是业务 dict，
+            //       恰好带 success 键，如 {success:true, memory_id:...}，无 output 键）
+            //       → inner 本身即 data。
+            //   区分：inner 有 "output" 键 → (A)；否则 → (B)。
+            //   与流式 tool_result 事件使用同一个 success 信号（tool_core/src/lib.rs:351）。
+            let ok = inner
+                .get("success")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(true);
+            if ok {
+                let data = if inner.get("output").is_some() {
+                    inner
+                        .get("output")
+                        .cloned()
+                        .unwrap_or(serde_json::Value::Null)
+                } else {
+                    inner.clone()
+                };
+                ToolExecutionResult::success(data)
+            } else {
+                let err_msg = inner
+                    .get("error")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("tool execution failed");
+                ToolExecutionResult::failure(err_msg)
+            }
+        } else if let Some(err) = inner.get("error").and_then(|v| v.as_str()) {
+            // ① MCP isError=true 或工具自身返回 {"error": "..."} 且无 success 字段
+            ToolExecutionResult::failure(err)
+        } else {
+            // ③ 纯业务数据 → 包成 success 信封
+            ToolExecutionResult::success(inner)
+        };
+
+        Ok(tool_result)
     }
 
     /// 原生插件 pipeline 调用：config 注入 + 热重载 + 崩溃回调，与 sidecar 对齐。
@@ -563,11 +851,15 @@ impl PluginInvokerImpl {
 
         // config 注入（shared::build_injected_config，按 manifest.config_files 命名空间）。
         let config = crate::shared::build_injected_config(
-            &self.loader.load_config().await.unwrap_or(serde_json::Value::Null),
+            &self
+                .loader
+                .load_config()
+                .await
+                .unwrap_or(serde_json::Value::Null),
             manifest,
         );
 
-        // 构造 PluginCtx（state/config 用 JSON 字符串）。
+        // 构造 PluginCtx（state/config 用 JSON 字符串；tool_call_json=None = pipeline 语义）。
         let plugin_ctx = agentos_native_sdk::PluginCtx {
             state_json: serde_json::to_string(&ctx.state).unwrap_or_else(|_| "{}".into()),
             config_json: serde_json::to_string(&config).unwrap_or_else(|_| "{}".into()),
@@ -575,19 +867,41 @@ impl PluginInvokerImpl {
             session_id: ctx.tenant.session_id.clone(),
             task_id: ctx.task_id.clone(),
             pipeline_id: ctx.pipeline_id.to_string(),
+            tool_call_json: None,
         };
 
         // 构造 HostServices（包 router）。router 缺失则 host=None，插件降级。
-        // NativeHostServices 是临时变量，execute 同步调用期间引用有效。
-        let host_svc: Option<NativeHostServices> = self
-            .router
-            .read()
-            .as_ref()
-            .map(|router| NativeHostServices { router: Arc::clone(router) });
-        let host_ref: Option<&dyn agentos_native_sdk::HostServices> =
-            host_svc.as_ref().map(|h| h as &dyn agentos_native_sdk::HostServices);
+        // G6：携带 plugin_id 信任锚点（单点授权在 CapabilityRouter 校验）。
+        // G7：execute 跑在 spawn_blocking 线程（cdylib 同步 C-ABI 可能长计算，
+        // 不阻塞 tokio worker）；HostServices 标记 on_blocking_thread，
+        // 内部 bridge 用直接 block_on（block_in_place 在 blocking 线程会 panic）。
+        let host_svc: Option<NativeHostServices> =
+            self.router
+                .read()
+                .as_ref()
+                .map(|router| NativeHostServices {
+                    router: Arc::clone(router),
+                    plugin_id: plugin_id.to_string(),
+                    on_blocking_thread: true,
+                });
 
-        let result = loader.execute(plugin_id, &plugin_ctx, host_ref);
+        let loader = Arc::clone(loader);
+        let pid = plugin_id.to_string();
+        let result = tokio::task::spawn_blocking(move || {
+            let host_ref: Option<&dyn agentos_native_sdk::HostServices> = host_svc
+                .as_ref()
+                .map(|h| h as &dyn agentos_native_sdk::HostServices);
+            loader.execute(&pid, &plugin_ctx, host_ref)
+        })
+        .await
+        .map_err(|join_err| PluginError {
+            message: format!(
+                "native plugin '{}' execute task panicked: {}",
+                plugin_id, join_err
+            ),
+            code: Some("NATIVE_EXECUTE_PANICKED".to_string()),
+            source: Some("plugin-invoker".to_string()),
+        })?;
 
         // execute 返回 state_updates JSON 字符串 → 解析为 PluginResult。
         let plugin_result = result.and_then(|state_updates_json| {
@@ -611,83 +925,113 @@ impl PluginInvokerImpl {
         as_result
     }
 
-    /// WASM 插件 pipeline 调用：config 注入 + 热重载 + 崩溃回调，与 sidecar 对齐。
-    async fn invoke_wasm_pipeline(
-        &self,
-        plugin_id: &str,
-        manifest: &PluginManifest,
-        ctx: &PluginContext,
-    ) -> Result<PluginResult, PluginError> {
-        let runtime = self.wasm_runtime_or_err(plugin_id)?;
-
-        // 热重载：指纹变化则重新编译模块（wasm 可安全 drop Store，无 dlclose 坑）。
-        if self.is_plugin_stale(plugin_id, manifest).await {
-            if let Some(dir) = self.loader.get_plugin_dir(plugin_id) {
-                let artifact = manifest
-                    .wasm
-                    .as_ref()
-                    .map(|w| w.artifact.as_str())
-                    .unwrap_or("");
-                let wasm_path = std::path::PathBuf::from(dir).join(artifact);
-                if let Err(e) = runtime.reload(plugin_id, &wasm_path) {
-                    warn!("Wasm hot reload failed for {}: {}", plugin_id, e);
-                }
-            }
-        }
-
-        self.load_wasm(runtime, plugin_id, manifest)?;
-        let input = crate::shared::build_plugin_input(self.loader.as_ref(), ctx, manifest).await?;
-        let result = runtime.invoke(plugin_id, &input);
-
-        if result.is_ok() {
-            self.touch_wasm_last_used(plugin_id);
-        } else {
-            // trap 视为崩溃，触发回调（与 sidecar 进程崩溃一致）。
-            self.notify_crash(plugin_id);
-        }
-        result
-    }
-
-    /// 原生插件 tool 调用：inputs 作 state + config 注入 + 崩溃回调。
+    /// 原生插件 tool 调用（B2：native 工具插件支持，M2 计划任务 B）。
+    ///
+    /// 复用生命周期钩子 `hook` 字段的既有模式：PluginCtx 加 **约定字段**
+    /// `tool_call_json = {"name": tool_name}`（概念上即 PluginInput 的
+    /// `{state: inputs, config: 注入配置, tool_call: {name: tool_name}}`），
+    /// 经 native_loader 的 execute 入口调用——与 pipeline execute 同一 C-ABI 入口，
+    /// 约定字段区分语义。
+    ///
+    /// 插件侧约定：execute 见 tool_call 字段走工具逻辑，返回 ToolExecutionResult
+    /// 形状 JSON；**旧插件不认识该字段 → 忽略，按 pipeline 逻辑返回 state_updates**
+    /// ——调用侧（[`normalize_native_tool_output`]）检测返回形状归一：能解析成
+    /// ToolExecutionResult 信封就用，否则按现状包 success 信封（零破坏）。
+    ///
+    /// crash 语义对齐 [`Self::notify_if_crash`]（execute panic/fatal → 崩溃回调）。
     async fn invoke_native_tool(
         &self,
-        _plugin_id: &str,
-        _manifest: &PluginManifest,
-        _tool_name: &str,
-        _inputs: &Value,
-    ) -> Result<ToolExecutionResult, PluginError> {
-        // 当前原生插件仅支持 pipeline 类型（经 PipelinePlugin trait）。
-        // InProcess 工具插件尚未支持——工具（bash 等）目前都是 sidecar。
-        // 待将来出现原生工具插件时，扩展 PipelinePlugin trait 之外的 Tool 契约。
-        Err(PluginError {
-            message: "InProcess tool plugin not yet supported (only pipeline plugins)".to_string(),
-            code: Some("NATIVE_TOOL_UNSUPPORTED".to_string()),
-            source: Some("plugin-invoker".to_string()),
-        })
-    }
-
-    /// WASM 插件 tool 调用：inputs 作 state + config 注入 + 崩溃回调。
-    async fn invoke_wasm_tool(
-        &self,
         plugin_id: &str,
         manifest: &PluginManifest,
-        _tool_name: &str,
+        tool_name: &str,
         inputs: &Value,
     ) -> Result<ToolExecutionResult, PluginError> {
-        let runtime = self.wasm_runtime_or_err(plugin_id)?;
-        self.load_wasm(runtime, plugin_id, manifest)?;
-        let config = crate::shared::injected_config(self.loader.as_ref(), manifest).await?;
-        let input = json!({ "state": inputs, "config": config });
-        let result = runtime.invoke(plugin_id, &input);
-        if result.is_ok() {
-            self.touch_wasm_last_used(plugin_id);
-        } else {
-            self.notify_crash(plugin_id);
+        let loader = self.native_loader_or_err(plugin_id)?;
+
+        // 热重载指纹检测（与 invoke_native_pipeline 同逻辑）：代码/配置变更告警。
+        if self.is_plugin_stale(plugin_id, manifest).await {
+            warn!(
+                "Native plugin '{}' source changed but cdylib cannot hot-unload (dlclose limit); \
+                 restart kernel to pick up changes",
+                plugin_id
+            );
         }
-        let plugin_result = result?;
-        Ok(ToolExecutionResult::success(
-            serde_json::to_value(plugin_result).unwrap_or_default(),
-        ))
+
+        self.load_native(loader, plugin_id, manifest)?;
+
+        // config 注入（shared::build_injected_config，按 manifest.config_files 命名空间）。
+        let config = crate::shared::build_injected_config(
+            &self
+                .loader
+                .load_config()
+                .await
+                .unwrap_or(serde_json::Value::Null),
+            manifest,
+        );
+
+        // 构造 PluginCtx：state=inputs（工具入参），tool_call 约定字段表达工具语义。
+        // 工具调用无 PluginContext（invoke_tool 不带租户/管道），租户等字段留空——
+        // 与 sidecar tools/call 直传 inputs（不带租户）对齐。
+        let plugin_ctx = agentos_native_sdk::PluginCtx {
+            state_json: serde_json::to_string(inputs).unwrap_or_else(|_| "{}".into()),
+            config_json: serde_json::to_string(&config).unwrap_or_else(|_| "{}".into()),
+            tenant_id: String::new(),
+            session_id: String::new(),
+            task_id: String::new(),
+            pipeline_id: String::new(),
+            tool_call_json: Some(
+                serde_json::to_string(&serde_json::json!({ "name": tool_name }))
+                    .unwrap_or_default(),
+            ),
+        };
+
+        // 构造 HostServices（包 router）。G6/G7 语义与 invoke_native_pipeline 同构：
+        // 携带 plugin_id 信任锚点；execute 跑 spawn_blocking（C-ABI 同步可能长计算）。
+        let host_svc: Option<NativeHostServices> =
+            self.router
+                .read()
+                .as_ref()
+                .map(|router| NativeHostServices {
+                    router: Arc::clone(router),
+                    plugin_id: plugin_id.to_string(),
+                    on_blocking_thread: true,
+                });
+
+        let loader = Arc::clone(loader);
+        let pid = plugin_id.to_string();
+        let raw = tokio::task::spawn_blocking(move || {
+            let host_ref: Option<&dyn agentos_native_sdk::HostServices> = host_svc
+                .as_ref()
+                .map(|h| h as &dyn agentos_native_sdk::HostServices);
+            loader.execute(&pid, &plugin_ctx, host_ref)
+        })
+        .await
+        .map_err(|join_err| PluginError {
+            message: format!(
+                "native plugin '{}' execute task panicked: {}",
+                plugin_id, join_err
+            ),
+            code: Some("NATIVE_EXECUTE_PANICKED".to_string()),
+            source: Some("plugin-invoker".to_string()),
+        })?;
+
+        // execute 返回 JSON 字符串 → 解析 + 归一为 ToolExecutionResult（对齐
+        // invoke_tool 的 sidecar 决策树：纯业务数据包 success 信封）。
+        let result = raw.and_then(|out_json| {
+            let inner: Value = serde_json::from_str(&out_json).map_err(|e| PluginError {
+                message: format!(
+                    "native plugin '{}' tool output parse failed: {}",
+                    plugin_id, e
+                ),
+                code: Some("NATIVE_OUTPUT_PARSE".to_string()),
+                source: Some("plugin-invoker".to_string()),
+            })?;
+            Ok(normalize_native_tool_output(&inner))
+        });
+
+        // crash 语义对齐（notify_if_crash：PANICKED/FATAL → 崩溃回调）。
+        self.notify_if_crash(plugin_id, &result);
+        result
     }
 
     /// 设置 Capability 路由器（启用 sidecar→内核反向调用）。
@@ -696,14 +1040,9 @@ impl PluginInvokerImpl {
     /// 之后新建的 MCP 客户端会自动带上路由器；已连接的客户端下次重连时生效。
     pub fn set_router(&self, router: Arc<dyn CapabilityRouter>) {
         // sidecar：存 router，新建 MCP client 时带上（PluginScopedRouter）。
-        // wasm：用 router 建 host_registry 注入 WasmRuntime——guest 的 host.call
-        //       import 即转发到 router（与 sidecar JSON-RPC 反向调用同一 router，对齐）。
-        // native：router 存此，host_call 入口经 capability::call_capability 转发。
-        // 一行接通三种 host_type 的 capability 反向调用。
-        if let Some(rt) = &self.wasm_runtime {
-            rt.set_host_registry(crate::capability::wasm_host_registry(router.clone()));
-            rt.set_capability_checker(Arc::new(crate::capability::AllowHostCallChecker));
-        }
+        // native：router 存此，execute 时包成 NativeHostServices 注入 ExecContext
+        // （host 调 capability 经其走 router.handle）。
+        // 一行接通两种 host_type 的 capability 反向调用。
         *self.router.write() = Some(router);
     }
 
@@ -760,7 +1099,7 @@ impl PluginInvokerImpl {
     /// 获取或创建 MCP 客户端（按需加载）。
     ///
     /// 并发安全：用 per-plugin spawn 锁（single-flight）保证同一 plugin_id 的 spawn
-    /// 串行化，修复「并发请求竞态创建多个孤儿 sidecar」的进程泄漏。
+    /// 串行化——并发触发只创建一个 sidecar，不遗留孤儿进程。
     async fn get_or_create_mcp_client(
         &self,
         manifest: &PluginManifest,
@@ -897,8 +1236,8 @@ impl PluginInvokerImpl {
                     command,
                     ep.args.join(" ")
                 );
-                let mut c = McpClient::new_stdio(command, ep.args.clone())
-                    .with_plugin_id(&manifest.id);
+                let mut c =
+                    McpClient::new_stdio(command, ep.args.clone()).with_plugin_id(&manifest.id);
                 // env 值含 ${ENV_VAR} 占位 → 解析（缺失则启动失败早暴露）。
                 let mut extra_env: Vec<(String, String)> = Vec::new();
                 for (k, v) in &ep.env {
@@ -974,15 +1313,13 @@ impl PluginInvokerImpl {
             source: Some("plugin-invoker".to_string()),
         })?;
 
-
         // initialize 握手（携带插件配置）
         // 配置加载失败时分级处理：IO 错误（目录不存在等）可降级为空配置；
         // 解析错误（YAML 语法错误）应报错，让插件启动失败比悄悄降级更安全。
         let full_config = match self.loader.load_config().await {
             Ok(config) => config,
             Err(e) => {
-                if e
-                    .code
+                if e.code
                     .as_deref()
                     .map(|c| c.contains("PARSE"))
                     .unwrap_or(false)
@@ -1013,9 +1350,7 @@ impl PluginInvokerImpl {
         let _ = client
             .send_notification("notifications/on_load", Some(config.clone()))
             .await
-            .inspect_err(|e| {
-                warn!("on_load notification failed for {}: {}", manifest.id, e)
-            });
+            .inspect_err(|e| warn!("on_load notification failed for {}: {}", manifest.id, e));
 
         // 旁路广播 OnLoad 给总线订阅者（审计/指标）。与上方 `notifications/on_load`
         // 直调属**同一生命周期事件**：直调是权威路径（通知目标插件初始化），
@@ -1090,8 +1425,6 @@ impl PluginInvokerImpl {
     /// 当前检测项：
     /// - 若 manifest 声明了 network 权限（`permissions.network.allowed_hosts` 非空），
     ///   则认为该插件可能联网；这是声明性记录，不阻断调用。
-    /// - 若 manifest 同时声明了 network 权限但 `allowed_hosts` 为空，
-    ///   说明声明含糊（声称要联网却未指定可信主机），记 warning。
     ///
     /// 该函数不返回错误，**永远不阻断** invoke 流程。
     fn check_permissions(&self, plugin_id: &str, manifest: &PluginManifest) {
@@ -1113,9 +1446,7 @@ impl PluginInvokerImpl {
             "Plugin permission declaration"
         );
 
-        // 声明含糊检测：声明了要联网（有非空 host 列表）说明确实要联网；
-        // 若声明了 network 权限意图但 allowed_hosts 为空，
-        // 说明声明不完整，记 warning（不阻断）。
+        // 声明了要联网（有非空 host 列表）说明确实要联网，记 info 留痕。
         // 注：0.2 不强制 enforce，仅日志留痕供审计。
         if has_network {
             info!(
@@ -1133,17 +1464,9 @@ impl PluginInvokerImpl {
             .insert(plugin_id.to_string(), Instant::now());
     }
 
-    /// 刷新 wasm 的最后调用时刻。
-    fn touch_wasm_last_used(&self, plugin_id: &str) {
-        self.wasm_last_used
-            .write()
-            .insert(plugin_id.to_string(), Instant::now());
-    }
-
-    /// 统一软卸载：按 host_type 分流，进程/模块 kill 但 manifest 描述保留（下次调用重新 spawn）。
+    /// 统一软卸载：按 host_type 分流，进程 kill 但 manifest 描述保留（下次调用重新 spawn）。
     ///
     /// - sidecar：复用 force_unload_impl（kill 进程 + 清缓存）
-    /// - wasm：调 wasm_runtime.unload()（释放模块）+ 清 wasm_last_used
     /// - InProcess（rust 原生 cdylib）：跳过（Windows dlclose 限制），返回 false
     ///
     /// 返回 true 表示已卸载，false 表示未卸载（不支持的类型或未加载）。
@@ -1162,23 +1485,6 @@ impl PluginInvokerImpl {
 
         match host_type {
             HostType::Sidecar => self.force_unload_impl(plugin_id).await.is_ok(),
-            HostType::Wasm => {
-                if let Some(rt) = &self.wasm_runtime {
-                    match rt.unload(plugin_id) {
-                        Ok(()) => {
-                            self.wasm_last_used.write().remove(plugin_id);
-                            info!("Plugin idle-unloaded (wasm): {}", plugin_id);
-                            true
-                        }
-                        Err(e) => {
-                            warn!("Failed to idle-unload wasm {}: {}", plugin_id, e);
-                            false
-                        }
-                    }
-                } else {
-                    false
-                }
-            }
             HostType::InProcess => {
                 // rust 原生 cdylib：dlclose 限制，不自动卸载
                 tracing::debug!(
@@ -1192,9 +1498,9 @@ impl PluginInvokerImpl {
 
     /// 启动后台空闲软卸载 GC 任务。
     ///
-    /// 每 30s 扫描 last_used + wasm_last_used，对空闲超过阈值的插件调 unload_if_idle
-    /// （sidecar kill 进程 / wasm 释放模块，manifest 描述保留，下次调用重新 spawn）。
-    /// 实现 trait 文档 :652 早就声明的"空闲超时自动卸载"设计原则。
+    /// 每 30s 扫描 last_used，对空闲超过阈值的插件调 unload_if_idle
+    /// （sidecar kill 进程，manifest 描述保留，下次调用重新 spawn）。
+    /// 对齐 trait 文档声明的「空闲超时自动卸载」设计原则。
     ///
     /// 必须用 Arc<Self> 调用（后台任务需 'static 持有 invoker）。在 main 启动期调一次。
     pub fn start_idle_gc(self: &Arc<Self>) {
@@ -1213,14 +1519,10 @@ impl PluginInvokerImpl {
 
     /// 单次 GC 扫描：收集所有已加载插件的 id + 最后调用时刻，对超时的软卸载。
     async fn run_idle_gc_pass(&self) {
-        // 快照当前所有"活跃"插件 id（sidecar + wasm 合并），避免长时间持锁
+        // 快照当前所有"活跃"插件 id，避免长时间持锁
         let candidates: Vec<String> = {
-            let sidecar_ids: Vec<String> =
-                self.last_used.read().keys().cloned().collect();
-            let wasm_ids: Vec<String> =
-                self.wasm_last_used.read().keys().cloned().collect();
+            let sidecar_ids: Vec<String> = self.last_used.read().keys().cloned().collect();
             let mut all: Vec<String> = sidecar_ids;
-            all.extend(wasm_ids);
             all.sort();
             all.dedup();
             all
@@ -1229,19 +1531,12 @@ impl PluginInvokerImpl {
         let now = Instant::now();
         for plugin_id in candidates {
             // sidecar 空闲判定
-            let sidecar_idle = self
+            let idle_secs = self
                 .last_used
                 .read()
                 .get(&plugin_id)
-                .map(|t| now.duration_since(*t).as_secs());
-            // wasm 空闲判定
-            let wasm_idle = self
-                .wasm_last_used
-                .read()
-                .get(&plugin_id)
-                .map(|t| now.duration_since(*t).as_secs());
-
-            let idle_secs = sidecar_idle.max(wasm_idle).unwrap_or(0);
+                .map(|t| now.duration_since(*t).as_secs())
+                .unwrap_or(0);
             if idle_secs == 0 {
                 continue;
             }
@@ -1319,9 +1614,7 @@ impl PluginInvokerImpl {
             let _ = client
                 .send_notification("notifications/on_unload", None)
                 .await
-                .inspect_err(|e| {
-                    warn!("on_unload notification failed for {}: {}", plugin_id, e)
-                });
+                .inspect_err(|e| warn!("on_unload notification failed for {}: {}", plugin_id, e));
             if let Err(e) = client.kill().await {
                 warn!("Failed to kill crashed plugin {}: {}", plugin_id, e);
             }
@@ -1398,7 +1691,6 @@ impl PluginInvoker for PluginInvokerImpl {
     ///
     /// 按 manifest 的 host_type 透明分发：
     /// - InProcess: 经 NativePluginLoader 加载 cdylib 并走 C-ABI 调用（JSON 契约）
-    /// - Wasm: 经 WasmRuntime 加载执行 .wasm（JSON 经线性内存）
     /// - Sidecar: 通过 MCP 客户端走 JSON-RPC tools/call
     async fn invoke_pipeline_plugin(
         &self,
@@ -1414,85 +1706,18 @@ impl PluginInvoker for PluginInvokerImpl {
         let result = match manifest.host_type {
             HostType::InProcess => {
                 // task_11 N2：经 NativePluginLoader 加载 cdylib 并通过 C-ABI 调用。
-                // config 注入与 sidecar 同逻辑（shared::build_plugin_input）——三家对齐。
+                // config 注入与 sidecar 同逻辑（shared::build_plugin_input）——两轨对齐。
                 self.invoke_native_pipeline(plugin_id, manifest, ctx).await
             }
-            HostType::Wasm => {
-                // task_11 N7：经 WasmRuntime 加载/执行 .wasm。
-                // config 注入同 sidecar——三家对齐。
-                self.invoke_wasm_pipeline(plugin_id, manifest, ctx).await
-            }
             HostType::Sidecar => {
-                // ADR 附录 D③（P6 命名治理）：从 manifest.invoke_entry 取 MCP 入口名
-                // （如 "context_build.execute"）。不再回退 capabilities.tools 或字面量
-                // "execute"——缺 invoke_entry 是 manifest 错误，必须显式暴露。
-                // 启动期 discover 聚合校验是主门；此处为运行期防线（深度防御）。
-                let tool_name = manifest.invoke_entry.as_deref().ok_or_else(|| PluginError {
-                    message: format!(
-                        "pipeline plugin '{}' missing manifest.invoke_entry (ADR 附录 D②)",
-                        plugin_id
-                    ),
-                    code: Some("MISSING_INVOKE_ENTRY".to_string()),
-                    source: Some("plugin-invoker".to_string()),
-                })?;
-
-                // Sidecar 模式：通过 MCP 客户端调用
-                let client_arc = self.get_or_create_mcp_client(manifest).await?;
-                let client = client_arc.read().await;
-
-                // 检查进程健康
-                if !client.is_alive().await {
-                    drop(client);
-                    self.notify_crash(plugin_id);
-                    return Err(PluginError {
-                        message: format!("plugin process crashed: {}", plugin_id),
-                        code: Some("PLUGIN_CRASHED".to_string()),
-                        source: Some("plugin-invoker".to_string()),
-                    });
-                }
-
-                // 调用 tools/call
-                // _log_ctx：per-request 日志上下文，从 ctx.state 抽取（真实数据所在，
-                // 见 server.rs 把 pipeline_id/session_id 写进 state）。SDK 在调 handler
-                // 前 LogContext.bind，使 sidecar 日志能带 pipeline_id 关联内核日志。
-                let log_ctx = serde_json::json!({
-                    "pipeline_id": ctx.state.get("pipeline_id").cloned().unwrap_or(Value::Null),
-                    "request_id": ctx.state.get("request_id").cloned().unwrap_or(Value::Null),
-                    "session_id": ctx.state.get("session_id").cloned().unwrap_or(Value::Null),
-                    "agent_name": ctx.state.get("agent_id").cloned().unwrap_or(Value::Null),
-                });
-                let tool_args = serde_json::json!({
-                    "state": ctx.state,
-                    "config": ctx.config,
-                    "_log_ctx": log_ctx,
-                });
-
-                let result = client.call_tool(tool_name, &tool_args).await.map_err(|e| {
-                    let is_crash = matches!(e, McpError::Transport { .. });
-                    if is_crash {
-                        drop(client);
-                        self.notify_crash(plugin_id);
-                    }
-                    PluginError {
-                        message: format!("MCP call failed: {}", e),
-                        code: Some("MCP_CALL_FAILED".to_string()),
-                        source: Some("plugin-invoker".to_string()),
-                    }
-                })?;
-
-                // 解析 MCP 响应——Python SDK 返回格式为：
-                // { "content": [{ "type": "text", "text": "<json_string>" }], "isError": false }
-                // 提取 content[0].text 并反序列化为 PluginResult
-                let inner = extract_mcp_content(&result);
-                let plugin_result: PluginResult = serde_json::from_value(inner).map_err(|e| {
-                    PluginError {
-                        message: format!("failed to parse MCP response as PluginResult: {}", e),
-                        code: Some("PARSE_ERROR".to_string()),
-                        source: Some("plugin-invoker".to_string()),
-                    }
-                })?;
-
-                Ok(plugin_result)
+                // B1（M2-reactive 第一刀）：sidecar 死亡透明恢复——单次尝试抽出为
+                // attempt_sidecar_pipeline，死亡判定（PLUGIN_CRASHED）触发
+                // force_unload + respawn + 重试一次（长事务在途调用不被依赖死亡破坏）。
+                self.with_transparent_recovery(plugin_id, || async {
+                    self.attempt_sidecar_pipeline(plugin_id, manifest, ctx)
+                        .await
+                })
+                .await
             }
         };
 
@@ -1509,7 +1734,6 @@ impl PluginInvoker for PluginInvokerImpl {
     ///
     /// 按 host_type 透明分发：
     /// - InProcess: 经 NativePluginLoader 加载 cdylib 走 C-ABI（inputs 作为 state）
-    /// - Wasm: 经 WasmRuntime 加载执行 .wasm（inputs 作为 state）
     /// - Sidecar: 通过 MCP 客户端走 JSON-RPC tools/call
     async fn invoke_tool(
         &self,
@@ -1526,95 +1750,17 @@ impl PluginInvoker for PluginInvokerImpl {
         let result = match manifest.host_type {
             HostType::InProcess => {
                 // task_11 N2：原生工具插件——inputs 作为 state，config 同 pipeline 路径注入。
-                self.invoke_native_tool(plugin_id, manifest, tool_name, inputs).await
-            }
-            HostType::Wasm => {
-                // task_11 N7：WASM 工具插件——inputs 作为 state，config 同 pipeline 路径注入。
-                self.invoke_wasm_tool(plugin_id, manifest, tool_name, inputs).await
+                // B2：经 execute 的 tool_call 约定字段表达工具语义（旧 pipeline 插件零破坏）。
+                self.invoke_native_tool(plugin_id, manifest, tool_name, inputs)
+                    .await
             }
             HostType::Sidecar => {
-                let client_arc = self.get_or_create_mcp_client(manifest).await?;
-                let client = client_arc.read().await;
-
-                if !client.is_alive().await {
-                    drop(client);
-                    self.notify_crash(plugin_id);
-                    return Err(PluginError {
-                        message: format!("plugin process crashed: {}", plugin_id),
-                        code: Some("PLUGIN_CRASHED".to_string()),
-                        source: Some("plugin-invoker".to_string()),
-                    });
-                }
-
-                let result =
-                    client
-                        .call_tool(tool_name, inputs)
+                // B1（M2-reactive 第一刀）：sidecar 死亡透明恢复——与 pipeline 路径同构。
+                self.with_transparent_recovery(plugin_id, || async {
+                    self.attempt_sidecar_tool(plugin_id, manifest, tool_name, inputs)
                         .await
-                        .map_err(|e| PluginError {
-                            message: format!("MCP tool call failed: {}", e),
-                            code: Some("MCP_TOOL_CALL_FAILED".to_string()),
-                            source: Some("plugin-invoker".to_string()),
-                        })?;
-
-                // 解析 MCP 响应：extract_mcp_content 已提取 content[0].text 并反序列化为
-                // 工具 handler 的原始返回（业务 dict，如 {"result": ...} / {"error": ...}）。
-                //
-                // 工具返回的是**纯业务数据**，不带 ToolExecutionResult 的 success/data 信封
-                // （那是内核内部结构，插件不该感知）。所以这里不能直接 from_value 成
-                // ToolExecutionResult——否则业务 dict 缺 success 字段会报
-                // "missing field `success`"。这里按三层优先级智能构造：
-                //   ① 若 isError=true（已被 extract 转成 {"error": "..."}）→ failure；
-                //   ② 若返回值恰好已是 ToolExecutionResult 信封（带 success 字段）→ 直接用；
-                //   ③ 否则视为纯业务数据 → success(data=inner)，与 pipeline 路径
-                //      （ToolExecutionResult::success(to_value(plugin_result))）对齐。
-                let inner = extract_mcp_content(&result);
-                // 决策树（统一 Python ToolResult 与 ToolExecutionResult 两种信封）：
-                //   ②-a 返回已是 ToolExecutionResult 信封（同时带 success + data）→ 直接 from_value
-                //   ②-b Python ToolResult 形状（带 success 但无 data，有 output/error）→ 归一化：
-                //        success=true  → success(data=output)
-                //        success=false → failure(error)
-                //   ①   MCP isError=true / 工具返回 {"error":"..."}（无 success）→ failure
-                //   ③   纯业务数据（无 success 无 error）→ success(data=inner)
-                let tool_result = if inner.get("success").is_some() && inner.get("data").is_some() {
-                    // ②-a 真 ToolExecutionResult 信封
-                    serde_json::from_value(inner).map_err(|e| PluginError {
-                        message: format!("failed to parse MCP response as ToolExecutionResult: {}", e),
-                        code: Some("PARSE_ERROR".to_string()),
-                        source: Some("plugin-invoker".to_string()),
-                    })?
-                } else if inner.get("success").is_some() {
-                    // ②-b 带 success 但无 data 字段。两种实际形态：
-                    //   (A) builtin_tools 的 ToolResult.to_dict() 信封 {success, output, error, metadata}
-                    //       → 业务数据在 output 里，取 output 作为 data。
-                    //   (B) memory 等 server.py 把 result.output 解包后直接返回（inner 本身就是业务 dict，
-                    //       恰好带 success 键，如 {success:true, memory_id:...}，无 output 键）
-                    //       → inner 本身即 data。
-                    //   区分：inner 有 "output" 键 → (A)；否则 → (B)。
-                    //   与流式 tool_result 事件使用同一个 success 信号（tool_core/src/lib.rs:351）。
-                    let ok = inner.get("success").and_then(|v| v.as_bool()).unwrap_or(true);
-                    if ok {
-                        let data = if inner.get("output").is_some() {
-                            inner.get("output").cloned().unwrap_or(serde_json::Value::Null)
-                        } else {
-                            inner.clone()
-                        };
-                        ToolExecutionResult::success(data)
-                    } else {
-                        let err_msg = inner
-                            .get("error")
-                            .and_then(|v| v.as_str())
-                            .unwrap_or("tool execution failed");
-                        ToolExecutionResult::failure(err_msg)
-                    }
-                } else if let Some(err) = inner.get("error").and_then(|v| v.as_str()) {
-                    // ① MCP isError=true 或工具自身返回 {"error": "..."} 且无 success 字段
-                    ToolExecutionResult::failure(err)
-                } else {
-                    // ③ 纯业务数据 → 包成 success 信封
-                    ToolExecutionResult::success(inner)
-                };
-
-                Ok(tool_result)
+                })
+                .await
             }
         };
 
@@ -1648,6 +1794,7 @@ impl PluginInvoker for PluginInvokerImpl {
             LifecycleHook::OnPipelineStart => "on_pipeline_start",
             LifecycleHook::OnPipelineEnd => "on_pipeline_end",
             LifecycleHook::OnError => "on_error",
+            LifecycleHook::DomainEvent => "domain_event",
         };
         let tags = serde_json::to_value(context.tags()).unwrap_or_default();
 
@@ -1658,20 +1805,20 @@ impl PluginInvoker for PluginInvokerImpl {
                     let client = client_arc.read().await;
                     if client.is_alive().await {
                         let hook_method = format!("notifications/{hook_name}");
-                        if let Err(e) = client
-                            .send_notification(&hook_method, Some(tags))
-                            .await
-                        {
+                        if let Err(e) = client.send_notification(&hook_method, Some(tags)).await {
                             warn!("Lifecycle notification failed for {}: {}", plugin_id, e);
                         }
                     }
                 }
             }
-            HostType::InProcess | HostType::Wasm => {
-                // Native/Wasm：没有 MCP 通知通道，钩子经 execute 传递——PluginInput 带
+            HostType::InProcess => {
+                // Native：没有 MCP 通知通道，钩子经 execute 传递——PluginInput 带
                 // `hook` 字段（值为钩子名）+ config。插件 SDK 见到 hook 字段走钩子逻辑。
                 // 错误仅 warn（与 sidecar 的 fire-and-forget 语义一致，不阻断管道）。
-                if let Err(e) = self.send_hook_via_execute(plugin_id, manifest, hook_name, &tags).await {
+                if let Err(e) = self
+                    .send_hook_via_execute(plugin_id, manifest, hook_name, &tags)
+                    .await
+                {
                     warn!("Lifecycle hook {hook_name} failed for {}: {}", plugin_id, e);
                 }
             }
@@ -1697,44 +1844,87 @@ impl PluginInvoker for PluginInvokerImpl {
         let root_refs: Vec<&str> = roots.iter().map(|s| s.as_str()).collect();
         self.loader.discover(&root_refs).await
     }
+
+    /// G2：拉取插件实际上报的工具清单（`tools/list` 原始 JSON）。
+    ///
+    /// 仅 sidecar 支持（native/wasm 暂无 describe 通道，返回不支持错误——api 层
+    /// 对这两类跳过校验，待 describe 机制落地后补全）。
+    /// 语义：spawn/复用 MCP 连接 → `tools/list`；**本次是新 spawn 的连接则校验后
+    /// 回收（kill + 移除缓存）**——安装期校验不破坏懒加载（复用中的连接不回收）。
+    async fn list_plugin_tools(&self, plugin_id: &str) -> Result<serde_json::Value, PluginError> {
+        let loaded = self.loader.load(plugin_id).await?;
+        let manifest = &loaded.manifest;
+        if manifest.host_type != HostType::Sidecar {
+            return Err(PluginError {
+                message: format!(
+                    "list_plugin_tools 暂不支持 host_type={:?}（native/wasm 的 describe 通道待 G2 后续落地）",
+                    manifest.host_type
+                ),
+                code: None,
+                source: None,
+            });
+        }
+        // 新 spawn 判定：校验前缓存里没有该插件的存活连接（本次会 spawn 新进程）
+        let was_new = {
+            let cached = self.mcp_clients.read().get(plugin_id).cloned();
+            match cached {
+                Some(client) => {
+                    let guard = client.read().await;
+                    !guard.is_alive().await
+                }
+                None => true,
+            }
+        };
+        let client = self.get_or_create_mcp_client(manifest).await?;
+        let raw = {
+            let guard = client.read().await;
+            guard.list_tools().await.map_err(|e| PluginError {
+                message: format!("tools/list failed for {plugin_id}: {e}"),
+                code: None,
+                source: None,
+            })?
+        };
+        // 本次新 spawn 的进程：校验完回收（kill + 移除缓存），懒加载语义不被破坏
+        if was_new {
+            if let Err(e) = client.write().await.kill().await {
+                tracing::debug!(
+                    "G2 verify: best-effort kill of freshly spawned sidecar {} failed (idle GC will reap): {e}",
+                    plugin_id
+                );
+            }
+            self.mcp_clients.write().remove(plugin_id);
+        }
+        Ok(raw)
+    }
 }
 
 impl PluginInvokerImpl {
-    /// 经 execute 向 native/wasm 插件传递生命周期钩子。
+    /// 确保生命周期钩子时机 native 插件已加载（钩子当前无 native 消费者，显式 no-op）。
     ///
-    /// 这两类插件没有 MCP 通知通道，约定用 PluginInput 的 `hook` 字段表达钩子：
-    /// 插件 SDK / guest 见到 `hook` 字段就走对应钩子逻辑，而非正常 execute。
-    /// config 仍按 config_files 注入（与 sidecar 的 on_load 带 config 对齐）。
+    /// native 插件没有 MCP 通知通道，钩子当前也无 native 侧消费者，本函数
+    /// 不传递负载，仅在钩子时机触发一次加载（保持热重载检测一致性）。
     async fn send_hook_via_execute(
         &self,
         plugin_id: &str,
         manifest: &PluginManifest,
-        hook_name: &str,
-        tags: &Value,
+        _hook_name: &str,
+        _tags: &Value,
     ) -> Result<(), PluginError> {
-        let config = crate::shared::injected_config(self.loader.as_ref(), manifest).await?;
-        let input = json!({
-            "state": tags,
-            "config": config,
-            "hook": hook_name,
-        });
-        match manifest.host_type {
-            HostType::InProcess => {
-                // 直接 trait 对象模型：生命周期钩子经 PipelinePlugin trait 之外
-                // 的独立契约传递（当前 tool_core 无 on_load/on_unload 需求，暂 no-op）。
-                // 仅确保插件已加载（保持热重载检测一致性）。
-                if let Some(loader) = self.native_loader.as_ref() {
-                    self.load_native(loader, plugin_id, manifest)?;
-                }
+        // 钩子负载当前无 native 消费者，不构造；仅保留 config_files 读取失败的
+        // Err 传播语义（injected_config 求值即校验）。
+        let _config = crate::shared::injected_config(self.loader.as_ref(), manifest).await?;
+        if manifest.host_type == HostType::InProcess {
+            // 直接 trait 对象模型：生命周期钩子经 PipelinePlugin trait 之外
+            // 的独立契约传递（当前 tool_core 无 on_load/on_unload 需求，暂 no-op）。
+            // 仅确保插件已加载（保持热重载检测一致性）。
+            //
+            // B2 后注：PluginCtx 已有同构的「约定字段表达特殊调用」先例——
+            // `tool_call_json`（工具调用语义，见 invoke_native_tool）。钩子若将来
+            // 需要 native 侧消费，可按同一模式加 `hook_json` 字段经 execute 直调
+            // （当前无消费者，保持 no-op）。
+            if let Some(loader) = self.native_loader.as_ref() {
+                self.load_native(loader, plugin_id, manifest)?;
             }
-            HostType::Wasm => {
-                if let Some(runtime) = self.wasm_runtime.as_ref() {
-                    let wasm_path = self.resolve_wasm_artifact(plugin_id, manifest)?;
-                    runtime.load(plugin_id, &wasm_path)?;
-                    runtime.invoke(plugin_id, &input)?;
-                }
-            }
-            _ => {}
         }
         Ok(())
     }
@@ -1815,11 +2005,6 @@ mod tests {
         fn add_manifest(&self, manifest: PluginManifest) {
             self.manifests.write().insert(manifest.id.clone(), manifest);
         }
-
-        /// 设置插件目录（N7 测试：让 invoker 能找到 .wasm 产物）。
-        fn set_plugin_dir(&self, plugin_id: &str, dir: impl Into<String>) {
-            self.plugin_dirs.write().insert(plugin_id.to_string(), dir.into());
-        }
     }
 
     #[async_trait]
@@ -1894,7 +2079,7 @@ mod tests {
             mcp: None,
             lifecycle: None,
             native: None,
-            wasm: None,
+            granted_capabilities: vec![],
             requires_content: None,
             invoke_entry: None,
             config_files: vec![],
@@ -1926,7 +2111,7 @@ mod tests {
             mcp: None,
             lifecycle: None,
             native: None,
-            wasm: None,
+            granted_capabilities: vec![],
             requires_content: None,
             invoke_entry: None,
             config_files: vec![],
@@ -2013,18 +2198,16 @@ mod tests {
             .to_path_buf()
     }
 
-    /// 构造完整装配的 invoker：真实 loader discover plugins/shared + 注入 wasm/native runtime。
+    /// 构造完整装配的 invoker：真实 loader discover plugins/shared + 注入 native runtime。
     async fn fully_wired_invoker_for_e2e() -> PluginInvokerImpl {
         let plugins_dir = repo_root().join("plugins/shared");
-        let loader = Arc::new(
-            agentos_plugin_loader::PluginLoaderImpl::new(plugins_dir.clone(), None),
-        );
+        let loader = Arc::new(agentos_plugin_loader::PluginLoaderImpl::new(
+            plugins_dir.clone(),
+            None,
+        ));
         loader.discover(&[]).await.unwrap();
-        let wasm_runtime = Arc::new(WasmRuntime::new().unwrap());
         let native_loader = Arc::new(NativePluginLoader::new());
-        PluginInvokerImpl::new(loader)
-            .set_wasm_runtime(wasm_runtime)
-            .set_native_loader(native_loader)
+        PluginInvokerImpl::new(loader).set_native_loader(native_loader)
     }
 
     fn make_e2e_ctx() -> PluginContext {
@@ -2065,15 +2248,19 @@ mod tests {
             plugins_dir.join("pipeline/core/tool_core/libpipeline_tool_core_native.so")
         };
         if !tool_core_artifact.exists() {
-            eprintln!("SKIP: tool_core cdylib not built at {}", tool_core_artifact.display());
+            eprintln!(
+                "SKIP: tool_core cdylib not built at {}",
+                tool_core_artifact.display()
+            );
             return;
         }
         let tool_core_parent = plugins_dir.join("pipeline/core");
         let tool_core_parent_str = tool_core_parent.to_string_lossy().to_string();
         let roots: Vec<&str> = vec![&tool_core_parent_str];
-        let loader = Arc::new(
-            agentos_plugin_loader::PluginLoaderImpl::new(plugins_dir, None),
-        );
+        let loader = Arc::new(agentos_plugin_loader::PluginLoaderImpl::new(
+            plugins_dir,
+            None,
+        ));
         loader.discover(&roots).await.unwrap();
         let native_loader = Arc::new(NativePluginLoader::new());
         let invoker = PluginInvokerImpl::new(loader).set_native_loader(native_loader);
@@ -2127,8 +2314,14 @@ mod tests {
                 0,
             ),
         );
-        let result = invoker.invoke_pipeline_plugin("pipeline_tool_core", &ctx_tool).await;
-        assert!(result.is_ok(), "tool_core invoke failed: {:?}", result.err());
+        let result = invoker
+            .invoke_pipeline_plugin("pipeline_tool_core", &ctx_tool)
+            .await;
+        assert!(
+            result.is_ok(),
+            "tool_core invoke failed: {:?}",
+            result.err()
+        );
         let pr = result.unwrap();
         // tool_core 必然回写 tool_results + 清空 raw_tool_calls。
         assert!(
@@ -2138,20 +2331,35 @@ mod tests {
         );
         assert_eq!(pr.state_updates.get("raw_tool_calls"), Some(&json!([])));
         // 关键断言：工具执行成功，结果回写 tool_results（success=true + 输出原文）。
-        let tool_results = pr.state_updates.get("tool_results").and_then(|v| v.as_array()).cloned();
+        let tool_results = pr
+            .state_updates
+            .get("tool_results")
+            .and_then(|v| v.as_array())
+            .cloned();
         let tr = tool_results.expect("should have tool result array");
         assert_eq!(tr.len(), 1, "should have 1 tool result");
         assert_eq!(tr[0]["success"], true, "tool should succeed: {:?}", tr[0]);
         assert_eq!(
             tr[0]["data"]["output"], "agentos-native-ok\n",
-            "tool output should be returned: {:?}", tr[0]
+            "tool output should be returned: {:?}",
+            tr[0]
         );
         // messages 重建：assistant tool_calls + tool 结果消息。
-        let msgs = pr.state_updates.get("messages").and_then(|v| v.as_array()).cloned();
+        let msgs = pr
+            .state_updates
+            .get("messages")
+            .and_then(|v| v.as_array())
+            .cloned();
         let msgs = msgs.expect("messages should be rebuilt");
-        assert!(msgs.iter().any(|m| m["role"] == "assistant" && m["tool_calls"].is_array()));
+        assert!(msgs
+            .iter()
+            .any(|m| m["role"] == "assistant" && m["tool_calls"].is_array()));
         assert!(
-            msgs.iter().any(|m| m["role"] == "tool" && m["content"].as_str().map(|s| s.contains("agentos-native-ok")).unwrap_or(false)),
+            msgs.iter().any(|m| m["role"] == "tool"
+                && m["content"]
+                    .as_str()
+                    .map(|s| s.contains("agentos-native-ok"))
+                    .unwrap_or(false)),
             "tool result message should carry output: {:?}",
             msgs
         );
@@ -2173,7 +2381,11 @@ mod tests {
         let invoker = fully_wired_invoker_for_e2e().await;
         let ctx = make_e2e_ctx();
         let result = invoker.invoke_pipeline_plugin("native_test", &ctx).await;
-        assert!(result.is_ok(), "native plugin invoke failed: {:?}", result.err());
+        assert!(
+            result.is_ok(),
+            "native plugin invoke failed: {:?}",
+            result.err()
+        );
         let pr = result.unwrap();
         assert_eq!(
             pr.state_updates.get("processed_by"),
@@ -2183,30 +2395,42 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn e2e_wasm_plugin_executes() {
-        let wasm = repo_root().join("plugins/shared/wasm_hello/wasm_hello.wasm");
-        if !wasm.exists() {
-            eprintln!("SKIP: wasm artifact not present at {}", wasm.display());
+    /// B2：native 工具调用端到端（tool_call 约定字段经 execute C-ABI 直调）。
+    ///
+    /// 测试形态取舍（诚实记录）：invoke_native_tool 依赖真实 cdylib（loader 是
+    /// 具体类型 NativePluginLoader，无 mock 注入点），单测无法覆盖完整链路——
+    /// 归一逻辑由 normalize_native_tool_output 单测覆盖，本测试用真 cdylib
+    /// （native-sdk-test-plugin 构建产物）验证「PluginCtx.tool_call_json → 插件
+    /// 工具分支 → ToolExecutionResult 信封」全链路。产物未构建时 SKIP；
+    /// Windows 下与其他 e2e_native 同因（STATUS_ACCESS_VIOLATION，HEAD 已知），
+    /// 跑法：cargo test -p agentos-invoker --lib -- --skip e2e_native。
+    #[tokio::test(flavor = "multi_thread")]
+    // 测试串行化锁需覆盖整个 async 测试体，刻意跨 await 持有，改异步锁会改变串行语义。
+    #[allow(clippy::await_holding_lock)]
+    async fn e2e_native_tool_call_via_execute() {
+        let _guard = NATIVE_E2E_LOCK.lock();
+        let dll = repo_root().join("plugins/shared/native_test/native_test_plugin.dll");
+        if !dll.exists() {
+            eprintln!(
+                "SKIP: native cdylib not built at {} (build native-sdk-test-plugin and copy)",
+                dll.display()
+            );
             return;
         }
         let invoker = fully_wired_invoker_for_e2e().await;
-        let ctx = make_e2e_ctx();
-        // 经 WasmRuntime（wasmtime）加载执行 .wasm
-        let result = invoker.invoke_pipeline_plugin("wasm_hello", &ctx).await;
+        let result = invoker
+            .invoke_tool("native_test", "echo_tool", &json!({"hello": "world"}))
+            .await;
         assert!(
             result.is_ok(),
-            "wasm plugin invoke failed: {:?}",
+            "native tool invoke failed: {:?}",
             result.err()
         );
-        let pr = result.unwrap();
-        // wasm_hello 返回 {"state_updates":{"processed_by":"wasm_hello"}}
-        assert_eq!(
-            pr.state_updates.get("processed_by"),
-            Some(&json!("wasm_hello")),
-            "got: {:?}",
-            pr.state_updates
-        );
+        let tr = result.unwrap();
+        // native-sdk-test-plugin 的工具分支返回 {success:true, data:{tool, echo_args}}
+        assert!(tr.success, "tool should succeed: {:?}", tr);
+        assert_eq!(tr.data["tool"], "echo_tool");
+        assert_eq!(tr.data["echo_args"]["hello"], "world");
     }
 
     #[tokio::test]
@@ -2267,7 +2491,7 @@ mod tests {
             mcp: None,
             lifecycle: None,
             native: None,
-            wasm: None,
+            granted_capabilities: vec![],
             requires_content: None,
             invoke_entry: None,
             config_files: vec![],
@@ -2305,171 +2529,222 @@ mod tests {
         assert!(result.is_ok());
     }
 
-    // ── task_11 N7：invoker 分发 host_type==Wasm ──
+    // ── B1（M2-reactive 第一刀）：透明恢复包装器单元测试 ──
+    //
+    // 测试形态取舍（诚实记录）：完整的「真 sidecar 死亡 → respawn → 重试成功」
+    // 需要「成功握手后又死亡」的 MCP 进程（echo 插件 + kill 时机控制），单测内
+    // 需真实 python 进程，太重且 Windows 易脆。这里测**重试逻辑函数层**：
+    // with_transparent_recovery 以可注入 attempt 闭包暴露，闭包计数模拟
+    // 「第一次死亡 / 重试成功 / 重试仍失败」三种序列，覆盖恢复决策全部分支；
+    // 死亡判定（is_dead_sidecar）与错误分类（is_recoverable_sidecar_death）
+    // 各自独立单测。真进程行为由 e2e_native 家族与集成链路兜底。
 
-    /// 构造一个 Wasm pipeline manifest（host_type: wasm）。
-    fn make_wasm_manifest(id: &str, artifact: &str) -> PluginManifest {
-        PluginManifest {
-            id: id.to_string(),
-            name: format!("Wasm {}", id),
-            version: "1.0.0".to_string(),
-            plugin_type: PluginType::Pipeline,
-            pipeline_role: None,
-            language: "rust".to_string(),
-            host_type: HostType::Wasm,
-            entry: artifact.to_string(),
-            capabilities: Default::default(),
-            dependencies: vec![],
-            permissions: Default::default(),
-            error_policy: Default::default(),
-            priority: 100,
-            mcp: None,
-            lifecycle: None,
-            native: None,
-            wasm: Some(agentos_core::traits::WasmArtifact {
-                artifact: artifact.to_string(),
-                wit_interface: None,
-                granted_capabilities: vec![],
-            }),
-            requires_content: None,
-            invoke_entry: Some("execute".to_string()),
-            config_files: vec![],
-            http_endpoints: vec![],
-            ui_schema: None,
-            contributes: None,
-            enabled: None,
-            activation: None,
-            provides: None,
-            persistent_fields: vec![],
-        }
-    }
-
-    /// 一个 echo WAT（输入 JSON 原样回显为输出 JSON）。
-    /// 注意：输出必须是合法的 PluginResult JSON，否则反序列化失败。
-    /// 这里 execute 直接返回固定的成功 PluginResult JSON（不读输入），
-    /// 避免 WAT 里实现 JSON 解析的复杂度——仅验证 host→guest→host 链路通。
-    const ECHO_RESULT_WAT: &str = r#"
-(module
-  (memory (export "memory") 1)
-  (global $bump (mut i32) (i32.const 4))
-  (func $allocate (export "allocate") (param $len i32) (result i32)
-    (local $ptr i32)
-    (local.set $ptr (global.get $bump))
-    (global.set $bump (i32.and
-      (i32.add (global.get $bump) (local.get $len))
-      (i32.const 0x7FFFFFFC)))
-    (local.set $ptr (i32.or (local.get $ptr) (i32.const 0)))
-    ;; 4 字节对齐
-    (global.set $bump (i32.and
-      (i32.add (global.get $bump) (i32.const 3))
-      (i32.const 0x7FFFFFFC)))
-    (local.get $ptr))
-  (func (export "deallocate") (param $p i32) (param $l i32))
-  ;; execute 返回固定的 PluginResult JSON：{"state_updates":{"echo":"ok"}} (31 字节)
-  ;; 把这串字节用 (data) 写进内存，execute 复制并返回 (ptr,len)。
-  (data (i32.const 1024) "{\"state_updates\":{\"echo\":\"ok\"}}")
-  (func (export "execute") (param $in_ptr i32) (param $in_len i32) (result i64)
-    (local $out_ptr i32)
-    ;; 输出长度 = 31（上面的 JSON 字节数）
-    (local.set $out_ptr (call $allocate (i32.const 31)))
-    ;; 复制 data 到 out
-    (memory.copy (local.get $out_ptr) (i32.const 1024) (i32.const 31))
-    (i64.or
-      (i64.extend_i32_u (local.get $out_ptr))
-      (i64.shl (i64.extend_i32_u (i32.const 31)) (i64.const 32))))
-)
-"#;
-
-    /// N7：invoker 经 WasmRuntime 加载并调用 WASM pipeline 插件，返回 PluginResult。
     #[tokio::test]
-    async fn test_invoke_wasm_pipeline_plugin_dispatches_to_wasmruntime() {
-        // 1. 写 .wasm 文件到临时目录（用 wat 编译 WAT）
-        let tmp = tempfile::tempdir().unwrap();
-        let wasm_bytes = wat::parse_bytes(ECHO_RESULT_WAT.as_bytes()).unwrap();
-        let wasm_path = tmp.path().join("echo.wasm");
-        std::fs::write(&wasm_path, &wasm_bytes).unwrap();
-
-        // 2. 构造 loader + manifest，设置插件目录
+    async fn test_recovery_retry_once_then_success() {
+        // 第一次尝试死亡（PLUGIN_CRASHED）→ force_unload + respawn → 第二次成功：
+        // 调用方拿到 Ok（完全透明），且不触发崩溃回调（插件实际可用）。
         let loader = Arc::new(MockLoader::new());
-        loader.add_manifest(make_wasm_manifest("wasm_echo", "echo.wasm"));
-        loader.set_plugin_dir("wasm_echo", tmp.path().to_string_lossy().to_string());
-
-        // 3. 构造带 WasmRuntime 的 invoker
-        let runtime = Arc::new(WasmRuntime::new().unwrap());
-        let invoker = PluginInvokerImpl::with_wasm_runtime(loader, runtime);
-
-        let ctx = PluginContext::new(
-            json!({}),
-            json!({}),
-            TenantContext::new("t1", "s1"),
-            Uuid::new_v4(),
-            agentos_core::types::ContentLoader::new(
-                Arc::new(MockStorage),
-                "run1".to_string(),
-                "main".to_string(),
-                0,
-            ),
-        );
-
-        let result = invoker.invoke_pipeline_plugin("wasm_echo", &ctx).await;
-        assert!(result.is_ok(), "WASM dispatch should succeed: {:?}", result);
-        let pr = result.unwrap();
-        // echo 模块返回 {"state_updates":{"echo":"ok"}}
-        assert_eq!(pr.state_updates.get("echo"), Some(&json!("ok")));
-    }
-
-    /// N7：未配置 WasmRuntime 时，WASM 插件调用返回 WASM_RUNTIME_NOT_CONFIGURED。
-    #[tokio::test]
-    async fn test_invoke_wasm_without_runtime_errors() {
-        let loader = Arc::new(MockLoader::new());
-        loader.add_manifest(make_wasm_manifest("wasm_no_rt", "x.wasm"));
-
-        // 用 new()——不注入 WasmRuntime
+        loader.add_manifest(make_sidecar_manifest("recover_ok", "python server.py"));
         let invoker = PluginInvokerImpl::new(loader);
-        let ctx = PluginContext::new(
-            json!({}),
-            json!({}),
-            TenantContext::new("t1", "s1"),
-            Uuid::new_v4(),
-            agentos_core::types::ContentLoader::new(
-                Arc::new(MockStorage),
-                "run1".to_string(),
-                "main".to_string(),
-                0,
-            ),
-        );
 
-        let err = invoker.invoke_pipeline_plugin("wasm_no_rt", &ctx).await.unwrap_err();
-        assert_eq!(err.code.as_deref(), Some("WASM_RUNTIME_NOT_CONFIGURED"));
+        let crashed = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let crashed_clone = Arc::clone(&crashed);
+        invoker.on_crash(Arc::new(move |plugin_id: &str| {
+            crashed_clone.lock().unwrap().push(plugin_id.to_string());
+        }));
+
+        let attempts = Arc::new(std::sync::Mutex::new(0u32));
+        let attempts_clone = Arc::clone(&attempts);
+        let result: Result<serde_json::Value, PluginError> = invoker
+            .with_transparent_recovery("recover_ok", || async {
+                let n = {
+                    let mut c = attempts_clone.lock().unwrap();
+                    *c += 1;
+                    *c
+                };
+                if n == 1 {
+                    Err(PluginError {
+                        message: "plugin process died mid-call".to_string(),
+                        code: Some("PLUGIN_CRASHED".to_string()),
+                        source: Some("plugin-invoker".to_string()),
+                    })
+                } else {
+                    Ok(serde_json::json!({"recovered": true}))
+                }
+            })
+            .await;
+
+        assert_eq!(*attempts.lock().unwrap(), 2, "死亡后必须恰好重试一次");
+        assert_eq!(result.unwrap()["recovered"], true, "重试成功对调用方透明");
+        assert!(
+            crashed.lock().unwrap().is_empty(),
+            "透明恢复成功不应触发崩溃回调"
+        );
     }
 
-    /// N7：WASM 插件缺 manifest.wasm.artifact → MISSING_WASM_ARTIFACT。
     #[tokio::test]
-    async fn test_invoke_wasm_missing_artifact_errors() {
-        let tmp = tempfile::tempdir().unwrap();
+    async fn test_recovery_retry_once_only_returns_original_error() {
+        // 重试仍失败 → 返回第一次的**原错误**（仅一次重试，防循环），并触发
+        // 崩溃回调（恢复失败保留崩溃语义：卸载能力 + last_crash_ts）。
         let loader = Arc::new(MockLoader::new());
-        let mut manifest = make_wasm_manifest("wasm_no_art", "echo.wasm");
-        manifest.wasm = None; // 故意去掉 wasm 字段
-        loader.add_manifest(manifest);
-        loader.set_plugin_dir("wasm_no_art", tmp.path().to_string_lossy().to_string());
+        loader.add_manifest(make_sidecar_manifest("recover_fail", "python server.py"));
+        let invoker = PluginInvokerImpl::new(loader);
 
-        let runtime = Arc::new(WasmRuntime::new().unwrap());
-        let invoker = PluginInvokerImpl::with_wasm_runtime(loader, runtime);
-        let ctx = PluginContext::new(
-            json!({}),
-            json!({}),
-            TenantContext::new("t1", "s1"),
-            Uuid::new_v4(),
-            agentos_core::types::ContentLoader::new(
-                Arc::new(MockStorage),
-                "run1".to_string(),
-                "main".to_string(),
-                0,
-            ),
+        let crashed = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let crashed_clone = Arc::clone(&crashed);
+        invoker.on_crash(Arc::new(move |plugin_id: &str| {
+            crashed_clone.lock().unwrap().push(plugin_id.to_string());
+        }));
+
+        let attempts = Arc::new(std::sync::Mutex::new(0u32));
+        let attempts_clone = Arc::clone(&attempts);
+        let result: Result<serde_json::Value, PluginError> = invoker
+            .with_transparent_recovery("recover_fail", || async {
+                let n = {
+                    let mut c = attempts_clone.lock().unwrap();
+                    *c += 1;
+                    *c
+                };
+                Err(PluginError {
+                    message: format!("death #{}", n),
+                    code: Some("PLUGIN_CRASHED".to_string()),
+                    source: Some("plugin-invoker".to_string()),
+                })
+            })
+            .await;
+
+        assert_eq!(*attempts.lock().unwrap(), 2, "仅重试一次，不得循环");
+        let err = result.unwrap_err();
+        assert_eq!(err.code.as_deref(), Some("PLUGIN_CRASHED"));
+        assert_eq!(err.message, "death #1", "重试失败返回第一次的原错误");
+        assert_eq!(
+            crashed.lock().unwrap().as_slice(),
+            &["recover_fail".to_string()],
+            "恢复失败必须触发一次崩溃回调"
         );
+    }
 
-        let err = invoker.invoke_pipeline_plugin("wasm_no_art", &ctx).await.unwrap_err();
-        assert_eq!(err.code.as_deref(), Some("MISSING_WASM_ARTIFACT"));
+    #[tokio::test]
+    async fn test_recovery_non_death_error_no_retry() {
+        // 非 death 类失败（MCP_CALL_FAILED 等）不重试——协议/工具错误 respawn 无益。
+        let loader = Arc::new(MockLoader::new());
+        loader.add_manifest(make_sidecar_manifest("no_retry", "python server.py"));
+        let invoker = PluginInvokerImpl::new(loader);
+
+        let attempts = Arc::new(std::sync::Mutex::new(0u32));
+        let attempts_clone = Arc::clone(&attempts);
+        let result: Result<serde_json::Value, PluginError> = invoker
+            .with_transparent_recovery("no_retry", || async {
+                *(attempts_clone.lock().unwrap()) += 1;
+                Err(PluginError {
+                    message: "MCP call failed: protocol error".to_string(),
+                    code: Some("MCP_CALL_FAILED".to_string()),
+                    source: Some("plugin-invoker".to_string()),
+                })
+            })
+            .await;
+
+        assert_eq!(*attempts.lock().unwrap(), 1, "非 death 错误不重试");
+        assert_eq!(result.unwrap_err().code.as_deref(), Some("MCP_CALL_FAILED"));
+    }
+
+    #[test]
+    fn test_is_recoverable_sidecar_death_classification() {
+        // 死亡分类：仅 PLUGIN_CRASHED 可透明恢复。
+        let mk = |code: &str| PluginError {
+            message: "x".to_string(),
+            code: Some(code.to_string()),
+            source: None,
+        };
+        assert!(PluginInvokerImpl::is_recoverable_sidecar_death(&mk(
+            "PLUGIN_CRASHED"
+        )));
+        assert!(!PluginInvokerImpl::is_recoverable_sidecar_death(&mk(
+            "MCP_CALL_FAILED"
+        )));
+        assert!(!PluginInvokerImpl::is_recoverable_sidecar_death(&mk(
+            "MCP_TOOL_CALL_FAILED"
+        )));
+        assert!(!PluginInvokerImpl::is_recoverable_sidecar_death(&mk(
+            "MCP_CONNECT_FAILED"
+        )));
+        assert!(!PluginInvokerImpl::is_recoverable_sidecar_death(
+            &PluginError {
+                message: "x".to_string(),
+                code: None,
+                source: None,
+            }
+        ));
+    }
+
+    #[test]
+    fn test_is_dead_sidecar_http_client_never_dead() {
+        // HTTP transport 无子进程（pid=None）→ 永不判死（is_alive 恒 false 的坑）。
+        // 用未连接的 HTTP 客户端模拟（child=None，与 HTTP 连接后同构——
+        // connect 的 HTTP 分支不设置 child）。
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap();
+        let client = McpClient::new_http(
+            "http://127.0.0.1:1/mcp",
+            std::collections::HashMap::new(),
+            None,
+        );
+        let dead = rt.block_on(async { PluginInvokerImpl::is_dead_sidecar(&client).await });
+        assert!(!dead, "HTTP transport（无子进程）不得判为死亡");
+    }
+
+    // ── B2：native 工具调用返回归一单元测试 ──
+
+    #[test]
+    fn test_normalize_native_tool_output_envelope_shapes() {
+        // 新工具插件的约定返回：{success, data} / {success:false, error} 信封直用。
+        let ok = normalize_native_tool_output(&json!({
+            "success": true, "data": {"output": "hi"}, "duration_ms": 7
+        }));
+        assert!(ok.success);
+        assert_eq!(ok.data["output"], "hi");
+        assert_eq!(ok.duration_ms, Some(7), "信封带的 duration_ms 应保留");
+
+        // 失败信封可缺 data（serde 直解析会报 missing field，归一层手构造）
+        let fail = normalize_native_tool_output(&json!({
+            "success": false, "error": "boom"
+        }));
+        assert!(!fail.success);
+        assert_eq!(fail.error.as_deref(), Some("boom"));
+
+        // 失败信封缺 error 字段 → 通用文案，不 panic
+        let fail_no_msg = normalize_native_tool_output(&json!({"success": false}));
+        assert!(!fail_no_msg.success);
+        assert!(fail_no_msg.error.is_some());
+    }
+
+    #[test]
+    fn test_normalize_native_tool_output_legacy_pipeline_shape_wraps_success() {
+        // 旧 pipeline 插件（忽略 tool_call）返回 state_updates → 纯业务数据包
+        // success 信封（零破坏）。注意 state_updates 可能天然含 error 键——
+        // 无 success 字段一律按业务数据处理，不误判 failure。
+        let legacy = normalize_native_tool_output(&json!({
+            "processed_by": "test_plugin",
+            "error": null
+        }));
+        assert!(
+            legacy.success,
+            "无 success 字段 = 旧插件业务数据，包 success"
+        );
+        assert_eq!(legacy.data["processed_by"], "test_plugin");
+        assert!(
+            legacy.data.get("error").is_some(),
+            "业务数据原样保留在 data"
+        );
+    }
+
+    #[test]
+    fn test_normalize_native_tool_output_success_without_data() {
+        // 带 success=true 但无 data → data=Null（不报 missing field）。
+        let r = normalize_native_tool_output(&json!({"success": true}));
+        assert!(r.success);
+        assert_eq!(r.data, serde_json::Value::Null);
     }
 
     // ── extract_mcp_content 辅助函数单元测试 ──
@@ -2547,7 +2822,7 @@ mod tests {
             mcp: None,
             lifecycle: None,
             native: None,
-            wasm: None,
+            granted_capabilities: vec![],
             requires_content: None,
             config_files: vec![],
             http_endpoints: vec![],
@@ -2716,7 +2991,8 @@ mod tests {
             &self,
             _thread_id: &str,
             _tenant_id: &str,
-        ) -> Result<Vec<agentos_core::types::TraceEntry>, agentos_core::types::StorageError> {
+        ) -> Result<Vec<agentos_core::types::TraceEntry>, agentos_core::types::StorageError>
+        {
             Ok(vec![])
         }
         // 以下方法 native 插件测试用不到，补空实现让测试编译通过（既有测试债）。
@@ -2755,8 +3031,10 @@ mod tests {
         async fn get_run_summary(
             &self,
             _run_id: &str,
-        ) -> Result<Option<agentos_core::types::PipelineRunSummary>, agentos_core::types::StorageError>
-        {
+        ) -> Result<
+            Option<agentos_core::types::PipelineRunSummary>,
+            agentos_core::types::StorageError,
+        > {
             Ok(None)
         }
         async fn update_run_summary(
@@ -2833,7 +3111,8 @@ mod tests {
         }
         async fn list_users(
             &self,
-        ) -> Result<Vec<agentos_core::types::UserRecord>, agentos_core::types::StorageError> {
+        ) -> Result<Vec<agentos_core::types::UserRecord>, agentos_core::types::StorageError>
+        {
             Ok(Vec::new())
         }
         async fn update_last_login(
@@ -2880,10 +3159,7 @@ mod tests {
         std::thread::sleep(std::time::Duration::from_secs_f64(1.1));
         std::fs::write(dir.join("server.py"), b"print(2) # changed").unwrap();
         let fp2 = compute_plugin_fingerprint(&dir, &manifest);
-        assert_ne!(
-            fp1, fp2,
-            "文件修改后指纹必须变化，否则热加载不会触发"
-        );
+        assert_ne!(fp1, fp2, "文件修改后指纹必须变化，否则热加载不会触发");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -2916,10 +3192,7 @@ mod tests {
         // touch_last_used 应在 last_used 缓存写入当前时刻
         let loader = Arc::new(MockLoader::new());
         let invoker = PluginInvokerImpl::new(loader);
-        assert!(
-            invoker.last_used.read().is_empty(),
-            "初始 last_used 应为空"
-        );
+        assert!(invoker.last_used.read().is_empty(), "初始 last_used 应为空");
         invoker.touch_last_used("plugin_a");
         invoker.touch_last_used("plugin_b");
         assert_eq!(
@@ -2940,7 +3213,10 @@ mod tests {
         let invoker = PluginInvokerImpl::new(loader);
         // 未加载任何 sidecar，unload_if_idle 应走 force_unload_impl（Ok）→ true
         let unloaded = invoker.unload_if_idle("never_loaded").await;
-        assert!(unloaded, "未加载插件的 unload_if_idle 应返回 true（软卸载幂等成功）");
+        assert!(
+            unloaded,
+            "未加载插件的 unload_if_idle 应返回 true（软卸载幂等成功）"
+        );
     }
 
     #[tokio::test]
@@ -3138,7 +3414,10 @@ mod tests {
         let loader = Arc::new(MockLoader::new());
         let mut m = make_sidecar_manifest("stdio_bad_env", "unused entry");
         let mut env = std::collections::HashMap::new();
-        env.insert("PLUGIN_HOME".to_string(), "${DEFINITELY_UNSET_VAR_XYZ}".to_string());
+        env.insert(
+            "PLUGIN_HOME".to_string(),
+            "${DEFINITELY_UNSET_VAR_XYZ}".to_string(),
+        );
         m.mcp = Some(agentos_core::traits::McpConfig {
             transport: agentos_core::traits::McpTransport::Stdio,
             endpoint: Some(agentos_core::traits::McpEndpoint {
@@ -3165,11 +3444,13 @@ mod tests {
         );
     }
 
-    // ── native/wasm tool 调用错误路径 ──
+    // ── native tool 调用错误路径（B2 后语义）──
 
     #[tokio::test]
-    async fn test_invoke_native_tool_unsupported() {
-        // InProcess 工具插件暂不支持 → NATIVE_TOOL_UNSUPPORTED（不会尝试加载 cdylib）。
+    async fn test_invoke_native_tool_without_loader_errors() {
+        // B2：invoke_native_tool 已接通 execute 的 tool_call 约定字段——
+        // 未注入 loader 时返回 NATIVE_LOADER_NOT_CONFIGURED（与 pipeline 路径一致），
+        // 不再是旧的 NATIVE_TOOL_UNSUPPORTED 硬错误。
         let loader = Arc::new(MockLoader::new());
         loader.add_manifest(make_inprocess_manifest("native_tool_plug"));
 
@@ -3178,37 +3459,49 @@ mod tests {
             .invoke_tool("native_tool_plug", "some_tool", &json!({}))
             .await
             .unwrap_err();
-        assert_eq!(err.code.as_deref(), Some("NATIVE_TOOL_UNSUPPORTED"));
+        assert_eq!(err.code.as_deref(), Some("NATIVE_LOADER_NOT_CONFIGURED"));
     }
 
     #[tokio::test]
-    async fn test_invoke_wasm_tool_missing_artifact_errors() {
-        // wasm 工具插件缺 manifest.wasm.artifact → MISSING_WASM_ARTIFACT。
+    async fn test_invoke_native_tool_missing_artifact_errors() {
+        // 注入了 native loader 但 manifest 缺 native.artifact → MISSING_NATIVE_ARTIFACT
+        // （B2 后工具路径与 pipeline 路径同门：resolve artifact 是第一道校验）。
         let loader = Arc::new(MockLoader::new());
-        let mut m = make_wasm_manifest("wasm_tool_no_art", "x.wasm");
-        m.plugin_type = PluginType::Tool;
-        m.wasm = None;
-        loader.add_manifest(m);
+        loader.add_manifest(make_inprocess_manifest("native_tool_no_artifact"));
 
-        let runtime = Arc::new(WasmRuntime::new().unwrap());
-        let invoker = PluginInvokerImpl::with_wasm_runtime(loader, runtime);
+        let invoker =
+            PluginInvokerImpl::new(loader).set_native_loader(Arc::new(NativePluginLoader::new()));
         let err = invoker
-            .invoke_tool("wasm_tool_no_art", "some_tool", &json!({}))
+            .invoke_tool("native_tool_no_artifact", "some_tool", &json!({}))
             .await
             .unwrap_err();
-        assert_eq!(err.code.as_deref(), Some("MISSING_WASM_ARTIFACT"));
+        assert_eq!(err.code.as_deref(), Some("MISSING_NATIVE_ARTIFACT"));
+    }
+
+    #[tokio::test]
+    async fn test_invoke_native_tool_bad_artifact_errors() {
+        // artifact 指向不存在的文件 → NATIVE_LOAD_FAILED（真实 NativePluginLoader 路径）。
+        let loader = Arc::new(MockLoader::new());
+        let mut m = make_inprocess_manifest("native_tool_bad_artifact");
+        m.native = Some(agentos_core::traits::NativeArtifact {
+            artifact: "definitely_missing_plugin.dll".to_string(),
+        });
+        loader.add_manifest(m);
+        loader.plugin_dirs.write().insert(
+            "native_tool_bad_artifact".to_string(),
+            std::env::temp_dir().to_string_lossy().to_string(),
+        );
+
+        let invoker =
+            PluginInvokerImpl::new(loader).set_native_loader(Arc::new(NativePluginLoader::new()));
+        let err = invoker
+            .invoke_tool("native_tool_bad_artifact", "some_tool", &json!({}))
+            .await
+            .unwrap_err();
+        assert_eq!(err.code.as_deref(), Some("NATIVE_LOAD_FAILED"));
     }
 
     // ── unload_if_idle 各 host_type 分支 ──
-
-    #[tokio::test]
-    async fn test_unload_if_idle_wasm_without_runtime_false() {
-        let loader = Arc::new(MockLoader::new());
-        loader.add_manifest(make_wasm_manifest("wasm_idle", "x.wasm"));
-        let invoker = PluginInvokerImpl::new(loader);
-        // wasm 插件但未注入 WasmRuntime → 不支持卸载 → false
-        assert!(!invoker.unload_if_idle("wasm_idle").await);
-    }
 
     #[tokio::test]
     async fn test_unload_if_idle_inprocess_false() {
@@ -3288,7 +3581,9 @@ mod tests {
         let calls = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
         let scoped: Arc<dyn CapabilityRouter> = Arc::new(PluginScopedRouter {
             plugin_id: "plugin_a".to_string(),
-            inner: Arc::new(RecordRouter { calls: calls.clone() }),
+            inner: Arc::new(RecordRouter {
+                calls: calls.clone(),
+            }),
         });
         let res = scoped
             .handle("metrics", "record", json!({"name": "calls", "value": 1}))
@@ -3308,7 +3603,9 @@ mod tests {
         let calls = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
         let scoped: Arc<dyn CapabilityRouter> = Arc::new(PluginScopedRouter {
             plugin_id: "plugin_b".to_string(),
-            inner: Arc::new(RecordRouter { calls: calls.clone() }),
+            inner: Arc::new(RecordRouter {
+                calls: calls.clone(),
+            }),
         });
         let _ = scoped.handle("ping", "pong", json!("hello")).await.unwrap();
         let got = calls.lock().unwrap().clone();

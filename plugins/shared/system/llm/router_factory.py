@@ -93,7 +93,7 @@ def _ensure_provider_type_map_loaded() -> None:
             if isinstance(pc, dict) and "type" in pc:
                 _provider_type_map[pn] = pc["type"]
     except Exception:  # noqa: BLE001
-        # 加载失败不抛：调用方拿到 provider_name 兜底，至少不比原来更差
+        # 加载失败不抛：调用方拿到 provider_name 兜底
         logger.warning("[Router] 懒加载 provider_type_map 失败", exc_info=True)
 
 

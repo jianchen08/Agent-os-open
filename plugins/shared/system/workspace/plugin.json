@@ -1,24 +1,37 @@
 {
-    "id": "workspace_service",
-    "name": "Workspace Service",
-    "version": "1.0.0",
-    "plugin_type": "system",
-    "language": "python",
-    "host_type": "sidecar",
-    "entry": "python server.py",
-    "capabilities": {
-        "tools": [
-            {"name": "workspace.get_or_create", "description": "Get or create a workspace for a container task"},
-            {"name": "workspace.get", "description": "Get workspace details"},
-            {"name": "workspace.get_file_tree", "description": "Generate file directory tree for a workspace"}
-        ],
-        "resources": [],
-        "route_signals": [],
-        "lifecycle_hooks": ["on_load", "on_unload"]
-    },
-    "dependencies": [],
-    "permissions": {},
-    "error_policy": "skip",
-    "priority": 50,
-    "requires_content": 5
+  "id": "workspace_service",
+  "name": "Workspace Service",
+  "version": "1.0.0",
+  "plugin_type": "system",
+  "language": "python",
+  "host_type": "sidecar",
+  "entry": "python server.py",
+  "capabilities": {
+    "tools": [],
+    "resources": [],
+    "route_signals": [],
+    "lifecycle_hooks": [
+      "on_load",
+      "on_unload"
+    ],
+    "services": [
+      {
+        "name": "workspace.get_or_create",
+        "description": "Get or create a workspace for a container task"
+      },
+      {
+        "name": "workspace.get",
+        "description": "Get workspace details"
+      },
+      {
+        "name": "workspace.get_file_tree",
+        "description": "Generate file directory tree for a workspace"
+      }
+    ]
+  },
+  "dependencies": [],
+  "permissions": {},
+  "error_policy": "skip",
+  "priority": 50,
+  "requires_content": 5
 }

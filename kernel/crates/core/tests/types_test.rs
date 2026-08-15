@@ -46,8 +46,14 @@ fn route_signal_builder_and_skip_none() {
 fn error_policy_default_is_abort_and_lowercase() {
     // Default → Abort；rename_all = "lowercase"
     assert_eq!(ErrorPolicy::default(), ErrorPolicy::Abort);
-    assert_eq!(serde_json::to_string(&ErrorPolicy::Abort).unwrap(), "\"abort\"");
-    assert_eq!(serde_json::to_string(&ErrorPolicy::Retry).unwrap(), "\"retry\"");
+    assert_eq!(
+        serde_json::to_string(&ErrorPolicy::Abort).unwrap(),
+        "\"abort\""
+    );
+    assert_eq!(
+        serde_json::to_string(&ErrorPolicy::Retry).unwrap(),
+        "\"retry\""
+    );
 }
 
 #[test]
@@ -112,10 +118,22 @@ fn tenant_context_new_defaults_empty_collections() {
 
 #[test]
 fn run_status_lowercase_serde() {
-    assert_eq!(serde_json::to_string(&RunStatus::Running).unwrap(), "\"running\"");
-    assert_eq!(serde_json::to_string(&RunStatus::Suspended).unwrap(), "\"suspended\"");
-    assert_eq!(serde_json::to_string(&RunStatus::Completed).unwrap(), "\"completed\"");
-    assert_eq!(serde_json::to_string(&RunStatus::Failed).unwrap(), "\"failed\"");
+    assert_eq!(
+        serde_json::to_string(&RunStatus::Running).unwrap(),
+        "\"running\""
+    );
+    assert_eq!(
+        serde_json::to_string(&RunStatus::Suspended).unwrap(),
+        "\"suspended\""
+    );
+    assert_eq!(
+        serde_json::to_string(&RunStatus::Completed).unwrap(),
+        "\"completed\""
+    );
+    assert_eq!(
+        serde_json::to_string(&RunStatus::Failed).unwrap(),
+        "\"failed\""
+    );
     let back: RunStatus = serde_json::from_str("\"failed\"").unwrap();
     assert_eq!(back, RunStatus::Failed);
 }
@@ -130,7 +148,10 @@ fn patch_type_snake_case_serde() {
         serde_json::to_string(&PatchType::RouteSignal).unwrap(),
         "\"route_signal\""
     );
-    assert_eq!(serde_json::to_string(&PatchType::Rollback).unwrap(), "\"rollback\"");
+    assert_eq!(
+        serde_json::to_string(&PatchType::Rollback).unwrap(),
+        "\"rollback\""
+    );
     // 全变体 round-trip
     for v in [
         PatchType::StateUpdate,

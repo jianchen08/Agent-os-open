@@ -74,10 +74,7 @@ pub fn export_prometheus(series: &[MetricSeriesView]) -> String {
                     let bounds: &[f64] = super::DEFAULT_HISTOGRAM_BUCKETS;
                     for (i, &bound) in bounds.iter().enumerate() {
                         let labels = with_le_label(&s.labels, bound);
-                        out.push_str(&format!(
-                            "{mname}_bucket{labels} {}\n",
-                            h.counts[i]
-                        ));
+                        out.push_str(&format!("{mname}_bucket{labels} {}\n", h.counts[i]));
                     }
                     // +Inf 桶
                     let labels = with_le_label(&s.labels, f64::INFINITY);
@@ -92,9 +89,9 @@ pub fn export_prometheus(series: &[MetricSeriesView]) -> String {
                 }
             }
             MetricType::Counter | MetricType::Gauge => {
-                let value = s.latest.unwrap_or_else(|| {
-                    s.samples.last().map(|x| x.value).unwrap_or(0.0)
-                });
+                let value = s
+                    .latest
+                    .unwrap_or_else(|| s.samples.last().map(|x| x.value).unwrap_or(0.0));
                 let labels = format_label_pairs(&s.labels);
                 out.push_str(&format!("{mname}{labels} {value}\n"));
             }
@@ -141,8 +138,8 @@ fn format_le_bound(b: f64) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use super::super::aggregator::{Labels, MetricType, Sample};
+    use super::*;
 
     fn make_view(
         plugin: &str,
@@ -156,7 +153,10 @@ mod tests {
             name: name.to_string(),
             metric_type: typ,
             labels,
-            samples: vec![Sample { ts: 1000, value: latest.unwrap_or(0.0) }],
+            samples: vec![Sample {
+                ts: 1000,
+                value: latest.unwrap_or(0.0),
+            }],
             unit: None,
             help: Some("test help".to_string()),
             latest,
@@ -166,7 +166,13 @@ mod tests {
 
     #[test]
     fn test_prom_counter_format() {
-        let mut v = make_view("llm_service", "tokens_used", MetricType::Counter, Some(12800.0), Labels::new());
+        let mut v = make_view(
+            "llm_service",
+            "tokens_used",
+            MetricType::Counter,
+            Some(12800.0),
+            Labels::new(),
+        );
         v.help = Some("Total tokens used".to_string());
         let out = export_prometheus(&[v]);
         assert!(out.contains("# HELP llm_service_tokens_used Total tokens used"));
@@ -195,7 +201,10 @@ mod tests {
 
     #[test]
     fn test_prom_metric_name_sanitization() {
-        assert_eq!(prom_metric_name("llm.service", "tokens.used"), "llm_service_tokens_used");
+        assert_eq!(
+            prom_metric_name("llm.service", "tokens.used"),
+            "llm_service_tokens_used"
+        );
         assert_eq!(prom_metric_name("p-1", "m.x"), "p_1_m_x");
     }
 

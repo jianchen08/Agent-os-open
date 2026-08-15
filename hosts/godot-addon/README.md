@@ -21,12 +21,26 @@
 | ---- | --------------- | ----------------------------------------------------- |
 | GET  | `/health`       | 探活，返回 `{ "status":"ok", "version":"0.2.0" }`      |
 | GET  | `/status`       | 连接器探活主入口，返回 `{ version, engine, engine_version, project }` |
-| GET  | `/context`      | 字段对齐 `game_engine.get_context()` 期望               |
+| GET  | `/context`      | 字段对齐 `game_engine.get_context()` 期望；含 `selection_detail`（name/type/path/preview_kind） |
 | GET  | `/scene`        | 当前编辑场景信息（名称/路径/根节点类/节点数）            |
 | GET  | `/selection`    | 当前选中节点名称列表                                    |
+| GET  | `/selection/preview?index=N` | 第 N 个选中节点的预览 PNG（≤512px）：贴图节点用贴图缩略图，其余截编辑器 2D/3D 视口；无预览 404 |
 | GET  | `/capabilities` | 支持的能力列表                                          |
 | POST | `/execute`      | 最小实现：回显 `{ command, args }`，不真正执行           |
 | GET  | `/screenshot` `/assets` `/play` `/stop` | 占位端点，返回 stub，保持接口形状兼容 |
+
+## 选中推送（→ AgentOS pipeline_godot_context 插件）
+
+除被动 HTTP 服务外，插件以**事件驱动**向 AgentOS 推送选中状态（无轮询）：
+
+- `EditorSelection.selection_changed` 信号（防抖 300ms）→ POST
+  `http://127.0.0.1:9100/ext/pipeline_godot_context/selection`（内核默认端口 9100）；
+- payload：`{ type, engine, engine_version, project, scene, items:[{name,type,path,preview_kind}], signature, ts }`，
+  `type` 为 `selection`（选中变化，含清空）/ `heartbeat`（5s 心跳）/ `offline`（插件退出）；
+- 推送失败静默（AgentOS 未启动不报错）；目标端点可在 Project Settings `agentos/push_endpoint` 覆盖。
+
+AgentOS 侧由 `plugins/shared/pipeline/input/godot_context/` 插件接收：
+转发前端（聊天框引用卡片实时镜像）+ 在用户消息后注入 `<reference>` 引用消息。
 
 ### `/context` 返回字段（对齐 game_engine.py）
 

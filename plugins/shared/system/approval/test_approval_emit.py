@@ -1,3 +1,4 @@
+# @feature: FP-0.2.五 审批闭环 | @ci: python-coverage
 """approval.created 事件发射链路测试（改动 A 后端）。
 
 覆盖：

@@ -170,7 +170,7 @@ pytestmark = pytest.mark.unit  # 或 integration / e2e
 ```
 
 **与基线锁的配合**：RED 阶段的新测试失败**不计入基线**——它是新功能的测试，不是
-pre-existing 红测。基线（`.github/test-batch-baseline.txt` /
+pre-existing 红测。基线（`.github/pytest-failure-baseline.txt` /
 `.github/rust-test-baseline.txt`）只许减不许增，只管 pre-existing 失败。
 
 #### CI 门禁
@@ -179,7 +179,7 @@ pre-existing 红测。基线（`.github/test-batch-baseline.txt` /
 |---|---|---|
 | **TDD Gate** | `scripts/check_tdd_compliance.py` + ci.yml `tdd-gate` job | PR 有源码变更但零测试变更（纯重构可加 `[skip-tdd]` 跳过） |
 | **Marker 检查** | `tests/plugins/conftest.py` | 测试缺分层 marker |
-| **Python 基线锁** | `scripts/check_test_batch_baseline.py` + `.github/test-batch-baseline.txt` | pre-existing 失败数增长 |
+| **Python 基线锁** | `scripts/check_pytest_failure_baseline.py` + `.github/pytest-failure-baseline.txt`（经 `run_gates.py` plugins-coverage） | pre-existing 失败数增长 |
 | **Rust 基线锁** | `scripts/check_rust_test_baseline.py` + `.github/rust-test-baseline.txt` | Rust 测试失败数增长 |
 
 #### 快速参考

@@ -2,8 +2,6 @@
 
 管理制品（Artifact）的 CRUD 和版本追踪。
 纯内存存储，与 HumanInteractionService 保持一致的存储模式。
-
-[0.2 P1-3] 从 src/artifacts/artifact_service.py 搬迁至 sidecar，逻辑无改动，
 保持 get_artifact_service / reset_artifact_service 单例语义。
 """
 

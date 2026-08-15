@@ -32,7 +32,10 @@ fn test_manifest_deserializes_config_files() {
     assert_eq!(manifest.config_files[0].path, "config/models/llm.yaml");
     assert_eq!(manifest.config_files[0].label, "LLM 模型配置");
     assert_eq!(manifest.config_files[1].id, "embedding");
-    assert_eq!(manifest.config_files[1].path, "config/models/embedding.yaml");
+    assert_eq!(
+        manifest.config_files[1].path,
+        "config/models/embedding.yaml"
+    );
 }
 
 /// 未声明 config_files 的旧 manifest 应向后兼容（config_files 为空 vec）。
@@ -54,7 +57,10 @@ fn test_manifest_without_config_files_defaults_empty() {
 
     let manifest: PluginManifest = serde_json::from_str(json).expect("manifest must parse");
 
-    assert!(manifest.config_files.is_empty(), "missing config_files defaults to empty");
+    assert!(
+        manifest.config_files.is_empty(),
+        "missing config_files defaults to empty"
+    );
     // P6: config_refs 字段已从结构体删除——编译期保证不再可访问。
     // 残留的 config_refs JSON 字段被 serde 忽略（向后兼容旧 manifest 文件）。
 }
@@ -107,7 +113,7 @@ fn test_empty_config_files_omitted_in_serialization() {
         mcp: None,
         lifecycle: None,
         native: None,
-        wasm: None,
+        granted_capabilities: vec![],
         requires_content: None,
         invoke_entry: None,
         config_files: vec![],

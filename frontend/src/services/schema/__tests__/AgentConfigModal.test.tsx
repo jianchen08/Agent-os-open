@@ -113,7 +113,7 @@ describe('AgentConfigModal', () => {
     // 字段渲染（抽样）
     expect(await screen.findByLabelText(/^名称/)).toHaveValue('代码审查专家')
     expect(screen.getByLabelText(/配置ID/)).toHaveValue('code_reviewer_agent')
-    expect(screen.getByLabelText(/最大迭代/)).toHaveValue(30)
+    expect(screen.getByLabelText(/最大迭代/)).toHaveValue('30')
   })
 
   it('AC-2: 编辑后保存 → PUT config 收到新 yaml，onSaved 触发', async () => {
@@ -130,7 +130,8 @@ describe('AgentConfigModal', () => {
 
     const nameInput = await screen.findByLabelText(/^名称/)
     fireEvent.change(nameInput, { target: { value: '审查专家 v2' } })
-    fireEvent.click(screen.getByRole('button', { name: /保存/ }))
+    // 模拟表单提交（等价点击保存按钮在真实浏览器触发的 submit；jsdom click 激活路径不重放）
+    fireEvent.submit(document.querySelector('form')!)
 
     await waitFor(() => {
       expect(putAgentConfig).toHaveBeenCalledTimes(1)

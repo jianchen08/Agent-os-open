@@ -88,7 +88,8 @@ impl SessionCoordinator {
             self.metrics.inc_kick_old();
         }
         // 活跃连接数 = 注册表大小（gauge，每次 register 后同步真实值）
-        self.metrics.set_connections(self.registry.active_count() as u64);
+        self.metrics
+            .set_connections(self.registry.active_count() as u64);
         kicked.map(|k| k.id())
     }
 
@@ -108,7 +109,10 @@ impl SessionCoordinator {
     /// 用于聊天流式闭环：dispatch_user_input 把引擎结果包成 new_message 推回前端。
     /// 不经限流（聊天事件低频，单次推送）。
     pub async fn emit_event(&self, thread_id: &str, event_type: &str, data: Value) -> bool {
-        let sequence = self.bus.next_sequence(&EmitScope::Thread(thread_id.to_string())).await;
+        let sequence = self
+            .bus
+            .next_sequence(&EmitScope::Thread(thread_id.to_string()))
+            .await;
         let payload = serde_json::json!({
             "type": event_type,
             "data": data,
@@ -147,13 +151,7 @@ impl SessionCoordinator {
     ) -> usize {
         let (delivered, _seq) = self
             .bus
-            .emit_with_sequence(
-                widget_id,
-                event,
-                data,
-                EmitScope::Broadcast,
-                plugin_id,
-            )
+            .emit_with_sequence(widget_id, event, data, EmitScope::Broadcast, plugin_id)
             .await;
         // 监控 M2：broadcast 计数
         self.metrics.inc_broadcast();
@@ -237,7 +235,10 @@ impl SessionCoordinator {
             ReplayResult::ResyncRequired => {
                 let resync = json!({"type": "resync_required", "data": {"thread_id": thread_id}});
                 self.registry
-                    .send_to_thread(thread_id, &serde_json::to_string(&resync).unwrap_or_default())
+                    .send_to_thread(
+                        thread_id,
+                        &serde_json::to_string(&resync).unwrap_or_default(),
+                    )
                     .await;
                 self.metrics.inc_replay_miss();
             }

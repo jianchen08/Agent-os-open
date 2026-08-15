@@ -72,11 +72,6 @@ def read_baseline() -> int:
     return int(BASELINE_FILE.read_text().strip())
 
 
-def write_baseline(count: int) -> None:
-    """写入基线文件。"""
-    BASELINE_FILE.write_text(f"{count}\n")
-
-
 def main() -> int:
     baseline = read_baseline()
     current = count_mypy_errors()

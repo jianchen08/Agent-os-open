@@ -1,7 +1,6 @@
 """批注（Annotation）与制品（Artifact）sidecar 自包含模块。
 
-[P1-3] 从 src/artifacts/（0.1）搬迁而来，本包完全自包含：
-纯内存存储、无 DB、无 LLM、无外部依赖，脱离对 src/ 的引用。
+本包完全自包含：纯内存存储、无 DB、无 LLM、无外部依赖。
 
 包含：
 - models: Annotation/AnnotationStatus/AnnotationTarget/Artifact/ArtifactType 数据类

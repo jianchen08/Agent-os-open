@@ -41,7 +41,7 @@ def reversible_operation(
             operation_type=OperationType.UPDATE,
             target_param="path",
         )
-        async def write_file(self, inputs: Dict[str, Any]) -> ToolResult:
+        async def write_file(self, inputs: dict[str, Any]) -> ToolResult:
             ...
     """
 

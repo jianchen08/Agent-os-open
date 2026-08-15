@@ -1,29 +1,57 @@
 {
-    "id": "scene_service",
-    "name": "Scene Service",
-    "version": "1.0.0",
-    "plugin_type": "system",
-    "language": "python",
-    "host_type": "sidecar",
-    "entry": "python server.py",
-    "capabilities": {
-        "tools": [
-            {"name": "scene.create", "description": "Create a new scene"},
-            {"name": "scene.switch", "description": "Switch active scene"},
-            {"name": "scene.delete", "description": "Delete a scene"},
-            {"name": "scene.list", "description": "List all scenes"},
-            {"name": "scene.get", "description": "Get scene details"},
-            {"name": "scene.update", "description": "Update scene properties"},
-            {"name": "scene.get_active", "description": "Get the current active scene"},
-            {"name": "scene.list_templates", "description": "List preset scene templates"}
-        ],
-        "resources": [],
-        "route_signals": [],
-        "lifecycle_hooks": ["on_load", "on_unload"]
-    },
-    "dependencies": [],
-    "permissions": {},
-    "error_policy": "skip",
-    "priority": 50,
-    "requires_content": 5
+  "id": "scene_service",
+  "name": "Scene Service",
+  "version": "1.0.0",
+  "plugin_type": "system",
+  "language": "python",
+  "host_type": "sidecar",
+  "entry": "python server.py",
+  "capabilities": {
+    "tools": [],
+    "resources": [],
+    "route_signals": [],
+    "lifecycle_hooks": [
+      "on_load",
+      "on_unload"
+    ],
+    "services": [
+      {
+        "name": "scene.create",
+        "description": "Create a new scene"
+      },
+      {
+        "name": "scene.switch",
+        "description": "Switch active scene"
+      },
+      {
+        "name": "scene.delete",
+        "description": "Delete a scene"
+      },
+      {
+        "name": "scene.list",
+        "description": "List all scenes"
+      },
+      {
+        "name": "scene.get",
+        "description": "Get scene details"
+      },
+      {
+        "name": "scene.update",
+        "description": "Update scene properties"
+      },
+      {
+        "name": "scene.get_active",
+        "description": "Get the current active scene"
+      },
+      {
+        "name": "scene.list_templates",
+        "description": "List preset scene templates"
+      }
+    ]
+  },
+  "dependencies": [],
+  "permissions": {},
+  "error_policy": "skip",
+  "priority": 50,
+  "requires_content": 5
 }

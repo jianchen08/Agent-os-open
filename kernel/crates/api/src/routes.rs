@@ -15,17 +15,18 @@ use agentos_core::traits::{
     PluginType, StorageBackend,
 };
 use agentos_core::types::{PipelineConfig, StepLibrary};
-use agentos_plugin_loader::CapabilityRegistryImpl;
+use agentos_invoker::verify::{compare_tools, declared_with_services, parse_actual_tools};
+use agentos_plugin_loader::{CapabilityRegistryImpl, PluginScopeRegistry};
 use axum::response::IntoResponse;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
 use crate::config_service::{
-    apply_put_masked_sentinels, atomic_write_yaml, compute_etag, mask_secrets,
-    validate_config_path,
+    apply_put_masked_sentinels, atomic_write_yaml, compute_etag, mask_secrets, validate_config_path,
 };
 use crate::error::ApiError;
-use crate::metrics::{export_prometheus, Labels, MetricsAggregator};
+use crate::metrics::plugin_widget_broadcast::{remove_plugin_bindings, WidgetBinding};
+use crate::metrics::{export_prometheus, MetricsAggregator};
 
 /// 健康检查响应。
 #[derive(Debug, Serialize)]
@@ -108,6 +109,13 @@ pub struct AppState {
     /// 供 agent loader / pipeline loader / plugin config_files 统一走。
     /// None = 未接线（降级：各 loader 继续各自直读，行为不变）。
     pub config_center: Option<Arc<ConfigCenter>>,
+    /// M1：per-plugin 注册账本（guard 化）。disable/unload 时经此结构性收回
+    /// 该插件全部注册（registry 四维 + broadcaster 绑定）。空注册表 = 无登记
+    /// （测试直接构造 AppState 时 disable 路径仍走 clear_plugin 兜底）。
+    pub plugin_scopes: Arc<PluginScopeRegistry>,
+    /// M1：widget 指标推送共享绑定表（禁用插件时移除其绑定，broadcaster 下 tick 生效）。
+    /// None = 未启用 widget 指标推送。
+    pub widget_bindings: Option<Arc<parking_lot::RwLock<Vec<WidgetBinding>>>>,
 }
 
 impl AppState {
@@ -134,6 +142,8 @@ impl AppState {
             metrics: None,
             plugin_dirs: Arc::new(HashMap::new()),
             config_center: None,
+            plugin_scopes: Arc::new(PluginScopeRegistry::new()),
+            widget_bindings: None,
         }
     }
 
@@ -160,6 +170,8 @@ impl AppState {
             metrics: None,
             plugin_dirs: Arc::new(HashMap::new()),
             config_center: None,
+            plugin_scopes: Arc::new(PluginScopeRegistry::new()),
+            widget_bindings: None,
         }
     }
 
@@ -222,6 +234,8 @@ impl AppState {
             metrics: None,
             plugin_dirs: Arc::new(HashMap::new()),
             config_center: None,
+            plugin_scopes: Arc::new(PluginScopeRegistry::new()),
+            widget_bindings: None,
         }
     }
 
@@ -234,6 +248,21 @@ impl AppState {
         self
     }
 
+    /// M1：注入插件注册账本（disable/unload 结构性收回的 guard 表）。
+    pub fn with_plugin_scopes(mut self, scopes: Arc<PluginScopeRegistry>) -> Self {
+        self.plugin_scopes = scopes;
+        self
+    }
+
+    /// M1：注入 widget 指标推送共享绑定表（禁用插件时移除其绑定）。
+    pub fn with_widget_bindings(
+        mut self,
+        bindings: Arc<parking_lot::RwLock<Vec<WidgetBinding>>>,
+    ) -> Self {
+        self.widget_bindings = Some(bindings);
+        self
+    }
+
     /// P2：启用会话内核（连接注册表 / 事件总线 / 重放缓冲 + 入站路由）。
     ///
     /// 在 `with_plugins` 后调用，注入 SessionCoordinator 与基于引擎的
@@ -243,14 +272,15 @@ impl AppState {
         let session = Arc::new(agentos_session::SessionCoordinator::new());
         // 管道 state 常驻注册表（与 session 同生命期，一起启用）。
         // 关键：先把 session 注入 self，再 clone 给 dispatcher。
-        // 否则 dispatcher 持有的 state.session 永远是 None（旧 bug：dispatcher
-        // 用了设置 session 字段之前的 clone，导致引擎结果无法推回前端）。
+        // 否则 dispatcher 持有的 state.session 永远是 None，引擎结果无法推回前端。
         let self_with_session = Self {
             session: Some(session.clone()),
             inbound_router: None,
             ..self
         };
-        let dispatcher = Arc::new(crate::ws_session::EngineDispatcher::new(self_with_session.clone()));
+        let dispatcher = Arc::new(crate::ws_session::EngineDispatcher::new(
+            self_with_session.clone(),
+        ));
         let inbound_router = Arc::new(agentos_session::router::InboundRouter::new(dispatcher));
         Self {
             inbound_router: Some(inbound_router),
@@ -269,7 +299,9 @@ impl AppState {
             inbound_router: None,
             ..self
         };
-        let dispatcher = Arc::new(crate::ws_session::EngineDispatcher::new(self_with_session.clone()));
+        let dispatcher = Arc::new(crate::ws_session::EngineDispatcher::new(
+            self_with_session.clone(),
+        ));
         let inbound_router = Arc::new(agentos_session::router::InboundRouter::new(dispatcher));
         Self {
             inbound_router: Some(inbound_router),
@@ -288,7 +320,8 @@ impl AppState {
         }
     }
 
-    /// 监控 M1：注入指标聚合器（启用 `/api/v1/metrics` 与 `/metrics` 端点）。
+    /// 监控 M1：注入指标聚合器（启用 `/metrics` 端点；查询面已迁
+    /// metrics-admin capability，见 metrics/capability.rs）。
     pub fn with_metrics(self, metrics: MetricsAggregator) -> Self {
         Self {
             metrics: Some(metrics),
@@ -334,10 +367,50 @@ pub async fn health_handler() -> axum::Json<HealthResponse> {
     })
 }
 
-/// /api/v1/schema 端点处理器（AC-06-5）。
+/// /api/v1/schema 端点处理器（AC-06-5；剩余项清仓 D2：ETag 协商缓存）。
+///
+/// 聚合 JSON 规范化序列化（serde_json 对字段序固定的 struct 输出确定）后
+/// sha256 作 ETag 响应头；请求带 `If-None-Match` 匹配（含 `*`）则返回 304
+/// 空体（前端周期拉 schema 的未变更轮次走 304，省全量聚合响应带宽）。
+/// 变更方（插件 enable/disable、G3 动态注册）另经 session 广播
+/// widget_event {schema, changed} 推前端主动重拉（见 plugins_set_enabled_handler
+/// / capability_router.rs）。
 pub async fn schema_handler(
     axum::extract::State(state): axum::extract::State<AppState>,
-) -> axum::Json<SchemaResponse> {
+    headers: axum::http::HeaderMap,
+) -> axum::response::Response {
+    let schema = build_schema(&state).await;
+    // 规范化序列化：SchemaResponse 字段序固定，serde_json 输出确定——
+    // 相同聚合内容 → 相同字节 → 相同 ETag（内容寻址，与 config_service 的
+    // compute_etag 同一实现）。
+    let body = serde_json::to_vec(&schema).unwrap_or_default();
+    let etag = compute_etag(&body);
+
+    // If-None-Match 协商：逗号分隔多候选（RFC 9110 §13.1.2），命中任一或 * → 304。
+    if let Some(inm) = headers
+        .get(axum::http::header::IF_NONE_MATCH)
+        .and_then(|v| v.to_str().ok())
+    {
+        if inm.split(',').map(str::trim).any(|t| t == etag || t == "*") {
+            return (
+                axum::http::StatusCode::NOT_MODIFIED,
+                [(axum::http::header::ETAG, etag)],
+                axum::body::Body::empty(),
+            )
+                .into_response();
+        }
+    }
+
+    (
+        [(axum::http::header::ETAG, etag)],
+        [(axum::http::header::CONTENT_TYPE, "application/json")],
+        body,
+    )
+        .into_response()
+}
+
+/// 聚合 schema 响应体（schema_handler 的纯函数部分，便于复用与测试）。
+async fn build_schema(state: &AppState) -> SchemaResponse {
     // 优先从 capability_registry 获取工具列表
     let tools = if let Some(registry) = &state.capability_registry {
         registry
@@ -418,14 +491,14 @@ pub async fn schema_handler(
         })
         .collect();
 
-    axum::Json(SchemaResponse {
+    SchemaResponse {
         agents,
         pipelines,
         tools,
         routes,
         plugin_configs,
         plugin_contributes,
-    })
+    }
 }
 
 /// /api/v1/agents 端点处理器。
@@ -707,7 +780,10 @@ fn collect_yaml_files(dir: &std::path::Path) -> std::io::Result<Vec<std::path::P
     Ok(files)
 }
 
-fn collect_yaml_files_inner(dir: &std::path::Path, files: &mut Vec<std::path::PathBuf>) -> std::io::Result<()> {
+fn collect_yaml_files_inner(
+    dir: &std::path::Path,
+    files: &mut Vec<std::path::PathBuf>,
+) -> std::io::Result<()> {
     for entry in std::fs::read_dir(dir)? {
         let entry = entry?;
         let path = entry.path();
@@ -764,10 +840,7 @@ pub async fn pipelines_runs_handler(
         message: "db store not injected".to_string(),
     })?;
     let tenant_ctx = crate::server::request_tenant_ctx(state.store.as_ref(), &headers, "").await;
-    let status = params
-        .get("status")
-        .filter(|s| !s.is_empty())
-        .cloned();
+    let status = params.get("status").filter(|s| !s.is_empty()).cloned();
     let limit = params
         .get("limit")
         .and_then(|v| v.parse::<u32>().ok())
@@ -784,6 +857,142 @@ pub async fn pipelines_runs_handler(
         message: format!("list_pipelines 查询失败: {e}"),
     })?;
     Ok(axum::Json(json!({ "items": rows })))
+}
+
+/// state 摘要提取的字段白名单（phase/迭代/上下文——messages 等大字段不出口）。
+const STATE_SUMMARY_KEYS: &[&str] = &[
+    "agent_id",
+    "agent_type",
+    "config_id",
+    "current_phase",
+    "ended",
+    "status",
+    "session_id",
+    "thread_id",
+    "pipeline_id",
+    "max_iterations",
+    "ckpt_max_seq",
+    "track.total_tokens",
+    "track.execution_stats",
+    "track.llm_usage",
+    "cost_control.total_tokens",
+    "cost_control.usage_percent",
+    "termination_advisor.status",
+    "router.stop_reason",
+    "stuck_detected",
+    "suspended",
+    "metadata",
+    "display_name",
+    "name",
+    "tags",
+    "input",
+    "raw_error",
+];
+
+/// 从一份管道 state 提取摘要（白名单字段 + messages 条数）。
+fn summarize_state(state: &serde_json::Value) -> serde_json::Value {
+    let mut out = serde_json::Map::new();
+    if let Some(obj) = state.as_object() {
+        for k in STATE_SUMMARY_KEYS {
+            if let Some(v) = obj.get(*k) {
+                out.insert(k.to_string(), v.clone());
+            }
+        }
+        // messages 只出口条数（迭代/轮次规模），不出口全文
+        if let Some(msgs) = obj.get("messages").and_then(|v| v.as_array()) {
+            out.insert("message_count".to_string(), json!(msgs.len()));
+        }
+    }
+    serde_json::Value::Object(out)
+}
+
+/// GET /api/v1/pipelines/state — 管道 state 摘要列表（前端任务树数据源）。
+///
+/// 数据分层（state 是会话/任务/迭代的运行时真值，直接供前端消费）：
+/// - **内存热数据**：PipelineStateRegistry 全部常驻条目（当前会话管道的
+///   final_state，含 current_phase / status / iteration 等实时字段）。
+/// - **DB 冷数据兜底**：registry 未覆盖的管道（重启后未再轮）从
+///   pipeline_checkpoints 最新一条提取同构摘要。
+///
+/// messages 全文不出口（只给 message_count）；大字段按白名单裁剪。
+pub async fn pipelines_state_handler(
+    axum::extract::State(state): axum::extract::State<AppState>,
+    headers: axum::http::HeaderMap,
+) -> Result<axum::Json<serde_json::Value>, ApiError> {
+    let tenant_ctx = crate::server::request_tenant_ctx(state.store.as_ref(), &headers, "").await;
+    let tenant_id = tenant_ctx.tenant_id;
+
+    // 1) 内存热数据：registry 全部条目（锁内取 state 快照提摘要）
+    let registry = agentos_session::pipeline_state_registry::global_registry();
+    let mut items: Vec<serde_json::Value> = Vec::new();
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for listing in registry.list() {
+        if listing.tenant_id != tenant_id {
+            continue;
+        }
+        let Some(entry) = registry.get(&listing.tenant_id, &listing.pipeline_id) else {
+            continue;
+        };
+        seen.insert(listing.pipeline_id.clone());
+        let summary = {
+            let e = entry.read();
+            summarize_state(&e.state)
+        };
+        items.push(json!({
+            "pipeline_id": listing.pipeline_id,
+            "thread_id": listing.thread_id,
+            "agent_id": listing.agent_id,
+            "msg_sequence": listing.msg_sequence,
+            "source": "memory",
+            "state": summary,
+        }));
+    }
+
+    // 2) DB 冷数据兜底：runs 清单里 registry 未覆盖的管道读最新 checkpoint
+    if let Some(db) = state.db.as_ref() {
+        let db = db.clone();
+        let tid = tenant_id.clone();
+        let rows = tokio::task::spawn_blocking(move || db.list_pipelines_inner(&tid, None, 200))
+            .await
+            .map_err(|e| ApiError::Internal {
+                message: format!("state list_pipelines join 失败: {e}"),
+            })?
+            .map_err(|e| ApiError::Internal {
+                message: format!("state list_pipelines 查询失败: {e}"),
+            })?;
+        for row in rows {
+            let pid = match row.pipeline_id.as_deref() {
+                Some(p) if !p.is_empty() => p.to_string(),
+                _ => continue,
+            };
+            if seen.contains(&pid) {
+                continue;
+            }
+            let db2 = state.db.as_ref().expect("db checked above").clone();
+            let tid2 = tenant_id.clone();
+            let pid2 = pid.clone();
+            let ckpt =
+                tokio::task::spawn_blocking(move || db2.load_latest_checkpoint(&pid2, &tid2))
+                    .await
+                    .map_err(|e| ApiError::Internal {
+                        message: format!("checkpoint join 失败: {e}"),
+                    })?
+                    .unwrap_or(None);
+            let summary = match ckpt {
+                Some((_, st)) => summarize_state(&st),
+                None => continue, // 无 checkpoint 的孤儿 run 不出口
+            };
+            items.push(json!({
+                "pipeline_id": pid,
+                "thread_id": row.thread_id.clone().unwrap_or_default(),
+                "agent_id": serde_json::Value::Null,
+                "source": "checkpoint",
+                "state": summary,
+            }));
+        }
+    }
+
+    Ok(axum::Json(json!({ "items": items })))
 }
 
 /// /api/v1/tools 端点处理器。
@@ -866,9 +1075,10 @@ pub async fn get_plugin_config_handler(
         message: "project_root not configured".to_string(),
     })?;
 
-    let manifest = find_manifest(&state.manifests, &plugin_id).ok_or_else(|| ApiError::NotFound {
-        message: format!("plugin not found: {plugin_id}"),
-    })?;
+    let manifest =
+        find_manifest(&state.manifests, &plugin_id).ok_or_else(|| ApiError::NotFound {
+            message: format!("plugin not found: {plugin_id}"),
+        })?;
 
     let mapping = find_config_mapping(manifest, &file_id).ok_or_else(|| ApiError::NotFound {
         message: format!("config file_id not found: {file_id}"),
@@ -909,9 +1119,10 @@ pub async fn put_plugin_config_handler(
         message: "project_root not configured".to_string(),
     })?;
 
-    let manifest = find_manifest(&state.manifests, &plugin_id).ok_or_else(|| ApiError::NotFound {
-        message: format!("plugin not found: {plugin_id}"),
-    })?;
+    let manifest =
+        find_manifest(&state.manifests, &plugin_id).ok_or_else(|| ApiError::NotFound {
+            message: format!("plugin not found: {plugin_id}"),
+        })?;
 
     let mapping = find_config_mapping(manifest, &file_id).ok_or_else(|| ApiError::NotFound {
         message: format!("config file_id not found: {file_id}"),
@@ -937,10 +1148,9 @@ pub async fn put_plugin_config_handler(
         }
     }
 
-    let stored: serde_json::Value =
-        serde_yaml::from_str(&raw).map_err(|e| ApiError::Internal {
-            message: format!("stored config yaml parse error: {e}"),
-        })?;
+    let stored: serde_json::Value = serde_yaml::from_str(&raw).map_err(|e| ApiError::Internal {
+        message: format!("stored config yaml parse error: {e}"),
+    })?;
     // B2：*** 哨兵字段保留磁盘原值
     let merged = apply_put_masked_sentinels(&stored, &req.data);
 
@@ -1003,6 +1213,170 @@ pub async fn get_plugin_config_with_etag(
 // PUT /api/v1/plugins/{id}/enabled 保留转正；history/reload* 4 个死端点已删除
 // （无任何前端/客户端消费者，见任务文档死代码清单）。
 
+/// G8 排空 + 自退出共享实现（`system_restart_handler` 与 plugin_watcher 的
+/// cdylib 变更自动重启共用——剩余项清仓批次 A3 抽取，watcher 经注入的回调调用，
+/// 不 import axum handler）。
+///
+/// 流程：排空（在途 `running` runs → `suspended`，重启后 resume 续跑）→ 记日志
+/// → 延迟 200ms 退出（让触发方的响应/日志先送达）。退出码 **75** =
+/// "restart requested"，监督者（启动脚本循环 / Service 重启策略）据码拉起新进程。
+///
+/// 测试逃生门：设 `AGENTOS_DISABLE_SELF_EXIT=1` 时只排空不退出（嵌入/测试场景）。
+///
+/// 返回被排空的 run 数（触发方记入日志/响应）。
+pub async fn drain_and_exit75(
+    db: Option<&Arc<agentos_engine::SqliteStore>>,
+    reason: &str,
+) -> usize {
+    let mut suspended_runs = 0usize;
+    if let Some(db) = db {
+        match db.suspend_running_runs() {
+            Ok(n) => suspended_runs = n as usize,
+            Err(e) => {
+                tracing::warn!(target: "system-restart", error = %e, "排空失败（继续重启流程）");
+            }
+        }
+    }
+    tracing::info!(
+        target: "system-restart",
+        suspended = suspended_runs,
+        reason = reason,
+        "G8 优雅重启：排空完成，即将以 exit 75 退出（监督者负责拉起新进程）"
+    );
+    if std::env::var("AGENTOS_DISABLE_SELF_EXIT").is_err() {
+        tokio::spawn(async {
+            // 让触发方的响应/日志先 flush 再退出。
+            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+            std::process::exit(75);
+        });
+    }
+    suspended_runs
+}
+
+/// POST /api/v1/system/restart — G8 优雅重启（restart-as-unload，cdylib 死结终结方案）。
+///
+/// 流程：排空（在途 `running` runs → `suspended`，重启后 resume 续跑）→ 回响应
+/// → 延迟 200ms 退出（让 HTTP 响应先送达）。退出码 **75** = "restart requested"，
+/// 监督者（启动脚本循环 / Service 重启策略）据码拉起新进程；无监督者时进程
+/// 即停止（诚实行为——`cargo run` / 直接启动下重启请求表现为停机）。
+///
+/// 触发场景：cdylib 插件集变更（装/卸/换——dlclose 死结使其无法热更新，重启即
+/// 卸载）；配置/插件批量变更后想要干净状态。sidecar 变更走热路径无需重启。
+/// cdylib 集合变更的另一条自动触发路径在 plugin_watcher（经 drain_and_exit75）。
+///
+/// 诚实限制（计划 §四 G8 已声明）：在途 LLM 流式那一步被切断（resume 后重试该步）；
+/// 前端经 WS 断线重连 + resync_required 拿到新状态。
+///
+/// 测试逃生门：设 `AGENTOS_DISABLE_SELF_EXIT=1` 时只排空不退出（嵌入/测试场景）。
+pub async fn system_restart_handler(
+    axum::extract::State(state): axum::extract::State<AppState>,
+) -> axum::Json<serde_json::Value> {
+    let suspended_runs = drain_and_exit75(state.db.as_ref(), "POST /api/v1/system/restart").await;
+    axum::Json(json!({
+        "success": true,
+        "message": "内核排空完成，即将退出（exit 75）；监督者将重启进程",
+        "exit_code": 75,
+        "suspended_runs": suspended_runs,
+    }))
+}
+
+/// POST /api/v1/plugins/validate-all — G2 双写一致性全量巡检。
+///
+/// 对照每个 tool 插件的 manifest 声明（`capabilities.tools`）与 sidecar 实际上报
+/// （MCP `tools/list`）——工具名集合 + 参数 schema。漂移分类：
+/// `missing`（声明有实际无）/ `undeclared`（实际有声明无）/ `schema_mismatch`。
+///
+/// 语义：spawn → 校验 → 回收（新 spawn 的连接校验后 kill，不破坏懒加载）；
+/// 校验失败（spawn 失败 / host 不支持）不阻断，插件标记 `error` 并继续。
+/// 结果只报告不处置（安装路径的处置见 plugin_watcher 的拒绝注册）。
+pub async fn validate_all_plugins_handler(
+    axum::extract::State(state): axum::extract::State<AppState>,
+) -> axum::Json<serde_json::Value> {
+    let Some(invoker) = state.invoker.clone() else {
+        return axum::Json(json!({
+            "checked": 0, "clean": 0, "drifted": 0, "errors": 1,
+            "message": "invoker 未接线（validate-all 不可用）",
+            "reports": [],
+        }));
+    };
+    let mut reports: Vec<serde_json::Value> = Vec::new();
+    let mut clean = 0usize;
+    let mut drifted = 0usize;
+    let mut errors = 0usize;
+    for m in state.manifests.iter() {
+        if m.capabilities.tools.is_empty() {
+            continue; // 非 tool 插件无工具可对照
+        }
+        if m.host_type != agentos_core::traits::HostType::Sidecar {
+            reports.push(json!({
+                "plugin_id": m.id,
+                "status": "skipped",
+                "reason": format!("host_type {:?} 暂无 describe 通道（G2 渐进落地）", m.host_type),
+                "mismatches": [],
+            }));
+            continue;
+        }
+        match invoker.list_plugin_tools(&m.id).await {
+            Ok(raw) => {
+                let (actual, malformed) = parse_actual_tools(&raw);
+                let mismatches = compare_tools(&declared_with_services(m), &actual);
+                let items: Vec<serde_json::Value> = mismatches
+                    .iter()
+                    .map(|mm| match mm {
+                        agentos_invoker::verify::VerifyMismatch::Missing { name } => {
+                            json!({"kind": "missing", "tool": name})
+                        }
+                        agentos_invoker::verify::VerifyMismatch::Undeclared { name } => {
+                            json!({"kind": "undeclared", "tool": name})
+                        }
+                        agentos_invoker::verify::VerifyMismatch::SchemaMismatch {
+                            name,
+                            declared,
+                            actual,
+                        } => {
+                            json!({
+                                "kind": "schema_mismatch",
+                                "tool": name,
+                                "declared_schema": declared,
+                                "actual_schema": actual,
+                            })
+                        }
+                    })
+                    .collect();
+                if mismatches.is_empty() {
+                    clean += 1;
+                } else {
+                    drifted += 1;
+                }
+                reports.push(json!({
+                    "plugin_id": m.id,
+                    "status": if mismatches.is_empty() { "clean" } else { "drifted" },
+                    "declared_tools": m.capabilities.tools.len(),
+                    "actual_tools": actual.len(),
+                    "malformed_items": malformed,
+                    "mismatches": items,
+                }));
+            }
+            Err(e) => {
+                errors += 1;
+                reports.push(json!({
+                    "plugin_id": m.id,
+                    "status": "error",
+                    "reason": e.message,
+                    "mismatches": [],
+                }));
+            }
+        }
+    }
+    axum::Json(json!({
+        "checked": reports.len(),
+        "clean": clean,
+        "drifted": drifted,
+        "errors": errors,
+        "reports": reports,
+    }))
+}
+
 /// GET /api/v1/plugins — 从 manifests 派生插件状态列表。
 pub async fn plugins_status_handler(
     axum::extract::State(state): axum::extract::State<AppState>,
@@ -1030,7 +1404,6 @@ pub async fn plugins_status_handler(
             let host_type = match m.host_type {
                 agentos_core::traits::HostType::InProcess => "in_process",
                 agentos_core::traits::HostType::Sidecar => "sidecar",
-                agentos_core::traits::HostType::Wasm => "wasm",
             };
             json!({
                 "plugin_id": m.id,
@@ -1075,13 +1448,18 @@ pub async fn plugins_set_enabled_handler(
             }))
         }
     };
-    let profile_path = project_root.join("config").join("plugins").join("default_profile.yaml");
+    let profile_path = project_root
+        .join("config")
+        .join("plugins")
+        .join("default_profile.yaml");
 
     // 读现有 profile（不存在则用空结构）
     let raw = std::fs::read_to_string(&profile_path).unwrap_or_default();
     let mut doc: serde_yaml::Value = serde_yaml::from_str(&raw).unwrap_or_else(|_| {
-        serde_yaml::from_str("version: 1\nplugins:\ndefaults:\n  enabled: true\n  activation: lazy\n")
-            .unwrap()
+        serde_yaml::from_str(
+            "version: 1\nplugins:\ndefaults:\n  enabled: true\n  activation: lazy\n",
+        )
+        .unwrap()
     });
 
     // 改 plugins.<id>.enabled（手动操作 serde_yaml Mapping）
@@ -1089,13 +1467,19 @@ pub async fn plugins_set_enabled_handler(
         // 确保 plugins 键存在且是 Mapping
         let plugins_key = serde_yaml::Value::String("plugins".into());
         if !top.contains_key(&plugins_key) {
-            top.insert(plugins_key.clone(), serde_yaml::Value::Mapping(serde_yaml::Mapping::new()));
+            top.insert(
+                plugins_key.clone(),
+                serde_yaml::Value::Mapping(serde_yaml::Mapping::new()),
+            );
         }
         if let Some(serde_yaml::Value::Mapping(ref mut plugins_map)) = top.get_mut(&plugins_key) {
             let pid_key = serde_yaml::Value::String(plugin_id.clone());
             // 确保该插件条目存在
             if !plugins_map.contains_key(&pid_key) {
-                plugins_map.insert(pid_key.clone(), serde_yaml::Value::Mapping(serde_yaml::Mapping::new()));
+                plugins_map.insert(
+                    pid_key.clone(),
+                    serde_yaml::Value::Mapping(serde_yaml::Mapping::new()),
+                );
             }
             if let Some(serde_yaml::Value::Mapping(ref mut entry)) = plugins_map.get_mut(&pid_key) {
                 entry.insert(
@@ -1120,27 +1504,101 @@ pub async fn plugins_set_enabled_handler(
                     ids.remove(&plugin_id);
                 }
             }
-            // 2) 禁用时立即从 CapabilityRegistry 摘掉（tools/http_routes 立即不可用）
-            //    启用时重新注册需要重启（axum 路由树在启动期固定，运行时无法动态加路由）
-            if !new_enabled {
-                if let Some(registry) = &state.capability_registry {
-                    use agentos_core::traits::CapabilityRegistry;
+            // 2) 注册表对称热更新（G1 enable 对称化 + M1 scope 结构性收回）：
+            //    禁用 → scope revoke（全部注册 guard 一次性收回）+ clear_plugin 兜底
+            //           + broadcaster 绑定移除（零残留）；
+            //    启用 → 立即重注册 tools/route_signals/http_routes（guarded，入新 scope）。
+            //    /ext/{*rest} 通配分发是注册表数据驱动（http_dispatcher），路由树无需
+            //    重启重建。
+            let mut registered = serde_json::Value::Null;
+            if let Some(registry) = &state.capability_registry {
+                use agentos_core::traits::CapabilityRegistry;
+                if new_enabled {
+                    match state.manifests.iter().find(|m| m.id == plugin_id) {
+                        Some(m) => {
+                            let (tools, http_routes) =
+                                crate::plugin_lifecycle::reenable_plugin_capabilities(
+                                    m,
+                                    registry,
+                                    Some(&state.plugin_scopes),
+                                );
+                            tracing::info!(
+                                target: "plugin-enablement",
+                                "plugin {} re-enabled: re-registered tools={} http_routes={}",
+                                plugin_id, tools, http_routes
+                            );
+                            registered = serde_json::json!({
+                                "tools": tools, "http_routes": http_routes
+                            });
+                        }
+                        None => {
+                            tracing::warn!(
+                                target: "plugin-enablement",
+                                "plugin {} enabled but manifest not found; nothing re-registered",
+                                plugin_id
+                            );
+                        }
+                    }
+                } else {
+                    // M1：先经 scope 收回全部登记（registry 四维 + broadcaster 绑定），
+                    // 再 clear_plugin 兜底（scope 无登记的直连注册路径仍被覆盖）。
+                    state.plugin_scopes.revoke(&plugin_id);
+                    if let Some(bindings) = &state.widget_bindings {
+                        remove_plugin_bindings(bindings, &plugin_id);
+                    }
                     registry.clear_plugin(&plugin_id);
+                    // G3：动态注册的持久化记录随禁用删除（动态注册生命周期 =
+                    // 插件启用周期；re-enable 后插件经 on_load/运行时自行重建）。
+                    if let Some(db) = &state.db {
+                        match db.delete_dynamic_tools_by_plugin(&plugin_id) {
+                            Ok(n) if n > 0 => {
+                                tracing::info!(
+                                    target: "plugin-enablement",
+                                    "plugin {} disabled: dropped {} dynamic tool registrations",
+                                    plugin_id, n
+                                );
+                            }
+                            Ok(_) => {}
+                            Err(e) => {
+                                tracing::warn!(
+                                    target: "plugin-enablement",
+                                    "plugin {} disabled but dynamic_tools cleanup failed: {}",
+                                    plugin_id, e
+                                );
+                            }
+                        }
+                    }
                 }
             }
-            let restart_needed = new_enabled; // 启用需重启（路由重建），禁用立即生效
+            let restart_needed = false; // 双向即时生效（G1）
             tracing::info!(
                 target: "plugin-enablement",
                 "plugin {} enabled={} (hot-reloaded: contributes + registry updated, restart={})",
                 plugin_id, new_enabled, restart_needed
             );
+            // 剩余项清仓 D2：schema 变更推送——enable/disable 已改变 schema 聚合
+            // （tools/contributes/configs），best-effort 广播 widget_event
+            // {schema, changed} 让前端增量重载（前端消费见 resync.ts）。
+            // 失败静默（观察层不拖垮主流程：session 未启用/无连接时 broadcast
+            // 返回 0，不视为错误）。
+            if let Some(session) = &state.session {
+                let _ = session
+                    .broadcast_widget(
+                        "schema",
+                        "changed",
+                        json!({ "plugin_id": plugin_id, "enabled": new_enabled }),
+                        "kernel",
+                    )
+                    .await;
+            }
             axum::Json(json!({
                 "success": true,
                 "plugin_id": plugin_id,
                 "enabled": new_enabled,
                 "restart_required": restart_needed,
-                "message": if restart_needed {
-                    format!("已启用插件 {}（重启后完全生效，contributes 已立即更新）", plugin_id)
+                "registered": registered,
+                "message": if new_enabled {
+                    format!("已启用插件 {}（立即生效）", plugin_id)
                 } else {
                     format!("已禁用插件 {}（立即生效）", plugin_id)
                 },
@@ -1159,116 +1617,17 @@ pub struct EnabledBody {
     pub enabled: bool,
 }
 
-// ── 监控 M5/M5b：指标查询与导出端点（监控设计 §五）──
-
-/// `/api/v1/metrics` 查询参数。
-#[derive(Debug, Default, Deserialize)]
-pub struct MetricsQueryParams {
-    /// 插件 id 过滤（缺省=all）。
-    pub plugin: Option<String>,
-    /// 指标名过滤（缺省=all）。
-    pub metric: Option<String>,
-    /// 时间窗（5m/1h/24h，缺省=1h）。
-    pub window: Option<String>,
-    /// labels 过滤，格式 key:value，多个用逗号。
-    pub labels: Option<String>,
-}
-
-/// 单条指标查询结果（监控设计 §五 响应）。
-#[derive(Debug, Serialize)]
-pub struct MetricSeriesResponse {
-    pub plugin_id: String,
-    pub name: String,
-    #[serde(rename = "type")]
-    pub metric_type: String,
-    pub labels: serde_json::Value,
-    pub samples: Vec<serde_json::Value>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub unit: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub latest: Option<f64>,
-}
-
-/// `/api/v1/metrics` 响应。
-#[derive(Debug, Serialize)]
-pub struct MetricsResponse {
-    pub metrics: Vec<MetricSeriesResponse>,
-}
-
-/// 解析 window 字符串为 Duration。
-fn parse_window(s: &str) -> std::time::Duration {
-    match s.trim() {
-        "5m" => std::time::Duration::from_secs(5 * 60),
-        "1h" => std::time::Duration::from_secs(60 * 60),
-        "24h" => std::time::Duration::from_secs(24 * 60 * 60),
-        _ => std::time::Duration::from_secs(60 * 60), // 默认 1h
-    }
-}
-
-/// 解析 labels 查询串（"model:deepseek,region:us"）。
-fn parse_labels_query(s: &str) -> Labels {
-    let mut out = Labels::new();
-    for pair in s.split(',') {
-        let pair = pair.trim();
-        if let Some((k, v)) = pair.split_once(':') {
-            let k = k.trim();
-            let v = v.trim();
-            if !k.is_empty() {
-                out.insert(k.to_string(), v.to_string());
-            }
-        }
-    }
-    out
-}
-
-/// GET /api/v1/metrics（监控设计 §五）。
-///
-/// 支持 ?plugin=&metric=&window=5m/1h/24h&labels=key:value 过滤。
-pub async fn metrics_query_handler(
-    axum::extract::State(state): axum::extract::State<AppState>,
-    axum::extract::Query(params): axum::extract::Query<MetricsQueryParams>,
-) -> Result<axum::Json<MetricsResponse>, ApiError> {
-    let agg = state.metrics.as_ref().ok_or_else(|| ApiError::NotFound {
-        message: "metrics aggregator not enabled".to_string(),
-    })?;
-    let window = params
-        .window
-        .as_deref()
-        .map(parse_window)
-        .unwrap_or_else(|| std::time::Duration::from_secs(60 * 60));
-    let labels_filter = params
-        .labels
-        .as_deref()
-        .map(parse_labels_query)
-        .unwrap_or_default();
-    let views = agg.query(
-        params.plugin.as_deref(),
-        params.metric.as_deref(),
-        Some(window),
-        &labels_filter,
-    );
-    let metrics = views
-        .into_iter()
-        .map(|v| MetricSeriesResponse {
-            plugin_id: v.plugin_id,
-            name: v.name,
-            metric_type: v.metric_type.as_str().to_string(),
-            labels: serde_json::to_value(&v.labels).unwrap_or(serde_json::json!({})),
-            samples: v
-                .samples
-                .into_iter()
-                .map(|s| serde_json::json!({"ts": s.ts, "value": s.value}))
-                .collect(),
-            unit: v.unit,
-            latest: v.latest,
-        })
-        .collect();
-    Ok(axum::Json(MetricsResponse { metrics }))
-}
+// ── 监控 M5b：Prometheus 导出端点（监控设计 §十一）──
+//
+// boot-plugin 第三刀拆分（对齐 db-admin 模式）：查询面（原 GET /api/v1/metrics）
+// 已迁 `metrics-admin` capability（metrics/capability.rs 的 query/list method，
+// HTTP 面在 plugins/shared/metrics_admin 插件 /ext/metrics_admin/**）；
+// /metrics 保留内核——Prometheus 抓取方通常不鉴权且是运维契约，URL 稳定优先。
 
 /// GET /metrics（Prometheus exposition format，监控设计 §十一 决策3）。
 ///
 /// 返回纯文本 Prometheus exposition 格式，供 Prometheus/Grafana 抓取。
+/// 插件面副本：/ext/metrics_admin/prometheus（metrics-admin capability）。
 pub async fn metrics_prometheus_handler(
     axum::extract::State(state): axum::extract::State<AppState>,
 ) -> Result<String, ApiError> {
@@ -1307,7 +1666,10 @@ pub struct PipelineConfigUpdateRequest {
 
 /// 解析管道配置文件路径：`config/pipelines/{name}.yaml`。
 fn pipeline_config_path(project_root: &std::path::Path, name: &str) -> std::path::PathBuf {
-    project_root.join("config").join("pipelines").join(format!("{name}.yaml"))
+    project_root
+        .join("config")
+        .join("pipelines")
+        .join(format!("{name}.yaml"))
 }
 
 /// GET /api/v1/config/pipelines/{name}（P7）。
@@ -1380,11 +1742,8 @@ pub async fn get_pipeline_config_with_etag(
     axum::extract::State(state): axum::extract::State<AppState>,
     axum::extract::Path(name): axum::extract::Path<String>,
 ) -> Result<axum::response::Response, ApiError> {
-    let axum::Json(resp) = get_pipeline_config_handler(
-        axum::extract::State(state),
-        axum::extract::Path(name),
-    )
-    .await?;
+    let axum::Json(resp) =
+        get_pipeline_config_handler(axum::extract::State(state), axum::extract::Path(name)).await?;
     let etag = resp.etag.clone();
     Ok(([(axum::http::header::ETAG, etag)], axum::Json(resp)).into_response())
 }

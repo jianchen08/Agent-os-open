@@ -28,6 +28,7 @@ from tests.channels.conftest import use_channel
 
 use_channel("api")
 from deps import require_auth  # noqa: E402
+import routes_workspaces as _routes_workspaces_mod  # noqa: E402
 from routes_workspaces import workspaces_router  # noqa: E402
 
 # ============================================================
@@ -67,14 +68,15 @@ def client(mock_auth, workspace_tmp):
     app.dependency_overrides[require_auth] = mock_auth
     app.include_router(workspaces_router)
 
-    # patch _resolve_workspace_path 返回临时目录
+    # patch _resolve_workspace_path 返回临时目录。
+    # 用 patch.object 持模块引用：全量收集时 use_channel 会逐出 sys.modules 里的
+    # routes_workspaces（_AMBIGUOUS_MODULES），执行期字符串 patch 会重新 import
+    # 新模块对象、与 workspaces_router 所在模块分裂导致 patch 失效；
+    # patch.object 直接改已持有引用，与逐出解耦。
     async def _fake_resolve(container_task_id: str):
         return workspace_tmp
 
-    with patch(
-        "routes_workspaces._resolve_workspace_path",
-        new=_fake_resolve,
-    ):
+    with patch.object(_routes_workspaces_mod, "_resolve_workspace_path", new=_fake_resolve):
         with TestClient(app) as c:
             yield c
 

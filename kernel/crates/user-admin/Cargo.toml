@@ -1,0 +1,18 @@
+[package]
+name = "agentos-user-admin"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "User Admin 用户管理策略面 — 用户列表/改角色/改租户/删用户（user-admin capability handler，HTTP 面在 plugins/shared/user_admin 插件）"
+
+[dependencies]
+agentos-core.workspace = true
+agentos-engine.workspace = true
+agentos-http.workspace = true
+agentos-mcp.workspace = true
+async-trait.workspace = true
+axum = { version = "0.8" }
+rusqlite = { version = "0.32", features = ["bundled"] }
+serde_json.workspace = true
+tokio.workspace = true

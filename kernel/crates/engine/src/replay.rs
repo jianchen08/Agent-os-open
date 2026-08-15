@@ -132,7 +132,7 @@ pub fn rebuild_messages_at(
 ///
 /// 1. 重建目标队列；2. 与当前表 diff 生成补偿 ops（恢复旧内容 / 清空多余槽，
 ///    同 `set` 原语）；3. 走表侧 apply；4. 追加 `PatchType::Rollback` 轨迹
-/// （记录回退目标与补偿实录——旧轨迹 append-only 完好）。
+///    （记录回退目标与补偿实录——旧轨迹 append-only 完好）。
 pub fn rollback(
     store: &SqliteStore,
     pipeline_id: &str,
@@ -152,7 +152,11 @@ pub fn rollback(
         .collect();
 
     let mut ops = Vec::new();
-    let keys: BTreeSet<i64> = target_map.keys().chain(current_map.keys()).cloned().collect();
+    let keys: BTreeSet<i64> = target_map
+        .keys()
+        .chain(current_map.keys())
+        .cloned()
+        .collect();
     for k in keys {
         match (target_map.get(&k), current_map.get(&k)) {
             (Some(t), Some(c)) if t == c => {} // 已一致，无需补偿

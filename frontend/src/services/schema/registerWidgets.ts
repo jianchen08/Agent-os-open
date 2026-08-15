@@ -14,6 +14,7 @@ import {
   SettingsHubPanel,
   ToolsPanel,
 } from '@/components/schema/widgets/PanelHostWidget'
+import { PipelineManagerWidget } from '@/components/schema/widgets/PipelineManagerWidget'
 import { SettingsHubWidget } from '@/components/schema/widgets/SettingsHubWidget'
 import { DecisionWidget } from '@/components/schema/widgets/DecisionWidget'
 import { EditorWidget } from '@/components/schema/widgets/EditorWidget'
@@ -76,6 +77,7 @@ const WIDGETS: WidgetEntry[] = [
   { name: 'workspace_explorer', component: PipelineManagerPanel, spaces: ['workspace'] },
   // 任务/管道管理（独立工作区标签，按需打开；旧 workspace_explorer 注册保留兼容）
   { name: 'pipeline_manager', component: PipelineManagerPanel, spaces: ['workspace'] },
+  { name: 'pipeline_manager_widget', component: PipelineManagerWidget, spaces: ['workspace'] },
   // 兼容 SettingsHubWidget 直注册
   { name: 'settings_hub_widget', component: SettingsHubWidget, spaces: ['workspace'] },
   // Webview：VS Code 风格插件自由 UI 沙箱（ADR §3.4'），fallback 到 html_preview。

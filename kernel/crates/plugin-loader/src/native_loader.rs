@@ -18,7 +18,6 @@
 //!   那是预期行为——cdylib panic=abort 是跨边界标准做法）。
 
 use std::collections::HashMap;
-use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -92,7 +91,7 @@ impl NativePluginLoader {
         })?;
 
         // SAFETY: lib.get 要求符号的函数签名与 CreateFn 一致。CREATE_FN_NAME
-        // (b"plugin_entry") 是 native-sdk 约定的 C ABI 导出（extern "C"），签名固定为
+        // (b"agentos_plugin_create") 是 native-sdk 约定的 C ABI 导出（extern "C"），签名固定为
         // `unsafe extern "C" fn() -> *mut ()`，C ABI 无名称修饰，类型匹配成立。
         let create_fn: CreateFn = unsafe {
             let sym: Symbol<CreateFn> = lib.get(CREATE_FN_NAME).map_err(|e| PluginError {
@@ -110,14 +109,18 @@ impl NativePluginLoader {
         // 调构造函数拿裸指针，还原为 Box<dyn PipelinePlugin>。
         // SAFETY: create_fn 由插件 cdylib 导出，返回 plugin_into_raw 产生的双重 Box 指针。
         let ptr = unsafe { create_fn() };
-        // SAFETY: ptr 由 create_fn()（插件 plugin_entry 导出）产生，按 native-sdk 契约
+        // SAFETY: ptr 由 create_fn()（插件 agentos_plugin_create 导出）产生，按 native-sdk 契约
         // 必须是 plugin_into_raw 生成的双重 Box 指针；box_from_raw 还原所有权并转移给 loader。
         // null 已由 box_from_raw 内部处理（返回 None → 下游 NATIVE_CREATE_NULL 错误）。
-        let instance: Box<dyn PipelinePlugin> = unsafe { box_from_raw(ptr) }.ok_or_else(|| PluginError {
-            message: format!("native plugin create returned null pointer: {}", path.display()),
-            code: Some("NATIVE_CREATE_NULL".to_string()),
-            source: Some("native-loader".to_string()),
-        })?;
+        let instance: Box<dyn PipelinePlugin> =
+            unsafe { box_from_raw(ptr) }.ok_or_else(|| PluginError {
+                message: format!(
+                    "native plugin create returned null pointer: {}",
+                    path.display()
+                ),
+                code: Some("NATIVE_CREATE_NULL".to_string()),
+                source: Some("native-loader".to_string()),
+            })?;
 
         Ok(NativePlugin {
             _lib: lib,
@@ -218,10 +221,6 @@ impl NativePluginLoader {
     }
 }
 
-// OsStr 兼容（路径操作工具，未来扩展用）
-#[allow(dead_code)]
-fn _osstr(_s: &OsStr) {}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -229,9 +228,19 @@ mod tests {
     #[test]
     fn platform_artifact_name_keeps_known_extensions() {
         assert_eq!(NativePluginLoader::platform_artifact_name("p.dll"), "p.dll");
-        assert_eq!(NativePluginLoader::platform_artifact_name("P.SO"), "P.SO", "大小写后缀保留");
-        assert_eq!(NativePluginLoader::platform_artifact_name("x.dylib"), "x.dylib");
-        assert_eq!(NativePluginLoader::platform_artifact_name("liby.so"), "liby.so");
+        assert_eq!(
+            NativePluginLoader::platform_artifact_name("P.SO"),
+            "P.SO",
+            "大小写后缀保留"
+        );
+        assert_eq!(
+            NativePluginLoader::platform_artifact_name("x.dylib"),
+            "x.dylib"
+        );
+        assert_eq!(
+            NativePluginLoader::platform_artifact_name("liby.so"),
+            "liby.so"
+        );
     }
 
     #[test]
@@ -281,6 +290,7 @@ mod tests {
             session_id: "s1".to_string(),
             task_id: "task1".to_string(),
             pipeline_id: "p1".to_string(),
+            tool_call_json: None,
         };
         let err = loader.execute("never_loaded", &ctx, None).unwrap_err();
         assert_eq!(err.code.as_deref(), Some("NATIVE_NOT_LOADED"));

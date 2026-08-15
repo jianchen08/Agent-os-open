@@ -278,7 +278,9 @@ export const Sidebar = memo<SidebarProps>(({ isMobile = false }) => {
           const session = await createSession(title || undefined, {
             agentId: agentId || undefined,
             workspace: options?.workspace,
+            workspaceMode: options?.workspaceMode,
             isolationMode: options?.isolationMode,
+            extra: options?.extra,
           })
           setModal(null)
         }
@@ -559,6 +561,12 @@ export const Sidebar = memo<SidebarProps>(({ isMobile = false }) => {
                   )}
                   <DropdownMenuItem onClick={() => navigate('/settings')}>设置</DropdownMenuItem>
                   <DropdownMenuItem onClick={() => navigate('/monitoring')}>监控</DropdownMenuItem>
+                  <DropdownMenuItem
+                    onClick={() => openWorkspacePanelByPath('/tasks')}
+                    data-testid="sidebar-user-menu-tasks"
+                  >
+                    任务管理
+                  </DropdownMenuItem>
                 </DropdownMenuContent>
               </DropdownMenu>
               <ThemeButton compact />
@@ -794,6 +802,12 @@ export const Sidebar = memo<SidebarProps>(({ isMobile = false }) => {
                   </DropdownMenuItem>
                   <DropdownMenuItem onClick={() => navigate('/monitoring')} data-testid="sidebar-user-menu-monitoring">
                     监控
+                  </DropdownMenuItem>
+                  <DropdownMenuItem
+                    onClick={() => openWorkspacePanelByPath('/tasks')}
+                    data-testid="sidebar-user-menu-tasks-2"
+                  >
+                    任务管理
                   </DropdownMenuItem>
                 </DropdownMenuContent>
               </DropdownMenu>

@@ -11,6 +11,7 @@ members = [
     "crates/api",
     "crates/http",
     "crates/db-admin",
+    "crates/user-admin",
     "crates/hooks",
     "crates/engine",
     "crates/session",
@@ -24,30 +25,21 @@ resolver = "2"
 opt-level = 1
 
 # ============================================================================
-# dev / test profile：本地代码全量调试符号 + 第三方依赖精简
-# 目标：自己写的代码能完整单步/看变量；第三方库只留 panic 行号栈，省磁盘。
-#
-# 两层调试符号：
-#   - 顶层 debug = "full"      → workspace 内自己的 crate：行号+变量+类型，断点单步全可用
-#   - package."*"               → 所有第三方依赖（tokio/serde/…）：仅 line-tables-only，
-#                                 足以定位 panic 栈，但 .pdb/.rlib 体积大幅缩小（实测约 -60%~70%）
-# split-debuginfo = "packed"   → Windows-MSVC 下把符号剥离到独立 .pdb，二进制本体不含重复符号
-#
-# 注：incremental=false / jobs=1 由 .cargo/config.toml 统一控制（本机规避编译器 ICE），此处不设。
+# dev / test（test 继承 dev）：全仓统一 line-tables-only。
+# 只保留行号表——panic/backtrace 能定位到文件:行号，但不含变量/类型信息，
+# .pdb/.rlib 体积比 full 小一个数量级（历史上 full 曾把 target/debug 撑到 46G）。
+# 需要断点单步看变量时临时覆盖即可，不必改本文件：
+#   CARGO_PROFILE_DEV_DEBUG=full cargo test ...
+# 注：MSVC 下符号本就拆到独立 .pdb；incremental=false / jobs=1 由
+#     .cargo/config.toml 控制（本机规避编译器 ICE），此处不设。
+# 调试/覆盖率跑完后的产物回收：python scripts/clean_rust_debug.py
 # ============================================================================
 [profile.dev]
-debug = "full"
-split-debuginfo = "packed"
-
-[profile.dev.package."*"]
 debug = "line-tables-only"
 
-[profile.test]
-debug = "full"
-split-debuginfo = "packed"
-
-[profile.test.package."*"]
-debug = "line-tables-only"
+# release 剥离调试信息（保留符号表，panic 栈仍有函数名）；行号级定位交给 dev profile。
+[profile.release]
+strip = "debuginfo"
 [workspace.package]
 version = "0.2.0"
 edition = "2021"
@@ -77,6 +69,7 @@ chrono = { version = "0.4", features = ["serde"] }
 dirs = "5"
 # tool_core messages 序列化（对齐 Python get_format_manager 默认 YAML）。
 serde_yaml = "0.9"
+form_urlencoded = "1"
 # 内核 crate（workspace 内部引用）
 agentos-core = { path = "crates/core" }
 agentos-config = { path = "crates/config" }
@@ -90,5 +83,6 @@ agentos-tenant = { path = "crates/tenant" }
 agentos-api = { path = "crates/api" }
 agentos-http = { path = "crates/http" }
 agentos-db-admin = { path = "crates/db-admin" }
+agentos-user-admin = { path = "crates/user-admin" }
 agentos-session = { path = "crates/session" }
 agentos-hooks = { path = "crates/hooks" }

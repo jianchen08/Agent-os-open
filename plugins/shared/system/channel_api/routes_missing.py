@@ -9,6 +9,7 @@ floating-chat, files/capabilities。
 from __future__ import annotations
 
 import logging
+import sys
 import time
 from collections.abc import Callable
 from typing import Any
@@ -19,11 +20,135 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 logger = logging.getLogger(__name__)
 
 
-def _get_human_interaction_service():
-    """延迟加载 human_interaction 服务（0.2 位于 tools/human/service.py）。"""
-    from human.service import get_human_interaction_service  # noqa: PLC0415
+class _HumanInteractionCapabilityProxy:
+    """经内核 tool-executor 调 human_interaction_tool sidecar 的真实服务实例。
 
-    return get_human_interaction_service()
+    0.2 sidecar 进程隔离：channel_api 进程内 import human.service 拿到的是本进程
+    的全新实例（_requests 恒空、Event 表为空）——真实交互数据在
+    human_interaction_tool 进程。经标准能力 tool-executor.invoke 调用该插件的
+    interaction.* 工具（作用于真实单例），绕开动态 namespace（human-interaction）
+    注册晚于本插件 initialize 的时序问题。
+    capability 未覆盖的单条查询（get_request）从 get_pending 过滤兜底。
+    """
+
+    _TOOL_METHODS = {
+        "get_pending": "interaction.get_pending",
+        "respond": "interaction.respond",
+    }
+
+    def __init__(self, executor_call: Callable[[str, dict[str, Any]], Any]) -> None:
+        self._executor_call = executor_call
+
+    async def _call(self, method: str, params: dict[str, Any]) -> dict[str, Any]:
+        tool = self._TOOL_METHODS.get(method)
+        if not tool:
+            raise RuntimeError(f"human-interaction.{method} 无对应工具")
+        res = await self._executor_call("invoke", {"tool_name": tool, "args": params})
+        # invoke 返回形状自适应：工具结果可能直接平铺，也可能包在 data/result 里
+        for candidate in (
+            res,
+            res.get("data") if isinstance(res, dict) else None,
+            res.get("result") if isinstance(res, dict) else None,
+        ):
+            if isinstance(candidate, dict):
+                if candidate.get("error"):
+                    raise RuntimeError(f"{tool} 失败: {candidate['error']}")
+                return candidate
+        raise RuntimeError(f"{tool} 返回无法解析: {type(res).__name__}")
+
+    async def get_pending_requests(
+        self,
+        session_id: str | None = None,
+        user_id: str | None = None,
+        limit: int = 50,
+    ) -> list[dict[str, Any]]:
+        res = await self._call("get_pending", {"session_id": session_id, "limit": limit})
+        return res.get("requests", [])
+
+    async def get_request(self, request_id: str) -> dict[str, Any] | None:
+        items = await self.get_pending_requests(limit=500)
+        for it in items:
+            if isinstance(it, dict) and (
+                it.get("id") == request_id or it.get("request_id") == request_id
+            ):
+                return it
+        return None
+
+    async def respond(self, request_id: str, resp_data: dict[str, Any]) -> bool:
+        # 兼容嵌套（body.response.*）与扁平（body 平铺）两种前端形状
+        inner = resp_data.get("response", {}) if isinstance(resp_data, dict) else {}
+        if not isinstance(inner, dict) or not inner:
+            inner = resp_data if isinstance(resp_data, dict) else {}
+        return await self.submit_response(
+            request_id=request_id,
+            response_type=inner.get("response_type", "answered"),
+            selected_option=inner.get("selected_option"),
+            answers=inner.get("answers"),
+            feedback=inner.get("feedback"),
+        )
+
+    async def submit_response(
+        self,
+        request_id: str,
+        response_type: str,
+        selected_option: str | None = None,
+        answers: list[str] | None = None,
+        feedback: str | None = None,
+        user_id: str | None = None,
+    ) -> bool:
+        try:
+            res = await self._call("respond", {
+                "request_id": request_id,
+                "response_type": response_type,
+                "selected_option": selected_option,
+                "answers": answers,
+                "feedback": feedback,
+            })
+        except RuntimeError as exc:
+            logger.warning("[channel_api] 交互响应转发失败 | request_id=%s | err=%s", request_id, exc)
+            return False
+        return bool(res.get("ok"))
+
+
+def _channel_api_plugin() -> Any:
+    """取 channel_api 入口的 plugin 实例（持有内核注入的能力句柄）。
+
+    入口是 `python server.py`——模块名是 __main__；`from server import plugin`
+    会把 server.py 再导入一遍，创建**未初始化的第二个实例**（无 capabilities），
+    必须从 __main__ 取。
+    """
+    import __main__ as _main  # noqa: PLC0415
+
+    plugin_obj = getattr(_main, "plugin", None)
+    if plugin_obj is None:
+        mod = sys.modules.get("server")
+        plugin_obj = getattr(mod, "plugin", None) if mod else None
+    if plugin_obj is None:
+        raise ImportError("channel_api plugin 实例不可达")
+    return plugin_obj
+
+
+def _get_human_interaction_service():
+    """优先经内核 tool-executor 转发到 human sidecar 真实实例；通道不可用回退本地。
+
+    修复「审批卡片不弹 + 批准无响应」的实例隔离断裂：本进程 import 的
+    human.service 是空实例，查 pending 恒空、respond 唤不醒真实 wait_for_choice。
+    """
+    try:
+        executor = _channel_api_plugin().get_capability("tool-executor")
+
+        async def _executor_call(method: str, params: dict[str, Any]) -> Any:
+            return await executor.call(method, params)
+
+        return _HumanInteractionCapabilityProxy(_executor_call)
+    except (KeyError, AttributeError, ImportError):
+        logger.warning(
+            "[channel_api] tool-executor 能力不可用，human-interaction 回退本地空实例"
+            "（pending 将恒空，审批恢复/响应不可用）"
+        )
+        from human.service import get_human_interaction_service  # noqa: PLC0415
+
+        return get_human_interaction_service()
 
 
 def _safe_enum_value(obj):

@@ -16,8 +16,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use agentos_core::traits::{
-    CapabilityRegistry, HttpEndpoint, HttpHandleCapability, HttpHandleRequest,
-    HttpHandleResponse,
+    CapabilityRegistry, HttpEndpoint, HttpHandleCapability, HttpHandleRequest, HttpHandleResponse,
 };
 use agentos_plugin_loader::CapabilityRegistryImpl;
 use base64::Engine;
@@ -67,15 +66,9 @@ impl HttpHandleCapability for WecomCallbackHandler {
                 Ok(HttpHandleResponse {
                     status: 200,
                     headers: HashMap::from([
-                        (
-                            "content-type".to_string(),
-                            "application/xml".to_string(),
-                        ),
+                        ("content-type".to_string(), "application/xml".to_string()),
                         // 回显收到的 raw body（解码后），供测试断言字节级透传
-                        (
-                            "x-recv-raw".to_string(),
-                            req.raw_body.clone(),
-                        ),
+                        ("x-recv-raw".to_string(), req.raw_body.clone()),
                     ]),
                     body: base64::engine::general_purpose::STANDARD
                         .encode(encrypted_reply.as_bytes()),
@@ -125,12 +118,17 @@ fn test_wecom_manifest_declares_dual_method_endpoints() {
         ]
     }"#;
 
-    let manifest: PluginManifest =
-        serde_json::from_str(json).expect("wecom manifest must parse");
+    let manifest: PluginManifest = serde_json::from_str(json).expect("wecom manifest must parse");
     assert_eq!(manifest.http_endpoints.len(), 2);
     // 同 path 不同 method
-    assert_eq!(manifest.http_endpoints[0].path, "/ext/channel_wecom/callback");
-    assert_eq!(manifest.http_endpoints[1].path, "/ext/channel_wecom/callback");
+    assert_eq!(
+        manifest.http_endpoints[0].path,
+        "/ext/channel_wecom/callback"
+    );
+    assert_eq!(
+        manifest.http_endpoints[1].path,
+        "/ext/channel_wecom/callback"
+    );
     assert_ne!(
         manifest.http_endpoints[0].method,
         manifest.http_endpoints[1].method
@@ -176,9 +174,7 @@ fn wecom_endpoints() -> [HttpEndpoint; 2] {
 fn wecom_dispatcher() -> HttpDispatcher {
     let registry = Arc::new(CapabilityRegistryImpl::new());
     for ep in wecom_endpoints() {
-        registry
-            .register_http_route("channel_wecom", ep)
-            .unwrap();
+        registry.register_http_route("channel_wecom", ep).unwrap();
     }
     HttpDispatcher::new(registry, Arc::new(WecomCallbackHandler))
 }
@@ -189,12 +185,16 @@ fn wecom_dispatcher() -> HttpDispatcher {
 async fn test_wecom_get_verify_passes_query_and_returns_echostr() {
     let dispatcher = wecom_dispatcher();
 
-    // 企微 GET 验证请求的典型 query（参考 crypto.py + adapter.py）
+    // 企微 GET 验证请求的典型 query（参考 crypto.py + adapter.py）。
+    // A1 后 dispatch_http 吃多值形态（key → Vec<value>），单 key 包一层 vec。
     let query = HashMap::from([
-        ("msg_signature".to_string(), "abc123sig".to_string()),
-        ("timestamp".to_string(), "1700000000".to_string()),
-        ("nonce".to_string(), "nonce_xyz".to_string()),
-        ("echostr".to_string(), "ENCRYPTED_ECHOSTR_FROM_WECOM".to_string()),
+        ("msg_signature".to_string(), vec!["abc123sig".to_string()]),
+        ("timestamp".to_string(), vec!["1700000000".to_string()]),
+        ("nonce".to_string(), vec!["nonce_xyz".to_string()]),
+        (
+            "echostr".to_string(),
+            vec!["ENCRYPTED_ECHOSTR_FROM_WECOM".to_string()],
+        ),
     ]);
 
     let outcome = dispatch_http(
@@ -232,14 +232,14 @@ async fn test_wecom_post_callback_passes_encrypted_xml_raw_body() {
     // 企微 POST 回调的典型 raw body：加密 XML（含 0x?? 非可见字节也行，这里用文本模拟）
     let encrypted_xml = b"<xml><Encrypt>BASE64_ENCRYPTED_PAYLOAD_HERE</Encrypt></xml>";
     let query = HashMap::from([
-        ("msg_signature".to_string(), "sha1sig_value".to_string()),
-        ("timestamp".to_string(), "1700000001".to_string()),
-        ("nonce".to_string(), "nonce_abc".to_string()),
+        (
+            "msg_signature".to_string(),
+            vec!["sha1sig_value".to_string()],
+        ),
+        ("timestamp".to_string(), vec!["1700000001".to_string()]),
+        ("nonce".to_string(), vec!["nonce_abc".to_string()]),
     ]);
-    let headers = HashMap::from([(
-        "content-type".to_string(),
-        "text/xml".to_string(),
-    )]);
+    let headers = HashMap::from([("content-type".to_string(), "text/xml".to_string())]);
 
     let outcome = dispatch_http(
         &dispatcher,

@@ -1,3 +1,4 @@
+/** @feature FP-0.2.四 前端Schema | @ci: frontend-test */
 /**
  * ContributionRegistry 视觉贡献（themes / client_styles）数据层测试
  *

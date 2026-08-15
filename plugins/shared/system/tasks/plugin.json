@@ -1,59 +1,60 @@
 {
-    "id": "task_service",
-    "name": "Task Service",
-    "version": "1.0.0",
-    "plugin_type": "system",
-    "language": "python",
-    "host_type": "sidecar",
-    "entry": "python server.py",
-    "capabilities": {
-        "tools": [
-            {
-                "name": "task.create",
-                "description": "Create a new task"
-            },
-            {
-                "name": "task.get",
-                "description": "Get task details by ID"
-            },
-            {
-                "name": "task.transition",
-                "description": "Perform a state transition on a task (start, pause, resume, fail, complete_evaluation)"
-            },
-            {
-                "name": "task.list",
-                "description": "List tasks by status or parent"
-            },
-            {
-                "name": "task.cancel",
-                "description": "Cancel a task and optionally cascade to subtasks"
-            },
-            {
-                "name": "task.delete",
-                "description": "Delete a task (soft delete for containers, hard delete otherwise)"
-            },
-            {
-                "name": "task.get_transitions",
-                "description": "Get valid state transitions for a task"
-            }
-        ],
-        "resources": [],
-        "route_signals": [],
-        "lifecycle_hooks": [
-            "on_load",
-            "on_unload"
-        ]
-    },
-    "dependencies": [],
-    "permissions": {},
-    "error_policy": "skip",
-    "priority": 50,
-    "requires_content": 5,
-    "config_files": [
-        {
-            "id": "long_term_task",
-            "path": "config/system/long_term_task.yaml",
-            "label": "长期任务配置"
-        }
+  "id": "task_service",
+  "name": "Task Service",
+  "version": "1.0.0",
+  "plugin_type": "system",
+  "language": "python",
+  "host_type": "sidecar",
+  "entry": "python server.py",
+  "capabilities": {
+    "tools": [],
+    "resources": [],
+    "route_signals": [],
+    "lifecycle_hooks": [
+      "on_load",
+      "on_unload"
+    ],
+    "services": [
+      {
+        "name": "task.create",
+        "description": "Create a new task"
+      },
+      {
+        "name": "task.get",
+        "description": "Get task details by ID"
+      },
+      {
+        "name": "task.transition",
+        "description": "Perform a state transition on a task (start, pause, resume, fail, complete_evaluation)"
+      },
+      {
+        "name": "task.list",
+        "description": "List tasks by status or parent"
+      },
+      {
+        "name": "task.cancel",
+        "description": "Cancel a task and optionally cascade to subtasks"
+      },
+      {
+        "name": "task.delete",
+        "description": "Delete a task (soft delete for containers, hard delete otherwise)"
+      },
+      {
+        "name": "task.get_transitions",
+        "description": "Get valid state transitions for a task"
+      }
     ]
+  },
+  "dependencies": [],
+  "permissions": {},
+  "error_policy": "skip",
+  "priority": 50,
+  "requires_content": 5,
+  "config_files": [
+    {
+      "id": "long_term_task",
+      "path": "config/system/long_term_task.yaml",
+      "label": "长期任务配置"
+    }
+  ]
 }

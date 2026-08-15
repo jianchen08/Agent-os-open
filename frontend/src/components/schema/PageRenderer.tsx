@@ -22,9 +22,10 @@ import type { PageDeclaration, PageSlot, PageSpace } from '@/services/schema/Con
 import type { UIInputFormField } from '@/types/schema'
 import type { ReactNode } from 'react'
 
-/** SchemaDriver 支持的字段类型集合（未知类型回退 string） */
+/** SchemaDriver 支持的字段类型集合（统一词汇表：未知类型回退 string） */
 const FORM_FIELD_TYPES = new Set([
   'string', 'number', 'boolean', 'select', 'multiselect', 'textarea', 'date', 'file',
+  'input', 'toggle', 'slider', 'color', 'radio', 'checkbox',
 ])
 
 /**

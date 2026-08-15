@@ -8,6 +8,13 @@ Godot 4 编辑器内 agentos 插件（HTTP 127.0.0.1:9600）
 game_engine 连接器（plugins/shared/system/connectors/creative/game_engine.py）
 ```
 
+选中引用（事件驱动，无轮询）：编辑器选中节点 → 插件 POST 推送
+`http://127.0.0.1:9100/ext/pipeline_godot_context/selection` → AgentOS
+聊天框出现引用卡片，发送消息时引用随消息注入（详见 `hosts/godot-addon/README.md`）。
+
+演示场景 `demo_main.tscn` 中 Player（Sprite2D）挂了测试贴图
+`assets/player_icon.png`，可用于验证预览缩略图。
+
 ## 运行
 
 需要 Godot 4.4+（宿主插件使用 `StreamPeer.get_partial_data`，该 API 自 4.4 起替代 `get_partial`）。

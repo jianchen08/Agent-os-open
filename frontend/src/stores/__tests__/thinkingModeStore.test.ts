@@ -1,3 +1,4 @@
+/** @feature FP-T12 前端适配 | @ci: frontend-test */
 /**
  * 功能测试：thinkingModeStore 标签级思考强度记忆 + 路由联动
  *

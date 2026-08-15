@@ -71,6 +71,16 @@ pub struct PipelineStateEntry {
     pub updated_at: Instant,
 }
 
+/// [`PipelineStateRegistry::list`] 返回的条目定位信息（轻量，不含 state 本体）。
+pub struct PipelineStateListing {
+    pub tenant_id: String,
+    pub pipeline_id: String,
+    pub thread_id: String,
+    pub agent_id: String,
+    pub msg_sequence: u64,
+    pub updated_at: Instant,
+}
+
 impl PipelineStateRegistry {
     /// 创建空注册表。
     pub fn new() -> Self {
@@ -164,6 +174,29 @@ impl PipelineStateRegistry {
     pub fn remove(&self, tenant_id: &str, pipeline_id: &str) {
         let key = (tenant_id.to_string(), pipeline_id.to_string());
         self.entries.write().remove(&key);
+    }
+
+    /// 列出全部常驻条目的定位信息（不含 state 本体——messages 可能很大，
+    /// 调用方按需经 [`PipelineStateRegistry::get`] 取锁内快照或读 DB checkpoint）。
+    ///
+    /// `GET /api/v1/pipelines/state` 的数据源：前端任务树直接消费内核 state
+    /// （会话/阶段/迭代等运行时真值），不走插件任务表。
+    pub fn list(&self) -> Vec<PipelineStateListing> {
+        self.entries
+            .read()
+            .iter()
+            .map(|((tenant_id, pipeline_id), entry)| {
+                let e = entry.read();
+                PipelineStateListing {
+                    tenant_id: tenant_id.clone(),
+                    pipeline_id: pipeline_id.clone(),
+                    thread_id: e.thread_id.clone(),
+                    agent_id: e.agent_id.clone(),
+                    msg_sequence: e.msg_sequence.load(Ordering::SeqCst),
+                    updated_at: e.updated_at,
+                }
+            })
+            .collect()
     }
 
     /// 当前注册的管道数（监控用）。
@@ -264,7 +297,11 @@ mod tests {
         reg.next_sequence(TENANT, "pipe_5");
         // 冷启动续接：DB 已有 10，取 max(内存2, 10)=10，下一次 next=11
         reg.init_sequence(TENANT, "pipe_5", 10);
-        assert_eq!(reg.next_sequence(TENANT, "pipe_5"), Some(11), "续接后不应回退");
+        assert_eq!(
+            reg.next_sequence(TENANT, "pipe_5"),
+            Some(11),
+            "续接后不应回退"
+        );
     }
 
     #[test]
@@ -276,10 +313,7 @@ mod tests {
         assert!(!reg.contains(TENANT, "pipe_6"));
         // 移除后重新 get_or_init 是冷启动
         let entry = reg.get_or_init(TENANT, "pipe_6", "t", "a", make_state(&["fresh"]));
-        assert_eq!(
-            entry.read().state["messages"].as_array().unwrap().len(),
-            1
-        );
+        assert_eq!(entry.read().state["messages"].as_array().unwrap().len(), 1);
     }
 
     #[test]

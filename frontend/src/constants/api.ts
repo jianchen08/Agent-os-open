@@ -45,11 +45,22 @@ export const API_ENDPOINTS = {
     UPDATE: (id: string) => `/api/v1/sessions/${id}`,
     /** 更新会话绑定的 Agent */
     UPDATE_AGENT: (id: string) => `/api/v1/sessions/${id}/agent`,
+    /** 线程创建表单字段 schema（内核聚合 enabled 插件 contributes.thread_fields） */
+    SCHEMA: '/api/v1/sessions/schema',
   },
   /** 管道相关 - 运行快照走内核 /api/v1/pipelines/runs（/api/v1/pipelines 为配置清单，勿混用） */
   PIPELINES: {
     /** 管道运行快照列表（统一管道管理数据源） */
     RUNS: '/api/v1/pipelines/runs',
+    /** 管道 state 摘要（内存常驻 + checkpoint 兜底；任务树迭代/阶段真值） */
+    STATE: '/api/v1/pipelines/state',
+    /** 管道插件清单（id/name/version/role/host_type，管道可视化编辑器的插件目录源） */
+    CATALOG: '/api/v1/pipelines',
+  },
+  /** 插件状态 - 内核 /api/v1/plugins（manifests 派生，含 enabled/config_files） */
+  PLUGINS: {
+    /** 插件状态列表 */
+    LIST: '/api/v1/plugins',
   },
   /** 消息相关 - 对应后端 /api/v1/sessions/{id}/messages */
   MESSAGES: {
@@ -104,6 +115,11 @@ export const API_ENDPOINTS = {
     LLM_GET: '/ext/channel_api/config/llm',
     /** 获取提供商列表 */
     LLM_PROVIDERS: '/ext/channel_api/config/llm/providers',
+    /** 获取 litellm 支持的提供者类型清单（随 litellm 升级自动更新） */
+    LLM_PROVIDER_TYPES: '/ext/channel_api/config/llm/provider-types',
+    /** 从提供商 API 实时拉取可用模型（需先配置 Key） */
+    LLM_REMOTE_MODELS: (providerId: string) =>
+      `/ext/channel_api/config/llm/providers/${providerId}/remote-models`,
     /** 获取模型列表 */
     LLM_MODELS: '/ext/channel_api/config/llm/models',
     /** 获取默认配置 */

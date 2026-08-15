@@ -1,0 +1,21 @@
+# pytest 失败数基线（只许减不许增，见 scripts/check_pytest_failure_baseline.py）
+#
+# 对应 run_gates.py 两条 Python 插件测试车道（coverage-exempt-heavy-suites 拆分）：
+#   - plugins-coverage：插桩 gate（豁免名单之外全部插件测试 + 覆盖率地板 44%）
+#   - plugins-heavy   ：免插桩 gate（tests/plugins/test_plugin_smoke_matrix.py，
+#     94 插件子进程冒烟矩阵——实测对父进程覆盖率为零贡献，见
+#     docs/working/机械门禁统一入口与覆盖率豁免.md）
+#
+# ⚠️ 严格规则：只能【减】不能【增】。
+#   - 减（鼓励）：修复 pre-existing 失败后，运行
+#     `python scripts/check_pytest_failure_baseline.py --lane <lane> --from-file <out> --init`
+#     重写更低的值，收紧门禁。
+#   - 增（禁止）：新失败不允许调大基线逃避，必须修复。
+#
+# 首次基线（2026-08-15，dev/0.2 本地实测；该分支此前从未跑过 CI）：
+#   - plugins-coverage：111 failed + 14 errors（迁移期既有破损：isolation docker
+#     边界、bash sidecar 握手、迁移遗留），+1 余量防 CI 慢机抖动 → 126
+#   - plugins-heavy：10 failed（multimodal / visual_customization_demo 加载 +
+#     8 个 external_mcp plugin.json 校验，含 omnisearch 接线），+1 余量 → 11
+plugins-coverage_failed=126
+plugins-heavy_failed=11

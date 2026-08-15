@@ -24,15 +24,11 @@ from __future__ import annotations
 
 import argparse
 import re
-import sys
 from pathlib import Path
 
-# 确保能导入 src 下模块（与同目录 fix_restart_dirty_tasks.py 一致）
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
+import yaml
 
-import yaml  # noqa: E402
-
-# 与 src/isolation/workspace_lifecycle.py / src/plugins/input/security_check/plugin.py
+# 与 system/isolation/workspace_lifecycle.py 与 pipeline/input/security_check/plugin.py
 # 中 _ISOLATED_WS_MODES 保持一致；这里复制定义避免脚本导入项目运行时模块。
 ISOLATED_MODES = frozenset({"worktree", "project_root", "branch"})
 

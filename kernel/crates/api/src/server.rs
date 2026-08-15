@@ -7,13 +7,18 @@
 //!
 //! [来源: docs/tasks/task_07_llm_api.md]
 
+use std::collections::HashMap;
 use std::net::SocketAddr;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::OnceLock;
 use std::time::{Duration, SystemTime};
 
 use parking_lot::RwLock as ParkingRwLock;
 
+#[allow(unused_imports)]
+use agentos_core::traits::{CapabilityRegistry, MessageQueryOpts};
+use agentos_core::types::{PipelineConfig, StepLibrary, TenantContext};
 use axum::{
     body::Body,
     extract::{
@@ -26,9 +31,6 @@ use axum::{
     routing::{get, post},
     Router,
 };
-#[allow(unused_imports)]
-use agentos_core::traits::{CapabilityRegistry, MessageQueryOpts};
-use agentos_core::types::{PipelineConfig, StepLibrary, TenantContext};
 
 use crate::pipeline_loader::{load_pipeline_config, load_step_library, validate_no_name_conflicts};
 use serde::{Deserialize, Serialize};
@@ -39,19 +41,19 @@ use crate::auth::{
     resolve_request_tenant_id,
 };
 use crate::error::ApiError;
-use crate::session_routes::{
-    create_session_handler, delete_session_handler, list_session_messages_handler,
-    list_sessions_handler, update_session_agent_handler, update_session_handler,
-};
 use crate::routes::{
     actions_execute_handler, agents_handler, agents_schema_handler, get_agent_config_handler,
     get_pipeline_config_with_etag, get_plugin_config_with_etag, health_handler,
-    metrics_prometheus_handler, metrics_query_handler, pipelines_handler, pipelines_runs_handler,
+    metrics_prometheus_handler, pipelines_handler, pipelines_runs_handler, pipelines_state_handler,
     plugins_set_enabled_handler, plugins_status_handler, put_agent_config_handler,
-    put_pipeline_config_handler, put_plugin_config_handler, schema_handler, tools_handler,
-    AppState,
+    put_pipeline_config_handler, put_plugin_config_handler, schema_handler, system_restart_handler,
+    tools_handler, validate_all_plugins_handler, AppState,
 };
-use agentos_db_admin::DbAdminState;
+use crate::session_routes::{
+    create_session_handler, delete_session_handler, list_session_messages_handler,
+    list_sessions_handler, sessions_schema_handler, update_session_agent_handler,
+    update_session_handler,
+};
 
 /// WebSocket 消息请求体。
 #[derive(Debug, Deserialize, Serialize)]
@@ -85,12 +87,6 @@ pub struct WsResponse {
 /// 动态端点统一走 `dispatch_http`（raw body/headers 透传 + 插件自定义响应 +
 /// per-endpoint timeout/concurrency）。
 pub fn build_router(state: AppState) -> Router {
-    // DB Admin 后台（db-admin crate）：从 AppState 克隆 store/db 注入其自有状态
-    // （api 仅负责挂载，端点逻辑与鉴权在 db-admin crate 内自洽）。
-    let db_admin_state = DbAdminState {
-        store: state.store.clone(),
-        db: state.db.clone(),
-    };
     let static_router = Router::new()
         // AC-06-3: 健康检查
         .route("/health", get(health_handler))
@@ -108,6 +104,7 @@ pub fn build_router(state: AppState) -> Router {
         .route("/api/v1/actions/execute", post(actions_execute_handler))
         .route("/api/v1/pipelines", get(pipelines_handler))
         .route("/api/v1/pipelines/runs", get(pipelines_runs_handler))
+        .route("/api/v1/pipelines/state", get(pipelines_state_handler))
         .route("/api/v1/tools", get(tools_handler))
         // P7: 管道配置查询/更新（内核承载 config/pipelines/*.yaml）
         .route(
@@ -125,6 +122,7 @@ pub fn build_router(state: AppState) -> Router {
             "/api/v1/sessions",
             get(list_sessions_handler).post(create_session_handler),
         )
+        .route("/api/v1/sessions/schema", get(sessions_schema_handler))
         .route(
             "/api/v1/sessions/{id}",
             axum::routing::patch(update_session_handler).delete(delete_session_handler),
@@ -139,9 +137,25 @@ pub fn build_router(state: AppState) -> Router {
         )
         // 插件监管端点（compat plugins/status 转正；history/reload* 死端点已删除）
         .route("/api/v1/plugins", get(plugins_status_handler))
-        .route("/api/v1/plugins/{id}/enabled", axum::routing::put(plugins_set_enabled_handler))
-        // 监控 M5/M5b：指标查询 + Prometheus 导出（监控设计 §五/§十一）
-        .route("/api/v1/metrics", get(metrics_query_handler))
+        // G2：双写一致性全量巡检（manifest 声明 vs sidecar 实际暴露）
+        .route(
+            "/api/v1/plugins/validate-all",
+            axum::routing::post(validate_all_plugins_handler),
+        )
+        // G8 优雅重启（admin）：排空 running runs → exit 75，监督者拉起新进程
+        .route(
+            "/api/v1/system/restart",
+            axum::routing::post(system_restart_handler),
+        )
+        .route(
+            "/api/v1/plugins/{id}/enabled",
+            axum::routing::put(plugins_set_enabled_handler),
+        )
+        // 监控 M5b：Prometheus 导出端点保留内核（运维契约：抓取方通常不鉴权且
+        // URL 稳定优先，boot-plugin 立项 §二/第三刀决策）。查询面 /api/v1/metrics
+        // 已迁 boot-plugin 第三刀：HTTP 面在 plugins/shared/metrics_admin 插件
+        // （/ext/metrics_admin/query），能力层 metrics-admin handler 在
+        // metrics/capability.rs（agentos-kernel.rs 启动期注册）。
         .route("/metrics", get(metrics_prometheus_handler))
         // AC-06-4: WebSocket 端点
         .route("/ws", get(ws_handler))
@@ -151,19 +165,24 @@ pub fn build_router(state: AppState) -> Router {
         // 消息发送端点（REST fallback for WS）
         .route("/api/v1/chat", post(chat_handler))
         // 人类交互响应端点——前端用户操作经此提交，内核转发到交互插件的 interaction.respond
-        .route("/api/v1/interaction/response", post(interaction_response_handler))
+        .route(
+            "/api/v1/interaction/response",
+            post(interaction_response_handler),
+        )
         // Auth 端点
         .route("/api/v1/auth/login", post(login_handler))
         .route("/api/v1/auth/me", get(me_handler))
         .route("/api/v1/auth/refresh", post(refresh_handler))
         .route("/api/v1/auth/logout", post(logout_handler))
-        .route("/api/v1/auth/register", post(register_handler))
-        // 统一通用数据接口（task_01：表驱动动态枚举，不改持久化）——
-        // 独立 db-admin crate（DB Admin 管理后台：通用 CRUD + SQL 执行器）
-        .nest("/api/v1/db", agentos_db_admin::router().with_state(db_admin_state));
+        .route("/api/v1/auth/register", post(register_handler));
+    // 统一通用数据接口（task_01）已迁移为 boot-plugin（第一刀）：
+    // /api/v1/db/* 的 axum nest 已摘除——SQL 能力层在 agentos-db-admin crate 的
+    // capability handler（agentos-kernel.rs 注册 db-admin namespace），HTTP 面在
+    // plugins/shared/db_admin 插件（/ext/db_admin/** 经 dispatcher 通配分发）。
 
     // P3：动态挂载插件 HTTP 端点（http_routes → dispatcher）
-    let router = crate::http_dispatcher::build_router_with_http_routes(state.clone(), static_router);
+    let router =
+        crate::http_dispatcher::build_router_with_http_routes(state.clone(), static_router);
     // F-API-1：配置写入面 + 会话/插件生命周期鉴权（白名单路径 + method 分写/读）。
     let auth_layer = from_fn_with_state(state.clone(), write_surface_auth);
     // CORS：开发期前端通过 VITE_API_BASE_URL 直连内核（http://localhost:9100），
@@ -183,6 +202,7 @@ pub fn build_router(state: AppState) -> Router {
 /// - `/api/v1/plugins*`（status/enabled/config；注意 /api/v1/plugins 裸路径也需鉴权）
 /// - `/api/v1/actions/execute`、`/api/v1/interaction/response`
 /// - `PUT /api/v1/agents/{id}/config`、`PUT /api/v1/config/pipelines/{name}`
+///
 /// 其余路径放行（/health、/api/v1/auth/*、/ws、/api/v1/db/* 等）。
 async fn write_surface_auth(
     State(state): State<AppState>,
@@ -194,9 +214,12 @@ async fn write_surface_auth(
 
     let needs_auth = path.starts_with("/api/v1/sessions")
         || path.starts_with("/api/v1/plugins")
+        || path == "/api/v1/system/restart"
         || path == "/api/v1/actions/execute"
         || path == "/api/v1/interaction/response"
-        || (path.starts_with("/api/v1/agents/") && path.ends_with("/config") && method == Method::PUT)
+        || (path.starts_with("/api/v1/agents/")
+            && path.ends_with("/config")
+            && method == Method::PUT)
         || (path.starts_with("/api/v1/config/pipelines/") && method == Method::PUT);
 
     if !needs_auth {
@@ -359,7 +382,9 @@ async fn ws_handler(
     if let (Some(session), Some(router)) = (state.session.clone(), state.inbound_router.clone()) {
         let token = params.get("token").cloned();
         // B3：前端重连时上报 last_sequence（全局 watermark），用于首个 thread 注册时回放断线期间事件。
-        let last_sequence = params.get("last_sequence").and_then(|s| s.parse::<u64>().ok());
+        let last_sequence = params
+            .get("last_sequence")
+            .and_then(|s| s.parse::<u64>().ok());
         return ws.on_upgrade(move |socket| {
             run_p2_ws_session(socket, session, router, token, last_sequence)
         });
@@ -408,8 +433,7 @@ pub(crate) async fn request_tenant_ctx(
 
 // 通过 0.2 配置驱动管道引擎处理消息。
 //
-// 替代旧的"遍历全部 pipeline 插件"placeholder：改为构造
-// [`agentos_engine::PipelineExecutor`]，读取 AppState 中的 `pipeline_config`
+// 构造 [`agentos_engine::PipelineExecutor`]，读取 AppState 中的 `pipeline_config`
 // + `step_library`，按 YAML 定义的 step 顺序执行（三级命中规则）。
 //
 // 流程：
@@ -422,7 +446,7 @@ pub(crate) async fn request_tenant_ctx(
 // 时走 echo-fallback，标注降级原因。
 
 /// 默认核心管道插件 id（可被 agent 配置 config/agents/<id>.yaml 的 core_plugin 覆盖）。
-/// 历史上硬编码 "pipeline_llm_core" 写在 initial_state，现提取为常量便于发现与替换。
+/// 提取为常量，便于发现与替换。
 const DEFAULT_CORE_PLUGIN: &str = "pipeline_llm_core";
 
 // 冷路径回放从该 pipeline 的 step 级轨迹按序 merge 重建完整 state（含 messages），
@@ -431,17 +455,23 @@ const DEFAULT_CORE_PLUGIN: &str = "pipeline_llm_core";
 /// 管道配置热重载的 mtime 检测 TTL：1 秒内不重复 stat，避免高频 chat 时反复解析 YAML。
 const PIPELINE_CONFIG_TTL: Duration = Duration::from_secs(1);
 
-/// 热重载检测的全局缓存：记录上次检测时刻 + 上次配置文件的 mtime 指纹。
-/// 进程级单例（OnceLock），所有 chat 请求共享，避免每次都重新 stat。
+/// 热重载检测的全局缓存：记录上次检测时刻 + 上次配置文件的 mtime 指纹 +
+/// 上次编译产物（G10：指纹不变时直接复用，零重编译）。
+/// 进程级单例（OnceLock），所有 chat 请求共享，避免每次都重新 stat/解析/编译。
+#[derive(Clone)]
 struct ConfigReloadState {
     last_check: std::time::Instant,
     last_fingerprint: u64,
+    compiled: Option<Arc<agentos_engine::compiler::CompiledPipeline>>,
 }
 
-static CONFIG_RELOAD_CACHE: OnceLock<ParkingRwLock<Option<ConfigReloadState>>> = OnceLock::new();
+/// 进程级单例缓存：按 config_root 隔离（测试多根并发、生产单根）。
+/// 键 = 配置根目录绝对路径——不同 config_root（如各测试的临时目录）互不污染。
+static CONFIG_RELOAD_CACHE: OnceLock<ParkingRwLock<HashMap<PathBuf, ConfigReloadState>>> =
+    OnceLock::new();
 
-fn config_reload_cache() -> &'static ParkingRwLock<Option<ConfigReloadState>> {
-    CONFIG_RELOAD_CACHE.get_or_init(|| ParkingRwLock::new(None))
+fn config_reload_cache() -> &'static ParkingRwLock<HashMap<PathBuf, ConfigReloadState>> {
+    CONFIG_RELOAD_CACHE.get_or_init(|| ParkingRwLock::new(HashMap::new()))
 }
 
 /// 计算管道配置的 mtime 指纹：autonomous.yaml + config/steps/ 目录下所有 .yaml。
@@ -495,80 +525,125 @@ fn compute_config_fingerprint(config_root: &std::path::Path) -> u64 {
     hasher.finish()
 }
 
-/// Pull 热加载：按需重载管道配置。
+/// Pull 热加载：按需重载并**编译**管道配置（G10 生产路径）。
 ///
-/// 每次 `process_via_engine` 执行前调用。返回本次执行应使用的 pipeline_config + step_library。
-/// 策略（双层短路）：
-/// 1. **TTL 门**：距上次检测不足 `PIPELINE_CONFIG_TTL`（1s）→ 直接返回 AppState 里启动期加载的配置。
+/// 每次 `process_via_engine` 执行前调用。返回本次执行应使用的
+/// [`CompiledPipeline`]（启动期编译的语义，运行时零解析）。
+/// 策略（双层短路 + fail-safe）：
+/// 1. **TTL 门**：距上次检测不足 `PIPELINE_CONFIG_TTL`（1s）→ 直接返回缓存编译产物。
 /// 2. **指纹比对**：TTL 过期后 stat autonomous.yaml + steps 目录 mtime，与缓存比对。
-///    相同 → 返回 AppState 配置（没更新）；不同 → 重新加载 + 校验，校验通过返回新配置，
-///    校验失败（坏 YAML / 命名冲突）则保留旧配置 + 记 warn（不 panic，对照启动期 fail-fast 的降级版）。
+///    相同 → 返回缓存产物（没更新）；不同 → 重新加载 + 校验 + 编译，
+///    成功返回新产物并更新缓存，失败（坏 YAML / 命名冲突 / 编译错误）则保留旧
+///    产物 + 记 warn（不 panic，对照启动期 fail-fast 的降级版）。
 ///
-/// 失败安全：任何 IO/解析错误都回退到 AppState 启动期配置，绝不因热重载让 chat 不可用。
-fn maybe_reload_pipeline_configs(
+/// 快照语义：在途 run 持调用时拿到的 `Arc` 跑完，新 run 取新产物——热重载对
+/// 正在执行的管道零影响。失败安全：任何 IO/解析/编译错误都回退到旧产物，
+/// 绝不因热重载让 chat 不可用。
+fn maybe_reload_compiled_pipeline(
     state: &AppState,
     config_root: &std::path::Path,
-) -> (Arc<PipelineConfig>, Arc<StepLibrary>) {
+) -> Arc<agentos_engine::compiler::CompiledPipeline> {
     let now = std::time::Instant::now();
-    // TTL 门 + 指纹比对在同一把读锁下快照
-    let needs_check = {
+    // TTL 门 + 指纹比对在同一把读锁下快照（按 config_root 取，测试多根并发隔离）
+    let (needs_check, cached) = {
         let cache = config_reload_cache().read();
-        match cache.as_ref() {
-            None => true, // 首次必检
-            Some(c) => now.duration_since(c.last_check) >= PIPELINE_CONFIG_TTL,
+        match cache.get(config_root) {
+            None => (true, None),
+            Some(c) => (
+                now.duration_since(c.last_check) >= PIPELINE_CONFIG_TTL,
+                c.compiled.clone(),
+            ),
         }
     };
     if !needs_check {
-        return (Arc::clone(&state.pipeline_config), Arc::clone(&state.step_library));
+        return cached.unwrap_or_else(empty_compiled);
     }
 
     let new_fp = compute_config_fingerprint(config_root);
-    let reload = {
+    let (reload, cached_compiled) = {
         let mut cache = config_reload_cache().write();
-        let stale = match cache.as_ref() {
-            None => true,
-            Some(c) => c.last_fingerprint != new_fp,
+        let (stale, compiled) = match cache.get(config_root) {
+            None => (true, None),
+            Some(c) => (c.last_fingerprint != new_fp, c.compiled.clone()),
         };
         // 无论是否重载都刷新检测时刻；指纹更新到 new_fp
-        *cache = Some(ConfigReloadState {
-            last_check: now,
-            last_fingerprint: new_fp,
-        });
-        stale
+        cache.insert(
+            config_root.to_path_buf(),
+            ConfigReloadState {
+                last_check: now,
+                last_fingerprint: new_fp,
+                compiled: compiled.clone(),
+            },
+        );
+        (stale, compiled)
     };
 
     if !reload {
-        return (Arc::clone(&state.pipeline_config), Arc::clone(&state.step_library));
+        return cached_compiled.unwrap_or_else(empty_compiled);
     }
 
-    // 指纹变化 → 重新加载 + 校验
-    info!("Pipeline config changed on disk, reloading...");
-    let new_pipeline = match load_pipeline_config(config_root) {
-        Ok(c) => c,
-        Err(e) => {
-            warn!(error = %e, "Hot reload: load_pipeline_config failed, keeping old config");
-            return (Arc::clone(&state.pipeline_config), Arc::clone(&state.step_library));
-        }
-    };
-    let new_steps = match load_step_library(config_root) {
-        Ok(s) => s,
-        Err(e) => {
-            warn!(error = %e, "Hot reload: load_step_library failed, keeping old config");
-            return (Arc::clone(&state.pipeline_config), Arc::clone(&state.step_library));
-        }
-    };
-    // 重名校验（启动期 fail-fast 的降级版：记 warn 不 panic）
+    // 指纹变化 → 重新加载 + 校验 + 编译（G10：when AST / 引用 / 环在加载期暴露）
+    info!("Pipeline config changed on disk, reloading + recompiling...");
     let known_ids: std::collections::HashSet<String> = state.plugin_ids.iter().cloned().collect();
-    if let Err(conflict) = validate_no_name_conflicts(&new_pipeline, &new_steps, &known_ids) {
-        warn!(conflict = %conflict, "Hot reload: name conflict, keeping old config");
-        return (Arc::clone(&state.pipeline_config), Arc::clone(&state.step_library));
+    let recompiled = load_and_compile(config_root, &known_ids);
+    let new_compiled = match recompiled {
+        Ok(c) => {
+            info!(
+                pipeline = %c.name,
+                bodies = c.bodies.len(),
+                "Pipeline config hot-reloaded and compiled successfully"
+            );
+            Arc::new(c)
+        }
+        Err(e) => {
+            warn!(error = %e, "Hot reload: pipeline recompile failed, keeping old compiled config");
+            return cached_compiled.unwrap_or_else(empty_compiled);
+        }
+    };
+    // 编译成功 → 原子更新缓存（后续请求零重编译）。
+    // 注意：读锁快照必须先落变量再释放——`if let Some(x) = lock.read().clone()` 的
+    // scrutinee 临时值（读锁 guard）生命周期会延长到 if 块结束，块内拿写锁即
+    // 同线程死锁（读锁未释放等写锁）。先求值再拿写锁，锁严格分离。
+    let cached_snapshot = config_reload_cache().read().get(config_root).cloned();
+    if let Some(mut c) = cached_snapshot {
+        c.compiled = Some(Arc::clone(&new_compiled));
+        config_reload_cache()
+            .write()
+            .insert(config_root.to_path_buf(), c);
     }
-    info!(
-        pipeline = %new_pipeline.name,
-        steps = new_pipeline.loop_bodies.len(),
-        "Pipeline config hot-reloaded successfully"
-    );
-    (Arc::new(new_pipeline), Arc::new(new_steps))
+    new_compiled
+}
+
+/// 加载 + 校验 + 编译管道（供热重载与启动期 fail-fast 复用）。
+///
+/// 任一步失败返回 Err（含上下文）——启动期调用方据此 panic 拒绝启动，
+/// 热重载调用方据此保留旧产物。
+pub fn load_and_compile(
+    config_root: &std::path::Path,
+    plugin_ids: &std::collections::HashSet<String>,
+) -> Result<agentos_engine::compiler::CompiledPipeline, String> {
+    use agentos_engine::compiler::compile_pipeline;
+    let pipeline =
+        load_pipeline_config(config_root).map_err(|e| format!("加载管道配置失败: {e}"))?;
+    let steps = load_step_library(config_root).map_err(|e| format!("加载公共 step 库失败: {e}"))?;
+    validate_no_name_conflicts(&pipeline, &steps, plugin_ids)
+        .map_err(|conflict| format!("命名冲突: {conflict}"))?;
+    compile_pipeline(&pipeline, &steps, plugin_ids).map_err(|e| e.to_string())
+}
+
+/// 空编译产物（配置缺失/首次编译失败时的安全降级：空管道执行，语义与
+/// "缺省配置下内核可启动"一致）。
+fn empty_compiled() -> Arc<agentos_engine::compiler::CompiledPipeline> {
+    use agentos_engine::compiler::compile_pipeline;
+    let empty = PipelineConfig::default();
+    Arc::new(
+        compile_pipeline(
+            &empty,
+            &StepLibrary::default(),
+            &std::collections::HashSet::new(),
+        )
+        .expect("空管道编译必然成功"),
+    )
 }
 
 /// 引擎执行结果。
@@ -584,6 +659,9 @@ pub(crate) struct EngineOutcome {
     pub failed: bool,
 }
 
+// 技术债（同 ROADMAP 已知技术债表 PLR091x 治理方式）：多参转发函数，
+// 收尾时统一收敛参数结构体。
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn process_via_engine(
     state: &AppState,
     message: &str,
@@ -594,6 +672,7 @@ pub(crate) async fn process_via_engine(
     message_id: &str,
     user_id: &str,
     thinking_strength: &str,
+    execution_context: Option<&serde_json::Value>,
 ) -> EngineOutcome {
     // Box::pin 到堆上：回写段 + executor.run 的深 sidecar 调用链让 Future 状态机
     // 在 release 下也接近 tokio worker 2MB 栈极限，堆分配规避溢出。
@@ -607,30 +686,31 @@ pub(crate) async fn process_via_engine(
         message_id,
         user_id,
         thinking_strength,
+        execution_context,
     ))
     .await
 }
 
 #[inline(never)]
+// 技术债（同上）：内部转发实现，随外层一并收敛。
+#[allow(clippy::too_many_arguments)]
 async fn process_via_engine_inner(
     state: &AppState,
     message: &str,
     agent_id: &str,
-    history: &[serde_json::Value],
+    _history: &[serde_json::Value],
     pipeline_id: &str,
     thread_id: &str,
     message_id: &str,
     user_id: &str,
     thinking_strength: &str,
+    execution_context: Option<&serde_json::Value>,
 ) -> EngineOutcome {
     let invoker = match state.invoker.clone() {
         Some(i) => i,
         None => {
             return EngineOutcome {
-                content: format!(
-                    "[echo-fallback: engine not available] {}",
-                    message
-                ),
+                content: format!("[echo-fallback: engine not available] {}", message),
                 final_assistant: None,
                 failed: false,
             };
@@ -640,10 +720,7 @@ async fn process_via_engine_inner(
         Some(s) => s,
         None => {
             return EngineOutcome {
-                content: format!(
-                    "[echo-fallback: store not available] {}",
-                    message
-                ),
+                content: format!("[echo-fallback: store not available] {}", message),
                 final_assistant: None,
                 failed: false,
             };
@@ -653,10 +730,7 @@ async fn process_via_engine_inner(
         Some(p) => p,
         None => {
             return EngineOutcome {
-                content: format!(
-                    "[echo-fallback: project_root not configured] {}",
-                    message
-                ),
+                content: format!("[echo-fallback: project_root not configured] {}", message),
                 final_assistant: None,
                 failed: false,
             };
@@ -703,37 +777,62 @@ async fn process_via_engine_inner(
         "thinking_strength": thinking_strength,
     });
 
-    // 1a. 会话级 execution_context 注入：thread metadata 的 workspace / isolation_mode
-    // （会话创建时由 channel_api 写入）组装为结构化 execution_context，随 initial_state
-    // 进入管道——init 体的 workspace_lifecycle / environment_lifecycle 插件据此执行
-    // （工作空间解析 + 环境基线），checkpoint 自动持久化。
+    // 1a. 会话级 execution_context 注入：thread metadata 的 workspace /
+    // workspace_mode / isolation_mode（会话创建时由前端写入 metadata）组装为
+    // 结构化 execution_context，随 initial_state 进入管道——init 体的
+    // workspace_lifecycle / environment_lifecycle 插件据此执行（工作空间解析 +
+    // 环境基线），checkpoint 自动持久化。
+    //
+    // 拓扑/隔离不依赖 workspace 填写：未填 source_path 时插件按默认目录自动
+    // 生成，mode/level 仍然生效（拓扑默认 worktree，对齐 task_submit）。
     //
     // 任务级 execution_context（task_submit 提交的 workspace_mode/isolation_level）
-    // 经任务管道执行入口透传（待任务执行器接线，见 dispatch 路径扩展），此处只做
-    // 会话级来源；两者结构一致：{"workspace": {source_path, mode}, "isolation": {level}}。
+    // 经任务管道执行入口透传（chat.send_message params），优先级高于此会话级来源；
+    // 两者结构一致：{"workspace": {source_path, mode}, "isolation": {level}}。
     if let Ok(Some(sess)) = store.get_session(thread_id).await {
         if let Some(meta) = sess.metadata {
             let mut ec = serde_json::Map::new();
-            if let Some(ws) = meta.get("workspace").and_then(|v| v.as_str()).filter(|s| !s.is_empty()) {
-                ec.insert(
-                    "workspace".to_string(),
-                    serde_json::json!({"source_path": ws, "mode": "plain"}),
-                );
+            let ws_path = meta
+                .get("workspace")
+                .and_then(|v| v.as_str())
+                .filter(|s| !s.is_empty());
+            let ws_mode = meta
+                .get("workspace_mode")
+                .and_then(|v| v.as_str())
+                .filter(|s| !s.is_empty())
+                .unwrap_or("worktree");
+            if ws_path.is_some() || meta.get("workspace_mode").is_some() {
+                let mut ws_obj = serde_json::Map::new();
+                if let Some(p) = ws_path {
+                    ws_obj.insert("source_path".to_string(), serde_json::json!(p));
+                }
+                ws_obj.insert("mode".to_string(), serde_json::json!(ws_mode));
+                ec.insert("workspace".to_string(), serde_json::Value::Object(ws_obj));
             }
             if let Some(iso) = meta
                 .get("isolation_mode")
                 .and_then(|v| v.as_str())
                 .filter(|s| !s.is_empty())
             {
-                ec.insert(
-                    "isolation".to_string(),
-                    serde_json::json!({"level": iso}),
-                );
+                ec.insert("isolation".to_string(), serde_json::json!({"level": iso}));
             }
             if !ec.is_empty() {
                 if let Some(obj) = initial_state.as_object_mut() {
-                    obj.insert("execution_context".to_string(), serde_json::Value::Object(ec));
+                    obj.insert(
+                        "execution_context".to_string(),
+                        serde_json::Value::Object(ec),
+                    );
                 }
+            }
+        }
+    }
+
+    // 1a2. 任务级 execution_context 覆盖（经 chat.send_message params 透传，
+    // 任务执行器从 task.metadata 组装；优先级高于会话级 thread metadata）。
+    if let Some(ec) = execution_context {
+        if ec.is_object() && !ec.as_object().map(|o| o.is_empty()).unwrap_or(true) {
+            if let Some(obj) = initial_state.as_object_mut() {
+                obj.insert("execution_context".to_string(), ec.clone());
             }
         }
     }
@@ -754,7 +853,12 @@ async fn process_via_engine_inner(
     let registry = agentos_session::global_registry();
     if let Some(entry) = registry.get(&tenant_id, effective_pipeline_id) {
         // 热路径：内存 state 完整，直接复用（无需走 DB）
-        if let Some(msgs) = entry.read().state.get("messages").and_then(|v| v.as_array()) {
+        if let Some(msgs) = entry
+            .read()
+            .state
+            .get("messages")
+            .and_then(|v| v.as_array())
+        {
             history_prefix = msgs.clone();
             history_loaded = true;
         }
@@ -769,8 +873,9 @@ async fn process_via_engine_inner(
         let mut recovered: serde_json::Value = serde_json::json!({});
         let mut ckpt_hit = false;
         if !effective_pipeline_id.is_empty() {
-            if let Ok(Some((_step_no, ckpt_state))) =
-                store.load_latest_checkpoint(effective_pipeline_id, &tenant_id).await
+            if let Ok(Some((_step_no, ckpt_state))) = store
+                .load_latest_checkpoint(effective_pipeline_id, &tenant_id)
+                .await
             {
                 recovered = ckpt_state;
                 // 队列真值在表：checkpoint 的 messages 剥离丢弃（新旧格式一律）
@@ -804,7 +909,10 @@ async fn process_via_engine_inner(
         // 累计标量字段以 pipeline_state 为准（每 step upsert 最新值），
         // 重建后插件能在正确基线上自然累加，不归零。
         if !effective_pipeline_id.is_empty() {
-            if let Ok(state_fields) = store.load_pipeline_state(effective_pipeline_id, &tenant_id).await {
+            if let Ok(state_fields) = store
+                .load_pipeline_state(effective_pipeline_id, &tenant_id)
+                .await
+            {
                 if let Some(rec_obj) = recovered.as_object_mut() {
                     for (k, v) in &state_fields {
                         rec_obj.insert(k.clone(), v.clone());
@@ -814,9 +922,11 @@ async fn process_via_engine_inner(
         }
         // messages 直读 message_slots（零回放；元素自带稳定 seq）
         if !effective_pipeline_id.is_empty() {
-            if let Ok(msgs) = store.load_message_history(effective_pipeline_id, &tenant_id).await {
+            if let Ok(msgs) = store
+                .load_message_history(effective_pipeline_id, &tenant_id)
+                .await
+            {
                 history_prefix = msgs;
-                history_loaded = !history_prefix.is_empty();
             }
         }
         // 标量字段注入 state
@@ -832,7 +942,10 @@ async fn process_via_engine_inner(
     // messages 塞回 state（热路径元素自带 seq；冷路径表读也已带 seq——零兼容，
     // 不做缺 seq 补位、不做客户端 history 兜底）
     if let Some(obj) = initial_state.as_object_mut() {
-        obj.insert("messages".to_string(), serde_json::Value::Array(history_prefix));
+        obj.insert(
+            "messages".to_string(),
+            serde_json::Value::Array(history_prefix),
+        );
     }
     // A1：复位"本轮首个 assistant 已注入 id"标志（checkpoint/registry 恢复可能带旧值，
     // 必须在恢复合并之后、管道执行之前强制复位，保证每 run 恰好注入一次 message_id）。
@@ -845,14 +958,13 @@ async fn process_via_engine_inner(
     // user 经 append op(无 seq → 引擎分配 next seq)+ 落 message_slots。
     // 指纹实录塞 _pending_message_ops（内部字段）：executor.persist_run_start 落一条
     // user_input 轨迹后移除——首轮 user 由此进入审计/回放范围（ops 即轨迹）。
-    if let Ok(user_ledger) =
-        agentos_engine::apply_messages_op_update(
-            &mut initial_state,
-            store.as_ref(),
-            &tenant_id,
-            &[serde_json::json!({"op":"set","msg":{"role":"user","content":message}})],
-        )
-        .await
+    if let Ok(user_ledger) = agentos_engine::apply_messages_op_update(
+        &mut initial_state,
+        store.as_ref(),
+        &tenant_id,
+        &[serde_json::json!({"op":"set","msg":{"role":"user","content":message}})],
+    )
+    .await
     {
         if !user_ledger.is_empty() {
             if let Some(obj) = initial_state.as_object_mut() {
@@ -894,7 +1006,7 @@ async fn process_via_engine_inner(
     // 配置变更对本次及后续请求生效：每次执行都经此检测。
     // 在 project_root 被 move 给 executor 之前算出 config_root。
     let config_root = project_root.join("config");
-    let (pipeline_cfg, step_lib) = maybe_reload_pipeline_configs(state, &config_root);
+    let compiled = maybe_reload_compiled_pipeline(state, &config_root);
     let executor = agentos_engine::PipelineExecutor::new(
         invoker,
         project_root,
@@ -908,14 +1020,16 @@ async fn process_via_engine_inner(
     // 这些是需跨轮持久化的累计标量字段（如 track.total_tokens）。
     // messages 是系统字段（引擎固定投影），不依赖此集合。
     .with_persistent_fields(
-        state.manifests
+        state
+            .manifests
             .iter()
             .flat_map(|m| m.persistent_fields.iter().cloned()),
     )
     // on_pipeline_end 钩子插件收集（spill_guard 清理通道）：manifest 声明了该
     // 钩子的插件在 run 结束时收到 OnPipelineEnd（best-effort，见 executor）。
     .with_pipeline_end_hook_plugins(
-        state.manifests
+        state
+            .manifests
             .iter()
             .filter(|m| {
                 m.capabilities
@@ -935,10 +1049,7 @@ async fn process_via_engine_inner(
 
     info!(run_id = %run_id, agent_id = %agent_id, "Pipeline run started");
 
-    let final_state = match executor
-        .run(&pipeline_cfg, &step_lib, initial_state)
-        .await
-    {
+    let final_state = match executor.run_compiled(&compiled, initial_state).await {
         Ok(s) => s,
         Err(e) => {
             warn!(run_id = %run_id, error = %e, "PipelineExecutor run failed");
@@ -966,7 +1077,13 @@ async fn process_via_engine_inner(
     if !effective_pipeline_id.is_empty() {
         let reg = agentos_session::global_registry();
         if !reg.contains(&tenant_id, effective_pipeline_id) {
-            reg.get_or_init(&tenant_id, effective_pipeline_id, thread_id, agent_id, final_state.clone());
+            reg.get_or_init(
+                &tenant_id,
+                effective_pipeline_id,
+                thread_id,
+                agent_id,
+                final_state.clone(),
+            );
         } else {
             reg.update_state(&tenant_id, effective_pipeline_id, final_state.clone());
         }
@@ -1055,10 +1172,12 @@ fn inject_tool_schemas(state: &mut serde_json::Value, app_state: &AppState) {
     let all_tools = registry.list_tools();
 
     // 按 agent 的 tool_ids 过滤；缺失则用全部（兜底，避免无工具可用）
-    let wanted_ids: Option<Vec<String>> = state
-        .get("tool_ids")
-        .and_then(|v| v.as_array())
-        .map(|arr| arr.iter().filter_map(|t| t.as_str().map(String::from)).collect());
+    let wanted_ids: Option<Vec<String>> =
+        state.get("tool_ids").and_then(|v| v.as_array()).map(|arr| {
+            arr.iter()
+                .filter_map(|t| t.as_str().map(String::from))
+                .collect()
+        });
     let wanted: Option<std::collections::HashSet<String>> =
         wanted_ids.map(|ids| ids.into_iter().collect());
     let schemas: Vec<serde_json::Value> = all_tools
@@ -1066,8 +1185,7 @@ fn inject_tool_schemas(state: &mut serde_json::Value, app_state: &AppState) {
         .filter(|t| match &wanted {
             Some(ids) => {
                 // tool_ids 命中 或 框架级强制工具（spill_retrieve 等，无视 agent 配置）
-                ids.contains(&t.name)
-                    || FRAMEWORK_ALWAYS_INCLUDE_TOOLS.contains(&t.name.as_str())
+                ids.contains(&t.name) || FRAMEWORK_ALWAYS_INCLUDE_TOOLS.contains(&t.name.as_str())
             }
             None => true,
         })
@@ -1094,6 +1212,30 @@ fn inject_tool_schemas(state: &mut serde_json::Value, app_state: &AppState) {
         obj.insert(
             "tool_schemas".to_string(),
             serde_json::Value::Array(schemas),
+        );
+    }
+
+    // 注入工具输出契约（task_dsh_plugin_adapter 任务 1）：tool_name →
+    // {schema, render}。tool_core 执行后按 `schema` 校验返回值（fail-closed），
+    // 前端按 `render` 意图路由渲染。只收集声明了 output_schema/render 的工具，
+    // 未声明者不产生条目（41 个存量工具零负担）。
+    let contracts: serde_json::Map<String, serde_json::Value> = all_tools
+        .iter()
+        .filter(|t| t.output_schema.is_some() || t.render.is_some())
+        .map(|t| {
+            (
+                t.name.clone(),
+                serde_json::json!({
+                    "schema": t.output_schema.clone().unwrap_or(serde_json::Value::Null),
+                    "render": t.render.clone().unwrap_or(serde_json::Value::Null),
+                }),
+            )
+        })
+        .collect();
+    if let Some(obj) = state.as_object_mut() {
+        obj.insert(
+            "tool_output_contracts".to_string(),
+            serde_json::Value::Object(contracts),
         );
     }
 }
@@ -1238,12 +1380,29 @@ async fn handle_ws_connection(socket: WebSocket, state: AppState, headers: Heade
                 });
 
                 // 在租户上下文内通过管道引擎处理消息（多租户 P0-4）
-                // TODO: agent_id 暂用默认（chat 协议暂未携带；后续从请求体取）
-                let tenant_ctx = request_tenant_ctx(state.store.as_ref(), &headers, &req.session_id).await;
-                let content =
-                    agentos_tenant::scope(tenant_ctx, process_via_engine(&state, &req.message, if req.agent_id.is_empty() { "agentos" } else { req.agent_id.as_str() }, &req.history, "", "", "", "", ""))
-                        .await
-                        .content;
+                let tenant_ctx =
+                    request_tenant_ctx(state.store.as_ref(), &headers, &req.session_id).await;
+                let content = agentos_tenant::scope(
+                    tenant_ctx,
+                    process_via_engine(
+                        &state,
+                        &req.message,
+                        if req.agent_id.is_empty() {
+                            "agentos"
+                        } else {
+                            req.agent_id.as_str()
+                        },
+                        &req.history,
+                        "",
+                        "",
+                        "",
+                        "",
+                        "",
+                        None,
+                    ),
+                )
+                .await
+                .content;
 
                 // 构造响应
                 let response = WsResponse {
@@ -1281,7 +1440,6 @@ async fn chat_handler(
     axum::Json(req): axum::Json<WsRequest>,
 ) -> Result<axum::Json<WsResponse>, ApiError> {
     // 在租户上下文内通过管道引擎处理消息（多租户 P0-4）
-    // TODO: agent_id 暂用默认（chat 协议暂未携带；后续从请求体取）
     let tenant_ctx = request_tenant_ctx(state.store.as_ref(), &headers, &req.session_id).await;
     // 分层持久化：REST chat 路径需用会话的真实 active_pipeline_id，否则消息会落到
     // thread_id 维度（effective 回退），与前端按 active_pipeline_id 查询不匹配 → 前端拿不到消息。
@@ -1291,21 +1449,68 @@ async fn chat_handler(
         let store_clone = store.clone();
         match agentos_tenant::scope(tenant_ctx.clone(), async move {
             store_clone.get_session(&sid).await
-        }).await {
+        })
+        .await
+        {
             Ok(Some(session)) => session.active_pipeline_id.unwrap_or_default(),
             _ => String::new(),
         }
-    } else { String::new() };
+    } else {
+        String::new()
+    };
     // 解析请求用户 user_id（从 Authorization token），供 process_via_engine 写入 state；
     // 触发器等工具据此捕获 user_id，触发时回派发（chat.send_message）解析 tenant。
     let user_id = crate::auth::resolve_request_user(state.store.as_ref(), &headers)
         .await
         .map(|(uid, _, _, _)| uid)
         .unwrap_or_default();
-    let content =
-        agentos_tenant::scope(tenant_ctx, process_via_engine(&state, &req.message, if req.agent_id.is_empty() { "agentos" } else { req.agent_id.as_str() }, &req.history, &pipeline_id, &req.session_id, "", &user_id, ""))
-            .await
-            .content;
+    // ADR-2026-08-15：HTTP 路径同步返回 outcome，但执行必须入管道链——与 WS /
+    // chat.send_message 共用同一条 FIFO，消除 HTTP 与 WS 同会话并发 run 的竞态。
+    // key 与 process_via_engine_inner 的 effective_pipeline_id 同式（空则回退
+    // thread_id），保证跨入口落到同一条链。
+    let chain_key = if pipeline_id.is_empty() {
+        req.session_id.clone()
+    } else {
+        pipeline_id.clone()
+    };
+    let registry = crate::run_chain::RunChainRegistry::global();
+    registry.note_user_pipeline(&user_id, &chain_key);
+    let (tx, rx) = tokio::sync::oneshot::channel::<String>();
+    let exec_state = state.clone();
+    let exec_message = req.message.clone();
+    let exec_agent = if req.agent_id.is_empty() {
+        "agentos".to_string()
+    } else {
+        req.agent_id.clone()
+    };
+    let exec_history = req.history.clone();
+    let exec_pipeline = pipeline_id.clone();
+    let exec_session = req.session_id.clone();
+    let exec_user = user_id.clone();
+    registry.enqueue(&chain_key, &user_id, async move {
+        let content = agentos_tenant::scope(
+            tenant_ctx,
+            process_via_engine(
+                &exec_state,
+                &exec_message,
+                &exec_agent,
+                &exec_history,
+                &exec_pipeline,
+                &exec_session,
+                "",
+                &exec_user,
+                "",
+                None,
+            ),
+        )
+        .await
+        .content;
+        let _ = tx.send(content);
+    });
+    // 任务 panic（rx 关闭）时给出明确错误而非挂死等待。
+    let content = rx
+        .await
+        .unwrap_or_else(|_| "[engine task terminated unexpectedly]".to_string());
 
     let response = WsResponse {
         r#type: "message".to_string(),
@@ -1330,11 +1535,15 @@ async fn interaction_response_handler(
         .and_then(|v| v.as_str())
         .unwrap_or("");
     if request_id.is_empty() {
-        return Ok(axum::Json(serde_json::json!({"success": false, "error": "缺少 request_id"})));
+        return Ok(axum::Json(
+            serde_json::json!({"success": false, "error": "缺少 request_id"}),
+        ));
     }
 
     let Some(invoker) = state.invoker.clone() else {
-        return Ok(axum::Json(serde_json::json!({"success": false, "error": "invoker not available"})));
+        return Ok(axum::Json(
+            serde_json::json!({"success": false, "error": "invoker not available"}),
+        ));
     };
 
     // 转发到交互插件的 interaction.respond 工具
@@ -1392,6 +1601,81 @@ mod tests {
     use serde_json::json;
     use tower::ServiceExt;
 
+    /// G2：validate-all 全量巡检——声明 vs 实际对照，漂移分类报告。
+    #[tokio::test]
+    async fn test_validate_all_reports_drift_and_clean() {
+        let mut state = AppState::new();
+        // 两个 tool 插件：p_drift（声明 t1+ghost，上报只有 t1 → missing 漂移）、
+        // p_clean（声明 t2，上报一致 → clean）
+        let mk_manifest = |id: &str, tools: &[&str]| -> agentos_core::traits::PluginManifest {
+            serde_json::from_value(json!({
+                "id": id, "name": id, "version": "1.0.0",
+                "plugin_type": "tool", "language": "python",
+                "host_type": "sidecar", "entry": "python server.py",
+                "capabilities": { "tools": tools.iter().map(|t| {
+                    json!({"name": t, "description": t})
+                }).collect::<Vec<_>>() },
+            }))
+            .expect("valid manifest")
+        };
+        state.manifests = Arc::new(vec![
+            mk_manifest("p_drift", &["t1", "ghost"]),
+            mk_manifest("p_clean", &["t2"]),
+        ]);
+        let invoker = Arc::new(RecordingInvoker {
+            seen: std::sync::Mutex::new(Vec::new()),
+            list_tools: std::collections::HashMap::from([
+                (
+                    "p_drift".to_string(),
+                    json!({ "tools": [{"name": "t1", "description": "t1"}] }),
+                ),
+                (
+                    "p_clean".to_string(),
+                    json!({ "tools": [{"name": "t2", "description": "t2"}] }),
+                ),
+            ]),
+        });
+        state.invoker = Some(invoker);
+
+        let resp = validate_all_plugins_handler(axum::extract::State(state)).await;
+        let body = resp.0;
+        assert_eq!(body["checked"], 2);
+        assert_eq!(body["clean"], 1);
+        assert_eq!(body["drifted"], 1);
+        assert_eq!(body["errors"], 0);
+        let drift_report = body["reports"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|r| r["plugin_id"] == "p_drift")
+            .expect("p_drift 报告");
+        assert_eq!(drift_report["status"], "drifted");
+        let kinds: Vec<&str> = drift_report["mismatches"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|m| m["kind"].as_str().unwrap())
+            .collect();
+        assert_eq!(kinds, vec!["missing"], "ghost 声明有实际无 → missing");
+        let clean_report = body["reports"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|r| r["plugin_id"] == "p_clean")
+            .expect("p_clean 报告");
+        assert_eq!(clean_report["status"], "clean");
+        assert_eq!(clean_report["mismatches"].as_array().unwrap().len(), 0);
+    }
+
+    /// G2：validate-all 在 invoker 未接线时返回错误计数（不 panic）。
+    #[tokio::test]
+    async fn test_validate_all_without_invoker_reports_error() {
+        let state = AppState::new(); // invoker = None
+        let resp = validate_all_plugins_handler(axum::extract::State(state)).await;
+        assert_eq!(resp.0["errors"], 1);
+        assert!(resp.0["message"].as_str().is_some());
+    }
+
     #[tokio::test]
     async fn test_health_returns_200() {
         let app = build_router(AppState::new());
@@ -1420,6 +1704,85 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    /// 剩余项清仓 D2：schema ETag——首次 200 带 ETag；If-None-Match 命中
+    /// （含 *）返回 304 空体；未命中返回 200 新体。
+    #[tokio::test]
+    async fn test_schema_etag_if_none_match_304() {
+        let app = build_router(AppState::new());
+
+        // 首次：200 + ETag 响应头
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/schema")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let etag = resp
+            .headers()
+            .get("etag")
+            .and_then(|v| v.to_str().ok())
+            .expect("ETag header")
+            .to_string();
+
+        // If-None-Match 命中 → 304 空体（ETag 仍带回，便于客户端续用）
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/schema")
+                    .header("If-None-Match", &etag)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_MODIFIED);
+        assert_eq!(
+            resp.headers().get("etag").and_then(|v| v.to_str().ok()),
+            Some(etag.as_str())
+        );
+        let body = axum::body::to_bytes(resp.into_body(), 8192).await.unwrap();
+        assert!(body.is_empty(), "304 必须空体");
+
+        // If-None-Match: * → 304
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/schema")
+                    .header("If-None-Match", "*")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_MODIFIED);
+
+        // 未命中的 ETag → 200 全量体
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/schema")
+                    .header("If-None-Match", "\"stale-etag\"")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), 65536).await.unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        // 响应体形状不变（agents/pipelines/tools/routes/plugin_*）
+        for key in ["agents", "pipelines", "tools", "routes"] {
+            assert!(json.get(key).is_some(), "schema 响应应含 {key}");
+        }
     }
 
     #[tokio::test]
@@ -1630,77 +1993,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_metrics_query_endpoint_returns_data() {
+    async fn test_metrics_query_endpoint_migrated_to_plugin() {
+        // boot-plugin 第三刀：查询面迁 /ext/metrics_admin/query（metrics-admin
+        // capability，语义测试在 metrics/capability.rs）；旧内核路由应已摘除。
         let app = build_router(state_with_metrics());
         let response = app
             .oneshot(
                 Request::builder()
                     .uri("/api/v1/metrics?plugin=llm_service")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(response.status(), StatusCode::OK);
-        let body = axum::body::to_bytes(response.into_body(), 8192)
-            .await
-            .unwrap();
-        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
-        let metrics = json["metrics"].as_array().unwrap();
-        assert!(!metrics.is_empty());
-        assert_eq!(metrics[0]["plugin_id"], "llm_service");
-    }
-
-    #[tokio::test]
-    async fn test_metrics_query_filter_by_metric_name() {
-        let app = build_router(state_with_metrics());
-        let response = app
-            .oneshot(
-                Request::builder()
-                    .uri("/api/v1/metrics?plugin=llm_service&metric=tokens_used")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        let body = axum::body::to_bytes(response.into_body(), 8192)
-            .await
-            .unwrap();
-        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
-        let metrics = json["metrics"].as_array().unwrap();
-        assert_eq!(metrics.len(), 1);
-        assert_eq!(metrics[0]["name"], "tokens_used");
-    }
-
-    #[tokio::test]
-    async fn test_metrics_query_filter_by_labels() {
-        let app = build_router(state_with_metrics());
-        let response = app
-            .oneshot(
-                Request::builder()
-                    .uri("/api/v1/metrics?labels=model:deepseek")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        let body = axum::body::to_bytes(response.into_body(), 8192)
-            .await
-            .unwrap();
-        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
-        let metrics = json["metrics"].as_array().unwrap();
-        // 只有 tokens_used 带 model 标签
-        assert!(metrics.iter().all(|m| m["name"] == "tokens_used"));
-    }
-
-    #[tokio::test]
-    async fn test_metrics_query_no_aggregator_404() {
-        // 未注入 metrics → 404
-        let app = build_router(AppState::new());
-        let response = app
-            .oneshot(
-                Request::builder()
-                    .uri("/api/v1/metrics")
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -1760,6 +2060,8 @@ mod tests {
     /// 记录每次收到的 messages（按调用顺序），供测试断言。
     struct RecordingInvoker {
         seen: std::sync::Mutex<Vec<serde_json::Value>>,
+        /// G2：list_plugin_tools 响应（plugin_id → tools/list JSON）。缺省空。
+        list_tools: std::collections::HashMap<String, serde_json::Value>,
     }
 
     #[async_trait::async_trait]
@@ -1769,7 +2071,7 @@ mod tests {
             _plugin_id: &str,
             ctx: &agentos_core::types::PluginContext,
         ) -> Result<agentos_core::types::PluginResult, agentos_core::types::PluginError> {
-            let mut history = ctx
+            let history = ctx
                 .state
                 .get("messages")
                 .cloned()
@@ -1799,7 +2101,8 @@ mod tests {
             _plugin_id: &str,
             _tool_name: &str,
             _inputs: &serde_json::Value,
-        ) -> Result<agentos_core::types::ToolExecutionResult, agentos_core::types::PluginError> {
+        ) -> Result<agentos_core::types::ToolExecutionResult, agentos_core::types::PluginError>
+        {
             Ok(agentos_core::types::ToolExecutionResult::success(
                 serde_json::Value::Null,
             ))
@@ -1812,6 +2115,16 @@ mod tests {
             _context: &agentos_core::traits::HookContext,
         ) -> Result<(), agentos_core::types::PluginError> {
             Ok(())
+        }
+        async fn list_plugin_tools(
+            &self,
+            plugin_id: &str,
+        ) -> Result<serde_json::Value, agentos_core::types::PluginError> {
+            Ok(self
+                .list_tools
+                .get(plugin_id)
+                .cloned()
+                .unwrap_or(serde_json::json!({ "tools": [] })))
         }
     }
 
@@ -1829,12 +2142,11 @@ mod tests {
         let store: Arc<dyn agentos_core::traits::StorageBackend> = sqlite.clone();
         let invoker = Arc::new(RecordingInvoker {
             seen: std::sync::Mutex::new(Vec::new()),
+            list_tools: std::collections::HashMap::new(),
         });
         // 临时项目根：含 config/pipelines/autonomous.yaml，引用 mock LLM 插件
-        let tmp_root = std::env::temp_dir().join(format!(
-            "mt_test_{}",
-            uuid::Uuid::new_v4().simple()
-        ));
+        let tmp_root =
+            std::env::temp_dir().join(format!("mt_test_{}", uuid::Uuid::new_v4().simple()));
         let cfg_dir = tmp_root.join("config").join("pipelines");
         std::fs::create_dir_all(&cfg_dir).unwrap();
         std::fs::write(
@@ -1853,12 +2165,14 @@ mod tests {
                 id: "llm".to_string(),
                 steps: vec![agentos_core::types::PipelineStep {
                     id: "llm".to_string(),
-                    steps: vec!["mock_llm_core".to_string()],
+                    steps: vec!["mock_llm_core".into()],
+                    when: None,
                     context: std::collections::HashMap::new(),
                     routes: vec![],
                     loop_config: None,
                 }],
                 loop_config: None,
+                while_cond: None,
                 exit_routes: vec![],
                 run_on_error: false,
             }],
@@ -1866,7 +2180,7 @@ mod tests {
         });
         state.step_library = Arc::new(agentos_core::types::StepLibrary::default());
         state.plugin_ids = Arc::new(std::collections::HashSet::from([
-            "mock_llm_core".to_string(),
+            "mock_llm_core".to_string()
         ]));
         (state, invoker, store, sqlite)
     }
@@ -1881,7 +2195,18 @@ mod tests {
         // 第一轮：pipeline_id=pipe_mt 非空（WS 路径 route_id 语义）
         let r1 = agentos_tenant::scope(
             tenant.clone(),
-            process_via_engine(&state, "第一轮：我叫小明", "agentos", &[], pipe, thread, "m1", "", ""),
+            process_via_engine(
+                &state,
+                "第一轮：我叫小明",
+                "agentos",
+                &[],
+                pipe,
+                thread,
+                "m1",
+                "",
+                "",
+                None,
+            ),
         )
         .await;
         assert!(!r1.content.is_empty(), "第一轮应返回 assistant 回复");
@@ -1889,7 +2214,18 @@ mod tests {
         // 第二轮：同 pipeline_id，应看到第一轮 user+assistant 上下文
         let r2 = agentos_tenant::scope(
             tenant,
-            process_via_engine(&state, "第二轮：我叫什么？", "agentos", &[], pipe, thread, "m2", "", ""),
+            process_via_engine(
+                &state,
+                "第二轮：我叫什么？",
+                "agentos",
+                &[],
+                pipe,
+                thread,
+                "m2",
+                "",
+                "",
+                None,
+            ),
         )
         .await;
         assert!(!r2.content.is_empty(), "第二轮应返回 assistant 回复");
@@ -1904,7 +2240,11 @@ mod tests {
 
         let second = seen[1].as_array().unwrap();
         // 完整序列 = 第一轮 user + 第一轮 assistant + 第二轮 user
-        assert_eq!(second.len(), 3, "第二轮应含第一轮上下文（user+assistant）+ 当前 user");
+        assert_eq!(
+            second.len(),
+            3,
+            "第二轮应含第一轮上下文（user+assistant）+ 当前 user"
+        );
         assert_eq!(second[0]["role"], "user");
         assert_eq!(second[0]["content"], "第一轮：我叫小明");
         assert_eq!(second[1]["role"], "assistant");
@@ -1923,14 +2263,36 @@ mod tests {
 
         let r1 = agentos_tenant::scope(
             tenant.clone(),
-            process_via_engine(&state, "HTTP 第一轮", "agentos", &[], "", thread, "h1", "", ""),
+            process_via_engine(
+                &state,
+                "HTTP 第一轮",
+                "agentos",
+                &[],
+                "",
+                thread,
+                "h1",
+                "",
+                "",
+                None,
+            ),
         )
         .await;
         assert!(!r1.content.is_empty());
 
         let r2 = agentos_tenant::scope(
             tenant,
-            process_via_engine(&state, "HTTP 第二轮", "agentos", &[], "", thread, "h2", "", ""),
+            process_via_engine(
+                &state,
+                "HTTP 第二轮",
+                "agentos",
+                &[],
+                "",
+                thread,
+                "h2",
+                "",
+                "",
+                None,
+            ),
         )
         .await;
         assert!(!r2.content.is_empty());
@@ -1938,7 +2300,11 @@ mod tests {
         let seen = invoker.seen.lock().unwrap();
         assert_eq!(seen.len(), 2);
         let second = seen[1].as_array().unwrap();
-        assert_eq!(second.len(), 3, "HTTP 空 pipeline_id 也应通过 thread_id 回退看到历史");
+        assert_eq!(
+            second.len(),
+            3,
+            "HTTP 空 pipeline_id 也应通过 thread_id 回退看到历史"
+        );
         assert_eq!(second[0]["content"], "HTTP 第一轮");
         assert_eq!(second[2]["content"], "HTTP 第二轮");
     }
@@ -1981,7 +2347,18 @@ mod tests {
 
         let r = agentos_tenant::scope(
             tenant,
-            process_via_engine(&state, "冷启动第二轮", "agentos", &[], pipe, thread, "c2", "", ""),
+            process_via_engine(
+                &state,
+                "冷启动第二轮",
+                "agentos",
+                &[],
+                pipe,
+                thread,
+                "c2",
+                "",
+                "",
+                None,
+            ),
         )
         .await;
         assert!(!r.content.is_empty(), "冷启动第二轮应返回 assistant 回复");
@@ -1989,7 +2366,11 @@ mod tests {
         let seen = invoker.seen.lock().unwrap();
         assert_eq!(seen.len(), 1, "冷启动应从 store 恢复历史并调用 LLM");
         let msgs = seen[0].as_array().unwrap();
-        assert_eq!(msgs.len(), 3, "冷启动应从 store 恢复第一轮 user+assistant + 当前 user");
+        assert_eq!(
+            msgs.len(),
+            3,
+            "冷启动应从 store 恢复第一轮 user+assistant + 当前 user"
+        );
         assert_eq!(msgs[0]["content"], "冷启动第一轮");
         assert_eq!(msgs[1]["role"], "assistant");
         assert_eq!(msgs[2]["content"], "冷启动第二轮");
@@ -2044,7 +2425,18 @@ mod tests {
         // alice 发消息（在 alice 的 tenant scope 内，模拟 dispatch_user_input）
         let r_a = agentos_tenant::scope(
             TenantContext::new("tenant_alice", thread_a),
-            process_via_engine(&state, "alice 的消息", "agentos", &[], pipe_a, thread_a, "a1", "", ""),
+            process_via_engine(
+                &state,
+                "alice 的消息",
+                "agentos",
+                &[],
+                pipe_a,
+                thread_a,
+                "a1",
+                "",
+                "",
+                None,
+            ),
         )
         .await;
         assert!(!r_a.content.is_empty(), "alice 发消息应返回 assistant 回复");
@@ -2052,19 +2444,32 @@ mod tests {
         // bob 发消息（在 bob 的 tenant scope 内）
         let r_b = agentos_tenant::scope(
             TenantContext::new("tenant_bob", thread_b),
-            process_via_engine(&state, "bob 的消息", "agentos", &[], pipe_b, thread_b, "b1", "", ""),
+            process_via_engine(
+                &state,
+                "bob 的消息",
+                "agentos",
+                &[],
+                pipe_b,
+                thread_b,
+                "b1",
+                "",
+                "",
+                None,
+            ),
         )
         .await;
         assert!(!r_b.content.is_empty(), "bob 发消息应返回 assistant 回复");
 
         // alice 在自己 scope 内能读到自己的消息（user + assistant ≥ 2 条）
         let store_a = store.clone();
-        let msgs_a = agentos_tenant::scope(
-            TenantContext::new("tenant_alice", thread_a),
-            async move { store_a.get_messages_by_pipeline(pipe_a, MessageQueryOpts::default()).await },
-        )
-        .await
-        .unwrap();
+        let msgs_a =
+            agentos_tenant::scope(TenantContext::new("tenant_alice", thread_a), async move {
+                store_a
+                    .get_messages_by_pipeline(pipe_a, MessageQueryOpts::default())
+                    .await
+            })
+            .await
+            .unwrap();
         assert!(
             msgs_a.len() >= 2,
             "alice 应能读到自己的 user+assistant 消息，实际 {}",
@@ -2073,20 +2478,23 @@ mod tests {
 
         // bob 在自己 scope 内能读到自己的消息
         let store_b = store.clone();
-        let msgs_b = agentos_tenant::scope(
-            TenantContext::new("tenant_bob", thread_b),
-            async move { store_b.get_messages_by_pipeline(pipe_b, MessageQueryOpts::default()).await },
-        )
-        .await
-        .unwrap();
+        let msgs_b =
+            agentos_tenant::scope(TenantContext::new("tenant_bob", thread_b), async move {
+                store_b
+                    .get_messages_by_pipeline(pipe_b, MessageQueryOpts::default())
+                    .await
+            })
+            .await
+            .unwrap();
         assert!(msgs_b.len() >= 2, "bob 应能读到自己的消息");
 
         // ★ 隔离断言：在 bob 的 scope 内读 alice 的 pipeline，必须为空
         let store_cross = store.clone();
-        let cross = agentos_tenant::scope(
-            TenantContext::new("tenant_bob", thread_b),
-            async move { store_cross.get_messages_by_pipeline(pipe_a, MessageQueryOpts::default()).await },
-        )
+        let cross = agentos_tenant::scope(TenantContext::new("tenant_bob", thread_b), async move {
+            store_cross
+                .get_messages_by_pipeline(pipe_a, MessageQueryOpts::default())
+                .await
+        })
         .await
         .unwrap();
         assert!(
@@ -2096,18 +2504,30 @@ mod tests {
 
         // 反向：alice scope 内读 bob 的 pipeline，也必须为空
         let store_cross2 = store.clone();
-        let cross2 = agentos_tenant::scope(
-            TenantContext::new("tenant_alice", thread_a),
-            async move { store_cross2.get_messages_by_pipeline(pipe_b, MessageQueryOpts::default()).await },
-        )
-        .await
-        .unwrap();
-        assert!(cross2.is_empty(), "tenant_alice 必须读不到 tenant_bob 的消息");
+        let cross2 =
+            agentos_tenant::scope(TenantContext::new("tenant_alice", thread_a), async move {
+                store_cross2
+                    .get_messages_by_pipeline(pipe_b, MessageQueryOpts::default())
+                    .await
+            })
+            .await
+            .unwrap();
+        assert!(
+            cross2.is_empty(),
+            "tenant_alice 必须读不到 tenant_bob 的消息"
+        );
 
         // 验证消息内容确实是各自的（alice 的 user 消息内容含 "alice"）
-        let alice_user_msg = msgs_a.iter().find(|m| m.role == "user").expect("alice 应有 user 消息");
+        let alice_user_msg = msgs_a
+            .iter()
+            .find(|m| m.role == "user")
+            .expect("alice 应有 user 消息");
         assert!(
-            alice_user_msg.content_preview.as_deref().unwrap_or("").contains("alice"),
+            alice_user_msg
+                .content_preview
+                .as_deref()
+                .unwrap_or("")
+                .contains("alice"),
             "alice 的消息内容应含 'alice'"
         );
     }
@@ -2153,9 +2573,11 @@ mod tests {
         state.store = Some(store.clone());
         state.invoker = Some(Arc::new(RecordingInvoker {
             seen: std::sync::Mutex::new(Vec::new()),
+            list_tools: std::collections::HashMap::new(),
         }));
         // 临时 config（make_engine_state 的精简版，足够 process_via_engine 跑通）
-        let tmp_root = std::env::temp_dir().join(format!("frank_test_{}", uuid::Uuid::new_v4().simple()));
+        let tmp_root =
+            std::env::temp_dir().join(format!("frank_test_{}", uuid::Uuid::new_v4().simple()));
         let cfg_dir = tmp_root.join("config").join("pipelines");
         std::fs::create_dir_all(&cfg_dir).unwrap();
         std::fs::write(
@@ -2169,49 +2591,70 @@ mod tests {
                 id: "llm".to_string(),
                 steps: vec![agentos_core::types::PipelineStep {
                     id: "llm".to_string(),
-                    steps: vec!["mock_llm_core".to_string()],
+                    steps: vec!["mock_llm_core".into()],
+                    when: None,
                     context: std::collections::HashMap::new(),
                     routes: vec![],
                     loop_config: None,
                 }],
                 loop_config: None,
+                while_cond: None,
                 exit_routes: vec![],
                 run_on_error: false,
             }],
             checkpoint: Default::default(),
         });
         state.step_library = Arc::new(agentos_core::types::StepLibrary::default());
-        state.plugin_ids = Arc::new(std::collections::HashSet::from(["mock_llm_core".to_string()]));
+        state.plugin_ids = Arc::new(std::collections::HashSet::from([
+            "mock_llm_core".to_string()
+        ]));
 
         let pipe = "pipe_frank";
         let thread = "thread_frank";
         // frank 发消息（tenant = frank_id）
         let r = agentos_tenant::scope(
             TenantContext::new(&frank_id, thread),
-            process_via_engine(&state, "frank 的问题", "agentos", &[], pipe, thread, "f1", "", ""),
+            process_via_engine(
+                &state,
+                "frank 的问题",
+                "agentos",
+                &[],
+                pipe,
+                thread,
+                "f1",
+                "",
+                "",
+                None,
+            ),
         )
         .await;
         assert!(!r.content.is_empty(), "frank 发消息应成功");
 
         // frank 能读到自己的历史
         let store_read = store.clone();
-        let msgs = agentos_tenant::scope(
-            TenantContext::new(&frank_id, thread),
-            async move { store_read.get_messages_by_pipeline(pipe, MessageQueryOpts::default()).await },
-        )
+        let msgs = agentos_tenant::scope(TenantContext::new(&frank_id, thread), async move {
+            store_read
+                .get_messages_by_pipeline(pipe, MessageQueryOpts::default())
+                .await
+        })
         .await
         .unwrap();
         assert!(msgs.len() >= 2, "frank 应能读到自己的历史");
 
         // admin（default 租户）读不到 frank 的消息
         let store_admin = store.clone();
-        let admin_msgs = agentos_tenant::scope(
-            TenantContext::new("default", "admin_thread"),
-            async move { store_admin.get_messages_by_pipeline(pipe, MessageQueryOpts::default()).await },
-        )
-        .await
-        .unwrap();
-        assert!(admin_msgs.is_empty(), "admin(default) 不应读到 frank 的消息");
+        let admin_msgs =
+            agentos_tenant::scope(TenantContext::new("default", "admin_thread"), async move {
+                store_admin
+                    .get_messages_by_pipeline(pipe, MessageQueryOpts::default())
+                    .await
+            })
+            .await
+            .unwrap();
+        assert!(
+            admin_msgs.is_empty(),
+            "admin(default) 不应读到 frank 的消息"
+        );
     }
 
     // ── CORS Origin 白名单（回归：反射任意 Origin + 凭据 = 跨域数据泄露）──
@@ -2236,10 +2679,19 @@ mod tests {
     #[test]
     fn allowlist_exact_match_only() {
         let allow = ["https://app.example.com", "https://www.example.com"];
-        assert!(super::origin_matches_allowlist("https://app.example.com", &allow));
+        assert!(super::origin_matches_allowlist(
+            "https://app.example.com",
+            &allow
+        ));
         // 精确匹配——子域/变体不应通过
-        assert!(!super::origin_matches_allowlist("https://evil.example.com", &allow));
-        assert!(!super::origin_matches_allowlist("https://app.example.com.evil.com", &allow));
+        assert!(!super::origin_matches_allowlist(
+            "https://evil.example.com",
+            &allow
+        ));
+        assert!(!super::origin_matches_allowlist(
+            "https://app.example.com.evil.com",
+            &allow
+        ));
     }
 
     // ── spill_guard 配套：框架级强制工具注入 ──────────────────────
@@ -2262,6 +2714,7 @@ mod tests {
                     category: ToolCategory::System,
                     source: ToolSource::Builtin,
                     ui: None,
+                    render: None,
                 },
             );
         }
@@ -2284,15 +2737,21 @@ mod tests {
             .iter()
             .map(|s| s["function"]["name"].as_str().unwrap())
             .collect();
-        assert!(names.contains(&"spill_retrieve"), "spill_retrieve 必须强制注入: {names:?}");
-        assert!(names.contains(&"bash_execute"), "tool_ids 命中的正常注入: {names:?}");
+        assert!(
+            names.contains(&"spill_retrieve"),
+            "spill_retrieve 必须强制注入: {names:?}"
+        );
+        assert!(
+            names.contains(&"bash_execute"),
+            "tool_ids 命中的正常注入: {names:?}"
+        );
     }
 
     /// 没有 tool_ids（兜底全量）时，spill_retrieve 自然在内。
     #[test]
     fn inject_tool_schemas_all_mode_includes_everything() {
         let app_state = app_state_with_tools(&["bash_execute", "spill_retrieve"]);
-        let mut state = json!({});  // 无 tool_ids → 全量
+        let mut state = json!({}); // 无 tool_ids → 全量
         inject_tool_schemas(&mut state, &app_state);
         let names: Vec<&str> = state["tool_schemas"]
             .as_array()
@@ -2307,7 +2766,7 @@ mod tests {
     /// registry 里没有 spill_retrieve（插件未安装）时不会凭空注入。
     #[test]
     fn inject_tool_schemas_no_spill_retrieve_when_not_installed() {
-        let app_state = app_state_with_tools(&["bash_execute"]);  // 无 spill_retrieve
+        let app_state = app_state_with_tools(&["bash_execute"]); // 无 spill_retrieve
         let mut state = json!({"tool_ids": ["bash_execute"]});
         inject_tool_schemas(&mut state, &app_state);
         let names: Vec<&str> = state["tool_schemas"]
@@ -2317,5 +2776,55 @@ mod tests {
             .map(|s| s["function"]["name"].as_str().unwrap())
             .collect();
         assert!(!names.contains(&"spill_retrieve"), "未安装不应凭空出现");
+    }
+
+    /// task_dsh_plugin_adapter 任务 1：声明了 output_schema/render 的工具，
+    /// 输出契约注入 state["tool_output_contracts"]（tool_core 校验 + 前端路由的
+    /// 数据源）；未声明者不产生条目（存量工具零负担）。
+    #[test]
+    fn inject_tool_schemas_also_injects_output_contracts() {
+        use agentos_core::traits::ToolDescriptor;
+        use agentos_core::types::{ToolCategory, ToolSource};
+        use agentos_plugin_loader::CapabilityRegistryImpl;
+        let registry = Arc::new(CapabilityRegistryImpl::new());
+        registry.register_tool(
+            "test_plugin",
+            ToolDescriptor {
+                name: "dsh_read".to_string(),
+                description: "read".to_string(),
+                plugin_id: "test_plugin".to_string(),
+                input_schema: json!({"type": "object", "properties": {}}),
+                output_schema: Some(json!({"type": "object", "required": ["path"]})),
+                category: ToolCategory::File,
+                source: ToolSource::Builtin,
+                ui: None,
+                render: Some(json!({"card": "read"})),
+            },
+        );
+        registry.register_tool(
+            "test_plugin",
+            ToolDescriptor {
+                name: "legacy_tool".to_string(),
+                description: "no contract".to_string(),
+                plugin_id: "test_plugin".to_string(),
+                input_schema: json!({"type": "object", "properties": {}}),
+                output_schema: None,
+                category: ToolCategory::System,
+                source: ToolSource::Builtin,
+                ui: None,
+                render: None,
+            },
+        );
+        let mut app_state = AppState::new();
+        app_state.capability_registry = Some(registry);
+
+        let mut state = json!({});
+        inject_tool_schemas(&mut state, &app_state);
+
+        let contracts = state["tool_output_contracts"].as_object().unwrap();
+        assert_eq!(contracts.len(), 1, "只有声明契约的工具进入: {contracts:?}");
+        assert_eq!(contracts["dsh_read"]["schema"]["required"][0], "path");
+        assert_eq!(contracts["dsh_read"]["render"]["card"], "read");
+        assert!(contracts.get("legacy_tool").is_none());
     }
 }

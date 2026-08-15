@@ -7,7 +7,14 @@
   "host_type": "sidecar",
   "entry": "python server.py",
   "capabilities": {
-    "tools": [
+    "tools": [],
+    "resources": [],
+    "route_signals": [],
+    "lifecycle_hooks": [
+      "on_load",
+      "on_unload"
+    ],
+    "services": [
       {
         "name": "api.get_status",
         "description": "Get HTTP API channel server status"
@@ -20,12 +27,6 @@
         "name": "http.handle",
         "description": "HTTP endpoint handler for /ext/channel_api/** (4c migration; pilot: config domain)"
       }
-    ],
-    "resources": [],
-    "route_signals": [],
-    "lifecycle_hooks": [
-      "on_load",
-      "on_unload"
     ]
   },
   "dependencies": [],

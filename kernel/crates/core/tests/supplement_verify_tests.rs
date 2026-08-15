@@ -63,7 +63,7 @@ fn make_test_manifest(
         mcp: None,
         lifecycle: None,
         native: None,
-        wasm: None,
+        granted_capabilities: vec![],
         requires_content,
         invoke_entry: None,
         config_files: vec![],

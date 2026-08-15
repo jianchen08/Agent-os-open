@@ -37,7 +37,6 @@ async fn admin_token(app: &axum::Router) -> String {
     v["access_token"].as_str().unwrap().to_string()
 }
 
-
 /// 构造一个最小 PluginManifest 字面量(基线 requires provides: None)。
 fn manifest_with_commands(plugin_id: &str, commands: Vec<Value>) -> PluginManifest {
     PluginManifest {
@@ -57,7 +56,7 @@ fn manifest_with_commands(plugin_id: &str, commands: Vec<Value>) -> PluginManife
         mcp: None,
         lifecycle: None,
         native: None,
-        wasm: None,
+        granted_capabilities: vec![],
         requires_content: None,
         invoke_entry: None,
         config_files: vec![],
@@ -130,11 +129,7 @@ async fn test_actions_execute_known_command_returns_success() {
         )
         .await
         .unwrap();
-    assert_eq!(
-        response.status(),
-        StatusCode::OK,
-        "已知 command 应返回 200"
-    );
+    assert_eq!(response.status(), StatusCode::OK, "已知 command 应返回 200");
 
     let body = axum::body::to_bytes(response.into_body(), 64 * 1024)
         .await

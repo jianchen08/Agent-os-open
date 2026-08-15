@@ -75,7 +75,7 @@ fn test_none_invoke_entry_omitted_in_serialization() {
         mcp: None,
         lifecycle: None,
         native: None,
-        wasm: None,
+        granted_capabilities: vec![],
         requires_content: None,
         config_files: vec![],
         http_endpoints: vec![],

@@ -12,8 +12,7 @@ import { AgentsPage } from '@/pages/agents/AgentsPage'
 import { MemoryPage } from '@/pages/memory/MemoryPage'
 import { SettingsHubWidget } from './SettingsHubWidget'
 import { CostDashboardWidget } from './CostDashboardWidget'
-import { FileTreeWidget } from './FileTreeWidget'
-import { FolderOpen } from '@/assets/icons'
+import { PipelineManagerWidget } from './PipelineManagerWidget'
 
 type PanelKind =
   | 'settings_hub'
@@ -23,6 +22,7 @@ type PanelKind =
   | 'agents_panel'
   | 'memory_panel'
   | 'workspace_explorer'
+  | 'pipeline_manager'
   | 'cost_dashboard'
 
 /**
@@ -55,7 +55,8 @@ function renderPanel(kind: PanelKind | string, props: Record<string, unknown>) {
     case 'cost_dashboard':
       return <CostDashboardWidget {...props} />
     case 'workspace_explorer':
-      return <WorkspaceExplorerPanel />
+    case 'pipeline_manager':
+      return <PipelineManagerPanel />
     default:
       // 按 component 名直达
       if (kind === 'settings_hub' || !kind) {
@@ -88,40 +89,19 @@ export function AgentsPanel(props: Record<string, unknown>) {
 export function MemoryPanel(props: Record<string, unknown>) {
   return <PanelHostWidget {...props} panel="memory_panel" />
 }
-export function WorkspaceExplorerPanel() {
+/** 任务/管道管理面板：右侧面板直接展示（无标题栏包裹），
+ *  统一管道管理视图：执行中的管道（任务/会话）实时状态 + 任务树组合。
+ *  文件树通过任务节点"打开工作空间"按钮按需打开（0.1 语义）。 */
+export function PipelineManagerPanel() {
   return (
     <div
       className={cn('flex h-full flex-col')}
       style={{ background: 'var(--ds-bg-panel, hsl(var(--card)))' }}
-      data-testid="workspace-explorer"
+      data-testid="pipeline-manager"
     >
-      <div
-        className="flex items-center gap-2 border-b px-4 py-2"
-        style={{ borderColor: 'var(--ds-border-subtle, rgba(148,163,184,0.12))' }}
-      >
-        <FolderOpen className="text-[var(--ds-accent-primary,#22D3EE)] h-4 w-4" />
-        <div>
-          <div className="text-foreground text-[13px] font-semibold">工作区</div>
-          <div className="text-muted-foreground font-mono text-[10px]">
-            文件管理 · 文件查看
-          </div>
-        </div>
-      </div>
-      <div className="min-h-0 flex-1 overflow-auto p-3">
-        {/* pipelineView：统一管道管理（任务树超集）——任务树 + 所有执行中的管道（会话/任务）
-            实时状态/耗时/token，点击管道行打开对应标签。dataSource 由任务/容器注入时
-            用真实 workspace:// 显示文件树；此处无数据源时仅显示管道管理视图。 */}
-        <FileTreeWidget
-          showSearch
-          expandLevel={1}
-          nodeTitleField="name"
-          nodeChildrenField="children"
-          dataSource={undefined}
-          pipelineView
-        />
-        <p className="text-muted-foreground mt-4 text-center text-xs">
-          打开会话任务工作空间后，文件树将显示在此处。也可通过聊天中的文件卡片打开文件查看。
-        </p>
+      <div className="min-h-0 flex-1">
+        {/* PipelineManagerWidget：管道管理（内核快照 + 实时事件）+ 任务树组合 */}
+        <PipelineManagerWidget />
       </div>
     </div>
   )

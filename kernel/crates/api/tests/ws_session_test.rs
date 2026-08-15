@@ -48,7 +48,7 @@ async fn session_coordinator_registers_and_routes() {
     let delivered = coord
         .emit_event("thread-1", "widget_event", serde_json::json!({"x": 1}))
         .await;
-    assert_eq!(delivered, true);
+    assert!(delivered);
     assert_eq!(count.load(Ordering::SeqCst), 1);
 }
 
@@ -86,9 +86,7 @@ async fn reconnect_replay_after_emit() {
     }
     // 重连：新 sink，last_sequence=1 → 回放 seq 2,3
     let (sink2, _, recv2) = make_sink();
-    let outcome = coord
-        .handle_reconnect("thread-1", "user-A", sink2, 1)
-        .await;
+    let outcome = coord.handle_reconnect("thread-1", "user-A", sink2, 1).await;
     assert!(outcome.replayed);
     assert!(!outcome.resync_required);
     let msgs = recv2.lock().unwrap();

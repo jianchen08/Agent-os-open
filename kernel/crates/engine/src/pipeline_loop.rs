@@ -29,17 +29,20 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::Arc;
 
-use tracing::{error, warn};
+use tracing::{debug, error, warn};
 
 use agentos_config::ConfigCenter;
 
 use agentos_core::traits::{PluginInvoker, StorageBackend};
 use agentos_core::types::{
-    ContentLoader, EngineError, LoopBody, PipelineConfig, PipelineStep, PluginContext, PluginError,
-    PluginResult, Route, RouteNext, StepLibrary, TenantContext,
+    ContentLoader, EngineError, PipelineConfig, PluginContext, PluginError, PluginResult,
+    RouteNext, StepLibrary, TenantContext,
 };
 
-use crate::condition::eval_condition;
+use crate::compiler::{
+    compile_pipeline, CompiledBody, CompiledItem, CompiledPipeline, CompiledRoute, CompiledStep,
+};
+use crate::condition::eval_expr;
 use crate::template::{render_template, render_value};
 
 /// 配置驱动的管道执行器。
@@ -142,7 +145,10 @@ impl PipelineExecutor {
     ///
     /// 生产侧从插件 manifest 的 `capabilities.lifecycle_hooks` 收集；run 结束时
     /// 逐个 best-effort 分发（失败仅 warn，不影响 run 返回值）。不调用为空集。
-    pub fn with_pipeline_end_hook_plugins(mut self, plugin_ids: impl IntoIterator<Item = String>) -> Self {
+    pub fn with_pipeline_end_hook_plugins(
+        mut self,
+        plugin_ids: impl IntoIterator<Item = String>,
+    ) -> Self {
         self.pipeline_end_hooks = plugin_ids.into_iter().collect();
         self
     }
@@ -156,10 +162,7 @@ impl PipelineExecutor {
     /// 分层持久化：注入插件 manifest 声明需持久化的 state 字段集合。
     /// 生产侧从插件加载器收集所有插件的 persistent_fields 并集后传入。
     /// 不调用时为空集（向后兼容，只投影 messages）。
-    pub fn with_persistent_fields(
-        mut self,
-        fields: impl IntoIterator<Item = String>,
-    ) -> Self {
+    pub fn with_persistent_fields(mut self, fields: impl IntoIterator<Item = String>) -> Self {
         self.persistent_fields = fields.into_iter().collect();
         self
     }
@@ -191,6 +194,27 @@ impl PipelineExecutor {
         step_library: &StepLibrary,
         initial_state: serde_json::Value,
     ) -> Result<serde_json::Value, EngineError> {
+        // G10 兼容路径：现场编译后执行（测试 / 旧调用方）。编译失败 = 加载期
+        // 校验失败（when 语法错误 / 未知引用 / 引用环），如实报错不静默——
+        // 与"非法 when 静默 false"的旧行为不同，这是 G10 的既定语义升级。
+        let compiled = compile_pipeline(config, step_library, &self.plugin_ids).map_err(|e| {
+            EngineError::Other {
+                message: format!("管道编译失败: {e}"),
+            }
+        })?;
+        self.run_compiled(&compiled, initial_state).await
+    }
+
+    /// 执行已编译管道（G10 生产路径：运行时零解析、零三级命中重算）。
+    ///
+    /// 语义与 [`PipelineExecutor::run`] 完全一致（`run` 内部即编译后转此）；
+    /// 差异仅在编译时机——生产路径在启动期 / 热重载时编译一次，`Arc` 原子换入，
+    /// 在途 run 持旧计划跑完（快照语义），此处直接消费 [`CompiledPipeline`]。
+    pub async fn run_compiled(
+        &self,
+        compiled: &CompiledPipeline,
+        initial_state: serde_json::Value,
+    ) -> Result<serde_json::Value, EngineError> {
         // 监控 M2：pipeline 执行次数 + 耗时（监控设计 §三 通道1）
         let run_start = std::time::Instant::now();
         let mut state = initial_state;
@@ -206,19 +230,16 @@ impl PipelineExecutor {
 
         // ── 多循环体执行 ──
         // 转移死循环防护：Phase 跳转/循环体数上限的乘积保险。
-        let max_guard = config.loop_bodies.len().saturating_mul(4).max(16);
+        let max_guard = compiled.bodies.len().saturating_mul(4).max(16);
         let mut idx: usize = 0;
         let mut guard: usize = 0;
-        while idx < config.loop_bodies.len() {
+        while idx < compiled.bodies.len() {
             if guard > max_guard {
                 return Err(EngineError::Other {
-                    message: format!(
-                        "循环体转移次数超限（{} 次，疑似 Phase 转移死循环）",
-                        guard
-                    ),
+                    message: format!("循环体转移次数超限（{} 次，疑似 Phase 转移死循环）", guard),
                 });
             }
-            let body = &config.loop_bodies[idx];
+            let body = &compiled.bodies[idx];
             // 挂起：整个管道等待恢复，不再推进任何循环体
             if truthy_flag(&state, "suspended") {
                 break;
@@ -228,7 +249,7 @@ impl PipelineExecutor {
             // 收尾语义：管道已 ended 时，run_on_error 循环体仍照常执行（忽略 ended）
             let ignore_ended = truthy_flag(&state, "ended") && body.run_on_error;
             let iterations = self
-                .execute_body(body, &mut state, config, step_library, ignore_ended)
+                .execute_body(body, &mut state, compiled, ignore_ended)
                 .await;
             // 监控 M2：迭代轮数（仅 loop 模式计，按循环体累计）
             if iterations > 0 {
@@ -248,7 +269,7 @@ impl PipelineExecutor {
                 if let Some(obj) = state.as_object_mut() {
                     obj.remove("next_phase");
                 }
-                match config.body_index(&id) {
+                match compiled.body_index(&id) {
                     Some(i) => jump = Some(i),
                     None => {
                         return Err(EngineError::Other {
@@ -264,7 +285,7 @@ impl PipelineExecutor {
                         obj.remove("next_phase");
                     }
                     match matched {
-                        RouteNext::Phase(id) => match config.body_index(&id) {
+                        RouteNext::Phase(id) => match compiled.body_index(&id) {
                             Some(i) => jump = Some(i),
                             None => {
                                 return Err(EngineError::Other {
@@ -310,19 +331,15 @@ impl PipelineExecutor {
     /// 返回迭代轮数（仅 loop 模式计；单次执行返回 0，对齐旧"仅 loop 计迭代"）。
     async fn execute_body(
         &self,
-        body: &LoopBody,
+        body: &CompiledBody,
         state: &mut serde_json::Value,
-        config: &PipelineConfig,
-        step_library: &StepLibrary,
+        compiled: &CompiledPipeline,
         ignore_ended: bool,
     ) -> i32 {
         let mut iteration: i32 = 0;
-        let looping = body.loop_config.as_ref().map(|c| c.enabled).unwrap_or(false);
-        let max_iters = body
-            .loop_config
-            .as_ref()
-            .map(|c| c.max_iterations)
-            .unwrap_or(-1);
+        // G10：循环模式 = loop_config.enabled 或 while_cond 任一开启（编译期已归一）
+        let looping = body.looping;
+        let max_iters = body.max_iterations;
         if looping {
             loop {
                 if truthy_flag(state, "suspended") {
@@ -330,6 +347,14 @@ impl PipelineExecutor {
                 }
                 if !ignore_ended && truthy_flag(state, "ended") {
                     break;
+                }
+                // G10 新 DSL：while 循环继续条件（同一 eval_condition 求值器，
+                // 已编译 AST 零解析）；假则退出循环（正常推进后续循环体）。
+                if let Some(cond) = &body.while_cond {
+                    if !eval_expr(cond, state) {
+                        debug!(body = %body.id, "while 条件为假，退出循环");
+                        break;
+                    }
                 }
                 iteration += 1;
                 if max_iters > 0 && iteration > max_iters {
@@ -349,9 +374,10 @@ impl PipelineExecutor {
                         agentos_config::load_agent_into_state(cc, state, &agent_id);
                     }
                 }
-                self.execute_steps(&body.steps, state, config, step_library, ignore_ended)
+                self.execute_steps(&body.steps, state, compiled, ignore_ended)
                     .await;
-                self.checkpoint_after_round(&config.checkpoint, state).await;
+                self.checkpoint_after_round(&compiled.checkpoint, state)
+                    .await;
                 if truthy_flag(state, "suspended") {
                     break;
                 }
@@ -361,9 +387,10 @@ impl PipelineExecutor {
             }
         } else {
             // 单次执行（前处理/后处理体）
-            self.execute_steps(&body.steps, state, config, step_library, ignore_ended)
+            self.execute_steps(&body.steps, state, compiled, ignore_ended)
                 .await;
-            self.checkpoint_after_round(&config.checkpoint, state).await;
+            self.checkpoint_after_round(&compiled.checkpoint, state)
+                .await;
         }
         iteration
     }
@@ -384,7 +411,11 @@ impl PipelineExecutor {
         for plugin_id in &self.pipeline_end_hooks {
             if let Err(e) = self
                 .invoker
-                .send_lifecycle_hook(plugin_id, agentos_core::traits::LifecycleHook::OnPipelineEnd, &hook_ctx)
+                .send_lifecycle_hook(
+                    plugin_id,
+                    agentos_core::traits::LifecycleHook::OnPipelineEnd,
+                    &hook_ctx,
+                )
                 .await
             {
                 warn!(plugin = %plugin_id, error = ?e, "OnPipelineEnd 分发失败（继续）");
@@ -393,54 +424,78 @@ impl PipelineExecutor {
     }
 
     /// 遍历 step 列表，遇到 `ended`（非收尾模式）/ `suspended` 即停。
+    ///
+    /// G10：支持 step 级 `RouteNext::Step` **真跳转**（新 DSL "回头"语义——
+    /// `then: <step id>` 跳到本循环体内指定 step 重新执行；编译期已校验目标存在）。
+    /// 组级 when 门在编译期已 AST 化（`Option<Expr>`），此处只求值零解析。
     async fn execute_steps(
         &self,
-        steps: &[PipelineStep],
+        steps: &[CompiledStep],
         state: &mut serde_json::Value,
-        config: &PipelineConfig,
-        step_library: &StepLibrary,
+        compiled: &CompiledPipeline,
         ignore_ended: bool,
     ) {
-        for step in steps {
+        let mut i = 0usize;
+        while i < steps.len() {
             if truthy_flag(state, "suspended") {
                 break;
             }
             if !ignore_ended && truthy_flag(state, "ended") {
                 break;
             }
-            self.execute_step(step, state, config, step_library, ignore_ended)
-                .await;
+            let step = &steps[i];
+            // G9 组级 when 门（已编译 AST）：假则整组跳过（组内零调用、零轨迹）。
+            if let Some(cond) = &step.when {
+                if !eval_expr(cond, state) {
+                    debug!(step = %step.id, "组级 when 门为假，跳过整组");
+                    i += 1;
+                    continue;
+                }
+            }
+            let routed = self.execute_step(step, state, compiled, ignore_ended).await;
+            // G10：step 级 Step 跳转（真跳转）——目标下标在本循环体内查找
+            if let Some(RouteNext::Step(id)) = routed {
+                if let Some(j) = steps.iter().position(|s| s.id == id) {
+                    debug!(step = %step.id, target = %id, "step 级跳转");
+                    i = j;
+                    continue;
+                }
+                warn!(
+                    step = %step.id,
+                    target = %id,
+                    "Step 跳转目标未在本循环体找到（编译期已校验，理论不可达）"
+                );
+            }
+            i += 1;
         }
     }
 
-    /// 执行单个 step：context 注入 →（可选）step 自带循环 → 三级命中执行 → 路由。
+    /// 执行单个 step：context 注入 →（可选）step 自带循环 → 列表项执行 → 路由。
     ///
-    /// 注意：step 自带循环时，路由放在循环体内由 `execute_step_inner` 后应用，
-    /// 且当前实现把路由统一放在非循环分支末尾执行（循环体内每轮末尾也会执行路由，
-    /// 这样能及时 break 出循环）。详见 [来源: 任务 §execute_step] 的实现取舍。
+    /// 注意：step 自带循环时，路由放在循环体内每轮末尾应用（及时结束/挂起）。
+    /// 返回 step 级路由命中的 `RouteNext`（G10：`Step` 真跳转由 `execute_steps`
+    /// 消费；`Phase` 已在 apply_routes 写 `state.next_phase`，循环体结束时消费）。
     ///
-    /// 由于 `execute_step` 与 `execute_step_inner` 相互递归调用（命中规则①②的
-    /// 组合节点会递归），Rust async fn 无法直接表达无限大小的 future，
+    /// 由于 `execute_step` 与 `execute_step_inner` 相互递归调用（Composite 项会
+    /// 递归执行），Rust async fn 无法直接表达无限大小的 future，
     /// 这里用 `Box::pin` 引入间接层（boxed future）打破无限大小。
     fn execute_step<'a>(
         &'a self,
-        step: &'a PipelineStep,
+        step: &'a CompiledStep,
         state: &'a mut serde_json::Value,
-        config: &'a PipelineConfig,
-        step_library: &'a StepLibrary,
+        compiled: &'a CompiledPipeline,
         ignore_ended: bool,
-    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'a>> {
-        Box::pin(self.execute_step_impl(step, state, config, step_library, ignore_ended))
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Option<RouteNext>> + Send + 'a>> {
+        Box::pin(self.execute_step_impl(step, state, compiled, ignore_ended))
     }
 
     async fn execute_step_impl(
         &self,
-        step: &PipelineStep,
+        step: &CompiledStep,
         state: &mut serde_json::Value,
-        config: &PipelineConfig,
-        step_library: &StepLibrary,
+        compiled: &CompiledPipeline,
         ignore_ended: bool,
-    ) {
+    ) -> Option<RouteNext> {
         // 0. 快照 step 执行前的 state，用于事后算 diff 落 step 级轨迹。
         //    轨迹颗粒度 = 配置 step（prepare/core/post 等），不钻插件。
         //    patch_data 含本 step 期间所有顶层 key 变更；messages 走 ops 实录（见 ops_ledger）。
@@ -448,9 +503,10 @@ impl PipelineExecutor {
         // 清空本 step 的 messages 实录缓冲（step 边界，防跨 step 泄漏）
         self.ops_ledger.lock().clear();
 
-        // 1. context 注入：渲染 step.context 模板，merge 进 state
+        // 1. context 注入：渲染 step.context 模板（模板原文保留，动态点），merge 进 state
         let rendered = render_value(
-            &serde_json::to_value(&step.context).unwrap_or(serde_json::Value::Object(Default::default())),
+            &serde_json::to_value(&step.context)
+                .unwrap_or(serde_json::Value::Object(Default::default())),
             state,
             &self.project_root,
         );
@@ -460,7 +516,7 @@ impl PipelineExecutor {
             }
         }
 
-        // 2. step 自带 loop_config：循环执行 execute_step_inner
+        // 2. step 自带 loop_config：循环执行列表项
         if let Some(loop_cfg) = &step.loop_config {
             if loop_cfg.enabled {
                 let max_iters = loop_cfg.max_iterations;
@@ -476,7 +532,7 @@ impl PipelineExecutor {
                     if max_iters > 0 && i > max_iters {
                         break;
                     }
-                    self.execute_step_inner(step, state, config, step_library, ignore_ended)
+                    self.execute_step_inner(step, state, compiled, ignore_ended)
                         .await;
                     // 循环体里也应用路由（及时结束/挂起）
                     if !step.routes.is_empty() {
@@ -489,23 +545,28 @@ impl PipelineExecutor {
                         break;
                     }
                 }
-                // 循环 step 执行完，落 step 级轨迹后返回
-                self.persist_step_trace(&step.id, &state_before, state).await;
-                return;
+                // 循环 step 执行完，落 step 级轨迹后返回（循环内路由不参与跳转）
+                self.persist_step_trace(&step.id, &state_before, state)
+                    .await;
+                return None;
             }
         }
 
         // 3. 非循环：直接执行
-        self.execute_step_inner(step, state, config, step_library, ignore_ended)
+        self.execute_step_inner(step, state, compiled, ignore_ended)
             .await;
 
-        // 4. 路由处理
-        if !step.routes.is_empty() {
-            apply_routes(&step.routes, state);
-        }
+        // 4. 路由处理：返回命中结果（Step 跳转由 execute_steps 消费）
+        let routed = if !step.routes.is_empty() {
+            apply_routes(&step.routes, state)
+        } else {
+            None
+        };
 
         // 5. 落 step 级轨迹（非循环分支）
-        self.persist_step_trace(&step.id, &state_before, state).await;
+        self.persist_step_trace(&step.id, &state_before, state)
+            .await;
+        routed
     }
 
     /// 落 step 级轨迹：对比 step 执行前后的 state，把变更的顶层 key 聚合为一条
@@ -592,7 +653,11 @@ impl PipelineExecutor {
         // 声明的累计标量字段投影
         for key in &self.persistent_fields {
             if let Some(v) = state.get(key) {
-                if let Err(e) = self.store.upsert_state_field(pipeline_id, &tenant_id, key, v).await {
+                if let Err(e) = self
+                    .store
+                    .upsert_state_field(pipeline_id, &tenant_id, key, v)
+                    .await
+                {
                     warn!(key = %key, error = %e, "upsert_state_field 失败（继续）");
                     self.metrics.inc_persist_failure();
                 }
@@ -600,78 +665,108 @@ impl PipelineExecutor {
         }
     }
 
-    /// 三级命中执行 `step.steps` 列表。
+    /// 执行已编译列表项（G10：引用已在加载期解析为三类——插件 / composite / 动态模板）。
+    ///
+    /// 运行时只做：项级 when AST 求值（零解析）→ 按类别分派。composite 查统一步骤池
+    /// 递归执行；动态模板项渲染后走同样的池/插件查找（显式保留的动态点）。
     async fn execute_step_inner(
         &self,
-        step: &PipelineStep,
+        step: &CompiledStep,
         state: &mut serde_json::Value,
-        config: &PipelineConfig,
-        step_library: &StepLibrary,
+        compiled: &CompiledPipeline,
         ignore_ended: bool,
     ) {
-        for item in &step.steps {
+        for item in &step.items {
             if truthy_flag(state, "suspended") {
                 break;
             }
             if !ignore_ended && truthy_flag(state, "ended") {
                 break;
             }
-            // 动态插件名：先渲染模板（处理 {{state.core_plugin}} 这类）
-            let resolved = render_template(item, state, &self.project_root);
-            let item = resolved.as_str();
-
-            // 命中①当前管道 step id
-            if let Some(target) = config.find_step(item) {
-                let target = target.clone();
-                self.execute_step(&target, state, config, step_library, ignore_ended)
-                    .await;
-                continue;
+            // G9 项级 when 门（已编译 AST）：invoke 前求值，假则整项跳过（零调用）。
+            // 语法错误在加载期编译时已暴露（不再有"静默 false"）。
+            if let Some(cond) = item.when() {
+                if !eval_expr(cond, state) {
+                    debug!(step = %step.id, "when 门为假，跳过项");
+                    continue;
+                }
             }
-            // 命中②公共 step 库
-            if let Some(target) = step_library.find(item) {
-                let target = target.clone();
-                self.execute_step(&target, state, config, step_library, ignore_ended)
-                    .await;
-                continue;
-            }
-            // 命中③插件名
-            if self.lookup_plugin(item) {
-                match self.invoke_plugin(item, state.clone()).await {
-                    Ok(result) => {
-                        if result.error.is_none() {
-                            // merge state_updates（轨迹在 step 级统一落，不钻插件）
-                            // 分层持久化：merge 的同时投影到业务表（messages 增量、声明字段 upsert）
-                            self.merge_and_project(state, &result.state_updates).await;
-                            if result.skip_remaining {
-                                break;
-                            }
-                        } else {
-                            // error_policy 简化：warn + 继续
-                            warn!(
-                                plugin = %item,
-                                error = ?result.error,
-                                "plugin returned error, continuing (error_policy=skip)"
+            match item {
+                // 静态命中管道/库 step（加载期已定，运行时查池递归）
+                CompiledItem::Composite { step_id, .. } => {
+                    let target = match compiled.find_step(step_id) {
+                        Some(t) => t.clone(),
+                        None => {
+                            // 编译期保证存在；防御路径（配置在热重载后池缩水）
+                            error!(
+                                step_or_plugin = %step_id,
+                                "composite step '{}' 不在编译池中（配置与插件集不同步），跳过",
+                                step_id
                             );
+                            continue;
                         }
+                    };
+                    self.execute_step(&target, state, compiled, ignore_ended)
+                        .await;
+                }
+                // 静态命中插件
+                CompiledItem::Plugin { plugin_id, .. } => {
+                    if self.invoke_item_plugin(plugin_id, state).await {
+                        break; // skip_remaining
                     }
-                    Err(e) => {
-                        // invoker 自身报错（如 sidecar 不可达）：warn + 继续
-                        warn!(
-                            plugin = %item,
-                            error = %e,
-                            "plugin invoker error, continuing"
+                }
+                // 动态点：模板名（{{state.xxx}}），渲染后走池 → 插件
+                CompiledItem::Dynamic { template, .. } => {
+                    let resolved = render_template(template, state, &self.project_root);
+                    if let Some(target) = compiled.find_step(&resolved) {
+                        let target = target.clone();
+                        self.execute_step(&target, state, compiled, ignore_ended)
+                            .await;
+                    } else if self.lookup_plugin(&resolved) {
+                        if self.invoke_item_plugin(&resolved, state).await {
+                            break;
+                        }
+                    } else {
+                        error!(
+                            step_or_plugin = %resolved,
+                            "动态 step/plugin '{}' 未找到，请下载或安装（已记录，继续后续步骤）",
+                            resolved
                         );
                     }
                 }
-                continue;
             }
-            // 三级都 miss
-            error!(
-                step_or_plugin = %item,
-                "step/plugin '{}' 未找到，请下载或安装（已记录，继续后续步骤）",
-                item
-            );
-            // 记录错误但继续（不 panic）
+        }
+    }
+
+    /// 调用原子插件并 merge state_updates；返回 true = 应跳过同组后续
+    /// （`skip_remaining`）。错误按 error_policy=skip warn + 继续（与旧行为一致）。
+    async fn invoke_item_plugin(&self, plugin_id: &str, state: &mut serde_json::Value) -> bool {
+        match self.invoke_plugin(plugin_id, state.clone()).await {
+            Ok(result) => {
+                if result.error.is_none() {
+                    // merge state_updates（轨迹在 step 级统一落，不钻插件）
+                    // 分层持久化：merge 的同时投影到业务表（messages 增量、声明字段 upsert）
+                    self.merge_and_project(state, &result.state_updates).await;
+                    result.skip_remaining
+                } else {
+                    // error_policy 简化：warn + 继续
+                    warn!(
+                        plugin = %plugin_id,
+                        error = ?result.error,
+                        "plugin returned error, continuing (error_policy=skip)"
+                    );
+                    false
+                }
+            }
+            Err(e) => {
+                // invoker 自身报错（如 sidecar 不可达）：warn + 继续
+                warn!(
+                    plugin = %plugin_id,
+                    error = %e,
+                    "plugin invoker error, continuing"
+                );
+                false
+            }
         }
     }
 
@@ -731,7 +826,11 @@ impl PipelineExecutor {
         // （完整实现应哈希 pipeline_config，但对持久化链路验证无影响）。
         let config_hash = "";
         let tenant_id = self.default_tenant.tenant_id.clone();
-        if let Err(e) = self.store.create_run(&self.run_id, config_hash, &tenant_id).await {
+        if let Err(e) = self
+            .store
+            .create_run(&self.run_id, config_hash, &tenant_id)
+            .await
+        {
             warn!(run_id = %self.run_id, error = %e, "create_run 落库失败（继续执行）");
             self.metrics.inc_persist_failure();
         }
@@ -750,7 +849,11 @@ impl PipelineExecutor {
             .get("session_id")
             .and_then(|v| v.as_str())
             .unwrap_or("");
-        if let Err(e) = self.store.link_pipeline_session(pipeline_id, session_id, &tenant_id).await {
+        if let Err(e) = self
+            .store
+            .link_pipeline_session(pipeline_id, session_id, &tenant_id)
+            .await
+        {
             warn!(error = %e, "link_pipeline_session 失败（继续）");
         }
 
@@ -799,7 +902,11 @@ impl PipelineExecutor {
         if !pipeline_id.is_empty() {
             let step_no = self.total_step_no.load(Ordering::SeqCst);
             let tenant_id = self.default_tenant.tenant_id.clone();
-            if let Err(e) = self.store.save_checkpoint(pipeline_id, &tenant_id, step_no, final_state).await {
+            if let Err(e) = self
+                .store
+                .save_checkpoint(pipeline_id, &tenant_id, step_no, final_state)
+                .await
+            {
                 warn!(pipeline_id = %pipeline_id, error = %e, "收尾 save_checkpoint 失败（继续执行）");
                 self.metrics.inc_persist_failure();
             }
@@ -807,10 +914,16 @@ impl PipelineExecutor {
 
         // update_run_status 要求 current_branch 和 current_seq 同时 Some 或同时 None。
         // 标记完成只需更新 status + ended_at，用 (None, None) 不更新 branch/seq。
-        if let Err(e) = self.store.update_run_status(
-            &self.run_id, agentos_core::types::RunStatus::Completed,
-            None, None,
-        ).await {
+        if let Err(e) = self
+            .store
+            .update_run_status(
+                &self.run_id,
+                agentos_core::types::RunStatus::Completed,
+                None,
+                None,
+            )
+            .await
+        {
             warn!(run_id = %self.run_id, error = %e, "update_run_status(Completed) 失败");
             self.metrics.inc_persist_failure();
         }
@@ -818,9 +931,9 @@ impl PipelineExecutor {
 
     /// merge 插件 state_updates 进 state（纯内存合并）。
     ///
-    /// messages **只接受 op 声明**（`{_ops:[set/insert]}`）→ "一次 apply" 到内存 + 表
-    /// + 实录三落点。全量数组形式已退役（零兼容）：收到即 warn 丢弃——改队列必须
-    /// 走 ops，声明式契约由所有插件（llm_core/tool_core/context_window_guard）履行。
+    /// messages **只接受 op 声明**（`{_ops:[set/insert]}`）→ "一次 apply" 到内存、
+    /// 表、实录三落点。全量数组形式已退役（零兼容）：收到即 warn 丢弃——改队列
+    /// 必须走 ops，声明式契约由所有插件（llm_core/tool_core/context_window_guard）履行。
     async fn merge_and_project(
         &self,
         state: &mut serde_json::Value,
@@ -842,7 +955,14 @@ impl PipelineExecutor {
                             o
                         })
                         .collect();
-                    match apply_messages_op_update(state, self.store.as_ref(), &tenant_id, &ops_owned).await {
+                    match apply_messages_op_update(
+                        state,
+                        self.store.as_ref(),
+                        &tenant_id,
+                        &ops_owned,
+                    )
+                    .await
+                    {
                         Ok(ledger) => {
                             // ops 即轨迹：指纹实录累积到 per-step 缓冲，step 末尾落 traces
                             if !ledger.is_empty() {
@@ -863,7 +983,6 @@ impl PipelineExecutor {
         }
     }
 
-
     /// 每完成一轮（一次完整 steps 执行）后调用：自增步数计数器，达 interval 则落档。
     ///
     /// checkpoint = 把当前完整 state 复制到 pipeline_checkpoints（留档快照）。
@@ -877,7 +996,10 @@ impl PipelineExecutor {
         if !ckpt_cfg.enabled || ckpt_cfg.interval_steps <= 0 {
             return;
         }
-        let pipeline_id = state.get("pipeline_id").and_then(|v| v.as_str()).unwrap_or("");
+        let pipeline_id = state
+            .get("pipeline_id")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
         if pipeline_id.is_empty() {
             return;
         }
@@ -885,7 +1007,11 @@ impl PipelineExecutor {
         let step_no = self.total_step_no.fetch_add(1, Ordering::SeqCst) + 1;
         if new_since >= ckpt_cfg.interval_steps {
             let tenant_id = self.default_tenant.tenant_id.clone();
-            if let Err(e) = self.store.save_checkpoint(pipeline_id, &tenant_id, step_no, state).await {
+            if let Err(e) = self
+                .store
+                .save_checkpoint(pipeline_id, &tenant_id, step_no, state)
+                .await
+            {
                 warn!(pipeline_id = %pipeline_id, error = %e, "save_checkpoint 失败（继续执行）");
                 self.metrics.inc_persist_failure();
             }
@@ -897,18 +1023,23 @@ impl PipelineExecutor {
 
 // ── 路由处理 ──────────────────────────────────────────────────
 
-/// 应用路由分支：按 YAML 顺序匹配第一个 `when` 为真的分支，执行其 `then`。
+/// 应用转移分支：按 YAML 顺序匹配第一个 `when` 为真的分支，执行其 `then`。
 ///
 /// 匹配后立即 `break`（priority 由 YAML 顺序体现）。返回命中的 `RouteNext`
-/// （克隆），供调用方（如循环体转移决策）使用；step 级调用方可忽略返回值。
-fn apply_routes(routes: &[Route], state: &mut serde_json::Value) -> Option<RouteNext> {
+/// （克隆），供调用方（循环体转移决策 / step 级跳转）使用。
+/// `when` 已在加载期编译为 AST（G10）：None = 恒真短路，其余只求值零解析。
+fn apply_routes(routes: &[CompiledRoute], state: &mut serde_json::Value) -> Option<RouteNext> {
     for route in routes {
-        if eval_condition(&route.when, state) {
+        let matched = match &route.when {
+            None => true,
+            Some(cond) => eval_expr(cond, state),
+        };
+        if matched {
             // set 字段
-            for (k, v) in &route.then.set {
+            for (k, v) in &route.set {
                 set_key(state, k, v.clone());
             }
-            match &route.then.next {
+            match &route.next {
                 RouteNext::Loop => { /* 继续，外层 while 会循环 */ }
                 RouteNext::End => {
                     set_key(state, "ended", serde_json::Value::Bool(true));
@@ -916,17 +1047,16 @@ fn apply_routes(routes: &[Route], state: &mut serde_json::Value) -> Option<Route
                 RouteNext::Wait => {
                     set_key(state, "suspended", serde_json::Value::Bool(true));
                 }
-                RouteNext::Step(id) => {
-                    // 简化：记到 state.next_step（不真正跳转）
-                    set_key(state, "next_step", serde_json::Value::String(id.clone()));
-                }
+                // Step 真跳转由 execute_steps 消费返回值完成（G10 新 DSL "回头"语义）；
+                // 此处不再写 state.next_step（旧"记号"语义退役）
+                RouteNext::Step(_id) => {}
                 RouteNext::Phase(id) => {
                     // 转移到指定循环体：记到 state.next_phase（run() 在循环体
                     // 结束时消费；step 级路由设置后在本循环体结束时生效）
                     set_key(state, "next_phase", serde_json::Value::String(id.clone()));
                 }
             }
-            return Some(route.then.next.clone());
+            return Some(route.next.clone());
         }
     }
     None
@@ -943,7 +1073,10 @@ fn ensure_object(state: &mut serde_json::Value) {
 
 /// state 是否含指定 key。
 fn key_present(state: &serde_json::Value, key: &str) -> bool {
-    state.as_object().map(|o| o.contains_key(key)).unwrap_or(false)
+    state
+        .as_object()
+        .map(|o| o.contains_key(key))
+        .unwrap_or(false)
 }
 
 /// 设置 state[key] = value（state 必须是 Object，否则忽略）。
@@ -1220,7 +1353,7 @@ fn inject_run_message_id(
         if msg
             .get("id")
             .and_then(|v| v.as_str())
-            .map_or(false, |s| !s.is_empty())
+            .is_some_and(|s| !s.is_empty())
         {
             continue;
         }
@@ -1228,7 +1361,10 @@ fn inject_run_message_id(
             obj.insert("_message_id".to_string(), serde_json::json!(mid));
         }
         if let Some(obj) = state.as_object_mut() {
-            obj.insert("_assistant_id_assigned".to_string(), serde_json::json!(true));
+            obj.insert(
+                "_assistant_id_assigned".to_string(),
+                serde_json::json!(true),
+            );
         }
         break;
     }
@@ -1248,15 +1384,13 @@ fn inject_run_message_id(
 pub(crate) fn op_ledger_entry(op: &serde_json::Value) -> Option<serde_json::Value> {
     let kind = op.get("op").and_then(|v| v.as_str()).unwrap_or("");
     let ids = |op: &serde_json::Value| {
-        op.get("msg")
-            .filter(|m| m.is_object())
-            .map(|m| {
-                let blob_src = serde_json::to_string(m).unwrap_or_default();
-                (
-                    agentos_core::ids::compute_message_id(m),
-                    agentos_core::ids::compute_blob_id(blob_src.as_bytes()),
-                )
-            })
+        op.get("msg").filter(|m| m.is_object()).map(|m| {
+            let blob_src = serde_json::to_string(m).unwrap_or_default();
+            (
+                agentos_core::ids::compute_message_id(m),
+                agentos_core::ids::compute_blob_id(blob_src.as_bytes()),
+            )
+        })
     };
     match kind {
         "set" => {
@@ -1290,6 +1424,7 @@ pub(crate) fn op_ledger_entry(op: &serde_json::Value) -> Option<serde_json::Valu
 #[cfg(test)]
 mod tests {
     use super::*;
+    use agentos_core::types::{LoopBody, PipelineStep, Route, StepItem};
     use async_trait::async_trait;
     use serde_json::json;
     use std::collections::HashMap;
@@ -1298,8 +1433,7 @@ mod tests {
 
     use agentos_core::traits::StorageBackend;
     use agentos_core::types::{
-        Branch, LoopConfig, Message, MessageRecord, RunRecord, RunStatus, ToolExecutionResult,
-        TraceEntry,
+        Branch, LoopConfig, MessageRecord, RunRecord, RunStatus, ToolExecutionResult, TraceEntry,
     };
 
     // ── 测试基础设施 ──────────────────────────────────────────
@@ -1327,12 +1461,7 @@ mod tests {
         }
 
         fn call_count(&self, plugin_id: &str) -> usize {
-            *self
-                .calls
-                .lock()
-                .unwrap()
-                .get(plugin_id)
-                .unwrap_or(&0)
+            *self.calls.lock().unwrap().get(plugin_id).unwrap_or(&0)
         }
     }
 
@@ -1384,7 +1513,10 @@ mod tests {
     struct NullStorage;
     #[async_trait]
     impl StorageBackend for NullStorage {
-        async fn get_run(&self, _run_id: &str) -> Result<RunRecord, agentos_core::types::StorageError> {
+        async fn get_run(
+            &self,
+            _run_id: &str,
+        ) -> Result<RunRecord, agentos_core::types::StorageError> {
             Err(agentos_core::types::StorageError::NotFound("null".into()))
         }
         async fn get_messages_by_pipeline(
@@ -1400,10 +1532,16 @@ mod tests {
         ) -> Result<Vec<u8>, agentos_core::types::StorageError> {
             Ok(vec![])
         }
-        async fn append_trace(&self, _entry: TraceEntry) -> Result<(), agentos_core::types::StorageError> {
+        async fn append_trace(
+            &self,
+            _entry: TraceEntry,
+        ) -> Result<(), agentos_core::types::StorageError> {
             Ok(())
         }
-        async fn create_branch(&self, _branch: Branch) -> Result<(), agentos_core::types::StorageError> {
+        async fn create_branch(
+            &self,
+            _branch: Branch,
+        ) -> Result<(), agentos_core::types::StorageError> {
             Ok(())
         }
         async fn update_run_status(
@@ -1439,13 +1577,15 @@ mod tests {
         async fn get_session(
             &self,
             _thread_id: &str,
-        ) -> Result<Option<agentos_core::types::SessionRecord>, agentos_core::types::StorageError> {
+        ) -> Result<Option<agentos_core::types::SessionRecord>, agentos_core::types::StorageError>
+        {
             Ok(None)
         }
         async fn list_sessions(
             &self,
             _filter: agentos_core::traits::SessionListFilter,
-        ) -> Result<Vec<agentos_core::types::SessionRecord>, agentos_core::types::StorageError> {
+        ) -> Result<Vec<agentos_core::types::SessionRecord>, agentos_core::types::StorageError>
+        {
             Ok(vec![])
         }
         async fn update_session(
@@ -1479,7 +1619,8 @@ mod tests {
             &self,
             _thread_id: &str,
             _tenant_id: &str,
-        ) -> Result<Vec<agentos_core::types::TraceEntry>, agentos_core::types::StorageError> {
+        ) -> Result<Vec<agentos_core::types::TraceEntry>, agentos_core::types::StorageError>
+        {
             Ok(vec![])
         }
 
@@ -1519,8 +1660,10 @@ mod tests {
         async fn get_run_summary(
             &self,
             _run_id: &str,
-        ) -> Result<Option<agentos_core::types::PipelineRunSummary>, agentos_core::types::StorageError>
-        {
+        ) -> Result<
+            Option<agentos_core::types::PipelineRunSummary>,
+            agentos_core::types::StorageError,
+        > {
             Ok(None)
         }
         async fn update_run_summary(
@@ -1654,7 +1797,8 @@ mod tests {
     fn atomic_step(id: &str, plugin: &str) -> PipelineStep {
         PipelineStep {
             id: id.to_string(),
-            steps: vec![plugin.to_string()],
+            steps: vec![plugin.into()],
+            when: None,
             context: HashMap::new(),
             routes: vec![],
             loop_config: None,
@@ -1667,6 +1811,137 @@ mod tests {
             .iter()
             .map(|(k, v)| (k.to_string(), v.clone()))
             .collect()
+    }
+
+    // ── G9 step 级 when 门：invoke 前求值，假则零调用 ──
+
+    fn gated_body(steps: Vec<StepItem>) -> PipelineConfig {
+        PipelineConfig {
+            name: "gate".into(),
+            loop_bodies: vec![LoopBody {
+                id: "main".into(),
+                steps: vec![PipelineStep {
+                    id: "body".into(),
+                    when: None,
+                    steps,
+                    context: HashMap::new(),
+                    routes: vec![],
+                    loop_config: None,
+                }],
+                loop_config: None,
+                while_cond: None,
+                exit_routes: vec![],
+                run_on_error: false,
+            }],
+            checkpoint: Default::default(),
+        }
+    }
+
+    #[tokio::test]
+    async fn when_gate_false_skips_item_zero_calls() {
+        let fixture = Fixture::build(&["a", "b"]);
+        fixture.invoker.set_result(
+            "a",
+            PluginResult {
+                state_updates: updates(&[("a_val", json!(1))]),
+                ..Default::default()
+            },
+        );
+        let config = gated_body(vec![
+            StepItem::Bare("a".into()),
+            StepItem::Gated {
+                name: "b".into(),
+                when: Some("False".into()),
+            },
+        ]);
+        let final_state = fixture
+            .run(&config, &StepLibrary::default(), json!({}))
+            .await;
+        assert_eq!(fixture.invoker.call_count("a"), 1);
+        assert_eq!(
+            fixture.invoker.call_count("b"),
+            0,
+            "when=False 的项必须零调用"
+        );
+        assert_eq!(final_state["a_val"], json!(1));
+        assert!(final_state.get("b_val").is_none());
+    }
+
+    #[tokio::test]
+    async fn when_gate_true_runs_item() {
+        let fixture = Fixture::build(&["a"]);
+        let config = gated_body(vec![StepItem::Gated {
+            name: "a".into(),
+            when: Some("True".into()),
+        }]);
+        fixture
+            .run(&config, &StepLibrary::default(), json!({}))
+            .await;
+        assert_eq!(fixture.invoker.call_count("a"), 1, "when=True 正常执行");
+    }
+
+    #[tokio::test]
+    async fn invalid_when_expression_fails_compilation() {
+        // G10 语义升级：when 语法错误在加载期编译时暴露（不再静默 false 跳过）。
+        // 兼容路径 run() 现场编译 → 返回 Err，调用方如实报错。
+        let fixture = Fixture::build(&["a"]);
+        let config = gated_body(vec![StepItem::Gated {
+            name: "a".into(),
+            when: Some("this is ((( invalid".into()),
+        }]);
+        let err = fixture
+            .executor
+            .run(&config, &StepLibrary::default(), json!({}))
+            .await
+            .unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("编译失败"), "err: {msg}");
+        assert!(msg.contains("when"), "err: {msg}");
+    }
+
+    #[tokio::test]
+    async fn group_when_false_skips_whole_step() {
+        let fixture = Fixture::build(&["a", "b"]);
+        let mut config = gated_body(vec![StepItem::Bare("a".into()), StepItem::Bare("b".into())]);
+        config.loop_bodies[0].steps[0].when = Some("False".into());
+        fixture
+            .run(&config, &StepLibrary::default(), json!({}))
+            .await;
+        assert_eq!(
+            fixture.invoker.call_count("a"),
+            0,
+            "组级 when=False 组内零调用"
+        );
+        assert_eq!(fixture.invoker.call_count("b"), 0);
+    }
+
+    #[tokio::test]
+    async fn gate_reads_state_updated_by_earlier_item() {
+        // 门在到达时对 state 求值：前一项把 go 置 True 后，后一项的门放行
+        let fixture = Fixture::build(&["a", "b"]);
+        fixture.invoker.set_result(
+            "a",
+            PluginResult {
+                state_updates: updates(&[("go", json!(true))]),
+                ..Default::default()
+            },
+        );
+        let config = gated_body(vec![
+            StepItem::Bare("a".into()),
+            StepItem::Gated {
+                name: "b".into(),
+                when: Some("go == True".into()),
+            },
+        ]);
+        fixture
+            .run(&config, &StepLibrary::default(), json!({}))
+            .await;
+        assert_eq!(fixture.invoker.call_count("a"), 1);
+        assert_eq!(
+            fixture.invoker.call_count("b"),
+            1,
+            "前项更新 state 后门应放行"
+        );
     }
 
     /// 计数式 invoker：每次调用计数 +1，可选在第 N 次后 set `ended` 或 `suspended`。
@@ -1747,16 +2022,16 @@ mod tests {
         let config = PipelineConfig {
             name: "single".into(),
             loop_bodies: vec![LoopBody {
-            id: "main".into(),
+                id: "main".into(),
 
-            steps: vec![atomic_step("s1", "echo")],
+                steps: vec![atomic_step("s1", "echo")],
 
-            loop_config: None,
+                loop_config: None,
 
-            exit_routes: vec![],
+                while_cond: None,
+                exit_routes: vec![],
 
-            run_on_error: false,
-
+                run_on_error: false,
             }],
             checkpoint: Default::default(),
         };
@@ -1795,22 +2070,23 @@ mod tests {
         let config = PipelineConfig {
             name: "composite".into(),
             loop_bodies: vec![LoopBody {
-            id: "main".into(),
+                id: "main".into(),
 
-            steps: vec![PipelineStep {
-                id: "parent".into(),
-                steps: vec!["child_a".into(), "child_b".into()],
-                context: HashMap::new(),
-                routes: vec![],
+                steps: vec![PipelineStep {
+                    id: "parent".into(),
+                    steps: vec!["child_a".into(), "child_b".into()],
+                    when: None,
+                    context: HashMap::new(),
+                    routes: vec![],
+                    loop_config: None,
+                }],
+
                 loop_config: None,
-            }],
 
-            loop_config: None,
+                while_cond: None,
+                exit_routes: vec![],
 
-            exit_routes: vec![],
-
-            run_on_error: false,
-
+                run_on_error: false,
             }],
             checkpoint: Default::default(),
         };
@@ -1844,25 +2120,26 @@ mod tests {
         let config = PipelineConfig {
             name: "double".into(),
             loop_bodies: vec![LoopBody {
-            id: "main".into(),
+                id: "main".into(),
 
-            steps: vec![
-                PipelineStep {
-                    id: "parent".into(),
-                    steps: vec!["child".into()],
-                    context: HashMap::new(),
-                    routes: vec![],
-                    loop_config: None,
-                },
-                atomic_step("child", "a"),
-            ],
+                steps: vec![
+                    PipelineStep {
+                        id: "parent".into(),
+                        steps: vec!["child".into()],
+                        when: None,
+                        context: HashMap::new(),
+                        routes: vec![],
+                        loop_config: None,
+                    },
+                    atomic_step("child", "a"),
+                ],
 
-            loop_config: None,
+                loop_config: None,
 
-            exit_routes: vec![],
+                while_cond: None,
+                exit_routes: vec![],
 
-            run_on_error: false,
-
+                run_on_error: false,
             }],
             checkpoint: Default::default(),
         };
@@ -1887,23 +2164,24 @@ mod tests {
         let config = PipelineConfig {
             name: "with_lib".into(),
             loop_bodies: vec![LoopBody {
-            id: "main".into(),
+                id: "main".into(),
 
-            steps: vec![atomic_step("caller", "shared_step")],
+                steps: vec![atomic_step("caller", "shared_step")],
 
-            loop_config: None,
+                loop_config: None,
 
-            exit_routes: vec![],
+                while_cond: None,
+                exit_routes: vec![],
 
-            run_on_error: false,
-
+                run_on_error: false,
             }],
             checkpoint: Default::default(),
         };
         let mut library = StepLibrary::default();
-        library
-            .steps
-            .insert("shared_step".to_string(), atomic_step("shared_step", "lib_plugin"));
+        library.steps.insert(
+            "shared_step".to_string(),
+            atomic_step("shared_step", "lib_plugin"),
+        );
         let final_state = fixture.run(&config, &library, json!({})).await;
         assert_eq!(fixture.invoker.call_count("lib_plugin"), 1);
         assert_eq!(final_state["lib_out"], json!("from_library"));
@@ -1924,14 +2202,15 @@ mod tests {
         let config = PipelineConfig {
             name: "loop_test".into(),
             loop_bodies: vec![LoopBody {
-            id: "main".into(),
-            steps: vec![atomic_step("body", "counter_plugin")],
-            loop_config: Some(agentos_core::types::LoopConfig {
-                enabled: true,
-                max_iterations: -1, // 无限，靠 ended 退出
-            }),
-            exit_routes: vec![],
-            run_on_error: false,
+                id: "main".into(),
+                steps: vec![atomic_step("body", "counter_plugin")],
+                loop_config: Some(agentos_core::types::LoopConfig {
+                    enabled: true,
+                    max_iterations: -1, // 无限，靠 ended 退出
+                }),
+                while_cond: None,
+                exit_routes: vec![],
+                run_on_error: false,
             }],
             checkpoint: Default::default(),
         };
@@ -1960,14 +2239,15 @@ mod tests {
         let config = PipelineConfig {
             name: "loop_cap".into(),
             loop_bodies: vec![LoopBody {
-            id: "main".into(),
-            steps: vec![atomic_step("body", "p")],
-            loop_config: Some(agentos_core::types::LoopConfig {
-                enabled: true,
-                max_iterations: 2,
-            }),
-            exit_routes: vec![],
-            run_on_error: false,
+                id: "main".into(),
+                steps: vec![atomic_step("body", "p")],
+                loop_config: Some(agentos_core::types::LoopConfig {
+                    enabled: true,
+                    max_iterations: 2,
+                }),
+                while_cond: None,
+                exit_routes: vec![],
+                run_on_error: false,
             }],
             checkpoint: Default::default(),
         };
@@ -1982,9 +2262,13 @@ mod tests {
     async fn test_routes() {
         // routes when 条件匹配后 set 字段 + ended
         let fixture = Fixture::build(&[]);
-        let config = PipelineConfig::single_body("routes", LoopConfig::default(), vec![PipelineStep {
+        let config = PipelineConfig::single_body(
+            "routes",
+            LoopConfig::default(),
+            vec![PipelineStep {
                 id: "router".into(),
                 steps: vec![], // 不调任何插件
+                when: None,
                 context: HashMap::new(),
                 routes: vec![Route {
                     when: "core_type == 'tool_execute'".into(),
@@ -1994,7 +2278,8 @@ mod tests {
                     },
                 }],
                 loop_config: None,
-            }]);
+            }],
+        );
         let library = StepLibrary::default();
         let state = fixture
             .run(&config, &library, json!({ "core_type": "tool_execute" }))
@@ -2010,28 +2295,29 @@ mod tests {
         let config = PipelineConfig {
             name: "wait".into(),
             loop_bodies: vec![LoopBody {
-            id: "main".into(),
+                id: "main".into(),
 
-            steps: vec![PipelineStep {
-                id: "w".into(),
-                steps: vec![],
-                context: HashMap::new(),
-                routes: vec![Route {
-                    when: "True".into(),
-                    then: agentos_core::types::RouteAction {
-                        next: RouteNext::Wait,
-                        set: HashMap::new(),
-                    },
+                steps: vec![PipelineStep {
+                    id: "w".into(),
+                    steps: vec![],
+                    when: None,
+                    context: HashMap::new(),
+                    routes: vec![Route {
+                        when: "True".into(),
+                        then: agentos_core::types::RouteAction {
+                            next: RouteNext::Wait,
+                            set: HashMap::new(),
+                        },
+                    }],
+                    loop_config: None,
                 }],
+
                 loop_config: None,
-            }],
 
-            loop_config: None,
+                while_cond: None,
+                exit_routes: vec![],
 
-            exit_routes: vec![],
-
-            run_on_error: false,
-
+                run_on_error: false,
             }],
             checkpoint: Default::default(),
         };
@@ -2042,33 +2328,35 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_miss_reported() {
-        // step 引用不存在的 step id 和插件名，不 panic（error log）
+    async fn test_unknown_reference_fails_compilation() {
+        // G10 语义升级：引用不存在的 step/插件在加载期编译时报错（不静默 error log）。
         let fixture = Fixture::build(&[]);
         let config = PipelineConfig {
             name: "miss".into(),
             loop_bodies: vec![LoopBody {
-            id: "main".into(),
+                id: "main".into(),
 
-            steps: vec![
-                atomic_step("s1", "ghost_step"), // 既不是 step 也不是已知插件
-                atomic_step("s2", "ghost_plugin"),
-            ],
+                steps: vec![
+                    atomic_step("s1", "ghost_step"), // 既不是 step 也不是已知插件
+                    atomic_step("s2", "ghost_plugin"),
+                ],
 
-            loop_config: None,
+                loop_config: None,
 
-            exit_routes: vec![],
+                while_cond: None,
+                exit_routes: vec![],
 
-            run_on_error: false,
-
+                run_on_error: false,
             }],
             checkpoint: Default::default(),
         };
-        // 不应 panic；返回的 state 仍合法
-        let state = fixture
+        let err = fixture
+            .executor
             .run(&config, &StepLibrary::default(), json!({}))
-            .await;
-        assert_eq!(state["ended"], json!(false));
+            .await
+            .unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("ghost_step"), "err: {msg}");
     }
 
     #[tokio::test]
@@ -2089,13 +2377,14 @@ mod tests {
         let _ = fixture;
         let fixture2 = Fixture::build(&[]);
         let mut context = HashMap::new();
-        context.insert(
-            "injected".to_string(),
-            json!("agent={{state.agent_id}}"),
-        );
-        let config = PipelineConfig::single_body("ctx", LoopConfig::default(), vec![PipelineStep {
+        context.insert("injected".to_string(), json!("agent={{state.agent_id}}"));
+        let config = PipelineConfig::single_body(
+            "ctx",
+            LoopConfig::default(),
+            vec![PipelineStep {
                 id: "ctx_step".into(),
                 steps: vec![],
+                when: None,
                 context,
                 routes: vec![Route {
                     when: "injected == 'agent=A1'".into(),
@@ -2105,9 +2394,14 @@ mod tests {
                     },
                 }],
                 loop_config: None,
-            }]);
+            }],
+        );
         let state = fixture2
-            .run(&config, &StepLibrary::default(), json!({ "agent_id": "A1" }))
+            .run(
+                &config,
+                &StepLibrary::default(),
+                json!({ "agent_id": "A1" }),
+            )
             .await;
         // injected 模板被渲染为 "agent=A1"
         assert_eq!(state["injected"], json!("agent=A1"));
@@ -2138,22 +2432,23 @@ mod tests {
         let config = PipelineConfig {
             name: "skip".into(),
             loop_bodies: vec![LoopBody {
-            id: "main".into(),
+                id: "main".into(),
 
-            steps: vec![PipelineStep {
-                id: "both".into(),
-                steps: vec!["first".into(), "second".into()],
-                context: HashMap::new(),
-                routes: vec![],
+                steps: vec![PipelineStep {
+                    id: "both".into(),
+                    steps: vec!["first".into(), "second".into()],
+                    when: None,
+                    context: HashMap::new(),
+                    routes: vec![],
+                    loop_config: None,
+                }],
+
                 loop_config: None,
-            }],
 
-            loop_config: None,
+                while_cond: None,
+                exit_routes: vec![],
 
-            exit_routes: vec![],
-
-            run_on_error: false,
-
+                run_on_error: false,
             }],
             checkpoint: Default::default(),
         };
@@ -2191,22 +2486,23 @@ mod tests {
         let config = PipelineConfig {
             name: "err".into(),
             loop_bodies: vec![LoopBody {
-            id: "main".into(),
+                id: "main".into(),
 
-            steps: vec![PipelineStep {
-                id: "seq".into(),
-                steps: vec!["bad".into(), "good".into()],
-                context: HashMap::new(),
-                routes: vec![],
+                steps: vec![PipelineStep {
+                    id: "seq".into(),
+                    steps: vec!["bad".into(), "good".into()],
+                    when: None,
+                    context: HashMap::new(),
+                    routes: vec![],
+                    loop_config: None,
+                }],
+
                 loop_config: None,
-            }],
 
-            loop_config: None,
+                while_cond: None,
+                exit_routes: vec![],
 
-            exit_routes: vec![],
-
-            run_on_error: false,
-
+                run_on_error: false,
             }],
             checkpoint: Default::default(),
         };
@@ -2233,14 +2529,15 @@ mod tests {
         let config = PipelineConfig {
             name: "suspend_loop".into(),
             loop_bodies: vec![LoopBody {
-            id: "main".into(),
-            steps: vec![atomic_step("body", "p")],
-            loop_config: Some(agentos_core::types::LoopConfig {
-                enabled: true,
-                max_iterations: 10,
-            }),
-            exit_routes: vec![],
-            run_on_error: false,
+                id: "main".into(),
+                steps: vec![atomic_step("body", "p")],
+                loop_config: Some(agentos_core::types::LoopConfig {
+                    enabled: true,
+                    max_iterations: 10,
+                }),
+                while_cond: None,
+                exit_routes: vec![],
+                run_on_error: false,
             }],
             checkpoint: Default::default(),
         };
@@ -2269,22 +2566,23 @@ mod tests {
         let config = PipelineConfig {
             name: "dyn".into(),
             loop_bodies: vec![LoopBody {
-            id: "main".into(),
+                id: "main".into(),
 
-            steps: vec![PipelineStep {
-                id: "dyn_step".into(),
-                steps: vec!["{{state.core_plugin}}".to_string()],
-                context: HashMap::new(),
-                routes: vec![],
+                steps: vec![PipelineStep {
+                    id: "dyn_step".into(),
+                    steps: vec!["{{state.core_plugin}}".into()],
+                    when: None,
+                    context: HashMap::new(),
+                    routes: vec![],
+                    loop_config: None,
+                }],
+
                 loop_config: None,
-            }],
 
-            loop_config: None,
+                while_cond: None,
+                exit_routes: vec![],
 
-            exit_routes: vec![],
-
-            run_on_error: false,
-
+                run_on_error: false,
             }],
             checkpoint: Default::default(),
         };
@@ -2306,16 +2604,16 @@ mod tests {
         let config = PipelineConfig {
             name: "noop".into(),
             loop_bodies: vec![LoopBody {
-            id: "main".into(),
+                id: "main".into(),
 
-            steps: vec![],
+                steps: vec![],
 
-            loop_config: None,
+                loop_config: None,
 
-            exit_routes: vec![],
+                while_cond: None,
+                exit_routes: vec![],
 
-            run_on_error: false,
-
+                run_on_error: false,
             }],
             checkpoint: Default::default(),
         };
@@ -2327,41 +2625,61 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_route_step_next_recorded() {
-        // RouteNext::Step(id) → 记到 state.next_step（简化语义）
-        let fixture = Fixture::build(&[]);
+    async fn test_route_step_jumps_to_target_step() {
+        // G10 语义升级：RouteNext::Step(id) 真跳转——j 命中后跳到 t 执行，
+        // 不再写 state.next_step 记号。跳转目标须在本循环体（编译期校验）。
+        let fixture = Fixture::build(&["a"]);
         let config = PipelineConfig {
             name: "jump".into(),
             loop_bodies: vec![LoopBody {
-            id: "main".into(),
+                id: "main".into(),
 
-            steps: vec![PipelineStep {
-                id: "j".into(),
-                steps: vec![],
-                context: HashMap::new(),
-                routes: vec![Route {
-                    when: "True".into(),
-                    then: agentos_core::types::RouteAction {
-                        next: RouteNext::Step("somewhere".into()),
-                        set: HashMap::new(),
+                steps: vec![
+                    PipelineStep {
+                        id: "j".into(),
+                        steps: vec![],
+                        when: None,
+                        context: HashMap::new(),
+                        routes: vec![Route {
+                            when: "True".into(),
+                            then: agentos_core::types::RouteAction {
+                                next: RouteNext::Step("t".into()),
+                                set: HashMap::new(),
+                            },
+                        }],
+                        loop_config: None,
                     },
-                }],
+                    PipelineStep {
+                        id: "t".into(),
+                        steps: vec!["a".into()],
+                        when: None,
+                        context: HashMap::new(),
+                        routes: vec![],
+                        loop_config: None,
+                    },
+                ],
+
                 loop_config: None,
-            }],
 
-            loop_config: None,
+                while_cond: None,
+                exit_routes: vec![],
 
-            exit_routes: vec![],
-
-            run_on_error: false,
-
+                run_on_error: false,
             }],
             checkpoint: Default::default(),
         };
         let state = fixture
             .run(&config, &StepLibrary::default(), json!({}))
             .await;
-        assert_eq!(state["next_step"], json!("somewhere"));
+        assert_eq!(
+            fixture.invoker.call_count("a"),
+            1,
+            "j 跳转到 t 后 t 的插件被执行"
+        );
+        assert!(
+            state.get("next_step").is_none(),
+            "Step 真跳转不再写 next_step 记号"
+        );
     }
 
     #[tokio::test]
@@ -2378,21 +2696,24 @@ mod tests {
         );
         let config = PipelineConfig {
             name: "step_loop".into(),
-            loop_bodies: vec![LoopBody { // 管道级不循环
-            id: "main".into(),
-            steps: vec![PipelineStep {
-                id: "looper".into(),
-                steps: vec!["p".to_string()],
-                context: HashMap::new(),
-                routes: vec![],
-                loop_config: Some(agentos_core::types::LoopConfig {
-                    enabled: true,
-                    max_iterations: -1,
-                }),
-            }],
-            loop_config: None,
-            exit_routes: vec![],
-            run_on_error: false,
+            loop_bodies: vec![LoopBody {
+                // 管道级不循环
+                id: "main".into(),
+                steps: vec![PipelineStep {
+                    id: "looper".into(),
+                    steps: vec!["p".into()],
+                    when: None,
+                    context: HashMap::new(),
+                    routes: vec![],
+                    loop_config: Some(agentos_core::types::LoopConfig {
+                        enabled: true,
+                        max_iterations: -1,
+                    }),
+                }],
+                loop_config: None,
+                while_cond: None,
+                exit_routes: vec![],
+                run_on_error: false,
             }],
             checkpoint: Default::default(),
         };
@@ -2434,20 +2755,20 @@ mod tests {
             },
         );
 
-        let executor = make_executor(fixture.invoker.clone(), &["noop"])
-            .with_config_center(cc);
+        let executor = make_executor(fixture.invoker.clone(), &["noop"]).with_config_center(cc);
 
         let config = PipelineConfig {
             name: "reload_test".into(),
             loop_bodies: vec![LoopBody {
-            id: "main".into(),
-            steps: vec![atomic_step("s1", "noop")],
-            loop_config: Some(agentos_core::types::LoopConfig {
-                enabled: true,
-                max_iterations: 5,
-            }),
-            exit_routes: vec![],
-            run_on_error: false,
+                id: "main".into(),
+                steps: vec![atomic_step("s1", "noop")],
+                loop_config: Some(agentos_core::types::LoopConfig {
+                    enabled: true,
+                    max_iterations: 5,
+                }),
+                while_cond: None,
+                exit_routes: vec![],
+                run_on_error: false,
             }],
             checkpoint: Default::default(),
         };
@@ -2462,8 +2783,7 @@ mod tests {
 
         // 验证 load_agent_into_state 被调用：agent yaml 字段注入了 state
         assert_eq!(
-            final_state["system_prompt"],
-            "注入的提示词",
+            final_state["system_prompt"], "注入的提示词",
             "config_center 注入后，loop 应调 load_agent_into_state"
         );
         assert_eq!(final_state["custom"], "hello");
@@ -2488,14 +2808,15 @@ mod tests {
         let config = PipelineConfig {
             name: "no_cc".into(),
             loop_bodies: vec![LoopBody {
-            id: "main".into(),
-            steps: vec![atomic_step("s1", "noop")],
-            loop_config: Some(agentos_core::types::LoopConfig {
-                enabled: true,
-                max_iterations: 5,
-            }),
-            exit_routes: vec![],
-            run_on_error: false,
+                id: "main".into(),
+                steps: vec![atomic_step("s1", "noop")],
+                loop_config: Some(agentos_core::types::LoopConfig {
+                    enabled: true,
+                    max_iterations: 5,
+                }),
+                while_cond: None,
+                exit_routes: vec![],
+                run_on_error: false,
             }],
             checkpoint: Default::default(),
         };
@@ -2539,7 +2860,8 @@ mod tests {
     fn test_inject_run_message_id_skips_insert_ops() {
         // 非 set 的 op（insert）跳过。
         let mut state = json!({"message_id": "m_2"});
-        let ops = vec![json!({"op": "insert", "at": 0, "msg": {"role": "assistant", "content": "x"}})];
+        let ops =
+            vec![json!({"op": "insert", "at": 0, "msg": {"role": "assistant", "content": "x"}})];
         let out = inject_run_message_id(&mut state, &ops, -1);
         assert_eq!(out, ops);
         assert!(state.get("_assistant_id_assigned").is_none());
@@ -2601,9 +2923,12 @@ mod tests {
             json!({"seq": 0, "role": "user"}),
             json!({"seq": 1, "role": "assistant"}),
         ];
-        apply_slot_ops_to_array(&mut arr, &[json!({
-            "op": "insert", "at": 0, "msg": {"role": "system"}
-        })]);
+        apply_slot_ops_to_array(
+            &mut arr,
+            &[json!({
+                "op": "insert", "at": 0, "msg": {"role": "system"}
+            })],
+        );
         let seqs: Vec<i64> = arr.iter().map(|m| m["seq"].as_i64().unwrap()).collect();
         assert_eq!(seqs, vec![0, 1, 2], "insert at 0 后段顺延");
         assert_eq!(arr[0]["role"], "system");
@@ -2663,8 +2988,8 @@ mod tests {
     #[test]
     fn test_op_ledger_entry_set_without_msg_ids_null() {
         // set 但 msg 缺失（delete）→ message_id/blob_id 为 null。
-        let e = op_ledger_entry(&json!({"op": "set", "seq": 3, "msg": null}))
-            .expect("set 应产生实录");
+        let e =
+            op_ledger_entry(&json!({"op": "set", "seq": 3, "msg": null})).expect("set 应产生实录");
         assert_eq!(e["op"], "set");
         assert_eq!(e["seq"], 3);
         assert!(e["message_id"].is_null());

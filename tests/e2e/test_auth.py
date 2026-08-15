@@ -1,3 +1,4 @@
+# @feature: FP-MIGR 0.1→0.2迁移（0.1 遗留测试） | @ci: python-plugins-test
 """认证全链路 E2E 测试。
 
 验证注册 → 登录获取 Token → Token 访问 API → Token 刷新 → Token 撤销后返回 401。

@@ -1,7 +1,6 @@
 """
 工作空间感知 Mixin
 
-从 0.1 src/tools/builtin/workspace_aware/tool.py 迁移。
 暴露接口：
 - WorkspaceAwareMixin：统一 workspace 消费的 Mixin 类
 

@@ -53,6 +53,10 @@ export interface PipelineViewEntry {
   agentName?: string
   /** 关联任务 ID（kind=task 时有值） */
   taskId?: string
+  /** 归属会话标题（threadId 命中会话列表时有值；无则视为无归属孤儿管道） */
+  sessionTitle?: string
+  /** 任务工作空间路径（kind=task 且任务带 workspace 时有值，供"打开工作空间"） */
+  workspacePath?: string
   /** 任务进度（0-100，kind=task 且任务带进度时有值） */
   progress?: number
   /** 汇总 token 用量（内核 summaries；实时以 usage 覆盖） */
@@ -63,4 +67,8 @@ export interface PipelineViewEntry {
     completionTokens: number
     totalTokens: number
   }
+  /** 当前循环体阶段（内核 state.current_phase：init/main/exit…，多循环体真值） */
+  currentPhase?: string
+  /** 消息条数（state.messages 规模，迭代轮次的粗粒度指标） */
+  messageCount?: number
 }

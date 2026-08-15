@@ -130,7 +130,7 @@ const PluginConfigRoute = lazy(() =>
   })),
 )
 // 插件 page 独立路由渲染器：通配 /p/:pageId → contributionRegistry.getPage → renderPageContent
-// （阶段2 遗留 — react-router 路由动态化；让插件 page 成为真实 URL 路由，可分享/刷新）
+// （react-router 路由动态化；让插件 page 成为真实 URL 路由，可分享/刷新）
 const PluginPageRenderer = lazy(() =>
   import('@/components/schema/PluginPageRenderer').then((m) => ({ default: m.PluginPageRenderer })),
 )
@@ -150,7 +150,8 @@ function ProtectedRoute({ children }: { children: ReactNode }): ReactNode {
   const { isAuthenticated, isInitializing } = useAuthStore()
 
   // 开发/本地模式：直接放行，不跳登录页（便于查看布局效果）
-  // 生产模式仍走正常鉴权。后续按 VS Code 方式改为侧边栏登录入口。
+  // 生产模式仍走正常鉴权。
+  // TODO: 登录入口改为侧边栏（VS Code 式）
   const devBypass = import.meta.env.DEV
 
   if (!devBypass && isInitializing) {
@@ -215,6 +216,15 @@ function HomePage(): ReactNode {
   /** 当前活跃会话的消息列表（从 pipelineMessageStore 响应式读取） */
   const activePipelineId = usePipelineMessageStore((s) => s.activePipelineId)
 
+  /** 排队优先级（ADR-2026-08-15）：切换选中会话时上报内核——全局并发闸门
+   * 有排队时，当前选中管道的 run 优先获得槽位（其他管道的排队不饿死，
+   * 空槽时照常执行）。 */
+  useEffect(() => {
+    if (activeSessionId) {
+      globalWS.sendActiveThread(activeSessionId, activePipelineId ?? undefined)
+    }
+  }, [activeSessionId, activePipelineId])
+
   /** 当前活跃会话的分页状态（从 pipelineMessageStore 响应式读取） */
   const activeKey = activePipelineId
   const hasMoreMessages = usePipelineMessageStore((s) => activeKey ? (s.hasMoreOlderByPipeline[activeKey] ?? false) : false)
@@ -234,9 +244,6 @@ function HomePage(): ReactNode {
   }, [])
 
   // 响应式订阅 token：登录/登出/token 刷新时自动（重）连 WS。
-  // 原实现用 getState().token 快照 + 空依赖数组，只在组件挂载时执行一次——
-  // 未登录进入页面时 token 为 null 不连接，登录成功后 token 更新但 effect 不重跑，
-  // 导致 WS 永远不连（"启动后一直未连接、发送卡住"根因）。
   // 各类 App 记录登录状态的通用模式：持久化凭证恢复 → 设置响应式状态 → 依赖它的逻辑
   // 自动响应。这里订阅 token 变化，登录后 effect 自动重跑建立 WS 连接。
   const authToken = useAuthStore((s) => s.token)

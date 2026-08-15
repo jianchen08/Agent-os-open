@@ -130,7 +130,7 @@ fn make_test_manifest(
         mcp: None,
         lifecycle: None,
         native: None,
-        wasm: None,
+        granted_capabilities: vec![],
         requires_content,
         invoke_entry: None,
         config_files: vec![],
@@ -260,10 +260,7 @@ impl StorageBackend for MockStorageBackend {
     }
 
     // ── 域3/4/5 stub（M1）──────────────────────────────────────────
-    async fn append_execution_record(
-        &self,
-        _record: &ExecutionRecord,
-    ) -> Result<(), StorageError> {
+    async fn append_execution_record(&self, _record: &ExecutionRecord) -> Result<(), StorageError> {
         Ok(())
     }
     async fn list_execution_records(
@@ -273,10 +270,7 @@ impl StorageBackend for MockStorageBackend {
     ) -> Result<Vec<ExecutionRecord>, StorageError> {
         Ok(vec![])
     }
-    async fn count_execution_records(
-        &self,
-        _pipeline_run_id: &str,
-    ) -> Result<u64, StorageError> {
+    async fn count_execution_records(&self, _pipeline_run_id: &str) -> Result<u64, StorageError> {
         Ok(0)
     }
     async fn delete_execution_records_by_session(
@@ -285,10 +279,7 @@ impl StorageBackend for MockStorageBackend {
     ) -> Result<u64, StorageError> {
         Ok(0)
     }
-    async fn save_run_summary(
-        &self,
-        _summary: &PipelineRunSummary,
-    ) -> Result<(), StorageError> {
+    async fn save_run_summary(&self, _summary: &PipelineRunSummary) -> Result<(), StorageError> {
         Ok(())
     }
     async fn get_run_summary(

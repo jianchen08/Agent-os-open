@@ -38,6 +38,42 @@ function normalizeRecord(record: Record<string, unknown>): Record<string, unknow
 }
 
 /** 从 WebSocket interaction_request 事件数据解析为 PendingInteraction 后端传递 file_paths（文件路径列表），前端通过 file-content API 拉取实际内容 */
+
+/**
+ * options 归一化：后端/LLM 可能把选项发成字符串数组（["批准","拒绝"]），
+ * 而 InteractionCard 渲染的是 opt.label（InteractionOption 对象数组）。
+ * 字符串元素会导致按钮文字为空——表现为"审批卡片只有输入框、没有选项按钮"。
+ * 另一类实测形态是对象包裹（{"item":["批准","拒绝"]}，MiniMax 传参畸形）：
+ * 取其第一个数组值继续归一化。
+ */
+function normalizeOptions(raw: unknown): PendingInteraction['options'] {
+  let list: unknown = raw
+  if (raw && typeof raw === 'object' && !Array.isArray(raw)) {
+    const firstArray = Object.values(raw as Record<string, unknown>).find(
+      (v) => Array.isArray(v),
+    )
+    list = firstArray
+  }
+  if (!Array.isArray(list)) return undefined
+  const out = list
+    .map((item, i) => {
+      if (typeof item === 'string') return { id: String(i), label: item }
+      if (item && typeof item === 'object') {
+        const o = item as Record<string, unknown>
+        const label = (o.label as string) || (o.text as string) || (o.name as string)
+        if (!label) return null
+        return {
+          id: o.id != null ? String(o.id) : String(i),
+          label,
+          ...(o.description ? { description: o.description as string } : {}),
+        }
+      }
+      return null
+    })
+    .filter((x): x is { id: string; label: string; description?: string } => x !== null)
+  return out.length > 0 ? out : undefined
+}
+
 async function parseInteractionEvent(
   data: Record<string, unknown>,
 ): Promise<Omit<PendingInteraction, 'status'> | null> {
@@ -102,7 +138,7 @@ async function parseInteractionEvent(
     tabId: (inner.tab_id as string) || '',
     agentId: (inner.agent_id as string) || '',
     pipelineId,
-    options: inner.options as PendingInteraction['options'],
+    options: normalizeOptions(inner.options),
     questions: inner.questions as string[],
     initialMessage: inner.initial_message as string,
     suggestions: inner.suggestions as string[],

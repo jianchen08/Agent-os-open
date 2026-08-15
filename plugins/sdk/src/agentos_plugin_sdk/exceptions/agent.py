@@ -25,7 +25,7 @@ class AgentNotFoundError(AgentException):
         name: Agent 名称
     """
 
-    def __init__(self, name: str, details: dict[str, Any] | None = None):
+    def __init__(self, name: str, details: dict[str, Any] | None = None) -> None:
         """初始化 Agent 不存在异常
 
         Args:
@@ -51,7 +51,7 @@ class AgentAlreadyExistsError(AgentException):
         name: Agent 名称
     """
 
-    def __init__(self, name: str, details: dict[str, Any] | None = None):
+    def __init__(self, name: str, details: dict[str, Any] | None = None) -> None:
         """初始化 Agent 已存在异常
 
         Args:
@@ -83,7 +83,7 @@ class AgentExecutionError(AgentException):
         message: str,
         cause: Exception | None = None,
         details: dict[str, Any] | None = None,
-    ):
+    ) -> None:
         """初始化 Agent 执行错误异常
 
         Args:
@@ -101,7 +101,7 @@ class SubAgentNestingError(AgentException):
     当 SubAgent 尝试再创建 SubAgent 时抛出。
     """
 
-    def __init__(self, details: dict[str, Any] | None = None):
+    def __init__(self, details: dict[str, Any] | None = None) -> None:
         """初始化 SubAgent 嵌套错误异常
 
         Args:

@@ -23,7 +23,7 @@ class ToolNotFoundError(ToolException):
         name: 工具名称
     """
 
-    def __init__(self, name: str, details: dict[str, Any] | None = None):
+    def __init__(self, name: str, details: dict[str, Any] | None = None) -> None:
         """初始化工具不存在异常
 
         Args:
@@ -43,7 +43,7 @@ class ToolAlreadyExistsError(ToolException):
         name: 工具名称
     """
 
-    def __init__(self, name: str, details: dict[str, Any] | None = None):
+    def __init__(self, name: str, details: dict[str, Any] | None = None) -> None:
         """初始化工具已存在异常
 
         Args:
@@ -68,7 +68,7 @@ class ToolValidationError(ToolException):
         message: str,
         errors: list[str] | None = None,
         details: dict[str, Any] | None = None,
-    ):
+    ) -> None:
         """初始化工具验证失败异常
 
         Args:
@@ -97,7 +97,7 @@ class ToolExecutionError(ToolException):
         message: str,
         cause: Exception | None = None,
         details: dict[str, Any] | None = None,
-    ):
+    ) -> None:
         """初始化工具执行失败异常
 
         Args:
@@ -130,7 +130,7 @@ class ApprovalRequiredError(ToolException):
         tool_name: str,
         reason: str | None = None,
         details: dict[str, Any] | None = None,
-    ):
+    ) -> None:
         """初始化需要审批异常
 
         Args:
@@ -169,7 +169,7 @@ class MCPConnectionError(MCPException):
         message: str,
         details: dict[str, Any] | None = None,
         cause: Exception | None = None,
-    ):
+    ) -> None:
         """初始化 MCP 连接错误异常
 
         Args:
@@ -196,7 +196,7 @@ class MCPConfigError(MCPException):
         self,
         message: str,
         details: dict[str, Any] | None = None,
-    ):
+    ) -> None:
         """初始化 MCP 配置错误异常
 
         Args:

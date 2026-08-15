@@ -1,0 +1,214 @@
+{
+  "id": "dsh_adapter",
+  "name": "DSH Plugin Adapter",
+  "description": "DeepSeek Harness (DSH) 插件适配器：非 MCP 后端工具经 Node runtime 桥接（通道 A）、前端视觉组件经 vendor 移植层 + render 意图路由、DSH 插件包清单翻译。DSH 源码零改动（只读参考 D:\\reference_repos\\deepseek-harness，commit 47f9438 锁定，MIT）。 D.6 槽位拆分后工具声明即注册（capabilities.tools = LLM 面，无需类型豁免）。",
+  "version": "0.1.0",
+  "plugin_type": "system",
+  "language": "python",
+  "host_type": "sidecar",
+  "entry": "python server.py",
+  "capabilities": {
+    "tools": [
+      {
+        "name": "dsh_read",
+        "description": "[DSH read 桥接] Read a UTF-8 text file and return line-numbered content. 在 DSH Node runtime 中执行（实现零翻译）。",
+        "input_schema": {
+          "type": "object",
+          "properties": {
+            "file_path": {
+              "type": "string",
+              "description": "Path to read, resolved by the filesystem backend."
+            },
+            "offset": {
+              "type": "integer",
+              "description": "1-based first line to return. Defaults to 1."
+            },
+            "limit": {
+              "type": "integer",
+              "description": "Maximum number of lines to return. Defaults to 2000."
+            }
+          },
+          "required": [
+            "file_path"
+          ]
+        },
+        "output_schema": {
+          "type": "object",
+          "properties": {
+            "path": {
+              "type": "string"
+            },
+            "offset": {
+              "type": "integer"
+            },
+            "lines": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "number": {
+                    "type": "integer"
+                  },
+                  "text": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "number",
+                  "text"
+                ]
+              }
+            },
+            "totalLines": {
+              "type": "integer"
+            }
+          },
+          "required": [
+            "path",
+            "offset",
+            "lines",
+            "totalLines"
+          ]
+        },
+        "render": {
+          "card": "read",
+          "bindings": {
+            "path": "result.path",
+            "lines": "result.lines",
+            "totalLines": "result.totalLines"
+          }
+        },
+        "category": "file"
+      },
+      {
+        "name": "dsh_glob",
+        "description": "[DSH glob 桥接] Discover files whose paths match a glob pattern, sorted by modification time (packaged ripgrep). 在 DSH Node runtime 中执行。",
+        "input_schema": {
+          "type": "object",
+          "properties": {
+            "pattern": {
+              "type": "string",
+              "description": "Glob pattern to match file paths against (e.g. \"**/*.ts\")."
+            },
+            "path": {
+              "type": "string",
+              "description": "Directory to search in. Defaults to the bridge workspace."
+            }
+          },
+          "required": [
+            "pattern"
+          ]
+        },
+        "output_schema": {
+          "type": "object",
+          "properties": {
+            "root": {
+              "type": "string"
+            },
+            "paths": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          },
+          "required": [
+            "root",
+            "paths"
+          ]
+        },
+        "render": {
+          "card": "search",
+          "bindings": {
+            "paths": "result.paths"
+          }
+        },
+        "category": "file"
+      },
+      {
+        "name": "dsh_translate_manifest",
+        "description": "[DSH 适配器] 把 DSH 插件包翻译成灵汐等价注册清单（缺省参数 = 全量装载 dsh_plugins/ 下的插件）。仅做清单翻译，不执行任何 DSH 代码。",
+        "input_schema": {
+          "type": "object",
+          "properties": {
+            "package_path": {
+              "type": "string",
+              "description": "DSH 插件包目录；缺省扫描适配器 dsh_plugins/ 全量"
+            }
+          },
+          "required": []
+        },
+        "category": "system"
+      },
+      {
+        "name": "dsh_list_plugins",
+        "description": "[DSH 适配器] 列出适配器 dsh_plugins/ 下已装载的 DSH 插件包（名称/版本/客户端/renderers 键）。",
+        "input_schema": {
+          "type": "object",
+          "properties": {},
+          "required": []
+        },
+        "category": "system"
+      }
+    ],
+    "resources": [],
+    "route_signals": [],
+    "lifecycle_hooks": [
+      "on_load",
+      "on_unload"
+    ]
+  },
+  "dependencies": [],
+  "permissions": {
+    "filesystem": {
+      "read_paths": [
+        "*"
+      ],
+      "write_paths": []
+    },
+    "network": {
+      "allowed_hosts": []
+    },
+    "env_vars": [
+      "AGENTOS_DSH_REPO_ROOT",
+      "PATH"
+    ],
+    "system_calls": [
+      "node"
+    ]
+  },
+  "error_policy": "skip",
+  "priority": 50,
+  "contributes": {
+    "renderers": [
+      {
+        "tool": "dsh_read",
+        "card": "read"
+      },
+      {
+        "tool": "dsh_glob",
+        "card": "search"
+      }
+    ],
+    "dsh_adapter": {
+      "source_commit": "47f943859bef60e4160492346772ded9b24f765a",
+      "source_version": "0.1.0-rc.5",
+      "backend_channel": "node-runtime-bridge",
+      "frontend_channel": "vendor-port + render-intent",
+      "components": [
+        "DiffBlock",
+        "JsonTree",
+        "ReadBlock",
+        "SearchBlock",
+        "TerminalBlock",
+        "WebBlock",
+        "CodeBlock"
+      ],
+      "out_of_scope": [
+        "mcp-tools (external_mcp direct)",
+        "conversation/trajectory/subagent ui packages",
+        "cordis runtime"
+      ]
+    }
+  }
+}

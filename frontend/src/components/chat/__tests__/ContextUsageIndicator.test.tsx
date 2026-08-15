@@ -1,3 +1,4 @@
+/** @feature FP-T12 前端适配 | @ci: frontend-test */
 /**
  * 功能测试：ContextUsageIndicator 上下文用量指示器（圈型进度）
  *

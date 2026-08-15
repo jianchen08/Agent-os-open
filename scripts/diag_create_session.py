@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import statistics
 import sys
 import time
@@ -26,8 +27,8 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import requests
 
 DEFAULT_BASE = "http://127.0.0.1:8988"
-DEFAULT_USER = "admin"
-DEFAULT_PWD = "admin123"
+DEFAULT_USER = os.environ.get("AGENTOS_ADMIN_USER", "admin")
+DEFAULT_PWD = os.environ.get("AGENTOS_ADMIN_PWD", "admin123")
 
 
 def p50(xs: list[float]) -> float:

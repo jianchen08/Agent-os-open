@@ -116,8 +116,8 @@ class TestPluginManifest:
         entry = data.get("entry") or data.get("invoke", {}).get("entry")
         assert entry and "server.py" in entry, "entry must reference server.py"
 
-        # capabilities.tools 至少声明 5 个工具
-        tool_names = [t["name"] for t in data.get("capabilities", {}).get("tools", [])]
+        # capabilities.services 至少声明 5 个服务方法（D.6 槽位拆分）
+        tool_names = [t["name"] for t in data.get("capabilities", {}).get("services", [])]
         for name in (
             "hindsight.retain",
             "hindsight.recall",
@@ -125,7 +125,7 @@ class TestPluginManifest:
             "hindsight.delete",
             "hindsight.import_document",
         ):
-            assert name in tool_names, f"{name} missing in capabilities.tools"
+            assert name in tool_names, f"{name} missing in capabilities.services"
 
 
 # ═══════════════════════════════════════════════════════════

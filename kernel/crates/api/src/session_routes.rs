@@ -32,7 +32,7 @@ pub async fn list_sessions_handler(
     let mut threads: Vec<Value> = Vec::new();
 
     // 优先读 DB（持久化会话列表）。list_sessions 按 task_local tenant 过滤，
-    // 需在请求租户 scope 内执行（修复前直接调，多租户下永远只读 default）。
+    // 需在请求租户 scope 内执行——scope 缺失回退 default 租户，跨租户读错位。
     let mut db_has_data = false;
     if let Some(store) = state.store.as_ref() {
         let tenant_ctx =
@@ -135,19 +135,28 @@ pub async fn create_session_handler(
     // 注册 thread → user 映射（WS 流式推送据此定位连接）+ thread → pipeline 映射
     if let Some(session) = &state.session {
         session.registry().register_thread(&thread_id, user_id);
-        session.registry().register_thread_pipeline(&thread_id, &pipeline_id);
+        session
+            .registry()
+            .register_thread_pipeline(&thread_id, &pipeline_id);
     }
 
     // 域2持久化：会话落 sessions 表（对齐 0.1 SessionModel）。
     // 内存在 registry 仍保留（WS 路由用），DB 负责跨重启恢复，create 时双写。
     if let Some(store) = state.store.as_ref() {
-        let metadata = body.get("metadata").cloned().unwrap_or_else(|| {
-            json!({ "session_type": "main_pipeline", "user_id": user_id })
-        });
-        let agent_id_str = agent_id.as_str().and_then(|s| if s.is_empty() { None } else { Some(s) });
+        let metadata = body
+            .get("metadata")
+            .cloned()
+            .unwrap_or_else(|| json!({ "session_type": "main_pipeline", "user_id": user_id }));
+        let agent_id_str = agent_id
+            .as_str()
+            .and_then(|s| if s.is_empty() { None } else { Some(s) });
         let session_rec = agentos_core::types::SessionRecord {
             thread_id: thread_id.clone(),
-            title: if title.is_empty() { None } else { Some(title.to_string()) },
+            title: if title.is_empty() {
+                None
+            } else {
+                Some(title.to_string())
+            },
             intent: intent.map(|s| s.to_string()),
             current_state: "active".to_string(),
             agent_id: agent_id_str.map(|s| s.to_string()),
@@ -159,7 +168,7 @@ pub async fn create_session_handler(
             last_active_at: Some(now.clone()),
         };
         // create_session 按 task_local tenant 落库，需在请求租户 scope 内执行
-        // （修复前直接调，多租户下会话落到 default 而非请求用户的租户）。
+        // ——scope 缺失回退 default 租户，会话会落到 default 而非请求用户的租户。
         let tenant_ctx =
             crate::server::request_tenant_ctx(state.store.as_ref(), &headers, &thread_id).await;
         let store_clone = store.clone();
@@ -168,9 +177,10 @@ pub async fn create_session_handler(
         let create_result = agentos_tenant::scope(tenant_ctx, async move {
             store_clone.create_session(&session_rec).await?;
             // 主管道兜底：创建会话即写映射，保证主管道即使未跑过也有映射（删会话级联不漏）。
-            let tenant_id =
-                agentos_tenant::current_or_default("default").tenant_id;
-            store_clone.link_pipeline_session(&pid_clone, &tid_clone, &tenant_id).await?;
+            let tenant_id = agentos_tenant::current_or_default("default").tenant_id;
+            store_clone
+                .link_pipeline_session(&pid_clone, &tid_clone, &tenant_id)
+                .await?;
             Ok::<(), agentos_core::types::StorageError>(())
         })
         .await;
@@ -178,6 +188,18 @@ pub async fn create_session_handler(
             tracing::warn!(thread_id = %thread_id, error = %e, "create_session 落库失败（继续返回）");
         }
     }
+
+    // 域事件插座：session.created → 观察总线（audit/metrics）+ 声明订阅的插件
+    // （capabilities.lifecycle_hooks 含 domain_event，fire-and-forget 不阻塞响应）。
+    crate::plugin_lifecycle::broadcast_domain_event(
+        &state,
+        "session.created",
+        vec![
+            ("session_id", json!(thread_id.as_str())),
+            ("pipeline_id", json!(pipeline_id.as_str())),
+        ],
+    )
+    .await;
 
     Json(json!({
         "thread_id": thread_id,
@@ -333,7 +355,7 @@ pub async fn delete_session_handler(
 ) -> Json<Value> {
     if let Some(store) = state.store.as_ref() {
         // 多租户：级联删除按 task_local tenant 过滤，需在请求租户 scope 内执行。
-        // 修复前直接调（task_local 未设 → current_or_default("default")），多租户下
+        // scope 缺失时（task_local 未设 → current_or_default("default")），
         // delete_session_inner 查 pipeline_sessions WHERE tenant_id='default' 查空 → 啥也没删。
         let tenant_ctx =
             crate::server::request_tenant_ctx(state.store.as_ref(), &headers, &id).await;
@@ -347,6 +369,15 @@ pub async fn delete_session_handler(
             tracing::warn!(thread_id = %id, error = %e, "delete_session 落库失败（仍返回 200）");
         }
     }
+
+    // 域事件插座：session.deleted（语义：删除请求已受理；级联清理见 store）。
+    crate::plugin_lifecycle::broadcast_domain_event(
+        &state,
+        "session.deleted",
+        vec![("session_id", json!(id.as_str()))],
+    )
+    .await;
+
     Json(json!({ "thread_id": id, "deleted": true }))
 }
 
@@ -377,12 +408,14 @@ pub async fn list_session_messages_handler(
     };
 
     // 多租户：get_messages_by_pipeline 按 task_local tenant 过滤，需在请求租户 scope 内执行。
-    // 修复前直接调（task_local 未设 → current_or_default("default")），多租户下永远只读 default。
+    // scope 缺失时（task_local 未设 → current_or_default("default")），永远只读 default 租户。
     let tenant_ctx = crate::server::request_tenant_ctx(state.store.as_ref(), &headers, &id).await;
     let store_clone = store.clone();
     let target_pid_for_scope = target_pid.clone();
     let records = match agentos_tenant::scope(tenant_ctx, async move {
-        store_clone.get_messages_by_pipeline(&target_pid_for_scope, opts).await
+        store_clone
+            .get_messages_by_pipeline(&target_pid_for_scope, opts)
+            .await
     })
     .await
     {
@@ -461,9 +494,10 @@ pub async fn list_session_messages_handler(
         // 前端据此渲染思考过程折叠区。字段名 camelCase 对齐前端 BackendMessageResponse。
         if let Some(reasoning) = rec.reasoning_content.as_deref() {
             if !reasoning.is_empty() {
-                msg.as_object_mut()
-                    .expect("msg is object")
-                    .insert("reasoningContent".into(), Value::String(reasoning.to_string()));
+                msg.as_object_mut().expect("msg is object").insert(
+                    "reasoningContent".into(),
+                    Value::String(reasoning.to_string()),
+                );
             }
         }
         messages.push(msg);
@@ -487,4 +521,43 @@ pub struct MessageListQuery {
     pub before_sequence: Option<u32>,
     pub after_sequence: Option<u32>,
     pub limit: Option<usize>,
+}
+
+// ─── Sessions schema ──────────────────────────────────────────────────────
+
+/// GET /api/v1/sessions/schema — 会话创建表单字段 schema（内置 + 插件聚合）。
+///
+/// 内置字段（标题/意图）+ 各 enabled 插件 `contributes.thread_fields` 聚合
+/// （如 isolation 插件贡献 workspace / isolationMode）。前端新建会话表单
+/// （SessionEditModal）据此渲染插件贡献字段，取值随线程创建写入 thread
+/// metadata → execution_context。新增会话级字段 = 插件声明，前端无需改代码。
+///
+/// 路径挂 /api/v1/sessions/schema（threads→sessions 转正后 0.2 语义）；
+/// 原 0.1 残留的 channel_api routes_threads `/api/v1/threads/schema` 无处理器。
+pub async fn sessions_schema_handler(State(state): State<AppState>) -> Json<Value> {
+    let mut fields: Vec<Value> = vec![
+        json!({"name": "title", "type": "string", "label": "会话标题", "required": true}),
+        json!({"name": "intent", "type": "string", "label": "意图描述"}),
+    ];
+
+    let enabled_ids = state.enabled_plugin_ids.read().await;
+    for m in state.manifests.iter() {
+        if !enabled_ids.contains(&m.id) {
+            continue;
+        }
+        let Some(contributes) = m.contributes.as_ref() else {
+            continue;
+        };
+        let Some(list) = contributes.get("thread_fields").and_then(|v| v.as_array()) else {
+            continue;
+        };
+        for f in list {
+            // 只收带 name 的合法声明项，与 channel_api _collect_plugin_thread_fields 对齐
+            if f.get("name").and_then(|n| n.as_str()).is_some() {
+                fields.push(f.clone());
+            }
+        }
+    }
+
+    Json(json!({ "fields": fields }))
 }

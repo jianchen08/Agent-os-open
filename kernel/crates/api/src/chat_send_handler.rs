@@ -4,8 +4,8 @@
 //! 复用前端同一条 WS 派发路径（`dispatch_user_input` → `process_via_engine`）：
 //! 以触发消息为新一轮用户消息投给该会话 agent，agent 处理后流式回复前端。
 //!
-//! 背景：0.1 的 `pipeline.message_bus` 在 0.2 已删，sidecar 此前无注入通道——
-//! 能往前端推展示事件（event-bus.emit），但不能唤醒 agent 跑一轮。本 handler 经
+//! sidecar 光有展示通道（event-bus.emit 往前端推事件）不能唤醒 agent 跑一轮，
+//! 还需注入通道——本 handler 即该通道：经
 //! [`CapabilityHandlerRegistry`] 注册（router 优先查它），不新建传输、不动 router 结构，
 //! 仅把内核既有的 `PipelineDispatcher::dispatch_user_input` 桥接成 sidecar 可达的能力。
 
@@ -63,12 +63,17 @@ impl CapabilityHandler for ChatSendHandler {
                     .ok_or_else(|| McpError::Protocol {
                         message: "chat.send_message 缺少 user_id 参数".to_string(),
                     })?;
+                // 任务级 execution_context（可选）：任务执行器从 task.metadata 组装
+                // （workspace_mode/isolation_level 等），随消息派发并入 initial_state，
+                // init 体 workspace_lifecycle / environment_lifecycle 插件消费。
+                let execution_context = params.get("execution_context").filter(|v| v.is_object());
 
                 tracing::info!(
                     target: "capability:chat",
                     pipeline = %pipeline_id,
                     user = %user_id,
                     msg_len = message.len(),
+                    has_execution_context = execution_context.is_some(),
                     "chat.send_message 派发触发消息"
                 );
 
@@ -78,7 +83,14 @@ impl CapabilityHandler for ChatSendHandler {
                 // tenant 由 dispatch_user_input 用 user_id 反查（与 WS 路径同源）。
                 // thinking_strength：HTTP 通道暂不携带（"" = 引擎不覆盖参数）。
                 self.dispatcher
-                    .dispatch_user_input(pipeline_id, user_id, message, pipeline_id, "")
+                    .dispatch_user_input(
+                        pipeline_id,
+                        user_id,
+                        message,
+                        pipeline_id,
+                        "",
+                        execution_context,
+                    )
                     .await
                     .map(|_| json!({"status": "dispatched", "pipeline_id": pipeline_id}))
                     .map_err(|e| McpError::Protocol {

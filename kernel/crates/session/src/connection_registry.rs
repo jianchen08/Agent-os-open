@@ -36,11 +36,7 @@ impl ConnectionRegistry {
     /// 注册全局单连接。若该 user 已有旧连接，踢出旧连接并返回（B10）。
     ///
     /// 调用方拿到返回的旧 sink 后应向其发送 4004 关闭码（"本账号在其他位置登录"）。
-    pub fn register(
-        &self,
-        user_id: &str,
-        sink: Arc<dyn EventSink>,
-    ) -> Option<Arc<dyn EventSink>> {
+    pub fn register(&self, user_id: &str, sink: Arc<dyn EventSink>) -> Option<Arc<dyn EventSink>> {
         let mut conns = self.connections.write();
         // insert 返回被替换出的旧连接（Some(old) 表示踢出了旧连接）
         conns.insert(user_id.to_string(), sink)

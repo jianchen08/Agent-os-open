@@ -99,11 +99,7 @@ impl PluginEnablement {
     ///
     /// 合并优先级：manifest_enabled > profile.plugins[id].enabled > defaults.enabled > true。
     /// manifest 显式 false 则禁用（插件自声明不参与）；显式 true 或缺省则看 profile。
-    pub fn is_enabled(
-        &self,
-        plugin_id: &str,
-        manifest_enabled: Option<bool>,
-    ) -> bool {
+    pub fn is_enabled(&self, plugin_id: &str, manifest_enabled: Option<bool>) -> bool {
         if let Some(b) = manifest_enabled {
             return b;
         }
@@ -142,7 +138,10 @@ mod tests {
         let mut en = PluginEnablement::default();
         en.profile.plugins.insert(
             "p1".into(),
-            ProfileEntry { enabled: Some(false), activation: None },
+            ProfileEntry {
+                enabled: Some(false),
+                activation: None,
+            },
         );
         // manifest 显式 true 覆盖 profile 的 false
         assert!(en.is_enabled("p1", Some(true)));
@@ -153,7 +152,10 @@ mod tests {
     #[test]
     fn test_defaults_apply_when_unlisted() {
         let mut en = PluginEnablement::default();
-        en.profile.defaults = ProfileDefaults { enabled: Some(false), activation: None };
+        en.profile.defaults = ProfileDefaults {
+            enabled: Some(false),
+            activation: None,
+        };
         // 未在 profile 列出 + manifest 缺省 → 走 defaults false
         assert!(!en.is_enabled("unknown_plugin", None));
     }
@@ -170,12 +172,18 @@ mod tests {
         let mut en = PluginEnablement::default();
         en.profile.plugins.insert(
             "p1".into(),
-            ProfileEntry { enabled: None, activation: Some(ActivationPolicy::Eager) },
+            ProfileEntry {
+                enabled: None,
+                activation: Some(ActivationPolicy::Eager),
+            },
         );
         // manifest 缺省 → profile 的 Eager
         assert_eq!(en.activation("p1", None), ActivationPolicy::Eager);
         // manifest Manual 覆盖 profile
-        assert_eq!(en.activation("p1", Some(ActivationPolicy::Manual)), ActivationPolicy::Manual);
+        assert_eq!(
+            en.activation("p1", Some(ActivationPolicy::Manual)),
+            ActivationPolicy::Manual
+        );
     }
 
     #[test]

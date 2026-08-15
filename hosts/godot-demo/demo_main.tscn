@@ -1,8 +1,11 @@
-[gd_scene format=3]
+[gd_scene load_steps=2 format=3]
+
+[ext_resource type="Texture2D" path="res://assets/player_icon.png" id="1_player_icon"]
 
 [node name="DemoMain" type="Node2D"]
 
 [node name="Player" type="Sprite2D" parent="."]
 position = Vector2(320, 180)
+texture = ExtResource("1_player_icon")
 
 [node name="Camera2D" type="Camera2D" parent="."]

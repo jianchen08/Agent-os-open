@@ -77,7 +77,10 @@ pub trait CapabilityRouter: Send + Sync {
     /// （[`crate::handler_registry::CapabilityHandlerRegistry`]）覆盖此方法
     /// 返回实际注册的 namespace。
     fn known_namespaces(&self) -> Vec<String> {
-        STANDARD_CAPABILITIES.iter().map(|s| s.to_string()).collect()
+        STANDARD_CAPABILITIES
+            .iter()
+            .map(|s| s.to_string())
+            .collect()
     }
 }
 

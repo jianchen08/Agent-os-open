@@ -3,12 +3,17 @@
 # 可被任何管道的 step.steps 引用（命中规则②：公共 step 库）。
 # 格式同单个 step 定义。
 #
+# 注（G10 2026-08-15）：step 列表项引用的是**插件 id**（三级命中③按
+# manifest id 查，非工具名）——0.1 的 `file_read`/`llm_core` 旧名已随
+# 0.2 插件化改为 `agentos-builtin-tools`/`pipeline_llm_core`。
+# 本文件是示例（当前无管道引用），保持引用有效以通过加载期编译校验。
+#
 # [来源: 配置驱动的管道引擎设计 — 公共 step 库]
 
 id: doc_extract
 steps:
-  - file_read
-  - llm_core
+  - agentos-builtin-tools
+  - pipeline_llm_core
 context:
   task: "提取文档关键信息"
   temperature: 0.3

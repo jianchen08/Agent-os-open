@@ -57,6 +57,7 @@ if _sys.platform == "win32":
                     _mode.value | 0x0004,  # ENABLE_VIRTUAL_TERMINAL_PROCESSING
                 )
     except Exception:
+        # VT 不支持的终端退回普通输出，无需处理
         pass
 
 from cli_commands import SlashCommandRegistry
@@ -160,8 +161,9 @@ def setup_logging(
         _console_handler.addFilter(_console_filter)
 
 
-# 默认管道配置路径 -- 优先项目根目录的 config/，回退到 src/config/
-_PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent.parent
+# 默认管道配置路径：取项目根目录的 config/（channel_cli → system → shared
+# → plugins → 仓库根，5 级 parent = 仓库根）
+_PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent.parent.parent
 _DEFAULT_PIPELINE_CONFIG = _PROJECT_ROOT / "config" / "pipelines" / "default.yaml"
 
 _SESSION_DIR = _PROJECT_ROOT / "data" / "session"
@@ -258,8 +260,8 @@ class CLIApplication(CLIRunnerMixin, CLISingleMixin, CLIInteractiveMixin):
 
         config_path = Path(config_path)
         if not config_path.exists():
-            # 回退到 src/ 下的 config/pipelines/
-            project_root = Path(__file__).resolve().parent.parent.parent / "config" / "pipelines" / "default.yaml"
+            # 回退到项目根 config/pipelines/（5 级 parent = 仓库根）
+            project_root = Path(__file__).resolve().parent.parent.parent.parent.parent / "config" / "pipelines" / "default.yaml"
             if project_root.exists():
                 config_path = project_root
             else:

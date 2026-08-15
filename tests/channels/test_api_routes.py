@@ -1,3 +1,4 @@
+# @feature: FP-MIGR 0.1→0.2迁移（0.1 遗留测试） | @ci: python-plugins-test
 """API 路由基础功能测试。
 
 覆盖 src/channels/api/ 下核心路由模块的基础功能：
@@ -15,6 +16,8 @@ import sys
 import tempfile
 from pathlib import Path
 from unittest.mock import MagicMock, patch
+
+import importlib.util
 
 import pytest
 import yaml
@@ -203,6 +206,19 @@ class TestAgentResponseModels:
         assert len(list_resp.items) == 1
 
 
+def _has_agents_types() -> bool:
+    """0.2 迁移后 agents.types 是否存在（agent 配置由内核 Rust 承载）。"""
+    try:
+        importlib.util.find_spec("agents.types")
+        return True
+    except (ModuleNotFoundError, ImportError):
+        return False
+
+
+@pytest.mark.skipif(
+    not _has_agents_types(),
+    reason="0.2 无 Python agents.types（agent 配置由内核 Rust 承载），_config_to_response 已随 0.1 routes_agents 移除",
+)
 class TestConfigToResponseModel:
     """_config_to_response 模型解析测试。
 

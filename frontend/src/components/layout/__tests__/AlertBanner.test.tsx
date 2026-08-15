@@ -1,3 +1,4 @@
+/** @feature FP-T12 前端适配 | @ci: frontend-test */
 /**
  * 功能测试：AlertBanner 异常浮现提示条 + useLayoutAlerts（task_layout_responsive 任务 2）
  *

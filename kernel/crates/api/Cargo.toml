@@ -7,6 +7,13 @@ rust-version.workspace = true
 description = "Lingxi AgentOS 0.2 HTTP/WebSocket API server — Axum-based"
 
 [dependencies]
+# boot-plugin 第一刀：api 不再挂载 /api/v1/db 路由（HTTP 面在 db_admin 插件），
+# 但 bin（agentos-kernel）仍需注册 db-admin capability handler（SQL 能力层留内核）；
+# tests 直测 handler 同样依赖。
+agentos-db-admin.workspace = true
+# boot-plugin 第二刀：用户管理策略面（auth 执行门留内核 api/src/auth.rs 不动；
+# 管理面 user-admin capability handler + HTTP 面在 user_admin 插件）。
+agentos-user-admin.workspace = true
 tokio.workspace = true
 serde.workspace = true
 serde_json.workspace = true
@@ -25,13 +32,13 @@ agentos-mcp.workspace = true
 agentos-session.workspace = true
 agentos-config.workspace = true
 agentos-http.workspace = true
-agentos-db-admin.workspace = true
 parking_lot = "0.12"
 notify = "7"
 chrono.workspace = true
 base64 = "0.22"
 sha2 = "0.10"
 serde_yaml = "0.9"
+form_urlencoded.workspace = true
 axum = { version = "0.8", features = ["ws"] }
 futures-util = "0.3"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }

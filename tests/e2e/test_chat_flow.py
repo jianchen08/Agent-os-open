@@ -1,3 +1,4 @@
+# @feature: FP-MIGR 0.1→0.2迁移（0.1 遗留测试） | @ci: python-plugins-test
 """对话流程 E2E 测试。
 
 验证 WebSocket 对话协议：WS 连接 → 认证 → 心跳交换 → 事件序列。

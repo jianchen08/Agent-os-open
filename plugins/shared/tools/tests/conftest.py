@@ -1,3 +1,4 @@
+# @feature: FP-0.2.二 内部模块 manifest | @ci: python-coverage
 """plugins/shared/tools/tests 装配：sys.path 注入。
 
 本目录全部测试共享的装配（仿 tests/test_migration.py 的 sys.path 模式集中化，

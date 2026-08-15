@@ -75,9 +75,8 @@ class ProcessManager:
         read_log 只认 pid 即可按规则算路径读磁盘——LLM 不需要额外记 log_file 路径，
         也不依赖 active_processes（进程结束后内存条目被清，但磁盘日志仍在）。
 
-        历史：曾用 `bash_<timestamp>_<cmd>_<hash>.log`，但 LLM 算不出 hash，
-        进程结束后无法回看日志。改成 pid 派生后 read_log 任何时候都能用。
-        pid 在 OS 层唯一，不会冲突。
+        文件名必须由 pid 独自派生（不含 hash 等调用方算不出的成分），
+        保证进程结束后 read_log 任何时候都能回读；pid 在 OS 层唯一，不会冲突。
         """
         return f"bash_{pid}.log"
 
@@ -540,15 +539,12 @@ class ProcessManager:
         log_file: Path,
         on_output: Callable[[str], None] | None = None,
     ):
-        """异步读取进程输出（块缓冲根治版 + 批量落盘）。
+        """异步读取进程输出（按字节块读 + 批量落盘）。
 
-        历史 bug：原用 stream.readline() 等换行符。但 cargo/gcc/make 等编译器
-        检测到 stdout 不是 TTY 时切到块缓冲（4-8KB 攒满才 flush），导致长时间
-        读不到任何行 → 日志文件为空 → LogCompressor 拿到空 lines → 平淡输出
-        "[0行]"，LLM 误判为"正常无输出"。
-
-        根治：改用 stream.read(N) 按字节块读，自己按 \\n 切行 + 字节级半行缓存。
-        切分点在 \\n（ASCII 0x0A，永远在多字节 UTF-8 字符外），所以不会切到
+        输出按字节块读取（stream.read(N)），不能用 readline：cargo/gcc/make 等
+        检测到 stdout 不是 TTY 时切到块缓冲（4-8KB 攒满才 flush），无换行符时
+        readline 会永久阻塞。自己按 \\n 切行 + 字节级半行缓存：
+        切分点在 \\n（ASCII 0x0A，永远在多字节 UTF-8 字符外），不会切到
         字符中间，decode 在完整字节行上做，EncodingHandler 的多编码 fallback
         链照常生效。
 
@@ -809,7 +805,7 @@ class ProcessManager:
         lines = self._read_tail_lines(proc_info.log_file)
         summary = self.log_compressor.compress(lines, proc_info.command)
         elapsed = time.time() - proc_info.start_time
-        # [0行] bug 修复：长任务无输出时显式告警，不静默成"0行"。
+        # 长任务无输出时显式告警，不静默成"0行"。
         # 子进程 stdout 块缓冲（cargo/gcc 等）下，readline 长时间读不到行，
         # LogCompressor 拿到空 lines → 平淡输出 "[0行]"，LLM 会误判为"正常无输出"。
         # 这里在 elapsed>15s 且 total_lines==0 时插入告警，让 LLM 知道是

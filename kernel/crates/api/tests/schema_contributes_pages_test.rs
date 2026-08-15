@@ -36,7 +36,7 @@ fn manifest_with_contributes(plugin_id: &str, contributes: Option<Value>) -> Plu
         mcp: None,
         lifecycle: None,
         native: None,
-        wasm: None,
+        granted_capabilities: vec![],
         requires_content: None,
         invoke_entry: None,
         config_files: vec![],
@@ -116,12 +116,14 @@ async fn schema_passes_contributes_pages_verbatim() {
 
     // 关键断言 1:contributes.pages 原样存在,声明字段不丢
     assert_eq!(
-        entry["contributes"]["pages"],
-        pages,
+        entry["contributes"]["pages"], pages,
         "contributes.pages 应原样透传,声明字段不丢"
     );
     // 关键断言 2:整个 contributes 对象 == 原声明(任意新增 key 都透传)
-    assert_eq!(entry["contributes"], contributes, "contributes 应整体原样透传");
+    assert_eq!(
+        entry["contributes"], contributes,
+        "contributes 应整体原样透传"
+    );
 }
 
 #[tokio::test]
@@ -177,13 +179,11 @@ async fn schema_passes_visual_contributes_themes_and_client_styles_verbatim() {
     let entry = &schema["plugin_contributes"][0];
     // 关键断言:themes / client_styles 原样透传,字段不丢(变量值、背景开关、scope 都保真)
     assert_eq!(
-        entry["contributes"]["themes"],
-        visual["themes"],
+        entry["contributes"]["themes"], visual["themes"],
         "contributes.themes 应原样透传"
     );
     assert_eq!(
-        entry["contributes"]["client_styles"],
-        visual["client_styles"],
+        entry["contributes"]["client_styles"], visual["client_styles"],
         "contributes.client_styles 应原样透传"
     );
 }

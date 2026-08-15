@@ -13,6 +13,9 @@ import { useThemeStore } from '@/stores/themeStore'
 import { registerBuiltinToolChatCards } from '@/utils/builtinToolChatCards'
 import { loggers } from '@/utils/logger'
 import { loadChatCardDeclarations } from '@/utils/chatCardInterpreter'
+import { disposeResyncOnSchema, initResyncOnSchema } from '@/services/websocket/resync'
+import { loadDshAdapterContributions } from '@/services/dshAdapter'
+import { loadRenderIntents } from '@/utils/dshRenderIntent'
 import type { ChatCardDeclaration } from '@/utils/chatCardInterpreter'
 
 /** 初始化自生长闭环 1. 注册所有预置组件 */
@@ -31,6 +34,9 @@ export async function initializeGrowthLoop(): Promise<void> {
   // Step 2: 加载 schema 到 ContributionRegistry 并同步导航（0.2 核心数据源）
   await reloadContributionRegistry()
 
+  // Step 3: 订阅 resync_required（内核重启/回放缓冲 miss 时的被动全量重同步通道）
+  initResyncOnSchema()
+
   loggers.websocket.info('自生长闭环初始化完成')
 }
 
@@ -48,11 +54,20 @@ async function reloadContributionRegistry(): Promise<void> {
     loadChatCardDeclarations(
       (schema as { tools?: Array<{ name?: string; ui?: { chat_card?: ChatCardDeclaration } }> }).tools ?? [],
     )
+    // render 意图声明（task_dsh_plugin_adapter 任务 1d）：tools[].render 装载到
+    // dshRenderIntent 注册表，工具结果按 DSH 卡词汇表路由（无声明回退 chat_card 级联）
+    loadRenderIntents(
+      (schema as { tools?: Array<{ name?: string; render?: Record<string, unknown> }> }).tools ?? [],
+    )
     // 内置工具（file_read/bash_execute/web_search/fetch/task_submit）的 chat_card 声明
     // 追加在 schema 声明之上：schema 热重载（load 会清空全表）后 builtin 依然生效并优先
     registerBuiltinToolChatCards()
     syncNavItemsFromContributes()
     shortcutRegistry.refresh()
+
+    // DSH 适配器贡献（task_dsh_plugin_adapter 任务 2）：renderers 兜底注册 +
+    // 来源版本记录。失败隔离在服务内部（不影响本函数其余步骤）。
+    await loadDshAdapterContributions()
 
     // 插件视觉贡献同步（contributes.themes / client_styles）：
     // - 主题：插件主题合入主题列表；当前用的插件主题被移除（插件禁用）→ 回退 base
@@ -86,6 +101,8 @@ export function refreshPluginContributions(): Promise<void> {
 
 /** 销毁自生长闭环（完全清理） 用于登出、认证过期等场景，需要彻底清除所有模块状态。 */
 export function destroyGrowthLoop(): void {
+  // 先注销 resync 订阅并取消未触发的防抖（globalWS.disconnect 也会清 handler，双保险）
+  disposeResyncOnSchema()
   contributionRegistry.clear()
   // 插件注入样式随闭环销毁清除（防跨会话残留）
   removeAllPluginStyles()
@@ -99,6 +116,9 @@ export async function restartGrowthLoop(): Promise<void> {
   contributionRegistry.clear()
 
   initializeWidgets()
+
+  // 补挂 resync_required 订阅（登出 disconnect 会清空全部 handler，幂等可重复调用）
+  initResyncOnSchema()
 
   try {
     // 重新加载 schema 到 ContributionRegistry（0.2 核心数据源）

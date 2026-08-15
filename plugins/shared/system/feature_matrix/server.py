@@ -4,13 +4,9 @@
 覆盖所有 widget 类型 / space / slot / schema 表单 / detachable / webview。
 仅供端到端渲染验证,无业务逻辑。
 
-> 2026-08: webcomponent 演示页已迁移为 webview（WebComponentCardHost 废弃，
-> 见 docs/tasks/task_plugin_frontend_customization.md 任务 4）。原 /component.js
-> 端点与 Custom Element 示例一并移除。
-
 端点:
   GET /ext/feature_matrix_plugin/webview    → webview widget 的 HTML
-  GET /ext/feature_matrix_plugin/wc_demo    → 原 webcomponent 演示页的 webview 迁移版
+  GET /ext/feature_matrix_plugin/wc_demo    → 组件演示页（webview 渲染）
   GET /ext/feature_matrix_plugin/config     → 插件配置数据(schema 表单的数据源)
 """
 

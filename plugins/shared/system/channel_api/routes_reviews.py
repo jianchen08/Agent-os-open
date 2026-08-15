@@ -170,7 +170,6 @@ async def media_review(
     Returns:
         ImageReviewResult 或 VideoReviewResult 的字典形式
     """
-    # 保存上传文件到临时目录
     suffix = os.path.splitext(file.filename or "")[1] if file.filename else ""  # noqa: PTH122
     tmp_dir = tempfile.mkdtemp(prefix="media_review_")
     tmp_path = os.path.join(tmp_dir, file.filename or f"upload{suffix}")

@@ -1,0 +1,288 @@
+"""工作空间生命周期 Input 插件。
+
+挂载在管道的 init / exit 循环体（多循环体模型），按 `state["current_phase"]`
+分发两个阶段。**插件自己持有工作空间服务**（WorkspaceLifecycleManager），
+自己创建、给 agent 使用、自己清理——不依赖跨进程 capability：
+
+- **init（bootstrap）**：消费 `state.execution_context.workspace`
+  （`{source_path, mode}`，由 task_submit / 会话创建参数解析注入）。有任务
+  上下文（state.task_id）时调 `on_task_start` 真实创建空间（worktree/plain）；
+  主会话（无任务）直接解析 source_path 写 state。结果写入
+  `state.workspace` / `project_root` / `ws_meta`。幂等：state 已有 workspace
+  则跳过。服务不可用时降级为纯解析（不阻断管道）。
+- **exit（finalize）**：有任务且 ws_meta.mode=worktree 时调
+  `merge_worktree_before_complete` 合并回源空间；否则 no-op。失败留痕不阻断。
+
+与隔离解耦：本插件只管"在哪个目录执行"（拓扑），执行环境（容器/宿主）由
+environment_lifecycle / isolation_guard 决策。
+
+State 命名空间：
+    - workspace / project_root / ws_meta：init 阶段写入
+    - workspace_finalized：exit 阶段写入
+"""
+
+from __future__ import annotations
+
+import logging
+import os
+import sys
+from pathlib import Path
+from types import SimpleNamespace
+from typing import Any
+
+from pipeline.plugin import IInputPlugin, PluginContext, PluginResult
+from pipeline.types import ErrorPolicy
+
+logger = logging.getLogger(__name__)
+
+
+def _ensure_isolation_path() -> None:
+    """把 isolation 插件目录加入 sys.path（workspace_lifecycle 服务所在）。"""
+    _here = Path(__file__).resolve().parent
+    _system_dir = _here.parents[2] / "system"
+    _iso_dir = _system_dir / "isolation"
+    for _p in (str(_system_dir), str(_iso_dir)):
+        if _p not in sys.path:
+            sys.path.insert(0, _p)
+
+
+class _ExecutionContextTaskTree:
+    """0.2 最小 task_tree：从 execution_context 重建父链（sidecar 无 task_service）。
+
+    服务内部 `_find_container_workspace` / `_start_subtask` 依赖
+    `task_tree.get_task(task_id)` 返回带 `parent_task_id` / `metadata` 的对象：
+
+    - `get_task(当前任务)` → `parent_task_id`（execution_context.parent_task_id，
+      task_submit 提交时写入）；
+    - `get_task(父任务)` → `metadata.task_scope="container"` +
+      `container_workspace`（由工作空间根推导 `container_{parent_id}`），
+      供容器直接子任务定位容器空间；
+    - 其余查询返回 None（降级为无父链，服务内部已有 try/except 兜底）。
+    """
+
+    def __init__(self, plugin: "WorkspaceLifecyclePlugin", manager: Any) -> None:
+        self._plugin = plugin
+        self._manager = manager
+
+    def get_task(self, task_id: str):
+        state = self._plugin._last_state or {}
+        ec = state.get("execution_context")
+        if not isinstance(ec, dict):
+            return None
+        parent_id = ec.get("parent_task_id")
+        current_id = state.get("task_id")
+        if task_id == current_id:
+            return SimpleNamespace(id=task_id, parent_task_id=parent_id, metadata={})
+        if parent_id and task_id == parent_id:
+            try:
+                container_path = str(self._manager._get_workspace_root() / f"container_{parent_id}")
+            except Exception:
+                container_path = ""
+            return SimpleNamespace(
+                id=task_id,
+                parent_task_id=None,
+                metadata={"task_scope": "container", "container_workspace": container_path},
+            )
+        return None
+
+    def save_task(self, task: Any) -> Any:
+        """持久化降级 no-op（ws_meta 由 state/execution_context 承载）。"""
+        return task
+
+
+class WorkspaceLifecyclePlugin(IInputPlugin):
+    """工作空间生命周期插件：init 创建空间，exit 合并清理（自持服务）。"""
+
+    error_policy = ErrorPolicy.ABORT
+
+    def __init__(self, config: dict[str, Any] | None = None) -> None:
+        """初始化。
+
+        Args:
+            config: 插件配置（base_path / workspace 配置等）
+        """
+        self._config = config or {}
+        self._manager: Any = None
+        self._last_state: dict[str, Any] | None = None
+
+    @property
+    def name(self) -> str:
+        """插件唯一标识名称。"""
+        return "workspace_lifecycle"
+
+    @property
+    def priority(self) -> int:
+        """插件执行优先级（init/exit 体单次执行，置于链首）。"""
+        return self._config.get("priority", 5)
+
+    # ── 服务对象（懒加载，插件进程内自持）──────────────────────
+
+    def _get_manager(self) -> Any | None:
+        """懒加载 WorkspaceLifecycleManager（服务不可用时返回 None，降级纯解析）。
+
+        task_tree 用 execution_context 适配器（0.2 sidecar 无 task_service）：
+        容器直接子任务经 parent_task_id 重建父链，定位容器空间。
+        """
+        if self._manager is not None:
+            return self._manager
+        try:
+            _ensure_isolation_path()
+            from isolation.workspace_lifecycle import WorkspaceLifecycleManager  # noqa: PLC0415
+
+            base_path = self._config.get("base_path") or str(Path.cwd())
+            manager = WorkspaceLifecycleManager(
+                resource_merge=None,
+                config=self._config.get("workspace_config", {}),
+                task_tree=_ExecutionContextTaskTree(self, None),  # type: ignore[arg-type]
+                ws_meta_store={},
+                base_path=base_path,
+            )
+            # 适配器需要 manager 推导容器空间路径，构造后回填
+            manager._task_tree._manager = manager  # type: ignore[attr-defined]
+            self._manager = manager
+            logger.info("[WorkspaceLifecycle] 工作空间服务已实例化 | base_path=%s", base_path)
+        except Exception as exc:
+            logger.warning(
+                "[WorkspaceLifecycle] 工作空间服务实例化失败，降级为纯解析 | error=%s",
+                exc,
+            )
+            self._manager = None
+        return self._manager
+
+    async def execute(self, ctx: PluginContext) -> PluginResult:
+        """按 current_phase 分发 init/exit 阶段。"""
+        self._last_state = ctx.state
+        phase = ctx.state.get("current_phase", "")
+        if phase == "init":
+            return await self._bootstrap(ctx)
+        if phase == "exit":
+            return await self._finalize(ctx)
+        # 其它循环体（main）：生命周期插件不参与，零产出
+        return PluginResult()
+
+    # ── init：创建/解析工作空间 ────────────────────────────────
+
+    async def _bootstrap(self, ctx: PluginContext) -> PluginResult:
+        """创建或解析工作空间。
+
+        有任务上下文 → 服务真实创建（worktree/plain）；主会话 → 纯解析。
+        幂等：state 已有 workspace（恢复/复用）时跳过。
+        """
+        state = ctx.state
+        if state.get("workspace"):
+            logger.debug(
+                "[WorkspaceLifecycle] workspace 已就位，跳过创建 | workspace=%s",
+                state["workspace"],
+            )
+            return PluginResult()
+
+        ec = state.get("execution_context")
+        if not isinstance(ec, dict):
+            logger.debug("[WorkspaceLifecycle] 无 execution_context，跳过工作空间创建")
+            return PluginResult()
+        ws_spec = ec.get("workspace")
+        if not isinstance(ws_spec, dict):
+            logger.debug("[WorkspaceLifecycle] execution_context 无 workspace 声明，跳过")
+            return PluginResult()
+
+        source_path = ws_spec.get("source_path") or ""
+        mode = ws_spec.get("mode") or "plain"
+        if not source_path:
+            logger.debug("[WorkspaceLifecycle] workspace source_path 为空，跳过")
+            return PluginResult()
+
+        task_id = state.get("task_id") or ""
+        manager = self._get_manager()
+        if manager is not None and task_id:
+            # 任务管道：调 0.1 工作空间服务真实创建（对齐 0.1 task_executor 契约：
+            # on_task_start(task_id, workspace, task_data) 分发 root/subtask；
+            # container_copy 拓扑走 init_container_workspace）。
+            # task_data 字段形态与 0.1 task_submit → task_data 一致。
+            task_data = {
+                "is_root": True,
+                "workspace_mode": mode,
+                "isolation_mode": (ec.get("isolation") or {}).get("level", ""),
+                "_has_explicit_workspace": bool(ws_spec.get("explicit")),
+                "_inherit_workspace_resolved": False,
+            }
+            try:
+                if mode == "container_copy":
+                    # 容器任务空间：复制源项目到容器空间（0.1 init_container_workspace）
+                    ws_meta = await ctx_await(
+                        manager.init_container_workspace, task_id, source_path, task_data
+                    )
+                else:
+                    ws_meta = await ctx_await(manager.on_task_start, task_id, source_path, task_data)
+                if isinstance(ws_meta, dict) and ws_meta.get("path"):
+                    updates = {
+                        "workspace": ws_meta["path"],
+                        "project_root": ws_meta.get("project_root") or ws_meta["path"],
+                        "ws_meta": ws_meta,
+                    }
+                    logger.info(
+                        "[WorkspaceLifecycle] init 服务创建工作空间 | task=%s | mode=%s | path=%s",
+                        task_id,
+                        ws_meta.get("mode"),
+                        ws_meta["path"],
+                    )
+                    return PluginResult(state_updates=updates)
+            except Exception as exc:
+                logger.warning(
+                    "[WorkspaceLifecycle] 工作空间创建失败，降级为源路径 | task=%s | error=%s",
+                    task_id,
+                    exc,
+                )
+        # 降级/主会话：直接使用源路径（plain 语义）
+        updates: dict[str, Any] = {
+            "workspace": source_path,
+            "project_root": source_path,
+            "ws_meta": {"mode": mode, "path": source_path, "project_root": source_path},
+        }
+        logger.info(
+            "[WorkspaceLifecycle] init 解析工作空间 | mode=%s | path=%s",
+            mode,
+            source_path,
+        )
+        return PluginResult(state_updates=updates)
+
+    # ── exit：合并/清理（服务自持，真实执行）──────────────────
+
+    async def _finalize(self, ctx: PluginContext) -> PluginResult:
+        """工作空间收尾：worktree 合并回源空间。
+
+        有任务且 ws_meta.mode=worktree → 调服务 merge_worktree_before_complete；
+        其余（plain/主会话）no-op。失败留痕不阻断（收尾类操作不得让 run 翻车）。
+        """
+        state = ctx.state
+        ws_meta = state.get("ws_meta") if isinstance(state.get("ws_meta"), dict) else {}
+        if ws_meta.get("mode") != "worktree":
+            return PluginResult()
+        task_id = state.get("task_id") or ""
+        if not task_id:
+            return PluginResult()
+        manager = self._get_manager()
+        if manager is None:
+            return PluginResult(state_updates={"workspace_finalized": False})
+        try:
+            merged = await ctx_await(manager.merge_worktree_before_complete, task_id)
+            logger.info(
+                "[WorkspaceLifecycle] exit 合并 worktree | task=%s | merged=%s",
+                task_id,
+                merged,
+            )
+            return PluginResult(state_updates={"workspace_finalized": True})
+        except Exception as exc:
+            logger.warning(
+                "[WorkspaceLifecycle] exit 合并失败（留痕不阻断）| task=%s | error=%s",
+                task_id,
+                exc,
+            )
+            return PluginResult(state_updates={"workspace_finalized": False})
+
+
+async def ctx_await(fn: Any, *args: Any, **kwargs: Any) -> Any:
+    """同步/异步统一调用（服务方法是同步的，跑在线程池避免阻塞事件循环）。"""
+    import asyncio  # noqa: PLC0415
+
+    result = await asyncio.get_running_loop().run_in_executor(None, lambda: fn(*args, **kwargs))
+    return result

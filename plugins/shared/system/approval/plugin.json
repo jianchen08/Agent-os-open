@@ -1,40 +1,56 @@
 {
-    "id": "approval_service",
-    "name": "Approval Service",
-    "version": "1.0.0",
-    "plugin_type": "system",
-    "language": "python",
-    "host_type": "sidecar",
-    "entry": "python server.py",
-    "lifecycle": {
-        "idle_timeout_secs": 0
-    },
-    "capabilities": {
-        "tools": [
-            {"name": "approval.create_choice", "description": "创建选择审批（委托 human-interaction 弹窗 + 挂起管道）"},
-            {"name": "approval.submit", "description": "提交审批结果并恢复挂起的管道"}
-        ],
-        "resources": [],
-        "route_signals": ["wait"],
-        "lifecycle_hooks": ["on_load", "on_unload"]
-    },
-    "dependencies": [],
-    "capabilities_required": ["human-interaction", "pipeline-executor", "event-bus"],
-    "permissions": {},
-    "error_policy": "abort",
-    "priority": 60,
-    "ui_schema": {
-        "widgets": [
-            {
-                "id": "approval_panel",
-                "type": "review_document",
-                "space": "fullscreen",
-                "trigger": "on_event:approval.created",
-                "props": {
-                    "diff_view": true,
-                    "annotation": true
-                }
-            }
-        ]
-    }
+  "id": "approval_service",
+  "name": "Approval Service",
+  "version": "1.0.0",
+  "plugin_type": "system",
+  "language": "python",
+  "host_type": "sidecar",
+  "entry": "python server.py",
+  "lifecycle": {
+    "idle_timeout_secs": 0
+  },
+  "capabilities": {
+    "tools": [],
+    "resources": [],
+    "route_signals": [
+      "wait"
+    ],
+    "lifecycle_hooks": [
+      "on_load",
+      "on_unload"
+    ],
+    "services": [
+      {
+        "name": "approval.create_choice",
+        "description": "创建选择审批（委托 human-interaction 弹窗 + 挂起管道）"
+      },
+      {
+        "name": "approval.submit",
+        "description": "提交审批结果并恢复挂起的管道"
+      }
+    ]
+  },
+  "dependencies": [],
+  "capabilities_required": [
+    "human-interaction",
+    "pipeline-executor",
+    "event-bus"
+  ],
+  "permissions": {},
+  "error_policy": "abort",
+  "priority": 60,
+  "ui_schema": {
+    "widgets": [
+      {
+        "id": "approval_panel",
+        "type": "review_document",
+        "space": "fullscreen",
+        "trigger": "on_event:approval.created",
+        "props": {
+          "diff_view": true,
+          "annotation": true
+        }
+      }
+    ]
+  }
 }

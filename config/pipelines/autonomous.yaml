@@ -1,8 +1,8 @@
 # 通用自主循环管道配置（多循环体模型）
 #
 # 引擎作为配置解释执行器：读此配置，按 loop_bodies 顺序执行每个循环体
-# （各自独立的 steps 与循环配置），据 exit_routes/routes 决定循环、分支与
-# 循环体间转移。所有 Agent 共用此管道，差异由 Agent 配置
+# （各自独立的 steps 与循环配置），据 next（统一 DSL）/exit_routes 决定循环、
+# 分支与循环体间转移。所有 Agent 共用此管道，差异由 Agent 配置
 # （system_prompt/tool_ids/model_tier）体现。
 #
 # 循环体语义：
@@ -11,10 +11,14 @@
 #   之后仍顺序推进到 exit；
 # - exit：后处理（workspace 合并/环境释放），run_on_error=true 保证
 #   提前终止（ended/出错）时仍执行收尾；挂起（suspended）不触发。
-# 转移：step 级路由设置的 state.next_phase > 循环体 exit_routes（Phase）>
+# 转移：step 级路由设置的 state.next_phase > 循环体 next（Phase）>
 # 默认顺序进入下一循环体；最后一个循环体结束 = run 结束。
-# （init/exit 体待 workspace_lifecycle / environment_lifecycle 插件就绪后挂载，
-#   当前仅 main 体，行为与旧单循环一致。）
+#
+# G10 统一 DSL（2026-08-15 冻结）：条件永远 `when`、目标永远 `then`、
+# 缺省顺序推进。转移写在节点/循环体的 `next:` 列表，`then` 目标为
+# `end` / `loop` / step id（step 级）/ 循环体 id；`when` 可省（缺省 True）。
+# 配置在加载期编译成执行计划（when 预编译为 AST、引用静态解析、语法错误
+# 启动即报），运行时零解析。
 #
 # 一切皆 step：steps 字段引用的内容按三级命中规则解析：
 #   ① 当前管道 step id → 组合节点递归
@@ -22,10 +26,19 @@
 #   ③ 插件名 → 原子插件 invoker 调用
 #
 # [来源: 配置驱动的管道引擎设计]
+# [来源: docs/working/重要设计/插件三轨一致性与Cordis机制迁移计划.md §G10]
 
 name: autonomous
 
 loop_bodies:
+  # ── init：前处理（工作空间解析 + 环境基线），单次执行 ──
+  - id: init
+    steps:
+      - id: init
+        steps:
+          - pipeline_workspace_lifecycle     # 消费 execution_context.workspace → state.workspace/project_root/ws_meta
+          - pipeline_environment_lifecycle   # 消费 execution_context.isolation → state.environment_basis
+
   # ── main：agent 自主循环（LLM ↔ 工具执行）──
   - id: main
     loop_config:
@@ -40,6 +53,8 @@ loop_bodies:
           - pipeline_param_inject
           - pipeline_memory_read
           - pipeline_knowledge_inject
+          - pipeline_model_prompt_adapter  # 模型适配消息注入（仅任务首轮、历史头部；须在 godot_context 之前——reference 消息会把首轮撑到 2 条）
+          - pipeline_godot_context       # Godot 选中引用注入（选中非空时在用户消息后插入 <reference> 消息）
           - pipeline_prompt_build
           - pipeline_isolation_guard   # 工具执行前决策隔离级别（写 state["execution_contexts"]）
           - pipeline_cost_control      # 预算统计（task_observability 1c：默认预算放大到实际不触达）
@@ -69,24 +84,29 @@ loop_bodies:
           - pipeline_duplicate_check
           - pipeline_stuck_detector
           - pipeline_result_format
-        routes:                   # 配置驱动的路由分支
+        next:                   # 出口转移（统一 DSL：when/then/缺省顺序推进）
           # 有非空工具调用 → 继续循环执行工具（明确判断非空列表，避免缺失字段误命中）
           - when: "raw_tool_calls != [] and raw_tool_calls != None"
-            then:
-              next: loop
-              set:
-                core_type: tool_execute
-                core_plugin: pipeline_tool_core
+            then: loop
+            set:
+              core_type: tool_execute
+              core_plugin: pipeline_tool_core
           # 工具刚执行完（core_type=tool_execute，raw_tool_calls 已被 tool_core 清空）
           # → 回 LLM 让它看到 tool_results 产生下一轮或文本回复（对齐 0.1 handle_no_route_signals
           #   的 "tool_execute 后自动 next_llm" 逻辑）
           - when: "core_type == 'tool_execute'"
-            then:
-              next: loop
-              set:
-                core_type: llm_call
-                core_plugin: pipeline_llm_core
+            then: loop
+            set:
+              core_type: llm_call
+              core_plugin: pipeline_llm_core
           # 其余情况（纯文本回复 / 字段缺失）→ 结束，避免无限循环
-          - when: "True"
-            then:
-              next: end
+          - then: end
+
+  # ── exit：后处理（工作空间收尾 + 环境释放），单次执行，提前终止必经 ──
+  - id: exit
+    run_on_error: true
+    steps:
+      - id: exit
+        steps:
+          - pipeline_workspace_lifecycle     # finalize：消费 state.workspace（merge/清理占位）
+          - pipeline_environment_lifecycle   # release：环境释放（占位）

@@ -1,7 +1,9 @@
 /**
  * 并发控制配置页面
  *
- * 设置任务并发数、Agent 层级并发、LLM 并发、工作流并发、队列参数
+ * 设置任务并发数、Agent 层级并发、工作流并发、队列参数。
+ * LLM 提供商级的并发/RPM 已移至「模型设置 → 提供商与密钥」
+ * （写入 llm.yaml providers.keys[]，由 KeyPool 真实消费）。
  */
 
 import { useState, useEffect, useCallback } from 'react'
@@ -17,7 +19,6 @@ import {
   type TaskConcurrencyConfig,
   type AgentConcurrencyConfig,
   type WorkflowConcurrencyConfig,
-  type LLMConcurrencyConfig,
 } from '@/services/api/config'
 
 type SaveState = 'idle' | 'saving' | 'saved' | 'error'
@@ -49,14 +50,6 @@ const AGENT_LEVEL_LABELS: Record<string, string> = {
   l1_max_concurrent: 'L1 Agent (项目经理)',
   l2_max_concurrent: 'L2 Agent (团队负责人)',
   l3_max_concurrent: 'L3 Agent (执行者)',
-}
-
-/** LLM 提供商标签 */
-const LLM_PROVIDER_LABELS: Record<string, string> = {
-  zhipu_max_concurrent: '智谱 AI',
-  openai_max_concurrent: 'OpenAI',
-  anthropic_max_concurrent: 'Anthropic',
-  default_max_concurrent: '默认提供商',
 }
 
 /**
@@ -121,14 +114,6 @@ export function ConcurrencySettingsPage() {
     [],
   )
 
-  // 更新 LLM 并发配置
-  const updateLlm = useCallback(<K extends keyof LLMConcurrencyConfig>(key: K, value: number) => {
-    setConfig((prev) => ({
-      ...prev,
-      llm: { ...prev.llm, [key]: value },
-    }))
-  }, [])
-
   // 保存并发配置到后端
   const handleSave = useCallback(async () => {
     setSaveState('saving')
@@ -180,7 +165,6 @@ export function ConcurrencySettingsPage() {
         <TabsList>
           <TabsTrigger value="task">任务并发</TabsTrigger>
           <TabsTrigger value="agent">Agent 层级</TabsTrigger>
-          <TabsTrigger value="llm">LLM 并发</TabsTrigger>
           <TabsTrigger value="queue">队列管理</TabsTrigger>
         </TabsList>
 
@@ -253,16 +237,14 @@ export function ConcurrencySettingsPage() {
             <div className="mt-4 border-t pt-3">
               <h3 className="text-muted-foreground mb-2 text-xs">并发层级结构</h3>
               <div className="space-y-1">
-                {(['l1_max_concurrent', 'l2_max_conunct_concurrent', 'l3_max_concurrent'] as const)
+                {(['l1_max_concurrent', 'l2_max_concurrent', 'l3_max_concurrent'] as const)
                   .filter((k) => k in config.agent)
                   .map((key, idx) => {
-                    const actualKey =
-                      key === 'l2_max_conunct_concurrent' ? 'l2_max_concurrent' : key
-                    const label = AGENT_LEVEL_LABELS[actualKey] || ''
-                    const value = config.agent[actualKey as keyof AgentConcurrencyConfig]
+                    const label = AGENT_LEVEL_LABELS[key] || ''
+                    const value = config.agent[key]
                     return (
                       <div
-                        key={actualKey}
+                        key={key}
                         className="flex items-center gap-2"
                         style={{ paddingLeft: `${idx * 24}px` }}
                       >
@@ -278,29 +260,6 @@ export function ConcurrencySettingsPage() {
                   })}
               </div>
             </div>
-          </div>
-        </TabsContent>
-
-        {/* LLM 并发 */}
-        <TabsContent value="llm">
-          <div className="mt-4 space-y-4">
-            <p className="text-muted-foreground text-xs">
-              各 LLM 提供商的 API 并发调用上限。超过此限制的请求将排队等待。
-            </p>
-            {(Object.entries(LLM_PROVIDER_LABELS) as [keyof LLMConcurrencyConfig, string][]).map(
-              ([key, label]) => (
-                <FieldRow key={key} label={label} htmlFor={`llm-${key}`}>
-                  <NumberInput
-                    id={`llm-${key}`}
-                    min={1}
-                    max={50}
-                    value={config.llm[key]}
-                    onChange={(v) => updateLlm(key, v)}
-                    ariaLabel={`${label}并发数`}
-                  />
-                </FieldRow>
-              ),
-            )}
           </div>
         </TabsContent>
 

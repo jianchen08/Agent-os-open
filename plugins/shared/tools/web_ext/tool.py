@@ -1,21 +1,16 @@
 """
 Web 操作工具
 
-暴露接口：
-- from_config(cls, config_path: str | None) -> 'WebTool'：from_config功能
-- get_tool_definition() -> Tool：get_tool_definition功能
-- handle_data(self, data)：handle_data功能
-- WebTool：WebTool类
+HTTP GET/POST 与网页正文抓取（trafilatura 抽取），支持域名黑白名单、
+默认请求头与代理；SSRF 校验见 _check_url_security（原语来自共享层 url_security）。
 """
 
 import logging
 import os
-from pathlib import Path  # noqa: F401
 from typing import Any
 from urllib.parse import urlparse
 
 import httpx
-import yaml  # noqa: F401
 
 from agentos_plugin_sdk import (
     BuiltinTool,

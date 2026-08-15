@@ -33,9 +33,25 @@ _TOOL_DIR = _REPO_ROOT / "plugins" / "shared" / "tools" / "task_submit"
 # isolation 是包（import isolation.workspace），需其父目录入 sys.path
 _SYSTEM_DIR = _REPO_ROOT / "plugins" / "shared" / "system"
 
-for _p in (_SDK_DIR, _TASKS_DIR, _TOOL_DIR, _SYSTEM_DIR):
-    if str(_p) not in sys.path:
-        sys.path.insert(0, str(_p))
+
+@pytest.fixture(scope="module", autouse=True)
+def _module_sys_path():
+    """模块级 sys.path 注入（teardown 恢复）。
+
+    注意：tasks 目录含 workspace.py（模块），system 目录含 workspace/（包）——
+    两者对 `import workspace` 解析冲突。本测试仅 tool.py 懒加载需要 tasks 目录，
+    用 fixture 管理并恢复 sys.path，避免污染同进程其它测试
+    （如 channel_api 的 routes_workspaces 依赖 system/workspace/ 包）。
+    """
+    added: list[str] = []
+    for _p in (_SDK_DIR, _TASKS_DIR, _TOOL_DIR, _SYSTEM_DIR):
+        s = str(_p)
+        if s not in sys.path:
+            sys.path.insert(0, s)
+            added.append(s)
+    yield
+    for s in added:
+        sys.path.remove(s)
 
 
 @pytest.fixture(scope="module")

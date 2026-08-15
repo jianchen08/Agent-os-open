@@ -22,6 +22,7 @@ pub mod pipeline_loader;
 pub mod plugin_lifecycle;
 pub mod plugin_watcher;
 pub mod routes;
+pub mod run_chain;
 pub mod server;
 pub mod session_routes;
 pub mod ws_session;
@@ -30,10 +31,10 @@ pub use auth::{
     login_handler, logout_handler, me_handler, refresh_handler, register_handler, RefreshResponse,
     RegisterRequest,
 };
+pub use capability_router::KernelCapabilityRouter;
 pub use error::ApiError;
 pub use pipeline_loader::{
     load_pipeline_config, load_step_library, validate_no_name_conflicts, PipelineLoadError,
 };
 pub use routes::{AppState, HealthResponse, SchemaResponse};
 pub use server::{build_router, start_server, WsRequest, WsResponse};
-pub use capability_router::KernelCapabilityRouter;

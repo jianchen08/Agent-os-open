@@ -5,7 +5,7 @@
 并清空 capabilities.tools（这些不是给 LLM 的工具，是管道自调用入口）。
 
 不变：
-  - system 类型 tools 双语义未评估（D.6），保留不动。
+  - system 类型的服务方法已迁 capabilities.services（D.6 槽位拆分落地，2026-08-15）。
   - tool 类型 tools 是真工具，不动。
   - sidecar 的 server.py @plugin.tool 声明不动（MCP 传输层，ADR D.3）。
 

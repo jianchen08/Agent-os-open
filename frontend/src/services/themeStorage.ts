@@ -62,16 +62,10 @@ const DEFAULT_PREFERENCES: ThemePreferences = {
  * 主题存储服务类
  */
 export class ThemeStorageService {
-  /**
-   * 获取当前激活的主题 ID
-   */
   static getActiveTheme(): string {
     return storage.getItem<string>(STORAGE_KEYS.ACTIVE_THEME) || 'dark'
   }
 
-  /**
-   * 设置当前激活的主题 ID
-   */
   static setActiveTheme(themeId: string): void {
     storage.setItem(STORAGE_KEYS.ACTIVE_THEME, themeId)
   }
@@ -91,9 +85,6 @@ export class ThemeStorageService {
     return themes.find((theme) => theme.id === id) || null
   }
 
-  /**
-   * 保存用户主题
-   */
   static saveUserTheme(theme: UserThemeConfig): void {
     const themes = this.getUserThemes()
     const index = themes.findIndex((t) => t.id === theme.id)
@@ -115,9 +106,6 @@ export class ThemeStorageService {
     storage.setItem(STORAGE_KEYS.USER_THEMES, themes)
   }
 
-  /**
-   * 删除用户主题
-   */
   static deleteUserTheme(themeId: string): boolean {
     const themes = this.getUserThemes()
     const filtered = themes.filter((t) => t.id !== themeId)
@@ -233,7 +221,7 @@ export function mergeTheme(
   base: ThemeConfig,
   custom: UserThemeConfig['customizations'],
 ): ThemeConfig {
-  // @ts-ignore - 复杂的类型合并问题，暂时忽略
+  // @ts-ignore - HACK: ThemeConfig 嵌套层级与 Partial 深混并不兼容 — 迁移到 deepMerge<ThemeConfig> 工具时移除
   return {
     ...base,
     id: (custom.id as string) || base.id,

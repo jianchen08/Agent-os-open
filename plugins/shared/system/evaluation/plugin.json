@@ -1,74 +1,75 @@
 {
-    "id": "evaluation_service",
-    "name": "Evaluation Service",
-    "version": "1.0.0",
-    "plugin_type": "system",
-    "language": "python",
-    "host_type": "sidecar",
-    "entry": "python server.py",
-    "capabilities": {
-        "tools": [
-            {
-                "name": "evaluation.run",
-                "description": "Run evaluation metrics against targets"
-            },
-            {
-                "name": "evaluation.get_result",
-                "description": "Get evaluation result by ID"
-            }
-        ],
-        "resources": [
-            {
-                "uri": "evaluation://metrics/registry",
-                "name": "Metric Registry"
-            }
-        ],
-        "route_signals": [],
-        "lifecycle_hooks": [
-            "on_load"
-        ]
-    },
-    "dependencies": [],
-    "permissions": {},
-    "error_policy": "abort",
-    "priority": 55,
-    "config_files": [
-        {
-            "id": "evaluation_metrics",
-            "path": "config/evaluation/evaluation_metrics.yaml",
-            "label": "评估指标定义"
-        }
+  "id": "evaluation_service",
+  "name": "Evaluation Service",
+  "version": "1.0.0",
+  "plugin_type": "system",
+  "language": "python",
+  "host_type": "sidecar",
+  "entry": "python server.py",
+  "capabilities": {
+    "tools": [],
+    "resources": [
+      {
+        "uri": "evaluation://metrics/registry",
+        "name": "Metric Registry"
+      }
     ],
-    "http_endpoints": [
-        {
-            "route_id": "metrics_list",
-            "method": "GET",
-            "path": "/ext/evaluation_service/metrics",
-            "auth": "none",
-            "handler_capability": "http.handle",
-            "timeout_ms": 5000,
-            "max_concurrency": 8,
-            "description": "List evaluation metrics (reads config_files: evaluation_metrics)"
-        },
-        {
-            "route_id": "metric_detail",
-            "method": "GET",
-            "path": "/ext/evaluation_service/metrics/{metric_id}",
-            "auth": "none",
-            "handler_capability": "http.handle",
-            "timeout_ms": 5000,
-            "max_concurrency": 8,
-            "description": "Get a single evaluation metric by id/name"
-        },
-        {
-            "route_id": "metric_delete",
-            "method": "DELETE",
-            "path": "/ext/evaluation_service/metrics/{metric_id}",
-            "auth": "none",
-            "handler_capability": "http.handle",
-            "timeout_ms": 5000,
-            "max_concurrency": 8,
-            "description": "Delete is rejected (built-in metrics are read-only)"
-        }
+    "route_signals": [],
+    "lifecycle_hooks": [
+      "on_load"
+    ],
+    "services": [
+      {
+        "name": "evaluation.run",
+        "description": "Run evaluation metrics against targets"
+      },
+      {
+        "name": "evaluation.get_result",
+        "description": "Get evaluation result by ID"
+      }
     ]
+  },
+  "dependencies": [],
+  "permissions": {},
+  "error_policy": "abort",
+  "priority": 55,
+  "config_files": [
+    {
+      "id": "evaluation_metrics",
+      "path": "config/evaluation/evaluation_metrics.yaml",
+      "label": "评估指标定义"
+    }
+  ],
+  "http_endpoints": [
+    {
+      "route_id": "metrics_list",
+      "method": "GET",
+      "path": "/ext/evaluation_service/metrics",
+      "auth": "none",
+      "handler_capability": "http.handle",
+      "timeout_ms": 5000,
+      "max_concurrency": 8,
+      "description": "List evaluation metrics (reads config_files: evaluation_metrics)"
+    },
+    {
+      "route_id": "metric_detail",
+      "method": "GET",
+      "path": "/ext/evaluation_service/metrics/{metric_id}",
+      "auth": "none",
+      "handler_capability": "http.handle",
+      "timeout_ms": 5000,
+      "max_concurrency": 8,
+      "description": "Get a single evaluation metric by id/name"
+    },
+    {
+      "route_id": "metric_delete",
+      "method": "DELETE",
+      "path": "/ext/evaluation_service/metrics/{metric_id}",
+      "auth": "none",
+      "handler_capability": "http.handle",
+      "timeout_ms": 5000,
+      "max_concurrency": 8,
+      "description": "Delete is rejected (built-in metrics are read-only)"
+    }
+  ]
 }

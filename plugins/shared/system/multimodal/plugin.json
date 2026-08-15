@@ -1,46 +1,47 @@
 {
-    "id": "multimodal_service",
-    "name": "Multimodal Service",
-    "description": "多模态内容适配与语音识别服务（模型能力查询/格式转换/ASR转写）",
-    "version": "1.0.0",
-    "plugin_type": "system",
-    "language": "python",
-    "host_type": "sidecar",
-    "entry": "python server.py",
-    "capabilities": {
-        "tools": [
-            {
-                "name": "multimodal.convert",
-                "description": "将文本和附件转换为模型特定格式"
-            },
-            {
-                "name": "multimodal.capability",
-                "description": "查询模型的多模态能力"
-            },
-            {
-                "name": "multimodal.supported",
-                "description": "检查模型是否支持多模态"
-            },
-            {
-                "name": "multimodal.transcribe",
-                "description": "语音识别（ASR）：音频转文本"
-            }
-        ],
-        "lifecycle_hooks": [
-            "on_load",
-            "on_unload"
-        ]
-    },
-    "dependencies": [],
-    "permissions": {},
-    "error_policy": "skip",
-    "priority": 40,
-    "requires_content": 3,
-    "config_files": [
-        {
-            "id": "media_providers",
-            "path": "config/models/media_providers.yaml",
-            "label": "媒体提供商配置"
-        }
+  "id": "multimodal_service",
+  "name": "Multimodal Service",
+  "description": "多模态内容适配与语音识别服务（模型能力查询/格式转换/ASR转写）",
+  "version": "1.0.0",
+  "plugin_type": "system",
+  "language": "python",
+  "host_type": "sidecar",
+  "entry": "python server.py",
+  "capabilities": {
+    "tools": [],
+    "lifecycle_hooks": [
+      "on_load",
+      "on_unload"
+    ],
+    "services": [
+      {
+        "name": "multimodal.convert",
+        "description": "将文本和附件转换为模型特定格式"
+      },
+      {
+        "name": "multimodal.capability",
+        "description": "查询模型的多模态能力"
+      },
+      {
+        "name": "multimodal.supported",
+        "description": "检查模型是否支持多模态"
+      },
+      {
+        "name": "multimodal.transcribe",
+        "description": "语音识别（ASR）：音频转文本"
+      }
     ]
+  },
+  "dependencies": [],
+  "permissions": {},
+  "error_policy": "skip",
+  "priority": 40,
+  "requires_content": 3,
+  "config_files": [
+    {
+      "id": "media_providers",
+      "path": "config/models/media_providers.yaml",
+      "label": "媒体提供商配置"
+    }
+  ]
 }

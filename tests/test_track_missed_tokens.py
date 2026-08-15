@@ -1,3 +1,4 @@
+# @feature: FP-0.2.可观测性 可观测性 | @ci: python-coverage
 """TrackPlugin token 用量收集的 cache 可观测字段测试（task_observability 1b）。
 
 钉死 _collect_token_usage 的 missed_tokens / cache 命中率语义：

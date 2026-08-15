@@ -35,4 +35,4 @@ pub use agent_loader::load_agent_into_state;
 pub use config_center::{AuditEntry, ConfigCenter, ConfigChangeEvent, ConfigEventType};
 pub use error::ConfigError;
 pub use loader::{CompositePluginYaml, ConfigLoader, StepConfig};
-pub use pipeline::{AgentConfig, load_agent_config};
+pub use pipeline::{load_agent_config, AgentConfig};

@@ -225,3 +225,71 @@ class TestLocalConfigParser:
         assert cfg.get_trigger_threshold() == int(128000 * 0.55), "触发阈值应为 70400"
         # 不应导入 memory.context_compressor（0.2 中不存在）
         assert "memory.context_compressor" not in sys.modules
+
+
+# ═══════════════════════════════════════════════════════════
+# 6. routed 条件注入（按 state 键值路由，2026-08-15 增强）
+# ═══════════════════════════════════════════════════════════
+
+
+class TestRoutedVar:
+    """routed 变量：精确/通配/布尔规范化/_default 兜底。"""
+
+    def test_exact_match(self) -> None:
+        """精确匹配：state 值命中的 routes 键内容直接返回。"""
+        mod = _load_plugin_module()
+        plugin = mod.PromptBuildPlugin()
+        ctx = _make_ctx({"core_type": "llm_call"})
+        var_def = {
+            "route_key": "core_type",
+            "routes": {
+                "llm_call": "LLM 轮次提示",
+                "tool_execute": "工具轮次提示",
+                "_default": "兜底提示",
+            },
+        }
+        assert _run(plugin._resolve_routed_var(ctx, var_def)) == "LLM 轮次提示"
+
+    def test_default_fallback(self) -> None:
+        """未命中 → _default 兜底。"""
+        mod = _load_plugin_module()
+        plugin = mod.PromptBuildPlugin()
+        ctx = _make_ctx({"core_type": "other"})
+        var_def = {
+            "route_key": "core_type",
+            "routes": {"llm_call": "A", "_default": "兜底"},
+        }
+        assert _run(plugin._resolve_routed_var(ctx, var_def)) == "兜底"
+
+    def test_wildcard_match(self) -> None:
+        """fnmatch 通配键：deepseek-* 命中 state 值；_default 不参与通配。"""
+        mod = _load_plugin_module()
+        plugin = mod.PromptBuildPlugin()
+        ctx = _make_ctx({"model_tier": "large"})
+        var_def = {
+            "route_key": "model_tier",
+            "routes": {"large*": "大档系", "small": "小档", "_default": "兜底"},
+        }
+        assert _run(plugin._resolve_routed_var(ctx, var_def)) == "大档系"
+
+    def test_boolean_normalization(self) -> None:
+        """布尔规范化：yaml 键 true 匹配 state 布尔 True（含 routes 键本身是布尔）。"""
+        mod = _load_plugin_module()
+        plugin = mod.PromptBuildPlugin()
+        ctx = _make_ctx({"ended": True})
+        var_def = {
+            "route_key": "ended",
+            "routes": {True: "已结束", False: "进行中"},
+        }
+        assert _run(plugin._resolve_routed_var(ctx, var_def)) == "已结束"
+
+    def test_nested_content_dict(self) -> None:
+        """routes 值为 dict 时按 content 字段返回（嵌套定义）。"""
+        mod = _load_plugin_module()
+        plugin = mod.PromptBuildPlugin()
+        ctx = _make_ctx({"core_type": "llm_call"})
+        var_def = {
+            "route_key": "core_type",
+            "routes": {"llm_call": {"type": "content", "content": "嵌套内容"}},
+        }
+        assert _run(plugin._resolve_routed_var(ctx, var_def)) == "嵌套内容"

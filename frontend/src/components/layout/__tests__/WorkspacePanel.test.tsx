@@ -45,7 +45,8 @@ describe('WorkspacePanel — tab 渲染', () => {
         renderTabContent={() => <div />}
       />,
     )
-    expect(screen.getByText(/工作区为空/)).toBeInTheDocument()
+    expect(screen.getByText(/暂无内容/)).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: /打开任务管理/ })).toBeInTheDocument()
   })
 })
 

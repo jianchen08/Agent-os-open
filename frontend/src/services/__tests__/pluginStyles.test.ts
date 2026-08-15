@@ -1,3 +1,4 @@
+/** @feature FP-0.2.四 前端Schema | @ci: frontend-test */
 /**
  * pluginStyles — 插件 CSS 注入（contributes.client_styles）测试
  *

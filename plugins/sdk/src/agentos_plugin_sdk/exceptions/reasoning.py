@@ -20,7 +20,7 @@ class ReasoningRequiredError(ToolException):
         reasoning_prompt: str,
         retry_count: int = 0,
         details: dict[str, Any] | None = None,
-    ):
+    ) -> None:
         """初始化异常
 
         Args:

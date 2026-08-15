@@ -239,7 +239,7 @@ interface PipelineMessageState {
   /** 判断指定管道是否还有更早的消息 */
   hasMoreOlder: (pipelineId: string) => boolean
 
-  /** 直接从 API 加载指定管道的历史消息（底层，吞异常已修复，调用方应优先用 loadPipelineMessages） */
+  /** 直接从 API 加载指定管道的历史消息（底层，调用方应优先用 loadPipelineMessages） */
   fetchMessages: (
     pipelineId: string,
     options?: { limit?: number; before_sequence?: number; after_sequence?: number; threadId?: string },
@@ -746,7 +746,7 @@ export const usePipelineMessageStore = create<PipelineMessageState>()(
     return get().streamingState[pipelineId]?.isStreaming ?? false
   },
 
-  /** 冷启动：从 API 写入最新消息并设置双游标 FIX: 合并策略 — streaming 消息仅在 API 未返回同 ID 时保留，其余以 API 数据为准。 */
+  /** 冷启动：从 API 写入最新消息并设置双游标 合并策略 — streaming 消息仅在 API 未返回同 ID 时保留，其余以 API 数据为准。 */
   initFromAPI: (pipelineId: string, messages: Message[], hasMoreOlder?: boolean) => {
     set((state) => {
       const sorted = [...messages].sort(compareMessages)
@@ -889,7 +889,7 @@ export const usePipelineMessageStore = create<PipelineMessageState>()(
     return get().hasMoreOlderByPipeline[pipelineId] ?? false
   },
 
-  /** 将旧管道中最近的用户消息迁移到新管道 */
+  /** 按 pipelineId 从 API 拉取消息（init/翻页/补漏三种游标模式） */
   fetchMessages: async (
     pipelineId: string,
     options?: { limit?: number; before_sequence?: number; after_sequence?: number; threadId?: string },
@@ -973,7 +973,7 @@ export const usePipelineMessageStore = create<PipelineMessageState>()(
         throw err
       } finally {
         _fetchingPipelines.delete(dedupeKey)
-        // 导致用户滚动到顶部后"加载更多"完全失效。
+        // 重置「加载更早」的 loading 标记，避免残留 true 时用户滚动到顶部后「加载更多」完全失效。
         if (options?.before_sequence !== undefined) {
           set((state) => {
             if (state.isLoadingOlderByPipeline[pipelineId]) {

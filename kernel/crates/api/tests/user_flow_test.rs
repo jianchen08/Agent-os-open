@@ -11,7 +11,7 @@
 
 use std::collections::HashSet;
 
-use agentos_core::traits::{PluginManifest, PluginType, HostType, ManifestCapabilities};
+use agentos_core::traits::{HostType, ManifestCapabilities, PluginManifest, PluginType};
 use agentos_plugin_loader::PluginEnablement;
 
 /// 构造测试 manifest（含 contributes + config_files）
@@ -38,7 +38,7 @@ fn test_manifest(
         mcp: None,
         lifecycle: None,
         native: None,
-        wasm: None,
+        granted_capabilities: vec![],
         requires_content: None,
         invoke_entry: None,
         config_files,
@@ -74,7 +74,10 @@ fn test_disabled_plugin_contributes_not_exported() {
     let mut profile = agentos_plugin_loader::PluginProfile::default();
     profile.plugins.insert(
         "disabled_plugin".into(),
-        agentos_plugin_loader::ProfileEntry { enabled: Some(false), activation: None },
+        agentos_plugin_loader::ProfileEntry {
+            enabled: Some(false),
+            activation: None,
+        },
     );
     let enablement = PluginEnablement::with_profile(profile);
 
@@ -175,7 +178,10 @@ fn test_http_endpoints_only_for_enabled() {
     let mut profile = agentos_plugin_loader::PluginProfile::default();
     profile.plugins.insert(
         "disabled_http".into(),
-        agentos_plugin_loader::ProfileEntry { enabled: Some(false), activation: None },
+        agentos_plugin_loader::ProfileEntry {
+            enabled: Some(false),
+            activation: None,
+        },
     );
     let enablement = PluginEnablement::with_profile(profile);
 
@@ -212,7 +218,7 @@ fn test_plugin_status_data_from_manifest() {
         mcp: None,
         lifecycle: None,
         native: None,
-        wasm: None,
+        granted_capabilities: vec![],
         requires_content: None,
         invoke_entry: None,
         config_files: vec![agentos_core::traits::ConfigFileMapping {
@@ -234,7 +240,10 @@ fn test_plugin_status_data_from_manifest() {
     assert_eq!(manifest.version, "2.0.0");
     assert_eq!(manifest.config_files.len(), 1); // → config_files 显示
     assert!(manifest.contributes.is_some()); // → has_contributes true
-    assert_eq!(manifest.activation, Some(agentos_core::traits::ActivationPolicy::Eager)); // → "eager"
+    assert_eq!(
+        manifest.activation,
+        Some(agentos_core::traits::ActivationPolicy::Eager)
+    ); // → "eager"
 }
 
 #[test]
@@ -286,7 +295,7 @@ fn test_eager_vs_lazy_distinction() {
         mcp: None,
         lifecycle: None,
         native: None,
-        wasm: None,
+        granted_capabilities: vec![],
         requires_content: None,
         invoke_entry: None,
         config_files: vec![],
@@ -300,6 +309,9 @@ fn test_eager_vs_lazy_distinction() {
     };
     let manifest_lazy = test_manifest("lazy_p", PluginType::Tool, None, vec![]);
 
-    assert_eq!(manifest_eager.activation, Some(agentos_core::traits::ActivationPolicy::Eager));
+    assert_eq!(
+        manifest_eager.activation,
+        Some(agentos_core::traits::ActivationPolicy::Eager)
+    );
     assert_eq!(manifest_lazy.activation, None); // None → default lazy
 }

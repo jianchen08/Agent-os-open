@@ -7,8 +7,8 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
-use async_trait::async_trait;
 use agentos_core::traits::{LoadedPlugin, PluginLoader, PluginManifest, PluginStatus, PluginType};
+use async_trait::async_trait;
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -93,7 +93,8 @@ impl PluginLoaderImpl {
         }
     }
 
-    /// 设置配置文件根目录，返回 self 供链式调用。    ///
+    /// 设置配置文件根目录，返回 self 供链式调用。
+    ///
     /// 设置后，`load_config()` 将扫描该目录下的 YAML 文件并解析为 JSON。
     ///
     /// # Security
@@ -173,25 +174,26 @@ impl PluginLoaderImpl {
             // 解析 manifest（跳过解析失败的插件，不影响同 root 的其他插件）
             let manifest: PluginManifest = match serde_json::from_str::<PluginManifest>(&content) {
                 Ok(m) => m,
-                Err(json_err) => {
-                    match serde_yaml::from_str::<PluginManifest>(&content) {
-                        Ok(m) => m,
-                        Err(yaml_err) => {
-                            warn!(
-                                "Skipping plugin at {}: json error: {}, yaml error: {}",
-                                manifest_path.display(), json_err, yaml_err
-                            );
-                            continue;
-                        }
+                Err(json_err) => match serde_yaml::from_str::<PluginManifest>(&content) {
+                    Ok(m) => m,
+                    Err(yaml_err) => {
+                        warn!(
+                            "Skipping plugin at {}: json error: {}, yaml error: {}",
+                            manifest_path.display(),
+                            json_err,
+                            yaml_err
+                        );
+                        continue;
                     }
-                }
+                },
             };
 
             // 校验 manifest（跳过校验失败的插件，不阻断同 root 的其他插件）
             if let Err(e) = self.validate_manifest_internal(&manifest, &manifest_path) {
                 warn!(
                     "Skipping plugin at {}: validation error: {}",
-                    manifest_path.display(), e
+                    manifest_path.display(),
+                    e
                 );
                 continue;
             }
@@ -275,11 +277,7 @@ impl PluginLoaderImpl {
         source_path: &Path,
     ) -> Result<(), LoaderError> {
         // 查找白名单条目
-        let entry = self
-            .allowlist
-            .plugins
-            .iter()
-            .find(|e| e.id == manifest.id);
+        let entry = self.allowlist.plugins.iter().find(|e| e.id == manifest.id);
 
         // strict 模式门槛校验
         if self.allowlist.mode == AllowlistMode::Strict && entry.is_none() {
@@ -437,8 +435,9 @@ impl PluginLoader for PluginLoaderImpl {
         // ADR 附录 D③/D.5（P6 命名治理）：启动期聚合校验 invoke_entry。
         // pipeline 类型插件的 MCP 入口名必须显式声明（不再隐式回退 capabilities.tools）。
         // 收集所有缺失项一次性报错——不逐个 panic，避免"修一个崩一个"的迁移体验。
-        // tool 类型用 capabilities.tools[]、system 类型暂保留 tools[]（D.6 双语义待评估），
-        // 都不要求 invoke_entry。
+        // D.6 槽位拆分（2026-08-15 落地）：capabilities.tools = LLM 工具（声明即
+        // 注册，不分类型）；capabilities.services = 内部服务方法。两者都不要求
+        // invoke_entry（那是管道入口的声明）。
         let mut missing_invoke_entry: Vec<String> = all_manifests
             .values()
             .map(|(m, _)| m)
@@ -484,7 +483,10 @@ impl PluginLoader for PluginLoaderImpl {
     ///
     /// 如果插件已加载则直接返回；如果未加载则首次实例化。
     /// 按需加载原则：首次被调用时才启动 MCP 边车进程（非预启动）。
-    async fn load(&self, plugin_id: &str) -> Result<LoadedPlugin, agentos_core::types::PluginError> {
+    async fn load(
+        &self,
+        plugin_id: &str,
+    ) -> Result<LoadedPlugin, agentos_core::types::PluginError> {
         // 检查是否已加载
         {
             let loaded = self.loaded.read();
@@ -582,7 +584,11 @@ impl PluginLoader for PluginLoaderImpl {
                     _ => "CONFIG_LOAD_FAILED",
                 };
                 agentos_core::types::PluginError {
-                    message: format!("Failed to load config from {}: {}", config_root.display(), e),
+                    message: format!(
+                        "Failed to load config from {}: {}",
+                        config_root.display(),
+                        e
+                    ),
                     code: Some(code.to_string()),
                     source: Some("plugin-loader".to_string()),
                 }
@@ -627,7 +633,7 @@ impl PluginLoaderImpl {
 
     /// 获取所有已发现插件的根目录映射（plugin_id → 插件目录绝对路径）。
     ///
-    /// 阶段3 遗留：HTTP dispatcher 据此把 `/ext/{plugin_id}/assets/{*path}`
+    /// HTTP dispatcher 据此把 `/ext/{plugin_id}/assets/{*path}`
     /// 解析到 `<plugin_dir>/web/<path>` 直读文件返回，免去为每个子资源单独声明
     /// http_endpoints。由 agentos-kernel 启动期调用，把结果经
     /// `AppState::with_plugin_dirs` 注入。
@@ -635,9 +641,7 @@ impl PluginLoaderImpl {
         let manifests = self.manifests.read();
         manifests
             .iter()
-            .filter_map(|(id, (_, path))| {
-                path.parent().map(|p| (id.clone(), p.to_path_buf()))
-            })
+            .filter_map(|(id, (_, path))| path.parent().map(|p| (id.clone(), p.to_path_buf())))
             .collect()
     }
 
@@ -711,11 +715,7 @@ impl PluginLoaderImpl {
                 let yaml_value: serde_json::Value = match serde_yaml::from_str(&content) {
                     Ok(v) => v,
                     Err(e) => {
-                        warn!(
-                            "Skipping unparseable config file {}: {}",
-                            path.display(),
-                            e
-                        );
+                        warn!("Skipping unparseable config file {}: {}", path.display(), e);
                         continue;
                     }
                 };
@@ -783,7 +783,7 @@ mod tests {
             mcp: None,
             lifecycle: None,
             native: None,
-            wasm: None,
+            granted_capabilities: vec![],
             requires_content: None,
             invoke_entry: None,
             config_files: vec![],
@@ -813,7 +813,10 @@ mod tests {
             "lifecycle": { "idle_timeout_secs": 0 }
         });
         let m: PluginManifest = serde_json::from_value(json).expect("parse manifest");
-        assert_eq!(m.lifecycle.expect("lifecycle present").idle_timeout_secs, Some(0));
+        assert_eq!(
+            m.lifecycle.expect("lifecycle present").idle_timeout_secs,
+            Some(0)
+        );
 
         let json2 = serde_json::json!({
             "id": "p", "name": "P", "version": "1.0.0",
@@ -845,7 +848,7 @@ mod tests {
             mcp: None,
             lifecycle: None,
             native: None,
-            wasm: None,
+            granted_capabilities: vec![],
             requires_content: None,
             invoke_entry: None,
             config_files: vec![],
@@ -881,7 +884,7 @@ mod tests {
             mcp: None,
             lifecycle: None,
             native: None,
-            wasm: None,
+            granted_capabilities: vec![],
             requires_content: None,
             invoke_entry: None,
             config_files: vec![],
@@ -964,9 +967,16 @@ mod tests {
         loader.discover(&[]).await.unwrap();
 
         let plugin_dir = loader.get_plugin_dir("dir_test_plugin");
-        assert!(plugin_dir.is_some(), "get_plugin_dir should return Some for discovered plugin");
+        assert!(
+            plugin_dir.is_some(),
+            "get_plugin_dir should return Some for discovered plugin"
+        );
         let dir = plugin_dir.unwrap();
-        assert!(dir.ends_with("dir_test_plugin"), "plugin dir should end with plugin id, got: {}", dir);
+        assert!(
+            dir.ends_with("dir_test_plugin"),
+            "plugin dir should end with plugin id, got: {}",
+            dir
+        );
     }
 
     #[tokio::test]
@@ -985,9 +995,16 @@ mod tests {
         loader.discover(&[]).await.unwrap();
 
         let plugin_dir = loader.get_plugin_dir("dir_test");
-        assert!(plugin_dir.is_some(), "get_plugin_dir should return Some for discovered plugin");
+        assert!(
+            plugin_dir.is_some(),
+            "get_plugin_dir should return Some for discovered plugin"
+        );
         let dir = plugin_dir.unwrap();
-        assert!(dir.ends_with("dir_test"), "plugin dir should end with plugin id, got: {}", dir);
+        assert!(
+            dir.ends_with("dir_test"),
+            "plugin dir should end with plugin id, got: {}",
+            dir
+        );
     }
 
     #[tokio::test]
@@ -1032,7 +1049,7 @@ mod tests {
             mcp: None,
             lifecycle: None,
             native: None,
-            wasm: None,
+            granted_capabilities: vec![],
             requires_content: Some(2),
             invoke_entry: None,
             config_files: vec![],
@@ -1076,7 +1093,10 @@ mod tests {
         assert_eq!(provides.capabilities.len(), 1);
         let cap = &provides.capabilities[0];
         assert_eq!(cap.namespace, "human-interaction");
-        assert_eq!(cap.methods, vec!["create_choice", "wait_for_choice", "respond", "cancel"]);
+        assert_eq!(
+            cap.methods,
+            vec!["create_choice", "wait_for_choice", "respond", "cancel"]
+        );
         assert_eq!(cap.host, ProvidedCapabilityHost::InProcess);
     }
 
@@ -1109,7 +1129,11 @@ mod tests {
         }"#;
         let manifest: PluginManifest = serde_json::from_str(json).unwrap();
         let cap = &manifest.provides.unwrap().capabilities[0];
-        assert_eq!(cap.host, ProvidedCapabilityHost::InProcess, "host 缺省应为 InProcess");
+        assert_eq!(
+            cap.host,
+            ProvidedCapabilityHost::InProcess,
+            "host 缺省应为 InProcess"
+        );
     }
 
     // ── 配置加载测试 ──
@@ -1201,16 +1225,8 @@ mod tests {
     async fn test_load_config_ignores_non_yaml_files() {
         let config_dir = tempfile::tempdir().unwrap();
 
-        fs::write(
-            config_dir.path().join("config.yaml"),
-            "key: value\n",
-        )
-        .unwrap();
-        fs::write(
-            config_dir.path().join("readme.md"),
-            "# Not a config\n",
-        )
-        .unwrap();
+        fs::write(config_dir.path().join("config.yaml"), "key: value\n").unwrap();
+        fs::write(config_dir.path().join("readme.md"), "# Not a config\n").unwrap();
         fs::write(
             config_dir.path().join("data.json"),
             "{\"key\": \"value\"}\n",
@@ -1234,11 +1250,7 @@ mod tests {
     async fn test_load_config_yml_extension() {
         let config_dir = tempfile::tempdir().unwrap();
 
-        fs::write(
-            config_dir.path().join("short.yml"),
-            "name: test\n",
-        )
-        .unwrap();
+        fs::write(config_dir.path().join("short.yml"), "name: test\n").unwrap();
 
         let loader =
             PluginLoaderImpl::new("/tmp/nonexistent", None).with_config_root(config_dir.path());
@@ -1266,10 +1278,7 @@ mod tests {
     async fn test_load_config_deep_nested_dirs() {
         // 深层嵌套（≥ 2 层目录）
         let config_dir = tempfile::tempdir().unwrap();
-        let deep_dir = config_dir
-            .path()
-            .join("system")
-            .join("subsystem");
+        let deep_dir = config_dir.path().join("system").join("subsystem");
         fs::create_dir_all(&deep_dir).unwrap();
 
         fs::write(
@@ -1277,11 +1286,7 @@ mod tests {
             "root_key: root_value\n",
         )
         .unwrap();
-        fs::write(
-            deep_dir.join("deep_config.yaml"),
-            "deep_key: deep_value\n",
-        )
-        .unwrap();
+        fs::write(deep_dir.join("deep_config.yaml"), "deep_key: deep_value\n").unwrap();
 
         let loader =
             PluginLoaderImpl::new("/tmp/nonexistent", None).with_config_root(config_dir.path());
@@ -1311,17 +1316,9 @@ mod tests {
         fs::create_dir_all(&sub_dir).unwrap();
 
         // 根目录有 config.yaml
-        fs::write(
-            config_dir.path().join("config.yaml"),
-            "from: root\n",
-        )
-        .unwrap();
+        fs::write(config_dir.path().join("config.yaml"), "from: root\n").unwrap();
         // 子目录也有 config.yaml
-        fs::write(
-            sub_dir.join("config.yaml"),
-            "from: sub\n",
-        )
-        .unwrap();
+        fs::write(sub_dir.join("config.yaml"), "from: sub\n").unwrap();
 
         let loader =
             PluginLoaderImpl::new("/tmp/nonexistent", None).with_config_root(config_dir.path());
@@ -1347,11 +1344,7 @@ mod tests {
         let empty_sub = config_dir.path().join("empty_dir");
         fs::create_dir_all(&empty_sub).unwrap();
 
-        fs::write(
-            config_dir.path().join("config.yaml"),
-            "key: value\n",
-        )
-        .unwrap();
+        fs::write(config_dir.path().join("config.yaml"), "key: value\n").unwrap();
 
         let loader =
             PluginLoaderImpl::new("/tmp/nonexistent", None).with_config_root(config_dir.path());
@@ -1370,16 +1363,8 @@ mod tests {
         // 同一目录下同时有 .yaml 和 .yml 文件
         let config_dir = tempfile::tempdir().unwrap();
 
-        fs::write(
-            config_dir.path().join("long.yaml"),
-            "type: yaml\n",
-        )
-        .unwrap();
-        fs::write(
-            config_dir.path().join("short.yml"),
-            "type: yml\n",
-        )
-        .unwrap();
+        fs::write(config_dir.path().join("long.yaml"), "type: yaml\n").unwrap();
+        fs::write(config_dir.path().join("short.yml"), "type: yml\n").unwrap();
 
         let loader =
             PluginLoaderImpl::new("/tmp/nonexistent", None).with_config_root(config_dir.path());
@@ -1405,11 +1390,7 @@ mod tests {
         let config_dir = tempfile::tempdir().unwrap();
 
         // 合法配置
-        fs::write(
-            config_dir.path().join("good.yaml"),
-            "key: value\n",
-        )
-        .unwrap();
+        fs::write(config_dir.path().join("good.yaml"), "key: value\n").unwrap();
         // 非法 YAML(map key 用了占位符,serde_yaml 解析失败)
         fs::write(
             config_dir.path().join("bad.yaml"),
@@ -1424,10 +1405,7 @@ mod tests {
         let config = loader.load_config().await.unwrap();
         let obj = config.as_object().unwrap();
         assert!(obj.contains_key("good"), "合法文件应正常加载");
-        assert!(
-            !obj.contains_key("bad"),
-            "非法文件应被跳过,不让整体失败"
-        );
+        assert!(!obj.contains_key("bad"), "非法文件应被跳过,不让整体失败");
     }
 
     /// 隐藏文件(以 `.` 开头)不应被当作配置加载——
@@ -1437,11 +1415,7 @@ mod tests {
     async fn test_load_config_skips_hidden_files() {
         let config_dir = tempfile::tempdir().unwrap();
 
-        fs::write(
-            config_dir.path().join("visible.yaml"),
-            "key: value\n",
-        )
-        .unwrap();
+        fs::write(config_dir.path().join("visible.yaml"), "key: value\n").unwrap();
         fs::write(
             config_dir.path().join(".hidden.yaml"),
             "hidden_key: hidden_value\n",
@@ -1474,8 +1448,7 @@ mod tests {
             mode: AllowlistMode::Strict,
             plugins: vec![],
         };
-        let loader =
-            PluginLoaderImpl::new(builtin.path(), None).with_allowlist(allowlist);
+        let loader = PluginLoaderImpl::new(builtin.path(), None).with_allowlist(allowlist);
 
         let manifests = loader.discover(&[]).await.unwrap();
         // 非白名单插件被 validate_manifest_internal 拒绝 → 不进入结果
@@ -1496,7 +1469,11 @@ mod tests {
         let loader = PluginLoaderImpl::new(builtin.path(), None);
 
         let manifests = loader.discover(&[]).await.unwrap();
-        assert_eq!(manifests.len(), 2, "permissive mode should allow all plugins");
+        assert_eq!(
+            manifests.len(),
+            2,
+            "permissive mode should allow all plugins"
+        );
         let ids: Vec<_> = manifests.iter().map(|m| m.id.clone()).collect();
         assert!(ids.contains(&"any_plugin_a".to_string()));
         assert!(ids.contains(&"any_plugin_b".to_string()));
@@ -1546,8 +1523,7 @@ mod tests {
                 sha256: correct_hash.clone(),
             }],
         };
-        let loader_ok =
-            PluginLoaderImpl::new(builtin.path(), None).with_allowlist(allowlist_ok);
+        let loader_ok = PluginLoaderImpl::new(builtin.path(), None).with_allowlist(allowlist_ok);
         let manifests = loader_ok.discover(&[]).await.unwrap();
         assert_eq!(
             manifests.len(),
@@ -1569,8 +1545,7 @@ mod tests {
                 sha256: broken_hash,
             }],
         };
-        let loader_bad =
-            PluginLoaderImpl::new(builtin.path(), None).with_allowlist(allowlist_bad);
+        let loader_bad = PluginLoaderImpl::new(builtin.path(), None).with_allowlist(allowlist_bad);
         let manifests_bad = loader_bad.discover(&[]).await.unwrap();
         assert!(
             manifests_bad.is_empty(),

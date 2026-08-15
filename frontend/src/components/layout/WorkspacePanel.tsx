@@ -1,8 +1,10 @@
 /** 工作区面板 管理工作区 Tab 切换，支持从悬浮窗拖拽吸附 */
 
-import React from 'react'
-import { FullscreenIcon, FullscreenExitIcon } from '@/assets/icons'
+import React, { useEffect, useRef, useState } from 'react'
+import { FullscreenIcon, FullscreenExitIcon, FolderTree } from '@/assets/icons'
 import { useNonPassiveWheel } from '@/hooks/useNonPassiveWheel'
+import { useLayoutModeStore } from '@/stores/layoutModeStore'
+import { openWorkspacePanelByPath } from '@/services/workspacePanelOpener'
 import type { WorkspaceTab } from '@/types/layout'
 
 /** 工作区面板属性 */
@@ -21,6 +23,14 @@ export interface WorkspacePanelProps {
   isFullscreen?: boolean
  /** 已访问过（至少激活过一次）的 Tab ID 集合，用于懒挂载策略 PERF 只有当前激活 Tab 或曾访问过的 Tab */
   visitedTabIds?: string[]
+}
+
+/** 标签右键菜单状态 */
+interface TabContextMenuState {
+  x: number
+  y: number
+  tabId: string
+  isPinned: boolean
 }
 
 /** 工作区面板组件 显示 Tab 栏和对应的 Tab 内容区域 */
@@ -42,10 +52,64 @@ export function WorkspacePanel({
     }
   })
 
+  /** 标签右键菜单 */
+  const [tabMenu, setTabMenu] = useState<TabContextMenuState | null>(null)
+  const menuRef = useRef<HTMLDivElement>(null)
+
+  /** 打开标签右键菜单 */
+  const handleTabContextMenu = (
+    e: React.MouseEvent,
+    tab: WorkspaceTab,
+  ) => {
+    e.preventDefault()
+    e.stopPropagation()
+    setTabMenu({ x: e.clientX, y: e.clientY, tabId: tab.id, isPinned: !!tab.isPinned })
+  }
+
+  /** 点击外部关闭菜单 */
+  useEffect(() => {
+    if (!tabMenu) return
+    const handleClickOutside = (e: MouseEvent) => {
+      if (menuRef.current && !menuRef.current.contains(e.target as Node)) {
+        setTabMenu(null)
+      }
+    }
+    const handleKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') setTabMenu(null)
+    }
+    document.addEventListener('mousedown', handleClickOutside)
+    document.addEventListener('keydown', handleKey)
+    return () => {
+      document.removeEventListener('mousedown', handleClickOutside)
+      document.removeEventListener('keydown', handleKey)
+    }
+  }, [tabMenu])
+
+  /** 菜单动作 */
+  const handleMenuAction = (action: 'close' | 'closeOther' | 'closeAll') => {
+    if (!tabMenu) return
+    const store = useLayoutModeStore.getState()
+    if (action === 'close') {
+      store.closeWorkspaceTab(tabMenu.tabId)
+    } else if (action === 'closeOther') {
+      store.closeOtherWorkspaceTabs(tabMenu.tabId)
+    } else {
+      store.closeAllWorkspaceTabs()
+    }
+    setTabMenu(null)
+  }
+
   if (tabs.length === 0) {
     return (
-      <div className="text-muted-foreground flex h-full items-center justify-center text-sm">
-        工作区为空 — 模块激活后自动出现
+      <div className="text-muted-foreground flex h-full flex-col items-center justify-center gap-3 text-sm">
+        <FolderTree className="text-muted-foreground/40 h-10 w-10" />
+        <span>暂无内容 — 从下方打开任务管理</span>
+        <button
+          onClick={() => openWorkspacePanelByPath('/tasks')}
+          className="bg-primary/15 text-primary hover:bg-primary/25 rounded-lg px-3 py-1.5 text-xs font-medium transition-colors"
+        >
+          打开任务管理
+        </button>
       </div>
     )
   }
@@ -64,6 +128,8 @@ export function WorkspacePanel({
                 : 'text-muted-foreground hover:text-foreground border-transparent'
             }`}
             onClick={() => onTabChange(tab.id)}
+            onContextMenu={(e) => handleTabContextMenu(e, tab)}
+            data-testid={`workspace-tab-${tab.id}`}
           >
             <span>{tab.title}</span>
             {!tab.isPinned && (
@@ -100,6 +166,39 @@ export function WorkspacePanel({
           </button>
         )}
       </div>
+
+      {/* 标签右键菜单 */}
+      {tabMenu && (
+        <div
+          ref={menuRef}
+          className="bg-popover text-popover-foreground shadow-lg fixed z-[100] min-w-[140px] rounded-lg border p-1 text-sm"
+          style={{ left: tabMenu.x, top: tabMenu.y }}
+        >
+          <button
+            className="hover:bg-accent text-muted-foreground hover:text-foreground flex w-full items-center rounded px-2.5 py-1.5 text-left text-xs disabled:opacity-40"
+            disabled={tabMenu.isPinned}
+            title={tabMenu.isPinned ? '固定标签不可关闭' : undefined}
+            onClick={() => handleMenuAction('close')}
+            data-testid="workspace-tab-menu-close"
+          >
+            关闭本标签
+          </button>
+          <button
+            className="hover:bg-accent text-muted-foreground hover:text-foreground flex w-full items-center rounded px-2.5 py-1.5 text-left text-xs"
+            onClick={() => handleMenuAction('closeOther')}
+            data-testid="workspace-tab-menu-close-other"
+          >
+            关闭其他标签
+          </button>
+          <button
+            className="hover:bg-accent text-muted-foreground hover:text-foreground flex w-full items-center rounded px-2.5 py-1.5 text-left text-xs"
+            onClick={() => handleMenuAction('closeAll')}
+            data-testid="workspace-tab-menu-close-all"
+          >
+            关闭所有标签
+          </button>
+        </div>
+      )}
 
       {/* Tab 内容 — 懒挂载：仅激活 Tab 或已访问 Tab 渲染真实内容 */}
       <div className="min-h-0 flex-1 overflow-hidden">

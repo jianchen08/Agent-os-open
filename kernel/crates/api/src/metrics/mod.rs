@@ -9,9 +9,12 @@
 //! - [`broadcast`]：event_bus 采样广播高频指标（监控设计 §六 形态2）
 //! - [`plugin_widget_broadcast`]：按插件 contributes.widget 配置驱动推送（ADR §3.5'）
 //! - [`lifecycle`]：生命周期事件总线指标订阅者（lifecycle.* 计数器）
+//! - [`capability`]：metrics-admin 读面 capability handler（boot-plugin 第三刀，
+//!   写面 metrics.record 留 KernelCapabilityRouter 内置）
 
 pub mod aggregator;
 pub mod broadcast;
+pub mod capability;
 pub mod counters;
 pub mod export;
 pub mod lifecycle;
@@ -24,12 +27,13 @@ pub use aggregator::{
     MetricsAggregator, Sample, DEFAULT_HISTOGRAM_BUCKETS, TIER1_BUCKET, TIER1_WINDOW, TIER2_BUCKET,
     TIER2_WINDOW,
 };
-pub use broadcast::{collect_broadcast_snapshot, BROADCAST_PREFIXES, MetricBroadcaster};
+pub use broadcast::{collect_broadcast_snapshot, MetricBroadcaster, BROADCAST_PREFIXES};
+pub use capability::{MetricsAdminCapabilityHandler, NAMESPACE as METRICS_ADMIN_NAMESPACE};
 pub use counters::{KernelCounters, KernelCountersSnapshot};
 pub use export::{export_prometheus, format_label_pairs};
 pub use lifecycle::spawn_lifecycle_metrics_subscriber;
 pub use plugin_widget_broadcast::{
-    collect_all_bindings, parse_plugin_bindings, BindingScope, PluginWidgetBroadcaster,
-    WidgetBinding, WidgetEmitter,
+    collect_all_bindings, parse_plugin_bindings, remove_plugin_bindings, BindingScope,
+    PluginWidgetBroadcaster, SharedBindings, WidgetBinding, WidgetEmitter,
 };
 pub use proc_state::{collect_proc_state, ProcStateSnapshot};

@@ -39,8 +39,8 @@ export function useRealtimeEvents(): void {
 
       const { activeSessionId, sessions } = useSessionStore.getState()
       if (!activeSessionId) return
-      // 只补当前会话的【主管道】，不对 session.pipelineIds 全部扇出（曾导致 4+ 并发请求
-      // × 后端全量加载 40s = 性能雪崩）。子管道的消息在用户切到对应 tab 时按需加载。
+      // 只补当前会话的【主管道】，不对 session.pipelineIds 全部扇出。
+      // 子管道的消息在用户切到对应 tab 时按需加载。
       const session = sessions.find((s) => s.id === activeSessionId)
       const mainPipelineId = session?.pipelineIds?.[0]
       if (!mainPipelineId) return
@@ -49,7 +49,7 @@ export function useRealtimeEvents(): void {
       // init 触发 initFromAPI → 后端 _list_by_pipeline_full 全量读大 YAML（4.3MB+，
       // 单请求 10-40s），多个 pipeline 并发即雪崩。backfill 走 read_records_from_tail
       // 尾部窗口读，秒级返回。流式占位的 id 对账问题由 ensureStreamingPlaceholder 的
-      // 状态守护（改动 A）保证安全，无需靠 init 全量覆盖。
+      // 状态守护保证安全，无需靠 init 全量覆盖。
       usePipelineMessageStore
         .getState()
         .loadPipelineMessages(mainPipelineId, {

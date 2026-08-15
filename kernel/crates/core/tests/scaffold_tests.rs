@@ -91,14 +91,7 @@ fn test_workspace_dependencies_present() {
 /// AC-02-1: 所有 crate 依赖 agentos-core（除了 core 自身）
 #[test]
 fn test_crates_depend_on_core() {
-    let dependent_crates = [
-        "config",
-        "plugin-loader",
-        "mcp",
-        "invoker",
-        "tenant",
-        "api",
-    ];
+    let dependent_crates = ["config", "plugin-loader", "mcp", "invoker", "tenant", "api"];
     for name in &dependent_crates {
         let cargo_path = format!("{}crates/{}/Cargo.toml", workspace_root(), name);
         let content = std::fs::read_to_string(&cargo_path)
@@ -161,29 +154,39 @@ fn test_ci_has_5_jobs() {
     }
 }
 
-/// AC-02-3: ci.yml 的 rust-lint job 包含 fmt 和 clippy
+/// AC-02-3: rust-lint 门禁包含 fmt 和 clippy
+/// （2026-08-15 门禁统一：ci.yml 经 run_gates.py 引用门禁 id，
+/// cargo 命令本身由 run_gates.py 的 GATES 表持有——承诺链两端都断言）
 #[test]
 fn test_ci_rust_lint_has_fmt_and_clippy() {
     let ci_content = std::fs::read_to_string(format!("{}.github/workflows/ci.yml", project_root()))
         .expect("ci.yml 不存在");
+    let gates_content = std::fs::read_to_string(format!("{}scripts/run_gates.py", project_root()))
+        .expect("run_gates.py 不存在");
     assert!(
-        ci_content.contains("cargo fmt"),
-        "ci.yml 的 rust-lint job 应包含 cargo fmt"
+        ci_content.contains("kernel-fmt") && ci_content.contains("kernel-clippy"),
+        "ci.yml 的 rust-lint job 应经 run_gates 引用 kernel-fmt/kernel-clippy 门禁"
     );
     assert!(
-        ci_content.contains("clippy"),
-        "ci.yml 的 rust-lint job 应包含 cargo clippy"
+        gates_content.contains("cargo fmt") && gates_content.contains("clippy"),
+        "run_gates.py 的 GATES 表应持有 cargo fmt 与 cargo clippy 命令"
     );
 }
 
-/// AC-02-3: ci.yml 的 rust-test job 包含 cargo test
+/// AC-02-3: rust-test 门禁包含 cargo test（同上，命令由 run_gates.py 持有）
 #[test]
 fn test_ci_rust_test_has_cargo_test() {
     let ci_content = std::fs::read_to_string(format!("{}.github/workflows/ci.yml", project_root()))
         .expect("ci.yml 不存在");
+    let gates_content = std::fs::read_to_string(format!("{}scripts/run_gates.py", project_root()))
+        .expect("run_gates.py 不存在");
     assert!(
-        ci_content.contains("cargo test"),
-        "ci.yml 的 rust-test job 应包含 cargo test"
+        ci_content.contains("kernel-test"),
+        "ci.yml 的 rust-test job 应经 run_gates 引用 kernel-test 门禁"
+    );
+    assert!(
+        gates_content.contains("cargo test"),
+        "run_gates.py 的 GATES 表应持有 cargo test 命令"
     );
 }
 

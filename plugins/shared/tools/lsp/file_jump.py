@@ -1,10 +1,8 @@
 """
 文件跳转协议
 
-暴露接口：
-- parse_uri(uri: str) -> tuple[str, Position | None]：parse_uri功能
-- generate_uri(file_path: str, position: Position | None, ide_type: IDEType | None) -> str：generate_uri功能
-- FileJumpProtocol：FileJumpProtocol类
+在「文件路径 + 行列位置」与 IDE 跳转 URI 之间双向转换：
+generate_uri 生成（VSCode/JetBrains/Nvim 各自的 scheme），parse_uri 解析还原。
 """
 
 import logging

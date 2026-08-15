@@ -9,7 +9,7 @@
  */
 
 import { create } from 'zustand'
-import { fetchPipelineRuns } from '@/services/api/pipelines'
+import { fetchPipelineRuns, fetchPipelineStates, type PipelineStateInfo } from '@/services/api/pipelines'
 import type { PipelineRunInfo, PipelineStatus } from '@/types/pipeline'
 import { usePipelineMessageStore } from './pipelineMessageStore'
 
@@ -24,6 +24,8 @@ function entryKey(item: PipelineRunInfo): string {
 interface PipelineRegistryState {
   /** 运行快照（同管道多条 run 取最新一条） */
   runs: Record<string, PipelineRunInfo>
+  /** 管道 state 摘要（pipeline_id → phase/迭代/上下文真值，任务树数据源） */
+  states: Record<string, PipelineStateInfo>
   /** 最近一次快照拉取时间 */
   lastFetchedAt: number | null
   /** 是否正在拉取 */
@@ -47,6 +49,7 @@ interface PipelineRegistryState {
 
 export const usePipelineRegistryStore = create<PipelineRegistryState>((set, get) => ({
   runs: {},
+  states: {},
   lastFetchedAt: null,
   isLoading: false,
   error: null,
@@ -57,7 +60,11 @@ export const usePipelineRegistryStore = create<PipelineRegistryState>((set, get)
     if (get().isLoading) return
     set({ isLoading: true })
     try {
-      const items = await fetchPipelineRuns({ limit: 100 })
+      // runs 与 state 并行拉取；state 失败降级为空（不阻断 runs 快照）
+      const [items, stateItems] = await Promise.all([
+        fetchPipelineRuns({ limit: 100 }),
+        fetchPipelineStates().catch(() => [] as PipelineStateInfo[]),
+      ])
       const next: Record<string, PipelineRunInfo> = {}
       for (const item of items) {
         const key = entryKey(item)
@@ -67,7 +74,11 @@ export const usePipelineRegistryStore = create<PipelineRegistryState>((set, get)
           next[key] = item
         }
       }
-      set({ runs: next, lastFetchedAt: Date.now(), error: null, isLoading: false })
+      const nextStates: Record<string, PipelineStateInfo> = {}
+      for (const st of stateItems) {
+        nextStates[st.pipeline_id] = st
+      }
+      set({ runs: next, states: nextStates, lastFetchedAt: Date.now(), error: null, isLoading: false })
     } catch (e) {
       console.error('[pipelineRegistry] 拉取管道快照失败', e)
       set({ error: e instanceof Error ? e.message : '拉取管道快照失败', isLoading: false })
@@ -139,6 +150,6 @@ export const usePipelineRegistryStore = create<PipelineRegistryState>((set, get)
 
   reset: () => {
     get().stopAutoRefresh()
-    set({ runs: {}, lastFetchedAt: null, isLoading: false, error: null })
+    set({ runs: {}, states: {}, lastFetchedAt: null, isLoading: false, error: null })
   },
 }))

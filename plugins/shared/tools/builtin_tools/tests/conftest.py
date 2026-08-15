@@ -1,3 +1,4 @@
+# @feature: FP-0.2.二 内部模块 manifest | @ci: python-coverage
 """测试装配：把 builtin_tools 的 ``src`` 注入 ``sys.path``。
 
 背景：本包源码在 ``plugins/shared/tools/builtin_tools/src/``，但 CI 的

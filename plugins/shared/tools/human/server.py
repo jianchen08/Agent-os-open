@@ -19,6 +19,7 @@
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 import sys
@@ -151,6 +152,32 @@ async def _on_unload(params: dict[str, Any]) -> None:
 # LLM 调此工具发起交互。进程内直接调 service，零中转。
 # ════════════════════════════════════════════════════════════════════
 
+
+def _normalize_options(raw: Any) -> list[dict[str, Any]] | None:
+    """LLM 传参容错：把 options 归一化为前端 InteractionOption 的 [{id,label}]。
+
+    schema 只声明 ``array``，LLM 常按直觉传字符串数组（``["批准","拒绝"]``）；
+    前端 InteractionCard 渲染 ``opt.label``，字符串元素会导致按钮文字为空，
+    表现为"审批卡片只有输入框、没有选项按钮"。
+    """
+    if raw is None:
+        return None
+    if not isinstance(raw, list):
+        return None
+    out: list[dict[str, Any]] = []
+    for i, item in enumerate(raw):
+        if isinstance(item, str):
+            out.append({"id": str(i), "label": item})
+        elif isinstance(item, dict):
+            label = item.get("label") or item.get("text") or item.get("name")
+            if not label:
+                continue
+            entry: dict[str, Any] = {"id": str(item.get("id", i)), "label": label}
+            if item.get("description"):
+                entry["description"] = item["description"]
+            out.append(entry)
+    return out or None
+
 @plugin.tool(
     name="human_interaction",
     schema={
@@ -172,12 +199,22 @@ async def _on_unload(params: dict[str, Any]) -> None:
 )
 async def human_interaction(**kwargs: Any) -> dict[str, Any]:
     """LLM 工具入口——进程内直接调 service，零跨进程中转。"""
+    # 冷启动竞态自愈：内核 spawn 完成后 on_load 是 fire-and-forget 通知
+    # （invoker.rs get_or_create_mcp_client），紧随其后的首次 tools/call 可能
+    # 抢在 _on_load（初始化 _service）之前到达——立即返回 error 会让 LLM 误判
+    # "工具不可用"并放弃。on_load 完成后 _service 全局可见，短暂等待即可跨过窗口。
+    global _service
     if _service is None:
-        return {"error": "service not initialized"}
+        for _ in range(50):  # 最多 ~10s，覆盖 Python import 慢的冷启动
+            await asyncio.sleep(0.2)
+            if _service is not None:
+                break
+    if _service is None:
+        return {"error": "service not initialized (on_load not finished in 10s)"}
 
     # 兼容 LLM 偶发的参数别名（type→mode、message→title），避免参数名错配
-    # 把 notification 误判成阻塞 choice。旧逻辑 mode 缺省即 "choice"，
-    # 会让本应非阻塞的 notification 静默变成 wait_for_choice（24h 挂起）。
+    # 把 notification 误判成阻塞 choice。notification 语义为非阻塞；
+    # mode 缺省值不得使 notification 退化为 wait_for_choice。
     if "mode" not in kwargs and "type" in kwargs:
         kwargs["mode"] = kwargs["type"]
     if not kwargs.get("title") and kwargs.get("message"):
@@ -233,7 +270,7 @@ async def _do_choice(
         tab_id=pipeline_id,
         title=kwargs.get("title", ""),
         description=kwargs.get("description", ""),
-        options=kwargs.get("options"),
+        options=_normalize_options(kwargs.get("options")),
         questions=kwargs.get("questions"),
         timeout_seconds=timeout,
         priority=Priority(kwargs.get("priority", "normal")),

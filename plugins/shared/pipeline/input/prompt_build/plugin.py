@@ -33,6 +33,7 @@ Step 6 重建要点（相对 0.1 的变化）：
 from __future__ import annotations
 
 import asyncio
+import fnmatch
 import logging
 import re
 from dataclasses import dataclass
@@ -967,6 +968,13 @@ class PromptBuildPlugin(IInputPlugin):
     async def _resolve_routed_var(self, ctx: PluginContext, var_def: dict[str, Any]) -> str:
         """解析路由变量，根据 state 中的 route_key 值从 routes 表中选择注入内容。
 
+        匹配语义（2026-08-15 增强，向后兼容）：
+          - 精确匹配：routes 键与 state 值规范化后全等（布尔 true/false
+            通吃——yaml 键写 ``true`` 可匹配 Python True；数字 str 化）；
+          - fnmatch 通配：精确未命中时遍历 routes 键做通配匹配
+            （``deepseek-*`` / ``large|medium`` 等），`_default` 不参与通配；
+          - `_default` 兜底：前两者均未命中时使用。
+
         routes 值支持两种形式：
           - 字符串：直接作为内容使用
           - 字典：作为嵌套变量定义递归解析（支持 path/tags/content 等类型）
@@ -984,8 +992,20 @@ class PromptBuildPlugin(IInputPlugin):
         if not route_key or not routes:
             return ""
 
-        current_value = ctx.state.get(route_key, "")
-        matched = routes.get(str(current_value), routes.get("_default", ""))
+        current_value = self._norm_state_val(ctx.state.get(route_key))
+        # 键规范化：yaml 布尔键（true/false）与 Python 值同构
+        norm_routes = {self._norm_state_val(k): v for k, v in routes.items()}
+
+        matched = norm_routes.get(current_value)
+        if matched is None:
+            for key, val in norm_routes.items():
+                if key == "_default":
+                    continue
+                if fnmatch.fnmatchcase(current_value, key):
+                    matched = val
+                    break
+        if matched is None:
+            matched = norm_routes.get("_default", "")
 
         if isinstance(matched, str):
             return matched
@@ -1009,6 +1029,20 @@ class PromptBuildPlugin(IInputPlugin):
                 return matched.get("content", "")
 
         return ""
+
+    @staticmethod
+    def _norm_state_val(value: Any) -> str:
+        """state/routes 值规范化：布尔 → true/false，None → 空串，其余 str 化。
+
+        与 model_prompt_adapter._norm_val 同语义（两插件各自内联，避免
+        跨插件共享模块耦合）；fnmatchcase 大小写敏感，str(True)="True"
+        匹配 yaml 的 ``true`` 键会失败，故统一小写布尔。
+        """
+        if value is None:
+            return ""
+        if isinstance(value, bool):
+            return "true" if value else "false"
+        return str(value)
 
     async def _load_compression_messages(  # noqa: PLR0912,PLR0915
         self,

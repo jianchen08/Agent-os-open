@@ -1,3 +1,4 @@
+# @feature: FP-0.2.二 内部模块 manifest | @ci: python-coverage
 """bash 工具进度推送测试 conftest——注入插件目录到 sys.path。
 
 插件位于 plugins/shared/tools/bash/，内部用平铺 import

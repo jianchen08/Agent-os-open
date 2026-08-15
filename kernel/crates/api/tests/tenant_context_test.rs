@@ -5,10 +5,9 @@
 //! （方案 B 目录隔离）。契约：
 //! - 无活跃 task_local scope → 返回 `tenant_id: "default"`（与 Python 侧回退一致，永不报错）；
 //! - 在 `agentos_tenant::scope` 内 → 返回 scope 的 tenant_id/session_id。
+//!
 //! 此前 capability_router 对 tenant-context 落在 catch-all（"未实现"）——本测试
 //! 锁定「Python 侧多租户通路真实可用」这一目标。
-
-use std::sync::Arc;
 
 use agentos_api::capability_router::KernelCapabilityRouter;
 use agentos_mcp::CapabilityRouter;
@@ -25,7 +24,10 @@ async fn tenant_context_get_returns_default_without_scope() {
         .handle("tenant-context", "get", json!({}))
         .await
         .expect("tenant-context.get 不应报错（无 scope 回退 default）");
-    assert_eq!(v["tenant_id"], "default", "无活跃 task_local 应回退 default: {v}");
+    assert_eq!(
+        v["tenant_id"], "default",
+        "无活跃 task_local 应回退 default: {v}"
+    );
     assert!(v["session_id"].is_string());
 }
 

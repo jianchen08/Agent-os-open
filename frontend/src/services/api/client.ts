@@ -72,7 +72,7 @@ apiClient.interceptors.request.use(
 
     // 如果token存在，添加到请求头
     if (token && config.headers) {
-      // // 某些请求（如 /auth/refresh）显式声明不带 access token（Authorization 设为空字符串），
+      // 某些请求（如 /auth/refresh）显式声明不带 access token（Authorization 设为空字符串），
       // 拦截器必须尊重这个声明，不覆盖。否则 refresh token 走 body，access token 却通过
       // 头抢先被后端读取，导致「期望 refresh 类型」401。
       const existing = config.headers.Authorization
@@ -135,7 +135,7 @@ apiClient.interceptors.response.use(
       originalRequest._retry = true
 
       try {
-        // // 刷新统一委托 authStore.refreshToken（单一互斥源）。
+        // 刷新统一委托 authStore.refreshToken（单一互斥源）。
         // 并发的 401 请求会共享同一个 in-flight refresh，后端只被调用一次，
         // 消除 refresh_token 单次轮换被并发击穿导致的 race。
         // 动态 import 打破静态循环依赖（见文件顶部注释）。
@@ -149,7 +149,7 @@ apiClient.interceptors.response.use(
         }
         return apiClient(originalRequest)
       } catch (refreshError) {
-        // // 仅当后端明确返回 401/403（真认证失效）才 logout；
+        // 仅当后端明确返回 401/403（真认证失效）才 logout；
         // 网络错误/超时/5xx 视为暂时性故障，reject 让上层重试，保留旧 token。
         if (isDefinitelyAuthFailure(refreshError)) {
           await clearAuthAndRedirect()
@@ -254,9 +254,6 @@ apiClient.interceptors.response.use(
 
     // 可选端点：前端会调但后端可能尚未实现/非核心路径，404 不上报刷屏
     // 真实业务失败仍通过 Promise.reject 交给调用方处理
-    // 注：/files/capabilities 已通过补路由（/ext/channel_api/files/capabilities）真正修复，
-    // 不再需要静默；其余域（floating-chat/evaluation-metrics/agent-calls/triggers/datasource）
-    // 仍为未补路由的可选端点，保留静默。
     const isOptionalEndpoint =
       requestUrl.includes('/floating-chat/') ||
       requestUrl.includes('/evaluation-metrics') ||
@@ -267,9 +264,7 @@ apiClient.interceptors.response.use(
       requestUrl.startsWith('/api/v1/datasource/')
 
     if (!isOptionalEndpoint) {
-      // DEV: 打印 404 请求 URL 定位根因（console-error-fix: errorReporting [VALIDATION] 404）。
-      // 非可选端点的 404 视为需要排查的异常路径，DEV 下输出 requestUrl 便于快速定位；
-      // 已修复端点（如 /ext/channel_api/tasks）不再触发此分支。
+      // 非可选端点的 404 视为需要排查的异常路径，DEV 下输出 requestUrl 便于快速定位。
       if (import.meta.env.DEV && error.response?.status === 404) {
         console.warn(`[API-404] requestUrl=${requestUrl} status=404`)
       }

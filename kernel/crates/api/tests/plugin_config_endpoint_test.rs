@@ -37,7 +37,6 @@ async fn admin_token(app: &axum::Router) -> String {
     v["access_token"].as_str().unwrap().to_string()
 }
 
-
 /// 构造一个含 config_files 的 manifest，映射到临时 config 目录的真实文件。
 fn manifest_with_files(plugin_id: &str, files: Vec<ConfigFileMapping>) -> PluginManifest {
     PluginManifest {
@@ -57,7 +56,7 @@ fn manifest_with_files(plugin_id: &str, files: Vec<ConfigFileMapping>) -> Plugin
         mcp: None,
         lifecycle: None,
         native: None,
-        wasm: None,
+        granted_capabilities: vec![],
         requires_content: None,
         invoke_entry: None,
         config_files: files,
@@ -78,11 +77,7 @@ async fn test_get_plugin_config_returns_file_content_with_etag() {
     let config_dir = tmp.path().join("config").join("models");
     fs::create_dir_all(&config_dir).unwrap();
     let llm_path = config_dir.join("llm.yaml");
-    fs::write(
-        &llm_path,
-        "name: glm\napi_key: ${DEEPSEEK_API_KEY}\n",
-    )
-    .unwrap();
+    fs::write(&llm_path, "name: glm\napi_key: ${DEEPSEEK_API_KEY}\n").unwrap();
 
     let manifest = manifest_with_files(
         "llm_service",
@@ -112,9 +107,14 @@ async fn test_get_plugin_config_returns_file_content_with_etag() {
 
     assert_eq!(response.status(), StatusCode::OK);
     // ETag 头存在
-    assert!(response.headers().get("etag").is_some(), "ETag header missing");
+    assert!(
+        response.headers().get("etag").is_some(),
+        "ETag header missing"
+    );
 
-    let body = axum::body::to_bytes(response.into_body(), 8192).await.unwrap();
+    let body = axum::body::to_bytes(response.into_body(), 8192)
+        .await
+        .unwrap();
     let json: Value = serde_json::from_slice(&body).unwrap();
     // B2：${ENV_VAR} 占位符原样显示
     assert_eq!(json["data"]["api_key"], "${DEEPSEEK_API_KEY}");
@@ -159,7 +159,9 @@ async fn test_get_plugin_config_masks_plaintext_secret() {
         .await
         .unwrap();
 
-    let body = axum::body::to_bytes(response.into_body(), 8192).await.unwrap();
+    let body = axum::body::to_bytes(response.into_body(), 8192)
+        .await
+        .unwrap();
     let json: Value = serde_json::from_slice(&body).unwrap();
     let masked = json["data"]["api_key"].as_str().unwrap();
     assert!(masked.contains("***"), "plaintext secret masked: {masked}");

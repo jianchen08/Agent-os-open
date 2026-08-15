@@ -1,3 +1,4 @@
+/** @feature FP-0.2.四 前端Schema | @ci: frontend-test */
 /**
  * CostDashboardWidget cache 维度测试（task_observability 1b）
  *

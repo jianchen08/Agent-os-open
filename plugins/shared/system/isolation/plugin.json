@@ -1,69 +1,142 @@
 {
-    "id": "isolation_service",
-    "name": "Isolation Service",
-    "version": "1.0.0",
-    "plugin_type": "system",
-    "language": "python",
-    "host_type": "sidecar",
-    "entry": "python server.py",
-    "capabilities": {
-        "tools": [
-            {
-                "name": "isolation.create_env",
-                "description": "创建或获取隔离环境"
-            },
-            {
-                "name": "isolation.execute",
-                "description": "在隔离环境中执行操作"
-            },
-            {
-                "name": "isolation.destroy_env",
-                "description": "销毁隔离环境"
-            },
-            {
-                "name": "isolation.list_envs",
-                "description": "列出隔离环境"
-            },
-            {
-                "name": "isolation.check_policy",
-                "description": "检查文件操作权限"
-            },
-            {
-                "name": "isolation.checkpoint",
-                "description": "检查点管理（创建/恢复/清理/列出）"
-            },
-            {
-                "name": "isolation.stats",
-                "description": "获取隔离系统统计信息"
-            }
-        ],
-        "resources": [],
-        "route_signals": [],
-        "lifecycle_hooks": [
-            "on_load",
-            "on_unload"
-        ]
-    },
-    "dependencies": [],
-    "permissions": {},
-    "error_policy": "skip",
-    "priority": 50,
-    "requires_content": 5,
-    "config_files": [
-        {
-            "id": "isolation_config",
-            "path": "config/isolation/isolation_config.yaml",
-            "label": "隔离配置"
-        },
-        {
-            "id": "isolation_policy",
-            "path": "config/isolation/isolation_policy.yaml",
-            "label": "隔离策略"
-        },
-        {
-            "id": "approval",
-            "path": "config/isolation/approval.yaml",
-            "label": "审批配置"
-        }
+  "id": "isolation_service",
+  "name": "Isolation Service",
+  "version": "1.0.0",
+  "plugin_type": "system",
+  "language": "python",
+  "host_type": "sidecar",
+  "entry": "python server.py",
+  "capabilities": {
+    "tools": [],
+    "resources": [],
+    "route_signals": [],
+    "lifecycle_hooks": [
+      "on_load",
+      "on_unload"
+    ],
+    "services": [
+      {
+        "name": "isolation.create_env",
+        "description": "创建或获取隔离环境"
+      },
+      {
+        "name": "isolation.execute",
+        "description": "在隔离环境中执行操作"
+      },
+      {
+        "name": "isolation.destroy_env",
+        "description": "销毁隔离环境"
+      },
+      {
+        "name": "isolation.list_envs",
+        "description": "列出隔离环境"
+      },
+      {
+        "name": "isolation.check_policy",
+        "description": "检查文件操作权限"
+      },
+      {
+        "name": "isolation.checkpoint",
+        "description": "检查点管理（创建/恢复/清理/列出）"
+      },
+      {
+        "name": "isolation.stats",
+        "description": "获取隔离系统统计信息"
+      }
     ]
+  },
+  "dependencies": [],
+  "permissions": {},
+  "error_policy": "skip",
+  "priority": 50,
+  "requires_content": 5,
+  "config_files": [
+    {
+      "id": "isolation_config",
+      "path": "config/isolation/isolation_config.yaml",
+      "label": "隔离配置"
+    },
+    {
+      "id": "isolation_policy",
+      "path": "config/isolation/isolation_policy.yaml",
+      "label": "隔离策略"
+    },
+    {
+      "id": "approval",
+      "path": "config/isolation/approval.yaml",
+      "label": "审批配置"
+    }
+  ],
+  "contributes": {
+    "thread_fields": [
+      {
+        "name": "workspace",
+        "type": "string",
+        "label": "工作空间",
+        "description": "主会话工作目录（项目路径），留空则按默认目录自动生成。该插件域（工作空间服务）贡献的会话级工作空间设置，随线程创建写入 thread metadata → execution_context。"
+      },
+      {
+        "name": "workspaceMode",
+        "type": "select",
+        "label": "工作空间拓扑",
+        "options": [
+          {
+            "label": "worktree（隔离副本，默认）",
+            "value": "worktree"
+          },
+          {
+            "label": "plain（直接操作目标目录）",
+            "value": "plain"
+          }
+        ],
+        "description": "会话工作空间的拓扑形态（worktree/plain），与隔离模式相互独立。未填工作空间时同样生效（自动生成的空间按此拓扑创建），随线程创建写入 thread metadata → execution_context.workspace.mode。"
+      },
+      {
+        "name": "isolationMode",
+        "type": "select",
+        "label": "隔离模式",
+        "options": [
+          {
+            "label": "非隔离",
+            "value": "non_isolated"
+          },
+          {
+            "label": "隔离（容器）",
+            "value": "isolated"
+          }
+        ],
+        "description": "主会话执行环境隔离（容器/宿主），与工作空间拓扑解耦。不依赖工作空间填写——未填时按默认目录自动生成后同样生效，随线程创建写入 thread metadata → execution_context。"
+      }
+    ],
+    "pages": [
+      {
+        "id": "isolation_settings",
+        "title": "隔离配置",
+        "space": "settings",
+        "icon": "🛡️",
+        "writable": true,
+        "schema": {
+          "type": "object",
+          "properties": {
+            "default_level": {
+              "type": "string",
+              "title": "默认隔离级别",
+              "enum": [
+                "isolated",
+                "non_isolated"
+              ]
+            },
+            "approval_required": {
+              "type": "boolean",
+              "title": "危险操作需审批"
+            },
+            "docker_available": {
+              "type": "boolean",
+              "title": "Docker 可用（容器执行）"
+            }
+          }
+        }
+      }
+    ]
+  }
 }

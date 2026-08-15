@@ -1,3 +1,4 @@
+/** @feature FP-T12 前端适配 | @ci: frontend-test */
 /**
  * 冷热路径数据结构一致性契约（TDD）：
  *

@@ -4,9 +4,8 @@
  * SettingsPage（全屏路由页 /settings）与 SettingsHubWidget（工作区设置面板
  * settings_hub）都需要展示「内核设置」导航（主题 / 插件 / 管道）。
  *
- * 此前两处各自维护一份清单（SettingsPage.BUILTIN_ITEMS 与
- * SettingsHubWidget.KERNEL_NAV），同一业务概念两处定义（散点），新增内核项需双修。
- * 统一收拢到此处，两处消费同一数据源。
+ * 统一收拢到此处单一数据源，两处消费同一数据源——避免同一业务概念两处定义
+ * （各自维护清单时新增内核项需双修）。
  */
 
 export interface KernelNavItem {
@@ -25,6 +24,14 @@ export interface KernelNavItem {
 }
 
 export const KERNEL_NAV_ITEMS: KernelNavItem[] = [
+  {
+    id: 'llm',
+    title: '模型设置',
+    label: '模型',
+    description: '配置大语言模型提供商、密钥与模型',
+    icon: '🤖',
+    group: '内核',
+  },
   {
     id: 'theme',
     title: '主题设置',
@@ -55,14 +62,6 @@ export const KERNEL_NAV_ITEMS: KernelNavItem[] = [
     label: 'API',
     description: '配置 API 端点与访问凭证',
     icon: '🛠️',
-    group: '内核',
-  },
-  {
-    id: 'llm',
-    title: 'LLM 设置',
-    label: '模型',
-    description: '配置大语言模型参数与供应商',
-    icon: '🤖',
     group: '内核',
   },
   {

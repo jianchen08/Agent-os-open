@@ -29,12 +29,6 @@ import { CreateTaskModal } from './CreateTaskModal'
 import { parseDataSourceRef, resolveDataSource } from '@/services/schema/parser'
 import { useLayoutModeStore } from '@/stores/layoutModeStore'
 import { useWorkspaceStore } from '@/stores/workspaceStore'
-import { usePipelineRegistryStore } from '@/stores/pipelineRegistryStore'
-import { useContextUsageStore } from '@/stores/contextUsageStore'
-import { useLongTermTaskStore } from '@/stores/longTermTaskStore'
-import { useSessionStore } from '@/stores/sessionStore'
-import { navigateToPipeline } from '@/services/pipelineNavigator'
-import type { PipelineRunInfo, PipelineStatus, PipelineViewEntry } from '@/types/pipeline'
 import {
   FileTreeContextMenu,
   type ContextMenuContext,
@@ -403,73 +397,6 @@ function sortNodes(
 }
 
 // ═════════════════════════════════════════════════════════════════
-// 统一管道管理（pipelineView 超集模式）辅助
-// ═════════════════════════════════════════════════════════════════
-
-/** 任务状态 → 管道运行状态映射（对齐 RunStatus 语义） */
-function taskStatusToPipelineStatus(taskStatus: string | undefined): PipelineStatus | null {
-  switch (taskStatus) {
-    case 'pending':
-    case 'running':
-    case 'evaluating':
-    case 'planning':
-      return 'running'
-    case 'stopped':
-    case 'suspended':
-    case 'blocked':
-    case 'paused':
-      return 'suspended'
-    case 'completed':
-      return 'completed'
-    case 'failed':
-    case 'timeout':
-    case 'cancelled':
-      return 'failed'
-    default:
-      return null
-  }
-}
-
-/** 从任务对象提取管道 ID（后端字段名与前端类型并存时双取） */
-function taskPipelineId(task: Record<string, unknown>): string | undefined {
-  const raw = task.pipeline_run_id ?? task.pipelineRunId
-  if (typeof raw === 'string' && raw) return raw
-  const meta = task.metadata as Record<string, unknown> | undefined
-  const metaRaw = meta?.pipeline_run_id ?? meta?.pipelineRunId
-  return typeof metaRaw === 'string' && metaRaw ? metaRaw : undefined
-}
-
-/** 格式化耗时（ms → "3m 20s" / "1h 2m" / "45s"） */
-export function formatDuration(ms: number | null | undefined): string {
-  if (ms === null || ms === undefined || isNaN(ms) || ms < 0) return '--'
-  const totalSec = Math.floor(ms / 1000)
-  if (totalSec < 60) return `${totalSec}s`
-  const m = Math.floor(totalSec / 60)
-  const s = totalSec % 60
-  if (m < 60) return s > 0 ? `${m}m ${s}s` : `${m}m`
-  const h = Math.floor(m / 60)
-  return h > 0 ? `${h}h ${m % 60}m` : `${m}m`
-}
-
-/** 提取条目的 token 展示值（实时 usage 优先，回退 summaries 汇总） */
-function entryTokenTotal(entry: PipelineViewEntry): number | null {
-  if (entry.liveUsage && entry.liveUsage.totalTokens > 0) return entry.liveUsage.totalTokens
-  const tokens = entry.totalTokens
-  if (tokens && typeof tokens === 'object') {
-    const total = tokens.total ?? tokens.total_tokens ?? tokens.output
-    if (typeof total === 'number') return total
-  }
-  return null
-}
-
-/** 管道状态 → 展示文案 */
-const PIPELINE_STATUS_LABELS: Record<string, string> = {
-  running: '运行中',
-  suspended: '已暂停',
-  completed: '已完成',
-  failed: '失败',
-}
-
 /** 通用树形组件 支持递归嵌套、展开/折叠动画、状态图标、进度条、 */
 export function FileTreeWidget(rawProps: Record<string, unknown>) {
   const config = extractTreeConfig(rawProps)
@@ -502,8 +429,6 @@ export function FileTreeWidget(rawProps: Record<string, unknown>) {
   /** 是否显示启用/禁用开关（workspace:// 数据源默认隐藏） */
   const ds = rawProps.dataSource as string | undefined
   const showEnabledToggle = config.showEnabledToggle ?? !(ds?.startsWith('workspace://'))
-  /** 是否启用统一管道管理模式（工作区默认页签开启；普通数据源场景保持原行为） */
-  const pipelineView = config.pipelineView ?? (rawProps.pipelineView as boolean | undefined) ?? false
   /** 合并状态配置 */
   const statusConfig = { ...DEFAULT_STATUS_CONFIG, ...(config.statusConfig ?? {}) }
   /** 节点点击回调 */
@@ -570,244 +495,6 @@ export function FileTreeWidget(rawProps: Record<string, unknown>) {
 
   /** 实际使用的树数据：优先使用远程数据，否则使用直接传入的数据 */
   const effectiveData = remoteTreeData.length > 0 ? remoteTreeData : allData
-
-  // ════ 统一管道管理（pipelineView）════
-
-  /** 管道运行快照注册表（内核快照 + 流式事件增量） */
-  const registryRuns = usePipelineRegistryStore((s) => s.runs)
-  /** 实时 token 用量（cost_update 事件驱动） */
-  const usageByPipeline = useContextUsageStore((s) => s.usageByPipeline)
-  /** 任务列表（任务管道状态权威源：5s 轮询 + task_* 事件） */
-  const tasks = useLongTermTaskStore((s) => s.tasks)
-  /** 会话列表（按 thread_id 取会话标题） */
-  const sessions = useSessionStore((s) => s.sessions)
-
-  /** 面板挂载时启动注册表自动刷新（30s 兜底 + 页面可见拉取），卸载停止 */
-  useEffect(() => {
-    if (!pipelineView) return
-    const store = usePipelineRegistryStore.getState()
-    if (Object.keys(store.runs).length === 0) {
-      store.fetch()
-    }
-    store.startAutoRefresh()
-    return () => usePipelineRegistryStore.getState().stopAutoRefresh()
-  }, [pipelineView])
-
-  /** 管道条目派生：注册表快照 + 任务列表（含管道 ID 的任务）合并，按开始时间倒序 */
-  const pipelineEntries: PipelineViewEntry[] = useMemo(() => {
-    if (!pipelineView) return []
-
-    // 任务 → 管道 ID 映射（判定任务类型 + 取任务名/进度）
-    const taskByPipeline = new Map<string, Record<string, unknown>>()
-    for (const task of tasks) {
-      const pid = taskPipelineId(task as unknown as Record<string, unknown>)
-      if (pid) taskByPipeline.set(pid, task as unknown as Record<string, unknown>)
-    }
-    const sessionById = new Map(sessions.map((s) => [s.id, s]))
-
-    const entries: PipelineViewEntry[] = []
-    const seen = new Set<string>()
-
-    // 1) 注册表运行快照（会话管道 + 已落 runs 的任务管道）
-    const runsSorted = Object.values(registryRuns).sort((a, b) =>
-      b.started_at.localeCompare(a.started_at),
-    )
-    for (const run of runsSorted) {
-      const key = run.pipeline_id || run.run_id
-      seen.add(key)
-      const task = run.pipeline_id ? taskByPipeline.get(run.pipeline_id) : undefined
-      const session = run.thread_id ? sessionById.get(run.thread_id) : undefined
-      const live = run.pipeline_id ? usageByPipeline[run.pipeline_id] : undefined
-      const kind = task ? 'task' : 'session'
-      const name =
-        (task ? String(task.title ?? '') : '')
-        || (session ? session.title : '')
-        || (run.pipeline_id ? run.pipeline_id.slice(0, 12) : run.run_id.slice(0, 12))
-      entries.push({
-        key,
-        pipelineId: run.pipeline_id,
-        runId: run.run_id,
-        threadId: run.thread_id,
-        status: run.status,
-        startedAt: run.started_at,
-        endedAt: run.ended_at,
-        kind,
-        name,
-        agentName: task ? String(task.agentName ?? task.agent_name ?? '') || undefined : undefined,
-        taskId: task ? String(task.id) : undefined,
-        progress:
-          typeof (task?.progress as Record<string, unknown> | undefined)?.progressPercent === 'number'
-            ? Number((task.progress as Record<string, unknown>).progressPercent)
-            : undefined,
-        totalTokens: run.total_tokens ?? null,
-        liveUsage: live
-          ? {
-              promptTokens: live.promptTokens,
-              completionTokens: live.completionTokens,
-              totalTokens: live.totalTokens,
-            }
-          : undefined,
-      })
-    }
-
-    // 2) 任务派生条目：有管道 ID 但未进 runs 的任务（旧引擎占位 run / 未落槽窗口）
-    for (const [pid, task] of taskByPipeline) {
-      if (seen.has(pid)) continue
-      const taskStatus = String(task.status ?? '')
-      const mapped = taskStatusToPipelineStatus(taskStatus)
-      if (!mapped) continue
-      const timestamps = task.timestamps as Record<string, unknown> | undefined
-      const startedAt =
-        (timestamps?.startedAt as string | undefined)
-        || (timestamps?.createdAt as string | undefined)
-        || new Date().toISOString()
-      const completedAt = timestamps?.completedAt as string | undefined
-      entries.push({
-        key: pid,
-        pipelineId: pid,
-        runId: pid,
-        threadId: String(task.threadId ?? task.thread_id ?? '') || undefined,
-        status: mapped,
-        startedAt,
-        endedAt: completedAt,
-        kind: 'task',
-        name: String(task.title ?? pid.slice(0, 12)),
-        agentName: String(task.agentName ?? task.agent_name ?? '') || undefined,
-        taskId: String(task.id),
-        progress:
-          typeof (task.progress as Record<string, unknown> | undefined)?.progressPercent === 'number'
-            ? Number((task.progress as Record<string, unknown>).progressPercent)
-            : undefined,
-        totalTokens: null,
-      })
-    }
-
-    return entries
-  }, [pipelineView, registryRuns, usageByPipeline, tasks, sessions])
-
-  /** 展示视图：tree（树视图）/ list（列表视图） */
-  const [viewMode, setViewMode] = useState<'tree' | 'list'>('tree')
-  /** 类型筛选：all / task / session */
-  const [kindFilter, setKindFilter] = useState<'all' | 'task' | 'session'>('all')
-  /** 状态筛选值（默认 'running'，空字符串表示显示全部；对任务树与管道条目同时生效） */
-  const [statusFilter, setStatusFilter] = useState(defaultStatusFilterValue)
-  /** 秒级 ticker（执行中条目耗时实时刷新；仅在 pipelineView 且存在活跃条目时运行） */
-  const [nowMs, setNowMs] = useState(() => Date.now())
-  useEffect(() => {
-    if (!pipelineView) return
-    const hasActive = pipelineEntries.some((e) => e.status === 'running' || e.status === 'suspended')
-    if (!hasActive) return
-    const timer = setInterval(() => setNowMs(Date.now()), 1000)
-    return () => clearInterval(timer)
-  }, [pipelineView, pipelineEntries])
-
-  /** 按类型 + 状态筛选管道条目 */
-  const filteredPipelineEntries = useMemo(() => {
-    if (!pipelineView) return []
-    return pipelineEntries.filter((entry) => {
-      if (kindFilter !== 'all' && entry.kind !== kindFilter) return false
-      if (statusFilter) {
-        const pipelineStatus = entry.status
-        // 任务状态与管道状态词表对齐：running/pending → 运行中；completed → 已完成等
-        const statusMatch =
-          pipelineStatus === statusFilter
-          || (statusFilter === 'running' && pipelineStatus === 'running')
-          || (statusFilter === 'completed' && pipelineStatus === 'completed')
-          || (statusFilter === 'failed' && pipelineStatus === 'failed')
-          || (statusFilter === 'paused' && pipelineStatus === 'suspended')
-        if (!statusMatch) return false
-      }
-      return true
-    })
-  }, [pipelineView, pipelineEntries, kindFilter, statusFilter])
-
-  /** 树视图分组节点（执行中 / 最近完成），注入现有树顶部 */
-  const pipelineGroupNodes: TreeNodeData[] = useMemo(() => {
-    if (!pipelineView || viewMode !== 'tree') return []
-    const active = filteredPipelineEntries.filter(
-      (e) => e.status === 'running' || e.status === 'suspended',
-    )
-    const done = filteredPipelineEntries.filter(
-      (e) => e.status === 'completed' || e.status === 'failed',
-    )
-    const toNode = (entry: PipelineViewEntry): TreeNodeData => ({
-      id: `pipeline-${entry.key}`,
-      title: entry.name,
-      status: entry.status,
-      progress: entry.progress,
-      created_at: entry.startedAt,
-      agent_name: entry.agentName,
-      pipeline_run_id: entry.pipelineId,
-      task_scope: 'non_container',
-      agent_level: 'L2',
-      __pipeline_entry: entry,
-    })
-    const nodes: TreeNodeData[] = []
-    if (active.length > 0) {
-      nodes.push({
-        id: '__pipeline_active_group__',
-        title: '执行中的管道',
-        status: 'running',
-        children: active.map(toNode),
-      })
-    }
-    if (done.length > 0) {
-      nodes.push({
-        id: '__pipeline_done_group__',
-        title: '最近完成',
-        status: 'completed',
-        children: done.map(toNode),
-      })
-    }
-    return nodes
-  }, [pipelineView, viewMode, filteredPipelineEntries])
-
-  /** 管道分组节点默认展开 */
-  useEffect(() => {
-    if (!pipelineView) return
-    const groupIds = pipelineGroupNodes.map((n) => getStableNodeId(n)).filter(Boolean)
-    if (groupIds.length === 0) return
-    setExpandedIds((prev) => {
-      let changed = false
-      const next = new Set(prev)
-      for (const id of groupIds) {
-        if (!next.has(id)) {
-          next.add(id)
-          changed = true
-        }
-      }
-      return changed ? next : prev
-    })
-  }, [pipelineGroupNodes, pipelineView])
-
-  /** 管道条目点击：优先走外部 onNodeClick（宿主可附加移动端收尾），否则内部导航 */
-  const handlePipelineEntryClick = useCallback(
-    async (entry: PipelineViewEntry) => {
-      const pipelineId = entry.pipelineId || entry.key
-      try {
-        if (onNodeClick) {
-          onNodeClick({
-            id: entry.taskId || pipelineId,
-            title: entry.name,
-            pipeline_run_id: pipelineId,
-            task_scope: 'non_container',
-            agent_level: 'L2',
-            status: entry.status,
-          })
-          return
-        }
-        await navigateToPipeline(pipelineId, {
-          agentName: entry.name,
-          agentLevel: 2,
-          taskId: entry.taskId,
-          status: entry.status,
-        })
-      } catch (e) {
-        console.error('[FileTreeWidget] 管道导航失败', e)
-      }
-    },
-    [onNodeClick],
-  )
 
   /** 处理节点右键菜单 */
   const handleNodeContextMenu = useCallback(
@@ -932,6 +619,8 @@ export function FileTreeWidget(rawProps: Record<string, unknown>) {
   const [searchKeyword, setSearchKeyword] = useState('')
   /** 展开的节点 ID 集合（优先从 localStorage 恢复） */
   const [expandedIds, setExpandedIds] = useState<Set<string>>(() => restoredExpandedIds ?? new Set<string>())
+  /** 状态筛选值（默认 'running'，空字符串表示显示全部） */
+  const [statusFilter, setStatusFilter] = useState(defaultStatusFilterValue)
   /** 节点启用/禁用状态映射（true=启用，false=禁用） */
   const [enabledMap, setEnabledMap] = useState<Record<string, boolean>>({})
   /** 已知的任务 ID 集合（用于检测新提交的任务并自动开启开关） */
@@ -1173,8 +862,8 @@ export function FileTreeWidget(rawProps: Record<string, unknown>) {
     [effectiveData, nodeChildrenField, triggerRefresh],
   )
 
-  /** 空状态渲染（pipelineView 模式下管道列表常驻，不因任务树为空而整块隐藏） */
-  if (!pipelineView && effectiveData.length === 0 && !isLoadingRemote) {
+  /** 空状态渲染 */
+  if (effectiveData.length === 0 && !isLoadingRemote) {
     return (
       <div className="w-full rounded-lg border">
         <div className="flex flex-col items-center justify-center p-8">
@@ -1189,71 +878,6 @@ export function FileTreeWidget(rawProps: Record<string, unknown>) {
   return (
     <div className="w-full rounded-lg border">
       {/* 搜索框 + 排序 */}
-
-      {/* 管道管理工具栏：视图切换（树/列表）+ 类型筛选（任务/会话） */}
-      {pipelineView && (
-        <div className="border-b px-3 py-2">
-          <div className="flex flex-wrap items-center gap-1">
-            <button
-              onClick={() => setViewMode('tree')}
-              className={`rounded-md px-2 py-0.5 text-[11px] transition-colors ${
-                viewMode === 'tree'
-                  ? 'bg-primary/15 text-primary font-medium'
-                  : 'text-muted-foreground hover:bg-accent/50 hover:text-foreground'
-              }`}
-              title="树视图"
-            >
-              <FolderTree className="mr-1 inline h-3 w-3" />
-              树
-            </button>
-            <button
-              onClick={() => setViewMode('list')}
-              className={`rounded-md px-2 py-0.5 text-[11px] transition-colors ${
-                viewMode === 'list'
-                  ? 'bg-primary/15 text-primary font-medium'
-                  : 'text-muted-foreground hover:bg-accent/50 hover:text-foreground'
-              }`}
-              title="列表视图"
-            >
-              <ClipboardList className="mr-1 inline h-3 w-3" />
-              列表
-            </button>
-            <span className="bg-border mx-1 h-3 w-px" />
-            <button
-              onClick={() => setKindFilter('all')}
-              className={`rounded-md px-2 py-0.5 text-[11px] transition-colors ${
-                kindFilter === 'all'
-                  ? 'bg-primary/15 text-primary font-medium'
-                  : 'text-muted-foreground hover:bg-accent/50 hover:text-foreground'
-              }`}
-            >
-              全部
-            </button>
-            <button
-              onClick={() => setKindFilter('task')}
-              className={`rounded-md px-2 py-0.5 text-[11px] transition-colors ${
-                kindFilter === 'task'
-                  ? 'bg-primary/15 text-primary font-medium'
-                  : 'text-muted-foreground hover:bg-accent/50 hover:text-foreground'
-              }`}
-              title="仅显示任务管道"
-            >
-              任务
-            </button>
-            <button
-              onClick={() => setKindFilter('session')}
-              className={`rounded-md px-2 py-0.5 text-[11px] transition-colors ${
-                kindFilter === 'session'
-                  ? 'bg-primary/15 text-primary font-medium'
-                  : 'text-muted-foreground hover:bg-accent/50 hover:text-foreground'
-              }`}
-              title="仅显示会话管道"
-            >
-              会话
-            </button>
-          </div>
-        </div>
-      )}
 
       {/* 状态筛选器 */}
       {showStatusFilter && (
@@ -1318,52 +942,41 @@ export function FileTreeWidget(rawProps: Record<string, unknown>) {
         </div>
       )}
 
-      {/* 管道列表视图（pipelineView + 列表模式）：平铺表格 */}
-      {pipelineView && viewMode === 'list' ? (
-        <PipelineTableView
-          entries={filteredPipelineEntries}
-          nowMs={nowMs}
-          onEntryClick={handlePipelineEntryClick}
-        />
-      ) : (
-        /* 树节点列表（pipelineView 树视图：管道分组节点注入现有树顶部） */
-        <div className="py-1" onContextMenu={handleBlankContextMenu}>
-          {filteredData.length === 0 && pipelineGroupNodes.length === 0 ? (
-            <div className="px-4 py-6 text-center">
-              <p className="text-muted-foreground text-xs">未找到匹配的节点</p>
-            </div>
-          ) : (
-            [...pipelineGroupNodes, ...filteredData].map((node) => (
-              <TreeNode
-                key={getStableNodeId(node)}
-                node={node}
-                depth={0}
-                expandedIds={expandedIds}
-                selectedId={selectedId}
-                showStatus={showStatus}
-                showProgress={showProgress}
-                showEnabledToggle={showEnabledToggle}
-                nodeIconField={nodeIconField}
-                nodeTitleField={nodeTitleField}
-                nodeStatusField={nodeStatusField}
-                nodeChildrenField={nodeChildrenField}
-                statusConfig={statusConfig}
-                onToggle={handleToggle}
-                onSelect={handleSelect}
-                onNodeClick={onNodeClick}
-                onFileClick={onFileClick}
-                onRefresh={triggerRefresh}
-                togglingIds={togglingIds}
-                enabledMap={enabledMap}
-                onToggleEnabled={handleToggleEnabled}
-                onContextMenu={handleNodeContextMenu}
-                nowMs={nowMs}
-                onPipelineClick={handlePipelineEntryClick}
-              />
-            ))
-          )}
-        </div>
-      )}
+      {/* 树节点列表 */}
+      <div className="py-1" onContextMenu={handleBlankContextMenu}>
+        {filteredData.length === 0 ? (
+          <div className="px-4 py-6 text-center">
+            <p className="text-muted-foreground text-xs">未找到匹配的节点</p>
+          </div>
+        ) : (
+          filteredData.map((node) => (
+            <TreeNode
+              key={getStableNodeId(node)}
+              node={node}
+              depth={0}
+              expandedIds={expandedIds}
+              selectedId={selectedId}
+              showStatus={showStatus}
+              showProgress={showProgress}
+              showEnabledToggle={showEnabledToggle}
+              nodeIconField={nodeIconField}
+              nodeTitleField={nodeTitleField}
+              nodeStatusField={nodeStatusField}
+              nodeChildrenField={nodeChildrenField}
+              statusConfig={statusConfig}
+              onToggle={handleToggle}
+              onSelect={handleSelect}
+              onNodeClick={onNodeClick}
+              onFileClick={onFileClick}
+              onRefresh={triggerRefresh}
+              togglingIds={togglingIds}
+              enabledMap={enabledMap}
+              onToggleEnabled={handleToggleEnabled}
+              onContextMenu={handleNodeContextMenu}
+            />
+          ))
+        )}
+      </div>
 
       {/* 上下文菜单 */}
       {contextMenu && (
@@ -1430,10 +1043,6 @@ interface TreeNodeProps {
   onToggleEnabled: (nodeId: string, enabled: boolean) => void
   /** 右键菜单回调（用于文件操作上下文菜单） */
   onContextMenu?: (e: React.MouseEvent, node: TreeNodeData) => void
-  /** 秒级 ticker（管道条目耗时实时刷新；非管道场景不传） */
-  nowMs?: number
-  /** 管道条目点击回调（pipelineView 树视图条目） */
-  onPipelineClick?: (entry: PipelineViewEntry) => void
 }
 
 /** 树节点组件 递归渲染单个树节点及其子节点，处理展开/折叠动画、 */
@@ -1483,8 +1092,6 @@ function TreeNode({
   enabledMap,
   onToggleEnabled,
   onContextMenu,
-  nowMs,
-  onPipelineClick,
 }: TreeNodeProps): React.ReactNode {
   const nodeId = getStableNodeId(node)
   const title = String(getNodeField(node, nodeTitleField) ?? '未命名')
@@ -1507,8 +1114,6 @@ function TreeNode({
   const isContainer = taskScope === 'container'
   const hasPipeline = !!pipelineRunId && !isContainer
   const hasWorkspace = !!wsMode && wsMode !== 'shared' && !!wsPath
-  /** 统一管道条目节点（pipelineView 注入）：行点击导航到对应标签 */
-  const pipelineEntry = node.__pipeline_entry as PipelineViewEntry | undefined
 
   /** 当前节点是否启用（由后端任务状态驱动） */
   const ACTIVE_STATUSES = new Set(['running', 'pending', 'evaluating', 'planning'])
@@ -1516,23 +1121,10 @@ function TreeNode({
   const isToggling = togglingIds.has(nodeId)
 
   /** 是否有元信息需要显示第二行 */
-  const hasMeta = (error && error.trim().length > 0) || !!pipelineEntry
-
-  /** 管道条目耗时（ms）：已结束取 ended-started，运行中取 now-started */
-  const pipelineDurationMs =
-    pipelineEntry && pipelineEntry.startedAt
-      ? (pipelineEntry.endedAt
-          ? new Date(pipelineEntry.endedAt).getTime() - new Date(pipelineEntry.startedAt).getTime()
-          : (nowMs ?? Date.now()) - new Date(pipelineEntry.startedAt).getTime())
-      : null
+  const hasMeta = error && error.trim().length > 0
 
   const handleClick = useCallback(() => {
     onSelect(nodeId)
-    if (pipelineEntry) {
-      // 管道条目：整行点击导航到对应标签（任务/会话管道统一走 navigateToPipeline）
-      onPipelineClick?.(pipelineEntry)
-      return
-    }
     if (hasChildren) {
       onToggle(nodeId)
     } else if (onFileClick) {
@@ -1540,7 +1132,7 @@ function TreeNode({
       const filePath = (node.path as string) ?? nodeId
       onFileClick(filePath, title)
     }
-  }, [nodeId, hasChildren, onToggle, onSelect, onFileClick, node, title, pipelineEntry, onPipelineClick])
+  }, [nodeId, hasChildren, onToggle, onSelect, onFileClick, node, title])
 
   const handleChevronClick = useCallback(
     (e: React.MouseEvent) => {
@@ -1612,8 +1204,8 @@ function TreeNode({
   /** 格式化创建时间 */
   const formattedTime = formatTime(createdAt)
 
-  /** 是否有操作按钮需要显示（管道条目整行点击导航，不再显示对话/工作空间按钮） */
-  const hasActions = (hasPipeline || hasWorkspace) && !pipelineEntry
+  /** 是否有操作按钮需要显示 */
+  const hasActions = hasPipeline || hasWorkspace
 
   // 失败/完成/暂停等非活跃任务统一使用 opacity-80（0.8 不透明度）。
   // 注意：opacity 仅作用于"当前节点行"的 div，不能加在包住子节点的外层 div 上，
@@ -1635,7 +1227,7 @@ function TreeNode({
         onClick={handleClick}
       >
         <div className="flex shrink-0 items-center pt-0.5">
-          {showEnabledToggle && !pipelineEntry && (
+          {showEnabledToggle && (
           <button
             className={`mr-1.5 flex h-4 w-7 shrink-0 items-center rounded-full p-0.5 transition-colors ${
               isEnabled
@@ -1691,15 +1283,6 @@ function TreeNode({
             <span className={`truncate text-sm ${isSelected ? 'text-foreground font-medium' : 'text-foreground/90'}`}>
               {title}
             </span>
-            {pipelineEntry && (
-              <span className={`shrink-0 rounded px-1 py-0 text-[10px] ${
-                pipelineEntry.kind === 'task'
-                  ? 'bg-status-warning/15 text-status-warning'
-                  : 'bg-primary/10 text-primary/80'
-              }`}>
-                {pipelineEntry.kind === 'task' ? '任务' : '会话'}
-              </span>
-            )}
             {agentName && agentName.trim() && (
               <span className="shrink-0 rounded bg-primary/10 px-1.5 py-0 text-[10px] text-primary/70">
                 {agentName.trim()}
@@ -1730,18 +1313,6 @@ function TreeNode({
                 )}
                 {formattedTime && (
                   <span>{formattedTime}</span>
-                )}
-                {pipelineEntry && (
-                  <>
-                    <span className="tabular-nums">
-                      {formatDuration(pipelineDurationMs)}
-                    </span>
-                    {entryTokenTotal(pipelineEntry) != null && (
-                      <span className="tabular-nums">
-                        {entryTokenTotal(pipelineEntry)!.toLocaleString()} tok
-                      </span>
-                    )}
-                  </>
                 )}
               </div>
             </div>
@@ -1818,8 +1389,6 @@ function TreeNode({
               enabledMap={enabledMap}
               onToggleEnabled={onToggleEnabled}
               onContextMenu={onContextMenu}
-              nowMs={nowMs}
-              onPipelineClick={onPipelineClick}
             />
 
           ))}
@@ -1831,83 +1400,3 @@ function TreeNode({
 
 }
 
-/** 管道列表视图（pipelineView 列表模式） 平铺展示所有执行中的管道：类型/名称/Agent/状态/耗时/token， */
-function PipelineTableView({
-  entries,
-  nowMs,
-  onEntryClick,
-}: {
-  entries: PipelineViewEntry[]
-  nowMs: number
-  onEntryClick: (entry: PipelineViewEntry) => void
-}) {
-  if (entries.length === 0) {
-    return (
-      <div className="px-4 py-6 text-center">
-        <p className="text-muted-foreground text-xs">暂无管道运行记录</p>
-      </div>
-    )
-  }
-
-  return (
-    <div className="overflow-x-auto">
-      <table className="w-full text-sm">
-        <thead>
-          <tr className="border-b text-left">
-            <th className="text-muted-foreground px-3 py-1.5 text-[11px] font-medium">类型</th>
-            <th className="text-muted-foreground px-3 py-1.5 text-[11px] font-medium">名称</th>
-            <th className="text-muted-foreground hidden px-3 py-1.5 text-[11px] font-medium sm:table-cell">Agent</th>
-            <th className="text-muted-foreground px-3 py-1.5 text-[11px] font-medium">状态</th>
-            <th className="text-muted-foreground hidden px-3 py-1.5 text-[11px] font-medium md:table-cell">耗时</th>
-            <th className="text-muted-foreground px-3 py-1.5 text-right text-[11px] font-medium">Token</th>
-          </tr>
-        </thead>
-        <tbody>
-          {entries.map((entry) => {
-            const statusInfo = getStatusIcon(entry.status, DEFAULT_STATUS_CONFIG)
-            const durationMs = entry.endedAt
-              ? new Date(entry.endedAt).getTime() - new Date(entry.startedAt).getTime()
-              : nowMs - new Date(entry.startedAt).getTime()
-            const tokenTotal = entryTokenTotal(entry)
-            return (
-              <tr
-                key={entry.key}
-                className="hover:bg-accent/20 cursor-pointer border-b last:border-b-0"
-                onClick={() => onEntryClick(entry)}
-                title={`打开${entry.kind === 'task' ? '任务' : '会话'}对话标签`}
-              >
-                <td className="px-3 py-1.5">
-                  <span className={`rounded px-1 py-0 text-[10px] font-medium ${
-                    entry.kind === 'task'
-                      ? 'bg-status-warning/15 text-status-warning'
-                      : 'bg-primary/10 text-primary/80'
-                  }`}>
-                    {entry.kind === 'task' ? '任务' : '会话'}
-                  </span>
-                </td>
-                <td className="max-w-[160px] truncate px-3 py-1.5 text-xs">
-                  {entry.name}
-                </td>
-                <td className="hidden px-3 py-1.5 text-xs text-muted-foreground sm:table-cell">
-                  {entry.agentName || '--'}
-                </td>
-                <td className="px-3 py-1.5">
-                  <span className={`flex items-center gap-1 text-xs ${statusInfo.color}`}>
-                    {statusInfo.icon}
-                    {PIPELINE_STATUS_LABELS[entry.status] ?? entry.status}
-                  </span>
-                </td>
-                <td className="hidden px-3 py-1.5 text-xs tabular-nums text-muted-foreground md:table-cell">
-                  {formatDuration(durationMs)}
-                </td>
-                <td className="px-3 py-1.5 text-right text-xs tabular-nums text-muted-foreground">
-                  {tokenTotal != null ? tokenTotal.toLocaleString() : '--'}
-                </td>
-              </tr>
-            )
-          })}
-        </tbody>
-      </table>
-    </div>
-  )
-}

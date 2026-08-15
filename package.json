@@ -14,8 +14,8 @@
     "electron:build": "npm run build --prefix frontend && tsc -p electron/tsconfig.json && electron-builder",
     "electron:compile": "tsc -p electron/tsconfig.json",
     "electron:compile:watch": "tsc -p electron/tsconfig.json --watch",
-    "test": "jest --config jest.config.cjs",
-    "test:coverage": "jest --config jest.config.cjs --coverage"
+    "test": "python scripts/run_gates.py --mode fast",
+    "test:coverage": "python scripts/run_gates.py --mode all"
   },
   "devDependencies": {
     "@types/jest": "^30.0.0",

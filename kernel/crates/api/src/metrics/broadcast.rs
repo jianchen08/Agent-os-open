@@ -118,8 +118,8 @@ impl MetricBroadcaster {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use super::super::aggregator::{Labels, MetricType};
+    use super::*;
 
     #[test]
     fn test_collect_snapshot_filters_by_prefix() {
@@ -157,8 +157,14 @@ mod tests {
 
         let snap = collect_broadcast_snapshot(&agg, Some(&kc));
         let obj = snap.as_object().unwrap();
-        assert!(obj.contains_key("p1.process.alive"), "process.alive should be included");
-        assert!(!obj.contains_key("p1.some_business"), "non-whitelisted should be excluded");
+        assert!(
+            obj.contains_key("p1.process.alive"),
+            "process.alive should be included"
+        );
+        assert!(
+            !obj.contains_key("p1.some_business"),
+            "non-whitelisted should be excluded"
+        );
         assert_eq!(obj["kernel.session.connections"], 42);
         assert_eq!(obj["kernel.engine.llm_calls_total"], 5);
         assert!(

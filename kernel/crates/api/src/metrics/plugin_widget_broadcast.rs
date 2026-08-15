@@ -25,13 +25,14 @@
 //!
 //! 详见 ADR `docs/working/重要设计/插件能力统一模型设计.md` §3.5'。
 
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
 use parking_lot::Mutex;
 use serde_json::{json, Value};
-use tracing::{debug, info, warn};
+use tracing::{info, warn};
 
 use super::aggregator::{Labels, MetricsAggregator};
 
@@ -93,7 +94,10 @@ pub fn parse_plugin_bindings(
     owner_plugin_id: &str,
     contributes: Option<&Value>,
 ) -> Vec<WidgetBinding> {
-    let widgets = match contributes.and_then(|c| c.get("widgets")).and_then(|w| w.as_array()) {
+    let widgets = match contributes
+        .and_then(|c| c.get("widgets"))
+        .and_then(|w| w.as_array())
+    {
         Some(arr) => arr,
         None => return Vec::new(),
     };
@@ -185,7 +189,12 @@ where
 /// gauge 是 avg；histogram 是 sum——由 metric_type 决定，本函数不转换。
 fn latest_value(agg: &MetricsAggregator, binding: &WidgetBinding) -> Option<Value> {
     let empty = Labels::new();
-    let views = agg.query(Some(&binding.plugin_id), Some(&binding.metric), None, &empty);
+    let views = agg.query(
+        Some(&binding.plugin_id),
+        Some(&binding.metric),
+        None,
+        &empty,
+    );
     // 同 plugin+metric 可能因 labels 不同有多条；MVP 合并所有 latest 为 {labels: value}。
     if views.is_empty() {
         return None;
@@ -210,11 +219,27 @@ fn latest_value(agg: &MetricsAggregator, binding: &WidgetBinding) -> Option<Valu
 
 /// labels → 稳定字符串 key（"{k=v,k=v}"）。
 fn labels_key(labels: &Labels) -> String {
-    let pairs: Vec<String> = labels
-        .iter()
-        .map(|(k, v)| format!("{k}={v}"))
-        .collect();
+    let pairs: Vec<String> = labels.iter().map(|(k, v)| format!("{k}={v}")).collect();
     format!("{{{}}}", pairs.join(","))
+}
+
+/// 共享绑定表（M1：禁用插件时从表中移除其绑定，broadcaster 下一 tick 快照生效）。
+pub type SharedBindings = Arc<parking_lot::RwLock<Vec<WidgetBinding>>>;
+
+/// 从共享绑定表移除某插件声明的全部绑定（M1 scope revoke 的 broadcaster 维度）。
+///
+/// 按 `owner_plugin_id` 匹配（"self" 解析发生在 parse 阶段，表内已是 owner id）。
+/// 返回移除条数。
+pub fn remove_plugin_bindings(bindings: &SharedBindings, owner_plugin_id: &str) -> usize {
+    let mut w = bindings.write();
+    let before = w.len();
+    w.retain(|b| b.owner_plugin_id != owner_plugin_id);
+    before - w.len()
+}
+
+/// 绑定的稳定 key（last_pushed 索引；owner+widget+metric 唯一定位一条绑定）。
+fn binding_key(b: &WidgetBinding) -> String {
+    format!("{}|{}|{}", b.owner_plugin_id, b.widget_id, b.metric)
 }
 
 /// 后台推送任务。
@@ -224,43 +249,43 @@ impl PluginWidgetBroadcaster {
     /// 启动后台推送循环。返回 join handle（drop 不影响已 spawn 的任务）。
     ///
     /// - `agg`：指标聚合器（插件已 metrics.record 写入此处）
-    /// - `bindings`：启动期解析出的绑定表
+    /// - `bindings`：共享绑定表（启动期解析填充；运行时可增删——禁用插件即移除）
     /// - `emitter`：推送出口（生产用 SessionCoordinator）
     pub fn spawn(
         agg: Arc<MetricsAggregator>,
-        bindings: Vec<WidgetBinding>,
+        bindings: SharedBindings,
         emitter: Arc<dyn WidgetEmitter>,
     ) -> tokio::task::JoinHandle<()> {
-        // 每条绑定的上次推送时间（启动时全部置 0，首次 tick 即触发）。
-        let last_pushed: Arc<Mutex<Vec<std::time::Instant>>> =
-            Arc::new(Mutex::new(vec![std::time::Instant::now(); bindings.len()]));
-        let bindings = Arc::new(bindings);
+        // 每条绑定的上次推送时间（按 binding key 索引，绑定表变化不串位）。
+        let last_pushed: Arc<Mutex<HashMap<String, std::time::Instant>>> =
+            Arc::new(Mutex::new(HashMap::new()));
         tokio::spawn(async move {
-            if bindings.is_empty() {
-                debug!(target: "plugin_widget_broadcast", "no bindings, task idle");
-                return;
-            }
             let mut tick = tokio::time::interval(TICK_INTERVAL);
             tick.tick().await; // 跳过首次立即触发
             info!(
                 target: "plugin_widget_broadcast",
-                count = bindings.len(),
-                "PluginWidgetBroadcaster started ({} bindings, {:?} tick)",
-                bindings.len(),
+                count = bindings.read().len(),
+                "PluginWidgetBroadcaster started ({:?} tick)",
                 TICK_INTERVAL
             );
             loop {
                 tick.tick().await;
                 let now = std::time::Instant::now();
-                // 计算本轮该推哪些绑定
-                let due: Vec<usize> = {
-                    let lp = last_pushed.lock();
-                    (0..bindings.len())
-                        .filter(|&i| now.duration_since(lp[i]) >= bindings[i].interval)
-                        .collect()
-                };
-                for i in due {
-                    let b = &bindings[i];
+                // 快照当前绑定（M1：共享表可能在 tick 间被增删）。
+                let snapshot: Vec<WidgetBinding> = bindings.read().clone();
+                for b in &snapshot {
+                    let key = binding_key(b);
+                    let due = {
+                        let lp = last_pushed.lock();
+                        match lp.get(&key) {
+                            Some(t) => now.duration_since(*t) >= b.interval,
+                            // 无记录 = 首次（启动时全部置 now，首次 tick 即到期）。
+                            None => true,
+                        }
+                    };
+                    if !due {
+                        continue;
+                    }
                     let data = match latest_value(&agg, b) {
                         Some(d) => d,
                         None => continue, // 该指标无数据 → 跳过（不推空帧）
@@ -268,7 +293,7 @@ impl PluginWidgetBroadcaster {
                     let _ = emitter
                         .broadcast_widget(&b.widget_id, "snapshot", data, &b.owner_plugin_id)
                         .await;
-                    last_pushed.lock()[i] = now;
+                    last_pushed.lock().insert(key, now);
                 }
             }
         })
@@ -289,11 +314,7 @@ impl WidgetEmitter for agentos_session::SessionCoordinator {
         plugin_id: &str,
     ) -> usize {
         agentos_session::SessionCoordinator::broadcast_widget(
-            self,
-            widget_id,
-            event,
-            data,
-            plugin_id,
+            self, widget_id, event, data, plugin_id,
         )
         .await
     }
@@ -301,8 +322,8 @@ impl WidgetEmitter for agentos_session::SessionCoordinator {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use super::super::aggregator::MetricType;
+    use super::*;
     use async_trait::async_trait;
     use parking_lot::Mutex as PlMutex;
     use serde_json::json;
@@ -455,15 +476,7 @@ mod tests {
     fn test_latest_value_single_series_no_labels() {
         let agg = MetricsAggregator::new();
         let empty = Labels::new();
-        agg.record(
-            "p1",
-            "tokens",
-            MetricType::Gauge,
-            42.0,
-            &empty,
-            None,
-            None,
-        );
+        agg.record("p1", "tokens", MetricType::Gauge, 42.0, &empty, None, None);
         let binding = WidgetBinding {
             widget_id: "w".into(),
             plugin_id: "p1".into(),
@@ -518,15 +531,7 @@ mod tests {
     async fn test_broadcaster_pushes_when_data_exists() {
         let agg = StdArc::new(MetricsAggregator::new());
         let empty = Labels::new();
-        agg.record(
-            "p1",
-            "tokens",
-            MetricType::Gauge,
-            99.0,
-            &empty,
-            None,
-            None,
-        );
+        agg.record("p1", "tokens", MetricType::Gauge, 99.0, &empty, None, None);
         let spy = StdArc::new(SpyEmitter {
             calls: PlMutex::new(Vec::new()),
         });
@@ -540,8 +545,13 @@ mod tests {
         };
         // 单次 tick 模拟：直接调用一次 push 逻辑（不 spawn loop）
         let data = latest_value(&agg, &binding).unwrap();
-        spy.broadcast_widget(&binding.widget_id, "snapshot", data, &binding.owner_plugin_id)
-            .await;
+        spy.broadcast_widget(
+            &binding.widget_id,
+            "snapshot",
+            data,
+            &binding.owner_plugin_id,
+        )
+        .await;
         let calls = spy.calls.lock();
         assert_eq!(calls.len(), 1);
         assert_eq!(calls[0].0, "w");

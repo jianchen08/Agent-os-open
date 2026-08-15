@@ -35,10 +35,6 @@ EXCLUDE_DIRS = {
     "node_modules", "__pycache__", ".venv", "venv", "build", "dist",
     ".mypy_cache", ".pytest_cache", "target", "site-packages", ".git",
 }
-# Python：仅扫测试文件（conftest/__init__ 非测试，不算）
-PY_TEST_RE = re.compile(r"test_.*\.py$")
-FE_TEST_RE = re.compile(r".*\.test\.(ts|tsx)$")
-RS_TEST_RE = re.compile(r".*\.rs$")
 
 # 标记解析（兼容 @feature: / @feature 、| 分隔、注释包裹等格式）
 FEATURE_RE = re.compile(r"@feature:?\s+(FP-[^\s|]+)")

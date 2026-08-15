@@ -1,3 +1,4 @@
+# @feature: FP-T07 llm api | @ci: python-coverage
 """llm_core 思考强度 → 模型参数路由测试（思考强度全链路）。
 
 推演链：思考强度需求 → 决策「强度随 user_input 透传，llm_core 在请求构造时

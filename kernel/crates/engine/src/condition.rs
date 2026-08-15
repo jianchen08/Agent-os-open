@@ -17,32 +17,131 @@
 //!     字面量：字符串（单/双引号）、数字、True/False/None、列表 [...]
 //!
 //! 优先级（低到高）：or < and < not < comparison < primary
+//!
+//! ## 两段式（G10 加载期编译）
+//!
+//! - [`parse_condition`]：把表达式字符串 tokenize + parse 成 [`Expr`] AST，
+//!   加载期一次性完成（管道编译时）；语法错误在加载期暴露，不静默。
+//! - [`eval_expr`]：对已编译 AST 求值，运行时零解析。
+//! - [`eval_condition`]：兼容入口（字符串直求值，内部 parse+eval）；
+//!   解析失败返回 false（安全兜底，语义与 0.1 一致）。
 
 use serde_json::Value;
 
-/// 安全求值条件表达式。
+/// 编译后的条件表达式 AST（G10：加载期 parse 一次，运行时只求值）。
+///
+/// 无副作用、无动态求值：求值仅读取 `state`。
+#[derive(Debug, Clone, PartialEq)]
+pub enum Expr {
+    /// 字面量（bool / number / string / null）。
+    Literal(Value),
+    /// 列表字面量（元素可以是任意表达式，求值时逐项折算）。
+    List(Vec<Expr>),
+    /// state 路径访问（root + 点链/下标步）。
+    Path { root: String, steps: Vec<PathStep> },
+    /// 逻辑非。
+    Not(Box<Expr>),
+    /// 逻辑与（短路）。
+    And(Box<Expr>, Box<Expr>),
+    /// 逻辑或（短路）。
+    Or(Box<Expr>, Box<Expr>),
+    /// 比较（== != > < >= <=）。
+    Compare {
+        op: &'static str,
+        left: Box<Expr>,
+        right: Box<Expr>,
+    },
+}
+
+/// 路径访问的一步：点字段或下标。
+#[derive(Debug, Clone, PartialEq)]
+pub enum PathStep {
+    /// `a.b`
+    Field(String),
+    /// `a[key]`（key 是表达式，求值后按 [`get_index`] 语义取）。
+    Index(Box<Expr>),
+}
+
+/// 解析条件表达式为 AST。
+///
+/// - `Ok(None)`：空串 / 纯空白——恒真（与 0.1 一致，无条件）。
+/// - `Ok(Some(expr))`：可求值的表达式。
+/// - `Err(msg)`：语法错误（带位置提示）——调用方应在加载期暴露，勿静默吞掉。
+pub fn parse_condition(condition: &str) -> Result<Option<Expr>, String> {
+    let expr = condition.trim();
+    if expr.is_empty() {
+        return Ok(None);
+    }
+    let tokens = tokenize(expr)?;
+    if tokens.is_empty() {
+        return Ok(None);
+    }
+    let mut parser = Parser::new(tokens);
+    let ast = parser.parse()?;
+    Ok(Some(ast))
+}
+
+/// 求值已编译表达式：折算为布尔（与 Python bool() 对齐）。
+///
+/// 运行时零解析——表达式结构在编译期已定型。恒真（`None`）由调用方短路，
+/// 本函数只接收 `Some`。
+pub fn eval_expr(expr: &Expr, state: &Value) -> bool {
+    value_truthy(&eval_value(expr, state))
+}
+
+/// 求值表达式为原始值（内部实现，比较/路径/列表求值用）。
+fn eval_value(expr: &Expr, state: &Value) -> Value {
+    match expr {
+        Expr::Literal(v) => v.clone(),
+        Expr::List(items) => Value::Array(items.iter().map(|e| eval_value(e, state)).collect()),
+        Expr::Path { root, steps } => {
+            let mut v = resolve_name(state, root);
+            for step in steps {
+                v = match step {
+                    PathStep::Field(f) => get_field(&v, f),
+                    PathStep::Index(key) => {
+                        let k = eval_value(key, state);
+                        get_index(&v, &k)
+                    }
+                };
+            }
+            v
+        }
+        Expr::Not(inner) => Value::Bool(!value_truthy(&eval_value(inner, state))),
+        Expr::And(l, r) => {
+            // 短路：左侧为假直接出 false（与 0.1 一致，右侧不求值）
+            let lv = eval_value(l, state);
+            if !value_truthy(&lv) {
+                Value::Bool(false)
+            } else {
+                Value::Bool(value_truthy(&eval_value(r, state)))
+            }
+        }
+        Expr::Or(l, r) => {
+            let lv = eval_value(l, state);
+            if value_truthy(&lv) {
+                Value::Bool(true)
+            } else {
+                Value::Bool(value_truthy(&eval_value(r, state)))
+            }
+        }
+        Expr::Compare { op, left, right } => {
+            let l = eval_value(left, state);
+            let r = eval_value(right, state);
+            Value::Bool(compare(&l, op, &r))
+        }
+    }
+}
+
+/// 安全求值条件表达式（兼容入口，字符串直求值）。
 ///
 /// 输入: `condition`（条件字符串，如 `"core_type == 'llm_call'"`），`state`（当前状态 serde_json::Value）
 /// 输出: 求值结果 bool；解析/求值异常返回 `false`（与 0.1 行为一致的安全兜底）。
 pub fn eval_condition(condition: &str, state: &Value) -> bool {
-    let expr = condition.trim();
-    if expr.is_empty() {
-        // 与 0.1 一致：空表达式视为 true（无条件）
-        return true;
-    }
-
-    let tokens = match tokenize(expr) {
-        Ok(t) => t,
-        Err(_) => return false,
-    };
-    if tokens.is_empty() {
-        return true;
-    }
-
-    let mut parser = Parser::new(tokens, state);
-    match parser.parse() {
-        Some(v) => value_truthy(&v),
-        None => false,
+    match parse_condition(condition) {
+        Ok(None) => true,
+        Ok(Some(expr)) => eval_expr(&expr, state),
+        Err(_) => false,
     }
 }
 
@@ -52,18 +151,18 @@ pub fn eval_condition(condition: &str, state: &Value) -> bool {
 
 #[derive(Debug, Clone, PartialEq)]
 enum TokKind {
-    String,    // "..." 或 '...'
-    Number,    // 123 / 1.5
-    Bool,      // True / False / None
-    Keyword,   // and / or / not
-    Op,        // == / != / > / < / >= / <=
-    Dot,       // .
-    Ident,     // 标识符
-    LBracket,  // [
-    RBracket,  // ]
-    LParen,    // (
-    RParen,    // )
-    Comma,     // ,
+    String,   // "..." 或 '...'
+    Number,   // 123 / 1.5
+    Bool,     // True / False / None
+    Keyword,  // and / or / not
+    Op,       // == / != / > / < / >= / <=
+    Dot,      // .
+    Ident,    // 标识符
+    LBracket, // [
+    RBracket, // ]
+    LParen,   // (
+    RParen,   // )
+    Comma,    // ,
 }
 
 #[derive(Debug, Clone)]
@@ -102,7 +201,10 @@ fn tokenize(expr: &str) -> Result<Vec<Token>, String> {
             // chars[start..i] 即引号内内容
             let body: String = chars[start..i].iter().collect();
             i += 1; // 消耗结束引号
-            tokens.push(Token { kind: TokKind::String, value: body });
+            tokens.push(Token {
+                kind: TokKind::String,
+                value: body,
+            });
             continue;
         }
 
@@ -120,7 +222,10 @@ fn tokenize(expr: &str) -> Result<Vec<Token>, String> {
                 }
             }
             let body: String = chars[start..i].iter().collect();
-            tokens.push(Token { kind: TokKind::Number, value: body });
+            tokens.push(Token {
+                kind: TokKind::Number,
+                value: body,
+            });
             continue;
         }
 
@@ -134,13 +239,18 @@ fn tokenize(expr: &str) -> Result<Vec<Token>, String> {
             // 大小写不敏感地识别布尔/None 字面量与逻辑关键字（对齐 JSON 的 true/false 与
             // 0.1 的 True/False/None；default.yaml 实际出现小写 true）。
             match word.to_lowercase().as_str() {
-                "true" | "false" | "none" => {
-                    tokens.push(Token { kind: TokKind::Bool, value: word.to_lowercase() })
-                }
-                "and" | "or" | "not" => {
-                    tokens.push(Token { kind: TokKind::Keyword, value: word.to_lowercase() })
-                }
-                _ => tokens.push(Token { kind: TokKind::Ident, value: word }),
+                "true" | "false" | "none" => tokens.push(Token {
+                    kind: TokKind::Bool,
+                    value: word.to_lowercase(),
+                }),
+                "and" | "or" | "not" => tokens.push(Token {
+                    kind: TokKind::Keyword,
+                    value: word.to_lowercase(),
+                }),
+                _ => tokens.push(Token {
+                    kind: TokKind::Ident,
+                    value: word,
+                }),
             }
             continue;
         }
@@ -150,14 +260,20 @@ fn tokenize(expr: &str) -> Result<Vec<Token>, String> {
             if i + 1 < n && chars[i + 1] == '=' {
                 let op: String = format!("{}=", c);
                 i += 2;
-                tokens.push(Token { kind: TokKind::Op, value: op });
+                tokens.push(Token {
+                    kind: TokKind::Op,
+                    value: op,
+                });
                 continue;
             }
             if c == '=' {
                 return Err(format!("Unexpected '=' at position {}", i));
             }
             // <, > 单字符
-            tokens.push(Token { kind: TokKind::Op, value: c.to_string() });
+            tokens.push(Token {
+                kind: TokKind::Op,
+                value: c.to_string(),
+            });
             i += 1;
             continue;
         }
@@ -165,27 +281,45 @@ fn tokenize(expr: &str) -> Result<Vec<Token>, String> {
         // 单字符 token
         match c {
             '.' => {
-                tokens.push(Token { kind: TokKind::Dot, value: c.to_string() });
+                tokens.push(Token {
+                    kind: TokKind::Dot,
+                    value: c.to_string(),
+                });
                 i += 1;
             }
             '[' => {
-                tokens.push(Token { kind: TokKind::LBracket, value: c.to_string() });
+                tokens.push(Token {
+                    kind: TokKind::LBracket,
+                    value: c.to_string(),
+                });
                 i += 1;
             }
             ']' => {
-                tokens.push(Token { kind: TokKind::RBracket, value: c.to_string() });
+                tokens.push(Token {
+                    kind: TokKind::RBracket,
+                    value: c.to_string(),
+                });
                 i += 1;
             }
             '(' => {
-                tokens.push(Token { kind: TokKind::LParen, value: c.to_string() });
+                tokens.push(Token {
+                    kind: TokKind::LParen,
+                    value: c.to_string(),
+                });
                 i += 1;
             }
             ')' => {
-                tokens.push(Token { kind: TokKind::RParen, value: c.to_string() });
+                tokens.push(Token {
+                    kind: TokKind::RParen,
+                    value: c.to_string(),
+                });
                 i += 1;
             }
             ',' => {
-                tokens.push(Token { kind: TokKind::Comma, value: c.to_string() });
+                tokens.push(Token {
+                    kind: TokKind::Comma,
+                    value: c.to_string(),
+                });
                 i += 1;
             }
             _ => return Err(format!("Unexpected character '{}' at position {}", c, i)),
@@ -196,18 +330,17 @@ fn tokenize(expr: &str) -> Result<Vec<Token>, String> {
 }
 
 // ===========================================================================
-// Parser — 递归下降，求值同步进行
+// Parser — 递归下降，产出 AST（不碰 state）
 // ===========================================================================
 
-struct Parser<'a> {
+struct Parser {
     tokens: Vec<Token>,
     pos: usize,
-    state: &'a Value,
 }
 
-impl<'a> Parser<'a> {
-    fn new(tokens: Vec<Token>, state: &'a Value) -> Self {
-        Self { tokens, pos: 0, state }
+impl Parser {
+    fn new(tokens: Vec<Token>) -> Self {
+        Self { tokens, pos: 0 }
     }
 
     fn peek(&self) -> Option<&Token> {
@@ -222,104 +355,123 @@ impl<'a> Parser<'a> {
         tok
     }
 
-    /// 入口：parse = parse_or
-    fn parse(&mut self) -> Option<Value> {
-        let v = self.parse_or()?;
-        // 解析完应到达 token 末尾；否则视为异常表达式
+    /// 入口：parse = parse_or；解析完必须到达 token 末尾，否则语法错误。
+    fn parse(&mut self) -> Result<Expr, String> {
+        let ast = self.parse_or()?;
         if self.pos != self.tokens.len() {
-            return None;
+            return Err(format!(
+                "position {}: 多余的 token '{}'",
+                self.pos, self.tokens[self.pos].value
+            ));
         }
-        Some(v)
+        Ok(ast)
     }
 
     /// or 表达式：left or right or ...
-    fn parse_or(&mut self) -> Option<Value> {
+    fn parse_or(&mut self) -> Result<Expr, String> {
         let mut left = self.parse_and()?;
         while let Some(tok) = self.peek() {
             if tok.kind == TokKind::Keyword && tok.value == "or" {
                 self.advance();
                 let right = self.parse_and()?;
-                let b = value_truthy(&left) || value_truthy(&right);
-                left = Value::Bool(b);
+                left = Expr::Or(Box::new(left), Box::new(right));
             } else {
                 break;
             }
         }
-        Some(left)
+        Ok(left)
     }
 
     /// and 表达式：left and right and ...
-    fn parse_and(&mut self) -> Option<Value> {
+    fn parse_and(&mut self) -> Result<Expr, String> {
         let mut left = self.parse_not()?;
         while let Some(tok) = self.peek() {
             if tok.kind == TokKind::Keyword && tok.value == "and" {
                 self.advance();
                 let right = self.parse_not()?;
-                let b = value_truthy(&left) && value_truthy(&right);
-                left = Value::Bool(b);
+                left = Expr::And(Box::new(left), Box::new(right));
             } else {
                 break;
             }
         }
-        Some(left)
+        Ok(left)
     }
 
     /// not 表达式：not <operand>
-    fn parse_not(&mut self) -> Option<Value> {
+    fn parse_not(&mut self) -> Result<Expr, String> {
         if let Some(tok) = self.peek() {
             if tok.kind == TokKind::Keyword && tok.value == "not" {
                 self.advance();
                 let operand = self.parse_not()?;
-                return Some(Value::Bool(!value_truthy(&operand)));
+                return Ok(Expr::Not(Box::new(operand)));
             }
         }
         self.parse_comparison()
     }
 
     /// 比较表达式：primary OP primary。
-    /// 注意：当 primary 后没有比较运算符时返回左侧值（与 0.1 一致），
-    /// 不能因为 peek() 返回 None（到达 token 末尾）就视为解析失败。
-    fn parse_comparison(&mut self) -> Option<Value> {
+    /// 注意：当 primary 后没有比较运算符时返回左侧表达式（与 0.1 一致，
+    /// 上层用布尔折算判定），不能因为 peek() 返回 None 就视为解析失败。
+    fn parse_comparison(&mut self) -> Result<Expr, String> {
         let left = self.parse_primary()?;
         let tok = match self.peek() {
             Some(t) => t.clone(),
-            None => return Some(left),
+            None => return Ok(left),
         };
 
         if tok.kind == TokKind::Op {
-            let op = self.advance()?.value;
+            let op = self
+                .advance()
+                .ok_or_else(|| format!("position {}: 比较运算符后表达式意外结束", self.pos))?
+                .value;
             let right = self.parse_primary()?;
-            return Some(Value::Bool(compare(&left, &op, &right)));
+            let op: &'static str = match op.as_str() {
+                "==" => "==",
+                "!=" => "!=",
+                ">" => ">",
+                "<" => "<",
+                ">=" => ">=",
+                "<=" => "<=",
+                other => return Err(format!("position {}: 未知比较运算符 '{}'", self.pos, other)),
+            };
+            return Ok(Expr::Compare {
+                op,
+                left: Box::new(left),
+                right: Box::new(right),
+            });
         }
 
-        // 非比较运算符：返回左侧值（用于上层做布尔判定）
-        Some(left)
+        // 非比较运算符：返回左侧表达式（用于上层做布尔判定）
+        Ok(left)
     }
 
-    /// primary：字面量 / 列表 / 标识符（含点链访问）
-    fn parse_primary(&mut self) -> Option<Value> {
-        let tok = self.peek()?.clone();
+    /// primary：字面量 / 列表 / 标识符（含点链访问）。
+    fn parse_primary(&mut self) -> Result<Expr, String> {
+        let tok = self
+            .peek()
+            .cloned()
+            .ok_or_else(|| format!("position {}: 表达式意外结束", self.pos))?;
 
         // 布尔字面量 true / false / none（tokenizer 已小写归一化）
         if tok.kind == TokKind::Bool {
             self.advance();
-            return Some(match tok.value.as_str() {
+            return Ok(Expr::Literal(match tok.value.as_str() {
                 "true" => Value::Bool(true),
                 "false" => Value::Bool(false),
                 _ => Value::Null, // none
-            });
+            }));
         }
 
         // 数字字面量
         if tok.kind == TokKind::Number {
             self.advance();
-            return Some(parse_number_literal(&tok.value));
+            return Ok(Expr::Literal(parse_number_literal(&tok.value)));
         }
 
         // 字符串字面量
         if tok.kind == TokKind::String {
             self.advance();
-            return Some(Value::String(tok.value));
+            return Ok(Expr::Literal(Value::String(tok.value)));
         }
 
         // 列表字面量 [...]
@@ -331,58 +483,71 @@ impl<'a> Parser<'a> {
         if tok.kind == TokKind::LParen {
             self.advance(); // 消耗 (
             let inner = self.parse_or()?;
-            let close = self.advance()?;
+            let close = self
+                .advance()
+                .ok_or_else(|| format!("position {}: 括号未闭合", self.pos))?;
             if close.kind != TokKind::RParen {
-                return None;
+                return Err(format!("position {}: 期望 ')'", self.pos));
             }
-            return Some(inner);
+            return Ok(inner);
         }
 
-        // 标识符：从 state 取值，随后处理点链 / 下标
+        // 标识符：state 路径（root + 点链 / 下标）
         if tok.kind == TokKind::Ident {
             self.advance();
-            let mut value = resolve_name(self.state, &tok.value);
+            let root = tok.value;
+            let mut steps = Vec::new();
 
             while let Some(next) = self.peek() {
                 match next.kind {
                     // 点号访问：value.property
                     TokKind::Dot => {
                         self.advance(); // 消耗 DOT
-                        let dot_tok = self.advance()?;
+                        let dot_tok = self.advance().ok_or_else(|| {
+                            format!("position {}: '.' 后表达式意外结束", self.pos)
+                        })?;
                         if dot_tok.kind != TokKind::Ident {
-                            // 点后必须跟标识符；链断掉，置 None 并停止
-                            value = Value::Null;
-                            break;
+                            return Err(format!(
+                                "position {}: '.' 后应为字段名（不支持方法调用）",
+                                self.pos
+                            ));
                         }
                         // 仅支持属性访问（不支持方法调用，与最小集一致）
-                        value = get_field(&value, &dot_tok.value);
+                        steps.push(PathStep::Field(dot_tok.value));
                     }
                     // 下标访问：value[key]
                     TokKind::LBracket => {
                         self.advance(); // 消耗 [
                         let key = self.parse_primary()?;
-                        let close = self.advance()?;
+                        let close = self
+                            .advance()
+                            .ok_or_else(|| format!("position {}: '[' 未闭合", self.pos))?;
                         if close.kind != TokKind::RBracket {
-                            return None;
+                            return Err(format!("position {}: 期望 ']'", self.pos));
                         }
-                        value = get_index(&value, &key);
+                        steps.push(PathStep::Index(Box::new(key)));
                     }
                     _ => break,
                 }
             }
 
-            return Some(value);
+            return Ok(Expr::Path { root, steps });
         }
 
-        None
+        Err(format!(
+            "position {}: 无法识别的 token '{}'",
+            self.pos, tok.value
+        ))
     }
 
     /// 解析方括号列表字面量，如 [1, 2, 'a']
-    fn parse_list(&mut self) -> Option<Value> {
+    fn parse_list(&mut self) -> Result<Expr, String> {
         // 消耗 [
-        let open = self.advance()?;
+        let open = self
+            .advance()
+            .ok_or_else(|| format!("position {}: 表达式意外结束", self.pos))?;
         if open.kind != TokKind::LBracket {
-            return None;
+            return Err(format!("position {}: 期望 '['", self.pos));
         }
 
         let mut items = Vec::new();
@@ -390,22 +555,34 @@ impl<'a> Parser<'a> {
         if let Some(tok) = self.peek() {
             if tok.kind == TokKind::RBracket {
                 self.advance();
-                return Some(Value::Array(items));
+                return Ok(Expr::List(items));
             }
         }
 
         loop {
             let item = self.parse_primary()?;
             items.push(item);
-            match self.peek()? {
-                Token { kind: TokKind::Comma, .. } => {
+            match self.peek() {
+                Some(Token {
+                    kind: TokKind::Comma,
+                    ..
+                }) => {
                     self.advance();
                 }
-                Token { kind: TokKind::RBracket, .. } => {
+                Some(Token {
+                    kind: TokKind::RBracket,
+                    ..
+                }) => {
                     self.advance();
-                    return Some(Value::Array(items));
+                    return Ok(Expr::List(items));
                 }
-                _ => return None,
+                Some(Token { value, .. }) => {
+                    return Err(format!(
+                        "position {}: 列表内意外的 token '{value}'（期望 ',' 或 ']'）",
+                        self.pos
+                    ))
+                }
+                None => return Err(format!("position {}: 列表未闭合", self.pos)),
             }
         }
     }
@@ -589,7 +766,10 @@ mod tests {
     #[test]
     fn test_dot_chain_false() {
         let state = json!({ "pause_guard": { "checked": { "paused": false } } });
-        assert!(!eval_condition("pause_guard.checked.paused == True", &state));
+        assert!(!eval_condition(
+            "pause_guard.checked.paused == True",
+            &state
+        ));
     }
 
     // ---- 扩展语法（0.1 已有，保留扩展性）----
@@ -640,7 +820,10 @@ mod tests {
     fn test_lowercase_bool() {
         // text_only == true（小写）也要工作
         let state = json!({ "text_only": true, "no_new_input": true });
-        assert!(eval_condition("text_only == true and no_new_input == true", &state));
+        assert!(eval_condition(
+            "text_only == true and no_new_input == true",
+            &state
+        ));
     }
 
     #[test]
@@ -683,14 +866,20 @@ mod tests {
     fn test_paren_grouping() {
         // (a or b) and c 的优先级
         let state = json!({ "a": true, "b": false, "c": true });
-        assert!(eval_condition("(a == true or b == true) and c == true", &state));
+        assert!(eval_condition(
+            "(a == true or b == true) and c == true",
+            &state
+        ));
     }
 
     #[test]
     fn test_partial_dot_chain_missing() {
         // 中间节点缺失 → None == True → false
         let state = json!({ "pause_guard": { } });
-        assert!(!eval_condition("pause_guard.checked.paused == True", &state));
+        assert!(!eval_condition(
+            "pause_guard.checked.paused == True",
+            &state
+        ));
     }
 
     #[test]

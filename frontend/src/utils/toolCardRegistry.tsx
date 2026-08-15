@@ -13,6 +13,7 @@ import type { MessageToolCall } from '@/types/models'
 import type { ReactNode } from 'react'
 import { interpretChatCard } from './chatCardInterpreter'
 import { getChatCardDeclaration } from './chatCardInterpreter'
+import { applyRenderIntent } from './dshRenderIntent'
 import { resolveChatCardIcon } from './chatCardIconRegistry'
 import type { ToolCallContext } from './chatCardInterpreter'
 import { registerBuiltinToolChatCards } from './builtinToolChatCards'
@@ -114,6 +115,15 @@ export function enhanceActivityWithToolConfig(
   if (!builtinChatCardsRegistered) {
     builtinChatCardsRegistered = true
     registerBuiltinToolChatCards()
+  }
+
+  // render 意图路由（S3.5，task_dsh_plugin_adapter 任务 1d）：工具契约的 render
+  // 声明（ToolDescriptor.render，schema 装载进 dshRenderIntent 注册表）优先于
+  // chat_card 声明——它是工具作者对输出形态的契约（对齐 DSH ToolResultView），
+  // 映射失败（无声明/字段对不上）返回 null 落回下方既有级联。
+  const rendered = applyRenderIntent(activity, toolCall)
+  if (rendered) {
+    return rendered
   }
 
   // 声明优先（S3）：插件 ui.chat_card 声明（后端经 /api/v1/schema 的 tools[].ui.chat_card

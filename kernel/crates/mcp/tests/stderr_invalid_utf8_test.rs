@@ -87,7 +87,11 @@ async fn stderr_invalid_utf8_does_not_block_sidecar() {
 
     let mut client = McpClient::new_stdio(
         python_exe().to_string(),
-        vec!["-u".to_string(), "-c".to_string(), sidecar_script().to_string()],
+        vec![
+            "-u".to_string(),
+            "-c".to_string(),
+            sidecar_script().to_string(),
+        ],
     )
     .with_plugin_id("stderr_invalid_utf8_test");
 
@@ -98,14 +102,11 @@ async fn stderr_invalid_utf8_does_not_block_sidecar() {
     // initialize 永远等不到响应 → 5s 超时（Err）→ 测试失败。
     // 修复后：stderr reader 用 lossy 解码继续消费 → sidecar 写完 200KB →
     // 进入 stdin 循环响应 initialize → Ok(Ok) → 测试通过。
-    let result =
-        tokio::time::timeout(Duration::from_secs(5), client.initialize(&json!({}))).await;
+    let result = tokio::time::timeout(Duration::from_secs(5), client.initialize(&json!({}))).await;
 
     match result {
         Err(_) => {
-            panic!(
-                "sidecar 被 stderr 非 UTF-8 阻塞：initialize 5s 内未返回（复现 120s 卡死根因）"
-            )
+            panic!("sidecar 被 stderr 非 UTF-8 阻塞：initialize 5s 内未返回（复现 120s 卡死根因）")
         }
         Ok(Err(e)) => {
             panic!("initialize 快速失败（非预期）：{}", e)

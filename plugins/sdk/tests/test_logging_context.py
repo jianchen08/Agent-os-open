@@ -97,7 +97,7 @@ async def test_tools_call_strips_log_ctx_from_arguments() -> None:
 
     import json
 
-    content = json.loads(result["content"][0]["text"])
+    content = json.loads(result.content[0].text)
     assert content == {"ok": True}
     # handler 收到的 arguments 不应含 _log_ctx
     assert "_log_ctx" not in received
@@ -118,7 +118,7 @@ async def test_tools_call_without_log_ctx_still_works() -> None:
     import json
 
     result = await server._handle_tools_call({"name": "echo", "arguments": {"text": "hi"}})
-    content = json.loads(result["content"][0]["text"])
+    content = json.loads(result.content[0].text)
     assert content == {"echo": "hi"}
 
 
@@ -164,7 +164,7 @@ async def test_tools_call_filters_injected_fields_for_plain_function() -> None:
             },
         }
     )
-    content = json.loads(result["content"][0]["text"])
+    content = json.loads(result.content[0].text)
     assert content == {"ok": True}
     # handler 只收到签名中存在的参数，内部注入字段被过滤
     assert received == {"operation": "calculate", "expression": "1+1"}
@@ -208,7 +208,7 @@ async def test_tools_call_passes_all_args_to_var_keyword_handler() -> None:
             },
         }
     )
-    content = json.loads(result["content"][0]["text"])
+    content = json.loads(result.content[0].text)
     assert content == {"ok": True}
     # _log_ctx 仍被 pop（不进入 handler），其余参数全量透传
     assert "_log_ctx" not in received

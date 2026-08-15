@@ -16,7 +16,20 @@ REM
 REM  Env vars:
 REM    AGENTOS_KERNEL_PORT   kernel port    (default 9100)
 REM    AGENTOS_FRONTEND_PORT frontend port  (default 6390, avoids container_22404's 5289/5290/6290)
-REM ============================================================
+REM
+REM  [Supervision note / 剩余项清仓批次 A2] Two supervisors may coexist:
+REM    1. This script wires run_kernel_supervised.bat (G8 lifecycle supervisor):
+REM       respawns kernel ONLY on exit code 75 (restart-as-unload); any other
+REM       exit stops the supervisor honestly (crashes are not masked).
+REM    2. An external session supervisor .zcode_tmp_kernel_supervisor.sh
+REM       (repo root, held by a prior ZCode session background task; writes
+REM       .kernel_supervisor.log / .vite_supervised.log) polls port 9100 every
+REM       5s and restarts the kernel whenever it is down, plus vite every 10
+REM       cycles. It therefore masks honest stops (e.g. the taskkill below and
+REM       non-75 exits) - if the kernel "keeps coming back" after stopping it,
+REM       that loop is the owner; stop it (kill its bash process / remove the
+REM       script) or expect it to re-launch the kernel within ~5s.
+REM  ============================================================
 setlocal EnableDelayedExpansion
 
 cd /d "%~dp0"
@@ -91,7 +104,11 @@ set "AGENTOS_PLUGINS_DIR=%PROJECT_ROOT%\plugins\shared"
 set "AGENTOS_CONFIG_ROOT=%PROJECT_ROOT%\config"
 
 set "KERNEL_LOG=%PROJECT_ROOT%\.kernel_02.log"
-start "AgentOS Kernel" /B cmd /c ""%KERNEL_BIN%" > "%KERNEL_LOG%" 2>&1"
+REM G8 supervisor: respawn kernel on exit code 75 (POST /api/v1/system/restart,
+REM and watcher auto-restart on cdylib plugin set change - A3).
+REM NOTE (A2): an external session supervisor (.zcode_tmp_kernel_supervisor.sh)
+REM may ALSO relaunch the kernel within ~5s of any stop - see header note.
+start "AgentOS Kernel" /B cmd /c ""%PROJECT_ROOT%\run_kernel_supervised.bat" "%KERNEL_BIN%" "%KERNEL_LOG%""
 
 echo        Waiting for kernel (poll /health up to 60s)...
 set "KERNEL_READY=0"

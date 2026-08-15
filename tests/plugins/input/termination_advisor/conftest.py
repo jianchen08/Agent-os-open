@@ -1,3 +1,4 @@
+# @feature: FP-0.2.可观测性 可观测性 | @ci: python-coverage
 """termination_advisor 测试 conftest——注入插件目录与 plugins/shared/ 到 sys.path。
 
 _PLUGIN_SOURCE_DIRS 暴露给 tests/plugins/conftest.py 的 pytest_runtest_setup，

@@ -39,7 +39,7 @@ fn path_ref_rejects_traversal_escape() {
     assert!(
         result.is_err(),
         "穿越引用应被拒绝，实际读取到: {:?}",
-        result.ok().filter(|s| s.contains("TOP-SECRET")).map(|s| s.clone())
+        result.ok().filter(|s| s.contains("TOP-SECRET"))
     );
 
     // Windows 分隔符变体 `..\\outside.md` 同样拒绝

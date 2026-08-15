@@ -49,7 +49,6 @@ async fn admin_token(app: &axum::Router) -> String {
     v["access_token"].as_str().unwrap().to_string()
 }
 
-
 // ── 共享字面量构造 ─────────────────────────────────────────────
 
 /// 构造一个最小 PluginManifest 字面量(contributes/http_endpoints 由调用方覆盖)。
@@ -72,7 +71,7 @@ fn manifest_base(plugin_id: &str) -> PluginManifest {
         mcp: None,
         lifecycle: None,
         native: None,
-        wasm: None,
+        granted_capabilities: vec![],
         requires_content: None,
         invoke_entry: None,
         config_files: vec![],
@@ -175,7 +174,8 @@ async fn path_a_agent_config_full_crud_loop() {
     );
 
     // 3) PUT 写新内容 → 返回 200 + success
-    let new_yaml = "config_id: crud_agent\nname: 新名\nagent_type: main\nlevel: L2\nmodel_tier: large\n";
+    let new_yaml =
+        "config_id: crud_agent\nname: 新名\nagent_type: main\nlevel: L2\nmodel_tier: large\n";
     let put_body = serde_json::to_string(&json!({ "yaml": new_yaml })).unwrap();
     let app = build_router(state.clone());
     let resp = app
@@ -216,15 +216,10 @@ async fn path_a_agent_config_full_crud_loop() {
     );
 
     // 5) .bak 备份文件存在(同目录 <file>.yaml.bak),内容为原内容
-    let backup = tmp
-        .path()
-        .join("config/agents/main/crud_agent.yaml.bak");
+    let backup = tmp.path().join("config/agents/main/crud_agent.yaml.bak");
     assert!(backup.is_file(), "备份文件应存在: {}", backup.display());
     let backup_content = fs::read_to_string(&backup).unwrap();
-    assert_eq!(
-        backup_content, original,
-        "备份内容应为 PUT 前的原内容"
-    );
+    assert_eq!(backup_content, original, "备份内容应为 PUT 前的原内容");
 
     // 让 _tmp 在函数末尾释放(不提前 drop)
     drop(tmp);
@@ -267,10 +262,7 @@ async fn path_a_put_invalid_yaml_behavior() {
 
     if resp.status() == StatusCode::BAD_REQUEST {
         // 实现做了语法校验:文件内容应保持原值
-        assert_eq!(
-            disk_after, original,
-            "PUT 400 时文件内容应保持原值不变"
-        );
+        assert_eq!(disk_after, original, "PUT 400 时文件内容应保持原值不变");
     } else {
         // 实现未做语法校验(预期路径,见 put_agent_config_handler):200 + 文件被写入新值
         assert_eq!(
@@ -306,7 +298,7 @@ async fn path_b_schema_contributes_multi_key_passthrough() {
     let state = AppState {
         manifests: Arc::new(vec![manifest]),
         enabled_plugin_ids: Arc::new(RwLock::new(HashSet::from([
-            "multi_contrib_plugin".to_string(),
+            "multi_contrib_plugin".to_string()
         ]))),
         ..AppState::with_config(json!({}))
     };
@@ -445,10 +437,7 @@ async fn path_c_command_with_tool_field_returns_success() {
         .await
         .unwrap();
     let json: Value = serde_json::from_slice(&body).unwrap();
-    assert_eq!(
-        json["success"], true,
-        "占位逻辑应返回 success=true: {json}"
-    );
+    assert_eq!(json["success"], true, "占位逻辑应返回 success=true: {json}");
 }
 
 /// C2:command 声明在 contributes.commands[].id(如 "commandId"),但 action 参数带
@@ -735,9 +724,7 @@ async fn path_e_agents_schema_covers_five_field_types() {
         .await
         .unwrap();
     let json: Value = serde_json::from_slice(&body).unwrap();
-    let fields = json["fields"]
-        .as_array()
-        .expect("schema 应含 fields 数组");
+    let fields = json["fields"].as_array().expect("schema 应含 fields 数组");
     assert!(!fields.is_empty(), "fields 不应为空");
 
     // 五种 type 都应至少出现一次
@@ -746,10 +733,7 @@ async fn path_e_agents_schema_covers_five_field_types() {
         let t = f["type"].as_str().expect("字段应有 type");
         types_seen.insert(t);
         // 每个字段必须带 label(前端表单渲染依赖)
-        assert!(
-            f["label"].is_string(),
-            "字段缺 label: {f}"
-        );
+        assert!(f["label"].is_string(), "字段缺 label: {f}");
     }
     for expected in ["string", "textarea", "number", "select", "multiselect"] {
         assert!(
@@ -822,4 +806,72 @@ async fn path_e_agents_schema_select_fields_have_full_options() {
             lv_opts
         );
     }
+}
+
+// ════════════════════════════════════════════════════════════════
+// 路径 F:会话创建表单 schema（sessions/schema 聚合插件 thread_fields）
+// ════════════════════════════════════════════════════════════════
+
+/// F1:GET /api/v1/sessions/schema → 内置 title/intent + enabled 插件的
+///  contributes.thread_fields（isolation 风格 workspace/isolationMode）聚合出口；
+/// disabled 插件与无 name 的非法项被滤掉。
+#[tokio::test]
+async fn path_f_sessions_schema_aggregates_plugin_thread_fields() {
+    let mut m_on = manifest_base("isolation");
+    m_on.contributes = Some(json!({
+        "thread_fields": [
+            {"name": "workspace", "type": "string", "label": "工作空间"},
+            {"name": "isolationMode", "type": "select", "label": "隔离模式",
+             "options": [{"label": "非隔离", "value": "non_isolated"}]},
+            {"type": "string", "label": "缺 name 的非法项应被忽略"}
+        ]
+    }));
+    let mut m_off = manifest_base("disabled_plugin");
+    m_off.contributes = Some(json!({
+        "thread_fields": [{"name": "secret", "type": "string", "label": "不应出现"}]
+    }));
+    let m_none = manifest_base("no_contributes_plugin");
+
+    let state = AppState {
+        manifests: Arc::new(vec![m_on, m_off, m_none]),
+        enabled_plugin_ids: Arc::new(RwLock::new(HashSet::from([
+            "isolation".to_string(),
+            "no_contributes_plugin".to_string(),
+        ]))),
+        ..AppState::with_config(json!({}))
+    };
+
+    let app = build_router(state);
+    let token = admin_token(&app).await;
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/sessions/schema")
+                .header("authorization", format!("Bearer {token}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(resp.into_body(), 64 * 1024)
+        .await
+        .unwrap();
+    let v: Value = serde_json::from_slice(&body).unwrap();
+
+    let names: Vec<&str> = v["fields"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|f| f["name"].as_str())
+        .collect();
+    // 内置字段在前，插件字段随后；非法项（无 name）与 disabled 插件不出口
+    assert_eq!(
+        names,
+        vec!["title", "intent", "workspace", "isolationMode"],
+        "fields 应为内置 + enabled 插件贡献，实际: {names:?}"
+    );
+    let ws = &v["fields"][2];
+    assert_eq!(ws["label"], "工作空间");
+    assert_eq!(v["fields"][3]["options"][0]["value"], "non_isolated");
 }

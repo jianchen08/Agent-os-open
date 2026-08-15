@@ -1,3 +1,4 @@
+/** @feature FP-T12 前端适配 | @ci: frontend-test */
 /**
  * F1 回归：刷新后 streamingState 被 persist merge 重置为 {}，
  * handleReconnected 仍应据 messagesByPipeline 里 status==='streaming' 的消息

@@ -94,11 +94,7 @@ mod tests {
     fn test_does_not_override_existing_state_fields() {
         // 契约：state 已有的字段不被覆盖（or_insert，调用方优先）
         let temp = tempfile::tempdir().unwrap();
-        let cc = setup(
-            temp.path().to_path_buf(),
-            "a1",
-            "system_prompt: agent值\n",
-        );
+        let cc = setup(temp.path().to_path_buf(), "a1", "system_prompt: agent值\n");
         let mut state = serde_json::json!({"system_prompt": "调用方值"});
 
         load_agent_into_state(&cc, &mut state, "a1");
@@ -163,11 +159,7 @@ mod tests {
 
         // 改文件（确保 mtime 变化）
         std::thread::sleep(std::time::Duration::from_millis(50));
-        std::fs::write(
-            temp.path().join("agents/a3.yaml"),
-            "v: 2\n",
-        )
-        .unwrap();
+        std::fs::write(temp.path().join("agents/a3.yaml"), "v: 2\n").unwrap();
 
         let mut state2 = serde_json::json!({});
         load_agent_into_state(&cc, &mut state2, "a3");

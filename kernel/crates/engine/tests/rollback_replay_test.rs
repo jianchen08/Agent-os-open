@@ -41,8 +41,8 @@ use std::time::Duration;
 
 use agentos_core::traits::{MessageQueryOpts, PluginInvoker, StorageBackend};
 use agentos_core::types::{
-    LoopBody, LoopConfig, PluginContext, PluginError, PluginResult, PipelineConfig, PipelineStep,
-    Route, RouteAction, RouteNext, TenantContext, ToolExecutionResult,
+    LoopBody, LoopConfig, PipelineConfig, PipelineStep, PluginContext, PluginError, PluginResult,
+    Route, RouteAction, RouteNext, StepItem, TenantContext, ToolExecutionResult,
 };
 use agentos_engine::{replay, PipelineExecutor, SqliteStore};
 use async_trait::async_trait;
@@ -136,7 +136,11 @@ fn make_engine_config() -> PipelineConfig {
             steps: vec![
                 PipelineStep {
                     id: "prepare".into(),
-                    steps: prepare_plugins,
+                    steps: prepare_plugins
+                        .iter()
+                        .map(|s| StepItem::Bare(s.to_string()))
+                        .collect(),
+                    when: None,
                     context: HashMap::new(),
                     routes: vec![],
                     loop_config: None,
@@ -144,6 +148,7 @@ fn make_engine_config() -> PipelineConfig {
                 PipelineStep {
                     id: "core".into(),
                     steps: vec!["{{state.core_plugin}}".into()],
+                    when: None,
                     context: HashMap::new(),
                     routes: vec![],
                     loop_config: None,
@@ -154,6 +159,7 @@ fn make_engine_config() -> PipelineConfig {
                         "pipeline_stop_check".into(),
                         "pipeline_result_format".into(),
                     ],
+                    when: None,
                     context: HashMap::new(),
                     routes: vec![
                         Route {
@@ -181,6 +187,7 @@ fn make_engine_config() -> PipelineConfig {
                 enabled: true,
                 max_iterations: -1,
             }),
+            while_cond: None,
             exit_routes: vec![],
             run_on_error: false,
         }],
@@ -259,11 +266,9 @@ async fn run_round(
 fn latest_trace_created_at(store: &SqliteStore) -> String {
     store
         .with_conn(|c| -> Result<Option<String>, rusqlite::Error> {
-            Ok(c.query_row(
-                "SELECT MAX(created_at) FROM traces",
-                [],
-                |r| r.get::<_, Option<String>>(0),
-            )?)
+            c.query_row("SELECT MAX(created_at) FROM traces", [], |r| {
+                r.get::<_, Option<String>>(0)
+            })
         })
         .unwrap()
         .unwrap_or_default()
@@ -275,10 +280,9 @@ fn all_traces(store: &SqliteStore) -> Vec<(String, String)> {
         .with_conn(|c| -> Result<Vec<(String, String)>, rusqlite::Error> {
             let mut stmt =
                 c.prepare("SELECT patch_type, patch_data FROM traces ORDER BY rowid ASC")?;
-            let rows = stmt.query_map([], |r| {
-                Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
-            })?;
-            Ok(rows.collect::<Result<Vec<_>, _>>()?)
+            let rows =
+                stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?;
+            rows.collect::<Result<Vec<_>, _>>()
         })
         .unwrap()
 }
@@ -365,8 +369,16 @@ async fn rebuild_messages_at_restores_midpoint_queue() {
 
     // 上界之后的变更不得泄入重建结果
     let raw = serde_json::to_string(&rebuilt).unwrap();
-    assert!(!raw.contains("m5-late"), "上界后的追加（seq 5）不应出现：{}", raw);
-    assert!(!raw.contains("m2-modified"), "上界后的 modify（seq 2）不应出现：{}", raw);
+    assert!(
+        !raw.contains("m5-late"),
+        "上界后的追加（seq 5）不应出现：{}",
+        raw
+    );
+    assert!(
+        !raw.contains("m2-modified"),
+        "上界后的 modify（seq 2）不应出现：{}",
+        raw
+    );
     assert!(raw.contains("m2"), "中间时刻的 seq 2 原内容应在：{}", raw);
 }
 
@@ -413,7 +425,11 @@ async fn rollback_restores_table_and_records_rollback_trace() {
     // 表侧 = 目标状态：槽位回到 0..4，槽 2 恢复旧内容（非 modified）
     let table = table_snapshot(&store, "p_rb2");
     let seqs: Vec<u32> = table.iter().map(|(s, _)| *s).collect();
-    assert_eq!(seqs, vec![0, 1, 2, 3, 4], "回退后表应回到目标槽位集合（seq 5 清空）");
+    assert_eq!(
+        seqs,
+        vec![0, 1, 2, 3, 4],
+        "回退后表应回到目标槽位集合（seq 5 清空）"
+    );
     let (_, slot2) = table.iter().find(|(s, _)| *s == 2).unwrap();
     assert_eq!(
         slot2, "r2",

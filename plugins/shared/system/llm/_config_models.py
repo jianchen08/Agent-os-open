@@ -18,23 +18,88 @@
 from __future__ import annotations
 
 import os
+import re
+from pathlib import Path
 from typing import Any
 
 # 模块级配置存储（由 set_config 注入，进程内单例）
 _config: dict[str, Any] = {}
 
+# 整串 ${VAR} 占位符（ADR §4.3 secrets）
+_ENV_REF_RE = re.compile(r"^\$\{(\w+)\}$")
+
+# .env 文件缓存：(mtime, vars)；set_config 每次注入时按 mtime 决定是否重读
+_env_cache: tuple[float, dict[str, str]] | None = None
+
+
+def _resolve_project_root() -> Path | None:
+    """向上探测项目根（包含 config/models 的目录）。
+
+    sidecar 从 plugins/shared/system/llm/ 运行，向上 4-5 层即项目根；
+    找不到返回 None（保持纯环境变量展开行为，不比原来差）。
+    """
+    here = Path(__file__).resolve()
+    for candidate in here.parents:
+        if (candidate / "config" / "models").is_dir():
+            return candidate
+    return None
+
+
+def _env_file_vars() -> dict[str, str]:
+    """读取项目根 .env（mtime 缓存）。空行/注释跳过。"""
+    global _env_cache  # noqa: PLW0603
+    root = _resolve_project_root()
+    if root is None:
+        return {}
+    env_path = root / ".env"
+    try:
+        mtime = env_path.stat().st_mtime
+    except OSError:
+        return {}
+    if _env_cache and _env_cache[0] == mtime:
+        return _env_cache[1]
+    result: dict[str, str] = {}
+    try:
+        for line in env_path.read_text(encoding="utf-8").splitlines():
+            stripped = line.strip()
+            if not stripped or stripped.startswith("#") or "=" not in stripped:
+                continue
+            key, _, value = stripped.partition("=")
+            result[key.strip()] = value.strip().strip('"')
+    except OSError:
+        return {}
+    _env_cache = (mtime, result)
+    return result
+
 
 def _expand_env_vars(value: Any) -> Any:
-    """递归解析配置值里的 ``${VAR}`` 占位符为进程环境变量值。
+    """递归解析配置值里的 ``${VAR}`` 占位符为真实 key。
 
-    sidecar 子进程继承内核父进程环境（tokio Command 默认行为），
-    所以能拿到 ``.env`` 里 ``API_KEY`` 等变量。解析 ADR §4.3 的
-    secret 占位符（如 ``api_key: ${ZHIPU_API_KEY}``）。未定义的变量
-    展开为空字符串（``expandvars`` 默认行为）。
+    解析顺序：进程环境变量（sidecar 继承内核父进程环境，tokio Command
+    默认行为）→ 项目根 .env 文件兜底。内核只在**启动时**加载一次 .env，
+    用户在设置页填写的 key 会写入 .env 但不进入运行中进程的环境——
+    .env 文件兜底使 sidecar 重启（配置变更触发的热重启）后即可拿到
+    新 key，无需重启内核（ADR §4.3 secrets 的运行时补全）。
+
+    未定义的变量保持 ``${VAR}`` 原样（``expandvars`` 行为），路由构建侧
+    以 ``UNRESOLVED:`` 指纹记日志定位。.env.example 的示例值
+    （``your-`` 开头）同样不视为已配置。
 
     递归处理 dict / list / str 三种类型，其他类型原样返回。
     """
     if isinstance(value, str):
+        m = _ENV_REF_RE.match(value.strip())
+        if m:
+            var = m.group(1)
+            resolved = os.environ.get(var)
+            if resolved is None:
+                resolved = _env_file_vars().get(var)
+            if resolved is None:
+                return value
+            if resolved.startswith("your-"):
+                # .env.example 示例值——视为未配置，保留占位符
+                return value
+            return resolved
         return os.path.expandvars(value)
     if isinstance(value, dict):
         return {k: _expand_env_vars(v) for k, v in value.items()}

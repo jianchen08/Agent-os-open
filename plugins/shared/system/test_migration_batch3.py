@@ -90,7 +90,8 @@ class TestConnectorsMigration:
         assert data["id"] == "connectors_service"
         assert data["plugin_type"] == "system"
         assert data["entry"] == "python server.py"  # 仓库统一约定为 python（85 个 plugin.json 一致）
-        assert len(data["capabilities"]["tools"]) >= 5
+        # D.6 槽位拆分：服务方法声明在 services
+        assert len(data["capabilities"]["services"]) >= 5
 
     def test_server_py_exists(self) -> None:
         """server.py 存在。"""
@@ -185,7 +186,8 @@ class TestSceneMigration:
         assert data["id"] == "scene_service"
         assert data["plugin_type"] == "system"
         assert data["entry"] == "python server.py"  # 仓库统一约定为 python（85 个 plugin.json 一致）
-        assert len(data["capabilities"]["tools"]) >= 5
+        # D.6 槽位拆分：服务方法声明在 services
+        assert len(data["capabilities"]["services"]) >= 5
 
     def test_server_py_exists(self) -> None:
         """server.py 存在。"""
@@ -268,7 +270,7 @@ class TestWorkspaceMigration:
         assert data["id"] == "workspace_service"
         assert data["plugin_type"] == "system"
         assert data["entry"] == "python server.py"  # 仓库统一约定为 python（85 个 plugin.json 一致）
-        assert len(data["capabilities"]["tools"]) >= 3
+        assert len(data["capabilities"]["services"]) >= 3
 
     def test_server_py_exists(self) -> None:
         """server.py 存在。"""

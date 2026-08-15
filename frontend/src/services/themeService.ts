@@ -351,8 +351,8 @@ export function compileThemeVariables(config: ThemeConfig): string {
   vars.push(`--overlay-strong: ${isDarkTheme ? 'rgba(0, 0, 0, 0.8)' : 'rgba(15, 23, 42, 0.78)'}`)
 
   // === Deep Space v2 桥接变量（--ds-*） ===
-  // 历史上组件大量引用 deep-space-v2.css 按 .dark/.light class 定死的
-  // --ds-* 变量，导致非深空主题下这些区域不跟随主题。
+  // 组件大量引用 deep-space-v2.css 的 --ds-* 变量（该文件按 .dark/.light class 定死取值，
+  // 不覆写则非深空主题下这些区域不跟随主题）。
   // 这里以主题内联样式（优先级高于 class 规则）统一覆写整套 --ds-*，
   // 使全部既有引用零改动接入主题系统；引擎未运行时仍回落 CSS 静态定义。
   const c2 = config.colors
@@ -401,7 +401,7 @@ export function compileThemeVariables(config: ThemeConfig): string {
   // === 动画/辉光语义色 ===
   // theme.css 静态定义了 --accent-*（引擎未跑时兜底），tailwind 的
   // border-flow 动画与 glow-running/waiting 工具类引用它们 —— 此处按主题覆写，
-  // 并补齐工具类实际引用的 --shadow-glow-*（此前从未输出，属断线修复）。
+  // 并补齐工具类实际引用的 --shadow-glow-*。
   vars.push(`--accent-running: ${config.colors.status.running}`)
   vars.push(`--accent-waiting: ${config.colors.status.pending}`)
   vars.push(`--accent-success: ${config.colors.status.success}`)
@@ -426,7 +426,7 @@ export function compileThemeVariables(config: ThemeConfig): string {
   }
 
   // === 字号阶梯 ===
-  // 主题 fontSize 此前从未输出（死配置）。这里同时输出两套变量：
+  // fontSize 输出两套变量（Tailwind 工具类引用与语义阶梯）：
   // 1) --text-xs~xl:接管 Tailwind 默认字号工具类，存量页面的 text-xs/sm/base
   //    零改动即跟随主题；行高按 1.5 倍率同步输出，避免字号变大后行距局促。
   // 2) --font-size-caption~page-title:语义阶梯（tailwind.config.js 的

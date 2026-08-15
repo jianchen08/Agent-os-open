@@ -15,8 +15,10 @@ dependencies = [
     "pyyaml>=6.0",
     "pydantic>=2.0",
     "pydantic-settings>=2.0",
-    # MCP Python SDK（modelcontextprotocol/python-sdk），与 Rust 端 rmcp 同源不同实现
-    "mcp>=1.0",
+    # MCP Python SDK v2 稳定线（modelcontextprotocol/python-sdk），承载 sidecar
+    # 传输/协议层；AgentOS 私有扩展（initialize DI/生命周期通知/反向 capability）
+    # 经 middleware 与自定义 notification handler 挂接（见 server.py）
+    "mcp>=2.0,<3",
 ]
 
 [project.optional-dependencies]

@@ -3,13 +3,14 @@
 //! [来源: docs/tasks/task_05_plugin_system.md AC-04-3]
 
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 
-use async_trait::async_trait;
 use agentos_core::traits::{
     CapabilityRegistry, Dependency, DependencyError, DependencyResolver, HttpEndpoint,
     HttpRouteDescriptor, ResourceDescriptor, ToolDescriptor,
 };
 use agentos_core::types::{RouteType, ToolCategory};
+use async_trait::async_trait;
 use parking_lot::RwLock;
 use tracing::info;
 
@@ -61,6 +62,227 @@ impl CapabilityRegistryImpl {
 impl Default for CapabilityRegistryImpl {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+// ── M1：PluginScope + RegistrationGuard（Cordis Fiber DisposableList 的 RAII 化）──
+
+/// per-plugin 注册账本：插件在内核侧的一切注册都以 guard 形式登记在此，
+/// scope 收回（drop 或显式 revoke_all）= 该插件全部注册一次性结构性收回。
+///
+/// 对应 Cordis `Fiber._disposables`（DisposableList）：每个注册自动挂进当前插件
+/// 副作用清单，卸载逆序回收。区别是 Rust 用 Drop 语义做类型系统保证——
+/// "禁用即摘除"不再依赖各注册点各自记得调 unregister。
+pub struct PluginScope {
+    plugin_id: String,
+    guards: parking_lot::Mutex<Vec<agentos_core::traits::RegistrationGuard>>,
+}
+
+impl PluginScope {
+    pub fn new(plugin_id: impl Into<String>) -> Self {
+        Self {
+            plugin_id: plugin_id.into(),
+            guards: parking_lot::Mutex::new(Vec::new()),
+        }
+    }
+
+    pub fn plugin_id(&self) -> &str {
+        &self.plugin_id
+    }
+
+    /// 登记一条注册的撤销 guard。guard 被 track 后所有权归 scope，
+    /// 单条提前注销用 [`Self::revoke_all`] 之外的按需 disarm 不支持
+    /// （单条撤销语义由裸 guard 使用方持有；scope 只做整插件收回）。
+    pub fn track(&self, guard: agentos_core::traits::RegistrationGuard) {
+        self.guards.lock().push(guard);
+    }
+
+    /// 显式收回全部登记（与 drop 等价，供 disable 路径显式调用）。
+    /// 逆序回收（与 Cordis LIFO 语义一致）：后注册的先撤。
+    pub fn revoke_all(&self) {
+        let mut guards = self.guards.lock();
+        while let Some(g) = guards.pop() {
+            drop(g);
+        }
+    }
+
+    /// 已登记的注册条数（测试/诊断用）。
+    pub fn len(&self) -> usize {
+        self.guards.lock().len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.guards.lock().is_empty()
+    }
+}
+
+impl Drop for PluginScope {
+    fn drop(&mut self) {
+        // LIFO 逆序收回（与 revoke_all 一致；guards 字段取空后逐条 drop 触发撤销）。
+        let mut guards = std::mem::take(&mut *self.guards.lock());
+        while let Some(g) = guards.pop() {
+            drop(g);
+        }
+    }
+}
+
+/// 全局插件 scope 表（plugin_id → PluginScope）。
+///
+/// disable/unload 路径调 [`Self::revoke`]：移除并收回该插件全部注册。
+/// 注册路径经 guarded 注册方法自动登记（见 [`CapabilityRegistryImpl`]）。
+#[derive(Default)]
+pub struct PluginScopeRegistry {
+    scopes: RwLock<HashMap<String, Arc<PluginScope>>>,
+}
+
+impl PluginScopeRegistry {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// 取（或建）某插件的 scope。幂等。
+    pub fn scope_of(&self, plugin_id: &str) -> Arc<PluginScope> {
+        if let Some(s) = self.scopes.read().get(plugin_id) {
+            return Arc::clone(s);
+        }
+        let mut w = self.scopes.write();
+        Arc::clone(
+            w.entry(plugin_id.to_string())
+                .or_insert_with(|| Arc::new(PluginScope::new(plugin_id))),
+        )
+    }
+
+    /// 收回某插件的全部注册并移除 scope。不存在则 no-op（幂等）。
+    pub fn revoke(&self, plugin_id: &str) {
+        if let Some(scope) = self.scopes.write().remove(plugin_id) {
+            scope.revoke_all();
+        }
+    }
+
+    /// 当前登记的 scope 数（测试/诊断用）。
+    pub fn len(&self) -> usize {
+        self.scopes.read().len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.scopes.read().is_empty()
+    }
+}
+
+impl CapabilityRegistryImpl {
+    // ── 单条移除（与 unregister_tools / clear_plugin 同族：map + by_plugin 索引）──
+
+    /// 移除单个工具注册（guard revoke 用；与 unregister_tools 同族逻辑，按名单条移除）。
+    fn remove_tool_entry(&self, plugin_id: &str, tool_name: &str) {
+        self.tools.write().remove(tool_name);
+        if let Some(names) = self.tools_by_plugin.write().get_mut(plugin_id) {
+            names.retain(|n| n != tool_name);
+        }
+    }
+
+    /// 移除单个资源注册。
+    fn remove_resource_entry(&self, plugin_id: &str, uri: &str) {
+        self.resources.write().remove(uri);
+        if let Some(uris) = self.resources_by_plugin.write().get_mut(plugin_id) {
+            uris.retain(|u| u != uri);
+        }
+    }
+
+    /// 移除该插件的路由信号声明并重建全局并集。
+    fn remove_route_signals_entry(&self, plugin_id: &str) {
+        let mut by_plugin = self.route_signals_by_plugin.write();
+        by_plugin.remove(plugin_id);
+        let mut sig_set = self.route_signals.write();
+        sig_set.clear();
+        for sigs in by_plugin.values() {
+            for sig in sigs {
+                sig_set.insert(sig.clone());
+            }
+        }
+    }
+
+    /// 移除单条 HTTP 路由注册。
+    fn remove_http_route_entry(&self, plugin_id: &str, path: &str, method: &str) {
+        self.http_routes.write().remove(&RouteKey {
+            path: path.to_string(),
+            method: method.to_string(),
+        });
+        if let Some(keys) = self.http_routes_by_plugin.write().get_mut(plugin_id) {
+            keys.retain(|k| k.path != path || k.method != method);
+        }
+    }
+
+    // ── guarded 注册（M1）：注册 + 返回撤销 guard；语义与对应 register_* 完全一致 ──
+
+    /// 注册工具并返回撤销 guard（revoke = 精确移除该工具注册）。
+    pub fn register_tool_guarded(
+        self: &Arc<Self>,
+        plugin_id: &str,
+        tool: ToolDescriptor,
+    ) -> agentos_core::traits::RegistrationGuard {
+        let name = tool.name.clone();
+        self.register_tool(plugin_id, tool);
+        let weak = Arc::downgrade(self);
+        let pid = plugin_id.to_string();
+        agentos_core::traits::RegistrationGuard::new(move || {
+            if let Some(reg) = weak.upgrade() {
+                reg.remove_tool_entry(&pid, &name);
+            }
+        })
+    }
+
+    /// 注册资源并返回撤销 guard。
+    pub fn register_resource_guarded(
+        self: &Arc<Self>,
+        plugin_id: &str,
+        resource: ResourceDescriptor,
+    ) -> agentos_core::traits::RegistrationGuard {
+        let uri = resource.uri.clone();
+        self.register_resource(plugin_id, resource);
+        let weak = Arc::downgrade(self);
+        let pid = plugin_id.to_string();
+        agentos_core::traits::RegistrationGuard::new(move || {
+            if let Some(reg) = weak.upgrade() {
+                reg.remove_resource_entry(&pid, &uri);
+            }
+        })
+    }
+
+    /// 注册路由信号并返回撤销 guard（该维度按插件整体声明，revoke = 移除整个声明）。
+    pub fn register_route_signals_guarded(
+        self: &Arc<Self>,
+        plugin_id: &str,
+        signals: Vec<RouteType>,
+    ) -> agentos_core::traits::RegistrationGuard {
+        self.register_route_signals(plugin_id, signals);
+        let weak = Arc::downgrade(self);
+        let pid = plugin_id.to_string();
+        agentos_core::traits::RegistrationGuard::new(move || {
+            if let Some(reg) = weak.upgrade() {
+                reg.remove_route_signals_entry(&pid);
+            }
+        })
+    }
+
+    /// 注册 HTTP 路由并返回 (描述符, 撤销 guard)。注册失败（冲突/越界）原样返回 Err。
+    pub fn register_http_route_guarded(
+        self: &Arc<Self>,
+        plugin_id: &str,
+        endpoint: HttpEndpoint,
+    ) -> Result<(HttpRouteDescriptor, agentos_core::traits::RegistrationGuard), String> {
+        let descriptor = self.register_http_route(plugin_id, endpoint)?;
+        let (path, method) = (
+            descriptor.endpoint.path.clone(),
+            descriptor.endpoint.method.clone(),
+        );
+        let weak = Arc::downgrade(self);
+        let pid = plugin_id.to_string();
+        let guard = agentos_core::traits::RegistrationGuard::new(move || {
+            if let Some(reg) = weak.upgrade() {
+                reg.remove_http_route_entry(&pid, &path, &method);
+            }
+        });
+        Ok((descriptor, guard))
     }
 }
 
@@ -138,9 +360,8 @@ impl CapabilityRegistry for CapabilityRegistryImpl {
         let mut sig_set = self.route_signals.write();
         let mut by_plugin = self.route_signals_by_plugin.write();
         by_plugin.insert(plugin_id.to_string(), signals);
-        // 重建全局集合为「所有 plugin 当前 signals 的并集」。旧实现只 insert 不
-        // 移除，重注册或部分卸载后旧 signal 永久残留导致 has_route_signal 永真；
-        // 此处重建保证全局集合始终反映当前并集，多 plugin 共享同一 signal 时
+        // 重建全局集合为「所有 plugin 当前 signals 的并集」，保证重注册或
+        // 部分卸载后不残留旧 signal；多 plugin 共享同一 signal 时
         // 只要还有任一 plugin 持有即保留。
         sig_set.clear();
         for sigs in by_plugin.values() {
@@ -216,7 +437,10 @@ impl CapabilityRegistry for CapabilityRegistryImpl {
         // 第一个 match 的返回（注册期冲突检测保证同模板不重复，故无歧义）。
         routes
             .values()
-            .find(|d| d.endpoint.method.eq_ignore_ascii_case(method) && path_matches_template(&d.endpoint.path, path))
+            .find(|d| {
+                d.endpoint.method.eq_ignore_ascii_case(method)
+                    && path_matches_template(&d.endpoint.path, path)
+            })
             .cloned()
     }
 
@@ -291,7 +515,11 @@ pub(crate) fn path_matches_template(template: &str, incoming: &str) -> bool {
     // 归一化：去尾部斜杠差异，空路径视作 "/"。
     let norm = |s: &str| -> String {
         let t = s.trim_end_matches('/');
-        if t.is_empty() { "/".to_string() } else { t.to_string() }
+        if t.is_empty() {
+            "/".to_string()
+        } else {
+            t.to_string()
+        }
     };
     let template = norm(template);
     let incoming = norm(incoming);
@@ -301,9 +529,9 @@ pub(crate) fn path_matches_template(template: &str, incoming: &str) -> bool {
     let t_segs: Vec<&str> = template.split('/').collect();
     let i_segs: Vec<&str> = incoming.split('/').collect();
     // 段数必须相等（多段通配 {x:path} 例外，见下）。
-    let has_catchall = t_segs.iter().any(|s| {
-        s.starts_with('{') && s.ends_with('}') && s.contains(":path")
-    });
+    let has_catchall = t_segs
+        .iter()
+        .any(|s| s.starts_with('{') && s.ends_with('}') && s.contains(":path"));
     if !has_catchall && t_segs.len() != i_segs.len() {
         return false;
     }
@@ -433,6 +661,38 @@ impl Default for DependencyResolverImpl {
     }
 }
 
+/// 按 manifest.dependencies 对插件列表做静态拓扑排序（M2-static）。
+///
+/// 把 discover 的返回序（HashMap 任意序）变为**显式可证明**的依赖序：
+/// 依赖者后加载（排序后靠后）；tie-break 字典序（resolver 内部保证）。
+/// 依赖环返回 [`DependencyError::Circular`]（含环节点）——启动期 fail-fast，
+/// 与 pipeline `load_and_compile` 的"坏配置拒绝启动"语义一致。
+///
+/// dep 引用了不存在的插件 id 不在本函数职责（optional 依赖由运行时各自兜底）；
+/// 这类 id 会进图但不影响 manifests 内部的相对顺序。
+pub fn sort_manifests_topologically(
+    manifests: &[agentos_core::traits::PluginManifest],
+) -> Result<Vec<agentos_core::traits::PluginManifest>, DependencyError> {
+    use agentos_core::traits::DependencyResolver;
+
+    let resolver = DependencyResolverImpl::new();
+    for m in manifests {
+        for dep in &m.dependencies {
+            resolver.add_dependency(&m.id, dep);
+        }
+    }
+    let order = resolver.resolve()?;
+    let rank: HashMap<&str, usize> = order
+        .iter()
+        .enumerate()
+        .map(|(i, id)| (id.as_str(), i))
+        .collect();
+    let mut sorted = manifests.to_vec();
+    // 图中无 rank 的（被 dep 引用但不在 manifests）不影响排序；manifests 全部有 rank。
+    sorted.sort_by_key(|m| rank.get(m.id.as_str()).copied().unwrap_or(usize::MAX));
+    Ok(sorted)
+}
+
 impl DependencyResolver for DependencyResolverImpl {
     fn add_dependency(&self, plugin_id: &str, dep: &Dependency) {
         self.deps
@@ -463,6 +723,7 @@ mod tests {
             category,
             source: ToolSource::Builtin,
             ui: None,
+            render: None,
         }
     }
 
@@ -664,12 +925,24 @@ mod tests {
     #[test]
     fn test_path_matches_template_single_param() {
         // {model_id} 单段
-        assert!(path_matches_template("/ext/p/models/{model_id}", "/ext/p/models/gpt-4"));
-        assert!(path_matches_template("/ext/p/models/{model_id}", "/ext/p/models/claude-3"));
+        assert!(path_matches_template(
+            "/ext/p/models/{model_id}",
+            "/ext/p/models/gpt-4"
+        ));
+        assert!(path_matches_template(
+            "/ext/p/models/{model_id}",
+            "/ext/p/models/claude-3"
+        ));
         // 单段不跨 /
-        assert!(!path_matches_template("/ext/p/models/{model_id}", "/ext/p/models/a/b"));
+        assert!(!path_matches_template(
+            "/ext/p/models/{model_id}",
+            "/ext/p/models/a/b"
+        ));
         // 段数不符
-        assert!(!path_matches_template("/ext/p/models/{model_id}", "/ext/p/models"));
+        assert!(!path_matches_template(
+            "/ext/p/models/{model_id}",
+            "/ext/p/models"
+        ));
     }
 
     #[test]
@@ -708,7 +981,9 @@ mod tests {
             max_concurrency: None,
             description: None,
         };
-        registry.register_http_route("p", mk("/ext/p/llm", "GET")).unwrap();
+        registry
+            .register_http_route("p", mk("/ext/p/llm", "GET"))
+            .unwrap();
         registry
             .register_http_route("p", mk("/ext/p/models/{model_id}", "PUT"))
             .unwrap();
@@ -719,15 +994,23 @@ mod tests {
         // 精确匹配（快路径）
         assert!(registry.find_http_route("/ext/p/llm", "GET").is_some());
         // 单段 param 匹配
-        let r = registry.find_http_route("/ext/p/models/gpt-4", "PUT").unwrap();
+        let r = registry
+            .find_http_route("/ext/p/models/gpt-4", "PUT")
+            .unwrap();
         assert_eq!(r.endpoint.path, "/ext/p/models/{model_id}");
         // method 不符不匹配
-        assert!(registry.find_http_route("/ext/p/models/gpt-4", "GET").is_none());
+        assert!(registry
+            .find_http_route("/ext/p/models/gpt-4", "GET")
+            .is_none());
         // 多段通配匹配
-        let r2 = registry.find_http_route("/ext/p/generic/a/b/c", "GET").unwrap();
+        let r2 = registry
+            .find_http_route("/ext/p/generic/a/b/c", "GET")
+            .unwrap();
         assert_eq!(r2.endpoint.path, "/ext/p/generic/{config_path:path}");
         // 完全不匹配
-        assert!(registry.find_http_route("/ext/p/nonexistent", "GET").is_none());
+        assert!(registry
+            .find_http_route("/ext/p/nonexistent", "GET")
+            .is_none());
     }
 
     // ── HTTP 路由注册治理（ADR 附录 E.1.3）──
@@ -749,45 +1032,65 @@ mod tests {
     fn test_register_http_route_rejects_path_outside_namespace() {
         // 规则 1：path 必须以 /ext/{plugin_id}/ 为前缀。
         let registry = CapabilityRegistryImpl::new();
-        assert!(registry.register_http_route("p1", mk_ep("/other/foo", "GET")).is_err());
-        assert!(registry.register_http_route("p1", mk_ep("/ext/p2/foo", "GET")).is_err());
+        assert!(registry
+            .register_http_route("p1", mk_ep("/other/foo", "GET"))
+            .is_err());
+        assert!(registry
+            .register_http_route("p1", mk_ep("/ext/p2/foo", "GET"))
+            .is_err());
         // 恰好 /ext/{plugin_id}（无尾斜杠）合法
-        assert!(registry.register_http_route("p1", mk_ep("/ext/p1", "GET")).is_ok());
+        assert!(registry
+            .register_http_route("p1", mk_ep("/ext/p1", "GET"))
+            .is_ok());
     }
 
     #[test]
     fn test_register_http_route_rejects_reserved_segments() {
         // 规则 2：denylist 段 ws / health。
         let registry = CapabilityRegistryImpl::new();
-        assert!(registry.register_http_route("p1", mk_ep("/ext/p1/ws/chat", "GET")).is_err());
-        assert!(registry.register_http_route("p1", mk_ep("/ext/p1/health", "GET")).is_err());
+        assert!(registry
+            .register_http_route("p1", mk_ep("/ext/p1/ws/chat", "GET"))
+            .is_err());
+        assert!(registry
+            .register_http_route("p1", mk_ep("/ext/p1/health", "GET"))
+            .is_err());
     }
 
     #[test]
     fn test_register_http_route_rejects_api_v1_subpath() {
         // 规则 3：denylist 子路径 api/v1。
         let registry = CapabilityRegistryImpl::new();
-        assert!(registry.register_http_route("p1", mk_ep("/ext/p1/api/v1/models", "GET")).is_err());
-        assert!(registry.register_http_route("p1", mk_ep("/api/v1/models", "GET")).is_err());
+        assert!(registry
+            .register_http_route("p1", mk_ep("/ext/p1/api/v1/models", "GET"))
+            .is_err());
+        assert!(registry
+            .register_http_route("p1", mk_ep("/api/v1/models", "GET"))
+            .is_err());
     }
 
     #[test]
     fn test_register_http_route_conflict_fails_closed() {
         // 同 path+method 冲突 → 第二次注册失败（不静默覆盖）。
         let registry = CapabilityRegistryImpl::new();
-        registry.register_http_route("p1", mk_ep("/ext/p1/foo", "GET")).unwrap();
+        registry
+            .register_http_route("p1", mk_ep("/ext/p1/foo", "GET"))
+            .unwrap();
         let err = registry.register_http_route("p1", mk_ep("/ext/p1/foo", "GET"));
         assert!(err.is_err());
         let msg = err.unwrap_err();
         assert!(msg.contains("conflict"), "got: {msg}");
         // 不同 method 不冲突
-        assert!(registry.register_http_route("p1", mk_ep("/ext/p1/foo", "POST")).is_ok());
+        assert!(registry
+            .register_http_route("p1", mk_ep("/ext/p1/foo", "POST"))
+            .is_ok());
     }
 
     #[test]
     fn test_find_http_route_method_case_insensitive() {
         let registry = CapabilityRegistryImpl::new();
-        registry.register_http_route("p1", mk_ep("/ext/p1/llm", "GET")).unwrap();
+        registry
+            .register_http_route("p1", mk_ep("/ext/p1/llm", "GET"))
+            .unwrap();
         assert!(registry.find_http_route("/ext/p1/llm", "get").is_some());
         assert!(registry.find_http_route("/ext/p1/llm", "GeT").is_some());
     }
@@ -795,14 +1098,19 @@ mod tests {
     #[test]
     fn test_clear_plugin_removes_http_routes_and_signals() {
         let registry = CapabilityRegistryImpl::new();
-        registry.register_http_route("p1", mk_ep("/ext/p1/llm", "GET")).unwrap();
+        registry
+            .register_http_route("p1", mk_ep("/ext/p1/llm", "GET"))
+            .unwrap();
         registry.register_route_signals("p1", vec![RouteType::End, RouteType::Wait]);
         assert!(registry.has_route_signal(&RouteType::End));
 
         registry.clear_plugin("p1");
 
         assert!(registry.find_http_route("/ext/p1/llm", "GET").is_none());
-        assert!(!registry.has_route_signal(&RouteType::End), "clear 后 signal 应移除");
+        assert!(
+            !registry.has_route_signal(&RouteType::End),
+            "clear 后 signal 应移除"
+        );
         assert!(!registry.has_route_signal(&RouteType::Wait));
     }
 
@@ -818,8 +1126,224 @@ mod tests {
 
         // plugin_a 重注册为空 → End/Wait 必须消失（union 重建），NextLlm 保留
         registry.register_route_signals("plugin_a", vec![]);
-        assert!(!registry.has_route_signal(&RouteType::End), "重注册后旧 signal 应移除");
+        assert!(
+            !registry.has_route_signal(&RouteType::End),
+            "重注册后旧 signal 应移除"
+        );
         assert!(!registry.has_route_signal(&RouteType::Wait));
         assert!(registry.has_route_signal(&RouteType::NextLlm));
+    }
+
+    // ── M1：PluginScope + RegistrationGuard（P2 验收：disable 后零残留）──
+
+    fn make_http_endpoint(plugin_id: &str, suffix: &str) -> HttpEndpoint {
+        HttpEndpoint {
+            route_id: format!("{}-{}", plugin_id, suffix),
+            method: "GET".to_string(),
+            path: format!("/ext/{}/{}", plugin_id, suffix),
+            auth: "none".to_string(),
+            handler_capability: "http.handle".to_string(),
+            timeout_ms: None,
+            max_concurrency: None,
+            description: None,
+        }
+    }
+
+    /// 四维 guarded 注册 → scope revoke → 全部维度零残留。
+    #[test]
+    fn m1_scope_revoke_leaves_no_residue_in_all_dimensions() {
+        let registry = Arc::new(CapabilityRegistryImpl::new());
+        let scopes = PluginScopeRegistry::new();
+        let pid = "m1_plugin";
+
+        let scope = scopes.scope_of(pid);
+        scope.track(
+            registry
+                .register_tool_guarded(pid, make_tool_descriptor("t1", pid, ToolCategory::System)),
+        );
+        scope.track(
+            registry.register_resource_guarded(pid, make_resource_descriptor("res://m1", pid)),
+        );
+        scope.track(registry.register_route_signals_guarded(pid, vec![RouteType::NextTool]));
+        scope.track(
+            registry
+                .register_http_route_guarded(pid, make_http_endpoint(pid, "cb"))
+                .expect("route should register")
+                .1,
+        );
+
+        // 注册后四维均可见。
+        assert!(registry.get_tool("t1").is_some());
+        assert!(!registry.list_resources().is_empty());
+        assert!(registry.has_route_signal(&RouteType::NextTool));
+        assert!(registry
+            .find_http_route("/ext/m1_plugin/cb", "GET")
+            .is_some());
+
+        // disable 语义：scope revoke → 全部收回。
+        scopes.revoke(pid);
+        assert!(
+            registry.get_tool("t1").is_none(),
+            "tool residue after revoke"
+        );
+        assert!(
+            registry.list_resources().is_empty(),
+            "resource residue after revoke"
+        );
+        assert!(
+            !registry.has_route_signal(&RouteType::NextTool),
+            "signal residue after revoke"
+        );
+        assert!(
+            registry
+                .find_http_route("/ext/m1_plugin/cb", "GET")
+                .is_none(),
+            "http route residue after revoke"
+        );
+        assert!(
+            scopes.is_empty(),
+            "scope table should drop the revoked entry"
+        );
+    }
+
+    /// 单 guard drop 只移除单条注册；其他插件的注册不受影响。
+    #[test]
+    fn m1_single_guard_drop_removes_only_that_registration() {
+        let registry = Arc::new(CapabilityRegistryImpl::new());
+        let guard = registry.register_tool_guarded(
+            "p1",
+            make_tool_descriptor("only_this", "p1", ToolCategory::System),
+        );
+        registry.register_tool(
+            "p2",
+            make_tool_descriptor("keep", "p2", ToolCategory::System),
+        );
+
+        drop(guard);
+        assert!(registry.get_tool("only_this").is_none());
+        assert!(
+            registry.get_tool("keep").is_some(),
+            "other plugin's tool must survive"
+        );
+    }
+
+    /// disarm 放弃撤销：注册保留。
+    #[test]
+    fn m1_disarm_keeps_registration() {
+        let registry = Arc::new(CapabilityRegistryImpl::new());
+        let guard = registry.register_tool_guarded(
+            "p1",
+            make_tool_descriptor("stay", "p1", ToolCategory::System),
+        );
+        guard.disarm();
+        assert!(registry.get_tool("stay").is_some());
+    }
+
+    /// PluginScope drop（不显式 revoke）同样收回——RAII 保证。
+    #[test]
+    fn m1_scope_drop_revokes_like_revoke() {
+        let registry = Arc::new(CapabilityRegistryImpl::new());
+        let scope = PluginScope::new("dropped_plugin");
+        scope.track(registry.register_tool_guarded(
+            "dropped_plugin",
+            make_tool_descriptor("t", "dropped_plugin", ToolCategory::System),
+        ));
+        drop(scope);
+        assert!(registry.get_tool("t").is_none());
+    }
+
+    /// registry 先行 drop 时 guard revoke 静默 no-op（弱引用语义，不 panic）。
+    #[test]
+    fn m1_guard_revoke_after_registry_drop_is_noop() {
+        let registry = Arc::new(CapabilityRegistryImpl::new());
+        let scopes = PluginScopeRegistry::new();
+        scopes.scope_of("p").track(
+            registry
+                .register_tool_guarded("p", make_tool_descriptor("t", "p", ToolCategory::System)),
+        );
+        drop(registry);
+        scopes.revoke("p"); // 不应 panic
+    }
+
+    // ── M2-static：sort_manifests_topologically ──
+
+    fn make_manifest_for_sort(id: &str) -> agentos_core::traits::PluginManifest {
+        use agentos_core::traits::{HostType, PluginManifest, PluginType};
+        PluginManifest {
+            id: id.to_string(),
+            name: format!("P {}", id),
+            version: "1.0.0".to_string(),
+            plugin_type: PluginType::System,
+            pipeline_role: None,
+            language: "python".to_string(),
+            host_type: HostType::Sidecar,
+            entry: "server.py".to_string(),
+            capabilities: Default::default(),
+            dependencies: vec![],
+            permissions: Default::default(),
+            error_policy: Default::default(),
+            priority: 100,
+            granted_capabilities: vec![],
+            mcp: None,
+            lifecycle: None,
+            native: None,
+            requires_content: None,
+            invoke_entry: None,
+            config_files: vec![],
+            http_endpoints: vec![],
+            ui_schema: None,
+            contributes: None,
+            enabled: None,
+            activation: None,
+            provides: None,
+            persistent_fields: vec![],
+        }
+    }
+
+    fn minimal_manifest(id: &str, deps: Vec<(&str, bool)>) -> agentos_core::traits::PluginManifest {
+        let mut m = make_manifest_for_sort(id);
+        m.dependencies = deps
+            .into_iter()
+            .map(|(dep_id, optional)| Dependency {
+                plugin_id: dep_id.to_string(),
+                optional,
+                min_version: None,
+            })
+            .collect();
+        m
+    }
+
+    #[test]
+    fn m2_sort_puts_dependencies_before_dependents() {
+        // 构造乱序输入：依赖者在前的乱序应被排为拓扑序（b → c → a）。
+        let manifests = vec![
+            minimal_manifest("z_depender", vec![("z_base", false)]),
+            minimal_manifest("z_base", vec![]),
+        ];
+        let sorted = sort_manifests_topologically(&manifests).unwrap();
+        let ids: Vec<&str> = sorted.iter().map(|m| m.id.as_str()).collect();
+        assert_eq!(ids, vec!["z_base", "z_depender"]);
+    }
+
+    #[test]
+    fn m2_sort_transitive_chain() {
+        let manifests = vec![
+            minimal_manifest("c", vec![("b", false)]),
+            minimal_manifest("a", vec![]),
+            minimal_manifest("b", vec![("a", false)]),
+        ];
+        let sorted = sort_manifests_topologically(&manifests).unwrap();
+        let ids: Vec<&str> = sorted.iter().map(|m| m.id.as_str()).collect();
+        assert_eq!(ids, vec!["a", "b", "c"]);
+    }
+
+    #[test]
+    fn m2_sort_detects_cycle() {
+        let manifests = vec![
+            minimal_manifest("x", vec![("y", false)]),
+            minimal_manifest("y", vec![("x", false)]),
+        ];
+        let err = sort_manifests_topologically(&manifests).unwrap_err();
+        assert!(matches!(err, DependencyError::Circular { .. }));
     }
 }

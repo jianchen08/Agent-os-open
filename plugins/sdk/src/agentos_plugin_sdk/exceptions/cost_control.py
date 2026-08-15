@@ -32,7 +32,7 @@ class BudgetExceededException(CostControlException):
         limit: int,
         limit_type: str = "task",
         details: dict[str, Any] | None = None,
-    ):
+    ) -> None:
         """初始化预算超限异常
 
         Args:
@@ -66,7 +66,7 @@ class QuotaExhaustedException(CostControlException):
         usage_percent: float,
         quota_type: str = "daily",
         details: dict[str, Any] | None = None,
-    ):
+    ) -> None:
         """初始化配额耗尽异常
 
         Args:

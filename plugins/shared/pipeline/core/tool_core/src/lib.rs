@@ -15,6 +15,7 @@ use serde_json::{json, Value};
 
 mod json_repair;
 mod messages;
+mod output_validate;
 mod types;
 
 use types::{StateKey, ToolCall, ToolResult};
@@ -152,6 +153,22 @@ fn execute_single_tool(tc: &ToolCall, host: Option<&dyn HostServices>, state: &V
         ),
     };
 
+    // output_schema 消费端（task_dsh_plugin_adapter 任务 1）：成功结果按内核注入的
+    // tool_output_contracts 校验，违规 fail-closed 转失败——错误带回 LLM 自我修正，
+    // error_policy=skip 管道继续。放在 tool_result 事件发送前，保证冷热一致
+    // （事件里的 success/error 与持久化 tool_result 同源）。DSH tools/post-execute
+    // 兜底语义的对应实现，见 docs/dsh_hook_translation.md。
+    let mut result = result;
+    if result.success && output_validate::validation_enabled(state) {
+        if let Some(err) = validate_output_contract(state, &tc.name, &result.data) {
+            result = ToolResult::failed(
+                &tc.name,
+                &format!("output_schema validation failed: {err}"),
+                result.duration_ms,
+            );
+        }
+    }
+
     // 发 tool_result 事件。
     emit_tool_event(host, state, "tool_result", tc, Some(&result));
     result
@@ -195,6 +212,21 @@ fn parse_tool_executor_response(tool_name: &str, resp: Value, duration_ms: f64) 
             .unwrap_or("tool execution failed");
         ToolResult::failed(tool_name, error, duration_ms)
     }
+}
+
+/// 取工具输出契约并校验（无契约/无 schema 返回 None = 通过）。
+///
+/// 契约由内核 inject_tool_schemas 注入 state["tool_output_contracts"]
+/// （tool_name → {schema, render}）；render 供前端路由，schema 供本处校验。
+fn validate_output_contract(state: &Value, tool_name: &str, data: &Value) -> Option<String> {
+    let contract = state
+        .get("tool_output_contracts")?
+        .get(tool_name)?;
+    let schema = contract.get("schema")?;
+    if schema.is_null() {
+        return None;
+    }
+    output_validate::validate(schema, data)
 }
 
 /// 收集任务级副作用，写进 state_updates（对齐 plugin.py:965-1017）。
@@ -440,5 +472,40 @@ mod tests {
         let params = build_invoke_params(&tc, &state);
         assert_eq!(params["_call_context"]["call_id"], "");
         assert_eq!(params["_call_context"]["thread_id"], "");
+    }
+
+    /// task_dsh_plugin_adapter 任务 1：声明了 output_schema 的工具，违规数据
+    /// 被 fail-closed 拦截；无契约/开关关闭时放行。
+    #[test]
+    fn test_validate_output_contract_fail_closed() {
+        let state = json!({
+            "tool_output_contracts": {
+                "bash_execute": {
+                    "schema": {
+                        "type": "object",
+                        "properties": {"status": {"type": "string"}},
+                        "required": ["status"]
+                    },
+                    "render": {"card": "terminal"}
+                }
+            }
+        });
+        // 违规：缺 required 字段。
+        let err = validate_output_contract(&state, "bash_execute", &json!({"pid": 1}));
+        assert!(err.unwrap().contains("missing required field `status`"));
+        // 合规放行。
+        assert_eq!(validate_output_contract(&state, "bash_execute", &json!({"status": "completed"})), None);
+        // 未声明契约的工具放行（存量 41 工具零负担）。
+        assert_eq!(validate_output_contract(&state, "file_read", &json!("anything")), None);
+        // 契约存在但 schema 为 null（仅 render）放行。
+        let render_only = json!({"tool_output_contracts": {"x": {"schema": null, "render": {"card": "read"}}}});
+        assert_eq!(validate_output_contract(&render_only, "x", &json!({})), None);
+    }
+
+    /// 校验开关：tool_output_validation == "off" 时整体跳过。
+    #[test]
+    fn test_validation_switch_off() {
+        assert!(!output_validate::validation_enabled(&json!({"tool_output_validation": "off"})));
+        assert!(output_validate::validation_enabled(&json!({})));
     }
 }

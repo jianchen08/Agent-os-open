@@ -333,6 +333,50 @@ def create_thread(
 
 
 @router.get(
+    "/schema",
+    summary="线程创建表单字段 schema（内置 + 插件 contributes.thread_fields 聚合）",
+)
+def thread_schema(_user: dict = Depends(require_auth)) -> dict[str, Any]:
+    """返回线程创建表单的字段级 schema。
+
+    前端新建/编辑会话表单据此渲染：内置字段（标题/意图）+ 各插件贡献的
+    `contributes.thread_fields`（如 isolation 插件贡献 workspace / isolationMode）。
+    插件贡献的字段随线程创建参数写入 thread metadata → 内核 initial_state 的
+    execution_context（会话级工作空间与隔离配置的 UI 来源）。
+    """
+    fields: list[dict[str, Any]] = [
+        {"name": "title", "type": "string", "label": "会话标题", "required": True},
+        {"name": "intent", "type": "string", "label": "意图描述"},
+    ]
+    fields.extend(_collect_plugin_thread_fields())
+    return {"fields": fields}
+
+
+def _collect_plugin_thread_fields() -> list[dict[str, Any]]:
+    """扫描 plugins/shared/system/*/plugin.json 的 contributes.thread_fields。
+
+    插件声明即表单选项来源（0.2 插件贡献协议）：新增字段 = 新增插件声明，
+    内核/前端无需改代码。
+    """
+    import json  # noqa: PLC0415
+
+    base = Path(__file__).resolve().parents[3] / "shared" / "system"
+    out: list[dict[str, Any]] = []
+    if not base.is_dir():
+        return out
+    for p in sorted(base.glob("*/plugin.json")):
+        try:
+            data = json.loads(p.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        contributes = data.get("contributes") or {}
+        fields = contributes.get("thread_fields")
+        if isinstance(fields, list):
+            out.extend(f for f in fields if isinstance(f, dict) and f.get("name"))
+    return out
+
+
+@router.get(
     "/{thread_id}",
     response_model=ThreadResponse,
     summary="获取线程详情",

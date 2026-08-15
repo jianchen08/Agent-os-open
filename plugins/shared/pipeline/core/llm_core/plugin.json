@@ -21,7 +21,18 @@
     "error_policy": "skip",
     "priority": 50,
     "config_files": [
-        {"id": "llm", "path": "config/models/llm.yaml", "label": "LLM 模型配置"},
-        {"id": "embedding", "path": "config/models/embedding.yaml", "label": "向量模型配置"}
-    ]
+        {
+            "id": "llm",
+            "path": "config/models/llm.yaml",
+            "label": "LLM 模型配置"
+        },
+        {
+            "id": "embedding",
+            "path": "config/models/embedding.yaml",
+            "label": "向量模型配置"
+        }
+    ],
+    "lifecycle": {
+        "idle_timeout_secs": 0
+    }
 }

@@ -1,3 +1,4 @@
+/** @feature FP-T12 前端适配 | @ci: frontend-test */
 /**
  * 功能测试：FullscreenOverlay 全屏覆盖层（task_layout_responsive 任务 4）
  *

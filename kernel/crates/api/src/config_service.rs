@@ -55,7 +55,10 @@ const KERNEL_RESERVED_SEGMENTS: &[&str] = &[
 /// # Errors
 /// - [`ConfigError::PathOutsideConfigRoot`]：路径越界或不在 config/ 下。
 /// - [`ConfigError::KernelReservedFile`]：命中 denylist。
-pub fn validate_config_path(project_root: &Path, mapping_path: &str) -> Result<PathBuf, ConfigError> {
+pub fn validate_config_path(
+    project_root: &Path,
+    mapping_path: &str,
+) -> Result<PathBuf, ConfigError> {
     let normalized = mapping_path.replace('\\', "/");
     // 拒绝显式 ../ 越界（即便 canonicalize 也会随后兜底，这里快速失败给出明确错误）
     if normalized.contains("../") {
@@ -102,7 +105,9 @@ fn is_under_config(target: &Path, config_root: &Path) -> bool {
         Ok(c) => c,
         Err(_) => config_root.to_path_buf(),
     };
-    let tgt = target.canonicalize().unwrap_or_else(|_| target.to_path_buf());
+    let tgt = target
+        .canonicalize()
+        .unwrap_or_else(|_| target.to_path_buf());
     tgt.starts_with(&cfg)
 }
 
@@ -196,25 +201,27 @@ pub fn compute_etag(bytes: &[u8]) -> String {
 /// - [`ConfigError::Io`]：写盘失败。
 pub fn atomic_write_yaml(target: &Path, value: &Value) -> Result<(), ConfigError> {
     if let Some(parent) = target.parent() {
-        std::fs::create_dir_all(parent)
-            .map_err(|e| ConfigError::Io {
-                message: format!("create_dir_all {}: {}", parent.display(), e),
-            })?;
+        std::fs::create_dir_all(parent).map_err(|e| ConfigError::Io {
+            message: format!("create_dir_all {}: {}", parent.display(), e),
+        })?;
     }
 
-    let serialized =
-        serde_yaml::to_string(value).map_err(|e| ConfigError::YamlInvalid { detail: e.to_string() })?;
+    let serialized = serde_yaml::to_string(value).map_err(|e| ConfigError::YamlInvalid {
+        detail: e.to_string(),
+    })?;
 
     // B6 round-trip：序列化结果必须可解析回 YAML（防半结构化数据损坏）
-    serde_yaml::from_str::<serde_yaml::Value>(&serialized)
-        .map_err(|e| ConfigError::YamlInvalid { detail: e.to_string() })?;
+    serde_yaml::from_str::<serde_yaml::Value>(&serialized).map_err(|e| {
+        ConfigError::YamlInvalid {
+            detail: e.to_string(),
+        }
+    })?;
 
     // B4 原子写：tmp + os::replace
     let tmp = target.with_extension("yaml.tmp");
-    std::fs::write(&tmp, serialized.as_bytes())
-        .map_err(|e| ConfigError::Io {
-            message: format!("write tmp {}: {}", tmp.display(), e),
-        })?;
+    std::fs::write(&tmp, serialized.as_bytes()).map_err(|e| ConfigError::Io {
+        message: format!("write tmp {}: {}", tmp.display(), e),
+    })?;
     std::fs::rename(&tmp, target).map_err(|e| ConfigError::Io {
         message: format!("replace {}: {}", target.display(), e),
     })?;
@@ -240,7 +247,10 @@ mod tests {
     #[test]
     fn test_mask_secret_value_keeps_env_placeholder() {
         let v = Value::String("${DEEPSEEK_API_KEY}".to_string());
-        assert_eq!(mask_secret_value(&v), Value::String("${DEEPSEEK_API_KEY}".to_string()));
+        assert_eq!(
+            mask_secret_value(&v),
+            Value::String("${DEEPSEEK_API_KEY}".to_string())
+        );
     }
 
     #[test]
@@ -252,8 +262,11 @@ mod tests {
     #[test]
     fn test_validate_rejects_dotdot() {
         let err = validate_config_path(Path::new("/tmp"), "config/../etc/passwd").unwrap_err();
-        assert_eq!(err, ConfigError::PathOutsideConfigRoot {
-            path: "config/../etc/passwd".to_string()
-        });
+        assert_eq!(
+            err,
+            ConfigError::PathOutsideConfigRoot {
+                path: "config/../etc/passwd".to_string()
+            }
+        );
     }
 }

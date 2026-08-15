@@ -1,3 +1,4 @@
+# @feature: FP-MIGR 0.1→0.2迁移（0.1 遗留测试） | @ci: python-plugins-test
 """routes_threads F821 回归测试（TDD）。
 
 回归 Round 3 发现的运行时崩溃：routes_threads.py 引用了未导入的名字

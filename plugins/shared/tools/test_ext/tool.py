@@ -1,9 +1,8 @@
 """
 Playwright 前端测试封装工具
 
-暴露接口：
-- get_tool_definition() -> Tool：工具定义
-- execute(self, inputs: dict) -> ToolExecutionResult：工具执行
+以 Playwright 驱动浏览器执行前端测试：浏览器启动、页面导航、元素交互、
+console 捕获、截图对比，支持 Chromium/Firefox/WebKit。
 """
 
 import json

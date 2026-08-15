@@ -1,8 +1,8 @@
 //! 请求用户解析 + token 编解码（api / db-admin 管理面共用，鉴权单一来源）。
 //!
-//! 从 api/src/auth.rs 迁移（2026-08）：db-admin 独立 crate 后无法依赖 api
-//! （循环依赖），但 `/api/v1/db/*` 与 api 的 `write_surface_auth` 共用同一套
-//! 用户解析逻辑。此处为唯一实现，api::auth 以 `pub use` 再导出保持既有引用不变。
+//! db-admin 独立 crate 后无法依赖 api（循环依赖），但 `/api/v1/db/*` 与 api 的
+//! `write_surface_auth` 共用同一套用户解析逻辑。此处为唯一实现，
+//! api::auth 以 `pub use` 再导出保持既有引用不变。
 //!
 //! Token 格式：base64({type}:{user_id}:{username}:{exp_unix_secs})
 //! DEBT: base64 编码无签名，可被任何人解码伪造。ceiling: 仅限 0.2 开发/演示环境。

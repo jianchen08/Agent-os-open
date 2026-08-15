@@ -63,10 +63,11 @@ pub fn load_agent_config(config_root: &Path, agent_id: &str) -> Result<AgentConf
     let content = std::fs::read_to_string(&path).map_err(|e| ConfigError::Io {
         message: format!("read {} failed: {e}", path.display()),
     })?;
-    let mut cfg: AgentConfig = serde_yaml::from_str(&content).map_err(|e| ConfigError::YamlParse {
-        path: path.to_string_lossy().to_string(),
-        message: e.to_string(),
-    })?;
+    let mut cfg: AgentConfig =
+        serde_yaml::from_str(&content).map_err(|e| ConfigError::YamlParse {
+            path: path.to_string_lossy().to_string(),
+            message: e.to_string(),
+        })?;
     // config_id 缺失时用文件名兜底
     if cfg.config_id.is_empty() {
         cfg.config_id = agent_id.to_string();
@@ -141,7 +142,11 @@ mod tests {
     fn load_agent_config_missing_config_id_falls_back_to_filename() {
         let root = tempfile::tempdir().unwrap();
         // config_id 显式为空串（serde 必填字段，缺字段会解析失败）→ 文件名兜底。
-        write_agent_yaml(root.path(), "agents/plain.yaml", "config_id: ''\nname: Plain\n");
+        write_agent_yaml(
+            root.path(),
+            "agents/plain.yaml",
+            "config_id: ''\nname: Plain\n",
+        );
         let cfg = load_agent_config(root.path(), "plain").unwrap();
         assert_eq!(cfg.config_id, "plain", "config_id 为空时用文件名兜底");
         assert_eq!(cfg.name, "Plain");

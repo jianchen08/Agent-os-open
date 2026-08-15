@@ -262,14 +262,13 @@ python -m pytest tests/suites/plugins/test_multimodal_preprocessor_text.py ...
 python -m pytest tests/suites/memory/test_restart_recompression_guard.py tests/suites/memory/test_e2e_compression.py ...
 ```
 
-**批次 4/5 — 散落测试与功能套件**（走基线锁脚本）：
+**批次 4/5 — 散落测试与功能套件**（随 plugins-coverage 门禁运行，batch 脚本已废弃移除）：
 
 ```bash
-python scripts/check_test_batch_baseline.py --batch 4   # tests/test_*.py + integration + test_external_tools
-python scripts/check_test_batch_baseline.py --batch 5   # tests/suites/ 下未纳入的套件
+python scripts/run_gates.py --filter plugins-coverage   # pytest 全量 + 失败数基线锁
 ```
 
-- 基线锁机制：失败数 > `.github/test-batch-baseline.txt` 的基线 → CI 红（拦截增长）；失败数 ≤ 基线 → CI 绿（允许 pre-existing 持平，鼓励逐步修复后收紧）。
+- 基线锁机制：失败数 > `.github/pytest-failure-baseline.txt` 的基线 → CI 红（拦截增长）；失败数 ≤ 基线 → CI 绿（允许 pre-existing 持平，鼓励逐步修复后收紧）。
 - 每测试 30 秒超时（pytest-timeout `--timeout=30`），防止挂起。
 
 **其他 CI job 覆盖的测试**（不在 test job 内）：

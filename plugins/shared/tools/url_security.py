@@ -1,7 +1,6 @@
 """URL 安全公共 helper（0.2 工具共享层）。
 
-download 与 web_ext 共用的 SSRF 防护原语，0.1 的 download/tool.py 中
-`_is_private_ip` / `_validate_url`（reference/0.1_src 有归档）上提到本层，
+download 与 web_ext 共用的 SSRF 防护原语集中在本层，
 避免两处各自维护内网网段表与 DNS 校验逻辑漂移。
 
 暴露接口：
@@ -20,7 +19,7 @@ import socket
 from urllib.parse import urlparse
 
 # RFC 1918 / loopback / link-local 网段（SSRF 防护）
-_PRIVATE_NETWORKS = [
+_PRIVATE_NETWORKS = (
     ipaddress.ip_network("10.0.0.0/8"),
     ipaddress.ip_network("172.16.0.0/12"),
     ipaddress.ip_network("192.168.0.0/16"),
@@ -29,7 +28,7 @@ _PRIVATE_NETWORKS = [
     ipaddress.ip_network("::1/128"),
     ipaddress.ip_network("fc00::/7"),
     ipaddress.ip_network("fe80::/10"),
-]
+)
 
 
 def is_private_ip(ip_str: str) -> bool:

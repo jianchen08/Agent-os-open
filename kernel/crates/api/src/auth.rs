@@ -36,10 +36,10 @@ const REFRESH_TOKEN_TTL_SECS: u64 = 7 * 24 * 60 * 60; // 7 days
 // 前端 client.ts 仅注入 Bearer 头，不解析 token 内容（已验证 NEED-1），
 // 因此该方案在开发阶段安全。
 pub use agentos_http::auth::{
-    default_users, decode_token, encode_token, extract_bearer_token, find_user_by_credentials,
+    decode_token, default_users, encode_token, extract_bearer_token, find_user_by_credentials,
     find_user_by_id, find_user_by_username, is_access_token, is_token_expired,
     resolve_request_tenant_id, resolve_request_user, resolve_tenant_id_by_user,
-    verify_access_token, BuiltInUser, DEFAULT_TENANT_ID, TokenType, VerifiedUser,
+    verify_access_token, BuiltInUser, TokenType, VerifiedUser, DEFAULT_TENANT_ID,
 };
 
 // ─── 请求 / 响应类型（与前端 types/api.ts 对齐）─────────────────────
@@ -112,12 +112,11 @@ pub async fn login_handler(
     State(state): State<AppState>,
     Json(req): Json<LoginRequest>,
 ) -> Result<Json<TokenResponse>, ApiError> {
-    let user =
-        find_user_by_credentials(state.store.as_ref(), &req.username, &req.password)
-            .await
-            .ok_or_else(|| ApiError::BadRequest {
-                message: "用户名或密码错误".to_string(),
-            })?;
+    let user = find_user_by_credentials(state.store.as_ref(), &req.username, &req.password)
+        .await
+        .ok_or_else(|| ApiError::BadRequest {
+            message: "用户名或密码错误".to_string(),
+        })?;
 
     // 更新最近登录时间（best-effort，失败不影响登录）
     if let Some(store) = state.store.as_ref() {
@@ -383,9 +382,7 @@ mod tests {
     fn verify_access_token_rejects_expired() {
         use base64::Engine;
         let exp = chrono::Utc::now().timestamp() as u64 - 1; // 已过期
-        let payload = format!(
-            "access:00000000-0000-0000-0000-000000000001:admin:{exp}"
-        );
+        let payload = format!("access:00000000-0000-0000-0000-000000000001:admin:{exp}");
         let expired = base64::engine::general_purpose::STANDARD_NO_PAD.encode(payload);
         assert!(verify_access_token(&expired).is_none());
     }
@@ -405,7 +402,10 @@ mod tests {
         let verified = verify_access_token(&token).expect("格式合法的 access token 应通过握手");
         assert_eq!(verified.user_id, "no-such-user-id");
         assert_eq!(verified.username, "ghost");
-        assert_eq!(verified.tenant_id, "", "未知用户的 tenant_id 应为空（dispatch 时解析）");
+        assert_eq!(
+            verified.tenant_id, "",
+            "未知用户的 tenant_id 应为空（dispatch 时解析）"
+        );
     }
 
     // ── login ──
@@ -765,7 +765,10 @@ mod tests {
         assert_eq!(user.user_id, user_id);
         assert_eq!(user.username, "alice");
         // 一用户一租户：tenant_id == user_id
-        assert_eq!(user.tenant_id, user.user_id, "一用户一租户: tenant_id 应等于 user_id");
+        assert_eq!(
+            user.tenant_id, user.user_id,
+            "一用户一租户: tenant_id 应等于 user_id"
+        );
     }
 
     /// 两个不同用户应有不同的 tenant_id（隔离前提）。
@@ -805,7 +808,8 @@ mod tests {
     #[tokio::test]
     async fn test_register_duplicate_username_rejected() {
         let (app, _store) = app_with_store().await;
-        let body = json!({"username": "dave", "password": "dave123", "email": "dave@t.com"}).to_string();
+        let body =
+            json!({"username": "dave", "password": "dave123", "email": "dave@t.com"}).to_string();
 
         // 第一次注册成功
         let resp = app
@@ -823,7 +827,8 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::OK);
 
         // 第二次同名应 400
-        let body2 = json!({"username": "dave", "password": "other", "email": "dave2@t.com"}).to_string();
+        let body2 =
+            json!({"username": "dave", "password": "other", "email": "dave2@t.com"}).to_string();
         let resp2 = app
             .oneshot(
                 Request::builder()
@@ -844,7 +849,8 @@ mod tests {
         let (app, _store) = app_with_store().await;
 
         // 先注册 eve
-        let reg_body = json!({"username": "eve", "password": "eve123", "email": "eve@t.com"}).to_string();
+        let reg_body =
+            json!({"username": "eve", "password": "eve123", "email": "eve@t.com"}).to_string();
         let _ = app
             .clone()
             .oneshot(

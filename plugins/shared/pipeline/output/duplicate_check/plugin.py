@@ -315,6 +315,7 @@ class DuplicateCheckPlugin(IOutputPlugin):
             软提示消息字符串
         """
         template = _HINT_TEMPLATES.get(count, _HINT_TEMPLATES[max(_HINT_TEMPLATES)])
+        # 模板来自 _HINT_TEMPLATES 配置常量的运行时渲染，非静态拼接（f-string 不适用）
         return template.format(count=count, tool=tool_desc)
 
     def _build_tool_call_description(self, ctx: PluginContext) -> str:

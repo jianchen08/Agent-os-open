@@ -1,3 +1,4 @@
+/** @feature FP-T12 前端适配 | @ci: frontend-test */
 /**
  * handleToolProgress 测试（task_observability 任务 2）
  *

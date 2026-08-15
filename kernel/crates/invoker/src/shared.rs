@@ -1,6 +1,6 @@
 //! 三种 host_type 共用的逻辑：config 注入、PluginInput 构造。
 //!
-//! 这些逻辑 sidecar / InProcess / Wasm 都要用，独立成模块避免在 invoker.rs 里
+//! 这些逻辑 sidecar / InProcess 都要用，独立成模块避免在 invoker.rs 里
 //! 堆叠，也确保三种插件拿到一致的配置和输入。
 
 use agentos_core::traits::{PluginLoader, PluginManifest};
@@ -21,7 +21,11 @@ pub async fn injected_config(
     let full_config = match loader.load_config().await {
         Ok(c) => c,
         Err(e) => {
-            if e.code.as_deref().map(|c| c.contains("PARSE")).unwrap_or(false) {
+            if e.code
+                .as_deref()
+                .map(|c| c.contains("PARSE"))
+                .unwrap_or(false)
+            {
                 return Err(PluginError {
                     message: format!("Plugin config parse error: {}", e),
                     code: Some("CONFIG_PARSE_ERROR".to_string()),
@@ -35,7 +39,7 @@ pub async fn injected_config(
     Ok(build_injected_config(&full_config, manifest))
 }
 
-/// 构造带 config_files 注入的 PluginInput JSON（native/wasm/sidecar 统一入口）。
+/// 构造带 config_files 注入的 PluginInput JSON（native/sidecar 统一入口）。
 ///
 /// config 来自 [`injected_config`]（manifest config_files 命名空间合并）。
 pub async fn build_plugin_input(
@@ -118,7 +122,7 @@ mod tests {
             mcp: None,
             lifecycle: None,
             native: None,
-            wasm: None,
+            granted_capabilities: vec![],
             requires_content: None,
             invoke_entry: None,
             config_files,
@@ -200,7 +204,10 @@ mod tests {
     #[test]
     fn resolve_config_path_handles_backslash_and_prefix() {
         let full = json!({"x": {"y": 7}});
-        assert_eq!(resolve_config_path(&full, "config/x/y.yaml"), Some(&json!(7)));
+        assert_eq!(
+            resolve_config_path(&full, "config/x/y.yaml"),
+            Some(&json!(7))
+        );
         assert_eq!(resolve_config_path(&full, "x\\y"), Some(&json!(7)));
         assert_eq!(resolve_config_path(&full, "missing"), None);
     }

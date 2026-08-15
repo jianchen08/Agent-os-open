@@ -1,3 +1,4 @@
+# @feature: FP-0.2.可观测性 可观测性 | @ci: python-coverage
 """monitoring 插件测试 conftest——把插件目录注入 sys.path。
 
 插件位于 plugins/shared/system/monitoring/，内部用平铺 import

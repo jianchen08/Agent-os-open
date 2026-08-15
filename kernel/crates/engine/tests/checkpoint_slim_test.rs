@@ -40,13 +40,13 @@ fn full_state() -> Value {
 fn raw_state_json(store: &SqliteStore, pipeline_id: &str) -> String {
     store
         .with_conn(|c| -> Result<String, rusqlite::Error> {
-            Ok(c.query_row(
+            c.query_row(
                 "SELECT state_json FROM pipeline_checkpoints \
                  WHERE pipeline_id = ?1 AND tenant_id = 'default' \
                  ORDER BY step_no DESC LIMIT 1",
                 rusqlite::params![pipeline_id],
                 |r| r.get::<_, String>(0),
-            )?)
+            )
         })
         .expect("读 pipeline_checkpoints.state_json 应成功")
 }
@@ -139,7 +139,7 @@ async fn legacy_full_checkpoint_load_strips_messages_unconditionally() {
     let legacy = full_state();
     store
         .with_conn(|c| -> Result<usize, rusqlite::Error> {
-            Ok(c.execute(
+            c.execute(
                 "INSERT INTO pipeline_checkpoints \
                  (checkpoint_id, pipeline_id, step_no, state_json, tenant_id, created_at) \
                  VALUES ('cp_p_legacy_1', 'p_legacy', 1, ?1, 'default', ?2)",
@@ -147,7 +147,7 @@ async fn legacy_full_checkpoint_load_strips_messages_unconditionally() {
                     serde_json::to_string(&legacy).unwrap(),
                     chrono::Utc::now().to_rfc3339()
                 ],
-            )?)
+            )
         })
         .expect("塞入旧格式 checkpoint 应成功");
 

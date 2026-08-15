@@ -50,3 +50,36 @@ const installStorage = (prop: 'localStorage' | 'sessionStorage') => {
 }
 installStorage('localStorage')
 installStorage('sessionStorage')
+
+// ---------------------------------------------------------------------------
+// antd 组件在 jsdom 下需要的浏览器 API polyfill
+//
+// matchMedia：antd Grid/useBreakpoint 初始化即调用；ResizeObserver：rc-* 系列
+// （Select/DatePicker/虚拟滚动）挂载时调用。jsdom 均不实现，缺失会导致
+// 引入真 antd 组件的用例（RjsfForm 表单等）直接抛错。
+// ---------------------------------------------------------------------------
+if (typeof window.matchMedia !== 'function') {
+  Object.defineProperty(window, 'matchMedia', {
+    writable: true,
+    value: (query: string) => ({
+      matches: false,
+      media: query,
+      onchange: null,
+      addListener: () => {},
+      removeListener: () => {},
+      addEventListener: () => {},
+      removeEventListener: () => {},
+      dispatchEvent: () => false,
+    }),
+  })
+}
+
+if (typeof globalThis.ResizeObserver !== 'function') {
+  class ResizeObserverStub implements Partial<ResizeObserver> {
+    observe(): void {}
+    unobserve(): void {}
+    disconnect(): void {}
+  }
+  ;(globalThis as unknown as { ResizeObserver: typeof ResizeObserverStub }).ResizeObserver =
+    ResizeObserverStub
+}

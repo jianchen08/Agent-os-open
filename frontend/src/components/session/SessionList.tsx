@@ -276,32 +276,21 @@ const SessionItem = memo<SessionItemProps>(
 
 function formatSessionMeta(session: Session): string {
   const updated = session.updatedAt || session.createdAt
-  let timeLabel = ''
-  if (updated) {
-    try {
-      const d = new Date(updated)
-      if (!Number.isNaN(d.getTime())) {
-        const now = new Date()
-        const sameDay =
-          d.getFullYear() === now.getFullYear() &&
-          d.getMonth() === now.getMonth() &&
-          d.getDate() === now.getDate()
-        timeLabel = sameDay
-          ? `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`
-          : `${d.getMonth() + 1}/${d.getDate()}`
-      }
-    } catch {
-      /* ignore */
-    }
+  if (!updated) return ''
+  try {
+    const d = new Date(updated)
+    if (Number.isNaN(d.getTime())) return ''
+    const now = new Date()
+    const sameDay =
+      d.getFullYear() === now.getFullYear() &&
+      d.getMonth() === now.getMonth() &&
+      d.getDate() === now.getDate()
+    return sameDay
+      ? `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`
+      : `${d.getMonth() + 1}/${d.getDate()}`
+  } catch {
+    return ''
   }
-  const msgCount =
-    typeof (session as { messageCount?: number }).messageCount === 'number'
-      ? (session as { messageCount?: number }).messageCount
-      : undefined
-  if (timeLabel && msgCount !== undefined) return `${timeLabel} · ${msgCount} 条消息`
-  if (timeLabel) return timeLabel
-  if (msgCount !== undefined) return `${msgCount} 条消息`
-  return ''
 }
 
 SessionItem.displayName = 'SessionItem'

@@ -67,9 +67,7 @@ async fn suspend_and_resume_by_request_id() {
         .unwrap();
 
     // 3. 根据 request_id 查找并 resume（模拟 dispatch_interaction_response 的核心逻辑）
-    let found = store
-        .find_suspended_run_by_request_id(request_id)
-        .unwrap();
+    let found = store.find_suspended_run_by_request_id(request_id).unwrap();
     assert!(found.is_some(), "必须能按 request_id 找到 suspended run");
 
     let run_record = found.unwrap();
@@ -83,9 +81,17 @@ async fn suspend_and_resume_by_request_id() {
         .and_then(|v| v.as_str())
         .unwrap_or("main")
         .to_string();
-    let _seq = meta.get("suspend_seq").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
+    let _seq = meta
+        .get("suspend_seq")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0) as u32;
     store
-        .update_run_status(&run_record.run_id, RunStatus::Running, Some(&branch_id), Some(_seq))
+        .update_run_status(
+            &run_record.run_id,
+            RunStatus::Running,
+            Some(&branch_id),
+            Some(_seq),
+        )
         .await
         .unwrap();
 

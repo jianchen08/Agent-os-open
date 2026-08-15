@@ -49,10 +49,9 @@ export function handleToolStart(eventData: any) {
   const msgs = pipelineStore.getState().getMessages(pipelineId)
   const msg = msgs.find((m: any) => m.id === messageId)
   if (!msg) {
-    // ★ 修复：tool_start 到达时消息占位不存在（stream_start 断线丢失/乱序/合并改名未命中），
-    //   自动创建占位符——对齐 handleStreamChunk / handleThinkingStart 的
-    //   "有消息就有占位符" 语义。原实现 `if (!msg) return` 静默丢弃工具调用，
-    //   多轮工具调用中后续轮次的 tool_start 若遇占位丢失，工具卡片不显示。
+    // tool_start 到达时消息占位可能不存在（stream_start 断线丢失/乱序/合并改名未命中），
+    // 自动创建占位符——对齐 handleStreamChunk / handleThinkingStart 的
+    // "有消息就有占位符" 语义：占位缺失时自动补建，任何 tool 事件自愈。
     _debugLogger.warn(
       `[TOOL_START] msg not found, auto-creating placeholder: pipeline=%s msgId=%s tool=%s`,
       pipelineId?.slice(0, 12), messageId?.slice(0, 12), toolName,
@@ -172,10 +171,10 @@ export function handleToolResult(eventData: any) {
   // 通过 call_id 精确匹配 parts[] 中的 tool_call part 并更新
   let partIndex = pipelineStore.getState().findToolCallPartIndex(pipelineId, messageId, callId)
   if (partIndex < 0) {
-    // ★ 修复：tool_result 到达时对应的 tool_call part 不存在（tool_start 事件丢失/乱序，
-    //   或 tool_start 因消息占位缺失被旧实现静默丢弃）。补建 tool_call part 再写入结果，
-    //   对齐 Python bridge_events.py 的 FIXUP 自动补发 tool_start 逻辑（Rust 内核 tool_core
-    //   无 FIXUP，前端兜底）。原实现静默跳过 → 工具结果消息丢失。
+    // tool_result 到达时对应的 tool_call part 可能不存在（tool_start 事件丢失/乱序），
+    // 补建 tool_call part 再写入结果，对齐 Python bridge_events.py 的 FIXUP 自动补发
+    // tool_start 逻辑（Rust 内核 tool_core 无 FIXUP，前端兜底）——占位缺失时自动补建，
+    // 任何 tool 事件自愈。
     const toolName = eventData.tool_name || eventData.data?.tool_name || 'unknown'
     _debugLogger.warn(
       '[TOOL_RESULT] tool_call part not found, FIXUP creating: tool=%s callId=%s msgId=%s',

@@ -208,7 +208,7 @@ class WorkspaceService:
     )
 
     # 文件树递归深度的安全兜底：仅用于防范符号链接环、超深嵌套导致的死循环或栈溢出，
-    # 不再作为用户可见的嵌套层级限制（历史默认值为 5，过浅导致深层目录不显示）。
+    # 不作为用户可见的嵌套层级限制。
     _SCAN_MAX_DEPTH_SAFETY_CAP = 50
 
     def _scan_directory(

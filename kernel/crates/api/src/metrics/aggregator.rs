@@ -356,7 +356,16 @@ impl MetricsAggregator {
         unit: Option<&str>,
         help: Option<&str>,
     ) {
-        self.record_at(now_secs(), plugin_id, name, metric_type, value, labels, unit, help);
+        self.record_at(
+            now_secs(),
+            plugin_id,
+            name,
+            metric_type,
+            value,
+            labels,
+            unit,
+            help,
+        );
     }
 
     /// 记录指标（指定时间戳，测试用）。
@@ -533,7 +542,10 @@ mod tests {
     use super::*;
 
     fn labels(pairs: &[(&str, &str)]) -> Labels {
-        pairs.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect()
+        pairs
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect()
     }
 
     // ── M1 三类型插入 + 查询 ──
@@ -542,8 +554,26 @@ mod tests {
     fn test_counter_accumulates() {
         let agg = MetricsAggregator::new();
         let lbl = labels(&[]);
-        agg.record_at(1000, "p1", "calls", MetricType::Counter, 10.0, &lbl, None, None);
-        agg.record_at(1001, "p1", "calls", MetricType::Counter, 5.0, &lbl, None, None);
+        agg.record_at(
+            1000,
+            "p1",
+            "calls",
+            MetricType::Counter,
+            10.0,
+            &lbl,
+            None,
+            None,
+        );
+        agg.record_at(
+            1001,
+            "p1",
+            "calls",
+            MetricType::Counter,
+            5.0,
+            &lbl,
+            None,
+            None,
+        );
         let views = agg.query_at(1002, Some("p1"), Some("calls"), None, &labels(&[]));
         assert_eq!(views.len(), 1);
         // 两个 1s 桶：1000->10, 1001->5（counter 桶内存累计值）
@@ -558,8 +588,26 @@ mod tests {
         let agg = MetricsAggregator::new();
         let lbl = labels(&[]);
         // 同一 1s 桶内多次记录 → 累加
-        agg.record_at(1000, "p1", "calls", MetricType::Counter, 10.0, &lbl, None, None);
-        agg.record_at(1000, "p1", "calls", MetricType::Counter, 5.0, &lbl, None, None);
+        agg.record_at(
+            1000,
+            "p1",
+            "calls",
+            MetricType::Counter,
+            10.0,
+            &lbl,
+            None,
+            None,
+        );
+        agg.record_at(
+            1000,
+            "p1",
+            "calls",
+            MetricType::Counter,
+            5.0,
+            &lbl,
+            None,
+            None,
+        );
         let views = agg.query_at(1001, Some("p1"), Some("calls"), None, &labels(&[]));
         assert_eq!(views[0].latest, Some(15.0)); // 10 + 5
     }
@@ -568,9 +616,27 @@ mod tests {
     fn test_gauge_overwrites() {
         let agg = MetricsAggregator::new();
         let lbl = labels(&[]);
-        agg.record_at(1000, "p1", "conn", MetricType::Gauge, 10.0, &lbl, None, None);
+        agg.record_at(
+            1000,
+            "p1",
+            "conn",
+            MetricType::Gauge,
+            10.0,
+            &lbl,
+            None,
+            None,
+        );
         agg.record_at(1000, "p1", "conn", MetricType::Gauge, 7.0, &lbl, None, None);
-        agg.record_at(1000, "p1", "conn", MetricType::Gauge, 14.0, &lbl, None, None);
+        agg.record_at(
+            1000,
+            "p1",
+            "conn",
+            MetricType::Gauge,
+            14.0,
+            &lbl,
+            None,
+            None,
+        );
         let views = agg.query_at(1001, Some("p1"), Some("conn"), None, &labels(&[]));
         // gauge 同桶取 avg：(10+7+14)/3 = 10.333
         assert!((views[0].latest.unwrap() - 10.3333).abs() < 0.01);
@@ -580,9 +646,36 @@ mod tests {
     fn test_histogram_buckets() {
         let agg = MetricsAggregator::new();
         let lbl = labels(&[]);
-        agg.record_at(1000, "p1", "lat", MetricType::Histogram, 0.003, &lbl, None, None);
-        agg.record_at(1000, "p1", "lat", MetricType::Histogram, 0.02, &lbl, None, None);
-        agg.record_at(1000, "p1", "lat", MetricType::Histogram, 2.0, &lbl, None, None);
+        agg.record_at(
+            1000,
+            "p1",
+            "lat",
+            MetricType::Histogram,
+            0.003,
+            &lbl,
+            None,
+            None,
+        );
+        agg.record_at(
+            1000,
+            "p1",
+            "lat",
+            MetricType::Histogram,
+            0.02,
+            &lbl,
+            None,
+            None,
+        );
+        agg.record_at(
+            1000,
+            "p1",
+            "lat",
+            MetricType::Histogram,
+            2.0,
+            &lbl,
+            None,
+            None,
+        );
         let views = agg.query_at(1001, Some("p1"), Some("lat"), None, &labels(&[]));
         let h = views[0].histogram.as_ref().unwrap();
         assert_eq!(h.count, 3);
@@ -637,9 +730,15 @@ mod tests {
         agg.rollup_at(now);
         let views = agg.query_at(now, Some("p1"), Some("g"), None, &labels(&[]));
         // tier1 桶已滚动到 tier2；sample 仍可查到（来自 tier2）
-        assert!(!views.is_empty(), "after rollup series should still exist via tier2");
+        assert!(
+            !views.is_empty(),
+            "after rollup series should still exist via tier2"
+        );
         let samples = &views[0].samples;
-        assert!(samples.iter().any(|s| s.value > 0.0), "tier2 bucket should retain value");
+        assert!(
+            samples.iter().any(|s| s.value > 0.0),
+            "tier2 bucket should retain value"
+        );
     }
 
     #[test]
@@ -664,8 +763,26 @@ mod tests {
     #[test]
     fn test_query_filter_by_plugin() {
         let agg = MetricsAggregator::new();
-        agg.record_at(1000, "p1", "m", MetricType::Counter, 1.0, &labels(&[]), None, None);
-        agg.record_at(1000, "p2", "m", MetricType::Counter, 1.0, &labels(&[]), None, None);
+        agg.record_at(
+            1000,
+            "p1",
+            "m",
+            MetricType::Counter,
+            1.0,
+            &labels(&[]),
+            None,
+            None,
+        );
+        agg.record_at(
+            1000,
+            "p2",
+            "m",
+            MetricType::Counter,
+            1.0,
+            &labels(&[]),
+            None,
+            None,
+        );
         let views = agg.query_at(1001, Some("p1"), None, None, &labels(&[]));
         assert_eq!(views.len(), 1);
         assert_eq!(views[0].plugin_id, "p1");
@@ -694,13 +811,7 @@ mod tests {
             None,
             None,
         );
-        let views = agg.query_at(
-            1001,
-            Some("p1"),
-            None,
-            None,
-            &labels(&[("env", "prod")]),
-        );
+        let views = agg.query_at(1001, Some("p1"), None, None, &labels(&[("env", "prod")]));
         assert_eq!(views.len(), 1);
         assert_eq!(views[0].labels.get("env").unwrap(), "prod");
     }
@@ -708,10 +819,34 @@ mod tests {
     #[test]
     fn test_query_window_filter() {
         let agg = MetricsAggregator::new();
-        agg.record_at(1000, "p1", "m", MetricType::Counter, 1.0, &labels(&[]), None, None);
-        agg.record_at(2000, "p1", "m", MetricType::Counter, 1.0, &labels(&[]), None, None);
+        agg.record_at(
+            1000,
+            "p1",
+            "m",
+            MetricType::Counter,
+            1.0,
+            &labels(&[]),
+            None,
+            None,
+        );
+        agg.record_at(
+            2000,
+            "p1",
+            "m",
+            MetricType::Counter,
+            1.0,
+            &labels(&[]),
+            None,
+            None,
+        );
         // now=2010, window=60s → 只看 1950 之后的
-        let views = agg.query_at(2010, Some("p1"), Some("m"), Some(Duration::from_secs(60)), &labels(&[]));
+        let views = agg.query_at(
+            2010,
+            Some("p1"),
+            Some("m"),
+            Some(Duration::from_secs(60)),
+            &labels(&[]),
+        );
         assert_eq!(views.len(), 1);
         assert_eq!(views[0].samples.len(), 1);
         assert_eq!(views[0].samples[0].ts, 2000);

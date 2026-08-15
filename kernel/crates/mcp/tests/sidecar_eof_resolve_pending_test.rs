@@ -62,14 +62,11 @@ async fn test_send_request_fails_fast_on_sidecar_eof() {
     tokio::time::sleep(Duration::from_millis(500)).await;
 
     // initialize 应在 5s 内快速失败（Ok(Err)），而非超时（Err）——那等于 120s 卡死。
-    let result =
-        tokio::time::timeout(Duration::from_secs(5), client.initialize(&json!({}))).await;
+    let result = tokio::time::timeout(Duration::from_secs(5), client.initialize(&json!({}))).await;
 
     match result {
         Err(_) => {
-            panic!(
-                "sidecar EOF 后 initialize 未快速失败：5s 内未返回（复现 120s 卡死）"
-            )
+            panic!("sidecar EOF 后 initialize 未快速失败：5s 内未返回（复现 120s 卡死）")
         }
         Ok(Err(_)) => {
             // 快速失败，符合预期：sidecar 崩溃应立刻报错，不阻塞调用方

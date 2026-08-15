@@ -1,3 +1,4 @@
+/** @feature FP-T12 前端适配 | @ci: frontend-test */
 /**
  * handleTerminationStatus 测试（task_observability 1c）
  *

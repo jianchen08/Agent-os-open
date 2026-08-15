@@ -43,9 +43,20 @@ def parse_vitest_failures(output: str) -> int:
 
 
 def parse_eslint_errors(output: str) -> int:
-    """从 ESLint 输出文本解析 error 数。匹配 "✖ 853 problems (33 errors, 820 warnings)"。"""
+    """从 ESLint 输出文本解析 error 数。匹配 "✖ 853 problems (33 errors, 820 warnings)"。
+
+    无 "problems" 汇总行 = 0 error（干净通过）；有汇总行但正则不命中 = 输出异常，
+    抛错而非静默返回 0（与 parse_vitest_failures 同口径，避免基线锁误判）。
+    """
     m = re.search(r"\((\d+)\s+errors?,", output)
-    return int(m.group(1)) if m else 0
+    if m:
+        return int(m.group(1))
+    if "problems" in output:
+        print("⚠️ ESLint 输出含 problems 汇总但无法解析 error 数")
+        print("原始输出尾部：")
+        print(output[-1500:])
+        raise RuntimeError("ESLint 输出格式异常，无法解析 error 数")
+    return 0
 
 
 def count_vitest_failures() -> int:
@@ -76,7 +87,7 @@ def read_baseline() -> tuple[int, int]:
     """读取基线文件，返回 (vitest_failures, eslint_errors)。"""
     if not BASELINE_FILE.exists():
         return (0, 0)
-    lines = BASELINE_FILE.read_text().strip().split("\n")
+    lines = BASELINE_FILE.read_text(encoding="utf-8").strip().split("\n")
     vitest = eslint = 0
     for line in lines:
         if line.startswith("vitest_failures="):
@@ -91,7 +102,8 @@ def write_baseline(vitest: int, eslint: int) -> None:
     BASELINE_FILE.write_text(
         f"# 前端测试基线（只许减不许增，见 scripts/check_frontend_baseline.py）\n"
         f"vitest_failures={vitest}\n"
-        f"eslint_errors={eslint}\n"
+        f"eslint_errors={eslint}\n",
+        encoding="utf-8",
     )
 
 

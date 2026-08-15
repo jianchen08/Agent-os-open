@@ -17,6 +17,34 @@ interface ThreadListResponse {
   total?: number
 }
 
+/** 线程创建表单字段（插件 contributes.thread_fields 聚合声明） */
+export interface ThreadField {
+  /** 字段名（提交参数名） */
+  name: string
+  /** 字段类型：string/textarea/number/select/multiselect */
+  type: string
+  /** 展示标签 */
+  label?: string
+  /** 是否必填 */
+  required?: boolean
+  /** select 选项 */
+  options?: Array<{ label: string; value: string }>
+  /** 描述/占位提示 */
+  description?: string
+}
+
+/** 获取线程创建表单字段 schema（内置 + 插件贡献聚合） */
+export async function getThreadSchema(
+  retryOptions: RetryOptions = {},
+): Promise<ThreadField[]> {
+  return requestWithRetry(async () => {
+    const response = await apiClient.get<{ fields: ThreadField[] }>(
+      API_ENDPOINTS.SESSIONS.SCHEMA,
+    )
+    return Array.isArray(response.data?.fields) ? response.data.fields : []
+  }, retryOptions)
+}
+
 /** 后端线程创建请求类型 */
 interface ThreadCreateRequest {
   /** 线程标题（可选） */
@@ -450,10 +478,14 @@ export interface CreateSessionOptions {
   title?: string
   /** 绑定的 Agent ID（可选） */
   agentId?: string
-  /** 会话工作空间绝对路径（项目目录） */
+  /** 会话工作空间绝对路径（项目目录；空 = 默认目录自动生成） */
   workspace?: string
-  /** 会话隔离模式：isolated（容器）/ non_isolated（宿主+审批） */
+  /** 会话工作空间拓扑：worktree（默认）/ plain */
+  workspaceMode?: 'worktree' | 'plain'
+  /** 会话隔离模式：isolated（容器）/ non_isolated（宿主） */
   isolationMode?: 'isolated' | 'non_isolated'
+  /** 插件贡献字段的通用值（透传 metadata，供 execution_context 消费） */
+  extra?: Record<string, string>
 }
 
 export async function createSession(
@@ -472,12 +504,25 @@ export async function createSession(
       requestData.agent_id = options.agentId
     }
 
-    if (options.workspace !== undefined) {
-      requestData.workspace = options.workspace
+    // 工作空间/拓扑/隔离随 metadata 落库（内核 create_session 只持久化 metadata，
+    // initial_state 组装 execution_context 时从 metadata 读取——顶层字段无消费者）。
+    // 拓扑/隔离不依赖工作空间填写：未填空间时默认目录自动生成后同样生效。
+    const sessionCtx: Record<string, string> = {}
+    if (options.workspace !== undefined && options.workspace !== '') {
+      sessionCtx.workspace = options.workspace
     }
-
+    if (options.workspaceMode !== undefined) {
+      sessionCtx.workspace_mode = options.workspaceMode
+    }
     if (options.isolationMode !== undefined) {
-      requestData.isolation_mode = options.isolationMode
+      sessionCtx.isolation_mode = options.isolationMode
+    }
+    if (Object.keys(sessionCtx).length > 0 || (options.extra && Object.keys(options.extra).length > 0)) {
+      requestData.metadata = {
+        ...(requestData.metadata || {}),
+        ...sessionCtx,
+        ...(options.extra || {}),
+      }
     }
 
     const response = await apiClient.post<ThreadCreateResponse>(

@@ -20,5 +20,8 @@
     "dependencies": [],
     "permissions": {},
     "error_policy": "skip",
-    "priority": 50
+    "priority": 50,
+    "lifecycle": {
+        "idle_timeout_secs": 0
+    }
 }

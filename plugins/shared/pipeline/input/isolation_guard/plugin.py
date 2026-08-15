@@ -182,8 +182,16 @@ class IsolationGuard(IInputPlugin):
 
         # 给每个 context 注入任务级隔离标志：isolation_level 是隔离的唯一真相源，
         # 隔离任务（isolated/None/空）的所有工具一律放行，不弹审批。
+        # 0.2 薄化：优先读 execution_context.isolation.level（init 体解析），
+        # task metadata 仅作兼容兜底（不再每次工具调用查 task_service 为主）。
+        ec = ctx.state.get("execution_context") if isinstance(ctx.state, dict) else None
+        ec_iso = (
+            ec.get("isolation", {}).get("level")
+            if isinstance(ec, dict) and isinstance(ec.get("isolation"), dict)
+            else None
+        )
         task_metadata = self._get_task_metadata(ctx)
-        task_isolated = (task_metadata.get("isolation_level") or "isolated") == "isolated"
+        task_isolated = (ec_iso or task_metadata.get("isolation_level") or "isolated") == "isolated"
         for context in execution_contexts:
             context["task_isolated"] = task_isolated
 
@@ -231,11 +239,22 @@ class IsolationGuard(IInputPlugin):
         Returns:
             执行上下文字典，包含 provider、level、tool_name、workspace 等信息
         """
+        # 隔离与工作空间的运行时真相源（0.2 薄化）：
+        # - execution_context.isolation.level（init 体 environment_lifecycle 解析）
+        #   > task metadata.isolation_level（0.1 兼容兜底）
+        # - state.workspace（init 体 workspace_lifecycle 解析）> task metadata.workspace
+        ec = ctx.state.get("execution_context") if isinstance(ctx.state, dict) else None
+        ec_iso = (
+            ec.get("isolation", {}).get("level")
+            if isinstance(ec, dict) and isinstance(ec.get("isolation"), dict)
+            else None
+        )
+        state_workspace = ctx.state.get("workspace") if isinstance(ctx.state, dict) else None
         task_metadata = self._get_task_metadata(ctx)
         # isolation_level 是隔离的唯一真相源：None/空 = 默认隔离（isolated），
         # 只有显式 non_isolated 才表示非隔离。归一化后下游决策统一。
-        metadata_isolation = task_metadata.get("isolation_level") or "isolated"
-        metadata_workspace = task_metadata.get("workspace")
+        metadata_isolation = ec_iso or task_metadata.get("isolation_level") or "isolated"
+        metadata_workspace = state_workspace or task_metadata.get("workspace")
 
         # 先解析工具级 policy，作为决策基础
         policy = self._decider.resolve(tool_name)

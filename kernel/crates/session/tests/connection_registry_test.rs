@@ -94,10 +94,7 @@ async fn unregister_removes_connection() {
     registry.register("user-A", sink.clone());
 
     registry.unregister("user-A", sink.id());
-    assert!(
-        registry.get_by_user("user-A").is_none(),
-        "注销后应查不到"
-    );
+    assert!(registry.get_by_user("user-A").is_none(), "注销后应查不到");
 }
 
 #[tokio::test]
@@ -114,7 +111,9 @@ async fn unregister_skips_when_current_is_newer() {
     registry.unregister("user-A", old_sink.id());
 
     // 新连接应仍在
-    let current = registry.get_by_user("user-A").expect("新连接不应被旧连接的注销误删");
+    let current = registry
+        .get_by_user("user-A")
+        .expect("新连接不应被旧连接的注销误删");
     assert_eq!(current.id(), new_sink.id());
 }
 

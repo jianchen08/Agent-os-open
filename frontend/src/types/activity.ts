@@ -43,6 +43,13 @@ export type DetailContentType =
   | 'image' // 图片（path 有效，点击灯箱预览）
   | 'link' // 链接（url 有效，点击外部打开）
   | 'log' // 日志流（等宽滚动区，吸底滚动+滚动锁）
+  // DSH vendor 卡（task_dsh_plugin_adapter 任务 3）：render 意图路由产物，
+  // dshProps 携带 vendor 组件 props（frontend/src/components/vendor/dsh/）。
+  | 'dsh:diff' // DiffBlock（{diffs: {path, oldText, newText}[]}）
+  | 'dsh:read' // ReadBlock（{label, lines, totalLines, lang}）
+  | 'dsh:web' // WebBlock（{kind: search|fetch, ...}）
+  | 'dsh:search' // SearchBlock（{kind: matches|paths, ...}）
+  | 'dsh:terminal' // TerminalBlock（{command, cwd, output, exitCode, running}）
 
 /**
  * 活动操作类型
@@ -82,6 +89,8 @@ export interface ActivityDetailBlock {
   path?: string
   /** 链接地址（仅 contentType='link' 时有效） */
   url?: string
+  /** DSH vendor 卡 props（仅 contentType='dsh:*' 时有效，结构见 dshRenderIntent.ts 各 payload 构造器） */
+  dshProps?: Record<string, unknown>
 }
 
 /**

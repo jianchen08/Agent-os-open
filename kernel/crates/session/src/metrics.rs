@@ -48,7 +48,9 @@ impl SessionMetrics {
         // 用 fetch_sub + saturating，避免下溢
         let _ = self
             .connections
-            .fetch_update(SeqCst::Relaxed, SeqCst::Relaxed, |v| Some(v.saturating_sub(1)));
+            .fetch_update(SeqCst::Relaxed, SeqCst::Relaxed, |v| {
+                Some(v.saturating_sub(1))
+            });
     }
 
     /// 直接设置活跃连接数（registry 调，反映真实连接表大小）。

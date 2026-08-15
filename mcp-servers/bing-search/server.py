@@ -14,6 +14,7 @@ from __future__ import annotations
 import json
 import re
 import sys
+import urllib.parse
 import urllib.request
 from html import unescape
 from typing import Any

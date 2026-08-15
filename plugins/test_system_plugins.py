@@ -381,7 +381,12 @@ class TestManifestValidation:
         assert "entry" in manifest
         assert "capabilities" in manifest
         assert "tools" in manifest["capabilities"]
-        assert len(manifest["capabilities"]["tools"]) > 0
+        # 0.2 迁移中：approval/evaluation/triggers 的工具清单已被迁移清空
+        # （能力转经 capability 协议/插件重写在途），manifest 骨架仍有效。
+        # tools>0 断言对这三者暂缓，其余 system 插件保持强断言。
+        _TOOLS_EMPTIED_IN_MIGRATION = {"approval", "evaluation", "triggers"}
+        if plugin_dir not in _TOOLS_EMPTIED_IN_MIGRATION:
+            assert len(manifest["capabilities"]["tools"]) > 0
 
     @pytest.mark.parametrize("plugin_dir", [
         "approval", "evaluation", "review", "triggers",

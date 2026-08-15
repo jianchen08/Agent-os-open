@@ -95,7 +95,7 @@ def _add_console_handler(
     formatter: logging.Formatter,
     level: int,
 ) -> None:
-    """添加 stdout handler。"""
+    """添加 stderr console handler（stdout 保留给 JSON-RPC 协议输出）。"""
     handler = logging.StreamHandler()
     handler.setFormatter(formatter)
     handler.setLevel(level)

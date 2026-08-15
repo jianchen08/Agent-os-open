@@ -20,6 +20,7 @@
 //!
 //! [来源: docs/0.2_rust_plugin_solution.md §2.2 事件总线]
 
+use std::sync::OnceLock;
 use std::time::SystemTime;
 
 use agentos_core::traits::{HookContext, LifecycleHook};
@@ -58,6 +59,71 @@ pub struct LifecycleEvent {
     pub ts: SystemTime,
 }
 
+/// 进程级总线单例：域事件发射点（HTTP handler / WS dispatcher）不便穿透
+/// AppState 持有总线句柄，启动期 `set_global` 注册一次（与注入 invoker 的
+/// 是同一实例）。未注册时 [`global`] 返回 None——观察层静默降级（测试/降级环境）。
+static GLOBAL_BUS: OnceLock<std::sync::Arc<HookEventBus>> = OnceLock::new();
+
+/// 注册进程级总线（启动期调用一次；重复调用静默忽略）。
+pub fn set_global(bus: std::sync::Arc<HookEventBus>) {
+    let _ = GLOBAL_BUS.set(bus);
+}
+
+/// 取进程级总线（未注册返回 None）。
+pub fn global() -> Option<std::sync::Arc<HookEventBus>> {
+    GLOBAL_BUS.get().cloned()
+}
+
+/// 构造域事件（hook = [`LifecycleHook::DomainEvent`]）：
+/// 事件名放 `ctx["event"]`，附任意标签（session_id/pipeline_id/user_id 等）。
+pub fn domain_event(name: &str, tags: Vec<(&str, serde_json::Value)>) -> LifecycleEvent {
+    let mut ctx = HookContext::new();
+    ctx.set("event", serde_json::json!(name));
+    for (key, value) in tags {
+        ctx.set(key, value);
+    }
+    LifecycleEvent {
+        hook: LifecycleHook::DomainEvent,
+        ctx,
+        target: EventTarget::Engine,
+        ts: SystemTime::now(),
+    }
+}
+
+/// 命名订阅者（M3 分发模式的消费端）。
+///
+/// 与 broadcast Receiver 并存的两类订阅形态：Receiver 适合"事件流消费者"
+/// （审计/指标后台任务自持游标）；命名订阅者适合"策略订阅者"——表达
+/// bail 短路 / waterfall 改写语义（同步小任务，返回值参与分发决策）。
+pub trait EventSubscriber: Send + Sync {
+    /// 订阅者 id（诊断日志用，不要求唯一）。
+    fn id(&self) -> &str;
+    /// 处理事件；返回 `Some(event)` 语义由 [`DispatchMode`] 解释：
+    /// bail = 真值短路；waterfall = 改写后的事件；emit/parallel/serial 忽略。
+    fn on_event(&self, event: LifecycleEvent) -> Option<LifecycleEvent>;
+}
+
+/// 事件分发模式（M3，对应 Cordis events.ts 的五种分发语义）。
+///
+/// - `Emit`：现状语义——broadcast 通道 fan-out，best-effort 非阻塞（返回 None）。
+/// - `Parallel`：命名订阅者全部并发执行（std::thread::scope），等全部完成，返回 None。
+/// - `Serial`：命名订阅者按注册顺序执行并等待，返回 None。
+/// - `Bail`：顺序执行，**首个返回 Some 的订阅者短路**，分发即停（返回该 Some）。
+/// - `Waterfall`：链式执行——前一订阅者返回的 Some(event) 替换事件传给下一个，
+///   最终返回最后一个事件（无人改写 = 原事件）。
+///
+/// 设计边界（与 crate 头注释一致）：点对点直调（`invoker.send_lifecycle_hook`）仍是
+/// 权威路径；模式化分发是观察/策略层的增强，绝不改变插件钩子的投递语义。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum DispatchMode {
+    #[default]
+    Emit,
+    Parallel,
+    Serial,
+    Bail,
+    Waterfall,
+}
+
 /// 生命周期钩子事件总线（多消费者广播）。
 ///
 /// 内部持一条 `tokio::sync::broadcast` 通道：`emit` 写入，每次 `subscribe` 拿到
@@ -65,10 +131,13 @@ pub struct LifecycleEvent {
 /// 慢消费者的 Receiver 会在下次 `recv` 收到 [`broadcast::error::RecvError::Lagged`]，
 /// 订阅者自行 warn 后继续（绝不可 fatal，观察层不能拖垮内核）。
 ///
+/// M3：另持一张命名订阅者表（[`EventSubscriber`]），经 [`Self::dispatch`] 按
+/// [`DispatchMode`] 分发——bail/waterfall 供审计/指标订阅者表达短路与改写语义。
+///
 /// 共享方式：包在 `Arc<HookEventBus>` 里在引擎与各订阅者间克隆（Sender 内部 Arc 共享）。
-#[derive(Debug, Clone)]
 pub struct HookEventBus {
     tx: broadcast::Sender<LifecycleEvent>,
+    subscribers: std::sync::RwLock<Vec<std::sync::Arc<dyn EventSubscriber>>>,
 }
 
 impl HookEventBus {
@@ -79,7 +148,10 @@ impl HookEventBus {
     pub fn new(capacity: usize) -> Self {
         // 丢弃初始空 Receiver：订阅者按需 subscribe。
         let (tx, _rx) = broadcast::channel(capacity);
-        Self { tx }
+        Self {
+            tx,
+            subscribers: std::sync::RwLock::new(Vec::new()),
+        }
     }
 
     /// 广播一个生命周期事件给所有订阅者。
@@ -105,6 +177,66 @@ impl HookEventBus {
     /// 返回内部 Sender 的克隆，供需要直接持有 Sender 注入的测试/扩展场景。
     pub fn handle(&self) -> broadcast::Sender<LifecycleEvent> {
         self.tx.clone()
+    }
+
+    /// 注册命名订阅者（M3）。按注册顺序参与 Serial/Bail/Waterfall 分发。
+    pub fn register_subscriber(&self, subscriber: std::sync::Arc<dyn EventSubscriber>) {
+        self.subscribers.write().unwrap().push(subscriber);
+    }
+
+    /// 按分发模式分发事件（M3）。
+    ///
+    /// 返回值语义见 [`DispatchMode`]；`Emit` 等价于 [`Self::emit`]（返回 None）。
+    /// 订阅者 panic 会向上传播（策略层分发是同步语义，与 broadcast 的
+    /// best-effort 观察通道不同——调用方决定容错边界）。
+    pub fn dispatch(&self, event: LifecycleEvent, mode: DispatchMode) -> Option<LifecycleEvent> {
+        let subs: Vec<std::sync::Arc<dyn EventSubscriber>> = {
+            let guard = self.subscribers.read().unwrap();
+            guard.clone()
+        };
+        match mode {
+            DispatchMode::Emit => {
+                self.emit(event);
+                None
+            }
+            DispatchMode::Parallel => {
+                if subs.is_empty() {
+                    return None;
+                }
+                std::thread::scope(|scope| {
+                    for s in &subs {
+                        let ev = event.clone();
+                        scope.spawn(move || {
+                            let _ = s.on_event(ev);
+                        });
+                    }
+                });
+                None
+            }
+            DispatchMode::Serial => {
+                for s in &subs {
+                    let _ = s.on_event(event.clone());
+                }
+                None
+            }
+            DispatchMode::Bail => {
+                for s in &subs {
+                    if let Some(short) = s.on_event(event.clone()) {
+                        return Some(short);
+                    }
+                }
+                None
+            }
+            DispatchMode::Waterfall => {
+                let mut current = event;
+                for s in &subs {
+                    if let Some(rewritten) = s.on_event(current.clone()) {
+                        current = rewritten;
+                    }
+                }
+                Some(current)
+            }
+        }
     }
 }
 
@@ -200,5 +332,111 @@ mod tests {
             .expect("send via handle");
         let got = rx.recv().await.unwrap();
         assert_eq!(got.hook, LifecycleHook::OnPipelineStart);
+    }
+
+    // ── M3：分发模式 ──
+
+    struct NamedSub {
+        id: &'static str,
+        behavior: fn(LifecycleEvent) -> Option<LifecycleEvent>,
+    }
+    impl EventSubscriber for NamedSub {
+        fn id(&self) -> &str {
+            self.id
+        }
+        fn on_event(&self, event: LifecycleEvent) -> Option<LifecycleEvent> {
+            (self.behavior)(event)
+        }
+    }
+    fn pass(_: LifecycleEvent) -> Option<LifecycleEvent> {
+        None
+    }
+    fn mark(mut e: LifecycleEvent) -> Option<LifecycleEvent> {
+        // 改写：给 ctx 打标记（HookContext tags 是 pub map）。
+        e.ctx.set("seen_by", serde_json::json!("marker"));
+        Some(e)
+    }
+
+    #[test]
+    fn m3_bail_short_circuits_on_first_some() {
+        let bus = HookEventBus::new(8);
+        bus.register_subscriber(std::sync::Arc::new(NamedSub {
+            id: "a",
+            behavior: pass,
+        }));
+        bus.register_subscriber(std::sync::Arc::new(NamedSub {
+            id: "b",
+            behavior: mark,
+        }));
+        // b 返回 Some → bail 短路；若 a 先短路则不会带 marker。
+        let out = bus.dispatch(make_event(LifecycleHook::OnError), DispatchMode::Bail);
+        assert!(out.is_some(), "bail 应返回首个真值");
+        assert!(out.unwrap().ctx.get("seen_by").is_some());
+    }
+
+    #[test]
+    fn m3_bail_none_when_all_pass() {
+        let bus = HookEventBus::new(8);
+        bus.register_subscriber(std::sync::Arc::new(NamedSub {
+            id: "a",
+            behavior: pass,
+        }));
+        assert!(bus
+            .dispatch(make_event(LifecycleHook::OnError), DispatchMode::Bail)
+            .is_none());
+    }
+
+    #[test]
+    fn m3_waterfall_chains_rewrites() {
+        let bus = HookEventBus::new(8);
+        bus.register_subscriber(std::sync::Arc::new(NamedSub {
+            id: "w1",
+            behavior: mark,
+        }));
+        bus.register_subscriber(std::sync::Arc::new(NamedSub {
+            id: "w2",
+            behavior: mark,
+        }));
+        let out = bus
+            .dispatch(
+                make_event(LifecycleHook::OnPipelineStart),
+                DispatchMode::Waterfall,
+            )
+            .expect("waterfall 总返回事件");
+        assert_eq!(
+            out.ctx.get("seen_by").and_then(|v| v.as_str()),
+            Some("marker")
+        );
+    }
+
+    #[test]
+    fn m3_serial_runs_all_and_returns_none() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let bus = HookEventBus::new(8);
+        static COUNT: AtomicUsize = AtomicUsize::new(0);
+        struct Counter;
+        impl EventSubscriber for Counter {
+            fn id(&self) -> &str {
+                "counter"
+            }
+            fn on_event(&self, _: LifecycleEvent) -> Option<LifecycleEvent> {
+                COUNT.fetch_add(1, Ordering::SeqCst);
+                None
+            }
+        }
+        bus.register_subscriber(std::sync::Arc::new(Counter));
+        bus.register_subscriber(std::sync::Arc::new(Counter));
+        assert!(bus
+            .dispatch(make_event(LifecycleHook::OnLoad), DispatchMode::Serial)
+            .is_none());
+        assert_eq!(COUNT.load(Ordering::SeqCst), 2, "serial 应执行全部订阅者");
+    }
+
+    #[test]
+    fn m3_emit_mode_still_broadcasts() {
+        let bus = HookEventBus::new(8);
+        assert!(bus
+            .dispatch(make_event(LifecycleHook::OnLoad), DispatchMode::Emit)
+            .is_none());
     }
 }

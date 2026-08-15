@@ -11,8 +11,8 @@ use std::sync::{Arc, Mutex};
 
 use agentos_core::traits::{MessageQueryOpts, PluginInvoker, StorageBackend};
 use agentos_core::types::{
-    Branch, LoopBody, LoopConfig, MessageRecord, PluginContext, PluginError, PluginResult,
-    PipelineConfig, PipelineStep, Route, RouteAction, RouteNext, RunRecord, RunStatus,
+    Branch, LoopBody, LoopConfig, MessageRecord, PipelineConfig, PipelineStep, PluginContext,
+    PluginError, PluginResult, Route, RouteAction, RouteNext, RunRecord, RunStatus, StepItem,
     StepLibrary, ToolExecutionResult, TraceEntry,
 };
 use agentos_engine::{PipelineExecutor, SqliteStore};
@@ -104,10 +104,16 @@ impl StorageBackend for NullStorage {
     async fn get_blob(&self, _blob_id: &str) -> Result<Vec<u8>, agentos_core::types::StorageError> {
         Ok(vec![])
     }
-    async fn append_trace(&self, _entry: TraceEntry) -> Result<(), agentos_core::types::StorageError> {
+    async fn append_trace(
+        &self,
+        _entry: TraceEntry,
+    ) -> Result<(), agentos_core::types::StorageError> {
         Ok(())
     }
-    async fn create_branch(&self, _branch: Branch) -> Result<(), agentos_core::types::StorageError> {
+    async fn create_branch(
+        &self,
+        _branch: Branch,
+    ) -> Result<(), agentos_core::types::StorageError> {
         Ok(())
     }
     async fn update_run_status(
@@ -127,7 +133,11 @@ impl StorageBackend for NullStorage {
     ) -> Result<(), agentos_core::types::StorageError> {
         Ok(())
     }
-    async fn store_blob(&self, _data: &[u8], _mime_type: &str) -> Result<String, agentos_core::types::StorageError> {
+    async fn store_blob(
+        &self,
+        _data: &[u8],
+        _mime_type: &str,
+    ) -> Result<String, agentos_core::types::StorageError> {
         Ok("null".to_string())
     }
     async fn create_session(
@@ -154,7 +164,10 @@ impl StorageBackend for NullStorage {
     ) -> Result<(), agentos_core::types::StorageError> {
         Ok(())
     }
-    async fn delete_session(&self, _thread_id: &str) -> Result<(), agentos_core::types::StorageError> {
+    async fn delete_session(
+        &self,
+        _thread_id: &str,
+    ) -> Result<(), agentos_core::types::StorageError> {
         Ok(())
     }
     async fn link_pipeline_session(
@@ -192,10 +205,16 @@ impl StorageBackend for NullStorage {
     ) -> Result<Vec<agentos_core::types::ExecutionRecord>, agentos_core::types::StorageError> {
         Ok(vec![])
     }
-    async fn count_execution_records(&self, _pipeline_run_id: &str) -> Result<u64, agentos_core::types::StorageError> {
+    async fn count_execution_records(
+        &self,
+        _pipeline_run_id: &str,
+    ) -> Result<u64, agentos_core::types::StorageError> {
         Ok(0)
     }
-    async fn delete_execution_records_by_session(&self, _pipeline_run_id: &str) -> Result<u64, agentos_core::types::StorageError> {
+    async fn delete_execution_records_by_session(
+        &self,
+        _pipeline_run_id: &str,
+    ) -> Result<u64, agentos_core::types::StorageError> {
         Ok(0)
     }
     async fn save_run_summary(
@@ -207,7 +226,8 @@ impl StorageBackend for NullStorage {
     async fn get_run_summary(
         &self,
         _run_id: &str,
-    ) -> Result<Option<agentos_core::types::PipelineRunSummary>, agentos_core::types::StorageError> {
+    ) -> Result<Option<agentos_core::types::PipelineRunSummary>, agentos_core::types::StorageError>
+    {
         Ok(None)
     }
     async fn update_run_summary(
@@ -220,7 +240,8 @@ impl StorageBackend for NullStorage {
     async fn list_run_summaries(
         &self,
         _limit: Option<usize>,
-    ) -> Result<Vec<agentos_core::types::PipelineRunSummary>, agentos_core::types::StorageError> {
+    ) -> Result<Vec<agentos_core::types::PipelineRunSummary>, agentos_core::types::StorageError>
+    {
         Ok(vec![])
     }
     async fn create_memory(
@@ -264,15 +285,13 @@ impl StorageBackend for NullStorage {
     async fn get_user_by_id(
         &self,
         _user_id: &str,
-    ) -> Result<Option<agentos_core::types::UserRecord>, agentos_core::types::StorageError>
-    {
+    ) -> Result<Option<agentos_core::types::UserRecord>, agentos_core::types::StorageError> {
         Ok(None)
     }
     async fn get_user_by_username(
         &self,
         _username: &str,
-    ) -> Result<Option<agentos_core::types::UserRecord>, agentos_core::types::StorageError>
-    {
+    ) -> Result<Option<agentos_core::types::UserRecord>, agentos_core::types::StorageError> {
         Ok(None)
     }
     async fn list_users(
@@ -286,10 +305,7 @@ impl StorageBackend for NullStorage {
     ) -> Result<(), agentos_core::types::StorageError> {
         Ok(())
     }
-    async fn delete_user(
-        &self,
-        _user_id: &str,
-    ) -> Result<bool, agentos_core::types::StorageError> {
+    async fn delete_user(&self, _user_id: &str) -> Result<bool, agentos_core::types::StorageError> {
         Ok(false)
     }
 }
@@ -337,7 +353,11 @@ fn make_engine_config(max_iterations: i32) -> PipelineConfig {
             steps: vec![
                 PipelineStep {
                     id: "prepare".into(),
-                    steps: prepare_plugins,
+                    steps: prepare_plugins
+                        .iter()
+                        .map(|s| StepItem::Bare(s.to_string()))
+                        .collect(),
+                    when: None,
                     context: HashMap::new(),
                     routes: vec![],
                     loop_config: None,
@@ -345,6 +365,7 @@ fn make_engine_config(max_iterations: i32) -> PipelineConfig {
                 PipelineStep {
                     id: "core".into(),
                     steps: vec!["{{state.core_plugin}}".into()],
+                    when: None,
                     context: HashMap::new(),
                     routes: vec![],
                     loop_config: None,
@@ -355,6 +376,7 @@ fn make_engine_config(max_iterations: i32) -> PipelineConfig {
                         "pipeline_stop_check".into(),
                         "pipeline_result_format".into(),
                     ],
+                    when: None,
                     context: HashMap::new(),
                     routes: post_routes,
                     loop_config: None,
@@ -364,6 +386,7 @@ fn make_engine_config(max_iterations: i32) -> PipelineConfig {
                 enabled: true,
                 max_iterations,
             }),
+            while_cond: None,
             exit_routes: vec![],
             run_on_error: false,
         }],
@@ -433,7 +456,13 @@ async fn test_pipeline_executes_steps() {
     let engine_cfg = make_engine_config(-1);
     assert_eq!(engine_cfg.name, "agentos_agent");
     assert_eq!(engine_cfg.loop_bodies.len(), 1);
-    assert!(engine_cfg.loop_bodies[0].loop_config.as_ref().unwrap().enabled);
+    assert!(
+        engine_cfg.loop_bodies[0]
+            .loop_config
+            .as_ref()
+            .unwrap()
+            .enabled
+    );
 
     let invoker = Arc::new(MockInvoker::new());
     // llm_core 返回纯文本回复（无工具调用）→ end 路由终止
@@ -458,11 +487,7 @@ async fn test_pipeline_executes_steps() {
         "suspended": false,
     });
     let final_state = executor
-        .run(
-            &engine_cfg,
-            &StepLibrary::default(),
-            initial_state,
-        )
+        .run(&engine_cfg, &StepLibrary::default(), initial_state)
         .await
         .expect("executor run should succeed");
 
@@ -576,11 +601,7 @@ async fn test_pipeline_routes_tool_calls_to_loop() {
         "suspended": false,
     });
     let final_state = executor
-        .run(
-            &engine_cfg,
-            &StepLibrary::default(),
-            initial_state,
-        )
+        .run(&engine_cfg, &StepLibrary::default(), initial_state)
         .await
         .expect("executor run should succeed");
 
@@ -655,11 +676,7 @@ async fn wiring_messages_ops_applied_to_state_and_table() {
     });
 
     let final_state = executor
-        .run(
-            &engine_cfg,
-            &StepLibrary::default(),
-            initial_state,
-        )
+        .run(&engine_cfg, &StepLibrary::default(), initial_state)
         .await
         .expect("run should succeed");
 
@@ -680,4 +697,101 @@ async fn wiring_messages_ops_applied_to_state_and_table() {
     assert_eq!(seqs, vec![0, 1], "表应有 seq 0,1（op 一次落表）");
     let roles: Vec<&str> = rows.iter().map(|r| r.role.as_str()).collect();
     assert_eq!(roles, vec!["user", "assistant"]);
+}
+
+/// G10：while 条件循环——body 无 loop_config 但有 while_cond，循环继续条件
+/// 每轮对 state 求值，假则退出（正常推进后续循环体）。
+#[tokio::test]
+async fn test_while_cond_drives_body_loop() {
+    let invoker = Arc::new(MockInvoker::new());
+    // count 插件每轮把 state.count +1
+    invoker.set_result(
+        "counter",
+        PluginResult {
+            state_updates: HashMap::from([("count".to_string(), json!(1))]),
+            ..Default::default()
+        },
+    );
+    // 这里用 state_updates 是"设置"，需要叠加计数语义：插件读当前 count 写回 +1。
+    // MockInvoker 的结果是静态预设，无法读 state；改用 after_merge 检查最终次数：
+    // while "count < 3" 循环 3 次后退出（count 由插件写 1，merge 覆盖）——
+    // 为验证"循环轮数受 while 控制"，用 max_iterations 兜底断言调用次数。
+    let config = PipelineConfig {
+        name: "while_test".into(),
+        loop_bodies: vec![LoopBody {
+            id: "main".into(),
+            steps: vec![PipelineStep {
+                id: "tick".into(),
+                steps: vec!["counter".into()],
+                when: None,
+                context: HashMap::new(),
+                routes: vec![],
+                loop_config: None,
+            }],
+            // 无 loop_config；while 恒假 → 一次都不执行（循环模式由 while 开启，
+            // 第一轮开头求值为假即退出）
+            loop_config: None,
+            while_cond: Some("False".into()),
+            exit_routes: vec![],
+            run_on_error: false,
+        }],
+        checkpoint: Default::default(),
+    };
+    let executor = make_executor(Arc::clone(&invoker), &["counter"]);
+    let final_state = executor
+        .run(&config, &StepLibrary::default(), json!({}))
+        .await
+        .expect("run should succeed");
+    assert_eq!(
+        invoker.call_count("counter"),
+        0,
+        "while=False 第一轮即退出，零调用"
+    );
+    assert_eq!(final_state["ended"], json!(false));
+}
+
+/// G10：while 条件为真时循环执行，条件变为假后退出。
+#[tokio::test]
+async fn test_while_cond_false_after_state_change_exits() {
+    let invoker = Arc::new(MockInvoker::new());
+    // flipper 每轮把 state.done 置 True（第二轮起 while 为假退出）
+    invoker.set_result(
+        "flipper",
+        PluginResult {
+            state_updates: HashMap::from([("done".to_string(), json!(true))]),
+            ..Default::default()
+        },
+    );
+    let config = PipelineConfig {
+        name: "while_test2".into(),
+        loop_bodies: vec![LoopBody {
+            id: "main".into(),
+            steps: vec![PipelineStep {
+                id: "flip".into(),
+                steps: vec!["flipper".into()],
+                when: None,
+                context: HashMap::new(),
+                routes: vec![],
+                loop_config: None,
+            }],
+            loop_config: None,
+            while_cond: Some("done != True".into()),
+            exit_routes: vec![],
+            run_on_error: false,
+        }],
+        checkpoint: Default::default(),
+    };
+    let executor = make_executor(Arc::clone(&invoker), &["flipper"]);
+    let final_state = executor
+        .run(&config, &StepLibrary::default(), json!({}))
+        .await
+        .expect("run should succeed");
+    // 第一轮执行（done 缺失 → 条件真）；插件置 done=true；第二轮条件假退出
+    assert_eq!(
+        invoker.call_count("flipper"),
+        1,
+        "done 置真后 while 假，只执行一轮"
+    );
+    assert_eq!(final_state["done"], json!(true));
+    assert_eq!(final_state["ended"], json!(false), "while 退出 ≠ ended");
 }

@@ -1,4 +1,4 @@
-# @feature: trigger_setup schema 同步 | @ci: python-plugins-test
+# @feature: FP-0.2.二 内部模块 manifest（trigger_setup schema 同步） | @ci: python-coverage
 """回归：trigger_setup 的 MCP schema 必须与后端 Tool 定义一致。
 
 历史 bug：server.py 注册的是残桩 schema（仅 action/trigger_type/config），

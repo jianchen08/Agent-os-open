@@ -240,6 +240,8 @@ export async function createRootTask(payload: {
   task_scope: 'container' | 'non_container'
   target_id?: string
   workspace?: string
+  /** 工作空间拓扑（与隔离解耦）：worktree（默认）/ plain */
+  workspace_mode?: '' | 'worktree' | 'plain'
   isolation_level?: '' | 'isolated' | 'non_isolated'
   inherit?: Record<string, unknown>
   thread_id: string

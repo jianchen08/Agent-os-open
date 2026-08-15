@@ -24,7 +24,7 @@ class TokenError(AuthException):
         message: str = "Token 错误",
         code: str | None = None,
         details: dict[str, Any] | None = None,
-    ):
+    ) -> None:
         """初始化 Token 错误异常
 
         Args:
@@ -42,7 +42,7 @@ class TokenExpiredError(TokenError):
         self,
         message: str = "Token 已过期",
         details: dict[str, Any] | None = None,
-    ):
+    ) -> None:
         """初始化 Token 已过期异常
 
         Args:
@@ -59,7 +59,7 @@ class TokenInvalidError(TokenError):
         self,
         message: str = "Token 无效",
         details: dict[str, Any] | None = None,
-    ):
+    ) -> None:
         """初始化 Token 无效异常
 
         Args:
@@ -76,7 +76,7 @@ class TokenRevokedError(TokenError):
         self,
         message: str = "Token 已被撤销",
         details: dict[str, Any] | None = None,
-    ):
+    ) -> None:
         """初始化 Token 已被撤销异常
 
         Args:
@@ -94,7 +94,7 @@ class AuthenticationFailedError(AuthException):
         message: str = "认证失败",
         code: str | None = None,
         details: dict[str, Any] | None = None,
-    ):
+    ) -> None:
         """初始化认证失败异常
 
         Args:
@@ -112,7 +112,7 @@ class InvalidCredentialsError(AuthenticationFailedError):
         self,
         message: str = "用户名或密码错误",
         details: dict[str, Any] | None = None,
-    ):
+    ) -> None:
         """初始化凭证无效异常
 
         Args:
@@ -129,7 +129,7 @@ class UserNotFoundError(AuthenticationFailedError):
         self,
         message: str = "用户不存在",
         details: dict[str, Any] | None = None,
-    ):
+    ) -> None:
         """初始化用户不存在异常
 
         Args:
@@ -146,7 +146,7 @@ class UserInactiveError(AuthenticationFailedError):
         self,
         message: str = "用户已被禁用",
         details: dict[str, Any] | None = None,
-    ):
+    ) -> None:
         """初始化用户已禁用异常
 
         Args:
@@ -163,7 +163,7 @@ class UserExistsError(AuthException):
         self,
         message: str = "用户名已存在",
         details: dict[str, Any] | None = None,
-    ):
+    ) -> None:
         """初始化用户已存在异常
 
         Args:
@@ -181,7 +181,7 @@ class PermissionDeniedError(AuthException):
         message: str = "权限不足",
         required_permission: str | None = None,
         details: dict[str, Any] | None = None,
-    ):
+    ) -> None:
         """初始化权限不足异常
 
         Args:
@@ -203,7 +203,7 @@ class RateLimitExceededError(AuthException):
         self,
         message: str = "请求过于频繁，请稍后再试",
         details: dict[str, Any] | None = None,
-    ):
+    ) -> None:
         """初始化请求频率超限异常
 
         Args:

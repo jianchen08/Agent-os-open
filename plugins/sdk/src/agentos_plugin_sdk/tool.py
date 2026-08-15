@@ -22,6 +22,7 @@ def tool(
     schema: dict[str, Any],
     description: str = "",
     output_schema: dict[str, Any] | None = None,
+    render: dict[str, Any] | None = None,
 ) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
     """装饰器——声明一个 MCP 工具。
 
@@ -44,6 +45,8 @@ def tool(
         schema: JSON Schema 描述输入参数。
         description: 工具描述。
         output_schema: 输出 JSON Schema（可选）。
+        render: 渲染意图声明（可选，对齐 DSH ToolResultView 词汇表），如
+            ``{"card": "terminal"}``。见 ToolDef.render。
 
     Returns:
         装饰器函数。
@@ -61,6 +64,7 @@ def tool(
                 handler=func,
                 description=description,
                 output_schema=output_schema,
+                render=render,
             ),
         )
         return func

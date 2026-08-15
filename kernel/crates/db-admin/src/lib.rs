@@ -1,13 +1,20 @@
-//! DB Admin 独立管理后台——通用表 CRUD + SQL 执行器（`/api/v1/db/*`）。
+//! DB Admin——通用表 CRUD + SQL 执行器（boot-plugin 第一刀：SQL 能力层）。
 //!
-//! 从 api crate 拆出（task_kernel_cleanup_and_split 任务 1）：api 回归
-//! "对外服务层"本职，本 crate 成为独立"管理工具"。前端 DB Admin 后台
-//! （`/debug/db`）经 `/api/v1/db/*` 观察/调试数据，7 个端点与路径保持不变，
-//! 前端无感知；鉴权（admin/viewer 角色）沿用 api 管理面同一套用户解析
-//! （`agentos_http::auth::resolve_request_user`，单一来源）。
+//! 演进史：从 api crate 拆出（task_kernel_cleanup_and_split 任务 1）后，
+//! 原 `/api/v1/db/*` axum 路由层已在 boot-plugin 迁移中摘除——HTTP 面由
+//! `plugins/shared/db_admin`（Python sidecar 插件）承载，经内核 `/ext/db_admin/*`
+//! 通配分发 → 插件 `http.handle` → 反向调用 `db-admin` capability → 本 crate 的
+//! [`capability::DbAdminCapabilityHandler`]（注册进内核 handler_registry）。
 //!
-//! 设计来源：docs/working/unified_db_admin_plan.md（表驱动动态枚举 + 安全约束）。
+//! - [`db_routes`]：纯 SQL 构建与校验逻辑（白名单枚举/参数绑定/租户隔离/BLOB 安全/
+//!   SQL 执行器防线——check_dangerous/classify_sql 等全部保留）；
+//! - [`capability`]：capability handler（7 method）+ 鉴权（`_authorization` 转发，
+//!   内核侧 resolve_request_user 复用 api 管理面同一实现）。
+//!
+//! 设计来源：docs/working/unified_db_admin_plan.md（表驱动动态枚举 + 安全约束）、
+//! docs/working/重要设计/boot-plugin内核能力插件化立项.md §三（第一刀方案）。
 
+pub mod capability;
 pub mod db_routes;
 
-pub use db_routes::{router, DbAdminState};
+pub use capability::{DbAdminCapabilityHandler, DbAdminState, NAMESPACE};

@@ -1,4 +1,4 @@
-// @ci: rust-test
+// @feature: FP-0.2.〇 管道引擎 | @ci: rust-test
 //! GET /api/v1/sessions/{id}/messages 工具字段内容契约测试（TDD）。
 //!
 //! 契约：持久化了 `tool_result_json` envelope 的 tool 消息，HTTP 返回必须携带
@@ -7,6 +7,7 @@
 //! - `toolDurationMs`（envelope.duration_ms）
 //! - `toolName`（envelope.tool_name）
 //! - `containerTaskId`（envelope.metadata.container_task_id 存在时）
+//!
 //! 这是前端刷新后还原 resultData/durationMs 的 HTTP 通道——缺失即冷热不一致。
 //!
 //! 既有字段回归：toolCalls / toolCallId / status / error / reasoningContent。
@@ -24,12 +25,20 @@ use tower::ServiceExt;
 
 const PID: &str = "p-api-tool-1";
 
-fn app_with_deps() -> (tempfile::TempDir, axum::Router, Arc<agentos_engine::SqliteStore>) {
+fn app_with_deps() -> (
+    tempfile::TempDir,
+    axum::Router,
+    Arc<agentos_engine::SqliteStore>,
+) {
     let tmp = tempfile::tempdir().unwrap();
 
     let agent_dir = tmp.path().join("config").join("agents").join("main");
     fs::create_dir_all(&agent_dir).unwrap();
-    fs::write(agent_dir.join("test_agent.yaml"), "config_id: test_agent\nname: t\n").unwrap();
+    fs::write(
+        agent_dir.join("test_agent.yaml"),
+        "config_id: test_agent\nname: t\n",
+    )
+    .unwrap();
 
     let pipe_dir = tmp.path().join("config").join("pipelines");
     fs::create_dir_all(&pipe_dir).unwrap();
@@ -37,7 +46,11 @@ fn app_with_deps() -> (tempfile::TempDir, axum::Router, Arc<agentos_engine::Sqli
 
     let model_dir = tmp.path().join("config").join("models");
     fs::create_dir_all(&model_dir).unwrap();
-    fs::write(model_dir.join("llm.yaml"), "name: glm\napi_key: ${ENV_KEY}\n").unwrap();
+    fs::write(
+        model_dir.join("llm.yaml"),
+        "name: glm\napi_key: ${ENV_KEY}\n",
+    )
+    .unwrap();
 
     let manifest = PluginManifest {
         id: "llm_service".to_string(),
@@ -56,7 +69,7 @@ fn app_with_deps() -> (tempfile::TempDir, axum::Router, Arc<agentos_engine::Sqli
         mcp: None,
         lifecycle: None,
         native: None,
-        wasm: None,
+        granted_capabilities: vec![],
         requires_content: None,
         invoke_entry: None,
         config_files: vec![ConfigFileMapping {
@@ -108,7 +121,9 @@ async fn get_messages_json(app: &axum::Router, token: &str) -> Value {
         .oneshot(
             Request::builder()
                 .method(Method::GET)
-                .uri(format!("/api/v1/sessions/thr-tool-1/messages?pipeline_run_id={PID}"))
+                .uri(format!(
+                    "/api/v1/sessions/thr-tool-1/messages?pipeline_run_id={PID}"
+                ))
                 .header("authorization", format!("Bearer {token}"))
                 .body(Body::empty())
                 .unwrap(),
@@ -116,7 +131,9 @@ async fn get_messages_json(app: &axum::Router, token: &str) -> Value {
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::OK, "admin 读取消息应 200");
-    let body = axum::body::to_bytes(resp.into_body(), 1 << 20).await.unwrap();
+    let body = axum::body::to_bytes(resp.into_body(), 1 << 20)
+        .await
+        .unwrap();
     serde_json::from_slice(&body).unwrap()
 }
 
@@ -124,41 +141,43 @@ async fn get_messages_json(app: &axum::Router, token: &str) -> Value {
 /// envelope 随消息持久化（tool 消息自带 tool_result 字段，整条进 blob）。
 fn seed_enriched_tool_turn(store: &agentos_engine::SqliteStore) {
     let msgs = [
-                json!({
-                    "role": "user",
-                    "content": "写文件"
-                }),
-                json!({
-                    "role": "assistant",
-                    "content": "",
-                    "reasoning_content": "思考中",
-                    "tool_calls": [{
-                        "id": "call_a1",
-                        "type": "function",
-                        "function": { "name": "file_write", "arguments": "{\"file_path\":\"a.rs\"}" }
-                    }]
-                }),
-                json!({
-                    "role": "tool",
-                    "tool_call_id": "call_a1",
-                    "content": "added: 2\nlines: 1\n",
-                    "tool_result": {
-                        "call_id": "call_a1",
-                        "tool_name": "file_write",
-                        "success": true,
-                        "error": null,
-                        "data": { "added": 2, "lines": 1, "new_content": "fn main() {}" },
-                        "metadata": { "container_task_id": "task_api_1" },
-                        "duration_ms": 88.8
-                    }
-                }),
+        json!({
+            "role": "user",
+            "content": "写文件"
+        }),
+        json!({
+            "role": "assistant",
+            "content": "",
+            "reasoning_content": "思考中",
+            "tool_calls": [{
+                "id": "call_a1",
+                "type": "function",
+                "function": { "name": "file_write", "arguments": "{\"file_path\":\"a.rs\"}" }
+            }]
+        }),
+        json!({
+            "role": "tool",
+            "tool_call_id": "call_a1",
+            "content": "added: 2\nlines: 1\n",
+            "tool_result": {
+                "call_id": "call_a1",
+                "tool_name": "file_write",
+                "success": true,
+                "error": null,
+                "data": { "added": 2, "lines": 1, "new_content": "fn main() {}" },
+                "metadata": { "container_task_id": "task_api_1" },
+                "duration_ms": 88.8
+            }
+        }),
     ];
     let ops: Vec<Value> = msgs
         .iter()
         .enumerate()
         .map(|(i, m)| json!({ "op": "set", "seq": i as u64, "msg": m }))
         .collect();
-    store.apply_messages_ops_to_table(PID, "default", &ops).unwrap();
+    store
+        .apply_messages_ops_to_table(PID, "default", &ops)
+        .unwrap();
 }
 
 #[tokio::test]
@@ -175,10 +194,19 @@ async fn tool_message_returns_structured_envelope_fields() {
         .expect("tool 消息必须存在");
 
     // ── 新契约字段（camelCase 对齐前端 BackendMessageResponse） ──
-    assert_eq!(tool_msg["toolResultData"]["added"], 2, "toolResultData 必须返回 envelope.data");
+    assert_eq!(
+        tool_msg["toolResultData"]["added"], 2,
+        "toolResultData 必须返回 envelope.data"
+    );
     assert_eq!(tool_msg["toolResultData"]["new_content"], "fn main() {}");
-    assert_eq!(tool_msg["toolDurationMs"], 88.8, "toolDurationMs 必须返回 envelope.duration_ms");
-    assert_eq!(tool_msg["toolName"], "file_write", "toolName 必须返回 envelope.tool_name");
+    assert_eq!(
+        tool_msg["toolDurationMs"], 88.8,
+        "toolDurationMs 必须返回 envelope.duration_ms"
+    );
+    assert_eq!(
+        tool_msg["toolName"], "file_write",
+        "toolName 必须返回 envelope.tool_name"
+    );
     assert_eq!(
         tool_msg["containerTaskId"], "task_api_1",
         "envelope.metadata.container_task_id 存在时必须返回 containerTaskId"
@@ -187,9 +215,18 @@ async fn tool_message_returns_structured_envelope_fields() {
     // ── content 契约：必须返回纯文本，而非整条消息 envelope JSON ──
     // （回归保护：blob 存的是整条消息 JSON，HTTP 读路径曾误把裸 blob 当 content，
     //   导致前端气泡显示 {"content":"...","role":"..."} 原始字段。）
-    let user_msg = messages.iter().find(|m| m["role"] == "user").expect("user 消息必须存在");
-    assert_eq!(user_msg["content"], "写文件", "user 消息 content 必须是纯文本，不能是 envelope JSON");
-    assert_eq!(tool_msg["content"], "added: 2\nlines: 1\n", "tool 消息 content 必须是纯文本，不能是 envelope JSON");
+    let user_msg = messages
+        .iter()
+        .find(|m| m["role"] == "user")
+        .expect("user 消息必须存在");
+    assert_eq!(
+        user_msg["content"], "写文件",
+        "user 消息 content 必须是纯文本，不能是 envelope JSON"
+    );
+    assert_eq!(
+        tool_msg["content"], "added: 2\nlines: 1\n",
+        "tool 消息 content 必须是纯文本，不能是 envelope JSON"
+    );
 
     // ── 既有字段回归 ──
     assert_eq!(tool_msg["toolCallId"], "call_a1");
@@ -244,7 +281,10 @@ async fn failed_tool_message_returns_error_fields() {
 
     let body = get_messages_json(&app, &token).await;
     let messages = body["messages"].as_array().expect("messages 数组");
-    let tool_msg = messages.iter().find(|m| m["role"] == "tool").expect("tool 消息");
+    let tool_msg = messages
+        .iter()
+        .find(|m| m["role"] == "tool")
+        .expect("tool 消息");
 
     assert_eq!(tool_msg["status"], "failed");
     assert_eq!(tool_msg["error"], "boom");

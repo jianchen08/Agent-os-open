@@ -40,6 +40,10 @@ _AMBIGUOUS_MODULES = {
     "message_normalizer",
     "session_bridge",
     "unified_types",
+    # workspace：跨目录同名（tasks/workspace.py、isolation/workspace.py 模块
+    # vs system/workspace/ 包）——逐出确保重新解析到 system/workspace/ 包
+    "workspace",
+    "workspace_service",
     # channel_api 内部模块（与其它通道同目录平铺导入时可能冲突）
     "deps",
     "auth",
@@ -81,8 +85,34 @@ def use_channel(channel: str) -> None:
         _s = str(_SYSTEM_DIR)
         if _s not in sys.path:
             sys.path.insert(0, _s)
+        _register_channels_api_compat()
     for m in _AMBIGUOUS_MODULES:
         sys.modules.pop(m, None)
+    # 移除含同名 workspace.py 的平铺目录（pytest 收集其它插件测试（tasks 等）时
+    # 会把其目录插入 sys.path）：裸 `import workspace` 会命中 tasks/workspace.py
+    # 模块而压过 system/workspace/ 包（PathFinder 模块优先于 namespace 包）。
+    # 此处移除保证 channel_api 路由的 `from workspace.workspace_service import`
+    # 解析到 0.2 真相源 system/workspace/ 包。
+    for _conflict in (_SYSTEM_DIR / "tasks", _SYSTEM_DIR / "isolation"):
+        _s = str(_conflict)
+        if _s in sys.path:
+            sys.path.remove(_s)
+
+
+def _register_channels_api_compat() -> None:
+    """0.1 `channels.api.*` 命名空间兼容：把 channel_api 目录挂为 `channels.api` 包。
+
+    0.2 迁移后通道插件平铺在 plugins/shared/system/channel_api/（`from routes_config
+    import ...`），但部分测试仍按 0.1 命名空间 import（`from channels.api.models
+    import ...`）。注册命名空间包后，`channels.api.X` 自动解析到 channel_api/X.py，
+    与平铺 import 并存。
+    """
+    import types  # noqa: PLC0415
+
+    channels_ns = sys.modules.setdefault("channels", types.ModuleType("channels"))
+    channels_ns.__path__ = []  # namespace package
+    api_ns = sys.modules.setdefault("channels.api", types.ModuleType("channels.api"))
+    api_ns.__path__ = [str(_CHANNEL_DIRS["api"])]
 
 
 # 这几个 channels.api 路由测试依赖的路由模块（routes_missing/routes_workspaces/

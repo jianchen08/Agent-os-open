@@ -29,7 +29,7 @@ fn manifest(plugin_id: &str, files: Vec<ConfigFileMapping>) -> PluginManifest {
         mcp: None,
         lifecycle: None,
         native: None,
-        wasm: None,
+        granted_capabilities: vec![],
         requires_content: None,
         invoke_entry: None,
         config_files: files,
@@ -88,7 +88,9 @@ async fn test_schema_aggregates_plugin_config_files() {
         .unwrap();
     assert_eq!(response.status(), StatusCode::OK);
 
-    let body = axum::body::to_bytes(response.into_body(), 16384).await.unwrap();
+    let body = axum::body::to_bytes(response.into_body(), 16384)
+        .await
+        .unwrap();
     let json: Value = serde_json::from_slice(&body).unwrap();
 
     // schema 应含 plugin_configs 数组，聚合各插件的 config_files

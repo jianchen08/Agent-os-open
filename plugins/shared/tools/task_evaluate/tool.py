@@ -715,7 +715,7 @@ class TaskEvaluateTool(BuiltinTool):
             # _GIT_TIMEOUT=30s/命令），合并成功时 checkout/merge/add/commit/verify
             # 叠加可阻塞主事件循环数分钟。本函数处于 async 工具执行链中，同步调用会
             # 冻住主 loop → 所有 asyncio 超时失效 → 此时被终态通知唤醒的父管道首次
-            # LLM 调用会永久卡死（生产反复出现的"通知上级后上级卡死"）。
+            # LLM 调用会永久卡死。
             # 丢到线程池执行：git 阻塞不再影响主 loop；合并串行的 threading.Lock
             # （_get_merge_lock）跨线程有效，串行化语义不变。
             import asyncio  # noqa: PLC0415

@@ -91,6 +91,10 @@ interface LayoutModeActions {
   addWorkspaceTab: (tab: WorkspaceTab) => void
   setActiveTab: (tabId: string) => void
   closeWorkspaceTab: (tabId: string) => void
+  /** 关闭指定标签外的其他标签（钉住标签保留） */
+  closeOtherWorkspaceTabs: (tabId: string) => void
+  /** 关闭全部标签（钉住标签保留） */
+  closeAllWorkspaceTabs: () => void
   updateWorkspaceTab: (tabId: string, updates: Partial<WorkspaceTab>) => void
 
   /** Dock item management */
@@ -208,6 +212,33 @@ export const useLayoutModeStore = create<LayoutModeState & LayoutModeActions>()(
           workspaceTabs: state.workspaceTabs.filter((t) => t.id !== tabId),
           visitedTabIds: state.visitedTabIds.filter((id) => id !== tabId),
         })),
+      closeOtherWorkspaceTabs: (tabId) =>
+        set((state) => {
+          const keep = state.workspaceTabs.filter(
+            (t) => t.id === tabId || t.isPinned,
+          )
+          // 激活标签被关时激活第一个剩余标签（钉住优先）
+          let tabs = keep
+          if (!keep.some((t) => t.isActive) && keep.length > 0) {
+            tabs = keep.map((t, i) => (i === 0 ? { ...t, isActive: true } : t))
+          }
+          return {
+            workspaceTabs: tabs,
+            visitedTabIds: state.visitedTabIds.filter(
+              (id) => tabs.some((t) => t.id === id),
+            ),
+          }
+        }),
+      closeAllWorkspaceTabs: () =>
+        set((state) => {
+          const keep = state.workspaceTabs.filter((t) => t.isPinned)
+          return {
+            workspaceTabs: keep,
+            visitedTabIds: state.visitedTabIds.filter(
+              (id) => keep.some((t) => t.id === id),
+            ),
+          }
+        }),
       updateWorkspaceTab: (tabId, updates) =>
         set((state) => ({
           workspaceTabs: state.workspaceTabs.map((t) =>
@@ -277,7 +308,25 @@ export const useLayoutModeStore = create<LayoutModeState & LayoutModeActions>()(
       }),
       merge: (persisted, current) => {
         const p = (persisted as Partial<LayoutModeState>) || {}
-        const tabs = Array.isArray(p.workspaceTabs) ? p.workspaceTabs : current.workspaceTabs
+        let tabs = Array.isArray(p.workspaceTabs) ? p.workspaceTabs : current.workspaceTabs
+        // 迁移（0.2 收尾）：旧的固定「工作区」标签（ws-panel-workspace）已退役——
+        // 右侧面板本身就是工作区，顶层标签（任务管理/文件树/设置…）都是其内容，
+        // 不再存在名为「工作区」的标签页。从持久化数据中清洗掉。
+        tabs = tabs.filter((t) => t.id !== 'ws-panel-workspace')
+        // 清洗后为空 → 默认激活任务管理标签（面板直接展示任务管理）
+        if (tabs.length === 0) {
+          tabs = [
+            {
+              id: 'ws-panel-tasks',
+              title: '任务管理',
+              icon: 'folder',
+              moduleId: '__panel_tasks__',
+              component: 'pipeline_manager',
+              isActive: true,
+              isPinned: false,
+            },
+          ]
+        }
         return {
           ...current,
           ...p,

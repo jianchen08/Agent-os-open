@@ -1,17 +1,15 @@
-"""通用文件下载工具（0.2 迁移版）。
+"""通用文件下载工具。
 
 基于 httpx 封装，支持多连接分段下载、断点续传、自动重试、安全限制。
 
-迁移（FP-MIGR 0.1→0.2）：
-- 顶层 import 由 0.1 的 ``tools.builtin.base`` / ``tools.types`` 改为
-  ``agentos_plugin_sdk``（Tool / ToolResult / BuiltinTool / 枚举 / 结果工厂）。
-- SSRF 防护原语（is_private_ip / resolve_hostname_ips / validate_url）上提到
-  共享层 ``url_security``，本模块不再各自维护内网网段表。
+- 顶层依赖 ``agentos_plugin_sdk``（Tool / ToolResult / BuiltinTool / 枚举 / 结果工厂）。
+- SSRF 防护原语（is_private_ip / resolve_hostname_ips / validate_url）位于共享层
+  ``url_security``，本模块不维护内网网段表。
 - save_path 经 ``WorkspaceAwareMixin.check_path_allowed(operation="write")`` 约束，
   isolation 插件不可用时降级放行（与 web_ext 一致）。
 
-安全随迁（FP-MIGR P1×2，审计 T5#59）：
-- ``skip_ssrf_check`` 移出公开 schema → 仅服务端内部位：构造参数
+安全约束（审计 T5#59）：
+- ``skip_ssrf_check`` 不在公开 schema → 仅服务端内部位：构造参数
   ``allow_ssrf_skip``（默认 False）。execute **无条件忽略**客户端
   ``inputs["skip_ssrf_check"]``，SSRF 校验恒执行（防 LLM/提示注入旁路）。
 - ``allow_ssrf_skip=True`` 仅用于受信本地测试服务器（服务端构造，客户端不可控）。

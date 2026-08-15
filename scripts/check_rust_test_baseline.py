@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 """Rust 测试失败数基线锁：防止 pre-existing 失败数增长。
 
-与 scripts/check_test_batch_baseline.py 同构，对应 ci.yml rust-test job：
+对应 ci.yml rust-test job：
 - .github/rust-test-baseline.txt 记录允许的失败数上限
 - 跑 `cargo test --all`，解析失败数
 - 失败数 > 基线 → 退出码 1（CI 红，拦截合并）
@@ -58,8 +58,9 @@ def run_cargo_test() -> tuple[int, str]:
             timeout=600,
         )
     except FileNotFoundError:
-        print("[rust-baseline] cargo 未安装，跳过 Rust 基线检查", file=sys.stderr)
-        return 0, ""
+        # cargo 缺失属于环境错误，门禁必须失败（fail-loud），禁止静默按 0 失败数放行
+        print("[rust-baseline] ❌ cargo 未安装，无法执行 Rust 基线检查", file=sys.stderr)
+        return -1, ""
     except subprocess.TimeoutExpired:
         print("[rust-baseline] cargo test 超时（600s）", file=sys.stderr)
         return -1, ""
@@ -82,7 +83,7 @@ def write_baseline(failures: int) -> None:
     BASELINE_FILE.write_text(
         f"""# Rust 测试失败数基线（只许减不许增）
 
-# 与 Python 的 test-batch-baseline.txt 同构，
+# 与 Python 的 pytest-failure-baseline.txt 同构，
 # 对应 ci.yml rust-test job：cargo test --all
 #
 # ⚠️ 严格规则：只能【减】不能【增】。

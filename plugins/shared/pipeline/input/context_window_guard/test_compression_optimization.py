@@ -1,4 +1,4 @@
-# @feature: FP-0.2 压缩优化 | @vision: V3 可嵌入 | @ci: python-plugins-test
+# @feature: FP-0.2.〇 管道引擎（压缩优化） | @vision: V3 可嵌入 | @ci: python-coverage
 """压缩优化 TDD 测试（语义标记 + fork 消息队列压缩）。
 
 对应 docs/tasks/task_compression_optimization.md 两项任务：

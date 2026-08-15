@@ -34,7 +34,10 @@ fn test_b1_path_traversal_rejected() {
     fs::create_dir_all(&config_root).unwrap();
 
     let err = validate_config_path(tmp.path(), "config/../../../etc/passwd").unwrap_err();
-    assert!(matches!(err, ConfigError::PathOutsideConfigRoot { .. }), "got {err:?}");
+    assert!(
+        matches!(err, ConfigError::PathOutsideConfigRoot { .. }),
+        "got {err:?}"
+    );
 }
 
 #[test]
@@ -42,10 +45,17 @@ fn test_b1_kernel_reserved_file_rejected() {
     let tmp = tempfile::tempdir().unwrap();
     let config_root = tmp.path().join("config");
     fs::create_dir_all(config_root.join("system")).unwrap();
-    fs::write(config_root.join("system/plugin_allowlist.yaml"), "mode: strict\n").unwrap();
+    fs::write(
+        config_root.join("system/plugin_allowlist.yaml"),
+        "mode: strict\n",
+    )
+    .unwrap();
 
     let err = validate_config_path(tmp.path(), "config/system/plugin_allowlist.yaml").unwrap_err();
-    assert!(matches!(err, ConfigError::KernelReservedFile { .. }), "got {err:?}");
+    assert!(
+        matches!(err, ConfigError::KernelReservedFile { .. }),
+        "got {err:?}"
+    );
 }
 
 #[test]
@@ -53,10 +63,17 @@ fn test_b1_pipelines_steps_reserved_rejected() {
     let tmp = tempfile::tempdir().unwrap();
     let config_root = tmp.path().join("config");
     fs::create_dir_all(config_root.join("pipelines")).unwrap();
-    fs::write(config_root.join("pipelines/default.yaml"), "name: default\n").unwrap();
+    fs::write(
+        config_root.join("pipelines/default.yaml"),
+        "name: default\n",
+    )
+    .unwrap();
 
     let err = validate_config_path(tmp.path(), "config/pipelines/default.yaml").unwrap_err();
-    assert!(matches!(err, ConfigError::KernelReservedFile { .. }), "got {err:?}");
+    assert!(
+        matches!(err, ConfigError::KernelReservedFile { .. }),
+        "got {err:?}"
+    );
 }
 
 // ── B2 secret 掩码 ──
@@ -76,7 +93,10 @@ fn test_b2_real_plaintext_secret_masked() {
     let value = serde_json::json!({"api_key": "sk-abcdef1234567890", "name": "glm"});
     let masked = mask_secrets(&value);
     let m = masked["api_key"].as_str().unwrap();
-    assert!(m.contains("***"), "plaintext secret should be masked, got {m}");
+    assert!(
+        m.contains("***"),
+        "plaintext secret should be masked, got {m}"
+    );
     assert!(!m.contains("abcdef1234567890"), "must not leak plaintext");
 }
 
@@ -119,10 +139,8 @@ fn test_b4_atomic_write_round_trip() {
 
     atomic_write_yaml(&target, &value).unwrap();
 
-    let read_back: serde_yaml::Value = serde_yaml::from_str(
-        &fs::read_to_string(&target).unwrap(),
-    )
-    .unwrap();
+    let read_back: serde_yaml::Value =
+        serde_yaml::from_str(&fs::read_to_string(&target).unwrap()).unwrap();
     assert_eq!(read_back["name"], "glm");
     assert_eq!(read_back["limit"], 100);
 }

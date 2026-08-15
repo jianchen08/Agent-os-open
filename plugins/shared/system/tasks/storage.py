@@ -247,7 +247,7 @@ class TaskStorage:
         from agents_types import AgentLevel  # noqa: PLC0415
         from task_types import TaskPriority  # noqa: PLC0415
 
-        # 兼容历史脏数据：description 曾被 LLM 写成 list，反序列化时归一化为 str，
+        # description 契约为 str；反序列化时对 list/tuple 输入做 join 归一化（防上游写脏），
         # 否则 API 层 TaskResponse.description（pydantic 强制 str）校验失败。
         raw_desc = data.get("description", "")
         if not isinstance(raw_desc, str):

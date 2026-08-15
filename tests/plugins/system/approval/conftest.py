@@ -1,3 +1,4 @@
+# @feature: FP-0.2.五 审批闭环 | @ci: python-coverage
 """approval 测试 conftest——把插件目录注入 sys.path。
 
 插件位于 plugins/shared/system/approval/，server.py 用平铺 import

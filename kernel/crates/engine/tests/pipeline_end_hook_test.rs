@@ -51,8 +51,7 @@ impl HookRecordingInvoker {
             .lock()
             .unwrap()
             .last()
-            .map(|(_, _, pid)| pid.clone())
-            .flatten()
+            .and_then(|(_, _, pid)| pid.clone())
     }
 }
 
@@ -87,8 +86,13 @@ impl PluginInvoker for HookRecordingInvoker {
             agentos_core::traits::LifecycleHook::OnPipelineStart => "on_pipeline_start",
             agentos_core::traits::LifecycleHook::OnPipelineEnd => "on_pipeline_end",
             agentos_core::traits::LifecycleHook::OnError => "on_error",
+            // M3 总线新增的枚举值：管道钩子测试不消费，映射中性名保持穷尽。
+            agentos_core::traits::LifecycleHook::DomainEvent => "domain_event",
         };
-        let pid = context.get("pipeline_id").and_then(|v| v.as_str()).map(String::from);
+        let pid = context
+            .get("pipeline_id")
+            .and_then(|v| v.as_str())
+            .map(String::from);
         self.hooks
             .lock()
             .unwrap()
@@ -113,11 +117,13 @@ fn minimal_config() -> agentos_core::types::PipelineConfig {
             steps: vec![agentos_core::types::PipelineStep {
                 id: "only".into(),
                 steps: vec!["pipeline_dummy".into()],
+                when: None,
                 context: HashMap::new(),
                 routes: vec![],
                 loop_config: None,
             }],
             loop_config: None,
+            while_cond: None,
             exit_routes: vec![],
             run_on_error: false,
         }],
@@ -146,7 +152,7 @@ fn make_executor(
 /// run 结束后注册插件收到 OnPipelineEnd（带 pipeline_id 标签）。
 #[tokio::test]
 async fn test_run_dispatches_on_pipeline_end() {
-    let tmp = tempfile::tempdir().unwrap();
+    let _tmp = tempfile::tempdir().unwrap(); // tempdir 生命周期保持（fixture 依赖目录存在）
     let store = Arc::new(SqliteStore::open_memory().unwrap());
     let invoker = Arc::new(HookRecordingInvoker::new());
     let executor = make_executor(invoker.clone(), &["spill_retrieve_tool"], store);
@@ -168,12 +174,16 @@ async fn test_run_dispatches_on_pipeline_end() {
 /// 未注册 hook 插件时不分发（零开销）。
 #[tokio::test]
 async fn test_run_without_hook_plugins_skips_dispatch() {
-    let tmp = tempfile::tempdir().unwrap();
+    let _tmp = tempfile::tempdir().unwrap(); // tempdir 生命周期保持（fixture 依赖目录存在）
     let store = Arc::new(SqliteStore::open_memory().unwrap());
     let invoker = Arc::new(HookRecordingInvoker::new());
     let executor = make_executor(invoker.clone(), &[], store);
     executor
-        .run(&minimal_config(), &Default::default(), json!({"pipeline_id": "p"}))
+        .run(
+            &minimal_config(),
+            &Default::default(),
+            json!({"pipeline_id": "p"}),
+        )
         .await
         .expect("run ok");
     assert!(invoker.hooks.lock().unwrap().is_empty(), "未注册 → 不分发");
@@ -182,15 +192,18 @@ async fn test_run_without_hook_plugins_skips_dispatch() {
 /// 分发失败（Err）是 best-effort：不影响 run 完成返回值。
 #[tokio::test]
 async fn test_dispatch_is_best_effort() {
-    let tmp = tempfile::tempdir().unwrap();
+    let _tmp = tempfile::tempdir().unwrap(); // tempdir 生命周期保持（fixture 依赖目录存在）
     let store = Arc::new(SqliteStore::open_memory().unwrap());
     let invoker = Arc::new(HookRecordingInvoker::new());
     invoker.fail_on("spill_retrieve_tool");
     let executor = make_executor(invoker.clone(), &["spill_retrieve_tool"], store);
     let result = executor
-        .run(&minimal_config(), &Default::default(), json!({"pipeline_id": "p"}))
+        .run(
+            &minimal_config(),
+            &Default::default(),
+            json!({"pipeline_id": "p"}),
+        )
         .await;
     assert!(result.is_ok(), "钩子分发失败不得让 run 失败");
     assert_eq!(invoker.hook_calls("spill_retrieve_tool").len(), 1);
 }
-

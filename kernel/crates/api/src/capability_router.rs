@@ -18,10 +18,10 @@
 
 use std::sync::Arc;
 
-use async_trait::async_trait;
 use agentos_core::traits::{CapabilityRegistry, MessageQueryOpts, StorageBackend};
 use agentos_core::types::{ExecutionRecord, MemoryRecord, PipelineRunSummary};
 use agentos_mcp::{CapabilityRouter, McpError};
+use async_trait::async_trait;
 use serde_json::{json, Value};
 use tracing::warn;
 
@@ -54,6 +54,48 @@ pub struct KernelCapabilityRouter {
     /// 注册的 namespace 在这里路由。handle() 先查这里，miss 再走下方 match。
     /// None = 不支持插件自注册能力（仅内核内置能力可用）。
     handler_registry: Option<Arc<agentos_mcp::CapabilityHandlerRegistry>>,
+    /// 配置读取器（G5：config-reader.get 的真实读取通道）。
+    /// 闭包签名 (plugin_id, file_id) → 该插件 manifest.config_files 声明的
+    /// 配置节内容；未声明/读取失败返回 Err（拒绝越权读配置）。
+    /// None = config-reader 保持 no-op 兜底（返回 null value，兼容旧装配）。
+    config_reader: Option<ConfigReaderFn>,
+    /// 授权查询器（G6：granted_capabilities 白名单的查找通道）。
+    /// 闭包签名 (plugin_id) → Some(白名单) 当且仅当该插件声明了非空
+    /// granted_capabilities；None = 未声明（默认全授予，存量插件零迁移）。
+    /// None（字段）= 未装配授权查询 → 不做校验（兼容旧装配/测试）。
+    grants_lookup: Option<GrantsLookupFn>,
+    /// 动态工具注册器（G3：registry.register_tool 的执行通道）。
+    /// 闭包负责三道闸的后两道——enablement 校验（插件须 Enabled）+
+    /// 写入注册表（经 M1 guarded 注册入 scope）+ 持久化（可重建性闸，写 DB）。
+    /// 信封闸（granted_capabilities 须含 "registry"）由上方 G6 单点校验覆盖。
+    /// None = 动态注册不可用（返回显式错误）。
+    dynamic_tool_registrar: Option<DynamicToolRegistrar>,
+}
+
+/// G3：动态工具注册器闭包。
+///
+/// (plugin_id, ToolDescriptor) → Ok(())。实现方负责 enablement 闸、
+/// 注册表写入（M1 guarded + scope 登记）与持久化（可重建性闸）。
+pub type DynamicToolRegistrar =
+    Arc<dyn Fn(&str, agentos_core::traits::ToolDescriptor) -> Result<(), String> + Send + Sync>;
+
+/// G5：config-reader.get 的读取器闭包。
+///
+/// (plugin_id, file_id) → 配置节 JSON。实现方负责"file_id 必须在调用方插件
+/// manifest.config_files 里声明"的越权校验（插件只能读自己声明的配置）。
+pub type ConfigReaderFn =
+    Arc<dyn Fn(&str, &str) -> Result<serde_json::Value, String> + Send + Sync>;
+
+/// G6：granted_capabilities 白名单查询闭包。
+///
+/// (plugin_id) → `Some(grants)` = 该插件声明了非空白名单（白名单制）；
+/// `None` = 未声明（默认全授予，向后兼容存量插件）。
+pub type GrantsLookupFn = Arc<dyn Fn(&str) -> Option<Vec<String>> + Send + Sync>;
+
+impl Default for KernelCapabilityRouter {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl KernelCapabilityRouter {
@@ -66,6 +108,9 @@ impl KernelCapabilityRouter {
             session: None,
             store: None,
             handler_registry: None,
+            config_reader: None,
+            grants_lookup: None,
+            dynamic_tool_registrar: None,
         }
     }
 
@@ -78,12 +123,33 @@ impl KernelCapabilityRouter {
             session: None,
             store: None,
             handler_registry: None,
+            config_reader: None,
+            grants_lookup: None,
+            dynamic_tool_registrar: None,
         }
     }
 
     /// 注入插件调用器（启用 tool-executor.invoke 反向调用）。
     pub fn with_invoker(mut self, invoker: Arc<dyn agentos_core::traits::PluginInvoker>) -> Self {
         self.invoker = Some(invoker);
+        self
+    }
+
+    /// 注入配置读取器（G5：启用 config-reader.get 真实读取）。
+    pub fn with_config_reader(mut self, reader: ConfigReaderFn) -> Self {
+        self.config_reader = Some(reader);
+        self
+    }
+
+    /// 注入授权查询器（G6：启用 granted_capabilities 白名单单点校验）。
+    pub fn with_grants_lookup(mut self, lookup: GrantsLookupFn) -> Self {
+        self.grants_lookup = Some(lookup);
+        self
+    }
+
+    /// 注入动态工具注册器（G3：启用 registry.register_tool 运行时注册）。
+    pub fn with_dynamic_tool_registrar(mut self, registrar: DynamicToolRegistrar) -> Self {
+        self.dynamic_tool_registrar = Some(registrar);
         self
     }
 
@@ -128,6 +194,33 @@ impl CapabilityRouter for KernelCapabilityRouter {
         method: &str,
         params: Value,
     ) -> Result<Value, McpError> {
+        // G6 授权单点校验：所有反向 capability 调用（sidecar JSON-RPC / native
+        // HostServices）都经过本方法——在此一处校验 granted_capabilities 白名单，
+        // 两轨同判同一拒绝语义。_plugin_id 是 invoker 注入的信任锚点（插件不可伪造）。
+        // 语义：未声明白名单 = 默认全授予（存量插件零迁移）；声明非空 = 白名单制，
+        // capability namespace 不在名单内即拒绝。粒度 = namespace（§八.2 待评审项，
+        // 现取粗粒度，capability.method 级细化留 G3 信封评审一并定）。
+        if let (Some(lookup), Some(pid)) = (
+            self.grants_lookup.as_ref(),
+            params.get("_plugin_id").and_then(|v| v.as_str()),
+        ) {
+            if let Some(grants) = lookup(pid) {
+                if !grants.iter().any(|g| g == capability) {
+                    warn!(
+                        target: "capability_router",
+                        plugin = pid,
+                        capability = capability,
+                        "G6 授权拒绝：capability 不在 granted_capabilities 白名单"
+                    );
+                    return Err(McpError::Protocol {
+                        message: format!(
+                            "capability '{}' not granted to plugin '{}' (granted_capabilities)",
+                            capability, pid
+                        ),
+                    });
+                }
+            }
+        }
         // 先查动态 handler 注册表（M2/M4：插件自注册的 namespace 在这里路由）。
         // 命中则委托，不再走下方内置 match。这让 human-interaction 等插件能力
         // 不需修改内置 match 即可被路由。
@@ -217,9 +310,12 @@ impl CapabilityRouter for KernelCapabilityRouter {
                 let store = self.store.as_ref().ok_or_else(|| McpError::Protocol {
                     message: "get_run_status disabled: kernel store not injected".to_string(),
                 })?;
-                let run = store.get_run(run_id).await.map_err(|e| McpError::Protocol {
-                    message: format!("get_run_status 失败: {e}"),
-                })?;
+                let run = store
+                    .get_run(run_id)
+                    .await
+                    .map_err(|e| McpError::Protocol {
+                        message: format!("get_run_status 失败: {e}"),
+                    })?;
                 // 返回完整 RunRecord（run_id/status/ended_at/...），status 序列化为
                 // lowercase（running/suspended/completed/failed）。
                 serde_json::to_value(&run).map_err(|e| McpError::Protocol {
@@ -235,7 +331,10 @@ impl CapabilityRouter for KernelCapabilityRouter {
                     .get("event")
                     .and_then(|v| v.as_str())
                     .unwrap_or("unknown");
-                let payload = params.get("payload").cloned().unwrap_or(serde_json::Value::Null);
+                let payload = params
+                    .get("payload")
+                    .cloned()
+                    .unwrap_or(serde_json::Value::Null);
                 tracing::debug!(target: "capability:event-bus", event = %event_name, "收到 event-bus.emit");
 
                 // 流式事件族：stream_chunk / thinking_start / thinking_chunk / thinking_end
@@ -272,7 +371,8 @@ impl CapabilityRouter for KernelCapabilityRouter {
                             .and_then(|v| v.as_str())
                             .unwrap_or("");
                         // thinking_start/thinking_end 无 content，跳过空 content 校验
-                        let needs_content = event_name == "stream_chunk" || event_name == "thinking_chunk";
+                        let needs_content =
+                            event_name == "stream_chunk" || event_name == "thinking_chunk";
                         if !thread_id.is_empty() && (!needs_content || !content.is_empty()) {
                             let mut data = serde_json::json!({
                                 "pipeline_id": pipeline_id,
@@ -327,9 +427,18 @@ impl CapabilityRouter for KernelCapabilityRouter {
                             // 确保路由键齐全。
                             let mut data = payload.clone();
                             if let Some(obj) = data.as_object_mut() {
-                                obj.insert("pipeline_id".to_string(), serde_json::Value::String(pipeline_id.to_string()));
-                                obj.insert("message_id".to_string(), serde_json::Value::String(message_id.to_string()));
-                                obj.insert("_threadId".to_string(), serde_json::Value::String(thread_id.to_string()));
+                                obj.insert(
+                                    "pipeline_id".to_string(),
+                                    serde_json::Value::String(pipeline_id.to_string()),
+                                );
+                                obj.insert(
+                                    "message_id".to_string(),
+                                    serde_json::Value::String(message_id.to_string()),
+                                );
+                                obj.insert(
+                                    "_threadId".to_string(),
+                                    serde_json::Value::String(thread_id.to_string()),
+                                );
                             }
                             let _ = session.emit_event(thread_id, event_name, data).await;
                         }
@@ -388,9 +497,18 @@ impl CapabilityRouter for KernelCapabilityRouter {
                             .unwrap_or("");
                         let mut data = payload.clone();
                         if let Some(obj) = data.as_object_mut() {
-                            obj.insert("pipeline_id".to_string(), serde_json::Value::String(pipeline_id.to_string()));
-                            obj.insert("message_id".to_string(), serde_json::Value::String(message_id.to_string()));
-                            obj.insert("_threadId".to_string(), serde_json::Value::String(thread_id.to_string()));
+                            obj.insert(
+                                "pipeline_id".to_string(),
+                                serde_json::Value::String(pipeline_id.to_string()),
+                            );
+                            obj.insert(
+                                "message_id".to_string(),
+                                serde_json::Value::String(message_id.to_string()),
+                            );
+                            obj.insert(
+                                "_threadId".to_string(),
+                                serde_json::Value::String(thread_id.to_string()),
+                            );
                         }
                         let _ = session.emit_event(thread_id, event_name, data).await;
                         return Ok(json!({"status": "emitted", "event": event_name}));
@@ -420,7 +538,10 @@ impl CapabilityRouter for KernelCapabilityRouter {
                     .get("event")
                     .and_then(|v| v.as_str())
                     .unwrap_or("unknown");
-                let payload = params.get("payload").cloned().unwrap_or(serde_json::Value::Null);
+                let payload = params
+                    .get("payload")
+                    .cloned()
+                    .unwrap_or(serde_json::Value::Null);
                 // thread_id 双取：payload 内优先，params 顶层兜底（scope 语义）
                 let thread_id = payload
                     .get("thread_id")
@@ -447,27 +568,138 @@ impl CapabilityRouter for KernelCapabilityRouter {
                         .unwrap_or("");
                     let mut data = payload.clone();
                     if let Some(obj) = data.as_object_mut() {
-                        obj.insert("pipeline_id".to_string(), serde_json::Value::String(pipeline_id.to_string()));
-                        obj.insert("message_id".to_string(), serde_json::Value::String(message_id.to_string()));
-                        obj.insert("_threadId".to_string(), serde_json::Value::String(thread_id.to_string()));
+                        obj.insert(
+                            "pipeline_id".to_string(),
+                            serde_json::Value::String(pipeline_id.to_string()),
+                        );
+                        obj.insert(
+                            "message_id".to_string(),
+                            serde_json::Value::String(message_id.to_string()),
+                        );
+                        obj.insert(
+                            "_threadId".to_string(),
+                            serde_json::Value::String(thread_id.to_string()),
+                        );
                     }
                     let _ = session.emit_event(thread_id, event_name, data).await;
                 }
                 Ok(json!({"status": "emitted", "event": event_name}))
             }
 
-            // ── config-reader：读配置节（P1 后为显式 no-op fallback）──
-            // task_11 P1 已把配置注入改到源头：manifest.config_files → invoker
-            // build_injected_config 在 spawn sidecar 时下发，插件经 plugin.get_config()
-            // 直接拿到自己的命名空间配置，不再需要反向调用 config-reader.get。
-            // 本 capability 名仍是 SDK 公共契约（STANDARD_CAPABILITIES），故保留 no-op
-            // 兜底（返回 null value）。config_refs 已于 P6 删除，配置只走 config_files。
+            // ── config-reader：读配置节（G5 接通真实读取）──
+            // 语义（v1.5 ADR config_files）：插件按 file_id 读**自己在 manifest
+            // config_files 里声明过的**配置节。信任锚点 _plugin_id 由 invoker 的
+            // PluginScopedRouter 注入（sidecar 不可伪造）；native 经 NativeHostServices
+            // 注入同字段。未声明 file_id = 越权读，拒绝。
+            // 装配了读取器但调用方缺 _plugin_id（非插件上下文）→ 拒绝；
+            // 未装配读取器（旧装配/测试）→ 保持 no-op 兜底（返回 null value）。
             ("config-reader", "get") => {
-                let key = params
-                    .get("key")
+                let key = params.get("key").and_then(|v| v.as_str()).unwrap_or("");
+                let Some(reader) = self.config_reader.as_ref() else {
+                    warn!(target: "capability_router", "config-reader.get 未装配读取器，返回 null（no-op 兜底）");
+                    return Ok(json!({"key": key, "value": null}));
+                };
+                let plugin_id = params
+                    .get("_plugin_id")
                     .and_then(|v| v.as_str())
                     .unwrap_or("");
-                Ok(json!({"key": key, "value": null}))
+                if plugin_id.is_empty() {
+                    return Err(McpError::Protocol {
+                        message: "config-reader.get 需要 _plugin_id（插件上下文调用）".to_string(),
+                    });
+                }
+                match reader(plugin_id, key) {
+                    Ok(value) => Ok(json!({"key": key, "value": value})),
+                    Err(reason) => Err(McpError::Protocol {
+                        message: format!("config-reader.get 拒绝: {}", reason),
+                    }),
+                }
+            }
+
+            // ── registry：运行时动态注册（G3，VS Code 双层模型的动态层）──
+            // 信封闸已由上方 G6 单点覆盖（granted_capabilities 须含 "registry"）。
+            // 本分支做参数解析 + 委托 registrar（enablement 闸 + 写入 + 持久化
+            // 都在装配闭包里——router 保持与具体注册表/存储类型解耦）。
+            ("registry", "register_tool") => {
+                use agentos_core::traits::ToolDescriptor;
+                use agentos_core::types::{ToolCategory, ToolSource};
+                let plugin_id = params
+                    .get("_plugin_id")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                if plugin_id.is_empty() {
+                    return Err(McpError::Protocol {
+                        message: "registry.register_tool 需要 _plugin_id（插件上下文调用）"
+                            .to_string(),
+                    });
+                }
+                let name = params
+                    .get("name")
+                    .and_then(|v| v.as_str())
+                    .ok_or_else(|| McpError::Protocol {
+                        message: "registry.register_tool 缺少 name 参数".to_string(),
+                    })?
+                    .to_string();
+                let descriptor = ToolDescriptor {
+                    plugin_id: plugin_id.clone(),
+                    name,
+                    description: params
+                        .get("description")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("dynamically registered tool")
+                        .to_string(),
+                    input_schema: params
+                        .get("input_schema")
+                        .cloned()
+                        .unwrap_or(serde_json::json!({})),
+                    output_schema: params.get("output_schema").cloned(),
+                    category: params
+                        .get("category")
+                        .and_then(|v| v.as_str())
+                        .and_then(|c| match c {
+                            "file" => Some(ToolCategory::File),
+                            "filesystem" => Some(ToolCategory::FileSystem),
+                            "search" => Some(ToolCategory::Search),
+                            "web" => Some(ToolCategory::Web),
+                            "memory" => Some(ToolCategory::Memory),
+                            "task" => Some(ToolCategory::Task),
+                            "execution" => Some(ToolCategory::Execution),
+                            "analysis" => Some(ToolCategory::Analysis),
+                            "monitoring" => Some(ToolCategory::Monitoring),
+                            "system" | "" => Some(ToolCategory::System),
+                            _ => None,
+                        })
+                        .unwrap_or(ToolCategory::System),
+                    // 动态注册一律记 Dynamic 来源（与 manifest 静态注册区分）。
+                    source: ToolSource::Dynamic,
+                    ui: params.get("ui").cloned(),
+                    render: params.get("render").cloned(),
+                };
+                let registrar =
+                    self.dynamic_tool_registrar
+                        .as_ref()
+                        .ok_or_else(|| McpError::Protocol {
+                            message: "registry.register_tool 未装配动态注册器（G3 未启用）"
+                                .to_string(),
+                        })?;
+                registrar(&plugin_id, descriptor).map_err(|reason| McpError::Protocol {
+                    message: format!("registry.register_tool 拒绝: {}", reason),
+                })?;
+                // 剩余项清仓 D2：注册成功即 schema.tools 变化——best-effort 经
+                // session 广播 widget_event {schema, changed}（前端 resync.ts 消费，
+                // 与 resync_required 同一重载链）。失败静默（观察层不拖垮注册主流程）。
+                if let Some(session) = &self.session {
+                    let _ = session
+                        .broadcast_widget(
+                            "schema",
+                            "changed",
+                            json!({ "plugin_id": plugin_id, "source": "dynamic_register" }),
+                            "kernel",
+                        )
+                        .await;
+                }
+                Ok(json!({"status": "registered", "plugin_id": plugin_id}))
             }
 
             // ── metrics：插件上报指标（监控设计 §三 通道2，第 6 个 capability）──
@@ -486,12 +718,11 @@ impl CapabilityRouter for KernelCapabilityRouter {
                     .and_then(|v| v.as_str())
                     .unwrap_or("unknown")
                     .to_string();
-                let name = params
-                    .get("name")
-                    .and_then(|v| v.as_str())
-                    .ok_or_else(|| McpError::Protocol {
+                let name = params.get("name").and_then(|v| v.as_str()).ok_or_else(|| {
+                    McpError::Protocol {
                         message: "metrics.record 缺少 name 参数".to_string(),
-                    })?;
+                    }
+                })?;
                 let value = params
                     .get("value")
                     .and_then(|v| v.as_f64())
@@ -582,7 +813,13 @@ impl CapabilityRouter for KernelCapabilityRouter {
                 // 纯函数工具（file_read 等）不受影响：SDK 的 _filter_handler_kwargs
                 // (agentos_plugin_sdk/server.py:54) 按 handler 签名过滤参数——无 **kwargs
                 // 的工具自动丢弃这些字段，不会因 unexpected keyword argument 崩溃。
-                let internal_keys = ["_owner", "_log_ctx", "tenant_id", "_call_context", "plugin_id"];
+                let internal_keys = [
+                    "_owner",
+                    "_log_ctx",
+                    "tenant_id",
+                    "_call_context",
+                    "plugin_id",
+                ];
                 let mut tool_args = tool_args_raw;
                 if let Some(obj) = tool_args.as_object_mut() {
                     for k in internal_keys {
@@ -622,7 +859,10 @@ impl CapabilityRouter for KernelCapabilityRouter {
                     message: "tool-executor 未配置 invoker".to_string(),
                 })?;
                 match invoker.invoke_tool(&plugin_id, tool_name, &tool_args).await {
-                    Ok(result) => Ok(serde_json::to_value(result).unwrap_or_else(|_| json!({"success": false}))),
+                    Ok(result) => {
+                        Ok(serde_json::to_value(result)
+                            .unwrap_or_else(|_| json!({"success": false})))
+                    }
                     Err(e) => Ok(json!({
                         "success": false,
                         "error": format!("tool execution failed: {}", e.message),
@@ -761,7 +1001,8 @@ impl KernelCapabilityRouter {
                     .get_run_summary(run_id)
                     .await
                     .map_err(|e| srv_err(format!("get: {e}")))?;
-                Ok(got.map(|s| serde_json::to_value(s).unwrap_or(Value::Null))
+                Ok(got
+                    .map(|s| serde_json::to_value(s).unwrap_or(Value::Null))
                     .unwrap_or(Value::Null))
             }
             ("pipeline-summaries", "update") => {
@@ -777,7 +1018,10 @@ impl KernelCapabilityRouter {
                 Ok(json!({ "ok": true }))
             }
             ("pipeline-summaries", "list") => {
-                let limit = params.get("limit").and_then(|v| v.as_u64()).map(|l| l as usize);
+                let limit = params
+                    .get("limit")
+                    .and_then(|v| v.as_u64())
+                    .map(|l| l as usize);
                 let rows = store
                     .list_run_summaries(limit)
                     .await
@@ -803,19 +1047,14 @@ impl KernelCapabilityRouter {
                     .get_memory(id)
                     .await
                     .map_err(|e| srv_err(format!("get: {e}")))?;
-                Ok(got.map(|m| serde_json::to_value(m).unwrap_or(Value::Null))
+                Ok(got
+                    .map(|m| serde_json::to_value(m).unwrap_or(Value::Null))
                     .unwrap_or(Value::Null))
             }
             ("memory", "list") => {
                 let memory_type = params.get("memory_type").and_then(|v| v.as_str());
-                let limit = params
-                    .get("limit")
-                    .and_then(|v| v.as_u64())
-                    .unwrap_or(20) as usize;
-                let offset = params
-                    .get("offset")
-                    .and_then(|v| v.as_u64())
-                    .unwrap_or(0) as usize;
+                let limit = params.get("limit").and_then(|v| v.as_u64()).unwrap_or(20) as usize;
+                let offset = params.get("offset").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
                 let rows = store
                     .list_memory(memory_type, limit, offset)
                     .await
@@ -827,10 +1066,7 @@ impl KernelCapabilityRouter {
                     .get("query")
                     .and_then(|v| v.as_str())
                     .ok_or_else(|| srv_err("missing query".into()))?;
-                let top_k = params
-                    .get("top_k")
-                    .and_then(|v| v.as_u64())
-                    .unwrap_or(5) as usize;
+                let top_k = params.get("top_k").and_then(|v| v.as_u64()).unwrap_or(5) as usize;
                 let rows = store
                     .search_memory(query, top_k)
                     .await
@@ -937,7 +1173,9 @@ fn parse_labels_safe(raw: Option<&Value>) -> Result<Labels, McpError> {
         // 禁换行/双引号（Prometheus exposition 安全，监控设计 §十）
         if val.contains('\n') || val.contains('"') {
             return Err(McpError::Protocol {
-                message: format!("label value contains forbidden char (newline/dquote) for key: {k}"),
+                message: format!(
+                    "label value contains forbidden char (newline/dquote) for key: {k}"
+                ),
             });
         }
         out.insert(k.clone(), val.to_string());
@@ -1143,8 +1381,7 @@ mod tests {
         coord.register("user-test", sink);
         coord.register_thread("thread-1", "user-test");
         let agg = MetricsAggregator::new();
-        KernelCapabilityRouter::with_metrics(agg)
-            .with_session(coord)
+        KernelCapabilityRouter::with_metrics(agg).with_session(coord)
     }
 
     #[tokio::test]
@@ -1401,7 +1638,8 @@ mod tests {
             plugin_id: &str,
             tool_name: &str,
             inputs: &Value,
-        ) -> Result<agentos_core::types::ToolExecutionResult, agentos_core::types::PluginError> {
+        ) -> Result<agentos_core::types::ToolExecutionResult, agentos_core::types::PluginError>
+        {
             self.captured.lock().unwrap().push((
                 plugin_id.to_string(),
                 tool_name.to_string(),
@@ -1443,6 +1681,7 @@ mod tests {
                 category: ToolCategory::System,
                 source: ToolSource::Mcp,
                 ui: None,
+                render: None,
             },
         );
         KernelCapabilityRouter::with_metrics(MetricsAggregator::new())
@@ -1467,7 +1706,10 @@ mod tests {
                 "thread_id": "sess-1"
             }
         });
-        let res = router.handle("tool-executor", "invoke", params).await.unwrap();
+        let res = router
+            .handle("tool-executor", "invoke", params)
+            .await
+            .unwrap();
         assert_eq!(res["success"], true);
 
         let calls = captured.lock().unwrap().clone();
@@ -1493,7 +1735,10 @@ mod tests {
             "tool_name": "bash_execute",
             "args": {"command": "echo hi", "session_id": "sess-1"},
         });
-        let _ = router.handle("tool-executor", "invoke", params).await.unwrap();
+        let _ = router
+            .handle("tool-executor", "invoke", params)
+            .await
+            .unwrap();
 
         let calls = captured.lock().unwrap().clone();
         assert_eq!(calls.len(), 1);
@@ -1517,7 +1762,10 @@ mod tests {
             "plugin_id": "hindsight",
             "args": {"query": "where did I leave the keys", "session_id": "sess-1"},
         });
-        let res = router.handle("tool-executor", "invoke", params).await.unwrap();
+        let res = router
+            .handle("tool-executor", "invoke", params)
+            .await
+            .unwrap();
         assert_eq!(res["success"], true);
 
         let calls = captured.lock().unwrap().clone();
@@ -1537,7 +1785,10 @@ mod tests {
             "plugin_id": "",
             "args": {"command": "echo hi"},
         });
-        let _ = router.handle("tool-executor", "invoke", params).await.unwrap();
+        let _ = router
+            .handle("tool-executor", "invoke", params)
+            .await
+            .unwrap();
 
         let calls = captured.lock().unwrap().clone();
         assert_eq!(calls.len(), 1);
@@ -1564,7 +1815,10 @@ mod tests {
             },
             "_log_ctx": {"request_id": "req-1"},
         });
-        let _ = router.handle("tool-executor", "invoke", params).await.unwrap();
+        let _ = router
+            .handle("tool-executor", "invoke", params)
+            .await
+            .unwrap();
 
         let calls = captured.lock().unwrap().clone();
         let inputs = &calls[0].2;
@@ -1572,7 +1826,10 @@ mod tests {
         assert!(inputs.get("_owner").is_none(), "_owner 应被剥离");
         assert!(inputs.get("_log_ctx").is_none(), "_log_ctx 应被剥离");
         assert!(inputs.get("tenant_id").is_none(), "tenant_id 应被剥离");
-        assert!(inputs.get("plugin_id").is_none(), "args 级 plugin_id 应被剥离（防伪造）");
+        assert!(
+            inputs.get("plugin_id").is_none(),
+            "args 级 plugin_id 应被剥离（防伪造）"
+        );
         // 业务字段保留（session_id/pipeline_id 是 param_inject 注入的显式参数）
         assert_eq!(inputs["command"], "echo hi");
         assert_eq!(inputs["session_id"], "sess-1");
@@ -1589,7 +1846,10 @@ mod tests {
             "tool_name": "bash_execute",
             "args": {"command": "echo hi", "session_id": "sess-1"},
         });
-        let _ = router.handle("tool-executor", "invoke", params).await.unwrap();
+        let _ = router
+            .handle("tool-executor", "invoke", params)
+            .await
+            .unwrap();
 
         let calls = captured.lock().unwrap().clone();
         assert_eq!(calls[0].0, "plugin_bash");
@@ -1599,14 +1859,20 @@ mod tests {
     async fn test_tool_executor_no_registry_falls_back_to_tool_name() {
         // 无注册表注入 + 无显式 plugin_id → plugin_id 兜底为 tool_name 本身。
         let captured = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
-        let router = KernelCapabilityRouter::with_metrics(MetricsAggregator::new())
-            .with_invoker(Arc::new(CaptureInvoker { captured: captured.clone() }));
+        let router = KernelCapabilityRouter::with_metrics(MetricsAggregator::new()).with_invoker(
+            Arc::new(CaptureInvoker {
+                captured: captured.clone(),
+            }),
+        );
 
         let params = json!({
             "tool_name": "some_tool",
             "args": {"x": 1},
         });
-        let _ = router.handle("tool-executor", "invoke", params).await.unwrap();
+        let _ = router
+            .handle("tool-executor", "invoke", params)
+            .await
+            .unwrap();
 
         let calls = captured.lock().unwrap().clone();
         assert_eq!(calls.len(), 1);
@@ -1633,7 +1899,8 @@ mod tests {
             _plugin_id: &str,
             _tool_name: &str,
             _inputs: &Value,
-        ) -> Result<agentos_core::types::ToolExecutionResult, agentos_core::types::PluginError> {
+        ) -> Result<agentos_core::types::ToolExecutionResult, agentos_core::types::PluginError>
+        {
             Err(agentos_core::types::PluginError {
                 message: "sidecar crashed".into(),
                 code: Some("MCP_TOOL_CALL_FAILED".into()),
@@ -1690,14 +1957,12 @@ mod tests {
         }
     }
 
-
     // ── M2：service-registry capability（用真实内存 SqliteStore 验证端到端）──
 
     /// 构造一个注入了内存 store 的路由器。
     fn router_with_store() -> KernelCapabilityRouter {
-        let store: Arc<dyn StorageBackend> = Arc::new(
-            agentos_engine::SqliteStore::open_memory().expect("open_memory"),
-        );
+        let store: Arc<dyn StorageBackend> =
+            Arc::new(agentos_engine::SqliteStore::open_memory().expect("open_memory"));
         KernelCapabilityRouter::new().with_store(store)
     }
 
@@ -1873,13 +2138,12 @@ mod tests {
         // 不注入 store → service-registry 应返回错误
         let router = KernelCapabilityRouter::new();
         let res = router
-            .handle(
-                "service-registry",
-                "memory.get",
-                json!({"id": "x"}),
-            )
+            .handle("service-registry", "memory.get", json!({"id": "x"}))
             .await;
-        assert!(res.is_err(), "service-registry must error when store not injected");
+        assert!(
+            res.is_err(),
+            "service-registry must error when store not injected"
+        );
     }
 
     #[tokio::test]
@@ -1888,7 +2152,10 @@ mod tests {
         let res = router
             .handle("service-registry", "bogus.op", json!({}))
             .await;
-        assert!(res.is_err(), "unknown service-registry domain/op must error");
+        assert!(
+            res.is_err(),
+            "unknown service-registry domain/op must error"
+        );
     }
 
     // ── F-REVIEW-2：pipeline-executor.get_run_status（复盘轮询真实完成）──
@@ -1932,7 +2199,10 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(res2["status"], "completed");
-        assert!(res2.get("ended_at").is_some(), "completed run 应有 ended_at");
+        assert!(
+            res2.get("ended_at").is_some(),
+            "completed run 应有 ended_at"
+        );
     }
 
     #[tokio::test]
@@ -1966,5 +2236,242 @@ mod tests {
             )
             .await;
         assert!(res3.is_err(), "不存在的 run 必须报错");
+    }
+
+    // ── G5：config-reader.get 真实读取 ──
+
+    async fn config_reader_roundtrip(
+        reader: ConfigReaderFn,
+        params: serde_json::Value,
+    ) -> Result<serde_json::Value, agentos_mcp::McpError> {
+        let router = KernelCapabilityRouter::new().with_config_reader(reader);
+        router.handle("config-reader", "get", params).await
+    }
+
+    #[tokio::test]
+    async fn g5_config_reader_returns_declared_value() {
+        let reader: ConfigReaderFn = Arc::new(|_pid, key| {
+            assert_eq!(key, "llm");
+            Ok(json!({"model": "glm"}))
+        });
+        let out =
+            config_reader_roundtrip(reader, json!({"key": "llm", "_plugin_id": "some_plugin"}))
+                .await
+                .unwrap();
+        assert_eq!(out["value"]["model"], "glm");
+    }
+
+    #[tokio::test]
+    async fn g5_config_reader_denies_undeclared_file_id() {
+        let reader: ConfigReaderFn = Arc::new(|_pid, key| Err(format!("file_id '{}' 未声明", key)));
+        let err = config_reader_roundtrip(reader, json!({"key": "secret", "_plugin_id": "p1"}))
+            .await
+            .unwrap_err();
+        assert!(format!("{}", err).contains("拒绝"));
+    }
+
+    #[tokio::test]
+    async fn g5_config_reader_requires_plugin_context() {
+        let reader: ConfigReaderFn = Arc::new(|_, _| Ok(json!({})));
+        let err = config_reader_roundtrip(reader, json!({"key": "llm"}))
+            .await
+            .unwrap_err();
+        assert!(format!("{}", err).contains("_plugin_id"));
+    }
+
+    #[tokio::test]
+    async fn g5_config_reader_without_reader_stays_noop() {
+        let router = KernelCapabilityRouter::new();
+        let out = router
+            .handle(
+                "config-reader",
+                "get",
+                json!({"key": "llm", "_plugin_id": "p1"}),
+            )
+            .await
+            .unwrap();
+        assert!(out["value"].is_null(), "未装配读取器保持 no-op 兜底");
+    }
+
+    // ── G6：granted_capabilities 白名单单点校验 ──
+
+    #[tokio::test]
+    async fn g6_granted_capability_allowed() {
+        let lookup: GrantsLookupFn = Arc::new(|pid| {
+            assert_eq!(pid, "p1");
+            Some(vec!["event-bus".to_string()])
+        });
+        let router = KernelCapabilityRouter::new().with_grants_lookup(lookup);
+        let out = router
+            .handle(
+                "event-bus",
+                "emit",
+                json!({"_plugin_id": "p1", "type": "x"}),
+            )
+            .await
+            .unwrap();
+        // event-bus.emit 返回 200-ish json（不因授权被拒即通过）。
+        assert!(out.get("status").is_some() || !out.is_null());
+    }
+
+    #[tokio::test]
+    async fn g6_ungranted_capability_denied() {
+        let lookup: GrantsLookupFn = Arc::new(|_| Some(vec!["config-reader".to_string()]));
+        let router = KernelCapabilityRouter::new().with_grants_lookup(lookup);
+        let err = router
+            .handle(
+                "event-bus",
+                "emit",
+                json!({"_plugin_id": "p1", "type": "x"}),
+            )
+            .await
+            .unwrap_err();
+        assert!(
+            format!("{}", err).contains("not granted"),
+            "应被白名单拒绝: {}",
+            err
+        );
+    }
+
+    #[tokio::test]
+    async fn g6_undeclared_grants_default_allow() {
+        // 未声明 granted_capabilities（None）→ 默认全授予（存量兼容）。
+        let lookup: GrantsLookupFn = Arc::new(|_| None);
+        let router = KernelCapabilityRouter::new().with_grants_lookup(lookup);
+        let out = router
+            .handle(
+                "event-bus",
+                "emit",
+                json!({"_plugin_id": "p1", "type": "x"}),
+            )
+            .await
+            .unwrap();
+        assert!(out.get("status").is_some() || !out.is_null());
+    }
+
+    #[tokio::test]
+    async fn g6_no_lookup_no_check() {
+        // 未装配授权查询器 → 不校验（旧装配兼容）。
+        let router = KernelCapabilityRouter::new();
+        let out = router
+            .handle(
+                "event-bus",
+                "emit",
+                json!({"_plugin_id": "p1", "type": "x"}),
+            )
+            .await
+            .unwrap();
+        assert!(out.get("status").is_some() || !out.is_null());
+    }
+
+    // ── G3：registry.register_tool 运行时动态注册 ──
+
+    #[tokio::test]
+    async fn g3_register_tool_calls_registrar() {
+        use std::sync::Mutex;
+        let captured: Arc<Mutex<Vec<(String, String)>>> = Arc::new(Mutex::new(Vec::new()));
+        let cap2 = captured.clone();
+        let registrar: DynamicToolRegistrar = Arc::new(move |pid, tool| {
+            cap2.lock().unwrap().push((pid.to_string(), tool.name));
+            Ok(())
+        });
+        let router = KernelCapabilityRouter::new().with_dynamic_tool_registrar(registrar);
+        let out = router
+            .handle(
+                "registry",
+                "register_tool",
+                json!({
+                    "_plugin_id": "connector",
+                    "name": "dyn_query",
+                    "description": "查询外部系统",
+                    "input_schema": {"type": "object"},
+                    "category": "search",
+                }),
+            )
+            .await
+            .unwrap();
+        assert_eq!(out["status"], "registered");
+        assert_eq!(out["plugin_id"], "connector");
+        assert_eq!(
+            *captured.lock().unwrap(),
+            vec![("connector".into(), "dyn_query".into())]
+        );
+    }
+
+    #[tokio::test]
+    async fn g3_register_tool_requires_plugin_context() {
+        let router = KernelCapabilityRouter::new();
+        let err = router
+            .handle("registry", "register_tool", json!({"name": "x"}))
+            .await
+            .unwrap_err();
+        assert!(format!("{}", err).contains("_plugin_id"));
+    }
+
+    #[tokio::test]
+    async fn g3_register_tool_requires_name() {
+        let registrar: DynamicToolRegistrar = Arc::new(|_, _| Ok(()));
+        let router = KernelCapabilityRouter::new().with_dynamic_tool_registrar(registrar);
+        let err = router
+            .handle("registry", "register_tool", json!({"_plugin_id": "p"}))
+            .await
+            .unwrap_err();
+        assert!(format!("{}", err).contains("name"));
+    }
+
+    #[tokio::test]
+    async fn g3_register_tool_without_registrar_errors() {
+        let router = KernelCapabilityRouter::new();
+        let err = router
+            .handle(
+                "registry",
+                "register_tool",
+                json!({"_plugin_id": "p", "name": "x"}),
+            )
+            .await
+            .unwrap_err();
+        assert!(format!("{}", err).contains("未装配"));
+    }
+
+    #[tokio::test]
+    async fn g3_envelope_gate_applies_to_registry_namespace() {
+        // 信封闸（G6 单点）：声明了白名单但不含 "registry" → 拒绝（信封二道闸验证）。
+        let registrar: DynamicToolRegistrar = Arc::new(|_, _| Ok(()));
+        let lookup: GrantsLookupFn = Arc::new(|_| Some(vec!["config-reader".to_string()]));
+        let router = KernelCapabilityRouter::new()
+            .with_dynamic_tool_registrar(registrar)
+            .with_grants_lookup(lookup);
+        let err = router
+            .handle(
+                "registry",
+                "register_tool",
+                json!({"_plugin_id": "p", "name": "x"}),
+            )
+            .await
+            .unwrap_err();
+        assert!(
+            format!("{}", err).contains("not granted"),
+            "信封闸应先于注册拒绝: {}",
+            err
+        );
+    }
+
+    #[tokio::test]
+    async fn g3_envelope_grant_allows_registration() {
+        // granted 含 "registry" → 信封闸放行,注册成功。
+        let registrar: DynamicToolRegistrar = Arc::new(|_, _| Ok(()));
+        let lookup: GrantsLookupFn = Arc::new(|_| Some(vec!["registry".to_string()]));
+        let router = KernelCapabilityRouter::new()
+            .with_dynamic_tool_registrar(registrar)
+            .with_grants_lookup(lookup);
+        let out = router
+            .handle(
+                "registry",
+                "register_tool",
+                json!({"_plugin_id": "p", "name": "x"}),
+            )
+            .await
+            .unwrap();
+        assert_eq!(out["status"], "registered");
     }
 }

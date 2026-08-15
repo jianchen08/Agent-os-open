@@ -168,7 +168,9 @@ impl KernelCounters {
                         None,
                         None,
                     );
-                    items_idx[idx].last_flushed.store(it.value, Ordering::Relaxed);
+                    items_idx[idx]
+                        .last_flushed
+                        .store(it.value, Ordering::Relaxed);
                 }
                 MetricType::Gauge => {
                     aggregator.record_at(

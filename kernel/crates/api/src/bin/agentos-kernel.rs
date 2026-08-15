@@ -22,15 +22,10 @@ use agentos_api::{
     load_pipeline_config, load_step_library, routes::AppState, start_server,
     validate_no_name_conflicts, KernelCapabilityRouter,
 };
-use agentos_core::traits::{
-    CapabilityRegistry, PluginLoader, PluginType, StorageBackend, ToolDescriptor,
-};
+use agentos_core::traits::{CapabilityRegistry, PluginLoader, ToolDescriptor};
 use agentos_core::types::{ToolCategory, ToolSource, UserRecord};
-use agentos_engine::SqliteStore;
 use agentos_invoker::PluginInvokerImpl;
-use agentos_plugin_loader::{
-    CapabilityRegistryImpl, NativePluginLoader, PluginLoaderImpl, WasmRuntime,
-};
+use agentos_plugin_loader::{CapabilityRegistryImpl, NativePluginLoader, PluginLoaderImpl};
 use tracing::{info, warn};
 use tracing_subscriber::{fmt, prelude::*};
 
@@ -39,7 +34,7 @@ use tracing_subscriber::{fmt, prelude::*};
 /// 0.5.0 最小持久化地基：auth 由硬编码占位改为查 DB，启动时确保 admin 存在。
 /// tenant_id = "default"（与多租户隔离地基的默认租户一致），保证旧数据
 /// （0.5.0 前以 default 写入的会话/消息）仍归 admin 可见。
-async fn seed_admin_user(store: Arc<SqliteStore>) {
+async fn seed_admin_user(store: Arc<dyn agentos_core::traits::StorageBackend>) {
     const ADMIN_ID: &str = "00000000-0000-0000-0000-000000000001";
     match store.get_user_by_id(ADMIN_ID).await {
         Ok(Some(_)) => {
@@ -62,7 +57,9 @@ async fn seed_admin_user(store: Arc<SqliteStore>) {
             };
             match store.create_user(&admin).await {
                 Ok(()) => info!(target: "agentos-kernel", "已播种内置 admin 用户 (tenant=default)"),
-                Err(e) => warn!(target: "agentos-kernel", error = %e, "播种 admin 用户失败（login 将回退内置硬编码）"),
+                Err(e) => {
+                    warn!(target: "agentos-kernel", error = %e, "播种 admin 用户失败（login 将回退内置硬编码）")
+                }
             }
         }
         Err(e) => {
@@ -184,6 +181,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
+    // 把 config_root 发布到进程环境：invoker 插件指纹与 mcp spawn 的
+    // .env 增量叠加（env_file 模块）靠它定位项目根 .env——用户在设置页
+    // 填写 API Key 后无需重启内核即可生效。
+    if std::env::var("AGENTOS_CONFIG_ROOT").is_err() {
+        std::env::set_var("AGENTOS_CONFIG_ROOT", &config_root);
+    }
+
     // 创建插件加载器——以 plugins/shared/ 为内置根，启用 user_root 覆盖语义，
     // 并接入 config_root（P0-1：否则 load_config() 恒返回空 {}，插件收不到配置）
     let loader = build_plugin_loader(&plugins_dir, user_plugins_dir, &config_root);
@@ -200,13 +204,29 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         plugins_dir.display()
     );
 
-    let manifests = loader.discover(&root_paths.iter().map(|s| s.as_str()).collect::<Vec<_>>()).await.unwrap_or_else(|e| {
-        warn!(
-            target: "agentos-kernel",
-            "Failed to discover plugins: {}. Continuing with empty plugin list.", e.message
-        );
-        Vec::new()
-    });
+    let manifests = loader
+        .discover(&root_paths.iter().map(|s| s.as_str()).collect::<Vec<_>>())
+        .await
+        .unwrap_or_else(|e| {
+            warn!(
+                target: "agentos-kernel",
+                "Failed to discover plugins: {}. Continuing with empty plugin list.", e.message
+            );
+            Vec::new()
+        });
+
+    // M2-static：启动期按 dependencies 静态拓扑排序——插件间启动顺序从
+    // HashMap 任意序变为显式可证明的依赖序（依赖者后加载；tie-break 字典序）。
+    // 依赖环 fail-fast（与 pipeline load_and_compile 的坏配置拒绝启动一致）。
+    let manifests =
+        agentos_plugin_loader::sort_manifests_topologically(&manifests).map_err(|e| {
+            eprintln!("[boot] 插件依赖环检测失败，拒绝启动: {}", e);
+            std::io::Write::flush(&mut std::io::stderr()).ok();
+            Box::<dyn std::error::Error>::from(format!(
+                "circular plugin dependencies at boot: {}",
+                e
+            ))
+        })?;
 
     info!(
         target: "agentos-kernel",
@@ -216,6 +236,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // 创建能力注册表
     let registry = Arc::new(CapabilityRegistryImpl::new());
+    // M1：per-plugin 注册账本（guard 化）——启动注册循环经 guarded 注册入账本，
+    // disable/unload 路径经 revoke 结构性收回（registry 四维 + broadcaster 绑定）。
+    let plugin_scopes = Arc::new(agentos_plugin_loader::PluginScopeRegistry::new());
 
     // 安装触发模型 L1：加载 default_profile.yaml 启用层。
     // disabled 的插件不进注册表出口（tools/route_signals/http_routes 不暴露）。
@@ -224,7 +247,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // 将 manifest 中声明的工具注册到 CapabilityRegistry
     let mut tool_count = 0usize;
-    let mut skipped_internal = 0usize;
     let mut skipped_disabled = 0usize;
     for manifest in &manifests {
         // L1 Enabled 过滤：disabled 插件不进出口（安装触发模型 §1.1）
@@ -232,16 +254,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             skipped_disabled += 1;
             continue;
         }
-        // ADR 附录D①（task_11）：只有 plugin_type == tool 的插件，其
-        // capabilities.tools 才是"给大模型调用的工具"，注册进 tools 维。
-        // pipeline 的 `*.execute` 是内部调用入口、system 的是服务能力，
-        // 不暴露给 LLM（/api/v1/tools）；P6 invoke_entry 治理后彻底分离。
-        if manifest.plugin_type == PluginType::Tool {
+        // D.6 槽位拆分（2026-08-15，废止原附录D① 类型门控）：
+        // capabilities.tools 语义唯一 = 给 LLM 的工具，声明即注册（不看类型）；
+        // 内部服务方法在 capabilities.services（不注册，走 invoke_entry/
+        // http_endpoints/显式 plugin_id/provides 通道）。
+        {
+            let scope = plugin_scopes.scope_of(&manifest.id);
             for tool_cap in &manifest.capabilities.tools {
-                let category = tool_cap
-                    .category
-                    .clone()
-                    .unwrap_or(ToolCategory::System);
+                let category = tool_cap.category.clone().unwrap_or(ToolCategory::System);
                 let descriptor = ToolDescriptor {
                     name: tool_cap.name.clone(),
                     description: tool_cap
@@ -255,37 +275,35 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         .unwrap_or(serde_json::json!({})),
                     output_schema: tool_cap.output_schema.clone(),
                     category,
-                    source: if manifest.host_type
-                        == agentos_core::traits::HostType::Sidecar
-                    {
+                    source: if manifest.host_type == agentos_core::traits::HostType::Sidecar {
                         ToolSource::Mcp
                     } else {
                         ToolSource::Builtin
                     },
                     ui: tool_cap.ui.clone(),
+                    render: tool_cap.render.clone(),
                 };
-                registry.register_tool(&manifest.id, descriptor);
+                // M1：guarded 注册——撤销 guard 入 scope，disable 时结构性收回。
+                scope.track(registry.register_tool_guarded(&manifest.id, descriptor));
                 tool_count += 1;
             }
-        } else {
-            skipped_internal += manifest.capabilities.tools.len();
         }
 
-        // 注册路由信号
+        // 注册路由信号（M1 guarded）
         if !manifest.capabilities.route_signals.is_empty() {
-            registry.register_route_signals(
+            let scope = plugin_scopes.scope_of(&manifest.id);
+            scope.track(registry.register_route_signals_guarded(
                 &manifest.id,
                 manifest.capabilities.route_signals.clone(),
-            );
+            ));
         }
     }
 
     info!(
         target: "agentos-kernel",
-        "Registered {} tools from {} plugins (filtered out {} internal/service entries, {} disabled by profile, ADR 附录D①)",
+        "Registered {} tools from {} plugins (declaration-based, D.6 slot split; {} disabled by profile)",
         tool_count,
         manifests.len(),
-        skipped_internal,
         skipped_disabled
     );
 
@@ -296,8 +314,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .filter(|m| enablement.is_enabled(&m.id, m.enabled))
         .cloned()
         .collect();
-    let http_errors =
-        agentos_api::http_dispatcher::register_manifest_http_routes(&registry, &enabled_manifests);
+    let http_errors = agentos_api::http_dispatcher::register_manifest_http_routes(
+        &registry,
+        &enabled_manifests,
+        Some(&plugin_scopes),
+    );
     let http_route_count = registry.list_http_routes().len();
     if !http_errors.is_empty() {
         panic!(
@@ -311,25 +332,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         http_route_count
     );
 
-    // 初始化管道引擎——SQLite 持久化文件（默认项目根 agentos.db，可用环境变量覆盖）。
-    // 进程重启后保留 runs/messages/traces/blobs 历史；多轮对话靠 messages 表按
-    // session_id 恢复上下文。开发/测试可用 AGENTOS_DB_PATH=:memory: 切回内存库。
-    //
-    // 0.2 用独立 db 文件（agentos_kernel.db），与 0.1 的 agentos.db 物理隔离：
-    // 0.2 是全新四表 schema（runs/messages/traces/blobs），不迁 0.1 数据，
-    // 隔离避免 0.1 老库同名表 schema 漂移的隐患（IF NOT EXISTS 不会改老表结构）。
-    let db_path = std::env::var("AGENTOS_DB_PATH").unwrap_or_else(|_| {
-        config_root
-            .parent()
-            .map(|root| root.join("agentos_kernel.db").to_string_lossy().to_string())
-            .unwrap_or_else(|| "agentos_kernel.db".to_string())
-    });
-    info!(target: "agentos-kernel", "SQLite store: {}", db_path);
-    let store = Arc::new(if db_path == ":memory:" {
-        SqliteStore::open_memory()?
-    } else {
-        SqliteStore::open(&db_path)?
-    });
+    // 初始化存储——StorageBackend driver 化（§9.6）：按 config/storage.yaml 或
+    // 环境变量选 driver（sqlite | memory；postgres 留桩），默认 sqlite +
+    // 项目根 agentos_kernel.db（AGENTOS_DB_PATH/:memory: 兼容）。
+    // 返回双句柄：store_dyn（业务账本 trait 面，runs/messages/traces/blobs/memory/
+    // users——换 driver 时完全可用）+ sqlite_db（SQLite 专有 db-admin 表驱动接口，
+    // 非 SQLite driver 下为 None → db-admin capability 诚实降级）。
+    // 存储是自举必需件 + 审计真相源，driver 编译进内核而非插件轨（§9.6 判据）。
+    let storage_cfg = agentos_engine::storage_factory::resolve_storage_config(&config_root);
+    info!(
+        target: "agentos-kernel",
+        driver = %storage_cfg.driver,
+        sqlite_path = %storage_cfg.sqlite_path,
+        "Storage driver resolved (config/storage.yaml > env > default sqlite)"
+    );
+    let (store, sqlite_db) = agentos_engine::storage_factory::open_storage(&storage_cfg)?;
+    let store_dyn: Arc<dyn agentos_core::traits::StorageBackend> = store.clone();
 
     // 播种内置 admin 用户（0.5.0 最小持久化地基）。
     // 首次启动时若 users 表无 admin，插入（admin/admin12345/tenant=default）。
@@ -339,37 +357,32 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // B2：启动时清扫孤儿 run——上次进程崩溃留下的 status='running' 的 run
     // 标记为 failed + 补 ended_at（persist_run_end 未执行的真实表现；不清扫会永远卡
     // running，历史/会话状态悬空）。已结束的 run 不受影响。
-    let reaped = store.reap_orphan_runs("default").unwrap_or(0);
-    if reaped > 0 {
-        warn!(target: "agentos-kernel", reaped = reaped, "启动清扫孤儿 run（标记为 failed）");
+    // B2 清扫是 SQLite 专有路径（reap_orphan_runs 固有方法）——非 SQLite driver
+    // 跳过（孤儿 run 清扫属启动家政，跳过不影响正确性，仅留状态悬空到下次 sqlite 起时清）。
+    if let Some(sqlite) = sqlite_db.as_ref() {
+        let reaped = sqlite.reap_orphan_runs("default").unwrap_or(0);
+        if reaped > 0 {
+            warn!(target: "agentos-kernel", reaped = reaped, "启动清扫孤儿 run（标记为 failed）");
+        }
     }
 
     // 创建真实插件调用器——按 host_type 透明分发：
     //   Sidecar: 通过 MCP stdio fork Python sidecar 执行插件
     //   InProcess: 经 NativePluginLoader 加载 cdylib 走 C-ABI（放进插件目录即用）
-    //   Wasm: 经 WasmRuntime（wasmtime）加载执行 .wasm（放进插件目录即用）
-    // 默认配置即可运行；host 能力注册表/白名单校验器留空（按需后续注入）。
-    // 阶段3 遗留：在 loader 被 move 进 Arc 之前，先取出插件根目录映射，
+    // 默认配置即可运行。原 Wasm 轨已按两轨终局决策关闭摘除。
+    // 在 loader 被 move 进 Arc 之前，先取出插件根目录映射，
     // 后续注入 AppState 启用 /ext/{plugin_id}/assets/** 静态资源托管。
     let plugin_dirs = loader.get_plugin_dirs();
-    eprintln!(
-        "[boot-diag] plugin_dirs loaded: {} entries",
-        plugin_dirs.len()
-    );
     let loader_arc = Arc::new(loader);
-    let wasm_runtime = Arc::new(WasmRuntime::new()?);
     let native_loader = Arc::new(NativePluginLoader::new());
-    let invoker = Arc::new(
-        PluginInvokerImpl::new(loader_arc.clone())
-            .set_wasm_runtime(wasm_runtime)
-            .set_native_loader(native_loader),
-    );
+    let invoker =
+        Arc::new(PluginInvokerImpl::new(loader_arc.clone()).set_native_loader(native_loader));
     // 显式注入 PYTHONPATH 候选目录：sidecar SDK 统一用 `from src.core.logging import`
     // 这种带 src. 前缀的 import，要让其解析成功，sys.path 必须含 src/ 的**父目录**
     // （project_root），而非 src/ 本身（否则 Python 在 <src>/src/core 找模块，报
-    // `No module named 'src.core'`）。历史上靠 AGENTOS_PLUGINS_DIR 环境变量推算，
-    // 但不同启动方式（.sh / IDE）未必设置该变量，导致 sidecar 启动即 import 失败、
-    // initialize 卡到超时。这里由内核直接从已知 plugins_dir 推算 project_root 注入，
+    // `No module named 'src.core'`）。AGENTOS_PLUGINS_DIR 环境变量推算不可靠
+    // （不同启动方式 .sh / IDE 未必设置该变量，会导致 sidecar 启动即 import 失败、
+    // initialize 卡到超时），这里由内核直接从已知 plugins_dir 推算 project_root 注入，
     // 不依赖外部环境。plugins/shared → plugins/ → project_root。
     if let Some(project_root) = plugins_dir
         .parent()
@@ -391,6 +404,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // 旁路 fan-out 给审计/指标订阅者（与 engine 的 OnPipelineStart/End 同一总线）。
     // 必须在 spawn 任何 sidecar 前完成（start_idle_gc 之后、请求接入之前即满足）。
     invoker.set_hook_bus(hook_bus.clone());
+    // 域事件发射点（session_routes / ws_session 的 handler）经全局单例访问同一总线
+    // （它们只持 AppState，不便穿层传总线句柄；未注册时观察层静默降级）。
+    agentos_hooks::set_global(hook_bus.clone());
 
     // 监控 M1：创建指标聚合器（三通道汇聚：内核自采 + 插件 record_metric + invoker 代采进程态）。
     // M4：router 持聚合器，metrics.record 反向调用写入它。
@@ -404,8 +420,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     //   经 KernelCounters → flush_to → MetricsAggregator → Prometheus 链路暴露。
     // 两者均 spawn 后台任务，慢消费者 Lagged 自动 warn 恢复（绝不 fatal）。
     let _audit_handle = agentos_hooks::spawn_audit_subscriber(hook_bus.clone());
-    let _lifecycle_metrics_handle =
-        agentos_api::metrics::spawn_lifecycle_metrics_subscriber(hook_bus.clone(), kernel_counters.clone());
+    let _lifecycle_metrics_handle = agentos_api::metrics::spawn_lifecycle_metrics_subscriber(
+        hook_bus.clone(),
+        kernel_counters.clone(),
+    );
     info!(target: "agentos-kernel", "lifecycle hook event bus + subscribers (audit/metrics) started");
 
     // 启用 sidecar→内核反向 capability 通道（审批暂停/恢复、复盘调管道、event-bus 的地基）。
@@ -424,7 +442,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // 路由完全从 manifest provides.capabilities 声明派生（含 tool_prefix），
     // 内核零硬编码——新插件声明 provides 即自动注册，无需改内核。
     let handler_registry = Arc::new(agentos_mcp::CapabilityHandlerRegistry::new());
-    let mcp_bridge = Arc::new(agentos_plugin_loader::McpBridge::new(invoker.clone() as Arc<dyn agentos_core::traits::PluginInvoker>));
+    let mcp_bridge = Arc::new(agentos_plugin_loader::McpBridge::new(
+        invoker.clone() as Arc<dyn agentos_core::traits::PluginInvoker>
+    ));
     mcp_bridge.add_routes_from_manifests(&enabled_manifests);
     let registered = agentos_plugin_loader::register_provided_capabilities(
         &handler_registry,
@@ -437,17 +457,208 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         registered
     );
 
-    let router = Arc::new(
-        KernelCapabilityRouter::with_metrics(
-            metrics_aggregator.clone(),
+    // boot-plugin 第一刀：db-admin capability（SQL 能力层留内核，HTTP 面在
+    // plugins/shared/db_admin 插件）。handler 直连 SqliteStore（cdylib 级信任件，
+    // 无 IPC），鉴权在 handler 内核侧执行（插件仅转发 Authorization 头，见
+    // db-admin/src/capability.rs 模块文档）。注册先于任何 sidecar spawn——
+    // initialize 握手的 build_declared_capabilities_from_namespaces 据此把
+    // db-admin 声明给 db_admin 插件（SDK 创建 CapabilityHandle）。
+    // db-admin 的 db 句柄按 driver 注入：非 SQLite driver 为 None（handler 的
+    // get_db 返回"统一数据接口未启用"400，诚实降级）。
+    handler_registry.register(std::sync::Arc::new(
+        agentos_db_admin::DbAdminCapabilityHandler::new(Some(store_dyn.clone()), sqlite_db.clone()),
+    ));
+    info!(
+        target: "agentos-kernel",
+        "Registered db-admin capability handler (7 methods, SQL layer in-kernel, HTTP face in db_admin plugin)"
+    );
+
+    // boot-plugin 第二刀：user-admin capability（用户管理**策略面**留内核，
+    // HTTP 面在 plugins/shared/user_admin 插件）。§9.6 精确拆分：auth 执行门
+    // （login/logout/me/register/refresh 的验签与路由准入）永留内核（auth.rs
+    // 一行不动）；本 handler 只承载管理性质操作（list_users/update_role/
+    // update_tenant/delete_user——内核此前无这些端点，直接以插件化形态新建）。
+    // 鉴权与 self-service 防护（admin 不能删自己/降自己角色/改自己租户）在
+    // handler 内核侧执行（插件仅转发 Authorization 头，见
+    // user-admin/src/capability.rs 模块文档）。注册先于任何 sidecar spawn——
+    // initialize 握手据此把 user-admin 声明给 user_admin 插件。
+    // update_role/update_tenant 的 db 句柄按 driver 注入：非 SQLite driver 为
+    // None（handler 诚实降级 400）；list/delete 走 StorageBackend trait（跨 driver）。
+    handler_registry.register(std::sync::Arc::new(
+        agentos_user_admin::UserAdminCapabilityHandler::new(
+            Some(store_dyn.clone()),
+            sqlite_db.clone(),
+        ),
+    ));
+    info!(
+        target: "agentos-kernel",
+        "Registered user-admin capability handler (4 methods, user-management policy layer in-kernel, HTTP face in user_admin plugin)"
+    );
+
+    // boot-plugin 第三刀：metrics-admin capability（指标读面留内核，HTTP 面在
+    // plugins/shared/metrics_admin 插件）。写面 metrics.record（插件上报指标的
+    // 热路径反向调用）仍是 KernelCapabilityRouter 内置 match，不经此 handler。
+    // 聚合器与 router/AppState 共享同一实例（Clone 内部 Arc），查询读到实时数据。
+    // 鉴权（admin/viewer 读面）在 handler 内核侧执行（插件仅转发 Authorization
+    // 头，见 metrics/capability.rs 模块文档）。/metrics（Prometheus 抓取）作为
+    // 运维契约保留内核路由，不经插件。
+    handler_registry.register(std::sync::Arc::new(
+        agentos_api::metrics::MetricsAdminCapabilityHandler::new(
+            Some(store_dyn.clone()),
+            Some(metrics_aggregator.clone()),
+        ),
+    ));
+    info!(
+        target: "agentos-kernel",
+        "Registered metrics-admin capability handler (3 methods: query/list/prometheus, read layer in-kernel, HTTP face in metrics_admin plugin)"
+    );
+
+    // G5：config-reader.get 读取器——file_id 必须在调用方插件的 manifest
+    // config_files 里声明（插件只能读自己声明的配置，越权拒绝）。
+    // ConfigCenter 带缓存（mtime 失效），热路径零重复读盘。
+    let cc_for_reader = Arc::new(agentos_config::config_center::ConfigCenter::new(
+        config_root.clone(),
+    ));
+    let loader_for_reader = loader_arc.clone();
+    let config_reader: agentos_api::capability_router::ConfigReaderFn =
+        Arc::new(move |plugin_id, file_id| {
+            let manifest = loader_for_reader
+                .get_manifest(plugin_id)
+                .ok_or_else(|| format!("plugin '{}' not found", plugin_id))?;
+            let mapping = manifest
+                .config_files
+                .iter()
+                .find(|c| c.id == file_id)
+                .ok_or_else(|| {
+                    format!(
+                        "file_id '{}' 未在插件 {} 的 config_files 声明（越权读取拒绝）",
+                        file_id, plugin_id
+                    )
+                })?;
+            // mapping.path 相对 config/ 根（可能带 config/ 前缀，归一化后交给 ConfigCenter）。
+            let rel = mapping
+                .path
+                .trim_start_matches("config/")
+                .trim_start_matches('/');
+            cc_for_reader
+                .load(rel)
+                .map_err(|e| format!("读取配置 {} 失败: {}", mapping.path, e))
+        });
+
+    // G6：granted_capabilities 白名单查询器——声明非空即白名单制，未声明默认
+    // 全授予（存量插件零迁移）。执行点在 KernelCapabilityRouter::handle 单点，
+    // sidecar（PluginScopedRouter 注 _plugin_id）与 native（NativeHostServices 注
+    // _plugin_id）同判。
+    let loader_for_grants = loader_arc.clone();
+    let grants_lookup: agentos_api::capability_router::GrantsLookupFn =
+        Arc::new(move |plugin_id| {
+            loader_for_grants.get_manifest(plugin_id).and_then(|m| {
+                if m.granted_capabilities.is_empty() {
+                    None
+                } else {
+                    Some(m.granted_capabilities.clone())
+                }
+            })
+        });
+
+    // G3：动态工具注册器——enablement 闸 + 写入注册表（M1 guarded 入 scope，
+    // disable 即结构性收回）+ 持久化（可重建性闸：写 dynamic_tools 表，
+    // 重启由启动路径重放，成为"最终配置"的一部分）。信封闸（granted
+    // 须含 "registry"）已由 router 入口的 G6 单点校验覆盖。
+    // enabled 集合提前构造（后续 AppState 复用同一 Arc）。
+    let enabled_plugin_ids: Arc<tokio::sync::RwLock<std::collections::HashSet<String>>> =
+        Arc::new(tokio::sync::RwLock::new(
+            manifests
+                .iter()
+                .filter(|m| enablement.is_enabled(&m.id, m.enabled))
+                .map(|m| m.id.clone())
+                .collect(),
+        ));
+    let dynamic_registrar: agentos_api::capability_router::DynamicToolRegistrar = {
+        let registry_for_dyn = registry.clone();
+        let scopes_for_dyn = plugin_scopes.clone();
+        let store_for_dyn = sqlite_db.clone();
+        let enabled_for_dyn = enabled_plugin_ids.clone();
+        Arc::new(
+            move |plugin_id: &str, tool: agentos_core::traits::ToolDescriptor| {
+                // enablement 闸：disabled 插件不得注册。try_read 竞争失败时宽容放行
+                // （注册低频，禁用竞态毫秒级窗口可接受；错误方向是"多注册一次"而非丢注册）。
+                if let Ok(ids) = enabled_for_dyn.try_read() {
+                    if !ids.contains(plugin_id) {
+                        return Err(format!(
+                            "plugin '{}' is disabled (L1 Enabled 闸)",
+                            plugin_id
+                        ));
+                    }
+                }
+                // 写入注册表（guarded：guard 入 scope，禁用插件时一次性收回）。
+                scopes_for_dyn
+                    .scope_of(plugin_id)
+                    .track(registry_for_dyn.register_tool_guarded(plugin_id, tool.clone()));
+                // 持久化（可重建性闸）。
+                let descriptor_json = serde_json::to_string(&tool)
+                    .map_err(|e| format!("descriptor 序列化失败: {}", e))?;
+                let sqlite = store_for_dyn.as_ref().ok_or_else(|| {
+                    "动态注册不可用：当前存储 driver 无 SQLite 专有表（可重建性闸要求持久化）"
+                        .to_string()
+                })?;
+                sqlite
+                    .save_dynamic_tool(plugin_id, &tool.name, &descriptor_json)
+                    .map_err(|e| format!("dynamic_tools 持久化失败: {}", e))?;
+                Ok(())
+            },
         )
-        .with_invoker(invoker.clone())
-        .with_registry(registry.clone())
-        .with_session(session_coord.clone())
-        .with_store(store.clone())
-        .with_handler_registry(handler_registry.clone()),
+    };
+
+    let router = Arc::new(
+        KernelCapabilityRouter::with_metrics(metrics_aggregator.clone())
+            .with_invoker(invoker.clone())
+            .with_registry(registry.clone())
+            .with_session(session_coord.clone())
+            .with_store(store.clone())
+            .with_handler_registry(handler_registry.clone())
+            .with_config_reader(config_reader)
+            .with_grants_lookup(grants_lookup)
+            .with_dynamic_tool_registrar(dynamic_registrar.clone()),
     );
     invoker.set_router(router);
+
+    // G3 启动重放：dynamic_tools 表的持久化动态注册 → registry（可重建性闸的
+    // 重放侧——重启后 enabled 插件的动态工具自动恢复，观察等价"从未重启"）。
+    // 复用 registrar 闭包（三道闸 + 持久化全复用，upsert 幂等）。
+    if let Some(sqlite_replay) = sqlite_db.as_ref() {
+        let enabled_set = enabled_plugin_ids.read().await.clone();
+        match sqlite_replay.list_dynamic_tools() {
+            Ok(rows) => {
+                let mut replayed = 0usize;
+                for (pid, _name, descriptor_json) in rows {
+                    if !enabled_set.contains(&pid) {
+                        continue; // disabled 插件的记录保留但不重放（re-enable 后插件自行重建）
+                    }
+                    match serde_json::from_str::<agentos_core::traits::ToolDescriptor>(
+                        &descriptor_json,
+                    ) {
+                        Ok(tool) => {
+                            if dynamic_registrar(&pid, tool).is_ok() {
+                                replayed += 1;
+                            }
+                        }
+                        Err(e) => {
+                            warn!(target: "agentos-kernel", plugin = %pid, error = %e,
+                                  "G3 重放：dynamic_tools 记录反序列化失败，跳过");
+                        }
+                    }
+                }
+                if replayed > 0 {
+                    info!(target: "agentos-kernel", replayed = replayed,
+                          "G3 动态注册重放完成（dynamic_tools → registry）");
+                }
+            }
+            Err(e) => {
+                warn!(target: "agentos-kernel", error = %e, "G3 重放：读取 dynamic_tools 失败（跳过）");
+            }
+        }
+    }
 
     // 监控 M3：注册崩溃回调——invoker 检测到插件崩溃时记时间戳到聚合器（last_crash_ts）。
     // 进程态轮询（memory_rss/uptime/alive/pid）由独立后台任务周期采（见下方 spawn）。
@@ -475,14 +686,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // ── 0.2 引擎接线：加载管道配置 + 公共 step 库 + 重名检测 ──
     // （config_root 已在上方 loader 创建前推导，此处复用）
 
-    let pipeline_config =
-        load_pipeline_config(&config_root).unwrap_or_else(|e| {
-            panic!("加载管道配置失败 ({}): {}", config_root.display(), e);
-        });
-    let step_library =
-        load_step_library(&config_root).unwrap_or_else(|e| {
-            panic!("加载公共 step 库失败 ({}): {}", config_root.display(), e);
-        });
+    let pipeline_config = load_pipeline_config(&config_root).unwrap_or_else(|e| {
+        panic!("加载管道配置失败 ({}): {}", config_root.display(), e);
+    });
+    let step_library = load_step_library(&config_root).unwrap_or_else(|e| {
+        panic!("加载公共 step 库失败 ({}): {}", config_root.display(), e);
+    });
 
     info!(
         target: "agentos-kernel",
@@ -497,15 +706,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         manifests.iter().map(|m| m.id.clone()).collect();
 
     // 启动期重名检测：冲突则 panic 退出（fail-fast，避免运行期歧义）
-    if let Err(conflict) =
-        validate_no_name_conflicts(&pipeline_config, &step_library, &plugin_ids)
+    if let Err(conflict) = validate_no_name_conflicts(&pipeline_config, &step_library, &plugin_ids)
     {
         panic!(
             "命名冲突检测失败，拒绝启动内核（修复配置后重试）: {}",
             conflict
         );
     }
-    eprintln!("[boot-diag] 重名检测完成"); use std::io::Write; std::io::stderr().flush().ok();
+
+    // G10：启动期加载期编译（fail-fast）。when 语法错误 / 引用不存在的 step 或
+    // 插件 / composite 引用环——启动即报错（消灭"静默 false 死路由"），
+    // 热重载路径的降级版在 server.rs maybe_reload_compiled_pipeline。
+    if let Err(compile_err) = agentos_api::server::load_and_compile(&config_root, &plugin_ids) {
+        panic!("管道加载期编译失败，拒绝启动内核（修复配置后重试）: {compile_err}");
+    }
 
     // 构建 AppState（注入 pipeline_config / step_library / invoker / store / plugin_ids / project_root）
     let project_root = config_root
@@ -513,22 +727,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .map(|p| p.to_path_buf())
         .unwrap_or_else(|| PathBuf::from("."));
     let store_dyn: Arc<dyn agentos_core::traits::StorageBackend> = store.clone();
-    eprintln!("[boot-diag] store_dyn ok"); std::io::stderr().flush().ok();
     let invoker_dyn: Arc<dyn agentos_core::traits::PluginInvoker> = invoker.clone();
-    eprintln!("[boot-diag] invoker_dyn ok"); std::io::stderr().flush().ok();
     // P3：HTTP 端点 dispatcher 的生产 handler（经 invoker 调插件 http.handle）
-    let http_handler: Arc<dyn agentos_core::traits::HttpHandleCapability> =
-        Arc::new(agentos_api::http_dispatcher::SidecarHttpHandler::new(
-            invoker_dyn.clone(),
-        ));
-    eprintln!("[boot-diag] http_handler ok"); std::io::stderr().flush().ok();
-    // L1 启用集合（schema 据此过滤 contributes）
-    let enabled_plugin_ids: std::collections::HashSet<String> = manifests
-        .iter()
-        .filter(|m| enablement.is_enabled(&m.id, m.enabled))
-        .map(|m| m.id.clone())
-        .collect();
-    eprintln!("[boot-diag] enabled_plugin_ids ok"); std::io::stderr().flush().ok();
+    let http_handler: Arc<dyn agentos_core::traits::HttpHandleCapability> = Arc::new(
+        agentos_api::http_dispatcher::SidecarHttpHandler::new(invoker_dyn.clone()),
+    );
+    // L1 启用集合（schema 据此过滤 contributes）——G3 时已提前构造（router 的
+    // enablement 闸共享同一 Arc），此处仅取快照喂 with_plugins（其签名收 HashSet）。
+    let enabled_snapshot: std::collections::HashSet<String> =
+        enabled_plugin_ids.read().await.clone();
     let state = AppState::with_plugins(
         manifests.clone(),
         registry,
@@ -538,36 +745,70 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         store_dyn,
         plugin_ids,
         project_root,
-        enabled_plugin_ids,
+        enabled_snapshot,
     );
-    eprintln!("[boot-diag] with_plugins 返回"); std::io::stderr().flush().ok();
     // task_01：注入统一数据接口专用 SqliteStore 句柄（/api/v1/db/* 用，表驱动动态枚举）。
     // 与 store_dyn（trait object，业务语义方法）互补；with_db 不改任何持久化方式。
-    let state = state.with_db(store.clone());
+    // with_db 按 driver 注入（sqlite/memory → Some；其它 driver → None，
+    // 统一数据接口与 G8 排空的 SQLite 专有路径诚实降级）。
+    let state = match sqlite_db.clone() {
+        Some(db) => state.with_db(db),
+        None => state,
+    };
     let state = state.with_http_handler(http_handler);
-    eprintln!("[boot-diag] with_http_handler 返回"); std::io::stderr().flush().ok();
-    // 阶段3 遗留：注入插件根目录映射，启用静态资源托管
+    // 注入插件根目录映射，启用静态资源托管
     // （/ext/{plugin_id}/assets/{*path} → <plugin_dir>/web/<path> 直读）。
     // 插件只需在自己的目录下放 web/ 子目录即可被内核自动托管，无需声明 http_endpoints。
     let state = state.with_plugin_dirs(plugin_dirs);
-    eprintln!("[boot-diag] with_plugin_dirs 返回"); std::io::stderr().flush().ok();
     // 统一配置加载方案 TDD-4：构造 ConfigCenter 注入 AppState。
     // 后续 loader（agent/pipeline/plugin config_files）经此统一走 load()/load_dir()/store()。
     let state = if let Some(root) = state.project_root.as_ref() {
-        let cc = std::sync::Arc::new(agentos_config::config_center::ConfigCenter::new(root.join("config")));
+        let cc = std::sync::Arc::new(agentos_config::config_center::ConfigCenter::new(
+            root.join("config"),
+        ));
         state.with_config_center(cc)
     } else {
         state
     };
-    eprintln!("[boot-diag] with_config_center 返回"); std::io::stderr().flush().ok();
+    // ADR §3.5'：插件 widget 绑定表（共享化，M1）。此处先建表注入 AppState，
+    // broadcaster 在 session 启用后 spawn（见下方 Metrics 后台任务段）。
+    let widget_bindings_shared: agentos_api::metrics::SharedBindings = {
+        let entries: Vec<(&str, Option<&serde_json::Value>)> = manifests
+            .iter()
+            .map(|m| (m.id.as_str(), m.contributes.as_ref()))
+            .collect();
+        Arc::new(parking_lot::RwLock::new(
+            agentos_api::metrics::collect_all_bindings(entries),
+        ))
+    };
+    // M1：每个有绑定的插件登记一条 broadcaster 维度 guard（revoke = 移除其全部绑定，
+    // 禁用插件时随 scope 结构性收回）。
+    {
+        let owners: std::collections::HashSet<String> = widget_bindings_shared
+            .read()
+            .iter()
+            .map(|b| b.owner_plugin_id.clone())
+            .collect();
+        for owner in owners {
+            let shared = Arc::clone(&widget_bindings_shared);
+            plugin_scopes
+                .scope_of(&owner)
+                .track(agentos_core::traits::RegistrationGuard::new(move || {
+                    agentos_api::metrics::plugin_widget_broadcast::remove_plugin_bindings(
+                        &shared, &owner,
+                    );
+                }));
+        }
+    }
     let state = state
-    // 监控 M1/M5/M5b：注入指标聚合器（启用 /api/v1/metrics + /metrics 端点）
-    .with_metrics(metrics_aggregator.clone());
-    eprintln!("[boot-diag] with_metrics 返回"); std::io::stderr().flush().ok();
+        // 监控 M1/M5/M5b：注入指标聚合器（启用 /api/v1/metrics + /metrics 端点）
+        .with_metrics(metrics_aggregator.clone())
+        // M1：注册账本 + widget 绑定表（disable 结构性收回）
+        .with_plugin_scopes(plugin_scopes.clone())
+        .with_widget_bindings(Arc::clone(&widget_bindings_shared));
     // P2：启用会话内核（WS 握手鉴权 + 连接注册 + 入站路由 + 断线重放）。
     // 复用 router 已持有的 session_coord（流式 chunk 推送与 WS 出站共享同一 SessionCoordinator）。
     let state = state.enable_session_with(session_coord);
-    eprintln!("[boot-diag] AppState 构造完成（enable_session_with 之后）"); std::io::stderr().flush().ok();
 
     // chat namespace capability：把"向会话投递消息并跑管道"暴露给 sidecar。
     // 触发器（trigger_setup_tool）到期触发时经 chat.send_message 复用前端同一条
@@ -576,7 +817,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // AppState 在 router 之后构造，故在此（启动末期）注册到既有 handler_registry。
     {
         let dispatcher: std::sync::Arc<dyn agentos_session::router::PipelineDispatcher> =
-            std::sync::Arc::new(agentos_api::ws_session::EngineDispatcher::new(state.clone()));
+            std::sync::Arc::new(agentos_api::ws_session::EngineDispatcher::new(
+                state.clone(),
+            ));
         handler_registry.register(std::sync::Arc::new(
             agentos_api::chat_send_handler::ChatSendHandler::new(dispatcher),
         ));
@@ -615,28 +858,25 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         );
         // ADR §3.5'：插件 widget 配置驱动推送——按 contributes.widgets[].metric_bindings
         // 把插件已上报的指标定时推给前端。插件被动（照常 metrics.record），内核统一编排。
-        let widget_bindings = {
-            let entries: Vec<(&str, Option<&serde_json::Value>)> = manifests
-                .iter()
-                .map(|m| (m.id.as_str(), m.contributes.as_ref()))
-                .collect();
-            agentos_api::metrics::collect_all_bindings(entries)
+        // M1：绑定表已共享化注入 AppState（禁用插件时从表移除其绑定，guard 已挂 scope）。
+        let widget_bindings = match state.widget_bindings.as_ref() {
+            Some(b) => Arc::clone(b),
+            None => Arc::new(parking_lot::RwLock::new(Vec::new())),
         };
-        if !widget_bindings.is_empty() {
+        if !widget_bindings.read().is_empty() {
             let agg_widget: Arc<agentos_api::metrics::MetricsAggregator> =
                 Arc::new(metrics_aggregator.clone());
             let session_widget: Arc<dyn agentos_api::metrics::WidgetEmitter> = session.clone();
-            let _widget_bcast_handle =
-                agentos_api::metrics::PluginWidgetBroadcaster::spawn(
-                    agg_widget,
-                    widget_bindings.clone(),
-                    session_widget,
-                );
+            let _widget_bcast_handle = agentos_api::metrics::PluginWidgetBroadcaster::spawn(
+                agg_widget,
+                Arc::clone(&widget_bindings),
+                session_widget,
+            );
             info!(
                 target: "agentos-kernel",
-                count = widget_bindings.len(),
+                count = widget_bindings.read().len(),
                 "PluginWidgetBroadcaster started ({} metric_bindings)",
-                widget_bindings.len()
+                widget_bindings.read().len()
             );
         }
         info!(target: "agentos-kernel", "Metrics background tasks started (M2 flush + M1 rollup + M6 broadcast, 1s interval)");
@@ -669,18 +909,42 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             .expect("capability_registry present at boot");
         let initial_ids: std::collections::HashSet<String> =
             manifests.iter().map(|m| m.id.clone()).collect();
+        // A3：cdylib 集合基线（boot manifests 的 InProcess id）——watcher 首轮
+        // sync 即可 diff，能捕捉 boot→首轮 sync 窗口内的装/卸。
+        let initial_cdylib_ids: std::collections::HashSet<String> = manifests
+            .iter()
+            .filter(|m| m.host_type == agentos_core::traits::HostType::InProcess)
+            .map(|m| m.id.clone())
+            .collect();
+        // A3：cdylib 集合变更重启回调——复用 G8 排空+退出（在途 runs → suspended
+        // 后 exit 75，监督者拉起新进程）；AGENTOS_DISABLE_SELF_EXIT=1 逃生门在
+        // 函数内部生效（只排空不退出）。watcher 经 env 开关
+        // AGENTOS_AUTO_RESTART_ON_CDYLIB_CHANGE（默认开，0 关）自行把关。
+        let hook_db = state.db.clone();
+        let restart_hook: Arc<dyn Fn() + Send + Sync> = Arc::new(move || {
+            let db = hook_db.clone();
+            tokio::spawn(async move {
+                agentos_api::routes::drain_and_exit75(
+                    db.as_ref(),
+                    "plugin_watcher: InProcess(cdylib) plugin set changed",
+                )
+                .await;
+            });
+        });
         let _watcher_handle = agentos_api::plugin_watcher::PluginWatcher::new(
             plugins_dir.clone(),
             watcher_invoker,
             watcher_registry,
             initial_ids,
         )
+        .with_scopes(plugin_scopes.clone())
+        .with_initial_cdylib_ids(initial_cdylib_ids)
+        .with_restart_hook(restart_hook)
         .spawn();
-        info!(target: "agentos-kernel", "Plugin hot-discover watcher spawned (notify + polling fallback)");
+        info!(target: "agentos-kernel", "Plugin hot-discover watcher spawned (notify + polling fallback; cdylib change -> G8 auto-restart)");
     }
 
     start_server(addr, state).await?;
-    eprintln!("[boot-diag] start_server 返回（不应到达）");
 
     Ok(())
 }
@@ -761,9 +1025,9 @@ fn collect_plugin_dirs(dir: &std::path::Path, dirs: &mut Vec<String>) {
 
 /// 构建插件加载器，并接入配置根目录（task_11 P0-1）。
 ///
-/// 将 loader 创建从 `main` 抽出，便于单测验证「config_root 已接到 loader」
-/// （历史 bug：`main` 创建 loader 时漏调 `.with_config_root(config_root)`，
-/// 导致 `load_config()` 恒返回空 `{}`，插件收不到任何配置）。
+/// loader 必须带 `.with_config_root(config_root)` 接入配置根目录——漏接会使
+/// `load_config()` 恒返回空 `{}`，插件收不到任何配置。从 `main` 抽出便于
+/// 单测验证「config_root 已接到 loader」。
 ///
 /// # Arguments
 /// * `plugins_dir` - 内置插件根目录（只读）
@@ -831,5 +1095,3 @@ mod tests {
         assert!(llm.contains_key("providers"), "llm.yaml 内容应含 providers");
     }
 }
-
-

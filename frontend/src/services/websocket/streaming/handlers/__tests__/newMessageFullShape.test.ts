@@ -1,3 +1,4 @@
+/** @feature FP-T12 前端适配 | @ci: frontend-test */
 /**
  * new_message 完整消息形态（data.message）测试——冷热路径同构（A2）。
  *

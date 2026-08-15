@@ -1,3 +1,4 @@
+# @feature: FP-MIGR 0.1→0.2迁移（0.1 遗留测试） | @ci: python-plugins-test
 """搜索 API 端点测试（P2 搜索框合并-后端部分）。
 
 覆盖 /api/v1/search 端点：

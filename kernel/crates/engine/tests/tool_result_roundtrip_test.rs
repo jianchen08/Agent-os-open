@@ -1,3 +1,4 @@
+// @feature: FP-0.2.〇 管道引擎 | @ci: rust-test
 //! 工具结果 envelope 持久化 round-trip 契约测试（op 模型版）。
 //!
 //! 契约：role=tool 消息自带的结构化工具结果（`tool_result` envelope：
@@ -6,8 +7,8 @@
 //! 经 `apply_messages_ops_to_table` 落 message_slots 后，`get_messages_by_pipeline`
 //! （读时重建）必须能完整读回——前端"刷新后冷数据与实时流式数据结构一致"的基石。
 //!
-//! envelope 同时是 status/error 的权威来源（success=false → failed+error），
-//! 优于历史 `"Error: "` 前缀推断；无 envelope 的消息回退前缀推断不劣化。
+//! envelope 是 status/error 的权威来源（success=false → failed+error）；
+//! 缺失 envelope 的消息回退 `"Error: "` 前缀推断，不劣化。
 use agentos_core::traits::{MessageQueryOpts, StorageBackend};
 use agentos_engine::SqliteStore;
 use serde_json::{json, Value};
@@ -22,7 +23,9 @@ fn seed(store: &SqliteStore, msgs: &[Value]) {
         .enumerate()
         .map(|(i, m)| json!({ "op": "set", "seq": i as u64, "msg": m }))
         .collect();
-    store.apply_messages_ops_to_table(PID, TENANT, &ops).unwrap();
+    store
+        .apply_messages_ops_to_table(PID, TENANT, &ops)
+        .unwrap();
 }
 
 /// 成功工具调用的消息数组（assistant tool_calls + tool 消息带 envelope）。
@@ -69,7 +72,10 @@ async fn tool_result_envelope_roundtrips_through_slot_blob() {
         .unwrap();
     assert_eq!(rows.len(), 3);
 
-    let tool_row = rows.iter().find(|r| r.role == "tool").expect("tool 行必须存在");
+    let tool_row = rows
+        .iter()
+        .find(|r| r.role == "tool")
+        .expect("tool 行必须存在");
     let envelope = tool_row
         .tool_result_json
         .as_deref()
@@ -95,20 +101,23 @@ async fn tool_result_envelope_roundtrips_through_slot_blob() {
 async fn envelope_drives_status_and_error_over_prefix_inference() {
     let store = SqliteStore::open_memory().unwrap();
     // content 不带 "Error: " 前缀，但 envelope success=false —— envelope 是权威来源。
-    seed(&store, &[json!({
-        "role": "tool",
-        "tool_call_id": "call_f1",
-        "content": "操作未成功",
-        "tool_result": {
-            "call_id": "call_f1",
-            "tool_name": "bash_execute",
-            "success": false,
-            "error": "boom",
-            "data": null,
-            "metadata": null,
-            "duration_ms": 5.0
-        }
-    })]);
+    seed(
+        &store,
+        &[json!({
+            "role": "tool",
+            "tool_call_id": "call_f1",
+            "content": "操作未成功",
+            "tool_result": {
+                "call_id": "call_f1",
+                "tool_name": "bash_execute",
+                "success": false,
+                "error": "boom",
+                "data": null,
+                "metadata": null,
+                "duration_ms": 5.0
+            }
+        })],
+    );
 
     let rows = store
         .get_messages_by_pipeline(PID, MessageQueryOpts::default())
@@ -143,7 +152,10 @@ async fn modify_replaces_whole_message_no_preserve_semantics() {
         .get_messages_by_pipeline(PID, MessageQueryOpts::default())
         .await
         .unwrap();
-    let tool_row = rows.iter().find(|r| r.role == "tool").expect("tool 行必须存在");
+    let tool_row = rows
+        .iter()
+        .find(|r| r.role == "tool")
+        .expect("tool 行必须存在");
     assert!(
         tool_row.tool_result_json.is_none(),
         "无 envelope 的新版本消息替换后，读回应无 envelope（内容变 = 新消息）"
@@ -156,11 +168,14 @@ async fn modify_replaces_whole_message_no_preserve_semantics() {
 async fn legacy_prefix_inference_fallback_without_envelope() {
     let store = SqliteStore::open_memory().unwrap();
     // 无 envelope 的消息：前缀推断语义保持。
-    seed(&store, &[json!({
-        "role": "tool",
-        "tool_call_id": "call_l1",
-        "content": "Error: legacy boom",
-    })]);
+    seed(
+        &store,
+        &[json!({
+            "role": "tool",
+            "tool_call_id": "call_l1",
+            "content": "Error: legacy boom",
+        })],
+    );
 
     let rows = store
         .get_messages_by_pipeline(PID, MessageQueryOpts::default())

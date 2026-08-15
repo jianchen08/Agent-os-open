@@ -1005,9 +1005,8 @@ class IsolationManager:
         }
 
         # 获取或创建环境。
-        # docker create/pull 超时（subprocess.TimeoutExpired）历史上在此冒泡成
-        # Core 异常 → engine_chain 当 transient 不熔断 → 无限 next_llm 空转（每轮
-        # 白等 docker create 30s × core retry 3 次 ≈ 4min）。这里把建环境整体 try：
+        # docker create/pull 超时（subprocess.TimeoutExpired）不能向上冒泡为 Core
+        # 异常——engine_chain 会当 transient 处理而不熔断。这里把建环境整体 try：
         # 未达阈值返回失败 result（走正常路径回 LLM，LLM 可自行调整）；
         # 达阈值抛 IsolationUnrecoverableError 让 engine_chain 直接 ENDED 挂引擎。
         try:

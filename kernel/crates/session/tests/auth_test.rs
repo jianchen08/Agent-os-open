@@ -3,8 +3,7 @@
 //! auth 测试——握手鉴权拒绝码 / 通过分支（ADR §7.2，参考 0.1 app_factory.py:232）。
 
 use agentos_session::auth::{
-    authenticate_handshake, HandshakeAuth, REJECT_CODE_INVALID_TOKEN,
-    REJECT_CODE_NO_TOKEN,
+    authenticate_handshake, HandshakeAuth, REJECT_CODE_INVALID_TOKEN, REJECT_CODE_NO_TOKEN,
 };
 
 #[tokio::test]

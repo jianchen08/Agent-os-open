@@ -1,0 +1,21 @@
+# 存储驱动配置（StorageBackend driver 化，§9.6）。
+#
+# 换存储方式 = 改 driver 一行 + 重启，上层零改动（runs/messages/traces/blobs/
+# memory/users 全走 StorageBackend trait）。
+#
+# driver 可选值：
+#   sqlite   —— 文件库（默认）。sqlite.path 相对项目根；":memory:" = 内存库。
+#   memory   —— 内存 SQLite（测试/临时实例，重启即失）。
+#   postgres —— 留桩（显式报错）：真实引入需加大依赖，等出现真实需求再落地。
+#
+# 优先级：环境变量（AGENTOS_STORAGE_DRIVER / AGENTOS_DB_PATH）> 本文件 > 默认。
+# 默认（无本文件、无环境变量）= sqlite + 项目根 agentos_kernel.db——与
+# driver 化之前的行为逐位一致。
+#
+# 为什么是内核内 driver 而不是插件：存储是自举必需件（插件加载之前就要用）
+# + 审计真相源（账本不可交给不受结构性关押的进程）。详见
+# docs/working/重要设计/插件三轨一致性与Cordis机制迁移计划.md §9.6。
+storage:
+  driver: sqlite
+  sqlite:
+    path: agentos_kernel.db

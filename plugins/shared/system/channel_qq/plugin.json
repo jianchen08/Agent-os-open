@@ -1,26 +1,36 @@
 {
-    "id": "channel_qq",
-    "name": "QQ Channel",
-    "version": "1.0.0",
-    "plugin_type": "system",
-    "language": "python",
-    "host_type": "sidecar",
-    "entry": "python server.py",
-    "lifecycle": {
-        "idle_timeout_secs": 0
-    },
-    "capabilities": {
-        "tools": [
-            {"name": "qq.send_message", "description": "Send a message to a QQ user or group via OneBot HTTP API"},
-            {"name": "qq.get_status", "description": "Get QQ channel adapter connection status"}
-        ],
-        "resources": [],
-        "route_signals": [],
-        "lifecycle_hooks": ["on_load", "on_unload"]
-    },
-    "dependencies": [],
-    "permissions": {},
-    "error_policy": "skip",
-    "priority": 50,
-    "requires_content": 5
+  "id": "channel_qq",
+  "name": "QQ Channel",
+  "version": "1.0.0",
+  "plugin_type": "system",
+  "language": "python",
+  "host_type": "sidecar",
+  "entry": "python server.py",
+  "lifecycle": {
+    "idle_timeout_secs": 0
+  },
+  "capabilities": {
+    "tools": [],
+    "resources": [],
+    "route_signals": [],
+    "lifecycle_hooks": [
+      "on_load",
+      "on_unload"
+    ],
+    "services": [
+      {
+        "name": "qq.send_message",
+        "description": "Send a message to a QQ user or group via OneBot HTTP API"
+      },
+      {
+        "name": "qq.get_status",
+        "description": "Get QQ channel adapter connection status"
+      }
+    ]
+  },
+  "dependencies": [],
+  "permissions": {},
+  "error_policy": "skip",
+  "priority": 50,
+  "requires_content": 5
 }

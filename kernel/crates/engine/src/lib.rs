@@ -1,9 +1,9 @@
 //! # Lingxi Engine — 管道引擎（PipelineExecutor + SQLite 状态账本）
 //!
 //! 0.2 统一执行器：`PipelineExecutor`（pipeline_loop.rs）——按 YAML 配置调用插件、
-//! 维护 state 一致性、记录变更（Append-Only Patch）。旧引擎（AdrEngineImpl）已清理
-//! （chat 与任务执行全部走 PipelineExecutor，capability 侧 suspend/resume 改为直接
-//! 操作 runs 表，见 kernel/crates/api/src/capability_router.rs）。
+//! 维护 state 一致性、记录变更（Append-Only Patch）。chat 与任务执行全部走
+//! PipelineExecutor；capability 侧 suspend/resume 直接操作 runs 表
+//! （见 kernel/crates/api/src/capability_router.rs）。
 //!
 //! ## 模块组织
 //!
@@ -15,10 +15,12 @@
 //! [来源: docs/working/adr_engine_design.md]
 //! [来源: docs/tasks/task_06_pipeline_engine.md]
 
+pub mod compiler;
 pub mod condition;
 pub mod metrics;
 pub mod pipeline_loop;
 pub mod replay;
+pub mod storage_factory;
 pub mod store;
 pub mod template;
 

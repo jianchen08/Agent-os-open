@@ -14,14 +14,10 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use agentos_api::http_dispatcher::{
-    dispatch_http, DispatchOutcome, HttpDispatcher,
-};
+use agentos_api::http_dispatcher::{dispatch_http, DispatchOutcome, HttpDispatcher};
 use agentos_api::routes::AppState;
 use agentos_api::server::build_router;
-use agentos_core::traits::{
-    HttpHandleCapability, HttpHandleRequest, HttpHandleResponse,
-};
+use agentos_core::traits::{HttpHandleCapability, HttpHandleRequest, HttpHandleResponse};
 use agentos_plugin_loader::CapabilityRegistryImpl;
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
@@ -58,11 +54,7 @@ fn make_plugin_with_web() -> tempfile::TempDir {
         "console.log('app loaded'); export default {};",
     )
     .unwrap();
-    std::fs::write(
-        web.join("style.css"),
-        "body { font-family: sans-serif; }",
-    )
-    .unwrap();
+    std::fs::write(web.join("style.css"), "body { font-family: sans-serif; }").unwrap();
     // 子目录文件（验证多段路径 /ext/{plugin}/assets/sub/deep.json）
     std::fs::create_dir_all(web.join("sub")).unwrap();
     std::fs::write(web.join("sub").join("deep.json"), "{\"k\":\"v\"}").unwrap();
@@ -108,13 +100,13 @@ async fn test_static_asset_serves_index_html() {
         .to_str()
         .unwrap()
         .to_string();
-    assert!(
-        ct.starts_with("text/html"),
-        "expected text/html, got {ct}"
-    );
+    assert!(ct.starts_with("text/html"), "expected text/html, got {ct}");
     let body = axum::body::to_bytes(resp.into_body(), 65536).await.unwrap();
     let text = String::from_utf8(body.to_vec()).unwrap();
-    assert!(text.contains("SPA Root"), "body should contain SPA Root: {text}");
+    assert!(
+        text.contains("SPA Root"),
+        "body should contain SPA Root: {text}"
+    );
 }
 
 // ── 200 + application/javascript ─────────────────────────────
@@ -173,10 +165,7 @@ async fn test_static_asset_serves_css_with_correct_mime() {
         .to_str()
         .unwrap()
         .to_string();
-    assert!(
-        ct.starts_with("text/css"),
-        "expected text/css, got {ct}"
-    );
+    assert!(ct.starts_with("text/css"), "expected text/css, got {ct}");
 }
 
 // ── 多段路径（sub/deep.json）────────────────────────────────

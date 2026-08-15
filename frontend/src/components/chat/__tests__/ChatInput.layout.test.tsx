@@ -1,3 +1,4 @@
+/** @feature FP-T12 前端适配 | @ci: frontend-test */
 /**
  * 功能测试：ChatInput 底部工具栏布局防溢出（发送按钮不被挤出输入框）
  *

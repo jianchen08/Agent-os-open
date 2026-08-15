@@ -13,7 +13,6 @@ import apiClient from '@/services/api/client'
 import { safeLoadLayout } from '@/services/layout/resolver'
 import { navigateToPipeline } from '@/services/pipelineNavigator'
 import { widgetRegistry } from '@/services/schema/WidgetRegistry'
-import { ensureDefaultWorkspacePanels } from '@/services/workspacePanelOpener'
 import { getFileEditorData, registerFileEditor, removeFileEditorData, updateFileEditorData, emitFileChange } from '@/stores/fileEditorRegistry'
 import { useLayoutModeStore } from '@/stores/layoutModeStore'
 import { useSessionStore } from '@/stores/sessionStore'
@@ -103,11 +102,6 @@ export function FiveSpaceLayout({
   const closeWorkspaceTab = useLayoutModeStore((s) => s.closeWorkspaceTab)
   const exitFullscreen = useLayoutModeStore((s) => s.exitFullscreen)
 
-  // 确保「工作区」默认页签（顶栏/侧栏入口打开其它页签；工作区钉住）
-  useEffect(() => {
-    ensureDefaultWorkspacePanels()
-  }, [])
-
   /** 工作区刷新 key，用于驱动 FileTreeWidget 等组件重新加载。
    * 直接作为 renderTabContent 的依赖传入任务树：任务状态事件 bump workspaceDataVersion
    * → 此处重算新字符串 → renderTabContent 闭包捕获新值 → 任务树收到新 refreshKey 重取。
@@ -172,7 +166,7 @@ export function FiveSpaceLayout({
   // themeConfig 异步解析（主题从 store/API 加载），刷新后会在首帧后才就位。
   // 若 layoutConfig 直接依赖 themeConfig，则 resolved 会随 themeConfig 到达而重算，
   // 导致已渲染的面板像素宽度被覆盖（Splitter.Panel 的 size 是受控的）→ 面板宽度跳动。
-  // 修复：首次解析出有效 layoutConfig 后冻结，之后 themeConfig 变化不再重算面板宽度。
+  // 首次解析出有效 layoutConfig 后冻结，之后 themeConfig 变化不再重算面板宽度。
   // themeConfig 的布局字段基本是静态的（min/max/default 宽度），无需跟随重算；
   // 面板宽度只在用户主动操作（拖拽改 ratio）或窗口 resize 时变。
   const themeLayoutRaw = (themeConfig as any)?.layout
@@ -703,7 +697,7 @@ export function FiveSpaceLayout({
             >
               {/* 工作区顶部操作栏 */}
               <div className="border-border flex h-9 shrink-0 items-center justify-between border-b px-2">
-                <span className="text-foreground text-xs font-medium">工作区</span>
+                <span className="text-foreground text-xs font-medium">面板</span>
                 <button
                   onClick={() => setMobileWorkspaceOpen(false)}
                   className="hover:bg-accent text-muted-foreground flex items-center gap-1 rounded-md px-2 py-1 text-xs transition-colors"

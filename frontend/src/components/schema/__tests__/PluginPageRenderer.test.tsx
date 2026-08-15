@@ -86,8 +86,9 @@ describe('PluginPageRenderer — /p/:pageId 独立路由渲染', () => {
 
     renderAt('/p/cfg-page')
 
-    expect(screen.getByTestId('schema-field-model')).toBeInTheDocument()
-    expect(screen.getByTestId('schema-field-name')).toBeInTheDocument()
+    // RjsfForm（antd 主题）渲染：label 即字段存在证明
+    expect(screen.getByText('模型')).toBeInTheDocument()
+    expect(screen.getByText('名称')).toBeInTheDocument()
   })
 
   it('URL /p/non-existent → getPage 返回 undefined → 渲染 404 占位（不崩溃）', () => {

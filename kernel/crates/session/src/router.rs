@@ -4,6 +4,7 @@
 //! - `user_input` → dispatch_user_input（转发到管道引擎）
 //! - `interaction_response` → dispatch_interaction_response（回复人工交互）
 //! - `stop_generation` → dispatch_stop（取消生成）
+//! - `active_thread_changed` → dispatch_active_thread（切换选中会话，排队优先级键）
 //! - `heartbeat` → 心跳确认（不转发）
 //! - 其余 → 忽略
 
@@ -32,6 +33,7 @@ pub trait PipelineDispatcher: Send + Sync {
         content: &str,
         pipeline_id: &str,
         thinking_strength: &str,
+        execution_context: Option<&serde_json::Value>,
     ) -> Result<(), String>;
 
     /// 转发人工交互响应（审批/选择）。
@@ -47,6 +49,19 @@ pub trait PipelineDispatcher: Send + Sync {
 
     /// 取消指定 thread 的生成。
     async fn dispatch_stop(&self, thread_id: &str) -> Result<(), String>;
+
+    /// 前端通知当前选中会话切换（排队优先级策略键）。
+    ///
+    /// 内核据此把该用户的活跃管道更新为当前选中的主管道——全局并发闸门有
+    /// 排队时活跃管道优先获得槽位。默认 no-op（测试 mock 无需关心）。
+    async fn dispatch_active_thread(
+        &self,
+        _user_id: &str,
+        _thread_id: &str,
+        _pipeline_id: &str,
+    ) -> Result<(), String> {
+        Ok(())
+    }
 }
 
 /// 路由结果。
@@ -90,6 +105,7 @@ impl InboundRouter {
             "user_input" => self.route_user_input(msg, user_id).await,
             "interaction_response" => self.route_interaction(msg).await,
             "stop_generation" => self.route_stop(msg).await,
+            "active_thread_changed" => self.route_active_thread(msg, user_id).await,
             _ => RouteOutcome::Ignored,
         }
     }
@@ -116,7 +132,11 @@ impl InboundRouter {
         let pipeline_id = msg
             .get("pipeline_id")
             .and_then(|v| v.as_str())
-            .or_else(|| msg.get("data").and_then(|d| d.get("pipeline_id")).and_then(|v| v.as_str()))
+            .or_else(|| {
+                msg.get("data")
+                    .and_then(|d| d.get("pipeline_id"))
+                    .and_then(|v| v.as_str())
+            })
             .unwrap_or("")
             .to_string();
         // thinking_strength：思考强度（off/low/medium/high），顶层优先、
@@ -133,7 +153,14 @@ impl InboundRouter {
             .to_string();
         match self
             .dispatcher
-            .dispatch_user_input(&thread_id, user_id, &content, &pipeline_id, &thinking_strength)
+            .dispatch_user_input(
+                &thread_id,
+                user_id,
+                &content,
+                &pipeline_id,
+                &thinking_strength,
+                None,
+            )
             .await
         {
             Ok(()) => RouteOutcome::Handled,
@@ -174,6 +201,35 @@ impl InboundRouter {
             _ => return RouteOutcome::Error("stop_generation 缺少 thread_id".into()),
         };
         match self.dispatcher.dispatch_stop(&thread_id).await {
+            Ok(()) => RouteOutcome::Handled,
+            Err(e) => RouteOutcome::Error(e),
+        }
+    }
+
+    /// active_thread_changed——用户切换当前选中的会话。
+    ///
+    /// pipeline_id 兼容顶层与 data 信封两处（与 user_input 同法）；缺省时由
+    /// dispatcher 侧回退该 thread 的主管道。
+    async fn route_active_thread(&self, msg: &Value, user_id: &str) -> RouteOutcome {
+        let thread_id = match msg.get("thread_id").and_then(|v| v.as_str()) {
+            Some(t) if !t.is_empty() => t.to_string(),
+            _ => return RouteOutcome::Error("active_thread_changed 缺少 thread_id".into()),
+        };
+        let pipeline_id = msg
+            .get("pipeline_id")
+            .and_then(|v| v.as_str())
+            .or_else(|| {
+                msg.get("data")
+                    .and_then(|d| d.get("pipeline_id"))
+                    .and_then(|v| v.as_str())
+            })
+            .unwrap_or("")
+            .to_string();
+        match self
+            .dispatcher
+            .dispatch_active_thread(user_id, &thread_id, &pipeline_id)
+            .await
+        {
             Ok(()) => RouteOutcome::Handled,
             Err(e) => RouteOutcome::Error(e),
         }

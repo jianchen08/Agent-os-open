@@ -1,3 +1,4 @@
+/** @feature FP-T12 前端适配 | @ci: frontend-test */
 /**
  * MediaRenderer 组件「工具内容展示」回归测试
  *
