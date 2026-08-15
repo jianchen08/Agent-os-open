@@ -617,15 +617,13 @@ pub fn delete_row_inner(
 
 // ─── SQL 执行器（原 POST /execute 的 SQL 逻辑与防线） ────────────────
 
-/// SQL 分类：只读（SELECT/WITH/EXPLAIN/只读 PRAGMA）vs 写语句。
+/// SQL 分类：只读（SELECT/WITH/EXPLAIN）vs 写语句。
+///
+/// PRAGMA 不参与分类：check_dangerous 在本函数之前执行且一律 403 拒绝
+/// （只读元数据走统一接口，不进 SQL 执行器），分类分支里没有 PRAGMA 路径。
 fn classify_sql(sql: &str) -> &'static str {
     let up = sql.trim_start().to_ascii_uppercase();
-    if up.starts_with("SELECT")
-        || up.starts_with("WITH")
-        || up.starts_with("EXPLAIN")
-        || up.starts_with("PRAGMA table_info")
-        || up.starts_with("PRAGMA table_xinfo")
-    {
+    if up.starts_with("SELECT") || up.starts_with("WITH") || up.starts_with("EXPLAIN") {
         "read"
     } else {
         "write"
@@ -786,10 +784,6 @@ mod tests {
     fn classify_sql_read_vs_write() {
         assert_eq!(classify_sql("SELECT 1"), "read");
         assert_eq!(classify_sql("with x as (select 1) select * from x"), "read");
-        // 原实现行为：只读 PRAGMA 匹配串未大写化（输入已 to_ascii_uppercase），
-        // 故 "PRAGMA table_info" 实际按 "write" 分类；但写路径先过
-        // check_dangerous 黑名单（PRAGMA 一律 403），分类结果无实际影响。
-        assert_eq!(classify_sql("PRAGMA table_info(memory)"), "write");
         assert_eq!(classify_sql("UPDATE memory SET x=1"), "write");
         assert_eq!(
             classify_sql("insert into memory (id) values ('a')"),

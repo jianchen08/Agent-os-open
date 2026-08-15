@@ -105,8 +105,6 @@ async fn stderr_does_not_block_sidecar() {
         first, second
     );
 
-    // 进程应当仍然存活（10s 窗口内），随后正常 kill。
-    // （若脚本已自然退出，is_alive 返回 false 也接受——重点是没被阻塞挂死。）
-    let _ = client.is_alive().await;
+    // 进程未被 stderr 阻塞挂死即可（脚本自然退出也接受），随后正常 kill。
     client.kill().await.expect("kill");
 }

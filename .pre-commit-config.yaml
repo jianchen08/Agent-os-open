@@ -75,6 +75,9 @@ repos:
 
       - id: mixed-line-ending
         name: 强制 LF 换行符
+        # *.bat/*.ps1 由 .gitattributes 强制 CRLF(Windows 运行时约定),与
+        # 本 hook 的 LF 归一天然冲突——排除,行尾治理交给 gitattributes。
+        exclude: \.(bat|ps1|cmd)$
         args: [--fix=lf]
 
       - id: detect-private-key

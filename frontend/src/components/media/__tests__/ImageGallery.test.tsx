@@ -115,14 +115,15 @@ describe('ImageGallery', () => {
   it('应支持下载图像', () => {
     const images = createMockImages(1)
 
-    const mockAnchor = {
-      href: '',
-      download: '',
-      click: vi.fn(),
-    }
+    // 用真 anchor 元素承接组件的 appendChild/removeChild（普通对象会被
+    // jsdom 拒收），仅 spy 其 click 阻止真实导航；createElement 的 spy 须
+    // 经 origCreateElement 转发，否则 mock 内调用自身会无限递归。
+    const realAnchor = document.createElement('a')
+    const clickSpy = vi.spyOn(realAnchor, 'click').mockImplementation(() => {})
+    const origCreateElement = document.createElement.bind(document)
     vi.spyOn(document, 'createElement').mockImplementation((tag: string) => {
-      if (tag === 'a') return mockAnchor as unknown as HTMLAnchorElement
-      return document.createElement(tag)
+      if (tag === 'a') return realAnchor
+      return origCreateElement(tag as keyof HTMLElementTagNameMap)
     })
 
     render(<ImageGallery images={images} />)
@@ -130,7 +131,8 @@ describe('ImageGallery', () => {
     const downloadButton = screen.getByRole('button', { name: /下载/i })
     fireEvent.click(downloadButton)
 
-    expect(mockAnchor.click).toHaveBeenCalled()
+    expect(clickSpy).toHaveBeenCalled()
+    expect(realAnchor.href).toBe(images[0].url)
 
     vi.restoreAllMocks()
   })
@@ -155,7 +157,8 @@ describe('ImageGallery', () => {
     render(<ImageGallery images={images} />)
 
     images.forEach((img) => {
-      expect(screen.getByText(img.title)).toBeInTheDocument()
+      // 标题渲染于悬停遮罩与信息区两处，断言"至少可见一处"
+      expect(screen.getAllByText(img.title).length).toBeGreaterThan(0)
     })
   })
 

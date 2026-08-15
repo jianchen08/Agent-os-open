@@ -1,4 +1,4 @@
-// @feature: plugin-hot-discover | @vision: V4 | @ci: rust-test
+// @feature: FP-0.2.一 插件协议 | @vision: V3 可嵌入 | @ci: rust-test
 //! 插件运行时自动发现的集成测试（真 loader + 真 invoker，非 mock）。
 //!
 //! 这些测试会设置进程级环境变量 `AGENTOS_PLUGINS_DIR`（discover_new_plugins 的目录源），

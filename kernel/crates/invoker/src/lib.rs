@@ -15,7 +15,6 @@
 //! [来源: docs/0.2_rust_plugin_solution.md §3.2]
 //! [来源: docs/tasks/task_05_plugin_system.md AC-04-5/AC-04-6]
 
-pub mod capability;
 pub mod invoker;
 pub mod shared;
 pub mod verify;

@@ -1,4 +1,4 @@
-// @feature: boot-plugin 第二刀 用户管理策略面 | @ci: rust-test
+// @feature: FP-0.2.八 多租户核心系统 | @vision: V4 多用户 | @ci: rust-test
 //! user-admin capability handler（用户管理策略面）行为回归测试。
 //!
 //! boot-plugin 第二刀（docs/working/重要设计/boot-plugin内核能力插件化立项.md

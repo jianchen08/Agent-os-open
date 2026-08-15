@@ -13,7 +13,9 @@
 //! - 读侧：`load_latest_checkpoint` 返回值同样无 messages、有 ckpt_max_seq；
 //! - 零兼容：库里手工塞入含 messages 的旧格式 checkpoint，load 也必须剥离。
 //!
-//! 当前实现存全量 state（含 messages 全文）→ 本文件测试为 **red（TDD red 阶段）**。
+//! 契约：save_checkpoint 剥离 messages（全文只在 blobs），只存标量 +
+//! `ckpt_max_seq` 水位；本文件断言该持久形态（写侧 SQL 直读 + 读侧返回值 +
+//! 零兼容三路）。
 
 use agentos_core::traits::StorageBackend;
 use agentos_engine::SqliteStore;
