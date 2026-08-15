@@ -180,6 +180,15 @@ jobs:
         run: rustup show
         working-directory: kernel
 
+      - name: sccache best-effort (装不上则禁用 wrapper)
+        run: |
+          if command -v sccache >/dev/null 2>&1 && sccache --version >/dev/null 2>&1; then
+            echo "sccache ready"
+          else
+            echo "sccache unavailable, disable RUSTC_WRAPPER"
+            echo "RUSTC_WRAPPER=" >> "$GITHUB_ENV"
+          fi
+
       - name: Install cargo-llvm-cov
         uses: taiki-e/install-action@v2
         with:
@@ -374,7 +383,9 @@ jobs:
       - name: Sync dependencies from uv.lock (frozen)
         # 需要 --extra isolation：isolation 超时测试 patch docker.from_env，
         # 需 docker 包（已在 uv.lock 内锁定）。
-        run: uv sync --frozen --extra dev --extra isolation
+        run: |
+          uv sync --frozen --extra dev --extra isolation
+          uv pip install -e ./plugins/sdk
 
       - name: Run gates (timing-gate)
         run: python scripts/run_gates.py --filter timing-gate
@@ -394,15 +405,15 @@ jobs:
         with:
           python-version: "3.11"
 
+      - name: Enable pnpm (setup-node 的 cache= pnpm 需先有 pnpm)
+        run: corepack enable && pnpm --version
+
       - name: Set up Node
         uses: actions/setup-node@v4
         with:
           node-version: "20"
           cache: pnpm
           cache-dependency-path: frontend/pnpm-lock.yaml
-
-      - name: Enable pnpm
-        run: corepack enable && pnpm --version
 
       - name: Install dependencies
         run: pnpm install --frozen-lockfile || pnpm install
@@ -426,15 +437,15 @@ jobs:
         with:
           python-version: "3.11"
 
+      - name: Enable pnpm (setup-node 的 cache= pnpm 需先有 pnpm)
+        run: corepack enable && pnpm --version
+
       - name: Set up Node
         uses: actions/setup-node@v4
         with:
           node-version: "20"
           cache: pnpm
           cache-dependency-path: frontend/pnpm-lock.yaml
-
-      - name: Enable pnpm
-        run: corepack enable && pnpm --version
 
       - name: Install dependencies
         run: pnpm install --frozen-lockfile || pnpm install

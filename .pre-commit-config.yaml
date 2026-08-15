@@ -165,6 +165,10 @@ repos:
               hosts/.*|
               docs/.*|
               config/templates/.*|
+              scripts/agent_prompt_viewer\.py|
+              scripts/diag_create_session\.py|
+              scripts/check_theme_contrast\.py|
+              scripts/browser_tool_call_evidence\.py|
               .*tests/.*|
               .*test_.*\.py$
           )$

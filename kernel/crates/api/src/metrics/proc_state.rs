@@ -55,7 +55,7 @@ fn collect_memory_rss_linux(pid: u32) -> Option<u64> {
     for line in content.lines() {
         if let Some(rest) = line.strip_prefix("VmRSS:") {
             // "VmRSS:\t 12345 kB"
-            let num: u64 = rest.trim().split_whitespace().next()?.parse().ok()?;
+            let num: u64 = rest.split_whitespace().next()?.parse().ok()?;
             return Some(num * 1024); // kB → bytes
         }
     }

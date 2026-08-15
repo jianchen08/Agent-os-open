@@ -158,7 +158,7 @@ def _iso_timestamp(created: float) -> str:
 
 def _json_safe(value: Any) -> Any:
     """确保值可 JSON 序列化。"""
-    if isinstance(value, str, int, float, bool, type(None)):
+    if isinstance(value, str | int | float | bool | type(None)):
         return value
     return str(value)
 
