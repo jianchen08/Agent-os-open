@@ -13,9 +13,8 @@ import logging
 from datetime import datetime  # noqa: F401
 from typing import Any
 
-from fastapi import Depends, Query
-
 from deps import APIError, require_auth, validate_pagination
+from fastapi import Depends, Query
 from memory_store import store
 from models import (
     TaskCreate,
@@ -27,8 +26,8 @@ from models import (
     TaskSubmitResponse,
     TaskUpdate,
 )
-from tasks.service_access import get_task_service
 from tasks.enum_utils import safe_enum_value
+from tasks.service_access import get_task_service
 
 logger = logging.getLogger(__name__)
 

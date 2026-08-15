@@ -1,5 +1,4 @@
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
 """
 Agent 提示词拼接查看器（调真实接口版本）
 
@@ -309,9 +308,9 @@ def _worker_main() -> None:
     """
     # 标准库路径：基于 Python 安装目录重建
     import asyncio  # noqa: F401  (在 -I 隔离模式下，需要显式 import)
-    import site
     import importlib
     import io
+    import site
 
     # 强制 stdout/stderr 用 utf-8 编码（-I 隔离模式下 PYTHONIOENCODING 可能失效，
     # Windows 默认 GBK 写入 emoji/中文时会抛 UnicodeEncodeError）
@@ -342,11 +341,12 @@ def _worker_main() -> None:
     importlib.invalidate_caches()
 
     try:
-        from pipeline.plugin import PluginContext
-        from plugins.input.prompt_build import PromptBuildPlugin
-
         # 断言：确认加载的是当前项目根的代码
         import inspect as _inspect
+
+        from pipeline.plugin import PluginContext
+
+        from plugins.input.prompt_build import PromptBuildPlugin
         loaded_file = _inspect.getfile(PromptBuildPlugin._build_dynamic_vars)
         if not Path(loaded_file).resolve().is_relative_to(PROJECT_ROOT.resolve()):
             raise RuntimeError(
@@ -405,7 +405,7 @@ def scan_agents() -> list[dict]:
         if ".bak" in yaml_file.name:
             continue
         try:
-            with open(yaml_file, "r", encoding="utf-8") as f:
+            with open(yaml_file, encoding="utf-8") as f:
                 config = yaml.safe_load(f)
         except Exception as e:
             print(f"  [跳过] 解析失败: {yaml_file} - {e}", file=sys.stderr)

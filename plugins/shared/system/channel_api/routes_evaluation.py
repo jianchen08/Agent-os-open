@@ -9,9 +9,8 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-from fastapi import APIRouter, Depends, Query
-
 from deps import APIError, require_auth
+from fastapi import APIRouter, Depends, Query
 from models import (
     MetricDetailResponse,
     MetricListResponse,

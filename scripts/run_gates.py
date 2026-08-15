@@ -195,7 +195,7 @@ GATES: list[Gate] = [
         label="插件测试（插桩，免豁免重型套件）+ 失败数基线锁 + 覆盖率地板 44%",
         domain="plugins",
         shell=(
-            'T=$(mktemp); ( uv run --frozen python -m pytest -v '
+            "T=$(mktemp); ( uv run --frozen python -m pytest -v "
             + _shell_join_pytest(coverage_exempt.instrumented_args())
             + " --cov=plugins --cov-report=term-missing --cov-report=xml:coverage.xml"
             + ' 2>&1 || true ) | tee "$T"; '
@@ -209,7 +209,7 @@ GATES: list[Gate] = [
         label="重型套件免插桩（94 插件子进程冒烟矩阵）+ 失败数基线锁",
         domain="plugins",
         shell=(
-            'T=$(mktemp); ( uv run --frozen python -m pytest -v '
+            "T=$(mktemp); ( uv run --frozen python -m pytest -v "
             + _shell_join_pytest(coverage_exempt.heavy_args())
             + ' 2>&1 || true ) | tee "$T"; '
             'python scripts/check_pytest_failure_baseline.py --lane plugins-heavy --from-file "$T"'
@@ -489,8 +489,7 @@ def run_selected(gates: list[Gate], max_active: int) -> int:
         for gate, (_, exit_code, _, seconds) in blocking:
             disposition = "" if not gate.allow_failure else "（观察型）"
             print(
-                f"  - {gate.id}{disposition}: {gate.label} "
-                f"(exit={exit_code}, {seconds:.1f}s)",
+                f"  - {gate.id}{disposition}: {gate.label} " f"(exit={exit_code}, {seconds:.1f}s)",
                 file=sys.stderr,
             )
         return 1

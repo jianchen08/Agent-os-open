@@ -17,9 +17,8 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-from fastapi import APIRouter, Depends
-
 from deps import APIError, require_auth
+from fastapi import APIRouter, Depends
 from scene.manager import SceneManager
 from scene.models import SceneCreateRequest, SceneUpdateRequest
 from scene.templates import list_templates

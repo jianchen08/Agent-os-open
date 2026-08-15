@@ -20,8 +20,6 @@ import asyncio
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
-
-from manager import IsolationManager
 from isolation_types import (
     EnvironmentStatus,
     IsolationContext,
@@ -30,6 +28,7 @@ from isolation_types import (
     OperationType,
     TaskType,
 )
+from manager import IsolationManager
 
 
 def _make_env(env_id: str = "cua-ws") -> IsolationEnvironment:

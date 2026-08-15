@@ -26,8 +26,9 @@ _project_root = os.path.abspath(os.path.join(_this_dir, "..", "..", "..", ".."))
 if _project_root not in sys.path:
     sys.path.insert(0, _project_root)
 
-from agentos_plugin_sdk import AgentOSPlugin  # noqa: E402
 from plugin import SessionIsolationPlugin  # noqa: E402
+
+from agentos_plugin_sdk import AgentOSPlugin  # noqa: E402
 
 logger = logging.getLogger(__name__)
 plugin = AgentOSPlugin("session_isolation_pipeline")

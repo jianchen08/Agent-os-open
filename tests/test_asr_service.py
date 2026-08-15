@@ -122,9 +122,8 @@ def test_transcribe_http_error():
     mock_resp = _make_mock_response(401, {"error": "unauthorized"})
     patcher, _mock_session = _patch_client_session(mock_resp)
 
-    with patcher:
-        with pytest.raises(RuntimeError, match="status=401"):
-            _async_run(svc.transcribe(b"fake-audio", "audio/webm"))
+    with patcher, pytest.raises(RuntimeError, match="status=401"):
+        _async_run(svc.transcribe(b"fake-audio", "audio/webm"))
 
 
 def test_transcribe_not_configured():
@@ -147,9 +146,8 @@ def test_transcribe_missing_text():
     mock_resp = _make_mock_response(200, {"unrelated": "data"})
     patcher, _mock_session = _patch_client_session(mock_resp)
 
-    with patcher:
-        with pytest.raises(RuntimeError, match="缺少转写文本"):
-            _async_run(svc.transcribe(b"fake-audio", "audio/webm"))
+    with patcher, pytest.raises(RuntimeError, match="缺少转写文本"):
+        _async_run(svc.transcribe(b"fake-audio", "audio/webm"))
 
 
 def test_load_config_env_fallback(tmp_path, monkeypatch):

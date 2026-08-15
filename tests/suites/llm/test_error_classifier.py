@@ -10,13 +10,10 @@ from __future__ import annotations
 
 import asyncio
 
-import pytest
-
 import litellm
-
+import pytest
 from llm.error_classifier import ErrorInfo, ErrorKind, classify_error
 from llm.key_pool import KeySlot
-
 
 # ---------------------------------------------------------------------------
 # classify_error：连接错误必须归 NETWORK

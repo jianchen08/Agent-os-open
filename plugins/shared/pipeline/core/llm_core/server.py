@@ -30,8 +30,9 @@ sys.path.insert(0, _system_llm_dir)
 # fetch（litellm 官方开关，get_model_cost_map 顶部判断此环境变量）。
 os.environ.setdefault("LITELLM_LOCAL_MODEL_COST_MAP", "true")
 
-from agentos_plugin_sdk import AgentOSPlugin  # noqa: E402
 from plugin import LLMCore  # noqa: E402
+
+from agentos_plugin_sdk import AgentOSPlugin  # noqa: E402
 
 logger = logging.getLogger(__name__)
 plugin = AgentOSPlugin("llm_core_pipeline")

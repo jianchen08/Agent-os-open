@@ -40,7 +40,7 @@ class ToolResult(BaseModel):
         return self.error is None
 
     @classmethod
-    def create_completed(cls, output: Any, metadata: dict[str, Any] | None = None) -> "ToolResult":
+    def create_completed(cls, output: Any, metadata: dict[str, Any] | None = None) -> ToolResult:
         """创建成功结果。"""
         return cls(output=output, metadata=metadata or {})
 
@@ -50,7 +50,7 @@ class ToolResult(BaseModel):
         error: str,
         error_code: str | None = None,
         metadata: dict[str, Any] | None = None,
-    ) -> "ToolResult":
+    ) -> ToolResult:
         """创建失败结果。"""
         return cls(error=error, error_code=error_code, metadata=metadata or {})
 

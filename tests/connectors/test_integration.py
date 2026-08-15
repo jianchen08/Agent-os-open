@@ -34,7 +34,6 @@ from connectors.types import (
     ConnectorState,
 )
 
-
 # ═══════════════════════════════════════════════════════════════════════
 # 测试用 Mock 组件
 # ═══════════════════════════════════════════════════════════════════════
@@ -181,7 +180,7 @@ class ConfigurableStubConnector(StubConnector, ConfigSubscriberMixin):
             "context": context,
         })
         # 模拟配置变更改变行为
-        self.active_file_from_config = f"updated_{file_path.split('/')[-1]}"
+        self.active_file_from_config = f"updated_{file_path.rsplit('/', maxsplit=1)[-1]}"
         self._context = ConnectorContext(active_file=self.active_file_from_config)
 
 

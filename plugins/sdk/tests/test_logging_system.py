@@ -714,9 +714,7 @@ class TestSetupLogging:
         config = LoggingConfig(level=logging.INFO, json_output=True, output="console")
         setup_logging(config, reset=True)
         root = logging.getLogger()
-        has_json = any(
-            isinstance(h.formatter, JsonFormatter) for h in root.handlers
-        )
+        has_json = any(isinstance(h.formatter, JsonFormatter) for h in root.handlers)
         assert has_json
 
     def test_setup_structured_formatter(self) -> None:
@@ -724,9 +722,7 @@ class TestSetupLogging:
         config = LoggingConfig(level=logging.INFO, json_output=False, output="console")
         setup_logging(config, reset=True)
         root = logging.getLogger()
-        has_structured = any(
-            isinstance(h.formatter, StructuredFormatter) for h in root.handlers
-        )
+        has_structured = any(isinstance(h.formatter, StructuredFormatter) for h in root.handlers)
         assert has_structured
 
     def test_setup_idempotent(self) -> None:
@@ -823,8 +819,12 @@ class TestContextFilter:
     def test_filter_injects_all_context_fields(self) -> None:
         """filter 注入全部 7 个追踪字段。"""
         LogContext.bind(
-            request_id="r1", task_id="t1", session_id="s1",
-            trace_id="tr1", pipeline_id="p1", thread_id="th1",
+            request_id="r1",
+            task_id="t1",
+            session_id="s1",
+            trace_id="tr1",
+            pipeline_id="p1",
+            thread_id="th1",
             agent_name="agent",
         )
         record = self._make_record()
@@ -857,9 +857,7 @@ class TestContextFilter:
         LogContext.bind(request_id="trace-abc")
         handler = logging.StreamHandler()
         handler.addFilter(ContextFilter())
-        handler.setFormatter(logging.Formatter(
-            "[%(levelname)s] rid=%(request_id)s tid=%(task_id)s %(message)s"
-        ))
+        handler.setFormatter(logging.Formatter("[%(levelname)s] rid=%(request_id)s tid=%(task_id)s %(message)s"))
 
         logger = logging.getLogger("test_context_filter_integration")
         logger.handlers.clear()
@@ -867,6 +865,7 @@ class TestContextFilter:
         logger.setLevel(logging.DEBUG)
 
         import io
+
         stream = io.StringIO()
         handler.stream = stream
         logger.info("test message")
@@ -903,9 +902,7 @@ class TestSetupLoggingWithContextFilter:
         config = LoggingConfig(level=logging.INFO, output="console")
         setup_logging(config, reset=True)
         root = logging.getLogger()
-        has_filter = any(
-            isinstance(f, ContextFilter) for h in root.handlers for f in h.filters
-        )
+        has_filter = any(isinstance(f, ContextFilter) for h in root.handlers for f in h.filters)
         assert has_filter
 
     def test_file_handler_has_context_filter(self) -> None:
@@ -914,12 +911,11 @@ class TestSetupLoggingWithContextFilter:
 
         with tempfile.TemporaryDirectory():
             config = LoggingConfig(
-                level=logging.INFO, output="file",
+                level=logging.INFO,
+                output="file",
                 file_path="logs/test_context_filter.log",
             )
             setup_logging(config, reset=True)
             root = logging.getLogger()
-            has_filter = any(
-                isinstance(f, ContextFilter) for h in root.handlers for f in h.filters
-            )
+            has_filter = any(isinstance(f, ContextFilter) for h in root.handlers for f in h.filters)
             assert has_filter

@@ -18,14 +18,13 @@
 3. 配置显式指定的 False 永不刷新（信任配置，保护既有行为）。
 4. True 状态不触发复检。
 """
+# isolation_guard 插件位于 plugins/shared/pipeline/input/isolation_guard/（0.2 平铺 import）
+import sys
 import time
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import tests._isolation_path  # noqa: F401  # 注入 isolation 插件目录到 sys.path
-
-# isolation_guard 插件位于 plugins/shared/pipeline/input/isolation_guard/（0.2 平铺 import）
-import sys
-from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "plugins" / "shared" / "pipeline" / "input" / "isolation_guard"))
 

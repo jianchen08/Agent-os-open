@@ -36,6 +36,7 @@ pytestmark = pytest.mark.skip(
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 from tests._pipeline_plugin_path import add_plugin_dir  # noqa: E402
+
 add_plugin_dir("output", "track")
 from plugin import TrackPlugin  # noqa: E402
 

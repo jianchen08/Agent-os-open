@@ -53,14 +53,15 @@ repos:
         name: 验证 YAML 语法
         args: [--allow-multiple-documents]
         # 排除第三方 YAML
-        exclude: ^(\.gitlab-ci\.yml|docker/.*|node_modules/.*)
+        exclude: ^(\.gitlab-ci\.yml|docker/.*|node_modules/.*|docs/working/private/.*)
 
       - id: check-toml
         name: 验证 TOML 语法
 
       - id: check-json
         name: 验证 JSON 语法
-        exclude: ^(\.vscode/.*|node_modules/.*|package-lock\.json)
+        # config/media_workflows/ 是 {{占位符}} 模板文件,非合法 JSON(设计如此)
+        exclude: ^(\.vscode/.*|node_modules/.*|package-lock\.json|config/media_workflows/.*)
 
       - id: check-merge-conflict
         name: 检测未解决的合并冲突标记
@@ -90,23 +91,50 @@ repos:
         name: Ruff Lint
         args: [--fix, --exit-non-zero-on-fix]
         types_or: [python, pyi]
-        # 排除不需要 lint 的目录
+        # 排除不需要 lint 的目录;tests/skills/agent-research 等老域是 0.1 遗留
+        # (1273 个 N802/PLC2401/E402 风格项,治理归 plugins 域门禁与 baseline,
+        # pre-commit 只管已治理域:plugins/sdk、scripts、src)
         exclude: |
           (?x)^(
               frontend/.*|
               electron/.*|
               mcp-servers/.*|
-              node_modules/.*
+              node_modules/.*|
+              tests/.*|
+              skills/.*|
+              agent-research/.*|
+              plugins/shared/.*|
+              plugins/test_.*|
+              hosts/.*|
+              config/templates/.*|
+              scripts/agent_prompt_viewer\.py|
+              scripts/diag_create_session\.py|
+              scripts/check_theme_contrast\.py|
+              scripts/browser_tool_call_evidence\.py
           )$
 
       # Format 格式化（在 lint 之后）
       - id: ruff-format
         name: Ruff Format
         types_or: [python, pyi]
+        # 范围对齐 Ruff Lint(老域排除,见上)
         exclude: |
           (?x)^(
               frontend/.*|
               electron/.*|
+              mcp-servers/.*|
+              node_modules/.*|
+              tests/.*|
+              skills/.*|
+              agent-research/.*|
+              plugins/shared/.*|
+              plugins/test_.*|
+              hosts/.*|
+              config/templates/.*|
+              scripts/agent_prompt_viewer\.py|
+              scripts/diag_create_session\.py|
+              scripts/check_theme_contrast\.py|
+              scripts/browser_tool_call_evidence\.py|
               mcp-servers/.*|
               node_modules/.*
           )$
@@ -122,13 +150,21 @@ repos:
         # 允许现有警告（不强制 0 错误），工具本身正常运行即可
         args: [--config-file=pyproject.toml, --no-incremental]
         files: \.py$
-        # 仅检查 src/ 下的 Python 文件
+        # 仅检查 src/ 下的 Python 文件;plugins/ 排除——插件 server.py 同名模块
+        # 冲突(mypy duplicate module),且插件域已由 plugins-mypy-baseline 门禁
+        # (run_gates)单独治理,pre-commit 不重复管辖
         exclude: |
           (?x)^(
               tests/.*|
               frontend/.*|
               electron/.*|
               mcp-servers/.*|
+              plugins/.*|
+              skills/.*|
+              agent-research/.*|
+              hosts/.*|
+              docs/.*|
+              config/templates/.*|
               .*tests/.*|
               .*test_.*\.py$
           )$

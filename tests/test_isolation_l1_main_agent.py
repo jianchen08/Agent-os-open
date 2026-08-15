@@ -11,15 +11,15 @@
 原决策只看 policy + 任务 isolation_level，不看 agent 层级，导致 L1 主 agent
 的 bash_execute 被错误路由进容器。
 """
+import sys
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
+from isolation_types import IsolationLevel
 
 import tests._isolation_path  # noqa: F401
 
-from isolation_types import IsolationLevel
-import sys
-from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "plugins" / "shared" / "pipeline" / "input" / "isolation_guard"))
 
 from pipeline.plugin import PluginContext

@@ -34,11 +34,11 @@ SOURCE_EXTENSIONS = {".py", ".rs"}
 
 # 源码文件路径模式（这些路径下的变更算"源码变更"）
 SOURCE_PATH_PATTERNS = [
-    r"^src/",            # Python 主源码
+    r"^src/",  # Python 主源码
     r"^plugins/.*/server\.py$",
     r"^plugins/.*/tool\.py$",
     r"^plugins/.*/plugin\.py$",  # pipeline 插件
-    r"^plugins/shared/",   # 插件共享代码
+    r"^plugins/shared/",  # 插件共享代码
     r"^kernel/crates/.+\.rs$",  # Rust 内核源码
 ]
 
@@ -46,10 +46,10 @@ SOURCE_PATH_PATTERNS = [
 TEST_PATH_PATTERNS = [
     r"/tests?/.*test_.*\.py$",
     r"/test_[^/]+\.py$",
-    r"_test\.rs$",        # Rust 单元测试文件
-    r"/tests/.*\.rs$",    # Rust 集成测试
+    r"_test\.rs$",  # Rust 单元测试文件
+    r"/tests/.*\.rs$",  # Rust 集成测试
     r"tests/.*\.py$",
-    r"conftest\.py$",     # pytest 配置也算测试基础设施
+    r"conftest\.py$",  # pytest 配置也算测试基础设施
 ]
 
 # 豁免：纯这些文件类型的变更不触发检查
@@ -57,12 +57,12 @@ EXEMPT_EXTENSIONS = {".md", ".yaml", ".yml", ".json", ".toml", ".txt", ".env", "
 
 # 豁免路径（变更这些路径不触发检查）
 EXEMPT_PATHS = [
-    "frontend/",          # 前端有独立测试体系
+    "frontend/",  # 前端有独立测试体系
     "docs/",
     ".github/",
     "docker/",
-    "scripts/",           # CI/运维脚本（check_tdd 自身除外）
-    "config/rules/",      # agent 规则配置
+    "scripts/",  # CI/运维脚本（check_tdd 自身除外）
+    "config/rules/",  # agent 规则配置
 ]
 
 
@@ -75,6 +75,7 @@ def _run_git(args: list[str]) -> str | None:
             capture_output=True,
             text=True,
             timeout=30,
+            check=False,
         )
     except (subprocess.TimeoutExpired, FileNotFoundError) as e:
         print(f"[tdd-gate] git {args[0]} 调用异常: {e}", file=sys.stderr)
@@ -165,10 +166,7 @@ def main() -> int:
         return 0
 
     if test_changes:
-        print(
-            f"[tdd-gate] ✅ 源码变更 {len(source_changes)} 个 + 测试变更 {len(test_changes)} 个，"
-            "TDD 合规"
-        )
+        print(f"[tdd-gate] ✅ 源码变更 {len(source_changes)} 个 + 测试变更 {len(test_changes)} 个，" "TDD 合规")
         return 0
 
     # 有源码变更但零测试变更 → 检查是否声明 skip

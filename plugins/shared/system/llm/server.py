@@ -20,6 +20,7 @@ from typing import Any
 sys.path.insert(0, os.path.dirname(__file__))
 
 from _config_models import ModelConfigLoaderShim, set_config
+
 from agentos_plugin_sdk import AgentOSPlugin
 
 logger = logging.getLogger(__name__)

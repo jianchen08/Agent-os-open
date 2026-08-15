@@ -29,9 +29,8 @@ pytestmark = pytest.mark.unit
 @pytest.fixture
 def db_session() -> Any:
     """每个测试独立的内存 SQLite 库（StaticPool 单连接保活）与同步 Session。"""
-    from sqlalchemy.orm import Session
-
     from _db_models import Base, create_db_engine
+    from sqlalchemy.orm import Session
 
     engine = create_db_engine("sqlite://")
     with engine.begin() as conn:
@@ -292,10 +291,9 @@ class TestDbOperationRecording:
     @pytest.mark.asyncio
     async def test_error_message字段可往返(self, db_session: Any) -> None:
         """error_message 与 models.OperationLog 对齐：写库后读回不丢。"""
-        from sqlalchemy import select
-
         from _db_models import RollbackOperationLog
         from models import OperationType
+        from sqlalchemy import select
 
         mgr = _make_db_manager(db_session)
         op_id = await mgr.record_operation("t1", "file_write", OperationType.CREATE, "/a", {})

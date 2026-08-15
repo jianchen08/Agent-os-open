@@ -24,7 +24,6 @@ import shutil
 from pathlib import Path
 
 import pytest
-
 from state_machine import InvalidTransitionError, SimpleStateMachine
 from storage import TaskStorage
 from task_types import TaskModel, TaskStatus

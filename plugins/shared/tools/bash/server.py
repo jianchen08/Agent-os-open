@@ -17,9 +17,9 @@ import atexit
 import logging
 import time
 
-from agentos_plugin_sdk import AgentOSPlugin, FrontendEmitter
-
 from tool import BashTool
+
+from agentos_plugin_sdk import AgentOSPlugin, FrontendEmitter
 
 logger = logging.getLogger(__name__)
 

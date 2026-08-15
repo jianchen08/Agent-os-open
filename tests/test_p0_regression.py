@@ -372,7 +372,6 @@ class TestTypePriorityScope:
     def test_type_priority_has_tool_type(self) -> None:
         """_TYPE_PRIORITY 包含 TOOL 类型的优先级。"""
         from evaluation.engine import _TYPE_PRIORITY
-
         from evaluation.types import MetricType
 
         assert MetricType.TOOL in _TYPE_PRIORITY
@@ -380,7 +379,6 @@ class TestTypePriorityScope:
     def test_type_priority_tool_before_agent(self) -> None:
         """TOOL 优先级数值小于 AGENT（TOOL 先执行）。"""
         from evaluation.engine import _TYPE_PRIORITY
-
         from evaluation.types import MetricType
 
         assert _TYPE_PRIORITY[MetricType.TOOL] < _TYPE_PRIORITY[MetricType.AGENT]

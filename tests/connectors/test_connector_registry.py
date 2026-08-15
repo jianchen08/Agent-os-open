@@ -12,8 +12,8 @@ import pytest
 
 pytestmark = pytest.mark.unit  # 0.2 TDD 分层：单元测试
 
-from registry import ConnectorRegistry
 from connector_types import ConnectorInfo
+from registry import ConnectorRegistry
 
 
 def _make_mock_connector(

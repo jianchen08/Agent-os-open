@@ -9,9 +9,8 @@ sidecar 继承内核环境，但内核只在启动时加载一次 .env——用�
 
 from __future__ import annotations
 
-import pytest
-
 import _config_models as cm
+import pytest
 
 
 @pytest.fixture(autouse=True)

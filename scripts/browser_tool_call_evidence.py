@@ -1,16 +1,15 @@
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
 """
 真实浏览器验证前端工具调用显示（Playwright sync_api + 指定 Chromium）
 - 打开前端 http://127.0.0.1:5290 → 登录 admin/admin12345 → 发送"用计算工具算一下 5+3"
 - 轮询 DOM：查找工具调用卡片（data-activity-type="tool_call"）、状态、结果（含 8）
 - 产出证据到 /workspace/docs/working/browser_tool_call_evidence/
 """
+import glob
 import json
 import os
 import sys
 import time
-import glob
 
 from playwright.sync_api import sync_playwright
 

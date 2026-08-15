@@ -12,9 +12,8 @@ import sys
 from pathlib import Path
 from typing import Any
 
-from fastapi import APIRouter, Depends, Query
-
 from deps import require_auth
+from fastapi import APIRouter, Depends, Query
 from workspace.workspace_service import get_workspace_service
 
 logger = logging.getLogger(__name__)

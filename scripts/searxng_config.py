@@ -13,24 +13,44 @@ SearXNG 默认引擎大量报 HTTP connection error。经探测 baidu/bing/sogou
 
 幂等：可重复运行。
 """
+
 from __future__ import annotations
 
 import re
 import sys
 from pathlib import Path
 
-
 # 网络探测确认被 TLS 阻断的引擎族（域名 TLS 握手被中断）
 BLOCKED_ENGINES = {
-    "duckduckgo", "duckduckgo images", "duckduckgo videos",
-    "duckduckgo news", "duckduckgo weather", "ddg definitions",
+    "duckduckgo",
+    "duckduckgo images",
+    "duckduckgo videos",
+    "duckduckgo news",
+    "duckduckgo weather",
+    "ddg definitions",
     "wikipedia",
-    "startpage", "startpage news", "startpage images",
-    "aol", "aol images", "aol videos",
-    "brave", "brave.images", "brave.videos", "brave.news", "braveapi",
-    "karmasearch", "karmasearch images", "karmasearch videos", "karmasearch news",
-    "google", "google images", "google news", "google videos",
-    "google scholar", "google play apps", "google play movies",
+    "startpage",
+    "startpage news",
+    "startpage images",
+    "aol",
+    "aol images",
+    "aol videos",
+    "brave",
+    "brave.images",
+    "brave.videos",
+    "brave.news",
+    "braveapi",
+    "karmasearch",
+    "karmasearch images",
+    "karmasearch videos",
+    "karmasearch news",
+    "google",
+    "google images",
+    "google news",
+    "google videos",
+    "google scholar",
+    "google play apps",
+    "google play movies",
 }
 
 # 网络可达但被官方默认禁用的引擎 —— 显式启用

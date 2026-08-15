@@ -11,9 +11,9 @@ from pathlib import Path
 from typing import Any
 
 import yaml
+from deps import require_auth
 from fastapi import APIRouter, Depends
 
-from deps import require_auth
 # DEBT: config 子模块未复制到插件目录。channel_api 是独立进程入口，
 # 完整运行时由 PYTHONPATH 提供。Sidecar 模式下 server.py 不导入此模块。
 # ceiling: routes_thinking_mode.py 无法在 sidecar 模式下直接 import。

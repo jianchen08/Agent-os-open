@@ -10,13 +10,14 @@ role=tool 诊断消息把缺失/类型错误明细反馈给 LLM，使其能补�
 """
 
 from __future__ import annotations
+
 from tests._pipeline_plugin_path import add_plugin_dir
+
 add_plugin_dir("input", "tool_schema_validator")
 
 from typing import Any
 
 import pytest
-
 from pipeline.plugin import PluginContext
 from pipeline.types import StateKeys
 

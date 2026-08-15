@@ -208,7 +208,7 @@ class TestConsolidatesChunks:
         assert "pipeline:pipe-1" in backend.add_calls[0]["tags"]
         assert "source_chunk:c1" in backend.add_calls[0]["tags"]
         assert backend.add_calls[1]["tags"][0] == "pipeline:pipe-1" or any(
-            "pipeline:pipe-1" == t for t in backend.add_calls[1]["tags"]
+            t == "pipeline:pipe-1" for t in backend.add_calls[1]["tags"]
         )
 
 

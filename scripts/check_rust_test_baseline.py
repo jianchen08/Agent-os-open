@@ -56,6 +56,7 @@ def run_cargo_test() -> tuple[int, str]:
             capture_output=True,
             text=True,
             timeout=600,
+            check=False,
         )
     except FileNotFoundError:
         # cargo 缺失属于环境错误，门禁必须失败（fail-loud），禁止静默按 0 失败数放行

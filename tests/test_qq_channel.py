@@ -15,9 +15,7 @@ from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
-
 from pipeline.types import StateKeys
-
 
 # ═══════════════════════════════════════════════════════════════
 # OneBotClient 测试

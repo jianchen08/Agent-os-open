@@ -17,6 +17,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+
 # SessionModel 原依赖 infrastructure.session.models（0.1 包），0.2 环境下该包不存在。
 # 这里本地化定义等价的 dataclass，字段与 0.1 保持一致，解除对 infrastructure 的依赖。
 @dataclass

@@ -14,7 +14,6 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-
 # ===========================================================================
 # 1. REQ-20：监控数据采集验证
 # ===========================================================================
@@ -318,8 +317,8 @@ class TestModelNamePassthrough:
 
     def test_loader_passes_model_name_from_yaml(self):
         """验证 AgentConfigLoader 从 YAML 传递 model_name。"""
-        import tempfile
         import os
+        import tempfile
 
         from src.agents.loader import AgentConfigLoader
 

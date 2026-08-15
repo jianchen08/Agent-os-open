@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """
 日志拦截 + 按规则提取匹配
 
@@ -180,15 +179,14 @@ def write_output(matches: list[dict[str, Any]], output_path: str | None):
         with open(out, "w", encoding="utf-8") as f:
             json.dump({"matches": matches, "total": len(matches)}, f, ensure_ascii=False, indent=2)
         print(f"💾 结果已写入: {output_path}")
+    elif matches:
+        print("\n--- 匹配结果 ---")
+        for m in matches:
+            line_info = f"L{m.get('line_number', '?')}"
+            groups_info = f" groups={m['groups']}" if "groups" in m else ""
+            print(f"  [{m['rule']}] {line_info}: {m['matched_text'][:100]}{groups_info}")
     else:
-        if matches:
-            print("\n--- 匹配结果 ---")
-            for m in matches:
-                line_info = f"L{m.get('line_number', '?')}"
-                groups_info = f" groups={m['groups']}" if "groups" in m else ""
-                print(f"  [{m['rule']}] {line_info}: {m['matched_text'][:100]}{groups_info}")
-        else:
-            print("📭 无匹配结果")
+        print("📭 无匹配结果")
 
 
 def main():

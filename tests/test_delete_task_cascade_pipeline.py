@@ -13,7 +13,6 @@ import tempfile
 from unittest.mock import AsyncMock, patch
 
 import pytest
-
 from tasks.service import TaskService
 
 

@@ -25,7 +25,6 @@ from types import ModuleType
 from typing import Any
 
 import pytest
-
 from pipeline.plugin import PluginContext
 from pipeline.types import StateKeys
 

@@ -15,12 +15,11 @@ from __future__ import annotations
 import logging
 from typing import Any
 
+from output_adapter import IOutputAdapter
 from rich.console import Console
 from rich.panel import Panel
 from rich.status import Status
 from rich.text import Text
-
-from output_adapter import IOutputAdapter
 
 logger = logging.getLogger(__name__)
 

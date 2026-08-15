@@ -13,7 +13,6 @@ from __future__ import annotations
 from dataclasses import fields
 
 import pytest
-
 from pipeline.plugin import ICorePlugin, OutputResult, PluginResult
 from pipeline.types import RouteSignal
 

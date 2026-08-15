@@ -32,6 +32,7 @@ from rich.console import Console
 from rich.panel import Panel
 from rich.table import Table
 
+
 def safe_enum_value(v: Any) -> str:
     """获取枚举的安全字符串值。
 

@@ -71,7 +71,6 @@ _BARE_MODULE_NAMES = {
     "gateway",
     "storage",
     "service",
-    "models",
     "interfaces",
     "connector_types",
     "isolation_types",

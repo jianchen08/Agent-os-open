@@ -21,7 +21,6 @@ from tests.test_utils.html_report import (
 )
 from tests.test_utils.report_generator import TestCaseResult, TestReport
 
-
 # ── 辅助函数 ──────────────────────────────────────────
 
 

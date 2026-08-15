@@ -15,7 +15,6 @@ from typing import Any
 from unittest.mock import AsyncMock
 
 import pytest
-
 from pipeline.plugin import PluginContext
 from pipeline.types import StateKeys
 
@@ -98,8 +97,8 @@ class TestConfig:
         assert p.priority == 99
 
     def test_error_policy为SKIP(self) -> None:
-        from plugin import SessionIsolationPlugin
         from pipeline.types import ErrorPolicy
+        from plugin import SessionIsolationPlugin
 
         assert SessionIsolationPlugin.error_policy == ErrorPolicy.SKIP
 

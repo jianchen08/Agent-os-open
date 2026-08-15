@@ -36,7 +36,6 @@ if _SHARED_DIR not in sys.path:
 from pipeline.plugin import PluginContext  # noqa: E402
 from plugin import PromptBuildPlugin  # noqa: E402
 
-
 # ── 测试辅助 ──
 
 

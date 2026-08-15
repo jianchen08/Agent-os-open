@@ -25,7 +25,6 @@ import asyncio
 import json
 
 import pytest
-
 from e2e_helpers import (
     KERNEL_URL,
     create_session,

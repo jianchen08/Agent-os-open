@@ -21,7 +21,6 @@ import time
 from unittest.mock import MagicMock, patch
 
 import pytest
-
 from manager import IsolationManager
 
 # _run_docker_sync 超时上限（秒）。测试里把硬超时压到这个值，让"挂起"场景

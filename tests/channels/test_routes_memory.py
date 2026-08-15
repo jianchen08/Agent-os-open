@@ -27,7 +27,6 @@ from deps import APIError  # noqa: E402
 def _reset_backend():
     """每个测试前清空注入的后端，保证用例相互独立。"""
     routes_memory.set_memory_backend(None)
-    yield
 
 
 def _backend_item(mem_id: str, content: str = "内容", mem_type: str = "semantic") -> dict:

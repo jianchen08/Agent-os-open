@@ -16,7 +16,6 @@ from dataclasses import dataclass
 from pathlib import Path
 
 import yaml  # noqa: F401
-
 from isolation_types import IsolationLevel
 
 logger = logging.getLogger(__name__)

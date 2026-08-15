@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """
 工具配置一致性验证脚本
 
@@ -59,17 +58,17 @@ async def validate_tool_config():
     warnings = []
 
     # 检查1: 配置文件中的工具是否都在代码中存在
-    for tool_name in config_tools.keys():
+    for tool_name in config_tools:
         if tool_name not in code_tools:
             errors.append(f"❌ 配置文件中的工具 '{tool_name}' 在代码中不存在")
 
     # 检查2: 代码中的工具是否都在配置文件中
-    for tool_name in code_tools.keys():
+    for tool_name in code_tools:
         if tool_name not in config_tools:
             errors.append(f"❌ 代码中的工具 '{tool_name}' 不在配置文件中")
 
     # 检查3: 验证工具属性一致性
-    for tool_name in code_tools.keys():
+    for tool_name in code_tools:
         if tool_name not in config_tools:
             continue
 
@@ -100,7 +99,7 @@ async def validate_tool_config():
             errors.append(f"❌ 缓存配置中的工具 '{tool_name}' 在代码中不存在")
 
     # 4. 输出结果
-    print(f"\n📊 统计信息:")
+    print("\n📊 统计信息:")
     print(f"   代码中的工具数: {len(code_tools)}")
     print(f"   配置文件中的工具数: {len(config_tools)}")
     print(f"   缓存配置中的工具数: {len(config_cache_tools)}")
@@ -118,12 +117,11 @@ async def validate_tool_config():
     if not errors and not warnings:
         print("\n✅ 验证通过！配置与代码完全一致。")
         return True
-    elif not errors:
+    if not errors:
         print("\n✅ 验证通过，只有警告无错误。")
         return True
-    else:
-        print(f"\n❌ 验证失败，请修复上述错误。")
-        return False
+    print("\n❌ 验证失败，请修复上述错误。")
+    return False
 
 
 async def main():

@@ -35,6 +35,7 @@ MAX_ALLOWED = TASK_LIMIT // PER_CALL  # 3
 def _make_manager():
     """小预算配置的 BudgetManager（独立实例，测试间零共享）。"""
     from budget_manager import BudgetManager
+
     from config import CostControlConfig, GlobalBudget
 
     config = CostControlConfig(
@@ -295,6 +296,7 @@ def _make_global_manager(*, daily_limit: int = GLOBAL_DAILY_LIMIT, monthly_limit
     全局测试不传 task_id/session_id，故 per_task/per_session 不生效；仅全局限额绑定。
     """
     from budget_manager import BudgetManager
+
     from config import CostControlConfig, GlobalBudget
 
     config = CostControlConfig(

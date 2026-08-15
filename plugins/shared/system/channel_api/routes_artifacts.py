@@ -12,13 +12,12 @@ import sys
 import uuid
 from typing import Any
 
-from fastapi import APIRouter, Depends, File, Form, Query, UploadFile
-
 from artifacts_sidecar.annotation_service import get_annotation_service
 from artifacts_sidecar.artifact_service import get_artifact_service
 from deps import require_auth
-from multimodal.storage import DiskFileStorage  # noqa: F811
+from fastapi import APIRouter, Depends, File, Form, Query, UploadFile
 from multimodal.mm_types import AttachmentInfo, MediaType  # noqa: F811
+from multimodal.storage import DiskFileStorage  # noqa: F811
 
 # 多租户数据根咽喉点（plugins/shared/tenant_data.py）。本文件位于
 # plugins/shared/system/channel_api/routes_artifacts.py，上溯 2 级到

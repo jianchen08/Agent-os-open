@@ -17,8 +17,9 @@ sys.path.insert(0, _this_dir)
 _shared_dir = os.path.join(_this_dir, "..", "..", "..")
 sys.path.insert(0, _shared_dir)
 
-from agentos_plugin_sdk import AgentOSPlugin  # noqa: E402
 from plugin import ExperienceConsolidatorPlugin, set_memory_backend  # noqa: E402
+
+from agentos_plugin_sdk import AgentOSPlugin  # noqa: E402
 
 # hindsight_memory 插件目录（wiring.py 所在处）加入 sys.path
 _HINDSIGHT_MEMORY_DIR = os.path.join(_shared_dir, "system", "hindsight_memory")
@@ -26,7 +27,6 @@ if _HINDSIGHT_MEMORY_DIR not in sys.path:
     sys.path.insert(0, _HINDSIGHT_MEMORY_DIR)
 
 from wiring import build_memory_backend  # noqa: E402
-
 
 logger = logging.getLogger(__name__)
 plugin = AgentOSPlugin("experience_consolidator_pipeline")

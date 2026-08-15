@@ -19,9 +19,8 @@ import logging
 import time as _time
 from typing import Any
 
-from rich.console import Console
-
 from cli_output_adapter import sanitize_for_terminal
+from rich.console import Console
 
 logger = logging.getLogger(__name__)
 

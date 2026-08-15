@@ -29,8 +29,9 @@ from __future__ import annotations
 import asyncio
 import re
 import time
+from collections.abc import Callable
 from pathlib import Path
-from typing import Any, Callable, ClassVar
+from typing import Any, ClassVar
 
 from bash_types import BashAction
 from input_handler import InputHandler

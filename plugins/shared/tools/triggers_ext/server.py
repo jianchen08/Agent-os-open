@@ -14,9 +14,9 @@ sys.path.insert(0, os.path.dirname(__file__))
 # sys.path 注入解析。不再依赖 0.1 兼容 shim。
 
 from tool import TriggerSetupTool  # noqa: E402
+from triggers.manager import get_trigger_manager  # noqa: E402
 
 from agentos_plugin_sdk import AgentOSPlugin  # noqa: E402
-from triggers.manager import get_trigger_manager  # noqa: E402
 
 plugin = AgentOSPlugin("trigger_setup_tool")
 

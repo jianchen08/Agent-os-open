@@ -8,6 +8,7 @@
 """
 import os
 import sys
+
 import pytest
 
 # ============================================================
@@ -20,7 +21,7 @@ if _PROJECT_ROOT not in sys.path:
     sys.path.insert(0, _PROJECT_ROOT)
 
 # 从 e2e_helpers 导入服务地址配置
-from e2e_helpers import KERNEL_URL, FRONTEND_URL, WS_URL, CHROMIUM_BIN
+from e2e_helpers import CHROMIUM_BIN, FRONTEND_URL, KERNEL_URL, WS_URL
 
 
 # ============================================================

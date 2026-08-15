@@ -9,10 +9,9 @@ from __future__ import annotations
 import logging
 from typing import Any
 
+from deps import APIError, require_auth
 from fastapi import APIRouter, Depends
 from pydantic import BaseModel, Field
-
-from deps import APIError, require_auth
 
 logger = logging.getLogger(__name__)
 

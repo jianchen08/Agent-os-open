@@ -11,7 +11,6 @@ from __future__ import annotations
 import asyncio
 
 import pytest
-
 from bash_types import ProcessInfo
 from process_manager import ProcessManager
 

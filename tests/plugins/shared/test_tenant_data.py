@@ -33,7 +33,6 @@ from tenant_data import (  # noqa: E402  (conftest 已把 plugins/shared 推上 
     tenant_data_root,
 )
 
-
 # ── helpers ──────────────────────────────────────────────
 
 

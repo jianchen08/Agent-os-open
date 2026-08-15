@@ -9,7 +9,6 @@ from __future__ import annotations
 from typing import Any
 
 import pytest
-
 from pipeline.plugin import PluginContext
 from pipeline.types import StateKeys
 
@@ -62,8 +61,8 @@ class TestConfig:
         assert d.priority == 99
 
     def test_error_policy为SKIP(self) -> None:
-        from plugin import StuckDetector
         from pipeline.types import ErrorPolicy
+        from plugin import StuckDetector
 
         assert StuckDetector.error_policy == ErrorPolicy.SKIP
 

@@ -6,11 +6,10 @@
 
 from __future__ import annotations
 
-import pytest
 from enum import Enum
 
+import pytest
 from pipeline.plugin_types import PluginTypeSlot
-
 
 # ────────────────────────────────────────────────────────
 # 注册 API 测试

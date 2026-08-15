@@ -226,7 +226,7 @@ class _FakeAsyncClient:
         self._head_headers = head_headers or {}
         self.get_calls: list[dict | None] = []
 
-    async def __aenter__(self) -> "_FakeAsyncClient":
+    async def __aenter__(self) -> _FakeAsyncClient:
         return self
 
     async def __aexit__(self, *exc: Any) -> None:
@@ -418,7 +418,7 @@ class _LocalServer:
         self.port = self._server.server_address[1]
         self._thread = threading.Thread(target=self._server.serve_forever, daemon=True)
 
-    def __enter__(self) -> "_LocalServer":
+    def __enter__(self) -> _LocalServer:
         self._thread.start()
         return self
 

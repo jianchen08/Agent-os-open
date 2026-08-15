@@ -1,10 +1,8 @@
 """多模态能力注册表测试 - 验证配置驱动的能力查询"""
 
 import pytest
-
+from multimodal.adapter import DefaultAdapter, OpenAIVisionAdapter
 from multimodal.capabilities import ModelCapabilityRegistry
-from multimodal.adapter import OpenAIVisionAdapter, DefaultAdapter
-
 
 # 测试用 LLM 配置（镜像 llm.yaml 中实际配置的多模态模型）
 TEST_LLM_CONFIG = {

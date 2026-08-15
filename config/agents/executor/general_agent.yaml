@@ -54,7 +54,7 @@ system_prompt: '{{path:config/rules/information_integrity_rules.md}}
   ## 工作空间
 
 
-  
+
   '
 static_vars:
   enabled: true

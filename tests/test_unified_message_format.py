@@ -205,7 +205,7 @@ class TestUnifiedMessageModel:
 
     def test_create_full_message(self):
         """创建完整消息（所有字段显式赋值）。"""
-        from schemas.message import MessageType, MessageSubtype, UnifiedMessage
+        from schemas.message import MessageSubtype, MessageType, UnifiedMessage
 
         content = {"text": "执行结果", "data": [1, 2, 3]}
         metadata = {"task_id": "t-001", "agent_id": "a-002", "session_id": "s-003"}
@@ -256,7 +256,7 @@ class TestUnifiedMessageModel:
 
     def test_subtype_accepts_enum(self):
         """subtype 接受 MessageSubtype 枚举值。"""
-        from schemas.message import MessageType, MessageSubtype, UnifiedMessage
+        from schemas.message import MessageSubtype, MessageType, UnifiedMessage
 
         msg = UnifiedMessage(type=MessageType.FAILED, subtype=MessageSubtype.ERROR)
         assert msg.subtype == MessageSubtype.ERROR
@@ -494,7 +494,7 @@ class TestWebSocketHttpConsistency:
 
     def test_ws_and_http_use_same_model(self):
         """WS 和 HTTP 都使用 UnifiedMessage 模型。"""
-        from schemas.message import UnifiedMessage, create_message, MessageType
+        from schemas.message import MessageType, UnifiedMessage, create_message
 
         ws_msg = create_message(msg_type=MessageType.EXECUTING)
         http_msg = create_message(msg_type=MessageType.COMPLETED)
@@ -503,7 +503,7 @@ class TestWebSocketHttpConsistency:
 
     def test_ws_http_json_serialization_identical(self):
         """WS 和 HTTP 消息的 JSON 序列化结构一致。"""
-        from schemas.message import MessageType, MessageSubtype, create_message
+        from schemas.message import MessageSubtype, MessageType, create_message
 
         msg = create_message(
             msg_type=MessageType.FAILED,
@@ -554,7 +554,7 @@ class TestCreateMessage:
 
     def test_create_message_with_all_params(self):
         """create_message 使用所有参数。"""
-        from schemas.message import MessageType, MessageSubtype, create_message
+        from schemas.message import MessageSubtype, MessageType, create_message
 
         msg = create_message(
             msg_type=MessageType.EXECUTING,
@@ -637,7 +637,7 @@ class TestConvenienceFunctions:
 
     def test_create_failed_message(self):
         """创建失败消息（带 ERROR 子类型）。"""
-        from schemas.message import MessageType, MessageSubtype, create_failed_message
+        from schemas.message import MessageSubtype, MessageType, create_failed_message
 
         msg = create_failed_message(error="超时", task_id="t1")
         assert msg.type == MessageType.FAILED
@@ -656,7 +656,7 @@ class TestConvenienceFunctions:
 
     def test_create_progress_message(self):
         """创建进度消息（EXECUTING + PROGRESS 子类型）。"""
-        from schemas.message import MessageType, MessageSubtype, create_progress_message
+        from schemas.message import MessageSubtype, MessageType, create_progress_message
 
         msg = create_progress_message(progress=75, description="下载中", task_id="t1")
         assert msg.type == MessageType.EXECUTING
@@ -871,7 +871,7 @@ class TestSerialization:
 
     def test_to_dict_produces_json_serializable_dict(self):
         """to_dict 生成可 JSON 序列化的字典。"""
-        from schemas.message import MessageType, MessageSubtype, UnifiedMessage
+        from schemas.message import MessageSubtype, MessageType, UnifiedMessage
 
         msg = UnifiedMessage(
             type=MessageType.EXECUTING,
@@ -898,7 +898,7 @@ class TestSerialization:
 
     def test_from_dict_roundtrip(self):
         """to_dict -> from_dict 往返保持数据一致。"""
-        from schemas.message import MessageType, MessageSubtype, UnifiedMessage
+        from schemas.message import MessageSubtype, MessageType, UnifiedMessage
 
         original = UnifiedMessage(
             type=MessageType.FAILED,
@@ -935,7 +935,7 @@ class TestSerialization:
 
     def test_json_roundtrip(self):
         """JSON 完整往返测试。"""
-        from schemas.message import MessageType, MessageSubtype, UnifiedMessage
+        from schemas.message import MessageSubtype, MessageType, UnifiedMessage
 
         original = UnifiedMessage(
             type=MessageType.EXECUTING,

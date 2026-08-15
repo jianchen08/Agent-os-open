@@ -8,9 +8,10 @@ import functools
 from collections.abc import Callable
 from typing import Any
 
+from budget_manager import get_budget_manager
+
 # 异常类型在调用方处理，这里仅导入预算管理器
 from tokenizer import get_token_counter
-from budget_manager import get_budget_manager
 
 
 def budget_check(

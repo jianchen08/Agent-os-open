@@ -57,9 +57,7 @@ class TestLoggingConfig:
         config = LoggingConfig.from_env()
         assert config.output == "both"
 
-    def test_from_env_invalid_level_falls_back_to_info(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_from_env_invalid_level_falls_back_to_info(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """无效的 LOG_LEVEL 回退到 INFO。"""
         monkeypatch.setenv("LOG_LEVEL", "INVALID")
         config = LoggingConfig.from_env()
@@ -200,9 +198,7 @@ class TestJsonFormatter:
         LogContext.unbind()
         LogContext.bind(trace_id="trace-xyz", task_id="t-001")
         try:
-            formatter = JsonFormatter(
-                context_fields=("trace_id", "task_id", "agent_name")
-            )
+            formatter = JsonFormatter(context_fields=("trace_id", "task_id", "agent_name"))
             record = logging.LogRecord(
                 name="test",
                 level=logging.INFO,

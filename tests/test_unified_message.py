@@ -96,7 +96,7 @@ class TestUnifiedMessage:
 
     def test_create_full_message(self):
         """创建完整消息（所有字段）。"""
-        from schemas.message import MessageType, MessageSubtype, UnifiedMessage
+        from schemas.message import MessageSubtype, MessageType, UnifiedMessage
 
         metadata = {"task_id": "t1", "agent_id": "a1", "session_id": "s1"}
         content = {"text": "Hello"}
@@ -188,7 +188,7 @@ class TestUnifiedMessageSerialization:
 
     def test_to_dict(self):
         """to_dict 方法生成可 JSON 序列化的字典。"""
-        from schemas.message import MessageType, MessageSubtype, UnifiedMessage
+        from schemas.message import MessageSubtype, MessageType, UnifiedMessage
 
         msg = UnifiedMessage(
             type=MessageType.EXECUTING,
@@ -226,7 +226,7 @@ class TestUnifiedMessageSerialization:
 
     def test_roundtrip_serialization(self):
         """序列化 -> 反序列化 保持数据一致。"""
-        from schemas.message import MessageType, MessageSubtype, UnifiedMessage
+        from schemas.message import MessageSubtype, MessageType, UnifiedMessage
 
         original = UnifiedMessage(
             type=MessageType.FAILED,
@@ -335,7 +335,7 @@ class TestMessageFactory:
 
     def test_create_progress_message(self):
         """便捷函数：创建进度消息。"""
-        from schemas.message import MessageType, MessageSubtype, create_progress_message
+        from schemas.message import MessageSubtype, MessageType, create_progress_message
 
         msg = create_progress_message(progress=75, description="下载中", task_id="t1")
         assert msg.type == MessageType.EXECUTING
@@ -368,8 +368,9 @@ class TestTimestampFormatting:
 
     def test_format_timestamp_with_different_timezone(self):
         """AC3: 支持非 UTC 时区。"""
-        from schemas.message import format_timestamp
         from datetime import timedelta
+
+        from schemas.message import format_timestamp
 
         tz = timezone(timedelta(hours=8))
         dt = datetime(2026, 5, 15, 18, 0, 0, tzinfo=tz)

@@ -29,9 +29,9 @@ import time
 from typing import Any
 
 from adapter_config import get_adapter_status_summary
-from window_info import normalize_window_info
 from pipeline.plugin import IInputPlugin, PluginContext, PluginResult
 from pipeline.types import ErrorPolicy
+from window_info import normalize_window_info
 
 logger = logging.getLogger(__name__)
 

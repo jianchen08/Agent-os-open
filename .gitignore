@@ -3,7 +3,10 @@
 # 防散落核心规则:
 #   - 根目录下划线开头的脚本(_*.py / _*.ps1 / _*.sh)一律不入库
 #   - working/ 与 .project/ 是本地工作区(过程文档/私密资料),不入库
-#   - 可再生产物(reports/dump/构建标记)不入库
+#   - 可再生产物(reports/
+# 例外:traceability 门禁的审查号清单源数据(非可再生产物)
+!reports/audit_round3/
+!reports/audit_round3/T5_tests.mddump/构建标记)不入库
 # ============================================================
 
 # ─── Python ───
@@ -41,6 +44,9 @@ docs/coverage_report.md
 
 # ─── 测试 / 报告产物(可随时再生,不入库)───
 reports/
+# 例外:traceability 门禁的审查号清单源数据(非可再生产物)
+!reports/audit_round3/
+!reports/audit_round3/T5_tests.md
 test-results/
 e2e_screenshots/
 verify_screenshots/

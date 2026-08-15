@@ -29,6 +29,7 @@ from pathlib import Path
 from typing import Any
 
 import yaml
+from constants import ToolLimits
 
 # 跨插件共享类型已上提到 SDK 公共依赖层 agentos_plugin_sdk。
 # ToolLimits 仅本工具使用，就近放在本工具目录 constants.py（server.py 已将本工具
@@ -41,7 +42,6 @@ from agentos_plugin_sdk import (
     ToolSource,
     create_success_result,
 )
-from constants import ToolLimits
 
 logger = logging.getLogger(__name__)
 

@@ -29,6 +29,7 @@ from _diagnostics import (
     _stream_logger,
     _sync_diag_handlers,
 )
+
 # 提供者适配插件注册表（3a：MiniMax 角色修正 / DeepSeek extra_body 透传 /
 # <think/> 提取均按模型名分发到 llm_provider_* 插件，llm_core 不绑定提供者）。
 from _provider_registry import apply_pre_send, extract_thinking_from_content
@@ -146,7 +147,7 @@ class _ThreadedStreamBridge:
         # 尚未返回流对象时先为 None，worker 完成填充。
         self.completion_stream = completion_stream
 
-    def __aiter__(self) -> "_ThreadedStreamBridge":
+    def __aiter__(self) -> _ThreadedStreamBridge:
         return self
 
     async def __anext__(self) -> Any:
@@ -1212,4 +1213,3 @@ class LiteLLMAdapter(_BaseLiteLLMAdapter):
     async def _do_completion(self, **kwargs: Any) -> Any:
         """调用 litellm.acompletion()。"""
         return await litellm.acompletion(**kwargs)
-

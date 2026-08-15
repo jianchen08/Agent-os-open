@@ -139,10 +139,7 @@ class TestMcpServer:
         assert len(result.tools) == 1
         assert result.tools[0].name == "echo"
         assert result.tools[0].description == "Echo tool"
-        assert result.tools[0].input_schema == {
-            "type": "object",
-            "properties": {"text": {"type": "string"}}
-        }
+        assert result.tools[0].input_schema == {"type": "object", "properties": {"text": {"type": "string"}}}
 
     @pytest.mark.asyncio
     async def test_tools_call_async(self) -> None:
@@ -173,9 +170,7 @@ class TestMcpServer:
             ),
         }
         server = McpServer(tools, {}, {})
-        result = await server._handle_tools_call(
-            {"name": "sync_echo", "arguments": {"text": "world"}}
-        )
+        result = await server._handle_tools_call({"name": "sync_echo", "arguments": {"text": "world"}})
         content = json.loads(result.content[0].text)
         assert content == {"echo": "world"}
 
@@ -188,9 +183,7 @@ class TestMcpServer:
         """
         seen: dict[str, Any] = {}
 
-        async def ranged(
-            path: str, start_line: int | None = None, end_line: int | None = None
-        ) -> dict:
+        async def ranged(path: str, start_line: int | None = None, end_line: int | None = None) -> dict:
             seen["start_line"] = start_line
             seen["end_line"] = end_line
             # 模拟 file_read 中的算术——字符串值在此会抛 TypeError
@@ -215,10 +208,12 @@ class TestMcpServer:
         }
         server = McpServer(tools, {}, {})
         # start_line/end_line 以「字符串」传入（模拟 LLM 输出）
-        result = await server._handle_tools_call({
-            "name": "ranged",
-            "arguments": {"path": "x.txt", "start_line": "2", "end_line": "4"},
-        })
+        result = await server._handle_tools_call(
+            {
+                "name": "ranged",
+                "arguments": {"path": "x.txt", "start_line": "2", "end_line": "4"},
+            }
+        )
         assert result.is_error is False
         assert seen["start_line"] == 2 and isinstance(seen["start_line"], int)
         assert seen["end_line"] == 4 and isinstance(seen["end_line"], int)
@@ -230,6 +225,7 @@ class TestMcpServer:
         回归 trigger_review：task_id 未到达 sidecar 时，零参调用 handler 会抛
         ``missing positional argument: task_id``。分发层应转为 isError 响应。
         """
+
         async def review(task_id: str, summary: str) -> dict:  # 无 **kwargs
             return {"task_id": task_id}
 
@@ -249,16 +245,17 @@ class TestMcpServer:
         }
         server = McpServer(tools, {}, {})
         # task_id 缺失
-        result = await server._handle_tools_call({
-            "name": "trigger_review",
-            "arguments": {"summary": "only summary"},
-        })
+        result = await server._handle_tools_call(
+            {
+                "name": "trigger_review",
+                "arguments": {"summary": "only summary"},
+            }
+        )
         assert result.is_error is True
         body = json.loads(result.content[0].text)
         assert body["success"] is False
         assert body["error_code"] == "INVALID_ARGUMENTS"
         assert "task_id" in body["error"]
-
 
     @pytest.mark.asyncio
     async def test_resources_read(self) -> None:
@@ -417,15 +414,11 @@ class TestDependencyInjection:
         """record_metric 走 metrics.record 反向调用（监控设计 §三 通道2）。"""
         plugin = AgentOSPlugin("llm_service")
         call_fn = AsyncMock(return_value={"status": "recorded"})
-        plugin._on_initialize(
-            {"capabilities": {"metrics": {}}, "config": {}}
-        )
+        plugin._on_initialize({"capabilities": {"metrics": {}}, "config": {}})
         # 替换注入的 call_fn 为 mock（绕过真实 KernelChannel）
         plugin._capabilities["metrics"]._call_fn = call_fn
 
-        result = await plugin.record_metric(
-            "tokens_used", 1280, "counter", {"model": "deepseek"}, unit="tokens"
-        )
+        result = await plugin.record_metric("tokens_used", 1280, "counter", {"model": "deepseek"}, unit="tokens")
         assert result == {"status": "recorded"}
         call_fn.assert_called_once()
         args = call_fn.call_args.args

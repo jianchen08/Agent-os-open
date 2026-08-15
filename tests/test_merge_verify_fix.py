@@ -1,13 +1,13 @@
 """验证合并修复：git_merge 验证（含 diff 基准）+ 重试 + fail_task"""
 from __future__ import annotations
 
-import tests._isolation_path  # noqa: F401
-
 import subprocess
 from pathlib import Path
 from unittest.mock import MagicMock
 
 import pytest
+
+import tests._isolation_path  # noqa: F401
 
 
 def git(*args, cwd=None):

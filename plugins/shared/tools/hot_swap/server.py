@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Hot Swap 工具 MCP 服务端——接口适配层。"""
 from __future__ import annotations
+
 import os
 import sys
 

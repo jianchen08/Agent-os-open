@@ -6,10 +6,9 @@ import logging
 import time
 from typing import Any
 
+from auth import get_current_user
 from fastapi import Header, HTTPException, Request, status
 from fastapi.responses import JSONResponse
-
-from auth import get_current_user
 
 logger = logging.getLogger(__name__)
 

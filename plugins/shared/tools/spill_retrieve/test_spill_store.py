@@ -61,7 +61,7 @@ def test_read_spill_plain(tmp_path):
     assert r["found"] is True
     assert r["content"] == "hello 原文"
     assert r["encoding"] == "plain"
-    assert r["size_bytes"] == len("hello 原文".encode("utf-8"))
+    assert r["size_bytes"] == len("hello 原文".encode())
 
 
 def test_read_spill_gzip_magic_autodetect(tmp_path):

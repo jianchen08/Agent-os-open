@@ -447,7 +447,7 @@ async def hindsight_import_document(
                 "chunks_imported": 0,
             }
         try:
-            with open(file_path, "r", encoding="utf-8") as fh:
+            with open(file_path, encoding="utf-8") as fh:
                 raw_text = fh.read()
         except Exception as e:
             return {"error": f"failed to read file: {e}", "chunks_imported": 0}

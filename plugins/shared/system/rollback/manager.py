@@ -10,9 +10,6 @@ import uuid
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import select
-from sqlalchemy.orm import Session
-
 from models import (
     Checkpoint,
     OperationLog,
@@ -21,6 +18,8 @@ from models import (
     RollbackResult,
 )
 from reversers import ReverserRegistry, get_reverser_registry
+from sqlalchemy import select
+from sqlalchemy.orm import Session
 
 logger = logging.getLogger(__name__)
 

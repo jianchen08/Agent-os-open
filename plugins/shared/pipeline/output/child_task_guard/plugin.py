@@ -14,9 +14,9 @@ from __future__ import annotations
 import logging
 from typing import Any
 
+from enum_utils import safe_enum_value
 from pipeline.plugin import IOutputPlugin, OutputResult, PluginContext
 from pipeline.types import ErrorPolicy, RouteSignal
-from enum_utils import safe_enum_value
 
 logger = logging.getLogger(__name__)
 

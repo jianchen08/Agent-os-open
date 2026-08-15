@@ -49,10 +49,10 @@ def _get_human_interaction_cap() -> Any | None:
         return _PLUGIN_REF.get_capability("human-interaction")
     except (KeyError, AttributeError):
         return None
-from policy import IsolationPolicyLoader
-from sensitive_paths import is_sensitive_path
 from pipeline.plugin import IInputPlugin, PluginContext, PluginResult
 from pipeline.types import ErrorPolicy, StateKeys
+from policy import IsolationPolicyLoader
+from sensitive_paths import is_sensitive_path
 
 logger = logging.getLogger(__name__)
 

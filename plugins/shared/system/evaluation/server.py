@@ -78,7 +78,7 @@ def _load_metrics() -> list[dict[str, Any]]:
     """读汇总 yaml 的 metrics 数组。读失败返回空列表（不抛，由调用方决定语义）。"""
     yaml_path = os.path.join(_project_root(), _METRICS_YAML)
     try:
-        with open(yaml_path, "r", encoding="utf-8") as f:
+        with open(yaml_path, encoding="utf-8") as f:
             data = yaml.safe_load(f) or {}
     except (OSError, yaml.YAMLError):
         return []

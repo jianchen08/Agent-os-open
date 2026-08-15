@@ -14,7 +14,7 @@ server.py 的 queue 消费者 → frontend.emit("tool_progress") → 内核 → 
 from __future__ import annotations
 
 import time
-from typing import Callable
+from collections.abc import Callable
 
 # 缓冲字符数阈值（≈1KB）
 _DEFAULT_MIN_CHARS = 1024

@@ -37,7 +37,6 @@ from llm_provider_deepseek import (  # noqa: E402
 )
 from llm_provider_minimax import ensure_role_safety  # noqa: E402
 
-
 # ─────────────────── 结构断言（防回退） ───────────────────
 
 def test_adapter_no_longer_contains_provider_hacks() -> None:

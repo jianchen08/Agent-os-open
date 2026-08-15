@@ -28,6 +28,7 @@ from typing import Any
 from unittest.mock import AsyncMock
 
 import pytest
+
 from agentos_plugin_sdk.capability import CapabilityHandle
 
 pytestmark = pytest.mark.unit

@@ -16,10 +16,9 @@ import logging
 from abc import ABC, abstractmethod
 from typing import Any
 
+from cli_input_adapter import CLIInputAdapter
 from rich.console import Console
 from rich.panel import Panel
-
-from cli_input_adapter import CLIInputAdapter
 
 logger = logging.getLogger(__name__)
 

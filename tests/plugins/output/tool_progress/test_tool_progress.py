@@ -10,7 +10,6 @@ from typing import Any
 from unittest.mock import MagicMock
 
 import pytest
-
 from pipeline.plugin import PluginContext
 from pipeline.types import StateKeys
 
@@ -55,8 +54,8 @@ class TestConfig:
         assert r.priority == 7
 
     def test_error_policy为SKIP(self) -> None:
-        from plugin import ToolProgressReporter
         from pipeline.types import ErrorPolicy
+        from plugin import ToolProgressReporter
 
         assert ToolProgressReporter.error_policy == ErrorPolicy.SKIP
 

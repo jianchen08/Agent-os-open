@@ -63,6 +63,7 @@ def _augment_description(description: str, output_schema: dict[str, Any] | None)
     line = f"Output contract: {compact}"
     return f"{description}\n{line}" if description else line
 
+
 # 反向 capability 调用等待内核响应的超时（与旧自研通道一致的 30s 默认）。
 CAPABILITY_CALL_TIMEOUT_S = 30.0
 
@@ -116,9 +117,7 @@ def _filter_handler_kwargs(handler: Any, arguments: dict[str, Any]) -> dict[str,
     return {k: v for k, v in arguments.items() if k in sig.parameters}
 
 
-def _coerce_args_by_schema(
-    schema: dict[str, Any], arguments: dict[str, Any]
-) -> dict[str, Any]:
+def _coerce_args_by_schema(schema: dict[str, Any], arguments: dict[str, Any]) -> dict[str, Any]:
     """按 schema 把字符串数值参数强制转为数值类型。
 
     LLM 经常把数值参数生成成字符串（如 ``"start_line": "5"``、``"limit": "20"``），
@@ -181,9 +180,7 @@ class KernelChannel:
 
     def _require_outbound(self) -> Any:
         if self._outbound is None:
-            raise RuntimeError(
-                "kernel channel not attached (initialize handshake not received)"
-            )
+            raise RuntimeError("kernel channel not attached (initialize handshake not received)")
         return self._outbound
 
     async def send_request(self, method: str, params: dict[str, Any]) -> Any:
@@ -208,9 +205,7 @@ class KernelChannel:
                 {"timeout": CAPABILITY_CALL_TIMEOUT_S},
             )
         except MCPError as e:
-            raise RuntimeError(
-                f"kernel capability call failed [{e.error.code}] {method}: {e.error.message}"
-            ) from None
+            raise RuntimeError(f"kernel capability call failed [{e.error.code}] {method}: {e.error.message}") from None
 
     async def send_notification(self, method: str, params: dict[str, Any]) -> None:
         """向内核发起一次 fire-and-forget 的 capability 通知（不等响应）。
@@ -331,9 +326,7 @@ class McpServer:
 
     async def _on_call_tool(self, ctx: Any, params: types.CallToolRequestParams) -> types.CallToolResult:
         """tools/call——调用指定工具并返回结果（原始 dict 分发层见 _handle_tools_call）。"""
-        return await self._handle_tools_call(
-            {"name": params.name, "arguments": dict(params.arguments or {})}
-        )
+        return await self._handle_tools_call({"name": params.name, "arguments": dict(params.arguments or {})})
 
     async def _handle_tools_call(self, params: dict[str, Any]) -> types.CallToolResult:
         """分发 tools/call 到已注册 handler（保留旧分发语义，供单测直调）。"""
@@ -363,9 +356,7 @@ class McpServer:
             except ValueError:
                 pass
             except TypeError as e:
-                logger.warning(
-                    "[mcp] 工具 %s 参数绑定失败: %s | kwargs=%s", name, e, list(kwargs)
-                )
+                logger.warning("[mcp] 工具 %s 参数绑定失败: %s | kwargs=%s", name, e, list(kwargs))
                 return types.CallToolResult(
                     content=[
                         types.TextContent(
@@ -387,7 +378,7 @@ class McpServer:
                 result = await result
 
         # ToolResult 等携带 to_dict() 的结果对象必须序列化为 JSON 对象
-        #（内核 invoker 按 content[0].text 的 JSON 对象解析 success/output/metadata），
+        # （内核 invoker 按 content[0].text 的 JSON 对象解析 success/output/metadata），
         # 否则 default=str 会退化成字符串，丢失结构。
         if hasattr(result, "to_dict") and callable(result.to_dict):
             result = result.to_dict()
@@ -412,9 +403,7 @@ class McpServer:
 
     # ── resources/read ───────────────────────────────────
 
-    async def _on_read_resource(
-        self, ctx: Any, params: types.ReadResourceRequestParams
-    ) -> types.ReadResourceResult:
+    async def _on_read_resource(self, ctx: Any, params: types.ReadResourceRequestParams) -> types.ReadResourceResult:
         """resources/read——读取指定资源。"""
         return await self._handle_resources_read({"uri": str(params.uri)})
 

@@ -16,9 +16,8 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
-
 from deps import require_auth
+from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
 from multimodal import get_asr_service
 
 logger = logging.getLogger(__name__)

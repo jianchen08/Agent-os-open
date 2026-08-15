@@ -36,7 +36,7 @@ def setup_sidecar_logging() -> None:
 
     # 优先复用 SDK 内置统一日志基础设施。
     # agentos_plugin_sdk.logging 的 StreamHandler 默认输出到 stderr，正好契合 sidecar 约束
-    #（stdout 被 JSON-RPC 占用）。output 强制 console，不写本地文件——sidecar 日志
+    # （stdout 被 JSON-RPC 占用）。output 强制 console，不写本地文件——sidecar 日志
     # 由内核 stderr reader 汇聚到统一 sink，避免双写。
     try:
         from agentos_plugin_sdk.logging import (  # noqa: PLC0415

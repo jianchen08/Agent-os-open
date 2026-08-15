@@ -24,11 +24,10 @@ E2E 测试：Auth 登录全链路 + Chat 管道 + 插件工具加载（HTTP API 
     3.3 响应含 type='message', session_id, timestamp 字段
 """
 import json
-import urllib.request
 import urllib.error
+import urllib.request
 
 import pytest
-
 from e2e_helpers import KERNEL_URL, http_get, http_post_json
 
 

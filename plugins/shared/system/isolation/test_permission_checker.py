@@ -47,8 +47,8 @@ from permission_policy import (  # noqa: E402
     PermissionPolicyType,
     PermissionScope,
     ReadPermission,
-    WritePermission,
     WorkspacePermissionPolicy,
+    WritePermission,
 )
 
 
@@ -214,8 +214,8 @@ class TestPathUtils:
         assert checker.resolve_path("C:/abs/x.py") == os.path.normpath("C:/abs/x.py")
 
     def test_get_project_root(self) -> None:
-        checker = PermissionChecker(project_root=str(Path(".").resolve()))
-        assert checker.get_project_root() == str(Path(".").resolve())
+        checker = PermissionChecker(project_root=str(Path().resolve()))
+        assert checker.get_project_root() == str(Path().resolve())
 
     def test_module_level_check_write_permission_with_dict(self, tmp_path: Path) -> None:
         ok, _ = check_write_permission(

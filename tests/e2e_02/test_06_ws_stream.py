@@ -18,13 +18,11 @@ E2E 测试：WS 流式全链路（FP-0.2.〇 串行循环）
 """
 import asyncio
 import json
+import os
 import uuid
 
 import pytest
-
 from e2e_helpers import create_session, ws_chat_url
-
-import os
 
 pytestmark = [
     pytest.mark.e2e,

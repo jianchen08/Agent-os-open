@@ -10,7 +10,6 @@ from __future__ import annotations
 from typing import Any
 
 import pytest
-
 from pipeline.plugin import PluginContext
 
 pytestmark = pytest.mark.unit
@@ -57,8 +56,8 @@ class TestConfig:
         assert p.priority == 40
 
     def test_error_policy为SKIP(self) -> None:
-        from plugin import TaskEventReceiverPlugin
         from pipeline.types import ErrorPolicy
+        from plugin import TaskEventReceiverPlugin
 
         assert TaskEventReceiverPlugin.error_policy == ErrorPolicy.SKIP
 

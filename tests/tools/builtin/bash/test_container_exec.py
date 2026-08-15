@@ -21,7 +21,6 @@ import asyncio
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
-
 from bash_types import WorkUnit
 from process_manager import (
     ContainerProcessBackend,

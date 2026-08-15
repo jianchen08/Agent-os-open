@@ -19,12 +19,11 @@ import time as _time
 from typing import Any
 
 import litellm
-
 from adapter import (  # noqa: F401 - 复用 llm_core 基类与流式基础设施
     _ACLOSE_TIMEOUT_SECONDS,
-    _ThreadedStreamBridge,
     _await_with_escape,
     _BaseLiteLLMAdapter,
+    _ThreadedStreamBridge,
 )
 from error_classifier import ErrorKind, classify_error
 
@@ -350,8 +349,8 @@ class KeyPoolAdapter(_BaseLiteLLMAdapter):
         #   → 主循环只从 queue.Queue 取 chunk，彻底避免跨 loop
         # - 主协程轮询 threading.Event（OS 层事件，到点必然置位/超时，不依赖
         #   任何事件循环调度），超时抛 TimeoutError 透传
-        import threading  # noqa: PLC0415
         import queue  # noqa: PLC0415
+        import threading  # noqa: PLC0415
 
         _done_evt = threading.Event()
         _result_box: list[Any] = []

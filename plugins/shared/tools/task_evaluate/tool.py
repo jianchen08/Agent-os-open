@@ -23,6 +23,8 @@ import logging
 from typing import Any
 
 from _eval_core import sanitize_eval_paths
+from task_types import TaskStatus
+
 from agentos_plugin_sdk import (
     BuiltinTool,
     Tool,
@@ -33,7 +35,6 @@ from agentos_plugin_sdk import (
     create_failure_result,
     create_success_result,
 )
-from task_types import TaskStatus
 
 logger = logging.getLogger(__name__)
 

@@ -1,8 +1,6 @@
 """验证 4 个已知 bug 修复的测试用例。"""
 from __future__ import annotations
 
-import tests._isolation_path  # noqa: F401
-
 import asyncio
 import logging
 from pathlib import Path
@@ -11,6 +9,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+import tests._isolation_path  # noqa: F401
 
 # ── BUG-1: _detect_scenario 不再是 staticmethod ──────────────────────────
 
@@ -29,8 +28,9 @@ class TestBug1DetectScenarioInstanceMethod:
 
     def test_detect_scenario_accepts_self(self):
         """BUG-1: _detect_scenario 签名应包含 self 参数。"""
-        from workspace_lifecycle import WorkspaceLifecycleManager
         import inspect
+
+        from workspace_lifecycle import WorkspaceLifecycleManager
 
         sig = inspect.signature(WorkspaceLifecycleManager._detect_scenario)
         params = list(sig.parameters.keys())
@@ -94,6 +94,7 @@ class TestBug3SubmittedDeduplication:
         # 不能直接 import TaskWorker（依赖太重），用 mock 验证字段
         # 改为检查源码中存在该字段
         import inspect
+
         from infrastructure import task_worker
 
         source = inspect.getsource(task_worker.TaskWorker.__init__)

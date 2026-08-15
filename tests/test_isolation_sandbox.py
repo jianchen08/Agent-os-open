@@ -18,13 +18,12 @@
 """
 from __future__ import annotations
 
-import tests._isolation_path  # noqa: F401  (把 isolation 插件目录加入 sys.path)
-
 from typing import Any
 
 import pytest
-
 from sandbox import CodeSandbox, SandboxConfig
+
+import tests._isolation_path  # noqa: F401  (把 isolation 插件目录加入 sys.path)
 
 
 @pytest.fixture

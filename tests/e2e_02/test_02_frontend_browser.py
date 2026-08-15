@@ -16,8 +16,8 @@
   2.4 验证前端到 Kernel 的 API 代理工作
 """
 import subprocess
-import pytest
 
+import pytest
 from e2e_helpers import http_get
 
 

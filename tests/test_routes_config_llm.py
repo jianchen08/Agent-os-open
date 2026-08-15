@@ -265,7 +265,7 @@ class TestRemoteModels:
             def json(self) -> dict[str, Any]:
                 return {"data": [{"id": "m-b"}, {"id": "m-a", "owned_by": "owner-x"}]}
 
-        def fake_get(url: str, headers: dict[str, str] | None = None, timeout: float = 0) -> "FakeResp":
+        def fake_get(url: str, headers: dict[str, str] | None = None, timeout: float = 0) -> FakeResp:
             captured["url"] = url
             captured["headers"] = headers or {}
             captured["timeout"] = timeout
@@ -294,7 +294,7 @@ class TestRemoteModels:
             def json(self) -> dict[str, Any]:
                 return {"data": [{"id": "gpt-x"}]}
 
-        def fake_get(url: str, headers: dict[str, str] | None = None, timeout: float = 0) -> "FakeResp":
+        def fake_get(url: str, headers: dict[str, str] | None = None, timeout: float = 0) -> FakeResp:
             captured["url"] = url
             captured["headers"] = headers or {}
             return FakeResp()

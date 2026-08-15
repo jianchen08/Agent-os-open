@@ -27,6 +27,7 @@
 用法（CI 或本地，建议在 uv 环境内）:
     uv run python scripts/check_mypy_baseline.py
 """
+
 from __future__ import annotations
 
 import subprocess
@@ -58,6 +59,7 @@ def count_mypy_errors() -> int:
         capture_output=True,
         text=True,
         cwd=ROOT,
+        check=False,
     )
     # mypy 输出里 count "error:" 行（每条错误行形如 "...: error: ... [code]"，
     # 汇总行 "Found N errors in M files" 不含冒号，不会被误计）

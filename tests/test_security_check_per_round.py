@@ -1,4 +1,5 @@
 from tests._pipeline_plugin_path import add_plugin_dir
+
 add_plugin_dir("input", "security_check")
 """security_check 审批闸门回归测试。
 
@@ -19,9 +20,9 @@ add_plugin_dir("input", "security_check")
 不仅是返回值。
 """
 
-import pytest
 from unittest.mock import AsyncMock, MagicMock
 
+import pytest
 from pipeline.plugin import PluginContext
 
 pytestmark = pytest.mark.unit

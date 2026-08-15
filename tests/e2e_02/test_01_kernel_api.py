@@ -13,8 +13,8 @@
   1.6 POST /api/v1/chat → 200, 响应含 type/content/session_id/timestamp 字段
 """
 import json
-import pytest
 
+import pytest
 from e2e_helpers import http_get, http_post_json
 
 

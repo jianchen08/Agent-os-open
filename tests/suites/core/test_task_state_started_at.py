@@ -12,7 +12,6 @@ import tempfile
 from datetime import datetime
 
 import pytest
-
 from service import TaskService
 from task_types import TaskStatus
 

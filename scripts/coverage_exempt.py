@@ -72,9 +72,9 @@ class ExemptSuite:
     """
 
     path: str
-    profile: str                 # 为什么重（重型画像）
-    measured_in_process: str     # 进程内执行的被度量代码对账
-    covered_by: str              # 覆盖由谁接住
+    profile: str  # 为什么重（重型画像）
+    measured_in_process: str  # 进程内执行的被度量代码对账
+    covered_by: str  # 覆盖由谁接住
 
 
 EXEMPT_SUITES: list[ExemptSuite] = [
@@ -158,8 +158,10 @@ def check() -> int:
         return 1
 
     n_ignores = len(ignores)
-    print(f"coverage_exempt: 配对校验通过——基集 {len(BASE_TEST_PATHS)} 条，豁免 {len(EXEMPT_SUITES)} 条"
-          f"（--ignore {n_ignores} 条 = positional {len(heavy_paths())} 条）")
+    print(
+        f"coverage_exempt: 配对校验通过——基集 {len(BASE_TEST_PATHS)} 条，豁免 {len(EXEMPT_SUITES)} 条"
+        f"（--ignore {n_ignores} 条 = positional {len(heavy_paths())} 条）"
+    )
     for s in EXEMPT_SUITES:
         print(f"  豁免: {s.path}")
     return 0

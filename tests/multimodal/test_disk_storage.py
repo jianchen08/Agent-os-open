@@ -22,9 +22,8 @@ import pytest
 
 pytestmark = pytest.mark.unit  # 0.2 TDD 分层：单元测试
 
-from storage import DiskFileStorage, LocalFileStorage, StorageError
 from mm_types import AttachmentInfo, MediaType
-
+from storage import DiskFileStorage, LocalFileStorage, StorageError
 
 # ── helpers ──────────────────────────────────────────────
 

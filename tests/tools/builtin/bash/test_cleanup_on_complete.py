@@ -13,7 +13,6 @@ import asyncio
 from pathlib import Path
 
 import pytest
-
 from bash_types import ProcessInfo
 from process_manager import ProcessManager
 

@@ -40,7 +40,7 @@ security:
   check_dangerous_commands: true
   check_sensitive_input: true
   max_input_length: 4096  # 最大输入长度
-  
+
   # 危险命令模式
   dangerous_patterns:
     - "rm -rf /"
@@ -49,7 +49,7 @@ security:
     - "dd if="
     - "> /dev/sd"
     - ":(){ :|:& };:"  # Fork bomb
-  
+
   # 敏感关键词（输入会被掩码）
   sensitive_keywords:
     - "password"
@@ -64,7 +64,7 @@ security:
 isolation:
   enabled: true  # 默认启用隔离
   default_level: "isolated"  # 默认隔离级别：non_isolated/isolated
-  
+
   # 隔离级别映射
   level_mapping:
     non_isolated: "非隔离（直接执行）"

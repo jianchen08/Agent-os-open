@@ -16,10 +16,9 @@ from __future__ import annotations
 import logging
 from typing import Any
 
+from deps import APIError, require_auth, validate_pagination
 from fastapi import APIRouter, Depends, Query
 from fastapi.params import Query as QueryParam
-
-from deps import APIError, require_auth, validate_pagination
 from models import (
     MemoryListResponse,
     MemoryResponse,

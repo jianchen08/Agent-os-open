@@ -19,10 +19,8 @@ import time
 from unittest.mock import AsyncMock
 
 import pytest
-
 from manager import IsolationManager
 from providers.docker_provider import DockerProvider
-
 
 # ---------------------------------------------------------------------------
 # 1. prune 限频：_should_prune 按标记文件判断

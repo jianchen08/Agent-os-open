@@ -17,7 +17,6 @@ import asyncio
 from pathlib import Path
 
 import pytest
-
 from process_manager import ProcessManager
 
 pytestmark = pytest.mark.unit

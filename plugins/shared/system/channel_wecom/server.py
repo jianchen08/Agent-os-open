@@ -15,9 +15,9 @@ from typing import Any
 
 sys.path.insert(0, os.path.dirname(__file__))
 
-from agentos_plugin_sdk import AgentOSPlugin
-
 from adapter import WeComAdapter
+
+from agentos_plugin_sdk import AgentOSPlugin
 
 logger = logging.getLogger(__name__)
 plugin = AgentOSPlugin("channel_wecom")

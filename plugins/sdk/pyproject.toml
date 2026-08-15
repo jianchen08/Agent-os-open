@@ -19,6 +19,9 @@ dependencies = [
     # 传输/协议层；AgentOS 私有扩展（initialize DI/生命周期通知/反向 capability）
     # 经 middleware 与自定义 notification handler 挂接（见 server.py）
     "mcp>=2.0,<3",
+    # MCP 低层类型/错误码(mcp_types.jsonrpc.INVALID_PARAMS 等,server.py 使用;
+    # 此前靠本地 pip 环境残留,未声明导致 CI ModuleNotFoundError)
+    "mcp-types>=2.0,<3",
 ]
 
 [project.optional-dependencies]

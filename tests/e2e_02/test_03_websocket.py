@@ -16,6 +16,7 @@
   3.3 验证 session_id 透传正确
 """
 import json
+
 import pytest
 
 pytestmark = pytest.mark.skip(reason="0.1 echo 协议已过时，0.2 见 test_06_ws_stream.py")

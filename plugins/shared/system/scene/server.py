@@ -18,11 +18,11 @@ _SYSTEM_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 if _SYSTEM_DIR not in sys.path:
     sys.path.insert(0, _SYSTEM_DIR)
 
-from agentos_plugin_sdk import AgentOSPlugin
-
 # 直接导入同目录老代码
 from scene.manager import SceneManager
 from scene.templates import list_templates
+
+from agentos_plugin_sdk import AgentOSPlugin
 
 logger = logging.getLogger(__name__)
 plugin = AgentOSPlugin("scene_service")

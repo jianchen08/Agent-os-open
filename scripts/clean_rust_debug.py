@@ -55,7 +55,7 @@ def _human(n: int) -> str:
     for unit in ("B", "KB", "MB", "GB", "TB"):
         if n < 1024 or unit == "TB":
             return f"{n:.1f}{unit}" if unit != "B" else f"{n}B"
-        n /= 1024
+        n = int(n) // 1024
     return f"{n}B"
 
 
@@ -108,7 +108,7 @@ def main() -> int:
 
     print(f"\n合计释放 {_human(freed)}。")
     if failed:
-        print(f"以下目录未能删除（被占用或权限不足）：")
+        print("以下目录未能删除（被占用或权限不足）：")
         for d in failed:
             print(f"  - {d.relative_to(ROOT)}")
         return 1

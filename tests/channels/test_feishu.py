@@ -7,10 +7,10 @@ FeishuStreamClient（Mock）和 CardBuilder 的核心功能。
 
 from __future__ import annotations
 
-import sys
-import os
 import asyncio
 import json
+import os
+import sys
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -21,9 +21,8 @@ from tests.channels.conftest import use_channel
 
 use_channel("feishu")
 from adapter import FeishuAdapter, FeishuInputAdapter, FeishuOutputAdapter
-from stream_client import FeishuStreamClient
 from card_builder import CardBuilder
-
+from stream_client import FeishuStreamClient
 
 # ═══════════════════════════════════════════════════════════
 # FeishuInputAdapter 测试

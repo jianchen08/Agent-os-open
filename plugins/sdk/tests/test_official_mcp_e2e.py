@@ -26,7 +26,7 @@ from typing import Any
 import pytest
 
 # sidecar 插件脚本：echo / 反向调用 / 反向通知 / 生命周期回读 四类工具
-SIDECAR_SCRIPT = '''
+SIDECAR_SCRIPT = """
 import sys
 from typing import Any
 
@@ -91,7 +91,7 @@ async def last_lifecycle() -> dict:
 
 if __name__ == "__main__":
     plugin.run()
-'''
+"""
 
 
 class KernelHarness:
@@ -145,9 +145,7 @@ class KernelHarness:
 
             if msg.get("method") is not None and "id" in msg:
                 self.received_requests.append(msg)
-                result = self.reverse_handlers.get(
-                    msg["method"], {"routed": True, "method": msg["method"]}
-                )
+                result = self.reverse_handlers.get(msg["method"], {"routed": True, "method": msg["method"]})
                 self._write({"jsonrpc": "2.0", "id": msg["id"], "result": result})
                 continue
 
@@ -302,10 +300,7 @@ class TestOfficialSdkE2E:
         body = _call_tool(initialized, "call_kernel", {})
         assert body["kernel_said"]["status"] == "resumed"
         # 内核侧确实收到了反向 request，method 为 <capability>.<method>
-        assert any(
-            r.get("method") == "pipeline-executor.resume"
-            for r in initialized.received_requests
-        )
+        assert any(r.get("method") == "pipeline-executor.resume" for r in initialized.received_requests)
 
     def test_reverse_capability_notification(self, initialized: KernelHarness) -> None:
         """工具 handler 内反向 notification（流式 chunk 推送路径）。"""
@@ -333,8 +328,12 @@ class TestOfficialSdkE2E:
         with initialized._lock:
             initialized._pending[req_id] = q
         initialized._write(
-            {"jsonrpc": "2.0", "id": req_id, "method": "tools/call",
-             "params": {"name": "no_such_tool", "arguments": {}}}
+            {
+                "jsonrpc": "2.0",
+                "id": req_id,
+                "method": "tools/call",
+                "params": {"name": "no_such_tool", "arguments": {}},
+            }
         )
         msg = q.get(timeout=30)
         assert msg.get("error") is not None

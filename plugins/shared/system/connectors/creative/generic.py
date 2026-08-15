@@ -14,7 +14,6 @@ import logging
 from typing import Any
 
 import aiohttp
-
 from base import BaseConnector
 from config_mixin import ConfigSubscriberMixin
 from connector_types import (

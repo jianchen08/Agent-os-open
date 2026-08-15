@@ -13,7 +13,6 @@ from __future__ import annotations
 import os
 
 import pytest
-
 from isolation.sensitive_paths import is_sensitive_path
 
 

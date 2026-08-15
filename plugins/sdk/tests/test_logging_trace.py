@@ -26,6 +26,7 @@ from agentos_plugin_sdk.logging import (
 # ContextFilter 测试
 # ============================================================
 
+
 class TestContextFilter:
     """ContextFilter 注入跟踪字段。"""
 
@@ -66,6 +67,7 @@ class TestContextFilter:
 # LogContext 补充测试
 # ============================================================
 
+
 class TestLogContextEdgeCases:
     """LogContext 边界场景。"""
 
@@ -85,8 +87,7 @@ class TestLogContextEdgeCases:
         """snapshot 返回所有标准字段。"""
         LogContext.bind(trace_id="t-001", agent_name="灵汐")
         snap = LogContext.snapshot()
-        for key in ("request_id", "task_id", "session_id", "trace_id",
-                     "pipeline_id", "thread_id", "agent_name"):
+        for key in ("request_id", "task_id", "session_id", "trace_id", "pipeline_id", "thread_id", "agent_name"):
             assert key in snap
         assert snap["trace_id"] == "t-001"
 
@@ -122,14 +123,13 @@ class TestLogContextEdgeCases:
 # StructuredFormatter 补充测试
 # ============================================================
 
+
 class TestStructuredFormatterEdgeCases:
     """StructuredFormatter 边界。"""
 
     def test_custom_format_string(self):
         """自定义格式字符串。"""
-        fmt = StructuredFormatter(
-            fmt="%(levelname)s | %(message)s", datefmt="%H:%M"
-        )
+        fmt = StructuredFormatter(fmt="%(levelname)s | %(message)s", datefmt="%H:%M")
         rec = logging.LogRecord("test", logging.INFO, "", 1, "hello", None, None)
         out = fmt.format(rec)
         assert "INFO" in out
@@ -166,6 +166,7 @@ class TestStructuredFormatterEdgeCases:
 # ============================================================
 # JsonFormatter 补充测试
 # ============================================================
+
 
 class TestJsonFormatterEdgeCases:
     """JsonFormatter 边界。"""
@@ -212,6 +213,7 @@ class TestJsonFormatterEdgeCases:
 # LoggingConfig 补充测试
 # ============================================================
 
+
 class TestLoggingConfigEdgeCases:
     """LoggingConfig 边界场景。"""
 
@@ -223,16 +225,18 @@ class TestLoggingConfigEdgeCases:
 
     def test_from_dict_complete(self):
         """完整 from_dict。"""
-        config = LoggingConfig.from_dict({
-            "level": "WARNING",
-            "output": "both",
-            "json_output": True,
-            "file_path": "/var/log/app.log",
-            "file_max_bytes": 1000000,
-            "file_backup_count": 5,
-            "third_party_level": "ERROR",
-            "context_fields": ["request_id", "task_id", "trace_id"],
-        })
+        config = LoggingConfig.from_dict(
+            {
+                "level": "WARNING",
+                "output": "both",
+                "json_output": True,
+                "file_path": "/var/log/app.log",
+                "file_max_bytes": 1000000,
+                "file_backup_count": 5,
+                "third_party_level": "ERROR",
+                "context_fields": ["request_id", "task_id", "trace_id"],
+            }
+        )
         assert config.level == logging.WARNING
         assert config.output == "both"
         assert config.json_output is True

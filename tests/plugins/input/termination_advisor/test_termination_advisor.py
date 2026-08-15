@@ -21,7 +21,6 @@ import asyncio
 from typing import Any
 
 import pytest
-
 from pipeline.plugin import PluginContext
 
 pytestmark = pytest.mark.unit

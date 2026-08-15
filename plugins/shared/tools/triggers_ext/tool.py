@@ -16,6 +16,13 @@ from datetime import UTC, datetime, timedelta, tzinfo
 from typing import Any
 from zoneinfo import ZoneInfo
 
+from triggers.manager import get_trigger_manager
+from triggers.types import (
+    TriggerConfig,
+    TriggerType,
+    parse_duration,
+)
+
 # 跨插件共享类型已上提到 SDK 公共依赖层 agentos_plugin_sdk。
 # 触发器领域代码（triggers.manager / triggers.types）为本工具自有，位于本工具目录下
 # 的 triggers/ 子包（server.py 已将本工具目录注入 sys.path），直接 import。
@@ -29,12 +36,6 @@ from agentos_plugin_sdk import (
     create_failure_result,
     create_success_result,
     get_settings,
-)
-from triggers.manager import get_trigger_manager
-from triggers.types import (
-    TriggerConfig,
-    TriggerType,
-    parse_duration,
 )
 
 logger = logging.getLogger(__name__)

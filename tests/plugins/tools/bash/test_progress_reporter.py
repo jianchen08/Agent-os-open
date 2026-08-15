@@ -15,7 +15,6 @@
 from __future__ import annotations
 
 import pytest
-
 from progress_reporter import ProgressReporter
 
 pytestmark = pytest.mark.unit

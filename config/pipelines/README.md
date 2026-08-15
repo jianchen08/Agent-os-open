@@ -19,7 +19,7 @@ config/
 ```yaml
 pipeline:
   name: "agent_name"
-  
+
   # Pre 插件配置 - 按 core_type 分组
   pre:
     llm_call:              # LLM 调用前的插件
@@ -30,7 +30,7 @@ pipeline:
     tool_execute:          # 工具执行前的插件
       - plugin: plugin_name
         priority: 20
-  
+
   # Post 插件配置 - 按 core_type 分组
   post:
     llm_call:              # LLM 调用后的插件
@@ -39,7 +39,7 @@ pipeline:
     tool_execute:          # 工具执行后的插件
       - plugin: plugin_name
         priority: 20
-  
+
   # Router 插件配置 - 不分 core_type
   router:
     - plugin: router_name
@@ -57,7 +57,7 @@ inherit: default            # 继承 default.yaml
 
 pipeline:
   name: "l1_main_agent"
-  
+
   # 扩展或覆盖父配置
   pre:
     llm_call:
@@ -183,17 +183,17 @@ final_state = await run_agent_loop(
 ```yaml
 pipeline:
   name: "minimal_agent"
-  
+
   pre:
     llm_call:
       - plugin: prompt_build
         priority: 50
-  
+
   post:
     llm_call:
       - plugin: persist
         priority: 10
-  
+
   router:
     - plugin: default_end
       priority: 100
@@ -204,7 +204,7 @@ pipeline:
 ```yaml
 pipeline:
   name: "production_agent"
-  
+
   pre:
     llm_call:
       - plugin: memory_read
@@ -222,7 +222,7 @@ inherit: default
 
 pipeline:
   name: "l2_subtask"
-  
+
   pre:
     tool_execute:
       - plugin: security_check
@@ -230,7 +230,7 @@ pipeline:
         config:
           default_isolation: container  # 覆盖父配置
           require_approval: true         # 子任务需要审批
-  
+
   router:
     - plugin: task_evaluation
       priority: 40

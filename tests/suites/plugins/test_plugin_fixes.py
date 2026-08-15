@@ -22,9 +22,9 @@ import time
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
-
 from pipeline.plugin import PluginContext
 from pipeline.types import StateKeys
+
 from tests.suites.plugins.conftest import load_module_from_file
 
 pytestmark = pytest.mark.unit

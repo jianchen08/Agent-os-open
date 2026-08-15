@@ -19,8 +19,9 @@ sys.path.insert(0, _this_dir)
 _shared_dir = os.path.join(_this_dir, "..", "..", "..")
 sys.path.insert(0, _shared_dir)
 
-from agentos_plugin_sdk import AgentOSPlugin, FrontendEmitter  # noqa: E402
 from plugin import TerminationAdvisorPlugin  # noqa: E402
+
+from agentos_plugin_sdk import AgentOSPlugin, FrontendEmitter  # noqa: E402
 
 logger = logging.getLogger(__name__)
 plugin = AgentOSPlugin("termination_advisor_pipeline")

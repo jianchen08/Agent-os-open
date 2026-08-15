@@ -242,7 +242,7 @@ def main() -> int:
         if args.only != "0.2":
             try:
                 token = login_01()
-                print(f"[0.1] 登录成功")
+                print("[0.1] 登录成功")
                 await test_0_1_single_turn(token, not args.no_llm)
                 await test_0_1_multi_turn_memory(token, not args.no_llm)
             except Exception as e:
@@ -250,7 +250,7 @@ def main() -> int:
         if args.only != "0.1":
             try:
                 http(f"{KERNEL_02}/health")
-                print(f"[0.2] kernel 可用")
+                print("[0.2] kernel 可用")
                 test_0_2_single_turn(not args.no_llm)
                 test_0_2_multi_turn_memory(not args.no_llm)
             except Exception as e:

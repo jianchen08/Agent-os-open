@@ -1,4 +1,5 @@
 from tests._pipeline_plugin_path import add_plugin_dir
+
 add_plugin_dir("core", "tool_core")
 """工具级拦截应转为「工具失败结果」而非终结整个管道。
 

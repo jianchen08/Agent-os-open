@@ -12,19 +12,18 @@ import tests._isolation_path  # noqa: F401  注入 isolation 插件目录到 sys
 0.2 迁移：isolation.X → 平铺 X；isolation.types → isolation_types（0.2 重命名）。
 """
 import pytest
-
 from decider import IsolationDecider, IsolationError
+from isolation_types import IsolationLevel
 from permission_checker import PermissionChecker, check_write_permission
 from permission_policy import (
     PermissionPolicyManager,
     PermissionPolicyType,
     PermissionScope,
     ReadPermission,
-    WritePermission,
     WorkspacePermissionPolicy,
+    WritePermission,
 )
 from policy import IsolationPolicyLoader, ToolIsolationPolicy
-from isolation_types import IsolationLevel
 
 pytestmark = pytest.mark.unit
 

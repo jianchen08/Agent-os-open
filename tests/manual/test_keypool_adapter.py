@@ -9,8 +9,8 @@
 用法: cd src && python -m test_keypool_adapter
 """
 import asyncio
-import time
 import logging
+import time
 
 logging.basicConfig(
     level=logging.INFO,
@@ -20,12 +20,13 @@ logger = logging.getLogger("test")
 
 
 async def main():
-    from config.models import get_model_config_loader
     from llm.router_factory import (
         build_adapter,
         get_key_pool,
         reset_router,
     )
+
+    from config.models import get_model_config_loader
 
     # 1. 构建 adapter
     reset_router()

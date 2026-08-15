@@ -33,4 +33,3 @@ def _evict_human_bare_modules():
     """每个测试前清理 service/interfaces 裸名缓存（不在全局碰撞名单内）。"""
     for _name in ("service", "interfaces"):
         sys.modules.pop(_name, None)
-    yield

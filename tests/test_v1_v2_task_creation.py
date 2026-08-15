@@ -140,7 +140,7 @@ class TestV1BackendStateMachine:
 
     def test_task_factory_creates_pending_task(self):
         """验证 create_task 工厂函数创建 PENDING 状态任务"""
-        from tasks.types import create_task, TaskStatus
+        from tasks.types import TaskStatus, create_task
 
         task = create_task(title="测试任务")
         assert task.status == TaskStatus.PENDING
@@ -183,7 +183,7 @@ class TestV1FrontendRealtimeUpdate:
 
     def test_global_websocket_supports_event_subscription(self):
         """验证 GlobalWebSocket 支持事件订阅（用于实时更新）"""
-        with open("frontend/src/services/websocket/GlobalWebSocket.ts", "r", encoding="utf-8") as f:
+        with open("frontend/src/services/websocket/GlobalWebSocket.ts", encoding="utf-8") as f:
             content = f.read()
         assert "subscribe(" in content, "GlobalWebSocket 缺少 subscribe 方法"
         assert "unsubscribe(" in content, "GlobalWebSocket 缺少 unsubscribe 方法"
@@ -191,7 +191,7 @@ class TestV1FrontendRealtimeUpdate:
 
     def test_task_ws_event_types_defined(self):
         """验证任务 WebSocket 事件类型已定义"""
-        with open("frontend/src/types/task.ts", "r", encoding="utf-8") as f:
+        with open("frontend/src/types/task.ts", encoding="utf-8") as f:
             content = f.read()
         expected_events = [
             "task_created",
@@ -222,7 +222,7 @@ class TestV1FrontendRealtimeUpdate:
             "longTermTaskStore",
             "frontend/src/stores/longTermTaskStore.ts"
         )
-        with open("frontend/src/stores/longTermTaskStore.ts", "r", encoding="utf-8") as f:
+        with open("frontend/src/stores/longTermTaskStore.ts", encoding="utf-8") as f:
             content = f.read()
         assert "updateTask" in content, "longTermTaskStore 缺少 updateTask 方法"
         assert "fetchTasks" in content, "longTermTaskStore 缺少 fetchTasks 方法"
@@ -250,7 +250,7 @@ class TestV1FrontendTaskListSorting:
 
     def test_frontend_task_sort_by_created_at_desc(self):
         """验证前端 TaskSortBy 类型支持 created_at 排序"""
-        with open("frontend/src/types/task.ts", "r", encoding="utf-8") as f:
+        with open("frontend/src/types/task.ts", encoding="utf-8") as f:
             content = f.read()
         assert "'created_at'" in content, "TaskSortBy 缺少 created_at 排序选项"
         assert "'desc'" in content, "TaskSortOrder 缺少 desc 选项"
@@ -261,7 +261,7 @@ class TestV1FrontendStatusDisplay:
 
     def test_frontend_task_status_matches_backend(self):
         """验证前端 TaskStatus 类型与后端状态定义一致"""
-        with open("frontend/src/types/task.ts", "r", encoding="utf-8") as f:
+        with open("frontend/src/types/task.ts", encoding="utf-8") as f:
             content = f.read()
 
         frontend_statuses = ["pending", "in_progress", "completed", "failed", "blocked", "suspended"]
@@ -278,7 +278,7 @@ class TestV1FrontendStatusDisplay:
 
     def test_frontend_task_type_definition_complete(self):
         """验证前端 Task 类型包含必要的状态字段"""
-        with open("frontend/src/types/task.ts", "r", encoding="utf-8") as f:
+        with open("frontend/src/types/task.ts", encoding="utf-8") as f:
             content = f.read()
 
         assert "status: TaskStatus" in content
@@ -349,21 +349,21 @@ class TestV2BackendErrorHandling:
 
     def test_standard_error_has_trace_id(self):
         """验证 StandardError 支持追踪 ID"""
-        with open("src/core/errors.py", "r", encoding="utf-8") as f:
+        with open("src/core/errors.py", encoding="utf-8") as f:
             content = f.read()
         assert "trace_id" in content or "StandardError" in content
 
     @pytest.mark.skip(reason="src/config/exceptions.py 已移除")
     def test_config_validation_exceptions(self):
         """验证配置模块有验证异常"""
-        with open("src/config/exceptions.py", "r", encoding="utf-8") as f:
+        with open("src/config/exceptions.py", encoding="utf-8") as f:
             content = f.read()
         assert "Exception" in content
         assert len(content.strip()) > 0
 
     def test_config_loader_error_handling(self):
         """验证配置加载器有错误处理逻辑"""
-        with open("src/config/loader.py", "r", encoding="utf-8") as f:
+        with open("src/config/loader.py", encoding="utf-8") as f:
             content = f.read()
         assert "except" in content or "raise" in content or "Exception" in content
 
@@ -391,7 +391,7 @@ class TestV2FrontendErrorDisplay:
 
     def test_error_boundary_renders_fallback_ui(self):
         """验证 ErrorBoundary 渲染降级 UI（不空白）"""
-        with open("frontend/src/components/ErrorBoundary.tsx", "r", encoding="utf-8") as f:
+        with open("frontend/src/components/ErrorBoundary.tsx", encoding="utf-8") as f:
             content = f.read()
 
         assert "出错了" in content
@@ -401,7 +401,7 @@ class TestV2FrontendErrorDisplay:
 
     def test_error_boundary_displays_error_details(self):
         """验证 ErrorBoundary 展示错误详情（包含错误堆栈）"""
-        with open("frontend/src/components/ErrorBoundary.tsx", "r", encoding="utf-8") as f:
+        with open("frontend/src/components/ErrorBoundary.tsx", encoding="utf-8") as f:
             content = f.read()
 
         assert "error.toString()" in content
@@ -409,7 +409,7 @@ class TestV2FrontendErrorDisplay:
 
     def test_long_term_task_store_error_handling(self):
         """验证 longTermTaskStore 正确处理错误"""
-        with open("frontend/src/stores/longTermTaskStore.ts", "r", encoding="utf-8") as f:
+        with open("frontend/src/stores/longTermTaskStore.ts", encoding="utf-8") as f:
             content = f.read()
 
         assert "error:" in content or "error |" in content
@@ -418,14 +418,14 @@ class TestV2FrontendErrorDisplay:
 
     def test_tasks_api_error_response_type(self):
         """验证前端 API 层有错误响应类型"""
-        with open("frontend/src/services/api/client.ts", "r", encoding="utf-8") as f:
+        with open("frontend/src/services/api/client.ts", encoding="utf-8") as f:
             content = f.read()
 
         assert "error" in content.lower()
 
     def test_task_type_includes_error_message(self):
         """验证前端 Task 类型包含 errorMessage 字段"""
-        with open("frontend/src/types/task.ts", "r", encoding="utf-8") as f:
+        with open("frontend/src/types/task.ts", encoding="utf-8") as f:
             content = f.read()
         assert "errorMessage" in content
 

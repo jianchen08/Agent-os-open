@@ -9,13 +9,14 @@ assistant(tool_calls) 之后、tool 之前 → 断序列 → 引擎中断。
 """
 
 from __future__ import annotations
+
 from tests._pipeline_plugin_path import add_plugin_dir
+
 add_plugin_dir("output", "duplicate_check")
 
 from typing import Any
 
 import pytest
-
 from pipeline.plugin import PluginContext
 from pipeline.types import StateKeys
 

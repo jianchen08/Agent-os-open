@@ -200,7 +200,7 @@ async def main() -> int:
     except AssertionError as e:
         print(f"\n❌ 验证失败: {e}")
         return 1
-    except Exception as e:
+    except Exception:
         import traceback
         traceback.print_exc()
         return 2

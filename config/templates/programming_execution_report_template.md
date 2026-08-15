@@ -77,4 +77,3 @@
 | {issue} | 高/中/低 | {suggestion} |
 
 ---
-

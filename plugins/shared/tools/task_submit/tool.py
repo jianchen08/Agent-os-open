@@ -1431,7 +1431,6 @@ class TaskSubmitTool(BuiltinTool):
         is_container: bool = False,
     ) -> tuple[Any, str | None]:
         """同步初始化工作空间，确保 ws_meta 写入 task.metadata 后才返回。"""
-        import asyncio  # noqa: PLC0415
 
         provider = _get_service_provider()
         lifecycle = provider.get("workspace_lifecycle_manager") if provider else None

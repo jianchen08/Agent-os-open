@@ -33,6 +33,7 @@ os.chdir(_PROJECT_ROOT)
 
 import yaml  # noqa: E402
 
+
 # ── 1. 真实 LLM client (context_window_guard 进程内路径) ──
 def build_real_llm_client() -> object:
     """构造真实 LLMClient，注入到 context_window_guard 的 set_llm_client。
@@ -108,7 +109,7 @@ async def main() -> None:
     total_chars = sum(len(m.get("content", "")) for m in messages)
     est_tokens = total_chars // 2
     trigger = int(128000 * 0.55)
-    print(f"=== 输入构造 ===")
+    print("=== 输入构造 ===")
     print(f"消息数: {len(messages)}, 总字符: {total_chars}, 估算 tokens: {est_tokens}")
     print(f"触发阈值: {trigger} tokens, 是否超阈值: {est_tokens > trigger}")
 
@@ -126,7 +127,7 @@ async def main() -> None:
     }
 
     # ── 5. 执行压缩 ──
-    print(f"\n=== 执行压缩 (真实 LLM) ===")
+    print("\n=== 执行压缩 (真实 LLM) ===")
     result = await plugin.execute(FakeCtx(state))
     updates = result.state_updates
     compressed = updates.get("messages")
@@ -140,7 +141,7 @@ async def main() -> None:
     assert len(compressed) < len(messages), "压缩后消息数应减少"
 
     # ── 6. 验证真实压缩输出 ──
-    print(f"\n=== 压缩块输出验证 ===")
+    print("\n=== 压缩块输出验证 ===")
     chunk_adds = [a for a in backend.adds if a["memory_type"] == "chunk"]
     semantic_adds = [a for a in backend.adds if a["memory_type"] == "semantic"]
     print(f"后端写入: chunk={len(chunk_adds)} 条, semantic={len(semantic_adds)} 条")
@@ -149,7 +150,7 @@ async def main() -> None:
     if chunk_adds:
         chunk = chunk_adds[0]
         content = chunk["content"]
-        print(f"\n--- 第一条 chunk (前 800 字符) ---")
+        print("\n--- 第一条 chunk (前 800 字符) ---")
         print(content[:800])
         print("...")
         # 尝试解析为 JSON 验证结构
@@ -172,15 +173,15 @@ async def main() -> None:
 
     if semantic_adds:
         s = semantic_adds[0]
-        print(f"\n--- 第一条 semantic 记忆 ---")
+        print("\n--- 第一条 semantic 记忆 ---")
         print(f"   tags: {s['tags']}")
         print(f"   content: {s['content'][:200]}")
 
     # ── 7. 压缩块写入即代表 LLM 调用成功（进程内直调，无 caller.calls 记录）──
-    print(f"\n=== LLM 调用统计 ===")
+    print("\n=== LLM 调用统计 ===")
     print(f"chunk 写入数(=LLM 调用成功数): {len(chunk_adds)}")
 
-    print(f"\n✅ 真实端到端压缩测试完成: 超阈值输入 → 真实 LLM 摘要 → 压缩块+记忆产出")
+    print("\n✅ 真实端到端压缩测试完成: 超阈值输入 → 真实 LLM 摘要 → 压缩块+记忆产出")
 
 
 if __name__ == "__main__":

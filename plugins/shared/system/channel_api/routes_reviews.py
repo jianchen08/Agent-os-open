@@ -16,9 +16,8 @@ import os
 import tempfile
 from typing import Any
 
-from fastapi import APIRouter, Depends, File, Form, Query, UploadFile
-
 from deps import require_auth
+from fastapi import APIRouter, Depends, File, Form, Query, UploadFile
 from review.media_review_service import MediaReviewService
 from review.review_service import get_review_service
 

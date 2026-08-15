@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """
 收集所有工具信息并生成配置文件
 
@@ -51,13 +50,7 @@ async def collect_all_tools():
     for tool_class in session_tool_classes:
         try:
             # 创建临时实例来获取定义（某些工具可能需要特殊处理）
-            if tool_class.__name__ == 'TaskSubmitTool':
-                tool_instance = tool_class(session=None)
-            elif tool_class.__name__ == 'TaskTool':
-                tool_instance = tool_class(session=None)
-            elif tool_class.__name__ == 'TaskEvaluateTool':
-                tool_instance = tool_class(session=None)
-            elif tool_class.__name__ == 'MemoryTool':
+            if tool_class.__name__ == 'TaskSubmitTool' or tool_class.__name__ == 'TaskTool' or tool_class.__name__ == 'TaskEvaluateTool' or tool_class.__name__ == 'MemoryTool':
                 tool_instance = tool_class(session=None)
             else:
                 tool_instance = tool_class()

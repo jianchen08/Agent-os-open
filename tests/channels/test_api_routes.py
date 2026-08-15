@@ -11,13 +11,12 @@
 
 from __future__ import annotations
 
+import importlib.util
 import os
 import sys
 import tempfile
 from pathlib import Path
 from unittest.mock import MagicMock, patch
-
-import importlib.util
 
 import pytest
 import yaml
@@ -77,7 +76,6 @@ class TestConfigYamlUtils:
     def test_read_yaml_nonexistent_file_raises_404(self) -> None:
         """读取不存在的文件抛出 HTTPException(404)。"""
         from fastapi import HTTPException
-
         from routes_config import _read_yaml
 
         with pytest.raises(HTTPException) as exc_info:
@@ -340,7 +338,6 @@ class TestConfigEndpoints:
     def setup_method(self) -> None:
         """创建临时配置目录和 FastAPI 测试应用。"""
         from fastapi import FastAPI
-
         from routes_config import router
 
         self.tmpdir = tempfile.mkdtemp()

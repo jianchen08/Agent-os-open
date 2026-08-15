@@ -15,11 +15,9 @@ EIO 与 setns 的关键差异：EIO 根因在宿主 /mnt/<盘> 的 9p 通道，�
 本测试 mock 掉 _repair_host_mount 与 _rebuild_and_retry_exec，聚焦于
 _remount_and_retry_exec 的编排逻辑与 post-exec 钩子的触发条件。
 """
-import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
 
-from manager import IsolationManager
-from providers.docker_provider import DockerProvider
+import pytest
 from isolation_types import (
     EnvironmentStatus,
     ExecutionResult,
@@ -28,6 +26,8 @@ from isolation_types import (
     IsolationLevel,
     TaskType,
 )
+from manager import IsolationManager
+from providers.docker_provider import DockerProvider
 
 # 真实 EIO 样本（agent 任务报错原样）
 _EIO_ERR = "ls: cannot access '/workspace/docs/working/x.md': Input/output error"

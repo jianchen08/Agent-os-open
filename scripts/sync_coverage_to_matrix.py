@@ -19,7 +19,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import re
 import sys
 import xml.etree.ElementTree as ET
 from pathlib import Path
@@ -55,7 +54,7 @@ def lcov_line_pct(lcov: Path) -> float | None:
 
 def lcov_per_path_keyword(lcov: Path) -> dict[str, float]:
     """按 SF 路径关键词（crate 名）分组统计 line%。"""
-    groups: dict[str, list[tuple[int, int]]] = {}  # keyword -> [covered_count, total]
+    groups: dict[str, list[int]] = {}  # keyword -> [covered_count, total_count]
     current_file = ""
     keyword: str | None = None
     for line in lcov.read_text(encoding="utf-8", errors="replace").splitlines():
@@ -75,10 +74,7 @@ def lcov_per_path_keyword(lcov: Path) -> dict[str, float]:
                     pass
         elif line == "end_of_record":
             keyword = None
-    return {
-        k: (cov / tot * 100.0 if tot else 0.0)
-        for k, (cov, tot) in groups.items()
-    }
+    return {k: (cov / tot * 100.0 if tot else 0.0) for k, (cov, tot) in groups.items()}
 
 
 # crate 路径片段 → 功能点
@@ -175,8 +171,7 @@ def render(data: dict[str, str | float]) -> str:
         "# 覆盖率自动报告",
         "",
         "> 由 `scripts/sync_coverage_to_matrix.py` 自动生成——**请勿手工编辑**。",
-        "> 数据源：阶段 2 CI 产出的 coverage.xml（Python）/ coverage-summary.json（前端）"
-        "/ coverage.lcov（Rust）。",
+        "> 数据源：阶段 2 CI 产出的 coverage.xml（Python）/ coverage-summary.json（前端）" "/ coverage.lcov（Rust）。",
         "> 供 `docs/test_traceability.md` 表 B/D 的覆盖率列参照；人工只调目标列。",
         "",
         "| 功能点 | 范围 | 现状 line% |",
@@ -191,8 +186,7 @@ def render(data: dict[str, str | float]) -> str:
         lines.append(f"| (Rust 整体) | 全 workspace lcov | {data['__rust_overall__']} |")
     lines.append("")
     lines.append(
-        "*缺失项 = 对应报告未生成（CI 未跑或路径不同）。运行 "
-        "`python scripts/sync_coverage_to_matrix.py` 刷新。*"
+        "*缺失项 = 对应报告未生成（CI 未跑或路径不同）。运行 " "`python scripts/sync_coverage_to_matrix.py` 刷新。*"
     )
     return "\n".join(lines) + "\n"
 

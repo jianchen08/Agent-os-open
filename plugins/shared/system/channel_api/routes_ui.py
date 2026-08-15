@@ -21,9 +21,8 @@ import time
 from pathlib import Path
 from typing import Any
 
-from fastapi import APIRouter, Depends, Query
-
 from deps import APIError, require_auth
+from fastapi import APIRouter, Depends, Query
 from ui_schema.types import ModuleUISchema
 
 logger = logging.getLogger(__name__)

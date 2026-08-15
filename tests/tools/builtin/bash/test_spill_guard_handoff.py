@@ -18,7 +18,6 @@
 from __future__ import annotations
 
 import pytest
-
 from tool import BashTool
 
 pytestmark = pytest.mark.unit
@@ -98,6 +97,7 @@ def test_read_log_no_clip():
     """read_log 路径不再 clip：辅助函数已删（调用点回归由 clip_read_log_output
     缺失 + 单元层覆盖保证；真实进程路径依赖 WSL 环境，与本改动解耦）。"""
     import inspect
+
     import tool as tool_mod
 
     source = inspect.getsource(tool_mod)

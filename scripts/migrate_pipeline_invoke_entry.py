@@ -12,6 +12,7 @@
 用法：
   python migrate_pipeline_invoke_entry.py --root <plugins/shared> [--dry-run]
 """
+
 from __future__ import annotations
 
 import argparse
@@ -66,9 +67,7 @@ def migrate_manifest(path: Path, dry_run: bool) -> tuple[str, str | None]:
     if not invoke_inserted:
         ordered["invoke_entry"] = data["invoke_entry"]
 
-    path.write_text(
-        json.dumps(ordered, ensure_ascii=False, indent=4) + "\n", encoding="utf-8"
-    )
+    path.write_text(json.dumps(ordered, ensure_ascii=False, indent=4) + "\n", encoding="utf-8")
     return ("migrated", f"{data.get('id')}: invoke_entry={entry_name!r}")
 
 

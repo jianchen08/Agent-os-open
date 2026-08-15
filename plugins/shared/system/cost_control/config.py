@@ -7,9 +7,8 @@
 from pathlib import Path  # noqa: F401
 
 import yaml  # noqa: F401
-from pydantic import BaseModel, Field
-
 from constants import CostControl
+from pydantic import BaseModel, Field
 
 
 class AlertThresholds(BaseModel):

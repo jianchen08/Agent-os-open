@@ -9,7 +9,6 @@ import logging
 from datetime import UTC, datetime
 from typing import Any
 
-from providers.base import IsolationProvider
 from isolation_types import (
     EnvironmentStatus,
     ExecutionResult,
@@ -17,6 +16,7 @@ from isolation_types import (
     IsolationEnvironment,
     IsolationLevel,
 )
+from providers.base import IsolationProvider
 
 logger = logging.getLogger(__name__)
 

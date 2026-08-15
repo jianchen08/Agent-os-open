@@ -28,7 +28,6 @@ from starlette.websockets import WebSocketDisconnect
 
 from tests.e2e.utils.ws_client import WSTestClient
 
-
 # ---------------------------------------------------------------------------
 # WebSocket 协议测试
 # ---------------------------------------------------------------------------

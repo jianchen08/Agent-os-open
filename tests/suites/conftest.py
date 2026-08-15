@@ -81,7 +81,7 @@ def engine():
     此处提供 None 占位，避免 pytest 收集时报 fixture not found。
     真正运行时由各测试文件的 main() 自行构建引擎。
     """
-    return None
+    return
 
 
 @pytest.fixture(scope="session")

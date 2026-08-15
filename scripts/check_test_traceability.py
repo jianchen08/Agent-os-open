@@ -32,8 +32,17 @@ BASELINE_FILE = ROOT / ".github" / "traceability-baseline.txt"
 
 # 测试文件发现范围（排除依赖/构建产物/缓存）
 EXCLUDE_DIRS = {
-    "node_modules", "__pycache__", ".venv", "venv", "build", "dist",
-    ".mypy_cache", ".pytest_cache", "target", "site-packages", ".git",
+    "node_modules",
+    "__pycache__",
+    ".venv",
+    "venv",
+    "build",
+    "dist",
+    ".mypy_cache",
+    ".pytest_cache",
+    "target",
+    "site-packages",
+    ".git",
 }
 
 # 标记解析（兼容 @feature: / @feature 、| 分隔、注释包裹等格式）
@@ -44,6 +53,7 @@ VALID_VISIONS = {f"V{i}" for i in range(1, 7)}
 
 
 # ── 加载合法引用集 ──────────────────────────────────────────────────────
+
 
 def load_valid_features() -> set[str]:
     """从 test_traceability.md 抽取合法功能点 ID 集合。
@@ -80,6 +90,7 @@ def is_feature_valid(token: str, valid: set[str]) -> bool:
 
 
 # ── 测试文件发现 ────────────────────────────────────────────────────────
+
 
 def find_test_files() -> list[Path]:
     """发现 Python / 前端 / Rust 测试文件（含 Rust src 内嵌 #[cfg(test)]）。"""
@@ -129,6 +140,7 @@ def find_test_files() -> list[Path]:
 
 # ── 标记解析 ────────────────────────────────────────────────────────────
 
+
 def parse_markers(path: Path) -> dict[str, str | None]:
     """读文件头部（前 40 行）解析 @feature/@vision/@audit。"""
     try:
@@ -147,6 +159,7 @@ def parse_markers(path: Path) -> dict[str, str | None]:
 
 
 # ── 主逻辑 ──────────────────────────────────────────────────────────────
+
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="测试追溯标记校验")
@@ -214,9 +227,7 @@ def main() -> int:
 
     # 基线锁：未标记数只减不增
     if len(unmarked) > baseline:
-        print(
-            f"\n❌ 未标记测试文件数 {len(unmarked)} > 基线 {baseline}（只减不增）"
-        )
+        print(f"\n❌ 未标记测试文件数 {len(unmarked)} > 基线 {baseline}（只减不增）")
         print("   新增测试文件请补 @feature 标记（见 testing_rules §9）；")
         print("   或治理后运行 `python scripts/check_test_traceability.py --init` 收紧基线。")
         return 1

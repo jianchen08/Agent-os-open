@@ -11,6 +11,7 @@ from typing import Any
 from urllib.parse import urlparse
 
 import httpx
+from url_security import is_private_ip, resolve_hostname_ips
 
 from agentos_plugin_sdk import (
     BuiltinTool,
@@ -22,7 +23,6 @@ from agentos_plugin_sdk import (
     create_failure_result,
     create_success_result,
 )
-from url_security import is_private_ip, resolve_hostname_ips
 
 logger = logging.getLogger(__name__)
 

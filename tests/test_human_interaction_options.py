@@ -23,7 +23,7 @@ for _d in (_HUMAN_DIR, _TOOLS_DIR):
         sys.path.insert(0, _d)
 
 
-@pytest.fixture()
+@pytest.fixture
 def normalize():
     from human.tool import HumanInteractionTool  # noqa: PLC0415
 

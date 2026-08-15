@@ -18,11 +18,9 @@ import tests._isolation_path  # noqa: F401
 
 本测试锁定核心契约：start 失败可自愈、误信异常态被纠正、执行前健康兜底。
 """
-import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
 
-from manager import IsolationManager
-from providers.docker_provider import DockerProvider
+import pytest
 from isolation_types import (
     EnvironmentStatus,
     ExecutionResult,
@@ -31,7 +29,8 @@ from isolation_types import (
     IsolationLevel,
     TaskType,
 )
-
+from manager import IsolationManager
+from providers.docker_provider import DockerProvider
 
 # ---------------------------------------------------------------------------
 # 工具：构造按子命令分支的 _run_cmd 替身

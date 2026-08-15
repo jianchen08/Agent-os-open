@@ -7,7 +7,6 @@
 from __future__ import annotations
 
 import pytest
-
 from process_manager import ProcessManager
 
 pytestmark = pytest.mark.unit

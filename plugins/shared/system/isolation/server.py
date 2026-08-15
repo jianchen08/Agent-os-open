@@ -15,18 +15,19 @@ from typing import Any
 
 sys.path.insert(0, os.path.dirname(__file__))
 
-from agentos_plugin_sdk import AgentOSPlugin
-
-# 直接导入同目录的老代码（文件就在旁边，不需要额外路径前缀）
-from manager import IsolationManager
+from checkpoint import CheckpointManager
 from isolation_types import (
     IsolationLevel,
     OperationType,
     TaskType,
 )
-from checkpoint import CheckpointManager
+
+# 直接导入同目录的老代码（文件就在旁边，不需要额外路径前缀）
+from manager import IsolationManager
 from permission_checker import PermissionChecker
 from permission_policy import PermissionPolicyManager
+
+from agentos_plugin_sdk import AgentOSPlugin
 
 logger = logging.getLogger(__name__)
 plugin = AgentOSPlugin("isolation_service")
@@ -228,11 +229,10 @@ async def isolation_destroy_env(
     if task_id:
         await _manager.destroy_by_task_id(task_id, success=success)
         return {"destroyed": True, "task_id": task_id}
-    elif env_id:
+    if env_id:
         await _manager.destroy_environment(env_id, success=success)
         return {"destroyed": True, "env_id": env_id}
-    else:
-        return {"error": "必须提供 env_id 或 task_id"}
+    return {"error": "必须提供 env_id 或 task_id"}
 
 
 @plugin.tool(
@@ -357,19 +357,19 @@ async def isolation_checkpoint(
         cp = _checkpoint_mgr.create_checkpoint(task_id, workspace, files_to_backup)
         return {"created": True, "checkpoint_id": cp.task_id}
 
-    elif action == "restore":
+    if action == "restore":
         if not task_id:
             return {"error": "restore 需要 task_id"}
         ok = _checkpoint_mgr.restore_checkpoint(task_id)
         return {"restored": ok}
 
-    elif action == "cleanup":
+    if action == "cleanup":
         if not task_id:
             return {"error": "cleanup 需要 task_id"}
         ok = _checkpoint_mgr.cleanup_checkpoint(task_id)
         return {"cleaned": ok}
 
-    elif action == "list":
+    if action == "list":
         checkpoints = _checkpoint_mgr.list_checkpoints()
         return {"checkpoints": checkpoints, "total": len(checkpoints)}
 

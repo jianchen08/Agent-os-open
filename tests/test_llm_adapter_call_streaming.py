@@ -71,7 +71,7 @@ class _FakeStream:
         # adapter 读取底层流对象（心跳日志用 is_closed）
         self.completion_stream = SimpleNamespace(is_closed=False)
 
-    def __aiter__(self) -> "_FakeStream":
+    def __aiter__(self) -> _FakeStream:
         return self
 
     async def __anext__(self) -> Any:

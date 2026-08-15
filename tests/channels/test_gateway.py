@@ -7,9 +7,9 @@
 
 from __future__ import annotations
 
-import sys
-import os
 import json
+import os
+import sys
 import tempfile
 import time
 from pathlib import Path
@@ -22,11 +22,10 @@ pytestmark = pytest.mark.unit  # 0.2 TDD 分层：单元测试
 from tests.channels.conftest import use_channel
 
 use_channel("gateway")
-from unified_types import UnifiedMessage, UnifiedResponse
+from channel_gateway import ChannelGateway
 from message_normalizer import MessageNormalizer
 from session_bridge import SessionBridge
-from channel_gateway import ChannelGateway
-
+from unified_types import UnifiedMessage, UnifiedResponse
 
 # ═══════════════════════════════════════════════════════════
 # MessageNormalizer 测试

@@ -18,14 +18,14 @@ from pathlib import Path
 import pytest
 
 from tests.test_utils.bug_locator import (
+    _PROJECT_SRC,
+    _TESTS_DIR,
     BugLocation,
     CodeLocation,
-    locate_bug,
     _is_project_code,
     _is_test_code,
     _relative_path,
-    _PROJECT_SRC,
-    _TESTS_DIR,
+    locate_bug,
 )
 
 

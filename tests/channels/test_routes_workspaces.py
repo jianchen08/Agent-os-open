@@ -27,8 +27,8 @@ from fastapi.testclient import TestClient
 from tests.channels.conftest import use_channel
 
 use_channel("api")
-from deps import require_auth  # noqa: E402
 import routes_workspaces as _routes_workspaces_mod  # noqa: E402
+from deps import require_auth  # noqa: E402
 from routes_workspaces import workspaces_router  # noqa: E402
 
 # ============================================================
@@ -43,7 +43,7 @@ MOCK_TASK_ID = "test-container-task-001"
 # ============================================================
 
 
-@pytest.fixture()
+@pytest.fixture
 def mock_auth():
     """覆盖认证依赖，模拟已登录用户。"""
 
@@ -53,7 +53,7 @@ def mock_auth():
     return _mock_auth
 
 
-@pytest.fixture()
+@pytest.fixture
 def workspace_tmp():
     """创建临时工作空间目录，测试结束后清理。"""
     tmp = tempfile.mkdtemp(prefix="ws_test_")
@@ -61,7 +61,7 @@ def workspace_tmp():
     shutil.rmtree(tmp, ignore_errors=True)
 
 
-@pytest.fixture()
+@pytest.fixture
 def client(mock_auth, workspace_tmp):
     """创建 FastAPI TestClient，覆盖认证和路径解析。"""
     app = FastAPI()
@@ -76,9 +76,8 @@ def client(mock_auth, workspace_tmp):
     async def _fake_resolve(container_task_id: str):
         return workspace_tmp
 
-    with patch.object(_routes_workspaces_mod, "_resolve_workspace_path", new=_fake_resolve):
-        with TestClient(app) as c:
-            yield c
+    with patch.object(_routes_workspaces_mod, "_resolve_workspace_path", new=_fake_resolve), TestClient(app) as c:
+        yield c
 
 
 def _url(endpoint: str, task_id: str = MOCK_TASK_ID) -> str:
@@ -658,6 +657,7 @@ class TestWorkspaceServiceRegression:
     def test_get_or_create_workspace(self):
         """get_or_create_workspace 应正确创建和获取工作空间。"""
         import asyncio
+
         from workspace.workspace_service import WorkspaceService
 
         service = WorkspaceService()
@@ -671,6 +671,7 @@ class TestWorkspaceServiceRegression:
     def test_get_or_create_workspace_idempotent(self):
         """重复调用 get_or_create_workspace 应返回同一实例。"""
         import asyncio
+
         from workspace.workspace_service import WorkspaceService
 
         loop = asyncio.new_event_loop()
@@ -682,6 +683,7 @@ class TestWorkspaceServiceRegression:
     def test_get_or_create_workspace_with_params(self):
         """get_or_create_workspace 支持自定义 title 和 description。"""
         import asyncio
+
         from workspace.workspace_service import WorkspaceService
 
         service = WorkspaceService()
@@ -700,8 +702,8 @@ class TestWorkspaceServiceRegression:
     def test_get_file_tree_with_real_directory(self):
         """get_file_tree 扫描真实目录应返回正确的文件树。"""
         import asyncio
-        import tempfile
         import shutil
+        import tempfile
 
         from workspace.workspace_service import WorkspaceService
 
@@ -738,8 +740,8 @@ class TestWorkspaceServiceRegression:
 
     def test_scan_directory_skips_hidden_and_pycache(self):
         """_scan_directory 应跳过隐藏文件和 __pycache__。"""
-        import tempfile
         import shutil
+        import tempfile
 
         from workspace.workspace_service import WorkspaceService
 
@@ -761,8 +763,8 @@ class TestWorkspaceServiceRegression:
 
     def test_scan_directory_max_depth(self):
         """_scan_directory 应遵守最大深度限制。"""
-        import tempfile
         import shutil
+        import tempfile
 
         from workspace.workspace_service import WorkspaceService
 
@@ -784,6 +786,7 @@ class TestWorkspaceServiceRegression:
     def test_workspace_not_found_returns_empty_artifacts(self):
         """不存在的工作空间获取制品应返回空列表。"""
         import asyncio
+
         from workspace.workspace_service import WorkspaceService
 
         service = WorkspaceService()
@@ -799,6 +802,7 @@ class TestWorkspaceServiceRegression:
         验证修复: os.listdir 的异常捕获从 PermissionError 扩展为 (PermissionError, OSError)。
         """
         from unittest.mock import patch
+
         from workspace.workspace_service import WorkspaceService
 
         service = WorkspaceService()
@@ -810,6 +814,7 @@ class TestWorkspaceServiceRegression:
     def test_scan_directory_handles_permission_error(self):
         """_scan_directory 遇到 PermissionError 时应安全返回空列表（回归测试）。"""
         from unittest.mock import patch
+
         from workspace.workspace_service import WorkspaceService
 
         service = WorkspaceService()
@@ -826,6 +831,7 @@ class TestWorkspaceServiceRegression:
         import shutil
         import tempfile
         from unittest.mock import patch
+
         from workspace.workspace_service import WorkspaceService
 
         tmp = tempfile.mkdtemp(prefix="ws_device_test_")

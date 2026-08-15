@@ -6,8 +6,8 @@ import logging
 from abc import ABC, abstractmethod
 from typing import Any
 
-from stream_client import WeComStreamClient
 from pipeline_types import StateKeys
+from stream_client import WeComStreamClient
 
 logger = logging.getLogger(__name__)
 

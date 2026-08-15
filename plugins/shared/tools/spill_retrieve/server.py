@@ -18,9 +18,9 @@ import logging
 from pathlib import Path
 from typing import Any
 
-from agentos_plugin_sdk import AgentOSPlugin
-
 from spill_store import cleanup_pipeline, read_spill, resolve_base_path
+
+from agentos_plugin_sdk import AgentOSPlugin
 
 logger = logging.getLogger(__name__)
 

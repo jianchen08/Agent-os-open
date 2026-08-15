@@ -9,7 +9,6 @@ import hashlib
 import os
 
 import pytest
-
 from pipeline.plugin import PluginContext
 from pipeline.types import StateKeys
 

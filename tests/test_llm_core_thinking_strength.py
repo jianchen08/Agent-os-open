@@ -31,7 +31,6 @@ for _d in (_LLM_CORE_DIR, _CORE_DIR, _SHARED_DIR):
 import llm_core.plugin as plugin_mod  # noqa: E402
 from llm_core.plugin import LLMCore, resolve_thinking_strength_params  # noqa: E402
 
-
 # ─────────────────── 纯函数：强度 → 参数映射 ───────────────────
 
 def test_strength_params_mapping() -> None:

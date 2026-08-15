@@ -15,16 +15,15 @@ E2E 测试：管道 chat 全链路（FP-0.2.〇 串行循环）
   ./kernel/target/release/agentos-kernel.exe），9100 端口可访问。
 - 手动运行（不在 CI）：python -m pytest tests/e2e_02/test_05_pipeline_chat.py -q
 """
-import pytest
+import os
 
+import pytest
 from e2e_helpers import (
     KERNEL_URL,
     create_session,
     http_get_with_auth,
     http_post_json,
 )
-
-import os
 
 pytestmark = [
     pytest.mark.e2e,

@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """
 副作用 Mock 和验证
 
@@ -18,7 +17,6 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
-
 
 # ──── 全局记录存储 ────
 
@@ -123,7 +121,7 @@ def run_server(port: int, output_path: str | None, save_interval: int = 5):
     server.timeout = save_interval
 
     print(f"🚀 Mock 服务已启动: http://0.0.0.0:{port}")
-    print(f"   所有请求将被记录")
+    print("   所有请求将被记录")
     if output_path:
         print(f"   定期保存到: {output_path} (每 {save_interval}s)")
     print("   按 Ctrl+C 停止\n")

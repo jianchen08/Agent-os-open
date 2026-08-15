@@ -12,13 +12,12 @@ import tests._isolation_path  # noqa: F401
 涉及模块：src/isolation/providers/docker_provider.py
 """
 import pytest
-
-from providers.docker_provider import DockerProvider
 from isolation_types import (
     EnvironmentStatus,
     IsolationContext,
     TaskType,
 )
+from providers.docker_provider import DockerProvider
 
 
 def _make_context(workspace: str | None = None) -> IsolationContext:

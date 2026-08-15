@@ -12,7 +12,6 @@ import os
 from pathlib import Path
 
 import psutil
-
 from lsp_types import IDEInfo, IDEType
 
 

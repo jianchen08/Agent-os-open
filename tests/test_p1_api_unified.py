@@ -463,6 +463,6 @@ class TestToolsBuiltinMessageBusMigration:
                             violations.append(f"{fpath}:{lineno}: {stripped}")
 
         assert len(violations) == 0, (
-            f"AR-4: tools/builtin 中仍有 send_pipeline_message 残留:\n"
+            "AR-4: tools/builtin 中仍有 send_pipeline_message 残留:\n"
             + "\n".join(violations)
         )

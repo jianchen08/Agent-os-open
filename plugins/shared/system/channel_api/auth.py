@@ -11,9 +11,9 @@ from datetime import datetime, timedelta, timezone
 from typing import Any
 
 import jwt
+from auth_token import TokenManager
 
 from agentos_plugin_sdk.settings import get_settings
-from auth_token import TokenManager
 
 logger = logging.getLogger(__name__)
 

@@ -262,4 +262,3 @@ class ModelConfigLoaderShim:
         if thinking_strength_params:
             result["thinking_strength_params"] = thinking_strength_params
         return result
-

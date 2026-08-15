@@ -12,13 +12,13 @@ from typing import Any
 from uuid import uuid4
 
 import jwt
+from auth_models import TokenPair, TokenPayload
 
 from agentos_plugin_sdk.exceptions import (
     TokenExpiredError,
     TokenInvalidError,
     TokenRevokedError,
 )
-from auth_models import TokenPair, TokenPayload
 
 logger = logging.getLogger(__name__)
 

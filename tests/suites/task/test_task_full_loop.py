@@ -19,6 +19,7 @@
 import asyncio
 import logging
 import sys
+
 import pytest
 
 # 设置 PYTHONPATH
@@ -109,7 +110,7 @@ async def test_full_task_loop():
     # 6. 检查最终状态
     task = task_service.get_task(task_id)
     if task:
-        print(f"\n--- 任务最终状态 ---")
+        print("\n--- 任务最终状态 ---")
         print(f"  ID: {task.id}")
         print(f"  标题: {task.title}")
         print(f"  状态: {task.status.value}")

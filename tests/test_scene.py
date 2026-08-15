@@ -14,18 +14,15 @@
 from __future__ import annotations
 
 import json
+import sys
 from pathlib import Path
 from typing import Any
 
 import pytest
 
-import sys
-from pathlib import Path
-
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "plugins" / "shared" / "system"))
 
 from scene.manager import SceneManager  # noqa: E402
-from scene.persistence import ScenePersistence  # noqa: E402
 from scene.models import (  # noqa: E402
     Scene,
     SceneCreateRequest,
@@ -36,8 +33,8 @@ from scene.models import (  # noqa: E402
     SceneUpdateRequest,
     SceneWidgetConfig,
 )
+from scene.persistence import ScenePersistence  # noqa: E402
 from scene.templates import PRESET_TEMPLATES, get_template, list_templates
-
 
 # ============================================================
 # Fixtures

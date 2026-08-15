@@ -29,7 +29,6 @@ from pathlib import Path
 
 import pytest
 
-
 pytestmark = pytest.mark.unit
 
 _PLUGIN_DIR = Path(__file__).resolve().parents[3] / "plugins" / "shared" / "tools" / "bash"

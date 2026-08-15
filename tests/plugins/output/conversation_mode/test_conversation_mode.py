@@ -9,7 +9,6 @@ from __future__ import annotations
 from typing import Any
 
 import pytest
-
 from pipeline.plugin import PluginContext
 from pipeline.types import StateKeys
 
@@ -60,8 +59,8 @@ class TestConfig:
         assert d.route_signals == ["wait"]
 
     def test_error_policy为SKIP(self) -> None:
-        from plugin import ConversationModeDetector
         from pipeline.types import ErrorPolicy
+        from plugin import ConversationModeDetector
 
         assert ConversationModeDetector.error_policy == ErrorPolicy.SKIP
 

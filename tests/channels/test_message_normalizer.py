@@ -3,7 +3,6 @@
 
 from __future__ import annotations
 
-
 import pytest
 
 pytestmark = pytest.mark.unit  # 0.2 TDD 分层：单元测试

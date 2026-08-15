@@ -61,13 +61,14 @@ if _sys.platform == "win32":
         pass
 
 from cli_commands import SlashCommandRegistry
+from cli_input_adapter import CLIInputAdapter
 from cli_interactive import CLIInteractiveMixin
+from cli_output_adapter import CLIOutputAdapter
 
 # 导入拆分后的混入类
 from cli_runner import CLIRunnerMixin
 from cli_single import CLISingleMixin
-from cli_input_adapter import CLIInputAdapter
-from cli_output_adapter import CLIOutputAdapter
+
 # DEBT: pipeline 子模块未复制到插件目录。CLI 是独立进程入口，这些依赖在
 # 完整运行环境中由 PYTHONPATH 提供。Sidecar 模式下 server.py 不导入 cli_main。
 # ceiling: cli_main.py 无法在 sidecar 模式下直接 import。
@@ -251,8 +252,9 @@ class CLIApplication(CLIRunnerMixin, CLISingleMixin, CLIInteractiveMixin):
             config_path: 管道配置 YAML 文件路径。
                 默认使用 ``config/pipelines/default.yaml``。
         """
-        from config.models import get_model_config_loader  # noqa: PLC0415
         from pipeline.config import build_plugin_registry, load_pipeline_config  # noqa: PLC0415
+
+        from config.models import get_model_config_loader  # noqa: PLC0415
 
         # 确定配置路径
         if config_path is None:
@@ -444,7 +446,6 @@ class CLIApplication(CLIRunnerMixin, CLISingleMixin, CLIInteractiveMixin):
             )
 
             import yaml as _yaml  # noqa: PLC0415
-
             from infrastructure.task_worker import TaskWorker  # noqa: PLC0415
 
             _tw_config: dict[str, Any] = {}

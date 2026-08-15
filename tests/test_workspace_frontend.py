@@ -151,7 +151,7 @@ class TestWorkspacesApi:
     def test_file_exists(self):
         """workspaces.ts 文件应存在。"""
         fpath = FRONTEND_SRC / "services" / "api" / "workspaces.ts"
-        assert fpath.exists(), f"workspaces.ts 不存在"
+        assert fpath.exists(), "workspaces.ts 不存在"
 
     def test_has_get_workspace_function(self):
         """应包含 getWorkspace 函数。"""

@@ -17,16 +17,16 @@ import uuid
 from typing import Any
 
 from base_combo_adapter import BaseComboAdapter
-from input_adapter import IInputAdapter
 from crypto import WecomCrypto
 from helpers import (
     _extract_encrypt,
     _extract_wecom_text,
     _parse_message_xml,
 )
+from input_adapter import IInputAdapter
 from output_adapter import WeComOutputAdapter  # noqa: F401 re-export
-from stream_client import WeComStreamClient
 from pipeline_types import StateKeys
+from stream_client import WeComStreamClient
 
 logger = logging.getLogger(__name__)
 

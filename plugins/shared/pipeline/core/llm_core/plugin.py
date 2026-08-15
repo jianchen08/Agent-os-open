@@ -17,6 +17,11 @@ import uuid
 from collections.abc import Callable
 from typing import Any
 
+from _message_normalizer import (
+    _is_valid_tool_call_id,
+    normalize_messages_for_provider,
+)
+from _stream_repeat_monitor import StreamRepetitionMonitor
 from adapter import (
     LiteLLMAdapter,
     LLMAdapter,
@@ -24,11 +29,6 @@ from adapter import (
 )
 from pipeline.plugin import ICorePlugin, PluginContext
 from pipeline.types import ErrorPolicy, StateKeys
-from _message_normalizer import (
-    _is_valid_tool_call_id,
-    normalize_messages_for_provider,
-)
-from _stream_repeat_monitor import StreamRepetitionMonitor
 
 logger = logging.getLogger(__name__)
 

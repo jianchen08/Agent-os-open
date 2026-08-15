@@ -9,8 +9,9 @@ Exit codes:
     2 = file not found
 """
 
-import sys
 import re
+import sys
+
 
 def validate(content: str) -> tuple[list[str], list[str]]:
     errors = []

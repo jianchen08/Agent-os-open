@@ -22,8 +22,6 @@ pytestmark = pytest.mark.unit  # 0.2 TDD 分层：单元测试
 
 from base import BaseConnector
 from config_mixin import ConfigSubscriberMixin
-from degradation import DegradationManager
-from registry import ConnectorRegistry
 from connector_types import (
     ActionResult,
     ConnectorAction,
@@ -31,7 +29,8 @@ from connector_types import (
     ConnectorInfo,
     ConnectorState,
 )
-
+from degradation import DegradationManager
+from registry import ConnectorRegistry
 
 # ── 测试用 Mock 连接器（策略实现） ──────────────────────────────────────
 

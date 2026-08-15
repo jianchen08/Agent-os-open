@@ -7,7 +7,6 @@ import os
 from typing import Any
 
 import litellm
-
 from key_pool import KeyPool, KeySlot
 
 logger = logging.getLogger(__name__)

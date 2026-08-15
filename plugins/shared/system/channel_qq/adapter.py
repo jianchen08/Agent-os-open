@@ -21,8 +21,8 @@ import uuid
 from typing import TYPE_CHECKING, Any
 
 from base_combo_adapter import BaseComboAdapter
-from input_adapter import IInputAdapter
 from helpers import _extract_qq_text
+from input_adapter import IInputAdapter
 from onebot_client import OneBotClient
 from output_adapter import QQOutputAdapter  # noqa: F401 re-export
 from pipeline_types import StateKeys

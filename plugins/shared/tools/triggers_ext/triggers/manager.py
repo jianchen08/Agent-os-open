@@ -21,7 +21,8 @@ import datetime
 import logging
 import threading
 import time
-from typing import Any, Callable
+from collections.abc import Callable
+from typing import Any
 
 from .types import TriggerConfig, TriggerStatus, TriggerType
 

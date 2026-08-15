@@ -9,7 +9,6 @@ from __future__ import annotations
 from typing import Any
 
 import pytest
-
 from pipeline.plugin import PluginContext
 from pipeline.types import StateKeys
 
@@ -46,8 +45,8 @@ class TestConfig:
         assert p.priority == 7
 
     def test_error_policy为SKIP(self) -> None:
-        from plugin import MultimodalPostprocessor
         from pipeline.types import ErrorPolicy
+        from plugin import MultimodalPostprocessor
 
         assert MultimodalPostprocessor.error_policy == ErrorPolicy.SKIP
 

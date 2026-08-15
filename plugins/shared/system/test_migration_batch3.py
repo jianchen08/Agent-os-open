@@ -281,7 +281,7 @@ class TestWorkspaceMigration:
         _purge_modules("models")
         sys.path.insert(0, str(WORKSPACE_DIR))
         try:
-            from models import Workspace, FileTreeNode  # noqa: F811
+            from models import FileTreeNode, Workspace  # noqa: F811
 
             node = FileTreeNode(name="test.py", type="file", path="test.py")
             assert node.name == "test.py"

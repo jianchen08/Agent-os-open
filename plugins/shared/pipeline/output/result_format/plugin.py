@@ -14,9 +14,9 @@ from __future__ import annotations
 import logging
 from typing import Any
 
+from format_manager import FormatManager, ToolFormat, get_format_manager
 from pipeline.plugin import IOutputPlugin, OutputResult, PluginContext
 from pipeline.types import ErrorPolicy, StateKeys
-from format_manager import FormatManager, ToolFormat, get_format_manager
 
 logger = logging.getLogger(__name__)
 

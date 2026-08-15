@@ -17,8 +17,8 @@ import logging
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
-from policy import ToolIsolationPolicy
 from isolation_types import IsolationLevel
+from policy import ToolIsolationPolicy
 
 if TYPE_CHECKING:
     # Tool 仅用于类型注解（ApprovalContext.tool 字段）。运行时不 import，

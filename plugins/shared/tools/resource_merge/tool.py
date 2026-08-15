@@ -21,6 +21,8 @@ import stat
 from pathlib import Path
 from typing import Any
 
+from git_helpers import GitHelpers
+
 from agentos_plugin_sdk import (
     BuiltinTool,
     Tool,
@@ -31,7 +33,6 @@ from agentos_plugin_sdk import (
     create_failure_result,
     create_success_result,
 )
-from git_helpers import GitHelpers
 
 logger = logging.getLogger(__name__)
 

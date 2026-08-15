@@ -119,7 +119,8 @@ def _plan_fix(data: dict) -> tuple[str, dict]:
 def main() -> int:
     parser = argparse.ArgumentParser(description="修复服务重启产生的脏任务数据")
     parser.add_argument(
-        "--apply", action="store_true",
+        "--apply",
+        action="store_true",
         help="实际写入（默认仅 dry-run 打印）",
     )
     args = parser.parse_args()
@@ -158,8 +159,11 @@ def main() -> int:
 
             if args.apply:
                 out = yaml.safe_dump(
-                    data, default_flow_style=False, allow_unicode=True,
-                    sort_keys=False, indent=2,
+                    data,
+                    default_flow_style=False,
+                    allow_unicode=True,
+                    sort_keys=False,
+                    indent=2,
                 )
                 f.write_text(out, encoding="utf-8")
             fixed += 1

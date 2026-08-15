@@ -16,9 +16,8 @@ import tests._tasks_path  # noqa: F401  注入 tasks 插件目录到 sys.path
 from datetime import datetime
 
 import pytest
-
 from state_machine import SimpleStateMachine, get_task_state_machine
-from task_types import TaskStatus, TaskModel, create_task
+from task_types import TaskModel, TaskStatus, create_task
 
 pytestmark = pytest.mark.unit
 

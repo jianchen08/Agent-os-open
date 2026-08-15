@@ -13,10 +13,10 @@ from typing import Any
 
 sys.path.insert(0, os.path.dirname(__file__))
 
-from agentos_plugin_sdk import AgentOSPlugin  # noqa: E402
-
 from gateway import LSPGateway, get_lsp_gateway  # noqa: E402
 from lsp_types import Position  # noqa: E402
+
+from agentos_plugin_sdk import AgentOSPlugin  # noqa: E402
 
 logger = logging.getLogger(__name__)
 plugin = AgentOSPlugin("lsp_service")

@@ -8,9 +8,8 @@ import os
 from pathlib import Path
 from typing import Any
 
-from fastapi import APIRouter, Depends, Query, status
-
 from deps import APIError, require_auth, validate_pagination
+from fastapi import APIRouter, Depends, Query, status
 
 _recovered_user_ids: set[str] = set()
 
@@ -65,6 +64,7 @@ from models import (  # noqa: E402
     ThreadResponse,
     ThreadUpdate,
 )
+
 logger = logging.getLogger(__name__)
 
 

@@ -163,4 +163,3 @@ class FrontendEmitter:
             await self._handle.notify("emit", {"event": event, "payload": payload})
         except Exception:  # noqa: S110 —— 观测推送失败不影响插件主流程（有注释说明意图）
             pass
-

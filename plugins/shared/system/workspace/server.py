@@ -18,10 +18,10 @@ _SYSTEM_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 if _SYSTEM_DIR not in sys.path:
     sys.path.insert(0, _SYSTEM_DIR)
 
-from agentos_plugin_sdk import AgentOSPlugin
-
 # 直接导入同目录老代码
 from workspace_service import WorkspaceService
+
+from agentos_plugin_sdk import AgentOSPlugin
 
 logger = logging.getLogger(__name__)
 plugin = AgentOSPlugin("workspace_service")

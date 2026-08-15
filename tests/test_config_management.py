@@ -16,7 +16,6 @@ import pytest
 import yaml
 from fastapi.testclient import TestClient
 
-
 # ---------------------------------------------------------------------------
 # 辅助函数
 # ---------------------------------------------------------------------------
@@ -99,13 +98,12 @@ def config_client(
     monkeypatch.setattr("channels.api.routes_config._ENV_FILE", test_env)
 
     # 构造最小应用：仅挂载 config 路由 + 错误处理器
-    from fastapi import FastAPI
-
     from channels.api.deps import (
         APIError,
         api_error_handler,
     )
     from channels.api.routes_config import router as config_router
+    from fastapi import FastAPI
 
     app = FastAPI()
     app.add_exception_handler(APIError, api_error_handler)

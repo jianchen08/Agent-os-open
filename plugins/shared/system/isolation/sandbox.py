@@ -13,7 +13,6 @@ from dataclasses import dataclass, field
 from io import StringIO
 from typing import Any
 
-
 # F-SANDBOX-2 白名单模式（allowlist, fail-closed）：仅允许下列纯函数内置，
 # 一切未列出项默认拒绝。本沙箱非安全边界，仅用于已审批 HOST 模式受信代码；
 # 不可信代码必须走容器隔离。

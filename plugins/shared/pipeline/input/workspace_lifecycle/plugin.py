@@ -60,7 +60,7 @@ class _ExecutionContextTaskTree:
     - 其余查询返回 None（降级为无父链，服务内部已有 try/except 兜底）。
     """
 
-    def __init__(self, plugin: "WorkspaceLifecyclePlugin", manager: Any) -> None:
+    def __init__(self, plugin: WorkspaceLifecyclePlugin, manager: Any) -> None:
         self._plugin = plugin
         self._manager = manager
 

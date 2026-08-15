@@ -10,9 +10,10 @@ import re
 import shlex
 import shutil
 import time
+from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Callable, ClassVar
+from typing import Any, ClassVar
 
 from bash_types import ProcessBackend, ProcessInfo, WorkUnit
 from encoding import EncodingHandler
@@ -490,9 +491,7 @@ class ProcessManager:
                     continue
                 if ch == '"':
                     in_double = False
-                elif ch == "`":  # 双引号内反引号命令替换
-                    return True
-                elif ch == "$" and nxt == "(":  # $(...) 双引号内仍展开
+                elif ch == "`" or ch == "$" and nxt == "(":  # 双引号内反引号命令替换
                     return True
                 i += 1
                 continue

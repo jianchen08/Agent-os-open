@@ -17,10 +17,10 @@ import uuid
 from typing import Any
 
 from base_combo_adapter import BaseComboAdapter
-from stream_client import FeishuStreamClient
 from input_adapter import IInputAdapter
 from output_adapter import IOutputAdapter
 from pipeline_types import StateKeys
+from stream_client import FeishuStreamClient
 
 logger = logging.getLogger(__name__)
 

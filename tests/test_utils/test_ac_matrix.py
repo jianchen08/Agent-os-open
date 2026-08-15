@@ -10,14 +10,13 @@ from pathlib import Path
 import pytest
 
 from tests.test_utils.ac_matrix import (
-    ACStatus,
-    ACMatrixTracker,
     AC_DEFINITIONS,
+    ACMatrixTracker,
+    ACStatus,
     collect_ac_test_mapping,
     derive_status,
     normalize_ac_id,
 )
-
 
 # ── 基本结构 ──────────────────────────────────────────
 

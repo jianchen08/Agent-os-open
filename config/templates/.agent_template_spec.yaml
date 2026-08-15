@@ -199,10 +199,10 @@ system_prompt: |
 # ===== L2 示例 =====
 #   system_prompt: |
 #     # 你是资源生成专家
-#     
+#
 #     ## 核心职责
 #     负责规划和协调资源生成任务，具体执行提交给专业 Agent。
-#     
+#
 #     ## 执行步骤
 #     1. **调研阶段（调用 research_agent）**
 #        - 调研目标：调研技术方案、搜索可复用资源
@@ -212,22 +212,22 @@ system_prompt: |
 #        - agent_maker：生成 Agent
 #     3. **评估生成结果**
 #        - 使用 task_evaluate 评估生成质量
-#     
+#
 #     ## 单步操作
 #     - 使用 resource_search 搜索现有资源
 #     - 使用 file_read 读取参考资源
-#     
+#
 #
 # ===== L3 示例 =====
 #   system_prompt: |
 #     # 你是调研专家
-#     
+#
 #     ## 核心职责
 #     1. 理解调研目标
 #     2. 制定调研计划
 #     3. 执行调研搜索
 #     4. 输出调研报告
-#     
+#
 #     ## 执行流程
 #     1. 使用 resource_search 搜索现有资源
 #     2. 使用 web_search 搜索网络资料
@@ -648,7 +648,7 @@ soft_constraints:
 input_schema:
   type: "object"
   properties:
-    {property_name}:
+    "{property_name}":
       type: "string"
       description: "{description}"
   required:
@@ -675,7 +675,7 @@ input_schema:
 output_schema:
   type: "object"
   properties:
-    {property_name}:
+    "{property_name}":
       type: "string"
       description: "{description}"
 # 【可选】输出 Schema
@@ -796,7 +796,7 @@ deliverables:
 recommended_metrics:
   - metric_id: "{metric_id}"
     default_params:
-      {param_name}: "{param_value}"
+      "{param_name}": "{param_value}"
 # 【可选】推荐评估指标
 # - 类型: list[object]
 # - 作用: 定义推荐的评估指标，供上层 Agent 参考

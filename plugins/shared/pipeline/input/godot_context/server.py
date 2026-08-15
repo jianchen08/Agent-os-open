@@ -115,15 +115,14 @@ async def _fetch_preview(index: int) -> bytes | None:
         import aiohttp  # noqa: PLC0415
 
         timeout = aiohttp.ClientTimeout(total=5)
-        async with aiohttp.ClientSession(timeout=timeout) as session:
-            async with session.get(
-                f"{GODOT_ADDON_ENDPOINT}/selection/preview",
-                params={"index": index},
-            ) as resp:
-                if resp.status != 200:
-                    return None
-                data = await resp.read()
-                return data if data[:8] == b"\x89PNG\r\n\x1a\n" else None
+        async with aiohttp.ClientSession(timeout=timeout) as session, session.get(
+            f"{GODOT_ADDON_ENDPOINT}/selection/preview",
+            params={"index": index},
+        ) as resp:
+            if resp.status != 200:
+                return None
+            data = await resp.read()
+            return data if data[:8] == b"\x89PNG\r\n\x1a\n" else None
     except Exception as e:  # noqa: BLE001
         logger.warning("[godot_context] 预览代理失败: %s", e)
         return None

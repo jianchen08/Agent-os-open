@@ -16,7 +16,6 @@ from __future__ import annotations
 import pytest
 from fastapi.testclient import TestClient
 
-
 # ============================================================
 # 单元测试：数据模型
 # ============================================================
@@ -150,13 +149,13 @@ class TestThreadResponseModel:
 class TestMemoryStoreThread:
     """MemoryStore 线程操作测试。"""
 
-    def _make_store(self) -> "MemoryStore":
+    def _make_store(self) -> MemoryStore:
         """创建干净的 MemoryStore 实例。"""
         from channels.api.models import MemoryStore
 
         return MemoryStore()
 
-    def _demo_user(self, store: "MemoryStore") -> dict:
+    def _demo_user(self, store: MemoryStore) -> dict:
         """获取 demo 用户。"""
         user = store.get_user_by_username("demo")
         assert user is not None, "demo 用户应存在"

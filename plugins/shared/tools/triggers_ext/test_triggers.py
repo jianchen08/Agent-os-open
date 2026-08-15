@@ -89,7 +89,7 @@ class _LoopThread:
         self.loop = asyncio.new_event_loop()
         self._thread = threading.Thread(target=self.loop.run_forever, daemon=True)
 
-    def __enter__(self) -> "_LoopThread":
+    def __enter__(self) -> _LoopThread:
         self._thread.start()
         return self
 
@@ -545,7 +545,7 @@ class TestInjectTriggerMessage:
 
 
 class TestSetupTool:
-    @pytest.fixture()
+    @pytest.fixture
     def tool(self) -> Any:
         import triggers.manager as manager_mod
 

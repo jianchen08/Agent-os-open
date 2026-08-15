@@ -11,8 +11,8 @@
 
 import logging
 
-from policy import IsolationPolicyLoader, ToolIsolationPolicy
 from isolation_types import IsolationLevel
+from policy import IsolationPolicyLoader, ToolIsolationPolicy
 
 logger = logging.getLogger(__name__)
 

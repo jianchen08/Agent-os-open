@@ -1,10 +1,12 @@
 """StreamRepetitionMonitor 单元测试。"""
 
-import sys
 import os
+import sys
+
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 from tests._pipeline_plugin_path import add_plugin_dir
+
 add_plugin_dir("core", "stream_repeat_monitor")
 from plugin import StreamRepetitionMonitor
 

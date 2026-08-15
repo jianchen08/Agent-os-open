@@ -35,9 +35,7 @@ from tenant_data import migrate_legacy_data_to_default  # noqa: E402
 
 def main() -> int:
     """CLI 入口。"""
-    parser = argparse.ArgumentParser(
-        description="把 data/ 平铺存量数据幂等迁入 data/default/（方案 B 多租户上线迁移）"
-    )
+    parser = argparse.ArgumentParser(description="把 data/ 平铺存量数据幂等迁入 data/default/（方案 B 多租户上线迁移）")
     parser.add_argument(
         "--apply",
         action="store_true",
@@ -66,9 +64,7 @@ def main() -> int:
         print(f"[migrate_legacy_data_to_default] 数据根不存在: {data_root}，无操作")
         return 0
 
-    legacy_items = sorted(
-        p.name for p in data_root.iterdir() if p.name != "default"
-    )
+    legacy_items = sorted(p.name for p in data_root.iterdir() if p.name != "default")
     if not legacy_items:
         print("[migrate_legacy_data_to_default] data/ 为空，无需迁移")
         return 0

@@ -12,7 +12,6 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
-
 from bash_types import ProcessInfo
 from process_manager import ProcessManager
 from tool import BashTool

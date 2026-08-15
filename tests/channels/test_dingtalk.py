@@ -7,10 +7,10 @@
 
 from __future__ import annotations
 
-import sys
-import os
 import hashlib
 import hmac
+import os
+import sys
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -22,7 +22,6 @@ from tests.channels.conftest import use_channel
 use_channel("dingtalk")
 from adapter import DingTalkAdapter, DingTalkInputAdapter, DingTalkOutputAdapter
 from stream_client import DingTalkStreamClient
-
 
 # ═══════════════════════════════════════════════════════════
 # DingTalkInputAdapter 测试
@@ -217,7 +216,7 @@ class TestDingTalkStreamClient:
         import base64
         string_to_sign = f"{timestamp}\ntest_secret"
         expected_hmac = hmac.new(
-            "test_secret".encode("utf-8"),
+            b"test_secret",
             string_to_sign.encode("utf-8"),
             hashlib.sha256,
         ).digest()

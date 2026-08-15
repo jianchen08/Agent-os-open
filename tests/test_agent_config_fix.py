@@ -14,7 +14,6 @@ from pathlib import Path
 import pytest
 import yaml
 
-
 # ─── 项目根目录 ───
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -36,7 +35,7 @@ class TestResearchAgentConfig:
     @pytest.fixture(autouse=True)
     def load_config(self):
         """加载并解析 YAML 配置"""
-        with open(self.RESEARCH_AGENT_PATH, "r", encoding="utf-8") as f:
+        with open(self.RESEARCH_AGENT_PATH, encoding="utf-8") as f:
             self.config = yaml.safe_load(f)
         self.system_prompt = self.config.get("system_prompt", "")
         self.raw_content = self.RESEARCH_AGENT_PATH.read_text(encoding="utf-8")
@@ -102,7 +101,7 @@ class TestEnvironmentSetupAgentConfig:
     @pytest.fixture(autouse=True)
     def load_config(self):
         """加载并解析 YAML 配置"""
-        with open(self.ENV_AGENT_PATH, "r", encoding="utf-8") as f:
+        with open(self.ENV_AGENT_PATH, encoding="utf-8") as f:
             self.config = yaml.safe_load(f)
         self.system_prompt = self.config.get("system_prompt", "")
 
@@ -181,7 +180,7 @@ class TestAllAgentYamlParseable:
         errors = []
         for yaml_file in yaml_files:
             try:
-                with open(yaml_file, "r", encoding="utf-8") as f:
+                with open(yaml_file, encoding="utf-8") as f:
                     config = yaml.safe_load(f)
                 if config is None:
                     errors.append(f"{yaml_file}: 解析结果为 None")
@@ -191,7 +190,7 @@ class TestAllAgentYamlParseable:
                 errors.append(f"{yaml_file}: {e}")
 
         assert len(errors) == 0, (
-            f"以下 YAML 文件解析失败:\n" + "\n".join(errors)
+            "以下 YAML 文件解析失败:\n" + "\n".join(errors)
         )
 
 

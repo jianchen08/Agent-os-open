@@ -26,9 +26,10 @@ _SHARED_DIR = str(Path(__file__).resolve().parents[3])  # plugins/shared/
 if _SHARED_DIR not in sys.path:
     sys.path.insert(0, _SHARED_DIR)
 
-from agentos_plugin_sdk.settings import get_settings, reset_settings
 from pipeline.plugin import PluginContext
 from plugin import PromptBuildPlugin
+
+from agentos_plugin_sdk.settings import get_settings, reset_settings
 
 # 固定一个"绝对时间"作为 now，避免依赖机器时钟。
 # 2026-07-02 03:24:00 UTC → Asia/Shanghai 11:24:00、Asia/Tokyo 12:24:00
