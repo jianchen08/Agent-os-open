@@ -150,10 +150,13 @@ jobs:
           fi
         working-directory: kernel
 
-      - name: Set up Python (gate runner)
+      - name: Set up Python (gate runner + sidecar 依赖)
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
+
+      - name: Install SDK (config_injection 等测试 spawn 真 python sidecar)
+        run: pip install -e ./plugins/sdk
 
       - name: Run gates (kernel-test + 失败数基线锁)
         run: python scripts/run_gates.py --filter kernel-test
@@ -413,11 +416,10 @@ jobs:
         with:
           node-version: "22"
           cache: pnpm
-          cache-dependency-path: frontend/pnpm-lock.yaml
+          cache-dependency-path: pnpm-lock.yaml
 
-      - name: Install dependencies
+      - name: Install dependencies (pnpm workspace,根 lock)
         run: pnpm install --frozen-lockfile || pnpm install
-        working-directory: frontend
 
       - name: Run gates (typecheck + lint 基线 + coverage 基线)
         run: python scripts/run_gates.py --filter frontend-typecheck,frontend-lint,frontend-coverage
@@ -445,11 +447,10 @@ jobs:
         with:
           node-version: "22"
           cache: pnpm
-          cache-dependency-path: frontend/pnpm-lock.yaml
+          cache-dependency-path: pnpm-lock.yaml
 
-      - name: Install dependencies
+      - name: Install dependencies (pnpm workspace,根 lock)
         run: pnpm install --frozen-lockfile || pnpm install
-        working-directory: frontend
 
       - name: Install Playwright chromium
         run: npx playwright install --with-deps chromium
