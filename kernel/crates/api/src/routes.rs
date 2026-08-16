@@ -371,6 +371,75 @@ pub async fn health_handler() -> axum::Json<HealthResponse> {
     })
 }
 
+/// /uploads/{filename} 静态服务（上传文件读取）。
+///
+/// channel_api artifacts 上传落盘 data/{tenant}/uploads 并返回
+/// `/uploads/{filename}` URL（前端附件预览 / 主题背景图引用）。本 handler
+/// 直读默认租户（default）上传目录；路径安全：拒绝 `..` 与路径分隔符。
+pub async fn serve_upload_handler(
+    axum::extract::State(state): axum::extract::State<AppState>,
+    axum::extract::Path(filename): axum::extract::Path<String>,
+) -> axum::response::Response {
+    use axum::body::Body;
+    use axum::http::{HeaderValue, StatusCode};
+    use axum::response::IntoResponse;
+
+    if filename.is_empty()
+        || filename.contains('/')
+        || filename.contains('\\')
+        || filename.contains("..")
+    {
+        return (StatusCode::NOT_FOUND, "not found").into_response();
+    }
+    let Some(project_root) = state.project_root.as_ref() else {
+        return (StatusCode::NOT_FOUND, "not found").into_response();
+    };
+    let uploads_dir = project_root.join("data").join("default").join("uploads");
+    let file_path = uploads_dir.join(&filename);
+    let Ok(meta) = tokio::fs::metadata(&file_path).await else {
+        return (StatusCode::NOT_FOUND, "not found").into_response();
+    };
+    if !meta.is_file() {
+        return (StatusCode::NOT_FOUND, "not found").into_response();
+    }
+    let Ok(bytes) = tokio::fs::read(&file_path).await else {
+        return (StatusCode::NOT_FOUND, "not found").into_response();
+    };
+    // 常见媒体扩展名 → content-type（未知回退 octet-stream）
+    let content_type = match file_path
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("")
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        "png" => "image/png",
+        "jpg" | "jpeg" => "image/jpeg",
+        "webp" => "image/webp",
+        "gif" => "image/gif",
+        "svg" => "image/svg+xml",
+        "avif" => "image/avif",
+        "mp3" => "audio/mpeg",
+        "wav" => "audio/wav",
+        "m4a" => "audio/mp4",
+        "mp4" => "video/mp4",
+        "webm" => "video/webm",
+        "pdf" => "application/pdf",
+        "json" => "application/json",
+        "txt" | "md" => "text/plain",
+        _ => "application/octet-stream",
+    };
+    let mut response = axum::response::Response::new(Body::from(bytes));
+    response.headers_mut().insert(
+        axum::http::header::CONTENT_TYPE,
+        HeaderValue::from_static(content_type),
+    );
+    if let Ok(cache) = HeaderValue::from_str("public, max-age=31536000, immutable") {
+        response.headers_mut().insert(axum::http::header::CACHE_CONTROL, cache);
+    }
+    response
+}
+
 /// /api/v1/schema 端点处理器（AC-06-5；剩余项清仓 D2：ETag 协商缓存）。
 ///
 /// 聚合 JSON 规范化序列化（serde_json 对字段序固定的 struct 输出确定）后

@@ -1,0 +1,7 @@
+/* DSH 视觉插件 dsh-background（luoyu-xingu/dsh-background）的换背景语义移植：
+   body 背景 = 可读性蒙层 + 背景图 cover fixed（对齐其 buildBackgroundCss）。 */
+body {
+  background:
+    linear-gradient(rgba(10, 14, 26, 0.55), rgba(10, 14, 26, 0.55)),
+    url(/ext/dsh_adapter/styles/dsh-bg.png) center / cover no-repeat fixed !important;
+}

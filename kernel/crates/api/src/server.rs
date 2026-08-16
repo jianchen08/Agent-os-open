@@ -46,8 +46,8 @@ use crate::routes::{
     get_pipeline_config_with_etag, get_plugin_config_with_etag, health_handler,
     metrics_prometheus_handler, pipelines_handler, pipelines_runs_handler, pipelines_state_handler,
     plugins_set_enabled_handler, plugins_status_handler, put_agent_config_handler,
-    put_pipeline_config_handler, put_plugin_config_handler, schema_handler, system_restart_handler,
-    tools_handler, validate_all_plugins_handler, AppState,
+    put_pipeline_config_handler, put_plugin_config_handler, schema_handler, serve_upload_handler,
+    system_restart_handler, tools_handler, validate_all_plugins_handler, AppState,
 };
 use crate::session_routes::{
     create_session_handler, delete_session_handler, list_session_messages_handler,
@@ -90,6 +90,9 @@ pub fn build_router(state: AppState) -> Router {
     let static_router = Router::new()
         // AC-06-3: 健康检查
         .route("/health", get(health_handler))
+        // 上传文件静态服务（channel_api artifacts 上传的媒体；前端附件预览/
+        // 背景图引用 /uploads/... URL）
+        .route("/uploads/{filename}", get(serve_upload_handler))
         // AC-06-5: Schema 聚合端点
         .route("/api/v1/schema", get(schema_handler))
         .route("/api/v1/agents", get(agents_handler))

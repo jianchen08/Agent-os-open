@@ -245,5 +245,60 @@ async def _on_dsh_adapter_unload(params: dict) -> None:  # noqa: ARG001
     logger.info("dsh_adapter: node runtime bridge shut down")
 
 
+# ── client_styles 静态 CSS 服务（contributes.client_styles 的拉取目标） ──
+# 前端经 /ext/{pluginId}{path} 拉取 CSS（带 Bearer，仅 Enabled 插件可挂路由），
+# 本 handler 从适配器 styles/ 目录读取（http_endpoints 声明精确路径，dispatcher
+# 契约：body base64 原样回写）。
+
+import base64  # noqa: E402
+
+_STYLES_DIR = Path(__file__).parent / "styles"
+_STYLE_ROUTES: dict[str, tuple[str, str]] = {
+    "/ext/dsh_adapter/styles/dsh-bg.css": ("text/css", "dsh-bg.css"),
+    "/ext/dsh_adapter/styles/dsh-bg.png": ("image/png", "dsh-bg.png"),
+}
+
+
+@plugin.tool(
+    name="http.handle",
+    schema={
+        "type": "object",
+        "properties": {
+            "path": {"type": "string"},
+            "method": {"type": "string"},
+            "plugin_id": {"type": "string"},
+            "raw_body": {"type": "string"},
+            "headers": {"type": "object"},
+            "query": {"type": "object"},
+        },
+    },
+    description="HTTP endpoint handler for /ext/dsh_adapter/styles/** (client_styles CSS serve)",
+)
+async def _http_handle_style(
+    path: str = "",
+    method: str = "GET",
+    plugin_id: str = "",
+    raw_body: str = "",
+    headers: dict[str, str] | None = None,
+    query: dict[str, str] | None = None,
+) -> dict[str, Any]:
+    """serve client_styles 贡献的静态 CSS（dispatcher 契约：body base64 原样回写）。"""
+    route = _STYLE_ROUTES.get(path)
+    if route is None or method != "GET":
+        return {"status": 404, "headers": {}, "body": "", "body_encoding": "utf-8"}
+    content_type, filename = route
+    try:
+        body = (_STYLES_DIR / filename).read_bytes()
+    except OSError as e:
+        logger.warning("dsh_adapter: style css read failed: %s", e)
+        return {"status": 500, "headers": {}, "body": "", "body_encoding": "utf-8"}
+    return {
+        "status": 200,
+        "headers": {"content-type": content_type},
+        "body": base64.b64encode(body).decode(),
+        "body_encoding": "base64",
+    }
+
+
 if __name__ == "__main__":
     plugin.run()
