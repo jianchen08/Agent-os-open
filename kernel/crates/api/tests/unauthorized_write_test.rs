@@ -24,6 +24,7 @@ use agentos_core::traits::{ConfigFileMapping, HostType, PluginManifest, PluginTy
 use axum::body::Body;
 use axum::http::{Method, Request, StatusCode};
 use serde_json::{json, Value};
+use tokio::sync::RwLock;
 use tower::ServiceExt;
 
 /// 构造带内存 store + project_root（agent/pipeline/plugin 配置齐全）的测试 app。
@@ -92,7 +93,7 @@ fn app_with_deps() -> (tempfile::TempDir, axum::Router) {
     let store = Arc::new(agentos_engine::SqliteStore::open_memory().unwrap());
     let mut state = AppState::new();
     state.store = Some(store.clone());
-    state.manifests = Arc::new(vec![manifest]);
+    state.manifests = Arc::new(RwLock::new(vec![manifest]));
     state.project_root = Some(tmp.path().to_path_buf());
     (tmp, build_router(state))
 }
@@ -297,13 +298,33 @@ async fn test_admin_token_passes_write_and_read() {
     let (_tmp, app) = app_with_deps();
     let admin = admin_token(&app).await;
 
-    // PUT agent config → 200（文件写回）
+    // PUT agent config（先 GET 拿 etag 满足 A13 If-Match 乐观锁）→ 200
+    let agent_etag = {
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/agents/test_agent/config")
+                    .header("authorization", format!("Bearer {admin}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), 8192).await.unwrap();
+        let v: Value = serde_json::from_slice(&body).unwrap();
+        v["etag"]
+            .as_str()
+            .expect("GET agent config 应带 etag")
+            .to_string()
+    };
     let status = send(
         &app,
         Method::PUT,
         "/api/v1/agents/test_agent/config",
         Some(&admin),
-        Some(json!({"yaml": "config_id: test_agent\nname: 新名\n"})),
+        Some(json!({"yaml": "config_id: test_agent\nname: 新名\n", "if_match": agent_etag})),
     )
     .await;
     assert_eq!(
@@ -312,13 +333,33 @@ async fn test_admin_token_passes_write_and_read() {
         "admin PUT agent config 应通过（当前 {status}）"
     );
 
-    // PUT pipeline config → 200（原子写回）
+    // PUT pipeline config（先 GET 拿 etag 满足 A13 If-Match 乐观锁）→ 200
+    let pipe_etag = {
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/config/pipelines/default")
+                    .header("authorization", format!("Bearer {admin}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        resp.headers()
+            .get("etag")
+            .expect("GET pipeline config 应带 etag 头")
+            .to_str()
+            .unwrap()
+            .to_string()
+    };
     let status = send(
         &app,
         Method::PUT,
         "/api/v1/config/pipelines/default",
         Some(&admin),
-        Some(json!({"data": {"name": "default"}})),
+        Some(json!({"data": {"name": "default"}, "if_match": pipe_etag})),
     )
     .await;
     assert_eq!(
@@ -390,5 +431,55 @@ async fn test_admin_token_passes_write_and_read() {
         status,
         StatusCode::OK,
         "admin GET plugins 应通过（当前 {status}）"
+    );
+}
+
+/// A14：create_session 的 user_id 以 token（resolve_request_user）解析为准——
+/// body 伪造 user_id ≠ token 用户时，事件路由（registry 的 thread → user 注册，
+/// WS 流式推送据此定位连接）按 token 用户登记。
+#[tokio::test]
+async fn test_create_session_routes_events_by_token_user_not_body() {
+    let tmp = tempfile::tempdir().unwrap();
+    let store = Arc::new(agentos_engine::SqliteStore::open_memory().unwrap());
+    let session = Arc::new(agentos_session::SessionCoordinator::new());
+
+    let mut state = AppState::new();
+    state.store = Some(store);
+    state.session = Some(session.clone());
+    state.project_root = Some(tmp.path().to_path_buf());
+    let app = build_router(state);
+
+    let token = admin_token(&app).await;
+    // body 伪造 user_id（≠ token 用户）
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/api/v1/sessions")
+                .header("authorization", format!("Bearer {token}"))
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    json!({"title": "t", "user_id": "forged-user-999"}).to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK, "admin 创建会话应 200");
+    let body = axum::body::to_bytes(resp.into_body(), 8192).await.unwrap();
+    let v: Value = serde_json::from_slice(&body).unwrap();
+    let thread_id = v["thread_id"].as_str().unwrap().to_string();
+
+    // registry 的 thread → user 映射必须是 token 用户（内置 admin 的固定 uuid），
+    // 而非 body 伪造的 "forged-user-999"。
+    let threads = session.list_threads();
+    let bound_user = threads
+        .iter()
+        .find(|(tid, _)| *tid == thread_id)
+        .map(|(_, uid)| uid.clone())
+        .expect("thread 应已注册到事件路由表");
+    assert_eq!(
+        bound_user, "00000000-0000-0000-0000-000000000001",
+        "事件路由应按 token 用户登记，而非 body 伪造值"
     );
 }

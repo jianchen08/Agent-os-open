@@ -1,4 +1,4 @@
-# @feature: FP-0.2.二 内部模块manifest | @vision: V3 可嵌入 | @ci: python-plugins-test
+# @feature: FP-0.2.二 内部模块manifest | @vision: V3 可嵌入 | @ci: python-coverage
 """isolation sandbox 定位回归测试（F-SANDBOX-2：白名单模式）。
 
 意图：sandbox 模块是**轻量代码沙箱**，只面向已审批 HOST 模式下的受信代码，
@@ -21,9 +21,9 @@ from __future__ import annotations
 from typing import Any
 
 import pytest
-from sandbox import CodeSandbox, SandboxConfig
 
-import tests._isolation_path  # noqa: F401  (把 isolation 插件目录加入 sys.path)
+import tests._isolation_path  # noqa: F401  (把 isolation 插件目录加入 sys.path；须在 sandbox import 前执行)
+from sandbox import CodeSandbox, SandboxConfig
 
 
 @pytest.fixture

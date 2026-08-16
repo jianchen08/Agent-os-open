@@ -1,3 +1,4 @@
+# @feature: FP-0.2.〇 管道引擎 | @vision: V3 可嵌入 | @ci: python-coverage
 """SensitiveChecker 单元测试——敏感数据模式检测与脱敏。
 
 覆盖：各类 Token/Key 正则匹配、password/api_key 字段值脱敏、

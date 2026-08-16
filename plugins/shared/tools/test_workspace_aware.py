@@ -1,4 +1,4 @@
-# @feature: FP-0.2.〇 管道引擎 | @vision: V3 可嵌入 | @ci: python-plugins-test
+# @feature: FP-0.2.〇 管道引擎 | @vision: V3 可嵌入 | @ci: none-local
 """workspace_aware 插件（工作空间感知 Mixin）单元测试。
 
 覆盖（对齐 plugins/shared/tools/workspace_aware.py）：

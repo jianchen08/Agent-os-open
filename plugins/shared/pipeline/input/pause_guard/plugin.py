@@ -10,6 +10,9 @@
 通过 ctx.get_service("task_service") 获取 TaskService 来查询任务状态。
 如果服务不可用，则跳过检查（不影响管道正常运行）。
 
+注意：跨插件服务接线（get_service 命中 task_service）属后续架构任务；
+当前未接线时本插件降级为不暂停，失败路径仅低频 warning 留痕。
+
 State 命名空间：
     - pause_guard.checked : 本插件写入的检查结果
 """
@@ -49,6 +52,8 @@ class PauseGuardPlugin(IInputPlugin):
         """
         self._config = config or {}
         self._enabled = self._config.get("enabled", True)
+        # 服务不可用告警只打一次（低频留痕，避免每轮迭代刷屏）
+        self._service_warned = False
 
     @property
     def name(self) -> str:
@@ -98,6 +103,10 @@ class PauseGuardPlugin(IInputPlugin):
         try:
             task_service = ctx.get_service("task_service")
         except KeyError:
+            # 跨插件服务接线属后续架构任务：未接线时降级为不暂停（语义不变）
+            if not self._service_warned:
+                self._service_warned = True
+                logger.warning("[%s] task_service 未接线，暂停检查降级为不暂停", self.name)
             return {"pause_guard.checked": {"paused": False, "reason": "task_service unavailable"}}
 
         # 查询任务状态

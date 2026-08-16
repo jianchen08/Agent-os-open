@@ -1,4 +1,4 @@
-# @feature: FP-0.2.七 路由收敛 | @vision: V3 可嵌入 | @ci: python-plugins-test
+# @feature: FP-0.2.七 路由收敛 | @vision: V3 可嵌入 | @ci: python-coverage
 """统一消息类型测试。"""
 
 from __future__ import annotations

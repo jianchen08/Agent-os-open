@@ -1,4 +1,4 @@
-# @feature: FP-0.2.CFG 配置系统与插件配置注入 | @vision: V3 可嵌入 | @ci: python-plugins-test
+# @feature: FP-0.2.CFG 配置系统与插件配置注入 | @vision: V3 可嵌入 | @ci: python-coverage
 """LLM 插件配置注入链路测试（task_11 P0）。
 
 验证两条 P0 修复：

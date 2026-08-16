@@ -1,3 +1,4 @@
+# @feature: FP-0.2.〇 管道引擎 | @vision: V3 可嵌入 | @ci: python-coverage
 """ConversationModeDetector 单元测试——对话模式激活/循环/结束三态机。
 
 覆盖：未激活时从 tool_results 检测激活信号、已激活无工具调用产生 wait、

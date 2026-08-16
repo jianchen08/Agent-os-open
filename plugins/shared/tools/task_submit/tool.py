@@ -654,6 +654,7 @@ class TaskSubmitTool(BuiltinTool):
         # 此处 inputs 中的值即为 agent 显式选择，按任务类型强制校验。
         _parent_scope = "non_container"
         _parent_ws_root: str | None = None  # 父容器任务的源空间（ws_meta.project_root/path）
+        _parent_scope_query_error: str | None = None  # 非 None = 父任务 scope 查询失败（拓扑未知）
         if parent_task_id:
             try:
                 _svc = self._get_task_service()
@@ -664,8 +665,16 @@ class TaskSubmitTool(BuiltinTool):
                         _parent_ws_meta = _parent_task.metadata.get("ws_meta")
                         if isinstance(_parent_ws_meta, dict):
                             _parent_ws_root = _parent_ws_meta.get("project_root") or _parent_ws_meta.get("path")
-            except Exception:
-                pass
+            except Exception as exc:
+                # 查询失败不再静默降级为 non_container（拓扑未知却按已知校验会放行/误拒）：
+                # 标记 unknown，下方受限操作保守拒绝。
+                _parent_scope = "unknown"
+                _parent_scope_query_error = f"{type(exc).__name__}: {exc}"
+                logger.warning(
+                    "[TaskSubmit] 查询父任务 scope 失败，受限操作将保守拒绝 | parent_task_id=%s | err=%s",
+                    parent_task_id,
+                    exc,
+                )
 
         def _same_workspace_root(path_a: str | None, path_b: str | None) -> bool:
             """规范化比较两个路径是否同一源空间（Windows 忽略大小写）。"""
@@ -678,6 +687,47 @@ class TaskSubmitTool(BuiltinTool):
                 return a == b
             except (ValueError, TypeError):
                 return False
+
+        def _parse_inherit_modes(inp: dict[str, Any]) -> set[str]:
+            """解析 inherit_mode / inherit.mode 为集合（两分支共用口径）。"""
+            mode = inp.get("inherit_mode") or (
+                inp.get("inherit", {}).get("mode") if isinstance(inp.get("inherit"), dict) else None
+            )
+            if isinstance(mode, str):
+                return {mode}
+            return set(mode) if isinstance(mode, (list, tuple)) else set()
+
+        def _inherit_from_id_of(inp: dict[str, Any]) -> str:
+            """提取继承源任务 ID（扁平 inherit_from 与旧式 inherit.from 同口径）。"""
+            cfg = inp.get("inherit")
+            if isinstance(cfg, dict):
+                return cfg.get("from", "") or ""
+            return inp.get("inherit_from") or ""
+
+        _inherit_modes = _parse_inherit_modes(inputs)
+
+        # ── 父任务 scope 查询失败：受限操作一律保守拒绝（提示 scope 查询失败）──
+        # workspace 拓扑参数（workspace / workspace_mode / isolation_level /
+        # inherit workspace）的放行与否取决于父任务是否 container，查询失败时
+        # 无法判定 → 拒绝而非按默认值放行。
+        if _parent_scope_query_error is not None:
+            _restricted_params = [p for p in ("workspace", "workspace_mode", "isolation_level") if inputs.get(p)]
+            _restricted_inherit = _inherit_from_id_of(inputs) and "workspace" in _inherit_modes
+            if _restricted_params or _restricted_inherit:
+                logger.warning(
+                    "[TaskSubmit] scope 查询失败且请求含受限参数，保守拒绝 | parent_task_id=%s | params=%s | inherit_ws=%s",
+                    parent_task_id,
+                    _restricted_params,
+                    bool(_restricted_inherit),
+                )
+                return create_failure_result(
+                    error=(
+                        f"父任务 scope 查询失败（{_parent_scope_query_error}），"
+                        "无法校验工作空间拓扑参数，本次受限操作已保守拒绝。请稍后重试；"
+                        "如持续失败请检查 task 服务可用性。"
+                    ),
+                    error_code="PARENT_SCOPE_QUERY_FAILED",
+                )
 
         # ── 容器直接子任务：可自选拓扑/隔离；workspace 不可设置（继承容器）──
         if _parent_scope == "container":
@@ -698,15 +748,7 @@ class TaskSubmitTool(BuiltinTool):
             # workspace_mode / isolation_level 允许自选 → 不做任何拦截
             # inherit workspace：允许，但只能继承父容器下的 worktree 源空间
             # （源任务的 worktree 源空间必须与容器任务一致）
-            _inherit_from_id = inputs.get("inherit_from")
-            _inherit_mode = inputs.get("inherit_mode") or (
-                inputs.get("inherit", {}).get("mode") if isinstance(inputs.get("inherit"), dict) else None
-            )
-            _inherit_modes = (
-                {_inherit_mode}
-                if isinstance(_inherit_mode, str)
-                else set(_inherit_mode) if isinstance(_inherit_mode, (list, tuple)) else set()
-            )
+            _inherit_from_id = _inherit_from_id_of(inputs)
             if _inherit_from_id and "workspace" in _inherit_modes:
                 _inherit_ws_root: str | None = None
                 try:
@@ -717,8 +759,21 @@ class TaskSubmitTool(BuiltinTool):
                             _src_ws = _src_task.metadata.get("ws_meta")
                             if isinstance(_src_ws, dict):
                                 _inherit_ws_root = _src_ws.get("project_root") or _src_ws.get("path")
-                except Exception:
-                    pass
+                except Exception as exc:
+                    # 源空间查询失败 → 无法核对与容器一致性 → 保守拒绝（不静默按 None 比对）
+                    logger.warning(
+                        "[TaskSubmit] 查询 inherit workspace 源空间失败，保守拒绝 | parent_task_id=%s | inherit_from=%s | err=%s",
+                        parent_task_id,
+                        _inherit_from_id,
+                        exc,
+                    )
+                    return create_failure_result(
+                        error=(
+                            f"inherit workspace 源空间查询失败（{exc}），"
+                            "无法核对与容器源空间的一致性，本次受限操作已保守拒绝。请稍后重试。"
+                        ),
+                        error_code="INHERIT_WS_QUERY_FAILED",
+                    )
                 if not _same_workspace_root(_inherit_ws_root, _parent_ws_root):
                     logger.warning(
                         "[TaskSubmit] 容器直接子任务 inherit workspace 源空间不一致被拒绝 | "
@@ -741,20 +796,12 @@ class TaskSubmitTool(BuiltinTool):
         # ── 普通子任务：只允许 inherit pipe；其余一律继承父任务 ──
         elif parent_task_id and _parent_scope != "container":
             # inherit workspace：普通子任务只能继承管道，工作空间继承被拒绝
-            _inherit_mode = inputs.get("inherit_mode") or (
-                inputs.get("inherit", {}).get("mode") if isinstance(inputs.get("inherit"), dict) else None
-            )
-            _inherit_modes = (
-                {_inherit_mode}
-                if isinstance(_inherit_mode, str)
-                else set(_inherit_mode) if isinstance(_inherit_mode, (list, tuple)) else set()
-            )
-            if inputs.get("inherit_from") and "workspace" in _inherit_modes:
+            if _inherit_from_id_of(inputs) and "workspace" in _inherit_modes:
                 logger.warning(
                     "[TaskSubmit] 普通子任务 inherit workspace 被拒绝（只能继承管道）| "
                     "parent_task_id=%s | inherit_from=%s",
                     parent_task_id,
-                    inputs.get("inherit_from"),
+                    _inherit_from_id_of(inputs),
                 )
                 return create_failure_result(
                     error=(
@@ -1120,8 +1167,14 @@ class TaskSubmitTool(BuiltinTool):
                     parent_scope = parent_task.metadata.get("task_scope", "non_container")
                     if parent_scope != "container":
                         is_root = False
-            except Exception:
-                pass
+            except Exception as exc:
+                # 任务已创建，此处仅是元数据标记：不回滚、不放行为目的改判——
+                # 维持默认 is_root=True（与查询失败前语义一致），仅记录 warning 供排查。
+                logger.warning(
+                    "[TaskSubmit] 查询父任务 scope 失败，is_root 维持默认 True | parent_task_id=%s | err=%s",
+                    parent_task_id,
+                    exc,
+                )
 
         if _inherit_resolved:
             is_root = True

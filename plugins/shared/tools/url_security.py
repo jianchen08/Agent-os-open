@@ -18,13 +18,17 @@ import ipaddress
 import socket
 from urllib.parse import urlparse
 
-# RFC 1918 / loopback / link-local 网段（SSRF 防护）
+# RFC 1918 / loopback / link-local / CGNAT / 未指定地址 网段（SSRF 防护）
 _PRIVATE_NETWORKS = (
     ipaddress.ip_network("10.0.0.0/8"),
     ipaddress.ip_network("172.16.0.0/12"),
     ipaddress.ip_network("192.168.0.0/16"),
     ipaddress.ip_network("127.0.0.0/8"),
     ipaddress.ip_network("169.254.0.0/16"),
+    # "this network"（0.0.0.0 常被解析为本机，等价回环旁路）
+    ipaddress.ip_network("0.0.0.0/8"),
+    # CGNAT 运营商级 NAT（RFC 6598），非公网可达目标
+    ipaddress.ip_network("100.64.0.0/10"),
     ipaddress.ip_network("::1/128"),
     ipaddress.ip_network("fc00::/7"),
     ipaddress.ip_network("fe80::/10"),
@@ -33,6 +37,9 @@ _PRIVATE_NETWORKS = (
 
 def is_private_ip(ip_str: str) -> bool:
     """检查 IP 是否属于内网地址（SSRF 防护）。
+
+    IPv4-mapped IPv6（如 ``::ffff:127.0.0.1``）先归一为 IPv4 再比对，
+    防止映射形式旁路 IPv4 网段表。
 
     无法解析的 IP 一律视为不安全（返回 True）。
 
@@ -44,9 +51,13 @@ def is_private_ip(ip_str: str) -> bool:
     """
     try:
         ip = ipaddress.ip_address(ip_str)
-        return any(ip in net for net in _PRIVATE_NETWORKS)
     except ValueError:
         return True  # 无法解析的 IP 视为不安全
+    if isinstance(ip, ipaddress.IPv6Address):
+        ipv4_mapped = ip.ipv4_mapped
+        if ipv4_mapped is not None:
+            ip = ipv4_mapped
+    return any(ip in net for net in _PRIVATE_NETWORKS)
 
 
 def resolve_hostname_ips(hostname: str) -> tuple[list[str] | None, str | None]:
@@ -69,6 +80,10 @@ def validate_url(url: str, allow_domains: list[str] | None = None) -> tuple[bool
     """URL 安全校验：协议白名单 + 域名白名单 + SSRF 防护。
 
     任何解析结果命中内网 IP 即拒绝（SSRF 防护不可旁路）。
+
+    ⚠️ 遗留点（DNS TOCTOU）：本校验与实际请求各做一次 DNS 解析，
+    攻击者可让两次解析返回不同结果（公网 IP 过校验 / 内网 IP 被请求）。
+    彻底修复需在请求层固定使用校验时解析出的 IP（架构级改造，本轮未做）。
 
     Args:
         url: 目标 URL

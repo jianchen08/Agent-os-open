@@ -66,8 +66,13 @@ test.describe('旅程11：附件上传与预览', () => {
     // 等待附件出现在预览区（确认上传流程启动）
     await expect(page.locator('text=e2e-doc-').first()).toBeVisible({ timeout: 15_000 });
 
-    // 等待上传完成（loading spinner 消失），上传通常 < 2s
-    await page.waitForTimeout(3000);
+    // 轮询等待上传完成（FileUploadZone 的 loading spinner 消失），替代固定 3s sleep。
+    // 先尽力等 spinner 出现（上传启动；上传极快时可能跳过），再轮询其消失。
+    const uploadSpinner = page.locator('.animate-spin');
+    await uploadSpinner.first().waitFor({ state: 'visible', timeout: 3_000 }).catch(() => {});
+    await expect
+      .poll(async () => (await uploadSpinner.count()) === 0, { timeout: 15_000 })
+      .toBe(true);
 
     await sendChatMessage(page, '请分析这个文件');
 
@@ -87,7 +92,13 @@ test.describe('旅程11：附件上传与预览', () => {
     await fileInput.setInputFiles(filePath);
     await expect(page.locator('text=e2e-preview-').first()).toBeVisible({ timeout: 15_000 });
 
-    await page.waitForTimeout(3000);
+    // 轮询等待上传完成（spinner 出现后消失），替代固定 3s sleep
+    const uploadSpinner = page.locator('.animate-spin');
+    await uploadSpinner.first().waitFor({ state: 'visible', timeout: 3_000 }).catch(() => {});
+    await expect
+      .poll(async () => (await uploadSpinner.count()) === 0, { timeout: 15_000 })
+      .toBe(true);
+
     await sendChatMessage(page, '看下这个文件');
 
     // 等待附件卡片渲染

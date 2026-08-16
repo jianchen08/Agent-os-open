@@ -1,4 +1,4 @@
-# @feature: FP-0.2.可观测性 | @vision: V3 可嵌入 | @ci: python-plugins-test
+# @feature: FP-0.2.可观测性 | @vision: V3 可嵌入 | @ci: python-test
 """frontend.emit capability 测试（task_observability 任务 1/2 共享前置）。
 
 ADR §3.5：frontend.emit 是「插件 → 内核 → 前端」的一次性事件推送出口。

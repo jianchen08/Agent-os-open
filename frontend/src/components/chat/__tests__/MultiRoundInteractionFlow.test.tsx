@@ -13,6 +13,7 @@
 import { act, fireEvent, render, renderHook, screen, waitFor } from '@testing-library/react'
 import React from 'react'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { MemoryRouter } from 'react-router-dom'
 import { InteractionCard } from '@/components/chat/InteractionCard'
 import { useInteractionHandler } from '@/hooks/useInteractionHandler'
 import { useRealtimeEvents } from '@/hooks/useRealtimeEvents'
@@ -108,12 +109,14 @@ vi.mock('@/components/ui/button', () => ({
 }))
 
 // ---------------------------------------------------------------------------
-//  Mock: WebSocket 服务 (用于 useRealtimeEvents / useInteractionHandler)
+//  Mock: GlobalWebSocket（真实订阅面：globalWS.subscribe/unsubscribe + send 族）
+//  useRealtimeEvents / useInteractionHandler 均通过 globalWS 订阅事件；
+//  此前 mock 的是无人 import 的 WebSocketService（mock 空气），事件从未触达真实 hook。
 // ---------------------------------------------------------------------------
 const listeners: Record<string, Set<(...args: any[]) => void>> = {}
 
-vi.mock('@/services/websocket/WebSocketService', () => ({
-  webSocketService: {
+vi.mock('@/services/websocket/GlobalWebSocket', () => ({
+  globalWS: {
     subscribe: vi.fn((event: string, cb: (...a: any[]) => void) => {
       if (!listeners[event]) listeners[event] = new Set()
       listeners[event].add(cb)
@@ -123,30 +126,9 @@ vi.mock('@/services/websocket/WebSocketService', () => ({
     }),
     send: vi.fn(),
     sendInteractionResponse: vi.fn().mockResolvedValue(undefined),
-  },
-}))
-
-vi.mock('@/constants/websocket', () => ({
-  WS_SERVER_EVENTS: {
-    STREAM_START: 'stream_start',
-    STREAM_CHUNK: 'stream_chunk',
-    STREAM_END: 'stream_end',
-    STREAM_ERROR: 'stream_error',
-    EXECUTION_START: 'execution_start',
-    EXECUTION_PROGRESS: 'execution_progress',
-    EXECUTION_OUTPUT: 'execution_output',
-    EXECUTION_DONE: 'execution_done',
-    EXECUTION_CANCELLED: 'execution_cancelled',
-    SUB_AGENT_CREATED: 'sub_agent_created',
-    SUB_AGENT_WAITING_INPUT: 'sub_agent_waiting_input',
-    SUB_AGENT_COMPLETED: 'sub_agent_completed',
-    INTERACTION_REQUEST: 'interaction_request',
-    WORKFLOW_STEP_UPDATE: 'workflow_step_update',
-  },
-  WebSocketStatus: {
-    DISCONNECTED: 'disconnected',
-    CONNECTING: 'connecting',
-    CONNECTED: 'connected',
+    sendApproval: vi.fn(),
+    connect: vi.fn(),
+    status: 'connected',
   },
 }))
 
@@ -645,19 +627,18 @@ describe('MultiRoundInteractionFlow — AC-1j: 多轮交互流程', () => {
       expect(layoutState.activeExecutions[0].status).toBe('completed')
     })
 
-    it('通过 useRealtimeEvents 触发执行事件 → 渲染交互卡片 → 用户响应', async () => {
+    it('执行事件（store 直驱）→ 渲染交互卡片 → 用户响应', async () => {
       const onRespondChoice = vi.fn()
 
-      // 注册 useRealtimeEvents 处理执行事件
+      // 注册 useRealtimeEvents（真实 hook；执行追踪事件已随 0.2 后端退役，
+      // 执行态由 store 直驱——与生产中 tool_start/tool_result handler 的写入路径一致）
       renderHook(() => useRealtimeEvents())
 
-      // 通过 WebSocket 事件触发执行开始
+      // 执行开始（store 写入）
       act(() => {
-        emitEvent('execution_start', {
-          execution_id: 'exec-ws-tool',
-          execution_type: 'tool',
-          name: 'pre_check',
-        })
+        useLayoutModeStore.getState().addOrUpdateExecution(
+          createExecutionEvent({ id: 'exec-ws-tool', name: 'pre_check' }),
+        )
       })
 
       const layoutState = useLayoutModeStore.getState()
@@ -666,25 +647,21 @@ describe('MultiRoundInteractionFlow — AC-1j: 多轮交互流程', () => {
 
       // 执行完成
       act(() => {
-        emitEvent('execution_done', {
-          execution_id: 'exec-ws-tool',
-          success: true,
-        })
+        useLayoutModeStore.getState().addOrUpdateExecution(
+          createExecutionEvent({ id: 'exec-ws-tool', name: 'pre_check', status: 'completed', progress: 100 }),
+        )
       })
 
       expect(useLayoutModeStore.getState().activeExecutions[0].status).toBe('completed')
 
-      // 直接在 interactionStore 添加交互（模拟 useInteractionHandler 的行为）
-      act(() => {
-        useInteractionStore.getState().addInteraction({
-          requestId: 'req-ws-tool',
-          mode: 'choice',
+      // 交互请求经 globalWS interaction_request 事件真实到达（useInteractionHandler 订阅）
+      renderHook(() => useInteractionHandler('session-1'), { wrapper: MemoryRouter })
+      await act(async () => {
+        emitEvent('interaction_request', {
+          request_id: 'req-ws-tool',
+          interaction_mode: 'choice',
           title: '确认后执行工具',
-          description: '',
-          threadId: 'thread-1',
-          tabId: 'tab-1',
-          agentId: 'agent-1',
-          timestamp: new Date().toISOString(),
+          thread_id: 'thread-1',
           options: [
             { id: 'go', label: '执行' },
             { id: 'stop', label: '停止' },
@@ -730,11 +707,9 @@ describe('MultiRoundInteractionFlow — AC-1j: 多轮交互流程', () => {
 
       // Agent 开始执行新工具
       act(() => {
-        emitEvent('execution_start', {
-          execution_id: 'exec-ws-after',
-          execution_type: 'tool',
-          name: 'post_interaction_tool',
-        })
+        useLayoutModeStore.getState().addOrUpdateExecution(
+          createExecutionEvent({ id: 'exec-ws-after', name: 'post_interaction_tool' }),
+        )
       })
 
       const newLayoutState = useLayoutModeStore.getState()
@@ -1043,11 +1018,11 @@ describe('MultiRoundInteractionFlow — AC-1j: 多轮交互流程', () => {
   // 附加：useInteractionHandler 集成（通过 WebSocket 事件添加交互）
   // -----------------------------------------------------------------------
   describe('useInteractionHandler 交互请求集成', () => {
-    it('interaction_request 事件应触发 store 添加交互', () => {
-      // useInteractionHandler 订阅 interaction_request 事件
-      renderHook(() => useInteractionHandler('session-1'))
+    it('interaction_request 事件应触发 store 添加交互', async () => {
+      // useInteractionHandler 通过 globalWS 订阅 interaction_request 事件
+      renderHook(() => useInteractionHandler('session-1'), { wrapper: MemoryRouter })
 
-      act(() => {
+      await act(async () => {
         emitEvent('interaction_request', {
           request_id: 'req-realtime',
           interaction_mode: 'choice',
@@ -1067,10 +1042,10 @@ describe('MultiRoundInteractionFlow — AC-1j: 多轮交互流程', () => {
       expect(found!.mode).toBe('choice')
     })
 
-    it('连续两个 interaction_request 应产生两个待处理交互', () => {
-      renderHook(() => useInteractionHandler('session-1'))
+    it('连续两个 interaction_request 应产生两个待处理交互', async () => {
+      renderHook(() => useInteractionHandler('session-1'), { wrapper: MemoryRouter })
 
-      act(() => {
+      await act(async () => {
         emitEvent('interaction_request', {
           request_id: 'req-multi-1',
           interaction_mode: 'choice',
@@ -1079,7 +1054,7 @@ describe('MultiRoundInteractionFlow — AC-1j: 多轮交互流程', () => {
         })
       })
 
-      act(() => {
+      await act(async () => {
         emitEvent('interaction_request', {
           request_id: 'req-multi-2',
           interaction_mode: 'conversation',
@@ -1093,11 +1068,11 @@ describe('MultiRoundInteractionFlow — AC-1j: 多轮交互流程', () => {
       expect(state.pendingInteractions[1].requestId).toBe('req-multi-2')
     })
 
-    it('interaction_request 事件的数据解析应兼容 snake_case 和 camelCase', () => {
-      renderHook(() => useInteractionHandler('session-1'))
+    it('interaction_request 仅接受 snake_case request_id（camelCase 无 request_id 会被丢弃）', async () => {
+      renderHook(() => useInteractionHandler('session-1'), { wrapper: MemoryRouter })
 
-      // 使用 camelCase 字段
-      act(() => {
+      // 仅 camelCase 字段（无 request_id）
+      await act(async () => {
         emitEvent('interaction_request', {
           requestId: 'req-camel',
           interactionMode: 'choice',
@@ -1106,47 +1081,90 @@ describe('MultiRoundInteractionFlow — AC-1j: 多轮交互流程', () => {
         })
       })
 
+      // 当前契约：parseInteractionEvent 只读 inner.request_id（snake_case），
+      // 缺失即返回 null——camelCase 兼容从未实现（F2 真实验证暴露的事实；
+      // 后端事件始终发 snake_case，故不视为缺陷）。
       const state = useInteractionStore.getState()
-      // 由于 parseInteractionEvent 优先使用 snake_case（request_id），
-      // camelCase 版本如果没有 request_id 则使用 requestId
-      const found = state.pendingInteractions.find(
-        (i) => i.requestId === 'req-camel',
+      expect(state.pendingInteractions.find((i) => i.requestId === 'req-camel')).toBeUndefined()
+
+      // snake_case 正常解析
+      await act(async () => {
+        emitEvent('interaction_request', {
+          request_id: 'req-snake',
+          interaction_mode: 'choice',
+          title: '下划线命名',
+          options: [{ id: 'ok', label: '确定' }],
+        })
+      })
+      const found = useInteractionStore.getState().pendingInteractions.find(
+        (i) => i.requestId === 'req-snake',
       )
       expect(found).toBeDefined()
-      expect(found!.title).toBe('驼峰命名')
+      expect(found!.title).toBe('下划线命名')
     })
   })
 
   // -----------------------------------------------------------------------
-  // 附加：useRealtimeEvents 执行事件集成
+  // 附加：useRealtimeEvents 任务生命周期集成
+  // （execution_start/done 等执行事件 2026-08 已删除——后端无发射源，
+  //   原集成用例断言的是死接线，详见 useRealtimeEvents.ts 头部清理注释）
   // -----------------------------------------------------------------------
-  describe('useRealtimeEvents 执行事件集成', () => {
-    it('execution_start → execution_done 完整流程', () => {
+  describe('useRealtimeEvents 任务生命周期集成', () => {
+    it('task_status_update 事件应更新 longTermTaskStore 并 bump 工作区版本', async () => {
+      const { useLongTermTaskStore } = await import('@/stores/longTermTaskStore')
+      // 种子任务：事件到达时应走 updateTask 分支而非全量 fetchTasks
+      useLongTermTaskStore.setState({
+        tasks: [
+          {
+            id: 'task-1',
+            title: '长期任务',
+            status: 'running',
+            currentPhase: 'prepare',
+          },
+        ] as never,
+      })
+
       renderHook(() => useRealtimeEvents())
 
-      act(() => {
-        emitEvent('execution_start', {
-          execution_id: 'exec-rt-1',
-          execution_type: 'tool',
-          name: 'build',
+      const versionBefore = useLayoutModeStore.getState().workspaceDataVersion
+      await act(async () => {
+        emitEvent('task_status_update', {
+          task_id: 'task-1',
+          new_status: 'completed',
+          current_phase: 'execute',
         })
       })
 
-      let state = useLayoutModeStore.getState()
-      expect(state.activeExecutions).toHaveLength(1)
-      expect(state.activeExecutions[0].id).toBe('exec-rt-1')
-      expect(state.activeExecutions[0].name).toBe('build')
-      expect(state.activeExecutions[0].status).toBe('running')
+      const taskState = useLongTermTaskStore.getState()
+      const task = taskState.tasks.find((t: { id: string }) => t.id === 'task-1') as {
+        status: string
+        currentPhase: string
+      }
+      expect(task).toBeDefined()
+      expect(task.status).toBe('completed')
+      expect(task.currentPhase).toBe('execute')
 
-      act(() => {
-        emitEvent('execution_done', {
-          execution_id: 'exec-rt-1',
-          success: true,
-        })
+      // 工作区数据版本被 bump（触发工作区面板刷新）
+      expect(useLayoutModeStore.getState().workspaceDataVersion).toBeGreaterThan(versionBefore)
+    })
+
+    it('task_deleted 事件应从 store 删除任务', async () => {
+      const { useLongTermTaskStore } = await import('@/stores/longTermTaskStore')
+      useLongTermTaskStore.setState({
+        tasks: [
+          { id: 'task-del', title: '待删除', status: 'running' },
+        ] as never,
       })
 
-      state = useLayoutModeStore.getState()
-      expect(state.activeExecutions[0].status).toBe('completed')
+      renderHook(() => useRealtimeEvents())
+
+      await act(async () => {
+        emitEvent('task_deleted', { task_id: 'task-del' })
+      })
+
+      expect(
+        useLongTermTaskStore.getState().tasks.some((t: { id: string }) => t.id === 'task-del'),
+      ).toBe(false)
     })
   })
 })

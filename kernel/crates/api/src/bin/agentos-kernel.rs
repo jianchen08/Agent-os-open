@@ -204,16 +204,34 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         plugins_dir.display()
     );
 
-    let manifests = loader
+    // A10：discover 失败 fail-fast——IO 故障/manifest 损坏意味着插件面不可用，
+    // 静默降级为空集会让内核以"无插件"假象运行（工具/能力全缺，问题后置难查），
+    // 故拒绝启动。逃生门：AGENTOS_ALLOW_EMPTY_PLUGINS=1（嵌入式/最小化部署/
+    // 沙箱场景显式声明接受空插件集）时保留旧的降级启动行为。
+    let manifests = match loader
         .discover(&root_paths.iter().map(|s| s.as_str()).collect::<Vec<_>>())
         .await
-        .unwrap_or_else(|e| {
+    {
+        Ok(m) => m,
+        Err(e) if std::env::var("AGENTOS_ALLOW_EMPTY_PLUGINS").as_deref() == Ok("1") => {
             warn!(
                 target: "agentos-kernel",
-                "Failed to discover plugins: {}. Continuing with empty plugin list.", e.message
+                "Failed to discover plugins: {}. AGENTOS_ALLOW_EMPTY_PLUGINS=1 → continuing with empty plugin list.", e.message
             );
             Vec::new()
-        });
+        }
+        Err(e) => {
+            eprintln!(
+                "[boot] 插件 discover 失败，拒绝启动: {}（设 AGENTOS_ALLOW_EMPTY_PLUGINS=1 可强制以空插件集启动）",
+                e.message
+            );
+            std::io::Write::flush(&mut std::io::stderr()).ok();
+            return Err(Box::<dyn std::error::Error>::from(format!(
+                "plugin discover failed at boot: {}",
+                e.message
+            )));
+        }
+    };
 
     // M2-static：启动期按 dependencies 静态拓扑排序——插件间启动顺序从
     // HashMap 任意序变为显式可证明的依赖序（依赖者后加载；tie-break 字典序）。
@@ -339,7 +357,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // users——换 driver 时完全可用）+ sqlite_db（SQLite 专有 db-admin 表驱动接口，
     // 非 SQLite driver 下为 None → db-admin capability 诚实降级）。
     // 存储是自举必需件 + 审计真相源，driver 编译进内核而非插件轨（§9.6 判据）。
-    let storage_cfg = agentos_engine::storage_factory::resolve_storage_config(&config_root);
+    // resolve_storage_config：config/storage.yaml 存在但损坏 → Err 拒绝启动
+    // （数据正确性优先，不静默落默认库）。
+    let storage_cfg = agentos_engine::storage_factory::resolve_storage_config(&config_root)?;
     info!(
         target: "agentos-kernel",
         driver = %storage_cfg.driver,
@@ -513,38 +533,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         "Registered metrics-admin capability handler (3 methods: query/list/prometheus, read layer in-kernel, HTTP face in metrics_admin plugin)"
     );
 
-    // G5：config-reader.get 读取器——file_id 必须在调用方插件的 manifest
-    // config_files 里声明（插件只能读自己声明的配置，越权拒绝）。
-    // ConfigCenter 带缓存（mtime 失效），热路径零重复读盘。
-    let cc_for_reader = Arc::new(agentos_config::config_center::ConfigCenter::new(
-        config_root.clone(),
-    ));
-    let loader_for_reader = loader_arc.clone();
-    let config_reader: agentos_api::capability_router::ConfigReaderFn =
-        Arc::new(move |plugin_id, file_id| {
-            let manifest = loader_for_reader
-                .get_manifest(plugin_id)
-                .ok_or_else(|| format!("plugin '{}' not found", plugin_id))?;
-            let mapping = manifest
-                .config_files
-                .iter()
-                .find(|c| c.id == file_id)
-                .ok_or_else(|| {
-                    format!(
-                        "file_id '{}' 未在插件 {} 的 config_files 声明（越权读取拒绝）",
-                        file_id, plugin_id
-                    )
-                })?;
-            // mapping.path 相对 config/ 根（可能带 config/ 前缀，归一化后交给 ConfigCenter）。
-            let rel = mapping
-                .path
-                .trim_start_matches("config/")
-                .trim_start_matches('/');
-            cc_for_reader
-                .load(rel)
-                .map_err(|e| format!("读取配置 {} 失败: {}", mapping.path, e))
-        });
-
     // G6：granted_capabilities 白名单查询器——声明非空即白名单制，未声明默认
     // 全授予（存量插件零迁移）。执行点在 KernelCapabilityRouter::handle 单点，
     // sidecar（PluginScopedRouter 注 _plugin_id）与 native（NativeHostServices 注
@@ -617,7 +605,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             .with_session(session_coord.clone())
             .with_store(store.clone())
             .with_handler_registry(handler_registry.clone())
-            .with_config_reader(config_reader)
             .with_grants_lookup(grants_lookup)
             .with_dynamic_tool_registrar(dynamic_registrar.clone()),
     );
@@ -940,6 +927,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .with_scopes(plugin_scopes.clone())
         .with_initial_cdylib_ids(initial_cdylib_ids)
         .with_restart_hook(restart_hook)
+        .with_manifests_store(state.manifests.clone())
         .spawn();
         info!(target: "agentos-kernel", "Plugin hot-discover watcher spawned (notify + polling fallback; cdylib change -> G8 auto-restart)");
     }

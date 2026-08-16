@@ -1,6 +1,9 @@
 # ================================================================
-# 能力适配器统一注册配置
+# 能力适配器统一注册配置（连接器注册表）
 # ================================================================
+# 注意：曾存在同名的 config/tools/capability_adapters.yaml（0.1 的 MCP 后端配置，
+# 零消费者，已删除）。本文件是连接器注册表，由 tool_context 插件的
+# adapter_config.py 读取（plugins/shared/pipeline/input/tool_context/）。
 #
 # 本文件定义所有外部连接器的注册信息，供 ConnectorRegistry 加载使用。
 # 每个适配器包含连接器的类型、优先级、能力列表和 MCP 配置路径。
@@ -28,7 +31,9 @@ adapters:
   # ==============================================================
   # VSCode IDE 连接器
   # 通过 HTTP 短轮询与 VSCode 扩展通信，支持双向交互。
-  # 实现：src/connectors/vscode/connector.py
+  # 实现：plugins/shared/system/connectors/vscode/connector.py
+  #       （connector_class: connectors.vscode.connector.VSCodeConnector，
+  #        平铺 import 相对 plugins/shared/system/connectors/ 目录）
   # ==============================================================
   vscode:
     type: "ide"
@@ -48,7 +53,8 @@ adapters:
   # ==============================================================
   # ComfyUI 创意生产连接器
   # 通过 HTTP API + WebSocket 连接 ComfyUI，支持 AI 图像生成工作流。
-  # 实现：src/connectors/creative/comfyui.py
+  # 实现：plugins/shared/system/connectors/creative/comfyui.py
+  #       （connector_class: connectors.creative.comfyui.ComfyUIConnector）
   # ==============================================================
   comfyui:
     type: "creative"

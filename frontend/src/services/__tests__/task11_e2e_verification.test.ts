@@ -21,7 +21,9 @@ vi.mock('@/services/api/client', () => ({
   },
 }))
 import apiClient from '@/services/api/client'
-import { fetchDynamicDataSource } from '@/services/api/datasource'
+// fetchDynamicDataSource（services/api/datasource.ts）已删除（0 消费死代码）；
+// 动态数据源的唯一活消费方是 RjsfForm 的 fetchDatasourceOptions（同样的相对 URI 拼接语义）
+import { fetchDatasourceOptions } from '@/services/schema/RjsfForm'
 
 // ============================================================================
 // 完整用户旅程：7 步串联
@@ -35,7 +37,6 @@ describe('Task 11 用户旅程：从 Schema 定义到渲染输出', () => {
   let testSchema: ModuleUISchema
   let parsedSchema: ReturnType<SchemaParser['parse']>['parsed']
   let renderResult: ReturnType<RenderingEngine['render']>
-  let datasourceResponse: { success: boolean; options: Array<{ label: string; value: string }> }
 
   // --- Step 1: 定义 0.2 Schema 并解析 ui 字段（AC-11-1）---
   it('Step 1 [AC-11-1]: 定义 0.2 Schema，SchemaParser 正确解析 ui.input_form 和 ui.result_widget', () => {
@@ -189,7 +190,7 @@ describe('Task 11 用户旅程：从 Schema 定义到渲染输出', () => {
   })
 
   // --- Step 5: 动态数据源获取（AC-11-3）---
-  it('Step 5 [AC-11-3]: fetchDynamicDataSource 调用 /api/v1/datasource/{uri}?category=search', async () => {
+  it('Step 5 [AC-11-3]: fetchDatasourceOptions 相对 URI 走 /api/v1/datasource/{uri} 代理', async () => {
     const mockGet = vi.mocked(apiClient.get)
     mockGet.mockResolvedValue({
       data: {
@@ -201,17 +202,14 @@ describe('Task 11 用户旅程：从 Schema 定义到渲染输出', () => {
       },
     })
 
-    datasourceResponse = await fetchDynamicDataSource('categories/list', { category: 'search' })
+    const options = await fetchDatasourceOptions('categories/list')
 
-    // 验证请求路径和参数
-    expect(mockGet).toHaveBeenCalledWith('/api/v1/datasource/categories/list', {
-      params: { category: 'search' },
-    })
+    // 验证请求路径（相对 URI 拼接语义，休眠断点见 RjsfForm.fetchDatasourceOptions）
+    expect(mockGet).toHaveBeenCalledWith('/api/v1/datasource/categories/list')
 
     // 验证返回的 options 列表
-    expect(datasourceResponse.success).toBe(true)
-    expect(datasourceResponse.options).toHaveLength(2)
-    expect(datasourceResponse.options[0].value).toBe('cat_a')
+    expect(options).toHaveLength(2)
+    expect(options[0].value).toBe('cat_a')
   })
 
   // --- Step 7: 向后兼容（AC-11-5）---
@@ -289,11 +287,11 @@ describe('补充场景 1：错误输入验证', () => {
     expect(() => parser.parse(invalidSchema)).toThrow()
   })
 
-  it('fetchDynamicDataSource 网络错误时抛出异常', async () => {
+  it('fetchDatasourceOptions 网络错误时抛出异常', async () => {
     const mockGet = vi.mocked(apiClient.get)
     mockGet.mockRejectedValue(new Error('Network timeout'))
 
-    await expect(fetchDynamicDataSource('any/source')).rejects.toThrow('Network timeout')
+    await expect(fetchDatasourceOptions('any/source')).rejects.toThrow('Network timeout')
   })
 })
 

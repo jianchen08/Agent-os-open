@@ -1,4 +1,4 @@
-# @feature: FP-0.2.spill_guard 取回工具 | @vision: V1 可进化 | @ci: python-plugins-test
+# @feature: FP-0.2.spill_guard 取回工具 | @vision: V1 可进化 | @ci: none-local
 """spill_retrieve TDD 测试——按 tool_call_id 读回 spill 原文 + 管道结束清理。
 
 验证内容（与 spill_guard Rust 侧 spill_store.rs 契约对齐）：

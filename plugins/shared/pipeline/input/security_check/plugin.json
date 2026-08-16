@@ -25,6 +25,11 @@
             "id": "security_rules",
             "path": "config/isolation/security_rules.yaml",
             "label": "安全规则"
+        },
+        {
+            "id": "builtin_tools_config",
+            "path": "config/tools/builtin_tools_config.yaml",
+            "label": "内置工具 dangerous_operations 声明（_is_dangerous_tool 轨道 2 数据源）"
         }
     ]
 }

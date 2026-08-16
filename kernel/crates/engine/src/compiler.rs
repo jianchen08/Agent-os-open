@@ -24,6 +24,7 @@ use agentos_core::types::{
     CheckpointConfig, LoopBody, LoopConfig, PipelineConfig, PipelineStep, Route, RouteNext,
     StepLibrary,
 };
+use sha2::{Digest, Sha256};
 
 use crate::condition::{parse_condition, Expr};
 
@@ -52,6 +53,9 @@ pub struct CompiledPipeline {
     pub name: String,
     pub bodies: Vec<CompiledBody>,
     pub checkpoint: CheckpointConfig,
+    /// 源 [`PipelineConfig`] 的确定性指纹（[`pipeline_config_hash`]，SHA-256 前 16 hex）。
+    /// 编译期一次算好随计划走，run 落 runs.config_hash 用。
+    pub config_hash: String,
     steps: Vec<CompiledStep>,
     step_index: HashMap<String, usize>,
 }
@@ -267,10 +271,41 @@ impl Compiler<'_> {
             bodies.push(self.compile_body(body, &pool_map)?);
         }
 
+        // ── 第五遍：转移目标校验 ──
+        // Phase：全量 routes（统一步骤池 step + 循环体 step + 循环体 exit_routes）
+        //        ——运行期 next_phase/exit_routes 都经 body_index 查找，目标须是
+        //        已声明循环体 id。
+        // Step：限循环体直接 steps 的 routes——运行期 execute_steps 只在本循环体
+        //        steps 内查找跳转目标；统一步骤池（库 step）的 Step 路由运行期
+        //        不消费（composite 执行丢弃返回值），不在此校验。
+        let phase_ids: HashSet<&str> = config.loop_bodies.iter().map(|b| b.id.as_str()).collect();
+        for step in &self.steps {
+            check_phase_targets(&step.routes, &phase_ids, &format!("step '{}'", step.id))?;
+        }
+        for body in &bodies {
+            let body_loc = format!("循环体 '{}'", body.id);
+            check_phase_targets(&body.exit_routes, &phase_ids, &body_loc)?;
+            for step in &body.steps {
+                let step_loc = format!("{body_loc} / step '{}'", step.id);
+                check_phase_targets(&step.routes, &phase_ids, &step_loc)?;
+                for (i, route) in step.routes.iter().enumerate() {
+                    if let RouteNext::Step(target) = &route.next {
+                        if body.step_index(target).is_none() {
+                            return Err(CompileError {
+                                location: format!("{step_loc} / 转移 #{}", i + 1),
+                                message: format!("Step 跳转目标 '{target}' 不在本循环体 steps 中"),
+                            });
+                        }
+                    }
+                }
+            }
+        }
+
         Ok(CompiledPipeline {
             name: config.name.clone(),
             bodies,
             checkpoint: config.checkpoint.clone(),
+            config_hash: pipeline_config_hash(config),
             steps: self.steps,
             step_index: self.step_index,
         })
@@ -397,14 +432,14 @@ fn compile_when(cond: Option<&str>, location: &str) -> Result<Option<Expr>, Comp
     }
 }
 
-/// 编译转移列表：when 预编译 + 转移目标存在性校验。
+/// 编译转移列表：when 预编译 + 原样搬运。
+/// Phase/Step 转移目标存在性校验在 [`Compiler::compile`] 尾声统一做
+/// （需要完整的 body id 集 / 循环体 step id 集，见第五遍）。
 fn compile_routes(routes: &[Route], location: &str) -> Result<Vec<CompiledRoute>, CompileError> {
     let mut out = Vec::with_capacity(routes.len());
     for (i, route) in routes.iter().enumerate() {
         let route_loc = format!("{location} / 转移 #{}", i + 1);
         let when = compile_when(Some(&route.when), &route_loc)?;
-        // Phase/Step 目标存在性由调用方在编译上下文校验（见 compile_body/compile_step 调用点）。
-        // 这里只做 when 编译 + 原样搬运。
         out.push(CompiledRoute {
             when,
             next: route.then.next.clone(),
@@ -412,6 +447,40 @@ fn compile_routes(routes: &[Route], location: &str) -> Result<Vec<CompiledRoute>
         });
     }
     Ok(out)
+}
+
+/// Phase 转移目标校验：目标须在已声明循环体 id 集内（运行期 body_index 查找范围）。
+fn check_phase_targets(
+    routes: &[CompiledRoute],
+    phase_ids: &HashSet<&str>,
+    location: &str,
+) -> Result<(), CompileError> {
+    for (i, route) in routes.iter().enumerate() {
+        if let RouteNext::Phase(target) = &route.next {
+            if !phase_ids.contains(target.as_str()) {
+                return Err(CompileError {
+                    location: format!("{location} / 转移 #{}", i + 1),
+                    message: format!("Phase 转移目标 '{target}' 不是已声明的循环体"),
+                });
+            }
+        }
+    }
+    Ok(())
+}
+
+/// 管道配置指纹（runs.config_hash 用）。
+///
+/// 确定性序列化：先 `serde_json::to_value`（serde_json::Map 默认 BTree 实现，
+/// 键序稳定——与结构体字段内 HashMap 的插入序无关），再取 SHA-256 前 16 hex。
+/// 同配置必同哈希、内容不同的配置哈希不同；指纹用于 runs 表审计/诊断定位，
+/// 不承担密码学承诺。
+pub fn pipeline_config_hash(config: &PipelineConfig) -> String {
+    let canonical = serde_json::to_value(config).unwrap_or(serde_json::Value::Null);
+    let json = serde_json::to_string(&canonical).unwrap_or_default();
+    let mut hasher = Sha256::new();
+    hasher.update(json.as_bytes());
+    let hex = format!("{:x}", hasher.finalize());
+    hex.chars().take(16).collect()
 }
 
 /// 引用环检测：有向图（边 i→j 表示 step i 引用 step j），DFS 找环。
@@ -712,5 +781,179 @@ mod tests {
         // 管道 step 优先入池：库 dup 被跳过，alpha 才在池里
         assert!(compiled.find_step("dup").is_some());
         assert!(compiled.find_step("alpha").is_none());
+    }
+
+    // ── 转移目标校验（第五遍）──
+
+    #[test]
+    fn bad_step_route_phase_target_is_compile_error() {
+        let mut step = make_step("s", vec![]);
+        step.routes = vec![Route {
+            when: "True".into(),
+            then: RouteAction {
+                next: RouteNext::Phase("ghost_body".into()),
+                set: HashMap::new(),
+            },
+        }];
+        let config = single_body("p", vec![step]);
+        let err = compile_pipeline(&config, &StepLibrary::default(), &plugins(&[])).unwrap_err();
+        assert!(err.message.contains("ghost_body"), "err: {err}");
+        assert!(err.message.contains("Phase"), "err: {err}");
+    }
+
+    #[test]
+    fn bad_exit_route_phase_target_is_compile_error() {
+        let mut body = LoopBody {
+            id: "main".into(),
+            steps: vec![make_step("s", vec![StepItem::Bare("alpha".into())])],
+            loop_config: None,
+            while_cond: None,
+            exit_routes: vec![Route {
+                when: "True".into(),
+                then: RouteAction {
+                    next: RouteNext::Phase("ghost_body".into()),
+                    set: HashMap::new(),
+                },
+            }],
+            run_on_error: false,
+        };
+        let config = PipelineConfig {
+            name: "p".into(),
+            loop_bodies: vec![body.clone()],
+            checkpoint: Default::default(),
+        };
+        let err =
+            compile_pipeline(&config, &StepLibrary::default(), &plugins(&["alpha"])).unwrap_err();
+        assert!(err.message.contains("ghost_body"), "err: {err}");
+        assert!(err.location.contains("main"), "err: {err}");
+        // 目标改成存在的循环体 → 通过
+        body.exit_routes[0].then.next = RouteNext::Phase("main".into());
+        let config2 = PipelineConfig {
+            name: "p".into(),
+            loop_bodies: vec![body],
+            checkpoint: Default::default(),
+        };
+        assert!(compile_pipeline(&config2, &StepLibrary::default(), &plugins(&["alpha"])).is_ok());
+    }
+
+    #[test]
+    fn bad_step_jump_target_is_compile_error() {
+        let mut step = make_step("s", vec![]);
+        step.routes = vec![Route {
+            when: "True".into(),
+            then: RouteAction {
+                next: RouteNext::Step("ghost_step".into()),
+                set: HashMap::new(),
+            },
+        }];
+        let config = single_body("p", vec![step]);
+        let err = compile_pipeline(&config, &StepLibrary::default(), &plugins(&[])).unwrap_err();
+        assert!(err.message.contains("ghost_step"), "err: {err}");
+        assert!(err.message.contains("Step"), "err: {err}");
+        assert!(err.location.contains("main"), "定位应含循环体：{err}");
+    }
+
+    #[test]
+    fn valid_jump_and_phase_targets_compile() {
+        // Step 目标在本循环体内 + Phase 目标是已声明循环体 → 编译通过
+        let mut jumper = make_step("j", vec![]);
+        jumper.routes = vec![
+            Route {
+                when: "True".into(),
+                then: RouteAction {
+                    next: RouteNext::Step("t".into()),
+                    set: HashMap::new(),
+                },
+            },
+            Route {
+                when: "False".into(),
+                then: RouteAction {
+                    next: RouteNext::Phase("fallback".into()),
+                    set: HashMap::new(),
+                },
+            },
+        ];
+        let config = PipelineConfig {
+            name: "p".into(),
+            loop_bodies: vec![
+                LoopBody {
+                    id: "main".into(),
+                    steps: vec![jumper, make_step("t", vec![])],
+                    loop_config: None,
+                    while_cond: None,
+                    exit_routes: vec![],
+                    run_on_error: false,
+                },
+                LoopBody {
+                    id: "fallback".into(),
+                    steps: vec![],
+                    loop_config: None,
+                    while_cond: None,
+                    exit_routes: vec![],
+                    run_on_error: false,
+                },
+            ],
+            checkpoint: Default::default(),
+        };
+        assert!(compile_pipeline(&config, &StepLibrary::default(), &plugins(&[])).is_ok());
+    }
+
+    // ── config_hash（A18）──
+
+    #[test]
+    fn config_hash_nonempty_stable_and_sensitive() {
+        let config = single_body(
+            "p",
+            vec![make_step("s", vec![StepItem::Bare("alpha".into())])],
+        );
+        let same = single_body(
+            "p",
+            vec![make_step("s", vec![StepItem::Bare("alpha".into())])],
+        );
+        let other = single_body(
+            "p2",
+            vec![make_step("s", vec![StepItem::Bare("alpha".into())])],
+        );
+        let h1 = pipeline_config_hash(&config);
+        let h2 = pipeline_config_hash(&same);
+        let h3 = pipeline_config_hash(&other);
+        assert_eq!(h1.len(), 16, "SHA-256 前 16 hex：{h1}");
+        assert!(h1.chars().all(|c| c.is_ascii_hexdigit()), "hex：{h1}");
+        assert_eq!(h1, h2, "同配置同哈希");
+        assert_ne!(h1, h3, "异配置异哈希");
+        // 编译产物携带同一指纹
+        let compiled =
+            compile_pipeline(&config, &StepLibrary::default(), &plugins(&["alpha"])).expect("ok");
+        assert_eq!(compiled.config_hash, h1);
+    }
+
+    #[test]
+    fn config_hash_stable_across_hashmap_insertion_order() {
+        // 路由 set 是 HashMap——不同插入序（同逻辑内容）不得影响指纹。
+        let mk = |first: &str| {
+            let mut set = HashMap::new();
+            // 故意按不同顺序插入同样的键值对
+            if first == "a" {
+                set.insert("a".to_string(), json!(1));
+                set.insert("b".to_string(), json!(2));
+                set.insert("c".to_string(), json!(3));
+            } else {
+                set.insert("c".to_string(), json!(3));
+                set.insert("b".to_string(), json!(2));
+                set.insert("a".to_string(), json!(1));
+            }
+            let mut step = make_step("s", vec![]);
+            step.routes = vec![Route {
+                when: "True".into(),
+                then: RouteAction {
+                    next: RouteNext::End,
+                    set,
+                },
+            }];
+            single_body("p", vec![step])
+        };
+        let h1 = pipeline_config_hash(&mk("a"));
+        let h2 = pipeline_config_hash(&mk("c"));
+        assert_eq!(h1, h2, "HashMap 插入序不得影响指纹");
     }
 }

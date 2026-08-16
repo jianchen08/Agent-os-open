@@ -33,12 +33,12 @@ ROOT = Path(__file__).resolve().parent.parent
 SOURCE_EXTENSIONS = {".py", ".rs"}
 
 # 源码文件路径模式（这些路径下的变更算"源码变更"）
+# 注：0.1 的 src/ 布局已删除，Python 源码现全部位于 plugins/shared/（下方模式覆盖）。
 SOURCE_PATH_PATTERNS = [
-    r"^src/",  # Python 主源码
     r"^plugins/.*/server\.py$",
     r"^plugins/.*/tool\.py$",
     r"^plugins/.*/plugin\.py$",  # pipeline 插件
-    r"^plugins/shared/",  # 插件共享代码
+    r"^plugins/shared/",  # 插件共享代码（0.2 Python 源码主体）
     r"^kernel/crates/.+\.rs$",  # Rust 内核源码
 ]
 

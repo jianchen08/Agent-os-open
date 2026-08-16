@@ -13,7 +13,6 @@ import {
   getEpisodes,
   getMemoryStats,
   getSemanticMemory,
-  importDocument,
   searchMemory,
 } from '@/services/api/memory'
 // Mock axios
@@ -183,37 +182,7 @@ describe('记忆 API', () => {
     })
   })
 
-  describe('importDocument - 文档导入', () => {
-    it('应 POST /ext/channel_api/memory/import 并返回导入数量', async () => {
-      vi.mocked(apiClient.post).mockResolvedValueOnce({
-        data: { imported: 3, name: '知识库' },
-      })
-
-      const result = await importDocument('文档内容', undefined, '知识库')
-
-      expect(result).toEqual({ imported: 3, name: '知识库' })
-      expect(apiClient.post).toHaveBeenCalledWith('/ext/channel_api/memory/import', {
-        text: '文档内容',
-        file_path: undefined,
-        name: '知识库',
-      })
-    })
-
-    it('应支持 file_path 导入并返回空名称', async () => {
-      vi.mocked(apiClient.post).mockResolvedValueOnce({
-        data: { imported: 0, name: '' },
-      })
-
-      const result = await importDocument(undefined, '/data/docs/guide.md')
-
-      expect(result).toEqual({ imported: 0, name: '' })
-      expect(apiClient.post).toHaveBeenCalledWith('/ext/channel_api/memory/import', {
-        text: undefined,
-        file_path: '/data/docs/guide.md',
-        name: undefined,
-      })
-    })
-  })
+  // importDocument 用例已删除：函数指向后端不存在的 /memory/import 端点（2026-08 清理）
 
   describe('重试机制', () => {
     it('应该在网络错误时重试', async () => {

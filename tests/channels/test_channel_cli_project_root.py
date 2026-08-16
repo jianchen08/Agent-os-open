@@ -1,4 +1,4 @@
-# @feature: FP-0.2.三 宿主接入 | @vision: V3 可嵌入 | @ci: python-plugins-test
+# @feature: FP-0.2.三 宿主接入 | @vision: V3 可嵌入 | @ci: python-coverage
 """channel_cli._PROJECT_ROOT 路径深度回归测试（F-CLI-1）。
 
 意图：cli_main.py 迁移到 plugins/shared/system/channel_cli/ 后，

@@ -168,7 +168,8 @@ pub async fn broadcast_domain_event(
         return;
     };
     let enabled = state.enabled_plugin_ids.read().await;
-    for manifest in state.manifests.iter() {
+    let manifests = state.manifests.read().await;
+    for manifest in manifests.iter() {
         if !enabled.contains(&manifest.id) {
             continue;
         }
@@ -308,11 +309,11 @@ mod domain_event_tests {
         });
         let mut state = AppState::with_config(json!({}));
         // A：声明 + 启用 → 收到；B：未声明 → 不收到；C：声明但禁用 → 不收到
-        state.manifests = Arc::new(vec![
+        state.manifests = Arc::new(tokio::sync::RwLock::new(vec![
             manifest("p_a", true),
             manifest("p_b", false),
             manifest("p_c", true),
-        ]);
+        ]));
         state.enabled_plugin_ids = Arc::new(tokio::sync::RwLock::new(HashSet::from([
             "p_a".to_string(),
             "p_b".to_string(),

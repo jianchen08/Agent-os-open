@@ -1,4 +1,4 @@
-# @feature: FP-0.2.二 内部模块manifest | @vision: V3 可嵌入 | @ci: python-plugins-test
+# @feature: FP-0.2.二 内部模块manifest | @vision: V3 可嵌入 | @ci: python-coverage
 """active_requests 指标真实化（start/end 配对）测试 —— F-MON-1。
 
 意图（WHY）：

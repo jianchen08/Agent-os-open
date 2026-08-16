@@ -13,6 +13,11 @@ import json
 import sys
 import os
 
+# 与 config/models/llm.yaml defaults.call_timeout 对齐（单位：秒）。
+# 流式整体 watchdog 由内核侧负责（同文件 defaults.first_token_timeout=120 /
+# stream_idle_timeout=180），本进程不做二次看护。
+CALL_TIMEOUT_SECONDS = 600
+
 def handle_request(request: dict) -> dict | None:
     """处理 MCP JSON-RPC 请求，返回响应 dict 或 None（notification 无响应）。"""
     method = request.get("method", "")
@@ -108,6 +113,7 @@ def handle_request(request: dict) -> dict | None:
                     messages=args.get("messages", []),
                     temperature=args.get("temperature", 0.7),
                     max_tokens=args.get("max_tokens"),
+                    timeout=CALL_TIMEOUT_SECONDS,
                 )
                 choice = response.choices[0]
                 return {
@@ -157,7 +163,13 @@ def handle_request(request: dict) -> dict | None:
                     temperature=temperature,
                     max_tokens=max_tokens,
                     stream=True,
+                    timeout=CALL_TIMEOUT_SECONDS,
                 )
+
+                # 注：litellm 的 timeout 对 stream=True 覆盖请求建立与每次读；
+                # 整体流式看护（首 token / 空闲超时）由内核侧按
+                # config/models/llm.yaml defaults.first_token_timeout(120s) /
+                # stream_idle_timeout(180s) 执行。
 
                 for chunk in response:
                     delta = chunk.choices[0].delta

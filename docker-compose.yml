@@ -18,7 +18,7 @@
 #   需同时运行多个实例（如对比测试两个版本）时，给第二实例设不同端口：
 #     set FRONTEND_HOST_PORT=5290 && set REDIS_HOST_PORT=6481 && set BACKEND_PORT=8989
 #
-#   脚本（start_web_cn.bat / wsl_ensure_containers.sh）用
+#   脚本（wsl_ensure_containers.sh 等运维脚本）用
 #   `docker compose ps -q <service>` 动态获取容器，不依赖固定名。
 # =============================================================================
 

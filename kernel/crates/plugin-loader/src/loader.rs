@@ -413,21 +413,38 @@ impl PluginLoader for PluginLoaderImpl {
             }
         }
 
-        // 扫描内置根
-        if let Ok(found) = self.scan_root(&self.builtin_root) {
-            for (manifest, path) in found {
-                all_manifests
-                    .entry(manifest.id.clone())
-                    .or_insert((manifest, path));
+        // 扫描内置根（Err 记 warn 不吞——与 root_paths 分支同款：单根失败不阻断其余根）
+        match self.scan_root(&self.builtin_root) {
+            Ok(found) => {
+                for (manifest, path) in found {
+                    all_manifests
+                        .entry(manifest.id.clone())
+                        .or_insert((manifest, path));
+                }
+            }
+            Err(e) => {
+                warn!(
+                    root = %self.builtin_root.display(),
+                    error = %e,
+                    "Failed to scan builtin plugin root"
+                );
             }
         }
 
-        // 扫描用户根
+        // 扫描用户根（用户根覆盖内置根：同 ID）
         if let Some(user_root) = &self.user_root {
-            if let Ok(found) = self.scan_root(user_root) {
-                for (manifest, path) in found {
-                    // 用户根覆盖内置根（同 ID）
-                    all_manifests.insert(manifest.id.clone(), (manifest, path));
+            match self.scan_root(user_root) {
+                Ok(found) => {
+                    for (manifest, path) in found {
+                        all_manifests.insert(manifest.id.clone(), (manifest, path));
+                    }
+                }
+                Err(e) => {
+                    warn!(
+                        root = %user_root.display(),
+                        error = %e,
+                        "Failed to scan user plugin root"
+                    );
                 }
             }
         }
@@ -761,6 +778,34 @@ mod tests {
             id, id, plugin_type, invoke_entry_field
         );
         fs::write(dir.join("plugin.json"), manifest_json).unwrap();
+    }
+
+    /// resources 能力维度删除后的 serde 兼容：旧 manifest 的
+    /// `capabilities.resources` 字段被默认忽略（无 deny_unknown_fields），解析不失败。
+    #[test]
+    fn test_manifest_with_legacy_resources_field_still_parses() {
+        let manifest_json = r#"{
+    "id": "legacy_res",
+    "name": "Legacy Resource Plugin",
+    "version": "1.0.0",
+    "plugin_type": "pipeline",
+    "language": "rust",
+    "host_type": "in_process",
+    "entry": "test_plugin",
+    "invoke_entry": "legacy_res.execute",
+    "capabilities": {
+        "resources": [
+            {"uri": "config://app", "name": "App Config", "mime_type": "application/json"}
+        ]
+    },
+    "dependencies": [],
+    "permissions": {},
+    "error_policy": "abort",
+    "priority": 100
+}"#;
+        let manifest: PluginManifest =
+            serde_json::from_str(manifest_json).expect("旧 resources 字段应被忽略");
+        assert_eq!(manifest.id, "legacy_res");
     }
 
     #[test]

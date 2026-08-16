@@ -11,6 +11,7 @@
 
 import React, { useState, useEffect, useRef } from 'react'
 import { FileWarning } from '@/assets/icons'
+import { getWorkspaceFileContent } from '@/services/api/workspaces'
 
 /** HTML 预览组件属性 */
 export interface HtmlPreviewWidgetProps {
@@ -27,7 +28,10 @@ export interface HtmlPreviewWidgetProps {
 /**
  * HTML 预览组件
  *
- * 通过 iframe srcDoc 渲染，sandbox 授予 scripts/same-origin/forms/popups/modals 以支持完整交互。
+ * 通过 iframe srcDoc 渲染，sandbox 授予 scripts/forms/popups/modals 以支持交互；
+ * 不授予 allow-same-origin——预览内容是不可信 HTML，若同源可访问父页面
+ * localStorage 中的 token 与 DOM。代价是预览内脚本运行于 opaque origin，
+ * 无法访问 cookie/localStorage。
  * 优先使用传入的 html 属性，其次通过 filePath + API 读取。
  * 使用 absolute 定位确保 iframe 填满父容器，不受 flex/overflow 嵌套影响。
  *
@@ -51,20 +55,15 @@ export function HtmlPreviewWidget({
     }
     if (!filePath || !containerTaskId) return
 
-    const encoded = encodeURIComponent(filePath)
-    fetch(`/ext/channel_api/workspaces/${containerTaskId}/file-content?path=${encoded}`)
-      .then((r) => {
-        if (!r.ok) throw new Error(`HTTP ${r.status}`)
-        return r.json()
-      })
+    getWorkspaceFileContent(containerTaskId, filePath)
       .then((data) => {
         if (data.success) {
-          setContent(data.content as string)
+          setContent(data.content ?? '')
         } else {
           setError(data.message ?? '读取失败')
         }
       })
-      .catch((e) => setError((e as Error).message))
+      .catch((e) => setError((e as Error)?.message ?? String(e)))
   }, [html, filePath, containerTaskId])
 
   if (error) {
@@ -89,7 +88,7 @@ export function HtmlPreviewWidget({
       <iframe
         srcDoc={content}
         title={title ?? 'HTML Preview'}
-        sandbox="allow-scripts allow-same-origin allow-forms allow-popups allow-modals"
+        sandbox="allow-scripts allow-forms allow-popups allow-modals"
         className="absolute inset-0 border-0 bg-white"
         style={{ width: '100%', height: '100%' }}
       />

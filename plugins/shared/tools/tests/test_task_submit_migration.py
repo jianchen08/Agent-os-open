@@ -1,4 +1,4 @@
-# @feature: FP-MIGR 0.1→0.2迁移 | @vision: V3 可嵌入 | @ci: python-plugins-test
+# @feature: FP-MIGR 0.1→0.2迁移 | @vision: V3 可嵌入 | @ci: python-coverage
 """task_submit 工具 0.2 迁移 TDD 测试。
 
 迁移（FP-MIGR，F-MIGR-2）：
@@ -262,7 +262,11 @@ class TestTaskSubmitCoreSubmit:
     """任务提交：成功、执行器不可用降级、工作空间初始化失败。"""
 
     def _patch_submit_deps(self, mod, monkeypatch, task: MagicMock | None = None) -> tuple[MagicMock, MagicMock]:
-        """把提交路径的依赖全部 mock 掉，返回 (task_service, provider)。"""
+        """把提交路径的依赖全部 mock 掉，返回 (task_service, provider)。
+
+        0.2 语义：任务提交即落库，不再调用 task_worker.submit_task
+        （管道执行由会话对话驱动），provider 仅服务 workspace_lifecycle 等。
+        """
         from unittest.mock import AsyncMock
 
         task_service = MagicMock()
@@ -273,9 +277,7 @@ class TestTaskSubmitCoreSubmit:
         task_service.get_root_task_id.return_value = None
 
         provider = MagicMock()
-        task_worker = MagicMock()
-        task_worker.submit_task.return_value = True
-        provider.get.return_value = task_worker  # 默认任何 key 都给 task_worker
+        provider.get.return_value = None  # 无 task_worker 实例（0.2 现状）
 
         monkeypatch.setattr(mod.TaskSubmitTool, "_get_task_service", lambda self: task_service)
         monkeypatch.setattr(mod.TaskSubmitTool, "_validate_target_agent", lambda self, t, l: (True, "", ""))
@@ -285,7 +287,7 @@ class TestTaskSubmitCoreSubmit:
 
     @pytest.mark.asyncio
     async def test_submit_non_container_success(self, mod, monkeypatch):
-        """非容器任务提交成功：返回 task_id + L1 可见 workspace。"""
+        """非容器任务提交成功：返回 task_id + L1 可见 workspace（提交即落库，无 worker 转发）。"""
         task = _make_task()
         task_service, provider = self._patch_submit_deps(mod, monkeypatch, task)
 
@@ -313,18 +315,14 @@ class TestTaskSubmitCoreSubmit:
         assert output["task_id"] == "task-001"
         assert output["status"] == "pending"
         assert output["workspace"] == "D:/proj"
-        # 提交给后台执行器的参数应包含验收标准与工作空间
-        task_worker = provider.get("task_worker")
-        submitted = task_worker.submit_task.call_args[0][0]
-        assert submitted["task_id"] == "task-001"
-        assert submitted["target_id"] == "general_agent"
+        task_service.create_task.assert_called_once()
 
     @pytest.mark.asyncio
-    async def test_submit_worker_unavailable_degrades(self, mod, monkeypatch):
-        """后台执行器不可用 → 删除刚创建的任务并返回 SUBMIT_FAILED（文档化降级）。"""
+    async def test_submit_without_worker_still_succeeds(self, mod, monkeypatch):
+        """0.2 语义：无 task_worker 实例不影响提交（任务落库即成功，管道由会话驱动）。"""
         task = _make_task()
-        task_service, provider = self._patch_submit_deps(mod, monkeypatch, task)
-        provider.get.return_value = None  # 所有服务均不可用（0.2 无 infrastructure 层）
+        task_service, _ = self._patch_submit_deps(mod, monkeypatch, task)
+        # provider.get 全部返回 None（helper 默认），模拟 worker/执行器不可用
 
         async def fake_init(t, workspace, task_data, ts, *, is_container=False):
             return t, None
@@ -340,9 +338,8 @@ class TestTaskSubmitCoreSubmit:
                 "target_id": "general_agent",
             }
         )
-        assert result.success is False
-        assert result.error_code == "SUBMIT_FAILED"
-        task_service.hard_delete.assert_called_once()
+        assert result.success is True
+        task_service.hard_delete.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_workspace_init_failure_cleans_up(self, mod, monkeypatch):
@@ -396,3 +393,163 @@ class TestNormalizeDescription:
 
     def test_non_string_scalar(self, mod):
         assert mod._normalize_description(42) == "42"
+
+
+# ── punch B8：scope 查询失败保守分支（拒绝而非静默放行/误判） ──
+
+
+class TestScopeQueryFailureConservative:
+    """task 服务查询异常：受限操作明确拒绝（提示 scope 查询失败），is_root 维持默认并留痕。"""
+
+    def _raising_service(self, monkeypatch, mod) -> MagicMock:
+        """get_task 恒抛异常的 task 服务。"""
+        svc = MagicMock()
+        svc.get_task = MagicMock(side_effect=RuntimeError("task service down"))
+        monkeypatch.setattr(mod.TaskSubmitTool, "_get_task_service", lambda _self: svc)
+        return svc
+
+    @pytest.mark.asyncio
+    async def test_scope_query_failure_with_workspace_rejected(self, mod, monkeypatch):
+        """父 scope 查询异常 + 显式 workspace → PARENT_SCOPE_QUERY_FAILED（不再按默认拓扑放行/误判）。"""
+        self._raising_service(monkeypatch, mod)
+        tool = mod.TaskSubmitTool()
+        result = await tool.execute(
+            {
+                "parent_agent_level": 1,
+                "goal": {"title": "子任务"},
+                "parent_task_id": "parent-001",
+                "workspace": "D:/proj",
+            }
+        )
+        assert result.success is False
+        assert result.error_code == "PARENT_SCOPE_QUERY_FAILED"
+        assert "scope 查询失败" in (result.error or "")
+
+    @pytest.mark.asyncio
+    async def test_scope_query_failure_with_isolation_level_rejected(self, mod, monkeypatch):
+        """父 scope 查询异常 + isolation_level → 同样保守拒绝。"""
+        self._raising_service(monkeypatch, mod)
+        tool = mod.TaskSubmitTool()
+        result = await tool.execute(
+            {
+                "parent_agent_level": 1,
+                "goal": {"title": "子任务"},
+                "parent_task_id": "parent-001",
+                "isolation_level": "high",
+            }
+        )
+        assert result.success is False
+        assert result.error_code == "PARENT_SCOPE_QUERY_FAILED"
+
+    @pytest.mark.asyncio
+    async def test_scope_query_failure_with_inherit_workspace_rejected(self, mod, monkeypatch):
+        """父 scope 查询异常 + inherit workspace → PARENT_SCOPE_QUERY_FAILED。"""
+        self._raising_service(monkeypatch, mod)
+        tool = mod.TaskSubmitTool()
+        result = await tool.execute(
+            {
+                "parent_agent_level": 1,
+                "goal": {"title": "子任务"},
+                "parent_task_id": "parent-001",
+                "inherit": {"from": "src-001", "mode": ["workspace"]},
+            }
+        )
+        assert result.success is False
+        assert result.error_code == "PARENT_SCOPE_QUERY_FAILED"
+
+    @pytest.mark.asyncio
+    async def test_scope_query_failure_without_restricted_params_not_blocked_here(self, mod, monkeypatch):
+        """scope 查询异常但无受限参数 → 拓扑校验层不拦截（交由后续存在性校验接管）。"""
+        self._raising_service(monkeypatch, mod)
+        tool = mod.TaskSubmitTool()
+        result = await tool.execute(
+            {
+                "parent_agent_level": 1,
+                "goal": {"title": "子任务"},
+                "parent_task_id": "parent-001",
+            }
+        )
+        assert result.error_code != "PARENT_SCOPE_QUERY_FAILED"
+
+    @pytest.mark.asyncio
+    async def test_container_inherit_ws_query_failure_rejected(self, mod, monkeypatch):
+        """父为 container + inherit workspace + 源空间查询异常 → INHERIT_WS_QUERY_FAILED。"""
+        container_task = MagicMock()
+        container_task.metadata = {"task_scope": "container", "ws_meta": {"path": "/ws/container"}}
+
+        def _get_task(task_id):
+            if task_id == "parent-001":
+                return container_task
+            raise RuntimeError("query src failed")
+
+        svc = MagicMock()
+        svc.get_task = MagicMock(side_effect=_get_task)
+        monkeypatch.setattr(mod.TaskSubmitTool, "_get_task_service", lambda _self: svc)
+        tool = mod.TaskSubmitTool()
+        result = await tool.execute(
+            {
+                "parent_agent_level": 1,
+                "goal": {"title": "容器子任务"},
+                "parent_task_id": "parent-001",
+                "inherit": {"from": "src-001", "mode": ["workspace"]},
+            }
+        )
+        assert result.success is False
+        assert result.error_code == "INHERIT_WS_QUERY_FAILED"
+
+    @pytest.mark.asyncio
+    async def test_is_root_query_failure_keeps_default_and_warns(self, mod, monkeypatch, caplog):
+        """is_root 判定查询异常 → 任务照常提交，is_root 维持默认 True 并记录 warning（不静默）。"""
+        import logging
+        from unittest.mock import AsyncMock
+
+        task = _make_task()
+        task_service = MagicMock()
+        task_service.create_task = AsyncMock(return_value=task)
+        task_service.hard_delete = AsyncMock()
+        task_service.save_task = AsyncMock()
+        task_service.get_root_task_id.return_value = None
+
+        parent_task = MagicMock()
+        parent_task.metadata = {"task_scope": "non_container"}
+        # 创建前 get_task 正常返回（通过存在性校验），创建后抛异常（模拟 is_root 查询失败）
+        state = {"created": False}
+
+        def _get_task(task_id):
+            if state["created"]:
+                raise RuntimeError("scope down after create")
+            return parent_task
+
+        task_service.get_task = MagicMock(side_effect=_get_task)
+
+        async def _create_task(*args, **kwargs):
+            state["created"] = True
+            return task
+
+        task_service.create_task = _create_task
+
+        provider = MagicMock()
+        provider.get.return_value = None
+        monkeypatch.setattr(mod.TaskSubmitTool, "_get_task_service", lambda _self: task_service)
+        monkeypatch.setattr(mod.TaskSubmitTool, "_validate_target_agent", lambda _self, _t, _lvl: (True, "", ""))
+        monkeypatch.setattr(mod.TaskSubmitTool, "_check_dependencies_exist", lambda _self, _d: [])
+        monkeypatch.setattr(mod, "_get_service_provider", lambda: provider)
+
+        async def fake_init(t, workspace, task_data, ts, *, is_container=False):
+            return t, None
+
+        monkeypatch.setattr(mod.TaskSubmitTool, "_init_workspace", staticmethod(fake_init))
+
+        tool = mod.TaskSubmitTool()
+        with caplog.at_level(logging.WARNING):
+            result = await tool.execute(
+                {
+                    "parent_agent_level": 1,
+                    "goal": {"title": "子任务"},
+                    "target_type": "agent",
+                    "target_id": "general_agent",
+                    "parent_task_id": "parent-001",
+                }
+            )
+        assert result.success is True
+        assert any("is_root 维持默认" in rec.message for rec in caplog.records)

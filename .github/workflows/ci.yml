@@ -559,6 +559,13 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: sccache best-effort (workflow 级 RUSTC_WRAPPER 兜底)
+        run: |
+          if ! command -v sccache >/dev/null 2>&1; then
+            echo "sccache unavailable, disable RUSTC_WRAPPER"
+            echo "RUSTC_WRAPPER=" >> "$GITHUB_ENV"
+          fi
+
       - name: Set up Python
         uses: actions/setup-python@v5
         with:

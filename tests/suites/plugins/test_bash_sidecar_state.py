@@ -1,3 +1,4 @@
+# @feature: FP-0.2.二 内部模块manifest | @vision: V3 可嵌入 | @ci: python-coverage
 """Bash 插件 0.2 sidecar 生命周期/越权/日志安全测试。
 
 覆盖评审 H-issue（仅 0.2 代码：plugins/shared/tools/bash + plugins/sdk）：

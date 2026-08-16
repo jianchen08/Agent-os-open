@@ -290,10 +290,31 @@ fn is_corruption_error(e: &StorageError) -> bool {
     }
 }
 
-/// 从 messages 数组元素提取 content 的字符串表示。
+/// 从槽位行的 blob 数据重建消息全文 JSON。
 ///
-/// content 可能是字符串（普通文本/工具结果）或数组（多 part：thinking/text 等）。
-/// 数组形式时拼接所有 text part 的 text 字段，保持与前端渲染一致。
+/// - `blob_id` 为 `None`：**合法缺失**（槽位本就无全文指针）→ 空对象，不算损坏；
+/// - `blob_id` 有值但 blob 行缺失 / 非 UTF-8 / JSON 解析失败：**损坏** → 仍降级为
+///   空对象（读路径行为不变），返回原因字符串供调用方聚合 warn（观测）。
+fn decode_slot_message(
+    blob_id: Option<&str>,
+    data: Option<&[u8]>,
+) -> (serde_json::Value, Option<String>) {
+    let empty = || serde_json::Value::Object(Default::default());
+    if blob_id.is_none() {
+        return (empty(), None);
+    }
+    let Some(data) = data else {
+        return (empty(), Some("blob 行缺失".to_string()));
+    };
+    let Some(text) = std::str::from_utf8(data).ok() else {
+        return (empty(), Some("blob 内容非 UTF-8".to_string()));
+    };
+    match serde_json::from_str(text) {
+        Ok(v) => (v, None),
+        Err(e) => (empty(), Some(format!("blob JSON 解析失败: {e}"))),
+    }
+}
+
 /// 从消息 JSON + 槽位元数据**读时重建** `MessageRecord`（纯索引行读路径共用）。
 ///
 /// 纯索引行不再存内容列，所有字段从 blob 里的整条消息 JSON 提取——
@@ -374,6 +395,10 @@ fn slot_row_to_record(
     }
 }
 
+/// 从 messages 数组元素提取 content 的字符串表示。
+///
+/// content 可能是字符串（普通文本/工具结果）或数组（多 part：thinking/text 等）。
+/// 数组形式时拼接所有 text part 的 text 字段，保持与前端渲染一致。
 fn extract_content_string(msg: &serde_json::Value) -> String {
     match msg.get("content") {
         Some(serde_json::Value::String(s)) => s.clone(),
@@ -924,26 +949,47 @@ impl SqliteStore {
         }
         let param_refs: Vec<&dyn rusqlite::ToSql> = params.iter().map(|p| p.as_ref()).collect();
 
+        // blob 解析：区分合法缺失（blob_id NULL）与损坏（有 blob_id 但读不出/解析失败）。
+        // 损坏行仍降级为空对象（行为不变），计数后聚合 warn 一次——热路径逐条刷屏。
+        let mut corrupted: usize = 0;
+        let mut first_corrupt: Option<(i64, String, String)> = None; // (seq, message_id, 原因)
         let msgs = stmt
             .query_map(param_refs.as_slice(), |row| {
                 let seq: i64 = row.get(0)?;
+                let message_id: Option<String> = row.get(1)?;
+                let blob_id: Option<String> = row.get(2)?;
                 let blob_data: Option<Vec<u8>> = row.get(6)?;
-                let msg: serde_json::Value = blob_data
-                    .as_deref()
-                    .and_then(|d| std::str::from_utf8(d).ok())
-                    .and_then(|s| serde_json::from_str(s).ok())
-                    .unwrap_or(serde_json::Value::Object(Default::default()));
+                let (msg, reason) = decode_slot_message(blob_id.as_deref(), blob_data.as_deref());
+                if let Some(reason) = reason {
+                    corrupted += 1;
+                    if first_corrupt.is_none() {
+                        first_corrupt = Some((seq, message_id.clone().unwrap_or_default(), reason));
+                    }
+                }
                 Ok(slot_row_to_record(
                     &msg,
                     seq,
-                    row.get(1)?,
-                    row.get(2)?,
+                    message_id.unwrap_or_default(),
+                    blob_id,
                     row.get(3)?,
                     row.get(4)?,
                     row.get(5)?,
                 ))
             })?
             .collect::<Result<Vec<_>, _>>()?;
+        if corrupted > 0 {
+            if let Some((seq, message_id, reason)) = first_corrupt {
+                warn!(
+                    pipeline_id = %pipeline_id,
+                    tenant_id = %tenant_id,
+                    count = corrupted,
+                    first_seq = seq,
+                    message_id = %message_id,
+                    reason = %reason,
+                    "message_slots 的消息 blob 损坏，受影响消息降级为空对象"
+                );
+            }
+        }
         Ok(msgs)
     }
 
@@ -959,20 +1005,28 @@ impl SqliteStore {
     ) -> Result<Vec<serde_json::Value>, StorageError> {
         let conn = self.conn.lock();
         let mut stmt = conn.prepare(
-            "SELECT s.seq, b.data FROM message_slots s \
+            "SELECT s.seq, s.message_id, s.blob_id, b.data FROM message_slots s \
              LEFT JOIN blobs b ON s.blob_id = b.blob_id \
              WHERE s.pipeline_id = ?1 AND s.tenant_id = ?2 \
              ORDER BY s.seq ASC",
         )?;
+        // 与 get_slot_messages_by_pipeline 同款：合法缺失与损坏分开，损坏聚合 warn。
+        let mut corrupted: usize = 0;
+        let mut first_corrupt: Option<(i64, String, String)> = None;
         let rows = stmt
             .query_map(rusqlite::params![pipeline_id, tenant_id], |row| {
                 let seq: i64 = row.get(0)?;
-                let blob_data: Option<Vec<u8>> = row.get(1)?;
-                let mut msg: serde_json::Value = blob_data
-                    .as_deref()
-                    .and_then(|d| std::str::from_utf8(d).ok())
-                    .and_then(|s| serde_json::from_str(s).ok())
-                    .unwrap_or(serde_json::Value::Object(Default::default()));
+                let message_id: Option<String> = row.get(1)?;
+                let blob_id: Option<String> = row.get(2)?;
+                let blob_data: Option<Vec<u8>> = row.get(3)?;
+                let (mut msg, reason) =
+                    decode_slot_message(blob_id.as_deref(), blob_data.as_deref());
+                if let Some(reason) = reason {
+                    corrupted += 1;
+                    if first_corrupt.is_none() {
+                        first_corrupt = Some((seq, message_id.unwrap_or_default(), reason));
+                    }
+                }
                 // 槽位号塞回消息对象（内存稠密数组的元素形态：自带稳定 seq）
                 if let Some(o) = msg.as_object_mut() {
                     o.insert("seq".to_string(), serde_json::json!(seq));
@@ -980,6 +1034,19 @@ impl SqliteStore {
                 Ok(msg)
             })?
             .collect::<Result<Vec<_>, _>>()?;
+        if corrupted > 0 {
+            if let Some((seq, message_id, reason)) = first_corrupt {
+                warn!(
+                    pipeline_id = %pipeline_id,
+                    tenant_id = %tenant_id,
+                    count = corrupted,
+                    first_seq = seq,
+                    message_id = %message_id,
+                    reason = %reason,
+                    "message_slots 的消息 blob 损坏，受影响消息降级为空对象"
+                );
+            }
+        }
         Ok(rows)
     }
 
@@ -2288,6 +2355,12 @@ impl SqliteStore {
     }
 }
 
+/// spawn_blocking join 失败（阻塞任务 panic / 被取消）→ [`StorageError`] 的统一转换。
+/// 下方 trait async 包装（spawn_blocking 转发固有同步方法）共用。
+fn join_err(e: tokio::task::JoinError) -> StorageError {
+    StorageError::Database(format!("join error: {e}"))
+}
+
 #[async_trait]
 impl StorageBackend for SqliteStore {
     async fn get_run(&self, run_id: &str) -> Result<RunRecord, StorageError> {
@@ -2466,7 +2539,7 @@ impl StorageBackend for SqliteStore {
         let tenant_id = tenant_id.to_string();
         tokio::task::spawn_blocking(move || this.create_run(&run_id, &config_hash, &tenant_id))
             .await
-            .map_err(|e| StorageError::Database(format!("join error: {e}")))?
+            .map_err(join_err)?
     }
 
     async fn store_blob(&self, data: &[u8], mime_type: &str) -> Result<String, StorageError> {
@@ -2475,7 +2548,7 @@ impl StorageBackend for SqliteStore {
         let mime_type = mime_type.to_string();
         tokio::task::spawn_blocking(move || this.store_blob(&data, &mime_type))
             .await
-            .map_err(|e| StorageError::Database(format!("join error: {e}")))?
+            .map_err(join_err)?
     }
 
     // ── 域10：分层持久化投影（trait async 包装，spawn_blocking + task_local tenant）──
@@ -2494,7 +2567,7 @@ impl StorageBackend for SqliteStore {
             this.apply_messages_ops_to_table(&pipeline_id, &tenant_id, &ops)
         })
         .await
-        .map_err(|e| StorageError::Database(format!("join error: {e}")))?
+        .map_err(join_err)?
     }
 
     async fn upsert_state_field(
@@ -2513,7 +2586,7 @@ impl StorageBackend for SqliteStore {
             this.upsert_state_field(&pipeline_id, &tenant_id, &key, &value)
         })
         .await
-        .map_err(|e| StorageError::Database(format!("join error: {e}")))?
+        .map_err(join_err)?
     }
 
     async fn load_pipeline_state(
@@ -2526,7 +2599,7 @@ impl StorageBackend for SqliteStore {
         let tenant_id = tenant_id.to_string();
         tokio::task::spawn_blocking(move || this.load_pipeline_state(&pipeline_id, &tenant_id))
             .await
-            .map_err(|e| StorageError::Database(format!("join error: {e}")))?
+            .map_err(join_err)?
     }
 
     async fn save_checkpoint(
@@ -2544,7 +2617,7 @@ impl StorageBackend for SqliteStore {
             this.save_checkpoint(&pipeline_id, &tenant_id, step_no, &state)
         })
         .await
-        .map_err(|e| StorageError::Database(format!("join error: {e}")))?
+        .map_err(join_err)?
     }
 
     async fn load_latest_checkpoint(
@@ -2557,7 +2630,7 @@ impl StorageBackend for SqliteStore {
         let tenant_id = tenant_id.to_string();
         tokio::task::spawn_blocking(move || this.load_latest_checkpoint(&pipeline_id, &tenant_id))
             .await
-            .map_err(|e| StorageError::Database(format!("join error: {e}")))?
+            .map_err(join_err)?
     }
 
     async fn load_message_history(
@@ -2570,7 +2643,7 @@ impl StorageBackend for SqliteStore {
         let tenant_id = tenant_id.to_string();
         tokio::task::spawn_blocking(move || this.load_message_history(&pipeline_id, &tenant_id))
             .await
-            .map_err(|e| StorageError::Database(format!("join error: {e}")))?
+            .map_err(join_err)?
     }
 
     // ── 域2：session 标签夹 CRUD（对齐 0.1 SessionModel）──────────────
@@ -2581,7 +2654,7 @@ impl StorageBackend for SqliteStore {
         let session = session.clone();
         tokio::task::spawn_blocking(move || this.upsert_session_inner(&session, &tenant_id))
             .await
-            .map_err(|e| StorageError::Database(format!("join error: {e}")))?
+            .map_err(join_err)?
     }
 
     async fn get_session(&self, thread_id: &str) -> Result<Option<SessionRecord>, StorageError> {
@@ -2590,7 +2663,7 @@ impl StorageBackend for SqliteStore {
         let thread_id = thread_id.to_string();
         tokio::task::spawn_blocking(move || this.get_session_inner(&thread_id, &tenant_id))
             .await
-            .map_err(|e| StorageError::Database(format!("join error: {e}")))?
+            .map_err(join_err)?
     }
 
     async fn list_sessions(
@@ -2601,7 +2674,7 @@ impl StorageBackend for SqliteStore {
         let this = self.clone();
         tokio::task::spawn_blocking(move || this.list_sessions_inner(&filter, &tenant_id))
             .await
-            .map_err(|e| StorageError::Database(format!("join error: {e}")))?
+            .map_err(join_err)?
     }
 
     async fn update_session(&self, session: &SessionRecord) -> Result<(), StorageError> {
@@ -2610,7 +2683,7 @@ impl StorageBackend for SqliteStore {
         let session = session.clone();
         tokio::task::spawn_blocking(move || this.upsert_session_inner(&session, &tenant_id))
             .await
-            .map_err(|e| StorageError::Database(format!("join error: {e}")))?
+            .map_err(join_err)?
     }
 
     async fn delete_session(&self, thread_id: &str) -> Result<(), StorageError> {
@@ -2619,7 +2692,7 @@ impl StorageBackend for SqliteStore {
         let thread_id = thread_id.to_string();
         tokio::task::spawn_blocking(move || this.delete_session_inner(&thread_id, &tenant_id))
             .await
-            .map_err(|e| StorageError::Database(format!("join error: {e}")))?
+            .map_err(join_err)?
     }
 
     async fn link_pipeline_session(
@@ -2636,7 +2709,7 @@ impl StorageBackend for SqliteStore {
             this.link_pipeline_session_inner(&pipeline_id, &thread_id, &tenant_id)
         })
         .await
-        .map_err(|e| StorageError::Database(format!("join error: {e}")))?
+        .map_err(join_err)?
     }
 
     async fn list_pipeline_ids_by_thread(
@@ -2651,7 +2724,7 @@ impl StorageBackend for SqliteStore {
             this.list_pipeline_ids_by_thread_inner(&thread_id, &tenant_id)
         })
         .await
-        .map_err(|e| StorageError::Database(format!("join error: {e}")))?
+        .map_err(join_err)?
     }
 
     async fn get_step_traces_by_thread(
@@ -2666,7 +2739,7 @@ impl StorageBackend for SqliteStore {
             this.get_step_traces_by_thread_inner(&thread_id, &tenant_id)
         })
         .await
-        .map_err(|e| StorageError::Database(format!("join error: {e}")))?
+        .map_err(join_err)?
     }
 
     // ── 域3/4/5：execution_records / summaries / memory（M1）──────────
@@ -2677,7 +2750,7 @@ impl StorageBackend for SqliteStore {
         let record = record.clone();
         tokio::task::spawn_blocking(move || this.append_execution_record_inner(&record, &tenant_id))
             .await
-            .map_err(|e| StorageError::Database(format!("join error: {e}")))?
+            .map_err(join_err)?
     }
 
     async fn list_execution_records(
@@ -2692,7 +2765,7 @@ impl StorageBackend for SqliteStore {
             this.list_execution_records_inner(&pipeline_run_id, &opts, &tenant_id)
         })
         .await
-        .map_err(|e| StorageError::Database(format!("join error: {e}")))?
+        .map_err(join_err)?
     }
 
     async fn count_execution_records(&self, pipeline_run_id: &str) -> Result<u64, StorageError> {
@@ -2703,7 +2776,7 @@ impl StorageBackend for SqliteStore {
             this.count_execution_records_inner(&pipeline_run_id, &tenant_id)
         })
         .await
-        .map_err(|e| StorageError::Database(format!("join error: {e}")))?
+        .map_err(join_err)?
     }
 
     async fn delete_execution_records_by_session(
@@ -2717,7 +2790,7 @@ impl StorageBackend for SqliteStore {
             this.delete_execution_records_by_session_inner(&pipeline_run_id, &tenant_id)
         })
         .await
-        .map_err(|e| StorageError::Database(format!("join error: {e}")))?
+        .map_err(join_err)?
     }
 
     async fn save_run_summary(&self, summary: &PipelineRunSummary) -> Result<(), StorageError> {
@@ -2726,7 +2799,7 @@ impl StorageBackend for SqliteStore {
         let summary = summary.clone();
         tokio::task::spawn_blocking(move || this.save_run_summary_inner(&summary, &tenant_id))
             .await
-            .map_err(|e| StorageError::Database(format!("join error: {e}")))?
+            .map_err(join_err)?
     }
 
     async fn get_run_summary(
@@ -2738,7 +2811,7 @@ impl StorageBackend for SqliteStore {
         let run_id = run_id.to_string();
         tokio::task::spawn_blocking(move || this.get_run_summary_inner(&run_id, &tenant_id))
             .await
-            .map_err(|e| StorageError::Database(format!("join error: {e}")))?
+            .map_err(join_err)?
     }
 
     async fn update_run_summary(
@@ -2754,7 +2827,7 @@ impl StorageBackend for SqliteStore {
             this.update_run_summary_inner(&run_id, &updates, &tenant_id)
         })
         .await
-        .map_err(|e| StorageError::Database(format!("join error: {e}")))?
+        .map_err(join_err)?
     }
 
     async fn list_run_summaries(
@@ -2765,7 +2838,7 @@ impl StorageBackend for SqliteStore {
         let this = self.clone();
         tokio::task::spawn_blocking(move || this.list_run_summaries_inner(limit, &tenant_id))
             .await
-            .map_err(|e| StorageError::Database(format!("join error: {e}")))?
+            .map_err(join_err)?
     }
 
     async fn create_memory(&self, memory: &MemoryRecord) -> Result<(), StorageError> {
@@ -2774,7 +2847,7 @@ impl StorageBackend for SqliteStore {
         let memory = memory.clone();
         tokio::task::spawn_blocking(move || this.create_memory_inner(&memory, &tenant_id))
             .await
-            .map_err(|e| StorageError::Database(format!("join error: {e}")))?
+            .map_err(join_err)?
     }
 
     async fn get_memory(&self, id: &str) -> Result<Option<MemoryRecord>, StorageError> {
@@ -2783,7 +2856,7 @@ impl StorageBackend for SqliteStore {
         let id = id.to_string();
         tokio::task::spawn_blocking(move || this.get_memory_inner(&id, &tenant_id))
             .await
-            .map_err(|e| StorageError::Database(format!("join error: {e}")))?
+            .map_err(join_err)?
     }
 
     async fn list_memory(
@@ -2799,7 +2872,7 @@ impl StorageBackend for SqliteStore {
             this.list_memory_inner(memory_type.as_deref(), limit, offset, &tenant_id)
         })
         .await
-        .map_err(|e| StorageError::Database(format!("join error: {e}")))?
+        .map_err(join_err)?
     }
 
     async fn search_memory(
@@ -2812,7 +2885,7 @@ impl StorageBackend for SqliteStore {
         let query = query.to_string();
         tokio::task::spawn_blocking(move || this.search_memory_inner(&query, top_k, &tenant_id))
             .await
-            .map_err(|e| StorageError::Database(format!("join error: {e}")))?
+            .map_err(join_err)?
     }
 
     async fn delete_memory(&self, id: &str) -> Result<bool, StorageError> {
@@ -2821,7 +2894,7 @@ impl StorageBackend for SqliteStore {
         let id = id.to_string();
         tokio::task::spawn_blocking(move || this.delete_memory_inner(&id, &tenant_id))
             .await
-            .map_err(|e| StorageError::Database(format!("join error: {e}")))?
+            .map_err(join_err)?
     }
 
     // ── 域6：users async wrapper（0.5.0 最小持久化地基）──────────────
@@ -2833,7 +2906,7 @@ impl StorageBackend for SqliteStore {
         let user = user.clone();
         tokio::task::spawn_blocking(move || this.create_user_inner(&user))
             .await
-            .map_err(|e| StorageError::Database(format!("join error: {e}")))?
+            .map_err(join_err)?
     }
 
     async fn get_user_by_id(&self, user_id: &str) -> Result<Option<UserRecord>, StorageError> {
@@ -2842,7 +2915,7 @@ impl StorageBackend for SqliteStore {
         let user_id = user_id.to_string();
         tokio::task::spawn_blocking(move || this.get_user_by_id_inner(&user_id))
             .await
-            .map_err(|e| StorageError::Database(format!("join error: {e}")))?
+            .map_err(join_err)?
     }
 
     async fn get_user_by_username(
@@ -2854,14 +2927,14 @@ impl StorageBackend for SqliteStore {
         let username = username.to_string();
         tokio::task::spawn_blocking(move || this.get_user_by_username_inner(&username))
             .await
-            .map_err(|e| StorageError::Database(format!("join error: {e}")))?
+            .map_err(join_err)?
     }
 
     async fn list_users(&self) -> Result<Vec<UserRecord>, StorageError> {
         let this = self.clone();
         tokio::task::spawn_blocking(move || this.list_users_inner())
             .await
-            .map_err(|e| StorageError::Database(format!("join error: {e}")))?
+            .map_err(join_err)?
     }
 
     async fn update_last_login(&self, user_id: &str) -> Result<(), StorageError> {
@@ -2869,7 +2942,7 @@ impl StorageBackend for SqliteStore {
         let user_id = user_id.to_string();
         tokio::task::spawn_blocking(move || this.update_last_login_inner(&user_id))
             .await
-            .map_err(|e| StorageError::Database(format!("join error: {e}")))?
+            .map_err(join_err)?
     }
 
     async fn delete_user(&self, user_id: &str) -> Result<bool, StorageError> {
@@ -2877,7 +2950,7 @@ impl StorageBackend for SqliteStore {
         let user_id = user_id.to_string();
         tokio::task::spawn_blocking(move || this.delete_user_inner(&user_id))
             .await
-            .map_err(|e| StorageError::Database(format!("join error: {e}")))?
+            .map_err(join_err)?
     }
 }
 
@@ -4104,5 +4177,33 @@ mod tests {
         let rows = store.list_dynamic_tools().unwrap();
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].0, "p2");
+    }
+
+    // ── A7：槽位 blob 解码的「合法缺失 vs 损坏」区分 ──
+
+    #[test]
+    fn decode_slot_message_distinguishes_missing_from_corruption() {
+        // blob_id NULL：合法缺失（无指针）→ 空对象，不算损坏
+        let (v, reason) = decode_slot_message(None, None);
+        assert!(v.as_object().is_some_and(|o| o.is_empty()));
+        assert!(reason.is_none(), "NULL blob_id 不得记为损坏");
+
+        // 有 blob_id 但 blob 行缺失 → 损坏（降级 + 原因）
+        let (v, reason) = decode_slot_message(Some("b_missing"), None);
+        assert!(v.as_object().is_some_and(|o| o.is_empty()));
+        assert!(reason.unwrap().contains("blob 行缺失"));
+
+        // 非 UTF-8 → 损坏
+        let (_, reason) = decode_slot_message(Some("b_utf8"), Some(&[0xff, 0xfe]));
+        assert!(reason.unwrap().contains("UTF-8"));
+
+        // JSON 解析失败 → 损坏
+        let (_, reason) = decode_slot_message(Some("b_badjson"), Some(b"{not json"));
+        assert!(reason.unwrap().contains("JSON"));
+
+        // 正常 JSON → 原样返回，无损坏
+        let (v, reason) = decode_slot_message(Some("b_ok"), Some(br#"{"role":"user"}"#));
+        assert_eq!(v["role"], json!("user"));
+        assert!(reason.is_none());
     }
 }

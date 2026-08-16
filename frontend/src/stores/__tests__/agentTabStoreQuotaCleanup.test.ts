@@ -43,11 +43,9 @@ vi.mock('@/stores/sessionStore', () => ({
 
 describe('AgentTabStore 配额降级清理', () => {
   let useAgentTabStore: typeof import('@/stores/agentTabStore').useAgentTabStore
-  let originalSetItem: typeof Storage.prototype.setItem
 
   beforeEach(async () => {
     localStorage.clear()
-    originalSetItem = Storage.prototype.setItem
 
     vi.resetModules()
     const mod = await import('@/stores/agentTabStore')
@@ -57,9 +55,9 @@ describe('AgentTabStore 配额降级清理', () => {
   })
 
   afterEach(() => {
-    Storage.prototype.setItem = originalSetItem
-    localStorage.clear()
+    // 恢复 spyOn 的实例方法（localStorage.setItem 等）
     vi.restoreAllMocks()
+    localStorage.clear()
   })
 
   it('配额不足时，降级清理应删除残留的 pipeline-messages localStorage key', () => {
@@ -67,8 +65,10 @@ describe('AgentTabStore 配额降级清理', () => {
     localStorage.setItem('pipeline-messages', '{"old":"data"}')
     expect(localStorage.getItem('pipeline-messages')).not.toBeNull()
 
-    // mock：所有 setItem 都抛 QuotaExceededError，模拟配额已满
-    Storage.prototype.setItem = vi.fn(() => {
+    // mock：所有 setItem 都抛 QuotaExceededError，模拟配额已满。
+    // 注意必须 spyOn 实例方法——test setup 的 localStorage 是内存 shim（MemoryStorage），
+    // 不继承全局 Storage.prototype，打补丁 Storage.prototype.setItem 不会生效。
+    vi.spyOn(localStorage, 'setItem').mockImplementation(() => {
       throw new DOMException('quota exceeded', 'QuotaExceededError')
     })
 

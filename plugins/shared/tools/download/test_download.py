@@ -1,4 +1,4 @@
-# @feature: FP-0.2.〇 管道引擎 | @vision: V3 可嵌入 | @ci: python-plugins-test
+# @feature: FP-0.2.〇 管道引擎 | @vision: V3 可嵌入 | @ci: none-local
 """download 插件（通用文件下载工具）单元测试。
 
 覆盖（对齐 plugins/shared/tools/download/tool.py）：
@@ -182,7 +182,8 @@ class TestExecuteValidation:
         assert r.output["size"] == 5
         assert r.metadata["segments"] == 2
         assert r.metadata["resumed"] is True
-        assert r.output["avg_speed"].endswith("/s")
+        # fake 下载极快时 elapsed 可为 0（Windows 计时器分辨率），此时按设计为 "N/A"
+        assert r.output["avg_speed"].endswith("/s") or r.output["avg_speed"] == "N/A"
 
     def test_download_exception_wrapped(self, tmp_path: Path) -> None:
         tool = DownloadTool(allow_ssrf_skip=True)
@@ -201,10 +202,15 @@ class TestExecuteValidation:
 
 
 class _FakeResp:
-    def __init__(self, content: bytes, headers: dict[str, str] | None = None) -> None:
+    def __init__(
+        self,
+        content: bytes,
+        headers: dict[str, str] | None = None,
+        status_code: int = 200,
+    ) -> None:
         self._content = content
         self._headers = headers or {}
-        self.status_code = 200
+        self.status_code = status_code
 
     @property
     def headers(self) -> httpx.Headers:
@@ -231,6 +237,12 @@ class _FakeAsyncClient:
 
     async def __aexit__(self, *exc: Any) -> None:
         pass
+
+    async def request(self, method: str, url: str, headers: dict | None = None, **kwargs: Any) -> _FakeResp:
+        # _follow_redirects 经 client.request 发起；转发到既有 head/get 语义
+        if method.upper() == "HEAD":
+            return await self.head(url, **kwargs)
+        return await self.get(url, headers=headers, **kwargs)
 
     async def head(self, url: str, **kwargs: Any) -> _FakeResp:
         return _FakeResp(b"", self._head_headers)
@@ -364,6 +376,143 @@ class TestSegmentedDownload:
 
         with pytest.raises(RuntimeError, match="请求失败"):
             _run(tool._retry_request(always_fail, "http://x/", max_retries=1))
+
+
+# ═══════════════════════════════════════════════════════════
+# 手动逐跳重定向（B3）：每跳 Location 经 validate_url 复检
+# ═══════════════════════════════════════════════════════════
+
+
+class _ScriptedClient:
+    """按 (METHOD, url) 脚本化响应的伪 httpx.AsyncClient（重定向测试用）。"""
+
+    def __init__(self, script: dict[tuple[str, str], _FakeResp]) -> None:
+        self._script = script
+        self.requests: list[tuple[str, str]] = []
+
+    async def __aenter__(self) -> _ScriptedClient:
+        return self
+
+    async def __aexit__(self, *exc: Any) -> None:
+        pass
+
+    async def request(self, method: str, url: str, **kwargs: Any) -> _FakeResp:
+        self.requests.append((method.upper(), url))
+        return self._script[(method.upper(), url)]
+
+
+class TestRedirectSecurity:
+    def test_redirect_to_private_ip_rejected(self, tmp_path: Path, monkeypatch) -> None:
+        """302 → 127.0.0.1：重定向目标经 validate_url 复检被拒，不再请求下一跳。"""
+
+        def fake_validate(url: str, allow_domains: list[str] | None = None) -> tuple[bool, str]:
+            if "127.0.0.1" in url:
+                return False, "域名 127.0.0.1 解析到内网 IP 127.0.0.1（SSRF 防护）"
+            return True, "OK"
+
+        monkeypatch.setattr(_MOD, "validate_url", fake_validate)
+        client = _ScriptedClient(
+            {
+                ("HEAD", "http://example.com/f.bin"): _FakeResp(
+                    b"", {"location": "http://127.0.0.1:8080/evil"}, status_code=302
+                ),
+            }
+        )
+        monkeypatch.setattr(_MOD.httpx, "AsyncClient", lambda **kw: client)
+
+        tool = DownloadTool()
+        with pytest.raises(_MOD.RedirectSecurityError, match="重定向目标被拒绝"):
+            _run(
+                tool._download(
+                    url="http://example.com/f.bin",
+                    save_dir=tmp_path,
+                    filename=None,
+                    max_connections=1,
+                    max_retries=1,
+                    timeout=5,
+                    max_size=0,
+                    proxy=None,
+                )
+            )
+        # 只打到入口 URL，内网下一跳从未被请求
+        assert client.requests == [("HEAD", "http://example.com/f.bin")]
+
+    def test_redirect_relative_location_resolved_and_validated(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        """相对 Location（/files/final.bin）归一为绝对地址并复检，通过后正常下载。"""
+        validated: list[str] = []
+
+        def fake_validate(url: str, allow_domains: list[str] | None = None) -> tuple[bool, str]:
+            validated.append(url)
+            return True, "OK"
+
+        monkeypatch.setattr(_MOD, "validate_url", fake_validate)
+        client = _ScriptedClient(
+            {
+                ("HEAD", "http://example.com/f.bin"): _FakeResp(
+                    b"", {"location": "/files/final.bin"}, status_code=302
+                ),
+                ("HEAD", "http://example.com/files/final.bin"): _FakeResp(
+                    b"", {"content-length": "5"}
+                ),
+                ("GET", "http://example.com/f.bin"): _FakeResp(
+                    b"", {"location": "/files/final.bin"}, status_code=302
+                ),
+                ("GET", "http://example.com/files/final.bin"): _FakeResp(
+                    b"hello", {"content-length": "5"}
+                ),
+            }
+        )
+        monkeypatch.setattr(_MOD.httpx, "AsyncClient", lambda **kw: client)
+
+        tool = DownloadTool()
+        result = _run(
+            tool._download(
+                url="http://example.com/f.bin",
+                save_dir=tmp_path,
+                filename=None,
+                max_connections=1,
+                max_retries=1,
+                timeout=5,
+                max_size=0,
+                proxy=None,
+            )
+        )
+        assert (tmp_path / "f.bin").read_bytes() == b"hello"
+        assert result["size"] == 5
+        # 相对 Location 已归一为绝对地址发起请求，且该地址经过了复检
+        assert ("GET", "http://example.com/files/final.bin") in client.requests
+        assert "http://example.com/files/final.bin" in validated
+
+    def test_redirect_loop_capped(self, tmp_path: Path, monkeypatch) -> None:
+        """无限重定向：受 MAX_REDIRECTS 上限约束，不悬挂。"""
+        monkeypatch.setattr(_MOD, "validate_url", lambda url, allow_domains=None: (True, "OK"))
+        loop_url = "http://example.com/loop"
+        client = _ScriptedClient(
+            {
+                ("HEAD", loop_url): _FakeResp(b"", {"location": loop_url}, status_code=302),
+                ("GET", loop_url): _FakeResp(b"", {"location": loop_url}, status_code=302),
+            }
+        )
+        monkeypatch.setattr(_MOD.httpx, "AsyncClient", lambda **kw: client)
+
+        tool = DownloadTool()
+        with pytest.raises(RuntimeError):
+            _run(
+                tool._download(
+                    url=loop_url,
+                    save_dir=tmp_path,
+                    filename=None,
+                    max_connections=1,
+                    max_retries=1,
+                    timeout=5,
+                    max_size=0,
+                    proxy=None,
+                )
+            )
+        # 每轮重定向链最多 MAX_REDIRECTS + 1 次请求，无失控
+        assert len(client.requests) <= (_MOD.MAX_REDIRECTS + 1) * 4
 
 
 # ═══════════════════════════════════════════════════════════

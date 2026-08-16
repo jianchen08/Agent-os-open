@@ -344,14 +344,17 @@ impl Default for HookContext {
 
 /// 能力注册表：内核在加载插件后构建的全局能力索引。
 ///
-/// 管理三类能力：
+/// 管理的能力维度：
 /// 1. **Tools**: 工具插件/系统插件提供的工具（供 LLM 选择和调用）
-/// 2. **Resources**: 插件暴露的数据源（MCP resources 机制）
-/// 3. **RouteSignals**: 管道插件声明的可能路由信号（供路由表校验）
+/// 2. **RouteSignals**: 管道插件声明的路由信号
+/// 3. **HttpRoutes**: 插件贡献的 HTTP 端点（ADR §3.3）
+///
+/// （原 Resources 维度已删除：manifest 与注册链全链无消费方。旧 manifest 的
+/// `capabilities.resources` 字段因 serde 默认忽略未知字段仍可解析，不受影响。）
 ///
 /// 单条内核注册的 RAII 撤销句柄（M1 PluginScope + RegistrationGuard）。
 ///
-/// 内核每个注册面（工具/资源/路由信号/HTTP 路由/hooks 订阅/widget 绑定…）在注册时
+/// 内核每个注册面（工具/路由信号/HTTP 路由/hooks 订阅/widget 绑定…）在注册时
 /// 返回一个 guard，guard drop 即精确注销该条注册；guard 也可登记进 per-plugin 的
 /// PluginScope，插件禁用/卸载时一次性结构性收回（见 plugin-loader::registry）。
 ///
@@ -399,20 +402,8 @@ pub trait CapabilityRegistry: Send + Sync {
     /// 按分类筛选工具。
     fn list_tools_by_category(&self, category: &ToolCategory) -> Vec<ToolDescriptor>;
 
-    /// 注册插件暴露的 MCP resource。
-    fn register_resource(&self, plugin_id: &str, resource: ResourceDescriptor);
-
-    /// 注销插件的 resources。
-    fn unregister_resources(&self, plugin_id: &str);
-
-    /// 列出所有已注册 resources。
-    fn list_resources(&self) -> Vec<ResourceDescriptor>;
-
     /// 注册管道插件的路由信号声明。
     fn register_route_signals(&self, plugin_id: &str, signals: Vec<RouteType>);
-
-    /// 检查某个路由信号是否被任何插件声明（路由表配置校验用）。
-    fn has_route_signal(&self, signal: &RouteType) -> bool;
 
     /// 注册插件贡献的 HTTP 端点（ADR §3.3）。
     ///
@@ -460,21 +451,8 @@ pub struct ToolDescriptor {
     pub render: Option<serde_json::Value>,
 }
 
-/// Resource 描述符（对内表示）。
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ResourceDescriptor {
-    pub uri: String,
-    pub name: String,
-    pub plugin_id: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub description: Option<String>,
-    #[serde(default = "default_mime")]
-    pub mime_type: String,
-}
-
-fn default_mime() -> String {
-    "application/json".to_string()
-}
+// Resource 描述符与 resources 能力维度已删除（全链无消费方）。
+// 旧 manifest 的 `capabilities.resources` 条目由 serde 默认忽略未知字段兜底。
 
 // ── 5. DependencyResolver（依赖解析器） ────────────────────────
 
@@ -1181,8 +1159,8 @@ pub struct ManifestCapabilities {
     /// provides 命名空间。wire 协议不变（仍是 MCP tools/call，ADR D.3）。
     #[serde(default)]
     pub services: Vec<ServiceCapability>,
-    #[serde(default)]
-    pub resources: Vec<ResourceCapability>,
+    /// `resources` 能力声明已删除（全链无消费方）；serde 默认忽略未知字段，
+    /// 旧 manifest 里的 `capabilities.resources` 条目不影响解析。
     #[serde(default)]
     pub route_signals: Vec<RouteType>,
     #[serde(default)]
@@ -1237,17 +1215,6 @@ pub struct ToolCapability {
     /// 路由渲染（task_dsh_plugin_adapter 任务 1）。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub render: Option<serde_json::Value>,
-}
-
-/// Resource 能力声明。
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ResourceCapability {
-    pub uri: String,
-    pub name: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub description: Option<String>,
-    #[serde(default = "default_mime")]
-    pub mime_type: String,
 }
 
 /// Manifest 权限声明。

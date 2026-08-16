@@ -25,6 +25,11 @@ const mocks = vi.hoisted(() => {
     findStreamingPartIndex: vi.fn(() => -1),
     appendToPart: vi.fn(),
     activePipelineId: null as string | null,
+    // handleStreamEnd → pipelineRegistryStore.applyStreamStatus 反查归属会话时读取：
+    // 新管道不在 registry.runs 中时用 pipelineSessionMap / pipelines 反查（F3 修复：
+    // 此前缺这两个字段，applyStreamStatus 内 pipelineSessionMap[pipelineId] 抛 TypeError）
+    pipelineSessionMap: {} as Record<string, string>,
+    pipelines: {} as Record<string, { sessionId?: string }>,
   }
   return {
     pipelineMethods,
@@ -172,7 +177,7 @@ describe('M-02: handleStreamEnd - stream_end 空内容 fallback', () => {
     expect(arg.category).toBe('alert')
   })
 
-  it('空内容 fallback 后应用 serverParts 替换消息且不残留空白 content', () => {
+  it('空内容 fallback 后消息收尾且不残留空白 content（按当前契约：空 parts 数组不触发 merge 分支）', () => {
     handleStreamEnd({
       data: { pipeline_id: 'pipe-001', parts: [], full_content: '' },
       message_id: 'msg-1',
@@ -180,7 +185,9 @@ describe('M-02: handleStreamEnd - stream_end 空内容 fallback', () => {
 
     expect(mocks.pipelineMethods.updateMessage).toHaveBeenCalled()
     const payload = mocks.pipelineMethods.updateMessage.mock.calls[0][2]
-    expect(payload.parts).toEqual([])
+    // 当前契约：serverParts 为空数组时走 fallback（appendPart 警告 + 仅收尾状态），
+    // 不用空数组显式覆盖 parts（parts 保持本地值，避免清空已有 part）
+    expect(payload.parts).toBeUndefined()
     expect(payload.status).toBe('completed')
     // 关键：不应把 content 显式设置为空字符串（避免空气泡）
     expect(payload.content).toBeUndefined()

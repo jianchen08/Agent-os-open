@@ -1,4 +1,4 @@
-# @feature: FP-0.2.六 记忆检索/注入补全 | @vision: V1 可进化 | @ci: python-plugins-test
+# @feature: FP-0.2.六 记忆检索/注入补全 | @vision: V1 可进化 | @ci: none-local
 """MemoryTool 0.2 重写版 TDD 测试——IMemoryBackend 注入替代已删除的 0.1 MemoryService。
 
 验证内容（与任务规格 10 个用例对齐）：
@@ -81,8 +81,14 @@ def backend() -> AsyncMock:
 
 @pytest.fixture
 def tool_inst(mod: Any, backend: AsyncMock) -> Any:
-    """构造注入了 mock backend 的 MemoryTool 实例。"""
-    return mod.MemoryTool(memory_backend=backend)
+    """构造注入了 mock backend 的 MemoryTool 实例。
+
+    敏感 action（store/import/update/delete）自 B6 起需要可信身份，
+    这里以服务端同款 set_trusted_user_id 注入。
+    """
+    t = mod.MemoryTool(memory_backend=backend)
+    t.set_trusted_user_id("tester")
+    return t
 
 
 # ═══════════════════════════════════════════════════════════
@@ -294,7 +300,140 @@ class TestSetMemoryBackend:
 
         t.set_memory_backend(backend)
         assert t._memory_backend is backend
+        t.set_trusted_user_id("tester")
 
         result = await t.execute({"action": "store", "content": "x"})
         backend.add.assert_awaited_once()
         assert result.success is True
+
+
+# ═══════════════════════════════════════════════════════════
+# 11+. IDOR 防护（B6）：敏感 action 需可信身份；注入后按身份隔离
+# ═══════════════════════════════════════════════════════════
+
+
+class TestIdorProtection:
+    async def test_store_without_trusted_identity_rejected(
+        self, mod: Any, backend: AsyncMock
+    ) -> None:
+        """无服务端可信身份注入时 write（store）被明确拒绝，后端未被触碰。"""
+        t = mod.MemoryTool(memory_backend=backend)  # 不注入 set_trusted_user_id
+
+        result = await t.execute(
+            {"action": "store", "content": "x", "user_id": "attacker"}
+        )
+
+        assert result.success is False
+        assert result.error is not None
+        assert "可信调用方身份" in result.error
+        assert "IDOR" in result.error
+        backend.add.assert_not_awaited()
+
+    async def test_delete_without_trusted_identity_rejected(
+        self, mod: Any, backend: AsyncMock
+    ) -> None:
+        """delete 同为敏感 action，无身份注入被拒。"""
+        t = mod.MemoryTool(memory_backend=backend)
+
+        result = await t.execute({"action": "delete", "memory_id": "m1"})
+
+        assert result.success is False
+        assert "可信调用方身份" in (result.error or "")
+        backend.delete.assert_not_awaited()
+
+    async def test_read_action_without_identity_still_works(
+        self, mod: Any, backend: AsyncMock
+    ) -> None:
+        """只读 action（retrieve）保留向后兼容：无身份注入仍可执行。"""
+        t = mod.MemoryTool(memory_backend=backend)
+
+        result = await t.execute({"action": "retrieve", "query": "q"})
+
+        assert result.success is True
+        backend.search.assert_awaited_once()
+
+    async def test_trusted_identity_overrides_client_user_id(
+        self, mod: Any, backend: AsyncMock
+    ) -> None:
+        """注入可信身份后隔离 key 恒用可信值，忽略客户端 inputs.user_id。"""
+        t = mod.MemoryTool(memory_backend=backend)
+        t.set_trusted_user_id("alice")
+
+        await t.execute(
+            {"action": "store", "content": "x", "user_id": "bob"}
+        )
+
+        kwargs = backend.add.await_args.kwargs
+        assert kwargs["user_id"] == "alice"
+
+    async def test_user_id_isolation_between_callers(
+        self, mod: Any, backend: AsyncMock
+    ) -> None:
+        """不同可信身份各自隔离：alice/bob 的写入分别落在各自 user_id 下。"""
+        alice = mod.MemoryTool(memory_backend=backend)
+        alice.set_trusted_user_id("alice")
+        bob = mod.MemoryTool(memory_backend=backend)
+        bob.set_trusted_user_id("bob")
+
+        await alice.execute({"action": "store", "content": "a"})
+        await bob.execute({"action": "store", "content": "b"})
+
+        used = [c.kwargs["user_id"] for c in backend.add.await_args_list]
+        assert used == ["alice", "bob"]
+
+
+# ═══════════════════════════════════════════════════════════
+# 12. server.py 入口接线（B6）：memory() 从注入参数取可信身份
+# ═══════════════════════════════════════════════════════════
+
+
+class TestServerIdorWiring:
+    """server.memory() 按 bash _owner_from_inputs 模式注入可信身份。"""
+
+    @pytest.fixture
+    def server_mod(self, monkeypatch, backend: AsyncMock) -> Any:
+        """加载 server.py（唯一模块名），并替换后端工厂为 mock。"""
+        import importlib.util as _ilu
+
+        mod_name = "memory_server_test"
+        module_path = _PLUGIN_DIR / "server.py"
+        spec = _ilu.spec_from_file_location(mod_name, module_path)
+        assert spec is not None and spec.loader is not None
+        module = _ilu.module_from_spec(spec)
+        sys.modules[mod_name] = module
+        spec.loader.exec_module(module)
+        monkeypatch.setattr(module, "_get_memory_backend", lambda: backend)
+        return module
+
+    async def test_owner_extracted_and_injected(self, server_mod: Any, backend: AsyncMock) -> None:
+        """_owner 注入 → set_trusted_user_id 生效，且忽略客户端 user_id。"""
+        out = await server_mod.memory(
+            _owner="sess-1", action="store", content="x", user_id="attacker"
+        )
+        assert out == {"success": True, "memory_id": "mem-1"}
+        kwargs = backend.add.await_args.kwargs
+        assert kwargs["user_id"] == "sess-1"
+
+    async def test_session_id_fallback(self, server_mod: Any, backend: AsyncMock) -> None:
+        """无 _owner 时回落 session_id（param_inject 常规注入路径）。"""
+        await server_mod.memory(session_id="sess-2", action="store", content="x")
+        kwargs = backend.add.await_args.kwargs
+        assert kwargs["user_id"] == "sess-2"
+
+    async def test_no_identity_sensitive_action_rejected(
+        self, server_mod: Any, backend: AsyncMock
+    ) -> None:
+        """无任何注入时 write（store）被明确拒绝（不静默用 inputs.user_id）。"""
+        out = await server_mod.memory(action="store", content="x", user_id="attacker")
+        assert "error" in out
+        assert "可信调用方身份" in out["error"]
+        backend.add.assert_not_awaited()
+
+    async def test_no_identity_read_action_compat(
+        self, server_mod: Any, backend: AsyncMock
+    ) -> None:
+        """无注入时只读 action 保留兼容（user_id 回退仅读路径可达）。"""
+        out = await server_mod.memory(action="retrieve", query="q", user_id="legacy")
+        assert out["success"] is True
+        kwargs = backend.search.await_args.kwargs
+        assert kwargs["user_id"] == "legacy"

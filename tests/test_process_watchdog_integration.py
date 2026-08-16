@@ -1,3 +1,4 @@
+# @feature: FP-0.2.二 内部模块manifest | @vision: V3 可嵌入 | @ci: python-coverage
 """看门狗真实进程集成测试。
 
 验证核心契约(用户真正关心的保障):起真实进程,它内存/进程增长到一定程度,

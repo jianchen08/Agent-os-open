@@ -52,12 +52,13 @@ vi.mock('@/components/ui/button', () => ({
 }))
 
 // ---------------------------------------------------------------------------
-//  Mock: WebSocket 服务
+//  Mock: GlobalWebSocket（真实订阅面：useRealtimeEvents 经 globalWS 订阅）
+//  此前 mock 的是无人 import 的 WebSocketService（mock 空气），事件从未触达真实 hook。
 // ---------------------------------------------------------------------------
 const listeners: Record<string, Set<(...args: any[]) => void>> = {}
 
-vi.mock('@/services/websocket/WebSocketService', () => ({
-  webSocketService: {
+vi.mock('@/services/websocket/GlobalWebSocket', () => ({
+  globalWS: {
     subscribe: vi.fn((event: string, cb: (...a: any[]) => void) => {
       if (!listeners[event]) listeners[event] = new Set()
       listeners[event].add(cb)
@@ -65,29 +66,9 @@ vi.mock('@/services/websocket/WebSocketService', () => ({
     unsubscribe: vi.fn((event: string, cb: (...a: any[]) => void) => {
       listeners[event]?.delete(cb)
     }),
-  },
-}))
-
-vi.mock('@/constants/websocket', () => ({
-  WS_SERVER_EVENTS: {
-    STREAM_START: 'stream_start',
-    STREAM_CHUNK: 'stream_chunk',
-    STREAM_END: 'stream_end',
-    STREAM_ERROR: 'stream_error',
-    EXECUTION_START: 'execution_start',
-    EXECUTION_PROGRESS: 'execution_progress',
-    EXECUTION_OUTPUT: 'execution_output',
-    EXECUTION_DONE: 'execution_done',
-    EXECUTION_CANCELLED: 'execution_cancelled',
-    SUB_AGENT_CREATED: 'sub_agent_created',
-    SUB_AGENT_WAITING_INPUT: 'sub_agent_waiting_input',
-    SUB_AGENT_COMPLETED: 'sub_agent_completed',
-    WORKFLOW_STEP_UPDATE: 'workflow_step_update',
-  },
-  WebSocketStatus: {
-    DISCONNECTED: 'disconnected',
-    CONNECTING: 'connecting',
-    CONNECTED: 'connected',
+    send: vi.fn(),
+    connect: vi.fn(),
+    status: 'connected',
   },
 }))
 
@@ -278,9 +259,13 @@ describe('SubAgentFlow — AC-1k: 子Agent事件链正确显示', () => {
 
   // -----------------------------------------------------------------------
   // 5. useRealtimeEvents 集成
+  //    （sub_agent_created/waiting_input/completed 事件后端无发射源，订阅已于
+  //     2026-08 死接线清理删除——原三个用例断言的是从未真实生效的链路，见
+  //     useRealtimeEvents.ts 头部注释。此处改为守护「不再复活死接线」+ 真实
+  //     事件链验证。）
   // -----------------------------------------------------------------------
   describe('useRealtimeEvents 集成', () => {
-    it('sub_agent_created 事件更新 layoutModeStore.activeExecutions', () => {
+    it('sub_agent_* 死事件不再写入 activeExecutions（无发射源，防止死接线复活）', () => {
       renderHook(() => useRealtimeEvents())
 
       act(() => {
@@ -292,83 +277,26 @@ describe('SubAgentFlow — AC-1k: 子Agent事件链正确显示', () => {
         })
       })
 
-      const state = useLayoutModeStore.getState()
-      expect(state.activeExecutions).toHaveLength(1)
-      expect(state.activeExecutions[0]).toMatchObject({
-        id: 'agent-agent-rt-1',
-        type: 'agent',
-        name: 'Realtime Agent',
-        status: 'running',
-      })
-    })
-
-    it('sub_agent_waiting_input 添加 interaction', () => {
-      renderHook(() => useRealtimeEvents())
-
-      act(() => {
-        emitEvent('sub_agent_created', {
-          agentId: 'agent-wait-1',
-          agentName: 'Waiting Agent',
-          agentLevel: 2,
-          parentAgentId: 'root',
-        })
-      })
-
-      act(() => {
-        emitEvent('sub_agent_waiting_input', {
-          agentId: 'agent-wait-1',
-          agentName: 'Waiting Agent',
-          agentLevel: 2,
-          prompt: '请确认是否继续',
-        })
-      })
-
-      const state = useLayoutModeStore.getState()
-      expect(state.pendingInteractions).toHaveLength(1)
-      expect(state.pendingInteractions[0]).toMatchObject({
-        id: 'interaction-agent-agent-wait-1',
-        prompt: '请确认是否继续',
-      })
-    })
-
-    it('sub_agent_completed 后 10 秒自动 removeExecution', () => {
-      vi.useFakeTimers()
-      renderHook(() => useRealtimeEvents())
-
-      // 创建
-      act(() => {
-        emitEvent('sub_agent_created', {
-          agentId: 'agent-cleanup',
-          agentName: 'Cleanup Agent',
-          agentLevel: 3,
-          parentAgentId: 'root',
-        })
-      })
-      expect(useLayoutModeStore.getState().activeExecutions).toHaveLength(1)
-
-      // 完成
-      act(() => {
-        emitEvent('sub_agent_completed', {
-          agentId: 'agent-cleanup',
-          agentName: 'Cleanup Agent',
-          agentLevel: 3,
-          success: true,
-          summary: '完成',
-        })
-      })
-
-      // 完成后仍存在但状态为 completed
-      const afterComplete = useLayoutModeStore.getState().activeExecutions
-      expect(afterComplete).toHaveLength(1)
-      expect(afterComplete[0].status).toBe('completed')
-
-      // 10 秒后移除
-      act(() => {
-        vi.advanceTimersByTime(10_000)
-      })
+      // 后端（kernel + 插件 event-bus）从不发射 sub_agent_created；
+      // 若此断言失败说明有人重新挂上了无人投递的订阅
       expect(useLayoutModeStore.getState().activeExecutions).toHaveLength(0)
+    })
 
-      vi.useRealTimers()
+    it('task_deleted 事件经 globalWS 真实订阅链路更新 store', async () => {
+      const { useLongTermTaskStore } = await import('@/stores/longTermTaskStore')
+      useLongTermTaskStore.setState({
+        tasks: [{ id: 'task-sub', title: '子任务', status: 'running' }] as never,
+      })
+
+      renderHook(() => useRealtimeEvents())
+
+      await act(async () => {
+        emitEvent('task_deleted', { task_id: 'task-sub' })
+      })
+
+      expect(
+        useLongTermTaskStore.getState().tasks.some((t: { id: string }) => t.id === 'task-sub'),
+      ).toBe(false)
     })
   })
 

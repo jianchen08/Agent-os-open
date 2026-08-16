@@ -1,4 +1,4 @@
-# @feature: FP-0.2.可观测性 | @ci: python-plugins-test
+# @feature: FP-0.2.可观测性 | @ci: python-coverage
 """TerminationAdvisorPlugin 主动式终止判断测试（task_observability 1c）。
 
 钉死语义：

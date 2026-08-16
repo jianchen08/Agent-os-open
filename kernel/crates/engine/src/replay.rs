@@ -10,8 +10,9 @@
 //! - run 反查经 `message_slots.run_id` lineage——首轮纯 user push（run 建立前落表，
 //!   run_id 为 NULL）的行不在回放范围；回退默认发生在多轮完整会话上。
 //! - 回放上界用 trace `created_at`（rfc3339，含边界）——"目标步/时刻"的中立投影。
-//! - 缺 blob 的实录条目跳过（不阻断重建）；caller 侧（server/registry）的内存态
-//!   刷新不在本模块职责内。
+//! - 缺 blob 的实录条目跳过（不阻断重建）；存储读错误（traces/blobs 查询失败）
+//!   向上传播为 `StorageError`——重建拿不到真相时由调用方决定失败，不静默给空。
+//! - caller 侧（server/registry）的内存态刷新不在本模块职责内。
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -63,31 +64,37 @@ fn ledger_ops_upto(
 }
 
 /// 按 blob_id 取全文（blobs 内容寻址、append-only——被覆盖/删除的旧版本仍在）。
-fn blob_message(conn: &Connection, blob_id: &str) -> Option<serde_json::Value> {
-    let data: Vec<u8> = conn
-        .query_row(
-            "SELECT data FROM blobs WHERE blob_id = ?1",
-            rusqlite::params![blob_id],
-            |r| r.get(0),
-        )
-        .ok()?;
-    serde_json::from_slice(&data).ok()
+///
+/// `Ok(None)` = blob 行缺失或内容解析失败（尽力而为跳过）；`Err` = 查询本身
+/// 失败（存储读错误，调用方传播）。
+fn blob_message(
+    conn: &Connection,
+    blob_id: &str,
+) -> Result<Option<serde_json::Value>, rusqlite::Error> {
+    let data: Vec<u8> = match conn.query_row(
+        "SELECT data FROM blobs WHERE blob_id = ?1",
+        rusqlite::params![blob_id],
+        |r| r.get(0),
+    ) {
+        Ok(d) => d,
+        Err(rusqlite::Error::QueryReturnedNoRows) => return Ok(None),
+        Err(e) => return Err(e),
+    };
+    Ok(serde_json::from_slice(&data).ok())
 }
 
 /// 重建目标时刻的消息队列（seq 升序、元素带 `seq` + 全文）。
 ///
 /// 回放语义 = 表侧 apply 语义的只读版：`set(seq, 有blob)` 写槽、`set(seq, null)`
-/// 清槽；重建失败（无实录/无 blob）返回力所能及的部分（缺行跳过，不报错——
-/// 调用方可比对长度判断完整性）。
+/// 清槽。存储读失败（traces/blobs 查询错误）传播为 `Err`；缺 blob 的实录条目
+/// 跳过（尽力而为，调用方可比对长度判断完整性）。
 pub fn rebuild_messages_at(
     store: &SqliteStore,
     pipeline_id: &str,
     tenant_id: &str,
     upto_created_at: &str,
-) -> Vec<serde_json::Value> {
-    let Ok(ops) = ledger_ops_upto(store, pipeline_id, tenant_id, upto_created_at) else {
-        return vec![];
-    };
+) -> Result<Vec<serde_json::Value>, StorageError> {
+    let ops = ledger_ops_upto(store, pipeline_id, tenant_id, upto_created_at)?;
     // 槽位 → blob_id（回放；delete 移除）
     let mut slots: BTreeMap<i64, String> = BTreeMap::new();
     for op in &ops {
@@ -110,12 +117,12 @@ pub fn rebuild_messages_at(
         }
         let _ = kind; // 寻址与 blob 有无已足够表达 set/insert 语义
     }
-    // blobs 回查全文 + 塞回 seq
-    store
-        .with_conn::<Vec<serde_json::Value>, rusqlite::Error>(|conn| {
+    // blobs 回查全文 + 塞回 seq（查询失败传播，不静默空；缺行/解析失败跳过）
+    Ok(
+        store.with_conn(|conn| -> Result<Vec<serde_json::Value>, rusqlite::Error> {
             let mut out = Vec::with_capacity(slots.len());
             for (seq, blob_id) in &slots {
-                let Some(mut msg) = blob_message(conn, blob_id) else {
+                let Some(mut msg) = blob_message(conn, blob_id)? else {
                     continue;
                 };
                 if let Some(o) = msg.as_object_mut() {
@@ -124,22 +131,23 @@ pub fn rebuild_messages_at(
                 out.push(msg);
             }
             Ok(out)
-        })
-        .unwrap_or_default()
+        })?,
+    )
 }
 
 /// 补偿执行：把 message_slots 表回退到目标时刻的状态。
 ///
-/// 1. 重建目标队列；2. 与当前表 diff 生成补偿 ops（恢复旧内容 / 清空多余槽，
-///    同 `set` 原语）；3. 走表侧 apply；4. 追加 `PatchType::Rollback` 轨迹
-///    （记录回退目标与补偿实录——旧轨迹 append-only 完好）。
+/// 1. 重建目标队列（存储读失败直接传播——不生成任何补偿 ops，表保持原状）；
+/// 2. 与当前表 diff 生成补偿 ops（恢复旧内容 / 清空多余槽，同 `set` 原语）；
+/// 3. 走表侧 apply；4. 追加 `PatchType::Rollback` 轨迹（记录回退目标与补偿
+///    实录——旧轨迹 append-only 完好）。
 pub fn rollback(
     store: &SqliteStore,
     pipeline_id: &str,
     tenant_id: &str,
     upto_created_at: &str,
 ) -> Result<(), StorageError> {
-    let target = rebuild_messages_at(store, pipeline_id, tenant_id, upto_created_at);
+    let target = rebuild_messages_at(store, pipeline_id, tenant_id, upto_created_at)?;
     let current = store.load_message_history(pipeline_id, tenant_id)?;
 
     let target_map: BTreeMap<i64, &serde_json::Value> = target

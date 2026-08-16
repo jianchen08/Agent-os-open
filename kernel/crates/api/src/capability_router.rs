@@ -6,7 +6,6 @@
 //!   改走 StorageBackend；start_run 占位能力随旧引擎移除，任务执行
 //!   统一走 chat.send_message → PipelineExecutor）
 //! - event-bus.emit → 广播事件（当前记录日志，前端推送留 P1）
-//! - config-reader.get → 读取配置节（从 AppState 配置缓存）
 //! - metrics.record → 写入指标聚合器（监控设计 §三 通道2，第 6 个 capability）
 //! - service-registry.<域>.<op> → 插件访问内核共享基础设施存储（M2：execution-records/
 //!   pipeline-summaries/memory 三域，对应 M1 内核存储层）。基础设施下沉内核后，
@@ -54,11 +53,6 @@ pub struct KernelCapabilityRouter {
     /// 注册的 namespace 在这里路由。handle() 先查这里，miss 再走下方 match。
     /// None = 不支持插件自注册能力（仅内核内置能力可用）。
     handler_registry: Option<Arc<agentos_mcp::CapabilityHandlerRegistry>>,
-    /// 配置读取器（G5：config-reader.get 的真实读取通道）。
-    /// 闭包签名 (plugin_id, file_id) → 该插件 manifest.config_files 声明的
-    /// 配置节内容；未声明/读取失败返回 Err（拒绝越权读配置）。
-    /// None = config-reader 保持 no-op 兜底（返回 null value，兼容旧装配）。
-    config_reader: Option<ConfigReaderFn>,
     /// 授权查询器（G6：granted_capabilities 白名单的查找通道）。
     /// 闭包签名 (plugin_id) → Some(白名单) 当且仅当该插件声明了非空
     /// granted_capabilities；None = 未声明（默认全授予，存量插件零迁移）。
@@ -78,13 +72,6 @@ pub struct KernelCapabilityRouter {
 /// 注册表写入（M1 guarded + scope 登记）与持久化（可重建性闸）。
 pub type DynamicToolRegistrar =
     Arc<dyn Fn(&str, agentos_core::traits::ToolDescriptor) -> Result<(), String> + Send + Sync>;
-
-/// G5：config-reader.get 的读取器闭包。
-///
-/// (plugin_id, file_id) → 配置节 JSON。实现方负责"file_id 必须在调用方插件
-/// manifest.config_files 里声明"的越权校验（插件只能读自己声明的配置）。
-pub type ConfigReaderFn =
-    Arc<dyn Fn(&str, &str) -> Result<serde_json::Value, String> + Send + Sync>;
 
 /// G6：granted_capabilities 白名单查询闭包。
 ///
@@ -108,7 +95,6 @@ impl KernelCapabilityRouter {
             session: None,
             store: None,
             handler_registry: None,
-            config_reader: None,
             grants_lookup: None,
             dynamic_tool_registrar: None,
         }
@@ -123,7 +109,6 @@ impl KernelCapabilityRouter {
             session: None,
             store: None,
             handler_registry: None,
-            config_reader: None,
             grants_lookup: None,
             dynamic_tool_registrar: None,
         }
@@ -132,12 +117,6 @@ impl KernelCapabilityRouter {
     /// 注入插件调用器（启用 tool-executor.invoke 反向调用）。
     pub fn with_invoker(mut self, invoker: Arc<dyn agentos_core::traits::PluginInvoker>) -> Self {
         self.invoker = Some(invoker);
-        self
-    }
-
-    /// 注入配置读取器（G5：启用 config-reader.get 真实读取）。
-    pub fn with_config_reader(mut self, reader: ConfigReaderFn) -> Self {
-        self.config_reader = Some(reader);
         self
     }
 
@@ -586,36 +565,6 @@ impl CapabilityRouter for KernelCapabilityRouter {
                 Ok(json!({"status": "emitted", "event": event_name}))
             }
 
-            // ── config-reader：读配置节（G5 接通真实读取）──
-            // 语义（v1.5 ADR config_files）：插件按 file_id 读**自己在 manifest
-            // config_files 里声明过的**配置节。信任锚点 _plugin_id 由 invoker 的
-            // PluginScopedRouter 注入（sidecar 不可伪造）；native 经 NativeHostServices
-            // 注入同字段。未声明 file_id = 越权读，拒绝。
-            // 装配了读取器但调用方缺 _plugin_id（非插件上下文）→ 拒绝；
-            // 未装配读取器（旧装配/测试）→ 保持 no-op 兜底（返回 null value）。
-            ("config-reader", "get") => {
-                let key = params.get("key").and_then(|v| v.as_str()).unwrap_or("");
-                let Some(reader) = self.config_reader.as_ref() else {
-                    warn!(target: "capability_router", "config-reader.get 未装配读取器，返回 null（no-op 兜底）");
-                    return Ok(json!({"key": key, "value": null}));
-                };
-                let plugin_id = params
-                    .get("_plugin_id")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("");
-                if plugin_id.is_empty() {
-                    return Err(McpError::Protocol {
-                        message: "config-reader.get 需要 _plugin_id（插件上下文调用）".to_string(),
-                    });
-                }
-                match reader(plugin_id, key) {
-                    Ok(value) => Ok(json!({"key": key, "value": value})),
-                    Err(reason) => Err(McpError::Protocol {
-                        message: format!("config-reader.get 拒绝: {}", reason),
-                    }),
-                }
-            }
-
             // ── registry：运行时动态注册（G3，VS Code 双层模型的动态层）──
             // 信封闸已由上方 G6 单点覆盖（granted_capabilities 须含 "registry"）。
             // 本分支做参数解析 + 委托 registrar（enablement 闸 + 写入 + 持久化
@@ -887,7 +836,8 @@ impl CapabilityRouter for KernelCapabilityRouter {
                 }))
             }
 
-            // logger 暂未实现具体 method
+            // 兜底：未注册/未实现的 capability.method（logger/config-reader 已作为
+            // 死能力从两端 STANDARD_CAPABILITIES 删除，残余调用会落到这里）。
             (cap, m) => {
                 warn!(
                     "unhandled capability call: {}.{} (params={})",
@@ -2236,61 +2186,6 @@ mod tests {
             )
             .await;
         assert!(res3.is_err(), "不存在的 run 必须报错");
-    }
-
-    // ── G5：config-reader.get 真实读取 ──
-
-    async fn config_reader_roundtrip(
-        reader: ConfigReaderFn,
-        params: serde_json::Value,
-    ) -> Result<serde_json::Value, agentos_mcp::McpError> {
-        let router = KernelCapabilityRouter::new().with_config_reader(reader);
-        router.handle("config-reader", "get", params).await
-    }
-
-    #[tokio::test]
-    async fn g5_config_reader_returns_declared_value() {
-        let reader: ConfigReaderFn = Arc::new(|_pid, key| {
-            assert_eq!(key, "llm");
-            Ok(json!({"model": "glm"}))
-        });
-        let out =
-            config_reader_roundtrip(reader, json!({"key": "llm", "_plugin_id": "some_plugin"}))
-                .await
-                .unwrap();
-        assert_eq!(out["value"]["model"], "glm");
-    }
-
-    #[tokio::test]
-    async fn g5_config_reader_denies_undeclared_file_id() {
-        let reader: ConfigReaderFn = Arc::new(|_pid, key| Err(format!("file_id '{}' 未声明", key)));
-        let err = config_reader_roundtrip(reader, json!({"key": "secret", "_plugin_id": "p1"}))
-            .await
-            .unwrap_err();
-        assert!(format!("{}", err).contains("拒绝"));
-    }
-
-    #[tokio::test]
-    async fn g5_config_reader_requires_plugin_context() {
-        let reader: ConfigReaderFn = Arc::new(|_, _| Ok(json!({})));
-        let err = config_reader_roundtrip(reader, json!({"key": "llm"}))
-            .await
-            .unwrap_err();
-        assert!(format!("{}", err).contains("_plugin_id"));
-    }
-
-    #[tokio::test]
-    async fn g5_config_reader_without_reader_stays_noop() {
-        let router = KernelCapabilityRouter::new();
-        let out = router
-            .handle(
-                "config-reader",
-                "get",
-                json!({"key": "llm", "_plugin_id": "p1"}),
-            )
-            .await
-            .unwrap();
-        assert!(out["value"].is_null(), "未装配读取器保持 no-op 兜底");
     }
 
     // ── G6：granted_capabilities 白名单单点校验 ──

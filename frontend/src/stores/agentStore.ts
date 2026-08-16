@@ -18,8 +18,6 @@ interface AgentState {
 
   /** 获取 Agent 列表 */
   fetchAgents: () => Promise<void>
-  /** 获取默认 Agent */
-  fetchDefaultAgent: () => Promise<string | null>
   /** 设置当前 Agent */
   setCurrentAgentId: (agentId: string | null) => void
   /** 清除错误 */
@@ -156,49 +154,9 @@ export const useAgentStore = create<AgentState>((set) => ({
   },
 
   /**
-   * 获取默认 Agent
-   */
-  fetchDefaultAgent: async () => {
-    try {
-      // 使用 tokenManager 获取 token
-      const token = tokenManager.getToken()
-      const response = await fetch(`${API_BASE}/agents/default`, {
-        headers: {
-          Authorization: `Bearer ${token}`,
-        },
-      })
-
-      if (!response.ok) {
-        // 如果没有默认 Agent，返回 null
-        if (response.status === 404) {
-          return null
-        }
-        throw new Error('获取默认 Agent 失败')
-      }
-
-      const data = await response.json()
-      const defaultAgentId = data.id
-
-      // 同时更新当前 Agent ID
-      set({ currentAgentId: defaultAgentId })
-
-      return defaultAgentId
-    } catch (error) {
-      reportError(
-        error instanceof Error ? error.message : String(error),
-        ErrorType.SERVER,
-        undefined,
-        {
-          componentName: 'AgentStore',
-          operation: 'fetchDefaultAgent',
-        },
-      )
-      return null
-    }
-  },
-
-  /**
    * 设置当前 Agent
+   * （2026-08 清理：fetchDefaultAgent 已删除——其调用的
+   * GET /api/v1/agents/default 端点后端不存在，且无任何调用方。）
    */
   setCurrentAgentId: (agentId: string | null) => {
     set({ currentAgentId: agentId })

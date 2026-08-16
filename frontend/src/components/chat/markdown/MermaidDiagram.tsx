@@ -22,7 +22,9 @@ function initMermaid() {
   mermaid.initialize({
     startOnLoad: false,
     theme: 'neutral',
-    securityLevel: 'loose',
+    // 'strict'：mermaid 在 render 输出前会用内置 DOMPurify 净化 SVG（loose 会跳过净化，
+    // 图表文本中的 HTML/脚本会原样进入 innerHTML，存在 XSS 风险）
+    securityLevel: 'strict',
     fontFamily: 'ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, sans-serif',
     flowchart: {
       useMaxWidth: true,

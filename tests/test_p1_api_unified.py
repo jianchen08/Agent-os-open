@@ -1,4 +1,4 @@
-# @feature: FP-MIGR 0.1→0.2迁移清理 | @vision: V3 可嵌入 | @ci: python-plugins-test
+# @feature: FP-MIGR 0.1→0.2迁移清理 | @vision: V3 可嵌入 | @ci: none-local
 """P1 架构修复 + API 统一 — 针对性测试。
 
 覆盖以下 P1 变更：

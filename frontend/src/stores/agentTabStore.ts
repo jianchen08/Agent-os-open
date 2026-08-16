@@ -640,7 +640,16 @@ export const useAgentTabStore = create<AgentTabState>((set, get) => ({
       }
 
       const pipelineStore = usePipelineMessageStore.getState()
-      const mainPipelineId = state.currentSessionId
+      // 主桶 key 是主管道 ID（session.pipelineIds[0]），不是 sessionId——
+      // 此前误用 currentSessionId 会把合并消息写进一个无人订阅的桶，主管道视图看不到。
+      const mainPipelineId = getMainPipelineId(state.currentSessionId)
+      if (!mainPipelineId) {
+        console.warn(
+          '[AgentTabStore] Cannot merge: main pipeline missing, sessionId=%s',
+          state.currentSessionId,
+        )
+        return state
+      }
 
       // 从 pipelineMessageStore 读取子 Tab 消息并合并到主管道
       if (subTab.pipelineRunId) {

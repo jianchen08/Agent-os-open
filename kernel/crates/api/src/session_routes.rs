@@ -127,14 +127,42 @@ pub async fn create_session_handler(
         .and_then(|v| v.as_str())
         .or(if title.is_empty() { None } else { Some(title) });
     let agent_id = body.get("agent_id").cloned().unwrap_or(json!("agentos"));
-    let user_id = body
+
+    // A14：user_id 以 token（resolve_request_user）解析为准——body 里的 user_id
+    // 是客户端可伪造字段，不得作为事件路由（WS 推送定位）的信任源；仅在无 token
+    // 用户时作显式降级（warn 标记，供审计区分）。
+    let token_user = crate::auth::resolve_request_user(state.store.as_ref(), &headers)
+        .await
+        .map(|(uid, _, _, _)| uid)
+        .ok();
+    let body_user = body
         .get("user_id")
         .and_then(|v| v.as_str())
-        .unwrap_or("anonymous");
+        .filter(|s| !s.is_empty())
+        .map(str::to_string);
+    let user_id = match (&token_user, &body_user) {
+        (Some(token_uid), Some(body_uid)) if token_uid != body_uid => {
+            tracing::warn!(
+                token_user = %token_uid,
+                body_user = %body_uid,
+                "create_session：body user_id 与 token 用户不一致，事件路由按 token 用户"
+            );
+            token_uid.clone()
+        }
+        (Some(token_uid), _) => token_uid.clone(),
+        (None, Some(body_uid)) => {
+            tracing::warn!(
+                body_user = %body_uid,
+                "create_session：无 token 用户，降级使用 body user_id（可伪造，仅测试/嵌入式场景）"
+            );
+            body_uid.clone()
+        }
+        (None, None) => "anonymous".to_string(),
+    };
 
     // 注册 thread → user 映射（WS 流式推送据此定位连接）+ thread → pipeline 映射
     if let Some(session) = &state.session {
-        session.registry().register_thread(&thread_id, user_id);
+        session.registry().register_thread(&thread_id, &user_id);
         session
             .registry()
             .register_thread_pipeline(&thread_id, &pipeline_id);
@@ -541,7 +569,8 @@ pub async fn sessions_schema_handler(State(state): State<AppState>) -> Json<Valu
     ];
 
     let enabled_ids = state.enabled_plugin_ids.read().await;
-    for m in state.manifests.iter() {
+    let manifests = state.manifests.read().await;
+    for m in manifests.iter() {
         if !enabled_ids.contains(&m.id) {
             continue;
         }

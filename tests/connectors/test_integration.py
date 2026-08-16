@@ -1,4 +1,4 @@
-# @feature: FP-0.2.二 内部模块manifest | @vision: V3 可嵌入 | @ci: python-plugins-test
+# @feature: FP-0.2.二 内部模块manifest | @vision: V3 可嵌入 | @ci: none-local
 """REQ-43: 外部连接端到端集成测试。
 
 用 mock 方式验证通道适配器与连接器的端到端集成场景，

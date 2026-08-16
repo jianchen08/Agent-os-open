@@ -1,4 +1,4 @@
-# @feature: FP-0.2.可观测性 | @ci: python-plugins-test
+# @feature: FP-0.2.可观测性 | @ci: python-coverage
 """ProgressReporter 进度节流器测试（task_observability 任务 2）。
 
 钉死语义：bash 工具执行中的 stdout 增量按阈值推送前端（tool_progress）——

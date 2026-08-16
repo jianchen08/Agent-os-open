@@ -1,4 +1,4 @@
-# @feature: FP-0.2.五 审批闭环 | @vision: V2 全能闭环 | @ci: python-plugins-test
+# @feature: FP-0.2.五 审批闭环 | @vision: V2 全能闭环 | @ci: python-coverage
 """RollbackManager 单元测试——内存模式（无 DB session）下的核心逻辑。
 
 覆盖：检查点 CRUD、操作日志记录与序号、回滚执行（按 steps / 按 checkpoint）、

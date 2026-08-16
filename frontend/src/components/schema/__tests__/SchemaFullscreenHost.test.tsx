@@ -5,7 +5,7 @@
  * 验证「声明 → 实现」链路在全屏空间的落点：
  * 1. trigger 求值（on_event:xxx → 事件名）与声明收集（space 过滤）
  * 2. 事件到达 → 打开 FullscreenOverlay → 声明 widget 渲染（payload 并入 props）
- * 3. 提交走既有真实通道（choice → sendInteractionResponse / review → sendApproval）
+ * 3. 提交走既有真实通道（choice / review → sendInteractionResponse；内核 ws 白名单不收 type:'approval'）
  * 4. 去重 / 关闭 / 队列导航
  */
 
@@ -161,7 +161,7 @@ describe('SchemaFullscreenHost 组件', () => {
     expect(screen.queryByTestId('fullscreen-toolbar')).toBeNull()
   })
 
-  it('review 模式：批准/拒绝 → sendApproval（审批决策通道）', async () => {
+  it('review 模式：批准/拒绝 → sendInteractionResponse（内核不收 type:approval，统一走 interaction 通道）', async () => {
     render(<SchemaFullscreenHost declarations={[approvalDecl]} />)
 
     fireApprovalCreated({
@@ -174,7 +174,13 @@ describe('SchemaFullscreenHost 组件', () => {
     const rejectBtn = await screen.findByRole('button', { name: '拒绝' })
     act(() => rejectBtn.click())
 
-    expect(sendApprovalMock).toHaveBeenCalledWith('session-1', 'rejected', '')
+    expect(sendInteractionResponseMock).toHaveBeenCalledWith(
+      'session-1',
+      'req-2',
+      expect.objectContaining({ response_type: 'answered', selected_option: 'rejected' }),
+    )
+    // 修复回归断言：不再使用内核会静默忽略的 sendApproval
+    expect(sendApprovalMock).not.toHaveBeenCalled()
     expect(screen.queryByTestId('fullscreen-toolbar')).toBeNull()
   })
 

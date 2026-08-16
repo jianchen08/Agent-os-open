@@ -1,4 +1,4 @@
-# @feature: FP-0.2.〇 管道引擎 | @vision: V2 全能闭环 | @ci: e2e-manual
+# @feature: FP-0.2.〇 管道引擎 | @vision: V2 全能闭环 | @ci: python-e2e
 """
 E2E 测试：管道 chat 全链路（FP-0.2.〇 串行循环）
 

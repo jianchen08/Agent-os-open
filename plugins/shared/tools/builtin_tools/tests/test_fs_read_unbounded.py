@@ -1,4 +1,4 @@
-# @feature: FP-0.2.spill_guard 任务 2 | @vision: V1 可进化 | @ci: python-plugins-test
+# @feature: FP-0.2.spill_guard 任务 2 | @vision: V1 可进化 | @ci: python-coverage
 """fs_tools file_read 截断清理（spill_guard 兜底就绪后）——TDD 规格。
 
 设计原则（task_spill_guard.md 任务 2）：read_file 不再"大文件（>2MB）直接拒绝"

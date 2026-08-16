@@ -1,4 +1,4 @@
-# @feature: FP-MIGR 0.1→0.2 迁移清理 | @vision: V3 可嵌入 | @ci: python-plugins-test
+# @feature: FP-MIGR 0.1→0.2 迁移清理 | @vision: V3 可嵌入 | @ci: python-coverage
 """工具迁移验证测试——验证简单工具插件的导入和基本功能。
 
 测试覆盖：
@@ -255,12 +255,12 @@ class TestCompatibilityChecker:
 
 
 class TestExternalMcpPluginJson:
-    """验证 7 个外部 MCP 工具的 plugin.json 格式。"""
+    """验证外部 MCP 工具的 plugin.json 格式（web_search 已被 omnisearch 聚合替代删除）。"""
 
     EXTERNAL_DIR = Path(__file__).resolve().parent.parent / "external_mcp"
 
     @pytest.mark.parametrize("tool_name", [
-        "web_search", "browser_test", "design_generate",
+        "browser_test", "design_generate",
         "design_review", "mcp_registry", "smithery", "resource_search",
     ])
     def test_external_mcp_plugin_json(self, tool_name):
@@ -289,7 +289,7 @@ class TestComplexToolsStructure:
     @pytest.mark.parametrize("tool_dir", [
         "bash", "download", "resource_merge",
         "task", "task_submit", "task_evaluate",
-        "test_ext", "search", "triggers_ext",
+        "search", "triggers_ext",
         "media", "lsp", "memory",
         "human", "web_ext", "hot_swap",
     ])
@@ -300,7 +300,7 @@ class TestComplexToolsStructure:
     @pytest.mark.parametrize("tool_dir", [
         "bash", "download", "resource_merge",
         "task", "task_submit", "task_evaluate",
-        "test_ext", "search", "triggers_ext",
+        "search", "triggers_ext",
         "media", "lsp", "memory",
         "human", "web_ext", "hot_swap",
     ])
@@ -311,7 +311,7 @@ class TestComplexToolsStructure:
     @pytest.mark.parametrize("tool_dir", [
         "bash", "download", "resource_merge",
         "task", "task_submit", "task_evaluate",
-        "test_ext", "search", "triggers_ext",
+        "search", "triggers_ext",
         "media", "lsp", "memory",
         "human", "web_ext", "hot_swap",
     ])

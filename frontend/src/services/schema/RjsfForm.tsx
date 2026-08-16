@@ -84,6 +84,10 @@ function normalizeDatasourceResponse(data: unknown): SchemaOption[] {
  * 拉取动态数据源选项
  *
  * @param uri - 数据源 URI：以 / 开头的绝对路径直连；否则走 /api/v1/datasource/{uri} 代理
+ *
+ * TODO(休眠断点登记)：后端 /api/v1/datasource/{uri} 目前以占位响应收敛（见
+ * services/api/client.ts isOptionalEndpoint），插件声明 datasourceUri 的 select
+ * 暂拿不到真实数据；后端代理端点落地后此处无需改动即可工作。
  */
 export async function fetchDatasourceOptions(uri: string): Promise<SchemaOption[]> {
   const url = uri.startsWith('/') ? uri : `/api/v1/datasource/${uri}`

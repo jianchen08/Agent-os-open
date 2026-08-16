@@ -1,4 +1,4 @@
-# @feature: FP-0.2.可观测性 | @ci: python-plugins-test
+# @feature: FP-0.2.可观测性 | @ci: python-coverage
 """TrackPlugin cost_update 事件契约测试（frontend.emit 出口，task_observability 1a）。
 
 钉死 cost_update 推送给前端的数据契约（经 frontend.emit capability，ADR §3.5）：
@@ -147,10 +147,19 @@ async def test_cost_update_skipped_on_tool_execute_round() -> None:
 async def test_cost_update_silent_without_frontend_service() -> None:
     """frontend 服务未注入（旧内核 / 无桥接）静默跳过，不抛异常。"""
     plugin = TrackPlugin()
-    ctx = _make_ctx(_base_state())
+    state = _base_state()
+    ctx = _make_ctx(state)
     usage = plugin._collect_token_usage(ctx)
 
-    await plugin._try_notify_cost_update(ctx, usage)  # 不抛即通过
+    # 前置：frontend 服务确未注入（get_service 对未注册服务抛 KeyError）
+    with pytest.raises(KeyError):
+        ctx.get_service("frontend")
+
+    # 契约：静默路径不外泄任何异常（KeyError 在插件内部被吞掉）
+    await plugin._try_notify_cost_update(ctx, usage)
+
+    # 无副作用：state 未被写入任何 cost_update 相关痕迹
+    assert not any(str(k).startswith("cost_update") for k in state)
 
 
 @pytest.mark.asyncio

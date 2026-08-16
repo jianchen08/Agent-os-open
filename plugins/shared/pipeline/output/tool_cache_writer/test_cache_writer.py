@@ -1,4 +1,4 @@
-# @feature: FP-0.2.〇 管道引擎 | @vision: V3 可嵌入 | @ci: python-plugins-test
+# @feature: FP-0.2.〇 管道引擎 | @vision: V3 可嵌入 | @ci: none-local
 """工具缓存写入断路接通的单测。
 
 验证 tool_cache（input）和 tool_cache_writer（output）共享模块级单例缓存，

@@ -9,8 +9,9 @@
  * 3. 事件到达 → 打开 FullscreenOverlay → DeclaredWidgetLayer 渲染声明 widget，
  *    事件 payload 合并进声明 props（widget 拿到真实数据：artifacts/annotations…）
  * 4. 通用底部操作栏按 payload.mode 提供交互，提交走既有真实通道：
- *    - choice / conversation → globalWS.sendInteractionResponse（human-interaction 回路）
- *    - review → globalWS.sendApproval（审批决策通道）
+ *    - choice / conversation / review → globalWS.sendInteractionResponse
+ *      （内核 ws 路由白名单只收 interaction_response，不收 type:'approval'——
+ *      review 曾走 sendApproval，消息会被内核 RouteOutcome::Ignored 静默丢弃）
  *
  * 扩展点语义：任何插件声明 fullscreen + on_event 的 widget，无需手写前端即可
  * 长出全屏面板。approval/plugin.json 的 approval_panel（review_document，
@@ -180,15 +181,15 @@ export function SchemaFullscreenHost({
           (typeof current.payload.thread_id === 'string' ? current.payload.thread_id : '') ||
           (typeof current.payload.run_id === 'string' ? current.payload.run_id : '') ||
           'approval'
-        if (current.mode === 'review') {
-          globalWS.sendApproval(threadId, result, (extra?.reason as string) ?? '')
-        } else {
-          globalWS.sendInteractionResponse(threadId, current.requestId, {
-            response_type: 'answered',
-            selected_option: result,
-            feedback: extra?.feedback,
-          })
-        }
+        // review 与 choice 统一走 interaction_response：内核 ws 白名单
+        // （kernel session router）只接受 interaction_response，type:'approval' 会被忽略。
+        // review 的 decision（approved/rejected）放 selected_option，附 reason。
+        globalWS.sendInteractionResponse(threadId, current.requestId, {
+          response_type: 'answered',
+          selected_option: result,
+          feedback: extra?.feedback,
+          reason: (extra?.reason as string) ?? '',
+        })
         removeItem(current.requestId)
       } finally {
         setSubmittingId(null)

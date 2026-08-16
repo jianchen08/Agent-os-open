@@ -86,21 +86,12 @@ class TestBug2ContainerWorkspacePriority:
 # ── BUG-3: _on_task_submitted 去重 ──────────────────────────────────────
 
 class TestBug3SubmittedDeduplication:
-    """验证 _on_task_submitted 有 set[str] 去重逻辑。"""
+    """验证 _on_task_submitted 有 set[str] 去重逻辑。
 
-    @pytest.mark.skip(reason="TaskWorker.__init__ 中不存在 _submitted_task_ids 字段")
-    def test_submitted_task_ids_initialized_as_set(self):
-        """BUG-3: TaskWorker.__init__ 应初始化 _submitted_task_ids 为 set[str]。"""
-        # 不能直接 import TaskWorker（依赖太重），用 mock 验证字段
-        # 改为检查源码中存在该字段
-        import inspect
-
-        from infrastructure import task_worker
-
-        source = inspect.getsource(task_worker.TaskWorker.__init__)
-        assert "_submitted_task_ids" in source, (
-            "TaskWorker.__init__ 应包含 _submitted_task_ids 字段初始化"
-        )
+    0.2 清理：原 test_submitted_task_ids_initialized_as_set 经反射检查
+    infrastructure.task_worker.TaskWorker.__init__ 源码——该 0.1 模块已删除，
+    死用例移除（见 docs/test_cleanup_0.2.md）。
+    """
 
     def test_dedup_set_blocks_duplicate_event(self):
         """BUG-3: 重复 task_id 应被 _submitted_task_ids 集合拦截。"""

@@ -1,4 +1,4 @@
-# @feature: FP-MIGR 0.1→0.2迁移 | @ci: python-plugins-test
+# @feature: FP-MIGR 0.1→0.2迁移 | @ci: python-coverage
 """allow 白名单优先单元测试 — _match_rules 的 allow 规则优先于 block/needs_approval。
 
 验证卡死根因修复：`wc -l ... 2>/dev/null` 这类安全命令被 dangerous_commands

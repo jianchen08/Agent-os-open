@@ -1,4 +1,4 @@
-# @feature: FP-0.2.〇 管道引擎 | @vision: V3 可嵌入 | @ci: python-plugins-test
+# @feature: FP-0.2.〇 管道引擎 | @vision: V3 可嵌入 | @ci: none-local
 """monitoring 插件（监控服务接口适配层）单元测试。
 
 覆盖（对齐 plugins/shared/system/monitoring/server.py）：

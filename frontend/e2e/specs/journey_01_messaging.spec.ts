@@ -63,8 +63,21 @@ test.describe('旅程01：对话流程', () => {
 
     // 核心断言：工具调用后文本不应断裂
     const textAfterTool = (await assistantMsg.textContent().catch(() => ''))?.length ?? 0;
-    await page.waitForTimeout(5_000);
-    const textLater = (await assistantMsg.textContent().catch(() => ''))?.length ?? 0;
+    // 轮询等待流式文本稳定（连续两次采样长度一致视为收敛），替代固定 5s sleep
+    let stableSamples = 0;
+    let prevLen = -1;
+    await expect
+      .poll(
+        async () => {
+          const len = (await assistantMsg.textContent().catch(() => ''))?.length ?? 0;
+          stableSamples = len > 0 && len === prevLen ? stableSamples + 1 : 0;
+          prevLen = len;
+          return stableSamples >= 2;
+        },
+        { timeout: 30_000, intervals: [500, 1000] },
+      )
+      .toBe(true);
+    const textLater = prevLen;
     console.log(`📊 工具调用后文本长度变化: ${textAfterTool} → ${textLater}`);
 
     expect(textLater, '工具调用后文本必须不减少').toBeGreaterThanOrEqual(textAfterTool);

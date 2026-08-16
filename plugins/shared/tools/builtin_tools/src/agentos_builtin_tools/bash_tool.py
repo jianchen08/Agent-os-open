@@ -1,9 +1,17 @@
 """Shell 命令执行工具。
 
 核心业务逻辑从 0.1 src/tools/builtin/bash/ 迁移。
-安全检查复用 0.1 的 SecurityChecker 模式。
 
-[来源: src/tools/builtin/bash/tool.py]
+危险命令黑名单（punch C17 单一事实源）：直接从共享层 bash 插件导入
+``bash.tool.DANGEROUS_PATTERNS``（SecurityChecker 分类为准），本文件不再
+维护本地副本。语义随事实源统一：
+- ``| bash`` / ``| sh`` 等管道到 shell 属 CAUTION（降级审批）而非硬拦——
+  builtin 路径无审批管道，故不在此拦截（与 bash/tool.py 分层原则一致）；
+- ``rm -rf`` / ``mkfs`` / ``dd if=`` 等不可逆灾难仍硬拦。
+
+导入路径：server.py / tests/conftest.py 把 plugins/shared/tools 与
+plugins/shared/tools/bash 注入 sys.path（bash.tool 以命名空间包导入，
+其平铺依赖 bash_types 等经 bash 目录解析）。
 """
 
 from __future__ import annotations
@@ -12,31 +20,9 @@ import asyncio
 import re
 from typing import Any
 
-from agentos_builtin_tools.result import ToolResult
+from bash.tool import DANGEROUS_PATTERNS
 
-# 危险命令正则（与 0.1 SecurityChecker.DANGEROUS_PATTERNS 对齐）
-_DANGEROUS_PATTERNS: list[str] = [
-    r"\brm\s+-rf\b",
-    r"\brm\s+-rf\s+/",
-    r"\|\s*bash\b",
-    r"\|\s*sh\b",
-    r"\|\s*zsh\b",
-    r"\|\s*fish\b",
-    r";\s*rm\b",
-    r";\s*del\b",
-    r";\s*format\b",
-    r"\bmkfs\b",
-    r"\bdd\s+if=",
-    r">\s*/dev/sd[a-z]",
-    r":\(\)\s*\{\s*:\|:&\s*\};:",
-    r"\bdel\s+/f\s+/s\s+/q\b",
-    r"\brmdir\s+/s\s+/q\b",
-    r"\bformat\s+[a-z]:",
-    r"\bshutdown\b",
-    r"\breboot\b",
-    r"\bpoweroff\b",
-    r"\bhalt\b",
-]
+from agentos_builtin_tools.result import ToolResult
 
 BASH_EXECUTE_SCHEMA: dict[str, Any] = {
     "type": "object",
@@ -66,13 +52,15 @@ BASH_EXECUTE_OUTPUT_SCHEMA: dict[str, Any] = {
 
 
 def _check_dangerous(command: str) -> str | None:
-    """检查命令是否包含危险模式。
+    """检查命令是否包含危险模式（单一事实源：bash.tool.DANGEROUS_PATTERNS）。
+
+    匹配语义与 SecurityChecker.check 对齐：re.IGNORECASE（大小写不敏感）。
 
     Returns:
         匹配到的危险模式描述，None 表示安全。
     """
-    for pattern in _DANGEROUS_PATTERNS:
-        if re.search(pattern, command):
+    for pattern in DANGEROUS_PATTERNS:
+        if re.search(pattern, command, re.IGNORECASE):
             return f"dangerous command detected: pattern={pattern}"
     return None
 

@@ -401,23 +401,5 @@ export function handleGlobalError(eventData: any) {
   })
 }
 
-/** 处理流式保活事件 */
-export function handleStreamKeepalive(eventData: any) {
-  // keepalive 是"连接保活"信号，同时检查是否有卡死的 streaming 管道
-  const pipelineId = resolvePipelineId(eventData)
-  if (!pipelineId) return
-
-  const STREAMING_TIMEOUT_MS = 180_000 // 3 分钟
-  const now = Date.now()
-  const streamingState = pipelineStore.getState().streamingState
-  for (const [pid, info] of Object.entries(streamingState)) {
-    const startedAt = (info as any)?.startedAt
-    if (startedAt && (now - startedAt) > STREAMING_TIMEOUT_MS) {
-      _debugLogger.warn(
-        '[STREAMING-WATCHDOG] 管道 %s 流式超时（%ds），强制终止',
-        pid.slice(0, 12), Math.round((now - startedAt) / 1000),
-      )
-      terminatePipeline(pid, undefined)
-    }
-  }
-}
+// 2026-08 清理：handleStreamKeepalive（stream_keepalive 事件）已删除——
+// 后端（kernel ws_session / capability_router / 插件 event-bus）无该事件发射源。

@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# @feature: FP-MIGR 0.1→0.2迁移 | @vision: V3 可嵌入 | @ci: python-coverage
 """第三批迁移模块（connectors + scene + workspace）导入验证测试。
 
 验证：

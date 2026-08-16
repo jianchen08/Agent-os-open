@@ -249,11 +249,12 @@ python -m pytest \
   tests/channels \
   tests/connectors \
   tests/monitoring \
-  --tb=long --no-header -q \
-  "${DESELECT_ARGS[@]}"   # 从 .github/known-skipped-tests.txt 动态读取 --deselect
+  --tb=long --no-header -q
 ```
 
-- `.github/known-skipped-tests.txt` 是**基线锁**：该文件只能删不能加，防止红测静默扩散。修复红测后从该文件移除即可恢复门禁。
+- 0.1 的逐条 `--deselect` 红测名单（`.github/known-skipped-tests.txt`）已废弃删除；
+  0.2 的红测治理统一走**失败数基线锁** `.github/pytest-failure-baseline.txt`
+  （`scripts/check_pytest_failure_baseline.py`，只减不增，见批次 4/5）。
 
 **批次 2/3 — 精确纳入的稳定测试**（整目录存在既有红测时，仅纳入指定文件）：
 

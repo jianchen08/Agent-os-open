@@ -108,7 +108,7 @@ async fn test_actions_execute_known_command_returns_success() {
         vec![json!({ "id": "test.cmd", "title": "Test Command" })],
     )];
     let mut state = AppState::new();
-    state.manifests = std::sync::Arc::new(manifests);
+    state.manifests = std::sync::Arc::new(tokio::sync::RwLock::new(manifests));
 
     let app = build_router(state);
     let token = admin_token(&app).await;
@@ -165,4 +165,57 @@ async fn test_actions_execute_missing_action_field_returns_400() {
         StatusCode::BAD_REQUEST,
         "缺 action 字段应返回 400"
     );
+}
+
+/// POST /api/v1/actions/execute:command 声明 `tool` 字段 + invoker 不可用(None)
+/// → 返回明确失败(success:false + "工具执行器不可用"),不静默假成功。
+#[tokio::test]
+async fn test_actions_execute_tool_declared_but_no_invoker_returns_failure() {
+    let manifests = vec![manifest_with_commands(
+        "tool_plugin",
+        vec![json!({
+            "id": "routed.cmd",
+            "title": "Routed Command",
+            "tool": "some_tool"
+        })],
+    )];
+    let mut state = AppState::new();
+    state.manifests = std::sync::Arc::new(tokio::sync::RwLock::new(manifests));
+    // state.invoker 保持 None(AppState::new 默认)——模拟执行器缺席装配
+
+    let app = build_router(state);
+    let token = admin_token(&app).await;
+    let body = serde_json::to_string(&json!({
+        "action": "routed.cmd",
+        "args": { "foo": "bar" },
+    }))
+    .unwrap();
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/v1/actions/execute")
+                .header("authorization", format!("Bearer {token}"))
+                .header("content-type", "application/json")
+                .body(Body::from(body))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK, "降级失败走业务信封 200");
+
+    let body = axum::body::to_bytes(response.into_body(), 64 * 1024)
+        .await
+        .unwrap();
+    let json: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(
+        json["success"], false,
+        "tool 声明 + invoker=None 必须返回 success=false: {json}"
+    );
+    let err = json["error"].as_str().unwrap_or_default();
+    assert!(
+        err.contains("工具执行器不可用"),
+        "error 字段应说明工具执行器不可用: {json}"
+    );
+    assert_eq!(json["plugin_id"], "tool_plugin");
 }

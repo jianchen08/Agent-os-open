@@ -242,7 +242,8 @@ async fn test_official_sdk_lifecycle_notification_reaches_sidecar() {
         return;
     }
 
-    // 无 router 生命周期也能跑：notifications/on_load 是 fire-and-forget
+    // 无 router 生命周期也能跑：notifications/on_load 是 fire-and-forget。
+    // 注意：这里是普通 raw string（不走 format!），Python 字面量用单层花括号。
     let script = r#"
 import json
 from typing import Any
@@ -250,7 +251,7 @@ from typing import Any
 from agentos_plugin_sdk import AgentOSPlugin
 
 plugin = AgentOSPlugin("lifecycle_probe")
-state = {{"got": None}}
+state = {"got": None}
 
 
 @plugin.on_load
@@ -260,11 +261,11 @@ async def _on_load(params: dict) -> None:
 
 @plugin.tool(
     name="last_on_load",
-    schema={{"type": "object", "properties": {{}}}},
+    schema={"type": "object", "properties": {}},
     description="return last on_load params",
 )
 async def last_on_load() -> dict:
-    return {{"got": state["got"]}}
+    return {"got": state["got"]}
 
 
 if __name__ == "__main__":

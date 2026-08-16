@@ -1,11 +1,12 @@
 #!/usr/bin/env python
-"""Rust 编译产物清理：调试/覆盖率跑完一轮后回收磁盘。
+"""Rust 编译产物清理：调试/覆盖率轮次结束后回收磁盘空间。
 
-背景：cargo 不会自动回收旧产物，debug 符号 + llvm-cov 插桩曾累计 55G+。
-定位问题的运行时二进制是 kernel/target/release/agentos-kernel(.exe)，
-debug 产物与覆盖率插桩产物在调试结束后没有保留价值。
+cargo 不会自动回收旧产物，debug 符号与 llvm-cov 插桩目录会随每轮
+调试/覆盖率持续增长。定位问题用的运行时二进制是
+kernel/target/release/agentos-kernel(.exe)，debug 产物与覆盖率插桩
+产物在调试结束后没有保留价值，本脚本负责把它们清掉。
 
-默认清理（保留 release）：
+清理目标（保留策略：release 产物默认保留，除非 --with-release）：
 - kernel/target/debug/            dev/test 构建产物（含残留的 incremental/）
 - kernel/target/llvm-cov-target/  cargo-llvm-cov 插桩构建
 - plugins/**/target/debug/        各插件 crate 的 debug 产物
@@ -28,7 +29,13 @@ KERNEL_TARGET = ROOT / "kernel" / "target"
 
 
 def _force_rmtree(path: Path) -> None:
-    """Windows 兼容删除：清只读位后重试；目录被占用则抛 OSError 交上层提示。"""
+    """Windows 兼容删除：清只读位后重试；目录被占用则抛 OSError 交上层提示。
+
+    注意：保持 onerror= 而非 3.12+ 的 onexc=——pyproject.toml 声明
+    requires-python = ">=3.11"，onexc 参数在 3.11 上不存在（3.12 才加入）。
+    onerror 自 3.12 起 DeprecationWarning，本机 3.14 实测仍可正常工作；
+    若未来最低支持版本升到 >=3.12，再迁移为 onexc=。
+    """
 
     def _onerror(func, target, exc_info):
         try:

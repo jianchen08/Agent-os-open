@@ -448,6 +448,28 @@ export async function saveAPIConfig(
 }
 
 /**
+ * 探测外部 API 端点健康状态
+ *
+ * 直连用户配置的 base_url（第三方主机），不走 apiClient——
+ * 携带本站 Authorization 头发往任意用户可填的外部地址会泄漏凭证。
+ * 5s 超时，任意异常（网络/CORS/非 2xx）一律视为不可达。
+ *
+ * @param baseUrl 外部端点基础 URL
+ * @returns 端点是否健康
+ */
+export async function testAPIEndpointHealth(baseUrl: string): Promise<boolean> {
+  try {
+    const res = await fetch(`${baseUrl.replace(/\/+$/, '')}/health`, {
+      method: 'GET',
+      signal: AbortSignal.timeout(5000),
+    })
+    return res.ok
+  } catch {
+    return false
+  }
+}
+
+/**
  * 任务并发配置类型
  */
 export interface TaskConcurrencyConfig {

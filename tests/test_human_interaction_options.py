@@ -1,4 +1,4 @@
-# @feature: FP-0.2.五 审批闭环 | @ci: python-coverage
+# @feature: FP-0.2.五 审批闭环 | @ci: none-local（不在任何 CI 车道：python-coverage 的 BASE_TEST_PATHS 未收集本文件）
 """human_interaction 工具 options 传参形态归一化测试。
 
 背景（2026-08-14 实测）：MiniMax-M3 会把 options 传成对象包裹

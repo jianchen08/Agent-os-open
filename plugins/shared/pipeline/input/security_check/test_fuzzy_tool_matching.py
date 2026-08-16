@@ -1,4 +1,4 @@
-# @feature: FP-0.2.〇 管道引擎 | @vision: V3 可嵌入 | @ci: python-plugins-test
+# @feature: FP-0.2.〇 管道引擎 | @vision: V3 可嵌入 | @ci: none-local
 """工具名模糊匹配的单测。
 
 验证 SecurityCheckPlugin 的 _tool_matches_rule / _fuzzy_tool_eq / _levenshtein：

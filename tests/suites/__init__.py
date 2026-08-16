@@ -10,6 +10,10 @@
 7. agent      - Agent测试
 8. llm        - LLM测试
 
+0.2 架构说明：src/ 已删除（迁移到 plugins/ 与 kernel/），原"把 src/ 加入
+sys.path"的注入已移除；各套件如需插件源码路径，经各自的 conftest /
+tests/_*_path 辅助模块注入。
+
 使用方法：
     pytest tests/suites/ -v                           # 运行所有测试
     pytest tests/suites/core/ -v                      # 只运行核心单元测试
@@ -17,13 +21,7 @@
     pytest tests/suites/ -m "not integration" -v       # 跳过集成测试
 """
 
-import sys
 from pathlib import Path
-
-# 添加src到路径
-SRC_DIR = Path(__file__).parent.parent / "src"
-if str(SRC_DIR) not in sys.path:
-    sys.path.insert(0, str(SRC_DIR))
 
 import pytest
 

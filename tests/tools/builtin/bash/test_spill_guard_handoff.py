@@ -1,4 +1,4 @@
-# @feature: FP-0.2.spill_guard 任务 2 | @vision: V1 可进化 | @ci: python-unit
+# @feature: FP-0.2.spill_guard 任务 2 | @vision: V1 可进化 | @ci: none-local
 """bash 工具截断清理（spill_guard 兜底就绪后）——TDD 规格。
 
 设计原则（task_spill_guard.md 任务 2）：工具只负责"执行 + 语义提取"，

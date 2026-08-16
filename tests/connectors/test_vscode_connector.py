@@ -1,4 +1,4 @@
-# @feature: FP-0.2.二 内部模块manifest | @vision: V3 可嵌入 | @ci: python-plugins-test
+# @feature: FP-0.2.二 内部模块manifest | @vision: V3 可嵌入 | @ci: none-local
 """VSCode 连接器的单元测试。
 
 测试 VSCodeConnector 的生命周期（connect/disconnect）、上下文获取、操作执行和连接失败场景。

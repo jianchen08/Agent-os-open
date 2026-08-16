@@ -3,22 +3,75 @@
 包含 file_read / file_write / list_directory / create_directory / copy_file / move_file / delete_file。
 核心业务逻辑从 0.1 src/tools/builtin/ 迁移，外层用 SDK 封装为 MCP 工具。
 
+工作空间约束（punch B5，参考 download/tool.py 的 project_root 前缀校验）：
+- file_write / move_file / delete_file：workspace/project_root 上下文可用时，
+  禁止根外绝对路径（写/删/移越界被拒，防 LLM 越出工作空间破坏宿主文件）。
+- file_read：workspace 外允许（兼容读取系统配置等场景），但记录 warning。
+- 上下文未注入（workspace/project_root 均缺省）时不约束（0.1 兼容路径），
+  记 debug 留痕。workspace/project_root 为运行时注入参数（不出现在 LLM schema）。
+
 [来源: src/tools/builtin/{file_read,file_write,list_directory,create_directory,copy_file,move_file,delete_file}/tool.py]
 """
 
 from __future__ import annotations
 
 import asyncio
+import logging
 import shutil
 from pathlib import Path
 from typing import Any
 
 from agentos_builtin_tools.result import ToolResult
 
+logger = logging.getLogger(__name__)
+
 # 大文件不再拒绝（task_spill_guard.md 任务 2）：大输出兜底由 pipeline 的
 # spill_guard 统一负责（原文存档 + 提取 + 定位符），工具只负责"读文件 +
 # 返回内容"。行范围（start_line/end_line/tail）是用户显式指定的查询窗口，
 # 不属于静默截断，保留。
+
+
+def _check_workspace_path(
+    path: str,
+    workspace: str | None,
+    project_root: str | None,
+    operation: str,
+) -> tuple[bool, str, str | None]:
+    """project_root 前缀校验（写/删/移越界拒绝；读放行但记录）。
+
+    Args:
+        path: 待校验路径（绝对或相对；相对路径以根为基准解析）
+        workspace: 工作空间路径（运行时注入，可选）
+        project_root: 项目根路径（运行时注入，可选；优先于 workspace 作根）
+        operation: "read" / "write" / "delete" / "move"（后三者一律拒绝根外路径）
+
+    Returns:
+        (是否允许, 拒绝原因, 校验用绝对路径)
+        第三个值仅在注入了 workspace/project_root 时非 None——写/删/移应
+        以该路径执行，保证"校验的路径 = 实际操作的路径"（相对路径以根锚定）。
+    """
+    root_str = project_root or workspace
+    if not root_str:
+        # 未注入工作空间上下文：不约束（0.1 兼容），留痕便于排查越界调用
+        logger.debug("[fs_tools] 无 workspace/project_root 上下文，跳过 %s 校验: %s", operation, path)
+        return True, "", None
+
+    root = Path(root_str).resolve()
+    target = Path(path)
+    resolved = target.resolve() if target.is_absolute() else (root / target).resolve()
+    try:
+        resolved.relative_to(root)
+    except ValueError:
+        if operation == "read":
+            # 读放行但记录（越界读是可观测事件）
+            logger.warning(
+                "[fs_tools] file_read 访问 workspace 外路径（允许但记录）| path=%s | root=%s",
+                resolved,
+                root,
+            )
+            return True, "", str(resolved)
+        return False, f"路径 {path} 超出 workspace/project_root（{root}）范围，{operation} 操作被拒绝", str(resolved)
+    return True, "", str(resolved)
 
 
 # ═════════════════════════════════════════════════════════════
@@ -52,11 +105,16 @@ async def file_read(
     start_line: int = 1,
     end_line: int | None = None,
     tail: int | None = None,
+    workspace: str | None = None,
+    project_root: str | None = None,
 ) -> ToolResult:
     """读取文件内容。
 
-    支持行范围读取和尾部读取。
+    支持行范围读取和尾部读取。workspace 外路径允许读取但记录 warning（B5）。
     """
+    # 工作空间约束（读路径：放行但记录，保持只读向后兼容）
+    _check_workspace_path(path, workspace, project_root, operation="read")
+
     file_path = Path(path)
     if not file_path.exists():
         return ToolResult.failure_result(f"File not found: {path}")
@@ -143,8 +201,17 @@ async def file_write(
     old_str: str | None = None,
     new_str: str | None = None,
     create_backup: bool = True,
+    workspace: str | None = None,
+    project_root: str | None = None,
 ) -> ToolResult:
-    """写入/编辑文件。"""
+    """写入/编辑文件。workspace/project_root 可用时禁止根外路径（B5）。"""
+    # 工作空间约束（写路径：根外一律拒绝；相对路径以根锚定后执行）
+    allowed, reason, resolved = _check_workspace_path(path, workspace, project_root, operation="write")
+    if not allowed:
+        return ToolResult.failure_result(reason)
+    if resolved is not None:
+        path = resolved
+
     file_path = Path(path)
 
     try:
@@ -399,12 +466,34 @@ async def move_file(
     destination: str | None = None,
     moves: list[dict[str, str]] | None = None,
     overwrite: bool = False,
+    workspace: str | None = None,
+    project_root: str | None = None,
 ) -> ToolResult:
-    """移动或重命名文件/目录。"""
+    """移动或重命名文件/目录。源与目标均须在 workspace/project_root 内（B5）。"""
+    # 工作空间约束：move 同时改动源（移出）与目标（写入），两端都校验；
+    # 相对路径以根锚定后执行（校验的路径 = 实际操作的路径）
+    if source:
+        allowed, reason, resolved = _check_workspace_path(source, workspace, project_root, operation="move")
+        if not allowed:
+            return ToolResult.failure_result(reason)
+        if resolved is not None:
+            source = resolved
+    if destination:
+        allowed, reason, resolved = _check_workspace_path(
+            destination, workspace, project_root, operation="move"
+        )
+        if not allowed:
+            return ToolResult.failure_result(reason)
+        if resolved is not None:
+            destination = resolved
+
     if moves:
         results: list[dict[str, Any]] = []
         for item in moves:
-            r = await move_file(item["source"], item["destination"], overwrite=overwrite)
+            r = await move_file(
+                item["source"], item["destination"],
+                overwrite=overwrite, workspace=workspace, project_root=project_root,
+            )
             results.append({"source": item["source"], "destination": item["destination"], "success": r.success})
         return ToolResult.success_result({"results": results})
 
@@ -452,11 +541,23 @@ async def delete_file(
     paths: list[str] | None = None,
     recursive: bool = False,
     force: bool = False,
+    workspace: str | None = None,
+    project_root: str | None = None,
 ) -> ToolResult:
-    """删除文件或目录。"""
+    """删除文件或目录。workspace/project_root 可用时禁止根外路径（B5）。"""
     target_paths = paths if paths else [path] if path else []
     if not target_paths:
         return ToolResult.failure_result("path or paths is required")
+
+    # 工作空间约束（删除路径：根外一律拒绝，批量场景逐条校验；
+    # 相对路径以根锚定后执行）
+    anchored: list[str] = []
+    for p in target_paths:
+        allowed, reason, resolved = _check_workspace_path(p, workspace, project_root, operation="delete")
+        if not allowed:
+            return ToolResult.failure_result(reason)
+        anchored.append(resolved if resolved is not None else p)
+    target_paths = anchored
 
     results: list[dict[str, Any]] = []
     all_success = True

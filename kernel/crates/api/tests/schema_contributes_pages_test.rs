@@ -55,7 +55,7 @@ async fn fetch_schema(manifests: Vec<PluginManifest>, enabled_ids: HashSet<Strin
     let state = AppState::with_config(json!({}));
     // 注入 manifests + enabled_plugin_ids(L1 过滤依赖它,缺省空集会导致 contributes 不出口)
     let state = AppState {
-        manifests: Arc::new(manifests),
+        manifests: Arc::new(RwLock::new(manifests)),
         enabled_plugin_ids: Arc::new(RwLock::new(enabled_ids)),
         ..state
     };

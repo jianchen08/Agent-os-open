@@ -84,12 +84,13 @@ vi.mock('@/types/activity', async (importOriginal) => {
 })
 
 // ---------------------------------------------------------------------------
-//  Mock: WebSocket 服务 (用于 useRealtimeEvents 集成测试)
+//  Mock: GlobalWebSocket（真实订阅面：useRealtimeEvents 经 globalWS 订阅）
+//  此前 mock 的是无人 import 的 WebSocketService（mock 空气），事件从未触达真实 hook。
 // ---------------------------------------------------------------------------
 const listeners: Record<string, Set<(...args: any[]) => void>> = {}
 
-vi.mock('@/services/websocket/WebSocketService', () => ({
-  webSocketService: {
+vi.mock('@/services/websocket/GlobalWebSocket', () => ({
+  globalWS: {
     subscribe: vi.fn((event: string, cb: (...a: any[]) => void) => {
       if (!listeners[event]) listeners[event] = new Set()
       listeners[event].add(cb)
@@ -97,29 +98,10 @@ vi.mock('@/services/websocket/WebSocketService', () => ({
     unsubscribe: vi.fn((event: string, cb: (...a: any[]) => void) => {
       listeners[event]?.delete(cb)
     }),
-  },
-}))
-
-vi.mock('@/constants/websocket', () => ({
-  WS_SERVER_EVENTS: {
-    STREAM_START: 'stream_start',
-    STREAM_CHUNK: 'stream_chunk',
-    STREAM_END: 'stream_end',
-    STREAM_ERROR: 'stream_error',
-    EXECUTION_START: 'execution_start',
-    EXECUTION_PROGRESS: 'execution_progress',
-    EXECUTION_OUTPUT: 'execution_output',
-    EXECUTION_DONE: 'execution_done',
-    EXECUTION_CANCELLED: 'execution_cancelled',
-    SUB_AGENT_CREATED: 'sub_agent_created',
-    SUB_AGENT_WAITING_INPUT: 'sub_agent_waiting_input',
-    SUB_AGENT_COMPLETED: 'sub_agent_completed',
-    WORKFLOW_STEP_UPDATE: 'workflow_step_update',
-  },
-  WebSocketStatus: {
-    DISCONNECTED: 'disconnected',
-    CONNECTING: 'connecting',
-    CONNECTED: 'connected',
+    send: vi.fn(),
+    sendInteractionResponse: vi.fn().mockResolvedValue(undefined),
+    connect: vi.fn(),
+    status: 'connected',
   },
 }))
 
@@ -381,54 +363,40 @@ describe('ErrorRecoveryFlow — AC-1l: 错误恢复流程', () => {
   })
 
   // -----------------------------------------------------------------------
-  // 附加：useRealtimeEvents 执行错误恢复集成
+  // 附加：useRealtimeEvents 任务生命周期集成
+  // （原 execution_start/done 集成用例已删除：execution_* 事件后端无发射源，
+  //   订阅已随 2026-08 死接线清理移除——原用例断言的是从未真实生效的链路）
   // -----------------------------------------------------------------------
-  describe('useRealtimeEvents 执行错误恢复集成', () => {
-    it('execution_start → execution_done(failed) → execution_start → execution_done(success)', () => {
+  describe('useRealtimeEvents 任务事件集成', () => {
+    it('task_status_update 失败态应更新 longTermTaskStore 并 bump 工作区版本', async () => {
+      const { useLongTermTaskStore } = await import('@/stores/longTermTaskStore')
+      useLongTermTaskStore.setState({
+        tasks: [
+          { id: 'task-err', title: '失败恢复任务', status: 'running', currentPhase: 'execute' },
+        ] as never,
+      })
+
       renderHook(() => useRealtimeEvents())
 
-      // 第一次执行 → 失败
-      act(() => {
-        emitEvent('execution_start', {
-          execution_id: 'exec-1',
-          execution_type: 'tool',
-          name: 'deploy',
-        })
-      })
-      let state = useLayoutModeStore.getState()
-      expect(state.activeExecutions).toHaveLength(1)
-      expect(state.activeExecutions[0].status).toBe('running')
-
-      act(() => {
-        emitEvent('execution_done', {
-          execution_id: 'exec-1',
-          success: false,
+      const versionBefore = useLayoutModeStore.getState().workspaceDataVersion
+      await act(async () => {
+        emitEvent('task_status_update', {
+          task_id: 'task-err',
+          new_status: 'failed',
           error: '连接超时',
         })
       })
-      state = useLayoutModeStore.getState()
-      expect(state.activeExecutions[0].status).toBe('failed')
 
-      // 第二次执行 → 成功
-      act(() => {
-        emitEvent('execution_start', {
-          execution_id: 'exec-2',
-          execution_type: 'tool',
-          name: 'deploy',
-        })
-      })
-      state = useLayoutModeStore.getState()
-      expect(state.activeExecutions).toHaveLength(2)
-
-      act(() => {
-        emitEvent('execution_done', {
-          execution_id: 'exec-2',
-          success: true,
-        })
-      })
-      state = useLayoutModeStore.getState()
-      expect(state.activeExecutions[0].status).toBe('failed')
-      expect(state.activeExecutions[1].status).toBe('completed')
+      const task = useLongTermTaskStore
+        .getState()
+        .tasks.find((t: { id: string }) => t.id === 'task-err') as {
+        status: string
+        error?: string
+      }
+      expect(task).toBeDefined()
+      expect(task.status).toBe('failed')
+      expect(task.error).toBe('连接超时')
+      expect(useLayoutModeStore.getState().workspaceDataVersion).toBeGreaterThan(versionBefore)
     })
   })
 })

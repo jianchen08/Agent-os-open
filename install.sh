@@ -1,4 +1,13 @@
 #!/usr/bin/env bash
+# ⚠️⚠️⚠️ 已废弃（仅适用于 0.1 归档）⚠️⚠️⚠️
+#
+# 本脚本面向 0.1 布局（src/ + requirements.txt + channels.websocket.app_factory），
+# 这些路径在 0.2 中均已删除，执行必然失败。保留仅作 0.1 归档参考。
+#
+# 0.2 安装/启动方式：
+#   - Linux/macOS:   ./start_web_02.sh
+#   - Windows:       install_native_docker.bat 或 start_web_02.bat
+#
 # Agent OS 一键部署脚本 (Linux / macOS)
 #
 # 职责:
@@ -14,6 +23,11 @@
 #           macOS 用 Docker Desktop(单一后端)。两者都不存在 WSL2 的脆弱性。
 
 set -euo pipefail
+
+# 0.1 死入口拦截：0.2 下继续执行只会半途失败，这里直接退出。
+echo "[ERROR] install.sh 仅适用于 0.1 归档布局（src/ + channels.websocket），在 0.2 中不可用。" >&2
+echo "        0.2 请使用: ./start_web_02.sh (Linux/macOS) 或 install_native_docker.bat / start_web_02.bat (Windows)" >&2
+exit 1
 
 # ── 颜色与日志 ────────────────────────────────────────────────
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; CYAN='\033[0;36m'; NC='\033[0m'

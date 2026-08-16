@@ -221,7 +221,14 @@ impl McpClient {
     pub async fn connect(&mut self) -> Result<(), McpError> {
         match &self.transport {
             McpTransport::Stdio { command, args } => {
-                let mut cmd = Command::new(command);
+                // Windows：npx/npm 等是 .cmd 批处理，CreateProcess 只找 .exe——
+                // 无扩展名命令先按 PATHEXT 探测解析成全路径，否则 spawn 报
+                // "program not found"（design_generate/browser_test 等 MCP 起不来）。
+                #[cfg(windows)]
+                let resolved = resolve_windows_command(command);
+                #[cfg(not(windows))]
+                let resolved = command.clone();
+                let mut cmd = Command::new(&resolved);
                 cmd.args(args)
                     .stdin(Stdio::piped())
                     .stdout(Stdio::piped())
@@ -1084,10 +1091,40 @@ pub fn build_declared_capabilities_from_namespaces<T: AsRef<str>>(namespaces: &[
         .collect()
 }
 
+/// Windows 下解析无扩展名命令为可执行全路径（PATHEXT 语义）。
+///
+/// npm 生态的 `npx`/`npm`/`pnpm` 在 Windows 上是 `.cmd` 批处理，而
+/// `Command::new("npx")` 走 CreateProcess 只找 `.exe`，直接报 program not found。
+/// 按 `PATHEXT`（缺省 `.COM;.EXE;.BAT;.CMD`）逐个 PATH 目录探测，命中即返回
+/// 全路径（`.bat`/`.cmd` 由 Rust 标准库自动经 cmd.exe 启动并转义参数）。
+/// 已带扩展名/路径分隔符的命令原样返回；探测不到也原样返回（让 spawn 报
+/// 真实错误，不吞掉病因）。
+#[cfg(windows)]
+fn resolve_windows_command(command: &str) -> String {
+    if command.contains('.') || command.contains('\\') || command.contains('/') {
+        return command.to_string();
+    }
+    let pathext = std::env::var("PATHEXT").unwrap_or_else(|_| ".COM;.EXE;.BAT;.CMD".to_string());
+    let paths = std::env::var("PATH").unwrap_or_default();
+    for dir in paths.split(';').filter(|s| !s.is_empty()) {
+        for ext in pathext.split(';').filter(|s| !s.is_empty()) {
+            let candidate = std::path::Path::new(dir).join(format!("{command}{ext}"));
+            if candidate.is_file() {
+                return candidate.to_string_lossy().into_owned();
+            }
+        }
+    }
+    command.to_string()
+}
+
 /// 把字符串里的 `${ENV_VAR}` 占位替换为环境变量值。
 ///
 /// 引用的变量未设置时报错（早暴露，不静默放行）——外部 MCP 端点的鉴权值缺失
 /// 通常意味着配置未就绪，连出去也会被 401 拒绝，不如在 connect 时直接失败。
+///
+/// 默认值语法（shell 标准，用于可选变量——如 omnisearch 的限流 key，缺失只降级
+/// 不阻断）：`${VAR:-default}`（未设置**或为空**用 default）、`${VAR-default}`
+/// （仅未设置用 default）。无默认值的未设置变量仍走早失败路径。
 pub fn resolve_env_placeholders(raw: &str) -> Result<String, McpError> {
     let mut out = String::with_capacity(raw.len());
     let mut rest = raw;
@@ -1107,10 +1144,30 @@ pub fn resolve_env_placeholders(raw: &str) -> Result<String, McpError> {
                         break;
                     }
                     Some(end) => {
-                        let var = &after[..end];
-                        let val = std::env::var(var).map_err(|_| McpError::ConnectionFailed {
-                            message: format!("HTTP MCP 端点引用了未设置的环境变量: ${{{}}}", var),
-                        })?;
+                        let spec = &after[..end];
+                        // shell 标准默认值语法："${VAR:-def}"（未设置或空用 def）、
+                        // "${VAR-def}"（仅未设置用 def）；环境变量名不含 '-'，可安全分割。
+                        let (var, default): (&str, Option<&str>) =
+                            if let Some(pos) = spec.find(":-") {
+                                (&spec[..pos], Some(&spec[pos + 2..]))
+                            } else if let Some(pos) = spec.find('-') {
+                                (&spec[..pos], Some(&spec[pos + 1..]))
+                            } else {
+                                (spec, None)
+                            };
+                        let val = match default {
+                            // ":-" 与 "-" 的差别只在空串处理：spec 含 ":-" 时空串也取默认。
+                            Some(d) => {
+                                let empty_means_default = spec.contains(":-");
+                                match std::env::var(var) {
+                                    Ok(v) if !(empty_means_default && v.is_empty()) => v,
+                                    _ => d.to_string(),
+                                }
+                            }
+                            None => std::env::var(var).map_err(|_| McpError::ConnectionFailed {
+                                message: format!("HTTP MCP 端点引用了未设置的环境变量: ${{{var}}}"),
+                            })?,
+                        };
                         out.push_str(&val);
                         rest = &after[end + 1..];
                     }
@@ -1199,13 +1256,12 @@ mod tests {
     #[test]
     fn test_declared_capabilities_when_router_present() {
         // router 存在时，声明全部标准能力（含 service-registry / tool-executor）。
+        // logger / config-reader 已作为死能力删除（W-A8+M），不再声明。
         let caps = build_declared_capabilities(true);
         for ns in [
             "pipeline-executor",
-            "config-reader",
             "tenant-context",
             "event-bus",
-            "logger",
             "metrics",
             "tool-executor",
             "service-registry",
@@ -1214,6 +1270,12 @@ mod tests {
             assert!(
                 caps.get(ns).is_some(),
                 "build_declared_capabilities(true) 缺少 {ns}——sidecar 拿不到该 capability 句柄"
+            );
+        }
+        for dead in ["logger", "config-reader"] {
+            assert!(
+                caps.get(dead).is_none(),
+                "死能力 {dead} 不应再声明给 sidecar"
             );
         }
     }
@@ -1386,6 +1448,43 @@ mod tests {
         std::env::remove_var("MCP_PH_TEST");
         // 未设置变量 → 报错
         assert!(resolve_env_placeholders("${MCP_PH_TEST_DEFINITELY_UNSET}").is_err());
+    }
+
+    #[test]
+    fn test_resolve_env_placeholders_default_syntax() {
+        // ${VAR:-def}：未设置 → 用默认值
+        std::env::remove_var("MCP_PH_OPT_UNSET");
+        assert_eq!(
+            resolve_env_placeholders("${MCP_PH_OPT_UNSET:-}").unwrap(),
+            ""
+        );
+        assert_eq!(
+            resolve_env_placeholders("k=${MCP_PH_OPT_UNSET:-fallback}").unwrap(),
+            "k=fallback"
+        );
+        // ${VAR:-def}：已设置（非空）→ 用环境值
+        std::env::set_var("MCP_PH_OPT_SET", "real");
+        assert_eq!(
+            resolve_env_placeholders("${MCP_PH_OPT_SET:-fallback}").unwrap(),
+            "real"
+        );
+        // ${VAR:-def}：已设置但为空串 → 用默认值（shell ":-" 语义）
+        std::env::set_var("MCP_PH_OPT_EMPTY", "");
+        assert_eq!(
+            resolve_env_placeholders("${MCP_PH_OPT_EMPTY:-fallback}").unwrap(),
+            "fallback"
+        );
+        // ${VAR-def}：仅未设置才用默认；空串保留空串（shell "-" 语义）
+        assert_eq!(
+            resolve_env_placeholders("${MCP_PH_OPT_EMPTY-fallback}").unwrap(),
+            ""
+        );
+        assert_eq!(
+            resolve_env_placeholders("${MCP_PH_OPT_UNSET-fallback}").unwrap(),
+            "fallback"
+        );
+        std::env::remove_var("MCP_PH_OPT_SET");
+        std::env::remove_var("MCP_PH_OPT_EMPTY");
     }
 
     #[test]

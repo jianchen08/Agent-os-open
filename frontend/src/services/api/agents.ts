@@ -1,4 +1,9 @@
-/** Agent 管理 API 服务 提供 Agent 配置的增删改查接口，与后端 /api/v1/agents/* 端点对齐 */
+/** Agent 管理 API 服务 提供 Agent 配置读取接口，与后端 /api/v1/agents/* 端点对齐
+ *
+ * 2026-08 清理：getAgent/createAgent/updateAgent/deleteAgent/getDefaultAgent 指向
+ * 后端不存在的端点（kernel server.rs 仅注册 GET /api/v1/agents、GET /schema、
+ * GET/PUT /{id}/config），已连同其用例删除。
+ */
 
 import { API_ENDPOINTS } from '@/constants/api'
 import apiClient from '@/services/api/client'
@@ -59,60 +64,6 @@ export interface AgentListResponse {
   page_size: number
 }
 
-/** Agent 创建请求类型（与后端 AgentCreateRequest 对齐） */
-export interface AgentCreateRequest {
-  /** Agent 名称 */
-  name: string
-  /** 使用的 LLM 模型（必需） */
-  model: string
-  /** 系统提示词（必需） */
-  system_prompt: string
-  /** Agent 描述 */
-  description?: string
-  /** Agent 类型 */
-  agent_type?: string
-  /** Agent 等级（如 "L1"） */
-  level?: string
-  /** 绑定的工具列表 */
-  tool_names?: string[]
-  /** 最大迭代次数 */
-  max_iterations?: number
-  /** 超时时间（秒） */
-  timeout?: number
-  /** 标签 */
-  tags?: string[]
-  /** 元数据 */
-  metadata?: Record<string, unknown>
-}
-
-/** Agent 更新请求类型（与后端 AgentUpdateRequest 对齐） */
-export interface AgentUpdateRequest {
-  /** Agent 名称 */
-  name?: string
-  /** Agent 描述 */
-  description?: string
-  /** Agent 类型 */
-  agent_type?: string
-  /** Agent 状态 */
-  status?: 'active' | 'inactive'
-  /** 使用的 LLM 模型 */
-  model?: string
-  /** 系统提示词 */
-  system_prompt?: string
-  /** Agent 等级（如 "L1"） */
-  level?: string
-  /** 绑定的工具列表 */
-  tool_names?: string[]
-  /** 最大迭代次数 */
-  max_iterations?: number
-  /** 超时时间（秒） */
-  timeout?: number
-  /** 标签 */
-  tags?: string[]
-  /** 元数据 */
-  metadata?: Record<string, unknown>
-}
-
 /** 获取 Agent 列表查询参数 */
 export interface GetAgentsParams {
   /** 页码 */
@@ -141,66 +92,6 @@ export async function getAgents(
         search: params.search,
       },
     })
-    return response.data
-  }, options)
-}
-
-export async function getAgent(
-  agentId: string,
-  options: RetryOptions = {},
-): Promise<AgentResponse> {
-  if (!agentId || agentId.trim().length === 0) {
-    throw new Error('Agent ID 不能为空')
-  }
-
-  return requestWithRetry(async () => {
-    const response = await apiClient.get<AgentResponse>(API_ENDPOINTS.AGENTS.GET(agentId))
-    return response.data
-  }, options)
-}
-
-export async function createAgent(
-  data: AgentCreateRequest,
-  options: RetryOptions = {},
-): Promise<AgentResponse> {
-  if (!data.name || data.name.trim().length === 0) {
-    throw new Error('Agent 名称不能为空')
-  }
-
-  return requestWithRetry(async () => {
-    const response = await apiClient.post<AgentResponse>(API_ENDPOINTS.AGENTS.CREATE, data)
-    return response.data
-  }, options)
-}
-
-export async function updateAgent(
-  agentId: string,
-  data: AgentUpdateRequest,
-  options: RetryOptions = {},
-): Promise<AgentResponse> {
-  if (!agentId || agentId.trim().length === 0) {
-    throw new Error('Agent ID 不能为空')
-  }
-
-  return requestWithRetry(async () => {
-    const response = await apiClient.put<AgentResponse>(API_ENDPOINTS.AGENTS.UPDATE(agentId), data)
-    return response.data
-  }, options)
-}
-
-export async function deleteAgent(agentId: string, options: RetryOptions = {}): Promise<void> {
-  if (!agentId || agentId.trim().length === 0) {
-    throw new Error('Agent ID 不能为空')
-  }
-
-  return requestWithRetry(async () => {
-    await apiClient.delete(API_ENDPOINTS.AGENTS.DELETE(agentId))
-  }, options)
-}
-
-export async function getDefaultAgent(options: RetryOptions = {}): Promise<AgentResponse> {
-  return requestWithRetry(async () => {
-    const response = await apiClient.get<AgentResponse>(API_ENDPOINTS.AGENTS.DEFAULT)
     return response.data
   }, options)
 }

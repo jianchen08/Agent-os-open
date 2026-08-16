@@ -62,6 +62,8 @@ class IsolationGuard(IInputPlugin):
         """
         self._config = config or {}
         self._enabled = self._config.get("enabled", True)
+        # 服务不可用告警只打一次（低频留痕，避免每轮迭代刷屏）
+        self._service_warned = False
         # Docker 可用性来源：配置显式指定（_docker_auto=False，信任不刷新）
         # vs 自动检测（_docker_auto=True，execute 入口按冷却窗口复检）。
         # 区分来源是为了避免：启动那一刻 daemon 假死被永久钉死为 False，
@@ -457,6 +459,11 @@ class IsolationGuard(IInputPlugin):
         try:
             task_service = ctx.get_service("task_service")
         except KeyError:
+            # 跨插件服务接线属后续架构任务：未接线时按无 metadata 处理（降级语义不变），
+            # 低频 warning 留痕（只打一次）。
+            if not self._service_warned:
+                self._service_warned = True
+                logger.warning("[IsolationGuard] task_service 未接线，task metadata 读取降级为空")
             return {}
 
         try:

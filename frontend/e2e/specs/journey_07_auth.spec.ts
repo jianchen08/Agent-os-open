@@ -120,12 +120,16 @@ test.describe('旅程07：认证', () => {
     await page.reload();
     await page.waitForLoadState('networkidle');
 
-    // 验证被重定向到登录页或显示错误
-    await page.waitForTimeout(2000);
-    const currentUrl = page.url();
-    const isLoginPage = currentUrl.includes('login');
-    const hasLoading = await page.locator('text=加载中').isVisible().catch(() => false);
-    // 页面应处于受限状态（登录页或加载中）
-    expect(isLoginPage || hasLoading || currentUrl === '/', '过期 token 应导致受限访问').toBeTruthy();
+    // 验证被重定向到登录页或显示错误：轮询等待受限状态出现（替代固定 2s sleep）
+    await expect
+      .poll(
+        async () => {
+          const url = page.url();
+          const hasLoading = await page.locator('text=加载中').isVisible().catch(() => false);
+          return url.includes('login') || hasLoading || url === '/';
+        },
+        { timeout: 10_000 },
+      )
+      .toBeTruthy();
   });
 });

@@ -1,4 +1,4 @@
-# @feature: FP-0.2.可观测性 dsh_adapter 插件 | @ci: python-plugins-test
+# @feature: FP-0.2.可观测性 dsh_adapter 插件 | @ci: python-coverage
 """dsh_adapter 插件测试（task_dsh_plugin_adapter 任务 2 + 4）。
 
 分层：
@@ -190,7 +190,20 @@ class TestManifestContract:
 
     def test_server_registry_matches_manifest(self, manifest: dict):
         """server.py 的 @plugin.tool 注册面 = plugin.json 声明面（防漂移）。"""
-        import server  # noqa: PLC0415
+        # 显式路径 + 唯一模块名加载（同 test_migration._load_simple_server 约定）：
+        # 裸 `import server` 会被同 pytest 进程里其它插件目录（后插入 sys.path[0]，
+        # 如 memory）的 server.py 劫持，导致合并运行时误判注册面漂移。
+        import importlib.util as _ilu
+
+        mod_name = "dsh_adapter_server_under_test"
+        if mod_name not in sys.modules:
+            spec = _ilu.spec_from_file_location(mod_name, PLUGIN_DIR / "server.py")
+            assert spec is not None, "cannot load dsh_adapter server.py"
+            assert spec.loader is not None, "cannot load dsh_adapter server.py"
+            module = _ilu.module_from_spec(spec)
+            sys.modules[mod_name] = module
+            spec.loader.exec_module(module)
+        server = sys.modules[mod_name]
 
         registered = set(server.plugin._tools.keys())  # noqa: SLF001
         declared = {t["name"] for t in manifest["capabilities"]["tools"]}

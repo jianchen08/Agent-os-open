@@ -1,4 +1,4 @@
-# @feature: FP-0.2.CFG 配置注入 | @ci: python-coverage
+# @feature: FP-0.2.CFG 配置注入 | @ci: none-local（不在任何 CI 车道：python-coverage 的 BASE_TEST_PATHS 未收集本文件）
 """_config_models._expand_env_vars 的 .env 文件兜底测试（填 Key 免重启链路）。
 
 sidecar 继承内核环境，但内核只在启动时加载一次 .env——用户在设置页

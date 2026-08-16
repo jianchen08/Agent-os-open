@@ -1,13 +1,14 @@
 #!/usr/bin/env bash
 # WSL native docker 模式：确保 dockerd 运行并就绪。
-# 由 start_web_cn.bat 调用。把原 .bat 里的复杂单行 bash 抽成独立脚本，
+# 0.1 时代由 start_web_cn.bat 调用（该入口已随 0.1 删除）；
+# 现在作为独立运维脚本在 WSL 内手动运行（bash wsl_start_daemon.sh）。
 # 目的是给所有遍历 /proc 的命令（pgrep/pkill/docker）都加 timeout，
 # 避免 WSL2 内核被 D 状态死锁污染时无限挂起。
 #
 # 退出码约定：
 #   0  dockerd 已运行且 /run/docker.sock 可响应（docker ps 成功）
 #   7  操作超时（pgrep/pkill/docker 命令卡死，疑似内核 D 状态污染）
-#      -> 由上层 start_web_cn.bat 自动 wsl --shutdown 重启内核后重试
+#      -> 由上层调用方 wsl --shutdown 重启 WSL 内核后重试
 set -uo pipefail
 
 # 1. 探测 dockerd 是否已在运行。

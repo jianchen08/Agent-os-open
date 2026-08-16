@@ -1,4 +1,4 @@
-# @feature: FP-0.2.二 内部模块 manifest | @vision: V3 可嵌入 | @ci: python-plugins-test
+# @feature: FP-0.2.二 内部模块 manifest | @vision: V3 可嵌入 | @ci: python-coverage
 """集成测试——覆盖 10 个工具的核心场景。
 
 通过直接调用工具函数验证行为等价性（AC-08-3/4）。
@@ -179,6 +179,34 @@ class TestBashExecute:
         result = await bash_execute("rm -rf /")
         assert not result.success
         assert "dangerous" in result.error.lower()
+
+    @pytest.mark.asyncio
+    async def test_dangerous_patterns_case_insensitive(self) -> None:
+        """黑名单匹配大小写不敏感（与 SecurityChecker.check 的 IGNORECASE 语义对齐）。"""
+        result = await bash_execute("MKFS /dev/sda1")
+        assert not result.success
+        assert "dangerous" in result.error.lower()
+
+    @pytest.mark.asyncio
+    async def test_pipe_to_bash_not_hard_blocked(self) -> None:
+        """C17 语义统一：| bash 属 CAUTION（降级审批）而非硬拦——不返回 dangerous。
+
+        builtin 路径无审批管道，故此处放行执行（执行结果成败与安全拦截无关）。
+        """
+        result = await bash_execute("echo hi | bash")
+        assert "dangerous" not in (result.error or "").lower()
+
+    def test_dangerous_patterns_single_source(self) -> None:
+        """黑名单单一事实源：本包与共享层 bash.tool 引用同一份 DANGEROUS_PATTERNS。"""
+        from bash.tool import CAUTION_PATTERNS
+        from bash.tool import DANGEROUS_PATTERNS as CANONICAL
+
+        from agentos_builtin_tools import bash_tool
+
+        assert bash_tool.DANGEROUS_PATTERNS is CANONICAL
+        # 语义统一锚点：管道到 shell（| bash 等）不在硬拦清单，属共享层 CAUTION
+        assert r"| bash" in CAUTION_PATTERNS
+        assert not any(p.startswith(r"\|\s*") for p in CANONICAL)
 
     @pytest.mark.asyncio
     async def test_exit_code(self) -> None:

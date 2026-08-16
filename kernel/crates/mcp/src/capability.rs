@@ -12,7 +12,6 @@
 //! | pipeline-executor | resume | 恢复挂起的管道 |
 //! | pipeline-executor | start_run | 起一个新管道 |
 //! | event-bus | emit | 发事件/通知前端 |
-//! | config-reader | get | 读配置节 |
 //! | metrics | record | 插件上报指标（record_metric，监控设计 §三 通道2） |
 //! | service-registry | <storage 域>.* | 插件访问内核共享基础设施（M2：execution-records/summaries/memory 存储，基础设施下沉内核） |
 //! | frontend | emit | 插件 → 内核 → 前端一次性事件推送（ADR §3.5，task_observability：cost_update/tool_progress/termination_status） |
@@ -27,12 +26,14 @@ use serde_json::Value;
 use crate::error::McpError;
 
 /// 标准 capability 名称（与 SDK `STANDARD_CAPABILITIES` 对齐）。
+///
+/// 已删除的死能力（W-A8+M，两端同步）：`logger`（从未实现任何 method）、
+/// `config-reader`（内核 handler 已删，插件改走 manifest config_files +
+/// `/api/v1/plugins/{id}/config` 配置面）。
 pub const STANDARD_CAPABILITIES: &[&str] = &[
     "pipeline-executor",
-    "config-reader",
     "tenant-context",
     "event-bus",
-    "logger",
     "metrics",
     "tool-executor",
     "service-registry",
@@ -145,13 +146,6 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_config_reader_method() {
-        let (cap, method) = parse_capability_method("config-reader.get").unwrap();
-        assert_eq!(cap, "config-reader");
-        assert_eq!(method, "get");
-    }
-
-    #[test]
     fn test_parse_event_bus_method() {
         let (cap, method) = parse_capability_method("event-bus.emit").unwrap();
         assert_eq!(cap, "event-bus");
@@ -180,13 +174,29 @@ mod tests {
 
     #[test]
     fn test_standard_capabilities_complete() {
-        // 确保 6 个标准能力都在清单里（与 SDK STANDARD_CAPABILITIES 对齐）
-        assert!(STANDARD_CAPABILITIES.contains(&"pipeline-executor"));
-        assert!(STANDARD_CAPABILITIES.contains(&"config-reader"));
-        assert!(STANDARD_CAPABILITIES.contains(&"tenant-context"));
-        assert!(STANDARD_CAPABILITIES.contains(&"event-bus"));
-        assert!(STANDARD_CAPABILITIES.contains(&"logger"));
-        assert!(STANDARD_CAPABILITIES.contains(&"metrics"));
+        // 标准能力清单（与 SDK STANDARD_CAPABILITIES 两端同步）。
+        for ns in [
+            "pipeline-executor",
+            "tenant-context",
+            "event-bus",
+            "metrics",
+            "tool-executor",
+            "service-registry",
+            "frontend",
+        ] {
+            assert!(
+                STANDARD_CAPABILITIES.contains(&ns),
+                "STANDARD_CAPABILITIES 缺少 {ns}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_dead_capabilities_removed() {
+        // W-A8+M：死能力删除后不得再被识别为合法 capability 调用
+        // （logger 从未实现 method；config-reader 内核 handler 已删）。
+        assert_eq!(parse_capability_method("logger.log"), None);
+        assert_eq!(parse_capability_method("config-reader.get"), None);
     }
 
     #[test]

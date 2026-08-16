@@ -1,4 +1,4 @@
-# @feature: FP-MIGR 0.1→0.2迁移（0.1 遗留测试） | @ci: python-plugins-test
+# @feature: FP-MIGR 0.1→0.2迁移（0.1 遗留测试） | @ci: python-coverage
 """搜索 API 端点测试（P2 搜索框合并-后端部分）。
 
 覆盖 /api/v1/search 端点：
@@ -65,31 +65,8 @@ def _make_thread(thread_id: str, title: str, user_id: str = "test_user") -> dict
     }
 
 
-class _FakeRecord:
-    """模拟 ExecutionRecordData 的最小对象。"""
-
-    def __init__(self, record_id: str, pipeline_run_id: str, content: str, rtype: str = "ai"):
-        self.record_id = record_id
-        self.pipeline_run_id = pipeline_run_id
-        self.content = content
-        self.type = rtype
-        self.role = "assistant" if rtype == "ai" else "user"
-        self.sequence = 1
-        self.created_at = "2026-08-01T00:00:00"
-
-
-class _FakeStorage:
-    """模拟 ExecutionRecordStorage，提供 records 遍历与 search_records。"""
-
-    def __init__(self, records: list[_FakeRecord]):
-        self._records = {f"{r.record_id}::{r.sequence}": r for r in records}
-
-    def search_records(self, keyword: str, limit: int = 50) -> list[_FakeRecord]:
-        needle = keyword.lower()
-        hits = [
-            r for r in self._records.values() if needle in (r.content or "").lower()
-        ]
-        return hits[:limit]
+# 注：原 _FakeRecord / _FakeStorage 辅助类仅服务消息搜索用例（0.2 未迁移，
+# 用例已删），随之移除。
 
 
 # ── type=session ──────────────────────────────────────────────
@@ -118,70 +95,6 @@ class TestSearchSessions:
             assert resp.status_code == 200
             data = resp.json()
             assert data["sessions"] == []
-
-
-# ── type=message ──────────────────────────────────────────────
-
-
-class TestSearchMessages:
-    """消息内容搜索。"""
-
-    @pytest.mark.xfail(reason="0.2 routes_search 未实现 _search_messages（消息搜索未迁移）", strict=False)
-    def test_matches_content_case_insensitive(self, client):
-        with patch(
-            "routes_search._search_messages",
-            return_value=[
-                {
-                    "id": "r2",
-                    "session_id": "pipe-1",
-                    "role": "assistant",
-                    "content": "分析结果：存在内存泄漏",
-                    "timestamp": "",
-                    "sequence": 1,
-                }
-            ],
-        ) as mock_fn:
-            resp = client.get("/api/v1/search", params={"q": "内存泄漏", "type": "message"})
-            assert resp.status_code == 200
-            data = resp.json()
-            assert len(data["messages"]) == 1
-            assert data["messages"][0]["id"] == "r2"
-            assert data["messages"][0]["session_id"] == "pipe-1"
-            assert data["sessions"] == []
-            mock_fn.assert_called_once()
-
-    @pytest.mark.xfail(reason="0.2 routes_search 未实现 _search_messages（消息搜索未迁移）", strict=False)
-    def test_no_match_returns_empty(self, client):
-        with patch("routes_search._search_messages", return_value=[]):
-            resp = client.get("/api/v1/search", params={"q": "不存在的内容", "type": "message"})
-            assert resp.status_code == 200
-            assert resp.json()["messages"] == []
-
-
-# ── type=all ──────────────────────────────────────────────────
-
-
-class TestSearchAll:
-    """同时搜索会话与消息。"""
-
-    @pytest.mark.xfail(reason="0.2 routes_search 未实现 _search_messages（消息搜索未迁移）", strict=False)
-    def test_returns_both(self, client):
-        with (
-            patch(
-                "routes_search._search_sessions",
-                return_value=[{"id": "t1", "title": "测试", "updated_at": "", "message_count": 1}],
-            ),
-            patch(
-                "routes_search._search_messages",
-                return_value=[{"id": "r1", "session_id": "pipe-1", "role": "assistant", "content": "测试内容", "timestamp": "", "sequence": 1}],
-            ),
-        ):
-            resp = client.get("/api/v1/search", params={"q": "测试", "type": "all"})
-            assert resp.status_code == 200
-            data = resp.json()
-            assert data["type"] == "all"
-            assert len(data["sessions"]) == 1
-            assert len(data["messages"]) == 1
 
 
 # ── 参数校验与认证 ─────────────────────────────────────────────
@@ -229,17 +142,6 @@ class TestSearchHelpers:
             ids = [h["id"] for h in hits]
             assert ids == ["t1"]  # t2 属 other_user，不返回
 
-    @pytest.mark.xfail(reason="0.2 routes_search 未实现 _search_messages（消息搜索未迁移）", strict=False)
-    def test_search_messages_uses_storage(self):
-        storage = _FakeStorage(
-            [
-                _FakeRecord("r1", "pipe-1", "分析代码性能"),
-                _FakeRecord("r2", "pipe-2", "无关内容"),
-            ]
-        )
-        with patch("routes_search._get_storage", return_value=storage):
-            from routes_search import _search_messages
-
-            hits = _search_messages("代码", limit=10)
-            assert len(hits) == 1
-            assert hits[0]["id"] == "r1"
+    # 0.2 清理：原 test_search_messages_uses_storage 经 mock routes_search._search_messages
+    # 验证消息搜索存储链路——该函数在 0.2 routes_search 中未实现（消息搜索未迁移），
+    # mock 不存在目标的 xfail 占位用例已删除（见 docs/test_cleanup_0.2.md）。

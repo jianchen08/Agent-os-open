@@ -1,4 +1,4 @@
-# @feature: FP-0.2.五 审批闭环 | @vision: V2 全能闭环 | @ci: python-plugins-test
+# @feature: FP-0.2.五 审批闭环 | @vision: V2 全能闭环 | @ci: python-coverage
 """HumanInteractionService 超时竞态单元测试（F-HI-1）。
 
 意图：审批闭环中 human_interaction 的超时必须"一次且及时"——

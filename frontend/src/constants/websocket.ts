@@ -88,6 +88,14 @@ export const buildGlobalWebSocketUrl = (token: string, lastSequence?: number): s
  * 对应后端发送的事件类型
  */
 export const WS_SERVER_EVENTS = {
+  // ⚠️ 无发射源事件名（类型面保留，勿新增订阅）：后端 kernel ws_session.rs /
+  // capability_router.rs 事件族 + 插件 event-bus.emit 全集（2026-08 核查）不含：
+  // state_change / error / execution_start / execution_progress / execution_done /
+  // execution_cancelled / execution_output / sub_agent_created /
+  // sub_agent_waiting_input / sub_agent_completed / system_notification /
+  // schema_updated / stream_keepalive。
+  // 另：task_status_update / task_status_changed 当前后端推送路径静默跳过
+  // （tasks/service.py 待 SDK frontend.emit 落地后恢复），订阅暂保留。
   /** 连接确认 */
   CONNECTION_CONFIRMATION: 'connection_confirmation',
   /** 状态变更 */

@@ -8,14 +8,17 @@
  *   前端页面、路由、交互、状态渲染均为真实行为。
  * - 覆盖 6 个功能场景（AC1 入口 / AC2 读取展示 / AC3 修改保存 / AC4 路由 / AC5 tabs / AC6 异常路径）
  *
- * 运行：node node_modules/@playwright/test/cli.js test e2e/zz_pipeline_settings_verify.spec.ts --reporter=list
+ * 运行：node node_modules/@playwright/test/cli.js test e2e/specs/zz_pipeline_settings_verify.spec.ts --reporter=list
+ * （或 npx playwright test --config=playwright.pipeline.config.ts）
  */
 import { test, expect, Page, Route } from '@playwright/test'
 
-// ── 使用 headless_shell-1234（内存占用小，避免受限容器 OOM 导致 Page crashed）──
+// ── 浏览器可执行文件路径经 PLAYWRIGHT_CHROMIUM_PATH 注入（跨环境可复现）；
+//    默认值保留本容器的 headless_shell-1234（内存占用小，避免受限容器 OOM 导致 Page crashed）──
 test.use({
   launchOptions: {
     executablePath:
+      process.env.PLAYWRIGHT_CHROMIUM_PATH ??
       '/opt/ms-playwright/chromium_headless_shell-1234/chrome-headless-shell-linux64/chrome-headless-shell',
     args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-gpu', '--disable-dev-shm-usage'],
   } as any,

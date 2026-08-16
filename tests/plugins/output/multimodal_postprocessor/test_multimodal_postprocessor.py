@@ -1,3 +1,4 @@
+# @feature: FP-0.2.〇 管道引擎 | @vision: V3 可嵌入 | @ci: python-coverage
 """MultimodalPostprocessor 单元测试——图片 URL 提取与状态写入。
 
 覆盖：_extract_urls 的正则匹配（多扩展名/带查询串/去重/保序）、

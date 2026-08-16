@@ -152,7 +152,9 @@ Web、CLI 共享同一套内核；完整支持 MCP 协议，可接入任何 MCP 
 - Node.js 18+（前端构建，Vite 要求）
 - Docker（WSL2 + docker-ce；前端容器 + Redis 容器，后端运行在宿主机）
 
-> **架构说明**：`docker compose` 只负责前端（静态托管）和 Redis 容器，**后端 FastAPI 进程运行在宿主机**（通过 `python -m channels.websocket.app_factory` 启动）。下方脚本会自动编排这三部分。
+> **架构说明**：0.2 为 Rust 内核（`kernel/`）+ Vite 前端直连内核架构：`start_web_02.*` 编译并启动
+> `agentos-kernel`（:9100，宿主机进程）与 Vite 前端 dev server（:6390，反代到内核）；
+> `docker compose` 仅按需提供 Redis 容器（docker/0.2/docker-compose.yml）。
 
 ### 方式一：Windows 一键启动（推荐）
 
@@ -161,21 +163,19 @@ Web、CLI 共享同一套内核；完整支持 MCP 协议，可接入任何 MCP 
 copy .env.example .env
 ::    编辑 .env，填入 LLM API Key（参考 config/models/llm.yaml）
 
-:: 2. 首次配置 Docker 环境（WSL2 + docker-ce，不再支持 Docker Desktop）
-::    本部署使用 WSL2 + docker-ce，不再支持 Docker Desktop
-::    若尚未配置，请先运行下面的脚本；已配置可跳过直接执行第 3 步
+:: 2.（可选）配置 WSL2 + docker-ce 环境供 Redis 容器使用；已配置可跳过
 install_native_docker.bat
 
-:: 3. 启动项目（自动装依赖 + 启动后端/前端/Redis）
-start_web_cn.bat
+:: 3. 启动项目（编译 Rust 内核 + 启动内核 :9100 / 前端 :6390 / Redis）
+start_web_02.bat
 
-:: 停止：关闭弹出的 "Agent OS Backend" 窗口，再执行
-docker compose down
+:: 停止
+stop_web_02.sh   （或按端口结束进程，见脚本末尾提示）
 ```
 
 启动后：
-- Web UI：http://localhost:5289
-- 后端 API：http://localhost:8988 （API 文档：/docs）
+- Web UI：http://localhost:6390
+- 内核 API：http://localhost:9100
 
 ### 方式二：Linux / macOS 一键启动
 
@@ -184,21 +184,19 @@ docker compose down
 cp .env.example .env
 # 编辑 .env，填入 LLM API Key
 
-# 2. 一键部署（装 Docker + Python 依赖 + 构建镜像 + 启动 + 健康检查）
-chmod +x install.sh
-./install.sh            # 完整部署（bootstrap + deploy）
-# 或 ./install.sh --deploy   # 已装好 Docker，跳过 bootstrap 直接部署
-
-# 3. 开发模式启动（后端 + 前端 dev server + Redis）
-./start_web.sh
+# 2. 启动（编译 Rust 内核 + 启动内核 :9100 / 前端 :6390 / Redis）
+#    注意：0.1 的 install.sh / start_web.sh / stop_web.sh 已废弃，勿用
+chmod +x start_web_02.sh
+./start_web_02.sh            # 完整启动（编译 + 内核 + 前端）
+# 或 ./start_web_02.sh --no-build   # 跳过编译直接启动
 
 # 停止
-./stop_web.sh
+./stop_web_02.sh
 ```
 
 启动后：
-- Web UI：http://localhost:5289
-- 后端 API：http://localhost:8988
+- Web UI：http://localhost:6390
+- 内核 API：http://localhost:9100
 
 ### 跨设备 / 多实例配置说明
 
@@ -206,18 +204,19 @@ chmod +x install.sh
 
 **工作空间根目录**：任务的工作文件默认存放在 `config/isolation/isolation_config.yaml` 中 `workspace.root` 指定的目录下。如果你的项目不在该路径，或希望放到其他盘符/分区，编辑该文件把 `root` 改为你的实际路径（支持绝对路径，如 Linux 的 `/tmp/ai_workspaces` 或 Windows 的 `D:/workspaces`）。注意：容器隔离模式下 `root` 必须是绝对路径，相对路径会导致 Docker bind mount 失败。
 
-**多实例运行（同时跑两个版本做对比测试）**：compose project 会自动按**所在目录名**隔离（不同目录 = 不同的容器名/网络/卷，互不冲突），无需手动设置 `COMPOSE_PROJECT_NAME`。唯一会冲突的是**宿主端口**（前端 5289 / Redis 6480 / 后端 8988）。
+**多实例运行（同时跑两个版本做对比测试）**：compose project 会自动按**所在目录名**隔离（不同目录 = 不同的容器名/网络/卷，互不冲突），无需手动设置 `COMPOSE_PROJECT_NAME`。唯一会冲突的是**宿主端口**（前端 6390 / 内核 9100 / Redis 6480）。
 
 宿主端口已参数化（带默认值），单实例零配置。需要同时运行第二份实例时，给它设置不同的端口即可：
 
 ```bat
-:: 实例一（默认端口）：直接双击 start_web_cn.bat
+:: 实例一（默认端口 9100/6390）：直接双击 start_web_02.bat
 
 :: 实例二（不同端口）：在另一个目录的命令行里
 set FRONTEND_HOST_PORT=5290
 set REDIS_HOST_PORT=6481
-set BACKEND_PORT=8989
-start_web_cn.bat
+set AGENTOS_KERNEL_PORT=9101
+set AGENTOS_FRONTEND_PORT=6391
+start_web_02.bat
 ```
 
 两个实例互不干扰：不同目录 → 不同 compose project（容器/网络/卷隔离）；不同端口 → 无冲突。启动提示会显示本实例实际使用的端口。停止时各自在对应目录执行 `docker compose down` 即可（按 project 隔离，不影响另一个）。
@@ -227,29 +226,21 @@ start_web_cn.bat
 适合不使用脚本、需要精细控制的开发者。
 
 ```bash
-# 1. 安装依赖（任选其一）
-pip install -e .              # 走 pyproject.toml（推荐）
-pip install -r requirements.txt  # 走 requirements.txt
+# 1. 编译并启动 Rust 内核（0.1 的 src/ + channels.websocket 入口已删除）
+cd kernel && cargo build --release --bin agentos-kernel
+export AGENTOS_PLUGINS_DIR=../plugins/shared AGENTOS_CONFIG_ROOT=../config
+./target/release/agentos-kernel    # 内核运行在 http://localhost:9100
 
-# 2. 启动 Redis（Docker 方式，端口对齐 .env）
-docker run -d --name agent-os-redis -p 6480:6379 \
-    redis:7-alpine redis-server --maxmemory 256mb --maxmemory-policy allkeys-lru
-
-# 3. 启动后端（FastAPI + WebSocket）
-PYTHONPATH=src python -m channels.websocket.app_factory
-# 后端运行在 http://localhost:8988
-
-# 4. 启动前端（另一个终端）
+# 2. 启动前端（另一个终端）
 cd frontend
 npm install
-npm run dev
-# 前端开发服务器运行在 http://localhost:5289
+npm run dev    # 前端开发服务器运行在 http://localhost:6390（反代到内核 :9100）
 ```
 
-> **关于 CLI 模式**：除 Web 模式外，还支持命令行交互（不启动 Web 服务）：
-> - `python run.py demo`（echo 回显）/ `python run.py real`（真实 LLM）—— 基于 `run.py` 的快捷入口
-> - `cli_cn.bat`（Windows）—— 清 `__pycache__` 后启动完整 CLI（`channels.cli.cli_main`），支持 `--mode {normal,auto,plan}`、`--message` 等参数
-> - `PYTHONPATH=src python -m channels.cli.cli_main`（跨平台）或安装后用注册命令 `agent-os`
+> **关于 CLI 模式**：0.1 的独立 CLI 入口（`cli_cn.bat` / `run.py` / `channels.cli.cli_main`）
+> 未迁移到 0.2——`plugins/shared/system/channel_cli` 目前仅作为 MCP 插件提供状态查询与
+> 文本格式化能力，完整交互式 CLI 依赖的 0.1 模块（`infrastructure` 等）已删除。
+> 当前版本请使用 Web 模式（`start_web_02.bat` / `start_web_02.sh`）。
 
 
 ---

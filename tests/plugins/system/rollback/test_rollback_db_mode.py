@@ -1,4 +1,4 @@
-# @feature: FP-0.2.五 审批闭环 | @vision: V2 全能闭环 | @ci: python-plugins-test
+# @feature: FP-0.2.五 审批闭环 | @vision: V2 全能闭环 | @ci: python-coverage
 """RollbackManager 单元测试——DB 持久化模式（带 AsyncSession，SQLite 内存库）。
 
 产品决策：内核已用数据库接口（SQLite / kernel db_routes），插件侧 DB 模式

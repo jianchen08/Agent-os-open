@@ -60,8 +60,12 @@ pub struct SchemaResponse {
 #[derive(Clone)]
 pub struct AppState {
     pub config: serde_json::Value,
-    /// 已发现的插件 manifest 列表
-    pub manifests: Arc<Vec<PluginManifest>>,
+    /// 已发现的插件 manifest 列表。
+    ///
+    /// RwLock 共享存储：watcher 热发现的新插件经 [`crate::plugin_watcher`] 每轮
+    /// sync 增量合并进来（按 id 去重），状态列表 / re-enable 重注册 / actions
+    /// 命令查找等消费面与能力注册表保持一致，无需重启内核。
+    pub manifests: Arc<RwLock<Vec<PluginManifest>>>,
     /// 能力注册表（工具/资源/路由信号）
     pub capability_registry: Option<Arc<CapabilityRegistryImpl>>,
     /// ── 0.2 引擎接线所需资源（process_via_engine 用）──
@@ -122,7 +126,7 @@ impl AppState {
     pub fn new() -> Self {
         Self {
             config: json!({}),
-            manifests: Arc::new(Vec::new()),
+            manifests: Arc::new(RwLock::new(Vec::new())),
             capability_registry: None,
             pipeline_config: Arc::new(PipelineConfig {
                 name: "default".to_string(),
@@ -150,7 +154,7 @@ impl AppState {
     pub fn with_config(config: serde_json::Value) -> Self {
         Self {
             config,
-            manifests: Arc::new(Vec::new()),
+            manifests: Arc::new(RwLock::new(Vec::new())),
             capability_registry: None,
             pipeline_config: Arc::new(PipelineConfig {
                 name: "default".to_string(),
@@ -218,7 +222,7 @@ impl AppState {
 
         Self {
             config,
-            manifests: Arc::new(manifests),
+            manifests: Arc::new(RwLock::new(manifests)),
             capability_registry: Some(registry),
             pipeline_config,
             step_library,
@@ -430,6 +434,8 @@ async fn build_schema(state: &AppState) -> SchemaResponse {
     // 从 manifest 构建 agents/pipelines
     let agents: Vec<serde_json::Value> = state
         .manifests
+        .read()
+        .await
         .iter()
         .filter(|m| m.plugin_type == PluginType::System)
         .map(|m| {
@@ -444,6 +450,8 @@ async fn build_schema(state: &AppState) -> SchemaResponse {
 
     let pipelines: Vec<serde_json::Value> = state
         .manifests
+        .read()
+        .await
         .iter()
         .filter(|m| m.plugin_type == PluginType::Pipeline)
         .map(|m| {
@@ -463,6 +471,8 @@ async fn build_schema(state: &AppState) -> SchemaResponse {
     // 前端据此构建"插件 → 多配置子项"配置树（ADR §4.6）。
     let plugin_configs: Vec<serde_json::Value> = state
         .manifests
+        .read()
+        .await
         .iter()
         .filter(|m| !m.config_files.is_empty())
         .map(|m| {
@@ -480,6 +490,8 @@ async fn build_schema(state: &AppState) -> SchemaResponse {
     let enabled_ids = state.enabled_plugin_ids.read().await;
     let plugin_contributes: Vec<serde_json::Value> = state
         .manifests
+        .read()
+        .await
         .iter()
         .filter(|m| m.contributes.is_some() && enabled_ids.contains(&m.id))
         .map(|m| {
@@ -616,10 +628,15 @@ pub async fn agents_schema_handler() -> axum::Json<serde_json::Value> {
     }))
 }
 
-/// GET /api/v1/agents/{id}/config——读取指定 agent 的 yaml 文件内容。
+/// GET /api/v1/agents/{id}/config——读取指定 agent 的 yaml 文件内容（掩码后）。
 ///
 /// 按 `resolve_agent_yaml_path` 定位文件（顶层 + 递归分类子目录），返回
-/// `{ config_id, yaml }`（yaml 为文件原文）。id 不存在 → 404。
+/// `{ config_id, yaml, etag }`。id 不存在 → 404。
+///
+/// 安全基线（对齐 plugin config GET，A13）：
+/// - yaml 经 `mask_secrets` 掩码后返回（敏感字段值 → `****`；`${ENV}` 占位符保留）。
+///   掩码走 parse → mask → serialize，字段顺序会归一化（yaml 键序无语义）；
+/// - `etag` 为**磁盘原文**的内容哈希，供 PUT If-Match 乐观锁使用。
 pub async fn get_agent_config_handler(
     axum::extract::State(state): axum::extract::State<AppState>,
     axum::extract::Path(agent_id): axum::extract::Path<String>,
@@ -634,7 +651,17 @@ pub async fn get_agent_config_handler(
     let raw = std::fs::read_to_string(&path).map_err(|e| ApiError::Internal {
         message: format!("read agent config {}: {e}", path.display()),
     })?;
-    Ok(axum::Json(json!({ "config_id": agent_id, "yaml": raw })))
+    let etag = compute_etag(raw.as_bytes());
+    let parsed: serde_json::Value = serde_yaml::from_str(&raw).map_err(|e| ApiError::Internal {
+        message: format!("agent config yaml parse error: {e}"),
+    })?;
+    let masked = mask_secrets(&parsed);
+    let yaml_text = serde_yaml::to_string(&masked).map_err(|e| ApiError::Internal {
+        message: format!("agent config yaml serialize error: {e}"),
+    })?;
+    Ok(axum::Json(
+        json!({ "config_id": agent_id, "yaml": yaml_text, "etag": etag }),
+    ))
 }
 
 /// PUT /api/v1/agents/{id}/config 请求体。
@@ -642,12 +669,15 @@ pub async fn get_agent_config_handler(
 pub struct AgentConfigUpdateRequest {
     /// 新的 yaml 文件内容（原文写回）。
     pub yaml: String,
+    /// GET 返回的 ETag（If-Match 乐观锁，对齐 plugin config PUT：缺失/不匹配 → 409）。
+    pub if_match: Option<String>,
 }
 
 /// PUT /api/v1/agents/{id}/config——写回 agent 的 yaml 文件。
 ///
-/// 流程：定位文件（不存在 → 404）→ 先备份原文件为 `<file>.yaml.bak` →
-/// 写新内容 → 返回 `{ config_id, success, backup }`。
+/// 流程：定位文件（不存在 → 404）→ **YAML 语法校验**（解析失败 → 400，不写盘）→
+/// If-Match 校验（缺失/与磁盘 ETag 不匹配 → 409）→ 备份原文件为
+/// `<file>.yaml.bak` → 写新内容 → 返回 `{ config_id, success, backup, etag }`。
 pub async fn put_agent_config_handler(
     axum::extract::State(state): axum::extract::State<AppState>,
     axum::extract::Path(agent_id): axum::extract::Path<String>,
@@ -661,6 +691,29 @@ pub async fn put_agent_config_handler(
             message: format!("agent config not found: {agent_id}"),
         })?;
 
+    // 语法校验先行（T2）：解析失败的 yaml 一律 400 拒写——半结构化内容落盘会
+    // 破坏下次启动的 agent 加载；此时磁盘保持原值。
+    serde_yaml::from_str::<serde_yaml::Value>(&req.yaml).map_err(|e| ApiError::BadRequest {
+        message: format!("agent config yaml invalid: {e}"),
+    })?;
+
+    // If-Match 乐观锁（A13，对齐 plugin config PUT）：必须匹配磁盘当前 ETag。
+    let raw = std::fs::read_to_string(&path).map_err(|e| ApiError::Internal {
+        message: format!("read agent config {}: {e}", path.display()),
+    })?;
+    let current_etag = compute_etag(raw.as_bytes());
+    match req.if_match.as_deref() {
+        Some(given) if given == current_etag => {}
+        _ => {
+            return Err(ApiError::Conflict {
+                message: format!(
+                    "ETag mismatch: current={current_etag}, given={:?}",
+                    req.if_match
+                ),
+            });
+        }
+    }
+
     // 先备份原文件（同目录 <file>.yaml.bak），再写新内容
     let backup = path.with_extension("yaml.bak");
     std::fs::copy(&path, &backup).map_err(|e| ApiError::Internal {
@@ -669,11 +722,13 @@ pub async fn put_agent_config_handler(
     std::fs::write(&path, &req.yaml).map_err(|e| ApiError::Internal {
         message: format!("write agent config {}: {e}", path.display()),
     })?;
+    let new_etag = compute_etag(req.yaml.as_bytes());
 
     Ok(axum::Json(json!({
         "config_id": agent_id,
         "success": true,
         "backup": backup.file_name().map(|n| n.to_string_lossy().to_string()),
+        "etag": new_etag,
     })))
 }
 
@@ -699,9 +754,11 @@ pub struct ActionsExecuteRequest {
 /// 处理:
 /// 1. 请求体缺 `action`(或空串)→ 400
 /// 2. 扫描 `state.manifests`,找 `contributes.commands[].id == action` 的插件 → 未命中 404
-/// 3. 命中后,若 command 声明了显式路由(条目里的 `tool` 字段指向工具名)且 invoker 可用,
-///    经 `invoker.invoke_tool(plugin_id, tool, args)` 调插件 sidecar(参考 capability_router
-///    的 tool-executor.invoke 模式);否则返回 success 占位(后续再细化路由)。
+/// 3. 命中后,若 command 声明了显式路由(条目里的 `tool` 字段指向工具名):
+///    invoker 可用 → 经 `invoker.invoke_tool(plugin_id, tool, args)` 调插件 sidecar
+///    (参考 capability_router 的 tool-executor.invoke 模式);invoker 不可用(None)→
+///    返回 success:false + "工具执行器不可用"错误(明确失败,不假成功)。
+/// 4. 无 `tool` 字段的纯声明命令 → 返回 success 占位 ack(设计内契约)。
 pub async fn actions_execute_handler(
     axum::extract::State(state): axum::extract::State<AppState>,
     axum::Json(req): axum::Json<ActionsExecuteRequest>,
@@ -714,7 +771,8 @@ pub async fn actions_execute_handler(
 
     // 扫描 manifests 找声明了该 command 的插件(同时取出 command 条目供路由判定)。
     let mut hit: Option<(&PluginManifest, &serde_json::Value)> = None;
-    for m in state.manifests.iter() {
+    let manifests = state.manifests.read().await;
+    for m in manifests.iter() {
         let Some(contributes) = m.contributes.as_ref() else {
             continue;
         };
@@ -736,35 +794,41 @@ pub async fn actions_execute_handler(
     let plugin_id = manifest.id.clone();
 
     // 显式路由:command 条目声明 `tool` 字段 → 经 invoker 调对应工具 sidecar。
-    // 缺省(无 tool 字段 / invoker 不可用)→ success 占位,保证前端链路通。
+    // tool 已声明但 invoker 不可用(None)→ 返回明确失败(不再假成功):
+    // 调用方声明了执行路由,执行器缺席意味着请求无法兑现,静默 success:true 会
+    // 让前端把"没执行"当成"执行成功"。
     if let Some(tool_name) = command_entry
         .get("tool")
         .and_then(|v| v.as_str())
         .map(str::to_string)
     {
-        if let Some(invoker) = state.invoker.clone() {
-            match invoker.invoke_tool(&plugin_id, &tool_name, &req.args).await {
-                Ok(result) => {
-                    return Ok(axum::Json(json!({
-                        "success": result.success,
-                        "result": result.data,
-                        "error": result.error,
-                        "plugin_id": plugin_id,
-                    })));
-                }
-                Err(e) => {
-                    return Ok(axum::Json(json!({
-                        "success": false,
-                        "error": e.message,
-                        "plugin_id": plugin_id,
-                    })));
-                }
+        let Some(invoker) = state.invoker.clone() else {
+            return Ok(axum::Json(json!({
+                "success": false,
+                "error": "工具执行器不可用（invoker 未装配），无法执行声明的 tool 路由",
+                "plugin_id": plugin_id,
+            })));
+        };
+        match invoker.invoke_tool(&plugin_id, &tool_name, &req.args).await {
+            Ok(result) => {
+                return Ok(axum::Json(json!({
+                    "success": result.success,
+                    "result": result.data,
+                    "error": result.error,
+                    "plugin_id": plugin_id,
+                })));
+            }
+            Err(e) => {
+                return Ok(axum::Json(json!({
+                    "success": false,
+                    "error": e.message,
+                    "plugin_id": plugin_id,
+                })));
             }
         }
     }
 
-    // 占位成功:command 已声明但无显式执行路由(或测试环境 invoker=None)。
-    // 后续可扩展为按 command 声明的 handler_capability/方法名路由到具体 sidecar。
+    // 占位成功:command 已声明但无显式执行路由(纯声明命令的 ack 占位,设计内契约)。
     Ok(axum::Json(json!({
         "success": true,
         "result": { "acknowledged": true, "action": req.action },
@@ -804,6 +868,8 @@ pub async fn pipelines_handler(
 ) -> axum::Json<Vec<serde_json::Value>> {
     let pipelines: Vec<serde_json::Value> = state
         .manifests
+        .read()
+        .await
         .iter()
         .filter(|m| m.plugin_type == PluginType::Pipeline)
         .map(|m| {
@@ -997,12 +1063,14 @@ pub async fn pipelines_state_handler(
 
 /// /api/v1/tools 端点处理器。
 ///
-/// 从 CapabilityRegistry 返回已注册的工具列表。
+/// 从 CapabilityRegistry 返回已注册的工具列表；registry 未装配时回退
+/// state.config 的 tools 数组。响应信封统一为 `{ "items": [...], "total": n }`
+/// （对齐 /api/v1/agents 列表端点的模式；前端 ToolsPage 期待该形状）。
 pub async fn tools_handler(
     axum::extract::State(state): axum::extract::State<AppState>,
-) -> axum::Json<Vec<serde_json::Value>> {
-    if let Some(registry) = &state.capability_registry {
-        let tools: Vec<serde_json::Value> = registry
+) -> axum::Json<serde_json::Value> {
+    let tools: Vec<serde_json::Value> = if let Some(registry) = &state.capability_registry {
+        registry
             .list_tools()
             .iter()
             .map(|t| {
@@ -1014,17 +1082,30 @@ pub async fn tools_handler(
                     "source": t.source,
                 })
             })
-            .collect();
-        return axum::Json(tools);
+            .collect()
+    } else {
+        // fallback: 从 config 获取（兼容旧逻辑）
+        state
+            .config
+            .get("tools")
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default()
+    };
+    let total = tools.len();
+    axum::Json(json!({ "items": tools, "total": total }))
+}
+
+/// serde_json::Value 的类型名（供 400 错误消息说明实际拿到的结构）。
+fn json_value_type_name(v: &serde_json::Value) -> &'static str {
+    match v {
+        serde_json::Value::Null => "null",
+        serde_json::Value::Bool(_) => "bool",
+        serde_json::Value::Number(_) => "number",
+        serde_json::Value::String(_) => "string",
+        serde_json::Value::Array(_) => "array",
+        serde_json::Value::Object(_) => "object",
     }
-    // fallback: 从 config 获取（兼容旧逻辑）
-    let tools = state
-        .config
-        .get("tools")
-        .and_then(|v| v.as_array())
-        .cloned()
-        .unwrap_or_default();
-    axum::Json(tools)
 }
 
 // ── P1-4/P1-5 插件配置端点（/api/v1/plugins/{id}/config/{file_id}）──
@@ -1075,10 +1156,10 @@ pub async fn get_plugin_config_handler(
         message: "project_root not configured".to_string(),
     })?;
 
-    let manifest =
-        find_manifest(&state.manifests, &plugin_id).ok_or_else(|| ApiError::NotFound {
-            message: format!("plugin not found: {plugin_id}"),
-        })?;
+    let manifests = state.manifests.read().await;
+    let manifest = find_manifest(&manifests, &plugin_id).ok_or_else(|| ApiError::NotFound {
+        message: format!("plugin not found: {plugin_id}"),
+    })?;
 
     let mapping = find_config_mapping(manifest, &file_id).ok_or_else(|| ApiError::NotFound {
         message: format!("config file_id not found: {file_id}"),
@@ -1119,10 +1200,10 @@ pub async fn put_plugin_config_handler(
         message: "project_root not configured".to_string(),
     })?;
 
-    let manifest =
-        find_manifest(&state.manifests, &plugin_id).ok_or_else(|| ApiError::NotFound {
-            message: format!("plugin not found: {plugin_id}"),
-        })?;
+    let manifests = state.manifests.read().await;
+    let manifest = find_manifest(&manifests, &plugin_id).ok_or_else(|| ApiError::NotFound {
+        message: format!("plugin not found: {plugin_id}"),
+    })?;
 
     let mapping = find_config_mapping(manifest, &file_id).ok_or_else(|| ApiError::NotFound {
         message: format!("config file_id not found: {file_id}"),
@@ -1303,7 +1384,7 @@ pub async fn validate_all_plugins_handler(
     let mut clean = 0usize;
     let mut drifted = 0usize;
     let mut errors = 0usize;
-    for m in state.manifests.iter() {
+    for m in state.manifests.read().await.iter() {
         if m.capabilities.tools.is_empty() {
             continue; // 非 tool 插件无工具可对照
         }
@@ -1384,6 +1465,8 @@ pub async fn plugins_status_handler(
     let enabled_ids = state.enabled_plugin_ids.read().await;
     let items: Vec<serde_json::Value> = state
         .manifests
+        .read()
+        .await
         .iter()
         .map(|m| {
             let config_type = match m.plugin_type {
@@ -1437,15 +1520,14 @@ pub async fn plugins_set_enabled_handler(
     axum::extract::Path(plugin_id): axum::extract::Path<String>,
     axum::extract::State(state): axum::extract::State<AppState>,
     axum::Json(body): axum::Json<EnabledBody>,
-) -> axum::Json<serde_json::Value> {
+) -> Result<axum::Json<serde_json::Value>, ApiError> {
     let new_enabled = body.enabled;
     let project_root = match &state.project_root {
         Some(p) => p,
         None => {
-            return axum::Json(json!({
-                "success": false,
-                "error": "project_root not available",
-            }))
+            return Err(ApiError::Internal {
+                message: "project_root not available".to_string(),
+            })
         }
     };
     let profile_path = project_root
@@ -1514,7 +1596,13 @@ pub async fn plugins_set_enabled_handler(
             if let Some(registry) = &state.capability_registry {
                 use agentos_core::traits::CapabilityRegistry;
                 if new_enabled {
-                    match state.manifests.iter().find(|m| m.id == plugin_id) {
+                    match state
+                        .manifests
+                        .read()
+                        .await
+                        .iter()
+                        .find(|m| m.id == plugin_id)
+                    {
                         Some(m) => {
                             let (tools, http_routes) =
                                 crate::plugin_lifecycle::reenable_plugin_capabilities(
@@ -1591,7 +1679,7 @@ pub async fn plugins_set_enabled_handler(
                     )
                     .await;
             }
-            axum::Json(json!({
+            Ok(axum::Json(json!({
                 "success": true,
                 "plugin_id": plugin_id,
                 "enabled": new_enabled,
@@ -1602,12 +1690,21 @@ pub async fn plugins_set_enabled_handler(
                 } else {
                     format!("已禁用插件 {}（立即生效）", plugin_id)
                 },
-            }))
+            })))
         }
-        Err(e) => axum::Json(json!({
-            "success": false,
-            "error": format!("写入 profile 失败: {}", e),
-        })),
+        // A12：写盘失败 → 5xx 统一错误信封（不再 200 + success:false 混装，
+        // 前端无法据状态码区分"已生效"与"根本没写进去"）。
+        Err(e) => {
+            tracing::error!(
+                target: "plugin-enablement",
+                plugin_id = %plugin_id,
+                error = %e,
+                "写入 profile 失败"
+            );
+            return Err(ApiError::Internal {
+                message: format!("写入 profile 失败: {e}"),
+            });
+        }
     }
 }
 
@@ -1662,6 +1759,8 @@ pub struct PipelineConfigResponse {
 #[derive(Debug, Deserialize)]
 pub struct PipelineConfigUpdateRequest {
     pub data: serde_json::Value,
+    /// GET 返回的 ETag（If-Match 乐观锁，对齐 plugin config PUT：缺失/不匹配 → 409）。
+    pub if_match: Option<String>,
 }
 
 /// 解析管道配置文件路径：`config/pipelines/{name}.yaml`。
@@ -1701,8 +1800,11 @@ pub async fn get_pipeline_config_handler(
 
 /// PUT /api/v1/config/pipelines/{name}（P7）。
 ///
-/// 原子写回 config/pipelines/{name}.yaml（tmp + rename + round-trip 校验），
-/// 返回新 ETag。非法 name → 400；父目录缺失自动创建。
+/// 校验（T2/A13，对齐 plugin config PUT）：data 必须是 YAML 映射（非映射文档
+/// 无法表示管道配置）→ 400；If-Match 乐观锁（缺失/与磁盘 ETag 不匹配 → 409；
+/// 文件不存在 → 404，不再支持 PUT 隐式创建）。通过后原子写回
+/// config/pipelines/{name}.yaml（tmp + rename + round-trip 校验），返回新 ETag。
+/// 非法 name → 400。
 pub async fn put_pipeline_config_handler(
     axum::extract::State(state): axum::extract::State<AppState>,
     axum::extract::Path(name): axum::extract::Path<String>,
@@ -1713,10 +1815,41 @@ pub async fn put_pipeline_config_handler(
             message: format!("invalid pipeline name: {name}"),
         });
     }
+    // 结构校验（T2）：管道配置必须是映射——标量/序列无法承载管道字段，
+    // 拒写保持磁盘原值。
+    if !req.data.is_object() {
+        return Err(ApiError::BadRequest {
+            message: format!(
+                "pipeline config must be a yaml mapping, got: {}",
+                json_value_type_name(&req.data)
+            ),
+        });
+    }
     let project_root = state.project_root.ok_or_else(|| ApiError::Internal {
         message: "project_root not configured".to_string(),
     })?;
     let path = pipeline_config_path(&project_root, &name);
+
+    // If-Match 乐观锁（A13）：必须匹配磁盘当前 ETag；文件不存在 → 404。
+    let current_etag = match std::fs::read_to_string(&path) {
+        Ok(raw) => compute_etag(raw.as_bytes()),
+        Err(_) => {
+            return Err(ApiError::NotFound {
+                message: format!("pipeline config not found: {name}"),
+            })
+        }
+    };
+    match req.if_match.as_deref() {
+        Some(given) if given == current_etag => {}
+        _ => {
+            return Err(ApiError::Conflict {
+                message: format!(
+                    "ETag mismatch: current={current_etag}, given={:?}",
+                    req.if_match
+                ),
+            });
+        }
+    }
 
     // B4/B6：原子写 + round-trip 校验（复用 config_service）
     atomic_write_yaml(&path, &req.data).map_err(config_err_to_api)?;

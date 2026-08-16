@@ -74,7 +74,7 @@ async fn test_schema_aggregates_plugin_config_files() {
     ];
 
     let mut state = AppState::new();
-    state.manifests = std::sync::Arc::new(manifests);
+    state.manifests = std::sync::Arc::new(tokio::sync::RwLock::new(manifests));
 
     let app = build_router(state);
     let response = app

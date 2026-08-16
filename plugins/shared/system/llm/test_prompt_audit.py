@@ -1,3 +1,4 @@
+# @feature: FP-0.2.CFG 配置系统与插件配置注入 | @vision: V3 可嵌入 | @ci: python-coverage
 """Prompt 审计落盘测试（task 日志体系改进）。
 
 验证：

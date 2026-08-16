@@ -347,10 +347,23 @@ async fn fp3_invoker_loads_and_injects_config() {
     });
     loader.set_config(test_config);
 
-    let manifest = make_sidecar_manifest(
+    let mut manifest = make_sidecar_manifest(
         "test_plugin",
         &format!("bash {}", script_path.to_string_lossy()),
     );
+    // P6 注入契约:只注入 manifest.config_files 声明的节(按 id 命名空间)。
+    manifest.config_files = vec![
+        agentos_core::traits::ConfigFileMapping {
+            id: "memory_storage".to_string(),
+            path: "memory_storage.yaml".to_string(),
+            label: "Memory".to_string(),
+        },
+        agentos_core::traits::ConfigFileMapping {
+            id: "api_config".to_string(),
+            path: "api_config.yaml".to_string(),
+            label: "API".to_string(),
+        },
+    ];
     loader.add_manifest(manifest);
 
     let invoker = agentos_invoker::PluginInvokerImpl::new(loader.clone());
@@ -392,10 +405,15 @@ async fn fp3_config_change_triggers_reload() {
     let loader = Arc::new(MockLoader::new());
     loader.set_config(json!({"version": "v1"}));
 
-    let manifest = make_sidecar_manifest(
+    let mut manifest = make_sidecar_manifest(
         "reload_plugin",
         &format!("bash {}", script_path.to_string_lossy()),
     );
+    manifest.config_files = vec![agentos_core::traits::ConfigFileMapping {
+        id: "version".to_string(),
+        path: "version.yaml".to_string(),
+        label: "Version".to_string(),
+    }];
     loader.add_manifest(manifest);
 
     let invoker = agentos_invoker::PluginInvokerImpl::new(loader.clone());
@@ -554,7 +572,7 @@ async fn e2e_full_config_injection_chain() {
     fs::write(
         plugin_entry_dir.join("plugin.json"),
         format!(
-            r#"{{"id":"e2e_plugin","name":"E2E","version":"1.0.0","plugin_type":"tool","language":"python","host_type":"sidecar","entry":"bash {}","capabilities":{{}},"dependencies":[],"permissions":{{}},"error_policy":"abort","priority":100}}"#,
+            r#"{{"id":"e2e_plugin","name":"E2E","version":"1.0.0","plugin_type":"tool","language":"python","host_type":"sidecar","entry":"bash {}","capabilities":{{}},"dependencies":[],"permissions":{{}},"error_policy":"abort","priority":100,"config_files":[{{"id":"memory_storage","path":"memory_storage.yaml","label":"Memory"}},{{"id":"api_config","path":"api_config.yaml","label":"API"}}]}}"#,
             script_path.to_string_lossy()
         ),
     ).unwrap();
@@ -562,6 +580,17 @@ async fn e2e_full_config_injection_chain() {
     let real_loader = Arc::new(
         agentos_plugin_loader::PluginLoaderImpl::new(plugin_dir.path(), None)
             .with_config_root(config_dir.path()),
+    );
+    eprintln!(
+        "[e2e-debug] plugin_dir={:?} exists={} entries={:?}",
+        plugin_dir.path(),
+        plugin_dir.path().exists(),
+        std::fs::read_dir(plugin_dir.path())
+            .map(|rd| rd
+                .flatten()
+                .map(|e| e.path().to_string_lossy().to_string())
+                .collect::<Vec<_>>())
+            .map_err(|e| e.to_string())
     );
     real_loader.discover(&[]).await.unwrap();
 

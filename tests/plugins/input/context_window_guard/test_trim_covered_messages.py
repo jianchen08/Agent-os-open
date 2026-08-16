@@ -1,3 +1,4 @@
+# @feature: FP-0.2.〇 管道引擎 | @vision: V3 可嵌入 | @ci: python-coverage
 """_trim_covered_messages 与 _estimate_assembled_tokens 单元测试（op 模式迁移版）。
 
 回归 pipeline 76e40ac9a0df 的 bug：裁剪侧和估算侧都用「非 system 消息条数」

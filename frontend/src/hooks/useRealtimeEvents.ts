@@ -4,22 +4,15 @@ import { useEffect } from 'react'
 import { useAuthStore } from '@/stores/authStore'
 import { WS_SERVER_EVENTS } from '@/constants/websocket'
 import { globalWS } from '@/services/websocket/GlobalWebSocket'
-import { handleSchemaUpdate } from '@/services/modules'
 import { useLayoutModeStore } from '@/stores/layoutModeStore'
 import { useLongTermTaskStore } from '@/stores/longTermTaskStore'
 import { useNotificationStore } from '@/stores/notificationStore'
 import { usePipelineMessageStore } from '@/stores/pipelineMessageStore'
 import { usePipelineRegistryStore } from '@/stores/pipelineRegistryStore'
 import { useSessionStore } from '@/stores/sessionStore'
-import { generateUUID } from '@/utils/uuid'
-import type { ExecutionEvent, InteractionRequest } from '@/stores/layoutModeStore'
 
 /** Hook to subscribe to real-time WebSocket events and update the layout store. Call once in a top-level component (e.g. FiveSpaceHomePage). */
 export function useRealtimeEvents(): void {
-  const addOrUpdateExecution = useLayoutModeStore((s) => s.addOrUpdateExecution)
-  const removeExecution = useLayoutModeStore((s) => s.removeExecution)
-  const addInteraction = useLayoutModeStore((s) => s.addInteraction)
-  const updateConnectionStatus = useLayoutModeStore((s) => s.updateConnectionStatus)
   const bumpWorkspaceDataVersion = useLayoutModeStore((s) => s.bumpWorkspaceDataVersion)
 
   useEffect(() => {
@@ -71,158 +64,10 @@ export function useRealtimeEvents(): void {
         })
     }
 
-    // Execution progress handlers
-
-    const handleExecutionStart = (rawData: Record<string, unknown>) => {
-      const data = (rawData.data as Record<string, unknown>) || rawData
-      const execId = data.execution_id as string | undefined
-      const execName = data.name as string | undefined
-      if (!execId) {
-        console.warn('[useRealtimeEvents] execution_id 缺失，无法追踪执行事件', data)
-      }
-      const event: ExecutionEvent = {
-        id: execId || generateUUID(),
-        type: (data.execution_type as ExecutionEvent['type']) || 'tool',
-        name: execName || 'Unknown',
-        status: 'running',
-        progress: 0,
-        startedAt: new Date().toISOString(),
-      }
-      addOrUpdateExecution(event)
-    }
-
-    const handleExecutionProgress = (rawData: Record<string, unknown>) => {
-      const data = (rawData.data as Record<string, unknown>) || rawData
-      const existingExecutions = useLayoutModeStore.getState().activeExecutions
-      const executionId = data.execution_id as string
-      const existing = existingExecutions.find((e) => e.id === executionId)
-
-      if (existing) {
-        addOrUpdateExecution({
-          ...existing,
-          progress: (data.progress as number) ?? existing.progress,
-        })
-      }
-    }
-
-    const handleExecutionOutput = (rawData: Record<string, unknown>) => {
-      const data = (rawData.data as Record<string, unknown>) || rawData
-      const existingExecutions = useLayoutModeStore.getState().activeExecutions
-      const executionId = data.execution_id as string
-      const existing = existingExecutions.find((e) => e.id === executionId)
-
-      if (existing) {
-        const newOutput = data.append
-          ? (existing.output || '') + (data.output as string)
-          : (data.output as string)
-        addOrUpdateExecution({
-          ...existing,
-          output: newOutput,
-        })
-      }
-    }
-
-    const handleExecutionDone = (rawData: Record<string, unknown>) => {
-      const data = (rawData.data as Record<string, unknown>) || rawData
-      const existingExecutions = useLayoutModeStore.getState().activeExecutions
-      const executionId = data.execution_id as string
-      const existing = existingExecutions.find((e) => e.id === executionId)
-
-      if (existing) {
-        addOrUpdateExecution({
-          ...existing,
-          status: (data.success as boolean) ? 'completed' : 'failed',
-          progress: 100,
-          completedAt: new Date().toISOString(),
-          error: (data.error as string) || undefined,
-        })
-
-        setTimeout(() => {
-          removeExecution(executionId)
-        }, 10000)
-      }
-
-      bumpWorkspaceDataVersion()
-    }
-
-    const handleExecutionCancelled = (rawData: Record<string, unknown>) => {
-      const data = (rawData.data as Record<string, unknown>) || rawData
-      const existingExecutions = useLayoutModeStore.getState().activeExecutions
-      const executionId = data.execution_id as string
-      const existing = existingExecutions.find((e) => e.id === executionId)
-
-      if (existing) {
-        addOrUpdateExecution({
-          ...existing,
-          status: 'cancelled',
-          completedAt: new Date().toISOString(),
-        })
-
-        setTimeout(() => {
-          removeExecution(executionId)
-        }, 5000)
-      }
-    }
-
-    // Interaction events are handled by useInteractionHandler hook
-
-    // Sub-agent event handlers
-
-    // 所有 handler 统一从 data.data 解包实际数据
-    const handleSubAgentCreated = (rawData: Record<string, unknown>) => {
-      const data = (rawData.data as Record<string, unknown>) || rawData
-      const agentId = (data.agentId as string) || (data.taskId as string)
-      const agentName = (data.agentName as string) || 'Sub-agent'
-      if (!agentId) {
-        console.warn('[useRealtimeEvents] Sub-agent agentId 缺失，无法追踪', data)
-      }
-      const event: ExecutionEvent = {
-        id: `agent-${agentId || 'unknown'}`,
-        type: 'agent',
-        name: agentName,
-        status: 'running',
-        progress: 0,
-        startedAt: new Date().toISOString(),
-      }
-      addOrUpdateExecution(event)
-
-      // Note: registerPipelineTab is handled by streamingEventService.ts
-      bumpWorkspaceDataVersion()
-    }
-
-    const handleSubAgentWaitingInput = (rawData: Record<string, unknown>) => {
-      const data = (rawData.data as Record<string, unknown>) || rawData
-      const agentId = data.agentId as string
-      const request: InteractionRequest = {
-        id: `interaction-agent-${agentId}`,
-        executionId: agentId,
-        prompt: (data.prompt as string) || `${data.agentName as string || 'Agent'} is waiting for input`,
-        timestamp: new Date().toISOString(),
-      }
-      addInteraction(request)
-    }
-
-    const handleSubAgentCompleted = (rawData: Record<string, unknown>) => {
-      const data = (rawData.data as Record<string, unknown>) || rawData
-      const agentId = data.agentId as string
-      const existingExecutions = useLayoutModeStore.getState().activeExecutions
-      const existing = existingExecutions.find((e) => e.id === `agent-${agentId}`)
-
-      if (existing) {
-        addOrUpdateExecution({
-          ...existing,
-          status: (data.success as boolean) ? 'completed' : 'failed',
-          progress: 100,
-          completedAt: new Date().toISOString(),
-        })
-
-        setTimeout(() => {
-          removeExecution(`agent-${agentId}`)
-        }, 10000)
-      }
-
-      bumpWorkspaceDataVersion()
-    }
+    // 2026-08 清理：execution_start/progress/output/done/cancelled、
+    // sub_agent_created/waiting_input/completed、schema_updated 的订阅已删除——
+    // 后端（kernel ws_session.rs / capability_router.rs 事件族 + 插件 event-bus.emit
+    // 全集）无这些事件名的发射源，订阅是死代码。
 
     // Task lifecycle handlers
 
@@ -275,36 +120,12 @@ export function useRealtimeEvents(): void {
     // WebSocket lifecycle（仅重连时补漏，首次连接由 setActiveSession 负责加载）
     globalWS.subscribe('reconnected', handleWsReconnect)
 
-    // Execution events
-    globalWS.subscribe(WS_SERVER_EVENTS.EXECUTION_START, handleExecutionStart as any)
-    globalWS.subscribe(WS_SERVER_EVENTS.EXECUTION_PROGRESS, handleExecutionProgress as any)
-    globalWS.subscribe(WS_SERVER_EVENTS.EXECUTION_OUTPUT, handleExecutionOutput as any)
-    globalWS.subscribe(WS_SERVER_EVENTS.EXECUTION_DONE, handleExecutionDone as any)
-    globalWS.subscribe(WS_SERVER_EVENTS.EXECUTION_CANCELLED, handleExecutionCancelled as any)
-
-    // Sub-agent events
-    globalWS.subscribe(WS_SERVER_EVENTS.SUB_AGENT_CREATED, handleSubAgentCreated as any)
-    globalWS.subscribe(
-      WS_SERVER_EVENTS.SUB_AGENT_WAITING_INPUT,
-      handleSubAgentWaitingInput as any,
-    )
-    globalWS.subscribe(WS_SERVER_EVENTS.SUB_AGENT_COMPLETED, handleSubAgentCompleted as any)
-
     // Task lifecycle events
+    // （task_status_update / task_status_changed 当前后端推送路径静默跳过、
+    //   待 SDK frontend.emit capability 落地后恢复——见 tasks/service.py，故保留订阅）
     globalWS.subscribe(WS_SERVER_EVENTS.TASK_STATUS_UPDATE, handleTaskStatusUpdate as any)
     globalWS.subscribe(WS_SERVER_EVENTS.TASK_STATUS_CHANGED, handleTaskStatusChanged as any)
     globalWS.subscribe(WS_SERVER_EVENTS.TASK_DELETED, handleTaskDeleted as any)
-
-    // Module schema update events (event-driven, replaces polling)
-    const handleSchemaUpdatedEvent = (rawData: Record<string, unknown>) => {
-      const data = (rawData.data as Record<string, unknown>) || rawData
-      handleSchemaUpdate({
-        module_id: (data.module_id as string) || '',
-        schema_version: (data.schema_version as string) || '',
-        changes: (data.changes as string[]) || [],
-      })
-    }
-    globalWS.subscribe(WS_SERVER_EVENTS.SCHEMA_UPDATED, handleSchemaUpdatedEvent as any)
 
     // visibility 回前台主动重连：浏览器后台时节流 setInterval 心跳 + uvicorn ws_ping_timeout
     // 会掐断连接，但 onclose 可能在标签页冻结期间被延迟。回前台时主动检测：连接已断则重连，
@@ -335,34 +156,10 @@ export function useRealtimeEvents(): void {
       globalWS.unsubscribe('reconnected', handleWsReconnect)
       document.removeEventListener('visibilitychange', handleVisibilityChange)
 
-      // Execution events
-      globalWS.unsubscribe(WS_SERVER_EVENTS.EXECUTION_START, handleExecutionStart as any)
-      globalWS.unsubscribe(WS_SERVER_EVENTS.EXECUTION_PROGRESS, handleExecutionProgress as any)
-      globalWS.unsubscribe(WS_SERVER_EVENTS.EXECUTION_OUTPUT, handleExecutionOutput as any)
-      globalWS.unsubscribe(WS_SERVER_EVENTS.EXECUTION_DONE, handleExecutionDone as any)
-      globalWS.unsubscribe(WS_SERVER_EVENTS.EXECUTION_CANCELLED, handleExecutionCancelled as any)
-
-      // Sub-agent events
-      globalWS.unsubscribe(WS_SERVER_EVENTS.SUB_AGENT_CREATED, handleSubAgentCreated as any)
-      globalWS.unsubscribe(
-        WS_SERVER_EVENTS.SUB_AGENT_WAITING_INPUT,
-        handleSubAgentWaitingInput as any,
-      )
-      globalWS.unsubscribe(WS_SERVER_EVENTS.SUB_AGENT_COMPLETED, handleSubAgentCompleted as any)
-
       // Task lifecycle events
       globalWS.unsubscribe(WS_SERVER_EVENTS.TASK_STATUS_UPDATE, handleTaskStatusUpdate as any)
       globalWS.unsubscribe(WS_SERVER_EVENTS.TASK_STATUS_CHANGED, handleTaskStatusChanged as any)
       globalWS.unsubscribe(WS_SERVER_EVENTS.TASK_DELETED, handleTaskDeleted as any)
-
-      // Module schema events
-      globalWS.unsubscribe(WS_SERVER_EVENTS.SCHEMA_UPDATED, handleSchemaUpdatedEvent as any)
     }
-  }, [
-    addOrUpdateExecution,
-    removeExecution,
-    addInteraction,
-    updateConnectionStatus,
-    bumpWorkspaceDataVersion,
-  ])
+  }, [bumpWorkspaceDataVersion])
 }

@@ -212,6 +212,15 @@ class SecurityChecker:
         return True, False, None
 
 
+# ── 单一事实源导出（punch C17）──────────────────────────────
+# 危险命令黑名单分类以本文件 SecurityChecker 为准；
+# builtin_tools/src/agentos_builtin_tools/bash_tool.py 直接导入以下常量，
+# 禁止再各维护一份正则清单（语义漂移：如 "| bash" 在此为 CAUTION 降级而非硬拦）。
+DANGEROUS_PATTERNS: list[str] = SecurityChecker.DANGEROUS_PATTERNS
+CAUTION_PATTERNS: list[str] = SecurityChecker.CAUTION_PATTERNS
+BACKGROUND_PATTERNS: list[str] = SecurityChecker.BACKGROUND_PATTERNS
+
+
 class BashTool(WorkspaceAwareMixin):
     """增强版 Bash 命令执行工具（0.2 sidecar）。
 

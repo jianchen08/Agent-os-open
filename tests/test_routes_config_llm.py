@@ -1,4 +1,4 @@
-# @feature: FP-0.2.CFG 配置注入 | @ci: python-coverage
+# @feature: FP-0.2.CFG 配置注入 | @ci: none-local（不在任何 CI 车道：python-coverage 的 BASE_TEST_PATHS 未收集本文件）
 """routes_config.py LLM 提供者管理单元测试（0.2 插件路径）。
 
 覆盖本次「填 Key 即用」改造的核心逻辑：

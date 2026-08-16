@@ -1,6 +1,4 @@
 version: 1
-user_plugin_roots:
-- plugins/user
 plugins:
   llm_service:
     enabled: true
@@ -56,6 +54,8 @@ plugins:
   demo_widget_plugin:
     enabled: true
     activation: lazy
+  simple_tools:
+    enabled: true
 defaults:
   enabled: true
   activation: lazy

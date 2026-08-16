@@ -1,4 +1,4 @@
-# @feature: FP-0.2.一 第三方插件协议 | @vision: V3 可嵌入 | @ci: python-plugins-test
+# @feature: FP-0.2.一 第三方插件协议 | @vision: V3 可嵌入 | @ci: python-test
 """sidecar 日志统一接入 + per-request 上下文绑定测试。
 
 覆盖：

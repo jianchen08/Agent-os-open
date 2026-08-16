@@ -1,3 +1,4 @@
+# @feature: FP-0.2.〇 管道引擎 | @vision: V3 可嵌入 | @ci: python-coverage
 """TaskEventReceiverPlugin 单元测试——任务终态事件接收与注入。
 
 覆盖：订阅 task_service 回调、_on_state_changed 终态过滤（仅 completed/failed）、

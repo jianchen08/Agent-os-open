@@ -2,6 +2,9 @@
 
 接收任务状态变更事件，当任务到达终态时注入通知到对话中，
 由主 Agent（灵汐）根据通知决定后续操作（提交新任务、重试、标记容器完成等）。
+
+注意：跨插件服务接线（get_service 命中 task_service）属后续架构任务；
+未接线时事件订阅不可用（空转），失败路径仅低频 warning 留痕。
 """
 
 from __future__ import annotations
@@ -36,6 +39,8 @@ class TaskEventReceiverPlugin(IInputPlugin):
         self._subscribed = False
         self._task_service: Any = None
         self._current_task_id: str = ""
+        # 服务不可用告警只打一次（低频留痕，避免每轮迭代刷屏）
+        self._service_warned = False
 
     @property
     def name(self) -> str:
@@ -98,8 +103,15 @@ class TaskEventReceiverPlugin(IInputPlugin):
         Args:
             ctx: 插件执行上下文
         """
-        with contextlib.suppress(KeyError):
+        try:
             self._task_service = ctx.get_service("task_service")
+        except KeyError:
+            # 跨插件服务接线属后续架构任务：未接线时订阅不可用（事件接收空转），
+            # 低频 warning 留痕（只打一次），不改变降级语义。
+            if not self._service_warned:
+                self._service_warned = True
+                logger.warning("[TaskEventReceiver] task_service 未接线，任务事件订阅不可用")
+            return
 
         if self._task_service is not None:
             try:

@@ -3,8 +3,8 @@
 0.1 的记忆服务（memory.service.MemoryService）已在 0.2 中删除，本模块改为
 注入式 IMemoryBackend（见 plugins/shared/system/hindsight_memory/memory_backend.py
 定义的端口：add / search / delete / import_document，全部 async）。
-本模块保持自包含：不导入 0.1 已删除的 core/tools/memory 包，Tool 与
-ToolExecutionResult 在本模块内就地定义（与 0.1 结构对齐）。
+Tool / ToolExecutionResult / 枚举 / 结果工厂均从 ``agentos_plugin_sdk`` 导入
+（与 download/tool.py 的导入清单对齐；SDK 字段覆盖本地版用法）。
 
 设计要点：
 - 后端可注入（构造参数或 set_memory_backend()），测试可传 AsyncMock。
@@ -20,10 +20,6 @@ ToolExecutionResult 在本模块内就地定义（与 0.1 结构对齐）。
   - get_context  → backend.search 更宽泛查询（更大 top_k，不过滤类型）
 
 暴露接口：
-- create_success_result(data: Any, metadata: dict | None) -> ToolExecutionResult
-- create_failure_result(error: str, error_code: str | None) -> ToolExecutionResult
-- Tool：工具定义（与 0.1 tools.types.Tool 关键字段对齐）
-- ToolExecutionResult：工具执行结果（与 0.1 core.results.ToolExecutionResult 对齐）
 - MemoryTool：记忆工具类
 """
 
@@ -31,147 +27,19 @@ from __future__ import annotations
 
 import logging
 import os
-from dataclasses import dataclass, field
-from enum import Enum
 from typing import Any
 
+from agentos_plugin_sdk import (
+    Tool,
+    ToolCategory,
+    ToolExecutionResult,
+    ToolLevel,
+    ToolSource,
+    create_failure_result,
+    create_success_result,
+)
+
 logger = logging.getLogger(__name__)
-
-
-# ═══════════════════════════════════════════════════════════
-# 本地类型定义（0.1 core.results / tools.types 在 0.2 已删除，就地对齐定义）
-# ═══════════════════════════════════════════════════════════
-
-
-@dataclass
-class ToolExecutionResult:
-    """工具执行结果——与 0.1 core.results.ToolExecutionResult 结构对齐。
-
-    Attributes:
-        success: 是否成功
-        output: 输出数据（成功时有值）
-        error: 错误信息（失败时有值）
-        error_code: 错误代码（可选）
-        metadata: 附加元数据
-    """
-
-    success: bool
-    output: dict[str, Any] = field(default_factory=dict)
-    error: str | None = None
-    error_code: str | None = None
-    metadata: dict[str, Any] = field(default_factory=dict)
-
-    @classmethod
-    def create_completed(
-        cls,
-        output: Any,
-        metadata: dict[str, Any] | None = None,
-    ) -> ToolExecutionResult:
-        """创建成功结果。"""
-        return cls(
-            success=True,
-            output=output,
-            metadata=metadata or {},
-        )
-
-    @classmethod
-    def create_failed(
-        cls,
-        error: str,
-        error_code: str | None = None,
-        metadata: dict[str, Any] | None = None,
-    ) -> ToolExecutionResult:
-        """创建失败结果。"""
-        return cls(
-            success=False,
-            error=error,
-            error_code=error_code,
-            metadata=metadata or {},
-        )
-
-
-class ToolCategory(str, Enum):
-    """工具功能分类（与 0.1 tools.types.ToolCategory 对齐）。"""
-
-    FILE = "file"
-    FILE_SYSTEM = "file_system"
-    SEARCH = "search"
-    WEB = "web"
-    MEMORY = "memory"
-    TASK = "task"
-    SYSTEM = "system"
-    EXECUTION = "execution"
-    ANALYSIS = "analysis"
-    EVALUATION = "evaluation"
-    AGENT = "agent"
-    MONITORING = "monitoring"
-
-
-class ToolLevel(str, Enum):
-    """工具级别分类（与 0.1 tools.types.ToolLevel 对齐）。"""
-
-    SYSTEM = "system"
-    USER = "user"
-    L1_ONLY = "l1_only"
-    L1_L2_ONLY = "l1_l2_only"
-    ALL = "all"
-
-
-class ToolSource(str, Enum):
-    """工具来源（与 0.1 tools.types.ToolSource 对齐）。"""
-
-    CODE = "code"
-    BUILTIN = "builtin"
-    MCP = "mcp"
-    HTTP = "http"
-    DATABASE = "database"
-
-
-@dataclass
-class Tool:
-    """工具定义——与 0.1 tools.types.Tool 的关键字段对齐。
-
-    Attributes:
-        name: 工具唯一标识
-        description: 工具功能描述
-        input_schema: 输入参数 JSON Schema
-        category: 功能分类
-        level: 工具级别
-        source: 工具来源
-        injected_params: 运行时注入参数列表（不暴露给 LLM）
-    """
-
-    name: str
-    description: str
-    input_schema: dict[str, Any]
-    category: ToolCategory | None = None
-    level: ToolLevel = ToolLevel.USER
-    source: ToolSource = ToolSource.CODE
-    injected_params: list[str] = field(default_factory=list)
-
-
-def create_success_result(
-    data: Any = None,
-    metadata: dict[str, Any] | None = None,
-) -> ToolExecutionResult:
-    """创建成功结果。"""
-    return ToolExecutionResult.create_completed(
-        output=data,
-        metadata=metadata or {},
-    )
-
-
-def create_failure_result(
-    error: str,
-    error_code: str | None = None,
-    metadata: dict[str, Any] | None = None,
-) -> ToolExecutionResult:
-    """创建失败结果。"""
-    return ToolExecutionResult.create_failed(
-        error=error,
-        error_code=error_code,
-        metadata=metadata or {},
-    )
 
 
 # ═══════════════════════════════════════════════════════════
@@ -194,9 +62,24 @@ class MemoryTool:
 
     后端为 duck-type 的 IMemoryBackend（AsyncMock / HindsightBackend /
     KernelMemoryBackend 均可）；未注入时执行返回错误结果，不崩溃。
+
+    IDOR 防护（punch B6）：
+    - 敏感 action（store/import_text/import_file/update/delete——写/删用户数据）
+      在 ``set_trusted_user_id`` 未注入服务端可信身份时**明确拒绝**，
+      不再静默回退 ``inputs.user_id``（后者可被客户端伪造以越权读写他人记忆）。
+    - 只读 action（retrieve/get_context/list）保留 ``inputs.user_id`` 回退，
+      维持旧调用路径向后兼容。
+    - 服务端入口（server.py 的 memory()）应按 bash 的 ``_owner_from_inputs``
+      模式从内核注入参数（``_owner`` / ``session_id`` / ...）解析可信身份后
+      调用 ``set_trusted_user_id``。
     """
 
     SYSTEM_USER_ID = "system"
+
+    # 敏感（写/删用户数据）action：无可信身份注入时拒绝（IDOR 防护）
+    SENSITIVE_ACTIONS = frozenset(
+        {"store", "import_text", "import_file", "update", "delete"}
+    )
 
     def __init__(self, memory_backend: Any | None = None):
         """初始化记忆工具。
@@ -236,8 +119,8 @@ class MemoryTool:
         鉴权优先级（高 → 低）：
         1. ``self._trusted_user_id``：服务端注入的可信 caller 身份——**忽略**
            客户端 ``inputs["user_id"]``，防 IDOR。
-        2. ``inputs["user_id"]``：**不可信**回退（仅在未注入可信身份时沿用，
-           兼容旧调用路径）。
+        2. ``inputs["user_id"]``：**不可信**回退——仅只读 action 沿用（敏感
+           action 在 execute 入口已被拒绝，见 SENSITIVE_ACTIONS），向后兼容。
         3. ``SYSTEM_USER_ID``：缺省系统态。
 
         Args:
@@ -248,7 +131,8 @@ class MemoryTool:
         """
         if self._trusted_user_id:
             return self._trusted_user_id
-        # 回退：无服务端可信注入时沿用 inputs（不可信，仅向后兼容）。
+        # 回退：无服务端可信注入时沿用 inputs（不可信；仅只读路径可达——
+        # 敏感 action 已在 execute 入口按无身份拒绝）。
         return str(inputs.get("user_id") or self.SYSTEM_USER_ID)
 
     @staticmethod
@@ -403,6 +287,16 @@ class MemoryTool:
             return create_failure_result("memory backend 未注入")
 
         action = inputs.get("action")
+
+        # IDOR 防护（B6）：敏感（写/删用户数据）action 无服务端可信身份注入时
+        # 明确拒绝——不再静默回退 inputs.user_id（客户端可伪造，越权写/删他人记忆）。
+        if action in self.SENSITIVE_ACTIONS and not self._trusted_user_id:
+            return create_failure_result(
+                "缺少可信调用方身份：敏感操作（"
+                + "/".join(sorted(self.SENSITIVE_ACTIONS))
+                + "）需服务端注入 _owner/session_id 等会话身份"
+                "（经 set_trusted_user_id），已拒绝以防止客户端伪造 user_id 越权（IDOR）"
+            )
 
         if action == "store":
             return await self._store(inputs)

@@ -1,4 +1,4 @@
-# @feature: FP-T07 llm api | @ci: python-coverage
+# @feature: FP-T07 llm api | @ci: none-local（不在任何 CI 车道：python-coverage 的 BASE_TEST_PATHS 未收集本文件）
 """llm_core 提供者拆分回归测试（task_kernel_cleanup_and_split 3a/3b）。
 
 结构断言：`adapter.py` 不再包含任何具体提供者 hack 与诊断机制——已迁至

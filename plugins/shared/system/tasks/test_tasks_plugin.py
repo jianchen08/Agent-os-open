@@ -1,4 +1,4 @@
-# @feature: FP-MIGR 0.1→0.2迁移 | @ci: python-plugins-test
+# @feature: FP-MIGR 0.1→0.2迁移 | @ci: python-coverage
 """tasks 插件迁移验证测试。
 
 验证内容：

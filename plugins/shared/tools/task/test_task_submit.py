@@ -1,4 +1,4 @@
-# @feature: FP-0.2.二 内部模块 manifest | @vision: V3 可嵌入 | @ci: python-plugins-test
+# @feature: FP-0.2.二 内部模块 manifest | @vision: V3 可嵌入 | @ci: python-coverage
 """
 task_submit 工具的单元测试
 

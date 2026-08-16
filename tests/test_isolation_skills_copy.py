@@ -13,9 +13,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import tests._isolation_path  # noqa: F401  # isort: skip —— 须在 workspace_lifecycle import 前注入 sys.path
 from workspace_lifecycle import WorkspaceLifecycleManager
-
-import tests._isolation_path  # noqa: F401
 
 
 def _make_manager(base_path: Path) -> WorkspaceLifecycleManager:

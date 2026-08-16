@@ -1,4 +1,4 @@
-# @feature: FP-0.2.二 内部模块manifest | @vision: V3 可嵌入 | @ci: python-plugins-test
+# @feature: FP-0.2.二 内部模块manifest | @vision: V3 可嵌入 | @ci: python-coverage
 """工作空间 API 路由 - 集成测试。
 
 测试范围：

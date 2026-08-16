@@ -1,4 +1,4 @@
-# @feature: FP-0.2.五 审批闭环 | @vision: V2 全能闭环 | @ci: python-plugins-test
+# @feature: FP-0.2.五 审批闭环 | @vision: V2 全能闭环 | @ci: python-coverage
 """approval.create_choice 超时/异常语义单测（F-APPROVAL-1）。
 
 产品决策：审批等待超时 = **拒绝**（不恢复管道、记录拒绝状态），

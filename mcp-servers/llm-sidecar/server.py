@@ -3,6 +3,9 @@
 # 通过 JSON-RPC over stdio 提供 LLM 调用能力。
 # 内核通过 McpClient 连接此边车进程，调用 tools/call 执行 LLM 请求。
 #
+# 依赖 python 包 litellm（pip install litellm）；未安装时工具调用直接返回
+# JSON-RPC error，不做 mock 降级。流式调用请使用 litellm_proxy.py（真实流式）。
+#
 # AC-06-2: Python litellm 边车可被内核通过 MCP 调用
 #
 # [来源: docs/tasks/task_07_llm_api.md]
@@ -10,6 +13,9 @@
 import sys
 import json
 import os
+
+# 与 config/models/llm.yaml defaults.call_timeout 对齐（单位：秒）
+CALL_TIMEOUT_SECONDS = 600
 
 def handle_initialize(params):
     return {
@@ -41,20 +47,6 @@ def handle_tools_list(params):
                 }
             },
             {
-                "name": "complete_stream",
-                "description": "Streaming LLM completion (returns chunk via notification)",
-                "inputSchema": {
-                    "type": "object",
-                    "properties": {
-                        "model": {"type": "string"},
-                        "messages": {"type": "array"},
-                        "temperature": {"type": "number"},
-                        "max_tokens": {"type": "integer"}
-                    },
-                    "required": ["model", "messages"]
-                }
-            },
-            {
                 "name": "list_models",
                 "description": "List available models",
                 "inputSchema": {
@@ -72,7 +64,19 @@ def handle_tools_call(params):
     if name == "complete":
         return handle_complete(arguments)
     elif name == "complete_stream":
-        return handle_complete_stream(arguments)
+        # 本服务未实现真实流式（曾经的实现是把用户输入切块伪装成 chunk）。
+        # 已从 tools/list 移除；此处仅对旧调用方返回明确的 not-supported 错误。
+        # 真实流式请调用 litellm_proxy.py 的 stream 工具。
+        return {
+            "error": {
+                "code": -32601,
+                "message": (
+                    "complete_stream is not supported by this server "
+                    "(no real streaming implementation); "
+                    "use mcp-servers/llm-sidecar/litellm_proxy.py 'stream' tool instead"
+                ),
+            }
+        }
     elif name == "list_models":
         return handle_list_models()
     else:
@@ -82,14 +86,24 @@ def handle_complete(args):
     model = args.get("model", "deepseek-chat")
     messages = args.get("messages", [])
 
-    # Try litellm first, fall back to mock if not installed
     try:
         import litellm
+    except ImportError as e:
+        # fail-fast：不做 mock 降级，直接返回错误（沿用本文件 JSON-RPC error 格式）
+        return {
+            "error": {
+                "code": -32603,
+                "message": f"litellm is required but not installed: {e}. pip install litellm",
+            }
+        }
+
+    try:
         response = litellm.completion(
             model=model,
             messages=messages,
             temperature=args.get("temperature", 0.7),
             max_tokens=args.get("max_tokens", 4096),
+            timeout=CALL_TIMEOUT_SECONDS,
         )
         choice = response.choices[0]
         result_content = choice.message.content or ""
@@ -105,51 +119,12 @@ def handle_complete(args):
                 "total_tokens": getattr(usage, "total_tokens", 0) if usage else 0,
             }
         }
-    except ImportError:
-        # Mock response for testing without litellm
-        user_msg = ""
-        for m in messages:
-            if m.get("role") == "user":
-                user_msg = m.get("content", "")
-                break
-        result = {
-            "content": f"[mock-llm] Response to: {user_msg}",
-            "model": model,
-            "finish_reason": "stop",
-            "usage": {
-                "prompt_tokens": len(str(messages)) // 4,
-                "completion_tokens": 50,
-                "total_tokens": len(str(messages)) // 4 + 50,
-            }
-        }
     except Exception as e:
         return {"isError": True, "content": [{"type": "text", "text": f"LLM error: {e}"}]}
 
     return {
         "content": [{"type": "text", "text": json.dumps(result)}]
     }
-
-def handle_complete_stream(args):
-    model = args.get("model", "deepseek-chat")
-    messages = args.get("messages", [])
-    user_msg = ""
-    for m in messages:
-        if m.get("role") == "user":
-            user_msg = m.get("content", "")
-            break
-
-    # For stdio mode, we simulate streaming by sending the full response
-    # Real streaming would use MCP notifications per chunk
-    chunks = [user_msg[i:i+10] for i in range(0, len(user_msg), 10)] if user_msg else ["mock"]
-
-    result = {
-        "content": [{"type": "text", "text": json.dumps({
-            "chunks": chunks,
-            "model": model,
-            "finish_reason": "stop",
-        })}]
-    }
-    return result
 
 def handle_list_models():
     models = [

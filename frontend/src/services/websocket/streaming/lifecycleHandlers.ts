@@ -1,4 +1,7 @@
-/** 生命周期事件处理器（STATE_CHANGE / WS重连补漏 / 系统通知 / 用量更新 / 终止评估） 从 initStreamingEvents 中提取的独立处理器函数，降低 index.ts 复杂度。 */
+/** 生命周期事件处理器（WS重连补漏 / 系统通知 / 用量更新 / 终止评估） 从 initStreamingEvents 中提取的独立处理器函数，降低 index.ts 复杂度。
+ *
+ * 2026-08 清理：handleStateChange（state_change 事件）已删除——后端无该事件发射源。
+ */
 import { useContextUsageStore } from '@/stores/contextUsageStore'
 import { useNotificationStore } from '@/stores/notificationStore'
 import { usePipelineMessageStore } from '@/stores/pipelineMessageStore'
@@ -7,19 +10,6 @@ import { loggers } from '@/utils/logger'
 
 import { allocateNextSequence, terminatePipeline } from './handlers/utils'
 import { resolvePipelineId } from './router'
-
-/** 处理 STATE_CHANGE 事件 */
-export function handleStateChange(eventData: any): void {
-  const status = eventData?.data?.status || eventData?.status
-  const pipelineId = resolvePipelineId(eventData)
-  const threadId = eventData?.data?.thread_id || eventData?.thread_id
-
-  const TERMINAL_STATUSES = ['suspended', 'stopped', 'finished', 'failed', 'completed', 'cancelled']
-  if (pipelineId && TERMINAL_STATUSES.includes(status)) {
-    terminatePipeline(pipelineId, threadId)
-    loggers.sessionStore.info('[STATE_CHANGE] pipeline %s → streaming cleaned: pipeline=%s', status, pipelineId)
-  }
-}
 
 /** 处理 WS 重连补漏。重连时对每个 streaming 管道执行 backfill 增量补漏，
  * 拉回断线期间后端 replay 缓冲累积的消息（useRealtimeEvents 只补激活会话主管道，

@@ -1,5 +1,5 @@
 # WSL liveness probe with a hard Windows-side timeout.
-# Called from start_web_cn.bat BEFORE any blocking `wsl -d Ubuntu ...` call.
+# Called from install_native_docker.bat BEFORE any blocking `wsl -d Ubuntu ...` call.
 #
 # Why this exists: bash-internal `timeout` cannot rescue a WSL2 kernel D-state
 # deadlock, because wsl.exe itself hangs on the Windows side before bash starts.

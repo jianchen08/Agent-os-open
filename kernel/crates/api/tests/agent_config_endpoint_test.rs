@@ -161,10 +161,33 @@ async fn test_put_agent_config_then_get_reads_back_new_content() {
     let (_tmp, state) = state_with_agent("round_trip_agent", original);
 
     let new_yaml = "config_id: round_trip_agent\nname: 新名\nlevel: L2\nmodel_tier: large\n";
-    let put_body = serde_json::to_string(&json!({ "yaml": new_yaml })).unwrap();
+
+    // A13：PUT 需带 GET 返回的 etag（If-Match 乐观锁）
+    let app0 = build_router(state.clone());
+    let token = admin_token(&app0).await;
+    let resp0 = app0
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/agents/round_trip_agent/config")
+                .header("authorization", format!("Bearer {token}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp0.status(), StatusCode::OK);
+    let body0 = axum::body::to_bytes(resp0.into_body(), 64 * 1024)
+        .await
+        .unwrap();
+    let get_json: Value = serde_json::from_slice(&body0).unwrap();
+    let etag = get_json["etag"]
+        .as_str()
+        .expect("GET 应返回 etag")
+        .to_string();
+
+    let put_body = serde_json::to_string(&json!({ "yaml": new_yaml, "if_match": etag })).unwrap();
 
     let app = build_router(state.clone());
-    let token = admin_token(&app).await;
     let response = app
         .oneshot(
             Request::builder()
@@ -218,9 +241,33 @@ async fn test_put_agent_config_creates_backup() {
     let original = "config_id: backup_agent\nname: 备份前\n";
     let (tmp, state) = state_with_agent("backup_agent", original);
 
-    let put_body =
-        serde_json::to_string(&json!({ "yaml": "config_id: backup_agent\nname: 备份后\n" }))
-            .unwrap();
+    // A13：先 GET 拿 etag
+    let app0 = build_router(state.clone());
+    let token = admin_token(&app0).await;
+    let resp0 = app0
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/agents/backup_agent/config")
+                .header("authorization", format!("Bearer {token}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let body0 = axum::body::to_bytes(resp0.into_body(), 64 * 1024)
+        .await
+        .unwrap();
+    let get_json: Value = serde_json::from_slice(&body0).unwrap();
+    let etag = get_json["etag"]
+        .as_str()
+        .expect("GET 应返回 etag")
+        .to_string();
+
+    let put_body = serde_json::to_string(&json!({
+        "yaml": "config_id: backup_agent\nname: 备份后\n",
+        "if_match": etag
+    }))
+    .unwrap();
     let app = build_router(state);
     let token = admin_token(&app).await;
     let response = app
@@ -265,6 +312,106 @@ async fn test_put_agent_config_missing_returns_404() {
         .await
         .unwrap();
     assert_eq!(response.status(), StatusCode::NOT_FOUND);
+}
+
+/// GET 对含敏感字段的 agent yaml 做掩码(A13 安全基线,对齐 plugin config GET):
+/// api_key 等明文 → `****`;`${ENV}` 占位符原样保留。
+#[tokio::test]
+async fn test_get_agent_config_masks_plaintext_secrets() {
+    let yaml =
+        "config_id: secret_agent\nname: s\napi_key: sk-real-secret-123\ntoken: ${SOME_TOKEN}\n";
+    let (_tmp, state) = state_with_agent("secret_agent", yaml);
+
+    let app = build_router(state);
+    let token = admin_token(&app).await;
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/agents/secret_agent/config")
+                .header("authorization", format!("Bearer {token}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let body = axum::body::to_bytes(response.into_body(), 64 * 1024)
+        .await
+        .unwrap();
+    let json: Value = serde_json::from_slice(&body).unwrap();
+    let yaml_back = json["yaml"].as_str().expect("应返回 yaml 字符串");
+    assert!(
+        !yaml_back.contains("sk-real-secret-123"),
+        "明文 secret 不得泄漏: {yaml_back}"
+    );
+    assert!(
+        yaml_back.contains("****"),
+        "明文 secret 应被掩码: {yaml_back}"
+    );
+    assert!(
+        yaml_back.contains("${SOME_TOKEN}"),
+        "ENV 占位符应原样保留: {yaml_back}"
+    );
+}
+
+/// PUT 写入语法非法的 yaml → 400 且磁盘保持原值(T2)。
+#[tokio::test]
+async fn test_put_agent_config_invalid_yaml_returns_400_keeps_disk() {
+    let original = "config_id: syntax_agent\nname: 原\n";
+    let (_tmp, state) = state_with_agent("syntax_agent", original);
+
+    // 裸 tab 缩进 + 未闭合引号 → serde_yaml 解析失败
+    let broken = "config_id: syntax_agent\nname: \"未闭合\n\tbad: tab\n";
+
+    let app0 = build_router(state.clone());
+    let token = admin_token(&app0).await;
+    let resp0 = app0
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/agents/syntax_agent/config")
+                .header("authorization", format!("Bearer {token}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let body0 = axum::body::to_bytes(resp0.into_body(), 64 * 1024)
+        .await
+        .unwrap();
+    let etag: Value = serde_json::from_slice(&body0).unwrap();
+    let etag = etag["etag"].as_str().unwrap().to_string();
+
+    let app = build_router(state.clone());
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("PUT")
+                .uri("/api/v1/agents/syntax_agent/config")
+                .header("authorization", format!("Bearer {token}"))
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::to_string(&json!({ "yaml": broken, "if_match": etag })).unwrap(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        response.status(),
+        StatusCode::BAD_REQUEST,
+        "非法 yaml 应 400"
+    );
+
+    let disk = fs::read_to_string(
+        state
+            .project_root
+            .as_ref()
+            .unwrap()
+            .join("config/agents/main/syntax_agent.yaml"),
+    )
+    .unwrap();
+    assert_eq!(disk, original, "400 时磁盘应保持原值");
 }
 
 /// 支持顶层 config/agents/<id>.yaml(非分类子目录)的定位方式。

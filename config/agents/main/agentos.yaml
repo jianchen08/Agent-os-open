@@ -237,6 +237,7 @@ tool_ids:
 - human_interaction
 - trigger_setup
 - trigger_review
+- review.get_report
 - file_read
 - enhanced_search
 hard_constraints:

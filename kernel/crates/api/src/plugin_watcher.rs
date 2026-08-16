@@ -33,9 +33,15 @@ use agentos_invoker::verify::{
 };
 use agentos_plugin_loader::{CapabilityRegistryImpl, PluginScopeRegistry};
 use tokio::sync::mpsc::{self, UnboundedSender};
+use tokio::sync::RwLock;
 use tracing::{info, warn};
 
 use crate::plugin_lifecycle::register_new_plugins;
+
+/// 热发现 manifest 共享存储：watcher 每轮 sync 后把新增插件 manifest 合并进
+/// `AppState.manifests`（按 id 去重的增量合并），保证 /api/v1/plugins 状态列表、
+/// re-enable 重注册、actions/execute 命令查找等 manifest 消费面与注册表一致。
+pub type ManifestsStore = Arc<RwLock<Vec<PluginManifest>>>;
 
 /// 默认防抖窗口：plugin 目录创建会触发多次 notify 事件，收口到 300ms 内合并一次。
 pub const DEFAULT_DEBOUNCE: std::time::Duration = std::time::Duration::from_millis(300);
@@ -230,6 +236,21 @@ pub async fn sync_once(
     known_ids: &mut HashSet<String>,
     known_cdylib: &mut Option<HashSet<String>>,
 ) -> Result<SyncReport, PluginError> {
+    sync_once_with_store(invoker, registry, scopes, known_ids, known_cdylib, None).await
+}
+
+/// [`sync_once`] 的 store 感知变体：`manifests_store` 传入 `AppState.manifests`
+/// 共享句柄时，本轮新注册插件的 manifest 会增量合并进 store（按 id 去重），
+/// 修复热发现后状态列表/重启用等 manifest 消费面看不到新插件的不一致。
+/// 只增不删：目录删除的卸载语义（工具摘除）仍是 watcher 已知 gap，不在此处扩大。
+pub async fn sync_once_with_store(
+    invoker: &dyn PluginInvoker,
+    registry: &Arc<CapabilityRegistryImpl>,
+    scopes: Option<&PluginScopeRegistry>,
+    known_ids: &mut HashSet<String>,
+    known_cdylib: &mut Option<HashSet<String>>,
+    manifests_store: Option<&ManifestsStore>,
+) -> Result<SyncReport, PluginError> {
     let all = invoker.discover_new_plugins().await?;
     // A3：InProcess(cdylib) 集合 diff 先行（下方 for 循环会 move `all`）。
     // 首轮建基线，之后新增/消失都报变更；用全量 `all`（G2 过滤只动 tools，
@@ -291,6 +312,16 @@ pub async fn sync_once(
     let mut report = apply_discovered_plugins(&filtered, known_ids, registry, scopes);
     report.drifted_plugins = drifted_plugins;
     report.cdylib_change = cdylib_change;
+    // 增量合并新插件 manifest 进共享 store（AppState.manifests），保证状态列表 /
+    // re-enable 重注册 / actions 命令查找与注册表一致。幂等：按 id 去重。
+    if let Some(store) = manifests_store {
+        let mut guard = store.write().await;
+        for m in &filtered {
+            if !guard.iter().any(|x| x.id == m.id) {
+                guard.push(m.clone());
+            }
+        }
+    }
     Ok(report)
 }
 
@@ -311,6 +342,9 @@ pub struct PluginWatcher {
     /// A3：cdylib 集合变更时的重启回调（None = 只记日志；bin 装配时注入，
     /// 内部走 routes::drain_and_exit75——排空 + exit 75 / 逃生门）。
     restart_hook: Option<Arc<dyn Fn() + Send + Sync>>,
+    /// 热发现 manifest 共享存储（bin 接线时传 `AppState.manifests`）。
+    /// None = 不同步 manifest 列表（旧行为，仅测试场景）。
+    manifests_store: Option<ManifestsStore>,
     debounce: Duration,
     poll_interval: Duration,
 }
@@ -330,6 +364,7 @@ impl PluginWatcher {
             known_ids: initial_ids,
             known_cdylib: None,
             restart_hook: None,
+            manifests_store: None,
             debounce: DEFAULT_DEBOUNCE,
             poll_interval: DEFAULT_POLL_INTERVAL,
         }
@@ -353,6 +388,13 @@ impl PluginWatcher {
     /// A3：注入 cdylib 集合变更的重启回调（生产由 bin 接线 drain_and_exit75）。
     pub fn with_restart_hook(mut self, hook: Arc<dyn Fn() + Send + Sync>) -> Self {
         self.restart_hook = Some(hook);
+        self
+    }
+
+    /// 注入 `AppState.manifests` 共享句柄：每轮 sync 后把新发现插件的 manifest
+    /// 增量合并进去（/api/v1/plugins 状态列表与注册表保持一致）。
+    pub fn with_manifests_store(mut self, store: ManifestsStore) -> Self {
+        self.manifests_store = Some(store);
         self
     }
 
@@ -385,6 +427,7 @@ impl PluginWatcher {
             known_ids,
             known_cdylib,
             restart_hook,
+            manifests_store,
             debounce,
             poll_interval,
         } = self;
@@ -433,12 +476,13 @@ impl PluginWatcher {
                     // 匹配到事件即继续等（重置防抖窗口）；超时或 channel 关闭则结束。
                 }
                 // 执行一次同步（幂等：无新插件则 no-op）。
-                let report = match sync_once(
+                let report = match sync_once_with_store(
                     invoker.as_ref(),
                     &registry,
                     scopes.as_deref(),
                     &mut known,
                     &mut known_cdylib,
+                    manifests_store.as_ref(),
                 )
                 .await
                 {

@@ -173,10 +173,11 @@ async fn path_a_agent_config_full_crud_loop() {
         "GET 应返回原内容"
     );
 
-    // 3) PUT 写新内容 → 返回 200 + success
+    // 3) PUT 写新内容 → 返回 200 + success（A13：先取 GET 的 etag 走 If-Match）
     let new_yaml =
         "config_id: crud_agent\nname: 新名\nagent_type: main\nlevel: L2\nmodel_tier: large\n";
-    let put_body = serde_json::to_string(&json!({ "yaml": new_yaml })).unwrap();
+    let etag = json["etag"].as_str().expect("GET 应返回 etag").to_string();
+    let put_body = serde_json::to_string(&json!({ "yaml": new_yaml, "if_match": etag })).unwrap();
     let app = build_router(state.clone());
     let resp = app
         .oneshot(
@@ -225,12 +226,9 @@ async fn path_a_agent_config_full_crud_loop() {
     drop(tmp);
 }
 
-/// A2:PUT 写入非法 yaml(语法错误)。
-///
-/// 探测现有行为:看 put_agent_config_handler 是否校验 yaml 语法。若不校验,
-/// 断言"文件内容确实被写入新值"(记录现状,不擅自改实现)。
+/// A2:PUT 写入非法 yaml(语法错误)→ 400 + 磁盘保持原值(T2 校验上线后的单分支契约)。
 #[tokio::test]
-async fn path_a_put_invalid_yaml_behavior() {
+async fn path_a_put_invalid_yaml_rejected_400_keeps_disk() {
     let original = "config_id: yamlcheck\nname: 原名\n";
     let (_tmp, state) = state_with_agent("yamlcheck", original);
 
@@ -252,6 +250,11 @@ async fn path_a_put_invalid_yaml_behavior() {
         )
         .await
         .unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::BAD_REQUEST,
+        "非法 yaml 语法应 400 拒绝(不写盘)"
+    );
 
     let disk_path = state
         .project_root
@@ -259,23 +262,67 @@ async fn path_a_put_invalid_yaml_behavior() {
         .unwrap()
         .join("config/agents/main/yamlcheck.yaml");
     let disk_after = fs::read_to_string(&disk_path).unwrap();
+    assert_eq!(disk_after, original, "PUT 400 时文件内容应保持原值不变");
+}
 
-    if resp.status() == StatusCode::BAD_REQUEST {
-        // 实现做了语法校验:文件内容应保持原值
-        assert_eq!(disk_after, original, "PUT 400 时文件内容应保持原值不变");
-    } else {
-        // 实现未做语法校验(预期路径,见 put_agent_config_handler):200 + 文件被写入新值
-        assert_eq!(
-            resp.status(),
-            StatusCode::OK,
-            "若不校验 yaml 语法,PUT 应返回 200;实际: {}",
-            resp.status()
-        );
-        assert_eq!(
-            disk_after, broken_yaml,
-            "未校验时,磁盘文件应被写入调用方提供的原文"
-        );
-    }
+/// A3:PUT 缺 If-Match / etag 过期 → 409(A13 乐观锁,对齐 plugin config PUT)。
+#[tokio::test]
+async fn path_a_put_agent_config_etag_mismatch_409() {
+    let original = "config_id: etagcheck\nname: 原名\n";
+    let (_tmp, state) = state_with_agent("etagcheck", original);
+    let valid_yaml = "config_id: etagcheck\nname: 新名\n";
+
+    let app = build_router(state.clone());
+    let token = admin_token(&app).await;
+
+    // 缺 if_match → 409,磁盘不动
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("PUT")
+                .uri("/api/v1/agents/etagcheck/config")
+                .header("authorization", format!("Bearer {token}"))
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::to_string(&json!({ "yaml": valid_yaml })).unwrap(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::CONFLICT, "缺 If-Match 应 409");
+
+    // etag 不匹配(伪造) → 409,磁盘不动
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("PUT")
+                .uri("/api/v1/agents/etagcheck/config")
+                .header("authorization", format!("Bearer {token}"))
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::to_string(&json!({
+                        "yaml": valid_yaml,
+                        "if_match": "stale-etag"
+                    }))
+                    .unwrap(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::CONFLICT, "过期 etag 应 409");
+
+    let disk = fs::read_to_string(
+        state
+            .project_root
+            .as_ref()
+            .unwrap()
+            .join("config/agents/main/etagcheck.yaml"),
+    )
+    .unwrap();
+    assert_eq!(disk, original, "409 时磁盘应保持原值");
 }
 
 // ════════════════════════════════════════════════════════════════
@@ -296,7 +343,7 @@ async fn path_b_schema_contributes_multi_key_passthrough() {
     manifest.contributes = Some(contributes.clone());
 
     let state = AppState {
-        manifests: Arc::new(vec![manifest]),
+        manifests: Arc::new(RwLock::new(vec![manifest])),
         enabled_plugin_ids: Arc::new(RwLock::new(HashSet::from([
             "multi_contrib_plugin".to_string()
         ]))),
@@ -355,7 +402,7 @@ async fn path_b_disabled_plugin_contributes_not_exported() {
 
     // enabled_plugin_ids 为空集 → 该插件被视为 disabled
     let state = AppState {
-        manifests: Arc::new(vec![manifest]),
+        manifests: Arc::new(RwLock::new(vec![manifest])),
         enabled_plugin_ids: Arc::new(RwLock::new(HashSet::new())),
         ..AppState::with_config(json!({}))
     };
@@ -389,12 +436,13 @@ async fn path_b_disabled_plugin_contributes_not_exported() {
 // 路径 C:actions 执行 + command 查找边界
 // ════════════════════════════════════════════════════════════════
 
-/// C1:command 声明带 `tool` 字段 → actions/execute 返回 success。
+/// C1:command 声明带 `tool` 字段 + invoker 不可用(None)→ 明确失败。
 ///
-/// 即便 invoker 为 None(测试环境),看现有占位逻辑:`tool` 字段命中后,
-/// invoker=None → 不进 invoke 分支 → 落到末尾 success 占位。
+/// 降级语义(T1 修复后):tool 路由已声明但执行器缺席时,返回 success:false +
+/// "工具执行器不可用"错误——不再静默占位 success:true(假成功会让前端把
+/// "没执行"当成"执行成功")。无 tool 字段的纯声明命令仍走 ack 占位(见 C3)。
 #[tokio::test]
-async fn path_c_command_with_tool_field_returns_success() {
+async fn path_c_command_with_tool_field_but_no_invoker_returns_failure() {
     let mut manifest = manifest_base("tool_cmd_plugin");
     manifest.contributes = Some(json!({
         "commands": [{
@@ -405,8 +453,8 @@ async fn path_c_command_with_tool_field_returns_success() {
     }));
 
     let mut state = AppState::new();
-    state.manifests = Arc::new(vec![manifest]);
-    // invoker 保持 None(AppState::new 默认),验证占位逻辑
+    state.manifests = Arc::new(RwLock::new(vec![manifest]));
+    // invoker 保持 None(AppState::new 默认),验证降级语义
 
     let app = build_router(state);
     let token = admin_token(&app).await;
@@ -430,14 +478,22 @@ async fn path_c_command_with_tool_field_returns_success() {
     assert_eq!(
         resp.status(),
         StatusCode::OK,
-        "command 声明带 tool 字段,invoker=None 时应走占位 success"
+        "降级失败走业务信封(HTTP 200 + success:false),而非 HTTP 错误码"
     );
 
     let body = axum::body::to_bytes(resp.into_body(), 64 * 1024)
         .await
         .unwrap();
     let json: Value = serde_json::from_slice(&body).unwrap();
-    assert_eq!(json["success"], true, "占位逻辑应返回 success=true: {json}");
+    assert_eq!(
+        json["success"], false,
+        "tool 已声明 + invoker=None 应返回明确失败: {json}"
+    );
+    let err = json["error"].as_str().unwrap_or_default();
+    assert!(
+        err.contains("工具执行器不可用"),
+        "error 应说明执行器不可用: {json}"
+    );
 }
 
 /// C2:command 声明在 contributes.commands[].id(如 "commandId"),但 action 参数带
@@ -453,7 +509,7 @@ async fn path_c_namespaced_action_does_not_match_bare_id() {
     }));
 
     let mut state = AppState::new();
-    state.manifests = Arc::new(vec![manifest]);
+    state.manifests = Arc::new(RwLock::new(vec![manifest]));
 
     let app = build_router(state);
     let token = admin_token(&app).await;
@@ -494,7 +550,7 @@ async fn path_c_empty_args_executes_normally() {
     }));
 
     let mut state = AppState::new();
-    state.manifests = Arc::new(vec![manifest]);
+    state.manifests = Arc::new(RwLock::new(vec![manifest]));
 
     let app = build_router(state);
     let token = admin_token(&app).await;
@@ -833,7 +889,7 @@ async fn path_f_sessions_schema_aggregates_plugin_thread_fields() {
     let m_none = manifest_base("no_contributes_plugin");
 
     let state = AppState {
-        manifests: Arc::new(vec![m_on, m_off, m_none]),
+        manifests: Arc::new(RwLock::new(vec![m_on, m_off, m_none])),
         enabled_plugin_ids: Arc::new(RwLock::new(HashSet::from([
             "isolation".to_string(),
             "no_contributes_plugin".to_string(),
@@ -874,4 +930,60 @@ async fn path_f_sessions_schema_aggregates_plugin_thread_fields() {
     let ws = &v["fields"][2];
     assert_eq!(ws["label"], "工作空间");
     assert_eq!(v["fields"][3]["options"][0]["value"], "non_isolated");
+}
+
+// ════════════════════════════════════════════════════════════════
+// 路径 G:插件 enabled 写盘失败 → 5xx 统一错误信封
+// ════════════════════════════════════════════════════════════════
+
+/// G1:PUT /api/v1/plugins/{id}/enabled 写 profile 失败 → 500 统一信封。
+///
+/// profile 路径被同名目录占位 → fs::write 必败。契约(A12):HTTP 500 +
+/// 通用文案 "internal server error"(ApiError::Internal 不透传 IO 细节),
+/// 不再 200 + success:false 混装——前端据状态码即可区分"已生效"与"没写进去"。
+#[tokio::test]
+async fn path_g_plugin_enabled_write_failure_returns_500() {
+    let tmp = tempfile::tempdir().unwrap();
+    let plugins_dir = tmp.path().join("config").join("plugins");
+    fs::create_dir_all(&plugins_dir).unwrap();
+    // default_profile.yaml 被目录占位:读失败(回退空 profile),写必败
+    fs::create_dir_all(plugins_dir.join("default_profile.yaml")).unwrap();
+
+    let mut state = AppState::new();
+    state.project_root = Some(tmp.path().to_path_buf());
+
+    let app = build_router(state);
+    let token = admin_token(&app).await;
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("PUT")
+                .uri("/api/v1/plugins/llm_service/enabled")
+                .header("authorization", format!("Bearer {token}"))
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::to_string(&json!({"enabled": false})).unwrap(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "写盘失败应 5xx,而非 200 假成功(实际 {})",
+        resp.status()
+    );
+    let body = axum::body::to_bytes(resp.into_body(), 64 * 1024)
+        .await
+        .unwrap();
+    let json: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(
+        json["error"]["code"], "500",
+        "统一错误信封应含 error.code: {json}"
+    );
+    assert_eq!(
+        json["error"]["message"], "internal server error",
+        "内部错误细节(IO 报错含路径)不透传客户端: {json}"
+    );
 }

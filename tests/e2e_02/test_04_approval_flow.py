@@ -1,4 +1,4 @@
-# @feature: FP-0.2.五 审批闭环 | @vision: V2 全能闭环 | @ci: e2e-manual
+# @feature: FP-0.2.五 审批闭环 | @vision: V2 全能闭环 | @ci: python-e2e
 """
 E2E 测试：审批闭环（FP-0.2.五 改动 A 验收）
 

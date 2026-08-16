@@ -1,4 +1,4 @@
-# @feature: FP-MIGR 任务提交参数解耦 | @ci: python-plugins-test
+# @feature: FP-MIGR 任务提交参数解耦 | @ci: none-local
 """task_submit 参数可用性矩阵测试。
 
 验证（worktree 选择与隔离分离，agent 直接选，按任务类型限定范围）：

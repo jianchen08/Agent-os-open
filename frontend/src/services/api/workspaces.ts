@@ -64,6 +64,30 @@ export async function moveEntry(
   })
 }
 
+/** 工作空间文件内容响应 */
+export interface WorkspaceFileContentResponse {
+  success: boolean
+  content?: string
+  message?: string
+}
+
+/**
+ * 获取工作空间文件内容
+ *
+ * 通过 apiClient 携带 Authorization 头读取指定路径的文本文件内容
+ * （HtmlPreviewWidget 的降级读取通道，html 属性优先时不会调用）。
+ */
+export async function getWorkspaceFileContent(
+  containerTaskId: string,
+  filePath: string,
+): Promise<WorkspaceFileContentResponse> {
+  const response = await apiClient.get<WorkspaceFileContentResponse>(
+    `${BASE}/${containerTaskId}/file-content`,
+    { params: { path: filePath } },
+  )
+  return response.data
+}
+
 /**
  * 在外部 IDE 中打开文件
  *

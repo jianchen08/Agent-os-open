@@ -1,4 +1,4 @@
-# @feature: FP-0.2.三 宿主接入 | @ci: python-coverage
+# @feature: FP-0.2.三 宿主接入 | @ci: none-local（不在任何 CI 车道：python-coverage 的 BASE_TEST_PATHS 未收集本文件）
 """pipeline_godot_context 插件单元测试。
 
 覆盖：推送接收→前端转发、心跳/清空/离线语义、管道注入 op 构造与幂等去重。

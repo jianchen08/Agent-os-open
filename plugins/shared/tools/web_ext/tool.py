@@ -262,7 +262,74 @@ class WebTool(BuiltinTool):
             merged.update(caller_headers)
         return merged
 
-    async def _http_get(self, inputs: dict[str, Any]) -> ToolResult:  # noqa: PLR0911
+    # ── 响应处理公共层（_http_get/_http_post/_fetch_page 共用，行为不变） ──
+
+    def _response_too_large_msg(self, response: httpx.Response) -> str | None:
+        """响应大小检查：超限返回错误消息，未超限返回 None。
+
+        先看声明值 Content-Length 头，再量实际 body（chunked 响应无声明值）。
+        """
+        content_length = response.headers.get("Content-Length")
+        if content_length and int(content_length) > self.max_response_size:
+            return f"响应过大: {content_length} 字节"
+        if len(response.content) > self.max_response_size:
+            return f"响应过大: {len(response.content)} 字节"
+        return None
+
+    def _extract_data(self, response: httpx.Response) -> Any:
+        """解析响应 body：JSON 优先；HTML 用 trafilatura 抽正文；其余按原文本。
+
+        get/post 共用（fetch_page 走独立的正文抽取路径，不经此方法）。
+        """
+        content = response.content
+        try:
+            return response.json()
+        except Exception:
+            # 非 JSON：检测 HTML 并提取文本，节省 LLM token
+            text = content.decode("utf-8", errors="ignore")
+            if "<html" in text[:500].lower() or "<!doctype" in text[:500].lower():
+                try:
+                    import trafilatura  # noqa: PLC0415
+
+                    extracted = trafilatura.extract(
+                        text,
+                        include_tables=True,
+                        include_links=False,
+                        include_formatting=False,
+                        favor_precision=True,
+                    )
+                    return extracted or text[:2000]
+                except Exception:
+                    return text[:2000]
+            return text
+
+    def _http_error_result(self, response: httpx.Response, payload: str | None = None) -> ToolResult:
+        """HTTP >= 400 的统一失败结果（payload 非 None 时以 `HTTP {code}: {payload}` 格式回显）。"""
+        hint = self._http_recovery_hint(response.status_code)
+        detail = f": {payload}" if payload is not None else ""
+        return create_failure_result(
+            error=f"HTTP {response.status_code}{detail}{hint}",
+            error_code=f"HTTP_{response.status_code}",
+        )
+
+    def _request_failure(self, exc: Exception, verb: str, error_code: str) -> ToolResult:
+        """请求异常统一尾部：超时 / HTTP 传输错误 / 其余按动作命名（行为不变）。"""
+        if isinstance(exc, httpx.TimeoutException):
+            return create_failure_result(
+                error="请求超时",
+                error_code="TIMEOUT",
+            )
+        if isinstance(exc, httpx.HTTPError):
+            return create_failure_result(
+                error=f"HTTP 请求失败: {str(exc)}",
+                error_code="HTTP_ERROR",
+            )
+        return create_failure_result(
+            error=f"{verb}: {str(exc)}",
+            error_code=error_code,
+        )
+
+    async def _http_get(self, inputs: dict[str, Any]) -> ToolResult:
         """HTTP GET 请求"""
         try:
             url = inputs["url"]
@@ -278,52 +345,18 @@ class WebTool(BuiltinTool):
                     timeout=httpx.Timeout(timeout),
                 )
 
-                # 检查响应大小
-                content_length = response.headers.get("Content-Length")
-                if content_length and int(content_length) > self.max_response_size:
+                too_large = self._response_too_large_msg(response)
+                if too_large:
                     return create_failure_result(
-                        error=f"响应过大: {content_length} 字节",
+                        error=too_large,
                         error_code="RESPONSE_TOO_LARGE",
                     )
 
-                # 读取响应
-                content = response.content
-
-                if len(content) > self.max_response_size:
-                    return create_failure_result(
-                        error=f"响应过大: {len(content)} 字节",
-                        error_code="RESPONSE_TOO_LARGE",
-                    )
-
-                # 尝试解析为 JSON
-                try:
-                    data = response.json()
-                except Exception:
-                    # 非 JSON：检测 HTML 并提取文本，节省 LLM token
-                    text = content.decode("utf-8", errors="ignore")
-                    if "<html" in text[:500].lower() or "<!doctype" in text[:500].lower():
-                        try:
-                            import trafilatura  # noqa: PLC0415
-
-                            extracted = trafilatura.extract(
-                                text,
-                                include_tables=True,
-                                include_links=False,
-                                include_formatting=False,
-                                favor_precision=True,
-                            )
-                            data = extracted or text[:2000]
-                        except Exception:
-                            data = text[:2000]
-                    else:
-                        data = text
+                data = self._extract_data(response)
 
                 if response.status_code >= 400:
-                    hint = self._http_recovery_hint(response.status_code)
-                    return create_failure_result(
-                        error=f"HTTP {response.status_code}: {data if isinstance(data, str) else str(data)[:500]}{hint}",
-                        error_code=f"HTTP_{response.status_code}",
-                    )
+                    payload = data if isinstance(data, str) else str(data)[:500]
+                    return self._http_error_result(response, payload)
 
                 return create_success_result(
                     data={
@@ -333,23 +366,10 @@ class WebTool(BuiltinTool):
                     metadata={"action": "http_get", "url": str(url)},
                 )
 
-        except httpx.TimeoutException:
-            return create_failure_result(
-                error="请求超时",
-                error_code="TIMEOUT",
-            )
-        except httpx.HTTPError as e:
-            return create_failure_result(
-                error=f"HTTP 请求失败: {str(e)}",
-                error_code="HTTP_ERROR",
-            )
         except Exception as e:
-            return create_failure_result(
-                error=f"GET 请求失败: {str(e)}",
-                error_code="GET_FAILED",
-            )
+            return self._request_failure(e, "GET 请求失败", "GET_FAILED")
 
-    async def _http_post(self, inputs: dict[str, Any]) -> ToolResult:  # noqa: PLR0911
+    async def _http_post(self, inputs: dict[str, Any]) -> ToolResult:
         """HTTP POST 请求"""
         try:
             url = inputs["url"]
@@ -367,52 +387,18 @@ class WebTool(BuiltinTool):
                     timeout=httpx.Timeout(timeout),
                 )
 
-                # 检查响应大小
-                content_length = response.headers.get("Content-Length")
-                if content_length and int(content_length) > self.max_response_size:
+                too_large = self._response_too_large_msg(response)
+                if too_large:
                     return create_failure_result(
-                        error=f"响应过大: {content_length} 字节",
+                        error=too_large,
                         error_code="RESPONSE_TOO_LARGE",
                     )
 
-                # 读取响应
-                content = response.content
-
-                if len(content) > self.max_response_size:
-                    return create_failure_result(
-                        error=f"响应过大: {len(content)} 字节",
-                        error_code="RESPONSE_TOO_LARGE",
-                    )
-
-                # 尝试解析为 JSON
-                try:
-                    data = response.json()
-                except Exception:
-                    # 非 JSON：检测 HTML 并提取文本，节省 LLM token
-                    text = content.decode("utf-8", errors="ignore")
-                    if "<html" in text[:500].lower() or "<!doctype" in text[:500].lower():
-                        try:
-                            import trafilatura  # noqa: PLC0415
-
-                            extracted = trafilatura.extract(
-                                text,
-                                include_tables=True,
-                                include_links=False,
-                                include_formatting=False,
-                                favor_precision=True,
-                            )
-                            data = extracted or text[:2000]
-                        except Exception:
-                            data = text[:2000]
-                    else:
-                        data = text
+                data = self._extract_data(response)
 
                 if response.status_code >= 400:
-                    hint = self._http_recovery_hint(response.status_code)
-                    return create_failure_result(
-                        error=f"HTTP {response.status_code}: {data if isinstance(data, str) else str(data)[:500]}{hint}",
-                        error_code=f"HTTP_{response.status_code}",
-                    )
+                    payload = data if isinstance(data, str) else str(data)[:500]
+                    return self._http_error_result(response, payload)
 
                 return create_success_result(
                     data={
@@ -422,23 +408,10 @@ class WebTool(BuiltinTool):
                     metadata={"action": "http_post", "url": str(url)},
                 )
 
-        except httpx.TimeoutException:
-            return create_failure_result(
-                error="请求超时",
-                error_code="TIMEOUT",
-            )
-        except httpx.HTTPError as e:
-            return create_failure_result(
-                error=f"HTTP 请求失败: {str(e)}",
-                error_code="HTTP_ERROR",
-            )
         except Exception as e:
-            return create_failure_result(
-                error=f"POST 请求失败: {str(e)}",
-                error_code="POST_FAILED",
-            )
+            return self._request_failure(e, "POST 请求失败", "POST_FAILED")
 
-    async def _fetch_page(self, inputs: dict[str, Any]) -> ToolResult:  # noqa: PLR0911
+    async def _fetch_page(self, inputs: dict[str, Any]) -> ToolResult:
         """抓取网页内容"""
         try:
             url = inputs["url"]
@@ -453,24 +426,15 @@ class WebTool(BuiltinTool):
                     timeout=httpx.Timeout(timeout),
                 )
 
-                # 检查响应大小
-                content_length = response.headers.get("Content-Length")
-                if content_length and int(content_length) > self.max_response_size:
+                too_large = self._response_too_large_msg(response)
+                if too_large:
                     return create_failure_result(
-                        error=f"响应过大: {content_length} 字节",
+                        error=too_large,
                         error_code="RESPONSE_TOO_LARGE",
                     )
 
                 # 读取 HTML
-                html = response.content
-
-                if len(html) > self.max_response_size:
-                    return create_failure_result(
-                        error=f"响应过大: {len(html)} 字节",
-                        error_code="RESPONSE_TOO_LARGE",
-                    )
-
-                html_text = html.decode("utf-8", errors="ignore")
+                html_text = response.content.decode("utf-8", errors="ignore")
 
                 result_data = {
                     "status": response.status_code,
@@ -496,29 +460,12 @@ class WebTool(BuiltinTool):
                     result_data["html"] = html_text
 
                 if response.status_code >= 400:
-                    hint = self._http_recovery_hint(response.status_code)
-                    return create_failure_result(
-                        error=f"HTTP {response.status_code}{hint}",
-                        error_code=f"HTTP_{response.status_code}",
-                    )
+                    return self._http_error_result(response)
 
                 return create_success_result(
                     data=result_data,
                     metadata={"action": "fetch_page", "url": str(url)},
                 )
 
-        except httpx.TimeoutException:
-            return create_failure_result(
-                error="请求超时",
-                error_code="TIMEOUT",
-            )
-        except httpx.HTTPError as e:
-            return create_failure_result(
-                error=f"HTTP 请求失败: {str(e)}",
-                error_code="HTTP_ERROR",
-            )
         except Exception as e:
-            return create_failure_result(
-                error=f"抓取网页失败: {str(e)}",
-                error_code="FETCH_FAILED",
-            )
+            return self._request_failure(e, "抓取网页失败", "FETCH_FAILED")

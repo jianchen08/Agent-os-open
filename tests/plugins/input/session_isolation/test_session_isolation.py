@@ -1,3 +1,4 @@
+# @feature: FP-0.2.〇 管道引擎 | @vision: V3 可嵌入 | @ci: python-coverage
 """SessionIsolationPlugin 单元测试——会话级隔离守卫的早退条件与容器注入。
 
 注意：0.2 环境下 infrastructure.session.session_workspace（0.1 已归档）不可 import，

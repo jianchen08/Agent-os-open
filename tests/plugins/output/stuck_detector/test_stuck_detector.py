@@ -1,3 +1,4 @@
+# @feature: FP-0.2.〇 管道引擎 | @vision: V3 可嵌入 | @ci: python-coverage
 """StuckDetector 单元测试——卡死检测的纯逻辑路径。
 
 覆盖：滑动窗口维护、工具调用重复、输出完全重复、输出高度相似、
@@ -45,20 +46,38 @@ class TestConfig:
         d = StuckDetector()
         assert d.name == "stuck_detector"
         assert d.priority == 15
-        assert d._window_size == 5
-        assert d._similarity_threshold == 0.9
-        assert d._repeat_threshold == 3
 
-    def test_自定义配置覆盖默认(self) -> None:
+    @pytest.mark.asyncio
+    async def test_默认repeat_threshold经公共行为生效(self) -> None:
+        """默认阈值 3 经 execute() 可观察：连 2 轮重复不报，第 3 轮报。
+
+        （P9：原断言 d._window_size/_similarity_threshold/_repeat_threshold
+        私有字段，改为经公共行为验证阈值生效；window_size/similarity_threshold
+        的行为面由 TestExecute 滑动窗口与 TestOutputRepeat 相似度用例覆盖。）
+        """
         from plugin import StuckDetector
 
-        d = StuckDetector(
-            config={"window_size": 10, "similarity_threshold": 0.8, "repeat_threshold": 2, "priority": 99}
-        )
-        assert d._window_size == 10
-        assert d._similarity_threshold == 0.8
-        assert d._repeat_threshold == 2
+        d = StuckDetector()
+        state = _state_with_tool("file_write", {"p": "/x"}, "same")
+        res1 = await d.execute(_ctx(state))
+        res2 = await d.execute(_ctx(state))
+        res3 = await d.execute(_ctx(state))
+        assert res1.state_updates["stuck_detected"] is False
+        assert res2.state_updates["stuck_detected"] is False
+        assert res3.state_updates["stuck_detected"] is True
+
+    @pytest.mark.asyncio
+    async def test_自定义配置覆盖默认(self) -> None:
+        """repeat_threshold=2 经公共行为生效：第 2 轮重复即报卡死。"""
+        from plugin import StuckDetector
+
+        d = StuckDetector(config={"repeat_threshold": 2, "priority": 99})
         assert d.priority == 99
+        state = _state_with_tool("t", {}, "same")
+        res1 = await d.execute(_ctx(state))
+        res2 = await d.execute(_ctx(state))
+        assert res1.state_updates["stuck_detected"] is False
+        assert res2.state_updates["stuck_detected"] is True
 
     def test_error_policy为SKIP(self) -> None:
         from pipeline.types import ErrorPolicy

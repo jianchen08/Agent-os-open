@@ -1,12 +1,13 @@
 """依赖注入能力句柄。
 
-内核在 initialize 时注入 6 个能力句柄：
+内核在 initialize 时注入 7 个能力句柄：
 - pipeline-executor: 管道执行能力
-- config-reader: 配置读取能力
 - tenant-context: 租户上下文
 - event-bus: 事件总线
-- logger: 日志服务
 - metrics: 指标上报（record_metric，监控设计 §三 通道2）
+- tool-executor: 工具执行
+- service-registry: 服务注册表
+- frontend: 前端事件出口
 
 [来源: docs/tasks/task_08_python_sdk.md AC-07-3]
 [来源: docs/working/重要设计/插件监控与指标机制设计.md §三 通道2]
@@ -99,13 +100,14 @@ class CapabilityHandle:
         return list(self._context.keys())
 
 
-# 标准能力句柄名称（与内核 STANDARD_CAPABILITIES 对齐）
+# 标准能力句柄名称（与内核 STANDARD_CAPABILITIES 对齐）。
+# 已删除的死能力（两端同步）：`logger`（内核从未实现任何 method）、
+# `config-reader`（内核 handler 已删，插件配置改走 manifest config_files
+# + /api/v1/plugins/{id}/config 配置面）。
 STANDARD_CAPABILITIES = [
     "pipeline-executor",
-    "config-reader",
     "tenant-context",
     "event-bus",
-    "logger",
     "metrics",
     "tool-executor",
     "service-registry",

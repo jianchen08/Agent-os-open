@@ -166,6 +166,10 @@ class SecurityCheckPlugin(IInputPlugin):
         # 加载安全规则
         self._rules = self._load_rules()
 
+        # 危险工具轨道 2 数据源：config_files 注入的 builtin_tools_config
+        # （见 _get_dangerous_operations / _parse_dangerous_ops_config）
+        self._dangerous_ops_by_tool = self._parse_dangerous_ops_config()
+
     def _load_rules(self) -> list[dict[str, Any]]:
         """从配置或 YAML 文件加载安全规则。
 
@@ -1089,8 +1093,9 @@ class SecurityCheckPlugin(IInputPlugin):
         2. 工具声明了 dangerous_operations —— delete_file/move_file/copy_file/
            file_write 等破坏性操作工具
 
-        tool_definition 从 tool_registry 服务获取；registry 不可用时回退到
-        只看 policy.execution（保持原有兜底行为）。
+        dangerous_operations 优先取 config_files 注入的 builtin_tools_config
+        （plugin.json 声明，内核命名空间合并），其次 tool_registry 服务；
+        均不可用时回退到只看 policy.execution（保持原有兜底行为）。
 
         Args:
             ctx: 插件执行上下文
@@ -1123,12 +1128,15 @@ class SecurityCheckPlugin(IInputPlugin):
         """
         return bool(execution_contexts) and all(c.get("task_isolated") for c in execution_contexts)
 
-    @staticmethod
-    def _get_dangerous_operations(ctx: PluginContext, tool_name: str) -> list[str]:
-        """从 tool_registry 获取工具声明的 dangerous_operations。
+    def _get_dangerous_operations(self, ctx: PluginContext, tool_name: str) -> list[str]:
+        """获取工具声明的 dangerous_operations（危险工具判定轨道 2 数据源）。
 
-        优先用 engine 注入的 tool_registry 服务，取不到时回退全局单例。
-        registry 不可用或工具不存在时返回空列表（兜底，不影响主流程）。
+        优先级（高 → 低）：
+        1. config_files 注入的 builtin_tools_config（plugin.json 声明
+           ``config/tools/builtin_tools_config.yaml``，内核按 id 命名空间合并进
+           ``plugin.get_config()``）——配置驱动、随内核重启生效，是唯一真相源；
+        2. engine 注入的 tool_registry 服务（运行时注册表）；
+        3. 空（兜底，不影响主流程）。
 
         Args:
             ctx: 插件执行上下文
@@ -1137,17 +1145,17 @@ class SecurityCheckPlugin(IInputPlugin):
         Returns:
             工具声明的 dangerous_operations 列表，无声明或不可用时为空列表
         """
+        # 轨道 2 主数据源：注入配置（config_files 命名空间 id = builtin_tools_config）
+        config_ops = self._dangerous_ops_by_tool.get(tool_name)
+        if config_ops is not None:
+            return config_ops
+
         registry = None
         with contextlib.suppress(KeyError):
             registry = ctx.get_service("tool_registry")
 
         if registry is None:
-            try:
-                from tools.global_registry import get_global_tool_registry_sync  # noqa: PLC0415
-
-                registry = get_global_tool_registry_sync()
-            except Exception:
-                return []
+            return []
 
         try:
             tool_def = registry.get(tool_name)
@@ -1158,3 +1166,29 @@ class SecurityCheckPlugin(IInputPlugin):
             return []
 
         return getattr(tool_def, "dangerous_operations", None) or []
+
+    def _parse_dangerous_ops_config(self) -> dict[str, list[str]]:
+        """解析注入配置中的工具 dangerous_operations 声明。
+
+        数据形状对齐 config/tools/builtin_tools_config.yaml 的 ``tools`` 列表
+        （collect_tool_info.py 生成）：``tools[].name`` / ``tools[].dangerous_operations``。
+
+        Returns:
+            {tool_name: dangerous_operations}；未注入或形状不符返回空 dict。
+        """
+        cfg = self._config.get("builtin_tools_config")
+        if not isinstance(cfg, dict):
+            return {}
+        tools = cfg.get("tools")
+        if not isinstance(tools, list):
+            return {}
+        result: dict[str, list[str]] = {}
+        for entry in tools:
+            if not isinstance(entry, dict):
+                continue
+            name = entry.get("name")
+            if not name:
+                continue
+            ops = entry.get("dangerous_operations")
+            result[str(name)] = [str(op) for op in ops] if isinstance(ops, list) else []
+        return result

@@ -27,7 +27,7 @@ import re
 import time
 from pathlib import Path
 from typing import Any
-from urllib.parse import unquote, urlparse
+from urllib.parse import unquote, urljoin, urlparse
 
 import httpx
 from url_security import validate_url
@@ -54,6 +54,10 @@ DEFAULT_MAX_RETRIES = 5
 DEFAULT_TIMEOUT = 300
 MAX_REDIRECTS = 5
 CHUNK_SIZE = 64 * 1024  # 64 KB read/write buffer
+
+
+class RedirectSecurityError(Exception):
+    """重定向链中某跳目标未通过 URL 安全校验（SSRF 防护，不可重试）。"""
 
 
 def _sanitize_filename(name: str) -> str:
@@ -271,6 +275,7 @@ class DownloadTool(WorkspaceAwareMixin, BuiltinTool):
                 timeout=timeout,
                 max_size=max_size,
                 proxy=proxy,
+                allow_domains=allow_domains,
             )
 
             elapsed = time.monotonic() - start_time
@@ -321,6 +326,7 @@ class DownloadTool(WorkspaceAwareMixin, BuiltinTool):
         timeout: int,
         max_size: int,
         proxy: str | None,
+        allow_domains: list[str] | None = None,
     ) -> dict:
         """
         核心下载逻辑：
@@ -331,8 +337,9 @@ class DownloadTool(WorkspaceAwareMixin, BuiltinTool):
         """
 
         client_kwargs = {
-            "follow_redirects": True,
-            "max_redirects": MAX_REDIRECTS,
+            # 重定向由 _follow_redirects 手动逐跳处理（每跳 SSRF 复检）：
+            # httpx 自动跟随会对 302 目标绕过入口校验（公网入口跳内网旁路）。
+            "follow_redirects": False,
             "timeout": httpx.Timeout(timeout, connect=30),
             "verify": True,  # TLS 校验
         }
@@ -346,11 +353,16 @@ class DownloadTool(WorkspaceAwareMixin, BuiltinTool):
             etag = ""
             head_headers = httpx.Headers()
             try:
-                head_resp = await self._retry_request(client.head, url, max_retries=min(max_retries, 2))
+                head_resp = await self._follow_redirects_with_retry(
+                    client, "HEAD", url, allow_domains, max_retries=min(max_retries, 2)
+                )
                 content_length = int(head_resp.headers.get("content-length", 0))
                 accept_ranges = head_resp.headers.get("accept-ranges", "").lower() == "bytes"
                 etag = head_resp.headers.get("etag", "")
                 head_headers = head_resp.headers
+            except RedirectSecurityError:
+                # 安全拒绝不降级、不重试——直接让调用方拿到失败结果
+                raise
             except Exception as e:
                 logger.warning(f"HEAD 请求失败，将回退到流式 GET 下载: {e}")
 
@@ -372,6 +384,7 @@ class DownloadTool(WorkspaceAwareMixin, BuiltinTool):
                     max_retries=max_retries,
                     max_size=max_size,
                     content_length=content_length,
+                    allow_domains=allow_domains,
                 )
 
             # ── 文件大小校验 ──
@@ -404,6 +417,7 @@ class DownloadTool(WorkspaceAwareMixin, BuiltinTool):
                     max_retries=max_retries,
                     max_size=max_size,
                     segments_state=segments_state,
+                    allow_domains=allow_domains,
                 )
                 result["resumed"] = resumed
                 return result
@@ -416,6 +430,7 @@ class DownloadTool(WorkspaceAwareMixin, BuiltinTool):
                 max_retries=max_retries,
                 max_size=max_size,
                 content_length=content_length,
+                allow_domains=allow_domains,
             )
 
     async def _segmented_download(  # noqa: PLR0915
@@ -430,6 +445,7 @@ class DownloadTool(WorkspaceAwareMixin, BuiltinTool):
         max_retries: int,
         max_size: int,
         segments_state: dict | None,
+        allow_domains: list[str] | None = None,
     ) -> dict:
         """分段并发下载（Range 请求）"""
 
@@ -488,7 +504,9 @@ class DownloadTool(WorkspaceAwareMixin, BuiltinTool):
                 for attempt in range(1, max_retries + 1):
                     try:
                         headers = {"Range": f"bytes={start}-{end}"}
-                        resp = await client.get(url, headers=headers)
+                        resp = await self._follow_redirects(
+                            client, "GET", url, allow_domains, headers=headers
+                        )
                         resp.raise_for_status()
 
                         # 写入分片临时文件
@@ -507,6 +525,9 @@ class DownloadTool(WorkspaceAwareMixin, BuiltinTool):
                         logger.debug(f"分片 {seg_idx}/{num_segments} 完成")
                         return
 
+                    except RedirectSecurityError:
+                        # 安全拒绝不重试
+                        raise
                     except Exception as e:
                         if attempt < max_retries:
                             wait = min(2**attempt, 30)  # 指数退避，最多 30 秒
@@ -556,8 +577,12 @@ class DownloadTool(WorkspaceAwareMixin, BuiltinTool):
         max_retries: int,
         max_size: int,
         content_length: int,
+        allow_domains: list[str] | None = None,
     ) -> dict:
         """单连接流式下载（不支持 Range 或未知大小时的回退方案）"""
+
+        # 重试次数钳制：0/负数至少 1 次（否则循环体不执行，无结果可返回）
+        max_retries = max(1, int(max_retries))
 
         # 检查是否有部分下载
         resume_from = 0
@@ -576,7 +601,9 @@ class DownloadTool(WorkspaceAwareMixin, BuiltinTool):
                 if resume_from > 0:
                     headers["Range"] = f"bytes={resume_from}-"
 
-                resp = await client.get(url, headers=headers)
+                resp = await self._follow_redirects(
+                    client, "GET", url, allow_domains, headers=headers
+                )
                 resp.raise_for_status()
 
                 # 服务器不支持 Range 时忽略请求头、返回 200 全量内容：
@@ -611,6 +638,9 @@ class DownloadTool(WorkspaceAwareMixin, BuiltinTool):
                     "resumed": resume_from > 0,
                 }
 
+            except RedirectSecurityError:
+                # 安全拒绝不重试
+                raise
             except Exception as e:
                 if attempt < max_retries:
                     wait = min(2**attempt, 30)
@@ -618,11 +648,85 @@ class DownloadTool(WorkspaceAwareMixin, BuiltinTool):
                     await asyncio.sleep(wait)
                 else:
                     raise RuntimeError(f"下载失败（已重试 {max_retries} 次）: {e}")  # noqa: B904
-        return None
+        # max_retries >= 1（入口已钳制）：循环必经 return 或 raise，此路径不可达
 
     # ────────────────────────────────────────────────────────
     # 工具方法
     # ────────────────────────────────────────────────────────
+
+    _REDIRECT_STATUSES = (301, 302, 303, 307, 308)
+
+    async def _follow_redirects(
+        self,
+        client: httpx.AsyncClient,
+        method: str,
+        url: str,
+        allow_domains: list[str] | None = None,
+        **kwargs,
+    ) -> httpx.Response:
+        """手动逐跳跟随重定向（每跳 SSRF 复检后再请求）。
+
+        client 以 follow_redirects=False 构造——httpx 自动跟随会对 302 目标
+        绕过入口 validate_url（公网入口跳内网的 SSRF 旁路）。本方法每跳：
+        1. 解析 Location（含相对路径，基于当前 URL 归一为绝对地址）
+        2. 对新目标重新执行 validate_url（协议/域名白名单/内网 IP）
+        3. 校验通过才发起下一跳请求；最多 MAX_REDIRECTS 跳
+
+        Args:
+            client: follow_redirects=False 的 httpx 客户端
+            method: HTTP 方法（HEAD/GET）
+            url: 起始 URL（须已通过入口校验）
+            allow_domains: 域名白名单（与入口校验同源）
+            **kwargs: 透传给 client.request（如 headers）
+
+        Returns:
+            最终（非重定向）响应
+
+        Raises:
+            RedirectSecurityError: 某跳目标未通过安全校验（不可重试）
+            RuntimeError: 超过 MAX_REDIRECTS 跳数上限
+        """
+        current = url
+        for _hop in range(MAX_REDIRECTS + 1):
+            resp = await client.request(method, current, **kwargs)
+            if resp.status_code not in self._REDIRECT_STATUSES:
+                return resp
+            location = resp.headers.get("location", "")
+            if not location:
+                return resp
+            # 相对 Location 以当前 URL 为基准归一为绝对地址
+            current = urljoin(current, location)
+            if not self._allow_ssrf_skip:
+                valid, msg = validate_url(current, allow_domains)
+                if not valid:
+                    raise RedirectSecurityError(f"重定向目标被拒绝: {msg}")
+        raise RuntimeError(f"重定向次数超过上限 {MAX_REDIRECTS}")
+
+    async def _follow_redirects_with_retry(
+        self,
+        client: httpx.AsyncClient,
+        method: str,
+        url: str,
+        allow_domains: list[str] | None = None,
+        max_retries: int = 2,
+        **kwargs,
+    ) -> httpx.Response:
+        """_follow_redirects 的指数退避重试包装（安全拒绝不重试）。"""
+        last_error: Exception | None = None
+        for attempt in range(1, max_retries + 1):
+            try:
+                resp = await self._follow_redirects(client, method, url, allow_domains, **kwargs)
+                resp.raise_for_status()
+                return resp
+            except RedirectSecurityError:
+                raise
+            except Exception as e:
+                last_error = e
+                if attempt < max_retries:
+                    wait = min(2**attempt, 30)
+                    logger.debug(f"请求重试 {attempt}/{max_retries}: {e}，等待 {wait}s")
+                    await asyncio.sleep(wait)
+        raise RuntimeError(f"请求失败（已重试 {max_retries} 次）: {last_error}")
 
     async def _retry_request(self, method, url: str, max_retries: int = 3, **kwargs) -> httpx.Response:
         """带指数退避的重试请求"""

@@ -29,11 +29,10 @@ test.describe('旅程06：记忆与知识', () => {
     if (hasStoreArea) {
       // 尝试填写内容
       await storeArea.fill('e2e-test-memory-content');
-      await page.waitForTimeout(300);
-
-      // 验证输入成功
-      const value = await storeArea.inputValue().catch(() => '');
-      expect(value, '应能输入存储内容').toContain('e2e-test');
+      // 轮询断言输入已生效（替代固定 sleep）
+      await expect
+        .poll(() => storeArea.inputValue().catch(() => ''), { timeout: 5_000 })
+        .toContain('e2e-test');
     }
   });
 
@@ -46,9 +45,10 @@ test.describe('旅程06：记忆与知识', () => {
 
     if (hasSearch) {
       await searchInput.fill('test query');
-      await page.waitForTimeout(300);
-      const value = await searchInput.inputValue().catch(() => '');
-      expect(value, '应能输入检索关键词').toBe('test query');
+      // 轮询断言输入已生效（替代固定 sleep）
+      await expect
+        .poll(() => searchInput.inputValue().catch(() => ''), { timeout: 5_000 })
+        .toBe('test query');
     }
   });
 

@@ -213,10 +213,10 @@ echo Next steps:
 echo   1. Close all cmd/terminal windows, reopen (so DOCKER_HOST applies)
 echo   2. Run: docker version  (confirm it connects to WSL docker)
 echo   3. If OK, uninstall Docker Desktop (Control Panel)
-echo   4. Start project with start_web_cn.bat
+echo   4. Start project with start_web_02.bat (pure 0.2: Rust kernel + Vite frontend)
 echo.
 echo NOTE: If docker version fails later (after WSL restart), re-run this script
-echo       to refresh the WSL IP. Or run start_web_cn.bat which auto-syncs it.
+echo       to refresh the WSL IP.
 echo.
 pause
 exit /b 0

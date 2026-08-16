@@ -8,7 +8,8 @@
 //!   例如 `{{state.agent_id}}`、`{{state.user.name}}`。
 //! - `{{path:相对路径}}` —— 读取文件内容（相对于项目根），例如
 //!   `{{path:config/agents/main/persona/agentos_persona.md}}`。
-//! - 字段/文件不存在时静默降级为空字符串（不报错）。
+//! - 字段缺失时静默降级为空字符串（不报错）；文件读取失败降级为空串并记
+//!   `warn!`（path + error，缺文件也走此路径——配置可缺，静默不可）。
 //! - 其它无法识别的表达式当作字面量原样保留。
 //!
 //! [来源: docs/tasks 0.2 引擎模板插值器]
@@ -16,6 +17,7 @@
 use std::path::Path;
 
 use serde_json::Value;
+use tracing::warn;
 
 /// 解析模板字符串，返回替换后的字符串。
 ///
@@ -78,10 +80,17 @@ fn find_close(slice: &[u8]) -> Option<usize> {
 /// 解析单个表达式（已 trim），返回替换后的字符串。
 fn render_expr(expr: &str, state: &Value, project_root: &Path) -> String {
     if let Some(path) = expr.strip_prefix("path:") {
-        // 文件读取：失败静默降级为空串
+        // 文件读取失败降级为空串（缺文件是配置演进中的常见形态，不阻断执行），
+        // 但保留 warn 观测——区别于拼写错误指向不存在文件的静默空值。
         let trimmed = path.trim();
         let full = project_root.join(trimmed);
-        std::fs::read_to_string(&full).unwrap_or_default()
+        match std::fs::read_to_string(&full) {
+            Ok(content) => content,
+            Err(e) => {
+                warn!(path = %trimmed, error = %e, "{{path:}} 文件读取失败，降级为空串");
+                String::new()
+            }
+        }
     } else if let Some(rest) = expr.strip_prefix("state.") {
         // state 点链取值：不存在返回空串
         state_lookup(state, rest).unwrap_or_default()
@@ -203,6 +212,18 @@ mod tests {
         let dir = tempfile::tempdir().expect("create tempdir");
         let out = render_template("[{{path:does/not/exist.md}}]", &json!({}), dir.path());
         assert_eq!(out, "[]");
+    }
+
+    #[test]
+    fn test_render_path_read_failure_degrades_to_empty() {
+        // 注入确定性读失败（区别于 NotFound）：路径指向目录 → read_to_string 报
+        // EISDIR。行为契约：仍降级为空串（warn 仅观测，不影响输出——tracing
+        // 输出需 subscriber 捕获，不在单测断言范围）。
+        let dir = tempfile::tempdir().expect("create tempdir");
+        let sub = dir.path().join("a_dir");
+        fs::create_dir(&sub).expect("create dir");
+        let out = render_template("[{{path:a_dir}}]", &json!({}), dir.path());
+        assert_eq!(out, "[]", "读失败（非 NotFound）同样降级为空串");
     }
 
     #[test]

@@ -1,4 +1,4 @@
-# @feature: FP-0.2.一 第三方插件协议 | @vision: V3 可嵌入 | @ci: python-plugins-test
+# @feature: FP-0.2.一 第三方插件协议 | @vision: V3 可嵌入 | @ci: python-test
 """SDK 功能测试——覆盖 AC-07-1 ~ AC-07-5。
 
 测试覆盖：

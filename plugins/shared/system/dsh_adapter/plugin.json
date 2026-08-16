@@ -133,7 +133,7 @@
           "properties": {
             "package_path": {
               "type": "string",
-              "description": "DSH 插件包目录；缺省扫描适配器 dsh_plugins/ 全量"
+              "description": "DSH 插件包目录（含 package.json 的源码目录；缺省 = 适配器自己的 dsh_plugins/ 全量）"
             }
           },
           "required": []

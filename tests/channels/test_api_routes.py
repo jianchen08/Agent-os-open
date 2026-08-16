@@ -1,4 +1,4 @@
-# @feature: FP-MIGR 0.1→0.2迁移（0.1 遗留测试） | @ci: python-plugins-test
+# @feature: FP-MIGR 0.1→0.2迁移（0.1 遗留测试） | @ci: python-coverage
 """API 路由基础功能测试。
 
 覆盖 src/channels/api/ 下核心路由模块的基础功能：

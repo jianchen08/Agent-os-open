@@ -1,6 +1,7 @@
 # Run `wsl --shutdown` with a hard timeout.
 # Under a WSL2 kernel D-state deadlock, `wsl --shutdown` itself can hang; without
-# a timeout the retry loop in start_web_cn.bat would freeze on a blank window too.
+# a timeout the retry loop in the calling .bat (install_native_docker.bat)
+# would freeze on a blank window too.
 #
 # Exit codes:
 #   0   shutdown completed within the timeout

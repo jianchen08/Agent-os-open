@@ -1,5 +1,6 @@
 ﻿# Frontend update script: check if src changed, rebuild and inject into container
-# Called by start_web.bat to avoid bat quoting issues
+# Originally called by the removed 0.1 start_web.bat; now run manually:
+#   powershell -NoProfile -ExecutionPolicy Bypass -File update_frontend.ps1
 # Exit code: 0 = success (no update or updated), 1 = error
 
 $ErrorActionPreference = 'Stop'
@@ -155,7 +156,7 @@ try {
             # BUG-FIX-fix_20260629_cp_fallback_rebuild:
             # 问题: docker cp 偶发假成功且重试无效(容器可写层文件锁/容器被外部
             #   并发会话用旧镜像重建等)。cp 失败时若只 exit 1 放弃,容器将永久
-            #   跑旧代码,前端改动始终不生效(start_web_cn.bat 镜像存在时只走本 cp 路径)。
+            #   跑旧代码,前端改动始终不生效(镜像已存在时只走本 cp 路径)。
             # 修复: cp 重试仍失败 → docker compose up -d --build frontend 重建镜像,
             #   把宿主机最新 dist 烧进镜像层(Dockerfile 路径A: COPY frontend/dist)。
             #   重建后容器内 dist 必然是新的,从根上消除"容器跑旧代码"。

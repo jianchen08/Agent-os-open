@@ -12,7 +12,7 @@ SystemMessage，并把所有占位符/注入点按来源分组展示为可折叠
 - 压缩块（compression_messages）和动态变量（prompt.dynamic_vars）均以 XML 包裹
 
 实现说明：
-- 主进程不直接 import pipeline.plugin / plugins.*，避免污染 sys.modules / PYTHONPATH
+- 主进程不直接 import plugins/shared/ 下的插件代码，避免污染 sys.modules / PYTHONPATH
 - 用 subprocess 启动一个隔离 Python 进程（--worker 模式），sys.path 完全干净
 - 所有从 `PromptBuildPlugin` 加载的代码都发生在隔离子进程内，确保使用**当前项目根目录**
   下的 plugin.py，不被其他 PYTHONPATH 路径干扰
@@ -47,12 +47,6 @@ PROJECT_ROOT = SCRIPT_DIR.parent
 
 AGENTS_DIR = PROJECT_ROOT / "config" / "agents"
 OUTPUT_PATH = PROJECT_ROOT / "docs" / "agent_prompts_viewer.html"
-
-# 其他可能干扰的项目根（坚果云同步路径等），会在子进程中从 sys.path 剔除
-EXTRA_PROJECT_PATHS = (
-    r"D:\Jianguoyun\Agent os",
-    r"D:\Jianguoyun\Agent_os",
-)
 
 
 # ─── 实际提示词拼接（通过子进程隔离调用 PromptBuildPlugin） ───
@@ -96,7 +90,7 @@ def _run_worker(agent_cfg: dict, workspace_path: str) -> dict:
     `-I` 标志让 Python 进入隔离模式（忽略所有 site-packages、PYTHONPATH、当前目录），
     启动后我们手动重建 sys.path：先加 stdlib 和必要的 site-packages，
     再加当前 PROJECT_ROOT，彻底避免 `agent-pipeline` 这类 `pip install -e` 引入的
-    其他项目路径（如 D:\\Jianguoyun\\Agent os\\src）污染。
+    其他项目路径污染。
 
     Args:
         agent_cfg: 解析后的 Agent YAML（dict）。
@@ -324,19 +318,28 @@ def _worker_main() -> None:
     # -I 模式启动时 sys.path 只剩 stdlib 路径，不含 site-packages
     stdlib_paths = list(sys.path)  # 隔离模式下这一段是 stdlib
 
-    # 重建 sys.path：stdlib + PROJECT_ROOT
+    # 重建 sys.path：stdlib + 0.2 插件目录
     sys.path[:] = stdlib_paths
     # 把 PROJECT_ROOT 放第一位
     if str(PROJECT_ROOT) in sys.path:
         sys.path.remove(str(PROJECT_ROOT))
     sys.path.insert(0, str(PROJECT_ROOT))
 
-    # 如果代码放在 src/ 下面，把 src 也加入（让 `from pipeline.xxx` / `from plugins.xxx` 工作）
-    src_dir = PROJECT_ROOT / "src"
-    if src_dir.is_dir():
-        if str(src_dir) in sys.path:
-            sys.path.remove(str(src_dir))
-        sys.path.insert(0, str(src_dir))
+    # 0.2 布局：PromptBuildPlugin 位于 plugins/shared/pipeline/input/prompt_build/
+    # （0.1 的 src/ + plugins/input/ 布局已删除）。
+    # 与插件自身 server.py 的 sys.path 注入方式对齐：
+    #   - plugins/shared/  → `from pipeline.plugin import PluginContext`（兼容包）
+    #   - 插件目录本身    → `from plugin import PromptBuildPlugin`（平铺 import）
+    shared_dir = PROJECT_ROOT / "plugins" / "shared"
+    prompt_build_dir = shared_dir / "pipeline" / "input" / "prompt_build"
+    if not (prompt_build_dir / "plugin.py").is_file():
+        raise RuntimeError(
+            f"0.2 插件目录不存在: {prompt_build_dir}（待 0.2 适配确认目录布局）"
+        )
+    for p in (str(shared_dir), str(prompt_build_dir)):
+        if p in sys.path:
+            sys.path.remove(p)
+        sys.path.insert(0, p)
 
     importlib.invalidate_caches()
 
@@ -346,7 +349,7 @@ def _worker_main() -> None:
 
         from pipeline.plugin import PluginContext
 
-        from plugins.input.prompt_build import PromptBuildPlugin
+        from plugin import PromptBuildPlugin  # noqa: I001  (prompt_build 插件平铺模块)
         loaded_file = _inspect.getfile(PromptBuildPlugin._build_dynamic_vars)
         if not Path(loaded_file).resolve().is_relative_to(PROJECT_ROOT.resolve()):
             raise RuntimeError(

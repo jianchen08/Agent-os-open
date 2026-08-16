@@ -139,15 +139,36 @@ async fn test_put_pipeline_config_writes_atomically() {
     let tmp = tempfile::tempdir().unwrap();
     write_pipeline(tmp.path());
 
+    // A13：先 GET 拿 etag（If-Match 乐观锁）
     let app = make_router(&tmp);
     let token = admin_token(&app).await;
+    let get_resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/config/pipelines/default")
+                .header("authorization", format!("Bearer {token}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(get_resp.status(), StatusCode::OK);
+    let etag = get_resp
+        .headers()
+        .get("etag")
+        .expect("GET 应带 etag 头")
+        .to_str()
+        .unwrap()
+        .to_string();
     let body = json!({
         "data": {
             "name": "agentos_agent",
             "input_routes": [
                 { "name": "default", "target": "core", "plugins": ["tool_schema", "security_check"], "priority": 30 }
             ]
-        }
+        },
+        "if_match": etag
     });
     let response = app
         .oneshot(
@@ -170,6 +191,93 @@ async fn test_put_pipeline_config_writes_atomically() {
         raw.contains("security_check"),
         "disk content should be updated: {raw}"
     );
+}
+
+/// PUT 非映射 data（标量/序列无法承载管道字段）→ 400 且磁盘保持原值（T2）。
+#[tokio::test]
+async fn test_put_pipeline_config_non_mapping_returns_400() {
+    let tmp = tempfile::tempdir().unwrap();
+    write_pipeline(tmp.path());
+
+    let app = make_router(&tmp);
+    let token = admin_token(&app).await;
+    // 先 GET 拿 etag，排除 409 干扰（结构校验先于乐观锁）
+    let get_resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/config/pipelines/default")
+                .header("authorization", format!("Bearer {token}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let etag = get_resp
+        .headers()
+        .get("etag")
+        .expect("GET 应带 etag 头")
+        .to_str()
+        .unwrap()
+        .to_string();
+
+    let before = fs::read_to_string(tmp.path().join("config/pipelines/default.yaml")).unwrap();
+    for bad in [json!(42), json!("scalar"), json!([1, 2, 3])] {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri("/api/v1/config/pipelines/default")
+                    .header("authorization", format!("Bearer {token}"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        json!({ "data": bad, "if_match": etag }).to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            response.status(),
+            StatusCode::BAD_REQUEST,
+            "非映射 data({bad}) 应 400"
+        );
+    }
+    let after = fs::read_to_string(tmp.path().join("config/pipelines/default.yaml")).unwrap();
+    assert_eq!(after, before, "400 时磁盘应保持原值");
+}
+
+/// PUT 缺 If-Match → 409（A13，对齐 plugin config PUT）。
+#[tokio::test]
+async fn test_put_pipeline_config_without_if_match_returns_409() {
+    let tmp = tempfile::tempdir().unwrap();
+    write_pipeline(tmp.path());
+
+    let app = make_router(&tmp);
+    let token = admin_token(&app).await;
+    let before = fs::read_to_string(tmp.path().join("config/pipelines/default.yaml")).unwrap();
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("PUT")
+                .uri("/api/v1/config/pipelines/default")
+                .header("authorization", format!("Bearer {token}"))
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    json!({ "data": { "name": "agentos_agent" } }).to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        response.status(),
+        StatusCode::CONFLICT,
+        "缺 If-Match 应 409"
+    );
+    let after = fs::read_to_string(tmp.path().join("config/pipelines/default.yaml")).unwrap();
+    assert_eq!(after, before, "409 时磁盘应保持原值");
 }
 
 /// PUT 非法 name（路径穿越）→ 400。

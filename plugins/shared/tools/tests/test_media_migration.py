@@ -1,4 +1,4 @@
-# @feature: FP-MIGR 0.1→0.2迁移 | @vision: V3 可嵌入 | @ci: python-plugins-test
+# @feature: FP-MIGR 0.1→0.2迁移 | @vision: V3 可嵌入 | @ci: python-coverage
 """media（image/tts/video/music）工具 0.2 迁移 TDD 测试。
 
 迁移（FP-MIGR）：

@@ -67,16 +67,16 @@ test.describe('旅程03：工具调用', () => {
     if (hasSearch) {
       const initialCount = await page.locator('.border.rounded-xl').count();
       await searchInput.fill('read');
-      await page.waitForTimeout(500);
+      // 轮询等待过滤生效（替代固定 sleep）：过滤重渲染后数量应 <= 初始数量
+      await expect
+        .poll(() => page.locator('.border.rounded-xl').count(), { timeout: 5_000 })
+        .toBeLessThanOrEqual(initialCount);
 
-      const filteredCount = await page.locator('.border.rounded-xl').count();
-      expect(filteredCount, '搜索后数量应 <= 初始数量').toBeLessThanOrEqual(initialCount);
-
-      // 清空搜索恢复
+      // 清空搜索恢复：轮询等待列表恢复到初始数量（重渲染完成）
       await searchInput.fill('');
-      await page.waitForTimeout(500);
-      const restoredCount = await page.locator('.border.rounded-xl').count();
-      expect(restoredCount, '清空搜索后应恢复原数量').toBe(initialCount);
+      await expect
+        .poll(() => page.locator('.border.rounded-xl').count(), { timeout: 5_000 })
+        .toBe(initialCount);
     }
   });
 

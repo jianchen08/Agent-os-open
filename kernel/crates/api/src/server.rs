@@ -17,7 +17,7 @@ use std::time::{Duration, SystemTime};
 use parking_lot::RwLock as ParkingRwLock;
 
 #[allow(unused_imports)]
-use agentos_core::traits::{CapabilityRegistry, MessageQueryOpts};
+use agentos_core::traits::{CapabilityRegistry, MessageQueryOpts, StorageBackend};
 use agentos_core::types::{PipelineConfig, StepLibrary, TenantContext};
 use axum::{
     body::Body,
@@ -202,6 +202,8 @@ pub fn build_router(state: AppState) -> Router {
 /// - `/api/v1/plugins*`（status/enabled/config；注意 /api/v1/plugins 裸路径也需鉴权）
 /// - `/api/v1/actions/execute`、`/api/v1/interaction/response`
 /// - `PUT /api/v1/agents/{id}/config`、`PUT /api/v1/config/pipelines/{name}`
+/// - `POST /api/v1/chat`（0.2 收紧：原来放行匿名——消息触发管道执行/落库，
+///   属写面语义，未鉴权等于任意人可驱动执行与消耗算力）
 ///
 /// 其余路径放行（/health、/api/v1/auth/*、/ws、/api/v1/db/* 等）。
 async fn write_surface_auth(
@@ -217,6 +219,7 @@ async fn write_surface_auth(
         || path == "/api/v1/system/restart"
         || path == "/api/v1/actions/execute"
         || path == "/api/v1/interaction/response"
+        || path == "/api/v1/chat"
         || (path.starts_with("/api/v1/agents/")
             && path.ends_with("/config")
             && method == Method::PUT)
@@ -706,35 +709,15 @@ async fn process_via_engine_inner(
     thinking_strength: &str,
     execution_context: Option<&serde_json::Value>,
 ) -> EngineOutcome {
-    let invoker = match state.invoker.clone() {
-        Some(i) => i,
-        None => {
-            return EngineOutcome {
-                content: format!("[echo-fallback: engine not available] {}", message),
-                final_assistant: None,
-                failed: false,
-            };
-        }
+    // ── 前置依赖：invoker / store / project_root 任一缺席 → echo 降级 ──
+    let Some(invoker) = state.invoker.clone() else {
+        return echo_fallback("engine not available", message);
     };
-    let store = match state.store.clone() {
-        Some(s) => s,
-        None => {
-            return EngineOutcome {
-                content: format!("[echo-fallback: store not available] {}", message),
-                final_assistant: None,
-                failed: false,
-            };
-        }
+    let Some(store) = state.store.clone() else {
+        return echo_fallback("store not available", message);
     };
-    let project_root = match state.project_root.clone() {
-        Some(p) => p,
-        None => {
-            return EngineOutcome {
-                content: format!("[echo-fallback: project_root not configured] {}", message),
-                final_assistant: None,
-                failed: false,
-            };
-        }
+    let Some(project_root) = state.project_root.clone() else {
+        return echo_fallback("project_root not configured", message);
     };
 
     // 0. 统一管道查询键：pipeline_id 为空（HTTP 路径不传 / 旧 WS handler）时
@@ -745,10 +728,93 @@ async fn process_via_engine_inner(
     } else {
         pipeline_id
     };
+    let tenant =
+        agentos_tenant::current().unwrap_or_else(|| TenantContext::new("default", "kernel"));
+    let tenant_id = tenant.tenant_id.clone();
 
-    // 1. 构造初始 state
-    //    core_plugin 默认值可被 agent 配置（config/agents/<id>.yaml 的 core_plugin 字段）
-    //    覆盖——见 load_agent_config_into_state。避免在内核硬编码具体插件 id。
+    // 1/1a/1a2. 初始 state 构造（含会话级/任务级 execution_context 注入）。
+    let initial_state = stage_build_initial_state(
+        &store,
+        message,
+        agent_id,
+        effective_pipeline_id,
+        thread_id,
+        message_id,
+        user_id,
+        thinking_strength,
+        execution_context,
+    )
+    .await;
+
+    // 1b. 多轮上下文装配（热路径 registry / 冷路径 checkpoint+traces+state+messages）
+    //     + 本轮 user 消息入账。
+    let mut initial_state = stage_recover_history(
+        initial_state,
+        &store,
+        message,
+        thread_id,
+        effective_pipeline_id,
+        &tenant_id,
+    )
+    .await;
+
+    // 2/2b. agent 配置加载 + 工具 schema 注入。
+    stage_inject_agent_and_tools(state, &mut initial_state, agent_id, &project_root);
+
+    // 3. 构造 PipelineExecutor 并执行；失败（含 run 标记 Failed 的兜底）直接
+    //    以失败 outcome 出口。
+    let final_state = match stage_execute(
+        state,
+        invoker,
+        project_root,
+        tenant,
+        store,
+        initial_state,
+        agent_id,
+        message,
+    )
+    .await
+    {
+        Ok(s) => s,
+        Err(outcome) => return outcome,
+    };
+
+    // 3b/4. registry 回写 + 响应提取。
+    stage_finalize(
+        &final_state,
+        &tenant_id,
+        effective_pipeline_id,
+        thread_id,
+        agent_id,
+    )
+}
+
+/// 前置依赖缺失时的 echo 降级应答（invoker/store/project_root 任一缺席）。
+fn echo_fallback(missing: &str, message: &str) -> EngineOutcome {
+    EngineOutcome {
+        content: format!("[echo-fallback: {missing}] {message}"),
+        final_assistant: None,
+        failed: false,
+    }
+}
+
+/// 阶段 1/1a/1a2：构造初始 state（含会话级/任务级 execution_context 注入）。
+///
+/// core_plugin 默认值可被 agent 配置（config/agents/<id>.yaml 的 core_plugin 字段）
+/// 覆盖——见 load_agent_config_into_state。避免在内核硬编码具体插件 id。
+// 技术债（同上）：多参阶段函数，收尾时统一收敛参数结构体。
+#[allow(clippy::too_many_arguments)]
+async fn stage_build_initial_state(
+    store: &Arc<dyn StorageBackend>,
+    message: &str,
+    agent_id: &str,
+    effective_pipeline_id: &str,
+    thread_id: &str,
+    message_id: &str,
+    user_id: &str,
+    thinking_strength: &str,
+    execution_context: Option<&serde_json::Value>,
+) -> serde_json::Value {
     let mut initial_state = serde_json::json!({
         "message": message,
         "input": message,
@@ -837,21 +903,31 @@ async fn process_via_engine_inner(
         }
     }
 
-    // 1b. 多轮上下文装配：state.messages 是 LLMCore._build_messages 读取的对话历史。
-    // 单一权威（不搞降级路径）：
-    //   ① 热路径：PipelineStateRegistry 内存 state 完整（每轮 final_state 含 messages
-    //      写回，LLM 插件负责 append assistant 回复）→ 直接复用 entry.state["messages"]。
-    //   ② 冷路径：registry 未命中（重启/新会话/内存丢失）→ 从 messages 表（持久化
-    //      冷数据）按 effective_pipeline_id 恢复完整历史，后续轮走热路径。
-    //   ③ 客户端传的 history 仅在①②均为空（真·首轮）时兜底，向后兼容老客户端。
-    // 恢复失败 = bug（内存丢 + DB 读不到）：显式 error 暴露，不静默吞掉。
-    let tenant =
-        agentos_tenant::current().unwrap_or_else(|| TenantContext::new("default", "kernel"));
-    let tenant_id = tenant.tenant_id.clone();
+    initial_state
+}
+
+/// 阶段 1b：多轮上下文装配 + 本轮 user 消息入账，返回补全后的 initial_state。
+///
+/// state.messages 是 LLMCore._build_messages 读取的对话历史。单一权威（不搞降级路径）：
+///   ① 热路径：PipelineStateRegistry 内存 state 完整（每轮 final_state 含 messages
+///      写回，LLM 插件负责 append assistant 回复）→ 直接复用 entry.state["messages"]。
+///   ② 冷路径：registry 未命中（重启/新会话/内存丢失）→ 从 messages 表（持久化
+///      冷数据）按 effective_pipeline_id 恢复完整历史，后续轮走热路径。
+///   ③ 客户端传的 history 仅在①②均为空（真·首轮）时兜底，向后兼容老客户端。
+/// 恢复失败 = bug（内存丢 + DB 读不到）：显式 error 暴露，不静默吞掉。
+#[allow(clippy::too_many_arguments)]
+async fn stage_recover_history(
+    mut initial_state: serde_json::Value,
+    store: &Arc<dyn StorageBackend>,
+    message: &str,
+    thread_id: &str,
+    effective_pipeline_id: &str,
+    tenant_id: &str,
+) -> serde_json::Value {
     let mut history_prefix: Vec<serde_json::Value> = Vec::new();
     let mut history_loaded = false;
     let registry = agentos_session::global_registry();
-    if let Some(entry) = registry.get(&tenant_id, effective_pipeline_id) {
+    if let Some(entry) = registry.get(tenant_id, effective_pipeline_id) {
         // 热路径：内存 state 完整，直接复用（无需走 DB）
         if let Some(msgs) = entry
             .read()
@@ -874,7 +950,7 @@ async fn process_via_engine_inner(
         let mut ckpt_hit = false;
         if !effective_pipeline_id.is_empty() {
             if let Ok(Some((_step_no, ckpt_state))) = store
-                .load_latest_checkpoint(effective_pipeline_id, &tenant_id)
+                .load_latest_checkpoint(effective_pipeline_id, tenant_id)
                 .await
             {
                 recovered = ckpt_state;
@@ -890,7 +966,7 @@ async fn process_via_engine_inner(
             }
         }
         if !ckpt_hit {
-            match store.get_step_traces_by_thread(thread_id, &tenant_id).await {
+            match store.get_step_traces_by_thread(thread_id, tenant_id).await {
                 Ok(step_traces) => {
                     for entry in &step_traces {
                         merge_patch(&mut recovered, &entry.patch_data);
@@ -910,7 +986,7 @@ async fn process_via_engine_inner(
         // 重建后插件能在正确基线上自然累加，不归零。
         if !effective_pipeline_id.is_empty() {
             if let Ok(state_fields) = store
-                .load_pipeline_state(effective_pipeline_id, &tenant_id)
+                .load_pipeline_state(effective_pipeline_id, tenant_id)
                 .await
             {
                 if let Some(rec_obj) = recovered.as_object_mut() {
@@ -923,7 +999,7 @@ async fn process_via_engine_inner(
         // messages 直读 message_slots（零回放；元素自带稳定 seq）
         if !effective_pipeline_id.is_empty() {
             if let Ok(msgs) = store
-                .load_message_history(effective_pipeline_id, &tenant_id)
+                .load_message_history(effective_pipeline_id, tenant_id)
                 .await
             {
                 history_prefix = msgs;
@@ -961,7 +1037,7 @@ async fn process_via_engine_inner(
     if let Ok(user_ledger) = agentos_engine::apply_messages_op_update(
         &mut initial_state,
         store.as_ref(),
-        &tenant_id,
+        tenant_id,
         &[serde_json::json!({"op":"set","msg":{"role":"user","content":message}})],
     )
     .await
@@ -975,14 +1051,24 @@ async fn process_via_engine_inner(
             }
         }
     }
+    initial_state
+}
 
-    // 2. 加载 Agent 配置注入 state（读 config/agents/<agent_id>.yaml，不存在跳过）
-    // 统一配置加载方案 TDD-6：优先走 ConfigCenter（泛化注入所有字段），
-    // 未接线时降级到旧的 load_agent_config_into_state（挑 5 字段，兼容）。
+/// 阶段 2/2b：加载 Agent 配置注入 state（读 config/agents/<agent_id>.yaml，不存在跳过）
+/// + 注入工具 schema。
+///
+/// 统一配置加载方案 TDD-6：优先走 ConfigCenter（泛化注入所有字段），
+/// 未接线时降级到旧的 load_agent_config_into_state（挑 5 字段，兼容）。
+fn stage_inject_agent_and_tools(
+    state: &AppState,
+    initial_state: &mut serde_json::Value,
+    agent_id: &str,
+    project_root: &std::path::Path,
+) {
     if let Some(cc) = state.config_center.as_ref() {
-        agentos_config::load_agent_into_state(cc, &mut initial_state, agent_id);
+        agentos_config::load_agent_into_state(cc, initial_state, agent_id);
     } else {
-        load_agent_config_into_state(&mut initial_state, agent_id, &project_root);
+        load_agent_config_into_state(initial_state, agent_id, project_root);
     }
 
     // 2b. 注入工具 schema 到 state（0.2 sidecar 架构适配）。
@@ -991,20 +1077,33 @@ async fn process_via_engine_inner(
     // 按 agent tool_ids 过滤、转成 OpenAI function-calling 格式注入 state["tool_schemas"]，
     // 这样 prepare 阶段的 tool_schema 插件读到非空 schema（它优先用 state 里的值），
     // LLM 即可看到工具并调用（tool_core 执行时内核 invoke_tool 经 MCP 调 sidecar）。
-    inject_tool_schemas(&mut initial_state, state);
+    inject_tool_schemas(initial_state, state);
+}
 
-    // 3. 构造 PipelineExecutor 并执行
-    //    run_id / branch_id 用 uuid 保证多请求隔离；租户上下文从 task_local 读取
-    //    （多租户 P0-4：本函数已在 agentos_tenant::scope 内调用）。
-    //    tenant / tenant_id 已在 1b 段解析（历史加载用），此处复用。
+/// 阶段 3：构造 PipelineExecutor 并执行 initial_state，返回 final_state。
+///
+/// run_id / branch_id 用 uuid 保证多请求隔离；租户上下文从 task_local 读取
+/// （多租户 P0-4：调用方已在 agentos_tenant::scope 内）。
+/// Pull 热加载：按需重载管道配置（autonomous.yaml + steps）——每次 chat 执行前
+/// 检测配置 mtime，变了才重新加载到本次执行用的局部变量，不写回 AppState
+/// （启动期配置保持不动，作为重载失败的兜底）。
+/// 执行失败（executor.run 返回 Err）：把 run 标记 failed + ended_at（避免永远卡
+/// running、历史悬空）并以 failed outcome 出口（Err 携带）。
+#[allow(clippy::too_many_arguments)]
+async fn stage_execute(
+    state: &AppState,
+    invoker: Arc<dyn agentos_core::traits::PluginInvoker>,
+    project_root: PathBuf,
+    tenant: TenantContext,
+    store: Arc<dyn StorageBackend>,
+    initial_state: serde_json::Value,
+    agent_id: &str,
+    message: &str,
+) -> Result<serde_json::Value, EngineOutcome> {
     let run_id = uuid::Uuid::new_v4().to_string();
     let branch_id = "main".to_string();
 
-    // ── Pull 热加载：按需重载管道配置（autonomous.yaml + steps）──
-    // 每次 chat 执行前检测配置 mtime，变了才重新加载到本次执行用的局部变量，
-    // 不写回 AppState（启动期配置保持不动，作为重载失败的兜底）。
-    // 配置变更对本次及后续请求生效：每次执行都经此检测。
-    // 在 project_root 被 move 给 executor 之前算出 config_root。
+    // ── Pull 热加载（在 project_root 被 move 给 executor 之前算出 config_root）──
     let config_root = project_root.join("config");
     let compiled = maybe_reload_compiled_pipeline(state, &config_root);
     let executor = agentos_engine::PipelineExecutor::new(
@@ -1022,6 +1121,8 @@ async fn process_via_engine_inner(
     .with_persistent_fields(
         state
             .manifests
+            .read()
+            .await
             .iter()
             .flat_map(|m| m.persistent_fields.iter().cloned()),
     )
@@ -1030,6 +1131,8 @@ async fn process_via_engine_inner(
     .with_pipeline_end_hook_plugins(
         state
             .manifests
+            .read()
+            .await
             .iter()
             .filter(|m| {
                 m.capabilities
@@ -1049,8 +1152,8 @@ async fn process_via_engine_inner(
 
     info!(run_id = %run_id, agent_id = %agent_id, "Pipeline run started");
 
-    let final_state = match executor.run_compiled(&compiled, initial_state).await {
-        Ok(s) => s,
+    match executor.run_compiled(&compiled, initial_state).await {
+        Ok(s) => Ok(s),
         Err(e) => {
             warn!(run_id = %run_id, error = %e, "PipelineExecutor run failed");
             // B2：引擎失败兜底——把 run 标记 failed + ended_at，避免永远卡 running、
@@ -1062,42 +1165,43 @@ async fn process_via_engine_inner(
             {
                 warn!(run_id = %run_id, error = %pe, "update_run_status(Failed) 失败（继续）");
             }
-            return EngineOutcome {
-                content: format!("[engine-run-failed] {}", message),
+            Err(EngineOutcome {
+                content: format!("[engine-run-failed] {message}"),
                 final_assistant: None,
                 failed: true,
-            };
+            })
         }
-    };
+    }
+}
 
-    // 3b. 回写 final_state 到全局 registry（state 内存常驻，对齐 0.1 _current_state）。
-    // final_state 含完整 messages 历史（LLM 插件 append 了 assistant 回复），
-    // 按 (tenant_id, effective_pipeline_id) 常驻：下一轮热路径直接复用，
-    // 免 DB 查询；重启/内存丢失时冷路径从 messages 表恢复（见 1b 段）。
+/// 阶段 3b/4：final_state 回写全局 registry + 提取响应。
+///
+/// 回写：final_state 含完整 messages 历史（LLM 插件 append 了 assistant 回复），
+/// 按 (tenant_id, effective_pipeline_id) 常驻：下一轮热路径直接复用，
+/// 免 DB 查询；重启/内存丢失时冷路径从 messages 表恢复（见 stage_recover_history）。
+fn stage_finalize(
+    final_state: &serde_json::Value,
+    tenant_id: &str,
+    effective_pipeline_id: &str,
+    thread_id: &str,
+    agent_id: &str,
+) -> EngineOutcome {
     if !effective_pipeline_id.is_empty() {
         let reg = agentos_session::global_registry();
-        if !reg.contains(&tenant_id, effective_pipeline_id) {
+        if !reg.contains(tenant_id, effective_pipeline_id) {
             reg.get_or_init(
-                &tenant_id,
+                tenant_id,
                 effective_pipeline_id,
                 thread_id,
                 agent_id,
                 final_state.clone(),
             );
         } else {
-            reg.update_state(&tenant_id, effective_pipeline_id, final_state.clone());
+            reg.update_state(tenant_id, effective_pipeline_id, final_state.clone());
         }
     }
 
-    // 4. 提取响应：优先 raw_result，回退 state.message，再回退原消息
-    let content = if let Some(raw) = final_state.get("raw_result").and_then(|v| v.as_str()) {
-        raw.to_string()
-    } else if let Some(msg) = final_state.get("message").and_then(|v| v.as_str()) {
-        msg.to_string()
-    } else {
-        // 没有 raw_result / message 字段：pretty-print 整个 state（便于调试）
-        serde_json::to_string_pretty(&final_state).unwrap_or_else(|_| message.to_string())
-    };
+    let content = extract_response_content(final_state);
     // A2：本轮最终 assistant 消息（完整持久形态，含 tool_calls/reasoning_content/seq），
     // WS 路径 new_message 携带它——前端与 DB 加载共用 mapper，冷热路径同构。
     let final_assistant = final_state
@@ -1113,6 +1217,25 @@ async fn process_via_engine_inner(
         content,
         final_assistant,
         failed: false,
+    }
+}
+
+/// 响应内容提取：优先 raw_result，回退 state.message，再回退固定文案。
+///
+/// A12：兜底不再把整份内部 state pretty-print 给客户端（内部结构/工具细节泄漏），
+/// 固定返回 "pipeline finished"；完整 state 保留在服务端 tracing（debug 级）。
+fn extract_response_content(final_state: &serde_json::Value) -> String {
+    if let Some(raw) = final_state.get("raw_result").and_then(|v| v.as_str()) {
+        raw.to_string()
+    } else if let Some(msg) = final_state.get("message").and_then(|v| v.as_str()) {
+        msg.to_string()
+    } else {
+        debug!(
+            target: "chat-response",
+            state = ?final_state,
+            "pipeline finished without raw_result/message（完整 state 仅留服务端日志）"
+        );
+        "pipeline finished".to_string()
     }
 }
 
@@ -1601,6 +1724,27 @@ mod tests {
     use serde_json::json;
     use tower::ServiceExt;
 
+    /// 登录内置 admin（无 store 时回退内置用户表）返回 access_token。
+    async fn admin_token(app: &axum::Router) -> String {
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/auth/login")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        json!({"username": "admin", "password": "admin12345"}).to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let body = axum::body::to_bytes(resp.into_body(), 8192).await.unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        v["access_token"].as_str().unwrap().to_string()
+    }
+
     /// G2：validate-all 全量巡检——声明 vs 实际对照，漂移分类报告。
     #[tokio::test]
     async fn test_validate_all_reports_drift_and_clean() {
@@ -1618,10 +1762,10 @@ mod tests {
             }))
             .expect("valid manifest")
         };
-        state.manifests = Arc::new(vec![
+        state.manifests = Arc::new(tokio::sync::RwLock::new(vec![
             mk_manifest("p_drift", &["t1", "ghost"]),
             mk_manifest("p_clean", &["t2"]),
-        ]);
+        ]));
         let invoker = Arc::new(RecordingInvoker {
             seen: std::sync::Mutex::new(Vec::new()),
             list_tools: std::collections::HashMap::from([
@@ -1833,6 +1977,34 @@ mod tests {
     #[tokio::test]
     async fn test_chat_post_returns_200() {
         let app = build_router(AppState::new());
+        // A11：chat 已纳入写面鉴权，先 login 拿 token
+        let token = admin_token(&app).await;
+        let body = serde_json::to_string(&WsRequest {
+            message: "hello".to_string(),
+            session_id: "s1".to_string(),
+            history: Vec::new(),
+            agent_id: String::new(),
+        })
+        .unwrap();
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/chat")
+                    .header("authorization", format!("Bearer {token}"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    /// A11：匿名 POST /api/v1/chat → 401（0.2 收紧：消息驱动管道执行属写面）。
+    #[tokio::test]
+    async fn test_chat_post_anonymous_returns_401() {
+        let app = build_router(AppState::new());
         let body = serde_json::to_string(&WsRequest {
             message: "hello".to_string(),
             session_id: "s1".to_string(),
@@ -1851,7 +2023,7 @@ mod tests {
             )
             .await
             .unwrap();
-        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
     }
 
     #[tokio::test]
@@ -1878,6 +2050,8 @@ mod tests {
     async fn test_chat_uses_engine_not_echo() {
         // 验证 chat 响应不再是简单的 "Response to: xxx"
         let app = build_router(AppState::new());
+        // A11：chat 已纳入写面鉴权，先 login 拿 token
+        let token = admin_token(&app).await;
         let body = serde_json::to_string(&WsRequest {
             message: "hello world".to_string(),
             session_id: "test_session".to_string(),
@@ -1890,6 +2064,7 @@ mod tests {
                 Request::builder()
                     .method("POST")
                     .uri("/api/v1/chat")
+                    .header("authorization", format!("Bearer {token}"))
                     .header("content-type", "application/json")
                     .body(Body::from(body))
                     .unwrap(),
@@ -1941,7 +2116,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_tools_handler_returns_tools_list() {
-        // 验证 tools handler 从 config 返回工具列表（无 registry 时）
+        // 验证 tools handler 从 config 返回工具列表（无 registry 时）。
+        // W-C2：响应信封统一为 {items, total}（对齐 /api/v1/agents）。
         let config = json!({
             "tools": [{"name": "calculator", "description": "A calculator"}],
         });
@@ -1959,9 +2135,10 @@ mod tests {
             .await
             .unwrap();
         let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
-        let tools = json.as_array().unwrap();
-        assert_eq!(tools.len(), 1);
-        assert_eq!(tools[0]["name"], "calculator");
+        let items = json["items"].as_array().expect("应含 items 数组");
+        assert_eq!(json["total"], 1);
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0]["name"], "calculator");
     }
 
     // ── 监控 M5/M5b：指标查询端点 + Prometheus 导出端点 ──

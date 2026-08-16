@@ -226,7 +226,8 @@ impl PipelineExecutor {
 
         // ADR ②③：引擎独占落库。run 开始时建 runs 记录 + 落 user 消息。
         // 失败只 warn 不阻断执行（持久化不应让管道跑不通）。
-        self.persist_run_start(&mut state).await;
+        self.persist_run_start(&mut state, &compiled.config_hash)
+            .await;
 
         // ── 多循环体执行 ──
         // 转移死循环防护：Phase 跳转/循环体数上限的乘积保险。
@@ -250,7 +251,7 @@ impl PipelineExecutor {
             let ignore_ended = truthy_flag(&state, "ended") && body.run_on_error;
             let iterations = self
                 .execute_body(body, &mut state, compiled, ignore_ended)
-                .await;
+                .await?;
             // 监控 M2：迭代轮数（仅 loop 模式计，按循环体累计）
             if iterations > 0 {
                 self.metrics.inc_iterations(iterations as u64);
@@ -329,13 +330,14 @@ impl PipelineExecutor {
     /// （`suspended`）始终终止执行（等待恢复，不跑收尾）。
     ///
     /// 返回迭代轮数（仅 loop 模式计；单次执行返回 0，对齐旧"仅 loop 计迭代"）。
+    /// Err = step 级跳转护栏触发（见 [`Self::execute_steps`]），向上传播终止 run。
     async fn execute_body(
         &self,
         body: &CompiledBody,
         state: &mut serde_json::Value,
         compiled: &CompiledPipeline,
         ignore_ended: bool,
-    ) -> i32 {
+    ) -> Result<i32, EngineError> {
         let mut iteration: i32 = 0;
         // G10：循环模式 = loop_config.enabled 或 while_cond 任一开启（编译期已归一）
         let looping = body.looping;
@@ -375,7 +377,7 @@ impl PipelineExecutor {
                     }
                 }
                 self.execute_steps(&body.steps, state, compiled, ignore_ended)
-                    .await;
+                    .await?;
                 self.checkpoint_after_round(&compiled.checkpoint, state)
                     .await;
                 if truthy_flag(state, "suspended") {
@@ -388,11 +390,11 @@ impl PipelineExecutor {
         } else {
             // 单次执行（前处理/后处理体）
             self.execute_steps(&body.steps, state, compiled, ignore_ended)
-                .await;
+                .await?;
             self.checkpoint_after_round(&compiled.checkpoint, state)
                 .await;
         }
-        iteration
+        Ok(iteration)
     }
 
     /// 向声明 `on_pipeline_end` 的插件分发管道结束钩子（best-effort）。
@@ -428,13 +430,18 @@ impl PipelineExecutor {
     /// G10：支持 step 级 `RouteNext::Step` **真跳转**（新 DSL "回头"语义——
     /// `then: <step id>` 跳到本循环体内指定 step 重新执行；编译期已校验目标存在）。
     /// 组级 when 门在编译期已 AST 化（`Option<Expr>`），此处只求值零解析。
+    ///
+    /// 跳转护栏：跳转次数上限 = steps 数 × 4（至少 16），与 run() 的循环体级
+    /// 转移护栏同款语义——恒跳回自身的路由在此截断为 Err，而非无限执行。
     async fn execute_steps(
         &self,
         steps: &[CompiledStep],
         state: &mut serde_json::Value,
         compiled: &CompiledPipeline,
         ignore_ended: bool,
-    ) {
+    ) -> Result<(), EngineError> {
+        let max_jumps = steps.len().saturating_mul(4).max(16);
+        let mut jumps: usize = 0;
         let mut i = 0usize;
         while i < steps.len() {
             if truthy_flag(state, "suspended") {
@@ -456,18 +463,29 @@ impl PipelineExecutor {
             // G10：step 级 Step 跳转（真跳转）——目标下标在本循环体内查找
             if let Some(RouteNext::Step(id)) = routed {
                 if let Some(j) = steps.iter().position(|s| s.id == id) {
+                    jumps += 1;
+                    if jumps > max_jumps {
+                        return Err(EngineError::Other {
+                            message: format!(
+                                "step 级跳转次数超限（{jumps} 次，上限 {max_jumps}，疑似 step 路由死循环）"
+                            ),
+                        });
+                    }
                     debug!(step = %step.id, target = %id, "step 级跳转");
                     i = j;
                     continue;
                 }
+                // 编译期已校验目标存在；此处为防御路径（如热重载后计划与配置不一致），
+                // 跳过跳转继续顺序执行
                 warn!(
                     step = %step.id,
                     target = %id,
-                    "Step 跳转目标未在本循环体找到（编译期已校验，理论不可达）"
+                    "Step 跳转目标未在本循环体找到（编译期已校验；防御路径，继续顺序执行）"
                 );
             }
             i += 1;
         }
+        Ok(())
     }
 
     /// 执行单个 step：context 注入 →（可选）step 自带循环 → 列表项执行 → 路由。
@@ -821,10 +839,10 @@ impl PipelineExecutor {
     /// 在 run() 开头调用一次。user 消息从 initial_state["message"] 取
     /// （server.rs:242 注入的当前用户输入）。完整内容存 blobs 表，
     /// messages 表存摘要 preview + blob_id 指针（ADR ⑦ 懒加载）。
-    async fn persist_run_start(&self, state: &mut serde_json::Value) {
-        // config_hash 是 runs 表的配置指纹元数据，此处用空串占位
-        // （完整实现应哈希 pipeline_config，但对持久化链路验证无影响）。
-        let config_hash = "";
+    async fn persist_run_start(&self, state: &mut serde_json::Value, config_hash: &str) {
+        // config_hash = 编译期对 PipelineConfig 的确定性指纹
+        // （compiler::pipeline_config_hash：serde_json 规范化 + SHA-256 前 16 hex），
+        // 随 CompiledPipeline 走到此落 runs 表。
         let tenant_id = self.default_tenant.tenant_id.clone();
         if let Err(e) = self
             .store
@@ -2679,6 +2697,56 @@ mod tests {
         assert!(
             state.get("next_step").is_none(),
             "Step 真跳转不再写 next_step 记号"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_step_route_self_jump_guard_errors() {
+        // 恒跳回自身的 step 路由 → 跳转护栏截断为 Err（不无限执行）。
+        // 上限 = steps.len()×4（本例 1 步 → max(4,16)=16 次跳转）：
+        // 第 17 次跳转超限返回 Err，插件恰好被调用 17 次（每次跳转前执行一次）。
+        let counter = Arc::new(AtomicUsize::new(0));
+        let executor = make_executor(
+            Arc::new(CountingInvoker {
+                counter: counter.clone(),
+                stop_after: 0,
+                set_suspended_after: 0,
+            }) as Arc<dyn PluginInvoker>,
+            &["p"],
+        );
+        let mut jumping = atomic_step("looper", "p");
+        jumping.routes = vec![Route {
+            when: "True".into(),
+            then: agentos_core::types::RouteAction {
+                next: RouteNext::Step("looper".into()),
+                set: HashMap::new(),
+            },
+        }];
+        let config = PipelineConfig {
+            name: "self_jump".into(),
+            loop_bodies: vec![LoopBody {
+                id: "main".into(),
+                steps: vec![jumping],
+                loop_config: None,
+                while_cond: None,
+                exit_routes: vec![],
+                run_on_error: false,
+            }],
+            checkpoint: Default::default(),
+        };
+        let result = executor
+            .run(&config, &StepLibrary::default(), json!({}))
+            .await;
+        let err = result.expect_err("恒自跳路由应被护栏截断为 Err");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("step 级跳转次数超限") && msg.contains("死循环"),
+            "错误信息应说明疑似 step 路由死循环：{msg}"
+        );
+        assert_eq!(
+            counter.load(Ordering::SeqCst),
+            17,
+            "1 步管道上限 16 次跳转，第 17 次截断（每次跳转前插件执行一次）"
         );
     }
 

@@ -8,6 +8,7 @@ import { Input } from '@/components/ui/input'
 import {
   getAPIConfig,
   saveAPIConfig,
+  testAPIEndpointHealth,
   type APIConfig,
   type EndpointConfig,
   type RateLimitConfig,
@@ -87,18 +88,11 @@ export function ApiSettingsPage() {
     }
   }, [config])
 
-  // 连接测试
+  // 连接测试（外部端点探测已下沉到 services/api/config.ts）
   const handleTestConnection = useCallback(async () => {
     setTestStatus('testing')
-    try {
-      const res = await fetch(`${config?.endpoint.base_url}/health`, {
-        method: 'GET',
-        signal: AbortSignal.timeout(5000),
-      })
-      setTestStatus(res.ok ? 'ok' : 'fail')
-    } catch {
-      setTestStatus('fail')
-    }
+    const healthy = await testAPIEndpointHealth(config?.endpoint.base_url ?? '')
+    setTestStatus(healthy ? 'ok' : 'fail')
     setTimeout(() => setTestStatus('idle'), 3000)
   }, [config?.endpoint.base_url])
 

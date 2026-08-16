@@ -1,3 +1,4 @@
+# @feature: FP-0.2.二 内部模块manifest | @vision: V3 可嵌入 | @ci: python-coverage
 """ToolCallGuard 和 OutputRepetitionGuard 新插件单元测试。
 
 测试覆盖：

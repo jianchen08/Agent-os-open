@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# @feature: FP-MIGR 0.1→0.2迁移清理 | @vision: V3 可嵌入 | @ci: python-plugins-test
+# @feature: FP-MIGR 0.1→0.2迁移清理 | @vision: V3 可嵌入 | @ci: none-local
 """第三方通道插件迁移验证测试。
 
 验证每个通道插件的：

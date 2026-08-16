@@ -1,10 +1,13 @@
 """测试公共配置。
 
 职责：
-1. 条件化 src/ 路径注入（0.2 架构下 src/ 已废弃，仅在仍存在时兼容老测试）
-2. 注册统一日志系统
-3. 通过 pytest hook 自动收集失败测试的日志和 bug 定位信息
-4. 生成结构化测试报告
+1. 注册统一日志系统
+2. 通过 pytest hook 自动收集失败测试的日志和 bug 定位信息
+3. 生成结构化测试报告
+
+0.2 架构说明：src/ 已删除（迁移到 plugins/ 与 kernel/）。原"条件化 src/
+路径注入"与"src/ 不存在时跳过 0.1 遗留测试"的机制随死测试清理一并移除
+（依赖 src/ 的 0.1 遗留测试已删除，见 docs/test_cleanup_0.2.md）。
 """
 
 import logging
@@ -13,12 +16,6 @@ import sys
 from pathlib import Path
 
 import pytest
-
-# 0.2 架构：src/ 已迁移到 plugins/。仅在 src/ 仍存在时（过渡期）加入 path，
-# 兼容尚未迁移的 0.1 遗留测试；src/ 不存在时这些测试会被 collect_ignore_glob 跳过。
-_SRC_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "src"))
-if os.path.isdir(_SRC_ROOT):
-    sys.path.insert(0, _SRC_ROOT)
 
 # 注意："suites" 已从 collect_ignore 移除，使 pytest tests/channels/ tests/suites/ 能正确收集集成测试。
 # 0.2 清理：原 collect_ignore 中的 test_cross_domain_discovery / test_directory_generator /
@@ -29,18 +26,15 @@ if os.path.isdir(_SRC_ROOT):
 #   （均为无断言或命中真实外部 API 的手动脚本，已移入）。
 collect_ignore: list[str] = ["manual"]
 
-# 0.2 架构：src/ 不存在时，跳过仍依赖 src 的测试文件。
-# 多数 0.1 遗留测试已删除或迁移到 0.2 模块（见迁移记录）。
-# 下列文件因 0.2 对应功能尚未完全就绪而暂留跳过：
+# 0.2 架构：src/ 已删除，下列仍依赖旧结构的测试文件跳过收集。
 #   - test_multimodal_capabilities：依赖 llm_config 配置注入链路（未接通，
 #     见 module_migration_plan §2.1 配置注入断链）。待链路修复后迁移。
 #   - test_monitoring_validation：跨多模块（monitoring + agents + channels.cli），
 #     0.2 结构差异大；monitoring 核心已由 test_plugin_smoke_matrix 覆盖加载链路。
-if not os.path.isdir(_SRC_ROOT):
-    collect_ignore_glob = [
-        "suites/tools/test_multimodal_capabilities.py",
-        "test_monitoring_validation.py",
-    ]
+collect_ignore_glob = [
+    "suites/tools/test_multimodal_capabilities.py",
+    "test_monitoring_validation.py",
+]
 
 # ── 报告输出目录 ──────────────────────────────────────────
 REPORT_DIR = os.path.join(os.path.dirname(__file__), "..", "reports")
@@ -112,7 +106,15 @@ def pytest_sessionstart(session: pytest.Session) -> None:
 
 
 def pytest_sessionfinish(session: pytest.Session, exitstatus: int) -> None:
-    """测试会话结束时生成报告。"""
+    """测试会话结束时生成报告。
+
+    环境开关：AGENTOS_SKIP_TEST_REPORT=1 时跳过全部报告写盘与控制台摘要
+    （避免并发 pytest 会话互相覆盖 reports/test_report.{json,html} 的副作用）。
+    默认（未设置/为 0）行为与历史完全一致。
+    """
+    if os.environ.get("AGENTOS_SKIP_TEST_REPORT", "") == "1":
+        return
+
     generator: object | None = getattr(session.config, "_report_generator", None)
     if generator is None:
         return

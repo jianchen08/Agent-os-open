@@ -51,7 +51,7 @@ async fn fetch_schema(manifests: Vec<PluginManifest>) -> Value {
     let state = AppState::with_config(json!({}));
     // 注入 manifests：用 with_plugins 太重，直接构造带 manifests 的 state
     let state = AppState {
-        manifests: std::sync::Arc::new(manifests),
+        manifests: std::sync::Arc::new(tokio::sync::RwLock::new(manifests)),
         ..state
     };
     let app = build_router(state);

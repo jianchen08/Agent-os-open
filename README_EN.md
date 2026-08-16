@@ -152,7 +152,10 @@ User message → Channel layer → Pipeline engine ┌─ Input plugins (preproc
 - Node.js 18+ (for frontend build, Vite required)
 - Docker (WSL2 + docker-ce; frontend container + Redis container, backend runs on the host)
 
-> **Architecture note**: `docker compose` only manages the frontend (static hosting) and Redis containers. The **backend FastAPI process runs on the host** (started via `python -m channels.websocket.app_factory`). The scripts below orchestrate all three parts.
+> **Architecture note**: 0.2 is a Rust kernel (`kernel/`) + Vite frontend talking straight to the
+> kernel: `start_web_02.*` builds and starts `agentos-kernel` (:9100, host process) and the Vite
+> dev server (:6390, proxying to the kernel); `docker compose` only provides the Redis container
+> on demand (docker/0.2/docker-compose.yml).
 
 ### Option 1: Windows One-Click (Recommended)
 
@@ -161,21 +164,19 @@ User message → Channel layer → Pipeline engine ┌─ Input plugins (preproc
 copy .env.example .env
 ::    Edit .env and fill in your LLM API keys (see config/models/llm.yaml)
 
-:: 2. Configure Docker environment first (WSL2 + docker-ce, Docker Desktop no longer supported)
-::    This deployment uses WSL2 + docker-ce only; Docker Desktop is not supported.
-::    Run the script below if not yet configured; skip to step 3 if already set up.
+:: 2. (optional) Set up WSL2 + docker-ce for the Redis container; skip if already configured
 install_native_docker.bat
 
-:: 3. Start the project (installs deps + launches backend/frontend/Redis)
-start_web_cn.bat
+:: 3. Start the project (builds the Rust kernel + starts kernel :9100 / frontend :6390 / Redis)
+start_web_02.bat
 
-:: Stop: close the "Agent OS Backend" window, then
-docker compose down
+:: Stop
+stop_web_02.sh   (or stop by port, see the hint printed at the end of the script)
 ```
 
 After startup:
-- Web UI: http://localhost:5289
-- Backend API: http://localhost:8988 (docs at /docs)
+- Web UI: http://localhost:6390
+- Kernel API: http://localhost:9100
 
 ### Option 2: Linux / macOS One-Click
 
@@ -184,21 +185,19 @@ After startup:
 cp .env.example .env
 # Edit .env and fill in your LLM API keys
 
-# 2. One-click deploy (installs Docker + Python deps + builds images + starts + health check)
-chmod +x install.sh
-./install.sh            # full deploy (bootstrap + deploy)
-# or ./install.sh --deploy   # Docker already installed, skip bootstrap
-
-# 3. Start in dev mode (backend + frontend dev server + Redis)
-./start_web.sh
+# 2. Start (builds the Rust kernel + starts kernel :9100 / frontend :6390 / Redis)
+#    NOTE: the 0.1 install.sh / start_web.sh / stop_web.sh are deprecated, do not use
+chmod +x start_web_02.sh
+./start_web_02.sh            # full start (build + kernel + frontend)
+# or ./start_web_02.sh --no-build   # skip the build step
 
 # Stop
-./stop_web.sh
+./stop_web_02.sh
 ```
 
 After startup:
-- Web UI: http://localhost:5289
-- Backend API: http://localhost:8988
+- Web UI: http://localhost:6390
+- Kernel API: http://localhost:9100
 
 ### Cross-device / Multi-Instance Configuration
 
@@ -206,18 +205,19 @@ The defaults work out of the box. Adjust as needed for the cases below.
 
 **Workspace root**: task working files are stored under the path set by `workspace.root` in `config/isolation/isolation_config.yaml`. If your project lives elsewhere, or you prefer a different drive/partition, edit that file and set `root` to your actual path (absolute paths only, e.g. `/tmp/ai_workspaces` on Linux or `D:/workspaces` on Windows). In container isolation mode `root` **must** be absolute — a relative path breaks the Docker bind mount.
 
-**Multi-instance (running two versions side by side for comparison)**: the compose project is auto-isolated by **directory name** (different directories = different container/network/volume names, no conflict). You do **not** need to set `COMPOSE_PROJECT_NAME`. The only thing that clashes is the **host port** (frontend 5289 / Redis 6480 / backend 8988).
+**Multi-instance (running two versions side by side for comparison)**: the compose project is auto-isolated by **directory name** (different directories = different container/network/volume names, no conflict). You do **not** need to set `COMPOSE_PROJECT_NAME`. The only thing that clashes is the **host port** (frontend 6390 / kernel 9100 / Redis 6480).
 
 Host ports are parameterized (with defaults), so a single instance needs zero config. To run a second instance, just give it different ports:
 
 ```bat
-:: Instance 1 (default ports): double-click start_web_cn.bat
+:: Instance 1 (default ports 9100/6390): double-click start_web_02.bat
 
 :: Instance 2 (different ports), in the other directory's shell:
 set FRONTEND_HOST_PORT=5290
 set REDIS_HOST_PORT=6481
-set BACKEND_PORT=8989
-start_web_cn.bat
+set AGENTOS_KERNEL_PORT=9101
+set AGENTOS_FRONTEND_PORT=6391
+start_web_02.bat
 ```
 
 The two instances don't interfere: different directories → different compose projects (container/network/volume isolation); different ports → no conflict. The startup banner shows the actual ports in use. Stop each by running `docker compose down` in its own directory (project-scoped, won't affect the other).
@@ -227,29 +227,22 @@ The two instances don't interfere: different directories → different compose p
 For developers who skip the scripts and need fine-grained control.
 
 ```bash
-# 1. Install dependencies (either works)
-pip install -e .              # via pyproject.toml (recommended)
-pip install -r requirements.txt  # via requirements.txt
+# 1. Build and start the Rust kernel (the 0.1 src/ + channels.websocket entries are gone)
+cd kernel && cargo build --release --bin agentos-kernel
+export AGENTOS_PLUGINS_DIR=../plugins/shared AGENTOS_CONFIG_ROOT=../config
+./target/release/agentos-kernel    # kernel runs at http://localhost:9100
 
-# 2. Start Redis (Docker, port aligned with .env)
-docker run -d --name agent-os-redis -p 6480:6379 \
-    redis:7-alpine redis-server --maxmemory 256mb --maxmemory-policy allkeys-lru
-
-# 3. Start backend (FastAPI + WebSocket)
-PYTHONPATH=src python -m channels.websocket.app_factory
-# Backend runs at http://localhost:8988
-
-# 4. Start frontend (separate terminal)
+# 2. Start frontend (separate terminal)
 cd frontend
 npm install
-npm run dev
-# Frontend dev server runs at http://localhost:5289
+npm run dev    # frontend dev server at http://localhost:6390 (proxies to kernel :9100)
 ```
 
-> **About CLI mode**: besides Web mode, a command-line interactive session is available (no web services started):
-> - `python run.py demo` (echo) / `python run.py real` (real LLM) — quick entry via `run.py`
-> - `cli_cn.bat` (Windows) — clears `__pycache__` then launches the full CLI (`channels.cli.cli_main`), supports `--mode {normal,auto,plan}`, `--message`, etc.
-> - `PYTHONPATH=src python -m channels.cli.cli_main` (cross-platform), or the registered command `agent-os` after install
+> **About CLI mode**: the 0.1 standalone CLI entries (`cli_cn.bat` / `run.py` / `channels.cli.cli_main`)
+> were not migrated to 0.2 — `plugins/shared/system/channel_cli` currently only runs as an MCP
+> plugin exposing status queries and text formatting; the full interactive CLI depended on 0.1
+> modules (`infrastructure`, etc.) that no longer exist. Use Web mode (`start_web_02.bat` /
+> `start_web_02.sh`) in this version.
 
 ---
 

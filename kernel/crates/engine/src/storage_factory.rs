@@ -32,6 +32,10 @@
 //!   ```
 //! 3. 默认：sqlite + 项目根 `agentos_kernel.db`（与 driver 化之前行为逐位一致）。
 //!
+//! 文件不存在 = 未配置（走默认）；文件存在但损坏（读失败/YAML 解析失败）=
+//! [`resolve_storage_config`] 返回 `Err` 拒绝启动——数据正确性优先，
+//! 不静默落到默认库。
+//!
 //! [来源: docs/working/重要设计/插件三轨一致性与Cordis机制迁移计划.md §9.6
 //!  "换存储后端 → StorageBackend driver 化（内核内 driver 接口，不是插件轨）"]
 
@@ -60,7 +64,9 @@ pub const ENV_DB_PATH: &str = "AGENTOS_DB_PATH";
 /// config 文件名（config_root 下）。
 const STORAGE_CONFIG_FILE: &str = "storage.yaml";
 
-/// 解析 storage.yaml 的 storage 节（容错：缺文件/坏结构 = None，走默认）。
+/// 解析 storage.yaml 的 storage 节。
+///
+/// serde 宽松：未知字段忽略（前向兼容）。文件存在与否由调用方在读文件时区分。
 #[derive(serde::Deserialize, Default)]
 struct StorageFile {
     #[serde(default)]
@@ -85,17 +91,29 @@ struct SqliteSection {
 ///
 /// `project_root` 用于相对 path 的基准与默认路径推导（config_root 的父目录，
 /// 与 driver 化之前的推导逻辑一致）。
-pub fn resolve_storage_config(config_root: &Path) -> StorageConfig {
+///
+/// 文件不存在 = 未配置（走默认 sqlite）；文件存在但读取/YAML 解析失败 = `Err`
+/// （数据正确性优先：坏配置可能让读写落到错误 driver/路径，拒绝启动而非静默默认）。
+pub fn resolve_storage_config(config_root: &Path) -> Result<StorageConfig, StorageError> {
     let project_root: PathBuf = config_root
         .parent()
         .map(|p| p.to_path_buf())
         .unwrap_or_else(|| PathBuf::from("."));
 
-    // ① config 文件（容错缺省）
-    let file: StorageFile = std::fs::read_to_string(config_root.join(STORAGE_CONFIG_FILE))
-        .ok()
-        .and_then(|raw| serde_yaml::from_str(&raw).ok())
-        .unwrap_or_default();
+    // ① config 文件：NotFound = 未配置；其余读失败/解析失败 = Err
+    let config_path = config_root.join(STORAGE_CONFIG_FILE);
+    let file: StorageFile = match std::fs::read_to_string(&config_path) {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => StorageFile::default(),
+        Err(e) => {
+            return Err(StorageError::Io(format!(
+                "读取 {} 失败: {e}",
+                config_path.display()
+            )))
+        }
+        Ok(raw) => serde_yaml::from_str(&raw).map_err(|e| {
+            StorageError::Io(format!("{} YAML 解析失败: {e}", config_path.display()))
+        })?,
+    };
     let section = file.storage.unwrap_or_default();
     let sqlite_section = section.sqlite.unwrap_or_default();
 
@@ -118,10 +136,10 @@ pub fn resolve_storage_config(config_root: &Path) -> StorageConfig {
                 .to_string()
         });
 
-    StorageConfig {
+    Ok(StorageConfig {
         driver,
         sqlite_path,
-    }
+    })
 }
 
 /// 打开存储。
@@ -169,12 +187,39 @@ mod tests {
         if std::env::var(ENV_STORAGE_DRIVER).is_ok() || std::env::var(ENV_DB_PATH).is_ok() {
             return;
         }
-        let cfg = resolve_storage_config(Path::new("/proj/config"));
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = resolve_storage_config(dir.path()).expect("无文件应走默认");
         assert_eq!(cfg.driver, "sqlite");
         assert!(cfg
             .sqlite_path
             .replace('\\', "/")
             .ends_with("agentos_kernel.db"));
+    }
+
+    /// 文件不存在（空 config 目录）→ Ok 且默认 sqlite。
+    #[test]
+    fn resolve_missing_file_is_ok_with_defaults() {
+        if std::env::var(ENV_STORAGE_DRIVER).is_ok() || std::env::var(ENV_DB_PATH).is_ok() {
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        assert!(!dir.path().join(STORAGE_CONFIG_FILE).exists());
+        let cfg = resolve_storage_config(dir.path()).expect("缺文件 = 未配置，走默认");
+        assert_eq!(cfg.driver, "sqlite");
+    }
+
+    /// 损坏 YAML（存在但解析失败）→ Err 拒绝启动（不静默走默认）。
+    #[test]
+    fn resolve_corrupted_yaml_is_error() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join(STORAGE_CONFIG_FILE), "!!!not yaml{{").unwrap();
+        let err = match resolve_storage_config(dir.path()) {
+            Ok(cfg) => panic!("损坏 YAML 应返回 Err，got: {cfg:?}"),
+            Err(e) => e,
+        };
+        let msg = format!("{err}");
+        assert!(msg.contains("解析失败"), "err: {msg}");
+        assert!(msg.contains("storage.yaml"), "错误应点名文件：{msg}");
     }
 
     /// yaml 解析：storage.driver/sqlite.path 节生效。
@@ -192,11 +237,11 @@ storage:
         assert_eq!(s.sqlite.unwrap().path.as_deref(), Some("/tmp/x.db"));
     }
 
-    /// 坏 yaml 容错 → 默认（不 panic）。
+    /// 坏 yaml：serde_yaml 层即报错（resolve_storage_config 传播为 Err）。
     #[test]
     fn resolve_tolerates_broken_yaml() {
         let f: Result<StorageFile, _> = serde_yaml::from_str("!!!not yaml{{");
-        assert!(f.is_err()); // 调用方 .ok() 兜底
+        assert!(f.is_err()); // resolve 侧：文件存在 + 解析失败 → Err 拒绝启动
     }
 
     /// open_storage：memory driver 双句柄可用且功能等价。

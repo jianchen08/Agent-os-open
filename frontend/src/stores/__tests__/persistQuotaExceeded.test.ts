@@ -34,7 +34,6 @@ const SESSION_ID = 'sess-quota-test'
 
 describe('persist 超配额时 store 行为', () => {
   let usePipelineMessageStore: typeof import('@/stores/pipelineMessageStore').usePipelineMessageStore
-  let originalSetItem: typeof Storage.prototype.setItem
 
   const makeMsg = (id: string, seq: number): Message => ({
     id,
@@ -48,14 +47,16 @@ describe('persist 超配额时 store 行为', () => {
   })
 
   beforeEach(async () => {
-    // 让所有 localStorage.setItem 都抛 QuotaExceededError，模拟配额已满
-    originalSetItem = Storage.prototype.setItem
-    Storage.prototype.setItem = vi.fn(() => {
-      const err = new DOMException(
+    // 清残留：隔离其他用例/文件写入的 localStorage（auth token 等），避免串扰
+    localStorage.clear()
+    // 让所有 localStorage.setItem 都抛 QuotaExceededError，模拟配额已满。
+    // 注意必须 spyOn 实例方法——test setup 的 localStorage 是内存 shim（MemoryStorage），
+    // 不继承全局 Storage.prototype，打补丁 Storage.prototype.setItem 不会生效。
+    vi.spyOn(localStorage, 'setItem').mockImplementation(() => {
+      throw new DOMException(
         "Failed to execute 'setItem' on 'Storage': Setting the value of 'pipeline-messages' exceeded the quota.",
         'QuotaExceededError',
       )
-      throw err
     })
 
     vi.resetModules()
@@ -75,7 +76,8 @@ describe('persist 超配额时 store 行为', () => {
   })
 
   afterEach(() => {
-    Storage.prototype.setItem = originalSetItem
+    // 恢复被 spyOn 的 setItem 实例方法
+    vi.restoreAllMocks()
   })
 
   it('addMessage 在 persist 失败时不应抛异常，且内存 state 应更新', () => {

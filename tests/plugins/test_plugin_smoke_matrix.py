@@ -1,3 +1,4 @@
+# @feature: FP-0.2.二 内部模块manifest | @vision: V3 可嵌入 | @ci: python-heavy-suites
 """全插件端到端冒烟矩阵——逐个插件验证"能否正常执行"。
 
 范围：plugins/ 下所有带 plugin.json 的插件（system / tools / pipeline / external_mcp）。

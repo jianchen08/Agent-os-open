@@ -575,31 +575,12 @@ export async function renderActivityCard(props: Partial<ActivityCardProps>) {
 }
 
 // ============================================================
-// WebSocket mock 注入
+// WebSocket mock 注入（2026-08 清理）
 // ============================================================
-
-/**
- * 注入 mock WebSocketService 到模块系统
- *
- * 在测试 beforeEach 中调用，使所有 import WebSocketService 的模块
- * 获得模拟版本。
- */
-export function setupWebSocketMock(): void {
-  vi.mock('@/services/websocket/WebSocketService', () => ({
-    webSocketService: mockWsService,
-    WebSocketService: MockWebSocketService,
-    default: mockWsService,
-  }))
-}
-
-/**
- * 清理 mock WebSocketService
- *
- * 在测试 afterEach 中调用，清除所有注册的事件处理器。
- */
-export function cleanupWebSocketMock(): void {
-  mockWsService.clearAll()
-}
+// setupWebSocketMock/cleanupWebSocketMock 已删除：零调用方，且其 mock 的
+// WebSocketService 不是任何生产代码的依赖（真实订阅面是 GlobalWebSocket）。
+// flow 测试已改为各自 mock '@/services/websocket/GlobalWebSocket'。
+// MockWebSocketService 类与 mockWsService 实例保留供仍引用它的测试使用。
 
 /**
  * useMessageRender hook 的参数类型

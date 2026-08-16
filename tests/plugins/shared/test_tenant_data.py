@@ -1,4 +1,4 @@
-# @feature: FP-0.2.八 多租户核心系统 | @vision: V4 多用户 | @ci: python-plugins-test
+# @feature: FP-0.2.八 多租户核心系统 | @vision: V4 多用户 | @ci: python-coverage
 """F-TENANT-B-T1 多租户数据根咽喉点测试 — 方案 B 目录隔离地基。
 
 覆盖咽喉点 ``plugins/shared/tenant_data.py`` 的全部契约：

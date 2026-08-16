@@ -1,4 +1,4 @@
-# @feature: FP-0.2.六 记忆检索 | @vision: V1 可进化 | @audit: T5#4 | @ci: python-plugins-test
+# @feature: FP-0.2.六 记忆检索 | @vision: V1 可进化 | @audit: T5#4 | @ci: none-local
 """压缩 LLM 调用函数测试（从 memory/test_compress.py 迁移）。
 
 compress 已从独立 sidecar (plugins/shared/system/memory/) 迁入 context_window_guard

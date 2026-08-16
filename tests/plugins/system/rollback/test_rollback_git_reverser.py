@@ -1,4 +1,4 @@
-# @feature: FP-0.2.五 审批闭环 | @vision: V2 全能闭环 | @ci: python-plugins-test
+# @feature: FP-0.2.五 审批闭环 | @vision: V2 全能闭环 | @ci: python-coverage
 """GitReverser 集成测试——真实临时 git 仓库 + 幂等回滚令牌。
 
 覆盖（业界成熟回滚 = 精确恢复点 + 幂等 + 失败即停）：

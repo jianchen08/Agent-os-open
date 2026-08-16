@@ -1,4 +1,4 @@
-# @feature: FP-0.2.八 多租户核心系统 | @vision: V4 多用户 | @ci: python-plugins-test
+# @feature: FP-0.2.八 多租户核心系统 | @vision: V4 多用户 | @ci: python-coverage
 """F-TENANT-B-T2 其余插件按租户改造测试 — 方案 B 目录隔离。
 
 覆盖 4 个插件存储层契约（同 multimodal/storage 的 T1 范式）：

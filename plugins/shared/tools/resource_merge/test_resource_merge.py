@@ -1,4 +1,4 @@
-# @feature: FP-0.2.〇 管道引擎 | @vision: V3 可嵌入 | @ci: python-plugins-test
+# @feature: FP-0.2.〇 管道引擎 | @vision: V3 可嵌入 | @ci: none-local
 """resource_merge 插件（git 资源合并/回滚工具）单元测试。
 
 覆盖（对齐 plugins/shared/tools/resource_merge/）：

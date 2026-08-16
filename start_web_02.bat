@@ -62,11 +62,15 @@ echo.
 
 REM ============================================================
 REM  Stop old instances (kernel process tree + frontend).
+REM  Port-targeted kill: find PIDs LISTENING on OUR ports via
+REM  netstat -ano, then taskkill /F /T /PID (tree kill).
+REM  The old version carpet-bombed ALL node.exe / agentos-kernel.exe
+REM  on the machine - killing unrelated projects' processes.
 REM ============================================================
-echo [CLEAN] Stopping old instances...
+echo [CLEAN] Stopping old instances (port-targeted)...
 
-taskkill /F /T /IM agentos-kernel.exe >nul 2>&1
-taskkill /F /IM node.exe >nul 2>&1
+call :KillPort "%AGENTOS_KERNEL_PORT%" "kernel"
+call :KillPort "%AGENTOS_FRONTEND_PORT%" "frontend"
 
 REM give Windows time to release the exe file handle (avoids cargo os error 5)
 timeout /t 3 /nobreak >nul
@@ -126,7 +130,7 @@ for /l %%i in (1,1,60) do (
 if "!KERNEL_READY!"=="0" (
     echo [ERROR] Kernel not ready within 60s, aborting.
     echo [HINT] Kernel did not answer /health. Check log: %KERNEL_LOG%
-    taskkill /F /T /IM agentos-kernel.exe >nul 2>&1
+    call :KillPort "%AGENTOS_KERNEL_PORT%" "kernel"
     pause
     exit /b 1
 )
@@ -198,8 +202,28 @@ echo.
 echo   Open http://localhost:%AGENTOS_FRONTEND_PORT% in browser.
 echo   Frontend proxies directly to 0.2 kernel (no 0.1 channel_api).
 echo.
-echo   Stop: taskkill /F /IM agentos-kernel.exe ^& taskkill /F /IM node.exe
+echo   Stop: run stop_web_02.sh, or kill by port (what this script does):
+echo     netstat -aon ^| findstr /C:":%AGENTOS_KERNEL_PORT% " ^| findstr LISTENING  -^> taskkill /F /T /PID ^<pid^>
 echo ========================================
 echo.
 pause
 endlocal
+exit /b 0
+
+REM ------------------------------------------------------------
+REM  KillPort <port> <label>
+REM  Kill every PID LISTENING on the given TCP port (tree kill).
+REM  netstat -ano columns: Proto Local Foreign State PID -> tokens=5
+REM  (findstr /C:":port " with trailing space avoids :91001-style
+REM   mismatches; LISTENING filter avoids killing outbound clients)
+REM ------------------------------------------------------------
+:KillPort
+set "KILLPORT_FOUND=0"
+for /f "tokens=5" %%p in ('netstat -ano ^| findstr /C:":%~1 " ^| findstr /C:"LISTENING"') do (
+    echo        [CLEAN] %~2: killing PID %%p on port %~1
+    taskkill /F /T /PID %%p >nul 2>&1
+    set "KILLPORT_FOUND=1"
+)
+if "!KILLPORT_FOUND!"=="0" echo        [CLEAN] %~2: no listener on port %~1
+set "KILLPORT_FOUND="
+goto :eof

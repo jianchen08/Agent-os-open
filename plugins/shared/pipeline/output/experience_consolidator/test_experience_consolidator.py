@@ -1,4 +1,4 @@
-# @feature: FP-0.2.〇 管道引擎 | @vision: V3 可嵌入 | @ci: python-plugins-test
+# @feature: FP-0.2.〇 管道引擎 | @vision: V3 可嵌入 | @ci: none-local
 """experience_consolidator 输出插件 TDD 测试（Step 5c 重建）。
 
 验证内容（与任务规格 7 个用例对齐，另加 add 失败降级 1 个）：

@@ -1,4 +1,4 @@
-# @feature: FP-0.2.二 内部模块 manifest | @vision: V3 可嵌入 | @audit: T5#15 | @ci: timing
+# @feature: FP-0.2.二 内部模块 manifest | @vision: V3 可嵌入 | @audit: T5#15 | @ci: none-local（不在任何 CI 车道：模块级 from llm.key_pool import 本地收集即红，未入 timing-gate——迁移债）
 """验证 KeyPool 主备模式选 key 策略。
 
 修复前 select() 按 score() 择优，token_quota=0 时 token 维度恒为 3999.6 常数，

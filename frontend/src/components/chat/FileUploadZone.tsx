@@ -470,14 +470,18 @@ export function FileUploadZone({
     return () => document.removeEventListener('paste', handlePaste)
   }, [enabled, handleFileSelect])
 
-  // 清理缩略图 URL
+  // 清理缩略图 URL：通过 ref 镜像最新 files，避免 cleanup 闭包捕获首渲染的空数组
+  const filesRef = useRef(files)
+  useEffect(() => {
+    filesRef.current = files
+  }, [files])
   useEffect(() => {
     return () => {
-      files.forEach((f) => {
+      filesRef.current.forEach((f) => {
         if (f.thumbnailUrl) URL.revokeObjectURL(f.thumbnailUrl)
       })
     }
-  }, []) // eslint-disable-line react-hooks/exhaustive-deps
+  }, [])
 
   const hasFiles = files.length > 0
   const allUploaded = files.length > 0 && files.every((f) => f.status === 'success')

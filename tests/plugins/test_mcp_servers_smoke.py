@@ -1,3 +1,4 @@
+# @feature: FP-0.2.一 插件协议 | @vision: V3 可嵌入 | @ci: python-coverage
 """MCP 服务与 skills 冒烟测试——独立于插件矩阵的第三类资产。
 
 覆盖：

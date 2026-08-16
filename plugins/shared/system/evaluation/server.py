@@ -209,18 +209,25 @@ async def evaluation_run(
             file_path = params.get("path", "")
             passed = bool(file_path) and os.path.exists(file_path)
             message = f"file exists: {file_path}" if passed else f"file not found: {file_path}"
+            error = None
         else:
-            # DEBT: bash_check/semantic_check/human_review 为占位。ceiling: 仅 file_check 实现。
+            # 显式 stub（诚实语义）：bash_check/semantic_check/human_review 未实现，
+            # 一律判失败并说明原因——不再以"提供了参数"假通过（会放行未评估任务）。
             # upgrade: 后续批次补充其他 metric 类型。
-            passed = bool(params)
-            message = "OK (params provided)" if passed else "No parameters provided"
+            passed = False
+            message = None
+            error = f"metric type not implemented: {metric_type}"
 
-        results.append({
+        result_entry: dict[str, Any] = {
             "metric_id": metric_id,
             "type": metric_type,
             "passed": passed,
-            "message": message,
-        })
+        }
+        if message is not None:
+            result_entry["message"] = message
+        if error is not None:
+            result_entry["error"] = error
+        results.append(result_entry)
         if not passed:
             all_passed = False
 
@@ -232,18 +239,16 @@ async def evaluation_run(
         "failed": sum(1 for r in results if not r["passed"]),
         "all_passed": all_passed,
         "gate_mode": gate_mode,
-        "gated": gate_mode and not all_passed,
+        # gate 未实现：pipeline-executor block 通道未接线，gated 恒 False——
+        # 如实报告"门控未生效"，不返回假 gated:true 让调用方误以为已拦截。
+        "gated": False,
+        "gate_enforced": False,
+        "note": "gate 未实现",
         "results": results,
         "timestamp": time.time(),
     }
 
     _results[eval_id] = summary
-
-    # In gate mode with failures: notify pipeline-executor to block
-    if gate_mode and not all_passed:
-        # pipeline = plugin.get_capability("pipeline-executor")
-        # await pipeline.call("block", {"eval_id": eval_id, "reason": "evaluation gate failed"})
-        pass
 
     return summary
 

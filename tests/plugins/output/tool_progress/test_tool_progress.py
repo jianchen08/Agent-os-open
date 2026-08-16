@@ -1,3 +1,4 @@
+# @feature: FP-0.2.〇 管道引擎 | @vision: V3 可嵌入 | @ci: python-coverage
 """ToolProgressReporter 单元测试——工具进度构建与发布逻辑。
 
 覆盖：_build_progress 的状态映射（success/failed/pending）、

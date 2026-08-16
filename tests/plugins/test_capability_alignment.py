@@ -1,3 +1,4 @@
+# @feature: FP-0.2.一 插件协议 | @vision: V3 可嵌入 | @ci: python-coverage
 """跨语言 capability 清单一致性测试（M1）。
 
 校验 SDK 的 STANDARD_CAPABILITIES 与内核 initialize 声明的能力清单对齐，
@@ -13,14 +14,12 @@ from agentos_plugin_sdk import AgentOSPlugin
 from agentos_plugin_sdk.capability import STANDARD_CAPABILITIES as SDK_CAPS
 
 
-def test_standard_capabilities_matches_expected_nine():
-    """SDK 清单应包含全部 9 个标准能力（含 frontend，task_observability），且无重复。"""
+def test_standard_capabilities_matches_expected_seven():
+    """SDK 清单应包含全部 7 个标准能力（含 frontend，task_observability），且无重复。"""
     expected = {
         "pipeline-executor",
-        "config-reader",
         "tenant-context",
         "event-bus",
-        "logger",
         "metrics",
         "tool-executor",
         "service-registry",
@@ -32,10 +31,10 @@ def test_standard_capabilities_matches_expected_nine():
 
 
 def test_sdk_injects_all_standard_caps_when_kernel_declares_them():
-    """当内核声明全部 9 项能力时，SDK 应能为每一项创建 CapabilityHandle。
+    """当内核声明全部 7 项能力时，SDK 应能为每一项创建 CapabilityHandle。
 
-    模拟 M1 修复后内核 initialize 的行为：build_declared_capabilities(true) 返回
-    全部 9 项。SDK 的 _on_initialize 必须全部注入，否则该能力对插件不可用。
+    模拟内核 initialize 的行为：build_declared_capabilities(true) 返回
+    全部 7 项。SDK 的 _on_initialize 必须全部注入，否则该能力对插件不可用。
     """
     plugin = AgentOSPlugin("test_alignment")
     declared = {name: {} for name in SDK_CAPS}

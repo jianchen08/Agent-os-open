@@ -1,4 +1,4 @@
-# @feature: FP-0.2.〇 管道引擎 | @vision: V3 可嵌入 | @ci: python-plugins-test
+# @feature: FP-0.2.〇 管道引擎 | @vision: V3 可嵌入 | @ci: none-local
 """isolation 插件（隔离环境管理器）单元测试。
 
 覆盖（对齐 plugins/shared/system/isolation/manager.py）：

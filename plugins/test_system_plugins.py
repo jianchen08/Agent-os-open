@@ -1,4 +1,4 @@
-# @feature: FP-0.2.二 内部模块manifest化 | @vision: V3 可嵌入 | @ci: python-plugins-test
+# @feature: FP-0.2.二 内部模块manifest化 | @vision: V3 可嵌入 | @ci: python-coverage
 """系统插件迁移测试——覆盖 AC-09-1 ~ AC-09-6。
 
 验证 6 个系统插件（记忆/审批/评估/复盘/触发器/WebSocket适配器）的 MCP 工具注册和调用。
@@ -35,7 +35,6 @@ _PLUGIN_CATEGORY_MAP: dict[str, str] = {
     "evaluation": "shared/system",
     "review": "shared/system",
     "builtin_tools": "shared/tools",
-    "triggers": "shared/tools",
 }
 
 
@@ -220,7 +219,28 @@ class TestEvaluationPlugin:
             gate_mode=True,
         )
         assert result["all_passed"] is False
-        assert result["gated"] is True
+        # gate 未实现：不再返回假 gated:true，改为显式标注未生效
+        assert result["gated"] is False
+        assert result["gate_enforced"] is False
+        assert result["note"] == "gate 未实现"
+
+    def test_evaluation_unimplemented_metric_types_fail_explicitly(self) -> None:
+        """bash_check/semantic_check/human_review 为显式 stub：一律判失败并说明原因。"""
+        mod = _load_plugin_module("evaluation")
+        result = _call_tool(
+            mod, "evaluation.run",
+            task_id="task_2b",
+            metrics=[
+                {"metric_id": "m1", "type": "bash_check", "params": {"command": "true"}},
+                {"metric_id": "m2", "type": "semantic_check", "params": {"criteria": "x"}},
+                {"metric_id": "m3", "type": "human_review", "params": {"reviewer": "r"}},
+            ],
+            gate_mode=True,
+        )
+        assert result["all_passed"] is False
+        for entry in result["results"]:
+            assert entry["passed"] is False
+            assert entry["error"] == f"metric type not implemented: {entry['type']}"
 
     def test_evaluation_get_result(self) -> None:
         mod = _load_plugin_module("evaluation")
@@ -280,93 +300,23 @@ class TestReviewPlugin:
 
 
 # ═══════════════════════════════════════════════════════════
-# AC-09-5: 触发器系统
-# ═══════════════════════════════════════════════════════════
-
-class TestTriggerPlugin:
-    """验证触发器系统插件。"""
-
-    def test_trigger_tools_registered(self) -> None:
-        mod = _load_plugin_module("triggers")
-        assert "trigger.register" in mod.plugin._tools
-        assert "trigger.cancel" in mod.plugin._tools
-        assert "trigger.list" in mod.plugin._tools
-
-    def test_register_cron_trigger(self) -> None:
-        mod = _load_plugin_module("triggers")
-        result = _call_tool(
-            mod, "trigger.register",
-            type="cron",
-            schedule="0 9 * * *",
-            action={"pipeline": "daily_report"},
-        )
-        assert result["status"] == "registered"
-        assert "trigger_id" in result
-
-    def test_register_interval_trigger(self) -> None:
-        mod = _load_plugin_module("triggers")
-        result = _call_tool(
-            mod, "trigger.register",
-            type="interval",
-            schedule="60",
-            action={"pipeline": "health_check"},
-        )
-        assert result["status"] == "registered"
-
-    def test_cancel_trigger(self) -> None:
-        mod = _load_plugin_module("triggers")
-        created = _call_tool(
-            mod, "trigger.register",
-            type="event",
-            schedule="user_login",
-            action={"pipeline": "welcome"},
-        )
-        result = _call_tool(mod, "trigger.cancel", trigger_id=created["trigger_id"])
-        assert result["status"] == "cancelled"
-
-    def test_list_triggers(self) -> None:
-        mod = _load_plugin_module("triggers")
-        _call_tool(
-            mod, "trigger.register",
-            type="cron",
-            schedule="0 * * * *",
-            action={"pipeline": "hourly"},
-        )
-        result = _call_tool(mod, "trigger.list")
-        assert result["count"] >= 1
-
-    def test_list_triggers_filtered(self) -> None:
-        mod = _load_plugin_module("triggers")
-        _call_tool(
-            mod, "trigger.register",
-            type="event",
-            schedule="test_event",
-            action={"pipeline": "p1"},
-        )
-        result = _call_tool(mod, "trigger.list", type="cron")
-        # Should not contain event triggers
-        for t in result["triggers"]:
-            assert t["type"] == "cron"
-
-
-# ═══════════════════════════════════════════════════════════
 # AC-09-1~6: manifest 校验
 # ═══════════════════════════════════════════════════════════
 
 class TestManifestValidation:
     """验证全部 5 个插件的 plugin.json manifest 格式。"""
 
-    # 0.2 插件类型：approval/evaluation/triggers 为 system 服务插件，
+    # 0.2 插件类型：approval/evaluation 为 system 服务插件，
     # review 声明为 tool 类型（trigger_review 等工具直接暴露给 LLM）。
+    # triggers 死壳（trigger_service）已删除，由 triggers_ext（trigger_setup_tool）替代。
     _EXPECTED_PLUGIN_TYPES = {
         "approval": "system",
         "evaluation": "system",
         "review": "tool",
-        "triggers": "system",
     }
 
     @pytest.mark.parametrize("plugin_dir", [
-        "approval", "evaluation", "review", "triggers",
+        "approval", "evaluation", "review",
     ])
     def test_manifest_exists_and_valid(self, plugin_dir: str) -> None:
         manifest_path = _get_plugin_dir(plugin_dir) / "plugin.json"
@@ -381,15 +331,15 @@ class TestManifestValidation:
         assert "entry" in manifest
         assert "capabilities" in manifest
         assert "tools" in manifest["capabilities"]
-        # 0.2 迁移中：approval/evaluation/triggers 的工具清单已被迁移清空
+        # 0.2 迁移中：approval/evaluation 的工具清单已被迁移清空
         # （能力转经 capability 协议/插件重写在途），manifest 骨架仍有效。
-        # tools>0 断言对这三者暂缓，其余 system 插件保持强断言。
-        _TOOLS_EMPTIED_IN_MIGRATION = {"approval", "evaluation", "triggers"}
+        # tools>0 断言对这两者暂缓，其余 system 插件保持强断言。
+        _TOOLS_EMPTIED_IN_MIGRATION = {"approval", "evaluation"}
         if plugin_dir not in _TOOLS_EMPTIED_IN_MIGRATION:
             assert len(manifest["capabilities"]["tools"]) > 0
 
     @pytest.mark.parametrize("plugin_dir", [
-        "approval", "evaluation", "review", "triggers",
+        "approval", "evaluation", "review",
     ])
     def test_server_exists(self, plugin_dir: str) -> None:
         server_path = _get_plugin_dir(plugin_dir) / "server.py"

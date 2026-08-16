@@ -15,7 +15,8 @@
 //! agentos_engine::replay::rebuild_messages_at(
 //!     store: &SqliteStore, pipeline_id: &str, tenant_id: &str,
 //!     upto_created_at: &str,                    // 回放上界：实录 trace 的 created_at ≤ 此值（含）
-//! ) -> Vec<serde_json::Value>                   // 按 seq 升序、元素带 seq + 全文
+//! ) -> Result<Vec<serde_json::Value>, agentos_core::types::StorageError>
+//!                                            // 按 seq 升序、元素带 seq + 全文；存储读失败传播
 //!
 //! agentos_engine::replay::rollback(
 //!     store: &SqliteStore, pipeline_id: &str, tenant_id: &str,
@@ -359,7 +360,8 @@ async fn rebuild_messages_at_restores_midpoint_queue() {
     );
 
     // 重建回到中间时刻
-    let rebuilt = replay::rebuild_messages_at(&store, "p_rb1", "default", &boundary);
+    let rebuilt =
+        replay::rebuild_messages_at(&store, "p_rb1", "default", &boundary).expect("重建应成功");
 
     let rebuilt_snapshot = queue_snapshot(&rebuilt);
     assert_eq!(
@@ -467,4 +469,53 @@ async fn rollback_restores_table_and_records_rollback_trace() {
     assert_eq!(seqs, vec![0, 1, 2, 3, 4, 5], "回退后继续对话应正常追加");
     let (_, slot5) = table.iter().find(|(s, _)| *s == 5).unwrap();
     assert_eq!(slot5, "r5-new-round");
+}
+
+/// 存储读失败 → rollback 返回 Err 且不写任何补偿（表保持失败前状态，
+/// 不生成清空/恢复 ops）。注入方式：DROP traces 表（ledger_ops_upto 的
+/// prepare 失败 = 真实存储读错误；SqliteStore 是具体类型，无法包 wrapper
+/// 注入，用 SQL 级破坏最直接）。
+#[tokio::test]
+async fn rollback_storage_read_failure_propagates_without_compensation() {
+    let store = Arc::new(SqliteStore::open_memory().unwrap());
+
+    // 阶段一：seq 0..1
+    run_round(
+        &store,
+        "run_rb3_a",
+        "p_rb3",
+        vec![set(0, user_msg("b0")), set(1, assistant_msg("b1"))],
+    )
+    .await;
+    let boundary = latest_trace_created_at(&store);
+    std::thread::sleep(Duration::from_millis(20));
+
+    // 阶段二（上界之后）：seq 2 追加
+    run_round(
+        &store,
+        "run_rb3_b",
+        "p_rb3",
+        vec![set(2, assistant_msg("b2-late"))],
+    )
+    .await;
+    let table_before = table_snapshot(&store, "p_rb3");
+    assert_eq!(table_before.len(), 3, "前置校验：失败注入前表有 3 个槽位");
+
+    // 注入存储读失败：traces 不可读
+    store
+        .with_conn(|c| c.execute("DROP TABLE traces", []))
+        .expect("drop traces 应成功");
+
+    let result = replay::rollback(&store, "p_rb3", "default", &boundary);
+    assert!(
+        result.is_err(),
+        "存储读失败应传播为 Err（而非吞错生成清空补偿）：{result:?}"
+    );
+
+    // 不写补偿：表与失败前逐位一致（若吞错重建为空，会把 seq 0..2 全清空）
+    let table_after = table_snapshot(&store, "p_rb3");
+    assert_eq!(
+        table_before, table_after,
+        "rollback 失败不得写补偿 ops（表保持原状）"
+    );
 }

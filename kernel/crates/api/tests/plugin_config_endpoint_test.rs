@@ -89,7 +89,7 @@ async fn test_get_plugin_config_returns_file_content_with_etag() {
     );
 
     let mut state = AppState::new();
-    state.manifests = std::sync::Arc::new(vec![manifest]);
+    state.manifests = std::sync::Arc::new(tokio::sync::RwLock::new(vec![manifest]));
     state.project_root = Some(tmp.path().to_path_buf());
 
     let app = build_router(state);
@@ -143,7 +143,7 @@ async fn test_get_plugin_config_masks_plaintext_secret() {
     );
 
     let mut state = AppState::new();
-    state.manifests = std::sync::Arc::new(vec![manifest]);
+    state.manifests = std::sync::Arc::new(tokio::sync::RwLock::new(vec![manifest]));
     state.project_root = Some(tmp.path().to_path_buf());
 
     let app = build_router(state);
@@ -188,7 +188,7 @@ async fn test_put_plugin_config_preserves_env_placeholder_via_sentinel() {
     );
 
     let mut state = AppState::new();
-    state.manifests = std::sync::Arc::new(vec![manifest]);
+    state.manifests = std::sync::Arc::new(tokio::sync::RwLock::new(vec![manifest]));
     state.project_root = Some(tmp.path().to_path_buf());
 
     // 先 GET 拿 ETag
@@ -261,7 +261,7 @@ async fn test_put_plugin_config_without_if_match_returns_409() {
     );
 
     let mut state = AppState::new();
-    state.manifests = std::sync::Arc::new(vec![manifest]);
+    state.manifests = std::sync::Arc::new(tokio::sync::RwLock::new(vec![manifest]));
     state.project_root = Some(tmp.path().to_path_buf());
 
     let put_body = serde_json::to_string(&json!({
@@ -301,7 +301,7 @@ async fn test_get_plugin_config_unknown_file_id_returns_404() {
     );
 
     let mut state = AppState::new();
-    state.manifests = std::sync::Arc::new(vec![manifest]);
+    state.manifests = std::sync::Arc::new(tokio::sync::RwLock::new(vec![manifest]));
     state.project_root = Some(tmp.path().to_path_buf());
 
     let app = build_router(state);

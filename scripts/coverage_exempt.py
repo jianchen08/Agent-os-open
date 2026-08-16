@@ -49,13 +49,28 @@ BASE_TEST_PATHS: list[str] = [
     "tests/plugins/",
     "tests/suites/plugins/",
     "tests/channels/",
-    "tests/test_p0_regression.py",
     "tests/test_security_check_allow_priority.py",
-    "tests/test_track_ai_record_id_contract.py",
+    "tests/test_security_check_isolation.py",
     "tests/test_track_cost_update_event.py",
     "tests/test_process_watchdog_integration.py",
     "tests/test_isolation_docker_timeout.py",
     "tests/test_isolation_container_self_heal.py",
+    # P1-lite 白名单扩容试点（2026-08-16 本地逐文件实跑通过、且在全车道
+    # 共跑上下文通过后纳入；test_security_check_soft_block_loop 单跑绿、与
+    # test_security_check_isolation 双文件共跑也绿（conftest 裸模块逐出钩子
+    # 已修复该对冲突），但全车道共跑仍 7 红（mock.patch 对裸模块名的事后
+    # 解析命中车道内其他插件的同名模块），未纳入——迁移债）。
+    # 同批未纳入复核（2026-08-16 单跑实测）：host_mode 1 红（危险工具双轨
+    # 判定）、per_round 9 红、signature 2 红、workspace_mount 1 红（需真实
+    # docker 且容器名冲突）、docker_recheck/io_error/l1_main_agent/
+    # namespace_desync 单跑收集即 ImportError（pipeline 依赖车道 conftest）。
+    "tests/test_isolation_checkpoint_security.py",
+    "tests/test_isolation_concurrent_create.py",
+    "tests/test_isolation_docker_provider_injection.py",
+    "tests/test_isolation_io_error_self_heal.py",
+    "tests/test_isolation_prune_throttle.py",
+    "tests/test_isolation_sandbox.py",
+    "tests/test_isolation_skills_copy.py",
 ]
 
 # 外部依赖 marker 过滤（与原 ci.yml 一致：排除需真实 API/Redis/DB/bwrap 的用例）。

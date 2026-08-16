@@ -21,6 +21,7 @@ use agentos_core::traits::{ConfigFileMapping, HostType, PluginManifest, PluginTy
 use axum::body::Body;
 use axum::http::{Method, Request, StatusCode};
 use serde_json::{json, Value};
+use tokio::sync::RwLock;
 use tower::ServiceExt;
 
 const PID: &str = "p-api-tool-1";
@@ -89,7 +90,7 @@ fn app_with_deps() -> (
     let store = Arc::new(agentos_engine::SqliteStore::open_memory().unwrap());
     let mut state = AppState::new();
     state.store = Some(store.clone());
-    state.manifests = Arc::new(vec![manifest]);
+    state.manifests = Arc::new(RwLock::new(vec![manifest]));
     state.project_root = Some(tmp.path().to_path_buf());
     (tmp, build_router(state), store)
 }

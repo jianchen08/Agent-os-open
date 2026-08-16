@@ -2,6 +2,10 @@
  * 上下文 Token 计数 Hook
  *
  * 使用后端 API 获取上下文 Token 使用量，包括系统提示、工具定义、历史消息等所有上下文 Token 计数。
+ *
+ * TODO(最后一公里未挂载)：本 hook 当前无任何组件挂载（接线属产品决策）。
+ * 上下文占用展示现由 useContextUsageStore + COST_UPDATE 事件实时驱动；
+ * 若需按「精确后端计数」展示再接线此 hook。
  */
 
 import { useCallback, useEffect, useRef, useState } from 'react'

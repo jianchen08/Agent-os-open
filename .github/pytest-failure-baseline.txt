@@ -17,5 +17,11 @@
 #     边界、bash sidecar 握手、迁移遗留），+1 余量防 CI 慢机抖动 → 126
 #   - plugins-heavy：10 failed（multimodal / visual_customization_demo 加载 +
 #     8 个 external_mcp plugin.json 校验，含 omnisearch 接线），+1 余量 → 11
-plugins-coverage_failed=126
+#
+# 收紧（2026-08-16，tests/ 根目录测试治理）：plugins-coverage 全车道本地复测
+# 101 failed + 14 errors = 115（死测试删除 + xfail 契约修正 + 迁移修复共同作用），
+# +1 余量 → 116。归属说明：其中含并行开发分支对 plugins/shared src 的修复
+# 贡献，非治理单方面所致；若 CI（Linux）实测高于本地（Windows），以 CI 实测
+# 为准回调本行。
+plugins-coverage_failed=116
 plugins-heavy_failed=11

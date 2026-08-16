@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # WSL2 内核健康度探针：检查是否存在持续的 D 状态（不可中断磁盘睡眠）进程。
-# 由 start_web_cn.bat 用 `timeout` 包住调用。
+# 手动运维时建议用 `timeout 30` 包住调用（0.1 的 start_web_cn.bat 曾如此调用，该入口已删除）。
 #
 # 退出码约定：
 #   0  健康（无持续 D 状态进程，或仅为启动期瞬时 D）

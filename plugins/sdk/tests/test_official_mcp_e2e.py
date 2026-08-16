@@ -1,4 +1,4 @@
-# @feature: FP-0.2.一 第三方插件协议 | @vision: V3 可嵌入 | @ci: python-plugins-test
+# @feature: FP-0.2.一 第三方插件协议 | @vision: V3 可嵌入 | @ci: python-test
 """官方 mcp SDK v2 承载的 MCP 服务端——与 Rust 内核协议兼容性端到端测试。
 
 测试进程扮演内核 McpClient（kernel/crates/mcp/src/client.rs 的逐字镜像）：

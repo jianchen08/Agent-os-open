@@ -5,8 +5,9 @@ export default defineConfig({
   // 匹配 e2e 目录下所有 spec 文件（含 journey、page、feature 等测试）
   testMatch: '**/*.spec.ts',
   fullyParallel: false,
-  forbidOnly: false,
-  retries: 0,
+  // CI 硬化：CI 上禁 .only、失败重试 2 次抓 flaky、首次重试留 trace 便于定位
+  forbidOnly: !!process.env.CI,
+  retries: process.env.CI ? 2 : 0,
   workers: 1,
   reporter: [['list']],
   timeout: 180_000,
@@ -15,7 +16,7 @@ export default defineConfig({
     actionTimeout: 15_000,
     navigationTimeout: 30_000,
     screenshot: 'off',
-    trace: 'off',
+    trace: 'on-first-retry',
   },
   projects: [
     {

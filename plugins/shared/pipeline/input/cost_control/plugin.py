@@ -8,6 +8,9 @@ Token 预算来源（按优先级）：
 2. 管道 state 中的 cost_control.budget 配置
 3. 插件配置中的 default_budget（默认 100000）
 
+注意：跨插件服务接线（get_service 命中 task_service）属后续架构任务；
+未接线时来源 1 不可用，回退来源 2/3（语义不变），失败路径仅低频 warning 留痕。
+
 TrackPlugin 在 Output 阶段将累计 token 写入 state["track.total_tokens"]，
 本插件在 Input 阶段读取该值与预算比较。
 
@@ -73,6 +76,8 @@ class CostControlPlugin(IInputPlugin):
         self._config = config or {}
         self._enabled = self._config.get("enabled", True)
         self._default_budget = self._config.get("default_budget", _DEFAULT_BUDGET)
+        # 服务不可用告警只打一次（低频留痕，避免每轮迭代刷屏）
+        self._service_warned = False
         self._warning_threshold = self._config.get("warning_threshold", _WARNING_THRESHOLD)
         self._critical_threshold = self._config.get("critical_threshold", _CRITICAL_THRESHOLD)
 
@@ -175,6 +180,7 @@ class CostControlPlugin(IInputPlugin):
             Token 预算值
         """
         # 来源 1：任务 metadata
+        # 跨插件服务接线属后续架构任务：get_service KeyError 时回退来源 2/3。
         task_id = ctx.state.get(StateKeys.TASK_ID, "")
         if task_id:
             try:
@@ -182,7 +188,12 @@ class CostControlPlugin(IInputPlugin):
                 task = task_service.get_task(task_id)
                 if task and task.metadata.get("token_budget"):
                     return int(task.metadata["token_budget"])
-            except (KeyError, ValueError, TypeError):
+            except KeyError:
+                if not self._service_warned:
+                    self._service_warned = True
+                    logger.warning("[CostControl] task_service 未接线，任务级 token_budget 不可用，回退 state/默认预算")
+            except (ValueError, TypeError):
+                # metadata 中 token_budget 非法值：回退来源 2/3（不打告警，属数据问题）
                 pass
 
         # 来源 2：state 中已有的配置

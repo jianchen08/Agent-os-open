@@ -268,13 +268,11 @@ fn m1_scope_revoke_cleans_registry_and_widget_bindings() {
     scopes.revoke("m1-tool");
     reg.clear_plugin("m1-tool");
 
-    // 残留扫描：四维 + broadcaster 绑定断言为空。
+    // 残留扫描：可查询维（tool / http 路由）+ broadcaster 绑定断言为空。
+    // （resource / route-signal 的查询面已随死代码删除——plugin-loader registry
+    // 不再暴露 list_resources/has_route_signal；收回路径经 scope revoke +
+    // clear_plugin 结构性保证，无可查询残留面。）
     assert!(reg.get_tool("mt1").is_none(), "tool 残留");
-    assert!(reg.list_resources().is_empty(), "resource 残留");
-    assert!(
-        !reg.has_route_signal(&agentos_core::types::RouteType::End),
-        "signal 残留"
-    );
     assert!(
         reg.find_http_route("/ext/m1-tool/webhook", "POST")
             .is_none(),

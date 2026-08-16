@@ -7,7 +7,7 @@ use std::sync::Arc;
 
 use agentos_core::traits::{
     CapabilityRegistry, Dependency, DependencyError, DependencyResolver, HttpEndpoint,
-    HttpRouteDescriptor, ResourceDescriptor, ToolDescriptor,
+    HttpRouteDescriptor, ToolDescriptor,
 };
 use agentos_core::types::{RouteType, ToolCategory};
 use async_trait::async_trait;
@@ -26,16 +26,18 @@ struct RouteKey {
 
 /// 能力注册表实现。
 ///
-/// 管理四类能力：
+/// 管理三类能力：
 /// 1. Tools: 工具插件/系统插件提供的工具
-/// 2. Resources: 插件暴露的数据源
-/// 3. RouteSignals: 管道插件声明的路由信号
-/// 4. HttpRoutes: 插件贡献的 HTTP 端点（ADR §3.3）
+/// 2. RouteSignals: 管道插件声明的路由信号
+/// 3. HttpRoutes: 插件贡献的 HTTP 端点（ADR §3.3）
+///
+/// （原 Resources 维度已删除：注册链无消费方。）
 pub struct CapabilityRegistryImpl {
     tools: RwLock<HashMap<String, ToolDescriptor>>,
     tools_by_plugin: RwLock<HashMap<String, Vec<String>>>,
-    resources: RwLock<HashMap<String, ResourceDescriptor>>,
-    resources_by_plugin: RwLock<HashMap<String, Vec<String>>>,
+    /// 路由信号并集（写入侧维持；查询面 has_route_signal 已随死代码删除）。
+    /// TODO(R2)：api 侧注册写入点清理后，此存储一并退役。
+    #[allow(dead_code)]
     route_signals: RwLock<HashSet<RouteType>>,
     route_signals_by_plugin: RwLock<HashMap<String, Vec<RouteType>>>,
     /// HTTP 端点维度（ADR §3.3）：RouteKey → 已注册描述符。
@@ -49,8 +51,6 @@ impl CapabilityRegistryImpl {
         Self {
             tools: RwLock::new(HashMap::new()),
             tools_by_plugin: RwLock::new(HashMap::new()),
-            resources: RwLock::new(HashMap::new()),
-            resources_by_plugin: RwLock::new(HashMap::new()),
             route_signals: RwLock::new(HashSet::new()),
             route_signals_by_plugin: RwLock::new(HashMap::new()),
             http_routes: RwLock::new(HashMap::new()),
@@ -180,14 +180,6 @@ impl CapabilityRegistryImpl {
         }
     }
 
-    /// 移除单个资源注册。
-    fn remove_resource_entry(&self, plugin_id: &str, uri: &str) {
-        self.resources.write().remove(uri);
-        if let Some(uris) = self.resources_by_plugin.write().get_mut(plugin_id) {
-            uris.retain(|u| u != uri);
-        }
-    }
-
     /// 移除该插件的路由信号声明并重建全局并集。
     fn remove_route_signals_entry(&self, plugin_id: &str) {
         let mut by_plugin = self.route_signals_by_plugin.write();
@@ -227,23 +219,6 @@ impl CapabilityRegistryImpl {
         agentos_core::traits::RegistrationGuard::new(move || {
             if let Some(reg) = weak.upgrade() {
                 reg.remove_tool_entry(&pid, &name);
-            }
-        })
-    }
-
-    /// 注册资源并返回撤销 guard。
-    pub fn register_resource_guarded(
-        self: &Arc<Self>,
-        plugin_id: &str,
-        resource: ResourceDescriptor,
-    ) -> agentos_core::traits::RegistrationGuard {
-        let uri = resource.uri.clone();
-        self.register_resource(plugin_id, resource);
-        let weak = Arc::downgrade(self);
-        let pid = plugin_id.to_string();
-        agentos_core::traits::RegistrationGuard::new(move || {
-            if let Some(reg) = weak.upgrade() {
-                reg.remove_resource_entry(&pid, &uri);
             }
         })
     }
@@ -331,31 +306,6 @@ impl CapabilityRegistry for CapabilityRegistryImpl {
             .collect()
     }
 
-    fn register_resource(&self, plugin_id: &str, resource: ResourceDescriptor) {
-        let uri = resource.uri.clone();
-        self.resources.write().insert(uri.clone(), resource);
-        self.resources_by_plugin
-            .write()
-            .entry(plugin_id.to_string())
-            .or_default()
-            .push(uri.clone());
-        info!("Resource registered: plugin={} uri={}", plugin_id, uri);
-    }
-
-    fn unregister_resources(&self, plugin_id: &str) {
-        let mut by_plugin = self.resources_by_plugin.write();
-        if let Some(uris) = by_plugin.remove(plugin_id) {
-            let mut resources = self.resources.write();
-            for uri in &uris {
-                resources.remove(uri);
-            }
-        }
-    }
-
-    fn list_resources(&self) -> Vec<ResourceDescriptor> {
-        self.resources.read().values().cloned().collect()
-    }
-
     fn register_route_signals(&self, plugin_id: &str, signals: Vec<RouteType>) {
         let mut sig_set = self.route_signals.write();
         let mut by_plugin = self.route_signals_by_plugin.write();
@@ -369,10 +319,6 @@ impl CapabilityRegistry for CapabilityRegistryImpl {
                 sig_set.insert(sig.clone());
             }
         }
-    }
-
-    fn has_route_signal(&self, signal: &RouteType) -> bool {
-        self.route_signals.read().contains(signal)
     }
 
     fn register_http_route(
@@ -446,7 +392,6 @@ impl CapabilityRegistry for CapabilityRegistryImpl {
 
     fn clear_plugin(&self, plugin_id: &str) {
         self.unregister_tools(plugin_id);
-        self.unregister_resources(plugin_id);
         let mut by_plugin = self.route_signals_by_plugin.write();
         if let Some(signals) = by_plugin.remove(plugin_id) {
             let mut sig_set = self.route_signals.write();
@@ -727,16 +672,6 @@ mod tests {
         }
     }
 
-    fn make_resource_descriptor(uri: &str, plugin_id: &str) -> ResourceDescriptor {
-        ResourceDescriptor {
-            uri: uri.to_string(),
-            name: format!("Resource {}", uri),
-            plugin_id: plugin_id.to_string(),
-            description: None,
-            mime_type: "application/json".to_string(),
-        }
-    }
-
     #[test]
     fn test_register_and_get_tool() {
         let registry = CapabilityRegistryImpl::new();
@@ -788,43 +723,17 @@ mod tests {
     }
 
     #[test]
-    fn test_register_and_list_resources() {
-        let registry = CapabilityRegistryImpl::new();
-        registry.register_resource(
-            "plugin_a",
-            make_resource_descriptor("config://app", "plugin_a"),
-        );
-
-        let resources = registry.list_resources();
-        assert_eq!(resources.len(), 1);
-        assert_eq!(resources[0].uri, "config://app");
-    }
-
-    #[test]
-    fn test_route_signals() {
-        let registry = CapabilityRegistryImpl::new();
-        registry.register_route_signals("plugin_a", vec![RouteType::NextLlm, RouteType::End]);
-
-        assert!(registry.has_route_signal(&RouteType::NextLlm));
-        assert!(registry.has_route_signal(&RouteType::End));
-        assert!(!registry.has_route_signal(&RouteType::Wait));
-    }
-
-    #[test]
     fn test_clear_plugin() {
         let registry = CapabilityRegistryImpl::new();
         registry.register_tool(
             "plugin_a",
             make_tool_descriptor("tool1", "plugin_a", ToolCategory::File),
         );
-        registry.register_resource("plugin_a", make_resource_descriptor("res://a", "plugin_a"));
         registry.register_route_signals("plugin_a", vec![RouteType::End]);
 
         registry.clear_plugin("plugin_a");
 
         assert_eq!(registry.list_tools().len(), 0);
-        assert_eq!(registry.list_resources().len(), 0);
-        assert!(!registry.has_route_signal(&RouteType::End));
     }
 
     #[test]
@@ -1096,42 +1005,15 @@ mod tests {
     }
 
     #[test]
-    fn test_clear_plugin_removes_http_routes_and_signals() {
+    fn test_clear_plugin_removes_http_routes() {
         let registry = CapabilityRegistryImpl::new();
         registry
             .register_http_route("p1", mk_ep("/ext/p1/llm", "GET"))
             .unwrap();
-        registry.register_route_signals("p1", vec![RouteType::End, RouteType::Wait]);
-        assert!(registry.has_route_signal(&RouteType::End));
 
         registry.clear_plugin("p1");
 
         assert!(registry.find_http_route("/ext/p1/llm", "GET").is_none());
-        assert!(
-            !registry.has_route_signal(&RouteType::End),
-            "clear 后 signal 应移除"
-        );
-        assert!(!registry.has_route_signal(&RouteType::Wait));
-    }
-
-    #[test]
-    fn test_register_route_signals_rebuilds_union_on_reregister() {
-        // 重注册（如部分卸载后）旧 signal 不得残留：全局集合 = 当前所有插件并集。
-        let registry = CapabilityRegistryImpl::new();
-        registry.register_route_signals("plugin_a", vec![RouteType::End, RouteType::Wait]);
-        registry.register_route_signals("plugin_b", vec![RouteType::NextLlm]);
-        assert!(registry.has_route_signal(&RouteType::End));
-        assert!(registry.has_route_signal(&RouteType::Wait));
-        assert!(registry.has_route_signal(&RouteType::NextLlm));
-
-        // plugin_a 重注册为空 → End/Wait 必须消失（union 重建），NextLlm 保留
-        registry.register_route_signals("plugin_a", vec![]);
-        assert!(
-            !registry.has_route_signal(&RouteType::End),
-            "重注册后旧 signal 应移除"
-        );
-        assert!(!registry.has_route_signal(&RouteType::Wait));
-        assert!(registry.has_route_signal(&RouteType::NextLlm));
     }
 
     // ── M1：PluginScope + RegistrationGuard（P2 验收：disable 后零残留）──
@@ -1149,7 +1031,9 @@ mod tests {
         }
     }
 
-    /// 四维 guarded 注册 → scope revoke → 全部维度零残留。
+    /// guarded 注册 → scope revoke → 各维度零残留。
+    /// （resources 维度已删除；route_signals 查询面已删除——本测试覆盖
+    /// tool 与 http_route 两个仍有查询面的维度。）
     #[test]
     fn m1_scope_revoke_leaves_no_residue_in_all_dimensions() {
         let registry = Arc::new(CapabilityRegistryImpl::new());
@@ -1161,9 +1045,6 @@ mod tests {
             registry
                 .register_tool_guarded(pid, make_tool_descriptor("t1", pid, ToolCategory::System)),
         );
-        scope.track(
-            registry.register_resource_guarded(pid, make_resource_descriptor("res://m1", pid)),
-        );
         scope.track(registry.register_route_signals_guarded(pid, vec![RouteType::NextTool]));
         scope.track(
             registry
@@ -1172,10 +1053,8 @@ mod tests {
                 .1,
         );
 
-        // 注册后四维均可见。
+        // 注册后各维度均可见。
         assert!(registry.get_tool("t1").is_some());
-        assert!(!registry.list_resources().is_empty());
-        assert!(registry.has_route_signal(&RouteType::NextTool));
         assert!(registry
             .find_http_route("/ext/m1_plugin/cb", "GET")
             .is_some());
@@ -1185,14 +1064,6 @@ mod tests {
         assert!(
             registry.get_tool("t1").is_none(),
             "tool residue after revoke"
-        );
-        assert!(
-            registry.list_resources().is_empty(),
-            "resource residue after revoke"
-        );
-        assert!(
-            !registry.has_route_signal(&RouteType::NextTool),
-            "signal residue after revoke"
         );
         assert!(
             registry

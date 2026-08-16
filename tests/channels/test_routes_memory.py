@@ -1,4 +1,4 @@
-# @feature: FP-MIGR 0.1→0.2迁移（0.1 遗留测试） | @ci: python-plugins-test
+# @feature: FP-MIGR 0.1→0.2迁移（0.1 遗留测试） | @ci: python-coverage
 """记忆管理路由测试（Step 7 重建：数据源切到 IMemoryBackend）。
 
 覆盖 /api/v1/memory/* 端点（routes_memory）：

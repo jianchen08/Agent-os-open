@@ -33,7 +33,24 @@ _HINDSIGHT_MEMORY_DIR = os.path.abspath(
 if _HINDSIGHT_MEMORY_DIR not in sys.path:
     sys.path.insert(0, _HINDSIGHT_MEMORY_DIR)
 
-from tool import MemoryTool  # noqa: E402
+# 加载本目录 tool.py 的 MemoryTool：显式路径 + 唯一模块名（不用裸
+# `from tool import ...`——同一进程里其它插件目录的 tool.py 会抢先占用
+# 平铺模块名 `tool`（如 task/tool.py），导致 ImportError/拿到错误实现）。
+import importlib.util as _ilu  # noqa: E402
+
+_TOOL_MOD_NAME = "memory_tool_impl"
+if _TOOL_MOD_NAME in sys.modules:
+    _tool_mod = sys.modules[_TOOL_MOD_NAME]
+else:
+    _tool_spec = _ilu.spec_from_file_location(
+        _TOOL_MOD_NAME, os.path.join(os.path.dirname(__file__), 'tool.py')
+    )
+    assert _tool_spec is not None
+    assert _tool_spec.loader is not None
+    _tool_mod = _ilu.module_from_spec(_tool_spec)
+    sys.modules[_TOOL_MOD_NAME] = _tool_mod
+    _tool_spec.loader.exec_module(_tool_mod)
+MemoryTool = _tool_mod.MemoryTool
 
 from agentos_plugin_sdk import AgentOSPlugin  # noqa: E402
 
@@ -120,13 +137,30 @@ def _get_memory_backend() -> Any | None:
     return _memory_backend
 
 
+def _owner_from_inputs(inputs: dict[str, Any]) -> str | None:
+    """从内核注入参数提取可信会话身份（bash/tool.py::_owner_from_inputs 同款）。
+
+    优先级：_owner > session_id > thread_id > workspace > project_root，
+    全部缺失返回 None。刻意**不含** user_id——那是客户端可伪造的参数，
+    作为身份即开门给 IDOR。
+    """
+    for key in ("_owner", "session_id", "thread_id", "workspace", "project_root"):
+        value = inputs.get(key)
+        if value is not None and str(value).strip():
+            return str(value).strip()
+    return None
+
+
 @plugin.tool(
     name="memory",
     schema=_MEMORY_SCHEMA,
     description=_MEMORY_DESCRIPTION,
 )
 async def memory(**kwargs):
+    # IDOR 防护接线（B6）：从内核注入参数解析可信身份后注入工具；
+    # 无注入时 MemoryTool 对敏感 action（store/import/update/delete）明确拒绝。
     t = MemoryTool(memory_backend=_get_memory_backend())
+    t.set_trusted_user_id(_owner_from_inputs(kwargs))
     result = await t.execute(kwargs)
     return result.output if result.success else {"error": result.error}
 
