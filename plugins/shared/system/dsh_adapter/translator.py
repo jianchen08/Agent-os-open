@@ -33,6 +33,74 @@ _SLOT_REGISTER_RE = re.compile(
 # MCP 型插件标记：dsh.host 声明 mcp transport / 包名含 mcp
 _MCP_HINT_RE = re.compile(r"mcp", re.IGNORECASE)
 
+# ── DSH client 槽位 → 灵汐 UI 槽位映射表（界面语义翻译的单一事实源） ────────
+#
+# DSH 的 client 插件经 slots 注册 UI 表面（conversation.* / tool.call.* /
+# settings.* 等）。灵汐前端按 contributes 声明渲染（viewsContainers/views/
+# workspaceTabs/dockItems/floating/modal/statusBarItems/chatMessages/
+# chatInteractions/chatActions/settingsPanels/widgets/client_styles/themes）。
+# 本表把 DSH 槽位的**语义**翻译成灵汐槽位——侧边栏→侧边栏、输入区→输入区、
+# 工具卡→聊天消息卡、详情→浮窗；灵汐无对应槽位的标记 direct（直接渲染，
+# 诚实边界，不强行归并）。
+DSH_SLOT_LINGXI_MAP: dict[str, dict[str, str]] = {
+    "tool.call.toolview": {"lingxi_slot": "chatMessages", "note": "工具结果卡 → 聊天消息卡样式（ActivityCard dsh:* 分支渲染）"},
+    "conversation.chat.node": {"lingxi_slot": "chatMessages", "note": "聊天消息节点 → 聊天消息卡"},
+    "conversation.details.tool": {"lingxi_slot": "floating", "note": "工具详情面板 → 浮窗/详情浮层"},
+    "conversation.composer": {"lingxi_slot": "chatInteractions", "note": "聊天输入区 → 聊天交互模式"},
+    "conversation.composer.dock": {"lingxi_slot": "dockItems", "note": "输入区 dock → 底部 dock 栏"},
+    "conversation.input.dock": {"lingxi_slot": "dockItems", "note": "输入区 dock → 底部 dock 栏"},
+    "settings.general.item": {"lingxi_slot": "settingsPanels", "note": "设置项 → 插件设置面板"},
+}
+_DSH_SLOT_FALLBACK: dict[str, str] = {
+    "lingxi_slot": "direct",
+    "note": "灵汐无对应槽位 → 直接渲染（不强行归并）",
+}
+
+
+def map_dsh_slot(slot_name: str) -> dict[str, str]:
+    """DSH slot 名 → 灵汐槽位（未收录回退 direct = 直接渲染）。"""
+    return DSH_SLOT_LINGXI_MAP.get(slot_name, dict(_DSH_SLOT_FALLBACK))
+
+
+# slots.register/inject 的 name 声明（任意槽位名，不限于 toolview）
+_SLOT_NAME_RE = re.compile(
+    r"slots\.(?:register|inject)\([^)]*?name:\s*['\"]([\w.]+)['\"]",
+    re.DOTALL,
+)
+
+# ── DSH toolview 键 → 灵汐渲染组件映射表（前端组件翻译的单一事实源） ────────
+#
+# DSH ui-tool 的每个 toolview 键（slots.register key）对应一个 DSH 卡片原语
+# （ui-primitives 组件）。灵汐侧的等价物 = vendor 移植组件 + render 意图卡：
+# 本表把「DSH 键 → DSH 卡片原语 → 灵汐组件 → render card」三段链一次写清。
+# 组件本体在 frontend/src/components/vendor/dsh/（锁定 commit 复制），
+# 渲染路由在 frontend/src/utils/dshRenderIntent.ts（payload 构造器）。
+# 新增映射 = 改本表 + 对应 payload 构造器，两处同步（有防漂移测试）。
+DSH_TOOLVIEW_COMPONENT_MAP: dict[str, dict[str, str]] = {
+    # DSH 键: {dsh_component: DSH 卡片原语, lingxi_component: vendor 组件, card: render 意图}
+    "read": {"dsh_component": "ReadBlock", "lingxi_component": "ReadBlock", "card": "read"},
+    "bash": {"dsh_component": "TerminalBlock", "lingxi_component": "TerminalBlock", "card": "terminal"},
+    "web_search": {"dsh_component": "WebBlock(search)", "lingxi_component": "WebBlock", "card": "web"},
+    "web_fetch": {"dsh_component": "WebBlock(fetch)", "lingxi_component": "WebBlock", "card": "web"},
+    "grep": {"dsh_component": "SearchBlock(matches)", "lingxi_component": "SearchBlock", "card": "search"},
+    "glob": {"dsh_component": "SearchBlock(paths)", "lingxi_component": "SearchBlock", "card": "search"},
+    "edit": {"dsh_component": "DiffBlock", "lingxi_component": "DiffBlock", "card": "diff"},
+    "write": {"dsh_component": "DiffBlock", "lingxi_component": "DiffBlock", "card": "diff"},
+    "todo_write": {"dsh_component": "JsonTree", "lingxi_component": "JsonTree", "card": "generic"},
+    "ask_user_question": {"dsh_component": "GenericToolCard", "lingxi_component": "ActivityCard(默认)", "card": "generic"},
+    # 未列出的键（未来 DSH 新增 toolview）→ generic 兜底，不拒绝翻译
+}
+_DSH_FALLBACK_MAPPING: dict[str, str] = {
+    "dsh_component": "GenericToolCard",
+    "lingxi_component": "ActivityCard(默认)",
+    "card": "generic",
+}
+
+
+def map_toolview_to_component(toolview_key: str) -> dict[str, str]:
+    """DSH toolview 键 → 灵汐组件映射（未收录键回退 generic 兜底）。"""
+    return DSH_TOOLVIEW_COMPONENT_MAP.get(toolview_key, dict(_DSH_FALLBACK_MAPPING))
+
 
 def dsh_params_to_json_schema(params: dict[str, Any] | None) -> dict[str, Any]:
     """DSH parameters DSL → JSON Schema（与 runtime 桥 mjs 侧同构）。
@@ -99,10 +167,12 @@ def translate_package(package_dir: str | Path) -> dict[str, Any]:
     platform = client_decl.get("platform") if isinstance(client_decl, dict) else None
     inject = client_decl.get("inject", []) if isinstance(client_decl, dict) else []
 
-    # 前端表面：client 入口扫描（toolview slot 键 = 灵汐 render 意图的键域）。
-    # 两种来源：(a) 源码目录 src/client/**/*.ts*（仓库检出）；(b) npm 构建产物
-    # lib/*.js（npm pack 下载包无 src——CSS 被 stub、slots.register 调用保留）。
+    # 前端表面：client 入口扫描——DSH 槽位（slots.register 的 name 域）与
+    # toolview 键（tool.call.toolview 的 key 域）。两种来源：(a) 源码目录
+    # src/client/**/*.ts*（仓库检出）；(b) npm 构建产物 lib/*.js（npm pack
+    # 下载包无 src——CSS 被 stub、slots.register 调用保留）。
     renderers: list[dict[str, Any]] = []
+    slots: dict[str, dict[str, Any]] = {}  # DSH 槽位名 → {lingxi_slot, note, sources}
     scan_targets: list[tuple[Path, str]] = []
     if (root / "src" / "client").is_dir():
         scan_targets = [
@@ -117,8 +187,19 @@ def translate_package(package_dir: str | Path) -> dict[str, Any]:
         except OSError as e:
             warnings.append(f"unreadable source {path.name}: {e}")
             continue
+        # 槽位名（任意 DSH slot）→ 灵汐槽位映射（未收录回退 direct = 直接渲染）
+        for slot_name in _SLOT_NAME_RE.findall(text):
+            entry = slots.setdefault(slot_name, {**map_dsh_slot(slot_name), "sources": []})
+            if rel not in entry["sources"]:
+                entry["sources"].append(rel)
+        # toolview 键（tool.call.toolview 的 key 域）→ 渲染组件映射
         for key in _SLOT_REGISTER_RE.findall(text):
-            renderers.append({"tool": key, "source": rel})
+            renderers.append({
+                "tool": key,
+                "source": rel,
+                # 组件映射：DSH 键 → 灵汐渲染组件（单一事实源见模块头部映射表）
+                **map_toolview_to_component(key),
+            })
 
     manifest: dict[str, Any] = {
         "source": {
@@ -136,6 +217,7 @@ def translate_package(package_dir: str | Path) -> dict[str, Any]:
         },
         "client": {
             "is_client_plugin": bool(client_decl),
+            "slots": slots,
             "renderers": renderers,
             # 功能型包（依赖 DSH 事件投影服务）不适配——诚实边界
             "adapter_scope": "visual-only" if renderers else "none",

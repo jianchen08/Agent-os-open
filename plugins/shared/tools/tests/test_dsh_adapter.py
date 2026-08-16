@@ -28,6 +28,7 @@ from translator import (  # noqa: E402
     discover_dsh_plugins,
     dsh_params_to_json_schema,
     load_installed_plugins,
+    map_dsh_slot,
     to_lingxi_tool_entry,
     translate_package,
     translate_packages,
@@ -80,7 +81,14 @@ class TestTranslatePackage:
         assert m["source"]["kind"] == "dsh-plugin"
         assert m["source"]["dsh"]["vendor_pinned"]["commit"] == DSH_SOURCE_COMMIT
         assert m["client"]["is_client_plugin"] is True
-        assert m["client"]["renderers"] == [{"tool": "read", "source": "src/client/read-row.tsx"}]
+        # 组件映射翻译：DSH 键 → 灵汐组件 + render 卡（映射表单一事实源）
+        assert m["client"]["renderers"] == [{
+            "tool": "read",
+            "source": "src/client/read-row.tsx",
+            "dsh_component": "ReadBlock",
+            "lingxi_component": "ReadBlock",
+            "card": "read",
+        }]
         assert m["warnings"] == []
 
     def test_non_plugin_dir_raises(self, tmp_path: Path):
@@ -132,7 +140,11 @@ class TestTranslatePackage:
             "  name: 'tool.call.toolview',\n" +
             "  key: 'edit',\n" +
             '  locale: CONVERSATION_NS\n' +
-            '}, FileMutationRow);\n',
+            '}, FileMutationRow);\n' +
+            "ctx.slots.inject('conversation.chat.node', () => ctx.slots.register({\n" +
+            "  name: 'conversation.chat.node',\n" +
+            "  key: 'tool-call',\n" +
+            "}, ToolCallTree));\n",
             encoding="utf-8",
         )
         return pkg
@@ -144,6 +156,14 @@ class TestTranslatePackage:
         keys = [r["tool"] for r in m["client"]["renderers"]]
         assert keys == ["bash", "edit"]
         assert m["client"]["renderers"][0]["source"] == "lib/client.js"
+        # 槽位语义映射：DSH slot → 灵汐槽位（sidebar→sidebar 式翻译）
+        slots = m["client"]["slots"]
+        assert slots["tool.call.toolview"]["lingxi_slot"] == "chatMessages"
+        assert slots["conversation.chat.node"]["lingxi_slot"] == "chatMessages"
+        # 映射表内：详情面板 → 浮窗
+        assert map_dsh_slot("conversation.details.tool")["lingxi_slot"] == "floating"
+        # 未收录槽位回退 direct（灵汐无对应 → 直接渲染，诚实边界）
+        assert map_dsh_slot("conversation.trajectory")["lingxi_slot"] == "direct"
         # 来源版本记录：包自身版本 + vendor 锁定基线分开
         assert m["source"]["version"] == "0.0.1-rc.1"
         assert m["source"]["dsh"]["vendor_pinned"]["commit"] == DSH_SOURCE_COMMIT
@@ -352,29 +372,21 @@ class TestRealRuntimeE2E:
 
 
 class TestInstalledDshPlugins:
-    """适配器目录下已放置的 DSH 插件包被发现并正确翻译（装载即生效）。"""
+    """适配器目录下已放置的 DSH 插件包被发现并正确翻译（装载即生效）。
 
-    def test_two_packages_discovered(self):
+    2026-08-16 起 dsh_plugins/ 清空：npm 演示包（ui-tool/ui-theme/ui-primitives）
+    属端到端验证用 demo，已随其他演示插件一并清理。此测试改为验证空装载
+    行为（发现为空、翻译零包、管理工具仍声明）。
+    """
+
+    def test_empty_plugins_dir_discovered(self):
         packages = discover_dsh_plugins()
-        names = {p.name for p in packages}
-        assert names == {"ui-primitives", "ui-tool"}, names
+        assert packages == [], packages
 
-    def test_ui_tool_translated_with_renderers(self):
+    def test_empty_installed_plugins_loaded(self):
         loaded = load_installed_plugins()
-        assert loaded["count"] == 2
-        by_name = {p["source"]["package"]: p for p in loaded["packages"]}
-        ui_tool = by_name["@deepseek-ai/dsh-client-ui-tool"]
-        assert ui_tool["client"]["is_client_plugin"] is True
-        keys = {r["tool"] for r in ui_tool["client"]["renderers"]}
-        # npm 0.0.1-rc.1 lib/client.js 实测的 toolview 键
-        assert {"read", "bash", "edit", "write", "grep", "glob"} <= keys, keys
-
-    def test_ui_primitives_is_library_not_plugin(self):
-        loaded = load_installed_plugins()
-        by_name = {p["source"]["package"]: p for p in loaded["packages"]}
-        prim = by_name["@deepseek-ai/dsh-client-ui-primitives"]
-        assert prim["client"]["is_client_plugin"] is False
-        assert prim["client"]["renderers"] == []
+        assert loaded["count"] == 0
+        assert loaded["packages"] == []
 
     def test_manifest_declares_list_tool(self):
         import json as _json  # noqa: PLC0415
@@ -385,3 +397,5 @@ class TestInstalledDshPlugins:
         assert manifest["plugin_type"] == "system"
         # D.6 槽位拆分：声明即注册，无类型豁免字段
         assert "llm_tools" not in manifest
+        # 演示 UI 贡献已清理：仅保留 renderers + 适配器元信息
+        assert set(manifest["contributes"].keys()) == {"renderers", "dsh_adapter"}

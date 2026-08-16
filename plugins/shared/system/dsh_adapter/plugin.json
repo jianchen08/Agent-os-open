@@ -210,5 +210,6 @@
         "cordis runtime"
       ]
     }
-  }
+  },
+  "http_endpoints": []
 }
