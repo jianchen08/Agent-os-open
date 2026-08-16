@@ -12,6 +12,7 @@
 from __future__ import annotations
 
 import logging
+import os
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -20,7 +21,25 @@ from isolation_types import IsolationLevel
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_POLICY_PATH = Path(__file__).parent.parent.parent / "config" / "isolation" / "isolation_policy.yaml"
+
+def _default_policy_path() -> Path:
+    """定位 isolation_policy.yaml。
+
+    优先 AGENTOS_CONFIG_ROOT（内核启动设置、sidecar 继承，部署布局无关）；
+    回退项目根相对推导（policy.py 在 <root>/plugins/shared/pipeline/input/
+    isolation_guard/ 下，parents[5] = 项目根）。旧锚 parents[2] 指向
+    plugins/shared/pipeline/config/——目录不存在，导致加载永远失败、
+    默认策略 = command_in_container 全员判危险（2026-08-17 审批风暴根因）。
+    """
+    env_root = os.environ.get("AGENTOS_CONFIG_ROOT")
+    if env_root:
+        p = Path(env_root) / "isolation" / "isolation_policy.yaml"
+        if p.exists():
+            return p
+    return Path(__file__).resolve().parents[5] / "config" / "isolation" / "isolation_policy.yaml"
+
+
+DEFAULT_POLICY_PATH = _default_policy_path()
 
 
 @dataclass
