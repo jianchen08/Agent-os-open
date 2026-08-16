@@ -19,7 +19,6 @@
 //! 的父目录；未设置时本模块全部降级为空操作，不比原来差。
 
 use std::collections::HashMap;
-use std::fs;
 use std::path::PathBuf;
 use std::sync::Mutex;
 use tracing::debug;
@@ -181,6 +180,7 @@ pub fn env_delta_overlay() -> Vec<(String, String)> {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
+    use std::fs;
 
     /// AGENTOS_CONFIG_ROOT 相关测试的进程级互斥锁。
     ///

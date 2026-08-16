@@ -1125,11 +1125,16 @@ async fn stage_recover_history(
                 history_prefix = msgs;
             }
         }
-        // 标量字段注入 state
+        // 标量字段注入 state（GAP-3：跳过易变 per-run 键——修复前已写的旧
+        // checkpoint 仍携带 message/input/suspended 等，覆盖会顶掉本轮新输入，
+        // 导致重启后旧 user 消息被重放消费。键集与 checkpoint 瘦身同源）。
         if let Some(rec_obj) = recovered.as_object_mut() {
             rec_obj.remove("messages");
             if let Some(init_obj) = initial_state.as_object_mut() {
                 for (k, v) in rec_obj.iter() {
+                    if agentos_engine::VOLATILE_RUN_KEYS.contains(&k.as_str()) {
+                        continue;
+                    }
                     init_obj.insert(k.clone(), v.clone());
                 }
             }
@@ -1151,9 +1156,22 @@ async fn stage_recover_history(
             serde_json::json!(false),
         );
     }
+    // GAP-3：中断重放幂等——上一次尝试若已把本轮 user 消息落槽（重启/崩溃
+    // 截断 run，无 assistant 跟随），恢复出的 history 尾部就是它；再 append 会
+    // 重复落槽+重复消费（e2e 重复 run/陈旧回复病根②）。tail 为同文 user →
+    // 跳过 append，引擎基于既有历史继续执行并产出回复。
+    let interrupted_tail = initial_state
+        .get("messages")
+        .and_then(|v| v.as_array())
+        .and_then(|msgs| msgs.last())
+        .is_some_and(|last| {
+            last.get("role").and_then(|r| r.as_str()) == Some("user")
+                && last.get("content").and_then(|c| c.as_str()) == Some(message)
+        });
     // user 经 append op(无 seq → 引擎分配 next seq)+ 落 message_slots。
     // 指纹实录塞 _pending_message_ops（内部字段）：executor.persist_run_start 落一条
     // user_input 轨迹后移除——首轮 user 由此进入审计/回放范围（ops 即轨迹）。
+    if !interrupted_tail {
     if let Ok(user_ledger) = agentos_engine::apply_messages_op_update(
         &mut initial_state,
         store.as_ref(),
@@ -1170,6 +1188,7 @@ async fn stage_recover_history(
                 );
             }
         }
+    }
     }
     initial_state
 }
@@ -2873,7 +2892,6 @@ mod tests {
     /// 模拟 WS 路径发消息，验证新注册用户能正常保存和读取自己的历史。
     #[tokio::test]
     async fn test_registered_user_can_save_and_read_history() {
-        use agentos_core::traits::StorageBackend;
         let store = Arc::new(agentos_engine::SqliteStore::open_memory().unwrap());
         // 播种 admin（login admin 兜底用）
         let now = chrono::Utc::now().to_rfc3339();
@@ -3465,5 +3483,184 @@ mod tests {
             .expect("task_completed 钩子");
         assert_eq!(task_evt.2["task_id"], json!("t77"));
         assert_eq!(task_evt.2["pipeline_id"], json!("pipe_gap2_emit"));
+    }
+
+    // ── GAP-3 后半：resume 幂等（重启后 user 消息不重复消费） ────────────
+
+    /// 中断签名：user 消息已落槽（上一次尝试被重启截断）且无 assistant 跟随
+    /// → 冷启动重放同一消息时**不得再次落槽**（修复前无条件 append 导致
+    /// 重复 run / 同消息双份 / 陈旧回复——e2e GAP-3 现象②）。
+    #[tokio::test]
+    async fn test_replay_after_interrupt_does_not_duplicate_user_message() {
+        let (state, invoker, store, _sqlite) = make_engine_state();
+        let tenant = TenantContext::new("tenant_gap3", "thread_gap3");
+
+        // 模拟中断：user 消息已持久化（slot 落库）但 run 未产出 assistant
+        let _ = store
+            .apply_messages_ops_to_table(
+                "pipe_gap3",
+                "tenant_gap3",
+                &[json!({"op":"set","seq":1,"msg":{"role":"user","content":"重启前的那条消息"}})],
+            )
+            .await;
+
+        // 冷启动重放同一消息（registry 无条目 → 冷路径）
+        let r = agentos_tenant::scope(
+            tenant,
+            process_via_engine(
+                &state,
+                "重启前的那条消息",
+                "agentos",
+                &[],
+                "pipe_gap3",
+                "thread_gap3",
+                "o1",
+                "",
+                "",
+                None,
+                None,
+            ),
+        )
+        .await;
+        assert!(!r.content.is_empty());
+
+        // 幂等断言：该内容的 user 消息在 message_slots 里恰好 1 条
+        let msgs = store
+            .load_message_history("pipe_gap3", "tenant_gap3")
+            .await
+            .unwrap();
+        let dup = msgs
+            .iter()
+            .filter(|m| {
+                m.get("role") == Some(&json!("user"))
+                    && m.get("content") == Some(&json!("重启前的那条消息"))
+            })
+            .count();
+        assert_eq!(dup, 1, "中断重放不得重复落槽：{msgs:?}");
+        // 引擎基于既有历史正常跑完（assistant 已产出）
+        assert!(
+            msgs.iter().any(|m| m.get("role") == Some(&json!("assistant"))),
+            "重放应继续执行产出回复：{msgs:?}"
+        );
+        let _ = invoker; // 引擎确实调用了 LLM 插件（seen_states 非空即跑过）
+        assert!(!invoker.seen_states.lock().unwrap().is_empty());
+    }
+
+    /// 正常连续两轮同文消息不受幂等影响：第一轮已消费（assistant 跟随），
+    /// 第二轮同文 user 是新输入 → 应正常 append（2 条 user）。
+    #[tokio::test]
+    async fn test_repeated_user_message_after_reply_still_appends() {
+        let (state, _invoker, store, _sqlite) = make_engine_state();
+        let tenant = TenantContext::new("tenant_gap3b", "thread_gap3b");
+        for _ in 0..2 {
+            let _ = agentos_tenant::scope(
+                tenant.clone(),
+                process_via_engine(
+                    &state,
+                    "再来一次",
+                    "agentos",
+                    &[],
+                    "pipe_gap3b",
+                    "thread_gap3b",
+                    "o1",
+                    "",
+                    "",
+                    None,
+                    None,
+                ),
+            )
+            .await;
+        }
+        let msgs = store
+            .load_message_history("pipe_gap3b", "tenant_gap3b")
+            .await
+            .unwrap();
+        let n = msgs
+            .iter()
+            .filter(|m| {
+                m.get("role") == Some(&json!("user")) && m.get("content") == Some(&json!("再来一次"))
+            })
+            .count();
+        assert_eq!(n, 2, "已消费后同文再发是合法新输入（应 2 条）：{msgs:?}");
+    }
+
+    /// 重启压力近似（GAP-3 验证标准的单进程版）：3 个会话（不同管道）并发
+    /// 各跑一条消息 + 其中一个管道带中断重放 → 终态各管道 user 计数精确、
+    /// 序列严格递增、无 NULL blob。同管道并发在生产入口必经 RunChain FIFO
+    /// 串行（ws_session/HTTP handler），此处按会话维度并发与生产同构。
+    #[tokio::test]
+    async fn test_concurrent_chats_with_interrupted_replay_consistent() {
+        let (state, _invoker, store, _sqlite) = make_engine_state();
+        // 管道 A 预置中断消息（user 已落槽、run 未产出 assistant——重启截断签名）
+        let _ = store
+            .apply_messages_ops_to_table(
+                "pipe_gap3c_a",
+                "tenant_gap3c",
+                &[json!({"op":"set","seq":1,"msg":{"role":"user","content":"被中断的并发消息"}})],
+            )
+            .await;
+
+        let mk = |pipeline: &'static str, msg: &'static str| {
+            let st = state.clone();
+            async move {
+                agentos_tenant::scope(
+                    TenantContext::new("tenant_gap3c", "thread_gap3c"),
+                    process_via_engine(
+                        &st,
+                        msg,
+                        "agentos",
+                        &[],
+                        pipeline,
+                        "thread_gap3c",
+                        "o1",
+                        "",
+                        "",
+                        None,
+                        None,
+                    ),
+                )
+                .await
+            }
+        };
+        let (ra, rb, rc, rr) = tokio::join!(
+            mk("pipe_gap3c_a", "被中断的并发消息"), // 中断重放（同文尾部）
+            mk("pipe_gap3c_b", "会话B的消息"),
+            mk("pipe_gap3c_c", "会话C的消息"),
+            mk("pipe_gap3c_d", "会话D的消息"),
+        );
+        for r in [&ra, &rb, &rc, &rr] {
+            assert!(!r.content.is_empty());
+        }
+
+        for (pid, expect_user_contents) in [
+            ("pipe_gap3c_a", vec!["被中断的并发消息"]),
+            ("pipe_gap3c_b", vec!["会话B的消息"]),
+            ("pipe_gap3c_c", vec!["会话C的消息"]),
+            ("pipe_gap3c_d", vec!["会话D的消息"]),
+        ] {
+            let msgs = store.load_message_history(pid, "tenant_gap3c").await.unwrap();
+            let seqs: Vec<i64> = msgs
+                .iter()
+                .filter_map(|m| m.get("seq").and_then(|s| s.as_i64()))
+                .collect();
+            let uniq: std::collections::BTreeSet<i64> = seqs.iter().copied().collect();
+            assert_eq!(seqs.len(), uniq.len(), "{pid} 序列应严格唯一：{msgs:?}");
+            for content in &expect_user_contents {
+                let n = msgs
+                    .iter()
+                    .filter(|m| {
+                        m.get("role") == Some(&json!("user"))
+                            && m.get("content") == Some(&json!(content))
+                    })
+                    .count();
+                assert_eq!(n, 1, "{pid}「{content}」应恰好 1 条：{msgs:?}");
+            }
+            for m in &msgs {
+                assert!(
+                    m.get("role").is_some() && m.get("content").is_some(),
+                    "{pid} 消息应可从 blob 完整重建：{m:?}"
+                );
+            }
+        }
     }
 }

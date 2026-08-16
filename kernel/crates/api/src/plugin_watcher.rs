@@ -20,7 +20,7 @@
 //!
 //! [来源: plugins 热更新调研 / reload-all 端点复用]
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
@@ -73,6 +73,8 @@ pub struct SyncReport {
     /// G2：本次发现但**拒绝注册漂移工具**的插件 id（安装期一致性校验——声明 vs
     /// 实际暴露不一致的贡献被拒绝，其余能力照常注册；报告可见不静默）。
     pub drifted_plugins: Vec<String>,
+    /// GAP-6：本轮检测到 manifest 变更并**已重注册**的插件 id（指纹对比）。
+    pub changed_plugin_ids: Vec<String>,
     /// A3：本轮检测到的 InProcess(cdylib) 插件集合变更（无变更为 None）。
     /// consumer 据此经 restart hook 触发 G8 优雅重启。
     pub cdylib_change: Option<CdylibChange>,
@@ -81,7 +83,7 @@ pub struct SyncReport {
 impl SyncReport {
     /// 无任何新增（用于 consumer 判空跳过日志）。
     pub fn is_empty(&self) -> bool {
-        self.new_plugin_ids.is_empty()
+        self.new_plugin_ids.is_empty() && self.changed_plugin_ids.is_empty()
     }
 }
 
@@ -219,6 +221,7 @@ pub fn apply_discovered_plugins(
         tools_registered,
         http_routes_registered,
         drifted_plugins: Vec::new(),
+        changed_plugin_ids: Vec::new(),
         cdylib_change: None,
     }
 }
@@ -236,7 +239,30 @@ pub async fn sync_once(
     known_ids: &mut HashSet<String>,
     known_cdylib: &mut Option<HashSet<String>>,
 ) -> Result<SyncReport, PluginError> {
-    sync_once_with_store(invoker, registry, scopes, known_ids, known_cdylib, None).await
+    // GAP-6：变更检测需跨调用持久基线；本便捷入口一次性 map（首轮建基线），
+    // 生产路径走 consumer 循环的常驻 map（sync_once_with_store 直用）。
+    let mut throwaway = HashMap::new();
+    sync_once_with_store(
+        invoker,
+        registry,
+        scopes,
+        known_ids,
+        known_cdylib,
+        None,
+        &mut throwaway,
+    )
+    .await
+}
+
+/// manifest 内容指纹（GAP-6 变更检测）：序列化全文哈希。
+///
+/// 与 mtime/源码指纹（invoker 的 respawn 判定）不同——这里只关心 manifest
+/// 声明本身是否变化（工具清单/entry/args/http_endpoints 等）。
+fn manifest_fingerprint(m: &PluginManifest) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    serde_json::to_string(m).unwrap_or_default().hash(&mut h);
+    h.finish()
 }
 
 /// [`sync_once`] 的 store 感知变体：`manifests_store` 传入 `AppState.manifests`
@@ -250,6 +276,7 @@ pub async fn sync_once_with_store(
     known_ids: &mut HashSet<String>,
     known_cdylib: &mut Option<HashSet<String>>,
     manifests_store: Option<&ManifestsStore>,
+    known_manifest_hashes: &mut HashMap<String, u64>,
 ) -> Result<SyncReport, PluginError> {
     let all = invoker.discover_new_plugins().await?;
     // A3：InProcess(cdylib) 集合 diff 先行（下方 for 循环会 move `all`）。
@@ -312,6 +339,57 @@ pub async fn sync_once_with_store(
     let mut report = apply_discovered_plugins(&filtered, known_ids, registry, scopes);
     report.drifted_plugins = drifted_plugins;
     report.cdylib_change = cdylib_change;
+
+    // ── GAP-6：既有插件 manifest 变更 → 重注册 ──────────────────────────
+    // watcher 此前只处理"新目录"（known_ids 之外），既有插件的 plugin.json
+    // 变更（工具清单/entry/args）既不重建注册数据也不刷新 manifests store——
+    // e2e 实测改 manifest 后 validate-all 仍用旧条目，须重启内核。
+    // 指纹 = manifest 序列化内容哈希（纯内容比对，与 mtime 无关）。
+    // 变更动作复用 re-enable 路径：revoke 旧 scope（guard drop 真撤销）→
+    // 按新 manifest 重注册 tools/route_signals/http_endpoints + 替换 store 条目。
+    // in_process(cdylib) 插件不在此列——代码变更走 A3 优雅重启路径整体重建。
+    let mut changed_plugin_ids: Vec<String> = Vec::new();
+    for m in &filtered {
+        if !known_ids.contains(&m.id) || m.host_type == HostType::InProcess {
+            continue;
+        }
+        let fp = manifest_fingerprint(m);
+        let changed = match known_manifest_hashes.get(&m.id) {
+            Some(old_fp) => *old_fp != fp,
+            None => {
+                // 无基线（升级前注册/异序）：建基线不动作，避免首轮误重注册
+                known_manifest_hashes.insert(m.id.clone(), fp);
+                continue;
+            }
+        };
+        if !changed {
+            continue;
+        }
+        let (tools, http_routes) =
+            crate::plugin_lifecycle::reenable_plugin_capabilities(m, registry, scopes);
+        if let Some(store) = manifests_store {
+            let mut guard = store.write().await;
+            match guard.iter_mut().find(|x| x.id == m.id) {
+                Some(slot) => *slot = m.clone(),
+                None => guard.push(m.clone()),
+            }
+        }
+        info!(
+            target: "plugin_watcher",
+            plugin = %m.id,
+            tools, http_routes,
+            "manifest 变更已重注册（无需重启内核）"
+        );
+        changed_plugin_ids.push(m.id.clone());
+        known_manifest_hashes.insert(m.id.clone(), fp);
+    }
+    // 新注册插件建立指纹基线（下轮起参与变更检测）
+    for id in &report.new_plugin_ids {
+        if let Some(m) = filtered.iter().find(|x| &x.id == id) {
+            known_manifest_hashes.insert(id.clone(), manifest_fingerprint(m));
+        }
+    }
+    report.changed_plugin_ids = changed_plugin_ids;
     // 增量合并新插件 manifest 进共享 store（AppState.manifests），保证状态列表 /
     // re-enable 重注册 / actions 命令查找与注册表一致。幂等：按 id 去重。
     if let Some(store) = manifests_store {
@@ -337,6 +415,8 @@ pub struct PluginWatcher {
     /// M1：guard 化注册的 scope 表（None = 旧路径不入账本）。
     scopes: Option<Arc<PluginScopeRegistry>>,
     known_ids: HashSet<String>,
+    /// GAP-6：plugin_id → manifest 内容指纹（变更检测基线，consumer 独占）。
+    known_manifest_hashes: HashMap<String, u64>,
     /// A3：InProcess 插件 id 已知集合（None = 未建基线，首轮 sync 建立）。
     known_cdylib: Option<HashSet<String>>,
     /// A3：cdylib 集合变更时的重启回调（None = 只记日志；bin 装配时注入，
@@ -362,6 +442,7 @@ impl PluginWatcher {
             registry,
             scopes: None,
             known_ids: initial_ids,
+            known_manifest_hashes: HashMap::new(),
             known_cdylib: None,
             restart_hook: None,
             manifests_store: None,
@@ -425,6 +506,7 @@ impl PluginWatcher {
             registry,
             scopes,
             known_ids,
+            known_manifest_hashes,
             known_cdylib,
             restart_hook,
             manifests_store,
@@ -464,6 +546,7 @@ impl PluginWatcher {
             // 持有 notify_watcher 保活（drop 即停止监听）；与 consumer 同生命周期。
             let _notify = notify_watcher;
             let mut known = known_ids;
+            let mut known_hashes = known_manifest_hashes;
             let mut known_cdylib = known_cdylib;
 
             loop {
@@ -483,6 +566,7 @@ impl PluginWatcher {
                     &mut known,
                     &mut known_cdylib,
                     manifests_store.as_ref(),
+                    &mut known_hashes,
                 )
                 .await
                 {
@@ -1014,5 +1098,93 @@ mod tests {
 
         // 无 hook → 不触发（诚实降级，只记日志）
         assert!(!trigger_cdylib_restart_if_enabled(&change, &None, true));
+    }
+
+    // ── GAP-6：既有插件 manifest 变更 → 重注册 ──────────────────────
+
+    fn hash_map() -> std::collections::HashMap<String, u64> {
+        std::collections::HashMap::new()
+    }
+
+    #[tokio::test]
+    async fn sync_reregisters_plugin_on_manifest_change() {
+        use agentos_core::traits::CapabilityRegistry;
+
+        let registry_arc = std::sync::Arc::new(CapabilityRegistryImpl::new());
+        let scopes = PluginScopeRegistry::new();
+        let store: ManifestsStore = std::sync::Arc::new(tokio::sync::RwLock::new(Vec::new()));
+        let mut known = HashSet::new();
+        let mut hashes = hash_map();
+
+        // 首轮：v1 manifest（工具 t_old）
+        let inv1 = MockInvoker::new(vec![mk_manifest("chg", "tool", &["t_old"], false)]);
+        sync_once_with_store(
+            &inv1, &registry_arc, Some(&scopes), &mut known, &mut None,
+            Some(&store), &mut hashes,
+        )
+        .await
+        .unwrap();
+        assert!(registry_arc.get_tool("t_old").is_some());
+
+        // 次轮：manifest 变更（工具 t_old → t_new）
+        let inv2 = MockInvoker::new(vec![mk_manifest("chg", "tool", &["t_new"], false)]);
+        let report = sync_once_with_store(
+            &inv2, &registry_arc, Some(&scopes), &mut known, &mut None,
+            Some(&store), &mut hashes,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(report.changed_plugin_ids, vec!["chg".to_string()]);
+        // 新 schema 生效、旧工具摘除（scope revoke → guard drop 真撤销）
+        assert!(registry_arc.get_tool("t_new").is_some(), "新工具应注册");
+        assert!(registry_arc.get_tool("t_old").is_none(), "旧工具应随 revoke 摘除");
+        // manifests store 更新为新 manifest
+        let guard = store.read().await;
+        let m = guard.iter().find(|x| x.id == "chg").expect("store 应含 chg");
+        assert!(m.capabilities.tools.iter().any(|t| t.name == "t_new"));
+        drop(guard);
+
+        // 第三轮：同 manifest 再同步 → 无变更（幂等，不重复重注册）
+        let report3 = sync_once_with_store(
+            &inv2, &registry_arc, Some(&scopes), &mut known, &mut None,
+            Some(&store), &mut hashes,
+        )
+        .await
+        .unwrap();
+        assert!(report3.changed_plugin_ids.is_empty(), "未变更不得重注册");
+    }
+
+    #[tokio::test]
+    async fn sync_http_endpoints_refreshed_on_change() {
+        use agentos_core::traits::CapabilityRegistry;
+
+        let registry_arc = std::sync::Arc::new(CapabilityRegistryImpl::new());
+        let scopes = PluginScopeRegistry::new();
+        let mut known = HashSet::new();
+        let mut hashes = hash_map();
+
+        let inv1 = MockInvoker::new(vec![mk_manifest("epc", "tool", &["t"], true)]);
+        sync_once_with_store(
+            &inv1, &registry_arc, Some(&scopes), &mut known, &mut None, None, &mut hashes,
+        )
+        .await
+        .unwrap();
+        let route_before = registry_arc
+            .find_http_route("/ext/epc/foo", "GET")
+            .expect("首轮应注册 http 路由");
+
+        // 变更后路由描述重建（同 path 不同 handler 也能换）
+        let inv2 = MockInvoker::new(vec![mk_manifest("epc", "tool", &["t2"], true)]);
+        sync_once_with_store(
+            &inv2, &registry_arc, Some(&scopes), &mut known, &mut None, None, &mut hashes,
+        )
+        .await
+        .unwrap();
+        let route_after = registry_arc
+            .find_http_route("/ext/epc/foo", "GET")
+            .expect("变更后路由应仍在");
+        let _ = (route_before, route_after);
+        assert!(registry_arc.get_tool("t2").is_some());
     }
 }

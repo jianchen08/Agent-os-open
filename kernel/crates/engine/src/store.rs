@@ -7,6 +7,21 @@
 //!
 //! [来源: docs/working/adr_engine_design.md §4.2]
 
+/// per-run 易变键：checkpoint 瘦身与冷恢复合并共同跳过的键集（GAP-3）。
+///
+/// 这些键属于"本轮运行"而非"管道累计状态"——残留会在恢复时覆盖下一轮的
+/// 新输入（重启后旧 user 消息被重放消费）。内核恢复侧（api server.rs）经
+/// lib.rs 再导出消费同一份，双侧语义单一来源。
+pub const VOLATILE_RUN_KEYS: &[&str] = &[
+    "message",
+    "input",
+    "message_id",
+    "suspended",
+    "thinking_strength",
+    "_assistant_id_assigned",
+    "_pending_message_ops",
+];
+
 use std::sync::Arc;
 
 use agentos_core::traits::{MessageQueryOpts, SessionListFilter, StorageBackend};
@@ -1142,7 +1157,10 @@ impl SqliteStore {
     ) -> Result<(), StorageError> {
         let conn = self.conn.lock();
         let checkpoint_id = format!("cp_{}_{}", pipeline_id, step_no);
-        // 瘦身副本：剥离 messages，写 ckpt_max_seq 水位（原 state 不动）
+        // 瘦身副本：剥离 messages + 易变 per-run 键，写 ckpt_max_seq 水位（原 state 不动）。
+        // 易变键（GAP-3）：message/input/message_id/suspended 等属于"本轮运行"，
+        // 不是管道累计状态——残留会在冷恢复时覆盖下一轮的新输入，导致重启后
+        // 旧 user 消息被重放消费（e2e 重复 run/陈旧回复的病根）。
         let mut slim = state.clone();
         if let Some(obj) = slim.as_object_mut() {
             let max_seq = obj
@@ -1156,6 +1174,9 @@ impl SqliteStore {
                 })
                 .unwrap_or(-1);
             obj.remove("messages");
+            for k in VOLATILE_RUN_KEYS {
+                obj.remove(*k);
+            }
             obj.insert("ckpt_max_seq".to_string(), serde_json::json!(max_seq));
         }
         let state_json = serde_json::to_string(&slim).unwrap_or_else(|_| "{}".into());

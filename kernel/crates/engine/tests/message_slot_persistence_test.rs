@@ -395,3 +395,51 @@ fn test_apply_ops_all_slots_have_blob() {
         assert!(has_content, "每条消息应可从 blob 完整重建：{m:?}");
     }
 }
+
+// ═══════════════════════════════════════════════════════════
+// GAP-3 后半：checkpoint 瘦身 + user 重放幂等（resume 重复消费病根）
+// ═══════════════════════════════════════════════════════════
+
+/// save_checkpoint 剥离易变 per-run 键（message/input/message_id/suspended/
+/// thinking_strength/_assistant_id_assigned/_pending_message_ops）——这些属于
+/// "本轮运行"而非"管道累计状态"，写进 checkpoint 只会在恢复时覆盖下一轮的
+/// 新输入（重启后旧 user 消息被重放消费）。累计标量（track.*/task.* 等）保留。
+#[test]
+fn test_save_checkpoint_strips_volatile_run_keys() {
+    let store = agentos_engine::SqliteStore::open_memory().unwrap();
+    let state = serde_json::json!({
+        "pipeline_id": "p1",
+        "message": "旧轮消息",
+        "input": "旧轮输入",
+        "message_id": "m_old",
+        "suspended": true,
+        "thinking_strength": "high",
+        "_assistant_id_assigned": true,
+        "_pending_message_ops": [{"op": "set"}],
+        "track.total_tokens": 1234,
+        "task.status": "running",
+        "messages": [
+            {"role": "user", "content": "u1", "seq": 1},
+            {"role": "assistant", "content": "a1", "seq": 2},
+        ],
+    });
+    store.save_checkpoint("p1", "t1", 3, &state).unwrap();
+    let (_, slim) = store.load_latest_checkpoint("p1", "t1").unwrap().unwrap();
+
+    for k in [
+        "message",
+        "input",
+        "message_id",
+        "suspended",
+        "thinking_strength",
+        "_assistant_id_assigned",
+        "_pending_message_ops",
+        "messages",
+    ] {
+        assert!(slim.get(k).is_none(), "易变键 {k} 不应进 checkpoint: {slim}");
+    }
+    // 累计标量保留 + 水位
+    assert_eq!(slim["track.total_tokens"], 1234);
+    assert_eq!(slim["task.status"], "running");
+    assert_eq!(slim["ckpt_max_seq"], 2);
+}
