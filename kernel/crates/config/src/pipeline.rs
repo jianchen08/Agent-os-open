@@ -79,6 +79,10 @@ pub fn load_agent_config(config_root: &Path, agent_id: &str) -> Result<AgentConf
 pub(crate) fn find_agent_yaml(dir: &Path, agent_id: &str) -> Option<std::path::PathBuf> {
     let target = format!("{agent_id}.yaml");
     let entries = std::fs::read_dir(dir).ok()?;
+    // 两轮：先按文件名精确匹配（快路径），未命中再按 yaml 内 config_id 匹配——
+    // 执行 agent 的文件名常与 config_id 不同（code_writer.yaml 的
+    // config_id=code_writer_agent，任务派发引用的是 config_id）。
+    let mut fallback: Vec<std::path::PathBuf> = Vec::new();
     for entry in entries.flatten() {
         let p = entry.path();
         if p.is_dir() {
@@ -87,6 +91,17 @@ pub(crate) fn find_agent_yaml(dir: &Path, agent_id: &str) -> Option<std::path::P
             }
         } else if p.file_name().map(|n| n == target.as_str()).unwrap_or(false) {
             return Some(p);
+        } else if p.extension().map(|e| e == "yaml").unwrap_or(false) {
+            fallback.push(p);
+        }
+    }
+    for p in fallback {
+        if let Ok(raw) = std::fs::read_to_string(&p) {
+            if let Ok(cfg) = serde_yaml::from_str::<serde_yaml::Value>(&raw) {
+                if cfg.get("config_id").and_then(|v| v.as_str()) == Some(agent_id) {
+                    return Some(p);
+                }
+            }
         }
     }
     None

@@ -122,6 +122,15 @@ impl ChatSendHandler {
         // init 体 workspace_lifecycle / environment_lifecycle 插件消费。
         let execution_context = params.get("execution_context").filter(|v| v.is_object());
 
+        // agent_id（可选，默认 "agentos"）：任务派发按 target 选执行 agent——
+        // 引擎据此加载 config/agents/**/<agent_id>.yaml（人格/tool_ids）。
+        let agent_id = params
+            .get("agent_id")
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty())
+            .unwrap_or("agentos")
+            .to_string();
+
         // state 注入（可选）：校验保留字后作为 overlay 透传。
         let mut overlay = validate_state_overlay(params.get("state"))?;
 
@@ -200,9 +209,10 @@ impl ChatSendHandler {
             let msg = message.to_string();
             let ec = execution_context.cloned();
             let ov = overlay.clone();
+            let aid = agent_id.clone();
             tokio::spawn(async move {
                 if let Err(e) = dispatcher
-                    .dispatch_user_input(&pid, &uid, &msg, &pid, "", ec.as_ref(), ov.as_ref())
+                    .dispatch_user_input(&pid, &uid, &msg, &pid, "", ec.as_ref(), ov.as_ref(), &aid)
                     .await
                 {
                     tracing::error!(
@@ -226,6 +236,7 @@ impl ChatSendHandler {
                 "",
                 execution_context,
                 overlay.as_ref(),
+                &agent_id,
             )
             .await
             .map(|_| {
@@ -408,6 +419,7 @@ mod tests {
             thinking_strength: &str,
             execution_context: Option<&Value>,
             state_overlay: Option<&Value>,
+            _agent_id: &str,
         ) -> Result<(), String> {
             self.calls.lock().unwrap().push((
                 thread_id.to_string(),
@@ -865,6 +877,7 @@ mod tests {
             _thinking_strength: &str,
             _execution_context: Option<&Value>,
             state_overlay: Option<&Value>,
+            _agent_id: &str,
         ) -> Result<(), String> {
             self.gate.notified().await;
             self.calls.lock().unwrap().push(state_overlay.cloned().unwrap_or(Value::Null));

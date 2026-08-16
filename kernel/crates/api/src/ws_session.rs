@@ -255,6 +255,7 @@ impl PipelineDispatcher for EngineDispatcher {
         thinking_strength: &str,
         execution_context: Option<&serde_json::Value>,
         state_overlay: Option<&serde_json::Value>,
+        agent_id: &str,
     ) -> Result<(), String> {
         use agentos_core::types::TenantContext;
         // tenant_id 必须用真正的租户 ID（与 HTTP 路径 resolve_request_tenant_id 同源），
@@ -320,6 +321,9 @@ impl PipelineDispatcher for EngineDispatcher {
         // GAP-1 阶段 1：自由 state overlay（chat.send_message 的 state 参数 +
         // 引擎写入的 lineage 扁平键）透传给引擎，并入 initial_state。
         let exec_overlay = state_overlay.cloned();
+        // 执行 agent（任务派发按 target 选 agent；主会话路径默认 agentos）：
+        // 决定引擎加载的 agent 配置（人格/tool_ids）。
+        let exec_agent = agent_id.to_string();
         // ADR-2026-08-15：后台执行必须经 RunChainRegistry 入链——裸 spawn 会让
         // 同会话两条消息并发跑（registry 回写 / msg_sequence 竞态）。链保证同
         // 管道严格 FIFO、跨管道并行；user_id+route_id 兼作排队优先级键（用户
@@ -336,7 +340,7 @@ impl PipelineDispatcher for EngineDispatcher {
                 crate::server::process_via_engine(
                     &exec_state,
                     &content,
-                    "agentos",
+                    &exec_agent,
                     &[],
                     &route_id,
                     &exec_thread,

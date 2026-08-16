@@ -1165,6 +1165,7 @@ class TaskSubmitTool(BuiltinTool):
             dependencies=dependencies,
             inputs=inputs,
             task_scope=task_scope,
+            agent_id=(target_id if target_type == "agent" else ""),
         )
         if dispatch.get("pipeline_id"):
             task_id = dispatch["pipeline_id"]
@@ -1215,6 +1216,7 @@ class TaskSubmitTool(BuiltinTool):
         dependencies: list[str],
         inputs: dict[str, Any],
         task_scope: str,
+        agent_id: str = "",
     ) -> dict[str, Any]:
         """GAP-1 统一：经 chat.send_message 创建任务执行管道（引擎生成 id = task.id）。
 
@@ -1276,6 +1278,10 @@ class TaskSubmitTool(BuiltinTool):
             "lineage": lineage,
             "background": True,
         }
+        # 目标 agent 传导：target_type=agent 时执行管道按该 agent 配置跑
+        # （人格/tool_ids）——内核 chat_send_handler 创建分支消费。缺失回退主 agent。
+        if agent_id:
+            params["agent_id"] = agent_id
         execution_context = self._build_execution_context(inputs, task_scope)
         if execution_context:
             params["execution_context"] = execution_context

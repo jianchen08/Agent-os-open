@@ -1718,6 +1718,10 @@ pub(crate) fn find_agent_yaml(dir: &std::path::Path, agent_id: &str) -> Option<s
     let Ok(entries) = std::fs::read_dir(dir) else {
         return None;
     };
+    // 两轮：先按文件名精确匹配（快路径），未命中再按 yaml 内 config_id 匹配——
+    // 大量执行 agent 的文件名与 config_id 不同（如 code_writer.yaml 的
+    // config_id=code_writer_agent，LLM 派发用的是 config_id）。
+    let mut fallback: Vec<std::path::PathBuf> = Vec::new();
     for entry in entries.flatten() {
         let p = entry.path();
         if p.is_dir() {
@@ -1726,6 +1730,17 @@ pub(crate) fn find_agent_yaml(dir: &std::path::Path, agent_id: &str) -> Option<s
             }
         } else if p.file_name().map(|n| n == target.as_str()).unwrap_or(false) {
             return Some(p);
+        } else if p.extension().map(|e| e == "yaml").unwrap_or(false) {
+            fallback.push(p);
+        }
+    }
+    for p in fallback {
+        if let Ok(raw) = std::fs::read_to_string(&p) {
+            if let Ok(cfg) = serde_yaml::from_str::<serde_yaml::Value>(&raw) {
+                if cfg.get("config_id").and_then(|v| v.as_str()) == Some(agent_id) {
+                    return Some(p);
+                }
+            }
         }
     }
     None

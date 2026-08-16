@@ -30,6 +30,10 @@ pub trait PipelineDispatcher: Send + Sync {
     /// state_overlay 是自由 state 注入（GAP-1：chat.send_message 的 `state`
     /// 参数 + 引擎写入的 lineage 扁平键），在 execution_context 合并点之后并入
     /// initial_state 顶层扁平键；WS 前端路径不携带（None）。
+    ///
+    /// agent_id 指定执行管道加载的 agent 配置（config/agents/**/<id>.yaml，
+    /// 决定人格/tool_ids/技能）。任务派发按 target 选 agent；前端主会话
+    /// 路径传默认主 agent。
     async fn dispatch_user_input(
         &self,
         thread_id: &str,
@@ -39,6 +43,7 @@ pub trait PipelineDispatcher: Send + Sync {
         thinking_strength: &str,
         execution_context: Option<&serde_json::Value>,
         state_overlay: Option<&serde_json::Value>,
+        agent_id: &str,
     ) -> Result<(), String>;
 
     /// 转发人工交互响应（审批/选择）。
@@ -166,6 +171,7 @@ impl InboundRouter {
                 &thinking_strength,
                 None,
                 None,
+                "agentos",
             )
             .await
         {
