@@ -31,6 +31,7 @@ from translator import (  # noqa: E402
     load_plugin_config,
     map_dsh_slot,
     to_lingxi_tool_entry,
+    translate_hooks_config,
     translate_package,
     translate_packages,
 )
@@ -492,3 +493,139 @@ class TestPluginConfigFilter:
         assert loaded["count"] == 1
         assert loaded["packages"] == [fake_pkgs[0]]
         assert loaded["disabled"] == ["bad-plugin"]
+
+
+# ── DSH 插件形态分类（hook/service/io/tool/visual 五形态） ───────────────
+
+
+class TestClassifyPlugin:
+    def _make_pkg(self, tmp_path: Path, name: str, files: dict[str, str]) -> Path:
+        pkg = tmp_path / name
+        pkg.mkdir(parents=True)
+        (pkg / "package.json").write_text(
+            json.dumps({"name": name, "version": "1.0.0"}),
+            encoding="utf-8",
+        )
+        for rel, content in files.items():
+            p = pkg / rel
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.write_text(content, encoding="utf-8")
+        return pkg
+
+    def test_hook_kind(self, tmp_path: Path):
+        pkg = self._make_pkg(tmp_path, "dsh-hooks", {
+            "src/index.ts": (
+                "export const inject = ['sessions']\n"
+                "export function apply(ctx) {\n"
+                "  ctx.on('session/event', async (ev) => { spawn('node notify.mjs'); })\n"
+                "  ctx.on('agent/created', () => {})\n"
+                "}\n"
+            ),
+        })
+        kinds = translate_package(pkg)["kinds"]
+        assert kinds["hook"]["events"] == ["agent/created", "session/event"]
+        assert "triggers_ext" in kinds["hook"]["lingxi"]
+
+    def test_service_kind(self, tmp_path: Path):
+        pkg = self._make_pkg(tmp_path, "dsh-interconnect", {
+            "src/interconnect/index.ts": (
+                "export class InterconnectService extends Service {\n"
+                "  static inject = ['webServer', 'agents', 'credentials']\n"
+                "  constructor(ctx, config) { super(ctx, 'interconnect') }\n"
+                "}\n"
+            ),
+        })
+        kinds = translate_package(pkg)["kinds"]
+        assert kinds["service"]["names"] == ["interconnect"]
+        assert "webServer" in kinds["service"]["inject"]
+        assert "capabilities.services" in kinds["service"]["lingxi"]
+
+    def test_io_kind_input_output(self, tmp_path: Path):
+        pkg = self._make_pkg(tmp_path, "agent-instructions", {
+            "src/index.ts": (
+                "export function apply(ctx) {\n"
+                "  ctx.on('agent/pre-step', async ({agent, messages}, next) => {\n"
+                "    agent.inbox.prepend(instructionMessage)\n"
+                "    return next()\n"
+                "  })\n"
+                "  ctx.on('tools/result', () => {})\n"
+                "}\n"
+            ),
+        })
+        kinds = translate_package(pkg)["kinds"]
+        assert kinds["io"]["roles"] == ["input", "output"]
+        assert "pipeline input/output" in kinds["io"]["lingxi"]
+
+    def test_tool_kind(self, tmp_path: Path):
+        pkg = self._make_pkg(tmp_path, "dsh-tool-time", {
+            "lib/index.js": "export const apply = (ctx) => { ctx.tools.register(defineTool({})) }\n",
+        })
+        kinds = translate_package(pkg)["kinds"]
+        assert "tool" in kinds
+
+    def test_visual_kind(self, tmp_path: Path):
+        pkg = self._make_pkg(tmp_path, "ui-tool", {
+            "dsh/client.js": "yield ctx.slots.register({ name: 'tool.call.toolview', key: 'read' }, ReadRow);\n",
+        })
+        kinds = translate_package(pkg)["kinds"]
+        assert "visual" in kinds
+
+    def test_multikind_interconnect_service_and_tool(self, tmp_path: Path):
+        """interconnect 是多形态样例：service + tool 并存。"""
+        pkg = self._make_pkg(tmp_path, "dsh-interconnect", {
+            "src/interconnect/index.ts": (
+                "export class InterconnectService extends Service {\n"
+                "  constructor(ctx, config) { super(ctx, 'interconnect') }\n"
+                "}\n"
+            ),
+            "src/tool-interconnect/index.ts": (
+                "export const apply = (ctx) => { ctx.tools.register(defineTool({ name: 'interconnect_send' })) }\n"
+            ),
+        })
+        kinds = translate_package(pkg)["kinds"]
+        assert "service" in kinds and "tool" in kinds
+
+
+# ── DSH hooks 配置翻译（事件 → 灵汐触发器参数） ─────────────────────────
+
+
+class TestTranslateHooksConfig:
+    def test_turn_end_reason_mapping(self):
+        r = translate_hooks_config([
+            {"on": "turn/end", "when": "completed", "run": "node a.mjs"},
+            {"on": "turn/end", "when": "error", "run": "node b.mjs"},
+            {"on": "turn/end", "when": "aborted", "run": "node c.mjs"},
+            {"on": "turn/end", "when": "max-tokens", "run": "node d.mjs"},
+        ])
+        assert r["mapped"] == 4
+        events = [t["event_type"] for t in r["triggers"]]
+        assert events == ["run.completed", "run.failed", "run.suspended", "run.suspended"]
+
+    def test_direct_event_mapping(self):
+        r = translate_hooks_config([
+            {"on": "turn/start", "run": "echo s"},
+            {"on": "approval/asked", "run": "echo a"},
+            {"on": "agent/created", "run": "echo c"},
+            {"on": "agent/disposed", "run": "echo d"},
+            {"on": "agent/error", "run": "echo e"},
+        ])
+        events = [t["event_type"] for t in r["triggers"]]
+        assert events == ["run.started", "approval.created", "session.created", "session.deleted", "run.failed"]
+
+    def test_command_action_params(self):
+        r = translate_hooks_config([{"on": "turn/end", "when": "completed", "run": "node n.mjs", "timeoutMs": 5000}])
+        t = r["triggers"][0]
+        assert t["action"] == "command"
+        assert t["action_params"] == {"command": "node n.mjs", "timeout_ms": 5000}
+
+    def test_unmapped_honest(self):
+        r = translate_hooks_config([{"on": "mystery/event", "run": "echo x"}])
+        assert r["mapped"] == 0
+        assert r["unmapped"][0]["reason"] == "no lingxi domain event equivalent"
+
+    def test_yaml_input(self):
+        r = translate_hooks_config(
+            "hooks:\n  - on: 'turn/end'\n    when: 'completed'\n    run: 'node n.mjs'\n"
+        )
+        assert r["mapped"] == 1
+        assert r["triggers"][0]["event_type"] == "run.completed"

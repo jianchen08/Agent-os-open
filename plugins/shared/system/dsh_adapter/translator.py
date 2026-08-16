@@ -36,6 +36,91 @@ _SLOT_REGISTER_RE = re.compile(
 # MCP 型插件标记：dsh.host 声明 mcp transport / 包名含 mcp
 _MCP_HINT_RE = re.compile(r"mcp", re.IGNORECASE)
 
+# ── DSH 插件形态分类（hook/service/io/tool/visual 五形态） ────────────────
+#
+# 用户定调：DSH 插件按形态分清区别——钩子类（事件→命令）、服务类（Service
+# 提供者）、输入输出类（agent 消息批次拦截/结果后处理）、工具类（defineTool）、
+# 视觉类（slots 前端表面）。一个包可多形态（如 interconnect = service+tool）。
+# 分类是静态信号（代码形态 + 清单声明），不执行任何 DSH 代码。
+_HOOK_EVENT_RE = re.compile(r"ctx\.on\(\s*['\"](session/event|agent/(?:created|disposed|error|status))['\"]")
+_HOOK_SPAWN_RE = re.compile(r"\b(?:spawn|exec)\(\s*['\"`]")
+_SERVICE_EXTENDS_RE = re.compile(r"extends\s+Service\b")
+_SERVICE_NAME_RE = re.compile(r"super\(\s*ctx\s*,\s*['\"]([\w.-]+)['\"]")
+_SERVICE_INJECT_RE = re.compile(r"(?:static\s+)?inject\s*=\s*\[([^\]]*)\]")
+_TOOL_REG_RE = re.compile(r"ctx\.tools\.register\(|defineTool\(")
+_IO_PRE_STEP_RE = re.compile(r"['\"]agent/pre-step['\"]")
+_IO_INBOX_RE = re.compile(r"agent\.inbox")
+_IO_TOOLS_RESULT_RE = re.compile(r"['\"]tools/result['\"]")
+
+
+def classify_dsh_plugin(root: str | Path) -> dict[str, Any]:
+    """静态分析 DSH 插件包形态（多形态标注，含关键信息提取）。
+
+    扫描全部 TS/JS 源码（src/**、lib/**、dsh/**）+ dsh.plugin.json 声明，
+    识别 hook/service/io/tool/visual 五形态。翻译层使用：输出灵汐对应机制
+    的契约建议（触发服务/服务声明/pipeline 插件接线），运行时落地另见
+    translate_hooks_config / 各通道。
+    """
+    root = Path(root)
+    blob = ""
+    for pattern in ("src/**/*.ts", "src/**/*.tsx", "src/**/*.js", "lib/**/*.js", "dsh/**/*.js", "**/*.mjs"):
+        for p in sorted(root.glob(pattern)):
+            try:
+                blob += p.read_text(encoding="utf-8", errors="replace") + "\n"
+            except OSError:
+                continue
+    kinds: dict[str, Any] = {}
+
+    # hook 钩子类：会话/agent 事件订阅 + 命令执行（spawn/exec 或 config hooks）
+    hook_events = sorted(set(_HOOK_EVENT_RE.findall(blob)))
+    if hook_events and (_HOOK_SPAWN_RE.search(blob) or "hooks" in blob):
+        kinds["hook"] = {
+            "events": hook_events,
+            "lingxi": "triggers_ext EVENT + action=command（translate_hooks_config 产出 trigger_setup 参数）",
+        }
+
+    # service 服务类：Service 子类注册（super(ctx, name)）或 dsh.plugin.json entry.inject
+    service_names: list[str] = sorted(set(_SERVICE_NAME_RE.findall(blob)))
+    injects: list[str] = []
+    for m in _SERVICE_INJECT_RE.findall(blob):
+        injects.extend(x.strip().strip("'\"") for x in m.split(",") if x.strip())
+    dsh_plugin_json = root / "dsh.plugin.json"
+    entry_inject: list[str] = []
+    if dsh_plugin_json.is_file():
+        try:
+            decl = json.loads(dsh_plugin_json.read_text(encoding="utf-8"))
+            entry_inject = decl.get("entry", {}).get("inject", []) if isinstance(decl.get("entry"), dict) else []
+        except ValueError:
+            pass
+    if service_names or entry_inject:
+        kinds["service"] = {
+            "names": service_names,
+            "inject": sorted(set(injects + entry_inject)),
+            "lingxi": "capabilities.services 契约（D.6：不进 LLM 面；方法体需按灵汐 SDK 重写或桥适配）",
+        }
+
+    # io 输入输出类：agent 消息批次拦截（pre-step/inbox=输入）与结果后处理（tools/result=输出）
+    io_roles: list[str] = []
+    if _IO_PRE_STEP_RE.search(blob) or _IO_INBOX_RE.search(blob):
+        io_roles.append("input")
+    if _IO_TOOLS_RESULT_RE.search(blob):
+        io_roles.append("output")
+    if io_roles:
+        kinds["io"] = {
+            "roles": io_roles,
+            "lingxi": "pipeline input/output 插件（IInputPlugin/IOutputPlugin + invoke_entry + autonomous.yaml prepare/post 链位置；逻辑需按 SDK 重写）",
+        }
+
+    # tool 工具类：defineTool 注册 → 通道 A 桥（extra-tools 机制）
+    if _TOOL_REG_RE.search(blob) or (root / "lib" / "index.js").is_file():
+        kinds["tool"] = {"channel": "runtime-bridge (extra-tools)"}
+
+    # visual 视觉类：slots 前端表面（复用 client 扫描信号）
+    if _SLOT_NAME_RE.search(blob):
+        kinds["visual"] = {"channel": "contributes renderers/slots 翻译"}
+
+    return kinds
+
 # ── DSH client 槽位 → 灵汐 UI 槽位映射表（界面语义翻译的单一事实源） ────────
 #
 # DSH 的 client 插件经 slots 注册 UI 表面（conversation.* / tool.call.* /
@@ -64,6 +149,84 @@ _DSH_SLOT_FALLBACK: dict[str, str] = {
 def map_dsh_slot(slot_name: str) -> dict[str, str]:
     """DSH slot 名 → 灵汐槽位（未收录回退 direct = 直接渲染）。"""
     return DSH_SLOT_LINGXI_MAP.get(slot_name, dict(_DSH_SLOT_FALLBACK))
+
+
+# ── DSH hook 事件 → 灵汐域事件映射表（钩子翻译的单一事实源） ──────────────
+#
+# DSH hooks 是声明式「事件→命令」（{on, when?, run, timeoutMs}）。灵汐等价
+# 物 = triggers_ext 的 EVENT 触发器（域事件总线输入）+ action=command。
+# turn/end 的 when（结束原因）直接映射到 run 终态事件名；aborted/blocked/
+# max-tokens/interrupted 域事件无细分（run.suspended 不携带 reason 标签），
+# 以 run.suspended 近似——诚实标注。
+HOOK_EVENT_LINGXI_MAP: dict[str, str] = {
+    "turn/start": "run.started",
+    "approval/asked": "approval.created",
+    "agent/created": "session.created",
+    "agent/disposed": "session.deleted",
+    "agent/error": "run.failed",
+}
+TURN_END_REASON_MAP: dict[str, str] = {
+    "completed": "run.completed",
+    "error": "run.failed",
+    "aborted": "run.suspended",
+    "blocked": "run.suspended",
+    "max-tokens": "run.suspended",
+    "interrupted": "run.suspended",
+}
+
+
+def translate_hooks_config(hooks: list[dict[str, Any]] | str | None) -> dict[str, Any]:
+    """DSH hooks 配置（[{on, when?, run, timeoutMs?}]）→ 灵汐触发器参数列表。
+
+    Returns:
+        ``{"triggers": [...], "mapped": n, "unmapped": [{on, when, run, reason}]}``。
+        每条 trigger 可直接作为 trigger_setup 工具的输入（trigger_type=event /
+        event_type / action=command / action_params / message）。
+    """
+    if hooks is None:
+        return {"triggers": [], "mapped": 0, "unmapped": []}
+    if isinstance(hooks, str):
+        try:
+            parsed = yaml.safe_load(hooks) or []
+        except yaml.YAMLError:
+            parsed = []
+    else:
+        parsed = hooks
+    # 兼容两种声明形态：直接列表 [{on, when, run}] 或 {hooks: [...]}（DSH
+    # profile 的 config 块包装）
+    if isinstance(parsed, dict) and isinstance(parsed.get("hooks"), list):
+        parsed = parsed["hooks"]
+    triggers: list[dict[str, Any]] = []
+    unmapped: list[dict[str, Any]] = []
+    for spec in parsed if isinstance(parsed, list) else []:
+        if not isinstance(spec, dict):
+            unmapped.append({"reason": "not-an-object", "spec": spec})
+            continue
+        on = spec.get("on")
+        if on is None and True in spec:
+            # PyYAML 默认 YAML 1.1：裸键 `on` 被解析为布尔 True（on/off 语义）
+            on = spec[True]
+        when = spec.get("when")
+        run = spec.get("run")
+        timeout_ms = spec.get("timeoutMs", 10000)
+        if on == "turn/end":
+            event = TURN_END_REASON_MAP.get(when) if when is not None else "run.completed"
+            if event is None:
+                unmapped.append({"on": on, "when": when, "run": run, "reason": "unknown turn/end reason"})
+                continue
+        else:
+            event = HOOK_EVENT_LINGXI_MAP.get(on)
+            if event is None:
+                unmapped.append({"on": on, "when": when, "run": run, "reason": "no lingxi domain event equivalent"})
+                continue
+        triggers.append({
+            "trigger_type": "event",
+            "event_type": event,
+            "action": "command",
+            "action_params": {"command": run, "timeout_ms": int(timeout_ms or 10000)},
+            "message": f"[DSH hook {on}] {run}",
+        })
+    return {"triggers": triggers, "mapped": len(triggers), "unmapped": unmapped}
 
 
 # slots.register/inject 的 name 声明（任意槽位名，不限于 toolview）
@@ -222,6 +385,7 @@ def translate_package(package_dir: str | Path) -> dict[str, Any]:
                 "client_inject": inject,
             },
         },
+        "kinds": classify_dsh_plugin(root),
         "client": {
             "is_client_plugin": bool(client_decl),
             "slots": slots,

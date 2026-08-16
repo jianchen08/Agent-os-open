@@ -544,8 +544,6 @@ export const ChatInput = ({
   /** 粘贴事件处理 */
   const handlePaste = useCallback(
     (e: React.ClipboardEvent) => {
-      if (!inputCapabilities.canPasteImage) return
-
       const items = e.clipboardData.items
       const imageFiles: File[] = []
 
@@ -558,14 +556,44 @@ export const ChatInput = ({
         }
       }
 
-      if (imageFiles.length > 0) {
-        e.preventDefault()
+      if (imageFiles.length === 0) return
+      e.preventDefault()
+
+      // 模型支持图片 → 附件管线（既有路径）
+      if (inputCapabilities.canPasteImage) {
         const dataTransfer = new DataTransfer()
         imageFiles.forEach((file) => dataTransfer.items.add(file))
         handleFileSelect(dataTransfer.files)
+        return
       }
+
+      // 纯文本模型降级（paste-to-path）：上传图片后把可引用路径插入输入框，
+      // 让文本模型配合 read/识图工具使用图片。与附件管线共享 uploadFile。
+      void (async () => {
+        const inserts: string[] = []
+        for (const file of imageFiles) {
+          try {
+            const result = await uploadFile(file, modelName)
+            inserts.push(`图片已上传：${result.url}`)
+          } catch {
+            inserts.push(`图片上传失败：${file.name}`)
+          }
+        }
+        if (inserts.length === 0) return
+        const currentText = textRef.current
+        const newText = currentText ? `${currentText}\n${inserts.join('\n')}` : inserts.join('\n')
+        setText(newText)
+        textRef.current = newText
+        if (draftKey) {
+          useChatInputStore.getState().saveDraft(draftKey, newText)
+        }
+        setTimeout(() => {
+          adjustTextareaHeight()
+          textareaRef.current?.focus()
+        }, 0)
+      })()
     },
-    [inputCapabilities.canPasteImage, handleFileSelect],
+    [inputCapabilities.canPasteImage, handleFileSelect, modelName, draftKey, adjustTextareaHeight],
   )
 
   /** 清理预览 URL */

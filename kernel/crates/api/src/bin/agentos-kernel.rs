@@ -598,6 +598,33 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         )
     };
 
+    // 域事件广播闭包：capability_router 收到域事件名单（approval.created）时
+    // 投递给声明 domain_event 的启用插件。manifests 用共享 RwLock（AppState
+    // 构造后替换为同一副本，watcher 热发现同步可见）。
+    let manifests_shared: Arc<tokio::sync::RwLock<Vec<agentos_core::traits::PluginManifest>>> =
+        Arc::new(tokio::sync::RwLock::new(manifests.clone()));
+    let domain_broadcaster: agentos_api::capability_router::DomainBroadcaster = {
+        let inv_for_domain: Arc<dyn agentos_core::traits::PluginInvoker> = invoker.clone();
+        let enabled_for_domain = enabled_plugin_ids.clone();
+        let manifests_for_domain = manifests_shared.clone();
+        Arc::new(move |event_name: &str, tags: Vec<(&str, serde_json::Value)>| {
+            let inv = inv_for_domain.clone();
+            let enabled = enabled_for_domain.clone();
+            let manifests = manifests_for_domain.clone();
+            let name = event_name.to_string();
+            tokio::spawn(async move {
+                agentos_api::plugin_lifecycle::broadcast_domain_event_from(
+                    &inv,
+                    &enabled,
+                    &manifests,
+                    &name,
+                    tags,
+                )
+                .await;
+            });
+        })
+    };
+
     let router = Arc::new(
         KernelCapabilityRouter::with_metrics(metrics_aggregator.clone())
             .with_invoker(invoker.clone())
@@ -606,7 +633,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             .with_store(store.clone())
             .with_handler_registry(handler_registry.clone())
             .with_grants_lookup(grants_lookup)
-            .with_dynamic_tool_registrar(dynamic_registrar.clone()),
+            .with_dynamic_tool_registrar(dynamic_registrar.clone())
+            .with_domain_broadcaster(domain_broadcaster),
     );
     invoker.set_router(router);
 
@@ -723,7 +751,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // enablement 闸共享同一 Arc），此处仅取快照喂 with_plugins（其签名收 HashSet）。
     let enabled_snapshot: std::collections::HashSet<String> =
         enabled_plugin_ids.read().await.clone();
-    let state = AppState::with_plugins(
+    let mut state = AppState::with_plugins(
         manifests.clone(),
         registry,
         Arc::new(pipeline_config),
@@ -734,6 +762,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         project_root,
         enabled_snapshot,
     );
+    // 共享 manifests 副本（域事件广播闭包与 watcher 热发现读同一份）。
+    state.manifests = manifests_shared.clone();
     // task_01：注入统一数据接口专用 SqliteStore 句柄（/api/v1/db/* 用，表驱动动态枚举）。
     // 与 store_dyn（trait object，业务语义方法）互补；with_db 不改任何持久化方式。
     // with_db 按 driver 注入（sqlite/memory → Some；其它 driver → None，

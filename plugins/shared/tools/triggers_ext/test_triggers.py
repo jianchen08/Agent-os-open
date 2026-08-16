@@ -16,6 +16,7 @@ from __future__ import annotations
 import asyncio
 import datetime
 import importlib.util
+import os
 import sys
 import threading
 import time
@@ -1085,6 +1086,111 @@ class TestDomainEventBridge:
         mgr.set_event_bridge_ready()
         assert mgr.is_event_bridge_ready() is True
 
+    def test_task_completed_auto_notifies_parent_pipeline(self) -> None:
+        """GAP-1：task_completed 带 parent_pipeline_id → 自动注入父管道。
+
+        等效"提交任务后自动注册触发器"：task_submit 承诺"子任务完成后自动
+        通知上级"，注册逻辑收敛在统一触发服务（triggers_ext），任务系统
+        零触发代码——事件本身携带父管道锚点即触发通知，无需显式注册。
+        """
+        received: list[tuple] = []
+
+        async def fake_injector(pipeline_id: str, message: str, user_id: str) -> str:
+            received.append((pipeline_id, message, user_id))
+            return "ok"
+
+        mgr = TriggerManager()
+        mgr.set_injector(fake_injector)
+        try:
+            fired = _run(
+                mgr.handle_domain_event(
+                    "task_completed",
+                    {
+                        "pipeline_id": "child_pipe",
+                        "task_id": "t_child",
+                        "parent_pipeline_id": "parent_pipe",
+                    },
+                )
+            )
+            # 无显式注册的触发器 → evaluate 不命中；自动父通知是独立注入
+            assert fired == []
+            assert len(received) == 1, "应自动向父管道注入一条通知"
+            assert received[0][0] == "parent_pipe", "注入目标应为父管道"
+            assert "t_child" in received[0][1], "通知应包含子任务标识"
+        finally:
+            mgr.stop_check_loop()
+
+    def test_task_failed_auto_notifies_parent_pipeline(self) -> None:
+        """GAP-1：task_failed 同样自动通知父管道（失败也需上级知晓）。"""
+        received: list[tuple] = []
+
+        async def fake_injector(pipeline_id: str, message: str, user_id: str) -> str:
+            received.append((pipeline_id, message, user_id))
+            return "ok"
+
+        mgr = TriggerManager()
+        mgr.set_injector(fake_injector)
+        try:
+            _run(
+                mgr.handle_domain_event(
+                    "task_failed",
+                    {
+                        "pipeline_id": "child_pipe",
+                        "task_id": "t_fail",
+                        "parent_pipeline_id": "parent_pipe",
+                        "error": "超时",
+                    },
+                )
+            )
+            assert len(received) == 1
+            assert received[0][0] == "parent_pipe"
+            assert "t_fail" in received[0][1]
+            assert "超时" in received[0][1], "失败通知应携带原因"
+        finally:
+            mgr.stop_check_loop()
+
+    def test_task_completed_without_parent_does_not_inject(self) -> None:
+        """无 parent_pipeline_id（根任务/无 lineage）→ 不自动注入（无处可投）。"""
+        received: list[tuple] = []
+
+        async def fake_injector(pipeline_id: str, message: str, user_id: str) -> str:
+            received.append((pipeline_id, message, user_id))
+            return "ok"
+
+        mgr = TriggerManager()
+        mgr.set_injector(fake_injector)
+        try:
+            _run(
+                mgr.handle_domain_event(
+                    "task_completed",
+                    {"pipeline_id": "child_pipe", "task_id": "t_root", "parent_pipeline_id": ""},
+                )
+            )
+            assert received == [], "根任务完成不应自动注入"
+        finally:
+            mgr.stop_check_loop()
+
+    def test_non_task_event_does_not_auto_notify(self) -> None:
+        """非任务事件（run.completed 等）不触发自动父通知。"""
+        received: list[tuple] = []
+
+        async def fake_injector(pipeline_id: str, message: str, user_id: str) -> str:
+            received.append((pipeline_id, message, user_id))
+            return "ok"
+
+        mgr = TriggerManager()
+        mgr.set_injector(fake_injector)
+        try:
+            _run(
+                mgr.handle_domain_event(
+                    "run.completed",
+                    {"pipeline_id": "p", "parent_pipeline_id": "parent"},
+                )
+            )
+            assert received == [], "非任务事件不自动注入"
+        finally:
+            mgr.stop_check_loop()
+
 
 class TestSetupToolBridgeWarnings:
     """注册防御：桥未就绪 → 成功结果携带明确 warning（不静默注册）。"""
@@ -1196,3 +1302,72 @@ class TestServerGAP2Wiring:
         manifest = json.loads((_PLUGIN_DIR / "plugin.json").read_text(encoding="utf-8"))
         hooks = manifest.get("capabilities", {}).get("lifecycle_hooks", [])
         assert "domain_event" in hooks
+
+
+# ═══════════════════════════════════════════════════════════
+# 触发器动作：action=command（通用命令执行机制）
+# ═══════════════════════════════════════════════════════════
+
+
+class TestCommandAction:
+    def test_default_action_routes_to_inject(self, tmp_path: Path) -> None:
+        """action 缺省（""）→ 不分发 command，返回 False（调用方走注入）。"""
+        mgr = TriggerManager()
+        trigger = _make_config()
+        assert mgr._dispatch_trigger_action(trigger) is False
+
+    def test_command_action_writes_file_with_env(self, tmp_path: Path) -> None:
+        """command 动作执行命令；触发上下文经 AGENTOS_TRIGGER_* env 传递。"""
+        out = tmp_path / "out.txt"
+        cmd = f'echo "%AGENTOS_TRIGGER_ID%|%AGENTOS_EVENT_NAME%|%AGENTOS_EVENT_TASK_ID%" > "{out}"' if os.name == "nt" \
+            else f'echo "$AGENTOS_TRIGGER_ID|$AGENTOS_EVENT_NAME|$AGENTOS_EVENT_TASK_ID" > "{out}"'
+        mgr = TriggerManager()
+        trigger = _make_config(
+            action="command",
+            action_params={"command": cmd, "timeout_ms": 15000},
+        )
+        assert mgr._dispatch_trigger_action(trigger, "task_completed", {"task_id": "t9"}) is True
+        deadline = time.time() + 10
+        while not out.exists() and time.time() < deadline:
+            time.sleep(0.1)
+        assert out.exists(), "command 动作未产出文件"
+        content = out.read_text(encoding="utf-8").strip()
+        assert "t1|task_completed|t9" in content, content
+
+    def test_command_action_timeout_kills(self, tmp_path: Path) -> None:
+        """超时后命令被终止（timeout_ms 远小于命令耗时）。"""
+        mgr = TriggerManager()
+        trigger = _make_config(
+            action="command",
+            action_params={"command": "ping -n 30 127.0.0.1" if os.name == "nt" else "sleep 30", "timeout_ms": 300},
+        )
+        start = time.time()
+        assert mgr._dispatch_trigger_action(trigger) is True
+        # daemon 线程内 wait(timeout) → 超时杀进程树；总耗时远小于命令自身时长
+        time.sleep(1.5)
+        elapsed = time.time() - start
+        assert elapsed < 10, f"命令未被超时终止: {elapsed:.1f}s"
+
+    def test_domain_event_command_skips_injector(self, tmp_path: Path) -> None:
+        """handle_domain_event 命中 command 触发器 → 执行命令且不注入消息。"""
+        injected: list[tuple[str, str]] = []
+        out = tmp_path / "ev.txt"
+        cmd = f'echo fired > "{out}"' if os.name != "nt" else f'echo fired > "{out}"'
+        mgr = TriggerManager()
+        mgr.set_injector(lambda pipeline_id, message, user_id="": injected.append((pipeline_id, message)))
+        trigger = _make_config(
+            trigger_id="cmd-ev",
+            name="命令触发器",
+            event_name="task_completed",
+            action="command",
+            action_params={"command": cmd, "timeout_ms": 15000},
+        )
+        mgr.register(trigger)
+        fired = _run(mgr.handle_domain_event("task_completed", {"task_id": "t9"}))
+        assert fired == ["cmd-ev"]
+        assert injected == [], f"command 触发器不应注入消息: {injected}"
+        deadline = time.time() + 10
+        while not out.exists() and time.time() < deadline:
+            time.sleep(0.1)
+        assert out.exists()
+        mgr.stop_check_loop()

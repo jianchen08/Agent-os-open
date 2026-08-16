@@ -1478,6 +1478,20 @@ async fn stage_execute(
         "task.id": initial_state.get("task.id").cloned().unwrap_or(serde_json::Value::Null),
     });
 
+    // run 启动域事件：回合开始时广播 run.started，触发器（EVENT）与生命周期
+    // 订阅者据此感知回合边界。标签与 run 终态事件同构（run_id/pipeline_id/
+    // thread_id/session_id）。
+    crate::plugin_lifecycle::broadcast_domain_event(
+        state,
+        "run.started",
+        vec![
+            ("run_id", serde_json::json!(run_id)),
+            ("pipeline_id", initial_state.get("pipeline_id").cloned().unwrap_or(serde_json::Value::Null)),
+            ("thread_id", initial_state.get("session_id").cloned().unwrap_or(serde_json::Value::Null)),
+        ],
+    )
+    .await;
+
     match executor.run_compiled(&compiled, initial_state).await {
         Ok(s) => Ok(s),
         Err(e) => {
@@ -4081,5 +4095,72 @@ mod tests {
             .await
             .unwrap();
         assert!(!fields2.contains_key("task.status"), "非任务管道不写任务字段");
+    }
+
+    // ── GAP-1 全流程数据流转：提交 → 管道创建 → run → 终态回写 → 聚合可见 ──
+
+    #[tokio::test]
+    async fn test_task_lifecycle_end_to_end_state_flow() {
+        // 组合验证（各环节单测已绿，此处串全链）：
+        // ① chat.send_message create 分支生成 pipeline_id（task.id 引擎注入）
+        // ② 同一 overlay 派发 → run 完成
+        // ③ 内核回写 task.status/ended_at（registry + pipeline_state 表）
+        // ④ pipeline-state.list 聚合行完整（task.* + lineage.* + status）
+        let (state, _invoker, store, _sqlite) = make_engine_state();
+
+        // ① 创建契约（chat handler 侧独立测试覆盖；此处手工构造同参，
+        // 聚焦引擎侧流转）：
+        let overlay = json!({
+            "task.goal": "全流程验证",
+            "task.status": "pending",
+            "task.scope": "non_container",
+            "lineage.root": true,
+            "lineage.origin.kind": "plugin",
+            "lineage.origin.source": "task_submit",
+        });
+        let pipeline_id = "pipe_lifecycle_1";
+        // 引擎注入 task.id（与 chat_send_handler create 分支同语义）
+        let mut overlay = overlay;
+        if let Some(obj) = overlay.as_object_mut() {
+            obj.insert("task.id".to_string(), json!(pipeline_id));
+        }
+
+        // ② 派发 → run 完成
+        let tenant = TenantContext::new("tenant_lifecycle", "thread_lifecycle");
+        let r = agentos_tenant::scope(
+            tenant,
+            process_via_engine(
+                &state,
+                "执行全流程验证任务",
+                "agentos",
+                &[],
+                pipeline_id,
+                "thread_lifecycle",
+                "o1",
+                "",
+                "",
+                None,
+                Some(&overlay),
+            ),
+        )
+        .await;
+        assert!(!r.content.is_empty());
+
+        // ③ registry 热路径终态
+        let reg = agentos_session::global_registry();
+        let entry = reg.get("tenant_lifecycle", pipeline_id).expect("registry 应有管道");
+        let st = entry.read();
+        assert_eq!(st.state["task.status"], json!("completed"), "任务终态由 run 终态回写");
+        assert!(st.state.get("task.ended_at").is_some());
+        // 出生字段保留（goal/scope/lineage）
+        assert_eq!(st.state["task.goal"], "全流程验证");
+        assert_eq!(st.state["task.scope"], "non_container");
+        assert_eq!(st.state["lineage.root"], true);
+        drop(st);
+
+        // ④ 聚合出口（pipeline-state.list 同源）行完整
+        let fields = store.load_pipeline_state(pipeline_id, "tenant_lifecycle").await.unwrap();
+        assert_eq!(fields.get("task.status"), Some(&json!("completed")), "冷路径表也回写");
+
     }
 }

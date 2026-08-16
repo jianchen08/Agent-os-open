@@ -20,6 +20,8 @@ import asyncio
 import datetime
 import inspect
 import logging
+import os
+import subprocess
 import threading
 import time
 from collections.abc import Callable
@@ -595,6 +597,10 @@ class TriggerManager:
                     if trigger is None:
                         continue
 
+                    # 动作分发：command 走 daemon 线程（不依赖注入字段）
+                    if self._dispatch_trigger_action(trigger):
+                        continue
+
                     if not trigger.pipeline_id or not trigger.message:
                         continue
 
@@ -643,6 +649,10 @@ class TriggerManager:
             trigger = self._triggers.get(trigger_id)
 
             if trigger is None:
+                continue
+
+            # 动作分发：command 走 daemon 线程（不依赖注入字段）
+            if self._dispatch_trigger_action(trigger):
                 continue
 
             if not trigger.pipeline_id or not trigger.message:
@@ -704,6 +714,108 @@ class TriggerManager:
         fire_info += f")\n{trigger.message}"
 
         return fire_info
+
+    # ── 触发器动作（action/action_params 通用机制） ─────────────────────
+    #
+    # 触发后的动作由 trigger.action 决定（默认 ""/inject = 注入消息唤醒管道；
+    # "command" = 经系统 shell 执行命令）。action_params：
+    #   command  : {"command": str, "timeout_ms": int(默认 10000), "cwd"?: str}
+    # 命令执行 fire-and-forget（daemon 线程），超时杀进程树，绝不阻塞触发
+    # 主流程；触发上下文经环境变量传递（AGENTOS_TRIGGER_*），不拼进 shell
+    # 字符串（防注入）。
+
+    def _command_env(
+        self,
+        trigger: TriggerConfig,
+        event_name: str | None = None,
+        event_data: dict[str, Any] | None = None,
+    ) -> dict[str, str]:
+        """构造命令执行环境：继承进程环境 + AGENTOS_TRIGGER_* 触发上下文。
+
+        事件触发的载荷键以 AGENTOS_EVENT_<KEY> 透传（仅标量；事件名恒有）。
+        """
+        env = dict(os.environ)
+        env["AGENTOS_TRIGGER_ID"] = trigger.trigger_id
+        env["AGENTOS_TRIGGER_NAME"] = trigger.name or ""
+        env["AGENTOS_TRIGGER_TYPE"] = trigger.trigger_type.value
+        env["AGENTOS_PIPELINE_ID"] = trigger.pipeline_id or ""
+        env["AGENTOS_FIRE_COUNT"] = str(trigger.fire_count)
+        if event_name:
+            env["AGENTOS_EVENT_NAME"] = event_name
+        for key, value in (event_data or {}).items():
+            if isinstance(value, (str, int, float, bool)) and value is not None:
+                env[f"AGENTOS_EVENT_{str(key).upper()}"] = str(value)
+        return env
+
+    @staticmethod
+    def _kill_process_tree(proc: subprocess.Popen) -> None:
+        """超时杀进程树（Windows taskkill /T /F；POSIX kill）。"""
+        if os.name == "nt":
+            try:
+                subprocess.run(
+                    ["taskkill", "/pid", str(proc.pid), "/T", "/F"],
+                    capture_output=True,
+                    timeout=10,
+                )
+            except Exception:  # noqa: BLE001 - 杀进程失败仅记录
+                pass
+        else:
+            try:
+                proc.kill()
+            except OSError:
+                pass
+
+    def _run_command(self, trigger: TriggerConfig, event_name: str | None, event_data: dict[str, Any] | None) -> None:
+        """daemon 线程执行命令动作（fire-and-forget：失败/超时仅记录）。"""
+        params = trigger.action_params or {}
+        command = str(params.get("command") or "").strip()
+        if not command:
+            logger.error("[TriggerManager] command 动作缺 command: trigger=%s", trigger.trigger_id)
+            return
+        timeout_ms = int(params.get("timeout_ms") or 10000)
+        env = self._command_env(trigger, event_name, event_data)
+        cwd = params.get("cwd")
+        try:
+            proc = subprocess.Popen(
+                command,
+                shell=True,
+                env=env,
+                cwd=str(cwd) if cwd else None,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+        except OSError as e:
+            logger.error("[TriggerManager] command 动作启动失败: trigger=%s error=%s", trigger.trigger_id, e)
+            return
+        try:
+            proc.wait(timeout=timeout_ms / 1000)
+        except subprocess.TimeoutExpired:
+            self._kill_process_tree(proc)
+            logger.warning(
+                "[TriggerManager] command 动作超时已终止: trigger=%s timeout_ms=%d",
+                trigger.trigger_id,
+                timeout_ms,
+            )
+        except Exception as e:  # noqa: BLE001 - 等待失败仅记录
+            logger.warning("[TriggerManager] command 动作等待异常: trigger=%s error=%s", trigger.trigger_id, e)
+
+    def _dispatch_trigger_action(
+        self,
+        trigger: TriggerConfig,
+        event_name: str | None = None,
+        event_data: dict[str, Any] | None = None,
+    ) -> bool:
+        """分发触发器动作。command → daemon 线程执行并返回 True（已处理）；
+        ""/inject → 返回 False（调用方走注入消息路径）。"""
+        action = (trigger.action or "").strip()
+        if action == "command":
+            threading.Thread(
+                target=self._run_command,
+                args=(trigger, event_name, event_data),
+                daemon=True,
+            ).start()
+            return True
+        return False
 
     def _inject_trigger_message(self, trigger: TriggerConfig) -> None:
         """触发器到期后把消息注入所属管道（唤醒 agent 跑一轮）。
@@ -837,11 +949,18 @@ class TriggerManager:
         ``evaluate_event`` 匹配触发器（实现已存在，此前无人调用），命中后经
         注入器直接投递（async 上下文，无需 run_coroutine_threadsafe）。
 
+        子任务自动通知（GAP-1）：任务事件携带 ``parent_pipeline_id`` 时，
+        即使没有显式注册的触发器也向父管道注入一条完成/失败通知——等效
+        "任务系统提交后自动注册触发器"，注册逻辑收敛在统一触发服务，
+        任务系统零触发代码。该注入与显式触发器互斥去重：同一事件既有
+        显式触发器命中又带 parent_pipeline_id 时，只按显式触发器注入
+        （自动注入仅在 fired 为空时兜底）。
+
         Args:
 
             event_name: 事件名（如 task_completed / run.failed）。
 
-            event_data: 事件载荷（pipeline_id / task_id 等标签）。
+            event_data: 事件载荷（pipeline_id / task_id / parent_pipeline_id 等标签）。
 
         Returns:
 
@@ -850,10 +969,20 @@ class TriggerManager:
         """
         fired = self.evaluate_event(event_name, event_data or {})
 
+        if not fired:
+            # GAP-1：无显式触发器命中 → 尝试子任务自动父通知（task_completed /
+            # task_failed + parent_pipeline_id 非空）。注入失败仅记录，不阻断。
+            await self._auto_notify_parent(event_name, event_data or {})
+
         for trigger_id in fired:
             trigger = self._triggers.get(trigger_id)
 
             if trigger is None:
+                continue
+
+            # 动作分发：command 走 daemon 线程（fire-and-forget，不依赖注入字段）；
+            # 默认注入消息
+            if self._dispatch_trigger_action(trigger, event_name, event_data or {}):
                 continue
 
             if not trigger.pipeline_id or not trigger.message:
@@ -889,6 +1018,56 @@ class TriggerManager:
                 )
 
         return fired
+
+    async def _auto_notify_parent(self, event_name: str, event_data: dict[str, Any]) -> None:
+        """GAP-1：子任务终态自动通知父管道（等效"提交后自动注册触发器"）。
+
+        契约：task_completed / task_failed 事件携带非空 ``parent_pipeline_id``
+        （内核从子任务管道 state 的 ``lineage.parent_pipeline_id`` 扁平键带出）
+        时，向父管道注入一条完成/失败通知——兑现 task_submit "子任务完成后
+        系统会自动通知你并恢复执行"的承诺。任务系统零触发代码：注册逻辑
+        收敛在统一触发服务（triggers_ext），事件本身携带父锚点即触发。
+
+        Returns:
+            None（注入失败仅记录，不阻断域事件桥主流程）。
+        """
+        if event_name not in ("task_completed", "task_failed"):
+            return
+        parent_pipeline_id = str(event_data.get("parent_pipeline_id") or "")
+        if not parent_pipeline_id:
+            return
+        task_id = str(event_data.get("task_id") or "")
+        error = str(event_data.get("error") or "")
+
+        if event_name == "task_completed":
+            message = f"[系统通知] 子任务 {task_id} 已完成，请检查结果并继续。"
+        else:
+            reason = f"：{error}" if error else ""
+            message = f"[系统通知] 子任务 {task_id} 失败{reason}，请处理。"
+
+        if self._injector is None:
+            logger.warning(
+                "[TriggerManager] 注入器未设置，子任务自动通知无法投递: parent=%s event=%s",
+                parent_pipeline_id,
+                event_name,
+            )
+            return
+
+        try:
+            await self._injector(parent_pipeline_id, message, "")
+            logger.info(
+                "[TriggerManager] 子任务自动通知已注入: parent=%s event=%s task=%s",
+                parent_pipeline_id,
+                event_name,
+                task_id,
+            )
+        except Exception as e:
+            logger.error(
+                "[TriggerManager] 子任务自动通知注入异常: parent=%s event=%s error=%s",
+                parent_pipeline_id,
+                event_name,
+                e,
+            )
 
     async def on_system_event(self, event_name: str, event_data: dict[str, Any]) -> list[str]:
         """接收系统事件并评估事件触发器。

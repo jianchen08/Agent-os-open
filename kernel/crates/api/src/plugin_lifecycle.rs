@@ -161,14 +161,29 @@ pub async fn broadcast_domain_event(
     name: &str,
     tags: Vec<(&str, serde_json::Value)>,
 ) {
-    if let Some(bus) = agentos_hooks::global() {
-        bus.emit(agentos_hooks::domain_event(name, tags.clone()));
-    }
     let Some(invoker) = state.invoker.clone() else {
         return;
     };
-    let enabled = state.enabled_plugin_ids.read().await;
-    let manifests = state.manifests.read().await;
+    let enabled = state.enabled_plugin_ids.clone();
+    let manifests = state.manifests.clone();
+    broadcast_domain_event_from(&invoker, &enabled, &manifests, name, tags).await;
+}
+
+/// 域事件投递（broadcast_domain_event 的组件版——供不持 AppState 的调用方
+/// 复用，如 capability_router 的域事件广播闭包）。双通道：观察总线 +
+/// 点对点推给声明 domain_event 的启用插件。
+pub async fn broadcast_domain_event_from(
+    invoker: &Arc<dyn agentos_core::traits::PluginInvoker>,
+    enabled: &tokio::sync::RwLock<std::collections::HashSet<String>>,
+    manifests: &tokio::sync::RwLock<Vec<agentos_core::traits::PluginManifest>>,
+    name: &str,
+    tags: Vec<(&str, serde_json::Value)>,
+) {
+    if let Some(bus) = agentos_hooks::global() {
+        bus.emit(agentos_hooks::domain_event(name, tags.clone()));
+    }
+    let enabled = enabled.read().await;
+    let manifests = manifests.read().await;
     for manifest in manifests.iter() {
         if !enabled.contains(&manifest.id) {
             continue;

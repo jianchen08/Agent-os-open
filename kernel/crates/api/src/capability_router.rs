@@ -64,7 +64,16 @@ pub struct KernelCapabilityRouter {
     /// 信封闸（granted_capabilities 须含 "registry"）由上方 G6 单点校验覆盖。
     /// None = 动态注册不可用（返回显式错误）。
     dynamic_tool_registrar: Option<DynamicToolRegistrar>,
+    /// 域事件广播闭包（DSH hook 翻译：event-bus.emit 的域事件名单事件同步
+    /// 广播，使 approval.created 等触达触发器订阅者）。None = 不广播。
+    domain_broadcaster: Option<DomainBroadcaster>,
 }
+
+/// 域事件广播闭包：(event_name, tags) → 点对点投递给声明 domain_event 的
+/// 启用插件（组件版 broadcast_domain_event_from；观察总线由调用方决定）。
+/// tags 键为静态字符串（调用处全部为字面量）。
+pub type DomainBroadcaster =
+    Arc<dyn Fn(&str, Vec<(&'static str, serde_json::Value)>) + Send + Sync>;
 
 /// G3：动态工具注册器闭包。
 ///
@@ -97,6 +106,7 @@ impl KernelCapabilityRouter {
             handler_registry: None,
             grants_lookup: None,
             dynamic_tool_registrar: None,
+            domain_broadcaster: None,
         }
     }
 
@@ -111,7 +121,14 @@ impl KernelCapabilityRouter {
             handler_registry: None,
             grants_lookup: None,
             dynamic_tool_registrar: None,
+            domain_broadcaster: None,
         }
+    }
+
+    /// 注入域事件广播闭包（启用 event-bus 域事件名单同步广播：approval.created 等）。
+    pub fn with_domain_broadcaster(mut self, broadcaster: DomainBroadcaster) -> Self {
+        self.domain_broadcaster = Some(broadcaster);
+        self
     }
 
     /// 注入插件调用器（启用 tool-executor.invoke 反向调用）。
@@ -538,6 +555,24 @@ impl CapabilityRouter for KernelCapabilityRouter {
                 // widget 交互反馈）经此直接到达前端——"插件经内核推"通道的通用出口，
                 // 前端按 type 订阅即可。与 frontend.emit 同构：payload 整体透传 +
                 // 补 pipeline_id/message_id/_threadId 路由键。
+
+                // 审批创建事件（approval.created）同步广播进域事件总线：除前端
+                // WS 透传外，生命周期订阅者（触发器/域事件插件）也能感知审批
+                // 请求——插件只发一次 event-bus，内核单点分流。
+                if event_name == "approval.created" {
+                    if let Some(broadcaster) = &self.domain_broadcaster {
+                        broadcaster(
+                            "approval.created",
+                            vec![
+                                ("request_id", payload.get("request_id").cloned().unwrap_or(serde_json::Value::Null)),
+                                ("run_id", payload.get("run_id").cloned().unwrap_or(serde_json::Value::Null)),
+                                ("pipeline_id", payload.get("pipeline_id").cloned().unwrap_or(serde_json::Value::Null)),
+                                ("thread_id", payload.get("thread_id").cloned().unwrap_or(serde_json::Value::Null)),
+                            ],
+                        );
+                    }
+                }
+
                 if let Some(session) = &self.session {
                     let thread_id = payload
                         .get("thread_id")
