@@ -328,3 +328,191 @@ async fn test_get_plugin_config_unknown_file_id_returns_404() {
         .unwrap();
     assert_eq!(response.status(), StatusCode::NOT_FOUND);
 }
+
+// ═══════════════════════════════════════════════════════════
+// GAP-4：env target 条目（外部 MCP 源 key 的配置入口）
+// ═══════════════════════════════════════════════════════════
+
+fn env_mapping(file_id: &str) -> ConfigFileMapping {
+    ConfigFileMapping {
+        id: file_id.to_string(),
+        path: ".env".to_string(),
+        label: "搜索源密钥".to_string(),
+        target: Some("env".to_string()),
+        fields: vec![
+            agentos_core::traits::EnvConfigField {
+                name: "SMITHERY_API_KEY".to_string(),
+                label: "Smithery API Key".to_string(),
+                field_type: "secret".to_string(),
+                required: true,
+                description: None,
+            },
+            agentos_core::traits::EnvConfigField {
+                name: "LANGSMITH_API_KEY".to_string(),
+                label: "LangSmith API Key".to_string(),
+                field_type: "secret".to_string(),
+                required: false,
+                description: None,
+            },
+        ],
+    }
+}
+
+/// 构造 app + 注入 manifest（复用上方 harness 的形态）。
+async fn env_app() -> (axum::Router, tempfile::TempDir) {
+    let tmp = tempfile::tempdir().unwrap();
+    let mut state = AppState::new();
+    state.project_root = Some(tmp.path().to_path_buf());
+    let mut manifests = state.manifests.write().await;
+    manifests.push(manifest_with_files("smithery_search", vec![env_mapping("api_keys")]));
+    drop(manifests);
+    (build_router(state), tmp)
+}
+
+#[tokio::test]
+async fn test_env_target_get_masks_and_put_writes() {
+    let (app, tmp) = env_app().await;
+    let token = admin_token(&app).await;
+    let uri = "/api/v1/plugins/smithery_search/config/api_keys";
+
+    // GET（未设置）：两字段为空串
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri(uri)
+                .header("authorization", format!("Bearer {token}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let etag = resp
+        .headers()
+        .get("etag")
+        .and_then(|h| h.to_str().ok())
+        .expect("ETag 头")
+        .to_string();
+    let v: Value = serde_json::from_slice(
+        &axum::body::to_bytes(resp.into_body(), 65536).await.unwrap(),
+    )
+    .unwrap();
+    assert_eq!(v["path"], ".env");
+    assert_eq!(v["data"]["SMITHERY_API_KEY"], "");
+    assert_eq!(v["data"]["LANGSMITH_API_KEY"], "");
+
+    // PUT：写入 smithery key（*** 哨兵跳过 langsmith）
+    let put = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(axum::http::Method::PUT)
+                .uri(uri)
+                .header("content-type", "application/json")
+                .header("authorization", format!("Bearer {token}"))
+                .body(Body::from(
+                    json!({
+                        "if_match": etag,
+                        "data": {
+                            "SMITHERY_API_KEY": "sk-secret-1",
+                            "LANGSMITH_API_KEY": "***"
+                        }
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let put_status = put.status();
+    let put_body = axum::body::to_bytes(put.into_body(), 65536).await.unwrap();
+    assert_eq!(
+        put_status,
+        StatusCode::OK,
+        "PUT 应成功，body={}",
+        String::from_utf8_lossy(&put_body)
+    );
+
+    // .env 落盘 + GET 掩码视图翻转
+    let env_text = fs::read_to_string(tmp.path().join(".env")).unwrap();
+    assert!(env_text.contains("SMITHERY_API_KEY=sk-secret-1"), "{env_text}");
+    assert!(!env_text.contains("LANGSMITH"), "哨兵字段不写入: {env_text}");
+    let resp2 = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri(uri)
+                .header("authorization", format!("Bearer {token}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let v2: Value =
+        serde_json::from_slice(&axum::body::to_bytes(resp2.into_body(), 65536).await.unwrap())
+            .unwrap();
+    assert_eq!(v2["data"]["SMITHERY_API_KEY"], "***");
+    assert_eq!(v2["data"]["LANGSMITH_API_KEY"], "");
+}
+
+#[tokio::test]
+async fn test_env_target_etag_conflict_and_undeclared_rejected() {
+    let (app, _tmp) = env_app().await;
+    let token = admin_token(&app).await;
+    let uri = "/api/v1/plugins/smithery_search/config/api_keys";
+
+    // 旧 ETag → 409
+    let stale = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(axum::http::Method::PUT)
+                .uri(uri)
+                .header("content-type", "application/json")
+                .header("authorization", format!("Bearer {token}"))
+                .body(Body::from(
+                    json!({"if_match": "stale-etag", "data": {"SMITHERY_API_KEY": "x"}}).to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(stale.status(), StatusCode::CONFLICT);
+
+    // 未声明字段 → 400（声明驱动：fields 之外的名字不可写）
+    // 先取合法 ETag
+    let got = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri(uri)
+                .header("authorization", format!("Bearer {token}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let etag = got
+        .headers()
+        .get("etag")
+        .and_then(|h| h.to_str().ok())
+        .expect("ETag 头")
+        .to_string();
+    let bad = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(axum::http::Method::PUT)
+                .uri(uri)
+                .header("content-type", "application/json")
+                .header("authorization", format!("Bearer {token}"))
+                .body(Body::from(
+                    json!({"if_match": etag, "data": {"EVIL_KEY": "x"}}).to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(bad.status(), StatusCode::BAD_REQUEST, "未声明字段应 400");
+}

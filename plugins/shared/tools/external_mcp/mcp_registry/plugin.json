@@ -32,5 +32,22 @@
     "dependencies": [],
     "permissions": {},
     "error_policy": "skip",
-    "priority": 30
+    "priority": 30,
+    "config_files": [
+        {
+            "id": "api_keys",
+            "label": "搜索源密钥",
+            "path": ".env",
+            "target": "env",
+            "fields": [
+                {
+                    "name": "MCP_REGISTRY_API_KEY",
+                    "label": "MCP Registry API Key",
+                    "type": "secret",
+                    "required": true,
+                    "description": "https://registry.modelcontextprotocol.io 的 API Key"
+                }
+            ]
+        }
+    ]
 }

@@ -17,10 +17,21 @@ import apiClient from '@/services/api/client'
 import type { SchemaResponse } from '@/services/api/schema'
 
 /** 单个配置文件映射项（manifest config_files 的前端镜像） */
+export interface EnvConfigFieldDef {
+  name: string
+  label: string
+  type?: 'secret' | 'string'
+  required?: boolean
+  description?: string
+}
+
 export interface PluginConfigFileMapping {
   id: string
   path: string
   label: string
+  /** GAP-4：写入目标（"env" = key/加密字段写 .env，前端按 fields 渲染密钥表单） */
+  target?: 'env'
+  fields?: EnvConfigFieldDef[]
 }
 
 /** schema.plugin_configs 数组元素 */

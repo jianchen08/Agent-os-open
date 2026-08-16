@@ -279,7 +279,7 @@ export class ContributionRegistry {
 
     // 加载 plugin_configs（配置面板注册表 + 归一化为 settings/nav 页面）
     const pluginConfigs = schema.plugin_configs as
-      | Array<{ plugin_id: string; plugin_name: string; config_files: Array<{ id: string; path: string; label: string }> }>
+      | Array<{ plugin_id: string; plugin_name: string; config_files: Array<{ id: string; path: string; label: string; target?: string; fields?: unknown[] }> }>
       | undefined
 
     if (Array.isArray(pluginConfigs)) {
@@ -345,7 +345,7 @@ export class ContributionRegistry {
   /**
    * 获取指定插件的配置文件列表
    */
-  getPluginConfigFiles(pluginId: string): Array<{ id: string; path: string; label: string }> {
+  getPluginConfigFiles(pluginId: string): Array<{ id: string; path: string; label: string; target?: string; fields?: unknown[] }> {
     return this.settingsPanels.get(pluginId)?.configFiles ?? []
   }
 

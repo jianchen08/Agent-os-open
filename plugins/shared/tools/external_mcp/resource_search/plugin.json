@@ -32,5 +32,22 @@
     "dependencies": [],
     "permissions": {},
     "error_policy": "skip",
-    "priority": 30
+    "priority": 30,
+    "config_files": [
+        {
+            "id": "api_keys",
+            "label": "搜索源密钥",
+            "path": ".env",
+            "target": "env",
+            "fields": [
+                {
+                    "name": "RESOURCE_SEARCH_API_KEY",
+                    "label": "Resource Search API Key",
+                    "type": "secret",
+                    "required": true,
+                    "description": "MCP Registry + Smithery 聚合搜索的 API Key"
+                }
+            ]
+        }
+    ]
 }

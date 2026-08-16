@@ -128,6 +128,8 @@ fn test_plugin_configs_only_includes_declared() {
             id: "cfg".to_string(),
             path: "config/test.yaml".to_string(),
             label: "Test".to_string(),
+            target: None,
+            fields: vec![],
         }],
     );
     let without_config = test_manifest("without_config", PluginType::System, None, vec![]);
@@ -225,6 +227,8 @@ fn test_plugin_status_data_from_manifest() {
             id: "cfg".to_string(),
             path: "config/test.yaml".to_string(),
             label: "Test Config".to_string(),
+            target: None,
+            fields: vec![],
         }],
         ui_schema: None,
         contributes: Some(serde_json::json!({"statusBarItems": []})),

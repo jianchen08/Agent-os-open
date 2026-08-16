@@ -33,5 +33,22 @@
     "dependencies": [],
     "permissions": {},
     "error_policy": "skip",
-    "priority": 30
+    "priority": 30,
+    "config_files": [
+        {
+            "id": "api_keys",
+            "label": "搜索源密钥",
+            "path": ".env",
+            "target": "env",
+            "fields": [
+                {
+                    "name": "LANGSMITH_API_KEY",
+                    "label": "LangSmith API Key",
+                    "type": "secret",
+                    "required": false,
+                    "description": "LangSmith 平台（https://smith.langchain.com）API Key，可选"
+                }
+            ]
+        }
+    ]
 }

@@ -23,6 +23,7 @@ import {
   savePluginConfigFile,
   isPluginConfigConflict,
 } from '@/services/api/pluginConfig'
+import { contributionRegistry } from '@/services/schema/ContributionRegistry'
 
 export interface PluginConfigEditorProps {
   pluginId: string
@@ -162,8 +163,22 @@ export function PluginConfigEditor({
     }
   }, [config, pluginId, fileId, etag])
 
+  // GAP-4：env target 条目（外部 MCP 源 key）→ 密钥表单分支（掩码 + 空输入保留原值）
+  const envMapping = contributionRegistry
+    .getPluginConfigFiles(pluginId)
+    .find((f) => f.id === fileId && f.target === 'env')
+
   const body = (
     <>
+      {envMapping && !isLoading && !loadError && (
+        <EnvKeyFieldsForm
+          pluginId={pluginId}
+          fileId={fileId}
+          fields={(envMapping.fields as { name: string; label: string; required?: boolean; description?: string }[]) || []}
+        />
+      )}
+      {!envMapping && (
+        <>
       {isLoading && (
         <div className="text-muted-foreground flex items-center justify-center py-20 text-sm">
           <div className="border-primary mr-2 h-5 w-5 animate-spin rounded-full border-2 border-t-transparent" />
@@ -202,6 +217,8 @@ export function PluginConfigEditor({
               </span>
             )}
           </div>
+        </>
+      )}
         </>
       )}
     </>
@@ -665,6 +682,132 @@ function FieldRow({
         {label}
       </label>
       <div className="min-w-0 flex-1">{children}</div>
+    </div>
+  )
+}
+
+
+/**
+ * env target 条目的密钥表单（GAP-4：外部 MCP 源 key 配置入口）。
+ *
+ * - GET 返回 {字段名: "***"(已设置) | ""(未设置)}——*** 即已配置掩码；
+ * - 输入留空 = 保留原值（提交 *** 哨兵），输入新值 = 更新；
+ * - 保存即生效（stdio spawn overlay / HTTP resolve 均回读 .env，无需重启内核）。
+ */
+function EnvKeyFieldsForm({
+  pluginId,
+  fileId,
+  fields,
+}: {
+  pluginId: string
+  fileId: string
+  fields: { name: string; label: string; required?: boolean; description?: string }[]
+}) {
+  const [values, setValues] = useState<Record<string, string>>({})
+  const [configured, setConfigured] = useState<Record<string, boolean>>({})
+  const [etag, setEtag] = useState('')
+  const [isLoading, setIsLoading] = useState(true)
+  const [saveState, setSaveState] = useState<SaveState>('idle')
+
+  useEffect(() => {
+    let cancelled = false
+    setIsLoading(true)
+    getPluginConfigFile(pluginId, fileId)
+      .then((result) => {
+        if (cancelled) return
+        const data = (result.data.data ?? {}) as Record<string, string>
+        const init: Record<string, string> = {}
+        const cfg: Record<string, boolean> = {}
+        for (const f of fields) {
+          const masked = data[f.name] ?? ''
+          init[f.name] = ''
+          cfg[f.name] = masked === '***'
+        }
+        setValues(init)
+        setConfigured(cfg)
+        setEtag(result.etag)
+      })
+      .catch((error: unknown) => {
+        if (!cancelled) toast.error('密钥配置加载失败', { description: error instanceof Error ? error.message : '' })
+      })
+      .finally(() => {
+        if (!cancelled) setIsLoading(false)
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [pluginId, fileId, fields])
+
+  const handleSave = async () => {
+    setSaveState('saving')
+    try {
+      const data: Record<string, string> = {}
+      for (const f of fields) {
+        const v = values[f.name] ?? ''
+        data[f.name] = v === '' ? '***' : v
+      }
+      const result = await savePluginConfigFile(pluginId, fileId, data, etag || undefined)
+      setEtag(result.etag)
+      // 重置输入框（已保存的新值不再回显明文）
+      const reset: Record<string, string> = {}
+      for (const f of fields) {
+        reset[f.name] = ''
+        if (data[f.name] !== '***') setConfigured((prev) => ({ ...prev, [f.name]: data[f.name] !== '' }))
+      }
+      setValues(reset)
+      setSaveState('saved')
+      toast.success('密钥已保存', { description: '无需重启内核，立即生效' })
+      setTimeout(() => setSaveState('idle'), 2000)
+    } catch (error: unknown) {
+      setSaveState('error')
+      if (isPluginConfigConflict(error)) {
+        toast.error('配置冲突', { description: '密钥状态已被他人修改，请刷新后重试' })
+        if (error.currentEtag) setEtag(error.currentEtag)
+        return
+      }
+      toast.error('密钥保存失败', { description: error instanceof Error ? error.message : '' })
+    }
+  }
+
+  if (isLoading) {
+    return (
+      <div className="text-muted-foreground py-10 text-sm">加载密钥配置...</div>
+    )
+  }
+
+  return (
+    <div className="space-y-4">
+      {fields.map((f) => (
+        <div key={f.name} className="space-y-1.5">
+          <div className="flex items-center gap-2">
+            <label className="text-sm font-medium">{f.label}</label>
+            {configured[f.name] ? (
+              <span className="rounded bg-status-success/15 px-1.5 py-0.5 text-[10px] text-status-success">已配置</span>
+            ) : f.required ? (
+              <span className="rounded bg-status-error/10 px-1.5 py-0.5 text-[10px] text-status-error">未配置（必填）</span>
+            ) : (
+              <span className="bg-status-warning/10 text-status-warning rounded px-1.5 py-0.5 text-[10px]">未配置（可选）</span>
+            )}
+          </div>
+          {f.description && <p className="text-muted-foreground text-xs">{f.description}</p>}
+          <input
+            type="password"
+            autoComplete="off"
+            className="bg-background w-full rounded-md border px-3 py-2 text-sm"
+            placeholder={configured[f.name] ? '已保存——输入新值以更换，留空保留' : '输入 API Key'}
+            value={values[f.name] ?? ''}
+            onChange={(e) => setValues((prev) => ({ ...prev, [f.name]: e.target.value }))}
+          />
+        </div>
+      ))}
+      <button
+        onClick={handleSave}
+        disabled={saveState === 'saving'}
+        className="bg-primary text-primary-foreground rounded-md px-4 py-2 text-sm disabled:opacity-50"
+      >
+        {saveState === 'saving' ? '保存中...' : saveState === 'saved' ? '已保存 ✓' : '保存密钥'}
+      </button>
+      <p className="text-muted-foreground text-xs">保存后立即生效（无需重启内核）。</p>
     </div>
   )
 }
