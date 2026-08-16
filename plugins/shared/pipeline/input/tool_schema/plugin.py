@@ -212,7 +212,7 @@ class ToolSchemaPlugin(IInputPlugin):
         """
         from pipeline.types import StateKeys  # noqa: PLC0415
 
-        raw_level = ctx.state.get(StateKeys.AGENT_LEVEL) or ctx.state.get("context.agent_level", "")
+        raw_level = ctx.state.get(StateKeys.AGENT_LEVEL, "")
         if raw_level:
             level_str = str(raw_level).upper().lstrip("L")
             try:

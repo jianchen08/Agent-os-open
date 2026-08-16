@@ -431,10 +431,10 @@ impl CapabilityRouter for KernelCapabilityRouter {
                             .get("thread_id")
                             .and_then(|v| v.as_str())
                             .unwrap_or("");
+                        // content 键为 0.1 协议固定字段（llm_core _consumer 只发 content）
                         let content = payload
                             .get("content")
                             .and_then(|v| v.as_str())
-                            .or_else(|| payload.get("chunk").and_then(|v| v.as_str()))
                             .unwrap_or("");
                         let pipeline_id = payload
                             .get("pipeline_id")
@@ -447,6 +447,21 @@ impl CapabilityRouter for KernelCapabilityRouter {
                         // thinking_start/thinking_end 无 content，跳过空 content 校验
                         let needs_content =
                             event_name == "stream_chunk" || event_name == "thinking_chunk";
+                        // 信封契约（0.1 协议）：thread_id + pipeline_id + message_id
+                        // 缺一即丢弃——前端 resolvePipelineId/extractMessageId 解析
+                        // 不出会丢事件，与其发一个"合法但坏"的信封不如显式拒绝。
+                        if thread_id.is_empty() || pipeline_id.is_empty() || message_id.is_empty()
+                        {
+                            tracing::warn!(
+                                target: "capability:event-bus",
+                                event = %event_name,
+                                thread = %thread_id,
+                                pipeline = %pipeline_id,
+                                message = %message_id,
+                                "流式事件信封不完整（缺 thread_id/pipeline_id/message_id），丢弃"
+                            );
+                            return Ok(json!({"status": "dropped", "reason": "incomplete envelope", "event": event_name}));
+                        }
                         if !thread_id.is_empty() && (!needs_content || !content.is_empty()) {
                             let mut data = serde_json::json!({
                                 "pipeline_id": pipeline_id,
@@ -456,17 +471,22 @@ impl CapabilityRouter for KernelCapabilityRouter {
                             if !content.is_empty() {
                                 data["content"] = serde_json::Value::String(content.to_string());
                             }
-                            let _ = session.emit_event(thread_id, event_name, data).await;
+                            let delivered = session.emit_event(thread_id, event_name, data).await;
+                            return Ok(json!({
+                                "status": if delivered { "emitted" } else { "dropped" },
+                                "event": event_name,
+                            }));
                         } else {
-                            // 诊断：事件被丢弃（thread_id 空 或 stream_chunk content 空）
+                            // 诊断：事件被丢弃（stream_chunk content 空）
                             // debug 级避免流式噪声；仅 stop/thinking_end 等无 content 事件偶发。
                             tracing::debug!(
                                 target: "capability:event-bus",
                                 event = %event_name,
                                 thread = %thread_id,
                                 has_content = !content.is_empty(),
-                                "流式事件被丢弃（thread_id 空 或 content 空）"
+                                "流式事件被丢弃（content 空）"
                             );
+                            return Ok(json!({"status": "dropped", "reason": "empty content", "event": event_name}));
                         }
                     }
                     return Ok(json!({"status": "emitted", "event": event_name}));
@@ -480,6 +500,7 @@ impl CapabilityRouter for KernelCapabilityRouter {
                 // 补 pipeline_id/message_id/_threadId 路由键即可（前端 handler 双取顶层/data）。
                 let tool_events = ["tool_start", "tool_result", "tool_multimedia_result"];
                 if tool_events.contains(&event_name) {
+                    let mut delivered = false;
                     if let Some(session) = &self.session {
                         let thread_id = payload
                             .get("thread_id")
@@ -514,10 +535,13 @@ impl CapabilityRouter for KernelCapabilityRouter {
                                     serde_json::Value::String(thread_id.to_string()),
                                 );
                             }
-                            let _ = session.emit_event(thread_id, event_name, data).await;
+                            delivered = session.emit_event(thread_id, event_name, data).await;
                         }
                     }
-                    return Ok(json!({"status": "emitted", "event": event_name}));
+                    return Ok(json!({
+                        "status": if delivered { "emitted" } else { "dropped" },
+                        "event": event_name,
+                    }));
                 }
 
                 // 交互事件族：interaction_request / interaction_cancelled /
@@ -526,6 +550,7 @@ impl CapabilityRouter for KernelCapabilityRouter {
                 // useInteractionHandler 订阅后渲染 InteractionCard/全局浮层表单）。
                 // 与工具族一致：整体透传 payload，补 _threadId 路由键。
                 if event_name.starts_with("interaction_") {
+                    let mut delivered = false;
                     if let Some(session) = &self.session {
                         let thread_id = payload
                             .get("thread_id")
@@ -539,7 +564,7 @@ impl CapabilityRouter for KernelCapabilityRouter {
                                     serde_json::Value::String(thread_id.to_string()),
                                 );
                             }
-                            let _ = session.emit_event(thread_id, event_name, data).await;
+                            delivered = session.emit_event(thread_id, event_name, data).await;
                         } else {
                             tracing::debug!(
                                 target: "capability:event-bus",
@@ -548,7 +573,10 @@ impl CapabilityRouter for KernelCapabilityRouter {
                             );
                         }
                     }
-                    return Ok(json!({"status": "emitted", "event": event_name}));
+                    return Ok(json!({
+                        "status": if delivered { "emitted" } else { "dropped" },
+                        "event": event_name,
+                    }));
                 }
 
                 // 其他事件名：透传转发（补路由键）。插件自定义事件（如审批类、
@@ -602,8 +630,11 @@ impl CapabilityRouter for KernelCapabilityRouter {
                                 serde_json::Value::String(thread_id.to_string()),
                             );
                         }
-                        let _ = session.emit_event(thread_id, event_name, data).await;
-                        return Ok(json!({"status": "emitted", "event": event_name}));
+                        let delivered = session.emit_event(thread_id, event_name, data).await;
+                        return Ok(json!({
+                            "status": if delivered { "emitted" } else { "dropped" },
+                            "event": event_name,
+                        }));
                     } else {
                         tracing::debug!(
                             target: "capability:event-bus",
@@ -612,7 +643,7 @@ impl CapabilityRouter for KernelCapabilityRouter {
                         );
                     }
                 }
-                Ok(json!({"status": "emitted", "event": event_name}))
+                Ok(json!({"status": "dropped", "reason": "no session or empty thread_id", "event": event_name}))
             }
 
             // ── frontend：插件 → 内核 → 前端一次性事件出口（ADR §3.5）──
@@ -649,6 +680,7 @@ impl CapabilityRouter for KernelCapabilityRouter {
                     );
                     return Ok(json!({"status": "dropped", "event": event_name}));
                 }
+                let mut delivered = false;
                 if let Some(session) = &self.session {
                     let pipeline_id = payload
                         .get("pipeline_id")
@@ -673,9 +705,12 @@ impl CapabilityRouter for KernelCapabilityRouter {
                             serde_json::Value::String(thread_id.to_string()),
                         );
                     }
-                    let _ = session.emit_event(thread_id, event_name, data).await;
+                    delivered = session.emit_event(thread_id, event_name, data).await;
                 }
-                Ok(json!({"status": "emitted", "event": event_name}))
+                Ok(json!({
+                    "status": if delivered { "emitted" } else { "dropped" },
+                    "event": event_name,
+                }))
             }
 
             // ── registry：运行时动态注册（G3，VS Code 双层模型的动态层）──

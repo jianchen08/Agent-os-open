@@ -663,7 +663,7 @@ class IsolationGuard(IInputPlugin):
         Returns:
             True 表示当前调用方是主 agent（L1 或未标层级）。
         """
-        raw_level = state.get(StateKeys.AGENT_LEVEL) or state.get("context.agent_level")
+        raw_level = state.get(StateKeys.AGENT_LEVEL)
         try:
             level = int(str(raw_level).upper().lstrip("L")) if raw_level else 1
         except (ValueError, TypeError):

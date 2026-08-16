@@ -67,16 +67,6 @@ class SessionModel:
 
 _log = logging.getLogger(__name__)
 
-# 本模块的 store 单例在 import 时即创建默认用户，其密码依赖环境变量。
-# 不同入口 import 顺序不可控（可能早于 app_factory 的 load_dotenv），
-# 故在此主动确保 .env 已加载，避免读到空环境变量而无法创建 admin。
-try:
-    from config.models import _load_dotenv_once  # noqa: PLC0415
-
-    _load_dotenv_once()
-except Exception:  # noqa: BLE001
-    _log.warning("加载 .env 失败，默认用户可能无法正确创建", exc_info=True)
-
 
 def _now_iso() -> str:
     """返回当前 UTC 时间的 ISO 格式字符串。"""
@@ -373,14 +363,20 @@ class MemoryStore:
         title: str | None = None,
         agent_id: str | None = None,
         metadata: dict[str, Any] | None = None,
+        intent: str | None = None,
     ) -> dict[str, Any] | None:
-        """更新线程属性。"""
+        """更新线程属性。
+
+        title 与 intent 是两个独立字段（创建时分别传入）——设置 title
+        不得覆盖 intent。
+        """
         thread = self.threads.get(thread_id)
         if thread is None:
             return None
         if title is not None:
             thread["title"] = title
-            thread["intent"] = title
+        if intent is not None:
+            thread["intent"] = intent
         if agent_id is not None:
             thread["agent_id"] = agent_id
         if metadata is not None:

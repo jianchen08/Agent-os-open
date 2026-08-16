@@ -1937,7 +1937,13 @@ async fn chat_handler(
         .await
         {
             Ok(Some(session)) => session.active_pipeline_id.unwrap_or_default(),
-            _ => String::new(),
+            // 会话不存在（Ok(None)）→ 空 pipeline_id，chain_key 回退 session_id；
+            // 存储故障（Err）单独报错可见，不与"无会话"混同。
+            Ok(None) => String::new(),
+            Err(e) => {
+                warn!(session = %req.session_id, error = %e, "chat_handler: get_session 失败，chain_key 回退 session_id");
+                String::new()
+            }
         }
     } else {
         String::new()

@@ -247,7 +247,7 @@ class ParamInjectPlugin(IInputPlugin):
             # 注入 parent_agent_level：从 state 中获取当前 Agent 层级
             # 供 task_submit / task_manage 等工具判断权限和设置子任务层级
             if "parent_agent_level" not in args:
-                raw_level = ctx.state.get(StateKeys.AGENT_LEVEL) or ctx.state.get("context.agent_level", "")
+                raw_level = ctx.state.get(StateKeys.AGENT_LEVEL, "")
                 if raw_level:
                     level_str = str(raw_level).upper().lstrip("L")
                     with contextlib.suppress(ValueError, TypeError):

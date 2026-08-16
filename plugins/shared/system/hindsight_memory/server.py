@@ -84,7 +84,7 @@ def _filter_by_memory_type(
 ) -> list[dict[str, Any]]:
     """按 memory_type 客户端过滤 recall 结果。
 
-    匹配优先级：metadata.memory_type → 顶层 memory_type 字段。
+    匹配字段：metadata.memory_type（写侧固定存放位置）。
 
     Args:
         results: hindsight recall 原始结果列表
@@ -98,8 +98,8 @@ def _filter_by_memory_type(
     out: list[dict[str, Any]] = []
     for r in results:
         meta = r.get("metadata") or {}
-        mt = meta.get("memory_type") or r.get("memory_type")
-        if mt == memory_type:
+        # 写侧固定存 metadata.memory_type（本模块 _store 的 setdefault）。
+        if meta.get("memory_type") == memory_type:
             out.append(r)
     return out
 

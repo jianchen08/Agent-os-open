@@ -50,7 +50,9 @@ class TaskReminder(IOutputPlugin):
             )
             return OutputResult()
 
-        task_id = state.get("task.id") or state.get("task_id")
+        # task.id 由引擎在管道出生时注入（== pipeline_id，见 chat_send_handler
+        # "调用方预传的 task.id 一律覆盖为引擎 id"）；缺失即会话管道，跳过。
+        task_id = state.get("task.id")
         if not task_id:
             logger.debug(
                 "TaskReminder[iter=%s]: skip, no task_id in state",
@@ -61,9 +63,9 @@ class TaskReminder(IOutputPlugin):
         # ── 规则 3：L1 调度层永不触发 ──
         # L1（灵汐）是调度层，它的纯文本输出是正常的调度/沟通汇报，
         # 不代表"忘了提交评估"。reminder 只对叶子执行者有意义。
-        # 0.2：task.agent_level 为扁平点号键（task_submit 派发注入），
-        # 兼容旧顶层 agent_level。
-        agent_level = state.get("task.agent_level") or state.get("agent_level", "")
+        # 层级单一真值：顶层 agent_level（context_build 以实际 Agent 层级
+        # 无条件覆盖，见 context_build/plugin.py）。
+        agent_level = state.get("agent_level", "")
         if agent_level == "L1":
             logger.debug(
                 "TaskReminder[iter=%s][task=%s]: skip, L1 调度层不触发 reminder",
@@ -72,28 +74,10 @@ class TaskReminder(IOutputPlugin):
             )
             return OutputResult()
 
-        task_service = state.get("task_service")
-        if not task_service:
-            try:
-                # 0.2：插件自持服务——经 tasks.service_access 进程内单例获取
-                # （0.1 infrastructure.service_provider 已废弃删除）。
-                from tasks.service_access import get_task_service  # noqa: PLC0415
-
-                task_service = get_task_service()
-            except Exception:
-                pass
         # ── 任务存在性：state 单一真值（GAP-1）──
         # task.id 出生即写入管道 state（task_submit 派发契约），state 有该键
         # 即视为任务存在——不查跨进程 task_service（0.2 多 sidecar 下进程内
         # 单例可能读不到其他进程刚创建的任务，误判"任务不存在"而提前 end）。
-        # task_service 仅作可选增强（0.1 遗留的 get_task 检查已退役）。
-        if task_service:
-            try:
-                _task_obj = task_service.get_task(task_id)
-                if _task_obj is None and task_id.startswith("__eval__"):
-                    pass
-            except Exception:
-                pass
 
         # ── 规则 4：有活跃下级任务时不触发（提前到最前面）──
         # 任务有活跃子任务说明在等子任务完成，当前任务的纯文本输出
@@ -318,17 +302,23 @@ class TaskReminder(IOutputPlugin):
         try:
             task_service = ctx.get_service("task_service")
         except KeyError:
+            # 服务未注册（如本插件 sidecar 无 task_service）→ 回退进程内单例。
+            # ImportError = 本进程不可达（已知 sidecar 布局），按无服务处理；
+            # get_task_service 自身初始化失败返回 None（已记日志），不抛。
             try:
                 from tasks.service_access import get_task_service  # noqa: PLC0415
 
                 task_service = get_task_service()
-            except Exception:
-                return False
+            except ImportError:
+                task_service = None
 
-        try:
-            subtasks = task_service.list_subtasks(task_id)
-        except Exception:
+        if task_service is None:
             return False
+
+        # 内部服务调用失败不吞——吞掉会把服务故障伪装成"无活跃子任务"，
+        # 直接改变 reminder 触发判定。失败向上抛，由 error_policy=skip 跳过
+        # 本轮 reminder 并留下可见日志。
+        subtasks = task_service.list_subtasks(task_id)
 
         active_statuses = {"pending", "running", "evaluating", "scheduled"}
         for st in subtasks:

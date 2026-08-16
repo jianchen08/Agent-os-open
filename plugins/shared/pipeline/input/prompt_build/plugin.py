@@ -390,8 +390,9 @@ class PromptBuildPlugin(IInputPlugin):
         """
         parts: list[str] = []
 
-        # 1. system_prompt（兼容 context.system_prompt 和 system_prompt 两种键名）
-        system_prompt = ctx.state.get("context.system_prompt", "") or ctx.state.get("system_prompt", "")
+        # 1. system_prompt：规范键 context.system_prompt（context_build 无条件写入，
+        #    已合并 state 注入与插件配置两来源）。
+        system_prompt = ctx.state.get("context.system_prompt", "")
 
         # 占位符替换：在拼接前将 {{xxx}} 替换为实际内容
         has_placeholders = bool(system_prompt and "{{" in system_prompt)

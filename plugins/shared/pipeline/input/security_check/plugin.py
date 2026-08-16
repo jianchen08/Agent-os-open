@@ -1366,11 +1366,7 @@ class SecurityCheckPlugin(IInputPlugin):
         if registry is None:
             return []
 
-        try:
-            tool_def = registry.get(tool_name)
-        except Exception:
-            return []
-
+        tool_def = registry.get(tool_name)
         if tool_def is None:
             return []
 

@@ -95,9 +95,9 @@ async def execute(state: dict, config: dict | None = None) -> dict:
     # 闭包是同步的（litellm 流式循环同步调用），内部用 create_task 把 async notify
     # 安排到当前事件循环（execute 正在 await，循环在跑，task 会执行）。
     # 逐字流式由此打通：sidecar 边生成边 notify → 内核 event-bus handler → session.emit_stream → 前端。
-    _thread_id = merged_state.get("session_id") or merged_state.get("thread_id") or ""
-    _pipeline_id = merged_state.get("pipeline_id") or ""
-    _message_id = merged_state.get("message_id") or ""
+    _thread_id = merged_state.get("session_id", "")
+    _pipeline_id = merged_state.get("pipeline_id", "")
+    _message_id = merged_state.get("message_id", "")
     try:
         _event_bus = plugin.get_capability("event-bus")
         _loop = asyncio.get_event_loop()
@@ -146,8 +146,9 @@ async def execute(state: dict, config: dict | None = None) -> dict:
             _chunk_queue.put_nowait((event, content))
 
         def _on_chunk(chunk_data: dict) -> None:
+            # chunk 契约：system/llm adapter 的 on_chunk 只传 {"type", "content"}。
             chunk_type = chunk_data.get("type", "text")
-            content = chunk_data.get("content") or chunk_data.get("text") or ""
+            content = chunk_data.get("content", "")
 
             if chunk_type == "thinking":
                 if content:

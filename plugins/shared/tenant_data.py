@@ -9,8 +9,9 @@
 1. ``tenant_data_root(tenant_id, subdir)`` —— 返回 ``{base}/{tenant_id}/{subdir}/``，自动
    mkdir。``base`` 默认为仓库 ``data/``（可经 env ``AGENTOS_DATA_DIR`` 或显式参数覆盖）。
 2. ``get_current_tenant_id(capability_caller)`` —— 经 ``tenant-context`` capability 取当前
-   tenant_id；未注入/调用失败/返回空 → 回退 ``DEFAULT_TENANT``（``"default"``）。
-   文档化：未接入 capability 的调用方暂用 default 租户，保证平滑迁移、永不崩溃。
+   tenant_id；未注入 → 回退 ``DEFAULT_TENANT``（``"default"``）。文档化：未接入 capability
+   的调用方暂用 default 租户；已注入但调用失败/返回不符契约则向上抛错（静默换租户
+   会造成跨租户数据写串，宁可失败可见）。
 3. ``migrate_legacy_data_to_default(data_root)`` —— 把全局共享的 ``data/{memory,...}``
    幂等迁入 ``data/default/{memory,...}``。**仅提供函数 + 测试**，真实迁移由部署/启动
    钩子调用（不在本模块对真实 data/ 执行破坏性移动）。
@@ -25,7 +26,7 @@ capability 调用模式（参考 hindsight_memory/wiring.py 的 ``_bind_caller``
 - 因此 ``capability_caller`` 约定为 **tenant-context 绑定的 async caller**，接收**短**
   方法名（如 ``"get"``），由 ``make_tenant_context_caller`` 在调用方剥前缀后转交句柄。
 - ``get_current_tenant_id`` 调 ``capability_caller("get", {})``，期待返回
-  ``{"tenant_id": "..."}``（或裸字符串）；内核尚未实现 ``tenant-context.get`` 时静默回退。
+  ``{"tenant_id": "...", "session_id": "..."}``（内核契约固定形状，不符即抛错）。
 
 [来源: docs/test_traceability.md FP-0.2.八 / V4；plugins/sdk/.../capability.py（tenant-context 为标准能力）；
  plugins/shared/system/hindsight_memory/wiring.py（_bind_caller 范本）]
@@ -76,23 +77,6 @@ def _default_data_base() -> Path:
     return Path(__file__).resolve().parents[2] / "data"
 
 
-def _sanitize_segment(segment: str) -> str:
-    """清洗 tenant_id / subdir 路径段，防路径穿越。
-
-    拒绝空串、含分隔符或 ``..`` 的值——租户目录必须是单层合法目录名。
-    """
-    if (
-        not segment
-        or ".." in segment
-        or "/" in segment
-        or "\\" in segment
-    ):
-        raise ValueError(
-            f"invalid tenant/subdir segment (path traversal blocked): {segment!r}"
-        )
-    return segment
-
-
 def tenant_data_root(
     tenant_id: str,
     subdir: str,
@@ -102,8 +86,10 @@ def tenant_data_root(
     """返回租户数据根 ``{base}/{tenant_id}/{subdir}/``，自动 mkdir(parents=True)。
 
     Args:
-        tenant_id: 租户 ID（单层目录名，禁含路径分隔符/``..``）。
-        subdir: 插件子目录名（如 ``multimodal``/``tasks``/``uploads``，单层）。
+        tenant_id: 租户 ID（内核 tenant-context.get 返回的内部生成值或
+            ``DEFAULT_TENANT``，非外部输入，不做防御校验）。
+        subdir: 插件子目录名（如 ``multimodal``/``tasks``/``uploads``，调用方
+            硬编码字面量）。
         base: 数据根 base。None 时用 ``_default_data_base()``（env ``AGENTOS_DATA_DIR``
             或仓库 ``data/``）。测试应显式传 base 或设 env 以隔离副作用。
 
@@ -111,7 +97,7 @@ def tenant_data_root(
         租户子目录 Path（已创建）。
     """
     base_path = Path(base) if base is not None else _default_data_base()
-    root = base_path / _sanitize_segment(tenant_id) / _sanitize_segment(subdir)
+    root = base_path / tenant_id / subdir
     root.mkdir(parents=True, exist_ok=True)
     return root
 
@@ -143,7 +129,8 @@ def tenant_config_dir(
     而生成空目录**，避免空覆盖层掩盖"无覆盖 → 回退全局配置"的语义。
 
     Args:
-        tenant_id: 租户 ID（单层目录名，禁含路径分隔符/``..``）。
+        tenant_id: 租户 ID（内核 tenant-context.get 返回的内部生成值或
+            ``DEFAULT_TENANT``，非外部输入，不做防御校验）。
         base: 配置根 base。None 时用 ``_default_config_users_base()``（env
             ``AGENTOS_CONFIG_USERS_DIR`` 或仓库 ``config/users/``）。测试应显式
             传 base 或设 env 以隔离副作用。
@@ -152,7 +139,7 @@ def tenant_config_dir(
         租户配置覆盖层目录 Path（可能不存在）。
     """
     base_path = Path(base) if base is not None else _default_config_users_base()
-    return base_path / _sanitize_segment(tenant_id)
+    return base_path / tenant_id
 
 
 # ═══════════════════════════════════════════════════════════
@@ -200,41 +187,44 @@ def make_tenant_context_caller(plugin: Any) -> CapabilityCaller | None:
 
 
 def _extract_tenant_id(result: Any) -> str:
-    """从 capability 返回值提取 tenant_id；无有效值 → DEFAULT_TENANT。"""
-    if isinstance(result, dict):
-        tid = result.get("tenant_id") or result.get("tenantId") or result.get("id")
-        if tid:
-            return str(tid)
-    elif isinstance(result, str) and result.strip():
-        return result.strip()
-    return DEFAULT_TENANT
+    """从 capability 返回值提取 tenant_id。
+
+    内核契约（capability_router ``tenant-context.get``）固定返回
+    ``{"tenant_id": ..., "session_id": ...}``。形状不符即契约违反——直接抛错，
+    不回退 default（静默换租户会造成跨租户数据写串）。
+    """
+    if isinstance(result, dict) and result.get("tenant_id"):
+        return str(result["tenant_id"])
+    raise ValueError(
+        f"tenant-context.get 返回不符合契约（期待 dict 含非空 tenant_id）: {result!r}"
+    )
 
 
 async def get_current_tenant_id(capability_caller: CapabilityCaller | None) -> str:
-    """经 tenant-context capability 取当前 tenant_id；失败/未注入 → ``DEFAULT_TENANT``。
+    """经 tenant-context capability 取当前 tenant_id；未注入 → ``DEFAULT_TENANT``。
 
     约定 ``capability_caller`` 为 **tenant-context 绑定**的 async caller（接收短方法名
     ``"get"``；可用 ``make_tenant_context_caller(plugin)`` 构造）。本函数调
-    ``await capability_caller("get", {})``，期待返回 ``{"tenant_id": "..."}`` 或裸字符串。
+    ``await capability_caller("get", {})``，返回 ``{"tenant_id": "...", ...}``。
 
-    韧性：caller 为 None、调用抛异常（内核暂未实现 ``tenant-context.get``）、返回空值
-    时均静默回退 ``DEFAULT_TENANT``——永不向上抛，确保未接入 capability 的调用方平滑运行。
+    capability 已注入但调用失败/返回不符契约时**向上抛错**：目标是同仓库内核
+    （内部调用不降级），且静默回退 default 租户会导致跨租户数据写串——宁可
+    失败可见，不可假装一切正常。仅"能力未注入"（迁移期未接线）回退
+    ``DEFAULT_TENANT``。
 
     Args:
         capability_caller: tenant-context 绑定的 async caller；None 表示未注入。
 
     Returns:
-        当前 tenant_id；不可解析时回退 ``"default"``。
+        当前 tenant_id；未注入时回退 ``"default"``。
+
+    Raises:
+        ValueError: capability 返回不符合内核契约。
+        Exception: capability 调用本身的失败原样传播。
     """
     if capability_caller is None:
         return DEFAULT_TENANT
-    try:
-        result = await capability_caller("get", {})
-    except Exception as exc:  # noqa: BLE001
-        logger.debug(
-            "[tenant_data] tenant-context.get 调用失败，回退 default | error=%s", exc
-        )
-        return DEFAULT_TENANT
+    result = await capability_caller("get", {})
     return _extract_tenant_id(result)
 
 

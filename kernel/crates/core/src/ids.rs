@@ -31,9 +31,10 @@ pub fn compute_blob_id(data: &[u8]) -> String {
 /// 计算消息的规范化内容 SHA256（前缀 `mc_`）——消息身份指纹。
 pub fn compute_message_id(msg: &Value) -> String {
     let canonical = canonical_message(msg);
-    // to_string 失败仅理论可能（Value 已是合法树）；失败时退空串参与 hash，
-    // 保持函数全态可调用（与旧实现的行为契约一致：不返回 Result）。
-    let json = serde_json::to_string(&canonical).unwrap_or_default();
+    // Value 序列化不可能失败（对象键必为 String、无 IO）；若失败宁可 panic
+    // 也不能退空串——空串会让所有消息得到同一指纹，静默摧毁去重身份。
+    let json = serde_json::to_string(&canonical)
+        .expect("serde_json Value serialization is infallible");
     let mut hasher = Sha256::new();
     hasher.update(json.as_bytes());
     format!("mc_{:x}", hasher.finalize())

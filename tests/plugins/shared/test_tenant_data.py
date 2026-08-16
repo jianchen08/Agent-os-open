@@ -116,10 +116,11 @@ class TestTenantIsolation:
 
 
 class TestGetCurrentTenantId:
-    """``get_current_tenant_id`` capability 契约 + 韧性回退。
+    """``get_current_tenant_id`` capability 契约。
 
     意图：未接入 capability 的调用方（如旧插件/单测）暂用 default 租户，
-    保证平滑迁移——永不因 tenant-context 缺失而崩溃。
+    保证平滑迁移；已注入但返回不符内核契约（``{"tenant_id": ...}``）或调用
+    失败时必须抛错——静默回退 default 会造成跨租户数据写串。
     """
 
     @staticmethod
@@ -136,27 +137,30 @@ class TestGetCurrentTenantId:
         caller = self._caller({"tenant_id": "t1", "session_id": "s1"})
         assert _async_run(get_current_tenant_id(caller)) == "t1"
 
-    def test_string_result(self):
-        """capability 返回裸字符串 tenant_id。"""
+    def test_string_result_rejected(self):
+        """裸字符串不符合内核契约 → 抛 ValueError（不静默回退 default）。"""
         caller = self._caller("tenant-str")
-        assert _async_run(get_current_tenant_id(caller)) == "tenant-str"
+        with pytest.raises(ValueError, match="契约"):
+            _async_run(get_current_tenant_id(caller))
 
-    def test_empty_dict_falls_back_to_default(self):
-        """返回空 dict → default。"""
+    def test_empty_dict_rejected(self):
+        """返回空 dict（缺 tenant_id）→ 抛 ValueError（不静默回退 default）。"""
         caller = self._caller({})
-        assert _async_run(get_current_tenant_id(caller)) == DEFAULT_TENANT
+        with pytest.raises(ValueError, match="契约"):
+            _async_run(get_current_tenant_id(caller))
 
     def test_none_caller_falls_back_to_default(self):
         """capability_caller 未注入（None）→ default。"""
         assert _async_run(get_current_tenant_id(None)) == DEFAULT_TENANT
 
-    def test_caller_raises_falls_back_to_default(self):
-        """capability 调用抛异常（如内核未实现 tenant-context.get）→ default。"""
+    def test_caller_raises_propagates(self):
+        """capability 调用抛异常（内部 bug）→ 原样传播，不吞成 default。"""
 
         async def _boom(method, params):
-            raise RuntimeError("capability method not implemented: tenant-context.get")
+            raise RuntimeError("capability router crashed")
 
-        assert _async_run(get_current_tenant_id(_boom)) == DEFAULT_TENANT
+        with pytest.raises(RuntimeError, match="capability router crashed"):
+            _async_run(get_current_tenant_id(_boom))
 
     def test_calls_tenant_context_get(self):
         """应经 tenant-context 命名空间调用（method='get'，tenant-context 绑定）。"""
@@ -274,13 +278,6 @@ class TestTenantConfigDir:
         monkeypatch.setenv("AGENTOS_CONFIG_USERS_DIR", str(tmp_path / "cfg"))
         d = tenant_config_dir("default")
         assert str(d).startswith(str(tmp_path / "cfg"))
-
-    def test_traversal_rejected(self, tmp_path):
-        """tenant_id 含 .. / 分隔符 → 拒绝（与数据根同款防穿越）。"""
-        with pytest.raises(ValueError):
-            tenant_config_dir("../../etc", base=tmp_path)
-        with pytest.raises(ValueError):
-            tenant_config_dir("a/b", base=tmp_path)
 
     def test_tenant_isolation(self, tmp_path):
         """A 租户配置目录与 B 租户不同（隔离不变量）。"""

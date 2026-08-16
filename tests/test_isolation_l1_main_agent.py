@@ -89,10 +89,6 @@ class TestIsMainAgent:
         """state 完全没有 agent_level 键 → 按主 agent 处理。"""
         assert IsolationGuard._is_main_agent({}) is True
 
-    def test_fallback_context_key(self):
-        """StateKeys.AGENT_LEVEL 缺失时回退到 context.agent_level。"""
-        assert IsolationGuard._is_main_agent({"context.agent_level": "L2"}) is False
-
 
 # ============================================================================
 # 2. L1 主 agent bash_execute 路由到 host

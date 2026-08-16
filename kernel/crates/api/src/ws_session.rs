@@ -480,7 +480,6 @@ impl PipelineDispatcher for EngineDispatcher {
         if let Some(db) = self.state.db.as_ref() {
             match db.find_suspended_run_by_request_id(request_id) {
                 Ok(Some(run)) => {
-                    let _meta = run.metadata.clone().unwrap_or_default();
                     // 0.2 收尾：旧引擎已清理，resume 即 runs 表状态簿记
                     // （新引擎执行流由 state.suspended 插件机制控制，此处恢复
                     // 状态供查询/复盘语义，与 capability pipeline-executor.resume 一致）。
@@ -585,18 +584,30 @@ async fn resolve_pipeline_id_for_thread(
 
     // ① 前端值非空且属于该 thread → 信任
     if !frontend_pipeline_id.is_empty() {
-        let pids = store
+        match store
             .list_pipeline_ids_by_thread(thread_id, tenant_id)
             .await
-            .unwrap_or_default();
-        if pids.iter().any(|p| p == frontend_pipeline_id) {
-            return frontend_pipeline_id.to_string();
+        {
+            Ok(pids) if pids.iter().any(|p| p == frontend_pipeline_id) => {
+                return frontend_pipeline_id.to_string();
+            }
+            Ok(_) => {
+                warn!(
+                    thread_id = %thread_id,
+                    frontend_pid = %frontend_pipeline_id,
+                    "前端传来的 pipeline_id 不属于该 thread（可能残留旧会话值），改用 thread 真实主管道"
+                );
+            }
+            // 存储故障 ≠ 无关联：报错可见，不得兜成空列表误诊为"前端值不属于该 thread"。
+            Err(e) => {
+                warn!(
+                    thread_id = %thread_id,
+                    frontend_pid = %frontend_pipeline_id,
+                    error = %e,
+                    "list_pipeline_ids_by_thread 查询失败，跳过前端值校验，改用 thread 真实主管道"
+                );
+            }
         }
-        warn!(
-            thread_id = %thread_id,
-            frontend_pid = %frontend_pipeline_id,
-            "前端传来的 pipeline_id 不属于该 thread（可能残留旧会话值），改用 thread 真实主管道"
-        );
     }
 
     // ② 取该 thread 的真实 active_pipeline_id

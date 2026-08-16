@@ -216,7 +216,7 @@ def _build_thread_response(t: dict) -> ThreadResponse:
     return ThreadResponse(
         thread_id=t["id"],
         title=t.get("title") or None,
-        intent=t.get("intent") or t.get("title") or None,
+        intent=t.get("intent") or None,
         current_state=t.get("current_state", "active"),
         created_at=t["created_at"],
         updated_at=t["updated_at"],
@@ -507,7 +507,8 @@ def update_thread(
 
     thread = store.update_thread(
         thread_id,
-        title=body.title or body.intent,
+        title=body.title,
+        intent=body.intent,
         agent_id=body.agent_id,
         metadata=_meta,
     )

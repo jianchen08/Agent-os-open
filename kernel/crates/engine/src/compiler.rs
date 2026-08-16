@@ -475,8 +475,13 @@ fn check_phase_targets(
 /// 同配置必同哈希、内容不同的配置哈希不同；指纹用于 runs 表审计/诊断定位，
 /// 不承担密码学承诺。
 pub fn pipeline_config_hash(config: &PipelineConfig) -> String {
-    let canonical = serde_json::to_value(config).unwrap_or(serde_json::Value::Null);
-    let json = serde_json::to_string(&canonical).unwrap_or_default();
+    // PipelineConfig 为纯数据 derive(Serialize)，to_value/to_string 不可能失败；
+    // 若失败宁可 panic 也不能兜 Null/空串——那会让所有配置得到同一 config_hash，
+    // 静默摧毁 runs 审计字段。
+    let canonical = serde_json::to_value(config)
+        .expect("PipelineConfig serialization is infallible");
+    let json =
+        serde_json::to_string(&canonical).expect("serde_json Value serialization is infallible");
     let mut hasher = Sha256::new();
     hasher.update(json.as_bytes());
     let hex = format!("{:x}", hasher.finalize());

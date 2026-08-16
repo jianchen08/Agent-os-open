@@ -100,9 +100,9 @@ class ContextBuildPlugin(IInputPlugin):
         # 1. 系统提示词（优先 state 注入，回退到插件配置）
         updates["context.system_prompt"] = ctx.state.get("system_prompt", "") or self._system_prompt
 
-        # 2. Agent 身份信息
+        # 2. Agent 身份信息（层级单一真值：顶层 agent_level，level_guard/
+        # isolation_guard/tool_schema/param_inject 等下游统一读此键）
         updates["context.agent_name"] = self._agent_name
-        updates["context.agent_level"] = self._agent_level
 
         # 始终用实际 Agent 层级覆盖 state 中的 AGENT_LEVEL，
         # 防止子管道继承父管道的层级（如 L2 agent 错误继承 L1）。

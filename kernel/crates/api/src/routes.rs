@@ -1288,8 +1288,8 @@ pub async fn get_plugin_config_handler(
     }
 
     let resolved = validate_config_path(&project_root, &mapping.path).map_err(config_err_to_api)?;
-    let raw = std::fs::read_to_string(&resolved).map_err(|_| ApiError::NotFound {
-        message: format!("config file not found on disk: {}", mapping.path),
+    let raw = std::fs::read_to_string(&resolved).map_err(|e| ApiError::NotFound {
+        message: format!("config file read failed: {}: {e}", mapping.path),
     })?;
 
     let etag = compute_etag(raw.as_bytes());
@@ -1388,8 +1388,8 @@ pub async fn put_plugin_config_handler(
 
     let resolved = validate_config_path(&project_root, &mapping.path).map_err(config_err_to_api)?;
 
-    let raw = std::fs::read_to_string(&resolved).map_err(|_| ApiError::NotFound {
-        message: format!("config file not found on disk: {}", mapping.path),
+    let raw = std::fs::read_to_string(&resolved).map_err(|e| ApiError::NotFound {
+        message: format!("config file read failed: {}: {e}", mapping.path),
     })?;
     let current_etag = compute_etag(raw.as_bytes());
 
@@ -1965,8 +1965,8 @@ pub async fn get_pipeline_config_handler(
         message: "project_root not configured".to_string(),
     })?;
     let path = pipeline_config_path(&project_root, &name);
-    let raw = std::fs::read_to_string(&path).map_err(|_| ApiError::NotFound {
-        message: format!("pipeline config not found: {name}"),
+    let raw = std::fs::read_to_string(&path).map_err(|e| ApiError::NotFound {
+        message: format!("pipeline config read failed: {name}: {e}"),
     })?;
     let etag = compute_etag(raw.as_bytes());
     let data: serde_json::Value = serde_yaml::from_str(&raw).map_err(|e| ApiError::Internal {
@@ -2007,12 +2007,12 @@ pub async fn put_pipeline_config_handler(
     })?;
     let path = pipeline_config_path(&project_root, &name);
 
-    // If-Match 乐观锁（A13）：必须匹配磁盘当前 ETag；文件不存在 → 404。
+    // If-Match 乐观锁（A13）：必须匹配磁盘当前 ETag；文件不存在/不可读 → 404。
     let current_etag = match std::fs::read_to_string(&path) {
         Ok(raw) => compute_etag(raw.as_bytes()),
-        Err(_) => {
+        Err(e) => {
             return Err(ApiError::NotFound {
-                message: format!("pipeline config not found: {name}"),
+                message: format!("pipeline config read failed: {name}: {e}"),
             })
         }
     };

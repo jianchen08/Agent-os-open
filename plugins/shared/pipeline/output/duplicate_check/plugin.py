@@ -333,7 +333,9 @@ class DuplicateCheckPlugin(IOutputPlugin):
         parts = []
         for tc in tool_calls:
             name = tc.get("name", "unknown")
-            args = tc.get("args") or tc.get("arguments", {})
+            # raw_tool_calls 生产方（llm adapter _parse/_normalize_tool_calls）固定
+            # 输出 {"id","name","arguments"}。
+            args = tc.get("arguments", {})
             if isinstance(args, str):
                 parts.append(f"{name}({args})")
             else:
@@ -452,7 +454,7 @@ class DuplicateCheckPlugin(IOutputPlugin):
         current_signatures = []
         for tc in tool_calls:
             name = tc.get("name", "")
-            args = tc.get("args") or tc.get("arguments", {})
+            args = tc.get("arguments", {})
             if isinstance(args, str):
                 try:
                     args = json.loads(args)

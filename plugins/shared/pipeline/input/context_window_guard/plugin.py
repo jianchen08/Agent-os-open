@@ -1402,8 +1402,7 @@ class ContextWindowGuardPlugin(IInputPlugin):
         # ④ 代码默认（见 config/system/context_window_config.yaml）
         return 0.55
 
-    @staticmethod
-    def _resolve_compression_model(explicit: str | None) -> str | None:
+    def _resolve_compression_model(self, explicit: str | None) -> str | None:
         """解析压缩模型：插件配置优先，回退到 llm.yaml defaults.compression。
 
         Args:
@@ -1414,16 +1413,13 @@ class ContextWindowGuardPlugin(IInputPlugin):
         """
         if explicit:
             return explicit
-        try:
-            from config.models import get_model_config_loader  # noqa: PLC0415
-
-            loader = get_model_config_loader()
-            defaults = loader._load_llm_data().get("defaults", {})
-            default_id = defaults.get("compression", "")
+        # llm.yaml 经 plugin.json config_files（id="models"）注入为
+        # ``{"models": {...llm.yaml...}}`` 命名空间（内核 build_injected_config）。
+        models_ns = self._config.get("models")
+        if isinstance(models_ns, dict):
+            default_id = models_ns.get("defaults", {}).get("compression", "")
             if default_id:
                 return default_id
-        except Exception:
-            pass
         return None
 
     @property

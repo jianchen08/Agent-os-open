@@ -261,7 +261,11 @@ pub async fn sync_once(
 fn manifest_fingerprint(m: &PluginManifest) -> u64 {
     use std::hash::{Hash, Hasher};
     let mut h = std::collections::hash_map::DefaultHasher::new();
-    serde_json::to_string(m).unwrap_or_default().hash(&mut h);
+    // PluginManifest 为纯数据（全 String/Vec 字段），序列化不可能失败；若失败
+    // 宁可 panic 也不能退空串——空串会让所有 manifest 指纹相同，变更检测静默失效。
+    serde_json::to_string(m)
+        .expect("PluginManifest serialization is infallible")
+        .hash(&mut h);
     h.finish()
 }
 

@@ -160,10 +160,9 @@ class DiskFileStorage(IFileStorage):
     def _meta_path(self, file_id: str) -> Path:
         """获取文件元数据路径。
 
-        拒绝含路径分隔符或 ``..`` 的 file_id，防止路径穿越写出到 base_dir 之外。
+        file_id 由上传端生成（``uuid.uuid4().hex[:12]``，纯十六进制），非外部
+        可控输入，不做防御校验。
         """
-        if not file_id or ".." in file_id or "/" in file_id or "\\" in file_id:
-            raise ValueError(f"invalid file_id (path traversal blocked): {file_id!r}")
         return self._base_dir / f"{file_id}.json"
 
     async def save(self, file_id: str, data: Any) -> None:

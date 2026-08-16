@@ -348,33 +348,24 @@ class LLMCore(ICorePlugin):
         """通过 sidecar 注入的 config 桥取模型配置（与 0.1 对齐）。
 
         从 ``_config_models.get_model_config_loader()`` 拿 loader，调
-        ``get_llm_core_config``。loader 不可用时返回 None（降级）。
+        ``get_llm_core_config``。模型未配置时 loader 返回 None（合法降级）；
+        import/loader 自身故障是 sidecar 接线 bug，直接抛出可见。
         """
-        try:
-            from _config_models import get_model_config_loader  # noqa: PLC0415
+        from _config_models import get_model_config_loader  # noqa: PLC0415
 
-            return get_model_config_loader().get_llm_core_config(model_id)
-        except Exception:  # noqa: BLE001
-            logger.debug("[%s] get_llm_core_config 失败，降级", self.name, exc_info=True)
-            return None
+        return get_model_config_loader().get_llm_core_config(model_id)
 
     def _resolve_tier(self, tier: str) -> str:
         """tier → model_id（defaults.tiers 解析）。"""
-        try:
-            from _config_models import get_model_config_loader  # noqa: PLC0415
+        from _config_models import get_model_config_loader  # noqa: PLC0415
 
-            return get_model_config_loader().resolve_tier(tier)
-        except Exception:  # noqa: BLE001
-            return ""
+        return get_model_config_loader().resolve_tier(tier)
 
     def _default_chat_model(self) -> str:
         """defaults.chat 默认对话模型 id。"""
-        try:
-            from _config_models import get_model_config_loader  # noqa: PLC0415
+        from _config_models import get_model_config_loader  # noqa: PLC0415
 
-            return get_model_config_loader().get_default_chat_model()
-        except Exception:  # noqa: BLE001
-            return ""
+        return get_model_config_loader().get_default_chat_model()
 
     async def execute(self, ctx: PluginContext) -> dict[str, Any]:  # noqa: PLR0912,PLR0915
         """执行 LLM 调用，返回原始结果。

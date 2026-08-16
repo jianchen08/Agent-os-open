@@ -1496,8 +1496,12 @@ impl SqliteStore {
         thread_id: &str,
         tenant_id: &str,
     ) -> Result<(), StorageError> {
+        // 两个 id 均为内部生成的 uuid（persist_run_start / 会话创建路径）；
+        // 为空即上游 bug，报错可见，不得静默跳过（跳过会丢管道-会话映射）。
         if pipeline_id.is_empty() || thread_id.is_empty() {
-            return Ok(());
+            return Err(StorageError::Database(format!(
+                "link_pipeline_session: empty id (pipeline_id={pipeline_id:?}, thread_id={thread_id:?})"
+            )));
         }
         let conn = self.conn.lock();
         let now = chrono::Utc::now().to_rfc3339();
@@ -1589,13 +1593,30 @@ impl SqliteStore {
     fn row_to_session(row: &rusqlite::Row<'_>) -> rusqlite::Result<SessionRecord> {
         let pipeline_ids_str: Option<String> = row.get(6)?;
         let metadata_str: Option<String> = row.get(7)?;
-        let pipeline_ids: Vec<String> = pipeline_ids_str
-            .as_deref()
-            .and_then(|s| serde_json::from_str(s).ok())
-            .unwrap_or_default();
-        let metadata = metadata_str
-            .as_deref()
-            .and_then(|s| serde_json::from_str(s).ok());
+        // JSON 列由本 store 写侧 serde_json::to_string 写入（纯内部往返）；
+        // 解析失败是数据损坏，报错而非静默清空（清空会让会话丢管道关联）。
+        let pipeline_ids: Vec<String> = match pipeline_ids_str.as_deref() {
+            None => Vec::new(),
+            Some(s) => serde_json::from_str(s).map_err(|e| {
+                rusqlite::Error::FromSqlConversionFailure(
+                    6,
+                    rusqlite::types::Type::Text,
+                    Box::new(e),
+                )
+            })?,
+        };
+        let metadata = match metadata_str.as_deref() {
+            None => None,
+            Some(s) => {
+                Some(serde_json::from_str(s).map_err(|e| {
+                    rusqlite::Error::FromSqlConversionFailure(
+                        7,
+                        rusqlite::types::Type::Text,
+                        Box::new(e),
+                    )
+                })?)
+            }
+        };
         Ok(SessionRecord {
             thread_id: row.get(0)?,
             title: row.get(1)?,
@@ -2129,7 +2150,15 @@ impl SqliteStore {
     /// 从查询行构造 PipelineRunSummary（total_tokens JSON 反序列化）。
     fn row_to_run_summary(row: &rusqlite::Row<'_>) -> rusqlite::Result<PipelineRunSummary> {
         let total_tokens_str: String = row.get(3)?;
-        let total_tokens = serde_json::from_str(&total_tokens_str).unwrap_or_default();
+        // 写侧 save_run_summary_inner 用 to_string 序列化（内部往返）；
+        // 解析失败是数据损坏，报错而非静默清空统计。
+        let total_tokens = serde_json::from_str(&total_tokens_str).map_err(|e| {
+            rusqlite::Error::FromSqlConversionFailure(
+                3,
+                rusqlite::types::Type::Text,
+                Box::new(e),
+            )
+        })?;
         Ok(PipelineRunSummary {
             run_id: row.get(0)?,
             thread_id: row.get(1)?,
@@ -2229,11 +2258,7 @@ impl SqliteStore {
             .get_run_summary_inner(run_id, tenant_id)?
             .ok_or_else(|| StorageError::NotFound(format!("run summary not found: {run_id}")))?;
         let mut total_tokens = existing.total_tokens.clone();
-        let total_tokens_obj = if total_tokens.is_object() {
-            total_tokens.as_object().cloned().unwrap_or_default()
-        } else {
-            serde_json::Map::new()
-        };
+        let total_tokens_obj = total_tokens.as_object().cloned().unwrap_or_default();
         for (k, v) in obj {
             match k.as_str() {
                 "thread_id" => existing.thread_id = v.as_str().unwrap_or("").to_string(),
@@ -2290,7 +2315,15 @@ impl SqliteStore {
     /// 从查询行构造 MemoryRecord（tags JSON 反序列化）。
     fn row_to_memory(row: &rusqlite::Row<'_>) -> rusqlite::Result<MemoryRecord> {
         let tags_str: String = row.get(3)?;
-        let tags = serde_json::from_str(&tags_str).unwrap_or_default();
+        // 写侧 create_memory_inner 用 to_string 序列化（内部往返）；
+        // 解析失败是数据损坏，报错而非静默清空。
+        let tags = serde_json::from_str(&tags_str).map_err(|e| {
+            rusqlite::Error::FromSqlConversionFailure(
+                3,
+                rusqlite::types::Type::Text,
+                Box::new(e),
+            )
+        })?;
         Ok(MemoryRecord {
             id: row.get(0)?,
             content: row.get(1)?,
