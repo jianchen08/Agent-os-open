@@ -1447,6 +1447,26 @@ pub trait StorageBackend: Send + Sync {
     /// 获取运行实例记录。
     async fn get_run(&self, run_id: &str) -> Result<RunRecord, StorageError>;
 
+    /// 记录 run 的管道归属（GAP-1 统一：task = pipeline，按管道挂起/恢复需要）。
+    /// 默认 no-op（mock/null store），SqliteStore 覆盖为真实 UPDATE。
+    async fn set_run_pipeline(
+        &self,
+        _run_id: &str,
+        _pipeline_id: &str,
+    ) -> Result<(), StorageError> {
+        Ok(())
+    }
+
+    /// 列出某管道的全部 run（GAP-1 统一：suspend_pipeline/resume_pipeline 按管道
+    /// 操作——找最新非终态 run）。默认空（mock/null store），SqliteStore 覆盖。
+    async fn list_runs_by_pipeline(
+        &self,
+        _pipeline_id: &str,
+        _tenant_id: &str,
+    ) -> Result<Vec<RunRecord>, StorageError> {
+        Ok(Vec::new())
+    }
+
     /// 按 pipeline_id 查询历史消息（消息层自治查询主键）。
     ///
     /// 两域解耦：消息层只按 pipeline_id 查询，不关心会话（thread）归属。

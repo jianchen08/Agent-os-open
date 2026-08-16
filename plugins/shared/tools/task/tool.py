@@ -34,6 +34,30 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+# ── GAP-1 统一：能力注入点（server.py on_load）──
+# chat_sender：chat.send_message（注入/重试驱动）；state_reader：pipeline-state.list
+# （任务状态/子链读面）；pipeline_executor：pipeline-executor（stop→suspend_pipeline /
+# resume→resume_pipeline）。
+_chat_sender: Any = None
+_state_reader: Any = None
+_pipeline_executor: Any = None
+
+
+def set_chat_sender(sender: Any) -> None:
+    global _chat_sender  # noqa: PLW0603
+    _chat_sender = sender
+
+
+def set_state_reader(reader: Any) -> None:
+    global _state_reader  # noqa: PLW0603
+    _state_reader = reader
+
+
+def set_pipeline_executor(executor: Any) -> None:
+    global _pipeline_executor  # noqa: PLW0603
+    _pipeline_executor = executor
+
+
 class TaskTool(BuiltinTool):
     """任务管理工具（简化版）。"""
 
@@ -140,6 +164,51 @@ class TaskTool(BuiltinTool):
             }
             for r in recent
         ]
+
+    async def _read_state_rows(self) -> list[dict[str, Any]] | None:
+        """读管道 state 聚合行（pipeline-state.list；None = 桥未就绪）。"""
+        reader = _state_reader
+        if reader is None:
+            return None
+        try:
+            rows = reader()
+            if asyncio.iscoroutine(rows):
+                rows = await rows
+            return [r for r in rows if isinstance(r, dict)] if isinstance(rows, list) else None
+        except Exception as exc:  # noqa: BLE001 — 读面降级不崩
+            logger.warning("[TaskTool] state 聚合读取失败: %s", exc)
+            return None
+
+    async def _get_task_from_state(self, task_id: str) -> Any:
+        """从 state 聚合行组装轻量任务对象（GAP-1 统一：task = pipeline）。"""
+        rows = await self._read_state_rows()
+        if rows is None:
+            return None
+        row = next(
+            (r for r in rows if str(r.get("pipeline_id") or "") == task_id),
+            None,
+        )
+        if row is None:
+            return None
+        status_str = str(row.get("task.status") or "pending")
+        try:
+            status = TaskStatus(status_str)
+        except (ValueError, AttributeError):
+            status = TaskStatus.PENDING
+        metadata: dict[str, Any] = {
+            "session_id": str(row.get("lineage.origin_session_id") or ""),
+            "target_id": str(row.get("task.submitted_by") or ""),
+            "retry_count": 0,
+            "max_retries": 6,
+        }
+        return types.SimpleNamespace(
+            id=task_id,
+            title=str(row.get("task.goal") or task_id),
+            status=status,
+            metadata=metadata,
+            pipeline_run_id=task_id,
+            agent_name="",
+        )
 
     def _get_task_service(self) -> TaskService:
         """获取共享的 TaskService 实例。
@@ -718,7 +787,9 @@ class TaskTool(BuiltinTool):
 
             service = self._get_task_service()
 
-            task = service.get_task(task_id)
+            task = await self._get_task_from_state(task_id)
+            if task is None and service is not None:
+                task = service.get_task(task_id)
 
             if not task:
                 return create_failure_result(
@@ -811,40 +882,31 @@ class TaskTool(BuiltinTool):
         }
 
         try:
-            from tools.tool_context import MessageType, PipelineMessage, emit  # noqa: PLC0415
-
-            _cont_msg = PipelineMessage(
-                type=MessageType.CHAT,
-                content=message,
-                pipeline_id=target_pipeline_id,
-                metadata={
-                    "source": "task_continue",
-                    "injected_by": f"L{parent_agent_level}",
-                    "task_id": task.id,
-                },
-            )
-
-            result = await emit(
-                _cont_msg,
-                task_id=task.id,
-            )
-
-            inject_result["trigger"] = result.method
-
-            if not result.success:
+            # GAP-1 统一：注入走 chat.send_message 注入分支（task_id 即 pipeline_id，
+            # background 立即返回——UI/LLM 不阻塞等待 run 完成）。
+            if _chat_sender is None:
                 inject_result["trigger"] = "failed"
-
-                inject_result["error"] = result.error
-
+                inject_result["error"] = "chat capability 未注入（sidecar 未接线）"
+                return create_success_result(
+                    data=inject_result,
+                    metadata={"action": "continue_inject"},
+                )
+            await _chat_sender({
+                "pipeline_id": target_pipeline_id,
+                "message": message,
+                "user_id": "task_manage",
+                "background": True,
+            })
+            inject_result["trigger"] = "chat.send_message"
             logger.info(
-                "[TaskTool] 消息注入完成 | pipeline_id=%s | method=%s | preview=%s",
+                "[TaskTool] 消息注入完成 | pipeline_id=%s | method=chat.send_message | preview=%s",
                 target_pipeline_id,
-                result.method,
                 message[:80],
             )
-
         except Exception as _wake_err:
             logger.warning("[TaskTool] 消息注入失败: %s", _wake_err)
+            inject_result["trigger"] = "failed"
+            inject_result["error"] = str(_wake_err)
 
         return create_success_result(
             data=inject_result,
@@ -884,7 +946,16 @@ class TaskTool(BuiltinTool):
                 message[:80],
             )
 
-        await service.resume_task(task.id)
+        # GAP-1 统一：恢复 = resume_pipeline（按管道恢复最新 suspended run）
+        if _pipeline_executor is not None:
+            try:
+                await _pipeline_executor({
+                    "method": "resume_pipeline",
+                    "params": {"pipeline_id": task.id},
+                })
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("[TaskTool] resume_pipeline 失败: %s", exc)
+        logger.info("[TaskTool] resume 完成（resume_pipeline）: task_id=%s", task.id)
 
         # 触发 TaskWorker 重新执行（resume 只改状态，不启动执行）。
         # 复用 retry 场景的 task_data 构造。_execute_background_task 会从
@@ -961,38 +1032,28 @@ class TaskTool(BuiltinTool):
                 message[:80],
             )
 
-        # 递增 retry_count
-
-        task.metadata["retry_count"] = retry_count + 1
-
-        # 重置上一轮评估计数器，避免新轮评估立即命中上限而失败
-
-        task.metadata.pop("eval_total_calls", None)
-        task.metadata.pop("eval_retry_count", None)
-
-        # 利用状态机从 failed/timeout → pending
-
-        await service.force_transition(task.id, TaskStatus.PENDING)
-
-        task.error = None
-
-        await service.save_task(task)
-
-        # 通过 TaskWorker 重提交
-
-        target_id = task.metadata.get("target_id", "") or task.agent_name or ""
-
+        # GAP-1 统一：重试 = chat.send_message 注入分支重新驱动一轮
+        # （pipeline_id = task_id，background 立即返回；新 run 终态由内核回写）。
+        # retry_count 为本次尝试序数（state 无写通道，历史计数不跨轮持久化）。
+        retry_count = retry_count + 1
         execution_warning = None
-
-        _ws_meta = task.metadata.get("ws_meta", {})
-
-        _workspace = task.metadata.get("workspace", "") or _ws_meta.get("path", "")
-
-        # 0.2 收尾：pipeline-executor.start_run 占位能力已随旧引擎 AdrEngineImpl
-        # 移除——retry 仅重置任务状态，任务管道执行由会话对话 /
-        # chat.send_message → PipelineExecutor 驱动。
-        logger.info("[TaskTool] retry 完成（仅状态重置，执行由会话对话驱动）: task_id=%s", task.id)
-        execution_warning = None
+        if _chat_sender is not None:
+            try:
+                _retry_msg = f"重新执行任务「{task.title}」。"
+                if message:
+                    _retry_msg += "\n纠正信息：" + message
+                await _chat_sender({
+                    "pipeline_id": task.id,
+                    "message": _retry_msg,
+                    "user_id": "task_manage",
+                    "background": True,
+                })
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("[TaskTool] retry 注入失败: %s", exc)
+                execution_warning = f"重试注入失败：{exc}"
+        else:
+            execution_warning = "chat capability 未注入，重试未派发执行"
+        logger.info("[TaskTool] retry 完成（chat.send_message 注入）: task_id=%s", task.id)
 
         result_data: dict[str, Any] = {
             "task_id": task.id,
@@ -1016,7 +1077,12 @@ class TaskTool(BuiltinTool):
     async def _stop_task(  # noqa: PLR0911
         self, inputs: dict[str, Any], parent_agent_level: int
     ) -> ToolExecutionResult:
-        """停止任务（统一进入 stopped 状态）。"""
+        """停止任务（GAP-1 统一：stop = 挂起任务管道，suspend_pipeline）。
+
+        task = pipeline：挂起该管道最新 run（run 终态 suspended → 内核回写
+        task.status=suspended）；级联子任务 = state 聚合中 lineage 子管道逐个
+        挂起。任务状态读 state 聚合（task.status），不再写 YAML。
+        """
 
         try:
             task_id = inputs.get("task_id")
@@ -1027,11 +1093,9 @@ class TaskTool(BuiltinTool):
                     error_code="MISSING_TASK_ID",
                 )
 
-            service = self._get_task_service()
+            task = await self._get_task_from_state(task_id)
 
-            task = service.get_task(task_id)
-
-            if not task:
+            if task is None:
                 return create_failure_result(
                     error=f"任务不存在: {task_id}",
                     error_code="TASK_NOT_FOUND",
@@ -1045,51 +1109,58 @@ class TaskTool(BuiltinTool):
                     error_code="INSUFFICIENT_PERMISSION",
                 )
 
-            # 只有非终态任务可以停止
-
-            stoppable_statuses = {
-                TaskStatus.PENDING,
-                TaskStatus.RUNNING,
-                TaskStatus.STOPPED,
-            }
-
-            if task.status not in stoppable_statuses:
+            status = getattr(task, "status", None)
+            status_str = status.value if hasattr(status, "value") else str(status or "pending")
+            stoppable = {"pending", "running", "suspended"}
+            if status_str not in stoppable:
                 return create_failure_result(
-                    error=f"当前状态 {task.status.value} 无法停止。可停止的状态：pending/running/stopped",
+                    error=f"当前状态 {status_str} 无法停止。可停止的状态：pending/running/suspended",
                     error_code="INVALID_STATUS",
                 )
 
-            if task.status == TaskStatus.STOPPED:
+            reason = inputs.get("reason", "用户请求停止")
+            old_status = status_str
+
+            if _pipeline_executor is None:
                 return create_failure_result(
-                    error="任务已是 stopped 状态",
-                    error_code="ALREADY_STOPPED",
+                    error="pipeline-executor capability 未注入（sidecar 未接线），无法停止任务",
+                    error_code="CONTINUE_FAILED",
                 )
 
-            reason = inputs.get("reason", "用户请求停止")
-
-            old_status = task.status.value
-
-            # pause_task 的参数是 paused_by 而非 reason
-
-            await service.pause_task(task_id, paused_by=f"停止(用户): {reason}")
-
-            # 级联停止子任务（仅对有子任务的任务）
+            try:
+                await _pipeline_executor({
+                    "method": "suspend_pipeline",
+                    "params": {"pipeline_id": task_id},
+                })
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("[TaskTool] suspend_pipeline 失败（继续尝试级联）: %s", exc)
 
             cascaded = 0
-
-            try:
-                service._cancel_pipeline_recursive(task_id)
-
-                cascaded = await service.cancel_task_cascade(task_id, reason=reason)
-
-            except Exception as cascade_err:
-                logger.warning("[TaskTool] 级联停止子任务失败 (non-fatal): %s", cascade_err)
+            rows = await self._read_state_rows()
+            if rows is not None:
+                for row in rows:
+                    if str(row.get("lineage.parent_pipeline_id") or "") == task_id:
+                        child_id = str(row.get("pipeline_id") or "")
+                        if not child_id:
+                            continue
+                        try:
+                            await _pipeline_executor({
+                                "method": "suspend_pipeline",
+                                "params": {"pipeline_id": child_id},
+                            })
+                            cascaded += 1
+                        except Exception as exc:  # noqa: BLE001
+                            logger.warning(
+                                "[TaskTool] 级联挂起子管道失败 | pipeline_id=%s | err=%s",
+                                child_id,
+                                exc,
+                            )
 
             result_data: dict[str, Any] = {
                 "task_id": task_id,
                 "stopped": True,
                 "old_status": old_status,
-                "new_status": TaskStatus.STOPPED.value,
+                "new_status": "suspended",
                 "reason": reason,
             }
 
@@ -1098,24 +1169,22 @@ class TaskTool(BuiltinTool):
 
             return create_success_result(
                 data=result_data,
-                metadata={"action": "stop_task"},
+                metadata={"action": "task_stop"},
             )
 
         except InvalidTransitionError as e:
             return create_failure_result(
-                error=f"停止失败（状态转换不合法）: {e}",
+                error=f"stop 失败（状态转换不合法）: {e}",
                 error_code="INVALID_TRANSITION",
             )
 
         except Exception as e:
-            logger.error("[TaskTool] 停止任务失败: %s", e)
-
+            logger.error("[TaskTool] stop 失败: %s", e)
             return create_failure_result(
-                error=f"停止任务失败: {str(e)}",
+                error=f"stop 失败: {str(e)}",
                 error_code="STOP_FAILED",
             )
 
-    # ── delete：删除任务 ──
 
     async def _delete_task(self, inputs: dict[str, Any], parent_agent_level: int) -> ToolExecutionResult:
         """删除任务，根据任务类型执行不同策略。"""

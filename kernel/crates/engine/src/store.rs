@@ -41,6 +41,7 @@ CREATE TABLE IF NOT EXISTS runs (
     config_hash    TEXT NOT NULL,
     status         TEXT NOT NULL DEFAULT 'running',
     tenant_id      TEXT NOT NULL,
+    pipeline_id    TEXT,
     created_at     TEXT NOT NULL,
     ended_at       TEXT,
     current_branch TEXT NOT NULL,
@@ -252,6 +253,21 @@ fn migrate_drop_legacy_message_slots(conn: &Connection) -> Result<(), StorageErr
 
 /// 为旧库（建表时无 tenant_id 列）补加 tenant_id 列。
 ///
+/// runs 表补 pipeline_id 列（GAP-1 统一：task = pipeline，按管道挂起/恢复
+/// 需要 run 的管道归属）。幂等：列已存在时跳过。
+fn migrate_add_run_pipeline_id(conn: &Connection) -> Result<(), StorageError> {
+    let has = conn
+        .prepare("SELECT COUNT(*) FROM pragma_table_info('runs') WHERE name='pipeline_id'")?
+        .query_row([], |row| row.get::<_, i64>(0))?;
+    if has == 0 {
+        conn.execute(
+            "ALTER TABLE runs ADD COLUMN pipeline_id TEXT",
+            [],
+        )?;
+    }
+    Ok(())
+}
+
 /// 仅在列缺失时执行 `ALTER TABLE ... ADD COLUMN`，幂等。blob 表不加（内容寻址，靠上游归属）。
 fn migrate_add_tenant_id(conn: &Connection) -> Result<(), StorageError> {
     for table in ["traces", "branches"] {
@@ -514,6 +530,7 @@ impl SqliteStore {
         conn.execute_batch(DDL)?;
         migrate_drop_legacy_message_slots(conn)?;
         migrate_add_tenant_id(conn)?;
+        migrate_add_run_pipeline_id(conn)?;
         info!("SQLite four-table store initialized");
         Ok(())
     }
@@ -2453,6 +2470,48 @@ impl StorageBackend for SqliteStore {
             Err(e) => Err(e.into()),
         }
     }
+    async fn set_run_pipeline(&self, run_id: &str, pipeline_id: &str) -> Result<(), StorageError> {
+        let conn = self.conn.lock();
+        conn.execute(
+            "UPDATE runs SET pipeline_id = ?1 WHERE run_id = ?2",
+            rusqlite::params![pipeline_id, run_id],
+        )?;
+        Ok(())
+    }
+
+    async fn list_runs_by_pipeline(
+        &self,
+        pipeline_id: &str,
+        tenant_id: &str,
+    ) -> Result<Vec<RunRecord>, StorageError> {
+        let conn = self.conn.lock();
+        let mut stmt = conn.prepare(
+            "SELECT run_id, config_hash, status, tenant_id, created_at, ended_at, current_branch, current_seq, metadata FROM runs WHERE pipeline_id = ?1 AND tenant_id = ?2 ORDER BY created_at DESC",
+        )?;
+        let rows = stmt.query_map(rusqlite::params![pipeline_id, tenant_id], |row| {
+            let status_str: String = row.get(2)?;
+            let metadata_str: Option<String> = row.get(8)?;
+            Ok(RunRecord {
+                run_id: row.get(0)?,
+                config_hash: row.get(1)?,
+                status: match status_str.as_str() {
+                    "running" => RunStatus::Running,
+                    "suspended" => RunStatus::Suspended,
+                    "completed" => RunStatus::Completed,
+                    "failed" => RunStatus::Failed,
+                    _ => RunStatus::Running,
+                },
+                tenant_id: row.get(3)?,
+                created_at: row.get(4)?,
+                ended_at: row.get(5)?,
+                current_branch: row.get(6)?,
+                current_seq: row.get(7)?,
+                metadata: metadata_str.and_then(|s| serde_json::from_str(&s).ok()),
+            })
+        })?;
+        Ok(rows.collect::<Result<Vec<_>, _>>()?)
+    }
+
 
     async fn get_messages_by_pipeline(
         &self,

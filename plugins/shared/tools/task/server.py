@@ -24,6 +24,29 @@ for _d in (_TASKS_DIR, _SYSTEM_DIR):
 from agentos_plugin_sdk import AgentOSPlugin  # noqa: E402
 
 plugin = AgentOSPlugin("task_manage_tool")
+@plugin.on_load
+async def _on_load(_params: dict[str, Any]) -> None:
+    """sidecar 启动：注入 chat / pipeline-state / pipeline-executor 能力（GAP-1 统一）。"""
+    import tool as tool_mod  # noqa: PLC0415
+
+    async def _chat(params: dict[str, Any]) -> dict[str, Any]:
+        handle = plugin.get_capability("chat")
+        return await handle.call("send_message", params)
+
+    async def _read_state_rows() -> list[dict[str, Any]]:
+        handle = plugin.get_capability("pipeline-state")
+        rows = await handle.call("list", {})
+        return rows if isinstance(rows, list) else []
+
+    async def _exec(params: dict[str, Any]) -> dict[str, Any]:
+        handle = plugin.get_capability("pipeline-executor")
+        return await handle.call(params["method"], params["params"])
+
+    tool_mod.set_chat_sender(_chat)
+    tool_mod.set_state_reader(_read_state_rows)
+    tool_mod.set_pipeline_executor(_exec)
+
+
 
 
 # 注意：@plugin.tool 装饰器必须落在真正的 handler（task_manage）上。

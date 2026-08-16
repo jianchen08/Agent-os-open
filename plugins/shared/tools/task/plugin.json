@@ -22,5 +22,10 @@
     "dependencies": [],
     "permissions": {},
     "error_policy": "skip",
-    "priority": 10
+    "priority": 10,
+    "granted_capabilities": [
+        "chat",
+        "pipeline-state",
+        "pipeline-executor"
+    ]
 }

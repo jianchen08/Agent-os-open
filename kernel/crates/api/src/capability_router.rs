@@ -277,6 +277,84 @@ impl CapabilityRouter for KernelCapabilityRouter {
                     })?;
                 Ok(json!({"status": "resumed", "run_id": run_id}))
             }
+            // ── GAP-1 统一：按管道挂起/恢复（task_manage stop/resume 映射）──
+            // task = pipeline：suspend_pipeline 挂起该管道最新非终态 run；
+            // resume_pipeline 恢复最新 suspended run。幂等：无匹配 run 返回 ok。
+            ("pipeline-executor", "suspend_pipeline") => {
+                let pipeline_id = params
+                    .get("pipeline_id")
+                    .and_then(|v| v.as_str())
+                    .ok_or_else(|| McpError::Protocol {
+                        message: "suspend_pipeline 缺少 pipeline_id 参数".to_string(),
+                    })?;
+                let store = self.store.as_ref().ok_or_else(|| McpError::Protocol {
+                    message: "suspend_pipeline disabled: kernel store not injected".to_string(),
+                })?;
+                let tenant_id = agentos_tenant::current_or_default("default").tenant_id;
+                let runs = store
+                    .list_runs_by_pipeline(pipeline_id, &tenant_id)
+                    .await
+                    .map_err(|e| McpError::Protocol {
+                        message: format!("suspend_pipeline 查询失败: {e}"),
+                    })?;
+                let target = runs.into_iter().find(|r| {
+                    r.status == agentos_core::types::RunStatus::Running
+                        || r.status == agentos_core::types::RunStatus::Suspended
+                });
+                match target {
+                    Some(run) if run.status == agentos_core::types::RunStatus::Suspended => {
+                        Ok(json!({"status": "suspended", "pipeline_id": pipeline_id, "run_id": run.run_id}))
+                    }
+                    Some(run) => {
+                        store
+                            .update_run_status(
+                                &run.run_id,
+                                agentos_core::types::RunStatus::Suspended,
+                                Some(&run.current_branch),
+                                Some(run.current_seq),
+                            )
+                            .await
+                            .map_err(|e| McpError::Protocol {
+                                message: format!("suspend_pipeline 失败: {e}"),
+                            })?;
+                        Ok(json!({"status": "suspended", "pipeline_id": pipeline_id, "run_id": run.run_id}))
+                    }
+                    None => Ok(json!({"status": "suspended", "pipeline_id": pipeline_id, "run_id": ""})),
+                }
+            }
+            ("pipeline-executor", "resume_pipeline") => {
+                let pipeline_id = params
+                    .get("pipeline_id")
+                    .and_then(|v| v.as_str())
+                    .ok_or_else(|| McpError::Protocol {
+                        message: "resume_pipeline 缺少 pipeline_id 参数".to_string(),
+                    })?;
+                let store = self.store.as_ref().ok_or_else(|| McpError::Protocol {
+                    message: "resume_pipeline disabled: kernel store not injected".to_string(),
+                })?;
+                let tenant_id = agentos_tenant::current_or_default("default").tenant_id;
+                let runs = store
+                    .list_runs_by_pipeline(pipeline_id, &tenant_id)
+                    .await
+                    .map_err(|e| McpError::Protocol {
+                        message: format!("resume_pipeline 查询失败: {e}"),
+                    })?;
+                let target = runs
+                    .into_iter()
+                    .find(|r| r.status == agentos_core::types::RunStatus::Suspended);
+                match target {
+                    Some(run) => {
+                        store
+                            .update_run_status(&run.run_id, agentos_core::types::RunStatus::Running, None, None)
+                            .await
+                            .map_err(|e| McpError::Protocol {
+                                message: format!("resume_pipeline 失败: {e}"),
+                            })?;
+                        Ok(json!({"status": "resumed", "pipeline_id": pipeline_id, "run_id": run.run_id}))
+                    }
+                    None => Ok(json!({"status": "resumed", "pipeline_id": pipeline_id, "run_id": ""})),
+                }
+            }
             ("pipeline-executor", "get_run_status") => {
                 // F-REVIEW-2：复盘侧轮询子管道真实完成状态的最小能力。
                 // 直接查 runs 表（store 生产侧由 agentos-kernel.rs with_store 注入）。
@@ -2505,5 +2583,60 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(out["status"], "registered");
+    }
+
+    #[tokio::test]
+    async fn test_suspend_resume_pipeline_by_id() {
+        // GAP-1 统一：task = pipeline——按管道挂起/恢复（stop/resume 映射）。
+        // 先建 run 并记录管道归属（SqliteStore 的 set_run_pipeline 真实写）。
+        let sqlite = Arc::new(agentos_engine::SqliteStore::open_memory().unwrap());
+        let store: Arc<dyn StorageBackend> = sqlite.clone();
+        let router = KernelCapabilityRouter::new().with_store(store.clone());
+
+        agentos_tenant::scope(
+            agentos_core::types::TenantContext::new("tenant_sr", "thread_sr"),
+            async {
+                use agentos_core::traits::StorageBackend;
+                let tenant = agentos_tenant::current_or_default("default").tenant_id;
+                store.create_run("run_sr_1", "h", &tenant).await.unwrap();
+                store.set_run_pipeline("run_sr_1", "pipe_task_9").await.unwrap();
+                store.create_run("run_sr_2", "h", &tenant).await.unwrap();
+                store.set_run_pipeline("run_sr_2", "pipe_task_9").await.unwrap();
+
+                // suspend：最新 run（run_sr_2）被挂起
+                let r = router
+                    .handle("pipeline-executor", "suspend_pipeline", json!({"pipeline_id": "pipe_task_9"}))
+                    .await
+                    .unwrap();
+                assert_eq!(r["status"], "suspended");
+                assert_eq!(r["run_id"], "run_sr_2", "应挂起最新 run");
+                let got = store.get_run("run_sr_2").await.unwrap();
+                assert_eq!(got.status, agentos_core::types::RunStatus::Suspended);
+
+                // 幂等：再次 suspend 返回同 run
+                let r2 = router
+                    .handle("pipeline-executor", "suspend_pipeline", json!({"pipeline_id": "pipe_task_9"}))
+                    .await
+                    .unwrap();
+                assert_eq!(r2["run_id"], "run_sr_2");
+
+                // resume：恢复最新 suspended run
+                let r3 = router
+                    .handle("pipeline-executor", "resume_pipeline", json!({"pipeline_id": "pipe_task_9"}))
+                    .await
+                    .unwrap();
+                assert_eq!(r3["run_id"], "run_sr_2");
+                let got2 = store.get_run("run_sr_2").await.unwrap();
+                assert_eq!(got2.status, agentos_core::types::RunStatus::Running);
+
+                // 无管道 → 幂等 ok（run_id 空）
+                let r4 = router
+                    .handle("pipeline-executor", "resume_pipeline", json!({"pipeline_id": "pipe_ghost"}))
+                    .await
+                    .unwrap();
+                assert_eq!(r4["run_id"], "");
+            },
+        )
+        .await;
     }
 }

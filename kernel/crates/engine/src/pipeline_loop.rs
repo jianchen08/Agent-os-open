@@ -852,6 +852,18 @@ impl PipelineExecutor {
             warn!(run_id = %self.run_id, error = %e, "create_run 落库失败（继续执行）");
             self.metrics.inc_persist_failure();
         }
+        // GAP-1 统一：记录 run 的管道归属（state.pipeline_id = effective id），
+        // 供按管道挂起/恢复（suspend_pipeline/resume_pipeline）定位 run。
+        let run_pipeline_id = state
+            .get("pipeline_id")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        if !run_pipeline_id.is_empty() {
+            let _ = self
+                .store
+                .set_run_pipeline(&self.run_id, run_pipeline_id)
+                .await;
+        }
 
         // pipeline_id 从 state 读（server.rs:261 注入，前端创建会话时生成、每轮回传）。
         // 它是消息层查询主键（对齐 0.1 pipeline_run_id），适配"通过 state 通路执行持久化"。
