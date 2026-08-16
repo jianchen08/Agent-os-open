@@ -61,7 +61,7 @@
             {
                 "id": "permission_mode_selector",
                 "type": "form",
-                "space": "chat",
+                "space": "chat-input",
                 "title": "权限模式",
                 "props": {
                     "title": "权限模式",
@@ -82,7 +82,7 @@
                         }
                     ],
                     "endpoint": "/ext/security_check/permission_mode",
-                    "description": "切换当前管道标签的权限模式；auto/bypass 高风险模式需在审批窗中确认"
+                    "description": "切换当前管道标签的权限模式（输入框工具栏，与思考强度并排）；auto/bypass 高风险模式需在审批窗中确认"
                 }
             }
         ]

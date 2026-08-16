@@ -13,6 +13,7 @@ import {
   Square,
   X,
 } from '@/assets/icons'
+import { DeclaredWidgetLayer } from '@/components/schema/DeclaredWidgetLayer'
 import { Button } from '@/components/ui/button'
 import { useModelCapabilities } from '@/hooks/useModelCapabilities'
 import { useVoiceInput } from '@/hooks/useVoiceInput'
@@ -825,6 +826,9 @@ export const ChatInput = ({
               />
             )}
 
+            {/* 插件声明式工具栏 widget（chat-input 空间）：权限模式选择器等，
+                与思考强度选择器并排（插件 ui_schema 声明驱动，跟随当前选中管道标签） */}
+            <DeclaredWidgetLayer space="chat-input" className="flex-row items-center" />
             {/* 思考强度选择器（四档：关闭/低/中/高；随消息路由后端模型参数） */}
             {enableThinkingMode && !isCompactMode && (
               <ThinkingModeToggle
