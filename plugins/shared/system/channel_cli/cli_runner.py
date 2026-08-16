@@ -218,28 +218,10 @@ class CLIRunnerMixin:
             self._update_status_bar_idle()
             return conversation_history
 
-        # 回填 pipeline_run_id 到关联的任务
+        # GAP-1 统一：task_id = pipeline_id（引擎生成），无需回填绑定——
+        # 0.1 的 bind_pipeline_run 回填段已退役。
         pipeline_run_id = final_state.get("pipeline_id", "")
-        if pipeline_run_id:
-            submitted_task_id = final_state.get("submitted_task_id")
-            if submitted_task_id:
-                task_service = self._services.get("task_service")
-                if task_service and hasattr(task_service, "bind_pipeline_run"):
-                    try:
-                        await task_service.bind_pipeline_run(submitted_task_id, pipeline_run_id)
-                        logger.info(
-                            "Bound task %s to pipeline_run %s",
-                            submitted_task_id,
-                            pipeline_run_id,
-                        )
-                        exec_storage = self._services.get("execution_record_storage")
-                        if exec_storage:
-                            root_id = task_service.get_root_task_id(submitted_task_id)
-                            if root_id:
-                                exec_storage.register_pipeline(pipeline_run_id, root_id)
-                    except Exception as exc:
-                        logger.warning("Failed to bind pipeline_run_id: %s", exc)
-            logger.info("Pipeline run completed: pipeline_id=%s", pipeline_run_id)
+        logger.info("Pipeline run completed: pipeline_id=%s", pipeline_run_id)
 
         await self._output_adapter.send(final_state, streamed=self._streaming)
 

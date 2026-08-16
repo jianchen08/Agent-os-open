@@ -27,9 +27,8 @@ logger = logging.getLogger(__name__)
 # ── 服务提供者解析 ──
 #
 # 内核能力经 sidecar 注入，服务解析统一走 _get_service_provider：
-# - task_worker：无可用实例——pipeline-executor.start_run 为占位能力
-#   （占位 run 无 execute_step 驱动、从不真正执行）。任务提交即落库；
-#   任务管道执行由会话对话 / chat.send_message → PipelineExecutor 驱动。
+# - task_worker：已退役（0.1 执行驱动）；任务执行经 chat.send_message
+#   创建管道（GAP-1 统一：task = pipeline，run 终态回写任务状态）。
 # - workspace_lifecycle_manager / agent_registry / execution_record_storage：
 #   sidecar 无等价实例 → None（调用方已有降级守卫/磁盘回退，文档化降级）。
 # 测试可 monkeypatch 模块级 _get_service_provider 注入 mock。

@@ -618,12 +618,8 @@ def delete_thread(  # noqa: PLR0912
                 except Exception as exc:  # noqa: BLE001
                     logger.warning("删除关联任务 %s 失败 | err=%s", task.id, exc, exc_info=True)
 
-    task_worker = _safe_get_service("task_worker")
-
-    if task_worker:
-        for pid in all_pipeline_ids:
-            with contextlib.suppress(Exception):
-                task_worker.cancel_pipeline(pid)
+    # GAP-1 统一：task_worker 已退役（任务执行经 chat.send_message 驱动）；
+    # 线程删除时任务管道由挂起语义覆盖（resume_pipeline 可恢复）。
 
     _notify_session_update(thread_id, "deleted")
 

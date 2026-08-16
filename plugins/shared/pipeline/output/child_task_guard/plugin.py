@@ -3,7 +3,7 @@
 当 LLM 只输出纯文本（没有工具调用）且当前任务有 pending/running 子任务时，
 挂起管道（route_signal=wait），避免无意义地调用 LLM 浪费 token。
 
-管道挂起后由 TaskWorker 在子任务终态或 idle 超时时调 engine.resume() 唤醒。
+管道挂起后由子任务终态（task_completed 域事件 → triggers_ext 注入）或挂起恢复（resume_pipeline）唤醒。
 
 State 命名空间：
     - child_task_guard_remind_count : idle 超时提醒次数计数器
@@ -45,7 +45,7 @@ class ChildTaskGuard(IOutputPlugin):
     在 LLM 输出纯文本且存在未完成子任务时：
     1. 返回 route_signal=wait 挂起管道（零 token 消耗）
 
-    idle 计时器由 TaskWorker 在任务开始时启动一次，本插件不负责重置。
+    idle 计时器由引擎迭代计数表达，本插件不负责重置。
     优先级应高于 TaskReminder（30 < 35），确保有子任务时先被拦截。
 
     检测机制：

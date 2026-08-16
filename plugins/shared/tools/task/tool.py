@@ -957,7 +957,7 @@ class TaskTool(BuiltinTool):
                 logger.warning("[TaskTool] resume_pipeline 失败: %s", exc)
         logger.info("[TaskTool] resume 完成（resume_pipeline）: task_id=%s", task.id)
 
-        # 触发 TaskWorker 重新执行（resume 只改状态，不启动执行）。
+        # GAP-1 统一：恢复经 resume_pipeline 直接执行（无需 TaskWorker）。
         # 复用 retry 场景的 task_data 构造。_execute_background_task 会从
         # task.pipeline_run_id 取 existing_pipeline_id 复用管道。
         # 0.2 收尾：pipeline-executor.start_run 占位能力已随旧引擎 AdrEngineImpl
