@@ -4,6 +4,7 @@ import Splitter from 'antd/es/splitter'
 import React, { useCallback, useMemo, useState, useEffect, useRef } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { Minimize2, FolderOpen } from '@/assets/icons'
+import { DeclaredWidgetLayer } from '@/components/schema/DeclaredWidgetLayer'
 import { HtmlPreviewWidget } from '@/components/schema/widgets/HtmlPreviewWidget'
 import { getEditorForFile } from '@/config/fileEditors'
 // 按需引入 antd Splitter 子模块，避免加载 antd 全量入口（26+ 组件 → 全部 icons →
@@ -427,6 +428,7 @@ export function FiveSpaceLayout({
               )}
               <div className="h-full overflow-auto p-2 sm:p-4">
                 <WidgetComponent
+                  {...(tab.props ?? {})}
                   dataSource={tab.dataSource}
                   sessionId={activeSessionId}
                   refreshKey={workspaceRefreshKey}
@@ -572,6 +574,7 @@ export function FiveSpaceLayout({
               <div className="flex min-h-0 flex-1 overflow-hidden">
                 <section className="flex flex-1 flex-col overflow-hidden">
                   {chatContent}
+                  <DeclaredWidgetLayer space="chat" />
                 </section>
               </div>
             ) : (
@@ -656,6 +659,7 @@ export function FiveSpaceLayout({
                 >
                   <div className="border-border h-full overflow-hidden border-r">
                     {chatContent}
+                    <DeclaredWidgetLayer space="chat" />
                   </div>
                 </Splitter.Panel>
 

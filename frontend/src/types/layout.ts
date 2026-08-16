@@ -135,6 +135,8 @@ export interface WorkspaceTab {
   moduleId: string
   component?: string
   layout?: Record<string, unknown>
+  /** 声明透传的静态 widget props（插件 views/widgets 贡献条目） */
+  props?: Record<string, unknown>
   dataSource?: string
   isActive: boolean
   isPinned: boolean

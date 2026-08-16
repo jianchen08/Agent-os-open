@@ -404,12 +404,16 @@ export const Sidebar = memo<SidebarProps>(({ isMobile = false }) => {
           moduleId: entry.pluginId ? `__plugin_${entry.pluginId}__` : `__contrib_${entry.id}__`,
         })
       } else {
+        // 容器条目（viewsContainers）：优先取容器下声明了 widget 的视图条目，
+        // 带其静态 props 渲染（声明数据直通 widget）；无视图条目时用容器 id 兜底
+        const viewEntry = contributionRegistry.getViews(entry.id).find((v) => v.widget)
         openWorkspacePanel({
-          id: `ws-plugin-${entry.id}`,
-          title: entry.title || entry.id,
-          component: entry.id,
-          icon: entry.icon,
-          moduleId: `__contrib_${entry.id}__`,
+          id: `ws-plugin-${viewEntry?.id ?? entry.id}`,
+          title: viewEntry?.title || entry.title || entry.id,
+          component: viewEntry?.widget || entry.id,
+          icon: viewEntry?.icon || entry.icon,
+          props: viewEntry?.props,
+          moduleId: entry.pluginId ? `__plugin_${entry.pluginId}__` : `__contrib_${entry.id}__`,
         })
       }
       if (isMobile) setSidebarCollapsed(true)

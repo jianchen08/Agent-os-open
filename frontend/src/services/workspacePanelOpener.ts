@@ -18,6 +18,8 @@ export interface WorkspacePanelSpec {
   icon?: string
   moduleId?: string
   dataSource?: string
+  /** 声明透传的静态 widget props */
+  props?: Record<string, unknown>
   /** 是否固定（默认 false，顶栏打开的可关） */
   isPinned?: boolean
 }
@@ -91,6 +93,7 @@ export function openWorkspacePanel(spec: WorkspacePanelSpec): void {
       moduleId: spec.moduleId || `__panel__${spec.id}`,
       component: spec.component,
       dataSource: spec.dataSource,
+      props: spec.props,
       isActive: true,
       isPinned: spec.isPinned ?? false,
     }
@@ -126,6 +129,7 @@ export function openWorkspacePanelByPath(path: string): boolean {
       component: pluginPage.widget || pluginPage.id,
       icon: pluginPage.icon,
       dataSource: pluginPage.datasourceUri,
+      props: pluginPage.props,
       moduleId: pluginPage.pluginId ? `__plugin_${pluginPage.pluginId}__` : `__contrib_${pluginPage.id}__`,
     })
     return true
