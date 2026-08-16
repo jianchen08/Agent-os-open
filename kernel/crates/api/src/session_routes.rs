@@ -426,8 +426,20 @@ pub async fn list_session_messages_handler(
         return Json(json!({ "messages": [], "total": 0, "has_more": false }));
     };
 
-    // 传了 pipeline_run_id 就用它，否则回退路径 id
-    let target_pid = q.pipeline_run_id.unwrap_or_else(|| id.clone());
+    // 传了 pipeline_run_id 就用它，否则回退路径 id；再回退线程的 active_pipeline_id
+    // （GAP-1 统一修复：thread_id 与 pipeline_id 不同值时按 active 管道查——
+    // 引擎落库用 resolve 后的 active_pipeline_id，直接拿 thread_id 查会落空）。
+    let explicit_pid = q.pipeline_run_id.clone();
+    let mut target_pid = explicit_pid.unwrap_or_else(|| id.clone());
+    if q.pipeline_run_id.is_none() {
+        if let Ok(Some(sess)) = store.get_session(&id).await {
+            if let Some(active) = sess.active_pipeline_id.as_deref() {
+                if !active.is_empty() {
+                    target_pid = active.to_string();
+                }
+            }
+        }
+    }
 
     let opts = agentos_core::traits::MessageQueryOpts {
         before_sequence: q.before_sequence,
