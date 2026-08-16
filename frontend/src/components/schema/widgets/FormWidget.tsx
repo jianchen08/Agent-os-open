@@ -5,10 +5,38 @@
  * number/slider/color/date/multiselect/radio/checkbox）已并入 UIInputFormField
  * 统一类型，本组件只做 props 收窄与提交回调透传。
  *
+ * 两种渲染形态（通用组件扩展，GAP 权限模式）：
+ * 1. 标准表单：多字段/复杂表单走 RjsfForm，props.onSubmit 或 props.endpoint 提交。
+ * 2. 紧凑下拉（compact）：单 select 字段 + props.endpoint 时自动启用——图标按钮 +
+ *    DropdownMenu（对齐 ThinkingModeToggle 形态），点选即提交，适合插件声明式
+ *    选择器（如权限模式切换）。高风险操作可在端点内经 human-interaction 弹
+ *    审批窗确认（fetch 挂起等待）。
+ *
+ * 提交模式：
+ * - props.endpoint（声明 JSON 可传字符串）：POST {pipeline_id: 当前选中管道, ...values}
+ *   到该端点，展示提交中/成功/失败状态。pipeline_id 跟随当前选中的管道标签
+ *   （agentTabStore.activeTabId → pipelineRunId，回退 store 级 activePipelineId /
+ *   sessionId）——权限模式按管道隔离，切换标签即切换目标。
+ * - props.onSubmit：显式 JS 回调（宿主注入场景）。
+ *
  * @module FormWidget
  */
 
+import { useState } from 'react'
+import { Check, ChevronDown, ShieldCheck } from '@/assets/icons'
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuLabel,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
+} from '@/components/ui/dropdown-menu'
+import { cn } from '@/lib/utils'
 import { RjsfForm } from '@/services/schema/RjsfForm'
+import { useAgentTabStore } from '@/stores/agentTabStore'
+import { usePipelineMessageStore } from '@/stores/pipelineMessageStore'
+import { useSessionStore } from '@/stores/sessionStore'
 import type { UIInputFormField } from '@/types/schema'
 
 /**
@@ -25,24 +53,190 @@ function extractFields(fields: unknown): UIInputFormField[] {
   )
 }
 
+type SubmitStatus = 'idle' | 'submitting' | 'success' | 'error' | 'unchanged'
+
+/** 紧凑下拉模式的选项定义（字段 select 的 options 结构） */
+interface CompactOption {
+  label: string
+  value: string
+  description?: string
+}
+
+/** 当前选中管道标签的 pipeline id（权限模式按管道隔离的 key） */
+function useActivePipelineId(): string {
+  const activeTabId = useAgentTabStore((s) => s.activeTabId)
+  const tabs = useAgentTabStore((s) => s.tabs)
+  const activePipelineId = usePipelineMessageStore((s) => s.activePipelineId)
+  const sessionId = useSessionStore((s) => s.activeSessionId)
+  const tabPipelineId = tabs.find((t) => t.id === activeTabId)?.pipelineRunId
+  return tabPipelineId ?? activePipelineId ?? sessionId ?? ''
+}
+
 /**
  * 表单交互组件
  *
- * @param props - 组件属性，包含 fields、layout、onSubmit 等
+ * @param props - 组件属性，包含 fields、layout、onSubmit、endpoint 等
  * @returns 动态表单渲染结果
  */
 export function FormWidget(props: Record<string, unknown>) {
   const fields = extractFields(props.fields)
   const onSubmit = props.onSubmit as ((data: Record<string, unknown>) => void) | undefined
   const layout = props.layout === 'grid' ? 'double' : 'single'
+  const endpoint = props.endpoint as string | undefined
+  const [status, setStatus] = useState<SubmitStatus>('idle')
+  const [statusText, setStatusText] = useState('')
+  const pipelineId = useActivePipelineId()
+
+  const handleSubmit = async (values: Record<string, unknown>) => {
+    if (endpoint) {
+      setStatus('submitting')
+      setStatusText('提交中…（高风险操作可能弹出审批窗等待确认）')
+      try {
+        const resp = await fetch(endpoint, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ pipeline_id: pipelineId, ...values }),
+        })
+        const data = (await resp.json()) as { switched?: boolean; unchanged?: boolean; reason?: string; error?: string }
+        if (data.switched) {
+          setStatus('success')
+          setStatusText('已切换')
+        } else if (data.unchanged) {
+          setStatus('unchanged')
+          setStatusText('当前已是该模式')
+        } else {
+          setStatus('error')
+          setStatusText(data.reason ?? data.error ?? '切换失败')
+        }
+      } catch {
+        setStatus('error')
+        setStatusText('请求失败')
+      }
+      return
+    }
+    if (onSubmit) {
+      await onSubmit(values)
+    }
+  }
+
+  // 紧凑下拉形态：单 select 字段 + endpoint（对齐 ThinkingModeToggle 的图标+下拉样式）
+  const compactField = fields.length === 1 && fields[0].type === 'select' ? fields[0] : undefined
+  const compact = Boolean(compactField && endpoint)
+
+  if (compact && compactField) {
+    return (
+      <CompactSelectToggle
+        field={compactField}
+        title={props.title as string | undefined}
+        onSelect={handleSubmit}
+        status={status}
+        statusText={statusText}
+      />
+    )
+  }
 
   return (
-    <RjsfForm
-      fields={fields}
-      layout={layout}
-      title={props.title as string | undefined}
-      submitLabel={(props.submitLabel as string) ?? '提交'}
-      onSubmit={onSubmit ? (values) => onSubmit(values) : undefined}
-    />
+    <div>
+      <RjsfForm
+        fields={fields}
+        layout={layout}
+        title={props.title as string | undefined}
+        submitLabel={(props.submitLabel as string) ?? '提交'}
+        onSubmit={handleSubmit}
+      />
+      {status !== 'idle' && (
+        <p className={cn('mt-1 text-xs', statusClass(status))} data-testid="form-widget-status">
+          {statusText}
+        </p>
+      )}
+    </div>
+  )
+}
+
+function statusClass(status: SubmitStatus): string {
+  if (status === 'success') return 'text-emerald-600'
+  if (status === 'error') return 'text-red-600'
+  return 'text-muted-foreground'
+}
+
+/**
+ * 紧凑下拉选择器（单 select + endpoint）
+ *
+ * 形态对齐 ThinkingModeToggle：图标按钮 + DropdownMenu（label + description + Check），
+ * 点选即提交到 endpoint。用于插件声明式选择器（如权限模式切换），不占用表单布局。
+ */
+function CompactSelectToggle({
+  field,
+  title,
+  onSelect,
+  status,
+  statusText,
+}: {
+  field: UIInputFormField
+  title?: string
+  onSelect: (values: Record<string, unknown>) => Promise<void>
+  status: SubmitStatus
+  statusText: string
+}) {
+  const options = Array.isArray(field.options) ? (field.options as CompactOption[]) : []
+  const currentValue = (field.default as string) ?? options[0]?.value ?? ''
+  const current = options.find((o) => o.value === currentValue)
+  const submitting = status === 'submitting'
+  const disabled = submitting || options.length === 0
+
+  const handlePick = (value: string) => {
+    void onSelect({ [field.name]: value })
+  }
+
+  return (
+    <div className="flex items-center gap-2">
+      <DropdownMenu>
+        <DropdownMenuTrigger asChild>
+          <button
+            type="button"
+            data-testid="compact-select-trigger"
+            className={cn(
+              'flex h-8 items-center gap-1.5 rounded-lg px-2.5 text-xs font-medium transition-all duration-200',
+              'hover:shadow-sm',
+              'bg-primary text-primary-foreground hover:bg-primary/90',
+              disabled && 'cursor-not-allowed opacity-50',
+            )}
+            disabled={disabled}
+            title={title ?? field.label}
+          >
+            <ShieldCheck className="h-icon-md w-icon-md" />
+            <span>{current?.label ?? field.label}</span>
+            <ChevronDown className="h-icon-xs w-icon-xs opacity-70" />
+          </button>
+        </DropdownMenuTrigger>
+        <DropdownMenuContent align="start" sideOffset={6} className="w-48">
+          <DropdownMenuLabel className="text-[11px]">{field.label}</DropdownMenuLabel>
+          <DropdownMenuSeparator />
+          {options.map((option) => (
+            <DropdownMenuItem
+              key={option.value}
+              onClick={() => handlePick(option.value)}
+              className={cn(
+                'flex items-center justify-between gap-2',
+                option.value === currentValue && 'text-primary',
+              )}
+            >
+              <span className="flex min-w-0 flex-col">
+                <span className="text-[13px] font-medium">{option.label}</span>
+                {option.description && (
+                  <span className="text-muted-foreground text-[11px]">{option.description}</span>
+                )}
+              </span>
+              {option.value === currentValue && <Check className="h-icon-sm w-icon-sm shrink-0" />}
+            </DropdownMenuItem>
+          ))}
+        </DropdownMenuContent>
+      </DropdownMenu>
+      {status !== 'idle' && (
+        <span className={cn('text-xs', statusClass(status))} data-testid="form-widget-status">
+          {statusText}
+        </span>
+      )}
+    </div>
   )
 }

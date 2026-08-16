@@ -61,6 +61,79 @@ _PROJECT_ROOT = os.path.dirname(  # noqa: PTH120
     os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))  # noqa: PTH100,PTH120
 )
 
+# ── 权限模式（对齐 ZCode/Claude Code/Codex 语义；模式 = 处置档位配置）──
+# 模式决定"危险工具未命中 allow 白名单/记忆指纹"时的处置：
+# - default      : 逐次确认（弹审批，现状语义）
+# - accept_edits : 文件读写类自动放行，命令类仍确认
+# - auto         : 尽量自动——block 规则自动拒绝；仅 needs_approval 规则/未授权
+#                  操作弹审批（"大部分不打扰，只有危险/未授权才打扰"）
+# - plan         : 只读——写类操作自动拒绝（不打扰）；读类放行
+# - bypass       : 跳过规则匹配与审批（保留路径遍历/敏感目录内置底线）
+PERMISSION_MODES: dict[str, str] = {
+    "default": "危险操作逐次确认",
+    "accept_edits": "文件读写自动放行，命令类仍确认",
+    "auto": "尽量自动：仅危险/未授权操作确认",
+    "plan": "只读：写类操作自动拒绝（不打扰）",
+    "bypass": "旁路：跳过审批（保留底线检查）",
+}
+
+# 权限模式表：key = pipeline_id（每管道独立，同会话不同管道标签互不影响，
+# 对齐"权限跟当前选中管道标签走"）；sidecar 进程内共享（server.py http.handle
+# 切换写、本插件 execute 读）；持久化到 data/permission_modes.json 防重启丢失。
+_PERMISSION_MODES: dict[str, str] = {}
+_PERMISSION_MODES_FILE = os.path.join(_PROJECT_ROOT, "data", "permission_modes.json")
+
+# accept_edits 放行的文件类工具；plan 拒绝的写类工具
+_FILE_TOOLS: frozenset[str] = frozenset({"file_read", "file_write"})
+_WRITE_TOOLS: frozenset[str] = frozenset({"file_write", "bash_execute"})
+
+# 只读工具白名单：只读操作默认不拦截（不判危险、不弹审批、不进审批链），
+# 第一道内置底线（路径遍历/敏感系统目录）仍生效；写类/命令类工具不在此列。
+_READ_ONLY_TOOLS: frozenset[str] = frozenset({
+    "file_read",
+    "enhanced_search",
+    "web_search",
+    "fetch",
+    "resource_search",
+    "memory",
+    "yaml_validate",
+    "schema_evaluator",
+    "resource_evaluator",
+    "compatibility_checker",
+})
+
+
+def _load_permission_modes() -> None:
+    """启动时从持久化文件加载权限模式表（幂等，失败留痕不阻断）。"""
+    global _PERMISSION_MODES  # noqa: PLW0603
+    try:
+        with open(_PERMISSION_MODES_FILE, encoding="utf-8") as f:
+            import json  # noqa: PLC0415
+
+            data = json.load(f)
+        if isinstance(data, dict):
+            _PERMISSION_MODES = {k: v for k, v in data.items() if v in PERMISSION_MODES}
+            logger.info("[security_check] 权限模式表加载 | pipelines=%d", len(_PERMISSION_MODES))
+    except FileNotFoundError:
+        pass
+    except Exception as exc:
+        logger.warning("[security_check] 权限模式表加载失败 | error=%s", exc)
+
+
+def _save_permission_modes() -> None:
+    """持久化权限模式表（写临时文件后原子替换，失败留痕不阻断）。"""
+    try:
+        import json  # noqa: PLC0415
+
+        os.makedirs(os.path.dirname(_PERMISSION_MODES_FILE), exist_ok=True)
+        tmp = _PERMISSION_MODES_FILE + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(_PERMISSION_MODES, f, ensure_ascii=False, indent=2)
+        os.replace(tmp, _PERMISSION_MODES_FILE)
+    except Exception as exc:
+        logger.warning("[security_check] 权限模式表持久化失败 | error=%s", exc)
+
+
 # 隔离策略加载器（模块级单例，构造时即从 isolation_policy.yaml 缓存）。
 # Host 模式审批以 policy.execution 为单一事实源：
 #   command_in_container → 命令执行类，HOST 降级需用户审批
@@ -327,10 +400,14 @@ class SecurityCheckPlugin(IInputPlugin):
             tool_name = tc.get("name", "")
             args = tc.get("args", {})
 
+            # 只读工具白名单：默认不拦截（第一道内置底线已过，此处直接放行）
+            if tool_name in _READ_ONLY_TOOLS:
+                continue
+
             # 判定是否危险工具：
             # - policy.execution == command_in_container（bash 等命令执行类）
-            # - 或工具声明了 dangerous_operations（delete/move/copy/file_write 等）
-            is_dangerous_tool = self._is_dangerous_tool(ctx, tool_name)
+            # - 或工具参数命中声明的 dangerous_operations（delete/move/copy/file_write 等）
+            is_dangerous_tool = self._is_dangerous_tool(ctx, tool_name, args)
 
             # 非危险工具 → 直接放行
             if not is_dangerous_tool:
@@ -357,7 +434,54 @@ class SecurityCheckPlugin(IInputPlugin):
                 )
                 continue
 
-            # 未命中白名单/记忆指纹 → 一律弹审批
+            # 未命中 allow 白名单/记忆指纹 → 按权限模式分流处置。
+            # 模式决定"未命中规则"的档位：default=确认、accept_edits=文件放行、
+            # auto=尽量自动、plan=写类拒绝、bypass=跳过审批。
+            mode = self._resolve_permission_mode(ctx)
+
+            if mode == "bypass":
+                logger.info(
+                    "[%s] bypass 模式放行 | tool=%s",
+                    self.name,
+                    tool_name,
+                )
+                continue
+
+            if mode == "accept_edits" and tool_name in _FILE_TOOLS:
+                logger.info(
+                    "[%s] accept_edits 模式文件类放行 | tool=%s",
+                    self.name,
+                    tool_name,
+                )
+                continue
+
+            if mode == "plan":
+                if tool_name in _WRITE_TOOLS:
+                    logger.info(
+                        "[%s] plan（只读）模式拒绝写类 | tool=%s",
+                        self.name,
+                        tool_name,
+                    )
+                    return self._soft_block(ctx, tool_name, f"plan（只读）模式拒绝写操作: {tool_name}")
+                # 读类危险操作（如 file_read 敏感路径）在只读模式下放行（读不破坏）
+                if tool_name in _FILE_TOOLS:
+                    logger.info(
+                        "[%s] plan 模式读类放行 | tool=%s",
+                        self.name,
+                        tool_name,
+                    )
+                    continue
+
+            if mode == "auto" and action == "block":
+                logger.info(
+                    "[%s] auto 模式自动拒绝（block 规则）| tool=%s | rule=%s",
+                    self.name,
+                    tool_name,
+                    rule_name,
+                )
+                return self._soft_block(ctx, tool_name, f"安全规则自动拒绝: {rule_name or 'block'}")
+
+            # default / auto(ask) / accept_edits(命令类) / plan(命令类) → 弹审批
             reason = "参数未命中安全白名单" + (f"（匹配规则: {rule_name}）" if rule_name else "")
             logger.warning(
                 "[%s] 危险工具参数未命中白名单，弹审批 | tool=%s | rule=%s",
@@ -373,6 +497,20 @@ class SecurityCheckPlugin(IInputPlugin):
             )
 
         return {"security.decision": {"allowed": True, "reason": "all checks passed"}}
+
+    def _resolve_permission_mode(self, ctx: PluginContext) -> str:
+        """解析当前调用的权限模式。
+
+        key 为 pipeline_id（每管道独立模式，同会话不同管道标签互不影响，
+        对齐"权限跟当前选中管道标签走"）；管道 id 缺失时回退 session_id。
+        优先级：管道级切换（http.handle 写入的 _PERMISSION_MODES）> 插件配置
+        （pipeline yaml security_check config 的 mode 字段）> 默认 "default"。
+        """
+        pipeline_id = ctx.state.get("pipeline_id") or ctx.state.get(StateKeys.SESSION_ID, "")
+        mode = _PERMISSION_MODES.get(pipeline_id)
+        if mode:
+            return mode
+        return self._config.get("mode", "default")
 
     async def _await_approval(
         self,
@@ -1084,14 +1222,18 @@ class SecurityCheckPlugin(IInputPlugin):
                 return f"CMD-style nul redirect detected: {m.group(0)!r} in command"
         return ""
 
-    def _is_dangerous_tool(self, ctx: PluginContext, tool_name: str) -> bool:
-        """判定工具是否属于危险工具（host 模式下需要参数审批把关）。
+    def _is_dangerous_tool(self, ctx: PluginContext, tool_name: str, tool_args: dict[str, Any] | None = None) -> bool:
+        """判定工具调用是否属于危险操作（host 模式下需要参数审批把关）。
 
-        双轨判定（满足任一即为危险工具）：
+        双轨判定（满足任一即为危险）：
         1. policy.execution == "command_in_container" —— bash 等命令执行类
            （容器不可用时降级到 host，命令任意性高，必须审批）
-        2. 工具声明了 dangerous_operations —— delete_file/move_file/copy_file/
-           file_write 等破坏性操作工具
+        2. 工具参数命中声明的 dangerous_operations —— **参数级判定**：
+           `read:/etc/`（路径前缀）、`write:C:\Windows\`（路径前缀）、
+           `delete_lines:`（操作参数匹配）、`rm -rf`（命令子串）。
+           常规读写（如 D:/myproject 内文件）不命中声明 → 非危险 → 直接放行，
+           不再"存在即危险"地全量弹审批（GAP 修复：消除 file_read/file_write
+           常规操作 100% 审批的过度打扰）。
 
         dangerous_operations 优先取 config_files 注入的 builtin_tools_config
         （plugin.json 声明，内核命名空间合并），其次 tool_registry 服务；
@@ -1100,18 +1242,78 @@ class SecurityCheckPlugin(IInputPlugin):
         Args:
             ctx: 插件执行上下文
             tool_name: 工具名称
+            tool_args: 工具参数字典（轨道 2 参数级判定用）
 
         Returns:
-            是否为危险工具
+            是否危险
         """
         # 轨道 1：命令执行类（policy.execution 判定）
         policy = _policy_loader.resolve(tool_name)
         if policy.execution == "command_in_container":
             return True
 
-        # 轨道 2：声明了 dangerous_operations 的工具
+        # 轨道 2：参数命中声明的 dangerous_operations（参数级判定）
         dangerous_ops = self._get_dangerous_operations(ctx, tool_name)
-        return bool(dangerous_ops)
+        if dangerous_ops and self._args_hit_dangerous_ops(tool_args, dangerous_ops):
+            return True
+        return False
+
+    # ── 轨道 2 参数级判定辅助 ──────────────────────────────────
+
+    _PATH_ARGS = ("path", "file_path", "directory", "dest", "target", "output_path", "working_dir")
+    _CMD_ARGS = ("command", "cmd")
+    _OP_ARGS = ("operation", "op", "action")
+
+    def _args_hit_dangerous_ops(self, tool_args: dict[str, Any] | None, ops: list[str]) -> bool:
+        """按参数内容判定是否命中 dangerous_operations 声明。
+
+        声明格式（与 config/tools/builtin_tools_config.yaml 对齐）：
+        - ``read:/etc/`` / ``write:C:\Windows\``：操作:路径前缀，匹配路径参数
+        - ``delete_lines:``：操作:（空模式），匹配操作参数值
+        - ``rm -rf``：裸命令模式，匹配 command/cmd 参数子串
+
+        无法解析的条目按裸命令模式处理（子串匹配，保守兜底）。
+
+        Args:
+            tool_args: 工具参数字典
+            ops: dangerous_operations 声明列表
+
+        Returns:
+            是否命中（命中 = 本次调用需要按危险处理）
+        """
+        if not tool_args:
+            return False
+        args = {k: str(v) for k, v in tool_args.items() if isinstance(v, (str, int, float))}
+
+        for raw in ops:
+            raw_s = str(raw)
+            if ":" in raw_s:
+                op_name, _, pattern = raw_s.partition(":")
+                if pattern:
+                    # 路径前缀匹配（大小写不敏感，分隔符归一化）
+                    norm_pattern = pattern.replace("\\", "/").lower()
+                    if not norm_pattern:
+                        continue
+                    for pk in self._PATH_ARGS:
+                        val = args.get(pk, "")
+                        if val and val.replace("\\", "/").lower().startswith(norm_pattern):
+                            return True
+                else:
+                    # 空模式：操作参数值匹配（如 file_write 的 operation=delete_lines）
+                    for ok in self._OP_ARGS:
+                        val = args.get(ok, "")
+                        if val and val.lower() == op_name.lower():
+                            return True
+            else:
+                # 裸命令模式：command/cmd 子串匹配
+                norm_cmd = raw_s.lower()
+                if not norm_cmd:
+                    continue
+                for ck in self._CMD_ARGS:
+                    val = args.get(ck, "")
+                    if val and norm_cmd in val.lower():
+                        return True
+        return False
 
     def _is_isolated(self, execution_contexts: list[dict[str, Any]]) -> bool:
         """判断当前任务是否为隔离模式。

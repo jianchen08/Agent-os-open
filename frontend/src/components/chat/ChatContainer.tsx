@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import { Loader2 } from '@/assets/icons'
+import { DeclaredWidgetLayer } from '@/components/schema/DeclaredWidgetLayer'
 import { useModelContextInfo } from '@/hooks/useModelContextInfo'
 import { getDefaults, getLLMConfig, type LLMDefaults } from '@/services/api/config'
 import { switchThinkingMode } from '@/services/api/thinkingMode'
@@ -388,6 +389,8 @@ export const ChatContainer = ({
       >
         {/* Godot 选中引用（实时镜像：选中出现 / 取消消失；选中非空发送时插件随消息注入引用） */}
         <GodotSelectionRow threadId={activeTabId || sessionId} />
+        {/* 插件声明式 widget（chat 空间）：权限模式选择器等（跟随当前选中管道标签） */}
+        <DeclaredWidgetLayer space="chat" />
         {/* key 强制切换标签时重建 ChatInput，使每个标签的输入状态（text/attachments/pendingFiles）独立 */}
         <ChatInput
           key={`input-${activeTabId || sessionId}`}

@@ -15,12 +15,15 @@ import sys
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
+# 先注入插件目录与 plugins/shared/（pipeline 命名空间包 + 裸名模块解析需要），
+# 再 import——消除对 pytest 收集顺序的依赖（自包含，可单独运行）。
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "plugins" / "shared"))
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "plugins" / "shared" / "pipeline" / "input" / "isolation_guard"))
+
 import pytest
 from isolation_types import IsolationLevel
 
 import tests._isolation_path  # noqa: F401
-
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "plugins" / "shared" / "pipeline" / "input" / "isolation_guard"))
 
 from pipeline.plugin import PluginContext
 from pipeline.types import StateKeys
@@ -35,17 +38,26 @@ def _make_guard(docker_available: bool = True) -> IsolationGuard:
     mock_policy.isolation = IsolationLevel.CONTAINER
     guard._decider.resolve = MagicMock(return_value=mock_policy)
     guard._get_task_metadata = MagicMock(return_value={"isolation_level": "isolated"})
+    # 容器落地注入 fake manager：docker 决策后直接返回容器 id，不触真实 IsolationManager
+    from types import SimpleNamespace
+
+    async def _goc(**kwargs):
+        return SimpleNamespace(env_id="container-test")
+
+    guard._manager = SimpleNamespace(get_or_create_environment=_goc)
     return guard
 
 
-def _make_ctx(agent_level: str | None = None) -> PluginContext:
-    """构造 tool_execute 上下文，可选注入 agent_level。"""
+def _make_ctx(agent_level: str | None = None, workspace: str | None = None) -> PluginContext:
+    """构造 tool_execute 上下文，可选注入 agent_level / workspace。"""
     state: dict = {
         StateKeys.CORE_TYPE: "tool_execute",
         StateKeys.RAW_TOOL_CALLS: [{"name": "bash_execute", "args": {"command": "ls"}}],
     }
     if agent_level is not None:
         state[StateKeys.AGENT_LEVEL] = agent_level
+    if workspace is not None:
+        state["workspace"] = workspace
     return PluginContext(state=state, config={}, _services={})
 
 
@@ -135,7 +147,7 @@ class TestSubtaskUnaffected:
     async def test_l2_goes_to_docker_when_available(self):
         """L2 + docker 可用 → 容器执行（主 agent 路由不应波及子任务）。"""
         guard = _make_guard(docker_available=True)
-        result = await guard.execute(_make_ctx("L2"))
+        result = await guard.execute(_make_ctx("L2", workspace="/host/ws"))
 
         contexts = result.state_updates.get("execution_contexts", [])
         assert contexts[0]["provider"] == "docker"

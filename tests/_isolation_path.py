@@ -14,8 +14,12 @@ import sys
 from pathlib import Path
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent
-_ISOLATION_DIR = _REPO_ROOT / "plugins" / "shared" / "system" / "isolation"
+_SYSTEM_DIR = _REPO_ROOT / "plugins" / "shared" / "system"
+_ISOLATION_DIR = _SYSTEM_DIR / "isolation"
 
-_s = str(_ISOLATION_DIR)
-if _s not in sys.path:
-    sys.path.insert(0, _s)
+# 先加 system/（isolation 命名空间包父目录，patch("isolation.decider.*") 需要），
+# 再加 isolation/ 子目录（平铺模块 import 需要）。
+for _d in (_SYSTEM_DIR, _ISOLATION_DIR):
+    _s = str(_d)
+    if _s not in sys.path:
+        sys.path.insert(0, _s)

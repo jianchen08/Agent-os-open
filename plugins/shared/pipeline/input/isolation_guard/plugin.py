@@ -1,14 +1,20 @@
 """隔离环境守卫 Input 插件。
 
-在工具执行前根据安全策略决定是否在容器内执行。
+在工具执行前根据安全策略决定是否在容器内执行，并负责**容器落地**：
 优先使用 IsolationDecider 从 isolation_policy.yaml 决策隔离级别，
-task metadata 可覆盖决策结果。
+task metadata 可覆盖决策结果；决策为 docker 的 bash_execute 经
+IsolationManager 按 workspace 幂等获取/创建容器并注入 _container_id
+（吸收原 session_isolation 插件的会话级容器语义，见 GAP 合并）。
 
 职责边界（SRP）：
-- 只管"执行环境"决策（container / host / denied）
+- 决策"执行环境"（container / host / denied）+ 容器落地注入
 - 不做审批（审批归 security_check 插件）
 - 不写 security.decision（仅 security_check 写）
 - blocked 信号通过 isolation.blocked 表达
+
+容器落地安全底线：容器不可达（服务缺失/创建失败）→ 对应调用标 blocked，
+**绝不降级 host 裸跑**——降级会让 security_check 的 task_isolated 审批豁免
+放行危险命令。
 
 State 命名空间：
     - execution_contexts : 各工具调用的执行上下文列表
@@ -19,7 +25,9 @@ from __future__ import annotations
 
 import logging
 import re
+import sys
 import time
+from pathlib import Path
 from typing import Any
 
 from decider import IsolationDecider
@@ -28,6 +36,16 @@ from pipeline.plugin import IInputPlugin, PluginContext, PluginResult
 from pipeline.types import ErrorPolicy, StateKeys
 
 logger = logging.getLogger(__name__)
+
+
+def _ensure_isolation_path() -> None:
+    """把 isolation 插件目录加入 sys.path（IsolationManager 所在）。"""
+    _here = Path(__file__).resolve().parent
+    _system_dir = _here.parents[2] / "system"
+    _iso_dir = _system_dir / "isolation"
+    for _p in (str(_system_dir), str(_iso_dir)):
+        if _p not in sys.path:
+            sys.path.insert(0, _p)
 
 
 class IsolationGuard(IInputPlugin):
@@ -85,6 +103,30 @@ class IsolationGuard(IInputPlugin):
         self._force_host = self._config.get("force_host", False)
         self._decider = IsolationDecider()
         self._enabled_by_agent: bool = True
+        # 环境服务（IsolationManager，懒加载；容器落地用）
+        self._manager: Any = None
+
+    # ── 环境服务对象（懒加载，插件进程内自持）────────────────────
+
+    def _get_manager(self) -> Any | None:
+        """懒加载 IsolationManager（服务不可用时返回 None，容器落地降级为 blocked）。"""
+        if self._manager is not None:
+            return self._manager
+        try:
+            _ensure_isolation_path()
+            from isolation.manager import IsolationManager  # noqa: PLC0415
+
+            self._manager = IsolationManager(
+                config_path=self._config.get("config_path"),
+            )
+            logger.info("[IsolationGuard] 环境服务已实例化")
+        except Exception as exc:
+            logger.warning(
+                "[IsolationGuard] 环境服务实例化失败，容器落地降级为 blocked | error=%s",
+                exc,
+            )
+            self._manager = None
+        return self._manager
 
     @staticmethod
     def _detect_docker() -> bool:
@@ -201,6 +243,33 @@ class IsolationGuard(IInputPlugin):
             "execution_contexts": execution_contexts,
         }
 
+        # ── 容器落地（吸收原 session_isolation 的会话级容器语义）──
+        # provider=docker 的 bash_execute 经 IsolationManager 按 workspace 幂等
+        # 获取/创建容器并注入 _container_id（bash tool.py 据此走 docker exec 通路）。
+        # 容器不可达（服务缺失/创建失败）→ 对应调用标 blocked，绝不降级 host 裸跑
+        # （降级会让 security_check 的 task_isolated 审批豁免放行危险命令）。
+        docker_ctxs = [c for c in execution_contexts if c.get("provider") == "docker"]
+        if docker_ctxs:
+            workspace = ctx.state.get("workspace") or task_metadata.get("workspace")
+            container_id = await self._get_or_create_container(workspace, ctx)
+            if container_id:
+                injected_calls = self._inject_container_id(
+                    tool_calls,
+                    {c["tool_name"] for c in docker_ctxs},
+                    container_id,
+                )
+                if injected_calls is not None:
+                    state_updates[StateKeys.RAW_TOOL_CALLS] = injected_calls
+            else:
+                for c in docker_ctxs:
+                    c["provider"] = "denied"
+                    c["blocked"] = True
+                    c["reason"] = "container_create_failed"
+                logger.warning(
+                    "[IsolationGuard] 容器落地失败，要求容器隔离的工具已阻止 | tools=%s",
+                    [c["tool_name"] for c in docker_ctxs],
+                )
+
         # 被策略阻止的工具写入 isolation.blocked，供路由拦截
         blocked_tools = [c for c in execution_contexts if c.get("blocked")]
         if blocked_tools:
@@ -213,6 +282,84 @@ class IsolationGuard(IInputPlugin):
             )
 
         return PluginResult(state_updates=state_updates)
+
+    # ── 容器落地辅助 ────────────────────────────────────────────
+
+    async def _get_or_create_container(
+        self,
+        workspace: str | None,
+        ctx: PluginContext,
+    ) -> str | None:
+        """经 IsolationManager 幂等获取/创建 workspace 容器（同 workspace 复用）。
+
+        Returns:
+            容器 id（env_id = workspace 派生的容器名）；服务不可用或创建失败返回 None
+            （调用方据此把对应调用标 blocked，不降级裸跑）。
+        """
+        if not workspace:
+            return None
+        manager = self._get_manager()
+        if manager is None:
+            return None
+        try:
+            # 用 isolation.* 命名空间路径 import，避免与插件本地 isolation_types 裸名冲突；
+            # manager 可能被外部注入（测试/降级路径），此处自行确保包路径存在。
+            _ensure_isolation_path()
+            import isolation.isolation_types as iso_types  # noqa: PLC0415
+
+            task_id = ctx.state.get(StateKeys.TASK_ID) or ""
+            env = await manager.get_or_create_environment(
+                task_id=task_id or "session",
+                task_type=iso_types.TaskType.ATOMIC,
+                operation_type=iso_types.OperationType.CODE_EXECUTION,
+                workspace=workspace,
+                isolation_level=iso_types.IsolationLevel.CONTAINER,
+            )
+            return getattr(env, "env_id", None) or getattr(env, "environment_id", None)
+        except Exception as exc:
+            logger.warning(
+                "[IsolationGuard] 容器获取/创建失败 | workspace=%s | error=%s",
+                workspace,
+                exc,
+            )
+            return None
+
+    @staticmethod
+    def _inject_container_id(
+        tool_calls: list[dict[str, Any]],
+        docker_tool_names: set[str],
+        container_id: str,
+    ) -> list[dict[str, Any]] | None:
+        """为 provider=docker 的 bash_execute 调用注入 _container_id。
+
+        仅在确有注入时返回新 tool_calls 列表（否则返回 None，调用方不覆盖 state）。
+        非 bash 工具不注入（_container_id 仅 bash tool.py 消费）；容器内固定挂载
+        workspace → /workspace，working_dir 未显式指定时补 /workspace。
+        """
+        injected_calls: list[dict[str, Any]] = []
+        injected = False
+        for tc in tool_calls:
+            new_tc = dict(tc)
+            if tc.get("name") == "bash_execute" and tc.get("name") in docker_tool_names:
+                args = new_tc.get("args", new_tc.get("arguments", {}))
+                if isinstance(args, str):
+                    import json  # noqa: PLC0415
+
+                    try:
+                        args = json.loads(args)
+                    except (json.JSONDecodeError, TypeError):
+                        args = {}
+                if not isinstance(args, dict):
+                    args = {}
+                args = dict(args)
+                args["_container_id"] = container_id
+                # 容器内固定挂载 /workspace：未显式指定 working_dir 时补容器路径
+                if not args.get("working_dir"):
+                    args["working_dir"] = "/workspace"
+                new_tc["args"] = args
+                injected = True
+            injected_calls.append(new_tc)
+        return injected_calls if injected else None
 
     def _decide_isolation(
         self,
@@ -286,12 +433,36 @@ class IsolationGuard(IInputPlugin):
             )
 
         # ── L1 主 agent 前置路由（force_host 之后，所有 docker 决策之前）──
-        # 任务级 isolation_level（默认 isolated）是给子任务的：子任务有独立
-        # 工作空间，可挂载进容器。L1 主 agent 没有任务工作空间（它直接在
-        # project_root 操作），强制进容器会因无 workspace 被拒（tool_core 报
-        # "工作空间未解析"）。L1 主 agent 的 bash_execute 一律路由到 host，
-        # 由 security_check 按 root_task 策略触发审批（require_confirmation）。
+        # 主 agent 默认没有任务工作空间（它直接在 project_root 操作），强制进
+        # 容器会因无 workspace 被拒（tool_core 报"工作空间未解析"）→ 路由到
+        # host，由 security_check 按 root_task 策略触发审批（require_confirmation）。
+        # 例外：主会话绑定了 workspace 且隔离级别为 isolated（会话级隔离语义，
+        # 原 session_isolation 插件吸收）→ 允许进容器，与子任务同语义。
         if tool_name == "bash_execute" and self._is_main_agent(ctx.state):
+            if metadata_workspace and metadata_isolation == "isolated":
+                if self._docker_available:
+                    logger.info(
+                        "[IsolationGuard] L1 主 agent bash_execute 会话隔离进容器 | tool=%s | ws=%s",
+                        tool_name,
+                        metadata_workspace,
+                    )
+                    return self._build_context(
+                        tool_name,
+                        "docker",
+                        "l1_main_agent_session_isolated",
+                        workspace=metadata_workspace,
+                    )
+                logger.warning(
+                    "[IsolationGuard] 主 agent 会话要求容器但 Docker 不可用，拒绝执行 | tool=%s",
+                    tool_name,
+                )
+                return self._build_context(
+                    tool_name,
+                    "denied",
+                    "docker_unavailable_container_required",
+                    workspace=metadata_workspace,
+                    blocked=True,
+                )
             logger.info(
                 "[IsolationGuard] L1 主 agent bash_execute 路由到 host（无任务工作空间，由 security_check 审批） | tool=%s",
                 tool_name,
