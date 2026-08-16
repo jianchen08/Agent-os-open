@@ -1715,7 +1715,7 @@ async def _handle_artifact_upload(raw_body: str, headers: dict[str, str]) -> dic
     url = f"/uploads/{saved_filename}"
 
     # 存元数据到 DiskFileStorage
-    from multimodal import AttachmentInfo, MediaType  # noqa: PLC0415
+    from multimodal.mm_types import AttachmentInfo, MediaType  # noqa: PLC0415
     attachment = AttachmentInfo(
         file_id=file_id,
         filename=filename,
