@@ -793,6 +793,38 @@ impl SqliteStore {
         let pid = pipeline_id.to_string();
         let now = chrono::Utc::now().to_rfc3339();
 
+        // GAP-3：整批一个显式事务——blob 与 slot 两条写入要么都提交要么都回滚。
+        // （此前各自 autocommit：G8 exit(75) 可在两语句之间截断进程，留下
+        // 「slot 落了、blob_id NULL」的半态——e2e 消息正文丢失的病根。）
+        // 语义等价 rusqlite 事务：出错回滚整批，不残留部分写入。
+        if let Err(e) = conn.execute_batch("BEGIN") {
+            return Err(StorageError::Database(format!("begin tx: {e}")));
+        }
+        let result = self.apply_messages_ops_in_tx(&conn, tenant_id, &pid, ops, &now);
+        match result {
+            Ok(()) => {
+                if let Err(e) = conn.execute_batch("COMMIT") {
+                    let _ = conn.execute_batch("ROLLBACK");
+                    return Err(StorageError::Database(format!("commit tx: {e}")));
+                }
+                Ok(())
+            }
+            Err(e) => {
+                let _ = conn.execute_batch("ROLLBACK");
+                Err(e)
+            }
+        }
+    }
+
+    /// 事务体：逐 op 写表（原逻辑抽出，调用方负责 BEGIN/COMMIT/ROLLBACK）。
+    fn apply_messages_ops_in_tx(
+        &self,
+        conn: &Connection,
+        tenant_id: &str,
+        pid: &str,
+        ops: &[serde_json::Value],
+        now: &str,
+    ) -> Result<(), StorageError> {
         for op in ops {
             let kind = op.get("op").and_then(|v| v.as_str()).unwrap_or("");
             match kind {

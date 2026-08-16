@@ -367,3 +367,31 @@ fn slot_cursor_paging_works_across_gaps() {
         "before_sequence=4 应返回 0,3（gap 不影响）"
     );
 }
+
+// ═══════════════════════════════════════════════════════════
+// GAP-3：写入批次原子性（G8 重启在途消息 blob NULL 的病根）
+// ═══════════════════════════════════════════════════════════
+
+/// GAP-3 不变量：任何批次的写入落库后，message_slots 行的 blob_id 恒非空。
+/// （此前 blob/slot 各自 autocommit，G8 exit(75) 可在两条语句间截断——
+/// 事务包裹后 slot 可见 ⟹ blob 已提交，消息正文不再丢失。）
+#[test]
+fn test_apply_ops_all_slots_have_blob() {
+    let store = agentos_engine::SqliteStore::open_memory().unwrap();
+    store
+        .apply_messages_ops_to_table("p1", "t1", &[
+            serde_json::json!({"op":"set","seq":1,"msg":{"role":"user","content":"a"}}),
+            serde_json::json!({"op":"set","seq":2,"msg":{"role":"assistant","content":"b"}}),
+            serde_json::json!({"op":"insert","at":1,"msg":{"role":"system","content":"c"}}),
+            serde_json::json!({"op":"set","seq":9,"_message_id":"m9","msg":{"role":"user","content":"d"}}),
+        ])
+        .unwrap();
+    let rows = store.load_message_history("p1", "t1").unwrap();
+    assert!(rows.len() >= 4, "四条消息应全部落库：{rows:?}");
+    // decode 成功即意味着 blob 完整（NULL blob 行会变成空对象——反向验证内容非空）
+    for m in &rows {
+        let has_content = m.get("content").and_then(|c| c.as_str()).is_some_and(|s| !s.is_empty())
+            || m.get("role").is_some();
+        assert!(has_content, "每条消息应可从 blob 完整重建：{m:?}");
+    }
+}
