@@ -19,5 +19,8 @@
     "dependencies": [],
     "permissions": {},
     "error_policy": "skip",
-    "priority": 5
+    "priority": 5,
+    "granted_capabilities": [
+        "pipeline-state"
+    ]
 }

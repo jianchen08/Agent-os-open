@@ -46,47 +46,81 @@ def _ensure_isolation_path() -> None:
             sys.path.insert(0, _p)
 
 
+# ── GAP-1 统一：state 聚合读取器（server.py on_load 注入，pipeline-state capability）──
+_state_reader: Any = None
+
+
+def set_state_reader(reader: Any) -> None:
+    """注入 state 聚合读取器（sidecar on_load 经 pipeline-state capability）。"""
+    global _state_reader  # noqa: PLW0603
+    _state_reader = reader
+
+
 class _ExecutionContextTaskTree:
-    """0.2 最小 task_tree：从 execution_context 重建父链（sidecar 无 task_service）。
+    """task_tree 接口的 state 直读实现（GAP-1 统一：task = pipeline）。
 
     服务内部 `_find_container_workspace` / `_start_subtask` 依赖
-    `task_tree.get_task(task_id)` 返回带 `parent_task_id` / `metadata` 的对象：
+    `task_tree.get_task(task_id)` 返回带 `parent_task_id` / `metadata` 的对象——
+    统一后不再伪造（0.1 的 task_tree.get_task 仿真已退役），改为读管道
+    state 聚合行（lineage.parent_pipeline_id = 父链、task.scope = 容器标记）：
 
-    - `get_task(当前任务)` → `parent_task_id`（execution_context.parent_task_id，
-      task_submit 提交时写入）；
-    - `get_task(父任务)` → `metadata.task_scope="container"` +
-      `container_workspace`（由工作空间根推导 `container_{parent_id}`），
-      供容器直接子任务定位容器空间；
-    - 其余查询返回 None（降级为无父链，服务内部已有 try/except 兜底）。
+    - `get_task(当前任务)` → `parent_task_id`（state 顶层扁平键
+      `lineage.parent_pipeline_id`，引擎出生写入）；
+    - `get_task(父任务)` → `metadata.task_scope`（父行 `task.scope`，
+      经 state 聚合读取）+ `container_workspace`（工作空间根推导
+      `container_{parent_id}`），供容器直接子任务定位容器空间；
+    - 聚合不可用 → None（服务内部已有 try/except 兜底）。
     """
 
     def __init__(self, plugin: WorkspaceLifecyclePlugin, manager: Any) -> None:
         self._plugin = plugin
         self._manager = manager
 
+    def _read_rows(self) -> list[dict[str, Any]]:
+        reader = _state_reader
+        if reader is None:
+            return []
+        try:
+            rows = reader()
+            if asyncio.iscoroutine(rows):
+                # sync 上下文不可 await——读面未同步化时降级为空
+                return []
+            return [r for r in rows if isinstance(r, dict)] if isinstance(rows, list) else []
+        except Exception:
+            return []
+
     def get_task(self, task_id: str):
         state = self._plugin._last_state or {}
-        ec = state.get("execution_context")
-        if not isinstance(ec, dict):
-            return None
-        parent_id = ec.get("parent_task_id")
         current_id = state.get("task_id")
-        if task_id == current_id:
-            return SimpleNamespace(id=task_id, parent_task_id=parent_id, metadata={})
-        if parent_id and task_id == parent_id:
-            try:
-                container_path = str(self._manager._get_workspace_root() / f"container_{parent_id}")
-            except Exception:
-                container_path = ""
-            return SimpleNamespace(
-                id=task_id,
-                parent_task_id=None,
-                metadata={"task_scope": "container", "container_workspace": container_path},
-            )
+        rows = self._read_rows()
+        row = next(
+            (r for r in rows if str(r.get("pipeline_id") or "") == task_id),
+            None,
+        )
+        if row is None and task_id != current_id:
+            return None
+        if task_id == current_id and row is None:
+            # 当前管道行缺失时用本 state 的 lineage 扁平键兜底
+            parent_id = str(state.get("lineage.parent_pipeline_id") or "")
+            return SimpleNamespace(id=task_id, parent_task_id=parent_id or None, metadata={})
+        parent_id = str(row.get("lineage.parent_pipeline_id") or "")
+        scope = str(row.get("task.scope") or "")
+        if task_id == current_id or task_id == parent_id or scope:
+            if scope == "container" or task_id == parent_id:
+                try:
+                    container_path = str(self._manager._get_workspace_root() / f"container_{task_id}")
+                except Exception:
+                    container_path = ""
+                return SimpleNamespace(
+                    id=task_id,
+                    parent_task_id=parent_id or None,
+                    metadata={"task_scope": "container", "container_workspace": container_path},
+                )
+            return SimpleNamespace(id=task_id, parent_task_id=parent_id or None, metadata={})
         return None
 
     def save_task(self, task: Any) -> Any:
-        """持久化降级 no-op（ws_meta 由 state/execution_context 承载）。"""
+        """持久化 no-op（ws_meta 由 state 承载——YAML 只读镜像，统一后不写）。"""
         return task
 
 

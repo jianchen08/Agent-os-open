@@ -1246,7 +1246,14 @@ class TaskTool(BuiltinTool):
     async def _change_status(  # noqa: PLR0911
         self, inputs: dict[str, Any], parent_agent_level: int
     ) -> ToolExecutionResult:
-        """变更容器任务状态。"""
+        """变更任务状态（GAP-1 统一：状态真值在引擎——手动改状态退役）。
+
+        统一后的合法映射（由管道能力表达，不再写 YAML 状态机）：
+        - suspended → suspend_pipeline（挂起 = 停止）
+        - running → resume_pipeline（恢复）
+        - completed/failed/pending/timeout → 拒绝（终态由 run 终态决定，
+          不可手动改写；timeout 由引擎超时表达）
+        """
 
         if parent_agent_level != 1:
             return create_failure_result(
@@ -1262,125 +1269,58 @@ class TaskTool(BuiltinTool):
                 error_code="MISSING_TASK_ID",
             )
 
-        try:
-            service = self._get_task_service()
+        target_status = str(inputs.get("target_status") or "").lower()
 
-        except RuntimeError as e:
-            return create_failure_result(error=str(e), error_code="SERVICE_UNAVAILABLE")
-
-        task = service.get_task(task_id)
-
-        if task is None:
-            return create_failure_result(
-                error=f"任务不存在: {task_id}",
-                error_code="TASK_NOT_FOUND",
-            )
-
-        # P0-3 纵深防御：变更容器状态前显式校验归属（L1 会话隔离），
-        # 防 L1 跨会话改他人容器任务。层级校验已在上方完成。
-        has_permission, error_msg = self._check_permission(task, parent_agent_level, inputs)
-
-        if not has_permission:
-            return create_failure_result(
-                error=error_msg,
-                error_code="INSUFFICIENT_PERMISSION",
-            )
-
-        # 用 task_scope 字段判断是否为容器任务（而非用 list_subtasks 是否为空判断）。
-
-        is_container = (task.metadata or {}).get("task_scope") == "container"
-
-        if not is_container:
-            return create_failure_result(
-                error=f"任务 {task_id} 不是容器任务（task_scope != container），change 仅用于容器任务",
-                error_code="NOT_A_CONTAINER",
-            )
-
-        # 目标状态必填
-
-        target_status_raw = inputs.get("status")
-
-        if not target_status_raw:
-            return create_failure_result(
-                error="change 操作必须提供 status（目标状态）",
-                error_code="MISSING_STATUS",
-            )
-
-        from datetime import datetime  # noqa: PLC0415
-
-        reason = inputs.get("container_reason", inputs.get("reason", ""))
-
-        target_status = target_status_raw
-
-        cleanup_info: dict[str, Any] = {}
-
-        # 仅 completed 时清理子任务 worktree，其它状态纯改
-
-        if target_status in {TaskStatus.COMPLETED.value, TaskStatus.COMPLETED}:
-            subtasks = service.list_subtasks(task_id)
-
-            try:
-                cleanup_info = await service._cleanup_subtask_worktrees(task, subtasks)
-
-            except Exception as e:
-                logger.warning(
-                    "[TaskTool] 容器 %s 子任务 worktree 清理异常 (non-fatal): %s",
-                    task_id,
-                    e,
+        if target_status in ("suspended", "stopped", "paused"):
+            if _pipeline_executor is None:
+                return create_failure_result(
+                    error="pipeline-executor capability 未注入，无法挂起任务",
+                    error_code="CONTINUE_FAILED",
                 )
-
-                cleanup_info = {
-                    "total_subtasks": len(subtasks),
-                    "cleaned_count": 0,
-                    "skipped_count": 0,
-                    "error_count": 1,
-                    "errors": [str(e)],
-                }
-
-        try:
-            await service.force_transition(task.id, target_status)
-
-            task.completed_at = datetime.now().isoformat()
-
-            if reason:
-                if task.metadata is None:
-                    task.metadata = {}
-
-                task.metadata["container_reason"] = reason
-
-            await service.save_task(task)
-
-            logger.info("[TaskTool] 容器状态变更: %s → %s — %s", task_id, target_status, reason)
-
-            result_data: dict[str, Any] = {
-                "task_id": task.id,
-                "status": str(target_status),
-                "message": f"容器 {task_id} 状态已变更为 {target_status}",
-            }
-
-            if cleanup_info:
-                result_data["cleanup"] = cleanup_info
-
+            try:
+                await _pipeline_executor({
+                    "method": "suspend_pipeline",
+                    "params": {"pipeline_id": task_id},
+                })
+            except Exception as exc:  # noqa: BLE001
+                return create_failure_result(
+                    error=f"挂起任务失败: {exc}",
+                    error_code="INVALID_TRANSITION",
+                )
             return create_success_result(
-                data=result_data,
-                metadata={"action": "change_status"},
+                data={"task_id": task_id, "changed": True, "new_status": "suspended"},
+                metadata={"action": "task_change"},
             )
 
-        except InvalidTransitionError as e:
-            return create_failure_result(
-                error=f"容器状态变更失败（状态转换不合法）: {e}",
-                error_code="INVALID_TRANSITION",
+        if target_status in ("running", "resumed"):
+            if _pipeline_executor is None:
+                return create_failure_result(
+                    error="pipeline-executor capability 未注入，无法恢复任务",
+                    error_code="CONTINUE_FAILED",
+                )
+            try:
+                await _pipeline_executor({
+                    "method": "resume_pipeline",
+                    "params": {"pipeline_id": task_id},
+                })
+            except Exception as exc:  # noqa: BLE001
+                return create_failure_result(
+                    error=f"恢复任务失败: {exc}",
+                    error_code="INVALID_TRANSITION",
+                )
+            return create_success_result(
+                data={"task_id": task_id, "changed": True, "new_status": "running"},
+                metadata={"action": "task_change"},
             )
 
-        except Exception as e:
-            logger.error("[TaskTool] 容器状态变更失败: %s", e)
+        return create_failure_result(
+            error=(
+                f"目标状态 {target_status or '(空)'} 不可手动设置：统一后任务状态"
+                "由 run 终态/挂起恢复决定（可设置：suspended/running）"
+            ),
+            error_code="INVALID_STATUS",
+        )
 
-            return create_failure_result(
-                error=f"容器状态变更失败: {str(e)}",
-                error_code="CONTAINER_CHANGE_FAILED",
-            )
-
-    # ── 批量操作 ──
 
     async def _batch_tasks(self, inputs: dict[str, Any], parent_agent_level: int) -> ToolExecutionResult:
         """批量任务操作，每个任务独立返回结果。"""

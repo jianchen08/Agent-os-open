@@ -616,7 +616,7 @@ def get_task(
     response_model=TaskResponse,
     summary="更新任务",
 )
-def update_task(
+async def update_task(
     task_id: str,
     body: TaskUpdate,
     _user: dict = Depends(require_auth),
@@ -645,44 +645,43 @@ def update_task(
 
     """
 
-    # 统一通过 TaskService 更新任务
+    # GAP-1 统一：任务字段真值在 state（出生即定，不可经 UI 改写）——
+    # update 语义退役，端点只读返回当前 state 行（status 的变更由 run 终态 /
+    # 挂起恢复表达；描述/优先级在提交时已定型）。
 
-    task_service = _get_task_service()
+    # 读 state 聚合行（task = pipeline）
+    from routes_missing import _channel_api_plugin  # noqa: PLC0415
 
-    task = None
+    try:
+        handle = _channel_api_plugin().get_capability("pipeline-state")
+        rows = await handle.call("list", {})
+    except Exception:
+        rows = None
 
-    if task_service is not None:
-        tm = task_service.get_task(task_id)
+    if not isinstance(rows, list):
+        raise APIError(
+            status_code=503,
+            error_code="API_TIME_2005",
+            message="state 聚合不可用，无法读取任务",
+        )
 
-        if tm is not None:
-            # 更新任务字段
+    row = next(
+        (r for r in rows if str(r.get("pipeline_id") or "") == task_id),
+        None,
+    )
 
-            updates: dict[str, Any] = {}
-
-            if body.description is not None:
-                updates["description"] = body.description
-
-            if body.status is not None:
-                from tasks.task_types import TaskStatus  # noqa: PLC0415
-
-                updates["status"] = TaskStatus(body.status)
-
-            if body.priority is not None:
-                updates["priority"] = body.priority
-
-            if updates:
-                task_service.update_task_fields_sync(task_id, **updates)
-
-            task = _task_model_to_dict(tm)
-
-    if task is None:
+    if row is None:
         raise APIError(
             status_code=404,
             error_code="API_NOTF_2004",
             message="任务不存在或已被删除",
         )
 
-    return _task_to_response(task)
+    return _task_to_response({
+        "id": task_id,
+        "title": str(row.get("task.goal") or task_id),
+        "status": str(row.get("task.status") or "pending"),
+    })
 
 
 @router.delete(
@@ -965,94 +964,6 @@ def evaluate_task(
             results=[],
         )
 
-
-def _cancel_running_pipeline(task_id: str) -> bool:
-    """取消任务关联的运行中管道（best-effort）。
-
-
-
-    通过 TaskWorker.cancel_pipeline 强制取消 asyncio.Task，
-
-    触发 PipelineEngine 的 CancelledError，真正停止执行。
-
-
-
-    Args:
-
-        task_id: 任务 ID
-
-
-
-    Returns:
-
-        是否成功取消了运行中的管道
-
-    """
-
-    try:
-        from infrastructure.service_provider import get_service_provider  # noqa: PLC0415
-
-        task_worker = get_service_provider().get("task_worker")
-
-        if task_worker is None:
-            return False
-
-        return task_worker.cancel_pipeline(task_id)
-
-    except Exception as exc:  # noqa: BLE001
-        logger.warning(
-            "取消运行中管道失败，返回 False | task_id=%s err=%s", task_id, exc, exc_info=True
-        )
-        return False
-
-
-def _cancel_child_pipelines(task_id: str, task_service: Any) -> int:
-    """递归取消任务及其所有子任务的运行中管道。
-
-
-
-    cancel_task_cascade 只将子任务状态标记为 failed，
-
-    不会取消子任务关联的 PipelineEngine。此函数补充这一缺失，
-
-    确保级联取消时所有子管道也被停止。
-
-
-
-    Args:
-
-        task_id: 父任务 ID
-
-        task_service: TaskService 实例
-
-
-
-    Returns:
-
-        成功取消的管道数量
-
-    """
-
-    cancelled = 0
-
-    try:
-        subtasks = task_service.list_by_parent(task_id)
-
-    except Exception as exc:  # noqa: BLE001
-        logger.warning(
-            "list_by_parent 失败，返回 0 | task_id=%s err=%s", task_id, exc, exc_info=True
-        )
-        return 0
-
-    for subtask in subtasks:
-        if _cancel_running_pipeline(subtask.id):
-            cancelled += 1
-
-        cancelled += _cancel_child_pipelines(subtask.id, task_service)
-
-    return cancelled
-
-
 @router.post(
     "/{task_id}/pause",
     summary="暂停任务",
@@ -1095,56 +1006,26 @@ async def pause_task(
 
     """
 
-    task_service = _get_task_service()
-
-    if task_service is None:
+    # GAP-1 统一：暂停 = 挂起任务管道（suspend_pipeline，run 终态回写 task.status）
+    if not await _suspend_task_pipeline(task_id):
         raise APIError(
-            status_code=503,
-            error_code="API_TIME_2005",
-            message="TaskService 不可用，无法暂停任务",
-        )
-
-    try:
-        await task_service.pause_task(task_id)
-
-    except KeyError:
-        raise APIError(  # noqa: B904
             status_code=404,
             error_code="API_NOTF_2004",
-            message=f"任务不存在: {task_id}",
+            message=f"任务不存在或无运行中 run: {task_id}",
         )
-
-    except Exception as exc:
-        from tasks.state_machine import InvalidTransitionError  # noqa: PLC0415
-
-        if isinstance(exc, InvalidTransitionError):
-            raise APIError(  # noqa: B904
-                status_code=400,
-                error_code="API_VAL_2003",
-                message=str(exc),
-            )
-
-        raise APIError(  # noqa: B904
-            status_code=500,
-            error_code="TASK_099",
-            message=f"暂停任务失败: {exc}",
-        )
-
-    pipeline_cancelled = _cancel_running_pipeline(task_id)
 
     logger.info(
-        "用户 %s 暂停任务 %s (pipeline_cancelled=%s)",
+        "用户 %s 暂停任务 %s（suspend_pipeline）",
         _user.get("username"),
         task_id,
-        pipeline_cancelled,
     )
 
     return {
         "success": True,
         "task_id": task_id,
         "paused_count": 1,
-        "pipeline_cancelled": pipeline_cancelled,
-        "message": "任务已暂停" + ("，运行中管道已取消" if pipeline_cancelled else ""),
+        "pipeline_cancelled": True,
+        "message": "任务已暂停（管道已挂起）",
     }
 
 
@@ -1186,46 +1067,13 @@ async def resume_task(
 
     """
 
-    task_service = _get_task_service()
-
-    if task_service is None:
+    # GAP-1 统一：恢复 = resume_pipeline（按管道恢复最新 suspended run）
+    if not await _resume_task_pipeline(task_id):
         raise APIError(
-            status_code=503,
-            error_code="API_TIME_2005",
-            message="TaskService 不可用，无法恢复任务",
-        )
-
-    try:
-        await task_service.resume_task(task_id)
-
-    except KeyError:
-        raise APIError(  # noqa: B904
             status_code=404,
             error_code="API_NOTF_2004",
-            message=f"任务不存在: {task_id}",
+            message=f"任务不存在或无挂起 run: {task_id}",
         )
-
-    except Exception as exc:
-        from tasks.state_machine import InvalidTransitionError  # noqa: PLC0415
-
-        if isinstance(exc, InvalidTransitionError):
-            raise APIError(  # noqa: B904
-                status_code=400,
-                error_code="API_VAL_2003",
-                message=str(exc),
-            )
-
-        raise APIError(  # noqa: B904
-            status_code=500,
-            error_code="TASK_099",
-            message=f"恢复任务失败: {exc}",
-        )
-
-    task_submitted = await _submit_task_event(
-        title=task_id,
-        task_id=task_id,
-        user_id=_user["sub"],
-    )
 
     logger.info(
         "用户 %s 恢复任务 %s (task_submitted=%s)",
@@ -1297,48 +1145,13 @@ async def cancel_task(
 
     # 获取任务并校验状态
 
-    task = task_service.get_task(task_id)
-
-    if task is None:
-        raise APIError(
-            status_code=404,
-            error_code="API_NOTF_2004",
-            message=f"任务不存在: {task_id}",
-        )
-
-    # 只有非终态任务可以取消（pending/running/stopped/evaluating）
-
-    from tasks.task_types import TaskStatus  # noqa: PLC0415
-
-    cancellable_statuses = {
-        TaskStatus.PENDING,
-        TaskStatus.RUNNING,
-        TaskStatus.STOPPED,
-        TaskStatus.EVALUATING,
-    }
-
-    if task.status not in cancellable_statuses:
-        raise APIError(
-            status_code=400,
-            error_code="API_VAL_2003",
-            message=f"当前状态无法取消: {task.status.value}",
-        )
-
     reason = (body or {}).get("reason", "用户请求取消")
 
-    await task_service.cancel_task(task_id, reason=f"已取消: {reason}")
+    # GAP-1 统一：取消 = 挂起任务管道 + lineage 级联（不再写 YAML 状态机；
+    # 取消语义由 run 终态 suspended 表达，状态真值在 state）
+    pipeline_cancelled = await _suspend_task_pipeline(task_id)
 
-    # 步骤2: 级联取消所有子任务
-
-    cascaded = await task_service.cancel_task_cascade(task_id, reason=reason)
-
-    # 步骤3: 取消运行中管道
-
-    is_container = task.metadata.get("task_scope") == "container"
-
-    pipeline_cancelled = False if is_container else _cancel_running_pipeline(task_id)
-
-    _cancel_child_pipelines(task_id, task_service)
+    cascaded = await _cascade_suspend_children(task_id)
 
     logger.info(
         "用户 %s 取消任务 %s (pipeline_cancelled=%s, cascaded=%d)",
@@ -1374,6 +1187,55 @@ async def cancel_task(
         "message": "任务已取消",
         "cascaded_subtasks": cascaded,
     }
+
+
+async def _suspend_task_pipeline(task_id: str) -> bool:
+    """GAP-1 统一：暂停/取消任务 = 挂起任务管道（suspend_pipeline）。
+
+    run 终态 suspended → 内核回写 task.status=suspended。返回是否派发成功。
+    """
+    try:
+        from routes_missing import _channel_api_plugin  # noqa: PLC0415
+
+        handle = _channel_api_plugin().get_capability("pipeline-executor")
+        resp = await handle.call("suspend_pipeline", {"pipeline_id": task_id})
+        return bool(resp and resp.get("run_id") is not None)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("[routes_tasks] suspend_pipeline 失败 | task_id=%s | err=%s", task_id, exc)
+        return False
+
+
+async def _resume_task_pipeline(task_id: str) -> bool:
+    """GAP-1 统一：恢复任务 = resume_pipeline（按管道恢复最新 suspended run）。"""
+    try:
+        from routes_missing import _channel_api_plugin  # noqa: PLC0415
+
+        handle = _channel_api_plugin().get_capability("pipeline-executor")
+        resp = await handle.call("resume_pipeline", {"pipeline_id": task_id})
+        return bool(resp and resp.get("run_id") is not None)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("[routes_tasks] resume_pipeline 失败 | task_id=%s | err=%s", task_id, exc)
+        return False
+
+
+async def _cascade_suspend_children(parent_task_id: str) -> int:
+    """GAP-1 统一：级联挂起子任务管道（state 聚合中 lineage 子管道逐个挂起）。"""
+    cascaded = 0
+    try:
+        from routes_missing import _channel_api_plugin  # noqa: PLC0415
+
+        handle = _channel_api_plugin().get_capability("pipeline-state")
+        rows = await handle.call("list", {})
+        if not isinstance(rows, list):
+            return 0
+        for row in rows:
+            if str(row.get("lineage.parent_pipeline_id") or "") == parent_task_id:
+                child_id = str(row.get("pipeline_id") or "")
+                if child_id and await _suspend_task_pipeline(child_id):
+                    cascaded += 1
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("[routes_tasks] 级联挂起失败 | task_id=%s | err=%s", parent_task_id, exc)
+    return cascaded
 
 
 async def _submit_task_event(
