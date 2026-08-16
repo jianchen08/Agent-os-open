@@ -170,6 +170,45 @@ class TestTranslatePackage:
         assert m["source"]["dsh"]["vendor_pinned"]["commit"] == DSH_SOURCE_COMMIT
         assert m["source"]["dsh"]["vendor_pinned"]["package_version"] == "0.1.0-rc.5"
 
+    def test_dsh_dir_client_scanned(self, tmp_path: Path):
+        """modlens 布局（client 面在 dsh/*.js）的 settings 槽位可扫出（registry 视觉类）。"""
+        pkg = tmp_path / "modlens"
+        (pkg / "dsh").mkdir(parents=True)
+        (pkg / "package.json").write_text(
+            json.dumps({
+                "name": "@liustack/modlens",
+                "version": "3.17.3",
+                "dsh": {"bundle": {"patch": "./cordis.patch.yml"}, "client": {"platform": "web", "immediately": True}},
+            }),
+            encoding="utf-8",
+        )
+        (pkg / "dsh" / "client.js").write_text(
+            "yield ctx.slots.register({ name: 'settings.plugin.item', id: 'modlens', order: 30 }, Card);\n",
+            encoding="utf-8",
+        )
+        m = translate_package(pkg)
+        assert m["client"]["is_client_plugin"] is True
+        slots = m["client"]["slots"]
+        assert "settings.plugin.item" in slots
+        assert slots["settings.plugin.item"]["lingxi_slot"] == "settingsPanels"
+        assert m["client"]["renderers"] == []
+
+    def test_extra_tools_flag(self, tmp_path: Path):
+        """含 lib/index.js 的工具包被标记为通道 A 可装载（extra-tools）。"""
+        pkg = tmp_path / "tool-time"
+        (pkg / "lib").mkdir(parents=True)
+        (pkg / "lib" / "index.js").write_text("export const apply = () => {};\n", encoding="utf-8")
+        (pkg / "package.json").write_text(
+            json.dumps({"name": "@deepseek-ai/dsh-tool-time", "version": "0.0.1"}),
+            encoding="utf-8",
+        )
+        m = translate_package(pkg)
+        assert m["backend"]["extra_tools"] is True
+        # 无 lib/ 的包（服务类等）不标
+        (pkg / "lib").rename(tmp_path / "lib-backup")
+        m2 = translate_package(pkg)
+        assert m2["backend"]["extra_tools"] is False
+
 
 class TestToLingxiToolEntry:
     def test_contract_passthrough(self):
@@ -369,25 +408,26 @@ class TestRealRuntimeE2E:
         assert any(p.replace("\\", "/").endswith("dsh_adapter/plugin.json") for p in out["data"]["paths"]), out["data"]
 
 
-# ── dsh_plugins/ 装载（真实 npm 下载包，离线验证） ─────────────────────
+# ── dsh_plugins/ 装载（真实 registry 插件包，离线验证） ────────────────
 
 
 class TestInstalledDshPlugins:
     """适配器目录下已放置的 DSH 插件包被发现并正确翻译（装载即生效）。
 
-    2026-08-16 起 dsh_plugins/ 清空：npm 演示包（ui-tool/ui-theme/ui-primitives）
-    属端到端验证用 demo，已随其他演示插件一并清理。此测试改为验证空装载
-    行为（发现为空、翻译零包、管理工具仍声明）。
+    2026-08-16 起 dsh_plugins/ 清空过 npm 演示包；随后放入 registry 真实包
+    （dsh-tool-time / dsh-hooks / dsh-interconnect / modlens）做四类试装。
+    空目录行为用 base_dir 隔离验证。
     """
 
-    def test_empty_plugins_dir_discovered(self):
-        packages = discover_dsh_plugins()
+    def test_empty_dir_discovered(self, tmp_path: Path):
+        packages = discover_dsh_plugins(tmp_path)
         assert packages == [], packages
 
-    def test_empty_installed_plugins_loaded(self):
+    def test_installed_plugins_loaded(self):
         loaded = load_installed_plugins()
-        assert loaded["count"] == 0
-        assert loaded["packages"] == []
+        assert loaded["count"] >= 1
+        packages = {p["source"]["package"] for p in loaded["packages"]}
+        assert "@deepseek-ai/dsh-tool-time" in packages, packages
 
     def test_manifest_declares_list_tool(self):
         import json as _json  # noqa: PLC0415

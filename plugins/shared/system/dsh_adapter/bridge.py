@@ -43,11 +43,13 @@ class DshRuntimeBridge:
         cwd: str | None = None,
         call_timeout_s: float = 120.0,
         boot_timeout_s: float = 60.0,
+        extra_plugins_dir: str | None = None,
     ) -> None:
         self._repo_root = repo_root or os.environ.get("AGENTOS_DSH_REPO_ROOT") or _DEFAULT_REPO_ROOT
         self._cwd = cwd or _DEFAULT_CWD
         self._call_timeout_s = call_timeout_s
         self._boot_timeout_s = boot_timeout_s
+        self._extra_plugins_dir = extra_plugins_dir
         self._proc: asyncio.subprocess.Process | None = None
         self._id_counter = 0
         self._pending: dict[int, asyncio.Future[dict[str, Any]]] = {}
@@ -71,6 +73,8 @@ class DshRuntimeBridge:
                 "(set AGENTOS_DSH_REPO_ROOT to a built deepseek-harness checkout)"
             )
         env = {**os.environ, "AGENTOS_DSH_REPO_ROOT": self._repo_root}
+        if self._extra_plugins_dir:
+            env["AGENTOS_DSH_EXTRA_PLUGINS_DIR"] = self._extra_plugins_dir
         self._proc = await asyncio.create_subprocess_exec(
             "node",
             str(_RUNTIME_SCRIPT),
@@ -217,11 +221,11 @@ class DshRuntimeBridge:
 _bridge: DshRuntimeBridge | None = None
 
 
-def get_bridge() -> DshRuntimeBridge:
-    """取（惰性创建）共享桥实例。"""
+def get_bridge(extra_plugins_dir: str | None = None) -> DshRuntimeBridge:
+    """取（惰性创建）共享桥实例；首次创建时注入外部工具包装载区。"""
     global _bridge  # noqa: PLW0603
     if _bridge is None:
-        _bridge = DshRuntimeBridge()
+        _bridge = DshRuntimeBridge(extra_plugins_dir=extra_plugins_dir)
     return _bridge
 
 

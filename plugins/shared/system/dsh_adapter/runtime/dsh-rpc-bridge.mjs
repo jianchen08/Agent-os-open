@@ -23,12 +23,19 @@
  */
 
 import { createInterface } from 'node:readline'
+import { existsSync, readdirSync } from 'node:fs'
+import { join } from 'node:path'
+import { pathToFileURL } from 'node:url'
 
 const DSH_REPO_ROOT = process.env.AGENTOS_DSH_REPO_ROOT ?? 'D:/reference_repos/deepseek-harness'
 const CLI_MODULES = `${DSH_REPO_ROOT}/apps/cli/node_modules/@deepseek-ai`
 const PKG = (name) => `file:///${DSH_REPO_ROOT}/apps/cli/node_modules/@deepseek-ai/${name}/lib/index.js`
 // subprocess-local 不在 apps/cli 链接集里，走包真实路径
 const SUBPROCESS_LOCAL = `file:///${DSH_REPO_ROOT}/packages/subprocess/subprocess-local/lib/index.js`
+// 外部 DSH 工具包装载区（可选）：目录下每个含 lib/index.js 的子包 = 一个
+// DSH 工具插件，boot 时逐个 ctx.plugin 加载（peer 基础包 dsh-tools 等由
+// server.py 以 junction 链接进同一目录，无 apply 形态自动跳过）。
+const EXTRA_PLUGINS_DIR = process.env.AGENTOS_DSH_EXTRA_PLUGINS_DIR
 
 let ctx = null
 let booted = false
@@ -49,7 +56,32 @@ async function boot(cwd) {
   await ctx.plugin(SubprocessLocal)
   await ctx.plugin(ToolFs)
   await ctx.plugin(ToolFsSearch, { sampleOverCapGlobResults: true })
+  await loadExtraPlugins()
   booted = true
+}
+
+/** 加载外部 DSH 工具包（装载区内的插件包；无 apply 的 peer 基础包自动跳过）。 */
+async function loadExtraPlugins() {
+  if (!EXTRA_PLUGINS_DIR) return
+  let names = []
+  try {
+    names = readdirSync(EXTRA_PLUGINS_DIR)
+  } catch {
+    return
+  }
+  for (const name of names) {
+    const entry = join(EXTRA_PLUGINS_DIR, name)
+    const index = join(entry, 'lib/index.js')
+    if (!existsSync(index)) continue
+    try {
+      const mod = await import(pathToFileURL(index).href)
+      if (typeof mod?.apply !== 'function') continue
+      await ctx.plugin(mod)
+      process.stderr.write(`[dsh-bridge] extra plugin loaded: ${name}\n`)
+    } catch (err) {
+      process.stderr.write(`[dsh-bridge] extra plugin ${name} load failed: ${err instanceof Error ? err.message : err}\n`)
+    }
+  }
 }
 
 /** DSH parameters DSL（{field: {type, required?, description?}}）→ JSON Schema。 */
@@ -70,8 +102,14 @@ function paramsToJsonSchema(parameters) {
 /** 导出已注册工具的模型面契约（presentation 回调不下发——那是宿主侧纯函数）。 */
 function listTools() {
   const out = []
-  for (const name of ['read', 'glob', 'grep']) {
-    const tool = ctx.tools.get(name)
+  let entries = []
+  try {
+    // 动态枚举：boot 插件（read/glob/grep）+ 外部加载的工具包全部可见
+    entries = [...(ctx.tools.view().visible.entries())]
+  } catch {
+    entries = ['read', 'glob', 'grep'].map((n) => [n, ctx.tools.get(n)]).filter(([, t]) => t !== undefined)
+  }
+  for (const [, tool] of entries) {
     if (tool === undefined) continue
     out.push({
       name: tool.name,

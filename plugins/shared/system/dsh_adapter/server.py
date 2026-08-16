@@ -17,16 +17,99 @@
 from __future__ import annotations
 
 import logging
+import os
+import shutil
+import subprocess
+from pathlib import Path
 from typing import Any
 
-from bridge import get_bridge, shutdown_bridge
-from translator import load_installed_plugins, translate_package
+from bridge import get_bridge as _get_bridge, shutdown_bridge
+from translator import (
+    discover_dsh_plugins,
+    load_installed_plugins,
+    load_plugin_config,
+    translate_package,
+    _plugin_enabled,
+)
 
 from agentos_plugin_sdk import AgentOSPlugin
 
 logger = logging.getLogger(__name__)
 
 plugin = AgentOSPlugin("dsh_adapter")
+
+# ── 外部工具包装载区（通道 A 扩展：dsh_plugins/ 工具包桥接） ──────────
+# 布局：runtime/extra-tools/node_modules/@deepseek-ai/ 同时放 peer 基础包
+# （junction → DSH repo 构建产物，零拷贝零漂移）与启用的工具包（junction →
+# dsh_plugins/ 下含 lib/index.js 的包）。ESM 解析链：包内 import
+# '@deepseek-ai/dsh-tools' 从包目录上溯命中同目录 peer 链接。
+_RUNTIME_DIR = Path(__file__).parent / "runtime"
+_EXTRA_TOOLS_DIR = _RUNTIME_DIR / "extra-tools" / "node_modules" / "@deepseek-ai"
+_DEFAULT_DSH_REPO = "D:/reference_repos/deepseek-harness"
+_PEER_PKGS: dict[str, str] = {
+    "dsh-tools": "packages/core/tools",
+    "dsh-invariants": "packages/runtime-diagnostics/invariants",
+}
+_bridge_ready = False
+
+
+def _make_junction(link: Path, target: Path) -> None:
+    """建目录 junction（Windows mklink /J，Linux os.symlink 兜底）；已存在跳过。"""
+    if link.exists() or link.is_symlink():
+        return
+    try:
+        os.symlink(target, link, target_is_directory=True)
+    except OSError:
+        subprocess.run(
+            ["cmd", "/c", "mklink", "/J", str(link), str(target)],
+            check=False,
+            capture_output=True,
+        )
+
+
+def _sync_extra_package(dest: Path, src: Path) -> None:
+    """把工具包的 lib/ + package.json 增量同步进装载区（幂等，内容变更时覆盖）。
+
+    用拷贝而非 junction：node ESM 对链接目标做 realpath，junction 会把包
+    真实位置打回 dsh_plugins/，包内 ``import '@deepseek-ai/dsh-tools'`` 的
+    上溯解析就找不到装载区的 peer 链接；拷贝后包自身位于装载区，上溯恰好
+    命中同目录 peer junction。
+    """
+    dest.mkdir(parents=True, exist_ok=True)
+    if (src / "lib").is_dir():
+        shutil.copytree(src / "lib", dest / "lib", dirs_exist_ok=True)
+    if (src / "package.json").is_file():
+        shutil.copy2(src / "package.json", dest / "package.json")
+
+
+def ensure_extra_tools_layout() -> str | None:
+    """把启用且含 lib/index.js 的 DSH 工具包同步进桥装载区（幂等）。
+
+    Returns:
+        装载区目录（供 bridge env 使用）；无工具包时仍返回目录（peer 链接
+        就位后桥可加载后续放入的工具包）。
+    """
+    repo_root = os.environ.get("AGENTOS_DSH_REPO_ROOT") or _DEFAULT_DSH_REPO
+    _EXTRA_TOOLS_DIR.mkdir(parents=True, exist_ok=True)
+    for name, rel in _PEER_PKGS.items():
+        _make_junction(_EXTRA_TOOLS_DIR / name, Path(repo_root) / rel)
+    config = load_plugin_config()
+    for pkg in discover_dsh_plugins():
+        if not (pkg / "lib" / "index.js").is_file():
+            continue
+        if not _plugin_enabled(pkg.name, config):
+            continue
+        _sync_extra_package(_EXTRA_TOOLS_DIR / pkg.name, pkg)
+    return str(_EXTRA_TOOLS_DIR)
+
+
+def get_bridge() -> Any:
+    """取共享桥（首次惰性创建时注入外部工具包装载区）。"""
+    global _bridge_ready  # noqa: PLW0603
+    if not _bridge_ready:
+        _get_bridge(extra_plugins_dir=ensure_extra_tools_layout())
+        _bridge_ready = True
+    return _get_bridge()
 
 
 @plugin.tool(
@@ -129,6 +212,7 @@ async def dsh_list_plugins() -> dict[str, Any]:
     return {
         "count": loaded["count"],
         "base_dir": loaded["base_dir"],
+        "extra_tools_dir": str(_EXTRA_TOOLS_DIR),
         "plugins": [
             {
                 "package": p["source"]["package"],
@@ -136,9 +220,11 @@ async def dsh_list_plugins() -> dict[str, Any]:
                 "is_client_plugin": p["client"]["is_client_plugin"],
                 "renderers": [r["tool"] for r in p["client"]["renderers"]],
                 "adapter_scope": p["client"]["adapter_scope"],
+                "extra_tools": bool(p["backend"].get("extra_tools")),
             }
             for p in loaded["packages"]
         ],
+        "disabled": loaded["disabled"],
         "errors": loaded["errors"],
     }
 

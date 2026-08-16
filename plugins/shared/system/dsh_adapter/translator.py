@@ -53,6 +53,7 @@ DSH_SLOT_LINGXI_MAP: dict[str, dict[str, str]] = {
     "conversation.composer.dock": {"lingxi_slot": "dockItems", "note": "输入区 dock → 底部 dock 栏"},
     "conversation.input.dock": {"lingxi_slot": "dockItems", "note": "输入区 dock → 底部 dock 栏"},
     "settings.general.item": {"lingxi_slot": "settingsPanels", "note": "设置项 → 插件设置面板"},
+    "settings.plugin.item": {"lingxi_slot": "settingsPanels", "note": "插件设置项 → 插件设置面板（modlens 等视觉包布局）"},
 }
 _DSH_SLOT_FALLBACK: dict[str, str] = {
     "lingxi_slot": "direct",
@@ -184,6 +185,9 @@ def translate_package(package_dir: str | Path) -> dict[str, Any]:
         ]
     elif (root / "lib").is_dir():
         scan_targets = [(f, f"lib/{f.name}") for f in sorted((root / "lib").glob("*.js"))]
+    elif (root / "dsh").is_dir():
+        # modlens 等视觉包的 client 面布局（package exports 指向 dsh/index.js）
+        scan_targets = [(f, f"dsh/{f.name}") for f in sorted((root / "dsh").glob("*.js"))]
     for path, rel in scan_targets:
         try:
             text = path.read_text(encoding="utf-8", errors="replace")
@@ -229,6 +233,8 @@ def translate_package(package_dir: str | Path) -> dict[str, Any]:
             # 静态翻译不产工具契约：通道 A（runtime 自省）或锁定契约表提供
             "tools_channel": "runtime-introspection",
             "mcp_tools": "out-of-scope (external_mcp direct)",
+            # 含 lib/index.js 的工具包可经通道 A 桥装载（extra-tools 机制）
+            "extra_tools": (root / "lib" / "index.js").is_file(),
         },
         "warnings": warnings,
     }
