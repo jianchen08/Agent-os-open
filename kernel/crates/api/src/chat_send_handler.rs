@@ -109,9 +109,9 @@ impl ChatSendHandler {
                 message: "chat.send_message 缺少 user_id 参数".to_string(),
             })?;
         let create_flag = params.get("create").and_then(|v| v.as_bool()).unwrap_or(false);
-        // background（可选，默认 false）：创建分支的派发改为 spawn 后台执行、
-        // 响应立即返回 pipeline_id——任务派发场景（task_submit）不能阻塞等待
-        // 整条任务管道跑完。注入分支不适用（触发通知需要投递确认）。
+        // background（可选，默认 false）：派发改为 spawn 后台执行、响应立即
+        // 返回——任务派发（task_submit 创建 / UI resume·retry 注入）不能阻塞
+        // 等待整条管道跑完。触发器通知保持默认 await（投递确认语义）。
         let background = params.get("background").and_then(|v| v.as_bool()).unwrap_or(false);
         let supplied_pid = params
             .get("pipeline_id")
@@ -190,11 +190,10 @@ impl ChatSendHandler {
         // tenant 由 dispatch_user_input 用 user_id 反查（与 WS 路径同源）。
         // thinking_strength：HTTP 通道暂不携带（"" = 引擎不覆盖参数）。
         //
-        // background（仅创建分支）：spawn 后台派发，响应立即返回——调用方
-        // （task_submit）即刻拿到 pipeline_id 写任务关联，任务管道在
-        // RunChain 上照常 FIFO 执行。派发失败仅告警（任务已创建，重试走
-        // 显式 pipeline_id 注入）。
-        if created && background {
+        // background：spawn 后台派发，响应立即返回——任务管道在 RunChain 上
+        // 照常 FIFO 执行。创建分支调用方即刻拿到 pipeline_id；注入分支（UI
+        // resume/retry）即刻返回 dispatched。派发失败仅告警。
+        if background {
             let dispatcher = self.dispatcher.clone();
             let pid = pipeline_id.clone();
             let uid = user_id.to_string();
@@ -213,7 +212,10 @@ impl ChatSendHandler {
                     );
                 }
             });
-            return Ok(json!({"status": "created", "pipeline_id": pipeline_id}));
+            return Ok(json!({
+                "status": if created { "created" } else { "dispatched" },
+                "pipeline_id": pipeline_id,
+            }));
         }
         self.dispatcher
             .dispatch_user_input(
@@ -968,5 +970,35 @@ mod tests {
             .unwrap();
         let pid = res["pipeline_id"].as_str().unwrap();
         assert_eq!(calls(&d)[0].6.as_ref().unwrap()["task.id"], pid, "引擎 id 覆盖调用方预传");
+    }
+
+    #[tokio::test]
+    async fn inject_background_returns_immediately() {
+        // UI resume/retry 场景：注入已有管道也支持 background（fire-and-forget）
+        let d = Arc::new(GatedDispatcher {
+            calls: Mutex::new(Vec::new()),
+            gate: tokio::sync::Notify::new(),
+        });
+        let h = ChatSendHandler::new(d.clone());
+        let res = tokio::time::timeout(std::time::Duration::from_millis(300), h.handle(
+            "send_message",
+            json!({
+                "pipeline_id": "pipe_existing", "message": "重跑一轮",
+                "user_id": "u1", "background": true,
+            }),
+        ))
+        .await
+        .expect("background 注入应在派发完成前返回")
+        .unwrap();
+        assert_eq!(res["status"], "dispatched");
+        assert_eq!(res["pipeline_id"], "pipe_existing");
+        assert!(d.calls.lock().unwrap().is_empty(), "派发应仍在挂起");
+        d.gate.notify_one();
+        let mut done = false;
+        for _ in 0..40 {
+            if !d.calls.lock().unwrap().is_empty() { done = true; break; }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+        assert!(done, "后台注入应最终执行");
     }
 }
