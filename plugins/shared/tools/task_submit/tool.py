@@ -3,6 +3,7 @@
 import asyncio
 import logging
 import os
+import inspect
 from pathlib import Path
 from typing import Any
 
@@ -72,6 +73,24 @@ def set_chat_sender(sender: Any) -> None:
 def _get_chat_sender() -> Any:
     """获取 chat.send_message 派发器（None = 未注入，测试可 monkeypatch）。"""
     return _chat_sender
+
+
+# ── GAP-1 统一：state 聚合读取器（server.py on_load 注入，依赖校验等读面）──
+# 约定签名：``() -> list[dict]``（sync 或 async，返回管道 state 聚合行，
+# 行为扁平点号键如 {"pipeline_id": ..., "task.status": ...}）。None = 未注入
+# （依赖校验 fail-closed）。
+_state_reader: Any = None
+
+
+def set_state_reader(reader: Any) -> None:
+    """注入 state 聚合读取器（server.py on_load 经 pipeline-state capability）。"""
+    global _state_reader  # noqa: PLW0603
+    _state_reader = reader
+
+
+def _get_state_reader() -> Any:
+    """获取 state 聚合读取器（None = 未注入，测试可 monkeypatch）。"""
+    return _state_reader
 
 
 # ── 危险目标空间目录列表 ──
@@ -1124,7 +1143,7 @@ class TaskSubmitTool(BuiltinTool):
         # ── 4. 依赖任务验证 ──
         dependencies = inputs.get("dependencies", [])
         if dependencies:
-            missing_ids = self._check_dependencies_exist(dependencies)
+            missing_ids = await self._check_dependencies_exist(dependencies)
             if missing_ids:
                 logger.error("[TaskSubmit] 依赖验证失败 | 不存在的任务: %s", missing_ids)
                 return create_failure_result(
@@ -1133,234 +1152,53 @@ class TaskSubmitTool(BuiltinTool):
                 )
             logger.info("[TaskSubmit] 依赖验证通过 | dependencies=%s", dependencies)
 
-        # ── 5. 获取服务 ──
-        task_service = self._get_task_service()
-        if task_service is None:
-            return create_failure_result(
-                error="任务服务不可用，请检查系统配置",
-                error_code="SERVICE_UNAVAILABLE",
-            )
-
-        # 任务类型 × 参数可用性校验已在 parent_task_id 注入后完成（见上文）：
-        # - 容器直接子任务：workspace / workspace_mode / isolation_level 已拒绝或清除（继承容器）；
-        # - 普通任务：三者保留（agent 显式选择，直接进入 _build_metadata 与 task_data）。
-
-        # ── 6. 创建任务 ──
-        raw_priority = inputs.get("priority", 5)
-        try:
-            from task_types import TaskPriority as TP  # noqa: N817,PLC0415
-
-            TP(raw_priority)
-        except (ValueError, AttributeError):
-            raw_priority = 5
-
-        try:
-            child_agent_level = min(parent_agent_level + 1, 3)
-            from agents_types import AgentLevel  # noqa: PLC0415
-
-            level_values = {"L1": 1, "L2": 2, "L3": 3}
-            level_str = f"L{child_agent_level}"
-            child_level = AgentLevel(level_str) if level_str in level_values else AgentLevel.L3_ATOMIC
-
-            pipeline_id = inputs.get("pipeline_id")
-            task = await task_service.create_task(
-                title=goal["title"],
-                description=description,
-                parent_task_id=parent_task_id,
-                parent_pipeline_id=pipeline_id,
-                target_type=target_type,
-                dependencies=dependencies or None,
-                priority=raw_priority,
-                agent_level=child_level,
-                metadata=self._build_metadata(inputs, goal, acceptance_criteria),
-            )
-        except Exception as e:
-            logger.error("[TaskSubmit] 任务创建失败: %s", e)
-            return create_failure_result(
-                error=f"任务创建失败: {e}",
-                error_code="TASK_CREATE_FAILED",
-            )
-
-        _t_create = _time.monotonic()
-        logger.info("[TaskSubmit] PERF | create_task=%.1fms", (_t_create - _t0) * 1000)
-
-        # ── 7. 提交完成（0.2 收尾：start_run 占位已移除，任务提交即落库；
-        #    任务管道执行由会话对话 / chat.send_message → PipelineExecutor 驱动）──
-        is_root = True
-        if parent_task_id and task_service:
-            try:
-                parent_task = task_service.get_task(parent_task_id)
-                if parent_task and parent_task.metadata:
-                    parent_scope = parent_task.metadata.get("task_scope", "non_container")
-                    if parent_scope != "container":
-                        is_root = False
-            except Exception as exc:
-                # 任务已创建，此处仅是元数据标记：不回滚、不放行为目的改判——
-                # 维持默认 is_root=True（与查询失败前语义一致），仅记录 warning 供排查。
-                logger.warning(
-                    "[TaskSubmit] 查询父任务 scope 失败，is_root 维持默认 True | parent_task_id=%s | err=%s",
-                    parent_task_id,
-                    exc,
-                )
-
-        if _inherit_resolved:
-            is_root = True
-
-        task_data = {
-            "task_id": task.id,
-            "target_type": target_type,
-            "target_id": target_id,
-            "user_input": goal.get("title", ""),
-            "description": description or goal.get("description", ""),
-            "acceptance_criteria": acceptance_criteria,
-            "workspace": workspace,
-            "priority": inputs.get("priority", 5),
-            "is_root": is_root,
-            # 工作空间拓扑（worktree/plain，与隔离解耦）：普通任务由 agent 显式选择，
-            # 容器直接子任务/未指定时为空（父链解析 + 系统默认）
-            "workspace_mode": inputs.get("workspace_mode", ""),
-            # 执行环境隔离（容器/宿主，与拓扑解耦）：普通任务显式选择；
-            # 容器直接子任务/未指定时为空（系统默认策略）
-            "isolation_level": inputs.get("isolation_level", ""),
-            "_has_explicit_workspace": bool(workspace),
-            "_inherit_workspace_resolved": _inherit_resolved,
-            "_source_ws_meta": old_ws_meta if _inherit_resolved else None,
-        }
-
-        if _inherit_pipe_pipeline_id:
-            task_data["_inherit_pipe_pipeline_id"] = _inherit_pipe_pipeline_id
-
-        logger.info(
-            "[TaskSubmit] task_data description 追踪 | task_id=%s | desc_in_task_data=%s | desc_len=%d",
-            task.id,
-            bool(task_data.get("description")),
-            len(task_data.get("description", "")),
-        )
-
-        # ── 7. 同步初始化工作空间 ──
-        # 工作空间解析必须在 submit 返回前完成，确保 ws_meta 写入 task.metadata。
-        # 失败则清理任务记录并返回错误，不让 LLM 误以为任务可执行。
-        task, ws_err = await self._init_workspace(
-            task,
-            workspace,
-            task_data,
-            task_service,
-        )
-        if ws_err:
-            await task_service.hard_delete(task.id)
-            return create_failure_result(error=ws_err, error_code="WORKSPACE_INIT_FAILED")
-
-        # ── 7.5 pipe 继承：同步 clone 源管道历史 ──
-        # 历史准备（clone）必须在 submit 返回前完成：clone 失败则任务提交失败，
-        # 让父 LLM 知道子任务起不来。预生成 pipeline_id 并 clone 到目标管道，
-        # task_executor 复用该 id（不再重复 clone）。
-        if _inherit_pipe_pipeline_id:
-            import uuid as _uuid  # noqa: PLC0415
-
-            _pre_pipeline_id = _uuid.uuid4().hex[:12]
-            try:
-                exec_storage = _get_service_provider().get("execution_record_storage")
-                if exec_storage:
-                    # root_task_id 必须与 task_executor._bind_pipeline_run 的
-                    # register_pipeline(pipeline_id, root_id) 一致，否则引擎注册时
-                    # 会触发文件迁移，导致 clone 文件和引擎读取文件分裂。
-                    _root_task_id = ""
-                    if task_service:
-                        _root_task_id = task_service.get_root_task_id(task.id) or ""
-                    exec_storage.clone_pipeline_records(
-                        source_pipeline_id=_inherit_pipe_pipeline_id,
-                        target_pipeline_id=_pre_pipeline_id,
-                        new_container_task_id=task.id,
-                        root_task_id=_root_task_id,
-                    )
-                    # clone 成功：把预生成 id 传给 task_executor 复用
-                    task_data["_pre_pipeline_id"] = _pre_pipeline_id
-                    logger.info(
-                        "[TaskSubmit] pipe 继承历史 clone 完成 | task=%s | src=%s | dst=%s | root=%s",
-                        task.id,
-                        _inherit_pipe_pipeline_id[:12],
-                        _pre_pipeline_id[:12],
-                        _root_task_id[:12] if _root_task_id else "(none)",
-                    )
-            except Exception as clone_exc:
-                # clone 失败：清理任务记录，返回失败给父 LLM
-                logger.error(
-                    "[TaskSubmit] pipe 继承历史 clone 失败 | task=%s | error=%s",
-                    task.id,
-                    clone_exc,
-                    exc_info=True,
-                )
-                await task_service.hard_delete(task.id)
-                return create_failure_result(
-                    error=f"继承管道历史失败：{clone_exc}",
-                    error_code="INHERIT_PIPE_FAILED",
-                )
-
-        _t_submit = _time.monotonic()
-        logger.info(
-            "[TaskSubmit] PERF | submit_task=%.1fms | total=%.1fms",
-            (_t_submit - _t_create) * 1000,
-            (_t_submit - _t0) * 1000,
-        )
-
-        logger.info("[TaskSubmit] 任务提交成功 | task_id=%s | title=%s", task.id, task.title)
-
-        # 0.2 推送改走 frontend.emit capability（ADR §3.5），SDK 暂未实现该 capability；
-        # 当前 task_status_update 广播静默跳过，0.2 栈不再依赖 0.1 的
-        # src/channels/websocket/ws_interaction_notifier（task_11 P2-7）。
-        # 待 SDK 实现后改用 ctx.frontend.emit(event="task_status_update", scope=...) 恢复。
-
-        # ── 8. GAP-1：任务执行驱动——经 chat.send_message 创建执行管道 ──
-        # run 未真正派发前不得声称"异步执行中"（e2e 缺口 GAP-1 的话术修正）：
-        # 派发成功 → 绑定关联 + start_task（started_at 非空）+ 如实报告管道 id；
-        # 派发器缺席/失败 → warning 话术（任务保留，可经 task_manage 重试）。
+        # ── 5. GAP-1 统一（state 单一真值）：任务即管道，直接经 chat.send_message
+        #    创建执行管道（引擎生成 pipeline_id = task.id）——不再创建 YAML 任务
+        #    记录（task_service.create_task 退役，YAML 降级只读镜像）。
+        #    - 依赖校验读 state 聚合（pipeline-state.list）而非 YAML 树；
+        #    - 工作空间初始化归执行管道的 workspace_lifecycle 插件（execution_context
+        #      随派发透传），提交期不再同步初始化；
+        #    - 任务状态（task.status/ended_at）由内核 run 终态回写 state。
         dispatch = await self._dispatch_task_pipeline(
-            task,
-            inputs,
-            description=task_data.get("description", ""),
+            title=goal["title"],
+            description=description,
             acceptance_criteria=acceptance_criteria,
             dependencies=dependencies,
-            task_service=task_service,
+            inputs=inputs,
+            task_scope=task_scope,
         )
         if dispatch.get("pipeline_id"):
-            try:
-                await task_service.bind_pipeline_run(task.id, dispatch["pipeline_id"])
-                await task_service.start_task(task.id)
-            except Exception as assoc_exc:
-                logger.error(
-                    "[TaskSubmit] 任务↔管道关联/启动回写失败 | task_id=%s | pipeline_id=%s | err=%s",
-                    task.id,
-                    dispatch["pipeline_id"],
-                    assoc_exc,
-                )
-                dispatch["warning"] = f"执行管道已创建，但任务状态回写失败：{assoc_exc}"
-
-        result_data: dict[str, Any] = {
-            "task_id": task.id,
-            "title": task.title,
-            "status": task.status.value,
-            "target_id": target_id,
-        }
-        if dispatch.get("pipeline_id"):
-            result_data["pipeline_id"] = dispatch["pipeline_id"]
+            task_id = dispatch["pipeline_id"]
+            result_data: dict[str, Any] = {
+                "task_id": task_id,
+                "title": goal["title"],
+                "status": "running",
+                "target_id": target_id,
+            }
+            result_data["pipeline_id"] = task_id
             result_data["message"] = (
-                f"任务 [{task.title}]（ID: {task.id}）已提交，执行管道已创建"
-                f"（pipeline {dispatch['pipeline_id']}），任务正在后台执行。"
+                f"任务 [{goal['title']}]（ID: {task_id}）已提交，执行管道已创建"
+                f"（pipeline {task_id}），任务正在后台执行。"
                 "子任务完成后系统会自动通知你并恢复执行。"
                 "在此期间请不要再调用任何工具（包括 task_manage），直接输出纯文本等待即可。"
             )
         else:
-            result_data["message"] = (
-                f"任务 [{task.title}]（ID: {task.id}）已提交并落库，但执行管道未能创建"
-                f"（{dispatch.get('warning', '未知原因')}）。"
-                "任务当前不会自动执行；可稍后重试提交或调用 task_manage 处理。"
-            )
-            result_data["warning"] = dispatch.get("warning", "执行管道未创建")
-
-        # 工作空间路径仅对 L1 返回（L2/L3 的 workspace 参数本身被隐藏，回显内部路径属信息泄漏）
+            result_data = {
+                "task_id": "",
+                "title": goal["title"],
+                "status": "submitted",
+                "target_id": target_id,
+                "message": (
+                    f"任务 [{goal['title']}] 已校验并提交，但执行管道未能创建"
+                    f"（{dispatch.get('warning', '未知原因')}）。"
+                    "任务当前不会自动执行；可稍后重试提交。"
+                ),
+                "warning": dispatch.get("warning", "执行管道未创建"),
+            }
+        # 工作空间路径仅对 L1 返回（L2/L3 的 workspace 参数本身被隐藏，回显内部路径属信息泄漏）；
+        # 统一后无 YAML ws_meta（空间初始化归执行管道 workspace_lifecycle），仅回显提交参数。
         if parent_agent_level == 1:
             result_data["workspace"] = workspace or ""
-            result_data["resolved_workspace"] = (task.metadata or {}).get("ws_meta", {}).get("path", "")
 
         return create_success_result(
             data=result_data,
@@ -1372,30 +1210,32 @@ class TaskSubmitTool(BuiltinTool):
 
     async def _dispatch_task_pipeline(  # noqa: PLR0913
         self,
-        task: Any,
-        inputs: dict[str, Any],
+        title: str,
         description: str,
         acceptance_criteria: dict[str, Any],
         dependencies: list[str],
-        task_service: Any,
+        inputs: dict[str, Any],
+        task_scope: str,
     ) -> dict[str, Any]:
-        """GAP-1：经 chat.send_message 创建任务执行管道（引擎生成 id）。
+        """GAP-1 统一：经 chat.send_message 创建任务执行管道（引擎生成 id = task.id）。
 
         契约（与内核 chat_send_handler 创建分支对齐）：
         - ``create: true`` + 不传 pipeline_id——引擎生成并在响应返回（三次定案：
-          堵 id 冒占），拿返回 id 写任务↔管道关联由调用方完成；
-        - ``state``：任务域字段出生即入（task.id/goal/status/description/
-          acceptance_criteria/dependencies——扁平点号键，STATE_SUMMARY_KEYS 出口）；
+          堵 id 冒占）；**task.id 由引擎注入 state**（身份权威统一，调用方
+          派发时还不知道 id），task = pipeline，无独立 YAML 记录；
+        - ``state``：任务域字段出生即入（task.goal/status/description/
+          acceptance_criteria/dependencies/scope——扁平点号键，STATE_SUMMARY_KEYS
+          出口）；task.status 终态由内核 run 终态回写（completed/failed/suspended）；
         - ``lineage``：有父形式（parent = 调用方管道，origin_session 同管道——
           主会话 thread_id 与 pipeline_id 同值）/ 根形式（无调用方管道时诚实声明
           plugin 来源，不伪造默认父）二选一；
-        - ``execution_context``：workspace/isolation/parent_task_id（task.metadata
-          已组装，供 init 体 workspace_lifecycle 消费）；
+        - ``execution_context``：workspace/isolation（本地组装，供执行管道
+          init 体 workspace_lifecycle 消费——空间初始化不再在提交期做）；
         - ``background: true``：不阻塞工具调用等待任务完成（派发即返回 id）。
 
         Returns:
-            ``{"pipeline_id": ...}`` 派发成功；``{"warning": ...}`` 派发器缺席/失败
-            （任务已创建，由调用方决定话术）。
+            ``{"pipeline_id": ...}`` 派发成功（即 task.id）；``{"warning": ...}``
+            派发器缺席/失败（无 YAML 记录可清理——管道未创建即无任务）。
         """
         sender = _get_chat_sender()
         if sender is None:
@@ -1415,7 +1255,7 @@ class TaskSubmitTool(BuiltinTool):
                 "origin": {"kind": "plugin", "source": "task_submit"},
             }
 
-        kickoff = f"执行任务「{task.title}」（任务 ID: {task.id}）。"
+        kickoff = f"执行任务「{title}」。"
         if description:
             kickoff += f"\n任务描述：{description}"
         if acceptance_criteria:
@@ -1426,18 +1266,18 @@ class TaskSubmitTool(BuiltinTool):
             "message": kickoff,
             "user_id": inputs.get("user_id") or "task_system",
             "state": {
-                "task.id": task.id,
-                "task.goal": task.title,
+                "task.goal": title,
                 "task.status": "pending",
                 "task.description": description or "",
                 "task.acceptance_criteria": acceptance_criteria or {},
                 "task.dependencies": dependencies or [],
+                "task.scope": task_scope,
                 "task.submitted_by": inputs.get("user_id", ""),
             },
             "lineage": lineage,
             "background": True,
         }
-        execution_context = (task.metadata or {}).get("execution_context")
+        execution_context = self._build_execution_context(inputs, task_scope)
         if execution_context:
             params["execution_context"] = execution_context
 
@@ -1445,8 +1285,8 @@ class TaskSubmitTool(BuiltinTool):
             resp = await sender(params)
         except Exception as exc:
             logger.error(
-                "[TaskSubmit] 任务管道派发失败 | task_id=%s | err=%s",
-                task.id,
+                "[TaskSubmit] 任务管道派发失败 | title=%s | err=%s",
+                title,
                 exc,
                 exc_info=True,
             )
@@ -1458,12 +1298,60 @@ class TaskSubmitTool(BuiltinTool):
         if not pipeline_id:
             return {"warning": f"派发响应缺少 pipeline_id：{resp!r}"}
         logger.info(
-            "[TaskSubmit] 任务执行管道已创建 | task_id=%s | pipeline_id=%s",
-            task.id,
+            "[TaskSubmit] 任务执行管道已创建 | task_id=%s | title=%s",
             pipeline_id,
+            title,
         )
         return {"pipeline_id": pipeline_id}
 
+    def _build_execution_context(self, inputs: dict[str, Any], task_scope: str) -> dict[str, Any]:
+        """结构化 execution_context（GAP-1 统一：不再写 YAML metadata，随派发透传）。
+
+        供执行管道 init 体 workspace_lifecycle / environment_lifecycle 插件消费：
+        workspace 拓扑（worktree/plain/container_copy）与隔离级别（与存储解耦）。
+        父任务链信息由 lineage 承担（引擎出生写入），不在此伪造。
+        """
+        _ec: dict[str, Any] = {}
+        if inputs.get("workspace"):
+            _ec["workspace"] = {
+                "source_path": inputs["workspace"],
+                "mode": inputs.get("workspace_mode")
+                or ("container_copy" if task_scope == "container" else "worktree"),
+                "explicit": True,
+            }
+        elif inputs.get("workspace_mode") or task_scope == "container":
+            _ec["workspace"] = {
+                "source_path": "",
+                "mode": inputs.get("workspace_mode")
+                or ("container_copy" if task_scope == "container" else "worktree"),
+            }
+        if inputs.get("isolation_level"):
+            _ec["isolation"] = {"level": inputs["isolation_level"]}
+        return _ec
+    def _build_execution_context(self, inputs: dict[str, Any], task_scope: str) -> dict[str, Any]:
+        """结构化 execution_context（GAP-1 统一：不再写 YAML metadata，随派发透传）。
+
+        供执行管道 init 体 workspace_lifecycle / environment_lifecycle 插件消费：
+        workspace 拓扑（worktree/plain/container_copy）与隔离级别（与存储解耦）。
+        父任务链信息由 lineage 承担（引擎出生写入），不在此伪造。
+        """
+        _ec: dict[str, Any] = {}
+        if inputs.get("workspace"):
+            _ec["workspace"] = {
+                "source_path": inputs["workspace"],
+                "mode": inputs.get("workspace_mode")
+                or ("container_copy" if task_scope == "container" else "worktree"),
+                "explicit": True,
+            }
+        elif inputs.get("workspace_mode") or task_scope == "container":
+            _ec["workspace"] = {
+                "source_path": "",
+                "mode": inputs.get("workspace_mode")
+                or ("container_copy" if task_scope == "container" else "worktree"),
+            }
+        if inputs.get("isolation_level"):
+            _ec["isolation"] = {"level": inputs["isolation_level"]}
+        return _ec
     async def _execute_long_term(self, inputs: dict[str, Any]) -> ToolExecutionResult:  # noqa: PLR0912,PLR0915
         """处理容器任务提交。"""
         # goal 解析逻辑同 execute()：优先扁平字段，兼容旧式 goal 对象
@@ -1517,60 +1405,24 @@ class TaskSubmitTool(BuiltinTool):
                 error_code="SERVICE_UNAVAILABLE",
             )
 
-        try:
-            description = _normalize_description(goal.get("description", ""))
-            pipeline_id = inputs.get("pipeline_id")
-            task = await task_service.create_task(
-                title=goal["title"],
-                description=description,
-                parent_pipeline_id=pipeline_id,
-                metadata=self._build_metadata(inputs, goal, {}),
-            )
-        except Exception as e:
-            logger.error("[TaskSubmit] 容器任务创建失败: %s", e)
+        # GAP-1 统一（state 单一真值）：容器任务也是管道——直接经 chat.send_message
+        # 创建（task.scope=container 出生即入 state，空间拓扑由执行管道 init 体
+        # workspace_lifecycle 消费 execution_context 处理），不再创建 YAML 任务
+        # 记录/绑定管道（task_service 写路径退役）。
+        dispatch = await self._dispatch_task_pipeline(
+            title=goal["title"],
+            description=_normalize_description(goal.get("description", "")),
+            acceptance_criteria={},
+            dependencies=[],
+            inputs=inputs,
+            task_scope="container",
+        )
+        if not dispatch.get("pipeline_id"):
             return create_failure_result(
-                error=f"容器任务创建失败: {e}",
+                error=f"容器任务提交失败：{dispatch.get('warning', '未知原因')}",
                 error_code="TASK_CREATE_FAILED",
             )
-
-        # 将当前管道 ID 绑定到容器任务，使子任务完成时能通知父管道
-        pipeline_id = inputs.get("pipeline_id")
-        if pipeline_id:
-            try:
-                await task_service.bind_pipeline_run(task.id, pipeline_id)
-                logger.info(
-                    "[TaskSubmit] 容器任务已绑定管道 | task_id=%s | pipeline_id=%s",
-                    task.id,
-                    pipeline_id,
-                )
-                exec_storage = self._get_execution_record_storage()
-                if exec_storage:
-                    root_id = task_service.get_root_task_id(task.id)
-                    if root_id:
-                        exec_storage.register_pipeline(pipeline_id, root_id)
-
-                _session_id = inputs.get("session_id", "")
-                if _session_id:
-                    try:
-                        from channels.api.memory_store import store as api_store  # noqa: PLC0415
-
-                        _session = api_store.get_session(_session_id)
-                        if _session:
-                            _session.register_pipeline(pipeline_id, set_active=False)
-                            api_store.set_session(_session_id, _session)
-                    except Exception as _reg_exc:
-                        logger.warning(
-                            "[TaskSubmit] 注册容器管道到 api_store 失败: %s",
-                            _reg_exc,
-                        )
-            except Exception as exc:
-                logger.warning(
-                    "[TaskSubmit] 容器任务绑定管道失败 | task_id=%s | error=%s",
-                    task.id,
-                    exc,
-                )
-
-        logger.info("[TaskSubmit] 容器任务提交成功 | task_id=%s | title=%s", task.id, task.title)
+        task_id = dispatch["pipeline_id"]
 
         # 0.2 推送改走 frontend.emit capability（ADR §3.5），SDK 暂未实现该 capability；
         # 当前 task_status_update 广播静默跳过，0.2 栈不再依赖 0.1 的
@@ -1581,7 +1433,7 @@ class TaskSubmitTool(BuiltinTool):
 
         container_workspace_path = resolve_container_workspace_path(
             inputs.get("workspace"),
-            task.id,
+            task_id,
             # 容器任务不可选隔离（校验已拒绝）→ 恒为隔离复制（isolated）
             isolation_mode="isolated",
         )
@@ -1764,22 +1616,36 @@ class TaskSubmitTool(BuiltinTool):
 
         return True
 
-    def _check_dependencies_exist(self, dependencies: list[str]) -> list[str]:
+    async def _read_state_rows(self) -> list[dict[str, Any]] | None:
+        """读管道 state 聚合行（pipeline-state.list capability；None = 桥未就绪）。
+
+        读取失败/未注入返回 None（fail-closed 语义由调用方决定）；
+        返回 list[dict] 时行为扁平点号键（pipeline_id/task.*/lineage.*）。
+        """
+        reader = _get_state_reader()
+        if reader is None:
+            return None
+        try:
+            rows = reader()
+            if inspect.isawaitable(rows):
+                rows = await rows  # type: ignore[misc]
+            return [r for r in rows if isinstance(r, dict)] if isinstance(rows, list) else None
+        except Exception as exc:  # noqa: BLE001 — 读面降级不崩提交
+            logger.warning("[TaskSubmit] state 聚合读取失败，依赖校验降级: %s", exc)
+            return None
+
+    async def _check_dependencies_exist(self, dependencies: list[str]) -> list[str]:
         """检查依赖任务是否存在。"""
-        if not dependencies:
-            return []
 
-        task_service = self._get_task_service()
-        if task_service is None:
-            logger.warning("[TaskSubmit] TaskService 不可用，跳过依赖检查")
-            return []
-
-        missing_ids = []
-        for dep_id in dependencies:
-            if task_service.get_task(dep_id) is None:
-                missing_ids.append(dep_id)
-        return missing_ids
-
+        rows = self._read_state_rows()
+        if rows is None:
+            logger.warning(
+                "[TaskSubmit] state 聚合不可用，依赖校验 fail-closed | dependencies=%s",
+                dependencies,
+            )
+            return list(dependencies)
+        known = {str(r.get("pipeline_id") or "") for r in rows}
+        return [d for d in dependencies if d not in known]
     def _build_metadata(  # noqa: PLR0912
         self,
         inputs: dict[str, Any],

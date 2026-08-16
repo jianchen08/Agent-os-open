@@ -152,7 +152,14 @@ impl ChatSendHandler {
             }
             // 三次定案：pipeline_id 由引擎生成（身份权威统一），uuid v4 simple
             // （32 位 hex 无连字符，与 sessions 表 active_pipeline_id 同格式）。
-            (uuid::Uuid::new_v4().simple().to_string(), true)
+            let pipeline_id = uuid::Uuid::new_v4().simple().to_string();
+            // GAP-1 统一（task = pipeline）：task.id 即管道 id——调用方派发时
+            // 尚不知道引擎身份，此处引擎强制注入（与 lineage 同级保护字段），
+            // 调用方预传的 task.id 一律覆盖为引擎 id（堵身份冒占）。
+            if let Some(obj) = overlay_obj.as_object_mut() {
+                obj.insert("task.id".to_string(), Value::String(pipeline_id.clone()));
+            }
+            (pipeline_id, true)
         } else {
             // ── 注入分支（现状不变）──
             // lineage 是引擎出生写入的保护字段，注入已有管道不得携带（防覆写）。
@@ -560,6 +567,8 @@ mod tests {
         assert_eq!(overlay["task.status"], "pending");
         assert_eq!(overlay["lineage.parent_pipeline_id"], "pipe_parent");
         assert_eq!(overlay["lineage.origin_session_id"], "sess_root");
+        // task.id 由引擎注入 == 响应 pipeline_id（身份权威统一）
+        assert_eq!(overlay["task.id"], pid);
     }
 
     #[tokio::test]
@@ -830,7 +839,8 @@ mod tests {
             c[0].5,
             Some(json!({"workspace": {"mode": "worktree"}, "isolation": {"level": "plain"}}))
         );
-        assert_eq!(c[0].6.as_ref().unwrap()["task.id"], "t9");
+        // task.id 由引擎注入（调用方预传的 t9 被覆盖为引擎 id）
+        assert_eq!(c[0].6.as_ref().unwrap()["task.id"], res["pipeline_id"]);
     }
 
     // ── GAP-1：background 参数（任务派发不阻塞等待任务完成） ──────────
@@ -907,7 +917,7 @@ mod tests {
             tokio::time::sleep(std::time::Duration::from_millis(50)).await;
         }
         assert!(dispatched, "background 派发应最终执行");
-        assert_eq!(d.calls.lock().unwrap()[0]["task.id"], "t1");
+        assert_eq!(d.calls.lock().unwrap()[0]["task.id"], res["pipeline_id"]);
     }
 
     #[tokio::test]
@@ -939,5 +949,24 @@ mod tests {
         let (h, _d) = handler();
         let err = h.handle("bogus", json!({})).await.unwrap_err();
         assert!(matches!(err, McpError::Protocol { .. }));
+    }
+
+    #[tokio::test]
+    async fn create_overrides_caller_supplied_task_id() {
+        // task.id 是引擎保护字段（同 lineage）：调用方预传的身份被引擎 id 覆盖
+        let (h, d) = handler();
+        let res = h
+            .handle(
+                "send_message",
+                json!({
+                    "create": true, "message": "m", "user_id": "u1",
+                    "lineage": {"root": true, "origin": {"kind": "plugin", "source": "task_submit"}},
+                    "state": {"task.id": "fake_id_999", "task.goal": "g"}
+                }),
+            )
+            .await
+            .unwrap();
+        let pid = res["pipeline_id"].as_str().unwrap();
+        assert_eq!(calls(&d)[0].6.as_ref().unwrap()["task.id"], pid, "引擎 id 覆盖调用方预传");
     }
 }

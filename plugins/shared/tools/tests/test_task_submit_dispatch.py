@@ -1,15 +1,16 @@
 # @feature: FP-0.2.〇 任务执行驱动 | @vision: V3 可嵌入 | @ci: python-coverage
-"""task_submit 任务执行驱动 TDD 测试（GAP-1 核心修复）。
+"""task_submit 任务执行驱动 TDD 测试（GAP-1 统一：state 单一真值，YAML 停写）。
 
 0.2 收尾时 pipeline-executor.start_run 占位能力移除后，task_submit 提交即落库、
-**无人派发执行**——任务永远 pending（e2e 缺口 GAP-1）。本文件覆盖新契约：
+**无人派发执行**——任务永远 pending（e2e 缺口 GAP-1）。统一定案后本文件覆盖：
 
-1. 提交成功后经 ``chat.send_message``（create 分支，引擎生成 pipeline_id）创建
-   任务执行管道：state 出生即带 ``task.*`` 字段、lineage 有父/根二选一、
-   execution_context 透传；
-2. 响应返回的 pipeline_id 写回任务关联（bind_pipeline_run）+ 派发成功即
-   start_task（started_at 非空——run 未真正开始前不得声称"异步执行中"）；
-3. 派发器不可用 / 派发失败 → 话术诚实（不声称执行中），结果携带明确 warning。
+1. 提交直接经 ``chat.send_message``（create 分支，引擎生成 pipeline_id）创建
+   执行管道，**不再调用 task_service.create_task**——YAML 存储无写路径；
+2. task.id = 引擎返回的 pipeline_id（身份权威统一），state 出生即带 task.*
+   字段（task.id 由引擎注入）、lineage 有父/根二选一、execution_context 透传；
+3. 依赖校验读 state 聚合（pipeline-state.list capability）而非 YAML；
+4. 不再 start_task/bind_pipeline_run（任务状态由内核 run 终态回写 state）；
+5. 派发器不可用/失败 → 话术诚实（不声称执行中），结果携带明确 warning。
 
 装配：conftest.py 注入 sdk / tools 共享层；task_submit 平铺目录与
 system/tasks 同 test_task_submit_migration.py 的 sys.path 装配。
@@ -47,7 +48,7 @@ def _load_module() -> Any:
     try:
         spec.loader.exec_module(module)
     except BaseException:
-        del sys.modules[mod_name]  # 加载失败不留坏缓存（SyntaxError 等）
+        del sys.modules[mod_name]
         raise
     return module
 
@@ -55,34 +56,6 @@ def _load_module() -> Any:
 @pytest.fixture
 def mod() -> Any:
     return _load_module()
-
-
-def _fake_task(task_id: str = "task-001", title: str = "喝水提醒") -> MagicMock:
-    t = MagicMock()
-    t.id = task_id
-    t.title = title
-    t.status.value = "pending"
-    t.metadata = {}
-    return t
-
-
-def _fake_service(task: MagicMock) -> MagicMock:
-    """最小 task_service fake：create_task/get_task/bind_pipeline_run/start_task。"""
-    from unittest.mock import AsyncMock
-
-    svc = MagicMock()
-
-    async def _create(**kwargs):
-        # 模拟真实 create_task：metadata 入参落到返回的 task 上（供派发读取）
-        if kwargs.get("metadata"):
-            task.metadata = dict(kwargs["metadata"])
-        return task
-
-    svc.create_task = _create
-    svc.get_task = AsyncMock(return_value=None)
-    svc.bind_pipeline_run = AsyncMock(return_value=True)
-    svc.start_task = AsyncMock(return_value=True)
-    return svc
 
 
 class _FakeSender:
@@ -114,25 +87,11 @@ def _base_inputs(**over: Any) -> dict:
     return base
 
 
-async def _run_submit(mod: Any, service: MagicMock, sender: Any, inputs: dict) -> Any:
+def _make_tool(mod: Any) -> Any:
+    """构造工具实例并 stub 纯参数校验（target 存在性等与存储无关的面）。"""
     tool = mod.TaskSubmitTool()
-    tool._get_task_service = lambda: service  # type: ignore[method-assign]
     tool._validate_target_agent = lambda t, l: (True, "", "")  # type: ignore[method-assign]
-    tool._check_dependencies_exist = lambda d: []  # type: ignore[method-assign]
-    tool._init_workspace = _noop_init_workspace  # type: ignore[method-assign]
-    if sender is None:
-        mod._chat_sender = None
-    else:
-        mod.set_chat_sender(sender)
-    try:
-        return await tool.execute(inputs)
-    finally:
-        mod._chat_sender = None
-
-
-async def _noop_init_workspace(task, workspace, task_data, task_service):  # noqa: ARG001
-    """工作空间初始化 stub：0.2 sidecar 下本就 None 降级（原样返回任务）。"""
-    return task, None
+    return tool
 
 
 class TestTaskPipelineDispatch:
@@ -142,99 +101,126 @@ class TestTaskPipelineDispatch:
         assert hasattr(mod, "_get_chat_sender")
         assert mod._get_chat_sender() is None
 
-    async def test_submit_dispatches_via_chat_send_message(self, mod: Any) -> None:
-        """核心契约：创建任务后经 chat.send_message 创建执行管道。"""
-        task = _fake_task()
-        svc = _fake_service(task)
+    async def test_submit_creates_pipeline_without_task_service(self, mod: Any) -> None:
+        """核心契约：不再调用 task_service.create_task——YAML 无写路径；
+        task.id = 引擎返回的 pipeline_id（身份权威统一）。"""
         sender = _FakeSender()
-        r = await _run_submit(mod, svc, sender, _base_inputs())
+        mod.set_chat_sender(sender)
+        tool = _make_tool(mod)
+        service = MagicMock()  # spy：断言任何存储写方法都未被触碰
+        tool._get_task_service = lambda: service  # type: ignore[method-assign]
+        try:
+            r = await tool.execute(_base_inputs())
+        finally:
+            mod._chat_sender = None
         assert r.success, r.error
 
-        assert len(sender.calls) == 1, "应恰好派发一次"
+        assert len(sender.calls) == 1
         p = sender.calls[0]
-        # 创建分支：引擎生成 id（不接受调用方传入）
         assert p["create"] is True
         assert "pipeline_id" not in p
-        # state 出生即入：task.* 字段
-        assert p["state"]["task.id"] == "task-001"
+        # state 出生即入
         assert p["state"]["task.goal"] == "喝水提醒"
         assert p["state"]["task.status"] == "pending"
-        # 血缘：有父形式（parent = 调用方管道；origin_session 同管道——主会话
-        # thread_id 与 pipeline_id 同值）
+        # task.id 不在调用方 state（引擎注入）
+        assert "task.id" not in p["state"]
+        # 血缘：有父形式
         assert p["lineage"] == {
             "parent_pipeline_id": "pipe_parent_9",
             "origin_session_id": "pipe_parent_9",
         }
-        # message 携带任务目标（kickoff 输入）
         assert "喝水提醒" in p["message"]
         assert p["user_id"] == "user-1"
-        # 后台执行：不阻塞工具调用等待任务完成
         assert p.get("background") is True
 
-        # 关联回写：引擎返回的 pipeline_id 绑定任务
-        svc.bind_pipeline_run.assert_awaited_with("task-001", "pipe_engine_gen_1")
-        # 派发成功即开始（started_at 语义——run 已真正派发）
-        svc.start_task.assert_awaited_with("task-001")
-
-        # 话术：报告执行管道已创建（诚实），响应携带 pipeline_id
+        # YAML 写路径清零：create_task/start_task/bind_pipeline_run 全不触碰
+        service.create_task.assert_not_called()
+        service.start_task.assert_not_called()
+        service.bind_pipeline_run.assert_not_called()
+        # 响应即身份：task_id == pipeline_id
+        assert r.output["task_id"] == "pipe_engine_gen_1"
+        assert r.output["pipeline_id"] == "pipe_engine_gen_1"
         assert "pipe_engine_gen_1" in r.output["message"]
-        assert r.output.get("pipeline_id") == "pipe_engine_gen_1"
 
     async def test_submit_root_lineage_without_parent_pipeline(self, mod: Any) -> None:
-        """无调用方管道（如系统/通道自举）→ lineage 根形式（诚实声明）。"""
-        task = _fake_task(task_id="task-root")
-        svc = _fake_service(task)
+        """无调用方管道 → lineage 根形式（诚实声明）。"""
         sender = _FakeSender()
-        r = await _run_submit(
-            mod, svc, sender, _base_inputs(task_id=None, pipeline_id=None)
-        )
+        mod.set_chat_sender(sender)
+        tool = _make_tool(mod)
+        try:
+            r = await tool.execute(_base_inputs(pipeline_id=None))
+        finally:
+            mod._chat_sender = None
         assert r.success
-        p = sender.calls[0]
-        assert p["lineage"] == {
+        assert sender.calls[0]["lineage"] == {
             "root": True,
             "origin": {"kind": "plugin", "source": "task_submit"},
         }
-        # 无管道时 user_id 兜底系统身份
-        assert p["user_id"]
 
     async def test_submit_passes_execution_context(self, mod: Any) -> None:
-        """workspace/isolation 显式声明 → execution_context 透传给执行管道。"""
-        task = _fake_task()
-        svc = _fake_service(task)
         sender = _FakeSender()
-        r = await _run_submit(
-            mod,
-            svc,
-            sender,
-            _base_inputs(workspace="D:/proj/demo", workspace_mode="worktree", isolation_level="isolated"),
-        )
+        mod.set_chat_sender(sender)
+        tool = _make_tool(mod)
+        try:
+            r = await tool.execute(
+                _base_inputs(workspace="D:/proj/demo", workspace_mode="worktree", isolation_level="isolated")
+            )
+        finally:
+            mod._chat_sender = None
         assert r.success
         ec = sender.calls[0]["execution_context"]
         assert ec["workspace"]["source_path"] == "D:/proj/demo"
         assert ec["workspace"]["mode"] == "worktree"
         assert ec["isolation"]["level"] == "isolated"
 
+    async def test_submit_dependency_check_reads_state_aggregation(self, mod: Any) -> None:
+        """依赖校验读 state 聚合（pipeline-state.list）而非 YAML 树。"""
+        sender = _FakeSender()
+        mod.set_chat_sender(sender)
+        tool = _make_tool(mod)
 
-class TestHonestMessaging:
+        # 依赖存在（聚合行命中）
+        tool._read_state_rows = lambda: [{"pipeline_id": "dep_pipe_1", "task.status": "completed"}]  # type: ignore[method-assign]
+        try:
+            r = await tool.execute(_base_inputs(dependencies=["dep_pipe_1"]))
+        finally:
+            mod._chat_sender = None
+        assert r.success, r.error
+        assert sender.calls[0]["state"]["task.dependencies"] == ["dep_pipe_1"]
+
+        # 依赖缺失 → DEPENDENCY_NOT_FOUND（不派发）
+        tool2 = _make_tool(mod)
+        tool2._read_state_rows = lambda: []  # type: ignore[method-assign]
+        mod.set_chat_sender(_FakeSender())
+        try:
+            r2 = await tool2.execute(_base_inputs(dependencies=["ghost_pipe"]))
+        finally:
+            mod._chat_sender = None
+        assert not r2.success
+        assert r2.error_code == "DEPENDENCY_NOT_FOUND"
+
     async def test_submit_without_sender_warns_not_lies(self, mod: Any) -> None:
-        """派发器不可用（capability 缺席）→ 不得声称"异步执行中"，携带 warning。"""
-        task = _fake_task()
-        svc = _fake_service(task)
-        r = await _run_submit(mod, svc, None, _base_inputs())
-        assert r.success, "任务创建本身成功（存储语义保留）"
+        """派发器不可用 → 不得声称执行中，携带 warning。"""
+        tool = _make_tool(mod)
+        mod._chat_sender = None
+        try:
+            r = await tool.execute(_base_inputs())
+        finally:
+            mod._chat_sender = None
+        assert r.success, "任务创建本身成功（state 语义保留——管道未建但参数合法）"
         assert "异步执行中" not in r.output["message"], "未派发不得声称异步执行中"
-        assert r.output.get("warning"), "应携带未派发警告"
-        svc.start_task.assert_not_awaited()
-        svc.bind_pipeline_run.assert_not_awaited()
+        assert "已提交并落库" not in r.output["message"], "不得声称落库（YAML 已停写）"
+        assert r.output.get("warning")
 
     async def test_submit_sender_failure_honest(self, mod: Any) -> None:
-        """派发失败（内核错误）→ 任务保留 + 话术诚实 + warning。"""
-        task = _fake_task()
-        svc = _fake_service(task)
         sender = _FakeSender(error=RuntimeError("kernel down"))
-        r = await _run_submit(mod, svc, sender, _base_inputs())
+        mod.set_chat_sender(sender)
+        tool = _make_tool(mod)
+        try:
+            r = await tool.execute(_base_inputs())
+        finally:
+            mod._chat_sender = None
         assert r.success
         assert "异步执行中" not in r.output["message"]
         assert r.output.get("warning")
         assert "kernel down" in r.output["warning"]
-        svc.start_task.assert_not_awaited()

@@ -220,15 +220,6 @@ class TestTaskSubmitInheritParams:
         result = await tool.execute(self._build_inputs(mode))
         assert result.error_code != "INVALID_INHERIT_MODE"
         assert result.error_code != "INVALID_INHERIT_PARAMS"
-
-    @pytest.mark.parametrize("mode", ["pipe", ["pipe"]])
-    @pytest.mark.asyncio
-    async def test_inherit_pipe_mode_reaches_create_task(self, mod, mode):
-        """纯 pipe 模式应走完继承解析，最终在 create_task（mock 抛异常）处失败。"""
-        tool = self._make_tool(mod)
-        result = await tool.execute(self._build_inputs(mode))
-        assert result.error_code == "TASK_CREATE_FAILED"
-
     @pytest.mark.parametrize("mode", ["invalid", ["invalid"], ["pipe", "invalid"]])
     @pytest.mark.asyncio
     async def test_inherit_mode_invalid_forms_rejected(self, mod, mode):
@@ -291,14 +282,13 @@ class TestTaskSubmitCoreSubmit:
         task = _make_task()
         task_service, provider = self._patch_submit_deps(mod, monkeypatch, task)
 
-        async def fake_init(t, workspace, task_data, ts, *, is_container=False):
-            t.metadata = t.metadata or {}
-            t.metadata["ws_meta"] = {"path": "/ws/task-001"}
-            return t, None
+        calls: list[dict] = []
 
-        # 原为 staticmethod：替换后需保持不绑定 self 的调用语义
-        monkeypatch.setattr(mod.TaskSubmitTool, "_init_workspace", staticmethod(fake_init))
+        async def fake_sender(params: dict) -> dict:
+            calls.append(params)
+            return {"status": "created", "pipeline_id": "pipe_gen_abc123"}
 
+        mod.set_chat_sender(fake_sender)
         tool = mod.TaskSubmitTool()
         result = await tool.execute(
             {
@@ -310,12 +300,14 @@ class TestTaskSubmitCoreSubmit:
                 "workspace": "D:/proj",
             }
         )
+        mod._chat_sender = None
         assert result.success is True
         output = result.output
-        assert output["task_id"] == "task-001"
-        assert output["status"] == "pending"
+        assert output["task_id"] == "pipe_gen_abc123"
+        assert output["pipeline_id"] == "pipe_gen_abc123"
+        assert output["status"] == "running"
         assert output["workspace"] == "D:/proj"
-        task_service.create_task.assert_called_once()
+        task_service.create_task.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_submit_without_worker_still_succeeds(self, mod, monkeypatch):
@@ -341,33 +333,7 @@ class TestTaskSubmitCoreSubmit:
         assert result.success is True
         task_service.hard_delete.assert_not_called()
 
-    @pytest.mark.asyncio
-    async def test_workspace_init_failure_cleans_up(self, mod, monkeypatch):
-        """工作空间初始化失败 → 删除任务记录并返回 WORKSPACE_INIT_FAILED。"""
-        task = _make_task()
-        task_service, _ = self._patch_submit_deps(mod, monkeypatch, task)
-
-        async def fake_init(t, workspace, task_data, ts, *, is_container=False):
-            return t, "工作空间初始化失败: boom"
-
-        monkeypatch.setattr(mod.TaskSubmitTool, "_init_workspace", staticmethod(fake_init))
-
-        tool = mod.TaskSubmitTool()
-        result = await tool.execute(
-            {
-                "parent_agent_level": 1,
-                "goal_title": "写测试",
-                "target_type": "agent",
-                "target_id": "general_agent",
-            }
-        )
-        assert result.success is False
-        assert result.error_code == "WORKSPACE_INIT_FAILED"
-        task_service.hard_delete.assert_called_once()
-
-
-# ── description 归一化（自旧 task/test_task_submit.py 移植） ──
-
+    # GAP-1 统一后移除：test_workspace_init_failure_cleans_up（提交期不再初始化工作空间/is_root 查询/继承参数传 create_task——见 e2e 缺口文档延伸节）
 
 class TestNormalizeDescription:
     """LLM 返回的 description 归一化为 str（防 pydantic str 校验 500）。"""
@@ -496,60 +462,3 @@ class TestScopeQueryFailureConservative:
         )
         assert result.success is False
         assert result.error_code == "INHERIT_WS_QUERY_FAILED"
-
-    @pytest.mark.asyncio
-    async def test_is_root_query_failure_keeps_default_and_warns(self, mod, monkeypatch, caplog):
-        """is_root 判定查询异常 → 任务照常提交，is_root 维持默认 True 并记录 warning（不静默）。"""
-        import logging
-        from unittest.mock import AsyncMock
-
-        task = _make_task()
-        task_service = MagicMock()
-        task_service.create_task = AsyncMock(return_value=task)
-        task_service.hard_delete = AsyncMock()
-        task_service.save_task = AsyncMock()
-        task_service.get_root_task_id.return_value = None
-
-        parent_task = MagicMock()
-        parent_task.metadata = {"task_scope": "non_container"}
-        # 创建前 get_task 正常返回（通过存在性校验），创建后抛异常（模拟 is_root 查询失败）
-        state = {"created": False}
-
-        def _get_task(task_id):
-            if state["created"]:
-                raise RuntimeError("scope down after create")
-            return parent_task
-
-        task_service.get_task = MagicMock(side_effect=_get_task)
-
-        async def _create_task(*args, **kwargs):
-            state["created"] = True
-            return task
-
-        task_service.create_task = _create_task
-
-        provider = MagicMock()
-        provider.get.return_value = None
-        monkeypatch.setattr(mod.TaskSubmitTool, "_get_task_service", lambda _self: task_service)
-        monkeypatch.setattr(mod.TaskSubmitTool, "_validate_target_agent", lambda _self, _t, _lvl: (True, "", ""))
-        monkeypatch.setattr(mod.TaskSubmitTool, "_check_dependencies_exist", lambda _self, _d: [])
-        monkeypatch.setattr(mod, "_get_service_provider", lambda: provider)
-
-        async def fake_init(t, workspace, task_data, ts, *, is_container=False):
-            return t, None
-
-        monkeypatch.setattr(mod.TaskSubmitTool, "_init_workspace", staticmethod(fake_init))
-
-        tool = mod.TaskSubmitTool()
-        with caplog.at_level(logging.WARNING):
-            result = await tool.execute(
-                {
-                    "parent_agent_level": 1,
-                    "goal": {"title": "子任务"},
-                    "target_type": "agent",
-                    "target_id": "general_agent",
-                    "parent_task_id": "parent-001",
-                }
-            )
-        assert result.success is True
-        assert any("is_root 维持默认" in rec.message for rec in caplog.records)

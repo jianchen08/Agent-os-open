@@ -792,9 +792,30 @@ async fn process_via_engine_inner(
         thread_id,
         agent_id,
     );
+    // GAP-1：run 终态即任务终态——回写 task.status（热路径 registry + 冷路径
+    // pipeline_state 标量表；suspended 不回写）。fire-and-forget 语义：失败仅
+    // 告警，不影响响应。
+    writeback_task_terminal_status(
+        state,
+        &final_state,
+        outcome.failed,
+        &tenant_id,
+        effective_pipeline_id,
+    )
+    .await;
     // GAP-2：run 终态域事件（completed/suspended）——state 带 task.* 时派生
     // task_completed（EVENT 触发器输入源）。fire-and-forget，不影响响应。
     emit_run_terminal_domain_events(state, &final_state, outcome.failed).await;
+    // GAP-1 统一：run 终态即任务终态——task.status/ended_at 回写 state 真值
+    // （registry + pipeline_state 表），任务树/评估从 state 直读。
+    finalize_task_status_in_state(
+        state,
+        &final_state,
+        outcome.failed,
+        &tenant_id,
+        effective_pipeline_id,
+    )
+    .await;
     outcome
 }
 
@@ -809,6 +830,12 @@ async fn process_via_engine_inner(
 /// 任务管道的 state 出生即带 task.* 字段）。事件经 [`broadcast_domain_event`]
 /// 双通道投递：观察总线 + 点对点推给声明 domain_event hook 的订阅插件
 /// （triggers_ext → evaluate_event——EVENT 触发器的输入源）。
+///
+/// 子任务通知（GAP-1）：task_completed/task_failed 事件额外携带
+/// `parent_pipeline_id` 标签（state 的 `lineage.parent_pipeline_id` 扁平键，
+/// 无父/根形式时为空串）——triggers_ext 据此把子任务完成通知注入父管道，
+/// 兑现 task_submit "子任务完成后自动通知上级"的承诺（等效自动注册的触发器，
+/// 注册逻辑收敛在统一触发服务，任务系统零触发代码）。
 fn derive_run_terminal_events(
     final_state: &serde_json::Value,
     failed: bool,
@@ -821,6 +848,8 @@ fn derive_run_terminal_events(
         .map(|o| o.keys().any(|k| k.starts_with("task.")))
         .unwrap_or(false);
     let task_id = v("task.id");
+    // 子任务通知锚点：lineage.parent_pipeline_id 扁平键（有父形式出生写入）
+    let parent_pipeline_id = v("lineage.parent_pipeline_id");
 
     let mut events: Vec<(&'static str, Vec<(&'static str, serde_json::Value)>)> = Vec::new();
     let run_tags = vec![
@@ -836,6 +865,7 @@ fn derive_run_terminal_events(
                     ("pipeline_id", pipeline_id),
                     ("thread_id", thread_id),
                     ("task_id", task_id),
+                    ("parent_pipeline_id", parent_pipeline_id),
                 ],
             ));
         }
@@ -857,6 +887,7 @@ fn derive_run_terminal_events(
                 ("pipeline_id", pipeline_id),
                 ("thread_id", thread_id),
                 ("task_id", task_id),
+                ("parent_pipeline_id", parent_pipeline_id),
             ],
         ));
     }
@@ -872,6 +903,155 @@ async fn emit_run_terminal_domain_events(
     for (name, tags) in derive_run_terminal_events(terminal_state, failed) {
         crate::plugin_lifecycle::broadcast_domain_event(state, name, tags).await;
     }
+}
+
+/// GAP-1 统一：run 终态即任务终态——state 带 `task.*` 字段的管道，把
+/// `task.status` / `task.ended_at` 回写 state 单一真值。
+///
+/// 双写目标：
+/// 1. **registry 常驻 state**（热路径：/api/v1/pipelines/state 内存行直接读）；
+/// 2. **pipeline_state 表**（冷路径：重启后 checkpoint 冷恢复按
+///    `checkpoint 标量 → pipeline_state 表补充` 的顺序合并，表的最新值覆盖
+///    checkpoint 里的出生值 pending——冷恢复也拿到终态）。
+///
+/// 任务树/评估/门控全部从 state 直读后，YAML 镜像不再被任何写路径触碰。
+async fn finalize_task_status_in_state(
+    state: &AppState,
+    final_state: &serde_json::Value,
+    failed: bool,
+    tenant_id: &str,
+    effective_pipeline_id: &str,
+) {
+    let has_task = final_state
+        .as_object()
+        .map(|o| o.keys().any(|k| k.starts_with("task.")))
+        .unwrap_or(false);
+    if !has_task || effective_pipeline_id.is_empty() {
+        return;
+    }
+    let status = if failed {
+        "failed"
+    } else if final_state
+        .get("suspended")
+        .and_then(|s| s.as_bool())
+        .unwrap_or(false)
+    {
+        "suspended"
+    } else {
+        "completed"
+    };
+    use serde_json::json;
+
+    let ended_at = chrono::Utc::now().to_rfc3339();
+    let mut merged = final_state.clone();
+    if let Some(obj) = merged.as_object_mut() {
+        obj.insert("task.status".to_string(), json!(status));
+        obj.insert("task.ended_at".to_string(), json!(ended_at));
+    }
+    // 热路径：registry 常驻 state 回写
+    let reg = agentos_session::global_registry();
+    if reg.contains(tenant_id, effective_pipeline_id) {
+        reg.update_state(tenant_id, effective_pipeline_id, merged.clone());
+    }
+    // 冷路径：pipeline_state 表（upsert_state_field 现成，O(1) 单键写）
+    if let Some(store) = state.store.as_ref() {
+        let _ = store
+            .upsert_state_field(effective_pipeline_id, tenant_id, "task.status", &json!(status))
+            .await;
+        let _ = store
+            .upsert_state_field(effective_pipeline_id, tenant_id, "task.ended_at", &json!(ended_at))
+            .await;
+    }
+    info!(
+        target: "task-state",
+        pipeline = %effective_pipeline_id,
+        status,
+        "任务终态已回写 state 单一真值（registry + pipeline_state 表）"
+    );
+}
+
+/// 派生任务管道的终态 `task.status`（GAP-1：task = pipeline state 单一真值）。
+///
+/// 任务管道的 state 出生即带 `task.*` 字段；run 终态即任务终态。返回
+/// `Some(status)` 时调用方应把 `task.status` 推进为终态；`None` = 不回写：
+/// - 非任务管道（无 `task.` 前缀键——精确前缀，`taskx` 不误判）；
+/// - suspended（等待人工交互，任务状态保持 running，不写终态）。
+fn derive_task_terminal_status(
+    final_state: &serde_json::Value,
+    failed: bool,
+) -> Option<&'static str> {
+    let has_task = final_state
+        .as_object()
+        .map(|o| o.keys().any(|k| k.starts_with("task.")))
+        .unwrap_or(false);
+    if !has_task {
+        return None;
+    }
+    let suspended = final_state
+        .get("suspended")
+        .and_then(|s| s.as_bool())
+        .unwrap_or(false);
+    if suspended {
+        return None;
+    }
+    Some(if failed { "failed" } else { "completed" })
+}
+
+/// GAP-1：run 终态回写 `task.status` 到 state（双落点，失败仅告警不阻断）。
+///
+/// task = pipeline state 单一真值：任务管道的终态由 run 终态决定（completed/
+/// failed；suspended 不回写）。回写双落点保证热冷路径一致：
+/// ① 内存 registry（热路径，`/api/v1/pipelines/state` 实时数据源）；
+/// ② pipeline_state 标量表（冷路径，重启后 checkpoint 之上的覆盖层——
+///    冷恢复顺序为 checkpoint → pipeline_state 补充，见 stage_recover_history
+///    第③步，因此标量表回写即可让冷启动读到终态）。
+async fn writeback_task_terminal_status(
+    state: &AppState,
+    terminal_state: &serde_json::Value,
+    failed: bool,
+    tenant_id: &str,
+    effective_pipeline_id: &str,
+) {
+    let Some(status) = derive_task_terminal_status(terminal_state, failed) else {
+        return;
+    };
+    if effective_pipeline_id.is_empty() {
+        return;
+    }
+    let status_val = serde_json::json!(status);
+
+    // ① 热路径：内存 registry（registry 回写发生在 stage_finalize，此处覆盖 task.status）
+    let reg = agentos_session::global_registry();
+    if let Some(entry) = reg.get(tenant_id, effective_pipeline_id) {
+        let mut new_state = entry.read().state.clone();
+        new_state["task.status"] = status_val.clone();
+        reg.update_state(tenant_id, effective_pipeline_id, new_state);
+    }
+
+    // ② 冷路径：pipeline_state 标量表（重启后覆盖 checkpoint 的旧 task.status）
+    if let Some(db) = state.db.as_ref() {
+        let db = db.clone();
+        let pid = effective_pipeline_id.to_string();
+        let tid = tenant_id.to_string();
+        let value = status_val.clone();
+        let write_pid = pid.clone();
+        if let Err(e) = tokio::task::spawn_blocking(move || {
+            db.upsert_state_field(&pid, &tid, "task.status", &value)
+        })
+        .await
+        {
+            tracing::warn!(
+                pipeline_id = %write_pid,
+                error = %e,
+                "task.status 终态回写失败（继续执行）"
+            );
+        }
+    }
+    tracing::info!(
+        pipeline_id = %effective_pipeline_id,
+        task_status = status,
+        "run 终态回写 task.status"
+    );
 }
 
 /// 前置依赖缺失时的 echo 降级应答（invoker/store/project_root 任一缺席）。
@@ -2457,6 +2637,7 @@ mod tests {
                     "event": tag("event"),
                     "pipeline_id": tag("pipeline_id"),
                     "task_id": tag("task_id"),
+                    "parent_pipeline_id": tag("parent_pipeline_id"),
                 }),
             ));
             Ok(())
@@ -2505,6 +2686,8 @@ mod tests {
         state.store = Some(store.clone());
         state.invoker = Some(invoker.clone());
         state.project_root = Some(tmp_root);
+        // 注入统一数据接口句柄（writeback_task_terminal_status 冷路径回写依赖）
+        state.db = Some(sqlite.clone());
         // 兜底配置（与临时 YAML 一致；临时 YAML 加载成功时此值被覆盖）
         state.pipeline_config = Arc::new(agentos_core::types::PipelineConfig {
             name: "test_multi_turn".to_string(),
@@ -3328,6 +3511,7 @@ mod tests {
             "thread_id": "th1",
             "task.id": "t9",
             "task.goal": "喝水提醒",
+            "lineage.parent_pipeline_id": "parent_p1",
         });
         let evs = derive_run_terminal_events(&st, false);
         let names: Vec<&str> = evs.iter().map(|(n, _)| *n).collect();
@@ -3342,6 +3526,8 @@ mod tests {
         };
         assert_eq!(tag("pipeline_id"), json!("p1"));
         assert_eq!(tag("task_id"), json!("t9"));
+        // 子任务通知锚点：parent_pipeline_id 从 state 的 lineage 扁平键带出
+        assert_eq!(tag("parent_pipeline_id"), json!("parent_p1"));
     }
 
     #[test]
@@ -3365,12 +3551,28 @@ mod tests {
 
     #[test]
     fn test_derive_run_terminal_events_failed_with_task_fields() {
-        let st = json!({"pipeline_id": "p4", "task.id": "t4", "task.goal": "g"});
-        let names: Vec<&str> = derive_run_terminal_events(&st, true)
+        let st = json!({
+            "pipeline_id": "p4",
+            "task.id": "t4",
+            "task.goal": "g",
+            "lineage.parent_pipeline_id": "parent_p4",
+        });
+        let evs = derive_run_terminal_events(&st, true)
             .iter()
-            .map(|(n, _)| *n)
-            .collect();
-        assert_eq!(names, vec!["run.failed", "task_failed"]);
+            .map(|(n, tags)| {
+                let pp = tags
+                    .iter()
+                    .find(|(k, _)| *k == "parent_pipeline_id")
+                    .map(|(_, v)| v.as_str().unwrap_or(""))
+                    .unwrap_or("");
+                (n.to_string(), pp.to_string())
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(evs[0], ("run.failed".to_string(), "".to_string()));
+        assert_eq!(
+            evs[1],
+            ("task_failed".to_string(), "parent_p4".to_string())
+        );
     }
 
     #[test]
@@ -3432,6 +3634,8 @@ mod tests {
             .insert("trigger_sub".to_string());
 
         let tenant = TenantContext::new("tenant_gap2_emit", "thread_gap2_emit");
+        // 注：lineage.* 是保留字（引擎出生写入），overlay 不可携带；真实路径经
+        // chat.send_message 的 lineage 参数写入 state，纯函数测试已覆盖 parent 标签透传。
         let overlay = json!({"task.id": "t77", "task.goal": "写周报"});
         let r = agentos_tenant::scope(
             tenant,
@@ -3483,6 +3687,148 @@ mod tests {
             .expect("task_completed 钩子");
         assert_eq!(task_evt.2["task_id"], json!("t77"));
         assert_eq!(task_evt.2["pipeline_id"], json!("pipe_gap2_emit"));
+        // parent_pipeline_id 标签存在（无 lineage 时为空串——不缺失键）
+        assert!(
+            task_evt.2.get("parent_pipeline_id").is_some(),
+            "task_completed 应携带 parent_pipeline_id 键（无父时为空串）"
+        );
+    }
+
+    // ── GAP-1 续：run 终态回写 task.status（task = pipeline state 单一真值） ──
+
+    #[test]
+    fn test_derive_task_terminal_status_completed() {
+        // 任务管道正常跑完（无 failed 标志）→ completed
+        let st = json!({"pipeline_id": "p1", "task.id": "t9"});
+        assert_eq!(derive_task_terminal_status(&st, false), Some("completed"));
+    }
+
+    #[test]
+    fn test_derive_task_terminal_status_failed() {
+        // 任务管道失败 → failed（优先于 completed）
+        let st = json!({"pipeline_id": "p1", "task.id": "t9"});
+        assert_eq!(derive_task_terminal_status(&st, true), Some("failed"));
+    }
+
+    #[test]
+    fn test_derive_task_terminal_status_skips_non_task_pipeline() {
+        // 非任务管道（无 task.* 前缀）→ None（不写回）
+        let plain = json!({"pipeline_id": "p2"});
+        assert_eq!(derive_task_terminal_status(&plain, false), None);
+    }
+
+    #[test]
+    fn test_derive_task_terminal_status_skips_suspended() {
+        // suspended（等待人工交互）→ None（任务状态保持 running，不写终态）
+        let st = json!({"pipeline_id": "p3", "suspended": true, "task.id": "t3"});
+        assert_eq!(derive_task_terminal_status(&st, false), None);
+    }
+
+    #[test]
+    fn test_derive_task_terminal_status_task_prefix_is_dotted() {
+        // 前缀必须精确 "task."：taskx 不得误判为任务管道
+        let st = json!({"pipeline_id": "p5", "taskx": 1});
+        assert_eq!(derive_task_terminal_status(&st, false), None);
+    }
+
+    // ── 集成：真实引擎跑完整链路 → 终态回写双落点（registry + pipeline_state 表） ──
+    // 接口级行为断言（非白盒）：process_via_engine 是前端消息的完整入口，
+    // 任务管道（state 带 task.*）跑完后 task.status 必须推进为 completed——
+    // 这是监控页"任务已完成"与 task_reminder 判断的数据基础。
+
+    #[tokio::test]
+    async fn test_engine_run_writes_back_task_status_completed() {
+        let (state, _invoker, store, _sqlite) = make_engine_state();
+        let tenant = TenantContext::new("tenant_wb", "thread_wb");
+        let tenant_id = tenant.tenant_id.clone();
+        let pipe = "pipe_wb_task";
+        let thread = "thread_wb";
+        let overlay = json!({
+            "task.id": "t_wb1",
+            "task.goal": "写周报",
+            "task.status": "pending",
+            "task.agent_level": "L2",
+        });
+        let r = agentos_tenant::scope(
+            tenant,
+            process_via_engine(
+                &state,
+                "执行任务",
+                "agentos",
+                &[],
+                pipe,
+                thread,
+                "o1",
+                "",
+                "",
+                None,
+                Some(&overlay),
+            ),
+        )
+        .await;
+        assert!(!r.content.is_empty(), "引擎应正常跑完一轮");
+
+        // ① 热路径：内存 registry 的 state 里 task.status 已推进为 completed
+        let reg = agentos_session::global_registry();
+        let entry = reg.get(&tenant_id, pipe).expect("registry 应有该管道条目");
+        let st = entry.read();
+        assert_eq!(
+            st.state.get("task.status").and_then(|v| v.as_str()),
+            Some("completed"),
+            "registry 热路径：task.status 应回写 completed，实际 {:?}",
+            st.state.get("task.status")
+        );
+        drop(st);
+
+        // ② 冷路径：pipeline_state 表同样落 completed（重启后 checkpoint 之上的覆盖层）
+        let fields = store
+            .load_pipeline_state(pipe, &tenant_id)
+            .await
+            .unwrap();
+        assert_eq!(
+            fields.get("task.status").and_then(|v| v.as_str()),
+            Some("completed"),
+            "pipeline_state 表：task.status 应落 completed，实际 {:?}",
+            fields.get("task.status")
+        );
+    }
+
+    #[tokio::test]
+    async fn test_engine_run_does_not_write_task_status_for_session_pipeline() {
+        // 非任务管道（无 task.* 字段）：run 终态不得误写 task.status
+        let (state, _invoker, _store, _sqlite) = make_engine_state();
+        let tenant = TenantContext::new("tenant_wb2", "thread_wb2");
+        let tenant_id = tenant.tenant_id.clone();
+        let pipe = "pipe_wb_session";
+        let thread = "thread_wb2";
+        let r = agentos_tenant::scope(
+            tenant,
+            process_via_engine(
+                &state,
+                "普通对话",
+                "agentos",
+                &[],
+                pipe,
+                thread,
+                "o1",
+                "",
+                "",
+                None,
+                None,
+            ),
+        )
+        .await;
+        assert!(!r.content.is_empty());
+
+        let reg = agentos_session::global_registry();
+        if let Some(entry) = reg.get(&tenant_id, pipe) {
+            let st = entry.read();
+            assert!(
+                st.state.get("task.status").is_none(),
+                "会话管道不得出现 task.status，实际 {:?}",
+                st.state.get("task.status")
+            );
+        }
     }
 
     // ── GAP-3 后半：resume 幂等（重启后 user 消息不重复消费） ────────────
@@ -3662,5 +4008,78 @@ mod tests {
                 );
             }
         }
+    }
+
+    // ── GAP-1 统一：run 终态即任务终态（state 单一真值的完成回写） ─────────
+
+    #[tokio::test]
+    async fn test_run_terminal_writes_task_status_to_state() {
+        // overlay 带 task.* 字段的管道跑完 → registry 常驻 state 与
+        // pipeline_state 表（冷路径真值）都回写 task.status=completed +
+        // task.ended_at——"run 终态即任务终态"，任务树数据源
+        // （/api/v1/pipelines/state 聚合 + checkpoint 冷兜底）无需 YAML。
+        let (state, _invoker, store, _sqlite) = make_engine_state();
+        let tenant = TenantContext::new("tenant_unify", "thread_unify");
+        let overlay = json!({"task.id": "t_unify", "task.goal": "统一验证", "task.status": "pending"});
+        let r = agentos_tenant::scope(
+            tenant,
+            process_via_engine(
+                &state,
+                "执行任务",
+                "agentos",
+                &[],
+                "pipe_unify",
+                "thread_unify",
+                "o1",
+                "",
+                "",
+                None,
+                Some(&overlay),
+            ),
+        )
+        .await;
+        assert!(!r.content.is_empty());
+
+        // registry 热数据
+        let reg = agentos_session::global_registry();
+        let entry = reg
+            .get("tenant_unify", "pipe_unify")
+            .expect("registry 应有该管道");
+        let st = entry.read();
+        assert_eq!(st.state["task.status"], json!("completed"));
+        assert!(st.state.get("task.ended_at").is_some(), "应写 ended_at");
+        drop(st);
+
+        // 冷路径表（checkpoint 冷恢复时以表为准覆盖旧 checkpoint 标量）
+        let fields = store
+            .load_pipeline_state("pipe_unify", "tenant_unify")
+            .await
+            .unwrap();
+        assert_eq!(fields.get("task.status"), Some(&json!("completed")));
+        assert!(fields.contains_key("task.ended_at"));
+
+        // 普通会话管道（无 task.*）不受影响——不写任务字段
+        let _ = agentos_tenant::scope(
+            TenantContext::new("tenant_unify", "thread_unify"),
+            process_via_engine(
+                &state,
+                "普通消息",
+                "agentos",
+                &[],
+                "pipe_plain",
+                "thread_unify",
+                "o1",
+                "",
+                "",
+                None,
+                None,
+            ),
+        )
+        .await;
+        let fields2 = store
+            .load_pipeline_state("pipe_plain", "tenant_unify")
+            .await
+            .unwrap();
+        assert!(!fields2.contains_key("task.status"), "非任务管道不写任务字段");
     }
 }

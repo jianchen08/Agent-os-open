@@ -43,6 +43,13 @@ async def _on_load(_params: dict[str, Any]) -> None:
 
     tool_mod.set_chat_sender(_send)
 
+    async def _read_state_rows() -> list[dict[str, Any]]:
+        handle = plugin.get_capability("pipeline-state")
+        rows = await handle.call("list", {})
+        return rows if isinstance(rows, list) else []
+
+    tool_mod.set_state_reader(_read_state_rows)
+
 
 @plugin.tool(
     name="task_submit",

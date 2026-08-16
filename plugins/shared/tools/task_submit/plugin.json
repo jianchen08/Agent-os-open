@@ -25,6 +25,7 @@
     "priority": 10,
     "granted_capabilities": [
         "chat",
-        "tenant-context"
+        "tenant-context",
+        "pipeline-state"
     ]
 }
