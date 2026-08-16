@@ -52,13 +52,17 @@ plugins:
     enabled: false
     activation: eager
   demo_widget_plugin:
-    enabled: true
+    enabled: false
     activation: lazy
   simple_tools:
     enabled: true
   design_generate_mcp:
     enabled: false
     activation: lazy
+  feature_matrix_plugin:
+    enabled: false
+  visual_customization_demo:
+    enabled: false
 defaults:
   enabled: true
   activation: lazy
