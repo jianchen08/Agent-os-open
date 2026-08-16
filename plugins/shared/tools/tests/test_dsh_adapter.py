@@ -439,8 +439,9 @@ class TestInstalledDshPlugins:
         assert manifest["plugin_type"] == "system"
         # D.6 槽位拆分：声明即注册，无类型豁免字段
         assert "llm_tools" not in manifest
-        # 演示 UI 贡献已清理：仅保留 renderers + 适配器元信息
-        assert set(manifest["contributes"].keys()) == {"renderers", "dsh_adapter"}
+        # 正式贡献面：renderers + 适配器元信息 + client_styles（DSH 视觉 CSS 通道）
+        assert set(manifest["contributes"].keys()) == {"renderers", "dsh_adapter", "client_styles"}
+        assert manifest["contributes"]["client_styles"][0]["id"] == "dsh-bg-image"
         # 配置入口：DSH 插件装载管理（config/dsh_adapter.yaml）
         assert manifest["config_files"] == [
             {"id": "dsh_plugins", "path": "config/dsh_adapter.yaml", "label": "DSH 插件配置"}
