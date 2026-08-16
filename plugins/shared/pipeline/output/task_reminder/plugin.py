@@ -50,7 +50,7 @@ class TaskReminder(IOutputPlugin):
             )
             return OutputResult()
 
-        task_id = state.get("task_id")
+        task_id = state.get("task.id") or state.get("task_id")
         if not task_id:
             logger.debug(
                 "TaskReminder[iter=%s]: skip, no task_id in state",
@@ -61,7 +61,9 @@ class TaskReminder(IOutputPlugin):
         # ── 规则 3：L1 调度层永不触发 ──
         # L1（灵汐）是调度层，它的纯文本输出是正常的调度/沟通汇报，
         # 不代表"忘了提交评估"。reminder 只对叶子执行者有意义。
-        agent_level = state.get("agent_level", "")
+        # 0.2：task.agent_level 为扁平点号键（task_submit 派发注入），
+        # 兼容旧顶层 agent_level。
+        agent_level = state.get("task.agent_level") or state.get("agent_level", "")
         if agent_level == "L1":
             logger.debug(
                 "TaskReminder[iter=%s][task=%s]: skip, L1 调度层不触发 reminder",
@@ -73,29 +75,23 @@ class TaskReminder(IOutputPlugin):
         task_service = state.get("task_service")
         if not task_service:
             try:
-                from infrastructure.service_provider import get_service_provider  # noqa: PLC0415
+                # 0.2：插件自持服务——经 tasks.service_access 进程内单例获取
+                # （0.1 infrastructure.service_provider 已废弃删除）。
+                from tasks.service_access import get_task_service  # noqa: PLC0415
 
-                task_service = get_service_provider().get("task_service")
+                task_service = get_task_service()
             except Exception:
                 pass
+        # ── 任务存在性：state 单一真值（GAP-1）──
+        # task.id 出生即写入管道 state（task_submit 派发契约），state 有该键
+        # 即视为任务存在——不查跨进程 task_service（0.2 多 sidecar 下进程内
+        # 单例可能读不到其他进程刚创建的任务，误判"任务不存在"而提前 end）。
+        # task_service 仅作可选增强（0.1 遗留的 get_task 检查已退役）。
         if task_service:
             try:
                 _task_obj = task_service.get_task(task_id)
-                if _task_obj is None:
-                    if task_id.startswith("__eval__"):
-                        pass
-                    else:
-                        logger.info(
-                            "TaskReminder[iter=%s][task=%s]: task not found, sending end signal",
-                            iteration,
-                            task_id,
-                        )
-                        return OutputResult(
-                            route_signal=RouteSignal(
-                                route_type="end",
-                                reason=f"task_reminder: task {task_id} no longer exists",
-                            ),
-                        )
+                if _task_obj is None and task_id.startswith("__eval__"):
+                    pass
             except Exception:
                 pass
 
@@ -204,13 +200,8 @@ class TaskReminder(IOutputPlugin):
                     ),
                 )
 
-        if state.get("task_evaluation_completed"):
-            logger.debug(
-                "TaskReminder[iter=%s][task=%s]: skip, task already evaluated and passed",
-                iteration,
-                task_id,
-            )
-            return OutputResult()
+        # GAP-1 统一：task_evaluation_completed 为 0.1 孤儿标志（无写者），已移除——
+        # 任务完成（run 终态）后管道自然结束，提醒随之停止。
 
         if state.get("conversation_mode"):
             logger.info(
@@ -311,15 +302,26 @@ class TaskReminder(IOutputPlugin):
         task_id: str,
         ctx: PluginContext,
     ) -> bool:
-        """检查当前任务是否有活跃的子任务。"""
+        """检查当前任务是否有活跃的子任务。
+
+        0.2 数据源分层（GAP-1：task = pipeline state 单一真值）：
+        ① **state 优先**：tool_core 在 task_submit 成功后自动把子任务 id 写入
+           state 的 ``submitted_task_ids``（副作用收集，跨进程可靠）——
+           有标记即视为有活跃子任务，不催提交评估；
+        ② **task_service 回退**：state 无标记时经 0.2 service_access 查
+           list_subtasks（兼容无副作用收集的旧路径/容器任务）。
+        """
+        submitted_ids = ctx.state.get("submitted_task_ids")
+        if isinstance(submitted_ids, list) and submitted_ids:
+            return True
+
         try:
             task_service = ctx.get_service("task_service")
         except KeyError:
             try:
-                from infrastructure.service_provider import get_service_provider  # noqa: PLC0415
+                from tasks.service_access import get_task_service  # noqa: PLC0415
 
-                provider = get_service_provider()
-                task_service = provider.get("task_service")
+                task_service = get_task_service()
             except Exception:
                 return False
 

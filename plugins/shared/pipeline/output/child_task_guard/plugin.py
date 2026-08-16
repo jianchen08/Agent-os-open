@@ -86,19 +86,9 @@ class ChildTaskGuard(IOutputPlugin):
 
         core_type = state.get("core_type", "")
 
-        if state.get("task_evaluation_completed"):
-            logger.debug(
-                "ChildTaskGuard[iter=%s]: task evaluation passed, emitting end signal to terminate pipeline",
-                iteration,
-            )
-            return OutputResult(
-                state_updates={},
-                route_signal=RouteSignal(
-                    route_type="end",
-                    reason="child_task_guard: task_evaluate passed, pipeline completed",
-                ),
-                skip_remaining=True,
-            )
+        # GAP-1 统一：评估完成收口不再依赖 task_evaluation_completed 标志
+        # （0.1 task_executor 写、0.2 起孤儿无写者）——任务终态 = run 终态，
+        # 收口由 task_completed 域事件 + 活跃子任务 state 判定覆盖。
 
         task_id = state.get("task_id")
         pipeline_id = state.get("pipeline_id", "")

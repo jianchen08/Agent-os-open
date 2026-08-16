@@ -962,6 +962,7 @@ const STATE_SUMMARY_KEYS: &[&str] = &[
     "task.goal",
     "task.status",
     "task.id",
+    "task.ended_at",
     // GAP-1 阶段 1：血缘字段（出生写入，任务树分组与溯源的出口依赖）
     "lineage.parent_pipeline_id",
     "lineage.origin_session_id",
@@ -2094,5 +2095,8 @@ mod state_summary_tests {
         // raw_result（最终输出）与 input 对称出口——复盘报告提取/任务树展示依赖
         let s2 = summarize_state(&json!({"pipeline_id": "p4", "raw_result": "复盘结论：x"}));
         assert_eq!(s2["raw_result"], "复盘结论：x");
+        // 终态回写的 task.ended_at 出口（任务树展示完成时间）
+        let s3 = summarize_state(&json!({"pipeline_id": "p5", "task.ended_at": "2026-08-16T09:00:00Z"}));
+        assert_eq!(s3["task.ended_at"], "2026-08-16T09:00:00Z");
     }
 }
