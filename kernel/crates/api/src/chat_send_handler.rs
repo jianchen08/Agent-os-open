@@ -188,6 +188,7 @@ impl ChatSendHandler {
             user = %user_id,
             msg_len = message.len(),
             created,
+            agent = %agent_id,
             has_execution_context = execution_context.is_some(),
             has_state = overlay.is_some(),
             "chat.send_message 派发触发消息"
