@@ -350,8 +350,19 @@ class ResourceSearchTool:
         wildcard_patterns = {"*", "all", "所有", "全部", "any"}
         is_wildcard = (not query_lower) or (query_lower in wildcard_patterns)
 
-        # rglob 找全部 plugin.json
-        plugin_jsons = sorted(plugins_dir.rglob("plugin.json"))
+        # 收集 plugin.json：os.walk 原位剪枝 node_modules（必须改写 dirnames，
+        # 生成器才不会深入）。Path.rglob 在 Python 3.12 会跟入符号链接/junction
+        # 目录——plugins 下 dsh_adapter runtime 的 node_modules 是 pnpm 循环
+        # 链接结构，rglob/未剪枝的 walk 都会无限遍历（2026-08-17 e2e 实测
+        # resource_search 卡死根因）。剪枝后 0.06s / 105 个 manifest。
+        import os as _os  # noqa: PLC0415
+
+        plugin_jsons: list[Path] = []
+        for dirpath, dirnames, filenames in _os.walk(plugins_dir):
+            dirnames[:] = [d for d in dirnames if d != "node_modules"]
+            if "plugin.json" in filenames:
+                plugin_jsons.append(Path(dirpath) / "plugin.json")
+        plugin_jsons.sort()
         for pj_path in plugin_jsons:
             try:
                 with open(pj_path, encoding="utf-8") as f:

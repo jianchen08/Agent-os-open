@@ -12,7 +12,7 @@
         "tools": [
             {
                 "name": "http.handle",
-                "description": "HTTP endpoint handler for /ext/security_check/**（权限模式切换端点）"
+                "description": "HTTP endpoint handler for /ext/pipeline_security_check/**（权限模式切换端点）"
             }
         ],
         "resources": [],
@@ -42,7 +42,7 @@
         {
             "route_id": "permission_mode_switch",
             "method": "POST",
-            "path": "/ext/security_check/permission_mode",
+            "path": "/ext/pipeline_security_check/permission_mode",
             "auth": "user",
             "handler_capability": "http.handle",
             "description": "切换管道权限模式（auto/bypass 高风险模式经 human-interaction 审批窗确认）"
@@ -50,7 +50,7 @@
         {
             "route_id": "permission_mode_get",
             "method": "GET",
-            "path": "/ext/security_check/permission_mode",
+            "path": "/ext/pipeline_security_check/permission_mode",
             "auth": "user",
             "handler_capability": "http.handle",
             "description": "查询管道当前权限模式"
@@ -81,7 +81,7 @@
                             ]
                         }
                     ],
-                    "endpoint": "/ext/security_check/permission_mode",
+                    "endpoint": "/ext/pipeline_security_check/permission_mode",
                     "description": "切换当前管道标签的权限模式（输入框工具栏，与思考强度并排）；auto/bypass 高风险模式需在审批窗中确认"
                 }
             }

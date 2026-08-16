@@ -99,7 +99,7 @@ async def execute(state: dict, config: dict | None = None) -> dict:
     return data
 
 
-# ─── 权限模式切换 HTTP 面（/ext/security_check/permission_mode）──────────
+# ─── 权限模式切换 HTTP 面（/ext/pipeline_security_check/permission_mode）──────────
 # 纯插件能力：内核 dispatcher 按 plugin.json 的 http_endpoints 自动注册路由，
 # 经 http.handle 进本插件。key = pipeline_id（每管道独立，对齐"权限跟当前
 # 选中管道标签走"）。高风险模式（auto/bypass）切换先经 human-interaction 弹
@@ -193,9 +193,9 @@ async def http_handle(path: str, method: str, plugin_id: str = "", raw_body: str
 
     path_norm = path.rstrip("/")
 
-    if method.upper() == "POST" and path_norm == "/ext/security_check/permission_mode":
+    if method.upper() == "POST" and path_norm == "/ext/pipeline_security_check/permission_mode":
         return await _switch_permission_mode(body)
-    if method.upper() == "GET" and path_norm == "/ext/security_check/permission_mode":
+    if method.upper() == "GET" and path_norm == "/ext/pipeline_security_check/permission_mode":
         # GET 参数经 query（query 可能是 dict 或 [key, value] 元组列表）
         query = kwargs.get("query") or {}
         if isinstance(query, dict):
