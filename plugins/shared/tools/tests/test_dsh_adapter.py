@@ -28,6 +28,7 @@ from translator import (  # noqa: E402
     discover_dsh_plugins,
     dsh_params_to_json_schema,
     load_installed_plugins,
+    load_plugin_config,
     map_dsh_slot,
     to_lingxi_tool_entry,
     translate_package,
@@ -399,3 +400,55 @@ class TestInstalledDshPlugins:
         assert "llm_tools" not in manifest
         # 演示 UI 贡献已清理：仅保留 renderers + 适配器元信息
         assert set(manifest["contributes"].keys()) == {"renderers", "dsh_adapter"}
+        # 配置入口：DSH 插件装载管理（config/dsh_adapter.yaml）
+        assert manifest["config_files"] == [
+            {"id": "dsh_plugins", "path": "config/dsh_adapter.yaml", "label": "DSH 插件配置"}
+        ]
+
+
+# ── 配置装载过滤（config/dsh_adapter.yaml：DSH 插件逐包启用/禁用） ─────
+
+
+class TestPluginConfigFilter:
+    def test_load_plugin_config_parses_plugins_map(self, tmp_path, monkeypatch):
+        cfg_dir = tmp_path / "config"
+        cfg_dir.mkdir()
+        (cfg_dir / "dsh_adapter.yaml").write_text(
+            "plugins:\n  my-plugin:\n    enabled: false\n  other-plugin: true\n",
+            encoding="utf-8",
+        )
+        monkeypatch.setenv("AGENTOS_PROJECT_ROOT", str(tmp_path))
+        cfg = load_plugin_config()
+        assert cfg == {"my-plugin": {"enabled": False}, "other-plugin": True}
+
+    def test_load_plugin_config_missing_file_returns_empty(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("AGENTOS_PROJECT_ROOT", str(tmp_path))
+        assert load_plugin_config() == {}
+
+    def test_plugin_enabled_rules(self, monkeypatch):
+        from translator import _plugin_enabled  # noqa: PLC0415
+
+        config = {"off": {"enabled": False}, "on": {"enabled": True}, "bare-off": False}
+        # 未列出 = 默认启用；{enabled:false} / 裸 false = 禁用
+        assert _plugin_enabled("unlisted", config) is True
+        assert _plugin_enabled("off", config) is False
+        assert _plugin_enabled("on", config) is True
+        assert _plugin_enabled("bare-off", config) is False
+        assert _plugin_enabled("missing", {}) is True
+
+    def test_load_installed_plugins_filters_disabled(self, monkeypatch):
+        import translator as translator_mod  # noqa: PLC0415
+
+        fake_pkgs = [
+            PLUGIN_DIR / "dsh_plugins" / "good-plugin",
+            PLUGIN_DIR / "dsh_plugins" / "bad-plugin",
+        ]
+        monkeypatch.setattr(translator_mod, "discover_dsh_plugins", lambda: fake_pkgs)
+        monkeypatch.setattr(
+            translator_mod, "load_plugin_config", lambda: {"bad-plugin": {"enabled": False}}
+        )
+        monkeypatch.setattr(translator_mod, "translate_packages", lambda pkgs: {"packages": list(pkgs)})
+        loaded = load_installed_plugins()
+        assert loaded["count"] == 1
+        assert loaded["packages"] == [fake_pkgs[0]]
+        assert loaded["disabled"] == ["bad-plugin"]

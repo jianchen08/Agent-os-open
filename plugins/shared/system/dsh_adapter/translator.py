@@ -18,9 +18,12 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 from pathlib import Path
 from typing import Any
+
+import yaml
 
 DSH_SOURCE_COMMIT = "47f943859bef60e4160492346772ded9b24f765a"
 DSH_SOURCE_VERSION = "0.1.0-rc.5"
@@ -260,14 +263,59 @@ def discover_dsh_plugins(base_dir: str | Path | None = None) -> list[Path]:
     )
 
 
+def _project_root() -> str:
+    """定位项目根：优先 AGENTOS_PROJECT_ROOT，回退上溯找 config/ 目录。"""
+    root = os.environ.get("AGENTOS_PROJECT_ROOT")
+    if root and os.path.isdir(root):
+        return root
+    cur = Path.cwd()
+    for _ in range(6):
+        if (cur / "config").is_dir():
+            return str(cur)
+        parent = cur.parent
+        if parent == cur:
+            break
+    return str(Path.cwd())
+
+
+def load_plugin_config() -> dict[str, Any]:
+    """读适配器配置（config/dsh_adapter.yaml）的 ``plugins`` 映射。
+
+    配置是 DSH 插件装载管理：``{包目录名: {enabled: bool}}``。读失败或
+    缺文件返回空 dict（语义 = 全部默认启用，不因配置问题阻塞装载）。
+    """
+    cfg_path = Path(_project_root()) / "config" / "dsh_adapter.yaml"
+    try:
+        with open(cfg_path, encoding="utf-8") as f:
+            data = yaml.safe_load(f) or {}
+    except (OSError, yaml.YAMLError):
+        return {}
+    plugins = data.get("plugins", {}) if isinstance(data, dict) else {}
+    return plugins if isinstance(plugins, dict) else {}
+
+
+def _plugin_enabled(name: str, config: dict[str, Any]) -> bool:
+    """按配置判定包是否启用：未列出默认启用；``{enabled: bool}`` 或裸 bool 均认。"""
+    entry = config.get(name)
+    if isinstance(entry, dict):
+        return bool(entry.get("enabled", True))
+    if isinstance(entry, bool):
+        return entry
+    return True
+
+
 def load_installed_plugins() -> dict[str, Any]:
-    """扫描 dsh_plugins/ 并批量翻译（适配器装载入口）。
+    """扫描 dsh_plugins/ 并按配置过滤后批量翻译（适配器装载入口）。
 
     Returns:
-        translate_packages 输出 + ``base_dir``（装载位置记录）。
+        translate_packages 输出 + ``base_dir``（装载位置记录）+ ``count``
+        （已启用装载数）+ ``disabled``（被配置禁用的包目录名列表）。
     """
     packages = discover_dsh_plugins()
-    out: dict[str, Any] = translate_packages(packages)
+    config = load_plugin_config()
+    enabled = [p for p in packages if _plugin_enabled(p.name, config)]
+    out: dict[str, Any] = translate_packages(enabled)
     out["base_dir"] = str(Path(__file__).parent / "dsh_plugins")
-    out["count"] = len(packages)
+    out["count"] = len(enabled)
+    out["disabled"] = [p.name for p in packages if not _plugin_enabled(p.name, config)]
     return out

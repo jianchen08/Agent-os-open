@@ -159,6 +159,13 @@
     ]
   },
   "dependencies": [],
+  "config_files": [
+    {
+      "id": "dsh_plugins",
+      "path": "config/dsh_adapter.yaml",
+      "label": "DSH 插件配置"
+    }
+  ],
   "permissions": {
     "filesystem": {
       "read_paths": [

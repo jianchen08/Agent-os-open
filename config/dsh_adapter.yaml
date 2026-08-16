@@ -1,0 +1,12 @@
+# DSH 插件适配器配置：DSH 插件装载管理
+#
+# 适配器自动装载 dsh_plugins/ 下含 package.json 的 DSH 插件包目录。
+# 此文件用于逐包启用/禁用（"配置 DSH 插件"）：
+#   - 列出且 enabled: false 的包：跳过装载（不翻译、不出现在 dsh_list_plugins）
+#   - 未列出的包：默认启用
+#
+# 示例（放入 dsh_plugins/my-plugin 后）：
+#   plugins:
+#     my-plugin:
+#       enabled: false
+plugins: {}
