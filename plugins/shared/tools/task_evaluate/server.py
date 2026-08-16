@@ -24,6 +24,19 @@ from agentos_plugin_sdk import AgentOSPlugin  # noqa: E402
 plugin = AgentOSPlugin("task_evaluate_tool")
 
 
+@plugin.on_load
+async def _on_load(_params: dict[str, Any]) -> None:
+    """sidecar 启动：注入 state 聚合读取器（GAP-1 统一——评估输入从 state 读）。"""
+    import tool as tool_mod  # noqa: PLC0415
+
+    async def _read_state_rows() -> list[dict[str, Any]]:
+        handle = plugin.get_capability("pipeline-state")
+        rows = await handle.call("list", {})
+        return rows if isinstance(rows, list) else []
+
+    tool_mod.set_state_reader(_read_state_rows)
+
+
 @plugin.tool(
     name="task_evaluate",
     schema={

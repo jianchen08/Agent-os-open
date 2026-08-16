@@ -1,1699 +1,1702 @@
 {
-  "id": "channel_api",
-  "name": "HTTP API Channel",
-  "version": "1.0.0",
-  "plugin_type": "system",
-  "language": "python",
-  "host_type": "sidecar",
-  "entry": "python server.py",
-  "capabilities": {
-    "tools": [],
-    "resources": [],
-    "route_signals": [],
-    "lifecycle_hooks": [
-      "on_load",
-      "on_unload"
+    "id": "channel_api",
+    "name": "HTTP API Channel",
+    "version": "1.0.0",
+    "plugin_type": "system",
+    "language": "python",
+    "host_type": "sidecar",
+    "entry": "python server.py",
+    "capabilities": {
+        "tools": [],
+        "resources": [],
+        "route_signals": [],
+        "lifecycle_hooks": [
+            "on_load",
+            "on_unload"
+        ],
+        "services": [
+            {
+                "name": "api.get_status",
+                "description": "Get HTTP API channel server status"
+            },
+            {
+                "name": "api.list_routes",
+                "description": "List available HTTP API routes"
+            },
+            {
+                "name": "http.handle",
+                "description": "HTTP endpoint handler for /ext/channel_api/** (4c migration; pilot: config domain)"
+            }
+        ]
+    },
+    "dependencies": [],
+    "permissions": {},
+    "error_policy": "skip",
+    "priority": 50,
+    "requires_content": 5,
+    "http_endpoints": [
+        {
+            "route_id": "config_llm_get",
+            "method": "GET",
+            "path": "/ext/channel_api/config/llm",
+            "auth": "user",
+            "handler_capability": "http.handle",
+            "timeout_ms": 5000,
+            "max_concurrency": 8,
+            "description": "config 域：获取完整 LLM 配置"
+        },
+        {
+            "route_id": "config_llm_providers_get",
+            "method": "GET",
+            "path": "/ext/channel_api/config/llm/providers",
+            "auth": "user",
+            "handler_capability": "http.handle",
+            "timeout_ms": 5000,
+            "max_concurrency": 8,
+            "description": "config 域：获取 providers"
+        },
+        {
+            "route_id": "config_llm_providers_create",
+            "method": "POST",
+            "path": "/ext/channel_api/config/llm/providers",
+            "auth": "user",
+            "handler_capability": "http.handle",
+            "timeout_ms": 5000,
+            "max_concurrency": 4,
+            "description": "config 域：新增 provider"
+        },
+        {
+            "route_id": "config_llm_providers_update",
+            "method": "PUT",
+            "path": "/ext/channel_api/config/llm/providers/{provider_id}",
+            "auth": "user",
+            "handler_capability": "http.handle",
+            "timeout_ms": 5000,
+            "max_concurrency": 4,
+            "description": "config 域：更新 provider"
+        },
+        {
+            "route_id": "config_llm_providers_delete",
+            "method": "DELETE",
+            "path": "/ext/channel_api/config/llm/providers/{provider_id}",
+            "auth": "user",
+            "handler_capability": "http.handle",
+            "timeout_ms": 5000,
+            "max_concurrency": 4,
+            "description": "config 域：删除 provider"
+        },
+        {
+            "route_id": "config_llm_provider_types_get",
+            "method": "GET",
+            "path": "/ext/channel_api/config/llm/provider-types",
+            "auth": "user",
+            "handler_capability": "http.handle",
+            "timeout_ms": 5000,
+            "max_concurrency": 8,
+            "description": "config 域：获取 litellm 支持的提供者类型清单"
+        },
+        {
+            "route_id": "config_llm_providers_remote_models_get",
+            "method": "GET",
+            "path": "/ext/channel_api/config/llm/providers/{provider_id}/remote-models",
+            "auth": "user",
+            "handler_capability": "http.handle",
+            "timeout_ms": 15000,
+            "max_concurrency": 4,
+            "description": "config 域：从提供商 API 实时拉取可用模型"
+        },
+        {
+            "route_id": "config_llm_models_get",
+            "method": "GET",
+            "path": "/ext/channel_api/config/llm/models",
+            "auth": "user",
+            "handler_capability": "http.handle",
+            "timeout_ms": 5000,
+            "max_concurrency": 8,
+            "description": "config 域：获取 models"
+        },
+        {
+            "route_id": "config_llm_models_create",
+            "method": "POST",
+            "path": "/ext/channel_api/config/llm/models",
+            "auth": "user",
+            "handler_capability": "http.handle",
+            "timeout_ms": 5000,
+            "max_concurrency": 4,
+            "description": "config 域：新增 model"
+        },
+        {
+            "route_id": "config_llm_models_update",
+            "method": "PUT",
+            "path": "/ext/channel_api/config/llm/models/{model_id}",
+            "auth": "user",
+            "handler_capability": "http.handle",
+            "timeout_ms": 5000,
+            "max_concurrency": 4,
+            "description": "config 域：更新 model"
+        },
+        {
+            "route_id": "config_llm_models_delete",
+            "method": "DELETE",
+            "path": "/ext/channel_api/config/llm/models/{model_id}",
+            "auth": "user",
+            "handler_capability": "http.handle",
+            "timeout_ms": 5000,
+            "max_concurrency": 4,
+            "description": "config 域：删除 model"
+        },
+        {
+            "route_id": "config_llm_defaults_get",
+            "method": "GET",
+            "path": "/ext/channel_api/config/llm/defaults",
+            "auth": "user",
+            "handler_capability": "http.handle",
+            "timeout_ms": 5000,
+            "max_concurrency": 8,
+            "description": "config 域：获取默认模型/tier"
+        },
+        {
+            "route_id": "config_llm_defaults_update",
+            "method": "PUT",
+            "path": "/ext/channel_api/config/llm/defaults",
+            "auth": "user",
+            "handler_capability": "http.handle",
+            "timeout_ms": 5000,
+            "max_concurrency": 4,
+            "description": "config 域：更新默认模型/tier"
+        },
+        {
+            "route_id": "config_context_window_get",
+            "method": "GET",
+            "path": "/ext/channel_api/config/context-window",
+            "auth": "user",
+            "handler_capability": "http.handle",
+            "timeout_ms": 5000,
+            "max_concurrency": 8,
+            "description": "config 域：获取上下文窗口配置"
+        },
+        {
+            "route_id": "config_context_window_update",
+            "method": "PUT",
+            "path": "/ext/channel_api/config/context-window",
+            "auth": "user",
+            "handler_capability": "http.handle",
+            "timeout_ms": 5000,
+            "max_concurrency": 4,
+            "description": "config 域：更新上下文窗口配置"
+        },
+        {
+            "route_id": "config_context_window_reset",
+            "method": "POST",
+            "path": "/ext/channel_api/config/context-window/reset",
+            "auth": "user",
+            "handler_capability": "http.handle",
+            "timeout_ms": 5000,
+            "max_concurrency": 4,
+            "description": "config 域：重置上下文窗口配置"
+        },
+        {
+            "route_id": "config_api_get",
+            "method": "GET",
+            "path": "/ext/channel_api/config/api",
+            "auth": "user",
+            "handler_capability": "http.handle",
+            "timeout_ms": 5000,
+            "max_concurrency": 8,
+            "description": "config 域：获取 API 运行配置"
+        },
+        {
+            "route_id": "config_api_update",
+            "method": "PUT",
+            "path": "/ext/channel_api/config/api",
+            "auth": "user",
+            "handler_capability": "http.handle",
+            "timeout_ms": 5000,
+            "max_concurrency": 4,
+            "description": "config 域：更新 API 运行配置"
+        },
+        {
+            "route_id": "config_concurrency_get",
+            "method": "GET",
+            "path": "/ext/channel_api/config/concurrency",
+            "auth": "user",
+            "handler_capability": "http.handle",
+            "timeout_ms": 5000,
+            "max_concurrency": 8,
+            "description": "config 域：获取并发配置"
+        },
+        {
+            "route_id": "config_concurrency_update",
+            "method": "PUT",
+            "path": "/ext/channel_api/config/concurrency",
+            "auth": "user",
+            "handler_capability": "http.handle",
+            "timeout_ms": 5000,
+            "max_concurrency": 4,
+            "description": "config 域：更新并发配置"
+        },
+        {
+            "route_id": "config_cost_control_get",
+            "method": "GET",
+            "path": "/ext/channel_api/config/cost-control",
+            "auth": "user",
+            "handler_capability": "http.handle",
+            "timeout_ms": 5000,
+            "max_concurrency": 8,
+            "description": "config 域：获取成本控制配置（注意：与 cost_control 插件不同）"
+        },
+        {
+            "route_id": "config_cost_control_update",
+            "method": "PUT",
+            "path": "/ext/channel_api/config/cost-control",
+            "auth": "user",
+            "handler_capability": "http.handle",
+            "timeout_ms": 5000,
+            "max_concurrency": 4,
+            "description": "config 域：更新成本控制配置"
+        },
+        {
+            "route_id": "config_generic_get",
+            "method": "GET",
+            "path": "/ext/channel_api/config/generic/{config_path:path}",
+            "auth": "user",
+            "handler_capability": "http.handle",
+            "timeout_ms": 5000,
+            "max_concurrency": 8,
+            "description": "config 域：按白名单路径读通用 YAML 配置"
+        },
+        {
+            "route_id": "config_generic_update",
+            "method": "PUT",
+            "path": "/ext/channel_api/config/generic/{config_path:path}",
+            "auth": "user",
+            "handler_capability": "http.handle",
+            "timeout_ms": 5000,
+            "max_concurrency": 4,
+            "description": "config 域：按白名单路径写通用 YAML 配置"
+        },
+        {
+            "route_id": "thinking_mode_health",
+            "method": "GET",
+            "path": "/ext/channel_api/thinking-mode/healthz",
+            "auth": "user",
+            "handler_capability": "http.handle",
+            "timeout_ms": 5000,
+            "max_concurrency": 8,
+            "description": "thinking-mode 域：健康检查（healthz 避内核保留段 health）"
+        },
+        {
+            "route_id": "thinking_mode_models_list",
+            "method": "GET",
+            "path": "/ext/channel_api/thinking-mode/models",
+            "auth": "user",
+            "handler_capability": "http.handle",
+            "timeout_ms": 5000,
+            "max_concurrency": 8,
+            "description": "thinking-mode 域：列出支持思考模式的模型"
+        },
+        {
+            "route_id": "thinking_mode_model_info",
+            "method": "GET",
+            "path": "/ext/channel_api/thinking-mode/models/{model_name}",
+            "auth": "user",
+            "handler_capability": "http.handle",
+            "timeout_ms": 5000,
+            "max_concurrency": 8,
+            "description": "thinking-mode 域：模型思考模式详情"
+        },
+        {
+            "route_id": "thinking_mode_check",
+            "method": "GET",
+            "path": "/ext/channel_api/thinking-mode/check/{model_name}",
+            "auth": "user",
+            "handler_capability": "http.handle",
+            "timeout_ms": 5000,
+            "max_concurrency": 8,
+            "description": "thinking-mode 域：检查模型是否支持思考模式"
+        },
+        {
+            "route_id": "thinking_mode_switch",
+            "method": "POST",
+            "path": "/ext/channel_api/thinking-mode/switch",
+            "auth": "user",
+            "handler_capability": "http.handle",
+            "timeout_ms": 5000,
+            "max_concurrency": 4,
+            "description": "thinking-mode 域：切换思考模式"
+        },
+        {
+            "route_id": "thinking_mode_recommendations",
+            "method": "POST",
+            "path": "/ext/channel_api/thinking-mode/recommendations",
+            "auth": "user",
+            "handler_capability": "http.handle",
+            "timeout_ms": 5000,
+            "max_concurrency": 8,
+            "description": "thinking-mode 域：获取思考模式推荐"
+        },
+        {
+            "route_id": "users_list",
+            "method": "GET",
+            "path": "/ext/channel_api/users",
+            "auth": "user",
+            "handler_capability": "http.handle",
+            "timeout_ms": 5000,
+            "max_concurrency": 8,
+            "description": "users 域：用户列表（stub）"
+        },
+        {
+            "route_id": "users_stats",
+            "method": "GET",
+            "path": "/ext/channel_api/users/stats",
+            "auth": "user",
+            "handler_capability": "http.handle",
+            "timeout_ms": 5000,
+            "max_concurrency": 8,
+            "description": "users 域：用户统计（stub）"
+        },
+        {
+            "route_id": "users_create",
+            "method": "POST",
+            "path": "/ext/channel_api/users",
+            "auth": "user",
+            "handler_capability": "http.handle",
+            "timeout_ms": 5000,
+            "max_concurrency": 4,
+            "description": "users 域：创建用户（stub，Query 参数）"
+        },
+        {
+            "route_id": "users_role_put",
+            "method": "PUT",
+            "path": "/ext/channel_api/users/{user_id}/role",
+            "auth": "user",
+            "handler_capability": "http.handle",
+            "timeout_ms": 5000,
+            "max_concurrency": 4,
+            "description": "users 域：更新用户角色（stub）"
+        },
+        {
+            "route_id": "users_role_patch",
+            "method": "PATCH",
+            "path": "/ext/channel_api/users/{user_id}/role",
+            "auth": "user",
+            "handler_capability": "http.handle",
+            "timeout_ms": 5000,
+            "max_concurrency": 4,
+            "description": "users 域：更新用户角色（PATCH，stub）"
+        },
+        {
+            "route_id": "users_active_put",
+            "method": "PUT",
+            "path": "/ext/channel_api/users/{user_id}/active",
+            "auth": "user",
+            "handler_capability": "http.handle",
+            "timeout_ms": 5000,
+            "max_concurrency": 4,
+            "description": "users 域：更新用户激活状态（stub）"
+        },
+        {
+            "route_id": "users_active_patch",
+            "method": "PATCH",
+            "path": "/ext/channel_api/users/{user_id}/active",
+            "auth": "user",
+            "handler_capability": "http.handle",
+            "timeout_ms": 5000,
+            "max_concurrency": 4,
+            "description": "users 域：更新用户激活状态（PATCH，stub）"
+        },
+        {
+            "route_id": "users_delete",
+            "method": "DELETE",
+            "path": "/ext/channel_api/users/{user_id}",
+            "auth": "user",
+            "handler_capability": "http.handle",
+            "timeout_ms": 5000,
+            "max_concurrency": 4,
+            "description": "users 域：删除用户（stub）"
+        },
+        {
+            "route_id": "users_settings_get",
+            "method": "GET",
+            "path": "/ext/channel_api/users/settings",
+            "auth": "user",
+            "handler_capability": "http.handle",
+            "timeout_ms": 5000,
+            "max_concurrency": 8,
+            "description": "users 域：用户设置（stub）"
+        },
+        {
+            "route_id": "users_settings_update",
+            "method": "PUT",
+            "path": "/ext/channel_api/users/settings",
+            "auth": "user",
+            "handler_capability": "http.handle",
+            "timeout_ms": 5000,
+            "max_concurrency": 4,
+            "description": "users 域：更新用户设置（stub）"
+        },
+        {
+            "route_id": "sessions_total_token_usage",
+            "method": "GET",
+            "path": "/ext/channel_api/sessions/{session_id}/total-token-usage",
+            "auth": "user",
+            "handler_capability": "http.handle",
+            "timeout_ms": 5000,
+            "max_concurrency": 8,
+            "description": "sessions 域：会话总Token用量（stub）"
+        },
+        {
+            "route_id": "sessions_context_token_usage",
+            "method": "GET",
+            "path": "/ext/channel_api/sessions/{session_id}/context-token-usage",
+            "auth": "user",
+            "handler_capability": "http.handle",
+            "timeout_ms": 5000,
+            "max_concurrency": 8,
+            "description": "sessions 域：上下文Token用量（stub）"
+        },
+        {
+            "route_id": "execution_records_list",
+            "method": "GET",
+            "path": "/ext/channel_api/execution/records",
+            "auth": "user",
+            "handler_capability": "http.handle",
+            "timeout_ms": 10000,
+            "max_concurrency": 8,
+            "description": "execution 域：执行记录列表（query: session_id/parent_record_id/limit/offset）"
+        },
+        {
+            "route_id": "execution_records_sessions",
+            "method": "GET",
+            "path": "/ext/channel_api/execution/records/sessions",
+            "auth": "user",
+            "handler_capability": "http.handle",
+            "timeout_ms": 10000,
+            "max_concurrency": 8,
+            "description": "execution 域：有记录的会话列表"
+        },
+        {
+            "route_id": "execution_records_group_summary",
+            "method": "GET",
+            "path": "/ext/channel_api/execution/records/group-summary",
+            "auth": "user",
+            "handler_capability": "http.handle",
+            "timeout_ms": 10000,
+            "max_concurrency": 8,
+            "description": "execution 域：记录分组概要"
+        },
+        {
+            "route_id": "execution_records_tree",
+            "method": "GET",
+            "path": "/ext/channel_api/execution/records/tree/{session_id}",
+            "auth": "user",
+            "handler_capability": "http.handle",
+            "timeout_ms": 10000,
+            "max_concurrency": 8,
+            "description": "execution 域：执行记录树"
+        },
+        {
+            "route_id": "execution_record_children",
+            "method": "GET",
+            "path": "/ext/channel_api/execution/records/{record_id}/children",
+            "auth": "user",
+            "handler_capability": "http.handle",
+            "timeout_ms": 5000,
+            "max_concurrency": 8,
+            "description": "execution 域：子执行记录（无层级，返回 []）"
+        },
+        {
+            "route_id": "execution_record_get",
+            "method": "GET",
+            "path": "/ext/channel_api/execution/records/{record_id}",
+            "auth": "user",
+            "handler_capability": "http.handle",
+            "timeout_ms": 5000,
+            "max_concurrency": 8,
+            "description": "execution 域：获取单条执行记录"
+        },
+        {
+            "route_id": "execution_record_delete",
+            "method": "DELETE",
+            "path": "/ext/channel_api/execution/records/{record_id}",
+            "auth": "user",
+            "handler_capability": "http.handle",
+            "timeout_ms": 5000,
+            "max_concurrency": 4,
+            "description": "execution 域：删除执行记录（stub）"
+        },
+        {
+            "route_id": "execution_records_delete_by_session",
+            "method": "DELETE",
+            "path": "/ext/channel_api/execution/records/session/{session_id}",
+            "auth": "user",
+            "handler_capability": "http.handle",
+            "timeout_ms": 10000,
+            "max_concurrency": 4,
+            "description": "execution 域：按会话删除执行记录（stub）"
+        },
+        {
+            "route_id": "execution_records_clear_all",
+            "method": "POST",
+            "path": "/ext/channel_api/execution/records/clear-all",
+            "auth": "user",
+            "handler_capability": "http.handle",
+            "timeout_ms": 10000,
+            "max_concurrency": 2,
+            "description": "execution 域：清理所有执行记录（stub）"
+        },
+        {
+            "route_id": "modules_ui_list",
+            "method": "GET",
+            "path": "/ext/channel_api/modules/ui",
+            "auth": "user",
+            "handler_capability": "http.handle",
+            "timeout_ms": 5000,
+            "max_concurrency": 8,
+            "description": "modules/ui 域：所有模块 UI Schema 列表（query: client_type 过滤）"
+        },
+        {
+            "route_id": "modules_ui_get",
+            "method": "GET",
+            "path": "/ext/channel_api/modules/ui/{module_id}",
+            "auth": "user",
+            "handler_capability": "http.handle",
+            "timeout_ms": 5000,
+            "max_concurrency": 8,
+            "description": "modules/ui 域：指定模块 UI Schema"
+        },
+        {
+            "route_id": "memory_list",
+            "method": "GET",
+            "path": "/ext/channel_api/memory",
+            "auth": "user",
+            "handler_capability": "http.handle",
+            "timeout_ms": 5000,
+            "max_concurrency": 8,
+            "description": "memory 域：记忆列表（query: memory_type/limit/offset）"
+        },
+        {
+            "route_id": "memory_search_get",
+            "method": "GET",
+            "path": "/ext/channel_api/memory/search",
+            "auth": "user",
+            "handler_capability": "http.handle",
+            "timeout_ms": 5000,
+            "max_concurrency": 8,
+            "description": "memory 域：关键词搜索（query: query/top_k/method）"
+        },
+        {
+            "route_id": "memory_search_post",
+            "method": "POST",
+            "path": "/ext/channel_api/memory/search",
+            "auth": "user",
+            "handler_capability": "http.handle",
+            "timeout_ms": 5000,
+            "max_concurrency": 8,
+            "description": "memory 域：关键词搜索（POST）"
+        },
+        {
+            "route_id": "memory_episodes_list",
+            "method": "GET",
+            "path": "/ext/channel_api/memory/episodes",
+            "auth": "user",
+            "handler_capability": "http.handle",
+            "timeout_ms": 5000,
+            "max_concurrency": 8,
+            "description": "memory 域：情景记忆列表（query: page/page_size）"
+        },
+        {
+            "route_id": "memory_episode_get",
+            "method": "GET",
+            "path": "/ext/channel_api/memory/episodes/{episode_id}",
+            "auth": "user",
+            "handler_capability": "http.handle",
+            "timeout_ms": 5000,
+            "max_concurrency": 8,
+            "description": "memory 域：单个情景记忆"
+        },
+        {
+            "route_id": "memory_semantic_list",
+            "method": "GET",
+            "path": "/ext/channel_api/memory/semantic",
+            "auth": "user",
+            "handler_capability": "http.handle",
+            "timeout_ms": 5000,
+            "max_concurrency": 8,
+            "description": "memory 域：语义记忆列表"
+        },
+        {
+            "route_id": "memory_consolidate",
+            "method": "POST",
+            "path": "/ext/channel_api/memory/consolidate",
+            "auth": "user",
+            "handler_capability": "http.handle",
+            "timeout_ms": 10000,
+            "max_concurrency": 2,
+            "description": "memory 域：记忆整合"
+        },
+        {
+            "route_id": "memory_stats",
+            "method": "GET",
+            "path": "/ext/channel_api/memory/stats",
+            "auth": "user",
+            "handler_capability": "http.handle",
+            "timeout_ms": 5000,
+            "max_concurrency": 8,
+            "description": "memory 域：记忆统计"
+        },
+        {
+            "route_id": "memory_get",
+            "method": "GET",
+            "path": "/ext/channel_api/memory/{memory_id}",
+            "auth": "user",
+            "handler_capability": "http.handle",
+            "timeout_ms": 5000,
+            "max_concurrency": 8,
+            "description": "memory 域：记忆详情"
+        },
+        {
+            "route_id": "memory_delete",
+            "method": "DELETE",
+            "path": "/ext/channel_api/memory/{memory_id}",
+            "auth": "user",
+            "handler_capability": "http.handle",
+            "timeout_ms": 5000,
+            "max_concurrency": 4,
+            "description": "memory 域：删除记忆"
+        },
+        {
+            "route_id": "artifacts_upload",
+            "method": "POST",
+            "path": "/ext/channel_api/artifacts/upload",
+            "auth": "user",
+            "handler_capability": "http.handle",
+            "timeout_ms": 30000,
+            "max_concurrency": 2,
+            "description": "artifacts 域：多模态文件上传（multipart/form-data，dispatcher 透传原始字节）"
+        },
+        {
+            "route_id": "artifacts_list",
+            "method": "GET",
+            "path": "/ext/channel_api/artifacts",
+            "auth": "user",
+            "handler_capability": "http.handle",
+            "timeout_ms": 5000,
+            "max_concurrency": 8,
+            "description": "artifacts 域：制品列表（query: task_id/limit/offset）"
+        },
+        {
+            "route_id": "artifacts_create",
+            "method": "POST",
+            "path": "/ext/channel_api/artifacts",
+            "auth": "user",
+            "handler_capability": "http.handle",
+            "timeout_ms": 5000,
+            "max_concurrency": 4,
+            "description": "artifacts 域：创建制品"
+        },
+        {
+            "route_id": "artifact_get",
+            "method": "GET",
+            "path": "/ext/channel_api/artifacts/{artifact_id}",
+            "auth": "user",
+            "handler_capability": "http.handle",
+            "timeout_ms": 5000,
+            "max_concurrency": 8,
+            "description": "artifacts 域：制品详情"
+        },
+        {
+            "route_id": "artifact_update",
+            "method": "PUT",
+            "path": "/ext/channel_api/artifacts/{artifact_id}",
+            "auth": "user",
+            "handler_capability": "http.handle",
+            "timeout_ms": 5000,
+            "max_concurrency": 4,
+            "description": "artifacts 域：更新制品（创建新版本）"
+        },
+        {
+            "route_id": "artifact_delete",
+            "method": "DELETE",
+            "path": "/ext/channel_api/artifacts/{artifact_id}",
+            "auth": "user",
+            "handler_capability": "http.handle",
+            "timeout_ms": 5000,
+            "max_concurrency": 4,
+            "description": "artifacts 域：删除制品"
+        },
+        {
+            "route_id": "artifact_versions",
+            "method": "GET",
+            "path": "/ext/channel_api/artifacts/{artifact_id}/versions",
+            "auth": "user",
+            "handler_capability": "http.handle",
+            "timeout_ms": 5000,
+            "max_concurrency": 8,
+            "description": "artifacts 域：制品版本历史"
+        },
+        {
+            "route_id": "artifact_diff",
+            "method": "GET",
+            "path": "/ext/channel_api/artifacts/{artifact_id}/diff",
+            "auth": "user",
+            "handler_capability": "http.handle",
+            "timeout_ms": 5000,
+            "max_concurrency": 8,
+            "description": "artifacts 域：版本差异（query: from/to）"
+        },
+        {
+            "route_id": "artifact_annotations_list",
+            "method": "GET",
+            "path": "/ext/channel_api/artifacts/{artifact_id}/annotations",
+            "auth": "user",
+            "handler_capability": "http.handle",
+            "timeout_ms": 5000,
+            "max_concurrency": 8,
+            "description": "annotations 域：制品批注列表（query: status/limit）"
+        },
+        {
+            "route_id": "artifact_annotations_create",
+            "method": "POST",
+            "path": "/ext/channel_api/artifacts/{artifact_id}/annotations",
+            "auth": "user",
+            "handler_capability": "http.handle",
+            "timeout_ms": 5000,
+            "max_concurrency": 4,
+            "description": "annotations 域：添加批注"
+        },
+        {
+            "route_id": "annotation_update",
+            "method": "PUT",
+            "path": "/ext/channel_api/annotations/{annotation_id}",
+            "auth": "user",
+            "handler_capability": "http.handle",
+            "timeout_ms": 5000,
+            "max_concurrency": 4,
+            "description": "annotations 域：更新批注"
+        },
+        {
+            "route_id": "annotation_delete",
+            "method": "DELETE",
+            "path": "/ext/channel_api/annotations/{annotation_id}",
+            "auth": "user",
+            "handler_capability": "http.handle",
+            "timeout_ms": 5000,
+            "max_concurrency": 4,
+            "description": "annotations 域：删除批注"
+        },
+        {
+            "route_id": "annotation_resolve",
+            "method": "POST",
+            "path": "/ext/channel_api/annotations/{annotation_id}/resolve",
+            "auth": "user",
+            "handler_capability": "http.handle",
+            "timeout_ms": 5000,
+            "max_concurrency": 4,
+            "description": "annotations 域：标记批注为已解决"
+        },
+        {
+            "route_id": "scenes_create",
+            "method": "POST",
+            "path": "/ext/channel_api/scenes",
+            "auth": "user",
+            "handler_capability": "http.handle",
+            "timeout_ms": 5000,
+            "max_concurrency": 4,
+            "description": "scenes 域：创建场景（可基于模板）"
+        },
+        {
+            "route_id": "scenes_list",
+            "method": "GET",
+            "path": "/ext/channel_api/scenes",
+            "auth": "user",
+            "handler_capability": "http.handle",
+            "timeout_ms": 5000,
+            "max_concurrency": 8,
+            "description": "scenes 域：列出所有场景"
+        },
+        {
+            "route_id": "scenes_templates",
+            "method": "GET",
+            "path": "/ext/channel_api/scenes/templates",
+            "auth": "user",
+            "handler_capability": "http.handle",
+            "timeout_ms": 5000,
+            "max_concurrency": 8,
+            "description": "scenes 域：获取场景模板列表"
+        },
+        {
+            "route_id": "scene_get",
+            "method": "GET",
+            "path": "/ext/channel_api/scenes/{scene_id}",
+            "auth": "user",
+            "handler_capability": "http.handle",
+            "timeout_ms": 5000,
+            "max_concurrency": 8,
+            "description": "scenes 域：获取场景详情"
+        },
+        {
+            "route_id": "scene_update",
+            "method": "PUT",
+            "path": "/ext/channel_api/scenes/{scene_id}",
+            "auth": "user",
+            "handler_capability": "http.handle",
+            "timeout_ms": 5000,
+            "max_concurrency": 4,
+            "description": "scenes 域：更新场景"
+        },
+        {
+            "route_id": "scene_delete",
+            "method": "DELETE",
+            "path": "/ext/channel_api/scenes/{scene_id}",
+            "auth": "user",
+            "handler_capability": "http.handle",
+            "timeout_ms": 5000,
+            "max_concurrency": 4,
+            "description": "scenes 域：删除场景"
+        },
+        {
+            "route_id": "scene_switch",
+            "method": "POST",
+            "path": "/ext/channel_api/scenes/{scene_id}/switch",
+            "auth": "user",
+            "handler_capability": "http.handle",
+            "timeout_ms": 5000,
+            "max_concurrency": 4,
+            "description": "scenes 域：切换场景"
+        },
+        {
+            "route_id": "asr_transcribe",
+            "method": "POST",
+            "path": "/ext/channel_api/audio/transcriptions",
+            "auth": "user",
+            "handler_capability": "http.handle",
+            "timeout_ms": 30000,
+            "max_concurrency": 2,
+            "description": "asr 域：音频转文字（multipart/form-data，file 字段）"
+        },
+        {
+            "route_id": "workspaces_open_file",
+            "method": "POST",
+            "path": "/ext/channel_api/workspaces/open-file",
+            "auth": "user",
+            "handler_capability": "http.handle",
+            "timeout_ms": 5000,
+            "max_concurrency": 4,
+            "description": "workspaces 域：在IDE中打开文件"
+        },
+        {
+            "route_id": "workspace_get",
+            "method": "GET",
+            "path": "/ext/channel_api/workspaces/{container_task_id}",
+            "auth": "user",
+            "handler_capability": "http.handle",
+            "timeout_ms": 5000,
+            "max_concurrency": 8,
+            "description": "workspaces 域：工作空间详情（不存在则自动创建）"
+        },
+        {
+            "route_id": "workspace_artifacts",
+            "method": "GET",
+            "path": "/ext/channel_api/workspaces/{container_task_id}/artifacts",
+            "auth": "user",
+            "handler_capability": "http.handle",
+            "timeout_ms": 5000,
+            "max_concurrency": 8,
+            "description": "workspaces 域：工作空间下所有制品"
+        },
+        {
+            "route_id": "workspace_file_tree",
+            "method": "GET",
+            "path": "/ext/channel_api/workspaces/{container_task_id}/file-tree",
+            "auth": "user",
+            "handler_capability": "http.handle",
+            "timeout_ms": 5000,
+            "max_concurrency": 8,
+            "description": "workspaces 域：文件目录树"
+        },
+        {
+            "route_id": "workspace_file_content_get",
+            "method": "GET",
+            "path": "/ext/channel_api/workspaces/{container_task_id}/file-content",
+            "auth": "user",
+            "handler_capability": "http.handle",
+            "timeout_ms": 5000,
+            "max_concurrency": 8,
+            "description": "workspaces 域：读取文件内容（query: path）"
+        },
+        {
+            "route_id": "workspace_file_content_save",
+            "method": "PUT",
+            "path": "/ext/channel_api/workspaces/{container_task_id}/file-content",
+            "auth": "user",
+            "handler_capability": "http.handle",
+            "timeout_ms": 5000,
+            "max_concurrency": 4,
+            "description": "workspaces 域：保存文件内容（query: path）"
+        },
+        {
+            "route_id": "workspace_create_entry",
+            "method": "POST",
+            "path": "/ext/channel_api/workspaces/{container_task_id}/create-entry",
+            "auth": "user",
+            "handler_capability": "http.handle",
+            "timeout_ms": 5000,
+            "max_concurrency": 4,
+            "description": "workspaces 域：创建文件或文件夹"
+        },
+        {
+            "route_id": "workspace_delete_entry",
+            "method": "DELETE",
+            "path": "/ext/channel_api/workspaces/{container_task_id}/entries",
+            "auth": "user",
+            "handler_capability": "http.handle",
+            "timeout_ms": 5000,
+            "max_concurrency": 4,
+            "description": "workspaces 域：删除文件或文件夹（query: path）"
+        },
+        {
+            "route_id": "workspace_rename_entry",
+            "method": "POST",
+            "path": "/ext/channel_api/workspaces/{container_task_id}/rename-entry",
+            "auth": "user",
+            "handler_capability": "http.handle",
+            "timeout_ms": 5000,
+            "max_concurrency": 4,
+            "description": "workspaces 域：重命名文件或文件夹"
+        },
+        {
+            "route_id": "workspace_move_entry",
+            "method": "POST",
+            "path": "/ext/channel_api/workspaces/{container_task_id}/move-entry",
+            "auth": "user",
+            "handler_capability": "http.handle",
+            "timeout_ms": 5000,
+            "max_concurrency": 4,
+            "description": "workspaces 域：移动文件或文件夹"
+        },
+        {
+            "route_id": "workspace_open",
+            "method": "POST",
+            "path": "/ext/channel_api/workspaces/{container_task_id}/open",
+            "auth": "user",
+            "handler_capability": "http.handle",
+            "timeout_ms": 5000,
+            "max_concurrency": 4,
+            "description": "workspaces 域：在IDE中打开工作空间"
+        },
+        {
+            "route_id": "review_create",
+            "method": "POST",
+            "path": "/ext/channel_api/reviews",
+            "auth": "user",
+            "handler_capability": "http.handle",
+            "timeout_ms": 5000,
+            "max_concurrency": 4,
+            "description": "reviews 域：创建审批请求"
+        },
+        {
+            "route_id": "review_list",
+            "method": "GET",
+            "path": "/ext/channel_api/reviews",
+            "auth": "user",
+            "handler_capability": "http.handle",
+            "timeout_ms": 5000,
+            "max_concurrency": 8,
+            "description": "reviews 域：审批列表（query: task_id/limit）"
+        },
+        {
+            "route_id": "review_media_review",
+            "method": "POST",
+            "path": "/ext/channel_api/reviews/media-review",
+            "auth": "user",
+            "handler_capability": "http.handle",
+            "timeout_ms": 60000,
+            "max_concurrency": 2,
+            "description": "reviews 域：上传文件并执行媒体审阅（multipart: file + media_type）"
+        },
+        {
+            "route_id": "review_get",
+            "method": "GET",
+            "path": "/ext/channel_api/reviews/{review_id}",
+            "auth": "user",
+            "handler_capability": "http.handle",
+            "timeout_ms": 5000,
+            "max_concurrency": 8,
+            "description": "reviews 域：审批详情"
+        },
+        {
+            "route_id": "review_feedback",
+            "method": "POST",
+            "path": "/ext/channel_api/reviews/{review_id}/feedback",
+            "auth": "user",
+            "handler_capability": "http.handle",
+            "timeout_ms": 5000,
+            "max_concurrency": 4,
+            "description": "reviews 域：提交审批反馈"
+        },
+        {
+            "route_id": "review_viewed",
+            "method": "POST",
+            "path": "/ext/channel_api/reviews/{review_id}/viewed",
+            "auth": "user",
+            "handler_capability": "http.handle",
+            "timeout_ms": 5000,
+            "max_concurrency": 4,
+            "description": "reviews 域：标记已查看"
+        },
+        {
+            "route_id": "review_cancel",
+            "method": "POST",
+            "path": "/ext/channel_api/reviews/{review_id}/cancel",
+            "auth": "user",
+            "handler_capability": "http.handle",
+            "timeout_ms": 5000,
+            "max_concurrency": 4,
+            "description": "reviews 域：取消审批"
+        },
+        {
+            "route_id": "review_media_metadata",
+            "method": "GET",
+            "path": "/ext/channel_api/reviews/{review_id}/media-metadata",
+            "auth": "user",
+            "handler_capability": "http.handle",
+            "timeout_ms": 5000,
+            "max_concurrency": 8,
+            "description": "reviews 域：审批关联的媒体元数据"
+        },
+        {
+            "route_id": "review_attachments",
+            "method": "POST",
+            "path": "/ext/channel_api/reviews/{review_id}/attachments",
+            "auth": "user",
+            "handler_capability": "http.handle",
+            "timeout_ms": 30000,
+            "max_concurrency": 2,
+            "description": "reviews 域：为审批添加媒体附件（JSON body，文件路径；auto_review 触发媒体审阅）"
+        },
+        {
+            "route_id": "tasks_list",
+            "method": "GET",
+            "path": "/ext/channel_api/tasks",
+            "auth": "user",
+            "handler_capability": "http.handle",
+            "timeout_ms": 5000,
+            "max_concurrency": 8,
+            "description": "tasks 域：任务列表（query: status/priority/session_id/limit/offset/skip）"
+        },
+        {
+            "route_id": "tasks_create",
+            "method": "POST",
+            "path": "/ext/channel_api/tasks",
+            "auth": "user",
+            "handler_capability": "http.handle",
+            "timeout_ms": 5000,
+            "max_concurrency": 4,
+            "description": "tasks 域：创建任务"
+        },
+        {
+            "route_id": "tasks_debug_all",
+            "method": "GET",
+            "path": "/ext/channel_api/tasks/debug/all",
+            "auth": "user",
+            "handler_capability": "http.handle",
+            "timeout_ms": 5000,
+            "max_concurrency": 4,
+            "description": "tasks 域：调试用全量任务"
+        },
+        {
+            "route_id": "tasks_create_root",
+            "method": "POST",
+            "path": "/ext/channel_api/tasks/root",
+            "auth": "user",
+            "handler_capability": "http.handle",
+            "timeout_ms": 5000,
+            "max_concurrency": 4,
+            "description": "tasks 域：手动创建根任务"
+        },
+        {
+            "route_id": "tasks_containers",
+            "method": "GET",
+            "path": "/ext/channel_api/tasks/containers",
+            "auth": "user",
+            "handler_capability": "http.handle",
+            "timeout_ms": 5000,
+            "max_concurrency": 8,
+            "description": "tasks 域：列出容器任务（query: session_id）"
+        },
+        {
+            "route_id": "task_get",
+            "method": "GET",
+            "path": "/ext/channel_api/tasks/{task_id}",
+            "auth": "user",
+            "handler_capability": "http.handle",
+            "timeout_ms": 5000,
+            "max_concurrency": 8,
+            "description": "tasks 域：任务详情"
+        },
+        {
+            "route_id": "task_update",
+            "method": "PATCH",
+            "path": "/ext/channel_api/tasks/{task_id}",
+            "auth": "user",
+            "handler_capability": "http.handle",
+            "timeout_ms": 5000,
+            "max_concurrency": 4,
+            "description": "tasks 域：更新任务"
+        },
+        {
+            "route_id": "task_delete",
+            "method": "DELETE",
+            "path": "/ext/channel_api/tasks/{task_id}",
+            "auth": "user",
+            "handler_capability": "http.handle",
+            "timeout_ms": 5000,
+            "max_concurrency": 4,
+            "description": "tasks 域：删除任务"
+        },
+        {
+            "route_id": "task_submit",
+            "method": "POST",
+            "path": "/ext/channel_api/tasks/{task_id}/submit",
+            "auth": "user",
+            "handler_capability": "http.handle",
+            "timeout_ms": 10000,
+            "max_concurrency": 2,
+            "description": "tasks 域：提交任务执行"
+        },
+        {
+            "route_id": "task_evaluate",
+            "method": "POST",
+            "path": "/ext/channel_api/tasks/{task_id}/evaluate",
+            "auth": "user",
+            "handler_capability": "http.handle",
+            "timeout_ms": 30000,
+            "max_concurrency": 2,
+            "description": "tasks 域：评估任务"
+        },
+        {
+            "route_id": "task_pause",
+            "method": "POST",
+            "path": "/ext/channel_api/tasks/{task_id}/pause",
+            "auth": "user",
+            "handler_capability": "http.handle",
+            "timeout_ms": 10000,
+            "max_concurrency": 2,
+            "description": "tasks 域：暂停任务（级联子任务）"
+        },
+        {
+            "route_id": "task_resume",
+            "method": "POST",
+            "path": "/ext/channel_api/tasks/{task_id}/resume",
+            "auth": "user",
+            "handler_capability": "http.handle",
+            "timeout_ms": 10000,
+            "max_concurrency": 2,
+            "description": "tasks 域：恢复任务"
+        },
+        {
+            "route_id": "task_cancel",
+            "method": "POST",
+            "path": "/ext/channel_api/tasks/{task_id}/cancel",
+            "auth": "user",
+            "handler_capability": "http.handle",
+            "timeout_ms": 10000,
+            "max_concurrency": 2,
+            "description": "tasks 域：取消任务"
+        },
+        {
+            "route_id": "task_phase_status",
+            "method": "GET",
+            "path": "/ext/channel_api/tasks/{task_id}/phase",
+            "auth": "user",
+            "handler_capability": "http.handle",
+            "timeout_ms": 5000,
+            "max_concurrency": 8,
+            "description": "tasks 域：任务当前阶段"
+        },
+        {
+            "route_id": "task_phase_complete_prepare",
+            "method": "POST",
+            "path": "/ext/channel_api/tasks/{task_id}/phase/prepare/complete",
+            "auth": "user",
+            "handler_capability": "http.handle",
+            "timeout_ms": 5000,
+            "max_concurrency": 4,
+            "description": "tasks 域：完成准备阶段"
+        },
+        {
+            "route_id": "task_phase_complete_execute",
+            "method": "POST",
+            "path": "/ext/channel_api/tasks/{task_id}/phase/execute/complete",
+            "auth": "user",
+            "handler_capability": "http.handle",
+            "timeout_ms": 5000,
+            "max_concurrency": 4,
+            "description": "tasks 域：完成执行阶段"
+        },
+        {
+            "route_id": "task_phase_output",
+            "method": "GET",
+            "path": "/ext/channel_api/tasks/{task_id}/phase/{phase}/output",
+            "auth": "user",
+            "handler_capability": "http.handle",
+            "timeout_ms": 5000,
+            "max_concurrency": 8,
+            "description": "tasks 域：获取阶段输出"
+        },
+        {
+            "route_id": "task_ac_list",
+            "method": "GET",
+            "path": "/ext/channel_api/tasks/{task_id}/ac",
+            "auth": "user",
+            "handler_capability": "http.handle",
+            "timeout_ms": 5000,
+            "max_concurrency": 8,
+            "description": "tasks 域：获取任务验收标准"
+        },
+        {
+            "route_id": "task_ac_evaluate_all",
+            "method": "POST",
+            "path": "/ext/channel_api/tasks/{task_id}/ac/evaluate-all",
+            "auth": "user",
+            "handler_capability": "http.handle",
+            "timeout_ms": 30000,
+            "max_concurrency": 2,
+            "description": "tasks 域：评估所有验收标准"
+        },
+        {
+            "route_id": "task_ac_evaluate",
+            "method": "POST",
+            "path": "/ext/channel_api/tasks/{task_id}/ac/{ac_id}/evaluate",
+            "auth": "user",
+            "handler_capability": "http.handle",
+            "timeout_ms": 30000,
+            "max_concurrency": 2,
+            "description": "tasks 域：评估单个验收标准"
+        },
+        {
+            "route_id": "task_ac_result",
+            "method": "GET",
+            "path": "/ext/channel_api/tasks/{task_id}/ac/{ac_id}/result",
+            "auth": "user",
+            "handler_capability": "http.handle",
+            "timeout_ms": 5000,
+            "max_concurrency": 8,
+            "description": "tasks 域：获取验收标准评估结果"
+        },
+        {
+            "route_id": "projects_list",
+            "method": "GET",
+            "path": "/ext/channel_api/projects",
+            "auth": "user",
+            "handler_capability": "http.handle",
+            "timeout_ms": 5000,
+            "max_concurrency": 8,
+            "description": "projects 域：长期任务列表（query: limit/offset）"
+        },
+        {
+            "route_id": "projects_create",
+            "method": "POST",
+            "path": "/ext/channel_api/projects",
+            "auth": "user",
+            "handler_capability": "http.handle",
+            "timeout_ms": 5000,
+            "max_concurrency": 4,
+            "description": "projects 域：创建长期任务"
+        },
+        {
+            "route_id": "project_get",
+            "method": "GET",
+            "path": "/ext/channel_api/projects/{project_id}",
+            "auth": "user",
+            "handler_capability": "http.handle",
+            "timeout_ms": 5000,
+            "max_concurrency": 8,
+            "description": "projects 域：长期任务详情"
+        },
+        {
+            "route_id": "project_toggle_auto_execute",
+            "method": "POST",
+            "path": "/ext/channel_api/projects/{project_id}/auto-execute",
+            "auth": "user",
+            "handler_capability": "http.handle",
+            "timeout_ms": 5000,
+            "max_concurrency": 4,
+            "description": "projects 域：切换自动执行"
+        },
+        {
+            "route_id": "project_pause",
+            "method": "POST",
+            "path": "/ext/channel_api/projects/{project_id}/pause",
+            "auth": "user",
+            "handler_capability": "http.handle",
+            "timeout_ms": 5000,
+            "max_concurrency": 4,
+            "description": "projects 域：暂停长期任务"
+        },
+        {
+            "route_id": "project_resume",
+            "method": "POST",
+            "path": "/ext/channel_api/projects/{project_id}/resume",
+            "auth": "user",
+            "handler_capability": "http.handle",
+            "timeout_ms": 5000,
+            "max_concurrency": 4,
+            "description": "projects 域：恢复长期任务"
+        },
+        {
+            "route_id": "project_delete",
+            "method": "DELETE",
+            "path": "/ext/channel_api/projects/{project_id}",
+            "auth": "user",
+            "handler_capability": "http.handle",
+            "timeout_ms": 5000,
+            "max_concurrency": 4,
+            "description": "projects 域：删除长期任务"
+        },
+        {
+            "route_id": "triggers_list",
+            "method": "GET",
+            "path": "/ext/channel_api/triggers",
+            "auth": "user",
+            "handler_capability": "http.handle",
+            "timeout_ms": 5000,
+            "max_concurrency": 8,
+            "description": "triggers 域：触发器列表"
+        },
+        {
+            "route_id": "triggers_create",
+            "method": "POST",
+            "path": "/ext/channel_api/triggers",
+            "auth": "user",
+            "handler_capability": "http.handle",
+            "timeout_ms": 5000,
+            "max_concurrency": 4,
+            "description": "triggers 域：创建触发器"
+        },
+        {
+            "route_id": "triggers_stats",
+            "method": "GET",
+            "path": "/ext/channel_api/triggers/stats",
+            "auth": "user",
+            "handler_capability": "http.handle",
+            "timeout_ms": 5000,
+            "max_concurrency": 8,
+            "description": "triggers 域：触发器统计"
+        },
+        {
+            "route_id": "trigger_get",
+            "method": "GET",
+            "path": "/ext/channel_api/triggers/{trigger_id}",
+            "auth": "user",
+            "handler_capability": "http.handle",
+            "timeout_ms": 5000,
+            "max_concurrency": 8,
+            "description": "triggers 域：触发器详情"
+        },
+        {
+            "route_id": "trigger_update",
+            "method": "PUT",
+            "path": "/ext/channel_api/triggers/{trigger_id}",
+            "auth": "user",
+            "handler_capability": "http.handle",
+            "timeout_ms": 5000,
+            "max_concurrency": 4,
+            "description": "triggers 域：更新触发器"
+        },
+        {
+            "route_id": "trigger_delete",
+            "method": "DELETE",
+            "path": "/ext/channel_api/triggers/{trigger_id}",
+            "auth": "user",
+            "handler_capability": "http.handle",
+            "timeout_ms": 5000,
+            "max_concurrency": 4,
+            "description": "triggers 域：删除触发器"
+        },
+        {
+            "route_id": "trigger_enable",
+            "method": "POST",
+            "path": "/ext/channel_api/triggers/{trigger_id}/enable",
+            "auth": "user",
+            "handler_capability": "http.handle",
+            "timeout_ms": 5000,
+            "max_concurrency": 4,
+            "description": "triggers 域：启用触发器"
+        },
+        {
+            "route_id": "trigger_disable",
+            "method": "POST",
+            "path": "/ext/channel_api/triggers/{trigger_id}/disable",
+            "auth": "user",
+            "handler_capability": "http.handle",
+            "timeout_ms": 5000,
+            "max_concurrency": 4,
+            "description": "triggers 域：禁用触发器"
+        },
+        {
+            "route_id": "trigger_manual",
+            "method": "POST",
+            "path": "/ext/channel_api/triggers/{trigger_id}/trigger",
+            "auth": "user",
+            "handler_capability": "http.handle",
+            "timeout_ms": 5000,
+            "max_concurrency": 4,
+            "description": "triggers 域：手动触发"
+        },
+        {
+            "route_id": "interaction_response",
+            "method": "POST",
+            "path": "/ext/channel_api/interaction/response",
+            "auth": "user",
+            "handler_capability": "http.handle",
+            "timeout_ms": 10000,
+            "max_concurrency": 4,
+            "description": "interaction 域：提交交互响应（触发 Event.set）"
+        },
+        {
+            "route_id": "interaction_pending",
+            "method": "GET",
+            "path": "/ext/channel_api/interaction/pending",
+            "auth": "user",
+            "handler_capability": "http.handle",
+            "timeout_ms": 5000,
+            "max_concurrency": 8,
+            "description": "interaction 域：待处理交互请求列表"
+        },
+        {
+            "route_id": "interaction_get",
+            "method": "GET",
+            "path": "/ext/channel_api/interaction/{request_id}",
+            "auth": "user",
+            "handler_capability": "http.handle",
+            "timeout_ms": 5000,
+            "max_concurrency": 8,
+            "description": "interaction 域：交互请求详情"
+        },
+        {
+            "route_id": "interaction_approve",
+            "method": "POST",
+            "path": "/ext/channel_api/interaction/{request_id}/approve",
+            "auth": "user",
+            "handler_capability": "http.handle",
+            "timeout_ms": 10000,
+            "max_concurrency": 4,
+            "description": "interaction 域：批准请求"
+        },
+        {
+            "route_id": "interaction_deny",
+            "method": "POST",
+            "path": "/ext/channel_api/interaction/{request_id}/deny",
+            "auth": "user",
+            "handler_capability": "http.handle",
+            "timeout_ms": 10000,
+            "max_concurrency": 4,
+            "description": "interaction 域：拒绝请求"
+        },
+        {
+            "route_id": "interaction_cancel",
+            "method": "POST",
+            "path": "/ext/channel_api/interaction/{request_id}/cancel",
+            "auth": "user",
+            "handler_capability": "http.handle",
+            "timeout_ms": 10000,
+            "max_concurrency": 4,
+            "description": "interaction 域：取消请求"
+        },
+        {
+            "route_id": "interaction_viewed",
+            "method": "POST",
+            "path": "/ext/channel_api/interaction/{request_id}/viewed",
+            "auth": "user",
+            "handler_capability": "http.handle",
+            "timeout_ms": 5000,
+            "max_concurrency": 4,
+            "description": "interaction 域：标记已查看"
+        },
+        {
+            "route_id": "floating_chat_status",
+            "method": "GET",
+            "path": "/ext/channel_api/floating-chat/status",
+            "auth": "user",
+            "handler_capability": "http.handle",
+            "timeout_ms": 5000,
+            "max_concurrency": 8,
+            "description": "floating-chat 域：悬浮窗状态"
+        },
+        {
+            "route_id": "floating_chat_launch",
+            "method": "POST",
+            "path": "/ext/channel_api/floating-chat/launch",
+            "auth": "user",
+            "handler_capability": "http.handle",
+            "timeout_ms": 5000,
+            "max_concurrency": 4,
+            "description": "floating-chat 域：启动悬浮窗"
+        },
+        {
+            "route_id": "agent_calls_list",
+            "method": "GET",
+            "path": "/ext/channel_api/agent-calls",
+            "auth": "user",
+            "handler_capability": "http.handle",
+            "timeout_ms": 5000,
+            "max_concurrency": 8,
+            "description": "agent-calls 域：Agent 调用记录列表"
+        },
+        {
+            "route_id": "agent_calls_statistics",
+            "method": "GET",
+            "path": "/ext/channel_api/agent-calls/statistics",
+            "auth": "user",
+            "handler_capability": "http.handle",
+            "timeout_ms": 5000,
+            "max_concurrency": 8,
+            "description": "agent-calls 域：调用统计"
+        },
+        {
+            "route_id": "agent_call_get",
+            "method": "GET",
+            "path": "/ext/channel_api/agent-calls/{execution_id}",
+            "auth": "user",
+            "handler_capability": "http.handle",
+            "timeout_ms": 5000,
+            "max_concurrency": 8,
+            "description": "agent-calls 域：调用记录详情"
+        },
+        {
+            "route_id": "kb_list",
+            "method": "GET",
+            "path": "/ext/channel_api/knowledge-base",
+            "auth": "user",
+            "handler_capability": "http.handle",
+            "timeout_ms": 5000,
+            "max_concurrency": 8,
+            "description": "knowledge-base 域：知识库列表"
+        },
+        {
+            "route_id": "kb_upload",
+            "method": "POST",
+            "path": "/ext/channel_api/knowledge-base/upload",
+            "auth": "user",
+            "handler_capability": "http.handle",
+            "timeout_ms": 10000,
+            "max_concurrency": 2,
+            "description": "knowledge-base 域：上传文件（stub）"
+        },
+        {
+            "route_id": "kb_stats",
+            "method": "GET",
+            "path": "/ext/channel_api/knowledge-base/stats",
+            "auth": "user",
+            "handler_capability": "http.handle",
+            "timeout_ms": 5000,
+            "max_concurrency": 8,
+            "description": "knowledge-base 域：知识库统计"
+        },
+        {
+            "route_id": "kb_check",
+            "method": "GET",
+            "path": "/ext/channel_api/knowledge-base/check",
+            "auth": "user",
+            "handler_capability": "http.handle",
+            "timeout_ms": 5000,
+            "max_concurrency": 8,
+            "description": "knowledge-base 域：检查知识库可用性"
+        },
+        {
+            "route_id": "kb_categories_list",
+            "method": "GET",
+            "path": "/ext/channel_api/knowledge-base/categories",
+            "auth": "user",
+            "handler_capability": "http.handle",
+            "timeout_ms": 5000,
+            "max_concurrency": 8,
+            "description": "knowledge-base 域：分类列表"
+        },
+        {
+            "route_id": "kb_category_create",
+            "method": "POST",
+            "path": "/ext/channel_api/knowledge-base/categories",
+            "auth": "user",
+            "handler_capability": "http.handle",
+            "timeout_ms": 5000,
+            "max_concurrency": 4,
+            "description": "knowledge-base 域：创建分类"
+        },
+        {
+            "route_id": "kb_category_delete",
+            "method": "DELETE",
+            "path": "/ext/channel_api/knowledge-base/categories/{name}",
+            "auth": "user",
+            "handler_capability": "http.handle",
+            "timeout_ms": 5000,
+            "max_concurrency": 4,
+            "description": "knowledge-base 域：删除分类"
+        },
+        {
+            "route_id": "kb_tags",
+            "method": "GET",
+            "path": "/ext/channel_api/knowledge-base/tags",
+            "auth": "user",
+            "handler_capability": "http.handle",
+            "timeout_ms": 5000,
+            "max_concurrency": 8,
+            "description": "knowledge-base 域：标签列表"
+        },
+        {
+            "route_id": "kb_item_get",
+            "method": "GET",
+            "path": "/ext/channel_api/knowledge-base/{item_id}",
+            "auth": "user",
+            "handler_capability": "http.handle",
+            "timeout_ms": 5000,
+            "max_concurrency": 8,
+            "description": "knowledge-base 域：知识库详情"
+        },
+        {
+            "route_id": "kb_item_delete",
+            "method": "DELETE",
+            "path": "/ext/channel_api/knowledge-base/{item_id}",
+            "auth": "user",
+            "handler_capability": "http.handle",
+            "timeout_ms": 5000,
+            "max_concurrency": 4,
+            "description": "knowledge-base 域：删除知识库条目"
+        },
+        {
+            "route_id": "search_global",
+            "method": "GET",
+            "path": "/ext/channel_api/search",
+            "auth": "user",
+            "handler_capability": "http.handle",
+            "timeout_ms": 5000,
+            "max_concurrency": 8,
+            "description": "search 域：统一搜索会话与消息（P2 搜索框合并）"
+        },
+        {
+            "route_id": "files_capabilities",
+            "method": "GET",
+            "path": "/ext/channel_api/files/capabilities",
+            "auth": "user",
+            "handler_capability": "http.handle",
+            "timeout_ms": 5000,
+            "max_concurrency": 8,
+            "description": "files 域：获取模型文件能力（ChatInput 上传按钮判断）"
+        },
+        {
+            "route_id": "files_supported_types",
+            "method": "GET",
+            "path": "/ext/channel_api/files/supported-types",
+            "auth": "user",
+            "handler_capability": "http.handle",
+            "timeout_ms": 5000,
+            "max_concurrency": 8,
+            "description": "files 域：获取支持的文件类型"
+        }
     ],
-    "services": [
-      {
-        "name": "api.get_status",
-        "description": "Get HTTP API channel server status"
-      },
-      {
-        "name": "api.list_routes",
-        "description": "List available HTTP API routes"
-      },
-      {
-        "name": "http.handle",
-        "description": "HTTP endpoint handler for /ext/channel_api/** (4c migration; pilot: config domain)"
-      }
+    "granted_capabilities": [
+        "pipeline-state"
     ]
-  },
-  "dependencies": [],
-  "permissions": {},
-  "error_policy": "skip",
-  "priority": 50,
-  "requires_content": 5,
-  "http_endpoints": [
-    {
-      "route_id": "config_llm_get",
-      "method": "GET",
-      "path": "/ext/channel_api/config/llm",
-      "auth": "user",
-      "handler_capability": "http.handle",
-      "timeout_ms": 5000,
-      "max_concurrency": 8,
-      "description": "config 域：获取完整 LLM 配置"
-    },
-    {
-      "route_id": "config_llm_providers_get",
-      "method": "GET",
-      "path": "/ext/channel_api/config/llm/providers",
-      "auth": "user",
-      "handler_capability": "http.handle",
-      "timeout_ms": 5000,
-      "max_concurrency": 8,
-      "description": "config 域：获取 providers"
-    },
-    {
-      "route_id": "config_llm_providers_create",
-      "method": "POST",
-      "path": "/ext/channel_api/config/llm/providers",
-      "auth": "user",
-      "handler_capability": "http.handle",
-      "timeout_ms": 5000,
-      "max_concurrency": 4,
-      "description": "config 域：新增 provider"
-    },
-    {
-      "route_id": "config_llm_providers_update",
-      "method": "PUT",
-      "path": "/ext/channel_api/config/llm/providers/{provider_id}",
-      "auth": "user",
-      "handler_capability": "http.handle",
-      "timeout_ms": 5000,
-      "max_concurrency": 4,
-      "description": "config 域：更新 provider"
-    },
-    {
-      "route_id": "config_llm_providers_delete",
-      "method": "DELETE",
-      "path": "/ext/channel_api/config/llm/providers/{provider_id}",
-      "auth": "user",
-      "handler_capability": "http.handle",
-      "timeout_ms": 5000,
-      "max_concurrency": 4,
-      "description": "config 域：删除 provider"
-    },
-    {
-      "route_id": "config_llm_provider_types_get",
-      "method": "GET",
-      "path": "/ext/channel_api/config/llm/provider-types",
-      "auth": "user",
-      "handler_capability": "http.handle",
-      "timeout_ms": 5000,
-      "max_concurrency": 8,
-      "description": "config 域：获取 litellm 支持的提供者类型清单"
-    },
-    {
-      "route_id": "config_llm_providers_remote_models_get",
-      "method": "GET",
-      "path": "/ext/channel_api/config/llm/providers/{provider_id}/remote-models",
-      "auth": "user",
-      "handler_capability": "http.handle",
-      "timeout_ms": 15000,
-      "max_concurrency": 4,
-      "description": "config 域：从提供商 API 实时拉取可用模型"
-    },
-    {
-      "route_id": "config_llm_models_get",
-      "method": "GET",
-      "path": "/ext/channel_api/config/llm/models",
-      "auth": "user",
-      "handler_capability": "http.handle",
-      "timeout_ms": 5000,
-      "max_concurrency": 8,
-      "description": "config 域：获取 models"
-    },
-    {
-      "route_id": "config_llm_models_create",
-      "method": "POST",
-      "path": "/ext/channel_api/config/llm/models",
-      "auth": "user",
-      "handler_capability": "http.handle",
-      "timeout_ms": 5000,
-      "max_concurrency": 4,
-      "description": "config 域：新增 model"
-    },
-    {
-      "route_id": "config_llm_models_update",
-      "method": "PUT",
-      "path": "/ext/channel_api/config/llm/models/{model_id}",
-      "auth": "user",
-      "handler_capability": "http.handle",
-      "timeout_ms": 5000,
-      "max_concurrency": 4,
-      "description": "config 域：更新 model"
-    },
-    {
-      "route_id": "config_llm_models_delete",
-      "method": "DELETE",
-      "path": "/ext/channel_api/config/llm/models/{model_id}",
-      "auth": "user",
-      "handler_capability": "http.handle",
-      "timeout_ms": 5000,
-      "max_concurrency": 4,
-      "description": "config 域：删除 model"
-    },
-    {
-      "route_id": "config_llm_defaults_get",
-      "method": "GET",
-      "path": "/ext/channel_api/config/llm/defaults",
-      "auth": "user",
-      "handler_capability": "http.handle",
-      "timeout_ms": 5000,
-      "max_concurrency": 8,
-      "description": "config 域：获取默认模型/tier"
-    },
-    {
-      "route_id": "config_llm_defaults_update",
-      "method": "PUT",
-      "path": "/ext/channel_api/config/llm/defaults",
-      "auth": "user",
-      "handler_capability": "http.handle",
-      "timeout_ms": 5000,
-      "max_concurrency": 4,
-      "description": "config 域：更新默认模型/tier"
-    },
-    {
-      "route_id": "config_context_window_get",
-      "method": "GET",
-      "path": "/ext/channel_api/config/context-window",
-      "auth": "user",
-      "handler_capability": "http.handle",
-      "timeout_ms": 5000,
-      "max_concurrency": 8,
-      "description": "config 域：获取上下文窗口配置"
-    },
-    {
-      "route_id": "config_context_window_update",
-      "method": "PUT",
-      "path": "/ext/channel_api/config/context-window",
-      "auth": "user",
-      "handler_capability": "http.handle",
-      "timeout_ms": 5000,
-      "max_concurrency": 4,
-      "description": "config 域：更新上下文窗口配置"
-    },
-    {
-      "route_id": "config_context_window_reset",
-      "method": "POST",
-      "path": "/ext/channel_api/config/context-window/reset",
-      "auth": "user",
-      "handler_capability": "http.handle",
-      "timeout_ms": 5000,
-      "max_concurrency": 4,
-      "description": "config 域：重置上下文窗口配置"
-    },
-    {
-      "route_id": "config_api_get",
-      "method": "GET",
-      "path": "/ext/channel_api/config/api",
-      "auth": "user",
-      "handler_capability": "http.handle",
-      "timeout_ms": 5000,
-      "max_concurrency": 8,
-      "description": "config 域：获取 API 运行配置"
-    },
-    {
-      "route_id": "config_api_update",
-      "method": "PUT",
-      "path": "/ext/channel_api/config/api",
-      "auth": "user",
-      "handler_capability": "http.handle",
-      "timeout_ms": 5000,
-      "max_concurrency": 4,
-      "description": "config 域：更新 API 运行配置"
-    },
-    {
-      "route_id": "config_concurrency_get",
-      "method": "GET",
-      "path": "/ext/channel_api/config/concurrency",
-      "auth": "user",
-      "handler_capability": "http.handle",
-      "timeout_ms": 5000,
-      "max_concurrency": 8,
-      "description": "config 域：获取并发配置"
-    },
-    {
-      "route_id": "config_concurrency_update",
-      "method": "PUT",
-      "path": "/ext/channel_api/config/concurrency",
-      "auth": "user",
-      "handler_capability": "http.handle",
-      "timeout_ms": 5000,
-      "max_concurrency": 4,
-      "description": "config 域：更新并发配置"
-    },
-    {
-      "route_id": "config_cost_control_get",
-      "method": "GET",
-      "path": "/ext/channel_api/config/cost-control",
-      "auth": "user",
-      "handler_capability": "http.handle",
-      "timeout_ms": 5000,
-      "max_concurrency": 8,
-      "description": "config 域：获取成本控制配置（注意：与 cost_control 插件不同）"
-    },
-    {
-      "route_id": "config_cost_control_update",
-      "method": "PUT",
-      "path": "/ext/channel_api/config/cost-control",
-      "auth": "user",
-      "handler_capability": "http.handle",
-      "timeout_ms": 5000,
-      "max_concurrency": 4,
-      "description": "config 域：更新成本控制配置"
-    },
-    {
-      "route_id": "config_generic_get",
-      "method": "GET",
-      "path": "/ext/channel_api/config/generic/{config_path:path}",
-      "auth": "user",
-      "handler_capability": "http.handle",
-      "timeout_ms": 5000,
-      "max_concurrency": 8,
-      "description": "config 域：按白名单路径读通用 YAML 配置"
-    },
-    {
-      "route_id": "config_generic_update",
-      "method": "PUT",
-      "path": "/ext/channel_api/config/generic/{config_path:path}",
-      "auth": "user",
-      "handler_capability": "http.handle",
-      "timeout_ms": 5000,
-      "max_concurrency": 4,
-      "description": "config 域：按白名单路径写通用 YAML 配置"
-    },
-    {
-      "route_id": "thinking_mode_health",
-      "method": "GET",
-      "path": "/ext/channel_api/thinking-mode/healthz",
-      "auth": "user",
-      "handler_capability": "http.handle",
-      "timeout_ms": 5000,
-      "max_concurrency": 8,
-      "description": "thinking-mode 域：健康检查（healthz 避内核保留段 health）"
-    },
-    {
-      "route_id": "thinking_mode_models_list",
-      "method": "GET",
-      "path": "/ext/channel_api/thinking-mode/models",
-      "auth": "user",
-      "handler_capability": "http.handle",
-      "timeout_ms": 5000,
-      "max_concurrency": 8,
-      "description": "thinking-mode 域：列出支持思考模式的模型"
-    },
-    {
-      "route_id": "thinking_mode_model_info",
-      "method": "GET",
-      "path": "/ext/channel_api/thinking-mode/models/{model_name}",
-      "auth": "user",
-      "handler_capability": "http.handle",
-      "timeout_ms": 5000,
-      "max_concurrency": 8,
-      "description": "thinking-mode 域：模型思考模式详情"
-    },
-    {
-      "route_id": "thinking_mode_check",
-      "method": "GET",
-      "path": "/ext/channel_api/thinking-mode/check/{model_name}",
-      "auth": "user",
-      "handler_capability": "http.handle",
-      "timeout_ms": 5000,
-      "max_concurrency": 8,
-      "description": "thinking-mode 域：检查模型是否支持思考模式"
-    },
-    {
-      "route_id": "thinking_mode_switch",
-      "method": "POST",
-      "path": "/ext/channel_api/thinking-mode/switch",
-      "auth": "user",
-      "handler_capability": "http.handle",
-      "timeout_ms": 5000,
-      "max_concurrency": 4,
-      "description": "thinking-mode 域：切换思考模式"
-    },
-    {
-      "route_id": "thinking_mode_recommendations",
-      "method": "POST",
-      "path": "/ext/channel_api/thinking-mode/recommendations",
-      "auth": "user",
-      "handler_capability": "http.handle",
-      "timeout_ms": 5000,
-      "max_concurrency": 8,
-      "description": "thinking-mode 域：获取思考模式推荐"
-    },
-    {
-      "route_id": "users_list",
-      "method": "GET",
-      "path": "/ext/channel_api/users",
-      "auth": "user",
-      "handler_capability": "http.handle",
-      "timeout_ms": 5000,
-      "max_concurrency": 8,
-      "description": "users 域：用户列表（stub）"
-    },
-    {
-      "route_id": "users_stats",
-      "method": "GET",
-      "path": "/ext/channel_api/users/stats",
-      "auth": "user",
-      "handler_capability": "http.handle",
-      "timeout_ms": 5000,
-      "max_concurrency": 8,
-      "description": "users 域：用户统计（stub）"
-    },
-    {
-      "route_id": "users_create",
-      "method": "POST",
-      "path": "/ext/channel_api/users",
-      "auth": "user",
-      "handler_capability": "http.handle",
-      "timeout_ms": 5000,
-      "max_concurrency": 4,
-      "description": "users 域：创建用户（stub，Query 参数）"
-    },
-    {
-      "route_id": "users_role_put",
-      "method": "PUT",
-      "path": "/ext/channel_api/users/{user_id}/role",
-      "auth": "user",
-      "handler_capability": "http.handle",
-      "timeout_ms": 5000,
-      "max_concurrency": 4,
-      "description": "users 域：更新用户角色（stub）"
-    },
-    {
-      "route_id": "users_role_patch",
-      "method": "PATCH",
-      "path": "/ext/channel_api/users/{user_id}/role",
-      "auth": "user",
-      "handler_capability": "http.handle",
-      "timeout_ms": 5000,
-      "max_concurrency": 4,
-      "description": "users 域：更新用户角色（PATCH，stub）"
-    },
-    {
-      "route_id": "users_active_put",
-      "method": "PUT",
-      "path": "/ext/channel_api/users/{user_id}/active",
-      "auth": "user",
-      "handler_capability": "http.handle",
-      "timeout_ms": 5000,
-      "max_concurrency": 4,
-      "description": "users 域：更新用户激活状态（stub）"
-    },
-    {
-      "route_id": "users_active_patch",
-      "method": "PATCH",
-      "path": "/ext/channel_api/users/{user_id}/active",
-      "auth": "user",
-      "handler_capability": "http.handle",
-      "timeout_ms": 5000,
-      "max_concurrency": 4,
-      "description": "users 域：更新用户激活状态（PATCH，stub）"
-    },
-    {
-      "route_id": "users_delete",
-      "method": "DELETE",
-      "path": "/ext/channel_api/users/{user_id}",
-      "auth": "user",
-      "handler_capability": "http.handle",
-      "timeout_ms": 5000,
-      "max_concurrency": 4,
-      "description": "users 域：删除用户（stub）"
-    },
-    {
-      "route_id": "users_settings_get",
-      "method": "GET",
-      "path": "/ext/channel_api/users/settings",
-      "auth": "user",
-      "handler_capability": "http.handle",
-      "timeout_ms": 5000,
-      "max_concurrency": 8,
-      "description": "users 域：用户设置（stub）"
-    },
-    {
-      "route_id": "users_settings_update",
-      "method": "PUT",
-      "path": "/ext/channel_api/users/settings",
-      "auth": "user",
-      "handler_capability": "http.handle",
-      "timeout_ms": 5000,
-      "max_concurrency": 4,
-      "description": "users 域：更新用户设置（stub）"
-    },
-    {
-      "route_id": "sessions_total_token_usage",
-      "method": "GET",
-      "path": "/ext/channel_api/sessions/{session_id}/total-token-usage",
-      "auth": "user",
-      "handler_capability": "http.handle",
-      "timeout_ms": 5000,
-      "max_concurrency": 8,
-      "description": "sessions 域：会话总Token用量（stub）"
-    },
-    {
-      "route_id": "sessions_context_token_usage",
-      "method": "GET",
-      "path": "/ext/channel_api/sessions/{session_id}/context-token-usage",
-      "auth": "user",
-      "handler_capability": "http.handle",
-      "timeout_ms": 5000,
-      "max_concurrency": 8,
-      "description": "sessions 域：上下文Token用量（stub）"
-    },
-    {
-      "route_id": "execution_records_list",
-      "method": "GET",
-      "path": "/ext/channel_api/execution/records",
-      "auth": "user",
-      "handler_capability": "http.handle",
-      "timeout_ms": 10000,
-      "max_concurrency": 8,
-      "description": "execution 域：执行记录列表（query: session_id/parent_record_id/limit/offset）"
-    },
-    {
-      "route_id": "execution_records_sessions",
-      "method": "GET",
-      "path": "/ext/channel_api/execution/records/sessions",
-      "auth": "user",
-      "handler_capability": "http.handle",
-      "timeout_ms": 10000,
-      "max_concurrency": 8,
-      "description": "execution 域：有记录的会话列表"
-    },
-    {
-      "route_id": "execution_records_group_summary",
-      "method": "GET",
-      "path": "/ext/channel_api/execution/records/group-summary",
-      "auth": "user",
-      "handler_capability": "http.handle",
-      "timeout_ms": 10000,
-      "max_concurrency": 8,
-      "description": "execution 域：记录分组概要"
-    },
-    {
-      "route_id": "execution_records_tree",
-      "method": "GET",
-      "path": "/ext/channel_api/execution/records/tree/{session_id}",
-      "auth": "user",
-      "handler_capability": "http.handle",
-      "timeout_ms": 10000,
-      "max_concurrency": 8,
-      "description": "execution 域：执行记录树"
-    },
-    {
-      "route_id": "execution_record_children",
-      "method": "GET",
-      "path": "/ext/channel_api/execution/records/{record_id}/children",
-      "auth": "user",
-      "handler_capability": "http.handle",
-      "timeout_ms": 5000,
-      "max_concurrency": 8,
-      "description": "execution 域：子执行记录（无层级，返回 []）"
-    },
-    {
-      "route_id": "execution_record_get",
-      "method": "GET",
-      "path": "/ext/channel_api/execution/records/{record_id}",
-      "auth": "user",
-      "handler_capability": "http.handle",
-      "timeout_ms": 5000,
-      "max_concurrency": 8,
-      "description": "execution 域：获取单条执行记录"
-    },
-    {
-      "route_id": "execution_record_delete",
-      "method": "DELETE",
-      "path": "/ext/channel_api/execution/records/{record_id}",
-      "auth": "user",
-      "handler_capability": "http.handle",
-      "timeout_ms": 5000,
-      "max_concurrency": 4,
-      "description": "execution 域：删除执行记录（stub）"
-    },
-    {
-      "route_id": "execution_records_delete_by_session",
-      "method": "DELETE",
-      "path": "/ext/channel_api/execution/records/session/{session_id}",
-      "auth": "user",
-      "handler_capability": "http.handle",
-      "timeout_ms": 10000,
-      "max_concurrency": 4,
-      "description": "execution 域：按会话删除执行记录（stub）"
-    },
-    {
-      "route_id": "execution_records_clear_all",
-      "method": "POST",
-      "path": "/ext/channel_api/execution/records/clear-all",
-      "auth": "user",
-      "handler_capability": "http.handle",
-      "timeout_ms": 10000,
-      "max_concurrency": 2,
-      "description": "execution 域：清理所有执行记录（stub）"
-    },
-    {
-      "route_id": "modules_ui_list",
-      "method": "GET",
-      "path": "/ext/channel_api/modules/ui",
-      "auth": "user",
-      "handler_capability": "http.handle",
-      "timeout_ms": 5000,
-      "max_concurrency": 8,
-      "description": "modules/ui 域：所有模块 UI Schema 列表（query: client_type 过滤）"
-    },
-    {
-      "route_id": "modules_ui_get",
-      "method": "GET",
-      "path": "/ext/channel_api/modules/ui/{module_id}",
-      "auth": "user",
-      "handler_capability": "http.handle",
-      "timeout_ms": 5000,
-      "max_concurrency": 8,
-      "description": "modules/ui 域：指定模块 UI Schema"
-    },
-    {
-      "route_id": "memory_list",
-      "method": "GET",
-      "path": "/ext/channel_api/memory",
-      "auth": "user",
-      "handler_capability": "http.handle",
-      "timeout_ms": 5000,
-      "max_concurrency": 8,
-      "description": "memory 域：记忆列表（query: memory_type/limit/offset）"
-    },
-    {
-      "route_id": "memory_search_get",
-      "method": "GET",
-      "path": "/ext/channel_api/memory/search",
-      "auth": "user",
-      "handler_capability": "http.handle",
-      "timeout_ms": 5000,
-      "max_concurrency": 8,
-      "description": "memory 域：关键词搜索（query: query/top_k/method）"
-    },
-    {
-      "route_id": "memory_search_post",
-      "method": "POST",
-      "path": "/ext/channel_api/memory/search",
-      "auth": "user",
-      "handler_capability": "http.handle",
-      "timeout_ms": 5000,
-      "max_concurrency": 8,
-      "description": "memory 域：关键词搜索（POST）"
-    },
-    {
-      "route_id": "memory_episodes_list",
-      "method": "GET",
-      "path": "/ext/channel_api/memory/episodes",
-      "auth": "user",
-      "handler_capability": "http.handle",
-      "timeout_ms": 5000,
-      "max_concurrency": 8,
-      "description": "memory 域：情景记忆列表（query: page/page_size）"
-    },
-    {
-      "route_id": "memory_episode_get",
-      "method": "GET",
-      "path": "/ext/channel_api/memory/episodes/{episode_id}",
-      "auth": "user",
-      "handler_capability": "http.handle",
-      "timeout_ms": 5000,
-      "max_concurrency": 8,
-      "description": "memory 域：单个情景记忆"
-    },
-    {
-      "route_id": "memory_semantic_list",
-      "method": "GET",
-      "path": "/ext/channel_api/memory/semantic",
-      "auth": "user",
-      "handler_capability": "http.handle",
-      "timeout_ms": 5000,
-      "max_concurrency": 8,
-      "description": "memory 域：语义记忆列表"
-    },
-    {
-      "route_id": "memory_consolidate",
-      "method": "POST",
-      "path": "/ext/channel_api/memory/consolidate",
-      "auth": "user",
-      "handler_capability": "http.handle",
-      "timeout_ms": 10000,
-      "max_concurrency": 2,
-      "description": "memory 域：记忆整合"
-    },
-    {
-      "route_id": "memory_stats",
-      "method": "GET",
-      "path": "/ext/channel_api/memory/stats",
-      "auth": "user",
-      "handler_capability": "http.handle",
-      "timeout_ms": 5000,
-      "max_concurrency": 8,
-      "description": "memory 域：记忆统计"
-    },
-    {
-      "route_id": "memory_get",
-      "method": "GET",
-      "path": "/ext/channel_api/memory/{memory_id}",
-      "auth": "user",
-      "handler_capability": "http.handle",
-      "timeout_ms": 5000,
-      "max_concurrency": 8,
-      "description": "memory 域：记忆详情"
-    },
-    {
-      "route_id": "memory_delete",
-      "method": "DELETE",
-      "path": "/ext/channel_api/memory/{memory_id}",
-      "auth": "user",
-      "handler_capability": "http.handle",
-      "timeout_ms": 5000,
-      "max_concurrency": 4,
-      "description": "memory 域：删除记忆"
-    },
-    {
-      "route_id": "artifacts_upload",
-      "method": "POST",
-      "path": "/ext/channel_api/artifacts/upload",
-      "auth": "user",
-      "handler_capability": "http.handle",
-      "timeout_ms": 30000,
-      "max_concurrency": 2,
-      "description": "artifacts 域：多模态文件上传（multipart/form-data，dispatcher 透传原始字节）"
-    },
-    {
-      "route_id": "artifacts_list",
-      "method": "GET",
-      "path": "/ext/channel_api/artifacts",
-      "auth": "user",
-      "handler_capability": "http.handle",
-      "timeout_ms": 5000,
-      "max_concurrency": 8,
-      "description": "artifacts 域：制品列表（query: task_id/limit/offset）"
-    },
-    {
-      "route_id": "artifacts_create",
-      "method": "POST",
-      "path": "/ext/channel_api/artifacts",
-      "auth": "user",
-      "handler_capability": "http.handle",
-      "timeout_ms": 5000,
-      "max_concurrency": 4,
-      "description": "artifacts 域：创建制品"
-    },
-    {
-      "route_id": "artifact_get",
-      "method": "GET",
-      "path": "/ext/channel_api/artifacts/{artifact_id}",
-      "auth": "user",
-      "handler_capability": "http.handle",
-      "timeout_ms": 5000,
-      "max_concurrency": 8,
-      "description": "artifacts 域：制品详情"
-    },
-    {
-      "route_id": "artifact_update",
-      "method": "PUT",
-      "path": "/ext/channel_api/artifacts/{artifact_id}",
-      "auth": "user",
-      "handler_capability": "http.handle",
-      "timeout_ms": 5000,
-      "max_concurrency": 4,
-      "description": "artifacts 域：更新制品（创建新版本）"
-    },
-    {
-      "route_id": "artifact_delete",
-      "method": "DELETE",
-      "path": "/ext/channel_api/artifacts/{artifact_id}",
-      "auth": "user",
-      "handler_capability": "http.handle",
-      "timeout_ms": 5000,
-      "max_concurrency": 4,
-      "description": "artifacts 域：删除制品"
-    },
-    {
-      "route_id": "artifact_versions",
-      "method": "GET",
-      "path": "/ext/channel_api/artifacts/{artifact_id}/versions",
-      "auth": "user",
-      "handler_capability": "http.handle",
-      "timeout_ms": 5000,
-      "max_concurrency": 8,
-      "description": "artifacts 域：制品版本历史"
-    },
-    {
-      "route_id": "artifact_diff",
-      "method": "GET",
-      "path": "/ext/channel_api/artifacts/{artifact_id}/diff",
-      "auth": "user",
-      "handler_capability": "http.handle",
-      "timeout_ms": 5000,
-      "max_concurrency": 8,
-      "description": "artifacts 域：版本差异（query: from/to）"
-    },
-    {
-      "route_id": "artifact_annotations_list",
-      "method": "GET",
-      "path": "/ext/channel_api/artifacts/{artifact_id}/annotations",
-      "auth": "user",
-      "handler_capability": "http.handle",
-      "timeout_ms": 5000,
-      "max_concurrency": 8,
-      "description": "annotations 域：制品批注列表（query: status/limit）"
-    },
-    {
-      "route_id": "artifact_annotations_create",
-      "method": "POST",
-      "path": "/ext/channel_api/artifacts/{artifact_id}/annotations",
-      "auth": "user",
-      "handler_capability": "http.handle",
-      "timeout_ms": 5000,
-      "max_concurrency": 4,
-      "description": "annotations 域：添加批注"
-    },
-    {
-      "route_id": "annotation_update",
-      "method": "PUT",
-      "path": "/ext/channel_api/annotations/{annotation_id}",
-      "auth": "user",
-      "handler_capability": "http.handle",
-      "timeout_ms": 5000,
-      "max_concurrency": 4,
-      "description": "annotations 域：更新批注"
-    },
-    {
-      "route_id": "annotation_delete",
-      "method": "DELETE",
-      "path": "/ext/channel_api/annotations/{annotation_id}",
-      "auth": "user",
-      "handler_capability": "http.handle",
-      "timeout_ms": 5000,
-      "max_concurrency": 4,
-      "description": "annotations 域：删除批注"
-    },
-    {
-      "route_id": "annotation_resolve",
-      "method": "POST",
-      "path": "/ext/channel_api/annotations/{annotation_id}/resolve",
-      "auth": "user",
-      "handler_capability": "http.handle",
-      "timeout_ms": 5000,
-      "max_concurrency": 4,
-      "description": "annotations 域：标记批注为已解决"
-    },
-    {
-      "route_id": "scenes_create",
-      "method": "POST",
-      "path": "/ext/channel_api/scenes",
-      "auth": "user",
-      "handler_capability": "http.handle",
-      "timeout_ms": 5000,
-      "max_concurrency": 4,
-      "description": "scenes 域：创建场景（可基于模板）"
-    },
-    {
-      "route_id": "scenes_list",
-      "method": "GET",
-      "path": "/ext/channel_api/scenes",
-      "auth": "user",
-      "handler_capability": "http.handle",
-      "timeout_ms": 5000,
-      "max_concurrency": 8,
-      "description": "scenes 域：列出所有场景"
-    },
-    {
-      "route_id": "scenes_templates",
-      "method": "GET",
-      "path": "/ext/channel_api/scenes/templates",
-      "auth": "user",
-      "handler_capability": "http.handle",
-      "timeout_ms": 5000,
-      "max_concurrency": 8,
-      "description": "scenes 域：获取场景模板列表"
-    },
-    {
-      "route_id": "scene_get",
-      "method": "GET",
-      "path": "/ext/channel_api/scenes/{scene_id}",
-      "auth": "user",
-      "handler_capability": "http.handle",
-      "timeout_ms": 5000,
-      "max_concurrency": 8,
-      "description": "scenes 域：获取场景详情"
-    },
-    {
-      "route_id": "scene_update",
-      "method": "PUT",
-      "path": "/ext/channel_api/scenes/{scene_id}",
-      "auth": "user",
-      "handler_capability": "http.handle",
-      "timeout_ms": 5000,
-      "max_concurrency": 4,
-      "description": "scenes 域：更新场景"
-    },
-    {
-      "route_id": "scene_delete",
-      "method": "DELETE",
-      "path": "/ext/channel_api/scenes/{scene_id}",
-      "auth": "user",
-      "handler_capability": "http.handle",
-      "timeout_ms": 5000,
-      "max_concurrency": 4,
-      "description": "scenes 域：删除场景"
-    },
-    {
-      "route_id": "scene_switch",
-      "method": "POST",
-      "path": "/ext/channel_api/scenes/{scene_id}/switch",
-      "auth": "user",
-      "handler_capability": "http.handle",
-      "timeout_ms": 5000,
-      "max_concurrency": 4,
-      "description": "scenes 域：切换场景"
-    },
-    {
-      "route_id": "asr_transcribe",
-      "method": "POST",
-      "path": "/ext/channel_api/audio/transcriptions",
-      "auth": "user",
-      "handler_capability": "http.handle",
-      "timeout_ms": 30000,
-      "max_concurrency": 2,
-      "description": "asr 域：音频转文字（multipart/form-data，file 字段）"
-    },
-    {
-      "route_id": "workspaces_open_file",
-      "method": "POST",
-      "path": "/ext/channel_api/workspaces/open-file",
-      "auth": "user",
-      "handler_capability": "http.handle",
-      "timeout_ms": 5000,
-      "max_concurrency": 4,
-      "description": "workspaces 域：在IDE中打开文件"
-    },
-    {
-      "route_id": "workspace_get",
-      "method": "GET",
-      "path": "/ext/channel_api/workspaces/{container_task_id}",
-      "auth": "user",
-      "handler_capability": "http.handle",
-      "timeout_ms": 5000,
-      "max_concurrency": 8,
-      "description": "workspaces 域：工作空间详情（不存在则自动创建）"
-    },
-    {
-      "route_id": "workspace_artifacts",
-      "method": "GET",
-      "path": "/ext/channel_api/workspaces/{container_task_id}/artifacts",
-      "auth": "user",
-      "handler_capability": "http.handle",
-      "timeout_ms": 5000,
-      "max_concurrency": 8,
-      "description": "workspaces 域：工作空间下所有制品"
-    },
-    {
-      "route_id": "workspace_file_tree",
-      "method": "GET",
-      "path": "/ext/channel_api/workspaces/{container_task_id}/file-tree",
-      "auth": "user",
-      "handler_capability": "http.handle",
-      "timeout_ms": 5000,
-      "max_concurrency": 8,
-      "description": "workspaces 域：文件目录树"
-    },
-    {
-      "route_id": "workspace_file_content_get",
-      "method": "GET",
-      "path": "/ext/channel_api/workspaces/{container_task_id}/file-content",
-      "auth": "user",
-      "handler_capability": "http.handle",
-      "timeout_ms": 5000,
-      "max_concurrency": 8,
-      "description": "workspaces 域：读取文件内容（query: path）"
-    },
-    {
-      "route_id": "workspace_file_content_save",
-      "method": "PUT",
-      "path": "/ext/channel_api/workspaces/{container_task_id}/file-content",
-      "auth": "user",
-      "handler_capability": "http.handle",
-      "timeout_ms": 5000,
-      "max_concurrency": 4,
-      "description": "workspaces 域：保存文件内容（query: path）"
-    },
-    {
-      "route_id": "workspace_create_entry",
-      "method": "POST",
-      "path": "/ext/channel_api/workspaces/{container_task_id}/create-entry",
-      "auth": "user",
-      "handler_capability": "http.handle",
-      "timeout_ms": 5000,
-      "max_concurrency": 4,
-      "description": "workspaces 域：创建文件或文件夹"
-    },
-    {
-      "route_id": "workspace_delete_entry",
-      "method": "DELETE",
-      "path": "/ext/channel_api/workspaces/{container_task_id}/entries",
-      "auth": "user",
-      "handler_capability": "http.handle",
-      "timeout_ms": 5000,
-      "max_concurrency": 4,
-      "description": "workspaces 域：删除文件或文件夹（query: path）"
-    },
-    {
-      "route_id": "workspace_rename_entry",
-      "method": "POST",
-      "path": "/ext/channel_api/workspaces/{container_task_id}/rename-entry",
-      "auth": "user",
-      "handler_capability": "http.handle",
-      "timeout_ms": 5000,
-      "max_concurrency": 4,
-      "description": "workspaces 域：重命名文件或文件夹"
-    },
-    {
-      "route_id": "workspace_move_entry",
-      "method": "POST",
-      "path": "/ext/channel_api/workspaces/{container_task_id}/move-entry",
-      "auth": "user",
-      "handler_capability": "http.handle",
-      "timeout_ms": 5000,
-      "max_concurrency": 4,
-      "description": "workspaces 域：移动文件或文件夹"
-    },
-    {
-      "route_id": "workspace_open",
-      "method": "POST",
-      "path": "/ext/channel_api/workspaces/{container_task_id}/open",
-      "auth": "user",
-      "handler_capability": "http.handle",
-      "timeout_ms": 5000,
-      "max_concurrency": 4,
-      "description": "workspaces 域：在IDE中打开工作空间"
-    },
-    {
-      "route_id": "review_create",
-      "method": "POST",
-      "path": "/ext/channel_api/reviews",
-      "auth": "user",
-      "handler_capability": "http.handle",
-      "timeout_ms": 5000,
-      "max_concurrency": 4,
-      "description": "reviews 域：创建审批请求"
-    },
-    {
-      "route_id": "review_list",
-      "method": "GET",
-      "path": "/ext/channel_api/reviews",
-      "auth": "user",
-      "handler_capability": "http.handle",
-      "timeout_ms": 5000,
-      "max_concurrency": 8,
-      "description": "reviews 域：审批列表（query: task_id/limit）"
-    },
-    {
-      "route_id": "review_media_review",
-      "method": "POST",
-      "path": "/ext/channel_api/reviews/media-review",
-      "auth": "user",
-      "handler_capability": "http.handle",
-      "timeout_ms": 60000,
-      "max_concurrency": 2,
-      "description": "reviews 域：上传文件并执行媒体审阅（multipart: file + media_type）"
-    },
-    {
-      "route_id": "review_get",
-      "method": "GET",
-      "path": "/ext/channel_api/reviews/{review_id}",
-      "auth": "user",
-      "handler_capability": "http.handle",
-      "timeout_ms": 5000,
-      "max_concurrency": 8,
-      "description": "reviews 域：审批详情"
-    },
-    {
-      "route_id": "review_feedback",
-      "method": "POST",
-      "path": "/ext/channel_api/reviews/{review_id}/feedback",
-      "auth": "user",
-      "handler_capability": "http.handle",
-      "timeout_ms": 5000,
-      "max_concurrency": 4,
-      "description": "reviews 域：提交审批反馈"
-    },
-    {
-      "route_id": "review_viewed",
-      "method": "POST",
-      "path": "/ext/channel_api/reviews/{review_id}/viewed",
-      "auth": "user",
-      "handler_capability": "http.handle",
-      "timeout_ms": 5000,
-      "max_concurrency": 4,
-      "description": "reviews 域：标记已查看"
-    },
-    {
-      "route_id": "review_cancel",
-      "method": "POST",
-      "path": "/ext/channel_api/reviews/{review_id}/cancel",
-      "auth": "user",
-      "handler_capability": "http.handle",
-      "timeout_ms": 5000,
-      "max_concurrency": 4,
-      "description": "reviews 域：取消审批"
-    },
-    {
-      "route_id": "review_media_metadata",
-      "method": "GET",
-      "path": "/ext/channel_api/reviews/{review_id}/media-metadata",
-      "auth": "user",
-      "handler_capability": "http.handle",
-      "timeout_ms": 5000,
-      "max_concurrency": 8,
-      "description": "reviews 域：审批关联的媒体元数据"
-    },
-    {
-      "route_id": "review_attachments",
-      "method": "POST",
-      "path": "/ext/channel_api/reviews/{review_id}/attachments",
-      "auth": "user",
-      "handler_capability": "http.handle",
-      "timeout_ms": 30000,
-      "max_concurrency": 2,
-      "description": "reviews 域：为审批添加媒体附件（JSON body，文件路径；auto_review 触发媒体审阅）"
-    },
-    {
-      "route_id": "tasks_list",
-      "method": "GET",
-      "path": "/ext/channel_api/tasks",
-      "auth": "user",
-      "handler_capability": "http.handle",
-      "timeout_ms": 5000,
-      "max_concurrency": 8,
-      "description": "tasks 域：任务列表（query: status/priority/session_id/limit/offset/skip）"
-    },
-    {
-      "route_id": "tasks_create",
-      "method": "POST",
-      "path": "/ext/channel_api/tasks",
-      "auth": "user",
-      "handler_capability": "http.handle",
-      "timeout_ms": 5000,
-      "max_concurrency": 4,
-      "description": "tasks 域：创建任务"
-    },
-    {
-      "route_id": "tasks_debug_all",
-      "method": "GET",
-      "path": "/ext/channel_api/tasks/debug/all",
-      "auth": "user",
-      "handler_capability": "http.handle",
-      "timeout_ms": 5000,
-      "max_concurrency": 4,
-      "description": "tasks 域：调试用全量任务"
-    },
-    {
-      "route_id": "tasks_create_root",
-      "method": "POST",
-      "path": "/ext/channel_api/tasks/root",
-      "auth": "user",
-      "handler_capability": "http.handle",
-      "timeout_ms": 5000,
-      "max_concurrency": 4,
-      "description": "tasks 域：手动创建根任务"
-    },
-    {
-      "route_id": "tasks_containers",
-      "method": "GET",
-      "path": "/ext/channel_api/tasks/containers",
-      "auth": "user",
-      "handler_capability": "http.handle",
-      "timeout_ms": 5000,
-      "max_concurrency": 8,
-      "description": "tasks 域：列出容器任务（query: session_id）"
-    },
-    {
-      "route_id": "task_get",
-      "method": "GET",
-      "path": "/ext/channel_api/tasks/{task_id}",
-      "auth": "user",
-      "handler_capability": "http.handle",
-      "timeout_ms": 5000,
-      "max_concurrency": 8,
-      "description": "tasks 域：任务详情"
-    },
-    {
-      "route_id": "task_update",
-      "method": "PATCH",
-      "path": "/ext/channel_api/tasks/{task_id}",
-      "auth": "user",
-      "handler_capability": "http.handle",
-      "timeout_ms": 5000,
-      "max_concurrency": 4,
-      "description": "tasks 域：更新任务"
-    },
-    {
-      "route_id": "task_delete",
-      "method": "DELETE",
-      "path": "/ext/channel_api/tasks/{task_id}",
-      "auth": "user",
-      "handler_capability": "http.handle",
-      "timeout_ms": 5000,
-      "max_concurrency": 4,
-      "description": "tasks 域：删除任务"
-    },
-    {
-      "route_id": "task_submit",
-      "method": "POST",
-      "path": "/ext/channel_api/tasks/{task_id}/submit",
-      "auth": "user",
-      "handler_capability": "http.handle",
-      "timeout_ms": 10000,
-      "max_concurrency": 2,
-      "description": "tasks 域：提交任务执行"
-    },
-    {
-      "route_id": "task_evaluate",
-      "method": "POST",
-      "path": "/ext/channel_api/tasks/{task_id}/evaluate",
-      "auth": "user",
-      "handler_capability": "http.handle",
-      "timeout_ms": 30000,
-      "max_concurrency": 2,
-      "description": "tasks 域：评估任务"
-    },
-    {
-      "route_id": "task_pause",
-      "method": "POST",
-      "path": "/ext/channel_api/tasks/{task_id}/pause",
-      "auth": "user",
-      "handler_capability": "http.handle",
-      "timeout_ms": 10000,
-      "max_concurrency": 2,
-      "description": "tasks 域：暂停任务（级联子任务）"
-    },
-    {
-      "route_id": "task_resume",
-      "method": "POST",
-      "path": "/ext/channel_api/tasks/{task_id}/resume",
-      "auth": "user",
-      "handler_capability": "http.handle",
-      "timeout_ms": 10000,
-      "max_concurrency": 2,
-      "description": "tasks 域：恢复任务"
-    },
-    {
-      "route_id": "task_cancel",
-      "method": "POST",
-      "path": "/ext/channel_api/tasks/{task_id}/cancel",
-      "auth": "user",
-      "handler_capability": "http.handle",
-      "timeout_ms": 10000,
-      "max_concurrency": 2,
-      "description": "tasks 域：取消任务"
-    },
-    {
-      "route_id": "task_phase_status",
-      "method": "GET",
-      "path": "/ext/channel_api/tasks/{task_id}/phase",
-      "auth": "user",
-      "handler_capability": "http.handle",
-      "timeout_ms": 5000,
-      "max_concurrency": 8,
-      "description": "tasks 域：任务当前阶段"
-    },
-    {
-      "route_id": "task_phase_complete_prepare",
-      "method": "POST",
-      "path": "/ext/channel_api/tasks/{task_id}/phase/prepare/complete",
-      "auth": "user",
-      "handler_capability": "http.handle",
-      "timeout_ms": 5000,
-      "max_concurrency": 4,
-      "description": "tasks 域：完成准备阶段"
-    },
-    {
-      "route_id": "task_phase_complete_execute",
-      "method": "POST",
-      "path": "/ext/channel_api/tasks/{task_id}/phase/execute/complete",
-      "auth": "user",
-      "handler_capability": "http.handle",
-      "timeout_ms": 5000,
-      "max_concurrency": 4,
-      "description": "tasks 域：完成执行阶段"
-    },
-    {
-      "route_id": "task_phase_output",
-      "method": "GET",
-      "path": "/ext/channel_api/tasks/{task_id}/phase/{phase}/output",
-      "auth": "user",
-      "handler_capability": "http.handle",
-      "timeout_ms": 5000,
-      "max_concurrency": 8,
-      "description": "tasks 域：获取阶段输出"
-    },
-    {
-      "route_id": "task_ac_list",
-      "method": "GET",
-      "path": "/ext/channel_api/tasks/{task_id}/ac",
-      "auth": "user",
-      "handler_capability": "http.handle",
-      "timeout_ms": 5000,
-      "max_concurrency": 8,
-      "description": "tasks 域：获取任务验收标准"
-    },
-    {
-      "route_id": "task_ac_evaluate_all",
-      "method": "POST",
-      "path": "/ext/channel_api/tasks/{task_id}/ac/evaluate-all",
-      "auth": "user",
-      "handler_capability": "http.handle",
-      "timeout_ms": 30000,
-      "max_concurrency": 2,
-      "description": "tasks 域：评估所有验收标准"
-    },
-    {
-      "route_id": "task_ac_evaluate",
-      "method": "POST",
-      "path": "/ext/channel_api/tasks/{task_id}/ac/{ac_id}/evaluate",
-      "auth": "user",
-      "handler_capability": "http.handle",
-      "timeout_ms": 30000,
-      "max_concurrency": 2,
-      "description": "tasks 域：评估单个验收标准"
-    },
-    {
-      "route_id": "task_ac_result",
-      "method": "GET",
-      "path": "/ext/channel_api/tasks/{task_id}/ac/{ac_id}/result",
-      "auth": "user",
-      "handler_capability": "http.handle",
-      "timeout_ms": 5000,
-      "max_concurrency": 8,
-      "description": "tasks 域：获取验收标准评估结果"
-    },
-    {
-      "route_id": "projects_list",
-      "method": "GET",
-      "path": "/ext/channel_api/projects",
-      "auth": "user",
-      "handler_capability": "http.handle",
-      "timeout_ms": 5000,
-      "max_concurrency": 8,
-      "description": "projects 域：长期任务列表（query: limit/offset）"
-    },
-    {
-      "route_id": "projects_create",
-      "method": "POST",
-      "path": "/ext/channel_api/projects",
-      "auth": "user",
-      "handler_capability": "http.handle",
-      "timeout_ms": 5000,
-      "max_concurrency": 4,
-      "description": "projects 域：创建长期任务"
-    },
-    {
-      "route_id": "project_get",
-      "method": "GET",
-      "path": "/ext/channel_api/projects/{project_id}",
-      "auth": "user",
-      "handler_capability": "http.handle",
-      "timeout_ms": 5000,
-      "max_concurrency": 8,
-      "description": "projects 域：长期任务详情"
-    },
-    {
-      "route_id": "project_toggle_auto_execute",
-      "method": "POST",
-      "path": "/ext/channel_api/projects/{project_id}/auto-execute",
-      "auth": "user",
-      "handler_capability": "http.handle",
-      "timeout_ms": 5000,
-      "max_concurrency": 4,
-      "description": "projects 域：切换自动执行"
-    },
-    {
-      "route_id": "project_pause",
-      "method": "POST",
-      "path": "/ext/channel_api/projects/{project_id}/pause",
-      "auth": "user",
-      "handler_capability": "http.handle",
-      "timeout_ms": 5000,
-      "max_concurrency": 4,
-      "description": "projects 域：暂停长期任务"
-    },
-    {
-      "route_id": "project_resume",
-      "method": "POST",
-      "path": "/ext/channel_api/projects/{project_id}/resume",
-      "auth": "user",
-      "handler_capability": "http.handle",
-      "timeout_ms": 5000,
-      "max_concurrency": 4,
-      "description": "projects 域：恢复长期任务"
-    },
-    {
-      "route_id": "project_delete",
-      "method": "DELETE",
-      "path": "/ext/channel_api/projects/{project_id}",
-      "auth": "user",
-      "handler_capability": "http.handle",
-      "timeout_ms": 5000,
-      "max_concurrency": 4,
-      "description": "projects 域：删除长期任务"
-    },
-    {
-      "route_id": "triggers_list",
-      "method": "GET",
-      "path": "/ext/channel_api/triggers",
-      "auth": "user",
-      "handler_capability": "http.handle",
-      "timeout_ms": 5000,
-      "max_concurrency": 8,
-      "description": "triggers 域：触发器列表"
-    },
-    {
-      "route_id": "triggers_create",
-      "method": "POST",
-      "path": "/ext/channel_api/triggers",
-      "auth": "user",
-      "handler_capability": "http.handle",
-      "timeout_ms": 5000,
-      "max_concurrency": 4,
-      "description": "triggers 域：创建触发器"
-    },
-    {
-      "route_id": "triggers_stats",
-      "method": "GET",
-      "path": "/ext/channel_api/triggers/stats",
-      "auth": "user",
-      "handler_capability": "http.handle",
-      "timeout_ms": 5000,
-      "max_concurrency": 8,
-      "description": "triggers 域：触发器统计"
-    },
-    {
-      "route_id": "trigger_get",
-      "method": "GET",
-      "path": "/ext/channel_api/triggers/{trigger_id}",
-      "auth": "user",
-      "handler_capability": "http.handle",
-      "timeout_ms": 5000,
-      "max_concurrency": 8,
-      "description": "triggers 域：触发器详情"
-    },
-    {
-      "route_id": "trigger_update",
-      "method": "PUT",
-      "path": "/ext/channel_api/triggers/{trigger_id}",
-      "auth": "user",
-      "handler_capability": "http.handle",
-      "timeout_ms": 5000,
-      "max_concurrency": 4,
-      "description": "triggers 域：更新触发器"
-    },
-    {
-      "route_id": "trigger_delete",
-      "method": "DELETE",
-      "path": "/ext/channel_api/triggers/{trigger_id}",
-      "auth": "user",
-      "handler_capability": "http.handle",
-      "timeout_ms": 5000,
-      "max_concurrency": 4,
-      "description": "triggers 域：删除触发器"
-    },
-    {
-      "route_id": "trigger_enable",
-      "method": "POST",
-      "path": "/ext/channel_api/triggers/{trigger_id}/enable",
-      "auth": "user",
-      "handler_capability": "http.handle",
-      "timeout_ms": 5000,
-      "max_concurrency": 4,
-      "description": "triggers 域：启用触发器"
-    },
-    {
-      "route_id": "trigger_disable",
-      "method": "POST",
-      "path": "/ext/channel_api/triggers/{trigger_id}/disable",
-      "auth": "user",
-      "handler_capability": "http.handle",
-      "timeout_ms": 5000,
-      "max_concurrency": 4,
-      "description": "triggers 域：禁用触发器"
-    },
-    {
-      "route_id": "trigger_manual",
-      "method": "POST",
-      "path": "/ext/channel_api/triggers/{trigger_id}/trigger",
-      "auth": "user",
-      "handler_capability": "http.handle",
-      "timeout_ms": 5000,
-      "max_concurrency": 4,
-      "description": "triggers 域：手动触发"
-    },
-    {
-      "route_id": "interaction_response",
-      "method": "POST",
-      "path": "/ext/channel_api/interaction/response",
-      "auth": "user",
-      "handler_capability": "http.handle",
-      "timeout_ms": 10000,
-      "max_concurrency": 4,
-      "description": "interaction 域：提交交互响应（触发 Event.set）"
-    },
-    {
-      "route_id": "interaction_pending",
-      "method": "GET",
-      "path": "/ext/channel_api/interaction/pending",
-      "auth": "user",
-      "handler_capability": "http.handle",
-      "timeout_ms": 5000,
-      "max_concurrency": 8,
-      "description": "interaction 域：待处理交互请求列表"
-    },
-    {
-      "route_id": "interaction_get",
-      "method": "GET",
-      "path": "/ext/channel_api/interaction/{request_id}",
-      "auth": "user",
-      "handler_capability": "http.handle",
-      "timeout_ms": 5000,
-      "max_concurrency": 8,
-      "description": "interaction 域：交互请求详情"
-    },
-    {
-      "route_id": "interaction_approve",
-      "method": "POST",
-      "path": "/ext/channel_api/interaction/{request_id}/approve",
-      "auth": "user",
-      "handler_capability": "http.handle",
-      "timeout_ms": 10000,
-      "max_concurrency": 4,
-      "description": "interaction 域：批准请求"
-    },
-    {
-      "route_id": "interaction_deny",
-      "method": "POST",
-      "path": "/ext/channel_api/interaction/{request_id}/deny",
-      "auth": "user",
-      "handler_capability": "http.handle",
-      "timeout_ms": 10000,
-      "max_concurrency": 4,
-      "description": "interaction 域：拒绝请求"
-    },
-    {
-      "route_id": "interaction_cancel",
-      "method": "POST",
-      "path": "/ext/channel_api/interaction/{request_id}/cancel",
-      "auth": "user",
-      "handler_capability": "http.handle",
-      "timeout_ms": 10000,
-      "max_concurrency": 4,
-      "description": "interaction 域：取消请求"
-    },
-    {
-      "route_id": "interaction_viewed",
-      "method": "POST",
-      "path": "/ext/channel_api/interaction/{request_id}/viewed",
-      "auth": "user",
-      "handler_capability": "http.handle",
-      "timeout_ms": 5000,
-      "max_concurrency": 4,
-      "description": "interaction 域：标记已查看"
-    },
-    {
-      "route_id": "floating_chat_status",
-      "method": "GET",
-      "path": "/ext/channel_api/floating-chat/status",
-      "auth": "user",
-      "handler_capability": "http.handle",
-      "timeout_ms": 5000,
-      "max_concurrency": 8,
-      "description": "floating-chat 域：悬浮窗状态"
-    },
-    {
-      "route_id": "floating_chat_launch",
-      "method": "POST",
-      "path": "/ext/channel_api/floating-chat/launch",
-      "auth": "user",
-      "handler_capability": "http.handle",
-      "timeout_ms": 5000,
-      "max_concurrency": 4,
-      "description": "floating-chat 域：启动悬浮窗"
-    },
-    {
-      "route_id": "agent_calls_list",
-      "method": "GET",
-      "path": "/ext/channel_api/agent-calls",
-      "auth": "user",
-      "handler_capability": "http.handle",
-      "timeout_ms": 5000,
-      "max_concurrency": 8,
-      "description": "agent-calls 域：Agent 调用记录列表"
-    },
-    {
-      "route_id": "agent_calls_statistics",
-      "method": "GET",
-      "path": "/ext/channel_api/agent-calls/statistics",
-      "auth": "user",
-      "handler_capability": "http.handle",
-      "timeout_ms": 5000,
-      "max_concurrency": 8,
-      "description": "agent-calls 域：调用统计"
-    },
-    {
-      "route_id": "agent_call_get",
-      "method": "GET",
-      "path": "/ext/channel_api/agent-calls/{execution_id}",
-      "auth": "user",
-      "handler_capability": "http.handle",
-      "timeout_ms": 5000,
-      "max_concurrency": 8,
-      "description": "agent-calls 域：调用记录详情"
-    },
-    {
-      "route_id": "kb_list",
-      "method": "GET",
-      "path": "/ext/channel_api/knowledge-base",
-      "auth": "user",
-      "handler_capability": "http.handle",
-      "timeout_ms": 5000,
-      "max_concurrency": 8,
-      "description": "knowledge-base 域：知识库列表"
-    },
-    {
-      "route_id": "kb_upload",
-      "method": "POST",
-      "path": "/ext/channel_api/knowledge-base/upload",
-      "auth": "user",
-      "handler_capability": "http.handle",
-      "timeout_ms": 10000,
-      "max_concurrency": 2,
-      "description": "knowledge-base 域：上传文件（stub）"
-    },
-    {
-      "route_id": "kb_stats",
-      "method": "GET",
-      "path": "/ext/channel_api/knowledge-base/stats",
-      "auth": "user",
-      "handler_capability": "http.handle",
-      "timeout_ms": 5000,
-      "max_concurrency": 8,
-      "description": "knowledge-base 域：知识库统计"
-    },
-    {
-      "route_id": "kb_check",
-      "method": "GET",
-      "path": "/ext/channel_api/knowledge-base/check",
-      "auth": "user",
-      "handler_capability": "http.handle",
-      "timeout_ms": 5000,
-      "max_concurrency": 8,
-      "description": "knowledge-base 域：检查知识库可用性"
-    },
-    {
-      "route_id": "kb_categories_list",
-      "method": "GET",
-      "path": "/ext/channel_api/knowledge-base/categories",
-      "auth": "user",
-      "handler_capability": "http.handle",
-      "timeout_ms": 5000,
-      "max_concurrency": 8,
-      "description": "knowledge-base 域：分类列表"
-    },
-    {
-      "route_id": "kb_category_create",
-      "method": "POST",
-      "path": "/ext/channel_api/knowledge-base/categories",
-      "auth": "user",
-      "handler_capability": "http.handle",
-      "timeout_ms": 5000,
-      "max_concurrency": 4,
-      "description": "knowledge-base 域：创建分类"
-    },
-    {
-      "route_id": "kb_category_delete",
-      "method": "DELETE",
-      "path": "/ext/channel_api/knowledge-base/categories/{name}",
-      "auth": "user",
-      "handler_capability": "http.handle",
-      "timeout_ms": 5000,
-      "max_concurrency": 4,
-      "description": "knowledge-base 域：删除分类"
-    },
-    {
-      "route_id": "kb_tags",
-      "method": "GET",
-      "path": "/ext/channel_api/knowledge-base/tags",
-      "auth": "user",
-      "handler_capability": "http.handle",
-      "timeout_ms": 5000,
-      "max_concurrency": 8,
-      "description": "knowledge-base 域：标签列表"
-    },
-    {
-      "route_id": "kb_item_get",
-      "method": "GET",
-      "path": "/ext/channel_api/knowledge-base/{item_id}",
-      "auth": "user",
-      "handler_capability": "http.handle",
-      "timeout_ms": 5000,
-      "max_concurrency": 8,
-      "description": "knowledge-base 域：知识库详情"
-    },
-    {
-      "route_id": "kb_item_delete",
-      "method": "DELETE",
-      "path": "/ext/channel_api/knowledge-base/{item_id}",
-      "auth": "user",
-      "handler_capability": "http.handle",
-      "timeout_ms": 5000,
-      "max_concurrency": 4,
-      "description": "knowledge-base 域：删除知识库条目"
-    },
-    {
-      "route_id": "search_global",
-      "method": "GET",
-      "path": "/ext/channel_api/search",
-      "auth": "user",
-      "handler_capability": "http.handle",
-      "timeout_ms": 5000,
-      "max_concurrency": 8,
-      "description": "search 域：统一搜索会话与消息（P2 搜索框合并）"
-    },
-    {
-      "route_id": "files_capabilities",
-      "method": "GET",
-      "path": "/ext/channel_api/files/capabilities",
-      "auth": "user",
-      "handler_capability": "http.handle",
-      "timeout_ms": 5000,
-      "max_concurrency": 8,
-      "description": "files 域：获取模型文件能力（ChatInput 上传按钮判断）"
-    },
-    {
-      "route_id": "files_supported_types",
-      "method": "GET",
-      "path": "/ext/channel_api/files/supported-types",
-      "auth": "user",
-      "handler_capability": "http.handle",
-      "timeout_ms": 5000,
-      "max_concurrency": 8,
-      "description": "files 域：获取支持的文件类型"
-    }
-  ]
 }

@@ -63,6 +63,18 @@ _available_routes: list[str] = []
 async def _on_load(params: dict[str, Any]) -> None:
     """Initialize HTTP API channel on load."""
     global _app_created, _available_routes
+    # GAP-1 统一：注入 state 聚合读取器（workspace_service 的父链/子链读面）
+    try:
+        from workspace_service import set_state_reader  # noqa: PLC0415
+
+        async def _read_state_rows() -> list[dict[str, Any]]:
+            handle = plugin.get_capability("pipeline-state")
+            rows = await handle.call("list", {})
+            return rows if isinstance(rows, list) else []
+
+        set_state_reader(_read_state_rows)
+    except Exception as exc:  # noqa: BLE001 — 注入失败降级（回退路径）
+        logger.warning("[channel_api] workspace_service state reader 注入失败: %s", exc)
     try:
         # 尝试导入 app 模块以检查可用性
         # 注意：完整 FastAPI 应用初始化需要数据库等外部依赖

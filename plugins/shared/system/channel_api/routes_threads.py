@@ -104,10 +104,18 @@ def _safe_get_service(service_name: str) -> Any:
         return None
 
 
-def _expand_pipeline_ids_with_task_data(pipeline_ids: list[str]) -> list[str]:
-    """利用任务数据的 parent_pipeline_id 链，将 pipeline_ids 扩展为完整集合。"""
+async def _expand_pipeline_ids_with_task_data(pipeline_ids: list[str]) -> list[str]:
+    """利用任务数据的 parent_pipeline_id 链，将 pipeline_ids 扩展为完整集合。
+
+    GAP-1 统一：优先读 state 聚合（task = pipeline，lineage.parent_pipeline_id
+    即父链）；读面未注入回退 task_service 只读镜像。
+    """
     if not pipeline_ids:
         return []
+
+    rows = await _read_state_rows()
+    if rows is not None:
+        return _expand_pipeline_ids_with_state_rows(pipeline_ids, rows)
 
     task_service = _get_task_service()
     if task_service is None:
@@ -122,6 +130,51 @@ def _expand_pipeline_ids_with_task_data(pipeline_ids: list[str]) -> list[str]:
         return list(pipeline_ids)
 
     return _expand_pipeline_ids_with_tasks(pipeline_ids, all_tasks or [])
+
+
+async def _read_state_rows() -> list[dict[str, Any]] | None:
+    """读管道 state 聚合行（pipeline-state.list；None = 桥未就绪）。"""
+    try:
+        from routes_missing import _channel_api_plugin  # noqa: PLC0415
+
+        handle = _channel_api_plugin().get_capability("pipeline-state")
+        rows = await handle.call("list", {})
+        return [r for r in rows if isinstance(r, dict)] if isinstance(rows, list) else None
+    except Exception as exc:  # noqa: BLE001 — 读面降级不崩
+        logger.warning("[routes_threads] state 聚合读取失败: %s", exc)
+        return None
+
+
+def _expand_pipeline_ids_with_state_rows(
+    pipeline_ids: list[str],
+    rows: list[dict[str, Any]],
+) -> list[str]:
+    """用 state 聚合行扩展 pipeline_ids：子管道 = lineage.parent_pipeline_id 匹配。"""
+    seen: set[str] = set()
+    ordered: list[str] = []
+    for pid in pipeline_ids:
+        if pid and pid not in seen:
+            seen.add(pid)
+            ordered.append(pid)
+
+    children_of: dict[str, list[str]] = {}
+    for r in rows:
+        pid = str(r.get("pipeline_id") or "")
+        parent = str(r.get("lineage.parent_pipeline_id") or "")
+        if pid and parent:
+            children_of.setdefault(parent, []).append(pid)
+
+    changed = True
+    while changed:
+        changed = False
+        for parent, children in list(children_of.items()):
+            if parent in seen:
+                for c in children:
+                    if c not in seen:
+                        seen.add(c)
+                        ordered.append(c)
+                        changed = True
+    return ordered
 
 
 def _expand_pipeline_ids_with_tasks(
@@ -381,7 +434,7 @@ def _collect_plugin_thread_fields() -> list[dict[str, Any]]:
     response_model=ThreadResponse,
     summary="获取线程详情",
 )
-def get_thread(
+async def get_thread(
     thread_id: str,
     _user: dict = Depends(require_auth),
 ) -> ThreadResponse:
@@ -398,7 +451,7 @@ def get_thread(
 
     # 扩展 pipeline_ids，包含所有子管道（通过任务 parent_pipeline_id 链追溯）
     raw_ids = thread.get("pipeline_ids", []) or []
-    expanded_ids = _expand_pipeline_ids_with_task_data(raw_ids)
+    expanded_ids = await _expand_pipeline_ids_with_task_data(raw_ids)
     return _build_thread_response({**thread, "pipeline_ids": expanded_ids})
 
 
@@ -732,7 +785,9 @@ def _register_session_pipeline(
     最终落入 task_submit 写入的任务 metadata，使任务状态变更事件能按用户定向推送。
 
     workspace / isolation_level 写入 tags 后，随 message_bus → engine.run 播种到
-    管道 state（workspace 已有链路；isolation_level 由 session_isolation 插件消费），
+    管道 state（workspace 已有链路；0.2 会话级隔离语义由 isolation_guard 消费——
+    内核把 thread metadata 的 isolation_mode 注入 execution_context.isolation.level，
+    isolation_guard 据此决策 + 容器落地；session_isolation 插件已随 GAP 合并删除），
     使主对话工具在会话工作空间内工作、会话级隔离模式生效（与任务级隔离解耦）。
     """
 

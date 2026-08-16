@@ -20,6 +20,7 @@
 import asyncio
 import contextlib
 import logging
+import types
 from typing import Any
 
 from _eval_core import sanitize_eval_paths
@@ -37,6 +38,24 @@ from agentos_plugin_sdk import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+# ── GAP-1 统一：state 聚合读取器（server.py on_load 注入，pipeline-state capability）──
+# 约定签名：``() -> list[dict]``（sync 或 async，管道 state 聚合行，行为扁平点号键
+# 如 {"pipeline_id": ..., "task.status": ..., "task.goal": ...}）。None = 未注入
+# （读面回退 task_service YAML 只读镜像）。
+_state_reader: Any = None
+
+
+def set_state_reader(reader: Any) -> None:
+    """注入 state 聚合读取器（server.py on_load 经 pipeline-state capability）。"""
+    global _state_reader  # noqa: PLW0603
+    _state_reader = reader
+
+
+def _get_state_reader() -> Any:
+    """获取 state 聚合读取器（None = 未注入，测试可 monkeypatch）。"""
+    return _state_reader
 
 _DEFAULT_MAX_RETRIES = 3
 _DEFAULT_EVAL_TIMEOUT = 1200.0
@@ -248,21 +267,18 @@ class TaskEvaluateTool(BuiltinTool):
             list(inputs.keys()),
         )
 
+        # GAP-1 统一：读面 state 优先（task = pipeline，task.* 即任务数据）；
+        # task_service 仅作状态写与回退（YAML 只读镜像，写通道落地前保留）。
         task_service = self._get_task_service()
-        if task_service is None:
-            return create_failure_result(
-                error="TaskService 不可用",
-                error_code="SERVICE_UNAVAILABLE",
-                metadata={"task_failed": True},
-            )
 
         if not task_id:
-            task_id = self._infer_task_id(task_service)
-            if task_id:
-                logger.warning(
-                    "[TaskEvaluate] task_id 为推断值: %s，注入链可能断裂",
-                    task_id,
-                )
+            if task_service is not None:
+                task_id = self._infer_task_id(task_service)
+                if task_id:
+                    logger.warning(
+                        "[TaskEvaluate] task_id 为推断值: %s，注入链可能断裂",
+                        task_id,
+                    )
 
         if not task_id:
             return create_failure_result(
@@ -271,7 +287,9 @@ class TaskEvaluateTool(BuiltinTool):
                 metadata={"task_failed": True},
             )
 
-        task = task_service.get_task(task_id)
+        task = await self._get_task_from_state(task_id)
+        if task is None and task_service is not None:
+            task = task_service.get_task(task_id)
         if task is None:
             return create_failure_result(error="任务不存在", error_code="TASK_NOT_FOUND")
 
@@ -930,6 +948,57 @@ class TaskEvaluateTool(BuiltinTool):
             }
         )
         task.metadata["evaluation_history"] = history
+
+    async def _read_state_rows(self) -> list[dict[str, Any]] | None:
+        """读管道 state 聚合行（pipeline-state.list；None = 桥未就绪）。"""
+        reader = _get_state_reader()
+        if reader is None:
+            return None
+        try:
+            rows = reader()
+            if asyncio.iscoroutine(rows):
+                rows = await rows
+            return [r for r in rows if isinstance(r, dict)] if isinstance(rows, list) else None
+        except Exception as exc:  # noqa: BLE001 — 读面降级不崩评估
+            logger.warning("[TaskEvaluate] state 聚合读取失败: %s", exc)
+            return None
+
+    async def _get_task_from_state(self, task_id: str) -> Any:
+        """从 state 聚合行组装轻量任务对象（GAP-1 统一：task = pipeline）。
+
+        行字段（STATE_SUMMARY_KEYS 出口）：task.goal/task.status/task.description/
+        task.acceptance_criteria/task.evaluation 等扁平点号键。缺行返回 None
+        （调用方回退 YAML 只读镜像）。
+        """
+        rows = await self._read_state_rows()
+        if rows is None:
+            return None
+        row = next(
+            (r for r in rows if str(r.get("pipeline_id") or "") == task_id),
+            None,
+        )
+        if row is None:
+            return None
+        status_str = str(row.get("task.status") or "pending")
+        try:
+            status = TaskStatus(status_str)
+        except (ValueError, AttributeError):
+            status = TaskStatus.PENDING
+        metadata: dict[str, Any] = {}
+        ac = row.get("task.acceptance_criteria")
+        if isinstance(ac, dict):
+            metadata["acceptance_criteria"] = ac
+        eval_res = row.get("task.evaluation")
+        if isinstance(eval_res, dict):
+            metadata["evaluation"] = eval_res
+        return types.SimpleNamespace(
+            id=task_id,
+            title=str(row.get("task.goal") or task_id),
+            description=str(row.get("task.description") or ""),
+            status=status,
+            metadata=metadata,
+            result=None,
+        )
 
     def _get_task_service(self) -> Any:
         """获取共享的 TaskService 实例。

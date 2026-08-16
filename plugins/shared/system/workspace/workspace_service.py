@@ -11,6 +11,23 @@ from workspace.models import FileTreeNode, Workspace
 
 logger = logging.getLogger(__name__)
 
+# ── GAP-1 统一：state 聚合读取器（channel_api server on_load 注入）──
+# 约定签名：``() -> list[dict]``（sync 或 async，管道 state 聚合行，行为扁平点号键
+# 如 {"pipeline_id": ..., "task.scope": ..., "lineage.parent_pipeline_id": ...}）。
+# None = 未注入（回退 task_service 只读镜像）。
+_state_reader: Any = None
+
+
+def set_state_reader(reader: Any) -> None:
+    """注入 state 聚合读取器（channel_api server on_load 经 pipeline-state capability）。"""
+    global _state_reader  # noqa: PLW0603
+    _state_reader = reader
+
+
+def _get_state_reader() -> Any:
+    """获取 state 聚合读取器（None = 未注入）。"""
+    return _state_reader
+
 # 全局单例
 _workspace_service: WorkspaceService | None = None
 
@@ -115,28 +132,50 @@ class WorkspaceService:
         return {"tree": [n.to_dict() for n in tree]}
 
     async def resolve_container_task(self, task_id: str) -> str:
-        """解析任务到容器任务。"""
+        """解析任务到容器任务（GAP-1 统一：父链 = lineage.parent_pipeline_id）。
+
+        读 state 聚合行（task = pipeline）：无父（根形式）→ 自身；task.scope ==
+        container → 自身；否则沿 lineage.parent_pipeline_id 向上找最近的容器
+        任务。读面未注入回退 task_service 只读镜像。
+        """
         try:
-            # M3：插件自包含——经 tasks.service_access 拿 TaskService（不再调 channel_api 进程的 ServiceProvider）。
+            rows = await self._read_state_rows()
+            if rows is None:
+                return await self._resolve_container_task_legacy(task_id)
+
+            by_id = {str(r.get("pipeline_id") or ""): r for r in rows}
+            current_id = task_id
+            visited: set[str] = set()
+            while current_id and current_id not in visited:
+                visited.add(current_id)
+                row = by_id.get(current_id)
+                if row is None:
+                    break
+                if not str(row.get("lineage.parent_pipeline_id") or ""):
+                    return current_id  # 根形式：自身即根/容器任务
+                if str(row.get("task.scope") or "") == "container":
+                    return current_id
+                current_id = str(row.get("lineage.parent_pipeline_id") or "")
+            return task_id
+        except Exception:
+            logger.warning("[WorkspaceService] 解析容器任务失败 | task_id=%s", task_id)
+            return task_id
+
+    async def _resolve_container_task_legacy(self, task_id: str) -> str:
+        """回退：task_service 只读镜像路径（读面未注入时的存量兼容）。"""
+        try:
             from tasks.service_access import get_task_service  # noqa: PLC0415
 
             task_service = get_task_service()
             if task_service is None:
                 return task_id
-
             task = await asyncio.to_thread(task_service.get_task, task_id)
             if not task:
                 return task_id
-
-            # 策略 1: 无父任务 → 本身就是根任务/容器任务
             if not task.parent_task_id:
                 return task_id
-
-            # 策略 2: 有容器标记
             if task.metadata.get("is_container"):
                 return task_id
-
-            # 策略 3: 向上递归
             current = task
             visited = {task_id}
             while current.parent_task_id and current.parent_task_id not in visited:
@@ -145,27 +184,50 @@ class WorkspaceService:
                 if not parent:
                     break
                 current = parent
-
             return current.id
-
         except Exception:
-            logger.warning("[WorkspaceService] 解析容器任务失败 | task_id=%s", task_id)
             return task_id
 
     async def _get_child_task_ids(self, container_task_id: str) -> set[str]:
-        """获取容器任务下所有子任务 ID。"""
+        """获取容器任务下所有子任务 ID（GAP-1 统一：子链 = lineage 分组）。"""
         try:
-            # M3：插件自包含——经 tasks.service_access 拿 TaskService（不再调 channel_api 进程的 ServiceProvider）。
+            rows = await self._read_state_rows()
+            if rows is None:
+                return await self._get_child_task_ids_legacy(container_task_id)
+
+            children_of: dict[str, list[str]] = {}
+            for r in rows:
+                pid = str(r.get("pipeline_id") or "")
+                parent = str(r.get("lineage.parent_pipeline_id") or "")
+                if pid and parent:
+                    children_of.setdefault(parent, []).append(pid)
+
+            child_ids: set[str] = set()
+            visited: set[str] = set()
+            queue = [container_task_id]
+            while queue:
+                parent_id = queue.pop(0)
+                if parent_id in visited:
+                    continue
+                visited.add(parent_id)
+                for cid in children_of.get(parent_id, []):
+                    child_ids.add(cid)
+                    queue.append(cid)
+            return child_ids
+        except Exception:
+            return set()
+
+    async def _get_child_task_ids_legacy(self, container_task_id: str) -> set[str]:
+        """回退：task_service 只读镜像路径。"""
+        try:
             from tasks.service_access import get_task_service  # noqa: PLC0415
 
             task_service = get_task_service()
             if task_service is None:
                 return {container_task_id}
-
             child_ids: set[str] = set()
             visited: set[str] = set()
             queue = [container_task_id]
-
             while queue:
                 parent_id = queue.pop(0)
                 if parent_id in visited:
@@ -175,10 +237,23 @@ class WorkspaceService:
                 for t in subtasks:
                     child_ids.add(t.id)
                     queue.append(t.id)
-
             return child_ids
         except Exception:
             return set()
+
+    async def _read_state_rows(self) -> list[dict[str, Any]] | None:
+        """读管道 state 聚合行（pipeline-state.list；None = 桥未就绪）。"""
+        reader = _get_state_reader()
+        if reader is None:
+            return None
+        try:
+            rows = reader()
+            if asyncio.iscoroutine(rows):
+                rows = await rows
+            return [r for r in rows if isinstance(r, dict)] if isinstance(rows, list) else None
+        except Exception as exc:  # noqa: BLE001 — 读面降级不崩
+            logger.warning("[WorkspaceService] state 聚合读取失败: %s", exc)
+            return None
 
     _WINDOWS_RESERVED_NAMES = frozenset(
         {
