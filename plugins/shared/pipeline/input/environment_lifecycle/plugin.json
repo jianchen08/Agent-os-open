@@ -6,7 +6,7 @@
     "language": "python",
     "host_type": "sidecar",
     "entry": "python server.py",
-    "invoke_entry": "environment_lifecycle_plugin.execute",
+    "invoke_entry": "environment_lifecycle.execute",
     "capabilities": {
         "tools": [],
         "resources": [],
