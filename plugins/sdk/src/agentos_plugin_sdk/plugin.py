@@ -256,10 +256,10 @@ class AgentOSPlugin:
         channel = self._kernel_channel
 
         def _make_call_fn(_cap_name: str) -> Any:
-            async def _call(method: str, m_params: dict[str, Any]) -> Any:
+            async def _call(method: str, m_params: dict[str, Any], timeout: float | None = None) -> Any:
                 # 命名空间方法名：<capability>.<method>（与内核 parse_capability_method 对齐）
                 full_method = f"{_cap_name}.{method}"
-                return await channel.send_request(full_method, m_params)
+                return await channel.send_request(full_method, m_params, timeout)
 
             return _call
 

@@ -581,10 +581,17 @@ class SecurityCheckPlugin(IInputPlugin):
                 rule_name,
             )
 
-            wait_res = await hi_cap.call("wait_for_choice", {
-                "request_id": request_id,
-                "timeout": 86400,
-            })
+            wait_res = await hi_cap.call(
+                "wait_for_choice",
+                {
+                    "request_id": request_id,
+                    "timeout": 86400,
+                },
+                # 等待用户审批是长等待语义：默认 30s 会先于用户点击掐断（2026-08-16
+                # 卡死根因）。取 295s 略低于内核 MCP 通道 300s，让本层先超时、
+                # 错误进入下方 InteractionTimeoutError 分支（soft-block 可恢复）。
+                timeout=295.0,
+            )
             # capability 返回 error dict 时转换成对应异常（与原 service 行为对齐）
             if not isinstance(wait_res, dict):
                 raise RuntimeError(f"wait_for_choice returned non-dict: {wait_res}")

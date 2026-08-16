@@ -36,4 +36,9 @@ pub trait EventSink: Send + Sync {
 
     /// 返回 sink 的唯一身份标识（用于连接注册表去重/踢旧比较）。
     fn id(&self) -> u64;
+
+    /// 关闭底层连接。B10 踢旧时必须调用——否则旧 socket 残留为幽灵连接
+    /// （收不到事件也断不开），对端批量断连时才集中暴露。
+    /// 默认空实现，测试 mock sink 无需实现。
+    fn shutdown(&self) {}
 }

@@ -55,6 +55,12 @@ impl EventSink for WsSink {
     fn id(&self) -> u64 {
         self.id
     }
+    fn shutdown(&self) {
+        // 关闭哨兵：出站排空任务收到空串即退出并向对端发 Close 帧。
+        // （tokio 1.52 的 UnboundedSender 无 close API，receiver 在排空任务
+        // 手里，只能经 channel 发信号；正常事件均为非空 JSON，不会误伤。）
+        let _ = self.tx.send(String::new());
+    }
 }
 
 /// 握手鉴权：从 query 参数取 token，调 verify_access_token。
@@ -138,6 +144,11 @@ async fn run_socket_loop(
     // 出站排空任务：从 channel 取消息写入 socket
     let mut send_task = tokio::spawn(async move {
         while let Some(text) = out_rx.recv().await {
+            // 空串 = 踢旧关闭哨兵（WsSink::shutdown 发出）：退出循环 →
+            // sender.close() 发 Close 帧 → 对端 onclose → 本端会话收尾。
+            if text.is_empty() {
+                break;
+            }
             if sender.send(Message::Text(text.into())).await.is_err() {
                 break;
             }

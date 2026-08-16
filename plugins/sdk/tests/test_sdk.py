@@ -328,7 +328,7 @@ class TestCapabilityHandle:
         handle = CapabilityHandle("pipeline-executor", call_fn=call_fn)
         result = await handle.call("execute", {"plugin": "test"})
         assert result == {"status": "ok"}
-        call_fn.assert_called_once_with("execute", {"plugin": "test"})
+        call_fn.assert_called_once_with("execute", {"plugin": "test"}, None)
 
     @pytest.mark.asyncio
     async def test_capability_call_not_connected(self) -> None:

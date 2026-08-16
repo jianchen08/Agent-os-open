@@ -183,18 +183,23 @@ class KernelChannel:
             raise RuntimeError("kernel channel not attached (initialize handshake not received)")
         return self._outbound
 
-    async def send_request(self, method: str, params: dict[str, Any]) -> Any:
+    async def send_request(
+        self, method: str, params: dict[str, Any], timeout: float | None = None
+    ) -> Any:
         """向内核发起一次反向 capability 调用，等待响应。
 
         Args:
             method: 形如 "pipeline-executor.resume" 的命名空间方法名
             params: 调用参数
+            timeout: 等待响应超时（秒）；None 用 CAPABILITY_CALL_TIMEOUT_S。
+                长等待语义的方法（如 human-interaction.wait_for_choice 等
+                用户响应）必须显式传大值，否则默认 30s 会先于用户操作掐断。
 
         Returns:
             内核返回的 result（dict）
 
         Raises:
-            RuntimeError: 内核返回 error、超时（CAPABILITY_CALL_TIMEOUT_S），
+            RuntimeError: 内核返回 error、超时（timeout / CAPABILITY_CALL_TIMEOUT_S），
                 或通道未绑定（initialize 前）。
         """
         outbound = self._require_outbound()
@@ -202,7 +207,7 @@ class KernelChannel:
             return await outbound.send_raw_request(
                 method,
                 params or {},
-                {"timeout": CAPABILITY_CALL_TIMEOUT_S},
+                {"timeout": timeout if timeout is not None else CAPABILITY_CALL_TIMEOUT_S},
             )
         except MCPError as e:
             raise RuntimeError(f"kernel capability call failed [{e.error.code}] {method}: {e.error.message}") from None

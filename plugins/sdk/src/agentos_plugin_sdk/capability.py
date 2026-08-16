@@ -46,12 +46,14 @@ class CapabilityHandle:
         """能力名称。"""
         return self._name
 
-    async def call(self, method: str, params: dict[str, Any]) -> Any:
+    async def call(self, method: str, params: dict[str, Any], timeout: float | None = None) -> Any:
         """调用内核能力。
 
         Args:
             method: 要调用的方法名。
             params: 方法参数。
+            timeout: 等待响应超时（秒）；None 用 SDK 默认（30s）。
+                长等待方法（如 human-interaction.wait_for_choice）必须显式传大值。
 
         Returns:
             内核返回的结果。
@@ -61,7 +63,7 @@ class CapabilityHandle:
         """
         if self._call_fn is None:
             raise RuntimeError(f"capability '{self._name}' is not connected to kernel")
-        return await self._call_fn(method, params)
+        return await self._call_fn(method, params, timeout)
 
     async def notify(self, method: str, params: dict[str, Any]) -> None:
         """向内核发送 fire-and-forget 通知（不等响应）。
