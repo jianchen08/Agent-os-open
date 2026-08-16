@@ -56,7 +56,7 @@ function getTaskStatusLabel(status: string): string {
 }
 
 /** 调试任务页面组件 */
-export function DebugTasksPage() {
+export function DebugTasksPage({ embedded }: { embedded?: boolean } = {}) {
   const [tasks, setTasks] = useState<TaskInfo[]>([])
   const [total, setTotal] = useState(0)
   const [isLoading, setIsLoading] = useState(true)
@@ -128,6 +128,7 @@ export function DebugTasksPage() {
     <PageShell
       title="调试任务"
       backHref="/debug"
+      embedded={embedded}
       actions={<span className="text-muted-foreground text-xs">共 {total} 个任务</span>}
     >
       {/* 状态过滤 */}

@@ -30,6 +30,12 @@ import { TableWidget } from '@/components/schema/widgets/TableWidget'
 import { TaskCardWidget } from '@/components/schema/widgets/TaskCardWidget'
 import { TerminalWidget } from '@/components/schema/widgets/TerminalWidget'
 import { WebviewWidget } from '@/components/schema/widgets/WebviewWidget'
+import { DbAdminPage } from '@/pages/debug/DbAdminPage'
+import { DebugEvaluationMetricsPage } from '@/pages/debug/DebugEvaluationMetricsPage'
+import { DebugExecutionRecordsPage } from '@/pages/debug/DebugExecutionRecordsPage'
+import { DebugSessionsPage } from '@/pages/debug/DebugSessionsPage'
+import { DebugTasksPage } from '@/pages/debug/DebugTasksPage'
+import { DebugUsersPage } from '@/pages/debug/DebugUsersPage'
 import { widgetRegistry } from './WidgetRegistry'
 import type { WidgetComponent } from './WidgetRegistry'
 import type { RenderingSpaceType } from '@/types/schema'
@@ -75,6 +81,14 @@ const WIDGETS: WidgetEntry[] = [
   { name: 'agents_panel', component: AgentsPanel, spaces: ['workspace'] },
   { name: 'memory_panel', component: MemoryPanel, spaces: ['workspace'] },
   { name: 'workspace_explorer', component: PipelineManagerPanel, spaces: ['workspace'] },
+  // 调试中心页面（debug_center 插件 contributes.pages 声明的预置组件；
+  // 页面数据经各数据源插件 HTTP 面获取：/ext/db_admin|channel_api|monitoring|evaluation_service/*）
+  { name: 'debug_db_admin', component: DbAdminPage, spaces: ['workspace'] },
+  { name: 'debug_execution_records', component: DebugExecutionRecordsPage, spaces: ['workspace'] },
+  { name: 'debug_sessions', component: DebugSessionsPage, spaces: ['workspace'] },
+  { name: 'debug_tasks', component: DebugTasksPage, spaces: ['workspace'] },
+  { name: 'debug_users', component: DebugUsersPage, spaces: ['workspace'] },
+  { name: 'debug_evaluation_metrics', component: DebugEvaluationMetricsPage, spaces: ['workspace'] },
   // 任务/管道管理（独立工作区标签，按需打开；旧 workspace_explorer 注册保留兼容）
   { name: 'pipeline_manager', component: PipelineManagerPanel, spaces: ['workspace'] },
   { name: 'pipeline_manager_widget', component: PipelineManagerWidget, spaces: ['workspace'] },

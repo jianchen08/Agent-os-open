@@ -14,7 +14,7 @@ import type { SessionInfo } from '@/services/api/executionRecords'
 /**
  * 调试会话页面组件
  */
-export function DebugSessionsPage() {
+export function DebugSessionsPage({ embedded }: { embedded?: boolean } = {}) {
   const [sessions, setSessions] = useState<SessionInfo[]>([])
   const [total, setTotal] = useState(0)
   const [isLoading, setIsLoading] = useState(true)
@@ -45,6 +45,7 @@ export function DebugSessionsPage() {
     <PageShell
       title="调试会话"
       backHref="/debug"
+      embedded={embedded}
       actions={<span className="text-muted-foreground text-xs">共 {total} 个会话</span>}
     >
       {/* 加载状态 */}

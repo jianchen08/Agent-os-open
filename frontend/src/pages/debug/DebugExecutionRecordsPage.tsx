@@ -32,7 +32,7 @@ function getRecordStatusStyle(status?: string): string {
 /**
  * 调试执行记录页面组件
  */
-export function DebugExecutionRecordsPage() {
+export function DebugExecutionRecordsPage({ embedded }: { embedded?: boolean } = {}) {
   const [records, setRecords] = useState<ExecutionRecord[]>([])
   const [sessions, setSessions] = useState<SessionInfo[]>([])
   const [selectedSession, setSelectedSession] = useState<string>('')
@@ -87,6 +87,7 @@ export function DebugExecutionRecordsPage() {
     <PageShell
       title="执行记录"
       backHref="/debug"
+      embedded={embedded}
       actions={<span className="text-muted-foreground text-xs">共 {total} 条</span>}
     >
       {/* 会话过滤 */}

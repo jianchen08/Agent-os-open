@@ -54,7 +54,7 @@ function rowPk(row: Record<string, unknown>, pkCols: ColumnInfo[]): string {
 /**
  * DB 管理页面组件
  */
-export function DbAdminPage() {
+export function DbAdminPage({ embedded }: { embedded?: boolean } = {}) {
   const [isAdmin, setIsAdmin] = useState<boolean | null>(null)
   const [tables, setTables] = useState<DbTableInfo[]>([])
   const [activeTable, setActiveTable] = useState<string>('')
@@ -295,7 +295,7 @@ export function DbAdminPage() {
   // admin 守卫
   if (isAdmin === false) {
     return (
-      <PageShell title="数据库管理" backHref="/debug">
+      <PageShell title="数据库管理" backHref="/debug" embedded={embedded}>
         <div className="flex h-full items-center justify-center">
           <div className="bg-destructive/10 text-destructive rounded-lg px-6 py-4 text-sm">
             无权限访问数据库管理页面（需要 admin 角色）
@@ -309,6 +309,7 @@ export function DbAdminPage() {
     <PageShell
       title="数据库管理"
       backHref="/debug"
+      embedded={embedded}
       actions={
         <span className="text-muted-foreground text-xs">
           {isLoading ? '加载中...' : `共 ${tables.length} 张表`}

@@ -14,7 +14,7 @@ import type { User } from '@/services/api/users'
 /**
  * 调试用户页面组件
  */
-export function DebugUsersPage() {
+export function DebugUsersPage({ embedded }: { embedded?: boolean } = {}) {
   const [users, setUsers] = useState<User[]>([])
   const [isLoading, setIsLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
@@ -44,6 +44,7 @@ export function DebugUsersPage() {
     <PageShell
       title="用户调试"
       backHref="/debug"
+      embedded={embedded}
       actions={<span className="text-muted-foreground text-xs">共 {users.length} 个用户</span>}
     >
       {/* 加载状态 */}

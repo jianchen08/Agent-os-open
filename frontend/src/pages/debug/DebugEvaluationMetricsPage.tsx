@@ -17,7 +17,7 @@ const CATEGORY_OPTIONS = ['', 'quality', 'safety', 'performance', 'reliability']
 /**
  * 调试评估指标页面组件
  */
-export function DebugEvaluationMetricsPage() {
+export function DebugEvaluationMetricsPage({ embedded }: { embedded?: boolean } = {}) {
   const [metrics, setMetrics] = useState<EvaluationMetric[]>([])
   const [total, setTotal] = useState(0)
   const [isLoading, setIsLoading] = useState(true)
@@ -59,6 +59,7 @@ export function DebugEvaluationMetricsPage() {
     <PageShell
       title="评估指标"
       backHref="/debug"
+      embedded={embedded}
       actions={<span className="text-muted-foreground text-xs">共 {total} 个指标</span>}
     >
       {/* 分类过滤 */}
