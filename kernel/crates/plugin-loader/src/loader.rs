@@ -250,6 +250,11 @@ impl PluginLoaderImpl {
         // ── P2-2 插件准入校验（白名单 + SHA256）──
         self.validate_allowlist(manifest, source_path)?;
 
+        // ── GAP-4：env target 声明闭环——mcp 端点的 ${VAR} 引用（无默认值
+        // 语法）必须被 config_files[target=env].fields 覆盖，漂移启动期暴露
+        // （新插件带 key 接入只改 manifest，内核/前端零改动的对称代价）──
+        validate_env_field_coverage(manifest)?;
+
         info!(
             "Manifest validated: id={} type={:?} host={:?} path={}",
             manifest.id,
@@ -743,6 +748,61 @@ impl PluginLoaderImpl {
 
         Ok(())
     }
+}
+
+/// GAP-4 校验闭环：manifest 里 mcp.endpoint 的 `${VAR}` 引用（无 `:-` 默认值）
+/// 必须被某个 `target: "env"` 的 config_files 条目的 fields 覆盖。
+///
+/// 覆盖了才能在设置页配置——否则 key 无入口，connect 硬失败且用户无处可填
+/// （e2e 缺口 GAP-4 的病根）。`${VAR:-def}` 带默认值的引用豁免（可选凭据）。
+fn validate_env_field_coverage(manifest: &PluginManifest) -> Result<(), LoaderError> {
+    let Some(mcp) = manifest.mcp.as_ref() else {
+        return Ok(());
+    };
+    let Some(endpoint) = mcp.endpoint.as_ref() else {
+        return Ok(());
+    };
+    // 收集全部 ${VAR} 引用（auth.value + env 值），排除 ${VAR:-def} 默认值语法
+    let mut refs: Vec<String> = Vec::new();
+    let mut collect = |value: &str| {
+        let mut rest = value;
+        while let Some(start) = rest.find("${") {
+            let after = &rest[start + 2..];
+            let Some(end) = after.find('}') else { break };
+            let var = &after[..end];
+            let has_default = var.starts_with(':') || var.contains(":-");
+            if !var.is_empty() && !has_default && !refs.iter().any(|r| r == var) {
+                refs.push(var.to_string());
+            }
+            rest = &after[end..];
+        }
+    };
+    if let Some(auth) = endpoint.auth.as_ref() {
+        collect(&auth.value);
+    }
+    for v in endpoint.env.values() {
+        collect(v);
+    }
+    if refs.is_empty() {
+        return Ok(());
+    }
+    let declared: std::collections::HashSet<&str> = manifest
+        .config_files
+        .iter()
+        .filter(|f| f.target.as_deref() == Some("env"))
+        .flat_map(|f| f.fields.iter().map(|fd| fd.name.as_str()))
+        .collect();
+    let missing: Vec<&String> = refs.iter().filter(|r| !declared.contains(r.as_str())).collect();
+    if missing.is_empty() {
+        return Ok(());
+    }
+    Err(LoaderError::ManifestValidation {
+        plugin_id: manifest.id.clone(),
+        reason: format!(
+            "mcp endpoint references undeclared env vars {:?}: declare them in a              config_files[target=\"env\"] fields entry so the settings page can manage them",
+            missing
+        ),
+    })
 }
 
 #[cfg(test)]
@@ -1679,4 +1739,62 @@ mod tests {
         // tool 和 system 都不要求 invoke_entry，discover 成功
         assert_eq!(manifests.len(), 2);
     }
+
+    // ── GAP-4：env target 声明闭环 ──────────────────────────────
+
+    fn env_coverage_manifest_json(declare: bool) -> String {
+        let files = if declare {
+            r#""config_files": [{
+                "id": "api_keys", "label": "Keys", "path": ".env", "target": "env",
+                "fields": [{"name": "SMITHERY_API_KEY", "label": "Smithery", "type": "secret", "required": true}]
+            }],"#
+        } else {
+            ""
+        };
+        format!(
+            r#"{{"id": "cov_plugin", "name": "Cov", "version": "1.0.0",
+            "plugin_type": "tool", "language": "external", "host_type": "sidecar", "entry": "mcp:external", "capabilities": {{}}, "dependencies": [], "permissions": {{}}, "error_policy": "skip", "priority": 30,
+            {files}
+            "mcp": {{
+                "transport": "streamable_http",
+                "endpoint": {{
+                    "url": "https://example.com/mcp",
+                    "auth": {{"type": "api_key", "header_name": "Authorization", "value": "{value}"}}
+                }}
+            }}}}"#,
+            files = files,
+            value = "${SMITHERY_API_KEY}"
+        )
+    }
+
+    #[test]
+    fn test_env_coverage_rejects_undeclared_var() {
+        let loader = PluginLoaderImpl::new("/tmp/nonexistent", None);
+        let manifest: PluginManifest =
+            serde_json::from_str(&env_coverage_manifest_json(false)).unwrap();
+        let err = loader.validate_manifest(&manifest);
+        assert!(err.is_err(), "未声明的 env var 引用应被拒：{err:?}");
+    }
+
+    #[test]
+    fn test_env_coverage_accepts_declared_var() {
+        let loader = PluginLoaderImpl::new("/tmp/nonexistent", None);
+        let manifest: PluginManifest =
+            serde_json::from_str(&env_coverage_manifest_json(true)).unwrap();
+        let r = loader.validate_manifest(&manifest);
+        assert!(r.is_ok(), "声明覆盖应通过：{r:?}");
+    }
+
+    #[test]
+    fn test_env_coverage_default_syntax_exempt() {
+        // ${VAR:-def} 带默认值（可选凭据）豁免声明要求
+        let loader = PluginLoaderImpl::new("/tmp/nonexistent", None);
+        let json = env_coverage_manifest_json(false).replace(
+            "${SMITHERY_API_KEY}",
+            "${OPTIONAL_KEY:-}",
+        );
+        let manifest: PluginManifest = serde_json::from_str(&json).unwrap();
+        assert!(loader.validate_manifest(&manifest).is_ok());
+    }
+
 }

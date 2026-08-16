@@ -120,6 +120,11 @@ fn parse_env_text(text: &str) -> HashMap<String, String> {
     vars
 }
 
+/// 解析 .env 文本为键值映射（读侧公开入口，GAP-4 路由层掩码视图用）。
+pub fn parse_env_text_for_read(text: &str) -> HashMap<String, String> {
+    parse_env_text(text)
+}
+
 /// 计算 sidecar 子进程的环境增量叠加。
 ///
 /// 返回 (key, value) 列表，直接经 `Command::env` 注入子进程：

@@ -1157,6 +1157,27 @@ fn find_config_mapping<'a>(
     manifest.config_files.iter().find(|f| f.id == file_id)
 }
 
+/// env target 条目的掩码视图：{字段名: "***"(已设置) | ""(未设置)}（GAP-4）。
+///
+/// 读取语义与内核侧解析一致：进程环境优先，缺失回退 .env（用户可能经系统
+/// 环境变量注入而非设置页——掩码视图如实反映"内核能否解析到"）。
+fn masked_env_fields(
+    mapping: &ConfigFileMapping,
+    env_path: &std::path::Path,
+) -> serde_json::Value {
+    let text = std::fs::read_to_string(env_path).unwrap_or_default();
+    let from_file = agentos_mcp::env_file::parse_env_text_for_read(&text);
+    let mut out = serde_json::Map::new();
+    for f in &mapping.fields {
+        let set = std::env::var(&f.name).ok().is_some() || from_file.contains_key(&f.name);
+        out.insert(
+            f.name.clone(),
+            serde_json::Value::String(if set { "***".to_string() } else { String::new() }),
+        );
+    }
+    serde_json::Value::Object(out)
+}
+
 /// GET /api/v1/plugins/{id}/config/{file_id}（ADR §4.3）。
 ///
 /// 流程：查 manifest → 查 config_files[file_id] → B1 path 校验 → 读文件 →
@@ -1177,6 +1198,24 @@ pub async fn get_plugin_config_handler(
     let mapping = find_config_mapping(manifest, &file_id).ok_or_else(|| ApiError::NotFound {
         message: format!("config file_id not found: {file_id}"),
     })?;
+
+    // ── env target 分支（GAP-4：key/加密字段写 .env）──
+    // GET 语义：data = {字段名: "***"(已设置) | ""(未设置)}——*** 哨兵即
+    // has_key 语义，前端按掩码渲染密码框；ETag 由该掩码视图派生（B4 乐观锁
+    // 对同一视图生效）。
+    if mapping.target.as_deref() == Some("env") {
+        let env_path = agentos_mcp::env_file::env_path_for_root(&project_root);
+        let data = masked_env_fields(mapping, &env_path);
+        let etag = compute_etag(serde_json::to_string(&data).unwrap_or_default().as_bytes());
+        return Ok(axum::Json(PluginConfigResponse {
+            plugin_id,
+            file_id,
+            label: mapping.label.clone(),
+            path: ".env".to_string(),
+            data,
+            etag,
+        }));
+    }
 
     let resolved = validate_config_path(&project_root, &mapping.path).map_err(config_err_to_api)?;
     let raw = std::fs::read_to_string(&resolved).map_err(|_| ApiError::NotFound {
@@ -1221,6 +1260,61 @@ pub async fn put_plugin_config_handler(
     let mapping = find_config_mapping(manifest, &file_id).ok_or_else(|| ApiError::NotFound {
         message: format!("config file_id not found: {file_id}"),
     })?;
+
+    // ── env target 分支（GAP-4）：*** 哨兵跳过、空值清除、新值写入 .env ──
+    // 生效语义：写入即生效（stdio spawn overlay + HTTP resolve_env_placeholders
+    // 均回读 .env，配合 invoker 的 .env mtime 指纹触发客户端重建）。
+    if mapping.target.as_deref() == Some("env") {
+        let env_path = agentos_mcp::env_file::env_path_for_root(&project_root);
+        let current = masked_env_fields(mapping, &env_path);
+        let current_etag =
+            compute_etag(serde_json::to_string(&current).unwrap_or_default().as_bytes());
+        match req.if_match.as_deref() {
+            Some(given) if given == current_etag => {}
+            _ => {
+                return Err(ApiError::Conflict {
+                    message: format!(
+                        "ETag mismatch: current={current_etag}, given={:?}",
+                        req.if_match
+                    ),
+                });
+            }
+        }
+        let declared: std::collections::HashSet<&str> = mapping
+            .fields
+            .iter()
+            .map(|f| f.name.as_str())
+            .collect();
+        let mut updates: Vec<(String, String)> = Vec::new();
+        if let Some(obj) = req.data.as_object() {
+            for (name, value) in obj {
+                if !declared.contains(name.as_str()) {
+                    return Err(ApiError::BadRequest {
+                        message: format!("undeclared env field: {name}"),
+                    });
+                }
+                let v = value.as_str().unwrap_or("");
+                if v == "***" {
+                    continue; // 哨兵：保留现值
+                }
+                updates.push((name.clone(), v.to_string()));
+            }
+        }
+        agentos_mcp::env_file::write_env_updates(&env_path, &updates).map_err(|e| {
+            ApiError::Internal {
+                message: format!("write .env: {e}"),
+            }
+        })?;
+        let data = masked_env_fields(mapping, &env_path);
+        let new_etag =
+            compute_etag(serde_json::to_string(&data).unwrap_or_default().as_bytes());
+        return Ok(axum::Json(json!({
+            "ok": true,
+            "plugin_id": plugin_id,
+            "file_id": file_id,
+            "etag": new_etag,
+        })));
+    }
 
     let resolved = validate_config_path(&project_root, &mapping.path).map_err(config_err_to_api)?;
 
