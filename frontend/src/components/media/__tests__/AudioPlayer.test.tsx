@@ -115,14 +115,13 @@ describe('AudioPlayer', () => {
     URL.revokeObjectURL = revokeObjectURLSpy
 
     // Mock createElement to track download link
-    const mockAnchor = {
-      href: '',
-      download: '',
-      click: vi.fn(),
-    }
+    // 现行实现会把 <a> appendChild 到 body 再 click（Firefox 下载必需），
+    // 必须用真实 anchor 元素（普通对象会被 jsdom 的 appendChild 拒绝）
     const originalCreateElement = document.createElement.bind(document)
+    const realAnchor = originalCreateElement('a')
+    const clickSpy = vi.spyOn(realAnchor, 'click').mockImplementation(() => {})
     vi.spyOn(document, 'createElement').mockImplementation((tag: string) => {
-      if (tag === 'a') return mockAnchor as unknown as HTMLAnchorElement
+      if (tag === 'a') return realAnchor
       return originalCreateElement(tag)
     })
 
@@ -131,7 +130,10 @@ describe('AudioPlayer', () => {
     const downloadButton = screen.getByRole('button', { name: /下载/i })
     fireEvent.click(downloadButton)
 
-    expect(mockAnchor.click).toHaveBeenCalled()
+    expect(clickSpy).toHaveBeenCalled()
+    // 下载属性正确设置
+    expect(realAnchor.href).toBe('https://example.com/audio.mp3')
+    expect(realAnchor.download).toBe('test-audio')
 
     // 恢复
     URL.createObjectURL = originalCreateURL

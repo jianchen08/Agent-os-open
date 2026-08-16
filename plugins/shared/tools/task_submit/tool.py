@@ -46,6 +46,33 @@ def _get_service_provider() -> Any:
     """获取 0.2 服务提供者 shim（sidecar 模式下的服务解析入口）。"""
     return _ServiceProviderShim()
 
+# ── GAP-1：chat.send_message 派发器（server.py on_load 注入）──
+#
+# 任务执行驱动：提交成功后经内核 chat capability 的 send_message（create 分支，
+# 引擎生成 pipeline_id）创建任务执行管道——state 出生即带 task.* 字段、lineage
+# 有父/根二选一、execution_context 透传。sidecar 进程内模块级注入（能力句柄
+# 懒解析在协程内完成）；未注入（capability 缺席/测试）时提交仍落库但话术诚实
+# （不声称"异步执行中"），结果携带 warning。
+_chat_sender: Any = None
+
+
+def set_chat_sender(sender: Any) -> None:
+    """注入 chat.send_message 派发器（server.py on_load 调用）。
+
+    约定签名：``async sender(params: dict) -> dict``，params 即
+    chat.send_message 的入参（create/message/user_id/state/lineage/
+    execution_context/background）；成功返回含 ``pipeline_id`` 的响应，
+    失败抛异常（由调用方记录并降级为 warning 话术）。
+    """
+    global _chat_sender  # noqa: PLW0603
+    _chat_sender = sender
+    logger.info("[TaskSubmit] chat.send_message 派发器已注入")
+
+
+def _get_chat_sender() -> Any:
+    """获取 chat.send_message 派发器（None = 未注入，测试可 monkeypatch）。"""
+    return _chat_sender
+
 
 # ── 危险目标空间目录列表 ──
 # 这些目录是操作系统关键目录，绝不允许作为任务的目标工作空间。
@@ -1283,18 +1310,52 @@ class TaskSubmitTool(BuiltinTool):
         # src/channels/websocket/ws_interaction_notifier（task_11 P2-7）。
         # 待 SDK 实现后改用 ctx.frontend.emit(event="task_status_update", scope=...) 恢复。
 
+        # ── 8. GAP-1：任务执行驱动——经 chat.send_message 创建执行管道 ──
+        # run 未真正派发前不得声称"异步执行中"（e2e 缺口 GAP-1 的话术修正）：
+        # 派发成功 → 绑定关联 + start_task（started_at 非空）+ 如实报告管道 id；
+        # 派发器缺席/失败 → warning 话术（任务保留，可经 task_manage 重试）。
+        dispatch = await self._dispatch_task_pipeline(
+            task,
+            inputs,
+            description=task_data.get("description", ""),
+            acceptance_criteria=acceptance_criteria,
+            dependencies=dependencies,
+            task_service=task_service,
+        )
+        if dispatch.get("pipeline_id"):
+            try:
+                await task_service.bind_pipeline_run(task.id, dispatch["pipeline_id"])
+                await task_service.start_task(task.id)
+            except Exception as assoc_exc:
+                logger.error(
+                    "[TaskSubmit] 任务↔管道关联/启动回写失败 | task_id=%s | pipeline_id=%s | err=%s",
+                    task.id,
+                    dispatch["pipeline_id"],
+                    assoc_exc,
+                )
+                dispatch["warning"] = f"执行管道已创建，但任务状态回写失败：{assoc_exc}"
+
         result_data: dict[str, Any] = {
             "task_id": task.id,
             "title": task.title,
             "status": task.status.value,
             "target_id": target_id,
-            "message": (
-                f"任务 [{task.title}]（ID: {task.id}）已提交，目标执行者：{target_id}，状态：异步执行中。"
-                "该任务需要一定时间完成。"
+        }
+        if dispatch.get("pipeline_id"):
+            result_data["pipeline_id"] = dispatch["pipeline_id"]
+            result_data["message"] = (
+                f"任务 [{task.title}]（ID: {task.id}）已提交，执行管道已创建"
+                f"（pipeline {dispatch['pipeline_id']}），任务正在后台执行。"
                 "子任务完成后系统会自动通知你并恢复执行。"
                 "在此期间请不要再调用任何工具（包括 task_manage），直接输出纯文本等待即可。"
-            ),
-        }
+            )
+        else:
+            result_data["message"] = (
+                f"任务 [{task.title}]（ID: {task.id}）已提交并落库，但执行管道未能创建"
+                f"（{dispatch.get('warning', '未知原因')}）。"
+                "任务当前不会自动执行；可稍后重试提交或调用 task_manage 处理。"
+            )
+            result_data["warning"] = dispatch.get("warning", "执行管道未创建")
 
         # 工作空间路径仅对 L1 返回（L2/L3 的 workspace 参数本身被隐藏，回显内部路径属信息泄漏）
         if parent_agent_level == 1:
@@ -1308,6 +1369,100 @@ class TaskSubmitTool(BuiltinTool):
                 "task_scope": task_scope,
             },
         )
+
+    async def _dispatch_task_pipeline(  # noqa: PLR0913
+        self,
+        task: Any,
+        inputs: dict[str, Any],
+        description: str,
+        acceptance_criteria: dict[str, Any],
+        dependencies: list[str],
+        task_service: Any,
+    ) -> dict[str, Any]:
+        """GAP-1：经 chat.send_message 创建任务执行管道（引擎生成 id）。
+
+        契约（与内核 chat_send_handler 创建分支对齐）：
+        - ``create: true`` + 不传 pipeline_id——引擎生成并在响应返回（三次定案：
+          堵 id 冒占），拿返回 id 写任务↔管道关联由调用方完成；
+        - ``state``：任务域字段出生即入（task.id/goal/status/description/
+          acceptance_criteria/dependencies——扁平点号键，STATE_SUMMARY_KEYS 出口）；
+        - ``lineage``：有父形式（parent = 调用方管道，origin_session 同管道——
+          主会话 thread_id 与 pipeline_id 同值）/ 根形式（无调用方管道时诚实声明
+          plugin 来源，不伪造默认父）二选一；
+        - ``execution_context``：workspace/isolation/parent_task_id（task.metadata
+          已组装，供 init 体 workspace_lifecycle 消费）；
+        - ``background: true``：不阻塞工具调用等待任务完成（派发即返回 id）。
+
+        Returns:
+            ``{"pipeline_id": ...}`` 派发成功；``{"warning": ...}`` 派发器缺席/失败
+            （任务已创建，由调用方决定话术）。
+        """
+        sender = _get_chat_sender()
+        if sender is None:
+            return {
+                "warning": "chat capability 未注入（sidecar 未接线），任务未派发执行"
+            }
+
+        parent_pipeline_id = inputs.get("pipeline_id") or ""
+        if parent_pipeline_id:
+            lineage: dict[str, Any] = {
+                "parent_pipeline_id": parent_pipeline_id,
+                "origin_session_id": parent_pipeline_id,
+            }
+        else:
+            lineage = {
+                "root": True,
+                "origin": {"kind": "plugin", "source": "task_submit"},
+            }
+
+        kickoff = f"执行任务「{task.title}」（任务 ID: {task.id}）。"
+        if description:
+            kickoff += f"\n任务描述：{description}"
+        if acceptance_criteria:
+            kickoff += f"\n验收标准：{acceptance_criteria}"
+
+        params: dict[str, Any] = {
+            "create": True,
+            "message": kickoff,
+            "user_id": inputs.get("user_id") or "task_system",
+            "state": {
+                "task.id": task.id,
+                "task.goal": task.title,
+                "task.status": "pending",
+                "task.description": description or "",
+                "task.acceptance_criteria": acceptance_criteria or {},
+                "task.dependencies": dependencies or [],
+                "task.submitted_by": inputs.get("user_id", ""),
+            },
+            "lineage": lineage,
+            "background": True,
+        }
+        execution_context = (task.metadata or {}).get("execution_context")
+        if execution_context:
+            params["execution_context"] = execution_context
+
+        try:
+            resp = await sender(params)
+        except Exception as exc:
+            logger.error(
+                "[TaskSubmit] 任务管道派发失败 | task_id=%s | err=%s",
+                task.id,
+                exc,
+                exc_info=True,
+            )
+            return {"warning": f"chat.send_message 派发失败：{exc}"}
+
+        pipeline_id = ""
+        if isinstance(resp, dict):
+            pipeline_id = str(resp.get("pipeline_id") or "")
+        if not pipeline_id:
+            return {"warning": f"派发响应缺少 pipeline_id：{resp!r}"}
+        logger.info(
+            "[TaskSubmit] 任务执行管道已创建 | task_id=%s | pipeline_id=%s",
+            task.id,
+            pipeline_id,
+        )
+        return {"pipeline_id": pipeline_id}
 
     async def _execute_long_term(self, inputs: dict[str, Any]) -> ToolExecutionResult:  # noqa: PLR0912,PLR0915
         """处理容器任务提交。"""

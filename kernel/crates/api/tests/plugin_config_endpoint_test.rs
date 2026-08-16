@@ -85,6 +85,8 @@ async fn test_get_plugin_config_returns_file_content_with_etag() {
             id: "llm".to_string(),
             path: "config/models/llm.yaml".to_string(),
             label: "LLM".to_string(),
+            target: None,
+            fields: vec![],
         }],
     );
 
@@ -139,6 +141,8 @@ async fn test_get_plugin_config_masks_plaintext_secret() {
             id: "godot".to_string(),
             path: "config/external_tools/godot.yaml".to_string(),
             label: "Godot".to_string(),
+            target: None,
+            fields: vec![],
         }],
     );
 
@@ -184,6 +188,8 @@ async fn test_put_plugin_config_preserves_env_placeholder_via_sentinel() {
             id: "llm".to_string(),
             path: "config/models/llm.yaml".to_string(),
             label: "LLM".to_string(),
+            target: None,
+            fields: vec![],
         }],
     );
 
@@ -257,6 +263,8 @@ async fn test_put_plugin_config_without_if_match_returns_409() {
             id: "llm".to_string(),
             path: "config/models/llm.yaml".to_string(),
             label: "LLM".to_string(),
+            target: None,
+            fields: vec![],
         }],
     );
 
@@ -297,6 +305,8 @@ async fn test_get_plugin_config_unknown_file_id_returns_404() {
             id: "llm".to_string(),
             path: "config/models/llm.yaml".to_string(),
             label: "LLM".to_string(),
+            target: None,
+            fields: vec![],
         }],
     );
 

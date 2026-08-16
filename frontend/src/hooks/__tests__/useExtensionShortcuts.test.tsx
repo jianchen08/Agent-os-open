@@ -32,10 +32,11 @@ describe('useExtensionShortcuts — 全局快捷键监听', () => {
   })
 
   it('挂载后注册 keydown 监听；命中快捷键触发 command', () => {
+    // 现行契约：schema 顶层为 plugin_contributes（plugin_id + contributes）
     contrib.loadFromSchema({
-      modules: [
+      plugin_contributes: [
         {
-          module_id: 'e',
+          plugin_id: 'e',
           contributes: { shortcuts: [{ command: 'e.save', key: 'Ctrl+S', when: 'workspace.focus' }] },
         },
       ],
@@ -59,8 +60,8 @@ describe('useExtensionShortcuts — 全局快捷键监听', () => {
 
   it('输入框聚焦时不触发（避免编辑时拦截）', () => {
     contrib.loadFromSchema({
-      modules: [
-        { module_id: 'e', contributes: { shortcuts: [{ command: 'e.save', key: 'Ctrl+S' }] } },
+      plugin_contributes: [
+        { plugin_id: 'e', contributes: { shortcuts: [{ command: 'e.save', key: 'Ctrl+S' }] } },
       ],
     } as never)
     shortcuts.refresh()
@@ -84,8 +85,8 @@ describe('useExtensionShortcuts — 全局快捷键监听', () => {
 
   it('无 when 的快捷键恒触发', () => {
     contrib.loadFromSchema({
-      modules: [
-        { module_id: 'e', contributes: { shortcuts: [{ command: 'e.help', key: 'F1' }] } },
+      plugin_contributes: [
+        { plugin_id: 'e', contributes: { shortcuts: [{ command: 'e.help', key: 'F1' }] } },
       ],
     } as never)
     shortcuts.refresh()
@@ -100,8 +101,8 @@ describe('useExtensionShortcuts — 全局快捷键监听', () => {
 
   it('卸载时移除监听', () => {
     contrib.loadFromSchema({
-      modules: [
-        { module_id: 'e', contributes: { shortcuts: [{ command: 'e.help', key: 'F1' }] } },
+      plugin_contributes: [
+        { plugin_id: 'e', contributes: { shortcuts: [{ command: 'e.help', key: 'F1' }] } },
       ],
     } as never)
     shortcuts.refresh()

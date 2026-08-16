@@ -594,8 +594,19 @@ export async function getMessages(
 
     const response = await apiClient.get<any>(API_ENDPOINTS.MESSAGES.LIST(sessionId), { params })
 
-    // 后端 MessageListResponse 始终是对象格式 {messages, total, has_more}
-    const rawMessages = response.data.messages || []
+    // 后端 MessageListResponse 始终是对象格式 {messages, total, has_more}。
+    // 防御传输层异常（拦截器返回 undefined / 204 无 body 等）：早退抛明确错误，
+    // 避免直接读 response.data.messages 时抛出难排查的
+    // 「Cannot read properties of undefined (reading 'data')」。
+    // 不能静默降级为空列表：initFromAPI 是全量替换，空列表会误清空已渲染消息。
+    const payload = response?.data
+    if (!payload || typeof payload !== 'object') {
+      throw new Error(
+        `获取消息列表失败：响应缺少数据体 (session=${sessionId}, status=${response?.status ?? 'unknown'})`,
+      )
+    }
+
+    const rawMessages = payload.messages || []
     const mapped = rawMessages.map((msg: BackendMessageResponse) =>
       mapBackendMessageToMessage(msg, sessionId),
     )
@@ -605,8 +616,8 @@ export async function getMessages(
     // 合并移到渲染层，数据层保持原始消息、sequence 连续。
     return {
       messages: mapped,
-      total: response.data.total ?? rawMessages.length,
-      has_more: response.data.has_more ?? false,
+      total: payload.total ?? rawMessages.length,
+      has_more: payload.has_more ?? false,
     }
   }, options)
 }

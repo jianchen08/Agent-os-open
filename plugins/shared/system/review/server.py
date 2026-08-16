@@ -186,6 +186,71 @@ async def trigger_review(
     artifacts = artifacts or []
     metrics = metrics or {}
 
+    # ── GAP-1：深度复盘经 chat.send_message 起 review_agent 管道 ──
+    # 不再"启动即 completed（乐观，空 lessons）"：派发成功 → 报告 running，
+    # get_report 轮询复盘管道状态（pipeline-state 聚合）真实完成才落 completed。
+    # chat capability 缺席 / 派发失败 → local_degrade 兜底（保留既有降级语义）。
+    try:
+        chat = plugin.get_capability("chat")
+    except KeyError:
+        chat = None
+    if chat is not None:
+        params = {
+            "create": True,
+            "background": True,
+            "message": (
+                f"对任务 {task_id} 进行深度复盘。" + "\n" + f"任务摘要：{summary}"
+                + ("\n" + "产物：" + ", ".join(artifacts) if artifacts else "")
+                + ("\n" + f"指标：{json.dumps(metrics, ensure_ascii=False)}" if metrics else "")
+                + "\n" + "请产出结构化复盘报告（总结 / 教训 lessons / 建议 recommendations）。"
+            ),
+            "user_id": "review_system",
+            "state": {
+                "task.id": task_id,
+                "review.id": review_id,
+                "review.summary": summary,
+                "review.artifacts": artifacts,
+                "review.metrics": metrics,
+            },
+            # 血缘：根形式（系统组件，诚实声明复盘来源——不伪造父/默认 session）
+            "lineage": {"root": True, "origin": {"kind": "plugin", "source": "review"}},
+        }
+        try:
+            resp = await chat.call("send_message", params)
+            pipeline_id = (
+                str(resp.get("pipeline_id") or "") if isinstance(resp, dict) else ""
+            )
+        except Exception as exc:  # noqa: BLE001 — 派发失败降级，不崩复盘入口
+            logger.error(
+                "[Review] 复盘管道派发失败 review_id=%s: %s", review_id, exc
+            )
+            pipeline_id = ""
+        if pipeline_id:
+            _reports[review_id] = {
+                "review_id": review_id,
+                "task_id": task_id,
+                "summary": summary,
+                "artifacts": artifacts,
+                "metrics": metrics,
+                "lessons": [],
+                "recommendations": [],
+                "status": "running",
+                "mode": "pipeline",
+                "pipeline_id": pipeline_id,
+                "created_at": time.time(),
+            }
+            logger.info(
+                "[Review] 复盘管道已创建 review_id=%s pipeline_id=%s",
+                review_id,
+                pipeline_id,
+            )
+            return {
+                "review_id": review_id,
+                "status": "running",
+                "mode": "pipeline",
+                "pipeline_id": pipeline_id,
+            }
+
     report = _local_degrade_report(review_id, task_id, summary, artifacts, metrics)
     _reports[review_id] = report
     return {
@@ -218,10 +283,58 @@ async def get_report(review_id: str) -> dict[str, Any]:
     report = _reports.get(review_id)
     if report is None:
         return {"error": "review not found", "review_id": review_id}
-    # 子管道进行中：查询内核 run 状态，真实完成才落 completed（F-REVIEW-2）
+    # 子管道进行中：先轮询复盘管道状态（GAP-1 chat.send_message 路径），
+    # 再回退既有 run_id 轮询（F-REVIEW-2 路径）。真实完成才落 completed。
     if report.get("status") == "running":
-        await _maybe_finalize_on_run_completion(report)
+        if report.get("pipeline_id"):
+            await _maybe_finalize_on_pipeline_completion(report)
+        else:
+            await _maybe_finalize_on_run_completion(report)
     return report
+
+
+async def _maybe_finalize_on_pipeline_completion(report: dict[str, Any]) -> None:
+    """按复盘管道 state 聚合行终结报告状态（GAP-1 派发路径的轮询）。
+
+    - 行 status=completed → 报告 completed（mode=pipeline，内容取 raw_result）
+    - 行 status=failed → 报告 failed（诚实状态，不伪造完成）
+    - running/查询失败/行缺失 → 保持 running（可重复轮询，不崩）
+    """
+    pipeline_id = report.get("pipeline_id") or ""
+    try:
+        handle = plugin.get_capability("pipeline-state")
+        rows = await handle.call("list", {})
+    except Exception as exc:  # noqa: BLE001 — 轮询失败保持现状
+        logger.warning(
+            "[Review] 复盘管道状态轮询失败 pipeline_id=%s: %s", pipeline_id, exc
+        )
+        return
+    row = next(
+        (r for r in rows if isinstance(r, dict) and r.get("pipeline_id") == pipeline_id),
+        None,
+    )
+    if row is None:
+        return
+    status = row.get("status")
+    if status == "completed":
+        report["status"] = "completed"
+        report["mode"] = "pipeline"
+        raw = row.get("raw_result")
+        if isinstance(raw, str) and raw.strip():
+            report["summary"] = raw
+            report["lessons"] = [raw.strip()]
+        logger.info(
+            "[Review] 复盘管道完成 review_id=%s pipeline_id=%s",
+            report.get("review_id"),
+            pipeline_id,
+        )
+    elif status == "failed":
+        report["status"] = "failed"
+        logger.warning(
+            "[Review] 复盘管道失败 review_id=%s pipeline_id=%s",
+            report.get("review_id"),
+            pipeline_id,
+        )
 
 
 async def _query_run_status(run_id: str) -> str | None:

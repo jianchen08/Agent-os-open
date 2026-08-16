@@ -1,18 +1,22 @@
 /**
  * MediaTimelineView 媒体时间轴 - 单元测试
  *
- * 测试覆盖：
- * - 基础渲染（播放器、时间轴、控制按钮）
+ * 测试覆盖（对齐现行组件契约）：
+ * - 基础渲染（播放器、时间轴、单一播放/暂停按钮）
  * - 时间显示格式化
- * - 已有标注渲染（标记点、标注列表）
- * - 只读模式（无添加输入框）
+ * - 已有标注渲染（标记点、标注列表，索引序号 testid）
+ * - 只读模式（无添加输入框、无删除按钮）
  * - 空标注列表
- * - 标注类型过滤（只显示 video_timestamp）
- * - 删除标注按钮
+ * - 标注类型过滤（只显示 video_timestamp 且 timestamp 非空）
+ * - 进度显示
+ *
+ * 已删用例说明：onRemoveAnnotation prop 及删除按钮已从组件移除
+ * （删除交互已不在 MediaTimelineView 内实现），相关「显示删除按钮/
+ * 点击删除回调」用例随之删除。
  */
 
-import { render, screen, fireEvent } from '@testing-library/react'
-import { describe, it, expect, vi } from 'vitest'
+import { render, screen } from '@testing-library/react'
+import { describe, it, expect } from 'vitest'
 import { MediaTimelineView } from '../MediaTimelineView'
 import type { Annotation } from '@/types/review'
 
@@ -34,36 +38,50 @@ describe('MediaTimelineView', () => {
       render(
         <MediaTimelineView
           mediaUrl="https://example.com/video.mp4"
+          mediaType="video"
           annotations={[]}
         />,
       )
 
-      expect(screen.getByTestId('media-player')).toBeInTheDocument()
+      expect(screen.getByTestId('video-player')).toBeInTheDocument()
     })
 
     it('应将 mediaUrl 设置为 video src', () => {
       render(
         <MediaTimelineView
           mediaUrl="https://example.com/movie.mp4"
+          mediaType="video"
           annotations={[]}
         />,
       )
 
-      const video = screen.getByTestId('media-player') as HTMLVideoElement
+      const video = screen.getByTestId('video-player') as HTMLVideoElement
       expect(video).toHaveAttribute('src', 'https://example.com/movie.mp4')
     })
 
-    it('应渲染播放控制按钮', () => {
+    it('应渲染音频播放器（mediaType=audio）', () => {
       render(
         <MediaTimelineView
-          mediaUrl="test.mp4"
+          mediaUrl="https://example.com/audio.mp3"
+          mediaType="audio"
           annotations={[]}
         />,
       )
 
-      expect(screen.getByTestId('toggle-play')).toBeInTheDocument()
-      expect(screen.getByTestId('skip-back')).toBeInTheDocument()
-      expect(screen.getByTestId('skip-forward')).toBeInTheDocument()
+      expect(screen.getByTestId('audio-player')).toBeInTheDocument()
+    })
+
+    it('应渲染播放/暂停按钮（现行契约：单一播放控制按钮）', () => {
+      render(
+        <MediaTimelineView
+          mediaUrl="test.mp4"
+          mediaType="video"
+          annotations={[]}
+        />,
+      )
+
+      // 现行契约：仅保留单一播放/暂停按钮（快进/快退已移除）
+      expect(screen.getByTestId('play-pause-btn')).toBeInTheDocument()
     })
 
     it('应渲染时间轴条', () => {
@@ -148,12 +166,14 @@ describe('MediaTimelineView', () => {
       render(
         <MediaTimelineView
           mediaUrl="test.mp4"
+          mediaType="video"
           duration={60}
           annotations={annotations}
         />,
       )
 
-      expect(screen.getByTestId('annotation-marker-m1')).toBeInTheDocument()
+      // 现行契约：标记点 testid 按排序后的索引命名
+      expect(screen.getByTestId('timeline-marker-0')).toBeInTheDocument()
     })
 
     it('应在标注列表中显示标注', () => {
@@ -164,12 +184,14 @@ describe('MediaTimelineView', () => {
       render(
         <MediaTimelineView
           mediaUrl="test.mp4"
+          mediaType="video"
           duration={30}
           annotations={annotations}
         />,
       )
 
-      expect(screen.getByTestId('annotation-item-l1')).toBeInTheDocument()
+      // 现行契约：列表项 testid 按排序后的索引命名
+      expect(screen.getByTestId('annotation-item-0')).toBeInTheDocument()
       expect(screen.getByText('first annotation')).toBeInTheDocument()
     })
 
@@ -182,15 +204,18 @@ describe('MediaTimelineView', () => {
       render(
         <MediaTimelineView
           mediaUrl="test.mp4"
+          mediaType="video"
           duration={30}
           annotations={annotations}
         />,
       )
 
       const items = screen.getAllByTestId(/^annotation-item-/)
-      // early 应排在前面
-      expect(items[0]).toHaveAttribute('data-testid', 'annotation-item-early')
-      expect(items[1]).toHaveAttribute('data-testid', 'annotation-item-late')
+      // early 应排在前面（现行契约：索引 testid + 文本内容区分）
+      expect(items[0]).toHaveAttribute('data-testid', 'annotation-item-0')
+      expect(items[0]).toHaveTextContent('early')
+      expect(items[1]).toHaveAttribute('data-testid', 'annotation-item-1')
+      expect(items[1]).toHaveTextContent('late')
     })
 
     it('应显示标注编号', () => {
@@ -238,32 +263,15 @@ describe('MediaTimelineView', () => {
       render(
         <MediaTimelineView
           mediaUrl="test.mp4"
+          mediaType="video"
           duration={30}
           annotations={annotations}
           readOnly={true}
-          onRemoveAnnotation={vi.fn()}
         />,
       )
 
+      // 现行契约：组件已无删除交互，任何模式下都不出现删除按钮
       expect(screen.queryByTestId('remove-annotation-ro1')).not.toBeInTheDocument()
-    })
-
-    it('非只读 + 有 onRemoveAnnotation 时显示删除按钮', () => {
-      const annotations = [
-        makeTimestampAnnotation({ id: 'rm1' }),
-      ]
-
-      render(
-        <MediaTimelineView
-          mediaUrl="test.mp4"
-          duration={30}
-          annotations={annotations}
-          readOnly={false}
-          onRemoveAnnotation={vi.fn()}
-        />,
-      )
-
-      expect(screen.getByTestId('remove-annotation-rm1')).toBeInTheDocument()
     })
   })
 
@@ -307,13 +315,15 @@ describe('MediaTimelineView', () => {
       render(
         <MediaTimelineView
           mediaUrl="test.mp4"
+          mediaType="video"
           duration={30}
           annotations={annotations}
         />,
       )
 
-      expect(screen.getByTestId('annotation-item-vid1')).toBeInTheDocument()
-      expect(screen.queryByTestId('annotation-item-img1')).not.toBeInTheDocument()
+      // 现行契约：只有 video_timestamp 且 timestamp 非空的标注进入列表（索引 0）
+      expect(screen.getByTestId('annotation-item-0')).toBeInTheDocument()
+      expect(screen.queryByTestId('annotation-item-1')).not.toBeInTheDocument()
     })
 
     it('timestamp 为 null 的标注不应显示', () => {
@@ -338,41 +348,19 @@ describe('MediaTimelineView', () => {
     })
   })
 
-  describe('删除标注回调', () => {
-    it('点击删除按钮应调用 onRemoveAnnotation', () => {
-      const onRemove = vi.fn()
-      const annotations = [
-        makeTimestampAnnotation({ id: 'del1' }),
-      ]
-
-      render(
-        <MediaTimelineView
-          mediaUrl="test.mp4"
-          duration={30}
-          annotations={annotations}
-          onRemoveAnnotation={onRemove}
-        />,
-      )
-
-      const deleteBtn = screen.getByTestId('remove-annotation-del1')
-      fireEvent.click(deleteBtn)
-
-      expect(onRemove).toHaveBeenCalledWith('del1')
-    })
-  })
-
   describe('播放控制', () => {
-    it('应渲染播放/暂停按钮', () => {
+    it('应渲染播放/暂停按钮（初始为播放 ▶）', () => {
       render(
         <MediaTimelineView
           mediaUrl="test.mp4"
+          mediaType="video"
           annotations={[]}
         />,
       )
 
-      const toggleBtn = screen.getByTestId('toggle-play')
+      const toggleBtn = screen.getByTestId('play-pause-btn')
       expect(toggleBtn).toBeInTheDocument()
-      expect(toggleBtn).toHaveAttribute('title', '播放')
+      expect(toggleBtn).toHaveTextContent('▶')
     })
   })
 

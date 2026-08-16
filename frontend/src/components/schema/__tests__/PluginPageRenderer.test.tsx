@@ -12,7 +12,7 @@
  * - 独立路由整页渲染（容器 data-testid="plugin-page-root"）
  */
 
-import { render, screen } from '@testing-library/react'
+import { render, screen, act } from '@testing-library/react'
 import { MemoryRouter, Routes, Route } from 'react-router-dom'
 import React from 'react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
@@ -91,10 +91,28 @@ describe('PluginPageRenderer — /p/:pageId 独立路由渲染', () => {
     expect(screen.getByText('名称')).toBeInTheDocument()
   })
 
-  it('URL /p/non-existent → getPage 返回 undefined → 渲染 404 占位（不崩溃）', () => {
-    renderAt('/p/non-existent')
+  it('URL /p/non-existent → 先轮询 loading，超时（~5s）后渲染 404 占位（不崩溃）', () => {
+    // 现行契约：registry 未初始化（schema 异步未加载完）时先 loading 轮询
+    // （每 300ms、最多 16 次），超限后才渲染 404。用 fake timers 推进到超时。
+    vi.useFakeTimers()
+    try {
+      renderAt('/p/non-existent')
 
-    expect(screen.getByTestId('plugin-page-not-found')).toBeInTheDocument()
+      // 未初始化 → 先显示 loading
+      expect(screen.getByTestId('plugin-page-loading')).toBeInTheDocument()
+
+      // 逐步推进 16 次 × 300ms（≈5s 上限）→ 轮询超限 → 404
+      // （每次 setTick 触发 re-render 后才调度下一个 timer，需逐步 act 推进）
+      for (let i = 0; i < 16; i++) {
+        act(() => {
+          vi.advanceTimersByTime(300)
+        })
+      }
+
+      expect(screen.getByTestId('plugin-page-not-found')).toBeInTheDocument()
+    } finally {
+      vi.useRealTimers()
+    }
   })
 
   it('独立路由整页渲染：根容器 data-testid="plugin-page-root"', () => {

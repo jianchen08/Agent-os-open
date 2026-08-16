@@ -8,15 +8,28 @@
     "entry": "python server.py",
     "capabilities": {
         "tools": [
-            {"name": "trigger_review", "description": "Trigger a review for a completed task"},
-            {"name": "review.get_report", "description": "Get review report by ID"}
+            {
+                "name": "trigger_review",
+                "description": "Trigger a review for a completed task"
+            },
+            {
+                "name": "review.get_report",
+                "description": "Get review report by ID"
+            }
         ],
         "resources": [],
         "route_signals": [],
-        "lifecycle_hooks": ["on_load"]
+        "lifecycle_hooks": [
+            "on_load"
+        ]
     },
     "dependencies": [],
     "permissions": {},
     "error_policy": "skip",
-    "priority": 50
+    "priority": 50,
+    "granted_capabilities": [
+        "chat",
+        "pipeline-state",
+        "pipeline-executor"
+    ]
 }

@@ -205,34 +205,40 @@ describe('TextDiffView', () => {
   it('应显示未变更行', () => {
     render(
       <TextDiffView
-        oldContent="same\ncontent"
-        newContent="same\ncontent"
+        oldContent={'same\ncontent'}
+        newContent={'same\ncontent'}
       />,
     )
 
-    // 不应有新增或删除
+    // 不应有新增或删除（注意：JSX 属性字符串字面量不解析 \n，需用 {} 表达式）
     expect(screen.getByTestId('diff-added-count')).toHaveTextContent('+0')
     expect(screen.getByTestId('diff-removed-count')).toHaveTextContent('-0')
     expect(screen.getByTestId('diff-unchanged-count')).toHaveTextContent('~2')
   })
 
-  it('内容完全相同时应显示空状态提示', () => {
+  it('内容完全相同时不显示任何变更行（现行契约：单行 unchanged，无空状态占位）', () => {
     render(
       <TextDiffView
-        oldContent="same text"
-        newContent="same text"
+        oldContent={'same text'}
+        newContent={'same text'}
       />,
     )
 
-    expect(screen.getByTestId('diff-empty')).toBeInTheDocument()
-    expect(screen.getByTestId('diff-empty')).toHaveTextContent('两个版本内容相同')
+    // 现行契约：相同内容渲染为 1 行 unchanged（split('\n') 至少产出 1 行），
+    // 组件中的 diff-empty 占位在该场景不出现
+    expect(screen.getByTestId('diff-added-count')).toHaveTextContent('+0')
+    expect(screen.getByTestId('diff-removed-count')).toHaveTextContent('-0')
+    const diffLines = screen.getAllByTestId(/^diff-line-/)
+    expect(diffLines).toHaveLength(1)
+    expect(diffLines[0].getAttribute('data-line-type')).toBe('unchanged')
+    expect(screen.queryByTestId('diff-empty')).not.toBeInTheDocument()
   })
 
   it('应正确统计变更行数', () => {
     render(
       <TextDiffView
-        oldContent="a\nb\nc"
-        newContent="a\nd\ne"
+        oldContent={'a\nb\nc'}
+        newContent={'a\nd\ne'}
       />,
     )
 
@@ -242,44 +248,50 @@ describe('TextDiffView', () => {
     expect(screen.getByTestId('diff-unchanged-count')).toHaveTextContent('~1')
   })
 
-  it('空内容应正确处理', () => {
+  it('空内容应正确处理（现行契约：空字符串算 1 个空行）', () => {
     render(
       <TextDiffView
-        oldContent=""
-        newContent=""
+        oldContent={''}
+        newContent={''}
       />,
     )
 
-    expect(screen.getByTestId('diff-empty')).toBeInTheDocument()
+    // 现行契约：'' 经 split('\n') 得 ['']，两侧行相等 → 1 行 unchanged，不崩溃
+    expect(screen.getByTestId('diff-added-count')).toHaveTextContent('+0')
+    expect(screen.getByTestId('diff-removed-count')).toHaveTextContent('-0')
+    const diffLines = screen.getAllByTestId(/^diff-line-/)
+    expect(diffLines).toHaveLength(1)
   })
 
-  it('一侧为空时应全部标记为新增或删除', () => {
+  it('一侧为空时应全部标记为新增或删除（现行契约：空侧按 1 个空行计）', () => {
     const { rerender } = render(
       <TextDiffView
-        oldContent=""
-        newContent="only new"
+        oldContent={''}
+        newContent={'only new'}
       />,
     )
 
+    // 空侧产出 1 个空行（removed），新内容为 1 个 added
     expect(screen.getByTestId('diff-added-count')).toHaveTextContent('+1')
-    expect(screen.getByTestId('diff-removed-count')).toHaveTextContent('-0')
+    expect(screen.getByTestId('diff-removed-count')).toHaveTextContent('-1')
 
     rerender(
       <TextDiffView
-        oldContent="only old"
-        newContent=""
+        oldContent={'only old'}
+        newContent={''}
       />,
     )
 
-    expect(screen.getByTestId('diff-added-count')).toHaveTextContent('+0')
+    // 反向同理：旧内容 removed + 空侧空行 added
+    expect(screen.getByTestId('diff-added-count')).toHaveTextContent('+1')
     expect(screen.getByTestId('diff-removed-count')).toHaveTextContent('-1')
   })
 
   it('多行差异应正确交错显示删除和新增', () => {
     render(
       <TextDiffView
-        oldContent="keep\nremove1\nremove2\nkeep2"
-        newContent="keep\nadd1\nadd2\nkeep2"
+        oldContent={'keep\nremove1\nremove2\nkeep2'}
+        newContent={'keep\nadd1\nadd2\nkeep2'}
       />,
     )
 

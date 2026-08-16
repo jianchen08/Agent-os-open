@@ -236,27 +236,20 @@ class TestEvaluateEvent:
 
 
 class TestEvaluateCondition:
-    def test_condition_with_parser(self) -> None:
-        """注入伪 pipeline.condition_parser（0.2 未提供）→ 条件评估主路径。"""
-        fake_mod = types.ModuleType("pipeline.condition_parser")
-        fake_mod.parse_condition = lambda expr, ctx: ctx.get("ready") is True
-        sys.modules["pipeline.condition_parser"] = fake_mod
-        try:
-            mgr = TriggerManager()
-            cfg = _make_config(trigger_type=TriggerType.CONDITION, condition_expression="ready == true")
-            mgr.register(cfg)
-            assert mgr.evaluate_condition({"ready": True}) == ["t1"]
-            assert cfg.fire_count == 1
-            # 条件不满足 → 不触发
-            assert mgr.evaluate_condition({"ready": False}) == []
-        finally:
-            del sys.modules["pipeline.condition_parser"]
-
-    def test_condition_parser_missing_degrades(self) -> None:
-        """无 condition_parser（0.2 实际状态）→ 评估抛 ImportError 被捕获，不崩溃。"""
-        sys.modules.pop("pipeline.condition_parser", None)
+    def test_condition_with_local_parser(self) -> None:
+        """本地 condition_parser（triggers/condition_parser.py，GAP-2 回移）→ 条件评估主路径。"""
         mgr = TriggerManager()
-        cfg = _make_config(trigger_type=TriggerType.CONDITION, condition_expression="x")
+        cfg = _make_config(trigger_type=TriggerType.CONDITION, condition_expression="ready == true")
+        mgr.register(cfg)
+        assert mgr.evaluate_condition({"ready": True}) == ["t1"]
+        assert cfg.fire_count == 1
+        # 条件不满足 → 不触发（且不产生新边沿）
+        assert mgr.evaluate_condition({"ready": False}) == []
+
+    def test_condition_invalid_syntax_degrades(self) -> None:
+        """非法表达式 → 求值安全兜底为 False，不崩溃不触发（GAP-2）。"""
+        mgr = TriggerManager()
+        cfg = _make_config(trigger_type=TriggerType.CONDITION, condition_expression="!!!invalid")
         mgr.register(cfg)
         assert mgr.evaluate_condition({"x": 1}) == []
 
@@ -784,3 +777,422 @@ class TestServer:
         # 失败路径 → 返回 {"error": ...}
         result = _run(server.trigger_setup(trigger_type="delay", message="m"))
         assert "error" in result
+
+
+# ═══════════════════════════════════════════════════════════
+# GAP-2：EVENT/CONDITION 触发器接线
+# - condition_parser 本地回移（triggers/condition_parser.py，无动态求值）
+# - 边沿检测（false→true 翻转才触发，持续满足不重复）
+# - state 聚合轮询（set_state_provider + _poll_conditions）
+# - 域事件桥（handle_domain_event + server on_domain_event 接线）
+# - 注册防御（桥未就绪 → 明确警告，不静默）
+# ═══════════════════════════════════════════════════════════
+
+
+class TestConditionParserGAP2:
+    """本地安全条件求值器（Rust engine/condition.rs 的 Python 回移 + 扁平键支持）。"""
+
+    def test_flat_dotted_keys(self) -> None:
+        """state 聚合行是扁平点号键（task.status / track.total_tokens 同款）。"""
+        from triggers.condition_parser import parse_condition
+
+        ctx = {"task.status": "failed", "task.goal": "喝水提醒"}
+        assert parse_condition("task.status == 'failed'", ctx) is True
+        assert parse_condition("task.status == 'completed'", ctx) is False
+        assert parse_condition("task.goal == '喝水提醒'", ctx) is True
+
+    def test_nested_dotted_path(self) -> None:
+        """嵌套 dict 点链访问（与 0.1/Rust 版一致的解析语义）。"""
+        from triggers.condition_parser import parse_condition
+
+        ctx = {"execution_context": {"workspace": {"mode": "worktree"}}}
+        assert parse_condition("execution_context.workspace.mode == 'worktree'", ctx) is True
+        assert parse_condition("execution_context.workspace.mode == 'plain'", ctx) is False
+
+    def test_operators_and_logic(self) -> None:
+        from triggers.condition_parser import parse_condition
+
+        ctx = {"n": 5, "a": True, "b": False, "xs": [1, 2, 3]}
+        assert parse_condition("n > 3", ctx) is True
+        assert parse_condition("n >= 5 and n <= 5", ctx) is True
+        assert parse_condition("n < 3 or a == true", ctx) is True
+        assert parse_condition("not b", ctx) is True
+        assert parse_condition("xs == [1, 2, 3]", ctx) is True
+        assert parse_condition("xs != []", ctx) is True
+
+    def test_missing_var_and_literals(self) -> None:
+        from triggers.condition_parser import parse_condition
+
+        assert parse_condition("missing == None", {}) is True
+        assert parse_condition("missing == 'x'", {}) is False
+        assert parse_condition("", {}) is True  # 空表达式恒真（与 0.1 一致）
+        assert parse_condition("True", {}) is True
+
+    def test_invalid_or_unsafe_expression_is_false(self) -> None:
+        """语法错误 / 注入尝试 → 安全兜底 False，绝不 eval。"""
+        from triggers.condition_parser import parse_condition
+
+        assert parse_condition("!!!invalid", {}) is False
+        assert parse_condition("__import__('os').system('rm -rf')", {}) is False
+        assert parse_condition("a == ", {}) is False
+
+    def test_flat_key_preferred_over_nested(self) -> None:
+        """同名时扁平键优先（STATE_SUMMARY_KEYS 约定），嵌套结构仍可回退。"""
+        from triggers.condition_parser import parse_condition
+
+        ctx = {"task.status": "running", "task": {"status": "failed"}}
+        assert parse_condition("task.status == 'running'", ctx) is True
+
+
+class TestConditionEdgeDetection:
+    """CONDITION 边沿检测：仅 false→true 翻转触发一次（GAP-2 定案）。"""
+
+    def _cond_mgr(self) -> tuple[TriggerManager, TriggerConfig]:
+        mgr = TriggerManager()
+        cfg = _make_config(
+            trigger_type=TriggerType.CONDITION,
+            condition_expression="task.status == 'failed'",
+            max_fires=0,
+        )
+        mgr.register(cfg)
+        return mgr, cfg
+
+    def test_unknown_to_true_fires_once(self) -> None:
+        """注册时已为真 → 计一次边沿（追溯性）。"""
+        mgr, cfg = self._cond_mgr()
+        try:
+            assert mgr.evaluate_condition({"task.status": "failed"}) == ["t1"]
+            # 持续满足 → 不重复注入
+            assert mgr.evaluate_condition({"task.status": "failed"}) == []
+            assert mgr.evaluate_condition({"task.status": "failed"}) == []
+            assert cfg.fire_count == 1
+        finally:
+            mgr.stop_check_loop()
+
+    def test_false_to_true_edge_fires(self) -> None:
+        mgr, cfg = self._cond_mgr()
+        try:
+            assert mgr.evaluate_condition({"task.status": "running"}) == []
+            assert mgr.evaluate_condition({"task.status": "failed"}) == ["t1"]
+            # true → false → true：新边沿，再次触发（max_fires=0 不限次）
+            assert mgr.evaluate_condition({"task.status": "running"}) == []
+            assert mgr.evaluate_condition({"task.status": "failed"}) == ["t1"]
+            assert cfg.fire_count == 2
+        finally:
+            mgr.stop_check_loop()
+
+    def test_rows_any_match_single_edge(self) -> None:
+        """多管道聚合行：任一行满足即真，仍按触发器粒度计一次边沿。"""
+        mgr, cfg = self._cond_mgr()
+        try:
+            rows = [
+                {"pipeline_id": "p1", "task.status": "running"},
+                {"pipeline_id": "p2", "task.status": "failed"},
+            ]
+            assert mgr.evaluate_condition_rows(rows) == ["t1"]
+            rows2 = [
+                {"pipeline_id": "p1", "task.status": "failed"},
+                {"pipeline_id": "p2", "task.status": "failed"},
+            ]
+            # 两行都满足仍是同一电平 → 不重复
+            assert mgr.evaluate_condition_rows(rows2) == []
+            assert cfg.fire_count == 1
+        finally:
+            mgr.stop_check_loop()
+
+
+class TestConditionPolling:
+    """检查循环条件轮询：state provider 注入 + _poll_conditions 驱动注入。"""
+
+    def test_poll_conditions_fires_and_injects(self) -> None:
+        received: list[tuple] = []
+
+        async def fake_injector(pipeline_id: str, message: str, user_id: str) -> str:
+            received.append((pipeline_id, message, user_id))
+            return "ok"
+
+        def provider() -> list[dict]:
+            return [{"pipeline_id": "p9", "task.status": "failed", "task.goal": "修 bug"}]
+
+        with _LoopThread() as lt:
+            mgr = TriggerManager()
+            mgr.set_main_loop(lt.loop)
+            mgr.set_injector(fake_injector)
+            mgr.set_state_provider(provider)
+            cfg = _make_config(
+                trigger_type=TriggerType.CONDITION,
+                condition_expression="task.status == 'failed'",
+                max_fires=0,
+                metadata={"user_id": "u-1"},
+            )
+            mgr.register(cfg)
+            try:
+                mgr._poll_conditions()
+                assert len(received) == 1
+                assert received[0][0] == "pipe-1"
+                assert "[触发器通知]" in received[0][1]
+                assert received[0][2] == "u-1"
+                # 持续满足 → 不重复注入
+                mgr._poll_conditions()
+                assert len(received) == 1
+            finally:
+                mgr.stop_check_loop()
+
+    def test_async_provider_via_main_loop(self) -> None:
+        """async provider（server.py 生产形态）→ 经 run_coroutine_threadsafe 求值。"""
+
+        async def provider() -> list[dict]:
+            return [{"task.status": "completed"}]
+
+        calls: list[tuple] = []
+
+        async def fake_injector(pipeline_id: str, message: str, user_id: str) -> str:
+            calls.append((pipeline_id, message))
+            return "ok"
+
+        with _LoopThread() as lt:
+            mgr = TriggerManager()
+            mgr.set_main_loop(lt.loop)
+            mgr.set_injector(fake_injector)
+            mgr.set_state_provider(provider)
+            cfg = _make_config(
+                trigger_type=TriggerType.CONDITION,
+                condition_expression="task.status == 'completed'",
+                max_fires=1,
+            )
+            mgr.register(cfg)
+            try:
+                mgr._poll_conditions()
+                assert len(calls) == 1
+            finally:
+                mgr.stop_check_loop()
+
+    def test_no_condition_triggers_skips_provider(self) -> None:
+        """无活跃 CONDITION 触发器 → 不调 provider（省一次内核往返）。"""
+        provider_calls: list[int] = []
+
+        def provider() -> list[dict]:
+            provider_calls.append(1)
+            return []
+
+        mgr = TriggerManager()
+        mgr.set_state_provider(provider)
+        cfg = _make_config(trigger_type=TriggerType.DELAY, delay_seconds=3600)
+        mgr.register(cfg)
+        try:
+            mgr._poll_conditions()
+            assert provider_calls == []
+        finally:
+            mgr.stop_check_loop()
+
+    def test_provider_error_degrades(self) -> None:
+        def bad_provider() -> list[dict]:
+            raise RuntimeError("kernel down")
+
+        mgr = TriggerManager()
+        mgr.set_state_provider(bad_provider)
+        cfg = _make_config(trigger_type=TriggerType.CONDITION, condition_expression="x == 1")
+        mgr.register(cfg)
+        try:
+            mgr._poll_conditions()  # 不抛异常
+            assert cfg.fire_count == 0
+        finally:
+            mgr.stop_check_loop()
+
+    def test_provider_not_set_degrades(self) -> None:
+        mgr = TriggerManager()
+        cfg = _make_config(trigger_type=TriggerType.CONDITION, condition_expression="x == 1")
+        mgr.register(cfg)
+        try:
+            mgr._poll_conditions()  # 不抛异常
+            assert cfg.fire_count == 0
+            assert mgr.is_state_provider_ready() is False
+        finally:
+            mgr.stop_check_loop()
+
+    def test_provider_non_list_return_degrades(self) -> None:
+        mgr = TriggerManager()
+        mgr.set_state_provider(lambda: {"not": "a list"})
+        cfg = _make_config(trigger_type=TriggerType.CONDITION, condition_expression="x == 1")
+        mgr.register(cfg)
+        try:
+            mgr._poll_conditions()
+            assert cfg.fire_count == 0
+        finally:
+            mgr.stop_check_loop()
+
+
+class TestDomainEventBridge:
+    """域事件桥：内核 notifications/domain_event → evaluate_event → 注入。"""
+
+    def test_handle_domain_event_evaluates_and_injects(self) -> None:
+        received: list[tuple] = []
+
+        async def fake_injector(pipeline_id: str, message: str, user_id: str) -> str:
+            received.append((pipeline_id, message, user_id))
+            return "ok"
+
+        mgr = TriggerManager()
+        mgr.set_injector(fake_injector)
+        cfg = _make_config(
+            event_name="task_completed",
+            max_fires=3,
+            metadata={"user_id": "u-7"},
+        )
+        mgr.register(cfg)
+        try:
+            fired = _run(mgr.handle_domain_event("task_completed", {"pipeline_id": "p1", "task_id": "t9"}))
+            assert fired == ["t1"]
+            assert len(received) == 1
+            assert received[0][0] == "pipe-1"
+            assert "task_completed" not in received[0][1]  # 消息体是 fire_info+用户消息
+            assert received[0][2] == "u-7"
+        finally:
+            mgr.stop_check_loop()
+
+    def test_handle_domain_event_unmatched_no_inject(self) -> None:
+        received: list[tuple] = []
+
+        async def fake_injector(pipeline_id: str, message: str, user_id: str) -> str:
+            received.append((pipeline_id, message, user_id))
+            return "ok"
+
+        mgr = TriggerManager()
+        mgr.set_injector(fake_injector)
+        mgr.register(_make_config(event_name="task_completed", max_fires=3))
+        try:
+            assert _run(mgr.handle_domain_event("session.created", {})) == []
+            assert received == []
+        finally:
+            mgr.stop_check_loop()
+
+    def test_handle_domain_event_injector_error_no_crash(self) -> None:
+        async def bad_injector(pipeline_id: str, message: str, user_id: str) -> str:
+            raise RuntimeError("kernel down")
+
+        mgr = TriggerManager()
+        mgr.set_injector(bad_injector)
+        mgr.register(_make_config(event_name="run.failed", max_fires=3))
+        try:
+            fired = _run(mgr.handle_domain_event("run.failed", {}))
+            assert fired == ["t1"]  # 评估成功（注入失败仅记录）
+        finally:
+            mgr.stop_check_loop()
+
+    def test_event_bridge_ready_flag(self) -> None:
+        mgr = TriggerManager()
+        assert mgr.is_event_bridge_ready() is False
+        mgr.set_event_bridge_ready()
+        assert mgr.is_event_bridge_ready() is True
+
+
+class TestSetupToolBridgeWarnings:
+    """注册防御：桥未就绪 → 成功结果携带明确 warning（不静默注册）。"""
+
+    def test_event_without_bridge_warns(self) -> None:
+        mod = _load_tool()
+        fresh = TriggerManager()
+        mod.get_trigger_manager = lambda: fresh  # 与 TestSetupTool.fixture 同式（tool 模块自身绑定）
+        try:
+            inst = mod.TriggerSetupTool()
+            r = _run(inst.execute({"trigger_type": "event", "event_type": "task_completed", "message": "m", "pipeline_id": "p"}))
+            assert r.success
+            assert "warning" in r.output
+            assert "域事件" in r.output["warning"] or "桥" in r.output["warning"]
+            # 桥就绪 → 无警告
+            fresh.set_event_bridge_ready()
+            r2 = _run(inst.execute({"trigger_type": "event", "event_type": "task_completed", "message": "m", "pipeline_id": "p2"}))
+            assert r2.success
+            assert "warning" not in r2.output
+        finally:
+            fresh.stop_check_loop()
+
+    def test_condition_without_provider_warns(self) -> None:
+        mod = _load_tool()
+        fresh = TriggerManager()
+        mod.get_trigger_manager = lambda: fresh
+        try:
+            inst = mod.TriggerSetupTool()
+            r = _run(inst.execute({"trigger_type": "condition", "condition": "a == 1", "message": "m", "pipeline_id": "p"}))
+            assert r.success
+            assert "warning" in r.output
+            # provider 就绪 → 无警告
+            fresh.set_state_provider(lambda: [])
+            r2 = _run(inst.execute({"trigger_type": "condition", "condition": "a == 1", "message": "m", "pipeline_id": "p2"}))
+            assert r2.success
+            assert "warning" not in r2.output
+        finally:
+            fresh.stop_check_loop()
+
+
+class TestServerGAP2Wiring:
+    """server.py：domain_event 钩子注册 + state provider 注入 + 桥就绪标记。"""
+
+    def test_on_load_sets_state_provider_and_bridge(self) -> None:
+        import triggers.manager as manager_mod
+
+        server = _load_server()
+        real_mgr = manager_mod.get_trigger_manager()
+        real_mgr.stop_check_loop()
+        saved = (real_mgr._state_provider, real_mgr._event_bridge_ready)
+        try:
+            loop = asyncio.new_event_loop()
+            try:
+                loop.run_until_complete(server._on_load({}))
+                assert real_mgr._state_provider is not None
+                assert real_mgr.is_event_bridge_ready() is True
+            finally:
+                loop.close()
+        finally:
+            real_mgr._state_provider, real_mgr._event_bridge_ready = saved
+            real_mgr.stop_check_loop()
+
+    def test_state_provider_calls_pipeline_state_capability(self) -> None:
+        server = _load_server()
+
+        class FakeState:
+            def __init__(self) -> None:
+                self.calls: list[tuple] = []
+
+            async def call(self, method: str, params: dict) -> list[dict]:
+                self.calls.append((method, params))
+                return [{"pipeline_id": "p1", "task.status": "running"}]
+
+        cap = FakeState()
+        server.plugin.get_capability = lambda name: cap  # type: ignore[method-assign]
+        provider = server._make_state_provider()
+        rows = _run(provider())
+        assert rows == [{"pipeline_id": "p1", "task.status": "running"}]
+        assert cap.calls and cap.calls[0][0] == "list"
+
+    def test_domain_event_handler_registered_and_forwards(self) -> None:
+        """plugin 注册了 on_domain_event 处理器，且转发到 manager.handle_domain_event。"""
+        server = _load_server()
+        handler = server.plugin._lifecycle_handlers.get("domain_event")
+        assert handler is not None, "server.py 应注册 domain_event 生命周期处理器"
+
+        import triggers.manager as manager_mod
+
+        mgr = manager_mod.get_trigger_manager()
+        mgr.stop_check_loop()
+        forwarded: list[tuple] = []
+
+        async def fake_handle(event_name: str, event_data: dict) -> list[str]:
+            forwarded.append((event_name, dict(event_data)))
+            return []
+
+        mgr.handle_domain_event = fake_handle  # type: ignore[method-assign]
+        try:
+            _run(handler({"event": "task_completed", "pipeline_id": "p1", "task_id": "t9"}))
+            assert forwarded == [("task_completed", {"event": "task_completed", "pipeline_id": "p1", "task_id": "t9"})]
+        finally:
+            del mgr.handle_domain_event
+            mgr.stop_check_loop()
+
+    def test_plugin_json_declares_domain_event_hook(self) -> None:
+        """manifest 补 domain_event lifecycle hook（内核才会点对点推送域事件）。"""
+        import json
+
+        manifest = json.loads((_PLUGIN_DIR / "plugin.json").read_text(encoding="utf-8"))
+        hooks = manifest.get("capabilities", {}).get("lifecycle_hooks", [])
+        assert "domain_event" in hooks

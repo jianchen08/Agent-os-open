@@ -48,17 +48,40 @@ def _make_trigger_injector() -> Any:
     return _inject
 
 
+def _make_state_provider() -> Any:
+    """构造 state 聚合行提供者（GAP-2 CONDITION 求值上下文）。
+
+    经内核 ``pipeline-state`` capability 读管道 state 聚合（与
+    /api/v1/pipelines/state 同构：扁平点号键行）。能力句柄懒解析
+    （协程内 get_capability），读取失败由 manager 记录并跳过本轮。
+    """
+
+    async def _provide() -> list[dict[str, Any]]:
+        handle = plugin.get_capability("pipeline-state")
+        rows = await handle.call("list", {})
+        return rows if isinstance(rows, list) else []
+
+    return _provide
+
+
 @plugin.on_load
 async def _on_load(_params: dict[str, Any]) -> None:
-    """sidecar 启动（主事件循环内）：接通触发检查循环 + 注入器。
+    """sidecar 启动（主事件循环内）：接通触发检查循环 + 注入器 + 双桥。
 
     修复两处 0.2 迁移遗留：
     1. set_main_loop 此前无人调用 → _main_loop 恒为 None → 触发器到期直接跳过；
     2. 注入路径此前依赖已删除的 pipeline.message_bus → 现改为内核 chat capability。
+
+    GAP-2 追加（EVENT/CONDITION 接线）：
+    3. state provider 注入 → CONDITION 触发器有了求值上下文（state 聚合轮询）；
+    4. 域事件桥就绪标记 → manifest 声明 domain_event hook + 下方
+       ``_on_domain_event`` 处理器注册后，内核终态事件可达 evaluate_event。
     """
     mgr = get_trigger_manager()
     mgr.set_main_loop(asyncio.get_running_loop())
     mgr.set_injector(_make_trigger_injector())
+    mgr.set_state_provider(_make_state_provider())
+    mgr.set_event_bridge_ready()
     mgr.start_check_loop()
 
 
@@ -66,6 +89,21 @@ async def _on_load(_params: dict[str, Any]) -> None:
 async def _on_unload(_params: dict[str, Any]) -> None:
     """sidecar 卸载：停止后台检查线程。"""
     get_trigger_manager().stop_check_loop()
+
+
+@plugin.on_domain_event
+async def _on_domain_event(params: dict[str, Any]) -> None:
+    """域事件入口（GAP-2 EVENT 接线）。
+
+    内核在 run 终态（completed/failed/suspended）经 broadcast_domain_event
+    推送域事件（state 带 ``task.*`` 字段时派生 ``task_completed`` /
+    ``task_failed``）；此处转发给 TriggerManager.evaluate_event——评估器
+    实现已存在，此前无人调用（e2e 缺口 GAP-2）。
+    """
+    event_name = params.get("event") or ""
+    if not event_name:
+        return
+    await get_trigger_manager().handle_domain_event(event_name, params)
 
 
 @plugin.tool(

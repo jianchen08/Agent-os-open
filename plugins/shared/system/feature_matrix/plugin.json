@@ -245,6 +245,14 @@
             "auth": "none",
             "handler_capability": "http.handle",
             "description": "插件配置数据(GET)"
+        },
+        {
+            "route_id": "config_update",
+            "method": "PUT",
+            "path": "/ext/feature_matrix_plugin/config",
+            "auth": "user",
+            "handler_capability": "http.handle",
+            "description": "插件配置提交(PUT，demo 语义：内存合并不落盘)"
         }
     ]
 }

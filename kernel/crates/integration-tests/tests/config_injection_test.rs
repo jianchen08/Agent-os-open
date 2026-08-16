@@ -357,11 +357,15 @@ async fn fp3_invoker_loads_and_injects_config() {
             id: "memory_storage".to_string(),
             path: "memory_storage.yaml".to_string(),
             label: "Memory".to_string(),
+            target: None,
+            fields: vec![],
         },
         agentos_core::traits::ConfigFileMapping {
             id: "api_config".to_string(),
             path: "api_config.yaml".to_string(),
             label: "API".to_string(),
+            target: None,
+            fields: vec![],
         },
     ];
     loader.add_manifest(manifest);
@@ -413,6 +417,8 @@ async fn fp3_config_change_triggers_reload() {
         id: "version".to_string(),
         path: "version.yaml".to_string(),
         label: "Version".to_string(),
+            target: None,
+            fields: vec![],
     }];
     loader.add_manifest(manifest);
 

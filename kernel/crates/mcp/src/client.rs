@@ -144,9 +144,10 @@ impl McpClient {
     /// 创建 HTTP transport 客户端
     ///
     /// `headers`：额外请求头（如 `X-Also-Search`）。`auth`：鉴权配置，其 `value`
-    /// 可含 `${ENV_VAR}` 占位，在 [`connect`](McpClient::connect) 时解析（缺失则
-    /// 连接失败，早暴露）。reqwest 客户端在 connect 时构建，把解析后的 auth 并入
-    /// 默认头。
+    /// 可含 `${ENV_VAR}` 占位，在 [`connect`](McpClient::connect) 时解析（查找顺序：
+    /// 进程环境 → `.env` overlay；两处均缺失则连接失败早暴露，但
+    /// `auth.required == Some(false)` 时跳过该鉴权头照常连接，由服务端 401 说话）。
+    /// reqwest 客户端在 connect 时构建，把解析后的 auth 并入默认头。
     pub fn new_http(
         url: impl Into<String>,
         headers: HashMap<String, String>,
@@ -515,32 +516,50 @@ impl McpClient {
                 }
             }
         }
-        // 鉴权头（${ENV_VAR} 解析；引用未设置变量 → 报错早暴露，不静默放行）。
+        // 鉴权头（${ENV_VAR} 解析，查找顺序：进程环境 → .env overlay）。
+        // 引用未设置变量时：auth.required 缺省/true → 报错早暴露（不静默放行）；
+        // 显式 false（可选凭据，如 langchain_hub 的 LANGSMITH_API_KEY）→
+        // 跳过该鉴权头照常连接，由服务端 401 说话（GAP-4b）。
         if let Some(a) = auth {
             if a.auth_type != AuthType::None {
-                let resolved = resolve_env_placeholders(&a.value)?;
-                let (name, val) = match a.auth_type {
-                    AuthType::Bearer => (
-                        reqwest::header::AUTHORIZATION,
-                        format!("Bearer {}", resolved),
-                    ),
-                    AuthType::ApiKey => {
-                        let name = HeaderName::try_from(a.header_name.as_str()).map_err(|e| {
-                            McpError::ConnectionFailed {
-                                message: format!(
-                                    "invalid auth header_name {}: {}",
-                                    a.header_name, e
-                                ),
-                            }
-                        })?;
-                        (name, resolved)
+                let optional_auth = a.required == Some(false);
+                let resolved = match resolve_env_placeholders(&a.value) {
+                    Ok(v) => Some(v),
+                    Err(e) if optional_auth => {
+                        tracing::info!(
+                            "[mcp] HTTP 端点鉴权为可选（required=false）且变量未配置，跳过鉴权头 | {}",
+                            e
+                        );
+                        None
                     }
-                    AuthType::None => unreachable!(),
+                    Err(e) => return Err(e),
                 };
-                let val = HeaderValue::from_str(&val).map_err(|e| McpError::ConnectionFailed {
-                    message: format!("invalid auth header value: {}", e),
-                })?;
-                header_map.append(name, val);
+                if let Some(resolved) = resolved {
+                    let (name, val) = match a.auth_type {
+                        AuthType::Bearer => (
+                            reqwest::header::AUTHORIZATION,
+                            format!("Bearer {}", resolved),
+                        ),
+                        AuthType::ApiKey => {
+                            let name =
+                                HeaderName::try_from(a.header_name.as_str()).map_err(|e| {
+                                    McpError::ConnectionFailed {
+                                        message: format!(
+                                            "invalid auth header_name {}: {}",
+                                            a.header_name, e
+                                        ),
+                                    }
+                                })?;
+                            (name, resolved)
+                        }
+                        AuthType::None => unreachable!(),
+                    };
+                    let val =
+                        HeaderValue::from_str(&val).map_err(|e| McpError::ConnectionFailed {
+                            message: format!("invalid auth header value: {}", e),
+                        })?;
+                    header_map.append(name, val);
+                }
             }
         }
 
@@ -1117,15 +1136,36 @@ fn resolve_windows_command(command: &str) -> String {
     command.to_string()
 }
 
-/// 把字符串里的 `${ENV_VAR}` 占位替换为环境变量值。
+/// 把字符串里的 `${ENV_VAR}` 占位替换为环境变量值（含 `.env` overlay 回退）。
 ///
-/// 引用的变量未设置时报错（早暴露，不静默放行）——外部 MCP 端点的鉴权值缺失
-/// 通常意味着配置未就绪，连出去也会被 401 拒绝，不如在 connect 时直接失败。
+/// 查找顺序（GAP-4a，与 stdio sidecar 的 spawn 叠加同语义）：**进程环境 →
+/// 项目 `.env` overlay**（[`crate::env_file::env_delta_overlay`] 的增量——只补
+/// 进程环境缺失的变量，绝不用 `.env` 覆盖系统显式设置的环境变量）。用户经
+/// 设置页把 key 写入 `.env` 后，HTTP MCP connect 时即可解析，无需重启内核
+/// （配合 invoker 的 `.env` mtime 指纹触发客户端重建，改动下次调用即生效）。
+///
+/// 引用的变量两处均未设置时报错（早暴露，不静默放行）——外部 MCP 端点的鉴权值
+/// 缺失通常意味着配置未就绪，连出去也会被 401 拒绝，不如在 connect 时直接失败。
+/// 可选凭据（`auth.required == false`）由 [`McpClient`] 的 `build_http_client`
+/// 捕获该错误后跳过鉴权头，本函数不感知 required 语义。
 ///
 /// 默认值语法（shell 标准，用于可选变量——如 omnisearch 的限流 key，缺失只降级
 /// 不阻断）：`${VAR:-default}`（未设置**或为空**用 default）、`${VAR-default}`
 /// （仅未设置用 default）。无默认值的未设置变量仍走早失败路径。
 pub fn resolve_env_placeholders(raw: &str) -> Result<String, McpError> {
+    // 每次 resolve 构造一次 overlay 查找表（一次 .env 文件读）。resolve 只在
+    // 客户端 connect / stdio env 构造时调用（低频），无需常驻缓存；且
+    // env_delta_overlay 每次现读文件正是「写完即生效」语义的一部分。
+    let overlay: HashMap<String, String> = crate::env_file::env_delta_overlay().into_iter().collect();
+    resolve_env_placeholders_with(raw, &overlay)
+}
+
+/// [`resolve_env_placeholders`] 的可注入版本：overlay 作为参数传入，便于单测
+/// mock .env 增量（不必真实写文件/改 AGENTOS_CONFIG_ROOT）。
+fn resolve_env_placeholders_with(
+    raw: &str,
+    overlay: &HashMap<String, String>,
+) -> Result<String, McpError> {
     let mut out = String::with_capacity(raw.len());
     let mut rest = raw;
     loop {
@@ -1159,13 +1199,17 @@ pub fn resolve_env_placeholders(raw: &str) -> Result<String, McpError> {
                             // ":-" 与 "-" 的差别只在空串处理：spec 含 ":-" 时空串也取默认。
                             Some(d) => {
                                 let empty_means_default = spec.contains(":-");
-                                match std::env::var(var) {
-                                    Ok(v) if !(empty_means_default && v.is_empty()) => v,
+                                match lookup_env_var(var, overlay) {
+                                    Some(v) if !(empty_means_default && v.is_empty()) => v,
                                     _ => d.to_string(),
                                 }
                             }
-                            None => std::env::var(var).map_err(|_| McpError::ConnectionFailed {
-                                message: format!("HTTP MCP 端点引用了未设置的环境变量: ${{{var}}}"),
+                            None => lookup_env_var(var, overlay).ok_or_else(|| {
+                                McpError::ConnectionFailed {
+                                    message: format!(
+                                        "HTTP MCP 端点引用了未设置的环境变量（进程环境与 .env 均未提供）: ${{{var}}}"
+                                    ),
+                                }
                             })?,
                         };
                         out.push_str(&val);
@@ -1176,6 +1220,17 @@ pub fn resolve_env_placeholders(raw: &str) -> Result<String, McpError> {
         }
     }
     Ok(out)
+}
+
+/// 单变量查找：进程环境优先，缺失时回退 `.env` overlay（增量）。
+///
+/// overlay 来自 [`crate::env_file::env_delta_overlay`]——其本身已按「系统环境
+/// 变量 > .env」过滤（只含进程环境缺失的变量），此处再显式按 进程环境 →
+/// overlay 的顺序查找，与 stdio sidecar 继承的子进程环境同语义。
+fn lookup_env_var(var: &str, overlay: &HashMap<String, String>) -> Option<String> {
+    std::env::var(var)
+        .ok()
+        .or_else(|| overlay.get(var).cloned())
 }
 
 #[cfg(test)]
@@ -1394,6 +1449,7 @@ mod tests {
             auth_type: AuthType::Bearer,
             header_name: "Authorization".to_string(),
             value: "${MCP_TEST_KEY}".to_string(),
+            required: None,
         };
         let mut headers = HashMap::new();
         headers.insert("X-Also-Search".to_string(), "smithery.ai".to_string());
@@ -1425,10 +1481,89 @@ mod tests {
             auth_type: AuthType::ApiKey,
             header_name: "Authorization".to_string(),
             value: "${MCP_TEST_KEY_DEFINITELY_UNSET}".to_string(),
+            required: None,
         };
         let mut client = McpClient::new_http("http://127.0.0.1:1", HashMap::new(), Some(auth));
         let res = client.connect().await;
         assert!(res.is_err(), "connect should fail on missing env var");
+    }
+
+    // ── GAP-4b：尊重 auth.required == false ────────────────────────────
+
+    #[tokio::test]
+    async fn test_http_optional_auth_missing_env_skips_header_and_connects() {
+        // required=false + 占位变量缺失 → connect 成功、请求不带该鉴权头
+        // （照常连接，由服务端 401 说话——langchain_hub 场景）
+        let expected = serde_json::json!({"ok": true});
+        let (url, captured) = spawn_mock_mcp_server(expected.clone()).await;
+
+        std::env::remove_var("MCP_OPT_AUTH_KEY_DEFINITELY_UNSET");
+        let auth = agentos_core::traits::EndpointAuth {
+            auth_type: AuthType::ApiKey,
+            header_name: "x-api-key".to_string(),
+            value: "${MCP_OPT_AUTH_KEY_DEFINITELY_UNSET}".to_string(),
+            required: Some(false),
+        };
+        let mut client = McpClient::new_http(url, HashMap::new(), Some(auth));
+        client
+            .connect()
+            .await
+            .expect("required=false 时缺变量不应 connect 失败");
+        let result = client.send_request("tools/list", None).await.unwrap();
+        assert_eq!(result, expected);
+
+        // 断言实际发出的请求头集合：鉴权头必须缺席
+        let raw = captured.lock().unwrap().clone().unwrap();
+        let raw_s = String::from_utf8_lossy(&raw).to_ascii_lowercase();
+        assert!(
+            !raw_s.contains("x-api-key"),
+            "可选鉴权未配置时不应携带 x-api-key 头: {raw_s}"
+        );
+        assert!(
+            !raw_s.contains("authorization:"),
+            "可选鉴权未配置时不应携带 authorization 头: {raw_s}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_http_optional_auth_with_env_still_sends_header() {
+        // required=false 但变量已配置 → 鉴权头照常发送（可选 ≠ 永不发送）
+        let expected = serde_json::json!({"ok": true});
+        let (url, captured) = spawn_mock_mcp_server(expected.clone()).await;
+
+        std::env::set_var("MCP_OPT_AUTH_KEY_SET", "secret-abc");
+        let auth = agentos_core::traits::EndpointAuth {
+            auth_type: AuthType::ApiKey,
+            header_name: "x-api-key".to_string(),
+            value: "${MCP_OPT_AUTH_KEY_SET}".to_string(),
+            required: Some(false),
+        };
+        let mut client = McpClient::new_http(url, HashMap::new(), Some(auth));
+        client.connect().await.unwrap();
+        client.send_request("tools/list", None).await.unwrap();
+
+        let raw = captured.lock().unwrap().clone().unwrap();
+        let raw_s = String::from_utf8_lossy(&raw).to_ascii_lowercase();
+        assert!(
+            raw_s.contains("x-api-key: secret-abc"),
+            "可选鉴权已配置时仍应发送鉴权头: {raw_s}"
+        );
+        std::env::remove_var("MCP_OPT_AUTH_KEY_SET");
+    }
+
+    #[tokio::test]
+    async fn test_http_connect_fails_on_missing_env_required_explicit_true() {
+        // required=true（显式）+ 变量缺失 → 保持既有硬失败（与缺省 None 同语义）
+        std::env::remove_var("MCP_REQ_AUTH_KEY_DEFINITELY_UNSET");
+        let auth = agentos_core::traits::EndpointAuth {
+            auth_type: AuthType::Bearer,
+            header_name: "Authorization".to_string(),
+            value: "${MCP_REQ_AUTH_KEY_DEFINITELY_UNSET}".to_string(),
+            required: Some(true),
+        };
+        let mut client = McpClient::new_http("http://127.0.0.1:1", HashMap::new(), Some(auth));
+        let res = client.connect().await;
+        assert!(res.is_err(), "required=true 时缺变量应 connect 失败");
     }
 
     #[test]
@@ -1487,6 +1622,112 @@ mod tests {
         std::env::remove_var("MCP_PH_OPT_EMPTY");
     }
 
+    // ── GAP-4a：resolve_env_placeholders 的 .env overlay 回退 ──────────
+
+    #[test]
+    fn test_resolve_placeholders_overlay_fallback_when_env_missing() {
+        // 进程环境未设置、overlay（.env 增量）有值 → 解析成功（mock overlay）
+        std::env::remove_var("MCP_PH_OVERLAY_ONLY");
+        let overlay = HashMap::from([(
+            "MCP_PH_OVERLAY_ONLY".to_string(),
+            "from_dotenv".to_string(),
+        )]);
+        assert_eq!(
+            resolve_env_placeholders_with("Bearer ${MCP_PH_OVERLAY_ONLY}", &overlay).unwrap(),
+            "Bearer from_dotenv"
+        );
+        // 性质断言：多处占位混排时同规则成立
+        assert_eq!(
+            resolve_env_placeholders_with("a${MCP_PH_OVERLAY_ONLY}b", &overlay).unwrap(),
+            "afrom_dotenvb"
+        );
+    }
+
+    #[test]
+    fn test_resolve_placeholders_process_env_priority_over_overlay() {
+        // 两者都有 → 进程环境优先（mock overlay）
+        std::env::set_var("MCP_PH_BOTH", "from_process");
+        let overlay =
+            HashMap::from([("MCP_PH_BOTH".to_string(), "from_dotenv".to_string())]);
+        assert_eq!(
+            resolve_env_placeholders_with("${MCP_PH_BOTH}", &overlay).unwrap(),
+            "from_process"
+        );
+        // 性质断言（优先级可逆）：进程环境删除后，同输入改取 overlay 值
+        std::env::remove_var("MCP_PH_BOTH");
+        assert_eq!(
+            resolve_env_placeholders_with("${MCP_PH_BOTH}", &overlay).unwrap(),
+            "from_dotenv"
+        );
+    }
+
+    #[test]
+    fn test_resolve_placeholders_overlay_respects_default_syntax() {
+        // ${VAR:-def}：进程环境与 overlay 均缺失 → 默认值；overlay 有值 →
+        // overlay 值优先于默认值（查找顺序在默认值之前）
+        std::env::remove_var("MCP_PH_DEF_VAR");
+        let empty: HashMap<String, String> = HashMap::new();
+        assert_eq!(
+            resolve_env_placeholders_with("${MCP_PH_DEF_VAR:-fallback}", &empty).unwrap(),
+            "fallback"
+        );
+        let overlay = HashMap::from([("MCP_PH_DEF_VAR".to_string(), "dotenv_val".to_string())]);
+        assert_eq!(
+            resolve_env_placeholders_with("${MCP_PH_DEF_VAR:-fallback}", &overlay).unwrap(),
+            "dotenv_val"
+        );
+        // 无默认值语法：两处均缺失 → 仍走早失败（GAP-4a 不放松错误路径）
+        assert!(resolve_env_placeholders_with("${MCP_PH_DEF_VAR}", &empty).is_err());
+    }
+
+    #[test]
+    fn test_resolve_placeholders_reads_project_dotenv_file() {
+        // 真实文件依赖的集成路径（GAP-4a 主场景）：临时目录作项目根写 .env，
+        // AGENTOS_CONFIG_ROOT 指向其 config 子目录（project_env_path 取 config
+        // root 的父目录下 .env）。该变量是进程级全局，与 env_file::tests 共享
+        // 互斥锁串行（见 TEST_ENV_MUTEX）。
+        let _guard = crate::env_file::tests::TEST_ENV_MUTEX
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        let var = format!("MCP_DOTENV_IT_{}", Uuid::new_v4().simple());
+        let tmp = std::env::temp_dir().join(format!(
+            "agentos_mcp_envit_{}",
+            Uuid::new_v4().simple()
+        ));
+        std::fs::create_dir_all(tmp.join("config")).unwrap();
+        std::fs::write(tmp.join(".env"), format!("{var}=from_dotenv\n")).unwrap();
+
+        // panic 安全地恢复 AGENTOS_CONFIG_ROOT（断言失败也不能污染其他测试）
+        struct RestoreEnvRoot(Option<String>);
+        impl Drop for RestoreEnvRoot {
+            fn drop(&mut self) {
+                match &self.0 {
+                    Some(v) => std::env::set_var("AGENTOS_CONFIG_ROOT", v),
+                    None => std::env::remove_var("AGENTOS_CONFIG_ROOT"),
+                }
+            }
+        }
+        let _restore = RestoreEnvRoot(std::env::var("AGENTOS_CONFIG_ROOT").ok());
+        std::env::set_var("AGENTOS_CONFIG_ROOT", tmp.join("config"));
+
+        // 1) 进程环境缺失 → .env overlay 提供值（设置页填 key 免重启生效路径）
+        std::env::remove_var(&var);
+        assert_eq!(
+            resolve_env_placeholders(&format!("Bearer ${{{var}}}")).unwrap(),
+            "Bearer from_dotenv"
+        );
+        // 2) 两者都有 → 进程环境优先（真实 env_delta_overlay 语义：系统环境
+        //    显式设置的变量不进 overlay，此处非 vacuous 断言）
+        std::env::set_var(&var, "from_process");
+        assert_eq!(
+            resolve_env_placeholders(&format!("Bearer ${{{var}}}")).unwrap(),
+            "Bearer from_process"
+        );
+
+        std::env::remove_var(&var);
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
     #[test]
     fn test_manifest_mcp_endpoint_deserialize() {
         // 模拟 external_mcp 插件 plugin.json 的关键字段：endpoint 嵌套在 mcp 下。
@@ -1524,5 +1765,39 @@ mod tests {
         assert_eq!(auth.auth_type, AuthType::ApiKey);
         assert_eq!(auth.header_name, "Authorization");
         assert_eq!(auth.value, "${RESOURCE_SEARCH_API_KEY}");
+        // 未声明 required → None（按必需处理，保持既有硬失败语义）
+        assert_eq!(auth.required, None);
+    }
+
+    #[test]
+    fn test_manifest_auth_required_false_deserialize() {
+        // langchain_hub 风格：auth.required=false 必须能经反序列化到达内核
+        // 逻辑（GAP-4b——此前该声明被 serde 静默丢弃）
+        let json = r#"{
+            "id": "langchain_like",
+            "name": "LangChain Like",
+            "version": "1.0.0",
+            "plugin_type": "tool",
+            "language": "external",
+            "host_type": "sidecar",
+            "entry": "mcp:external",
+            "capabilities": {},
+            "mcp": {
+                "transport": "streamable_http",
+                "endpoint": {
+                    "url": "https://api.example.com/v1/search",
+                    "auth": {"type": "api_key", "header_name": "x-api-key", "value": "${OPT_API_KEY}", "required": false}
+                }
+            }
+        }"#;
+        let m: agentos_core::traits::PluginManifest = serde_json::from_str(json).unwrap();
+        let auth = m
+            .mcp
+            .expect("mcp config should deserialize")
+            .endpoint
+            .expect("endpoint should deserialize")
+            .auth
+            .expect("auth present");
+        assert_eq!(auth.required, Some(false));
     }
 }

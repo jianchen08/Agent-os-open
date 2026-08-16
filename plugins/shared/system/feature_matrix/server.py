@@ -131,6 +131,26 @@ CONFIG_DATA = {
     "description": "Feature Matrix 测试插件的示例配置数据(由后端 GET /config 返回)"
 }
 
+# PUT /config 的运行时副本（demo 数据源：仅进程内存合并，不落盘，重启还原默认）
+_runtime_config: dict[str, Any] | None = None
+
+
+def _decode_body(raw_body: str) -> dict[str, Any]:
+    """解码 http.handle 的 raw_body（base64 或明文 JSON）为 dict。"""
+    import json as _json
+
+    if not raw_body:
+        return {}
+    try:
+        try:
+            decoded = base64.b64decode(raw_body).decode("utf-8")
+        except (ValueError, UnicodeDecodeError):
+            decoded = raw_body
+        data = _json.loads(decoded)
+        return data if isinstance(data, dict) else {}
+    except (ValueError, TypeError):
+        return {}
+
 
 @plugin.tool(
     name="http.handle",
@@ -160,7 +180,14 @@ async def http_handle(
     if path.endswith("/wc_demo"):
         return _response_html(WEBVIEW_WC_DEMO_HTML)
     if path.endswith("/config"):
-        return _response_json(CONFIG_DATA)
+        if method.upper() == "PUT":
+            # demo 语义：内存合并 + 回显，不持久化（重启还原 CONFIG_DATA）
+            global _runtime_config
+            current = _runtime_config if _runtime_config is not None else dict(CONFIG_DATA)
+            current.update(_decode_body(raw_body))
+            _runtime_config = current
+            return _response_json({"saved": True, "persisted": False, "data": current})
+        return _response_json(_runtime_config if _runtime_config is not None else CONFIG_DATA)
     # 未知路径
     return {
         "success": True,

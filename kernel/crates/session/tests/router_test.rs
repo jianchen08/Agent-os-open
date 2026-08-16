@@ -28,6 +28,7 @@ impl PipelineDispatcher for MockDispatcher {
         _pipeline_id: &str,
         thinking_strength: &str,
         _execution_context: Option<&serde_json::Value>,
+        _state_overlay: Option<&serde_json::Value>,
     ) -> Result<(), String> {
         self.user_inputs.lock().unwrap().push((
             thread_id.into(),
@@ -190,6 +191,7 @@ async fn dispatcher_failure_returns_error() {
             _: &str,
             _: &str,
             _: &str,
+            _: Option<&serde_json::Value>,
             _: Option<&serde_json::Value>,
         ) -> Result<(), String> {
             Err("boom".into())

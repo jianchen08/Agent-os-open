@@ -142,10 +142,11 @@ describe('MessageList', () => {
       expect(screen.getByTestId('message-item-msg-3')).toBeInTheDocument()
     })
 
-    it('多轮工具调用消息流完整渲染：user + 各轮 assistant + tool 全部展示（回归）', () => {
+    it('多轮工具调用消息流渲染：user + 单一合并 assistant 气泡（回归）', () => {
       // 对应用户反馈 bug：多轮工具调用中 AI 消息只剩一条、tool 消息不显示。
-      // 渲染层 displayMessages 经 mergeConsecutiveAssistantMessages 处理，
-      // 修复后 tool 保留、被 tool 分隔的多轮 assistant 不合并，全部独立渲染。
+      // 现行契约（与流式渲染同构）：mergeConsecutiveAssistantMessages 把一个对话轮次
+      // （assistant 声明 → tool 结果 → assistant 回答 → …）合并为单一 assistant 气泡，
+      // tool 结果注入对应 tool_call part（part 层渲染），不再产出独立 tool 消息项。
       const messages = [
         makeMessage({ id: 'u1', role: 'user', content: '查天气', sequence: 1 }),
         makeMessage({
@@ -178,17 +179,19 @@ describe('MessageList', () => {
       ]
       render(<MessageList {...defaultProps} messages={messages} />)
 
-      // ★ 修复后：6 条消息全部渲染（不再被合并成 1 条、tool 不被吞）
+      // ★ 现行契约：u1 + 合并后的单一 assistant 气泡（以组内首条 a1 为载体）
       expect(screen.getByTestId('message-item-u1')).toBeInTheDocument()
       expect(screen.getByTestId('message-item-a1')).toBeInTheDocument()
-      expect(screen.getByTestId('message-item-t1')).toBeInTheDocument()
-      expect(screen.getByTestId('message-item-a2')).toBeInTheDocument()
-      expect(screen.getByTestId('message-item-t2')).toBeInTheDocument()
-      expect(screen.getByTestId('message-item-a3')).toBeInTheDocument()
+      // tool / 后续 assistant 不再作为独立消息项渲染（被合并进 a1 的 parts）
+      expect(screen.queryByTestId('message-item-t1')).not.toBeInTheDocument()
+      expect(screen.queryByTestId('message-item-a2')).not.toBeInTheDocument()
+      expect(screen.queryByTestId('message-item-t2')).not.toBeInTheDocument()
+      expect(screen.queryByTestId('message-item-a3')).not.toBeInTheDocument()
 
-      // tool 消息内容保留
-      expect(screen.getByText('北京晴')).toBeInTheDocument()
-      expect(screen.getByText('明天多云')).toBeInTheDocument()
+      // 合并气泡包含各轮 assistant 的文本内容（content 以空行拼接为一个文本节点）
+      const mergedBubble = screen.getByTestId('message-item-a1')
+      expect(mergedBubble).toHaveTextContent('今天晴，查明天？')
+      expect(mergedBubble).toHaveTextContent('明天多云，带外套')
     })
 
     it('最后一条消息 isLast 为 true', () => {

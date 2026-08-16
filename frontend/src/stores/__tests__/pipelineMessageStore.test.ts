@@ -99,18 +99,20 @@ describe('pipelineMessageStore', () => {
       expect(store.getMessages('pipe-1')).toHaveLength(2)
     })
 
-    it('合并时保留正在流式的消息（streaming 未被 API 覆盖）', () => {
+    it('刷新时丢弃本地 streaming 占位（initFromAPI 全量替换，不保留本地）', () => {
       const store = usePipelineMessageStore.getState()
-      // 模拟流式中消息
+      // 模拟流式中消息（API 未返回）
       store.addMessage('pipe-1', makeMsg('msg-stream', 'partial...', { status: 'streaming' }))
 
       // API 返回的消息不包含流式消息
       store.initFromAPI('pipe-1', [makeMsg('msg-1', 'completed')])
 
       const msgs = store.getMessages('pipe-1')
-      const streamMsg = msgs.find(m => m.id === 'msg-stream')
-      expect(streamMsg).toBeDefined()
-      expect(streamMsg!.status).toBe('streaming')
+      // 现行契约：刷新语义为全量权威替换，本地 streaming 缓存一律丢弃
+      // （后端仍在输出时由 WS 重连 backfill + 续流补回）
+      expect(msgs.find(m => m.id === 'msg-stream')).toBeUndefined()
+      expect(msgs).toHaveLength(1)
+      expect(msgs[0].id).toBe('msg-1')
     })
 
     it('API 版本替换同 ID 已完成消息', () => {
@@ -124,9 +126,9 @@ describe('pipelineMessageStore', () => {
       expect(msgs[0].content).toBe('full content')
     })
 
-    // 注意: 用 user/assistant 交替避免 mergeConsecutiveAssistantMessages 合并，
-    // 纯粹验证排序逻辑。
-    it('刷新后 localOnly 消息按 sequence 升序合并（不末尾拼接）', () => {
+    // 注意: initFromAPI 现为「全量替换」语义：本地消息一律丢弃，只保留 API 权威数据。
+    // 乱序 API 消息按 sequence 升序排序。
+    it('刷新后 localOnly 消息被丢弃（全量替换），API 消息按 sequence 升序', () => {
       const store = usePipelineMessageStore.getState()
       // 模拟 persist 恢复的旧消息（sequence=1，本地独有，API 未返回）
       store.addMessage('pipe-1', makeMsg('old-msg', 'old content', { sequence: 1, role: 'user', status: 'completed' }))
@@ -138,18 +140,16 @@ describe('pipelineMessageStore', () => {
       ])
 
       const msgs = store.getMessages('pipe-1')
-      // 4 条消息都在（去重后）
-      expect(msgs).toHaveLength(4)
-      // 关键：按 sequence 升序，旧消息在最前（修复前会被错误地排到末尾）
-      expect(msgs.map(m => m.sequence)).toEqual([1, 10, 20, 30])
-      expect(msgs[0].id).toBe('old-msg')
-      expect(msgs[3].id).toBe('api-30')
+      // 现行契约：本地 localOnly 不合并、不保留，只剩 API 的 3 条
+      expect(msgs).toHaveLength(3)
+      // API 消息按 sequence 升序
+      expect(msgs.map(m => m.sequence)).toEqual([10, 20, 30])
+      expect(msgs[0].id).toBe('api-10')
+      expect(msgs[2].id).toBe('api-30')
     })
 
-    it('localOnly 含多条乱序消息时也正确排序', () => {
+    it('API 消息乱序时按 sequence 升序正确排序', () => {
       const store = usePipelineMessageStore.getState()
-      // persist 恢复的消息可能无序，用 user/assistant 严格交替避免相邻合并
-      // 最终 sequence 序列 [2,3,5,8] → 角色 [user, assistant, user, assistant]
       store.addMessage('pipe-1', makeMsg('local-5', 'c5', { sequence: 5, role: 'user', status: 'completed' }))
       store.addMessage('pipe-1', makeMsg('local-2', 'c2', { sequence: 2, role: 'user', status: 'completed' }))
       store.initFromAPI('pipe-1', [
@@ -158,7 +158,8 @@ describe('pipelineMessageStore', () => {
       ])
 
       const msgs = store.getMessages('pipe-1')
-      expect(msgs.map(m => m.sequence)).toEqual([2, 3, 5, 8])
+      // 现行契约：全量替换丢弃 local（5、2），API 消息按 sequence 升序
+      expect(msgs.map(m => m.sequence)).toEqual([3, 8])
     })
   })
 

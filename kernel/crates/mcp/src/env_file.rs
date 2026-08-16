@@ -19,6 +19,7 @@
 //! 的父目录；未设置时本模块全部降级为空操作，不比原来差。
 
 use std::collections::HashMap;
+use std::fs;
 use std::path::PathBuf;
 use std::sync::Mutex;
 use tracing::debug;
@@ -35,6 +36,68 @@ pub fn project_env_path() -> Option<PathBuf> {
     let root = PathBuf::from(config_root);
     let env_path = root.parent()?.join(".env");
     env_path.is_file().then_some(env_path)
+}
+
+/// 指定项目根下的 .env 路径（不要求已存在——写侧用于创建）。
+///
+/// 生产路径与 [`project_env_path`] 同一文件：AGENTOS_CONFIG_ROOT =
+/// `<project_root>/config`，其父目录即项目根。路由层（无 AGENTOS_CONFIG_ROOT
+/// 语义的调用方）经 state.project_root 直接定位，避免测试/多租户场景下
+/// 进程环境变量的竞态。
+pub fn env_path_for_root(project_root: &std::path::Path) -> std::path::PathBuf {
+    project_root.join(".env")
+}
+
+/// 原子写入一组 .env 键值更新（GAP-4 写侧）。
+///
+/// 行级合并（不重排、不丢注释）：既有键原行更新、新键追加、空值移除；
+/// 值含空白或 `#` 时加双引号（与 [`parse_env_text`] 的去引号回读对齐）。
+/// 原子性：tmp 写入 + rename（与配置中心 atomic_write_yaml 同款），
+/// 中断不会留下半截 .env。
+pub fn write_env_updates(env_path: &std::path::Path, updates: &[(String, String)]) -> Result<(), String> {
+    let existing = std::fs::read_to_string(env_path).unwrap_or_default();
+    let mut lines: Vec<String> = existing.lines().map(|l| l.to_string()).collect();
+
+    for (key, value) in updates {
+        let rendered = if value.is_empty() {
+            String::new()
+        } else if value.contains(' ') || value.contains('#') || value.contains('\t') {
+            format!("\"{}\"", value)
+        } else {
+            value.clone()
+        };
+        let prefix = format!("{}=", key);
+        // 找最后一个同名键行（用户手工可能重复声明，统一收敛为一行）
+        let mut last_idx: Option<usize> = None;
+        for (i, line) in lines.iter().enumerate() {
+            let t = line.trim_start();
+            if t == key || t.starts_with(&prefix) {
+                last_idx = Some(i);
+            }
+        }
+        match (last_idx, value.is_empty()) {
+            (Some(i), true) => {
+                lines.remove(i);
+            }
+            (Some(i), false) => {
+                lines[i] = format!("{}={}", key, rendered);
+            }
+            (None, true) => {} // 本就不存在，无需移除
+            (None, false) => lines.push(format!("{}={}", key, rendered)),
+        }
+    }
+
+    let mut text = lines.join("\n");
+    if !text.is_empty() {
+        text.push('\n');
+    }
+    if let Some(parent) = env_path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| format!("create .env dir: {e}"))?;
+    }
+    let tmp_path = env_path.with_extension("env.tmp");
+    std::fs::write(&tmp_path, text.as_bytes()).map_err(|e| format!("write .env tmp: {e}"))?;
+    std::fs::rename(&tmp_path, env_path).map_err(|e| format!("rename .env: {e}"))?;
+    Ok(())
 }
 
 /// 解析 .env 文本为 KEY=VALUE 映射（跳过注释与空行，去引号）。
@@ -111,8 +174,15 @@ pub fn env_delta_overlay() -> Vec<(String, String)> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
+
+    /// AGENTOS_CONFIG_ROOT 相关测试的进程级互斥锁。
+    ///
+    /// 该变量是进程全局状态，cargo test 默认多线程并行跑——一个测试 remove、
+    /// 另一个 set 会互相踩（client.rs 的 .env 集成测试与本模块的空操作降级
+    /// 测试都操作它）。跨模块共享此锁串行化。
+    pub(crate) static TEST_ENV_MUTEX: Mutex<()> = Mutex::new(());
 
     fn parse(text: &str) -> HashMap<String, String> {
         parse_env_text(text)
@@ -128,11 +198,61 @@ mod tests {
     }
 
     #[test]
+    fn write_env_updates_creates_and_merges() {
+        // GAP-4：写侧（原子写 + 行级合并）——新文件创建、既有键更新、
+        // 无关键与注释保留。
+        let tmp = tempfile::tempdir().unwrap();
+        let env = tmp.path().join(".env");
+        fs::write(&env, "# hand-written\nKEEP_ME=1\nOLD=k1\n").unwrap();
+
+        write_env_updates(&env, &[("NEW_KEY".to_string(), "v1".to_string())]).unwrap();
+        let text1 = fs::read_to_string(&env).unwrap();
+        assert!(text1.contains("KEEP_ME=1"), "无关键保留: {text1}");
+        assert!(text1.contains("# hand-written"), "注释保留: {text1}");
+        assert!(text1.contains("NEW_KEY=v1"), "新键追加: {text1}");
+
+        write_env_updates(&env, &[("OLD".to_string(), "k2".to_string())]).unwrap();
+        let text2 = fs::read_to_string(&env).unwrap();
+        assert!(text2.contains("OLD=k2"), "既有键更新: {text2}");
+        assert!(!text2.contains("OLD=k1"), "旧值不残留: {text2}");
+
+        // 新路径（.env 不存在）直接创建
+        let env2 = tmp.path().join("sub").join(".env");
+        write_env_updates(&env2, &[("A".to_string(), "1".to_string())]).unwrap();
+        assert!(fs::read_to_string(&env2).unwrap().contains("A=1"));
+    }
+
+    #[test]
+    fn write_env_updates_empty_value_removes_key() {
+        // 清空语义：空值 = 移除该变量（前端"清除已保存的 key"路径）
+        let tmp = tempfile::tempdir().unwrap();
+        let env = tmp.path().join(".env");
+        fs::write(&env, "SMITHERY_API_KEY=secret\nOTHER=2\n").unwrap();
+        write_env_updates(&env, &[("SMITHERY_API_KEY".to_string(), String::new())]).unwrap();
+        let text = fs::read_to_string(&env).unwrap();
+        assert!(!text.contains("SMITHERY_API_KEY"), "空值移除键: {text}");
+        assert!(text.contains("OTHER=2"), "其余键不受影响: {text}");
+    }
+
+    #[test]
+    fn write_env_updates_quotes_values_with_spaces() {
+        // 值含空白/井号时加引号，回读语义不漂移（与 parse_env_text 对齐）
+        let tmp = tempfile::tempdir().unwrap();
+        let env = tmp.path().join(".env");
+        write_env_updates(&env, &[("K".to_string(), "a b # c".to_string())]).unwrap();
+        let text = fs::read_to_string(&env).unwrap();
+        assert!(text.contains("K=\"a b # c\""), "{text}");
+    }
+
+    #[test]
     fn overlay_injects_missing_vars_only() {
         // 系统环境中已有 SYS_VAR（值与 .env 不同）→ 不覆盖；
         // MISSING_VAR 环境缺失 → 注入。
         // 注：env_delta_overlay 依赖真实 std::env，测试仅在 AGENTOS_CONFIG_ROOT
         // 未指向含 .env 的目录时验证空操作降级。
+        // unwrap_or_else(into_inner)：测试 panic 导致锁中毒时继续执行
+        // （锁只为串行化 env 操作，中毒无并发安全含义）
+        let _guard = TEST_ENV_MUTEX.lock().unwrap_or_else(|p| p.into_inner());
         std::env::remove_var("AGENTOS_CONFIG_ROOT");
         assert!(project_env_path().is_none());
         assert!(env_delta_overlay().is_empty());

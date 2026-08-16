@@ -294,3 +294,124 @@ class TestTriggerReviewDegrade:
         got = await mod.get_report(triggered["review_id"])
         assert got["mode"] == "local_degrade"
         assert got["status"] == "completed"
+
+
+# ═══════════════════════════════════════════════════════════
+# GAP-1：深度复盘经 chat.send_message 起 review_agent 管道
+# ═══════════════════════════════════════════════════════════
+
+
+def _inject_chat_capability(mod: Any, result: Any = None, error: Exception | None = None) -> list[dict]:
+    """注入 fake chat 能力，记录 send_message 入参。"""
+    calls: list[dict] = []
+
+    async def fake_call(method: str, params: dict[str, Any]) -> Any:
+        assert method == "send_message"
+        calls.append(params)
+        if error:
+            raise error
+        return result if result is not None else {
+            "status": "created",
+            "pipeline_id": "pipe_review_gen_1",
+        }
+
+    mod.plugin._capabilities["chat"] = CapabilityHandle("chat", call_fn=fake_call)
+    return calls
+
+
+def _inject_pipeline_state_capability(mod: Any, rows: list[dict]) -> None:
+    """注入 fake pipeline-state 能力（get_report 轮询复盘管道状态）。"""
+
+    async def fake_call(method: str, params: dict[str, Any]) -> Any:
+        assert method == "list"
+        return rows
+
+    mod.plugin._capabilities["pipeline-state"] = CapabilityHandle(
+        "pipeline-state", call_fn=fake_call
+    )
+
+
+class TestTriggerReviewDispatch:
+    async def test_trigger_review_starts_review_pipeline(self, mod: Any) -> None:
+        """chat 可用 → 经 send_message 起 review 管道（不再 local_degrade）。"""
+        calls = _inject_chat_capability(mod)
+        r = await mod.trigger_review(
+            task_id="task-9", summary="复盘周报任务", artifacts=["a.md"], metrics={"quality": 0.8}
+        )
+        assert r["status"] == "running"
+        assert r["mode"] == "pipeline"
+        assert r["pipeline_id"] == "pipe_review_gen_1"
+
+        assert len(calls) == 1
+        p = calls[0]
+        assert p["create"] is True
+        assert p["background"] is True
+        # 血缘：根形式（系统组件，诚实声明复盘来源——不伪造父）
+        assert p["lineage"] == {"root": True, "origin": {"kind": "plugin", "source": "review"}}
+        # state：复盘对象 + 复盘输入出生即入
+        assert p["state"]["task.id"] == "task-9"
+        assert p["state"]["review.summary"] == "复盘周报任务"
+        assert p["state"]["review.artifacts"] == ["a.md"]
+        assert p["state"]["review.metrics"] == {"quality": 0.8}
+        assert "复盘" in p["message"] and "task-9" in p["message"]
+
+        # 报告登记为 running（get_report 轮询入口）
+        report = mod._reports[r["review_id"]]
+        assert report["status"] == "running"
+        assert report["pipeline_id"] == "pipe_review_gen_1"
+
+    async def test_trigger_review_degrades_without_chat(self, mod: Any) -> None:
+        """chat capability 缺席 → 维持 local_degrade 兜底（不崩）。"""
+        mod.plugin._capabilities.pop("chat", None)
+        r = await mod.trigger_review(task_id="task-1", summary="s")
+        assert r["status"] == "completed"
+        assert r["mode"] == "local_degrade"
+
+    async def test_trigger_review_degrades_on_dispatch_error(self, mod: Any) -> None:
+        """派发失败（内核错误）→ local_degrade 兜底（不崩）。"""
+        _inject_chat_capability(mod, error=RuntimeError("kernel down"))
+        r = await mod.trigger_review(task_id="task-1", summary="s")
+        assert r["mode"] == "local_degrade"
+
+
+class TestGetReportPipelinePoll:
+    async def test_get_report_finalizes_on_pipeline_completed(self, mod: Any) -> None:
+        """复盘管道 completed → 报告落 completed（mode=pipeline，内容取 raw_result）。"""
+        _inject_chat_capability(mod)
+        r = await mod.trigger_review(task_id="task-9", summary="s")
+        rid = r["review_id"]
+
+        _inject_pipeline_state_capability(
+            mod,
+            rows=[{
+                "pipeline_id": "pipe_review_gen_1",
+                "status": "completed",
+                "raw_result": "复盘结论：测试覆盖不足，建议补集成测试",
+            }],
+        )
+        report = await mod.get_report(rid)
+        assert report["status"] == "completed"
+        assert report["mode"] == "pipeline"
+        assert "复盘结论" in report["summary"]
+
+    async def test_get_report_marks_failed_on_pipeline_failure(self, mod: Any) -> None:
+        """复盘管道 failed → 报告落 failed（诚实状态，不伪造完成）。"""
+        _inject_chat_capability(mod)
+        r = await mod.trigger_review(task_id="task-9", summary="s")
+
+        _inject_pipeline_state_capability(
+            mod, rows=[{"pipeline_id": "pipe_review_gen_1", "status": "failed"}]
+        )
+        report = await mod.get_report(r["review_id"])
+        assert report["status"] == "failed"
+
+    async def test_get_report_keeps_running_while_pipeline_running(self, mod: Any) -> None:
+        """复盘管道仍在跑 → 报告保持 running（get_report 可重复轮询）。"""
+        _inject_chat_capability(mod)
+        r = await mod.trigger_review(task_id="task-9", summary="s")
+
+        _inject_pipeline_state_capability(
+            mod, rows=[{"pipeline_id": "pipe_review_gen_1", "status": "running"}]
+        )
+        report = await mod.get_report(r["review_id"])
+        assert report["status"] == "running"

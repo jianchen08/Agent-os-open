@@ -184,6 +184,17 @@ describe('会话和消息API服务', () => {
       // 验证抛出错误
       await expect(getMessages(sessionId)).rejects.toThrow()
     })
+
+    it('响应缺少数据体时应抛出明确错误（而非 TypeError: reading data）', async () => {
+      const sessionId = 'session-no-body'
+
+      // 200 但无 body（如 204/空响应）：payload 为 undefined/null/非对象
+      mockAxios.onGet(API_ENDPOINTS.MESSAGES.LIST(sessionId)).reply(200)
+
+      // 必须抛出带明确信息的错误，而不是
+      // 「Cannot read properties of undefined (reading 'data')」这类难排查的 TypeError
+      await expect(getMessages(sessionId)).rejects.toThrow('响应缺少数据体')
+    })
   })
 
   describe('重试机制', () => {

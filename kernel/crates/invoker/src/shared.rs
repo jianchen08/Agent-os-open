@@ -152,11 +152,15 @@ mod tests {
                     id: "llm".to_string(),
                     path: "config/models/llm.yaml".to_string(),
                     label: "LLM".to_string(),
+                    target: None,
+                    fields: vec![],
                 },
                 ConfigFileMapping {
                     id: "embedding".to_string(),
                     path: "config/models/embedding.yaml".to_string(),
                     label: "Embedding".to_string(),
+                    target: None,
+                    fields: vec![],
                 },
             ],
         );
@@ -176,6 +180,8 @@ mod tests {
                 id: "nope".to_string(),
                 path: "config/models/nope.yaml".to_string(),
                 label: "Nope".to_string(),
+                    target: None,
+                    fields: vec![],
             }],
         );
         let injected = build_injected_config(&full, &manifest);

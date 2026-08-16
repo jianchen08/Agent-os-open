@@ -1,5 +1,5 @@
 /**
- * 刷新对账竞态防护测试（根因2 修复回归）。
+ * 刷新对账竞态防护测试（回归）。
  *
  * 背景：pipelineMessageStore 曾持久化 hasMoreOlderByPipeline 但不持久化
  * reconciledByPipeline/prependedCountByPipeline，语义割裂。刷新后 hasMoreOlder=true
@@ -7,12 +7,12 @@
  * 触发 startReached → onLoadMore 看到 hasMoreOlder=true 放行 → older 并发，导致
  * prepend 的历史被 init 全量覆盖丢失或重复加载。
  *
- * 修复：
- *  1. merge 重置 hasMoreOlder/topCursor/bottomCursor（统一「刷新=全量重新对账」）。
- *  2. fetchMessages 防御：older 请求不得与 init 并发（init 进行中直接拒绝 older）。
- *
- * 本测试覆盖 #2（行为性，价值最高）：init 进行中时调 fetchMessages(older) 应被拒绝，
- * 不发网络请求；init 完成后才允许 older。
+ * 现行防护契约（实现演进后）：
+ *  1. merge 重置 reconciledByPipeline（刷新=全量重新对账）；bottomCursor 等运行时
+ *     状态以默认值为准。prependedCountByPipeline 字段已从 store 删除。
+ *  2. fetchMessages 并发去重按「方向」区分 key（init/newer/older 互不阻塞——
+ *     older 的 prepend 与 init 的全量替换均按 sequence 排序合并，方向间并发安全）；
+ *     同方向并发去重：复用同一 in-flight promise，不重复发网络请求。
  */
 import { describe, it, expect, beforeEach, vi } from 'vitest'
 import type { Message } from '@/types/models'
@@ -79,33 +79,43 @@ describe('刷新对账竞态：init/older 并发防护', () => {
       bottomCursorsByPipeline: {},
       hasMoreOlderByPipeline: {},
       isLoadingOlderByPipeline: {},
-      prependedCountByPipeline: {},
       reconciledByPipeline: {},
     })
   })
 
-  it('init 进行中时，older 请求被拒绝（不发网络请求）', async () => {
+  it('init 进行中时，older 按方向去重不互相阻塞；同方向并发复用同一请求', async () => {
     // 让 init 请求挂起（永不 resolve），保持 init 进行中
     mockGet.mockImplementationOnce(neverResolvingGet)
+    // older 请求正常返回 1 条更早消息
+    mockGet.mockResolvedValueOnce({
+      data: { messages: [makeMsg('m0', 0)], total: 1, has_more: false },
+    })
 
-    // 触发 init（全量加载）
+    // 触发 init（全量加载）；挂起的 init attach catch 避免 dangling promise 告警
     const initPromise = usePipelineMessageStore.getState().fetchMessages(PIPELINE_ID, { threadId: THREAD_ID })
+    initPromise.catch(() => {})
 
-    // 在 init 完成前，尝试发起 older 请求（before_sequence=10）
-    usePipelineMessageStore.getState().fetchMessages(PIPELINE_ID, {
+    // init 进行中发起 older（before_sequence=10）与并发重复 older
+    const olderPromise1 = usePipelineMessageStore.getState().fetchMessages(PIPELINE_ID, {
+      threadId: THREAD_ID,
+      before_sequence: 10,
+    })
+    const olderPromise2 = usePipelineMessageStore.getState().fetchMessages(PIPELINE_ID, {
       threadId: THREAD_ID,
       before_sequence: 10,
     })
 
-    // 关键断言：older 被拒绝，只应有 1 次网络调用（init 的），older 不额外发请求
-    expect(mockGet).toHaveBeenCalledTimes(1)
+    await Promise.all([olderPromise1, olderPromise2])
+
+    // 同方向去重：older 只发 1 次网络请求；方向间不阻塞：init 1 次 + older 1 次
+    expect(mockGet).toHaveBeenCalledTimes(2)
     const initCallParams = mockGet.mock.calls[0][1].params || {}
     expect(initCallParams).toMatchObject({ pipeline_run_id: PIPELINE_ID })
-    // 确认那次是 init（无 before_sequence）
+    // 确认第一次是 init（无 before_sequence）
     expect(initCallParams).not.toHaveProperty('before_sequence')
-
-    // 清理：让 init promise 不再挂起（避免影响后续/悬挂 promise 告警）
-    initPromise.catch(() => {})
+    // 第二次是 older（带 before_sequence）
+    const olderCallParams = mockGet.mock.calls[1][1].params || {}
+    expect(olderCallParams).toMatchObject({ before_sequence: 10, pipeline_run_id: PIPELINE_ID })
   })
 
   it('init 完成后，older 请求正常放行', async () => {
@@ -145,13 +155,13 @@ describe('刷新对账竞态：init/older 并发防护', () => {
       hasMoreOlderByPipeline: { [PIPELINE_ID]: true },
       topCursorsByPipeline: { [PIPELINE_ID]: 1 },
       bottomCursorsByPipeline: { [PIPELINE_ID]: 2 },
-      prependedCountByPipeline: { [PIPELINE_ID]: 50 },
       reconciledByPipeline: { [PIPELINE_ID]: true },
     })
 
     // 重新 import 触发 persist 重新初始化（模拟刷新 = store 重新创建）。
     // jsdom 无 IndexedDB，store 降级内存模式，rehydrate 无持久化数据 → merge 不真正执行。
     // 故直接验证：store 初始状态下这些字段都是 {} （符合「刷新后全量重新对账」的预期终态）。
+    // prependedCountByPipeline 字段已从 store 删除，不再断言。
     vi.resetModules()
     const freshMod = await import('@/stores/pipelineMessageStore')
     const freshState = freshMod.usePipelineMessageStore.getState()
@@ -160,6 +170,5 @@ describe('刷新对账竞态：init/older 并发防护', () => {
     expect(freshState.topCursorsByPipeline).toEqual({})
     expect(freshState.bottomCursorsByPipeline).toEqual({})
     expect(freshState.reconciledByPipeline).toEqual({})
-    expect(freshState.prependedCountByPipeline).toEqual({})
   })
 })

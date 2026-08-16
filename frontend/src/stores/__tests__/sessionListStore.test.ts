@@ -171,12 +171,17 @@ describe('sessionListStore', () => {
   // ── searchSessions ──
 
   describe('searchSessions', () => {
-    it('空关键词返回全部会话', () => {
-      const sessions = [makeSession({ id: 's1', title: '会话1' }), makeSession({ id: 's2', title: '会话2' })]
+    it('空关键词返回全部会话（原样返回，不排序）', () => {
+      const sessions = [
+        makeSession({ id: 's1', title: '会话1', pinned: false }),
+        makeSession({ id: 's2', title: '会话2', pinned: true }),
+      ]
       useSessionStore.setState(() => ({ sessions }))
 
       const result = useSessionListStore.getState().searchSessions('')
       expect(result).toHaveLength(2)
+      // 现行契约：空关键词早退原样返回（保持传入顺序，不做置顶/时间排序）
+      expect(result.map((s) => s.id)).toEqual(['s1', 's2'])
     })
 
     it('按关键词过滤会话（不区分大小写）', () => {
@@ -192,26 +197,27 @@ describe('sessionListStore', () => {
       expect(result.every((s) => s.title.toLowerCase().includes('python'))).toBe(true)
     })
 
-    it('置顶会话排在前面', () => {
+    it('置顶会话排在前面（非空关键词触发排序）', () => {
       const sessions = [
         makeSession({ id: 's1', title: '普通会话', pinned: false, updatedAt: '2026-06-01T00:00:00.000Z' }),
         makeSession({ id: 's2', title: '置顶会话', pinned: true, updatedAt: '2026-05-01T00:00:00.000Z' }),
       ]
       useSessionStore.setState(() => ({ sessions }))
 
-      const result = useSessionListStore.getState().searchSessions('')
+      // 现行契约：空关键词早退不排序，排序仅在非空关键词过滤后进行
+      const result = useSessionListStore.getState().searchSessions('会话')
       expect(result[0].id).toBe('s2')
       expect(result[1].id).toBe('s1')
     })
 
-    it('未置顶会话按更新时间倒序排列', () => {
+    it('未置顶会话按更新时间倒序排列（非空关键词触发排序）', () => {
       const sessions = [
         makeSession({ id: 's1', title: '旧会话', pinned: false, updatedAt: '2026-01-01T00:00:00.000Z' }),
         makeSession({ id: 's2', title: '新会话', pinned: false, updatedAt: '2026-06-01T00:00:00.000Z' }),
       ]
       useSessionStore.setState(() => ({ sessions }))
 
-      const result = useSessionListStore.getState().searchSessions('')
+      const result = useSessionListStore.getState().searchSessions('会话')
       expect(result[0].id).toBe('s2')
       expect(result[1].id).toBe('s1')
     })
@@ -349,15 +355,16 @@ describe('sessionListStore', () => {
       expect(mockUpdateSessionApi).not.toHaveBeenCalled()
     })
 
-    it('API 失败时本地标题已更新（乐观更新）', async () => {
+    it('API 失败时回滚本地标题（乐观更新失败回滚）', async () => {
       const sessions = [makeSession({ id: 's1', title: '旧名' })]
       useSessionStore.setState(() => ({ sessions }))
       mockUpdateSessionApi.mockRejectedValue(new Error('网络错误'))
 
       await useSessionListStore.getState().renameSession('s1', '新名')
 
+      // 现行契约：乐观更新后若 API 失败，回滚到原标题（避免与服务端状态漂移）
       const updated = useSessionStore.getState().sessions.find((s) => s.id === 's1')
-      expect(updated?.title).toBe('新名') // 乐观更新保留
+      expect(updated?.title).toBe('旧名')
     })
   })
 

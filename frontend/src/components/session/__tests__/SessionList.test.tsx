@@ -314,7 +314,7 @@ describe('AC-1.3-3: 置顶视觉标识', () => {
     expect(pinIcon).toBeInTheDocument()
   })
 
-  it('普通会话左侧应显示 MessageSquare 图标', () => {
+  it('普通会话左侧不显示图标（现行契约：仅置顶会话有 Pin 图标）', () => {
     const normalSession = createMockSession({ pinned: false, title: '普通会话' })
     render(
       <SessionList
@@ -325,9 +325,11 @@ describe('AC-1.3-3: 置顶视觉标识', () => {
       />,
     )
 
+    // 现行契约：普通会话标题前无任何图标（MessageSquare 图标已移除），
+    // 仅置顶会话显示 Pin 图标（见上一用例）
     const sessionButton = screen.getByRole('button', { name: /普通会话/ })
-    const messageIcon = sessionButton.querySelector('[data-testid="message-icon"]')
-    expect(messageIcon).toBeInTheDocument()
+    expect(sessionButton.querySelector('[data-testid="pin-icon"]')).toBeNull()
+    expect(sessionButton.querySelector('[data-testid="message-icon"]')).toBeNull()
   })
 })
 
@@ -351,7 +353,8 @@ describe('AC-1.3-4: 兼容现有功能', () => {
       openDropdownMenu(moreButtons[0])
     })
 
-    expect(await screen.findByText('编辑')).toBeInTheDocument()
+    // 现行契约：菜单项文案为「编辑会话」（原「编辑」已演进）
+    expect(await screen.findByText('编辑会话')).toBeInTheDocument()
     expect(screen.getByText('复制')).toBeInTheDocument()
     expect(screen.getByText('星标')).toBeInTheDocument()
     expect(screen.getByText('删除')).toBeInTheDocument()
@@ -414,7 +417,7 @@ describe('AC-1.3-4: 兼容现有功能', () => {
     expect(defaultCallbacks.onStarSession).toHaveBeenCalledWith(session.id)
   })
 
-  it('hover 时仍显示操作按钮', () => {
+  it('hover 时仍显示操作按钮（现行契约：星标 + 更多操作）', () => {
     const session = createMockSession()
     render(
       <SessionList
@@ -425,9 +428,11 @@ describe('AC-1.3-4: 兼容现有功能', () => {
       />,
     )
 
-    const deleteButtons = screen.getAllByRole('button', { name: /删除会话/ })
+    // 现行契约：行内常驻操作为「星标」按钮 + 「更多操作」下拉触发器
+    // （独立的「删除会话」按钮已移除，删除入口收敛到下拉菜单 + 内置确认对话框）
+    const starButtons = screen.getAllByRole('button', { name: /^(星标|取消星标)/ })
     const moreButtons = screen.getAllByRole('button', { name: /更多操作/ })
-    expect(deleteButtons.length).toBeGreaterThan(0)
+    expect(starButtons.length).toBeGreaterThan(0)
     expect(moreButtons.length).toBeGreaterThan(0)
   })
 

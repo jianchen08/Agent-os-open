@@ -926,6 +926,10 @@ pub async fn pipelines_runs_handler(
 }
 
 /// state 摘要提取的字段白名单（phase/迭代/上下文——messages 等大字段不出口）。
+///
+/// GAP-1（task = pipeline）：任务域 `task.*`（任务树展示）与 `lineage.*`
+/// （父子分组/溯源——任务树按 parent 分组聚合、根形式天然不进树的出口依赖）
+/// 以扁平点号键出口，风格与 `track.total_tokens` 一致。
 const STATE_SUMMARY_KEYS: &[&str] = &[
     "agent_id",
     "agent_type",
@@ -952,11 +956,20 @@ const STATE_SUMMARY_KEYS: &[&str] = &[
     "name",
     "tags",
     "input",
+    "raw_result",
     "raw_error",
+    // GAP-1 阶段 1：任务域字段（管道 state 是任务单一真值，聚合是任务树数据源）
+    "task.goal",
+    "task.status",
+    "task.id",
+    // GAP-1 阶段 1：血缘字段（出生写入，任务树分组与溯源的出口依赖）
+    "lineage.parent_pipeline_id",
+    "lineage.origin_session_id",
+    "lineage.root",
 ];
 
 /// 从一份管道 state 提取摘要（白名单字段 + messages 条数）。
-fn summarize_state(state: &serde_json::Value) -> serde_json::Value {
+pub(crate) fn summarize_state(state: &serde_json::Value) -> serde_json::Value {
     let mut out = serde_json::Map::new();
     if let Some(obj) = state.as_object() {
         for k in STATE_SUMMARY_KEYS {
@@ -1701,9 +1714,9 @@ pub async fn plugins_set_enabled_handler(
                 error = %e,
                 "写入 profile 失败"
             );
-            return Err(ApiError::Internal {
+            Err(ApiError::Internal {
                 message: format!("写入 profile 失败: {e}"),
-            });
+            })
         }
     }
 }
@@ -1921,5 +1934,71 @@ mod tdd4_config_center_tests {
         let cc = state.config_center.as_ref().expect("应已注入");
         let val = cc.load("test.yaml").expect("load 应成功");
         assert_eq!(val["key"], "value");
+    }
+}
+
+#[cfg(test)]
+mod state_summary_tests {
+    //! GAP-1 阶段 1：任务域/血缘字段出得来——STATE_SUMMARY_KEYS 白名单扩展。
+    //! task = pipeline 后，/api/v1/pipelines/state 聚合是任务树数据源，
+    //! task.*（任务字段）与 lineage.*（父子分组/溯源）必须出口，不被 summarize 裁掉。
+
+    use super::*;
+
+    #[test]
+    fn test_summarize_state_exports_task_and_lineage_fields() {
+        let state = json!({
+            "pipeline_id": "p1",
+            "task.goal": "喝水提醒",
+            "task.status": "running",
+            "task.id": "t1",
+            "lineage.parent_pipeline_id": "pipe_parent",
+            "lineage.origin_session_id": "sess_root",
+            "lineage.root": true,
+            "messages": [{"role": "user"}, {"role": "assistant"}],
+        });
+        let s = summarize_state(&state);
+        assert_eq!(s["task.goal"], "喝水提醒");
+        assert_eq!(s["task.status"], "running");
+        assert_eq!(s["task.id"], "t1");
+        assert_eq!(s["lineage.parent_pipeline_id"], "pipe_parent");
+        assert_eq!(s["lineage.origin_session_id"], "sess_root");
+        assert_eq!(s["lineage.root"], true);
+        // messages 仍只出口条数（大字段不出口的既有契约不变）
+        assert!(s.get("messages").is_none());
+        assert_eq!(s["message_count"], 2);
+    }
+
+    #[test]
+    fn test_summarize_state_omits_absent_task_and_lineage_fields() {
+        // 反向性质：无任务域字段的普通会话管道，摘要不得伪造 task.*/lineage.* 键
+        let s = summarize_state(&json!({"pipeline_id": "p2", "status": "running"}));
+        assert_eq!(s["pipeline_id"], "p2");
+        assert_eq!(s["status"], "running");
+        for k in [
+            "task.goal",
+            "task.status",
+            "task.id",
+            "lineage.parent_pipeline_id",
+            "lineage.origin_session_id",
+            "lineage.root",
+        ] {
+            assert!(s.get(k).is_none(), "{k} 不应被伪造");
+        }
+    }
+
+    #[test]
+    fn test_summarize_state_still_cuts_non_whitelisted_fields() {
+        // 白名单机制本身不变：新增键不放开白名单外字段
+        let s = summarize_state(&json!({
+            "pipeline_id": "p3",
+            "secret_blob": "x",
+            "task.goal": "g"
+        }));
+        assert!(s.get("secret_blob").is_none(), "白名单外字段仍裁剪");
+        assert_eq!(s["task.goal"], "g");
+        // raw_result（最终输出）与 input 对称出口——复盘报告提取/任务树展示依赖
+        let s2 = summarize_state(&json!({"pipeline_id": "p4", "raw_result": "复盘结论：x"}));
+        assert_eq!(s2["raw_result"], "复盘结论：x");
     }
 }

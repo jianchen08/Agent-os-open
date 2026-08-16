@@ -26,6 +26,24 @@ from agentos_plugin_sdk import AgentOSPlugin  # noqa: E402
 plugin = AgentOSPlugin("task_submit_tool")
 
 
+@plugin.on_load
+async def _on_load(_params: dict[str, Any]) -> None:
+    """sidecar 启动：注入 chat.send_message 派发器（GAP-1 任务执行驱动）。
+
+    tool.py 模块级注入点 set_chat_sender——提交成功后经 chat capability 的
+    send_message（create 分支，引擎生成 pipeline_id）创建任务执行管道。
+    能力句柄懒解析（协程内 get_capability），on_load 早于 capability 注入
+    完成也能在真正派发时拿到。
+    """
+    import tool as tool_mod  # noqa: PLC0415
+
+    async def _send(params: dict[str, Any]) -> dict[str, Any]:
+        handle = plugin.get_capability("chat")
+        return await handle.call("send_message", params)
+
+    tool_mod.set_chat_sender(_send)
+
+
 @plugin.tool(
     name="task_submit",
     schema={

@@ -1418,8 +1418,16 @@ async def cancel_task(
 
 
 async def _submit_task_event(task_id: str, task_service: Any, is_root: bool = True) -> bool:
-    """通过 task_worker 直接提交任务事件。"""
+    """GAP-1：经 chat.send_message 驱动任务执行管道（引擎生成 pipeline_id）。
 
+    0.1 的 task_worker.submit_task 已随 0.2 移除（此前该函数因
+    infrastructure.service_provider ImportError 恒 False——UI 路径任务
+    启动静默失败）。现走与 task_submit 工具同一条链：内核 chat capability
+    的 send_message 创建分支，state 出生即带 task.* 字段、lineage 有父/
+    根二选一、execution_context 透传、background 派发不阻塞请求。
+
+    派发成功后写任务↔管道关联 + start_task（run 未真正派发前不声称执行）。
+    """
     try:
         task = task_service.get_task(task_id)
 
@@ -1428,27 +1436,78 @@ async def _submit_task_event(task_id: str, task_service: Any, is_root: bool = Tr
 
         metadata = task.metadata or {}
 
-        from infrastructure.service_provider import get_service_provider  # noqa: PLC0415
+        def _plugin_obj() -> Any:
+            from routes_missing import _channel_api_plugin  # noqa: PLC0415
 
-        task_worker = get_service_provider().get("task_worker")
+            return _channel_api_plugin()
 
-        if not task_worker:
-            logger.warning("_submit_task_event: task_worker 不可用")
+        chat = _plugin_obj().get_capability("chat")
 
+        parent_pipeline_id = str(getattr(task, "parent_pipeline_id", "") or "")
+        if parent_pipeline_id:
+            lineage: dict[str, Any] = {
+                "parent_pipeline_id": parent_pipeline_id,
+                "origin_session_id": parent_pipeline_id,
+            }
+        else:
+            lineage = {
+                "root": True,
+                "origin": {"kind": "channel", "source": "channel_api"},
+            }
+
+        title = task.title or ""
+        description = task.description or ""
+        kickoff = f"执行任务「{title}」（任务 ID: {task_id}）。"
+        if description:
+            kickoff += f"{BN}{BN}任务描述：{description}"
+
+        params: dict[str, Any] = {
+            "create": True,
+            "background": True,
+            "message": kickoff,
+            "user_id": str(metadata.get("user_id") or "task_system"),
+            "state": {
+                "task.id": task_id,
+                "task.goal": title,
+                "task.status": "pending",
+                "task.description": description,
+                "task.acceptance_criteria": metadata.get("acceptance_criteria", {}),
+                "task.dependencies": list(metadata.get("dependencies") or []),
+                "task.submitted_by": str(metadata.get("user_id") or ""),
+            },
+            "lineage": lineage,
+        }
+        execution_context = metadata.get("execution_context")
+        if execution_context:
+            params["execution_context"] = execution_context
+
+        resp = await chat.call("send_message", params)
+        pipeline_id = str(resp.get("pipeline_id") or "") if isinstance(resp, dict) else ""
+        if not pipeline_id:
+            logger.warning(
+                "_submit_task_event: 派发响应缺少 pipeline_id | task_id=%s | resp=%s",
+                task_id,
+                resp,
+            )
             return False
 
-        return task_worker.submit_task(
-            {
-                "task_id": task.id,
-                "target_type": task.target_type or "agent",
-                "target_id": metadata.get("target_id", ""),
-                "user_input": task.title or "",
-                "description": task.description or "",
-                "acceptance_criteria": metadata.get("acceptance_criteria", {}),
-                "workspace": metadata.get("workspace", ""),
-                "is_root": is_root,
-            }
+        try:
+            await task_service.bind_pipeline_run(task_id, pipeline_id)
+            await task_service.start_task(task_id)
+        except Exception as assoc_exc:  # noqa: BLE001 — 关联回写失败不否定已派发事实
+            logger.error(
+                "_submit_task_event: 任务↔管道关联/启动回写失败 | task_id=%s | pipeline_id=%s | err=%s",
+                task_id,
+                pipeline_id,
+                assoc_exc,
+            )
+
+        logger.info(
+            "_submit_task_event: 任务执行管道已创建 | task_id=%s | pipeline_id=%s",
+            task_id,
+            pipeline_id,
         )
+        return True
 
     except Exception as exc:
         logger.warning("_submit_task_event: 提交任务失败: task_id=%s, error=%s", task_id, exc)

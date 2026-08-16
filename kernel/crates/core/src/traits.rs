@@ -1190,9 +1190,44 @@ pub struct ConfigFileMapping {
     /// 配置子项标识（插件内唯一）。
     pub id: String,
     /// 相对 config/ 根的文件路径（含 config/ 前缀或相对形式均可，loader 归一化）。
+    ///
+    /// `target: "env"` 的条目例外：path 不指向 config/ 子树，而表示项目根
+    /// `.env`（GAP-4 外部 MCP 源 key 的声明驱动配置入口）。
     pub path: String,
     /// 前端展示名称。
     pub label: String,
+    /// 写入目标（GAP-4）：`"env"` = 字段写进项目 `.env`（key/加密字段），
+    /// 缺省 = 写进 path 指向的插件配置文件（既有 YAML 语义）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target: Option<String>,
+    /// `target: "env"` 时的字段级声明：前端按此渲染表单（secret 用密码框），
+    /// `name` 须与 `mcp.endpoint.auth.value` / `env` 里的 `${VAR}` 引用一致
+    /// （loader 交叉核对，漂移启动期暴露）。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub fields: Vec<EnvConfigField>,
+}
+
+/// env target 条目的字段级声明（GAP-4 声明驱动配置）。
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct EnvConfigField {
+    /// 环境变量名（= .env 键，须与 manifest 的 `${VAR}` 引用一致）。
+    pub name: String,
+    /// 前端展示名称。
+    pub label: String,
+    /// 字段类型：`secret`（密码框/掩码展示）| `string`。缺省按 secret 处理
+    /// （env 条目的保守默认——宁可掩码不可泄漏）。
+    #[serde(rename = "type", default = "default_env_field_type")]
+    pub field_type: String,
+    /// 是否必填（缺失时插件 connect 硬失败 vs 可选降级）。
+    #[serde(default)]
+    pub required: bool,
+    /// 字段说明（前端提示文案，可选）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+}
+
+fn default_env_field_type() -> String {
+    "secret".to_string()
 }
 
 /// 工具能力声明。
@@ -1320,6 +1355,11 @@ pub struct EndpointAuth {
     pub header_name: String,
     /// 鉴权值，支持 `${ENV_VAR}` 占位（构造 HTTP 客户端时解析）。
     pub value: String,
+    /// 鉴权凭据是否必需（GAP-4b）。缺省 `None` 按必需处理（保持既有硬失败
+    /// 行为）；显式 `false` 时占位变量缺失 → 跳过该鉴权头照常连接，由
+    /// 服务端 401 说话（如 langchain_hub 的 LANGSMITH_API_KEY 可选场景）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub required: Option<bool>,
 }
 
 /// 鉴权方式。

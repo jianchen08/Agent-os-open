@@ -710,14 +710,29 @@ class TriggerSetupTool(BuiltinTool):
             f"event_type={event_type}"
         )
 
-        return create_success_result(
-            data={
-                "success": True,
-                "trigger_id": trigger_id,
-                "trigger_type": "event",
-                "message": f"事件触发器已设置，监听事件: {event_type}",
-            },
-        )
+        data = {
+            "success": True,
+            "trigger_id": trigger_id,
+            "trigger_type": "event",
+            "message": f"事件触发器已设置，监听事件: {event_type}",
+        }
+
+        # GAP-2 防御：域事件桥未就绪（manifest 未声明 domain_event hook 或
+        # server.py 处理器未接线）时 EVENT 触发器收不到任何事件——明确警告，
+        # 不静默注册成功。
+        if not self._manager.is_event_bridge_ready():
+            data["warning"] = (
+                "域事件桥未就绪：当前 sidecar 未接通内核域事件通道，"
+                "此 EVENT 触发器可能永远不会触发（请检查 plugin.json 的 "
+                "domain_event lifecycle hook 声明与 server.py 接线）"
+            )
+            logger.warning(
+                "[TriggerSetupTool] EVENT 触发器注册于域事件桥未就绪状态 | trigger_id=%s | event=%s",
+                trigger_id,
+                event_type,
+            )
+
+        return create_success_result(data=data)
 
     async def _setup_condition_trigger(
         self,
@@ -765,11 +780,25 @@ class TriggerSetupTool(BuiltinTool):
             f"condition={condition}"
         )
 
-        return create_success_result(
-            data={
-                "success": True,
-                "trigger_id": trigger_id,
-                "trigger_type": "condition",
-                "message": f"条件触发器已设置，条件: {condition}",
-            },
-        )
+        data = {
+            "success": True,
+            "trigger_id": trigger_id,
+            "trigger_type": "condition",
+            "message": f"条件触发器已设置，条件: {condition}",
+        }
+
+        # GAP-2 防御：state 聚合桥未就绪（server.py 未注入 state provider）时
+        # CONDITION 触发器没有求值上下文——明确警告，不静默注册成功。
+        if not self._manager.is_state_provider_ready():
+            data["warning"] = (
+                "条件求值桥未就绪：当前 sidecar 未接通管道 state 聚合读取，"
+                "此 CONDITION 触发器可能永远不会触发（请检查 server.py 的 "
+                "state provider 注入与内核 pipeline-state capability）"
+            )
+            logger.warning(
+                "[TriggerSetupTool] CONDITION 触发器注册于 state 聚合桥未就绪状态 | trigger_id=%s | condition=%s",
+                trigger_id,
+                condition,
+            )
+
+        return create_success_result(data=data)

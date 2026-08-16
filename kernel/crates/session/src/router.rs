@@ -26,6 +26,10 @@ pub trait PipelineDispatcher: Send + Sync {
     /// thinking_strength 是前端思考强度（off/low/medium/high，空串=未指定），
     /// 注入引擎初始状态后由 llm_core 路由到具体模型参数（temperature/max_tokens/
     /// reasoning_effort）。
+    ///
+    /// state_overlay 是自由 state 注入（GAP-1：chat.send_message 的 `state`
+    /// 参数 + 引擎写入的 lineage 扁平键），在 execution_context 合并点之后并入
+    /// initial_state 顶层扁平键；WS 前端路径不携带（None）。
     async fn dispatch_user_input(
         &self,
         thread_id: &str,
@@ -34,6 +38,7 @@ pub trait PipelineDispatcher: Send + Sync {
         pipeline_id: &str,
         thinking_strength: &str,
         execution_context: Option<&serde_json::Value>,
+        state_overlay: Option<&serde_json::Value>,
     ) -> Result<(), String>;
 
     /// 转发人工交互响应（审批/选择）。
@@ -159,6 +164,7 @@ impl InboundRouter {
                 &content,
                 &pipeline_id,
                 &thinking_strength,
+                None,
                 None,
             )
             .await

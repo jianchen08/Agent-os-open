@@ -131,7 +131,7 @@ describe('发送消息没有输出 bug 复现', () => {
     expect(logCalls.some(w => w.includes('message not found'))).toBe(false)
   })
 
-  it('场景2: initFromAPI 在 stream_start 之后被调用（竞态）', () => {
+  it('场景2: initFromAPI 在 stream_start 之后被调用（竞态）- 全量替换丢弃本地占位', () => {
     const store = usePipelineMessageStore.getState()
     store.registerPipeline({ pipelineId: PIPELINE_ID, sessionId: SESSION_ID, level: 1, tabId: null, agentName: '', status: 'idle', parentId: null, unreadCount: 0 })
     store.activatePipeline(PIPELINE_ID)
@@ -159,14 +159,16 @@ describe('发送消息没有输出 bug 复现', () => {
     apiMsgs.push(makeMsg('user-new', { role: 'user', content: '新问题', status: 'completed' }))
     store.initFromAPI(PIPELINE_ID, apiMsgs)
 
+    // 现行契约：initFromAPI 为全量权威替换，不保留本地 streaming 占位
+    // （生产环境 loadPipelineMessages 的流式保护会阻止流式中发起 init；
+    //  后端仍在输出时由 WS 重连 backfill + 续流补回新内容）
     const msgsAfterInit = store.getMessages(PIPELINE_ID)
-    const streamingMsg = msgsAfterInit.find(m => m.id === streamMsgId)
-    expect(streamingMsg).toBeDefined()
+    expect(msgsAfterInit.find(m => m.id === streamMsgId)).toBeUndefined()
 
+    // 后续 updateMessage 找不到目标 → 跳过更新（不自动创建），输出明确日志
     store.updateMessage(PIPELINE_ID, streamMsgId, { status: 'completed' } as any)
-    const afterEnd = store.getMessages(PIPELINE_ID).find(m => m.id === streamMsgId)
-    expect(afterEnd).toBeDefined()
-    expect(afterEnd!.status).toBe('completed')
+    expect(store.getMessages(PIPELINE_ID).find(m => m.id === streamMsgId)).toBeUndefined()
+    expect(logCalls.some(w => w.includes('目标消息不存在'))).toBe(true)
     expect(logCalls.some(w => w.includes('message not found'))).toBe(false)
   })
 
@@ -205,24 +207,23 @@ describe('发送消息没有输出 bug 复现', () => {
     const streamMsgId = 'msg_stream_004'
     ensureStreamingPlaceholder(store, PIPELINE_A, streamMsgId)
 
-	    // updateMessage 在 B 管道找不到消息 → upsert 创建新消息（不会影响 A 管道）
-	    store.updateMessage(PIPELINE_B, streamMsgId, { status: 'completed' } as any)
+    // 现行契约：updateMessage 在 B 管道找不到消息 → 跳过更新（不自动创建避免重复），
+    // 输出明确日志；不影响 A 管道、不在 B 管道插入消息
+    store.updateMessage(PIPELINE_B, streamMsgId, { status: 'completed' } as any)
 
-	    // upsert 日志
-	    expect(logCalls.some(w => w.includes('updateMessage 未找到'))).toBe(true)
+    // 跳过更新的明确日志
+    expect(logCalls.some(w => w.includes('目标消息不存在'))).toBe(true)
 
-	    // A 管道的原消息不变
-	    const msgsA = store.getMessages(PIPELINE_A)
-	    expect(msgsA.find(m => m.id === streamMsgId)).toBeDefined()
-	    expect(msgsA.find(m => m.id === streamMsgId)!.status).toBe('streaming')
+    // A 管道的原消息不变（仍为 streaming）
+    const msgsA = store.getMessages(PIPELINE_A)
+    expect(msgsA.find(m => m.id === streamMsgId)).toBeDefined()
+    expect(msgsA.find(m => m.id === streamMsgId)!.status).toBe('streaming')
 
-	    // B 管道被 upsert 插入了新消息
-	    const msgsB = store.getMessages(PIPELINE_B)
-	    expect(msgsB.find(m => m.id === streamMsgId)).toBeDefined()
-	    expect(msgsB.find(m => m.id === streamMsgId)!.status).toBe('completed')
+    // B 管道未被写入任何消息（无 upsert）
+    expect(store.getMessages(PIPELINE_B)).toEqual([])
   })
 
-  it('场景5: stream_start 缺失导致占位消息未创建，updateMessage 自动创建消息', () => {
+  it('场景5: stream_start 缺失导致占位消息未创建，updateMessage 跳过更新（不自动创建）', () => {
     const store = usePipelineMessageStore.getState()
     store.registerPipeline({ pipelineId: PIPELINE_ID, sessionId: SESSION_ID, level: 1, tabId: null, agentName: '', status: 'idle', parentId: null, unreadCount: 0 })
     store.activatePipeline(PIPELINE_ID)
@@ -240,12 +241,11 @@ describe('发送消息没有输出 bug 复现', () => {
 
     store.updateMessage(PIPELINE_ID, streamMsgId, { status: 'completed' } as any)
 
+    // 现行契约：找不到目标消息时不自动创建（避免重复消息），仅输出明确日志
     const msgs = store.getMessages(PIPELINE_ID)
-    expect(msgs).toHaveLength(52)
-    const autoCreated = msgs.find(m => m.id === streamMsgId)
-    expect(autoCreated).toBeDefined()
-    expect(autoCreated!.status).toBe('completed')
-    expect(autoCreated!.role).toBe('assistant')
+    expect(msgs).toHaveLength(51)
+    expect(msgs.find(m => m.id === streamMsgId)).toBeUndefined()
+    expect(logCalls.some(w => w.includes('目标消息不存在'))).toBe(true)
   })
 
   it('场景6: 真实 ID 格式竞态 — API hex ID vs WS msg_ 前缀 ID', () => {
@@ -279,15 +279,15 @@ describe('发送消息没有输出 bug 复现', () => {
     apiMsgs.push(makeMsg('hex_user_new_0000', { role: 'user', content: '新问题', status: 'completed' }))
     store.initFromAPI(PIPELINE_ID, apiMsgs)
 
+    // 现行契约：initFromAPI 全量替换，本地 msg_ 前缀占位不被保留
+    // （生产由 loadPipelineMessages 流式保护阻止流式中 init；WS backfill 补回）
     const msgsAfterInit = store.getMessages(PIPELINE_ID)
-    const streamingMsg = msgsAfterInit.find(m => m.id === streamMsgId)
-    expect(streamingMsg).toBeDefined()
-    expect(streamingMsg!.status).toBe('streaming')
+    expect(msgsAfterInit.find(m => m.id === streamMsgId)).toBeUndefined()
 
+    // 后续 updateMessage 找不到目标 → 跳过更新，输出明确日志
     store.updateMessage(PIPELINE_ID, streamMsgId, { status: 'completed' } as any)
-    const afterEnd = store.getMessages(PIPELINE_ID).find(m => m.id === streamMsgId)
-    expect(afterEnd).toBeDefined()
-    expect(afterEnd!.status).toBe('completed')
+    expect(store.getMessages(PIPELINE_ID).find(m => m.id === streamMsgId)).toBeUndefined()
+    expect(logCalls.some(w => w.includes('目标消息不存在'))).toBe(true)
     expect(logCalls.some(w => w.includes('message not found'))).toBe(false)
   })
 
@@ -322,10 +322,9 @@ describe('发送消息没有输出 bug 复现', () => {
     apiMsgs.push(makeMsg('hex_user_new_0000', { role: 'user', content: '新问题', status: 'completed' }))
     store.initFromAPI(PIPELINE_ID, apiMsgs)
 
+    // 现行契约：initFromAPI 全量替换，已完成的本地占位同样不保留（API 为权威）
     const afterInit = store.getMessages(PIPELINE_ID)
-    const completedMsg = afterInit.find(m => m.id === streamMsgId)
-    expect(completedMsg).toBeDefined()
-    expect(completedMsg!.status).toBe('completed')
+    expect(afterInit.find(m => m.id === streamMsgId)).toBeUndefined()
     expect(logCalls.some(w => w.includes('message not found'))).toBe(false)
   })
 

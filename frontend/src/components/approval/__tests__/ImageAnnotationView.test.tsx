@@ -1,17 +1,20 @@
 /**
  * ImageAnnotationView 图片标注 - 单元测试
  *
- * 测试覆盖：
+ * 测试覆盖（对齐现行组件契约）：
  * - 基础渲染（图片、工具栏、标注计数）
  * - 已有标注渲染（矩形区域、编号、建议文字）
- * - 只读模式（隐藏工具栏、无删除按钮）
+ * - 只读模式（无删除按钮）
  * - 空标注列表
- * - 删除标注回调
- * - 无效标注类型过滤（只显示 image_area 类型）
+ * - 标注类型过滤（只显示 image_area 且有 area 的类型）
+ *
+ * 已删用例说明：onRemoveAnnotation prop 及删除按钮已从组件移除
+ * （删除交互已不在 ImageAnnotationView 内实现），相关「显示删除按钮/
+ * 点击删除回调」用例随之删除。
  */
 
 import { render, screen } from '@testing-library/react'
-import { describe, it, expect, vi } from 'vitest'
+import { describe, it, expect } from 'vitest'
 import { ImageAnnotationView } from '../ImageAnnotationView'
 import type { Annotation } from '@/types/review'
 
@@ -43,7 +46,7 @@ describe('ImageAnnotationView', () => {
       expect(img).toHaveAttribute('src', 'https://example.com/img.png')
     })
 
-    it('应渲染工具栏（非只读）', () => {
+    it('应渲染工具栏（标题 + 标注计数）', () => {
       render(
         <ImageAnnotationView
           imageUrl="test.png"
@@ -52,7 +55,9 @@ describe('ImageAnnotationView', () => {
         />,
       )
 
-      expect(screen.getByText('在图片上拖拽绘制标注区域')).toBeInTheDocument()
+      // 现行契约：工具栏为标题「图片标注」+ 计数（非只读提示文案已移除）
+      expect(screen.getByText('图片标注')).toBeInTheDocument()
+      expect(screen.getByTestId('annotation-count')).toBeInTheDocument()
     })
 
     it('应显示标注计数', () => {
@@ -85,7 +90,8 @@ describe('ImageAnnotationView', () => {
         />,
       )
 
-      expect(screen.getByTestId('annotation-rect-rect1')).toBeInTheDocument()
+      // 现行契约：矩形叠加层 testid 按索引命名
+      expect(screen.getByTestId('annotation-overlay-0')).toBeInTheDocument()
     })
 
     it('应显示标注编号', () => {
@@ -120,14 +126,15 @@ describe('ImageAnnotationView', () => {
         />,
       )
 
-      expect(screen.getByTestId('annotation-rect-m1')).toBeInTheDocument()
-      expect(screen.getByTestId('annotation-rect-m2')).toBeInTheDocument()
-      expect(screen.getByTestId('annotation-rect-m3')).toBeInTheDocument()
+      // 现行契约：矩形叠加层 testid 按索引命名
+      expect(screen.getByTestId('annotation-overlay-0')).toBeInTheDocument()
+      expect(screen.getByTestId('annotation-overlay-1')).toBeInTheDocument()
+      expect(screen.getByTestId('annotation-overlay-2')).toBeInTheDocument()
     })
   })
 
   describe('只读模式', () => {
-    it('只读模式不显示工具栏', () => {
+    it('只读模式不显示拖拽绘制提示', () => {
       render(
         <ImageAnnotationView
           imageUrl="test.png"
@@ -149,28 +156,11 @@ describe('ImageAnnotationView', () => {
           imageUrl="test.png"
           annotations={annotations}
           readOnly={true}
-          onRemoveAnnotation={vi.fn()}
         />,
       )
 
+      // 现行契约：组件已无删除交互，任何模式下都不出现删除按钮
       expect(screen.queryByTestId('remove-annotation-ro1')).not.toBeInTheDocument()
-    })
-
-    it('非只读 + 有 onRemoveAnnotation 时显示删除按钮', () => {
-      const annotations = [
-        makeAnnotation({ id: 'edit1' }),
-      ]
-
-      render(
-        <ImageAnnotationView
-          imageUrl="test.png"
-          annotations={annotations}
-          readOnly={false}
-          onRemoveAnnotation={vi.fn()}
-        />,
-      )
-
-      expect(screen.getByTestId('remove-annotation-edit1')).toBeInTheDocument()
     })
   })
 
@@ -198,28 +188,6 @@ describe('ImageAnnotationView', () => {
     })
   })
 
-  describe('删除标注回调', () => {
-    it('点击删除按钮应调用 onRemoveAnnotation', () => {
-      const onRemove = vi.fn()
-      const annotations = [
-        makeAnnotation({ id: 'del1' }),
-      ]
-
-      render(
-        <ImageAnnotationView
-          imageUrl="test.png"
-          annotations={annotations}
-          onRemoveAnnotation={onRemove}
-        />,
-      )
-
-      // 注意：删除按钮使用 group-hover:flex 可能在测试中不可见
-      // 但 button 元素仍存在于 DOM 中
-      const deleteBtn = screen.getByTestId('remove-annotation-del1')
-      expect(deleteBtn).toBeInTheDocument()
-    })
-  })
-
   describe('标注类型过滤', () => {
     it('只渲染 image_area 类型的标注', () => {
       const annotations = [
@@ -240,8 +208,9 @@ describe('ImageAnnotationView', () => {
         />,
       )
 
-      expect(screen.getByTestId('annotation-rect-img1')).toBeInTheDocument()
-      expect(screen.queryByTestId('annotation-rect-vid1')).not.toBeInTheDocument()
+      // 现行契约：矩形叠加层按索引命名，video_timestamp 被过滤（无第 2 个 overlay）
+      expect(screen.getByTestId('annotation-overlay-0')).toBeInTheDocument()
+      expect(screen.queryByTestId('annotation-overlay-1')).not.toBeInTheDocument()
     })
 
     it('没有 area 属性的 image_area 标注不应渲染矩形', () => {
@@ -256,7 +225,7 @@ describe('ImageAnnotationView', () => {
         />,
       )
 
-      expect(screen.queryByTestId('annotation-rect-noarea')).not.toBeInTheDocument()
+      expect(screen.queryByTestId('annotation-overlay-0')).not.toBeInTheDocument()
     })
   })
 

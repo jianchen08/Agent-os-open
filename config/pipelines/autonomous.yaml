@@ -49,6 +49,7 @@ loop_bodies:
       # ── 上下文准备（input 插件链）──
       - id: prepare
         steps:                    # 插件 id（manifest 里的 id，带 pipeline_ 前缀）
+          - pipeline_pause_guard       # 任务暂停检查（迭代起点，priority=5 最早；task_service 未接线时降级 paused=False + warning 留痕，写 state["pause_guard.checked"]）
           - pipeline_tool_schema
           - pipeline_param_inject
           - pipeline_memory_read
@@ -57,6 +58,8 @@ loop_bodies:
           - pipeline_godot_context       # Godot 选中引用注入（选中非空时在用户消息后插入 <reference> 消息）
           - pipeline_prompt_build
           - pipeline_isolation_guard   # 工具执行前决策隔离级别（写 state["execution_contexts"]）
+          - pipeline_level_guard       # 层级权限守卫（仅 tool_execute 轮次：任务类工具按 tool_ids 拦截，写 state["security.level_decision"]，tool_core 执行前检查）
+          - pipeline_security_check    # 安全守卫（仅 tool_execute 轮次：路径遍历/敏感目录/危险工具审批，写 state["security.decision"]；读 isolation_guard 写入的 execution_contexts 判定隔离放行）
           - pipeline_cost_control      # 预算统计（task_observability 1c：默认预算放大到实际不触达）
           - pipeline_termination_advisor  # 主动终止判断（整合 cost_control/stuck/track 信号，task_observability 1c）
         context:                  # 自由 key-value，merge 进 state 供插件读取

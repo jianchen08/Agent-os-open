@@ -825,6 +825,40 @@ impl CapabilityRouter for KernelCapabilityRouter {
             // / memory 三表（M1 落地），不再各自持有进程内 ServiceProvider/store。
             ("service-registry", method) => self.handle_service_registry(method, params).await,
 
+            // ── pipeline-state：管道 state 聚合（GAP-2 CONDITION 求值上下文）──
+            // 返回当前租户全部常驻管道的 state 摘要行（扁平点号键，task.*/lineage.*
+            // 经 STATE_SUMMARY_KEYS 出口）——与 GET /api/v1/pipelines/state 同数据源
+            // （内存 registry），行结构扁平化（state 字段提升到行顶层），插件侧
+            // condition_parser 直接以行为求值上下文。messages 全文不出口。
+            ("pipeline-state", "list") => {
+                let tenant_id = agentos_tenant::current_or_default("default").tenant_id;
+                let registry = agentos_session::pipeline_state_registry::global_registry();
+                let mut rows: Vec<Value> = Vec::new();
+                for listing in registry.list() {
+                    if listing.tenant_id != tenant_id {
+                        continue;
+                    }
+                    let Some(entry) = registry.get(&listing.tenant_id, &listing.pipeline_id)
+                    else {
+                        continue;
+                    };
+                    let mut row = {
+                        let e = entry.read();
+                        crate::routes::summarize_state(&e.state)
+                    };
+                    if let Some(obj) = row.as_object_mut() {
+                        obj.insert("pipeline_id".to_string(), json!(listing.pipeline_id));
+                        obj.insert("thread_id".to_string(), json!(listing.thread_id));
+                        if !listing.agent_id.is_empty() {
+                            obj.insert("agent_id".to_string(), json!(listing.agent_id));
+                        }
+                        obj.insert("source".to_string(), json!("memory"));
+                    }
+                    rows.push(row);
+                }
+                Ok(Value::Array(rows))
+            }
+
             // ── tenant-context：多租户上下文查询（F-TENANT-B-KERNEL）──
             // Python 侧 `plugins/shared/tenant_data.py` 经此能力取当前租户决定数据根；
             // 无活跃 task_local 时回退 "default"（与 Python 侧回退一致，永不报错）。
@@ -2036,6 +2070,109 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(listed.as_array().unwrap().len(), 1);
+    }
+
+    // ── GAP-2：pipeline-state 域（CONDITION 触发器的求值上下文源） ──────
+
+    #[tokio::test]
+    async fn test_pipeline_state_lists_registry_rows_with_task_fields() {
+        // 唯一租户隔离（global registry 进程级共享，避免污染其它测试）
+        let tenant = format!("tenant_gap2_{}", uuid::Uuid::new_v4().simple());
+        let pid = format!("pipe_gap2_{}", uuid::Uuid::new_v4().simple());
+        let other_pid = format!("pipe_other_{}", uuid::Uuid::new_v4().simple());
+        let reg = agentos_session::pipeline_state_registry::global_registry();
+        reg.get_or_init(
+            &tenant,
+            &pid,
+            "th_gap2",
+            "agentos",
+            json!({
+                "pipeline_id": pid,
+                "status": "completed",
+                "task.id": "t42",
+                "task.goal": "喝水提醒",
+                "task.status": "completed",
+                "lineage.parent_pipeline_id": "pipe_parent",
+                "lineage.origin_session_id": "sess_root",
+                "messages": [{"role": "user"}, {"role": "assistant"}],
+            }),
+        );
+        // 不同租户的管道：不得泄漏
+        reg.get_or_init(
+            "tenant_gap2_alien",
+            &other_pid,
+            "th_alien",
+            "agentos",
+            json!({"pipeline_id": other_pid, "status": "running"}),
+        );
+
+        let router = router_with_store();
+        let rows = agentos_tenant::scope(
+            agentos_core::types::TenantContext::new(&tenant, "th_gap2"),
+            router.handle("pipeline-state", "list", json!({})),
+        )
+        .await
+        .unwrap();
+
+        let arr = rows.as_array().expect("返回应为行数组");
+        let row = arr
+            .iter()
+            .find(|r| r.get("pipeline_id").and_then(|v| v.as_str()) == Some(pid.as_str()))
+            .expect("本租户管道行应存在");
+        // task.*/lineage.* 扁平键出口（条件表达式 task.status == 'completed' 可求值）
+        assert_eq!(row["task.id"], "t42");
+        assert_eq!(row["task.status"], "completed");
+        assert_eq!(row["task.goal"], "喝水提醒");
+        assert_eq!(row["lineage.parent_pipeline_id"], "pipe_parent");
+        assert_eq!(row["lineage.origin_session_id"], "sess_root");
+        assert_eq!(row["source"], "memory");
+        assert_eq!(row["thread_id"], "th_gap2");
+        // messages 不出口（只给条数）——与 /api/v1/pipelines/state 同契约
+        assert!(row.get("messages").is_none());
+        assert_eq!(row["message_count"], 2);
+        // 租户隔离性质：异租户管道不出现在结果里
+        assert!(
+            !arr.iter().any(|r| {
+                r.get("pipeline_id").and_then(|v| v.as_str()) == Some(other_pid.as_str())
+            }),
+            "异租户管道不得泄漏"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_pipeline_state_rows_are_flat_for_condition_eval() {
+        // 性质断言：行结构是「顶层扁平点号键」（非嵌套 state 子对象）——
+        // 插件侧 condition_parser（扁平键优先）直接以行为求值上下文。
+        let tenant = format!("tenant_gap2b_{}", uuid::Uuid::new_v4().simple());
+        let pid = format!("pipe_gap2b_{}", uuid::Uuid::new_v4().simple());
+        let reg = agentos_session::pipeline_state_registry::global_registry();
+        reg.get_or_init(
+            &tenant,
+            &pid,
+            "th",
+            "agentos",
+            json!({"pipeline_id": pid, "status": "failed", "task.status": "failed"}),
+        );
+
+        let router = router_with_store();
+        let rows = agentos_tenant::scope(
+            agentos_core::types::TenantContext::new(&tenant, "th"),
+            router.handle("pipeline-state", "list", json!({})),
+        )
+        .await
+        .unwrap();
+        let row = rows
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|r| r.get("pipeline_id").and_then(|v| v.as_str()) == Some(pid.as_str()))
+            .unwrap();
+        assert!(
+            row.get("task.status").is_some() && row.get("state").is_none(),
+            "state 字段应提升到行顶层（扁平键），不嵌套在 state 子对象里"
+        );
+        assert_eq!(row["task.status"], "failed");
+        assert_eq!(row["status"], "failed");
     }
 
     #[tokio::test]

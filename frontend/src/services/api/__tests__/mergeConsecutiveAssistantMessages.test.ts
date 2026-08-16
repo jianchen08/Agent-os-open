@@ -290,21 +290,26 @@ describe('mergeConsecutiveAssistantMessages', () => {
       ]
 
       const merged = mergeConsecutiveAssistantMessages(messages)
-      // ★ 修复后：tool 消息保留（独立渲染工具结果），多轮 assistant 不合并
-      expect(merged).toHaveLength(3)
-      expect(merged.map((m) => m.role)).toEqual(['assistant', 'tool', 'assistant'])
+      // ★ 现行契约：一个对话轮次（assistant 声明 → tool 结果 → assistant 回答）
+      // 合并为单一 assistant 气泡（与流式渲染同构），tool 结果注入 tool_call part
+      expect(merged).toHaveLength(1)
+      expect(merged[0].role).toBe('assistant')
+      expect(merged[0].id).toBe('ai-1')
 
-      // tool 消息本身保留
-      expect(merged[1].id).toBe('tool-1')
-      expect(merged[1].toolResult).toBe('搜索结果：...')
+      // 合并 content：空 content 的 assistant 被过滤，只保留有文本的回复
+      expect(merged[0].content).toBe('最终回复')
 
-      // tool 结果注入 ai-1 的 tool_call part（吸收逻辑仍生效）
+      // tool 结果注入 tool_call part（吸收逻辑生效）
       const parts = merged[0].parts as any[]
       const toolCallPart = parts.find((p: any) => p.type === 'tool_call')
       expect(toolCallPart).toBeDefined()
       expect(toolCallPart.result).toBe('搜索结果：...')
       expect(toolCallPart.durationMs).toBe(500)
       expect(toolCallPart.state).toBe('done')
+
+      // 组内 parts 的 sequence 去重后保持渲染顺序（文本 → 工具 → 文本）
+      const seqs = parts.map((p: any) => p.sequence)
+      expect(new Set(seqs).size).toBe(seqs.length)
     })
   })
 

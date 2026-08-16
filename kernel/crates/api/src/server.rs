@@ -676,6 +676,7 @@ pub(crate) async fn process_via_engine(
     user_id: &str,
     thinking_strength: &str,
     execution_context: Option<&serde_json::Value>,
+    state_overlay: Option<&serde_json::Value>,
 ) -> EngineOutcome {
     // Box::pin 到堆上：回写段 + executor.run 的深 sidecar 调用链让 Future 状态机
     // 在 release 下也接近 tokio worker 2MB 栈极限，堆分配规避溢出。
@@ -690,6 +691,7 @@ pub(crate) async fn process_via_engine(
         user_id,
         thinking_strength,
         execution_context,
+        state_overlay,
     ))
     .await
 }
@@ -708,6 +710,7 @@ async fn process_via_engine_inner(
     user_id: &str,
     thinking_strength: &str,
     execution_context: Option<&serde_json::Value>,
+    state_overlay: Option<&serde_json::Value>,
 ) -> EngineOutcome {
     // ── 前置依赖：invoker / store / project_root 任一缺席 → echo 降级 ──
     let Some(invoker) = state.invoker.clone() else {
@@ -732,7 +735,8 @@ async fn process_via_engine_inner(
         agentos_tenant::current().unwrap_or_else(|| TenantContext::new("default", "kernel"));
     let tenant_id = tenant.tenant_id.clone();
 
-    // 1/1a/1a2. 初始 state 构造（含会话级/任务级 execution_context 注入）。
+    // 1/1a/1a2/1a3. 初始 state 构造（含会话级/任务级 execution_context 注入 +
+    // 自由 state overlay）。
     let initial_state = stage_build_initial_state(
         &store,
         message,
@@ -743,6 +747,7 @@ async fn process_via_engine_inner(
         user_id,
         thinking_strength,
         execution_context,
+        state_overlay,
     )
     .await;
 
@@ -780,13 +785,93 @@ async fn process_via_engine_inner(
     };
 
     // 3b/4. registry 回写 + 响应提取。
-    stage_finalize(
+    let outcome = stage_finalize(
         &final_state,
         &tenant_id,
         effective_pipeline_id,
         thread_id,
         agent_id,
-    )
+    );
+    // GAP-2：run 终态域事件（completed/suspended）——state 带 task.* 时派生
+    // task_completed（EVENT 触发器输入源）。fire-and-forget，不影响响应。
+    emit_run_terminal_domain_events(state, &final_state, outcome.failed).await;
+    outcome
+}
+
+/// GAP-2：从 run 终态 state 派生域事件（run.* 终态 + 任务域派生）。
+///
+/// - `failed=true` → `run.failed`（state 带 `task.*` 字段时追加 `task_failed`）
+/// - `suspended` 标志（RouteNext::Wait 落档）→ `run.suspended`（等待人工交互，
+///   无任务派生——收口把关是 child_task_guard 的结构性职责）
+/// - 否则 → `run.completed`（state 带 `task.*` 字段时追加 `task_completed`）
+///
+/// 任务派生判据：state 存在任意 `task.` 前缀键（task = pipeline 单一真值，
+/// 任务管道的 state 出生即带 task.* 字段）。事件经 [`broadcast_domain_event`]
+/// 双通道投递：观察总线 + 点对点推给声明 domain_event hook 的订阅插件
+/// （triggers_ext → evaluate_event——EVENT 触发器的输入源）。
+fn derive_run_terminal_events(
+    final_state: &serde_json::Value,
+    failed: bool,
+) -> Vec<(&'static str, Vec<(&'static str, serde_json::Value)>)> {
+    let v = |k: &str| final_state.get(k).cloned().unwrap_or(serde_json::Value::Null);
+    let pipeline_id = v("pipeline_id");
+    let thread_id = v("session_id");
+    let has_task = final_state
+        .as_object()
+        .map(|o| o.keys().any(|k| k.starts_with("task.")))
+        .unwrap_or(false);
+    let task_id = v("task.id");
+
+    let mut events: Vec<(&'static str, Vec<(&'static str, serde_json::Value)>)> = Vec::new();
+    let run_tags = vec![
+        ("pipeline_id", pipeline_id.clone()),
+        ("thread_id", thread_id.clone()),
+    ];
+    if failed {
+        events.push(("run.failed", run_tags));
+        if has_task {
+            events.push((
+                "task_failed",
+                vec![
+                    ("pipeline_id", pipeline_id),
+                    ("thread_id", thread_id),
+                    ("task_id", task_id),
+                ],
+            ));
+        }
+        return events;
+    }
+    let suspended = final_state
+        .get("suspended")
+        .and_then(|s| s.as_bool())
+        .unwrap_or(false);
+    if suspended {
+        events.push(("run.suspended", run_tags));
+        return events;
+    }
+    events.push(("run.completed", run_tags));
+    if has_task {
+        events.push((
+            "task_completed",
+            vec![
+                ("pipeline_id", pipeline_id),
+                ("thread_id", thread_id),
+                ("task_id", task_id),
+            ],
+        ));
+    }
+    events
+}
+
+/// 广播 run 终态域事件（GAP-2：fire-and-forget，不阻塞引擎出口）。
+async fn emit_run_terminal_domain_events(
+    state: &AppState,
+    terminal_state: &serde_json::Value,
+    failed: bool,
+) {
+    for (name, tags) in derive_run_terminal_events(terminal_state, failed) {
+        crate::plugin_lifecycle::broadcast_domain_event(state, name, tags).await;
+    }
 }
 
 /// 前置依赖缺失时的 echo 降级应答（invoker/store/project_root 任一缺席）。
@@ -798,7 +883,8 @@ fn echo_fallback(missing: &str, message: &str) -> EngineOutcome {
     }
 }
 
-/// 阶段 1/1a/1a2：构造初始 state（含会话级/任务级 execution_context 注入）。
+/// 阶段 1/1a/1a2/1a3：构造初始 state（含会话级/任务级 execution_context 注入 +
+/// 自由 state overlay 合并）。
 ///
 /// core_plugin 默认值可被 agent 配置（config/agents/<id>.yaml 的 core_plugin 字段）
 /// 覆盖——见 load_agent_config_into_state。避免在内核硬编码具体插件 id。
@@ -814,6 +900,7 @@ async fn stage_build_initial_state(
     user_id: &str,
     thinking_strength: &str,
     execution_context: Option<&serde_json::Value>,
+    state_overlay: Option<&serde_json::Value>,
 ) -> serde_json::Value {
     let mut initial_state = serde_json::json!({
         "message": message,
@@ -903,7 +990,40 @@ async fn stage_build_initial_state(
         }
     }
 
+    // 1a3. 自由 state overlay（GAP-1：chat.send_message 的 state 参数 + 引擎
+    // 写入的 lineage 扁平键）：在 execution_context 合并点（1a/1a2）之后并入
+    // 顶层扁平键——任务域 task.* 出生即入 state，消费方（task_evaluate /
+    // child_task_guard / 任务树聚合）从 state 直读。
+    if let Some(overlay) = state_overlay {
+        apply_state_overlay(&mut initial_state, overlay);
+    }
+
     initial_state
+}
+
+/// 把自由 state overlay 并入 initial_state 顶层扁平键（GAP-1 阶段 1 合并点）。
+///
+/// 防御语义（调用方 chat.send_handler 已做保留字校验，此处纵深防御）：
+/// - 引擎系统保留字（[`crate::chat_send_handler::RESERVED_STATE_KEYS`]）跳过，
+///   非 chat 入口的理论调用者无法覆写 message/pipeline_id 等系统字段；
+/// - `lineage.*` 已存在时跳过——lineage 是引擎出生写入的保护字段（与 messages
+///   同级），后续轮次 overlay 不可覆写（防伪造父/根）。
+fn apply_state_overlay(initial_state: &mut serde_json::Value, overlay: &serde_json::Value) {
+    let Some(src) = overlay.as_object() else {
+        return;
+    };
+    let Some(obj) = initial_state.as_object_mut() else {
+        return;
+    };
+    for (k, v) in src {
+        if crate::chat_send_handler::RESERVED_STATE_KEYS.contains(&k.as_str()) {
+            continue;
+        }
+        if k.starts_with("lineage.") && obj.contains_key(k) {
+            continue;
+        }
+        obj.insert(k.clone(), v.clone());
+    }
 }
 
 /// 阶段 1b：多轮上下文装配 + 本轮 user 消息入账，返回补全后的 initial_state。
@@ -1152,10 +1272,19 @@ async fn stage_execute(
 
     info!(run_id = %run_id, agent_id = %agent_id, "Pipeline run started");
 
+    // GAP-2：防御网路径的失败事件标签预捕获（run_compiled 会 move initial_state）。
+    let failed_emit_state = serde_json::json!({
+        "pipeline_id": initial_state.get("pipeline_id").cloned().unwrap_or(serde_json::Value::Null),
+        "session_id": initial_state.get("session_id").cloned().unwrap_or(serde_json::Value::Null),
+        "task.id": initial_state.get("task.id").cloned().unwrap_or(serde_json::Value::Null),
+    });
+
     match executor.run_compiled(&compiled, initial_state).await {
         Ok(s) => Ok(s),
         Err(e) => {
             warn!(run_id = %run_id, error = %e, "PipelineExecutor run failed");
+            // GAP-2：run.failed 终态事件（引擎 Err 防御网；task.* 派生经预捕获标签）
+            emit_run_terminal_domain_events(state, &failed_emit_state, true).await;
             // B2：引擎失败兜底——把 run 标记 failed + ended_at，避免永远卡 running、
             // 历史悬空。（PipelineExecutor::run 当前不返回 Err，这是防御网；崩溃留下的
             // running 孤儿由内核启动 reap_orphan_runs 清扫。）
@@ -1522,6 +1651,7 @@ async fn handle_ws_connection(socket: WebSocket, state: AppState, headers: Heade
                         "",
                         "",
                         None,
+                        None,
                     ),
                 )
                 .await
@@ -1623,6 +1753,7 @@ async fn chat_handler(
                 "",
                 &exec_user,
                 "",
+                None,
                 None,
             ),
         )
@@ -1768,6 +1899,8 @@ mod tests {
         ]));
         let invoker = Arc::new(RecordingInvoker {
             seen: std::sync::Mutex::new(Vec::new()),
+            seen_states: std::sync::Mutex::new(Vec::new()),
+            hooks: std::sync::Mutex::new(Vec::new()),
             list_tools: std::collections::HashMap::from([
                 (
                     "p_drift".to_string(),
@@ -2237,8 +2370,13 @@ mod tests {
     /// 记录每次收到的 messages（按调用顺序），供测试断言。
     struct RecordingInvoker {
         seen: std::sync::Mutex<Vec<serde_json::Value>>,
+        /// GAP-1：记录每次收到的完整 state 快照（断言 state overlay / lineage
+        /// 是否进入插件可见 state）。
+        seen_states: std::sync::Mutex<Vec<serde_json::Value>>,
         /// G2：list_plugin_tools 响应（plugin_id → tools/list JSON）。缺省空。
         list_tools: std::collections::HashMap<String, serde_json::Value>,
+        /// GAP-2：记录收到的生命周期钩子 (plugin_id, hook 名, ctx JSON)。
+        hooks: std::sync::Mutex<Vec<(String, String, serde_json::Value)>>,
     }
 
     #[async_trait::async_trait]
@@ -2254,6 +2392,7 @@ mod tests {
                 .cloned()
                 .unwrap_or_else(|| serde_json::json!([]));
             self.seen.lock().unwrap().push(history.clone());
+            self.seen_states.lock().unwrap().push(ctx.state.clone());
             // 模拟 LLM：构造 assistant 回复（内容基于收到的消息数，便于断言），
             // 以增量 op emit（零兼容：所有插件一律 op 模型，无全量数组分支）
             let reply_msg = serde_json::json!({
@@ -2287,10 +2426,20 @@ mod tests {
 
         async fn send_lifecycle_hook(
             &self,
-            _plugin_id: &str,
-            _hook: agentos_core::traits::LifecycleHook,
-            _context: &agentos_core::traits::HookContext,
+            plugin_id: &str,
+            hook: agentos_core::traits::LifecycleHook,
+            context: &agentos_core::traits::HookContext,
         ) -> Result<(), agentos_core::types::PluginError> {
+            let tag = |k: &str| context.get(k).cloned().unwrap_or(serde_json::Value::Null);
+            self.hooks.lock().unwrap().push((
+                plugin_id.to_string(),
+                format!("{hook:?}"),
+                serde_json::json!({
+                    "event": tag("event"),
+                    "pipeline_id": tag("pipeline_id"),
+                    "task_id": tag("task_id"),
+                }),
+            ));
             Ok(())
         }
         async fn list_plugin_tools(
@@ -2319,6 +2468,8 @@ mod tests {
         let store: Arc<dyn agentos_core::traits::StorageBackend> = sqlite.clone();
         let invoker = Arc::new(RecordingInvoker {
             seen: std::sync::Mutex::new(Vec::new()),
+            seen_states: std::sync::Mutex::new(Vec::new()),
+            hooks: std::sync::Mutex::new(Vec::new()),
             list_tools: std::collections::HashMap::new(),
         });
         // 临时项目根：含 config/pipelines/autonomous.yaml，引用 mock LLM 插件
@@ -2383,6 +2534,7 @@ mod tests {
                 "",
                 "",
                 None,
+                None,
             ),
         )
         .await;
@@ -2401,6 +2553,7 @@ mod tests {
                 "m2",
                 "",
                 "",
+                None,
                 None,
             ),
         )
@@ -2451,6 +2604,7 @@ mod tests {
                 "",
                 "",
                 None,
+                None,
             ),
         )
         .await;
@@ -2468,6 +2622,7 @@ mod tests {
                 "h2",
                 "",
                 "",
+                None,
                 None,
             ),
         )
@@ -2534,6 +2689,7 @@ mod tests {
                 "c2",
                 "",
                 "",
+                None,
                 None,
             ),
         )
@@ -2613,6 +2769,7 @@ mod tests {
                 "",
                 "",
                 None,
+                None,
             ),
         )
         .await;
@@ -2631,6 +2788,7 @@ mod tests {
                 "b1",
                 "",
                 "",
+                None,
                 None,
             ),
         )
@@ -2750,6 +2908,8 @@ mod tests {
         state.store = Some(store.clone());
         state.invoker = Some(Arc::new(RecordingInvoker {
             seen: std::sync::Mutex::new(Vec::new()),
+            seen_states: std::sync::Mutex::new(Vec::new()),
+            hooks: std::sync::Mutex::new(Vec::new()),
             list_tools: std::collections::HashMap::new(),
         }));
         // 临时 config（make_engine_state 的精简版，足够 process_via_engine 跑通）
@@ -2801,6 +2961,7 @@ mod tests {
                 "f1",
                 "",
                 "",
+                None,
                 None,
             ),
         )
@@ -3003,5 +3164,306 @@ mod tests {
         assert_eq!(contracts["dsh_read"]["schema"]["required"][0], "path");
         assert_eq!(contracts["dsh_read"]["render"]["card"], "read");
         assert!(contracts.get("legacy_tool").is_none());
+    }
+
+    // ── GAP-1 阶段 1：自由 state overlay / lineage 并入 initial_state ──────
+    // 契约：chat.send_message 的 state 注入在 execution_context 合并点
+    // （1a/1a2）之后并入顶层扁平键；lineage.* 为引擎出生写入的保护字段。
+
+    #[tokio::test]
+    async fn test_stage_build_initial_state_merges_overlay_after_execution_context() {
+        let sqlite = Arc::new(agentos_engine::SqliteStore::open_memory().unwrap());
+        let store: Arc<dyn StorageBackend> = sqlite;
+        let overlay = json!({
+            "task.goal": "喝水提醒",
+            "task.status": "pending",
+            "task.id": "31bfdee19720",
+            "lineage.parent_pipeline_id": "pipe_parent",
+            "lineage.origin_session_id": "sess_root",
+            "lineage.root": true,
+        });
+        let st = stage_build_initial_state(
+            &store,
+            "msg",
+            "agentos",
+            "pipe_new",
+            "thread_new",
+            "m1",
+            "u1",
+            "",
+            Some(&json!({"workspace": {"mode": "worktree"}})),
+            Some(&overlay),
+        )
+        .await;
+        // execution_context 合并点（1a2）优先成立（overlay 不侵蚀其结构）
+        assert_eq!(st["execution_context"]["workspace"]["mode"], "worktree");
+        // overlay 顶层扁平键并入（与 track.total_tokens 同款约定）
+        assert_eq!(st["task.goal"], "喝水提醒");
+        assert_eq!(st["task.status"], "pending");
+        assert_eq!(st["task.id"], "31bfdee19720");
+        assert_eq!(st["lineage.parent_pipeline_id"], "pipe_parent");
+        assert_eq!(st["lineage.origin_session_id"], "sess_root");
+        assert_eq!(st["lineage.root"], true);
+        // 引擎系统字段基线完好
+        assert_eq!(st["message"], "msg");
+        assert_eq!(st["pipeline_id"], "pipe_new");
+        assert_eq!(st["session_id"], "thread_new");
+        assert_eq!(st["user_id"], "u1");
+    }
+
+    #[test]
+    fn test_apply_state_overlay_skips_engine_system_fields() {
+        // 纵深防御：即使 overlay 携带保留字（handler 层已拦截，此处防内部旁路
+        // 调用者），合并点也跳过引擎系统字段
+        let mut st = json!({
+            "message": "real",
+            "pipeline_id": "pipe_real",
+            "user_id": "u_real",
+            "messages": [{"role": "user", "content": "real"}],
+        });
+        apply_state_overlay(
+            &mut st,
+            &json!({
+                "message": "evil",
+                "pipeline_id": "evil",
+                "user_id": "evil",
+                "messages": [],
+                "execution_context": {"evil": true},
+                "task.goal": "ok"
+            }),
+        );
+        assert_eq!(st["message"], "real");
+        assert_eq!(st["pipeline_id"], "pipe_real");
+        assert_eq!(st["user_id"], "u_real");
+        assert_eq!(st["messages"].as_array().unwrap().len(), 1);
+        assert!(st.get("execution_context").is_none());
+        assert_eq!(st["task.goal"], "ok", "非保留字自由键应并入");
+    }
+
+    #[test]
+    fn test_apply_state_overlay_lineage_keys_not_overwritten_once_present() {
+        // lineage 出生写入后为引擎保护字段：后续 overlay 同名键跳过（引擎值保留）
+        let mut st = json!({});
+        apply_state_overlay(
+            &mut st,
+            &json!({
+                "lineage.root": true,
+                "lineage.origin.kind": "channel",
+                "task.status": "pending"
+            }),
+        );
+        apply_state_overlay(
+            &mut st,
+            &json!({"lineage.root": false, "task.status": "running"}),
+        );
+        assert_eq!(st["lineage.root"], true, "lineage 已存在 → 引擎值保留");
+        assert_eq!(st["lineage.origin.kind"], "channel");
+        assert_eq!(st["task.status"], "running", "非保护键后续可更新");
+    }
+
+    #[tokio::test]
+    async fn test_process_via_engine_state_overlay_reaches_plugin_context() {
+        // 真实引擎路径（非 mock 合并点）：overlay 键进入插件可见 state——
+        // task.* 消费契约（task_evaluate / child_task_guard 等读 state 直读）
+        let (state, invoker, _store, _sqlite) = make_engine_state();
+        let tenant = TenantContext::new("tenant_overlay", "thread_overlay");
+        let overlay = json!({
+            "task.goal": "写周报",
+            "task.status": "pending",
+            "lineage.parent_pipeline_id": "pipe_parent",
+            "lineage.origin_session_id": "thread_human"
+        });
+        let r = agentos_tenant::scope(
+            tenant,
+            process_via_engine(
+                &state,
+                "开始执行任务",
+                "agentos",
+                &[],
+                "pipe_overlay",
+                "thread_overlay",
+                "o1",
+                "",
+                "",
+                None,
+                Some(&overlay),
+            ),
+        )
+        .await;
+        assert!(!r.content.is_empty());
+        let states = invoker.seen_states.lock().unwrap();
+        assert!(!states.is_empty(), "引擎应至少调用一次 LLM 插件");
+        assert_eq!(states[0]["task.goal"], "写周报");
+        assert_eq!(states[0]["task.status"], "pending");
+        assert_eq!(states[0]["lineage.parent_pipeline_id"], "pipe_parent");
+        assert_eq!(states[0]["lineage.origin_session_id"], "thread_human");
+    }
+
+    // ── GAP-2：run 终态域事件（EVENT 触发器的输入源） ─────────────────────
+    // 契约：run 结束（completed/suspended/failed）时内核广播 run.* 域事件；
+    // state 带 task.* 字段时派生任务域事件（task_completed/task_failed）。
+
+    #[test]
+    fn test_derive_run_terminal_events_completed_with_task_fields() {
+        let st = json!({
+            "pipeline_id": "p1",
+            "thread_id": "th1",
+            "task.id": "t9",
+            "task.goal": "喝水提醒",
+        });
+        let evs = derive_run_terminal_events(&st, false);
+        let names: Vec<&str> = evs.iter().map(|(n, _)| *n).collect();
+        assert_eq!(names, vec!["run.completed", "task_completed"]);
+        // 标签携带溯源字段
+        let (_, tags) = &evs[1];
+        let tag = |k: &str| {
+            tags.iter()
+                .find(|(tk, _)| *tk == k)
+                .map(|(_, v)| v.clone())
+                .unwrap_or(serde_json::Value::Null)
+        };
+        assert_eq!(tag("pipeline_id"), json!("p1"));
+        assert_eq!(tag("task_id"), json!("t9"));
+    }
+
+    #[test]
+    fn test_derive_run_terminal_events_plain_and_suspended() {
+        // 无 task.* 字段的普通会话管道：只发 run.*，不派生任务事件
+        let plain = json!({"pipeline_id": "p2", "thread_id": "th2"});
+        let names: Vec<&str> = derive_run_terminal_events(&plain, false)
+            .iter()
+            .map(|(n, _)| *n)
+            .collect();
+        assert_eq!(names, vec!["run.completed"]);
+
+        // 挂起（RouteNext::Wait 落的 suspended 标志）：run.suspended
+        let suspended = json!({"pipeline_id": "p3", "suspended": true, "task.id": "t3"});
+        let names2: Vec<&str> = derive_run_terminal_events(&suspended, false)
+            .iter()
+            .map(|(n, _)| *n)
+            .collect();
+        assert_eq!(names2, vec!["run.suspended"]);
+    }
+
+    #[test]
+    fn test_derive_run_terminal_events_failed_with_task_fields() {
+        let st = json!({"pipeline_id": "p4", "task.id": "t4", "task.goal": "g"});
+        let names: Vec<&str> = derive_run_terminal_events(&st, true)
+            .iter()
+            .map(|(n, _)| *n)
+            .collect();
+        assert_eq!(names, vec!["run.failed", "task_failed"]);
+    }
+
+    #[test]
+    fn test_derive_run_terminal_events_task_prefix_is_dotted() {
+        // 前缀必须精确为 "task."：taskx/execution_context.task_id 不得误派生
+        let st = json!({"pipeline_id": "p5", "taskx": 1, "task_meta": "y"});
+        let names: Vec<&str> = derive_run_terminal_events(&st, false)
+            .iter()
+            .map(|(n, _)| *n)
+            .collect();
+        assert_eq!(names, vec!["run.completed"]);
+    }
+
+    #[tokio::test]
+    async fn test_process_via_engine_emits_run_terminal_domain_events() {
+        // wiring：真实引擎跑一轮 → 声明 domain_event hook 的启用插件收到
+        // run.completed + task_completed（state overlay 带 task.* 字段时）
+        let (state, invoker, _store, _sqlite) = make_engine_state();
+        // 订阅方插件：manifest 声明 DomainEvent hook 且启用
+        {
+            let mut manifests = state.manifests.write().await;
+            manifests.push(agentos_core::traits::PluginManifest {
+                id: "trigger_sub".to_string(),
+                name: "trigger_sub".to_string(),
+                version: "1.0.0".to_string(),
+                plugin_type: agentos_core::traits::PluginType::System,
+                pipeline_role: None,
+                language: "python".to_string(),
+                host_type: agentos_core::traits::HostType::Sidecar,
+                entry: String::new(),
+                capabilities: agentos_core::traits::ManifestCapabilities {
+                    lifecycle_hooks: vec![agentos_core::traits::LifecycleHook::DomainEvent],
+                    ..Default::default()
+                },
+                dependencies: vec![],
+                permissions: Default::default(),
+                error_policy: Default::default(),
+                priority: 100,
+                mcp: None,
+                lifecycle: None,
+                native: None,
+                granted_capabilities: vec![],
+                requires_content: None,
+                invoke_entry: None,
+                config_files: vec![],
+                ui_schema: None,
+                persistent_fields: vec![],
+                http_endpoints: vec![],
+                contributes: Default::default(),
+                enabled: Some(true),
+                activation: Default::default(),
+                provides: Default::default(),
+            });
+        }
+        state
+            .enabled_plugin_ids
+            .write()
+            .await
+            .insert("trigger_sub".to_string());
+
+        let tenant = TenantContext::new("tenant_gap2_emit", "thread_gap2_emit");
+        let overlay = json!({"task.id": "t77", "task.goal": "写周报"});
+        let r = agentos_tenant::scope(
+            tenant,
+            process_via_engine(
+                &state,
+                "执行任务",
+                "agentos",
+                &[],
+                "pipe_gap2_emit",
+                "thread_gap2_emit",
+                "o1",
+                "",
+                "",
+                None,
+                Some(&overlay),
+            ),
+        )
+        .await;
+        assert!(!r.content.is_empty());
+
+        // 广播 spawn 是 fire-and-forget：轮询等待钩子抵达（上限 5s）
+        let mut hooks = Vec::new();
+        for _ in 0..50 {
+            hooks = invoker.hooks.lock().unwrap().clone();
+            if hooks.len() >= 2 {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
+        let events: Vec<String> = hooks
+            .iter()
+            .map(|(pid, _, ctx)| {
+                assert_eq!(pid, "trigger_sub");
+                ctx["event"].as_str().unwrap_or("").to_string()
+            })
+            .collect();
+        assert!(
+            events.contains(&"run.completed".to_string()),
+            "应广播 run.completed，实际 {events:?}"
+        );
+        assert!(
+            events.contains(&"task_completed".to_string()),
+            "state 带 task.* 应派生 task_completed，实际 {events:?}"
+        );
+        // task 事件携带任务标签
+        let task_evt = hooks
+            .iter()
+            .find(|(_, _, ctx)| ctx["event"] == json!("task_completed"))
+            .expect("task_completed 钩子");
+        assert_eq!(task_evt.2["task_id"], json!("t77"));
+        assert_eq!(task_evt.2["pipeline_id"], json!("pipe_gap2_emit"));
     }
 }

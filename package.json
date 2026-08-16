@@ -60,5 +60,13 @@
   },
   "dependencies": {
     "playwright": "^1.60.0"
+  },
+  "pnpm": {
+    "onlyBuiltDependencies": [
+      "electron",
+      "unrs-resolver",
+      "esbuild",
+      "@tailwindcss/oxide"
+    ]
   }
 }
