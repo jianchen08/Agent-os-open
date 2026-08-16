@@ -60,7 +60,7 @@ class IsolationPolicyLoader:
         self._register_watcher()
 
     def _load_config(self) -> None:
-        """从 config_center 加载策略配置。"""
+        """从 config_center 加载策略配置；config_center 不可用时回退直读文件。"""
         path = self._config_path
         try:
             from config.config_center import get_config_center  # noqa: PLC0415
@@ -72,11 +72,20 @@ class IsolationPolicyLoader:
                 rel = rel[rel.index("config/") + len("config/") :]
             self._config = get_config_center().get(rel) or {}
         except Exception:
-            logger.warning(f"隔离策略配置加载失败: {path}，使用默认策略（容器隔离）")
-            self._default = ToolIsolationPolicy()
-            self._tools = {}
-            self._categories = {}
-            return
+            # config_center 不可用（P1-7 迁移前）→ 文件回退：直读 isolation_policy.yaml，
+            # 避免所有工具默认容器隔离（旧行为全 CONTAINER 的 bug 根因）。
+            try:
+                import yaml  # noqa: PLC0415
+
+                with open(path, encoding="utf-8") as f:
+                    self._config = yaml.safe_load(f) or {}
+                logger.warning(f"隔离策略经文件回退加载: {path}")
+            except Exception:  # noqa: BLE001 - 回退失败用默认（容器隔离兜底）
+                logger.warning(f"隔离策略配置加载失败: {path}，使用默认策略（容器隔离）")
+                self._default = ToolIsolationPolicy()
+                self._tools = {}
+                self._categories = {}
+                return
 
         self._default = self._parse_policy(self._config.get("default", {}))
         self._tools = {k: self._parse_policy(v) for k, v in self._config.get("tools", {}).items()}

@@ -83,7 +83,7 @@ def _sync_extra_package(dest: Path, src: Path) -> None:
 
 
 def ensure_extra_tools_layout() -> str | None:
-    """把启用且含 lib/index.js 的 DSH 工具包同步进桥装载区（幂等）。
+    """把启用且含 lib/index.js 的 DSH 工具包同步进桥装载区（幂等，含清理）。
 
     Returns:
         装载区目录（供 bridge env 使用）；无工具包时仍返回目录（peer 链接
@@ -94,12 +94,22 @@ def ensure_extra_tools_layout() -> str | None:
     for name, rel in _PEER_PKGS.items():
         _make_junction(_EXTRA_TOOLS_DIR / name, Path(repo_root) / rel)
     config = load_plugin_config()
+    keep: set[str] = set(_PEER_PKGS)
     for pkg in discover_dsh_plugins():
         if not (pkg / "lib" / "index.js").is_file():
             continue
         if not _plugin_enabled(pkg.name, config):
             continue
         _sync_extra_package(_EXTRA_TOOLS_DIR / pkg.name, pkg)
+        keep.add(pkg.name)
+    # 清理装载区残留（插件移除/禁用后同步删除，避免旧包继续被桥加载）
+    for name in os.listdir(_EXTRA_TOOLS_DIR):
+        link = _EXTRA_TOOLS_DIR / name
+        if (link.is_dir() or link.is_symlink()) and name not in keep:
+            try:
+                shutil.rmtree(link)
+            except OSError:
+                pass
     return str(_EXTRA_TOOLS_DIR)
 
 

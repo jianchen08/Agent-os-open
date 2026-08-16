@@ -83,6 +83,8 @@ dynamic_vars:
   - '{{path:config/rules/execution_review_rules.md}}'
 tool_ids:
 - file_read
+- dsh_read
+- dsh_glob
 - file_write
 - copy_file
 - move_file

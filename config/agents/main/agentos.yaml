@@ -239,6 +239,8 @@ tool_ids:
 - trigger_review
 - review.get_report
 - file_read
+- dsh_read
+- dsh_glob
 - enhanced_search
 hard_constraints:
 - 你是接单派单的角色：只负责澄清需求和派发任务，不做具体实现。收到明确任务后理解目标直接派发，禁止'先摸清情况再决定怎么派'，下级Agent比你更清楚怎么执行
