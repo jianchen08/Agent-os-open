@@ -918,6 +918,77 @@ async fn emit_run_terminal_domain_events(
 ///    checkpoint 里的出生值 pending——冷恢复也拿到终态）。
 ///
 /// 任务树/评估/门控全部从 state 直读后，YAML 镜像不再被任何写路径触碰。
+/// 评估闸门信号：final_state 是否已有评估痕迹。
+///
+/// 两路信号（任一即视为已评估）：
+/// 1. `evaluation.detected_result`——评估管道模式，task_reminder 检测
+///    evaluation_result JSON 后写入（评估管道输出特定 JSON 的契约）；
+/// 2. messages 中存在成功的 task_evaluate 工具调用——assistant 的
+///    tool_calls 含 name=task_evaluate，且对应 role=tool 结果内容带
+///    success:true（task_evaluate 成功返回 {"success": true, ...}）。
+fn task_evaluated(final_state: &serde_json::Value) -> bool {
+    if final_state
+        .get("evaluation.detected_result")
+        .is_some_and(|v| !v.is_null())
+    {
+        return true;
+    }
+    // 显式标志（测试注入 / 工具链显式写）：覆盖引擎重建 messages 轨迹的
+    // 场景（overlay 的 messages 会被 stage_recover_history 重组）。
+    if final_state
+        .get("task.evaluated")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false)
+    {
+        return true;
+    }
+    let Some(messages) = final_state.get("messages").and_then(|m| m.as_array()) else {
+        return false;
+    };
+    use std::collections::HashSet;
+    // 第一遍：收集 task_evaluate 调用 id
+    let mut eval_call_ids: HashSet<String> = HashSet::new();
+    for msg in messages {
+        if msg.get("role").and_then(|r| r.as_str()) != Some("assistant") {
+            continue;
+        }
+        if let Some(calls) = msg.get("tool_calls").and_then(|c| c.as_array()) {
+            for c in calls {
+                let is_eval = c
+                    .get("function")
+                    .and_then(|f| f.get("name"))
+                    .and_then(|n| n.as_str())
+                    .is_some_and(|n| n == "task_evaluate");
+                if is_eval {
+                    if let Some(id) = c.get("id").and_then(|i| i.as_str()) {
+                        eval_call_ids.insert(id.to_string());
+                    }
+                }
+            }
+        }
+    }
+    if eval_call_ids.is_empty() {
+        return false;
+    }
+    // 第二遍：对应 tool 结果是否成功
+    for msg in messages {
+        if msg.get("role").and_then(|r| r.as_str()) != Some("tool") {
+            continue;
+        }
+        let Some(id) = msg.get("tool_call_id").and_then(|i| i.as_str()) else {
+            continue;
+        };
+        if !eval_call_ids.contains(id) {
+            continue;
+        }
+        let content = msg.get("content").and_then(|c| c.as_str()).unwrap_or("");
+        if content.contains("\"success\": true") || content.contains("\"success\":true") {
+            return true;
+        }
+    }
+    false
+}
+
 async fn finalize_task_status_in_state(
     state: &AppState,
     final_state: &serde_json::Value,
@@ -940,6 +1011,22 @@ async fn finalize_task_status_in_state(
         .unwrap_or(false)
     {
         "suspended"
+    } else if !task_evaluated(final_state) {
+        // 评估闸门（2026-08-17 裁决）：任务完成必须经评估——评估管道输出
+        // evaluation_result JSON（task_reminder 检测写 evaluation.detected_result）
+        // 或执行者成功调用过 task_evaluate 工具。L1 调度层纯沟通汇报除外。
+        // 未评估不落 completed，标 pending_evaluation：task_completed 通知上级
+        // 照发（携带该状态），上级可催评估/重派；run 进行中 task_reminder 已
+        // 持续提醒（max_reminders 兜底防死循环）。
+        let agent_level = final_state
+            .get("agent_level")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        if agent_level == "L1" {
+            "completed"
+        } else {
+            "pending_evaluation"
+        }
     } else {
         "completed"
     };
@@ -1376,23 +1463,47 @@ async fn stage_recover_history(
     initial_state
 }
 
-/// 阶段 2/2b：加载 Agent 配置注入 state（读 config/agents/<agent_id>.yaml，不存在跳过）
-/// + 注入工具 schema。
-///
-/// 统一配置加载方案 TDD-6：优先走 ConfigCenter（泛化注入所有字段），
-/// 未接线时降级到旧的 load_agent_config_into_state（挑 5 字段，兼容）。
-fn stage_inject_agent_and_tools(
-    state: &AppState,
-    initial_state: &mut serde_json::Value,
-    agent_id: &str,
-    project_root: &std::path::Path,
-) {
-    if let Some(cc) = state.config_center.as_ref() {
-        agentos_config::load_agent_into_state(cc, initial_state, agent_id);
-    } else {
-        load_agent_config_into_state(initial_state, agent_id, project_root);
+/// agents API 端点（routes.rs resolve_agent_yaml_path）定位 agent yaml 用。
+/// 引擎路径已解耦（agent 配置加载归 context_build 插件），此函数仅服务
+/// /api/v1/agents* 配置管理面。两轮匹配：文件名 → yaml 内 config_id。
+pub(crate) fn find_agent_yaml(dir: &std::path::Path, agent_id: &str) -> Option<std::path::PathBuf> {
+    let target = format!("{}.yaml", agent_id);
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return None;
+    };
+    let mut fallback: Vec<std::path::PathBuf> = Vec::new();
+    for entry in entries.flatten() {
+        let p = entry.path();
+        if p.is_dir() {
+            if let Some(found) = find_agent_yaml(&p, agent_id) {
+                return Some(found);
+            }
+        } else if p.file_name().map(|n| n == target.as_str()).unwrap_or(false) {
+            return Some(p);
+        } else if p.extension().map(|e| e == "yaml").unwrap_or(false) {
+            fallback.push(p);
+        }
     }
+    for p in fallback {
+        if let Ok(raw) = std::fs::read_to_string(&p) {
+            if let Ok(cfg) = serde_yaml::from_str::<serde_yaml::Value>(&raw) {
+                if cfg.get("config_id").and_then(|v| v.as_str()) == Some(agent_id) {
+                    return Some(p);
+                }
+            }
+        }
+    }
+    None
+}
 
+/// 阶段 2b：注入工具 schema。
+///
+/// agent 配置（system_prompt/persona 等 yaml 字段）已从内核解耦（2026-08-17
+/// 裁决）：内核只负责把 agent_id 放进 initial_state（stage_build_initial_state），
+/// yaml 加载归 sidecar 的 context_build 插件（按 state.agent_id 读
+/// AGENTOS_CONFIG_ROOT/agents/**）。工具 schema 注入留在内核——ToolRegistry
+/// 在内核，这是工具面契约（按 agent tool_ids 过滤下发）而非 agent 配置。
+fn stage_inject_agent_and_tools(state: &AppState, initial_state: &mut serde_json::Value, _agent_id: &str, _project_root: &std::path::Path) {
     // 2b. 注入工具 schema 到 state（0.2 sidecar 架构适配）。
     // 0.1 单进程时 tool_schema 插件经 ctx.get_service("tool_registry") 直接访问内核
     // ToolRegistry；0.2 sidecar 是独立进程拿不到该 service。改为内核侧在管道启动前
@@ -1713,38 +1824,6 @@ fn inject_tool_schemas(state: &mut serde_json::Value, app_state: &AppState) {
 /// agents/ 按分类组织为 `agents/<category>/<id>.yaml`（main/orchestrator/
 /// executor/system/task/test），顶层不再放单文件。返回首个匹配路径。
 /// pub(crate)：routes.rs 的 agent config 读写端点复用同一套定位逻辑。
-pub(crate) fn find_agent_yaml(dir: &std::path::Path, agent_id: &str) -> Option<std::path::PathBuf> {
-    let target = format!("{}.yaml", agent_id);
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        return None;
-    };
-    // 两轮：先按文件名精确匹配（快路径），未命中再按 yaml 内 config_id 匹配——
-    // 大量执行 agent 的文件名与 config_id 不同（如 code_writer.yaml 的
-    // config_id=code_writer_agent，LLM 派发用的是 config_id）。
-    let mut fallback: Vec<std::path::PathBuf> = Vec::new();
-    for entry in entries.flatten() {
-        let p = entry.path();
-        if p.is_dir() {
-            if let Some(found) = find_agent_yaml(&p, agent_id) {
-                return Some(found);
-            }
-        } else if p.file_name().map(|n| n == target.as_str()).unwrap_or(false) {
-            return Some(p);
-        } else if p.extension().map(|e| e == "yaml").unwrap_or(false) {
-            fallback.push(p);
-        }
-    }
-    for p in fallback {
-        if let Ok(raw) = std::fs::read_to_string(&p) {
-            if let Ok(cfg) = serde_yaml::from_str::<serde_yaml::Value>(&raw) {
-                if cfg.get("config_id").and_then(|v| v.as_str()) == Some(agent_id) {
-                    return Some(p);
-                }
-            }
-        }
-    }
-    None
-}
 
 /// 加载 Agent 配置注入到管道 state。
 ///
@@ -1755,82 +1834,6 @@ pub(crate) fn find_agent_yaml(dir: &std::path::Path, agent_id: &str) -> Option<s
 /// 设计取舍：字段冲突时不覆盖 state 中已有的值（agent 调用方注入优先级高于配置默认），
 /// 仅在缺失时补。`max_iterations` 同时覆写 `pipeline_config.loop_config.max_iterations`
 /// 的运行期语义（由 PipelineExecutor 在每次 run 时读取 state，而非 config）。
-fn load_agent_config_into_state(
-    state: &mut serde_json::Value,
-    agent_id: &str,
-    project_root: &std::path::Path,
-) {
-    // Agent 配置在 config/agents/ 下（按分类子目录 main/orchestrator/executor/…）。
-    // project_root 是项目根（config/ 的父目录），拼 config/agents。
-    let agents_dir = project_root.join("config").join("agents");
-    let top = agents_dir.join(format!("{}.yaml", agent_id));
-    let path = if top.is_file() {
-        top
-    } else {
-        match find_agent_yaml(&agents_dir, agent_id) {
-            Some(p) => p,
-            None => {
-                tracing::debug!(
-                    agent_id = %agent_id,
-                    "Agent config not found under {}, using defaults",
-                    agents_dir.display()
-                );
-                return;
-            }
-        }
-    };
-    let raw = match std::fs::read_to_string(&path) {
-        Ok(s) => s,
-        Err(_) => {
-            tracing::debug!(
-                agent_id = %agent_id,
-                "Agent config not readable at {}, using defaults",
-                path.display()
-            );
-            return;
-        }
-    };
-    let parsed: serde_yaml::Value = match serde_yaml::from_str(&raw) {
-        Ok(v) => v,
-        Err(e) => {
-            warn!(
-                agent_id = %agent_id,
-                error = %e,
-                "Failed to parse agent config, using defaults"
-            );
-            return;
-        }
-    };
-
-    let obj = match state.as_object_mut() {
-        Some(o) => o,
-        None => return,
-    };
-    let entry = |key: &str| -> Option<serde_json::Value> {
-        parsed
-            .get(key)
-            .cloned()
-            .and_then(|v| serde_yaml::from_value(v).ok())
-    };
-
-    if let Some(v) = entry("system_prompt") {
-        obj.entry("system_prompt").or_insert(v);
-    }
-    if let Some(v) = entry("tool_ids") {
-        obj.entry("tool_ids").or_insert(v);
-    }
-    if let Some(v) = entry("model_tier") {
-        obj.entry("model_tier").or_insert(v);
-    }
-    if let Some(v) = entry("max_iterations") {
-        obj.entry("max_iterations").or_insert(v);
-    }
-    // core_plugin：agent 配置优先于内核默认值（DEFAULT_CORE_PLUGIN）。
-    // 用 insert 直接覆盖，使 agent 能切换核心插件（如换 LLM 提供商）。
-    if let Some(v) = entry("core_plugin") {
-        obj.insert("core_plugin".to_string(), v);
-    }
-}
 
 /// 处理 WebSocket 连接——收发消息循环。
 async fn handle_ws_connection(socket: WebSocket, state: AppState, headers: HeaderMap) {
@@ -3786,6 +3789,9 @@ mod tests {
             "task.goal": "写周报",
             "task.status": "pending",
             "task.agent_level": "L2",
+            // 评估闸门证据（显式标志——overlay 的 messages 会被引擎重组）
+            "task.evaluated": true,
+            "agent_level": "L2",
         });
         let r = agentos_tenant::scope(
             tenant,
@@ -4058,7 +4064,8 @@ mod tests {
         // （/api/v1/pipelines/state 聚合 + checkpoint 冷兜底）无需 YAML。
         let (state, _invoker, store, _sqlite) = make_engine_state();
         let tenant = TenantContext::new("tenant_unify", "thread_unify");
-        let overlay = json!({"task.id": "t_unify", "task.goal": "统一验证", "task.status": "pending"});
+        let overlay = json!({"task.id": "t_unify", "task.goal": "统一验证", "task.status": "pending",
+            "task.evaluated": true, "agent_level": "L2"});
         let r = agentos_tenant::scope(
             tenant,
             process_via_engine(
@@ -4147,6 +4154,9 @@ mod tests {
         let mut overlay = overlay;
         if let Some(obj) = overlay.as_object_mut() {
             obj.insert("task.id".to_string(), json!(pipeline_id));
+            // 评估闸门证据（显式标志——overlay 的 messages 会被引擎重组）
+            obj.insert("agent_level".to_string(), json!("L2"));
+            obj.insert("task.evaluated".to_string(), json!(true));
         }
 
         // ② 派发 → run 完成

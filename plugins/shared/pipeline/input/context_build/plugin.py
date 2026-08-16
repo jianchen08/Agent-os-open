@@ -14,6 +14,7 @@ State 命名空间：
 from __future__ import annotations
 
 import logging
+import re
 from typing import Any
 
 from pipeline.plugin import IInputPlugin, PluginContext, PluginResult
@@ -59,6 +60,66 @@ class ContextBuildPlugin(IInputPlugin):
         self._agent_name = self._config.get("agent_name", "")
         self._agent_level = self._config.get("agent_level", "L1")
         self._extra_context = self._config.get("extra_context", {})
+        # agent 配置自持（解耦裁决 2026-08-17）：内核只把 agent_id 放进 state，
+        # 加载 config/agents/**/<agent_id>.yaml 是本插件（sidecar）的职责。
+        # 缓存：yaml 路径 → 解析结果（mtime 失效），进程内复用。
+        self._agent_yaml_cache: dict[str, tuple[float, dict[str, Any]]] = {}
+
+    def _find_agent_yaml(self, agents_dir, agent_id: str):
+        """在 agents_dir 下递归找 <agent_id>.yaml；未命中回退按 config_id 匹配。
+
+        Returns:
+            (path, mtime) 或 None。config_id 匹配覆盖执行 agent 文件名与
+            config_id 不同的常态（code_writer.yaml / config_id=code_writer_agent）。
+        """
+        import os
+        from pathlib import Path
+
+        target = f"{agent_id}.yaml"
+        fallback: list = []
+        for p in Path(agents_dir).rglob("*.yaml"):
+            if p.name == target:
+                return p, p.stat().st_mtime
+            fallback.append(p)
+        for p in fallback:
+            try:
+                with open(p, encoding="utf-8") as f:
+                    head = f.read(4096)
+            except OSError:
+                continue
+            m = re.search(r"^config_id:\s*(\S+)\s*$", head, re.M)
+            if m and m.group(1) == agent_id:
+                return p, p.stat().st_mtime
+        return None
+
+    def _load_agent_config(self, agent_id: str) -> dict[str, Any]:
+        """按 agent_id 加载 agent yaml（缓存 + mtime 失效）。失败返回空 dict。"""
+        import os
+        import yaml as _yaml
+        from pathlib import Path
+
+        if not agent_id:
+            return {}
+        root = os.environ.get("AGENTOS_CONFIG_ROOT", "")
+        agents_dir = Path(root) / "agents" if root else None
+        if agents_dir is None or not agents_dir.is_dir():
+            return {}
+        found = self._find_agent_yaml(agents_dir, agent_id)
+        if found is None:
+            return {}
+        path, mtime = found
+        cached = self._agent_yaml_cache.get(str(path))
+        if cached and cached[0] == mtime:
+            return cached[1]
+        try:
+            with open(path, encoding="utf-8") as f:
+                data = _yaml.safe_load(f) or {}
+        except Exception:
+            return {}
+        if not isinstance(data, dict):
+            data = {}
+        self._agent_yaml_cache[str(path)] = (mtime, data)
+        return data
 
     @property
     def name(self) -> str:
@@ -97,8 +158,23 @@ class ContextBuildPlugin(IInputPlugin):
         """
         updates: dict[str, Any] = {}
 
-        # 1. 系统提示词（优先 state 注入，回退到插件配置）
-        updates["context.system_prompt"] = ctx.state.get("system_prompt", "") or self._system_prompt
+        # 1. 系统提示词：优先 state 注入；否则按 state.agent_id 加载 agent yaml
+        #    （agent 配置自持——内核不再读 yaml，只负责把 agent_id 放进 state）；
+        #    最终回退插件配置默认。
+        agent_cfg = self._load_agent_config(str(ctx.state.get("agent_id", "") or ""))
+        updates["context.system_prompt"] = (
+            ctx.state.get("system_prompt", "")
+            or str(agent_cfg.get("system_prompt", "") or "")
+            or self._system_prompt
+        )
+        # agent yaml 的层级/名称补充（state 显式值优先——param 注入与上下文已有
+        # 值比配置默认更强；context.agent_level 稍后仍按 _agent_level 覆盖逻辑走）。
+        if not self._agent_name and agent_cfg.get("display_name"):
+            self._agent_name = str(agent_cfg["display_name"])
+        if agent_cfg.get("level") and self._config.get("agent_level") is None:
+            lvl = str(agent_cfg["level"]).upper()
+            if lvl.startswith("L"):
+                self._agent_level = lvl
 
         # 2. Agent 身份信息（层级单一真值：顶层 agent_level，level_guard/
         # isolation_guard/tool_schema/param_inject 等下游统一读此键）

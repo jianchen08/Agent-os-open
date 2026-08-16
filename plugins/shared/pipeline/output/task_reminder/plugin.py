@@ -187,6 +187,17 @@ class TaskReminder(IOutputPlugin):
         # GAP-1 统一：task_evaluation_completed 为 0.1 孤儿标志（无写者），已移除——
         # 任务完成（run 终态）后管道自然结束，提醒随之停止。
 
+        # 评估闸门放行（2026-08-17 裁决）：任务完成必须经评估——已成功调用
+        # task_evaluate（或评估模式已检测 evaluation_result JSON）即放行结束；
+        # 未评估则继续走提醒，文案要求先提交评估。
+        if self._has_successful_task_evaluate(state.get("messages", [])):
+            logger.info(
+                "TaskReminder[iter=%s][task=%s]: task_evaluate success detected, allowing end",
+                iteration,
+                task_id,
+            )
+            return OutputResult()
+
         if state.get("conversation_mode"):
             logger.info(
                 "TaskReminder[iter=%s][task=%s]: skip, conversation mode active",
@@ -238,6 +249,32 @@ class TaskReminder(IOutputPlugin):
                 reason=f"task_reminder: text_only output, reminder #{reminder_count + 1}",
             ),
         )
+
+    @staticmethod
+    def _has_successful_task_evaluate(messages: list) -> bool:
+        """messages 中是否存在成功的 task_evaluate 工具调用。
+
+        assistant tool_calls 含 name=task_evaluate 且对应 role=tool 结果
+        内容带 success:true（task_evaluate 成功返回 {"success": true,...}）。
+        """
+        eval_call_ids = set()
+        for msg in messages:
+            if not isinstance(msg, dict) or msg.get("role") != "assistant":
+                continue
+            for c in msg.get("tool_calls") or []:
+                fn = c.get("function") or {}
+                if fn.get("name") == "task_evaluate" and c.get("id"):
+                    eval_call_ids.add(c["id"])
+        if not eval_call_ids:
+            return False
+        for msg in messages:
+            if not isinstance(msg, dict) or msg.get("role") != "tool":
+                continue
+            if msg.get("tool_call_id") in eval_call_ids:
+                content = str(msg.get("content", ""))
+                if '"success": true' in content or '"success":true' in content:
+                    return True
+        return False
 
     @staticmethod
     def _detect_evaluation_result_json(text: str) -> dict[str, Any] | None:
@@ -358,7 +395,10 @@ class TaskReminder(IOutputPlugin):
         count: int,
     ) -> str:
         """构建执行者提醒内容。"""
-        parts = [f"【系统提醒 #{count + 1}】请检查任务验收标准是否已满足："]
+        parts = [
+            f"【系统提醒 #{count + 1}】任务完成前必须提交评估：请先调用 task_evaluate 工具按验收标准评估本任务，评估通过后任务才能完成。"
+            "请检查任务验收标准是否已满足："
+        ]
 
         acceptance_criteria = state.get("acceptance_criteria", [])
         if acceptance_criteria:
