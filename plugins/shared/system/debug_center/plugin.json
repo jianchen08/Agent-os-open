@@ -1,8 +1,8 @@
 {
     "id": "debug_center",
     "name": "Debug Center",
-    "description": "调试中心页面插件（纯声明）：集中贡献 6 个调试页面（数据库管理/执行记录/会话/任务/用户/评估指标）的 contributes.pages —— activity-bar 侧边栏入口 + /p/:pageId 直达，前端按 widget 名（debug_* 预置组件）渲染。页面数据经各数据源插件 HTTP 面获取（/ext/db_admin|channel_api|monitoring|evaluation_service/*），本插件无运行时能力，仅声明页面。",
-    "version": "0.1.0",
+    "description": "调试中心页面插件（纯声明）：侧边栏贡献单一「调试」入口（contributes.pages，仅管理员可见 when: user.role == 'admin'），打开后为工作区面板（widget: debug_center_hub），内部切换 6 个调试页面——数据库管理/执行记录/会话/任务/用户/评估指标。页面数据经各数据源插件 HTTP 面获取（/ext/db_admin|channel_api|monitoring|evaluation_service/*），本插件无运行时能力，仅声明页面。",
+    "version": "0.2.0",
     "plugin_type": "system",
     "language": "python",
     "host_type": "sidecar",
@@ -16,70 +16,15 @@
     "contributes": {
         "pages": [
             {
-                "id": "db_admin_console",
-                "title": "数据库管理",
-                "icon": "🗄️",
+                "id": "debug_center_hub",
+                "title": "调试",
+                "icon": "🛠️",
                 "space": "workspace",
                 "slot": "activity-bar",
                 "order": 10,
-                "widget": "debug_db_admin",
-                "path": "/p/db_admin_console",
-                "description": "浏览任意表、筛选/编辑行数据、SQL 调试（admin）"
-            },
-            {
-                "id": "execution_records_viewer",
-                "title": "执行记录",
-                "icon": "📋",
-                "space": "workspace",
-                "slot": "activity-bar",
-                "order": 20,
-                "widget": "debug_execution_records",
-                "path": "/p/execution_records_viewer",
-                "description": "查看发送给 Agent 的执行记录与调用链路"
-            },
-            {
-                "id": "debug_sessions_viewer",
-                "title": "会话",
-                "icon": "💬",
-                "space": "workspace",
-                "slot": "activity-bar",
-                "order": 30,
-                "widget": "debug_sessions",
-                "path": "/p/debug_sessions_viewer",
-                "description": "查看和调试会话数据"
-            },
-            {
-                "id": "debug_tasks_viewer",
-                "title": "任务",
-                "icon": "⚙️",
-                "space": "workspace",
-                "slot": "activity-bar",
-                "order": 40,
-                "widget": "debug_tasks",
-                "path": "/p/debug_tasks_viewer",
-                "description": "查看任务执行状态和历史"
-            },
-            {
-                "id": "debug_users_viewer",
-                "title": "用户",
-                "icon": "👤",
-                "space": "workspace",
-                "slot": "activity-bar",
-                "order": 50,
-                "widget": "debug_users",
-                "path": "/p/debug_users_viewer",
-                "description": "查看用户调试信息和状态"
-            },
-            {
-                "id": "debug_evaluation_metrics_viewer",
-                "title": "评估指标",
-                "icon": "📊",
-                "space": "workspace",
-                "slot": "activity-bar",
-                "order": 60,
-                "widget": "debug_evaluation_metrics",
-                "path": "/p/debug_evaluation_metrics_viewer",
-                "description": "查看系统评估指标和得分"
+                "widget": "debug_center_hub",
+                "when": "user.role == 'admin'",
+                "description": "调试中心（仅管理员）：数据库管理/执行记录/会话/任务/用户/评估指标"
             }
         ]
     }

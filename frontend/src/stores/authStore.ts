@@ -116,6 +116,7 @@ function mapUserInfoToUser(userInfo: UserInfoResponse): User {
     id: userInfo.id,
     username: userInfo.username,
     email: userInfo.email,
+    role: userInfo.role,
     createdAt: userInfo.created_at,
   }
 }

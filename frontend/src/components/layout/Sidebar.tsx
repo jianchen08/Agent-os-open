@@ -43,6 +43,7 @@ import { cn } from '@/lib/utils'
 import { searchGlobal, type SessionSearchHit, type MessageSearchHit } from '@/services/api/search'
 import { reportError } from '@/services/errorReporting'
 import { contributionRegistry } from '@/services/schema/ContributionRegistry'
+import { evaluateWhen } from '@/services/schema/whenExpression'
 import {
   openWorkspacePanel,
   openWorkspacePanelByPath,
@@ -118,15 +119,18 @@ export const Sidebar = memo<SidebarProps>(({ isMobile = false }) => {
     }, 1500)
     return () => window.clearInterval(id)
   }, [])
+  const user = useAuthStore((s) => s.user)
   const pluginContainers = useMemo(() => {
     void contribTick
     return contributionRegistry
       .getPagesBySpace('workspace')
       .filter((p) => p.slot === 'activity-bar')
+      // when 条件（ADR §3.4）：声明了 when 的插件页面按 context keys 求值，
+      // 不满足则不在侧边栏显示（如调试中心仅管理员可见：user.role == 'admin'）
+      .filter((p) => (p.when ? evaluateWhen(p.when, { 'user.role': user?.role ?? 'guest' }) : true))
       .slice()
       .sort((a, b) => (a.order ?? 50) - (b.order ?? 50))
-  }, [contribTick])
-  const user = useAuthStore((s) => s.user)
+  }, [contribTick, user])
   const isAuthenticated = useAuthStore((s) => s.isAuthenticated)
   const logout = useAuthStore((s) => s.logout)
 

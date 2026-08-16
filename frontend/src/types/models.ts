@@ -51,6 +51,8 @@ export interface User {
   email?: string
   /** 头像URL（可选） */
   avatar?: string
+  /** 用户角色（来自后端 UserInfoResponse；用于 when 条件如 user.role == 'admin'） */
+  role?: 'admin' | 'user' | 'guest'
   /** 创建时间 */
   createdAt: string
 }
