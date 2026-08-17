@@ -22,6 +22,22 @@
                 "render": {
                     "card": "form",
                     "title": "人工交互"
+                },
+                "ui": {
+                    "interaction_modes": [
+                        {
+                            "mode": "choice",
+                            "features": ["options", "options_detail", "text_input"]
+                        },
+                        {
+                            "mode": "conversation",
+                            "features": ["options", "suggestions", "navigate", "text_input"]
+                        },
+                        {
+                            "mode": "notification",
+                            "features": ["message", "progress"]
+                        }
+                    ]
                 }
             },
             {
