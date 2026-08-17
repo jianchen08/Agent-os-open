@@ -153,11 +153,16 @@ class WorkspaceLifecyclePlugin(IInputPlugin):
 
     # ── 服务对象（懒加载，插件进程内自持）──────────────────────
 
-    def _get_manager(self) -> Any | None:
+    def _get_manager(self, base_path_hint: str | None = None) -> Any | None:
         """懒加载 WorkspaceLifecycleManager（服务不可用时返回 None，降级纯解析）。
 
         task_tree 用 execution_context 适配器（0.2 sidecar 无 task_service）：
         容器直接子任务经 parent_task_id 重建父链，定位容器空间。
+
+        base_path_hint：工作流服务的基础路径（=项目根）。sidecar 的 cwd 是插件
+        目录（invoker with_working_dir），绝不能回退 cwd——0.2 下从
+        execution_context.workspace.source_path 传入（task 创建时带项目根）。
+        首次传入后缓存；空 hint 且未缓存时回退安全值（不误用插件目录）。
         """
         if self._manager is not None:
             return self._manager
@@ -165,7 +170,11 @@ class WorkspaceLifecyclePlugin(IInputPlugin):
             _ensure_isolation_path()
             from isolation.workspace_lifecycle import WorkspaceLifecycleManager  # noqa: PLC0415
 
-            base_path = self._config.get("base_path") or str(Path.cwd())
+            base_path = (
+                base_path_hint
+                or self._config.get("base_path")
+                or str(Path(__file__).resolve().parents[4])
+            )
             manager = WorkspaceLifecycleManager(
                 resource_merge=None,
                 config=self._config.get("workspace_config", {}),
@@ -236,7 +245,9 @@ class WorkspaceLifecyclePlugin(IInputPlugin):
         # 0.2 统一：任务身份 = pipeline_id，引擎注入 state 的扁平键是 task.id
         # （点号键）；兼容顶层 task_id（0.1 遗留）。缺 task 上下文 = 主会话纯解析。
         task_id = state.get("task_id") or state.get("task.id") or ""
-        manager = self._get_manager()
+        # 工作流服务基础路径 = 项目根：sidecar cwd 是插件目录（非项目根），
+        # 用 source_path（task 创建时带的项目根）作为 base_path 修正。
+        manager = self._get_manager(base_path_hint=source_path)
         if not source_path and task_id:
             # 0.1 执行语义兜底（task_executor._resolve_task_workspace）：无显式
             # workspace 的任务在「工作空间根/{task_id}」下创建目录——默认隔离
