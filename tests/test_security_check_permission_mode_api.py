@@ -2,7 +2,7 @@
 """security_check 权限模式切换 HTTP 端点测试（纯插件 http_endpoints 能力）。
 
 覆盖：
-- POST /ext/security_check/permission_mode：低风险模式直接切换
+- POST /ext/pipeline_security_check/permission_mode：低风险模式直接切换
 - 高风险模式（auto/bypass）经 human-interaction 审批确认，确认/取消/异常分支
 - 参数校验（非法 mode / 缺 session_id）、相同模式幂等、GET 查询
 """
@@ -49,7 +49,7 @@ def _fake_hi_cap(selected: str) -> AsyncMock:
 
 def _make_http_post(pipeline_id: str, mode: str) -> dict[str, Any]:
     body = base64.b64encode(json.dumps({"pipeline_id": pipeline_id, "mode": mode}).encode("utf-8")).decode("ascii")
-    return {"path": "/ext/security_check/permission_mode", "method": "POST", "plugin_id": "security_check", "raw_body": body}
+    return {"path": "/ext/pipeline_security_check/permission_mode", "method": "POST", "plugin_id": "pipeline_security_check", "raw_body": body}
 
 
 def _decode(resp: dict[str, Any]) -> dict[str, Any]:
@@ -144,7 +144,7 @@ class TestValidationAndQuery:
         _mock_hi(monkeypatch, "confirm")
         body = base64.b64encode(json.dumps({"mode": "auto"}).encode("utf-8")).decode("ascii")
         resp = await server_mod.http_handle(
-            **{"path": "/ext/security_check/permission_mode", "method": "POST", "raw_body": body}
+            **{"path": "/ext/pipeline_security_check/permission_mode", "method": "POST", "raw_body": body}
         )
         assert _decode(resp)["switched"] is False
 
@@ -160,7 +160,7 @@ class TestValidationAndQuery:
         _mock_hi(monkeypatch, "confirm")
         sc_mod._PERMISSION_MODES["p1"] = "plan"
         resp = await server_mod.http_handle(
-            **{"path": "/ext/security_check/permission_mode", "method": "GET", "plugin_id": "security_check", "raw_body": "", "query": {"pipeline_id": "p1"}}
+            **{"path": "/ext/pipeline_security_check/permission_mode", "method": "GET", "plugin_id": "pipeline_security_check", "raw_body": "", "query": {"pipeline_id": "p1"}}
         )
         result = _decode(resp)
         assert result["mode"] == "plan"
@@ -169,6 +169,6 @@ class TestValidationAndQuery:
     @pytest.mark.asyncio
     async def test_未设置时查询默认default(self) -> None:
         resp = await server_mod.http_handle(
-            **{"path": "/ext/security_check/permission_mode", "method": "GET", "plugin_id": "security_check", "raw_body": "", "query": {"pipeline_id": "p1"}}
+            **{"path": "/ext/pipeline_security_check/permission_mode", "method": "GET", "plugin_id": "pipeline_security_check", "raw_body": "", "query": {"pipeline_id": "p1"}}
         )
         assert _decode(resp)["mode"] == "default"

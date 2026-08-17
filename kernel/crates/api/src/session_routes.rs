@@ -170,11 +170,19 @@ pub async fn create_session_handler(
 
     // 域2持久化：会话落 sessions 表（对齐 0.1 SessionModel）。
     // 内存在 registry 仍保留（WS 路由用），DB 负责跨重启恢复，create 时双写。
+    // metadata 与默认值合并（body 字段优先，缺失补默认）：前端会传
+    // isolation_mode 等自定义字段，整体替换会丢掉 session_type，导致
+    // 会话列表按 session_type='main_pipeline' 过滤时看不到新会话。
+    let mut metadata = body
+        .get("metadata")
+        .cloned()
+        .unwrap_or_else(|| json!({ "session_type": "main_pipeline", "user_id": user_id }));
+    if let Some(m) = metadata.as_object_mut() {
+        m.entry("session_type")
+            .or_insert_with(|| json!("main_pipeline"));
+        m.entry("user_id").or_insert_with(|| json!(user_id));
+    }
     if let Some(store) = state.store.as_ref() {
-        let metadata = body
-            .get("metadata")
-            .cloned()
-            .unwrap_or_else(|| json!({ "session_type": "main_pipeline", "user_id": user_id }));
         let agent_id_str = agent_id
             .as_str()
             .and_then(|s| if s.is_empty() { None } else { Some(s) });
@@ -240,7 +248,7 @@ pub async fn create_session_handler(
         "pipeline_ids": [pipeline_id],
         "active_pipeline_id": pipeline_id,
         "message_count": 0,
-        "metadata": body.get("metadata").cloned().unwrap_or_else(|| json!({})),
+        "metadata": metadata,
     }))
 }
 
