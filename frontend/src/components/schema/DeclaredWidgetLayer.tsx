@@ -41,18 +41,26 @@ export interface DeclaredWidgetLayerProps {
   fallback?: WidgetComponent
   /** 默认组件的 props（宿主注入场景：默认件需要宿主状态/回调） */
   fallbackProps?: Record<string, unknown>
+  /**
+   * 宿主向声明组件注入 props（声明 props 之上叠加）：
+   * 槽位值跟随宿主 state 的受控场景（如思考强度随管道标签），声明组件
+   * 仍是插件的，value/onChange 由宿主注入
+   */
+  overrideProps?: (declaration: WidgetDeclaration) => Record<string, unknown> | undefined
   className?: string
 }
 
 /**
- * 渲染单个已解析 widget（透传声明 props）
+ * 渲染单个已解析 widget（透传声明 props；宿主 overrideProps 叠加其上）
  */
 function ResolvedItem({
   declaration,
   Component,
+  injected,
 }: {
   declaration: WidgetDeclaration
   Component: WidgetComponent
+  injected?: Record<string, unknown>
 }) {
   return (
     <div
@@ -60,7 +68,7 @@ function ResolvedItem({
       data-widget-type={declaration.type}
       className="min-h-0"
     >
-      <Component {...(declaration.props ?? {})} />
+      <Component {...(declaration.props ?? {})} {...(injected ?? {})} />
     </div>
   )
 }
@@ -94,6 +102,7 @@ export function DeclaredWidgetLayer({
   excludeIds,
   fallback,
   fallbackProps,
+  overrideProps,
   className,
 }: DeclaredWidgetLayerProps): ReactNode {
   // 读取移入 useMemo：getAllWidgets() 每次返回新数组引用，放内部避免记忆化失效
@@ -158,7 +167,12 @@ export function DeclaredWidgetLayer({
       data-slot={slotId}
     >
       {resolved.map(({ declaration, component }) => (
-        <ResolvedItem key={declaration.id} declaration={declaration} Component={component} />
+        <ResolvedItem
+          key={declaration.id}
+          declaration={declaration}
+          Component={component}
+          injected={overrideProps?.(declaration)}
+        />
       ))}
     </div>
   )

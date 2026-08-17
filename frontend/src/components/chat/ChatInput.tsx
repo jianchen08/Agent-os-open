@@ -28,7 +28,6 @@ import {
 } from '@/types/thinkingMode'
 import { ChatInputActions } from './ChatInputActions'
 import { ContextUsageIndicator } from './ContextUsageIndicator'
-import { ThinkingModeToggle } from './ThinkingModeToggle'
 import { VoiceInputButton } from './VoiceInputButton'
 import type { Attachment, ChatInputProps, PendingFile, SendMessageParams } from './types'
 
@@ -833,21 +832,28 @@ export const ChatInput = ({
               />
             )}
 
-            {/* 插件声明式工具栏 widget（chat-input 空间附加式）：权限模式选择器等，
-                与思考强度选择器并排（插件 ui_schema 声明驱动，跟随当前选中管道标签）；
+            {/* 插件声明式工具栏 widget（chat-input 空间附加式）：权限模式选择器等
+                （插件 ui_schema 声明驱动，跟随当前选中管道标签）；
                 excludeIds 排除已被上方槽位层消费的声明，防重复渲染 */}
             <DeclaredWidgetLayer
               space="chat-input"
               className="flex-row items-center"
-              excludeIds={['voice_input', 'context_usage']}
+              excludeIds={['voice_input', 'context_usage', 'thinking_strength']}
             />
-            {/* 思考强度选择器（四档：关闭/低/中/高；随消息路由后端模型参数） */}
+            {/* 思考强度槽位（chat-input 空间，数据归属 llm_core——reasoning_effort
+                由其路由解释）：渲染 llm_core 声明的 form（select 四档），值/回调由
+                宿主注入（跟随当前管道标签 + 随消息路由后端模型参数） */}
             {enableThinkingMode && !isCompactMode && (
-              <ThinkingModeToggle
-                currentModel={modelName || 'unknown'}
-                strength={currentThinkingStrength}
-                onStrengthChange={handleStrengthChange}
-                disabled={disabled || isExecuting || !modelName || modelName === 'unknown'}
+              <DeclaredWidgetLayer
+                space="chat-input"
+                slotId="thinking_strength"
+                overrideProps={() => ({
+                  value: { strength: currentThinkingStrength },
+                  onChange: (v: Record<string, unknown>) =>
+                    handleStrengthChange(v.strength as ThinkingStrength),
+                  disabled: disabled || isExecuting || !modelName || modelName === 'unknown',
+                })}
+                className="flex-row items-center"
               />
             )}
 

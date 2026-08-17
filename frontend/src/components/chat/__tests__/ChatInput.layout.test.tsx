@@ -15,6 +15,8 @@
 import { fireEvent, render, screen } from '@testing-library/react'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { ChatInput } from '../ChatInput'
+import { contributionRegistry } from '@/services/schema/ContributionRegistry'
+import { widgetRegistry } from '@/services/schema/WidgetRegistry'
 
 vi.mock('@/hooks/useModelCapabilities', () => ({
   useModelCapabilities: () => ({
@@ -43,23 +45,42 @@ vi.mock('../VoiceInputButton', () => ({
   VoiceInputButton: () => <div data-testid="mock-voice-button" />,
 }))
 
-vi.mock('../ThinkingModeToggle', () => ({
-  ThinkingModeToggle: (props: {
-    strength?: string
-    onStrengthChange?: (s: string) => void
-    disabled?: boolean
-  }) => (
+// 思考强度槽位 stub：等价 llm_core 的 ui_schema 声明（chat-input 空间
+// thinking_strength 槽位），stub 组件接收宿主 overrideProps 注入的受控值/回调
+const ThinkingStrengthStub = (props: Record<string, unknown>) => {
+  const value = props.value as { strength?: string } | undefined
+  const onChange = props.onChange as ((v: Record<string, unknown>) => void) | undefined
+  return (
     <button
       type="button"
       data-testid="mock-thinking-toggle"
-      data-strength={props.strength}
-      disabled={props.disabled}
-      onClick={() => props.onStrengthChange?.('high')}
+      data-strength={value?.strength}
+      disabled={Boolean(props.disabled)}
+      onClick={() => onChange?.({ strength: 'high' })}
     >
       thinking
     </button>
-  ),
-}))
+  )
+}
+
+function registerThinkingSlot() {
+  widgetRegistry.register('test_thinking_stub', ThinkingStrengthStub, {
+    name: 'test_thinking_stub',
+    supportedSpaces: ['chat', 'workspace'],
+  })
+  contributionRegistry.loadFromSchema({
+    pipelines: [
+      {
+        id: 'pipeline_llm_core',
+        ui_schema: {
+          widgets: [
+            { id: 'thinking_strength', type: 'test_thinking_stub', space: 'chat-input' },
+          ],
+        },
+      },
+    ],
+  } as never)
+}
 
 // 插件动作容器：模拟声明了多个动作，验证其可收缩且不挤出发送按钮
 vi.mock('../ChatInputActions', () => ({
@@ -93,6 +114,9 @@ function renderInput() {
 describe('ChatInput 底部工具栏 — 发送按钮不被挤出', () => {
   beforeEach(() => {
     vi.clearAllMocks()
+    widgetRegistry.clear()
+    contributionRegistry.clear()
+    registerThinkingSlot()
   })
 
   it('底部工具栏：左组可收缩（min-w-0 flex-1），发送按钮 shrink-0', () => {

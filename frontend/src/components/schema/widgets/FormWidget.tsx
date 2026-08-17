@@ -5,25 +5,27 @@
  * number/slider/color/date/multiselect/radio/checkbox）已并入 UIInputFormField
  * 统一类型，本组件只做 props 收窄与提交回调透传。
  *
- * 两种渲染形态（通用组件扩展，GAP 权限模式）：
+ * 渲染形态：
  * 1. 标准表单：多字段/复杂表单走 RjsfForm，props.onSubmit 或 props.endpoint 提交。
- * 2. 紧凑下拉（compact）：单 select 字段 + props.endpoint 时自动启用——图标按钮 +
- *    DropdownMenu（对齐 ThinkingModeToggle 形态），点选即提交，适合插件声明式
- *    选择器（如权限模式切换）。高风险操作可在端点内经 human-interaction 弹
+ * 2. 紧凑下拉（compact）：单 select 字段 + endpoint/onChange 时自动启用——图标按钮 +
+ *    DropdownMenu，点选即提交/回调，适合插件声明式选择器（如权限模式切换、
+ *    思考强度跟随管道标签）。高风险操作可在端点内经 human-interaction 弹
  *    审批窗确认（fetch 挂起等待）。
  *
- * 提交模式：
+ * 提交/受控模式（endpoint 与受控互斥）：
  * - props.endpoint（声明 JSON 可传字符串）：POST {pipeline_id: 当前选中管道, ...values}
  *   到该端点，展示提交中/成功/失败状态。pipeline_id 跟随当前选中的管道标签
  *   （agentTabStore.activeTabId → pipelineRunId，回退 store 级 activePipelineId /
  *   sessionId）——权限模式按管道隔离，切换标签即切换目标。
  * - props.onSubmit：显式 JS 回调（宿主注入场景）。
+ * - props.value + props.onChange：受控模式（宿主注入当前值 + 变更回调，
+ *   值跟随宿主 state，如思考强度随管道标签变化）。
  *
  * @module FormWidget
  */
 
 import { useState } from 'react'
-import { Check, ChevronDown, ShieldCheck } from '@/assets/icons'
+import { Check, ChevronDown } from '@/assets/icons'
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -37,6 +39,7 @@ import { RjsfForm } from '@/services/schema/RjsfForm'
 import { useAgentTabStore } from '@/stores/agentTabStore'
 import { usePipelineMessageStore } from '@/stores/pipelineMessageStore'
 import { useSessionStore } from '@/stores/sessionStore'
+import { resolveChatCardIcon } from '@/utils/chatCardIconRegistry'
 import type { UIInputFormField } from '@/types/schema'
 
 /**
@@ -83,6 +86,12 @@ export function FormWidget(props: Record<string, unknown>) {
   const onSubmit = props.onSubmit as ((data: Record<string, unknown>) => void) | undefined
   const layout = props.layout === 'grid' ? 'double' : 'single'
   const endpoint = props.endpoint as string | undefined
+  // 受控模式（宿主注入场景：值跟随宿主 state，变更经 onChange 流出——
+  // 与 endpoint 直连互斥使用；如思考强度跟随当前管道标签）
+  const onChange = props.onChange as ((data: Record<string, unknown>) => void) | undefined
+  const controlledValue = (props.value ?? props.initialValues) as
+    | Record<string, unknown>
+    | undefined
   const [status, setStatus] = useState<SubmitStatus>('idle')
   const [statusText, setStatusText] = useState('')
   const pipelineId = useActivePipelineId()
@@ -119,16 +128,22 @@ export function FormWidget(props: Record<string, unknown>) {
     }
   }
 
-  // 紧凑下拉形态：单 select 字段 + endpoint（对齐 ThinkingModeToggle 的图标+下拉样式）
+  // 紧凑下拉形态：单 select 字段（endpoint 直连或受控 onChange 二者其一）
   const compactField = fields.length === 1 && fields[0].type === 'select' ? fields[0] : undefined
-  const compact = Boolean(compactField && endpoint)
+  const compact = Boolean(compactField && (endpoint || onChange))
 
   if (compact && compactField) {
     return (
       <CompactSelectToggle
         field={compactField}
         title={props.title as string | undefined}
+        icon={props.icon as string | undefined}
         onSelect={handleSubmit}
+        onPick={onChange}
+        currentValue={
+          controlledValue ? (controlledValue[compactField.name] as string | undefined) : undefined
+        }
+        disabled={props.disabled as boolean | undefined}
         status={status}
         statusText={statusText}
       />
@@ -142,6 +157,7 @@ export function FormWidget(props: Record<string, unknown>) {
         layout={layout}
         title={props.title as string | undefined}
         submitLabel={(props.submitLabel as string) ?? '提交'}
+        initialValues={controlledValue}
         onSubmit={handleSubmit}
       />
       {status !== 'idle' && (
@@ -235,31 +251,46 @@ function statusClass(status: SubmitStatus): string {
 }
 
 /**
- * 紧凑下拉选择器（单 select + endpoint）
+ * 紧凑下拉选择器（单 select，endpoint 直连或受控 onChange）
  *
- * 形态对齐 ThinkingModeToggle：图标按钮 + DropdownMenu（label + description + Check），
- * 点选即提交到 endpoint。用于插件声明式选择器（如权限模式切换），不占用表单布局。
+ * 图标按钮 + DropdownMenu（label + description + Check），点选即提交/回调。
+ * 用于插件声明式选择器（如权限模式切换 / 思考强度跟随管道标签），不占表单布局。
+ * icon 为语义字符串（经 chatCardIconRegistry 解析，如 'shield'/'brain'），缺省 shield。
  */
 function CompactSelectToggle({
   field,
   title,
+  icon,
   onSelect,
+  onPick,
+  currentValue,
+  disabled: disabledProp,
   status,
   statusText,
 }: {
   field: UIInputFormField
   title?: string
+  icon?: string
   onSelect: (values: Record<string, unknown>) => Promise<void>
+  onPick?: (values: Record<string, unknown>) => void
+  /** 受控当前值（宿主注入；缺省回退 field.default / 首选项） */
+  currentValue?: string
+  disabled?: boolean
   status: SubmitStatus
   statusText: string
 }) {
   const options = Array.isArray(field.options) ? (field.options as CompactOption[]) : []
-  const currentValue = (field.default as string) ?? options[0]?.value ?? ''
-  const current = options.find((o) => o.value === currentValue)
+  const value = currentValue ?? (field.default as string) ?? options[0]?.value ?? ''
+  const current = options.find((o) => o.value === value)
   const submitting = status === 'submitting'
-  const disabled = submitting || options.length === 0
+  const disabled = disabledProp || submitting || options.length === 0
+  const Icon = resolveChatCardIcon(icon ?? 'shield')
 
   const handlePick = (value: string) => {
+    if (onPick) {
+      onPick({ [field.name]: value })
+      return
+    }
     void onSelect({ [field.name]: value })
   }
 
@@ -279,7 +310,7 @@ function CompactSelectToggle({
             disabled={disabled}
             title={title ?? field.label}
           >
-            <ShieldCheck className="h-icon-md w-icon-md" />
+            <Icon className="h-icon-md w-icon-md" />
             <span>{current?.label ?? field.label}</span>
             <ChevronDown className="h-icon-xs w-icon-xs opacity-70" />
           </button>
@@ -293,7 +324,7 @@ function CompactSelectToggle({
               onClick={() => handlePick(option.value)}
               className={cn(
                 'flex items-center justify-between gap-2',
-                option.value === currentValue && 'text-primary',
+                option.value === value && 'text-primary',
               )}
             >
               <span className="flex min-w-0 flex-col">
@@ -302,7 +333,7 @@ function CompactSelectToggle({
                   <span className="text-muted-foreground text-[11px]">{option.description}</span>
                 )}
               </span>
-              {option.value === currentValue && <Check className="h-icon-sm w-icon-sm shrink-0" />}
+              {option.value === value && <Check className="h-icon-sm w-icon-sm shrink-0" />}
             </DropdownMenuItem>
           ))}
         </DropdownMenuContent>

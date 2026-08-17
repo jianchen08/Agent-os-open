@@ -9,11 +9,14 @@
  */
 
 import {
+  Brain,
   Copy,
   FileEdit,
   FileText,
+  Gauge,
   Globe,
   Link,
+  ShieldCheck,
   Target,
   Terminal,
 } from '@/assets/icons'
@@ -45,6 +48,12 @@ const ICON_MAP: Record<string, LucideIcon> = {
   submit: Target,
   // 通用
   copy: Copy,
+  // 控件类（FormWidget compact 等槽位控件复用本表解析声明 icon 字符串）
+  brain: Brain,
+  thinking: Brain,
+  gauge: Gauge,
+  shield: ShieldCheck,
+  permission: ShieldCheck,
 }
 
 /** 默认图标（未命中时的兜底，避免空白） */

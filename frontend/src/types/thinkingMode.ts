@@ -35,18 +35,6 @@ export const STRENGTH_TO_PARAMS: Record<
   high: { reasoning_effort: 'high' },
 }
 
-/** 强度选择项（UI 菜单） */
-export const THINKING_STRENGTH_OPTIONS: {
-  value: ThinkingStrength
-  label: string
-  description: string
-}[] = [
-  { value: 'off', label: '关闭', description: '普通模式，不启用思考' },
-  { value: 'low', label: '低', description: '轻量思考，响应更快' },
-  { value: 'medium', label: '中', description: '标准思考（默认）' },
-  { value: 'high', label: '高', description: '深度思考，耗时更长' },
-]
-
 export interface ThinkingModeState {
   /** 是否启用思考模式 */
   enabled: boolean

@@ -49,10 +49,6 @@ vi.mock('../VoiceInputButton', () => ({
   VoiceInputButton: () => <div data-testid="mock-voice-button" />,
 }))
 
-vi.mock('../ThinkingModeToggle', () => ({
-  ThinkingModeToggle: () => <button type="button">thinking</button>,
-}))
-
 vi.mock('../ChatInputActions', () => ({
   ChatInputActions: () => <div data-testid="mock-chat-input-actions" />,
 }))
