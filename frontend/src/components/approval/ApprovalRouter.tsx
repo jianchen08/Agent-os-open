@@ -7,7 +7,6 @@
  * 不依赖 registry 初始化时序）；完全未知降级 text_diff。
  */
 
-import React from 'react'
 import { TextDiffView } from './TextDiffView'
 import { ImageAnnotationView } from './ImageAnnotationView'
 import { MediaTimelineView } from './MediaTimelineView'
