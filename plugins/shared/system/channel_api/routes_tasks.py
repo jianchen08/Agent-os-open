@@ -545,6 +545,7 @@ async def create_root_task(
         user_id=_current_user(_user).get("sub", ""),
         scope=body.task_scope,
         execution_context=execution_context,
+        agent_id=body.target_id,
     )
     if not task_id:
         raise APIError(
@@ -1294,6 +1295,7 @@ async def _submit_task_event(
     scope: str = "non_container",
     execution_context: dict | None = None,
     task_id: str = "",
+    agent_id: str = "",
 ) -> str:
     """GAP-1 统一：经 chat.send_message 驱动任务执行管道，返回 pipeline_id（= task.id）。
 
@@ -1359,6 +1361,8 @@ async def _submit_task_event(
             "background": True,
             "message": kickoff,
             "user_id": user_id or "task_system",
+            # 目标执行 agent 传导（默认为主 agent）
+            **({"agent_id": agent_id} if agent_id else {}),
             "state": {
                 "task.goal": title,
                 "task.status": "pending",
