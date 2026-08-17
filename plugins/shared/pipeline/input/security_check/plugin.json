@@ -6,6 +6,10 @@
     "language": "python",
     "host_type": "sidecar",
     "entry": "python server.py",
+    "mcp": {
+        "transport": "stdio",
+        "request_timeout_secs": 90000
+    },
     "invoke_entry": "security_check.execute",
     "activation": "eager",
     "capabilities": {

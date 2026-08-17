@@ -44,6 +44,12 @@ class _HumanInteractionCapabilityProxy:
         if not tool:
             raise RuntimeError(f"human-interaction.{method} 无对应工具")
         res = await self._executor_call("invoke", {"tool_name": tool, "args": params})
+        import logging as _logging
+
+        _logging.getLogger("channel_api").warning(
+            "[P2-DEBUG] proxy._call res=%s",
+            str(res)[:300],
+        )
         # invoke 返回形状自适应：工具结果可能直接平铺，也可能包在 data/result 里
         for candidate in (
             res,
@@ -138,7 +144,11 @@ def _get_human_interaction_service():
         executor = _channel_api_plugin().get_capability("tool-executor")
 
         async def _executor_call(method: str, params: dict[str, Any]) -> Any:
-            return await executor.call(method, params)
+            # 审批等待（wait_for_choice 业务超时 86400）经 security_check →
+            # human sidecar 全链长等待：SDK 默认 30s 会先于用户操作掐断
+            # （2026-08-16 卡死根因同类）；显式传大值，实际超时由 human
+            # 服务 enforce。
+            return await executor.call(method, params, timeout=86500.0)
 
         return _HumanInteractionCapabilityProxy(_executor_call)
     except (KeyError, AttributeError, ImportError):
