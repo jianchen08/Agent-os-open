@@ -92,4 +92,91 @@ describe('DeclaredWidgetLayer', () => {
 
     expect(screen.getByTestId('declared-widget-cw')).toBeInTheDocument()
   })
+
+  // ── 槽位语义：前端默认件 + 插件声明可覆盖 ──
+
+  const DefaultStub: WidgetComponent = (props: { label?: string }) => (
+    <div data-testid="slot-default">{props.label ?? 'default'}</div>
+  )
+
+  it('槽位无覆盖声明时渲染前端默认组件（fallbackProps 注入）', () => {
+    widgetRegistry.register('chart', Stub, { name: 'chart', supportedSpaces: ['workspace'] })
+    // 空间内有无关注联声明（id 不匹配槽位）
+    const declarations = [
+      { id: 'other', type: 'chart', space: 'chat-input', props: { label: '别的' } },
+    ]
+
+    render(
+      <DeclaredWidgetLayer
+        declarations={declarations}
+        space="chat-input"
+        slotId="voice_input"
+        fallback={DefaultStub}
+        fallbackProps={{ label: '前端默认语音按钮' }}
+      />,
+    )
+
+    expect(screen.getByTestId('slot-default-voice_input')).toBeInTheDocument()
+    expect(screen.getByText('前端默认语音按钮')).toBeInTheDocument()
+    expect(screen.queryByTestId('declared-widget-other')).not.toBeInTheDocument()
+  })
+
+  it('插件声明 id === slotId 时覆盖默认组件（声明 props 生效）', () => {
+    widgetRegistry.register('chart', Stub, { name: 'chart', supportedSpaces: ['workspace'] })
+    const declarations = [
+      { id: 'voice_input', type: 'chart', space: 'chat-input', props: { label: '插件接管' } },
+    ]
+
+    render(
+      <DeclaredWidgetLayer
+        declarations={declarations}
+        space="chat-input"
+        slotId="voice_input"
+        fallback={DefaultStub}
+      />,
+    )
+
+    expect(screen.getByTestId('declared-widget-voice_input')).toBeInTheDocument()
+    expect(screen.getByText('插件接管')).toBeInTheDocument()
+    expect(screen.queryByTestId('slot-default-voice_input')).not.toBeInTheDocument()
+  })
+
+  it('多插件声明同槽位时按 order 小者胜', () => {
+    widgetRegistry.register('chart', Stub, { name: 'chart', supportedSpaces: ['workspace'] })
+    const declarations = [
+      { id: 'voice_input', type: 'chart', space: 'chat-input', props: { label: '后装' }, order: 20 },
+      { id: 'voice_input', type: 'chart', space: 'chat-input', props: { label: '优先' }, order: 10 },
+    ]
+
+    render(
+      <DeclaredWidgetLayer
+        declarations={declarations}
+        space="chat-input"
+        slotId="voice_input"
+        fallback={DefaultStub}
+      />,
+    )
+
+    expect(screen.getByText('优先')).toBeInTheDocument()
+    expect(screen.queryByText('后装')).not.toBeInTheDocument()
+  })
+
+  it('excludeIds 防重复：附加式层排除已被槽位消费的声明', () => {
+    widgetRegistry.register('chart', Stub, { name: 'chart', supportedSpaces: ['workspace'] })
+    const declarations = [
+      { id: 'voice_input', type: 'chart', space: 'chat-input', props: { label: '槽位件' } },
+      { id: 'addon', type: 'chart', space: 'chat-input', props: { label: '附加件' } },
+    ]
+
+    render(
+      <DeclaredWidgetLayer
+        declarations={declarations}
+        space="chat-input"
+        excludeIds={['voice_input']}
+      />,
+    )
+
+    expect(screen.getByTestId('declared-widget-addon')).toBeInTheDocument()
+    expect(screen.queryByTestId('declared-widget-voice_input')).not.toBeInTheDocument()
+  })
 })

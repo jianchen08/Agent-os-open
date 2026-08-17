@@ -153,6 +153,81 @@ export function FormWidget(props: Record<string, unknown>) {
   )
 }
 
+// ============================================================================
+// 决策选择适配器（decision 注册名 → FormWidget 词汇）
+// ============================================================================
+
+/** 旧 DecisionWidget 的选项结构 */
+interface DecisionOption {
+  id: string
+  label: string
+  description?: string
+  disabled?: boolean
+  style?: string
+  icon?: string
+}
+
+function extractDecisionOptions(options: unknown): DecisionOption[] {
+  if (!Array.isArray(options)) return []
+  return options.filter(
+    (o): o is DecisionOption =>
+      typeof o === 'object' && o !== null && typeof (o as DecisionOption).id === 'string',
+  )
+}
+
+/**
+ * 决策选择 = 单字段表单（decision 注册名的实现，原 DecisionWidget 已删）
+ *
+ * options 映射为 radio（单选）/ checkbox（多选）字段，走 RjsfForm 字段模式
+ * （无提交按钮），点选即经 onChange 回调——保持旧版「即点即回调」语义。
+ *
+ * @param props - options/multiple/onDecision/title（与旧 DecisionWidget 同构）
+ */
+export function DecisionFormAdapter(props: Record<string, unknown>) {
+  const options = extractDecisionOptions(props.options)
+  const multiple = (props.multiple as boolean) ?? false
+  const onDecision = props.onDecision as
+    | ((selected: string | string[]) => void)
+    | undefined
+  const title = props.title as string | undefined
+
+  if (options.length === 0) {
+    return (
+      <RjsfForm fields={[]} title={title} />
+    )
+  }
+
+  const field: UIInputFormField = {
+    name: 'decision',
+    type: multiple ? 'checkbox' : 'radio',
+    label: title ?? '决策',
+    options: options.map((o) => ({
+      label: o.description ? `${o.label}（${o.description}）` : o.label,
+      value: o.id,
+    })),
+  }
+
+  return (
+    <RjsfForm
+      fields={[field]}
+      title={title}
+      onChange={(values) => {
+        if (!onDecision) return
+        const v = values.decision
+        onDecision(
+          multiple
+            ? Array.isArray(v)
+              ? v.map(String)
+              : []
+            : v == null || v === ''
+              ? ''
+              : String(v),
+        )
+      }}
+    />
+  )
+}
+
 function statusClass(status: SubmitStatus): string {
   if (status === 'success') return 'text-emerald-600'
   if (status === 'error') return 'text-red-600'

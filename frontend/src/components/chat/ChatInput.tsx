@@ -800,35 +800,47 @@ export const ChatInput = ({
               </Button>
             )}
 
-            {/* 语音输入按钮 */}
+            {/* 语音输入槽位（chat-input 空间）：前端默认 VoiceInputButton，
+                插件声明 id=voice_input 可覆盖（换 webview 即完全接管） */}
             {!isCompactMode && voiceInput.isSupported && (
-              <VoiceInputButton
-                disabled={disabled || isExecuting}
-                state={voiceInput.state}
-                error={voiceInput.error}
-                recordingDuration={voiceInput.recordingDuration}
-                aria-label={voiceInput.isRecording ? '停止语音输入' : '开始语音输入'}
-                onClick={() => {
-                  if (voiceInput.isRecording) {
-                    // 停止前提交未确认的临时文字（保留为正文），并保存草稿
-                    if (interimVoiceStartRef.current !== -1) {
-                      commitInterimVoice()
-                      if (draftKey) {
-                        useChatInputStore.getState().saveDraft(draftKey, textRef.current)
+              <DeclaredWidgetLayer
+                space="chat-input"
+                slotId="voice_input"
+                fallback={VoiceInputButton}
+                fallbackProps={{
+                  disabled: disabled || isExecuting,
+                  state: voiceInput.state,
+                  error: voiceInput.error,
+                  recordingDuration: voiceInput.recordingDuration,
+                  'aria-label': voiceInput.isRecording ? '停止语音输入' : '开始语音输入',
+                  onClick: () => {
+                    if (voiceInput.isRecording) {
+                      // 停止前提交未确认的临时文字（保留为正文），并保存草稿
+                      if (interimVoiceStartRef.current !== -1) {
+                        commitInterimVoice()
+                        if (draftKey) {
+                          useChatInputStore.getState().saveDraft(draftKey, textRef.current)
+                        }
                       }
+                      voiceInput.stopRecording()
+                    } else {
+                      interimVoiceStartRef.current = -1
+                      voiceInput.startRecording()
                     }
-                    voiceInput.stopRecording()
-                  } else {
-                    interimVoiceStartRef.current = -1
-                    voiceInput.startRecording()
-                  }
+                  },
                 }}
+                className="flex-row items-center"
               />
             )}
 
-            {/* 插件声明式工具栏 widget（chat-input 空间）：权限模式选择器等，
-                与思考强度选择器并排（插件 ui_schema 声明驱动，跟随当前选中管道标签） */}
-            <DeclaredWidgetLayer space="chat-input" className="flex-row items-center" />
+            {/* 插件声明式工具栏 widget（chat-input 空间附加式）：权限模式选择器等，
+                与思考强度选择器并排（插件 ui_schema 声明驱动，跟随当前选中管道标签）；
+                excludeIds 排除已被上方槽位层消费的声明，防重复渲染 */}
+            <DeclaredWidgetLayer
+              space="chat-input"
+              className="flex-row items-center"
+              excludeIds={['voice_input', 'context_usage']}
+            />
             {/* 思考强度选择器（四档：关闭/低/中/高；随消息路由后端模型参数） */}
             {enableThinkingMode && !isCompactMode && (
               <ThinkingModeToggle
@@ -839,15 +851,22 @@ export const ChatInput = ({
               />
             )}
 
-            {/* 模型名 + 上下文圈型进度（可收缩：空间不足时先截断模型名/数字；
-                总量/缓存命中详情在悬停 title） */}
-            <ContextUsageIndicator
-              modelName={modelName}
-              currentTokenUsage={currentTokenUsage}
-              maxTokens={maxTokens}
-              totalTokens={_totalTokens || undefined}
-              cachedTokens={cachedTokens || undefined}
-              hitRatio={hitRatio || undefined}
+            {/* token 用量槽位（chat-input 空间）：前端默认 ContextUsageIndicator
+                （模型名 + 上下文圈型进度，可收缩：空间不足时先截断模型名/数字；
+                总量/缓存命中详情在悬停 title），插件声明 id=context_usage 可覆盖 */}
+            <DeclaredWidgetLayer
+              space="chat-input"
+              slotId="context_usage"
+              fallback={ContextUsageIndicator}
+              fallbackProps={{
+                modelName,
+                currentTokenUsage,
+                maxTokens,
+                totalTokens: _totalTokens || undefined,
+                cachedTokens: cachedTokens || undefined,
+                hitRatio: hitRatio || undefined,
+              }}
+              className="flex-row items-center"
             />
 
             {/* 插件声明的聊天输入动作（chat 空间 input-action 声明驱动） */}

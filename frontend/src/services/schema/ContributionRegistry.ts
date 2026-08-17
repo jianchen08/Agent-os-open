@@ -178,7 +178,7 @@ export interface SettingsPanelEntry {
 
 /** 插件 ui_schema 声明的单个 widget */
 export interface WidgetDeclaration {
-  /** widget 实例标识（插件内唯一） */
+  /** widget 实例标识（插件内唯一；与槽位 id 相等时视为对该槽位的覆盖声明） */
   id: string
   /** widget 类型，对应 WidgetRegistry 注册 key */
   type: string
@@ -186,6 +186,8 @@ export interface WidgetDeclaration {
   space?: string
   /** 触发时机 */
   trigger?: string
+  /** 排序权重（槽位内多声明裁决：小者胜；缺省 1000） */
+  order?: number
   /** widget props */
   props?: Record<string, unknown>
   /** 来源插件 ID */
@@ -334,6 +336,7 @@ export class ContributionRegistry {
           type: w.type as string,
           space: w.space as string | undefined,
           trigger: w.trigger as string | undefined,
+          order: typeof w.order === 'number' ? w.order : undefined,
           props: w.props as Record<string, unknown> | undefined,
           pluginId,
         }))

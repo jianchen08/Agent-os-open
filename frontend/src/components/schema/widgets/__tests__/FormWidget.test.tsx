@@ -10,11 +10,11 @@
  * - input / select / number 收集值；required 空数组被拦截
  */
 
-import { fireEvent, render, screen } from '@testing-library/react'
+import { fireEvent, render, screen, waitFor } from '@testing-library/react'
 import React from 'react'
 import { describe, expect, it, vi } from 'vitest'
 
-import { FormWidget } from '../FormWidget'
+import { DecisionFormAdapter, FormWidget } from '../FormWidget'
 
 /**
  * 提交动作：模拟表单 submit 事件（等价于用户点击 type=submit 按钮在真实浏览器
@@ -167,5 +167,48 @@ describe('FormWidget — input / select / number 值收集', () => {
     const v = onSubmit.mock.calls[0][0] as Record<string, unknown>
     expect(v.title).toBe('hello')
     expect(v.count).toBe(42)
+  })
+})
+
+describe('DecisionFormAdapter — decision 注册名 = 单字段表单（原 DecisionWidget 并入）', () => {
+  it('options 映射为 radio，点选即经 onDecision 回调（字段模式无提交按钮）', async () => {
+    const onDecision = vi.fn()
+    render(
+      <DecisionFormAdapter
+        title="部署方案"
+        options={[
+          { id: 'a', label: '蓝绿' },
+          { id: 'b', label: '灰度' },
+        ]}
+        onDecision={onDecision}
+      />,
+    )
+    expect(screen.getByText('部署方案')).toBeInTheDocument()
+    // 无提交按钮（字段模式）
+    expect(screen.queryByRole('button', { name: /提交/ })).not.toBeInTheDocument()
+    // 点选 radio → onDecision 立即收到选项 id
+    fireEvent.click(screen.getByLabelText('蓝绿'))
+    await waitFor(() => expect(onDecision).toHaveBeenCalledWith('a'))
+  })
+
+  it('multiple 模式映射为 checkbox，回调收到数组', async () => {
+    const onDecision = vi.fn()
+    render(
+      <DecisionFormAdapter
+        options={[
+          { id: 'a', label: '选项A' },
+          { id: 'b', label: '选项B' },
+        ]}
+        multiple
+        onDecision={onDecision}
+      />,
+    )
+    fireEvent.click(screen.getByLabelText('选项A'))
+    await waitFor(() => expect(onDecision).toHaveBeenCalledWith(['a']))
+  })
+
+  it('空 options 渲染占位（暂无表单字段）', () => {
+    render(<DecisionFormAdapter options={[]} />)
+    expect(screen.getByText('暂无表单字段')).toBeInTheDocument()
   })
 })

@@ -14,20 +14,15 @@ import {
   SettingsHubPanel,
   ToolsPanel,
 } from '@/components/schema/widgets/PanelHostWidget'
-import { PipelineManagerWidget } from '@/components/schema/widgets/PipelineManagerWidget'
-import { SettingsHubWidget } from '@/components/schema/widgets/SettingsHubWidget'
-import { DecisionWidget } from '@/components/schema/widgets/DecisionWidget'
+import { DecisionFormAdapter, FormWidget } from '@/components/schema/widgets/FormWidget'
 import { EditorWidget } from '@/components/schema/widgets/EditorWidget'
 import { FileTreeWidget } from '@/components/schema/widgets/FileTreeWidget'
-import { FormWidget } from '@/components/schema/widgets/FormWidget'
 import { GalleryWidget } from '@/components/schema/widgets/GalleryWidget'
 import { HtmlPreviewWidget } from '@/components/schema/widgets/HtmlPreviewWidget'
 import { KanbanWidget } from '@/components/schema/widgets/KanbanWidget'
-import { ProgressWidget } from '@/components/schema/widgets/ProgressWidget'
 import { ReviewDocumentWidget } from '@/components/schema/widgets/ReviewDocumentWidget'
 import { StatusCardWidget } from '@/components/schema/widgets/StatusCardWidget'
 import { TableWidget } from '@/components/schema/widgets/TableWidget'
-import { TaskCardWidget } from '@/components/schema/widgets/TaskCardWidget'
 import { TerminalWidget } from '@/components/schema/widgets/TerminalWidget'
 import { WebviewWidget } from '@/components/schema/widgets/WebviewWidget'
 import { DebugCenterHubWidget } from '@/components/schema/widgets/DebugCenterHubWidget'
@@ -49,15 +44,17 @@ const WIDGETS: WidgetEntry[] = [
   { name: 'chart', component: ChartWidget, spaces: ['chat', 'workspace', 'floating'] },
   { name: 'gallery', component: GalleryWidget, spaces: ['chat', 'workspace', 'floating'] },
   { name: 'table', component: TableWidget, spaces: ['chat', 'workspace'], fallback: 'status_card' },
-  { name: 'progress', component: ProgressWidget, spaces: ['chat', 'workspace'], fallback: 'status_card' },
-  { name: 'code_block', component: CodeBlockWidget, spaces: ['chat', 'workspace'] },
+  // 卡片三形态统一组件（variant/props 推断：metric/progress/task）
   { name: 'status_card', component: StatusCardWidget, spaces: ['chat', 'workspace', 'floating'] },
-  { name: 'decision', component: DecisionWidget, spaces: ['chat'], fallback: 'form' },
+  { name: 'progress', component: StatusCardWidget, spaces: ['chat', 'workspace'], fallback: 'status_card' },
+  { name: 'task_card', component: StatusCardWidget, spaces: ['chat', 'workspace', 'floating'], fallback: 'status_card' },
+  { name: 'code_block', component: CodeBlockWidget, spaces: ['chat', 'workspace'] },
+  // 决策选择 = 单字段表单（radio/checkbox，字段模式点选即回调）
+  { name: 'decision', component: DecisionFormAdapter, spaces: ['chat'], fallback: 'form' },
   { name: 'file_tree', component: FileTreeWidget, spaces: ['chat', 'workspace'], fallback: 'table' },
   { name: 'tree', component: FileTreeWidget, spaces: ['chat', 'workspace'], fallback: 'table' },
   { name: 'html_preview', component: HtmlPreviewWidget, spaces: ['workspace', 'floating', 'fullscreen'], fallback: 'code_block' },
   { name: 'review_document', component: ReviewDocumentWidget, spaces: ['workspace', 'fullscreen'], fallback: 'table' },
-  { name: 'task_card', component: TaskCardWidget, spaces: ['chat', 'workspace', 'floating'], fallback: 'status_card' },
   { name: 'artifact_preview', component: ArtifactPreviewWidget, spaces: ['chat', 'workspace', 'floating'], fallback: 'code_block' },
   { name: 'editor', component: EditorWidget, spaces: ['chat', 'workspace', 'floating'], fallback: 'code_block' },
   { name: 'terminal', component: TerminalWidget, spaces: ['workspace', 'fullscreen'], fallback: 'code_block' },
@@ -80,11 +77,8 @@ const WIDGETS: WidgetEntry[] = [
   // 面板内部切换 6 个调试页面——数据库管理/执行记录/会话/任务/用户/评估指标，
   // 页面数据经各数据源插件 HTTP 面获取：/ext/db_admin|channel_api|monitoring|evaluation_service/*）
   { name: 'debug_center_hub', component: DebugCenterHubWidget, spaces: ['workspace'] },
-  // 任务/管道管理（独立工作区标签，按需打开；旧 workspace_explorer 注册保留兼容）
+  // 任务/管道管理（独立工作区标签，按需打开；workspace_explorer 为旧注册名兼容）
   { name: 'pipeline_manager', component: PipelineManagerPanel, spaces: ['workspace'] },
-  { name: 'pipeline_manager_widget', component: PipelineManagerWidget, spaces: ['workspace'] },
-  // 兼容 SettingsHubWidget 直注册
-  { name: 'settings_hub_widget', component: SettingsHubWidget, spaces: ['workspace'] },
   // Webview：VS Code 风格插件自由 UI 沙箱（ADR §3.4'），fallback 到 html_preview。
   // 注：webcomponent（WebComponentCardHost，eval 注入）已于 0.2 废弃并删除代码，
   // 插件自定义完整 UI 一律走 webview / 主题插件 / CSS 注入（task_plugin_frontend_customization）。
