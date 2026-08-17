@@ -1038,6 +1038,11 @@ class TriggerManager:
             return
         task_id = str(event_data.get("task_id") or "")
         error = str(event_data.get("error") or "")
+        # 子任务提交者（task_submit 写入子任务初始 state 的 task.submitted_by，
+        # 内核 task_completed/task_failed 事件随 parent_pipeline_id 一并带出）。
+        # chat.send_message 硬校验 user_id 非空（tenant 反查）——传空串会被内核
+        # 拒绝（-32603 缺少 user_id，2026-08-17 子任务结果回传断点）。
+        user_id = str(event_data.get("user_id") or "")
 
         if event_name == "task_completed":
             message = f"[系统通知] 子任务 {task_id} 已完成，请检查结果并继续。"
@@ -1054,7 +1059,7 @@ class TriggerManager:
             return
 
         try:
-            await self._injector(parent_pipeline_id, message, "")
+            await self._injector(parent_pipeline_id, message, user_id)
             logger.info(
                 "[TriggerManager] 子任务自动通知已注入: parent=%s event=%s task=%s",
                 parent_pipeline_id,

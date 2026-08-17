@@ -853,6 +853,11 @@ fn derive_run_terminal_events(
     let task_id = v("task.id");
     // 子任务通知锚点：lineage.parent_pipeline_id 扁平键（有父形式出生写入）
     let parent_pipeline_id = v("lineage.parent_pipeline_id");
+    // 子任务完成通知注入 chat.send_message 需要 user_id：task_submit 创建子任务
+    // 时把提交者写进初始 state（task.submitted_by），随 final_state 带出给
+    // triggers_ext 注入器——否则注入器传空串被内核拒绝（-32603 缺少 user_id，
+    // 2026-08-17 子任务结果回传断点）。
+    let task_user_id = v("task.submitted_by");
 
     let mut events: Vec<(&'static str, Vec<(&'static str, serde_json::Value)>)> = Vec::new();
     let run_tags = vec![
@@ -869,6 +874,7 @@ fn derive_run_terminal_events(
                     ("thread_id", thread_id),
                     ("task_id", task_id),
                     ("parent_pipeline_id", parent_pipeline_id),
+                    ("user_id", task_user_id),
                 ],
             ));
         }
@@ -891,6 +897,7 @@ fn derive_run_terminal_events(
                 ("thread_id", thread_id),
                 ("task_id", task_id),
                 ("parent_pipeline_id", parent_pipeline_id),
+                ("user_id", task_user_id),
             ],
         ));
     }
@@ -3478,6 +3485,7 @@ mod tests {
             "thread_id": "th1",
             "task.id": "t9",
             "task.goal": "喝水提醒",
+            "task.submitted_by": "admin",
             "lineage.parent_pipeline_id": "parent_p1",
         });
         let evs = derive_run_terminal_events(&st, false);
@@ -3495,6 +3503,10 @@ mod tests {
         assert_eq!(tag("task_id"), json!("t9"));
         // 子任务通知锚点：parent_pipeline_id 从 state 的 lineage 扁平键带出
         assert_eq!(tag("parent_pipeline_id"), json!("parent_p1"));
+        // 子任务完成通知注入 chat.send_message 需要 user_id（task_submit 创建时
+        // 写入 task.submitted_by）——事件必须带出，否则触发器注入器传空串被内核
+        // 拒绝（-32603 缺少 user_id，2026-08-17 子任务结果回传断点）
+        assert_eq!(tag("user_id"), json!("admin"));
     }
 
     #[test]
