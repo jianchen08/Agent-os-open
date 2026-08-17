@@ -170,3 +170,8 @@ agentos_kernel.db-shm
 hosts/godot-demo/.godot/
 .zcode_tmp_*
 kernel/schema_tmp.json
+
+# 取消跟踪的仓库垃圾（worktree 加速）
+.zcode_e2e/
+*.dll
+*.so
