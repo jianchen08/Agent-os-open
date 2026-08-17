@@ -25,6 +25,7 @@ import {
   ExternalLink,
   MessageSquare,
 } from '@/assets/icons'
+import apiClient from '@/services/api/client'
 import { pauseTask, resumeTask, cancelTask } from '@/services/api/tasks'
 import { navigateToPipeline } from '@/services/pipelineNavigator'
 import { usePipelineRegistryStore } from '@/stores/pipelineRegistryStore'
@@ -133,8 +134,28 @@ export function PipelineManagerWidget(_rawProps: Record<string, unknown>) {
   const registryStates = usePipelineRegistryStore((s) => s.states)
   /** 实时 token 用量（cost_update 事件驱动） */
   const usageByPipeline = useContextUsageStore((s) => s.usageByPipeline)
-  /** 任务列表（任务管道状态权威源：5s 轮询 + task_* 事件） */
-  const tasks = useLongTermTaskStore((s) => s.tasks)
+  /** 全量任务（/ext/channel_api/tasks 不过滤 long-term；任务节点/任务管道判定权威源） */
+  const [allTasks, setAllTasks] = useState<Record<string, unknown>[]>([])
+  useEffect(() => {
+    let cancelled = false
+    const load = async () => {
+      try {
+        const resp = await apiClient.get('/ext/channel_api/tasks', {
+          params: { skip: 0, limit: 100 },
+        })
+        if (!cancelled) setAllTasks(resp.data.items ?? [])
+      } catch {
+        // 任务列表不可用时静默（管道列表仍可用）
+      }
+    }
+    load()
+    // 30s 轻量轮询（与注册表同频；任务状态变化影响任务节点/条目显示）
+    const timer = setInterval(load, 30_000)
+    return () => {
+      cancelled = true
+      clearInterval(timer)
+    }
+  }, [])
   /** 会话列表（按 thread_id 取会话标题） */
   const sessions = useSessionStore((s) => s.sessions)
 
@@ -150,11 +171,11 @@ export function PipelineManagerWidget(_rawProps: Record<string, unknown>) {
 
   /** 管道条目派生：注册表快照 + 任务列表（含管道 ID 的任务）合并，按开始时间倒序 */
   const pipelineEntries: PipelineViewEntry[] = useMemo(() => {
-    // 任务 → 管道 ID 映射（判定任务类型 + 取任务名/进度）
+    // 任务 → 管道 ID 映射（判定任务类型 + 取任务名/进度；全量任务）
     const taskByPipeline = new Map<string, Record<string, unknown>>()
-    for (const task of tasks) {
-      const pid = taskPipelineId(task as unknown as Record<string, unknown>)
-      if (pid) taskByPipeline.set(pid, task as unknown as Record<string, unknown>)
+    for (const task of allTasks) {
+      const pid = taskPipelineId(task)
+      if (pid) taskByPipeline.set(pid, task)
     }
     const sessionById = new Map(sessions.map((s) => [s.id, s]))
 
@@ -294,7 +315,7 @@ export function PipelineManagerWidget(_rawProps: Record<string, unknown>) {
     }
 
     return entries
-  }, [registryRuns, registryStates, usageByPipeline, tasks, sessions])
+  }, [registryRuns, registryStates, usageByPipeline, allTasks, sessions])
 
   /** 展示视图：tree（树视图）/ list（列表视图） */
   const [viewMode, setViewMode] = useState<'tree' | 'list'>('tree')
@@ -334,40 +355,20 @@ export function PipelineManagerWidget(_rawProps: Record<string, unknown>) {
     [pipelineEntries, kindFilter, statusFilter],
   )
 
-  /** 管道树：主管道顶层（对应会话层级）→ 容器任务层 → 任务管道嵌套。
-   *  子任务管道挂主管道/容器任务下（父子关系不确定时视为主管道直接下属）；
-   *  孤儿（无会话归属）顶层平铺。 */
+  /** 管道树：会话主管道顶层 → 任务节点（容器/普通任务，展开显示其下管道）→ 管道。
+   *  任务作为父节点展开显示其管道（任务 → 任务管道层级）；
+   *  无任务归属的管道直接挂主管道下；孤儿（无会话归属）顶层平铺。
+   *  状态分组按顶层节点状态划分，子树跟随父级不拆散层级。 */
   const pipelineTree = useMemo(() => {
     const entryByKey = new Map(filteredPipelineEntries.map((e) => [e.key, e]))
-    // 任务索引（id → task）
-    const taskById = new Map(
-      tasks.map((t) => [String((t as unknown as Record<string, unknown>).id ?? ''), t]),
-    )
-    // 容器任务节点（task_scope=container，主管道下的组织层；可能无自身管道）
-    const containerTasks = tasks.filter(
-      (t) =>
-        String((t as unknown as Record<string, unknown>).task_scope ?? '') === 'container'
-        || String((t as unknown as Record<string, unknown>).taskScope ?? '') === 'container',
-    )
-    const containerKey = (taskId: string) => `container:${taskId}`
-    // 任务父子：子任务 → 父任务（父是容器任务 → 容器节点；父有管道 → 父管道条目）
-    const parentKeyByKey = new Map<string, string>()
-    for (const e of filteredPipelineEntries) {
-      if (e.kind !== 'task' || !e.taskId) continue
-      const task = taskById.get(e.taskId) as Record<string, unknown> | undefined
-      const parentTaskId = task?.parent_task_id ?? task?.parentTaskId
-      if (!parentTaskId) continue
-      const parentTask = taskById.get(String(parentTaskId)) as Record<string, unknown> | undefined
-      if (!parentTask) continue
-      const parentScope = String(parentTask.task_scope ?? parentTask.taskScope ?? '')
-      if (parentScope === 'container') {
-        parentKeyByKey.set(e.key, containerKey(String(parentTask.id)))
-      } else {
-        const parentPid = taskPipelineId(parentTask)
-        if (parentPid && entryByKey.has(parentPid)) {
-          parentKeyByKey.set(e.key, parentPid)
-        }
-      }
+    // 任务索引（id → task；全量任务）
+    const taskById = new Map(allTasks.map((t) => [String(t.id ?? ''), t]))
+    const taskKey = (taskId: string) => `task:${taskId}`
+    // 任务父子映射：taskId → parentTaskId
+    const parentTaskOf = new Map<string, string>()
+    for (const t of allTasks) {
+      const pid = String(t.parent_task_id ?? t.parentTaskId ?? '')
+      if (pid) parentTaskOf.set(String(t.id), pid)
     }
     // 会话主管道：threadId 组内 session.pipelineIds[0]（缺省取最早 started_at）
     const threadTop = new Map<string, string>()
@@ -386,15 +387,6 @@ export function PipelineManagerWidget(_rawProps: Record<string, unknown>) {
         main ?? [...list].sort((a, b) => a.startedAt.localeCompare(b.startedAt))[0]
       threadTop.set(tid, top.key)
     }
-    // 容器任务父级：会话主管道（threadId 归属）或顶层
-    const containerParent = new Map<string, string>()
-    for (const ct of containerTasks) {
-      const t = ct as unknown as Record<string, unknown>
-      const tid = String(t.thread_id ?? t.threadId ?? '')
-      const topKey = tid && threadTop.has(tid) ? threadTop.get(tid)! : ''
-      containerParent.set(containerKey(String(t.id)), topKey)
-    }
-    // 挂载：任务父子优先；否则会话内非主管道挂主管道下（直接下属）
     const childrenMap = new Map<string, PipelineTreeNode[]>()
     const roots: PipelineTreeNode[] = []
     const pushChild = (parentKey: string, node: PipelineTreeNode) => {
@@ -402,11 +394,41 @@ export function PipelineManagerWidget(_rawProps: Record<string, unknown>) {
       list.push(node)
       childrenMap.set(parentKey, list)
     }
+    // 任务节点注册表（含容器任务；普通任务只要有管道/父子关系也建节点）
+    const taskNodes = new Map<string, PipelineTreeNode>()
+    const ensureTaskNode = (taskId: string): PipelineTreeNode => {
+      const existing = taskNodes.get(taskId)
+      if (existing) return existing
+      const t = taskById.get(taskId)
+      const meta = t?.metadata as Record<string, unknown> | undefined
+      const node: PipelineTreeNode = {
+        key: taskKey(taskId),
+        task: {
+          taskId,
+          title: String(t?.title ?? taskId),
+          status: String(t?.status ?? ''),
+          // task_scope 在 TaskModel.metadata 中（API 顶层无此字段）
+          scope: String(
+            t?.task_scope ?? t?.taskScope ?? meta?.task_scope ?? meta?.taskScope ?? '',
+          ),
+        },
+        depth: 0,
+        children: [],
+      }
+      taskNodes.set(taskId, node)
+      return node
+    }
+    // 1) 任务管道 → 挂到所属任务节点下（任务节点展开显示管道）
     for (const e of filteredPipelineEntries) {
-      let parentKey = parentKeyByKey.get(e.key)
+      if (e.kind === 'task' && e.taskId) {
+        const parentNode = ensureTaskNode(e.taskId)
+        parentNode.children.push({ key: e.key, entry: e, depth: 0, children: [] })
+        continue
+      }
+      // 2) 非任务管道（会话主管道/直接子管道/孤儿）
+      let parentKey: string | undefined
       if (
-        !parentKey
-        && e.threadId
+        e.threadId
         && threadTop.has(e.threadId)
         && threadTop.get(e.threadId) !== e.key
       ) {
@@ -419,40 +441,37 @@ export function PipelineManagerWidget(_rawProps: Record<string, unknown>) {
         roots.push(node)
       }
     }
-    // 容器任务节点挂载（主管道下或顶层）
-    for (const ct of containerTasks) {
-      const t = ct as unknown as Record<string, unknown>
-      const cKey = containerKey(String(t.id))
-      const node: PipelineTreeNode = {
-        key: cKey,
-        container: {
-          taskId: String(t.id),
-          title: String(t.title ?? t.id),
-          status: String(t.status ?? ''),
-        },
-        depth: 0,
-        children: [],
+    // 3) 任务节点归属：父任务节点 → 会话主管道 → 顶层
+    for (const [taskId, node] of taskNodes) {
+      const parentTaskId = parentTaskOf.get(taskId)
+      if (parentTaskId && taskNodes.has(parentTaskId)) {
+        taskNodes.get(parentTaskId)!.children.push(node)
+        continue
       }
-      const parentKey = containerParent.get(cKey) ?? ''
-      if (parentKey && (entryByKey.has(parentKey) || childrenMap.has(parentKey))) {
-        pushChild(parentKey, node)
+      const t = taskById.get(taskId)
+      const tmeta = t?.metadata as Record<string, unknown> | undefined
+      // thread_id 在 TaskModel.metadata 中（API 顶层无此字段）
+      const tid = String(t?.thread_id ?? t?.threadId ?? tmeta?.thread_id ?? tmeta?.threadId ?? '')
+      const topKey = tid && threadTop.has(tid) ? threadTop.get(tid)! : ''
+      if (topKey && (entryByKey.has(topKey) || childrenMap.has(topKey))) {
+        pushChild(topKey, node)
       } else {
         roots.push(node)
       }
     }
     const sortByStart = (a: PipelineTreeNode, b: PipelineTreeNode) => {
-      const sa = a.entry?.startedAt ?? a.container?.title ?? ''
-      const sb = b.entry?.startedAt ?? b.container?.title ?? ''
+      const sa = a.entry?.startedAt ?? a.task?.title ?? ''
+      const sb = b.entry?.startedAt ?? b.task?.title ?? ''
       return String(sb).localeCompare(String(sa))
     }
     const build = (list: PipelineTreeNode[], depth: number): PipelineTreeNode[] =>
       [...list].sort(sortByStart).map((n) => ({
         ...n,
         depth,
-        children: build(childrenMap.get(n.key) ?? [], depth + 1),
+        children: build(n.children, depth + 1),
       }))
     return build(roots, 0)
-  }, [filteredPipelineEntries, tasks, sessions])
+  }, [filteredPipelineEntries, allTasks, sessions])
 
   /** 展开/折叠详情 */
   const toggleEntry = useCallback((key: string) => {
@@ -701,14 +720,14 @@ export function PipelineManagerWidget(_rawProps: Record<string, unknown>) {
 // 树视图：执行中/最近完成两组，组内按会话分组，孤儿平铺
 // ═════════════════════════════════════════════════════════════════
 
-/** 管道树节点：管道条目 或 容器任务（主管道下的组织层，可能无自身管道） */
+/** 管道树节点：任务节点（容器/普通任务，展开显示其管道）或 管道条目 */
 interface PipelineTreeNode {
-  /** 节点 key（条目 key 或 container:taskId） */
+  /** 节点 key（条目 key 或 task:taskId） */
   key: string
-  /** 管道条目（容器节点无此字段） */
+  /** 管道条目（任务节点无此字段） */
   entry?: PipelineViewEntry
-  /** 容器任务信息（容器节点） */
-  container?: { taskId: string; title: string; status: string }
+  /** 任务节点信息（容器/普通任务；其 children 为管道或子任务节点） */
+  task?: { taskId: string; title: string; status: string; scope: string }
   depth: number
   children: PipelineTreeNode[]
 }
@@ -733,7 +752,7 @@ function PipelineTree({
     if (n.entry) {
       return n.entry.status === 'running' || n.entry.status === 'suspended'
     }
-    const mapped = taskStatusToPipelineStatus(n.container?.status)
+    const mapped = taskStatusToPipelineStatus(n.task?.status)
     return mapped === 'running' || mapped === 'suspended'
   }
   const split = (nodes: PipelineTreeNode[]) => {
@@ -792,7 +811,7 @@ function countNodes(nodes: PipelineTreeNode[]): number {
   return n
 }
 
-/** 容器任务状态 → 展示文案/颜色 */
+/** 任务状态 → 展示文案/颜色 */
 function containerStatusInfo(status: string): { label: string; color: string } {
   const mapped = taskStatusToPipelineStatus(status)
   const info = statusIcon(mapped ?? 'completed')
@@ -846,7 +865,7 @@ function TreeGroup({
                   orphan={!node.entry.threadId}
                 />
               ) : (
-                <ContainerRow
+                <TaskRow
                   node={node}
                   expanded={expandedKeys.has(node.key)}
                   onToggle={onToggle}
@@ -870,7 +889,7 @@ function TreeGroup({
   )
 }
 
-/** 递归渲染子树（主管道 → 容器任务 → 任务管道嵌套） */
+/** 递归渲染子树（主管道 → 任务/容器 → 管道嵌套） */
 function TreeChildren({
   nodes,
   nowMs,
@@ -902,7 +921,7 @@ function TreeChildren({
               orphan={!node.entry.threadId}
             />
           ) : (
-            <ContainerRow
+            <TaskRow
               node={node}
               expanded={expandedKeys.has(node.key)}
               onToggle={onToggle}
@@ -924,8 +943,8 @@ function TreeChildren({
   )
 }
 
-/** 容器任务行：主管道下的组织层（任务标题 + 状态 + 子项数），点击展开/收起 */
-function ContainerRow({
+/** 任务节点行（容器/普通任务）：父节点展开显示其下管道/子任务（任务 → 管道层级） */
+function TaskRow({
   node,
   expanded,
   onToggle,
@@ -934,14 +953,16 @@ function ContainerRow({
   expanded: boolean
   onToggle: (key: string) => void
 }) {
-  const container = node.container!
-  const status = containerStatusInfo(container.status)
+  const task = node.task!
+  const status = containerStatusInfo(task.status)
+  const childCount = countNodes(node.children)
+  const isContainer = task.scope === 'container'
   return (
     <div
       className="hover:bg-accent flex cursor-pointer items-center gap-1.5 py-1.5 pr-2 transition-colors"
       style={{ paddingLeft: `${node.depth * 16 + 8}px` }}
       onClick={() => onToggle(node.key)}
-      title="容器任务（展开查看其下任务管道）"
+      title={isContainer ? '容器任务（展开查看其下任务管道）' : '任务（展开查看其管道）'}
     >
       <button
         className="text-muted-foreground hover:text-foreground flex h-5 w-5 shrink-0 items-center justify-center rounded transition-transform"
@@ -953,15 +974,21 @@ function ContainerRow({
       >
         <ChevronRight className={`h-3.5 w-3.5 transition-transform ${expanded ? 'rotate-90' : ''}`} />
       </button>
-      <span className="shrink-0 rounded bg-status-info/15 px-1 py-0 text-[10px] font-medium text-status-info">
-        容器
+      <span
+        className={`shrink-0 rounded px-1 py-0 text-[10px] font-medium ${
+          isContainer
+            ? 'bg-status-info/15 text-status-info'
+            : 'bg-status-warning/15 text-status-warning'
+        }`}
+      >
+        {isContainer ? '容器' : '任务'}
       </span>
-      <span className="text-foreground/90 min-w-0 flex-1 truncate text-sm">{container.title}</span>
+      <span className="text-foreground/90 min-w-0 flex-1 truncate text-sm">{task.title}</span>
       <span className={`shrink-0 rounded px-1 text-[10px] font-medium ${status.color}`}>
         {status.label}
       </span>
       <span className="text-muted-foreground/50 shrink-0 text-[10px]">
-        [{countNodes(node.children)}]
+        [{childCount}]
       </span>
     </div>
   )
