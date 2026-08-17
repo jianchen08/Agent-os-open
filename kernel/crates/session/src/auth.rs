@@ -7,8 +7,9 @@
 pub const REJECT_CODE_NO_TOKEN: u16 = 4001;
 /// 拒绝码：token 无效或已过期。
 pub const REJECT_CODE_INVALID_TOKEN: u16 = 4001;
-/// 踢旧关闭码：本账号在其他位置登录（B10，前端收到不自动重连）。
-pub const CLOSE_CODE_KICKED: u16 = 4004;
+/// 踢旧关闭码：本账号被新连接替换（B10 单连接，前端 GlobalWebSocket 对 4000
+/// 判"被新连接替换"跳过重连——与前端协议码对齐，防止双客户端互踢风暴）。
+pub const CLOSE_CODE_KICKED: u16 = 4000;
 
 /// 握手鉴权结果。
 #[derive(Debug, Clone, PartialEq, Eq)]

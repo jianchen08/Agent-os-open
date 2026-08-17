@@ -144,9 +144,18 @@ async fn run_socket_loop(
     // 出站排空任务：从 channel 取消息写入 socket
     let mut send_task = tokio::spawn(async move {
         while let Some(text) = out_rx.recv().await {
-            // 空串 = 踢旧关闭哨兵（WsSink::shutdown 发出）：退出循环 →
-            // sender.close() 发 Close 帧 → 对端 onclose → 本端会话收尾。
             if text.is_empty() {
+                // 踢旧关闭（WsSink::shutdown 发出空串哨兵）：先发带 CLOSE_CODE_KICKED
+                // 状态码的 Close 帧再退出——前端 GlobalWebSocket 对 4000 判"被新连接替换"
+                // 跳过重连，双客户端互踢风暴（每 ~4.5s 断连、消息发送全断）的断根点。
+                // 旧实现只发空 Close（浏览器 onclose=1005），前端按普通掉线 4s 退避重连
+                // → A/B 各自重连互踢 → 无限循环。
+                let _ = sender
+                    .send(Message::Close(Some(axum::extract::ws::CloseFrame {
+                        code: agentos_session::auth::CLOSE_CODE_KICKED,
+                        reason: "replaced_by_new_connection".into(),
+                    })))
+                    .await;
                 break;
             }
             if sender.send(Message::Text(text.into())).await.is_err() {

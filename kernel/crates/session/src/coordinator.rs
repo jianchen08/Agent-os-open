@@ -85,7 +85,7 @@ impl SessionCoordinator {
     pub fn register(&self, user_id: &str, sink: Arc<dyn crate::EventSink>) -> Option<u64> {
         let kicked = self.registry.register(user_id, sink);
         if let Some(old) = &kicked {
-            // 踢旧必须真正关闭旧连接（connection_registry 注释要求的 4004 语义落地），
+            // 踢旧必须真正关闭旧连接（connection_registry 注释要求的 CLOSE_CODE_KICKED 语义落地），
             // 只换注册表会让旧 socket 变幽灵连接：收不到事件、也永不退出。
             old.shutdown();
             self.metrics.inc_kick_old();
