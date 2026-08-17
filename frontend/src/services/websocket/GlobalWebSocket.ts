@@ -57,10 +57,24 @@ class GlobalWebSocketService {
    * （成功或失败）后在 _scheduleReconnect 的回调里复位。
    */
   private _refreshingForReconnect: boolean = false
+  /**
+   * 被 4000 踢旧标记：本页连接被同一账号的新连接替换（B10 单连接）。
+   *
+   * 内核踢旧会发带 4000 状态码的 Close 帧；onclose(4000) 置位后，任何自动
+   * 重连路径（visibilitychange 回前台、router token 变化等）都不得再 connect
+   * ——否则 A/B 两页互相踢旧重连形成互踢环（2026-08-17 双客户端风暴的残余
+   * 触发源）。刷新页面（新模块实例）或登出（disconnect 复位）后恢复。
+   */
+  private _kickedByReplacement: boolean = false
   /** 断线前已确认的最大消息序号（用于断线补漏 last_sequence） */
   private _lastSequence: number = 0
 
   private _connectionTimeoutTimer: ReturnType<typeof setTimeout> | null = null
+
+  /** 本页是否被新连接替换（4000 踢旧）：true 时自动路径不得重连。 */
+  wasKickedByReplacement(): boolean {
+    return this._kickedByReplacement
+  }
 
   /** 建立全局 WS 连接（登录后调用一次） */
   connect(token: string): void {
@@ -70,6 +84,12 @@ class GlobalWebSocketService {
     // refresh 永远执行不到。refresh 流程会在回调里自行 connect(新token)。
     if (this._refreshingForReconnect) {
       _wsLogger.debug('[GlobalWS] 正在刷新 token 重连，跳过外部 connect（避免用过期 token 打断 refresh）')
+      return
+    }
+    // 被 4000 踢旧（本页已被其他连接替换）：禁止自动重连，否则会反过来踢掉
+    // 当前持有者，形成互踢环。用户刷新页面（新实例）或登出（disconnect 复位）后恢复。
+    if (this._kickedByReplacement) {
+      _wsLogger.debug('[GlobalWS] 本页被新连接替换(code=4000)，跳过自动重连（刷新页面可恢复）')
       return
     }
     if (this._status === 'connected' && this._token === token) return
@@ -126,6 +146,8 @@ class GlobalWebSocketService {
       const isReconnect = this._reconnectAttempts > 0
       _wsLogger.debug('[GlobalWS] connected %s', isReconnect ? '(reconnect)' : '')
       this._status = 'connected'
+      // 真实连接建立成功：清除被踢标记（踢旧后用户刷新/重登的恢复点）
+      this._kickedByReplacement = false
       this._reconnectAttempts = 0
       this._flushQueue()
       this._startHeartbeat()
@@ -192,6 +214,7 @@ class GlobalWebSocketService {
       useLayoutModeStore.getState().updateConnectionStatus({ state: 'disconnected' })
 
       if (event.code === 4000) {
+        this._kickedByReplacement = true
         console.info('[GlobalWS] 被新连接替换(code=4000)，跳过重连')
         return
       }
@@ -215,6 +238,7 @@ class GlobalWebSocketService {
   disconnect(): void {
     this._disposed = true
     this._refreshingForReconnect = false
+    this._kickedByReplacement = false
     this._clearTimers()
     this._stopHeartbeat()
     if (this._connectionTimeoutTimer) {

@@ -348,6 +348,41 @@ describe('GlobalWebSocketService', () => {
       service.disconnect()
     })
 
+    it('被 4000 踢旧后 connect() 不再新建连接（防 visibilitychange 互踢环）', async () => {
+      const { service, connect, getLatestWs } = await createService()
+
+      connect('test-token')
+      vi.advanceTimersByTime(100)
+      const ws = getLatestWs()!
+      simulateSuccessfulOpen(ws)
+
+      // code=4000 被新连接替换
+      simulateClose(ws, 4000, '被新连接替换')
+      expect(service.wasKickedByReplacement()).toBe(true)
+
+      // visibilitychange/router 等自动路径再调 connect → 必须拦截，不产生新连接
+      const instancesBefore = instances.length
+      connect('test-token')
+      expect(instances.length).toBe(instancesBefore)
+      expect(service.status).toBe('disconnected')
+      service.disconnect()
+    })
+
+    it('被 4000 踢旧后 disconnect()（登出）复位标记，允许重新连接', async () => {
+      const { service, connect, getLatestWs, disconnect } = await createService()
+
+      connect('test-token')
+      vi.advanceTimersByTime(100)
+      const ws = getLatestWs()!
+      simulateSuccessfulOpen(ws)
+
+      simulateClose(ws, 4000, '被新连接替换')
+      expect(service.wasKickedByReplacement()).toBe(true)
+
+      disconnect()
+      expect(service.wasKickedByReplacement()).toBe(false)
+    })
+
     it('完整流程: disconnected → connecting → connected → reconnecting → connected', async () => {
       const { service, connect, getLatestWs, disconnect } = await createService()
 

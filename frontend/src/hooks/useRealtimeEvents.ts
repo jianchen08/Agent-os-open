@@ -134,6 +134,12 @@ export function useRealtimeEvents(): void {
     const handleVisibilityChange = () => {
       if (document.visibilityState !== 'visible') return
       if (globalWS.status === 'connected') return
+      // 被 4000 踢旧（本页已被其他连接替换）：不自动重连，避免互踢环
+      // （connect() 内部同样拦截，此处显式短路 + 留痕便于排查）
+      if (globalWS.wasKickedByReplacement()) {
+        console.info('[useRealtimeEvents] 本页被新连接替换(code=4000)，回前台不自动重连（刷新页面可恢复）')
+        return
+      }
       const { checkTokenExpiration, refreshToken, token } = useAuthStore.getState()
       // token 过期：先刷新再连。必须用 .then()（成功才连），绝不能用 .finally()——
       // refresh 失败时若仍用旧过期 token 硬连，会触发 4001 → 重连链 → 可能误登出。
