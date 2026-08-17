@@ -44,12 +44,6 @@ class _HumanInteractionCapabilityProxy:
         if not tool:
             raise RuntimeError(f"human-interaction.{method} 无对应工具")
         res = await self._executor_call("invoke", {"tool_name": tool, "args": params})
-        import logging as _logging
-
-        _logging.getLogger("channel_api").warning(
-            "[P2-DEBUG] proxy._call res=%s",
-            str(res)[:300],
-        )
         # invoke 返回形状自适应：工具结果可能直接平铺，也可能包在 data/result 里
         for candidate in (
             res,
