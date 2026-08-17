@@ -17,9 +17,7 @@ export const ROUTES = {
   /** 设置子页面 */
   SETTINGS_API: '/settings/api',
   SETTINGS_LLM: '/settings/llm',
-  SETTINGS_CONTEXT: '/settings/context',
   SETTINGS_CONCURRENCY: '/settings/concurrency',
-  SETTINGS_COST: '/settings/cost',
   /** 插件设置 */
   SETTINGS_PLUGINS: '/settings/plugins',
   // planned 未实现：无对应页面与路由，保留供后续扩展

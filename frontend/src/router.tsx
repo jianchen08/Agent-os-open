@@ -47,18 +47,10 @@ const ChatContainer = lazy(() =>
 const LlmSettingsPage = lazy(() =>
   import('@/pages/settings/LlmSettingsPage').then((m) => ({ default: m.LlmSettingsPage })),
 )
-const ContextWindowSettingsPage = lazy(() =>
-  import('@/pages/settings/ContextWindowSettingsPage').then((m) => ({
-    default: m.ContextWindowSettingsPage,
-  })),
-)
 const ConcurrencySettingsPage = lazy(() =>
   import('@/pages/settings/ConcurrencySettingsPage').then((m) => ({
     default: m.ConcurrencySettingsPage,
   })),
-)
-const CostSettingsPage = lazy(() =>
-  import('@/pages/settings/CostSettingsPage').then((m) => ({ default: m.CostSettingsPage })),
 )
 const ToolsPage = lazy(() =>
   import('@/pages/tools/ToolsPage').then((m) => ({ default: m.ToolsPage })),
@@ -566,31 +558,11 @@ export function createRouter() {
       ),
     },
     {
-      path: ROUTES.SETTINGS_CONTEXT,
-      element: (
-        <ProtectedRoute>
-          <Suspense fallback={LazyFallback}>
-            <ContextWindowSettingsPage />
-          </Suspense>
-        </ProtectedRoute>
-      ),
-    },
-    {
       path: ROUTES.SETTINGS_CONCURRENCY,
       element: (
         <ProtectedRoute>
           <Suspense fallback={LazyFallback}>
             <ConcurrencySettingsPage />
-          </Suspense>
-        </ProtectedRoute>
-      ),
-    },
-    {
-      path: ROUTES.SETTINGS_COST,
-      element: (
-        <ProtectedRoute>
-          <Suspense fallback={LazyFallback}>
-            <CostSettingsPage />
           </Suspense>
         </ProtectedRoute>
       ),

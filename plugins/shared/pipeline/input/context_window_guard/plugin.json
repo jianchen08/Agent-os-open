@@ -24,7 +24,132 @@
         {
             "id": "models",
             "path": "config/models/llm.yaml",
-            "label": "LLM 模型配置（压缩用 chat completions）"
+            "label": "LLM 模型配置（压缩用 chat completions）",
+            "fields": [
+                {
+                    "name": "defaults.chat",
+                    "type": "string",
+                    "label": "压缩用模型",
+                    "description": "上下文压缩的 chat completions 模型 id"
+                }
+            ]
+        },
+        {
+            "id": "context_window",
+            "path": "config/system/context_window_config.yaml",
+            "label": "上下文窗口配置",
+            "fields": [
+                {
+                    "name": "compress_trigger_ratio",
+                    "type": "slider",
+                    "label": "压缩触发比例",
+                    "min": 0,
+                    "max": 1,
+                    "description": "上下文占用超过该比例触发压缩"
+                },
+                {
+                    "name": "include_tools_description_in_prompt",
+                    "type": "toggle",
+                    "label": "提示词内嵌工具描述",
+                    "default": false
+                },
+                {
+                    "name": "compression.enabled",
+                    "type": "toggle",
+                    "label": "启用上下文压缩",
+                    "default": true
+                },
+                {
+                    "name": "compression.model",
+                    "type": "string",
+                    "label": "压缩模型",
+                    "description": "留空则用默认 chat 模型"
+                },
+                {
+                    "name": "compression.layer_trigger_ratio",
+                    "type": "slider",
+                    "label": "层级压缩触发比例",
+                    "min": 0,
+                    "max": 1
+                },
+                {
+                    "name": "compression.max_turn_ratio",
+                    "type": "slider",
+                    "label": "最大轮次占比",
+                    "min": 0,
+                    "max": 1
+                },
+                {
+                    "name": "budgets.system_prompt",
+                    "type": "slider",
+                    "label": "预算·系统提示",
+                    "min": 0,
+                    "max": 1
+                },
+                {
+                    "name": "budgets.tools_description",
+                    "type": "slider",
+                    "label": "预算·工具描述",
+                    "min": 0,
+                    "max": 1
+                },
+                {
+                    "name": "budgets.static_vars",
+                    "type": "slider",
+                    "label": "预算·静态变量",
+                    "min": 0,
+                    "max": 1
+                },
+                {
+                    "name": "budgets.dynamic_variables",
+                    "type": "slider",
+                    "label": "预算·动态变量",
+                    "min": 0,
+                    "max": 1
+                },
+                {
+                    "name": "budgets.l3",
+                    "type": "slider",
+                    "label": "预算·L3 记忆",
+                    "min": 0,
+                    "max": 1
+                },
+                {
+                    "name": "budgets.l2",
+                    "type": "slider",
+                    "label": "预算·L2 记忆",
+                    "min": 0,
+                    "max": 1
+                },
+                {
+                    "name": "budgets.l1",
+                    "type": "slider",
+                    "label": "预算·L1 记忆",
+                    "min": 0,
+                    "max": 1
+                },
+                {
+                    "name": "budgets.recent",
+                    "type": "slider",
+                    "label": "预算·最近消息",
+                    "min": 0,
+                    "max": 1
+                },
+                {
+                    "name": "budgets.retrieval",
+                    "type": "slider",
+                    "label": "预算·检索",
+                    "min": 0,
+                    "max": 1
+                },
+                {
+                    "name": "budgets.response_reserve",
+                    "type": "slider",
+                    "label": "预算·响应预留",
+                    "min": 0,
+                    "max": 1
+                }
+            ]
         }
     ]
 }

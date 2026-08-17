@@ -14,8 +14,6 @@ import { SchemaFormEmbed } from '@/components/schema/widgets/SchemaFormEmbed'
 import { cn } from '@/lib/utils'
 import { ApiSettingsPage } from '@/pages/settings/ApiSettingsPage'
 import { ConcurrencySettingsPage } from '@/pages/settings/ConcurrencySettingsPage'
-import { ContextWindowSettingsPage } from '@/pages/settings/ContextWindowSettingsPage'
-import { CostSettingsPage } from '@/pages/settings/CostSettingsPage'
 import { LlmSettingsPage } from '@/pages/settings/LlmSettingsPage'
 import { PipelineSettingsPage } from '@/pages/settings/PipelineSettingsPage'
 import { PluginsSettingsPage } from '@/pages/settings/PluginsSettingsPage'
@@ -135,9 +133,7 @@ export function SettingsHubWidget(_props: Record<string, unknown>) {
         {active === 'kernel-pipeline' && <PipelineSettingsPage embedded />}
         {active === 'kernel-api' && <ApiSettingsPage />}
         {active === 'kernel-llm' && <LlmSettingsPage embedded />}
-        {active === 'kernel-context' && <ContextWindowSettingsPage />}
         {active === 'kernel-concurrency' && <ConcurrencySettingsPage />}
-        {active === 'kernel-cost' && <CostSettingsPage />}
         {active === 'kernel-plugins' && (
           <PluginsSettingsPage
             onSelectPluginConfig={(pluginId, fileId) => {

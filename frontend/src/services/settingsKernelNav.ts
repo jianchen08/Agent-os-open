@@ -65,27 +65,11 @@ export const KERNEL_NAV_ITEMS: KernelNavItem[] = [
     group: '内核',
   },
   {
-    id: 'context',
-    title: '上下文窗口',
-    label: '上下文',
-    description: '配置上下文窗口大小与截断策略',
-    icon: '🪟',
-    group: '内核',
-  },
-  {
     id: 'concurrency',
     title: '并发设置',
     label: '并发',
     description: '配置请求并发数与限流策略',
     icon: '⚙️',
-    group: '内核',
-  },
-  {
-    id: 'cost',
-    title: '成本设置',
-    label: '成本',
-    description: '配置成本预算与用量统计',
-    icon: '💰',
     group: '内核',
   },
 ]

@@ -28,10 +28,8 @@ import { toast } from '@/components/ui/sonner'
 import { Tabs, TabsList, TabsTrigger, TabsContent } from '@/components/ui/tabs'
 import {
   getLLMConfig,
-  getDefaults,
   getProviderTypes,
   getRemoteModels,
-  saveLLMDefaults,
   addModel,
   updateModel,
   deleteModel,
@@ -42,10 +40,8 @@ import {
   type ModelConfig,
   type ProviderConfig,
   type RemoteModel,
-  type LLMDefaults,
 } from '@/services/api/config'
 
-type SaveState = 'idle' | 'saving' | 'saved' | 'error'
 
 /**
  * 从被 reject 的对象中提取后端错误消息。
@@ -120,10 +116,8 @@ const COMMON_PROVIDER_TYPES = ['openai', 'anthropic', 'deepseek', 'zai', 'minima
  */
 export function LlmSettingsPage({ embedded = false }: { embedded?: boolean }) {
   const [config, setConfig] = useState<LLMConfigResponse | null>(null)
-  const [defaults, setDefaults] = useState<LLMDefaults | null>(null)
   const [isLoading, setIsLoading] = useState(true)
   const [loadError, setLoadError] = useState<string | null>(null)
-  const [saveState, setSaveState] = useState<SaveState>('idle')
   const [activeTab, setActiveTab] = useState('providers')
 
   // 拉取模型对话框的目标提供者
@@ -152,17 +146,15 @@ export function LlmSettingsPage({ embedded = false }: { embedded?: boolean }) {
     setIsLoading(true)
     setLoadError(null)
 
-    Promise.all([getLLMConfig(), getDefaults()])
-      .then(([llmConfig, defaultsData]) => {
+    getLLMConfig()
+      .then((llmConfig) => {
         if (cancelled) return
         setConfig(llmConfig)
-        setDefaults(defaultsData)
       })
       .catch((err) => {
         if (!cancelled) {
           console.error('[LlmSettingsPage] Failed to load LLM config:', err)
           setLoadError('无法连接服务器，请检查网络后重试')
-          setDefaults({ chat: '', embedding: '', tiers: {} })
           setConfig({
             models: {},
             providers: {},
@@ -187,19 +179,6 @@ export function LlmSettingsPage({ embedded = false }: { embedded?: boolean }) {
   const providerIds = config ? Object.keys(config.providers ?? {}) : []
 
   // 保存默认模型选择
-  const handleSaveDefaults = useCallback(async () => {
-    if (!defaults) return
-    setSaveState('saving')
-    try {
-      const saved = await saveLLMDefaults(defaults)
-      setDefaults(saved)
-      setSaveState('saved')
-      setTimeout(() => setSaveState('idle'), 2000)
-    } catch (e) {
-      setSaveState('error')
-      toast.error('保存默认配置失败', { description: getApiMsg(e) })
-    }
-  }, [defaults])
 
   // 添加新模型
   const handleAddModel = useCallback(async () => {
@@ -510,79 +489,13 @@ export function LlmSettingsPage({ embedded = false }: { embedded?: boolean }) {
         {/* ── Tab 2：模型 ── */}
         <TabsContent value="models">
           <div className="mt-4 space-y-6">
-            {/* 默认模型 */}
-            <section>
-              <h3 className="mb-3 text-sm font-semibold">默认模型</h3>
-              <div className="space-y-4">
-                <FieldRow label="聊天模型" htmlFor="default-chat">
-                  <Select
-                    value={defaults?.chat ?? ''}
-                    onValueChange={(v) => setDefaults((prev) => (prev ? { ...prev, chat: v } : prev))}
-                  >
-                    <SelectTrigger id="default-chat">
-                      <SelectValue placeholder="选择聊天模型" />
-                    </SelectTrigger>
-                    <SelectContent>
-                      {modelIds.map((id) => (
-                        <SelectItem key={id} value={id}>{id}</SelectItem>
-                      ))}
-                    </SelectContent>
-                  </Select>
-                </FieldRow>
-
-                {(['large', 'medium', 'small'] as const).map((tier) => (
-                  <FieldRow key={tier} label={`模型分级 (${tier.charAt(0).toUpperCase()}${tier.slice(1)})`} htmlFor={`tier-${tier}`}>
-                    <Select
-                      value={defaults?.tiers?.[tier] ?? ''}
-                      onValueChange={(v) =>
-                        setDefaults((prev) =>
-                          prev ? { ...prev, tiers: { ...prev.tiers, [tier]: v } } : prev
-                        )
-                      }
-                    >
-                      <SelectTrigger id={`tier-${tier}`}>
-                        <SelectValue placeholder={`${tier === 'large' ? '大' : tier === 'medium' ? '中' : '小'}型任务模型`} />
-                      </SelectTrigger>
-                      <SelectContent>
-                        {modelIds.map((id) => (
-                          <SelectItem key={id} value={id}>{id}</SelectItem>
-                        ))}
-                      </SelectContent>
-                    </Select>
-                  </FieldRow>
-                ))}
-
-                <FieldRow label="嵌入模型" htmlFor="default-embedding">
-                  <Select
-                    value={defaults?.embedding ?? ''}
-                    onValueChange={(v) => setDefaults((prev) => (prev ? { ...prev, embedding: v } : prev))}
-                  >
-                    <SelectTrigger id="default-embedding">
-                      <SelectValue placeholder="选择嵌入模型" />
-                    </SelectTrigger>
-                    <SelectContent>
-                      {modelIds.map((id) => (
-                        <SelectItem key={id} value={id}>{id}</SelectItem>
-                      ))}
-                    </SelectContent>
-                  </Select>
-                </FieldRow>
-
-                <div className="flex items-center gap-3 pt-2">
-                  <Button onClick={handleSaveDefaults} disabled={saveState === 'saving'}>
-                    {saveState === 'saving' ? (
-                      <>
-                        <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" />
-                        保存中...
-                      </>
-                    ) : (
-                      '保存默认配置'
-                    )}
-                  </Button>
-                  {saveState === 'saved' && <span className="text-xs text-status-success" role="status">已保存</span>}
-                  {saveState === 'error' && <span className="text-xs text-status-error" role="alert">保存失败</span>}
-                </div>
-              </div>
+            {/* 默认模型：widget 化 T5 迁至插件配置表单（设置 → 插件配置 → LLM Core） */}
+            <section className="rounded-lg border border-dashed p-4">
+              <h3 className="mb-1 text-sm font-semibold">默认模型</h3>
+              <p className="text-muted-foreground text-xs leading-relaxed">
+                默认对话/分级/向量模型与并发上限已迁移至插件配置表单（数据归属
+                llm_core）：设置 → <span className="text-foreground font-medium">插件配置 → LLM 模型配置</span>。
+              </p>
             </section>
 
             {/* 模型列表 */}

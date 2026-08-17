@@ -46,6 +46,91 @@
   "error_policy": "skip",
   "priority": 50,
   "requires_content": 5,
+  "config_files": [
+    {
+      "id": "cost",
+      "path": "config/system/cost_control.yaml",
+      "label": "成本控制配置",
+      "fields": [
+        {
+          "name": "enabled",
+          "type": "toggle",
+          "label": "启用成本控制",
+          "default": true
+        },
+        {
+          "name": "global_config.daily_token_limit",
+          "type": "number",
+          "label": "日 token 上限",
+          "min": 0,
+          "default": 1000000
+        },
+        {
+          "name": "global_config.monthly_token_limit",
+          "type": "number",
+          "label": "月 token 上限",
+          "min": 0,
+          "default": 30000000
+        },
+        {
+          "name": "global_config.per_task_token_limit",
+          "type": "number",
+          "label": "单任务 token 上限",
+          "min": 0,
+          "default": 200000
+        },
+        {
+          "name": "global_config.per_session_token_limit",
+          "type": "number",
+          "label": "单会话 token 上限",
+          "min": 0,
+          "default": 500000
+        },
+        {
+          "name": "alerts.warning_threshold",
+          "type": "slider",
+          "label": "预警阈值（%）",
+          "min": 0,
+          "max": 100,
+          "default": 70
+        },
+        {
+          "name": "alerts.critical_threshold",
+          "type": "slider",
+          "label": "严重阈值（%）",
+          "min": 0,
+          "max": 100,
+          "default": 90
+        },
+        {
+          "name": "alerts.exhausted_threshold",
+          "type": "slider",
+          "label": "耗尽阈值（%）",
+          "min": 0,
+          "max": 100,
+          "default": 100
+        },
+        {
+          "name": "protection.auto_save_at_warning",
+          "type": "toggle",
+          "label": "预警时自动保存",
+          "default": true
+        },
+        {
+          "name": "protection.auto_pause_at_critical",
+          "type": "toggle",
+          "label": "严重时自动暂停",
+          "default": true
+        },
+        {
+          "name": "protection.auto_stop_at_exhausted",
+          "type": "toggle",
+          "label": "耗尽时自动停止",
+          "default": true
+        }
+      ]
+    }
+  ],
   "http_endpoints": [
     {
       "route_id": "cost_budget_status",
