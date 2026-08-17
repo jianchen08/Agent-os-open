@@ -15,6 +15,7 @@ import { loadChatCardDeclarations } from '@/utils/chatCardInterpreter'
 import { disposeResyncOnSchema, initResyncOnSchema } from '@/services/websocket/resync'
 import { loadDshAdapterContributions } from '@/services/dshAdapter'
 import { loadRenderIntents } from '@/utils/dshRenderIntent'
+import { loadOutputSchemas } from '@/utils/outputSchemaView'
 import type { ChatCardDeclaration } from '@/utils/chatCardInterpreter'
 
 /** 初始化自生长闭环 1. 注册所有预置组件 */
@@ -52,6 +53,11 @@ async function reloadContributionRegistry(): Promise<void> {
     // 工具卡片声明（chat_card）从 tools[].ui.chat_card 装载到解释器注册表
     loadChatCardDeclarations(
       (schema as { tools?: Array<{ name?: string; ui?: { chat_card?: ChatCardDeclaration } }> }).tools ?? [],
+    )
+    // 工具输出契约（output_schema，widget 化 T4）：从 tools[].output_schema 装载，
+    // 无声明的工具按契约渲染只读结构化视图 + 违规标警
+    loadOutputSchemas(
+      (schema as { tools?: Array<{ name?: string; output_schema?: Record<string, unknown> }> }).tools ?? [],
     )
     // render 意图声明：tools[].render 装载到 dshRenderIntent 注册表（声明路由），
     // 无声明时工具结果按数据形状自动路由（数据路由），均未命中落通用数据渲染

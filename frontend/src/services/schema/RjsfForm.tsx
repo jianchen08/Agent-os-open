@@ -463,6 +463,8 @@ export interface RjsfFormProps {
   title?: string
   /** 布局：single 单列 / double 双列（antd Row/Col colSpan 24/12） */
   layout?: 'single' | 'double'
+  /** 整表禁用（只读展示场景，如工具 output_schema 结构化视图） */
+  disabled?: boolean
 }
 
 /**
@@ -479,6 +481,7 @@ export function RjsfForm({
   submitLabel = '提交',
   title,
   layout = 'single',
+  disabled,
 }: RjsfFormProps) {
   const [submitting, setSubmitting] = useState(false)
   const { schema, uiSchema: fieldUiSchema } = useMemo(() => toRjsf(fields), [fields])
@@ -528,6 +531,7 @@ export function RjsfForm({
         templates={{ ErrorListTemplate: NoopErrorList }}
         transformErrors={transformErrors}
         omitExtraData
+        disabled={disabled}
         onSubmit={handleSubmit}
         onChange={
           onChange ? ({ formData: values }: IChangeEvent) => onChange(values ?? {}) : undefined

@@ -52,6 +52,24 @@
                                 "collapsible": true,
                                 "defaultExpanded": false
                             }
+                        ],
+                        "actions": [
+                            {
+                                "id": "open_file",
+                                "label": "打开文件",
+                                "on_click": {
+                                    "action": "open_file",
+                                    "value": "{{args.path}}"
+                                }
+                            },
+                            {
+                                "id": "copy_content",
+                                "label": "复制内容",
+                                "on_click": {
+                                    "action": "copy",
+                                    "value": "{{args.content}}"
+                                }
+                            }
                         ]
                     }
                 }

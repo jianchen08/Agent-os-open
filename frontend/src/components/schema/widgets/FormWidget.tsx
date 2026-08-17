@@ -159,6 +159,7 @@ export function FormWidget(props: Record<string, unknown>) {
         submitLabel={(props.submitLabel as string) ?? '提交'}
         initialValues={controlledValue}
         onSubmit={handleSubmit}
+        disabled={props.disabled as boolean | undefined}
       />
       {status !== 'idle' && (
         <p className={cn('mt-1 text-xs', statusClass(status))} data-testid="form-widget-status">

@@ -25,6 +25,7 @@ import {
 import { useEffect, useRef, useState } from 'react'
 import { TextDiffView } from '@/components/approval'
 import { MarkdownRenderer } from '@/components/chat/markdown/MarkdownRenderer'
+import { FormWidget } from '@/components/schema/widgets/FormWidget'
 import { DiffBlock, ReadBlock, SearchBlock, TerminalBlock, WebBlock } from '@/components/vendor/dsh'
 import { TOOL_CONTENT_SCROLL_CLASS } from '@/lib/toolCardStyles'
 import { cn } from '@/lib/utils'
@@ -363,6 +364,36 @@ const FormBlockView: FC<{
 }
 
 /**
+ * 交互表单块（widget 化 T2/T4）：chat_card form 声明 / output_schema 结构化视图。
+ *
+ * 双形态：endpoint 有值 = 交互表单（FormWidget endpoint 模式提交）；
+ * readOnly/无 endpoint = 只读结构化展示（整表 disabled，字段模式无提交按钮）。
+ * 点击/提交事件阻断冒泡（卡片头部折叠开关不误触发）。
+ */
+const FormBlockInputView: FC<{
+  fields: unknown[]
+  endpoint?: string
+  values?: Record<string, unknown>
+  submitLabel?: string
+  readOnly?: boolean
+}> = ({ fields, endpoint, values, submitLabel, readOnly }) => (
+  <div
+    className="py-1"
+    onClick={(e) => e.stopPropagation()}
+    onSubmit={(e) => e.stopPropagation()}
+  >
+    <FormWidget
+      fields={fields}
+      endpoint={readOnly ? undefined : endpoint}
+      initialValues={values}
+      submitLabel={submitLabel}
+      layout="single"
+      disabled={readOnly}
+    />
+  </div>
+)
+
+/**
  * 日志块：等宽滚动区，吸底滚动 + 上翻滚动锁
  */
 const LogBlockView: FC<{ content: string }> = ({ content }) => {
@@ -492,6 +523,33 @@ const DetailBlock: FC<{ block: ActivityDetailBlock }> = ({ block }) => {
     // 待展示 JSON）；payload 由 dshRenderIntent 的纯函数构造，字段类型可控。
     if (contentType.startsWith('dsh:')) {
       return <DshBlockView contentType={contentType} props={block.dshProps ?? {}} />
+    }
+
+    // 交互表单块（widget 化 T2/T4）：content.formFields 数组 = 声明表单 /
+    // 契约结构化视图（需先于 object→JSON 兜底——content 是结构化 props）；
+    // 旧形态（kvItems/jsonItems 只读）落下方 switch 的 FormBlockView。
+    if (
+      contentType === 'form' &&
+      content &&
+      typeof content === 'object' &&
+      Array.isArray((content as Record<string, unknown>).formFields)
+    ) {
+      const c = content as {
+        formFields: unknown[]
+        endpoint?: string
+        values?: Record<string, unknown>
+        submitLabel?: string
+        readOnly?: boolean
+      }
+      return (
+        <FormBlockInputView
+          fields={c.formFields}
+          endpoint={c.endpoint}
+          values={c.values}
+          submitLabel={c.submitLabel}
+          readOnly={c.readOnly}
+        />
+      )
     }
 
     if (typeof content === 'object') {
@@ -798,12 +856,14 @@ const ActivityCard: FC<ActivityCardProps> = ({
                   key={action.id}
                   onClick={async (e) => {
                     e.stopPropagation()
+                    // 声明驱动产物可能无 handler（未知协议/value 缺失）——禁用而非报错
+                    if (!action.onClick) return
                     if (action.confirmMessage && !(await confirm(action.confirmMessage))) {
                       return
                     }
                     await action.onClick()
                   }}
-                  disabled={action.disabled}
+                  disabled={action.disabled || !action.onClick}
                   aria-label={action.label || action.type}
                   className={cn(
                     'inline-flex items-center gap-1.5 rounded-md px-2.5 py-1 text-xs font-medium transition-colors',

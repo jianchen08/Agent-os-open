@@ -52,7 +52,10 @@ export type DetailContentType =
   | 'dsh:terminal' // TerminalBlock（{command, cwd, output, exitCode, running}）
   // 通用渲染路由器（dshRenderIntent 数据路由/声明产出）：表格式与表单式布局。
   | 'table' // 表格（table.columns + table.rows 有效）
-  | 'form' // 表单（kvItems 标量 + jsonItems 长文本/对象折叠）
+  // 表单：两形态同词（双路由）——content.formFields 数组 = 可交互表单
+  // （chat_card form 块声明，ActivityCard 透传 FormWidget）；否则 kvItems 标量
+  // + jsonItems 长文本折叠的只读表单视图（render 意图数据路由产物）。
+  | 'form'
 
 /**
  * 活动操作类型
@@ -114,8 +117,14 @@ export interface ActivityAction {
   type: ActivityActionType
   /** 是否禁用 */
   disabled?: boolean
-  /** 点击处理函数 */
-  onClick: () => void | Promise<void>
+  /**
+   * 点击处理函数。
+   *
+   * 声明驱动（chat_card actions）产物可能没有可执行 handler（未声明
+   * on_click / 未知协议 / value 求值缺失）——此时按钮禁用而非报错，
+   * 故本字段可选。
+   */
+  onClick?: () => void | Promise<void>
   /** 确认提示（可选） */
   confirmMessage?: string
   /** 操作按钮样式（可选） */

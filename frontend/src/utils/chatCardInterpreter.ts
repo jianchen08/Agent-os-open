@@ -11,12 +11,14 @@
  * 协议参考：docs/working/design/tool-card-rendering-design.md §五
  */
 
-import { safeParseResult } from '@/utils/toolCardRegistry'
+import { toast } from '@/components/ui/sonner'
+import { commandDispatcher } from '@/services/schema/commandDispatcher'
+import { getGlobalImagePreviewCallback, getGlobalOpenFileCallback, safeParseResult } from '@/utils/toolCardRegistry'
 import type { ActivityAction, ActivityDetailBlock, DetailContentType } from '@/types/activity'
 
 /** 卡片内容块声明（type 与 ActivityCard 现有 contentType 对齐） */
 export interface ChatCardBlockDecl {
-  type: 'text' | 'code' | 'json' | 'markdown' | 'diff' | 'kv' | 'file' | 'image' | 'link' | 'log'
+  type: 'text' | 'code' | 'json' | 'markdown' | 'diff' | 'kv' | 'file' | 'image' | 'link' | 'log' | 'form'
   /** 区块 ID（透传到 ActivityDetailBlock.id，供测试/外部按 id 定位） */
   id?: string
   label?: string
@@ -34,14 +36,47 @@ export interface ChatCardBlockDecl {
   /** diff 专用 */
   diffOldSource?: string
   diffNewSource?: string
+  /** form 专用：交互表单声明（字段词汇 = UIInputFormField） */
+  form?: ChatCardFormDecl
+}
+
+/**
+ * form 块声明（widget 化 T2）：工具卡片内声明交互表单。
+ *
+ * 提交通道：endpoint 直连（FormWidget endpoint 模式，POST
+ * {pipeline_id, ...values}）——高风险操作可由端点内部挂 human-interaction
+ * 审批。表单初值可经 valuesSource 从工具上下文预填。
+ */
+export interface ChatCardFormDecl {
+  /** 字段声明（UIInputFormField 词汇，FormWidget 收窄渲染） */
+  fields: Array<Record<string, unknown>>
+  /** 提交端点（POST {pipeline_id, ...values}；缺省则只读展示） */
+  endpoint?: string
+  /** 提交按钮文案（缺省「提交」） */
+  submitLabel?: string
+  /** 初值 source（路径表达式 → 对象，如 result.form_values） */
+  valuesSource?: string
 }
 
 export interface ChatCardActionDecl {
   id: string
   label: string
   icon?: string
-  /** on_click 协议（open_file/open_url/preview_image/copy/run_action）——执行接线待 actions 落地 */
-  onClick?: Record<string, unknown>
+  /**
+   * on_click 协议（widget 化 T3 接线）：
+   * {action: 'open_file'|'open_url'|'preview_image'|'copy'|'run_action', value,
+   *  args?, confirm?}
+   * - value 支持模板（如 "{{result.stdout}}"）；求值缺失/未知协议 → 按钮禁用
+   * - run_action 走 commandDispatcher（POST /api/v1/actions/execute）
+   * - confirm 为确认弹窗文案（点击先确认再执行）
+   */
+  onClick?: {
+    action?: unknown
+    value?: unknown
+    args?: unknown
+    confirm?: unknown
+    [key: string]: unknown
+  }
 }
 
 /** ui.chat_card 声明（已反序列化） */
@@ -258,6 +293,26 @@ function translateBlock(decl: ChatCardBlockDecl, ctx: ToolCallContext): Activity
       if (!diffOld && !diffNew) return null
       return { ...base, contentType: 'diff' as DetailContentType, content: '', diffOld, diffNew }
     }
+    case 'form': {
+      // form 块（widget 化 T2）：字段声明 + 提交端点打包进 content，
+      // ActivityCard form 分支按 formFields 形状路由到 FormWidget（交互）
+      // 或 FormBlockView（只读 kvItems/jsonItems，双路由同词）。
+      const form = decl.form
+      if (!form || !Array.isArray(form.fields) || form.fields.length === 0) return null
+      const values = form.valuesSource ? evalPath(ctx, form.valuesSource) : undefined
+      return {
+        ...base,
+        contentType: 'form' as DetailContentType,
+        content: {
+          formFields: form.fields,
+          endpoint: form.endpoint,
+          submitLabel: form.submitLabel,
+          values: values && typeof values === 'object' && !Array.isArray(values)
+            ? (values as Record<string, unknown>)
+            : undefined,
+        },
+      }
+    }
     default:
       return null
   }
@@ -317,11 +372,71 @@ export function clearChatCardDeclarations(): void {
 }
 
 /**
+ * on_click 协议 → 可执行 handler（widget 化 T3）。
+ *
+ * value 支持模板（renderTemplate）；求值缺失 / 协议缺失 / 未知协议返回
+ * null——上层据此禁用按钮（死按钮禁用而非点击报错）。
+ */
+function buildActionHandler(
+  decl: ChatCardActionDecl,
+  ctx: ToolCallContext,
+): (() => void | Promise<void>) | null {
+  const proto = decl.onClick
+  const action = proto?.action
+  if (typeof action !== 'string') return null
+  const rawValue = proto?.value
+  const value = typeof rawValue === 'string' ? renderTemplate(rawValue, ctx) : rawValue
+
+  switch (action) {
+    case 'open_file': {
+      if (typeof value !== 'string' || value === '') return null
+      return () => {
+        void getGlobalOpenFileCallback()(value)
+      }
+    }
+    case 'open_url': {
+      if (typeof value !== 'string' || value === '') return null
+      return () => {
+        window.open(value, '_blank', 'noopener,noreferrer')
+      }
+    }
+    case 'preview_image': {
+      if (typeof value !== 'string' || value === '') return null
+      return () => {
+        getGlobalImagePreviewCallback()(value)
+      }
+    }
+    case 'copy': {
+      const text =
+        value == null ? '' : typeof value === 'object' ? JSON.stringify(value, null, 2) : String(value)
+      return async () => {
+        try {
+          await navigator.clipboard?.writeText(text)
+          toast.success('已复制到剪贴板')
+        } catch {
+          toast.error('复制失败')
+        }
+      }
+    }
+    case 'run_action': {
+      if (typeof value !== 'string' || value === '') return null
+      const args = proto?.args && typeof proto.args === 'object' ? proto.args : undefined
+      return () => {
+        void commandDispatcher.executeCommand(value, args)
+      }
+    }
+    default:
+      return null
+  }
+}
+
+/**
  * 据 ui.chat_card 声明 + 工具调用上下文，翻译成 ActivityCard 可直接渲染的 details/actions。
  *
  * - title/summary 经模板引擎求值
  * - blocks 按 when 过滤后翻译为 ActivityDetailBlock[]（值缺失的块自动跳过）
- * - actions 产出结构（on_click 执行接线待后续落地）
+ * - actions 经 on_click 协议接线（open_file/open_url/preview_image/copy/
+ *   run_action；无协议/求值缺失 → 按钮禁用）
  */
 export function interpretChatCard(decl: ChatCardDeclaration, ctx: ToolCallContext): InterpretedChatCard {
   const details: ActivityDetailBlock[] = []
@@ -333,11 +448,20 @@ export function interpretChatCard(decl: ChatCardDeclaration, ctx: ToolCallContex
     if (translated) details.push(translated)
   }
 
-  const actions: ActivityAction[] = (decl.actions ?? []).map((a) => ({
-    id: a.id,
-    icon: null,
-    label: a.label,
-  }))
+  const actions: ActivityAction[] = (decl.actions ?? []).map((a) => {
+    const handler = buildActionHandler(a, ctx)
+    const confirm = a.onClick?.confirm
+    return {
+      id: a.id,
+      icon: null,
+      label: a.label,
+      type: 'custom',
+      // 无可执行 handler（未声明 on_click / 未知协议 / value 求值缺失）→ 禁用
+      disabled: !handler,
+      onClick: handler ?? undefined,
+      confirmMessage: typeof confirm === 'string' && confirm !== '' ? confirm : undefined,
+    }
+  })
 
   // filePathSource 求值 → 交由 enhance 注入 activity.filePath + onOpenFile
   let filePath: string | undefined

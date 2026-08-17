@@ -15,6 +15,7 @@ import { interpretChatCard } from './chatCardInterpreter'
 import { getChatCardDeclaration } from './chatCardInterpreter'
 import { applyRenderIntent, applyDataDrivenIntent } from './dshRenderIntent'
 import { resolveChatCardIcon } from './chatCardIconRegistry'
+import { buildOutputSchemaView, getOutputSchema } from './outputSchemaView'
 import type { ToolCallContext } from './chatCardInterpreter'
 
 /**
@@ -69,6 +70,28 @@ export function getGlobalOpenFileCallback(): (filePath: string, containerTaskId?
   return globalOnOpenFile || ((filePath: string, _containerTaskId?: string) => {
     console.warn('[toolCardRegistry] 未注册文件打开回调，请在应用启动时调用 registerGlobalOpenFileCallback')
   })
+}
+
+// ── 全局图片预览回调（chat_card actions on_click preview_image 协议宿主，widget 化 T3）──
+let globalImagePreview: ((src: string) => void) | null = null
+
+/**
+ * 注册全局图片预览回调（传 null 恢复缺省行为）。
+ *
+ * 宿主：main.tsx 挂载的 ImagePreviewHost（全屏灯箱）。缺省兜底：新标签打开。
+ */
+export function registerGlobalImagePreviewCallback(callback: ((src: string) => void) | null): void {
+  globalImagePreview = callback
+}
+
+/** 获取全局图片预览回调（未注册时兜底新标签打开） */
+export function getGlobalImagePreviewCallback(): (src: string) => void {
+  return (
+    globalImagePreview ||
+    ((src: string) => {
+      window.open(src, '_blank', 'noopener,noreferrer')
+    })
+  )
 }
 
 /**
@@ -145,6 +168,29 @@ export function enhanceActivityWithToolConfig(
       enhanced.diffStat = interpreted.diffStat
     }
     return enhanced
+  }
+
+  // 工具契约结构化视图（widget 化 T4）：带 output_schema 但无 render/chat_card
+  // 声明的工具，结果按 schema 渲染只读结构化表单 + 契约违规标警（fail-closed
+  // 前端镜像，权威校验在内核 tool_core）。显式声明已在上文优先返回。
+  const outputSchema = getOutputSchema(activity.toolName)
+  if (outputSchema) {
+    const view = buildOutputSchemaView(
+      outputSchema,
+      toolCall.result,
+      toolCall.resultData,
+    )
+    if (view) {
+      const enhancedContract: ActivityData = {
+        ...activity,
+        title: humanizeToolName(activity.toolName),
+        details: [view.block, ...inferDefaultDetails(toolCall)],
+      }
+      if (view.violations.length > 0) {
+        enhancedContract.error = `output_schema 契约校验（前端镜像）：\n${view.violations.join('\n')}`
+      }
+      return enhancedContract
+    }
   }
 
   // 数据路由：无任何插件声明（render/chat_card）时按数据形状自动匹配渲染组件
