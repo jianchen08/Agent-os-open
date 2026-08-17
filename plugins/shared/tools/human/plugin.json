@@ -7,6 +7,10 @@
     "language": "python",
     "host_type": "sidecar",
     "entry": "python server.py",
+    "mcp": {
+        "transport": "stdio",
+        "request_timeout_secs": 90000
+    },
     "lifecycle": {
         "idle_timeout_secs": 0
     },

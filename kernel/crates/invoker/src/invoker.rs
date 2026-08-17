@@ -1307,6 +1307,18 @@ impl PluginInvokerImpl {
             }
         };
 
+        // 插件级调用超时（manifest.mcp.request_timeout_secs）：长等待业务
+        // （human-interaction.wait_for_choice 的 24h 审批等）必须显式声明，
+        // 否则内核 MCP client 300s 默认兜底先于用户操作掐断调用（2026-08-17
+        // 审批 5 分钟窗口实锤：-32001 超时 → 审批作废 → 引擎重试弹窗循环）。
+        if let Some(secs) = manifest
+            .mcp
+            .as_ref()
+            .and_then(|m| m.request_timeout_secs)
+        {
+            client = client.with_request_timeout(std::time::Duration::from_secs(secs));
+        }
+
         client.connect().await.map_err(|e| PluginError {
             message: format!("MCP connect failed: {}", e),
             code: Some("MCP_CONNECT_FAILED".to_string()),
@@ -3372,6 +3384,7 @@ mod tests {
             endpoint: None,
             idle_timeout_secs: 300,
             protocol_version: "2025-06-18".to_string(),
+            request_timeout_secs: None,
         });
         loader.add_manifest(m);
 
@@ -3396,6 +3409,7 @@ mod tests {
             }),
             idle_timeout_secs: 300,
             protocol_version: "2025-06-18".to_string(),
+            request_timeout_secs: None,
         });
         loader.add_manifest(m);
 
@@ -3428,6 +3442,7 @@ mod tests {
             }),
             idle_timeout_secs: 300,
             protocol_version: "2025-06-18".to_string(),
+            request_timeout_secs: None,
         });
         loader.add_manifest(m);
 

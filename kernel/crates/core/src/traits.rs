@@ -1295,6 +1295,14 @@ pub struct McpConfig {
     pub idle_timeout_secs: u64,
     #[serde(default = "default_protocol_version")]
     pub protocol_version: String,
+    /// 单次工具调用的响应等待超时（秒）。`None` = 内核默认 300s。
+    ///
+    /// 长等待业务（human-interaction.wait_for_choice 等用户响应，业务超时可达
+    /// 24h）必须显式声明，否则内核 MCP client 300s 兜底会先于用户操作掐断调用
+    /// （2026-08-17 审批 5 分钟窗口实锤：审批请求被 -32001 超时作废后引擎重试
+    /// 弹窗循环）。security_check 的 SDK 侧 timeout 参数仅作提示，内核不读。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request_timeout_secs: Option<u64>,
 }
 
 pub fn default_idle_timeout() -> u64 {
@@ -1736,4 +1744,29 @@ pub struct SessionListFilter {
     pub session_type: Option<String>,
     /// 最多返回条数
     pub limit: Option<usize>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn mcp_config_request_timeout_secs_parse_roundtrip() {
+        // 显式声明 → 覆盖默认 300s
+        let cfg: McpConfig = serde_json::from_value(serde_json::json!({
+            "transport": "stdio",
+            "request_timeout_secs": 90000,
+        }))
+        .expect("合法配置应可解析");
+        assert_eq!(cfg.request_timeout_secs, Some(90000));
+
+        // 缺省 → None（保持内核 300s 默认兜底）
+        let cfg2: McpConfig =
+            serde_json::from_value(serde_json::json!({"transport": "stdio"})).expect("缺省可解析");
+        assert_eq!(cfg2.request_timeout_secs, None);
+
+        // 序列化往返：None 字段不输出（兼容旧清单）
+        let s = serde_json::to_string(&cfg2).unwrap();
+        assert!(!s.contains("request_timeout_secs"), "None 字段不应序列化: {s}");
+    }
 }
