@@ -245,6 +245,43 @@ export function toRjsf(fields: UIInputFormField[]): {
 }
 
 /**
+ * 级联选择语义化（缺口 G2）：用当前表单值把 datasource 字段的 ui:options
+ * 补成「已解析的 datasourceUri + 依赖指纹 depKey」。
+ *
+ * RJSF 对 widget 的 formContext 传递在 antd 主题下不可靠——改走确定性路径：
+ * uiSchema 每渲染重建（with 当前 formData），带 {{}} 模板的字段值变化 →
+ * 该字段 ui:options.datasourceUri 变化 → RJSF 必重渲该 widget → AsyncSelect
+ * 的 effect 依赖（resolvedUri/depKey）变化 → 自动重拉。
+ */
+export function resolveAsyncSelectOptions(
+  fields: UIInputFormField[],
+  uiSchema: UiSchema,
+  formData: Record<string, unknown>,
+): UiSchema {
+  let changed = false
+  const out: UiSchema = { ...uiSchema }
+  for (const f of fields) {
+    if (!f.datasourceUri) continue
+    const entry = uiSchema[f.name]
+    if (!entry) continue
+    const opts = { ...((entry['ui:options'] as Record<string, unknown>) ?? {}) }
+    const deps = [...(f.dependsOn ?? []), ...extractUriDeps(f.datasourceUri)]
+    const resolved = f.datasourceUri.includes('{{')
+      ? resolveTemplateUri(f.datasourceUri, formData)
+      : f.datasourceUri
+    const depKey = deps.map((d) => String(formData?.[d] ?? '')).join('|')
+    if (opts.datasourceUri !== resolved || opts.depKey !== depKey || opts.dependsOn === undefined) {
+      changed = true
+      opts.datasourceUri = resolved
+      opts.depKey = depKey
+      opts.dependsOn = f.dependsOn ?? []
+    }
+    out[f.name] = { ...entry, 'ui:options': opts }
+  }
+  return changed ? out : uiSchema
+}
+
+/**
  * 构建表单初始值：initialValues > 字段 default > 类型空值
  *
  * 未给的 string/number 保持 undefined（让 placeholder 可见）；数组用 []；
@@ -361,32 +398,28 @@ function resolveTemplateUri(uri: string, formData: Record<string, unknown> | und
 }
 
 function AsyncSelectWidget(props: WidgetProps) {
-  const { id, value, onChange, disabled, readonly, placeholder, options, formContext } = props
+  const { id, value, onChange, disabled, readonly, placeholder, options } = props
   const opts = options as unknown as {
     datasourceUri?: string
     dependsOn?: string[]
+    /** 依赖指纹：依赖字段值序列化（RjsfForm 级联语义化注入，G2） */
+    depKey?: string
     fallbackOptions?: Array<{ label: string; value: string | number }>
     multiple?: boolean
   }
-  const ctx = formContext as { formData?: Record<string, unknown> } | undefined
-  const formData = ctx?.formData
   const uri = opts.datasourceUri ?? ''
   const multiple = Boolean(opts.multiple)
-  // 级联依赖：显式 dependsOn ∪ datasourceUri {{}} 引用
-  const deps = [...(opts.dependsOn ?? []), ...extractUriDeps(uri)]
-  const depKey = deps.map((d) => String(formData?.[d] ?? '')).join('|')
-  const resolvedUri = uri ? resolveTemplateUri(uri, formData) : ''
   const [asyncOptions, setAsyncOptions] = useState<Array<{ label: string; value: string | number }>>(
     [],
   )
-  const [loading, setLoading] = useState(Boolean(resolvedUri))
+  const [loading, setLoading] = useState(Boolean(uri))
 
   useEffect(() => {
-    if (!resolvedUri) return
+    if (!uri) return
     let cancelled = false
     setLoading(true)
     setAsyncOptions([])
-    fetchDatasourceOptions(resolvedUri)
+    fetchDatasourceOptions(uri)
       .then((fetched) => {
         if (!cancelled) setAsyncOptions(fetched)
       })
@@ -399,8 +432,9 @@ function AsyncSelectWidget(props: WidgetProps) {
     return () => {
       cancelled = true
     }
+    // depKey：依赖字段值变化时重拉（模板 URI 变化已体现在 uri 依赖上）
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [resolvedUri, depKey])
+  }, [uri, opts.depKey])
 
   const finalOptions = asyncOptions.length > 0 ? asyncOptions : (opts.fallbackOptions ?? [])
 
@@ -516,19 +550,25 @@ export function RjsfForm({
 }: RjsfFormProps) {
   const [submitting, setSubmitting] = useState(false)
   const { schema, uiSchema: fieldUiSchema } = useMemo(() => toRjsf(fields), [fields])
+  // 级联语义化（缺口 G2）：模板 URI + 依赖指纹随表单值实时解析（字段值变化 →
+  // 该字段 ui:options 变化 → RJSF 重渲 widget → AsyncSelect 重拉）
   const [formData, setFormData] = useState(() => buildFormValues(fields, initialValues))
+  const uiSchema = useMemo(
+    () => resolveAsyncSelectOptions(fields, fieldUiSchema, formData),
+    [fields, fieldUiSchema, formData],
+  )
   const transformErrors = useMemo(() => makeErrorTransformer(fields), [fields])
 
-  const uiSchema = useMemo(
+  const uiSchemaWithSubmit = useMemo(
     () => ({
-      ...fieldUiSchema,
+      ...uiSchema,
       'ui:submitButtonOptions': {
         norender: !onSubmit,
         submitText: submitting ? '提交中...' : submitLabel,
         props: { type: 'primary' as const, loading: submitting, disabled: submitting },
       },
     }),
-    [fieldUiSchema, submitLabel, onSubmit, submitting],
+    [uiSchema, submitLabel, onSubmit, submitting],
   )
 
   if (fields.length === 0) {
@@ -554,10 +594,10 @@ export function RjsfForm({
       {title && <h3 className="text-foreground text-base font-semibold">{title}</h3>}
       <Form
         schema={schema}
-        uiSchema={uiSchema}
+        uiSchema={uiSchemaWithSubmit}
         validator={validator}
         formData={formData}
-        formContext={{ colSpan: layout === 'double' ? 12 : 24, formData }}
+        formContext={{ colSpan: layout === 'double' ? 12 : 24 }}
         widgets={WIDGETS}
         templates={{ ErrorListTemplate: NoopErrorList }}
         transformErrors={transformErrors}
@@ -565,11 +605,9 @@ export function RjsfForm({
         disabled={disabled}
         onSubmit={handleSubmit}
         onChange={({ formData: values }: IChangeEvent) => {
-          const next = values ?? {}
-          // 实时表单值推进 formContext（级联选择依赖读取，缺口 G2）——无论
-          // 外部是否传 onChange 都回写，避免级联表单缺 onChange prop 时依赖失效
-          setFormData(next)
-          if (onChange) onChange(next)
+          // 实时表单值驱动级联语义化（缺口 G2）——无论外部是否传 onChange 都回写
+          setFormData(values ?? {})
+          if (onChange) onChange(values ?? {})
         }}
       />
     </div>

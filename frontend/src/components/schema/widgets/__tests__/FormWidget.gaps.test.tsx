@@ -114,20 +114,12 @@ describe('G1：反馈文案/成功动作声明化', () => {
 })
 
 describe('G2：级联选择（datasourceUri 模板 + dependsOn 重拉）', () => {
-  it('{{field}} 模板随表单值渲染并重拉（apiGet 断言绝对 URI 直连）', async () => {
-    apiGet.mockResolvedValue({ data: [{ label: 'glm', value: 'glm' }] })
+  it('{{field}} 模板随表单值渲染并重拉（文本字段驱动，jsdom 可靠）', async () => {
+    apiGet.mockResolvedValue({ data: [] })
     render(
       <RjsfForm
         fields={[
-          {
-            name: 'provider',
-            type: 'select' as const,
-            label: '提供商',
-            options: [
-              { label: 'Zhipu', value: 'zhipu' },
-              { label: 'OpenAI', value: 'openai' },
-            ],
-          },
+          { name: 'provider', type: 'input' as const, label: '提供商' },
           {
             name: 'model',
             type: 'select' as const,
@@ -137,13 +129,15 @@ describe('G2：级联选择（datasourceUri 模板 + dependsOn 重拉）', () =>
         ]}
       />,
     )
+    // 初始空值 → 模板空段
     await waitFor(() => expect(apiGet).toHaveBeenCalledWith('/ext/opts?provider='))
-    const callsForEmpty = apiGet.mock.calls.length
-    // 选择 provider → 模板实值 + 依赖变更重拉
-    fireEvent.mouseDown(document.getElementById('root_provider') as HTMLInputElement)
-    fireEvent.click(await screen.findByRole('option', { name: 'Zhipu' }))
+    // 输入 provider → onChange → formData 更新 → 模板实值重拉
+    fireEvent.change(screen.getByLabelText('提供商'), { target: { value: 'zhipu' } })
     await waitFor(() => expect(apiGet).toHaveBeenCalledWith('/ext/opts?provider=zhipu'))
-    expect(apiGet.mock.calls.length).toBeGreaterThan(callsForEmpty)
+    // 再改一次 → 依赖变化再次重拉
+    fireEvent.change(screen.getByLabelText('提供商'), { target: { value: 'openai' } })
+    await waitFor(() => expect(apiGet).toHaveBeenCalledWith('/ext/opts?provider=openai'))
+    await waitFor(() => expect(apiGet).toHaveBeenCalledWith('/ext/opts?provider=zhipu'))
   })
 
   it('显式 dependsOn 字段变化触发重拉（datasourceUri 无模板时也生效）', async () => {
@@ -151,23 +145,21 @@ describe('G2：级联选择（datasourceUri 模板 + dependsOn 重拉）', () =>
     render(
       <RjsfForm
         fields={[
-          {
-            name: 'scope',
-            type: 'select' as const,
-            label: '范围',
-            options: [
-              { label: '任务', value: 'task' },
-              { label: '会话', value: 'session' },
-            ],
-          },
+          { name: 'scope', type: 'input' as const, label: '范围' },
           { name: 'item', type: 'select' as const, label: '条目', datasourceUri: '/ext/items', dependsOn: ['scope'] },
         ]}
       />,
     )
-    await waitFor(() => expect(apiGet).toHaveBeenCalledWith('/ext/items'))
-    const calls = apiGet.mock.calls.length
-    fireEvent.mouseDown(document.getElementById('root_scope') as HTMLInputElement)
-    fireEvent.click(await screen.findByRole('option', { name: '任务' }))
-    await waitFor(() => expect(apiGet.mock.calls.length).toBeGreaterThan(calls))
+    await waitFor(() => expect(apiGet.mock.calls.length).toBeGreaterThanOrEqual(1))
+    // 依赖字段变化 → 同一 URI 重拉（无模板，dependsOn 驱动）
+    fireEvent.change(screen.getByLabelText('范围'), { target: { value: 'task' } })
+    await waitFor(() => expect(apiGet.mock.calls.length).toBeGreaterThanOrEqual(2))
+    fireEvent.change(screen.getByLabelText('范围'), { target: { value: 'session' } })
+    await waitFor(() => expect(apiGet.mock.calls.length).toBeGreaterThanOrEqual(3))
+    // 依赖值未变（重复输入同值）→ 不重拉
+    const stable = apiGet.mock.calls.length
+    fireEvent.change(screen.getByLabelText('范围'), { target: { value: 'session' } })
+    await new Promise((r) => setTimeout(r, 200))
+    expect(apiGet.mock.calls.length).toBe(stable)
   })
 })
