@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio  # noqa: F401
 import logging
+import sys
 from datetime import datetime  # noqa: F401
 from typing import Any
 
@@ -332,6 +333,10 @@ async def create_task(
 
     """
 
+    # SDK HTTP 端点把 body 作 dict 透传（不实例化 Pydantic 模型）——兼容两种形状
+    if isinstance(body, dict):
+        body = TaskCreate(**body)
+
     task_service = _get_task_service()
 
     if task_service is None:
@@ -391,6 +396,10 @@ async def create_root_task(
     非容器由 target agent 直接执行。L2 拦截规则、层级配置、注入链均不变。
     """
 
+    # SDK HTTP 端点把 body 作 dict 透传（不实例化 Pydantic 模型）——兼容两种形状
+    if isinstance(body, dict):
+        body = TaskRootCreate(**body)
+
     task_service = _get_task_service()
 
     if task_service is None:
@@ -421,9 +430,24 @@ async def create_root_task(
     # workspace 路径安全校验（复用 task_submit 同款）
 
     if body.workspace:
-        from tools.builtin.task_submit.tool import _validate_workspace_path  # noqa: PLC0415
+        # 0.2 迁移：task_submit 独立插件目录（tools.builtin 包已废弃），
+        # channel_api 的 sys.path 不含该目录——importlib 磁盘加载。
+        import importlib.util  # noqa: PLC0415
+        from pathlib import Path  # noqa: PLC0415
 
-        ws_error = _validate_workspace_path(body.workspace)
+        _ws_spec = importlib.util.spec_from_file_location(
+            "task_submit_tool_ws_check",
+            str(
+                Path(__file__).resolve().parent.parent.parent
+                / "tools" / "task_submit" / "tool.py"
+            ),
+        )
+        assert _ws_spec is not None and _ws_spec.loader is not None
+        _ws_mod = importlib.util.module_from_spec(_ws_spec)
+        sys.modules["task_submit_tool_ws_check"] = _ws_mod
+        _ws_spec.loader.exec_module(_ws_mod)
+
+        ws_error = _ws_mod._validate_workspace_path(body.workspace)
 
         if ws_error:
             raise APIError(
