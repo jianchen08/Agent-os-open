@@ -150,6 +150,17 @@
   "contributes": {
     "pages": [
       {
+        "id": "monitoring",
+        "title": "监控",
+        "icon": "📊",
+        "space": "workspace",
+        "slot": "activity-bar",
+        "order": 20,
+        "path": "/monitoring",
+        "widget": "monitoring_panel",
+        "description": "系统监控面板（widget 化 T11 声明迁移：禁用插件即移除入口）"
+      },
+      {
         "id": "payload_diag",
         "title": "Payload 诊断",
         "space": "workspace",

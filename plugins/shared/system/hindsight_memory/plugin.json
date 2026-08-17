@@ -46,5 +46,20 @@
   "error_policy": "skip",
   "priority": 50,
   "requires_content": 5,
-  "config_files": []
+  "config_files": [],
+  "contributes": {
+    "pages": [
+      {
+        "id": "memory",
+        "title": "记忆",
+        "icon": "🧠",
+        "space": "workspace",
+        "slot": "activity-bar",
+        "order": 30,
+        "path": "/memory",
+        "widget": "memory_panel",
+        "description": "记忆面板（widget 化 T11 声明迁移）"
+      }
+    ]
+  }
 }

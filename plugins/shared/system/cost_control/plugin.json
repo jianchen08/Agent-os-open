@@ -182,5 +182,20 @@
       "max_concurrency": 4,
       "description": "Reset global budget tracking"
     }
-  ]
+  ],
+  "contributes": {
+    "pages": [
+      {
+        "id": "cost_dashboard",
+        "title": "成本",
+        "icon": "💰",
+        "space": "workspace",
+        "slot": "activity-bar",
+        "order": 40,
+        "path": "/cost",
+        "widget": "cost_dashboard",
+        "description": "成本仪表盘（widget 化 T11 声明迁移）"
+      }
+    ]
+  }
 }

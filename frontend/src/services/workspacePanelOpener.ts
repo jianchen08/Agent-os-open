@@ -40,13 +40,9 @@ export const TOP_NAV_PANELS: Record<string, WorkspacePanelSpec> = {
     icon: 'plugin',
     moduleId: '__panel_plugins__',
   },
-  '/monitoring': {
-    id: 'ws-panel-monitoring',
-    title: '监控',
-    component: 'monitoring_panel',
-    icon: 'activity',
-    moduleId: '__panel_monitoring__',
-  },
+  // 监控/记忆面板已声明化（widget 化 T11）：monitoring/hindsight_memory 插件
+  // contributes.pages 声明（openWorkspacePanelByPath 解析顺序 1），禁用插件
+  // 即移除入口；此处不再硬编码。
   '/tools': {
     id: 'ws-panel-tools',
     title: '工具',
@@ -60,13 +56,6 @@ export const TOP_NAV_PANELS: Record<string, WorkspacePanelSpec> = {
     component: 'agents_panel',
     icon: 'person',
     moduleId: '__panel_agents__',
-  },
-  '/memory': {
-    id: 'ws-panel-memory',
-    title: '记忆',
-    component: 'memory_panel',
-    icon: 'brain',
-    moduleId: '__panel_memory__',
   },
   '/tasks': {
     id: 'ws-panel-tasks',
