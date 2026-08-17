@@ -10,7 +10,14 @@
         "tools": [
             {
                 "name": "trigger_review",
-                "description": "Trigger a review for a completed task"
+                "description": "Trigger a review for a completed task",
+                "ui": {
+                    "view_modes": [
+                        { "view_mode": "text_diff", "widget": "text_diff" },
+                        { "view_mode": "image_annotation", "widget": "image_annotation" },
+                        { "view_mode": "media_timeline", "widget": "media_timeline" }
+                    ]
+                }
             },
             {
                 "name": "review.get_report",

@@ -26,9 +26,37 @@ import { TableWidget } from '@/components/schema/widgets/TableWidget'
 import { TerminalWidget } from '@/components/schema/widgets/TerminalWidget'
 import { WebviewWidget } from '@/components/schema/widgets/WebviewWidget'
 import { DebugCenterHubWidget } from '@/components/schema/widgets/DebugCenterHubWidget'
+import { ImageAnnotationView } from '@/components/approval/ImageAnnotationView'
+import { MediaTimelineView } from '@/components/approval/MediaTimelineView'
+import { TextDiffView } from '@/components/approval/TextDiffView'
 import { widgetRegistry } from './WidgetRegistry'
 import type { WidgetComponent } from './WidgetRegistry'
+import type { Annotation } from '@/types/review'
 import type { RenderingSpaceType } from '@/types/schema'
+
+/** 审批三视图 widget 适配（widget 化 T10：view_mode 声明路由的复用件） */
+const TextDiffWidget = (props: Record<string, unknown>) => (
+  <TextDiffView
+    oldContent={typeof props.oldContent === 'string' ? props.oldContent : ''}
+    newContent={typeof props.newContent === 'string' ? props.newContent : ''}
+  />
+)
+const ImageAnnotationWidget = (props: Record<string, unknown>) => (
+  <ImageAnnotationView
+    imageUrl={typeof props.imageUrl === 'string' ? props.imageUrl : ''}
+    annotations={(props.annotations as Annotation[]) ?? []}
+    readOnly={props.readOnly === true}
+  />
+)
+const MediaTimelineWidget = (props: Record<string, unknown>) => (
+  <MediaTimelineView
+    mediaUrl={typeof props.mediaUrl === 'string' ? props.mediaUrl : ''}
+    mediaType={props.mediaType === 'audio' ? 'audio' : 'video'}
+    duration={typeof props.duration === 'number' ? props.duration : undefined}
+    annotations={(props.annotations as Annotation[]) ?? []}
+    readOnly={props.readOnly === true}
+  />
+)
 
 /** Widget 注册条目 */
 interface WidgetEntry {
@@ -91,6 +119,11 @@ const WIDGETS: WidgetEntry[] = [
     spaces: ['workspace', 'floating', 'fullscreen'],
     fallback: 'status_card',
   },
+  // 审批三视图（widget 化 T10：review_service 的 ui.view_modes 声明路由复用件；
+  // ApprovalRouter 未声明时直连内置组件，不依赖本注册）
+  { name: 'text_diff', component: TextDiffWidget, spaces: ['workspace', 'fullscreen'], fallback: 'code_block' },
+  { name: 'image_annotation', component: ImageAnnotationWidget, spaces: ['workspace', 'fullscreen'], fallback: 'text_diff' },
+  { name: 'media_timeline', component: MediaTimelineWidget, spaces: ['workspace', 'fullscreen'], fallback: 'text_diff' },
 ]
 
 /**
