@@ -47,7 +47,9 @@ pub type ManifestsStore = Arc<RwLock<Vec<PluginManifest>>>;
 pub const DEFAULT_DEBOUNCE: std::time::Duration = std::time::Duration::from_millis(300);
 
 /// 默认轮询兜底间隔：notify 不可靠环境（Docker/WSL）下保底发现新插件。
-pub const DEFAULT_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_secs(5);
+/// 1 分钟 = notify 失效时的低频兜底；正常环境变更全由 notify 事件驱动，
+/// 轮询只兜底不抢跑（曾 5s 固定全量重扫 60+ manifest，无变更也在空转）。
+pub const DEFAULT_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_secs(60);
 
 /// cdylib（InProcess）插件集合变更（A3：触发 G8 优雅重启的判据）。
 ///
@@ -254,19 +256,46 @@ pub async fn sync_once(
     .await
 }
 
-/// manifest 内容指纹（GAP-6 变更检测）：序列化全文哈希。
+/// manifest 内容指纹（GAP-6 变更检测）：确定性序列化全文哈希。
 ///
 /// 与 mtime/源码指纹（invoker 的 respawn 判定）不同——这里只关心 manifest
 /// 声明本身是否变化（工具清单/entry/args/http_endpoints 等）。
+/// 序列化前递归按键排序：`McpEndpoint.env` 等 HashMap 字段每次反序列化迭代
+/// 顺序随机，直接 `to_string` 会让内容相同的 manifest 指纹漂移（omnisearch
+/// 8 键 env 被 watcher 每轮误判"变更"重注册就是它），键序化后指纹只随内容变化。
 fn manifest_fingerprint(m: &PluginManifest) -> u64 {
     use std::hash::{Hash, Hasher};
     let mut h = std::collections::hash_map::DefaultHasher::new();
     // PluginManifest 为纯数据（全 String/Vec 字段），序列化不可能失败；若失败
     // 宁可 panic 也不能退空串——空串会让所有 manifest 指纹相同，变更检测静默失效。
-    serde_json::to_string(m)
-        .expect("PluginManifest serialization is infallible")
+    deterministic_json(&serde_json::to_value(m).expect("PluginManifest serialization is infallible"))
         .hash(&mut h);
     h.finish()
+}
+
+/// 把 `Value` 序列化为键序唯一的字符串（对象键递归升序），用作内容指纹。
+fn deterministic_json(v: &serde_json::Value) -> String {
+    match v {
+        serde_json::Value::Object(map) => {
+            let mut keys: Vec<&String> = map.keys().collect();
+            keys.sort();
+            let inner = keys
+                .iter()
+                .map(|k| format!("{:?}:{}", k, deterministic_json(&map[*k])))
+                .collect::<Vec<_>>()
+                .join(",");
+            format!("{{{}}}", inner)
+        }
+        serde_json::Value::Array(arr) => {
+            let inner = arr
+                .iter()
+                .map(deterministic_json)
+                .collect::<Vec<_>>()
+                .join(",");
+            format!("[{}]", inner)
+        }
+        other => other.to_string(),
+    }
 }
 
 /// [`sync_once`] 的 store 感知变体：`manifests_store` 传入 `AppState.manifests`
@@ -610,6 +639,21 @@ impl PluginWatcher {
     }
 }
 
+/// 判定 notify 事件是否值得触发一次插件重扫：只关心 plugin.json 的 增/改
+/// （GAP-6 manifest 变更重注册主路径）与**新目录创建**（新插件根）。
+/// 其余文件（插件源码、llm_core/logs/payload_diag 等运行时产物、编辑器临时
+/// 文件）不触发——watcher 只看 manifest 声明；sidecar 代码变更由 invoker 的
+/// respawn 指纹判定，不走这里。
+fn notify_event_relevant(kind: notify::EventKind, paths: &[std::path::PathBuf]) -> bool {
+    match kind {
+        notify::EventKind::Create(notify::event::CreateKind::Folder) => true,
+        notify::EventKind::Create(_) | notify::EventKind::Modify(_) => paths
+            .iter()
+            .any(|p| p.file_name().map(|n| n == "plugin.json").unwrap_or(false)),
+        _ => false,
+    }
+}
+
 /// 建 notify watcher 监听 `plugins_dir`（递归），Create/Modify 事件经临时文件过滤后
 /// 往 `tx` 发 `()`。init/watch 失败返回 None（调用方靠轮询兜底）。
 ///
@@ -618,25 +662,13 @@ fn spawn_notify_watcher(
     plugins_dir: PathBuf,
     tx: UnboundedSender<()>,
 ) -> Option<notify::RecommendedWatcher> {
-    use notify::{EventKind, RecommendedWatcher, RecursiveMode, Watcher};
+    use notify::{RecommendedWatcher, RecursiveMode, Watcher};
 
     let mut watcher = match RecommendedWatcher::new(
         move |res: Result<notify::Event, notify::Error>| {
             if let Ok(event) = res {
-                // 新插件 = 新目录 / 新 plugin.json，对应 Create/Modify。
-                if matches!(event.kind, EventKind::Create(_) | EventKind::Modify(_)) {
-                    // 过滤编辑器临时文件（.swp / ~backup 等）。
-                    let noisy = event.paths.iter().any(|p| {
-                        p.file_name()
-                            .map(|n| {
-                                let s = n.to_string_lossy();
-                                s.starts_with('.') || s.starts_with('~')
-                            })
-                            .unwrap_or(false)
-                    });
-                    if !noisy {
-                        let _ = tx.send(());
-                    }
+                if notify_event_relevant(event.kind, &event.paths) {
+                    let _ = tx.send(());
                 }
             }
         },
@@ -1190,5 +1222,84 @@ mod tests {
             .expect("变更后路由应仍在");
         let _ = (route_before, route_after);
         assert!(registry_arc.get_tool("t2").is_some());
+    }
+
+    // ── manifest 指纹确定性（omnisearch 假变更回归）───────────────────
+
+    /// omnisearch 同款场景：mcp endpoint env 含 8 个键（HashMap 迭代顺序随机源）。
+    fn mk_manifest_with_env(id: &str) -> PluginManifest {
+        let v = serde_json::json!({
+            "id": id, "name": id, "version": "1.0.0",
+            "plugin_type": "tool", "language": "external",
+            "host_type": "sidecar", "entry": "mcp:external",
+            "mcp": { "transport": "stdio", "endpoint": {
+                "command": "x", "args": [],
+                "env": {
+                    "K1": "v1", "K2": "v2", "K3": "v3", "K4": "v4",
+                    "K5": "v5", "K6": "v6", "K7": "v7", "K8": "v8",
+                }
+            } },
+            "capabilities": { "tools": [ { "name": "t1", "description": "d" } ] },
+        });
+        serde_json::from_value(v).expect("valid manifest")
+    }
+
+    #[test]
+    fn manifest_fingerprint_stable_across_reparse_with_multi_key_env() {
+        // HashMap 字段（McpEndpoint.env）每次反序列化迭代顺序随机。若指纹依赖
+        // 序列化键序，同一内容解析两次会得到不同指纹 → watcher 每轮误判"变更"
+        // 重注册（omnisearch 每 5s 一次假变更就是这个）。多次迭代抵掉哈希顺序
+        // 偶然一致的极小概率，保证回归测试必 Red。
+        for _ in 0..20 {
+            let a: PluginManifest = mk_manifest_with_env("fp_env");
+            let b: PluginManifest = mk_manifest_with_env("fp_env");
+            assert_eq!(
+                manifest_fingerprint(&a),
+                manifest_fingerprint(&b),
+                "同一内容的 manifest 指纹必须稳定（与解析次数/轮询轮次无关）"
+            );
+        }
+    }
+
+    #[test]
+    fn notify_event_relevant_only_fires_for_plugin_json_and_new_dirs() {
+        use notify::event::{CreateKind, DataChange, ModifyKind, RemoveKind};
+        use notify::EventKind;
+        use std::path::PathBuf;
+
+        let p = |s: &str| PathBuf::from(s);
+        let modify = EventKind::Modify(ModifyKind::Data(DataChange::Any));
+        // plugin.json 的 增/改 是 watcher 主路径（manifest 变更 → 重注册）
+        assert!(notify_event_relevant(
+            modify.clone(),
+            &[p("/plugins/tools/bash/plugin.json")]
+        ));
+        assert!(notify_event_relevant(
+            EventKind::Create(CreateKind::File),
+            &[p("/plugins/tools/newtool/plugin.json")]
+        ));
+        // 新目录 = 新插件根（tools/<name>/ 嵌套），触发扫描
+        assert!(notify_event_relevant(
+            EventKind::Create(CreateKind::Folder),
+            &[p("/plugins/tools/newtool")]
+        ));
+        // 运行时产物不许触发：llm_core/logs/payload_diag 缓存、普通源码、编辑器临时文件
+        assert!(!notify_event_relevant(
+            modify.clone(),
+            &[p("/plugins/pipeline/core/llm_core/logs/payload_diag/1786__x.json")]
+        ));
+        assert!(!notify_event_relevant(
+            modify.clone(),
+            &[p("/plugins/tools/bash/tool.py")]
+        ));
+        assert!(!notify_event_relevant(
+            EventKind::Create(CreateKind::File),
+            &[p("/plugins/tools/bash/.bash_tool.swp")]
+        ));
+        // 无关事件类型（Remove/Rename）不触发
+        assert!(!notify_event_relevant(
+            EventKind::Remove(RemoveKind::File),
+            &[p("/plugins/tools/bash/plugin.json")]
+        ));
     }
 }
