@@ -56,6 +56,7 @@ import { useSessionStore } from '@/stores/sessionStore'
 import { toast } from '@/components/ui/sonner'
 import { resolveChatCardIcon } from '@/utils/chatCardIconRegistry'
 import { openWorkspacePanelByPath } from '@/services/workspacePanelOpener'
+import { emitFormEvent } from '@/services/schema/formEventBus'
 import type { UIInputFormField } from '@/types/schema'
 
 /**
@@ -188,6 +189,15 @@ export function FormWidget(props: Record<string, unknown>) {
     | { type: 'open_panel'; path: string }
     | { type: 'reload' }
     | undefined
+  // 缺口 G3：事件联动——提交成功 emit `{eventName}`(payload=表单值)，
+  // 失败 emit `{eventName}:failed`(payload={error, values})；声明传 eventName
+  const eventName = props.eventName as string | undefined
+  const emitSuccess = (values: Record<string, unknown>) => {
+    if (eventName) emitFormEvent(eventName, values)
+  }
+  const emitFailure = (error: unknown, values: Record<string, unknown>) => {
+    if (eventName) emitFormEvent(`${eventName}:failed`, { error: error instanceof Error ? error.message : String(error), values })
+  }
 
   const runSuccessAction = (action: typeof successAction) => {
     if (!action) return
@@ -213,9 +223,11 @@ export function FormWidget(props: Record<string, unknown>) {
         setStatusText(successText ?? '已保存')
         onSaved?.()
         runSuccessAction(successAction)
+        emitSuccess(values)
       } catch (err) {
         setStatus('error')
         setStatusText(failureText ?? (err instanceof Error ? err.message : '保存失败'))
+        emitFailure(err, values)
       }
       return
     }
@@ -249,10 +261,12 @@ export function FormWidget(props: Record<string, unknown>) {
           setStatusText(successText ?? data.message ?? '已提交')
           onSaved?.()
           runSuccessAction(successAction)
+          emitSuccess(values)
         }
       } catch {
         setStatus('error')
         setStatusText(failureText ?? '请求失败')
+        emitFailure(new Error('请求失败'), values)
       }
       return
     }
@@ -263,12 +277,14 @@ export function FormWidget(props: Record<string, unknown>) {
         setStatusText(successText ?? '已提交')
         onSaved?.()
         runSuccessAction(successAction)
+        emitSuccess(values)
       } catch (err) {
         setStatus('error')
         setStatusText(failureText ?? (err instanceof Error ? err.message : String(err)))
         toast.error('提交失败', {
           description: err instanceof Error ? err.message : String(err),
         })
+        emitFailure(err, values)
       }
     }
   }

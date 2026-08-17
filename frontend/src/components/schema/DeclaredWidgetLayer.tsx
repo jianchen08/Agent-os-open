@@ -19,10 +19,12 @@
 
 import { useEffect, useMemo } from 'react'
 import { cn } from '@/lib/utils'
+import { EventWatchBox } from '@/components/schema/EventWatchBox'
 import { contributionRegistry } from '@/services/schema/ContributionRegistry'
 import { resolveDeclaredWidgets } from '@/services/schema/widgetChain'
 import type { WidgetDeclaration } from '@/services/schema/ContributionRegistry'
 import type { WidgetComponent } from '@/services/schema/WidgetRegistry'
+import type { FormEventWatch } from '@/services/schema/formEventBus'
 import type { ReactNode } from 'react'
 
 export interface DeclaredWidgetLayerProps {
@@ -51,7 +53,12 @@ export interface DeclaredWidgetLayerProps {
 }
 
 /**
- * 渲染单个已解析 widget（透传声明 props；宿主 overrideProps 叠加其上）
+ * 渲染单个已解析 widget（透传声明 props；宿主 overrideProps 叠加其上）。
+ *
+ * 事件联动（缺口 G3）：声明 props.watch（单条或数组
+ * {event, action:'reload'}）→ EventWatchBox 包裹，事件触发时按 reloadKey
+ * 重挂载组件（数据在挂载时获取的组件 = 重拉），实现「表单 A 提交 → 组件 B
+ * 自动刷新」的声明级联动。
  */
 function ResolvedItem({
   declaration,
@@ -62,14 +69,33 @@ function ResolvedItem({
   Component: WidgetComponent
   injected?: Record<string, unknown>
 }) {
-  return (
+  const rawWatch = (declaration.props as { watch?: FormEventWatch | FormEventWatch[] } | undefined)
+    ?.watch
+  const props = { ...(declaration.props ?? {}), ...(injected ?? {}) }
+  const body = (
     <div
       data-testid={`declared-widget-${declaration.id}`}
       data-widget-type={declaration.type}
       className="min-h-0"
     >
-      <Component {...(declaration.props ?? {})} {...(injected ?? {})} />
+      <Component {...props} />
     </div>
+  )
+  if (!rawWatch) return body
+  return (
+    <EventWatchBox watch={rawWatch}>
+      {(reloadKey) => (
+        <div
+          data-testid={`declared-widget-${declaration.id}`}
+          data-widget-type={declaration.type}
+          data-reload-key={reloadKey}
+          className="min-h-0"
+        >
+          {/* key 变化强制重挂载 → 重拉数据（watch reload 语义） */}
+          <Component key={reloadKey} {...props} />
+        </div>
+      )}
+    </EventWatchBox>
   )
 }
 
