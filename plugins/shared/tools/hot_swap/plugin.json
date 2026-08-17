@@ -11,7 +11,11 @@
         "tools": [
             {
                 "name": "hot_swap",
-                "description": "热替换工具，无需重启即可更新插件配置"
+                "description": "热替换工具，无需重启即可更新插件配置",
+                "render": {
+                    "card": "form",
+                    "title": "热替换"
+                }
             }
         ],
         "lifecycle_hooks": [

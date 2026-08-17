@@ -11,7 +11,11 @@
         "tools": [
             {
                 "name": "resource_merge",
-                "description": "基于 git worktree 的资源合并与回滚工具"
+                "description": "基于 git worktree 的资源合并与回滚工具",
+                "render": {
+                    "card": "form",
+                    "title": "资源合并"
+                }
             }
         ],
         "lifecycle_hooks": [

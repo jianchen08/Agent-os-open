@@ -9,14 +9,20 @@
 import { beforeEach, describe, expect, it } from 'vitest'
 import {
   addRenderIntent,
+  applyDataDrivenIntent,
   applyRenderIntent,
   clearRenderIntents,
   diffPayload,
+  filePayload,
+  formPayload,
   getRenderIntent,
+  imagePayload,
+  inferRenderIntent,
   loadRenderIntents,
   readPayload,
   renderIntentToBlocks,
   searchPayload,
+  tablePayload,
   terminalPayload,
   webPayload,
   type RenderContext,
@@ -181,6 +187,174 @@ describe('webPayload（DSH web 卡映射）', () => {
 
   it('无 url/sources → null', () => {
     expect(webPayload(ctx({}, {}), intent('web'))).toBeNull()
+  })
+})
+
+describe('imagePayload / filePayload（产物路径卡）', () => {
+  it('图片扩展名路径 → image 卡（media 产物）', () => {
+    const p = imagePayload(ctx({ prompt: 'cat' }, { file_path: 'out/art.png', media_type: 'image' }), intent('image'))
+    expect(p).toEqual({ path: 'out/art.png' })
+  })
+
+  it('非图片扩展名 → image 卡 null，file 卡命中', () => {
+    expect(imagePayload(ctx({}, { path: 'a.mp3' }), intent('image'))).toBeNull()
+    expect(filePayload(ctx({}, { path: 'a.mp3' }), intent('file'))).toEqual({ path: 'a.mp3' })
+  })
+
+  it('URL 不是文件 → file 卡 null', () => {
+    expect(filePayload(ctx({}, { path: 'https://x/y.png' }), intent('file'))).toBeNull()
+  })
+
+  it('bindings 覆盖路径字段', () => {
+    const p = filePayload(ctx({}, { saved: '/tmp/f.bin' }), intent('file', { path: 'result.saved' }))
+    expect(p).toEqual({ path: '/tmp/f.bin' })
+  })
+})
+
+describe('tablePayload（表头+二维数组）', () => {
+  it('形态 A：*_h + *_d 配对（resource_search 表格）', () => {
+    const p = tablePayload(
+      ctx({ resource_type: 'agent' }, { agent_h: ['ID', '名称'], agent_d: [['a-1', '运维'], ['a-2', '开发']], agent_c: 2 }),
+      intent('table'),
+    )
+    expect(p).toEqual({ columns: ['ID', '名称'], rows: [['a-1', '运维'], ['a-2', '开发']] })
+  })
+
+  it('形态 B：result.d 二维数组（task_manage 列表，无表头 → 列1..N）', () => {
+    const p = tablePayload(ctx({}, { d: [['t-1', '标题1', 'running'], ['t-2', '标题2', 'completed']], hint: '共 2 条' }), intent('table'))
+    expect(p?.columns).toEqual(['列1', '列2', '列3'])
+    expect(p?.rows).toEqual([['t-1', '标题1', 'running'], ['t-2', '标题2', 'completed']])
+  })
+
+  it('形态 C：items 对象数组（list_directory，列名=key 序）', () => {
+    const p = tablePayload(
+      ctx({}, { items: [{ name: 'a.py', type: 'file', size: 12 }, { name: 'src', type: 'directory', size: 0 }] }),
+      intent('table'),
+    )
+    expect(p?.columns).toEqual(['name', 'type', 'size'])
+    expect(p?.rows).toEqual([['a.py', 'file', '12'], ['src', 'directory', '0']])
+  })
+
+  it('无表格形状 → null', () => {
+    expect(tablePayload(ctx({}, { title: 'x' }), intent('table'))).toBeNull()
+  })
+})
+
+describe('formPayload（表单式布局）', () => {
+  it('无 bindings：args 标量 + result 标量入 kv，长文本/对象入 json', () => {
+    const p = formPayload(
+      ctx(
+        { goal_title: '实现登录', priority: 5, acceptance_criteria: { file_check: {} } },
+        { task_id: 't-1', status: 'running', message: '这是一条很长的话术，用来验证长文本会进入折叠区而不是 kv 平铺。'.repeat(6) },
+      ),
+      intent('form'),
+    )
+    expect(p).not.toBeNull()
+    const kv = p?.kvItems as { key: string; value: string }[]
+    expect(kv).toEqual(expect.arrayContaining([
+      { key: '任务目标', value: '实现登录' },
+      { key: '优先级', value: '5' },
+      { key: '任务ID', value: 't-1' },
+      { key: '状态', value: 'running' },
+    ]))
+    const json = p?.jsonItems as { label: string; content: unknown }[]
+    expect(json.map((j) => j.label)).toEqual(expect.arrayContaining(['验收标准', '消息']))
+  })
+
+  it('bindings：按声明字段序收集', () => {
+    const p = formPayload(
+      ctx({ goal_title: 'G', target_id: 'a-1' }, { task_id: 't', status: 'done' }),
+      intent('form', { status: 'result.status', 任务ID: 'result.task_id' }),
+    )
+    expect(p?.kvItems).toEqual([
+      { key: '状态', value: 'done' },
+      { key: '任务ID', value: 't' },
+    ])
+  })
+
+  it('空数据 → null', () => {
+    expect(formPayload(ctx({}, {}), intent('form'))).toBeNull()
+  })
+})
+
+describe('inferRenderIntent（数据路由：按形状推断）', () => {
+  it('diff 形状（old_content+new_content）→ diff', () => {
+    expect(inferRenderIntent(ctx({}, { old_content: 'a', new_content: 'b' }))?.card).toBe('diff')
+  })
+
+  it('terminal 形状（args.command）→ terminal', () => {
+    expect(inferRenderIntent(ctx({ command: 'ls' }, { stdout: 'x', exit_code: 0 }))?.card).toBe('terminal')
+  })
+
+  it('read 形状（content + path）→ read', () => {
+    expect(inferRenderIntent(ctx({ file_path: 'f.py' }, { content: 'l1\nl2' }))?.card).toBe('read')
+  })
+
+  it('search 形状（results 数组）→ search', () => {
+    expect(inferRenderIntent(ctx({}, { results: [{ path: 'a.ts' }] }))?.card).toBe('search')
+  })
+
+  it('web 形状（args.url）→ web', () => {
+    expect(inferRenderIntent(ctx({ url: 'https://x' }, { status_code: 200 }))?.card).toBe('web')
+  })
+
+  it('图片扩展名路径 → image；普通文件路径 → file', () => {
+    expect(inferRenderIntent(ctx({}, { file_path: 'out/pic.png' }))?.card).toBe('image')
+    expect(inferRenderIntent(ctx({}, { file_path: 'out/data.bin' }))?.card).toBe('file')
+  })
+
+  it('表格形状（*_h/*_d）→ table；d 二维数组 → table', () => {
+    expect(inferRenderIntent(ctx({}, { tool_h: ['a'], tool_d: [['1']] }))?.card).toBe('table')
+    expect(inferRenderIntent(ctx({}, { d: [['t', 'x']] }))?.card).toBe('table')
+  })
+
+  it('无形状特征 → undefined（落通用数据渲染）', () => {
+    expect(inferRenderIntent(ctx({ goal_title: 'G' }, { task_id: 't', status: 'ok' }))).toBeUndefined()
+  })
+})
+
+describe('renderIntentToBlocks：新卡产出块形态', () => {
+  it('image 卡 → contentType=image + path', () => {
+    const blocks = renderIntentToBlocks({ card: 'image', title: '生成图片' }, ctx({}, { file_path: 'a.png' }))
+    expect(blocks).toEqual([{ label: '生成图片', content: '', contentType: 'image', path: 'a.png' }])
+  })
+
+  it('table 卡 → contentType=table + columns/rows', () => {
+    const blocks = renderIntentToBlocks({ card: 'table' }, ctx({}, { tool_h: ['ID'], tool_d: [['1']] }))
+    expect(blocks[0].contentType).toBe('table')
+    expect(blocks[0].table).toEqual({ columns: ['ID'], rows: [['1']] })
+  })
+
+  it('form 卡 → contentType=form + kvItems/jsonItems（默认展开）', () => {
+    const blocks = renderIntentToBlocks({ card: 'form', title: '任务详情' }, ctx({ goal_title: 'G' }, { task_id: 't' }))
+    expect(blocks[0].contentType).toBe('form')
+    expect(blocks[0].kvItems).toContainEqual({ key: '任务ID', value: 't' })
+    expect(blocks[0].defaultExpanded).toBe(true)
+  })
+})
+
+describe('applyDataDrivenIntent（数据路由增强入口）', () => {
+  beforeEach(() => clearRenderIntents())
+
+  it('无声明 + 数据有形状 → 按形状路由（diff 数据 → dsh:diff 块）', () => {
+    const activity = { type: 'tool_call', toolName: 'w', details: [] } as ActivityData
+    const toolCall = { tool_args: { path: 'a.md' }, resultData: { old_content: 'x', new_content: 'y' } } as MessageToolCall
+    const out = applyDataDrivenIntent(activity, toolCall)
+    expect(out?.details?.[0].contentType).toBe('dsh:diff')
+  })
+
+  it('有声明时数据路由不干预（applyRenderIntent 声明优先）', () => {
+    addRenderIntent('w', { card: 'terminal' })
+    const activity = { type: 'tool_call', toolName: 'w', details: [] } as ActivityData
+    const toolCall = { tool_args: {}, resultData: { old_content: 'x', new_content: 'y' } } as MessageToolCall
+    // 声明映射失败（terminal 需要 command）→ 返回 null，数据路由由调用方后续处理
+    expect(applyRenderIntent(activity, toolCall)).toBeNull()
+  })
+
+  it('无形状特征 → null（落 L0 通用渲染）', () => {
+    const activity = { type: 'tool_call', toolName: 'w', details: [] } as ActivityData
+    const toolCall = { tool_args: { a: 1 }, resultData: { b: 2 } } as MessageToolCall
+    expect(applyDataDrivenIntent(activity, toolCall)).toBeNull()
   })
 })
 

@@ -11,7 +11,10 @@
         "tools": [
             {
                 "name": "web_operate",
-                "description": "Web 操作：HTTP 请求和网页抓取"
+                "description": "Web 操作：HTTP 请求和网页抓取",
+                "render": {
+                    "card": "web"
+                }
             }
         ],
         "lifecycle_hooks": [

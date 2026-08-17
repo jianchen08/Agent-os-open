@@ -11,7 +11,10 @@
         "tools": [
             {
                 "name": "resource_search",
-                "description": "搜索系统内 Agent、工具、Skill 资源"
+                "description": "搜索系统内 Agent、工具、Skill 资源",
+                "render": {
+                    "card": "table"
+                }
             }
         ],
         "lifecycle_hooks": [

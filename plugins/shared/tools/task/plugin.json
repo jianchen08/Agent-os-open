@@ -11,7 +11,11 @@
         "tools": [
             {
                 "name": "task_manage",
-                "description": "任务管理工具：查询和控制任务生命周期"
+                "description": "任务管理工具：查询和控制任务生命周期",
+                "render": {
+                    "card": "form",
+                    "title": "任务管理"
+                }
             }
         ],
         "lifecycle_hooks": [

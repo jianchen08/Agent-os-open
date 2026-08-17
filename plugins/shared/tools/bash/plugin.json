@@ -65,7 +65,10 @@
                     },
                     "required": ["status"]
                 },
-                "category": "system"
+                "category": "system",
+                "render": {
+                    "card": "terminal"
+                }
             }
         ],
         "lifecycle_hooks": [

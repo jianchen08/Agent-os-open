@@ -10,7 +10,6 @@ import { initializeWidgets } from '@/services/schema/registerWidgets'
 import { shortcutRegistry } from '@/services/schema/shortcutRegistry'
 import { useLayoutModeStore } from '@/stores/layoutModeStore'
 import { useThemeStore } from '@/stores/themeStore'
-import { registerBuiltinToolChatCards } from '@/utils/builtinToolChatCards'
 import { loggers } from '@/utils/logger'
 import { loadChatCardDeclarations } from '@/utils/chatCardInterpreter'
 import { disposeResyncOnSchema, initResyncOnSchema } from '@/services/websocket/resync'
@@ -54,14 +53,11 @@ async function reloadContributionRegistry(): Promise<void> {
     loadChatCardDeclarations(
       (schema as { tools?: Array<{ name?: string; ui?: { chat_card?: ChatCardDeclaration } }> }).tools ?? [],
     )
-    // render 意图声明（task_dsh_plugin_adapter 任务 1d）：tools[].render 装载到
-    // dshRenderIntent 注册表，工具结果按 DSH 卡词汇表路由（无声明回退 chat_card 级联）
+    // render 意图声明：tools[].render 装载到 dshRenderIntent 注册表（声明路由），
+    // 无声明时工具结果按数据形状自动路由（数据路由），均未命中落通用数据渲染
     loadRenderIntents(
       (schema as { tools?: Array<{ name?: string; render?: Record<string, unknown> }> }).tools ?? [],
     )
-    // 内置工具（file_read/bash_execute/web_search/fetch/task_submit）的 chat_card 声明
-    // 追加在 schema 声明之上：schema 热重载（load 会清空全表）后 builtin 依然生效并优先
-    registerBuiltinToolChatCards()
     syncNavItemsFromContributes()
     shortcutRegistry.refresh()
 

@@ -11,7 +11,11 @@
         "tools": [
             {
                 "name": "task_submit",
-                "description": "任务提交工具，将任务提交给指定 Agent 执行"
+                "description": "任务提交工具，将任务提交给指定 Agent 执行",
+                "render": {
+                    "card": "form",
+                    "title": "任务提交"
+                }
             }
         ],
         "lifecycle_hooks": [

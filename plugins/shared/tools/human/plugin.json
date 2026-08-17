@@ -12,15 +12,43 @@
     },
     "capabilities": {
         "tools": [
-            {"name": "human_interaction", "description": "与用户交互（LLM 工具，choice/conversation/notification）"},
-            {"name": "interaction.send_notification", "description": "发送非阻塞通知（服务能力）"},
-            {"name": "interaction.create_choice", "description": "创建选择模式交互请求（服务能力）"},
-            {"name": "interaction.wait_for_choice", "description": "等待用户选择响应（服务能力）"},
-            {"name": "interaction.respond", "description": "提交交互响应（前端响应回路）"},
-            {"name": "interaction.cancel", "description": "取消交互请求（服务能力）"},
-            {"name": "interaction.get_pending", "description": "获取待处理请求列表（服务能力）"}
+            {
+                "name": "human_interaction",
+                "description": "与用户交互（LLM 工具，choice/conversation/notification）",
+                "render": {
+                    "card": "form",
+                    "title": "人工交互"
+                }
+            },
+            {
+                "name": "interaction.send_notification",
+                "description": "发送非阻塞通知（服务能力）"
+            },
+            {
+                "name": "interaction.create_choice",
+                "description": "创建选择模式交互请求（服务能力）"
+            },
+            {
+                "name": "interaction.wait_for_choice",
+                "description": "等待用户选择响应（服务能力）"
+            },
+            {
+                "name": "interaction.respond",
+                "description": "提交交互响应（前端响应回路）"
+            },
+            {
+                "name": "interaction.cancel",
+                "description": "取消交互请求（服务能力）"
+            },
+            {
+                "name": "interaction.get_pending",
+                "description": "获取待处理请求列表（服务能力）"
+            }
         ],
-        "lifecycle_hooks": ["on_load", "on_unload"]
+        "lifecycle_hooks": [
+            "on_load",
+            "on_unload"
+        ]
     },
     "provides": {
         "capabilities": [

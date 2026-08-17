@@ -14,7 +14,11 @@
         "tools": [
             {
                 "name": "trigger_setup",
-                "description": "触发器配置工具"
+                "description": "触发器配置工具",
+                "render": {
+                    "card": "form",
+                    "title": "触发器"
+                }
             }
         ],
         "lifecycle_hooks": [

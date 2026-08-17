@@ -13,10 +13,9 @@ import type { MessageToolCall } from '@/types/models'
 import type { ReactNode } from 'react'
 import { interpretChatCard } from './chatCardInterpreter'
 import { getChatCardDeclaration } from './chatCardInterpreter'
-import { applyRenderIntent } from './dshRenderIntent'
+import { applyRenderIntent, applyDataDrivenIntent } from './dshRenderIntent'
 import { resolveChatCardIcon } from './chatCardIconRegistry'
 import type { ToolCallContext } from './chatCardInterpreter'
-import { registerBuiltinToolChatCards } from './builtinToolChatCards'
 
 /**
  * 工具卡片渲染配置
@@ -46,11 +45,6 @@ export interface ToolCardConfig {
  * 注册表：工具名 → 渲染配置
  */
 const registry = new Map<string, ToolCardConfig>()
-
-/**
- * 内置 chat_card 声明是否已惰性装入（首次 enhance 调用时触发，避免模块加载时的循环依赖 TDZ）。
- */
-let builtinChatCardsRegistered = false
 
 /** 全局文件打开回调（支持 containerTaskId） */
 let globalOnOpenFile: ((filePath: string, containerTaskId?: string) => void | Promise<void>) | null = null
@@ -107,26 +101,14 @@ export function enhanceActivityWithToolConfig(
     return activity
   }
 
-  // 惰性装入内置 chat_card 声明（首次 enhance 调用时）：等价手写 registerToolCard 的
-  // 「声明始终可用」语义，使内置工具卡片无需调用方显式 register 即可被查到（如 file_write
-  // 的等价性测试只引入本模块、不显式注册）。放运行时而非模块加载时，规避
-  // toolCardRegistry ↔ chatCardInterpreter ↔ builtinToolChatCards 的循环依赖 TDZ。
-  // GrowthLoop 在 schema 热重载（loadChatCardDeclarations 会清空全表）后会再次显式注册。
-  if (!builtinChatCardsRegistered) {
-    builtinChatCardsRegistered = true
-    registerBuiltinToolChatCards()
-  }
-
-  // render 意图路由（S3.5，task_dsh_plugin_adapter 任务 1d）：工具契约的 render
-  // 声明（ToolDescriptor.render，schema 装载进 dshRenderIntent 注册表）优先于
-  // chat_card 声明——它是工具作者对输出形态的契约（对齐 DSH ToolResultView），
-  // 映射失败（无声明/字段对不上）返回 null 落回下方既有级联。
+  // 声明路由：插件 render 声明（ToolDescriptor.render，schema 装载进
+  // dshRenderIntent 注册表）——工具作者对输出形态的契约，最高优先。
   const rendered = applyRenderIntent(activity, toolCall)
   if (rendered) {
     return rendered
   }
 
-  // 声明优先（S3）：插件 ui.chat_card 声明（后端经 /api/v1/schema 的 tools[].ui.chat_card
+  // 插件 ui.chat_card 声明（后端经 /api/v1/schema 的 tools[].ui.chat_card
   // 透传，前端在 schema 加载时装入注册表）→ 解释器翻译成 ActivityDetailBlock[]，
   // ActivityCard 原样渲染。无声明时回退下面的手写 registry / L0 推断。
   const declared = getChatCardDeclaration(activity.toolName)
@@ -163,6 +145,14 @@ export function enhanceActivityWithToolConfig(
       enhanced.diffStat = interpreted.diffStat
     }
     return enhanced
+  }
+
+  // 数据路由：无任何插件声明（render/chat_card）时按数据形状自动匹配渲染组件
+  // （diff 形状 → diff 组件、stdout+exit_code → terminal 组件等）。插件显式声明
+  // 永远优先；未命中落下方手写 registry / L0 通用数据渲染。
+  const dataDriven = applyDataDrivenIntent(activity, toolCall)
+  if (dataDriven) {
+    return dataDriven
   }
 
   const config = getToolCardConfig(activity.toolName)

@@ -279,6 +279,90 @@ const KvBlockView: FC<{ items: { key: string; value: string }[] }> = ({ items })
 )
 
 /**
+ * 表格块：表头 + 二维数组行（横向滚动；行列数大时纵向限高滚动）
+ */
+const TableBlockView: FC<{ columns: string[]; rows: string[][] }> = ({ columns, rows }) => (
+  <div className="bg-muted/30 overflow-x-auto rounded">
+    <table className="w-full border-collapse text-xs">
+      <thead>
+        <tr>
+          {columns.map((col, i) => (
+            <th
+              key={`h-${i}`}
+              className="text-muted-foreground border-border/40 bg-muted/40 border-b px-2 py-1 text-left font-medium whitespace-nowrap"
+            >
+              {col}
+            </th>
+          ))}
+        </tr>
+      </thead>
+      <tbody>
+        {rows.map((row, ri) => (
+          <tr key={`r-${ri}`} className="odd:bg-transparent even:bg-[var(--hover-overlay)]">
+            {columns.map((_c, ci) => (
+              <td key={`c-${ci}`} className="text-foreground/90 max-w-[320px] truncate border-b border-[var(--border-border)]/30 px-2 py-1 font-mono whitespace-nowrap">
+                {row[ci] ?? ''}
+              </td>
+            ))}
+          </tr>
+        ))}
+      </tbody>
+    </table>
+  </div>
+)
+
+/**
+ * 表单块：标量 kv 平铺 + 长文本/对象折叠区（渲染路由 form 卡产物）。
+ * 长内容按 label 折叠（默认收起，避免大文本撑爆卡片）。
+ */
+const FormBlockView: FC<{
+  items: { key: string; value: string }[]
+  jsonItems: { label: string; content: unknown }[]
+}> = ({ items, jsonItems }) => {
+  const [expandedKeys, setExpandedKeys] = useState<Set<string>>(new Set())
+  return (
+    <div className="space-y-2">
+      {items.length > 0 && <KvBlockView items={items} />}
+      {jsonItems.map((item, index) => {
+        const text =
+          typeof item.content === 'string'
+            ? item.content
+            : JSON.stringify(item.content, null, 2)
+        const isExpanded = expandedKeys.has(item.label)
+        return (
+          <div key={`${item.label}-${index}`} className="bg-muted/30 rounded">
+            <button
+              onClick={() => {
+                setExpandedKeys((prev) => {
+                  const next = new Set(prev)
+                  if (next.has(item.label)) next.delete(item.label)
+                  else next.add(item.label)
+                  return next
+                })
+              }}
+              className="text-muted-foreground hover:text-foreground flex w-full items-center gap-1.5 px-2 py-1.5 text-left text-xs font-medium transition-colors"
+            >
+              {isExpanded ? (
+                <ChevronDown className="h-icon-xs w-icon-xs flex-shrink-0" />
+              ) : (
+                <ChevronRight className="h-icon-xs w-icon-xs flex-shrink-0" />
+              )}
+              <span className="min-w-0 truncate">{item.label}</span>
+              <span className="text-muted-foreground/60 ml-auto shrink-0">{text.length} 字符</span>
+            </button>
+            {isExpanded && (
+              <pre className={`${TOOL_CONTENT_SCROLL_CLASS} max-h-48 overflow-y-auto p-2 pt-0 font-mono text-xs whitespace-pre-wrap`}>
+                {text}
+              </pre>
+            )}
+          </div>
+        )
+      })}
+    </div>
+  )
+}
+
+/**
  * 日志块：等宽滚动区，吸底滚动 + 上翻滚动锁
  */
 const LogBlockView: FC<{ content: string }> = ({ content }) => {
@@ -480,6 +564,17 @@ const DetailBlock: FC<{ block: ActivityDetailBlock }> = ({ block }) => {
 
       case 'kv':
         return <KvBlockView items={block.kvItems ?? []} />
+
+      case 'table':
+        return (
+          <TableBlockView
+            columns={block.table?.columns ?? []}
+            rows={block.table?.rows ?? []}
+          />
+        )
+
+      case 'form':
+        return <FormBlockView items={block.kvItems ?? []} jsonItems={block.jsonItems ?? []} />
 
       case 'file':
         return <FileBlockView path={block.path || content} />

@@ -50,6 +50,9 @@ export type DetailContentType =
   | 'dsh:web' // WebBlock（{kind: search|fetch, ...}）
   | 'dsh:search' // SearchBlock（{kind: matches|paths, ...}）
   | 'dsh:terminal' // TerminalBlock（{command, cwd, output, exitCode, running}）
+  // 通用渲染路由器（dshRenderIntent 数据路由/声明产出）：表格式与表单式布局。
+  | 'table' // 表格（table.columns + table.rows 有效）
+  | 'form' // 表单（kvItems 标量 + jsonItems 长文本/对象折叠）
 
 /**
  * 活动操作类型
@@ -83,8 +86,12 @@ export interface ActivityDetailBlock {
   diffOld?: string
   /** 差异对比新内容（仅 contentType='diff' 时有效） */
   diffNew?: string
-  /** 键值对列表（仅 contentType='kv' 时有效） */
+  /** 键值对列表（仅 contentType='kv'/'form' 时有效） */
   kvItems?: { key: string; value: string }[]
+  /** 长文本/对象折叠区（仅 contentType='form' 时有效，label + content 对） */
+  jsonItems?: { label: string; content: unknown }[]
+  /** 表格数据（仅 contentType='table' 时有效） */
+  table?: { columns: string[]; rows: string[][] }
   /** 关联路径（仅 contentType='file'/'image' 时有效） */
   path?: string
   /** 链接地址（仅 contentType='link' 时有效） */

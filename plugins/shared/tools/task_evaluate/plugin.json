@@ -11,7 +11,11 @@
         "tools": [
             {
                 "name": "task_evaluate",
-                "description": "任务评估工具，评估任务的验收指标是否满足"
+                "description": "任务评估工具，评估任务的验收指标是否满足",
+                "render": {
+                    "card": "form",
+                    "title": "任务评估"
+                }
             }
         ],
         "lifecycle_hooks": [

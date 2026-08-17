@@ -11,7 +11,11 @@
         "tools": [
             {
                 "name": "download",
-                "description": "通用文件下载工具，支持多连接分段下载、断点续传"
+                "description": "通用文件下载工具，支持多连接分段下载、断点续传",
+                "render": {
+                    "card": "file",
+                    "title": "下载完成"
+                }
             }
         ],
         "lifecycle_hooks": [

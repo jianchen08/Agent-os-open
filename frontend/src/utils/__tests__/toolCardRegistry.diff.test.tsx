@@ -8,11 +8,53 @@
  * mergeStreamingParts 保留本地丢弃权威 parts → 前端拿不到 added/removed → diff 不生效。
  * 修复方案：后端补 result_data 结构化字段，前端 toolHandler 存为 resultData，
  * registry 的 extractWriteDiff 优先读 resultData。
+ *
+ * 声明来源：file_write 的卡片表单声明由插件侧提供（plugins/shared/tools/
+ * builtin_tools/plugin.json 的 capabilities.tools[].ui.chat_card，前端经
+ * /api/v1/schema 装载）——本测试模拟 schema 装载后走真实 enhance 级联。
  */
-import { describe, expect, it } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import type { ActivityData } from '@/types/activity'
 import type { MessageToolCall } from '@/types/models'
+import { loadChatCardDeclarations, clearChatCardDeclarations } from '@/utils/chatCardInterpreter'
+import type { ChatCardDeclaration } from '@/utils/chatCardInterpreter'
 import { enhanceActivityWithToolConfig } from '@/utils/toolCardRegistry'
+
+/** file_write 卡片声明（与插件 plugin.json 的 ui.chat_card 保持一致的镜像）。 */
+const FILE_WRITE_DECL: ChatCardDeclaration = {
+  icon: 'edit',
+  title: '写入 {{args.path | basename | default:file_write}}',
+  filePathSource: 'args.path',
+  diffStat: {
+    addedSource: 'output.added || result.added',
+    removedSource: 'output.removed || result.removed',
+  },
+  blocks: [
+    { type: 'code', label: '文件路径', source: 'args.path', collapsible: false },
+    {
+      type: 'diff',
+      label: '差异对比',
+      diffOldSource: 'output.old_content || result.old_content',
+      diffNewSource: 'output.new_content || result.new_content',
+      collapsible: true,
+      defaultExpanded: true,
+    },
+    {
+      type: 'code',
+      id: 'content',
+      label: '写入内容',
+      source: 'args.content',
+      unless: 'output.old_content || result.old_content',
+      collapsible: true,
+      defaultExpanded: false,
+    },
+  ],
+}
+
+beforeEach(() => {
+  loadChatCardDeclarations([{ name: 'file_write', ui: { chat_card: FILE_WRITE_DECL } }])
+})
+afterEach(() => clearChatCardDeclarations())
 
 function makeBaseActivity(toolName: string): ActivityData {
   return {

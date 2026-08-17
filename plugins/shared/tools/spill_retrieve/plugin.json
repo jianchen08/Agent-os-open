@@ -24,23 +24,46 @@
                             "description": "管道 ID（通常自动注入，无需手动提供）"
                         }
                     },
-                    "required": ["tool_call_id"]
+                    "required": [
+                        "tool_call_id"
+                    ]
                 },
                 "output_schema": {
                     "type": "object",
                     "properties": {
-                        "tool_call_id": {"type": "string"},
-                        "pipeline_id": {"type": "string"},
-                        "content": {"type": "string", "description": "完整原文"},
-                        "encoding": {"type": "string", "enum": ["plain", "gzip"]},
-                        "size_bytes": {"type": "integer"}
+                        "tool_call_id": {
+                            "type": "string"
+                        },
+                        "pipeline_id": {
+                            "type": "string"
+                        },
+                        "content": {
+                            "type": "string",
+                            "description": "完整原文"
+                        },
+                        "encoding": {
+                            "type": "string",
+                            "enum": [
+                                "plain",
+                                "gzip"
+                            ]
+                        },
+                        "size_bytes": {
+                            "type": "integer"
+                        }
                     }
+                },
+                "render": {
+                    "card": "form",
+                    "title": "溢出内容"
                 }
             }
         ],
         "resources": [],
         "route_signals": [],
-        "lifecycle_hooks": ["on_pipeline_end"]
+        "lifecycle_hooks": [
+            "on_pipeline_end"
+        ]
     },
     "dependencies": [],
     "permissions": {},
