@@ -220,6 +220,9 @@ export function toRjsf(fields: UIInputFormField[]): {
           ? (ui['ui:options'] as Record<string, unknown>)
           : {}),
         datasourceUri: field.datasourceUri,
+        // 级联依赖（缺口 G2）：datasourceUri 可含 {{其他字段}} 模板引用（自动推断），
+        // 也可显式声明 dependsOn——依赖字段值变化时本字段选项自动重拉
+        dependsOn: field.dependsOn ?? [],
         fallbackOptions: field.options ?? [],
         multiple: field.type === 'multiselect' || field.type === 'checkbox',
       }
@@ -337,26 +340,53 @@ function SwitchWidget({ id, value, onChange, disabled, readonly }: WidgetProps) 
   )
 }
 
-/** datasourceUri 异步下拉：挂载拉取选项，失败回退静态 options */
+/** datasourceUri 异步下拉：挂载拉取选项，失败回退静态 options；级联依赖变化自动重拉 */
+const TEMPLATE_RE = /\{\{\s*([a-zA-Z_][a-zA-Z0-9_]*)\s*\}\}/g
+
+/** 从 datasourceUri 模板提取依赖字段名（{{field}}） */
+function extractUriDeps(uri: string): string[] {
+  const deps: string[] = []
+  for (const m of uri.matchAll(TEMPLATE_RE)) {
+    if (!deps.includes(m[1])) deps.push(m[1])
+  }
+  return deps
+}
+
+/** 用当前表单值渲染 datasourceUri 模板：/ext/opts?provider={{provider}} → 实值替换 */
+function resolveTemplateUri(uri: string, formData: Record<string, unknown> | undefined): string {
+  return uri.replace(TEMPLATE_RE, (_m, name: string) => {
+    const v = formData?.[name]
+    return v == null ? '' : encodeURIComponent(String(v))
+  })
+}
+
 function AsyncSelectWidget(props: WidgetProps) {
-  const { id, value, onChange, disabled, readonly, placeholder, options } = props
+  const { id, value, onChange, disabled, readonly, placeholder, options, formContext } = props
   const opts = options as unknown as {
     datasourceUri?: string
+    dependsOn?: string[]
     fallbackOptions?: Array<{ label: string; value: string | number }>
     multiple?: boolean
   }
+  const ctx = formContext as { formData?: Record<string, unknown> } | undefined
+  const formData = ctx?.formData
   const uri = opts.datasourceUri ?? ''
   const multiple = Boolean(opts.multiple)
+  // 级联依赖：显式 dependsOn ∪ datasourceUri {{}} 引用
+  const deps = [...(opts.dependsOn ?? []), ...extractUriDeps(uri)]
+  const depKey = deps.map((d) => String(formData?.[d] ?? '')).join('|')
+  const resolvedUri = uri ? resolveTemplateUri(uri, formData) : ''
   const [asyncOptions, setAsyncOptions] = useState<Array<{ label: string; value: string | number }>>(
     [],
   )
-  const [loading, setLoading] = useState(Boolean(uri))
+  const [loading, setLoading] = useState(Boolean(resolvedUri))
 
   useEffect(() => {
-    if (!uri) return
+    if (!resolvedUri) return
     let cancelled = false
     setLoading(true)
-    fetchDatasourceOptions(uri)
+    setAsyncOptions([])
+    fetchDatasourceOptions(resolvedUri)
       .then((fetched) => {
         if (!cancelled) setAsyncOptions(fetched)
       })
@@ -369,7 +399,8 @@ function AsyncSelectWidget(props: WidgetProps) {
     return () => {
       cancelled = true
     }
-  }, [uri])
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [resolvedUri, depKey])
 
   const finalOptions = asyncOptions.length > 0 ? asyncOptions : (opts.fallbackOptions ?? [])
 
@@ -485,7 +516,7 @@ export function RjsfForm({
 }: RjsfFormProps) {
   const [submitting, setSubmitting] = useState(false)
   const { schema, uiSchema: fieldUiSchema } = useMemo(() => toRjsf(fields), [fields])
-  const [formData] = useState(() => buildFormValues(fields, initialValues))
+  const [formData, setFormData] = useState(() => buildFormValues(fields, initialValues))
   const transformErrors = useMemo(() => makeErrorTransformer(fields), [fields])
 
   const uiSchema = useMemo(
@@ -526,16 +557,20 @@ export function RjsfForm({
         uiSchema={uiSchema}
         validator={validator}
         formData={formData}
-        formContext={{ colSpan: layout === 'double' ? 12 : 24 }}
+        formContext={{ colSpan: layout === 'double' ? 12 : 24, formData }}
         widgets={WIDGETS}
         templates={{ ErrorListTemplate: NoopErrorList }}
         transformErrors={transformErrors}
         omitExtraData
         disabled={disabled}
         onSubmit={handleSubmit}
-        onChange={
-          onChange ? ({ formData: values }: IChangeEvent) => onChange(values ?? {}) : undefined
-        }
+        onChange={({ formData: values }: IChangeEvent) => {
+          const next = values ?? {}
+          // 实时表单值推进 formContext（级联选择依赖读取，缺口 G2）——无论
+          // 外部是否传 onChange 都回写，避免级联表单缺 onChange prop 时依赖失效
+          setFormData(next)
+          if (onChange) onChange(next)
+        }}
       />
     </div>
   )

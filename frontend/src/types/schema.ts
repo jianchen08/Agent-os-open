@@ -199,6 +199,11 @@ export interface UIInputFormField {
   options?: Array<{ label: string; value: string | number }>
   /** 动态数据源 URI（调用内核代理端点获取选项列表） */
   datasourceUri?: string
+  /**
+   * 级联依赖（缺口 G2）：依赖字段值变化时本字段选项自动重拉。
+   * 也可不声明——datasourceUri 里的 {{其他字段}} 模板引用会被自动推断为依赖。
+   */
+  dependsOn?: string[]
   /** 占位符 */
   placeholder?: string
   /** 数值范围与步长（number/slider 类型） */

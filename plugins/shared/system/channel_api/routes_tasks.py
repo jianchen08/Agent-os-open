@@ -16,6 +16,13 @@ from typing import Any
 
 from deps import APIError, require_auth, validate_pagination
 from fastapi import Depends, Query
+
+def _current_user(_user):
+    """SDK 进程内分发（_handle_tasks_domain）不解析 FastAPI Depends——
+    _user 为 Depends 对象时降级空用户；FastAPI 原生路由下发 dict。"""
+    return _user if isinstance(_user, dict) else {}
+
+
 from memory_store import store
 from models import (
     TaskCreate,
@@ -364,7 +371,7 @@ async def create_task(
     task_id = await _submit_task_event(
         title=body.title,
         description=body.description or "",
-        user_id=_user["sub"],
+        user_id=_current_user(_user).get("sub", ""),
     )
     if not task_id:
         raise APIError(
@@ -373,7 +380,7 @@ async def create_task(
             message="任务执行管道创建失败",
         )
 
-    logger.info("用户 %s 创建任务: %s", _user.get("username"), task_id)
+    logger.info("用户 %s 创建任务: %s", _current_user(_user).get("username", "system"), task_id)
 
     return _task_to_response({"id": task_id, "title": body.title, "status": "pending"})
 
@@ -508,7 +515,7 @@ async def create_root_task(
         "acceptance_criteria": {},  # 默认空，_build_full_task_input 会自动跳过评估段
         "workspace": body.workspace,
         "isolation_level": body.isolation_level,
-        "user_id": _user["sub"],
+        "user_id": _current_user(_user).get("sub", ""),
         "inherit": body.inherit or {},
         "source": "user_manual",  # 审计标记：区分用户直接发起
     }
@@ -522,7 +529,7 @@ async def create_root_task(
         acceptance_criteria=metadata.get("acceptance_criteria") or {},
         dependencies=list(metadata.get("dependencies") or []),
         parent_pipeline_id=active_pipeline_id or "",
-        user_id=_user["sub"],
+        user_id=_current_user(_user).get("sub", ""),
         scope=body.task_scope,
     )
     if not task_id:
@@ -534,7 +541,7 @@ async def create_root_task(
 
     logger.info(
         "[create_root_task] 用户 %s 手动创建根任务 | task_id=%s | scope=%s | thread=%s",
-        _user.get("username"),
+        _current_user(_user).get("username", "system"),
         task_id,
         body.task_scope,
         thread_id,
@@ -616,7 +623,7 @@ def get_task(
         if tm is not None:
             # 跨用户资源隔离：仅允许任务创建者访问自己的任务
             task_user_id = (tm.metadata or {}).get("user_id")
-            if task_user_id is not None and task_user_id != _user["sub"]:
+            if task_user_id is not None and task_user_id != _current_user(_user).get("sub"):
                 raise APIError(
                     status_code=404,
                     error_code="API_NOTF_2004",
@@ -767,7 +774,7 @@ async def delete_task(
     if task is not None and task.metadata.get("soft_deleted"):
         logger.info(
             "用户 %s 软删除容器任务 %s",
-            _user.get("username"),
+            _current_user(_user).get("username", "system"),
             task_id,
         )
 
@@ -775,7 +782,7 @@ async def delete_task(
 
     logger.info(
         "用户 %s 删除任务 %s",
-        _user.get("username"),
+        _current_user(_user).get("username", "system"),
         task_id,
     )
 
@@ -851,10 +858,10 @@ async def submit_task(
     submitted = await _submit_task_event(
         title=str(task.get("title") or task_id),
         task_id=task_id,
-        user_id=_user["sub"],
+        user_id=_current_user(_user).get("sub", ""),
     )
 
-    logger.info("用户 %s 提交任务 %s 执行", _user.get("username"), task_id)
+    logger.info("用户 %s 提交任务 %s 执行", _current_user(_user).get("username", "system"), task_id)
 
     return TaskSubmitResponse(
         task_id=task_id,
@@ -1040,7 +1047,7 @@ async def pause_task(
 
     logger.info(
         "用户 %s 暂停任务 %s（suspend_pipeline）",
-        _user.get("username"),
+        _current_user(_user).get("username", "system"),
         task_id,
     )
 
@@ -1101,7 +1108,7 @@ async def resume_task(
 
     logger.info(
         "用户 %s 恢复任务 %s (task_submitted=%s)",
-        _user.get("username"),
+        _current_user(_user).get("username", "system"),
         task_id,
         task_submitted,
     )
@@ -1179,7 +1186,7 @@ async def cancel_task(
 
     logger.info(
         "用户 %s 取消任务 %s (pipeline_cancelled=%s, cascaded=%d)",
-        _user.get("username"),
+        _current_user(_user).get("username", "system"),
         task_id,
         pipeline_cancelled,
         cascaded,

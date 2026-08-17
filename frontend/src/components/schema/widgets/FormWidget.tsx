@@ -55,6 +55,7 @@ import { usePipelineMessageStore } from '@/stores/pipelineMessageStore'
 import { useSessionStore } from '@/stores/sessionStore'
 import { toast } from '@/components/ui/sonner'
 import { resolveChatCardIcon } from '@/utils/chatCardIconRegistry'
+import { openWorkspacePanelByPath } from '@/services/workspacePanelOpener'
 import type { UIInputFormField } from '@/types/schema'
 
 /**
@@ -117,6 +118,8 @@ export function FormWidget(props: Record<string, unknown>) {
   const [dsValues, setDsValues] = useState<Record<string, unknown> | null>(null)
   const [dsReady, setDsReady] = useState(!fieldsUri && !dataUri)
   const [dsError, setDsError] = useState<string | null>(null)
+  /** successAction.reload 触发 datasource 重拉（须在 effect 依赖之前声明） */
+  const [reloadKey, setReloadKey] = useState(0)
 
   useEffect(() => {
     if (!fieldsUri && !dataUri) return
@@ -168,7 +171,7 @@ export function FormWidget(props: Record<string, unknown>) {
     return () => {
       cancelled = true
     }
-  }, [fieldsUri, dataUri, dataFormat])
+  }, [fieldsUri, dataUri, dataFormat, reloadKey])
 
   const fields = extractFields(dsFields ?? props.fields)
   const controlledValue = (props.value ?? props.initialValues) as
@@ -177,6 +180,23 @@ export function FormWidget(props: Record<string, unknown>) {
   const effectiveInitial = dsValues ?? controlledValue
   const [status, setStatus] = useState<SubmitStatus>('idle')
   const [statusText, setStatusText] = useState('')
+  // 缺口 G1：声明化反馈文案 + 成功动作（successText/failureText/successAction
+  // 均可经 ui_schema.widgets.props 声明 JSON 传递）
+  const successText = props.successText as string | undefined
+  const failureText = props.failureText as string | undefined
+  const successAction = props.successAction as
+    | { type: 'open_panel'; path: string }
+    | { type: 'reload' }
+    | undefined
+
+  const runSuccessAction = (action: typeof successAction) => {
+    if (!action) return
+    if (action.type === 'open_panel') {
+      openWorkspacePanelByPath(action.path)
+    } else if (action.type === 'reload') {
+      setReloadKey((k) => k + 1)
+    }
+  }
 
   const handleSubmit = async (values: Record<string, unknown>) => {
     // datasource 写回：dataUri PUT/POST（yaml 序列化为 {yaml} 体）
@@ -190,11 +210,12 @@ export function FormWidget(props: Record<string, unknown>) {
             : { ...values, ...(extraBody ?? {}) }
         await apiClient({ method: submitMethod, url: dataUri, data: body })
         setStatus('success')
-        setStatusText('已保存')
+        setStatusText(successText ?? '已保存')
         onSaved?.()
+        runSuccessAction(successAction)
       } catch (err) {
         setStatus('error')
-        setStatusText(err instanceof Error ? err.message : '保存失败')
+        setStatusText(failureText ?? (err instanceof Error ? err.message : '保存失败'))
       }
       return
     }
@@ -207,20 +228,31 @@ export function FormWidget(props: Record<string, unknown>) {
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ pipeline_id: pipelineId, ...(extraBody ?? {}), ...values }),
         })
-        const data = (await resp.json()) as { switched?: boolean; unchanged?: boolean; reason?: string; error?: string }
-        if (data.switched) {
-          setStatus('success')
-          setStatusText('已切换')
-        } else if (data.unchanged) {
-          setStatus('unchanged')
-          setStatusText('当前已是该模式')
-        } else {
+        const data = (await resp.json()) as {
+          switched?: boolean
+          unchanged?: boolean
+          reason?: string
+          error?: string
+          message?: string
+        }
+        // endpoint 响应协议：error/reason = 失败；unchanged=true = 无变更（仅
+        // 权限模式等切换端点用）；其余一律视为成功（通用表单端点返回创建对象等，
+        // 旧实现把非 switched 响应误判为失败是该模式的既有缺陷）
+        if (data.error || data.reason) {
           setStatus('error')
-          setStatusText(data.reason ?? data.error ?? '切换失败')
+          setStatusText(failureText ?? data.reason ?? data.error ?? '提交失败')
+        } else if (data.unchanged === true) {
+          setStatus('unchanged')
+          setStatusText(successText ?? data.message ?? '当前已是该模式')
+        } else {
+          setStatus('success')
+          setStatusText(successText ?? data.message ?? '已提交')
+          onSaved?.()
+          runSuccessAction(successAction)
         }
       } catch {
         setStatus('error')
-        setStatusText('请求失败')
+        setStatusText(failureText ?? '请求失败')
       }
       return
     }
@@ -228,11 +260,12 @@ export function FormWidget(props: Record<string, unknown>) {
       try {
         await onSubmit(values)
         setStatus('success')
-        setStatusText('已提交')
+        setStatusText(successText ?? '已提交')
         onSaved?.()
+        runSuccessAction(successAction)
       } catch (err) {
         setStatus('error')
-        setStatusText(err instanceof Error ? err.message : String(err))
+        setStatusText(failureText ?? (err instanceof Error ? err.message : String(err)))
         toast.error('提交失败', {
           description: err instanceof Error ? err.message : String(err),
         })

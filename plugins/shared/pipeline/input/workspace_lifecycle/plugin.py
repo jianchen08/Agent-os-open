@@ -91,7 +91,9 @@ class _ExecutionContextTaskTree:
 
     def get_task(self, task_id: str):
         state = self._plugin._last_state or {}
-        current_id = state.get("task_id")
+        # 0.2 统一：任务身份 = pipeline_id，引擎注入 state 的扁平键是 task.id（点号键），
+        # 兼容顶层 task_id（0.1 遗留）
+        current_id = state.get("task_id") or state.get("task.id")
         rows = self._read_rows()
         row = next(
             (r for r in rows if str(r.get("pipeline_id") or "") == task_id),
@@ -203,6 +205,16 @@ class WorkspaceLifecyclePlugin(IInputPlugin):
         幂等：state 已有 workspace（恢复/复用）时跳过。
         """
         state = ctx.state
+        _dbg = {
+            k: str(state.get(k))[:120]
+            for k in (
+                "task_id", "task.id", "pipeline_id",
+                "execution_context", "execution_context.workspace",
+                "workspace", "project_root",
+            )
+            if state.get(k) is not None
+        }
+        logger.info("[WorkspaceLifecycle] bootstrap state keys=%s", _dbg)
         if state.get("workspace"):
             logger.debug(
                 "[WorkspaceLifecycle] workspace 已就位，跳过创建 | workspace=%s",
@@ -221,7 +233,9 @@ class WorkspaceLifecyclePlugin(IInputPlugin):
 
         source_path = ws_spec.get("source_path") or ""
         mode = ws_spec.get("mode") or "plain"
-        task_id = state.get("task_id") or ""
+        # 0.2 统一：任务身份 = pipeline_id，引擎注入 state 的扁平键是 task.id
+        # （点号键）；兼容顶层 task_id（0.1 遗留）。缺 task 上下文 = 主会话纯解析。
+        task_id = state.get("task_id") or state.get("task.id") or ""
         manager = self._get_manager()
         if not source_path and task_id:
             # 0.1 执行语义兜底（task_executor._resolve_task_workspace）：无显式
@@ -309,7 +323,7 @@ class WorkspaceLifecyclePlugin(IInputPlugin):
         ws_meta = state.get("ws_meta") if isinstance(state.get("ws_meta"), dict) else {}
         if ws_meta.get("mode") != "worktree":
             return PluginResult()
-        task_id = state.get("task_id") or ""
+        task_id = state.get("task_id") or state.get("task.id") or ""
         if not task_id:
             return PluginResult()
         manager = self._get_manager()
