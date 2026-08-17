@@ -346,6 +346,7 @@ fn env_mapping(file_id: &str) -> ConfigFileMapping {
                 field_type: "secret".to_string(),
                 required: true,
                 description: None,
+                extra: None,
             },
             agentos_core::traits::EnvConfigField {
                 name: "LANGSMITH_API_KEY".to_string(),
@@ -353,6 +354,7 @@ fn env_mapping(file_id: &str) -> ConfigFileMapping {
                 field_type: "secret".to_string(),
                 required: false,
                 description: None,
+                extra: None,
             },
         ],
     }

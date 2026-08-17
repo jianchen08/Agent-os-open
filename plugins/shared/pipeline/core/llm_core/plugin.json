@@ -24,12 +24,81 @@
         {
             "id": "llm",
             "path": "config/models/llm.yaml",
-            "label": "LLM 模型配置"
+            "label": "LLM 模型配置",
+            "fields": [
+                {
+                    "name": "defaults.chat",
+                    "type": "string",
+                    "label": "默认对话模型",
+                    "description": "模型 id（须已在 models 段注册）",
+                    "required": true
+                },
+                {
+                    "name": "defaults.tiers.large",
+                    "type": "string",
+                    "label": "大模型档位",
+                    "description": "复杂任务默认模型 id"
+                },
+                {
+                    "name": "defaults.tiers.medium",
+                    "type": "string",
+                    "label": "中模型档位",
+                    "description": "常规任务默认模型 id"
+                },
+                {
+                    "name": "defaults.tiers.small",
+                    "type": "string",
+                    "label": "小模型档位",
+                    "description": "轻量任务默认模型 id"
+                },
+                {
+                    "name": "defaults.embedding",
+                    "type": "string",
+                    "label": "默认向量模型",
+                    "description": "embedding 任务默认模型 id"
+                },
+                {
+                    "name": "concurrency.chat",
+                    "type": "number",
+                    "label": "对话并发",
+                    "min": 1,
+                    "max": 64,
+                    "default": 8,
+                    "description": "chat completions 并发上限"
+                },
+                {
+                    "name": "concurrency.embedding",
+                    "type": "number",
+                    "label": "向量并发",
+                    "min": 1,
+                    "max": 64,
+                    "default": 4,
+                    "description": "embedding 并发上限"
+                }
+            ]
         },
         {
             "id": "embedding",
             "path": "config/models/embedding.yaml",
-            "label": "向量模型配置"
+            "label": "向量模型配置",
+            "fields": [
+                {
+                    "name": "embedding.enabled",
+                    "type": "toggle",
+                    "label": "启用向量模型",
+                    "default": false
+                },
+                {
+                    "name": "embedding.default_provider",
+                    "type": "string",
+                    "label": "默认提供商"
+                },
+                {
+                    "name": "embedding.default_model",
+                    "type": "string",
+                    "label": "默认模型"
+                }
+            ]
         }
     ],
     "lifecycle": {

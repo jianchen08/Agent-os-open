@@ -6,7 +6,7 @@
  * 可嵌入设置页右侧面板，也可作为独立内容渲染。
  */
 
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useMemo, useState } from 'react'
 import { Loader2, Plus, Trash2 } from '@/assets/icons'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
@@ -22,8 +22,15 @@ import {
   getPluginConfigFile,
   savePluginConfigFile,
   isPluginConfigConflict,
+  type EnvConfigFieldDef,
 } from '@/services/api/pluginConfig'
 import { contributionRegistry } from '@/services/schema/ContributionRegistry'
+import { RjsfForm } from '@/services/schema/RjsfForm'
+import {
+  buildInitialValues,
+  mergeFormValues,
+  toFormFields,
+} from '@/utils/configFormFields'
 
 export interface PluginConfigEditorProps {
   pluginId: string
@@ -76,6 +83,8 @@ export function PluginConfigEditor({
   const [isLoading, setIsLoading] = useState(true)
   const [loadError, setLoadError] = useState<string | null>(null)
   const [saveState, setSaveState] = useState<SaveState>('idle')
+  /** 类型化表单模式下手动切回原始 KV 编辑（fields 未覆盖的键的逃生口） */
+  const [rawMode, setRawMode] = useState(false)
 
   useEffect(() => {
     let cancelled = false
@@ -139,34 +148,58 @@ export function PluginConfigEditor({
     })
   }, [])
 
-  const handleSave = useCallback(async () => {
-    if (!config) return
-    setSaveState('saving')
-    try {
-      const result = await savePluginConfigFile(pluginId, fileId, config, etag || undefined)
-      setEtag(result.etag)
-      setSaveState('saved')
-      toast.success('配置已保存')
-      setTimeout(() => setSaveState('idle'), 2000)
-    } catch (error: unknown) {
-      if (isPluginConfigConflict(error)) {
-        setSaveState('error')
-        toast.error('配置冲突', {
-          description: '配置已被他人修改，请刷新后重试',
-        })
-        if (error.currentEtag) setEtag(error.currentEtag)
-        return
-      }
-      const msg = error instanceof Error ? error.message : '保存配置时发生错误'
-      setSaveState('error')
-      toast.error('配置保存失败', { description: msg })
-    }
-  }, [config, pluginId, fileId, etag])
-
   // GAP-4：env target 条目（外部 MCP 源 key）→ 密钥表单分支（掩码 + 空输入保留原值）
-  const envMapping = contributionRegistry
+  // T1：YAML target 条目带 fields → 类型化 RJSF 表单（谁的数据谁出表单）；
+  // 无 fields / 手动切回 → 原始 KV 树兜底。
+  const mapping = contributionRegistry
     .getPluginConfigFiles(pluginId)
-    .find((f) => f.id === fileId && f.target === 'env')
+    .find((f) => f.id === fileId)
+  const envMapping = mapping && mapping.target === 'env' ? mapping : undefined
+  const typedFields = useMemo(
+    () => (envMapping ? [] : toFormFields(mapping?.fields as EnvConfigFieldDef[] | undefined)),
+    [envMapping, mapping],
+  )
+
+  const persistConfig = useCallback(
+    async (next: Record<string, unknown>) => {
+      setSaveState('saving')
+      try {
+        const result = await savePluginConfigFile(pluginId, fileId, next, etag || undefined)
+        setEtag(result.etag)
+        setConfig(next)
+        setSaveState('saved')
+        toast.success('配置已保存')
+        setTimeout(() => setSaveState('idle'), 2000)
+      } catch (error: unknown) {
+        if (isPluginConfigConflict(error)) {
+          setSaveState('error')
+          toast.error('配置冲突', {
+            description: '配置已被他人修改，请刷新后重试',
+          })
+          if (error.currentEtag) setEtag(error.currentEtag)
+          return
+        }
+        const msg = error instanceof Error ? error.message : '保存配置时发生错误'
+        setSaveState('error')
+        toast.error('配置保存失败', { description: msg })
+      }
+    },
+    [pluginId, fileId, etag],
+  )
+
+  const handleSave = useCallback(() => {
+    if (!config) return
+    void persistConfig(config)
+  }, [config, persistConfig])
+
+  // 类型化表单提交：表单值按字段路径写回，未声明键原样保留
+  const handleTypedSubmit = useCallback(
+    (values: Record<string, unknown>) => {
+      if (!config) return
+      void persistConfig(mergeFormValues(config, typedFields, values))
+    },
+    [config, typedFields, persistConfig],
+  )
 
   const body = (
     <>
@@ -192,8 +225,42 @@ export function PluginConfigEditor({
         </div>
       )}
 
-      {!isLoading && config && (
+      {!isLoading && config && typedFields.length > 0 && !rawMode && (
         <>
+          <RjsfForm
+            fields={typedFields}
+            initialValues={buildInitialValues(config, typedFields)}
+            onSubmit={handleTypedSubmit}
+            submitLabel="保存配置"
+            layout="single"
+          />
+          <div className="mt-4 flex items-center justify-between border-t pt-3">
+            {saveState === 'saved' && (
+              <span className="text-xs text-status-success" role="status">已保存</span>
+            )}
+            {saveState === 'error' && (
+              <span className="text-xs text-status-error" role="alert">保存失败</span>
+            )}
+            <button
+              onClick={() => setRawMode(true)}
+              className="text-muted-foreground hover:text-foreground ml-auto text-xs underline-offset-2 hover:underline"
+            >
+              原始 KV 编辑（fields 未覆盖的键）
+            </button>
+          </div>
+        </>
+      )}
+
+      {!isLoading && config && (typedFields.length === 0 || rawMode) && (
+        <>
+          {rawMode && typedFields.length > 0 && (
+            <button
+              onClick={() => setRawMode(false)}
+              className="text-muted-foreground hover:text-foreground mb-4 text-xs underline-offset-2 hover:underline"
+            >
+              ← 返回类型化表单
+            </button>
+          )}
           <ConfigObject obj={config} parentPath={[]} onChange={handleChange} onDelete={handleDelete} onAddField={handleAddField} allowAddField />
           <div className="mt-6 flex items-center gap-3 border-t pt-4">
             <Button onClick={handleSave} disabled={saveState === 'saving'}>

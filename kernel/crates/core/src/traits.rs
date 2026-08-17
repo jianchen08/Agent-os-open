@@ -1185,7 +1185,7 @@ pub struct ServiceCapability {
 /// - `label`：前端展示用的名称。
 ///
 /// path 安全校验见 loader 的 B1 实现（归一化 + 落 config/ 子树 + denylist）。
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ConfigFileMapping {
     /// 配置子项标识（插件内唯一）。
     pub id: String,
@@ -1200,22 +1200,29 @@ pub struct ConfigFileMapping {
     /// 缺省 = 写进 path 指向的插件配置文件（既有 YAML 语义）。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub target: Option<String>,
-    /// `target: "env"` 时的字段级声明：前端按此渲染表单（secret 用密码框），
-    /// `name` 须与 `mcp.endpoint.auth.value` / `env` 里的 `${VAR}` 引用一致
-    /// （loader 交叉核对，漂移启动期暴露）。
+    /// 字段级声明：`target: "env"` 时为 env 密钥表单（`name` 须与
+    /// `mcp.endpoint.auth.value` / `env` 里的 `${VAR}` 引用一致，loader 交叉
+    /// 核对，漂移启动期暴露）；YAML target 时为类型化表单声明（UI 词汇表经
+    /// `EnvConfigField::extra` 透传，前端 RJSF 表单消费，内核不解释）。
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub fields: Vec<EnvConfigField>,
 }
 
-/// env target 条目的字段级声明（GAP-4 声明驱动配置）。
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+/// config_files 条目的字段级声明（env 密钥表单 GAP-4 + YAML 类型化表单）。
+///
+/// env target：字段名 = .env 键。YAML target：字段 name 支持点号路径（如
+/// `defaults.chat`），`type`/UI 词汇（options/min/max/step/default…）由前端
+/// 词汇表解释——内核只保底解析本结构体的显式字段，其余经 `extra` 原样透传
+/// （谁的数据谁出表单，内核不建模 UI 词汇表）。
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct EnvConfigField {
-    /// 环境变量名（= .env 键，须与 manifest 的 `${VAR}` 引用一致）。
+    /// 字段名（env = .env 键；YAML = 点号路径）。
     pub name: String,
     /// 前端展示名称。
     pub label: String,
-    /// 字段类型：`secret`（密码框/掩码展示）| `string`。缺省按 secret 处理
-    /// （env 条目的保守默认——宁可掩码不可泄漏）。
+    /// 字段类型：env target 下 `secret`（密码框/掩码展示）| `string`，缺省按
+    /// secret 处理（保守默认——宁可掩码不可泄漏）；YAML target 下为前端表单
+    /// 词汇（select/toggle/number/textarea…），内核不校验值域。
     #[serde(rename = "type", default = "default_env_field_type")]
     pub field_type: String,
     /// 是否必填（缺失时插件 connect 硬失败 vs 可选降级）。
@@ -1224,6 +1231,10 @@ pub struct EnvConfigField {
     /// 字段说明（前端提示文案，可选）。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
+    /// UI 词汇表透传（YAML target 的表单声明：options/min/max/step/default/
+    /// datasourceUri 等）——序列化时平铺进字段对象，不产生 `extra` 键。
+    #[serde(flatten, default)]
+    pub extra: Option<serde_json::Map<String, serde_json::Value>>,
 }
 
 fn default_env_field_type() -> String {

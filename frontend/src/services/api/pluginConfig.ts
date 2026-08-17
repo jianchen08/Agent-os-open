@@ -16,13 +16,31 @@ import { API_ENDPOINTS } from '@/constants/api'
 import apiClient from '@/services/api/client'
 import type { SchemaResponse } from '@/services/api/schema'
 
-/** 单个配置文件映射项（manifest config_files 的前端镜像） */
+/**
+ * config_files.fields 单字段声明（manifest 前端镜像）。
+ *
+ * env target：name = .env 键，type 仅 secret|string。
+ * YAML target：name 支持点号路径（如 defaults.chat），type 为 UI 表单词汇
+ * （select/toggle/number/textarea…），options/min/max/step/default 等 UI 词汇
+ * 由内核 flatten 透传（kernel EnvConfigField::extra）。
+ */
 export interface EnvConfigFieldDef {
   name: string
   label: string
-  type?: 'secret' | 'string'
+  type?: string
   required?: boolean
   description?: string
+  /** 选项（select/multiselect/radio/checkbox） */
+  options?: Array<{ label?: string; value: string | number }>
+  min?: number
+  max?: number
+  step?: number
+  default?: unknown
+  placeholder?: string
+  /** 动态数据源 URI（选项从端点拉取） */
+  datasourceUri?: string
+  validation?: { min?: number; max?: number; pattern?: string; message?: string }
+  [key: string]: unknown
 }
 
 export interface PluginConfigFileMapping {
