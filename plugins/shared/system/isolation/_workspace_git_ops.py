@@ -106,7 +106,8 @@ class _GitOpsMixin:
     def _get_workspace_root(self) -> Path:
         """从配置中读取工作空间基目录，解析为绝对路径。
 
-        workspace.root 支持绝对路径和相对路径（相对于 CWD）。
+        workspace.root 支持绝对路径和相对路径（**相对 base_path=项目根**，
+        不是 cwd——sidecar 的 cwd 是插件目录，拼 cwd 会把工作空间建错位置）。
         返回的是所有工作空间（worktree/container）的父目录。
         例如配置 root: "D:/myproject" 则返回 Path("D:/myproject")。
         """
@@ -117,7 +118,9 @@ class _GitOpsMixin:
             return Path(raw)
         p = Path(raw)
         if not p.is_absolute():
-            p = Path.cwd() / p
+            # 相对路径基于 base_path（项目根），不能拼 cwd——sidecar cwd 是插件目录
+            base = getattr(self, "_base_path", None) or Path.cwd()
+            p = Path(base) / p
         return p.resolve()
 
     def _run_git(self, *args: str, cwd: Path, timeout: int = _GIT_TIMEOUT) -> tuple[int, str, str]:

@@ -256,13 +256,19 @@ class WorkspaceLifecyclePlugin(IInputPlugin):
                 _ensure_isolation_path()
                 from isolation.workspace import get_workspace_config_root  # noqa: PLC0415
 
-                # 默认工作空间根（如 .ai_workspaces）必须基于项目根拼绝对路径——
-                # sidecar cwd 是插件目录，相对路径会把空间建错位置。
+                # 项目根（sidecar cwd 是插件目录，只能从插件文件推导）
                 _root = Path(__file__).resolve().parents[5]
-                source_path = str(_root / get_workspace_config_root() / task_id)
+                if mode == "worktree":
+                    # worktree 拓扑：workspace 参数是**源项目**（服务自动在
+                    # 工作区根下建隔离副本）；以项目根为源。
+                    source_path = str(_root)
+                else:
+                    # plain 拓扑：直接在「工作区根/{task_id}」目录操作（默认隔离）
+                    source_path = str(_root / get_workspace_config_root() / task_id)
                 logger.info(
-                    "[WorkspaceLifecycle] 无显式 workspace，按默认根创建 | task=%s | path=%s",
+                    "[WorkspaceLifecycle] 无显式 workspace，按默认根创建 | task=%s | mode=%s | path=%s",
                     task_id,
+                    mode,
                     source_path,
                 )
             except Exception as exc:
