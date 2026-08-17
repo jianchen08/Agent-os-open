@@ -173,7 +173,7 @@ class WorkspaceLifecyclePlugin(IInputPlugin):
             base_path = (
                 base_path_hint
                 or self._config.get("base_path")
-                or str(Path(__file__).resolve().parents[4])
+                or str(Path(__file__).resolve().parents[5])
             )
             manager = WorkspaceLifecycleManager(
                 resource_merge=None,
