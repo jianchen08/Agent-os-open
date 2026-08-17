@@ -1310,11 +1310,14 @@ class TaskSubmitTool(BuiltinTool):
         return {"pipeline_id": pipeline_id}
 
     def _build_execution_context(self, inputs: dict[str, Any], task_scope: str) -> dict[str, Any]:
-        """结构化 execution_context（GAP-1 统一：不再写 YAML metadata，随派发透传）。
+        """结构化 execution_context（GAP-1 统一：随派发透传，不写 YAML metadata）。
 
-        供执行管道 init 体 workspace_lifecycle / environment_lifecycle 插件消费：
-        workspace 拓扑（worktree/plain/container_copy）与隔离级别（与存储解耦）。
-        父任务链信息由 lineage 承担（引擎出生写入），不在此伪造。
+        对齐 0.1 执行语义（task_executor）：普通任务默认隔离执行——
+        - isolation 默认 isolated（0.1 coordinator.default_level；显式
+          isolation_level 优先）；容器任务恒系统默认（调用方不可选）。
+        - workspace 默认声明 source_path 空 = 执行管道按「工作空间根/{task_id}」
+          兜底创建（workspace_lifecycle._bootstrap，对齐 0.1 _resolve_task_
+          workspace）；显式 workspace/workspace_mode 优先。
         """
         _ec: dict[str, Any] = {}
         if inputs.get("workspace"):
@@ -1324,38 +1327,18 @@ class TaskSubmitTool(BuiltinTool):
                 or ("container_copy" if task_scope == "container" else "worktree"),
                 "explicit": True,
             }
-        elif inputs.get("workspace_mode") or task_scope == "container":
+        else:
             _ec["workspace"] = {
                 "source_path": "",
                 "mode": inputs.get("workspace_mode")
                 or ("container_copy" if task_scope == "container" else "worktree"),
+                "explicit": False,
             }
-        if inputs.get("isolation_level"):
-            _ec["isolation"] = {"level": inputs["isolation_level"]}
-        return _ec
-    def _build_execution_context(self, inputs: dict[str, Any], task_scope: str) -> dict[str, Any]:
-        """结构化 execution_context（GAP-1 统一：不再写 YAML metadata，随派发透传）。
-
-        供执行管道 init 体 workspace_lifecycle / environment_lifecycle 插件消费：
-        workspace 拓扑（worktree/plain/container_copy）与隔离级别（与存储解耦）。
-        父任务链信息由 lineage 承担（引擎出生写入），不在此伪造。
-        """
-        _ec: dict[str, Any] = {}
-        if inputs.get("workspace"):
-            _ec["workspace"] = {
-                "source_path": inputs["workspace"],
-                "mode": inputs.get("workspace_mode")
-                or ("container_copy" if task_scope == "container" else "worktree"),
-                "explicit": True,
-            }
-        elif inputs.get("workspace_mode") or task_scope == "container":
-            _ec["workspace"] = {
-                "source_path": "",
-                "mode": inputs.get("workspace_mode")
-                or ("container_copy" if task_scope == "container" else "worktree"),
-            }
-        if inputs.get("isolation_level"):
-            _ec["isolation"] = {"level": inputs["isolation_level"]}
+        level = inputs.get("isolation_level") or (
+            "" if task_scope == "container" else "isolated"
+        )
+        if level:
+            _ec["isolation"] = {"level": level}
         return _ec
     async def _execute_long_term(self, inputs: dict[str, Any]) -> ToolExecutionResult:  # noqa: PLR0912,PLR0915
         """处理容器任务提交。"""

@@ -221,12 +221,30 @@ class WorkspaceLifecyclePlugin(IInputPlugin):
 
         source_path = ws_spec.get("source_path") or ""
         mode = ws_spec.get("mode") or "plain"
+        task_id = state.get("task_id") or ""
+        manager = self._get_manager()
+        if not source_path and task_id:
+            # 0.1 执行语义兜底（task_executor._resolve_task_workspace）：无显式
+            # workspace 的任务在「工作空间根/{task_id}」下创建目录——默认隔离
+            # 执行的工作空间（容器挂载与 bash 执行均以此为锚）。
+            try:
+                _ensure_isolation_path()
+                from isolation.workspace import get_workspace_config_root  # noqa: PLC0415
+
+                source_path = f"{get_workspace_config_root()}/{task_id}"
+                logger.info(
+                    "[WorkspaceLifecycle] 无显式 workspace，按默认根创建 | task=%s | path=%s",
+                    task_id,
+                    source_path,
+                )
+            except Exception as exc:
+                logger.warning(
+                    "[WorkspaceLifecycle] 默认工作空间根解析失败 | error=%s", exc
+                )
         if not source_path:
             logger.debug("[WorkspaceLifecycle] workspace source_path 为空，跳过")
             return PluginResult()
 
-        task_id = state.get("task_id") or ""
-        manager = self._get_manager()
         if manager is not None and task_id:
             # 任务管道：调 0.1 工作空间服务真实创建（对齐 0.1 task_executor 契约：
             # on_task_start(task_id, workspace, task_data) 分发 root/subtask；
