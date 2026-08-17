@@ -62,7 +62,7 @@ def _make_source_task(pipeline_run_id: str = "pipe-12345") -> MagicMock:
     return src
 
 
-def _build_inputs(mode, inherit_from: str = "src-task-001") -> dict:
+def _build_inputs(mode, inherit_from: str = "src-task-001", user_id: str = "") -> dict:
     """构造一组用于 task_submit.execute() 的最小输入。"""
     return {
         "goal": {"title": "继承任务测试"},
@@ -75,6 +75,7 @@ def _build_inputs(mode, inherit_from: str = "src-task-001") -> dict:
             "from": inherit_from,
             "mode": mode,
         },
+        **({"user_id": user_id} if user_id else {}),
     }
 
 
@@ -362,6 +363,44 @@ def test_normalize_description_non_string_scalar():
     """非 str 标量（int/dict）转为字符串，避免 len() 校验失效。"""
     assert _normalize_description(42) == "42"
     assert _normalize_description(True) == "True"
+
+
+# ─────────────────── 0.2 state 传递：提交者身份写入 ───────────────────
+
+
+def test_submit_writes_submitted_by_user_id_into_initial_state():
+    """创建子任务时把提交者写进初始 state 的 task.submitted_by。
+
+    0.2 任务信息走 state 不落文件：内核 task_completed/task_failed 事件
+    从 final_state 的 task.submitted_by 带出 user_id，触发器注入器据此调
+    chat.send_message 才有身份——曾硬编码空串被内核 -32603 拒绝（2026-08-17
+    子任务结果回传断点）。
+    """
+    captured: dict = {}
+
+    async def fake_sender(params: dict) -> dict:
+        captured.update(params)
+        return {"pipeline_id": "child_pipe_001"}
+
+    tool = TaskSubmitTool()
+    patches, _ = _patch_infrastructure()
+    for p in patches:
+        p.start()
+    try:
+        with patch.object(_tool_mod, "_get_chat_sender", return_value=fake_sender):
+            result = asyncio.run(
+                tool.execute(_build_inputs(mode="pipe", user_id="u_admin"))
+            )
+    finally:
+        for p in patches:
+            p.stop()
+
+    assert result.error_code in (None, ""), f"应派发成功，实际 error_code={result.error_code}"
+    assert result.output.get("pipeline_id") == "child_pipe_001"
+    assert captured.get("user_id") == "u_admin", "chat.send_message 的 user_id 应为提交者"
+    assert (
+        captured.get("state", {}).get("task.submitted_by") == "u_admin"
+    ), "初始 state 必须写 task.submitted_by（内核事件带出 user_id 的依据）"
 
 
 if __name__ == "__main__":

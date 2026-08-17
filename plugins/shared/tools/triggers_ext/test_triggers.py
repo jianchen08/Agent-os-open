@@ -1109,6 +1109,10 @@ class TestDomainEventBridge:
                         "pipeline_id": "child_pipe",
                         "task_id": "t_child",
                         "parent_pipeline_id": "parent_pipe",
+                        # 内核从子任务 state 的 task.submitted_by 带出（task_submit
+                        # 创建时写入）——注入器必须透传，chat.send_message 硬校验
+                        # user_id 非空，传空串会被内核 -32603 拒绝（2026-08-17 断点）
+                        "user_id": "u_admin",
                     },
                 )
             )
@@ -1117,6 +1121,7 @@ class TestDomainEventBridge:
             assert len(received) == 1, "应自动向父管道注入一条通知"
             assert received[0][0] == "parent_pipe", "注入目标应为父管道"
             assert "t_child" in received[0][1], "通知应包含子任务标识"
+            assert received[0][2] == "u_admin", "注入器应透传事件携带的 user_id"
         finally:
             mgr.stop_check_loop()
 
