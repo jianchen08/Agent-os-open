@@ -102,7 +102,27 @@ class ToolSchemaPlugin(IInputPlugin):
             # 0.2 sidecar 架构:sidecar 拿不到内核 tool_registry。若内核已注入
             # tool_schemas（process_via_engine 经 capability_registry 生成），保留它，
             # 不覆盖为空（否则 LLM 拿不到任何工具）。无内核注入时返回空。
-            if ctx.state.get("tool_schemas"):
+            schemas = ctx.state.get("tool_schemas")
+            if schemas:
+                # agent 配置解耦后的过滤点：context_build 按 agent yaml 注入
+                # state.tool_ids——此处对内核全量注入按 agent 工具面过滤
+                # （内核读不到 yaml，缺失 tool_ids 时是全量兜底）。
+                wanted = ctx.state.get("tool_ids") or []
+                if wanted:
+                    # 与内核 FRAMEWORK_ALWAYS_INCLUDE_TOOLS（server.rs）对齐：
+                    # 框架级强制工具无视 agent 配置保留。
+                    keep = set(wanted) | {"spill_retrieve"}
+                    filtered = [
+                        s for s in schemas
+                        if isinstance(s, dict)
+                        and (s.get("function") or {}).get("name") in keep
+                    ]
+                    if len(filtered) != len(schemas):
+                        logger.info(
+                            "[%s] 按 agent tool_ids 过滤工具面 | %d -> %d",
+                            self.name, len(schemas), len(filtered),
+                        )
+                        return {"tool_schemas": filtered}
                 return {}  # 不覆盖，保留内核注入的 schema
             return {"tool_schemas": []}
 

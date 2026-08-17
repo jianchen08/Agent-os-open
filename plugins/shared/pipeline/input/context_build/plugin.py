@@ -171,6 +171,11 @@ class ContextBuildPlugin(IInputPlugin):
         # 值比配置默认更强；context.agent_level 稍后仍按 _agent_level 覆盖逻辑走）。
         if not self._agent_name and agent_cfg.get("display_name"):
             self._agent_name = str(agent_cfg["display_name"])
+        # tool_ids 随 agent 配置注入（内核 inject_tool_schemas 读 state.tool_ids
+        # 过滤；agent 配置加载归本插件后由这里供给）。
+        _tool_ids = agent_cfg.get("tool_ids")
+        if isinstance(_tool_ids, list) and _tool_ids:
+            updates["tool_ids"] = _tool_ids
         if agent_cfg.get("level") and self._config.get("agent_level") is None:
             lvl = str(agent_cfg["level"]).upper()
             if lvl.startswith("L"):
