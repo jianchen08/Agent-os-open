@@ -10,7 +10,6 @@
 
 import { useEffect, useMemo, useState } from 'react'
 import { PluginConfigEditor } from '@/components/config/PluginConfigEditor'
-import { SchemaFormEmbed } from '@/components/schema/widgets/SchemaFormEmbed'
 import { cn } from '@/lib/utils'
 import { ApiSettingsPage } from '@/pages/settings/ApiSettingsPage'
 import { ConcurrencySettingsPage } from '@/pages/settings/ConcurrencySettingsPage'
@@ -18,7 +17,9 @@ import { LlmSettingsPage } from '@/pages/settings/LlmSettingsPage'
 import { PipelineSettingsPage } from '@/pages/settings/PipelineSettingsPage'
 import { PluginsSettingsPage } from '@/pages/settings/PluginsSettingsPage'
 import { ThemeSettingsPage } from '@/pages/settings/ThemeSettingsPage'
+import { FormWidget } from './FormWidget'
 import { getSchema } from '@/services/api/schema'
+import { API_ENDPOINTS } from '@/constants/api'
 import { contributionRegistry } from '@/services/schema/ContributionRegistry'
 import { KERNEL_NAV_ITEMS } from '@/services/settingsKernelNav'
 import type { SettingsPanelEntry } from '@/services/schema/ContributionRegistry'
@@ -142,7 +143,12 @@ export function SettingsHubWidget(_props: Record<string, unknown>) {
           />
         )}
         {String(active).startsWith('schema:') && (
-          <SchemaFormEmbed schemaId={String(active).slice('schema:'.length)} />
+          <FormWidget
+            fieldsUri={API_ENDPOINTS.AGENTS.SCHEMA}
+            dataUri={API_ENDPOINTS.AGENTS.CONFIG(String(active).slice('schema:'.length))}
+            dataFormat="yaml"
+            submitLabel="保存配置"
+          />
         )}
         {String(active).startsWith('plugin:') && (
           <PluginConfigEmbed pathKey={String(active).slice('plugin:'.length)} />

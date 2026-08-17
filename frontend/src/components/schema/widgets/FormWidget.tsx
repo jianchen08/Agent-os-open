@@ -11,20 +11,26 @@
  *    DropdownMenu，点选即提交/回调，适合插件声明式选择器（如权限模式切换、
  *    思考强度跟随管道标签）。高风险操作可在端点内经 human-interaction 弹
  *    审批窗确认（fetch 挂起等待）。
+ * 3. datasource 模式（widget 化 T12）：fieldsUri 拉字段声明 + dataUri 拉初值/
+ *    写回（吸收原 SchemaFormEmbed：GET/PUT agent 配置 yaml）。
+ * 4. modal 壳模式（widget 化 T12）：modal 声明或受控 open/onClose 包 Dialog
+ *    （吸收原 CreateTaskModal：提交成功自动关闭 + onSaved 回调）。
  *
  * 提交/受控模式（endpoint 与受控互斥）：
- * - props.endpoint（声明 JSON 可传字符串）：POST {pipeline_id: 当前选中管道, ...values}
- *   到该端点，展示提交中/成功/失败状态。pipeline_id 跟随当前选中的管道标签
- *   （agentTabStore.activeTabId → pipelineRunId，回退 store 级 activePipelineId /
- *   sessionId）——权限模式按管道隔离，切换标签即切换目标。
- * - props.onSubmit：显式 JS 回调（宿主注入场景）。
+ * - props.endpoint（声明 JSON 可传字符串）：POST {pipeline_id: 当前选中管道,
+ *   ...extraBody, ...values} 到该端点，展示提交中/成功/失败状态。pipeline_id
+ *   跟随当前选中的管道标签（agentTabStore.activeTabId → pipelineRunId，回退
+ *   store 级 activePipelineId / sessionId）——权限模式按管道隔离，切换标签即切换目标。
+ * - props.dataUri：GET 初值（yaml 文本自动解析）；提交 PUT/POST 回写
+ *   （dataFormat=yaml 时序列化为 {yaml} 体，对齐 agent 配置写回协议）。
+ * - props.onSubmit：显式 JS 回调（宿主注入场景；modal 模式提交成功自动关闭）。
  * - props.value + props.onChange：受控模式（宿主注入当前值 + 变更回调，
  *   值跟随宿主 state，如思考强度随管道标签变化）。
  *
  * @module FormWidget
  */
 
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import { Check, ChevronDown } from '@/assets/icons'
 import {
   DropdownMenu,
@@ -34,11 +40,20 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu'
-import { cn } from '@/lib/utils'
+import {
+  Dialog,
+  DialogContent,
+  DialogHeader,
+  DialogTitle,
+} from '@/components/ui/dialog'
+import apiClient from '@/services/api/client'
 import { RjsfForm } from '@/services/schema/RjsfForm'
+import { parseYamlObject, serializeYaml } from '@/services/schema/yaml'
+import { cn } from '@/lib/utils'
 import { useAgentTabStore } from '@/stores/agentTabStore'
 import { usePipelineMessageStore } from '@/stores/pipelineMessageStore'
 import { useSessionStore } from '@/stores/sessionStore'
+import { toast } from '@/components/ui/sonner'
 import { resolveChatCardIcon } from '@/utils/chatCardIconRegistry'
 import type { UIInputFormField } from '@/types/schema'
 
@@ -78,25 +93,111 @@ function useActivePipelineId(): string {
 /**
  * 表单交互组件
  *
- * @param props - 组件属性，包含 fields、layout、onSubmit、endpoint 等
+ * @param props - 组件属性，包含 fields、layout、onSubmit、endpoint、
+ *   fieldsUri/dataUri（datasource 模式）、modal/open/onClose（modal 壳）等
  * @returns 动态表单渲染结果
  */
 export function FormWidget(props: Record<string, unknown>) {
-  const fields = extractFields(props.fields)
   const onSubmit = props.onSubmit as ((data: Record<string, unknown>) => void) | undefined
   const layout = props.layout === 'grid' ? 'double' : 'single'
   const endpoint = props.endpoint as string | undefined
   // 受控模式（宿主注入场景：值跟随宿主 state，变更经 onChange 流出——
   // 与 endpoint 直连互斥使用；如思考强度跟随当前管道标签）
   const onChange = props.onChange as ((data: Record<string, unknown>) => void) | undefined
+  const pipelineId = useActivePipelineId()
+
+  // ── datasource 模式（widget 化 T12）──
+  const fieldsUri = props.fieldsUri as string | undefined
+  const dataUri = props.dataUri as string | undefined
+  const dataFormat = (props.dataFormat as 'json' | 'yaml') ?? 'json'
+  const submitMethod = (props.submitMethod as 'PUT' | 'POST') ?? 'PUT'
+  const extraBody = props.extraBody as Record<string, unknown> | undefined
+  const onSaved = props.onSaved as (() => void) | undefined
+  const [dsFields, setDsFields] = useState<unknown[] | null>(null)
+  const [dsValues, setDsValues] = useState<Record<string, unknown> | null>(null)
+  const [dsReady, setDsReady] = useState(!fieldsUri && !dataUri)
+  const [dsError, setDsError] = useState<string | null>(null)
+
+  useEffect(() => {
+    if (!fieldsUri && !dataUri) return
+    let cancelled = false
+    setDsReady(false)
+    setDsError(null)
+    const jobs: Promise<unknown>[] = []
+    if (fieldsUri) {
+      jobs.push(
+        apiClient.get(fieldsUri).then((resp) => {
+          const d = resp.data
+          const f = Array.isArray(d)
+            ? d
+            : d && typeof d === 'object' && Array.isArray((d as { fields?: unknown[] }).fields)
+              ? (d as { fields: unknown[] }).fields
+              : null
+          if (f === null) throw new Error('fieldsUri 响应不含 fields 数组')
+          if (!cancelled) setDsFields(f)
+        }),
+      )
+    }
+    if (dataUri) {
+      jobs.push(
+        apiClient.get(dataUri).then((resp) => {
+          const d: unknown = resp.data
+          if (dataFormat === 'yaml') {
+            const rec = d as { yaml?: unknown }
+            const text = typeof d === 'string' ? d : typeof rec?.yaml === 'string' ? rec.yaml : ''
+            if (!cancelled) setDsValues(parseYamlObject(text))
+          } else {
+            if (!cancelled) setDsValues(
+              d && typeof d === 'object' && !Array.isArray(d)
+                ? (d as Record<string, unknown>)
+                : {},
+            )
+          }
+        }),
+      )
+    }
+    Promise.all(jobs)
+      .then(() => {
+        if (!cancelled) setDsReady(true)
+      })
+      .catch((err: unknown) => {
+        if (cancelled) return
+        setDsError(err instanceof Error ? err.message : '数据源加载失败')
+        setDsReady(true)
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [fieldsUri, dataUri, dataFormat])
+
+  const fields = extractFields(dsFields ?? props.fields)
   const controlledValue = (props.value ?? props.initialValues) as
     | Record<string, unknown>
     | undefined
+  const effectiveInitial = dsValues ?? controlledValue
   const [status, setStatus] = useState<SubmitStatus>('idle')
   const [statusText, setStatusText] = useState('')
-  const pipelineId = useActivePipelineId()
 
   const handleSubmit = async (values: Record<string, unknown>) => {
+    // datasource 写回：dataUri PUT/POST（yaml 序列化为 {yaml} 体）
+    if (dataUri) {
+      setStatus('submitting')
+      setStatusText('保存中…')
+      try {
+        const body =
+          dataFormat === 'yaml'
+            ? { yaml: serializeYaml(values) }
+            : { ...values, ...(extraBody ?? {}) }
+        await apiClient({ method: submitMethod, url: dataUri, data: body })
+        setStatus('success')
+        setStatusText('已保存')
+        onSaved?.()
+      } catch (err) {
+        setStatus('error')
+        setStatusText(err instanceof Error ? err.message : '保存失败')
+      }
+      return
+    }
     if (endpoint) {
       setStatus('submitting')
       setStatusText('提交中…（高风险操作可能弹出审批窗等待确认）')
@@ -104,7 +205,7 @@ export function FormWidget(props: Record<string, unknown>) {
         const resp = await fetch(endpoint, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ pipeline_id: pipelineId, ...values }),
+          body: JSON.stringify({ pipeline_id: pipelineId, ...(extraBody ?? {}), ...values }),
         })
         const data = (await resp.json()) as { switched?: boolean; unchanged?: boolean; reason?: string; error?: string }
         if (data.switched) {
@@ -124,13 +225,75 @@ export function FormWidget(props: Record<string, unknown>) {
       return
     }
     if (onSubmit) {
-      await onSubmit(values)
+      try {
+        await onSubmit(values)
+        setStatus('success')
+        setStatusText('已提交')
+        onSaved?.()
+      } catch (err) {
+        setStatus('error')
+        setStatusText(err instanceof Error ? err.message : String(err))
+        toast.error('提交失败', {
+          description: err instanceof Error ? err.message : String(err),
+        })
+      }
     }
   }
 
-  // 紧凑下拉形态：单 select 字段（endpoint 直连或受控 onChange 二者其一）
+  // 紧凑下拉形态：单 select 字段（endpoint 直连或受控 onChange 二者其一）。
+  // datasource/modal 模式不适用紧凑形态。
   const compactField = fields.length === 1 && fields[0].type === 'select' ? fields[0] : undefined
-  const compact = Boolean(compactField && (endpoint || onChange))
+  const compact = Boolean(
+    compactField && (endpoint || onChange) && !fieldsUri && !dataUri && !props.modal,
+  )
+
+  const formBody = (
+    <div>
+      {dsError && (
+        <p className="text-status-error mb-2 text-xs" role="alert">
+          {dsError}
+        </p>
+      )}
+      {!dsReady ? (
+        <p className="text-muted-foreground py-4 text-center text-sm">加载表单数据…</p>
+      ) : (
+        <>
+          {/* key=dataUri 就绪态：异步初值到达后重挂载，使 RjsfForm 捕获 initialValues */}
+          <RjsfForm
+            key={String(dsReady)}
+            fields={fields}
+            layout={layout}
+            title={props.title as string | undefined}
+            submitLabel={(props.submitLabel as string) ?? '提交'}
+            initialValues={effectiveInitial}
+            onSubmit={handleSubmit}
+            disabled={props.disabled as boolean | undefined}
+          />
+        </>
+      )}
+      {status !== 'idle' && (
+        <p className={cn('mt-1 text-xs', statusClass(status))} data-testid="form-widget-status">
+          {statusText}
+        </p>
+      )}
+    </div>
+  )
+
+  // ── modal 壳模式（widget 化 T12）：受控 open/onClose 或 trigger 按钮 ──
+  const modalCfg = props.modal as { trigger?: string; title?: string } | undefined
+  if (modalCfg) {
+    return (
+      <ModalShell
+        trigger={modalCfg.trigger}
+        title={modalCfg.title}
+        open={props.open as boolean | undefined}
+        onClose={props.onClose as (() => void) | undefined}
+        closeOnSuccess={status === 'success'}
+      >
+        {formBody}
+      </ModalShell>
+    )
+  }
 
   if (compact && compactField) {
     return (
@@ -141,7 +304,7 @@ export function FormWidget(props: Record<string, unknown>) {
         onSelect={handleSubmit}
         onPick={onChange}
         currentValue={
-          controlledValue ? (controlledValue[compactField.name] as string | undefined) : undefined
+          effectiveInitial ? (effectiveInitial[compactField.name] as string | undefined) : undefined
         }
         disabled={props.disabled as boolean | undefined}
         status={status}
@@ -150,23 +313,65 @@ export function FormWidget(props: Record<string, unknown>) {
     )
   }
 
+  return formBody
+}
+
+/** modal 壳：受控 open/onClose（缺省 trigger 按钮自开关），成功态自动关闭 */
+function ModalShell({
+  trigger,
+  title,
+  open: controlledOpen,
+  onClose,
+  closeOnSuccess,
+  children,
+}: {
+  trigger?: string
+  title?: string
+  open?: boolean
+  onClose?: () => void
+  closeOnSuccess?: boolean
+  children: React.ReactNode
+}) {
+  const [selfOpen, setSelfOpen] = useState(false)
+  const isControlled = controlledOpen !== undefined
+  const open = isControlled ? controlledOpen : selfOpen
+
+  useEffect(() => {
+    if (closeOnSuccess && open) {
+      setSelfOpen(false)
+      onClose?.()
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [closeOnSuccess])
+
   return (
-    <div>
-      <RjsfForm
-        fields={fields}
-        layout={layout}
-        title={props.title as string | undefined}
-        submitLabel={(props.submitLabel as string) ?? '提交'}
-        initialValues={controlledValue}
-        onSubmit={handleSubmit}
-        disabled={props.disabled as boolean | undefined}
-      />
-      {status !== 'idle' && (
-        <p className={cn('mt-1 text-xs', statusClass(status))} data-testid="form-widget-status">
-          {statusText}
-        </p>
+    <>
+      {trigger && !isControlled && (
+        <button
+          type="button"
+          onClick={() => setSelfOpen(true)}
+          className="bg-primary text-primary-foreground rounded-md px-3 py-1.5 text-sm"
+        >
+          {trigger}
+        </button>
       )}
-    </div>
+      <Dialog
+        open={open}
+        onOpenChange={(o) => {
+          if (!o) {
+            setSelfOpen(false)
+            onClose?.()
+          }
+        }}
+      >
+        <DialogContent className="max-w-2xl">
+          <DialogHeader>
+            <DialogTitle>{title ?? '填写表单'}</DialogTitle>
+          </DialogHeader>
+          <div className="max-h-[65vh] overflow-y-auto p-6 pt-2">{children}</div>
+        </DialogContent>
+      </Dialog>
+    </>
   )
 }
 

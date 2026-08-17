@@ -25,7 +25,7 @@ import React, { useState, useCallback, useMemo, useEffect, useRef } from 'react'
 import apiClient from '@/services/api/client'
 import { pauseTask, resumeTask } from '@/services/api/tasks'
 import { Button } from '@/components/ui/button'
-import { CreateTaskModal } from './CreateTaskModal'
+import { CreateTaskFormModal } from './CreateTaskFormModal'
 import { parseDataSourceRef, resolveDataSource } from '@/services/schema/parser'
 import { useLayoutModeStore } from '@/stores/layoutModeStore'
 import { useWorkspaceStore } from '@/stores/workspaceStore'
@@ -989,10 +989,10 @@ export function FileTreeWidget(rawProps: Record<string, unknown>) {
       )}
 
       {/* 新建根任务模态框 */}
-      <CreateTaskModal
+      <CreateTaskFormModal
         isOpen={isCreateTaskOpen}
         onClose={() => setIsCreateTaskOpen(false)}
-        sessionId={sessionId}
+        sessionId={sessionId ?? ''}
         onCreated={triggerRefresh}
       />
     </div>
