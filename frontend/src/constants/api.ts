@@ -124,12 +124,6 @@ export const API_ENDPOINTS = {
     LLM_MODELS: '/ext/channel_api/config/llm/models',
     /** 获取默认配置 */
     LLM_DEFAULTS: '/ext/channel_api/config/llm/defaults',
-    /** 获取上下文窗口配置 */
-    CONTEXT_WINDOW_GET: '/ext/channel_api/config/context-window',
-    /** 更新上下文窗口配置 */
-    CONTEXT_WINDOW_UPDATE: '/ext/channel_api/config/context-window',
-    /** 重置上下文窗口配置 */
-    CONTEXT_WINDOW_RESET: '/ext/channel_api/config/context-window/reset',
     /** 获取并发配置 */
     CONCURRENCY_GET: '/ext/channel_api/config/concurrency',
     /** 更新并发配置 */

@@ -72,15 +72,13 @@ const WIDGETS: WidgetEntry[] = [
   { name: 'chart', component: ChartWidget, spaces: ['chat', 'workspace', 'floating'] },
   { name: 'gallery', component: GalleryWidget, spaces: ['chat', 'workspace', 'floating'] },
   { name: 'table', component: TableWidget, spaces: ['chat', 'workspace'], fallback: 'status_card' },
-  // 卡片三形态统一组件（variant/props 推断：metric/progress/task）
+  // 卡片三形态统一组件（variant/props 推断：metric/progress/task；progress/task_card
+  // 注册名别名已清理——零消费，声明确要旧名时用 status_card + variant 参数）
   { name: 'status_card', component: StatusCardWidget, spaces: ['chat', 'workspace', 'floating'] },
-  { name: 'progress', component: StatusCardWidget, spaces: ['chat', 'workspace'], fallback: 'status_card' },
-  { name: 'task_card', component: StatusCardWidget, spaces: ['chat', 'workspace', 'floating'], fallback: 'status_card' },
   { name: 'code_block', component: CodeBlockWidget, spaces: ['chat', 'workspace'] },
   // 决策选择 = 单字段表单（radio/checkbox，字段模式点选即回调）
   { name: 'decision', component: DecisionFormAdapter, spaces: ['chat'], fallback: 'form' },
   { name: 'file_tree', component: FileTreeWidget, spaces: ['chat', 'workspace'], fallback: 'table' },
-  { name: 'tree', component: FileTreeWidget, spaces: ['chat', 'workspace'], fallback: 'table' },
   { name: 'html_preview', component: HtmlPreviewWidget, spaces: ['workspace', 'floating', 'fullscreen'], fallback: 'code_block' },
   { name: 'review_document', component: ReviewDocumentWidget, spaces: ['workspace', 'fullscreen'], fallback: 'table' },
   { name: 'artifact_preview', component: ArtifactPreviewWidget, spaces: ['chat', 'workspace', 'floating'], fallback: 'code_block' },
@@ -105,7 +103,7 @@ const WIDGETS: WidgetEntry[] = [
   // 面板内部切换 6 个调试页面——数据库管理/执行记录/会话/任务/用户/评估指标，
   // 页面数据经各数据源插件 HTTP 面获取：/ext/db_admin|channel_api|monitoring|evaluation_service/*）
   { name: 'debug_center_hub', component: DebugCenterHubWidget, spaces: ['workspace'] },
-  // 任务/管道管理（独立工作区标签，按需打开；workspace_explorer 为旧注册名兼容）
+  // 任务/管道管理（独立工作区标签，按需打开；workspace_explorer 旧注册名已清理）
   { name: 'pipeline_manager', component: PipelineManagerPanel, spaces: ['workspace'] },
   // Webview：VS Code 风格插件自由 UI 沙箱（ADR §3.4'），fallback 到 html_preview。
   // 注：webcomponent（WebComponentCardHost，eval 注入）已于 0.2 废弃并删除代码，

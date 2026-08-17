@@ -490,17 +490,11 @@ export class ContributionRegistry {
     return [...(this.pagesByPlugin.get(pluginId) ?? [])]
   }
 
-  // ── 旧贡献点查询（pages 之上的薄视图，渲染侧迁移前的兼容层）──
+  // ── 旧贡献点查询（仅保留仍有生产消费的薄视图；getViewsContainers/
+  // getStatusBarItems/getDockItems 零消费，已清理——统一走 getPagesBySpace）──
 
   /**
-   * 获取导航项（归一化前为 viewsContainers）
-   */
-  getViewsContainers(): PageDeclaration[] {
-    return this.pages.filter((p) => p.legacyFrom === 'viewsContainers')
-  }
-
-  /**
-   * 获取侧边栏视图（归一化前为 views）
+   * 获取侧边栏视图（归一化前为 views；Sidebar 容器视图消费）
    */
   getViews(containerId?: string): PageDeclaration[] {
     const views = this.pages.filter((p) => p.legacyFrom === 'views')
@@ -522,20 +516,6 @@ export class ContributionRegistry {
    */
   getSettingsPanel(pluginId: string): SettingsPanelEntry | undefined {
     return this.settingsPanels.get(pluginId)
-  }
-
-  /**
-   * 获取状态栏条目（归一化前为 statusBarItems）
-   */
-  getStatusBarItems(): PageDeclaration[] {
-    return this.pages.filter((p) => p.legacyFrom === 'statusBarItems')
-  }
-
-  /**
-   * 获取 dock 栏条目（归一化前为 dockItems）
-   */
-  getDockItems(): PageDeclaration[] {
-    return this.pages.filter((p) => p.legacyFrom === 'dockItems')
   }
 
   // ── Widget 声明（来自 agents/pipelines 的 ui_schema）──

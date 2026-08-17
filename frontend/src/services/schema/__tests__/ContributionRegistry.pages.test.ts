@@ -8,7 +8,8 @@
  *   workspaceTabs/chatMessages/chatInteractions/chatActions/menus/commands/
  *   shortcuts/modal/settingsPanels/widgets)在注册时直接归一化为
  *   PageDeclaration(带 legacyFrom 来源标记),无第二套存储
- * - 旧查询方法(getViewsContainers/getStatusBarItems/getMenus/...)是 pages 之上的薄视图,仍可用
+ * - 旧查询方法(getViews/getMenus/...)是 pages 之上的薄视图；零消费的
+ *   getViewsContainers/getStatusBarItems/getDockItems 已清理（统一走 getPagesBySpace）
  */
 
 import { describe, it, expect, beforeEach } from 'vitest'
@@ -324,7 +325,7 @@ describe('ContributionRegistry — 旧贡献点直接归一化为 pages', () => 
     })
   })
 
-  it('旧查询方法是 pages 之上的薄视图(getViewsContainers/getStatusBarItems/getMenus/getCommands/getShortcuts/getModals 仍工作)', () => {
+  it('薄视图(getViews/getMenus/getCommands/getShortcuts/getModals)是 pages 之上的查询(getViewsContainers/getStatusBarItems 已清理)', () => {
     registry.loadFromSchema(
       makeSchema({
         plugin_configs: [
@@ -347,9 +348,9 @@ describe('ContributionRegistry — 旧贡献点直接归一化为 pages', () => 
       }),
     )
 
-    expect(registry.getViewsContainers()).toHaveLength(1)
-    expect(registry.getViewsContainers()[0].id).toBe('activity')
-    expect(registry.getStatusBarItems()).toHaveLength(1)
+    // viewsContainers/statusBarItems 薄视图已清理——经统一 API（getPagesBySpace）查询
+    expect(registry.getPagesBySpace('workspace').filter((p) => p.legacyFrom === 'viewsContainers')[0].id).toBe('activity')
+    expect(registry.getPagesBySpace('dock').filter((p) => p.legacyFrom === 'statusBarItems')).toHaveLength(1)
     expect(registry.getMenus('workspace/context')).toHaveLength(1)
     expect(registry.getCommands()[0].id).toBe('cmd1')
     expect(registry.getShortcuts()[0].key).toBe('Ctrl+K')

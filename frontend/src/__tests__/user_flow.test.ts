@@ -41,16 +41,17 @@ describe('场景1: ContributionRegistry 从 plugin_contributes 注册贡献点',
       ],
     } as never)
 
-    expect(registry.getStatusBarItems()).toHaveLength(1)
-    expect(registry.getStatusBarItems()[0].id).toBe('demo_status')
-    expect(registry.getViewsContainers()).toHaveLength(1)
-    expect(registry.getViewsContainers()[0].id).toBe('demo')
+    const statusItems = registry.getPages().filter((p) => p.legacyFrom === 'statusBarItems')
+    expect(statusItems).toHaveLength(1)
+    expect(statusItems[0].id).toBe('demo_status')
+    expect(registry.getPages().filter((p) => p.legacyFrom === 'viewsContainers')).toHaveLength(1)
+    expect(registry.getPages().filter((p) => p.legacyFrom === 'viewsContainers')[0].id).toBe('demo')
   })
 
   it('无 plugin_contributes 时不崩溃，返回空', () => {
     registry.loadFromSchema({} as never)
-    expect(registry.getStatusBarItems()).toHaveLength(0)
-    expect(registry.getViewsContainers()).toHaveLength(0)
+    expect(registry.getPages().filter((p) => p.legacyFrom === 'statusBarItems')).toHaveLength(0)
+    expect(registry.getPages().filter((p) => p.legacyFrom === 'viewsContainers')).toHaveLength(0)
   })
 
   it('多个插件的 contributes 都注册', () => {
@@ -60,7 +61,7 @@ describe('场景1: ContributionRegistry 从 plugin_contributes 注册贡献点',
         { plugin_id: 'p2', contributes: { statusBarItems: [{ id: 's2' }] } },
       ],
     } as never)
-    const items = registry.getStatusBarItems()
+    const items = registry.getPages().filter((p) => p.legacyFrom === 'statusBarItems')
     expect(items).toHaveLength(2)
     expect(items.map((i) => i.id).sort()).toEqual(['s1', 's2'])
   })

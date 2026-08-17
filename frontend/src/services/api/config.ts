@@ -132,52 +132,6 @@ export interface LLMConfigResponse {
   defaults: LLMDefaults
 }
 
-/**
- * 压缩配置子项
- */
-export interface CompressionConfig {
-  /** 是否启用压缩 */
-  enabled: boolean
-  /** 压缩使用的模型（空则跟随主模型） */
-  model: string
-  /** 单层压缩触发比例 */
-  layer_trigger_ratio: number
-  /** 单轮次最大压缩比例 */
-  max_turn_ratio: number
-}
-
-/**
- * 上下文窗口配置类型
- *
- * 与后端 config/system/context_window_config.yaml 一一对应
- */
-export interface ContextWindowConfig {
-  /** 配置版本 */
-  version: string
-  /** 压缩触发比例（占用达到此比例时触发压缩） */
-  compress_trigger_ratio: number
-  /** 各层 Token 预算分配（百分比，总和 = 1.0） */
-  budgets: Record<string, number>
-  /** 是否在 prompt 中包含工具描述 */
-  include_tools_description_in_prompt: boolean
-  /** 各层稳定性标记 */
-  stability: Record<string, string>
-  /** 层级顺序 */
-  layer_order: string[]
-  /** 静态变量配置 */
-  static_vars: { enabled: boolean; sources: string[] }
-  /** 动态变量配置 */
-  dynamic_vars: {
-    enabled: boolean
-    vars: string[]
-    rules: { enabled: boolean; hard_constraints: string[]; max_rules: number }
-  }
-  /** 压缩设置 */
-  compression: CompressionConfig
-  /** 自定义层 */
-  custom_layers: Record<string, unknown>
-}
-
 export async function getLLMConfig(options: RetryOptions = {}): Promise<LLMConfigResponse> {
   return requestWithRetry(async () => {
     const response = await apiClient.get<LLMConfigResponse>(API_ENDPOINTS.CONFIG.LLM_GET)
@@ -246,41 +200,6 @@ export async function getModels(
 export async function getDefaults(options: RetryOptions = {}): Promise<LLMDefaults> {
   return requestWithRetry(async () => {
     const response = await apiClient.get<LLMDefaults>(API_ENDPOINTS.CONFIG.LLM_DEFAULTS)
-    return response.data
-  }, options)
-}
-
-export async function getContextWindowConfig(
-  options: RetryOptions = {},
-): Promise<ContextWindowConfig> {
-  return requestWithRetry(async () => {
-    const response = await apiClient.get<ContextWindowConfig>(
-      API_ENDPOINTS.CONFIG.CONTEXT_WINDOW_GET,
-    )
-    return response.data
-  }, options)
-}
-
-export async function updateContextWindowConfig(
-  data: Partial<ContextWindowConfig>,
-  options: RetryOptions = {},
-): Promise<ContextWindowConfig> {
-  return requestWithRetry(async () => {
-    const response = await apiClient.put<ContextWindowConfig>(
-      API_ENDPOINTS.CONFIG.CONTEXT_WINDOW_UPDATE,
-      data,
-    )
-    return response.data
-  }, options)
-}
-
-export async function resetContextWindowConfig(
-  options: RetryOptions = {},
-): Promise<ContextWindowConfig> {
-  return requestWithRetry(async () => {
-    const response = await apiClient.post<ContextWindowConfig>(
-      API_ENDPOINTS.CONFIG.CONTEXT_WINDOW_RESET,
-    )
     return response.data
   }, options)
 }

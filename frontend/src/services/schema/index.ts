@@ -10,7 +10,6 @@
 // ===== Schema 注册表（已有）=====
 export { parseSchema, parseDataSourceRef, resolveDataSource, validateSchema } from './parser'
 export type { ParsedSchema } from './parser'
-export type { LayoutNode, ComponentRenderer } from './composer'
 
 // ===== Schema 解析器（新增）=====
 export { SchemaParser, schemaParser } from './SchemaParser'

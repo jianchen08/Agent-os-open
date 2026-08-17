@@ -92,7 +92,7 @@ describe('task_11 P4/P5 验收：插件声明 contributes 后前端自动出现�
 
   describe('P4-d 自动入口（不改前端代码）', () => {
     it('contributes.viewsContainers 自动出现导航入口', () => {
-      const containers = registry.getViewsContainers()
+      const containers = registry.getPages().filter((p) => p.legacyFrom === 'viewsContainers')
       expect(containers).toHaveLength(1)
       expect(containers[0].id).toBe('demo')
       expect(containers[0].title).toBe('演示')
