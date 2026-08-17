@@ -256,7 +256,10 @@ class WorkspaceLifecyclePlugin(IInputPlugin):
                 _ensure_isolation_path()
                 from isolation.workspace import get_workspace_config_root  # noqa: PLC0415
 
-                source_path = f"{get_workspace_config_root()}/{task_id}"
+                # 默认工作空间根（如 .ai_workspaces）必须基于项目根拼绝对路径——
+                # sidecar cwd 是插件目录，相对路径会把空间建错位置。
+                _root = Path(__file__).resolve().parents[5]
+                source_path = str(_root / get_workspace_config_root() / task_id)
                 logger.info(
                     "[WorkspaceLifecycle] 无显式 workspace，按默认根创建 | task=%s | path=%s",
                     task_id,
