@@ -523,6 +523,19 @@ async def create_root_task(
     # GAP-1 统一（state 单一真值）：任务即管道——直接经 chat.send_message 创建
     # 执行管道（引擎生成 pipeline_id = task_id），父链由 lineage 表达
     # （parent_pipeline_id = active_pipeline_id），YAML 无写路径。
+    # execution_context：组装工作区拓扑/隔离声明（对齐 task_submit._build_execution_context），
+    # workspace_lifecycle 插件据此在 init 阶段创建 worktree/plain 空间。
+    _ws_mode = body.workspace or "worktree"
+    if _ws_mode not in ("worktree", "plain"):
+        _ws_mode = "worktree"
+    execution_context = {
+        "isolation": {"level": body.isolation_level or "non_isolated"},
+        "workspace": {
+            "mode": _ws_mode,
+            "source_path": "",
+            "explicit": bool(body.workspace),
+        },
+    }
     task_id = await _submit_task_event(
         title=body.title,
         description=body.description or "",
@@ -531,6 +544,7 @@ async def create_root_task(
         parent_pipeline_id=active_pipeline_id or "",
         user_id=_current_user(_user).get("sub", ""),
         scope=body.task_scope,
+        execution_context=execution_context,
     )
     if not task_id:
         raise APIError(
