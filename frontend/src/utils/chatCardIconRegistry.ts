@@ -9,11 +9,11 @@
  */
 
 import {
+  Activity,
   Brain,
   Copy,
   FileEdit,
   FileText,
-  Gauge,
   Globe,
   Link,
   ShieldCheck,
@@ -51,7 +51,8 @@ const ICON_MAP: Record<string, LucideIcon> = {
   // 控件类（FormWidget compact 等槽位控件复用本表解析声明 icon 字符串）
   brain: Brain,
   thinking: Brain,
-  gauge: Gauge,
+  // gauge 图标未收录于图标库（icons/index.ts 无 gauge），以 activity 波形代指强度档位
+  gauge: Activity,
   shield: ShieldCheck,
   permission: ShieldCheck,
 }
