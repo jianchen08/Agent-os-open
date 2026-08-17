@@ -13,6 +13,14 @@ export default defineConfig({
   plugins: [react()],
   resolve: {
     alias: {
+      // pnpm 布局修复：@rjsf/core 的 lib barrel（index.js → getTestRegistry.js）
+      // 引用其 devDep @rjsf/validator-ajv8，.pnpm 物理路径下解析不到——alias
+      // 兜底指向 frontend 本地健康副本（仓库根 node_modules 的同名链接是历史
+      // 安装污染残留，POSIX 风格目标在 Windows 上悬空）。
+      '@rjsf/validator-ajv8': path.resolve(
+        __dirname,
+        './node_modules/@rjsf/validator-ajv8',
+      ),
       '@': path.resolve(__dirname, './src'),
       '@/components': path.resolve(__dirname, './src/components'),
       '@/pages': path.resolve(__dirname, './src/pages'),
@@ -40,6 +48,14 @@ export default defineConfig({
     hookTimeout: 10000,
     // 不监听，单次运行
     watch: false,
+    // pnpm 布局修复：@rjsf/* 外化后由 Node 原生解析，@rjsf/core 的 lib barrel
+    // （index.js → getTestRegistry.js）引用其 devDep @rjsf/validator-ajv8，
+    // 从 .pnpm 物理路径解析不到——inline 进 Vite 管线让上方 alias 兜底生效。
+    server: {
+      deps: {
+        inline: [/\/@rjsf\//],
+      },
+    },
     // 关闭 CSS 处理
     css: false,
     // 覆盖率（阶段 2.2）：include 从 4 个文件放开到全量 src，产出真实全量基线。

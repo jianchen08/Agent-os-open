@@ -183,7 +183,8 @@ describe('DecisionFormAdapter — decision 注册名 = 单字段表单（原 Dec
         onDecision={onDecision}
       />,
     )
-    expect(screen.getByText('部署方案')).toBeInTheDocument()
+    // 标题与 radio 字段 label 同文本——限定标题层级避免 getByText 多命中
+    expect(screen.getByRole('heading', { name: '部署方案' })).toBeInTheDocument()
     // 无提交按钮（字段模式）
     expect(screen.queryByRole('button', { name: /提交/ })).not.toBeInTheDocument()
     // 点选 radio → onDecision 立即收到选项 id
