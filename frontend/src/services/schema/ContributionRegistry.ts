@@ -212,6 +212,20 @@ export interface ClientStyleDeclaration {
 const NON_PAGE_CONTRIBUTE_KEYS: ReadonlySet<string> = new Set(['themes', 'client_styles'])
 
 /**
+ * 已弃用的旧贡献 key（ADR 2026-08-17 widget-migration-t8-t13-t14）：
+ * 声明这些 key 的插件数据被忽略（不进 pages 归一化）。
+ * - workspaceTabs：薄视图零调用方，工作区标签统一走 contributes.pages
+ * - chatMessages/chatInteractions/chatActions：chat/inline 槽无渲染方，
+ *   消息级内联卡片场景已被工具卡协议（ui.chat_card / render）覆盖
+ */
+const DEPRECATED_CONTRIBUTE_KEYS: ReadonlySet<string> = new Set([
+  'workspaceTabs',
+  'chatMessages',
+  'chatInteractions',
+  'chatActions',
+])
+
+/**
  * 旧贡献点 key → 归一化 space/slot 映射（统一架构 4.4 节）
  *
  * 交互类（menus/commands/shortcuts/modal）在 actions 模型落地前暂归一化为
@@ -220,7 +234,6 @@ const NON_PAGE_CONTRIBUTE_KEYS: ReadonlySet<string> = new Set(['themes', 'client
 const LEGACY_PAGE_MAP: Record<string, { space: PageSpace; slot: PageSlot }> = {
   viewsContainers: { space: 'workspace', slot: 'activity-bar' },
   views: { space: 'workspace', slot: 'tab' },
-  workspaceTabs: { space: 'workspace', slot: 'tab' },
   dockItems: { space: 'dock', slot: 'item' },
   statusBarItems: { space: 'dock', slot: 'status' },
   floating: { space: 'floating', slot: 'panel' },
@@ -228,11 +241,14 @@ const LEGACY_PAGE_MAP: Record<string, { space: PageSpace; slot: PageSlot }> = {
   menus: { space: 'chat', slot: 'inline' },
   commands: { space: 'chat', slot: 'input-action' },
   shortcuts: { space: 'chat', slot: 'input-action' },
-  chatMessages: { space: 'chat', slot: 'inline' },
-  chatInteractions: { space: 'chat', slot: 'inline' },
-  chatActions: { space: 'chat', slot: 'inline' },
   settingsPanels: { space: 'settings', slot: 'nav' },
   widgets: { space: 'workspace', slot: 'tab' },
+  // [弃用 2026-08-17，ADR widget-migration-t8-t13-t14] workspaceTabs /
+  // chatMessages / chatInteractions / chatActions 四个旧贡献 key 归一化已移除：
+  // - workspaceTabs 薄视图（getWorkspaceTabs）零调用方——工作区标签统一走
+  //   contributes.pages + openWorkspacePanelByPath（插件声明 path 直达）
+  // - chat/inline 槽自始无渲染方——消息级内联卡片场景已被工具卡协议
+  //   （ui.chat_card / render）覆盖，声明这些 key 的插件数据不再进 pages
 }
 
 /** PageDeclaration 显式字段（归一化时其余字段原样透传） */
@@ -391,6 +407,7 @@ export class ContributionRegistry {
       // 由各自旁路注册表承接（themeStore / pluginStyles 消费）。
       for (const [type, items] of Object.entries(contributes)) {
         if (!Array.isArray(items)) continue
+        if (DEPRECATED_CONTRIBUTE_KEYS.has(type)) continue
         if (NON_PAGE_CONTRIBUTE_KEYS.has(type)) {
           if (type === 'themes') {
             this.registerPluginThemes(pluginId, items as Record<string, unknown>[])
@@ -491,13 +508,6 @@ export class ContributionRegistry {
       return views.filter((v) => v.containerId === containerId)
     }
     return views
-  }
-
-  /**
-   * 获取工作区标签页（归一化前为 workspaceTabs）
-   */
-  getWorkspaceTabs(): PageDeclaration[] {
-    return this.pages.filter((p) => p.legacyFrom === 'workspaceTabs')
   }
 
   /**

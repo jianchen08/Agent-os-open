@@ -249,10 +249,11 @@ describe('ContributionRegistry — 旧贡献点直接归一化为 pages', () => 
     expect(dock.find((p) => p.id === 'sb1')).toMatchObject({ space: 'dock', slot: 'status', legacyFrom: 'statusBarItems' })
     expect(dock.find((p) => p.id === 'dock1')).toMatchObject({ space: 'dock', slot: 'item', legacyFrom: 'dockItems' })
     expect(registry.getPage('flt1')).toMatchObject({ space: 'floating', slot: 'panel', legacyFrom: 'floating' })
-    expect(registry.getPage('tab1')).toMatchObject({ space: 'workspace', slot: 'tab', legacyFrom: 'workspaceTabs' })
+    // workspaceTabs 已弃用（ADR widget-migration-t8-t13-t14）：不再归一化
+    expect(registry.getPage('tab1')).toBeUndefined()
   })
 
-  it('chat 系列 → chat/inline;menus/commands/shortcuts/modal 归一化且旧字段透传', () => {
+  it('chat 系列已弃用；menus/commands/shortcuts/modal 归一化且旧字段透传', () => {
     registry.loadFromSchema(
       makeSchema({
         plugin_contributes: [
@@ -272,11 +273,11 @@ describe('ContributionRegistry — 旧贡献点直接归一化为 pages', () => 
     )
 
     const chat = registry.getPagesBySpace('chat')
-    // chat 系列 → chat/inline
-    expect(chat.filter((p) => p.legacyFrom === 'chatActions' || p.legacyFrom === 'chatMessages').map((p) => p.legacyFrom).sort()).toEqual(['chatActions', 'chatMessages'])
-    expect(chat.filter((p) => p.legacyFrom?.startsWith('chat')).every((p) => p.slot === 'inline')).toBe(true)
-    // 交互类(menus/commands/shortcuts)也归一化,legacyFrom 标记真实来源
-    expect(chat.map((p) => p.legacyFrom).sort()).toEqual(['chatActions', 'chatMessages', 'commands', 'menus', 'shortcuts'])
+    // chat 系列（chatActions/chatMessages）已弃用（ADR widget-migration-t8-t13-t14）：
+    // chat/inline 槽无渲染方，场景由工具卡协议（ui.chat_card / render）覆盖
+    expect(chat.filter((p) => p.legacyFrom === 'chatActions' || p.legacyFrom === 'chatMessages')).toEqual([])
+    // 交互类(menus/commands/shortcuts)仍归一化,legacyFrom 标记真实来源
+    expect(chat.map((p) => p.legacyFrom).sort()).toEqual(['commands', 'menus', 'shortcuts'])
 
     const menu = registry.getPage('m1')
     expect(menu).toMatchObject({ space: 'chat', slot: 'inline', legacyFrom: 'menus', location: 'workspace/context', command: 'c1', when: 'resource.isFile' })

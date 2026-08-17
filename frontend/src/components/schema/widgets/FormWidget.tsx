@@ -369,6 +369,18 @@ function ModalShell({
             <DialogTitle>{title ?? '填写表单'}</DialogTitle>
           </DialogHeader>
           <div className="max-h-[65vh] overflow-y-auto p-6 pt-2">{children}</div>
+          <div className="flex justify-end gap-2 px-6 pb-4">
+            <button
+              type="button"
+              onClick={() => {
+                setSelfOpen(false)
+                onClose?.()
+              }}
+              className="border-border text-muted-foreground hover:bg-muted/70 rounded-md border px-3 py-1.5 text-sm"
+            >
+              取消
+            </button>
+          </div>
         </DialogContent>
       </Dialog>
     </>

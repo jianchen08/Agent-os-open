@@ -104,10 +104,10 @@ describe('task_11 P4/P5 验收：插件声明 contributes 后前端自动出现�
       expect(views[0].id).toBe('demo.list')
     })
 
-    it('contributes.workspaceTabs 自动出现工作区 tab', () => {
-      const tabs = registry.getWorkspaceTabs()
-      expect(tabs).toHaveLength(1)
-      expect(tabs[0].id).toBe('demo.tab')
+    it('contributes.workspaceTabs 已弃用（ADR widget-migration-t8-t13-t14）：不再归一化为页面', () => {
+      // 弃用前该 key 归一化为 workspace/tab 页；现统一走 contributes.pages
+      const pages = registry.getPages().filter((p) => p.legacyFrom === 'workspaceTabs')
+      expect(pages).toHaveLength(0)
     })
   })
 

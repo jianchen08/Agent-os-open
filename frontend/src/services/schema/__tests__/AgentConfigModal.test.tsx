@@ -12,18 +12,16 @@ import React from 'react'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import type { UIInputFormField } from '@/types/schema'
 
-// ── Mock API 模块 ──
-vi.mock('@/services/api/agents', () => ({
-  getAgentSchema: vi.fn(),
-  getAgentConfig: vi.fn(),
-  putAgentConfig: vi.fn(),
-}))
-
+// ── Mock API 模块（widget 化 T12：AgentConfigModal 走 FormWidget datasource，
+//    apiClient.get 拉 schema/config，apiClient(...) 调用 PUT 写回）──
+const apiGet = vi.fn()
+const apiCall = vi.fn()
 vi.mock('@/services/api/client', () => ({
-  default: { get: vi.fn() },
+  default: Object.assign(
+    (...args: unknown[]) => apiCall(...args),
+    { get: (...args: unknown[]) => apiGet(...args) },
+  ),
 }))
-
-import { getAgentConfig, getAgentSchema, putAgentConfig } from '@/services/api/agents'
 
 import { AgentConfigModal } from '@/components/agent/AgentConfigModal'
 
@@ -84,16 +82,12 @@ const SAMPLE_YAML = [
 describe('AgentConfigModal', () => {
   beforeEach(() => {
     vi.clearAllMocks()
-    vi.mocked(getAgentSchema).mockResolvedValue({ fields: SCHEMA_FIELDS })
-    vi.mocked(getAgentConfig).mockResolvedValue({
-      config_id: 'code_reviewer_agent',
-      yaml: SAMPLE_YAML,
+    apiGet.mockImplementation((url: string) => {
+      if (url.endsWith('/schema')) return Promise.resolve({ data: { fields: SCHEMA_FIELDS } })
+      if (url.includes('/config')) return Promise.resolve({ data: { yaml: SAMPLE_YAML } })
+      return Promise.reject(new Error(`unexpected: ${url}`))
     })
-    vi.mocked(putAgentConfig).mockResolvedValue({
-      config_id: 'code_reviewer_agent',
-      success: true,
-      backup: 'code_reviewer_agent.yaml.bak',
-    })
+    apiCall.mockResolvedValue({ data: { success: true } })
   })
 
   it('AC-1: 打开后加载 schema 字段并以 yaml 值预填表单', async () => {
@@ -106,8 +100,8 @@ describe('AgentConfigModal', () => {
     )
 
     await waitFor(() => {
-      expect(getAgentSchema).toHaveBeenCalledTimes(1)
-      expect(getAgentConfig).toHaveBeenCalledWith('code_reviewer_agent')
+      expect(apiGet).toHaveBeenCalledWith('/api/v1/agents/schema')
+      expect(apiGet).toHaveBeenCalledWith('/api/v1/agents/code_reviewer_agent/config')
     })
 
     // 字段渲染（抽样）
@@ -134,12 +128,13 @@ describe('AgentConfigModal', () => {
     fireEvent.submit(document.querySelector('form')!)
 
     await waitFor(() => {
-      expect(putAgentConfig).toHaveBeenCalledTimes(1)
+      expect(apiCall).toHaveBeenCalledTimes(1)
     })
-    const [agentId, yaml] = vi.mocked(putAgentConfig).mock.calls[0]
-    expect(agentId).toBe('code_reviewer_agent')
-    expect(yaml).toContain('审查专家 v2')
-    expect(yaml).toContain('config_id: code_reviewer_agent')
+    const cfg = apiCall.mock.calls[0][0] as { method: string; url: string; data: { yaml: string } }
+    expect(cfg.method).toBe('PUT')
+    expect(cfg.url).toBe('/api/v1/agents/code_reviewer_agent/config')
+    expect(cfg.data.yaml).toContain('审查专家 v2')
+    expect(cfg.data.yaml).toContain('config_id: code_reviewer_agent')
     expect(onSaved).toHaveBeenCalledTimes(1)
     expect(onClose).toHaveBeenCalledTimes(1)
   })
@@ -158,6 +153,6 @@ describe('AgentConfigModal', () => {
     fireEvent.click(screen.getByRole('button', { name: /取消/ }))
 
     expect(onClose).toHaveBeenCalledTimes(1)
-    expect(putAgentConfig).not.toHaveBeenCalled()
+    expect(apiCall).not.toHaveBeenCalled()
   })
 })
