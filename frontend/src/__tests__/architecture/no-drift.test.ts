@@ -24,7 +24,9 @@ const BASELINE = {
 
 // 统一层消费下限（迁移单调递增）
 const CONSUMPTION_MIN = {
-  shared: 54, // M3: 全部页面已接入 shared 组件
+  // M3: 全部页面已接入 shared 组件；54→52 = widget 化 T6/T7 退役
+  // ContextWindowSettingsPage/CostSettingsPage（各含 shared 引用，合法递减）
+  shared: 52,
   uiCard: 0, // M2 接入后转为下限
 }
 
