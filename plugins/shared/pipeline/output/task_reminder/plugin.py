@@ -210,15 +210,32 @@ class TaskReminder(IOutputPlugin):
 
         reminder_count = state.get("evaluate_reminder_count", 0)
         if reminder_count >= self._max_reminders:
-            logger.warning(
-                "TaskReminder[iter=%s][task=%s]: max_reminders reached "
-                "(%d >= %d), sending end signal to prevent infinite loop",
-                iteration,
-                task_id,
-                reminder_count,
-                self._max_reminders,
-            )
+            # 评估闸门的插件裁决（内核只落库不判定）：提醒耗尽仍无评估证据——
+            # 任务终态不落 completed，标 pending_evaluation（task_completed 通知
+            # 上级照发携带该状态，上级可催评估/重派）。有评估证据则不写，
+            # 内核补默认 completed。
+            state_updates = {}
+            if not self._has_successful_task_evaluate(state.get("messages", [])) and not state.get(
+                "evaluation.detected_result"
+            ):
+                state_updates["task.status"] = "pending_evaluation"
+                logger.warning(
+                    "TaskReminder[iter=%s][task=%s]: max_reminders reached without evaluation, "
+                    "task.status -> pending_evaluation",
+                    iteration,
+                    task_id,
+                )
+            else:
+                logger.warning(
+                    "TaskReminder[iter=%s][task=%s]: max_reminders reached "
+                    "(%d >= %d), sending end signal to prevent infinite loop",
+                    iteration,
+                    task_id,
+                    reminder_count,
+                    self._max_reminders,
+                )
             return OutputResult(
+                state_updates=state_updates,
                 route_signal=RouteSignal(
                     route_type="end",
                     reason=f"task_reminder: max_reminders reached ({reminder_count}/{self._max_reminders}), task may be stuck",

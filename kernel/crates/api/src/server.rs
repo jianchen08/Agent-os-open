@@ -918,77 +918,6 @@ async fn emit_run_terminal_domain_events(
 ///    checkpoint 里的出生值 pending——冷恢复也拿到终态）。
 ///
 /// 任务树/评估/门控全部从 state 直读后，YAML 镜像不再被任何写路径触碰。
-/// 评估闸门信号：final_state 是否已有评估痕迹。
-///
-/// 两路信号（任一即视为已评估）：
-/// 1. `evaluation.detected_result`——评估管道模式，task_reminder 检测
-///    evaluation_result JSON 后写入（评估管道输出特定 JSON 的契约）；
-/// 2. messages 中存在成功的 task_evaluate 工具调用——assistant 的
-///    tool_calls 含 name=task_evaluate，且对应 role=tool 结果内容带
-///    success:true（task_evaluate 成功返回 {"success": true, ...}）。
-fn task_evaluated(final_state: &serde_json::Value) -> bool {
-    if final_state
-        .get("evaluation.detected_result")
-        .is_some_and(|v| !v.is_null())
-    {
-        return true;
-    }
-    // 显式标志（测试注入 / 工具链显式写）：覆盖引擎重建 messages 轨迹的
-    // 场景（overlay 的 messages 会被 stage_recover_history 重组）。
-    if final_state
-        .get("task.evaluated")
-        .and_then(|v| v.as_bool())
-        .unwrap_or(false)
-    {
-        return true;
-    }
-    let Some(messages) = final_state.get("messages").and_then(|m| m.as_array()) else {
-        return false;
-    };
-    use std::collections::HashSet;
-    // 第一遍：收集 task_evaluate 调用 id
-    let mut eval_call_ids: HashSet<String> = HashSet::new();
-    for msg in messages {
-        if msg.get("role").and_then(|r| r.as_str()) != Some("assistant") {
-            continue;
-        }
-        if let Some(calls) = msg.get("tool_calls").and_then(|c| c.as_array()) {
-            for c in calls {
-                let is_eval = c
-                    .get("function")
-                    .and_then(|f| f.get("name"))
-                    .and_then(|n| n.as_str())
-                    .is_some_and(|n| n == "task_evaluate");
-                if is_eval {
-                    if let Some(id) = c.get("id").and_then(|i| i.as_str()) {
-                        eval_call_ids.insert(id.to_string());
-                    }
-                }
-            }
-        }
-    }
-    if eval_call_ids.is_empty() {
-        return false;
-    }
-    // 第二遍：对应 tool 结果是否成功
-    for msg in messages {
-        if msg.get("role").and_then(|r| r.as_str()) != Some("tool") {
-            continue;
-        }
-        let Some(id) = msg.get("tool_call_id").and_then(|i| i.as_str()) else {
-            continue;
-        };
-        if !eval_call_ids.contains(id) {
-            continue;
-        }
-        let content = msg.get("content").and_then(|c| c.as_str()).unwrap_or("");
-        if content.contains("\"success\": true") || content.contains("\"success\":true") {
-            return true;
-        }
-    }
-    false
-}
-
 async fn finalize_task_status_in_state(
     state: &AppState,
     final_state: &serde_json::Value,
@@ -1003,32 +932,29 @@ async fn finalize_task_status_in_state(
     if !has_task || effective_pipeline_id.is_empty() {
         return;
     }
-    let status = if failed {
-        "failed"
+    // 任务终态裁决在插件（task_reminder 等按评估契约写 state.task.status，
+    // 如未过评估的 pending_evaluation）；内核只补默认并落库——成功终态下
+    // state 已显式声明 task.status 时尊重插件裁决不覆盖；failed/suspended
+    // 是引擎级事实（执行失败/挂起），无条件覆盖（插件无从裁决）。
+    let status: String = if failed {
+        "failed".to_string()
     } else if final_state
         .get("suspended")
         .and_then(|s| s.as_bool())
         .unwrap_or(false)
     {
-        "suspended"
-    } else if !task_evaluated(final_state) {
-        // 评估闸门（2026-08-17 裁决）：任务完成必须经评估——评估管道输出
-        // evaluation_result JSON（task_reminder 检测写 evaluation.detected_result）
-        // 或执行者成功调用过 task_evaluate 工具。L1 调度层纯沟通汇报除外。
-        // 未评估不落 completed，标 pending_evaluation：task_completed 通知上级
-        // 照发（携带该状态），上级可催评估/重派；run 进行中 task_reminder 已
-        // 持续提醒（max_reminders 兜底防死循环）。
-        let agent_level = final_state
-            .get("agent_level")
-            .and_then(|v| v.as_str())
-            .unwrap_or("");
-        if agent_level == "L1" {
-            "completed"
-        } else {
-            "pending_evaluation"
-        }
+        "suspended".to_string()
+    } else if let Some(plugin_status) = final_state
+        .get("task.status")
+        .and_then(|v| v.as_str())
+        // "pending" 是 task_submit 出生值（非插件裁决）——run 成功结束即视为
+        // 已推进，补默认 completed；插件链改写成其它值（如未过评估的
+        // pending_evaluation）才是裁决，尊重不覆盖。
+        .filter(|v| !v.is_empty() && *v != "pending")
+    {
+        plugin_status.to_string()
     } else {
-        "completed"
+        "completed".to_string()
     };
     use serde_json::json;
 
@@ -3789,9 +3715,6 @@ mod tests {
             "task.goal": "写周报",
             "task.status": "pending",
             "task.agent_level": "L2",
-            // 评估闸门证据（显式标志——overlay 的 messages 会被引擎重组）
-            "task.evaluated": true,
-            "agent_level": "L2",
         });
         let r = agentos_tenant::scope(
             tenant,
@@ -4064,8 +3987,7 @@ mod tests {
         // （/api/v1/pipelines/state 聚合 + checkpoint 冷兜底）无需 YAML。
         let (state, _invoker, store, _sqlite) = make_engine_state();
         let tenant = TenantContext::new("tenant_unify", "thread_unify");
-        let overlay = json!({"task.id": "t_unify", "task.goal": "统一验证", "task.status": "pending",
-            "task.evaluated": true, "agent_level": "L2"});
+        let overlay = json!({"task.id": "t_unify", "task.goal": "统一验证", "task.status": "pending"});
         let r = agentos_tenant::scope(
             tenant,
             process_via_engine(
@@ -4128,6 +4050,46 @@ mod tests {
         assert!(!fields2.contains_key("task.status"), "非任务管道不写任务字段");
     }
 
+    #[tokio::test]
+    async fn test_finalize_respects_plugin_task_status_verdict() {
+        // 评估闸门裁决在插件（task_reminder 写 task.status=pending_evaluation）；
+        // 内核只落库不判定：成功终态下 state 显式声明的任务状态不被覆盖。
+        let (state, _invoker, store, _sqlite) = make_engine_state();
+        let tenant = TenantContext::new("tenant_plugin_verdict", "thread_pv");
+        let overlay = json!({
+            "task.id": "t_pv",
+            "task.goal": "插件裁决",
+            "task.status": "pending_evaluation",
+        });
+        let r = agentos_tenant::scope(
+            tenant,
+            process_via_engine(
+                &state,
+                "执行任务",
+                "agentos",
+                &[],
+                "pipe_pv",
+                "thread_pv",
+                "m1",
+                "u1",
+                "",
+                None,
+                Some(&overlay),
+            ),
+        )
+        .await;
+        assert!(!r.content.is_empty());
+        let reg = agentos_session::global_registry();
+        let entry = reg.get("tenant_plugin_verdict", "pipe_pv").unwrap();
+        let st = entry.read();
+        assert_eq!(
+            st.state["task.status"], json!("pending_evaluation"),
+            "内核应尊重插件裁决的 task.status"
+        );
+        drop(st);
+        let _ = store;
+    }
+
     // ── GAP-1 全流程数据流转：提交 → 管道创建 → run → 终态回写 → 聚合可见 ──
 
     #[tokio::test]
@@ -4154,9 +4116,7 @@ mod tests {
         let mut overlay = overlay;
         if let Some(obj) = overlay.as_object_mut() {
             obj.insert("task.id".to_string(), json!(pipeline_id));
-            // 评估闸门证据（显式标志——overlay 的 messages 会被引擎重组）
-            obj.insert("agent_level".to_string(), json!("L2"));
-            obj.insert("task.evaluated".to_string(), json!(true));
+
         }
 
         // ② 派发 → run 完成
