@@ -243,6 +243,27 @@ class SecurityCheckPlugin(IInputPlugin):
         # （见 _get_dangerous_operations / _parse_dangerous_ops_config）
         self._dangerous_ops_by_tool = self._parse_dangerous_ops_config()
 
+    # P1-7 task_11 债务兜底：ConfigCenter 不可达时内联默认规则（黑名单模式 +
+    # 危险命令关键词），避免"规则空 = 安全闸门失效 = 所有工具都弹审批"——
+    # 2026-08-17 实测 rules 加载失败后 bash_execute/file_write 等全弹审批，
+    # 任务链路被审批阻塞。与 config/isolation/security_rules.yaml 保持同构。
+    _DEFAULT_RULES: list[dict[str, Any]] = [
+        {
+            "name": "dangerous_commands",
+            "tools": ["*"],
+            "params": ["command", "cmd"],
+            "action": "needs_approval",
+            "patterns": [
+                {"type": "keyword", "value": kw}
+                for kw in (
+                    "rm -rf", "del /s", "format", "mkfs", "dd if=",
+                    "> /dev/sd", "chmod 777", "chown root", "shutdown",
+                    "reboot", "halt", "poweroff", "nc -", "netcat ",
+                )
+            ],
+        },
+    ]
+
     def _load_rules(self) -> list[dict[str, Any]]:
         """从配置或 YAML 文件加载安全规则。
 
@@ -270,11 +291,12 @@ class SecurityCheckPlugin(IInputPlugin):
             data = get_config_center().get(rel)
             if data and "rules" in data:
                 return data["rules"]
-            logger.warning("[%s] No rules found in %s", self.name, rules_path)
-            return []
         except Exception:
-            logger.warning("[%s] Rules file load failed: %s", self.name, rules_path)
-            return []
+            logger.warning("[%s] No rules found in %s，回退内联默认规则", self.name, rules_path)
+            return list(self._DEFAULT_RULES)
+        except Exception:
+            logger.warning("[%s] Rules file load failed: %s，回退内联默认规则", self.name, rules_path)
+            return list(self._DEFAULT_RULES)
 
     @property
     def name(self) -> str:
