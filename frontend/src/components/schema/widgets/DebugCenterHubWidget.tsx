@@ -16,6 +16,7 @@ import { DebugExecutionRecordsPage } from '@/pages/debug/DebugExecutionRecordsPa
 import { DebugSessionsPage } from '@/pages/debug/DebugSessionsPage'
 import { DebugTasksPage } from '@/pages/debug/DebugTasksPage'
 import { DebugUsersPage } from '@/pages/debug/DebugUsersPage'
+import { ContractStatusPanel } from '@/components/debug/ContractStatusPanel'
 
 interface DebugPageItem {
   id: string
@@ -32,6 +33,7 @@ const DEBUG_PAGES: DebugPageItem[] = [
   { id: 'tasks', title: '任务', icon: '⚙️', component: () => <DebugTasksPage embedded /> },
   { id: 'users', title: '用户', icon: '👤', component: () => <DebugUsersPage embedded /> },
   { id: 'evaluation', title: '评估指标', icon: '📊', component: () => <DebugEvaluationMetricsPage embedded /> },
+  { id: 'contract_status', title: '插件契约', icon: '🛡️', component: () => <ContractStatusPanel /> },
 ]
 
 /** 调试中心面板组件（widget: debug_center_hub） */
