@@ -2,7 +2,8 @@
  * API 客户端 404 收敛行为测试（P4）
  *
  * 覆盖修复：
- * 1. isOptionalEndpoint 覆盖 /datasource/ → datasource 404 静默，不调用 reportError
+ * 1. datasource 404 是真实信号（G6-a 代理已接管 /api/v1/datasource/*，占位
+ *    护栏移除）→ 与其它 404 一致降级 WARNING 上报，不再静默
  * 2. 非业务路径 404 日志级别降为 WARNING（errorSeverity=warning），不再 ERROR
  *
  * 测试方式：mock axios.create 捕获 response 拦截器的 error handler，
@@ -98,13 +99,15 @@ describe('client.ts 404 收敛行为（P4）', () => {
     reportErrorMock.mockClear()
   })
 
-  it('datasource 端点 404 应静默，不调用 reportError', async () => {
+  it('datasource 端点 404 是真实信号 → 按常规 404 上报（WARNING）', async () => {
     const handler = getResponseErrorHandler()
     await expect(
       handler(make404Error('/api/v1/datasource/categories/list')),
     ).rejects.toBeDefined()
-    // 静默：不上报（isOptionalEndpoint 命中 /datasource/）
-    expect(reportErrorMock).not.toHaveBeenCalled()
+    // G6-a：内核 datasource 路由已接管，404 = 数据源未命中，与其他 404 一致收敛
+    expect(reportErrorMock).toHaveBeenCalledTimes(1)
+    const [, , severity] = reportErrorMock.mock.calls[0]
+    expect(severity).toBe('warning')
   })
 
   it('非业务路径 404 应上报且 severity 为 WARNING（不再 ERROR）', async () => {
