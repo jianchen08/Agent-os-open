@@ -440,6 +440,62 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // （它们只持 AppState，不便穿层传总线句柄；未注册时观察层静默降级）。
     agentos_hooks::set_global(hook_bus.clone());
 
+    // 注册闸 G2 启动期存量校验（与热发现同源公共函数）：对 enabled 的 sidecar
+    // tool 插件 spawn → tools/list → 对照声明。漂移工具剔除 / spawn 失败（默认
+    // 严格）清空该插件工具，均经 re-enable 路径重注册净化后 manifest——拦截在
+    // boot 产生，不把"声明与实现不服"的插件带病注册进运行期。
+    // 灰度：AGENTOS_G2_STRICT_SPAWN_FAIL=0 回退 lenient（warn + 按声明注册旧行为）。
+    // 只验 tools 非空的 sidecar（services 方向 schema 契约在 Phase 1 补）。
+    {
+        use agentos_api::plugin_watcher::{g2_strict_env_enabled, g2_verify_and_sanitize};
+        let strict = g2_strict_env_enabled(std::env::var("AGENTOS_G2_STRICT_SPAWN_FAIL").ok());
+        let mut verified = 0usize;
+        let mut drifted = 0usize;
+        let mut spawn_failed = 0usize;
+        for manifest in &manifests {
+            if !enablement.is_enabled(&manifest.id, manifest.enabled)
+                || manifest.host_type != agentos_core::traits::HostType::Sidecar
+                || manifest.capabilities.tools.is_empty()
+            {
+                continue;
+            }
+            let outcome =
+                g2_verify_and_sanitize(invoker.as_ref(), manifest.clone(), strict).await;
+            if !outcome.drift && !outcome.spawn_failed {
+                verified += 1;
+                continue;
+            }
+            if outcome.spawn_failed {
+                spawn_failed += 1;
+            } else {
+                drifted += 1;
+            }
+            // 用净化后 manifest 重注册该插件能力（复用 re-enable：scope revoke + 重注册）。
+            let (tools, http_routes) = agentos_api::plugin_lifecycle::reenable_plugin_capabilities(
+                &outcome.manifest,
+                &registry,
+                Some(&plugin_scopes),
+            );
+            info!(
+                target: "plugin-g2-boot",
+                plugin = %manifest.id,
+                rejected = ?outcome.rejected_tools,
+                strict,
+                tools,
+                http_routes,
+                "注册闸 G2（boot）：插件声明与实现不一致，已按净化后 manifest 重注册"
+            );
+        }
+        info!(
+            target: "plugin-g2-boot",
+            verified,
+            drifted,
+            spawn_failed,
+            strict,
+            "注册闸 G2 启动期存量校验完成"
+        );
+    }
+
     // 监控 M1：创建指标聚合器（三通道汇聚：内核自采 + 插件 record_metric + invoker 代采进程态）。
     // M4：router 持聚合器，metrics.record 反向调用写入它。
     let metrics_aggregator = agentos_api::metrics::MetricsAggregator::new();
@@ -914,9 +970,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // 插件运行时自动发现（notify watch + 轮询兜底）：往 plugins/ 丢新插件目录即生效，
     // 无需重启内核、无需手动调 reload-all。复用启动期已构造的 invoker / registry；
     // initial_ids 取启动 manifests，避免把已注册插件重复注册（与 reload-all 新插件序列对齐）。
-    //
-    // 已知 gap（与 reload-all 端点一致，非本次范围）：此处未按 enablement profile 过滤
-    // disabled 插件——启动期过滤、运行时发现路径不过滤。统一需后续单独处理。
+    // 注入 enablement profile：热发现路径同样按 L1 过滤 disabled 插件（注册闸对齐启动期）。
     //
     // 关键前置：discover_new_plugins 内部读 AGENTOS_PLUGINS_DIR 推导 roots。启动期若走
     // 默认 plugins_dir（未设该环境变量），须在此补设，保证 watcher 监听目录与 invoker
@@ -970,6 +1024,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .with_initial_cdylib_ids(initial_cdylib_ids)
         .with_restart_hook(restart_hook)
         .with_manifests_store(state.manifests.clone())
+        .with_enablement(enablement.clone())
         .spawn();
         info!(target: "agentos-kernel", "Plugin hot-discover watcher spawned (notify + polling fallback; cdylib change -> G8 auto-restart)");
     }

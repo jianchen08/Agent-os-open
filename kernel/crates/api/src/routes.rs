@@ -1781,9 +1781,35 @@ pub async fn plugins_set_enabled_handler(
                         .find(|m| m.id == plugin_id)
                     {
                         Some(m) => {
+                            // 注册闸 G2 复核（reenable 复用注册校验，不另设校验层）：
+                            // sidecar tool 插件先 spawn 校验，漂移/失败（默认严格）则用
+                            // 净化后 manifest 重注册，禁止把"声明与实现不服"的能力在启用
+                            // 时带进来（AGENTOS_G2_STRICT_SPAWN_FAIL=0 回退 lenient）。
+                            let mut manifest_for_register = m.clone();
+                            if let Some(invoker) = &state.invoker {
+                                let strict = crate::plugin_watcher::g2_strict_env_enabled(
+                                    std::env::var("AGENTOS_G2_STRICT_SPAWN_FAIL").ok(),
+                                );
+                                let outcome = crate::plugin_watcher::g2_verify_and_sanitize(
+                                    invoker.as_ref(),
+                                    m.clone(),
+                                    strict,
+                                )
+                                .await;
+                                if outcome.drift || outcome.spawn_failed {
+                                    tracing::warn!(
+                                        target: "plugin-enablement",
+                                        plugin = %plugin_id,
+                                        rejected = ?outcome.rejected_tools,
+                                        spawn_failed = outcome.spawn_failed,
+                                        "注册闸 G2：启用复核发现声明与实现不一致，按净化后能力注册"
+                                    );
+                                    manifest_for_register = outcome.manifest;
+                                }
+                            }
                             let (tools, http_routes) =
                                 crate::plugin_lifecycle::reenable_plugin_capabilities(
-                                    m,
+                                    &manifest_for_register,
                                     registry,
                                     Some(&state.plugin_scopes),
                                 );

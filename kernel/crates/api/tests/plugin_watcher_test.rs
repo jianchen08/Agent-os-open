@@ -256,6 +256,9 @@ async fn watcher_fires_restart_hook_on_cdylib_addition() {
 async fn watcher_does_not_fire_restart_hook_for_sidecar_only() {
     let tmp = tempfile::tempdir().unwrap();
     std::env::set_var("AGENTOS_PLUGINS_DIR", tmp.path());
+    // stub sidecar 无 server.py，真实 spawn 必失败；本测试目的是"sidecar-only 不触发
+    // 重启 hook"而非验证 G2（G2 严格/宽松已在 plugin_watcher.rs 单测覆盖），故置 lenient。
+    std::env::set_var("AGENTOS_G2_STRICT_SPAWN_FAIL", "0");
 
     let loader: Arc<dyn PluginLoader> = Arc::new(PluginLoaderImpl::new(tmp.path(), None));
     let invoker = Arc::new(PluginInvokerImpl::new(loader));

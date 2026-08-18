@@ -31,7 +31,9 @@ use agentos_core::types::PluginError;
 use agentos_invoker::verify::{
     compare_tools, declared_with_services, parse_actual_tools, rejected_tool_names,
 };
-use agentos_plugin_loader::{CapabilityRegistryImpl, PluginScopeRegistry};
+use agentos_plugin_loader::{
+    dependency_error_for, CapabilityRegistryImpl, PluginEnablement, PluginScopeRegistry,
+};
 use tokio::sync::mpsc::{self, UnboundedSender};
 use tokio::sync::RwLock;
 use tracing::{info, warn};
@@ -75,6 +77,13 @@ pub struct SyncReport {
     /// G2：本次发现但**拒绝注册漂移工具**的插件 id（安装期一致性校验——声明 vs
     /// 实际暴露不一致的贡献被拒绝，其余能力照常注册；报告可见不静默）。
     pub drifted_plugins: Vec<String>,
+    /// Phase 0（注册闸 L1）：本轮被 enablement profile 过滤（disabled）而未注册的
+    /// 插件数——热发现路径此前不过滤 disabled（`agentos-kernel.rs` 原注释自认），
+    /// 现与启动期注册循环对齐。
+    pub skipped_disabled: usize,
+    /// Phase 0（注册闸依赖完整性）：本轮因非 optional dependencies 引用不存在或
+    /// 版本不满足而被拒绝注册的**新**插件 id。
+    pub dependency_rejected: Vec<String>,
     /// GAP-6：本轮检测到 manifest 变更并**已重注册**的插件 id（指纹对比）。
     pub changed_plugin_ids: Vec<String>,
     /// A3：本轮检测到的 InProcess(cdylib) 插件集合变更（无变更为 None）。
@@ -223,9 +232,142 @@ pub fn apply_discovered_plugins(
         tools_registered,
         http_routes_registered,
         drifted_plugins: Vec::new(),
+        skipped_disabled: 0,
+        dependency_rejected: Vec::new(),
         changed_plugin_ids: Vec::new(),
         cdylib_change: None,
     }
+}
+
+/// `AGENTOS_G2_STRICT_SPAWN_FAIL` 开关（G2 spawn/list_tools 失败的处置，灰度）。
+///
+/// 默认严格（fail-closed）：spawn/上报失败 → 拒绝注册该插件声明的全部工具；
+/// 仅显式 `0`（trim 后）→ lenient（warn + 按声明注册，旧行为）。纯函数吃
+/// Option<String> 而非直接读 env——避免测试进程级环境变量并发污染。
+pub fn g2_strict_env_enabled(value: Option<String>) -> bool {
+    !matches!(value, Some(v) if v.trim() == "0")
+}
+
+/// G2 校验+净化结果。
+#[derive(Debug, Clone)]
+pub struct G2VerifyOutcome {
+    /// 校验后的 manifest：漂移工具被剔除；strict + spawn 失败时 tools 被清空。
+    pub manifest: PluginManifest,
+    /// 被拒绝注册的工具名（漂移 missing/schema_mismatch，或 strict 失败全量）。
+    pub rejected_tools: Vec<String>,
+    /// 存在漂移信号（missing/schema_mismatch 或仅有 undeclared）。
+    pub drift: bool,
+    /// spawn/tools-list 本身失败（区别于"比对出漂移"）。
+    pub spawn_failed: bool,
+}
+
+/// G2：单插件"声明 ↔ 实际暴露"一致性校验 + 处置（公共化，供注册/启动/重启用复用）。
+///
+/// - 无 tools（仅 services/route 插件）→ 跳过校验，原样返回（与既有语义一致，
+///   services schema 契约在 Phase 1 补方向）；
+/// - 比对出可拒绝漂移（missing / schema_mismatch）→ 剔除漂移工具，其余照常；
+/// - spawn/list_tools 失败 → `strict_spawn_fail` 决定：拒绝全部工具（fail-closed）
+///   或 warn+按声明注册（lenient 灰度）。
+///
+/// 纯校验+净化，无注册副作用；调用方决定后续注册行为。
+pub async fn g2_verify_and_sanitize(
+    invoker: &dyn PluginInvoker,
+    manifest: PluginManifest,
+    strict_spawn_fail: bool,
+) -> G2VerifyOutcome {
+    // G2 只验 sidecar（InProcess/native 无 describe 通道，verify.rs 自述——它们
+    // 的一致性走 A3 重启 + native describe 后续落地）；无 tools（services-only/
+    // route）插件跳过。均原样返回。
+    if manifest.host_type != HostType::Sidecar || manifest.capabilities.tools.is_empty() {
+        return G2VerifyOutcome {
+            manifest,
+            rejected_tools: Vec::new(),
+            drift: false,
+            spawn_failed: false,
+        };
+    }
+    match invoker.list_plugin_tools(&manifest.id).await {
+        Ok(raw) => {
+            let (actual, _malformed) = parse_actual_tools(&raw);
+            let mismatches = compare_tools(&declared_with_services(&manifest), &actual);
+            let rejected = rejected_tool_names(&mismatches);
+            if rejected.is_empty() {
+                G2VerifyOutcome {
+                    manifest,
+                    rejected_tools: Vec::new(),
+                    drift: !mismatches.is_empty(),
+                    spawn_failed: false,
+                }
+            } else {
+                let mut sanitized = manifest;
+                sanitized
+                    .capabilities
+                    .tools
+                    .retain(|t| !rejected.contains(&t.name));
+                G2VerifyOutcome {
+                    manifest: sanitized,
+                    rejected_tools: rejected.into_iter().collect(),
+                    drift: true,
+                    spawn_failed: false,
+                }
+            }
+        }
+        Err(e) => {
+            warn!(
+                target: "plugin_watcher",
+                plugin = %manifest.id,
+                error = %e.message,
+                strict = strict_spawn_fail,
+                "G2 校验失败（spawn/上报不可用）"
+            );
+            if strict_spawn_fail {
+                let rejected_tools = manifest
+                    .capabilities
+                    .tools
+                    .iter()
+                    .map(|t| t.name.clone())
+                    .collect::<Vec<_>>();
+                let mut sanitized = manifest;
+                sanitized.capabilities.tools.clear();
+                G2VerifyOutcome {
+                    manifest: sanitized,
+                    rejected_tools,
+                    drift: true,
+                    spawn_failed: true,
+                }
+            } else {
+                G2VerifyOutcome {
+                    manifest,
+                    rejected_tools: Vec::new(),
+                    drift: false,
+                    spawn_failed: true,
+                }
+            }
+        }
+    }
+}
+
+/// L0 纯函数：按 enablement 谓词过滤 manifests，返回（保留的引用, 跳过的 disabled 数）。
+///
+/// `is_enabled` 与 [`agentos_plugin_loader::PluginEnablement::is_enabled`] 同签名，
+/// 便于直接传入或测试注入。disabled 插件不进注册表出口（与启动期注册循环一致）。
+pub fn filter_enabled_manifests<'a, F>(
+    all: &'a [PluginManifest],
+    mut is_enabled: F,
+) -> (Vec<&'a PluginManifest>, usize)
+where
+    F: FnMut(&str, Option<bool>) -> bool,
+{
+    let mut kept = Vec::with_capacity(all.len());
+    let mut skipped = 0usize;
+    for m in all {
+        if is_enabled(&m.id, m.enabled) {
+            kept.push(m);
+        } else {
+            skipped += 1;
+        }
+    }
+    (kept, skipped)
 }
 
 /// L1 async 编排：拉取全量 manifests → 调 L0 注册新增 + cdylib 集合 diff。
@@ -252,6 +394,8 @@ pub async fn sync_once(
         known_cdylib,
         None,
         &mut throwaway,
+        None,
+        true,
     )
     .await
 }
@@ -310,67 +454,79 @@ pub async fn sync_once_with_store(
     known_cdylib: &mut Option<HashSet<String>>,
     manifests_store: Option<&ManifestsStore>,
     known_manifest_hashes: &mut HashMap<String, u64>,
+    enablement: Option<&PluginEnablement>,
+    strict_spawn_fail: bool,
 ) -> Result<SyncReport, PluginError> {
     let all = invoker.discover_new_plugins().await?;
     // A3：InProcess(cdylib) 集合 diff 先行（下方 for 循环会 move `all`）。
-    // 首轮建基线，之后新增/消失都报变更；用全量 `all`（G2 过滤只动 tools，
-    // 不动 host_type 归属）。
+    // 首轮建基线，之后新增/消失都报变更；用全量 `all`（enablement/G2 过滤
+    // 只动注册对象，不动 host_type 归属）。
     let cdylib_change = diff_cdylib_change(&all, known_cdylib);
-    // G2 安装期一致性校验：对新发现的 tool 插件 spawn → tools/list → 对照
-    // manifest 声明。漂移工具的贡献**拒绝注册**（克隆 manifest 剔除该工具），
-    // 其余能力照常；校验失败（spawn 失败等）不阻断安装（warn 记录）。
-    let mut filtered: Vec<PluginManifest> = Vec::with_capacity(all.len());
+    // 注册闸 L1：enablement 过滤（热发现路径此前不过滤 disabled，与启动期
+    // 注册循环对齐）；依赖完整性参照"将注册集合"（disabled 不在集合 → 依赖它
+    // 视为缺失，fail-closed）。
+    let (kept_refs, skipped_disabled) = filter_enabled_manifests(&all, |id, def| {
+        enablement.map_or(true, |e| e.is_enabled(id, def))
+    });
+    let present: HashMap<&str, &str> = kept_refs
+        .iter()
+        .map(|m| (m.id.as_str(), m.version.as_str()))
+        .collect();
+
+    // G2 安装期一致性校验（公共化 g2_verify_and_sanitize）：对新发现的 tool 插件
+    // spawn → tools/list → 对照声明。漂移工具的贡献拒绝注册，其余能力照常；
+    // spawn 失败按 strict_spawn_fail 处置（默认严格：拒绝该插件全部工具）。
+    let mut filtered: Vec<PluginManifest> = Vec::with_capacity(kept_refs.len());
     let mut drifted_plugins = Vec::new();
-    for m in all {
+    let mut dependency_rejected = Vec::new();
+    for m in kept_refs {
         if known_ids.contains(&m.id) || m.capabilities.tools.is_empty() {
-            filtered.push(m);
+            filtered.push(m.clone());
             continue;
         }
-        match invoker.list_plugin_tools(&m.id).await {
-            Ok(raw) => {
-                let (actual, _malformed) = parse_actual_tools(&raw);
-                let mismatches = compare_tools(&declared_with_services(&m), &actual);
-                let rejected = rejected_tool_names(&mismatches);
-                if rejected.is_empty() {
-                    if !mismatches.is_empty() {
-                        // 仅 undeclared（实际多暴露）——不拒绝注册，但记录
-                        warn!(
-                            target: "plugin_watcher",
-                            plugin = %m.id,
-                            mismatches = mismatches.len(),
-                            "G2 校验：插件存在未声明暴露的工具（不拒绝注册）"
-                        );
-                    }
-                    filtered.push(m);
-                } else {
-                    warn!(
-                        target: "plugin_watcher",
-                        plugin = %m.id,
-                        rejected = ?rejected,
-                        "G2 校验：插件声明与实现漂移，拒绝注册漂移工具（其余能力照常）"
-                    );
-                    drifted_plugins.push(m.id.clone());
-                    let mut sanitized = m;
-                    sanitized
-                        .capabilities
-                        .tools
-                        .retain(|t| !rejected.contains(&t.name));
-                    filtered.push(sanitized);
-                }
-            }
-            Err(e) => {
+        // 注册闸依赖完整性：新插件非 optional 依赖不存在/版本不满足 → 整插件拒注册。
+        if let Some(err) = dependency_error_for(m, |id| present.get(id).copied()) {
+            warn!(
+                target: "plugin_watcher",
+                plugin = %m.id,
+                error = %err.to_string(),
+                "注册闸依赖完整性：拒绝注册（依赖不存在/版本不满足）"
+            );
+            dependency_rejected.push(m.id.clone());
+            continue;
+        }
+        let outcome = g2_verify_and_sanitize(invoker, m.clone(), strict_spawn_fail).await;
+        if outcome.drift {
+            if outcome.rejected_tools.is_empty() {
+                // 仅 undeclared（实际多暴露）——不拒绝注册，但记录
                 warn!(
                     target: "plugin_watcher",
                     plugin = %m.id,
-                    error = %e.message,
-                    "G2 校验失败（spawn/上报不可用），不阻断安装"
+                    "G2 校验：插件存在未声明暴露的工具（不拒绝注册）"
                 );
-                filtered.push(m);
+            } else {
+                warn!(
+                    target: "plugin_watcher",
+                    plugin = %m.id,
+                    rejected = ?outcome.rejected_tools,
+                    "G2 校验：插件声明与实现漂移，拒绝注册漂移工具（其余能力照常）"
+                );
+                drifted_plugins.push(m.id.clone());
             }
         }
+        if outcome.spawn_failed && !strict_spawn_fail {
+            warn!(
+                target: "plugin_watcher",
+                plugin = %m.id,
+                "G2 校验失败（spawn/上报不可用）——lenient 模式按声明注册（AGENTOS_G2_STRICT_SPAWN_FAIL=0）"
+            );
+        }
+        filtered.push(outcome.manifest);
     }
     let mut report = apply_discovered_plugins(&filtered, known_ids, registry, scopes);
     report.drifted_plugins = drifted_plugins;
+    report.skipped_disabled = skipped_disabled;
+    report.dependency_rejected = dependency_rejected;
     report.cdylib_change = cdylib_change;
 
     // ── GAP-6：既有插件 manifest 变更 → 重注册 ──────────────────────────
@@ -458,6 +614,9 @@ pub struct PluginWatcher {
     /// 热发现 manifest 共享存储（bin 接线时传 `AppState.manifests`）。
     /// None = 不同步 manifest 列表（旧行为，仅测试场景）。
     manifests_store: Option<ManifestsStore>,
+    /// 注册闸 L1：enablement profile。Some 时热发现路径过滤 disabled 插件
+    /// （与启动期注册循环对齐）；None = 不过滤（旧行为/测试）。
+    enablement: Option<PluginEnablement>,
     debounce: Duration,
     poll_interval: Duration,
 }
@@ -479,6 +638,7 @@ impl PluginWatcher {
             known_cdylib: None,
             restart_hook: None,
             manifests_store: None,
+            enablement: None,
             debounce: DEFAULT_DEBOUNCE,
             poll_interval: DEFAULT_POLL_INTERVAL,
         }
@@ -509,6 +669,13 @@ impl PluginWatcher {
     /// 增量合并进去（/api/v1/plugins 状态列表与注册表保持一致）。
     pub fn with_manifests_store(mut self, store: ManifestsStore) -> Self {
         self.manifests_store = Some(store);
+        self
+    }
+
+    /// 注入 enablement profile：热发现路径过滤 disabled 插件（注册闸 L1 对齐
+    /// 启动期注册循环）。None（缺省）= 不过滤，测试/旧语义。
+    pub fn with_enablement(mut self, enablement: PluginEnablement) -> Self {
+        self.enablement = Some(enablement);
         self
     }
 
@@ -543,6 +710,7 @@ impl PluginWatcher {
             known_cdylib,
             restart_hook,
             manifests_store,
+            enablement,
             debounce,
             poll_interval,
         } = self;
@@ -600,6 +768,10 @@ impl PluginWatcher {
                     &mut known_cdylib,
                     manifests_store.as_ref(),
                     &mut known_hashes,
+                    enablement.as_ref(),
+                    g2_strict_env_enabled(
+                        std::env::var("AGENTOS_G2_STRICT_SPAWN_FAIL").ok(),
+                    ),
                 )
                 .await
                 {
@@ -993,7 +1165,8 @@ mod tests {
         assert_eq!(names, vec!["t1".to_string()]);
     }
 
-    /// G2：校验失败（list_tools 报错）不阻断安装（工具照常注册 + warn）。
+    /// G2：校验失败（list_tools 报错）默认严格（fail-closed）——拒绝该插件全部工具，
+    /// 注册流程继续不阻断；lenient 由 `AGENTOS_G2_STRICT_SPAWN_FAIL=0` 回退。
     #[tokio::test]
     async fn sync_once_verify_failure_does_not_block_install() {
         let mut invoker = MockInvoker::new(vec![mk_manifest("p1", "tool", &["t1"], false)]);
@@ -1003,8 +1176,33 @@ mod tests {
         let report = sync_once(&invoker, &registry_arc, None, &mut known, &mut None)
             .await
             .unwrap();
+        assert!(
+            report.drifted_plugins.contains(&"p1".to_string()),
+            "spawn 失败严格模式 → 漂移插件报告可见"
+        );
+        assert_eq!(
+            report.tools_registered, 0,
+            "严格模式：spawn 失败拒绝声明工具，不再带病注册"
+        );
+        assert!(registry_arc.list_tools().is_empty());
+    }
+
+    /// G2：校验失败 lenient（灰度回退）→ 保留声明工具（旧行为）。
+    #[tokio::test]
+    async fn sync_once_verify_failure_lenient_keeps_tools() {
+        let mut invoker = MockInvoker::new(vec![mk_manifest("p1", "tool", &["t1"], false)]);
+        invoker.list_tools_fail = true;
+        let registry_arc = std::sync::Arc::new(CapabilityRegistryImpl::new());
+        let mut known = HashSet::new();
+        let report = sync_once_with_store(
+            &invoker, &registry_arc, None, &mut known, &mut None, None, &mut HashMap::new(),
+            None, false,
+        )
+        .await
+        .unwrap();
         assert!(report.drifted_plugins.is_empty());
-        assert_eq!(report.tools_registered, 1, "校验失败不拒绝注册");
+        assert_eq!(report.tools_registered, 1, "lenient：校验失败仍按声明注册（warn）");
+        assert_eq!(registry_arc.list_tools().len(), 1);
     }
 
     #[test]
@@ -1156,7 +1354,7 @@ mod tests {
         let inv1 = MockInvoker::new(vec![mk_manifest("chg", "tool", &["t_old"], false)]);
         sync_once_with_store(
             &inv1, &registry_arc, Some(&scopes), &mut known, &mut None,
-            Some(&store), &mut hashes,
+            Some(&store), &mut hashes, None, true,
         )
         .await
         .unwrap();
@@ -1166,7 +1364,7 @@ mod tests {
         let inv2 = MockInvoker::new(vec![mk_manifest("chg", "tool", &["t_new"], false)]);
         let report = sync_once_with_store(
             &inv2, &registry_arc, Some(&scopes), &mut known, &mut None,
-            Some(&store), &mut hashes,
+            Some(&store), &mut hashes, None, true,
         )
         .await
         .unwrap();
@@ -1184,7 +1382,7 @@ mod tests {
         // 第三轮：同 manifest 再同步 → 无变更（幂等，不重复重注册）
         let report3 = sync_once_with_store(
             &inv2, &registry_arc, Some(&scopes), &mut known, &mut None,
-            Some(&store), &mut hashes,
+            Some(&store), &mut hashes, None, true,
         )
         .await
         .unwrap();
@@ -1203,6 +1401,7 @@ mod tests {
         let inv1 = MockInvoker::new(vec![mk_manifest("epc", "tool", &["t"], true)]);
         sync_once_with_store(
             &inv1, &registry_arc, Some(&scopes), &mut known, &mut None, None, &mut hashes,
+            None, true,
         )
         .await
         .unwrap();
@@ -1214,6 +1413,7 @@ mod tests {
         let inv2 = MockInvoker::new(vec![mk_manifest("epc", "tool", &["t2"], true)]);
         sync_once_with_store(
             &inv2, &registry_arc, Some(&scopes), &mut known, &mut None, None, &mut hashes,
+            None, true,
         )
         .await
         .unwrap();
@@ -1301,5 +1501,165 @@ mod tests {
             EventKind::Remove(RemoveKind::File),
             &[p("/plugins/tools/bash/plugin.json")]
         ));
+    }
+
+    // ── Phase 0：注册闸——G2 公共化 / disabled 过滤 / 依赖拒绝 ──────────────
+
+    /// G2 spawn 失败处置开关：默认严格（fail-closed），仅 "0" 置 lenient。
+    #[test]
+    fn g2_strict_env_switch_parsing() {
+        assert!(g2_strict_env_enabled(None), "未设 → 严格（fail-closed）");
+        assert!(g2_strict_env_enabled(Some("1".to_string())));
+        assert!(g2_strict_env_enabled(Some("yes".to_string())));
+        assert!(!g2_strict_env_enabled(Some("0".to_string())));
+        assert!(!g2_strict_env_enabled(Some(" 0 ".to_string())));
+    }
+
+    /// enablement 过滤纯函数：disabled 跳过并计数，保留序不变。
+    #[test]
+    fn filter_enabled_skips_disabled_and_counts() {
+        let all = vec![
+            mk_manifest("a", "tool", &["t_a"], false),
+            mk_manifest("b", "tool", &["t_b"], false),
+            mk_manifest("c", "tool", &["t_c"], false),
+        ];
+        let (kept, skipped) = filter_enabled_manifests(&all, |id, default| {
+            if id == "b" {
+                false
+            } else {
+                default.unwrap_or(true)
+            }
+        });
+        assert_eq!(skipped, 1);
+        let ids: Vec<&str> = kept.iter().map(|m| m.id.as_str()).collect();
+        assert_eq!(ids, vec!["a", "c"]);
+    }
+
+    #[tokio::test]
+    async fn g2_verify_consistent_returns_unchanged() {
+        let invoker = MockInvoker::new(vec![mk_manifest("p1", "tool", &["t1", "t2"], false)]);
+        let m = mk_manifest("p1", "tool", &["t1", "t2"], false);
+        let out = g2_verify_and_sanitize(&invoker, m, true).await;
+        assert!(!out.drift && !out.spawn_failed);
+        assert!(out.rejected_tools.is_empty());
+        assert_eq!(out.manifest.capabilities.tools.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn g2_verify_drift_sanitizes_rejected_tool_only() {
+        let mut invoker =
+            MockInvoker::new(vec![mk_manifest("p1", "tool", &["t1", "ghost"], false)]);
+        invoker
+            .list_tools
+            .insert("p1".into(), json!({ "tools": [{"name": "t1", "description": "t1"}] }));
+        let m = mk_manifest("p1", "tool", &["t1", "ghost"], false);
+        let out = g2_verify_and_sanitize(&invoker, m, true).await;
+        assert!(out.drift);
+        assert_eq!(out.rejected_tools, vec!["ghost".to_string()]);
+        let names: Vec<String> = out.manifest.capabilities.tools.iter().map(|t| t.name.clone()).collect();
+        assert_eq!(names, vec!["t1".to_string()], "漂移工具被剔除、其余照常");
+    }
+
+    #[tokio::test]
+    async fn g2_verify_spawn_fail_strict_empties_tools() {
+        let mut invoker = MockInvoker::new(vec![mk_manifest("p1", "tool", &["t1", "t2"], false)]);
+        invoker.list_tools_fail = true;
+        let m = mk_manifest("p1", "tool", &["t1", "t2"], false);
+        let out = g2_verify_and_sanitize(&invoker, m, true).await;
+        assert!(out.spawn_failed && out.drift);
+        assert!(out.manifest.capabilities.tools.is_empty(), "strict：拒绝全部声明工具");
+        assert_eq!(out.rejected_tools.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn g2_verify_spawn_fail_lenient_keeps_tools() {
+        let mut invoker = MockInvoker::new(vec![mk_manifest("p1", "tool", &["t1"], false)]);
+        invoker.list_tools_fail = true;
+        let m = mk_manifest("p1", "tool", &["t1"], false);
+        let out = g2_verify_and_sanitize(&invoker, m, false).await;
+        assert!(out.spawn_failed);
+        assert_eq!(out.manifest.capabilities.tools.len(), 1, "lenient：按声明注册（warn）");
+        assert!(!out.drift);
+    }
+
+    /// services-only（无 tools）插件：不 spawn 校验，原样返回（若被调用会因
+    /// list_tools_fail 炸——应被跳过）。
+    #[tokio::test]
+    async fn g2_verify_skips_services_only_plugin() {
+        let mut invoker = MockInvoker::new(vec![mk_manifest("s", "system", &[], false)]);
+        invoker.list_tools_fail = true;
+        let m = mk_manifest("s", "system", &[], false);
+        let out = g2_verify_and_sanitize(&invoker, m, true).await;
+        assert!(!out.spawn_failed && !out.drift);
+        assert!(out.manifest.capabilities.tools.is_empty());
+    }
+
+    /// InProcess（cdylib）tool 插件：无 describe 通道，不做 G2（若被调用会因
+    /// list_tools_fail 炸——应被跳过）。
+    #[tokio::test]
+    async fn g2_verify_skips_in_process_plugin() {
+        let mut invoker = MockInvoker::new(vec![mk_manifest_host("nativeish", "in_process")]);
+        invoker.list_tools_fail = true;
+        let m = mk_manifest_host("nativeish", "in_process");
+        let out = g2_verify_and_sanitize(&invoker, m, true).await;
+        assert!(!out.spawn_failed && !out.drift);
+    }
+
+    /// 注册闸 L1：disabled 插件在热发现路径不进注册表（此前不过滤）。
+    #[tokio::test]
+    async fn sync_skips_disabled_plugin_in_hot_discovery() {
+        use agentos_plugin_loader::{PluginEnablement, PluginProfile, ProfileEntry};
+        let mut plugins = std::collections::HashMap::new();
+        plugins.insert(
+            "b".to_string(),
+            ProfileEntry { enabled: Some(false), activation: None },
+        );
+        let enablement = PluginEnablement::with_profile(PluginProfile {
+            version: 1,
+            plugins,
+            defaults: Default::default(),
+        });
+        let invoker = MockInvoker::new(vec![
+            mk_manifest("a", "tool", &["t_a"], false),
+            mk_manifest("b", "tool", &["t_b"], false),
+            mk_manifest("c", "tool", &["t_c"], false),
+        ]);
+        let registry_arc = std::sync::Arc::new(CapabilityRegistryImpl::new());
+        let mut known = HashSet::new();
+        let report = sync_once_with_store(
+            &invoker, &registry_arc, None, &mut known, &mut None, None, &mut HashMap::new(),
+            Some(&enablement), true,
+        )
+        .await
+        .unwrap();
+        assert_eq!(report.skipped_disabled, 1, "b 被 profile 禁用");
+        let ids: Vec<String> = registry_arc.list_tools().iter().map(|t| t.plugin_id.clone()).collect();
+        assert!(!ids.contains(&"b".to_string()), "disabled 插件不进注册表");
+        assert!(ids.contains(&"a".to_string()) && ids.contains(&"c".to_string()));
+    }
+
+    /// 注册闸依赖完整性：新插件引用不存在的插件 id → 整插件拒绝注册。
+    #[tokio::test]
+    async fn sync_rejects_new_plugin_with_missing_required_dep() {
+        use agentos_core::traits::Dependency;
+        let mut m = mk_manifest("dep_app", "tool", &["t_a"], false);
+        m.dependencies = vec![Dependency {
+            plugin_id: "ghost".to_string(),
+            optional: false,
+            min_version: None,
+        }];
+        let invoker = MockInvoker::new(vec![m]);
+        let registry_arc = std::sync::Arc::new(CapabilityRegistryImpl::new());
+        let mut known = HashSet::new();
+        let report = sync_once_with_store(
+            &invoker, &registry_arc, None, &mut known, &mut None, None, &mut HashMap::new(),
+            None, true,
+        )
+        .await
+        .unwrap();
+        assert_eq!(report.dependency_rejected, vec!["dep_app".to_string()]);
+        assert!(report.new_plugin_ids.is_empty(), "依赖缺失的插件不注册");
+        assert!(registry_arc.list_tools().is_empty());
+        assert!(known.is_empty());
     }
 }

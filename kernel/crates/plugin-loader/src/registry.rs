@@ -661,6 +661,38 @@ pub fn version_gte(actual: &str, min: &str) -> bool {
     true
 }
 
+/// 单插件的依赖完整性错误（注册闸/热发现可复用）。
+///
+/// 参照 `present(plugin_id) -> Option<version>`（由调用方决定参照哪套集合：
+/// boot = 全量 manifests；热发现 = "将注册"的 enabled 集合）。有缺失/版本不满足
+/// 返回首错，全过返回 `None`。
+pub fn dependency_error_for<'a>(
+    m: &'a agentos_core::traits::PluginManifest,
+    mut present: impl FnMut(&str) -> Option<&'a str>,
+) -> Option<DependencyError> {
+    for dep in &m.dependencies {
+        if dep.optional {
+            continue;
+        }
+        let Some(actual_version) = present(&dep.plugin_id) else {
+            return Some(DependencyError::MissingRequired {
+                plugin_id: dep.plugin_id.clone(),
+                dependent: m.id.clone(),
+            });
+        };
+        if let Some(min) = &dep.min_version {
+            if !version_gte(actual_version, min) {
+                return Some(DependencyError::VersionMismatch {
+                    plugin_id: dep.plugin_id.clone(),
+                    required: min.clone(),
+                    actual: (*actual_version).to_string(),
+                });
+            }
+        }
+    }
+    None
+}
+
 /// 注册闸：校验 manifests 的 `dependencies` 引用完整性（fail-closed）。
 ///
 /// - 非 optional 依赖引用不存在的插件 id → [`DependencyError::MissingRequired`]；
@@ -677,25 +709,8 @@ pub fn validate_dependencies(
         .map(|m| (m.id.as_str(), m.version.as_str()))
         .collect();
     for m in manifests {
-        for dep in &m.dependencies {
-            if dep.optional {
-                continue;
-            }
-            let Some(actual_version) = present.get(dep.plugin_id.as_str()) else {
-                return Err(DependencyError::MissingRequired {
-                    plugin_id: dep.plugin_id.clone(),
-                    dependent: m.id.clone(),
-                });
-            };
-            if let Some(min) = &dep.min_version {
-                if !version_gte(actual_version, min) {
-                    return Err(DependencyError::VersionMismatch {
-                        plugin_id: dep.plugin_id.clone(),
-                        required: min.clone(),
-                        actual: (*actual_version).to_string(),
-                    });
-                }
-            }
+        if let Some(err) = dependency_error_for(m, |id| present.get(id).copied()) {
+            return Err(err);
         }
     }
     Ok(())
