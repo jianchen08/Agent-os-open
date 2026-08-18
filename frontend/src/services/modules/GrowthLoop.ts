@@ -17,6 +17,7 @@ import { loadDshAdapterContributions } from '@/services/dshAdapter'
 import { loadRenderIntents } from '@/utils/dshRenderIntent'
 import { loadOutputSchemas } from '@/utils/outputSchemaView'
 import { loadInteractionModes } from '@/utils/interactionModes'
+import { loadNotificationModes } from '@/utils/notificationModes'
 import { loadViewModes } from '@/utils/viewModeRoutes'
 import { validatePluginDeclaration } from '@/services/pluginDeclarationValidate'
 import type { ChatCardDeclaration } from '@/utils/chatCardInterpreter'
@@ -66,6 +67,11 @@ async function reloadContributionRegistry(): Promise<void> {
     // tools[].ui.interaction_modes 装载（模式→features 词表，覆盖内置默认件）
     loadInteractionModes(
       (schema as { tools?: Array<{ ui?: { interaction_modes?: unknown } }> }).tools ?? [],
+    )
+    // 通知分类渲染声明（widget 化批1-C）：human_interaction_tool 的
+    // tools[].ui.notification_modes 装载（category→渲染词表，覆盖内置默认件）
+    loadNotificationModes(
+      (schema as { tools?: Array<{ ui?: { notification_modes?: unknown } }> }).tools ?? [],
     )
     // 审批视图模式声明（widget 化 T10）：review_service 的 tools[].ui.view_modes
     // 装载（view_mode→widget 路由，ApprovalRouter 声明驱动查找）
