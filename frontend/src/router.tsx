@@ -108,9 +108,6 @@ const PipelineSettingsPage = lazy(() =>
     default: m.PipelineSettingsPage,
   })),
 )
-const TriggersPage = lazy(() =>
-  import('@/pages/triggers/TriggersPage').then((m) => ({ default: m.TriggersPage })),
-)
 const KnowledgeBasePage = lazy(() =>
   import('@/pages/knowledge-base/KnowledgeBasePage').then((m) => ({
     default: m.KnowledgeBasePage,
@@ -653,16 +650,6 @@ export function createRouter() {
         <ProtectedRoute>
           <Suspense fallback={LazyFallback}>
             <MemoryPage />
-          </Suspense>
-        </ProtectedRoute>
-      ),
-    },
-    {
-      path: ROUTES.TRIGGERS,
-      element: (
-        <ProtectedRoute>
-          <Suspense fallback={LazyFallback}>
-            <TriggersPage />
           </Suspense>
         </ProtectedRoute>
       ),

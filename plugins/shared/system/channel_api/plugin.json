@@ -1725,6 +1725,103 @@
       "description": "files 域：获取支持的文件类型"
     }
   ],
+
+  "ui_schema": {
+    "widgets": [
+      {
+        "id": "triggers_table",
+        "type": "table",
+        "space": "triggers",
+        "order": 10,
+        "props": {
+          "title": "触发器列表",
+          "datasourceUri": "/ext/channel_api/triggers",
+          "rowActions": [
+            {
+              "key": "trigger",
+              "label": "触发",
+              "url": "/ext/channel_api/triggers/{id}/trigger",
+              "successText": "已触发"
+            },
+            {
+              "key": "enable",
+              "label": "启用",
+              "url": "/ext/channel_api/triggers/{id}/enable",
+              "when": { "key": "enabled", "equals": false }
+            },
+            {
+              "key": "disable",
+              "label": "禁用",
+              "url": "/ext/channel_api/triggers/{id}/disable",
+              "when": { "key": "enabled", "equals": true }
+            },
+            {
+              "key": "delete",
+              "label": "删除",
+              "variant": "destructive",
+              "method": "DELETE",
+              "url": "/ext/channel_api/triggers/{id}",
+              "confirm": "确认删除该触发器？"
+            }
+          ]
+        }
+      },
+      {
+        "id": "triggers_create",
+        "type": "form",
+        "space": "triggers",
+        "order": 20,
+        "props": {
+          "title": "创建触发器",
+          "fields": [
+            {
+              "name": "name",
+              "type": "input",
+              "label": "名称",
+              "required": true
+            },
+            {
+              "name": "type",
+              "type": "select",
+              "label": "类型",
+              "required": true,
+              "options": [
+                { "label": "定时", "value": "schedule" },
+                { "label": "事件", "value": "event" },
+                { "label": "手动", "value": "manual" }
+              ]
+            },
+            {
+              "name": "config",
+              "type": "textarea",
+              "label": "配置 JSON",
+              "placeholder": "{\"cron\": \"0 * * * *\"}"
+            }
+          ],
+          "endpoint": "/ext/channel_api/triggers",
+          "successText": "触发器已创建"
+        }
+      }
+    ]
+  },
+  "contributes": {
+    "pages": [
+      {
+        "id": "triggers",
+        "title": "触发器",
+        "icon": "⚡",
+        "space": "workspace",
+        "slot": "activity-bar",
+        "order": 15,
+        "path": "/triggers",
+        "widget": "widget_stage",
+        "props": {
+          "space": "triggers"
+        },
+        "description": "触发器管理（widget 化声明页：列表+行操作+创建，替代硬编码 TriggersPage）"
+      }
+    ]
+  },
   "granted_capabilities": [
     "pipeline-state",
     "tool-executor",

@@ -53,7 +53,6 @@ export const ROUTES = {
   /** 记忆页面 */
   MEMORY: '/memory',
   /** 触发器页面 */
-  TRIGGERS: '/triggers',
   /** 知识库页面 */
   KNOWLEDGE_BASE: '/knowledge-base',
   /** 会话页面 */

@@ -51,6 +51,8 @@ export interface RowActionDecl {
   url: string
   /** 成功提示（缺省「操作成功」） */
   successText?: string
+  /** 显隐条件：行字段等于值才渲染（如启停按 enabled 分支声明） */
+  when?: { key: string; equals?: unknown }
 }
 
 function extractRowActions(raw: unknown): RowActionDecl[] {
@@ -63,6 +65,12 @@ function extractRowActions(raw: unknown): RowActionDecl[] {
       typeof (a as RowActionDecl).label === 'string' &&
       typeof (a as RowActionDecl).url === 'string',
   )
+}
+
+/** when 条件过滤：无 when 恒显；有 when 且行值 === equals 才显 */
+function rowActionVisible(action: RowActionDecl, row: Record<string, unknown>): boolean {
+  if (!action.when) return true
+  return row[action.when.key] === action.when.equals
 }
 
 /** url 模板替换：{col} → 行值；缺列值保留原样 */
@@ -299,7 +307,7 @@ export function TableWidget(props: Record<string, unknown>) {
                   {rowActions.length > 0 && (
                     <td className="px-4 py-2.5 text-right">
                       <div className="flex items-center justify-end gap-1.5">
-                        {rowActions.map((action) => (
+                        {rowActions.filter((a) => rowActionVisible(a, row)).map((action) => (
                           <button
                             key={action.key}
                             data-testid={`row-action-${action.key}`}
