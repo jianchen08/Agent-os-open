@@ -111,7 +111,6 @@
       }
     ]
   },
-  "dependencies": [],
   "permissions": {},
   "priority": 40,
   "requires_content": 3,
@@ -219,22 +218,83 @@
   ],
   "ui_schema": {
     "widgets": [
-      { "id": "resource_cpu", "type": "status_card", "space": "monitoring", "order": 10,
-        "props": { "title": "系统资源", "label": "CPU",
-          "datasourceUri": "/ext/monitoring/system/metrics", "valueKey": "metrics.cpu_usage",
-          "refresh": { "type": "poll", "intervalSeconds": 10 } } },
-      { "id": "resource_mem", "type": "status_card", "space": "monitoring", "order": 20,
-        "props": { "label": "内存", "datasourceUri": "/ext/monitoring/system/metrics",
-          "valueKey": "metrics.memory.usage_percent", "refresh": { "type": "poll", "intervalSeconds": 10 } } },
-      { "id": "resource_disk", "type": "status_card", "space": "monitoring", "order": 30,
-        "props": { "label": "磁盘", "datasourceUri": "/ext/monitoring/system/metrics",
-          "valueKey": "metrics.disk.usage_percent", "refresh": { "type": "poll", "intervalSeconds": 10 } } },
-      { "id": "token_card", "type": "status_card", "space": "monitoring", "order": 40,
-        "props": { "title": "LLM 请求", "label": "请求数", "datasourceUri": "/ext/monitoring/token-usage",
-          "valueKey": "token_usage.request_count", "refresh": { "type": "poll", "intervalSeconds": 30 } } },
-      { "id": "tasks_table", "type": "table", "space": "monitoring", "order": 50,
-        "props": { "title": "最近任务", "datasourceUri": "/ext/monitoring/tasks", "pageSize": 10,
-          "refresh": { "type": "poll", "intervalSeconds": 30 } } }
+      {
+        "id": "resource_cpu",
+        "type": "status_card",
+        "space": "monitoring",
+        "order": 10,
+        "props": {
+          "title": "系统资源",
+          "label": "CPU",
+          "datasourceUri": "/ext/monitoring/system/metrics",
+          "valueKey": "metrics.cpu_usage",
+          "refresh": {
+            "type": "poll",
+            "intervalSeconds": 10
+          }
+        }
+      },
+      {
+        "id": "resource_mem",
+        "type": "status_card",
+        "space": "monitoring",
+        "order": 20,
+        "props": {
+          "label": "内存",
+          "datasourceUri": "/ext/monitoring/system/metrics",
+          "valueKey": "metrics.memory.usage_percent",
+          "refresh": {
+            "type": "poll",
+            "intervalSeconds": 10
+          }
+        }
+      },
+      {
+        "id": "resource_disk",
+        "type": "status_card",
+        "space": "monitoring",
+        "order": 30,
+        "props": {
+          "label": "磁盘",
+          "datasourceUri": "/ext/monitoring/system/metrics",
+          "valueKey": "metrics.disk.usage_percent",
+          "refresh": {
+            "type": "poll",
+            "intervalSeconds": 10
+          }
+        }
+      },
+      {
+        "id": "token_card",
+        "type": "status_card",
+        "space": "monitoring",
+        "order": 40,
+        "props": {
+          "title": "LLM 请求",
+          "label": "请求数",
+          "datasourceUri": "/ext/monitoring/token-usage",
+          "valueKey": "token_usage.request_count",
+          "refresh": {
+            "type": "poll",
+            "intervalSeconds": 30
+          }
+        }
+      },
+      {
+        "id": "tasks_table",
+        "type": "table",
+        "space": "monitoring",
+        "order": 50,
+        "props": {
+          "title": "最近任务",
+          "datasourceUri": "/ext/monitoring/tasks",
+          "pageSize": 10,
+          "refresh": {
+            "type": "poll",
+            "intervalSeconds": 30
+          }
+        }
+      }
     ]
   },
   "contributes": {

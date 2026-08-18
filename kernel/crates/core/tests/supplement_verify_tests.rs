@@ -57,7 +57,7 @@ fn make_test_manifest(
         host_type,
         entry: "test_plugin".to_string(),
         capabilities: ManifestCapabilities::default(),
-        dependencies: vec![],
+        requires_services: vec![],
         permissions: ManifestPermissions::default(),
         error_policy: ErrorPolicy::default(),
         priority: 100,
@@ -321,7 +321,7 @@ fn test_manifest_requires_content_with_value() {
         "host_type": "in_process",
         "entry": "memory_read",
         "capabilities": {},
-        "dependencies": [],
+        "requires_services": [],
         "permissions": {},
         "priority": 100,
         "requires_content": 5

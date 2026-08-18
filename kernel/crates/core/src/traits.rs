@@ -457,59 +457,6 @@ pub struct ToolDescriptor {
 // Resource 描述符与 resources 能力维度已删除（全链无消费方）。
 // 旧 manifest 的 `capabilities.resources` 条目由 serde 默认忽略未知字段兜底。
 
-// ── 5. DependencyResolver（依赖解析器） ────────────────────────
-
-/// 插件依赖解析器：解析插件间的依赖拓扑并按序加载。
-///
-/// 内核在实例化插件前，根据 manifest 中的 `dependencies` 字段
-/// 构建依赖图并执行拓扑排序，确保被依赖的插件先加载。
-pub trait DependencyResolver: Send + Sync {
-    /// 添加插件依赖声明。
-    fn add_dependency(&self, plugin_id: &str, dep: &Dependency);
-
-    /// 构建依赖图并返回拓扑排序结果。
-    ///
-    /// # Returns
-    /// Ok(plugin_ids) - 按加载顺序排列的插件 ID 列表
-    /// Err(cycle) - 检测到循环依赖时返回参与环路的插件 ID 列表
-    fn resolve(&self) -> Result<Vec<String>, DependencyError>;
-}
-
-/// 插件依赖声明（对应 manifest.dependencies[]）。
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Dependency {
-    pub plugin_id: String,
-    #[serde(default)]
-    pub optional: bool,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub min_version: Option<String>,
-}
-
-/// 依赖解析错误。
-#[derive(Debug, Clone, thiserror::Error)]
-pub enum DependencyError {
-    /// 循环依赖
-    #[error("circular dependency detected: {cycle:?}")]
-    Circular { cycle: Vec<String> },
-
-    /// 缺少必需依赖
-    #[error("missing required dependency '{plugin_id}' for '{dependent}'")]
-    MissingRequired {
-        plugin_id: String,
-        dependent: String,
-    },
-
-    /// 版本不兼容
-    #[error(
-        "dependency version mismatch: '{plugin_id}' requires >= {required}, but found {actual}"
-    )]
-    VersionMismatch {
-        plugin_id: String,
-        required: String,
-        actual: String,
-    },
-}
-
 // ── 6. LlmProvider（LLM 抽象层） ──────────────────────────────
 
 /// LLM 服务提供者抽象（抽象层 + 可替换实现模式）。
@@ -790,8 +737,13 @@ pub struct PluginManifest {
     pub host_type: HostType,
     pub entry: String,
     pub capabilities: ManifestCapabilities,
-    #[serde(default)]
-    pub dependencies: Vec<Dependency>,
+    /// 服务依赖（2026-08-18 契约定型：插件↔插件唯一耦合轴）。
+    /// 条目 `ns`（需要该能力角色任意方法已注册）或 `ns.method`（需要该具体服务端点
+    /// 已注册）；注册表把条目映射到提供者插件，消费者**不点名插件 id**。旧
+    /// `dependencies[].plugin_id` 实现级依赖已移除（106 插件全空死字段，详见
+    /// docs/decisions/2026-08-18-plugin-dependency-package.md）。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub requires_services: Vec<String>,
     #[serde(default)]
     pub permissions: ManifestPermissions,
     /// 错误处理策略——ADR 2026-08-18 收敛后为唯一值 `Retry`（serde default，manifest

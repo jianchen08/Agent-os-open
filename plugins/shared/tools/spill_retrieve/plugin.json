@@ -64,7 +64,6 @@
       "on_pipeline_end"
     ]
   },
-  "dependencies": [],
   "permissions": {},
   "priority": 50,
   "config_files": [

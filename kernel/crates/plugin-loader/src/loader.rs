@@ -15,6 +15,7 @@ use sha2::{Digest, Sha256};
 use tracing::{info, warn};
 
 use crate::error::LoaderError;
+use crate::native_loader::NativePluginLoader;
 
 /// 插件准入白名单模式。
 ///
@@ -246,6 +247,33 @@ impl PluginLoaderImpl {
 
         // host_type 校验（ADR ⑧: 所有插件支持双路径，但必须声明一个）
         // host_type 已是必填字段，serde 会校验
+
+        // ── native 产物预检（契约闸门体系 2.5）：InProcess 插件声明的 cdylib
+        // 产物必须存在，缺失在加载期明确报错，不再拖到 load/调用期才炸 ──
+        if let Some(native) = &manifest.native {
+            let Some(dir) = source_path.parent() else {
+                return Err(LoaderError::ManifestValidation {
+                    plugin_id: manifest.id.clone(),
+                    reason: format!(
+                        "native artifact 无法解析相对路径（manifest {:?} 无父目录）",
+                        source_path
+                    ),
+                });
+            };
+            // 与真实加载路径同规则：裸名按平台补 cdylib 后缀（.dll/lib{}.so），
+            // 已带已知扩展名则原样——否则声明 `pipeline_tool_core_native` 会因
+            // 磁盘上是 `..._native.dll` 而被误判缺失。
+            let artifact_path = dir.join(NativePluginLoader::platform_artifact_name(&native.artifact));
+            if !artifact_path.exists() {
+                return Err(LoaderError::ManifestValidation {
+                    plugin_id: manifest.id.clone(),
+                    reason: format!(
+                        "native artifact 缺失: {}（cdylib 产物未构建或路径声明有误）",
+                        artifact_path.display()
+                    ),
+                });
+            }
+        }
 
         // ── P2-2 插件准入校验（白名单 + SHA256）──
         self.validate_allowlist(manifest, source_path)?;
@@ -830,7 +858,7 @@ mod tests {
     "host_type": "in_process",
     "entry": "test_plugin",
     "capabilities": {{}},
-    "dependencies": [],
+    "requires_services": [],
     "permissions": {{}},
     "priority": 100{}
 }}"#,
@@ -859,7 +887,7 @@ mod tests {
             {"uri": "config://app", "name": "App Config", "mime_type": "application/json"}
         ]
     },
-    "dependencies": [],
+    "requires_services": [],
     "permissions": {},
     "priority": 100
 }"#;
@@ -958,7 +986,7 @@ mod tests {
             host_type: HostType::InProcess,
             entry: "test_entry".to_string(),
             capabilities: Default::default(),
-            dependencies: vec![],
+            requires_services: vec![],
             permissions: Default::default(),
             error_policy: Default::default(),
             priority: 100,
@@ -1024,7 +1052,7 @@ mod tests {
             host_type: HostType::InProcess,
             entry: "test_entry".to_string(),
             capabilities: Default::default(),
-            dependencies: vec![],
+            requires_services: vec![],
             permissions: Default::default(),
             error_policy: Default::default(),
             priority: 100,
@@ -1061,7 +1089,7 @@ mod tests {
             host_type: HostType::InProcess,
             entry: String::new(), // 空entry
             capabilities: Default::default(),
-            dependencies: vec![],
+            requires_services: vec![],
             permissions: Default::default(),
             error_policy: Default::default(),
             priority: 100,
@@ -1227,7 +1255,7 @@ mod tests {
             host_type: HostType::InProcess,
             entry: "memory_read".to_string(),
             capabilities: Default::default(),
-            dependencies: vec![],
+            requires_services: vec![],
             permissions: Default::default(),
             error_policy: Default::default(),
             priority: 100,
@@ -1681,7 +1709,7 @@ mod tests {
     "host_type": "sidecar",
     "entry": "python3 server.py",
     "capabilities": {},
-    "dependencies": [],
+    "requires_services": [],
     "permissions": {},
     "priority": 100,
     "invoke_entry": "hashed_plugin.execute"
@@ -1832,7 +1860,7 @@ mod tests {
         };
         format!(
             r#"{{"id": "cov_plugin", "name": "Cov", "version": "1.0.0",
-            "plugin_type": "tool", "language": "external", "host_type": "sidecar", "entry": "mcp:external", "capabilities": {{}}, "dependencies": [], "permissions": {{}}, "priority": 30,
+            "plugin_type": "tool", "language": "external", "host_type": "sidecar", "entry": "mcp:external", "capabilities": {{}}, "requires_services": [], "permissions": {{}}, "priority": 30,
             {files}
             "mcp": {{
                 "transport": "streamable_http",
@@ -1874,6 +1902,59 @@ mod tests {
         );
         let manifest: PluginManifest = serde_json::from_str(&json).unwrap();
         assert!(loader.validate_manifest(&manifest).is_ok());
+    }
+
+    /// 契约闸门 2.5：native 产物预检——artifact 缺失 → 加载期明确报错（不是拖到
+    /// load/调用期才炸）。
+    #[test]
+    fn test_native_artifact_precheck_missing_rejected() {
+        let dir = tempfile::tempdir().unwrap();
+        let plugin_dir = dir.path().join("p_native");
+        std::fs::create_dir_all(&plugin_dir).unwrap();
+        let json_path = plugin_dir.join("plugin.json");
+        std::fs::write(
+            &json_path,
+            r#"{
+                "id": "p_native", "name": "p_native", "version": "1.0.0",
+                "plugin_type": "tool", "language": "rust",
+                "host_type": "in_process", "entry": "p_native",
+                "capabilities": {},
+                "native": { "artifact": "libp_native.so" }
+            }"#,
+        )
+        .unwrap();
+        let loader = PluginLoaderImpl::new(dir.path(), None);
+        let manifest: PluginManifest =
+            serde_json::from_str(&std::fs::read_to_string(&json_path).unwrap()).unwrap();
+        let err = loader.validate_manifest_internal(&manifest, &json_path);
+        let msg = err.expect_err("native artifact 缺失应被拒").to_string();
+        assert!(msg.contains("native artifact 缺失"), "{msg}");
+    }
+
+    /// 契约闸门 2.5：native 产物预检——artifact 存在 → 通过。
+    #[test]
+    fn test_native_artifact_precheck_existing_accepted() {
+        let dir = tempfile::tempdir().unwrap();
+        let plugin_dir = dir.path().join("p_native");
+        std::fs::create_dir_all(&plugin_dir).unwrap();
+        let json_path = plugin_dir.join("plugin.json");
+        std::fs::write(
+            &json_path,
+            r#"{
+                "id": "p_native", "name": "p_native", "version": "1.0.0",
+                "plugin_type": "tool", "language": "rust",
+                "host_type": "in_process", "entry": "p_native",
+                "capabilities": {},
+                "native": { "artifact": "libp_native.so" }
+            }"#,
+        )
+        .unwrap();
+        std::fs::write(plugin_dir.join("libp_native.so"), b"not-really-so").unwrap();
+        let loader = PluginLoaderImpl::new(dir.path(), None);
+        let manifest: PluginManifest =
+            serde_json::from_str(&std::fs::read_to_string(&json_path).unwrap()).unwrap();
+        let r = loader.validate_manifest_internal(&manifest, &json_path);
+        assert!(r.is_ok(), "native artifact 存在应通过：{r:?}");
     }
 
 }

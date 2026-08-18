@@ -71,7 +71,6 @@
       }
     ]
   },
-  "dependencies": [],
   "permissions": {},
   "priority": 60,
   "ui_schema": {

@@ -7,7 +7,7 @@
 //!
 //! - [`traits`]: 插件抽象接口——PipelinePlugin（含 Input/Core/Output 子 trait）、
 //!   PluginInvoker（透明分发 in_process / sidecar）、CapabilityRegistry、
-//!   DependencyResolver、LlmProvider、PluginLoader、StorageBackend（ADR ③④）、
+//!   LlmProvider、PluginLoader、StorageBackend（ADR ③④）、
 //!   AdrEngine（ADR ①）
 //! - [`types`]: 共享数据结构——RouteSignal（4 种）、ErrorPolicy、PluginContext（含
 //!   ContentLoader ADR ⑦）、PluginResult、PluginError、TenantContext、

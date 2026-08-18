@@ -140,7 +140,6 @@
       }
     ]
   },
-  "dependencies": [],
   "permissions": {},
   "priority": 50,
   "requires_content": 5,
@@ -293,7 +292,10 @@
           "label": "预算用量",
           "datasourceUri": "/ext/cost_control/budget/status",
           "valueKey": "usage_percent",
-          "refresh": { "type": "poll", "intervalSeconds": 60 }
+          "refresh": {
+            "type": "poll",
+            "intervalSeconds": 60
+          }
         }
       },
       {
@@ -306,7 +308,10 @@
           "label": "今日使用率",
           "datasourceUri": "/ext/cost_control/usage/statistics",
           "valueKey": "global_stats.daily_usage_percent",
-          "refresh": { "type": "poll", "intervalSeconds": 60 }
+          "refresh": {
+            "type": "poll",
+            "intervalSeconds": 60
+          }
         }
       },
       {
@@ -319,7 +324,10 @@
           "label": "本月使用率",
           "datasourceUri": "/ext/cost_control/usage/statistics",
           "valueKey": "global_stats.monthly_usage_percent",
-          "refresh": { "type": "poll", "intervalSeconds": 60 }
+          "refresh": {
+            "type": "poll",
+            "intervalSeconds": 60
+          }
         }
       }
     ]

@@ -1,4 +1,4 @@
-//! 能力注册表 + 依赖解析器
+//! 能力注册表 + 服务依赖解析（服务唯一轴）
 //!
 //! [来源: docs/tasks/task_05_plugin_system.md AC-04-3]
 
@@ -6,8 +6,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use agentos_core::traits::{
-    CapabilityRegistry, Dependency, DependencyError, DependencyResolver, HttpEndpoint,
-    HttpRouteDescriptor, ToolDescriptor,
+    CapabilityRegistry, HttpEndpoint, HttpRouteDescriptor, PluginManifest, ToolDescriptor,
 };
 use agentos_core::types::{RouteType, ToolCategory};
 use async_trait::async_trait;
@@ -511,209 +510,250 @@ pub(crate) fn path_matches_template(template: &str, incoming: &str) -> bool {
     i == i_segs.len()
 }
 
-/// 依赖解析器实现。
+/// 服务依赖错误（2026-08-18 契约定型：插件↔插件唯一耦合轴）。
 ///
-/// 根据插件 manifest 中的 `dependencies` 字段构建依赖图并执行拓扑排序。
-pub struct DependencyResolverImpl {
-    deps: RwLock<HashMap<String, Vec<Dependency>>>,
+/// 消费者不点名插件 id，只声明所需能力角色/端点；映射由服务面注册表完成。
+#[derive(Debug, Clone, thiserror::Error)]
+pub enum ServiceDepError {
+    /// 所需能力角色/端点无人提供。
+    #[error(
+        "service dependency unsatisfied: consumer='{consumer}' required='{service}' — {detail}"
+    )]
+    Unsatisfied {
+        consumer: String,
+        service: String,
+        detail: String,
+    },
+    /// 服务依赖环（A 需 B 的服务、B 需 A 的服务）。
+    #[error("service dependency cycle: {cycle:?}")]
+    Cycle { cycle: Vec<String> },
 }
 
-impl DependencyResolverImpl {
-    pub fn new() -> Self {
-        Self {
-            deps: RwLock::new(HashMap::new()),
-        }
-    }
+/// 服务面：从 manifests 汇总"谁提供了哪些服务"——能力角色（namespace）与服务端点
+/// （ns.method）→ 提供者映射。
+///
+/// 数据来源两路：`capabilities.services[]`（服务方法声明，D.6 槽位拆分，名字即
+/// `ns.method`）与 `provides.capabilities[]`（反向调用能力信封命名空间）。`ns` 角色 =
+/// 该 namespace 下已有方法注册；`ns.method` 端点 = 具体方法已注册。`has_role`/
+/// `has_method` 供 [`first_error_for`] 判定 `requires_services` 是否满足，不点名插件。
+#[derive(Debug, Clone, Default)]
+pub struct ServiceSurface {
+    /// namespace → 已注册方法集合（角色即在表 = has_role 通过）。
+    methods_by_ns: HashMap<String, HashSet<String>>,
+    /// 端点（ns.method，无方法名的纯角色级记 ns）→ 提供者插件 id 列表（拓扑边/诊断用）。
+    providers: HashMap<String, Vec<String>>,
+}
 
-    fn topological_sort(&self) -> Result<Vec<String>, DependencyError> {
-        let deps = self.deps.read();
-
-        // 收集所有节点
-        let mut all_nodes: HashSet<String> = HashSet::new();
-        for (plugin_id, dep_list) in deps.iter() {
-            all_nodes.insert(plugin_id.clone());
-            for dep in dep_list {
-                all_nodes.insert(dep.plugin_id.clone());
+impl ServiceSurface {
+    /// 从 "将注册" 的 manifest 集合构建服务面（boot 全量 / 热发现 enabled 子集）。
+    pub fn from_manifests(manifests: &[PluginManifest]) -> Self {
+        let mut surface = ServiceSurface::default();
+        for m in manifests {
+            for svc in &m.capabilities.services {
+                register_service(&mut surface, m, &svc.name);
             }
-        }
-
-        // 构建邻接表（被依赖者 → 依赖者）
-        let mut graph: HashMap<String, Vec<String>> = HashMap::new();
-        let mut in_degree: HashMap<String, usize> = HashMap::new();
-
-        for node in &all_nodes {
-            graph.entry(node.clone()).or_default();
-            in_degree.entry(node.clone()).or_insert(0);
-        }
-
-        for (plugin_id, dep_list) in deps.iter() {
-            for dep in dep_list {
-                // dep.plugin_id 必须先于 plugin_id 加载
-                graph
-                    .entry(dep.plugin_id.clone())
-                    .or_default()
-                    .push(plugin_id.clone());
-                *in_degree.entry(plugin_id.clone()).or_insert(0) += 1;
-            }
-        }
-
-        // Kahn's algorithm
-        let mut queue: Vec<String> = in_degree
-            .iter()
-            .filter(|(_, &deg)| deg == 0)
-            .map(|(k, _)| k.clone())
-            .collect();
-        queue.sort();
-
-        let mut result = Vec::new();
-        let mut remaining = in_degree.clone();
-
-        while let Some(node) = queue.first().cloned() {
-            queue.remove(0);
-            result.push(node.clone());
-
-            if let Some(neighbors) = graph.get(&node) {
-                for neighbor in neighbors {
-                    if let Some(deg) = remaining.get_mut(neighbor) {
-                        *deg -= 1;
-                        if *deg == 0 {
-                            // 插入保持排序
-                            let pos = queue.binary_search(neighbor).unwrap_or_else(|e| e);
-                            queue.insert(pos, neighbor.clone());
-                        }
+            if let Some(provides) = &m.provides {
+                for cap in &provides.capabilities {
+                    let prefix = cap
+                        .tool_prefix
+                        .clone()
+                        .unwrap_or_else(|| cap.namespace.replace('-', "_"));
+                    for method in &cap.methods {
+                        register_method(&mut surface, m, &prefix, method);
                     }
                 }
             }
         }
+        surface
+    }
 
-        // 检测循环依赖
-        if result.len() != all_nodes.len() {
-            let cycle: Vec<String> = all_nodes
-                .iter()
-                .filter(|n| !result.contains(*n))
+    /// ns 角色是否已注册（该 namespace 下至少一个方法被提供）。
+    pub fn has_role(&self, ns: &str) -> bool {
+        self.methods_by_ns
+            .get(ns)
+            .is_some_and(|methods| !methods.is_empty())
+    }
+
+    /// ns.method 端点是否已注册。
+    pub fn has_method(&self, ns: &str, method: &str) -> bool {
+        self.methods_by_ns
+            .get(ns)
+            .is_some_and(|methods| methods.contains(method))
+    }
+
+    /// 单插件 `requires_services` 首错（fail-closed）：条目无人提供即返回错误。
+    pub fn first_error_for(&self, m: &PluginManifest) -> Option<ServiceDepError> {
+        for item in &m.requires_services {
+            match parse_item(item) {
+                (ns, Some(method)) => {
+                    if !self.has_method(ns, method) {
+                        return Some(ServiceDepError::Unsatisfied {
+                            consumer: m.id.clone(),
+                            service: item.clone(),
+                            detail: format!(
+                                "service endpoint '{ns}.{method}' is not registered by any plugin"
+                            ),
+                        });
+                    }
+                }
+                (ns, None) => {
+                    if !self.has_role(ns) {
+                        return Some(ServiceDepError::Unsatisfied {
+                            consumer: m.id.clone(),
+                            service: item.clone(),
+                            detail: format!("capability role '{ns}' has no registered method"),
+                        });
+                    }
+                }
+            }
+        }
+        None
+    }
+
+    /// `requires_services` 条目 → 提供者插件 id 列表（服务面拓扑边用）。
+    pub fn provider_ids(&self, item: &str) -> Vec<String> {
+        let (ns, method) = parse_item(item);
+        match method {
+            Some(m) => self
+                .providers
+                .get(&format!("{ns}.{m}"))
                 .cloned()
-                .collect();
-            return Err(DependencyError::Circular { cycle });
-        }
-
-        Ok(result)
-    }
-}
-
-impl Default for DependencyResolverImpl {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-/// 按 manifest.dependencies 对插件列表做静态拓扑排序（M2-static）。
-///
-/// 把 discover 的返回序（HashMap 任意序）变为**显式可证明**的依赖序：
-/// 依赖者后加载（排序后靠后）；tie-break 字典序（resolver 内部保证）。
-/// 依赖环返回 [`DependencyError::Circular`]（含环节点）——启动期 fail-fast，
-/// 与 pipeline `load_and_compile` 的"坏配置拒绝启动"语义一致。
-///
-/// dep 引用了不存在的插件 id 不在本函数职责（optional 依赖由运行时各自兜底）；
-/// 这类 id 会进图但不影响 manifests 内部的相对顺序。
-pub fn sort_manifests_topologically(
-    manifests: &[agentos_core::traits::PluginManifest],
-) -> Result<Vec<agentos_core::traits::PluginManifest>, DependencyError> {
-    use agentos_core::traits::DependencyResolver;
-
-    let resolver = DependencyResolverImpl::new();
-    for m in manifests {
-        for dep in &m.dependencies {
-            resolver.add_dependency(&m.id, dep);
-        }
-    }
-    let order = resolver.resolve()?;
-    let rank: HashMap<&str, usize> = order
-        .iter()
-        .enumerate()
-        .map(|(i, id)| (id.as_str(), i))
-        .collect();
-    let mut sorted = manifests.to_vec();
-    // 图中无 rank 的（被 dep 引用但不在 manifests）不影响排序；manifests 全部有 rank。
-    sorted.sort_by_key(|m| rank.get(m.id.as_str()).copied().unwrap_or(usize::MAX));
-    Ok(sorted)
-}
-
-/// 版本号 `>=` 判定（"x.y.z" 数值段逐段比较，缺段视为 0）。
-///
-/// 纯函数、零 crate 依赖：用于 [`validate_dependencies`] 的 `min_version`
-/// fail-closed 校验。非数值/畸形段按 0 处理（宁可不满足也不误放行）。
-pub fn version_gte(actual: &str, min: &str) -> bool {
-    fn parts(v: &str) -> Vec<u64> {
-        v.split('.')
-            .filter_map(|s| s.trim().parse::<u64>().ok())
-            .collect()
-    }
-    let a = parts(actual);
-    let b = parts(min);
-    let len = a.len().max(b.len());
-    for i in 0..len {
-        let av = a.get(i).copied().unwrap_or(0);
-        let bv = b.get(i).copied().unwrap_or(0);
-        if av != bv {
-            return av > bv;
-        }
-    }
-    true
-}
-
-/// 单插件的依赖完整性错误（注册闸/热发现可复用）。
-///
-/// 参照 `present(plugin_id) -> Option<version>`（由调用方决定参照哪套集合：
-/// boot = 全量 manifests；热发现 = "将注册"的 enabled 集合）。有缺失/版本不满足
-/// 返回首错，全过返回 `None`。
-pub fn dependency_error_for<'a>(
-    m: &'a agentos_core::traits::PluginManifest,
-    mut present: impl FnMut(&str) -> Option<&'a str>,
-) -> Option<DependencyError> {
-    for dep in &m.dependencies {
-        if dep.optional {
-            continue;
-        }
-        let Some(actual_version) = present(&dep.plugin_id) else {
-            return Some(DependencyError::MissingRequired {
-                plugin_id: dep.plugin_id.clone(),
-                dependent: m.id.clone(),
-            });
-        };
-        if let Some(min) = &dep.min_version {
-            if !version_gte(actual_version, min) {
-                return Some(DependencyError::VersionMismatch {
-                    plugin_id: dep.plugin_id.clone(),
-                    required: min.clone(),
-                    actual: (*actual_version).to_string(),
-                });
+                .unwrap_or_default(),
+            None => {
+                // 角色级：收集该 ns 下所有端点/角色的提供者（去重）。
+                let mut out = Vec::new();
+                let prefix = format!("{ns}.");
+                for (endpoint, provs) in &self.providers {
+                    if endpoint == ns || endpoint.starts_with(&prefix) {
+                        for p in provs {
+                            if !out.contains(p) {
+                                out.push(p.clone());
+                            }
+                        }
+                    }
+                }
+                out
             }
         }
     }
-    None
 }
 
-/// 注册闸：校验 manifests 的 `dependencies` 引用完整性（fail-closed）。
+/// `ns.method` → (`ns`, `Some(method)`)；`ns` → (`ns`, `None`)。
+fn parse_item(item: &str) -> (&str, Option<&str>) {
+    match item.split_once('.') {
+        Some((ns, method)) if !ns.is_empty() && !method.is_empty() => (ns, Some(method)),
+        _ => (item, None),
+    }
+}
+
+/// 注册一条 `capabilities.services[].name`（形态 `ns.method`；无 `.` 按角色登记）。
+fn register_service(surface: &mut ServiceSurface, m: &PluginManifest, name: &str) {
+    let (ns, method) = parse_item(name);
+    if let Some(method) = method {
+        register_method(surface, m, ns, method);
+    } else {
+        surface.methods_by_ns.entry(ns.to_string()).or_default();
+        surface
+            .providers
+            .entry(ns.to_string())
+            .or_default()
+            .push(m.id.clone());
+    }
+}
+
+/// 注册单方法到服务面。
+fn register_method(surface: &mut ServiceSurface, m: &PluginManifest, ns: &str, method: &str) {
+    surface
+        .methods_by_ns
+        .entry(ns.to_string())
+        .or_default()
+        .insert(method.to_string());
+    surface
+        .providers
+        .entry(format!("{ns}.{method}"))
+        .or_default()
+        .push(m.id.clone());
+}
+
+/// 注册闸：解析全量 manifests 的 `requires_services` 引用完整性（fail-closed，服务唯一轴）。
 ///
-/// - 非 optional 依赖引用不存在的插件 id → [`DependencyError::MissingRequired`]；
-/// - 存在但实际版本 < `min_version` → [`DependencyError::VersionMismatch`]；
-/// - optional 依赖缺失跳过；无依赖恒 `Ok`。
-///
-/// 现状 0.2 存量插件全部 `dependencies: []`，本校验不破坏既有启动；
-/// 它把"引用了不存在的插件 id"从死字段/运行时谜题变成启动期 fail-fast。
-pub fn validate_dependencies(
-    manifests: &[agentos_core::traits::PluginManifest],
-) -> Result<(), DependencyError> {
-    let present: HashMap<&str, &str> = manifests
-        .iter()
-        .map(|m| (m.id.as_str(), m.version.as_str()))
-        .collect();
+/// 任意条目无人提供 → `Err`，启动期拒绝；服务→插件映射由服务面完成，消费者不点名
+/// 插件 id。现状 0.2 存量插件全部 `requires_services: []`，本校验不破坏既有启动；
+/// 它把"引用了不存在的插件/服务"从运行期谜题提前到启动期暴露。
+pub fn resolve_requires_services(manifests: &[PluginManifest]) -> Result<(), ServiceDepError> {
+    let surface = ServiceSurface::from_manifests(manifests);
     for m in manifests {
-        if let Some(err) = dependency_error_for(m, |id| present.get(id).copied()) {
+        if let Some(err) = surface.first_error_for(m) {
             return Err(err);
         }
     }
     Ok(())
+}
+
+/// 按 `requires_services`（服务边）对插件列表做静态拓扑排序（M2-static）。
+///
+/// 把 discover 的返回序（HashMap 任意序）变为**显式可证明**的依赖序：依赖者后加载
+/// （排序后靠后）；tie-break 字典序（Kahn 按 manifest id 排序）。服务依赖环返回
+/// [`ServiceDepError::Cycle`]（含环节点）——启动期 fail-fast，与 pipeline
+/// `load_and_compile` 的"坏配置拒绝启动"语义一致。
+///
+/// `requires_services` 引用不存在提供者的条目不进图（[`resolve_requires_services`]
+/// 负责 fail-closed 拒绝；此处只排相对顺序）。无依赖时退化为字典序（与旧实现一致）。
+pub fn sort_manifests_topologically(
+    manifests: &[PluginManifest],
+) -> Result<Vec<PluginManifest>, ServiceDepError> {
+    let surface = ServiceSurface::from_manifests(manifests);
+    let index: HashMap<&str, usize> = manifests
+        .iter()
+        .enumerate()
+        .map(|(i, m)| (m.id.as_str(), i))
+        .collect();
+    // 邻接表：provider(pi) 必须先于 consumer(i) 加载。
+    let mut graph: HashMap<usize, Vec<usize>> = HashMap::new();
+    let mut in_degree = vec![0usize; manifests.len()];
+    for (i, m) in manifests.iter().enumerate() {
+        for item in &m.requires_services {
+            for provider in surface.provider_ids(item) {
+                if let Some(&pi) = index.get(provider.as_str()) {
+                    graph.entry(pi).or_default().push(i);
+                    in_degree[i] += 1;
+                }
+            }
+        }
+    }
+
+    // Kahn's algorithm（tie-break：manifest id 字典序）。
+    let mut queue: Vec<usize> = (0..manifests.len())
+        .filter(|&i| in_degree[i] == 0)
+        .collect();
+    queue.sort_by_key(|&i| manifests[i].id.clone());
+    let mut remaining = in_degree.clone();
+    let mut result: Vec<usize> = Vec::with_capacity(manifests.len());
+    while let Some(node) = queue.first().cloned() {
+        queue.remove(0);
+        result.push(node);
+        if let Some(neighbors) = graph.get(&node) {
+            for &nb in neighbors {
+                remaining[nb] -= 1;
+                if remaining[nb] == 0 {
+                    let pos = queue
+                        .binary_search_by(|&j| {
+                            manifests[j].id.as_str().cmp(manifests[nb].id.as_str())
+                        })
+                        .unwrap_or_else(|e| e);
+                    queue.insert(pos, nb);
+                }
+            }
+        }
+    }
+    if result.len() != manifests.len() {
+        let cycle: Vec<String> = (0..manifests.len())
+            .filter(|&i| !result.contains(&i))
+            .map(|i| manifests[i].id.clone())
+            .collect();
+        return Err(ServiceDepError::Cycle { cycle });
+    }
+    Ok(result.into_iter().map(|i| manifests[i].clone()).collect())
 }
 
 /// 合法 JSON Schema 类型（输出/输入契约的第一层 type 收口）。
@@ -801,19 +841,6 @@ pub fn provides_methods_unbacked(
     out
 }
 
-impl DependencyResolver for DependencyResolverImpl {
-    fn add_dependency(&self, plugin_id: &str, dep: &Dependency) {
-        self.deps
-            .write()
-            .entry(plugin_id.to_string())
-            .or_default()
-            .push(dep.clone());
-    }
-
-    fn resolve(&self) -> Result<Vec<String>, DependencyError> {
-        self.topological_sort()
-    }
-}
 
 #[cfg(test)]
 mod tests {
@@ -899,91 +926,91 @@ mod tests {
         assert_eq!(registry.list_tools().len(), 0);
     }
 
-    #[test]
-    fn test_dependency_resolution_simple() {
-        let resolver = DependencyResolverImpl::new();
-        // A depends on B → B should load first
-        resolver.add_dependency(
-            "plugin_a",
-            &Dependency {
-                plugin_id: "plugin_b".to_string(),
-                optional: false,
-                min_version: None,
-            },
-        );
+    // ── 服务依赖（service-only axis，2026-08-18 契约定型）──────────
 
-        let order = resolver.resolve().unwrap();
-        let a_pos = order.iter().position(|x| x == "plugin_a").unwrap();
-        let b_pos = order.iter().position(|x| x == "plugin_b").unwrap();
-        assert!(b_pos < a_pos, "B should load before A");
+    /// 构造带 `capabilities.services`（提供的服务端点名列表）的 manifest。
+    fn svc_manifest(id: &str, provides: &[&str]) -> PluginManifest {
+        serde_json::from_value(json!({
+            "id": id, "name": id, "version": "1.0.0",
+            "plugin_type": "tool", "language": "rust",
+            "host_type": "sidecar", "entry": "x",
+            "capabilities": { "services":
+                provides.iter().map(|n| json!({ "name": n })).collect::<Vec<_>>() }
+        }))
+        .expect("valid manifest")
     }
 
     #[test]
-    fn test_dependency_resolution_chain() {
-        let resolver = DependencyResolverImpl::new();
-        // C depends on B, B depends on A → order: A, B, C
-        resolver.add_dependency(
-            "plugin_c",
-            &Dependency {
-                plugin_id: "plugin_b".to_string(),
-                optional: false,
-                min_version: None,
-            },
-        );
-        resolver.add_dependency(
-            "plugin_b",
-            &Dependency {
-                plugin_id: "plugin_a".to_string(),
-                optional: false,
-                min_version: None,
-            },
-        );
-
-        let order = resolver.resolve().unwrap();
-        let a_pos = order.iter().position(|x| x == "plugin_a").unwrap();
-        let b_pos = order.iter().position(|x| x == "plugin_b").unwrap();
-        let c_pos = order.iter().position(|x| x == "plugin_c").unwrap();
-        assert!(a_pos < b_pos);
-        assert!(b_pos < c_pos);
+    fn test_service_dep_provider_loads_first() {
+        // app 需要 audit.write；audit 插件提供它 → 提供者先加载、resolve 通过。
+        let mut app = svc_manifest("app", &[]);
+        app.requires_services = vec!["audit.write".into()];
+        let audit = svc_manifest("audit", &["audit.write"]);
+        let sorted = sort_manifests_topologically(&[app.clone(), audit.clone()]).unwrap();
+        assert!(resolve_requires_services(&[app.clone(), audit.clone()]).is_ok());
+        let app_pos = sorted.iter().position(|m| m.id == "app").unwrap();
+        let audit_pos = sorted.iter().position(|m| m.id == "audit").unwrap();
+        assert!(audit_pos < app_pos, "audit（提供者）必须先于 app 加载");
     }
 
     #[test]
-    fn test_dependency_circular_detected() {
-        let resolver = DependencyResolverImpl::new();
-        // A → B → A (circular)
-        resolver.add_dependency(
-            "plugin_a",
-            &Dependency {
-                plugin_id: "plugin_b".to_string(),
-                optional: false,
-                min_version: None,
-            },
-        );
-        resolver.add_dependency(
-            "plugin_b",
-            &Dependency {
-                plugin_id: "plugin_a".to_string(),
-                optional: false,
-                min_version: None,
-            },
-        );
+    fn test_service_dep_role_level() {
+        // 角色级条目 `audit`：该 namespace 下任意方法已注册即满足（不必点名方法）。
+        let mut app = svc_manifest("app", &[]);
+        app.requires_services = vec!["audit".into()];
+        let audit = svc_manifest("audit", &["audit.write"]);
+        assert!(resolve_requires_services(&[app, audit]).is_ok());
+    }
 
-        let result = resolver.resolve();
+    #[test]
+    fn test_service_dep_unsatisfied_fail_closed() {
+        // 引用了无人提供的服务端点 → fail-closed 拒绝，错误带上消费者与服务条目。
+        let mut app = svc_manifest("app", &[]);
+        app.requires_services = vec!["ghost.read".into()];
+        let err = resolve_requires_services(&[app]).unwrap_err();
+        assert!(
+            err.to_string().contains("consumer='app'") && err.to_string().contains("ghost.read"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn test_service_dep_no_requires_passes_lexicographic() {
+        // 存量插件全空 requires_services：resolve 恒过，拓扑退化为 id 字典序。
+        let a = svc_manifest("b_plugin", &["b.x"]);
+        let b = svc_manifest("a_plugin", &[]);
+        assert!(resolve_requires_services(&[a.clone(), b.clone()]).is_ok());
+        let sorted = sort_manifests_topologically(&[a, b]).unwrap();
+        let ids: Vec<&str> = sorted.iter().map(|m| m.id.as_str()).collect();
+        assert_eq!(ids, vec!["a_plugin", "b_plugin"]);
+    }
+
+    #[test]
+    fn test_service_dep_circular_detected() {
+        // a 需 b.x、b 需 a.y → 服务依赖环，启动期 fail-fast。
+        let mut a = svc_manifest("a", &["a.y"]);
+        a.requires_services = vec!["b.x".into()];
+        let mut br = svc_manifest("b", &["b.x"]);
+        br.requires_services = vec!["a.y".into()];
+        let result = sort_manifests_topologically(&[a, br]);
         assert!(result.is_err());
         match result {
-            Err(DependencyError::Circular { cycle }) => {
-                assert!(cycle.contains(&"plugin_a".to_string()));
-                assert!(cycle.contains(&"plugin_b".to_string()));
+            Err(ServiceDepError::Cycle { cycle }) => {
+                assert!(cycle.contains(&"a".to_string()));
+                assert!(cycle.contains(&"b".to_string()));
             }
-            _ => panic!("Expected Circular error"),
+            Err(e) => panic!("期望 Cycle，得 {e:?}"),
+            Ok(_) => panic!("期望环检测失败"),
         }
     }
 
     #[test]
-    fn test_dependency_no_deps() {
-        let resolver = DependencyResolverImpl::new();
-        let order = resolver.resolve().unwrap();
-        assert!(order.is_empty());
+    fn test_service_surface_role_vs_method() {
+        let surface = ServiceSurface::from_manifests(&[svc_manifest("p", &["audit.write", "audit.read"])]);
+        assert!(surface.has_role("audit"));
+        assert!(surface.has_method("audit", "write"));
+        assert!(!surface.has_method("audit", "delete"), "未声明的方法不算注册");
+        assert!(!surface.has_role("ghost"));
     }
 
     // ── HTTP param-route 模板匹配测试（4c 解锁）──
@@ -1299,7 +1326,7 @@ mod tests {
         scopes.revoke("p"); // 不应 panic
     }
 
-    // ── M2-static：sort_manifests_topologically ──
+    // ── M2-static：sort_manifests_topologically（服务边） + 注册闸 resolve ──
 
     fn make_manifest_for_sort(id: &str) -> agentos_core::traits::PluginManifest {
         use agentos_core::traits::{HostType, PluginManifest, PluginType};
@@ -1314,7 +1341,7 @@ mod tests {
             host_type: HostType::Sidecar,
             entry: "server.py".to_string(),
             capabilities: Default::default(),
-            dependencies: vec![],
+            requires_services: vec![],
             permissions: Default::default(),
             error_policy: Default::default(),
             priority: 100,
@@ -1335,25 +1362,28 @@ mod tests {
         }
     }
 
-    fn minimal_manifest(id: &str, deps: Vec<(&str, bool)>) -> agentos_core::traits::PluginManifest {
+    /// 构造排序用 manifest：`requires` = 需要的能力角色/端点（ns 或 ns.method），
+    /// `provides` = 自身提供的服务端点（capabilities.services[].name，形态 ns.method）。
+    fn svc_sort_manifest(
+        id: &str,
+        requires: &[&str],
+        provides: &[&str],
+    ) -> agentos_core::traits::PluginManifest {
         let mut m = make_manifest_for_sort(id);
-        m.dependencies = deps
-            .into_iter()
-            .map(|(dep_id, optional)| Dependency {
-                plugin_id: dep_id.to_string(),
-                optional,
-                min_version: None,
-            })
+        m.requires_services = requires.iter().map(|s| s.to_string()).collect();
+        m.capabilities.services = provides
+            .iter()
+            .map(|n| serde_json::from_value(json!({ "name": n })).unwrap())
             .collect();
         m
     }
 
     #[test]
-    fn m2_sort_puts_dependencies_before_dependents() {
-        // 构造乱序输入：依赖者在前的乱序应被排为拓扑序（b → c → a）。
+    fn m2_sort_puts_service_providers_before_consumers() {
+        // 乱序输入：消费者在前 → 应被排为拓扑序（提供者 → 消费者）。
         let manifests = vec![
-            minimal_manifest("z_depender", vec![("z_base", false)]),
-            minimal_manifest("z_base", vec![]),
+            svc_sort_manifest("z_depender", &["z_svc.read"], &[]),
+            svc_sort_manifest("z_base", &[], &["z_svc.read"]),
         ];
         let sorted = sort_manifests_topologically(&manifests).unwrap();
         let ids: Vec<&str> = sorted.iter().map(|m| m.id.as_str()).collect();
@@ -1361,11 +1391,11 @@ mod tests {
     }
 
     #[test]
-    fn m2_sort_transitive_chain() {
+    fn m2_sort_transitive_service_chain() {
         let manifests = vec![
-            minimal_manifest("c", vec![("b", false)]),
-            minimal_manifest("a", vec![]),
-            minimal_manifest("b", vec![("a", false)]),
+            svc_sort_manifest("c", &["b.x"], &[]),
+            svc_sort_manifest("a", &[], &["a.x"]),
+            svc_sort_manifest("b", &["a.x"], &["b.x"]),
         ];
         let sorted = sort_manifests_topologically(&manifests).unwrap();
         let ids: Vec<&str> = sorted.iter().map(|m| m.id.as_str()).collect();
@@ -1373,86 +1403,37 @@ mod tests {
     }
 
     #[test]
-    fn m2_sort_detects_cycle() {
+    fn m2_sort_detects_service_cycle() {
         let manifests = vec![
-            minimal_manifest("x", vec![("y", false)]),
-            minimal_manifest("y", vec![("x", false)]),
+            svc_sort_manifest("x", &["y.m"], &["x.m"]),
+            svc_sort_manifest("y", &["x.m"], &["y.m"]),
         ];
         let err = sort_manifests_topologically(&manifests).unwrap_err();
-        assert!(matches!(err, DependencyError::Circular { .. }));
+        assert!(matches!(err, ServiceDepError::Cycle { .. }));
     }
 
-    // ── validate_dependencies（注册闸：依赖引用完整性，fail-closed） ──────────
+    // ── resolve_requires_services（注册闸：服务引用完整性，fail-closed） ──────────
 
     #[test]
-    fn validate_deps_all_satisfied_is_ok() {
+    fn validate_reqs_satisfied_is_ok() {
         let manifests = vec![
-            minimal_manifest("base", vec![]),
-            minimal_manifest("app", vec![("base", false)]),
+            svc_sort_manifest("base", &[], &["base.x"]),
+            svc_sort_manifest("app", &["base.x"], &[]),
         ];
-        assert!(validate_dependencies(&manifests).is_ok());
+        assert!(resolve_requires_services(&manifests).is_ok());
     }
 
     #[test]
-    fn validate_deps_missing_required_rejected() {
-        let manifests = vec![minimal_manifest("app", vec![("ghost", false)])];
-        let err = validate_dependencies(&manifests).unwrap_err();
+    fn validate_reqs_unsatisfied_rejected() {
+        let manifests = vec![svc_sort_manifest("app", &["ghost.read"], &[])];
+        let err = resolve_requires_services(&manifests).unwrap_err();
         match err {
-            DependencyError::MissingRequired { plugin_id, dependent } => {
-                assert_eq!(plugin_id, "ghost");
-                assert_eq!(dependent, "app");
+            ServiceDepError::Unsatisfied { consumer, service, .. } => {
+                assert_eq!(consumer, "app");
+                assert_eq!(service, "ghost.read");
             }
-            other => panic!("expected MissingRequired, got {other:?}"),
+            other => panic!("expected Unsatisfied, got {other:?}"),
         }
-    }
-
-    #[test]
-    fn validate_deps_optional_missing_is_ok() {
-        let manifests = vec![minimal_manifest("app", vec![("ghost", true)])];
-        assert!(validate_dependencies(&manifests).is_ok());
-    }
-
-    #[test]
-    fn validate_deps_version_mismatch_rejected() {
-        let mut base = make_manifest_for_sort("base");
-        base.version = "1.0.0".to_string();
-        let mut app = make_manifest_for_sort("app");
-        app.dependencies = vec![Dependency {
-            plugin_id: "base".to_string(),
-            optional: false,
-            min_version: Some("2.0.0".to_string()),
-        }];
-        let err = validate_dependencies(&[app, base]).unwrap_err();
-        match err {
-            DependencyError::VersionMismatch { plugin_id, required, actual } => {
-                assert_eq!(plugin_id, "base");
-                assert_eq!(required, "2.0.0");
-                assert_eq!(actual, "1.0.0");
-            }
-            other => panic!("expected VersionMismatch, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn validate_deps_version_satisfied_is_ok() {
-        let mut base = make_manifest_for_sort("base");
-        base.version = "2.1.0".to_string();
-        let mut app = make_manifest_for_sort("app");
-        app.dependencies = vec![Dependency {
-            plugin_id: "base".to_string(),
-            optional: false,
-            min_version: Some("2.0.0".to_string()),
-        }];
-        assert!(validate_dependencies(&[app, base]).is_ok());
-    }
-
-    #[test]
-    fn version_gte_numeric_segment_compare() {
-        assert!(version_gte("2.1.0", "2.0.0"));
-        assert!(version_gte("2.0.0", "2.0.0"));
-        assert!(!version_gte("1.9.9", "2.0.0"));
-        assert!(version_gte("1.2.3", "1.2"), "长版本视为更高");
-        assert!(version_gte("1.10", "1.9"), "数值段比较非字典序");
     }
 
     // ── output_schema 声明合法性（注册闸，与插件其它声明同一套 fail-closed） ──

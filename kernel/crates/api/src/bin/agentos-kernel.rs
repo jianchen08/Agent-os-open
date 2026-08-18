@@ -233,21 +233,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     };
 
-    // 注册闸-依赖引用完整性（fail-closed）：非 optional dependencies 引用不存在的
-    // 插件 id / 实际版本不满足 min_version → 拒绝启动。0.2 存量插件全为空依赖，
-    // 不破坏既有启动；它把"引用不存在的插件"从运行期谜题提前到启动期暴露。
-    agentos_plugin_loader::validate_dependencies(&manifests).map_err(|e| {
-        eprintln!("[boot] 插件依赖解析失败，拒绝启动: {}", e);
+    // 注册闸-服务依赖解析（fail-closed，唯一依赖轴）：任意插件的 requires_services
+    // 不满足（能力角色无人提供 / 服务端点未注册）→ 拒绝启动；服务→插件映射由服务面注册表
+    // 完成，消费者不点名插件 id。把"依赖不满足"从运行期谜题提前到启动期暴露。
+    agentos_plugin_loader::resolve_requires_services(&manifests).map_err(|e| {
+        eprintln!("[boot] 插件服务依赖解析失败，拒绝启动: {}", e);
         std::io::Write::flush(&mut std::io::stderr()).ok();
         Box::<dyn std::error::Error>::from(format!(
-            "plugin dependency resolution failed at boot: {}",
+            "plugin service dependency resolution failed at boot: {}",
             e
         ))
     })?;
 
-    // M2-static：启动期按 dependencies 静态拓扑排序——插件间启动顺序从
+    // M2-static：启动期按 requires_services（服务边）静态拓扑排序——插件间启动顺序从
     // HashMap 任意序变为显式可证明的依赖序（依赖者后加载；tie-break 字典序）。
-    // 依赖环 fail-fast（与 pipeline load_and_compile 的坏配置拒绝启动一致）。
+    // 服务依赖环 fail-fast（与 pipeline load_and_compile 的坏配置拒绝启动一致）。
     let manifests =
         agentos_plugin_loader::sort_manifests_topologically(&manifests).map_err(|e| {
             eprintln!("[boot] 插件依赖环检测失败，拒绝启动: {}", e);
@@ -440,6 +440,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // （它们只持 AppState，不便穿层传总线句柄；未注册时观察层静默降级）。
     agentos_hooks::set_global(hook_bus.clone());
 
+    // 闸2·观测：契约状态账本（boot 收口全量插件健康度，后续 reenable/热发现/
+    // validate-all 共享写入；与 AppState 同一实例注入，`GET /contract-status` 消费）。
+    let contract_states = Arc::new(agentos_api::contract::ContractLedger::new());
     // 注册闸 G2 启动期存量校验（与热发现同源公共函数）：对 enabled 的 sidecar
     // tool 插件 spawn → tools/list → 对照声明。漂移工具剔除 / spawn 失败（默认
     // 严格）清空该插件工具，均经 re-enable 路径重注册净化后 manifest——拦截在
@@ -453,15 +456,24 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let mut drifted = 0usize;
         let mut spawn_failed = 0usize;
         for manifest in &manifests {
-            if !enablement.is_enabled(&manifest.id, manifest.enabled)
-                || manifest.host_type != agentos_core::traits::HostType::Sidecar
-                || (manifest.capabilities.tools.is_empty()
-                    && manifest.capabilities.services.is_empty())
-            {
+            let enabled = enablement.is_enabled(&manifest.id, manifest.enabled);
+            let g2_applicable = enabled
+                && manifest.host_type == agentos_core::traits::HostType::Sidecar
+                && (!manifest.capabilities.tools.is_empty()
+                    || !manifest.capabilities.services.is_empty());
+            if !g2_applicable {
+                // 非 G2 覆盖（禁用/非 sidecar/无 tools+services）：登记 not_covered 缺省
+                contract_states
+                    .upsert(agentos_api::contract::PluginContractState::not_covered(
+                        manifest, enabled,
+                    ));
                 continue;
             }
             let outcome =
                 g2_verify_and_sanitize(invoker.as_ref(), manifest.clone(), strict).await;
+            contract_states.upsert(agentos_api::contract::PluginContractState::derived(
+                manifest, enabled, Some(&outcome),
+            ));
             if !outcome.drift && !outcome.spawn_failed {
                 verified += 1;
                 continue;

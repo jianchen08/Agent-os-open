@@ -1,40 +1,39 @@
 {
-    "id": "resource_search_tool",
-    "name": "Resource Search Tool",
-    "description": "搜索系统内 Agent、工具、Skill 资源的 MCP 工具",
-    "version": "1.0.0",
-    "plugin_type": "tool",
-    "language": "python",
-    "host_type": "sidecar",
-    "entry": "python server.py",
-    "capabilities": {
-        "tools": [
-            {
-                "name": "resource_search",
-                "description": "搜索系统内 Agent、工具、Skill 资源",
-                "render": {
-                    "card": "table"
-                }
-            }
-        ],
-        "lifecycle_hooks": [
-            "on_load",
-            "on_unload"
-        ]
-    },
-    "dependencies": [],
-    "permissions": {},
-    "priority": 30,
-    "config_files": [
-        {
-            "id": "builtin_tools_config",
-            "path": "config/tools/builtin_tools_config.yaml",
-            "label": "内置工具配置"
-        },
-        {
-            "id": "resource_search",
-            "path": "config/tools/search/resource_search.yaml",
-            "label": "资源搜索配置"
+  "id": "resource_search_tool",
+  "name": "Resource Search Tool",
+  "description": "搜索系统内 Agent、工具、Skill 资源的 MCP 工具",
+  "version": "1.0.0",
+  "plugin_type": "tool",
+  "language": "python",
+  "host_type": "sidecar",
+  "entry": "python server.py",
+  "capabilities": {
+    "tools": [
+      {
+        "name": "resource_search",
+        "description": "搜索系统内 Agent、工具、Skill 资源",
+        "render": {
+          "card": "table"
         }
+      }
+    ],
+    "lifecycle_hooks": [
+      "on_load",
+      "on_unload"
     ]
+  },
+  "permissions": {},
+  "priority": 30,
+  "config_files": [
+    {
+      "id": "builtin_tools_config",
+      "path": "config/tools/builtin_tools_config.yaml",
+      "label": "内置工具配置"
+    },
+    {
+      "id": "resource_search",
+      "path": "config/tools/search/resource_search.yaml",
+      "label": "资源搜索配置"
+    }
+  ]
 }

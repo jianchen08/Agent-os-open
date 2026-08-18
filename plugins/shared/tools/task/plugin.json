@@ -1,34 +1,33 @@
 {
-    "id": "task_manage_tool",
-    "name": "Task Management Tool",
-    "description": "任务管理 MCP 工具，查询和控制任务生命周期",
-    "version": "1.0.0",
-    "plugin_type": "tool",
-    "language": "python",
-    "host_type": "sidecar",
-    "entry": "python server.py",
-    "capabilities": {
-        "tools": [
-            {
-                "name": "task_manage",
-                "description": "任务管理工具：查询和控制任务生命周期",
-                "render": {
-                    "card": "form",
-                    "title": "任务管理"
-                }
-            }
-        ],
-        "lifecycle_hooks": [
-            "on_load",
-            "on_unload"
-        ]
-    },
-    "dependencies": [],
-    "permissions": {},
-    "priority": 10,
-    "granted_capabilities": [
-        "chat",
-        "pipeline-state",
-        "pipeline-executor"
+  "id": "task_manage_tool",
+  "name": "Task Management Tool",
+  "description": "任务管理 MCP 工具，查询和控制任务生命周期",
+  "version": "1.0.0",
+  "plugin_type": "tool",
+  "language": "python",
+  "host_type": "sidecar",
+  "entry": "python server.py",
+  "capabilities": {
+    "tools": [
+      {
+        "name": "task_manage",
+        "description": "任务管理工具：查询和控制任务生命周期",
+        "render": {
+          "card": "form",
+          "title": "任务管理"
+        }
+      }
+    ],
+    "lifecycle_hooks": [
+      "on_load",
+      "on_unload"
     ]
+  },
+  "permissions": {},
+  "priority": 10,
+  "granted_capabilities": [
+    "chat",
+    "pipeline-state",
+    "pipeline-executor"
+  ]
 }

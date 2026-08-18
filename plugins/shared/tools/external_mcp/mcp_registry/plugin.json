@@ -1,52 +1,51 @@
 {
-    "id": "mcp_registry_search",
-    "name": "MCP Registry Search",
-    "description": "MCP Registry 搜索 MCP 工具",
-    "version": "1.0.0",
-    "plugin_type": "tool",
-    "language": "external",
-    "host_type": "sidecar",
-    "entry": "mcp:external",
-    "mcp": {
-        "transport": "streamable_http",
-        "endpoint": {
-            "url": "https://registry.modelcontextprotocol.io",
-            "headers": {
-                "Accept": "application/json"
-            },
-            "auth": {
-                "type": "api_key",
-                "header_name": "Authorization",
-                "value": "${MCP_REGISTRY_API_KEY}"
-            }
-        }
-    },
-    "capabilities": {
-        "tools": [
-            {
-                "name": "mcp_registry_search",
-                "description": "Search MCP Registry for registered servers"
-            }
-        ]
-    },
-    "dependencies": [],
-    "permissions": {},
-    "priority": 30,
-    "config_files": [
-        {
-            "id": "api_keys",
-            "label": "搜索源密钥",
-            "path": ".env",
-            "target": "env",
-            "fields": [
-                {
-                    "name": "MCP_REGISTRY_API_KEY",
-                    "label": "MCP Registry API Key",
-                    "type": "secret",
-                    "required": true,
-                    "description": "https://registry.modelcontextprotocol.io 的 API Key"
-                }
-            ]
-        }
+  "id": "mcp_registry_search",
+  "name": "MCP Registry Search",
+  "description": "MCP Registry 搜索 MCP 工具",
+  "version": "1.0.0",
+  "plugin_type": "tool",
+  "language": "external",
+  "host_type": "sidecar",
+  "entry": "mcp:external",
+  "mcp": {
+    "transport": "streamable_http",
+    "endpoint": {
+      "url": "https://registry.modelcontextprotocol.io",
+      "headers": {
+        "Accept": "application/json"
+      },
+      "auth": {
+        "type": "api_key",
+        "header_name": "Authorization",
+        "value": "${MCP_REGISTRY_API_KEY}"
+      }
+    }
+  },
+  "capabilities": {
+    "tools": [
+      {
+        "name": "mcp_registry_search",
+        "description": "Search MCP Registry for registered servers"
+      }
     ]
+  },
+  "permissions": {},
+  "priority": 30,
+  "config_files": [
+    {
+      "id": "api_keys",
+      "label": "搜索源密钥",
+      "path": ".env",
+      "target": "env",
+      "fields": [
+        {
+          "name": "MCP_REGISTRY_API_KEY",
+          "label": "MCP Registry API Key",
+          "type": "secret",
+          "required": true,
+          "description": "https://registry.modelcontextprotocol.io 的 API Key"
+        }
+      ]
+    }
+  ]
 }

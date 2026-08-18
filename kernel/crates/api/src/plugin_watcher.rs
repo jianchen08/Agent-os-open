@@ -32,8 +32,8 @@ use agentos_invoker::verify::{
     compare_tools, declared_with_services, parse_actual_tools, rejected_tool_names,
 };
 use agentos_plugin_loader::{
-    dependency_error_for, output_schema_error, provides_methods_unbacked, CapabilityRegistryImpl,
-    PluginEnablement, PluginScopeRegistry,
+    output_schema_error, provides_methods_unbacked, CapabilityRegistryImpl, PluginEnablement,
+    PluginScopeRegistry, ServiceSurface,
 };
 use tokio::sync::mpsc::{self, UnboundedSender};
 use tokio::sync::RwLock;
@@ -82,8 +82,8 @@ pub struct SyncReport {
     /// 插件数——热发现路径此前不过滤 disabled（`agentos-kernel.rs` 原注释自认），
     /// 现与启动期注册循环对齐。
     pub skipped_disabled: usize,
-    /// Phase 0（注册闸依赖完整性）：本轮因非 optional dependencies 引用不存在或
-    /// 版本不满足而被拒绝注册的**新**插件 id。
+    /// Phase 0（注册闸服务依赖，2026-08-18 服务唯一轴）：本轮因 `requires_services`
+    /// 无人提供（能力角色/服务端点未注册）而被拒绝注册的**新**插件 id。
     pub dependency_rejected: Vec<String>,
     /// GAP-6：本轮检测到 manifest 变更并**已重注册**的插件 id（指纹对比）。
     pub changed_plugin_ids: Vec<String>,
@@ -547,6 +547,7 @@ pub async fn sync_once(
         &mut throwaway,
         None,
         true,
+        None,
     )
     .await
 }
@@ -607,6 +608,7 @@ pub async fn sync_once_with_store(
     known_manifest_hashes: &mut HashMap<String, u64>,
     enablement: Option<&PluginEnablement>,
     strict_spawn_fail: bool,
+    contract_states: Option<&crate::contract::ContractLedger>,
 ) -> Result<SyncReport, PluginError> {
     let all = invoker.discover_new_plugins().await?;
     // A3：InProcess(cdylib) 集合 diff 先行（下方 for 循环会 move `all`）。
@@ -619,10 +621,10 @@ pub async fn sync_once_with_store(
     let (kept_refs, skipped_disabled) = filter_enabled_manifests(&all, |id, def| {
         enablement.map_or(true, |e| e.is_enabled(id, def))
     });
-    let present: HashMap<&str, &str> = kept_refs
-        .iter()
-        .map(|m| (m.id.as_str(), m.version.as_str()))
-        .collect();
+    // 服务依赖解析参照"将注册集合"（服务面）：requires_services 的 ns/ns.method 必须被集合内
+    // 某插件提供；disabled 插件不在集合 → 其服务不在面 → 依赖它的插件拒注册（fail-closed）。
+    let kept_owned: Vec<PluginManifest> = kept_refs.iter().map(|m| (*m).clone()).collect();
+    let service_surface = ServiceSurface::from_manifests(&kept_owned);
 
     // G2 安装期一致性校验（公共化 g2_verify_and_sanitize）：对新发现的 tool 插件
     // spawn → tools/list → 对照声明。漂移工具的贡献拒绝注册，其余能力照常；
@@ -634,21 +636,34 @@ pub async fn sync_once_with_store(
         if known_ids.contains(&m.id)
             || (m.capabilities.tools.is_empty() && m.capabilities.services.is_empty())
         {
+            // 已知插件/无 tools+services：不重验，账本保持既有状态（不覆盖）。
             filtered.push(m.clone());
             continue;
         }
-        // 注册闸依赖完整性：新插件非 optional 依赖不存在/版本不满足 → 整插件拒注册。
-        if let Some(err) = dependency_error_for(m, |id| present.get(id).copied()) {
+        // 注册闸服务依赖：新插件 requires_services 不满足（能力角色无人提供/端点未注册）→
+        // 整插件拒注册（fail-closed，与旧 id 依赖同一语义，改按服务面解析）。
+        if let Some(err) = service_surface.first_error_for(m) {
             warn!(
                 target: "plugin_watcher",
                 plugin = %m.id,
                 error = %err.to_string(),
-                "注册闸依赖完整性：拒绝注册（依赖不存在/版本不满足）"
+                "注册闸服务依赖：拒绝注册（能力无人提供/服务未注册）"
             );
+            if let Some(ledger) = contract_states {
+                let mut st = crate::contract::PluginContractState::not_covered(m, true);
+                st.gates.dep_ok = false;
+                st.gates.last_error = Some(err.to_string());
+                ledger.upsert(st);
+            }
             dependency_rejected.push(m.id.clone());
             continue;
         }
         let outcome = g2_verify_and_sanitize(invoker, m.clone(), strict_spawn_fail).await;
+        if let Some(ledger) = contract_states {
+            ledger.upsert(crate::contract::PluginContractState::derived(
+                m, true, Some(&outcome),
+            ));
+        }
         if outcome.drift {
             if outcome.rejected_tools.is_empty() {
                 // 仅 undeclared（实际多暴露）——不拒绝注册，但记录
@@ -770,6 +785,9 @@ pub struct PluginWatcher {
     /// 注册闸 L1：enablement profile。Some 时热发现路径过滤 disabled 插件
     /// （与启动期注册循环对齐）；None = 不过滤（旧行为/测试）。
     enablement: Option<PluginEnablement>,
+    /// 闸2·观测：热发现校验结果收口（boot 已收口全量；此处补热发现新插件的
+    /// 契约状态）。None = 不记录（测试/旧行为）。
+    contract_states: Option<Arc<crate::contract::ContractLedger>>,
     debounce: Duration,
     poll_interval: Duration,
 }
@@ -792,6 +810,7 @@ impl PluginWatcher {
             restart_hook: None,
             manifests_store: None,
             enablement: None,
+            contract_states: None,
             debounce: DEFAULT_DEBOUNCE,
             poll_interval: DEFAULT_POLL_INTERVAL,
         }
@@ -832,6 +851,15 @@ impl PluginWatcher {
         self
     }
 
+    /// 注入闸2·观测账本：热发现校验结果收口（新插件契约状态写入）。
+    pub fn with_contract_states(
+        mut self,
+        contract_states: Arc<crate::contract::ContractLedger>,
+    ) -> Self {
+        self.contract_states = Some(contract_states);
+        self
+    }
+
     /// 自定义防抖窗口（测试用短值加速）。
     pub fn with_debounce(mut self, debounce: Duration) -> Self {
         self.debounce = debounce;
@@ -864,6 +892,7 @@ impl PluginWatcher {
             restart_hook,
             manifests_store,
             enablement,
+            contract_states,
             debounce,
             poll_interval,
         } = self;
@@ -925,6 +954,7 @@ impl PluginWatcher {
                     g2_strict_env_enabled(
                         std::env::var("AGENTOS_G2_STRICT_SPAWN_FAIL").ok(),
                     ),
+                    contract_states.as_deref(),
                 )
                 .await
                 {
@@ -1366,6 +1396,7 @@ mod tests {
         let report = sync_once_with_store(
             &invoker, &registry_arc, None, &mut known, &mut None, None, &mut HashMap::new(),
             None, false,
+            None,
         )
         .await
         .unwrap();
@@ -1524,6 +1555,7 @@ mod tests {
         sync_once_with_store(
             &inv1, &registry_arc, Some(&scopes), &mut known, &mut None,
             Some(&store), &mut hashes, None, true,
+            None,
         )
         .await
         .unwrap();
@@ -1534,6 +1566,7 @@ mod tests {
         let report = sync_once_with_store(
             &inv2, &registry_arc, Some(&scopes), &mut known, &mut None,
             Some(&store), &mut hashes, None, true,
+            None,
         )
         .await
         .unwrap();
@@ -1552,6 +1585,7 @@ mod tests {
         let report3 = sync_once_with_store(
             &inv2, &registry_arc, Some(&scopes), &mut known, &mut None,
             Some(&store), &mut hashes, None, true,
+            None,
         )
         .await
         .unwrap();
@@ -1571,6 +1605,7 @@ mod tests {
         sync_once_with_store(
             &inv1, &registry_arc, Some(&scopes), &mut known, &mut None, None, &mut hashes,
             None, true,
+            None,
         )
         .await
         .unwrap();
@@ -1583,6 +1618,7 @@ mod tests {
         sync_once_with_store(
             &inv2, &registry_arc, Some(&scopes), &mut known, &mut None, None, &mut hashes,
             None, true,
+            None,
         )
         .await
         .unwrap();
@@ -1798,6 +1834,7 @@ mod tests {
         let report = sync_once_with_store(
             &invoker, &registry_arc, None, &mut known, &mut None, None, &mut HashMap::new(),
             Some(&enablement), true,
+            None,
         )
         .await
         .unwrap();
@@ -1807,22 +1844,18 @@ mod tests {
         assert!(ids.contains(&"a".to_string()) && ids.contains(&"c".to_string()));
     }
 
-    /// 注册闸依赖完整性：新插件引用不存在的插件 id → 整插件拒绝注册。
+    /// 注册闸服务依赖（服务唯一轴）：新插件 requires_services 无人提供 → 整插件拒绝注册。
     #[tokio::test]
     async fn sync_rejects_new_plugin_with_missing_required_dep() {
-        use agentos_core::traits::Dependency;
         let mut m = mk_manifest("dep_app", "tool", &["t_a"], false);
-        m.dependencies = vec![Dependency {
-            plugin_id: "ghost".to_string(),
-            optional: false,
-            min_version: None,
-        }];
+        m.requires_services = vec!["ghost.read".to_string()];
         let invoker = MockInvoker::new(vec![m]);
         let registry_arc = std::sync::Arc::new(CapabilityRegistryImpl::new());
         let mut known = HashSet::new();
         let report = sync_once_with_store(
             &invoker, &registry_arc, None, &mut known, &mut None, None, &mut HashMap::new(),
             None, true,
+            None,
         )
         .await
         .unwrap();

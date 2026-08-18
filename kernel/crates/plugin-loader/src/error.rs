@@ -25,9 +25,6 @@ pub enum LoaderError {
     #[error("capability not found: {name}")]
     CapabilityNotFound { name: String },
 
-    #[error("dependency error: {message}")]
-    Dependency { message: String },
-
     #[error("IO error: {message}")]
     Io { message: String },
 }

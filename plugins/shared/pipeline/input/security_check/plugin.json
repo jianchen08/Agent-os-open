@@ -25,7 +25,6 @@
       "on_unload"
     ]
   },
-  "dependencies": [],
   "permissions": {},
   "priority": 50,
   "config_files": [

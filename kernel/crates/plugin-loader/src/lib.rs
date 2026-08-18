@@ -29,7 +29,7 @@ pub use error::LoaderError;
 pub use loader::{AllowlistConfig, AllowlistEntry, AllowlistMode, PluginLoaderImpl};
 pub use native_loader::NativePluginLoader;
 pub use registry::{
-    dependency_error_for, output_schema_error, provides_methods_unbacked,
-    sort_manifests_topologically, validate_dependencies, version_gte, CapabilityRegistryImpl,
-    DependencyResolverImpl, PluginScope, PluginScopeRegistry,
+    output_schema_error, provides_methods_unbacked, resolve_requires_services,
+    sort_manifests_topologically, CapabilityRegistryImpl, PluginScope, PluginScopeRegistry,
+    ServiceDepError, ServiceSurface,
 };

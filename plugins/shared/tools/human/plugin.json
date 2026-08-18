@@ -144,7 +144,6 @@
       }
     ]
   },
-  "dependencies": [],
   "permissions": {},
   "priority": 15,
   "activation": "eager"

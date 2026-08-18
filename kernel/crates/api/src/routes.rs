@@ -120,6 +120,10 @@ pub struct AppState {
     /// M1：widget 指标推送共享绑定表（禁用插件时移除其绑定，broadcaster 下 tick 生效）。
     /// None = 未启用 widget 指标推送。
     pub widget_bindings: Option<Arc<parking_lot::RwLock<Vec<WidgetBinding>>>>,
+    /// 闸2·观测：插件契约状态账本（boot/热发现/reenable/validate-all 收口写入）。
+    /// 只读端点 `GET /api/v1/plugins/contract-status` 消费；未接线 = 空账本
+    /// （端点照常返回 manifest 派生的 not_covered 缺省）。
+    pub contract_states: Arc<crate::contract::ContractLedger>,
 }
 
 impl AppState {
@@ -148,6 +152,7 @@ impl AppState {
             config_center: None,
             plugin_scopes: Arc::new(PluginScopeRegistry::new()),
             widget_bindings: None,
+            contract_states: Arc::new(crate::contract::ContractLedger::new()),
         }
     }
 
@@ -176,6 +181,7 @@ impl AppState {
             config_center: None,
             plugin_scopes: Arc::new(PluginScopeRegistry::new()),
             widget_bindings: None,
+            contract_states: Arc::new(crate::contract::ContractLedger::new()),
         }
     }
 
@@ -240,6 +246,7 @@ impl AppState {
             config_center: None,
             plugin_scopes: Arc::new(PluginScopeRegistry::new()),
             widget_bindings: None,
+            contract_states: Arc::new(crate::contract::ContractLedger::new()),
         }
     }
 
@@ -264,6 +271,15 @@ impl AppState {
         bindings: Arc<parking_lot::RwLock<Vec<WidgetBinding>>>,
     ) -> Self {
         self.widget_bindings = Some(bindings);
+        self
+    }
+
+    /// 注入闸2·观测的插件契约状态账本（boot 填健康度后注入）。
+    pub fn with_contract_states(
+        mut self,
+        contract_states: Arc<crate::contract::ContractLedger>,
+    ) -> Self {
+        self.contract_states = contract_states;
         self
     }
 
@@ -1546,7 +1562,8 @@ pub async fn system_restart_handler(
 ///
 /// 语义：spawn → 校验 → 回收（新 spawn 的连接校验后 kill，不破坏懒加载）；
 /// 校验失败（spawn 失败 / host 不支持）不阻断，插件标记 `error` 并继续。
-/// 结果只报告不处置（安装路径的处置见 plugin_watcher 的拒绝注册）。
+/// 结果报告 + **写闸2·观测账本**（`state.contract_states`，处置=安装路径的
+/// plugin_watcher 拒绝注册已做；此处为人工巡检的收口，见契约闸门方案 Phase2）。
 pub async fn validate_all_plugins_handler(
     axum::extract::State(state): axum::extract::State<AppState>,
 ) -> axum::Json<serde_json::Value> {
@@ -1557,13 +1574,18 @@ pub async fn validate_all_plugins_handler(
             "reports": [],
         }));
     };
+    let enabled_ids = state.enabled_plugin_ids.read().await.clone();
+    let ledger = state.contract_states.clone();
     let mut reports: Vec<serde_json::Value> = Vec::new();
     let mut clean = 0usize;
     let mut drifted = 0usize;
     let mut errors = 0usize;
     for m in state.manifests.read().await.iter() {
+        let enabled = enabled_ids.contains(&m.id);
         if m.capabilities.tools.is_empty() {
-            continue; // 非 tool 插件无工具可对照
+            // 非 tool 插件无工具可对照：登记 not_covered 缺省（诚实标未覆盖）
+            ledger.upsert(crate::contract::PluginContractState::not_covered(m, enabled));
+            continue;
         }
         if m.host_type != agentos_core::traits::HostType::Sidecar {
             reports.push(json!({
@@ -1572,6 +1594,7 @@ pub async fn validate_all_plugins_handler(
                 "reason": format!("host_type {:?} 暂无 describe 通道（G2 渐进落地）", m.host_type),
                 "mismatches": [],
             }));
+            ledger.upsert(crate::contract::PluginContractState::not_covered(m, enabled));
             continue;
         }
         match invoker.list_plugin_tools(&m.id).await {
@@ -1606,6 +1629,29 @@ pub async fn validate_all_plugins_handler(
                 } else {
                     drifted += 1;
                 }
+                // 写健康度：被拒工具 = missing/schema_mismatch（undeclared 仅记录不拒）
+                let rejected: Vec<String> = mismatches
+                    .iter()
+                    .filter_map(|mm| match mm {
+                        agentos_invoker::verify::VerifyMismatch::Missing { name } => {
+                            Some(name.clone())
+                        }
+                        agentos_invoker::verify::VerifyMismatch::SchemaMismatch { name, .. } => {
+                            Some(name.clone())
+                        }
+                        agentos_invoker::verify::VerifyMismatch::Undeclared { .. } => None,
+                    })
+                    .collect();
+                let g2o = crate::plugin_watcher::G2VerifyOutcome {
+                    manifest: m.clone(),
+                    rejected_tools: rejected,
+                    drift: !mismatches.is_empty(),
+                    spawn_failed: false,
+                    smoke_failed: false,
+                };
+                ledger.upsert(crate::contract::PluginContractState::derived(
+                    m, enabled, Some(&g2o),
+                ));
                 reports.push(json!({
                     "plugin_id": m.id,
                     "status": if mismatches.is_empty() { "clean" } else { "drifted" },
@@ -1617,6 +1663,10 @@ pub async fn validate_all_plugins_handler(
             }
             Err(e) => {
                 errors += 1;
+                // 写健康度：spawn/上报不可用 = not_covered（不是验出漂移），记 reason
+                let mut st = crate::contract::PluginContractState::not_covered(m, enabled);
+                st.gates.last_error = Some(e.message.clone());
+                ledger.upsert(st);
                 reports.push(json!({
                     "plugin_id": m.id,
                     "status": "error",
@@ -1632,6 +1682,26 @@ pub async fn validate_all_plugins_handler(
         "drifted": drifted,
         "errors": errors,
         "reports": reports,
+    }))
+}
+
+/// GET /api/v1/plugins/contract-status — 闸2·观测：每插件契约状态（只读）。
+///
+/// 只读账本（boot/热发现/reenable/validate-all 写入，`state.contract_states`）；
+/// 请求时不重跑校验（"结果前置复用"，契约闸门方案 §1.7）。未登记插件补
+/// `not_covered` 缺省（诚实标注未覆盖，不假装绿）。响应 `{ plugins, ... }`
+/// 信封，前端 `parseContractStatus` 兼容。
+pub async fn plugins_contract_status_handler(
+    axum::extract::State(state): axum::extract::State<AppState>,
+) -> axum::Json<serde_json::Value> {
+    let enabled_ids = state.enabled_plugin_ids.read().await.clone();
+    let manifests = state.manifests.read().await.clone();
+    let items =
+        crate::contract::contract_statuses(&state.contract_states, &manifests, &enabled_ids);
+    axum::Json(json!({
+        "plugins": items,
+        "count": items.len(),
+        "generated_at": crate::contract::now_ms(),
     }))
 }
 
@@ -1786,6 +1856,8 @@ pub async fn plugins_set_enabled_handler(
                             // 净化后 manifest 重注册，禁止把"声明与实现不服"的能力在启用
                             // 时带进来（AGENTOS_G2_STRICT_SPAWN_FAIL=0 回退 lenient）。
                             let mut manifest_for_register = m.clone();
+                            let mut g2_outcome: Option<crate::plugin_watcher::G2VerifyOutcome> =
+                                None;
                             if let Some(invoker) = &state.invoker {
                                 let strict = crate::plugin_watcher::g2_strict_env_enabled(
                                     std::env::var("AGENTOS_G2_STRICT_SPAWN_FAIL").ok(),
@@ -1796,6 +1868,7 @@ pub async fn plugins_set_enabled_handler(
                                     strict,
                                 )
                                 .await;
+                                g2_outcome = Some(outcome.clone());
                                 if outcome.drift || outcome.spawn_failed {
                                     tracing::warn!(
                                         target: "plugin-enablement",
@@ -1807,6 +1880,12 @@ pub async fn plugins_set_enabled_handler(
                                     manifest_for_register = outcome.manifest;
                                 }
                             }
+                            // 闸2·观测：启用复核结果收口（无 invoker = not_covered 缺省）
+                            state.contract_states.upsert(
+                                crate::contract::PluginContractState::derived(
+                                    m, true, g2_outcome.as_ref(),
+                                ),
+                            );
                             let (tools, http_routes) =
                                 crate::plugin_lifecycle::reenable_plugin_capabilities(
                                     &manifest_for_register,
@@ -1833,6 +1912,18 @@ pub async fn plugins_set_enabled_handler(
                 } else {
                     // M1：先经 scope 收回全部登记（registry 四维 + broadcaster 绑定），
                     // 再 clear_plugin 兜底（scope 无登记的直连注册路径仍被覆盖）。
+                    // 闸2·观测：禁用收口登记 not_covered（enabled=false，账本旧值作废）。
+                    if let Some(m) = state
+                        .manifests
+                        .read()
+                        .await
+                        .iter()
+                        .find(|m| m.id == plugin_id)
+                    {
+                        state.contract_states.upsert(
+                            crate::contract::PluginContractState::not_covered(m, false),
+                        );
+                    }
                     state.plugin_scopes.revoke(&plugin_id);
                     if let Some(bindings) = &state.widget_bindings {
                         remove_plugin_bindings(bindings, &plugin_id);

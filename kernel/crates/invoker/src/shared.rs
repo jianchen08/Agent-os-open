@@ -116,7 +116,7 @@ mod tests {
             host_type: HostType::InProcess,
             entry: String::new(),
             capabilities: ManifestCapabilities::default(),
-            dependencies: vec![],
+            requires_services: vec![],
             permissions: ManifestPermissions::default(),
             error_policy: Default::default(),
             priority: 50,

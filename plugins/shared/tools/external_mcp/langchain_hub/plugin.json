@@ -1,53 +1,52 @@
 {
-    "id": "langchain_hub_search",
-    "name": "LangChain Hub Search",
-    "description": "LangChain Hub / LangSmith 平台适配器，搜索提示词模板和工具",
-    "version": "1.0.0",
-    "plugin_type": "tool",
-    "language": "external",
-    "host_type": "sidecar",
-    "entry": "mcp:external",
-    "mcp": {
-        "transport": "streamable_http",
-        "endpoint": {
-            "url": "https://api.smith.langchain.com/v1/repo/search",
-            "headers": {
-                "Accept": "application/json"
-            },
-            "auth": {
-                "type": "api_key",
-                "header_name": "x-api-key",
-                "value": "${LANGSMITH_API_KEY}",
-                "required": false
-            }
-        }
-    },
-    "capabilities": {
-        "tools": [
-            {
-                "name": "langchain_hub_search",
-                "description": "Search LangChain Hub for prompt templates and tools. Parameters: query (search keyword), repo_type (prompt/tool), limit (max results)."
-            }
-        ]
-    },
-    "dependencies": [],
-    "permissions": {},
-    "priority": 30,
-    "config_files": [
-        {
-            "id": "api_keys",
-            "label": "搜索源密钥",
-            "path": ".env",
-            "target": "env",
-            "fields": [
-                {
-                    "name": "LANGSMITH_API_KEY",
-                    "label": "LangSmith API Key",
-                    "type": "secret",
-                    "required": false,
-                    "description": "LangSmith 平台（https://smith.langchain.com）API Key，可选"
-                }
-            ]
-        }
+  "id": "langchain_hub_search",
+  "name": "LangChain Hub Search",
+  "description": "LangChain Hub / LangSmith 平台适配器，搜索提示词模板和工具",
+  "version": "1.0.0",
+  "plugin_type": "tool",
+  "language": "external",
+  "host_type": "sidecar",
+  "entry": "mcp:external",
+  "mcp": {
+    "transport": "streamable_http",
+    "endpoint": {
+      "url": "https://api.smith.langchain.com/v1/repo/search",
+      "headers": {
+        "Accept": "application/json"
+      },
+      "auth": {
+        "type": "api_key",
+        "header_name": "x-api-key",
+        "value": "${LANGSMITH_API_KEY}",
+        "required": false
+      }
+    }
+  },
+  "capabilities": {
+    "tools": [
+      {
+        "name": "langchain_hub_search",
+        "description": "Search LangChain Hub for prompt templates and tools. Parameters: query (search keyword), repo_type (prompt/tool), limit (max results)."
+      }
     ]
+  },
+  "permissions": {},
+  "priority": 30,
+  "config_files": [
+    {
+      "id": "api_keys",
+      "label": "搜索源密钥",
+      "path": ".env",
+      "target": "env",
+      "fields": [
+        {
+          "name": "LANGSMITH_API_KEY",
+          "label": "LangSmith API Key",
+          "type": "secret",
+          "required": false,
+          "description": "LangSmith 平台（https://smith.langchain.com）API Key，可选"
+        }
+      ]
+    }
+  ]
 }

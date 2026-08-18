@@ -1,29 +1,28 @@
 {
-    "id": "memory_tool",
-    "name": "Memory Tool",
-    "description": "知识记忆存储和检索 MCP 工具",
-    "version": "1.0.0",
-    "plugin_type": "tool",
-    "language": "python",
-    "host_type": "sidecar",
-    "entry": "python server.py",
-    "capabilities": {
-        "tools": [
-            {
-                "name": "memory",
-                "description": "存储和检索知识、情景记忆",
-                "render": {
-                    "card": "form",
-                    "title": "记忆操作"
-                }
-            }
-        ],
-        "lifecycle_hooks": [
-            "on_load",
-            "on_unload"
-        ]
-    },
-    "dependencies": [],
-    "permissions": {},
-    "priority": 25
+  "id": "memory_tool",
+  "name": "Memory Tool",
+  "description": "知识记忆存储和检索 MCP 工具",
+  "version": "1.0.0",
+  "plugin_type": "tool",
+  "language": "python",
+  "host_type": "sidecar",
+  "entry": "python server.py",
+  "capabilities": {
+    "tools": [
+      {
+        "name": "memory",
+        "description": "存储和检索知识、情景记忆",
+        "render": {
+          "card": "form",
+          "title": "记忆操作"
+        }
+      }
+    ],
+    "lifecycle_hooks": [
+      "on_load",
+      "on_unload"
+    ]
+  },
+  "permissions": {},
+  "priority": 25
 }

@@ -137,7 +137,6 @@
       "on_unload"
     ]
   },
-  "dependencies": [],
   "permissions": {},
   "priority": 40
 }

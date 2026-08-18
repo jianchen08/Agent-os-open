@@ -1,29 +1,28 @@
 {
-    "id": "download_tool",
-    "name": "Download Tool",
-    "description": "通用文件下载 MCP 工具，支持多连接分段下载和断点续传",
-    "version": "1.0.0",
-    "plugin_type": "tool",
-    "language": "python",
-    "host_type": "sidecar",
-    "entry": "python server.py",
-    "capabilities": {
-        "tools": [
-            {
-                "name": "download",
-                "description": "通用文件下载工具，支持多连接分段下载、断点续传",
-                "render": {
-                    "card": "file",
-                    "title": "下载完成"
-                }
-            }
-        ],
-        "lifecycle_hooks": [
-            "on_load",
-            "on_unload"
-        ]
-    },
-    "dependencies": [],
-    "permissions": {},
-    "priority": 30
+  "id": "download_tool",
+  "name": "Download Tool",
+  "description": "通用文件下载 MCP 工具，支持多连接分段下载和断点续传",
+  "version": "1.0.0",
+  "plugin_type": "tool",
+  "language": "python",
+  "host_type": "sidecar",
+  "entry": "python server.py",
+  "capabilities": {
+    "tools": [
+      {
+        "name": "download",
+        "description": "通用文件下载工具，支持多连接分段下载、断点续传",
+        "render": {
+          "card": "file",
+          "title": "下载完成"
+        }
+      }
+    ],
+    "lifecycle_hooks": [
+      "on_load",
+      "on_unload"
+    ]
+  },
+  "permissions": {},
+  "priority": 30
 }

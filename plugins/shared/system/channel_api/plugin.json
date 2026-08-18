@@ -59,7 +59,6 @@
       }
     ]
   },
-  "dependencies": [],
   "permissions": {},
   "priority": 50,
   "requires_content": 5,
@@ -1725,7 +1724,6 @@
       "description": "files 域：获取支持的文件类型"
     }
   ],
-
   "config_files": [
     {
       "id": "concurrency",
@@ -1733,17 +1731,72 @@
       "label": "并发设置",
       "description": "A2：并发配置类型化表单（替代硬编码 ConcurrencySettingsPage）",
       "fields": [
-        { "name": "task.max_concurrent_tasks", "type": "number", "label": "最大并发任务数", "min": 1 },
-        { "name": "task.task_max_workers", "type": "number", "label": "线程池大小", "min": 1 },
-        { "name": "task.task_timeout", "type": "number", "label": "任务超时（秒）", "min": 1 },
-        { "name": "agent.l1_max_concurrent", "type": "number", "label": "L1 并发", "min": 1 },
-        { "name": "agent.l2_max_concurrent", "type": "number", "label": "L2 并发", "min": 1 },
-        { "name": "agent.l3_max_concurrent", "type": "number", "label": "L3 并发", "min": 1 },
-        { "name": "workflow.max_concurrent", "type": "number", "label": "工作流并发", "min": 1 },
-        { "name": "llm.zhipu_max_concurrent", "type": "number", "label": "Zhipu 并发", "min": 1 },
-        { "name": "llm.openai_max_concurrent", "type": "number", "label": "OpenAI 并发", "min": 1 },
-        { "name": "llm.anthropic_max_concurrent", "type": "number", "label": "Anthropic 并发", "min": 1 },
-        { "name": "llm.default_max_concurrent", "type": "number", "label": "默认模型并发", "min": 1 }
+        {
+          "name": "task.max_concurrent_tasks",
+          "type": "number",
+          "label": "最大并发任务数",
+          "min": 1
+        },
+        {
+          "name": "task.task_max_workers",
+          "type": "number",
+          "label": "线程池大小",
+          "min": 1
+        },
+        {
+          "name": "task.task_timeout",
+          "type": "number",
+          "label": "任务超时（秒）",
+          "min": 1
+        },
+        {
+          "name": "agent.l1_max_concurrent",
+          "type": "number",
+          "label": "L1 并发",
+          "min": 1
+        },
+        {
+          "name": "agent.l2_max_concurrent",
+          "type": "number",
+          "label": "L2 并发",
+          "min": 1
+        },
+        {
+          "name": "agent.l3_max_concurrent",
+          "type": "number",
+          "label": "L3 并发",
+          "min": 1
+        },
+        {
+          "name": "workflow.max_concurrent",
+          "type": "number",
+          "label": "工作流并发",
+          "min": 1
+        },
+        {
+          "name": "llm.zhipu_max_concurrent",
+          "type": "number",
+          "label": "Zhipu 并发",
+          "min": 1
+        },
+        {
+          "name": "llm.openai_max_concurrent",
+          "type": "number",
+          "label": "OpenAI 并发",
+          "min": 1
+        },
+        {
+          "name": "llm.anthropic_max_concurrent",
+          "type": "number",
+          "label": "Anthropic 并发",
+          "min": 1
+        },
+        {
+          "name": "llm.default_max_concurrent",
+          "type": "number",
+          "label": "默认模型并发",
+          "min": 1
+        }
       ]
     },
     {
@@ -1752,13 +1805,46 @@
       "label": "API 设置",
       "description": "A2：API 端点/限流类型化表单（替代硬编码 ApiSettingsPage；cors_origins 走 KV 逃生口）",
       "fields": [
-        { "name": "endpoint.base_url", "type": "string", "label": "Base URL" },
-        { "name": "endpoint.version", "type": "string", "label": "API Version" },
-        { "name": "endpoint.timeout", "type": "number", "label": "超时时间（秒）", "min": 1 },
-        { "name": "rate_limit.global_limit", "type": "string", "label": "全局限流", "placeholder": "100/minute" },
-        { "name": "rate_limit.auth", "type": "string", "label": "认证限流", "placeholder": "5/minute" },
-        { "name": "rate_limit.tasks", "type": "string", "label": "任务限流", "placeholder": "20/minute" },
-        { "name": "rate_limit.websocket", "type": "string", "label": "WebSocket 限流", "placeholder": "50/minute" }
+        {
+          "name": "endpoint.base_url",
+          "type": "string",
+          "label": "Base URL"
+        },
+        {
+          "name": "endpoint.version",
+          "type": "string",
+          "label": "API Version"
+        },
+        {
+          "name": "endpoint.timeout",
+          "type": "number",
+          "label": "超时时间（秒）",
+          "min": 1
+        },
+        {
+          "name": "rate_limit.global_limit",
+          "type": "string",
+          "label": "全局限流",
+          "placeholder": "100/minute"
+        },
+        {
+          "name": "rate_limit.auth",
+          "type": "string",
+          "label": "认证限流",
+          "placeholder": "5/minute"
+        },
+        {
+          "name": "rate_limit.tasks",
+          "type": "string",
+          "label": "任务限流",
+          "placeholder": "20/minute"
+        },
+        {
+          "name": "rate_limit.websocket",
+          "type": "string",
+          "label": "WebSocket 限流",
+          "placeholder": "50/minute"
+        }
       ]
     }
   ],
@@ -1783,13 +1869,19 @@
               "key": "enable",
               "label": "启用",
               "url": "/ext/channel_api/triggers/{id}/enable",
-              "when": { "key": "enabled", "equals": false }
+              "when": {
+                "key": "enabled",
+                "equals": false
+              }
             },
             {
               "key": "disable",
               "label": "禁用",
               "url": "/ext/channel_api/triggers/{id}/disable",
-              "when": { "key": "enabled", "equals": true }
+              "when": {
+                "key": "enabled",
+                "equals": true
+              }
             },
             {
               "key": "delete",
@@ -1822,9 +1914,18 @@
               "label": "类型",
               "required": true,
               "options": [
-                { "label": "定时", "value": "schedule" },
-                { "label": "事件", "value": "event" },
-                { "label": "手动", "value": "manual" }
+                {
+                  "label": "定时",
+                  "value": "schedule"
+                },
+                {
+                  "label": "事件",
+                  "value": "event"
+                },
+                {
+                  "label": "手动",
+                  "value": "manual"
+                }
               ]
             },
             {

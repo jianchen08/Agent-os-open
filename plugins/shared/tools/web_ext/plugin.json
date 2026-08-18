@@ -1,40 +1,39 @@
 {
-    "id": "web_operate_tool",
-    "name": "Web Operate Tool",
-    "description": "Web 操作 MCP 工具（HTTP 请求和网页抓取）",
-    "version": "1.0.0",
-    "plugin_type": "tool",
-    "language": "python",
-    "host_type": "sidecar",
-    "entry": "python server.py",
-    "capabilities": {
-        "tools": [
-            {
-                "name": "web_operate",
-                "description": "Web 操作：HTTP 请求和网页抓取",
-                "render": {
-                    "card": "web"
-                }
-            }
-        ],
-        "lifecycle_hooks": [
-            "on_load",
-            "on_unload"
-        ]
-    },
-    "dependencies": [],
-    "permissions": {},
-    "priority": 30,
-    "config_files": [
-        {
-            "id": "web_fetch",
-            "path": "config/tools/web/fetch.yaml",
-            "label": "网页抓取配置"
-        },
-        {
-            "id": "web_operate",
-            "path": "config/tools/web/web_operate.yaml",
-            "label": "网页操作配置"
+  "id": "web_operate_tool",
+  "name": "Web Operate Tool",
+  "description": "Web 操作 MCP 工具（HTTP 请求和网页抓取）",
+  "version": "1.0.0",
+  "plugin_type": "tool",
+  "language": "python",
+  "host_type": "sidecar",
+  "entry": "python server.py",
+  "capabilities": {
+    "tools": [
+      {
+        "name": "web_operate",
+        "description": "Web 操作：HTTP 请求和网页抓取",
+        "render": {
+          "card": "web"
         }
+      }
+    ],
+    "lifecycle_hooks": [
+      "on_load",
+      "on_unload"
     ]
+  },
+  "permissions": {},
+  "priority": 30,
+  "config_files": [
+    {
+      "id": "web_fetch",
+      "path": "config/tools/web/fetch.yaml",
+      "label": "网页抓取配置"
+    },
+    {
+      "id": "web_operate",
+      "path": "config/tools/web/web_operate.yaml",
+      "label": "网页操作配置"
+    }
+  ]
 }

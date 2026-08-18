@@ -157,7 +157,6 @@
       "on_unload"
     ]
   },
-  "dependencies": [],
   "config_files": [
     {
       "id": "dsh_plugins",

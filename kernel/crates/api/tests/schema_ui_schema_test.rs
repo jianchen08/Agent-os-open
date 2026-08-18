@@ -27,7 +27,7 @@ fn manifest_with_ui(
         host_type: HostType::Sidecar,
         entry: "python server.py".to_string(),
         capabilities: Default::default(),
-        dependencies: vec![],
+        requires_services: vec![],
         permissions: Default::default(),
         error_policy: Default::default(),
         priority: 100,

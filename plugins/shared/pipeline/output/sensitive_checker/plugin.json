@@ -16,7 +16,6 @@
     "route_signals": [],
     "lifecycle_hooks": []
   },
-  "dependencies": [],
   "permissions": {},
   "priority": 50
 }

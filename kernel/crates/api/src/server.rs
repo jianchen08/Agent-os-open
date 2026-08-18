@@ -45,9 +45,10 @@ use crate::routes::{
     actions_execute_handler, agents_handler, agents_schema_handler, get_agent_config_handler,
     get_pipeline_config_with_etag, get_plugin_config_with_etag, health_handler,
     metrics_prometheus_handler, pipelines_handler, pipelines_runs_handler, pipelines_state_handler,
-    plugins_set_enabled_handler, plugins_status_handler, put_agent_config_handler,
-    put_pipeline_config_handler, put_plugin_config_handler, schema_handler, serve_upload_handler,
-    system_restart_handler, tools_handler, validate_all_plugins_handler, AppState,
+    plugins_contract_status_handler, plugins_set_enabled_handler, plugins_status_handler,
+    put_agent_config_handler, put_pipeline_config_handler, put_plugin_config_handler, schema_handler,
+    serve_upload_handler, system_restart_handler, tools_handler, validate_all_plugins_handler,
+    AppState,
 };
 use crate::session_routes::{
     create_session_handler, delete_session_handler, list_session_messages_handler,
@@ -144,6 +145,11 @@ pub fn build_router(state: AppState) -> Router {
         .route(
             "/api/v1/plugins/validate-all",
             axum::routing::post(validate_all_plugins_handler),
+        )
+        // 闸2·观测：每插件契约状态（只读账本；三线会师——契约校验 × 三通道 × 面板）
+        .route(
+            "/api/v1/plugins/contract-status",
+            get(plugins_contract_status_handler),
         )
         // G8 优雅重启（admin）：排空 running runs → exit 75，监督者拉起新进程
         .route(
@@ -2126,6 +2132,94 @@ mod tests {
         assert!(resp.0["message"].as_str().is_some());
     }
 
+    /// 闸2·观测：validate-all 写健康度账本（drift→g2=drift+last_error；
+    /// clean→g2=ok），随后 contract-status 把它带进 `{plugins:[...]}` 响应。
+    #[tokio::test]
+    async fn test_validate_all_writes_contract_health_then_status() {
+        let mut state = AppState::new();
+        let mk_manifest = |id: &str, tools: &[&str]| -> agentos_core::traits::PluginManifest {
+            serde_json::from_value(json!({
+                "id": id, "name": id, "version": "1.0.0",
+                "plugin_type": "tool", "language": "python",
+                "host_type": "sidecar", "entry": "python server.py",
+                "capabilities": { "tools": tools.iter().map(|t| {
+                    json!({"name": t, "description": t})
+                }).collect::<Vec<_>>() },
+            }))
+            .expect("valid manifest")
+        };
+        state.manifests = Arc::new(tokio::sync::RwLock::new(vec![
+            mk_manifest("p_drift", &["t1", "ghost"]),
+            mk_manifest("p_clean", &["t2"]),
+        ]));
+        state.enabled_plugin_ids = Arc::new(tokio::sync::RwLock::new(
+            std::collections::HashSet::from(["p_drift".to_string(), "p_clean".to_string()]),
+        ));
+        let invoker = Arc::new(RecordingInvoker {
+            seen: std::sync::Mutex::new(Vec::new()),
+            seen_states: std::sync::Mutex::new(Vec::new()),
+            hooks: std::sync::Mutex::new(Vec::new()),
+            list_tools: std::collections::HashMap::from([
+                (
+                    "p_drift".to_string(),
+                    json!({ "tools": [{"name": "t1", "description": "t1"}] }),
+                ),
+                (
+                    "p_clean".to_string(),
+                    json!({ "tools": [{"name": "t2", "description": "t2"}] }),
+                ),
+            ]),
+        });
+        state.invoker = Some(invoker);
+
+        let resp = validate_all_plugins_handler(axum::extract::State(state.clone())).await;
+        assert_eq!(resp.0["drifted"], 1);
+
+        let status = plugins_contract_status_handler(axum::extract::State(state))
+            .await
+            .0;
+        assert_eq!(status["count"], 2);
+        let plugins = status["plugins"].as_array().unwrap();
+        let by_id = |id: &str| plugins.iter().find(|p| p["plugin_id"] == id).unwrap();
+        let drift_gates = &by_id("p_drift")["gates"];
+        assert_eq!(drift_gates["g2_consistency"], "drift");
+        assert!(drift_gates["last_error"].as_str().unwrap().contains("t1") ||
+                drift_gates["last_error"].as_str().unwrap().contains("ghost"),
+            "漂移工具进 last_error: {:?}", drift_gates["last_error"]);
+        let clean_gates = &by_id("p_clean")["gates"];
+        assert_eq!(clean_gates["g2_consistency"], "ok");
+        assert_eq!(by_id("p_clean")["enabled"], true);
+    }
+
+    /// 闸2·观测：contract-status 契约形状——`{plugins:[...], count}`，账本
+    /// 未登记补 not_covered 缺省，`enabled` 一律以当前快照为准。
+    #[tokio::test]
+    async fn test_contract_status_handler_shape() {
+        let mut state = AppState::new();
+        let m: agentos_core::traits::PluginManifest = serde_json::from_value(json!({
+            "id": "p_svc", "name": "p_svc", "version": "1.0.0",
+            "plugin_type": "system", "language": "python",
+            "host_type": "sidecar", "entry": "python server.py",
+            "capabilities": {},
+        }))
+        .expect("valid manifest");
+        state.manifests = Arc::new(tokio::sync::RwLock::new(vec![m.clone()]));
+        // 未登记：只 enabled，不登记账本 → not_covered 缺省
+        state.enabled_plugin_ids = Arc::new(tokio::sync::RwLock::new(
+            std::collections::HashSet::from(["p_svc".to_string()]),
+        ));
+
+        let status = plugins_contract_status_handler(axum::extract::State(state))
+            .await
+            .0;
+        let plugins = status["plugins"].as_array().unwrap();
+        assert_eq!(plugins.len(), 1);
+        assert_eq!(plugins[0]["plugin_id"], "p_svc");
+        assert_eq!(plugins[0]["enabled"], true);
+        assert_eq!(plugins[0]["gates"]["g2_consistency"], "not_covered");
+        assert_eq!(plugins[0]["gates"]["manifest_schema_valid"], true);
+    }
+
     #[tokio::test]
     async fn test_health_returns_200() {
         let app = build_router(AppState::new());
@@ -3587,7 +3681,7 @@ mod tests {
                     lifecycle_hooks: vec![agentos_core::traits::LifecycleHook::DomainEvent],
                     ..Default::default()
                 },
-                dependencies: vec![],
+                requires_services: vec![],
                 permissions: Default::default(),
                 error_policy: Default::default(),
                 priority: 100,

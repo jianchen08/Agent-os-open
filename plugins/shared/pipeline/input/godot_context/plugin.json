@@ -53,7 +53,6 @@
       "on_unload"
     ]
   },
-  "dependencies": [],
   "permissions": {},
   "priority": 50
 }

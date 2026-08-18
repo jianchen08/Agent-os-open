@@ -1,29 +1,28 @@
 {
-    "id": "resource_merge_tool",
-    "name": "Resource Merge Tool",
-    "description": "基于 git worktree 的资源合并与回滚 MCP 工具",
-    "version": "1.0.0",
-    "plugin_type": "tool",
-    "language": "python",
-    "host_type": "sidecar",
-    "entry": "python server.py",
-    "capabilities": {
-        "tools": [
-            {
-                "name": "resource_merge",
-                "description": "基于 git worktree 的资源合并与回滚工具",
-                "render": {
-                    "card": "form",
-                    "title": "资源合并"
-                }
-            }
-        ],
-        "lifecycle_hooks": [
-            "on_load",
-            "on_unload"
-        ]
-    },
-    "dependencies": [],
-    "permissions": {},
-    "priority": 20
+  "id": "resource_merge_tool",
+  "name": "Resource Merge Tool",
+  "description": "基于 git worktree 的资源合并与回滚 MCP 工具",
+  "version": "1.0.0",
+  "plugin_type": "tool",
+  "language": "python",
+  "host_type": "sidecar",
+  "entry": "python server.py",
+  "capabilities": {
+    "tools": [
+      {
+        "name": "resource_merge",
+        "description": "基于 git worktree 的资源合并与回滚工具",
+        "render": {
+          "card": "form",
+          "title": "资源合并"
+        }
+      }
+    ],
+    "lifecycle_hooks": [
+      "on_load",
+      "on_unload"
+    ]
+  },
+  "permissions": {},
+  "priority": 20
 }

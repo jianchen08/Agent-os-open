@@ -1,25 +1,45 @@
 {
-    "id": "lsp_service",
-    "name": "LSP Service",
-    "description": "LSP 语言服务协议工具（定义跳转/引用查找/诊断/补全/文件跳转）",
-    "version": "1.0.0",
-    "plugin_type": "tool",
-    "language": "python",
-    "host_type": "sidecar",
-    "entry": "python server.py",
-    "capabilities": {
-        "tools": [
-            {"name": "lsp.definition", "description": "跳转到符号定义位置"},
-            {"name": "lsp.references", "description": "查找符号的所有引用位置"},
-            {"name": "lsp.diagnostics", "description": "获取文件的诊断信息（错误和警告）"},
-            {"name": "lsp.completion", "description": "获取代码补全建议"},
-            {"name": "lsp.jump_to_file", "description": "在 IDE 中打开文件并跳转到指定位置"},
-            {"name": "lsp.supported_languages", "description": "获取支持的编程语言列表"}
-        ],
-        "lifecycle_hooks": ["on_load", "on_unload"]
-    },
-    "dependencies": [],
-    "permissions": {},
-    "priority": 30,
-    "requires_content": 3
+  "id": "lsp_service",
+  "name": "LSP Service",
+  "description": "LSP 语言服务协议工具（定义跳转/引用查找/诊断/补全/文件跳转）",
+  "version": "1.0.0",
+  "plugin_type": "tool",
+  "language": "python",
+  "host_type": "sidecar",
+  "entry": "python server.py",
+  "capabilities": {
+    "tools": [
+      {
+        "name": "lsp.definition",
+        "description": "跳转到符号定义位置"
+      },
+      {
+        "name": "lsp.references",
+        "description": "查找符号的所有引用位置"
+      },
+      {
+        "name": "lsp.diagnostics",
+        "description": "获取文件的诊断信息（错误和警告）"
+      },
+      {
+        "name": "lsp.completion",
+        "description": "获取代码补全建议"
+      },
+      {
+        "name": "lsp.jump_to_file",
+        "description": "在 IDE 中打开文件并跳转到指定位置"
+      },
+      {
+        "name": "lsp.supported_languages",
+        "description": "获取支持的编程语言列表"
+      }
+    ],
+    "lifecycle_hooks": [
+      "on_load",
+      "on_unload"
+    ]
+  },
+  "permissions": {},
+  "priority": 30,
+  "requires_content": 3
 }

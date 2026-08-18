@@ -1,53 +1,52 @@
 {
-    "id": "media_tools",
-    "name": "Media Generation Tools",
-    "description": "媒体生成 MCP 工具集（图片/音乐/视频/TTS）",
-    "version": "1.0.0",
-    "plugin_type": "tool",
-    "language": "python",
-    "host_type": "sidecar",
-    "entry": "python server.py",
-    "capabilities": {
-        "tools": [
-            {
-                "name": "image_generate",
-                "description": "图片生成",
-                "render": {
-                    "card": "image",
-                    "title": "图片生成"
-                }
-            },
-            {
-                "name": "music_generate",
-                "description": "音乐生成",
-                "render": {
-                    "card": "file",
-                    "title": "音乐生成"
-                }
-            },
-            {
-                "name": "video_generate",
-                "description": "视频生成",
-                "render": {
-                    "card": "file",
-                    "title": "视频生成"
-                }
-            },
-            {
-                "name": "tts_generate",
-                "description": "文本转语音",
-                "render": {
-                    "card": "file",
-                    "title": "语音生成"
-                }
-            }
-        ],
-        "lifecycle_hooks": [
-            "on_load",
-            "on_unload"
-        ]
-    },
-    "dependencies": [],
-    "permissions": {},
-    "priority": 30
+  "id": "media_tools",
+  "name": "Media Generation Tools",
+  "description": "媒体生成 MCP 工具集（图片/音乐/视频/TTS）",
+  "version": "1.0.0",
+  "plugin_type": "tool",
+  "language": "python",
+  "host_type": "sidecar",
+  "entry": "python server.py",
+  "capabilities": {
+    "tools": [
+      {
+        "name": "image_generate",
+        "description": "图片生成",
+        "render": {
+          "card": "image",
+          "title": "图片生成"
+        }
+      },
+      {
+        "name": "music_generate",
+        "description": "音乐生成",
+        "render": {
+          "card": "file",
+          "title": "音乐生成"
+        }
+      },
+      {
+        "name": "video_generate",
+        "description": "视频生成",
+        "render": {
+          "card": "file",
+          "title": "视频生成"
+        }
+      },
+      {
+        "name": "tts_generate",
+        "description": "文本转语音",
+        "render": {
+          "card": "file",
+          "title": "语音生成"
+        }
+      }
+    ],
+    "lifecycle_hooks": [
+      "on_load",
+      "on_unload"
+    ]
+  },
+  "permissions": {},
+  "priority": 30
 }

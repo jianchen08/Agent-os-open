@@ -31,7 +31,7 @@ fn manifest(plugin_id: &str, plugin_type: PluginType, host_type: HostType) -> Pl
         host_type,
         entry: "server.py".to_string(),
         capabilities: ManifestCapabilities::default(),
-        dependencies: vec![],
+        requires_services: vec![],
         permissions: Default::default(),
         error_policy: Default::default(),
         priority: 100,

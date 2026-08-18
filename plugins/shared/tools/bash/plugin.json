@@ -1,92 +1,140 @@
 {
-    "id": "bash_tool",
-    "name": "Bash Execute Tool",
-    "description": "Bash 命令执行 MCP 工具，支持长时间运行进程和交互式输入。进程状态由 sidecar 内单例 ProcessManager 跨调用维护（execute→input→continue→terminate），会话身份（owner）随内核注入，pid 级操作强制越权校验。",
-    "version": "1.0.0",
-    "plugin_type": "tool",
-    "language": "python",
-    "host_type": "sidecar",
-    "entry": "python server.py",
-    "capabilities": {
-        "tools": [
-            {
-                "name": "bash_execute",
-                "description": "执行 Shell 命令，支持长时间运行进程和交互式输入。不要手动 nohup/setsid/disown/行尾&（本工具自带后台执行，手动后台化会使进程脱离管理）。危险命令（rm -rf /、format、dd if= 等）会被拦截。",
-                "input_schema": {
-                    "type": "object",
-                    "properties": {
-                        "action": {
-                            "type": "string",
-                            "enum": ["execute", "continue", "terminate", "input", "read_log"],
-                            "description": "execute=执行新命令；continue=凭 pid 继续等（仍在跑则等到完成或超时，已完成则直接返回结果）；terminate=凭 pid 终止；input=凭 pid 向等待输入的进程发文本（yes/no、密码等）；read_log=凭 pid 读完整日志（任何时候都能用，进程已结束也能读）。",
-                            "default": "execute"
-                        },
-                        "command": {
-                            "type": "string",
-                            "description": "要执行的Shell命令（action=execute 时必需）"
-                        },
-                        "pid": {
-                            "type": "integer",
-                            "description": "进程ID（action=continue/terminate/input/read_log 时必需，由 execute 或 continue 的 running 返回值提供）"
-                        },
-                        "timeout": {
-                            "type": "integer",
-                            "description": "等待上限秒数（默认30，最大290）。超时不杀进程，返回 running+pid 供继续轮询。",
-                            "default": 30,
-                            "maximum": 290
-                        },
-                        "working_dir": {
-                            "type": "string",
-                            "description": "命令执行的工作目录，默认为当前目录"
-                        },
-                        "input_text": {
-                            "type": "string",
-                            "description": "向运行中进程发送的输入文本（action=input 时必需）。如 yes/no、密码、菜单选项编号。"
-                        },
-                        "force": {
-                            "type": "boolean",
-                            "description": "强制终止（action=terminate 时有效，默认 false）",
-                            "default": false
-                        }
-                    },
-                    "required": []
-                },
-                "output_schema": {
-                    "type": "object",
-                    "properties": {
-                        "status": {"type": "string", "enum": ["completed", "running", "terminated"]},
-                        "pid": {"type": "integer"},
-                        "exit_code": {"type": "integer"},
-                        "output": {"type": "string"},
-                        "summary": {"type": "array", "items": {"type": "string"}},
-                        "elapsed": {"type": "number"},
-                        "message": {"type": "string"},
-                        "error": {"type": "string"}
-                    },
-                    "required": ["status"]
-                },
-                "category": "system",
-                "render": {
-                    "card": "terminal"
-                }
+  "id": "bash_tool",
+  "name": "Bash Execute Tool",
+  "description": "Bash 命令执行 MCP 工具，支持长时间运行进程和交互式输入。进程状态由 sidecar 内单例 ProcessManager 跨调用维护（execute→input→continue→terminate），会话身份（owner）随内核注入，pid 级操作强制越权校验。",
+  "version": "1.0.0",
+  "plugin_type": "tool",
+  "language": "python",
+  "host_type": "sidecar",
+  "entry": "python server.py",
+  "capabilities": {
+    "tools": [
+      {
+        "name": "bash_execute",
+        "description": "执行 Shell 命令，支持长时间运行进程和交互式输入。不要手动 nohup/setsid/disown/行尾&（本工具自带后台执行，手动后台化会使进程脱离管理）。危险命令（rm -rf /、format、dd if= 等）会被拦截。",
+        "input_schema": {
+          "type": "object",
+          "properties": {
+            "action": {
+              "type": "string",
+              "enum": [
+                "execute",
+                "continue",
+                "terminate",
+                "input",
+                "read_log"
+              ],
+              "description": "execute=执行新命令；continue=凭 pid 继续等（仍在跑则等到完成或超时，已完成则直接返回结果）；terminate=凭 pid 终止；input=凭 pid 向等待输入的进程发文本（yes/no、密码等）；read_log=凭 pid 读完整日志（任何时候都能用，进程已结束也能读）。",
+              "default": "execute"
+            },
+            "command": {
+              "type": "string",
+              "description": "要执行的Shell命令（action=execute 时必需）"
+            },
+            "pid": {
+              "type": "integer",
+              "description": "进程ID（action=continue/terminate/input/read_log 时必需，由 execute 或 continue 的 running 返回值提供）"
+            },
+            "timeout": {
+              "type": "integer",
+              "description": "等待上限秒数（默认30，最大290）。超时不杀进程，返回 running+pid 供继续轮询。",
+              "default": 30,
+              "maximum": 290
+            },
+            "working_dir": {
+              "type": "string",
+              "description": "命令执行的工作目录，默认为当前目录"
+            },
+            "input_text": {
+              "type": "string",
+              "description": "向运行中进程发送的输入文本（action=input 时必需）。如 yes/no、密码、菜单选项编号。"
+            },
+            "force": {
+              "type": "boolean",
+              "description": "强制终止（action=terminate 时有效，默认 false）",
+              "default": false
             }
-        ],
-        "lifecycle_hooks": [
-            "on_load",
-            "on_unload"
-        ]
-    },
-    "dependencies": [],
-    "permissions": {
-        "filesystem": {
-            "read_paths": ["*"],
-            "write_paths": ["*"]
+          },
+          "required": []
         },
-        "network": {
-            "allowed_hosts": ["*"]
+        "output_schema": {
+          "type": "object",
+          "properties": {
+            "status": {
+              "type": "string",
+              "enum": [
+                "completed",
+                "running",
+                "terminated"
+              ]
+            },
+            "pid": {
+              "type": "integer"
+            },
+            "exit_code": {
+              "type": "integer"
+            },
+            "output": {
+              "type": "string"
+            },
+            "summary": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "elapsed": {
+              "type": "number"
+            },
+            "message": {
+              "type": "string"
+            },
+            "error": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "status"
+          ]
         },
-        "env_vars": ["*"],
-        "system_calls": ["bash", "sh", "cmd", "wsl", "docker", "powershell", "python", "*"]
+        "category": "system",
+        "render": {
+          "card": "terminal"
+        }
+      }
+    ],
+    "lifecycle_hooks": [
+      "on_load",
+      "on_unload"
+    ]
+  },
+  "permissions": {
+    "filesystem": {
+      "read_paths": [
+        "*"
+      ],
+      "write_paths": [
+        "*"
+      ]
     },
-    "priority": 20
+    "network": {
+      "allowed_hosts": [
+        "*"
+      ]
+    },
+    "env_vars": [
+      "*"
+    ],
+    "system_calls": [
+      "bash",
+      "sh",
+      "cmd",
+      "wsl",
+      "docker",
+      "powershell",
+      "python",
+      "*"
+    ]
+  },
+  "priority": 20
 }

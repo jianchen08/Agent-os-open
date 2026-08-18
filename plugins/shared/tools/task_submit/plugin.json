@@ -1,214 +1,213 @@
 {
-    "id": "task_submit_tool",
-    "name": "Task Submit Tool",
-    "description": "任务提交 MCP 工具，将任务提交给指定 Agent 执行",
-    "version": "1.0.0",
-    "plugin_type": "tool",
-    "language": "python",
-    "host_type": "sidecar",
-    "entry": "python server.py",
-    "capabilities": {
-        "tools": [
-            {
-                "name": "task_submit",
-                "description": "任务提交工具，将任务提交给指定 Agent 执行",
-                "render": {
-                    "card": "form",
-                    "title": "任务提交"
-                },
-                "input_schema": {
+  "id": "task_submit_tool",
+  "name": "Task Submit Tool",
+  "description": "任务提交 MCP 工具，将任务提交给指定 Agent 执行",
+  "version": "1.0.0",
+  "plugin_type": "tool",
+  "language": "python",
+  "host_type": "sidecar",
+  "entry": "python server.py",
+  "capabilities": {
+    "tools": [
+      {
+        "name": "task_submit",
+        "description": "任务提交工具，将任务提交给指定 Agent 执行",
+        "render": {
+          "card": "form",
+          "title": "任务提交"
+        },
+        "input_schema": {
+          "type": "object",
+          "properties": {
+            "target_type": {
+              "type": "string",
+              "enum": [
+                "agent"
+              ],
+              "description": "目标类型，固定为 agent。non_container 必填，container 不需要"
+            },
+            "target_id": {
+              "type": "string",
+              "description": "目标 Agent ID。non_container 必填，container 不需要。如果系统提供了 Agent 映射表，直接使用映射表中的 ID，不要用 resource_search 搜索"
+            },
+            "goal_title": {
+              "type": "string",
+              "description": "任务标题（必填），简短明确"
+            },
+            "goal_description": {
+              "type": "string",
+              "maxLength": 2000,
+              "description": "任务描述（上限 2000 字符）。只写目标和背景，禁止写执行步骤/工具选择/流程顺序；引用文件只写路径（如 docs/report.md），让下级 Agent 自行读取，不要复制文件内容。"
+            },
+            "acceptance_criteria": {
+              "type": "object",
+              "description": "验收标准字典（可选，但推荐填写）。key 为评估指标 ID，value 为配置对象。评估指标 ID 必须从下列内置指标中选取，按验证强度递增：\n- file_check：文件检查（工具自动，验证文件存在性/非空/内容匹配）\n- bash_check：命令检查（工具自动，通过命令退出码判定结果）\n- semantic_check：语义检查（agent 自动，验证意图覆盖/匹配/幻觉等语义层面）\n- human_review：人工审核（人类执行，验证需要人工审批/复核的主观或不可逆判断）\n选用规则：用户要求'人类评估/人工审核/人工确认'时必须用 human_review，不得用 semantic_check 替代；semantic_check 是 agent 自动语义判断，不涉及人类。指标 ID 必须精确匹配，禁止自创或用 value 子字段名（如 pass_threshold）充当 key。",
+              "additionalProperties": {
+                "type": "object",
+                "description": "评估指标配置对象",
+                "properties": {
+                  "input_params": {
                     "type": "object",
-                    "properties": {
-                        "target_type": {
-                            "type": "string",
-                            "enum": [
-                                "agent"
-                            ],
-                            "description": "目标类型，固定为 agent。non_container 必填，container 不需要"
-                        },
-                        "target_id": {
-                            "type": "string",
-                            "description": "目标 Agent ID。non_container 必填，container 不需要。如果系统提供了 Agent 映射表，直接使用映射表中的 ID，不要用 resource_search 搜索"
-                        },
-                        "goal_title": {
-                            "type": "string",
-                            "description": "任务标题（必填），简短明确"
-                        },
-                        "goal_description": {
-                            "type": "string",
-                            "maxLength": 2000,
-                            "description": "任务描述（上限 2000 字符）。只写目标和背景，禁止写执行步骤/工具选择/流程顺序；引用文件只写路径（如 docs/report.md），让下级 Agent 自行读取，不要复制文件内容。"
-                        },
-                        "acceptance_criteria": {
-                            "type": "object",
-                            "description": "验收标准字典（可选，但推荐填写）。key 为评估指标 ID，value 为配置对象。评估指标 ID 必须从下列内置指标中选取，按验证强度递增：\n- file_check：文件检查（工具自动，验证文件存在性/非空/内容匹配）\n- bash_check：命令检查（工具自动，通过命令退出码判定结果）\n- semantic_check：语义检查（agent 自动，验证意图覆盖/匹配/幻觉等语义层面）\n- human_review：人工审核（人类执行，验证需要人工审批/复核的主观或不可逆判断）\n选用规则：用户要求'人类评估/人工审核/人工确认'时必须用 human_review，不得用 semantic_check 替代；semantic_check 是 agent 自动语义判断，不涉及人类。指标 ID 必须精确匹配，禁止自创或用 value 子字段名（如 pass_threshold）充当 key。",
-                            "additionalProperties": {
-                                "type": "object",
-                                "description": "评估指标配置对象",
-                                "properties": {
-                                    "input_params": {
-                                        "type": "object",
-                                        "description": "传递给评估工具的参数。不同指标所需参数不同：file_check 需要 {\"path\": \"src/main.py\"}；bash_check 需要 {\"command\": \"pytest tests/\"}；semantic_check 需要 {\"criteria\": \"评估要求描述\"}；human_review 需要 {\"title\": \"审核标题\", \"mode\": \"choice\"}。"
-                                    },
-                                    "expected_output": {
-                                        "type": "object",
-                                        "description": "预期输出，用于验证评估结果（可选）"
-                                    },
-                                    "pass_threshold": {
-                                        "type": "number",
-                                        "minimum": 0,
-                                        "maximum": 100,
-                                        "description": "任务级别的通过阈值（0-100），优先级高于指标默认阈值"
-                                    }
-                                },
-                                "required": []
-                            }
-                        },
-                        "priority": {
-                            "type": "integer",
-                            "minimum": 1,
-                            "maximum": 10,
-                            "default": 5,
-                            "description": "任务优先级，1-10，数值越大优先级越高"
-                        },
-                        "max_retries": {
-                            "type": "integer",
-                            "minimum": 0,
-                            "default": 3,
-                            "description": "任务失败时的最大重试次数"
-                        },
-                        "task_scope": {
-                            "type": "string",
-                            "enum": [
-                                "non_container",
-                                "container"
-                            ],
-                            "default": "non_container",
-                            "description": "任务范围：non_container（非容器任务，实际执行的任务，必须指定 target_type 和 target_id）。container 仅限 L1 Agent 使用（用于组织复杂长期任务的子任务链），L2 Agent 禁止使用 container"
-                        },
-                        "parent_task_id": {
-                            "type": "string",
-                            "description": "父任务 ID。为容器任务创建子任务时需要指定此参数，将子任务关联到对应的容器。"
-                        },
-                        "workspace": {
-                            "type": "string",
-                            "description": "目标项目路径。指定任务需要操作（读取或修改）的项目目录。**重要**：当任务需要对某个特定文件夹进行读取或修改时，必须设置此参数为该目标文件夹的路径，否则任务将无法定位到正确的目标目录。可用范围（按任务类型）：普通任务可填；容器任务可填（作为容器空间的源项目，系统复制到隔离空间操作，不设置则创建空容器空间）；容器直接子任务**不可填**——工作空间继承容器，显式指定会被拒绝。工作空间拓扑由 workspace_mode 决定（worktree=在目标项目上建隔离副本；plain=直接操作目标目录）；执行环境隔离由 isolation_level 决定，两者独立。"
-                        },
-                        "workspace_mode": {
-                            "type": "string",
-                            "enum": [
-                                "worktree",
-                                "plain"
-                            ],
-                            "description": "工作空间拓扑（普通任务可选，默认 worktree）。worktree：在目标项目上创建 git worktree 隔离操作，不影响原项目（默认）。plain：直接在目标目录工作，不建 worktree、不切分支。与 isolation_level（执行环境容器/宿主）相互独立。容器任务与容器直接子任务**不可选**（容器不直接执行；子任务继承容器空间）。"
-                        },
-                        "isolation_level": {
-                            "type": "string",
-                            "enum": [
-                                "non_isolated",
-                                "isolated"
-                            ],
-                            "description": "执行环境隔离级别（普通任务可选，默认使用系统配置）。non_isolated：非隔离，直接在宿主环境执行。isolated：隔离，在容器执行环境中工作。只决定执行环境，不决定工作空间拓扑（拓扑由 workspace_mode 决定）。容器任务与容器直接子任务**不可选**（容器不直接执行；子任务继承容器）。"
-                        },
-                        "inherit_from": {
-                            "type": "string",
-                            "description": "源任务 ID（被继承的任务）。设置后需同时指定 inherit_mode"
-                        },
-                        "inherit_mode": {
-                            "description": "继承模式（需配合 inherit_from 使用）：\n- \"pipe\"：继承对话管道（消息历史），适合改了目标但保留上下文\n- \"workspace\"：继承工作空间（文件目录），适合换方案但保留文件\n- [\"pipe\",\"workspace\"]：同时继承对话与文件（最常见延续场景）",
-                            "oneOf": [
-                                {
-                                    "type": "string",
-                                    "enum": [
-                                        "pipe",
-                                        "workspace"
-                                    ]
-                                },
-                                {
-                                    "type": "array",
-                                    "items": {
-                                        "type": "string",
-                                        "enum": [
-                                            "pipe",
-                                            "workspace"
-                                        ]
-                                    }
-                                }
-                            ]
-                        }
-                    },
-                    "required": [
-                        "goal_title"
-                    ],
-                    "allOf": [
-                        {
-                            "if": {
-                                "not": {
-                                    "required": [
-                                        "task_scope"
-                                    ],
-                                    "properties": {
-                                        "task_scope": {
-                                            "const": "container"
-                                        }
-                                    }
-                                }
-                            },
-                            "then": {
-                                "required": [
-                                    "target_type",
-                                    "target_id"
-                                ]
-                            }
-                        },
-                        {
-                            "if": {
-                                "required": [
-                                    "task_scope"
-                                ],
-                                "properties": {
-                                    "task_scope": {
-                                        "const": "container"
-                                    }
-                                }
-                            },
-                            "then": {
-                                "not": {
-                                    "anyOf": [
-                                        {
-                                            "required": [
-                                                "target_type"
-                                            ]
-                                        },
-                                        {
-                                            "required": [
-                                                "target_id"
-                                            ]
-                                        },
-                                        {
-                                            "required": [
-                                                "parent_task_id"
-                                            ]
-                                        }
-                                    ]
-                                }
-                            }
-                        }
+                    "description": "传递给评估工具的参数。不同指标所需参数不同：file_check 需要 {\"path\": \"src/main.py\"}；bash_check 需要 {\"command\": \"pytest tests/\"}；semantic_check 需要 {\"criteria\": \"评估要求描述\"}；human_review 需要 {\"title\": \"审核标题\", \"mode\": \"choice\"}。"
+                  },
+                  "expected_output": {
+                    "type": "object",
+                    "description": "预期输出，用于验证评估结果（可选）"
+                  },
+                  "pass_threshold": {
+                    "type": "number",
+                    "minimum": 0,
+                    "maximum": 100,
+                    "description": "任务级别的通过阈值（0-100），优先级高于指标默认阈值"
+                  }
+                },
+                "required": []
+              }
+            },
+            "priority": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 10,
+              "default": 5,
+              "description": "任务优先级，1-10，数值越大优先级越高"
+            },
+            "max_retries": {
+              "type": "integer",
+              "minimum": 0,
+              "default": 3,
+              "description": "任务失败时的最大重试次数"
+            },
+            "task_scope": {
+              "type": "string",
+              "enum": [
+                "non_container",
+                "container"
+              ],
+              "default": "non_container",
+              "description": "任务范围：non_container（非容器任务，实际执行的任务，必须指定 target_type 和 target_id）。container 仅限 L1 Agent 使用（用于组织复杂长期任务的子任务链），L2 Agent 禁止使用 container"
+            },
+            "parent_task_id": {
+              "type": "string",
+              "description": "父任务 ID。为容器任务创建子任务时需要指定此参数，将子任务关联到对应的容器。"
+            },
+            "workspace": {
+              "type": "string",
+              "description": "目标项目路径。指定任务需要操作（读取或修改）的项目目录。**重要**：当任务需要对某个特定文件夹进行读取或修改时，必须设置此参数为该目标文件夹的路径，否则任务将无法定位到正确的目标目录。可用范围（按任务类型）：普通任务可填；容器任务可填（作为容器空间的源项目，系统复制到隔离空间操作，不设置则创建空容器空间）；容器直接子任务**不可填**——工作空间继承容器，显式指定会被拒绝。工作空间拓扑由 workspace_mode 决定（worktree=在目标项目上建隔离副本；plain=直接操作目标目录）；执行环境隔离由 isolation_level 决定，两者独立。"
+            },
+            "workspace_mode": {
+              "type": "string",
+              "enum": [
+                "worktree",
+                "plain"
+              ],
+              "description": "工作空间拓扑（普通任务可选，默认 worktree）。worktree：在目标项目上创建 git worktree 隔离操作，不影响原项目（默认）。plain：直接在目标目录工作，不建 worktree、不切分支。与 isolation_level（执行环境容器/宿主）相互独立。容器任务与容器直接子任务**不可选**（容器不直接执行；子任务继承容器空间）。"
+            },
+            "isolation_level": {
+              "type": "string",
+              "enum": [
+                "non_isolated",
+                "isolated"
+              ],
+              "description": "执行环境隔离级别（普通任务可选，默认使用系统配置）。non_isolated：非隔离，直接在宿主环境执行。isolated：隔离，在容器执行环境中工作。只决定执行环境，不决定工作空间拓扑（拓扑由 workspace_mode 决定）。容器任务与容器直接子任务**不可选**（容器不直接执行；子任务继承容器）。"
+            },
+            "inherit_from": {
+              "type": "string",
+              "description": "源任务 ID（被继承的任务）。设置后需同时指定 inherit_mode"
+            },
+            "inherit_mode": {
+              "description": "继承模式（需配合 inherit_from 使用）：\n- \"pipe\"：继承对话管道（消息历史），适合改了目标但保留上下文\n- \"workspace\"：继承工作空间（文件目录），适合换方案但保留文件\n- [\"pipe\",\"workspace\"]：同时继承对话与文件（最常见延续场景）",
+              "oneOf": [
+                {
+                  "type": "string",
+                  "enum": [
+                    "pipe",
+                    "workspace"
+                  ]
+                },
+                {
+                  "type": "array",
+                  "items": {
+                    "type": "string",
+                    "enum": [
+                      "pipe",
+                      "workspace"
                     ]
+                  }
                 }
+              ]
             }
-        ],
-        "lifecycle_hooks": [
-            "on_load",
-            "on_unload"
-        ]
-    },
-    "dependencies": [],
-    "permissions": {},
-    "priority": 10,
-    "granted_capabilities": [
-        "chat",
-        "tenant-context",
-        "pipeline-state"
+          },
+          "required": [
+            "goal_title"
+          ],
+          "allOf": [
+            {
+              "if": {
+                "not": {
+                  "required": [
+                    "task_scope"
+                  ],
+                  "properties": {
+                    "task_scope": {
+                      "const": "container"
+                    }
+                  }
+                }
+              },
+              "then": {
+                "required": [
+                  "target_type",
+                  "target_id"
+                ]
+              }
+            },
+            {
+              "if": {
+                "required": [
+                  "task_scope"
+                ],
+                "properties": {
+                  "task_scope": {
+                    "const": "container"
+                  }
+                }
+              },
+              "then": {
+                "not": {
+                  "anyOf": [
+                    {
+                      "required": [
+                        "target_type"
+                      ]
+                    },
+                    {
+                      "required": [
+                        "target_id"
+                      ]
+                    },
+                    {
+                      "required": [
+                        "parent_task_id"
+                      ]
+                    }
+                  ]
+                }
+              }
+            }
+          ]
+        }
+      }
+    ],
+    "lifecycle_hooks": [
+      "on_load",
+      "on_unload"
     ]
+  },
+  "permissions": {},
+  "priority": 10,
+  "granted_capabilities": [
+    "chat",
+    "tenant-context",
+    "pipeline-state"
+  ]
 }

@@ -15,6 +15,7 @@ pub mod auth;
 pub mod capability_router;
 pub mod chat_send_handler;
 pub mod config_service;
+pub mod contract;
 pub mod error;
 pub mod http_dispatcher;
 pub mod metrics;

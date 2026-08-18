@@ -297,7 +297,7 @@ mod domain_event_tests {
                 },
                 ..Default::default()
             },
-            dependencies: vec![],
+            requires_services: vec![],
             permissions: Default::default(),
             error_policy: Default::default(),
             priority: 100,
