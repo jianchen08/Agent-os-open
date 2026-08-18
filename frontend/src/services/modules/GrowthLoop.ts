@@ -18,6 +18,7 @@ import { loadRenderIntents } from '@/utils/dshRenderIntent'
 import { loadOutputSchemas } from '@/utils/outputSchemaView'
 import { loadInteractionModes } from '@/utils/interactionModes'
 import { loadViewModes } from '@/utils/viewModeRoutes'
+import { validatePluginDeclaration } from '@/services/pluginDeclarationValidate'
 import type { ChatCardDeclaration } from '@/utils/chatCardInterpreter'
 
 /** 初始化自生长闭环 1. 注册所有预置组件 */
@@ -76,6 +77,37 @@ async function reloadContributionRegistry(): Promise<void> {
     loadRenderIntents(
       (schema as { tools?: Array<{ name?: string; render?: Record<string, unknown> }> }).tools ?? [],
     )
+    // 插件声明合法性校验（Phase 1-C5）：装载时对页面/工具渲染/chat_card/widget 声明
+    // 做结构校验，坏声明不再静默降级——errors/warnings 统一收集上报（健康度观察）。
+    try {
+      const schemaVal = schema as unknown as Record<string, unknown>
+      const pluginContribPages = (((schemaVal.plugin_contributes as
+        Array<Record<string, unknown>> | undefined) ?? [])
+        .flatMap((c) => ((c.contributes as Record<string, unknown[]> | undefined)?.pages ?? [])))
+      const widgetSources = [
+        ...(((schemaVal.agents as Array<Record<string, unknown>> | undefined) ?? [])),
+        ...(((schemaVal.pipelines as Array<Record<string, unknown>> | undefined) ?? [])),
+      ]
+        .map((a) => a.ui_schema)
+        .filter((u): u is { widgets?: unknown } => !!u && typeof u === 'object')
+      const declResult = validatePluginDeclaration({
+        pages: pluginContribPages as Array<Record<string, unknown>>,
+        tools: (schemaVal.tools as Array<Record<string, unknown>> | undefined) ?? [],
+        uiSchemaWidgets: widgetSources.flatMap((u) => (u.widgets ?? []) as never[]),
+      })
+      if (declResult.errors.length > 0) {
+        loggers.websocket.warn(
+          `插件声明校验不通过（${declResult.errors.length} 处，声明可能不生效）:\n${declResult.errors.slice(0, 20).join('\n')}`,
+        )
+      }
+      if (declResult.warnings.length > 0) {
+        loggers.websocket.warn(
+          `插件声明降级警告（${declResult.warnings.length} 处）:\n${declResult.warnings.slice(0, 20).join('\n')}`,
+        )
+      }
+    } catch (err) {
+      loggers.websocket.warn('插件声明校验异常:', err)
+    }
     syncNavItemsFromContributes()
     shortcutRegistry.refresh()
 
