@@ -1,180 +1,230 @@
 {
-  "id": "hindsight_memory_service",
-  "name": "Hindsight Memory Service",
-  "version": "1.0.0",
-  "plugin_type": "system",
-  "language": "python",
-  "host_type": "sidecar",
-  "entry": "python server.py",
-  "capabilities": {
-    "tools": [],
-    "route_signals": [],
-    "lifecycle_hooks": [
-      "on_load",
-      "on_unload"
+    "id": "hindsight_memory_service",
+    "name": "Hindsight Memory Service",
+    "version": "1.0.0",
+    "plugin_type": "system",
+    "language": "python",
+    "host_type": "sidecar",
+    "entry": "python server.py",
+    "capabilities": {
+        "tools": [],
+        "route_signals": [],
+        "lifecycle_hooks": [
+            "on_load",
+            "on_unload"
+        ],
+        "services": [
+            {
+                "name": "hindsight.retain",
+                "description": "Store a memory into a hindsight bank",
+                "input_schema": {
+                    "properties": {
+                        "bank_id": {
+                            "type": "string",
+                            "description": "Memory bank id (tenant isolation key)"
+                        },
+                        "content": {
+                            "type": "string",
+                            "description": "Memory content text"
+                        },
+                        "memory_type": {
+                            "type": "string",
+                            "default": "semantic",
+                            "description": "Memory type tag (goes into metadata for recall filter)"
+                        },
+                        "metadata": {
+                            "type": "object",
+                            "default": {},
+                            "description": "Optional extra metadata"
+                        }
+                    },
+                    "required": [
+                        "content"
+                    ],
+                    "type": "object"
+                }
+            },
+            {
+                "name": "hindsight.recall",
+                "description": "Recall relevant memories from a hindsight bank",
+                "input_schema": {
+                    "properties": {
+                        "bank_id": {
+                            "type": "string",
+                            "description": "Memory bank id (tenant isolation key)"
+                        },
+                        "query": {
+                            "type": "string",
+                            "description": "Recall query"
+                        },
+                        "top_k": {
+                            "type": "integer",
+                            "default": 5,
+                            "minimum": 1,
+                            "maximum": 100
+                        },
+                        "memory_type": {
+                            "type": "string",
+                            "description": "Optional client-side filter by memory_type"
+                        }
+                    },
+                    "required": [
+                        "query"
+                    ],
+                    "type": "object"
+                }
+            },
+            {
+                "name": "hindsight.reflect",
+                "description": "Trigger hindsight reflection/consolidation on a bank",
+                "input_schema": {
+                    "properties": {
+                        "bank_id": {
+                            "type": "string",
+                            "description": "Memory bank id (tenant isolation key)"
+                        }
+                    },
+                    "type": "object"
+                }
+            },
+            {
+                "name": "hindsight.summarize",
+                "description": "Summarize relevant memories via recall + reflection (SUMMARY injection)",
+                "input_schema": {
+                    "properties": {
+                        "bank_id": {
+                            "type": "string",
+                            "description": "Memory bank id (tenant isolation key)"
+                        },
+                        "query": {
+                            "type": "string",
+                            "description": "摘要聚焦的查询（缺省总结最近记忆）"
+                        },
+                        "top_k": {
+                            "type": "integer",
+                            "default": 20,
+                            "description": "recall 检索条数"
+                        },
+                        "memory_type": {
+                            "type": "string",
+                            "description": "按记忆类型过滤检索"
+                        }
+                    },
+                    "type": "object"
+                }
+            },
+            {
+                "name": "hindsight.delete",
+                "description": "Delete memories from a hindsight bank",
+                "input_schema": {
+                    "properties": {
+                        "bank_id": {
+                            "type": "string",
+                            "description": "Memory bank id (tenant isolation key)"
+                        },
+                        "memory_id": {
+                            "type": "string",
+                            "description": "Optional specific memory id to delete; if omitted deletes the whole bank"
+                        }
+                    },
+                    "type": "object"
+                }
+            },
+            {
+                "name": "hindsight.import_document",
+                "description": "Chunk and import a text document into a hindsight bank",
+                "input_schema": {
+                    "properties": {
+                        "bank_id": {
+                            "type": "string",
+                            "description": "Memory bank id (tenant isolation key)"
+                        },
+                        "text": {
+                            "type": "string",
+                            "description": "Document text to import (mutually exclusive with file_path)"
+                        },
+                        "file_path": {
+                            "type": "string",
+                            "description": "Path to a .txt/.md file to import"
+                        },
+                        "knowledge_name": {
+                            "type": "string",
+                            "description": "Optional knowledge label for the imported doc"
+                        }
+                    },
+                    "type": "object"
+                }
+            }
+        ]
+    },
+    "dependencies": [],
+    "permissions": {},
+    "priority": 50,
+    "requires_content": 5,
+    "config_files": [],
+    "http_endpoints": [
+        {
+            "route_id": "hindsight_recall",
+            "method": "GET",
+            "path": "/ext/hindsight_memory/recall",
+            "auth": "none",
+            "handler_capability": "http.handle",
+            "timeout_ms": 5000,
+            "max_concurrency": 8,
+            "description": "记忆回顾（前端记忆页接成熟 Hindsight 数据）"
+        },
+        {
+            "route_id": "hindsight_stats",
+            "method": "GET",
+            "path": "/ext/hindsight_memory/stats",
+            "auth": "none",
+            "handler_capability": "http.handle",
+            "timeout_ms": 5000,
+            "max_concurrency": 8,
+            "description": "记忆后端状态"
+        }
     ],
-    "services": [
-      {
-        "name": "hindsight.retain",
-        "description": "Store a memory into a hindsight bank",
-        "input_schema": {
-          "properties": {
-            "bank_id": {
-              "type": "string",
-              "description": "Memory bank id (tenant isolation key)"
+    "ui_schema": {
+        "widgets": [
+            {
+                "id": "memory_table",
+                "type": "table",
+                "space": "memory",
+                "order": 10,
+                "props": {
+                    "title": "最近记忆（Hindsight）",
+                    "datasourceUri": "/ext/hindsight_memory/recall?query=&limit=10"
+                }
             },
-            "content": {
-              "type": "string",
-              "description": "Memory content text"
-            },
-            "memory_type": {
-              "type": "string",
-              "default": "semantic",
-              "description": "Memory type tag (goes into metadata for recall filter)"
-            },
-            "metadata": {
-              "type": "object",
-              "default": {},
-              "description": "Optional extra metadata"
+            {
+                "id": "memory_stats",
+                "type": "status_card",
+                "space": "memory",
+                "order": 20,
+                "props": {
+                    "label": "记忆后端",
+                    "datasourceUri": "/ext/hindsight_memory/stats",
+                    "valueKey": "backend"
+                }
             }
-          },
-          "required": [
-            "content"
-          ],
-          "type": "object"
-        }
-      },
-      {
-        "name": "hindsight.recall",
-        "description": "Recall relevant memories from a hindsight bank",
-        "input_schema": {
-          "properties": {
-            "bank_id": {
-              "type": "string",
-              "description": "Memory bank id (tenant isolation key)"
-            },
-            "query": {
-              "type": "string",
-              "description": "Recall query"
-            },
-            "top_k": {
-              "type": "integer",
-              "default": 5,
-              "minimum": 1,
-              "maximum": 100
-            },
-            "memory_type": {
-              "type": "string",
-              "description": "Optional client-side filter by memory_type"
+        ]
+    },
+    "contributes": {
+        "pages": [
+            {
+                "id": "memory",
+                "title": "记忆",
+                "icon": "🧠",
+                "space": "workspace",
+                "slot": "activity-bar",
+                "order": 30,
+                "path": "/memory",
+                "widget": "widget_stage",
+                "props": {
+                    "space": "memory"
+                },
+                "description": "记忆回顾（widget 化：Hindsight 记忆表+后端状态卡）"
             }
-          },
-          "required": [
-            "query"
-          ],
-          "type": "object"
-        }
-      },
-      {
-        "name": "hindsight.reflect",
-        "description": "Trigger hindsight reflection/consolidation on a bank",
-        "input_schema": {
-          "properties": {
-            "bank_id": {
-              "type": "string",
-              "description": "Memory bank id (tenant isolation key)"
-            }
-          },
-          "type": "object"
-        }
-      },
-      {
-        "name": "hindsight.summarize",
-        "description": "Summarize relevant memories via recall + reflection (SUMMARY injection)",
-        "input_schema": {
-          "properties": {
-            "bank_id": {
-              "type": "string",
-              "description": "Memory bank id (tenant isolation key)"
-            },
-            "query": {
-              "type": "string",
-              "description": "摘要聚焦的查询（缺省总结最近记忆）"
-            },
-            "top_k": {
-              "type": "integer",
-              "default": 20,
-              "description": "recall 检索条数"
-            },
-            "memory_type": {
-              "type": "string",
-              "description": "按记忆类型过滤检索"
-            }
-          },
-          "type": "object"
-        }
-      },
-      {
-        "name": "hindsight.delete",
-        "description": "Delete memories from a hindsight bank",
-        "input_schema": {
-          "properties": {
-            "bank_id": {
-              "type": "string",
-              "description": "Memory bank id (tenant isolation key)"
-            },
-            "memory_id": {
-              "type": "string",
-              "description": "Optional specific memory id to delete; if omitted deletes the whole bank"
-            }
-          },
-          "type": "object"
-        }
-      },
-      {
-        "name": "hindsight.import_document",
-        "description": "Chunk and import a text document into a hindsight bank",
-        "input_schema": {
-          "properties": {
-            "bank_id": {
-              "type": "string",
-              "description": "Memory bank id (tenant isolation key)"
-            },
-            "text": {
-              "type": "string",
-              "description": "Document text to import (mutually exclusive with file_path)"
-            },
-            "file_path": {
-              "type": "string",
-              "description": "Path to a .txt/.md file to import"
-            },
-            "knowledge_name": {
-              "type": "string",
-              "description": "Optional knowledge label for the imported doc"
-            }
-          },
-          "type": "object"
-        }
-      }
-    ]
-  },
-  "dependencies": [],
-  "permissions": {},
-  "priority": 50,
-  "requires_content": 5,
-  "config_files": [],
-  "contributes": {
-    "pages": [
-      {
-        "id": "memory",
-        "title": "记忆",
-        "icon": "🧠",
-        "space": "workspace",
-        "slot": "activity-bar",
-        "order": 30,
-        "path": "/memory",
-        "widget": "memory_panel",
-        "description": "记忆面板（widget 化 T11 声明迁移）"
-      }
-    ]
-  }
+        ]
+    }
 }

@@ -9,7 +9,7 @@ import { Brain, Inbox, Search } from '@/assets/icons'
 import { ErrorState } from '@/components/shared/ErrorState'
 import { LoadingState } from '@/components/shared/LoadingState'
 import { PageShell } from '@/components/shared/PageShell'
-import { getEpisodes, searchMemory, getMemoryStats, getSemanticMemory } from '@/services/api/memory'
+import { getEpisodes, searchHindsight, getMemoryStats, getSemanticMemory } from '@/services/api/memory'
 import type { Episode, SemanticKnowledge, MemoryStats, MemoryItem } from '@/services/api/memory'
 
 /** Tab 类型 */
@@ -85,7 +85,7 @@ export function MemoryPage() {
     setIsSearching(true)
     setError(null)
     try {
-      const res = await searchMemory(searchQuery)
+      const res = await searchHindsight(searchQuery, 10)
       setSearchResults(res.items)
       setSearchTotal(res.total)
     } catch (err: unknown) {

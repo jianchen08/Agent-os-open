@@ -305,3 +305,37 @@ class TestBankIdDefault:
         assert call_kwargs["bank_id"]
         assert call_kwargs["bank_id"] != ""
         assert result["stored"] is True
+# ═══════════════════════════════════════════════════════════
+# HTTP 展示面（前端接成熟 Hindsight 数据）
+# ═══════════════════════════════════════════════════════════
+
+def _http_call(path, method="GET", query=None):
+    from server import http_handle
+    import asyncio
+    return asyncio.run(http_handle(path=path, method=method, plugin_id="hindsight_memory", query=query or {}))
+
+
+def _decode(data):
+    import base64
+    assert data.get("status") == 200, data
+    return json.loads(base64.b64decode(data["body"]).decode("utf-8"))
+
+
+def test_http_recall_degrade_when_client_not_ready():
+    out = _http_call("/ext/hindsight_memory/recall", query={"query": "test", "limit": "5"})
+    assert out["success"] is True
+    payload = _decode(out["data"])
+    # client 未初始化 → recall 降级（不崩溃），HTTP 仍 200
+    assert "initialized" in payload or "results" in payload
+
+
+def test_http_stats_reports_hindsight_backend():
+    out = _http_call("/ext/hindsight_memory/stats")
+    payload = _decode(out["data"])
+    assert payload["backend"] == "hindsight"
+    assert "bank_id" in payload
+
+
+def test_http_unknown_route_404():
+    out = _http_call("/ext/hindsight_memory/nope")
+    assert out["data"]["status"] == 404

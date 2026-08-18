@@ -154,6 +154,50 @@ export async function getEpisode(id: string, options: RetryOptions = {}): Promis
   }, options)
 }
 
+/**
+ * Hindsight 语义检索（成熟包数据面，widget 化 B3 收口）：
+ * GET /ext/hindsight_memory/recall → {results, total} → {items,total,query}。
+ * 记忆数据已接入成熟 Hindsight（向量检索，嵌入式 PostgreSQL），本函数是
+ * 前端消费入口（替代 channel_api 旧 memory 域 search）。
+ */
+export async function searchHindsight(
+  query: string,
+  top_k = 10,
+  options: RetryOptions = {},
+): Promise<MemorySearchResponse> {
+  return requestWithRetry(async () => {
+    const response = await apiClient.get<{ results: unknown[]; total: number }>(
+      `/ext/hindsight_memory/recall?query=${encodeURIComponent(query)}&limit=${top_k}`,
+    )
+    const results = response.data.results ?? []
+    return {
+      items: results
+        .filter((r) => r && typeof r === 'object')
+        .map((r) => {
+          const item = r as Record<string, unknown>
+          const id = String(item.id ?? '')
+          const content =
+            typeof item.content === 'string'
+              ? item.content
+              : typeof item.text === 'string'
+                ? item.text
+                : ''
+          const meta = (item.metadata as Record<string, unknown> | undefined) ?? {}
+          return {
+            id,
+            content,
+            memory_type: String(meta.memory_type ?? 'semantic'),
+            score: typeof item.score === 'number' ? item.score : 0,
+            metadata: meta,
+            created_at: '',
+          } as MemoryItem
+        }),
+      total: response.data.total ?? results.length,
+      query,
+    }
+  }, options)
+}
+
 export async function searchMemory(
   query: string | MemorySearchRequest,
   options: RetryOptions = {},

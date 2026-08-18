@@ -21,6 +21,8 @@ bank_id 是多租户隔离 key（来自内核的 tenant_id），缺省回落到�
 
 from __future__ import annotations
 
+import base64
+import json
 import logging
 import os
 import sys
@@ -650,6 +652,79 @@ async def _on_unload(params: dict[str, Any]) -> None:
                 pass
         finally:
             _api_process = None
+
+
+
+
+# ═══════════════════════════════════════════════════════════
+# HTTP 展示面（前端记忆页消费，B3 收口：记忆数据接成熟 Hindsight）
+# ═══════════════════════════════════════════════════════════
+
+def _json_response(payload: Any, status: int = 200) -> dict[str, Any]:
+    """包成内核期望的 HttpHandleResponse（body base64）。"""
+    body_str = json.dumps(payload, default=str, ensure_ascii=False)
+    body_b64 = base64.b64encode(body_str.encode("utf-8")).decode("ascii")
+    return {
+        "status": status,
+        "headers": {"Content-Type": "application/json; charset=utf-8"},
+        "body": body_b64,
+        "body_encoding": "base64",
+    }
+
+
+def _ok(data: Any) -> dict[str, Any]:
+    return {"success": True, "data": data}
+
+
+@plugin.tool(
+    name="http.handle",
+    schema={
+        "type": "object",
+        "properties": {
+            "path": {"type": "string"},
+            "method": {"type": "string"},
+            "plugin_id": {"type": "string"},
+            "raw_body": {"type": "string"},
+            "headers": {"type": "object"},
+            "query": {"type": "object"},
+        },
+    },
+    description="HTTP endpoint handler for /ext/hindsight_memory/** (memory frontend)",
+)
+async def http_handle(
+    path: str = "",
+    method: str = "GET",
+    plugin_id: str = "",
+    raw_body: str = "",
+    headers: dict[str, str] | None = None,
+    query: dict[str, str] | None = None,
+) -> dict[str, Any]:
+    """按 path 分发：recall（记忆回顾）/ stats（降级状态）。"""
+    q = query or {}
+    try:
+        if path == "/ext/hindsight_memory/recall" and method == "GET":
+            result = await hindsight_recall(
+                query=q.get("query", ""),
+                top_k=max(1, min(100, int(q.get("limit", 10)))),
+            )
+            return _ok(_json_response(result))
+
+        if path == "/ext/hindsight_memory/stats" and method == "GET":
+            initialized = _client is not None
+            return _ok(
+                _json_response(
+                    {
+                        "bank_id": _resolve_bank_id(q.get("bank_id")),
+                        "initialized": initialized,
+                        "backend": "hindsight",
+                    }
+                )
+            )
+
+        return _ok(_json_response({"error": "not found", "path": path}, 404))
+    except Exception as exc:
+        logger.exception("hindsight http.handle failed: %s", exc)
+        return {"success": False, "error": str(exc), "data": _json_response({"error": str(exc)}, 500)}
 
 
 if __name__ == "__main__":

@@ -78,6 +78,10 @@ export function normalizeRows(payload: unknown): {
       // {items, total} 信封（如 /ext/monitoring/tasks）
       return buildRowsFromArray(raw.items as unknown[])
     }
+    if (Array.isArray(raw.results)) {
+      // {results, total} 信封（如 /ext/hindsight_memory/recall）
+      return buildRowsFromArray(raw.results as unknown[])
+    }
   }
   return { columns: [], rows: [] }
 }
