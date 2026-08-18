@@ -55,6 +55,20 @@ describe('validatePluginDeclaration 负例（校验器不空转）', () => {
     const errs = errorsOf({ uiSchemaWidgets: [{ type: 'form', space: 'workspace' }] })
     expect(errs.some((e) => e.includes('缺 id'))).toBe(true)
   })
+
+  it('select 字段缺 options 且无 datasource → warning（下拉为空）', () => {
+    const r = validatePluginDeclaration({
+      pages: [{ id: 'p', space: 'settings', schema: { fields: [{ name: 'mode', type: 'select', label: '模式' }] } }],
+    })
+    expect(r.warnings.some((e) => e.includes('缺 options/datasourceUri'))).toBe(true)
+  })
+
+  it('source 模板括号未配平 → warning（渲染空值）', () => {
+    const r = validatePluginDeclaration({
+      tools: [{ name: 't', ui: { chat_card: { title: 'x', blocks: [{ type: 'text', source: 'result.{{status' }] } } }],
+    })
+    expect(r.warnings.some((e) => e.includes('模板括号未配平'))).toBe(true)
+  })
 })
 
 // ── 真实语料：仓库 plugins/shared 下真实声明全过，采集问题暴露 ──

@@ -66,12 +66,31 @@ function validateFields(fields: unknown, ctx: string, errs: string[], warns: str
       errs.push(`${ctx}.fields[${i}] 不是对象`)
       continue
     }
-    const name = (f as Record<string, unknown>).name
+    const rec = f as Record<string, unknown>
+    const name = rec.name
     if (!nonEmptyString(name)) errs.push(`${ctx}.fields[${i}] 缺 name（该条会被渲染端整条丢弃）`)
-    const type = (f as Record<string, unknown>).type
+    const type = rec.type
     if (type !== undefined && typeof type === 'string' && !FIELD_TYPES.has(type)) {
       // 未知 type 渲染端兜底为 string——不崩但形状失实，记 warning
       warns.push(`${ctx}.fields[${i}] name=${String(name)} 未知 type=${type}（将落回 string 渲染）`)
+    }
+    // select/multiselect/radio/checkbox 下拉型字段缺 options 且无动态源 → 空下拉
+    if (typeof type === 'string' && ['select', 'multiselect', 'radio', 'checkbox'].includes(type)) {
+      const hasOptions = Array.isArray(rec.options) && rec.options.length > 0
+      const hasDatasource = nonEmptyString(rec.datasourceUri)
+      if (!hasOptions && !hasDatasource) {
+        warns.push(`${ctx}.fields[${i}] name=${String(name)} type=${type} 缺 options/datasourceUri（下拉为空）`)
+      }
+    }
+    // 动态源模板配平（datasourceUri 含 {{字段}} / source 含 {{表达式}} 未闭合 → 渲染空）
+    for (const key of ['datasourceUri', 'source', 'defaultSource'] as const) {
+      const raw = rec[key]
+      if (typeof raw !== 'string') continue
+      const open = (raw.match(/\{\{/g) ?? []).length
+      const close = (raw.match(/\}\}/g) ?? []).length
+      if (open !== close) {
+        warns.push(`${ctx}.fields[${i}] name=${String(name)} ${key} 模板括号未配平（渲染空值）`)
+      }
     }
   }
 }
@@ -99,6 +118,13 @@ function validateChatCard(cc: Record<string, unknown>, ctx: string, errs: string
     if (type === 'text') {
       const has = nonEmptyString((b as Record<string, unknown>).label) || nonEmptyString((b as Record<string, unknown>).source)
       if (!has) warns.push(`${ctx}.blocks[${i}] text 块缺 label/source（渲染为空）`)
+    }
+    // 块级 source 模板配平（{{...}} 未闭合 → 该块渲染空值）
+    const src = (b as Record<string, unknown>).source
+    if (typeof src === 'string') {
+      const open = (src.match(/\{\{/g) ?? []).length
+      const close = (src.match(/\}\}/g) ?? []).length
+      if (open !== close) warns.push(`${ctx}.blocks[${i}] source 模板括号未配平（渲染空值）`)
     }
     if (type === 'kv') {
       const kvFields = (b as Record<string, unknown>).fields
