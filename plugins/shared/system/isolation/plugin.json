@@ -16,31 +16,209 @@
     "services": [
       {
         "name": "isolation.create_env",
-        "description": "创建或获取隔离环境"
+        "description": "创建或获取隔离环境",
+        "input_schema": {
+          "properties": {
+            "task_id": {
+              "type": "string",
+              "description": "任务 ID"
+            },
+            "task_type": {
+              "type": "string",
+              "enum": [
+                "project",
+                "module",
+                "atomic"
+              ],
+              "default": "atomic",
+              "description": "任务类型"
+            },
+            "operation_type": {
+              "type": "string",
+              "description": "操作类型（如 code_execution, file_operation）"
+            },
+            "workspace": {
+              "type": "string",
+              "description": "工作目录路径"
+            },
+            "parent_workspace": {
+              "type": "string",
+              "description": "父任务工作目录"
+            },
+            "parent_env_id": {
+              "type": "string",
+              "description": "父环境 ID"
+            },
+            "isolation_level": {
+              "type": "string",
+              "enum": [
+                "isolated",
+                "non_isolated"
+              ],
+              "description": "隔离级别（默认 isolated）"
+            }
+          },
+          "required": [
+            "task_id"
+          ],
+          "type": "object"
+        }
       },
       {
         "name": "isolation.execute",
-        "description": "在隔离环境中执行操作"
+        "description": "在隔离环境中执行操作",
+        "input_schema": {
+          "properties": {
+            "task_id": {
+              "type": "string",
+              "description": "任务 ID"
+            },
+            "task_type": {
+              "type": "string",
+              "enum": [
+                "project",
+                "module",
+                "atomic"
+              ],
+              "default": "atomic"
+            },
+            "operation": {
+              "type": "object",
+              "description": "操作描述（type/command/files 等）"
+            },
+            "operation_type": {
+              "type": "string"
+            },
+            "workspace": {
+              "type": "string"
+            },
+            "parent_workspace": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "task_id",
+            "operation"
+          ],
+          "type": "object"
+        }
       },
       {
         "name": "isolation.destroy_env",
-        "description": "销毁隔离环境"
+        "description": "销毁隔离环境",
+        "input_schema": {
+          "properties": {
+            "env_id": {
+              "type": "string",
+              "description": "环境 ID"
+            },
+            "task_id": {
+              "type": "string",
+              "description": "任务 ID（按任务销毁）"
+            },
+            "success": {
+              "type": "boolean",
+              "default": true,
+              "description": "任务是否成功完成"
+            }
+          },
+          "type": "object"
+        }
       },
       {
         "name": "isolation.list_envs",
-        "description": "列出隔离环境"
+        "description": "列出隔离环境",
+        "input_schema": {
+          "properties": {
+            "task_id": {
+              "type": "string",
+              "description": "按任务 ID 筛选（可选）"
+            },
+            "level": {
+              "type": "string",
+              "enum": [
+                "isolated",
+                "non_isolated"
+              ],
+              "description": "按隔离级别筛选（可选）"
+            }
+          },
+          "type": "object"
+        }
       },
       {
         "name": "isolation.check_policy",
-        "description": "检查文件操作权限"
+        "description": "检查文件操作权限",
+        "input_schema": {
+          "properties": {
+            "path": {
+              "type": "string",
+              "description": "要检查的文件路径"
+            },
+            "workspace": {
+              "type": "string",
+              "description": "工作目录"
+            },
+            "operation": {
+              "type": "string",
+              "enum": [
+                "read",
+                "write"
+              ],
+              "description": "操作类型"
+            }
+          },
+          "required": [
+            "path",
+            "operation"
+          ],
+          "type": "object"
+        }
       },
       {
         "name": "isolation.checkpoint",
-        "description": "检查点管理（创建/恢复/清理/列出）"
+        "description": "检查点管理（创建/恢复/清理/列出）",
+        "input_schema": {
+          "properties": {
+            "action": {
+              "type": "string",
+              "enum": [
+                "create",
+                "restore",
+                "cleanup",
+                "list"
+              ],
+              "description": "检查点操作"
+            },
+            "task_id": {
+              "type": "string",
+              "description": "任务 ID"
+            },
+            "workspace": {
+              "type": "string",
+              "description": "工作目录"
+            },
+            "files_to_backup": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "description": "要备份的文件列表"
+            }
+          },
+          "required": [
+            "action"
+          ],
+          "type": "object"
+        }
       },
       {
         "name": "isolation.stats",
-        "description": "获取隔离系统统计信息"
+        "description": "获取隔离系统统计信息",
+        "input_schema": {
+          "properties": {},
+          "type": "object"
+        }
       }
     ]
   },

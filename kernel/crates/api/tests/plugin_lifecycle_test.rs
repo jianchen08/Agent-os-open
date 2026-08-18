@@ -93,6 +93,8 @@ fn declaration_based_registration_tools_any_type_services_not_registered() {
     service_host.capabilities.services = vec![agentos_core::traits::ServiceCapability {
         name: "monitoring.get_metrics".to_string(),
         description: Some("metrics".to_string()),
+        input_schema: None,
+        output_schema: None,
     }];
     assert_eq!(register_plugin_capabilities(&service_host, &reg, None), 0);
     assert!(
@@ -110,6 +112,8 @@ fn non_tool_plugin_does_not_register_tools() {
     m.capabilities.services = vec![agentos_core::traits::ServiceCapability {
         name: "internal_only".to_string(),
         description: None,
+        input_schema: None,
+        output_schema: None,
     }];
     let reg = std::sync::Arc::new(CapabilityRegistryImpl::new());
     let n = register_plugin_capabilities(&m, &reg, None);

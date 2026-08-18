@@ -19,11 +19,40 @@
     "services": [
       {
         "name": "dingtalk.send_message",
-        "description": "Send a text message to a DingTalk user via Stream API"
+        "description": "Send a text message to a DingTalk user via Stream API",
+        "input_schema": {
+          "properties": {
+            "user_id": {
+              "type": "string",
+              "description": "DingTalk user staff_id"
+            },
+            "content": {
+              "type": "string",
+              "description": "Message content text"
+            },
+            "msg_type": {
+              "type": "string",
+              "enum": [
+                "text",
+                "markdown"
+              ],
+              "default": "text"
+            }
+          },
+          "required": [
+            "user_id",
+            "content"
+          ],
+          "type": "object"
+        }
       },
       {
         "name": "dingtalk.get_status",
-        "description": "Get DingTalk channel adapter connection status"
+        "description": "Get DingTalk channel adapter connection status",
+        "input_schema": {
+          "properties": {},
+          "type": "object"
+        }
       }
     ]
   },

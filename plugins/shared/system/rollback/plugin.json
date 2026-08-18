@@ -16,15 +16,117 @@
     "services": [
       {
         "name": "rollback.create_checkpoint",
-        "description": "Create a rollback checkpoint for a task"
+        "description": "Create a rollback checkpoint for a task",
+        "input_schema": {
+          "properties": {
+            "task_id": {
+              "type": "string",
+              "description": "Task identifier"
+            },
+            "name": {
+              "type": "string",
+              "description": "Checkpoint name (optional)"
+            },
+            "description": {
+              "type": "string",
+              "description": "Checkpoint description (optional)"
+            },
+            "metadata": {
+              "type": "object",
+              "description": "Additional checkpoint metadata (optional)"
+            }
+          },
+          "required": [
+            "task_id"
+          ],
+          "type": "object"
+        }
       },
       {
         "name": "rollback.record_operation",
-        "description": "Record an operation log entry (file write, git commit, API call, etc.)"
+        "description": "Record an operation log entry (file write, git commit, API call, etc.)",
+        "input_schema": {
+          "properties": {
+            "task_id": {
+              "type": "string",
+              "description": "Task identifier"
+            },
+            "tool_name": {
+              "type": "string",
+              "description": "Tool that performed the operation"
+            },
+            "operation_type": {
+              "type": "string",
+              "enum": [
+                "create",
+                "update",
+                "delete",
+                "execute"
+              ],
+              "description": "Operation type"
+            },
+            "target": {
+              "type": "string",
+              "description": "Operation target (file path, API URL, etc.)"
+            },
+            "params": {
+              "type": "object",
+              "description": "Operation parameters"
+            },
+            "before_state": {
+              "type": "object",
+              "description": "State before operation (optional)"
+            },
+            "after_state": {
+              "type": "object",
+              "description": "State after operation (optional)"
+            },
+            "reversible": {
+              "type": "boolean",
+              "default": true
+            },
+            "reverse_action": {
+              "type": "object",
+              "description": "Reverse action definition (optional)"
+            },
+            "checkpoint_id": {
+              "type": "string",
+              "description": "Associated checkpoint ID (optional)"
+            }
+          },
+          "required": [
+            "task_id",
+            "tool_name",
+            "operation_type",
+            "target",
+            "params"
+          ],
+          "type": "object"
+        }
       },
       {
         "name": "rollback.execute",
-        "description": "Roll back task operations to a checkpoint or N steps back"
+        "description": "Roll back task operations to a checkpoint or N steps back",
+        "input_schema": {
+          "properties": {
+            "task_id": {
+              "type": "string",
+              "description": "Task identifier"
+            },
+            "to_checkpoint": {
+              "type": "string",
+              "description": "Rollback to this checkpoint ID (optional)"
+            },
+            "steps": {
+              "type": "integer",
+              "description": "Roll back the last N operations (optional)"
+            }
+          },
+          "required": [
+            "task_id"
+          ],
+          "type": "object"
+        }
       }
     ]
   },

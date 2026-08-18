@@ -21,6 +21,9 @@ use agentos_core::traits::{PluginManifest, ToolCapability};
 /// （D.6 槽位拆分：services 条目仍是 sidecar 上的 MCP 工具，只是不进
 /// LLM 注册面——双写校验的对照集合必须合并两者，否则迁移后系统插件的
 /// 服务方法会全部误报 undeclared）。
+/// 2026-08-18：服务条目经 auto-backfill 携带 `input_schema`/`output_schema`
+/// （在提供方 plugin.json），此处一并映射进对照集合——G2 据此比对"插件↔服务"
+/// 调用形状（声明 vs 提供方实际 tools/list）。
 pub fn declared_with_services(manifest: &PluginManifest) -> Vec<ToolCapability> {
     let mut declared = manifest.capabilities.tools.clone();
     declared.extend(
@@ -31,8 +34,8 @@ pub fn declared_with_services(manifest: &PluginManifest) -> Vec<ToolCapability> 
             .map(|s| ToolCapability {
                 name: s.name.clone(),
                 description: s.description.clone(),
-                input_schema: None,
-                output_schema: None,
+                input_schema: s.input_schema.clone(),
+                output_schema: s.output_schema.clone(),
                 category: None,
                 ui: None,
                 render: None,
@@ -342,5 +345,61 @@ mod tests {
         let (tools, malformed) = parse_actual_tools(&json!({"foo": 1}));
         assert!(tools.is_empty());
         assert_eq!(malformed, 1);
+    }
+
+    // ── Phase 1-C5：services 入参形状（插件↔服务）比对 ─────────────────
+
+    #[test]
+    fn declared_with_services_carries_service_schemas() {
+        // 服务 schema auto-backfill 进 services 条目后，必须进入"声明对照集合"
+        let v = json!({
+            "id": "svc_host", "name": "S", "version": "1.0.0",
+            "plugin_type": "system", "language": "python",
+            "host_type": "sidecar", "entry": "x",
+            "capabilities": {"services": [
+                {"name": "svc.foo", "description": "d",
+                 "input_schema": {"type": "object", "required": ["a"],
+                                  "properties": {"a": {"type": "string"}}},
+                 "output_schema": {"type": "object"}}
+            ]}
+        });
+        let m: PluginManifest = serde_json::from_value(v).unwrap();
+        let declared = declared_with_services(&m);
+        assert_eq!(declared.len(), 1);
+        assert_eq!(declared[0].name, "svc.foo");
+        assert!(declared[0].input_schema.is_some(), "服务入参 schema 进对照集合");
+        assert!(declared[0].output_schema.is_some());
+    }
+
+    #[test]
+    fn service_input_schema_mismatch_is_drift() {
+        // 服务声明了入参形状、提供方实际暴露不符 → 漂移（SchemaMismatch）
+        let v = json!({
+            "id": "svc_host", "name": "S", "version": "1.0.0",
+            "plugin_type": "system", "language": "python",
+            "host_type": "sidecar", "entry": "x",
+            "capabilities": {"services": [
+                {"name": "svc.foo", "description": "d",
+                 "input_schema": {"type": "object", "required": ["a"],
+                                  "properties": {"a": {"type": "string"}}}}
+            ]}
+        });
+        let m: PluginManifest = serde_json::from_value(v).unwrap();
+        let declared = declared_with_services(&m);
+        let actual = vec![ActualTool {
+            name: "svc.foo".to_string(),
+            description: None,
+            input_schema: json!({"type": "object"}),
+        }];
+        let mm = compare_tools(&declared, &actual);
+        assert_eq!(mm.len(), 1, "服务入参形状声明 vs 实际不符 → 必须漂移");
+        match &mm[0] {
+            VerifyMismatch::SchemaMismatch { name, .. } => assert_eq!(name, "svc.foo"),
+            other => panic!("预期 SchemaMismatch，实际 {other:?}"),
+        }
+        assert!(
+            rejected_tool_names(&mm).contains("svc.foo"),
+            "服务形状漂移 → 拒绝该条贡献（与工具通道一致）"
+        );
     }
 }

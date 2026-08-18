@@ -16,15 +16,46 @@
     "services": [
       {
         "name": "api.get_status",
-        "description": "Get HTTP API channel server status"
+        "description": "Get HTTP API channel server status",
+        "input_schema": {
+          "properties": {},
+          "type": "object"
+        }
       },
       {
         "name": "api.list_routes",
-        "description": "List available HTTP API routes"
+        "description": "List available HTTP API routes",
+        "input_schema": {
+          "properties": {},
+          "type": "object"
+        }
       },
       {
         "name": "http.handle",
-        "description": "HTTP endpoint handler for /ext/channel_api/** (4c migration; pilot: config domain)"
+        "description": "HTTP endpoint handler for /ext/channel_api/** (4c migration; pilot: config domain)",
+        "input_schema": {
+          "properties": {
+            "path": {
+              "type": "string"
+            },
+            "method": {
+              "type": "string"
+            },
+            "plugin_id": {
+              "type": "string"
+            },
+            "raw_body": {
+              "type": "string"
+            },
+            "headers": {
+              "type": "object"
+            },
+            "query": {
+              "type": "object"
+            }
+          },
+          "type": "object"
+        }
       }
     ]
   },

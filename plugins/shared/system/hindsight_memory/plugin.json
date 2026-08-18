@@ -16,27 +16,144 @@
     "services": [
       {
         "name": "hindsight.retain",
-        "description": "Store a memory into a hindsight bank"
+        "description": "Store a memory into a hindsight bank",
+        "input_schema": {
+          "properties": {
+            "bank_id": {
+              "type": "string",
+              "description": "Memory bank id (tenant isolation key)"
+            },
+            "content": {
+              "type": "string",
+              "description": "Memory content text"
+            },
+            "memory_type": {
+              "type": "string",
+              "default": "semantic",
+              "description": "Memory type tag (goes into metadata for recall filter)"
+            },
+            "metadata": {
+              "type": "object",
+              "default": {},
+              "description": "Optional extra metadata"
+            }
+          },
+          "required": [
+            "content"
+          ],
+          "type": "object"
+        }
       },
       {
         "name": "hindsight.recall",
-        "description": "Recall relevant memories from a hindsight bank"
+        "description": "Recall relevant memories from a hindsight bank",
+        "input_schema": {
+          "properties": {
+            "bank_id": {
+              "type": "string",
+              "description": "Memory bank id (tenant isolation key)"
+            },
+            "query": {
+              "type": "string",
+              "description": "Recall query"
+            },
+            "top_k": {
+              "type": "integer",
+              "default": 5,
+              "minimum": 1,
+              "maximum": 100
+            },
+            "memory_type": {
+              "type": "string",
+              "description": "Optional client-side filter by memory_type"
+            }
+          },
+          "required": [
+            "query"
+          ],
+          "type": "object"
+        }
       },
       {
         "name": "hindsight.reflect",
-        "description": "Trigger hindsight reflection/consolidation on a bank"
+        "description": "Trigger hindsight reflection/consolidation on a bank",
+        "input_schema": {
+          "properties": {
+            "bank_id": {
+              "type": "string",
+              "description": "Memory bank id (tenant isolation key)"
+            }
+          },
+          "type": "object"
+        }
       },
       {
         "name": "hindsight.summarize",
-        "description": "Summarize relevant memories via recall + reflection (SUMMARY injection)"
+        "description": "Summarize relevant memories via recall + reflection (SUMMARY injection)",
+        "input_schema": {
+          "properties": {
+            "bank_id": {
+              "type": "string",
+              "description": "Memory bank id (tenant isolation key)"
+            },
+            "query": {
+              "type": "string",
+              "description": "摘要聚焦的查询（缺省总结最近记忆）"
+            },
+            "top_k": {
+              "type": "integer",
+              "default": 20,
+              "description": "recall 检索条数"
+            },
+            "memory_type": {
+              "type": "string",
+              "description": "按记忆类型过滤检索"
+            }
+          },
+          "type": "object"
+        }
       },
       {
         "name": "hindsight.delete",
-        "description": "Delete memories from a hindsight bank"
+        "description": "Delete memories from a hindsight bank",
+        "input_schema": {
+          "properties": {
+            "bank_id": {
+              "type": "string",
+              "description": "Memory bank id (tenant isolation key)"
+            },
+            "memory_id": {
+              "type": "string",
+              "description": "Optional specific memory id to delete; if omitted deletes the whole bank"
+            }
+          },
+          "type": "object"
+        }
       },
       {
         "name": "hindsight.import_document",
-        "description": "Chunk and import a text document into a hindsight bank"
+        "description": "Chunk and import a text document into a hindsight bank",
+        "input_schema": {
+          "properties": {
+            "bank_id": {
+              "type": "string",
+              "description": "Memory bank id (tenant isolation key)"
+            },
+            "text": {
+              "type": "string",
+              "description": "Document text to import (mutually exclusive with file_path)"
+            },
+            "file_path": {
+              "type": "string",
+              "description": "Path to a .txt/.md file to import"
+            },
+            "knowledge_name": {
+              "type": "string",
+              "description": "Optional knowledge label for the imported doc"
+            }
+          },
+          "type": "object"
+        }
       }
     ]
   },

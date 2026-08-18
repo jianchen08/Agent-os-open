@@ -16,11 +16,58 @@
     "services": [
       {
         "name": "llm.complete",
-        "description": "Send a completion request to LLM with messages and optional tools"
+        "description": "Send a completion request to LLM with messages and optional tools",
+        "input_schema": {
+          "properties": {
+            "model": {
+              "type": "string",
+              "description": "LiteLLM model identifier (e.g. 'zai/glm-4-plus')"
+            },
+            "messages": {
+              "type": "array",
+              "items": {
+                "type": "object"
+              },
+              "description": "Chat messages array"
+            },
+            "tools": {
+              "type": "array",
+              "items": {
+                "type": "object"
+              },
+              "description": "Optional tool schemas for function calling"
+            },
+            "temperature": {
+              "type": "number",
+              "default": 0.7
+            },
+            "max_tokens": {
+              "type": "integer",
+              "default": 4096
+            }
+          },
+          "required": [
+            "model",
+            "messages"
+          ],
+          "type": "object"
+        }
       },
       {
         "name": "llm.health_check",
-        "description": "Check if a specific model is healthy and available"
+        "description": "Check if a specific model is healthy and available",
+        "input_schema": {
+          "properties": {
+            "model": {
+              "type": "string",
+              "description": "Model identifier to check"
+            }
+          },
+          "required": [
+            "model"
+          ],
+          "type": "object"
+        }
       }
     ]
   },

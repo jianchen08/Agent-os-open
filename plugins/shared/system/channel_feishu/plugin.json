@@ -19,15 +19,61 @@
     "services": [
       {
         "name": "feishu.send_message",
-        "description": "Send a text message to a Feishu user via API"
+        "description": "Send a text message to a Feishu user via API",
+        "input_schema": {
+          "properties": {
+            "user_id": {
+              "type": "string",
+              "description": "Feishu user open_id"
+            },
+            "content": {
+              "type": "string",
+              "description": "Message content text"
+            },
+            "msg_type": {
+              "type": "string",
+              "enum": [
+                "text",
+                "interactive"
+              ],
+              "default": "text"
+            }
+          },
+          "required": [
+            "user_id",
+            "content"
+          ],
+          "type": "object"
+        }
       },
       {
         "name": "feishu.send_card",
-        "description": "Send an interactive card message to a Feishu user"
+        "description": "Send an interactive card message to a Feishu user",
+        "input_schema": {
+          "properties": {
+            "user_id": {
+              "type": "string",
+              "description": "Feishu user open_id"
+            },
+            "card_config": {
+              "type": "object",
+              "description": "Feishu interactive card configuration dict"
+            }
+          },
+          "required": [
+            "user_id",
+            "card_config"
+          ],
+          "type": "object"
+        }
       },
       {
         "name": "feishu.get_status",
-        "description": "Get Feishu channel adapter connection status"
+        "description": "Get Feishu channel adapter connection status",
+        "input_schema": {
+          "properties": {},
+          "type": "object"
+        }
       }
     ]
   },

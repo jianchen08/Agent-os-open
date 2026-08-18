@@ -19,11 +19,44 @@
     "services": [
       {
         "name": "qq.send_message",
-        "description": "Send a message to a QQ user or group via OneBot HTTP API"
+        "description": "Send a message to a QQ user or group via OneBot HTTP API",
+        "input_schema": {
+          "properties": {
+            "user_id": {
+              "type": "integer",
+              "description": "QQ user number"
+            },
+            "content": {
+              "type": "string",
+              "description": "Message content text"
+            },
+            "message_type": {
+              "type": "string",
+              "enum": [
+                "private",
+                "group"
+              ],
+              "default": "private"
+            },
+            "group_id": {
+              "type": "integer",
+              "description": "Group ID (required for group messages)"
+            }
+          },
+          "required": [
+            "user_id",
+            "content"
+          ],
+          "type": "object"
+        }
       },
       {
         "name": "qq.get_status",
-        "description": "Get QQ channel adapter connection status"
+        "description": "Get QQ channel adapter connection status",
+        "input_schema": {
+          "properties": {},
+          "type": "object"
+        }
       }
     ]
   },

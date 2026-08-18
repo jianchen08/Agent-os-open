@@ -16,11 +16,27 @@
     "services": [
       {
         "name": "cli.get_status",
-        "description": "Get CLI channel adapter status"
+        "description": "Get CLI channel adapter status",
+        "input_schema": {
+          "properties": {},
+          "type": "object"
+        }
       },
       {
         "name": "cli.sanitize_text",
-        "description": "Sanitize text for terminal output"
+        "description": "Sanitize text for terminal output",
+        "input_schema": {
+          "properties": {
+            "text": {
+              "type": "string",
+              "description": "Text to sanitize for terminal"
+            }
+          },
+          "required": [
+            "text"
+          ],
+          "type": "object"
+        }
       }
     ]
   },

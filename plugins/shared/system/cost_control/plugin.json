@@ -16,27 +16,127 @@
     "services": [
       {
         "name": "cost_control.check_budget",
-        "description": "Check if budget allows the estimated token usage"
+        "description": "Check if budget allows the estimated token usage",
+        "input_schema": {
+          "properties": {
+            "estimated_tokens": {
+              "type": "integer",
+              "minimum": 0,
+              "description": "预估 Token 数"
+            },
+            "user_id": {
+              "type": "string",
+              "description": "用户 ID（可选）"
+            },
+            "task_id": {
+              "type": "string",
+              "description": "任务 ID（可选）"
+            },
+            "session_id": {
+              "type": "string",
+              "description": "会话 ID（可选）"
+            }
+          },
+          "required": [
+            "estimated_tokens"
+          ],
+          "type": "object"
+        }
       },
       {
         "name": "cost_control.record_usage",
-        "description": "Record token usage and check for budget alerts"
+        "description": "Record token usage and check for budget alerts",
+        "input_schema": {
+          "properties": {
+            "tokens": {
+              "type": "integer",
+              "minimum": 0,
+              "description": "使用的 Token 数"
+            },
+            "model": {
+              "type": "string",
+              "description": "模型名称"
+            },
+            "user_id": {
+              "type": "string",
+              "description": "用户 ID（可选）"
+            },
+            "task_id": {
+              "type": "string",
+              "description": "任务 ID（可选）"
+            },
+            "session_id": {
+              "type": "string",
+              "description": "会话 ID（可选）"
+            }
+          },
+          "required": [
+            "tokens",
+            "model"
+          ],
+          "type": "object"
+        }
       },
       {
         "name": "cost_control.get_status",
-        "description": "Get current budget status for a scope"
+        "description": "Get current budget status for a scope",
+        "input_schema": {
+          "properties": {
+            "user_id": {
+              "type": "string",
+              "description": "用户 ID（可选）"
+            },
+            "task_id": {
+              "type": "string",
+              "description": "任务 ID（可选）"
+            },
+            "session_id": {
+              "type": "string",
+              "description": "会话 ID（可选）"
+            }
+          },
+          "type": "object"
+        }
       },
       {
         "name": "cost_control.get_statistics",
-        "description": "Get global usage statistics"
+        "description": "Get global usage statistics",
+        "input_schema": {
+          "properties": {},
+          "type": "object"
+        }
       },
       {
         "name": "cost_control.reset_task_budget",
-        "description": "Reset budget tracking for a specific task"
+        "description": "Reset budget tracking for a specific task",
+        "input_schema": {
+          "properties": {
+            "task_id": {
+              "type": "string",
+              "description": "任务 ID"
+            }
+          },
+          "required": [
+            "task_id"
+          ],
+          "type": "object"
+        }
       },
       {
         "name": "cost_control.reset_session_budget",
-        "description": "Reset budget tracking for a specific session"
+        "description": "Reset budget tracking for a specific session",
+        "input_schema": {
+          "properties": {
+            "session_id": {
+              "type": "string",
+              "description": "会话 ID"
+            }
+          },
+          "required": [
+            "session_id"
+          ],
+          "type": "object"
+        }
       }
     ]
   },

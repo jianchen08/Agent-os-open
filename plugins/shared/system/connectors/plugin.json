@@ -16,31 +16,93 @@
     "services": [
       {
         "name": "connector.register",
-        "description": "Register a connector instance"
+        "description": "Register a connector instance",
+        "input_schema": {
+          "properties": {
+            "connector_type": {
+              "type": "string",
+              "description": "连接器类型标识，如 vscode"
+            }
+          },
+          "required": [
+            "connector_type"
+          ],
+          "type": "object"
+        }
       },
       {
         "name": "connector.unregister",
-        "description": "Unregister a connector by type"
+        "description": "Unregister a connector by type",
+        "input_schema": {
+          "properties": {
+            "connector_type": {
+              "type": "string",
+              "description": "要注销的连接器类型"
+            }
+          },
+          "required": [
+            "connector_type"
+          ],
+          "type": "object"
+        }
       },
       {
         "name": "connector.list",
-        "description": "List all registered connectors"
+        "description": "List all registered connectors",
+        "input_schema": {
+          "properties": {},
+          "type": "object"
+        }
       },
       {
         "name": "connector.get_active",
-        "description": "Get the active connector (highest priority)"
+        "description": "Get the active connector (highest priority)",
+        "input_schema": {
+          "properties": {},
+          "type": "object"
+        }
       },
       {
         "name": "connector.get_status",
-        "description": "Get connector status summary"
+        "description": "Get connector status summary",
+        "input_schema": {
+          "properties": {
+            "connector_type": {
+              "type": "string",
+              "description": "连接器类型（可选，不传则返回全部状态）"
+            }
+          },
+          "type": "object"
+        }
       },
       {
         "name": "connector.get_adapter_status",
-        "description": "Get adapter configuration status summary"
+        "description": "Get adapter configuration status summary",
+        "input_schema": {
+          "properties": {},
+          "type": "object"
+        }
       },
       {
         "name": "connector.degrade",
-        "description": "Execute action with fallback degradation"
+        "description": "Execute action with fallback degradation",
+        "input_schema": {
+          "properties": {
+            "action_type": {
+              "type": "string",
+              "description": "操作类型: open_file/get_selection/show_diff/insert_content/jump_to"
+            },
+            "params": {
+              "type": "object",
+              "description": "操作参数",
+              "default": {}
+            }
+          },
+          "required": [
+            "action_type"
+          ],
+          "type": "object"
+        }
       }
     ]
   },

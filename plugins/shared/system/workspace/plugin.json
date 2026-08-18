@@ -16,15 +16,70 @@
     "services": [
       {
         "name": "workspace.get_or_create",
-        "description": "Get or create a workspace for a container task"
+        "description": "Get or create a workspace for a container task",
+        "input_schema": {
+          "properties": {
+            "container_task_id": {
+              "type": "string",
+              "description": "容器任务 ID"
+            },
+            "session_id": {
+              "type": "string",
+              "description": "关联会话 ID",
+              "default": ""
+            },
+            "title": {
+              "type": "string",
+              "description": "工作空间标题",
+              "default": ""
+            },
+            "description": {
+              "type": "string",
+              "description": "工作空间描述",
+              "default": ""
+            }
+          },
+          "required": [
+            "container_task_id"
+          ],
+          "type": "object"
+        }
       },
       {
         "name": "workspace.get",
-        "description": "Get workspace details"
+        "description": "Get workspace details",
+        "input_schema": {
+          "properties": {
+            "container_task_id": {
+              "type": "string",
+              "description": "容器任务 ID"
+            }
+          },
+          "required": [
+            "container_task_id"
+          ],
+          "type": "object"
+        }
       },
       {
         "name": "workspace.get_file_tree",
-        "description": "Generate file directory tree for a workspace"
+        "description": "Generate file directory tree for a workspace",
+        "input_schema": {
+          "properties": {
+            "container_task_id": {
+              "type": "string",
+              "description": "容器任务 ID"
+            },
+            "base_path": {
+              "type": "string",
+              "description": "基础路径（可选，用于扫描真实文件目录）"
+            }
+          },
+          "required": [
+            "container_task_id"
+          ],
+          "type": "object"
+        }
       }
     ]
   },

@@ -16,31 +16,174 @@
     "services": [
       {
         "name": "task.create",
-        "description": "Create a new task"
+        "description": "Create a new task",
+        "input_schema": {
+          "properties": {
+            "title": {
+              "type": "string",
+              "description": "Task title"
+            },
+            "description": {
+              "type": "string",
+              "default": "",
+              "description": "Task description"
+            },
+            "priority": {
+              "type": "integer",
+              "default": 5,
+              "minimum": 1,
+              "maximum": 10,
+              "description": "Task priority (1=highest, 10=lowest)"
+            },
+            "parent_task_id": {
+              "type": "string",
+              "description": "Parent task ID for subtask hierarchy"
+            }
+          },
+          "required": [
+            "title"
+          ],
+          "type": "object"
+        }
       },
       {
         "name": "task.get",
-        "description": "Get task details by ID"
+        "description": "Get task details by ID",
+        "input_schema": {
+          "properties": {
+            "task_id": {
+              "type": "string",
+              "description": "Task ID"
+            }
+          },
+          "required": [
+            "task_id"
+          ],
+          "type": "object"
+        }
       },
       {
         "name": "task.transition",
-        "description": "Perform a state transition on a task (start, pause, resume, fail, complete_evaluation)"
+        "description": "Perform a state transition on a task (start, pause, resume, fail, complete_evaluation)",
+        "input_schema": {
+          "properties": {
+            "task_id": {
+              "type": "string",
+              "description": "Task ID"
+            },
+            "action": {
+              "type": "string",
+              "enum": [
+                "start",
+                "pause",
+                "resume",
+                "fail",
+                "complete_evaluation"
+              ],
+              "description": "Transition action to perform"
+            },
+            "reason": {
+              "type": "string",
+              "description": "Reason for fail action"
+            },
+            "passed": {
+              "type": "boolean",
+              "description": "Evaluation result (for complete_evaluation action)"
+            },
+            "result": {
+              "type": "object",
+              "description": "Evaluation result data"
+            }
+          },
+          "required": [
+            "task_id",
+            "action"
+          ],
+          "type": "object"
+        }
       },
       {
         "name": "task.list",
-        "description": "List tasks by status or parent"
+        "description": "List tasks by status or parent",
+        "input_schema": {
+          "properties": {
+            "status": {
+              "type": "string",
+              "enum": [
+                "pending",
+                "running",
+                "evaluating",
+                "stopped",
+                "completed",
+                "failed",
+                "timeout"
+              ],
+              "description": "Filter by status. Omit to list all tasks."
+            },
+            "parent_task_id": {
+              "type": "string",
+              "description": "Filter by parent task ID (list subtasks)"
+            }
+          },
+          "type": "object"
+        }
       },
       {
         "name": "task.cancel",
-        "description": "Cancel a task and optionally cascade to subtasks"
+        "description": "Cancel a task and optionally cascade to subtasks",
+        "input_schema": {
+          "properties": {
+            "task_id": {
+              "type": "string",
+              "description": "Root task ID to cancel"
+            },
+            "reason": {
+              "type": "string",
+              "description": "Cancellation reason"
+            },
+            "cascade": {
+              "type": "boolean",
+              "default": true,
+              "description": "Cascade cancel all subtasks"
+            }
+          },
+          "required": [
+            "task_id"
+          ],
+          "type": "object"
+        }
       },
       {
         "name": "task.delete",
-        "description": "Delete a task (soft delete for containers, hard delete otherwise)"
+        "description": "Delete a task (soft delete for containers, hard delete otherwise)",
+        "input_schema": {
+          "properties": {
+            "task_id": {
+              "type": "string",
+              "description": "Task ID to delete"
+            }
+          },
+          "required": [
+            "task_id"
+          ],
+          "type": "object"
+        }
       },
       {
         "name": "task.get_transitions",
-        "description": "Get valid state transitions for a task"
+        "description": "Get valid state transitions for a task",
+        "input_schema": {
+          "properties": {
+            "task_id": {
+              "type": "string",
+              "description": "Task ID"
+            }
+          },
+          "required": [
+            "task_id"
+          ],
+          "type": "object"
+        }
       }
     ]
   },

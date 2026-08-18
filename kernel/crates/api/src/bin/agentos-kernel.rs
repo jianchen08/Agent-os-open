@@ -455,7 +455,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         for manifest in &manifests {
             if !enablement.is_enabled(&manifest.id, manifest.enabled)
                 || manifest.host_type != agentos_core::traits::HostType::Sidecar
-                || manifest.capabilities.tools.is_empty()
+                || (manifest.capabilities.tools.is_empty()
+                    && manifest.capabilities.services.is_empty())
             {
                 continue;
             }

@@ -19,23 +19,95 @@
     "services": [
       {
         "name": "monitoring.get_metrics",
-        "description": "Get current system performance metrics (CPU, memory, disk, network, LLM, tools, tasks)"
+        "description": "Get current system performance metrics (CPU, memory, disk, network, LLM, tools, tasks)",
+        "input_schema": {
+          "properties": {},
+          "type": "object"
+        }
       },
       {
         "name": "monitoring.get_health",
-        "description": "Get system health status with bottleneck detection"
+        "description": "Get system health status with bottleneck detection",
+        "input_schema": {
+          "properties": {},
+          "type": "object"
+        }
       },
       {
         "name": "monitoring.record_llm_request",
-        "description": "Record an LLM API call for usage tracking"
+        "description": "Record an LLM API call for usage tracking",
+        "input_schema": {
+          "properties": {
+            "response_time": {
+              "type": "number",
+              "description": "Response time in seconds"
+            },
+            "error": {
+              "type": "boolean",
+              "default": false,
+              "description": "Whether the request errored"
+            }
+          },
+          "required": [
+            "response_time"
+          ],
+          "type": "object"
+        }
       },
       {
         "name": "monitoring.record_tool_execution",
-        "description": "Record a tool execution for performance tracking"
+        "description": "Record a tool execution for performance tracking",
+        "input_schema": {
+          "properties": {
+            "execution_time": {
+              "type": "number",
+              "description": "Execution time in seconds"
+            },
+            "cache_hit": {
+              "type": "boolean",
+              "default": false
+            },
+            "error": {
+              "type": "boolean",
+              "default": false
+            }
+          },
+          "required": [
+            "execution_time"
+          ],
+          "type": "object"
+        }
       },
       {
         "name": "monitoring.update_task_status",
-        "description": "Update task execution metrics (pending, running, completed counts)"
+        "description": "Update task execution metrics (pending, running, completed counts)",
+        "input_schema": {
+          "properties": {
+            "pending": {
+              "type": "integer",
+              "description": "Number of pending tasks"
+            },
+            "running": {
+              "type": "integer",
+              "description": "Number of running tasks"
+            },
+            "completed": {
+              "type": "integer",
+              "description": "Number of completed tasks"
+            },
+            "task_time": {
+              "type": "number",
+              "default": 0,
+              "description": "Task execution time in seconds"
+            }
+          },
+          "required": [
+            "pending",
+            "running",
+            "completed"
+          ],
+          "type": "object"
+        }
       }
     ]
   },

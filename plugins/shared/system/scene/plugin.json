@@ -16,35 +16,134 @@
     "services": [
       {
         "name": "scene.create",
-        "description": "Create a new scene"
+        "description": "Create a new scene",
+        "input_schema": {
+          "properties": {
+            "name": {
+              "type": "string",
+              "description": "场景名称"
+            },
+            "description": {
+              "type": "string",
+              "default": ""
+            },
+            "template_id": {
+              "type": "string",
+              "description": "模板 ID（可选）"
+            },
+            "layout": {
+              "type": "object",
+              "description": "布局配置（可选，覆盖模板）"
+            },
+            "widgets": {
+              "type": "array",
+              "description": "组件列表（可选，覆盖模板）",
+              "items": {
+                "type": "object"
+              }
+            }
+          },
+          "required": [
+            "name"
+          ],
+          "type": "object"
+        }
       },
       {
         "name": "scene.switch",
-        "description": "Switch active scene"
+        "description": "Switch active scene",
+        "input_schema": {
+          "properties": {
+            "scene_id": {
+              "type": "string",
+              "description": "目标场景 ID"
+            }
+          },
+          "required": [
+            "scene_id"
+          ],
+          "type": "object"
+        }
       },
       {
         "name": "scene.delete",
-        "description": "Delete a scene"
+        "description": "Delete a scene",
+        "input_schema": {
+          "properties": {
+            "scene_id": {
+              "type": "string",
+              "description": "要删除的场景 ID"
+            }
+          },
+          "required": [
+            "scene_id"
+          ],
+          "type": "object"
+        }
       },
       {
         "name": "scene.list",
-        "description": "List all scenes"
+        "description": "List all scenes",
+        "input_schema": {
+          "properties": {},
+          "type": "object"
+        }
       },
       {
         "name": "scene.get",
-        "description": "Get scene details"
+        "description": "Get scene details",
+        "input_schema": {
+          "properties": {
+            "scene_id": {
+              "type": "string",
+              "description": "场景 ID"
+            }
+          },
+          "required": [
+            "scene_id"
+          ],
+          "type": "object"
+        }
       },
       {
         "name": "scene.update",
-        "description": "Update scene properties"
+        "description": "Update scene properties",
+        "input_schema": {
+          "properties": {
+            "scene_id": {
+              "type": "string",
+              "description": "场景 ID"
+            },
+            "name": {
+              "type": "string",
+              "description": "新名称（可选）"
+            },
+            "description": {
+              "type": "string",
+              "description": "新描述（可选）"
+            }
+          },
+          "required": [
+            "scene_id"
+          ],
+          "type": "object"
+        }
       },
       {
         "name": "scene.get_active",
-        "description": "Get the current active scene"
+        "description": "Get the current active scene",
+        "input_schema": {
+          "properties": {},
+          "type": "object"
+        }
       },
       {
         "name": "scene.list_templates",
-        "description": "List preset scene templates"
+        "description": "List preset scene templates",
+        "input_schema": {
+          "properties": {},
+          "type": "object"
+        }
       }
     ]
   },

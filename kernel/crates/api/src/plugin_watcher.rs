@@ -276,9 +276,11 @@ pub async fn g2_verify_and_sanitize(
     strict_spawn_fail: bool,
 ) -> G2VerifyOutcome {
     // G2 只验 sidecar（InProcess/native 无 describe 通道，verify.rs 自述——它们
-    // 的一致性走 A3 重启 + native describe 后续落地）；无 tools（services-only/
-    // route）插件跳过。均原样返回。
-    if manifest.host_type != HostType::Sidecar || manifest.capabilities.tools.is_empty() {
+    // 的一致性走 A3 重启 + native describe 后续落地）；无 tools 且无 services
+    // （route 仅插件）跳过。均原样返回。
+    if manifest.host_type != HostType::Sidecar
+        || (manifest.capabilities.tools.is_empty() && manifest.capabilities.services.is_empty())
+    {
         return G2VerifyOutcome {
             manifest,
             rejected_tools: Vec::new(),
@@ -480,7 +482,9 @@ pub async fn sync_once_with_store(
     let mut drifted_plugins = Vec::new();
     let mut dependency_rejected = Vec::new();
     for m in kept_refs {
-        if known_ids.contains(&m.id) || m.capabilities.tools.is_empty() {
+        if known_ids.contains(&m.id)
+            || (m.capabilities.tools.is_empty() && m.capabilities.services.is_empty())
+        {
             filtered.push(m.clone());
             continue;
         }

@@ -15,11 +15,65 @@
     "services": [
       {
         "name": "evaluation.run",
-        "description": "Run evaluation metrics against targets"
+        "description": "Run evaluation metrics against targets",
+        "input_schema": {
+          "properties": {
+            "task_id": {
+              "type": "string"
+            },
+            "metrics": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "metric_id": {
+                    "type": "string"
+                  },
+                  "type": {
+                    "type": "string",
+                    "enum": [
+                      "file_check",
+                      "bash_check",
+                      "semantic_check",
+                      "human_review"
+                    ]
+                  },
+                  "params": {
+                    "type": "object"
+                  }
+                },
+                "required": [
+                  "metric_id",
+                  "type"
+                ]
+              }
+            },
+            "gate_mode": {
+              "type": "boolean",
+              "default": true
+            }
+          },
+          "required": [
+            "task_id",
+            "metrics"
+          ],
+          "type": "object"
+        }
       },
       {
         "name": "evaluation.get_result",
-        "description": "Get evaluation result by ID"
+        "description": "Get evaluation result by ID",
+        "input_schema": {
+          "properties": {
+            "eval_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "eval_id"
+          ],
+          "type": "object"
+        }
       }
     ]
   },

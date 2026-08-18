@@ -19,15 +19,71 @@
     "services": [
       {
         "name": "wecom.send_message",
-        "description": "Send a text message to a WeCom user via HTTP API"
+        "description": "Send a text message to a WeCom user via HTTP API",
+        "input_schema": {
+          "properties": {
+            "user_id": {
+              "type": "string",
+              "description": "WeCom user UserID"
+            },
+            "content": {
+              "type": "string",
+              "description": "Message content text"
+            },
+            "msg_type": {
+              "type": "string",
+              "enum": [
+                "text",
+                "markdown"
+              ],
+              "default": "text"
+            }
+          },
+          "required": [
+            "user_id",
+            "content"
+          ],
+          "type": "object"
+        }
       },
       {
         "name": "wecom.handle_callback",
-        "description": "Handle WeCom callback request (URL verification or message decryption)"
+        "description": "Handle WeCom callback request (URL verification or message decryption)",
+        "input_schema": {
+          "properties": {
+            "timestamp": {
+              "type": "string",
+              "description": "Callback timestamp"
+            },
+            "nonce": {
+              "type": "string",
+              "description": "Callback nonce"
+            },
+            "msg_signature": {
+              "type": "string",
+              "description": "Callback message signature"
+            },
+            "body": {
+              "type": "string",
+              "description": "Callback request body (encrypted XML)"
+            }
+          },
+          "required": [
+            "timestamp",
+            "nonce",
+            "msg_signature",
+            "body"
+          ],
+          "type": "object"
+        }
       },
       {
         "name": "wecom.get_status",
-        "description": "Get WeCom channel adapter connection status"
+        "description": "Get WeCom channel adapter connection status",
+        "input_schema": {
+          "properties": {},
+          "type": "object"
+        }
       }
     ]
   },

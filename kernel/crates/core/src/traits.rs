@@ -1180,12 +1180,22 @@ pub struct ManifestCapabilities {
 
 /// 服务方法声明（D.6 槽位拆分）。结构是 ToolCapability 的子集（迁移期
 /// manifest 条目只搬 name/description），语义是"内部服务入口"——不注册
-/// 进 LLM 面。serde 宽松：多余字段忽略，迁移期条目原样可解析。
+/// 进 LLM 面。2026-08-18 契约定型：`input_schema`（必填，auto-backfill 自
+/// 提供方实际 MCP 工具 schema）+ `output_schema`（提供方声明了才填）——
+/// 服务由谁提供就在谁的 plugin.json 补，G2 据此比对"插件↔服务"调用形状。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ServiceCapability {
     pub name: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
+    /// 服务入参形状（JSON Schema）。由提供方 auto-backfill（spawn 其 sidecar 拉
+    /// `tools/list` 的真实 schema 写回）；`None` = 未声明（存量未补前容忍，G2
+    /// 只对"声明了"的比对，与工具通道一致）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub input_schema: Option<serde_json::Value>,
+    /// 服务出参形状（提供方在代码里声明了才填，不伪造）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_schema: Option<serde_json::Value>,
 }
 
 /// 配置文件映射项（ADR §4.2/§4.3 `config_files[]`）。

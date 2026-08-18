@@ -21,11 +21,53 @@
     "services": [
       {
         "name": "approval.create_choice",
-        "description": "创建选择审批（委托 human-interaction 弹窗 + 挂起管道）"
+        "description": "创建选择审批（委托 human-interaction 弹窗 + 挂起管道）",
+        "input_schema": {
+          "properties": {
+            "title": {
+              "type": "string"
+            },
+            "options": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "run_id": {
+              "type": "string",
+              "description": "管道运行 ID（用于挂起管道）"
+            },
+            "timeout": {
+              "type": "number",
+              "default": 86400.0,
+              "description": "审批等待超时（秒）；超时 = 拒绝（不恢复管道）。默认 24h，可经 APPROVAL_DEFAULT_TIMEOUT_SECONDS 覆盖"
+            }
+          },
+          "required": [
+            "title",
+            "options"
+          ],
+          "type": "object"
+        }
       },
       {
         "name": "approval.submit",
-        "description": "提交审批结果并恢复挂起的管道"
+        "description": "提交审批结果并恢复挂起的管道",
+        "input_schema": {
+          "properties": {
+            "request_id": {
+              "type": "string"
+            },
+            "result": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "request_id",
+            "result"
+          ],
+          "type": "object"
+        }
       }
     ]
   },
