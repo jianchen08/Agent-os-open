@@ -20,6 +20,7 @@
 import { useEffect, useMemo } from 'react'
 import { cn } from '@/lib/utils'
 import { EventWatchBox } from '@/components/schema/EventWatchBox'
+import { RefreshBox, type RefreshDecl } from '@/components/schema/RefreshBox'
 import { contributionRegistry } from '@/services/schema/ContributionRegistry'
 import { resolveDeclaredWidgets } from '@/services/schema/widgetChain'
 import type { WidgetDeclaration } from '@/services/schema/ContributionRegistry'
@@ -71,6 +72,7 @@ function ResolvedItem({
 }) {
   const rawWatch = (declaration.props as { watch?: FormEventWatch | FormEventWatch[] } | undefined)
     ?.watch
+  const rawRefresh = (declaration.props as { refresh?: RefreshDecl } | undefined)?.refresh
   const props = { ...(declaration.props ?? {}), ...(injected ?? {}) }
   const body = (
     <div
@@ -81,19 +83,26 @@ function ResolvedItem({
       <Component {...props} />
     </div>
   )
-  if (!rawWatch) return body
+  if (!rawWatch && !rawRefresh) return body
   return (
-    <EventWatchBox watch={rawWatch}>
-      {(reloadKey) => (
-        <div
-          data-testid={`declared-widget-${declaration.id}`}
-          data-widget-type={declaration.type}
-          data-reload-key={reloadKey}
-          className="min-h-0"
-        >
-          {/* key 变化强制重挂载 → 重拉数据（watch reload 语义） */}
-          <Component key={reloadKey} {...props} />
-        </div>
+    <EventWatchBox watch={rawWatch ?? []}>
+      {(watchKey) => (
+        <RefreshBox refresh={rawRefresh ?? { type: 'poll', intervalSeconds: 0 }}>
+          {(refreshKey) => {
+            const reloadKey = watchKey + refreshKey
+            return (
+              <div
+                data-testid={`declared-widget-${declaration.id}`}
+                data-widget-type={declaration.type}
+                data-reload-key={reloadKey}
+                className="min-h-0"
+              >
+                {/* key 变化强制重挂载 → 重拉数据（事件联动 G3 / 定时轮询 G6-b 共用语义） */}
+                <Component key={reloadKey} {...props} />
+              </div>
+            )
+          }}
+        </RefreshBox>
       )}
     </EventWatchBox>
   )

@@ -236,3 +236,63 @@ describe('DeclaredWidgetLayer watch 接线（声明级联动）', () => {
     vi.unstubAllGlobals()
   })
 })
+
+describe('G6-b：定时轮询刷新（refresh poll）', () => {
+  it('RefreshBox 按 interval 重挂载子组件', async () => {
+    const { RefreshBox } = await import('@/components/schema/RefreshBox')
+    const mountSpy = vi.fn()
+    render(
+      <RefreshBox refresh={{ type: 'poll', intervalSeconds: 1 }}>
+        {(key) => <ChildMountSpy key={key} mountSpy={mountSpy} reloadKey={key} />}
+      </RefreshBox>,
+    )
+    expect(mountSpy).toHaveBeenCalledTimes(1)
+    await new Promise((r) => setTimeout(r, 1150))
+    expect(mountSpy).toHaveBeenCalledTimes(2)
+    await new Promise((r) => setTimeout(r, 1100))
+    expect(mountSpy).toHaveBeenCalledTimes(3)
+  })
+
+  it('声明 refresh 的 widget 定时重拉 datasource（重新 GET）', async () => {
+    const fetchMock = vi.fn().mockResolvedValue({ json: async () => ({ task_id: 't-1' }) })
+    vi.stubGlobal('fetch', fetchMock)
+    apiGet.mockImplementation((url: string) =>
+      Promise.resolve({
+        data:
+          url.endsWith('/schema')
+            ? { fields: [{ name: 'note', type: 'input', label: '备注' }] }
+            : { data: { note: 'v1' } },
+      }),
+    )
+    contributionRegistry.loadFromSchema({
+      agents: [
+        {
+          id: 'p',
+          ui_schema: {
+            widgets: [
+              {
+                id: 'form_b',
+                type: 'form',
+                space: 'workspace',
+                props: {
+                  refresh: { type: 'poll', intervalSeconds: 1 },
+                  fieldsUri: '/api/v1/agents/schema',
+                  dataUri: '/api/v1/agents/x/config',
+                  dataFormat: 'json',
+                },
+              },
+            ],
+          },
+        },
+      ],
+      plugin_configs: [],
+    })
+    render(<DeclaredWidgetLayer space="workspace" />)
+    await waitFor(() => expect(apiGet.mock.calls.some((c) => c[0].endsWith('/config'))).toBe(true))
+    const getsBefore = apiGet.mock.calls.length
+    // 等一个轮询周期 → 重挂载 → 重新 GET config
+    await new Promise((r) => setTimeout(r, 1150))
+    expect(apiGet.mock.calls.length).toBeGreaterThan(getsBefore)
+    vi.unstubAllGlobals()
+  })
+})
