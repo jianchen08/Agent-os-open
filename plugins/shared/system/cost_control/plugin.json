@@ -281,6 +281,49 @@
       "description": "Reset global budget tracking"
     }
   ],
+  "ui_schema": {
+    "widgets": [
+      {
+        "id": "budget_card",
+        "type": "status_card",
+        "space": "cost",
+        "order": 10,
+        "props": {
+          "title": "全局预算",
+          "label": "预算用量",
+          "datasourceUri": "/ext/cost_control/budget/status",
+          "valueKey": "usage_percent",
+          "refresh": { "type": "poll", "intervalSeconds": 60 }
+        }
+      },
+      {
+        "id": "usage_daily_card",
+        "type": "status_card",
+        "space": "cost",
+        "order": 20,
+        "props": {
+          "title": "今日用量",
+          "label": "今日使用率",
+          "datasourceUri": "/ext/cost_control/usage/statistics",
+          "valueKey": "global_stats.daily_usage_percent",
+          "refresh": { "type": "poll", "intervalSeconds": 60 }
+        }
+      },
+      {
+        "id": "usage_monthly_card",
+        "type": "status_card",
+        "space": "cost",
+        "order": 30,
+        "props": {
+          "title": "本月用量",
+          "label": "本月使用率",
+          "datasourceUri": "/ext/cost_control/usage/statistics",
+          "valueKey": "global_stats.monthly_usage_percent",
+          "refresh": { "type": "poll", "intervalSeconds": 60 }
+        }
+      }
+    ]
+  },
   "contributes": {
     "pages": [
       {
@@ -291,8 +334,11 @@
         "slot": "activity-bar",
         "order": 40,
         "path": "/cost",
-        "widget": "cost_dashboard",
-        "description": "成本仪表盘（widget 化 T11 声明迁移）"
+        "widget": "widget_stage",
+        "props": {
+          "space": "cost"
+        },
+        "description": "成本看板（widget 化：预算/用量卡声明组合，替代硬编码 CostDashboardWidget）"
       }
     ]
   }

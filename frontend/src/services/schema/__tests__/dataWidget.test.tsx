@@ -159,7 +159,8 @@ describe('组件接线（datasourceUri）', () => {
   it('StatusCardWidget：datasourceUri → scalar value 渲染', async () => {
     apiGet.mockResolvedValue({ data: { value: 88 } })
     render(<StatusCardWidget datasourceUri="/ext/cost/status" label="预算" />)
-    await waitFor(() => expect(screen.getByText('88')).toBeInTheDocument())
+    // label+数值 → progress 形态（百分比）
+    await waitFor(() => expect(screen.getByText('88%')).toBeInTheDocument())
   })
 
   it('无 uri：三个组件零行为变化（静态 props 照常）', () => {
@@ -263,5 +264,21 @@ describe('TableWidget 行操作（rowActions）', () => {
     fireEvent.click(screen.getByTestId('row-action-del'))
     await new Promise((r) => setTimeout(r, 50))
     expect(apiCall).not.toHaveBeenCalled()
+  })
+})
+
+describe('StatusCard valueKey（A2 成本卡前置）', () => {
+  it('datasourceUri + valueKey 取嵌套字段渲染', async () => {
+    apiGet.mockResolvedValue({
+      data: { global_stats: { daily_usage_percent: 62, daily_tokens: 100 } },
+    })
+    render(
+      <StatusCardWidget
+        label="今日用量"
+        datasourceUri="/ext/cost_control/usage/statistics"
+        valueKey="global_stats.daily_usage_percent"
+      />,
+    )
+    await waitFor(() => expect(screen.getByText('62%')).toBeInTheDocument())
   })
 })

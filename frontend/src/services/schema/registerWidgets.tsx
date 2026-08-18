@@ -3,7 +3,6 @@
 import { ArtifactPreviewWidget } from '@/components/schema/widgets/ArtifactPreviewWidget'
 import { ChartWidget } from '@/components/schema/widgets/ChartWidget'
 import { CodeBlockWidget } from '@/components/schema/widgets/CodeBlockWidget'
-import { CostDashboardWidget } from '@/components/schema/widgets/CostDashboardWidget'
 import { DigitalHumanWidget } from '@/components/schema/widgets/DigitalHumanWidget'
 import {
   AgentsPanel,
@@ -89,12 +88,6 @@ const WIDGETS: WidgetEntry[] = [
   { name: 'editor', component: EditorWidget, spaces: ['chat', 'workspace', 'floating'], fallback: 'code_block' },
   { name: 'terminal', component: TerminalWidget, spaces: ['workspace', 'fullscreen'], fallback: 'code_block' },
   { name: 'kanban', component: KanbanWidget, spaces: ['workspace'], fallback: 'table' },
-  {
-    name: 'cost_dashboard',
-    component: CostDashboardWidget,
-    spaces: ['workspace', 'floating'],
-    fallback: 'status_card',
-  },
   // 顶栏打开的工作区面板（可关闭页签，非常驻）
   { name: 'settings_hub', component: SettingsHubPanel, spaces: ['workspace', 'floating'] },
   { name: 'plugins_panel', component: PluginsPanel, spaces: ['workspace'] },

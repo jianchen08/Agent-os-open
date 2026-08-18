@@ -339,6 +339,16 @@ type CardVariant = 'metric' | 'progress' | 'task'
  * @param props - 组件属性（形态推断见模块注释）
  * @returns 卡片渲染结果
  */
+/** 点号路径取值（valueKey 用，如 'global_stats.daily_usage_percent'） */
+function getByPath(obj: Record<string, unknown>, path: string): unknown {
+  let cur: unknown = obj
+  for (const seg of path.split('.')) {
+    if (cur == null || typeof cur !== 'object') return undefined
+    cur = (cur as Record<string, unknown>)[seg]
+  }
+  return cur
+}
+
 export function StatusCardWidget(props: Record<string, unknown>) {
   // 订阅 widget_event 推送（metric 形态：若有 widgetId，用 latest.data 的 value 覆盖 props）
   // 这是 metric_bindings 配置驱动推送的「最后一公里」：内核推 → store → 本组件渲染。
@@ -363,21 +373,31 @@ export function StatusCardWidget(props: Record<string, unknown>) {
       ? Math.max(0, Math.min(100, scalar.progress))
       : progressNum
 
-  // 形态推断：variant 显式优先；特征 props 次之
+  // widget_event 推送的 value（metric_bindings 场景）最高优先
+  const eventValue = latest?.data?.value as string | number | undefined
+  // A1a：scalar 数据源的 value 覆盖（HTTP 拉场景），eventValue 仍然最高优先；
+  // valueKey 声明指定字段（支持点号路径，如预算卡的 usage_percent）
+  const valueKey = props.valueKey as string | undefined
+  const scalarValue = scalar
+    ? ((valueKey ? getByPath(scalar, valueKey) : scalar.value) as string | number | undefined)
+    : props.value
+  const value = eventValue ?? (scalarValue as string | number | undefined)
+
+  // 形态推断：variant 显式优先；特征 props 次之（value 已含 scalar/event 覆盖）
   const resolved: CardVariant =
     variant
     ?? (steps.length > 0 || indeterminate
       ? 'progress'
       : progress !== undefined
         ? 'task'
-        : typeof props.label === 'string' && typeof props.value === 'number'
+        : typeof props.label === 'string' && typeof value === 'number'
           ? 'progress'
           : 'metric')
 
   if (resolved === 'progress') {
     return (
       <ProgressView
-        value={props.value as number | undefined}
+        value={typeof value === 'number' ? value : undefined}
         label={props.label as string | undefined}
         status={(props.status as ProgressStatus) ?? 'active'}
         steps={steps}
@@ -401,12 +421,6 @@ export function StatusCardWidget(props: Record<string, unknown>) {
   // metric 形态（默认）
   const metrics = extractMetrics(scalar?.metrics ?? props.metrics)
   const title = props.title as string | undefined
-  // 优先用 widget_event 推送的 value（metric_bindings 场景），props 兜底（静态场景）
-  const eventValue = latest?.data?.value as string | number | undefined
-  // A1a：scalar 数据源的 value 覆盖（HTTP 拉场景），eventValue 仍然最高优先
-  const scalarValue =
-    scalar && 'value' in scalar ? (scalar.value as string | number | undefined) : props.value
-  const value = eventValue ?? (scalarValue as string | number | undefined)
   const trend = props.trend as TrendDirection | undefined
   const trendValue = props.trendValue as string | undefined
   const icon = props.icon as string | undefined

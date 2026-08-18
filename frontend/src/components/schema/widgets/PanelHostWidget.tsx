@@ -11,7 +11,6 @@ import { ToolsPage } from '@/pages/tools/ToolsPage'
 import { AgentsPage } from '@/pages/agents/AgentsPage'
 import { MemoryPage } from '@/pages/memory/MemoryPage'
 import { SettingsHubWidget } from './SettingsHubWidget'
-import { CostDashboardWidget } from './CostDashboardWidget'
 import { PipelineManagerWidget } from './PipelineManagerWidget'
 
 type PanelKind =
@@ -23,7 +22,6 @@ type PanelKind =
   | 'memory_panel'
   | 'workspace_explorer'
   | 'pipeline_manager'
-  | 'cost_dashboard'
 
 /**
  * 统一工作区面板宿主
@@ -52,8 +50,6 @@ function renderPanel(kind: PanelKind | string, props: Record<string, unknown>) {
       return <AgentsPage />
     case 'memory_panel':
       return <MemoryPage />
-    case 'cost_dashboard':
-      return <CostDashboardWidget {...props} />
     case 'workspace_explorer':
     case 'pipeline_manager':
       return <PipelineManagerPanel />
