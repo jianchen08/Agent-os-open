@@ -108,11 +108,17 @@ impl ChatSendHandler {
             .ok_or_else(|| McpError::Protocol {
                 message: "chat.send_message 缺少 user_id 参数".to_string(),
             })?;
-        let create_flag = params.get("create").and_then(|v| v.as_bool()).unwrap_or(false);
+        let create_flag = params
+            .get("create")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
         // background（可选，默认 false）：派发改为 spawn 后台执行、响应立即
         // 返回——任务派发（task_submit 创建 / UI resume·retry 注入）不能阻塞
         // 等待整条管道跑完。触发器通知保持默认 await（投递确认语义）。
-        let background = params.get("background").and_then(|v| v.as_bool()).unwrap_or(false);
+        let background = params
+            .get("background")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
         let supplied_pid = params
             .get("pipeline_id")
             .and_then(|v| v.as_str())
@@ -145,13 +151,14 @@ impl ChatSendHandler {
                 });
             }
             // 血缘二选一强制（补定案：出生结构性写入，非可选元数据）。
-            let lineage = params.get("lineage").filter(|v| !v.is_null()).ok_or_else(|| {
-                McpError::Protocol {
+            let lineage = params
+                .get("lineage")
+                .filter(|v| !v.is_null())
+                .ok_or_else(|| McpError::Protocol {
                     message: "chat.send_message 创建新管道必须声明 lineage\
                               （有父/根二选一，杜绝孤儿管道）"
                         .to_string(),
-                }
-            })?;
+                })?;
             let lineage_keys = parse_lineage(lineage)?;
             let overlay_obj = overlay.get_or_insert_with(|| Value::Object(Map::new()));
             if let Some(obj) = overlay_obj.as_object_mut() {
@@ -305,12 +312,11 @@ fn validate_state_overlay(state: Option<&Value>) -> Result<Option<Value>, McpErr
 /// 不伪造默认父/默认 session（假父会在任务树聚合里成为幽灵节点）。两种形式
 /// 同时出现或均缺失 → [`McpError::Protocol`]。
 fn parse_lineage(lineage: &Value) -> Result<Map<String, Value>, McpError> {
-    let bad =
-        |msg: String| -> Result<Map<String, Value>, McpError> {
-            Err(McpError::Protocol {
-                message: format!("chat.send_message lineage 不合法: {msg}"),
-            })
-        };
+    let bad = |msg: String| -> Result<Map<String, Value>, McpError> {
+        Err(McpError::Protocol {
+            message: format!("chat.send_message lineage 不合法: {msg}"),
+        })
+    };
     let Some(lin) = lineage.as_object() else {
         return bad("必须为对象（有父/根二选一）".to_string());
     };
@@ -329,9 +335,7 @@ fn parse_lineage(lineage: &Value) -> Result<Map<String, Value>, McpError> {
             .and_then(|v| v.as_str())
             .filter(|s| !s.is_empty())
         else {
-            return bad(
-                "有父形式必须同时提供非空 origin_session_id（根人类会话锚点）".to_string(),
-            );
+            return bad("有父形式必须同时提供非空 origin_session_id（根人类会话锚点）".to_string());
         };
         let mut m = Map::new();
         m.insert("lineage.parent_pipeline_id".to_string(), json!(pid));
@@ -669,15 +673,24 @@ mod tests {
         let (h, d) = handler();
         let cases = vec![
             (json!({}), "空对象：两种形式都不满足"),
-            (json!({"parent_pipeline_id": "p1"}), "有父形式缺 origin_session_id"),
-            (json!({"origin_session_id": "s1"}), "有父形式缺 parent_pipeline_id"),
+            (
+                json!({"parent_pipeline_id": "p1"}),
+                "有父形式缺 origin_session_id",
+            ),
+            (
+                json!({"origin_session_id": "s1"}),
+                "有父形式缺 parent_pipeline_id",
+            ),
             (
                 json!({"parent_pipeline_id": "", "origin_session_id": "s1"}),
                 "parent_pipeline_id 为空串",
             ),
             (json!({"root": false}), "root=false 且无父形式"),
             (json!({"root": true}), "根形式缺 origin"),
-            (json!({"root": true, "origin": {}}), "根形式 origin 缺 kind/source"),
+            (
+                json!({"root": true, "origin": {}}),
+                "根形式 origin 缺 kind/source",
+            ),
             (
                 json!({"root": true, "origin": {"kind": "channel"}}),
                 "根形式 origin 缺 source",
@@ -761,8 +774,7 @@ mod tests {
         ] {
             let mut state = serde_json::Map::new();
             state.insert(key.to_string(), json!("evil"));
-            let mut params =
-                json!({"pipeline_id": "pipe_1", "message": "m", "user_id": "u1"});
+            let mut params = json!({"pipeline_id": "pipe_1", "message": "m", "user_id": "u1"});
             params["state"] = Value::Object(state);
             expect_protocol_error(&h, &d, params, &format!("保留字 {key}")).await;
         }
@@ -778,8 +790,7 @@ mod tests {
         ] {
             let mut state = serde_json::Map::new();
             state.insert(key.to_string(), json!(true));
-            let mut params =
-                json!({"pipeline_id": "pipe_1", "message": "m", "user_id": "u1"});
+            let mut params = json!({"pipeline_id": "pipe_1", "message": "m", "user_id": "u1"});
             params["state"] = Value::Object(state);
             expect_protocol_error(&h, &d, params, &format!("保护前缀 {key}")).await;
         }
@@ -881,7 +892,10 @@ mod tests {
             _agent_id: &str,
         ) -> Result<(), String> {
             self.gate.notified().await;
-            self.calls.lock().unwrap().push(state_overlay.cloned().unwrap_or(Value::Null));
+            self.calls
+                .lock()
+                .unwrap()
+                .push(state_overlay.cloned().unwrap_or(Value::Null));
             Ok(())
         }
         async fn dispatch_interaction_response(
@@ -906,15 +920,18 @@ mod tests {
             gate: tokio::sync::Notify::new(),
         });
         let h = ChatSendHandler::new(d.clone());
-        let res = tokio::time::timeout(std::time::Duration::from_millis(300), h.handle(
-            "send_message",
-            json!({
-                "create": true, "message": "m", "user_id": "u1",
-                "background": true,
-                "lineage": {"parent_pipeline_id": "p", "origin_session_id": "s"},
-                "state": {"task.id": "t1"}
-            }),
-        ))
+        let res = tokio::time::timeout(
+            std::time::Duration::from_millis(300),
+            h.handle(
+                "send_message",
+                json!({
+                    "create": true, "message": "m", "user_id": "u1",
+                    "background": true,
+                    "lineage": {"parent_pipeline_id": "p", "origin_session_id": "s"},
+                    "state": {"task.id": "t1"}
+                }),
+            ),
+        )
         .await
         .expect("background 创建应在派发完成前返回（300ms 闸门未开）")
         .unwrap();
@@ -945,13 +962,16 @@ mod tests {
             gate: tokio::sync::Notify::new(),
         });
         let h = ChatSendHandler::new(d.clone());
-        let outcome = tokio::time::timeout(std::time::Duration::from_millis(200), h.handle(
-            "send_message",
-            json!({
-                "create": true, "message": "m", "user_id": "u1",
-                "lineage": {"root": true, "origin": {"kind": "system", "source": "kernel"}}
-            }),
-        ))
+        let outcome = tokio::time::timeout(
+            std::time::Duration::from_millis(200),
+            h.handle(
+                "send_message",
+                json!({
+                    "create": true, "message": "m", "user_id": "u1",
+                    "lineage": {"root": true, "origin": {"kind": "system", "source": "kernel"}}
+                }),
+            ),
+        )
         .await;
         assert!(
             outcome.is_err(),
@@ -983,7 +1003,11 @@ mod tests {
             .await
             .unwrap();
         let pid = res["pipeline_id"].as_str().unwrap();
-        assert_eq!(calls(&d)[0].6.as_ref().unwrap()["task.id"], pid, "引擎 id 覆盖调用方预传");
+        assert_eq!(
+            calls(&d)[0].6.as_ref().unwrap()["task.id"],
+            pid,
+            "引擎 id 覆盖调用方预传"
+        );
     }
 
     #[tokio::test]
@@ -994,13 +1018,16 @@ mod tests {
             gate: tokio::sync::Notify::new(),
         });
         let h = ChatSendHandler::new(d.clone());
-        let res = tokio::time::timeout(std::time::Duration::from_millis(300), h.handle(
-            "send_message",
-            json!({
-                "pipeline_id": "pipe_existing", "message": "重跑一轮",
-                "user_id": "u1", "background": true,
-            }),
-        ))
+        let res = tokio::time::timeout(
+            std::time::Duration::from_millis(300),
+            h.handle(
+                "send_message",
+                json!({
+                    "pipeline_id": "pipe_existing", "message": "重跑一轮",
+                    "user_id": "u1", "background": true,
+                }),
+            ),
+        )
         .await
         .expect("background 注入应在派发完成前返回")
         .unwrap();
@@ -1010,7 +1037,10 @@ mod tests {
         d.gate.notify_one();
         let mut done = false;
         for _ in 0..40 {
-            if !d.calls.lock().unwrap().is_empty() { done = true; break; }
+            if !d.calls.lock().unwrap().is_empty() {
+                done = true;
+                break;
+            }
             tokio::time::sleep(std::time::Duration::from_millis(50)).await;
         }
         assert!(done, "后台注入应最终执行");

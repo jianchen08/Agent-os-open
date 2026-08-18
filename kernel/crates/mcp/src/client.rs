@@ -1156,7 +1156,8 @@ pub fn resolve_env_placeholders(raw: &str) -> Result<String, McpError> {
     // 每次 resolve 构造一次 overlay 查找表（一次 .env 文件读）。resolve 只在
     // 客户端 connect / stdio env 构造时调用（低频），无需常驻缓存；且
     // env_delta_overlay 每次现读文件正是「写完即生效」语义的一部分。
-    let overlay: HashMap<String, String> = crate::env_file::env_delta_overlay().into_iter().collect();
+    let overlay: HashMap<String, String> =
+        crate::env_file::env_delta_overlay().into_iter().collect();
     resolve_env_placeholders_with(raw, &overlay)
 }
 
@@ -1628,10 +1629,8 @@ mod tests {
     fn test_resolve_placeholders_overlay_fallback_when_env_missing() {
         // 进程环境未设置、overlay（.env 增量）有值 → 解析成功（mock overlay）
         std::env::remove_var("MCP_PH_OVERLAY_ONLY");
-        let overlay = HashMap::from([(
-            "MCP_PH_OVERLAY_ONLY".to_string(),
-            "from_dotenv".to_string(),
-        )]);
+        let overlay =
+            HashMap::from([("MCP_PH_OVERLAY_ONLY".to_string(), "from_dotenv".to_string())]);
         assert_eq!(
             resolve_env_placeholders_with("Bearer ${MCP_PH_OVERLAY_ONLY}", &overlay).unwrap(),
             "Bearer from_dotenv"
@@ -1647,8 +1646,7 @@ mod tests {
     fn test_resolve_placeholders_process_env_priority_over_overlay() {
         // 两者都有 → 进程环境优先（mock overlay）
         std::env::set_var("MCP_PH_BOTH", "from_process");
-        let overlay =
-            HashMap::from([("MCP_PH_BOTH".to_string(), "from_dotenv".to_string())]);
+        let overlay = HashMap::from([("MCP_PH_BOTH".to_string(), "from_dotenv".to_string())]);
         assert_eq!(
             resolve_env_placeholders_with("${MCP_PH_BOTH}", &overlay).unwrap(),
             "from_process"
@@ -1690,10 +1688,8 @@ mod tests {
             .lock()
             .unwrap_or_else(|p| p.into_inner());
         let var = format!("MCP_DOTENV_IT_{}", Uuid::new_v4().simple());
-        let tmp = std::env::temp_dir().join(format!(
-            "agentos_mcp_envit_{}",
-            Uuid::new_v4().simple()
-        ));
+        let tmp =
+            std::env::temp_dir().join(format!("agentos_mcp_envit_{}", Uuid::new_v4().simple()));
         std::fs::create_dir_all(tmp.join("config")).unwrap();
         std::fs::write(tmp.join(".env"), format!("{var}=from_dotenv\n")).unwrap();
 

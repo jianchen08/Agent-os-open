@@ -344,9 +344,8 @@ async fn run_smoke(
         if tool.smoke != Some(true) {
             continue;
         }
-        let sample = sample_value_from_schema(
-            tool.input_schema.as_ref().unwrap_or(&serde_json::json!({})),
-        );
+        let sample =
+            sample_value_from_schema(tool.input_schema.as_ref().unwrap_or(&serde_json::json!({})));
         match invoker.invoke_tool(&manifest.id, &tool.name, &sample).await {
             Ok(r) if r.success => {
                 info!(
@@ -381,7 +380,10 @@ async fn run_smoke(
         }
     }
     if !rejected.is_empty() {
-        manifest.capabilities.tools.retain(|t| !rejected.contains(&t.name));
+        manifest
+            .capabilities
+            .tools
+            .retain(|t| !rejected.contains(&t.name));
     }
     (rejected, failed)
 }
@@ -572,8 +574,10 @@ fn manifest_fingerprint(m: &PluginManifest) -> u64 {
     let mut h = std::collections::hash_map::DefaultHasher::new();
     // PluginManifest 为纯数据（全 String/Vec 字段），序列化不可能失败；若失败
     // 宁可 panic 也不能退空串——空串会让所有 manifest 指纹相同，变更检测静默失效。
-    deterministic_json(&serde_json::to_value(m).expect("PluginManifest serialization is infallible"))
-        .hash(&mut h);
+    deterministic_json(
+        &serde_json::to_value(m).expect("PluginManifest serialization is infallible"),
+    )
+    .hash(&mut h);
     h.finish()
 }
 
@@ -642,8 +646,7 @@ pub async fn sync_once_with_store(
     // 不在此处与它抢着摘除。
     let pre_registered: HashSet<String> = known_ids.clone();
     let present_ids: HashSet<&str> = all.iter().map(|m| m.id.as_str()).collect();
-    let is_known_inprocess =
-        |id: &str| known_cdylib.as_ref().is_some_and(|s| s.contains(id));
+    let is_known_inprocess = |id: &str| known_cdylib.as_ref().is_some_and(|s| s.contains(id));
     let mut uninstalled: Vec<String> = pre_registered
         .iter()
         .filter(|id| !present_ids.contains(id.as_str()) && !is_known_inprocess(id))
@@ -686,7 +689,9 @@ pub async fn sync_once_with_store(
         let outcome = g2_verify_and_sanitize(invoker, m.clone(), strict_spawn_fail).await;
         if let Some(ledger) = contract_states {
             ledger.upsert(crate::contract::PluginContractState::derived(
-                m, true, Some(&outcome),
+                m,
+                true,
+                Some(&outcome),
             ));
         }
         if outcome.drift {
@@ -766,9 +771,7 @@ pub async fn sync_once_with_store(
         }
         if let Some(store) = manifests_store {
             let mut guard = store.write().await;
-            guard.retain(|m| {
-                !uninstalled.contains(&m.id) && !cascade_uninstalled.contains(&m.id)
-            });
+            guard.retain(|m| !uninstalled.contains(&m.id) && !cascade_uninstalled.contains(&m.id));
         }
         info!(
             target: "plugin_watcher",
@@ -1034,9 +1037,7 @@ impl PluginWatcher {
                     manifests_store.as_ref(),
                     &mut known_hashes,
                     enablement.as_ref(),
-                    g2_strict_env_enabled(
-                        std::env::var("AGENTOS_G2_STRICT_SPAWN_FAIL").ok(),
-                    ),
+                    g2_strict_env_enabled(std::env::var("AGENTOS_G2_STRICT_SPAWN_FAIL").ok()),
                     contract_states.as_deref(),
                 )
                 .await
@@ -1205,7 +1206,8 @@ mod tests {
             _tool_name: &str,
             _inputs: &serde_json::Value,
         ) -> Result<ToolExecutionResult, PluginError> {
-            self.invoke_calls.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            self.invoke_calls
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             if self.invoke_tool_fail {
                 return Err(PluginError {
                     message: "invoke_tool boom".into(),
@@ -1477,14 +1479,24 @@ mod tests {
         let registry_arc = std::sync::Arc::new(CapabilityRegistryImpl::new());
         let mut known = HashSet::new();
         let report = sync_once_with_store(
-            &invoker, &registry_arc, None, &mut known, &mut None, None, &mut HashMap::new(),
-            None, false,
+            &invoker,
+            &registry_arc,
+            None,
+            &mut known,
+            &mut None,
+            None,
+            &mut HashMap::new(),
+            None,
+            false,
             None,
         )
         .await
         .unwrap();
         assert!(report.drifted_plugins.is_empty());
-        assert_eq!(report.tools_registered, 1, "lenient：校验失败仍按声明注册（warn）");
+        assert_eq!(
+            report.tools_registered, 1,
+            "lenient：校验失败仍按声明注册（warn）"
+        );
         assert_eq!(registry_arc.list_tools().len(), 1);
     }
 
@@ -1636,8 +1648,15 @@ mod tests {
         // 首轮：v1 manifest（工具 t_old）
         let inv1 = MockInvoker::new(vec![mk_manifest("chg", "tool", &["t_old"], false)]);
         sync_once_with_store(
-            &inv1, &registry_arc, Some(&scopes), &mut known, &mut None,
-            Some(&store), &mut hashes, None, true,
+            &inv1,
+            &registry_arc,
+            Some(&scopes),
+            &mut known,
+            &mut None,
+            Some(&store),
+            &mut hashes,
+            None,
+            true,
             None,
         )
         .await
@@ -1647,8 +1666,15 @@ mod tests {
         // 次轮：manifest 变更（工具 t_old → t_new）
         let inv2 = MockInvoker::new(vec![mk_manifest("chg", "tool", &["t_new"], false)]);
         let report = sync_once_with_store(
-            &inv2, &registry_arc, Some(&scopes), &mut known, &mut None,
-            Some(&store), &mut hashes, None, true,
+            &inv2,
+            &registry_arc,
+            Some(&scopes),
+            &mut known,
+            &mut None,
+            Some(&store),
+            &mut hashes,
+            None,
+            true,
             None,
         )
         .await
@@ -1657,17 +1683,30 @@ mod tests {
         assert_eq!(report.changed_plugin_ids, vec!["chg".to_string()]);
         // 新 schema 生效、旧工具摘除（scope revoke → guard drop 真撤销）
         assert!(registry_arc.get_tool("t_new").is_some(), "新工具应注册");
-        assert!(registry_arc.get_tool("t_old").is_none(), "旧工具应随 revoke 摘除");
+        assert!(
+            registry_arc.get_tool("t_old").is_none(),
+            "旧工具应随 revoke 摘除"
+        );
         // manifests store 更新为新 manifest
         let guard = store.read().await;
-        let m = guard.iter().find(|x| x.id == "chg").expect("store 应含 chg");
+        let m = guard
+            .iter()
+            .find(|x| x.id == "chg")
+            .expect("store 应含 chg");
         assert!(m.capabilities.tools.iter().any(|t| t.name == "t_new"));
         drop(guard);
 
         // 第三轮：同 manifest 再同步 → 无变更（幂等，不重复重注册）
         let report3 = sync_once_with_store(
-            &inv2, &registry_arc, Some(&scopes), &mut known, &mut None,
-            Some(&store), &mut hashes, None, true,
+            &inv2,
+            &registry_arc,
+            Some(&scopes),
+            &mut known,
+            &mut None,
+            Some(&store),
+            &mut hashes,
+            None,
+            true,
             None,
         )
         .await
@@ -1686,8 +1725,15 @@ mod tests {
 
         let inv1 = MockInvoker::new(vec![mk_manifest("epc", "tool", &["t"], true)]);
         sync_once_with_store(
-            &inv1, &registry_arc, Some(&scopes), &mut known, &mut None, None, &mut hashes,
-            None, true,
+            &inv1,
+            &registry_arc,
+            Some(&scopes),
+            &mut known,
+            &mut None,
+            None,
+            &mut hashes,
+            None,
+            true,
             None,
         )
         .await
@@ -1699,8 +1745,15 @@ mod tests {
         // 变更后路由描述重建（同 path 不同 handler 也能换）
         let inv2 = MockInvoker::new(vec![mk_manifest("epc", "tool", &["t2"], true)]);
         sync_once_with_store(
-            &inv2, &registry_arc, Some(&scopes), &mut known, &mut None, None, &mut hashes,
-            None, true,
+            &inv2,
+            &registry_arc,
+            Some(&scopes),
+            &mut known,
+            &mut None,
+            None,
+            &mut hashes,
+            None,
+            true,
             None,
         )
         .await
@@ -1774,7 +1827,9 @@ mod tests {
         // 运行时产物不许触发：llm_core/logs/payload_diag 缓存、普通源码、编辑器临时文件
         assert!(!notify_event_relevant(
             modify.clone(),
-            &[p("/plugins/pipeline/core/llm_core/logs/payload_diag/1786__x.json")]
+            &[p(
+                "/plugins/pipeline/core/llm_core/logs/payload_diag/1786__x.json"
+            )]
         ));
         assert!(!notify_event_relevant(
             modify.clone(),
@@ -1837,14 +1892,21 @@ mod tests {
     async fn g2_verify_drift_sanitizes_rejected_tool_only() {
         let mut invoker =
             MockInvoker::new(vec![mk_manifest("p1", "tool", &["t1", "ghost"], false)]);
-        invoker
-            .list_tools
-            .insert("p1".into(), json!({ "tools": [{"name": "t1", "description": "t1"}] }));
+        invoker.list_tools.insert(
+            "p1".into(),
+            json!({ "tools": [{"name": "t1", "description": "t1"}] }),
+        );
         let m = mk_manifest("p1", "tool", &["t1", "ghost"], false);
         let out = g2_verify_and_sanitize(&invoker, m, true).await;
         assert!(out.drift);
         assert_eq!(out.rejected_tools, vec!["ghost".to_string()]);
-        let names: Vec<String> = out.manifest.capabilities.tools.iter().map(|t| t.name.clone()).collect();
+        let names: Vec<String> = out
+            .manifest
+            .capabilities
+            .tools
+            .iter()
+            .map(|t| t.name.clone())
+            .collect();
         assert_eq!(names, vec!["t1".to_string()], "漂移工具被剔除、其余照常");
     }
 
@@ -1855,7 +1917,10 @@ mod tests {
         let m = mk_manifest("p1", "tool", &["t1", "t2"], false);
         let out = g2_verify_and_sanitize(&invoker, m, true).await;
         assert!(out.spawn_failed && out.drift);
-        assert!(out.manifest.capabilities.tools.is_empty(), "strict：拒绝全部声明工具");
+        assert!(
+            out.manifest.capabilities.tools.is_empty(),
+            "strict：拒绝全部声明工具"
+        );
         assert_eq!(out.rejected_tools.len(), 2);
     }
 
@@ -1866,7 +1931,11 @@ mod tests {
         let m = mk_manifest("p1", "tool", &["t1"], false);
         let out = g2_verify_and_sanitize(&invoker, m, false).await;
         assert!(out.spawn_failed);
-        assert_eq!(out.manifest.capabilities.tools.len(), 1, "lenient：按声明注册（warn）");
+        assert_eq!(
+            out.manifest.capabilities.tools.len(),
+            1,
+            "lenient：按声明注册（warn）"
+        );
         assert!(!out.drift);
     }
 
@@ -1900,7 +1969,10 @@ mod tests {
         let mut plugins = std::collections::HashMap::new();
         plugins.insert(
             "b".to_string(),
-            ProfileEntry { enabled: Some(false), activation: None },
+            ProfileEntry {
+                enabled: Some(false),
+                activation: None,
+            },
         );
         let enablement = PluginEnablement::with_profile(PluginProfile {
             version: 1,
@@ -1915,14 +1987,25 @@ mod tests {
         let registry_arc = std::sync::Arc::new(CapabilityRegistryImpl::new());
         let mut known = HashSet::new();
         let report = sync_once_with_store(
-            &invoker, &registry_arc, None, &mut known, &mut None, None, &mut HashMap::new(),
-            Some(&enablement), true,
+            &invoker,
+            &registry_arc,
+            None,
+            &mut known,
+            &mut None,
+            None,
+            &mut HashMap::new(),
+            Some(&enablement),
+            true,
             None,
         )
         .await
         .unwrap();
         assert_eq!(report.skipped_disabled, 1, "b 被 profile 禁用");
-        let ids: Vec<String> = registry_arc.list_tools().iter().map(|t| t.plugin_id.clone()).collect();
+        let ids: Vec<String> = registry_arc
+            .list_tools()
+            .iter()
+            .map(|t| t.plugin_id.clone())
+            .collect();
         assert!(!ids.contains(&"b".to_string()), "disabled 插件不进注册表");
         assert!(ids.contains(&"a".to_string()) && ids.contains(&"c".to_string()));
     }
@@ -1936,8 +2019,15 @@ mod tests {
         let registry_arc = std::sync::Arc::new(CapabilityRegistryImpl::new());
         let mut known = HashSet::new();
         let report = sync_once_with_store(
-            &invoker, &registry_arc, None, &mut known, &mut None, None, &mut HashMap::new(),
-            None, true,
+            &invoker,
+            &registry_arc,
+            None,
+            &mut known,
+            &mut None,
+            None,
+            &mut HashMap::new(),
+            None,
+            true,
             None,
         )
         .await
@@ -1968,8 +2058,16 @@ mod tests {
             let registry_arc = std::sync::Arc::new(CapabilityRegistryImpl::new());
             let mut known = HashSet::new();
             let report = sync_once_with_store(
-                &inv, &registry_arc, None, &mut known, &mut None, None, &mut HashMap::new(),
-                None, true, None,
+                &inv,
+                &registry_arc,
+                None,
+                &mut known,
+                &mut None,
+                None,
+                &mut HashMap::new(),
+                None,
+                true,
+                None,
             )
             .await
             .unwrap();
@@ -1982,21 +2080,40 @@ mod tests {
         // 次轮：p 目录从磁盘消失（discover 只剩 c）→ p 卸载 + c 依赖级联摘下。
         let mut inv2 = MockInvoker::new(vec![c.clone()]);
         let r2 = sync_once_with_store(
-            &inv2, &registry_arc, None, &mut known, &mut None, None, &mut HashMap::new(),
-            None, true, None,
+            &inv2,
+            &registry_arc,
+            None,
+            &mut known,
+            &mut None,
+            None,
+            &mut HashMap::new(),
+            None,
+            true,
+            None,
         )
         .await
         .unwrap();
         assert_eq!(r2.uninstalled, vec!["p".to_string()]);
         assert_eq!(r2.cascade_uninstalled, vec!["c".to_string()]);
-        assert!(registry_arc.list_tools().is_empty(), "依赖者 c 的能力也一并摘下");
+        assert!(
+            registry_arc.list_tools().is_empty(),
+            "依赖者 c 的能力也一并摘下"
+        );
         assert!(!known.contains(&"p".to_string()) && !known.contains(&"c".to_string()));
 
         // 提供者回归 → 下轮自动重注册（含消费者，自愈）。
         let inv3 = MockInvoker::new(vec![p.clone(), c.clone()]);
         let r3 = sync_once_with_store(
-            &inv3, &registry_arc, None, &mut known, &mut None, None, &mut HashMap::new(),
-            None, true, None,
+            &inv3,
+            &registry_arc,
+            None,
+            &mut known,
+            &mut None,
+            None,
+            &mut HashMap::new(),
+            None,
+            true,
+            None,
         )
         .await
         .unwrap();
@@ -2014,8 +2131,16 @@ mod tests {
         let registry_arc = std::sync::Arc::new(CapabilityRegistryImpl::new());
         let mut known = HashSet::new();
         let r1 = sync_once_with_store(
-            &inv1, &registry_arc, None, &mut known, &mut None, None, &mut HashMap::new(),
-            None, true, None,
+            &inv1,
+            &registry_arc,
+            None,
+            &mut known,
+            &mut None,
+            None,
+            &mut HashMap::new(),
+            None,
+            true,
+            None,
         )
         .await
         .unwrap();
@@ -2024,14 +2149,26 @@ mod tests {
         // 只删 a 的目录：b 无 requires_services → 不受牵连。
         let mut inv2 = MockInvoker::new(vec![mk_manifest("b", "tool", &["tb"], false)]);
         let r2 = sync_once_with_store(
-            &inv2, &registry_arc, None, &mut known, &mut None, None, &mut HashMap::new(),
-            None, true, None,
+            &inv2,
+            &registry_arc,
+            None,
+            &mut known,
+            &mut None,
+            None,
+            &mut HashMap::new(),
+            None,
+            true,
+            None,
         )
         .await
         .unwrap();
         assert_eq!(r2.uninstalled, vec!["a".to_string()]);
         assert!(r2.cascade_uninstalled.is_empty());
-        let ids: Vec<String> = registry_arc.list_tools().iter().map(|t| t.plugin_id.clone()).collect();
+        let ids: Vec<String> = registry_arc
+            .list_tools()
+            .iter()
+            .map(|t| t.plugin_id.clone())
+            .collect();
         assert_eq!(ids, vec!["b".to_string()], "b 不受牵连");
         assert!(!known.contains(&"a".to_string()));
         assert!(known.contains(&"b".to_string()));
@@ -2085,31 +2222,54 @@ mod tests {
     #[tokio::test]
     async fn smoke_failure_rejects_the_tool() {
         let mut invoker = MockInvoker::new(vec![mk_manifest_smoke("p1", "t_smoke", true)]);
-        invoker.list_tools = std::collections::HashMap::from([("p1".into(), assert_input_schema_ok(json!({"tools":[{ "name": "t_smoke" }]})))]);
+        invoker.list_tools = std::collections::HashMap::from([(
+            "p1".into(),
+            assert_input_schema_ok(json!({"tools":[{ "name": "t_smoke" }]})),
+        )]);
         invoker.invoke_tool_fail = true;
-        let out = g2_verify_and_sanitize(&invoker, mk_manifest_smoke("p1", "t_smoke", true), true).await;
+        let out =
+            g2_verify_and_sanitize(&invoker, mk_manifest_smoke("p1", "t_smoke", true), true).await;
         assert!(out.smoke_failed, "冒烟失败须标记");
-        assert!(out.manifest.capabilities.tools.is_empty(), "冒烟失败的工具被拒绝");
+        assert!(
+            out.manifest.capabilities.tools.is_empty(),
+            "冒烟失败的工具被拒绝"
+        );
         assert!(out.rejected_tools.contains(&"t_smoke".to_string()));
     }
 
     #[tokio::test]
     async fn smoke_success_keeps_the_tool() {
         let mut invoker = MockInvoker::new(vec![mk_manifest_smoke("p1", "t_smoke", true)]);
-        invoker.list_tools = std::collections::HashMap::from([("p1".into(), assert_input_schema_ok(json!({"tools":[{ "name": "t_smoke" }]})))]);
-        let out = g2_verify_and_sanitize(&invoker, mk_manifest_smoke("p1", "t_smoke", true), true).await;
+        invoker.list_tools = std::collections::HashMap::from([(
+            "p1".into(),
+            assert_input_schema_ok(json!({"tools":[{ "name": "t_smoke" }]})),
+        )]);
+        let out =
+            g2_verify_and_sanitize(&invoker, mk_manifest_smoke("p1", "t_smoke", true), true).await;
         assert!(!out.smoke_failed);
         assert_eq!(out.manifest.capabilities.tools.len(), 1, "冒烟成功则保留");
-        assert_eq!(invoker.invoke_calls.load(std::sync::atomic::Ordering::Relaxed), 1);
+        assert_eq!(
+            invoker
+                .invoke_calls
+                .load(std::sync::atomic::Ordering::Relaxed),
+            1
+        );
     }
 
     #[tokio::test]
     async fn smoke_not_run_without_optin() {
         let mut invoker = MockInvoker::new(vec![mk_manifest_smoke("p1", "t_no_smoke", false)]);
-        invoker.list_tools = std::collections::HashMap::from([("p1".into(), assert_input_schema_ok(json!({"tools":[{ "name": "t_no_smoke" }]})))]);
-        let _ = g2_verify_and_sanitize(&invoker, mk_manifest_smoke("p1", "t_no_smoke", false), true).await;
+        invoker.list_tools = std::collections::HashMap::from([(
+            "p1".into(),
+            assert_input_schema_ok(json!({"tools":[{ "name": "t_no_smoke" }]})),
+        )]);
+        let _ =
+            g2_verify_and_sanitize(&invoker, mk_manifest_smoke("p1", "t_no_smoke", false), true)
+                .await;
         assert_eq!(
-            invoker.invoke_calls.load(std::sync::atomic::Ordering::Relaxed),
+            invoker
+                .invoke_calls
+                .load(std::sync::atomic::Ordering::Relaxed),
             0,
             "未声明 smoke:true 的工具不被冒烟（避免注册期副作用）"
         );

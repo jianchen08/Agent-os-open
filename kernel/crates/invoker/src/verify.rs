@@ -369,7 +369,10 @@ mod tests {
         let declared = declared_with_services(&m);
         assert_eq!(declared.len(), 1);
         assert_eq!(declared[0].name, "svc.foo");
-        assert!(declared[0].input_schema.is_some(), "服务入参 schema 进对照集合");
+        assert!(
+            declared[0].input_schema.is_some(),
+            "服务入参 schema 进对照集合"
+        );
         assert!(declared[0].output_schema.is_some());
     }
 

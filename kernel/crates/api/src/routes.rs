@@ -451,7 +451,9 @@ pub async fn serve_upload_handler(
         HeaderValue::from_static(content_type),
     );
     if let Ok(cache) = HeaderValue::from_str("public, max-age=31536000, immutable") {
-        response.headers_mut().insert(axum::http::header::CACHE_CONTROL, cache);
+        response
+            .headers_mut()
+            .insert(axum::http::header::CACHE_CONTROL, cache);
     }
     response
 }
@@ -1247,10 +1249,7 @@ fn find_config_mapping<'a>(
 ///
 /// 读取语义与内核侧解析一致：进程环境优先，缺失回退 .env（用户可能经系统
 /// 环境变量注入而非设置页——掩码视图如实反映"内核能否解析到"）。
-fn masked_env_fields(
-    mapping: &ConfigFileMapping,
-    env_path: &std::path::Path,
-) -> serde_json::Value {
+fn masked_env_fields(mapping: &ConfigFileMapping, env_path: &std::path::Path) -> serde_json::Value {
     let text = std::fs::read_to_string(env_path).unwrap_or_default();
     let from_file = agentos_mcp::env_file::parse_env_text_for_read(&text);
     let mut out = serde_json::Map::new();
@@ -1258,7 +1257,11 @@ fn masked_env_fields(
         let set = std::env::var(&f.name).ok().is_some() || from_file.contains_key(&f.name);
         out.insert(
             f.name.clone(),
-            serde_json::Value::String(if set { "***".to_string() } else { String::new() }),
+            serde_json::Value::String(if set {
+                "***".to_string()
+            } else {
+                String::new()
+            }),
         );
     }
     serde_json::Value::Object(out)
@@ -1353,8 +1356,11 @@ pub async fn put_plugin_config_handler(
     if mapping.target.as_deref() == Some("env") {
         let env_path = agentos_mcp::env_file::env_path_for_root(&project_root);
         let current = masked_env_fields(mapping, &env_path);
-        let current_etag =
-            compute_etag(serde_json::to_string(&current).unwrap_or_default().as_bytes());
+        let current_etag = compute_etag(
+            serde_json::to_string(&current)
+                .unwrap_or_default()
+                .as_bytes(),
+        );
         match req.if_match.as_deref() {
             Some(given) if given == current_etag => {}
             _ => {
@@ -1366,11 +1372,8 @@ pub async fn put_plugin_config_handler(
                 });
             }
         }
-        let declared: std::collections::HashSet<&str> = mapping
-            .fields
-            .iter()
-            .map(|f| f.name.as_str())
-            .collect();
+        let declared: std::collections::HashSet<&str> =
+            mapping.fields.iter().map(|f| f.name.as_str()).collect();
         let mut updates: Vec<(String, String)> = Vec::new();
         if let Some(obj) = req.data.as_object() {
             for (name, value) in obj {
@@ -1392,8 +1395,7 @@ pub async fn put_plugin_config_handler(
             }
         })?;
         let data = masked_env_fields(mapping, &env_path);
-        let new_etag =
-            compute_etag(serde_json::to_string(&data).unwrap_or_default().as_bytes());
+        let new_etag = compute_etag(serde_json::to_string(&data).unwrap_or_default().as_bytes());
         return Ok(axum::Json(json!({
             "ok": true,
             "plugin_id": plugin_id,
@@ -1584,7 +1586,9 @@ pub async fn validate_all_plugins_handler(
         let enabled = enabled_ids.contains(&m.id);
         if m.capabilities.tools.is_empty() {
             // 非 tool 插件无工具可对照：登记 not_covered 缺省（诚实标未覆盖）
-            ledger.upsert(crate::contract::PluginContractState::not_covered(m, enabled));
+            ledger.upsert(crate::contract::PluginContractState::not_covered(
+                m, enabled,
+            ));
             continue;
         }
         if m.host_type != agentos_core::traits::HostType::Sidecar {
@@ -1594,7 +1598,9 @@ pub async fn validate_all_plugins_handler(
                 "reason": format!("host_type {:?} 暂无 describe 通道（G2 渐进落地）", m.host_type),
                 "mismatches": [],
             }));
-            ledger.upsert(crate::contract::PluginContractState::not_covered(m, enabled));
+            ledger.upsert(crate::contract::PluginContractState::not_covered(
+                m, enabled,
+            ));
             continue;
         }
         match invoker.list_plugin_tools(&m.id).await {
@@ -1636,9 +1642,9 @@ pub async fn validate_all_plugins_handler(
                         agentos_invoker::verify::VerifyMismatch::Missing { name } => {
                             Some(name.clone())
                         }
-                        agentos_invoker::verify::VerifyMismatch::SchemaMismatch { name, .. } => {
-                            Some(name.clone())
-                        }
+                        agentos_invoker::verify::VerifyMismatch::SchemaMismatch {
+                            name, ..
+                        } => Some(name.clone()),
                         agentos_invoker::verify::VerifyMismatch::Undeclared { .. } => None,
                     })
                     .collect();
@@ -1650,7 +1656,9 @@ pub async fn validate_all_plugins_handler(
                     smoke_failed: false,
                 };
                 ledger.upsert(crate::contract::PluginContractState::derived(
-                    m, enabled, Some(&g2o),
+                    m,
+                    enabled,
+                    Some(&g2o),
                 ));
                 reports.push(json!({
                     "plugin_id": m.id,
@@ -1883,7 +1891,9 @@ pub async fn plugins_set_enabled_handler(
                             // 闸2·观测：启用复核结果收口（无 invoker = not_covered 缺省）
                             state.contract_states.upsert(
                                 crate::contract::PluginContractState::derived(
-                                    m, true, g2_outcome.as_ref(),
+                                    m,
+                                    true,
+                                    g2_outcome.as_ref(),
                                 ),
                             );
                             let (tools, http_routes) =
@@ -1920,9 +1930,9 @@ pub async fn plugins_set_enabled_handler(
                         .iter()
                         .find(|m| m.id == plugin_id)
                     {
-                        state.contract_states.upsert(
-                            crate::contract::PluginContractState::not_covered(m, false),
-                        );
+                        state
+                            .contract_states
+                            .upsert(crate::contract::PluginContractState::not_covered(m, false));
                     }
                     state.plugin_scopes.revoke(&plugin_id);
                     if let Some(bindings) = &state.widget_bindings {
@@ -2282,7 +2292,8 @@ mod state_summary_tests {
         let s2 = summarize_state(&json!({"pipeline_id": "p4", "raw_result": "复盘结论：x"}));
         assert_eq!(s2["raw_result"], "复盘结论：x");
         // 终态回写的 task.ended_at 出口（任务树展示完成时间）
-        let s3 = summarize_state(&json!({"pipeline_id": "p5", "task.ended_at": "2026-08-16T09:00:00Z"}));
+        let s3 =
+            summarize_state(&json!({"pipeline_id": "p5", "task.ended_at": "2026-08-16T09:00:00Z"}));
         assert_eq!(s3["task.ended_at"], "2026-08-16T09:00:00Z");
     }
 }

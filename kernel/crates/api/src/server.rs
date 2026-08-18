@@ -46,9 +46,9 @@ use crate::routes::{
     get_pipeline_config_with_etag, get_plugin_config_with_etag, health_handler,
     metrics_prometheus_handler, pipelines_handler, pipelines_runs_handler, pipelines_state_handler,
     plugins_contract_status_handler, plugins_set_enabled_handler, plugins_status_handler,
-    put_agent_config_handler, put_pipeline_config_handler, put_plugin_config_handler, schema_handler,
-    serve_upload_handler, system_restart_handler, tools_handler, validate_all_plugins_handler,
-    AppState,
+    put_agent_config_handler, put_pipeline_config_handler, put_plugin_config_handler,
+    schema_handler, serve_upload_handler, system_restart_handler, tools_handler,
+    validate_all_plugins_handler, AppState,
 };
 use crate::session_routes::{
     create_session_handler, delete_session_handler, list_session_messages_handler,
@@ -849,7 +849,12 @@ fn derive_run_terminal_events(
     final_state: &serde_json::Value,
     failed: bool,
 ) -> Vec<(&'static str, Vec<(&'static str, serde_json::Value)>)> {
-    let v = |k: &str| final_state.get(k).cloned().unwrap_or(serde_json::Value::Null);
+    let v = |k: &str| {
+        final_state
+            .get(k)
+            .cloned()
+            .unwrap_or(serde_json::Value::Null)
+    };
     let pipeline_id = v("pipeline_id");
     let thread_id = v("session_id");
     let has_task = final_state
@@ -985,10 +990,20 @@ async fn finalize_task_status_in_state(
     // 冷路径：pipeline_state 表（upsert_state_field 现成，O(1) 单键写）
     if let Some(store) = state.store.as_ref() {
         let _ = store
-            .upsert_state_field(effective_pipeline_id, tenant_id, "task.status", &json!(status))
+            .upsert_state_field(
+                effective_pipeline_id,
+                tenant_id,
+                "task.status",
+                &json!(status),
+            )
             .await;
         let _ = store
-            .upsert_state_field(effective_pipeline_id, tenant_id, "task.ended_at", &json!(ended_at))
+            .upsert_state_field(
+                effective_pipeline_id,
+                tenant_id,
+                "task.ended_at",
+                &json!(ended_at),
+            )
             .await;
     }
     info!(
@@ -1381,23 +1396,23 @@ async fn stage_recover_history(
     // 指纹实录塞 _pending_message_ops（内部字段）：executor.persist_run_start 落一条
     // user_input 轨迹后移除——首轮 user 由此进入审计/回放范围（ops 即轨迹）。
     if !interrupted_tail {
-    if let Ok(user_ledger) = agentos_engine::apply_messages_op_update(
-        &mut initial_state,
-        store.as_ref(),
-        tenant_id,
-        &[serde_json::json!({"op":"set","msg":{"role":"user","content":message}})],
-    )
-    .await
-    {
-        if !user_ledger.is_empty() {
-            if let Some(obj) = initial_state.as_object_mut() {
-                obj.insert(
-                    "_pending_message_ops".to_string(),
-                    serde_json::Value::Array(user_ledger),
-                );
+        if let Ok(user_ledger) = agentos_engine::apply_messages_op_update(
+            &mut initial_state,
+            store.as_ref(),
+            tenant_id,
+            &[serde_json::json!({"op":"set","msg":{"role":"user","content":message}})],
+        )
+        .await
+        {
+            if !user_ledger.is_empty() {
+                if let Some(obj) = initial_state.as_object_mut() {
+                    obj.insert(
+                        "_pending_message_ops".to_string(),
+                        serde_json::Value::Array(user_ledger),
+                    );
+                }
             }
         }
-    }
     }
     initial_state
 }
@@ -1442,7 +1457,12 @@ pub(crate) fn find_agent_yaml(dir: &std::path::Path, agent_id: &str) -> Option<s
 /// yaml 加载归 sidecar 的 context_build 插件（按 state.agent_id 读
 /// AGENTOS_CONFIG_ROOT/agents/**）。工具 schema 注入留在内核——ToolRegistry
 /// 在内核，这是工具面契约（按 agent tool_ids 过滤下发）而非 agent 配置。
-fn stage_inject_agent_and_tools(state: &AppState, initial_state: &mut serde_json::Value, _agent_id: &str, _project_root: &std::path::Path) {
+fn stage_inject_agent_and_tools(
+    state: &AppState,
+    initial_state: &mut serde_json::Value,
+    _agent_id: &str,
+    _project_root: &std::path::Path,
+) {
     // 2b. 注入工具 schema 到 state（0.2 sidecar 架构适配）。
     // 0.1 单进程时 tool_schema 插件经 ctx.get_service("tool_registry") 直接访问内核
     // ToolRegistry；0.2 sidecar 是独立进程拿不到该 service。改为内核侧在管道启动前
@@ -1539,8 +1559,20 @@ async fn stage_execute(
         "run.started",
         vec![
             ("run_id", serde_json::json!(run_id)),
-            ("pipeline_id", initial_state.get("pipeline_id").cloned().unwrap_or(serde_json::Value::Null)),
-            ("thread_id", initial_state.get("session_id").cloned().unwrap_or(serde_json::Value::Null)),
+            (
+                "pipeline_id",
+                initial_state
+                    .get("pipeline_id")
+                    .cloned()
+                    .unwrap_or(serde_json::Value::Null),
+            ),
+            (
+                "thread_id",
+                initial_state
+                    .get("session_id")
+                    .cloned()
+                    .unwrap_or(serde_json::Value::Null),
+            ),
         ],
     )
     .await;
@@ -2152,9 +2184,11 @@ mod tests {
             mk_manifest("p_drift", &["t1", "ghost"]),
             mk_manifest("p_clean", &["t2"]),
         ]));
-        state.enabled_plugin_ids = Arc::new(tokio::sync::RwLock::new(
-            std::collections::HashSet::from(["p_drift".to_string(), "p_clean".to_string()]),
-        ));
+        state.enabled_plugin_ids =
+            Arc::new(tokio::sync::RwLock::new(std::collections::HashSet::from([
+                "p_drift".to_string(),
+                "p_clean".to_string(),
+            ])));
         let invoker = Arc::new(RecordingInvoker {
             seen: std::sync::Mutex::new(Vec::new()),
             seen_states: std::sync::Mutex::new(Vec::new()),
@@ -2183,9 +2217,15 @@ mod tests {
         let by_id = |id: &str| plugins.iter().find(|p| p["plugin_id"] == id).unwrap();
         let drift_gates = &by_id("p_drift")["gates"];
         assert_eq!(drift_gates["g2_consistency"], "drift");
-        assert!(drift_gates["last_error"].as_str().unwrap().contains("t1") ||
-                drift_gates["last_error"].as_str().unwrap().contains("ghost"),
-            "漂移工具进 last_error: {:?}", drift_gates["last_error"]);
+        assert!(
+            drift_gates["last_error"].as_str().unwrap().contains("t1")
+                || drift_gates["last_error"]
+                    .as_str()
+                    .unwrap()
+                    .contains("ghost"),
+            "漂移工具进 last_error: {:?}",
+            drift_gates["last_error"]
+        );
         let clean_gates = &by_id("p_clean")["gates"];
         assert_eq!(clean_gates["g2_consistency"], "ok");
         assert_eq!(by_id("p_clean")["enabled"], true);
@@ -2205,9 +2245,10 @@ mod tests {
         .expect("valid manifest");
         state.manifests = Arc::new(tokio::sync::RwLock::new(vec![m.clone()]));
         // 未登记：只 enabled，不登记账本 → not_covered 缺省
-        state.enabled_plugin_ids = Arc::new(tokio::sync::RwLock::new(
-            std::collections::HashSet::from(["p_svc".to_string()]),
-        ));
+        state.enabled_plugin_ids =
+            Arc::new(tokio::sync::RwLock::new(std::collections::HashSet::from([
+                "p_svc".to_string(),
+            ])));
 
         let status = plugins_contract_status_handler(axum::extract::State(state))
             .await
@@ -3642,10 +3683,7 @@ mod tests {
             })
             .collect::<Vec<_>>();
         assert_eq!(evs[0], ("run.failed".to_string(), "".to_string()));
-        assert_eq!(
-            evs[1],
-            ("task_failed".to_string(), "parent_p4".to_string())
-        );
+        assert_eq!(evs[1], ("task_failed".to_string(), "parent_p4".to_string()));
     }
 
     #[test]
@@ -3855,10 +3893,7 @@ mod tests {
         drop(st);
 
         // ② 冷路径：pipeline_state 表同样落 completed（重启后 checkpoint 之上的覆盖层）
-        let fields = store
-            .load_pipeline_state(pipe, &tenant_id)
-            .await
-            .unwrap();
+        let fields = store.load_pipeline_state(pipe, &tenant_id).await.unwrap();
         assert_eq!(
             fields.get("task.status").and_then(|v| v.as_str()),
             Some("completed"),
@@ -3959,7 +3994,8 @@ mod tests {
         assert_eq!(dup, 1, "中断重放不得重复落槽：{msgs:?}");
         // 引擎基于既有历史正常跑完（assistant 已产出）
         assert!(
-            msgs.iter().any(|m| m.get("role") == Some(&json!("assistant"))),
+            msgs.iter()
+                .any(|m| m.get("role") == Some(&json!("assistant"))),
             "重放应继续执行产出回复：{msgs:?}"
         );
         let _ = invoker; // 引擎确实调用了 LLM 插件（seen_states 非空即跑过）
@@ -3998,7 +4034,8 @@ mod tests {
         let n = msgs
             .iter()
             .filter(|m| {
-                m.get("role") == Some(&json!("user")) && m.get("content") == Some(&json!("再来一次"))
+                m.get("role") == Some(&json!("user"))
+                    && m.get("content") == Some(&json!("再来一次"))
             })
             .count();
         assert_eq!(n, 2, "已消费后同文再发是合法新输入（应 2 条）：{msgs:?}");
@@ -4058,7 +4095,10 @@ mod tests {
             ("pipe_gap3c_c", vec!["会话C的消息"]),
             ("pipe_gap3c_d", vec!["会话D的消息"]),
         ] {
-            let msgs = store.load_message_history(pid, "tenant_gap3c").await.unwrap();
+            let msgs = store
+                .load_message_history(pid, "tenant_gap3c")
+                .await
+                .unwrap();
             let seqs: Vec<i64> = msgs
                 .iter()
                 .filter_map(|m| m.get("seq").and_then(|s| s.as_i64()))
@@ -4094,7 +4134,8 @@ mod tests {
         // （/api/v1/pipelines/state 聚合 + checkpoint 冷兜底）无需 YAML。
         let (state, _invoker, store, _sqlite) = make_engine_state();
         let tenant = TenantContext::new("tenant_unify", "thread_unify");
-        let overlay = json!({"task.id": "t_unify", "task.goal": "统一验证", "task.status": "pending"});
+        let overlay =
+            json!({"task.id": "t_unify", "task.goal": "统一验证", "task.status": "pending"});
         let r = agentos_tenant::scope(
             tenant,
             process_via_engine(
@@ -4154,7 +4195,10 @@ mod tests {
             .load_pipeline_state("pipe_plain", "tenant_unify")
             .await
             .unwrap();
-        assert!(!fields2.contains_key("task.status"), "非任务管道不写任务字段");
+        assert!(
+            !fields2.contains_key("task.status"),
+            "非任务管道不写任务字段"
+        );
     }
 
     #[tokio::test]
@@ -4190,7 +4234,8 @@ mod tests {
         let entry = reg.get("tenant_plugin_verdict", "pipe_pv").unwrap();
         let st = entry.read();
         assert_eq!(
-            st.state["task.status"], json!("pending_evaluation"),
+            st.state["task.status"],
+            json!("pending_evaluation"),
             "内核应尊重插件裁决的 task.status"
         );
         drop(st);
@@ -4223,7 +4268,6 @@ mod tests {
         let mut overlay = overlay;
         if let Some(obj) = overlay.as_object_mut() {
             obj.insert("task.id".to_string(), json!(pipeline_id));
-
         }
 
         // ② 派发 → run 完成
@@ -4249,9 +4293,15 @@ mod tests {
 
         // ③ registry 热路径终态
         let reg = agentos_session::global_registry();
-        let entry = reg.get("tenant_lifecycle", pipeline_id).expect("registry 应有管道");
+        let entry = reg
+            .get("tenant_lifecycle", pipeline_id)
+            .expect("registry 应有管道");
         let st = entry.read();
-        assert_eq!(st.state["task.status"], json!("completed"), "任务终态由 run 终态回写");
+        assert_eq!(
+            st.state["task.status"],
+            json!("completed"),
+            "任务终态由 run 终态回写"
+        );
         assert!(st.state.get("task.ended_at").is_some());
         // 出生字段保留（goal/scope/lineage）
         assert_eq!(st.state["task.goal"], "全流程验证");
@@ -4260,8 +4310,14 @@ mod tests {
         drop(st);
 
         // ④ 聚合出口（pipeline-state.list 同源）行完整
-        let fields = store.load_pipeline_state(pipeline_id, "tenant_lifecycle").await.unwrap();
-        assert_eq!(fields.get("task.status"), Some(&json!("completed")), "冷路径表也回写");
-
+        let fields = store
+            .load_pipeline_state(pipeline_id, "tenant_lifecycle")
+            .await
+            .unwrap();
+        assert_eq!(
+            fields.get("task.status"),
+            Some(&json!("completed")),
+            "冷路径表也回写"
+        );
     }
 }

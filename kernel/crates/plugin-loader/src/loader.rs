@@ -285,7 +285,8 @@ impl PluginLoaderImpl {
             // 与真实加载路径同规则：裸名按平台补 cdylib 后缀（.dll/lib{}.so），
             // 已带已知扩展名则原样——否则声明 `pipeline_tool_core_native` 会因
             // 磁盘上是 `..._native.dll` 而被误判缺失。
-            let artifact_path = dir.join(NativePluginLoader::platform_artifact_name(&native.artifact));
+            let artifact_path =
+                dir.join(NativePluginLoader::platform_artifact_name(&native.artifact));
             if !artifact_path.exists() {
                 return Err(LoaderError::ManifestValidation {
                     plugin_id: manifest.id.clone(),
@@ -842,7 +843,10 @@ fn validate_env_field_coverage(manifest: &PluginManifest) -> Result<(), LoaderEr
         .filter(|f| f.target.as_deref() == Some("env"))
         .flat_map(|f| f.fields.iter().map(|fd| fd.name.as_str()))
         .collect();
-    let missing: Vec<&String> = refs.iter().filter(|r| !declared.contains(r.as_str())).collect();
+    let missing: Vec<&String> = refs
+        .iter()
+        .filter(|r| !declared.contains(r.as_str()))
+        .collect();
     if missing.is_empty() {
         return Ok(());
     }
@@ -940,7 +944,13 @@ mod tests {
         fn collect(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
             // 跳过第三方/运行时产物目录：管理面只管插件声明，node_modules 下也有
             // 大量 widget_demo/dsh 依赖的 plugin.json（非本仓插件）。
-            const SKIP: &[&str] = &["node_modules", ".venv", "__pycache__", "dsh_plugins", "runtime"];
+            const SKIP: &[&str] = &[
+                "node_modules",
+                ".venv",
+                "__pycache__",
+                "dsh_plugins",
+                "runtime",
+            ];
             let mut entries = match std::fs::read_dir(dir) {
                 Ok(e) => e,
                 Err(e) => {
@@ -960,12 +970,19 @@ mod tests {
             }
         }
         collect(&shared, &mut walk);
-        assert!(walk.len() > 50, "应扫到真实插件语料 >50，实际 {}", walk.len());
+        assert!(
+            walk.len() > 50,
+            "应扫到真实插件语料 >50，实际 {}",
+            walk.len()
+        );
         for path in &walk {
             let text = std::fs::read_to_string(&path)
                 .unwrap_or_else(|e| panic!("读取 {} 失败: {e}", path.display()));
             let m: PluginManifest = serde_json::from_str(&text).unwrap_or_else(|e| {
-                panic!("真实语料 {} 未通过严格解析（校验器抓到未知字段/坏结构）: {e}", path.display());
+                panic!(
+                    "真实语料 {} 未通过严格解析（校验器抓到未知字段/坏结构）: {e}",
+                    path.display()
+                );
             });
             assert!(!m.id.is_empty() && !m.name.is_empty() && !m.version.is_empty());
             // output_schema 声明合法性（声明即校验）：真实工具若有畸形声明即红灯
@@ -1002,7 +1019,13 @@ mod tests {
         let shared = manifest_dir.join("../../../plugins/shared");
         let mut walk = Vec::new();
         fn collect(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
-            const SKIP: &[&str] = &["node_modules", ".venv", "__pycache__", "dsh_plugins", "runtime"];
+            const SKIP: &[&str] = &[
+                "node_modules",
+                ".venv",
+                "__pycache__",
+                "dsh_plugins",
+                "runtime",
+            ];
             let Ok(mut entries) = std::fs::read_dir(dir) else {
                 return;
             };
@@ -1964,10 +1987,8 @@ mod tests {
     fn test_env_coverage_default_syntax_exempt() {
         // ${VAR:-def} 带默认值（可选凭据）豁免声明要求
         let loader = PluginLoaderImpl::new("/tmp/nonexistent", None);
-        let json = env_coverage_manifest_json(false).replace(
-            "${SMITHERY_API_KEY}",
-            "${OPTIONAL_KEY:-}",
-        );
+        let json =
+            env_coverage_manifest_json(false).replace("${SMITHERY_API_KEY}", "${OPTIONAL_KEY:-}");
         let manifest: PluginManifest = serde_json::from_str(&json).unwrap();
         assert!(loader.validate_manifest(&manifest).is_ok());
     }
@@ -2050,5 +2071,4 @@ mod tests {
         assert_eq!(cfg.plugins[0].id, "foo");
         assert_eq!(cfg.plugins[0].sha256, "abc123");
     }
-
 }

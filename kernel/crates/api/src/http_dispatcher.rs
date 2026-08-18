@@ -290,7 +290,9 @@ async fn exec_ext_request(
             })
         }
         DispatchOutcome::NotFound => (StatusCode::NOT_FOUND, "route not found").into_response(),
-        DispatchOutcome::Timeout => (StatusCode::GATEWAY_TIMEOUT, "endpoint timeout").into_response(),
+        DispatchOutcome::Timeout => {
+            (StatusCode::GATEWAY_TIMEOUT, "endpoint timeout").into_response()
+        }
         DispatchOutcome::ConcurrencyLimited => {
             (StatusCode::SERVICE_UNAVAILABLE, "concurrency limit").into_response()
         }
@@ -325,8 +327,16 @@ fn build_wildcard_handler(
                         m
                     })
                     .unwrap_or_default();
-                exec_ext_request(dispatcher, plugin_dirs, method, path, query_multi, headers, body)
-                    .await
+                exec_ext_request(
+                    dispatcher,
+                    plugin_dirs,
+                    method,
+                    path,
+                    query_multi,
+                    headers,
+                    body,
+                )
+                .await
             }
         };
 
@@ -368,8 +378,16 @@ fn build_datasource_handler(
                     m
                 })
                 .unwrap_or_default();
-            exec_ext_request(dispatcher, plugin_dirs, method, ext_path, query_multi, headers, body)
-                .await
+            exec_ext_request(
+                dispatcher,
+                plugin_dirs,
+                method,
+                ext_path,
+                query_multi,
+                headers,
+                body,
+            )
+            .await
         }
     };
     axum::routing::any(handler)

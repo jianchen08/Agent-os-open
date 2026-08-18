@@ -33,8 +33,8 @@ pub fn compute_message_id(msg: &Value) -> String {
     let canonical = canonical_message(msg);
     // Value 序列化不可能失败（对象键必为 String、无 IO）；若失败宁可 panic
     // 也不能退空串——空串会让所有消息得到同一指纹，静默摧毁去重身份。
-    let json = serde_json::to_string(&canonical)
-        .expect("serde_json Value serialization is infallible");
+    let json =
+        serde_json::to_string(&canonical).expect("serde_json Value serialization is infallible");
     let mut hasher = Sha256::new();
     hasher.update(json.as_bytes());
     format!("mc_{:x}", hasher.finalize())

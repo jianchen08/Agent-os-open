@@ -617,10 +617,15 @@ async fn test_datasource_proxy_forwards_to_ext_routes() {
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
-    let body = axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+    let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
     let text = String::from_utf8(body.to_vec()).unwrap();
     assert!(text.contains(r#""limit":"5""#), "query 应透传: {text}");
-    assert!(text.contains(r#""filter":["a","b"]"#), "多值 query 应全量: {text}");
+    assert!(
+        text.contains(r#""filter":["a","b"]"#),
+        "多值 query 应全量: {text}"
+    );
 
     // 显式 ext 长形式
     let resp = app

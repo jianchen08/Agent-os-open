@@ -418,8 +418,8 @@ async fn fp3_config_change_triggers_reload() {
         id: "version".to_string(),
         path: "version.yaml".to_string(),
         label: "Version".to_string(),
-            target: None,
-            fields: vec![],
+        target: None,
+        fields: vec![],
     }];
     loader.add_manifest(manifest);
 

@@ -463,16 +463,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     || !manifest.capabilities.services.is_empty());
             if !g2_applicable {
                 // 非 G2 覆盖（禁用/非 sidecar/无 tools+services）：登记 not_covered 缺省
-                contract_states
-                    .upsert(agentos_api::contract::PluginContractState::not_covered(
-                        manifest, enabled,
-                    ));
+                contract_states.upsert(agentos_api::contract::PluginContractState::not_covered(
+                    manifest, enabled,
+                ));
                 continue;
             }
-            let outcome =
-                g2_verify_and_sanitize(invoker.as_ref(), manifest.clone(), strict).await;
+            let outcome = g2_verify_and_sanitize(invoker.as_ref(), manifest.clone(), strict).await;
             contract_states.upsert(agentos_api::contract::PluginContractState::derived(
-                manifest, enabled, Some(&outcome),
+                manifest,
+                enabled,
+                Some(&outcome),
             ));
             if !outcome.drift && !outcome.spawn_failed {
                 verified += 1;
@@ -688,22 +688,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let inv_for_domain: Arc<dyn agentos_core::traits::PluginInvoker> = invoker.clone();
         let enabled_for_domain = enabled_plugin_ids.clone();
         let manifests_for_domain = manifests_shared.clone();
-        Arc::new(move |event_name: &str, tags: Vec<(&str, serde_json::Value)>| {
-            let inv = inv_for_domain.clone();
-            let enabled = enabled_for_domain.clone();
-            let manifests = manifests_for_domain.clone();
-            let name = event_name.to_string();
-            tokio::spawn(async move {
-                agentos_api::plugin_lifecycle::broadcast_domain_event_from(
-                    &inv,
-                    &enabled,
-                    &manifests,
-                    &name,
-                    tags,
-                )
-                .await;
-            });
-        })
+        Arc::new(
+            move |event_name: &str, tags: Vec<(&str, serde_json::Value)>| {
+                let inv = inv_for_domain.clone();
+                let enabled = enabled_for_domain.clone();
+                let manifests = manifests_for_domain.clone();
+                let name = event_name.to_string();
+                tokio::spawn(async move {
+                    agentos_api::plugin_lifecycle::broadcast_domain_event_from(
+                        &inv, &enabled, &manifests, &name, tags,
+                    )
+                    .await;
+                });
+            },
+        )
     };
 
     let router = Arc::new(
@@ -1139,7 +1137,9 @@ pub(crate) fn build_plugin_loader(
     // P0-2：allowlist 生产接线——config/system/plugin_allowlist.yaml 从"空挂"变真准入
     // （permissive 默认：放行 + 条目 sha256 校验，真实语料零误伤；strict 由部署方显式
     // 启用：白名单外插件 load 失败 fail-closed，与 deny_unknown_fields 一致）。
-    let allowlist = agentos_plugin_loader::load_allowlist_file(&config_root.join("system/plugin_allowlist.yaml"));
+    let allowlist = agentos_plugin_loader::load_allowlist_file(
+        &config_root.join("system/plugin_allowlist.yaml"),
+    );
     PluginLoaderImpl::new(plugins_dir, user_plugins_dir)
         // 接入 config_root：否则 load_config() 因 config_root=None 恒返回空 {}
         .with_config_root(config_root)

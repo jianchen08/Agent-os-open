@@ -390,7 +390,10 @@ fn test_apply_ops_all_slots_have_blob() {
     assert!(rows.len() >= 4, "四条消息应全部落库：{rows:?}");
     // decode 成功即意味着 blob 完整（NULL blob 行会变成空对象——反向验证内容非空）
     for m in &rows {
-        let has_content = m.get("content").and_then(|c| c.as_str()).is_some_and(|s| !s.is_empty())
+        let has_content = m
+            .get("content")
+            .and_then(|c| c.as_str())
+            .is_some_and(|s| !s.is_empty())
             || m.get("role").is_some();
         assert!(has_content, "每条消息应可从 blob 完整重建：{m:?}");
     }
@@ -436,7 +439,10 @@ fn test_save_checkpoint_strips_volatile_run_keys() {
         "_pending_message_ops",
         "messages",
     ] {
-        assert!(slim.get(k).is_none(), "易变键 {k} 不应进 checkpoint: {slim}");
+        assert!(
+            slim.get(k).is_none(),
+            "易变键 {k} 不应进 checkpoint: {slim}"
+        );
     }
     // 累计标量保留 + 水位
     assert_eq!(slim["track.total_tokens"], 1234);

@@ -554,14 +554,23 @@ pub struct ServiceSurface {
 const KERNEL_PROVIDED_SERVICES: &[(&str, &[&str])] = &[
     (
         "pipeline-executor",
-        &["suspend", "resume", "suspend_pipeline", "resume_pipeline", "get_run_status"],
+        &[
+            "suspend",
+            "resume",
+            "suspend_pipeline",
+            "resume_pipeline",
+            "get_run_status",
+        ],
     ),
     ("event-bus", &["emit"]),
     ("tool-executor", &["invoke"]),
     ("pipeline-state", &["list"]),
     ("config-reader", &["read"]),
     ("logger", &["log"]),
-    ("execution-records", &["append", "count", "delete_by_session", "list"]),
+    (
+        "execution-records",
+        &["append", "count", "delete_by_session", "list"],
+    ),
     ("frontend", &["emit"]),
     ("memory", &["create", "delete", "get", "list", "search"]),
     ("messages", &["list"]),
@@ -817,7 +826,9 @@ pub fn output_schema_error(decl: &serde_json::Value) -> Option<String> {
         } else if let Some(arr) = t.as_array() {
             !arr.is_empty()
                 && arr.iter().all(|v| {
-                    v.as_str().map(|s| JSON_SCHEMA_TYPES.contains(&s)).unwrap_or(false)
+                    v.as_str()
+                        .map(|s| JSON_SCHEMA_TYPES.contains(&s))
+                        .unwrap_or(false)
                 })
         } else {
             false
@@ -832,7 +843,11 @@ pub fn output_schema_error(decl: &serde_json::Value) -> Option<String> {
         }
     }
     if let Some(req) = obj.get("required") {
-        if !req.as_array().map(|a| a.iter().all(|v| v.is_string())).unwrap_or(false) {
+        if !req
+            .as_array()
+            .map(|a| a.iter().all(|v| v.is_string()))
+            .unwrap_or(false)
+        {
             return Some("output_schema.required 必须是字符串数组".to_string());
         }
     }
@@ -854,14 +869,16 @@ pub fn output_schema_error(decl: &serde_json::Value) -> Option<String> {
 /// 真实语料（2026-08-18）：human_interaction_tool 公告 create_conversation 但
 /// 无 `interaction.create_conversation` 工具（历史遗留死公告，无消费者）——
 /// 本检查抓出后从 provides.methods 移除。
-pub fn provides_methods_unbacked(
-    m: &agentos_core::traits::PluginManifest,
-) -> Vec<String> {
+pub fn provides_methods_unbacked(m: &agentos_core::traits::PluginManifest) -> Vec<String> {
     let Some(provides) = &m.provides else {
         return Vec::new();
     };
-    let declared_tools: std::collections::HashSet<&str> =
-        m.capabilities.tools.iter().map(|t| t.name.as_str()).collect();
+    let declared_tools: std::collections::HashSet<&str> = m
+        .capabilities
+        .tools
+        .iter()
+        .map(|t| t.name.as_str())
+        .collect();
     let mut out = Vec::new();
     for cap in &provides.capabilities {
         let prefix = cap
@@ -877,7 +894,6 @@ pub fn provides_methods_unbacked(
     }
     out
 }
-
 
 #[cfg(test)]
 mod tests {
@@ -1043,10 +1059,14 @@ mod tests {
 
     #[test]
     fn test_service_surface_role_vs_method() {
-        let surface = ServiceSurface::from_manifests(&[svc_manifest("p", &["audit.write", "audit.read"])]);
+        let surface =
+            ServiceSurface::from_manifests(&[svc_manifest("p", &["audit.write", "audit.read"])]);
         assert!(surface.has_role("audit"));
         assert!(surface.has_method("audit", "write"));
-        assert!(!surface.has_method("audit", "delete"), "未声明的方法不算注册");
+        assert!(
+            !surface.has_method("audit", "delete"),
+            "未声明的方法不算注册"
+        );
         assert!(!surface.has_role("ghost"));
     }
 
@@ -1079,7 +1099,10 @@ mod tests {
         let surface = ServiceSurface::from_manifests(&[m]);
         assert!(surface.has_role("human-interaction"));
         assert!(surface.has_method("human-interaction", "create_choice"));
-        assert!(!surface.has_role("human_interaction"), "wire 前缀不是契约键");
+        assert!(
+            !surface.has_role("human_interaction"),
+            "wire 前缀不是契约键"
+        );
     }
 
     // ── HTTP param-route 模板匹配测试（4c 解锁）──
@@ -1497,7 +1520,9 @@ mod tests {
         let manifests = vec![svc_sort_manifest("app", &["ghost.read"], &[])];
         let err = resolve_requires_services(&manifests).unwrap_err();
         match err {
-            ServiceDepError::Unsatisfied { consumer, service, .. } => {
+            ServiceDepError::Unsatisfied {
+                consumer, service, ..
+            } => {
                 assert_eq!(consumer, "app");
                 assert_eq!(service, "ghost.read");
             }
@@ -1521,18 +1546,42 @@ mod tests {
             "type": "array", "items": {"type": "object", "properties": {}}
         }))
         .is_none());
-        assert!(output_schema_error(&json!({})).is_none(), "空对象可解析（无 type 也允许）");
+        assert!(
+            output_schema_error(&json!({})).is_none(),
+            "空对象可解析（无 type 也允许）"
+        );
     }
 
     #[test]
     fn output_schema_malformed_is_rejected() {
-        assert!(output_schema_error(&json!("just-a-string")).is_some(), "顶层非对象必须报");
-        assert!(output_schema_error(&json!({"type": "hat"})).is_some(), "非法 type 必须报");
-        assert!(output_schema_error(&json!({"type": ["object", "hat"]})).is_some(), "type 数组含非法项");
-        assert!(output_schema_error(&json!({"type": 42})).is_some(), "type 非字符串/数组");
-        assert!(output_schema_error(&json!({"properties": "oops"})).is_some(), "properties 非对象");
-        assert!(output_schema_error(&json!({"required": ["a", 1]})).is_some(), "required 非纯字符串数组");
-        assert!(output_schema_error(&json!({"items": "oops"})).is_some(), "items 非对象");
+        assert!(
+            output_schema_error(&json!("just-a-string")).is_some(),
+            "顶层非对象必须报"
+        );
+        assert!(
+            output_schema_error(&json!({"type": "hat"})).is_some(),
+            "非法 type 必须报"
+        );
+        assert!(
+            output_schema_error(&json!({"type": ["object", "hat"]})).is_some(),
+            "type 数组含非法项"
+        );
+        assert!(
+            output_schema_error(&json!({"type": 42})).is_some(),
+            "type 非字符串/数组"
+        );
+        assert!(
+            output_schema_error(&json!({"properties": "oops"})).is_some(),
+            "properties 非对象"
+        );
+        assert!(
+            output_schema_error(&json!({"required": ["a", 1]})).is_some(),
+            "required 非纯字符串数组"
+        );
+        assert!(
+            output_schema_error(&json!({"items": "oops"})).is_some(),
+            "items 非对象"
+        );
     }
 
     // ── provides 服务注册检查（公告的方法必须有已声明工具） ──────────────

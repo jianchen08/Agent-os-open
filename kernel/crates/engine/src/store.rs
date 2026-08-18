@@ -260,10 +260,7 @@ fn migrate_add_run_pipeline_id(conn: &Connection) -> Result<(), StorageError> {
         .prepare("SELECT COUNT(*) FROM pragma_table_info('runs') WHERE name='pipeline_id'")?
         .query_row([], |row| row.get::<_, i64>(0))?;
     if has == 0 {
-        conn.execute(
-            "ALTER TABLE runs ADD COLUMN pipeline_id TEXT",
-            [],
-        )?;
+        conn.execute("ALTER TABLE runs ADD COLUMN pipeline_id TEXT", [])?;
     }
     Ok(())
 }
@@ -1607,15 +1604,13 @@ impl SqliteStore {
         };
         let metadata = match metadata_str.as_deref() {
             None => None,
-            Some(s) => {
-                Some(serde_json::from_str(s).map_err(|e| {
-                    rusqlite::Error::FromSqlConversionFailure(
-                        7,
-                        rusqlite::types::Type::Text,
-                        Box::new(e),
-                    )
-                })?)
-            }
+            Some(s) => Some(serde_json::from_str(s).map_err(|e| {
+                rusqlite::Error::FromSqlConversionFailure(
+                    7,
+                    rusqlite::types::Type::Text,
+                    Box::new(e),
+                )
+            })?),
         };
         Ok(SessionRecord {
             thread_id: row.get(0)?,
@@ -2153,11 +2148,7 @@ impl SqliteStore {
         // 写侧 save_run_summary_inner 用 to_string 序列化（内部往返）；
         // 解析失败是数据损坏，报错而非静默清空统计。
         let total_tokens = serde_json::from_str(&total_tokens_str).map_err(|e| {
-            rusqlite::Error::FromSqlConversionFailure(
-                3,
-                rusqlite::types::Type::Text,
-                Box::new(e),
-            )
+            rusqlite::Error::FromSqlConversionFailure(3, rusqlite::types::Type::Text, Box::new(e))
         })?;
         Ok(PipelineRunSummary {
             run_id: row.get(0)?,
@@ -2318,11 +2309,7 @@ impl SqliteStore {
         // 写侧 create_memory_inner 用 to_string 序列化（内部往返）；
         // 解析失败是数据损坏，报错而非静默清空。
         let tags = serde_json::from_str(&tags_str).map_err(|e| {
-            rusqlite::Error::FromSqlConversionFailure(
-                3,
-                rusqlite::types::Type::Text,
-                Box::new(e),
-            )
+            rusqlite::Error::FromSqlConversionFailure(3, rusqlite::types::Type::Text, Box::new(e))
         })?;
         Ok(MemoryRecord {
             id: row.get(0)?,
@@ -2544,7 +2531,6 @@ impl StorageBackend for SqliteStore {
         })?;
         Ok(rows.collect::<Result<Vec<_>, _>>()?)
     }
-
 
     async fn get_messages_by_pipeline(
         &self,

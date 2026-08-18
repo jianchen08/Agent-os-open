@@ -319,9 +319,9 @@ impl CapabilityRouter for KernelCapabilityRouter {
                         || r.status == agentos_core::types::RunStatus::Suspended
                 });
                 match target {
-                    Some(run) if run.status == agentos_core::types::RunStatus::Suspended => {
-                        Ok(json!({"status": "suspended", "pipeline_id": pipeline_id, "run_id": run.run_id}))
-                    }
+                    Some(run) if run.status == agentos_core::types::RunStatus::Suspended => Ok(
+                        json!({"status": "suspended", "pipeline_id": pipeline_id, "run_id": run.run_id}),
+                    ),
                     Some(run) => {
                         store
                             .update_run_status(
@@ -334,9 +334,13 @@ impl CapabilityRouter for KernelCapabilityRouter {
                             .map_err(|e| McpError::Protocol {
                                 message: format!("suspend_pipeline 失败: {e}"),
                             })?;
-                        Ok(json!({"status": "suspended", "pipeline_id": pipeline_id, "run_id": run.run_id}))
+                        Ok(
+                            json!({"status": "suspended", "pipeline_id": pipeline_id, "run_id": run.run_id}),
+                        )
                     }
-                    None => Ok(json!({"status": "suspended", "pipeline_id": pipeline_id, "run_id": ""})),
+                    None => {
+                        Ok(json!({"status": "suspended", "pipeline_id": pipeline_id, "run_id": ""}))
+                    }
                 }
             }
             ("pipeline-executor", "resume_pipeline") => {
@@ -362,14 +366,23 @@ impl CapabilityRouter for KernelCapabilityRouter {
                 match target {
                     Some(run) => {
                         store
-                            .update_run_status(&run.run_id, agentos_core::types::RunStatus::Running, None, None)
+                            .update_run_status(
+                                &run.run_id,
+                                agentos_core::types::RunStatus::Running,
+                                None,
+                                None,
+                            )
                             .await
                             .map_err(|e| McpError::Protocol {
                                 message: format!("resume_pipeline 失败: {e}"),
                             })?;
-                        Ok(json!({"status": "resumed", "pipeline_id": pipeline_id, "run_id": run.run_id}))
+                        Ok(
+                            json!({"status": "resumed", "pipeline_id": pipeline_id, "run_id": run.run_id}),
+                        )
                     }
-                    None => Ok(json!({"status": "resumed", "pipeline_id": pipeline_id, "run_id": ""})),
+                    None => {
+                        Ok(json!({"status": "resumed", "pipeline_id": pipeline_id, "run_id": ""}))
+                    }
                 }
             }
             ("pipeline-executor", "get_run_status") => {
@@ -450,8 +463,7 @@ impl CapabilityRouter for KernelCapabilityRouter {
                         // 信封契约（0.1 协议）：thread_id + pipeline_id + message_id
                         // 缺一即丢弃——前端 resolvePipelineId/extractMessageId 解析
                         // 不出会丢事件，与其发一个"合法但坏"的信封不如显式拒绝。
-                        if thread_id.is_empty() || pipeline_id.is_empty() || message_id.is_empty()
-                        {
+                        if thread_id.is_empty() || pipeline_id.is_empty() || message_id.is_empty() {
                             tracing::warn!(
                                 target: "capability:event-bus",
                                 event = %event_name,
@@ -460,7 +472,9 @@ impl CapabilityRouter for KernelCapabilityRouter {
                                 message = %message_id,
                                 "流式事件信封不完整（缺 thread_id/pipeline_id/message_id），丢弃"
                             );
-                            return Ok(json!({"status": "dropped", "reason": "incomplete envelope", "event": event_name}));
+                            return Ok(
+                                json!({"status": "dropped", "reason": "incomplete envelope", "event": event_name}),
+                            );
                         }
                         if !thread_id.is_empty() && (!needs_content || !content.is_empty()) {
                             let mut data = serde_json::json!({
@@ -486,7 +500,9 @@ impl CapabilityRouter for KernelCapabilityRouter {
                                 has_content = !content.is_empty(),
                                 "流式事件被丢弃（content 空）"
                             );
-                            return Ok(json!({"status": "dropped", "reason": "empty content", "event": event_name}));
+                            return Ok(
+                                json!({"status": "dropped", "reason": "empty content", "event": event_name}),
+                            );
                         }
                     }
                     return Ok(json!({"status": "emitted", "event": event_name}));
@@ -592,10 +608,34 @@ impl CapabilityRouter for KernelCapabilityRouter {
                         broadcaster(
                             "approval.created",
                             vec![
-                                ("request_id", payload.get("request_id").cloned().unwrap_or(serde_json::Value::Null)),
-                                ("run_id", payload.get("run_id").cloned().unwrap_or(serde_json::Value::Null)),
-                                ("pipeline_id", payload.get("pipeline_id").cloned().unwrap_or(serde_json::Value::Null)),
-                                ("thread_id", payload.get("thread_id").cloned().unwrap_or(serde_json::Value::Null)),
+                                (
+                                    "request_id",
+                                    payload
+                                        .get("request_id")
+                                        .cloned()
+                                        .unwrap_or(serde_json::Value::Null),
+                                ),
+                                (
+                                    "run_id",
+                                    payload
+                                        .get("run_id")
+                                        .cloned()
+                                        .unwrap_or(serde_json::Value::Null),
+                                ),
+                                (
+                                    "pipeline_id",
+                                    payload
+                                        .get("pipeline_id")
+                                        .cloned()
+                                        .unwrap_or(serde_json::Value::Null),
+                                ),
+                                (
+                                    "thread_id",
+                                    payload
+                                        .get("thread_id")
+                                        .cloned()
+                                        .unwrap_or(serde_json::Value::Null),
+                                ),
                             ],
                         );
                     }
@@ -643,7 +683,9 @@ impl CapabilityRouter for KernelCapabilityRouter {
                         );
                     }
                 }
-                Ok(json!({"status": "dropped", "reason": "no session or empty thread_id", "event": event_name}))
+                Ok(
+                    json!({"status": "dropped", "reason": "no session or empty thread_id", "event": event_name}),
+                )
             }
 
             // ── frontend：插件 → 内核 → 前端一次性事件出口（ADR §3.5）──
@@ -986,8 +1028,7 @@ impl CapabilityRouter for KernelCapabilityRouter {
                     if listing.tenant_id != tenant_id {
                         continue;
                     }
-                    let Some(entry) = registry.get(&listing.tenant_id, &listing.pipeline_id)
-                    else {
+                    let Some(entry) = registry.get(&listing.tenant_id, &listing.pipeline_id) else {
                         continue;
                     };
                     let mut row = {
@@ -2669,13 +2710,23 @@ mod tests {
                 use agentos_core::traits::StorageBackend;
                 let tenant = agentos_tenant::current_or_default("default").tenant_id;
                 store.create_run("run_sr_1", "h", &tenant).await.unwrap();
-                store.set_run_pipeline("run_sr_1", "pipe_task_9").await.unwrap();
+                store
+                    .set_run_pipeline("run_sr_1", "pipe_task_9")
+                    .await
+                    .unwrap();
                 store.create_run("run_sr_2", "h", &tenant).await.unwrap();
-                store.set_run_pipeline("run_sr_2", "pipe_task_9").await.unwrap();
+                store
+                    .set_run_pipeline("run_sr_2", "pipe_task_9")
+                    .await
+                    .unwrap();
 
                 // suspend：最新 run（run_sr_2）被挂起
                 let r = router
-                    .handle("pipeline-executor", "suspend_pipeline", json!({"pipeline_id": "pipe_task_9"}))
+                    .handle(
+                        "pipeline-executor",
+                        "suspend_pipeline",
+                        json!({"pipeline_id": "pipe_task_9"}),
+                    )
                     .await
                     .unwrap();
                 assert_eq!(r["status"], "suspended");
@@ -2685,14 +2736,22 @@ mod tests {
 
                 // 幂等：再次 suspend 返回同 run
                 let r2 = router
-                    .handle("pipeline-executor", "suspend_pipeline", json!({"pipeline_id": "pipe_task_9"}))
+                    .handle(
+                        "pipeline-executor",
+                        "suspend_pipeline",
+                        json!({"pipeline_id": "pipe_task_9"}),
+                    )
                     .await
                     .unwrap();
                 assert_eq!(r2["run_id"], "run_sr_2");
 
                 // resume：恢复最新 suspended run
                 let r3 = router
-                    .handle("pipeline-executor", "resume_pipeline", json!({"pipeline_id": "pipe_task_9"}))
+                    .handle(
+                        "pipeline-executor",
+                        "resume_pipeline",
+                        json!({"pipeline_id": "pipe_task_9"}),
+                    )
                     .await
                     .unwrap();
                 assert_eq!(r3["run_id"], "run_sr_2");
@@ -2701,7 +2760,11 @@ mod tests {
 
                 // 无管道 → 幂等 ok（run_id 空）
                 let r4 = router
-                    .handle("pipeline-executor", "resume_pipeline", json!({"pipeline_id": "pipe_ghost"}))
+                    .handle(
+                        "pipeline-executor",
+                        "resume_pipeline",
+                        json!({"pipeline_id": "pipe_ghost"}),
+                    )
                     .await
                     .unwrap();
                 assert_eq!(r4["run_id"], "");

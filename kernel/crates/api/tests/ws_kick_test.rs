@@ -17,8 +17,8 @@ use agentos_session::router::{InboundRouter, PipelineDispatcher};
 use agentos_session::SessionCoordinator;
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
-use serde_json::{json, Value};
 use futures_util::StreamExt;
+use serde_json::{json, Value};
 use tokio_tungstenite::tungstenite::Message;
 use tower::ServiceExt;
 

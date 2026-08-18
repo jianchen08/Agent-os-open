@@ -1314,11 +1314,7 @@ impl PluginInvokerImpl {
         // （human-interaction.wait_for_choice 的 24h 审批等）必须显式声明，
         // 否则内核 MCP client 300s 默认兜底先于用户操作掐断调用（2026-08-17
         // 审批 5 分钟窗口实锤：-32001 超时 → 审批作废 → 引擎重试弹窗循环）。
-        if let Some(secs) = manifest
-            .mcp
-            .as_ref()
-            .and_then(|m| m.request_timeout_secs)
-        {
+        if let Some(secs) = manifest.mcp.as_ref().and_then(|m| m.request_timeout_secs) {
             client = client.with_request_timeout(std::time::Duration::from_secs(secs));
         }
 

@@ -1756,6 +1756,9 @@ mod tests {
 
         // 序列化往返：None 字段不输出（兼容旧清单）
         let s = serde_json::to_string(&cfg2).unwrap();
-        assert!(!s.contains("request_timeout_secs"), "None 字段不应序列化: {s}");
+        assert!(
+            !s.contains("request_timeout_secs"),
+            "None 字段不应序列化: {s}"
+        );
     }
 }

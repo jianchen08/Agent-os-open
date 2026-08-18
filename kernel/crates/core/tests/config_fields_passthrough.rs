@@ -39,14 +39,16 @@ fn yaml_fields_ui_vocab_passthrough() {
             }
         ]
     });
-    let m: ConfigFileMapping =
-        serde_json::from_value(raw).expect("合法 config_files 声明应可解析");
+    let m: ConfigFileMapping = serde_json::from_value(raw).expect("合法 config_files 声明应可解析");
     assert_eq!(m.fields.len(), 3);
 
     // 类型词汇进 field_type，UI 参数进 extra（解析期不丢弃）
     assert_eq!(m.fields[0].field_type, "select");
     let extra = m.fields[0].extra.as_ref().expect("options 应透传进 extra");
-    assert!(extra.contains_key("options"), "extra 应含 options: {extra:?}");
+    assert!(
+        extra.contains_key("options"),
+        "extra 应含 options: {extra:?}"
+    );
     assert_eq!(
         m.fields[1].extra.as_ref().unwrap().get("datasourceUri"),
         Some(&serde_json::json!("/api/v1/models"))

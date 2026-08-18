@@ -367,7 +367,10 @@ async fn env_app() -> (axum::Router, tempfile::TempDir) {
     let mut state = AppState::new();
     state.project_root = Some(tmp.path().to_path_buf());
     let mut manifests = state.manifests.write().await;
-    manifests.push(manifest_with_files("smithery_search", vec![env_mapping("api_keys")]));
+    manifests.push(manifest_with_files(
+        "smithery_search",
+        vec![env_mapping("api_keys")],
+    ));
     drop(manifests);
     (build_router(state), tmp)
 }
@@ -397,10 +400,9 @@ async fn test_env_target_get_masks_and_put_writes() {
         .and_then(|h| h.to_str().ok())
         .expect("ETag 头")
         .to_string();
-    let v: Value = serde_json::from_slice(
-        &axum::body::to_bytes(resp.into_body(), 65536).await.unwrap(),
-    )
-    .unwrap();
+    let v: Value =
+        serde_json::from_slice(&axum::body::to_bytes(resp.into_body(), 65536).await.unwrap())
+            .unwrap();
     assert_eq!(v["path"], ".env");
     assert_eq!(v["data"]["SMITHERY_API_KEY"], "");
     assert_eq!(v["data"]["LANGSMITH_API_KEY"], "");
@@ -439,8 +441,14 @@ async fn test_env_target_get_masks_and_put_writes() {
 
     // .env 落盘 + GET 掩码视图翻转
     let env_text = fs::read_to_string(tmp.path().join(".env")).unwrap();
-    assert!(env_text.contains("SMITHERY_API_KEY=sk-secret-1"), "{env_text}");
-    assert!(!env_text.contains("LANGSMITH"), "哨兵字段不写入: {env_text}");
+    assert!(
+        env_text.contains("SMITHERY_API_KEY=sk-secret-1"),
+        "{env_text}"
+    );
+    assert!(
+        !env_text.contains("LANGSMITH"),
+        "哨兵字段不写入: {env_text}"
+    );
     let resp2 = app
         .clone()
         .oneshot(
@@ -452,9 +460,12 @@ async fn test_env_target_get_masks_and_put_writes() {
         )
         .await
         .unwrap();
-    let v2: Value =
-        serde_json::from_slice(&axum::body::to_bytes(resp2.into_body(), 65536).await.unwrap())
-            .unwrap();
+    let v2: Value = serde_json::from_slice(
+        &axum::body::to_bytes(resp2.into_body(), 65536)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
     assert_eq!(v2["data"]["SMITHERY_API_KEY"], "***");
     assert_eq!(v2["data"]["LANGSMITH_API_KEY"], "");
 }
@@ -475,7 +486,8 @@ async fn test_env_target_etag_conflict_and_undeclared_rejected() {
                 .header("content-type", "application/json")
                 .header("authorization", format!("Bearer {token}"))
                 .body(Body::from(
-                    json!({"if_match": "stale-etag", "data": {"SMITHERY_API_KEY": "x"}}).to_string(),
+                    json!({"if_match": "stale-etag", "data": {"SMITHERY_API_KEY": "x"}})
+                        .to_string(),
                 ))
                 .unwrap(),
         )

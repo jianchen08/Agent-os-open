@@ -736,7 +736,9 @@ impl PipelineExecutor {
                 }
                 // 静态命中插件（per-plugin inputs 经 config 通道传给插件，
                 // 不 merge 进 state、不落 trace）
-                CompiledItem::Plugin { plugin_id, inputs, .. } => {
+                CompiledItem::Plugin {
+                    plugin_id, inputs, ..
+                } => {
                     if self.invoke_item_plugin(plugin_id, inputs, state).await {
                         break; // skip_remaining
                     }
@@ -750,7 +752,10 @@ impl PipelineExecutor {
                             .await;
                     } else if self.lookup_plugin(&resolved) {
                         // 动态点无静态 inputs（模板运行时才定），传空
-                        if self.invoke_item_plugin(&resolved, &HashMap::new(), state).await {
+                        if self
+                            .invoke_item_plugin(&resolved, &HashMap::new(), state)
+                            .await
+                        {
                             break;
                         }
                     } else {
@@ -2133,7 +2138,11 @@ mod tests {
         // 组级 when=False：s2（→b）整个跳过，不计步
         config.loop_bodies[0].steps[1].when = Some("False".into());
         fixture
-            .run(&config, &StepLibrary::default(), json!({ "pipeline_id": "p1" }))
+            .run(
+                &config,
+                &StepLibrary::default(),
+                json!({ "pipeline_id": "p1" }),
+            )
             .await;
         // 执行序列：a(1) → [s2 跳过] → c(2) → d(3)。interval=2 → 第 2 步触发一次
         // 中段存档（step_no=2）；run 结束时 persist_run_end 再落最终态（step_no=3）。
@@ -2188,7 +2197,11 @@ mod tests {
             },
         };
         executor
-            .run(&config, &StepLibrary::default(), json!({ "pipeline_id": "p1" }))
+            .run(
+                &config,
+                &StepLibrary::default(),
+                json!({ "pipeline_id": "p1" }),
+            )
             .await
             .expect("run ok");
         assert_eq!(

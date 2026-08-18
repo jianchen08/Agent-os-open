@@ -53,7 +53,10 @@ pub fn env_path_for_root(project_root: &std::path::Path) -> std::path::PathBuf {
 /// 值含空白或 `#` 时加双引号（与 [`parse_env_text`] 的去引号回读对齐）。
 /// 原子性：tmp 写入 + rename（与配置中心 atomic_write_yaml 同款），
 /// 中断不会留下半截 .env。
-pub fn write_env_updates(env_path: &std::path::Path, updates: &[(String, String)]) -> Result<(), String> {
+pub fn write_env_updates(
+    env_path: &std::path::Path,
+    updates: &[(String, String)],
+) -> Result<(), String> {
     let existing = std::fs::read_to_string(env_path).unwrap_or_default();
     let mut lines: Vec<String> = existing.lines().map(|l| l.to_string()).collect();
 

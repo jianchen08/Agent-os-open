@@ -74,7 +74,10 @@ impl PluginContractState {
                 let last_error = if o.rejected_tools.is_empty() {
                     None
                 } else {
-                    Some(format!("拒绝注册/剔除工具: {}", o.rejected_tools.join(", ")))
+                    Some(format!(
+                        "拒绝注册/剔除工具: {}",
+                        o.rejected_tools.join(", ")
+                    ))
                 };
                 (
                     g2_consistency.to_string(),

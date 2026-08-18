@@ -217,10 +217,9 @@ fn check_one(manifest_path: &Path) -> CheckReport {
     // 补 cdylib 后缀，与真实加载路径一致——否则 `pipeline_tool_core_native` 声明
     // 会因磁盘上是 `..._native.dll` 而被误判缺失）
     if let Some(native) = &manifest.native {
-        let artifact_path = plugin_dir
-            .join(agentos_plugin_loader::NativePluginLoader::platform_artifact_name(
-                &native.artifact,
-            ));
+        let artifact_path = plugin_dir.join(
+            agentos_plugin_loader::NativePluginLoader::platform_artifact_name(&native.artifact),
+        );
         if artifact_path.exists() {
             checks.push(format!("native artifact 存在: {}", artifact_path.display()));
         } else {
@@ -241,7 +240,10 @@ fn check_one(manifest_path: &Path) -> CheckReport {
         }
     }
     if bad_tools.is_empty() {
-        checks.push(format!("output_schema 声明合法（{} 工具）", manifest.capabilities.tools.len()));
+        checks.push(format!(
+            "output_schema 声明合法（{} 工具）",
+            manifest.capabilities.tools.len()
+        ));
     } else {
         errors.push(format!(
             "output_schema 声明不合法（声明即校验，fail-closed）: {}",
@@ -321,8 +323,13 @@ mod tests {
         );
         let r = check_one(&p);
         assert!(!r.valid, "未知字段应拒载: {:?}", r.checks);
-        assert!(r.errors.iter().any(|e| e.contains("解析失败") || e.contains("unknown")),
-            "{:?}", r.errors);
+        assert!(
+            r.errors
+                .iter()
+                .any(|e| e.contains("解析失败") || e.contains("unknown")),
+            "{:?}",
+            r.errors
+        );
     }
 
     #[test]
@@ -343,7 +350,11 @@ mod tests {
         );
         let r = check_one(&p);
         assert!(!r.valid);
-        assert!(r.errors.iter().any(|e| e.contains("output_schema")), "{:?}", r.errors);
+        assert!(
+            r.errors.iter().any(|e| e.contains("output_schema")),
+            "{:?}",
+            r.errors
+        );
     }
 
     #[test]
@@ -361,7 +372,11 @@ mod tests {
         );
         let r = check_one(&p);
         assert!(!r.valid);
-        assert!(r.errors.iter().any(|e| e.contains("entry 为空")), "{:?}", r.errors);
+        assert!(
+            r.errors.iter().any(|e| e.contains("entry 为空")),
+            "{:?}",
+            r.errors
+        );
     }
 
     #[test]
@@ -380,6 +395,10 @@ mod tests {
         );
         let r = check_one(&p);
         assert!(!r.valid);
-        assert!(r.errors.iter().any(|e| e.contains("provides")), "{:?}", r.errors);
+        assert!(
+            r.errors.iter().any(|e| e.contains("provides")),
+            "{:?}",
+            r.errors
+        );
     }
 }

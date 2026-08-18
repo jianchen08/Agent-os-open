@@ -481,8 +481,8 @@ pub fn pipeline_config_hash(config: &PipelineConfig) -> String {
     // PipelineConfig 为纯数据 derive(Serialize)，to_value/to_string 不可能失败；
     // 若失败宁可 panic 也不能兜 Null/空串——那会让所有配置得到同一 config_hash，
     // 静默摧毁 runs 审计字段。
-    let canonical = serde_json::to_value(config)
-        .expect("PipelineConfig serialization is infallible");
+    let canonical =
+        serde_json::to_value(config).expect("PipelineConfig serialization is infallible");
     let json =
         serde_json::to_string(&canonical).expect("serde_json Value serialization is infallible");
     let mut hasher = Sha256::new();
@@ -580,7 +580,9 @@ mod tests {
         let body = &compiled.bodies[0];
         assert_eq!(body.steps.len(), 1);
         match &body.steps[0].items[0] {
-            CompiledItem::Plugin { plugin_id, when, .. } => {
+            CompiledItem::Plugin {
+                plugin_id, when, ..
+            } => {
                 assert_eq!(plugin_id, "alpha");
                 assert!(when.is_none());
             }
