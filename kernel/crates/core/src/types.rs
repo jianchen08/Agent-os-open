@@ -1096,9 +1096,12 @@ impl Default for LoopConfig {
     }
 }
 
-/// 检查点配置：每 N 步把当时的完整 state 复制一份到 pipeline_checkpoints 表，
-/// 作为留档快照。冷启动重建时优先从最近的 checkpoint 恢复（O(1) 取基线），
-/// 再回放其后 traces 的增量 ops，避免长会话全量回放。
+/// 检查点配置：每 N 个配置 step（实际执行）把当时的完整 state 复制一份到
+/// pipeline_checkpoints 表，作为留档快照。冷启动重建时优先从最近的 checkpoint
+/// 恢复（O(1) 取基线），再回放其后 traces 的增量 ops，避免长会话全量回放。
+///
+/// 计数单位 = **配置 step**（引擎在 persist_step_trace 起始推进，与轨迹同为
+/// 配置 step 边界；组级 when 跳过的 step 不执行不计步，step 内部循环一次计一步）。
 ///
 /// checkpoint 存全量 state（非 diff）：用存储换 O(1) 恢复速度，
 /// 与 traces 的增量化（省存储）配套——traces 变薄后，checkpoint 补偿重建速度。
@@ -1108,7 +1111,7 @@ pub struct CheckpointConfig {
     /// 是否启用定期 checkpoint。
     #[serde(default = "default_checkpoint_enabled")]
     pub enabled: bool,
-    /// 每隔多少步打一次全量快照（引擎可配）。0 或负数 = 禁用。
+    /// 每隔多少个配置 step 打一次全量快照（引擎可配）。0 或负数 = 禁用。
     /// 默认 1000：长会话每千步留一份基线，重建成本可控。
     #[serde(default = "default_checkpoint_interval")]
     pub interval_steps: i64,
@@ -1152,6 +1155,13 @@ pub enum StepItem {
         /// 进入门条件；None 等价 Bare。
         #[serde(default)]
         when: Option<String>,
+        /// 本项针对该插件的输入参数（per-plugin inputs，2026-08-18 新增）。
+        ///
+        /// 仅对**插件原子项**（三级命中③）生效：经既有 config 通道传给插件
+        /// （载荷 `config.inputs`），**不 merge 进 state、不落 trace**。
+        /// Composite（命中①②）/ Dynamic 项忽略该字段。空 = 等价旧行为。
+        #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+        inputs: HashMap<String, serde_json::Value>,
     },
 }
 
@@ -1169,6 +1179,15 @@ impl StepItem {
         match self {
             StepItem::Bare(_) => None,
             StepItem::Gated { when, .. } => when.as_deref(),
+        }
+    }
+
+    /// per-plugin inputs（仅 Gated 形态携带；Bare 恒空）。编译期复制一次，
+    /// 供构建 `CompiledItem::Plugin`；运行时通过 config 通道传给插件。
+    pub fn inputs(&self) -> HashMap<String, serde_json::Value> {
+        match self {
+            StepItem::Bare(_) => HashMap::new(),
+            StepItem::Gated { inputs, .. } => inputs.clone(),
         }
     }
 }

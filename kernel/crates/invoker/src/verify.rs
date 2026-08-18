@@ -39,6 +39,7 @@ pub fn declared_with_services(manifest: &PluginManifest) -> Vec<ToolCapability> 
                 category: None,
                 ui: None,
                 render: None,
+                smoke: None,
             }),
     );
     declared
@@ -196,6 +197,7 @@ mod tests {
             category: None,
             ui: None,
             render: None,
+            smoke: None,
         }
     }
 

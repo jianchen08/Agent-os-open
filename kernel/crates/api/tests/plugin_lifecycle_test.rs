@@ -61,6 +61,7 @@ fn tool_cap(name: &str) -> ToolCapability {
         category: Some(ToolCategory::File),
         ui: None,
         render: None,
+        smoke: None,
     }
 }
 

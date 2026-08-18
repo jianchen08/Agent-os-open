@@ -1282,6 +1282,11 @@ pub struct ToolCapability {
     /// 路由渲染（task_dsh_plugin_adapter 任务 1）。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub render: Option<serde_json::Value>,
+    /// 注册闸冒烟开关（2026-08-18）：显式 `true` 的工具，注册时用样例输入真调用
+    /// 一次验证"基本能力能跑"（fail-closed，调用失败拒绝该工具）。缺省不冒烟——
+    /// 副作用敏感/需要真实参数的能力由插件显式声明后才会被冒烟，避免注册期误伤。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub smoke: Option<bool>,
 }
 
 /// Manifest 权限声明。

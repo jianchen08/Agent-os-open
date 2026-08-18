@@ -253,21 +253,110 @@ pub fn g2_strict_env_enabled(value: Option<String>) -> bool {
 pub struct G2VerifyOutcome {
     /// 校验后的 manifest：漂移工具被剔除；strict + spawn 失败时 tools 被清空。
     pub manifest: PluginManifest,
-    /// 被拒绝注册的工具名（漂移 missing/schema_mismatch，或 strict 失败全量）。
+    /// 被拒绝注册的工具名（漂移 missing/schema_mismatch / strict 失败全量 / 冒烟失败）。
     pub rejected_tools: Vec<String>,
     /// 存在漂移信号（missing/schema_mismatch 或仅有 undeclared）。
     pub drift: bool,
     /// spawn/tools-list 本身失败（区别于"比对出漂移"）。
     pub spawn_failed: bool,
+    /// 注册闸冒烟（smoke:true 工具）有调用失败被拒。
+    pub smoke_failed: bool,
 }
 
-/// G2：单插件"声明 ↔ 实际暴露"一致性校验 + 处置（公共化，供注册/启动/重启用复用）。
+/// 从 JSON Schema 生成一条代表性样例输入（注册闸冒烟用）。
 ///
-/// - 无 tools（仅 services/route 插件）→ 跳过校验，原样返回（与既有语义一致，
-///   services schema 契约在 Phase 1 补方向）；
+/// 覆盖常用子集：object→逐属性按 type/enum/items 递归填值；type 缺省→空对象。
+/// 无法决断的（`$ref`/组合关键字）→ 空对象/空串，宁可不完整也不编造业务值。
+/// 纯函数，可同步单测。冒烟只验"调用不崩 + 返回成功"，不验业务语义。
+pub fn sample_value_from_schema(schema: &serde_json::Value) -> serde_json::Value {
+    use serde_json::{json, Map};
+    match schema.get("type").and_then(|t| t.as_str()) {
+        Some("object") => {
+            let mut obj = Map::new();
+            if let Some(props) = schema.get("properties").and_then(|p| p.as_object()) {
+                for (k, v) in props {
+                    obj.insert(k.clone(), sample_value_from_schema(v));
+                }
+            }
+            serde_json::Value::Object(obj)
+        }
+        Some("array") => json!([]),
+        Some("string") => schema
+            .get("enum")
+            .and_then(|e| e.as_array())
+            .and_then(|a| a.first())
+            .cloned()
+            .unwrap_or(json!("")),
+        Some("number") | Some("integer") => json!(0),
+        Some("boolean") => json!(false),
+        Some("null") => json!(null),
+        _ => json!({}),
+    }
+}
+
+/// 注册闸冒烟：对声明了 `smoke: true` 的工具构造样例输入真调一次，验证"基本能力
+/// 能跑"（fail-closed）。调用异常/返回 failure → 拒绝该工具 + 记 `smoke_failed`。
+/// 副作用敏感/需要真实参数的能力由插件**显式** `smoke: true` 才被冒烟——缺省不冒烟，
+/// 避免注册期误伤生产工具。
+async fn run_smoke(
+    invoker: &dyn PluginInvoker,
+    manifest: &mut PluginManifest,
+) -> (Vec<String>, bool) {
+    let mut rejected = Vec::new();
+    let mut failed = false;
+    for tool in &manifest.capabilities.tools {
+        if tool.smoke != Some(true) {
+            continue;
+        }
+        let sample = sample_value_from_schema(
+            tool.input_schema.as_ref().unwrap_or(&serde_json::json!({})),
+        );
+        match invoker.invoke_tool(&manifest.id, &tool.name, &sample).await {
+            Ok(r) if r.success => {
+                info!(
+                    target: "plugin_smoke",
+                    plugin = %manifest.id,
+                    tool = %tool.name,
+                    "注册闸冒烟：样例调用成功"
+                );
+            }
+            Ok(r) => {
+                warn!(
+                    target: "plugin_smoke",
+                    plugin = %manifest.id,
+                    tool = %tool.name,
+                    error = ?r.error,
+                    "注册闸冒烟：调用返回失败，拒绝该工具"
+                );
+                rejected.push(tool.name.clone());
+                failed = true;
+            }
+            Err(e) => {
+                warn!(
+                    target: "plugin_smoke",
+                    plugin = %manifest.id,
+                    tool = %tool.name,
+                    error = %e.message,
+                    "注册闸冒烟：调用异常，拒绝该工具"
+                );
+                rejected.push(tool.name.clone());
+                failed = true;
+            }
+        }
+    }
+    if !rejected.is_empty() {
+        manifest.capabilities.tools.retain(|t| !rejected.contains(&t.name));
+    }
+    (rejected, failed)
+}
+
+/// G2：单插件"声明 ↔ 实际暴露"一致性校验 + 冒烟 + 处置（公共化，供注册/启动/重启用复用）。
+///
+/// - 无 tools 且无 services（route 仅插件 / InProcess / native）→ 跳过，原样返回；
 /// - 比对出可拒绝漂移（missing / schema_mismatch）→ 剔除漂移工具，其余照常；
 /// - spawn/list_tools 失败 → `strict_spawn_fail` 决定：拒绝全部工具（fail-closed）
-///   或 warn+按声明注册（lenient 灰度）。
+///   或 warn+按声明注册（lenient 灰度）；
+/// - 声明了 `smoke: true` 的工具 → 样例输入真调一次，失败拒绝（fail-closed）。
 ///
 /// 纯校验+净化，无注册副作用；调用方决定后续注册行为。
 pub async fn g2_verify_and_sanitize(
@@ -286,6 +375,7 @@ pub async fn g2_verify_and_sanitize(
             rejected_tools: Vec::new(),
             drift: false,
             spawn_failed: false,
+            smoke_failed: false,
         };
     }
     match invoker.list_plugin_tools(&manifest.id).await {
@@ -293,12 +383,13 @@ pub async fn g2_verify_and_sanitize(
             let (actual, _malformed) = parse_actual_tools(&raw);
             let mismatches = compare_tools(&declared_with_services(&manifest), &actual);
             let rejected = rejected_tool_names(&mismatches);
-            if rejected.is_empty() {
+            let mut outcome = if rejected.is_empty() {
                 G2VerifyOutcome {
                     manifest,
                     rejected_tools: Vec::new(),
                     drift: !mismatches.is_empty(),
                     spawn_failed: false,
+                    smoke_failed: false,
                 }
             } else {
                 let mut sanitized = manifest;
@@ -311,8 +402,17 @@ pub async fn g2_verify_and_sanitize(
                     rejected_tools: rejected.into_iter().collect(),
                     drift: true,
                     spawn_failed: false,
+                    smoke_failed: false,
                 }
+            };
+            // 冒烟：声明了 smoke:true 的工具样例调用一次，失败剔除（fail-closed）
+            let (smoke_rejected, smoke_failed) = run_smoke(invoker, &mut outcome.manifest).await;
+            if smoke_failed {
+                outcome.smoke_failed = true;
+                outcome.drift = true;
+                outcome.rejected_tools.extend(smoke_rejected);
             }
+            outcome
         }
         Err(e) => {
             warn!(
@@ -336,6 +436,7 @@ pub async fn g2_verify_and_sanitize(
                     rejected_tools,
                     drift: true,
                     spawn_failed: true,
+                    smoke_failed: false,
                 }
             } else {
                 G2VerifyOutcome {
@@ -343,6 +444,7 @@ pub async fn g2_verify_and_sanitize(
                     rejected_tools: Vec::new(),
                     drift: false,
                     spawn_failed: true,
+                    smoke_failed: false,
                 }
             }
         }
@@ -922,6 +1024,10 @@ mod tests {
         list_tools: std::collections::HashMap<String, serde_json::Value>,
         /// 置 true 时 list_plugin_tools 返回错误（模拟 spawn/上报失败）。
         list_tools_fail: bool,
+        /// 置 true 时 invoke_tool 返回 Err（模拟冒烟调用异常）。
+        invoke_tool_fail: bool,
+        /// 冒烟 invoke_tool 的调用计数（断言未声明 smoke 的工具不被冒烟）。
+        invoke_calls: std::sync::atomic::AtomicUsize,
     }
 
     #[async_trait]
@@ -939,7 +1045,15 @@ mod tests {
             _tool_name: &str,
             _inputs: &serde_json::Value,
         ) -> Result<ToolExecutionResult, PluginError> {
-            unimplemented!("sync_once 不走 invoke 路径")
+            self.invoke_calls.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            if self.invoke_tool_fail {
+                return Err(PluginError {
+                    message: "invoke_tool boom".into(),
+                    code: None,
+                    source: None,
+                });
+            }
+            Ok(ToolExecutionResult::success(serde_json::json!({})))
         }
         async fn send_lifecycle_hook(
             &self,
@@ -997,6 +1111,8 @@ mod tests {
                 fail: false,
                 list_tools,
                 list_tools_fail: false,
+                invoke_tool_fail: false,
+                invoke_calls: std::sync::atomic::AtomicUsize::new(0),
             }
         }
     }
@@ -1040,6 +1156,8 @@ mod tests {
             fail: true,
             list_tools: std::collections::HashMap::new(),
             list_tools_fail: false,
+            invoke_tool_fail: false,
+            invoke_calls: std::sync::atomic::AtomicUsize::new(0),
         };
         let registry_arc = std::sync::Arc::new(CapabilityRegistryImpl::new());
         let mut known = HashSet::new();
@@ -1665,5 +1783,83 @@ mod tests {
         assert!(report.new_plugin_ids.is_empty(), "依赖缺失的插件不注册");
         assert!(registry_arc.list_tools().is_empty());
         assert!(known.is_empty());
+    }
+
+    // ── Phase 1-C5b：注册闸冒烟样例跑（smoke:true 逐能力放行） ──────────────
+
+    fn mk_manifest_smoke(id: &str, tool: &str, smoke: bool) -> PluginManifest {
+        let v = serde_json::json!({
+            "id": id, "name": id, "version": "1.0.0",
+            "plugin_type": "tool", "language": "rust",
+            "host_type": "sidecar", "entry": "x",
+            "capabilities": { "tools": [
+                { "name": tool, "description": tool, "smoke": smoke,
+                  "input_schema": {"type": "object", "properties": {"a": {"type": "string"}}} }
+            ] },
+        });
+        serde_json::from_value(v).expect("valid manifest")
+    }
+
+    fn assert_input_schema_ok(schema: serde_json::Value) -> serde_json::Value {
+        // 与 mk_manifest_smoke 的 input_schema 完全一致，避免 G2 schema 误漂移
+        serde_json::json!({
+            "tools": [ { "name": schema["tools"][0]["name"], "description": "d",
+                         "inputSchema": {"type": "object", "properties": {"a": {"type": "string"}}} } ]
+        })
+    }
+
+    #[test]
+    fn sample_from_schema_fills_typed_properties() {
+        let schema = serde_json::json!({
+            "type": "object",
+            "properties": {
+                "n": {"type": "number"},
+                "s": {"type": "string"},
+                "e": {"type": "string", "enum": ["fast", "slow"]},
+                "b": {"type": "boolean"},
+                "a": {"type": "array", "items": {"type": "string"}},
+                "o": {"type": "object", "properties": {"k": {"type": "integer"}}}
+            }
+        });
+        let sample = sample_value_from_schema(&schema);
+        assert_eq!(sample["n"], serde_json::json!(0));
+        assert_eq!(sample["s"], serde_json::json!(""));
+        assert_eq!(sample["e"], serde_json::json!("fast"), "enum 取首项");
+        assert_eq!(sample["b"], serde_json::json!(false));
+        assert_eq!(sample["a"], serde_json::json!([]));
+        assert_eq!(sample["o"]["k"], serde_json::json!(0), "嵌套对象递归填值");
+    }
+
+    #[tokio::test]
+    async fn smoke_failure_rejects_the_tool() {
+        let mut invoker = MockInvoker::new(vec![mk_manifest_smoke("p1", "t_smoke", true)]);
+        invoker.list_tools = std::collections::HashMap::from([("p1".into(), assert_input_schema_ok(json!({"tools":[{ "name": "t_smoke" }]})))]);
+        invoker.invoke_tool_fail = true;
+        let out = g2_verify_and_sanitize(&invoker, mk_manifest_smoke("p1", "t_smoke", true), true).await;
+        assert!(out.smoke_failed, "冒烟失败须标记");
+        assert!(out.manifest.capabilities.tools.is_empty(), "冒烟失败的工具被拒绝");
+        assert!(out.rejected_tools.contains(&"t_smoke".to_string()));
+    }
+
+    #[tokio::test]
+    async fn smoke_success_keeps_the_tool() {
+        let mut invoker = MockInvoker::new(vec![mk_manifest_smoke("p1", "t_smoke", true)]);
+        invoker.list_tools = std::collections::HashMap::from([("p1".into(), assert_input_schema_ok(json!({"tools":[{ "name": "t_smoke" }]})))]);
+        let out = g2_verify_and_sanitize(&invoker, mk_manifest_smoke("p1", "t_smoke", true), true).await;
+        assert!(!out.smoke_failed);
+        assert_eq!(out.manifest.capabilities.tools.len(), 1, "冒烟成功则保留");
+        assert_eq!(invoker.invoke_calls.load(std::sync::atomic::Ordering::Relaxed), 1);
+    }
+
+    #[tokio::test]
+    async fn smoke_not_run_without_optin() {
+        let mut invoker = MockInvoker::new(vec![mk_manifest_smoke("p1", "t_no_smoke", false)]);
+        invoker.list_tools = std::collections::HashMap::from([("p1".into(), assert_input_schema_ok(json!({"tools":[{ "name": "t_no_smoke" }]})))]);
+        let _ = g2_verify_and_sanitize(&invoker, mk_manifest_smoke("p1", "t_no_smoke", false), true).await;
+        assert_eq!(
+            invoker.invoke_calls.load(std::sync::atomic::Ordering::Relaxed),
+            0,
+            "未声明 smoke:true 的工具不被冒烟（避免注册期副作用）"
+        );
     }
 }

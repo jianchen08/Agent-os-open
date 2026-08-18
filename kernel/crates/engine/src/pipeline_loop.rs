@@ -376,10 +376,10 @@ impl PipelineExecutor {
                         agentos_config::load_agent_into_state(cc, state, &agent_id);
                     }
                 }
+                // checkpoint 计数在 persist_step_trace 里按「配置 step」推进
+                // （每执行一个配置 step +1，达 interval_steps 落档），此处不再按轮计数。
                 self.execute_steps(&body.steps, state, compiled, ignore_ended)
                     .await?;
-                self.checkpoint_after_round(&compiled.checkpoint, state)
-                    .await;
                 if truthy_flag(state, "suspended") {
                     break;
                 }
@@ -391,8 +391,6 @@ impl PipelineExecutor {
             // 单次执行（前处理/后处理体）
             self.execute_steps(&body.steps, state, compiled, ignore_ended)
                 .await?;
-            self.checkpoint_after_round(&compiled.checkpoint, state)
-                .await;
         }
         Ok(iteration)
     }
@@ -564,7 +562,7 @@ impl PipelineExecutor {
                     }
                 }
                 // 循环 step 执行完，落 step 级轨迹后返回（循环内路由不参与跳转）
-                self.persist_step_trace(&step.id, &state_before, state)
+                self.persist_step_trace(&step.id, &compiled.checkpoint, &state_before, state)
                     .await;
                 return None;
             }
@@ -582,7 +580,7 @@ impl PipelineExecutor {
         };
 
         // 5. 落 step 级轨迹（非循环分支）
-        self.persist_step_trace(&step.id, &state_before, state)
+        self.persist_step_trace(&step.id, &compiled.checkpoint, &state_before, state)
             .await;
         routed
     }
@@ -598,12 +596,21 @@ impl PipelineExecutor {
     /// raw_tool_calls）不进 trace——全文真值在 blobs/messages 表，trace 只存指纹。
     /// system_message 保留（追踪提示词演变，state_diff 已去重，仅在变化时记录）。
     /// diff 与实录均为空（step 无产出）则不落轨迹。
+    ///
+    /// **每执行一个配置 step 必调本函数**（组级 when 跳过的 step 在 execute_steps
+    /// 直接 continue，不进本函数）——checkpoint 按步计数即在此推进
+    /// （[`Self::count_step_and_maybe_checkpoint`]），保证"实际执行的 step"才计步。
     async fn persist_step_trace(
         &self,
         step_id: &str,
+        ckpt: &agentos_core::types::CheckpointConfig,
         state_before: &serde_json::Value,
         state_after: &serde_json::Value,
     ) {
+        // checkpoint 按配置 step 计数（在轨迹入口统一推进，含无产出 step——
+        // 无产出也消耗了一步；0/禁用 + pipeline_id 为空时内部跳过）。
+        self.count_step_and_maybe_checkpoint(ckpt, state_after)
+            .await;
         let mut diff = state_diff(state_before, state_after);
 
         // 过滤已投影到 messages 表的冗余字段（原文不进 trace，全文在 blobs）
@@ -727,9 +734,10 @@ impl PipelineExecutor {
                     self.execute_step(&target, state, compiled, ignore_ended)
                         .await;
                 }
-                // 静态命中插件
-                CompiledItem::Plugin { plugin_id, .. } => {
-                    if self.invoke_item_plugin(plugin_id, state).await {
+                // 静态命中插件（per-plugin inputs 经 config 通道传给插件，
+                // 不 merge 进 state、不落 trace）
+                CompiledItem::Plugin { plugin_id, inputs, .. } => {
+                    if self.invoke_item_plugin(plugin_id, inputs, state).await {
                         break; // skip_remaining
                     }
                 }
@@ -741,7 +749,8 @@ impl PipelineExecutor {
                         self.execute_step(&target, state, compiled, ignore_ended)
                             .await;
                     } else if self.lookup_plugin(&resolved) {
-                        if self.invoke_item_plugin(&resolved, state).await {
+                        // 动态点无静态 inputs（模板运行时才定），传空
+                        if self.invoke_item_plugin(&resolved, &HashMap::new(), state).await {
                             break;
                         }
                     } else {
@@ -758,8 +767,16 @@ impl PipelineExecutor {
 
     /// 调用原子插件并 merge state_updates；返回 true = 应跳过同组后续
     /// （`skip_remaining`）。插件错误统一 warn + 继续（不再按 error_policy 分发，ADR 2026-08-18）。
-    async fn invoke_item_plugin(&self, plugin_id: &str, state: &mut serde_json::Value) -> bool {
-        match self.invoke_plugin(plugin_id, state.clone()).await {
+    ///
+    /// `inputs`：per-plugin 输入（经 config 通道传给插件，不进 state、不落 trace；
+    /// 空 = 等价旧行为）。
+    async fn invoke_item_plugin(
+        &self,
+        plugin_id: &str,
+        inputs: &HashMap<String, serde_json::Value>,
+        state: &mut serde_json::Value,
+    ) -> bool {
+        match self.invoke_plugin(plugin_id, inputs, state.clone()).await {
             Ok(result) => {
                 if result.error.is_none() {
                     // merge state_updates（轨迹在 step 级统一落，不钻插件）
@@ -794,9 +811,14 @@ impl PipelineExecutor {
     }
 
     /// 构造 `PluginContext` 并调用 `invoker`。
+    ///
+    /// `inputs` 走既有 config 通道：非空时填 `config = {"inputs": <inputs>}`
+    /// （sidecar 路径 invoker.rs 原样转发 ctx.config，插件在 execute 收 `config`）；
+    /// 空时保持空对象 = 旧行为零变化。不进 state → 不产生 step diff/trace。
     async fn invoke_plugin(
         &self,
         plugin_id: &str,
+        inputs: &HashMap<String, serde_json::Value>,
         state: serde_json::Value,
     ) -> Result<PluginResult, PluginError> {
         // 监控 M2：step 命中（每 invoke 一次 = 命中一个 step 的插件）
@@ -807,9 +829,14 @@ impl PipelineExecutor {
             self.branch_id.clone(),
             0,
         );
+        let config = if inputs.is_empty() {
+            serde_json::Value::Object(Default::default())
+        } else {
+            serde_json::json!({ "inputs": inputs })
+        };
         let ctx = PluginContext::new(
             state,
-            serde_json::Value::Object(Default::default()),
+            config,
             self.default_tenant.clone(),
             uuid::Uuid::nil(),
             content_loader,
@@ -1013,12 +1040,16 @@ impl PipelineExecutor {
         }
     }
 
-    /// 每完成一轮（一次完整 steps 执行）后调用：自增步数计数器，达 interval 则落档。
+    /// 每个配置 step 完成后推进一步：自增步数计数器，达 interval 则落档。
     ///
     /// checkpoint = 把当前完整 state 复制到 pipeline_checkpoints（留档快照）。
     /// 冷启动重建优先取最近 checkpoint（O(1) 基线）+ 回放其后 traces 增量。
     /// interval_steps 从 PipelineConfig.checkpoint 读，引擎可配（默认 1000）。0/负数=禁用。
-    async fn checkpoint_after_round(
+    ///
+    /// 计数单位 = 实际执行的**配置 step**（组级 when 跳过的 step 不执行、不进
+    /// trace、不计步；step 内部循环一次计一步，与 trace 粒度一致）——与轨迹
+    /// （persist_step_trace）同为配置 step 边界，故在此推进而非按轮计数。
+    async fn count_step_and_maybe_checkpoint(
         &self,
         ckpt_cfg: &agentos_core::types::CheckpointConfig,
         state: &serde_json::Value,
@@ -1469,10 +1500,11 @@ mod tests {
     // ── 测试基础设施 ──────────────────────────────────────────
 
     /// 可编程的 MockInvoker：按 plugin_id 返回预设的 PluginResult。
-    /// 同时统计每个插件被调用的次数。
+    /// 同时统计每个插件被调用的次数 + 捕获每次收到 ctx.config（inputs 通道测试用）。
     struct MockInvoker {
         results: Mutex<HashMap<String, PluginResult>>,
         calls: Mutex<HashMap<String, usize>>,
+        configs: Mutex<Vec<(String, serde_json::Value)>>,
     }
 
     impl MockInvoker {
@@ -1480,6 +1512,7 @@ mod tests {
             Self {
                 results: Mutex::new(HashMap::new()),
                 calls: Mutex::new(HashMap::new()),
+                configs: Mutex::new(Vec::new()),
             }
         }
 
@@ -1493,6 +1526,17 @@ mod tests {
         fn call_count(&self, plugin_id: &str) -> usize {
             *self.calls.lock().unwrap().get(plugin_id).unwrap_or(&0)
         }
+
+        /// 某插件每次 invoke 收到的 ctx.config（按调用顺序；无调用 = 空 Vec）。
+        fn captured_configs(&self, plugin_id: &str) -> Vec<serde_json::Value> {
+            self.configs
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|(p, _)| p == plugin_id)
+                .map(|(_, c)| c.clone())
+                .collect()
+        }
     }
 
     #[async_trait]
@@ -1500,7 +1544,7 @@ mod tests {
         async fn invoke_pipeline_plugin(
             &self,
             plugin_id: &str,
-            _ctx: &PluginContext,
+            ctx: &PluginContext,
         ) -> Result<PluginResult, PluginError> {
             // 计数
             *self
@@ -1509,6 +1553,11 @@ mod tests {
                 .unwrap()
                 .entry(plugin_id.to_string())
                 .or_insert(0) += 1;
+            // 捕获每插件收到的 config（per-plugin inputs 经此通道）
+            self.configs
+                .lock()
+                .unwrap()
+                .push((plugin_id.to_string(), ctx.config.clone()));
             // 返回预设结果（缺失则返回空成功）
             let result = self
                 .results
@@ -1540,7 +1589,38 @@ mod tests {
     }
 
     /// 空 StorageBackend，仅用于构造 ContentLoader。
-    struct NullStorage;
+    /// 记录收到的 `save_checkpoint` step_no（checkpoint 计步测试读取；其余测试不关心，
+    /// 默认 trait 实现为 no-op，这里显式 override 以便观察按步计数触发时机）。
+    struct NullStorage {
+        checkpoints: Mutex<Vec<i64>>,
+        traces: Mutex<usize>,
+    }
+
+    impl Default for NullStorage {
+        fn default() -> Self {
+            Self {
+                checkpoints: Mutex::new(Vec::new()),
+                traces: Mutex::new(0),
+            }
+        }
+    }
+
+    impl NullStorage {
+        /// 每次 save_checkpoint 收到的 step_no（升序）。
+        fn saved_step_nos(&self) -> Vec<i64> {
+            self.checkpoints.lock().unwrap().clone()
+        }
+
+        fn save_count(&self) -> usize {
+            self.checkpoints.lock().unwrap().len()
+        }
+
+        /// 收到的 append_trace 次数（项级 when 跳过 / 无产出 step 不落 trace 测试用）。
+        fn trace_count(&self) -> usize {
+            *self.traces.lock().unwrap()
+        }
+    }
+
     #[async_trait]
     impl StorageBackend for NullStorage {
         async fn get_run(
@@ -1566,6 +1646,17 @@ mod tests {
             &self,
             _entry: TraceEntry,
         ) -> Result<(), agentos_core::types::StorageError> {
+            *self.traces.lock().unwrap() += 1;
+            Ok(())
+        }
+        async fn save_checkpoint(
+            &self,
+            _pipeline_id: &str,
+            _tenant_id: &str,
+            step_no: i64,
+            _state: &serde_json::Value,
+        ) -> Result<(), agentos_core::types::StorageError> {
+            self.checkpoints.lock().unwrap().push(step_no);
             Ok(())
         }
         async fn create_branch(
@@ -1792,22 +1883,27 @@ mod tests {
     struct Fixture {
         executor: PipelineExecutor,
         invoker: Arc<MockInvoker>,
+        store: Arc<NullStorage>,
     }
 
     impl Fixture {
         fn build(plugin_ids: &[&str]) -> Self {
             let invoker = Arc::new(MockInvoker::new());
-            let store: Arc<dyn StorageBackend> = Arc::new(NullStorage);
+            let store = Arc::new(NullStorage::default());
             let executor = PipelineExecutor::new(
                 invoker.clone() as Arc<dyn PluginInvoker>,
                 PathBuf::from("."),
                 TenantContext::new("tenant_test", "session_test"),
                 plugin_ids.iter().map(|s| s.to_string()),
-                store,
+                store.clone() as Arc<dyn StorageBackend>,
                 "run_test",
                 "main",
             );
-            Self { executor, invoker }
+            Self {
+                executor,
+                invoker,
+                store,
+            }
         }
 
         async fn run(
@@ -1882,6 +1978,7 @@ mod tests {
             StepItem::Gated {
                 name: "b".into(),
                 when: Some("False".into()),
+                inputs: HashMap::new(),
             },
         ]);
         let final_state = fixture
@@ -1903,6 +2000,7 @@ mod tests {
         let config = gated_body(vec![StepItem::Gated {
             name: "a".into(),
             when: Some("True".into()),
+            inputs: HashMap::new(),
         }]);
         fixture
             .run(&config, &StepLibrary::default(), json!({}))
@@ -1918,6 +2016,7 @@ mod tests {
         let config = gated_body(vec![StepItem::Gated {
             name: "a".into(),
             when: Some("this is ((( invalid".into()),
+            inputs: HashMap::new(),
         }]);
         let err = fixture
             .executor
@@ -1961,6 +2060,7 @@ mod tests {
             StepItem::Gated {
                 name: "b".into(),
                 when: Some("go == True".into()),
+                inputs: HashMap::new(),
             },
         ]);
         fixture

@@ -126,6 +126,8 @@ pub enum CompiledItem {
     Plugin {
         plugin_id: String,
         when: Option<Expr>,
+        /// per-plugin inputs（经 config 通道传给插件，不 merge 进 state、不落 trace）。
+        inputs: HashMap<String, serde_json::Value>,
     },
     /// 静态命中管道/库 step（三级命中①②），运行时查统一步骤池递归执行。
     Composite { step_id: String, when: Option<Expr> },
@@ -339,6 +341,7 @@ impl Compiler<'_> {
                 items.push(CompiledItem::Plugin {
                     plugin_id: item.name().to_string(),
                     when: item_when,
+                    inputs: item.inputs(),
                 });
             } else {
                 return Err(CompileError {
@@ -577,7 +580,7 @@ mod tests {
         let body = &compiled.bodies[0];
         assert_eq!(body.steps.len(), 1);
         match &body.steps[0].items[0] {
-            CompiledItem::Plugin { plugin_id, when } => {
+            CompiledItem::Plugin { plugin_id, when, .. } => {
                 assert_eq!(plugin_id, "alpha");
                 assert!(when.is_none());
             }
@@ -669,6 +672,7 @@ mod tests {
             vec![StepItem::Gated {
                 name: "alpha".into(),
                 when: Some("True".into()),
+                inputs: HashMap::new(),
             }],
         );
         step.when = Some("True".into());
