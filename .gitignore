@@ -175,3 +175,6 @@ kernel/schema_tmp.json
 .zcode_e2e/
 *.dll
 *.so
+
+# uv（python 包装载插件 python_packager）sidecar venv 不入库
+.venv/
