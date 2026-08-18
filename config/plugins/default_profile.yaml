@@ -63,7 +63,8 @@ plugins:
     enabled: false
   visual_customization_demo:
     enabled: false
-  # widget 化全特性演示/测试插件（前端演示台 + sidecar 演示端点）
+  # widget 化全特性演示/测试插件（前端演示台 + sidecar 演示端点）。
+  # ⚠️ 测试样板插件：仅开发版本保留启用；生产发布必须排除（不随生产部署、不出现于生产界面）。
   widget_demo:
     enabled: true
     activation: lazy
