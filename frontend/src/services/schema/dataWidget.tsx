@@ -79,7 +79,7 @@ export function normalizeRows(payload: unknown): {
       return buildRowsFromArray(raw.items as unknown[])
     }
     if (Array.isArray(raw.results)) {
-      // {results, total} 信封（如 /ext/hindsight_memory/recall）
+      // {results, total} 信封（如 /ext/hindsight_memory_service/recall）
       return buildRowsFromArray(raw.results as unknown[])
     }
   }

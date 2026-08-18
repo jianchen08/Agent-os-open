@@ -689,7 +689,7 @@ def _ok(data: Any) -> dict[str, Any]:
             "query": {"type": "object"},
         },
     },
-    description="HTTP endpoint handler for /ext/hindsight_memory/** (memory frontend)",
+    description="HTTP endpoint handler for /ext/hindsight_memory_service/** (memory frontend)",
 )
 async def http_handle(
     path: str = "",
@@ -702,14 +702,14 @@ async def http_handle(
     """按 path 分发：recall（记忆回顾）/ stats（降级状态）。"""
     q = query or {}
     try:
-        if path == "/ext/hindsight_memory/recall" and method == "GET":
+        if path == "/ext/hindsight_memory_service/recall" and method == "GET":
             result = await hindsight_recall(
                 query=q.get("query", ""),
                 top_k=max(1, min(100, int(q.get("limit", 10)))),
             )
             return _ok(_json_response(result))
 
-        if path == "/ext/hindsight_memory/stats" and method == "GET":
+        if path == "/ext/hindsight_memory_service/stats" and method == "GET":
             initialized = _client is not None
             return _ok(
                 _json_response(

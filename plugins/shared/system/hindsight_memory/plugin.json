@@ -165,7 +165,7 @@
     {
       "route_id": "hindsight_recall",
       "method": "GET",
-      "path": "/ext/hindsight_memory/recall",
+      "path": "/ext/hindsight_memory_service/recall",
       "auth": "none",
       "handler_capability": "http.handle",
       "timeout_ms": 5000,
@@ -175,7 +175,7 @@
     {
       "route_id": "hindsight_stats",
       "method": "GET",
-      "path": "/ext/hindsight_memory/stats",
+      "path": "/ext/hindsight_memory_service/stats",
       "auth": "none",
       "handler_capability": "http.handle",
       "timeout_ms": 5000,
@@ -192,7 +192,7 @@
         "order": 10,
         "props": {
           "title": "最近记忆（Hindsight）",
-          "datasourceUri": "/ext/hindsight_memory/recall?query=&limit=10"
+          "datasourceUri": "/ext/hindsight_memory_service/recall?query=&limit=10"
         }
       },
       {
@@ -202,7 +202,7 @@
         "order": 20,
         "props": {
           "label": "记忆后端",
-          "datasourceUri": "/ext/hindsight_memory/stats",
+          "datasourceUri": "/ext/hindsight_memory_service/stats",
           "valueKey": "backend"
         }
       }

@@ -322,7 +322,7 @@ def _decode(data):
 
 
 def test_http_recall_degrade_when_client_not_ready():
-    out = _http_call("/ext/hindsight_memory/recall", query={"query": "test", "limit": "5"})
+    out = _http_call("/ext/hindsight_memory_service/recall", query={"query": "test", "limit": "5"})
     assert out["success"] is True
     payload = _decode(out["data"])
     # client 未初始化 → recall 降级（不崩溃），HTTP 仍 200
@@ -330,12 +330,12 @@ def test_http_recall_degrade_when_client_not_ready():
 
 
 def test_http_stats_reports_hindsight_backend():
-    out = _http_call("/ext/hindsight_memory/stats")
+    out = _http_call("/ext/hindsight_memory_service/stats")
     payload = _decode(out["data"])
     assert payload["backend"] == "hindsight"
     assert "bank_id" in payload
 
 
 def test_http_unknown_route_404():
-    out = _http_call("/ext/hindsight_memory/nope")
+    out = _http_call("/ext/hindsight_memory_service/nope")
     assert out["data"]["status"] == 404
