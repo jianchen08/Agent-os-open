@@ -1,122 +1,151 @@
 {
-    "id": "human_interaction_tool",
-    "name": "Human Interaction Tool",
-    "description": "用户交互插件（双角色：LLM 工具 + 交互服务。choice/conversation/notification 三模式）",
-    "version": "2.0.0",
-    "plugin_type": "tool",
-    "language": "python",
-    "host_type": "sidecar",
-    "entry": "python server.py",
-    "mcp": {
-        "transport": "stdio",
-        "request_timeout_secs": 90000
-    },
-    "lifecycle": {
-        "idle_timeout_secs": 0
-    },
-    "capabilities": {
-        "tools": [
+  "id": "human_interaction_tool",
+  "name": "Human Interaction Tool",
+  "description": "用户交互插件（双角色：LLM 工具 + 交互服务。choice/conversation/notification 三模式）",
+  "version": "2.0.0",
+  "plugin_type": "tool",
+  "language": "python",
+  "host_type": "sidecar",
+  "entry": "python server.py",
+  "mcp": {
+    "transport": "stdio",
+    "request_timeout_secs": 90000
+  },
+  "lifecycle": {
+    "idle_timeout_secs": 0
+  },
+  "capabilities": {
+    "tools": [
+      {
+        "name": "human_interaction",
+        "description": "与用户交互（LLM 工具，choice/conversation/notification）",
+        "render": {
+          "card": "form",
+          "title": "人工交互"
+        },
+        "ui": {
+          "interaction_modes": [
             {
-                "name": "human_interaction",
-                "description": "与用户交互（LLM 工具，choice/conversation/notification）",
-                "render": {
-                    "card": "form",
-                    "title": "人工交互"
-                },
-                "ui": {
-                    "interaction_modes": [
-                        {
-                            "mode": "choice",
-                            "features": ["options", "options_detail", "text_input"]
-                        },
-                        {
-                            "mode": "conversation",
-                            "features": ["options", "suggestions", "navigate", "text_input"]
-                        },
-                        {
-                            "mode": "notification",
-                            "features": ["message", "progress"]
-                        }
-                    ],
-                    "notification_modes": [
-                        {
-                            "category": "progress",
-                            "features": ["status", "message", "progress"],
-                            "icon": "loader"
-                        },
-                        {
-                            "category": "alert",
-                            "features": ["status", "message", "actions"],
-                            "icon": "alert-triangle"
-                        },
-                        {
-                            "category": "info",
-                            "features": ["status", "message"],
-                            "icon": "info"
-                        },
-                        {
-                            "category": "success",
-                            "features": ["status", "message"],
-                            "icon": "check-circle"
-                        },
-                        {
-                            "category": "error",
-                            "features": ["status", "message", "actions"],
-                            "icon": "alert-circle"
-                        }
-                    ]
-                }
+              "mode": "choice",
+              "features": [
+                "options",
+                "options_detail",
+                "text_input"
+              ]
             },
             {
-                "name": "interaction.send_notification",
-                "description": "发送非阻塞通知（服务能力）"
+              "mode": "conversation",
+              "features": [
+                "options",
+                "suggestions",
+                "navigate",
+                "text_input"
+              ]
             },
             {
-                "name": "interaction.create_choice",
-                "description": "创建选择模式交互请求（服务能力）"
-            },
-            {
-                "name": "interaction.wait_for_choice",
-                "description": "等待用户选择响应（服务能力）"
-            },
-            {
-                "name": "interaction.respond",
-                "description": "提交交互响应（前端响应回路）"
-            },
-            {
-                "name": "interaction.cancel",
-                "description": "取消交互请求（服务能力）"
-            },
-            {
-                "name": "interaction.get_pending",
-                "description": "获取待处理请求列表（服务能力）"
+              "mode": "notification",
+              "features": [
+                "message",
+                "progress"
+              ]
             }
+          ],
+          "notification_modes": [
+            {
+              "category": "progress",
+              "features": [
+                "status",
+                "message",
+                "progress"
+              ],
+              "icon": "loader"
+            },
+            {
+              "category": "alert",
+              "features": [
+                "status",
+                "message",
+                "actions"
+              ],
+              "icon": "alert-triangle"
+            },
+            {
+              "category": "info",
+              "features": [
+                "status",
+                "message"
+              ],
+              "icon": "info"
+            },
+            {
+              "category": "success",
+              "features": [
+                "status",
+                "message"
+              ],
+              "icon": "check-circle"
+            },
+            {
+              "category": "error",
+              "features": [
+                "status",
+                "message",
+                "actions"
+              ],
+              "icon": "alert-circle"
+            }
+          ]
+        }
+      },
+      {
+        "name": "interaction.send_notification",
+        "description": "发送非阻塞通知（服务能力）"
+      },
+      {
+        "name": "interaction.create_choice",
+        "description": "创建选择模式交互请求（服务能力）"
+      },
+      {
+        "name": "interaction.wait_for_choice",
+        "description": "等待用户选择响应（服务能力）"
+      },
+      {
+        "name": "interaction.respond",
+        "description": "提交交互响应（前端响应回路）"
+      },
+      {
+        "name": "interaction.cancel",
+        "description": "取消交互请求（服务能力）"
+      },
+      {
+        "name": "interaction.get_pending",
+        "description": "获取待处理请求列表（服务能力）"
+      }
+    ],
+    "lifecycle_hooks": [
+      "on_load",
+      "on_unload"
+    ]
+  },
+  "provides": {
+    "capabilities": [
+      {
+        "namespace": "human-interaction",
+        "methods": [
+          "send_notification",
+          "create_choice",
+          "wait_for_choice",
+          "respond",
+          "cancel",
+          "get_pending"
         ],
-        "lifecycle_hooks": [
-            "on_load",
-            "on_unload"
-        ]
-    },
-    "provides": {
-        "capabilities": [
-            {
-                "namespace": "human-interaction",
-                "methods": [
-                    "send_notification",
-                    "create_choice",
-                    "create_conversation",
-                    "wait_for_choice",
-                    "respond",
-                    "cancel",
-                    "get_pending"
-                ],
-                "host": "sidecar",
-                "tool_prefix": "interaction"
-            }
-        ]
-    },
-    "dependencies": [],
-    "permissions": {},
-    "priority": 15,
-    "activation": "eager"
+        "host": "sidecar",
+        "tool_prefix": "interaction"
+      }
+    ]
+  },
+  "dependencies": [],
+  "permissions": {},
+  "priority": 15,
+  "activation": "eager"
 }

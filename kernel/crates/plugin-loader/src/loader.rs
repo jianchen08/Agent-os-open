@@ -931,6 +931,14 @@ mod tests {
                     );
                 }
             }
+            // provides 服务注册检查：公告的方法必须有已声明工具（"服务未注册"）
+            let unbacked = crate::registry::provides_methods_unbacked(&m);
+            assert!(
+                unbacked.is_empty(),
+                "真实语料 {} 公告了未注册的服务（provides 方法无对应已声明工具）: {:?}——服务声明了但消费者调不到",
+                path.display(),
+                unbacked
+            );
             count += 1;
         }
         assert!(count == walk.len(), "每份真实 manifest 都过严格解析");

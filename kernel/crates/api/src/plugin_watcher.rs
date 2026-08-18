@@ -32,8 +32,8 @@ use agentos_invoker::verify::{
     compare_tools, declared_with_services, parse_actual_tools, rejected_tool_names,
 };
 use agentos_plugin_loader::{
-    dependency_error_for, output_schema_error, CapabilityRegistryImpl, PluginEnablement,
-    PluginScopeRegistry,
+    dependency_error_for, output_schema_error, provides_methods_unbacked, CapabilityRegistryImpl,
+    PluginEnablement, PluginScopeRegistry,
 };
 use tokio::sync::mpsc::{self, UnboundedSender};
 use tokio::sync::RwLock;
@@ -438,6 +438,19 @@ pub async fn g2_verify_and_sanitize(
             if !malformed.is_empty() {
                 outcome.drift = true;
                 outcome.rejected_tools.extend(malformed);
+            }
+            // 服务注册检查：provides 公告的方法必须有已声明工具（"service 未注册"），
+            // 否则消费者可见却调不到——硬上报（与依赖管理同一类：声明不生效）。
+            let unregistered = provides_methods_unbacked(&outcome.manifest);
+            if !unregistered.is_empty() {
+                warn!(
+                    target: "plugin_gate_services",
+                    plugin = %outcome.manifest.id,
+                    advertised_but_unregistered = ?unregistered,
+                    "注册闸：provides 公告的服务没有对应已声明工具（服务声明了但未注册），消费者将调不到"
+                );
+                outcome.drift = true;
+                outcome.rejected_tools.extend(unregistered);
             }
             // 冒烟：声明了 smoke:true 的工具样例调用一次，失败剔除（fail-closed）
             let (smoke_rejected, smoke_failed) = run_smoke(invoker, &mut outcome.manifest).await;

@@ -767,6 +767,40 @@ pub fn output_schema_error(decl: &serde_json::Value) -> Option<String> {
     None
 }
 
+/// 注册闸：`provides.capabilities` 公告的每个方法必须有**已声明**的工具
+/// （`{tool_prefix}.{method}`；tool_prefix 缺省 = namespace 的 '-'→'_'）。
+///
+/// 若方法公告了但对应工具未声明 → 消费者可见 `namespace.method` 却调不到 =
+/// **"服务声明了但没注册"**（fail-closed）。G2 另外查"已声明 vs 实际暴露"，
+/// 这里查"公告 vs 已声明"，两层合起来才保证公告的服务真能调。
+///
+/// 真实语料（2026-08-18）：human_interaction_tool 公告 create_conversation 但
+/// 无 `interaction.create_conversation` 工具（历史遗留死公告，无消费者）——
+/// 本检查抓出后从 provides.methods 移除。
+pub fn provides_methods_unbacked(
+    m: &agentos_core::traits::PluginManifest,
+) -> Vec<String> {
+    let Some(provides) = &m.provides else {
+        return Vec::new();
+    };
+    let declared_tools: std::collections::HashSet<&str> =
+        m.capabilities.tools.iter().map(|t| t.name.as_str()).collect();
+    let mut out = Vec::new();
+    for cap in &provides.capabilities {
+        let prefix = cap
+            .tool_prefix
+            .clone()
+            .unwrap_or_else(|| cap.namespace.replace('-', "_"));
+        for method in &cap.methods {
+            let expected = format!("{prefix}.{method}");
+            if !declared_tools.contains(expected.as_str()) {
+                out.push(expected);
+            }
+        }
+    }
+    out
+}
+
 impl DependencyResolver for DependencyResolverImpl {
     fn add_dependency(&self, plugin_id: &str, dep: &Dependency) {
         self.deps
@@ -1449,5 +1483,41 @@ mod tests {
         assert!(output_schema_error(&json!({"properties": "oops"})).is_some(), "properties 非对象");
         assert!(output_schema_error(&json!({"required": ["a", 1]})).is_some(), "required 非纯字符串数组");
         assert!(output_schema_error(&json!({"items": "oops"})).is_some(), "items 非对象");
+    }
+
+    // ── provides 服务注册检查（公告的方法必须有已声明工具） ──────────────
+
+    #[test]
+    fn provides_methods_unbacked_detects_dead_advertisement() {
+        // human_interaction_tool 历史真例：公告 create_conversation 但无对应工具
+        let v = json!({
+            "id": "svc", "name": "S", "version": "1.0.0",
+            "plugin_type": "system", "language": "python",
+            "host_type": "sidecar", "entry": "x",
+            "capabilities": { "tools": [ {"name": "interaction.create_choice", "description": "d"} ] },
+            "provides": { "capabilities": [ {
+                "namespace": "human-interaction", "tool_prefix": "interaction",
+                "methods": ["create_choice", "create_conversation"]
+            } ] }
+        });
+        let m: agentos_core::traits::PluginManifest = serde_json::from_value(v).unwrap();
+        assert_eq!(
+            provides_methods_unbacked(&m),
+            vec!["interaction.create_conversation".to_string()],
+            "公告但无已声明工具 = 服务未注册，必须抓出"
+        );
+    }
+
+    #[test]
+    fn provides_methods_all_backed_is_clean() {
+        let v = json!({
+            "id": "svc", "name": "S", "version": "1.0.0",
+            "plugin_type": "system", "language": "python",
+            "host_type": "sidecar", "entry": "x",
+            "capabilities": { "tools": [ {"name": "ns.foo", "description": "d"} ] },
+            "provides": { "capabilities": [ { "namespace": "ns", "methods": ["foo"] } ] }
+        });
+        let m: agentos_core::traits::PluginManifest = serde_json::from_value(v).unwrap();
+        assert!(provides_methods_unbacked(&m).is_empty());
     }
 }
