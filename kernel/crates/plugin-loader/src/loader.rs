@@ -918,6 +918,19 @@ mod tests {
                 panic!("真实语料 {} 未通过严格解析（校验器抓到未知字段/坏结构）: {e}", path.display());
             });
             assert!(!m.id.is_empty() && !m.name.is_empty() && !m.version.is_empty());
+            // output_schema 声明合法性（声明即校验）：真实工具若有畸形声明即红灯
+            for t in &m.capabilities.tools {
+                if let Some(out) = &t.output_schema {
+                    let msg = crate::registry::output_schema_error(out);
+                    assert!(
+                        msg.is_none(),
+                        "真实语料 {} 的 {} output_schema 声明不合法: {}",
+                        path.display(),
+                        t.name,
+                        msg.unwrap()
+                    );
+                }
+            }
             count += 1;
         }
         assert!(count == walk.len(), "每份真实 manifest 都过严格解析");

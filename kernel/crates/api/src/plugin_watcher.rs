@@ -32,7 +32,8 @@ use agentos_invoker::verify::{
     compare_tools, declared_with_services, parse_actual_tools, rejected_tool_names,
 };
 use agentos_plugin_loader::{
-    dependency_error_for, CapabilityRegistryImpl, PluginEnablement, PluginScopeRegistry,
+    dependency_error_for, output_schema_error, CapabilityRegistryImpl, PluginEnablement,
+    PluginScopeRegistry,
 };
 use tokio::sync::mpsc::{self, UnboundedSender};
 use tokio::sync::RwLock;
@@ -294,6 +295,33 @@ pub fn sample_value_from_schema(schema: &serde_json::Value) -> serde_json::Value
     }
 }
 
+/// 注册闸：`output_schema` 声明合法性（与插件其它声明同一套 fail-closed——
+/// 不再是 tool_core 运行时才暴露的特殊小岛）。畸形声明 → 拒绝该工具并返回名单。
+fn reject_malformed_output_schemas(manifest: &mut PluginManifest) -> Vec<String> {
+    let mut rejected = Vec::new();
+    for tool in &manifest.capabilities.tools {
+        if let Some(out) = &tool.output_schema {
+            if let Some(msg) = output_schema_error(out) {
+                warn!(
+                    target: "plugin_watcher",
+                    plugin = %manifest.id,
+                    tool = %tool.name,
+                    error = %msg,
+                    "注册闸：output_schema 声明不合法，拒绝该工具（声明即校验）"
+                );
+                rejected.push(tool.name.clone());
+            }
+        }
+    }
+    if !rejected.is_empty() {
+        manifest
+            .capabilities
+            .tools
+            .retain(|t| !rejected.contains(&t.name));
+    }
+    rejected
+}
+
 /// 注册闸冒烟：对声明了 `smoke: true` 的工具构造样例输入真调一次，验证"基本能力
 /// 能跑"（fail-closed）。调用异常/返回 failure → 拒绝该工具 + 记 `smoke_failed`。
 /// 副作用敏感/需要真实参数的能力由插件**显式** `smoke: true` 才被冒烟——缺省不冒烟，
@@ -405,6 +433,12 @@ pub async fn g2_verify_and_sanitize(
                     smoke_failed: false,
                 }
             };
+            // output_schema 声明合法性：畸形 → 拒绝该工具（声明即校验，fail-closed）
+            let malformed = reject_malformed_output_schemas(&mut outcome.manifest);
+            if !malformed.is_empty() {
+                outcome.drift = true;
+                outcome.rejected_tools.extend(malformed);
+            }
             // 冒烟：声明了 smoke:true 的工具样例调用一次，失败剔除（fail-closed）
             let (smoke_rejected, smoke_failed) = run_smoke(invoker, &mut outcome.manifest).await;
             if smoke_failed {
@@ -1861,5 +1895,31 @@ mod tests {
             0,
             "未声明 smoke:true 的工具不被冒烟（避免注册期副作用）"
         );
+    }
+
+    /// output_schema 声明合法性（声明即校验）：畸形声明 → 注册期拒绝该工具，
+    /// 不再等到 tool_core 运行时才暴露。
+    #[tokio::test]
+    async fn malformed_output_schema_rejected_at_registration() {
+        let v = serde_json::json!({
+            "id": "p1", "name": "p1", "version": "1.0.0",
+            "plugin_type": "tool", "language": "rust",
+            "host_type": "sidecar", "entry": "x",
+            "capabilities": { "tools": [
+                { "name": "t_bad", "description": "d",
+                  "output_schema": {"type": "object", "properties": "oops"} },
+                { "name": "t_ok", "description": "d",
+                  "output_schema": {"type": "object", "properties": {"a": {"type": "string"}}, "required": ["a"]} }
+            ] },
+        });
+        let m: PluginManifest = serde_json::from_value(v).unwrap();
+        let invoker = MockInvoker::new(vec![m.clone()]);
+        let out = g2_verify_and_sanitize(&invoker, m, true).await;
+        assert!(
+            out.rejected_tools.contains(&"t_bad".to_string()),
+            "畸形 output_schema 的工具必须被拒"
+        );
+        assert_eq!(out.manifest.capabilities.tools.len(), 1, "t_ok 保留");
+        assert_eq!(out.manifest.capabilities.tools[0].name, "t_ok");
     }
 }

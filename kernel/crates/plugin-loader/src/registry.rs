@@ -716,6 +716,57 @@ pub fn validate_dependencies(
     Ok(())
 }
 
+/// 合法 JSON Schema 类型（输出/输入契约的第一层 type 收口）。
+const JSON_SCHEMA_TYPES: &[&str] = &[
+    "object", "array", "string", "number", "integer", "boolean", "null",
+];
+
+/// 注册闸：工具 `output_schema` 声明合法性（2026-08-18，与插件其它声明同一套
+/// fail-closed 机制——不再是 tool_core 运行时才暴露的特殊小岛）。
+///
+/// 校验声明的**形状**（首层是否良构 JSON Schema 对象），不校验业务语义：
+/// 顶层层 `type` 合法（或 type 数组全合法）；`properties` 为对象；`required`
+/// 为字符串数组；`items` 为对象。畸形声明 → `Some(错误说明)`，注册期拒绝该工具。
+///
+/// 真实语料校准（2026-08-18 扫描）：84 工具仅 5 个声明 output_schema，且全部只
+/// 用 type/properties/required——本校验覆盖其全部形态，不产生误报。
+pub fn output_schema_error(decl: &serde_json::Value) -> Option<String> {
+    let Some(obj) = decl.as_object() else {
+        return Some("output_schema 必须是 JSON Schema 对象".to_string());
+    };
+    if let Some(t) = obj.get("type") {
+        let types_ok = if let Some(s) = t.as_str() {
+            JSON_SCHEMA_TYPES.contains(&s)
+        } else if let Some(arr) = t.as_array() {
+            !arr.is_empty()
+                && arr.iter().all(|v| {
+                    v.as_str().map(|s| JSON_SCHEMA_TYPES.contains(&s)).unwrap_or(false)
+                })
+        } else {
+            false
+        };
+        if !types_ok {
+            return Some(format!("output_schema.type 非法: {t}"));
+        }
+    }
+    if let Some(props) = obj.get("properties") {
+        if !props.is_object() {
+            return Some("output_schema.properties 必须是对象".to_string());
+        }
+    }
+    if let Some(req) = obj.get("required") {
+        if !req.as_array().map(|a| a.iter().all(|v| v.is_string())).unwrap_or(false) {
+            return Some("output_schema.required 必须是字符串数组".to_string());
+        }
+    }
+    if let Some(items) = obj.get("items") {
+        if !items.is_object() {
+            return Some("output_schema.items 必须是对象".to_string());
+        }
+    }
+    None
+}
+
 impl DependencyResolver for DependencyResolverImpl {
     fn add_dependency(&self, plugin_id: &str, dep: &Dependency) {
         self.deps
@@ -1368,5 +1419,35 @@ mod tests {
         assert!(!version_gte("1.9.9", "2.0.0"));
         assert!(version_gte("1.2.3", "1.2"), "长版本视为更高");
         assert!(version_gte("1.10", "1.9"), "数值段比较非字典序");
+    }
+
+    // ── output_schema 声明合法性（注册闸，与插件其它声明同一套 fail-closed） ──
+
+    #[test]
+    fn output_schema_wellformed_declarations_pass() {
+        // 真实语料校准：5/84 工具的 output_schema 全部只用 type/properties/required
+        assert!(output_schema_error(&json!({
+            "type": "object",
+            "properties": {"a": {"type": "string"}},
+            "required": ["a"],
+        }))
+        .is_none());
+        assert!(output_schema_error(&json!({"type": ["object", "string"]})).is_none());
+        assert!(output_schema_error(&json!({
+            "type": "array", "items": {"type": "object", "properties": {}}
+        }))
+        .is_none());
+        assert!(output_schema_error(&json!({})).is_none(), "空对象可解析（无 type 也允许）");
+    }
+
+    #[test]
+    fn output_schema_malformed_is_rejected() {
+        assert!(output_schema_error(&json!("just-a-string")).is_some(), "顶层非对象必须报");
+        assert!(output_schema_error(&json!({"type": "hat"})).is_some(), "非法 type 必须报");
+        assert!(output_schema_error(&json!({"type": ["object", "hat"]})).is_some(), "type 数组含非法项");
+        assert!(output_schema_error(&json!({"type": 42})).is_some(), "type 非字符串/数组");
+        assert!(output_schema_error(&json!({"properties": "oops"})).is_some(), "properties 非对象");
+        assert!(output_schema_error(&json!({"required": ["a", 1]})).is_some(), "required 非纯字符串数组");
+        assert!(output_schema_error(&json!({"items": "oops"})).is_some(), "items 非对象");
     }
 }
