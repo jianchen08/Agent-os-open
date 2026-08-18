@@ -32,6 +32,7 @@ import { useInteractionStore } from '@/stores/interactionStore'
 import { useNotificationStore } from '@/stores/notificationStore'
 import { PRIORITY_STYLES } from '@/types/notification'
 import { MarkdownRenderer } from '@/components/shared/markdown/MarkdownRenderer'
+import { resolveNotificationLayout } from '@/utils/notificationModes'
 import { NotificationItemComponent } from './NotificationItem'
 import type { NotificationAction, NotificationItem, NotificationPriority } from '@/types/notification'
 
@@ -191,7 +192,7 @@ export function NotificationCenter({ className, hideTrigger = false }: Notificat
             </DialogDescription>
           </DialogHeader>
 
-          {activeBlockingNotification.category === 'progress' &&
+          {resolveNotificationLayout(activeBlockingNotification).features.has('progress') &&
             activeBlockingNotification.progress != null && (
               <div className="py-2">
                 <div className="h-2 w-full rounded-full bg-muted overflow-hidden">
