@@ -15,6 +15,7 @@
 import React from 'react'
 import { AlertCircle, CheckCircle2, Clock, Loader2, PauseCircle, XCircle } from '@/assets/icons'
 import { useWidgetEventStore } from '@/stores/widgetEventStore'
+import { DataWidgetStatus, useDataWidget } from '@/services/schema/dataWidget'
 
 // ═════════════════════════════════════════════════════════════════
 // metric 形态（原 StatusCardWidget）
@@ -343,14 +344,24 @@ export function StatusCardWidget(props: Record<string, unknown>) {
   // 这是 metric_bindings 配置驱动推送的「最后一公里」：内核推 → store → 本组件渲染。
   const widgetId = props.widgetId as string | undefined
   const latest = useWidgetEventStore((s) => (widgetId ? s.latest[widgetId] : undefined))
+  // A1a：datasourceUri（HTTP 拉，scalar 形状）→ 无 uri 回退静态 props
+  const remote = useDataWidget(props, 'scalar' as const)
+  const scalar = (props.datasourceUri ? remote.data : undefined) as
+    | Record<string, unknown>
+    | undefined
 
   const variant = props.variant as CardVariant | undefined
   const steps = extractSteps(props.steps)
   const indeterminate = (props.indeterminate as boolean) ?? false
-  const progress =
+  const progressNum =
     typeof props.progress === 'number' && !Number.isNaN(props.progress)
       ? Math.max(0, Math.min(100, props.progress))
       : undefined
+  // scalar 数据源的 progress 覆盖（数字才生效）
+  const progress =
+    typeof scalar?.progress === 'number' && !Number.isNaN(scalar.progress)
+      ? Math.max(0, Math.min(100, scalar.progress))
+      : progressNum
 
   // 形态推断：variant 显式优先；特征 props 次之
   const resolved: CardVariant =
@@ -388,15 +399,23 @@ export function StatusCardWidget(props: Record<string, unknown>) {
   }
 
   // metric 形态（默认）
-  const metrics = extractMetrics(props.metrics)
+  const metrics = extractMetrics(scalar?.metrics ?? props.metrics)
   const title = props.title as string | undefined
   // 优先用 widget_event 推送的 value（metric_bindings 场景），props 兜底（静态场景）
   const eventValue = latest?.data?.value as string | number | undefined
-  const value = eventValue ?? (props.value as string | number | undefined)
+  // A1a：scalar 数据源的 value 覆盖（HTTP 拉场景），eventValue 仍然最高优先
+  const scalarValue =
+    scalar && 'value' in scalar ? (scalar.value as string | number | undefined) : props.value
+  const value = eventValue ?? (scalarValue as string | number | undefined)
   const trend = props.trend as TrendDirection | undefined
   const trendValue = props.trendValue as string | undefined
   const icon = props.icon as string | undefined
   const description = props.description as string | undefined
+
+  // 数据源加载/错误提示（A1a）：有 uri 且失败/加载中时前置展示
+  if ((props.datasourceUri && remote.error) || (props.datasourceUri && remote.loading)) {
+    return <DataWidgetStatus loading={remote.loading} error={remote.error} />
+  }
 
   // 多指标模式
   if (metrics.length > 0) {

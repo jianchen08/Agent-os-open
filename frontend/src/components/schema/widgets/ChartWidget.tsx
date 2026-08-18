@@ -8,6 +8,7 @@
  */
 
 import React, { useMemo } from 'react'
+import { DataWidgetStatus, useDataWidget } from '@/services/schema/dataWidget'
 
 /** 图表类型 */
 type ChartType =
@@ -120,26 +121,37 @@ function extractConfig(props: Record<string, unknown>): ChartConfig {
  */
 export function ChartWidget(props: Record<string, unknown>) {
   const chartType = (props.chartType as ChartType) ?? 'bar'
-  const data = extractData(props.data)
+  // A1a：datasourceUri（HTTP 拉，series 形状）→ 无 uri 回退静态 props.data
+  const remote = useDataWidget(props, 'series' as const)
+  const data = extractData(props.datasourceUri ? remote.data : props.data)
   const config = extractConfig(props)
 
   const hasData =
     data.labels.length > 0 && data.datasets.some((ds) => ds.data.length > 0)
 
+  if (remote.error) {
+    return <DataWidgetStatus loading={false} error={remote.error} />
+  }
+
   if (!hasData) {
     return (
       <div className="flex flex-col items-center justify-center rounded-lg border p-8">
-        <svg
-          className="text-muted-foreground mb-2 h-12 w-12"
-          viewBox="0 0 24 24"
-          fill="none"
-          stroke="currentColor"
-          strokeWidth={1.5}
-        >
-          <path d="M3 3v18h18" />
-          <path d="M7 16l4-4 4 4 4-8" />
-        </svg>
-        <p className="text-muted-foreground text-sm">暂无图表数据</p>
+        <DataWidgetStatus loading={remote.loading} error={null} />
+        {!remote.loading && (
+          <>
+            <svg
+              className="text-muted-foreground mb-2 h-12 w-12"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth={1.5}
+            >
+              <path d="M3 3v18h18" />
+              <path d="M7 16l4-4 4 4 4-8" />
+            </svg>
+            <p className="text-muted-foreground text-sm">暂无图表数据</p>
+          </>
+        )}
       </div>
     )
   }

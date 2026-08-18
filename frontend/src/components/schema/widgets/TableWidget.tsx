@@ -7,6 +7,7 @@
  */
 
 import React, { useState, useMemo, useCallback } from 'react'
+import { DataWidgetStatus, useDataWidget } from '@/services/schema/dataWidget'
 
 /** 列定义 */
 interface ColumnDef {
@@ -67,8 +68,13 @@ function extractRows(data: unknown): Record<string, unknown>[] {
  * @returns 表格渲染结果
  */
 export function TableWidget(props: Record<string, unknown>) {
-  const columns = extractColumns(props.columns)
-  const rows = extractRows(props.data)
+  // A1a：datasourceUri（HTTP 拉，rows 形状）→ 无 uri 回退静态 columns/data
+  const remote = useDataWidget(props, 'rows' as const)
+  const rowData = (props.datasourceUri ? remote.data : undefined) as
+    | { columns?: unknown; rows?: unknown }
+    | undefined
+  const columns = extractColumns(rowData?.columns ?? props.columns)
+  const rows = extractRows(rowData?.rows ?? props.data)
   const pageSize = (props.pageSize as number) ?? 10
   const title = props.title as string | undefined
 
@@ -120,19 +126,27 @@ export function TableWidget(props: Record<string, unknown>) {
   }, [sortedRows, safeCurrentPage, pageSize])
 
   if (columns.length === 0 && rows.length === 0) {
+    if (remote.error) {
+      return <DataWidgetStatus loading={false} error={remote.error} />
+    }
     return (
       <div className="flex flex-col items-center justify-center rounded-lg border border-dashed p-8">
-        <svg
-          className="text-muted-foreground mb-2 h-12 w-12"
-          viewBox="0 0 24 24"
-          fill="none"
-          stroke="currentColor"
-          strokeWidth={1.5}
-        >
-          <rect x="3" y="3" width="18" height="18" rx="2" />
-          <path d="M3 9h18M3 15h18M9 3v18M15 3v18" />
-        </svg>
-        <p className="text-muted-foreground text-sm">暂无表格数据</p>
+        <DataWidgetStatus loading={remote.loading} error={null} />
+        {!remote.loading && (
+          <>
+            <svg
+              className="text-muted-foreground mb-2 h-12 w-12"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth={1.5}
+            >
+              <rect x="3" y="3" width="18" height="18" rx="2" />
+              <path d="M3 9h18M3 15h18M9 3v18M15 3v18" />
+            </svg>
+            <p className="text-muted-foreground text-sm">暂无表格数据</p>
+          </>
+        )}
       </div>
     )
   }
