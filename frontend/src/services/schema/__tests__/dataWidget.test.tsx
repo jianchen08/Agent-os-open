@@ -21,6 +21,13 @@ import { TableWidget } from '@/components/schema/widgets/TableWidget'
 import { StatusCardWidget } from '@/components/schema/widgets/StatusCardWidget'
 
 const apiGet = vi.fn()
+const { wsSubscribe, wsUnsubscribe } = vi.hoisted(() => ({
+  wsSubscribe: vi.fn(),
+  wsUnsubscribe: vi.fn(),
+}))
+vi.mock('@/services/websocket/GlobalWebSocket', () => ({
+  globalWS: { subscribe: wsSubscribe, unsubscribe: wsUnsubscribe },
+}))
 vi.mock('@/services/api/client', () => ({
   default: Object.assign(
     (...args: unknown[]) => Promise.resolve({ data: {} }),
@@ -166,5 +173,46 @@ describe('组件接线（datasourceUri）', () => {
     render(<StatusCardWidget label="静态" value={5} />)
     // value + label → progress 形态，进度以百分比显示
     expect(screen.getByText('5%')).toBeInTheDocument()
+  })
+})
+
+// ── A1c：WS 事件驱动数据源 ─────────────────────────────────
+import { globalWS } from '@/services/websocket/GlobalWebSocket'
+import { useWsDataSource } from '@/services/schema/dataWidget'
+
+describe('A1c：WS 事件驱动数据源', () => {
+  beforeEach(() => {
+    wsSubscribe.mockClear()
+    wsUnsubscribe.mockClear()
+    globalThis.wsHandler = undefined as ((p: unknown) => void) | undefined
+    wsSubscribe.mockImplementation((_ch: string, h: (p: unknown) => void) => {
+      globalThis.wsHandler = h
+    })
+  })
+
+  it('useDataWidget + refresh:{type:ws,channel}：事件驱动更新（不走 loading）', async () => {
+    apiGet.mockRejectedValue(new Error('http 不应被调用'))
+    function Host() {
+      const r = useDataWidget({ refresh: { type: 'ws', channel: 'cost_update' } }, 'scalar')
+      return <span data-testid="v">{JSON.stringify((r.data as { value?: number } | undefined)?.value)}</span>
+    }
+    render(<Host />)
+    expect(apiGet).not.toHaveBeenCalled()
+    // 模拟 WS 推送事件 → scalar 归一（{value:...} 形状）→ 更新
+    ;(globalThis.wsHandler as (p: unknown) => void)?.({ value: 42 })
+    await waitFor(() => expect(screen.getByTestId('v').textContent).toBe('42'))
+  })
+
+  it('useWsDataSource：独立 hook 订阅/退订', async () => {
+    function Host() {
+      const { data } = useWsDataSource({ channel: 'cost_update', initial: 0 })
+      return <span data-testid="w">{String(data)}</span>
+    }
+    const { unmount } = render(<Host />)
+    expect(wsSubscribe).toHaveBeenCalledWith('cost_update', expect.any(Function))
+    ;(globalThis.wsHandler as (p: unknown) => void)?.(7)
+    await waitFor(() => expect(screen.getByTestId('w').textContent).toBe('7'))
+    unmount()
+    expect(wsUnsubscribe).toHaveBeenCalledWith('cost_update', expect.any(Function))
   })
 })

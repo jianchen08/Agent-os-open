@@ -6,12 +6,13 @@
  * - 数据形状协议（shape）：`rows`（表格 {columns,rows}）/ `series`（图表
  *   {labels,datasets}）/ `scalar`（状态卡 {value|metrics|progress}）。
  *   chart/table/status_card 三个数据 widget 消费本层；与 RefreshBox(poll)
- *   组合 = 声明周期重挂载即重拉；WS 推送由 A1c（useWsDataSource）承接
- *   （事件驱动更新，不走 remount）。
- * - 无 uri 时回退静态 props（零行为变化，兼容旧声明）。
+ *   组合 = 声明周期重挂载即重拉；WS 推送由 `refresh:{type:'ws',channel}`
+ *   （A1c）承接——事件驱动更新，不走 remount。
+ * - 无 uri/ws 时回退静态 props（零行为变化，兼容旧声明）。
  */
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import apiClient from '@/services/api/client'
+import { globalWS } from '@/services/websocket/GlobalWebSocket'
 
 export type DataShape = 'rows' | 'series' | 'scalar'
 
@@ -150,13 +151,60 @@ export function normalizeDataPayload(payload: unknown, shape: DataShape): unknow
 
 // ── hook ───────────────────────────────────────────────────
 
+/** 声明 WS 推送源（A1c）：refresh:{type:'ws', channel} */
+export interface WsRefreshConfig {
+  type: 'ws'
+  channel: string
+}
+
+/** 从组件 props 解析 WS 推送声明；非 ws/缺 channel → null */
+export function parseWsRefresh(props: Record<string, unknown>): WsRefreshConfig | null {
+  const r = props.refresh
+  if (!r || typeof r !== 'object') return null
+  const cfg = r as Record<string, unknown>
+  if (cfg.type !== 'ws') return null
+  const channel = cfg.channel
+  return typeof channel === 'string' && channel !== '' ? { type: 'ws', channel } : null
+}
+
 /**
- * 数据 widget 取数 hook：datasourceUri（HTTP 拉，A1a）→ 归一化数据。
- * 无 uri 时回退静态 data/value（零行为变化）。
+ * 通用声明式 WS 数据源（A1c）：订阅 WS channel → 事件驱动更新数据。
+ * 明确不走 RefreshBox remount——WS 是持续推送状态，remount 会丢事件/重复订阅。
+ * 非 widget 宿主也可直接用本 hook（如成本实时卡）。
+ */
+export function useWsDataSource(options: {
+  channel?: string
+  initial?: unknown
+  extract?: (payload: unknown) => unknown
+}): { data: unknown } {
+  const { channel, initial, extract } = options
+  const [data, setData] = useState<unknown>(initial)
+  const extractRef = useRef(extract)
+  extractRef.current = extract
+
+  useEffect(() => {
+    if (!channel) return
+    const handler = (payload: unknown) => {
+      const fn = extractRef.current
+      setData(fn ? fn(payload) : payload)
+    }
+    globalWS.subscribe(channel, handler)
+    return () => globalWS.unsubscribe(channel, handler)
+  }, [channel])
+
+  return { data }
+}
+
+/**
+ * 数据 widget 取数 hook：三种数据源按声明择一——
+ * - `refresh:{type:'ws',channel}`：WS 推送，事件驱动更新（A1c）；
+ * - `datasourceUri`：HTTP 拉，归一化（A1a）；
+ * - 均无：静态 data/value（零行为变化）。
  */
 export function useDataWidget(props: Record<string, unknown>, shape: DataShape): DataWidgetResult {
   const uri = props.datasourceUri as string | undefined
   const staticData = props.data ?? props.value
+  const ws = parseWsRefresh(props)
   const [state, setState] = useState<DataWidgetResult>({
     data: staticData,
     loading: false,
@@ -164,6 +212,19 @@ export function useDataWidget(props: Record<string, unknown>, shape: DataShape):
   })
 
   useEffect(() => {
+    // WS 事件驱动（A1c）：事件即数据，shape 归一后更新，不走 loading
+    if (ws) {
+      const handler = (payload: unknown) => {
+        setState((prev) => ({
+          ...prev,
+          data: normalizeDataPayload(payload, shape),
+          loading: false,
+          error: null,
+        }))
+      }
+      globalWS.subscribe(ws.channel, handler)
+      return () => globalWS.unsubscribe(ws.channel, handler)
+    }
     if (!uri) {
       setState({ data: staticData, loading: false, error: null })
       return
@@ -188,9 +249,9 @@ export function useDataWidget(props: Record<string, unknown>, shape: DataShape):
     return () => {
       cancelled = true
     }
-    // staticData 对象每次渲染引用会变——只依赖 uri/shape，避免拉取循环
+    // staticData 对象每次渲染引用会变——只依赖关键源，避免拉取循环
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [uri, shape])
+  }, [uri, shape, ws?.channel])
 
   return state
 }
