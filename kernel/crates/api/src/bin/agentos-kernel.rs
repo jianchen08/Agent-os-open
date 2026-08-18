@@ -233,6 +233,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     };
 
+    // 注册闸-依赖引用完整性（fail-closed）：非 optional dependencies 引用不存在的
+    // 插件 id / 实际版本不满足 min_version → 拒绝启动。0.2 存量插件全为空依赖，
+    // 不破坏既有启动；它把"引用不存在的插件"从运行期谜题提前到启动期暴露。
+    agentos_plugin_loader::validate_dependencies(&manifests).map_err(|e| {
+        eprintln!("[boot] 插件依赖解析失败，拒绝启动: {}", e);
+        std::io::Write::flush(&mut std::io::stderr()).ok();
+        Box::<dyn std::error::Error>::from(format!(
+            "plugin dependency resolution failed at boot: {}",
+            e
+        ))
+    })?;
+
     // M2-static：启动期按 dependencies 静态拓扑排序——插件间启动顺序从
     // HashMap 任意序变为显式可证明的依赖序（依赖者后加载；tie-break 字典序）。
     // 依赖环 fail-fast（与 pipeline load_and_compile 的坏配置拒绝启动一致）。

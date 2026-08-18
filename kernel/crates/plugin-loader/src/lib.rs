@@ -29,6 +29,6 @@ pub use error::LoaderError;
 pub use loader::{AllowlistConfig, AllowlistEntry, AllowlistMode, PluginLoaderImpl};
 pub use native_loader::NativePluginLoader;
 pub use registry::{
-    sort_manifests_topologically, CapabilityRegistryImpl, DependencyResolverImpl, PluginScope,
-    PluginScopeRegistry,
+    sort_manifests_topologically, validate_dependencies, version_gte, CapabilityRegistryImpl,
+    DependencyResolverImpl, PluginScope, PluginScopeRegistry,
 };

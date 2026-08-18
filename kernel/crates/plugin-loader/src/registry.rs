@@ -638,6 +638,69 @@ pub fn sort_manifests_topologically(
     Ok(sorted)
 }
 
+/// 版本号 `>=` 判定（"x.y.z" 数值段逐段比较，缺段视为 0）。
+///
+/// 纯函数、零 crate 依赖：用于 [`validate_dependencies`] 的 `min_version`
+/// fail-closed 校验。非数值/畸形段按 0 处理（宁可不满足也不误放行）。
+pub fn version_gte(actual: &str, min: &str) -> bool {
+    fn parts(v: &str) -> Vec<u64> {
+        v.split('.')
+            .filter_map(|s| s.trim().parse::<u64>().ok())
+            .collect()
+    }
+    let a = parts(actual);
+    let b = parts(min);
+    let len = a.len().max(b.len());
+    for i in 0..len {
+        let av = a.get(i).copied().unwrap_or(0);
+        let bv = b.get(i).copied().unwrap_or(0);
+        if av != bv {
+            return av > bv;
+        }
+    }
+    true
+}
+
+/// 注册闸：校验 manifests 的 `dependencies` 引用完整性（fail-closed）。
+///
+/// - 非 optional 依赖引用不存在的插件 id → [`DependencyError::MissingRequired`]；
+/// - 存在但实际版本 < `min_version` → [`DependencyError::VersionMismatch`]；
+/// - optional 依赖缺失跳过；无依赖恒 `Ok`。
+///
+/// 现状 0.2 存量插件全部 `dependencies: []`，本校验不破坏既有启动；
+/// 它把"引用了不存在的插件 id"从死字段/运行时谜题变成启动期 fail-fast。
+pub fn validate_dependencies(
+    manifests: &[agentos_core::traits::PluginManifest],
+) -> Result<(), DependencyError> {
+    let present: HashMap<&str, &str> = manifests
+        .iter()
+        .map(|m| (m.id.as_str(), m.version.as_str()))
+        .collect();
+    for m in manifests {
+        for dep in &m.dependencies {
+            if dep.optional {
+                continue;
+            }
+            let Some(actual_version) = present.get(dep.plugin_id.as_str()) else {
+                return Err(DependencyError::MissingRequired {
+                    plugin_id: dep.plugin_id.clone(),
+                    dependent: m.id.clone(),
+                });
+            };
+            if let Some(min) = &dep.min_version {
+                if !version_gte(actual_version, min) {
+                    return Err(DependencyError::VersionMismatch {
+                        plugin_id: dep.plugin_id.clone(),
+                        required: min.clone(),
+                        actual: (*actual_version).to_string(),
+                    });
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
 impl DependencyResolver for DependencyResolverImpl {
     fn add_dependency(&self, plugin_id: &str, dep: &Dependency) {
         self.deps
@@ -1216,5 +1279,78 @@ mod tests {
         ];
         let err = sort_manifests_topologically(&manifests).unwrap_err();
         assert!(matches!(err, DependencyError::Circular { .. }));
+    }
+
+    // ── validate_dependencies（注册闸：依赖引用完整性，fail-closed） ──────────
+
+    #[test]
+    fn validate_deps_all_satisfied_is_ok() {
+        let manifests = vec![
+            minimal_manifest("base", vec![]),
+            minimal_manifest("app", vec![("base", false)]),
+        ];
+        assert!(validate_dependencies(&manifests).is_ok());
+    }
+
+    #[test]
+    fn validate_deps_missing_required_rejected() {
+        let manifests = vec![minimal_manifest("app", vec![("ghost", false)])];
+        let err = validate_dependencies(&manifests).unwrap_err();
+        match err {
+            DependencyError::MissingRequired { plugin_id, dependent } => {
+                assert_eq!(plugin_id, "ghost");
+                assert_eq!(dependent, "app");
+            }
+            other => panic!("expected MissingRequired, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn validate_deps_optional_missing_is_ok() {
+        let manifests = vec![minimal_manifest("app", vec![("ghost", true)])];
+        assert!(validate_dependencies(&manifests).is_ok());
+    }
+
+    #[test]
+    fn validate_deps_version_mismatch_rejected() {
+        let mut base = make_manifest_for_sort("base");
+        base.version = "1.0.0".to_string();
+        let mut app = make_manifest_for_sort("app");
+        app.dependencies = vec![Dependency {
+            plugin_id: "base".to_string(),
+            optional: false,
+            min_version: Some("2.0.0".to_string()),
+        }];
+        let err = validate_dependencies(&[app, base]).unwrap_err();
+        match err {
+            DependencyError::VersionMismatch { plugin_id, required, actual } => {
+                assert_eq!(plugin_id, "base");
+                assert_eq!(required, "2.0.0");
+                assert_eq!(actual, "1.0.0");
+            }
+            other => panic!("expected VersionMismatch, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn validate_deps_version_satisfied_is_ok() {
+        let mut base = make_manifest_for_sort("base");
+        base.version = "2.1.0".to_string();
+        let mut app = make_manifest_for_sort("app");
+        app.dependencies = vec![Dependency {
+            plugin_id: "base".to_string(),
+            optional: false,
+            min_version: Some("2.0.0".to_string()),
+        }];
+        assert!(validate_dependencies(&[app, base]).is_ok());
+    }
+
+    #[test]
+    fn version_gte_numeric_segment_compare() {
+        assert!(version_gte("2.1.0", "2.0.0"));
+        assert!(version_gte("2.0.0", "2.0.0"));
+        assert!(!version_gte("1.9.9", "2.0.0"));
+        assert!(version_gte("1.2.3", "1.2"), "长版本视为更高");
+        assert!(version_gte("1.10", "1.9"), "数值段比较非字典序");
     }
 }
