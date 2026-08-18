@@ -37,6 +37,33 @@
                             "mode": "notification",
                             "features": ["message", "progress"]
                         }
+                    ],
+                    "notification_modes": [
+                        {
+                            "category": "progress",
+                            "features": ["status", "message", "progress"],
+                            "icon": "loader"
+                        },
+                        {
+                            "category": "alert",
+                            "features": ["status", "message", "actions"],
+                            "icon": "alert-triangle"
+                        },
+                        {
+                            "category": "info",
+                            "features": ["status", "message"],
+                            "icon": "info"
+                        },
+                        {
+                            "category": "success",
+                            "features": ["status", "message"],
+                            "icon": "check-circle"
+                        },
+                        {
+                            "category": "error",
+                            "features": ["status", "message", "actions"],
+                            "icon": "alert-circle"
+                        }
                     ]
                 }
             },
