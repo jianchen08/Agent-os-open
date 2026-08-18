@@ -213,8 +213,13 @@ pub fn build_router_with_http_routes(
     // handler 先尝试静态资源（plugin_dirs 命中 + 文件存在）→ 命中则直接返回；
     // 否则若有 dispatcher，走 find_http_route 模板匹配插件 http_endpoints；
     // 都不命中 → 404。
-    let wildcard_handler = build_wildcard_handler(dispatcher, plugin_dirs);
+    let wildcard_handler = build_wildcard_handler(dispatcher.clone(), plugin_dirs.clone());
     router = router.route("/ext/{*rest}", wildcard_handler);
+    // G6-a：/api/v1/datasource/{*rest} 数据源代理——改写 /ext/{rest} 复用同一分发。
+    // 前端 fetchDatasourceOptions 对非绝对 URI 走此前缀（旧占位护栏在 frontend
+    // client.ts isOptionalEndpoint，本路由接管后移除该护栏）。
+    let datasource_handler = build_datasource_handler(dispatcher, plugin_dirs);
+    router = router.route("/api/v1/datasource/{*rest}", datasource_handler);
     router
 }
 
@@ -224,13 +229,80 @@ pub fn build_router_with_http_routes(
 /// 静态资源优先：`/ext/{plugin_id}/assets/{*rest}` 命中时由内核直接读文件返回，
 /// 不进入 dispatcher。这让插件带完整 SPA（分离的 JS/CSS/图片）无需为每个子资源
 /// 单独声明 http_endpoints。
+/// 执行一个 /ext 风格请求（插件 http_endpoints 分发 / 静态资源），供
+/// - `/ext/{*rest}` 通配路由
+/// - `/api/v1/datasource/{*rest}` 数据源代理（见 build_datasource_handler）
+/// 共用。path 形如 `/ext/{plugin_id}/...`。
+#[allow(clippy::too_many_arguments)]
+async fn exec_ext_request(
+    dispatcher: Option<Arc<HttpDispatcher>>,
+    plugin_dirs: Arc<HashMap<String, std::path::PathBuf>>,
+    method: axum::http::Method,
+    path: String,
+    query_multi: HashMap<String, Vec<String>>,
+    headers: axum::http::HeaderMap,
+    body: axum::body::Bytes,
+) -> axum::response::Response {
+    use axum::body::Body;
+    use axum::http::{HeaderName, HeaderValue, StatusCode};
+    use axum::response::IntoResponse;
+
+    // 1) 静态资源直读：命中则直接返回（200 + mime / 404）。
+    if let Some(resp) = try_serve_static_asset(&path, &plugin_dirs) {
+        return resp;
+    }
+
+    // 2) 否则走 dispatcher（若有）。无 dispatcher → 404。
+    let Some(dispatcher) = dispatcher else {
+        return (StatusCode::NOT_FOUND, "route not found").into_response();
+    };
+
+    let method_str = method.as_str().to_string();
+    let headers_map = header_map_to_hashmap(&headers);
+    let raw_body = body.to_vec();
+    let outcome = dispatch_http(
+        &dispatcher,
+        &path,
+        &method_str,
+        raw_body,
+        headers_map,
+        query_multi,
+    )
+    .await;
+    match outcome {
+        DispatchOutcome::Handled(resp) => {
+            let mut builder = axum::response::Response::builder()
+                .status(StatusCode::from_u16(resp.status).unwrap_or(StatusCode::OK));
+            for (k, v) in &resp.headers {
+                if let (Ok(name), Ok(val)) = (HeaderName::try_from(k), HeaderValue::try_from(v)) {
+                    builder = builder.header(name, val);
+                }
+            }
+            let body_bytes = if resp.body.is_empty() {
+                Vec::new()
+            } else {
+                base64::engine::general_purpose::STANDARD
+                    .decode(&resp.body)
+                    .unwrap_or_default()
+            };
+            builder.body(Body::from(body_bytes)).unwrap_or_else(|_| {
+                (StatusCode::INTERNAL_SERVER_ERROR, "response build failed").into_response()
+            })
+        }
+        DispatchOutcome::NotFound => (StatusCode::NOT_FOUND, "route not found").into_response(),
+        DispatchOutcome::Timeout => (StatusCode::GATEWAY_TIMEOUT, "endpoint timeout").into_response(),
+        DispatchOutcome::ConcurrencyLimited => {
+            (StatusCode::SERVICE_UNAVAILABLE, "concurrency limit").into_response()
+        }
+        DispatchOutcome::HandlerError(msg) => (StatusCode::BAD_GATEWAY, msg).into_response(),
+    }
+}
+
 fn build_wildcard_handler(
     dispatcher: Option<Arc<HttpDispatcher>>,
     plugin_dirs: Arc<HashMap<String, std::path::PathBuf>>,
 ) -> axum::routing::MethodRouter<crate::routes::AppState> {
-    use axum::body::Body;
-    use axum::http::{HeaderMap, HeaderName, HeaderValue, Method, StatusCode};
-    use axum::response::IntoResponse;
+    use axum::http::{HeaderMap, Method};
 
     // axum::routing::any 注册——任何 method 都走同一 handler。
     // query 多值解析用 form_urlencoded 手动收集（A1）：serde_urlencoded 的
@@ -253,68 +325,53 @@ fn build_wildcard_handler(
                         m
                     })
                     .unwrap_or_default();
-
-                // 1) 静态资源直读：命中则直接返回（200 + mime / 404）。
-                if let Some(resp) = try_serve_static_asset(&path, &plugin_dirs) {
-                    return resp;
-                }
-
-                // 2) 否则走 dispatcher（若有）。无 dispatcher → 404。
-                let Some(dispatcher) = dispatcher else {
-                    return (StatusCode::NOT_FOUND, "route not found").into_response();
-                };
-
-                let method_str = method.as_str().to_string();
-                let headers_map = header_map_to_hashmap(&headers);
-                let raw_body = body.to_vec();
-                let outcome = dispatch_http(
-                    &dispatcher,
-                    &path,
-                    &method_str,
-                    raw_body,
-                    headers_map,
-                    query_multi,
-                )
-                .await;
-                match outcome {
-                    DispatchOutcome::Handled(resp) => {
-                        let mut builder = axum::response::Response::builder()
-                            .status(StatusCode::from_u16(resp.status).unwrap_or(StatusCode::OK));
-                        for (k, v) in &resp.headers {
-                            if let (Ok(name), Ok(val)) =
-                                (HeaderName::try_from(k), HeaderValue::try_from(v))
-                            {
-                                builder = builder.header(name, val);
-                            }
-                        }
-                        let body_bytes = if resp.body.is_empty() {
-                            Vec::new()
-                        } else {
-                            base64::engine::general_purpose::STANDARD
-                                .decode(&resp.body)
-                                .unwrap_or_default()
-                        };
-                        builder.body(Body::from(body_bytes)).unwrap_or_else(|_| {
-                            (StatusCode::INTERNAL_SERVER_ERROR, "response build failed")
-                                .into_response()
-                        })
-                    }
-                    DispatchOutcome::NotFound => {
-                        (StatusCode::NOT_FOUND, "route not found").into_response()
-                    }
-                    DispatchOutcome::Timeout => {
-                        (StatusCode::GATEWAY_TIMEOUT, "endpoint timeout").into_response()
-                    }
-                    DispatchOutcome::ConcurrencyLimited => {
-                        (StatusCode::SERVICE_UNAVAILABLE, "concurrency limit").into_response()
-                    }
-                    DispatchOutcome::HandlerError(msg) => {
-                        (StatusCode::BAD_GATEWAY, msg).into_response()
-                    }
-                }
+                exec_ext_request(dispatcher, plugin_dirs, method, path, query_multi, headers, body)
+                    .await
             }
         };
 
+    axum::routing::any(handler)
+}
+
+/// 构造 `/api/v1/datasource/{*rest}` 数据源代理（G6-a：datasource 占位转真实路由）。
+///
+/// 语义：`{rest}` 为插件数据源标识，形如 `/ext/{plugin_id}/{route_id}` 的短路径——
+/// 把 `/api/v1/datasource/ext/{plugin_id}/{route_id}` 改写为 `/ext/{...}` 复用
+/// [`exec_ext_request`]（插件 http_endpoints 分发，选项形状由插件决定）；
+/// 兼容短形式 `/api/v1/datasource/{route_id}` 时按 `/ext/{route_id}` 处理。
+/// 未命中 → 404（前端 datasource 占位护栏由真实路由接管后移除）。
+fn build_datasource_handler(
+    dispatcher: Option<Arc<HttpDispatcher>>,
+    plugin_dirs: Arc<HashMap<String, std::path::PathBuf>>,
+) -> axum::routing::MethodRouter<crate::routes::AppState> {
+    use axum::http::{HeaderMap, Method, Uri};
+
+    let handler = move |method: Method, uri: Uri, headers: HeaderMap, body: axum::body::Bytes| {
+        let dispatcher = dispatcher.clone();
+        let plugin_dirs = plugin_dirs.clone();
+        async move {
+            let rest = uri.path().trim_start_matches("/api/v1/datasource");
+            let rest = rest.trim_start_matches('/');
+            let ext_path = if rest.starts_with("ext/") {
+                format!("/{rest}")
+            } else {
+                format!("/ext/{rest}")
+            };
+            let query_multi: std::collections::HashMap<String, Vec<String>> = uri
+                .query()
+                .map(|q| {
+                    let mut m: std::collections::HashMap<String, Vec<String>> =
+                        std::collections::HashMap::new();
+                    for (k, v) in form_urlencoded::parse(q.as_bytes()) {
+                        m.entry(k.to_string()).or_default().push(v.to_string());
+                    }
+                    m
+                })
+                .unwrap_or_default();
+            exec_ext_request(dispatcher, plugin_dirs, method, ext_path, query_multi, headers, body)
+                .await
+        }
+    };
     axum::routing::any(handler)
 }
 

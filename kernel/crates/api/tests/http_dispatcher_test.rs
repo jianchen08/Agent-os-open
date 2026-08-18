@@ -575,3 +575,75 @@ async fn test_register_manifest_http_routes_aggregates_errors() {
     // 合法路由确实注册了
     assert_eq!(registry.list_http_routes().len(), 1);
 }
+
+// ── /api/v1/datasource/{*rest} 数据源代理（G6-a：占位转真实路由） ─────────
+
+/// 验证 datasource 代理把 `{rest}` 改写为 /ext/{rest} 复用同一分发：
+/// - 短形式 `/api/v1/datasource/{plugin_id}/{route_id}` → `/ext/{plugin_id}/{route_id}`
+/// - 显式 ext 长形式 `/api/v1/datasource/ext/{plugin_id}/{route_id}` 也命中
+/// - query 透传（多值全量）；未注册 route → 404（真实路由接管，前端占位护栏已移）
+#[tokio::test]
+async fn test_datasource_proxy_forwards_to_ext_routes() {
+    use agentos_api::routes::AppState;
+    use agentos_api::server::build_router;
+    use axum::body::Body;
+    use axum::http::{Request, StatusCode};
+    use tower::ServiceExt;
+
+    let mut state = AppState::new();
+    let registry = Arc::new(CapabilityRegistryImpl::new());
+    registry
+        .register_http_route(
+            "db_admin",
+            endpoint("r", "GET", "/ext/db_admin/table/memory"),
+        )
+        .unwrap();
+    state.capability_registry = Some(registry);
+    state.http_handler = Some(Arc::new(QueryEchoHandler));
+    let app = build_router(state);
+
+    // 短形式（前端 fetchDatasourceOptions 非绝对 URI 的调用形态）
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/api/v1/datasource/db_admin/table/memory?limit=5&filter=a&filter=b")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+    let text = String::from_utf8(body.to_vec()).unwrap();
+    assert!(text.contains(r#""limit":"5""#), "query 应透传: {text}");
+    assert!(text.contains(r#""filter":["a","b"]"#), "多值 query 应全量: {text}");
+
+    // 显式 ext 长形式
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/api/v1/datasource/ext/db_admin/table/memory")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    // 未注册 route → 404
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/api/v1/datasource/nonexistent/foo")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+}

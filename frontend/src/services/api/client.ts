@@ -258,10 +258,9 @@ apiClient.interceptors.response.use(
       requestUrl.includes('/floating-chat/') ||
       requestUrl.includes('/evaluation-metrics') ||
       requestUrl.includes('/agent-calls') ||
-      requestUrl.includes('/triggers') ||
-      // P4: datasource 动态数据源（schema select 选项），后端以占位响应收敛，避免 404 刷屏。
-      // 用 startsWith 精确匹配前端实际调用的前缀，避免误匹配其它含 /datasource/ 的路径
-      requestUrl.startsWith('/api/v1/datasource/')
+      requestUrl.includes('/triggers')
+    // datasource 占位护栏已移除（G6-a）：/api/v1/datasource/{*rest} 由内核真实路由接管，
+    // 404 即真实未命中（前端 fetchDatasourceOptions 正常注册表兜底空选项）。
 
     if (!isOptionalEndpoint) {
       // 非可选端点的 404 视为需要排查的异常路径，DEV 下输出 requestUrl 便于快速定位。
