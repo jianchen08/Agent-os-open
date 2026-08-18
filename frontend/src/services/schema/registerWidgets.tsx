@@ -7,7 +7,6 @@ import { DigitalHumanWidget } from '@/components/schema/widgets/DigitalHumanWidg
 import {
   AgentsPanel,
   MemoryPanel,
-  MonitoringPanel,
   PipelineManagerPanel,
   PluginsPanel,
   SettingsHubPanel,
@@ -91,7 +90,6 @@ const WIDGETS: WidgetEntry[] = [
   // 顶栏打开的工作区面板（可关闭页签，非常驻）
   { name: 'settings_hub', component: SettingsHubPanel, spaces: ['workspace', 'floating'] },
   { name: 'plugins_panel', component: PluginsPanel, spaces: ['workspace'] },
-  { name: 'monitoring_panel', component: MonitoringPanel, spaces: ['workspace'] },
   { name: 'tools_panel', component: ToolsPanel, spaces: ['workspace'] },
   { name: 'agents_panel', component: AgentsPanel, spaces: ['workspace'] },
   { name: 'memory_panel', component: MemoryPanel, spaces: ['workspace'] },

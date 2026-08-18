@@ -74,6 +74,10 @@ export function normalizeRows(payload: unknown): {
     if (Array.isArray(raw.data)) {
       return buildRowsFromArray(raw.data as unknown[])
     }
+    if (Array.isArray(raw.items)) {
+      // {items, total} 信封（如 /ext/monitoring/tasks）
+      return buildRowsFromArray(raw.items as unknown[])
+    }
   }
   return { columns: [], rows: [] }
 }

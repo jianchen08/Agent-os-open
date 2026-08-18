@@ -6,7 +6,6 @@
 
 import { cn } from '@/lib/utils'
 import { PluginsSettingsPage } from '@/pages/settings/PluginsSettingsPage'
-import { MonitoringPage } from '@/pages/monitoring/MonitoringPage'
 import { ToolsPage } from '@/pages/tools/ToolsPage'
 import { AgentsPage } from '@/pages/agents/AgentsPage'
 import { MemoryPage } from '@/pages/memory/MemoryPage'
@@ -16,7 +15,6 @@ import { PipelineManagerWidget } from './PipelineManagerWidget'
 type PanelKind =
   | 'settings_hub'
   | 'plugins_panel'
-  | 'monitoring_panel'
   | 'tools_panel'
   | 'agents_panel'
   | 'memory_panel'
@@ -42,8 +40,6 @@ function renderPanel(kind: PanelKind | string, props: Record<string, unknown>) {
       return <SettingsHubWidget {...props} />
     case 'plugins_panel':
       return <PluginsSettingsPage />
-    case 'monitoring_panel':
-      return <MonitoringPage />
     case 'tools_panel':
       return <ToolsPage />
     case 'agents_panel':
@@ -72,9 +68,6 @@ export function SettingsHubPanel(props: Record<string, unknown>) {
 }
 export function PluginsPanel(props: Record<string, unknown>) {
   return <PanelHostWidget {...props} panel="plugins_panel" />
-}
-export function MonitoringPanel(props: Record<string, unknown>) {
-  return <PanelHostWidget {...props} panel="monitoring_panel" />
 }
 export function ToolsPanel(props: Record<string, unknown>) {
   return <PanelHostWidget {...props} panel="tools_panel" />

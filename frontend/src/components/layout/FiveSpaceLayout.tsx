@@ -8,11 +8,11 @@ import { HtmlPreviewWidget } from '@/components/schema/widgets/HtmlPreviewWidget
 import { getEditorForFile } from '@/config/fileEditors'
 // 按需引入 antd Splitter 子模块，避免加载 antd 全量入口（26+ 组件 → 全部 icons →
 // 触发 847 项 @ant-design/icons-svg/lib/asn/* 全量预构建，首屏 JS 与启动预构建时间双高）
-import { ROUTES } from '@/constants/routes'
 import apiClient from '@/services/api/client'
 import { safeLoadLayout } from '@/services/layout/resolver'
 import { navigateToPipeline } from '@/services/pipelineNavigator'
 import { widgetRegistry } from '@/services/schema/WidgetRegistry'
+import { openWorkspacePanelByPath } from '@/services/workspacePanelOpener'
 import { getFileEditorData, registerFileEditor, removeFileEditorData, updateFileEditorData, emitFileChange } from '@/stores/fileEditorRegistry'
 import { useLayoutModeStore } from '@/stores/layoutModeStore'
 import { useSessionStore } from '@/stores/sessionStore'
@@ -208,8 +208,9 @@ export function FiveSpaceLayout({
   const handleAlertAction = useCallback(
     (item: AlertBannerItem) => {
       if (item.kind === 'connection') {
-        const opened = openWorkspacePanelByPath(ROUTES.MONITORING)
-        if (!opened) navigate(ROUTES.MONITORING)
+        // 监控页已声明化（monitoring 插件 contributes.pages path /monitoring）——直接打开
+        const opened = openWorkspacePanelByPath('/monitoring')
+        if (!opened) navigate('/monitoring')
       }
     },
     [navigate],

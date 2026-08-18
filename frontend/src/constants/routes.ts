@@ -45,7 +45,6 @@ export const ROUTES = {
   /** 智能体页面 */
   AGENTS: '/agents',
   /** 监控页面 */
-  MONITORING: '/monitoring',
   /** 管理员页面 */
   ADMIN: '/admin',
   /** 记忆页面 */

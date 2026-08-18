@@ -33,7 +33,6 @@ export interface NavItem {
  */
 const TITLEBAR_NAV_ITEMS: NavItem[] = [
   { path: ROUTES.SETTINGS, label: '设置', order: 10, source: 'kernel' },
-  { path: ROUTES.MONITORING, label: '监控', order: 20, source: 'kernel' },
 ]
 
 /** 默认导航项（内核固定；顶栏用 TITLEBAR_NAV_ITEMS） */

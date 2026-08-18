@@ -50,9 +50,6 @@ const ToolsPage = lazy(() =>
 const AgentsPage = lazy(() =>
   import('@/pages/agents/AgentsPage').then((m) => ({ default: m.AgentsPage })),
 )
-const MonitoringPage = lazy(() =>
-  import('@/pages/monitoring/MonitoringPage').then((m) => ({ default: m.MonitoringPage })),
-)
 const AdminPage = lazy(() =>
   import('@/pages/admin/AdminPage').then((m) => ({ default: m.AdminPage })),
 )
@@ -592,16 +589,6 @@ export function createRouter() {
         <ProtectedRoute>
           <Suspense fallback={LazyFallback}>
             <AgentsPage />
-          </Suspense>
-        </ProtectedRoute>
-      ),
-    },
-    {
-      path: ROUTES.MONITORING,
-      element: (
-        <ProtectedRoute>
-          <Suspense fallback={LazyFallback}>
-            <MonitoringPage />
           </Suspense>
         </ProtectedRoute>
       ),
