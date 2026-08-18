@@ -3,10 +3,15 @@
  *
  * 功能：
  * - 优先级视觉区分（图标、颜色、动画）
- * - 进度条（progress类型）
+ * - 进度条（progress 特性）
  * - 忽略/确认按钮
  * - 阻塞模式覆盖层
  * - 折叠后的摘要行
+ *
+ * 渲染走声明驱动（widget 化批1-C）：分类→渲染形态由
+ * utils/notificationModes 注册表决定（human 插件 ui.notification_modes
+ * 声明覆盖，前端内置五分类默认件兜底，未知分类通用兜底），
+ * 本组件不再按 category 硬编码渲染分支。
  */
 
 import {
@@ -18,28 +23,29 @@ import {
   Loader2,
   X,
 } from '@/assets/icons'
-import { useCallback, useMemo } from 'react'
+import { useCallback } from 'react'
 import { Button } from '@/components/ui/button'
 import { cn } from '@/lib/utils'
 import { PRIORITY_STYLES } from '@/types/notification'
+import { resolveNotificationLayout } from '@/utils/notificationModes'
 import { MarkdownRenderer } from './markdown/MarkdownRenderer'
 import type {
   NotificationAction,
-  NotificationCategory,
   NotificationItem as NotificationItemType,
   NotificationPriority,
 } from '@/types/notification'
 
-/** 图标映射 */
-const CATEGORY_ICONS: Record<NotificationCategory, React.ElementType> = {
-  progress: Loader2,
-  alert: AlertTriangle,
+/** 分类状态图标原语（声明 icon 键 → 组件；未知键兜底 Bell） */
+const NOTIFICATION_ICON_MAP: Record<string, React.ElementType> = {
+  loader: Loader2,
+  'alert-triangle': AlertTriangle,
+  'alert-circle': AlertCircle,
   info: Info,
-  success: CheckCircle2,
-  error: AlertCircle,
+  'check-circle': CheckCircle2,
+  bell: Bell,
 }
 
-/** 优先级图标覆盖 */
+/** 优先级图标覆盖（优先于分类声明） */
 const PRIORITY_ICONS: Partial<Record<NotificationPriority, React.ElementType>> = {
   critical: AlertTriangle,
   high: AlertCircle,
@@ -84,11 +90,15 @@ export function NotificationItemComponent({
   className,
   hasInteraction = false,
 }: NotificationItemProps) {
-  const { id, title, message, priority, category, progress, isBlocking, isRead, timestamp, actions } = notification
+  const { id, title, priority, progress, isBlocking, isRead, timestamp, actions } = notification
 
   const style = PRIORITY_STYLES[priority]
-  const IconComponent = PRIORITY_ICONS[priority] ?? CATEGORY_ICONS[category]
-  const isProgress = category === 'progress'
+  // 分类→渲染形态由声明注册表决定（默认兜底 + 插件可覆盖）
+  const layout = resolveNotificationLayout(notification)
+  const isProgress = layout.features.has('progress')
+  const IconComponent = layout.features.has('status')
+    ? (PRIORITY_ICONS[priority] ?? NOTIFICATION_ICON_MAP[layout.iconKey] ?? Bell)
+    : null
 
   const handleClick = useCallback(() => {
     onClick?.(notification)
@@ -124,7 +134,7 @@ export function NotificationItemComponent({
         onClick={handleClick}
         data-testid={`notification-item-${id}`}
       >
-        <IconComponent className={cn('h-icon-sm w-icon-sm flex-shrink-0', style.text)} />
+        {IconComponent && <IconComponent className={cn('h-icon-sm w-icon-sm flex-shrink-0', style.text)} />}
         <span className="truncate flex-1">{title}</span>
         {hasInteraction && (
           <span className="text-[10px] text-primary font-medium shrink-0">点击处理</span>
@@ -163,13 +173,15 @@ export function NotificationItemComponent({
       <div className="p-3">
         {/* 标题行 */}
         <div className="flex items-start gap-2">
-          <IconComponent
-            className={cn(
-              'h-icon-md w-icon-md flex-shrink-0 mt-0.5',
-              style.text,
-              isProgress && 'animate-spin',
-            )}
-          />
+          {IconComponent && (
+            <IconComponent
+              className={cn(
+                'h-icon-md w-icon-md flex-shrink-0 mt-0.5',
+                style.text,
+                isProgress && 'animate-spin',
+              )}
+            />
+          )}
           <div className="flex-1 min-w-0">
             <div className="flex items-center gap-2">
               <span className={cn('text-sm font-semibold', !isRead && style.text)}>
@@ -196,14 +208,14 @@ export function NotificationItemComponent({
           )}
         </div>
 
-        {/* 消息内容 */}
-        {message && (
+        {/* 消息内容（message 特性） */}
+        {layout.features.has('message') && notification.message && (
           <div className="mt-2 text-sm text-muted-foreground pl-6 max-h-[300px] overflow-y-auto overscroll-contain rounded">
-            <MarkdownRenderer content={message} />
+            <MarkdownRenderer content={notification.message} />
           </div>
         )}
 
-        {/* 进度条 */}
+        {/* 进度条（progress 特性，随分类声明） */}
         {isProgress && progress != null && (
           <div className="mt-2 pl-6">
             <div className="flex items-center gap-2">
@@ -223,8 +235,8 @@ export function NotificationItemComponent({
           </div>
         )}
 
-        {/* 动作按钮 */}
-        {actions && actions.length > 0 && (
+        {/* 动作按钮（actions 特性，有载荷自动补） */}
+        {layout.features.has('actions') && actions && actions.length > 0 && (
           <div className="mt-3 flex items-center gap-2 pl-6">
             {actions.map((action) => (
               <Button
