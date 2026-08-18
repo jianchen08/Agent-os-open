@@ -14,6 +14,7 @@ import {
   X,
 } from '@/assets/icons'
 import { DeclaredWidgetLayer } from '@/components/schema/DeclaredWidgetLayer'
+import { useControlledSlotBridge } from '@/hooks/useControlledSlotBridge'
 import { Button } from '@/components/ui/button'
 import { useModelCapabilities } from '@/hooks/useModelCapabilities'
 import { useVoiceInput } from '@/hooks/useVoiceInput'
@@ -166,6 +167,16 @@ export const ChatInput = ({
     },
     [onThinkingStrengthChange],
   )
+
+  // 受控双向绑定桥（widget 化 G4）：宿主向声明组件注入 value/onChange——
+  // 字段名、值形态由钩子统一处理，无需手写 shape
+  const thinkingStrengthBridge = useControlledSlotBridge('thinking_strength', {
+    field: 'strength',
+    get: () => currentThinkingStrength,
+    set: (_f, v) => handleStrengthChange(v as ThinkingStrength),
+    // 惰性求值：isExecuting 在下方声明，渲染期回调时才读取（规避 TDZ）
+    extra: () => ({ disabled: disabled || isExecuting || !modelName || modelName === 'unknown' }),
+  })
 
   /** 必须声明在使用它的回调（handleVoiceInterim / handleVoiceTranscriptionComplete 等）之前，
    *  否则在依赖数组中访问会触发 TDZ（Cannot access ... before initialization）。
@@ -847,12 +858,7 @@ export const ChatInput = ({
               <DeclaredWidgetLayer
                 space="chat-input"
                 slotId="thinking_strength"
-                overrideProps={() => ({
-                  value: { strength: currentThinkingStrength },
-                  onChange: (v: Record<string, unknown>) =>
-                    handleStrengthChange(v.strength as ThinkingStrength),
-                  disabled: disabled || isExecuting || !modelName || modelName === 'unknown',
-                })}
+                overrideProps={thinkingStrengthBridge}
                 className="flex-row items-center"
               />
             )}
