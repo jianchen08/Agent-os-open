@@ -21,6 +21,7 @@ import { TableWidget } from '@/components/schema/widgets/TableWidget'
 import { StatusCardWidget } from '@/components/schema/widgets/StatusCardWidget'
 
 const apiGet = vi.fn()
+const apiCall = vi.fn()
 const { wsSubscribe, wsUnsubscribe } = vi.hoisted(() => ({
   wsSubscribe: vi.fn(),
   wsUnsubscribe: vi.fn(),
@@ -30,7 +31,7 @@ vi.mock('@/services/websocket/GlobalWebSocket', () => ({
 }))
 vi.mock('@/services/api/client', () => ({
   default: Object.assign(
-    (...args: unknown[]) => Promise.resolve({ data: {} }),
+    (...args: unknown[]) => apiCall(...args),
     { get: (...args: unknown[]) => apiGet(...args) },
   ),
 }))
@@ -38,6 +39,8 @@ vi.mock('@/services/api/client', () => ({
 beforeEach(() => {
   apiGet.mockReset()
   apiGet.mockResolvedValue({ data: {} })
+  apiCall.mockReset()
+  apiCall.mockResolvedValue({ data: { ok: true } })
 })
 
 describe('数据形状协议', () => {
@@ -214,5 +217,51 @@ describe('A1c：WS 事件驱动数据源', () => {
     await waitFor(() => expect(screen.getByTestId('w').textContent).toBe('7'))
     unmount()
     expect(wsUnsubscribe).toHaveBeenCalledWith('cost_update', expect.any(Function))
+  })
+})
+
+// ── A1b：TableWidget 行操作（rowActions） ──────────────────
+
+describe('TableWidget 行操作（rowActions）', () => {
+  it('声明 rowActions → 操作列渲染，点击 fetch 并重拉数据', async () => {
+    apiCall.mockResolvedValue({ data: { ok: true } })
+    // 列表数据
+    apiGet.mockResolvedValue({
+      data: { columns: [{ key: 'id', label: 'ID' }], rows: [{ id: 't-1' }, { id: 't-2' }] },
+    })
+    render(
+      <TableWidget
+        datasourceUri="/ext/channel_api/triggers"
+        rowActions={[
+          { key: 'trigger', label: '触发', url: '/ext/channel_api/triggers/{id}/trigger' },
+        ]}
+      />,
+    )
+    await waitFor(() => expect(screen.getAllByTestId('row-action-trigger').length).toBeGreaterThan(0))
+    apiCall.mockClear()
+    const getsBefore = apiGet.mock.calls.length
+    fireEvent.click(screen.getAllByTestId('row-action-trigger')[0])
+    await waitFor(() => expect(apiCall).toHaveBeenCalled())
+    const [cfg] = apiCall.mock.calls[0]
+    expect(cfg.method).toBe('POST')
+    expect(cfg.url).toBe('/ext/channel_api/triggers/t-1/trigger')
+    // 成功后 reloadKey 重拉
+    await waitFor(() => expect(apiGet.mock.calls.length).toBeGreaterThan(getsBefore))
+  })
+
+  it('confirm 声明：取消则不请求', async () => {
+    vi.spyOn(window, 'confirm').mockReturnValue(false)
+    apiCall.mockResolvedValue({ data: { ok: true } })
+    apiGet.mockResolvedValue({ data: { columns: [{ key: 'id', label: 'ID' }], rows: [{ id: 'x' }] } })
+    render(
+      <TableWidget
+        datasourceUri="/ext/triggers"
+        rowActions={[{ key: 'del', label: '删除', url: '/ext/triggers/{id}', method: 'DELETE', confirm: '确认？' }]}
+      />,
+    )
+    await waitFor(() => expect(screen.getByTestId('row-action-del')).toBeInTheDocument())
+    fireEvent.click(screen.getByTestId('row-action-del'))
+    await new Promise((r) => setTimeout(r, 50))
+    expect(apiCall).not.toHaveBeenCalled()
   })
 })

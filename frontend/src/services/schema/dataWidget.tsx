@@ -200,8 +200,13 @@ export function useWsDataSource(options: {
  * - `refresh:{type:'ws',channel}`：WS 推送，事件驱动更新（A1c）；
  * - `datasourceUri`：HTTP 拉，归一化（A1a）；
  * - 均无：静态 data/value（零行为变化）。
+ * reloadKey：外部触发重拉（如表格行操作成功后），变化即重新取数。
  */
-export function useDataWidget(props: Record<string, unknown>, shape: DataShape): DataWidgetResult {
+export function useDataWidget(
+  props: Record<string, unknown>,
+  shape: DataShape,
+  reloadKey = 0,
+): DataWidgetResult {
   const uri = props.datasourceUri as string | undefined
   const staticData = props.data ?? props.value
   const ws = parseWsRefresh(props)
@@ -251,7 +256,7 @@ export function useDataWidget(props: Record<string, unknown>, shape: DataShape):
     }
     // staticData 对象每次渲染引用会变——只依赖关键源，避免拉取循环
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [uri, shape, ws?.channel])
+  }, [uri, shape, ws?.channel, reloadKey])
 
   return state
 }

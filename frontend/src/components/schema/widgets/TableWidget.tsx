@@ -8,6 +8,8 @@
 
 import React, { useState, useMemo, useCallback } from 'react'
 import { DataWidgetStatus, useDataWidget } from '@/services/schema/dataWidget'
+import apiClient from '@/services/api/client'
+import { toast } from '@/components/ui/sonner'
 
 /** 列定义 */
 interface ColumnDef {
@@ -30,6 +32,45 @@ interface SortState {
   key: string
   /** 排序方向 */
   direction: SortDirection
+}
+
+/**
+ * 行操作声明（A1b：表格行内动作，Triggers/监控列表/健康度明细通用）。
+ * 声明 JSON 可表达：method + url（支持 {列key} 模板，如
+ * '/ext/channel_api/triggers/{id}/trigger'）+ confirm + variant。
+ */
+export interface RowActionDecl {
+  key: string
+  label: string
+  /** 点击前确认文案（缺省不确认） */
+  confirm?: string
+  variant?: 'default' | 'destructive' | 'outline' | 'ghost'
+  /** HTTP 方法（缺省 POST） */
+  method?: 'POST' | 'PUT' | 'DELETE'
+  /** 端点 URL，支持 {列key} 模板替换为行值 */
+  url: string
+  /** 成功提示（缺省「操作成功」） */
+  successText?: string
+}
+
+function extractRowActions(raw: unknown): RowActionDecl[] {
+  if (!Array.isArray(raw)) return []
+  return raw.filter(
+    (a): a is RowActionDecl =>
+      !!a &&
+      typeof a === 'object' &&
+      typeof (a as RowActionDecl).key === 'string' &&
+      typeof (a as RowActionDecl).label === 'string' &&
+      typeof (a as RowActionDecl).url === 'string',
+  )
+}
+
+/** url 模板替换：{col} → 行值；缺列值保留原样 */
+function renderActionUrl(url: string, row: Record<string, unknown>): string {
+  return url.replace(/\{([a-zA-Z_][a-zA-Z0-9_]*)\}/g, (_m, key: string) => {
+    const v = row[key]
+    return v == null ? _m : encodeURIComponent(String(v))
+  })
 }
 
 /**
@@ -69,7 +110,10 @@ function extractRows(data: unknown): Record<string, unknown>[] {
  */
 export function TableWidget(props: Record<string, unknown>) {
   // A1a：datasourceUri（HTTP 拉，rows 形状）→ 无 uri 回退静态 columns/data
-  const remote = useDataWidget(props, 'rows' as const)
+  const rowActions = extractRowActions(props.rowActions)
+  // A1b：行操作成功后重拉（reloadKey 驱动 useDataWidget）
+  const [reloadTick, setReloadTick] = useState(0)
+  const remote = useDataWidget(props, 'rows' as const, reloadTick)
   const rowData = (props.datasourceUri ? remote.data : undefined) as
     | { columns?: unknown; rows?: unknown }
     | undefined
@@ -77,6 +121,22 @@ export function TableWidget(props: Record<string, unknown>) {
   const rows = extractRows(rowData?.rows ?? props.data)
   const pageSize = (props.pageSize as number) ?? 10
   const title = props.title as string | undefined
+
+  const handleRowAction = useCallback(
+    async (action: RowActionDecl, row: Record<string, unknown>) => {
+      if (action.confirm && !window.confirm(action.confirm)) return
+      try {
+        await apiClient({ method: action.method ?? 'POST', url: renderActionUrl(action.url, row) })
+        toast.success(action.successText ?? '操作成功')
+        setReloadTick((t) => t + 1)
+      } catch (err) {
+        toast.error('操作失败', {
+          description: err instanceof Error ? err.message : String(err),
+        })
+      }
+    },
+    [],
+  )
 
   const [sortState, setSortState] = useState<SortState | null>(null)
   const [currentPage, setCurrentPage] = useState(1)
@@ -207,13 +267,18 @@ export function TableWidget(props: Record<string, unknown>) {
                   </span>
                 </th>
               ))}
+              {rowActions.length > 0 && (
+                <th className="text-muted-foreground px-4 py-2.5 text-right text-xs font-medium uppercase tracking-wider">
+                  操作
+                </th>
+              )}
             </tr>
           </thead>
           <tbody>
             {pagedRows.length === 0 ? (
               <tr>
                 <td
-                  colSpan={columns.length}
+                  colSpan={columns.length + (rowActions.length > 0 ? 1 : 0)}
                   className="text-muted-foreground px-4 py-8 text-center"
                 >
                   无数据
@@ -231,6 +296,28 @@ export function TableWidget(props: Record<string, unknown>) {
                       {renderCellValue(row[col.key])}
                     </td>
                   ))}
+                  {rowActions.length > 0 && (
+                    <td className="px-4 py-2.5 text-right">
+                      <div className="flex items-center justify-end gap-1.5">
+                        {rowActions.map((action) => (
+                          <button
+                            key={action.key}
+                            data-testid={`row-action-${action.key}`}
+                            onClick={() => void handleRowAction(action, row)}
+                            className={`rounded px-2 py-1 text-xs transition-colors ${
+                              action.variant === 'destructive'
+                                ? 'text-status-error hover:bg-status-error/10'
+                                : action.variant === 'outline'
+                                  ? 'border-border text-muted-foreground border hover:bg-muted/60'
+                                  : 'text-primary hover:bg-primary/10'
+                            }`}
+                          >
+                            {action.label}
+                          </button>
+                        ))}
+                      </div>
+                    </td>
+                  )}
                 </tr>
               ))
             )}
