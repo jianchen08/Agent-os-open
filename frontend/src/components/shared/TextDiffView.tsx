@@ -5,7 +5,7 @@
  * 底层使用 ReviewDiff 的 computeDiff 算法。
  */
 
-import React, { useMemo } from 'react'
+import { useMemo } from 'react'
 import type { DiffLine, DiffLineType } from '@/types/review'
 
 export interface TextDiffViewProps {

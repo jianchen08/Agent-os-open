@@ -15,7 +15,7 @@ import {
 } from '@/utils/interactionModes'
 import type { PendingInteraction } from '@/stores/interactionStore'
 
-vi.mock('../markdown/MarkdownRenderer', () => ({
+vi.mock('@/components/shared/markdown/MarkdownRenderer', () => ({
   MarkdownRenderer: ({ content }: { content: string }) => (
     <div data-testid="markdown">{content}</div>
   ),

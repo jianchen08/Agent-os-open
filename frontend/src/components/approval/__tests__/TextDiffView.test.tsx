@@ -12,7 +12,7 @@
 
 import { render, screen } from '@testing-library/react'
 import { describe, it, expect } from 'vitest'
-import { TextDiffView } from '../TextDiffView'
+import { TextDiffView } from '@/components/shared/TextDiffView'
 
 /** 在 diff-content 内按 data-line-type 取行元素列表。 */
 function linesByType(container: HTMLElement, type: string): HTMLElement[] {

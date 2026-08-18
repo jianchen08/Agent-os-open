@@ -31,7 +31,7 @@ import { cn } from '@/lib/utils'
 import { useInteractionStore } from '@/stores/interactionStore'
 import { useNotificationStore } from '@/stores/notificationStore'
 import { PRIORITY_STYLES } from '@/types/notification'
-import { MarkdownRenderer } from './markdown/MarkdownRenderer'
+import { MarkdownRenderer } from '@/components/shared/markdown/MarkdownRenderer'
 import { NotificationItemComponent } from './NotificationItem'
 import type { NotificationAction, NotificationItem, NotificationPriority } from '@/types/notification'
 

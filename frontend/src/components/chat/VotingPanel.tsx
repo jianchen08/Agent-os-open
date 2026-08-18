@@ -14,7 +14,7 @@ import { useCallback, useMemo, useState } from 'react'
 import { Button } from '@/components/ui/button'
 import { cn } from '@/lib/utils'
 import { useVotingStore } from '@/stores/votingStore'
-import { MarkdownRenderer } from './markdown/MarkdownRenderer'
+import { MarkdownRenderer } from '@/components/shared/markdown/MarkdownRenderer'
 import type { VotingOption, VotingSession } from '@/types/voting'
 
 /** 单个方案卡片 */

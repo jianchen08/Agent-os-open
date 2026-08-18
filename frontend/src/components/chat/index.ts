@@ -51,7 +51,7 @@ export {
   type CodeBlockProps,
   type MarkdownRendererProps,
   type MermaidDiagramProps,
-} from './markdown'
+} from '@/components/shared/markdown'
 
 // 类型导出
 export type {

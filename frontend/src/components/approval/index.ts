@@ -5,8 +5,8 @@
 export { ApprovalRouter } from './ApprovalRouter'
 export type { ApprovalRouterProps, ViewMode } from './ApprovalRouter'
 
-export { TextDiffView } from './TextDiffView'
-export type { TextDiffViewProps } from './TextDiffView'
+export { TextDiffView } from '@/components/shared/TextDiffView'
+export type { TextDiffViewProps } from '@/components/shared/TextDiffView'
 
 export { ImageAnnotationView } from './ImageAnnotationView'
 export type { ImageAnnotationViewProps } from './ImageAnnotationView'

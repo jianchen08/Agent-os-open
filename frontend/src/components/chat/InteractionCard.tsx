@@ -18,7 +18,7 @@ import {
   DialogHeader,
   DialogTitle,
 } from '@/components/ui/dialog'
-import { MarkdownRenderer } from './markdown/MarkdownRenderer'
+import { MarkdownRenderer } from '@/components/shared/markdown/MarkdownRenderer'
 import type { InteractionOption, PendingInteraction } from '@/stores/interactionStore'
 import { resolveInteractionLayout } from '@/utils/interactionModes'
 

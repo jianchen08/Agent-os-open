@@ -24,7 +24,7 @@ import {
 } from '@/assets/icons'
 import { useEffect, useRef, useState } from 'react'
 import { TextDiffView } from '@/components/approval'
-import { MarkdownRenderer } from '@/components/chat/markdown/MarkdownRenderer'
+import { MarkdownRenderer } from '@/components/shared/markdown/MarkdownRenderer'
 import { FormWidget } from '@/components/schema/widgets/FormWidget'
 import { DiffBlock, ReadBlock, SearchBlock, TerminalBlock, WebBlock } from '@/components/vendor/dsh'
 import { TOOL_CONTENT_SCROLL_CLASS } from '@/lib/toolCardStyles'

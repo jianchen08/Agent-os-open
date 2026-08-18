@@ -5,7 +5,7 @@ import { motion } from 'motion/react'
 import { useMemo, type FC, type ReactNode } from 'react'
 
 import { useThemeStore } from '@/stores/themeStore'
-import { preprocessSvgCodeBlocks } from './markdown/shared'
+import { preprocessSvgCodeBlocks } from '@/components/shared/markdown/shared'
 import './LobeChatMarkdown.css'
 
 interface LobeChatMarkdownProps {

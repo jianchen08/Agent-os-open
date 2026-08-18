@@ -24,7 +24,7 @@ vi.mock('@/components/approval', () => ({
   TextDiffView: () => null,
 }))
 
-vi.mock('@/components/chat/markdown/MarkdownRenderer', () => ({
+vi.mock('@/components/shared/markdown/MarkdownRenderer', () => ({
   MarkdownRenderer: () => null,
 }))
 

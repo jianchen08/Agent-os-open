@@ -28,7 +28,7 @@ import { Button } from '@/components/ui/button'
 import { cn } from '@/lib/utils'
 import { PRIORITY_STYLES } from '@/types/notification'
 import { resolveNotificationLayout } from '@/utils/notificationModes'
-import { MarkdownRenderer } from './markdown/MarkdownRenderer'
+import { MarkdownRenderer } from '@/components/shared/markdown/MarkdownRenderer'
 import type {
   NotificationAction,
   NotificationItem as NotificationItemType,

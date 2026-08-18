@@ -17,7 +17,7 @@ import { describe, expect, it, vi } from 'vitest'
 import type { Mock } from 'vitest'
 
 // ── Mock 复用目标（断言「被调用」即可，不验证其内部高亮实现）──
-vi.mock('@/components/chat/markdown', () => ({
+vi.mock('@/components/shared/markdown', () => ({
   CodeBlock: vi.fn((props: { code?: string; language?: string }) => (
     <div data-testid="codeblock-mock" data-language={props.language ?? ''}>
       {props.code}
@@ -28,7 +28,7 @@ vi.mock('@/components/chat/markdown', () => ({
   )),
 }))
 
-import { CodeBlock, MarkdownRenderer } from '@/components/chat/markdown'
+import { CodeBlock, MarkdownRenderer } from '@/components/shared/markdown'
 import { ArtifactPreviewWidget } from '../ArtifactPreviewWidget'
 
 const CodeBlockMock = CodeBlock as unknown as Mock

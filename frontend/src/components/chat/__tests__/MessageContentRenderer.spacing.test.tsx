@@ -15,7 +15,7 @@ import type { MessageToolCall, ThinkingContent } from '@/types/models'
 import type { ActivityData } from '@/types/activity'
 
 // Mock MarkdownRenderer
-vi.mock('@/components/chat/markdown/MarkdownRenderer', () => ({
+vi.mock('@/components/shared/markdown/MarkdownRenderer', () => ({
   MarkdownRenderer: ({ content }: { content: string }) => (
     <div data-testid="markdown-renderer">{content}</div>
   ),

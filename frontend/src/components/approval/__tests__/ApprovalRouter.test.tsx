@@ -13,7 +13,7 @@ import { render, screen, fireEvent } from '@testing-library/react'
 import React from 'react'
 
 import { ApprovalRouter } from '../ApprovalRouter'
-import { TextDiffView } from '../TextDiffView'
+import { TextDiffView } from '@/components/shared/TextDiffView'
 import { ImageAnnotationView } from '../ImageAnnotationView'
 import { MediaTimelineView } from '../MediaTimelineView'
 

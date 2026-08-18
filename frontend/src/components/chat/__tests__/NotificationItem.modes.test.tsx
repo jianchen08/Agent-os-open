@@ -14,7 +14,7 @@ import {
 } from '@/utils/notificationModes'
 import type { NotificationItem } from '@/types/notification'
 
-vi.mock('../markdown/MarkdownRenderer', () => ({
+vi.mock('@/components/shared/markdown/MarkdownRenderer', () => ({
   MarkdownRenderer: ({ content }: { content: string }) => (
     <div data-testid="notif-markdown">{content}</div>
   ),

@@ -9,7 +9,7 @@
 
 import React from 'react'
 import { FileText, Image as ImageIcon, FileCode, File, Database } from '@/assets/icons'
-import { CodeBlock, MarkdownRenderer } from '@/components/chat/markdown'
+import { CodeBlock, MarkdownRenderer } from '@/components/shared/markdown'
 
 /** 制品类型 */
 type ArtifactKind = 'text' | 'image' | 'code' | 'document' | 'data' | 'composite' | 'file'

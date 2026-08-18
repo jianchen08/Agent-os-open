@@ -7,7 +7,7 @@
 import { ChevronDown, ChevronRight, Loader2, CheckCircle2, Clock, XCircle } from '@/assets/icons'
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { cn } from '@/lib/utils'
-import { MarkdownRenderer } from './markdown/MarkdownRenderer'
+import { MarkdownRenderer } from '@/components/shared/markdown/MarkdownRenderer'
 import type { ThinkingContent, ThinkingStep } from '@/types/models'
 import type { FC } from 'react'
 

@@ -9,7 +9,7 @@
  */
 
 import clsx from 'clsx'
-import { MarkdownRenderer } from '@/components/chat/markdown/MarkdownRenderer'
+import { MarkdownRenderer } from '@/components/shared/markdown/MarkdownRenderer'
 import css from './WebBlock.module.css'
 
 /**

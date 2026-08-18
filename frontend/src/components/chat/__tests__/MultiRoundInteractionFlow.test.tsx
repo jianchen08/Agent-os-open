@@ -76,7 +76,7 @@ vi.mock('@/lib/utils', () => ({
 // ---------------------------------------------------------------------------
 //  Mock: MarkdownRenderer
 // ---------------------------------------------------------------------------
-vi.mock('@/components/chat/markdown/MarkdownRenderer', () => ({
+vi.mock('@/components/shared/markdown/MarkdownRenderer', () => ({
   MarkdownRenderer: ({ content }: { content: string }) => (
     <div data-testid="markdown-renderer">{content}</div>
   ),

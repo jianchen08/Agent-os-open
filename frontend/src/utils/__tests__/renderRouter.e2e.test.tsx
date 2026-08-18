@@ -19,7 +19,7 @@ import type { ActivityData } from '@/types/activity'
 import type { MessageToolCall } from '@/types/models'
 
 vi.mock('@/components/approval', () => ({ TextDiffView: () => null }))
-vi.mock('@/components/chat/markdown/MarkdownRenderer', () => ({ MarkdownRenderer: () => null }))
+vi.mock('@/components/shared/markdown/MarkdownRenderer', () => ({ MarkdownRenderer: () => null }))
 // 部分 mock：保留 enhanceActivityWithToolConfig 真实实现，仅替换全局文件打开回调
 vi.mock('@/utils/toolCardRegistry', async (importOriginal) => {
   const actual = await importOriginal<typeof import('@/utils/toolCardRegistry')>()
