@@ -532,9 +532,10 @@ pub enum ServiceDepError {
 /// 服务面：从 manifests 汇总"谁提供了哪些服务"——能力角色（namespace）与服务端点
 /// （ns.method）→ 提供者映射。
 ///
-/// 数据来源两路：`capabilities.services[]`（服务方法声明，D.6 槽位拆分，名字即
-/// `ns.method`）与 `provides.capabilities[]`（反向调用能力信封命名空间）。`ns` 角色 =
-/// 该 namespace 下已有方法注册；`ns.method` 端点 = 具体方法已注册。`has_role`/
+/// 数据来源三路：`capabilities.services[]`（服务方法声明，D.6 槽位拆分，名字即
+/// `ns.method`）、`provides.capabilities[]`（反向调用能力信封命名空间）、内核内置
+/// 能力面（[`KERNEL_PROVIDED_SERVICES`]，CapabilityRouter 常驻）。`ns` 角色 = 该
+/// namespace 下已有方法注册；`ns.method` 端点 = 具体方法已注册。`has_role`/
 /// `has_method` 供 [`first_error_for`] 判定 `requires_services` 是否满足，不点名插件。
 #[derive(Debug, Clone, Default)]
 pub struct ServiceSurface {
@@ -544,27 +545,67 @@ pub struct ServiceSurface {
     providers: HashMap<String, Vec<String>>,
 }
 
+/// 内核内置提供的能力角色（`api/src/capability_router.rs` 常驻分发，插件不声明也有）——
+/// 服务面由「插件声明面 + 内核内置面」并集构成；否则 approval 等声明
+/// `requires_services: ["pipeline-executor", "event-bus"]`（服务由内核注入，非插件
+/// provides）会被误判「无人提供」→ 拒注册。端点级按 router 实际分支列方法；
+/// `config-reader`/`logger` 走兜底分发，按规范方法名登记（角色可满足，端点精确性
+/// 以 router 实测为准；若两端漂移由依赖不改契约者负责收敛）。
+const KERNEL_PROVIDED_SERVICES: &[(&str, &[&str])] = &[
+    (
+        "pipeline-executor",
+        &["suspend", "resume", "suspend_pipeline", "resume_pipeline", "get_run_status"],
+    ),
+    ("event-bus", &["emit"]),
+    ("tool-executor", &["invoke"]),
+    ("pipeline-state", &["list"]),
+    ("config-reader", &["read"]),
+    ("logger", &["log"]),
+    ("execution-records", &["append", "count", "delete_by_session", "list"]),
+    ("frontend", &["emit"]),
+    ("memory", &["create", "delete", "get", "list", "search"]),
+    ("messages", &["list"]),
+    ("metrics", &["record"]),
+    ("pipeline-summaries", &["get", "list", "save", "update"]),
+    ("registry", &["register_tool"]),
+    ("tenant-context", &["get"]),
+    ("traces", &["list"]),
+];
+
 impl ServiceSurface {
     /// 从 "将注册" 的 manifest 集合构建服务面（boot 全量 / 热发现 enabled 子集）。
     pub fn from_manifests(manifests: &[PluginManifest]) -> Self {
         let mut surface = ServiceSurface::default();
+        // 内核内置能力面（CapabilityRouter 常驻，插件的 requires_services 可能依赖它）。
+        for &(ns, methods) in KERNEL_PROVIDED_SERVICES {
+            for method in methods {
+                surface.insert_method(ns, method);
+            }
+        }
         for m in manifests {
             for svc in &m.capabilities.services {
                 register_service(&mut surface, m, &svc.name);
             }
             if let Some(provides) = &m.provides {
                 for cap in &provides.capabilities {
-                    let prefix = cap
-                        .tool_prefix
-                        .clone()
-                        .unwrap_or_else(|| cap.namespace.replace('-', "_"));
+                    // 契约键 = namespace（D1：服务→插件的映射按
+                    // provides.capabilities[].namespace 做）；`tool_prefix` 是 wire 形态
+                    // （McpBridge 路由用），不是契约命名空间——previously 曾误用。
                     for method in &cap.methods {
-                        register_method(&mut surface, m, &prefix, method);
+                        register_method(&mut surface, m, &cap.namespace, method);
                     }
                 }
             }
         }
         surface
+    }
+
+    /// 仅登记方法集（内核内置面用，无提供者插件、不产生拓扑边）。
+    fn insert_method(&mut self, ns: &str, method: &str) {
+        self.methods_by_ns
+            .entry(ns.to_string())
+            .or_default()
+            .insert(method.to_string());
     }
 
     /// ns 角色是否已注册（该 namespace 下至少一个方法被提供）。
@@ -661,13 +702,9 @@ fn register_service(surface: &mut ServiceSurface, m: &PluginManifest, name: &str
     }
 }
 
-/// 注册单方法到服务面。
+/// 注册单方法到服务面（提供者插件伴随登记，供拓扑边/诊断用）。
 fn register_method(surface: &mut ServiceSurface, m: &PluginManifest, ns: &str, method: &str) {
-    surface
-        .methods_by_ns
-        .entry(ns.to_string())
-        .or_default()
-        .insert(method.to_string());
+    surface.insert_method(ns, method);
     surface
         .providers
         .entry(format!("{ns}.{method}"))
@@ -1011,6 +1048,38 @@ mod tests {
         assert!(surface.has_method("audit", "write"));
         assert!(!surface.has_method("audit", "delete"), "未声明的方法不算注册");
         assert!(!surface.has_role("ghost"));
+    }
+
+    #[test]
+    fn test_service_surface_kernel_provided_roles() {
+        // 内核内置能力面：空 manifests 也能满足 pipeline-executor/event-bus 角色——
+        // approval 等声明 requires_services 依赖内核注入能力时不得误判"无人提供"。
+        let surface = ServiceSurface::from_manifests(&[]);
+        assert!(surface.has_role("pipeline-executor"));
+        assert!(surface.has_role("event-bus"));
+        assert!(surface.has_method("pipeline-executor", "suspend"));
+        assert!(surface.has_method("event-bus", "emit"));
+        assert!(!surface.has_role("ghost-core"));
+    }
+
+    #[test]
+    fn test_service_surface_provides_uses_contract_namespace() {
+        // provides.namespace 带连字符（human-interaction）：契约键 = 命名空间本身，
+        // 不是 wire 形态 tool_prefix（interaction）——消费者按 ns 角色解析须命中。
+        let m: PluginManifest = serde_json::from_value(json!({
+            "id": "human", "name": "human", "version": "1.0.0",
+            "plugin_type": "tool", "language": "python", "host_type": "sidecar",
+            "entry": "python server.py", "capabilities": {},
+            "provides": { "capabilities": [{
+                "namespace": "human-interaction",
+                "methods": ["create_choice", "wait_for_choice"]
+            }]}
+        }))
+        .unwrap();
+        let surface = ServiceSurface::from_manifests(&[m]);
+        assert!(surface.has_role("human-interaction"));
+        assert!(surface.has_method("human-interaction", "create_choice"));
+        assert!(!surface.has_role("human_interaction"), "wire 前缀不是契约键");
     }
 
     // ── HTTP param-route 模板匹配测试（4c 解锁）──

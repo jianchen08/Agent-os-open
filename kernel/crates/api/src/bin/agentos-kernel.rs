@@ -1136,9 +1136,14 @@ pub(crate) fn build_plugin_loader(
     user_plugins_dir: Option<PathBuf>,
     config_root: &std::path::Path,
 ) -> PluginLoaderImpl {
+    // P0-2：allowlist 生产接线——config/system/plugin_allowlist.yaml 从"空挂"变真准入
+    // （permissive 默认：放行 + 条目 sha256 校验，真实语料零误伤；strict 由部署方显式
+    // 启用：白名单外插件 load 失败 fail-closed，与 deny_unknown_fields 一致）。
+    let allowlist = agentos_plugin_loader::load_allowlist_file(&config_root.join("system/plugin_allowlist.yaml"));
     PluginLoaderImpl::new(plugins_dir, user_plugins_dir)
         // 接入 config_root：否则 load_config() 因 config_root=None 恒返回空 {}
         .with_config_root(config_root)
+        .with_allowlist(allowlist)
 }
 
 #[cfg(test)]

@@ -26,7 +26,9 @@ pub use capability_provider::{
 };
 pub use enablement::{PluginEnablement, PluginProfile, ProfileEntry};
 pub use error::LoaderError;
-pub use loader::{AllowlistConfig, AllowlistEntry, AllowlistMode, PluginLoaderImpl};
+pub use loader::{
+    load_allowlist_file, AllowlistConfig, AllowlistEntry, AllowlistMode, PluginLoaderImpl,
+};
 pub use native_loader::NativePluginLoader;
 pub use registry::{
     output_schema_error, provides_methods_unbacked, resolve_requires_services,

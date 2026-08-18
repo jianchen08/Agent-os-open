@@ -6,6 +6,11 @@
   "language": "python",
   "host_type": "sidecar",
   "entry": "python server.py",
+  "requires_services": [
+    "human-interaction",
+    "pipeline-executor",
+    "event-bus"
+  ],
   "lifecycle": {
     "idle_timeout_secs": 0
   },

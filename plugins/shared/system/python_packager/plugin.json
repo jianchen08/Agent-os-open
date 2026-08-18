@@ -1,0 +1,74 @@
+{
+  "id": "python_packager",
+  "name": "Python Packager (uv)",
+  "version": "1.0.0",
+  "plugin_type": "system",
+  "language": "python",
+  "host_type": "sidecar",
+  "entry": "python server.py",
+  "description": "语言域装载插件（P5 第一匹）：Python 插件的安装/卸载/语言依赖解析，uv 后端——装进 sidecar venv、解析 pyproject 依赖、写 uv.lock（哈希完整锁定）、卸载清 venv+lock。内核只留契约层与编排；本插件回答'包怎么到位、语言依赖怎么解析、产物/入口怎么交'。后端唯一依赖 = 外部成熟包管理器 uv（不重复造安装器/锁文件）。",
+  "requires_services": [],
+  "capabilities": {
+    "tools": [],
+    "services": [
+      {
+        "name": "packaging.python.install",
+        "description": "uv sync 安装 Python 包依赖到 sidecar venv，生成 uv.lock（哈希完整锁定）",
+        "input_schema": {
+          "type": "object",
+          "properties": {
+            "package_dir": {
+              "type": "string",
+              "description": "含 pyproject.toml 的插件/包目录绝对路径"
+            }
+          },
+          "required": ["package_dir"]
+        }
+      },
+      {
+        "name": "packaging.python.uninstall",
+        "description": "卸载：删除插件 venv 与 uv.lock（uv remove 语义收敛为环境整删）",
+        "input_schema": {
+          "type": "object",
+          "properties": {
+            "package_dir": {
+              "type": "string",
+              "description": "含 pyproject.toml 的插件/包目录绝对路径"
+            }
+          },
+          "required": ["package_dir"]
+        }
+      },
+      {
+        "name": "packaging.python.resolve_dependencies",
+        "description": "对比 pyproject 声明依赖是否已被 uv 解析安装（.venv+uv.lock 就绪且 uv sync 幂等通过 = satisfied）",
+        "input_schema": {
+          "type": "object",
+          "properties": {
+            "package_dir": {
+              "type": "string",
+              "description": "含 pyproject.toml 的插件/包目录绝对路径"
+            }
+          },
+          "required": ["package_dir"]
+        }
+      },
+      {
+        "name": "packaging.python.status",
+        "description": "环境状态：uv 版本 / .venv / uv.lock / pyproject 声明依赖清单",
+        "input_schema": {
+          "type": "object",
+          "properties": {
+            "package_dir": {
+              "type": "string",
+              "description": "含 pyproject.toml 的插件/包目录绝对路径"
+            }
+          },
+          "required": ["package_dir"]
+        }
+      }
+    ]
+  },
+  "permissions": {},
+  "priority": 5
+}

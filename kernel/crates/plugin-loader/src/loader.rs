@@ -55,6 +55,28 @@ pub struct AllowlistConfig {
     pub plugins: Vec<AllowlistEntry>,
 }
 
+/// 加载插件准入白名单配置（容错）：文件缺失/解析失败 → 默认 permissive 空白名单。
+///
+/// 生产接线（build_plugin_loader）把 `config/system/plugin_allowlist.yaml` 从"空挂"
+/// 变成真·准入——permissive=放行 + 条目 sha256 校验（真实语料校准：106 插件
+/// 当前零 sha256 声明、零误伤）；strict=白名单外插件加载失败（fail-closed，与
+/// deny_unknown_fields 一致），由部署方显式启用。
+pub fn load_allowlist_file(path: &Path) -> AllowlistConfig {
+    match std::fs::read_to_string(path) {
+        Ok(text) => match serde_yaml::from_str::<AllowlistConfig>(&text) {
+            Ok(cfg) => cfg,
+            Err(e) => {
+                warn!(path = %path.display(), error = %e, "plugin_allowlist.yaml 解析失败 → 回退默认 permissive 空白名单");
+                AllowlistConfig::default()
+            }
+        },
+        Err(_) => {
+            warn!(path = %path.display(), "plugin_allowlist.yaml 缺失 → 回退默认 permissive 空白名单");
+            AllowlistConfig::default()
+        }
+    }
+}
+
 /// 插件加载器实现。
 ///
 /// 支持双根扫描：
@@ -970,6 +992,52 @@ mod tests {
             count += 1;
         }
         assert!(count == walk.len(), "每份真实 manifest 都过严格解析");
+    }
+
+    /// 真实语料（含 approval 复活的 requires_services）在依赖闸（resolve_requires_services）
+    /// 上必须全部通过——服务面 = 插件声明面 + 内核内置能力面，否则 boot fail-fast 误伤。
+    #[test]
+    fn real_corpus_resolve_requires_services_passes() {
+        let manifest_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let shared = manifest_dir.join("../../../plugins/shared");
+        let mut walk = Vec::new();
+        fn collect(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
+            const SKIP: &[&str] = &["node_modules", ".venv", "__pycache__", "dsh_plugins", "runtime"];
+            let Ok(mut entries) = std::fs::read_dir(dir) else {
+                return;
+            };
+            while let Some(entry) = entries.next() {
+                let path = entry.unwrap().path();
+                if path.is_dir() {
+                    if !SKIP.contains(&path.file_name().and_then(|n| n.to_str()).unwrap_or("")) {
+                        collect(&path, out);
+                    }
+                } else if path.file_name().and_then(|n| n.to_str()) == Some("plugin.json") {
+                    out.push(path);
+                }
+            }
+        }
+        collect(&shared, &mut walk);
+        let manifests: Vec<PluginManifest> = walk
+            .iter()
+            .map(|p| {
+                let text = std::fs::read_to_string(p).unwrap();
+                serde_json::from_str(&text)
+                    .unwrap_or_else(|e| panic!("解析 {} 失败: {e}", p.display()))
+            })
+            .collect();
+        let declared: Vec<&str> = manifests
+            .iter()
+            .filter(|m| !m.requires_services.is_empty())
+            .map(|m| m.id.as_str())
+            .collect();
+        assert!(
+            !declared.is_empty(),
+            "应有真实插件声明 requires_services（approval 复活）"
+        );
+        crate::registry::resolve_requires_services(&manifests).unwrap_or_else(|e| {
+            panic!("真实语料依赖闸不过（approval 等 requires_services 未满足→boot 会被拒）: {e}")
+        });
     }
 
     #[test]
@@ -1955,6 +2023,32 @@ mod tests {
             serde_json::from_str(&std::fs::read_to_string(&json_path).unwrap()).unwrap();
         let r = loader.validate_manifest_internal(&manifest, &json_path);
         assert!(r.is_ok(), "native artifact 存在应通过：{r:?}");
+    }
+
+    /// allowlist 生产接线：缺文件 → 默认 permissive 空白名单（不误伤）；
+    /// yaml 合法 → 如实载入 mode/条目。
+    #[test]
+    fn load_allowlist_missing_file_defaults_to_permissive() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = load_allowlist_file(&dir.path().join("no_allowlist.yaml"));
+        assert_eq!(cfg.mode, AllowlistMode::Permissive);
+        assert!(cfg.plugins.is_empty());
+    }
+
+    #[test]
+    fn load_allowlist_parses_yaml() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("plugin_allowlist.yaml");
+        std::fs::write(
+            &p,
+            "mode: strict\nplugins:\n  - id: foo\n    sha256: abc123\n",
+        )
+        .unwrap();
+        let cfg = load_allowlist_file(&p);
+        assert_eq!(cfg.mode, AllowlistMode::Strict);
+        assert_eq!(cfg.plugins.len(), 1);
+        assert_eq!(cfg.plugins[0].id, "foo");
+        assert_eq!(cfg.plugins[0].sha256, "abc123");
     }
 
 }
