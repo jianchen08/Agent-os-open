@@ -108,9 +108,7 @@ export const API_ENDPOINTS = {
   /** 配置管理相关 - 4c 迁移：已切 /ext/channel_api/config/**（经内核 dispatcher → channel_api http.handle） */
   CONFIG: {
     /** 获取 API 配置 */
-    API_GET: '/ext/channel_api/config/api',
     /** 更新 API 配置 */
-    API_UPDATE: '/ext/channel_api/config/api',
     /** 获取 LLM 配置 */
     LLM_GET: '/ext/channel_api/config/llm',
     /** 获取提供商列表 */
@@ -125,9 +123,7 @@ export const API_ENDPOINTS = {
     /** 获取默认配置 */
     LLM_DEFAULTS: '/ext/channel_api/config/llm/defaults',
     /** 获取并发配置 */
-    CONCURRENCY_GET: '/ext/channel_api/config/concurrency',
     /** 更新并发配置 */
-    CONCURRENCY_UPDATE: '/ext/channel_api/config/concurrency',
     /** 获取成本控制配置 */
     COST_CONTROL_GET: '/ext/channel_api/config/cost-control',
     /** 更新成本控制配置 */

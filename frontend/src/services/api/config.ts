@@ -18,9 +18,6 @@
  * - updateProviderConfig(providerId, config, options): 提供商配置 - 更新提供商配置
  * - addProvider(providerId, config, options): 提供商列表 - 添加提供商
  * - deleteProvider(providerId, options): 提供商列表 - 删除提供商
- * - getAPIConfig(options): APIConfig - 获取 API 配置
- * - saveAPIConfig(config, options): APIConfig - 保存 API 配置
- * - getConcurrencyConfig(options): ConcurrencyConfigResponse - 获取并发配置
  * - ModelConfig - LLM 模型配置类型
  * - ProviderConfig - 提供商配置类型
  * - LLMDefaults - LLM 默认配置类型
@@ -28,12 +25,6 @@
  * - ContextWindowConfig - 上下文窗口配置类型
  * - EndpointConfig - API 端点配置类型
  * - RateLimitConfig - 限流配置类型
- * - APIConfig - API 配置类型
- * - TaskConcurrencyConfig - 任务并发配置类型
- * - AgentConcurrencyConfig - Agent 层级并发配置类型
- * - WorkflowConcurrencyConfig - 工作流并发配置类型
- * - LLMConcurrencyConfig - LLM 并发配置类型
- * - ConcurrencyConfigResponse - 并发配置响应类型
  */
 
 import { API_ENDPOINTS } from '@/constants/api'
@@ -340,32 +331,6 @@ export interface RateLimitConfig {
 /**
  * API 配置类型
  */
-export interface APIConfig {
-  /** 端点配置 */
-  endpoint: EndpointConfig
-  /** 限流配置 */
-  rate_limit: RateLimitConfig
-  /** CORS 允许的源 */
-  cors_origins: string[]
-}
-
-export async function getAPIConfig(options: RetryOptions = {}): Promise<APIConfig> {
-  return requestWithRetry(async () => {
-    const response = await apiClient.get<APIConfig>(API_ENDPOINTS.CONFIG.API_GET)
-    return response.data
-  }, options)
-}
-
-export async function saveAPIConfig(
-  config: APIConfig,
-  options: RetryOptions = {},
-): Promise<APIConfig> {
-  return requestWithRetry(async () => {
-    const response = await apiClient.put<APIConfig>(API_ENDPOINTS.CONFIG.API_UPDATE, config)
-    return response.data
-  }, options)
-}
-
 /**
  * 探测外部 API 端点健康状态
  *
@@ -391,87 +356,18 @@ export async function testAPIEndpointHealth(baseUrl: string): Promise<boolean> {
 /**
  * 任务并发配置类型
  */
-export interface TaskConcurrencyConfig {
-  /** 最大并发任务数 */
-  max_concurrent_tasks: number
-  /** 任务执行线程池大小 */
-  task_max_workers: number
-  /** 任务超时（秒） */
-  task_timeout: number
-}
-
 /**
  * Agent 层级并发配置类型
  */
-export interface AgentConcurrencyConfig {
-  /** L1 Agent (项目经理) 最大并发数 */
-  l1_max_concurrent: number
-  /** L2 Agent (团队负责人) 最大并发数 */
-  l2_max_concurrent: number
-  /** L3 Agent (执行者) 最大并发数 */
-  l3_max_concurrent: number
-}
-
 /**
  * 工作流并发配置类型
  */
-export interface WorkflowConcurrencyConfig {
-  /** 工作流最大并发数 */
-  max_concurrent: number
-}
-
 /**
  * LLM 并发配置类型
  */
-export interface LLMConcurrencyConfig {
-  /** 智谱 AI 最大并发数 */
-  zhipu_max_concurrent: number
-  /** OpenAI 最大并发数 */
-  openai_max_concurrent: number
-  /** Anthropic 最大并发数 */
-  anthropic_max_concurrent: number
-  /** 默认最大并发数 */
-  default_max_concurrent: number
-}
-
 /**
  * 并发配置响应类型
  */
-export interface ConcurrencyConfigResponse {
-  /** 任务并发配置 */
-  task: TaskConcurrencyConfig
-  /** Agent 层级并发配置 */
-  agent: AgentConcurrencyConfig
-  /** 工作流并发配置 */
-  workflow: WorkflowConcurrencyConfig
-  /** LLM 并发配置 */
-  llm: LLMConcurrencyConfig
-}
-
-export async function getConcurrencyConfig(
-  options: RetryOptions = {},
-): Promise<ConcurrencyConfigResponse> {
-  return requestWithRetry(async () => {
-    const response = await apiClient.get<ConcurrencyConfigResponse>(
-      API_ENDPOINTS.CONFIG.CONCURRENCY_GET,
-    )
-    return response.data
-  }, options)
-}
-
-export async function saveConcurrencyConfig(
-  config: ConcurrencyConfigResponse,
-  options: RetryOptions = {},
-): Promise<ConcurrencyConfigResponse> {
-  return requestWithRetry(async () => {
-    const response = await apiClient.put<ConcurrencyConfigResponse>(
-      API_ENDPOINTS.CONFIG.CONCURRENCY_UPDATE,
-      config,
-    )
-    return response.data
-  }, options)
-}
-
 export interface CostControlGlobalConfig {
   daily_token_limit: number
   monthly_token_limit: number
