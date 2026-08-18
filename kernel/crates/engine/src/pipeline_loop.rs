@@ -1494,7 +1494,8 @@ mod tests {
 
     use agentos_core::traits::StorageBackend;
     use agentos_core::types::{
-        Branch, LoopConfig, MessageRecord, RunRecord, RunStatus, ToolExecutionResult, TraceEntry,
+        Branch, CheckpointConfig, LoopConfig, MessageRecord, RunRecord, RunStatus,
+        ToolExecutionResult, TraceEntry,
     };
 
     // ── 测试基础设施 ──────────────────────────────────────────
@@ -2074,6 +2075,160 @@ mod tests {
         );
     }
 
+    // ── per-plugin inputs（config 通道，不进 state / 不落 trace）────────
+
+    #[tokio::test]
+    async fn step_item_inputs_reach_plugin_via_config_without_state_or_trace() {
+        // step 项声明 inputs → 插件经 config["inputs"] 收到；不 merge 进 state、
+        // 不产生 step diff（插件无其它 state_updates → 0 trace）。
+        let fixture = Fixture::build(&["a"]);
+        let config = gated_body(vec![StepItem::Gated {
+            name: "a".into(),
+            when: None,
+            inputs: HashMap::from([("mode".into(), json!("strict")), ("limit".into(), json!(5))]),
+        }]);
+        let final_state = fixture
+            .run(&config, &StepLibrary::default(), json!({}))
+            .await;
+        assert_eq!(
+            fixture.invoker.captured_configs("a"),
+            vec![json!({ "inputs": { "mode": "strict", "limit": 5 } })],
+            "插件应经 config.inputs 收到 step 项声明的输入"
+        );
+        // 不污染 state：无 inputs / mode / limit 顶层键
+        assert!(final_state.get("inputs").is_none());
+        assert!(final_state.get("mode").is_none());
+        assert!(final_state.get("limit").is_none());
+        // 插件无产出 + inputs 不进 diff → 0 trace
+        assert_eq!(fixture.store.trace_count(), 0, "inputs 不得产生轨迹");
+    }
+
+    // ── checkpoint 按「配置 step」计数（组级 when 跳过的 step 不计）─────
+
+    #[tokio::test]
+    async fn checkpoint_counts_configured_steps_group_skipped_excluded() {
+        // 单次 body，4 个配置 step（s2 组级 when=False 跳过）；interval_steps=2 →
+        // 按步：a(1) → c(2) 恰好触发一次 save(step_no=2)；s2 不计步。
+        let fixture = Fixture::build(&["a", "b", "c", "d"]);
+        let mut config = PipelineConfig {
+            name: "ckpt".into(),
+            loop_bodies: vec![LoopBody {
+                id: "main".into(),
+                steps: vec![
+                    atomic_step("s1", "a"),
+                    atomic_step("s2", "b"),
+                    atomic_step("s3", "c"),
+                    atomic_step("s4", "d"),
+                ],
+                loop_config: None,
+                while_cond: None,
+                exit_routes: vec![],
+                run_on_error: false,
+            }],
+            checkpoint: CheckpointConfig {
+                enabled: true,
+                interval_steps: 2,
+            },
+        };
+        // 组级 when=False：s2（→b）整个跳过，不计步
+        config.loop_bodies[0].steps[1].when = Some("False".into());
+        fixture
+            .run(&config, &StepLibrary::default(), json!({ "pipeline_id": "p1" }))
+            .await;
+        // 执行序列：a(1) → [s2 跳过] → c(2) → d(3)。interval=2 → 第 2 步触发一次
+        // 中段存档（step_no=2）；run 结束时 persist_run_end 再落最终态（step_no=3）。
+        assert_eq!(
+            fixture.store.saved_step_nos(),
+            vec![2, 3],
+            "按步计：第 2 个实际执行的配置 step 触发中段存档；组级 when 跳过的 s2 不计；末尾为 run 结束兜底存档"
+        );
+        assert_eq!(fixture.store.save_count(), 2, "中段一次 + run 结尾兜底一次");
+    }
+
+    #[tokio::test]
+    async fn checkpoint_counts_steps_across_loop_rounds_not_rounds() {
+        // 每轮 3 个配置 step，循环 2 轮 = 6 步；interval_steps=4 → 按步在第 4 个
+        // step 触发一次存档（旧按轮：每 4 轮=12 步才触发）。counting invoker
+        // 在第 6 次调用后 set ended 终止：r1 a/b/c + r2 a/b/c。
+        let invoker = Arc::new(CountingInvoker {
+            counter: Arc::new(AtomicUsize::new(0)),
+            stop_after: 6,
+            set_suspended_after: 0,
+        });
+        let store = Arc::new(NullStorage::default());
+        let executor = PipelineExecutor::new(
+            invoker.clone() as Arc<dyn PluginInvoker>,
+            PathBuf::from("."),
+            TenantContext::new("t", "s"),
+            ["a", "b", "c"].iter().map(|s| s.to_string()),
+            store.clone() as Arc<dyn StorageBackend>,
+            "r",
+            "b",
+        );
+        let config = PipelineConfig {
+            name: "ckpt_loop".into(),
+            loop_bodies: vec![LoopBody {
+                id: "main".into(),
+                steps: vec![
+                    atomic_step("s1", "a"),
+                    atomic_step("s2", "b"),
+                    atomic_step("s3", "c"),
+                ],
+                loop_config: Some(LoopConfig {
+                    enabled: true,
+                    max_iterations: -1,
+                }),
+                while_cond: None,
+                exit_routes: vec![],
+                run_on_error: false,
+            }],
+            checkpoint: CheckpointConfig {
+                enabled: true,
+                interval_steps: 4,
+            },
+        };
+        executor
+            .run(&config, &StepLibrary::default(), json!({ "pipeline_id": "p1" }))
+            .await
+            .expect("run ok");
+        assert_eq!(
+            store.saved_step_nos(),
+            vec![4, 6],
+            "按步计跨轮：第 4 个执行 step 触发中段存档（旧按轮则此时远未到阈值）；末尾 6 = run 结束兜底存档"
+        );
+    }
+
+    // ── 项级 when 跳过：零调用 + 整 step 无产出则不落 trace ────────────
+
+    #[tokio::test]
+    async fn when_gate_skipped_item_leaves_no_trace_and_no_call() {
+        // a 有 state_updates 产出，但 when=False 跳过 → a 零调用；step 无 context
+        // 变更 + 全部项被跳过 = 空 diff → persist_step_trace 早退不落 trace。
+        let fixture = Fixture::build(&["a"]);
+        fixture.invoker.set_result(
+            "a",
+            PluginResult {
+                state_updates: updates(&[("a_val", json!(1))]),
+                ..Default::default()
+            },
+        );
+        let config = gated_body(vec![StepItem::Gated {
+            name: "a".into(),
+            when: Some("False".into()),
+            inputs: HashMap::new(),
+        }]);
+        let final_state = fixture
+            .run(&config, &StepLibrary::default(), json!({}))
+            .await;
+        assert_eq!(fixture.invoker.call_count("a"), 0, "when=False 零调用");
+        assert!(final_state.get("a_val").is_none());
+        assert_eq!(
+            fixture.store.trace_count(),
+            0,
+            "整 step 被 when 门架空 → 不落 trace"
+        );
+    }
+
     /// 计数式 invoker：每次调用计数 +1，可选在第 N 次后 set `ended` 或 `suspended`。
     /// 用于验证循环 / 挂起逻辑。
     struct CountingInvoker {
@@ -2124,7 +2279,7 @@ mod tests {
 
     /// 用给定 invoker + plugin_ids 构造一个 PipelineExecutor（NullStorage 后端）。
     fn make_executor(invoker: Arc<dyn PluginInvoker>, plugin_ids: &[&str]) -> PipelineExecutor {
-        let store: Arc<dyn StorageBackend> = Arc::new(NullStorage);
+        let store: Arc<dyn StorageBackend> = Arc::new(NullStorage::default());
         PipelineExecutor::new(
             invoker,
             PathBuf::from("."),

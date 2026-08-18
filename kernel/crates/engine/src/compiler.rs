@@ -688,6 +688,36 @@ mod tests {
     }
 
     #[test]
+    fn gated_item_inputs_are_carried_into_plugin_item() {
+        // step 项的 inputs 编译进 CompiledItem::Plugin，供运行时经 config 通道传给插件。
+        let config = single_body(
+            "p",
+            vec![make_step(
+                "s",
+                vec![StepItem::Gated {
+                    name: "alpha".into(),
+                    when: None,
+                    inputs: HashMap::from([("k".into(), serde_json::json!("v"))]),
+                }],
+            )],
+        );
+        let compiled =
+            compile_pipeline(&config, &StepLibrary::default(), &plugins(&["alpha"])).expect("ok");
+        match &compiled.bodies[0].steps[0].items[0] {
+            CompiledItem::Plugin {
+                plugin_id,
+                when,
+                inputs,
+            } => {
+                assert_eq!(plugin_id, "alpha");
+                assert!(when.is_none());
+                assert_eq!(inputs.get("k"), Some(&serde_json::json!("v")));
+            }
+            other => panic!("expected Plugin, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn composite_cycle_is_compile_error() {
         let config = single_body(
             "p",
