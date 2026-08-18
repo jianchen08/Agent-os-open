@@ -20,6 +20,9 @@ import { FileTreeWidget } from '@/components/schema/widgets/FileTreeWidget'
 import { GalleryWidget } from '@/components/schema/widgets/GalleryWidget'
 import { HtmlPreviewWidget } from '@/components/schema/widgets/HtmlPreviewWidget'
 import { KanbanWidget } from '@/components/schema/widgets/KanbanWidget'
+import { WizardWidget } from '@/components/schema/widgets/WizardWidget'
+import { SortableListWidget } from '@/components/schema/widgets/SortableListWidget'
+import { InlineEditWidget } from '@/components/schema/widgets/InlineEditWidget'
 import { ReviewDocumentWidget } from '@/components/schema/widgets/ReviewDocumentWidget'
 import { StatusCardWidget } from '@/components/schema/widgets/StatusCardWidget'
 import { TableWidget } from '@/components/schema/widgets/TableWidget'
@@ -117,6 +120,10 @@ const WIDGETS: WidgetEntry[] = [
     spaces: ['workspace', 'floating', 'fullscreen'],
     fallback: 'status_card',
   },
+  // 富交互形态（widget 化 G5）：多步向导 / 拖拽排序 / 内联编辑
+  { name: 'wizard', component: WizardWidget, spaces: ['workspace', 'floating', 'fullscreen'], fallback: 'form' },
+  { name: 'sortable_list', component: SortableListWidget, spaces: ['workspace', 'floating'], fallback: 'table' },
+  { name: 'inline_edit', component: InlineEditWidget, spaces: ['chat', 'workspace'], fallback: 'form' },
   // 审批三视图（widget 化 T10：review_service 的 ui.view_modes 声明路由复用件；
   // ApprovalRouter 未声明时直连内置组件，不依赖本注册）
   { name: 'text_diff', component: TextDiffWidget, spaces: ['workspace', 'fullscreen'], fallback: 'code_block' },
