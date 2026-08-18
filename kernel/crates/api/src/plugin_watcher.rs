@@ -90,6 +90,12 @@ pub struct SyncReport {
     /// A3：本轮检测到的 InProcess(cdylib) 插件集合变更（无变更为 None）。
     /// consumer 据此经 restart hook 触发 G8 优雅重启。
     pub cdylib_change: Option<CdylibChange>,
+    /// P1（卸载语义）：本轮目录从磁盘消失、能力被摘下（scope revoke / clear_plugin）
+    /// 的已登记插件 id（参照全量发现集，disabled/G2 暂拒不算）。
+    pub uninstalled: Vec<String>,
+    /// P1（卸载语义）：因提供者被卸载、`requires_services` 不再满足而被连带摘下
+    /// （fail-closed 级联）的插件 id——目录仍在，服务提供者回归后自动重注册。
+    pub cascade_uninstalled: Vec<String>,
 }
 
 impl SyncReport {
@@ -237,6 +243,8 @@ pub fn apply_discovered_plugins(
         dependency_rejected: Vec::new(),
         changed_plugin_ids: Vec::new(),
         cdylib_change: None,
+        uninstalled: Vec::new(),
+        cascade_uninstalled: Vec::new(),
     }
 }
 
@@ -626,6 +634,23 @@ pub async fn sync_once_with_store(
     let kept_owned: Vec<PluginManifest> = kept_refs.iter().map(|m| (*m).clone()).collect();
     let service_surface = ServiceSurface::from_manifests(&kept_owned);
 
+    // ── 卸载语义（P1）：已登记插件目录从磁盘消失 → 本轮摘下能力 ──────────
+    // 参照"全量发现集 all"（含 disabled）而非 kept filtered：目录仍在的
+    // disabled / G2 暂拒 / 依赖被拒插件都不算卸载。known_ids 稍后被
+    // apply_discovered_plugins 扩充，故在此先拍"先前已登记"快照再 diff。
+    // InProcess(cdylib) 除外——其消失/重建归 A3 优雅重启路径（diff_cdylib_change），
+    // 不在此处与它抢着摘除。
+    let pre_registered: HashSet<String> = known_ids.clone();
+    let present_ids: HashSet<&str> = all.iter().map(|m| m.id.as_str()).collect();
+    let is_known_inprocess =
+        |id: &str| known_cdylib.as_ref().is_some_and(|s| s.contains(id));
+    let mut uninstalled: Vec<String> = pre_registered
+        .iter()
+        .filter(|id| !present_ids.contains(id.as_str()) && !is_known_inprocess(id))
+        .cloned()
+        .collect();
+    uninstalled.sort();
+
     // G2 安装期一致性校验（公共化 g2_verify_and_sanitize）：对新发现的 tool 插件
     // spawn → tools/list → 对照声明。漂移工具的贡献拒绝注册，其余能力照常；
     // spawn 失败按 strict_spawn_fail 处置（默认严格：拒绝该插件全部工具）。
@@ -696,6 +721,64 @@ pub async fn sync_once_with_store(
     report.skipped_disabled = skipped_disabled;
     report.dependency_rejected = dependency_rejected;
     report.cdylib_change = cdylib_change;
+
+    // ── 卸载语义（P1）执行：目录消失 → 摘除能力 + 依赖者连带（fail-closed） ──
+    if !uninstalled.is_empty() {
+        for id in &uninstalled {
+            if let Some(s) = scopes {
+                s.revoke(id);
+            } else {
+                registry.clear_plugin(id);
+            }
+        }
+        // 依赖者连带：**先前已登记**插件中，requires_services 因提供者被卸载而不满足
+        // → 一并摘下（fail-closed：目录仍在，服务提供者回归后下轮自动重注册）。
+        // 本轮新注册插件已在主循环过依赖闸（服务面已不含被卸载提供者）→ 不在此列；
+        // InProcess 归 A3 重建，跳过。
+        let remaining_surface = ServiceSurface::from_manifests(&filtered);
+        let mut cascade_uninstalled: Vec<String> = Vec::new();
+        for m in &filtered {
+            if m.host_type == HostType::InProcess
+                || !pre_registered.contains(&m.id)
+                || m.requires_services.is_empty()
+            {
+                continue;
+            }
+            if let Some(err) = remaining_surface.first_error_for(m) {
+                warn!(
+                    target: "plugin_watcher",
+                    plugin = %m.id,
+                    error = %err.to_string(),
+                    "卸载连带：依赖的服务已无提供者，摘下该插件能力（fail-closed，服务回归自动重注册）"
+                );
+                if let Some(s) = scopes {
+                    s.revoke(&m.id);
+                } else {
+                    registry.clear_plugin(&m.id);
+                }
+                cascade_uninstalled.push(m.id.clone());
+            }
+        }
+        cascade_uninstalled.sort();
+        for id in uninstalled.iter().chain(cascade_uninstalled.iter()) {
+            known_ids.remove(id);
+            known_manifest_hashes.remove(id);
+        }
+        if let Some(store) = manifests_store {
+            let mut guard = store.write().await;
+            guard.retain(|m| {
+                !uninstalled.contains(&m.id) && !cascade_uninstalled.contains(&m.id)
+            });
+        }
+        info!(
+            target: "plugin_watcher",
+            uninstalled = ?uninstalled,
+            cascade_uninstalled = ?cascade_uninstalled,
+            "卸载语义：目录消失插件已摘下能力（含依赖者连带）"
+        );
+        report.uninstalled = uninstalled;
+        report.cascade_uninstalled = cascade_uninstalled;
+    }
 
     // ── GAP-6：既有插件 manifest 变更 → 重注册 ──────────────────────────
     // watcher 此前只处理"新目录"（known_ids 之外），既有插件的 plugin.json
@@ -1863,6 +1946,95 @@ mod tests {
         assert!(report.new_plugin_ids.is_empty(), "依赖缺失的插件不注册");
         assert!(registry_arc.list_tools().is_empty());
         assert!(known.is_empty());
+    }
+
+    /// 卸载语义（P1）：目录消失 → 摘下能力；依赖者（requires_services 无人提供）
+    /// 一并级联摘下；服务提供者回归 → 下轮自动重注册（自愈）。
+    #[tokio::test]
+    async fn sync_uninstalls_removed_plugin_and_cascades_dependents() {
+        // 提供者 p 提供 x.m；消费者 c 依赖 x.m（round1 双双注册）。
+        let p: PluginManifest = serde_json::from_value(json!({
+            "id": "p", "name": "p", "version": "1.0.0",
+            "plugin_type": "tool", "language": "python", "host_type": "sidecar",
+            "entry": "python server.py",
+            "capabilities": { "services": [{ "name": "x.m" }] },
+        }))
+        .unwrap();
+        let mut c = mk_manifest("c", "tool", &["tc"], false);
+        c.requires_services = vec!["x.m".to_string()];
+
+        let r1 = {
+            let inv = MockInvoker::new(vec![p.clone(), c.clone()]);
+            let registry_arc = std::sync::Arc::new(CapabilityRegistryImpl::new());
+            let mut known = HashSet::new();
+            let report = sync_once_with_store(
+                &inv, &registry_arc, None, &mut known, &mut None, None, &mut HashMap::new(),
+                None, true, None,
+            )
+            .await
+            .unwrap();
+            assert_eq!(report.new_plugin_ids.len(), 2, "round1 全注册");
+            assert_eq!(registry_arc.list_tools().len(), 1, "c 的工具 tc 注册");
+            (registry_arc, known)
+        };
+        let (registry_arc, mut known) = r1;
+
+        // 次轮：p 目录从磁盘消失（discover 只剩 c）→ p 卸载 + c 依赖级联摘下。
+        let mut inv2 = MockInvoker::new(vec![c.clone()]);
+        let r2 = sync_once_with_store(
+            &inv2, &registry_arc, None, &mut known, &mut None, None, &mut HashMap::new(),
+            None, true, None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(r2.uninstalled, vec!["p".to_string()]);
+        assert_eq!(r2.cascade_uninstalled, vec!["c".to_string()]);
+        assert!(registry_arc.list_tools().is_empty(), "依赖者 c 的能力也一并摘下");
+        assert!(!known.contains(&"p".to_string()) && !known.contains(&"c".to_string()));
+
+        // 提供者回归 → 下轮自动重注册（含消费者，自愈）。
+        let inv3 = MockInvoker::new(vec![p.clone(), c.clone()]);
+        let r3 = sync_once_with_store(
+            &inv3, &registry_arc, None, &mut known, &mut None, None, &mut HashMap::new(),
+            None, true, None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(r3.new_plugin_ids.len(), 2, "服务回归自动重注册");
+        assert_eq!(registry_arc.list_tools().len(), 1, "c 的工具 tc 重新注册");
+    }
+
+    /// 卸载语义（P1）：无依赖者的插件被卸载 → 只摘自身能力，不波及其它插件。
+    #[tokio::test]
+    async fn sync_uninstall_isolated_plugin_leaves_others() {
+        let inv1 = MockInvoker::new(vec![
+            mk_manifest("a", "tool", &["ta"], false),
+            mk_manifest("b", "tool", &["tb"], false),
+        ]);
+        let registry_arc = std::sync::Arc::new(CapabilityRegistryImpl::new());
+        let mut known = HashSet::new();
+        let r1 = sync_once_with_store(
+            &inv1, &registry_arc, None, &mut known, &mut None, None, &mut HashMap::new(),
+            None, true, None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(r1.new_plugin_ids.len(), 2);
+
+        // 只删 a 的目录：b 无 requires_services → 不受牵连。
+        let mut inv2 = MockInvoker::new(vec![mk_manifest("b", "tool", &["tb"], false)]);
+        let r2 = sync_once_with_store(
+            &inv2, &registry_arc, None, &mut known, &mut None, None, &mut HashMap::new(),
+            None, true, None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(r2.uninstalled, vec!["a".to_string()]);
+        assert!(r2.cascade_uninstalled.is_empty());
+        let ids: Vec<String> = registry_arc.list_tools().iter().map(|t| t.plugin_id.clone()).collect();
+        assert_eq!(ids, vec!["b".to_string()], "b 不受牵连");
+        assert!(!known.contains(&"a".to_string()));
+        assert!(known.contains(&"b".to_string()));
     }
 
     // ── Phase 1-C5b：注册闸冒烟样例跑（smoke:true 逐能力放行） ──────────────
