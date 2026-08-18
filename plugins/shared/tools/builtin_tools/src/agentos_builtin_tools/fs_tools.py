@@ -57,6 +57,12 @@ def _check_workspace_path(
         return True, "", None
 
     root = Path(root_str).resolve()
+    # 容器挂载点翻译：bash 在容器内以 /workspace 为工作目录（isolation_guard
+    # 固定挂载约定），LLM 会沿用该绝对路径调文件工具——宿主侧把 /workspace/
+    # 前缀重映射到注入的宿主工作空间，否则写到不存在的宿主绝对路径。
+    if path == "/workspace" or path.startswith("/workspace/"):
+        path = str(root) + path[len("/workspace"):]
+        logger.info("[fs_tools] 容器挂载点 /workspace 重映射到宿主工作空间 | -> %s", path)
     target = Path(path)
     resolved = target.resolve() if target.is_absolute() else (root / target).resolve()
     try:
