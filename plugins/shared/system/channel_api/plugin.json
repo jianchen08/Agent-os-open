@@ -1726,6 +1726,27 @@
     }
   ],
 
+  "config_files": [
+    {
+      "id": "concurrency",
+      "path": "config/system/concurrency_config.yaml",
+      "label": "并发设置",
+      "description": "A2：并发配置类型化表单（替代硬编码 ConcurrencySettingsPage）",
+      "fields": [
+        { "name": "task.max_concurrent_tasks", "type": "number", "label": "最大并发任务数", "min": 1 },
+        { "name": "task.task_max_workers", "type": "number", "label": "线程池大小", "min": 1 },
+        { "name": "task.task_timeout", "type": "number", "label": "任务超时（秒）", "min": 1 },
+        { "name": "agent.l1_max_concurrent", "type": "number", "label": "L1 并发", "min": 1 },
+        { "name": "agent.l2_max_concurrent", "type": "number", "label": "L2 并发", "min": 1 },
+        { "name": "agent.l3_max_concurrent", "type": "number", "label": "L3 并发", "min": 1 },
+        { "name": "workflow.max_concurrent", "type": "number", "label": "工作流并发", "min": 1 },
+        { "name": "llm.zhipu_max_concurrent", "type": "number", "label": "Zhipu 并发", "min": 1 },
+        { "name": "llm.openai_max_concurrent", "type": "number", "label": "OpenAI 并发", "min": 1 },
+        { "name": "llm.anthropic_max_concurrent", "type": "number", "label": "Anthropic 并发", "min": 1 },
+        { "name": "llm.default_max_concurrent", "type": "number", "label": "默认模型并发", "min": 1 }
+      ]
+    }
+  ],
   "ui_schema": {
     "widgets": [
       {

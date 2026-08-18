@@ -10,7 +10,6 @@ import { PluginConfigEditor } from '@/components/config/PluginConfigEditor'
 import { renderPageContent } from '@/components/schema/PageRenderer'
 import { PageShell } from '@/components/shared/PageShell'
 import { ApiSettingsPage } from '@/pages/settings/ApiSettingsPage'
-import { ConcurrencySettingsPage } from '@/pages/settings/ConcurrencySettingsPage'
 import { LlmSettingsPage } from '@/pages/settings/LlmSettingsPage'
 import { PipelineSettingsPage } from '@/pages/settings/PipelineSettingsPage'
 import { PluginsSettingsPage } from '@/pages/settings/PluginsSettingsPage'
@@ -211,7 +210,6 @@ export function SettingsPage() {
               {selected.id === 'pipeline' && <PipelineSettingsPage embedded />}
               {selected.id === 'api' && <ApiSettingsPage />}
               {selected.id === 'llm' && <LlmSettingsPage embedded />}
-              {selected.id === 'concurrency' && <ConcurrencySettingsPage />}
               {selected.id === 'plugins' && (
                 <PluginsSettingsPage
                   embedded

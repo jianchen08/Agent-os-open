@@ -47,11 +47,6 @@ const ChatContainer = lazy(() =>
 const LlmSettingsPage = lazy(() =>
   import('@/pages/settings/LlmSettingsPage').then((m) => ({ default: m.LlmSettingsPage })),
 )
-const ConcurrencySettingsPage = lazy(() =>
-  import('@/pages/settings/ConcurrencySettingsPage').then((m) => ({
-    default: m.ConcurrencySettingsPage,
-  })),
-)
 const ToolsPage = lazy(() =>
   import('@/pages/tools/ToolsPage').then((m) => ({ default: m.ToolsPage })),
 )
@@ -550,16 +545,6 @@ export function createRouter() {
         <ProtectedRoute>
           <Suspense fallback={LazyFallback}>
             <LlmSettingsPage />
-          </Suspense>
-        </ProtectedRoute>
-      ),
-    },
-    {
-      path: ROUTES.SETTINGS_CONCURRENCY,
-      element: (
-        <ProtectedRoute>
-          <Suspense fallback={LazyFallback}>
-            <ConcurrencySettingsPage />
           </Suspense>
         </ProtectedRoute>
       ),

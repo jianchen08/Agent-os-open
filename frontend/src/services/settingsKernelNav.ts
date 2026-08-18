@@ -64,12 +64,4 @@ export const KERNEL_NAV_ITEMS: KernelNavItem[] = [
     icon: '🛠️',
     group: '内核',
   },
-  {
-    id: 'concurrency',
-    title: '并发设置',
-    label: '并发',
-    description: '配置请求并发数与限流策略',
-    icon: '⚙️',
-    group: '内核',
-  },
 ]

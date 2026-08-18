@@ -49,9 +49,6 @@ vi.mock('@/pages/settings/PluginsSettingsPage', () => ({ PluginsSettingsPage: ()
 vi.mock('@/pages/settings/PipelineSettingsPage', () => ({ PipelineSettingsPage: () => <div /> }))
 vi.mock('@/pages/settings/ApiSettingsPage', () => ({ ApiSettingsPage: () => <div /> }))
 vi.mock('@/pages/settings/LlmSettingsPage', () => ({ LlmSettingsPage: () => <div /> }))
-vi.mock('@/pages/settings/ContextWindowSettingsPage', () => ({ ContextWindowSettingsPage: () => <div /> }))
-vi.mock('@/pages/settings/ConcurrencySettingsPage', () => ({ ConcurrencySettingsPage: () => <div /> }))
-vi.mock('@/pages/settings/CostSettingsPage', () => ({ CostSettingsPage: () => <div /> }))
 vi.mock('@/components/config/PluginConfigEditor', () => ({
   PluginConfigEditor: () => <div data-testid="plugin-config-editor" />,
 }))

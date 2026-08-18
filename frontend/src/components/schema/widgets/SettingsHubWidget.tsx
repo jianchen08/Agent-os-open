@@ -12,7 +12,6 @@ import { useEffect, useMemo, useState } from 'react'
 import { PluginConfigEditor } from '@/components/config/PluginConfigEditor'
 import { cn } from '@/lib/utils'
 import { ApiSettingsPage } from '@/pages/settings/ApiSettingsPage'
-import { ConcurrencySettingsPage } from '@/pages/settings/ConcurrencySettingsPage'
 import { LlmSettingsPage } from '@/pages/settings/LlmSettingsPage'
 import { PipelineSettingsPage } from '@/pages/settings/PipelineSettingsPage'
 import { PluginsSettingsPage } from '@/pages/settings/PluginsSettingsPage'
@@ -31,7 +30,6 @@ type NavKey =
   | 'kernel-api'
   | 'kernel-llm'
   | 'kernel-context'
-  | 'kernel-concurrency'
   | 'kernel-cost'
   | `plugin:${string}`
   | `schema:${string}`
@@ -134,7 +132,6 @@ export function SettingsHubWidget(_props: Record<string, unknown>) {
         {active === 'kernel-pipeline' && <PipelineSettingsPage embedded />}
         {active === 'kernel-api' && <ApiSettingsPage />}
         {active === 'kernel-llm' && <LlmSettingsPage embedded />}
-        {active === 'kernel-concurrency' && <ConcurrencySettingsPage />}
         {active === 'kernel-plugins' && (
           <PluginsSettingsPage
             onSelectPluginConfig={(pluginId, fileId) => {
