@@ -566,7 +566,7 @@ impl PluginInvokerImpl {
     /// last_crash_ts，插件实际可用）。
     ///
     /// 这是运行时唯一保留的错误重试行为（ADR 2026-08-18：ErrorPolicy 收敛为
-    /// 契约兼容占位，不再产生行为分发）。
+    /// 唯一值 RETRY，manifest 字段已清理，不再产生行为分发）。
     async fn with_transparent_recovery<T, F, Fut>(
         &self,
         plugin_id: &str,

@@ -771,7 +771,7 @@ impl PipelineExecutor {
                     warn!(
                         plugin = %plugin_id,
                         error = ?result.error,
-                        "plugin returned error, continuing (error_policy=skip)"
+                        "plugin returned error, continuing (error_policy unified, ADR 2026-08-18)"
                     );
                     false
                 }

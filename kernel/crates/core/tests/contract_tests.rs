@@ -163,7 +163,6 @@ fn test_manifest_requires_content_default_none() {
         "capabilities": {},
         "dependencies": [],
         "permissions": {},
-        "error_policy": "abort",
         "priority": 100
     }"#;
     let manifest: PluginManifest = serde_json::from_str(json_str).unwrap();

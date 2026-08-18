@@ -832,7 +832,6 @@ mod tests {
     "capabilities": {{}},
     "dependencies": [],
     "permissions": {{}},
-    "error_policy": "abort",
     "priority": 100{}
 }}"#,
             id, id, plugin_type, invoke_entry_field
@@ -860,7 +859,6 @@ mod tests {
     },
     "dependencies": [],
     "permissions": {},
-    "error_policy": "abort",
     "priority": 100
 }"#;
         let manifest: PluginManifest =
@@ -1603,7 +1601,6 @@ mod tests {
     "capabilities": {},
     "dependencies": [],
     "permissions": {},
-    "error_policy": "abort",
     "priority": 100,
     "invoke_entry": "hashed_plugin.execute"
 }"#;
@@ -1753,7 +1750,7 @@ mod tests {
         };
         format!(
             r#"{{"id": "cov_plugin", "name": "Cov", "version": "1.0.0",
-            "plugin_type": "tool", "language": "external", "host_type": "sidecar", "entry": "mcp:external", "capabilities": {{}}, "dependencies": [], "permissions": {{}}, "error_policy": "skip", "priority": 30,
+            "plugin_type": "tool", "language": "external", "host_type": "sidecar", "entry": "mcp:external", "capabilities": {{}}, "dependencies": [], "permissions": {{}}, "priority": 30,
             {files}
             "mcp": {{
                 "transport": "streamable_http",

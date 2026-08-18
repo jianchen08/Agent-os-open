@@ -578,7 +578,7 @@ async fn e2e_full_config_injection_chain() {
     fs::write(
         plugin_entry_dir.join("plugin.json"),
         format!(
-            r#"{{"id":"e2e_plugin","name":"E2E","version":"1.0.0","plugin_type":"tool","language":"python","host_type":"sidecar","entry":"bash {}","capabilities":{{}},"dependencies":[],"permissions":{{}},"error_policy":"abort","priority":100,"config_files":[{{"id":"memory_storage","path":"memory_storage.yaml","label":"Memory"}},{{"id":"api_config","path":"api_config.yaml","label":"API"}}]}}"#,
+            r#"{{"id":"e2e_plugin","name":"E2E","version":"1.0.0","plugin_type":"tool","language":"python","host_type":"sidecar","entry":"bash {}","capabilities":{{}},"dependencies":[],"permissions":{{}},"priority":100,"config_files":[{{"id":"memory_storage","path":"memory_storage.yaml","label":"Memory"}},{{"id":"api_config","path":"api_config.yaml","label":"API"}}]}}"#,
             script_path.to_string_lossy()
         ),
     ).unwrap();

@@ -322,7 +322,6 @@ fn test_manifest_requires_content_with_value() {
         "capabilities": {},
         "dependencies": [],
         "permissions": {},
-        "error_policy": "abort",
         "priority": 100,
         "requires_content": 5
     }"#;

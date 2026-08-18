@@ -88,6 +88,5 @@
         "env_vars": ["*"],
         "system_calls": ["bash", "sh", "cmd", "wsl", "docker", "powershell", "python", "*"]
     },
-    "error_policy": "skip",
     "priority": 20
 }

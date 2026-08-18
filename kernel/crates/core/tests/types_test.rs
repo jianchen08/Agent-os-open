@@ -43,13 +43,9 @@ fn route_signal_builder_and_skip_none() {
 }
 
 #[test]
-fn error_policy_default_is_abort_and_lowercase() {
-    // Default → Abort；rename_all = "lowercase"
-    assert_eq!(ErrorPolicy::default(), ErrorPolicy::Abort);
-    assert_eq!(
-        serde_json::to_string(&ErrorPolicy::Abort).unwrap(),
-        "\"abort\""
-    );
+fn error_policy_default_is_retry_and_lowercase() {
+    // ADR 2026-08-18：收敛为唯一值 Retry；rename_all = "lowercase"
+    assert_eq!(ErrorPolicy::default(), ErrorPolicy::Retry);
     assert_eq!(
         serde_json::to_string(&ErrorPolicy::Retry).unwrap(),
         "\"retry\""

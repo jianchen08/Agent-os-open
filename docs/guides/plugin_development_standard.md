@@ -215,8 +215,8 @@ def register_types(cls, slots: PluginTypeSlot) -> None:
 
 ## 5. 错误处理规范（ADR 2026-08-18）
 
-> 0.2 起插件**不再声明错误策略**（`error_policy` 字段为契约兼容占位，仅 manifest
-> 加载期校验用，不产生行为分发）。运行时错误处理由引擎/编排层按错误类型自动决定：
+> 0.2 起插件**不再声明错误策略**（`error_policy` 字段已收敛为唯一值 `retry` 并从全部
+> manifest 移除，ADR 2026-08-18）。运行时错误处理由引擎/编排层按错误类型自动决定：
 
 | 错误类型 | 处理方 | 行为 |
 |----------|--------|------|
@@ -383,7 +383,7 @@ class {PluginClass}(IInputPlugin):
 - [ ] 实现了 `name`、`priority`、`execute` 三个必需成员
 - [ ] 构造函数接受 `config` 参数，默认 `None`
 - [ ] execute 方法是 async，返回正确类型
-- [ ] **不**声明 `error_policy`（DEPRECATED，ADR 2026-08-18；错误处理由引擎/编排层决定）
+- [ ] **不**声明 `error_policy`（已收敛为唯一值 `retry` 并整体移除，ADR 2026-08-18；错误处理由引擎/编排层决定）
 - [ ] State 键使用命名空间格式（`namespace.key`）
 - [ ] 不直接修改 `ctx.state`，通过返回值传递更新
 - [ ] 有单元测试覆盖核心路径和错误路径

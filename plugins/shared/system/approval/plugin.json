@@ -37,7 +37,6 @@
     "event-bus"
   ],
   "permissions": {},
-  "error_policy": "abort",
   "priority": 60,
   "ui_schema": {
     "widgets": [

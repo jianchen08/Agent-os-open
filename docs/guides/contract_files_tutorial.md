@@ -199,7 +199,7 @@
 | `capabilities` | object | ✅ | 能力声明（详见下表） | 见下方 |
 | `dependencies` | array | ❌ | 依赖的其他插件 | `[{"plugin_id": "tool_schema"}]` |
 | `permissions` | object | ❌ | 权限申请（默认空） | 见下方 |
-| `error_policy` | enum | ❌ | DEPRECATED 兼容占位（ADR 2026-08-18），不再分发行为 | `"abort"` / `"skip"` / `"retry"` / `"fallback"` |
+| `error_policy` | enum | ❌ | 已收敛为唯一值 `retry` 并整体移除（ADR 2026-08-18），不要再声明 | `"retry"`（缺省值，字段非必填） |
 | `priority` | int | ❌ | 优先级，默认 100 | 数值越小越先执行 |
 | `mcp` | object | ❌ | MCP 配置（仅 sidecar 类型） | 见下方 |
 
@@ -451,7 +451,7 @@ pub trait LlmProvider: Send + Sync {
 |------|------|----------|
 | `RouteType` 枚举 | 路由类型（4 种） | `NextLlm` / `NextTool` / `End` / `Wait` |
 | `RouteSignal` struct | 路由信号包 | Output 插件返回 `PluginResult.route_signal` |
-| `ErrorPolicy` 枚举 | 错误策略（DEPRECATED 兼容占位，ADR 2026-08-18） | `Abort` / `Skip` / `Retry` / `Fallback` |
+| `ErrorPolicy` 枚举 | 错误策略（已收敛为唯一值 `retry`，ADR 2026-08-18） | `Retry` |
 | `PluginResult` struct | 插件执行结果 | 包含 `state_updates` + `route_signal` + `skip_remaining` + `error` |
 | `PluginError` struct | 插件错误 | `message` + `code` + `source` |
 | `PluginContext` struct | 插件执行上下文 | 包含 `state` + `config` + `tenant` + `pipeline_id` + `session_id` + `task_id` |
@@ -474,26 +474,20 @@ pub enum RouteType {
 
 > **关键变更**：0.1 有 6 种（`next_llm` / `next_tool` / `end` / `delegate` / `wait` / `decision`），0.2 删除 `delegate` 和 `fork`，精简为 4 种。详见 0.2插件体系核心决策 §决策 10。
 
-#### `ErrorPolicy` 详解（DEPRECATED，契约兼容占位）
+#### `ErrorPolicy` 详解（已收敛，不再声明）
 
-> **ADR 2026-08-18**：0.2 引擎**不再按 `error_policy` 分发行为**。枚举保留 4 个值仅为兼容
-> 已冻结 manifest 的加载期字段校验；错误处理由引擎/编排层按错误类型决定（瞬态
-> sidecar 崩溃→retry 一次；工具失败→回喂 LLM 自我修正；非瞬态→上抛编排层）。
-> 插件**不要再声明** `error_policy`。
+> **ADR 2026-08-18**：0.2 引擎**不再按 `error_policy` 分发行为**。枚举已收敛为唯一值
+> `retry`（`abort` / `skip` / `fallback` 已删除）；错误处理由引擎/编排层按错误类型决定
+> （瞬态 sidecar 崩溃→retry 一次；工具失败→回喂 LLM 自我修正；非瞬态→上抛编排层）。
+> 插件**不要再声明** `error_policy`（manifest 字段可选，缺省即 retry）。
 
 ```rust
 pub enum ErrorPolicy {
-    Abort,      // 保留仅为兼容校验（默认）
-    Skip,       // 保留仅为兼容校验
-    Retry,      // 保留仅为兼容校验
-    Fallback,   // 保留仅为兼容校验
+    Retry,  // 瞬态错误重试一次（invoker with_transparent_recovery）；其余上抛编排层
 }
 ```
 
-| `Abort` | 保留仅为兼容校验（ADR 2026-08-18） | — |
-| `Fallback` | 保留仅为兼容校验（ADR 2026-08-18） | — |
-| `Skip` | 保留仅为兼容校验（ADR 2026-08-18） | — |
-| `Retry` | 保留仅为兼容校验（ADR 2026-08-18） | — |
+| `Retry` | 瞬态错误重试一次；其余错误决策上抛编排层（ADR 2026-08-18） | — |
 
 #### `PluginContext` 详解
 

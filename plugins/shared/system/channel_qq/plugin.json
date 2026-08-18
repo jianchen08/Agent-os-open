@@ -30,7 +30,6 @@
   },
   "dependencies": [],
   "permissions": {},
-  "error_policy": "skip",
   "priority": 50,
   "requires_content": 5
 }

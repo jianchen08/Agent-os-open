@@ -18,7 +18,6 @@
     },
     "dependencies": [],
     "permissions": {},
-    "error_policy": "skip",
     "priority": 50,
     "config_files": [
         {

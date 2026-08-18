@@ -49,6 +49,5 @@
     },
     "dependencies": [],
     "permissions": {},
-    "error_policy": "skip",
     "priority": 30
 }

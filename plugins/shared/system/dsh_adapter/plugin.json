@@ -184,7 +184,6 @@
       "node"
     ]
   },
-  "error_policy": "skip",
   "priority": 50,
   "contributes": {
     "renderers": [
