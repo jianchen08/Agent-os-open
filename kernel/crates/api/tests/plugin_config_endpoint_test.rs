@@ -42,6 +42,7 @@ fn manifest_with_files(plugin_id: &str, files: Vec<ConfigFileMapping>) -> Plugin
     PluginManifest {
         id: plugin_id.to_string(),
         name: plugin_id.to_string(),
+        description: None,
         version: "1.0.0".to_string(),
         plugin_type: PluginType::System,
         pipeline_role: None,

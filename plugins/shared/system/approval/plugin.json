@@ -11,7 +11,6 @@
   },
   "capabilities": {
     "tools": [],
-    "resources": [],
     "route_signals": [
       "wait"
     ],
@@ -31,11 +30,6 @@
     ]
   },
   "dependencies": [],
-  "capabilities_required": [
-    "human-interaction",
-    "pipeline-executor",
-    "event-bus"
-  ],
   "permissions": {},
   "priority": 60,
   "ui_schema": {

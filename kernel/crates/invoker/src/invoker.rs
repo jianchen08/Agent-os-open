@@ -2080,6 +2080,7 @@ mod tests {
         PluginManifest {
             id: id.to_string(),
             name: format!("Test {}", id),
+            description: None,
             version: "1.0.0".to_string(),
             plugin_type: PluginType::Tool,
             pipeline_role: None,
@@ -2112,6 +2113,7 @@ mod tests {
         PluginManifest {
             id: id.to_string(),
             name: format!("Test {}", id),
+            description: None,
             version: "1.0.0".to_string(),
             plugin_type: PluginType::Pipeline,
             pipeline_role: None,
@@ -2492,6 +2494,7 @@ mod tests {
         let manifest = PluginManifest {
             id: "composite_test".to_string(),
             name: "Composite".to_string(),
+            description: None,
             version: "1.0.0".to_string(),
             plugin_type: PluginType::Composite,
             pipeline_role: None,
@@ -2823,6 +2826,7 @@ mod tests {
         PluginManifest {
             id: id.to_string(),
             name: format!("Test {}", id),
+            description: None,
             version: "1.0.0".to_string(),
             plugin_type: PluginType::Pipeline,
             pipeline_role: None,

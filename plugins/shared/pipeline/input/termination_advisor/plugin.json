@@ -1,19 +1,25 @@
 {
-    "id": "pipeline_termination_advisor",
-    "name": "Termination Advisor",
-    "version": "1.0.0",
-    "plugin_type": "pipeline",
-    "language": "python",
-    "host_type": "sidecar",
-    "entry": "python server.py",
-    "invoke_entry": "termination_advisor.execute",
-    "capabilities": { "tools": [], "resources": [], "route_signals": [],
-                      "lifecycle_hooks": ["on_load", "on_unload"] },
-    "dependencies": [],
-    "permissions": {},
-    "priority": 9,
-    "persistent_fields": [
-        "termination_advisor.status",
-        "termination_advisor.stop_reason"
+  "id": "pipeline_termination_advisor",
+  "name": "Termination Advisor",
+  "version": "1.0.0",
+  "plugin_type": "pipeline",
+  "language": "python",
+  "host_type": "sidecar",
+  "entry": "python server.py",
+  "invoke_entry": "termination_advisor.execute",
+  "capabilities": {
+    "tools": [],
+    "route_signals": [],
+    "lifecycle_hooks": [
+      "on_load",
+      "on_unload"
     ]
+  },
+  "dependencies": [],
+  "permissions": {},
+  "priority": 9,
+  "persistent_fields": [
+    "termination_advisor.status",
+    "termination_advisor.stop_reason"
+  ]
 }

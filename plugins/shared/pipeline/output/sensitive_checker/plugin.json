@@ -1,23 +1,22 @@
 {
-    "id": "pipeline_sensitive_checker",
-    "name": "Sensitive Checker",
-    "version": "1.0.0",
-    "plugin_type": "pipeline",
-    "pipeline_role": "output",
-    "language": "rust",
-    "host_type": "in_process",
-    "entry": "pipeline_sensitive_checker_native.dll",
-    "invoke_entry": "plugin_execute",
-    "native": {
-        "artifact": "pipeline_sensitive_checker_native"
-    },
-    "capabilities": {
-        "tools": [],
-        "resources": [],
-        "route_signals": [],
-        "lifecycle_hooks": []
-    },
-    "dependencies": [],
-    "permissions": {},
-    "priority": 50
+  "id": "pipeline_sensitive_checker",
+  "name": "Sensitive Checker",
+  "version": "1.0.0",
+  "plugin_type": "pipeline",
+  "pipeline_role": "output",
+  "language": "rust",
+  "host_type": "in_process",
+  "entry": "pipeline_sensitive_checker_native.dll",
+  "invoke_entry": "plugin_execute",
+  "native": {
+    "artifact": "pipeline_sensitive_checker_native"
+  },
+  "capabilities": {
+    "tools": [],
+    "route_signals": [],
+    "lifecycle_hooks": []
+  },
+  "dependencies": [],
+  "permissions": {},
+  "priority": 50
 }

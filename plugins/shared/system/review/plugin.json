@@ -1,41 +1,49 @@
 {
-    "id": "review_service",
-    "name": "Review Service",
-    "version": "1.0.0",
-    "plugin_type": "tool",
-    "language": "python",
-    "host_type": "sidecar",
-    "entry": "python server.py",
-    "capabilities": {
-        "tools": [
+  "id": "review_service",
+  "name": "Review Service",
+  "version": "1.0.0",
+  "plugin_type": "tool",
+  "language": "python",
+  "host_type": "sidecar",
+  "entry": "python server.py",
+  "capabilities": {
+    "tools": [
+      {
+        "name": "trigger_review",
+        "description": "Trigger a review for a completed task",
+        "ui": {
+          "view_modes": [
             {
-                "name": "trigger_review",
-                "description": "Trigger a review for a completed task",
-                "ui": {
-                    "view_modes": [
-                        { "view_mode": "text_diff", "widget": "text_diff" },
-                        { "view_mode": "image_annotation", "widget": "image_annotation" },
-                        { "view_mode": "media_timeline", "widget": "media_timeline" }
-                    ]
-                }
+              "view_mode": "text_diff",
+              "widget": "text_diff"
             },
             {
-                "name": "review.get_report",
-                "description": "Get review report by ID"
+              "view_mode": "image_annotation",
+              "widget": "image_annotation"
+            },
+            {
+              "view_mode": "media_timeline",
+              "widget": "media_timeline"
             }
-        ],
-        "resources": [],
-        "route_signals": [],
-        "lifecycle_hooks": [
-            "on_load"
-        ]
-    },
-    "dependencies": [],
-    "permissions": {},
-    "priority": 50,
-    "granted_capabilities": [
-        "chat",
-        "pipeline-state",
-        "pipeline-executor"
+          ]
+        }
+      },
+      {
+        "name": "review.get_report",
+        "description": "Get review report by ID"
+      }
+    ],
+    "route_signals": [],
+    "lifecycle_hooks": [
+      "on_load"
     ]
+  },
+  "dependencies": [],
+  "permissions": {},
+  "priority": 50,
+  "granted_capabilities": [
+    "chat",
+    "pipeline-state",
+    "pipeline-executor"
+  ]
 }

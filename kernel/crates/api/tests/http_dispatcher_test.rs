@@ -507,6 +507,7 @@ async fn test_register_manifest_http_routes_aggregates_errors() {
     let good = PluginManifest {
         id: "good".to_string(),
         name: "Good".to_string(),
+        description: None,
         version: "1.0.0".to_string(),
         plugin_type: PluginType::System,
         pipeline_role: None,
@@ -536,6 +537,7 @@ async fn test_register_manifest_http_routes_aggregates_errors() {
     let bad = PluginManifest {
         id: "bad".to_string(),
         name: "Bad".to_string(),
+        description: None,
         version: "1.0.0".to_string(),
         plugin_type: PluginType::System,
         pipeline_role: None,

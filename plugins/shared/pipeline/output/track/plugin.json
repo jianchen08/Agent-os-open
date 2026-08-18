@@ -1,27 +1,26 @@
 {
-    "id": "pipeline_track",
-    "name": "Track",
-    "version": "1.0.0",
-    "plugin_type": "pipeline",
-    "language": "python",
-    "host_type": "sidecar",
-    "entry": "python server.py",
-    "invoke_entry": "track.execute",
-    "capabilities": {
-        "tools": [],
-        "resources": [],
-        "route_signals": [],
-        "lifecycle_hooks": [
-            "on_load",
-            "on_unload"
-        ]
-    },
-    "dependencies": [],
-    "permissions": {},
-    "priority": 50,
-    "persistent_fields": [
-        "track.total_tokens",
-        "track.llm_usage",
-        "track.execution_stats"
+  "id": "pipeline_track",
+  "name": "Track",
+  "version": "1.0.0",
+  "plugin_type": "pipeline",
+  "language": "python",
+  "host_type": "sidecar",
+  "entry": "python server.py",
+  "invoke_entry": "track.execute",
+  "capabilities": {
+    "tools": [],
+    "route_signals": [],
+    "lifecycle_hooks": [
+      "on_load",
+      "on_unload"
     ]
+  },
+  "dependencies": [],
+  "permissions": {},
+  "priority": 50,
+  "persistent_fields": [
+    "track.total_tokens",
+    "track.llm_usage",
+    "track.execution_stats"
+  ]
 }

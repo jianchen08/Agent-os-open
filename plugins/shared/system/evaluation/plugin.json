@@ -8,12 +8,6 @@
   "entry": "python server.py",
   "capabilities": {
     "tools": [],
-    "resources": [
-      {
-        "uri": "evaluation://metrics/registry",
-        "name": "Metric Registry"
-      }
-    ],
     "route_signals": [],
     "lifecycle_hooks": [
       "on_load"

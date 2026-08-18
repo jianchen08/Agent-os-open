@@ -1,93 +1,112 @@
 {
-    "id": "pipeline_security_check",
-    "name": "Security Check",
-    "version": "1.0.0",
-    "plugin_type": "pipeline",
-    "language": "python",
-    "host_type": "sidecar",
-    "entry": "python server.py",
-    "mcp": {
-        "transport": "stdio",
-        "request_timeout_secs": 90000
-    },
-    "invoke_entry": "security_check.execute",
-    "activation": "eager",
-    "capabilities": {
-        "tools": [
-            {
-                "name": "http.handle",
-                "description": "HTTP endpoint handler for /ext/pipeline_security_check/**（权限模式切换端点）"
-            }
-        ],
-        "resources": [],
-        "route_signals": [],
-        "lifecycle_hooks": [
-            "on_load",
-            "on_unload"
-        ]
-    },
-    "dependencies": [],
-    "permissions": {},
-    "priority": 50,
-    "config_files": [
-        {
-            "id": "security_rules",
-            "path": "config/isolation/security_rules.yaml",
-            "label": "安全规则"
-        },
-        {
-            "id": "builtin_tools_config",
-            "path": "config/tools/builtin_tools_config.yaml",
-            "label": "内置工具 dangerous_operations 声明（_is_dangerous_tool 轨道 2 数据源）"
-        }
+  "id": "pipeline_security_check",
+  "name": "Security Check",
+  "version": "1.0.0",
+  "plugin_type": "pipeline",
+  "language": "python",
+  "host_type": "sidecar",
+  "entry": "python server.py",
+  "mcp": {
+    "transport": "stdio",
+    "request_timeout_secs": 90000
+  },
+  "invoke_entry": "security_check.execute",
+  "activation": "eager",
+  "capabilities": {
+    "tools": [
+      {
+        "name": "http.handle",
+        "description": "HTTP endpoint handler for /ext/pipeline_security_check/**（权限模式切换端点）"
+      }
     ],
-    "http_endpoints": [
-        {
-            "route_id": "permission_mode_switch",
-            "method": "POST",
-            "path": "/ext/pipeline_security_check/permission_mode",
-            "auth": "user",
-            "handler_capability": "http.handle",
-            "description": "切换管道权限模式（auto/bypass 高风险模式经 human-interaction 审批窗确认）"
-        },
-        {
-            "route_id": "permission_mode_get",
-            "method": "GET",
-            "path": "/ext/pipeline_security_check/permission_mode",
-            "auth": "user",
-            "handler_capability": "http.handle",
-            "description": "查询管道当前权限模式"
-        }
-    ],
-    "ui_schema": {
-        "widgets": [
-            {
-                "id": "permission_mode_selector",
-                "type": "form",
-                "space": "chat-input",
-                "title": "权限模式",
-                "props": {
-                    "title": "权限模式",
-                    "submitLabel": "切换模式",
-                    "fields": [
-                        {
-                            "name": "mode",
-                            "type": "select",
-                            "label": "权限模式",
-                            "default": "default",
-                            "options": [
-                                {"label": "默认（逐次确认）", "value": "default", "description": "危险操作逐次确认"},
-                                {"label": "接受编辑（文件自动）", "value": "accept_edits", "description": "文件读写自动放行，命令类仍确认"},
-                                {"label": "自动（尽量不打扰）", "value": "auto", "description": "仅危险/未授权操作确认"},
-                                {"label": "只读（拒绝写操作）", "value": "plan", "description": "写类操作自动拒绝"},
-                                {"label": "旁路（跳过审批）", "value": "bypass", "description": "跳过审批，保留底线检查"}
-                            ]
-                        }
-                    ],
-                    "endpoint": "/ext/pipeline_security_check/permission_mode",
-                    "description": "切换当前管道标签的权限模式（输入框工具栏，与思考强度并排）；auto/bypass 高风险模式需在审批窗中确认"
-                }
-            }
-        ]
+    "route_signals": [],
+    "lifecycle_hooks": [
+      "on_load",
+      "on_unload"
+    ]
+  },
+  "dependencies": [],
+  "permissions": {},
+  "priority": 50,
+  "config_files": [
+    {
+      "id": "security_rules",
+      "path": "config/isolation/security_rules.yaml",
+      "label": "安全规则"
+    },
+    {
+      "id": "builtin_tools_config",
+      "path": "config/tools/builtin_tools_config.yaml",
+      "label": "内置工具 dangerous_operations 声明（_is_dangerous_tool 轨道 2 数据源）"
     }
+  ],
+  "http_endpoints": [
+    {
+      "route_id": "permission_mode_switch",
+      "method": "POST",
+      "path": "/ext/pipeline_security_check/permission_mode",
+      "auth": "user",
+      "handler_capability": "http.handle",
+      "description": "切换管道权限模式（auto/bypass 高风险模式经 human-interaction 审批窗确认）"
+    },
+    {
+      "route_id": "permission_mode_get",
+      "method": "GET",
+      "path": "/ext/pipeline_security_check/permission_mode",
+      "auth": "user",
+      "handler_capability": "http.handle",
+      "description": "查询管道当前权限模式"
+    }
+  ],
+  "ui_schema": {
+    "widgets": [
+      {
+        "id": "permission_mode_selector",
+        "type": "form",
+        "space": "chat-input",
+        "title": "权限模式",
+        "props": {
+          "title": "权限模式",
+          "submitLabel": "切换模式",
+          "fields": [
+            {
+              "name": "mode",
+              "type": "select",
+              "label": "权限模式",
+              "default": "default",
+              "options": [
+                {
+                  "label": "默认（逐次确认）",
+                  "value": "default",
+                  "description": "危险操作逐次确认"
+                },
+                {
+                  "label": "接受编辑（文件自动）",
+                  "value": "accept_edits",
+                  "description": "文件读写自动放行，命令类仍确认"
+                },
+                {
+                  "label": "自动（尽量不打扰）",
+                  "value": "auto",
+                  "description": "仅危险/未授权操作确认"
+                },
+                {
+                  "label": "只读（拒绝写操作）",
+                  "value": "plan",
+                  "description": "写类操作自动拒绝"
+                },
+                {
+                  "label": "旁路（跳过审批）",
+                  "value": "bypass",
+                  "description": "跳过审批，保留底线检查"
+                }
+              ]
+            }
+          ],
+          "endpoint": "/ext/pipeline_security_check/permission_mode",
+          "description": "切换当前管道标签的权限模式（输入框工具栏，与思考强度并排）；auto/bypass 高风险模式需在审批窗中确认"
+        }
+      }
+    ]
+  }
 }

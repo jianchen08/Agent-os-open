@@ -1,60 +1,59 @@
 {
-    "id": "pipeline_godot_context",
-    "name": "Godot Context",
-    "description": "Godot 编辑器选中引用：接收宿主插件推送、转发前端、随用户消息注入引用",
-    "version": "1.0.0",
-    "plugin_type": "pipeline",
-    "language": "python",
-    "host_type": "sidecar",
-    "entry": "python server.py",
-    "invoke_entry": "godot_context.execute",
-    "lifecycle": {
-        "idle_timeout_secs": 0
+  "id": "pipeline_godot_context",
+  "name": "Godot Context",
+  "description": "Godot 编辑器选中引用：接收宿主插件推送、转发前端、随用户消息注入引用",
+  "version": "1.0.0",
+  "plugin_type": "pipeline",
+  "language": "python",
+  "host_type": "sidecar",
+  "entry": "python server.py",
+  "invoke_entry": "godot_context.execute",
+  "lifecycle": {
+    "idle_timeout_secs": 0
+  },
+  "http_endpoints": [
+    {
+      "route_id": "selection_push",
+      "method": "POST",
+      "path": "/ext/pipeline_godot_context/selection",
+      "auth": "none",
+      "handler_capability": "http.handle",
+      "description": "Godot 宿主插件选中推送端点（selection/heartbeat/offline）"
     },
-    "http_endpoints": [
-        {
-            "route_id": "selection_push",
-            "method": "POST",
-            "path": "/ext/pipeline_godot_context/selection",
-            "auth": "none",
-            "handler_capability": "http.handle",
-            "description": "Godot 宿主插件选中推送端点（selection/heartbeat/offline）"
-        },
-        {
-            "route_id": "selection_snapshot",
-            "method": "GET",
-            "path": "/ext/pipeline_godot_context/selection",
-            "auth": "user",
-            "handler_capability": "http.handle",
-            "description": "当前选中快照（前端初始化）"
-        },
-        {
-            "route_id": "selection_subscribe",
-            "method": "POST",
-            "path": "/ext/pipeline_godot_context/subscribe",
-            "auth": "user",
-            "handler_capability": "http.handle",
-            "description": "前端订阅选中变化推送（body: {thread_id}）"
-        },
-        {
-            "route_id": "selection_preview",
-            "method": "GET",
-            "path": "/ext/pipeline_godot_context/preview",
-            "auth": "user",
-            "handler_capability": "http.handle",
-            "description": "选中对象预览图（代理 Godot 9600 /selection/preview）"
-        }
-    ],
-    "capabilities": {
-        "tools": [],
-        "resources": [],
-        "route_signals": [],
-        "lifecycle_hooks": [
-            "on_load",
-            "on_unload"
-        ]
+    {
+      "route_id": "selection_snapshot",
+      "method": "GET",
+      "path": "/ext/pipeline_godot_context/selection",
+      "auth": "user",
+      "handler_capability": "http.handle",
+      "description": "当前选中快照（前端初始化）"
     },
-    "dependencies": [],
-    "permissions": {},
-    "priority": 50
+    {
+      "route_id": "selection_subscribe",
+      "method": "POST",
+      "path": "/ext/pipeline_godot_context/subscribe",
+      "auth": "user",
+      "handler_capability": "http.handle",
+      "description": "前端订阅选中变化推送（body: {thread_id}）"
+    },
+    {
+      "route_id": "selection_preview",
+      "method": "GET",
+      "path": "/ext/pipeline_godot_context/preview",
+      "auth": "user",
+      "handler_capability": "http.handle",
+      "description": "选中对象预览图（代理 Godot 9600 /selection/preview）"
+    }
+  ],
+  "capabilities": {
+    "tools": [],
+    "route_signals": [],
+    "lifecycle_hooks": [
+      "on_load",
+      "on_unload"
+    ]
+  },
+  "dependencies": [],
+  "permissions": {},
+  "priority": 50
 }

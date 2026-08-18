@@ -1,88 +1,89 @@
 {
-    "id": "db_admin",
-    "name": "DB Admin HTTP Face",
-    "description": "DB Admin 管理后台的 HTTP 面层（boot-plugin 第一刀）：/ext/db_admin/** 端点经内核 dispatcher 进本插件 http.handle，反向调用内核 db-admin capability（SQL 能力层：表枚举/行 CRUD/SQL 执行器，逻辑与鉴权在内核 handler 内）。鉴权凭证（Authorization 头）由本插件原样转发、内核侧解析，插件不做鉴权决策。",
-    "version": "1.0.0",
-    "plugin_type": "tool",
-    "language": "python",
-    "host_type": "sidecar",
-    "entry": "python server.py",
-    "activation": "eager",
-    "capabilities": {
-        "tools": [
-            {
-                "name": "http.handle",
-                "description": "HTTP endpoint handler for /ext/db_admin/**（db-admin capability 的 HTTP 面转发层）"
-            },
-            {
-                "name": "db_admin.status",
-                "description": "插件状态（capability 句柄是否已注入）"
-            }
-        ],
-        "resources": [],
-        "route_signals": [],
-        "lifecycle_hooks": []
+  "id": "db_admin",
+  "name": "DB Admin HTTP Face",
+  "description": "DB Admin 管理后台的 HTTP 面层（boot-plugin 第一刀）：/ext/db_admin/** 端点经内核 dispatcher 进本插件 http.handle，反向调用内核 db-admin capability（SQL 能力层：表枚举/行 CRUD/SQL 执行器，逻辑与鉴权在内核 handler 内）。鉴权凭证（Authorization 头）由本插件原样转发、内核侧解析，插件不做鉴权决策。",
+  "version": "1.0.0",
+  "plugin_type": "tool",
+  "language": "python",
+  "host_type": "sidecar",
+  "entry": "python server.py",
+  "activation": "eager",
+  "capabilities": {
+    "tools": [
+      {
+        "name": "http.handle",
+        "description": "HTTP endpoint handler for /ext/db_admin/**（db-admin capability 的 HTTP 面转发层）"
+      },
+      {
+        "name": "db_admin.status",
+        "description": "插件状态（capability 句柄是否已注入）"
+      }
+    ],
+    "route_signals": [],
+    "lifecycle_hooks": []
+  },
+  "dependencies": [],
+  "permissions": {},
+  "priority": 50,
+  "granted_capabilities": [
+    "db-admin"
+  ],
+  "http_endpoints": [
+    {
+      "route_id": "tables",
+      "method": "GET",
+      "path": "/ext/db_admin/tables",
+      "auth": "admin",
+      "handler_capability": "http.handle",
+      "description": "枚举全部表（名称/列/主键/行数）"
     },
-    "dependencies": [],
-    "permissions": {},
-    "priority": 50,
-    "granted_capabilities": ["db-admin"],
-    "http_endpoints": [
-        {
-            "route_id": "tables",
-            "method": "GET",
-            "path": "/ext/db_admin/tables",
-            "auth": "admin",
-            "handler_capability": "http.handle",
-            "description": "枚举全部表（名称/列/主键/行数）"
-        },
-        {
-            "route_id": "table_rows",
-            "method": "GET",
-            "path": "/ext/db_admin/table/{table}",
-            "auth": "admin",
-            "handler_capability": "http.handle",
-            "description": "行查询：limit/offset 分页、多列筛选、排序"
-        },
-        {
-            "route_id": "table_insert",
-            "method": "POST",
-            "path": "/ext/db_admin/table/{table}",
-            "auth": "admin",
-            "handler_capability": "http.handle",
-            "description": "插入单行（body: {row}）"
-        },
-        {
-            "route_id": "table_row",
-            "method": "GET",
-            "path": "/ext/db_admin/table/{table}/{pk_value}",
-            "auth": "admin",
-            "handler_capability": "http.handle",
-            "description": "单行查询（复合主键用 , 拼接）"
-        },
-        {
-            "route_id": "table_row_update",
-            "method": "PATCH",
-            "path": "/ext/db_admin/table/{table}/{pk_value}",
-            "auth": "admin",
-            "handler_capability": "http.handle",
-            "description": "更新单行（body: {updates}）"
-        },
-        {
-            "route_id": "table_row_delete",
-            "method": "DELETE",
-            "path": "/ext/db_admin/table/{table}/{pk_value}",
-            "auth": "admin",
-            "handler_capability": "http.handle",
-            "description": "删除单行"
-        },
-        {
-            "route_id": "execute",
-            "method": "POST",
-            "path": "/ext/db_admin/execute",
-            "auth": "admin",
-            "handler_capability": "http.handle",
-            "description": "SQL 执行器（body: {sql, confirm}；危险语句黑名单在内核 handler）"
-        }
-    ]
+    {
+      "route_id": "table_rows",
+      "method": "GET",
+      "path": "/ext/db_admin/table/{table}",
+      "auth": "admin",
+      "handler_capability": "http.handle",
+      "description": "行查询：limit/offset 分页、多列筛选、排序"
+    },
+    {
+      "route_id": "table_insert",
+      "method": "POST",
+      "path": "/ext/db_admin/table/{table}",
+      "auth": "admin",
+      "handler_capability": "http.handle",
+      "description": "插入单行（body: {row}）"
+    },
+    {
+      "route_id": "table_row",
+      "method": "GET",
+      "path": "/ext/db_admin/table/{table}/{pk_value}",
+      "auth": "admin",
+      "handler_capability": "http.handle",
+      "description": "单行查询（复合主键用 , 拼接）"
+    },
+    {
+      "route_id": "table_row_update",
+      "method": "PATCH",
+      "path": "/ext/db_admin/table/{table}/{pk_value}",
+      "auth": "admin",
+      "handler_capability": "http.handle",
+      "description": "更新单行（body: {updates}）"
+    },
+    {
+      "route_id": "table_row_delete",
+      "method": "DELETE",
+      "path": "/ext/db_admin/table/{table}/{pk_value}",
+      "auth": "admin",
+      "handler_capability": "http.handle",
+      "description": "删除单行"
+    },
+    {
+      "route_id": "execute",
+      "method": "POST",
+      "path": "/ext/db_admin/execute",
+      "auth": "admin",
+      "handler_capability": "http.handle",
+      "description": "SQL 执行器（body: {sql, confirm}；危险语句黑名单在内核 handler）"
+    }
+  ]
 }

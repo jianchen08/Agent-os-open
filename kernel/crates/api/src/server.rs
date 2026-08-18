@@ -3576,6 +3576,7 @@ mod tests {
             manifests.push(agentos_core::traits::PluginManifest {
                 id: "trigger_sub".to_string(),
                 name: "trigger_sub".to_string(),
+                description: None,
                 version: "1.0.0".to_string(),
                 plugin_type: agentos_core::traits::PluginType::System,
                 pipeline_role: None,

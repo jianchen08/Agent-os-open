@@ -1,26 +1,25 @@
 {
-    "id": "pipeline_tool_core",
-    "name": "Tool Core",
-    "version": "1.0.0",
-    "plugin_type": "pipeline",
-    "pipeline_role": "core",
-    "language": "rust",
-    "host_type": "in_process",
-    "entry": "pipeline_tool_core_native.dll",
-    "invoke_entry": "plugin_execute",
-    "native": {
-        "artifact": "pipeline_tool_core_native"
-    },
-    "capabilities": {
-        "tools": [],
-        "resources": [],
-        "route_signals": [],
-        "lifecycle_hooks": []
-    },
-    "dependencies": [],
-    "permissions": {},
-    "priority": 50,
-    "lifecycle": {
-        "idle_timeout_secs": 0
-    }
+  "id": "pipeline_tool_core",
+  "name": "Tool Core",
+  "version": "1.0.0",
+  "plugin_type": "pipeline",
+  "pipeline_role": "core",
+  "language": "rust",
+  "host_type": "in_process",
+  "entry": "pipeline_tool_core_native.dll",
+  "invoke_entry": "plugin_execute",
+  "native": {
+    "artifact": "pipeline_tool_core_native"
+  },
+  "capabilities": {
+    "tools": [],
+    "route_signals": [],
+    "lifecycle_hooks": []
+  },
+  "dependencies": [],
+  "permissions": {},
+  "priority": 50,
+  "lifecycle": {
+    "idle_timeout_secs": 0
+  }
 }

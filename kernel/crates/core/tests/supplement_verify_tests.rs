@@ -49,6 +49,7 @@ fn make_test_manifest(
     PluginManifest {
         id: "test_plugin".to_string(),
         name: "Test Plugin".to_string(),
+        description: None,
         version: "1.0.0".to_string(),
         plugin_type,
         pipeline_role: None,

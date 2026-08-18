@@ -8,7 +8,6 @@
   "entry": "python server.py",
   "capabilities": {
     "tools": [],
-    "resources": [],
     "route_signals": [],
     "lifecycle_hooks": [
       "on_load",

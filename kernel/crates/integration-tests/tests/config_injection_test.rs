@@ -199,6 +199,7 @@ fn make_sidecar_manifest(id: &str, entry: &str) -> PluginManifest {
     PluginManifest {
         id: id.to_string(),
         name: format!("Test {}", id),
+        description: None,
         version: "1.0.0".to_string(),
         plugin_type: PluginType::Tool,
         pipeline_role: None,

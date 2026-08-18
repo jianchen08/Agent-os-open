@@ -24,6 +24,7 @@ fn test_manifest(
     PluginManifest {
         id: id.to_string(),
         name: id.to_string(),
+        description: None,
         version: "0.1.0".to_string(),
         plugin_type,
         pipeline_role: None,
@@ -206,6 +207,7 @@ fn test_plugin_status_data_from_manifest() {
     let manifest = PluginManifest {
         id: "test_plugin".to_string(),
         name: "Test Plugin".to_string(),
+        description: None,
         version: "2.0.0".to_string(),
         plugin_type: PluginType::System,
         pipeline_role: None,
@@ -285,6 +287,7 @@ fn test_eager_vs_lazy_distinction() {
     let manifest_eager = PluginManifest {
         id: "eager_p".to_string(),
         name: "Eager".to_string(),
+        description: None,
         version: "1.0".to_string(),
         plugin_type: PluginType::System,
         pipeline_role: None,

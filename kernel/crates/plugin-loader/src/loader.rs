@@ -839,10 +839,12 @@ mod tests {
         fs::write(dir.join("plugin.json"), manifest_json).unwrap();
     }
 
-    /// resources 能力维度删除后的 serde 兼容：旧 manifest 的
-    /// `capabilities.resources` 字段被默认忽略（无 deny_unknown_fields），解析不失败。
+    /// Phase 1 契约定型（2026-08-18）：manifest 未知字段从"静默忽略"改为
+    /// `deny_unknown_fields` 拒绝——历史遗留 `capabilities.resources`（结构已删）
+    /// 是 82 个真实插件曾携带的死声明，扫描后已全量清除；本测试断言未知字段
+    /// 现在**拒绝**（fail-closed），不再容忍"声明了却不生效"。
     #[test]
-    fn test_manifest_with_legacy_resources_field_still_parses() {
+    fn test_manifest_with_unknown_field_is_rejected() {
         let manifest_json = r#"{
     "id": "legacy_res",
     "name": "Legacy Resource Plugin",
@@ -861,9 +863,64 @@ mod tests {
     "permissions": {},
     "priority": 100
 }"#;
-        let manifest: PluginManifest =
-            serde_json::from_str(manifest_json).expect("旧 resources 字段应被忽略");
-        assert_eq!(manifest.id, "legacy_res");
+        let err = serde_json::from_str::<PluginManifest>(manifest_json)
+            .expect_err("未知字段 capabilities.resources 必须拒绝，不再静默忽略");
+        let msg = format!("{err:?}");
+        assert!(
+            msg.contains("resources"),
+            "错误应指明被拒绝的未知字段: {msg}"
+        );
+    }
+
+    /// 语料级校验（Phase 1 契约真实性回归）：真实仓库全部 plugin.json 必须毫发
+    /// 无伤通过严格反序列化（`deny_unknown_fields`）+ 必填字段校验。
+    ///
+    /// 这是"校验器不要在真实数据上空转"的持续闸门——它第一次在真实语料上运行时
+    /// 抓到的硬伤（已全量迁移）：
+    /// - 38 个插件顶层 `description`：struct 无此字段，serde 静默丢弃 → 现已入 struct；
+    /// - 82 个插件 `capabilities.resources`：结构已删的遗留字段 → 已清除；
+    /// - approval 的 `capabilities_required`：非契约字段 → 已清除。
+    /// 若此后熟悉语料出现未知字段/缺必填，本测试即红灯（校验器真实生效）。
+    #[test]
+    fn real_corpus_all_manifests_pass_strict_parsing() {
+        let manifest_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let shared = manifest_dir.join("../../../plugins/shared");
+        let mut count = 0usize;
+        let mut walk = Vec::new();
+        fn collect(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
+            // 跳过第三方/运行时产物目录：管理面只管插件声明，node_modules 下也有
+            // 大量 widget_demo/dsh 依赖的 plugin.json（非本仓插件）。
+            const SKIP: &[&str] = &["node_modules", ".venv", "__pycache__", "dsh_plugins", "runtime"];
+            let mut entries = match std::fs::read_dir(dir) {
+                Ok(e) => e,
+                Err(e) => {
+                    panic!("无法读取 {}: {e}", dir.display());
+                }
+            };
+            while let Some(entry) = entries.next() {
+                let entry = entry.unwrap();
+                let path = entry.path();
+                if path.is_dir() {
+                    if !SKIP.contains(&path.file_name().and_then(|n| n.to_str()).unwrap_or("")) {
+                        collect(&path, out);
+                    }
+                } else if path.file_name().and_then(|n| n.to_str()) == Some("plugin.json") {
+                    out.push(path);
+                }
+            }
+        }
+        collect(&shared, &mut walk);
+        assert!(walk.len() > 50, "应扫到真实插件语料 >50，实际 {}", walk.len());
+        for path in &walk {
+            let text = std::fs::read_to_string(&path)
+                .unwrap_or_else(|e| panic!("读取 {} 失败: {e}", path.display()));
+            let m: PluginManifest = serde_json::from_str(&text).unwrap_or_else(|e| {
+                panic!("真实语料 {} 未通过严格解析（校验器抓到未知字段/坏结构）: {e}", path.display());
+            });
+            assert!(!m.id.is_empty() && !m.name.is_empty() && !m.version.is_empty());
+            count += 1;
+        }
+        assert!(count == walk.len(), "每份真实 manifest 都过严格解析");
     }
 
     #[test]
@@ -872,6 +929,7 @@ mod tests {
         let manifest = PluginManifest {
             id: "test".to_string(),
             name: "Test".to_string(),
+            description: None,
             version: "1.0.0".to_string(),
             plugin_type: PluginType::Pipeline,
             pipeline_role: None,
@@ -937,6 +995,7 @@ mod tests {
         let manifest = PluginManifest {
             id: String::new(),
             name: "Test".to_string(),
+            description: None,
             version: "1.0.0".to_string(),
             plugin_type: PluginType::Pipeline,
             pipeline_role: None,
@@ -973,6 +1032,7 @@ mod tests {
         let manifest = PluginManifest {
             id: "composite_test".to_string(),
             name: "Composite".to_string(),
+            description: None,
             version: "1.0.0".to_string(),
             plugin_type: PluginType::Composite,
             pipeline_role: None,
@@ -1138,6 +1198,7 @@ mod tests {
         let manifest = PluginManifest {
             id: "memory_read".to_string(),
             name: "Memory Read".to_string(),
+            description: None,
             version: "1.0.0".to_string(),
             plugin_type: PluginType::Pipeline,
             pipeline_role: None,

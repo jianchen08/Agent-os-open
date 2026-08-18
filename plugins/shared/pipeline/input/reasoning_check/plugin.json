@@ -1,22 +1,21 @@
 {
-    "id": "pipeline_reasoning_check",
-    "name": "Reasoning Check",
-    "version": "1.0.0",
-    "plugin_type": "pipeline",
-    "language": "python",
-    "host_type": "sidecar",
-    "entry": "python server.py",
-    "invoke_entry": "reasoning_check.execute",
-    "capabilities": {
-        "tools": [],
-        "resources": [],
-        "route_signals": [],
-        "lifecycle_hooks": [
-            "on_load",
-            "on_unload"
-        ]
-    },
-    "dependencies": [],
-    "permissions": {},
-    "priority": 50
+  "id": "pipeline_reasoning_check",
+  "name": "Reasoning Check",
+  "version": "1.0.0",
+  "plugin_type": "pipeline",
+  "language": "python",
+  "host_type": "sidecar",
+  "entry": "python server.py",
+  "invoke_entry": "reasoning_check.execute",
+  "capabilities": {
+    "tools": [],
+    "route_signals": [],
+    "lifecycle_hooks": [
+      "on_load",
+      "on_unload"
+    ]
+  },
+  "dependencies": [],
+  "permissions": {},
+  "priority": 50
 }

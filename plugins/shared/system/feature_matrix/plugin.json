@@ -1,258 +1,406 @@
 {
-    "id": "feature_matrix_plugin",
-    "name": "Feature Matrix Plugin",
-    "description": "全功能测试插件:覆盖所有 space/slot/widget 类型/schema 表单/actions/detachable。仅供端到端渲染验证。",
-    "version": "0.1.0",
-    "plugin_type": "system",
-    "language": "python",
-    "host_type": "sidecar",
-    "entry": "python server.py",
-    "capabilities": {
-        "tools": [],
-        "resources": [],
-        "route_signals": [],
-        "lifecycle_hooks": []
-    },
-    "contributes": {
-        "pages": [
-            {
-                "id": "fm_chart",
-                "title": "图表 Widget",
-                "icon": "📊",
-                "space": "workspace",
-                "slot": "tab",
-                "order": 10,
-                "widget": "chart",
-                "props": {
-                    "title": "Feature Matrix 图表",
-                    "chartType": "bar",
-                    "data": {
-                        "labels": ["周一", "周二", "周三", "周四", "周五"],
-                        "datasets": [{ "label": "调用次数", "data": [12, 19, 8, 15, 22], "color": "#22D3EE" }]
-                    }
-                }
-            },
-            {
-                "id": "fm_table",
-                "title": "表格 Widget",
-                "icon": "📋",
-                "space": "workspace",
-                "slot": "tab",
-                "order": 20,
-                "widget": "table",
-                "props": {
-                    "title": "Feature Matrix 表格",
-                    "columns": [
-                        { "key": "name", "label": "名称", "sortable": true },
-                        { "key": "type", "label": "类型" },
-                        { "key": "status", "label": "状态" }
-                    ],
-                    "data": [
-                        { "name": "SchemaDriver", "type": "表单驱动", "status": "✅" },
-                        { "name": "PageRenderer", "type": "页面渲染", "status": "✅" },
-                        { "name": "WebComponent", "type": "已废弃→迁移 Webview", "status": "✅" },
-                        { "name": "WindowManager", "type": "浮窗", "status": "✅" }
-                    ]
-                }
-            },
-            {
-                "id": "fm_status_card",
-                "title": "状态卡 Widget",
-                "icon": "📌",
-                "space": "workspace",
-                "slot": "tab",
-                "order": 30,
-                "widget": "status_card",
-                "props": {
-                    "title": "基础设施状态",
-                    "value": "8/8 断裂点修复",
-                    "trend": "↑",
-                    "trendValue": "100%",
-                    "icon": "✅",
-                    "description": "前端能力由后端长出来主链路全通"
-                }
-            },
-            {
-                "id": "fm_digital_human",
-                "title": "数字人形象",
-                "icon": "🤖",
-                "space": "workspace",
-                "slot": "tab",
-                "order": 40,
-                "widget": "digital_human",
-                "props": {
-                    "source": "live2d://models/sample.model3.json",
-                    "connector": "avatar_connector",
-                    "widgetId": "fm_dh_events"
-                }
-            },
-            {
-                "id": "fm_terminal",
-                "title": "终端(骨架)",
-                "icon": "🖥️",
-                "space": "workspace",
-                "slot": "tab",
-                "order": 50,
-                "widget": "terminal",
-                "props": {
-                    "pluginId": "feature_matrix_plugin",
-                    "terminalId": "fm-term",
-                    "title": "插件终端接入点",
-                    "cols": 80,
-                    "rows": 24
-                }
-            },
-            {
-                "id": "fm_kanban",
-                "title": "看板(骨架)",
-                "icon": "🗂️",
-                "space": "workspace",
-                "slot": "tab",
-                "order": 60,
-                "widget": "kanban",
-                "props": {
-                    "title": "任务看板",
-                    "pluginId": "feature_matrix_plugin",
-                    "columns": [
-                        { "id": "todo", "title": "待办" },
-                        { "id": "doing", "title": "进行中" },
-                        { "id": "done", "title": "已完成" }
-                    ],
-                    "data": [
-                        { "id": "t1", "columnId": "todo", "title": "终端接入 xterm" },
-                        { "id": "t2", "columnId": "todo", "title": "看板拖拽 dnd" },
-                        { "id": "t3", "columnId": "doing", "title": "形象引擎 Live2D" },
-                        { "id": "t4", "columnId": "done", "title": "SchemaDriver" },
-                        { "id": "t5", "columnId": "done", "title": "pages 统一模型" }
-                    ]
-                }
-            },
-            {
-                "id": "fm_webview",
-                "title": "Webview 沙箱",
-                "icon": "🌐",
-                "space": "workspace",
-                "slot": "tab",
-                "order": 70,
-                "widget": "webview",
-                "props": {
-                    "pluginId": "feature_matrix_plugin",
-                    "htmlPath": "/webview",
-                    "widgetId": "fm_webview_wid"
-                }
-            },
-            {
-                "id": "fm_webcomponent",
-                "title": "Web Component(已迁移)",
-                "icon": "🧩",
-                "space": "workspace",
-                "slot": "tab",
-                "order": 80,
-                "widget": "webview",
-                "props": {
-                    "pluginId": "feature_matrix_plugin",
-                    "htmlPath": "/wc_demo",
-                    "widgetId": "fm_webview_wid_wc"
-                }
-            },
-            {
-                "id": "fm_settings_form",
-                "title": "插件配置(Schema 表单)",
-                "icon": "⚙️",
-                "space": "settings",
-                "slot": "nav",
-                "order": 90,
-                "schema": {
-                    "fields": [
-                        { "name": "api_endpoint", "type": "string", "label": "API 地址", "required": true, "default": "https://api.example.com" },
-                        { "name": "timeout", "type": "number", "label": "超时(秒)", "default": 30, "validation": { "min": 1, "max": 300 } },
-                        { "name": "enabled", "type": "boolean", "label": "启用插件", "default": true },
-                        { "name": "log_level", "type": "select", "label": "日志级别", "options": [{ "label": "调试", "value": "debug" }, { "label": "信息", "value": "info" }, { "label": "警告", "value": "warn" }], "default": "info" },
-                        { "name": "tags", "type": "multiselect", "label": "标签", "options": [{ "label": "生产", "value": "prod" }, { "label": "实验", "value": "exp" }, { "label": "核心", "value": "core" }] },
-                        { "name": "description", "type": "textarea", "label": "描述", "placeholder": "插件描述..." }
-                    ]
-                },
-                "datasourceUri": "/ext/feature_matrix_plugin/config",
-                "writable": true
-            },
-            {
-                "id": "fm_sidebar_entry",
-                "title": "FM 入口",
-                "icon": "🧪",
-                "space": "workspace",
-                "slot": "activity-bar",
-                "order": 5,
-                "widget": "status_card",
-                "props": { "title": "Feature Matrix", "value": "测试插件", "icon": "🧪" }
-            },
-            {
-                "id": "fm_status_bar",
-                "title": "FM 就绪",
-                "space": "dock",
-                "slot": "status",
-                "order": 5,
-                "widget": "status_card",
-                "props": { "title": "Feature Matrix", "color": "var(--ds-status-running, #22D3EE)" }
-            },
-            {
-                "id": "fm_floating_popout",
-                "title": "可弹出浮窗",
-                "icon": "📌",
-                "space": "workspace",
-                "slot": "tab",
-                "order": 85,
-                "widget": "status_card",
-                "props": { "title": "点右上角弹出按钮", "value": "我是可弹出的", "icon": "📌" },
-                "detachable": {
-                    "popout": true,
-                    "childWindow": true,
-                    "desktopWidget": true,
-                    "defaultSize": { "w": 360, "h": 400 },
-                    "alwaysOnTop": false
-                }
-            }
-        ],
-        "commands": [
-            {
-                "id": "fm.hello",
-                "title": "Feature Matrix: 打招呼",
-                "category": "测试",
-                "icon": "👋"
-            }
-        ]
-    },
-    "http_endpoints": [
-        {
-            "route_id": "webview",
-            "method": "GET",
-            "path": "/ext/feature_matrix_plugin/webview",
-            "auth": "none",
-            "handler_capability": "http.handle",
-            "description": "Webview widget HTML"
-        },
-        {
-            "route_id": "wc_demo",
-            "method": "GET",
-            "path": "/ext/feature_matrix_plugin/wc_demo",
-            "auth": "none",
-            "handler_capability": "http.handle",
-            "description": "原 Web Component 演示页的 webview 迁移版 HTML（WebComponentCardHost 已废弃）"
-        },
-        {
-            "route_id": "config",
-            "method": "GET",
-            "path": "/ext/feature_matrix_plugin/config",
-            "auth": "none",
-            "handler_capability": "http.handle",
-            "description": "插件配置数据(GET)"
-        },
-        {
-            "route_id": "config_update",
-            "method": "PUT",
-            "path": "/ext/feature_matrix_plugin/config",
-            "auth": "user",
-            "handler_capability": "http.handle",
-            "description": "插件配置提交(PUT，demo 语义：内存合并不落盘)"
+  "id": "feature_matrix_plugin",
+  "name": "Feature Matrix Plugin",
+  "description": "全功能测试插件:覆盖所有 space/slot/widget 类型/schema 表单/actions/detachable。仅供端到端渲染验证。",
+  "version": "0.1.0",
+  "plugin_type": "system",
+  "language": "python",
+  "host_type": "sidecar",
+  "entry": "python server.py",
+  "capabilities": {
+    "tools": [],
+    "route_signals": [],
+    "lifecycle_hooks": []
+  },
+  "contributes": {
+    "pages": [
+      {
+        "id": "fm_chart",
+        "title": "图表 Widget",
+        "icon": "📊",
+        "space": "workspace",
+        "slot": "tab",
+        "order": 10,
+        "widget": "chart",
+        "props": {
+          "title": "Feature Matrix 图表",
+          "chartType": "bar",
+          "data": {
+            "labels": [
+              "周一",
+              "周二",
+              "周三",
+              "周四",
+              "周五"
+            ],
+            "datasets": [
+              {
+                "label": "调用次数",
+                "data": [
+                  12,
+                  19,
+                  8,
+                  15,
+                  22
+                ],
+                "color": "#22D3EE"
+              }
+            ]
+          }
         }
+      },
+      {
+        "id": "fm_table",
+        "title": "表格 Widget",
+        "icon": "📋",
+        "space": "workspace",
+        "slot": "tab",
+        "order": 20,
+        "widget": "table",
+        "props": {
+          "title": "Feature Matrix 表格",
+          "columns": [
+            {
+              "key": "name",
+              "label": "名称",
+              "sortable": true
+            },
+            {
+              "key": "type",
+              "label": "类型"
+            },
+            {
+              "key": "status",
+              "label": "状态"
+            }
+          ],
+          "data": [
+            {
+              "name": "SchemaDriver",
+              "type": "表单驱动",
+              "status": "✅"
+            },
+            {
+              "name": "PageRenderer",
+              "type": "页面渲染",
+              "status": "✅"
+            },
+            {
+              "name": "WebComponent",
+              "type": "已废弃→迁移 Webview",
+              "status": "✅"
+            },
+            {
+              "name": "WindowManager",
+              "type": "浮窗",
+              "status": "✅"
+            }
+          ]
+        }
+      },
+      {
+        "id": "fm_status_card",
+        "title": "状态卡 Widget",
+        "icon": "📌",
+        "space": "workspace",
+        "slot": "tab",
+        "order": 30,
+        "widget": "status_card",
+        "props": {
+          "title": "基础设施状态",
+          "value": "8/8 断裂点修复",
+          "trend": "↑",
+          "trendValue": "100%",
+          "icon": "✅",
+          "description": "前端能力由后端长出来主链路全通"
+        }
+      },
+      {
+        "id": "fm_digital_human",
+        "title": "数字人形象",
+        "icon": "🤖",
+        "space": "workspace",
+        "slot": "tab",
+        "order": 40,
+        "widget": "digital_human",
+        "props": {
+          "source": "live2d://models/sample.model3.json",
+          "connector": "avatar_connector",
+          "widgetId": "fm_dh_events"
+        }
+      },
+      {
+        "id": "fm_terminal",
+        "title": "终端(骨架)",
+        "icon": "🖥️",
+        "space": "workspace",
+        "slot": "tab",
+        "order": 50,
+        "widget": "terminal",
+        "props": {
+          "pluginId": "feature_matrix_plugin",
+          "terminalId": "fm-term",
+          "title": "插件终端接入点",
+          "cols": 80,
+          "rows": 24
+        }
+      },
+      {
+        "id": "fm_kanban",
+        "title": "看板(骨架)",
+        "icon": "🗂️",
+        "space": "workspace",
+        "slot": "tab",
+        "order": 60,
+        "widget": "kanban",
+        "props": {
+          "title": "任务看板",
+          "pluginId": "feature_matrix_plugin",
+          "columns": [
+            {
+              "id": "todo",
+              "title": "待办"
+            },
+            {
+              "id": "doing",
+              "title": "进行中"
+            },
+            {
+              "id": "done",
+              "title": "已完成"
+            }
+          ],
+          "data": [
+            {
+              "id": "t1",
+              "columnId": "todo",
+              "title": "终端接入 xterm"
+            },
+            {
+              "id": "t2",
+              "columnId": "todo",
+              "title": "看板拖拽 dnd"
+            },
+            {
+              "id": "t3",
+              "columnId": "doing",
+              "title": "形象引擎 Live2D"
+            },
+            {
+              "id": "t4",
+              "columnId": "done",
+              "title": "SchemaDriver"
+            },
+            {
+              "id": "t5",
+              "columnId": "done",
+              "title": "pages 统一模型"
+            }
+          ]
+        }
+      },
+      {
+        "id": "fm_webview",
+        "title": "Webview 沙箱",
+        "icon": "🌐",
+        "space": "workspace",
+        "slot": "tab",
+        "order": 70,
+        "widget": "webview",
+        "props": {
+          "pluginId": "feature_matrix_plugin",
+          "htmlPath": "/webview",
+          "widgetId": "fm_webview_wid"
+        }
+      },
+      {
+        "id": "fm_webcomponent",
+        "title": "Web Component(已迁移)",
+        "icon": "🧩",
+        "space": "workspace",
+        "slot": "tab",
+        "order": 80,
+        "widget": "webview",
+        "props": {
+          "pluginId": "feature_matrix_plugin",
+          "htmlPath": "/wc_demo",
+          "widgetId": "fm_webview_wid_wc"
+        }
+      },
+      {
+        "id": "fm_settings_form",
+        "title": "插件配置(Schema 表单)",
+        "icon": "⚙️",
+        "space": "settings",
+        "slot": "nav",
+        "order": 90,
+        "schema": {
+          "fields": [
+            {
+              "name": "api_endpoint",
+              "type": "string",
+              "label": "API 地址",
+              "required": true,
+              "default": "https://api.example.com"
+            },
+            {
+              "name": "timeout",
+              "type": "number",
+              "label": "超时(秒)",
+              "default": 30,
+              "validation": {
+                "min": 1,
+                "max": 300
+              }
+            },
+            {
+              "name": "enabled",
+              "type": "boolean",
+              "label": "启用插件",
+              "default": true
+            },
+            {
+              "name": "log_level",
+              "type": "select",
+              "label": "日志级别",
+              "options": [
+                {
+                  "label": "调试",
+                  "value": "debug"
+                },
+                {
+                  "label": "信息",
+                  "value": "info"
+                },
+                {
+                  "label": "警告",
+                  "value": "warn"
+                }
+              ],
+              "default": "info"
+            },
+            {
+              "name": "tags",
+              "type": "multiselect",
+              "label": "标签",
+              "options": [
+                {
+                  "label": "生产",
+                  "value": "prod"
+                },
+                {
+                  "label": "实验",
+                  "value": "exp"
+                },
+                {
+                  "label": "核心",
+                  "value": "core"
+                }
+              ]
+            },
+            {
+              "name": "description",
+              "type": "textarea",
+              "label": "描述",
+              "placeholder": "插件描述..."
+            }
+          ]
+        },
+        "datasourceUri": "/ext/feature_matrix_plugin/config",
+        "writable": true
+      },
+      {
+        "id": "fm_sidebar_entry",
+        "title": "FM 入口",
+        "icon": "🧪",
+        "space": "workspace",
+        "slot": "activity-bar",
+        "order": 5,
+        "widget": "status_card",
+        "props": {
+          "title": "Feature Matrix",
+          "value": "测试插件",
+          "icon": "🧪"
+        }
+      },
+      {
+        "id": "fm_status_bar",
+        "title": "FM 就绪",
+        "space": "dock",
+        "slot": "status",
+        "order": 5,
+        "widget": "status_card",
+        "props": {
+          "title": "Feature Matrix",
+          "color": "var(--ds-status-running, #22D3EE)"
+        }
+      },
+      {
+        "id": "fm_floating_popout",
+        "title": "可弹出浮窗",
+        "icon": "📌",
+        "space": "workspace",
+        "slot": "tab",
+        "order": 85,
+        "widget": "status_card",
+        "props": {
+          "title": "点右上角弹出按钮",
+          "value": "我是可弹出的",
+          "icon": "📌"
+        },
+        "detachable": {
+          "popout": true,
+          "childWindow": true,
+          "desktopWidget": true,
+          "defaultSize": {
+            "w": 360,
+            "h": 400
+          },
+          "alwaysOnTop": false
+        }
+      }
+    ],
+    "commands": [
+      {
+        "id": "fm.hello",
+        "title": "Feature Matrix: 打招呼",
+        "category": "测试",
+        "icon": "👋"
+      }
     ]
+  },
+  "http_endpoints": [
+    {
+      "route_id": "webview",
+      "method": "GET",
+      "path": "/ext/feature_matrix_plugin/webview",
+      "auth": "none",
+      "handler_capability": "http.handle",
+      "description": "Webview widget HTML"
+    },
+    {
+      "route_id": "wc_demo",
+      "method": "GET",
+      "path": "/ext/feature_matrix_plugin/wc_demo",
+      "auth": "none",
+      "handler_capability": "http.handle",
+      "description": "原 Web Component 演示页的 webview 迁移版 HTML（WebComponentCardHost 已废弃）"
+    },
+    {
+      "route_id": "config",
+      "method": "GET",
+      "path": "/ext/feature_matrix_plugin/config",
+      "auth": "none",
+      "handler_capability": "http.handle",
+      "description": "插件配置数据(GET)"
+    },
+    {
+      "route_id": "config_update",
+      "method": "PUT",
+      "path": "/ext/feature_matrix_plugin/config",
+      "auth": "user",
+      "handler_capability": "http.handle",
+      "description": "插件配置提交(PUT，demo 语义：内存合并不落盘)"
+    }
+  ]
 }

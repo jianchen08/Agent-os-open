@@ -23,6 +23,7 @@ fn manifest(plugin_id: &str, plugin_type: PluginType, host_type: HostType) -> Pl
     PluginManifest {
         id: plugin_id.to_string(),
         name: plugin_id.to_string(),
+        description: None,
         version: "1.0.0".to_string(),
         plugin_type,
         pipeline_role: None,

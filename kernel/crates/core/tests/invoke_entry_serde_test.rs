@@ -61,6 +61,7 @@ fn test_none_invoke_entry_omitted_in_serialization() {
     let manifest = PluginManifest {
         id: "p".to_string(),
         name: "P".to_string(),
+        description: None,
         version: "1.0.0".to_string(),
         plugin_type: PluginType::Pipeline,
         pipeline_role: None,
@@ -95,11 +96,11 @@ fn test_none_invoke_entry_omitted_in_serialization() {
     );
 }
 
-/// P6：config_refs 字段已删除——manifest 中残留 config_refs 字段不应破坏解析
-/// （serde 默认忽略未知字段），但结构体上不再有该字段。
+/// P6：config_refs 字段已删除——2026-08-18 契约定型改为 `deny_unknown_fields`
+/// 拒绝，残留 config_refs 不再被静默忽略（真实语料确认无插件残留，拒绝不破坏启动）。
 #[test]
 fn test_config_refs_field_removed() {
-    // 旧 manifest 残留 config_refs 字段——serde 忽略未知字段，解析不报错
+    // 旧 manifest 残留 config_refs 字段——现在拒绝
     let json = r#"{
         "id": "legacy",
         "name": "Legacy",
@@ -112,7 +113,11 @@ fn test_config_refs_field_removed() {
         "config_refs": ["models"]
     }"#;
 
-    let manifest: PluginManifest = serde_json::from_str(json).expect("manifest must parse");
-    // config_refs 字段已不存在于结构体——编译期保证，此处只验证解析不崩
-    assert_eq!(manifest.id, "legacy");
+    let err = serde_json::from_str::<PluginManifest>(json)
+        .expect_err("残留未知字段 config_refs 必须拒绝，不再静默忽略");
+    let msg = format!("{err:?}");
+    assert!(
+        msg.contains("config_refs"),
+        "错误应指明被拒绝的未知字段: {msg}"
+    );
 }

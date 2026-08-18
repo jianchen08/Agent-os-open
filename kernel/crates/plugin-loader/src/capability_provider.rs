@@ -273,6 +273,7 @@ mod tests {
         PluginManifest {
             id: id.to_string(),
             name: id.to_string(),
+            description: None,
             version: "1.0.0".to_string(),
             plugin_type: PluginType::System,
             pipeline_role: None,

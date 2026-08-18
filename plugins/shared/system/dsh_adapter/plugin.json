@@ -151,7 +151,6 @@
         "category": "system"
       }
     ],
-    "resources": [],
     "route_signals": [],
     "lifecycle_hooks": [
       "on_load",

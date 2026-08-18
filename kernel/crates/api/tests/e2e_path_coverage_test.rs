@@ -57,6 +57,7 @@ fn manifest_base(plugin_id: &str) -> PluginManifest {
     PluginManifest {
         id: plugin_id.to_string(),
         name: plugin_id.to_string(),
+        description: None,
         version: "1.0.0".to_string(),
         plugin_type: PluginType::System,
         pipeline_role: None,

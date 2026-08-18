@@ -1,56 +1,57 @@
 {
-    "id": "metrics_admin",
-    "name": "Metrics Admin HTTP Face",
-    "description": "指标读面的 HTTP 面层（boot-plugin 第三刀）：/ext/metrics_admin/** 端点经内核 dispatcher 进本插件 http.handle，反向调用内核 metrics-admin capability（查询/枚举/Prometheus 导出，逻辑与鉴权在内核 handler 内）。写面（metrics.record 热路径）仍为内核内置反向调用，不经本插件。鉴权凭证（Authorization 头）由本插件原样转发、内核侧解析，插件不做鉴权决策。内核 /metrics（Prometheus 抓取）作为运维契约保留在内核，不经本插件。",
-    "version": "1.0.0",
-    "plugin_type": "tool",
-    "language": "python",
-    "host_type": "sidecar",
-    "entry": "python server.py",
-    "activation": "eager",
-    "capabilities": {
-        "tools": [
-            {
-                "name": "http.handle",
-                "description": "HTTP endpoint handler for /ext/metrics_admin/**（metrics-admin capability 的 HTTP 面转发层）"
-            },
-            {
-                "name": "metrics_admin.status",
-                "description": "插件状态（capability 句柄是否已注入）"
-            }
-        ],
-        "resources": [],
-        "route_signals": [],
-        "lifecycle_hooks": []
+  "id": "metrics_admin",
+  "name": "Metrics Admin HTTP Face",
+  "description": "指标读面的 HTTP 面层（boot-plugin 第三刀）：/ext/metrics_admin/** 端点经内核 dispatcher 进本插件 http.handle，反向调用内核 metrics-admin capability（查询/枚举/Prometheus 导出，逻辑与鉴权在内核 handler 内）。写面（metrics.record 热路径）仍为内核内置反向调用，不经本插件。鉴权凭证（Authorization 头）由本插件原样转发、内核侧解析，插件不做鉴权决策。内核 /metrics（Prometheus 抓取）作为运维契约保留在内核，不经本插件。",
+  "version": "1.0.0",
+  "plugin_type": "tool",
+  "language": "python",
+  "host_type": "sidecar",
+  "entry": "python server.py",
+  "activation": "eager",
+  "capabilities": {
+    "tools": [
+      {
+        "name": "http.handle",
+        "description": "HTTP endpoint handler for /ext/metrics_admin/**（metrics-admin capability 的 HTTP 面转发层）"
+      },
+      {
+        "name": "metrics_admin.status",
+        "description": "插件状态（capability 句柄是否已注入）"
+      }
+    ],
+    "route_signals": [],
+    "lifecycle_hooks": []
+  },
+  "dependencies": [],
+  "permissions": {},
+  "priority": 50,
+  "granted_capabilities": [
+    "metrics-admin"
+  ],
+  "http_endpoints": [
+    {
+      "route_id": "query",
+      "method": "GET",
+      "path": "/ext/metrics_admin/query",
+      "auth": "admin",
+      "handler_capability": "http.handle",
+      "description": "指标查询：?plugin=&metric=&window=5m/1h/24h&labels=key:value 过滤（原 /api/v1/metrics）"
     },
-    "dependencies": [],
-    "permissions": {},
-    "priority": 50,
-    "granted_capabilities": ["metrics-admin"],
-    "http_endpoints": [
-        {
-            "route_id": "query",
-            "method": "GET",
-            "path": "/ext/metrics_admin/query",
-            "auth": "admin",
-            "handler_capability": "http.handle",
-            "description": "指标查询：?plugin=&metric=&window=5m/1h/24h&labels=key:value 过滤（原 /api/v1/metrics）"
-        },
-        {
-            "route_id": "series",
-            "method": "GET",
-            "path": "/ext/metrics_admin/series",
-            "auth": "admin",
-            "handler_capability": "http.handle",
-            "description": "series 元信息枚举（不带 samples 的目录面）"
-        },
-        {
-            "route_id": "prometheus",
-            "method": "GET",
-            "path": "/ext/metrics_admin/prometheus",
-            "auth": "admin",
-            "handler_capability": "http.handle",
-            "description": "Prometheus exposition format 导出（text/plain；内核 /metrics 仍保留）"
-        }
-    ]
+    {
+      "route_id": "series",
+      "method": "GET",
+      "path": "/ext/metrics_admin/series",
+      "auth": "admin",
+      "handler_capability": "http.handle",
+      "description": "series 元信息枚举（不带 samples 的目录面）"
+    },
+    {
+      "route_id": "prometheus",
+      "method": "GET",
+      "path": "/ext/metrics_admin/prometheus",
+      "auth": "admin",
+      "handler_capability": "http.handle",
+      "description": "Prometheus exposition format 导出（text/plain；内核 /metrics 仍保留）"
+    }
+  ]
 }

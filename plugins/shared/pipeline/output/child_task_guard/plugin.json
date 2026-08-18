@@ -1,25 +1,24 @@
 {
-    "id": "pipeline_child_task_guard",
-    "name": "Child Task Guard",
-    "version": "1.0.0",
-    "plugin_type": "pipeline",
-    "language": "python",
-    "host_type": "sidecar",
-    "entry": "python server.py",
-    "invoke_entry": "child_task_guard.execute",
-    "capabilities": {
-        "tools": [],
-        "resources": [],
-        "route_signals": [],
-        "lifecycle_hooks": [
-            "on_load",
-            "on_unload"
-        ]
-    },
-    "dependencies": [],
-    "permissions": {},
-    "priority": 50,
-    "granted_capabilities": [
-        "pipeline-state"
+  "id": "pipeline_child_task_guard",
+  "name": "Child Task Guard",
+  "version": "1.0.0",
+  "plugin_type": "pipeline",
+  "language": "python",
+  "host_type": "sidecar",
+  "entry": "python server.py",
+  "invoke_entry": "child_task_guard.execute",
+  "capabilities": {
+    "tools": [],
+    "route_signals": [],
+    "lifecycle_hooks": [
+      "on_load",
+      "on_unload"
     ]
+  },
+  "dependencies": [],
+  "permissions": {},
+  "priority": 50,
+  "granted_capabilities": [
+    "pipeline-state"
+  ]
 }

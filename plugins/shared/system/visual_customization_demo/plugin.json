@@ -1,63 +1,66 @@
 {
-    "id": "visual_customization_demo",
-    "name": "Visual Customization Demo",
-    "description": "示范插件：演示插件前端定制化（contributes.themes 主题包 + contributes.client_styles CSS 注入）。金色蕾丝主题（纯 CSS 变量键值对，无 JS 执行）+ 金色蕾丝边框装饰 CSS（经内核 /ext/{pluginId}/assets/ 静态直出）。仅供端到端验证，无业务逻辑。",
-    "version": "0.1.0",
-    "plugin_type": "system",
-    "language": "python",
-    "host_type": "sidecar",
-    "entry": "python server.py",
-    "capabilities": {
-        "tools": [],
-        "resources": [],
-        "route_signals": [],
-        "lifecycle_hooks": []
-    },
-    "contributes": {
-        "themes": [
-            {
-                "id": "gold-lace",
-                "name": "金色蕾丝",
-                "description": "金色蕾丝：香槟金强调色 + 暖金面板底色（演示 contributes.themes）",
-                "base": "dark",
-                "variables": {
-                    "--ds-accent-primary": "#D4AF37",
-                    "--ds-accent-ai": "#E8C56A",
-                    "--ds-accent-glow": "#D4AF37",
-                    "--ds-bg-canvas": "#17120A",
-                    "--ds-bg-panel": "rgba(40, 35, 20, 0.92)",
-                    "--ds-bg-elevated": "#2B2413",
-                    "--ds-bg-hover": "rgba(212, 175, 55, 0.08)",
-                    "--ds-border-subtle": "rgba(212, 175, 55, 0.28)",
-                    "--ds-border-active": "#D4AF37",
-                    "--ds-border-strong": "rgba(212, 175, 55, 0.55)",
-                    "--ds-text-primary": "#F5EECB",
-                    "--ds-text-secondary": "#D8C98F",
-                    "--ds-text-muted": "#A89A6B",
-                    "--ds-r-md": "10px",
-                    "--ds-r-lg": "14px",
-                    "--accent-running": "#D4AF37",
-                    "--accent-waiting": "#B8860B",
-                    "--shadow-glow-running": "rgba(212, 175, 55, 0.45)",
-                    "--shadow-glow-waiting": "rgba(184, 134, 11, 0.35)",
-                    "--btn-primary-bg": "#B8860B",
-                    "--btn-primary-text": "#FFF9E6",
-                    "--btn-primary-border": "#D4AF37",
-                    "--btn-primary-hover-bg": "#D4AF37"
-                },
-                "backgrounds": {
-                    "image": { "enabled": false },
-                    "texture": { "enabled": false }
-                }
-            }
-        ],
-        "client_styles": [
-            {
-                "id": "gold-lace-border",
-                "path": "/assets/border.css",
-                "scope": "global",
-                "description": "金色蕾丝边框（视口装饰框，引用 var(--ds-*) 跟随主题切换）"
-            }
-        ]
-    }
+  "id": "visual_customization_demo",
+  "name": "Visual Customization Demo",
+  "description": "示范插件：演示插件前端定制化（contributes.themes 主题包 + contributes.client_styles CSS 注入）。金色蕾丝主题（纯 CSS 变量键值对，无 JS 执行）+ 金色蕾丝边框装饰 CSS（经内核 /ext/{pluginId}/assets/ 静态直出）。仅供端到端验证，无业务逻辑。",
+  "version": "0.1.0",
+  "plugin_type": "system",
+  "language": "python",
+  "host_type": "sidecar",
+  "entry": "python server.py",
+  "capabilities": {
+    "tools": [],
+    "route_signals": [],
+    "lifecycle_hooks": []
+  },
+  "contributes": {
+    "themes": [
+      {
+        "id": "gold-lace",
+        "name": "金色蕾丝",
+        "description": "金色蕾丝：香槟金强调色 + 暖金面板底色（演示 contributes.themes）",
+        "base": "dark",
+        "variables": {
+          "--ds-accent-primary": "#D4AF37",
+          "--ds-accent-ai": "#E8C56A",
+          "--ds-accent-glow": "#D4AF37",
+          "--ds-bg-canvas": "#17120A",
+          "--ds-bg-panel": "rgba(40, 35, 20, 0.92)",
+          "--ds-bg-elevated": "#2B2413",
+          "--ds-bg-hover": "rgba(212, 175, 55, 0.08)",
+          "--ds-border-subtle": "rgba(212, 175, 55, 0.28)",
+          "--ds-border-active": "#D4AF37",
+          "--ds-border-strong": "rgba(212, 175, 55, 0.55)",
+          "--ds-text-primary": "#F5EECB",
+          "--ds-text-secondary": "#D8C98F",
+          "--ds-text-muted": "#A89A6B",
+          "--ds-r-md": "10px",
+          "--ds-r-lg": "14px",
+          "--accent-running": "#D4AF37",
+          "--accent-waiting": "#B8860B",
+          "--shadow-glow-running": "rgba(212, 175, 55, 0.45)",
+          "--shadow-glow-waiting": "rgba(184, 134, 11, 0.35)",
+          "--btn-primary-bg": "#B8860B",
+          "--btn-primary-text": "#FFF9E6",
+          "--btn-primary-border": "#D4AF37",
+          "--btn-primary-hover-bg": "#D4AF37"
+        },
+        "backgrounds": {
+          "image": {
+            "enabled": false
+          },
+          "texture": {
+            "enabled": false
+          }
+        }
+      }
+    ],
+    "client_styles": [
+      {
+        "id": "gold-lace-border",
+        "path": "/assets/border.css",
+        "scope": "global",
+        "description": "金色蕾丝边框（视口装饰框，引用 var(--ds-*) 跟随主题切换）"
+      }
+    ]
+  }
 }

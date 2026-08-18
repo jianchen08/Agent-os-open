@@ -1,25 +1,24 @@
 {
-    "id": "pipeline_workspace_lifecycle",
-    "name": "Workspace Lifecycle",
-    "version": "1.0.0",
-    "plugin_type": "pipeline",
-    "language": "python",
-    "host_type": "sidecar",
-    "entry": "python server.py",
-    "invoke_entry": "workspace_lifecycle.execute",
-    "capabilities": {
-        "tools": [],
-        "resources": [],
-        "route_signals": [],
-        "lifecycle_hooks": [
-            "on_load",
-            "on_unload"
-        ]
-    },
-    "dependencies": [],
-    "permissions": {},
-    "priority": 5,
-    "granted_capabilities": [
-        "pipeline-state"
+  "id": "pipeline_workspace_lifecycle",
+  "name": "Workspace Lifecycle",
+  "version": "1.0.0",
+  "plugin_type": "pipeline",
+  "language": "python",
+  "host_type": "sidecar",
+  "entry": "python server.py",
+  "invoke_entry": "workspace_lifecycle.execute",
+  "capabilities": {
+    "tools": [],
+    "route_signals": [],
+    "lifecycle_hooks": [
+      "on_load",
+      "on_unload"
     ]
+  },
+  "dependencies": [],
+  "permissions": {},
+  "priority": 5,
+  "granted_capabilities": [
+    "pipeline-state"
+  ]
 }

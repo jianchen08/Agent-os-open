@@ -89,6 +89,7 @@ fn test_empty_http_endpoints_omitted_in_serialization() {
     let manifest = PluginManifest {
         id: "p".to_string(),
         name: "P".to_string(),
+        description: None,
         version: "1.0.0".to_string(),
         plugin_type: PluginType::System,
         pipeline_role: None,

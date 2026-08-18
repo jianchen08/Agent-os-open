@@ -773,9 +773,14 @@ pub struct PluginLifecycle {
 /// **ADR ⑦ 新增**：`requires_content` 字段声明插件需要的最近消息条数，
 /// 引擎据此从 blobs 表按需加载消息内容。
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct PluginManifest {
     pub id: String,
     pub name: String,
+    /// 插件人读描述。2026-08-18 契约定型：此前 38 个真实插件声明的顶层
+    /// `description` 因 struct 无此字段被 serde 静默丢弃——现成为真字段。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
     pub version: String,
     pub plugin_type: PluginType,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1151,6 +1156,7 @@ pub struct NativeArtifact {
 
 /// Manifest 能力声明（运行时表示）。
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ManifestCapabilities {
     /// 给 LLM 的工具声明——**声明即注册**（D.6 槽位拆分）：
     /// 不按 plugin_type 门控，任何类型插件声明 tools 即进

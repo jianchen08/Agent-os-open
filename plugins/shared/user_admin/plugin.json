@@ -1,64 +1,65 @@
 {
-    "id": "user_admin",
-    "name": "User Admin HTTP Face",
-    "description": "用户管理策略面的 HTTP 面层（boot-plugin 第二刀）：/ext/user_admin/** 端点经内核 dispatcher 进本插件 http.handle，反向调用内核 user-admin capability（用户列表/改角色/改租户/删用户；auth 执行门 login/logout/me/register/refresh 永留内核不动）。鉴权凭证（Authorization 头）由本插件原样转发、内核侧解析（admin 角色 + self-service 防护），插件不做鉴权决策。",
-    "version": "1.0.0",
-    "plugin_type": "tool",
-    "language": "python",
-    "host_type": "sidecar",
-    "entry": "python server.py",
-    "activation": "eager",
-    "capabilities": {
-        "tools": [
-            {
-                "name": "http.handle",
-                "description": "HTTP endpoint handler for /ext/user_admin/**（user-admin capability 的 HTTP 面转发层）"
-            },
-            {
-                "name": "user_admin.status",
-                "description": "插件状态（capability 句柄是否已注入）"
-            }
-        ],
-        "resources": [],
-        "route_signals": [],
-        "lifecycle_hooks": []
+  "id": "user_admin",
+  "name": "User Admin HTTP Face",
+  "description": "用户管理策略面的 HTTP 面层（boot-plugin 第二刀）：/ext/user_admin/** 端点经内核 dispatcher 进本插件 http.handle，反向调用内核 user-admin capability（用户列表/改角色/改租户/删用户；auth 执行门 login/logout/me/register/refresh 永留内核不动）。鉴权凭证（Authorization 头）由本插件原样转发、内核侧解析（admin 角色 + self-service 防护），插件不做鉴权决策。",
+  "version": "1.0.0",
+  "plugin_type": "tool",
+  "language": "python",
+  "host_type": "sidecar",
+  "entry": "python server.py",
+  "activation": "eager",
+  "capabilities": {
+    "tools": [
+      {
+        "name": "http.handle",
+        "description": "HTTP endpoint handler for /ext/user_admin/**（user-admin capability 的 HTTP 面转发层）"
+      },
+      {
+        "name": "user_admin.status",
+        "description": "插件状态（capability 句柄是否已注入）"
+      }
+    ],
+    "route_signals": [],
+    "lifecycle_hooks": []
+  },
+  "dependencies": [],
+  "permissions": {},
+  "priority": 50,
+  "granted_capabilities": [
+    "user-admin"
+  ],
+  "http_endpoints": [
+    {
+      "route_id": "users",
+      "method": "GET",
+      "path": "/ext/user_admin/users",
+      "auth": "admin",
+      "handler_capability": "http.handle",
+      "description": "列全部用户（不含密码；仅 admin）"
     },
-    "dependencies": [],
-    "permissions": {},
-    "priority": 50,
-    "granted_capabilities": ["user-admin"],
-    "http_endpoints": [
-        {
-            "route_id": "users",
-            "method": "GET",
-            "path": "/ext/user_admin/users",
-            "auth": "admin",
-            "handler_capability": "http.handle",
-            "description": "列全部用户（不含密码；仅 admin）"
-        },
-        {
-            "route_id": "user_role_update",
-            "method": "PATCH",
-            "path": "/ext/user_admin/users/{user_id}/role",
-            "auth": "admin",
-            "handler_capability": "http.handle",
-            "description": "改用户角色（body: {role: admin|user}；内核侧校验 admin 角色 + 不能改自己）"
-        },
-        {
-            "route_id": "user_tenant_update",
-            "method": "PATCH",
-            "path": "/ext/user_admin/users/{user_id}/tenant",
-            "auth": "admin",
-            "handler_capability": "http.handle",
-            "description": "改用户归属租户（body: {tenant_id}；内核侧校验 admin 角色 + 不能改自己）"
-        },
-        {
-            "route_id": "user_delete",
-            "method": "DELETE",
-            "path": "/ext/user_admin/users/{user_id}",
-            "auth": "admin",
-            "handler_capability": "http.handle",
-            "description": "删用户（内核侧校验 admin 角色 + 不能删自己，防锁死系统）"
-        }
-    ]
+    {
+      "route_id": "user_role_update",
+      "method": "PATCH",
+      "path": "/ext/user_admin/users/{user_id}/role",
+      "auth": "admin",
+      "handler_capability": "http.handle",
+      "description": "改用户角色（body: {role: admin|user}；内核侧校验 admin 角色 + 不能改自己）"
+    },
+    {
+      "route_id": "user_tenant_update",
+      "method": "PATCH",
+      "path": "/ext/user_admin/users/{user_id}/tenant",
+      "auth": "admin",
+      "handler_capability": "http.handle",
+      "description": "改用户归属租户（body: {tenant_id}；内核侧校验 admin 角色 + 不能改自己）"
+    },
+    {
+      "route_id": "user_delete",
+      "method": "DELETE",
+      "path": "/ext/user_admin/users/{user_id}",
+      "auth": "admin",
+      "handler_capability": "http.handle",
+      "description": "删用户（内核侧校验 admin 角色 + 不能删自己，防锁死系统）"
+    }
+  ]
 }

@@ -1,111 +1,110 @@
 {
-    "id": "simple_tools",
-    "name": "Simple Tools Plugin",
-    "description": "简单工具集 MCP 插件（11个纯函数工具：单位换算/计算器/YAML校验等）",
-    "version": "1.0.0",
-    "plugin_type": "tool",
-    "language": "python",
-    "host_type": "sidecar",
-    "entry": "python server.py",
-    "capabilities": {
-        "tools": [
-            {
-                "name": "unit_converter",
-                "description": "单位换算工具（长度/重量/温度）",
-                "render": {
-                    "card": "form",
-                    "title": "单位换算"
-                }
-            },
-            {
-                "name": "scientific_calculator",
-                "description": "科学计算器（三角函数/对数/幂运算等）",
-                "render": {
-                    "card": "form",
-                    "title": "科学计算"
-                }
-            },
-            {
-                "name": "yaml_validate",
-                "description": "YAML 配置文件格式校验",
-                "render": {
-                    "card": "form",
-                    "title": "YAML 校验"
-                }
-            },
-            {
-                "name": "binary_converter",
-                "description": "二进制文件转 Markdown（PDF/DOCX/图片等）",
-                "render": {
-                    "card": "form",
-                    "title": "文件转 Markdown"
-                }
-            },
-            {
-                "name": "ide_get_selection",
-                "description": "获取当前 IDE 中的上下文信息",
-                "render": {
-                    "card": "form",
-                    "title": "获取 IDE 选区"
-                }
-            },
-            {
-                "name": "ide_open_file",
-                "description": "在 IDE 中打开指定文件",
-                "render": {
-                    "card": "form",
-                    "title": "IDE 打开文件"
-                }
-            },
-            {
-                "name": "ide_show_diff",
-                "description": "在 IDE 中显示文件差异",
-                "render": {
-                    "card": "form",
-                    "title": "IDE 展示差异"
-                }
-            },
-            {
-                "name": "state_update",
-                "description": "更新工作流共享状态变量",
-                "render": {
-                    "card": "form",
-                    "title": "状态更新"
-                }
-            },
-            {
-                "name": "compatibility_checker",
-                "description": "检查资源修改兼容性，识别破坏性变更",
-                "render": {
-                    "card": "form",
-                    "title": "兼容性检查"
-                }
-            },
-            {
-                "name": "read_execution_detail",
-                "description": "查看管道执行详细记录（渐进式披露）",
-                "render": {
-                    "card": "form",
-                    "title": "执行详情"
-                }
-            },
-            {
-                "name": "register_resource",
-                "description": "动态注册 Agent/工具/模板到系统",
-                "render": {
-                    "card": "form",
-                    "title": "注册资源"
-                }
-            }
-        ],
-        "resources": [],
-        "route_signals": [],
-        "lifecycle_hooks": [
-            "on_load",
-            "on_unload"
-        ]
-    },
-    "dependencies": [],
-    "permissions": {},
-    "priority": 50
+  "id": "simple_tools",
+  "name": "Simple Tools Plugin",
+  "description": "简单工具集 MCP 插件（11个纯函数工具：单位换算/计算器/YAML校验等）",
+  "version": "1.0.0",
+  "plugin_type": "tool",
+  "language": "python",
+  "host_type": "sidecar",
+  "entry": "python server.py",
+  "capabilities": {
+    "tools": [
+      {
+        "name": "unit_converter",
+        "description": "单位换算工具（长度/重量/温度）",
+        "render": {
+          "card": "form",
+          "title": "单位换算"
+        }
+      },
+      {
+        "name": "scientific_calculator",
+        "description": "科学计算器（三角函数/对数/幂运算等）",
+        "render": {
+          "card": "form",
+          "title": "科学计算"
+        }
+      },
+      {
+        "name": "yaml_validate",
+        "description": "YAML 配置文件格式校验",
+        "render": {
+          "card": "form",
+          "title": "YAML 校验"
+        }
+      },
+      {
+        "name": "binary_converter",
+        "description": "二进制文件转 Markdown（PDF/DOCX/图片等）",
+        "render": {
+          "card": "form",
+          "title": "文件转 Markdown"
+        }
+      },
+      {
+        "name": "ide_get_selection",
+        "description": "获取当前 IDE 中的上下文信息",
+        "render": {
+          "card": "form",
+          "title": "获取 IDE 选区"
+        }
+      },
+      {
+        "name": "ide_open_file",
+        "description": "在 IDE 中打开指定文件",
+        "render": {
+          "card": "form",
+          "title": "IDE 打开文件"
+        }
+      },
+      {
+        "name": "ide_show_diff",
+        "description": "在 IDE 中显示文件差异",
+        "render": {
+          "card": "form",
+          "title": "IDE 展示差异"
+        }
+      },
+      {
+        "name": "state_update",
+        "description": "更新工作流共享状态变量",
+        "render": {
+          "card": "form",
+          "title": "状态更新"
+        }
+      },
+      {
+        "name": "compatibility_checker",
+        "description": "检查资源修改兼容性，识别破坏性变更",
+        "render": {
+          "card": "form",
+          "title": "兼容性检查"
+        }
+      },
+      {
+        "name": "read_execution_detail",
+        "description": "查看管道执行详细记录（渐进式披露）",
+        "render": {
+          "card": "form",
+          "title": "执行详情"
+        }
+      },
+      {
+        "name": "register_resource",
+        "description": "动态注册 Agent/工具/模板到系统",
+        "render": {
+          "card": "form",
+          "title": "注册资源"
+        }
+      }
+    ],
+    "route_signals": [],
+    "lifecycle_hooks": [
+      "on_load",
+      "on_unload"
+    ]
+  },
+  "dependencies": [],
+  "permissions": {},
+  "priority": 50
 }

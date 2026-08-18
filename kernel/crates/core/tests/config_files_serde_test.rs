@@ -38,9 +38,9 @@ fn test_manifest_deserializes_config_files() {
     );
 }
 
-/// 未声明 config_files 的旧 manifest 应向后兼容（config_files 为空 vec）。
-/// P6：config_refs 字段已删除，但 manifest 残留的 config_refs 字段不破坏解析
-/// （serde 默认忽略未知字段）。
+/// 未声明 config_files 的 manifest 应默认空；但残留的 `config_refs` 已是非契约
+/// 未知字段（P6 删除后）——2026-08-18 契约定型改为 `deny_unknown_fields` 拒绝，
+/// 不再"声明了却静默忽略"（真实语料扫描确认无插件残留 config_refs，拒绝不破坏启动）。
 #[test]
 fn test_manifest_without_config_files_defaults_empty() {
     let json = r#"{
@@ -55,14 +55,13 @@ fn test_manifest_without_config_files_defaults_empty() {
         "config_refs": ["memory_storage"]
     }"#;
 
-    let manifest: PluginManifest = serde_json::from_str(json).expect("manifest must parse");
-
+    let err = serde_json::from_str::<PluginManifest>(json)
+        .expect_err("残留未知字段 config_refs 必须拒绝，不再静默忽略");
+    let msg = format!("{err:?}");
     assert!(
-        manifest.config_files.is_empty(),
-        "missing config_files defaults to empty"
+        msg.contains("config_refs"),
+        "错误应指明被拒绝的未知字段: {msg}"
     );
-    // P6: config_refs 字段已从结构体删除——编译期保证不再可访问。
-    // 残留的 config_refs JSON 字段被 serde 忽略（向后兼容旧 manifest 文件）。
 }
 
 /// P6：config_files + invoke_entry 可并存（pipeline 插件既有配置映射又有 MCP 入口）。
@@ -99,6 +98,7 @@ fn test_empty_config_files_omitted_in_serialization() {
     let manifest = PluginManifest {
         id: "p".to_string(),
         name: "P".to_string(),
+        description: None,
         version: "1.0.0".to_string(),
         plugin_type: PluginType::System,
         pipeline_role: None,

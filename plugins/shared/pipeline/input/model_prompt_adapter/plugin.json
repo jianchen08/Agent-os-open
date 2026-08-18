@@ -1,33 +1,32 @@
 {
-    "id": "pipeline_model_prompt_adapter",
-    "name": "Model Prompt Adapter",
-    "description": "按模型/状态路由的消息注入规则执行器（DeepSeek 思维链 few-shot 等模型适配，rules.yaml 配置驱动）",
-    "version": "1.0.0",
-    "plugin_type": "pipeline",
-    "language": "python",
-    "host_type": "sidecar",
-    "entry": "python server.py",
-    "invoke_entry": "model_prompt_adapter.execute",
-    "lifecycle": {
-        "idle_timeout_secs": 0
-    },
-    "config_files": [
-        {
-            "id": "adapter",
-            "path": "config/plugins/model_prompt_adapter.yaml",
-            "label": "模型适配插件配置"
-        }
-    ],
-    "capabilities": {
-        "tools": [],
-        "resources": [],
-        "route_signals": [],
-        "lifecycle_hooks": [
-            "on_load",
-            "on_unload"
-        ]
-    },
-    "dependencies": [],
-    "permissions": {},
-    "priority": 55
+  "id": "pipeline_model_prompt_adapter",
+  "name": "Model Prompt Adapter",
+  "description": "按模型/状态路由的消息注入规则执行器（DeepSeek 思维链 few-shot 等模型适配，rules.yaml 配置驱动）",
+  "version": "1.0.0",
+  "plugin_type": "pipeline",
+  "language": "python",
+  "host_type": "sidecar",
+  "entry": "python server.py",
+  "invoke_entry": "model_prompt_adapter.execute",
+  "lifecycle": {
+    "idle_timeout_secs": 0
+  },
+  "config_files": [
+    {
+      "id": "adapter",
+      "path": "config/plugins/model_prompt_adapter.yaml",
+      "label": "模型适配插件配置"
+    }
+  ],
+  "capabilities": {
+    "tools": [],
+    "route_signals": [],
+    "lifecycle_hooks": [
+      "on_load",
+      "on_unload"
+    ]
+  },
+  "dependencies": [],
+  "permissions": {},
+  "priority": 55
 }

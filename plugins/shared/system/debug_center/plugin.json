@@ -1,31 +1,30 @@
 {
-    "id": "debug_center",
-    "name": "Debug Center",
-    "description": "调试中心页面插件（纯声明）：侧边栏贡献单一「调试」入口（contributes.pages，仅管理员可见 when: user.role == 'admin'），打开后为工作区面板（widget: debug_center_hub），内部切换 6 个调试页面——数据库管理/执行记录/会话/任务/用户/评估指标。页面数据经各数据源插件 HTTP 面获取（/ext/db_admin|channel_api|monitoring|evaluation_service/*），本插件无运行时能力，仅声明页面。",
-    "version": "0.2.0",
-    "plugin_type": "system",
-    "language": "python",
-    "host_type": "sidecar",
-    "entry": "python server.py",
-    "capabilities": {
-        "tools": [],
-        "resources": [],
-        "route_signals": [],
-        "lifecycle_hooks": []
-    },
-    "contributes": {
-        "pages": [
-            {
-                "id": "debug_center_hub",
-                "title": "调试",
-                "icon": "🛠️",
-                "space": "workspace",
-                "slot": "activity-bar",
-                "order": 10,
-                "widget": "debug_center_hub",
-                "when": "user.role == 'admin'",
-                "description": "调试中心（仅管理员）：数据库管理/执行记录/会话/任务/用户/评估指标"
-            }
-        ]
-    }
+  "id": "debug_center",
+  "name": "Debug Center",
+  "description": "调试中心页面插件（纯声明）：侧边栏贡献单一「调试」入口（contributes.pages，仅管理员可见 when: user.role == 'admin'），打开后为工作区面板（widget: debug_center_hub），内部切换 6 个调试页面——数据库管理/执行记录/会话/任务/用户/评估指标。页面数据经各数据源插件 HTTP 面获取（/ext/db_admin|channel_api|monitoring|evaluation_service/*），本插件无运行时能力，仅声明页面。",
+  "version": "0.2.0",
+  "plugin_type": "system",
+  "language": "python",
+  "host_type": "sidecar",
+  "entry": "python server.py",
+  "capabilities": {
+    "tools": [],
+    "route_signals": [],
+    "lifecycle_hooks": []
+  },
+  "contributes": {
+    "pages": [
+      {
+        "id": "debug_center_hub",
+        "title": "调试",
+        "icon": "🛠️",
+        "space": "workspace",
+        "slot": "activity-bar",
+        "order": 10,
+        "widget": "debug_center_hub",
+        "when": "user.role == 'admin'",
+        "description": "调试中心（仅管理员）：数据库管理/执行记录/会话/任务/用户/评估指标"
+      }
+    ]
+  }
 }

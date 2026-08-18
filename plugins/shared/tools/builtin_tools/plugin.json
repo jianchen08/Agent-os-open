@@ -1,144 +1,143 @@
 {
-    "id": "agentos-builtin-tools",
-    "name": "Builtin Tools",
-    "description": "10 个高频内置工具（文件读写/shell/搜索/目录/Web 操作）MCP 封装",
-    "version": "1.0.0",
-    "plugin_type": "tool",
-    "language": "python",
-    "host_type": "sidecar",
-    "entry": "python server.py",
-    "capabilities": {
-        "tools": [
-            {
-                "name": "file_read",
-                "description": "读取文件内容",
-                "render": {
-                    "card": "read"
-                }
+  "id": "agentos-builtin-tools",
+  "name": "Builtin Tools",
+  "description": "10 个高频内置工具（文件读写/shell/搜索/目录/Web 操作）MCP 封装",
+  "version": "1.0.0",
+  "plugin_type": "tool",
+  "language": "python",
+  "host_type": "sidecar",
+  "entry": "python server.py",
+  "capabilities": {
+    "tools": [
+      {
+        "name": "file_read",
+        "description": "读取文件内容",
+        "render": {
+          "card": "read"
+        }
+      },
+      {
+        "name": "file_write",
+        "description": "写入/编辑文件",
+        "ui": {
+          "chat_card": {
+            "icon": "edit",
+            "title": "写入 {{args.path | basename | default:file_write}}",
+            "filePathSource": "args.path",
+            "diffStat": {
+              "addedSource": "output.added || result.added",
+              "removedSource": "output.removed || result.removed"
             },
-            {
-                "name": "file_write",
-                "description": "写入/编辑文件",
-                "ui": {
-                    "chat_card": {
-                        "icon": "edit",
-                        "title": "写入 {{args.path | basename | default:file_write}}",
-                        "filePathSource": "args.path",
-                        "diffStat": {
-                            "addedSource": "output.added || result.added",
-                            "removedSource": "output.removed || result.removed"
-                        },
-                        "blocks": [
-                            {
-                                "type": "code",
-                                "label": "文件路径",
-                                "source": "args.path",
-                                "collapsible": false
-                            },
-                            {
-                                "type": "diff",
-                                "label": "差异对比",
-                                "diffOldSource": "output.old_content || result.old_content",
-                                "diffNewSource": "output.new_content || result.new_content",
-                                "collapsible": true,
-                                "defaultExpanded": true
-                            },
-                            {
-                                "type": "code",
-                                "id": "content",
-                                "label": "写入内容",
-                                "source": "args.content",
-                                "unless": "output.old_content || result.old_content",
-                                "collapsible": true,
-                                "defaultExpanded": false
-                            }
-                        ],
-                        "actions": [
-                            {
-                                "id": "open_file",
-                                "label": "打开文件",
-                                "on_click": {
-                                    "action": "open_file",
-                                    "value": "{{args.path}}"
-                                }
-                            },
-                            {
-                                "id": "copy_content",
-                                "label": "复制内容",
-                                "on_click": {
-                                    "action": "copy",
-                                    "value": "{{args.content}}"
-                                }
-                            }
-                        ]
-                    }
+            "blocks": [
+              {
+                "type": "code",
+                "label": "文件路径",
+                "source": "args.path",
+                "collapsible": false
+              },
+              {
+                "type": "diff",
+                "label": "差异对比",
+                "diffOldSource": "output.old_content || result.old_content",
+                "diffNewSource": "output.new_content || result.new_content",
+                "collapsible": true,
+                "defaultExpanded": true
+              },
+              {
+                "type": "code",
+                "id": "content",
+                "label": "写入内容",
+                "source": "args.content",
+                "unless": "output.old_content || result.old_content",
+                "collapsible": true,
+                "defaultExpanded": false
+              }
+            ],
+            "actions": [
+              {
+                "id": "open_file",
+                "label": "打开文件",
+                "on_click": {
+                  "action": "open_file",
+                  "value": "{{args.path}}"
                 }
-            },
-            {
-                "name": "bash_execute",
-                "description": "执行 Shell 命令",
-                "render": {
-                    "card": "terminal"
+              },
+              {
+                "id": "copy_content",
+                "label": "复制内容",
+                "on_click": {
+                  "action": "copy",
+                  "value": "{{args.content}}"
                 }
-            },
-            {
-                "name": "enhanced_search",
-                "description": "代码/文件搜索",
-                "render": {
-                    "card": "search"
-                }
-            },
-            {
-                "name": "list_directory",
-                "description": "目录列举",
-                "render": {
-                    "card": "table"
-                }
-            },
-            {
-                "name": "create_directory",
-                "description": "创建目录",
-                "render": {
-                    "card": "file"
-                }
-            },
-            {
-                "name": "copy_file",
-                "description": "复制文件",
-                "render": {
-                    "card": "form"
-                }
-            },
-            {
-                "name": "move_file",
-                "description": "移动文件",
-                "render": {
-                    "card": "form"
-                }
-            },
-            {
-                "name": "delete_file",
-                "description": "删除文件",
-                "render": {
-                    "card": "form"
-                }
-            },
-            {
-                "name": "web_operate",
-                "description": "Web 操作",
-                "render": {
-                    "card": "web"
-                }
-            }
-        ],
-        "resources": [],
-        "route_signals": [],
-        "lifecycle_hooks": [
-            "on_load",
-            "on_unload"
-        ]
-    },
-    "dependencies": [],
-    "permissions": {},
-    "priority": 40
+              }
+            ]
+          }
+        }
+      },
+      {
+        "name": "bash_execute",
+        "description": "执行 Shell 命令",
+        "render": {
+          "card": "terminal"
+        }
+      },
+      {
+        "name": "enhanced_search",
+        "description": "代码/文件搜索",
+        "render": {
+          "card": "search"
+        }
+      },
+      {
+        "name": "list_directory",
+        "description": "目录列举",
+        "render": {
+          "card": "table"
+        }
+      },
+      {
+        "name": "create_directory",
+        "description": "创建目录",
+        "render": {
+          "card": "file"
+        }
+      },
+      {
+        "name": "copy_file",
+        "description": "复制文件",
+        "render": {
+          "card": "form"
+        }
+      },
+      {
+        "name": "move_file",
+        "description": "移动文件",
+        "render": {
+          "card": "form"
+        }
+      },
+      {
+        "name": "delete_file",
+        "description": "删除文件",
+        "render": {
+          "card": "form"
+        }
+      },
+      {
+        "name": "web_operate",
+        "description": "Web 操作",
+        "render": {
+          "card": "web"
+        }
+      }
+    ],
+    "route_signals": [],
+    "lifecycle_hooks": [
+      "on_load",
+      "on_unload"
+    ]
+  },
+  "dependencies": [],
+  "permissions": {},
+  "priority": 40
 }

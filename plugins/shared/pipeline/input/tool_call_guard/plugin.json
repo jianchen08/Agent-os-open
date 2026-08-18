@@ -1,22 +1,23 @@
 {
-    "id": "pipeline_tool_call_guard",
-    "name": "Tool Call Guard",
-    "version": "1.0.0",
-    "plugin_type": "pipeline",
-    "language": "python",
-    "host_type": "sidecar",
-    "entry": "python server.py",
-    "invoke_entry": "tool_call_guard.execute",
-    "capabilities": {
-        "tools": [],
-        "resources": [],
-        "route_signals": ["next_llm"],
-        "lifecycle_hooks": [
-            "on_load",
-            "on_unload"
-        ]
-    },
-    "dependencies": [],
-    "permissions": {},
-    "priority": 15
+  "id": "pipeline_tool_call_guard",
+  "name": "Tool Call Guard",
+  "version": "1.0.0",
+  "plugin_type": "pipeline",
+  "language": "python",
+  "host_type": "sidecar",
+  "entry": "python server.py",
+  "invoke_entry": "tool_call_guard.execute",
+  "capabilities": {
+    "tools": [],
+    "route_signals": [
+      "next_llm"
+    ],
+    "lifecycle_hooks": [
+      "on_load",
+      "on_unload"
+    ]
+  },
+  "dependencies": [],
+  "permissions": {},
+  "priority": 15
 }

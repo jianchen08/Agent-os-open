@@ -1,31 +1,30 @@
 {
-    "id": "pipeline_spill_guard",
-    "name": "Spill Guard",
-    "description": "大输出兜底输出插件：对工具的大结果统一处理（原文存文件 + UTF-8 安全提取 + 定位符返回）。配置上与 tool_core 同 step 组合（排在其后），引擎 step 末尾落轨迹机制保证大结果不污染轨迹/messages。",
-    "version": "1.0.0",
-    "plugin_type": "pipeline",
-    "pipeline_role": "output",
-    "language": "rust",
-    "host_type": "in_process",
-    "entry": "pipeline_spill_guard_native.dll",
-    "invoke_entry": "plugin_execute",
-    "native": {
-        "artifact": "pipeline_spill_guard_native"
-    },
-    "capabilities": {
-        "tools": [],
-        "resources": [],
-        "route_signals": [],
-        "lifecycle_hooks": []
-    },
-    "dependencies": [],
-    "permissions": {},
-    "priority": 50,
-    "config_files": [
-        {
-            "id": "spill",
-            "path": "config/system/spill_config.yaml",
-            "label": "spill_guard 兜底策略与存储配置"
-        }
-    ]
+  "id": "pipeline_spill_guard",
+  "name": "Spill Guard",
+  "description": "大输出兜底输出插件：对工具的大结果统一处理（原文存文件 + UTF-8 安全提取 + 定位符返回）。配置上与 tool_core 同 step 组合（排在其后），引擎 step 末尾落轨迹机制保证大结果不污染轨迹/messages。",
+  "version": "1.0.0",
+  "plugin_type": "pipeline",
+  "pipeline_role": "output",
+  "language": "rust",
+  "host_type": "in_process",
+  "entry": "pipeline_spill_guard_native.dll",
+  "invoke_entry": "plugin_execute",
+  "native": {
+    "artifact": "pipeline_spill_guard_native"
+  },
+  "capabilities": {
+    "tools": [],
+    "route_signals": [],
+    "lifecycle_hooks": []
+  },
+  "dependencies": [],
+  "permissions": {},
+  "priority": 50,
+  "config_files": [
+    {
+      "id": "spill",
+      "path": "config/system/spill_config.yaml",
+      "label": "spill_guard 兜底策略与存储配置"
+    }
+  ]
 }

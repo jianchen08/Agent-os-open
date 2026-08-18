@@ -56,6 +56,7 @@ fn app_with_deps() -> (
     let manifest = PluginManifest {
         id: "llm_service".to_string(),
         name: "llm_service".to_string(),
+        description: None,
         version: "1.0.0".to_string(),
         plugin_type: PluginType::System,
         pipeline_role: None,
