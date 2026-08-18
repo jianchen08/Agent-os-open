@@ -43,7 +43,7 @@ impl PipelinePlugin for SpillGuard {
         let state = ectx.ctx.state_value();
         let config = ectx.ctx.config_value();
         // run 内部全路径 best-effort：任何存档/解析失败都收敛为空更新（no-op），
-        // 不会把 Err 上抛（error_policy=skip 语义之外再加一层自保）。
+        // 不会把 Err 上抛（引擎对插件错误统一 warn+继续，ADR 2026-08-18；此处再加一层自保）。
         let updates = run(&state, &config);
         serde_json::to_string(&updates).map_err(|e| format!("serialize state_updates: {e}"))
     }

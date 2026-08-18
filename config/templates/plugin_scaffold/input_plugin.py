@@ -17,7 +17,6 @@ import logging
 from typing import Any
 
 from pipeline.plugin import IInputPlugin, PluginContext, PluginResult
-from pipeline.types import ErrorPolicy
 
 logger = logging.getLogger(__name__)
 
@@ -26,12 +25,7 @@ class {PluginClass}(IInputPlugin):
     """{one_line_description}。
 
     {detailed_description}
-
-    Attributes:
-        error_policy: 错误处理策略
     """
-
-    error_policy: ErrorPolicy = ErrorPolicy.ABORT
 
     def __init__(self, config: dict[str, Any] | None = None) -> None:
         """初始化插件。

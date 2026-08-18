@@ -18,7 +18,6 @@ import logging
 from typing import Any
 
 from pipeline.plugin import IInputPlugin, PluginContext, PluginResult
-from pipeline.types import ErrorPolicy
 
 logger = logging.getLogger(__name__)
 
@@ -32,13 +31,11 @@ class ToolSchemaPlugin(IInputPlugin):
     额外生成人类可读的文本描述写入 state["prompt.tool_descriptions"]。
 
     优先级：50（构建级，与 prompt_build 同级）
-    错误策略：FALLBACK（没工具描述也能对话）
+    没工具描述也能对话。
 
     Attributes:
         _config: 插件配置字典
     """
-
-    error_policy = ErrorPolicy.ABORT
 
     def __init__(self, config: dict[str, Any] | None = None) -> None:
         """初始化工具 Schema 注入插件。

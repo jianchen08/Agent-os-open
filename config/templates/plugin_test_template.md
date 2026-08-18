@@ -36,7 +36,6 @@ from __future__ import annotations
 import pytest
 
 from pipeline.plugin import PluginContext, PluginResult
-from pipeline.types import ErrorPolicy
 # TODO: 导入插件类
 # from plugins.{plugin_type}.{plugin_name}.{plugin_name} import {PluginClass}
 
@@ -92,17 +91,6 @@ class Test{PluginClass}Properties:
         plugin = make_plugin()
         assert isinstance(plugin.priority, int)
         assert plugin.priority >= 0
-
-    def test_error_policy_declared(self) -> None:
-        """应声明有效的 error_policy。"""
-        plugin = make_plugin()
-        assert hasattr(plugin.__class__, "error_policy")
-        assert plugin.__class__.error_policy in (
-            ErrorPolicy.ABORT,
-            ErrorPolicy.SKIP,
-            ErrorPolicy.RETRY,
-            ErrorPolicy.FALLBACK,
-        )
 
 # ── 构造函数测试 ──────────────────────────────────────
 
@@ -187,10 +175,7 @@ class Test{PluginClass}Errors:
         plugin = make_plugin()
         ctx = make_ctx(state={{"trigger_error": True}})
         result = await plugin.execute(ctx)
-        # 根据错误策略验证行为
-        # ABORT: result.error 不为 None
-        # SKIP: result 可能正常返回（跳过错误部分）
-        # FALLBACK: result 使用 fallback 值
+        # 插件失败时验证：result.error 不为 None 且不中断管道
 ```
 
 ### 2.2 Output 插件测试模板

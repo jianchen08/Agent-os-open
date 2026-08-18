@@ -45,13 +45,6 @@ class TestConfig:
         p = MultimodalPostprocessor(config={"priority": 7})
         assert p.priority == 7
 
-    def test_error_policy为SKIP(self) -> None:
-        from pipeline.types import ErrorPolicy
-        from plugin import MultimodalPostprocessor
-
-        assert MultimodalPostprocessor.error_policy == ErrorPolicy.SKIP
-
-
 # ============================================================
 # _extract_urls
 # ============================================================

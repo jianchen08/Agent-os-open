@@ -11,7 +11,7 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
-from pipeline.types import ErrorPolicy, RouteSignal
+from pipeline.types import RouteSignal
 
 if TYPE_CHECKING:
     from pipeline.plugin_types import PluginTypeSlot
@@ -20,14 +20,9 @@ if TYPE_CHECKING:
 class IPlugin(ABC):
     """插件抽象基类。
 
-    所有管道插件的统一接口，提供名称、优先级和错误策略属性。
+    所有管道插件的统一接口，提供名称和优先级属性。
     子类必须实现 execute 方法。
-
-    Class Attributes:
-        error_policy: 插件错误处理策略，默认 ABORT
     """
-
-    error_policy: ErrorPolicy = ErrorPolicy.ABORT
 
     @classmethod  # noqa: B027
     def register_types(cls, slots: PluginTypeSlot) -> None:
@@ -77,12 +72,7 @@ class ICorePlugin(IPlugin):
 
     负责执行核心逻辑（LLM 调用或工具执行），
     返回包含核心执行结果的字典。
-
-    Class Attributes:
-        fallback_state: 错误策略为 FALLBACK 时使用的默认状态更新
     """
-
-    fallback_state: dict[str, Any] = {}
 
     @abstractmethod
     async def execute(self, ctx: PluginContext) -> dict[str, Any]:

@@ -8,7 +8,7 @@ from typing import Any
 
 from enum_utils import safe_enum_value
 from pipeline.plugin import IOutputPlugin, OutputResult, PluginContext
-from pipeline.types import ErrorPolicy, RouteSignal
+from pipeline.types import RouteSignal
 
 logger = logging.getLogger(__name__)
 
@@ -16,7 +16,6 @@ logger = logging.getLogger(__name__)
 class TaskReminder(IOutputPlugin):
     """任务评估提醒 Output 插件。"""
 
-    error_policy = ErrorPolicy.SKIP
 
     # 评估模式下连续仅工具调用的提醒阈值
     _EVAL_TOOL_ONLY_THRESHOLD = 6
@@ -370,7 +369,7 @@ class TaskReminder(IOutputPlugin):
             return False
 
         # 内部服务调用失败不吞——吞掉会把服务故障伪装成"无活跃子任务"，
-        # 直接改变 reminder 触发判定。失败向上抛，由 error_policy=skip 跳过
+        # 直接改变 reminder 触发判定。失败向上抛，由引擎统一 warn+继续
         # 本轮 reminder 并留下可见日志。
         subtasks = task_service.list_subtasks(task_id)
 

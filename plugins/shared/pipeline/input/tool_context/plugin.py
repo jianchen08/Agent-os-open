@@ -30,7 +30,6 @@ from typing import Any
 
 from adapter_config import get_adapter_status_summary
 from pipeline.plugin import IInputPlugin, PluginContext, PluginResult
-from pipeline.types import ErrorPolicy
 from window_info import normalize_window_info
 
 logger = logging.getLogger(__name__)
@@ -43,14 +42,12 @@ class ToolContextPlugin(IInputPlugin):
     从 capability_adapters.yaml 读取适配器状态，构建 tool_context 注入管道 state。
 
     优先级：40（在 ToolSchemaPlugin(50) 之前执行）
-    错误策略：FALLBACK（上下文缺失不影响管道运行）
+    上下文缺失不影响管道运行。
 
     Attributes:
         _config: 插件配置字典
         _enabled: 是否启用
     """
-
-    error_policy = ErrorPolicy.ABORT
 
     def __init__(self, config: dict[str, Any] | None = None) -> None:
         """初始化工具上下文感知插件。

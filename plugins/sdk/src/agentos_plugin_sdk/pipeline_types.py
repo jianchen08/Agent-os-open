@@ -67,7 +67,13 @@ class StateKeys:
 
 
 class ErrorPolicy(Enum):
-    """插件错误处理策略。"""
+    """插件错误处理策略。
+
+    DEPRECATED：0.2 引擎不再按 error_policy 分发行为；枚举值仅保留以兼容
+    已冻结 manifest 的字段校验。错误处理由引擎按错误类型自动决定（重试见
+    invoker 的 with_transparent_recovery——sidecar 崩溃时 force_unload+respawn+
+    重试一次）；ABORT/SKIP/FALLBACK 决策上抛编排层。插件不要再声明 error_policy。
+    """
 
     ABORT = "abort"
     SKIP = "skip"
@@ -360,14 +366,9 @@ class PluginTypeSlot:
 class IPlugin(ABC):
     """插件抽象基类。
 
-    所有管道插件的统一接口，提供名称、优先级和错误策略属性。
+    所有管道插件的统一接口，提供名称和优先级属性。
     子类必须实现 execute 方法。
-
-    Class Attributes:
-        error_policy: 插件错误处理策略，默认 ABORT
     """
-
-    error_policy: ErrorPolicy = ErrorPolicy.ABORT
 
     @classmethod  # noqa: B027
     def register_types(cls, slots: PluginTypeSlot) -> None:
@@ -417,12 +418,7 @@ class ICorePlugin(IPlugin):
 
     负责执行核心逻辑（LLM 调用或工具执行），
     返回包含核心执行结果的字典。
-
-    Class Attributes:
-        fallback_state: 错误策略为 FALLBACK 时使用的默认状态更新
     """
-
-    fallback_state: dict[str, Any] = {}
 
     @abstractmethod
     async def execute(self, ctx: PluginContext) -> dict[str, Any]:  # type: ignore[override]

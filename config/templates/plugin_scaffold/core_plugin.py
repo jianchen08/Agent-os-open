@@ -16,7 +16,6 @@ import logging
 from typing import Any
 
 from pipeline.plugin import ICorePlugin, PluginContext
-from pipeline.types import ErrorPolicy
 
 logger = logging.getLogger(__name__)
 
@@ -25,14 +24,7 @@ class {PluginClass}(ICorePlugin):
     """{one_line_description}。
 
     {detailed_description}
-
-    Attributes:
-        error_policy: 错误处理策略
-        fallback_state: 错误策略为 FALLBACK 时的默认状态更新
     """
-
-    error_policy: ErrorPolicy = ErrorPolicy.ABORT
-    fallback_state: dict[str, Any] = {{}}
 
     def __init__(self, config: dict[str, Any] | None = None) -> None:
         """初始化核心插件。

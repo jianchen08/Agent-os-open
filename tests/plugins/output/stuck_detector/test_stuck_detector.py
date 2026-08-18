@@ -79,13 +79,6 @@ class TestConfig:
         assert res1.state_updates["stuck_detected"] is False
         assert res2.state_updates["stuck_detected"] is True
 
-    def test_error_policy为SKIP(self) -> None:
-        from pipeline.types import ErrorPolicy
-        from plugin import StuckDetector
-
-        assert StuckDetector.error_policy == ErrorPolicy.SKIP
-
-
 # ============================================================
 # _compute_similarity
 # ============================================================

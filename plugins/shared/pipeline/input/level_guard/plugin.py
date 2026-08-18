@@ -26,7 +26,7 @@ import logging
 from typing import Any
 
 from pipeline.plugin import IInputPlugin, PluginContext, PluginResult
-from pipeline.types import ErrorPolicy, StateKeys
+from pipeline.types import StateKeys
 
 logger = logging.getLogger(__name__)
 
@@ -51,13 +51,11 @@ class LevelGuardPlugin(IInputPlugin):
     LLM 看不到的工具，天然无法被调用。
 
     优先级：20（最先执行，授权最廉价，最先短路）
-    错误策略：ABORT（权限问题必须停止）
+    权限问题必须停止。
 
     Attributes:
         _config: 插件配置字典
     """
-
-    error_policy = ErrorPolicy.ABORT
 
     def __init__(self, config: dict[str, Any] | None = None) -> None:
         """初始化层级权限守卫插件。

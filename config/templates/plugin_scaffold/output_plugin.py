@@ -17,7 +17,6 @@ import logging
 from typing import Any
 
 from pipeline.plugin import IOutputPlugin, PluginContext, OutputResult
-from pipeline.types import ErrorPolicy
 
 logger = logging.getLogger(__name__)
 
@@ -26,12 +25,7 @@ class {PluginClass}(IOutputPlugin):
     """{one_line_description}。
 
     {detailed_description}
-
-    Attributes:
-        error_policy: 错误处理策略
     """
-
-    error_policy: ErrorPolicy = ErrorPolicy.SKIP
 
     @property
     def route_signals(self) -> list[str]:

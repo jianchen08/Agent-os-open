@@ -56,12 +56,6 @@ class TestConfig:
         assert p.name == "task_event_receiver"
         assert p.priority == 40
 
-    def test_error_policy为SKIP(self) -> None:
-        from pipeline.types import ErrorPolicy
-        from plugin import TaskEventReceiverPlugin
-
-        assert TaskEventReceiverPlugin.error_policy == ErrorPolicy.SKIP
-
     def test_初始无pending事件与未订阅(self) -> None:
         from plugin import TaskEventReceiverPlugin
 

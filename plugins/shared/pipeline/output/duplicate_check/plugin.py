@@ -31,7 +31,7 @@ import logging
 from typing import Any
 
 from pipeline.plugin import IOutputPlugin, OutputResult, PluginContext
-from pipeline.types import ErrorPolicy, RouteSignal, StateKeys
+from pipeline.types import RouteSignal, StateKeys
 
 logger = logging.getLogger(__name__)
 
@@ -62,13 +62,11 @@ class DuplicateCheckPlugin(IOutputPlugin):
     - 第三级：终止管道（主 agent 通知用户，子 agent 直接终止）
 
     优先级：4（系统级）
-    错误策略：ABORT（重复检测异常必须终止管道）
+    重复检测异常必须终止管道。
 
     Attributes:
         _config: 插件配置字典
     """
-
-    error_policy = ErrorPolicy.ABORT
 
     def __init__(self, config: dict[str, Any] | None = None) -> None:
         """初始化重复检查插件。

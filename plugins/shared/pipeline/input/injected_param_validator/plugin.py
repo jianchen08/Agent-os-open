@@ -14,7 +14,6 @@ import logging
 from typing import Any
 
 from pipeline.plugin import IInputPlugin, PluginContext, PluginResult
-from pipeline.types import ErrorPolicy
 
 logger = logging.getLogger(__name__)
 
@@ -43,13 +42,11 @@ class InjectedParamValidator(IInputPlugin):
     WARNING 日志，便于排查契约断裂问题。
 
     优先级：5（最早执行，只执行一次）
-    错误策略：SKIP（校验失败不终止管道）
+    校验失败不终止管道。
 
     Attributes:
         _config: 插件配置字典
     """
-
-    error_policy = ErrorPolicy.SKIP
 
     def __init__(self, config: dict[str, Any] | None = None) -> None:
         """初始化注入参数校验插件。

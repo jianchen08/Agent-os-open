@@ -39,7 +39,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from pipeline.plugin import IInputPlugin, PluginContext, PluginResult
-from pipeline.types import ErrorPolicy, StateKeys
+from pipeline.types import StateKeys
 
 logger = logging.getLogger(__name__)
 
@@ -1337,14 +1337,12 @@ class ContextWindowGuardPlugin(IInputPlugin):
     模块级 _capability_caller（memory.compress 工具）。
 
     优先级：5（在 prompt_build 的 10 之前执行）
-    错误策略：SKIP（压缩失败不阻塞管线）
+    压缩失败不阻塞管线。
 
     Attributes:
         _config: 插件配置字典
         _trigger_ratio: 触发压缩的阈值比例（默认 0.55）
     """
-
-    error_policy = ErrorPolicy.SKIP
 
     def __init__(self, config: dict[str, Any] | None = None) -> None:
         """初始化上下文窗口守卫插件。

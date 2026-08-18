@@ -17,7 +17,7 @@ from typing import Any
 
 from enum_utils import safe_enum_value
 from pipeline.plugin import IOutputPlugin, OutputResult, PluginContext
-from pipeline.types import ErrorPolicy, RouteSignal
+from pipeline.types import RouteSignal
 
 logger = logging.getLogger(__name__)
 
@@ -56,8 +56,6 @@ class ChildTaskGuard(IOutputPlugin):
     Attributes:
         _idle_remind_limit: idle 超时后最多提醒次数（默认 3）
     """
-
-    error_policy = ErrorPolicy.SKIP
 
     def __init__(self, config: dict[str, Any] | None = None) -> None:
         self._config = config or {}

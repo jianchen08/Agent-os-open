@@ -48,13 +48,6 @@ class TestConfig:
         assert c._mask == "[REDACTED]"
         assert c.priority == 1
 
-    def test_error_policy为SKIP(self) -> None:
-        from pipeline.types import ErrorPolicy
-        from plugin import SensitiveChecker
-
-        assert SensitiveChecker.error_policy == ErrorPolicy.SKIP
-
-
 # ============================================================
 # _sanitize_string —— 各类模式
 # ============================================================

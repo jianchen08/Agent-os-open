@@ -12,8 +12,8 @@
 //! 拦截结构性漂移（字段缺失/类型错位），不是严格模式校验。
 //!
 //! 校验失败 → fail-closed：结果转 `ToolResult::failed`（错误信息带违规点），
-//! LLM 收到错误并自我修正；错误按插件 error_policy=skip 继续管道（对齐
-//! DSH `tools/post-execute` 兜底语义，见 docs/dsh_hook_translation.md）。
+//! LLM 收到错误并自我修正；插件错误由引擎统一 warn+继续管道（ADR 2026-08-18，
+//! 对齐 DSH `tools/post-execute` 兜底语义，见 docs/dsh_hook_translation.md）。
 //!
 //! 可配置：state["tool_output_validation"] = "off" 时整体跳过（默认开启）。
 

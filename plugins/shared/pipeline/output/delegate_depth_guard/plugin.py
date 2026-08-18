@@ -25,7 +25,7 @@ import logging
 from typing import Any
 
 from pipeline.plugin import IOutputPlugin, OutputResult, PluginContext
-from pipeline.types import ErrorPolicy, RouteSignal, StateKeys
+from pipeline.types import RouteSignal, StateKeys
 
 logger = logging.getLogger(__name__)
 
@@ -40,13 +40,11 @@ class DelegateDepthGuardPlugin(IOutputPlugin):
     初始值由管道首次运行时设置（默认 0）。
 
     优先级：3（在系统级检查之后，委派策略之前）
-    错误策略：SKIP（深度超限不是错误，是保护机制）
+    深度超限不是错误，是保护机制。
 
     Attributes:
         _config: 插件配置字典
     """
-
-    error_policy = ErrorPolicy.SKIP
 
     def __init__(self, config: dict[str, Any] | None = None) -> None:
         """初始化委派深度守卫插件。

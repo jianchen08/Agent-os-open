@@ -33,7 +33,7 @@ from typing import Any
 from decider import IsolationDecider
 from isolation_types import IsolationLevel
 from pipeline.plugin import IInputPlugin, PluginContext, PluginResult
-from pipeline.types import ErrorPolicy, StateKeys
+from pipeline.types import StateKeys
 
 logger = logging.getLogger(__name__)
 
@@ -60,10 +60,9 @@ class IsolationGuard(IInputPlugin):
     3. Docker 不可用时根据策略的 fallback 字段降级
 
     优先级：40（在 level_guard 之后，security_check 之前）
-    错误策略：SKIP（隔离决策失败不应阻断管道）
+    隔离决策失败不应阻断管道。
     """
 
-    error_policy = ErrorPolicy.SKIP
 
     # Docker 可用性复检冷却窗口（秒）：仅自动检测来源在不可用时按此间隔复检，
     # 避免每次工具调用都 spawn subprocess 探测 daemon。

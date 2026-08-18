@@ -28,7 +28,6 @@ from pathlib import Path
 from typing import Any
 
 from pipeline.plugin import IInputPlugin, PluginContext, PluginResult
-from pipeline.types import ErrorPolicy
 
 logger = logging.getLogger(__name__)
 
@@ -45,8 +44,6 @@ def _ensure_isolation_path() -> None:
 
 class EnvironmentLifecyclePlugin(IInputPlugin):
     """执行环境生命周期插件：init 解析环境基线，exit 销毁环境（自持服务）。"""
-
-    error_policy = ErrorPolicy.SKIP
 
     def __init__(self, config: dict[str, Any] | None = None) -> None:
         """初始化。

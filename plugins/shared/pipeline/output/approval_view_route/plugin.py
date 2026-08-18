@@ -27,7 +27,7 @@ from enum import Enum
 from typing import Any
 
 from pipeline.plugin import IOutputPlugin, OutputResult, PluginContext
-from pipeline.types import ErrorPolicy, StateKeys
+from pipeline.types import StateKeys
 
 logger = logging.getLogger(__name__)
 
@@ -68,13 +68,11 @@ class ApprovalViewRoutePlugin(IOutputPlugin):
         - raw_result（核心执行结果）
 
     优先级：35（在 result_format(20) 之后，stop_check(10) 之前）
-    错误策略：SKIP（路由失败不阻塞管道）
+    路由失败不阻塞管道。
 
     Attributes:
         _config: 插件配置字典
     """
-
-    error_policy = ErrorPolicy.SKIP
 
     def __init__(self, config: dict[str, Any] | None = None) -> None:
         """初始化审批视图路由插件。

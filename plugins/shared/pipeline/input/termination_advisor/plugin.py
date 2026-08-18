@@ -30,7 +30,7 @@ import logging
 from typing import Any
 
 from pipeline.plugin import IInputPlugin, PluginContext, PluginResult
-from pipeline.types import ErrorPolicy, StateKeys
+from pipeline.types import StateKeys
 
 logger = logging.getLogger(__name__)
 
@@ -53,8 +53,6 @@ class TerminationAdvisorPlugin(IInputPlugin):
     Attributes:
         _config: 插件配置字典
     """
-
-    error_policy = ErrorPolicy.SKIP
 
     def __init__(self, config: dict[str, Any] | None = None) -> None:
         """初始化终止判断插件。

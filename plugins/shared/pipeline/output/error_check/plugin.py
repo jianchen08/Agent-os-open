@@ -17,7 +17,7 @@ import logging
 from typing import Any
 
 from pipeline.plugin import IOutputPlugin, OutputResult, PluginContext
-from pipeline.types import ErrorPolicy, RouteSignal, StateKeys
+from pipeline.types import RouteSignal, StateKeys
 
 logger = logging.getLogger(__name__)
 
@@ -35,13 +35,12 @@ class ErrorCheckPlugin(IOutputPlugin):
     - 可重试错误：产出 next_llm 信号 + 增加 retry.count
 
     优先级：2（系统级，仅次于 stop_check）
-    错误策略：ABORT（错误检查异常必须终止管道）
+    错误检查异常必须终止管道。
 
     Attributes:
         _config: 插件配置字典
     """
 
-    error_policy = ErrorPolicy.ABORT
 
     # 空响应指示词
     _EMPTY_RESPONSE_INDICATORS = {"", "none", "null", "undefined", "无", "空"}

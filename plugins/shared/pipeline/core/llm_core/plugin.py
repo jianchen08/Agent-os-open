@@ -1,11 +1,11 @@
 """LLM Core 插件 -- 基于 LLM Adapter 的大模型调用实现。
 
 通过 LLM Adapter 中间层调用大模型，支持多模型 fallback 和流式回调。
-重试由 PluginChain 的 error_policy 统一管理。
+重试/降级由 LLM Adapter（Router 层）负责；插件只上抛错误，错误处理语义见 ADR 2026-08-18。
 
 职责：
 - 成功时输出 raw_result、raw_tool_calls，并将 assistant 回复 append 到 messages
-- 失败时直接抛出异常，由 PluginChain 决定是否重试
+- 失败时直接抛出异常，由引擎/编排层按错误类型决定（瞬态 sidecar 崩溃→retry 一次；非瞬态→上抛）
 """
 
 from __future__ import annotations
@@ -28,7 +28,7 @@ from adapter import (
     LLMResponse,
 )
 from pipeline.plugin import ICorePlugin, PluginContext
-from pipeline.types import ErrorPolicy, StateKeys
+from pipeline.types import StateKeys
 
 logger = logging.getLogger(__name__)
 
@@ -174,12 +174,12 @@ class LLMCore(ICorePlugin):
 
     通过 LLM Adapter 中间层调用大模型，支持多模型 fallback。
     成功时输出 raw_result 和 raw_tool_calls，并将 assistant 回复写入 messages。
-    失败时直接抛出异常，由 PluginChain 的 error_policy 统一管理重试。
+    失败时直接抛出异常，由引擎/编排层按错误类型处理：瞬态 sidecar 崩溃由
+    invoker with_transparent_recovery 重试一次；非瞬态错误上抛（ADR 2026-08-18）。
 
     Class Attributes:
-        error_policy: 错误策略为 RETRY（由 PluginChain 统一管理）
-        max_retries: 最大重试次数（供 PluginChain 使用）
-        retry_delay: 首次重试延迟（秒）（供 PluginChain 使用）
+        max_retries: 最大重试次数（透传给 LLM Adapter）
+        retry_delay: 首次重试延迟（秒）（透传给 LLM Adapter）
 
     Attributes:
         _config: 插件配置字典，包含 provider/model/api_base/api_key 等
@@ -191,7 +191,6 @@ class LLMCore(ICorePlugin):
         _adapter: LLM 调用适配器实例
     """
 
-    error_policy = ErrorPolicy.RETRY
     max_retries: int = 1  # Router 已有 num_retries + fallback，Engine 层不重复重试
     retry_delay: float = 5.0
     overload_retry_delay: float = 60.0
@@ -373,7 +372,7 @@ class LLMCore(ICorePlugin):
         调用 LLM 后，将 assistant 回复 append 到 messages 中。
         谁生产数据谁负责写入：LLMCore 生产的 assistant 回复，由 LLMCore 写入。
 
-        失败时直接抛出异常，由 PluginChain 的 error_policy 统一管理重试。
+        失败时直接抛出异常，由引擎/编排层按错误类型处理（ADR 2026-08-18）。
 
         Args:
             ctx: 插件执行上下文

@@ -26,7 +26,7 @@ import re
 from typing import Any
 
 from pipeline.plugin import IInputPlugin, PluginContext, PluginResult
-from pipeline.types import ErrorPolicy, StateKeys
+from pipeline.types import StateKeys
 
 logger = logging.getLogger(__name__)
 
@@ -67,13 +67,11 @@ class ToolSchemaValidator(IInputPlugin):
     - string→boolean: "true"/"1"→True, "false"/"0"→False
 
     优先级：30（校验级，在参数注入之后）
-    错误策略：SKIP（验证失败不终止管道）
+    验证失败不终止管道。
 
     Attributes:
         _config: 插件配置字典
     """
-
-    error_policy = ErrorPolicy.SKIP
 
     def __init__(self, config: dict[str, Any] | None = None) -> None:
         """初始化 Schema 验证插件。

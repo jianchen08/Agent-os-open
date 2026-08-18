@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Any
 
 from pipeline.plugin import IInputPlugin, PluginContext, PluginResult
-from pipeline.types import ErrorPolicy, StateKeys
+from pipeline.types import StateKeys
 
 logger = logging.getLogger(__name__)
 
@@ -82,8 +82,6 @@ _resolve_project_root._cached: Path | None = None
 
 class ParamInjectPlugin(IInputPlugin):
     """参数注入 Input 插件。"""
-
-    error_policy = ErrorPolicy.ABORT
 
     def __init__(self, config: dict[str, Any] | None = None) -> None:
         """初始化参数注入插件。"""

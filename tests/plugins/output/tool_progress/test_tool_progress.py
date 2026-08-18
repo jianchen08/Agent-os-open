@@ -54,13 +54,6 @@ class TestConfig:
         assert r._summary_max_length == 50
         assert r.priority == 7
 
-    def test_error_policy为SKIP(self) -> None:
-        from pipeline.types import ErrorPolicy
-        from plugin import ToolProgressReporter
-
-        assert ToolProgressReporter.error_policy == ErrorPolicy.SKIP
-
-
 # ============================================================
 # _build_progress
 # ============================================================

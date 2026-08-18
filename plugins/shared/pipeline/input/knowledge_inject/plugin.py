@@ -17,7 +17,6 @@ import logging
 from typing import Any
 
 from pipeline.plugin import IInputPlugin, PluginContext, PluginResult
-from pipeline.types import ErrorPolicy
 
 logger = logging.getLogger(__name__)
 
@@ -52,7 +51,7 @@ class KnowledgeInjectPlugin(IInputPlugin):
     不再依赖 0.2 中不存在的 memory_service 服务。
 
     优先级：30（数据级，在 context_build 之后、prompt_build 之前）
-    错误策略：FALLBACK（降级为无知识对话）
+    降级为无知识对话。
 
     Attributes:
         _config: 插件配置
@@ -60,8 +59,6 @@ class KnowledgeInjectPlugin(IInputPlugin):
         _top_k: 检索结果数量
         _max_tokens: 最大 token 数
     """
-
-    error_policy = ErrorPolicy.ABORT
 
     def __init__(self, config: dict[str, Any] | None = None) -> None:
         """初始化知识注入插件。

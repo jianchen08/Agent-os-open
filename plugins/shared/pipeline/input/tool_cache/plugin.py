@@ -25,7 +25,7 @@ import time
 from typing import Any
 
 from pipeline.plugin import IInputPlugin, PluginContext, PluginResult
-from pipeline.types import ErrorPolicy, StateKeys
+from pipeline.types import StateKeys
 
 logger = logging.getLogger(__name__)
 
@@ -121,13 +121,11 @@ class ToolCache(IInputPlugin):
     - exclude_tools: 不缓存的工具名列表（默认含 bash_execute 等有副作用的工具）
 
     优先级：35（校验级，在 schema 验证之后）
-    错误策略：SKIP（缓存异常不阻塞管道）
+    缓存异常不阻塞管道。
 
     Attributes:
         _config: 插件配置字典
     """
-
-    error_policy = ErrorPolicy.SKIP
 
     def __init__(self, config: dict[str, Any] | None = None) -> None:
         """初始化工具缓存插件。

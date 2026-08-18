@@ -23,7 +23,6 @@ import logging
 from typing import Any
 
 from pipeline.plugin import IInputPlugin, PluginContext, PluginResult
-from pipeline.types import ErrorPolicy
 
 logger = logging.getLogger(__name__)
 
@@ -80,14 +79,12 @@ class MemoryReadPlugin(IInputPlugin):
     无需在构造时注入。
 
     优先级：35（数据级，在 knowledge_inject 之后）
-    错误策略：SKIP（检索失败不影响管道继续）
+    检索失败不影响管道继续。
 
     Attributes:
         _config: 插件配置字典
         _inject_type: 注入方式（full/retrieval/summary）
     """
-
-    error_policy = ErrorPolicy.SKIP
 
     def __init__(self, config: dict[str, Any] | None = None) -> None:
         """初始化记忆读取插件。

@@ -80,21 +80,21 @@ impl RouteSignal {
 
 // ── 错误策略 ──────────────────────────────────────────────────
 
-/// 插件错误处理策略（与 0.1 对等）。
+/// 0.2 运行时唯一错误策略：瞬态错误重试（见 invoker
+/// `with_transparent_recovery`——sidecar 崩溃时 force_unload + respawn + 重试一次）；
+/// 其余错误决策上抛编排层（引擎统一 warn + 继续，跳过/终止由路由表/step 决定）。
+///
+/// 收敛自 0.1 的 ABORT/SKIP/RETRY/FALLBACK 四值（ADR 2026-08-18）：仅 retry 有
+/// 真实需求，其余值已随 manifest 清理移除。manifest 的 `error_policy` 字段可选
+/// （serde default），缺省即 RETRY。
 ///
 /// [来源: pipeline/types.py ErrorPolicy]
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum ErrorPolicy {
-    /// 立即终止后续插件
+    /// 瞬态错误重试一次（invoker with_transparent_recovery）；其余决策上抛编排层
     #[default]
-    Abort,
-    /// 记录警告继续
-    Skip,
-    /// 调用方实现重试循环
     Retry,
-    /// 用兜底结果替代
-    Fallback,
 }
 
 // ── 插件结果 ──────────────────────────────────────────────────

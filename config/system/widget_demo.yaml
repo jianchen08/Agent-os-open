@@ -1,7 +1,6 @@
-# widget_demo 演示配置（config_files.fields 的 T1 类型化表单目标）
 enabled: true
 level: l1
 threshold: 50
 tags:
-  - alpha
-note: ""
+- alpha
+note: ''

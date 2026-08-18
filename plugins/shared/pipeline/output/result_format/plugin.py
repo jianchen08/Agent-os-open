@@ -16,7 +16,7 @@ from typing import Any
 
 from format_manager import FormatManager, ToolFormat, get_format_manager
 from pipeline.plugin import IOutputPlugin, OutputResult, PluginContext
-from pipeline.types import ErrorPolicy, StateKeys
+from pipeline.types import StateKeys
 
 logger = logging.getLogger(__name__)
 
@@ -36,13 +36,12 @@ class ResultFormatPlugin(IOutputPlugin):
     基于 context_window 动态计算截断阈值。
 
     优先级：20（副作用型，在 persist 之后）
-    错误策略：SKIP（格式化失败不影响当轮结果）
+    格式化失败不影响当轮结果。
 
     Attributes:
         _config: 插件配置字典
     """
 
-    error_policy = ErrorPolicy.SKIP
 
     # 工具输出截断配置：基于 context_window 动态计算
     TOOL_OUTPUT_RATIO = 0.05  # 单个工具输出占上下文窗口的最大比例

@@ -1,7 +1,6 @@
 """plugin.py 与 types.py 修复验证单元测试。
 
 覆盖：
-  - P6: ICorePlugin.fallback_state 是空字典 {} 而非 Field 对象
   - M5: OutputResult 不重复声明 route_signal
   - P3: RouteSignal docstring 包含 decision 路由类型
 
@@ -13,84 +12,10 @@ from __future__ import annotations
 from dataclasses import fields
 
 import pytest
-from pipeline.plugin import ICorePlugin, OutputResult, PluginResult
+from pipeline.plugin import OutputResult, PluginResult
 from pipeline.types import RouteSignal
 
 pytestmark = pytest.mark.unit
-
-
-# ---------------------------------------------------------------------------
-# P6: ICorePlugin.fallback_state 是空字典
-# ---------------------------------------------------------------------------
-
-
-class TestICorePluginFallbackState:
-    """P6: ICorePlugin.fallback_state 默认值验证。"""
-
-    @pytest.mark.unit
-    def test_fallback_state_is_empty_dict(self) -> None:
-        """P6: ICorePlugin.fallback_state 类属性应为空字典 {}。"""
-        assert ICorePlugin.fallback_state == {}
-
-    @pytest.mark.unit
-    def test_fallback_state_is_dict_type(self) -> None:
-        """P6: ICorePlugin.fallback_state 应是 dict 类型，不是 Field 描述符。"""
-        assert isinstance(ICorePlugin.fallback_state, dict)
-
-    @pytest.mark.unit
-    def test_fallback_state_not_dataclass_field(self) -> None:
-        """P6: fallback_state 不是 dataclass Field 对象。
-
-        验证 ICorePlugin.fallback_state 不是 field() 返回的 Field 实例，
-        而是直接的空字典。
-        """
-        from dataclasses import Field
-
-        # 类属性值不应是 Field 类型
-        assert not isinstance(ICorePlugin.fallback_state, Field)
-
-    @pytest.mark.unit
-    def test_fallback_state_per_instance_isolation(self) -> None:
-        """P6: 各实例的 fallback_state 不会因共享可变默认值而互相影响。
-
-        虽然类属性是 {}，但每个子类实例应可以安全设置自己的值。
-        """
-
-        class PluginA(ICorePlugin):
-            @property
-            def name(self) -> str:
-                return "a"
-
-            @property
-            def priority(self) -> int:
-                return 10
-
-            async def execute(self, ctx):
-                return {}
-
-        class PluginB(ICorePlugin):
-            @property
-            def name(self) -> str:
-                return "b"
-
-            @property
-            def priority(self) -> int:
-                return 20
-
-            async def execute(self, ctx):
-                return {}
-
-        a = PluginA()
-        b = PluginB()
-
-        # 两个实例默认都是空字典
-        assert a.fallback_state == {}
-        assert b.fallback_state == {}
-
-        # 修改 a 的 fallback_state 不应影响 b
-        a.fallback_state = {"key": "val_a"}
-        assert a.fallback_state == {"key": "val_a"}
-        assert b.fallback_state == {}
 
 
 # ---------------------------------------------------------------------------

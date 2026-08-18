@@ -18,7 +18,7 @@ import re
 from typing import Any
 
 from pipeline.plugin import IInputPlugin, PluginContext, PluginResult
-from pipeline.types import ErrorPolicy, StateKeys
+from pipeline.types import StateKeys
 
 logger = logging.getLogger(__name__)
 
@@ -34,7 +34,7 @@ class ContextBuildPlugin(IInputPlugin):
     不负责管理服务实例（服务通过 PluginContext.get_service 获取）。
 
     优先级：10（准备级，先于其他 Input 插件执行）
-    错误策略：FALLBACK（最小上下文也能跑）
+    最小上下文也能跑。
 
     Attributes:
         _config: 插件配置字典
@@ -42,8 +42,6 @@ class ContextBuildPlugin(IInputPlugin):
         _agent_name: Agent 名称
         _agent_level: Agent 层级
     """
-
-    error_policy = ErrorPolicy.ABORT
 
     def __init__(self, config: dict[str, Any] | None = None) -> None:
         """初始化上下文构建插件。

@@ -45,7 +45,10 @@ pub trait PluginMeta: Send + Sync {
     /// 插件类型（对应 manifest.type）
     fn plugin_type(&self) -> PluginType;
 
-    /// 插件错误处理策略（对应 manifest.error_policy）
+    /// 插件错误处理策略（对应 manifest.error_policy，可选字段）。
+    ///
+    /// ADR 2026-08-18 收敛后为唯一值 `ErrorPolicy::Retry`——引擎不再按它分发行为，
+    /// 相关内容仅作 struct 兼容保留。
     fn error_policy(&self) -> ErrorPolicy {
         ErrorPolicy::default()
     }
@@ -786,6 +789,8 @@ pub struct PluginManifest {
     pub dependencies: Vec<Dependency>,
     #[serde(default)]
     pub permissions: ManifestPermissions,
+    /// 错误处理策略——ADR 2026-08-18 收敛后为唯一值 `Retry`（serde default，manifest
+    /// 可选字段，缺省即 retry）。保留字段仅为 struct 兼容，引擎不再按它分发行为。
     #[serde(default)]
     pub error_policy: ErrorPolicy,
     #[serde(default = "default_priority")]

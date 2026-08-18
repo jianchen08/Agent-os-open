@@ -23,7 +23,7 @@ import logging
 from typing import Any
 
 from pipeline.plugin import IInputPlugin, PluginContext, PluginResult
-from pipeline.types import ErrorPolicy, StateKeys
+from pipeline.types import StateKeys
 
 logger = logging.getLogger(__name__)
 
@@ -35,13 +35,11 @@ class PauseGuardPlugin(IInputPlugin):
     如果暂停则产出 wait 路由信号使管道挂起。
 
     优先级：5（最先执行，在 context_build 之前）
-    错误策略：SKIP（检查失败不影响管道运行）
+    检查失败不影响管道运行。
 
     Attributes:
         _config: 插件配置字典
     """
-
-    error_policy = ErrorPolicy.SKIP
 
     def __init__(self, config: dict[str, Any] | None = None) -> None:
         """初始化暂停守卫插件。

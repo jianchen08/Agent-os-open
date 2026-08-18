@@ -21,7 +21,7 @@ import time
 from typing import Any
 
 from pipeline.plugin import IOutputPlugin, OutputResult, PluginContext
-from pipeline.types import ErrorPolicy, RouteSignal, StateKeys
+from pipeline.types import RouteSignal, StateKeys
 
 logger = logging.getLogger(__name__)
 
@@ -41,13 +41,11 @@ class StopCheckPlugin(IOutputPlugin):
     6. 任务状态检测 → task 被删除/取消/完成/失败
 
     优先级：1（系统级，最高优先级检查）
-    错误策略：ABORT（停止判断异常必须终止管道）
+    停止判断异常必须终止管道。
 
     Attributes:
         _config: 插件配置字典
     """
-
-    error_policy = ErrorPolicy.ABORT
 
     def __init__(self, config: dict[str, Any] | None = None) -> None:
         """初始化停止检查插件。

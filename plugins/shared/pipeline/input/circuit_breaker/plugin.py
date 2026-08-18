@@ -20,7 +20,6 @@ import time
 from typing import Any
 
 from pipeline.plugin import IInputPlugin, PluginContext, PluginResult
-from pipeline.types import ErrorPolicy
 
 logger = logging.getLogger(__name__)
 
@@ -36,7 +35,6 @@ class CircuitBreaker(IInputPlugin):
         half_open_max_calls: 半开状态允许的探测次数（默认 1）
     """
 
-    error_policy = ErrorPolicy.SKIP
 
     CLOSED = "closed"
     OPEN = "open"

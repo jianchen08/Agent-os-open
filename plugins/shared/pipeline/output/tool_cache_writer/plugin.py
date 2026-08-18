@@ -22,7 +22,7 @@ import logging
 from typing import Any
 
 from pipeline.plugin import IOutputPlugin, OutputResult, PluginContext
-from pipeline.types import ErrorPolicy, StateKeys
+from pipeline.types import StateKeys
 
 logger = logging.getLogger(__name__)
 
@@ -40,10 +40,8 @@ class ToolCacheWriter(IOutputPlugin):
     - exclude_tools: 不缓存的工具名列表（默认含 bash_execute 等有副作用的工具）
 
     优先级：25（在 tool_progress priority=30 之前，尽早写缓存）
-    错误策略：SKIP（缓存写入异常不阻塞管道）
+    缓存写入异常不阻塞管道。
     """
-
-    error_policy = ErrorPolicy.SKIP
 
     def __init__(self, config: dict[str, Any] | None = None) -> None:
         """初始化工具缓存写入插件。

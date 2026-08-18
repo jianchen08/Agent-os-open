@@ -219,7 +219,7 @@ fn sanitize_string(text: &str, mask: &str) -> String {
 }
 
 /// 轻量日志：当前 native-sdk 未暴露 host.log 便捷封装，统一降级为静默。
-/// （脱敏失败不影响主流程——error_policy=skip，这里只吞掉模式编译错误。）
+/// （脱敏失败不影响主流程——插件错误由引擎统一 warn+继续，ADR 2026-08-18；这里只吞掉模式编译错误。）
 fn tracing_warn(_msg: &str) {
     // 预留：若后续需要把告警透出，经 host.call_capability("event-bus","emit",...)
     // 或 tracing::warn! 输出。当前正则均为编译期固定字面量，此处不会触发。

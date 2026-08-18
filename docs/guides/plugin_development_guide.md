@@ -207,19 +207,13 @@ import logging
 from typing import Any
 
 from pipeline.plugin import IOutputPlugin, OutputResult, PluginContext
-from pipeline.types import ErrorPolicy, StateKeys
+from pipeline.types import StateKeys
 
 logger = logging.getLogger(__name__)
 
 
 class ResultLengthGuardPlugin(IOutputPlugin):
-    """输出长度守卫插件。
-
-    Attributes:
-        error_policy: SKIP，本插件失败不影响主流程
-    """
-
-    error_policy = ErrorPolicy.SKIP
+    """输出长度守卫插件。"""
 
     def __init__(self, config: dict[str, Any] | None = None) -> None:
         """初始化长度守卫插件。
@@ -272,7 +266,7 @@ class ResultLengthGuardPlugin(IOutputPlugin):
 
 **要点对照真实代码**：
 - 导入路径是 `pipeline.plugin`（`src/pipeline/plugin.py`）和 `pipeline.types`（`src/pipeline/types.py`）
-- `ErrorPolicy` 有四个成员：`ABORT` / `SKIP` / `RETRY` / `FALLBACK`
+- `ErrorPolicy` 为 DEPRECATED 兼容占位（ADR 2026-08-18）：不要再声明 `error_policy`，错误处理由引擎/编排层按错误类型决定
 - `StateKeys.RAW_RESULT` 等预定义键在 `pipeline.types` 中，避免硬编码字符串
 - `priority` 通常从 `config.get("priority", 默认值)` 读取，便于配置覆盖
 - 跨迭代状态写 state，不存实例属性
@@ -310,10 +304,6 @@ class TestResultLengthGuardProperties:
 
     def test_priority_config_override(self) -> None:
         assert make_plugin(config={"priority": 99}).priority == 99
-
-    def test_error_policy_is_skip(self) -> None:
-        from pipeline.types import ErrorPolicy
-        assert make_plugin().__class__.error_policy == ErrorPolicy.SKIP
 
 
 class TestResultLengthGuardInit:
@@ -568,7 +558,7 @@ async def test_my_plugin() -> None:
 - [ ] 主文件命名为 `plugin.py`，`__init__.py` 用 `from .plugin import XxxPlugin` 导出
 - [ ] 正确继承 `IInputPlugin` / `ICorePlugin` / `IOutputPlugin`
 - [ ] 实现 `name`、`priority`、`execute` 三个必需成员
-- [ ] 声明了正确的 `error_policy`（`ABORT` / `SKIP` / `RETRY` / `FALLBACK`）
+- [ ] **不要**声明 `error_policy`（已 DEPRECATED，见 ADR 2026-08-18；错误处理由引擎/编排层决定）
 - [ ] 构造函数接受 `config: dict[str, Any] | None = None`
 - [ ] State 键使用命名空间格式（`{namespace}.{key}`），跨迭代状态存 state 不存实例属性
 - [ ] 优先从 `config.get("priority", 默认值)` 读取优先级
@@ -587,7 +577,7 @@ async def test_my_plugin() -> None:
 |------|------|------|
 | 插件开发标准规范 | `docs/guides/plugin_development_standard.md` | 完整规范文档（同目录） |
 | 插件接口定义 | `src/pipeline/plugin.py` | `IPlugin`/`IInputPlugin`/`ICorePlugin`/`IOutputPlugin`/`PluginContext`/`PluginResult`/`OutputResult` |
-| 类型与枚举 | `src/pipeline/types.py` | `ErrorPolicy`/`RouteSignal`/`StateKeys` 定义 |
+| 类型与枚举 | `src/pipeline/types.py` | `ErrorPolicy`（DEPRECATED 兼容占位）/`RouteSignal`/`StateKeys` 定义 |
 | 类型插槽 | `src/pipeline/plugin_types.py` | `PluginTypeSlot` 类型注册机制 |
 | 管道配置 | `config/pipelines/default.yaml` | 默认管道配置（插件注册位置） |
 | 真实插件示例 | `src/plugins/output/duplicate_check/plugin.py` | 三级渐进策略的完整 Output 插件实现 |

@@ -50,8 +50,8 @@
 | 8 | `kernel/crates/core/src/types.rs` | Rust 数据类型 | 核心共享类型——RouteType / ErrorPolicy / PluginResult / PluginContext / TenantContext / ToolCategory 等 | ✅ 已存在 |
 | 9 | `src/pipeline/plugin.py` | Python 抽象基类 | 0.1 旧版插件契约（IPlugin / IInputPlugin / ICorePlugin / IOutputPlugin / PluginContext / PluginResult / OutputResult） | ✅ 已存在（0.1 对照基线） |
 | 10 | `src/pipeline/types.py` | Python 类型定义 | 0.1 旧版类型——StateKeys / ErrorPolicy / RouteSignal / TargetType | ✅ 已存在（0.1 对照基线） |
-| 11 | `config/templates/plugin_scaffold/core_plugin.py` | 脚手架模板 | Core 插件模板（含 `ICorePlugin` 继承、fallback_state、ErrorPolicy） | ✅ 已存在 |
-| 12 | `config/templates/plugin_scaffold/input_plugin.py` | 脚手架模板 | Input 插件模板（含 `IInputPlugin`、ErrorPolicy、enabled 默认 True） | ✅ 已存在 |
+| 11 | `config/templates/plugin_scaffold/core_plugin.py` | 脚手架模板 | Core 插件模板（含 `ICorePlugin` 继承） | ✅ 已存在 |
+| 12 | `config/templates/plugin_scaffold/input_plugin.py` | 脚手架模板 | Input 插件模板（含 `IInputPlugin`、enabled 默认 True） | ✅ 已存在 |
 | 13 | `config/templates/plugin_scaffold/output_plugin.py` | 脚手架模板 | Output 插件模板（含 `IOutputPlugin`、route_signals 声明） | ✅ 已存在 |
 | 14 | `docs/guides/plugin_development_guide.md` | 完整教程 | 47 个现有插件的工作机制 + 端到端示例（从设计到测试） | ✅ 已存在 |
 | 15 | `docs/guides/plugin_development_standard.md` | 标准规范 | 命名规范 / 目录结构 / 接口约束 / 错误策略 / State 命名空间 / 类型插槽 | ✅ 已存在 |
@@ -199,7 +199,7 @@
 | `capabilities` | object | ✅ | 能力声明（详见下表） | 见下方 |
 | `dependencies` | array | ❌ | 依赖的其他插件 | `[{"plugin_id": "tool_schema"}]` |
 | `permissions` | object | ❌ | 权限申请（默认空） | 见下方 |
-| `error_policy` | enum | ❌ | 错误策略，默认 `abort` | `"abort"` / `"skip"` / `"retry"` / `"fallback"` |
+| `error_policy` | enum | ❌ | DEPRECATED 兼容占位（ADR 2026-08-18），不再分发行为 | `"abort"` / `"skip"` / `"retry"` / `"fallback"` |
 | `priority` | int | ❌ | 优先级，默认 100 | 数值越小越先执行 |
 | `mcp` | object | ❌ | MCP 配置（仅 sidecar 类型） | 见下方 |
 
@@ -451,7 +451,7 @@ pub trait LlmProvider: Send + Sync {
 |------|------|----------|
 | `RouteType` 枚举 | 路由类型（4 种） | `NextLlm` / `NextTool` / `End` / `Wait` |
 | `RouteSignal` struct | 路由信号包 | Output 插件返回 `PluginResult.route_signal` |
-| `ErrorPolicy` 枚举 | 错误策略 | `Abort` / `Skip` / `Retry` / `Fallback` |
+| `ErrorPolicy` 枚举 | 错误策略（DEPRECATED 兼容占位，ADR 2026-08-18） | `Abort` / `Skip` / `Retry` / `Fallback` |
 | `PluginResult` struct | 插件执行结果 | 包含 `state_updates` + `route_signal` + `skip_remaining` + `error` |
 | `PluginError` struct | 插件错误 | `message` + `code` + `source` |
 | `PluginContext` struct | 插件执行上下文 | 包含 `state` + `config` + `tenant` + `pipeline_id` + `session_id` + `task_id` |
@@ -474,23 +474,26 @@ pub enum RouteType {
 
 > **关键变更**：0.1 有 6 种（`next_llm` / `next_tool` / `end` / `delegate` / `wait` / `decision`），0.2 删除 `delegate` 和 `fork`，精简为 4 种。详见 0.2插件体系核心决策 §决策 10。
 
-#### `ErrorPolicy` 详解（4 种策略）
+#### `ErrorPolicy` 详解（DEPRECATED，契约兼容占位）
+
+> **ADR 2026-08-18**：0.2 引擎**不再按 `error_policy` 分发行为**。枚举保留 4 个值仅为兼容
+> 已冻结 manifest 的加载期字段校验；错误处理由引擎/编排层按错误类型决定（瞬态
+> sidecar 崩溃→retry 一次；工具失败→回喂 LLM 自我修正；非瞬态→上抛编排层）。
+> 插件**不要再声明** `error_policy`。
 
 ```rust
 pub enum ErrorPolicy {
-    Abort,      // 立即终止后续插件（默认）
-    Skip,       // 记录警告继续
-    Retry,      // 调用方实现重试循环
-    Fallback,   // 用兜底结果替代
+    Abort,      // 保留仅为兼容校验（默认）
+    Skip,       // 保留仅为兼容校验
+    Retry,      // 保留仅为兼容校验
+    Fallback,   // 保留仅为兼容校验
 }
 ```
 
-| 策略 | 适用场景 | 典型插件 |
-|------|----------|----------|
-| `Abort` | 不确定就不能继续 | 安全检查、停止判断、参数注入 |
-| `Fallback` | 降级也能跑 | 上下文构建、工具 Schema 生成 |
-| `Skip` | 失败不影响当轮 | 记忆写入、追踪统计、格式化 |
-| `Retry` | 瞬态错误可重试 | 外部 API 调用 |
+| `Abort` | 保留仅为兼容校验（ADR 2026-08-18） | — |
+| `Fallback` | 保留仅为兼容校验（ADR 2026-08-18） | — |
+| `Skip` | 保留仅为兼容校验（ADR 2026-08-18） | — |
+| `Retry` | 保留仅为兼容校验（ADR 2026-08-18） | — |
 
 #### `PluginContext` 详解
 
@@ -539,7 +542,7 @@ pub struct PluginContext {
 | 维度 | 0.1 Python | 0.2 Rust |
 |------|-----------|----------|
 | 抽象机制 | ABC + `@abstractmethod` | Rust trait + `#[async_trait]` |
-| 错误处理 | raise exception → 由 plugin chain 按 error_policy 处理 | 返回 `Result<PluginResult, PluginError>` |
+| 错误处理 | raise exception → 由 plugin chain 按 error_policy 处理 | 返回 `Result<PluginResult, PluginError>`（引擎不按 error_policy 分发，ADR 2026-08-18） |
 | state 类型 | `dict[str, Any]` | `serde_json::Value` |
 | execute 返回类型 | Input→PluginResult, Core→dict, Output→OutputResult | 全部→PluginResult（统一） |
 | 路由信号 | `route_type: str`（无类型约束） | `route_type: RouteType`（强类型枚举） |
@@ -564,7 +567,7 @@ pub struct PluginContext {
 #### 关键内容
 
 - **StateKeys**——25 个 state 字段名常量（ITERATION / CORE_TYPE / ENDED / SESSION_ID / RAW_RESULT / RAW_TOOL_CALLS / RAW_THINKING ...）
-- **ErrorPolicy**——4 种错误策略（与 0.2 一致）
+- **ErrorPolicy**——4 个枚举值保留仅为兼容已冻结 manifest 的校验，运行时不再按它分发行为（ADR 2026-08-18）
 - **RouteSignal**——`@dataclass`，字段：`route_type: str` + `target` + `reason` + `payload`
 
 > **0.1 → 0.2 演进**：
@@ -592,17 +595,14 @@ pub struct PluginContext {
 
 | 模板 | 继承的基类 | 关键差异 |
 |------|----------|---------|
-| `core_plugin.py` | `ICorePlugin` | 默认 `error_policy = ABORT`；有 `fallback_state` 字段（默认 `{}`） |
-| `input_plugin.py` | `IInputPlugin` | 默认 `error_policy = ABORT`；构造函数读 `enabled` 配置 |
-| `output_plugin.py` | `IOutputPlugin` | 默认 `error_policy = SKIP`；有 `route_signals` property（默认返回 `[]`） |
+| `core_plugin.py` | `ICorePlugin` | 构造函数读 `enabled` 配置 |
+| `input_plugin.py` | `IInputPlugin` | 构造函数读 `enabled` 配置 |
+| `output_plugin.py` | `IOutputPlugin` | 有 `route_signals` property（默认返回 `[]`） |
 
 #### 模板的核心结构（以 output_plugin.py 为例）
 
 ```python
 class {PluginClass}(IOutputPlugin):
-    error_policy: ErrorPolicy = ErrorPolicy.SKIP  # 错误策略
-    fallback_state: dict[str, Any] = {}  # FALLBACK 时的默认状态
-
     @property
     def route_signals(self) -> list[str]:
         """本插件可能产出的路由信号类型列表。"""
@@ -622,7 +622,7 @@ class {PluginClass}(IOutputPlugin):
 #### 实际场景
 
 - **新插件作者**：复制 `output_plugin.py` → 改类名 → 填 TODO。一份 30 行起步的合规插件就出来了。
-- **code review**：照模板检查新插件是否符合契约（error_policy / route_signals / 构造函数 / execute 签名）
+- **code review**：照模板检查新插件是否符合契约（route_signals / 构造函数 / execute 签名；**不声明** error_policy）
 
 > **来源**：[来源: config/templates/plugin_scaffold/core_plugin.py / input_plugin.py / output_plugin.py]
 

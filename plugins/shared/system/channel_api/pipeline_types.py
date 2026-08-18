@@ -53,7 +53,13 @@ class StateKeys:
 
 
 class ErrorPolicy(Enum):
-    """插件错误处理策略。"""
+    """插件错误处理策略。
+
+    DEPRECATED：0.2 引擎不再按 error_policy 分发行为；枚举值仅保留以兼容
+    已冻结 manifest 的字段校验。错误处理由引擎按错误类型自动决定（重试见
+    invoker 的 with_transparent_recovery——sidecar 崩溃时 force_unload+respawn+
+    重试一次）；ABORT/SKIP/FALLBACK 决策上抛编排层。插件不要再声明 error_policy。
+    """
 
     ABORT = "abort"
     SKIP = "skip"

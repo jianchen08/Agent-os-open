@@ -155,9 +155,9 @@ fn execute_single_tool(tc: &ToolCall, host: Option<&dyn HostServices>, state: &V
 
     // output_schema 消费端（task_dsh_plugin_adapter 任务 1）：成功结果按内核注入的
     // tool_output_contracts 校验，违规 fail-closed 转失败——错误带回 LLM 自我修正，
-    // error_policy=skip 管道继续。放在 tool_result 事件发送前，保证冷热一致
-    // （事件里的 success/error 与持久化 tool_result 同源）。DSH tools/post-execute
-    // 兜底语义的对应实现，见 docs/dsh_hook_translation.md。
+    // 插件错误由引擎统一 warn+继续（ADR 2026-08-18）。放在 tool_result 事件发送前，
+    // 保证冷热一致（事件里的 success/error 与持久化 tool_result 同源）。DSH tools/
+    // post-execute 兜底语义的对应实现，见 docs/dsh_hook_translation.md。
     let mut result = result;
     if result.success && output_validate::validation_enabled(state) {
         if let Some(err) = validate_output_contract(state, &tc.name, &result.data) {

@@ -6,7 +6,7 @@
 - 边界路径：tool_registry 返回空列表
 - 边界路径：Electron 窗口信息为空
 - 边界路径：插件禁用
-- 属性验证：name、priority、error_policy
+- 属性验证：name、priority
 - 适配器状态：adapter_status 字段验证
 - 窗口信息规范化：标准格式和旧格式兼容
 """
@@ -23,7 +23,6 @@ from tests._pipeline_plugin_path import add_plugin_dir
 
 add_plugin_dir("input", "tool_context")
 from pipeline.plugin import PluginContext, PluginResult  # noqa: E402
-from pipeline.types import ErrorPolicy  # noqa: E402
 from plugin import ToolContextPlugin  # noqa: E402
 
 pytestmark = pytest.mark.unit
@@ -114,16 +113,6 @@ class TestToolContextPluginProperties:
         """优先级应可通过 config 覆盖。"""
         p = ToolContextPlugin(config={"priority": 30})
         assert p.priority == 30
-
-    def test_error_policy_is_fallback(self, plugin: ToolContextPlugin) -> None:
-        """错误策略应为 FALLBACK。"""
-        assert plugin.error_policy == ErrorPolicy.FALLBACK
-
-    def test_fallback_state_has_tool_context(self, plugin: ToolContextPlugin) -> None:
-        """fallback_state 应包含 tool_context 默认值。"""
-        assert "tool_context" in plugin.fallback_state
-        assert plugin.fallback_state["tool_context"]["online_tools"] == []
-        assert "adapter_status" in plugin.fallback_state["tool_context"]
 
 
 # ── 正常路径 ─────────────────────────────────────────────

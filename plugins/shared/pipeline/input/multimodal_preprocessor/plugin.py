@@ -17,7 +17,6 @@ import re
 from typing import Any
 
 from pipeline.plugin import IInputPlugin, PluginContext, PluginResult
-from pipeline.types import ErrorPolicy
 
 logger = logging.getLogger(__name__)
 
@@ -53,13 +52,11 @@ class MultimodalPreprocessor(IInputPlugin):
     写入管道状态供后续 LLM 调用使用。
 
     优先级：40（预处理级，在参数注入之前）
-    错误策略：SKIP（检测失败不影响管道执行）
+    检测失败不影响管道执行。
 
     Attributes:
         _config: 插件配置字典
     """
-
-    error_policy = ErrorPolicy.SKIP
 
     def __init__(self, config: dict[str, Any] | None = None) -> None:
         """初始化多模态预处理插件。
@@ -180,7 +177,7 @@ class MultimodalPreprocessor(IInputPlugin):
         """将音频附件转写为文本。
 
         读取音频文件字节（本地路径或 data URL），调用 ASR 服务转写。
-        ASR 服务未配置或转写失败时静默跳过（保持插件 SKIP 错误策略）。
+        ASR 服务未配置或转写失败时静默跳过。
 
         Args:
             url: 音频 URL 或本地路径
@@ -255,7 +252,7 @@ class MultimodalPreprocessor(IInputPlugin):
         提取的文本会和用户消息一起发给 LLM（任何模型都能接收文本）。
 
         失败时（文件不存在、markitdown 未安装、文件过大、转换失败）
-        记 warning 日志并返回空串，保持插件 SKIP 错误策略不阻断管道。
+        记 warning 日志并返回空串，不阻断管道。
 
         Args:
             url: 附件 URL（如 /uploads/xxx.pdf）

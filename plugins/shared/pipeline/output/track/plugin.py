@@ -17,7 +17,7 @@ import time
 from typing import Any
 
 from pipeline.plugin import IOutputPlugin, OutputResult, PluginContext
-from pipeline.types import ErrorPolicy, StateKeys
+from pipeline.types import StateKeys
 
 logger = logging.getLogger(__name__)
 
@@ -31,8 +31,6 @@ _CACHE_HIT_WARN_THRESHOLD = 0.9
 
 class TrackPlugin(IOutputPlugin):
     """追踪统计 Output 插件。"""
-
-    error_policy = ErrorPolicy.SKIP
 
     def __init__(self, config: dict[str, Any] | None = None) -> None:
         """初始化追踪统计插件。"""

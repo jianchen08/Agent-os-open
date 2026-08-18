@@ -14,7 +14,7 @@ import logging
 from typing import Any
 
 from pipeline.plugin import IOutputPlugin, OutputResult, PluginContext
-from pipeline.types import ErrorPolicy, StateKeys
+from pipeline.types import StateKeys
 
 logger = logging.getLogger(__name__)
 
@@ -33,13 +33,11 @@ class ToolProgressReporter(IOutputPlugin):
     }
 
     优先级：30（处理级）
-    错误策略：SKIP（进度报告失败不阻塞管道）
+    进度报告失败不阻塞管道。
 
     Attributes:
         _config: 插件配置字典
     """
-
-    error_policy = ErrorPolicy.SKIP
 
     def __init__(self, config: dict[str, Any] | None = None) -> None:
         """初始化工具进度报告插件。

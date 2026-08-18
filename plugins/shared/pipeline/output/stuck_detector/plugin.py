@@ -20,7 +20,7 @@ from difflib import SequenceMatcher
 from typing import Any
 
 from pipeline.plugin import IOutputPlugin, OutputResult, PluginContext
-from pipeline.types import ErrorPolicy, StateKeys
+from pipeline.types import StateKeys
 
 logger = logging.getLogger(__name__)
 
@@ -38,8 +38,6 @@ class StuckDetector(IOutputPlugin):
         _similarity_threshold: 相似度阈值（默认 0.9）
         _repeat_threshold: 重复次数阈值（默认 3）
     """
-
-    error_policy = ErrorPolicy.SKIP
 
     def __init__(self, config: dict[str, Any] | None = None) -> None:
         """初始化卡死检测插件。

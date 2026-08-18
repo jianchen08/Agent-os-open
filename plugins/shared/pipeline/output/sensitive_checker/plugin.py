@@ -23,7 +23,7 @@ import re
 from typing import Any
 
 from pipeline.plugin import IOutputPlugin, OutputResult, PluginContext
-from pipeline.types import ErrorPolicy, StateKeys
+from pipeline.types import StateKeys
 
 logger = logging.getLogger(__name__)
 
@@ -37,13 +37,12 @@ class SensitiveChecker(IOutputPlugin):
     脱敏策略：将匹配到的敏感值替换为 ***。
 
     优先级：20（安全级，优先执行）
-    错误策略：SKIP（脱敏失败不阻塞管道）
+    脱敏失败不阻塞管道。
 
     Attributes:
         _config: 插件配置字典
     """
 
-    error_policy = ErrorPolicy.SKIP
 
     _SENSITIVE_PATTERNS: list[tuple[str, re.Pattern[str]]] = [
         ("OpenAI Key", re.compile(r"sk-[a-zA-Z0-9]{20,}")),

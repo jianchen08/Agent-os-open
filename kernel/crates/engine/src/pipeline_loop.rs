@@ -10,7 +10,7 @@
 //! ② 公共 step 库（`step_library.find`）→ 组合节点递归执行
 //! ③ 插件名（在已知插件集合中）→ 通过 `PluginInvoker` 调用原子插件
 //!
-//! 三级都 miss：记 `error!` 但不 panic（error_policy 简化为记录后继续）。
+//! 三级都 miss：记 `error!` 但不 panic（插件错误统一为记录后继续，不按 error_policy 分发，ADR 2026-08-18）。
 //!
 //! ## 状态流转
 //!
@@ -757,7 +757,7 @@ impl PipelineExecutor {
     }
 
     /// 调用原子插件并 merge state_updates；返回 true = 应跳过同组后续
-    /// （`skip_remaining`）。错误按 error_policy=skip warn + 继续（与旧行为一致）。
+    /// （`skip_remaining`）。插件错误统一 warn + 继续（不再按 error_policy 分发，ADR 2026-08-18）。
     async fn invoke_item_plugin(&self, plugin_id: &str, state: &mut serde_json::Value) -> bool {
         match self.invoke_plugin(plugin_id, state.clone()).await {
             Ok(result) => {
@@ -767,7 +767,7 @@ impl PipelineExecutor {
                     self.merge_and_project(state, &result.state_updates).await;
                     result.skip_remaining
                 } else {
-                    // error_policy 简化：warn + 继续
+                    // 引擎统一 warn + 继续（不按 error_policy 分发，ADR 2026-08-18）
                     warn!(
                         plugin = %plugin_id,
                         error = ?result.error,

@@ -28,7 +28,7 @@ import logging
 from typing import Any
 
 from pipeline.plugin import IOutputPlugin, OutputResult, PluginContext
-from pipeline.types import ErrorPolicy, StateKeys
+from pipeline.types import StateKeys
 
 logger = logging.getLogger(__name__)
 
@@ -61,10 +61,8 @@ class ExperienceConsolidatorPlugin(IOutputPlugin):
     知识以 memory_type="experience" 写入同一后端（source="consolidation"）。
 
     优先级：28（在 context_compress 之后）
-    错误策略：SKIP（沉淀失败不影响当轮结果）
+    沉淀失败不影响当轮结果。
     """
-
-    error_policy = ErrorPolicy.SKIP
 
     def __init__(self, config: dict[str, Any] | None = None) -> None:
         """初始化经验沉淀插件。

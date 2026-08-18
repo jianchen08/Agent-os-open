@@ -43,7 +43,6 @@ from typing import Any
 from zoneinfo import ZoneInfo
 
 from pipeline.plugin import IInputPlugin, PluginContext, PluginResult
-from pipeline.types import ErrorPolicy
 
 from agentos_plugin_sdk.settings import get_settings
 
@@ -193,13 +192,11 @@ class PromptBuildPlugin(IInputPlugin):
     不包含历史消息和动态变量。历史消息和动态变量由 LLMCore._build_messages 负责组装。
 
     优先级：50（构建级，在 context_build 和 memory_read 之后）
-    错误策略：ABORT（没有提示词 LLM 无法调用）
+    没有提示词 LLM 无法调用。
 
     Attributes:
         _config: 插件配置字典
     """
-
-    error_policy = ErrorPolicy.ABORT
 
     def __init__(self, config: dict[str, Any] | None = None) -> None:
         """初始化提示词构建插件。

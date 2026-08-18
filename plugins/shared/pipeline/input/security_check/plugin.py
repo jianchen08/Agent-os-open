@@ -50,7 +50,7 @@ def _get_human_interaction_cap() -> Any | None:
     except (KeyError, AttributeError):
         return None
 from pipeline.plugin import IInputPlugin, PluginContext, PluginResult
-from pipeline.types import ErrorPolicy, StateKeys
+from pipeline.types import StateKeys
 from policy import IsolationPolicyLoader
 from sensitive_paths import is_sensitive_path
 
@@ -171,14 +171,12 @@ class SecurityCheckPlugin(IInputPlugin):
     3. 配置规则匹配（通用引擎）
 
     优先级：70（校验级，在参数注入之后）
-    错误策略：ABORT（安全不确定必须停止）
+    安全不确定必须停止。
 
     Attributes:
         _config: 插件配置字典
         _rules: 从 YAML 加载的安全规则列表
     """
-
-    error_policy = ErrorPolicy.ABORT
 
     def __init__(self, config: dict[str, Any] | None = None) -> None:
         """初始化安全检查插件。

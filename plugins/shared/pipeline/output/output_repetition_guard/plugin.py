@@ -15,7 +15,7 @@ from difflib import SequenceMatcher
 from typing import Any
 
 from pipeline.plugin import IOutputPlugin, OutputResult, PluginContext
-from pipeline.types import ErrorPolicy, RouteSignal, StateKeys
+from pipeline.types import RouteSignal, StateKeys
 
 logger = logging.getLogger(__name__)
 
@@ -42,10 +42,7 @@ class OutputRepetitionGuard(IOutputPlugin):
     - 4+ 次：产出 decision 信号
 
     优先级：12（Output 阶段，在 ErrorCheck 之后）
-    错误策略：ABORT
     """
-
-    error_policy = ErrorPolicy.ABORT
 
     def __init__(self, config: dict[str, Any] | None = None) -> None:
         self._config = config or {}

@@ -18,7 +18,7 @@ import re
 from typing import Any
 
 from pipeline.plugin import IInputPlugin, PluginContext, PluginResult
-from pipeline.types import ErrorPolicy, StateKeys
+from pipeline.types import StateKeys
 
 logger = logging.getLogger(__name__)
 
@@ -36,13 +36,11 @@ class ReasoningCheckPlugin(IInputPlugin):
     检查的是上一轮 LLM 输出的推理内容。
 
     优先级：75（校验级，在 security_check 之后）
-    错误策略：SKIP（推理检查异常不影响管道执行）
+    推理检查异常不影响管道执行。
 
     Attributes:
         _config: 插件配置字典
     """
-
-    error_policy = ErrorPolicy.SKIP
 
     def __init__(self, config: dict[str, Any] | None = None) -> None:
         """初始化推理检查插件。

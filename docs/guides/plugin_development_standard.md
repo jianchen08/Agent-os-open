@@ -133,8 +133,6 @@ from pipeline.plugin import PluginContext, PluginResult, OutputResult
 class {PluginClass}(IInputPlugin):
     """插件简述。"""
 
-    error_policy: ErrorPolicy = ErrorPolicy.ABORT  # 必填：声明错误策略
-
     @property
     def name(self) -> str:
         """插件唯一标识名称，必须与目录名和配置名一致。"""
@@ -179,7 +177,7 @@ class {PluginClass}(IInputPlugin):
 | 必须是 `async` | 管道引擎异步调用 |
 | 参数只能是 `ctx: PluginContext` | 不接受其他参数 |
 | 必须返回对应类型 | Input→`PluginResult`，Core→`dict`，Output→`OutputResult` |
-| 不抛出未捕获异常 | 异常由插件链按 `error_policy` 处理 |
+| 不抛出未捕获异常 | 异常由引擎统一处理（warn+继续）；非瞬态决策上抛编排层 |
 | 不直接修改 `ctx.state` | 通过返回 `state_updates` 让引擎合并 |
 
 ### 4.5 State 命名空间约定
@@ -215,16 +213,21 @@ def register_types(cls, slots: PluginTypeSlot) -> None:
 
 ---
 
-## 5. 错误策略规范
+## 5. 错误处理规范（ADR 2026-08-18）
 
-### 5.1 策略选择标准
+> 0.2 起插件**不再声明错误策略**（`error_policy` 字段为契约兼容占位，仅 manifest
+> 加载期校验用，不产生行为分发）。运行时错误处理由引擎/编排层按错误类型自动决定：
 
-| 策略 | 适用场景 | 行为 | 典型插件 |
-|------|----------|------|----------|
-| `ABORT` | 不确定就不能继续 | 跳过后续插件 + 记录错误 | 安全检查、停止判断、参数注入 |
-| `FALLBACK` | 降级也能跑 | 使用 `fallback_state` 替代结果 | 上下文构建、工具 Schema |
-| `SKIP` | 失败不影响当轮结果 | 记录警告，继续执行 | 记忆写入、追踪统计、格式化 |
-| `RETRY` | 瞬态错误可重试 | 由调用方实现重试循环 | 外部 API 调用 |
+| 错误类型 | 处理方 | 行为 |
+|----------|--------|------|
+| 瞬态（sidecar 进程崩溃） | 内核 invoker | `with_transparent_recovery`：force_unload + respawn + 重试一次 |
+| 工具失败结果 | tool_core | 结果转 `ToolResult::failed` 回喂 LLM 自我修正 |
+| 插件执行错误（非瞬态） | 引擎 | warn + 继续；跳过/终止等决策上抛编排层 |
+
+### 5.1 插件作者的职责
+
+失败时返回带 `error` 的 `PluginResult` 或向上抛异常（由引擎统一处理），
+不要在类上声明任何 `error_policy`。必要的严重性语义在 docstring 中用自然语言说明即可。
 
 ### 5.2 错误处理最佳实践
 
@@ -267,7 +270,7 @@ logger = logging.getLogger(__name__)
 
 ```python
 logger.info("Plugin %s started with config: %s", self.name, self._config)
-logger.warning("Plugin %s fallback triggered: %s", self.name, reason)
+logger.warning("Plugin %s degraded, continuing: %s", self.name, reason)
 logger.error("Plugin %s execution failed: %s", self.name, exc)
 ```
 
@@ -280,7 +283,7 @@ logger.error("Plugin %s execution failed: %s", self.name, exc)
 | 测试类型 | 必要性 | 说明 |
 |----------|--------|------|
 | 单元测试 | 必选 | 覆盖 `execute` 方法的核心路径 |
-| 错误路径测试 | 必选 | 验证 error_policy 行为 |
+| 错误路径测试 | 必选 | 验证失败时返回 `error` 且不中断管道 |
 | 配置默认值测试 | 推荐 | 验证 config=None 时正常工作 |
 | 集成测试 | 推荐 | 与其他插件的 state 交互 |
 
@@ -332,9 +335,6 @@ class {PluginClass}(IInputPlugin):
     """{简短描述}。
 
     {详细说明职责、行为和注意事项。}
-
-    Attributes:
-        error_policy: 错误处理策略
     """
 ```
 
@@ -383,7 +383,7 @@ class {PluginClass}(IInputPlugin):
 - [ ] 实现了 `name`、`priority`、`execute` 三个必需成员
 - [ ] 构造函数接受 `config` 参数，默认 `None`
 - [ ] execute 方法是 async，返回正确类型
-- [ ] 声明了正确的 `error_policy`
+- [ ] **不**声明 `error_policy`（DEPRECATED，ADR 2026-08-18；错误处理由引擎/编排层决定）
 - [ ] State 键使用命名空间格式（`namespace.key`）
 - [ ] 不直接修改 `ctx.state`，通过返回值传递更新
 - [ ] 有单元测试覆盖核心路径和错误路径

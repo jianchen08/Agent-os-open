@@ -12,7 +12,7 @@ import re
 from typing import Any
 
 from pipeline.plugin import IOutputPlugin, OutputResult, PluginContext
-from pipeline.types import ErrorPolicy, StateKeys
+from pipeline.types import StateKeys
 
 # 图片URL正则：匹配 http(s)://...jpg/png/gif/webp/svg
 _IMAGE_URL_PATTERN = re.compile(
@@ -28,13 +28,11 @@ class MultimodalPostprocessor(IOutputPlugin):
     提取图片URL并写入管道状态，供后续持久化存储使用。
 
     优先级：40（后处理级）
-    错误策略：SKIP（提取失败不影响管道执行）
+    提取失败不影响管道执行。
 
     Attributes:
         _config: 插件配置字典
     """
-
-    error_policy = ErrorPolicy.SKIP
 
     def __init__(self, config: dict[str, Any] | None = None) -> None:
         """初始化多模态后处理插件。

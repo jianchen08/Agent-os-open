@@ -59,13 +59,6 @@ class TestConfig:
         assert d.priority == 5
         assert d.route_signals == ["wait"]
 
-    def test_error_policy为SKIP(self) -> None:
-        from pipeline.types import ErrorPolicy
-        from plugin import ConversationModeDetector
-
-        assert ConversationModeDetector.error_policy == ErrorPolicy.SKIP
-
-
 # ============================================================
 # _extract_conversation_flag
 # ============================================================

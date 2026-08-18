@@ -31,7 +31,6 @@ from types import SimpleNamespace
 from typing import Any
 
 from pipeline.plugin import IInputPlugin, PluginContext, PluginResult
-from pipeline.types import ErrorPolicy
 
 logger = logging.getLogger(__name__)
 
@@ -128,8 +127,6 @@ class _ExecutionContextTaskTree:
 
 class WorkspaceLifecyclePlugin(IInputPlugin):
     """工作空间生命周期插件：init 创建空间，exit 合并清理（自持服务）。"""
-
-    error_policy = ErrorPolicy.ABORT
 
     def __init__(self, config: dict[str, Any] | None = None) -> None:
         """初始化。

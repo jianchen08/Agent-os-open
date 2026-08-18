@@ -225,12 +225,6 @@ core_plugins:
       default_params:
         temperature: 0.7
         max_tokens: 131072
-      # litellm 内置重试（处理瞬态错误 + 过载）
-      num_retries: 3
-      retry_delay: 15
-      # engine.py 层过载兜底（litellm 重试耗尽后触发）
-      overload_retry_delay: 45
-      max_retries: 1
       # LLM 调用超时（秒）
       llm_call_timeout: 300
   tool_execute:
