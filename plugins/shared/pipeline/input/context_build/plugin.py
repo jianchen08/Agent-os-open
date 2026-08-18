@@ -176,8 +176,11 @@ class ContextBuildPlugin(IInputPlugin):
         _tool_ids = agent_cfg.get("tool_ids")
         if isinstance(_tool_ids, list) and _tool_ids:
             updates["tool_ids"] = _tool_ids
+        # agent 层级：yaml level（如 code_writer L3）覆盖插件默认 L1——子任务
+        # 管道按目标 agent 定层级（L1 豁免会让 task_reminder 评估闸门旁路，
+        # 2026-08-18 实测踩坑）。插件配置显式 agent_level 仍最高优先。
         if agent_cfg.get("level") and self._config.get("agent_level") is None:
-            lvl = str(agent_cfg["level"]).upper()
+            lvl = str(agent_cfg["level"]).strip().upper()
             if lvl.startswith("L"):
                 self._agent_level = lvl
 
