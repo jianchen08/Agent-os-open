@@ -23,6 +23,7 @@ import { KanbanWidget } from '@/components/schema/widgets/KanbanWidget'
 import { WizardWidget } from '@/components/schema/widgets/WizardWidget'
 import { SortableListWidget } from '@/components/schema/widgets/SortableListWidget'
 import { InlineEditWidget } from '@/components/schema/widgets/InlineEditWidget'
+import { WidgetStage } from '@/components/schema/widgets/WidgetStage'
 import { ReviewDocumentWidget } from '@/components/schema/widgets/ReviewDocumentWidget'
 import { StatusCardWidget } from '@/components/schema/widgets/StatusCardWidget'
 import { TableWidget } from '@/components/schema/widgets/TableWidget'
@@ -120,6 +121,8 @@ const WIDGETS: WidgetEntry[] = [
     spaces: ['workspace', 'floating', 'fullscreen'],
     fallback: 'status_card',
   },
+  // 声明演示台（widget_demo 插件）：渲染指定 space 的全部声明 widget + G4 受控桥
+  { name: 'widget_stage', component: WidgetStage, spaces: ['workspace', 'floating', 'fullscreen'] },
   // 富交互形态（widget 化 G5）：多步向导 / 拖拽排序 / 内联编辑
   { name: 'wizard', component: WizardWidget, spaces: ['workspace', 'floating', 'fullscreen'], fallback: 'form' },
   { name: 'sortable_list', component: SortableListWidget, spaces: ['workspace', 'floating'], fallback: 'table' },

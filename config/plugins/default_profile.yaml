@@ -63,6 +63,10 @@ plugins:
     enabled: false
   visual_customization_demo:
     enabled: false
+  # widget 化全特性演示/测试插件（前端演示台 + sidecar 演示端点）
+  widget_demo:
+    enabled: true
+    activation: lazy
 defaults:
   enabled: true
   activation: lazy

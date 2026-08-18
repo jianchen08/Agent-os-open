@@ -77,6 +77,14 @@ export interface ChatCardActionDecl {
     confirm?: unknown
     [key: string]: unknown
   }
+  /** on_click 协议键名别名（设计文档 §4.2 用 snake_case；两者等价，双键兼容） */
+  on_click?: {
+    action?: unknown
+    value?: unknown
+    args?: unknown
+    confirm?: unknown
+    [key: string]: unknown
+  }
 }
 
 /** ui.chat_card 声明（已反序列化） */
@@ -381,7 +389,7 @@ function buildActionHandler(
   decl: ChatCardActionDecl,
   ctx: ToolCallContext,
 ): (() => void | Promise<void>) | null {
-  const proto = decl.onClick
+  const proto = decl.onClick ?? decl.on_click
   const action = proto?.action
   if (typeof action !== 'string') return null
   const rawValue = proto?.value
@@ -450,7 +458,7 @@ export function interpretChatCard(decl: ChatCardDeclaration, ctx: ToolCallContex
 
   const actions: ActivityAction[] = (decl.actions ?? []).map((a) => {
     const handler = buildActionHandler(a, ctx)
-    const confirm = a.onClick?.confirm
+    const confirm = a.onClick?.confirm ?? a.on_click?.confirm
     return {
       id: a.id,
       icon: null,

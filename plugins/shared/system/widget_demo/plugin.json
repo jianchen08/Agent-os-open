@@ -1,0 +1,548 @@
+{
+    "id": "widget_demo",
+    "name": "Widget Demo（前端特性演示）",
+    "description": "widget 化全特性演示/测试插件：config_files fields 类型化表单（T1）、chat_card form 块+actions（T2/T3）、output_schema 结构化视图（T4）、事件联动（G3）、受控桥（G4）、向导/拖拽/内联（G5）、datasource 代理+轮询（G6）。纯声明为主，sidecar 提供演示端点。",
+    "version": "1.0.0",
+    "plugin_type": "system",
+    "language": "python",
+    "host_type": "sidecar",
+    "entry": "python server.py",
+    "capabilities": {
+        "tools": [
+            {
+                "name": "demo_card_tool",
+                "description": "演示 chat_card：text/kv/form 块 + actions（copy/open_url）",
+                "ui": {
+                    "chat_card": {
+                        "icon": "sparkles",
+                        "title": "演示卡片 {{args.summary | default:widget-demo}}",
+                        "blocks": [
+                            {
+                                "type": "text",
+                                "label": "摘要",
+                                "source": "args.summary"
+                            },
+                            {
+                                "type": "kv",
+                                "label": "关键值",
+                                "fields": [
+                                    {
+                                        "key": "耗时",
+                                        "source": "result.duration_ms"
+                                    },
+                                    {
+                                        "key": "状态",
+                                        "source": "result.status"
+                                    }
+                                ]
+                            },
+                            {
+                                "type": "form",
+                                "label": "快速操作",
+                                "form": {
+                                    "fields": [
+                                        {
+                                            "name": "action",
+                                            "type": "select",
+                                            "label": "动作",
+                                            "options": [
+                                                {
+                                                    "label": "批准",
+                                                    "value": "approve"
+                                                },
+                                                {
+                                                    "label": "驳回",
+                                                    "value": "reject"
+                                                }
+                                            ]
+                                        }
+                                    ],
+                                    "endpoint": "/ext/widget_demo/actions/submit",
+                                    "submitLabel": "执行"
+                                }
+                            }
+                        ],
+                        "actions": [
+                            {
+                                "id": "copy_summary",
+                                "label": "复制摘要",
+                                "on_click": {
+                                    "action": "copy",
+                                    "value": "{{args.summary}}",
+                                    "confirm": "复制摘要到剪贴板？"
+                                }
+                            },
+                            {
+                                "id": "open_docs",
+                                "label": "查看文档",
+                                "on_click": {
+                                    "action": "open_url",
+                                    "value": "https://example.com/widget-demo"
+                                }
+                            }
+                        ]
+                    }
+                }
+            },
+            {
+                "name": "demo_contract_tool",
+                "description": "演示 output_schema：工具结果按契约渲染只读结构化视图（T4）",
+                "output_schema": {
+                    "type": "object",
+                    "properties": {
+                        "status": {
+                            "type": "string",
+                            "enum": ["ok", "warn", "fail"]
+                        },
+                        "score": {
+                            "type": "number"
+                        },
+                        "items": {
+                            "type": "array",
+                            "items": {
+                                "type": "string"
+                            }
+                        }
+                    },
+                    "required": ["status"]
+                }
+            }
+        ],
+        "resources": [],
+        "route_signals": [],
+        "lifecycle_hooks": [
+            "on_load"
+        ]
+    },
+    "config_files": [
+        {
+            "id": "demo",
+            "path": "config/system/widget_demo.yaml",
+            "label": "演示插件配置",
+            "description": "T1 类型化表单样板：设置页按 fields 渲染（toggle/slider/select/multiselect/textarea）",
+            "fields": [
+                {
+                    "name": "enabled",
+                    "type": "toggle",
+                    "label": "启用演示",
+                    "default": true
+                },
+                {
+                    "name": "level",
+                    "type": "select",
+                    "label": "演示级别",
+                    "options": [
+                        {
+                            "label": "L1",
+                            "value": "l1"
+                        },
+                        {
+                            "label": "L2",
+                            "value": "l2"
+                        }
+                    ]
+                },
+                {
+                    "name": "threshold",
+                    "type": "slider",
+                    "label": "演示阈值",
+                    "min": 0,
+                    "max": 100,
+                    "default": 50
+                },
+                {
+                    "name": "tags",
+                    "type": "multiselect",
+                    "label": "标签",
+                    "options": [
+                        {
+                            "label": "alpha",
+                            "value": "alpha"
+                        },
+                        {
+                            "label": "beta",
+                            "value": "beta"
+                        }
+                    ]
+                },
+                {
+                    "name": "note",
+                    "type": "textarea",
+                    "label": "备注"
+                }
+            ]
+        }
+    ],
+    "http_endpoints": [
+        {
+            "route_id": "demo_config_get",
+            "method": "GET",
+            "path": "/ext/widget_demo/config",
+            "auth": "none",
+            "handler_capability": "http.handle",
+            "timeout_ms": 5000,
+            "max_concurrency": 8,
+            "description": "演示配置 + fetch_count（G6-b poll / dataUri 消费）"
+        },
+        {
+            "route_id": "demo_config_put",
+            "method": "PUT",
+            "path": "/ext/widget_demo/config",
+            "auth": "none",
+            "handler_capability": "http.handle",
+            "timeout_ms": 5000,
+            "max_concurrency": 8,
+            "description": "写回演示配置（dataUri 提交）"
+        },
+        {
+            "route_id": "demo_schema",
+            "method": "GET",
+            "path": "/ext/widget_demo/schema",
+            "auth": "none",
+            "handler_capability": "http.handle",
+            "timeout_ms": 5000,
+            "max_concurrency": 8,
+            "description": "演示表单字段声明（fieldsUri 消费）"
+        },
+        {
+            "route_id": "demo_state",
+            "method": "GET",
+            "path": "/ext/widget_demo/state",
+            "auth": "none",
+            "handler_capability": "http.handle",
+            "timeout_ms": 5000,
+            "max_concurrency": 8,
+            "description": "提交计数（G3 watch 订阅侧消费）"
+        },
+        {
+            "route_id": "demo_options_models",
+            "method": "GET",
+            "path": "/ext/widget_demo/options/models",
+            "auth": "none",
+            "handler_capability": "http.handle",
+            "timeout_ms": 5000,
+            "max_concurrency": 8,
+            "description": "级联模型选项（G2 datasourceUri 模板 + G6-a 代理消费）"
+        },
+        {
+            "route_id": "demo_options_regions",
+            "method": "GET",
+            "path": "/ext/widget_demo/options/regions",
+            "auth": "none",
+            "handler_capability": "http.handle",
+            "timeout_ms": 5000,
+            "max_concurrency": 8,
+            "description": "静态数据源选项（G6-a 代理直连消费）"
+        },
+        {
+            "route_id": "demo_submit",
+            "method": "POST",
+            "path": "/ext/widget_demo/actions/submit",
+            "auth": "none",
+            "handler_capability": "http.handle",
+            "timeout_ms": 5000,
+            "max_concurrency": 8,
+            "description": "通用提交端点（form/wizard/chat_card form 块消费，计数递增）"
+        },
+        {
+            "route_id": "demo_toggle",
+            "method": "POST",
+            "path": "/ext/widget_demo/actions/toggle",
+            "auth": "none",
+            "handler_capability": "http.handle",
+            "timeout_ms": 5000,
+            "max_concurrency": 8,
+            "description": "compact 切换端点（G1 切换协议：返回 switched）"
+        }
+    ],
+    "ui_schema": {
+        "widgets": [
+            {
+                "id": "demo_form_compact",
+                "type": "form",
+                "space": "widget-demo",
+                "order": 10,
+                "props": {
+                    "title": "G1 compact：模式切换",
+                    "icon": "shield",
+                    "description": "单 select + endpoint → 紧凑下拉，点选即提交",
+                    "fields": [
+                        {
+                            "name": "mode",
+                            "type": "select",
+                            "label": "模式",
+                            "options": [
+                                {
+                                    "label": "标准",
+                                    "value": "standard"
+                                },
+                                {
+                                    "label": "严格",
+                                    "value": "strict"
+                                },
+                                {
+                                    "label": "宽松",
+                                    "value": "loose"
+                                }
+                            ]
+                        }
+                    ],
+                    "endpoint": "/ext/widget_demo/actions/toggle"
+                }
+            },
+            {
+                "id": "demo_form_cascade",
+                "type": "form",
+                "space": "widget-demo",
+                "order": 20,
+                "props": {
+                    "title": "G2/G6-a 级联选择",
+                    "description": "非绝对 datasourceUri 走 /api/v1/datasource/ 代理；模型选项随提供商级联重拉",
+                    "fields": [
+                        {
+                            "name": "provider",
+                            "type": "select",
+                            "label": "提供商",
+                            "options": [
+                                {
+                                    "label": "Zhipu",
+                                    "value": "zhipu"
+                                },
+                                {
+                                    "label": "OpenAI",
+                                    "value": "openai"
+                                },
+                                {
+                                    "label": "DeepSeek",
+                                    "value": "deepseek"
+                                }
+                            ]
+                        },
+                        {
+                            "name": "model",
+                            "type": "select",
+                            "label": "模型（{{provider}} 模板）",
+                            "datasourceUri": "widget_demo/options/models?provider={{provider}}"
+                        },
+                        {
+                            "name": "region",
+                            "type": "select",
+                            "label": "区域（代理直连）",
+                            "datasourceUri": "widget_demo/options/regions"
+                        }
+                    ]
+                }
+            },
+            {
+                "id": "demo_form_data",
+                "type": "form",
+                "space": "widget-demo",
+                "order": 30,
+                "props": {
+                    "title": "G6-b 实时数据（5s 轮询）",
+                    "description": "refresh poll：周期重挂载重拉 /config（fetch_count 递增可见）",
+                    "fieldsUri": "/ext/widget_demo/schema",
+                    "dataUri": "/ext/widget_demo/config",
+                    "dataFormat": "json",
+                    "refresh": {
+                        "type": "poll",
+                        "intervalSeconds": 5
+                    },
+                    "submitLabel": "保存配置"
+                }
+            },
+            {
+                "id": "demo_form_emit",
+                "type": "form",
+                "space": "widget-demo",
+                "order": 40,
+                "props": {
+                    "title": "G3 事件发射",
+                    "description": "提交成功发 widget.demo.submitted（下方 watch 面板自动刷新）",
+                    "eventName": "widget.demo.submitted",
+                    "fields": [
+                        {
+                            "name": "task_title",
+                            "type": "input",
+                            "label": "任务标题",
+                            "required": true
+                        }
+                    ],
+                    "endpoint": "/ext/widget_demo/actions/submit",
+                    "successText": "已提交"
+                }
+            },
+            {
+                "id": "demo_panel_watch",
+                "type": "form",
+                "space": "widget-demo",
+                "order": 50,
+                "props": {
+                    "title": "G3 事件联动（订阅侧）",
+                    "description": "watch submitted/wizard_done → 重挂载重拉 /state（提交计数刷新）",
+                    "watch": [
+                        {
+                            "event": "widget.demo.submitted",
+                            "action": "reload"
+                        },
+                        {
+                            "event": "widget.demo.wizard_done",
+                            "action": "reload"
+                        }
+                    ],
+                    "fieldsUri": "/ext/widget_demo/schema",
+                    "dataUri": "/ext/widget_demo/state",
+                    "dataFormat": "json"
+                }
+            },
+            {
+                "id": "demo_wizard",
+                "type": "wizard",
+                "space": "widget-demo",
+                "order": 60,
+                "props": {
+                    "title": "G5 多步向导",
+                    "steps": [
+                        {
+                            "title": "基本信息",
+                            "fields": [
+                                {
+                                    "name": "title",
+                                    "type": "input",
+                                    "label": "标题",
+                                    "required": true
+                                },
+                                {
+                                    "name": "priority",
+                                    "type": "select",
+                                    "label": "优先级",
+                                    "options": [
+                                        {
+                                            "label": "P0",
+                                            "value": "p0"
+                                        },
+                                        {
+                                            "label": "P1",
+                                            "value": "p1"
+                                        },
+                                        {
+                                            "label": "P2",
+                                            "value": "p2"
+                                        }
+                                    ]
+                                }
+                            ]
+                        },
+                        {
+                            "title": "执行环境",
+                            "fields": [
+                                {
+                                    "name": "workspace",
+                                    "type": "input",
+                                    "label": "工作空间"
+                                },
+                                {
+                                    "name": "isolation",
+                                    "type": "select",
+                                    "label": "隔离",
+                                    "options": [
+                                        {
+                                            "label": "默认",
+                                            "value": ""
+                                        },
+                                        {
+                                            "label": "隔离",
+                                            "value": "isolated"
+                                        }
+                                    ]
+                                }
+                            ]
+                        }
+                    ],
+                    "endpoint": "/ext/widget_demo/actions/submit",
+                    "eventName": "widget.demo.wizard_done",
+                    "successText": "向导完成"
+                }
+            },
+            {
+                "id": "demo_sortable",
+                "type": "sortable_list",
+                "space": "widget-demo",
+                "order": 70,
+                "props": {
+                    "title": "G5 拖拽排序（宿主受控）",
+                    "description": "items 由 widget_stage 宿主经受控桥持有，重排即更新",
+                    "items": [
+                        "alpha",
+                        "beta",
+                        "gamma"
+                    ]
+                }
+            },
+            {
+                "id": "demo_inline",
+                "type": "inline_edit",
+                "space": "widget-demo",
+                "order": 80,
+                "props": {
+                    "title": "G5 内联编辑（宿主受控）",
+                    "description": "点击编辑，Enter 提交 / Esc 取消",
+                    "value": "点击编辑我"
+                }
+            },
+            {
+                "id": "demo_controlled",
+                "type": "form",
+                "space": "widget-demo",
+                "order": 90,
+                "props": {
+                    "title": "G4 受控双向绑定",
+                    "description": "值/回调由 widget_stage 宿主经 useControlledSlotBridge 注入",
+                    "fields": [
+                        {
+                            "name": "strength",
+                            "type": "select",
+                            "label": "强度",
+                            "options": [
+                                {
+                                    "label": "低",
+                                    "value": "low"
+                                },
+                                {
+                                    "label": "中",
+                                    "value": "medium"
+                                },
+                                {
+                                    "label": "高",
+                                    "value": "high"
+                                }
+                            ]
+                        }
+                    ]
+                }
+            }
+        ]
+    },
+    "contributes": {
+        "pages": [
+            {
+                "id": "widget_demo",
+                "title": "Widget 演示",
+                "icon": "🧪",
+                "space": "workspace",
+                "slot": "activity-bar",
+                "order": 5,
+                "path": "/widget-demo",
+                "widget": "widget_stage",
+                "props": {
+                    "space": "widget-demo"
+                },
+                "description": "widget 化全特性演示台（T1-T4 + G1-G6 声明链路）"
+            }
+        ]
+    },
+    "dependencies": [],
+    "permissions": {},
+    "error_policy": "skip",
+    "priority": 50
+}
