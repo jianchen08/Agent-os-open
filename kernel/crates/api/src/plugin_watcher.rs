@@ -512,10 +512,10 @@ pub async fn g2_verify_and_sanitize(
 ///
 /// `is_enabled` 与 [`agentos_plugin_loader::PluginEnablement::is_enabled`] 同签名，
 /// 便于直接传入或测试注入。disabled 插件不进注册表出口（与启动期注册循环一致）。
-pub fn filter_enabled_manifests<'a, F>(
-    all: &'a [PluginManifest],
+pub fn filter_enabled_manifests<F>(
+    all: &[PluginManifest],
     mut is_enabled: F,
-) -> (Vec<&'a PluginManifest>, usize)
+) -> (Vec<&PluginManifest>, usize)
 where
     F: FnMut(&str, Option<bool>) -> bool,
 {
@@ -609,7 +609,10 @@ fn deterministic_json(v: &serde_json::Value) -> String {
 /// [`sync_once`] 的 store 感知变体：`manifests_store` 传入 `AppState.manifests`
 /// 共享句柄时，本轮新注册插件的 manifest 会增量合并进 store（按 id 去重），
 /// 修复热发现后状态列表/重启用等 manifest 消费面看不到新插件的不一致。
-/// 只增不删：目录删除的卸载语义（工具摘除）仍是 watcher 已知 gap，不在此处扩大。
+/// 只增不删：目录删除的卸载语义由下方 P1 卸载块处理。
+// 多依赖注入的编排泵（invoker/registry/scopes/known 集/账本/报告），参数分组
+// 收构成本超出收益，保留为内部函数（调用面收敛于 sync_once 与测试）。
+#[allow(clippy::too_many_arguments)]
 pub async fn sync_once_with_store(
     invoker: &dyn PluginInvoker,
     registry: &Arc<CapabilityRegistryImpl>,
@@ -631,7 +634,7 @@ pub async fn sync_once_with_store(
     // 注册循环对齐）；依赖完整性参照"将注册集合"（disabled 不在集合 → 依赖它
     // 视为缺失，fail-closed）。
     let (kept_refs, skipped_disabled) = filter_enabled_manifests(&all, |id, def| {
-        enablement.map_or(true, |e| e.is_enabled(id, def))
+        enablement.is_none_or(|e| e.is_enabled(id, def))
     });
     // 服务依赖解析参照"将注册集合"（服务面）：requires_services 的 ns/ns.method 必须被集合内
     // 某插件提供；disabled 插件不在集合 → 其服务不在面 → 依赖它的插件拒注册（fail-closed）。
@@ -1812,7 +1815,7 @@ mod tests {
         let modify = EventKind::Modify(ModifyKind::Data(DataChange::Any));
         // plugin.json 的 增/改 是 watcher 主路径（manifest 变更 → 重注册）
         assert!(notify_event_relevant(
-            modify.clone(),
+            modify,
             &[p("/plugins/tools/bash/plugin.json")]
         ));
         assert!(notify_event_relevant(
@@ -1826,13 +1829,13 @@ mod tests {
         ));
         // 运行时产物不许触发：llm_core/logs/payload_diag 缓存、普通源码、编辑器临时文件
         assert!(!notify_event_relevant(
-            modify.clone(),
+            modify,
             &[p(
                 "/plugins/pipeline/core/llm_core/logs/payload_diag/1786__x.json"
             )]
         ));
         assert!(!notify_event_relevant(
-            modify.clone(),
+            modify,
             &[p("/plugins/tools/bash/tool.py")]
         ));
         assert!(!notify_event_relevant(
@@ -2078,7 +2081,7 @@ mod tests {
         let (registry_arc, mut known) = r1;
 
         // 次轮：p 目录从磁盘消失（discover 只剩 c）→ p 卸载 + c 依赖级联摘下。
-        let mut inv2 = MockInvoker::new(vec![c.clone()]);
+        let inv2 = MockInvoker::new(vec![c.clone()]);
         let r2 = sync_once_with_store(
             &inv2,
             &registry_arc,
@@ -2099,7 +2102,7 @@ mod tests {
             registry_arc.list_tools().is_empty(),
             "依赖者 c 的能力也一并摘下"
         );
-        assert!(!known.contains(&"p".to_string()) && !known.contains(&"c".to_string()));
+        assert!(!known.contains("p") && !known.contains("c"));
 
         // 提供者回归 → 下轮自动重注册（含消费者，自愈）。
         let inv3 = MockInvoker::new(vec![p.clone(), c.clone()]);
@@ -2147,7 +2150,7 @@ mod tests {
         assert_eq!(r1.new_plugin_ids.len(), 2);
 
         // 只删 a 的目录：b 无 requires_services → 不受牵连。
-        let mut inv2 = MockInvoker::new(vec![mk_manifest("b", "tool", &["tb"], false)]);
+        let inv2 = MockInvoker::new(vec![mk_manifest("b", "tool", &["tb"], false)]);
         let r2 = sync_once_with_store(
             &inv2,
             &registry_arc,
@@ -2170,8 +2173,8 @@ mod tests {
             .map(|t| t.plugin_id.clone())
             .collect();
         assert_eq!(ids, vec!["b".to_string()], "b 不受牵连");
-        assert!(!known.contains(&"a".to_string()));
-        assert!(known.contains(&"b".to_string()));
+        assert!(!known.contains("a"));
+        assert!(known.contains("b"));
     }
 
     // ── Phase 1-C5b：注册闸冒烟样例跑（smoke:true 逐能力放行） ──────────────

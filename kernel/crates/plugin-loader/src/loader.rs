@@ -931,9 +931,11 @@ mod tests {
     ///
     /// 这是"校验器不要在真实数据上空转"的持续闸门——它第一次在真实语料上运行时
     /// 抓到的硬伤（已全量迁移）：
-    /// - 38 个插件顶层 `description`：struct 无此字段，serde 静默丢弃 → 现已入 struct；
-    /// - 82 个插件 `capabilities.resources`：结构已删的遗留字段 → 已清除；
-    /// - approval 的 `capabilities_required`：非契约字段 → 已清除。
+    ///
+    ///   - 38 个插件顶层 `description`：struct 无此字段，serde 静默丢弃 → 现已入 struct；
+    ///   - 82 个插件 `capabilities.resources`：结构已删的遗留字段 → 已清除；
+    ///   - approval 的 `capabilities_required`：非契约字段 → 已清除。
+    ///
     /// 若此后熟悉语料出现未知字段/缺必填，本测试即红灯（校验器真实生效）。
     #[test]
     fn real_corpus_all_manifests_pass_strict_parsing() {
@@ -951,13 +953,13 @@ mod tests {
                 "dsh_plugins",
                 "runtime",
             ];
-            let mut entries = match std::fs::read_dir(dir) {
+            let entries = match std::fs::read_dir(dir) {
                 Ok(e) => e,
                 Err(e) => {
                     panic!("无法读取 {}: {e}", dir.display());
                 }
             };
-            while let Some(entry) = entries.next() {
+            for entry in entries {
                 let entry = entry.unwrap();
                 let path = entry.path();
                 if path.is_dir() {
@@ -976,7 +978,7 @@ mod tests {
             walk.len()
         );
         for path in &walk {
-            let text = std::fs::read_to_string(&path)
+            let text = std::fs::read_to_string(path)
                 .unwrap_or_else(|e| panic!("读取 {} 失败: {e}", path.display()));
             let m: PluginManifest = serde_json::from_str(&text).unwrap_or_else(|e| {
                 panic!(
@@ -1026,10 +1028,10 @@ mod tests {
                 "dsh_plugins",
                 "runtime",
             ];
-            let Ok(mut entries) = std::fs::read_dir(dir) else {
+            let Ok(entries) = std::fs::read_dir(dir) else {
                 return;
             };
-            while let Some(entry) = entries.next() {
+            for entry in entries {
                 let path = entry.unwrap().path();
                 if path.is_dir() {
                     if !SKIP.contains(&path.file_name().and_then(|n| n.to_str()).unwrap_or("")) {

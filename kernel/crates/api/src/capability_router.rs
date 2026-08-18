@@ -2707,7 +2707,6 @@ mod tests {
         agentos_tenant::scope(
             agentos_core::types::TenantContext::new("tenant_sr", "thread_sr"),
             async {
-                use agentos_core::traits::StorageBackend;
                 let tenant = agentos_tenant::current_or_default("default").tenant_id;
                 store.create_run("run_sr_1", "h", &tenant).await.unwrap();
                 store

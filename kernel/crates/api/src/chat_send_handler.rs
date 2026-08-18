@@ -176,7 +176,7 @@ impl ChatSendHandler {
                 obj.insert("task.id".to_string(), Value::String(pipeline_id.clone()));
             }
             (pipeline_id, true)
-        } else {
+        } else if let Some(pid) = supplied_pid {
             // ── 注入分支（现状不变）──
             // lineage 是引擎出生写入的保护字段，注入已有管道不得携带（防覆写）。
             if params.get("lineage").filter(|v| !v.is_null()).is_some() {
@@ -186,7 +186,9 @@ impl ChatSendHandler {
                         .to_string(),
                 });
             }
-            (supplied_pid.unwrap().to_string(), false)
+            (pid.to_string(), false)
+        } else {
+            unreachable!("supplied_pid 为 None 时已在创建分支 return/自生成 pipeline_id")
         };
 
         tracing::info!(

@@ -232,7 +232,7 @@ pub fn build_router_with_http_routes(
 /// 执行一个 /ext 风格请求（插件 http_endpoints 分发 / 静态资源），供
 /// - `/ext/{*rest}` 通配路由
 /// - `/api/v1/datasource/{*rest}` 数据源代理（见 build_datasource_handler）
-/// 共用。path 形如 `/ext/{plugin_id}/...`。
+///   共用。path 形如 `/ext/{plugin_id}/...`。
 #[allow(clippy::too_many_arguments)]
 async fn exec_ext_request(
     dispatcher: Option<Arc<HttpDispatcher>>,

@@ -868,14 +868,14 @@ impl SqliteStore {
                             // 优先作 record_id；缺省回退内容指纹。
                             let preferred_id = op.get("_message_id").and_then(|v| v.as_str());
                             self.write_slot_to_table_locked(
-                                &conn,
+                                conn,
                                 tenant_id,
-                                &pid,
+                                pid,
                                 seq as i64,
                                 msg,
                                 preferred_id,
                                 run_id,
-                                &now,
+                                now,
                             )?;
                         }
                         _ => {
@@ -910,7 +910,7 @@ impl SqliteStore {
                         rusqlite::params![BIG - 1, tenant_id, pid, BIG],
                     )?;
                     self.write_slot_to_table_locked(
-                        &conn, tenant_id, &pid, at, msg, None, None, &now,
+                        conn, tenant_id, pid, at, msg, None, None, now,
                     )?;
                 }
                 _ => {

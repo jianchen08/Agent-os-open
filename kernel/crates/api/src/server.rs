@@ -1790,22 +1790,6 @@ fn inject_tool_schemas(state: &mut serde_json::Value, app_state: &AppState) {
     }
 }
 
-/// 在 agents 目录（含分类子目录）递归查找 `<agent_id>.yaml`。
-///
-/// agents/ 按分类组织为 `agents/<category>/<id>.yaml`（main/orchestrator/
-/// executor/system/task/test），顶层不再放单文件。返回首个匹配路径。
-/// pub(crate)：routes.rs 的 agent config 读写端点复用同一套定位逻辑。
-
-/// 加载 Agent 配置注入到管道 state。
-///
-/// 简化语义（[来源: 任务 §load_agent_config_into_state]）：只读 `system_prompt`
-/// / `tool_ids` / `model_tier` / `max_iterations` 几个字段，不解析复杂结构。
-/// 文件不存在跳过（用 state 已有的默认值）。
-///
-/// 设计取舍：字段冲突时不覆盖 state 中已有的值（agent 调用方注入优先级高于配置默认），
-/// 仅在缺失时补。`max_iterations` 同时覆写 `pipeline_config.loop_config.max_iterations`
-/// 的运行期语义（由 PipelineExecutor 在每次 run 时读取 state，而非 config）。
-
 /// 处理 WebSocket 连接——收发消息循环。
 async fn handle_ws_connection(socket: WebSocket, state: AppState, headers: HeaderMap) {
     let (mut sender, mut receiver) = socket.split();
@@ -3849,6 +3833,8 @@ mod tests {
     // 这是监控页"任务已完成"与 task_reminder 判断的数据基础。
 
     #[tokio::test]
+    // 测试内 guard 在 await 前已显式 drop（clippy await_holding_lock 已知误报；重构另立票据）
+    #[allow(clippy::await_holding_lock)]
     async fn test_engine_run_writes_back_task_status_completed() {
         let (state, _invoker, store, _sqlite) = make_engine_state();
         let tenant = TenantContext::new("tenant_wb", "thread_wb");
@@ -4127,6 +4113,7 @@ mod tests {
     // ── GAP-1 统一：run 终态即任务终态（state 单一真值的完成回写） ─────────
 
     #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
     async fn test_run_terminal_writes_task_status_to_state() {
         // overlay 带 task.* 字段的管道跑完 → registry 常驻 state 与
         // pipeline_state 表（冷路径真值）都回写 task.status=completed +
@@ -4245,6 +4232,7 @@ mod tests {
     // ── GAP-1 全流程数据流转：提交 → 管道创建 → run → 终态回写 → 聚合可见 ──
 
     #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
     async fn test_task_lifecycle_end_to_end_state_flow() {
         // 组合验证（各环节单测已绿，此处串全链）：
         // ① chat.send_message create 分支生成 pipeline_id（task.id 引擎注入）

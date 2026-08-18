@@ -34,6 +34,7 @@ pub trait PipelineDispatcher: Send + Sync {
     /// agent_id 指定执行管道加载的 agent 配置（config/agents/**/<id>.yaml，
     /// 决定人格/tool_ids/技能）。任务派发按 target 选 agent；前端主会话
     /// 路径传默认主 agent。
+    #[allow(clippy::too_many_arguments)]
     async fn dispatch_user_input(
         &self,
         thread_id: &str,

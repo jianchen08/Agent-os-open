@@ -51,7 +51,6 @@ fn main() {
             "--deny" => deny = true,
             "--help" | "-h" => {
                 println!(
-                    "{}",
                     "plugin_check —— 插件契约静态校验（闸0/闸1 共用语义）\n\
                      \n\
                      usage:\n  \
