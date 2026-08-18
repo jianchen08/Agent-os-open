@@ -125,8 +125,12 @@ def _mode_warning(mode: str) -> str:
     return warnings.get(mode, "")
 
 
-async def _confirm_switch(pipeline_id: str, mode: str) -> bool:
+async def _confirm_switch(session_id: str, mode: str) -> bool:
     """经 human-interaction 弹审批窗确认高风险模式切换。
+
+    Args:
+        session_id: 真实会话 id（thread_id）——前端审批 UI 按会话过滤订阅，
+            传 pipeline_id 会导致审批窗不显示、确认永远超时。
 
     Returns:
         True=用户确认；False=取消/超时/交互服务不可用。
@@ -138,8 +142,8 @@ async def _confirm_switch(pipeline_id: str, mode: str) -> bool:
         return False
     try:
         create_res = await hi_cap.call("create_choice", {
-            "session_id": pipeline_id,
-            "thread_id": pipeline_id,
+            "session_id": session_id,
+            "thread_id": session_id,
             "tab_id": "",
             "title": f"权限模式切换确认: {mode}",
             "description": f"将要切换到「{mode}」模式。\n{_mode_warning(mode)}",
@@ -245,9 +249,13 @@ async def _switch_permission_mode(body: dict) -> dict:
     if mode == current:
         return _http_response(200, {"switched": True, "mode": mode, "unchanged": True})
 
-    # 高风险模式：经 human-interaction 弹审批窗确认（复用现有审批 UI）
+    # 高风险模式：经 human-interaction 弹审批窗确认（复用现有审批 UI；
+    # 确认请求用真实 session_id——前端审批 UI 按会话过滤，pipeline_id 会不显示）
     if mode in _HIGH_RISK_MODES:
-        confirmed = await _confirm_switch(key, mode)
+        confirmed = await _confirm_switch(
+            str(body.get("session_id") or key),
+            mode,
+        )
         if not confirmed:
             return _http_response(
                 200,

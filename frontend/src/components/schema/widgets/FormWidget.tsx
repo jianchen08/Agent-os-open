@@ -107,6 +107,7 @@ export function FormWidget(props: Record<string, unknown>) {
   // 与 endpoint 直连互斥使用；如思考强度跟随当前管道标签）
   const onChange = props.onChange as ((data: Record<string, unknown>) => void) | undefined
   const pipelineId = useActivePipelineId()
+  const sessionId = useSessionStore((s) => s.activeSessionId)
 
   // ── datasource 模式（widget 化 T12）──
   const fieldsUri = props.fieldsUri as string | undefined
@@ -238,7 +239,7 @@ export function FormWidget(props: Record<string, unknown>) {
         const resp = await fetch(endpoint, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ pipeline_id: pipelineId, ...(extraBody ?? {}), ...values }),
+          body: JSON.stringify({ pipeline_id: pipelineId, session_id: sessionId ?? '', ...(extraBody ?? {}), ...values }),
         })
         const data = (await resp.json()) as {
           switched?: boolean
