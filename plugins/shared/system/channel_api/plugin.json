@@ -1745,6 +1745,21 @@
         { "name": "llm.anthropic_max_concurrent", "type": "number", "label": "Anthropic 并发", "min": 1 },
         { "name": "llm.default_max_concurrent", "type": "number", "label": "默认模型并发", "min": 1 }
       ]
+    },
+    {
+      "id": "api",
+      "path": "config/system/api_config.yaml",
+      "label": "API 设置",
+      "description": "A2：API 端点/限流类型化表单（替代硬编码 ApiSettingsPage；cors_origins 走 KV 逃生口）",
+      "fields": [
+        { "name": "endpoint.base_url", "type": "string", "label": "Base URL" },
+        { "name": "endpoint.version", "type": "string", "label": "API Version" },
+        { "name": "endpoint.timeout", "type": "number", "label": "超时时间（秒）", "min": 1 },
+        { "name": "rate_limit.global_limit", "type": "string", "label": "全局限流", "placeholder": "100/minute" },
+        { "name": "rate_limit.auth", "type": "string", "label": "认证限流", "placeholder": "5/minute" },
+        { "name": "rate_limit.tasks", "type": "string", "label": "任务限流", "placeholder": "20/minute" },
+        { "name": "rate_limit.websocket", "type": "string", "label": "WebSocket 限流", "placeholder": "50/minute" }
+      ]
     }
   ],
   "ui_schema": {

@@ -11,7 +11,6 @@
 import { useEffect, useMemo, useState } from 'react'
 import { PluginConfigEditor } from '@/components/config/PluginConfigEditor'
 import { cn } from '@/lib/utils'
-import { ApiSettingsPage } from '@/pages/settings/ApiSettingsPage'
 import { LlmSettingsPage } from '@/pages/settings/LlmSettingsPage'
 import { PipelineSettingsPage } from '@/pages/settings/PipelineSettingsPage'
 import { PluginsSettingsPage } from '@/pages/settings/PluginsSettingsPage'
@@ -130,7 +129,6 @@ export function SettingsHubWidget(_props: Record<string, unknown>) {
       <main className="min-h-0 min-w-0 flex-1 overflow-auto">
         {active === 'kernel-theme' && <ThemeSettingsPage />}
         {active === 'kernel-pipeline' && <PipelineSettingsPage embedded />}
-        {active === 'kernel-api' && <ApiSettingsPage />}
         {active === 'kernel-llm' && <LlmSettingsPage embedded />}
         {active === 'kernel-plugins' && (
           <PluginsSettingsPage

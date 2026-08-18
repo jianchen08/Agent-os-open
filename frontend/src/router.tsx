@@ -33,9 +33,6 @@ import type { ReactNode } from 'react'
 const SettingsPage = lazy(() =>
   import('@/pages/settings/SettingsPage').then((m) => ({ default: m.SettingsPage })),
 )
-const ApiSettingsPage = lazy(() =>
-  import('@/pages/settings/ApiSettingsPage').then((m) => ({ default: m.ApiSettingsPage })),
-)
 // 聊天容器懒加载：ChatContainer 依赖链包含 @lobehub/ui 全量入口（EmojiPicker→
 // @emoji-mart/data 3.2MB、Markdown→highlight.js 197 语言）与 react-syntax-highlighter
 // 全量 Prism（300 语言）、mermaid，静态导入会让 /login 等公共页也必须加载整个聊天
@@ -525,16 +522,6 @@ export function createRouter() {
         <ProtectedRoute>
           <Suspense fallback={LazyFallback}>
             <SettingsPage />
-          </Suspense>
-        </ProtectedRoute>
-      ),
-    },
-    {
-      path: ROUTES.SETTINGS_API,
-      element: (
-        <ProtectedRoute>
-          <Suspense fallback={LazyFallback}>
-            <ApiSettingsPage />
           </Suspense>
         </ProtectedRoute>
       ),

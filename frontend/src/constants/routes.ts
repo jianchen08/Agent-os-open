@@ -15,7 +15,6 @@ export const ROUTES = {
   /** 设置页面 */
   SETTINGS: '/settings',
   /** 设置子页面 */
-  SETTINGS_API: '/settings/api',
   SETTINGS_LLM: '/settings/llm',
   /** 插件设置 */
   SETTINGS_PLUGINS: '/settings/plugins',

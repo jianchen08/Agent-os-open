@@ -9,7 +9,6 @@ import { useEffect, useMemo, useState } from 'react'
 import { PluginConfigEditor } from '@/components/config/PluginConfigEditor'
 import { renderPageContent } from '@/components/schema/PageRenderer'
 import { PageShell } from '@/components/shared/PageShell'
-import { ApiSettingsPage } from '@/pages/settings/ApiSettingsPage'
 import { LlmSettingsPage } from '@/pages/settings/LlmSettingsPage'
 import { PipelineSettingsPage } from '@/pages/settings/PipelineSettingsPage'
 import { PluginsSettingsPage } from '@/pages/settings/PluginsSettingsPage'
@@ -208,7 +207,6 @@ export function SettingsPage() {
             <div className="h-full min-h-0 [&>div]:!h-auto [&>div]:!min-h-0 [&>div]:!overflow-visible [&_header]:!hidden">
               {selected.id === 'theme' && <ThemeSettingsPage embedded />}
               {selected.id === 'pipeline' && <PipelineSettingsPage embedded />}
-              {selected.id === 'api' && <ApiSettingsPage />}
               {selected.id === 'llm' && <LlmSettingsPage embedded />}
               {selected.id === 'plugins' && (
                 <PluginsSettingsPage

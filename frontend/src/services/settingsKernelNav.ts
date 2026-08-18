@@ -56,12 +56,4 @@ export const KERNEL_NAV_ITEMS: KernelNavItem[] = [
     icon: '🔀',
     group: '内核',
   },
-  {
-    id: 'api',
-    title: 'API 设置',
-    label: 'API',
-    description: '配置 API 端点与访问凭证',
-    icon: '🛠️',
-    group: '内核',
-  },
 ]
