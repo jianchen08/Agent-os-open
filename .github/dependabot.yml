@@ -87,6 +87,34 @@ updates:
         update-types: ["version-update:semver-major"]
 
   # ============================================================
+  # Rust 依赖（kernel/Cargo.toml，Cargo.lock 锁定）
+  # 安全审查 2026-08-19：此前无 cargo 生态条目，内核依赖不在自动更新
+  # 与漏洞告警范围（OSV 扫描发现的 idna/instant 类公告无人跟进）
+  # ============================================================
+  - package-ecosystem: "cargo"
+    directory: "/kernel"
+    schedule:
+      interval: "weekly"
+      day: "friday"
+      time: "09:00"
+      timezone: "Asia/Shanghai"
+    open-pull-requests-limit: 5
+    labels:
+      - "dependencies"
+      - "rust"
+    commit-message:
+      prefix: "deps(kernel)"
+      include: "scope"
+    groups:
+      production-dependencies:
+        dependency-type: "production"
+      development-dependencies:
+        dependency-type: "development"
+    ignore:
+      - dependency-name: "*"
+        update-types: ["version-update:semver-major"]
+
+  # ============================================================
   # GitHub Actions（CI 工作流依赖）
   # ============================================================
   - package-ecosystem: "github-actions"

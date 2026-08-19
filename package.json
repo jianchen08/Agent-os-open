@@ -8,6 +8,7 @@
     "url": "https://github.com/jianchen08/Agent-os-open.git"
   },
   "main": "dist-electron/main.js",
+  "packageManager": "pnpm@11.7.0",
   "scripts": {
     "electron": "electron .",
     "electron:dev": "concurrently \"npm run dev --prefix frontend\" \"wait-on http://localhost:5188 && electron .\"",
@@ -58,8 +59,8 @@
       "icon": "frontend/public/icon.png"
     }
   },
-  "dependencies": {
-    "playwright": "^1.60.0"
+  "overrides": {
+    "shell-quote": "1.9.0"
   },
   "pnpm": {
     "onlyBuiltDependencies": [
