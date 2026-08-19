@@ -154,6 +154,44 @@ impl CapabilityRouter for PluginScopedRouter {
     }
 }
 
+/// venv 解释器路径（纯路径选择逻辑，`windows` 参数使两平台分支皆可测）。
+///
+/// uv venv 标准布局：Windows `.venv/Scripts/python.exe`、Unix `.venv/bin/python`。
+fn venv_interpreter_layout(plugin_dir: &Path, windows: bool) -> std::path::PathBuf {
+    if windows {
+        plugin_dir.join(".venv").join("Scripts").join("python.exe")
+    } else {
+        plugin_dir.join(".venv").join("bin").join("python")
+    }
+}
+
+/// 探测插件目录的 venv 解释器：按本平台布局优先，另一平台布局作回退
+/// （探测无害——命中即返回绝对路径，缺失返回 None，不执行解释器）。
+fn find_venv_interpreter(plugin_dir: &Path) -> Option<std::path::PathBuf> {
+    [
+        venv_interpreter_layout(plugin_dir, cfg!(windows)),
+        venv_interpreter_layout(plugin_dir, !cfg!(windows)),
+    ]
+    .into_iter()
+    .find(|p| p.is_file())
+}
+
+/// 判定 entry 首词是否 PATH 裸 python 命令（`python` / `python3`，含 Windows
+/// 可执行扩展 `.exe`/`.bat`/`.cmd`）。带路径分隔符的绝对/相对路径不判——venv
+/// 只替代"靠 PATH 解析的裸解释器"，显式绝对路径 entry 是刻意选择，不动。
+fn is_plain_python_command(command: &str) -> bool {
+    if command.contains('\\') || command.contains('/') {
+        return false;
+    }
+    let lower = command.to_ascii_lowercase();
+    let name = lower
+        .strip_suffix(".exe")
+        .or_else(|| lower.strip_suffix(".bat"))
+        .or_else(|| lower.strip_suffix(".cmd"))
+        .unwrap_or(&lower);
+    matches!(name, "python" | "python3")
+}
+
 /// 从 MCP tools/call 响应中提取内部 JSON 值。
 ///
 /// Python SDK 的 McpServer 返回格式为：
@@ -1135,9 +1173,9 @@ impl PluginInvokerImpl {
         };
         let kill_fut = async { client.write().await.kill().await };
         match tokio::time::timeout(Duration::from_secs(2), kill_fut).await {
-            Ok(Ok(())) => info!(
-                "kill_sidecar_if_any: killed sidecar of disabled plugin {plugin_id}"
-            ),
+            Ok(Ok(())) => {
+                info!("kill_sidecar_if_any: killed sidecar of disabled plugin {plugin_id}")
+            }
             Ok(Err(e)) => {
                 warn!("kill_sidecar_if_any: best-effort kill of {plugin_id} failed: {e}")
             }
@@ -1359,7 +1397,7 @@ impl PluginInvokerImpl {
                 c
             }
             _ => {
-                let (command, args) = self.parse_entry(&manifest.entry)?;
+                let (command, args) = self.resolve_sidecar_command(manifest)?;
                 let mut c = McpClient::new_stdio(command, args)
                     // plugin_id 用于 stderr 转发时区分 sidecar 日志来源（[plugin_id] 前缀）。
                     .with_plugin_id(&manifest.id);
@@ -1515,6 +1553,37 @@ impl PluginInvokerImpl {
         }
         let command = parts[0].to_string();
         let args = parts[1..].iter().map(|s| s.to_string()).collect();
+        Ok((command, args))
+    }
+
+    /// 解析 sidecar 启动命令（uv 迁移批 A，**双轨期**）。
+    ///
+    /// 在 [`Self::parse_entry`] 基础上做 venv 分流：插件目录存在 `.venv`
+    /// （Windows `.venv/Scripts/python.exe`、Unix `.venv/bin/python`）且 entry
+    /// 首词是 PATH 裸 python/python3 时，用 venv 解释器**绝对路径**替代裸命令——
+    /// SDK/第三方依赖由 venv 内 editable install 解析，不再依赖 PATH 环境。
+    /// 无 `.venv` 或 entry 非 python → 走现 plain 路径原样返回（批 A-C 双轨保留，
+    /// 批 D 翻转后删 plain 分支）。
+    ///
+    /// 绝对路径解释器含路径分隔符与 `.`，天然绕过 mcp 侧 `resolve_windows_command`
+    /// 的 PATHEXT 探测（该函数对带分隔符/扩展名的命令原样返回），不会被误解析。
+    fn resolve_sidecar_command(
+        &self,
+        manifest: &PluginManifest,
+    ) -> Result<(String, Vec<String>), PluginError> {
+        let (mut command, args) = self.parse_entry(&manifest.entry)?;
+        if is_plain_python_command(&command) {
+            if let Some(dir) = self.loader.get_plugin_dir(&manifest.id) {
+                if let Some(interp) = find_venv_interpreter(std::path::Path::new(&dir)) {
+                    info!(
+                        "[invoker] 插件 {} 走 venv 解释器（uv 双轨）| interpreter={}",
+                        manifest.id,
+                        interp.display()
+                    );
+                    command = interp.to_string_lossy().into_owned();
+                }
+            }
+        }
         Ok((command, args))
     }
 
@@ -3526,6 +3595,151 @@ mod tests {
             "PYTHONPATH 必须包含 plugins/sdk/src（agentos_plugin_sdk 源码目录），实际: {}",
             py
         );
+    }
+
+    // ── venv 分流（uv 迁移批 A，双轨期）：路径选择逻辑单元层 ──
+
+    /// 造一个假 .venv：只放空文件占位解释器路径（find_venv_interpreter 只做
+    /// is_file 探测，不执行——真实解释器由 boot 冒烟验证）。
+    fn fake_venv(dir: &std::path::Path, windows_layout: bool) -> std::path::PathBuf {
+        let interp = if windows_layout {
+            dir.join(".venv").join("Scripts").join("python.exe")
+        } else {
+            dir.join(".venv").join("bin").join("python")
+        };
+        std::fs::create_dir_all(interp.parent().unwrap()).unwrap();
+        std::fs::write(&interp, b"").unwrap();
+        interp
+    }
+
+    #[test]
+    fn test_venv_interpreter_layout_both_platforms() {
+        // 纯路径选择逻辑：Windows 布局 .venv/Scripts/python.exe，
+        // Unix 布局 .venv/bin/python——两分支必须在任意平台上都真实覆盖。
+        let dir = std::path::Path::new("D:/proj/plugins/shared/tools/demo");
+        let win = venv_interpreter_layout(dir, true);
+        assert_eq!(win, dir.join(".venv").join("Scripts").join("python.exe"));
+        let unix = venv_interpreter_layout(dir, false);
+        assert_eq!(unix, dir.join(".venv").join("bin").join("python"));
+    }
+
+    #[test]
+    fn test_find_venv_interpreter_detects_windows_layout() {
+        // 假 .venv（Scripts/python.exe 占位文件）→ 探测命中返回绝对路径。
+        let tmp = tempfile::tempdir().unwrap();
+        let expected = fake_venv(tmp.path(), true);
+        assert_eq!(find_venv_interpreter(tmp.path()), Some(expected));
+    }
+
+    #[test]
+    fn test_find_venv_interpreter_detects_unix_layout() {
+        // Unix 布局（bin/python）也须可探测——跨平台分支不因运行平台而漏。
+        let tmp = tempfile::tempdir().unwrap();
+        let expected = fake_venv(tmp.path(), false);
+        assert_eq!(find_venv_interpreter(tmp.path()), Some(expected));
+    }
+
+    #[test]
+    fn test_find_venv_interpreter_missing_venv_returns_none() {
+        // 无 .venv → None（走 plain 路径，双轨期保留）。
+        let tmp = tempfile::tempdir().unwrap();
+        assert_eq!(find_venv_interpreter(tmp.path()), None);
+        // .venv 目录存在但解释器缺失（半成品）同样 None，不误切。
+        std::fs::create_dir_all(tmp.path().join(".venv")).unwrap();
+        assert_eq!(find_venv_interpreter(tmp.path()), None);
+    }
+
+    #[test]
+    fn test_is_plain_python_command() {
+        // 只有 PATH 裸 python/python3（含 Windows 可执行扩展）才被 venv 替换；
+        // 绝对路径/其他解释器（node 等）不动。
+        assert!(is_plain_python_command("python"));
+        assert!(is_plain_python_command("python3"));
+        assert!(is_plain_python_command("python.exe"));
+        assert!(!is_plain_python_command("node"));
+        assert!(!is_plain_python_command("D:/py/python.exe"));
+        assert!(!is_plain_python_command("/usr/bin/python3"));
+    }
+
+    #[test]
+    fn test_resolve_sidecar_command_uses_venv_interpreter() {
+        // 插件目录有 .venv → command 换成 venv 解释器绝对路径，args 原样保留。
+        let tmp = tempfile::tempdir().unwrap();
+        let interp = fake_venv(tmp.path(), true);
+
+        let loader = Arc::new(MockLoader::new());
+        loader.plugin_dirs.write().insert(
+            "demo_tool".to_string(),
+            tmp.path().to_string_lossy().into_owned(),
+        );
+        let invoker = PluginInvokerImpl::new(loader);
+        let manifest = make_sidecar_manifest("demo_tool", "python server.py");
+
+        let (cmd, args) = invoker.resolve_sidecar_command(&manifest).unwrap();
+        assert_eq!(cmd, interp.to_string_lossy().into_owned());
+        assert_eq!(args, vec!["server.py"]);
+    }
+
+    #[test]
+    fn test_resolve_sidecar_command_unix_venv_layout() {
+        // Unix 布局 venv 同样命中（find 的跨平台回退探测）。
+        let tmp = tempfile::tempdir().unwrap();
+        let interp = fake_venv(tmp.path(), false);
+
+        let loader = Arc::new(MockLoader::new());
+        loader.plugin_dirs.write().insert(
+            "demo_tool".to_string(),
+            tmp.path().to_string_lossy().into_owned(),
+        );
+        let invoker = PluginInvokerImpl::new(loader);
+        let manifest = make_sidecar_manifest("demo_tool", "python server.py");
+
+        let (cmd, _) = invoker.resolve_sidecar_command(&manifest).unwrap();
+        assert_eq!(cmd, interp.to_string_lossy().into_owned());
+    }
+
+    #[test]
+    fn test_resolve_sidecar_command_no_venv_keeps_plain() {
+        // 无 .venv → 裸 python 原样（plain 双轨保留）。
+        let tmp = tempfile::tempdir().unwrap();
+        let loader = Arc::new(MockLoader::new());
+        loader.plugin_dirs.write().insert(
+            "demo_tool".to_string(),
+            tmp.path().to_string_lossy().into_owned(),
+        );
+        let invoker = PluginInvokerImpl::new(loader);
+        let manifest = make_sidecar_manifest("demo_tool", "python server.py");
+
+        let (cmd, args) = invoker.resolve_sidecar_command(&manifest).unwrap();
+        assert_eq!(cmd, "python");
+        assert_eq!(args, vec!["server.py"]);
+    }
+
+    #[test]
+    fn test_resolve_sidecar_command_unknown_dir_keeps_plain() {
+        // loader 查不到插件目录（get_plugin_dir None）→ 不探测，plain 原样。
+        let loader = Arc::new(MockLoader::new());
+        let invoker = PluginInvokerImpl::new(loader);
+        let manifest = make_sidecar_manifest("ghost", "python server.py");
+        let (cmd, _) = invoker.resolve_sidecar_command(&manifest).unwrap();
+        assert_eq!(cmd, "python");
+    }
+
+    #[test]
+    fn test_resolve_sidecar_command_non_python_entry_not_replaced() {
+        // entry 首词非 python（如 node server.js）→ 即使目录有 .venv 也不替换。
+        let tmp = tempfile::tempdir().unwrap();
+        fake_venv(tmp.path(), true);
+        let loader = Arc::new(MockLoader::new());
+        loader.plugin_dirs.write().insert(
+            "demo_tool".to_string(),
+            tmp.path().to_string_lossy().into_owned(),
+        );
+        let invoker = PluginInvokerImpl::new(loader);
+        let manifest = make_sidecar_manifest("demo_tool", "node server.js");
+
+        let (cmd, _) = invoker.resolve_sidecar_command(&manifest).unwrap();
+        assert_eq!(cmd, "node");
     }
 
     // ── 补充分支覆盖：extract_mcp_content 错误/多元素/非字符串 ──
