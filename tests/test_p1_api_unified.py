@@ -1,54 +1,71 @@
 # @feature: FP-MIGR 0.1→0.2迁移清理 | @vision: V3 可嵌入 | @ci: none-local
-"""P1 架构修复 + API 统一 — 针对性测试。
+"""P1 API 统一 — 存活路由前缀与鉴权回归（0.2 清理版，批次 2 §4.1）。
 
-覆盖以下 P1 变更：
-- AR-3: message_bus.py 使用 engine.inject_queue_size 公共属性，不访问 _inject_queue
-- AR-4: tools/builtin 中 send_pipeline_message 调用已迁移到 MessageBus.emit
-- AR-5: 所有 API 路由前缀统一为 /api/v1/
-- D-3: deps.py require_auth 仅保留 Authorization header（移除 Query token 参数）
-- A-7: core/di/global_container.py 新增 get_service() 便捷封装
+0.2 清理（2026-08-19，逐用例分类清单见当次 commit message）：
+
+删除（A 类，0.1 快照断言）：
+- routes_auth / routes_agents / routes_tools / routes_plugins / routes_maintenance
+  前缀参数用例——模块已删，对应 API 面迁 kernel/crates/api（axum）。
+- routes_ui / routes_comfyui / routes_reviews 前缀用例——文件残留但 import 链断
+  （ui_schema / services / review.* sidecar 未迁移），server.py 已按域 stub 防御
+  （server.py modules/ui 与 reviews 域的 try/except 分发），断言死模块前缀属
+  0.1 快照。
+- TestGetService ×6——core/di/global_container + infrastructure.service_provider
+  （0.1 Python DI）已删，0.2 DI 落 Rust kernel。
+- TestMessageBusInjectQueueSize ×3 与 TestToolsBuiltinMessageBusMigration——断言对象
+  src/pipeline/{message_bus,engine}.py、src/tools/builtin/ 已随 src/ 删除
+  （消息总线/引擎在 kernel engine crate）。
+
+改写（B 类）：
+- test_no_legacy_api_prefix_without_v1——改为扫描 0.2 存活路由模块
+  （channel_api sidecar 按域挂载的全部 routes_*），意图不变：
+  不允许 /api/（无 v1）旧前缀回潮。
+- 模块级 use_channel("api")——注册 channels.api 命名空间兼容（tests/channels/
+  conftest.py _register_channels_api_compat），本文件可独立运行
+  （原先依赖 test_delete_thread_cascade_metadata.py 先行导入才不炸）。
+
+保留（0.2 仍有效意图）：
+- AR-5: channel_api 存活路由模块 prefix 均以 /api/v1/ 开头。
+- D-3: channels.api.deps.require_auth 仅接受 Authorization header，
+  不接受 Query token。
 """
 
 from __future__ import annotations
 
 import inspect
-from datetime import timedelta
-from unittest.mock import patch
 
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
+from tests.channels.conftest import use_channel
+
+use_channel("api")
+
 # ============================================================
-# AR-5: API 路由前缀统一为 /api/v1/
+# AR-5: API 路由前缀统一为 /api/v1/（0.2 存活路由模块）
 # ============================================================
 
 
 class TestAPIPrefixUnification:
-    """验证所有路由模块的 prefix 均以 /api/v1/ 开头（AR-5）。"""
+    """验证 0.2 存活路由模块的 prefix 均以 /api/v1/ 开头（AR-5）。"""
 
-    # 从 app.py _register_routes 中提取的完整路由模块清单
+    # 0.2 channel_api sidecar 实际按域分发（server.py import routes_xxx）且
+    # import 链存活的模块清单。
     ROUTE_MODULES = [
-        ("channels.api.routes_auth", "router"),
         ("channels.api.routes_threads", "router"),
-        ("channels.api.routes_agents", "router"),
         ("channels.api.routes_tasks", "router"),
-        ("channels.api.routes_tools", "router"),
         ("channels.api.routes_memory", "router"),
         ("channels.api.routes_evaluation", "router"),
-        ("channels.api.routes_plugins", "router"),
         ("channels.api.routes_config", "router"),
         ("channels.api.routes_thinking_mode", "router"),
-        ("channels.api.routes_ui", "router"),
         ("channels.api.routes_external_chat", "router"),
         ("channels.api.routes_scene", "router"),
-        ("channels.api.routes_comfyui", "router"),
-        ("channels.api.routes_maintenance", "router"),
     ]
 
     @pytest.mark.parametrize("module_path,router_attr", ROUTE_MODULES)
     def test_router_prefix_starts_with_api_v1(self, module_path: str, router_attr: str) -> None:
-        """每个路由模块的 prefix 必须以 /api/v1/ 开头。"""
+        """每个存活路由模块的 prefix 必须以 /api/v1/ 开头。"""
         import importlib
 
         mod = importlib.import_module(module_path)
@@ -67,14 +84,6 @@ class TestAPIPrefixUnification:
             f"workspaces_router prefix='{workspaces_router.prefix}' 不符合规范"
         )
 
-    def test_reviews_router_prefix(self) -> None:
-        """审批路由 prefix 验证。"""
-        from channels.api.routes_reviews import reviews_router
-
-        assert reviews_router.prefix.startswith("/api/v1/"), (
-            f"reviews_router prefix='{reviews_router.prefix}' 不符合规范"
-        )
-
     def test_artifacts_router_prefix(self) -> None:
         """制品路由 prefix 验证。"""
         from channels.api.routes_artifacts import artifacts_router
@@ -84,15 +93,16 @@ class TestAPIPrefixUnification:
         )
 
     def test_no_legacy_api_prefix_without_v1(self) -> None:
-        """确认不存在以 /api/ 开头但不是 /api/v1/ 的旧路由前缀。"""
+        """确认存活路由模块中不存在以 /api/ 开头但不是 /api/v1/ 的旧路由前缀。"""
         import importlib
 
-        # 收集所有路由模块
+        # 扫描范围 = 参数化存活模块 + workspaces/artifacts/search/missing
+        # （均为 server.py 按域分发且 import 链存活的模块）。
         route_module_names = [m for m, _ in self.ROUTE_MODULES]
         route_module_names.extend([
             "channels.api.routes_workspaces",
-            "channels.api.routes_reviews",
             "channels.api.routes_artifacts",
+            "channels.api.routes_search",
             "channels.api.routes_missing",
         ])
 
@@ -108,97 +118,6 @@ class TestAPIPrefixUnification:
                             f"{module_name}.{attr_name} 的 prefix='{prefix}' "
                             f"使用了旧版 /api/ 前缀而非 /api/v1/"
                         )
-
-
-# ============================================================
-# A-7: get_service() 便捷封装测试
-# ============================================================
-
-
-class TestGetService:
-    """验证 core/di/global_container.py 的 get_service() 封装（A-7）。"""
-
-    def test_get_service_returns_registered_instance(self) -> None:
-        """注册服务后，get_service 应返回正确实例。"""
-        from infrastructure.service_provider import ServiceProvider
-
-        # 重置单例确保干净状态
-        ServiceProvider.reset()
-        provider = ServiceProvider()
-        test_instance = {"name": "test_service_instance"}
-        provider.register("test_service_a7", test_instance)
-
-        from core.di.global_container import get_service
-
-        result = get_service("test_service_a7")
-        assert result is test_instance, "get_service 应返回已注册的实例"
-
-        # 清理
-        ServiceProvider.reset()
-
-    def test_get_service_returns_default_for_missing(self) -> None:
-        """服务不存在时，get_service 应返回 default 参数值。"""
-        from core.di.global_container import get_service
-        from infrastructure.service_provider import ServiceProvider
-
-        ServiceProvider.reset()
-
-        default_value = "fallback_default"
-        result = get_service("nonexistent_service_xyz", default=default_value)
-        assert result == default_value, "服务不存在时应返回 default 值"
-
-        ServiceProvider.reset()
-
-    def test_get_service_returns_none_for_missing_without_default(self) -> None:
-        """无 default 参数且服务不存在时，应返回 None。"""
-        from core.di.global_container import get_service
-        from infrastructure.service_provider import ServiceProvider
-
-        ServiceProvider.reset()
-
-        result = get_service("totally_nonexistent_service")
-        assert result is None, "无 default 参数时，缺失服务应返回 None"
-
-        ServiceProvider.reset()
-
-    def test_get_service_handles_provider_exception(self) -> None:
-        """provider 内部异常时，get_service 应捕获并返回 default。
-
-        get_service 设计上捕获 ImportError / AttributeError / KeyError，
-        这些是运行时服务获取最可能遇到的异常类型。
-        """
-        from core.di.global_container import get_service
-
-        # 模拟 get_service_provider 抛出 ImportError（如模块缺失场景）
-        with patch(
-            "infrastructure.service_provider.get_service_provider",
-            side_effect=ImportError("provider module missing"),
-        ):
-            result = get_service("any_service", default="error_fallback")
-            assert result == "error_fallback", "ImportError 时应返回 default 而非传播异常"
-
-    def test_get_service_handles_attribute_error(self) -> None:
-        """provider.get 不可用时（AttributeError），get_service 应返回 default。"""
-        from core.di.global_container import get_service
-
-        # 模拟 provider 对象缺少 get 方法
-        with patch(
-            "infrastructure.service_provider.get_service_provider",
-            return_value=object(),  # 普通 object 没有 .get 方法
-        ):
-            result = get_service("any_service", default="attr_fallback")
-            assert result == "attr_fallback", "AttributeError 时应返回 default"
-
-    def test_get_service_signature_has_default_param(self) -> None:
-        """get_service 函数签名必须包含 default 参数（A-7 封装核心）。"""
-        from core.di.global_container import get_service
-
-        sig = inspect.signature(get_service)
-        params = sig.parameters
-
-        assert "name" in params, "get_service 必须有 name 参数"
-        assert "default" in params, "get_service 必须有 default 参数（A-7 便捷封装的核心设计）"
-        assert params["default"].default is None, "default 参数的默认值应为 None"
 
 
 # ============================================================
@@ -349,120 +268,3 @@ class TestRequireAuthHeaderOnly:
         assert _extract_token("") == ""
         assert _extract_token("Bearer ") == ""
         assert _extract_token("Basic something") == ""
-
-
-# ============================================================
-# AR-3: message_bus 使用 inject_queue_size 公共属性
-# ============================================================
-
-
-class TestMessageBusInjectQueueSize:
-    """验证 message_bus 使用 engine.inject_queue_size 公共属性（AR-3）。"""
-
-    def test_message_bus_source_uses_public_property(self) -> None:
-        """AR-3: message_bus.py 源码中应使用 inject_queue_size 而非 _inject_queue。"""
-        import os
-
-        message_bus_path = os.path.join(
-            os.path.dirname(__file__), "..", "src", "pipeline", "message_bus.py"
-        )
-        message_bus_path = os.path.abspath(message_bus_path)
-
-        with open(message_bus_path, encoding="utf-8") as f:
-            source = f.read()
-
-        # 不应直接访问 engine._inject_queue
-        assert "engine._inject_queue" not in source, (
-            "AR-3: message_bus.py 不应直接访问 engine._inject_queue 私有属性"
-        )
-
-    def test_engine_has_inject_queue_size_property(self) -> None:
-        """engine.inject_queue_size 作为公共属性存在。"""
-        # 通过源码验证属性定义存在
-        import os
-
-        engine_path = os.path.join(
-            os.path.dirname(__file__), "..", "src", "pipeline", "engine.py"
-        )
-        engine_path = os.path.abspath(engine_path)
-
-        with open(engine_path, encoding="utf-8") as f:
-            source = f.read()
-
-        assert "def inject_queue_size" in source, (
-            "AR-3: PipelineEngine 必须定义 inject_queue_size 公共属性"
-        )
-        assert "@property" in source, (
-            "AR-3: inject_queue_size 必须是 @property"
-        )
-
-    def test_inject_queue_size_is_read_only_property(self) -> None:
-        """inject_queue_size 是只读属性，内部委托给 _inject_queue。"""
-        # 通过 AST 检查属性定义
-        import ast
-        import os
-
-        engine_path = os.path.join(
-            os.path.dirname(__file__), "..", "src", "pipeline", "engine.py"
-        )
-        engine_path = os.path.abspath(engine_path)
-
-        with open(engine_path, encoding="utf-8") as f:
-            tree = ast.parse(f.read())
-
-        found_property = False
-        for node in ast.walk(tree):
-            if isinstance(node, ast.AsyncFunctionDef | ast.FunctionDef):
-                if node.name == "inject_queue_size":
-                    # 检查是否有装饰器 @property
-                    for decorator in node.decorator_list:
-                        if isinstance(decorator, ast.Name) and decorator.id == "property":
-                            found_property = True
-
-        assert found_property, "inject_queue_size 必须使用 @property 装饰器"
-
-
-# ============================================================
-# AR-4: tools/builtin 中不再使用 send_pipeline_message
-# ============================================================
-
-
-class TestToolsBuiltinMessageBusMigration:
-    """验证 tools/builtin 中 send_pipeline_message 已迁移到 MessageBus.emit（AR-4）。"""
-
-    def test_no_send_pipeline_message_in_tools_builtin(self) -> None:
-        """AR-4: tools/builtin 目录下不应再出现 send_pipeline_message 调用。"""
-        import os
-
-        tools_builtin_path = os.path.join(
-            os.path.dirname(__file__), "..", "src", "tools", "builtin"
-        )
-        tools_builtin_path = os.path.abspath(tools_builtin_path)
-
-        if not os.path.exists(tools_builtin_path):
-            pytest.skip("tools/builtin 目录不存在")
-
-        violations = []
-        for root, _dirs, files in os.walk(tools_builtin_path):
-            for fname in files:
-                if not fname.endswith(".py"):
-                    continue
-                fpath = os.path.join(root, fname)
-                with open(fpath, encoding="utf-8") as f:
-                    content = f.read()
-                if "send_pipeline_message" in content:
-                    # 检查是否是注释或字符串中的引用（粗略检查）
-                    for lineno, line in enumerate(content.splitlines(), 1):
-                        stripped = line.strip()
-                        if (
-                            "send_pipeline_message" in stripped
-                            and not stripped.startswith("#")
-                            and not stripped.startswith("'")
-                            and not stripped.startswith('"')
-                        ):
-                            violations.append(f"{fpath}:{lineno}: {stripped}")
-
-        assert len(violations) == 0, (
-            "AR-4: tools/builtin 中仍有 send_pipeline_message 残留:\n"
-            + "\n".join(violations)
-        )
