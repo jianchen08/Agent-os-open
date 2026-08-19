@@ -51,31 +51,23 @@ async def _on_load(_params: dict[str, Any]) -> None:
     tool_mod.set_state_reader(_read_state_rows)
 
 
+# schema/description 单一事实源：tool.TaskSubmitTool.get_tool_definition()——
+# 与 manifest 声明同源同形（平铺 goal_title + allOf 容器约束）。此前此处是
+# 手抄简陋嵌套版（goal.title），与声明漂移被 boot G2 严格模式拒绝注册
+# （2026-08-19 e2e 实测 task_submit 从工具面消失）。tool.py 模块级仅依赖
+# SDK（领域模块均函数内懒加载），模块级 import 安全。
+from tool import TaskSubmitTool  # noqa: E402
+
+_TASK_SUBMIT_DEF = TaskSubmitTool.get_tool_definition()
+
+
 @plugin.tool(
     name="task_submit",
-    schema={
-        "type": "object",
-        "properties": {
-            "target_type": {"type": "string", "enum": ["agent"]},
-            "target_id": {"type": "string"},
-            "goal": {"type": "object", "properties": {"title": {"type": "string"}, "description": {"type": "string"}}, "required": ["title"]},
-            "acceptance_criteria": {"type": "object"},
-            "priority": {"type": "integer", "minimum": 1, "maximum": 10, "default": 5},
-            "max_retries": {"type": "integer", "minimum": 0, "default": 3},
-            "task_scope": {"type": "string", "enum": ["non_container", "container"], "default": "non_container"},
-            "parent_task_id": {"type": "string"},
-            "workspace": {"type": "string"},
-            "isolation_level": {"type": "string", "enum": ["non_isolated", "isolated"]},
-            "inherit": {"type": "object"},
-        },
-        "required": ["goal"],
-    },
-    description="任务提交工具",
+    schema=_TASK_SUBMIT_DEF.input_schema,
+    description=_TASK_SUBMIT_DEF.description,
 )
 async def task_submit(**kwargs):
     """任务提交。"""
-    from tool import TaskSubmitTool  # noqa: PLC0415
-
     tool = TaskSubmitTool()
     result = await tool.execute(kwargs)
     if result.success:

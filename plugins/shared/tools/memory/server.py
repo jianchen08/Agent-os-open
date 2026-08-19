@@ -63,27 +63,40 @@ _MEMORY_DESCRIPTION = MemoryTool.get_tool_definition().description
 
 # ── 记忆后端（懒构建 + 缓存）──────────────────────────────
 _memory_backend: Any | None = None
-_memory_backend_attempted = False
 
 
 def _make_capability_caller() -> Any | None:
     """从内核注入的能力句柄构造 capability_caller（async fn `(method, params)`）。
 
-    优先 tool-executor（hindsight 后端），回落 service-registry（kernel 后端）；
-    均未注入时返回 None。
+    同时收集 tool-executor + service-registry 句柄，按 method 前缀路由：
+    - "tool-executor.*"（hindsight 后端的 retain/recall）→ tool-executor handle
+    - 无前缀域方法（kernel 后端的 memory.create/search）→ service-registry handle
 
-    桥接说明：memory_backend 的 CapabilityCaller 约定传入**完整** wire method
-    （如 "tool-executor.invoke" / "memory.create"），而 SDK CapabilityHandle.call
-    会拼接 ``f"{cap}.{method}"``。因此需剥掉已含的能力前缀，避免双命名空间
-    （"tool-executor.tool-executor.invoke"——内核 CapabilityRouter 只认
-    ("tool-executor", "invoke")）。
+    此前"优先 tool-executor 单句柄"的形态会把 kernel 后端的 memory.create
+    错拼成 tool-executor.memory.create（内核 method not implemented，2026-08-19
+    e2e 实测）。至少一个句柄可用即返回 caller；均未注入返回 None。
     """
+    handles: dict[str, Any] = {}
     for cap_name in ("tool-executor", "service-registry"):
         try:
-            handle = plugin.get_capability(cap_name)
+            handles[cap_name] = plugin.get_capability(cap_name)
         except KeyError:
             continue
-        return _bind_caller(handle, cap_name)
+
+    if "service-registry" in handles:
+        sr = handles["service-registry"]
+        te = handles.get("tool-executor")
+
+        async def _call(method: str, params: dict[str, Any]) -> Any:
+            if method.startswith("tool-executor."):
+                if te is None:
+                    raise RuntimeError("tool-executor 能力未注入")
+                return await te.call(method[len("tool-executor."):], params)
+            return await sr.call(method, params)
+
+        return _call
+    if "tool-executor" in handles:
+        return _bind_caller(handles["tool-executor"], "tool-executor")
     return None
 
 
@@ -119,8 +132,17 @@ def _build_memory_backend() -> Any | None:
     try:
         from memory_backend import get_memory_backend  # noqa: PLC0415
 
+        # config_files 注入形状为 {file_id: 文件内容}（invoker build_injected_config）。
+        # 本插件 file_id="backend" → {"backend": {backend: kernel, ...}}，解开一层
+        # 再交工厂；无 config_files 声明的历史形态（裸 {backend: ...}）也兼容。
+        injected = plugin.get_config() or {}
+        backend_cfg = (
+            injected.get("backend")
+            if isinstance(injected.get("backend"), dict)
+            else injected
+        )
         return get_memory_backend(
-            config=plugin.get_config() or {},
+            config=backend_cfg,
             capability_caller=caller,
         )
     except Exception as e:
@@ -129,10 +151,14 @@ def _build_memory_backend() -> Any | None:
 
 
 def _get_memory_backend() -> Any | None:
-    """懒构建并缓存记忆后端（幂等，多次调用只构建一次）。"""
-    global _memory_backend, _memory_backend_attempted
-    if not _memory_backend_attempted:
-        _memory_backend_attempted = True
+    """懒构建并缓存记忆后端（成功后幂等；失败不锁死，下次调用重试）。
+
+    capability 句柄在 initialize 握手注入，早于首条工具调用；但空能力
+    sidecar（boot 期无 router spawn）等异常形态下首次构建会失败——失败
+    不缓存 None，下一次调用重试，避免一次竞态把后端永久判死。
+    """
+    global _memory_backend
+    if _memory_backend is None:
         _memory_backend = _build_memory_backend()
     return _memory_backend
 

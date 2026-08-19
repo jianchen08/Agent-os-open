@@ -135,16 +135,41 @@ class TestHindsightBackend:
         assert item["score"] == 0.9
         assert item["memory_type"] == "semantic"
 
-    async def test_hindsight_add_degrades_on_error(
+    async def test_hindsight_add_raises_on_caller_error(
         self, mod: Any, caller: AsyncMock
     ) -> None:
-        """capability_caller 抛错时 add() 优雅降级，返回空串而非崩溃。"""
+        """capability_caller 抛错时 add() 上抛——吞错降级曾让 memory 工具
+        把失败包装成 success:true 的假成功（2026-08-19 e2e 实测），已改诚实上抛。"""
         caller.side_effect = RuntimeError("boom")
         backend = mod.HindsightBackend(caller)
 
-        result = await backend.add(user_id="user-1", content="hello")
+        with pytest.raises(RuntimeError, match="hindsight.retain"):
+            await backend.add(user_id="user-1", content="hello")
 
-        assert result == ""
+    async def test_hindsight_add_raises_on_degrade_response(
+        self, mod: Any, caller: AsyncMock
+    ) -> None:
+        """hindsight sidecar 降级响应（{error, initialized: False}，无 id 键）
+        必须视为失败上抛，不得静默返回空 id。"""
+        caller.return_value = {
+            "error": "hindsight not initialized",
+            "initialized": False,
+            "operation": "retain",
+        }
+        backend = mod.HindsightBackend(caller)
+
+        with pytest.raises(RuntimeError, match="降级"):
+            await backend.add(user_id="user-1", content="hello")
+
+    async def test_hindsight_add_raises_on_empty_id(
+        self, mod: Any, caller: AsyncMock
+    ) -> None:
+        """响应无 error 但也无 id（写入未确认）必须失败——空 id 不是成功。"""
+        caller.return_value = {"stored": True}
+        backend = mod.HindsightBackend(caller)
+
+        with pytest.raises(RuntimeError, match="memory id"):
+            await backend.add(user_id="user-1", content="hello")
 
 
 # ═══════════════════════════════════════════════════════════

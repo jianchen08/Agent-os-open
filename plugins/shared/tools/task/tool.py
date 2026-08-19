@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
+import types
 from typing import TYPE_CHECKING, Any
 
 from state_machine import InvalidTransitionError
@@ -195,8 +197,15 @@ class TaskTool(BuiltinTool):
             status = TaskStatus(status_str)
         except (ValueError, AttributeError):
             status = TaskStatus.PENDING
+        # 会话锚点取舍：任务管道无 sessions 行，其 thread_id 恒等于自身
+        # pipeline_id；出生侧 lineage.origin_session_id 修正后为真 thread id。
+        # 取「不等于自身 pipeline_id」的那个，两侧语义偏差互为兜底。
+        pid = str(row.get("pipeline_id") or "")
+        origin_sess = str(row.get("lineage.origin_session_id") or "")
+        row_thread = str(row.get("thread_id") or "")
+        anchor = origin_sess if origin_sess and origin_sess != pid else (row_thread if row_thread and row_thread != pid else origin_sess or row_thread)
         metadata: dict[str, Any] = {
-            "session_id": str(row.get("lineage.origin_session_id") or ""),
+            "session_id": anchor,
             "target_id": str(row.get("task.submitted_by") or ""),
             "retry_count": 0,
             "max_retries": 6,
@@ -208,7 +217,50 @@ class TaskTool(BuiltinTool):
             metadata=metadata,
             pipeline_run_id=task_id,
             agent_name="",
+            error=None,
         )
+
+    async def _list_tasks_from_state(self) -> list[Any] | None:
+        """从 state 聚合批量组装任务对象（GAP-1 单一真值的列表读面）。
+
+        只含有 task.* 字段的行是任务管道（无该字段段的管道不是任务，跳过）；
+        按 task.ended_at/创建序倒序近似——聚合行无稳定时间戳键时保序。
+        None = 桥未就绪/无任务行（调用方回落旧 service）。
+        """
+        rows = await self._read_state_rows()
+        if rows is None:
+            return None
+        out: list[Any] = []
+        for row in rows:
+            if not any(str(k).startswith("task.") for k in row.keys()):
+                continue
+            pid = str(row.get("pipeline_id") or "")
+            if not pid:
+                continue
+            try:
+                status = TaskStatus(str(row.get("task.status") or "pending"))
+            except (ValueError, AttributeError):
+                status = TaskStatus.PENDING
+            out.append(
+                types.SimpleNamespace(
+                    id=pid,
+                    title=str(row.get("task.goal") or pid),
+                    status=status,
+                    metadata={
+                        "session_id": (
+                            (lambda o, t: o if o and o != pid else (t if t and t != pid else o or t))(
+                                str(row.get("lineage.origin_session_id") or ""),
+                                str(row.get("thread_id") or ""),
+                            )
+                        ),
+                        "target_id": str(row.get("task.submitted_by") or ""),
+                    },
+                    pipeline_run_id=pid,
+                    agent_name="",
+                    error=None,
+                )
+            )
+        return out
 
     def _get_task_service(self) -> TaskService:
         """获取共享的 TaskService 实例。
@@ -496,7 +548,14 @@ class TaskTool(BuiltinTool):
         return await service.list_all(limit=limit, reverse=True)
 
     async def _list_all_tasks_sorted(self) -> list[TaskModel]:
-        """拉取存储内全部任务，按创建时间倒序返回（不做截断）。"""
+        """拉取全部任务，按创建时间倒序返回（不做截断）。
+
+        GAP-1 单一真值：优先 state 聚合（task = pipeline），桥未就绪回落
+        旧 service 存储。
+        """
+        from_state = await self._list_tasks_from_state()
+        if from_state is not None:
+            return from_state  # type: ignore[return-value]
 
         service = self._get_task_service()
 
@@ -589,12 +648,13 @@ class TaskTool(BuiltinTool):
     async def _get_task_detail(
         self, inputs: dict[str, Any], parent_agent_level: int, task_id: str
     ) -> ToolExecutionResult:
-        """查询单个任务详情。"""
+        """查询单个任务详情（GAP-1 单一真值：state 聚合优先，回落旧 service）。"""
 
         try:
-            service = self._get_task_service()
-
-            task = service.get_task(task_id)
+            task = await self._get_task_from_state(task_id)
+            if task is None:
+                service = self._get_task_service()
+                task = service.get_task(task_id)
 
             if not task:
                 return create_failure_result(

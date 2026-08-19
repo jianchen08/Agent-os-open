@@ -196,7 +196,8 @@ class KernelChannel:
                 用户响应）必须显式传大值，否则默认 30s 会先于用户操作掐断。
 
         Returns:
-            内核返回的 result（dict）
+            内核返回的 result（dict；内核对非 object 返回值包 {"__raw__": value}
+            传输，此处解包还原原始形状——list/标量等）。
 
         Raises:
             RuntimeError: 内核返回 error、超时（timeout / CAPABILITY_CALL_TIMEOUT_S），
@@ -204,13 +205,20 @@ class KernelChannel:
         """
         outbound = self._require_outbound()
         try:
-            return await outbound.send_raw_request(
+            resp = await outbound.send_raw_request(
                 method,
                 params or {},
                 {"timeout": timeout if timeout is not None else CAPABILITY_CALL_TIMEOUT_S},
             )
         except MCPError as e:
             raise RuntimeError(f"kernel capability call failed [{e.error.code}] {method}: {e.error.message}") from None
+        # 对称解包（见内核 mcp/client.rs handle_incoming_request）：官方 SDK 的
+        # JSONRPCResponse.result 契约是 object，内核把数组/标量包成 {"__raw__": v}
+        # 传输。恰好只含 __raw__ 单键的 dict 视为信封还原；真业务数据以其它
+        # 键为准，不受影响。
+        if isinstance(resp, dict) and set(resp.keys()) == {"__raw__"}:
+            return resp["__raw__"]
+        return resp
 
     async def send_notification(self, method: str, params: dict[str, Any]) -> None:
         """向内核发起一次 fire-and-forget 的 capability 通知（不等响应）。

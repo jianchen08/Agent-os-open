@@ -573,12 +573,19 @@ async def _on_load(params: dict[str, Any]) -> None:
         import subprocess  # noqa: PLC0415
 
         # 启动 hindsight-api 服务器子进程(pg0 嵌入式 PG + uvicorn HTTP)
+        # PYTHONPATH 前置本插件目录：子进程启动时执行 sitecustomize.py，
+        # 注入 mcp 2.0 下缺失的 request_ctx/MCPError 兼容名（详见该文件头注释）。
+        _spawn_env = os.environ.copy()
+        _existing_pp = _spawn_env.get("PYTHONPATH", "")
+        _spawn_env["PYTHONPATH"] = (
+            _THIS_DIR + (os.pathsep + _existing_pp if _existing_pp else "")
+        )
         _api_process = subprocess.Popen(
             [sys.executable, "-m", "hindsight_api.main",
              "--port", str(port), "--host", "127.0.0.1"],
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
-            env=os.environ.copy(),
+            env=_spawn_env,
         )
         logger.info("[hindsight] hindsight-api 子进程已启动 PID=%s port=%s", _api_process.pid, port)
 

@@ -315,8 +315,12 @@ async def _maybe_finalize_on_pipeline_completion(report: dict[str, Any]) -> None
     )
     if row is None:
         return
-    status = row.get("status")
-    if status == "completed":
+    # 聚合行无独立 "status" 键（此前读它恒 None → 报告永久卡 running，
+    # 2026-08-19 e2e 实测）：终态判定 = task.status（任务域）或
+    # ended/current_phase（执行域），两者任一信号到位即可。
+    status = row.get("task.status") or row.get("status")
+    ended = row.get("ended") is True or row.get("current_phase") == "exit"
+    if status == "completed" or (ended and status != "failed"):
         report["status"] = "completed"
         report["mode"] = "pipeline"
         raw = row.get("raw_result")
@@ -328,7 +332,7 @@ async def _maybe_finalize_on_pipeline_completion(report: dict[str, Any]) -> None
             report.get("review_id"),
             pipeline_id,
         )
-    elif status == "failed":
+    elif status == "failed" or (ended and status == "failed"):
         report["status"] = "failed"
         logger.warning(
             "[Review] 复盘管道失败 review_id=%s pipeline_id=%s",

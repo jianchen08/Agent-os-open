@@ -1017,11 +1017,23 @@ async fn handle_incoming_request(
 
     let result = router.handle(capability, cap_method, params).await;
     let resp = match result {
-        Ok(value) => serde_json::json!({
-            "jsonrpc": "2.0",
-            "id": raw_id,
-            "result": value
-        }),
+        Ok(value) => {
+            // MCP 官方 SDK 的 JSONRPCResponse.result 契约是 object（dict[str, Any]）：
+            // 数组/标量/Null 会让对端 pydantic 校验失败、响应被静默丢弃 → 发起方
+            // pending 永不 resolve → 超时（2026-08-19 e2e 实测 service-registry.
+            // memory.search 返回 Vec 即中招）。非 object 一律包 {"__raw__": value}，
+            // SDK KernelChannel.send_request 对称解包；object 原样（零迁移成本）。
+            let result_value = if value.is_object() {
+                value
+            } else {
+                serde_json::json!({ "__raw__": value })
+            };
+            serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": raw_id,
+                "result": result_value
+            })
+        }
         Err(e) => serde_json::json!({
             "jsonrpc": "2.0",
             "id": raw_id,

@@ -108,6 +108,7 @@ class CapabilityHandle:
 # + /api/v1/plugins/{id}/config 配置面）。
 STANDARD_CAPABILITIES = [
     "pipeline-executor",
+    "pipeline-state",
     "tenant-context",
     "event-bus",
     "metrics",

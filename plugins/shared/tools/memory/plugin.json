@@ -7,6 +7,13 @@
   "language": "python",
   "host_type": "sidecar",
   "entry": "python server.py",
+  "config_files": [
+    {
+      "id": "backend",
+      "label": "记忆后端设置",
+      "path": "config/system/memory_backend.yaml"
+    }
+  ],
   "capabilities": {
     "tools": [
       {

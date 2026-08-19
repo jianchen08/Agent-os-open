@@ -18,6 +18,75 @@
         "render": {
           "card": "form",
           "title": "触发器"
+        },
+        "input_schema": {
+          "type": "object",
+          "properties": {
+            "action": {
+              "type": "string",
+              "enum": [
+                "setup",
+                "cancel",
+                "update"
+              ],
+              "description": "操作类型: setup=设置触发器(默认), cancel=取消指定触发器, update=更新已有触发器的次数或时长"
+            },
+            "trigger_id": {
+              "type": "string",
+              "description": "触发器 ID（action=cancel/update 时必填）"
+            },
+            "trigger_type": {
+              "type": "string",
+              "enum": [
+                "delay",
+                "schedule",
+                "interval",
+                "event",
+                "condition"
+              ],
+              "description": "触发类型: delay=延迟触发(几秒后), schedule=定时触发(指定时间), interval=周期触发(按间隔重复), event=事件触发, condition=条件触发"
+            },
+            "message": {
+              "type": "string",
+              "description": "触发时注入的消息内容"
+            },
+            "delay_seconds": {
+              "type": "integer",
+              "description": "延迟秒数（trigger_type=delay 时必填），最小 1 秒，最大 86400 秒（24小时）"
+            },
+            "schedule_time": {
+              "type": "string",
+              "description": "定时触发时间（trigger_type=schedule 时必填），ISO 8601 格式，如: 2026-03-15T15:00:00"
+            },
+            "interval": {
+              "type": "string",
+              "description": "周期间隔（trigger_type=interval 时必填），支持格式: '30s', '5m', '1h', '1d', '1h30m'。最小 10 秒，最大 30 天"
+            },
+            "max_count": {
+              "type": "integer",
+              "description": "最大触发次数（0 或不填表示无限），到达后触发器自动停止"
+            },
+            "max_time": {
+              "type": "string",
+              "description": "最长运行时间（到达后触发器自动停止），支持格式: '30m', '2h', '3d', '1h30m'。不填表示无限"
+            },
+            "event_type": {
+              "type": "string",
+              "description": "监听的事件类型（trigger_type=event 时必填），如: task_completed, file_changed"
+            },
+            "condition": {
+              "type": "string",
+              "description": "条件表达式（trigger_type=condition 时必填），如: task_status == 'pending'"
+            },
+            "name": {
+              "type": "string",
+              "description": "触发器名称（可选），便于识别"
+            }
+          },
+          "required": [
+            "trigger_type",
+            "message"
+          ]
         }
       }
     ],

@@ -173,11 +173,21 @@ class HindsightBackend(IMemoryBackend):
         try:
             result = await self._call("tool-executor.invoke", params)
         except Exception as e:
-            logger.warning("[HindsightBackend.add] 调用失败降级 | error=%s", e)
-            return ""
+            # 诚实上抛：吞错降级会让 memory 工具层把失败包装成 success:true
+            # 的假成功（2026-08-19 e2e 实测）。降级决策归工具层。
+            raise RuntimeError(f"hindsight.retain 调用失败: {e}") from e
         if isinstance(result, dict):
-            return str(result.get("id", "") or "")
-        return str(result) if result is not None else ""
+            # hindsight sidecar 降级签名为 {error, initialized: False}（无 id 键）。
+            # 视为失败上抛，杜绝"返回空 id 但报成功"。
+            if result.get("error") or result.get("initialized") is False:
+                raise RuntimeError(
+                    f"hindsight 后端降级: {result.get('error') or 'not initialized'}"
+                )
+            memory_id = str(result.get("id", "") or "")
+            if not memory_id:
+                raise RuntimeError("hindsight.retain 未返回 memory id（写入未确认）")
+            return memory_id
+        raise RuntimeError(f"hindsight.retain 返回非预期类型: {type(result).__name__}")
 
     async def search(
         self,
@@ -199,8 +209,13 @@ class HindsightBackend(IMemoryBackend):
         try:
             result = await self._call("tool-executor.invoke", params)
         except Exception as e:
-            logger.warning("[HindsightBackend.search] 调用失败降级 | error=%s", e)
-            return []
+            raise RuntimeError(f"hindsight.recall 调用失败: {e}") from e
+        if isinstance(result, dict) and (
+            result.get("error") or result.get("initialized") is False
+        ):
+            raise RuntimeError(
+                f"hindsight 后端降级: {result.get('error') or 'not initialized'}"
+            )
         return self._map_hindsight_results(result)
 
     async def delete(self, user_id: str, memory_id: str | None = None) -> bool:
@@ -322,8 +337,9 @@ class KernelMemoryBackend(IMemoryBackend):
         try:
             await self._call("memory.create", record)
         except Exception as e:
-            logger.warning("[KernelMemoryBackend.add] 调用失败降级 | error=%s", e)
-            return ""
+            # 上抛而非静默 ""：空 id 会被 memory 工具层判失败，但吞错让排查
+            # 无从下手（真实错误如 capability 超时被藏成"成功但无 id"）。
+            raise RuntimeError(f"memory.create 调用失败: {e}") from e
         return record["id"]
 
     async def search(
@@ -340,8 +356,9 @@ class KernelMemoryBackend(IMemoryBackend):
                 "memory.search", {"query": query, "top_k": top_k}
             )
         except Exception as e:
-            logger.warning("[KernelMemoryBackend.search] 调用失败降级 | error=%s", e)
-            return []
+            # 上抛：search 失败 ≠ 空结果（静默 [] 曾掩盖 capability 超时根因
+            # 半天，2026-08-19 e2e 实测）。空结果只来自内核真实返回的空列表。
+            raise RuntimeError(f"memory.search 调用失败: {e}") from e
         return self._map_kernel_results(result, memory_type)
 
     async def delete(self, user_id: str, memory_id: str | None = None) -> bool:

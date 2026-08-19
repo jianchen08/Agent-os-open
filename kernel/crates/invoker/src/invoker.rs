@@ -1040,13 +1040,50 @@ impl PluginInvokerImpl {
     /// 设置 Capability 路由器（启用 sidecar→内核反向调用）。
     ///
     /// 必须在 engine 创建后调用（路由器需要 engine 句柄）。
-    /// 之后新建的 MCP 客户端会自动带上路由器；已连接的客户端下次重连时生效。
+    /// 之后新建的 MCP 客户端会自动带上路由器；**已缓存的客户端直接废弃**
+    /// （kill + 移除，下次调用 respawn）——缓存命中路径不会重连，若保留
+    /// 旧实例，router 前 spawn 的 sidecar（如 boot 期 G2 存量校验窗口，
+    /// 见 agentos-kernel.rs 注册闸 G2 块与 set_router 的顺序）将以空
+    /// capabilities initialize 长存，插件反向调用（tool-executor/
+    /// service-registry）永远 KeyError（2026-08-19 e2e 实测 memory
+    /// 后端"未注入"根因）。
     pub fn set_router(&self, router: Arc<dyn CapabilityRouter>) {
         // sidecar：存 router，新建 MCP client 时带上（PluginScopedRouter）。
         // native：router 存此，execute 时包成 NativeHostServices 注入 ExecContext
         // （host 调 capability 经其走 router.handle）。
         // 一行接通两种 host_type 的 capability 反向调用。
         *self.router.write() = Some(router);
+
+        // 废弃全部已缓存 sidecar：它们 initialize 时拿到的 capabilities 集合
+        // 是旧 router 状态（可能为空）的快照，且永不重连。kill 是 best-effort
+        // （失败仅 debug 日志——respawn 时 is_alive 会走崩溃清理兜底）。
+        let invalidated: Vec<(String, Arc<tokio::sync::RwLock<McpClient>>)> =
+            self.mcp_clients.write().drain().collect();
+        if invalidated.is_empty() {
+            return;
+        }
+        let kill = async move {
+            for (id, client) in invalidated {
+                if let Err(e) = client.write().await.kill().await {
+                    tracing::debug!(
+                        "set_router invalidate: best-effort kill of sidecar {id} failed: {e}"
+                    );
+                }
+            }
+        };
+        // 同步上下文（无 tokio runtime 的测试等）下无法 spawn 异步 kill：
+        // 缓存已清空（下次调用必然 respawn 新实例），旧进程交由 stdio 关闭/
+        // idle GC 兜底，宁可短暂冗余也不 panic。
+        match tokio::runtime::Handle::try_current() {
+            Ok(handle) => {
+                handle.spawn(kill);
+            }
+            Err(_) => {
+                tracing::debug!(
+                    "set_router: no tokio runtime, cached sidecars dropped without kill"
+                );
+            }
+        }
     }
 
     /// 注入生命周期钩子事件总线（旁路广播，可选）。

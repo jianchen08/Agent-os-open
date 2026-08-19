@@ -335,6 +335,11 @@ class MemoryTool:
                 tags=tags,
                 source="memory_tool",
             )
+            if not memory_id:
+                # 空 id = 后端未确认写入（降级/静默失败），不得报成功
+                return create_failure_result(
+                    "存储失败：记忆后端未返回 memory id（写入未确认，可能后端降级）"
+                )
             return create_success_result(
                 {"success": True, "memory_id": memory_id}
             )

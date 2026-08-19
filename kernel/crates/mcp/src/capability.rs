@@ -32,6 +32,10 @@ use crate::error::McpError;
 /// `/api/v1/plugins/{id}/config` 配置面）。
 pub const STANDARD_CAPABILITIES: &[&str] = &[
     "pipeline-executor",
+    // pipeline-state.list：router 静态路由（capability_router.rs）但此前
+    // 不在声明面——sidecar initialize 拿不到句柄，task_manage 的 state
+    // 聚合读桥永远 KeyError（2026-08-19 e2e 实测）。
+    "pipeline-state",
     "tenant-context",
     "event-bus",
     "metrics",

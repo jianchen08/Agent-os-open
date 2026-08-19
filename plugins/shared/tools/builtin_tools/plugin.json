@@ -86,6 +86,92 @@
         "description": "代码/文件搜索",
         "render": {
           "card": "search"
+        },
+        "input_schema": {
+          "properties": {
+            "case_sensitive": {
+              "default": false,
+              "description": "是否区分大小写",
+              "type": "boolean"
+            },
+            "context_lines": {
+              "default": 2,
+              "description": "上下文行数",
+              "type": "integer"
+            },
+            "file_pattern": {
+              "description": "文件过滤模式（如 *.py）",
+              "type": "string"
+            },
+            "max_depth": {
+              "default": 20,
+              "description": "最大递归深度",
+              "type": "integer"
+            },
+            "max_results": {
+              "default": 100,
+              "description": "最大结果数",
+              "type": "integer"
+            },
+            "path": {
+              "default": ".",
+              "description": "搜索起始路径",
+              "type": "string"
+            },
+            "query": {
+              "description": "搜索关键词或正则表达式",
+              "type": "string"
+            },
+            "search_type": {
+              "default": "text",
+              "description": "搜索类型：text=内容搜索，filename=文件名搜索",
+              "enum": [
+                "text",
+                "filename"
+              ],
+              "type": "string"
+            },
+            "use_regex": {
+              "default": false,
+              "description": "是否使用正则表达式",
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "query"
+          ],
+          "type": "object"
+        },
+        "output_schema": {
+          "type": "object",
+          "properties": {
+            "results": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "file_path": {
+                    "type": "string"
+                  },
+                  "line_number": {
+                    "type": "integer"
+                  },
+                  "content": {
+                    "type": "string"
+                  }
+                }
+              }
+            },
+            "count": {
+              "type": "integer"
+            },
+            "truncated": {
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "results"
+          ]
         }
       },
       {
