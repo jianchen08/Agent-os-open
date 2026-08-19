@@ -22,9 +22,10 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
 use crate::types::{
-    Branch, ErrorPolicy, ExecutionRecord, MemoryRecord, MessageRecord, PipelineRunSummary,
-    PluginContext, PluginError, PluginResult, RouteType, RunRecord, RunStatus, SessionRecord,
-    StorageError, ToolCategory, ToolExecutionResult, ToolSource, TraceEntry, UserRecord,
+    Branch, ErrorPolicy, ExecutionRecord, MemoryRecord, MessageRecord, PipelineRunInfo,
+    PipelineRunSummary, PluginContext, PluginError, PluginResult, RouteType, RunRecord, RunStatus,
+    SessionRecord, StorageError, ToolCategory, ToolExecutionResult, ToolSource, TraceEntry,
+    UserRecord,
 };
 
 // ── 1. 插件基础 Trait ───────────────────────────────────────────
@@ -1461,6 +1462,18 @@ pub trait StorageBackend: Send + Sync {
         _pipeline_id: &str,
         _tenant_id: &str,
     ) -> Result<Vec<RunRecord>, StorageError> {
+        Ok(Vec::new())
+    }
+
+    /// 管道运行快照列表（runs × message_slots × pipeline_sessions × pipeline_run_summaries
+    /// 联结，按 started_at 倒序）。调试中心「会话/执行记录」的会话维度数据源，
+    /// 与 `GET /api/v1/pipelines/runs` 同查询。默认空（mock/null store），SqliteStore 覆盖。
+    async fn list_pipelines(
+        &self,
+        _tenant_id: &str,
+        _status: Option<&str>,
+        _limit: u32,
+    ) -> Result<Vec<PipelineRunInfo>, StorageError> {
         Ok(Vec::new())
     }
 

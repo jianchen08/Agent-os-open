@@ -526,6 +526,10 @@ impl SqliteStore {
         conn.execute_batch("PRAGMA journal_mode=WAL;")?;
         conn.execute_batch(DDL)?;
         migrate_drop_legacy_message_slots(conn)?;
+        // 零兼容：0.2 消息真值 = message_slots ⨝ blobs（见文件头注释），旧 messages
+        // 投影表已退役。存量库会残留建不建都不管的空表，DROP 掉以保证 db_admin
+        // 表清单与后端实际读写一一对应（调试中心数据库管理页审查结论 2026-08-19）。
+        conn.execute("DROP TABLE IF EXISTS messages", [])?;
         migrate_add_tenant_id(conn)?;
         migrate_add_run_pipeline_id(conn)?;
         info!("SQLite four-table store initialized");
@@ -2526,6 +2530,16 @@ impl StorageBackend for SqliteStore {
             rusqlite::params![pipeline_id, run_id],
         )?;
         Ok(())
+    }
+
+    /// 管道运行快照列表（trait 面）：委托 list_pipelines_inner（同 HTTP /pipelines/runs）。
+    async fn list_pipelines(
+        &self,
+        tenant_id: &str,
+        status: Option<&str>,
+        limit: u32,
+    ) -> Result<Vec<PipelineRunInfo>, StorageError> {
+        self.list_pipelines_inner(tenant_id, status, limit)
     }
 
     async fn list_runs_by_pipeline(

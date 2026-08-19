@@ -1085,6 +1085,33 @@ impl CapabilityRouter for KernelCapabilityRouter {
                 Ok(Value::Array(rows))
             }
 
+            // ── pipeline-runs 域（runs 快照列表，调试中心会话/执行记录数据源）──
+            // 与 GET /api/v1/pipelines/runs 同查询（list_pipelines_inner 四表联结），
+            // 按 started_at 倒序；插件侧（channel_api）以此为「有执行记录的会话」清单。
+            ("pipeline-runs", "list") => {
+                let tenant_id = params
+                    .get("tenant_id")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("default");
+                let status = params
+                    .get("status")
+                    .and_then(|v| v.as_str())
+                    .filter(|s| !s.is_empty());
+                let limit = params
+                    .get("limit")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(100)
+                    .min(500) as u32;
+                let rows = self
+                    .store
+                    .as_ref()
+                    .ok_or_else(|| srv_err("pipeline-runs.list: kernel store not injected".into()))?
+                    .list_pipelines(tenant_id, status, limit)
+                    .await
+                    .map_err(|e| srv_err(format!("pipeline-runs.list: {e}")))?;
+                serde_json::to_value(rows).map_err(|e| srv_err(format!("encode: {e}")))
+            }
+
             // ── tenant-context：多租户上下文查询（F-TENANT-B-KERNEL）──
             // Python 侧 `plugins/shared/tenant_data.py` 经此能力取当前租户决定数据根；
             // 无活跃 task_local 时回退 "default"（与 Python 侧回退一致，永不报错）。
