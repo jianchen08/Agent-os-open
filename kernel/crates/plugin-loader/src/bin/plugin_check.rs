@@ -1,3 +1,4 @@
+// @feature: FP-0.2.一 插件协议·plugin_check 契约校验引擎 | @ci: rust-test
 //! `plugin_check` —— 插件契约校验引擎（闸0·开发期 / 闸1·注册期共用语义）。
 //!
 //! 用法：

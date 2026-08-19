@@ -2357,13 +2357,20 @@ mod tests {
             "tool output should be returned: {:?}",
             tr[0]
         );
-        // messages 重建：assistant tool_calls + tool 结果消息。
-        let msgs = pr
+        // messages 重建：assistant tool_calls + tool 结果消息（op-based state-update
+        // 协议——tool_core native 以 `{"_ops":[{op:"set",msg}]}` 增量下发，非裸数组）。
+        let msgs_ops = pr
             .state_updates
             .get("messages")
+            .and_then(|v| v.get("_ops"))
             .and_then(|v| v.as_array())
             .cloned();
-        let msgs = msgs.expect("messages should be rebuilt");
+        let msgs_ops = msgs_ops.expect("messages should be rebuilt (op-based _ops)");
+        assert!(!msgs_ops.is_empty(), "新增消息应有 _ops 增量");
+        let msgs: Vec<&Value> = msgs_ops
+            .iter()
+            .filter_map(|op| op.get("msg"))
+            .collect();
         assert!(msgs
             .iter()
             .any(|m| m["role"] == "assistant" && m["tool_calls"].is_array()));

@@ -21,6 +21,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 import re
 import sys
 from pathlib import Path
@@ -43,6 +44,10 @@ EXCLUDE_DIRS = {
     "target",
     "site-packages",
     ".git",
+    # 工具生成/同步的工作区副本（非产品测试，扫进会把未标记数虚高）
+    ".ai_workspaces",
+    ".zcode",
+    ".zcode_e2e",
 }
 
 # 标记解析（兼容 @feature: / @feature 、| 分隔、注释包裹等格式）
@@ -99,27 +104,35 @@ def find_test_files() -> list[Path]:
     def excluded(p: Path) -> bool:
         return any(part in EXCLUDE_DIRS for part in p.parts)
 
+    def iter_pruned(root: Path):
+        """带剪枝的递归文件枚举——`rglob` 会钻进 dsh_adapter 的递归 node_modules
+        无限卡死（与此前迁移脚本同根因）；此处遍历时即剪枝 EXCLUDE_DIRS。"""
+        for dirpath, dirnames, filenames in os.walk(root):
+            dirnames[:] = [d for d in dirnames if d not in EXCLUDE_DIRS]
+            for fn in filenames:
+                yield Path(dirpath) / fn
+
     # Python test_*.py（仓库内）
-    for p in ROOT.rglob("test_*.py"):
-        if not excluded(p):
+    for p in iter_pruned(ROOT):
+        if p.name.startswith("test_") and p.suffix == ".py" and not excluded(p):
             files.append(p)
 
     # 前端 *.test.ts(x)（限定 frontend 下，避免扫到 node_modules）
     fe_root = ROOT / "frontend"
     if fe_root.exists():
-        for p in fe_root.rglob("*.test.*"):
-            if p.suffix in (".ts", ".tsx") and not excluded(p):
+        for p in iter_pruned(fe_root):
+            if ".test." in p.name and p.suffix in (".ts", ".tsx") and not excluded(p):
                 files.append(p)
 
     # Rust tests/*.rs（kernel 下）
     kernel = ROOT / "kernel"
     if kernel.exists():
-        for p in kernel.rglob("tests/*.rs"):
-            if not excluded(p):
+        for p in iter_pruned(kernel):
+            if "tests" in p.parts and p.suffix == ".rs" and not excluded(p):
                 files.append(p)
         # Rust src 内嵌 #[cfg(test)] 的 .rs（按文件计，不展开每个 #[test]）
-        for p in kernel.rglob("src/*.rs"):
-            if excluded(p):
+        for p in iter_pruned(kernel):
+            if "src" not in p.parts or p.suffix != ".rs" or excluded(p):
                 continue
             try:
                 if "#[cfg(test)]" in p.read_text(encoding="utf-8", errors="replace"):

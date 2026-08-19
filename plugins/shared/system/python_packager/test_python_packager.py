@@ -1,4 +1,4 @@
-# @feature: 插件包管理体系 P1.5 语言域装载插件（python_packager=uv） | @ci: python-coverage
+# @feature: FP-0.2.一 第三方插件协议·python_packager 装载 | @ci: python-coverage
 """python_packager 装载插件测试（uv 后端）：真装真卸 + fail-closed 负例。
 
 覆盖：
