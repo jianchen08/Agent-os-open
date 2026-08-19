@@ -875,7 +875,8 @@ async def get_execution_record_sessions(_user: dict = Depends(require_auth)) -> 
             or run.get("thread_id") or pid[:12],
             "created_at": run.get("started_at") or "",
             "updated_at": run.get("ended_at") or run.get("started_at") or "",
-            "record_count": state.get("message_count", 0),
+            # state 摘要缺失时置 None（前端隐藏"0 条"误导显示）而非 0
+            "record_count": state.get("message_count"),
             "thread_id": run.get("thread_id"),
             "run_status": run.get("status"),
         })

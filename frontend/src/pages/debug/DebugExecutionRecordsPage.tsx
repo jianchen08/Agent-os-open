@@ -173,7 +173,8 @@ export function DebugExecutionRecordsPage({ embedded }: { embedded?: boolean } =
         <option value="">全部会话</option>
         {sessions.map((s) => (
           <option key={s.id} value={s.id}>
-            {s.title || s.id} ({s.record_count} 条)
+            {s.title || s.id}
+            {s.record_count != null ? ` (${s.record_count} 条)` : ''}
           </option>
         ))}
       </select>

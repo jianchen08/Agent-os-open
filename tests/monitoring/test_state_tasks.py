@@ -9,13 +9,24 @@
 
 from __future__ import annotations
 
+import importlib.util
 import os
+from pathlib import Path
 
 import pytest
 
 pytestmark = pytest.mark.unit  # 0.2 TDD 分层：单元测试
 
-import server as monitoring_server
+# 按路径直接加载 monitoring/server.py 为独立模块名——裸名 ``import server`` 依赖
+# sys.path 顺序，会被先收集的其它插件目录（channel_api 也有 server.py）抢先解析
+# （pytest 会话启动即导入全部 conftest，目录插入顺序不保证 monitoring 在前）。
+# conftest 仍负责把 monitoring 目录加进 sys.path（server.py 内部的平铺导入需要）。
+_SERVER_PY = (
+    Path(__file__).resolve().parents[2] / "plugins" / "shared" / "system" / "monitoring" / "server.py"
+)
+_spec = importlib.util.spec_from_file_location("monitoring_server_under_test", _SERVER_PY)
+monitoring_server = importlib.util.module_from_spec(_spec)
+_spec.loader.exec_module(monitoring_server)
 
 
 class _FakeCap:

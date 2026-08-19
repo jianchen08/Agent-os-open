@@ -71,9 +71,11 @@ export function DebugSessionsPage({ embedded }: { embedded?: boolean } = {}) {
                   <div className="text-muted-foreground mt-2 space-y-1 text-xs">
                     <div className="flex items-center gap-2">
                       <span>记录数：</span>
-                      <span className="bg-primary/10 text-primary rounded-full px-2 py-0.5 text-xs">
-                        {session.record_count}
-                      </span>
+                      {session.record_count != null && (
+                        <span className="bg-primary/10 text-primary rounded-full px-2 py-0.5 text-xs">
+                          {session.record_count}
+                        </span>
+                      )}
                     </div>
                     <div>创建：{new Date(session.created_at).toLocaleString()}</div>
                     <div>更新：{new Date(session.updated_at).toLocaleString()}</div>

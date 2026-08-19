@@ -38,6 +38,12 @@ _FAKE_RUNS = [
         "status": "completed", "started_at": "2026-08-19T08:00:00Z",
         "ended_at": "2026-08-19T08:05:00Z",
     },
+    {
+        # 无 state 摘要的会话：record_count 应为 None（前端隐藏"0 条"误导）
+        "run_id": "run-3", "pipeline_id": "pipeC", "thread_id": "thread-c",
+        "status": "completed", "started_at": "2026-08-19T07:00:00Z",
+        "ended_at": "2026-08-19T07:01:00Z",
+    },
 ]
 
 _FAKE_STATES = [
@@ -111,9 +117,9 @@ async def test_sessions_assembled_from_runs_and_states():
     _install_fake_providers()
     result = await rm.get_execution_record_sessions()
     sessions = result["sessions"]
-    # pipeA 两次 run 去重为一条；按 started_at 倒序 pipeB 在前
-    assert [s["id"] for s in sessions] == ["pipeB", "pipeA"]
-    assert result["total"] == 2
+    # pipeA 两次 run 去重为一条；按 started_at 倒序 pipeB 在前；pipeC 无 state
+    assert [s["id"] for s in sessions] == ["pipeB", "pipeA", "pipeC"]
+    assert result["total"] == 3
     pipe_a = sessions[1]
     assert pipe_a["title"] == "灵汐"  # state.display_name 优先
     assert pipe_a["record_count"] == 2  # state.message_count
@@ -121,6 +127,8 @@ async def test_sessions_assembled_from_runs_and_states():
     assert pipe_a["run_status"] == "running"  # 最新 run 状态
     # pipeB 无 display_name → 回退 thread_id
     assert sessions[0]["title"] == "thread-b"
+    # pipeC 无 state 摘要 → record_count None（而非误导性的 0）
+    assert sessions[2]["record_count"] is None
 
 
 async def test_records_assemble_message_snapshot_per_session():

@@ -30,7 +30,8 @@ export interface SessionInfo {
   title: string
   created_at: string
   updated_at: string
-  record_count: number
+  /** 消息条数（state 摘要缺失时为 null，前端隐藏显示） */
+  record_count: number | null
 }
 
 /**
