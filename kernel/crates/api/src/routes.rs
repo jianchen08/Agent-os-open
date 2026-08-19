@@ -104,12 +104,12 @@ pub struct AppState {
     /// 安装触发模型 L1：已启用插件 id 集合（schema 聚合据此过滤 contributes/configs）。
     /// disabled 插件的 manifest 仍在 manifests（用户能看到装了什么），但不出口 contributes。
     pub enabled_plugin_ids: Arc<RwLock<std::collections::HashSet<String>>>,
-    /// 阶段3 遗留：插件根目录映射（plugin_id → 插件根目录绝对路径）。
+    /// 插件根目录映射（plugin_id → 插件根目录绝对路径）。
     ///
     /// 由启动期 loader 扫描结果填充（或测试直接构造）。HTTP dispatcher 据此把
     /// `/ext/{plugin_id}/assets/{*path}` 解析到 `<plugin_root>/web/<path>`，
     /// 直接读文件返回，免去为每个子资源单独声明 http_endpoints。
-    /// 空 map = 无插件托管静态资源（兼容旧行为，仅静态路由 + dispatcher）。
+    /// 空 map = 无插件托管静态资源（仅静态路由 + dispatcher）。
     pub plugin_dirs: Arc<HashMap<String, PathBuf>>,
     /// 统一配置中心（统一配置加载方案 TDD-1/2/3 的入口）。
     ///
@@ -370,7 +370,7 @@ impl AppState {
         }
     }
 
-    /// 阶段3 遗留：注入插件根目录映射（plugin_id → 插件目录绝对路径）。
+    /// 注入插件根目录映射（plugin_id → 插件目录绝对路径）。
     ///
     /// 启用后，HTTP dispatcher 把 `/ext/{plugin_id}/assets/{*path}` 解析到
     /// `<plugin_dir>/web/<path>` 直读文件返回。由启动期 loader 扫描结果填充。
@@ -1555,11 +1555,8 @@ pub async fn get_plugin_config_with_etag(
 
 // ── 插件管理端点（/api/v1/plugins）——loader 监管能力（内核职责）──
 //
-// 转正说明（task_kernel_cleanup_and_split 任务 2）：由 compat_routes.rs 平移而来，
-// 实现深度绑定 0.2 运行态（manifests / enabled_plugin_ids / default_profile.yaml），
-// 非空 stub。GET /api/v1/plugins（原 /api/v1/plugins/status）与
-// PUT /api/v1/plugins/{id}/enabled 保留转正；history/reload* 4 个死端点已删除
-// （无任何前端/客户端消费者，见任务文档死代码清单）。
+// 现存端点：GET /api/v1/plugins（状态清单）与
+// PUT /api/v1/plugins/{id}/enabled（启停，写 default_profile.yaml + 热更新）。
 
 /// G8 排空 + 自退出共享实现（`system_restart_handler` 与 plugin_watcher 的
 /// cdylib 变更自动重启共用——剩余项清仓批次 A3 抽取，watcher 经注入的回调调用，
