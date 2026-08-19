@@ -2404,10 +2404,7 @@ mod tests {
             .cloned();
         let msgs_ops = msgs_ops.expect("messages should be rebuilt (op-based _ops)");
         assert!(!msgs_ops.is_empty(), "新增消息应有 _ops 增量");
-        let msgs: Vec<&Value> = msgs_ops
-            .iter()
-            .filter_map(|op| op.get("msg"))
-            .collect();
+        let msgs: Vec<&Value> = msgs_ops.iter().filter_map(|op| op.get("msg")).collect();
         assert!(msgs
             .iter()
             .any(|m| m["role"] == "assistant" && m["tool_calls"].is_array()));

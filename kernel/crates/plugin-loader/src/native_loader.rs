@@ -13,7 +13,11 @@
 //! ## 安全要点
 //!
 //! - unsafe 仅在 dlopen + 指针还原（loader 内部），插件作者代码零 unsafe。
-//! - Library 句柄常驻 loader 生命周期；**生产不做原地热卸载**（Windows dlclose 坑）。
+//! - **永不 dlclose**：Library 句柄以 `ManuallyDrop` 持有，drop 阶段不释放——
+//!   Windows 上 `FreeLibrary` 卸载带 Rust 静态的 cdylib 会触发静态析构顺序错位，
+//!   产生 `STATUS_ACCESS_VIOLATION`（e2e 实测：测试 teardown drop NativePlugin →
+//!   `_lib` 释放 → 0xc0000005；`mem::forget` 验证后全绿）。句柄随进程退出由 OS 回收。
+//!   生产本就是进程级单例永不 drop；此设计让测试也遵守同一"不热卸载"契约，跨平台统一。
 //! - `catch_unwind` 包裹 execute，插件 panic 不拖垮内核（panic=abort 时直接终止进程，
 //!   那是预期行为——cdylib panic=abort 是跨边界标准做法）。
 
@@ -32,9 +36,10 @@ type CreateFn = unsafe extern "C" fn() -> *mut ();
 
 /// 一个已加载的原生插件实例：Library（保活）+ trait 对象。
 pub struct NativePlugin {
-    /// Library 句柄——保活，trait 对象的代码指向其内。
-    /// 永不单独释放（生产不做热卸载）。
-    _lib: Library,
+    /// Library 句柄——以 ManuallyDrop 持有，**drop 阶段刻意不释放**（见模块注释：
+    /// Windows 上 dlclose 带 Rust 静态的 cdylib 会 AV）。进程退出时由 OS 回收。
+    #[allow(dead_code)]
+    _lib: std::mem::ManuallyDrop<Library>,
     /// 插件构造出的 trait 对象。
     instance: Box<dyn PipelinePlugin>,
     /// 加载来源路径（调试/日志用）。
@@ -123,7 +128,7 @@ impl NativePluginLoader {
             })?;
 
         Ok(NativePlugin {
-            _lib: lib,
+            _lib: std::mem::ManuallyDrop::new(lib),
             instance,
             path: path.to_path_buf(),
         })
@@ -177,7 +182,8 @@ impl NativePluginLoader {
         }
     }
 
-    /// 卸载指定插件（从表移除，Arc 引用计数归零时 drop）。
+    /// 卸载指定插件（从表移除，Arc 引用计数归零时 drop；视为"逻辑卸载"——
+    /// cdylib 句柄按契约泄漏保活，物理卸载随进程退出由 OS 完成）。
     pub fn unload(&self, plugin_id: &str) -> Result<(), PluginError> {
         match self.loaded.write().remove(plugin_id) {
             Some(_) => {
