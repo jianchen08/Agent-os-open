@@ -8,6 +8,7 @@ floating-chat, files/capabilities。
 
 from __future__ import annotations
 
+import json
 import logging
 import sys
 import time
@@ -475,18 +476,51 @@ async def delete_project(project_id: str, _user: dict = Depends(require_auth)) -
 
 # ---------------------------------------------------------------------------
 # Users 路由 - /api/v1/users
+#
+# 2026-08-19 真实数据化：list/stats 经内核 db-admin.table_query 查 users 表
+# （透传调用方 Authorization 做读角色校验）。password 列绝不出口。
+# 变更类端点（create/update/delete）保持存根——用户管理走内核 user-admin 域。
 # ---------------------------------------------------------------------------
 users_router = APIRouter(prefix="/api/v1/users", tags=["用户管理"], dependencies=[Depends(require_auth)])
 
+# users 表中绝不出口的敏感列（含口令散列）
+_USER_SENSITIVE_COLUMNS = frozenset({"password", "password_hash"})
+
+
+def _user_row_to_api(row: dict[str, Any]) -> dict[str, Any]:
+    """users 表行 → 前端 User 形状（脱敏 + user_id → id 映射 + is_active 补齐）。"""
+    safe = {k: v for k, v in row.items() if k not in _USER_SENSITIVE_COLUMNS}
+    safe["id"] = safe.get("user_id") or safe.get("id") or ""
+    safe.setdefault("is_active", True)
+    return safe
+
 
 @users_router.get("", summary="获取用户列表")
-async def list_users(_user: dict = Depends(require_auth)) -> list[dict[str, Any]]:
-    return []
+async def list_users(
+    skip: int = 0,
+    limit: int = 100,
+    authorization: str = "",
+    _user: dict = Depends(require_auth),
+) -> list[dict[str, Any]]:
+    import kernel_reads  # noqa: PLC0415
+
+    result = await kernel_reads.query_table(
+        "users", limit=limit, offset=skip, authorization=authorization
+    )
+    return [_user_row_to_api(r) for r in result.get("rows", [])]
 
 
 @users_router.get("/stats", summary="获取用户统计")
-async def get_user_stats(_user: dict = Depends(require_auth)) -> dict[str, Any]:
-    return {"total_users": 0, "active_users": 0, "admin_count": 0}
+async def get_user_stats(authorization: str = "", _user: dict = Depends(require_auth)) -> dict[str, Any]:
+    import kernel_reads  # noqa: PLC0415
+
+    result = await kernel_reads.query_table("users", limit=500, authorization=authorization)
+    rows = result.get("rows", [])
+    return {
+        "total_users": len(rows),
+        "active_users": sum(1 for r in rows if r.get("is_active", 1) in (1, True)),
+        "admin_count": sum(1 for r in rows if r.get("role") == "admin"),
+    }
 
 
 @users_router.post("", summary="创建用户")
@@ -717,30 +751,135 @@ async def get_agent_call(execution_id: str, _user: dict = Depends(require_auth))
 
 # ---------------------------------------------------------------------------
 # Execution Records 路由 - /api/v1/execution
-# 数据来源：ExecutionRecordStorage（按 pipeline_run_id 分组的 YAML 持久化）。
+#
+# 2026-08-19 真实数据化：0.2 消息真值 = 内核 SQLite message_slots ⨝ blobs
+# （messages.list 能力，读时重建全文）。list/sessions/get 从内核拼装消息快照；
+# 内核能力不可用时降级空结构（HTTP 200 空载荷，前端契约不破坏）。
+# tree/children/group-summary 无前端消费方，保持空结构。
 # ---------------------------------------------------------------------------
+
 execution_router = APIRouter(prefix="/api/v1/execution", tags=["执行记录"], dependencies=[Depends(require_auth)])
 
-# 执行记录的 YAML 存储后端（ExecutionRecordStorage）已在 0.2 架构中废弃：
-# 内核 pipeline_loop 将消息/轨迹下沉到 SQLite（messages / traces / pipeline_checkpoints）。
-# 以下 handler 改为返回空结构，保持前端契约不破坏（HTTP 200 + 空载荷），
-# 待后续接入内核 messages/traces 能力后再恢复数据。
+# 全会话模式扫描的最近会话数（每会话一次内核能力调用，控制页面加载时延）
+_ALL_SESSIONS_SCAN = 30
+# 全会话模式每会话最多取的消息条数
+_PER_SESSION_MSG_LIMIT = 100
+# 单会话模式最多拉取的消息条数（超过此长度的会话只呈现最近这段）
+_SESSION_MSG_FETCH_LIMIT = 500
+
+
+def _message_to_record(msg: dict[str, Any], session_id: str) -> dict[str, Any]:
+    """内核 MessageRecord → 前端 ExecutionRecord（message_data = 拼装的消息快照）。
+
+    content_preview 为读时重建的全文（内核注释：字段名保留 preview 以稳接口形状）；
+    tool_calls_json/tool_result_json 在此解析为结构化对象。
+    """
+    role = msg.get("role") or "unknown"
+    tool_calls: Any = None
+    for key in ("tool_calls_json",):
+        raw = msg.get(key)
+        if raw:
+            try:
+                tool_calls = json.loads(raw)
+            except (TypeError, ValueError):
+                tool_calls = None
+    tool_result: Any = None
+    if msg.get("tool_result_json"):
+        try:
+            tool_result = json.loads(msg["tool_result_json"])
+        except (TypeError, ValueError):
+            tool_result = None
+    message_data: dict[str, Any] = {
+        "role": role,
+        "content": msg.get("content_preview") or "",
+        "tool_calls": tool_calls,
+        "tool_call_id": msg.get("tool_call_id"),
+        "reasoning_content": msg.get("reasoning_content"),
+        "tool_result": tool_result,
+        "error": msg.get("error"),
+    }
+    return {
+        "id": msg.get("message_id") or "",
+        "session_id": session_id,
+        "sequence": msg.get("seq_in_branch"),
+        "record_type": role,
+        "status": msg.get("status") or ("completed" if role in ("user", "assistant", "system") else None),
+        "depth": 0,
+        "message_data": message_data,
+        "created_at": msg.get("created_at") or "",
+        "run_id": msg.get("run_id"),
+    }
 
 
 @execution_router.get("/records", summary="获取执行记录列表")
 async def list_execution_records(
-    session_id: str | None = Query(default=None, description="按会话ID过滤"),
-    parent_record_id: str | None = Query(default=None, description="按父记录ID过滤"),
-    limit: int = Query(default=50, ge=1, le=500),
-    offset: int = Query(default=0, ge=0),
+    session_id: str | None = None,
+    parent_record_id: str | None = None,
+    limit: int = 50,
+    offset: int = 0,
     _user: dict = Depends(require_auth),
 ) -> dict[str, Any]:
-    return {"records": [], "total": 0, "session_id": session_id}
+    import kernel_reads  # noqa: PLC0415
+
+    del parent_record_id  # 内核消息模型为扁平槽位，无父子记录
+    if session_id:
+        msgs = await kernel_reads.list_messages(session_id, limit=_SESSION_MSG_FETCH_LIMIT)
+        records = [_message_to_record(m, session_id) for m in msgs]
+        records.reverse()  # seq 升序读入 → 最新在前呈现
+        return {
+            "records": records[offset:offset + limit],
+            "total": len(records),
+            "session_id": session_id,
+        }
+    # 全会话模式：最近 N 个会话的消息拼装为全局时间倒序列表
+    runs = await kernel_reads.list_pipeline_runs(limit=_ALL_SESSIONS_SCAN)
+    all_records: list[dict[str, Any]] = []
+    seen_pipelines: set[str] = set()
+    for run in runs:
+        pid = run.get("pipeline_id")
+        # 同管道多 run（重试/续跑）去重，只取一次消息快照
+        if not pid or pid in seen_pipelines:
+            continue
+        seen_pipelines.add(pid)
+        msgs = await kernel_reads.list_messages(pid, limit=_PER_SESSION_MSG_LIMIT)
+        all_records.extend(_message_to_record(m, pid) for m in msgs)
+    all_records.sort(key=lambda r: r.get("created_at") or "", reverse=True)
+    return {
+        "records": all_records[offset:offset + limit],
+        "total": len(all_records),
+        "session_id": None,
+    }
 
 
 @execution_router.get("/records/sessions", summary="获取有记录的会话列表")
 async def get_execution_record_sessions(_user: dict = Depends(require_auth)) -> dict[str, Any]:
-    return {"sessions": [], "total": 0}
+    import kernel_reads  # noqa: PLC0415
+
+    runs = await kernel_reads.list_pipeline_runs(limit=500)
+    states = {
+        row.get("pipeline_id"): row
+        for row in await kernel_reads.list_state_rows()
+        if row.get("pipeline_id")
+    }
+    sessions: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for run in runs:  # runs 按 started_at 倒序，同管道多 run 去重取最新
+        pid = run.get("pipeline_id")
+        if not pid or pid in seen:
+            continue
+        seen.add(pid)
+        state = states.get(pid, {})
+        sessions.append({
+            "id": pid,
+            "title": state.get("display_name") or state.get("name")
+            or run.get("thread_id") or pid[:12],
+            "created_at": run.get("started_at") or "",
+            "updated_at": run.get("ended_at") or run.get("started_at") or "",
+            "record_count": state.get("message_count", 0),
+            "thread_id": run.get("thread_id"),
+            "run_status": run.get("status"),
+        })
+    return {"sessions": sessions, "total": len(sessions)}
 
 
 @execution_router.get("/records/group-summary", summary="获取记录分组概要")
@@ -774,6 +913,20 @@ async def get_execution_record(
     record_id: str,
     _user: dict = Depends(require_auth),
 ) -> dict[str, Any]:
+    import kernel_reads  # noqa: PLC0415
+
+    # message_id 全局无索引：在最近 N 个会话的消息快照中线性查找
+    runs = await kernel_reads.list_pipeline_runs(limit=_ALL_SESSIONS_SCAN)
+    seen_pipelines: set[str] = set()
+    for run in runs:
+        pid = run.get("pipeline_id")
+        if not pid or pid in seen_pipelines:
+            continue
+        seen_pipelines.add(pid)
+        msgs = await kernel_reads.list_messages(pid, limit=_PER_SESSION_MSG_LIMIT)
+        for msg in msgs:
+            if msg.get("message_id") == record_id:
+                return _message_to_record(msg, pid)
     return {"id": record_id, "session_id": "", "message_data": {}, "created_at": ""}
 
 

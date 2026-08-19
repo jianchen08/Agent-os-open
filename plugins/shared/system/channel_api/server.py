@@ -75,6 +75,44 @@ async def _on_load(params: dict[str, Any]) -> None:
         set_state_reader(_read_state_rows)
     except Exception as exc:  # noqa: BLE001 — 注入失败降级（回退路径）
         logger.warning("[channel_api] workspace_service state reader 注入失败: %s", exc)
+
+    # 调试中心数据链（2026-08-19）：execution/users 域真实数据 = 内核只读能力
+    # （messages.list / pipeline-runs.list / db-admin.table_query），经 kernel_reads
+    # 桥接注入；能力未就绪时 handler 降级空载荷（前端契约不破坏）。
+    try:
+        import kernel_reads  # noqa: PLC0415
+
+        async def _kr_list_pipeline_runs(status: str | None = None, limit: int = 100):
+            handle = plugin.get_capability("pipeline-runs")
+            return await handle.call("list", {"status": status or "", "limit": int(limit)})
+
+        async def _kr_list_messages(pipeline_id: str, limit: int | None = None):
+            params: dict[str, Any] = {"pipeline_id": pipeline_id}
+            if limit is not None:
+                params["limit"] = int(limit)
+            handle = plugin.get_capability("messages")
+            return await handle.call("list", params)
+
+        async def _kr_list_state_rows():
+            handle = plugin.get_capability("pipeline-state")
+            rows = await handle.call("list", {})
+            return rows if isinstance(rows, list) else []
+
+        async def _kr_query_table(
+            table: str, limit: int = 50, offset: int = 0, authorization: str = ""
+        ):
+            params: dict[str, Any] = {"table": table, "limit": int(limit), "offset": int(offset)}
+            if authorization:
+                params["_authorization"] = authorization
+            handle = plugin.get_capability("db-admin")
+            return await handle.call("table_query", params)
+
+        kernel_reads.set_provider("pipeline-runs", _kr_list_pipeline_runs)
+        kernel_reads.set_provider("messages", _kr_list_messages)
+        kernel_reads.set_provider("pipeline-state", _kr_list_state_rows)
+        kernel_reads.set_provider("db-admin", _kr_query_table)
+    except Exception as exc:  # noqa: BLE001 — 注入失败降级（handler 返回空结构）
+        logger.warning("[channel_api] kernel_reads provider 注入失败: %s", exc)
     try:
         # 尝试导入 app 模块以检查可用性
         # 注意：完整 FastAPI 应用初始化需要数据库等外部依赖
@@ -400,18 +438,29 @@ async def _handle_users_domain(
     method: str,
     raw_body: str,
     query: dict[str, str],
+    headers: dict[str, str] | None = None,
     _user: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """users 域分发：/ext/channel_api/users/** → routes_missing 的 users 路由业务函数（全 stub）。
+    """users 域分发：/ext/channel_api/users/** → routes_missing 的 users 路由业务函数。
 
     caller 身份由 ``http_handle`` 经 ``_resolve_caller`` 解析后透传（``_user`` 含
     sub/role）。管理员端点（create_user / update_role / update_active / delete_user）
-    显式做垂直越权检查：非 admin → 403。
+    显式做垂直越权检查：非 admin → 403。list/stats 经内核 db-admin 能力查 users
+    表（2026-08-19 真实数据化），透传调用方 Authorization 供内核做读角色校验。
     """
     import routes_missing as rm  # noqa: PLC0415
     from fastapi import HTTPException  # noqa: PLC0415
 
     caller = _user or {}
+    h = headers or {}
+    authorization = h.get("Authorization") or h.get("authorization") or ""
+
+    def _qint(key: str, default: int) -> int:
+        try:
+            return int(query[key]) if key in query else default
+        except (TypeError, ValueError):
+            return default
+
     prefix = "/ext/channel_api/users"
     if not path.startswith(prefix):
         return _ok(_json_response({"error": "not a users path", "path": path}, 404))
@@ -420,9 +469,11 @@ async def _handle_users_domain(
     try:
         # GET "" (list) / GET "/stats" / GET|PUT "/settings" 不带 user_id
         if sub in ("", "/") and method == "GET":
-            return _ok(_json_response(await rm.list_users()))
+            return _ok(_json_response(await rm.list_users(
+                skip=_qint("skip", 0), limit=_qint("limit", 100), authorization=authorization,
+            )))
         if sub == "/stats" and method == "GET":
-            return _ok(_json_response(await rm.get_user_stats()))
+            return _ok(_json_response(await rm.get_user_stats(authorization=authorization)))
         if sub == "/settings" and method == "GET":
             return _ok(_json_response(await rm.get_user_settings()))
         if sub == "/settings" and method == "PUT":
@@ -1778,7 +1829,8 @@ async def http_handle(
     # ── users 域（含管理员端点，透传真实 caller 身份做垂直越权检查）──
     if path.startswith("/ext/channel_api/users"):
         return await _handle_users_domain(
-            path, method, raw_body, q, _user=_resolve_caller(headers or {})
+            path, method, raw_body, q, headers=headers or {},
+            _user=_resolve_caller(headers or {})
         )
 
     # ── sessions 域 ──
