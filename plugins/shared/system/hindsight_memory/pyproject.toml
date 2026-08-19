@@ -1,0 +1,18 @@
+[project]
+name = "agentos-plugin-hindsight-memory-service"
+version = "1.0.0"
+description = "Lingxi AgentOS 0.2 plugin — hindsight_memory_service（uv 单轨迁移样板；双 venv 设计见 requirements.txt）"
+requires-python = ">=3.11"
+dependencies = [
+    "agentos-plugin-sdk>=0.2.0",
+    # sidecar 客户端面：hindsight_client 是纯 HTTP 客户端（aiohttp+pydantic，
+    # 无 mcp 依赖），与 SDK 的 mcp>=2.0,<3 同 venv 共存无冲突。
+    # hindsight-api 服务器栈（fastmcp→mcp 1.x + pg0-embedded）与 mcp 2.x 互斥，
+    # 装在第二个 venv .venv-hindsight（见 requirements.txt）。
+    "hindsight-client>=0.9.0,<0.10",
+]
+
+# 本地 SDK 源映射（uv lock 解析必需——agentos-plugin-sdk 不在任何 registry）：
+# editable 链接 plugins/sdk/src 源码目录（判据 2 案 A）。
+[tool.uv.sources]
+agentos-plugin-sdk = { path = "../../../sdk", editable = true }

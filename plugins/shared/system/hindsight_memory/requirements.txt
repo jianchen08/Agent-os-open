@@ -1,10 +1,19 @@
-# Hindsight memory sidecar dependencies.
+# Hindsight API 服务器子进程专用 venv（.venv-hindsight）依赖清单。
 #
-# 真实架构:hindsight-all-slim 是「客户端 + 服务器」分离设计:
-# - hindsight-api (main 入口) 启动 HTTP 服务器,内部用 pg0 嵌入式 PostgreSQL
-# - hindsight_client.Hindsight(base_url) 是 HTTP 客户端,aretain/arecall 调服务器
+# 本插件是「双 venv」设计（mcp 1.x/2.0 生态互斥的正解）：
+# - .venv          —— sidecar 本体：AgentOS SDK（mcp>=2.0,<3）+ hindsight-client（本文件不管，
+#                     见 pyproject.toml；invoker 双标志门槛据此选它启动 server.py）。
+# - .venv-hindsight —— server.py on_load auto-spawn 的 hindsight-api 子进程：
+#     hindsight_api.main（uvicorn HTTP + pg0 嵌入式 PostgreSQL），其 fastmcp 栈要求
+#     mcp<2.0（fastmcp-slim[client,server]→mcp>=1.24,<2.0），与 SDK 的 mcp>=2 互斥，
+#     故必须独立 venv，且版本按下述锁定防止 uv 解到互斥新版。
 #
-# 本 sidecar 在 on_load 时启动 hindsight-api 子进程 + 创建客户端连接。
-# 包均懒导入(on_load 内 try/except),缺失时 sidecar 降级不崩溃。
-hindsight-all-slim>=0.9.0          # 客户端 + API 服务器(hindsight_client + hindsight_api.main)
-hindsight-api-slim[embedded-db]>=0.9.0  # pg0 嵌入式 PostgreSQL 扩展(零外部 DB)
+# 版本=原自建 .venv（2026-08-19 批 C 前）pip freeze 实测锁定：
+#   - hindsight-api-slim 0.9.1（hindsight_api.main 入口）
+#   - fastmcp 3.4.7 → fastmcp-slim[client,server]==3.4.7 → mcp 1.29.0
+#   - pg0-embedded 0.15.1（[embedded-db] extra，零外部 PostgreSQL）
+#
+# 重建：uv venv .venv-hindsight --python 3.12 && uv pip install -r requirements.txt
+# （其余传递依赖由 resolver 自由解析，与原 venv 的逐包对照记录见迁移方案 §十二）
+hindsight-api-slim[embedded-db]==0.9.1
+fastmcp==3.4.7

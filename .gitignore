@@ -178,6 +178,8 @@ kernel/schema_tmp.json
 
 # uv（python 包装载插件 python_packager）sidecar venv 不入库
 .venv/
+# hindsight_memory 第二 venv（API 服务器栈，mcp 1.x 与 SDK 的 mcp 2.x 互斥故独立）
+.venv-hindsight/
 
 # e2e 产物 token 文件（已过期凭据物证，不入库）
 .e2e_token_*

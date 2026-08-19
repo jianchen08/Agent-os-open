@@ -628,17 +628,23 @@ async def _on_load(params: dict[str, Any]) -> None:
             logger.info("[hindsight] 复用既有 hindsight-api 服务 %s", base_url)
         else:
             # 启动 hindsight-api 服务器子进程(pg0 嵌入式 PG + uvicorn HTTP)
-            # 用 hindsight 专用 venv 的 python 起子进程：venv 内 fastmcp 解析到其
-            # 匹配的 mcp 1.x（request_ctx 等），与宿主 sidecar 的 AgentOS SDK
-            # （mcp>=2.0,<3）完全隔离——mcp 1.x/2.0 生态互斥问题正解在此，而非
-            # 切内核记忆表保底或 shim 系统环境（2026-08-19 用户纠正）。
-            # venv 路径：插件目录下 .venv（uv 创建，gitignore 不入库）。
-            _venv_python = os.path.join(_THIS_DIR, ".venv", "Scripts", "python.exe")
+            # 用 hindsight 专用 venv（.venv-hindsight）的 python 起子进程：venv 内
+            # fastmcp 解析到其匹配的 mcp 1.x（request_ctx 等），与宿主 sidecar 的
+            # AgentOS SDK（mcp>=2.0,<3）完全隔离——mcp 1.x/2.0 生态互斥问题正解
+            # 在此，而非切内核记忆表保底或 shim 系统环境（2026-08-19 用户纠正）。
+            # 2026-08-19 批 C 后为「双 venv」：.venv=SDK 轨（invoker 启动 server.py
+            # 用），.venv-hindsight=API 服务器栈（requirements.txt 锁版本）。
+            _venv_python = os.path.join(_THIS_DIR, ".venv-hindsight", "Scripts", "python.exe")
+            if not os.path.isfile(_venv_python):
+                # Unix 布局回退探测（与 invoker resolve_sidecar_command 同款双布局）
+                _unix_python = os.path.join(_THIS_DIR, ".venv-hindsight", "bin", "python")
+                if os.path.isfile(_unix_python):
+                    _venv_python = _unix_python
             if not os.path.isfile(_venv_python):
                 logger.error(
-                    "[hindsight] venv python 缺失（%s），hindsight-api 无法启动。"
-                    "创建方式：uv venv .venv && uv pip install "
-                    "'hindsight-all-slim>=0.9.0' 'hindsight-api-slim[embedded-db]>=0.9.0' fastmcp",
+                    "[hindsight] API 服务器 venv python 缺失（%s），hindsight-api 无法"
+                    "启动。创建方式：uv venv .venv-hindsight --python 3.12 && "
+                    "uv pip install -r requirements.txt（依赖清单见 requirements.txt）",
                     _venv_python,
                 )
                 raise RuntimeError("hindsight venv 未初始化")
