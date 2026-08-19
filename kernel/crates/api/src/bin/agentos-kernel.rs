@@ -152,6 +152,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         config_root.display()
     );
 
+    // 内核能力契约加载（2026-08-20 Part B：定义驱动入口校验 + schema 聚合的
+    // 单一真值源）。目录缺失 = 未启用（宽泛放行）；文件损坏 = fail-fast 拒启
+    // ——契约是校验器的眼睛，坏契约静默跳过等于校验器装瞎。
+    let capability_contracts: Arc<Vec<agentos_api::kernel_capabilities::KernelCapabilityContract>> =
+        Arc::new(
+            agentos_api::kernel_capabilities::load_contracts(
+                &config_root.join("kernel_capabilities"),
+            )
+            .unwrap_or_else(|e| panic!("内核能力契约文件加载失败（fail-closed）: {e}")),
+        );
+    info!(
+        target: "agentos-kernel",
+        namespaces = capability_contracts.len(),
+        "Loaded kernel capability contracts (definition-driven entry validation)"
+    );
+
     // 加载项目根 .env 到进程环境（config_root 的父目录）。
     // sidecar 子进程默认继承父进程环境变量（tokio Command 无 env_clear），
     // 这样 sidecar 能解析配置里的 ${API_KEY} 等占位符（ADR §4.3 secrets）。
@@ -703,7 +719,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             .with_handler_registry(handler_registry.clone())
             .with_grants_lookup(grants_lookup)
             .with_dynamic_tool_registrar(dynamic_registrar.clone())
-            .with_domain_broadcaster(domain_broadcaster),
+            .with_domain_broadcaster(domain_broadcaster)
+            .with_capability_contracts(capability_contracts.clone()),
     );
     invoker.set_router(router);
 
@@ -805,6 +822,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         None => state,
     };
     let state = state.with_http_handler(http_handler);
+    // 内核能力契约注入 AppState（/api/v1/schema 聚合透出——消费端同源）。
+    let state = state.with_kernel_capability_contracts(capability_contracts.clone());
     // 注入插件根目录映射，启用静态资源托管
     // （/ext/{plugin_id}/assets/{*path} → <plugin_dir>/web/<path> 直读）。
     // 插件只需在自己的目录下放 web/ 子目录即可被内核自动托管，无需声明 http_endpoints。
