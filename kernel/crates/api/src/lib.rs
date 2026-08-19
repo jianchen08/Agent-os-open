@@ -18,6 +18,7 @@ pub mod config_service;
 pub mod contract;
 pub mod error;
 pub mod http_dispatcher;
+pub mod kernel_capabilities;
 pub mod metrics;
 pub mod pipeline_loader;
 pub mod plugin_lifecycle;

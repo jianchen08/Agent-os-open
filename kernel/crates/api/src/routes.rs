@@ -51,6 +51,10 @@ pub struct SchemaResponse {
     /// P4/P5：各插件的 contributes 聚合（仅含声明 contributes 的插件）。
     /// 前端 ContributionRegistry 作为唯一真相源消费（ADR §3.4/§六）。
     pub plugin_contributes: Vec<serde_json::Value>,
+    /// 内核基础设施能力契约聚合（config/kernel_capabilities/*.json 透出）。
+    /// 与插件侧 plugin.json 契约同构：前端/调用方/入口校验消费同一份定义，
+    /// 不读代码副本（2026-08-20 Part B：单一真值源消除双轨漂移）。
+    pub kernel_capabilities: Vec<serde_json::Value>,
 }
 
 /// 应用状态——通过 Axum State 共享。
@@ -124,6 +128,10 @@ pub struct AppState {
     /// 只读端点 `GET /api/v1/plugins/contract-status` 消费；未接线 = 空账本
     /// （端点照常返回 manifest 派生的 not_covered 缺省）。
     pub contract_states: Arc<crate::contract::ContractLedger>,
+    /// 内核能力契约（config/kernel_capabilities/*.json）——schema 聚合透出用。
+    /// None = 未装配（契约目录缺失或测试装配；入口校验由 router 侧独立持有）。
+    pub kernel_capability_contracts:
+        Option<Arc<Vec<crate::kernel_capabilities::KernelCapabilityContract>>>,
 }
 
 impl AppState {
@@ -153,6 +161,7 @@ impl AppState {
             plugin_scopes: Arc::new(PluginScopeRegistry::new()),
             widget_bindings: None,
             contract_states: Arc::new(crate::contract::ContractLedger::new()),
+            kernel_capability_contracts: None,
         }
     }
 
@@ -182,6 +191,7 @@ impl AppState {
             plugin_scopes: Arc::new(PluginScopeRegistry::new()),
             widget_bindings: None,
             contract_states: Arc::new(crate::contract::ContractLedger::new()),
+            kernel_capability_contracts: None,
         }
     }
 
@@ -247,7 +257,18 @@ impl AppState {
             plugin_scopes: Arc::new(PluginScopeRegistry::new()),
             widget_bindings: None,
             contract_states: Arc::new(crate::contract::ContractLedger::new()),
+            kernel_capability_contracts: None,
         }
+    }
+
+    /// 注入内核能力契约（config/kernel_capabilities/*.json 加载物）：
+    /// /api/v1/schema 聚合透出（前端/调用方与入口校验同一真值源）。
+    pub fn with_kernel_capability_contracts(
+        mut self,
+        contracts: Arc<Vec<crate::kernel_capabilities::KernelCapabilityContract>>,
+    ) -> Self {
+        self.kernel_capability_contracts = Some(contracts);
+        self
     }
 
     /// 注入统一数据接口专用 SqliteStore 句柄（`/api/v1/db/*` 用）。
@@ -590,6 +611,20 @@ async fn build_schema(state: &AppState) -> SchemaResponse {
         })
         .collect();
 
+    // 内核基础设施能力契约透出（Part B：与插件 contributes 同构的聚合位）。
+    // 契约结构原样序列化（namespace/description/capabilities[].method +
+    // input_schema/output_schema）——前端/调用方与入口校验消费同一份定义。
+    let kernel_capabilities: Vec<serde_json::Value> = state
+        .kernel_capability_contracts
+        .as_ref()
+        .map(|contracts| {
+            contracts
+                .iter()
+                .map(|c| serde_json::to_value(c).unwrap_or_default())
+                .collect()
+        })
+        .unwrap_or_default();
+
     SchemaResponse {
         agents,
         pipelines,
@@ -597,6 +632,7 @@ async fn build_schema(state: &AppState) -> SchemaResponse {
         routes,
         plugin_configs,
         plugin_contributes,
+        kernel_capabilities,
     }
 }
 
@@ -1975,27 +2011,9 @@ pub async fn plugins_set_enabled_handler(
                         remove_plugin_bindings(bindings, &plugin_id);
                     }
                     registry.clear_plugin(&plugin_id);
-                    // G3：动态注册的持久化记录随禁用删除（动态注册生命周期 =
-                    // 插件启用周期；re-enable 后插件经 on_load/运行时自行重建）。
-                    if let Some(db) = &state.db {
-                        match db.delete_dynamic_tools_by_plugin(&plugin_id) {
-                            Ok(n) if n > 0 => {
-                                tracing::info!(
-                                    target: "plugin-enablement",
-                                    "plugin {} disabled: dropped {} dynamic tool registrations",
-                                    plugin_id, n
-                                );
-                            }
-                            Ok(_) => {}
-                            Err(e) => {
-                                tracing::warn!(
-                                    target: "plugin-enablement",
-                                    "plugin {} disabled but dynamic_tools cleanup failed: {}",
-                                    plugin_id, e
-                                );
-                            }
-                        }
-                    }
+                    // G3：动态注册随 scope/clear_plugin 结构性收回（dynamic_tools 表
+                    // 已于 2026-08-19 退役——动态注册是 state 域数据不落内核，
+                    // re-enable 后插件经 on_load/运行时自行重建）。
                 }
             }
             let restart_needed = false; // 双向即时生效（G1）

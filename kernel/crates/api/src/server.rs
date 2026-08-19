@@ -1227,9 +1227,10 @@ async fn stage_build_initial_state(
 
 /// 把自由 state overlay 并入 initial_state 顶层扁平键（GAP-1 阶段 1 合并点）。
 ///
-/// 防御语义（调用方 chat.send_handler 已做保留字校验，此处纵深防御）：
-/// - 引擎系统保留字（[`crate::chat_send_handler::RESERVED_STATE_KEYS`]）跳过，
-///   非 chat 入口的理论调用者无法覆写 message/pipeline_id 等系统字段；
+/// 防御语义（调用方 chat_send_handler 已做保留字校验，此处纵深防御）：
+/// - 引擎系统保留字（[`crate::kernel_capabilities::RESERVED_STATE_KEYS`]，
+///   契约文件锚定的单一真值源清单）跳过，非 chat 入口的理论调用者无法覆写
+///   message/pipeline_id 等系统字段；
 /// - `lineage.*` 已存在时跳过——lineage 是引擎出生写入的保护字段（与 messages
 ///   同级），后续轮次 overlay 不可覆写（防伪造父/根）。
 fn apply_state_overlay(initial_state: &mut serde_json::Value, overlay: &serde_json::Value) {
@@ -1240,7 +1241,7 @@ fn apply_state_overlay(initial_state: &mut serde_json::Value, overlay: &serde_js
         return;
     };
     for (k, v) in src {
-        if crate::chat_send_handler::RESERVED_STATE_KEYS.contains(&k.as_str()) {
+        if crate::kernel_capabilities::RESERVED_STATE_KEYS.contains(&k.as_str()) {
             continue;
         }
         if k.starts_with("lineage.") && obj.contains_key(k) {
@@ -4409,8 +4410,14 @@ mod tests {
         use agentos_session::router::PipelineDispatcher;
         let _ = dispatcher
             .dispatch_user_input(
-                "pid-32hex-inject", "u1", "嗨", "pid-32hex-inject",
-                "", None, None, "agentos",
+                "pid-32hex-inject",
+                "u1",
+                "嗨",
+                "pid-32hex-inject",
+                "",
+                None,
+                None,
+                "agentos",
             )
             .await;
         let got = sink.delivered.load(Ordering::SeqCst);

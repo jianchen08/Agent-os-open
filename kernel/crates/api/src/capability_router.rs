@@ -66,6 +66,10 @@ pub struct KernelCapabilityRouter {
     /// 域事件广播闭包（DSH hook 翻译：event-bus.emit 的域事件名单事件同步
     /// 广播，使 approval.created 等触达触发器订阅者）。None = 不广播。
     domain_broadcaster: Option<DomainBroadcaster>,
+    /// 内核能力契约（定义驱动入口校验，2026-08-20 Part B）：config/kernel_capabilities/
+    /// *.json 声明的 input_schema（含 pattern 形态）在本路由入口逐条执行——
+    /// G6 授权之后、派发之前。None = 未装配契约 → 宽泛放行（兼容旧装配/测试）。
+    capability_contracts: Option<Arc<Vec<crate::kernel_capabilities::KernelCapabilityContract>>>,
 }
 
 /// 域事件广播闭包：(event_name, tags) → 点对点投递给声明 domain_event 的
@@ -106,6 +110,7 @@ impl KernelCapabilityRouter {
             grants_lookup: None,
             dynamic_tool_registrar: None,
             domain_broadcaster: None,
+            capability_contracts: None,
         }
     }
 
@@ -121,7 +126,19 @@ impl KernelCapabilityRouter {
             grants_lookup: None,
             dynamic_tool_registrar: None,
             domain_broadcaster: None,
+            capability_contracts: None,
         }
+    }
+
+    /// 注入内核能力契约（启用定义驱动入口校验：契约声明了 (namespace, method)
+    /// 才按 input_schema 逐条校验——required/类型/pattern 形态/enum/闭包参数面；
+    /// 未声明即宽泛放行）。生产装配自 config/kernel_capabilities/*.json。
+    pub fn with_capability_contracts(
+        mut self,
+        contracts: Arc<Vec<crate::kernel_capabilities::KernelCapabilityContract>>,
+    ) -> Self {
+        self.capability_contracts = Some(contracts);
+        self
     }
 
     /// 注入域事件广播闭包（启用 event-bus 域事件名单同步广播：approval.created 等）。
@@ -215,6 +232,14 @@ impl CapabilityRouter for KernelCapabilityRouter {
                     });
                 }
             }
+        }
+        // 定义驱动入口校验（2026-08-20 Part B）：契约声明了 (capability, method)
+        // 时按 input_schema 逐条执行（required/类型/pattern 形态/enum/闭包参数面），
+        // 未声明即宽泛放行——定义详细到什么程度，就校验到什么程度。这是"相同
+        // 类型、不同语义"错误（如 thread 坐标填进 pipeline_id 槽）的暴露点：
+        // 形状全合法的互填在形态档（pattern）抓红。
+        if let Some(contracts) = self.capability_contracts.as_ref() {
+            crate::kernel_capabilities::validate_params(contracts, capability, method, &params)?;
         }
         // 先查动态 handler 注册表（M2/M4：插件自注册的 namespace 在这里路由）。
         // 命中则委托，不再走下方内置 match。这让 human-interaction 等插件能力
@@ -2050,7 +2075,7 @@ mod tests {
         let store: Arc<dyn StorageBackend> =
             Arc::new(agentos_engine::SqliteStore::open_memory().expect("open_memory"));
         KernelCapabilityRouter::new().with_store(store)
-    }    // ── GAP-2：pipeline-state 域（CONDITION 触发器的求值上下文源） ──────
+    } // ── GAP-2：pipeline-state 域（CONDITION 触发器的求值上下文源） ──────
 
     #[tokio::test]
     async fn test_pipeline_state_lists_registry_rows_with_task_fields() {

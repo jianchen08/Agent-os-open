@@ -1,0 +1,123 @@
+{
+  "namespace": "chat",
+  "description": "消息注入桥——向会话投递消息并跑管道（内核基础设施能力；任务管理/查询是任务插件的服务，走 plugin.json 契约，不在此列）。单一真值源：内核入口校验、/api/v1/schema 聚合、调用方（触发器/任务派发/复盘）均消费本文件，不读代码副本。",
+  "capabilities": [
+    {
+      "method": "send_message",
+      "description": "投递消息到会话管道并跑一轮。创建分支（create:true 或 pipeline_id 空）引擎生成新管道身份；注入分支（带 pipeline_id）内部反查 pipeline_sessions 解析真实会话 thread（黑盒，对外契约不含 thread 参数），解析失败即协议错误。thread_id（^thread- 前缀会话标签）与 pipeline_id（32hex 引擎身份）形态互斥，互填在入口即红。",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "message": {
+            "type": "string",
+            "minLength": 1,
+            "description": "本轮用户消息内容（任务派发时为 kickoff 指令）"
+          },
+          "user_id": {
+            "type": "string",
+            "minLength": 1,
+            "description": "发起用户 id（tenant 解析锚点；系统发起用 task_system/review_system 等）"
+          },
+          "pipeline_id": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{32}$",
+            "description": "注入目标管道（32hex 引擎身份，uuid v4 simple 小写）。与 thread_id（^thread- 前缀）是不同域的坐标：thread 是会话标签、pipeline 是引擎身份，互填即协议错误"
+          },
+          "create": {
+            "type": "boolean",
+            "description": "true = 创建新管道（引擎生成 pipeline_id 并在响应返回，不接受调用方传 id）"
+          },
+          "background": {
+            "type": "boolean",
+            "description": "true = spawn 后台派发、响应立即返回（任务派发不阻塞等待管道跑完）"
+          },
+          "agent_id": {
+            "type": "string",
+            "minLength": 1,
+            "description": "执行 agent（按 target 选执行器；缺省 agentos）"
+          },
+          "execution_context": {
+            "type": "object",
+            "description": "任务级执行上下文（workspace_mode/isolation_level 等，init 体生命周期插件消费）"
+          },
+          "state": {
+            "type": "object",
+            "description": "自由注入 initial_state 顶层扁平键（任务域用 task.* 点号键）。保留字与 lineage.* 保护前缀命中即协议错误",
+            "propertyNames": {
+              "not": {
+                "enum": [
+                  "message",
+                  "messages",
+                  "agent_id",
+                  "pipeline_id",
+                  "session_id",
+                  "thread_id",
+                  "user_id",
+                  "run_id",
+                  "execution_context",
+                  "lineage",
+                  "message_id"
+                ]
+              },
+              "x-forbidden-prefixes": ["lineage."]
+            }
+          },
+          "lineage": {
+            "type": "object",
+            "description": "创建分支血缘（有父/根二选一，杜绝孤儿管道）；注入分支不可携带（防覆写出生字段）",
+            "properties": {
+              "parent_pipeline_id": {
+                "type": "string",
+                "pattern": "^[0-9a-f]{32}$",
+                "description": "直接创建者管道（有父形式必填）"
+              },
+              "origin_session_id": {
+                "type": "string",
+                "minLength": 1,
+                "description": "根人类会话锚点（有父形式必填，向上最近的会话）"
+              },
+              "root": {
+                "type": "boolean",
+                "description": "根形式声明（true 时必须提供 origin）"
+              },
+              "origin": {
+                "type": "object",
+                "description": "根形式来源声明",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "enum": ["channel", "external_service", "plugin", "system"],
+                    "description": "来源类型描述符"
+                  },
+                  "source": {
+                    "type": "string",
+                    "minLength": 1,
+                    "description": "非空来源描述（如 task_submit / review / dingtalk）"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "required": ["message", "user_id"],
+        "additionalProperties": false
+      },
+      "output_schema": {
+        "type": "object",
+        "properties": {
+          "status": {
+            "type": "string",
+            "enum": ["created", "dispatched"],
+            "description": "created = 创建分支已派发；dispatched = 注入分支已派发"
+          },
+          "pipeline_id": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{32}$",
+            "description": "管道身份（创建分支为引擎新生成 id；注入分支为原值）"
+          }
+        },
+        "required": ["status", "pipeline_id"]
+      }
+    }
+  ]
+}

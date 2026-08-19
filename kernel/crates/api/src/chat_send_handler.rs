@@ -32,26 +32,29 @@ use serde_json::{json, Map, Value};
 use agentos_mcp::{CapabilityHandler, McpError};
 use agentos_session::router::PipelineDispatcher;
 
-/// state 注入保留字：引擎系统字段，调用方不可覆盖（GAP-1 定案——堵消息/路由/
-/// 上下文被注入方篡改）。`lineage` 及 `lineage.*` 前缀同属保护（引擎出生写入，
-/// 见 [`parse_lineage`]）。任务域字段用 `task.*` 前缀。
-pub(crate) const RESERVED_STATE_KEYS: &[&str] = &[
+/// send_message 实际读取的顶层参数清单（防"配置↔代码"双轨漂移的代码侧锚点）。
+///
+/// 与 `config/kernel_capabilities/chat.json` 的 `input_schema.properties` 集合
+/// 必须一致——一致性由 kernel_capabilities::tests 的机械闸强制：加参数不改契约
+/// （或反之）测试即红。新增参数三处同步：本清单、契约文件、读取代码。
+#[allow(dead_code)] // 消费方是 kernel_capabilities::tests 机械闸（测试期使用）
+pub(crate) const HANDLED_PARAM_NAMES: &[&str] = &[
     "message",
-    "messages",
-    "agent_id",
-    "pipeline_id",
-    "session_id",
-    "thread_id",
     "user_id",
-    "run_id",
+    "create",
+    "background",
+    "pipeline_id",
     "execution_context",
+    "agent_id",
+    "state",
     "lineage",
-    "message_id",
 ];
 
 /// lineage 根形式 `origin.kind` 合法枚举（GAP-1 补定案：根是诚实声明，来源用
 /// 类型描述符表达——channel | external_service | plugin | system）。
-const LINEAGE_ORIGIN_KINDS: &[&str] = &["channel", "external_service", "plugin", "system"];
+/// 契约文件 lineage.origin.kind.enum 的代码侧锚点（机械闸强制一致）。
+pub(crate) const LINEAGE_ORIGIN_KINDS: &[&str] =
+    &["channel", "external_service", "plugin", "system"];
 
 /// `chat` namespace handler：sidecar → 投递消息到会话并跑管道。
 ///
@@ -324,8 +327,11 @@ impl ChatSendHandler {
 ///
 /// 键约定：顶层扁平点号键（任务域 `task.*`，与 track.total_tokens 同款——
 /// STATE_SUMMARY_KEYS 匹配的就是这种顶层扁平键）。保留字与 `lineage.*` 保护
-/// 前缀命中即 [`McpError::Protocol`]。
+/// 前缀命中即 [`McpError::Protocol`]。清单单一真值源在
+/// [`crate::kernel_capabilities`]（契约文件锚定，本处为直连路径的防线）。
 fn validate_state_overlay(state: Option<&Value>) -> Result<Option<Value>, McpError> {
+    use crate::kernel_capabilities::{FORBIDDEN_STATE_KEY_PREFIXES, RESERVED_STATE_KEYS};
+
     let Some(state) = state.filter(|v| !v.is_null()) else {
         return Ok(None);
     };
@@ -341,7 +347,10 @@ fn validate_state_overlay(state: Option<&Value>) -> Result<Option<Value>, McpErr
                 message: "chat.send_message state 键不得为空串".to_string(),
             });
         }
-        if key.starts_with("lineage.") {
+        if FORBIDDEN_STATE_KEY_PREFIXES
+            .iter()
+            .any(|p| key.starts_with(p))
+        {
             return Err(McpError::Protocol {
                 message: format!(
                     "chat.send_message state 键 {key} 受保护：lineage 为引擎出生写入字段，\
@@ -625,7 +634,11 @@ mod tests {
     async fn inject_with_store_resolves_real_thread_coordinate() {
         let store = Arc::new(agentos_engine::SqliteStore::open_memory().unwrap());
         store
-            .link_pipeline_session("a1b2c3d4e5f64789abcdef0123456789", "thread-trig-1", "default")
+            .link_pipeline_session(
+                "a1b2c3d4e5f64789abcdef0123456789",
+                "thread-trig-1",
+                "default",
+            )
             .await
             .unwrap();
         let d = RecordingDispatcher::shared();
@@ -675,7 +688,11 @@ mod tests {
     async fn inject_background_resolves_real_thread_coordinate() {
         let store = Arc::new(agentos_engine::SqliteStore::open_memory().unwrap());
         store
-            .link_pipeline_session("b1b2c3d4e5f64789abcdef0123456789", "thread-trig-2", "default")
+            .link_pipeline_session(
+                "b1b2c3d4e5f64789abcdef0123456789",
+                "thread-trig-2",
+                "default",
+            )
             .await
             .unwrap();
         let d = RecordingDispatcher::shared();
@@ -701,7 +718,10 @@ mod tests {
             tokio::time::sleep(std::time::Duration::from_millis(50)).await;
         }
         let rec = rec.expect("background 注入应最终派发");
-        assert_eq!(rec.0, "thread-trig-2", "background 分支 thread 槽位同样解析");
+        assert_eq!(
+            rec.0, "thread-trig-2",
+            "background 分支 thread 槽位同样解析"
+        );
         assert_eq!(rec.3, "b1b2c3d4e5f64789abcdef0123456789");
     }
 

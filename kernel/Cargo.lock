@@ -27,6 +27,7 @@ dependencies = [
  "futures-util",
  "notify",
  "parking_lot",
+ "regex",
  "rusqlite",
  "serde",
  "serde_json",
