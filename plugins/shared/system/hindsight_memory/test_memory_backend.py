@@ -20,6 +20,7 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 import sys
 from pathlib import Path
 from typing import Any
@@ -203,6 +204,187 @@ class TestHindsightBackend:
 
         with pytest.raises(RuntimeError, match="memory id"):
             await backend.add(user_id="user-1", content="hello")
+
+
+# ═══════════════════════════════════════════════════════════
+# 8. add metadata 键值全 str（缺陷①：tags list 进 wire metadata 必炸）
+# ── hindsight-client 0.9.x aretain metadata 是 dict[str, str] pydantic 校验，
+#    tags 以 list 塞进 metadata → ValidationError → 报告从未真正持久化
+#    （2026-08-19 批 C 取证，真实 API A/B 对照复现）。
+# ═══════════════════════════════════════════════════════════
+
+
+class TestAddMetadataStrSafety:
+    async def test_add_serializes_tags_to_str(
+        self, mod: Any, caller: AsyncMock
+    ) -> None:
+        """红①：add 装配的 wire metadata 键值必须全 str——tags 序列化为 JSON 串。"""
+        caller.return_value = {"id": "mem-t1", "stored": True}
+        backend = mod.HindsightBackend(caller)
+
+        await backend.add(
+            user_id="review",
+            content="hello",
+            memory_type="review",
+            tags=["review_id:r1", "review_report"],
+            source="review_agent",
+        )
+
+        meta = caller.call_args.args[1]["args"]["metadata"]
+        assert isinstance(meta["tags"], str), (
+            f"metadata.tags 必须是 str，实际 {type(meta['tags']).__name__}"
+        )
+        assert json.loads(meta["tags"]) == ["review_id:r1", "review_report"]
+        assert meta["source"] == "review_agent"
+        # pydantic dict[str,str] 校验面：所有值都是 str
+        assert all(isinstance(v, str) for v in meta.values()), meta
+
+    async def test_add_without_tags_keeps_no_tags_key(
+        self, mod: Any, caller: AsyncMock
+    ) -> None:
+        """tags 缺省时不产生 tags 键（既有语义保留）。"""
+        caller.return_value = {"id": "mem-t2", "stored": True}
+        backend = mod.HindsightBackend(caller)
+
+        await backend.add(user_id="u", content="c", source="s")
+
+        meta = caller.call_args.args[1]["args"]["metadata"]
+        assert "tags" not in meta
+
+    async def test_add_merges_extra_metadata_str_coerced(
+        self, mod: Any, caller: AsyncMock
+    ) -> None:
+        """红②：add 可选 metadata 参数合并进 wire metadata（review_id 定向键），
+        非 str 值一律强转 str（校验面安全）。"""
+        caller.return_value = {"id": "mem-t3", "stored": True}
+        backend = mod.HindsightBackend(caller)
+
+        await backend.add(
+            user_id="review",
+            content="c",
+            memory_type="review",
+            tags=["t"],
+            source="review_agent",
+            metadata={"review_id": "r1", "count": 5},
+        )
+
+        meta = caller.call_args.args[1]["args"]["metadata"]
+        assert meta["review_id"] == "r1"
+        assert meta["count"] == "5"
+        assert all(isinstance(v, str) for v in meta.values()), meta
+
+    async def test_add_extra_metadata_does_not_override_tags(
+        self, mod: Any, caller: AsyncMock
+    ) -> None:
+        """调用方 metadata 里的同名键不得覆盖 add 自身装配的 tags/source 语义键。"""
+        caller.return_value = {"id": "mem-t4", "stored": True}
+        backend = mod.HindsightBackend(caller)
+
+        await backend.add(
+            user_id="u", content="c", tags=["real-tag"],
+            source="review_agent", metadata={"tags": "caller-injected"},
+        )
+
+        meta = caller.call_args.args[1]["args"]["metadata"]
+        assert json.loads(meta["tags"]) == ["real-tag"]
+
+
+# ═══════════════════════════════════════════════════════════
+# 9. get_documents（缺陷②冷读面）：经 tool-executor 调
+#    hindsight.get_documents 按 bank/tags 精确取回文档原文。
+# ═══════════════════════════════════════════════════════════
+
+
+class TestGetDocuments:
+    async def test_get_documents_invokes_tool(
+        self, mod: Any, caller: AsyncMock
+    ) -> None:
+        """红③：get_documents 经 tool-executor.invoke 调 hindsight.get_documents，
+        透传 bank/tags/tags_match。"""
+        caller.return_value = {
+            "documents": [
+                {"id": "d1", "original_text": "{}", "document_metadata": {}}
+            ],
+            "total": 1,
+        }
+        backend = mod.HindsightBackend(caller)
+
+        docs = await backend.get_documents(
+            user_id="review", tags=["review_id:r1"]
+        )
+
+        method, params = caller.call_args.args
+        assert method == "tool-executor.invoke"
+        assert params["tool_name"] == "hindsight.get_documents"
+        assert params["plugin_id"] == "hindsight_memory_service"
+        assert params["args"]["bank_id"] == "review"
+        assert params["args"]["tags"] == ["review_id:r1"]
+        assert params["args"]["tags_match"] == "any_strict"
+        assert len(docs) == 1
+        assert docs[0]["id"] == "d1"
+
+    async def test_get_documents_by_exact_id(
+        self, mod: Any, caller: AsyncMock
+    ) -> None:
+        """document_id 精确取回（单文档直查模式）。"""
+        caller.return_value = {
+            "documents": [{"id": "doc-9", "original_text": "raw"}],
+            "total": 1,
+        }
+        backend = mod.HindsightBackend(caller)
+
+        docs = await backend.get_documents(user_id="review", document_id="doc-9")
+
+        args = caller.call_args.args[1]["args"]
+        assert args["document_id"] == "doc-9"
+        assert docs[0]["original_text"] == "raw"
+
+    async def test_get_documents_unwraps_invoke_envelope(
+        self, mod: Any, caller: AsyncMock
+    ) -> None:
+        """tool-executor 信封 {success, data} 解包后取 documents。"""
+        caller.return_value = {
+            "success": True,
+            "data": {"documents": [{"id": "d-e"}], "total": 1},
+        }
+        backend = mod.HindsightBackend(caller)
+
+        docs = await backend.get_documents(user_id="review")
+        assert docs[0]["id"] == "d-e"
+
+    async def test_get_documents_empty_and_malformed_degrade_to_empty(
+        self, mod: Any, caller: AsyncMock
+    ) -> None:
+        """空结果/非 dict 响应降级为 []，不抛。"""
+        backend = mod.HindsightBackend(caller)
+        caller.return_value = {"documents": [], "total": 0}
+        assert await backend.get_documents(user_id="review") == []
+        caller.return_value = ["not", "a", "dict"]
+        assert await backend.get_documents(user_id="review") == []
+
+    async def test_get_documents_raises_on_caller_error(
+        self, mod: Any, caller: AsyncMock
+    ) -> None:
+        """能力调用失败诚实上抛（与 search 同风格，调用方决定降级）。"""
+        caller.side_effect = RuntimeError("boom")
+        backend = mod.HindsightBackend(caller)
+
+        with pytest.raises(RuntimeError, match="hindsight.get_documents"):
+            await backend.get_documents(user_id="review")
+
+    async def test_get_documents_raises_on_degrade_signature(
+        self, mod: Any, caller: AsyncMock
+    ) -> None:
+        """sidecar 降级响应（error/initialized:false）必须视为失败上抛。"""
+        caller.return_value = {
+            "error": "hindsight not initialized",
+            "initialized": False,
+            "operation": "get_documents",
+        }
+        backend = mod.HindsightBackend(caller)
+
+        with pytest.raises(RuntimeError, match="降级"):
+            await backend.get_documents(user_id="review")
 
 
 # ═══════════════════════════════════════════════════════════

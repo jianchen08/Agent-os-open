@@ -99,6 +99,10 @@ async def store_report(review_id: str, report: dict[str, Any]) -> None:
     # user_id 固定 "review" bank：冷读时调用方只有 review_id、不知道 task_id，
     # 无法定向查 task_id bank——bank 固定后 get_report 冷读才能定向检索
     # （task_id 保留在 content JSON 内不丢；存量 task_id bank 报告接受召回不全）。
+    # metadata 携带 review_id 定向键：hindsight-client 0.9.x aretain 的
+    # metadata 是 dict[str,str] pydantic 校验，tags 以 list 塞入曾致写入
+    # 必炸（报告从未真正持久化，2026-08-19 批 C 取证）——tags 序列化与
+    # 定向键组装由 HindsightBackend.add 装配处负责（键值全 str）。
     if _memory_backend is not None:
         try:
             await _memory_backend.add(
@@ -107,6 +111,7 @@ async def store_report(review_id: str, report: dict[str, Any]) -> None:
                 memory_type="review",
                 tags=[f"review_id:{review_id}", "review_report"],
                 source="review_agent",
+                metadata={"review_id": review_id},
             )
         except Exception as exc:  # noqa: BLE001 — 记忆后端失败不崩复盘回写
             logger.warning(
@@ -303,15 +308,21 @@ async def get_report(review_id: str) -> dict[str, Any]:
 async def _cold_read_report(review_id: str) -> dict[str, Any] | None:
     """冷读兜底：sidecar 重启后从 Hindsight 取回已持久化报告（G3）。
 
-    IMemoryBackend 检索面只有相似度 ``search(query, user_id, top_k,
-    memory_type)``——没有按 id/tags 精确取回的接口，tags 不参与过滤。故以
-    review_id 为 query 在固定 "review" bank 内召回 top_k=5，逐条解析 content
-    JSON，**精确匹配 review_id 字段 == 入参**才采纳（防相似度误召回），取
-    首条命中。
+    主路径（缺陷②修复）：走 HindsightBackend.get_documents（hindsight
+    documents API）按 ``review_id:<id>`` tag 服务端精确过滤取回文档**原文**
+    ``original_text``。recall 返回的是抽取后事实（world/observation/
+    experience），原文 JSON 永不命中、``types=['memory']`` 原文召回模式
+    不存在（422）——旧相似度 search 路径对 hindsight 后端恒 miss
+    （2026-08-19 批 C 真实 API 取证）。
+
+    回落路径：后端无 get_documents（旧形态/非 hindsight）→ 既有相似度
+    ``search(query, user_id, top_k, memory_type)`` 路径——以 review_id 为
+    query 在固定 "review" bank 召回 top_k=5，逐条解析 content JSON，
+    **精确匹配 review_id 字段 == 入参**才采纳（防相似度误召回）。
 
     - ``_memory_backend`` 未注入（降级）→ 返回 None（not found 语义不变）；
-    - 检索失败（HindsightBackend.search 上抛 RuntimeError 形态）→ 告警并
-      退回 None，不崩 get_report（与写侧落库失败降级同风格）；
+    - 检索失败（RuntimeError 形态）→ 告警并降级，不崩 get_report
+      （与写侧落库失败降级同风格）；
     - 命中 → 反序列化回填 ``_reports[review_id]``（后续轮询语义照常）并返回。
 
     Args:
@@ -322,6 +333,12 @@ async def _cold_read_report(review_id: str) -> dict[str, Any] | None:
     """
     if _memory_backend is None:
         return None
+
+    parsed = await _cold_read_via_documents(review_id)
+    if parsed is not None:
+        return parsed
+
+    # 回落：相似度 search（兼容仅 search 的旧形态后端）
     try:
         rows = await _memory_backend.search(
             query=review_id,
@@ -347,6 +364,55 @@ async def _cold_read_report(review_id: str) -> dict[str, Any] | None:
         if isinstance(parsed, dict) and parsed.get("review_id") == review_id:
             _reports[review_id] = parsed
             logger.info("[Review] 报告冷读回填 review_id=%s", review_id)
+            return parsed
+    return None
+
+
+async def _cold_read_via_documents(review_id: str) -> dict[str, Any] | None:
+    """冷读主路径：documents API 按 tag 精确取回报告原文。
+
+    get_documents 是 HindsightBackend 的扩展方法（非 IMemoryBackend 端口
+    面）——后端未提供（旧形态替身/非 hindsight 后端）时返回 None 交回落
+    路径；提供则按 ``review_id:<id>`` tag any_strict 服务端过滤，逐条解析
+    ``original_text``，**精确匹配 review_id 字段 == 入参**才采纳（防脏数据
+    误中）。
+
+    Args:
+        review_id: 要取回的复盘 ID。
+
+    Returns:
+        完整报告 dict；后端无该方法/无命中/失败返回 None。
+    """
+    get_docs = getattr(_memory_backend, "get_documents", None)
+    if not callable(get_docs):
+        return None
+    try:
+        docs = await get_docs(
+            user_id="review",
+            tags=[f"review_id:{review_id}"],
+            tags_match="any_strict",
+            limit=5,
+        )
+    except Exception as exc:  # noqa: BLE001 — 文档面失败回落 search 路径
+        logger.warning(
+            "[Review] 报告冷读 documents 面失败 review_id=%s: %s", review_id, exc
+        )
+        return None
+    for doc in docs or []:
+        if not isinstance(doc, dict):
+            continue
+        content = doc.get("original_text")
+        if not isinstance(content, str):
+            continue
+        try:
+            parsed = json.loads(content)
+        except (json.JSONDecodeError, TypeError, ValueError):
+            continue
+        if isinstance(parsed, dict) and parsed.get("review_id") == review_id:
+            _reports[review_id] = parsed
+            logger.info(
+                "[Review] 报告冷读回填（documents 原文）review_id=%s", review_id
+            )
             return parsed
     return None
 

@@ -154,6 +154,45 @@
           },
           "type": "object"
         }
+      },
+      {
+        "name": "hindsight.get_documents",
+        "description": "Get raw documents (original_text + metadata) from a hindsight bank (read-only; cold-read exact recovery, not extracted facts)",
+        "input_schema": {
+          "properties": {
+            "bank_id": {
+              "type": "string",
+              "description": "Memory bank id (tenant isolation key)"
+            },
+            "document_id": {
+              "type": "string",
+              "description": "Exact document id for single-document fetch (when given, tags/q are ignored)"
+            },
+            "tags": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "description": "Server-side tag filter (e.g. ['review_id:<id>'])"
+            },
+            "tags_match": {
+              "type": "string",
+              "default": "any_strict",
+              "description": "Tag match mode: any/all/any_strict/all_strict/exact"
+            },
+            "q": {
+              "type": "string",
+              "description": "Case-insensitive substring filter on document id"
+            },
+            "limit": {
+              "type": "integer",
+              "default": 20,
+              "minimum": 1,
+              "maximum": 100
+            }
+          },
+          "type": "object"
+        }
       }
     ]
   },

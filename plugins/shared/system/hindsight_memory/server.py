@@ -21,6 +21,7 @@ bank_id 是多租户隔离 key（来自内核的 tenant_id），缺省回落到�
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import json
 import logging
@@ -168,8 +169,26 @@ async def hindsight_retain(
         bank = _resolve_bank_id(bank_id)
         meta = dict(metadata or {})
         meta.setdefault("memory_type", memory_type)
-        # tags 用于 arecall 服务端过滤(memory_type 作为 tag)
+        # tags：type tag（recall/reflect 服务端过滤）+ 调用方 tags 提升。
+        # HindsightBackend.add 把 IMemoryBackend.add 的 tags 序列化进
+        # metadata["tags"]（hindsight aretain 的 metadata 是 dict[str,str]
+        # pydantic 校验，list 值必炸——2026-08-19 批 C 取证）；此处还原为
+        # hindsight 真实 tags，供 list_documents/recall 服务端精确过滤
+        # （review 冷读按 review_id:<id> tag 定向的前提）。
         tags = [f"type:{memory_type}"]
+        raw_tags = meta.get("tags")
+        if isinstance(raw_tags, list):
+            # 直调工具的调用方把 list 放进 metadata——同样提升，并回写
+            # JSON 串保 wire 校验安全
+            tags.extend(str(t) for t in raw_tags if t)
+            meta["tags"] = json.dumps(raw_tags, ensure_ascii=False)
+        elif isinstance(raw_tags, str):
+            try:
+                parsed_tags = json.loads(raw_tags)
+            except (json.JSONDecodeError, ValueError):
+                parsed_tags = None
+            if isinstance(parsed_tags, list):
+                tags.extend(str(t) for t in parsed_tags if t)
 
         # 同步 retain 的 RetainResponse 不带单条 id（operation_id 恒 None）——
         # memory 工具层要求 memory_id 确认写入，故用 retain_async + 调用方
@@ -308,6 +327,11 @@ def _extract_summary_text(result: Any) -> str:
     Returns:
         摘要文本；无法提取时返回空串（调用方降级）。
     """
+    # pydantic 响应（ReflectResponse 等）先 model_dump 再提取——直接
+    # str(obj) 会得到对象 repr（summarize 摘要面预存缺陷，与 arecall
+    # 传参 TypeError 同路径）
+    if hasattr(result, "model_dump"):
+        result = result.model_dump()
     if isinstance(result, str):
         return result
     if isinstance(result, dict):
@@ -349,12 +373,20 @@ async def hindsight_summarize(
 
     try:
         bank = _resolve_bank_id(bank_id)
-        recall_kwargs: dict[str, Any] = {"bank_id": bank, "query": query or "", "top_k": top_k}
+        # arecall 无 top_k/memory_type 形参（透传曾致 TypeError 被 except 降级
+        # 吞掉——2026-08-19 批 C 取证）：memory_type 走 tags 服务端过滤（与
+        # hindsight_recall 同款）；检索量由 arecall 的 token 预算驱动，top_k
+        # 仅作召回计数的上报上限，不再透传。
+        recall_kwargs: dict[str, Any] = {"bank_id": bank, "query": query or ""}
         if memory_type:
-            recall_kwargs["memory_type"] = memory_type
+            recall_kwargs["tags"] = [f"type:{memory_type}"]
+            recall_kwargs["tags_match"] = "any"
         recall = await _client.arecall(**recall_kwargs)
         recalled_count = 0
-        if isinstance(recall, dict):
+        recall_results = getattr(recall, "results", None)
+        if isinstance(recall_results, list):
+            recalled_count = min(len(recall_results), max(0, top_k))
+        elif isinstance(recall, dict):
             items = recall.get("results")
             recalled_count = len(items) if isinstance(items, list) else 0
 
@@ -402,7 +434,10 @@ async def hindsight_delete(bank_id: str = "", memory_id: str = "") -> dict[str, 
         if deleter is None:
             return {"deleted": False, "error": "client has no delete method"}
         result = deleter(bank_id=bank)
-        if callable(result) and not isinstance(result, bool):
+        # async 方法调用返回协程——必须 await（callable(coro) 恒 False 的旧
+        # 守卫从不 await，删库假成功 + "coroutine never awaited"，2026-08-19
+        # 批 C 取证）
+        if asyncio.iscoroutine(result):
             result = await result
         return {"deleted": True}
     except Exception as e:
@@ -487,6 +522,121 @@ async def hindsight_import_document(
     except Exception as e:
         logger.warning("[hindsight.import_document] 导入失败 | error=%s", e)
         return {"chunks_imported": 0, "knowledge_name": knowledge_name, "error": str(e)}
+
+
+@plugin.tool(
+    name="hindsight.get_documents",
+    schema={
+        "type": "object",
+        "properties": {
+            "bank_id": {
+                "type": "string",
+                "description": "Memory bank id (tenant isolation key)",
+            },
+            "document_id": {
+                "type": "string",
+                "description": "Exact document id for single-document fetch "
+                "(when given, tags/q are ignored)",
+            },
+            "tags": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": "Server-side tag filter (e.g. ['review_id:<id>'])",
+            },
+            "tags_match": {
+                "type": "string",
+                "default": "any_strict",
+                "description": "Tag match mode: any/all/any_strict/all_strict/exact",
+            },
+            "q": {
+                "type": "string",
+                "description": "Case-insensitive substring filter on document id",
+            },
+            "limit": {
+                "type": "integer",
+                "default": 20,
+                "minimum": 1,
+                "maximum": 100,
+            },
+        },
+    },
+    description="Get raw documents (original_text + metadata) from a hindsight bank "
+    "(read-only; cold-read exact recovery, not extracted facts)",
+)
+async def hindsight_get_documents(
+    bank_id: str = "",
+    document_id: str = "",
+    tags: list[str] | None = None,
+    tags_match: str = "any_strict",
+    q: str = "",
+    limit: int = 20,
+) -> dict[str, Any]:
+    """按 bank/tags/document_id 取回文档原文（只读）。
+
+    冷读定向面：recall 返回抽取后事实（world/observation/experience），
+    原文 JSON 永不命中、types=['memory'] 422（2026-08-19 真实 API 取证）；
+    documents API 才保有 original_text。list_documents 条目不含原文
+    （仅 metadata/tags/计数），故逐条 get_document 补齐。
+
+    - document_id 给定 → get_document 直查；404 → 空结果（not found 语义）。
+    - 否则 list_documents（服务端 tags 过滤，any_strict = OR 且排除无 tag）
+      → 逐条 get_document 补 original_text（单条失败降级返回条目本身）。
+    """
+    if _client is None:
+        return _degrade_dict("get_documents")
+
+    def _to_dict(doc: Any) -> dict[str, Any]:
+        if hasattr(doc, "model_dump"):
+            doc = doc.model_dump()
+        elif not isinstance(doc, dict) and hasattr(doc, "__dict__"):
+            doc = vars(doc)
+        return dict(doc) if isinstance(doc, dict) else {}
+
+    try:
+        bank = _resolve_bank_id(bank_id)
+        documents: list[dict[str, Any]] = []
+        if document_id:
+            try:
+                doc = await _client.documents.get_document(
+                    bank_id=bank, document_id=document_id
+                )
+            except Exception as e:
+                if getattr(e, "status", None) == 404:
+                    return {"documents": [], "total": 0}
+                raise
+            documents.append(_to_dict(doc))
+        else:
+            kwargs: dict[str, Any] = {"bank_id": bank, "limit": max(1, limit)}
+            if tags:
+                kwargs["tags"] = tags
+                kwargs["tags_match"] = tags_match or "any_strict"
+            if q:
+                kwargs["q"] = q
+            listing = await _client.documents.list_documents(**kwargs)
+            items = list(getattr(listing, "items", None) or [])
+            for item in items:
+                doc_dict = _to_dict(item)
+                doc_id = str(doc_dict.get("id", "") or "")
+                if not doc_id:
+                    documents.append(doc_dict)
+                    continue
+                try:
+                    full = await _client.documents.get_document(
+                        bank_id=bank, document_id=doc_id
+                    )
+                except Exception:
+                    # 单条原文取失败不炸整个列举（降级返回条目本身）
+                    documents.append(doc_dict)
+                    continue
+                merged = _to_dict(full)
+                # list 条目字段补缺（full 未提供的键不丢）
+                for key, value in doc_dict.items():
+                    merged.setdefault(key, value)
+                documents.append(merged)
+        return {"documents": documents, "total": len(documents)}
+    except Exception as e:
+        logger.warning("[hindsight.get_documents] 调用失败 | error=%s", e)
+        return {"documents": [], "total": 0, "error": str(e)}
 
 
 # ═══════════════════════════════════════════════════════════

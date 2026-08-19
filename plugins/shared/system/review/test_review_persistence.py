@@ -391,16 +391,21 @@ class TestTriggerReviewDispatch:
 
 
 class _StubMemoryBackend:
-    """IMemoryBackend 替身：记录 add/search 调用，返回统一形态条目。
+    """IMemoryBackend 替身：记录 add/search/get_documents 调用，返回统一形态条目。
 
     条目形态对齐 HindsightBackend._map_hindsight_results 输出：
     {id, content, score, memory_type, metadata}——content 为报告 JSON 串。
+    get_documents 模拟 HindsightBackend 文档面（缺陷②冷读新路径）。
     """
 
     def __init__(self) -> None:
         self.entries: list[dict[str, Any]] = []
         self.search_calls: list[dict[str, Any]] = []
         self.search_error: Exception | None = None
+        self.add_calls: list[dict[str, Any]] = []
+        self.documents: list[dict[str, Any]] = []
+        self.get_documents_calls: list[dict[str, Any]] = []
+        self.get_documents_error: Exception | None = None
 
     async def add(
         self,
@@ -409,7 +414,18 @@ class _StubMemoryBackend:
         memory_type: str = "semantic",
         tags: list[str] | None = None,
         source: str = "",
+        metadata: dict[str, str] | None = None,
     ) -> str:
+        self.add_calls.append(
+            {
+                "user_id": user_id,
+                "content": content,
+                "memory_type": memory_type,
+                "tags": tags,
+                "source": source,
+                "metadata": metadata,
+            }
+        )
         self.entries.append(
             {
                 "id": f"mem-{len(self.entries) + 1}",
@@ -419,6 +435,29 @@ class _StubMemoryBackend:
             }
         )
         return f"mem-{len(self.entries)}"
+
+    async def get_documents(
+        self,
+        user_id: str,
+        document_id: str = "",
+        tags: list[str] | None = None,
+        tags_match: str = "any_strict",
+        q: str = "",
+        limit: int = 20,
+    ) -> list[dict[str, Any]]:
+        self.get_documents_calls.append(
+            {
+                "user_id": user_id,
+                "document_id": document_id,
+                "tags": tags,
+                "tags_match": tags_match,
+                "q": q,
+                "limit": limit,
+            }
+        )
+        if self.get_documents_error is not None:
+            raise self.get_documents_error
+        return list(self.documents[:limit])
 
     async def search(
         self,
@@ -562,3 +601,115 @@ class TestGetReportPipelinePoll:
         )
         report = await mod.get_report(r["review_id"])
         assert report["status"] == "running"
+
+
+# ═══════════════════════════════════════════════════════════
+# 缺陷①（写入必炸）+ 缺陷②（冷读形态错）修复回归
+# ── hindsight-client 0.9.x aretain metadata 是 dict[str,str] pydantic 校验，
+#    tags list 塞 metadata → ValidationError → 报告从未真正持久化；
+#    recall 返回抽取后事实（type=world/observation/experience），原文 JSON
+#    永不命中，types=['memory'] 422（2026-08-19 批 C 真实 API 取证）。
+# ═══════════════════════════════════════════════════════════
+
+
+class TestStoreReportMetadataKey:
+    async def test_store_report_passes_review_id_metadata(
+        self, mod: Any, mock_backend: AsyncMock
+    ) -> None:
+        """红：store_report 把 review_id 传进 add 的 metadata（冷读定向键），
+        与序列化后的 tags（add 装配处负责）共同构成可检索 wire metadata。"""
+        mod.set_memory_backend(mock_backend)
+        await mod.store_report("review-m1", {"task_id": "t", "lessons": ["l"]})
+
+        kwargs = mock_backend.add.call_args.kwargs
+        assert kwargs.get("metadata") == {"review_id": "review-m1"}
+
+
+class TestColdReadViaDocuments:
+    async def test_cold_read_uses_documents_original_text(self, mod: Any) -> None:
+        """红：冷读走 get_documents 按 review_id tag 精确取回原文 original_text
+        （不再依赖 recall 抽取事实形态——原文 JSON 永不命中）。"""
+        stub = _StubMemoryBackend()
+        stub.documents = [
+            {
+                "id": "doc-1",
+                "original_text": json.dumps(
+                    {
+                        "review_id": "review-d1",
+                        "status": "completed",
+                        "lessons": ["l-d1"],
+                        "task_id": "task-d1",
+                    },
+                    ensure_ascii=False,
+                ),
+                "document_metadata": {"review_id": "review-d1"},
+                "tags": ["type:review", "review_id:review-d1"],
+            }
+        ]
+        mod.set_memory_backend(stub)
+        mod._reports.clear()  # 模拟重启丢内存
+
+        got = await mod.get_report("review-d1")
+
+        assert got.get("error") is None
+        assert got["review_id"] == "review-d1"
+        assert got["status"] == "completed"
+        assert got["lessons"] == ["l-d1"]
+        # 定向检索：review bank + review_id tag 精确匹配
+        assert stub.get_documents_calls, "冷读应调用 backend.get_documents"
+        last = stub.get_documents_calls[-1]
+        assert last["user_id"] == "review"
+        assert last["tags"] == ["review_id:review-d1"]
+        assert last["tags_match"] == "any_strict"
+        # 回填内存
+        assert mod._reports["review-d1"]["status"] == "completed"
+
+    async def test_cold_read_documents_rejects_mismatched_review_id(
+        self, mod: Any
+    ) -> None:
+        """原文 review_id 不匹配（tag 误中/脏数据）→ 精确校验拒绝，不采纳。"""
+        stub = _StubMemoryBackend()
+        stub.documents = [
+            {
+                "id": "doc-x",
+                "original_text": json.dumps(
+                    {"review_id": "review-OTHER", "status": "completed"}
+                ),
+                "document_metadata": {"review_id": "review-OTHER"},
+                "tags": ["review_id:review-OTHER"],
+            }
+        ]
+        mod.set_memory_backend(stub)
+
+        got = await mod.get_report("review-d2")
+        assert got == {"error": "review not found", "review_id": "review-d2"}
+        assert "review-d2" not in mod._reports
+
+    async def test_cold_read_documents_error_falls_back_gracefully(
+        self, mod: Any
+    ) -> None:
+        """get_documents 抛错（后端不可用）→ 告警降级 not found，不崩。"""
+        stub = _StubMemoryBackend()
+        stub.get_documents_error = RuntimeError("hindsight.get_documents 调用失败: down")
+        mod.set_memory_backend(stub)
+
+        got = await mod.get_report("review-d3")
+        assert got == {"error": "review not found", "review_id": "review-d3"}
+
+    async def test_cold_read_legacy_search_still_works_without_documents(
+        self, mod: Any
+    ) -> None:
+        """后端无 get_documents（旧形态/仅 search）→ 回落既有 search 冷读路径
+        （语义不变，兼容非 hindsight 后端）。"""
+
+        class _SearchOnlyBackend(_StubMemoryBackend):
+            get_documents = None  # type: ignore[assignment]
+
+        stub = _SearchOnlyBackend()
+        mod.set_memory_backend(stub)
+        await mod.store_report("review-legacy", {"task_id": "t", "lessons": ["l-l"]})
+        mod._reports.clear()
+
+        got = await mod.get_report("review-legacy")
+        assert got["review_id"] == "review-legacy"
+        assert got["lessons"] == ["l-l"]

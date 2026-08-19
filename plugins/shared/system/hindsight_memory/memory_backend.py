@@ -19,6 +19,7 @@ DROP 一并退役（2026-08-19 用户裁定：不留两套真值、禁用备用�
 
 from __future__ import annotations
 
+import json
 import logging
 import time
 from abc import ABC, abstractmethod
@@ -50,6 +51,7 @@ class IMemoryBackend(ABC):
         memory_type: str = "semantic",
         tags: list[str] | None = None,
         source: str = "",
+        metadata: dict[str, str] | None = None,
     ) -> str:
         """写入一条记忆，返回 memory id。
 
@@ -59,6 +61,8 @@ class IMemoryBackend(ABC):
             memory_type: 记忆类型（semantic/episode/...）
             tags: 可选标签列表
             source: 可选来源标注
+            metadata: 可选定向键值（如 review_id）——键值会被序列化为 str
+                合入 wire metadata（hindsight pydantic dict[str,str] 校验面）。
 
         Returns:
             memory id；失败时返回空串（降级，不抛异常）。
@@ -149,13 +153,32 @@ class HindsightBackend(IMemoryBackend):
         memory_type: str = "semantic",
         tags: list[str] | None = None,
         source: str = "",
+        metadata: dict[str, str] | None = None,
     ) -> str:
-        """写入记忆，经 tool-executor.invoke 调用 hindsight.retain。"""
-        metadata: dict[str, Any] = {}
+        """写入记忆，经 tool-executor.invoke 调用 hindsight.retain。
+
+        wire metadata 键值必须全 str：hindsight-client 0.9.x aretain 的
+        metadata 是 ``dict[str, str]`` pydantic 校验——tags 以 list 塞入曾致
+        所有带 tags 的写入必炸（复盘报告从未真正持久化，2026-08-19 批 C
+        真实 API A/B 取证）。tags 序列化为 JSON 串；sidecar retain 会解析并
+        提升为 hindsight 真实 tags（供 list_documents/recall 服务端 tag 过滤）。
+        """
+        wire_meta: dict[str, str] = {}
+        if metadata:
+            # 调用方定向键（如 review_id）——值强转 str；tags/source 语义键
+            # 由本方法装配，不接受调用方覆盖
+            for key, value in metadata.items():
+                if key in ("tags", "source"):
+                    continue
+                wire_meta[str(key)] = (
+                    value
+                    if isinstance(value, str)
+                    else json.dumps(value, ensure_ascii=False, default=str)
+                )
         if tags:
-            metadata["tags"] = tags
+            wire_meta["tags"] = json.dumps(list(tags), ensure_ascii=False)
         if source:
-            metadata["source"] = source
+            wire_meta["source"] = source
         params = {
             "tool_name": "hindsight.retain",
             "plugin_id": "hindsight_memory_service",
@@ -163,7 +186,7 @@ class HindsightBackend(IMemoryBackend):
                 "bank_id": user_id,
                 "content": content,
                 "memory_type": memory_type,
-                "metadata": metadata,
+                "metadata": wire_meta,
             },
         }
         try:
@@ -224,6 +247,69 @@ class HindsightBackend(IMemoryBackend):
                     f"hindsight 后端降级: {result.get('error') or 'not initialized'}"
                 )
         return self._map_hindsight_results(result)
+
+    async def get_documents(
+        self,
+        user_id: str,
+        document_id: str = "",
+        tags: list[str] | None = None,
+        tags_match: str = "any_strict",
+        q: str = "",
+        limit: int = 20,
+    ) -> list[dict[str, Any]]:
+        """按 bank/tags/document_id 取回文档原文（original_text）。
+
+        冷读定向面（IMemoryBackend 端口之外的 HindsightBackend 扩展方法）：
+        recall 返回抽取后事实（world/observation/experience），原文永不命中；
+        本方法走 sidecar ``hindsight.get_documents`` 工具（hindsight documents
+        API）按 tags 服务端过滤精确取回原始文档。
+
+        Args:
+            user_id: bank 隔离 key（review 报告固定 "review" bank）
+            document_id: 精确取单文档（给定时忽略 tags/q）
+            tags: 服务端 tag 过滤（如 ["review_id:<id>"]）
+            tags_match: tag 匹配模式（any_strict = OR 且排除无 tag）
+            q: document id 子串过滤（可选）
+            limit: 返回条数上限
+
+        Returns:
+            文档 dict 列表（含 original_text/document_metadata/tags）；
+            空结果/形态异常降级 []；sidecar 降级/能力失败诚实上抛 RuntimeError
+            （与 search 同风格，降级决策归调用方）。
+        """
+        args: dict[str, Any] = {
+            "bank_id": user_id,
+            "limit": limit,
+            "tags_match": tags_match or "any_strict",
+        }
+        if document_id:
+            args["document_id"] = document_id
+        if tags:
+            args["tags"] = list(tags)
+        if q:
+            args["q"] = q
+        params = {
+            "tool_name": "hindsight.get_documents",
+            "plugin_id": "hindsight_memory_service",
+            "args": args,
+        }
+        try:
+            result = await self._call("tool-executor.invoke", params)
+        except Exception as e:
+            raise RuntimeError(f"hindsight.get_documents 调用失败: {e}") from e
+        if isinstance(result, dict):
+            if "data" in result:
+                inner = result.get("data")
+                if isinstance(inner, dict):
+                    result = inner
+            if result.get("error") or result.get("initialized") is False:
+                raise RuntimeError(
+                    f"hindsight 后端降级: {result.get('error') or 'not initialized'}"
+                )
+            docs = result.get("documents")
+            if isinstance(docs, list):
+                return [d for d in docs if isinstance(d, dict)]
+        return []
 
     async def delete(self, user_id: str, memory_id: str | None = None) -> bool:
         """删除记忆，经 tool-executor.invoke 调用 hindsight.delete。"""

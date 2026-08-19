@@ -23,6 +23,7 @@ import importlib.util
 import json
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
@@ -124,6 +125,7 @@ class TestPluginManifest:
             "hindsight.reflect",
             "hindsight.delete",
             "hindsight.import_document",
+            "hindsight.get_documents",
         ):
             assert name in tool_names, f"{name} missing in capabilities.services"
 
@@ -142,6 +144,7 @@ class TestToolRegistration:
             "hindsight.reflect",
             "hindsight.delete",
             "hindsight.import_document",
+            "hindsight.get_documents",
         ):
             assert name in mod.plugin._tools, f"tool {name} not registered"
 
@@ -339,3 +342,279 @@ def test_http_stats_reports_hindsight_backend():
 def test_http_unknown_route_404():
     out = _http_call("/ext/hindsight_memory_service/nope")
     assert out["data"]["status"] == 404
+
+
+# ═══════════════════════════════════════════════════════════
+# 缺陷①配套：retain 把 metadata["tags"]（JSON 串）提升为 hindsight 真实 tags
+# ── 服务端 list_documents/recall tag 过滤（冷读定向）的前提。
+# ═══════════════════════════════════════════════════════════
+
+
+class TestRetainTagsPromotion:
+    def test_retain_promotes_metadata_tags(
+        self, mod: Any, mock_client: MagicMock
+    ) -> None:
+        """红：metadata["tags"]（HindsightBackend.add 序列化的 JSON 串）解析后
+        并入 aretain tags（与 type:<memory_type> 并存）。"""
+        _call_tool(
+            mod,
+            "hindsight.retain",
+            bank_id="review",
+            content="hello",
+            memory_type="review",
+            metadata={
+                "review_id": "r1",
+                "tags": json.dumps(["review_id:r1", "review_report"]),
+                "source": "review_agent",
+            },
+        )
+
+        call_kwargs = mock_client.aretain.call_args.kwargs
+        tags = call_kwargs["tags"]
+        assert "type:review" in tags
+        assert "review_id:r1" in tags
+        assert "review_report" in tags
+        # metadata 原样透传（值全 str，pydantic dict[str,str] 校验面安全）
+        assert call_kwargs["metadata"]["review_id"] == "r1"
+
+    def test_retain_tolerates_invalid_tags_json(
+        self, mod: Any, mock_client: MagicMock
+    ) -> None:
+        """metadata["tags"] 非 JSON 数组时不炸——仅保留 type tag（防御）。"""
+        result = _call_tool(
+            mod,
+            "hindsight.retain",
+            bank_id="b",
+            content="c",
+            metadata={"tags": "not-a-json-list"},
+        )
+        assert result["stored"] is True
+        assert mock_client.aretain.call_args.kwargs["tags"] == ["type:semantic"]
+
+    def test_retain_without_metadata_tags_unchanged(
+        self, mod: Any, mock_client: MagicMock
+    ) -> None:
+        """无 tags 元数据时行为与既有完全一致（type tag only）。"""
+        _call_tool(mod, "hindsight.retain", bank_id="b", content="c")
+        assert mock_client.aretain.call_args.kwargs["tags"] == ["type:semantic"]
+
+
+# ═══════════════════════════════════════════════════════════
+# 缺陷②：hindsight.get_documents 只读工具（按 bank/tags/document_id 取文档原文）
+# ═══════════════════════════════════════════════════════════
+
+
+def _doc_api_mock(
+    items: list[dict[str, Any]] | None = None,
+    total: int | None = None,
+    doc: Any = None,
+    get_error: Exception | None = None,
+) -> MagicMock:
+    """构造 _client.documents 替身（list_documents/get_document 均 AsyncMock）。"""
+    docs_api = MagicMock()
+    docs_api.list_documents = AsyncMock(
+        return_value=SimpleNamespace(items=items or [], total=total if total is not None else len(items or []))
+    )
+    if get_error is not None:
+        docs_api.get_document = AsyncMock(side_effect=get_error)
+    else:
+        docs_api.get_document = AsyncMock(return_value=doc)
+    return docs_api
+
+
+class TestGetDocumentsTool:
+    def test_degrades_without_client(self, mod: Any) -> None:
+        """_client 为 None 时降级字典，不崩溃。"""
+        mod._client = None
+        result = _call_tool(mod, "hindsight.get_documents", bank_id="b")
+        assert result.get("initialized") is False
+        assert "error" in result
+
+    def test_list_by_tags_fills_original_text(
+        self, mod: Any, mock_client: MagicMock
+    ) -> None:
+        """tags 过滤列举 → 每条再取原文（list 响应不含 original_text，
+        get_document 才有——2026-08-19 真实 API 实测）。"""
+        mock_client.documents = _doc_api_mock(
+            items=[{"id": "d1", "tags": ["type:review", "review_id:r1"]}],
+            doc=SimpleNamespace(
+                id="d1",
+                original_text='{"review_id": "r1"}',
+                document_metadata={"review_id": "r1"},
+                tags=["type:review", "review_id:r1"],
+                created_at="t0",
+                updated_at="t1",
+                memory_unit_count=2,
+            ),
+        )
+        result = _call_tool(
+            mod,
+            "hindsight.get_documents",
+            bank_id="review",
+            tags=["review_id:r1"],
+        )
+
+        list_kwargs = mock_client.documents.list_documents.call_args.kwargs
+        assert list_kwargs["bank_id"] == "review"
+        assert list_kwargs["tags"] == ["review_id:r1"]
+        assert list_kwargs["tags_match"] == "any_strict"
+        assert result["total"] == 1
+        doc = result["documents"][0]
+        assert doc["id"] == "d1"
+        assert doc["original_text"] == '{"review_id": "r1"}'
+        assert doc["document_metadata"] == {"review_id": "r1"}
+        # 精确取原文被调用
+        mock_client.documents.get_document.assert_awaited_once_with(
+            bank_id="review", document_id="d1"
+        )
+
+    def test_exact_document_id_short_circuits(
+        self, mod: Any, mock_client: MagicMock
+    ) -> None:
+        """document_id 直查（不调 list），命中返回单条原文。"""
+        mock_client.documents = _doc_api_mock(
+            doc=SimpleNamespace(
+                id="doc-9",
+                original_text="raw",
+                document_metadata={},
+                tags=[],
+                created_at="t0",
+                updated_at="t1",
+                memory_unit_count=1,
+            ),
+        )
+        result = _call_tool(
+            mod, "hindsight.get_documents", bank_id="review", document_id="doc-9"
+        )
+
+        mock_client.documents.list_documents.assert_not_called()
+        mock_client.documents.get_document.assert_awaited_once_with(
+            bank_id="review", document_id="doc-9"
+        )
+        assert result["documents"][0]["original_text"] == "raw"
+
+    def test_document_not_found_returns_empty(
+        self, mod: Any, mock_client: MagicMock
+    ) -> None:
+        """404（NotFound，status=404）→ 空 documents（not found 语义，非错误）。"""
+        err = Exception("not found")
+        err.status = 404  # hindsight ApiException 带 status 属性
+        mock_client.documents = _doc_api_mock(get_error=err)
+
+        result = _call_tool(
+            mod, "hindsight.get_documents", bank_id="review", document_id="gone"
+        )
+
+        assert result["documents"] == []
+        assert result["total"] == 0
+        assert "error" not in result
+
+    def test_documents_api_error_returns_error_dict(
+        self, mod: Any, mock_client: MagicMock
+    ) -> None:
+        """非 404 错误 → error dict（诚实失败，不伪造成空）。"""
+        mock_client.documents = _doc_api_mock(get_error=RuntimeError("db down"))
+
+        result = _call_tool(
+            mod, "hindsight.get_documents", bank_id="review", document_id="d"
+        )
+
+        assert result.get("documents") in (None, [])
+        assert "error" in result
+
+
+# ═══════════════════════════════════════════════════════════
+# 预存 bug①：hindsight.summarize arecall 传 top_k/memory_type（非形参，
+# TypeError 被 except 降级吞掉——2026-08-19 批 C 取证）
+# ═══════════════════════════════════════════════════════════
+
+
+class TestSummarizeFix:
+    def test_summarize_arecall_kwargs_valid(
+        self, mod: Any, mock_client: MagicMock
+    ) -> None:
+        """红：arecall 只收真实形参——memory_type 转 tags 服务端过滤，
+        top_k 不透传（arecall 无此参数，token 预算驱动）。"""
+        mock_client.arecall.return_value = MagicMock(
+            results=[MagicMock(id="f1")], chunks=[], source_facts=[]
+        )
+        mock_client.areflect.return_value = MagicMock(
+            model_dump=lambda: {"summary": "摘要文本"}
+        )
+
+        result = _call_tool(
+            mod,
+            "hindsight.summarize",
+            bank_id="bank_A",
+            query="q",
+            top_k=20,
+            memory_type="semantic",
+        )
+
+        call_kwargs = mock_client.arecall.call_args.kwargs
+        assert "top_k" not in call_kwargs, (
+            f"arecall 无 top_k 形参，实际收到: {sorted(call_kwargs)}"
+        )
+        assert "memory_type" not in call_kwargs
+        assert call_kwargs.get("tags") == ["type:semantic"]
+        assert call_kwargs.get("tags_match") == "any"
+        # 成功路径（无 error），recalled 从 RecallResponse.results 计数
+        assert "error" not in result
+        assert result["recalled"] == 1
+        assert result["summary"] == "摘要文本"
+
+    def test_summarize_without_memory_type_plain_recall(
+        self, mod: Any, mock_client: MagicMock
+    ) -> None:
+        """无 memory_type 时 arecall 不带 tags（全库检索语义不变）。"""
+        mock_client.arecall.return_value = MagicMock(results=[], chunks=[], source_facts=[])
+        mock_client.areflect.return_value = MagicMock(
+            model_dump=lambda: {"summary": "s"}
+        )
+
+        _call_tool(mod, "hindsight.summarize", bank_id="bank_A", query="q")
+
+        call_kwargs = mock_client.arecall.call_args.kwargs
+        assert "tags" not in call_kwargs
+        assert call_kwargs["bank_id"] == "bank_A"
+        assert call_kwargs["query"] == "q"
+
+
+# ═══════════════════════════════════════════════════════════
+# 预存 bug②：hindsight.delete callable(coro) 恒 False → adelete_bank
+# 从不 await、删库假成功（协程无 __call__）
+# ═══════════════════════════════════════════════════════════
+
+
+class TestDeleteFix:
+    def test_delete_awaits_coroutine(
+        self, mod: Any, mock_client: MagicMock
+    ) -> None:
+        """红：adelete_bank 返回协程必须被 await（真实等待删除完成）。"""
+        result = _call_tool(mod, "hindsight.delete", bank_id="bank_del")
+
+        mock_client.adelete_bank.assert_awaited_once_with(bank_id="bank_del")
+        assert result["deleted"] is True
+
+    def test_delete_failure_returns_false(
+        self, mod: Any, mock_client: MagicMock
+    ) -> None:
+        """adelete_bank 抛错 → deleted:false（诚实失败）。"""
+        mock_client.adelete_bank.side_effect = RuntimeError("bank locked")
+
+        result = _call_tool(mod, "hindsight.delete", bank_id="bank_del")
+
+        assert result["deleted"] is False
+        assert "error" in result
+
+    def test_delete_awaits_adelete_fallback(
+        self, mod: Any, mock_client: MagicMock
+    ) -> None:
+        """adelete_bank 缺席时回落 adelete——协程同样要 await。"""
+        del mock_client.adelete_bank
+        mock_client.adelete = AsyncMock(return_value=None)
+
+        result = _call_tool(mod, "hindsight.delete", bank_id="b2")
+
+        mock_client.adelete.assert_awaited_once_with(bank_id="b2")
+        assert result["deleted"] is True
