@@ -20,7 +20,9 @@ use std::sync::Arc;
 
 use agentos_api::routes::AppState;
 use agentos_api::server::build_router;
-use agentos_core::traits::{ConfigFileMapping, HostType, PluginManifest, PluginType};
+use agentos_core::traits::{
+    ConfigFileMapping, HostType, PluginManifest, PluginType, StorageBackend,
+};
 use axum::body::Body;
 use axum::http::{Method, Request, StatusCode};
 use serde_json::{json, Value};
@@ -33,7 +35,7 @@ use tower::ServiceExt;
 /// - config/agents/main/test_agent.yaml（agent config PUT 正例）
 /// - config/pipelines/default.yaml（pipeline config PUT 正例）
 /// - config/models/llm.yaml（经 manifest config_files 映射，plugin config PUT 正例）
-fn app_with_deps() -> (tempfile::TempDir, axum::Router) {
+async fn app_with_deps() -> (tempfile::TempDir, axum::Router) {
     let tmp = tempfile::tempdir().unwrap();
 
     let agent_dir = tmp.path().join("config").join("agents").join("main");
@@ -94,6 +96,21 @@ fn app_with_deps() -> (tempfile::TempDir, axum::Router) {
     };
 
     let store = Arc::new(agentos_engine::SqliteStore::open_memory().unwrap());
+    // 播种 admin 对齐生产启动行为（seed_admin_user）：auth 加固后
+    // store 存在但用户名未命中不再回退内置硬编码凭据
+    store
+        .create_user(&agentos_core::types::UserRecord {
+            user_id: "00000000-0000-0000-0000-000000000001".to_string(),
+            username: "admin".to_string(),
+            password: "admin12345".to_string(),
+            email: Some("admin@agentos.dev".to_string()),
+            role: "admin".to_string(),
+            tenant_id: "default".to_string(),
+            created_at: chrono::Utc::now().to_rfc3339(),
+            last_login_at: None,
+        })
+        .await
+        .unwrap();
     let mut state = AppState::new();
     state.store = Some(store.clone());
     state.manifests = Arc::new(RwLock::new(vec![manifest]));
@@ -101,7 +118,7 @@ fn app_with_deps() -> (tempfile::TempDir, axum::Router) {
     (tmp, build_router(state))
 }
 
-/// 登录并返回 access_token（内置 admin；store 无该用户时回退内置用户表）。
+/// 登录并返回 access_token（admin 由 app_with_deps 按生产行为播种入库）。
 async fn admin_token(app: &axum::Router) -> String {
     let resp = app
         .clone()
@@ -243,7 +260,7 @@ fn write_surface_cases() -> Vec<(Method, &'static str, Option<Value>)> {
 /// 写面端点：无 token → 401（匿名不得写配置/触发命令/提交交互响应/操纵插件）。
 #[tokio::test]
 async fn test_write_surface_rejects_anonymous_401() {
-    let (_tmp, app) = app_with_deps();
+    let (_tmp, app) = app_with_deps().await;
     for (method, uri, payload) in write_surface_cases() {
         let status = send(&app, method, uri, None, payload).await;
         assert_eq!(
@@ -257,7 +274,7 @@ async fn test_write_surface_rejects_anonymous_401() {
 /// 写面端点：普通用户（role=user）→ 403（写面仅 admin）。
 #[tokio::test]
 async fn test_write_surface_rejects_non_admin_403() {
-    let (_tmp, app) = app_with_deps();
+    let (_tmp, app) = app_with_deps().await;
     let user = user_token(&app).await;
     for (method, uri, payload) in write_surface_cases() {
         let status = send(&app, method, uri, Some(&user), payload).await;
@@ -273,7 +290,7 @@ async fn test_write_surface_rejects_non_admin_403() {
 /// 无 token → 401；普通用户 → 403（仅 admin/viewer，对齐 db_routes 只读角色）。
 #[tokio::test]
 async fn test_read_surface_requires_auth_401_and_403() {
-    let (_tmp, app) = app_with_deps();
+    let (_tmp, app) = app_with_deps().await;
     let user = user_token(&app).await;
     for (method, uri) in [
         (Method::GET, "/api/v1/sessions"),
@@ -298,7 +315,7 @@ async fn test_read_surface_requires_auth_401_and_403() {
 /// admin token → 写面/读面全部放行（正常流程不回归）。
 #[tokio::test]
 async fn test_admin_token_passes_write_and_read() {
-    let (_tmp, app) = app_with_deps();
+    let (_tmp, app) = app_with_deps().await;
     let admin = admin_token(&app).await;
 
     // PUT agent config（先 GET 拿 etag 满足 A13 If-Match 乐观锁）→ 200
@@ -444,6 +461,20 @@ async fn test_admin_token_passes_write_and_read() {
 async fn test_create_session_routes_events_by_token_user_not_body() {
     let tmp = tempfile::tempdir().unwrap();
     let store = Arc::new(agentos_engine::SqliteStore::open_memory().unwrap());
+    // 播种 admin（对齐生产 seed_admin_user；auth 加固后无硬编码回退）
+    store
+        .create_user(&agentos_core::types::UserRecord {
+            user_id: "00000000-0000-0000-0000-000000000001".to_string(),
+            username: "admin".to_string(),
+            password: "admin12345".to_string(),
+            email: Some("admin@agentos.dev".to_string()),
+            role: "admin".to_string(),
+            tenant_id: "default".to_string(),
+            created_at: chrono::Utc::now().to_rfc3339(),
+            last_login_at: None,
+        })
+        .await
+        .unwrap();
     let session = Arc::new(agentos_session::SessionCoordinator::new());
 
     let mut state = AppState::new();

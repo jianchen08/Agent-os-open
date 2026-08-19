@@ -17,7 +17,9 @@ use std::sync::Arc;
 
 use agentos_api::routes::AppState;
 use agentos_api::server::build_router;
-use agentos_core::traits::{ConfigFileMapping, HostType, PluginManifest, PluginType};
+use agentos_core::traits::{
+    ConfigFileMapping, HostType, PluginManifest, PluginType, StorageBackend,
+};
 use axum::body::Body;
 use axum::http::{Method, Request, StatusCode};
 use serde_json::{json, Value};
@@ -26,7 +28,7 @@ use tower::ServiceExt;
 
 const PID: &str = "p-api-tool-1";
 
-fn app_with_deps() -> (
+async fn app_with_deps() -> (
     tempfile::TempDir,
     axum::Router,
     Arc<agentos_engine::SqliteStore>,
@@ -91,6 +93,21 @@ fn app_with_deps() -> (
     };
 
     let store = Arc::new(agentos_engine::SqliteStore::open_memory().unwrap());
+    // 播种 admin 对齐生产启动行为（seed_admin_user）：auth 加固后
+    // store 存在但用户名未命中不再回退内置硬编码凭据
+    store
+        .create_user(&agentos_core::types::UserRecord {
+            user_id: "00000000-0000-0000-0000-000000000001".to_string(),
+            username: "admin".to_string(),
+            password: "admin12345".to_string(),
+            email: Some("admin@agentos.dev".to_string()),
+            role: "admin".to_string(),
+            tenant_id: "default".to_string(),
+            created_at: chrono::Utc::now().to_rfc3339(),
+            last_login_at: None,
+        })
+        .await
+        .unwrap();
     let mut state = AppState::new();
     state.store = Some(store.clone());
     state.manifests = Arc::new(RwLock::new(vec![manifest]));
@@ -186,7 +203,7 @@ fn seed_enriched_tool_turn(store: &agentos_engine::SqliteStore) {
 
 #[tokio::test]
 async fn tool_message_returns_structured_envelope_fields() {
-    let (_tmp, app, store) = app_with_deps();
+    let (_tmp, app, store) = app_with_deps().await;
     seed_enriched_tool_turn(&store);
     let token = admin_token(&app).await;
 
@@ -239,7 +256,7 @@ async fn tool_message_returns_structured_envelope_fields() {
 
 #[tokio::test]
 async fn assistant_tool_calls_and_reasoning_unchanged() {
-    let (_tmp, app, store) = app_with_deps();
+    let (_tmp, app, store) = app_with_deps().await;
     seed_enriched_tool_turn(&store);
     let token = admin_token(&app).await;
 
@@ -257,7 +274,7 @@ async fn assistant_tool_calls_and_reasoning_unchanged() {
 
 #[tokio::test]
 async fn failed_tool_message_returns_error_fields() {
-    let (_tmp, app, store) = app_with_deps();
+    let (_tmp, app, store) = app_with_deps().await;
     store
         .apply_messages_ops_to_table(
             PID,
