@@ -83,15 +83,18 @@ async def _on_load(params: dict[str, Any]) -> None:
         import kernel_reads  # noqa: PLC0415
 
         async def _kr_list_pipeline_runs(status: str | None = None, limit: int = 100):
-            handle = plugin.get_capability("pipeline-runs")
-            return await handle.call("list", {"status": status or "", "limit": int(limit)})
+            # service-registry 约定：handle.call("<域>.<op>")——pipeline-runs 域挂在
+            # capability_router 的 service-registry 分发下（直连式需登记两端
+            # STANDARD_CAPABILITIES，未走该通道）。
+            handle = plugin.get_capability("service-registry")
+            return await handle.call("pipeline-runs.list", {"status": status or "", "limit": int(limit)})
 
         async def _kr_list_messages(pipeline_id: str, limit: int | None = None):
             params: dict[str, Any] = {"pipeline_id": pipeline_id}
             if limit is not None:
                 params["limit"] = int(limit)
-            handle = plugin.get_capability("messages")
-            return await handle.call("list", params)
+            handle = plugin.get_capability("service-registry")
+            return await handle.call("messages.list", params)
 
         async def _kr_list_state_rows():
             handle = plugin.get_capability("pipeline-state")

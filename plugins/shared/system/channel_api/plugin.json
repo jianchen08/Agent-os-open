@@ -1962,6 +1962,8 @@
   "granted_capabilities": [
     "pipeline-state",
     "tool-executor",
-    "chat"
+    "chat",
+    "service-registry",
+    "db-admin"
   ]
 }

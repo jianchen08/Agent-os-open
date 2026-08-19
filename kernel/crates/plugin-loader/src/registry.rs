@@ -565,6 +565,8 @@ const KERNEL_PROVIDED_SERVICES: &[(&str, &[&str])] = &[
     ("event-bus", &["emit"]),
     ("tool-executor", &["invoke"]),
     ("pipeline-state", &["list"]),
+    // runs 快照列表（调试中心会话/执行记录数据源，与 GET /api/v1/pipelines/runs 同查询）
+    ("pipeline-runs", &["list"]),
     ("config-reader", &["read"]),
     ("logger", &["log"]),
     (
