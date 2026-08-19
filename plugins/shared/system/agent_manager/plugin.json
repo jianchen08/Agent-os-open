@@ -1,0 +1,126 @@
+{
+  "id": "agent_manager",
+  "name": "Agent Manager",
+  "description": "agent 配置管理面——config/agents/**/*.yaml 的列表/字段声明/读(掩码+etag)/写(乐观锁+备份)端点与 agent.get/list/config-validate 服务（承接原内核 /api/v1/agents* 4 路由语义）",
+  "version": "1.0.0",
+  "plugin_type": "system",
+  "language": "python",
+  "host_type": "sidecar",
+  "entry": "python server.py",
+  "lifecycle": {
+    "idle_timeout_secs": 0
+  },
+  "capabilities": {
+    "tools": [],
+    "route_signals": [],
+    "lifecycle_hooks": [
+      "on_load"
+    ],
+    "services": [
+      {
+        "name": "agent.get",
+        "description": "Load one agent config (parsed yaml dict) by agent_id (filename or config_id two-round match)",
+        "input_schema": {
+          "properties": {
+            "agent_id": {
+              "type": "string",
+              "description": "Agent ID (yaml filename stem or config_id)"
+            }
+          },
+          "required": [
+            "agent_id"
+          ],
+          "type": "object"
+        }
+      },
+      {
+        "name": "agent.list",
+        "description": "List agent configs from config/agents/**/*.yaml (optional agent_type filter)",
+        "input_schema": {
+          "properties": {
+            "agent_type": {
+              "type": "string",
+              "description": "Optional filter by agent_type field (e.g. main/orchestrator/specialized/atomic/system)"
+            }
+          },
+          "type": "object"
+        }
+      },
+      {
+        "name": "agent.config-validate",
+        "description": "Validate agent config yaml syntax (parse check, no disk write)",
+        "input_schema": {
+          "properties": {
+            "yaml": {
+              "type": "string",
+              "description": "Agent config yaml text to validate"
+            }
+          },
+          "required": [
+            "yaml"
+          ],
+          "type": "object"
+        }
+      }
+    ]
+  },
+  "permissions": {},
+  "priority": 30,
+  "http_endpoints": [
+    {
+      "route_id": "agent_manager_list",
+      "method": "GET",
+      "path": "/ext/agent_manager/agents",
+      "auth": "none",
+      "handler_capability": "http.handle",
+      "timeout_ms": 5000,
+      "max_concurrency": 8,
+      "description": "Agent 列表（扫描 config/agents/**/*.yaml，?agent_type= 过滤，{items,total}——原 GET /api/v1/agents 语义）"
+    },
+    {
+      "route_id": "agent_manager_schema",
+      "method": "GET",
+      "path": "/ext/agent_manager/agents/schema",
+      "auth": "none",
+      "handler_capability": "http.handle",
+      "timeout_ms": 5000,
+      "max_concurrency": 8,
+      "description": "Agent 配置字段声明 {fields:[...]}（原 GET /api/v1/agents/schema 语义）"
+    },
+    {
+      "route_id": "agent_manager_get_config",
+      "method": "GET",
+      "path": "/ext/agent_manager/agents/{id}/config",
+      "auth": "none",
+      "handler_capability": "http.handle",
+      "timeout_ms": 5000,
+      "max_concurrency": 8,
+      "description": "读取 agent yaml（敏感字段掩码 + 磁盘原文 etag——原 GET /api/v1/agents/{id}/config 语义）"
+    },
+    {
+      "route_id": "agent_manager_put_config",
+      "method": "PUT",
+      "path": "/ext/agent_manager/agents/{id}/config",
+      "auth": "admin",
+      "handler_capability": "http.handle",
+      "timeout_ms": 10000,
+      "max_concurrency": 4,
+      "description": "写回 agent yaml（语法校验 400 → If-Match 乐观锁 409 → .bak 备份 → 写回——原 PUT /api/v1/agents/{id}/config 语义；admin 由插件自持检查）"
+    }
+  ],
+  "contributes": {
+    "pages": [
+      {
+        "id": "agent_manager_agents",
+        "title": "智能体",
+        "icon": "person",
+        "space": "workspace",
+        "slot": "activity-bar",
+        "order": 30,
+        "path": "/agents",
+        "widget": "agents_panel",
+        "description": "Agent 配置管理（浏览+编辑一体，数据源 /ext/agent_manager/agents——承接原 AgentsPage）"
+      }
+    ]
+  }
+}
