@@ -118,6 +118,155 @@ pub struct McpClient {
     http_client: Option<reqwest::Client>,
 }
 
+/// 出网 URL 边界守卫（安全审查 2026-08-20 B-2 摘出修复）。
+///
+/// 默认禁止 MCP HTTP 对私网/特殊段发包（RFC1918、ULA、链路本地=云元数据
+/// 169.254.169.254、CGNAT、组播、未指定地址）；环回（127.0.0.0/8、::1）默认
+/// 放行——本地 LLM 网关（ollama/one-api 等）是合法产品形态；设
+/// `AGENTOS_MCP_BLOCK_LOOPBACK=1` 连环回一并禁止（加固部署）。
+/// 主机名在连接时解析并逐个校验解析 IP；解析失败时放行并告警（无法分类时
+/// 不误伤内网私有 DNS 部署；DNS 重绑定须域名解析被控，已属配置面失守）。
+/// 配置来源：插件 manifest 的 mcp.http.url / 内核配置——均可能经配置写入面
+/// 被篡改（A-2），此处为纵深防线。
+fn ip_address_blocked(ip: std::net::IpAddr, block_loopback: bool) -> bool {
+    match ip {
+        std::net::IpAddr::V4(v4) => {
+            let [a, b, _c, _d] = v4.octets();
+            if a == 127 {
+                // 环回：默认放行（本地 LLM 网关合法用例）；加固模式（block_loopback=true）禁止
+                return block_loopback;
+            }
+            let private_net = a == 10
+                || (a == 172 && (16..=31).contains(&b))
+                || (a == 192 && b == 168)
+                || (a == 169 && b == 254)
+                || (a == 100 && (64..=127).contains(&b)) // CGNAT 100.64.0.0/10
+                || a == 0;
+            let special = (224..=239).contains(&a) || a >= 240; // 组播 + 保留
+            private_net || special
+        }
+        std::net::IpAddr::V6(v6) => {
+            let segments = v6.segments();
+            if segments == [0, 0, 0, 0, 0, 0, 0, 1] {
+                return block_loopback; // ::1 环回
+            }
+            let is_ula = (segments[0] & 0xfe00) == 0xfc00; // fc00::/7
+            let is_link_local = (segments[0] & 0xffc0) == 0xfe80; // fe80::/10
+            let is_multicast = (segments[0] & 0xff00) == 0xff00; // ff00::/8
+            let is_unspecified = segments == [0; 8];
+            is_ula || is_link_local || is_multicast || is_unspecified
+        }
+    }
+}
+
+/// 出网守卫单测（安全审查 2026-08-20 B-2）。
+#[cfg(test)]
+/// 校验出网 URL 通过边界检查；非法 URL / 命中禁止段 → Err（fail-closed）。
+fn is_outbound_url_allowed(url: &str) -> Result<(), McpError> {
+    let parsed = reqwest::Url::parse(url).map_err(|e| McpError::ConnectionFailed {
+        message: format!("invalid MCP http url {}: {}", url, e),
+    })?;
+    let host = parsed.host_str().unwrap_or_default().to_string();
+    if host.is_empty() {
+        return Err(McpError::ConnectionFailed {
+            message: format!("MCP http url 无 host: {url}"),
+        });
+    }
+    let block_loopback = std::env::var("AGENTOS_MCP_BLOCK_LOOPBACK").as_deref() == Ok("1");
+    // 字面 IP 直判
+    if let Ok(ip) = host.parse::<std::net::IpAddr>() {
+        return if ip_address_blocked(ip, block_loopback) {
+            Err(McpError::ConnectionFailed {
+                message: format!(
+                    "MCP http 出网被拒：{url} 命中禁止网段（私网/元数据/特殊段，环回{}放行）",
+                    if block_loopback { "不" } else { "" },
+                ),
+            })
+        } else {
+            Ok(())
+        };
+    }
+    // 主机名：解析后逐个 IP 校验
+    use std::net::ToSocketAddrs;
+    match (host.as_str(), 0).to_socket_addrs() {
+        Ok(addrs) => {
+            for addr in addrs {
+                if ip_address_blocked(addr.ip(), block_loopback) {
+                    return Err(McpError::ConnectionFailed {
+                        message: format!("MCP http 出网被拒：{url} 解析到禁止网段 {}", addr.ip()),
+                    });
+                }
+            }
+            Ok(())
+        }
+        Err(e) => {
+            tracing::warn!(
+                "[mcp] 出网守卫：主机 {host} 解析失败，放行（无法分类，不误伤内网私有 DNS）| {e}"
+            );
+            Ok(())
+        }
+    }
+}
+mod outbound_guard_tests {
+    use super::*;
+
+    #[test]
+    fn test_private_and_special_ipv4_blocked() {
+        for ip in [
+            "10.0.0.1",
+            "172.16.0.1",
+            "172.31.255.255",
+            "192.168.1.1",
+            "169.254.169.254", // 云元数据
+            "100.64.0.1",      // CGNAT
+            "0.0.0.1",
+            "224.0.0.1",
+            "240.0.0.1",
+        ] {
+            let addr: std::net::IpAddr = ip.parse().unwrap();
+            assert!(ip_address_blocked(addr, false), "应拦截 {ip}");
+        }
+    }
+
+    #[test]
+    fn test_loopback_and_public_allowed() {
+        let loopback: std::net::IpAddr = "127.0.0.1".parse().unwrap();
+        assert!(!ip_address_blocked(loopback, false), "环回默认放行");
+        assert!(ip_address_blocked(loopback, true), "加固模式禁环回");
+
+        let v6_loopback: std::net::IpAddr = "::1".parse().unwrap();
+        assert!(!ip_address_blocked(v6_loopback, false));
+
+        for ip in ["8.8.8.8", "1.1.1.1", "223.5.5.5"] {
+            let addr: std::net::IpAddr = ip.parse().unwrap();
+            assert!(!ip_address_blocked(addr, false), "公网应放行 {ip}");
+        }
+    }
+
+    #[test]
+    fn test_ipv6_special_blocked() {
+        for ip in ["fc00::1", "fd12:3456::1", "fe80::1", "ff02::1", "::"] {
+            let addr: std::net::IpAddr = ip.parse().unwrap();
+            assert!(ip_address_blocked(addr, false), "应拦截 {ip}");
+        }
+    }
+
+    #[test]
+    fn test_outbound_url_guard() {
+        // 私网/元数据 → 拒绝
+        assert!(is_outbound_url_allowed("http://192.168.1.5:8080/sse").is_err());
+        assert!(is_outbound_url_allowed("http://10.0.0.2:3000").is_err());
+        assert!(is_outbound_url_allowed("http://169.254.169.254/latest/meta-data").is_err());
+        // 环回/localhost → 放行（本地 LLM 网关合法用例；localhost 解析到环回）
+        assert!(is_outbound_url_allowed("http://127.0.0.1:11434").is_ok());
+        assert!(is_outbound_url_allowed("http://localhost:11434").is_ok());
+        // 公网 → 放行
+        assert!(is_outbound_url_allowed("https://api.openai.com/v1").is_ok());
+        // 非法 URL → fail-closed
+        assert!(is_outbound_url_allowed("not-a-url").is_err());
+    }
+}
+
 impl McpClient {
     /// 创建 stdio transport 客户端
     pub fn new_stdio(command: impl Into<String>, args: Vec<String>) -> Self {
@@ -489,6 +638,7 @@ impl McpClient {
     }
 
     /// 构建 HTTP reqwest 客户端：解析 `${ENV_VAR}` 鉴权占位、合并额外头、设超时。
+
     fn build_http_client(
         &self,
         url: &str,
@@ -497,10 +647,8 @@ impl McpClient {
     ) -> Result<reqwest::Client, McpError> {
         use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
 
-        // 先校验 URL 合法（早暴露配置错误）。
-        reqwest::Url::parse(url).map_err(|e| McpError::ConnectionFailed {
-            message: format!("invalid MCP http url {}: {}", url, e),
-        })?;
+        // 先校验 URL 合法 + 出网边界（早暴露配置错误；顺带防 SSRF 到内网/云元数据）。
+        is_outbound_url_allowed(url)?;
 
         let mut header_map = HeaderMap::new();
         for (k, v) in headers {
