@@ -759,6 +759,16 @@ const ActivityCard: FC<ActivityCardProps> = ({
           <span className="text-foreground min-w-0 truncate font-medium">{activity.title}</span>
         )}
 
+        {/* 条目摘要：文件路径/命令/URL 等一句话（折叠态可见，补足条目信息量） */}
+        {activity.subtitle && (
+          <span
+            className="text-muted-foreground/70 min-w-0 max-w-[280px] truncate font-mono text-[11px]"
+            title={activity.subtitle}
+          >
+            {activity.subtitle}
+          </span>
+        )}
+
         {activity.durationMs && (
           <span className="text-muted-foreground/70 flex-shrink-0">
             {formatDuration(activity.durationMs)}
@@ -776,6 +786,21 @@ const ActivityCard: FC<ActivityCardProps> = ({
         {/* 状态图标（12px）：仅 running/failed 出现，其余状态由左边条表达，降低图标噪音 */}
         {(activity.status === 'running' || activity.status === 'failed') && (
           <span className="flex-shrink-0">{getStatusIcon(activity.status)}</span>
+        )}
+
+        {/* 条目上的打开文件入口：显式图标按钮（不依赖标题 hover 提示） */}
+        {activity.filePath && activity.onOpenFile && (
+          <button
+            onClick={(e) => {
+              e.stopPropagation()
+              activity.onOpenFile?.(activity.filePath!)
+            }}
+            className="text-muted-foreground/60 hover:text-primary flex-shrink-0 rounded p-0.5 transition-colors hover:bg-[var(--hover-overlay)]"
+            title={`在工作区打开文件: ${activity.filePath}`}
+            aria-label={`打开文件 ${activity.filePath}`}
+          >
+            <ExternalLink className="h-icon-sm w-icon-sm" />
+          </button>
         )}
 
         <span

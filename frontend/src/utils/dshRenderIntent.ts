@@ -459,6 +459,67 @@ export function inferRenderIntent(ctx: RenderContext): ToolRenderIntent | undefi
   return undefined
 }
 
+// ── 条目元信息（summary/filePath）提取 ────────────────────────────────
+
+/** render 意图派生的条目元信息：summary = 头部摘要行，filePath = 可打开文件。 */
+export interface CardMeta {
+  /** 头部摘要（命令/路径/URL 等一句话，折叠态可见） */
+  summary?: string
+  /** 可在工作区打开的文件路径（存在时条目提供打开入口） */
+  filePath?: string
+}
+
+/** search 卡的查询词字段族（args 侧）。 */
+const QUERY_FIELDS = ['args.query', 'args.pattern', 'args.keyword', 'args.q', 'args.search', 'args.regex'] as const
+
+/**
+ * 按 render 意图提取条目元信息（纯函数，与 payload 构造器同字段族）。
+ * read/file/image/diff → filePath + summary；terminal/web/search → summary；
+ * table/form/generic → 无（返回空对象）。
+ */
+export function deriveCardMeta(ctx: RenderContext, intent: ToolRenderIntent): CardMeta {
+  const path = str(pickField('path', [...PATH_FIELDS], ctx, intent))
+  switch (intent.card) {
+    case 'read':
+    case 'file':
+    case 'image':
+      return path ? { summary: path, filePath: path } : {}
+    case 'diff': {
+      // 多文件 diff（diffs 数组）：摘要取首文件路径 + 计数，不给打开入口；
+      // 单文件对（file_write 字族）→ path 字段族直取，可打开
+      const diffs = pickField('diffs', ['result.diffs'], ctx, intent)
+      if (Array.isArray(diffs) && diffs.length > 0) {
+        const paths = diffs
+          .filter((d): d is Record<string, unknown> => typeof d === 'object' && d !== null)
+          .map(d => str(d.path) ?? str(d.file_path))
+          .filter((p): p is string => p !== undefined)
+        if (paths.length > 1) {
+          return { summary: `${paths[0]} 等 ${paths.length} 个文件` }
+        }
+        if (paths.length === 1) {
+          return { summary: paths[0], filePath: paths[0] }
+        }
+        return {}
+      }
+      return path ? { summary: path, filePath: path } : {}
+    }
+    case 'terminal': {
+      const command = str(pickField('command', ['args.command', 'args.cmd'], ctx, intent))
+      return command !== undefined ? { summary: command } : {}
+    }
+    case 'web': {
+      const url = str(pickField('url', ['result.url', 'args.url'], ctx, intent))
+      return url !== undefined ? { summary: url } : {}
+    }
+    case 'search': {
+      const query = str(pickField('query', [...QUERY_FIELDS], ctx, intent))
+      return query !== undefined ? { summary: query } : {}
+    }
+    default:
+      return {}
+  }
+}
+
 // ── 主入口：渲染意图 → ActivityDetailBlock[] ────────────────────────
 
 const PAYLOAD_BUILDERS: Record<Exclude<RenderIntentCard, 'generic'>, (ctx: RenderContext, intent: ToolRenderIntent) => Record<string, unknown> | null> = {
@@ -562,7 +623,7 @@ export function applyDataDrivenIntent(activity: ActivityData, toolCall: MessageT
   }
 }
 
-function buildRenderContext(toolCall: MessageToolCall): RenderContext {
+export function buildRenderContext(toolCall: MessageToolCall): RenderContext {
   return {
     args: (toolCall.tool_args ?? undefined) as SourceData,
     result: (toolCall.resultData ?? toolCall.result ?? undefined) as SourceData,

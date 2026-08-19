@@ -141,6 +141,8 @@ export interface ActivityData {
   id: string
   /** 活动标题/名称 */
   title: string
+  /** 条目摘要（头部标题旁的一行补充：文件路径/命令/URL 等，折叠态也可见） */
+  subtitle?: string
   /** 工具名称（仅 type=tool_call 时有值，用于工具级渲染配置匹配） */
   toolName?: string
   /** 关联的文件路径（如 file_read/file_write 操作的文件） */
@@ -249,17 +251,23 @@ export function getStatusBgColorClass(status: ActivityStatus): string {
 
 /**
  * 格式化时长
+ *
+ * 后端 duration_ms 为 f64 浮点（tool_core ToolResult.duration_ms），此处统一
+ * 收敛显示位数：<1s 取整毫秒；10s 内 1 位小数秒；更长取整秒；分钟级 m+s。
  */
 export function formatDuration(ms: number): string {
-  if (ms < 1000) {
-    return `${ms}ms`
+  if (!Number.isFinite(ms) || ms < 0) {
+    return '0ms'
   }
-  const seconds = Math.floor(ms / 1000)
+  if (ms < 1000) {
+    return `${Math.round(ms)}ms`
+  }
+  const seconds = ms / 1000
   if (seconds < 60) {
-    return `${seconds}s`
+    return seconds < 10 ? `${seconds.toFixed(1)}s` : `${Math.round(seconds)}s`
   }
   const minutes = Math.floor(seconds / 60)
-  const remainingSeconds = seconds % 60
+  const remainingSeconds = Math.round(seconds % 60)
   return remainingSeconds > 0 ? `${minutes}m ${remainingSeconds}s` : `${minutes}m`
 }
 

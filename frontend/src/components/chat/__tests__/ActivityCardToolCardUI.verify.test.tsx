@@ -186,3 +186,54 @@ describe('AC-工具卡片UI-场景5: ActivityCard 侧（失败默认折叠 + jso
     expect(mdContainer!.className).toContain('overflow-y-auto')
   })
 })
+
+describe('AC-工具卡片条目增强: subtitle 摘要行 + 条目上的打开文件入口（2026-08-19）', () => {
+  it('subtitle 在折叠态头部可见（条目信息量补足）', () => {
+    render(
+      <ActivityCard
+        activity={makeActivity({
+          status: 'completed',
+          title: '读取文件',
+          subtitle: 'src/main.py',
+        })}
+      />,
+    )
+    expect(screen.getByText('src/main.py')).toBeInTheDocument()
+  })
+
+  it('filePath + onOpenFile → 条目上出现打开按钮，点击触发回调且不展开卡片', () => {
+    const onOpenFile = vi.fn()
+    render(
+      <ActivityCard
+        activity={makeActivity({
+          status: 'completed',
+          title: '读取文件',
+          subtitle: 'src/main.py',
+          filePath: 'src/main.py',
+          onOpenFile,
+        })}
+      />,
+    )
+
+    const btn = screen.getByRole('button', { name: '打开文件 src/main.py' })
+    fireEvent.click(btn)
+    expect(onOpenFile).toHaveBeenCalledWith('src/main.py')
+    // 打开文件不应误触发展开（stopPropagation）
+    expect(screen.queryByText('错误')).not.toBeInTheDocument()
+  })
+
+  it('无 filePath 时条目上不出现打开按钮', () => {
+    render(<ActivityCard activity={makeActivity({ status: 'completed' })} />)
+    expect(screen.queryByRole('button', { name: /打开文件/ })).not.toBeInTheDocument()
+  })
+
+  it('执行时长位数收敛：浮点 ms 不再原样输出', () => {
+    render(
+      <ActivityCard
+        activity={makeActivity({ status: 'completed', durationMs: 872.1098728179932 })}
+      />,
+    )
+    expect(screen.getByText('872ms')).toBeInTheDocument()
+    expect(screen.queryByText(/872\.109/)).not.toBeInTheDocument()
+  })
+})

@@ -12,7 +12,14 @@ import type { MessageToolCall } from '@/types/models'
 import type { ReactNode } from 'react'
 import { interpretChatCard } from './chatCardInterpreter'
 import { getChatCardDeclaration } from './chatCardInterpreter'
-import { applyRenderIntent, applyDataDrivenIntent } from './dshRenderIntent'
+import {
+  applyDataDrivenIntent,
+  applyRenderIntent,
+  buildRenderContext,
+  deriveCardMeta,
+  getRenderIntent,
+  inferRenderIntent,
+} from './dshRenderIntent'
 import { resolveChatCardIcon } from './chatCardIconRegistry'
 import { buildOutputSchemaView, getOutputSchema } from './outputSchemaView'
 import type { ToolCallContext } from './chatCardInterpreter'
@@ -108,6 +115,59 @@ export function getToolCardConfig(toolName: string): ToolCardConfig | undefined 
 }
 
 /**
+ * 注入文件打开能力（filePath + onOpenFile）。
+ *
+ * onOpenFile 第二参为 record 上的 containerTaskId；调用方可通过 options.onOpenFile
+ * 接管并改用当前 Tab 的 taskId（优先于 record 值）。
+ */
+function injectFileOpen(
+  activity: ActivityData,
+  filePath: string,
+  toolCall: MessageToolCall,
+  options?: { onOpenFile?: (filePath: string, containerTaskId?: string) => void | Promise<void> },
+): ActivityData {
+  const openFileCallback = options?.onOpenFile || getGlobalOpenFileCallback()
+  const recordTaskId = toolCall.containerTaskId
+  return {
+    ...activity,
+    filePath,
+    onOpenFile: () => openFileCallback(filePath, recordTaskId),
+  }
+}
+
+/**
+ * render 意图分支（声明/数据路由）的条目增强：标题人性化 + 摘要行 +
+ * 文件打开入口注入。
+ *
+ * 双路由落地后全量工具走 render 分支早退，此前该分支只设置 details——
+ * filePath/onOpenFile 注入与标题人性化被跳过（读文件卡片无法打开文件、
+ * 条目显示原始工具名），此处统一补齐。
+ */
+function applyCardMeta(
+  enhanced: ActivityData,
+  base: ActivityData,
+  toolCall: MessageToolCall,
+  options?: { onOpenFile?: (filePath: string, containerTaskId?: string) => void | Promise<void> },
+): ActivityData {
+  const ctx = buildRenderContext(toolCall)
+  // 声明意图优先；数据路由分支（applyDataDrivenIntent 产物）按数据形状重推
+  const intent = getRenderIntent(base.toolName!) ?? inferRenderIntent(ctx)
+  const meta = intent ? deriveCardMeta(ctx, intent) : {}
+  const result: ActivityData = {
+    ...enhanced,
+    // render 分支不改标题：沿用工具名人性化（与 L0/契约视图口径一致）
+    title: enhanced.title === base.title ? humanizeToolName(base.toolName!) : enhanced.title,
+  }
+  if (meta.summary) {
+    result.subtitle = meta.summary
+  }
+  if (meta.filePath) {
+    return injectFileOpen(result, meta.filePath, toolCall, options)
+  }
+  return result
+}
+
+/**
  * 使用工具配置增强 ActivityData
  *
  * 在 toolCallToActivity 转换后调用，用工具配置覆盖/增强默认渲染
@@ -127,7 +187,7 @@ export function enhanceActivityWithToolConfig(
   // dshRenderIntent 注册表）——工具作者对输出形态的契约，最高优先。
   const rendered = applyRenderIntent(activity, toolCall)
   if (rendered) {
-    return rendered
+    return applyCardMeta(rendered, activity, toolCall, options)
   }
 
   // 插件 ui.chat_card 声明（后端经 /api/v1/schema 的 tools[].ui.chat_card
@@ -161,8 +221,7 @@ export function enhanceActivityWithToolConfig(
       const openFileCallback = options?.onOpenFile || getGlobalOpenFileCallback()
       const recordTaskId = toolCall.containerTaskId
       enhanced.onOpenFile = () => openFileCallback(interpreted.filePath as string, recordTaskId)
-    }
-    // 声明 diffStat 求值产出 → 注入 activity.diffStat（等价手写 buildDiffStat，头部 +X -Y 徽标）
+    }    // 声明 diffStat 求值产出 → 注入 activity.diffStat（等价手写 buildDiffStat，头部 +X -Y 徽标）
     if (interpreted.diffStat) {
       enhanced.diffStat = interpreted.diffStat
     }
@@ -197,7 +256,7 @@ export function enhanceActivityWithToolConfig(
   // 永远优先；未命中落下方手写 registry / L0 通用数据渲染。
   const dataDriven = applyDataDrivenIntent(activity, toolCall)
   if (dataDriven) {
-    return dataDriven
+    return applyCardMeta(dataDriven, activity, toolCall, options)
   }
 
   const config = getToolCardConfig(activity.toolName)
@@ -244,12 +303,7 @@ export function enhanceActivityWithToolConfig(
   if (config.hasFilePath) {
     const filePath = extractFilePath(toolCall)
     if (filePath) {
-      enhanced.filePath = filePath
-      // onOpenFile 第二参为 record 上的 containerTaskId；调用方可通过 options.onOpenFile
-      // 接管并改用当前 Tab 的 taskId（优先于 record 值）。
-      const openFileCallback = options?.onOpenFile || getGlobalOpenFileCallback()
-      const recordTaskId = toolCall.containerTaskId
-      enhanced.onOpenFile = () => openFileCallback(filePath, recordTaskId)
+      Object.assign(enhanced, injectFileOpen(enhanced, filePath, toolCall, options))
     }
   }
 

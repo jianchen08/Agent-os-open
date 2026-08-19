@@ -12,6 +12,7 @@ import {
   applyDataDrivenIntent,
   applyRenderIntent,
   clearRenderIntents,
+  deriveCardMeta,
   diffPayload,
   filePayload,
   formPayload,
@@ -404,5 +405,55 @@ describe('renderIntentToBlocks / applyRenderIntent（级联集成）', () => {
     const activity = { type: 'tool_call', toolName: 'dsh_read' } as ActivityData
     const toolCall = { tool_args: {}, resultData: { unrelated: true } } as MessageToolCall
     expect(applyRenderIntent(activity, toolCall)).toBeNull()
+  })
+})
+
+describe('deriveCardMeta（条目元信息提取：summary/filePath）', () => {
+  const meta = (card: string, args: Record<string, unknown>, result: Record<string, unknown>, bindings?: Record<string, string>) =>
+    deriveCardMeta(ctx(args, result), intent(card, bindings))
+
+  it('read/file/image 卡 → summary=路径 + filePath（工作区打开入口）', () => {
+    expect(meta('read', { file_path: 'src/a.py' }, { file: 'src/a.py', content: 'x' })).toEqual({
+      summary: 'src/a.py',
+      filePath: 'src/a.py',
+    })
+    expect(meta('file', {}, { path: 'out/report.md' })).toEqual({
+      summary: 'out/report.md',
+      filePath: 'out/report.md',
+    })
+    expect(meta('image', {}, { path: 'shots/x.png' })).toEqual({
+      summary: 'shots/x.png',
+      filePath: 'shots/x.png',
+    })
+  })
+
+  it('read 卡 bindings.path 覆盖字段族', () => {
+    expect(meta('read', { f: 'custom.rs' }, {}, { path: 'args.f' })).toEqual({
+      summary: 'custom.rs',
+      filePath: 'custom.rs',
+    })
+  })
+
+  it('terminal/web/search 卡 → 仅 summary（命令/URL/查询词）', () => {
+    expect(meta('terminal', { command: 'cargo test' }, {})).toEqual({ summary: 'cargo test' })
+    expect(meta('web', { url: 'https://a.com' }, {})).toEqual({ summary: 'https://a.com' })
+    expect(meta('search', { query: 'foo' }, {})).toEqual({ summary: 'foo' })
+  })
+
+  it('diff 卡：单文件对可打开；多文件 diffs 只给摘要；无路径返回空', () => {
+    expect(meta('diff', { file_path: 'a.md' }, { old_content: 'x', new_content: 'y' })).toEqual({
+      summary: 'a.md',
+      filePath: 'a.md',
+    })
+    expect(meta('diff', {}, { diffs: [{ path: 'a.py' }, { path: 'b.py' }] })).toEqual({
+      summary: 'a.py 等 2 个文件',
+    })
+    expect(meta('diff', {}, { old_content: 'x', new_content: 'y' })).toEqual({})
+  })
+
+  it('table/form/generic 卡 → 无元信息', () => {
+    expect(meta('form', { a: 1 }, { b: 2 })).toEqual({})
+    expect(meta('table', {}, { d: [['x']] })).toEqual({})
+    expect(meta('generic', {}, {})).toEqual({})
   })
 })
