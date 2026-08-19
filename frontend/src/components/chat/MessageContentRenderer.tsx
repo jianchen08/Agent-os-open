@@ -80,13 +80,9 @@ function DefaultToolCallRenderer(
           )}
         />
       )}
-      {/* 透传 w-full max-w-full：ActivityCard 默认 w-fit max-w-[85%] 是自适应内容宽度的
-          紧凑卡片样式，不适合消息流（会窄于气泡）；此处覆盖为占满父容器（气泡）宽度，
-          与 assistant 气泡对齐。不影响 ExecutionCardLoader 等其他调用场景（其不传 className）。 */}
-      <ActivityCard
-        activity={fragment.activity}
-        className="w-full max-w-full"
-      />
+      {/* ActivityCard 默认即满宽（w-full max-w-full，工具卡统一形态 2026-08-19）：
+          早期默认 w-fit max-w-[85%] 需调用方覆盖，现默认满宽与 assistant 气泡对齐。 */}
+      <ActivityCard activity={fragment.activity} />
     </div>
   )
 }

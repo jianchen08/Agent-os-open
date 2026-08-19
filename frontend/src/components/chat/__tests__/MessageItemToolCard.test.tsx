@@ -1,24 +1,27 @@
 /**
- * 工具卡片（tool card）UI 优化测试
+ * 工具卡片（tool card）统一形态测试（2026-08-19 统一改造后）
  *
- * 验证 AC-工具卡片UI-1 ~ AC-工具卡片UI-4：
- * 1. 工具卡片宽度对齐气泡宽度（不超出气泡）
- * 2. 长参数（输入/输出结果）自动换行显示
- * 3. 超长结果固定高度 + 滚动条浏览
- * 4. 工具出错时不自动展开（默认折叠，点击才展开）
+ * 独立 tool 消息（未被 assistant parts 吸收的兜底路径）不再用自制"文本行 +
+ * 状态药丸 + 查看详情"样式，统一走 ActivityCard（与消息流 parts 吸收路径同款
+ * 满宽卡：registry 增强、render 卡、subtitle、打开文件入口、时长格式化）。
  *
- * 测试策略：
- * - 渲染 MessageItem 的 isTool 分支（role === 'tool'）
- * - 断言 DOM 类名（jsdom 无 CSS 引擎，宽度/换行/滚动类名即渲染契约）
- * - 断言展开/折叠的可见性行为（可观察交互）
+ * 验证 AC：
+ * 1. 容器宽度对齐气泡（max-w-[calc(100%-44px)]）且卡片满宽（w-full max-w-full）
+ * 2. 长结果展开可读（统一滚动/换行样式契约）
+ * 3. 出错默认折叠，点击头部展开
+ * 4. 旧 UI 退役：无状态药丸文本、无裸时长字符串
+ * 5. 统一增强管线：声明 render 的工具拿到人性化标题/subtitle/打开文件入口
  */
 import { fireEvent, render, screen } from '@testing-library/react'
-import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { MessageItem } from '../MessageItem'
+import { clearRenderIntents, loadRenderIntents } from '@/utils/dshRenderIntent'
 import type { Message } from '@/types/models'
 
 // ============================================================
 // Mock 外部依赖（MessageItem 依赖较重，仅保留被测分支需要的最小依赖）
+// 注：不再 mock toolCardRegistry —— 统一后 isTool 分支走真实增强管线
+// （activityConverter → toolCardRegistry → render 意图路由），mock 会砍断链路。
 // ============================================================
 
 vi.mock('@/stores/sessionStore', () => ({
@@ -31,13 +34,6 @@ vi.mock('@/stores/agentStore', () => ({
 
 vi.mock('@/stores/interactionStore', () => ({
   useInteractionStore: () => ({ pendingInteractions: [] }),
-}))
-
-vi.mock('@/utils/toolCardRegistry', () => ({
-  safeParseResult: (result: unknown) =>
-    result !== null && typeof result === 'object'
-      ? (result as Record<string, unknown>)
-      : null,
 }))
 
 vi.mock('@/services/errorReporting', () => ({
@@ -77,94 +73,69 @@ function makeToolMessage(overrides: Partial<Message> = {}): Message {
     status: 'completed',
     toolName: 'search',
     ...overrides,
-  }
+  } as Message
+}
+
+/** 展开卡片（点卡片头部标题切换；'search' 工具人性化标题为 'Search'） */
+function expandCard() {
+  fireEvent.click(screen.getByText('Search'))
 }
 
 // ============================================================
 // 测试套件
 // ============================================================
 
-describe('AC-工具卡片UI: 工具卡片 UI 优化', () => {
+describe('工具卡统一形态: 独立 tool 消息走 ActivityCard（2026-08-19）', () => {
   beforeEach(() => {
     vi.clearAllMocks()
   })
+  afterEach(() => clearRenderIntents())
 
-  // ----------------------------------------------------------
-  // AC1: 宽度对齐气泡
-  // ----------------------------------------------------------
-  describe('AC1: 宽度对齐气泡', () => {
-    it('工具卡片容器应含气泡同宽约束类（max-w-[calc(100%-44px)]），不超出气泡', () => {
-      render(
-        <MessageItem
-          message={makeToolMessage({ toolResult: '结果' })}
-        />,
-      )
+  describe('AC1: 宽度对齐气泡 + 卡片满宽', () => {
+    it('容器含气泡同宽约束（max-w-[calc(100%-44px)]），卡片含满宽类（w-full max-w-full）', () => {
+      render(<MessageItem message={makeToolMessage({ toolResult: '结果' })} />)
 
-      const card = screen.getByTestId('message-item')
+      const container = screen.getByTestId('message-item')
+      expect(container.getAttribute('data-role')).toBe('tool')
+      expect(container.className).toContain('max-w-[calc(100%-44px)]')
+
+      const card = document.querySelector('[data-activity-type="tool_call"]')
       expect(card).toBeInTheDocument()
-      expect(card.getAttribute('data-role')).toBe('tool')
-
-      // 气泡宽度约束：与 assistant 气泡一致（max-w-[calc(100%-44px)]）
-      expect(card.className).toContain('max-w-[calc(100%-44px)]')
+      expect(card!.className).toContain('w-full')
+      expect(card!.className).toContain('max-w-full')
+      // 紧凑变体类已退役
+      expect(card!.className).not.toContain('w-fit')
     })
   })
 
-  // ----------------------------------------------------------
-  // AC2: 长文本自动换行
-  // ----------------------------------------------------------
-  describe('AC2: 长参数/结果自动换行', () => {
-    it('结果容器应含语义换行类（whitespace-pre-wrap/break-words），不含 break-all（防中文每字一行）与 truncate', () => {
-      const longResult = 'x'.repeat(2000)
+  describe('AC2+AC3: 长结果展开可读（统一滚动/换行样式）', () => {
+    it('展开后超长对象结果入 json 块：max-h + overflow-y-auto + 语义换行，无 break-all', () => {
       render(
         <MessageItem
-          message={makeToolMessage({ toolResult: longResult })}
+          message={makeToolMessage({
+            toolResult: { data: { rows: 'x'.repeat(2000) } },
+          })}
         />,
       )
 
-      // 默认折叠，先展开
-      fireEvent.click(screen.getByTestId('tool-card-toggle'))
+      // 默认折叠：内容不可见
+      expect(screen.queryByText(/x{50}/)).not.toBeInTheDocument()
 
-      const resultArea = document.querySelector('[data-testid="tool-card-body"]')
-      expect(resultArea).toBeInTheDocument()
-
-      // 必须含换行类（长字符串不横向溢出）
-      expect(resultArea!.className).toContain('whitespace-pre-wrap')
-      // break-words（overflow-wrap: break-word）：中文按语义换行，仅超长单词/URL 断词
-      expect(resultArea!.className).toContain('break-words')
-      // 禁止 break-all（word-break: break-all 对中文强制每字符断行 → 每字一行）
-      expect(resultArea!.className).not.toContain('break-all')
-      // 禁止 truncate（nowrap 单行截断会阻止换行）
-      expect(resultArea!.className).not.toContain('truncate')
+      expandCard()
+      // 嵌套对象块（collapsible）再展开
+      fireEvent.click(screen.getByText('data'))
+      const pre = document.querySelector('[data-activity-type="tool_call"] pre')
+      expect(pre).toBeInTheDocument()
+      expect(pre!.className).toContain('max-h-40')
+      expect(pre!.className).toContain('overflow-y-auto')
+      expect(pre!.className).toContain('whitespace-pre-wrap')
+      expect(pre!.className).toContain('break-words')
+      expect(pre!.className).not.toContain('break-all')
     })
   })
 
-  // ----------------------------------------------------------
-  // AC3: 超长结果滚动
-  // ----------------------------------------------------------
-  describe('AC3: 超长结果滚动浏览', () => {
-    it('结果容器应含固定最大高度 + overflow-y-auto 滚动条', () => {
-      render(
-        <MessageItem
-          message={makeToolMessage({ toolResult: 'y'.repeat(5000) })}
-        />,
-      )
-
-      fireEvent.click(screen.getByTestId('tool-card-toggle'))
-
-      const body = document.querySelector('[data-testid="tool-card-body"]')
-      expect(body).toBeInTheDocument()
-      // 固定最大高度（max-h-*）
-      expect(body!.className).toMatch(/max-h-/)
-      // 纵向滚动
-      expect(body!.className).toContain('overflow-y-auto')
-    })
-  })
-
-  // ----------------------------------------------------------
-  // AC4: 出错不自动展开
-  // ----------------------------------------------------------
   describe('AC4: 出错不自动展开（默认折叠）', () => {
-    it('含错误信息的工具卡片默认折叠，错误内容不可见；点击展开后才可见', () => {
+    it('含错误的工具卡默认折叠，点击头部展开后错误可见，再点折叠', () => {
       render(
         <MessageItem
           message={makeToolMessage({
@@ -175,46 +146,49 @@ describe('AC-工具卡片UI: 工具卡片 UI 优化', () => {
         />,
       )
 
-      // 默认折叠：错误内容不可见
       expect(screen.queryByText(/连接超时/)).not.toBeInTheDocument()
 
-      // 点击展开按钮 → 错误可见
-      fireEvent.click(screen.getByTestId('tool-card-toggle'))
+      expandCard()
       expect(screen.getByText(/连接超时/)).toBeInTheDocument()
 
-      // 再次点击折叠 → 错误隐藏
-      fireEvent.click(screen.getByTestId('tool-card-toggle'))
+      expandCard()
       expect(screen.queryByText(/连接超时/)).not.toBeInTheDocument()
     })
+  })
 
-    it('含错误的工具卡片应有可点击的展开按钮（默认显示折叠态箭头）', () => {
+  describe('旧 UI 退役：状态药丸与裸时长不再出现', () => {
+    it('无"已完成"药丸文本；时长经 formatDuration 格式化（浮点不再原样输出）', () => {
       render(
         <MessageItem
-          message={makeToolMessage({ status: 'failed', toolError: '错误' })}
+          message={makeToolMessage({ toolResult: 'ok', durationMs: 1234.5678 })}
         />,
       )
 
-      const toggle = screen.getByTestId('tool-card-toggle')
-      expect(toggle).toBeInTheDocument()
-      expect(toggle.tagName).toBe('BUTTON')
-      expect(toggle.getAttribute('aria-expanded')).toBe('false')
-
-      fireEvent.click(toggle)
-      expect(toggle.getAttribute('aria-expanded')).toBe('true')
+      expect(screen.queryByText('已完成')).not.toBeInTheDocument()
+      expect(screen.queryByText('查看详情')).not.toBeInTheDocument()
+      expect(screen.getByText('1.2s')).toBeInTheDocument()
+      expect(screen.queryByText(/1234\.5678/)).not.toBeInTheDocument()
     })
+  })
 
-    it('成功但结果超长的工具卡片同样默认折叠（统一折叠行为）', () => {
+  describe('统一增强管线：声明 render 的工具与消息流同款渲染', () => {
+    it('file_read（read 卡声明）→ 人性化标题 + subtitle + 打开文件入口', () => {
+      loadRenderIntents([{ name: 'file_read', render: { card: 'read' } }])
       render(
         <MessageItem
-          message={makeToolMessage({ toolResult: '正常结果' })}
+          message={makeToolMessage({
+            toolName: 'file_read',
+            toolResult: { file: 'src/main.py', content: 'print(1)' },
+            metadata: { args: { path: 'src/main.py' } },
+          })}
         />,
       )
 
-      // 默认折叠：结果内容不可见
-      expect(screen.queryByText(/正常结果/)).not.toBeInTheDocument()
-
-      fireEvent.click(screen.getByTestId('tool-card-toggle'))
-      expect(screen.getByText(/正常结果/)).toBeInTheDocument()
+      expect(screen.getByText('读取文件')).toBeInTheDocument()
+      expect(screen.getByText('src/main.py')).toBeInTheDocument() // subtitle 摘要
+      expect(
+        screen.getByRole('button', { name: '打开文件 src/main.py' }),
+      ).toBeInTheDocument()
     })
   })
 })

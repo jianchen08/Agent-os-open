@@ -718,7 +718,8 @@ const ActivityCard: FC<ActivityCardProps> = ({
     <div
       className={cn(
         'border-border/40 bg-card relative my-1 overflow-hidden rounded-lg border text-xs transition-all',
-        'w-fit max-w-[85%]',
+        // 满宽：与消息气泡同宽（工具卡统一形态——不再提供紧凑自适应变体）
+        'w-full max-w-full',
         activity.customClassName,
         className,
       )}

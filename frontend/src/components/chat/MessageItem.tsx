@@ -4,8 +4,6 @@ import {
   Bell,
   Bot,
   Check,
-  ChevronDown,
-  ChevronRight,
   FileCode,
   FileText,
   FileIcon as FileGeneric,
@@ -15,10 +13,10 @@ import {
   User,
 } from '@/assets/icons'
 import { memo, useEffect, useRef, useState } from 'react'
+import ActivityCard from './ActivityCard'
 import { ImageGallery } from '@/components/media/ImageGallery'
 import { Avatar, AvatarFallback } from '@/components/ui/avatar'
 import { Button } from '@/components/ui/button'
-import { TOOL_CONTENT_SCROLL_CLASS } from '@/lib/toolCardStyles'
 import { cn } from '@/lib/utils'
 import { ErrorType, reportError } from '@/services/errorReporting'
 import { openAttachment } from '@/services/attachmentOpener'
@@ -26,12 +24,14 @@ import { useAgentStore } from '@/stores/agentStore'
 import { useInteractionStore } from '@/stores/interactionStore'
 import { useSessionStore } from '@/stores/sessionStore'
 import { formatTimestamp } from '@/utils/format'
-import { safeParseResult } from '@/utils/toolCardRegistry'
+import { toolCallToActivity } from '@/utils/activityConverter'
+import { getGlobalOpenFileCallback } from '@/utils/toolCardRegistry'
 import useMessageRender from './hooks/useMessageRender'
 import { MessageActions } from './MessageActions'
 import MessageContentRenderer from './MessageContentRenderer'
 import { parseReferenceMessage, ReferenceChip } from './ReferenceChip'
 import type { MessageItemProps } from './types'
+import type { MessageToolCall } from '@/types/models'
 
 /** 消息编辑组件 */
 interface MessageEditorProps {
@@ -130,8 +130,6 @@ export const MessageItem = memo(function MessageItem({
 }: MessageItemProps) {
   const [isEditing, setIsEditing] = useState(false)
   const [versionContent, setVersionContent] = useState<string | null>(null)
-  /** 工具卡片展开状态：默认折叠（含错误也默认折叠，用户点击才展开） */
-  const [toolCardExpanded, setToolCardExpanded] = useState(false)
 
   const isUser = message.role === 'user'
   const isAssistant = message.role === 'assistant'
@@ -196,13 +194,40 @@ export const MessageItem = memo(function MessageItem({
     taskId,
   })
 
-  /** 工具消息独立渲染 */
+  /** 工具消息独立渲染：统一走 ActivityCard（与消息流 parts 吸收路径同款满宽卡，2026-08-19 统一） */
   if (isTool) {
     const toolName: string = message.toolName || (message.metadata?.name as string | undefined) || '工具'
     const toolStatus: string = message.status || 'completed'
     const toolResult: unknown = message.toolResult || message.metadata?.result || message.metadata?.output
     const toolError: unknown = message.toolError || message.metadata?.error
     const durationMs: unknown = message.durationMs || message.metadata?.duration_ms
+
+    const statusMap: Record<string, MessageToolCall['status']> = {
+      completed: 'completed',
+      failed: 'failed',
+      running: 'running',
+      streaming: 'running',
+      pending: 'pending',
+      cancelled: 'cancelled',
+    }
+
+    const activity = toolCallToActivity(
+      {
+        call_id: message.toolCallId || message.id,
+        tool_name: toolName,
+        tool_args: (message.metadata?.args as Record<string, unknown> | undefined) ?? {},
+        status: statusMap[toolStatus] ?? 'completed',
+        result: toolResult,
+        resultData: message.toolResultData,
+        error: typeof toolError === 'string' ? toolError : undefined,
+        duration_ms: typeof durationMs === 'number' ? durationMs : undefined,
+        containerTaskId: message.metadata?.containerTaskId as string | undefined,
+      },
+      {
+        onOpenFile: (filePath, recordCtid) =>
+          getGlobalOpenFileCallback()(filePath, recordCtid ?? taskId),
+      },
+    )
 
     return (
       <div
@@ -215,90 +240,7 @@ export const MessageItem = memo(function MessageItem({
         data-role="tool"
       >
         <div className="min-w-0 flex-1">
-          <div className="flex items-center gap-2 text-sm">
-            <span className="text-muted-foreground min-w-0 flex-1 truncate font-medium">
-              {toolName}
-            </span>
-            <span
-              className={cn(
-                'rounded-full px-2 py-0.5 text-xs',
-                toolStatus === 'completed'
-                  ? 'bg-status-success/15 text-status-success'
-                  : toolStatus === 'failed'
-                    ? 'bg-status-error/15 text-status-error'
-                    : toolStatus === 'running'
-                      ? 'bg-status-info/15 text-status-info'
-                      : 'bg-status-pending/15 text-status-pending',
-              )}
-            >
-              {toolStatus === 'completed'
-                ? '已完成'
-                : toolStatus === 'failed'
-                  ? '失败'
-                  : toolStatus === 'running'
-                    ? '执行中'
-                    : toolStatus}
-            </span>
-            {durationMs ? <span className="text-muted-foreground text-xs">{String(durationMs)}ms</span> : null}
-            {/* 展开/折叠按钮：默认折叠，点击才展开详情（含错误时也不自动展开） */}
-            <button
-              type="button"
-              data-testid="tool-card-toggle"
-              aria-expanded={toolCardExpanded}
-              aria-label={toolCardExpanded ? '收起工具详情' : '查看工具详情'}
-              onClick={() => setToolCardExpanded((v) => !v)}
-              className="text-muted-foreground hover:text-foreground flex flex-shrink-0 cursor-pointer items-center gap-1 rounded px-1 py-0.5 text-xs transition-colors"
-            >
-              {toolCardExpanded ? (
-                <ChevronDown className="h-icon-xs w-icon-xs" />
-              ) : (
-                <ChevronRight className="h-icon-xs w-icon-xs" />
-              )}
-              {toolCardExpanded ? '收起' : '查看详情'}
-            </button>
-          </div>
-
-          {toolCardExpanded && (
-            <div
-              data-testid="tool-card-body"
-              className={`mt-1 space-y-1 text-sm ${TOOL_CONTENT_SCROLL_CLASS}`}
-            >
-              {toolError ? <div className="text-status-error">{String(toolError)}</div> : null}
-              {toolResult ? (
-                <div className="text-muted-foreground">
-                  {(() => {
-                    const parsed = safeParseResult(toolResult)
-                    if (parsed) {
-                      const output = parsed.output as Record<string, unknown> | undefined
-                      const taskId = (output?.task_id as string) || (parsed.task_id as string) || ''
-                      const status = (output?.status as string) || (parsed.status as string) || ''
-                      const message = (output?.message as string) || (parsed.message as string) || ''
-                      const parts: string[] = []
-                      if (taskId) parts.push(`任务ID: ${taskId}`)
-                      if (status) parts.push(`状态: ${status}`)
-                      if (message) parts.push(message)
-                      return parts.length > 0 ? (
-                        <div className="space-y-0.5">
-                          {parts.map((p, i) => (
-                            <div key={i} className="break-words whitespace-pre-wrap">
-                              {p}
-                            </div>
-                          ))}
-                        </div>
-                      ) : (
-                        <pre className="break-words whitespace-pre-wrap">{JSON.stringify(parsed, null, 2)}</pre>
-                      )
-                    }
-                    return (
-                      <span className="break-words whitespace-pre-wrap">
-                        {typeof toolResult === 'string' ? toolResult : JSON.stringify(toolResult)}
-                      </span>
-                    )
-                  })()}
-                </div>
-              ) : null}
-            </div>
-          )}
+          <ActivityCard activity={activity} />
         </div>
       </div>
     )
