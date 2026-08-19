@@ -22,6 +22,7 @@ F-REVIEW-2 扩展（review 真实完成事件，轮询语义）：
 from __future__ import annotations
 
 import importlib.util
+import json
 import sys
 from pathlib import Path
 from typing import Any
@@ -83,7 +84,9 @@ def _inject_pipeline_capability(
     此处仅 mock get_run_status（get_report 轮询链路）。
     """
 
-    async def fake_call(method: str, params: dict[str, Any]) -> dict[str, Any]:
+    async def fake_call(
+        method: str, params: dict[str, Any], timeout: float | None = None
+    ) -> dict[str, Any]:
         if method == "get_run_status":
             return {"run_id": run_id, "status": status}
         raise AssertionError(f"unexpected capability method: {method}")
@@ -263,7 +266,9 @@ class TestGetReportRunStatusPolling:
     async def test_run_status_call_failure_keeps_running(self, mod: Any) -> None:
         """内核 get_run_status 报错 → 降级保持 running，不崩。"""
 
-        async def failing_call(method: str, params: dict[str, Any]) -> dict[str, Any]:
+        async def failing_call(
+            method: str, params: dict[str, Any], timeout: float | None = None
+        ) -> dict[str, Any]:
             raise RuntimeError("kernel unreachable")
 
         mod.plugin._capabilities["pipeline-executor"] = CapabilityHandle(
@@ -305,7 +310,9 @@ def _inject_chat_capability(mod: Any, result: Any = None, error: Exception | Non
     """注入 fake chat 能力，记录 send_message 入参。"""
     calls: list[dict] = []
 
-    async def fake_call(method: str, params: dict[str, Any]) -> Any:
+    async def fake_call(
+        method: str, params: dict[str, Any], timeout: float | None = None
+    ) -> Any:
         assert method == "send_message"
         calls.append(params)
         if error:
@@ -322,7 +329,9 @@ def _inject_chat_capability(mod: Any, result: Any = None, error: Exception | Non
 def _inject_pipeline_state_capability(mod: Any, rows: list[dict]) -> None:
     """注入 fake pipeline-state 能力（get_report 轮询复盘管道状态）。"""
 
-    async def fake_call(method: str, params: dict[str, Any]) -> Any:
+    async def fake_call(
+        method: str, params: dict[str, Any], timeout: float | None = None
+    ) -> Any:
         assert method == "list"
         return rows
 
@@ -372,6 +381,144 @@ class TestTriggerReviewDispatch:
         _inject_chat_capability(mod, error=RuntimeError("kernel down"))
         r = await mod.trigger_review(task_id="task-1", summary="s")
         assert r["mode"] == "local_degrade"
+
+
+# ═══════════════════════════════════════════════════════════
+# G3 冷读兜底：sidecar 重启后 get_report 从 Hindsight 取回已持久化报告
+# （0.2 收尾 §3.1；IMemoryBackend 只有相似度 search，无按 id/tags 精确检索，
+#  精确校验 review_id == 入参由读侧自行完成，防相似度误召回）
+# ═══════════════════════════════════════════════════════════
+
+
+class _StubMemoryBackend:
+    """IMemoryBackend 替身：记录 add/search 调用，返回统一形态条目。
+
+    条目形态对齐 HindsightBackend._map_hindsight_results 输出：
+    {id, content, score, memory_type, metadata}——content 为报告 JSON 串。
+    """
+
+    def __init__(self) -> None:
+        self.entries: list[dict[str, Any]] = []
+        self.search_calls: list[dict[str, Any]] = []
+        self.search_error: Exception | None = None
+
+    async def add(
+        self,
+        user_id: str,
+        content: str,
+        memory_type: str = "semantic",
+        tags: list[str] | None = None,
+        source: str = "",
+    ) -> str:
+        self.entries.append(
+            {
+                "id": f"mem-{len(self.entries) + 1}",
+                "content": content,
+                "memory_type": memory_type,
+                "metadata": {"tags": tags or [], "source": source, "bank": user_id},
+            }
+        )
+        return f"mem-{len(self.entries)}"
+
+    async def search(
+        self,
+        query: str,
+        user_id: str,
+        top_k: int = 5,
+        memory_type: str | None = None,
+    ) -> list[dict[str, Any]]:
+        self.search_calls.append(
+            {
+                "query": query,
+                "user_id": user_id,
+                "top_k": top_k,
+                "memory_type": memory_type,
+            }
+        )
+        if self.search_error is not None:
+            raise self.search_error
+        return [dict(entry, score=0.9) for entry in self.entries[:top_k]]
+
+
+class TestStoreReportFixedBank:
+    async def test_store_report_writes_fixed_review_bank(
+        self, mod: Any, mock_backend: AsyncMock
+    ) -> None:
+        """写侧 user_id 固定 "review" bank（冷读定向检索前提），不随 task_id 漂移。
+
+        task_id 信息保留在 content JSON 内不丢（报告体本身含 task_id 字段）。
+        """
+        mod.set_memory_backend(mock_backend)
+        await mod.store_report(
+            "review-b1", {"task_id": "task-b1", "lessons": ["l"]}
+        )
+        kwargs = mock_backend.add.call_args.kwargs
+        assert kwargs["user_id"] == "review"
+
+
+class TestGetReportColdRead:
+    async def test_cold_read_recovers_report_after_restart(self, mod: Any) -> None:
+        """红1：_reports 清空（模拟 sidecar 重启）→ 经 Hindsight 取回已持久化报告。"""
+        stub = _StubMemoryBackend()
+        mod.set_memory_backend(stub)
+        await mod.store_report(
+            "review-c1",
+            {"task_id": "task-c1", "summary": "冷读报告", "lessons": ["l-c1"]},
+        )
+        mod._reports.clear()  # 模拟重启丢内存
+
+        got = await mod.get_report("review-c1")
+        assert got.get("error") is None
+        assert got["review_id"] == "review-c1"
+        assert got["status"] == "completed"
+        assert got["lessons"] == ["l-c1"]
+        # 回填内存：后续 get_report 直接走内存路径
+        assert mod._reports["review-c1"]["status"] == "completed"
+        # 检索参数：定向 review bank + memory_type=review 过滤
+        assert stub.search_calls, "冷读应调用 backend.search"
+        last = stub.search_calls[-1]
+        assert last["user_id"] == "review"
+        assert last["memory_type"] == "review"
+        assert last["query"] == "review-c1"
+
+    async def test_cold_read_rejects_mismatched_review_id(self, mod: Any) -> None:
+        """红2：search 相似召回但 review_id 不匹配（含非 JSON 条目）→ 精确校验
+        拒绝采纳，维持 not found，不污染 _reports。"""
+        stub = _StubMemoryBackend()
+        stub.entries.append(
+            {
+                "id": "mem-1",
+                "content": json.dumps(
+                    {"review_id": "review-OTHER", "status": "completed", "lessons": ["x"]}
+                ),
+                "memory_type": "review",
+                "metadata": {},
+            }
+        )
+        stub.entries.append(
+            {"id": "mem-2", "content": "not-a-json-content", "memory_type": "review", "metadata": {}}
+        )
+        mod.set_memory_backend(stub)
+
+        got = await mod.get_report("review-missing")
+        assert got == {"error": "review not found", "review_id": "review-missing"}
+        assert "review-missing" not in mod._reports
+
+    async def test_cold_read_without_backend_still_not_found(self, mod: Any) -> None:
+        """红3：_memory_backend=None（降级）→ not found 且不抛异常。"""
+        got = await mod.get_report("review-none")
+        assert got == {"error": "review not found", "review_id": "review-none"}
+
+    async def test_cold_read_search_failure_degrades_to_not_found(self, mod: Any) -> None:
+        """检索异常（HindsightBackend.search 上抛 RuntimeError 形态）→ 退回
+        not found 并告警，不崩 get_report。"""
+        stub = _StubMemoryBackend()
+        stub.search_error = RuntimeError("hindsight.recall 调用失败: sidecar down")
+        mod.set_memory_backend(stub)
+
+        got = await mod.get_report("review-err")
+        assert got == {"error": "review not found", "review_id": "review-err"}
+        assert "review-err" not in mod._reports
 
 
 class TestGetReportPipelinePoll:

@@ -96,10 +96,13 @@ async def store_report(review_id: str, report: dict[str, Any]) -> None:
     _reports[review_id] = existing
 
     # 持久化到长期记忆后端（Hindsight）。未注入时降级，仅保留内存路径。
+    # user_id 固定 "review" bank：冷读时调用方只有 review_id、不知道 task_id，
+    # 无法定向查 task_id bank——bank 固定后 get_report 冷读才能定向检索
+    # （task_id 保留在 content JSON 内不丢；存量 task_id bank 报告接受召回不全）。
     if _memory_backend is not None:
         try:
             await _memory_backend.add(
-                user_id=existing.get("task_id") or "review",
+                user_id="review",
                 content=json.dumps(existing, ensure_ascii=False),
                 memory_type="review",
                 tags=[f"review_id:{review_id}", "review_report"],
@@ -278,11 +281,15 @@ async def get_report(review_id: str) -> dict[str, Any]:
     - 报告已回写（store_report 调用过）：返回完整报告，status=completed
     - 子管道进行中：经 pipeline-executor.get_run_status 惰性轮询 run 状态——
       run 真实完成才落 completed，失败落 failed，进行中保持 running
+    - 内存未命中（sidecar 重启/回收丢内存）：冷读兜底——经记忆后端从
+      Hindsight 取回已持久化报告（见 _cold_read_report）
     - 未找到：返回 error
     """
     report = _reports.get(review_id)
     if report is None:
-        return {"error": "review not found", "review_id": review_id}
+        report = await _cold_read_report(review_id)
+        if report is None:
+            return {"error": "review not found", "review_id": review_id}
     # 子管道进行中：先轮询复盘管道状态（GAP-1 chat.send_message 路径），
     # 再回退既有 run_id 轮询（F-REVIEW-2 路径）。真实完成才落 completed。
     if report.get("status") == "running":
@@ -291,6 +298,57 @@ async def get_report(review_id: str) -> dict[str, Any]:
         else:
             await _maybe_finalize_on_run_completion(report)
     return report
+
+
+async def _cold_read_report(review_id: str) -> dict[str, Any] | None:
+    """冷读兜底：sidecar 重启后从 Hindsight 取回已持久化报告（G3）。
+
+    IMemoryBackend 检索面只有相似度 ``search(query, user_id, top_k,
+    memory_type)``——没有按 id/tags 精确取回的接口，tags 不参与过滤。故以
+    review_id 为 query 在固定 "review" bank 内召回 top_k=5，逐条解析 content
+    JSON，**精确匹配 review_id 字段 == 入参**才采纳（防相似度误召回），取
+    首条命中。
+
+    - ``_memory_backend`` 未注入（降级）→ 返回 None（not found 语义不变）；
+    - 检索失败（HindsightBackend.search 上抛 RuntimeError 形态）→ 告警并
+      退回 None，不崩 get_report（与写侧落库失败降级同风格）；
+    - 命中 → 反序列化回填 ``_reports[review_id]``（后续轮询语义照常）并返回。
+
+    Args:
+        review_id: 要取回的复盘 ID。
+
+    Returns:
+        完整报告 dict；无命中/降级/失败返回 None。
+    """
+    if _memory_backend is None:
+        return None
+    try:
+        rows = await _memory_backend.search(
+            query=review_id,
+            user_id="review",
+            top_k=5,
+            memory_type="review",
+        )
+    except Exception as exc:  # noqa: BLE001 — 检索失败退回 not found，不崩冷读
+        logger.warning(
+            "[Review] 报告冷读 Hindsight 失败 review_id=%s: %s", review_id, exc
+        )
+        return None
+    for row in rows or []:
+        if not isinstance(row, dict):
+            continue
+        content = row.get("content")
+        if not isinstance(content, str):
+            continue
+        try:
+            parsed = json.loads(content)
+        except (json.JSONDecodeError, TypeError, ValueError):
+            continue
+        if isinstance(parsed, dict) and parsed.get("review_id") == review_id:
+            _reports[review_id] = parsed
+            logger.info("[Review] 报告冷读回填 review_id=%s", review_id)
+            return parsed
+    return None
 
 
 async def _maybe_finalize_on_pipeline_completion(report: dict[str, Any]) -> None:
