@@ -50,6 +50,30 @@ async def _on_load(_params: dict[str, Any]) -> None:
 
     tool_mod.set_state_reader(_read_state_rows)
 
+    # P4 收敛（2026-08-20）：agent_registry 查询接 agent_manager 插件的
+    # agent.get 服务（tool-executor 显式 plugin_id 跨插件通道）。
+    # 结果信封：{"success": bool, "data": {"found": bool, "config": dict}}；
+    # 服务不可用/未启用 → 异常或 success=false → lookup 返回 None → 磁盘回退。
+    async def _agent_lookup(agent_id: str) -> dict[str, Any] | None:
+        handle = plugin.get_capability("tool-executor")
+        result = await handle.call(
+            "invoke",
+            {
+                "plugin_id": "agent_manager",
+                "tool_name": "agent.get",
+                "args": {"agent_id": agent_id},
+            },
+        )
+        if not isinstance(result, dict) or not result.get("success"):
+            return None
+        data = result.get("data")
+        if not isinstance(data, dict) or not data.get("found"):
+            return None
+        config = data.get("config")
+        return config if isinstance(config, dict) else None
+
+    tool_mod.set_agent_registry_lookup(_agent_lookup)
+
 
 # schema/description 单一事实源：tool.TaskSubmitTool.get_tool_definition()——
 # 与 manifest 声明同源同形（平铺 goal_title + allOf 容器约束）。此前此处是

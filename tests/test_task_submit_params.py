@@ -118,7 +118,13 @@ def make_tool(tool_module, service: FakeTaskService):
 
     tool_module._get_service_provider = lambda: _ProviderShim()
     tool._get_task_service = lambda: service
-    tool._validate_target_agent = lambda target_id, level: (True, "", "")
+
+    # _validate_target_agent 已 async 化（P4：registry 路径经 agent_manager
+    # agent.get 服务查询，2026-08-20）——mock 需为 async 函数
+    async def _fake_validate_target(target_id, level):
+        return (True, "", "")
+
+    tool._validate_target_agent = _fake_validate_target
     tool._check_parent_ownership = lambda level, pid: (True, None)
 
     async def fake_init_workspace(task, workspace, task_data, task_service, *, is_container=False):

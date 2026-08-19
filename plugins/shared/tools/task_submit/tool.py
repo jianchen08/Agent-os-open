@@ -5,6 +5,7 @@ import logging
 import os
 import inspect
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 # 跨插件共享类型（含 safe_enum_value）已上提到 SDK 公共依赖层 agentos_plugin_sdk。
@@ -29,22 +30,44 @@ logger = logging.getLogger(__name__)
 # 内核能力经 sidecar 注入，服务解析统一走 _get_service_provider：
 # - task_worker：已退役（0.1 执行驱动）；任务执行经 chat.send_message
 #   创建管道（GAP-1 统一：task = pipeline，run 终态回写任务状态）。
-# - workspace_lifecycle_manager / agent_registry / execution_record_storage：
-#   sidecar 无等价实例 → None（调用方已有降级守卫/磁盘回退，文档化降级）。
-# 测试可 monkeypatch 模块级 _get_service_provider 注入 mock。
+# - agent_registry：由 agent_manager 插件提供（2026-08-20 插件化收敛）——
+#   server.py on_load 经 tool-executor（显式 plugin_id=agent_manager）注入
+#   _agent_registry_lookup（async agent_id -> config dict | None）；未注入/
+#   查询失败 → None，调用方回退磁盘 rglob（行为不劣化）。
+# - workspace_lifecycle_manager / execution_record_storage：
+#   sidecar 无等价实例 → None（调用方已有降级守卫/文档化降级）。
+# 测试可 monkeypatch 模块级 _get_service_provider / set_agent_registry_lookup。
 
 class _ServiceProviderShim:
     """0.2 服务提供者适配：get(key) 返回 0.2 等价或 None（文档化降级）。"""
 
     def get(self, key: str) -> Any:
-        # workspace_lifecycle_manager / agent_registry / execution_record_storage
-        # 0.2 sidecar 无等价实例：调用方已有降级守卫（agent_registry 有磁盘回退）。
+        # agent_registry 经 set_agent_registry_lookup 注入的查询钩子承接
+        # （_get_agent_config_from_registry 直取 _agent_registry_lookup，
+        # 此处不再返回 0.1 式同步 registry 对象）。
+        # workspace_lifecycle_manager / execution_record_storage
+        # 0.2 sidecar 无等价实例：调用方已有降级守卫。
         return None
 
 
 def _get_service_provider() -> Any:
     """获取 0.2 服务提供者 shim（sidecar 模式下的服务解析入口）。"""
     return _ServiceProviderShim()
+
+
+# ── agent_registry 查询钩子（agent_manager 服务注入，P4 收敛 2026-08-20）──
+_agent_registry_lookup: Any = None
+
+
+def set_agent_registry_lookup(lookup: Any) -> None:
+    """注入 agent 配置查询钩子（server.py on_load 调用）。
+
+    约定签名：``async lookup(agent_id: str) -> dict | None``（返回 agent_manager
+    agent.get 服务解析后的 yaml dict；未命中/服务不可用 → None → 磁盘回退）。
+    """
+    global _agent_registry_lookup  # noqa: PLW0603
+    _agent_registry_lookup = lookup
+    logger.info("[TaskSubmit] agent_registry 查询钩子已注入（agent_manager 服务）")
 
 # ── GAP-1：chat.send_message 派发器（server.py on_load 注入）──
 #
@@ -1114,7 +1137,7 @@ class TaskSubmitTool(BuiltinTool):
 
         # ── 2.5 目标 Agent 存在性与级别校验 ──
         if target_type == "agent":
-            valid, err_msg, err_code = self._validate_target_agent(
+            valid, err_msg, err_code = await self._validate_target_agent(
                 target_id,
                 parent_agent_level,
             )
@@ -1742,7 +1765,7 @@ class TaskSubmitTool(BuiltinTool):
 
         return metadata
 
-    def _validate_target_agent(
+    async def _validate_target_agent(
         self,
         target_id: str,
         parent_agent_level: int,
@@ -1754,7 +1777,7 @@ class TaskSubmitTool(BuiltinTool):
         # 用于在级别校验后统一拦截派发给已禁用 Agent 的任务。
         is_active = True
 
-        agent_config = self._get_agent_config_from_registry(target_id)
+        agent_config = await self._get_agent_config_from_registry(target_id)
 
         if agent_config is not None:
             level_value = safe_enum_value(agent_config.level)
@@ -1804,20 +1827,31 @@ class TaskSubmitTool(BuiltinTool):
 
         return (True, "", "")
 
-    def _get_agent_config_from_registry(self, target_id: str) -> Any | None:
-        """从 agent_registry 查找 Agent 配置。"""
+    async def _get_agent_config_from_registry(self, target_id: str) -> Any | None:
+        """从 agent_registry（agent_manager 的 agent.get 服务）查找 Agent 配置。
+
+        P4 收敛（2026-08-20）：查询钩子由 server.py on_load 注入（tool-executor
+        显式 plugin_id=agent_manager）；未注入/服务不可用/未命中 → None（磁盘回退）。
+        """
+        lookup = _agent_registry_lookup
+        if lookup is None:
+            return None
         try:
-            provider = _get_service_provider()
-            agent_registry = provider.get("agent_registry")
-            if agent_registry is not None:
-                return agent_registry.get(target_id)
-        except Exception as exc:
+            config = await lookup(target_id)
+        except Exception as exc:  # noqa: BLE001 — 服务故障降级磁盘回退
             logger.warning(
-                "[_get_agent_config_from_registry] 加载 agent_config 失败 (target_id=%s): %s",
+                "[_get_agent_config_from_registry] agent_manager 服务查询失败 (target_id=%s): %s",
                 target_id,
                 exc,
             )
-        return None
+            return None
+        if not isinstance(config, dict):
+            return None
+        # 0.1 调用方期待属性访问（.level/.is_active）——轻量命名空间适配
+        return SimpleNamespace(
+            level=config.get("level", ""),
+            is_active=config.get("is_active", True),
+        )
 
     @staticmethod
     def _lookup_agent_from_disk(target_id: str) -> tuple[bool, str, int, bool]:
