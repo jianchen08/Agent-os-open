@@ -301,6 +301,14 @@ impl PipelineDispatcher for EngineDispatcher {
         let message_id = format!("a_{}", uuid::Uuid::new_v4().simple());
 
         if let Some(session) = state.session.as_ref() {
+            // 事件单播坐标注册：推送最终落点是 user 级 WS 连接，thread 只是
+            // thread→user 反查索引（connection_registry）。前端 WS 已按当前会话
+            // thread 注册；注入路径（触发器 chat.send_message）只持有管道唯一
+            // 坐标（32hex pipeline_id）作派发键，若不注册则 send_to_thread 反查
+            // 无 user、事件被丢弃——表现为「LLM 日志有、前端收不到」（2026-08-19）。
+            // 幂等注册：派发键（thread_id）与 route_id 双坐标均直达 user。
+            session.register_thread(thread_id, user_id);
+            session.register_thread(&route_id, user_id);
             // 1. stream_start 提前发（在引擎执行前），让前端先建立占位气泡
             let _ = session
                 .emit_event(

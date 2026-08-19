@@ -4370,4 +4370,53 @@ mod tests {
             "冷路径表也回写"
         );
     }
+
+    /// 2026-08-19 触发器注入回归：chat.send_message 注入只持有管道唯一坐标
+    /// （32hex pipeline_id），事件按该坐标 emit 后必须能经 registry 反查直达
+    /// 在线 user 的 WS 连接——否则出现「LLM 日志有、前端收不到回复」。
+    #[tokio::test]
+    async fn inject_dispatch_events_reach_user_connection_via_pipeline_coordinate() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Arc;
+
+        #[derive(Clone)]
+        struct RecSink {
+            delivered: Arc<AtomicUsize>,
+        }
+        #[async_trait::async_trait]
+        impl agentos_session::EventSink for RecSink {
+            async fn send_text(&self, _t: &str) -> bool {
+                self.delivered.fetch_add(1, Ordering::SeqCst);
+                true
+            }
+            fn id(&self) -> u64 {
+                42
+            }
+        }
+
+        let (mut state, _invoker, _store, _sqlite) = make_engine_state();
+        let coord = Arc::new(agentos_session::SessionCoordinator::new());
+        state = state.enable_session_with(coord.clone());
+        let sink = Arc::new(RecSink {
+            delivered: Default::default(),
+        });
+        coord.register("u1", sink.clone());
+        // 前端已按会话 thread 注册；注入路径的派发键 = 管道唯一坐标，未注册
+        coord.register_thread("thread-1", "u1");
+
+        let dispatcher = crate::ws_session::EngineDispatcher::new(state);
+        // 注入派发：thread_id 与 pipeline_id 同取管道唯一坐标（chat.send_message 现状）
+        use agentos_session::router::PipelineDispatcher;
+        let _ = dispatcher
+            .dispatch_user_input(
+                "pid-32hex-inject", "u1", "嗨", "pid-32hex-inject",
+                "", None, None, "agentos",
+            )
+            .await;
+        let got = sink.delivered.load(Ordering::SeqCst);
+        assert!(
+            got >= 1,
+            "注入事件按管道唯一坐标必须直达 user 连接——LLM 日志有、前端收不到 = 该坐标缺注册"
+        );
+    }
 }
