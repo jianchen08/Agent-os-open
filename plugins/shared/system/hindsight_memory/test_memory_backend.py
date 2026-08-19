@@ -135,6 +135,43 @@ class TestHindsightBackend:
         assert item["score"] == 0.9
         assert item["memory_type"] == "semantic"
 
+    async def test_hindsight_add_unwraps_invoke_envelope(
+        self, mod: Any, caller: AsyncMock
+    ) -> None:
+        """tool-executor.invoke 经内核 invoker 归一把业务 dict 包成
+        {success:true, data:<业务>} 信封（invoker.rs 决策树 ③）——add 必须
+        解 data 再取 id，否则恒取空（2026-08-19 e2e 实测"未返回 memory id"）。"""
+        caller.return_value = {
+            "success": True,
+            "data": {"id": "mem-env-1", "stored": True, "metadata": {}},
+        }
+        backend = mod.HindsightBackend(caller)
+
+        mem_id = await backend.add(user_id="user-1", content="hello")
+
+        assert mem_id == "mem-env-1"
+
+    async def test_hindsight_search_unwraps_invoke_envelope(
+        self, mod: Any, caller: AsyncMock
+    ) -> None:
+        """search 同受信封包裹，需解 data 后映射，否则结果恒空。"""
+        caller.return_value = {
+            "success": True,
+            "data": {
+                "results": [
+                    {"id": "m-e", "content": "beta", "score": 0.7,
+                     "metadata": {"memory_type": "semantic"}}
+                ],
+                "total": 1,
+            },
+        }
+        backend = mod.HindsightBackend(caller)
+
+        results = await backend.search(query="q", user_id="user-1")
+
+        assert len(results) == 1
+        assert results[0]["id"] == "m-e"
+
     async def test_hindsight_add_raises_on_caller_error(
         self, mod: Any, caller: AsyncMock
     ) -> None:

@@ -177,8 +177,15 @@ class HindsightBackend(IMemoryBackend):
             # 的假成功（2026-08-19 e2e 实测）。降级决策归工具层。
             raise RuntimeError(f"hindsight.retain 调用失败: {e}") from e
         if isinstance(result, dict):
-            # hindsight sidecar 降级签名为 {error, initialized: False}（无 id 键）。
-            # 视为失败上抛，杜绝"返回空 id 但报成功"。
+            # tool-executor.invoke 经内核 invoker 归一：纯业务 dict（无
+            # success/error）被包成 {success:true, data:<业务>} 信封（invoker.rs
+            # 决策树 ③）。侧边 tools/call 直连无信封，故此处两层都解。
+            if "data" in result:
+                inner = result.get("data")
+                if isinstance(inner, dict):
+                    result = inner
+            # 业务 dict（hindsight sidecar 的 hindsight.retain 返回）里有
+            # error/降级签名或无 id → 明确失败，杜绝"空 id 报成功"。
             if result.get("error") or result.get("initialized") is False:
                 raise RuntimeError(
                     f"hindsight 后端降级: {result.get('error') or 'not initialized'}"
@@ -210,12 +217,16 @@ class HindsightBackend(IMemoryBackend):
             result = await self._call("tool-executor.invoke", params)
         except Exception as e:
             raise RuntimeError(f"hindsight.recall 调用失败: {e}") from e
-        if isinstance(result, dict) and (
-            result.get("error") or result.get("initialized") is False
-        ):
-            raise RuntimeError(
-                f"hindsight 后端降级: {result.get('error') or 'not initialized'}"
-            )
+        if isinstance(result, dict):
+            # 同 add：解 tool-executor.invoke 的 ToolExecutionResult data 信封
+            if "data" in result:
+                inner = result.get("data")
+                if isinstance(inner, dict):
+                    result = inner
+            if result.get("error") or result.get("initialized") is False:
+                raise RuntimeError(
+                    f"hindsight 后端降级: {result.get('error') or 'not initialized'}"
+                )
         return self._map_hindsight_results(result)
 
     async def delete(self, user_id: str, memory_id: str | None = None) -> bool:

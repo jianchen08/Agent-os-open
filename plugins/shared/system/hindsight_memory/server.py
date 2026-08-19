@@ -171,15 +171,25 @@ async def hindsight_retain(
         # tags 用于 arecall 服务端过滤(memory_type 作为 tag)
         tags = [f"type:{memory_type}"]
 
+        # 同步 retain 的 RetainResponse 不带单条 id（operation_id 恒 None）——
+        # memory 工具层要求 memory_id 确认写入，故用 retain_async + 调用方
+        # 生成 operation_id（幂等 id），服务器接受后原样回传即 memory_id
+        # （2026-08-19 e2e 实测：sync 模式取 id 恒空→诚变化误判"未确认"）。
+        import uuid  # noqa: PLC0415
+
+        operation_id = str(uuid.uuid4())  # 服务器校验标准 UUID（secrets.token_hex 24hex 被 422）
         result = await _client.aretain(
             bank_id=bank, content=content, metadata=meta, tags=tags,
+            retain_async=True, operation_id=operation_id,
         )
-        # RetainResponse 对象:取 id 字段
+        # RetainResponse 对象:优先 operation_id(调用方幂等 id)，兜底旧字段
         mem_id = ""
-        if hasattr(result, "accepted"):
+        if hasattr(result, "accepted") or result is not None:
             mem_id = str(getattr(result, "operation_id", "") or "")
         elif isinstance(result, dict):
             mem_id = result.get("id", result.get("operation_id", ""))
+        if not mem_id and getattr(result, "success", False):
+            mem_id = operation_id
         return {"id": mem_id, "stored": True, "metadata": meta}
     except Exception as e:
         logger.warning("[hindsight.retain] 调用失败 | error=%s", e)
@@ -484,6 +494,33 @@ async def hindsight_import_document(
 # ═══════════════════════════════════════════════════════════
 
 
+def _load_env_file_keys() -> dict[str, str]:
+    """从项目根 .env 直读所需 key（sidecar 自足，不依赖内核 env 覆盖）。
+
+    invoker 的 env_delta_overlay 可能未把 ZHIPU/SILICONFLOW key 泡进 sidecar
+    进程环境（实测 memory 曾因 key 缺失报 hindsight not initialized）；
+    此处仅补读取，不改写任何内核/全局配置，未找到 key 返回空继续（health
+    server 照起，向量写入时才失败）。
+    """
+    # 插件目录 plugins/shared/system/hindsight_memory → 项目根上溯 4 级
+    root = os.path.abspath(os.path.join(_THIS_DIR, "..", "..", "..", ".."))
+    env_path = os.path.join(root, ".env")
+    out: dict[str, str] = {}
+    try:
+        with open(env_path, "r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line or line.startswith("#") or "=" not in line:
+                    continue
+                k, _, v = line.partition("=")
+                k, v = k.strip(), v.strip().strip('"').strip("'")
+                if k in ("ZHIPU_API_KEY", "SILICONFLOW_API_KEY"):
+                    out[k] = v
+    except OSError:
+        pass
+    return out
+
+
 def _apply_llm_env() -> None:
     """把 HINDSIGHT_API_* 配置写入环境变量（hindsight-api 从 env 读取配置）。
 
@@ -495,6 +532,11 @@ def _apply_llm_env() -> None:
         → 用 SILICONFLOW_API_KEY(用户需在 .env 配置)
       - Reranker:rrf(Reciprocal Rank Fusion, 无需下载模型, 避免 HF 被墙)
     """
+    file_keys = _load_env_file_keys()
+    if not os.environ.get("ZHIPU_API_KEY") and file_keys.get("ZHIPU_API_KEY"):
+        os.environ["ZHIPU_API_KEY"] = file_keys["ZHIPU_API_KEY"]
+    if not os.environ.get("SILICONFLOW_API_KEY") and file_keys.get("SILICONFLOW_API_KEY"):
+        os.environ["SILICONFLOW_API_KEY"] = file_keys["SILICONFLOW_API_KEY"]
     # ── LLM(GLM, 复用智谱 key)──
     llm_defaults = {
         "HINDSIGHT_API_LLM_PROVIDER": "openai",
@@ -571,41 +613,63 @@ async def _on_load(params: dict[str, Any]) -> None:
 
     try:
         import subprocess  # noqa: PLC0415
+        import urllib.request as _ur  # noqa: PLC0415
 
-        # 启动 hindsight-api 服务器子进程(pg0 嵌入式 PG + uvicorn HTTP)
-        # PYTHONPATH 前置本插件目录：子进程启动时执行 sitecustomize.py，
-        # 注入 mcp 2.0 下缺失的 request_ctx/MCPError 兼容名（详见该文件头注释）。
-        _spawn_env = os.environ.copy()
-        _existing_pp = _spawn_env.get("PYTHONPATH", "")
-        _spawn_env["PYTHONPATH"] = (
-            _THIS_DIR + (os.pathsep + _existing_pp if _existing_pp else "")
-        )
-        _api_process = subprocess.Popen(
-            [sys.executable, "-m", "hindsight_api.main",
-             "--port", str(port), "--host", "127.0.0.1"],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            env=_spawn_env,
-        )
-        logger.info("[hindsight] hindsight-api 子进程已启动 PID=%s port=%s", _api_process.pid, port)
-
-        # 等待服务器就绪(轮询 /health,最多 60s)
-        import asyncio as _aio  # noqa: PLC0415
-        import urllib.request  # noqa: PLC0415
-
-        for _attempt in range(60):
-            await _aio.sleep(1)
-            try:
-                with urllib.request.urlopen(f"{base_url}/health", timeout=2) as resp:
-                    if resp.status == 200:
-                        logger.info("[hindsight] 服务器就绪 (attempt=%d)", _attempt + 1)
-                        break
-            except Exception:
-                # 检查子进程是否已退出
-                if _api_process.poll() is not None:
-                    raise RuntimeError(f"hindsight-api 子进程已退出 code={_api_process.returncode}")
+        # 幂等连接既有服务：插件重载/重启时 8420 可能已有健康 hindsight-api
+        # （外部/上次实例常驻），直接复用而非再 spawn（端口冲突 + 首启 pg0 建库
+        # 慢导致 on_load 轮询 60s 超时判死——2026-08-19 e2e 实测）。
+        _already_up = False
+        try:
+            with _ur.urlopen(f"{base_url}/health", timeout=2) as _resp:
+                _already_up = _resp.status == 200
+        except Exception:
+            _already_up = False
+        if _already_up:
+            logger.info("[hindsight] 复用既有 hindsight-api 服务 %s", base_url)
         else:
-            raise RuntimeError("hindsight-api 服务器 60s 内未就绪")
+            # 启动 hindsight-api 服务器子进程(pg0 嵌入式 PG + uvicorn HTTP)
+            # 用 hindsight 专用 venv 的 python 起子进程：venv 内 fastmcp 解析到其
+            # 匹配的 mcp 1.x（request_ctx 等），与宿主 sidecar 的 AgentOS SDK
+            # （mcp>=2.0,<3）完全隔离——mcp 1.x/2.0 生态互斥问题正解在此，而非
+            # 切内核记忆表保底或 shim 系统环境（2026-08-19 用户纠正）。
+            # venv 路径：插件目录下 .venv（uv 创建，gitignore 不入库）。
+            _venv_python = os.path.join(_THIS_DIR, ".venv", "Scripts", "python.exe")
+            if not os.path.isfile(_venv_python):
+                logger.error(
+                    "[hindsight] venv python 缺失（%s），hindsight-api 无法启动。"
+                    "创建方式：uv venv .venv && uv pip install "
+                    "'hindsight-all-slim>=0.9.0' 'hindsight-api-slim[embedded-db]>=0.9.0' fastmcp",
+                    _venv_python,
+                )
+                raise RuntimeError("hindsight venv 未初始化")
+            _api_process = subprocess.Popen(
+                [_venv_python, "-m", "hindsight_api.main",
+                 "--port", str(port), "--host", "127.0.0.1"],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                env=os.environ.copy(),
+            )
+            logger.info("[hindsight] hindsight-api 子进程已启动 PID=%s port=%s", _api_process.pid, port)
+
+            # 等待服务器就绪(轮询 /health,最多 60s)
+            import asyncio as _aio  # noqa: PLC0415
+            import urllib.request  # noqa: PLC0415
+
+            for _attempt in range(60):
+                await _aio.sleep(1)
+                try:
+                    with urllib.request.urlopen(f"{base_url}/health", timeout=2) as resp:
+                        if resp.status == 200:
+                            logger.info("[hindsight] 服务器就绪 (attempt=%d)", _attempt + 1)
+                            break
+                except Exception:
+                    # 检查子进程是否已退出
+                    if _api_process.poll() is not None:
+                        raise RuntimeError(
+                            f"hindsight-api 子进程已退出 code={_api_process.returncode}"
+                        )
+            else:
+                raise RuntimeError("hindsight-api 服务器 60s 内未就绪")
 
         # 创建 HTTP 客户端
         from hindsight_client import Hindsight  # type: ignore
