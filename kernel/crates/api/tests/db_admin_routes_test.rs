@@ -20,6 +20,7 @@ use std::sync::Arc;
 
 use agentos_api::routes::AppState;
 use agentos_api::server::build_router;
+use agentos_core::traits::StorageBackend;
 use agentos_db_admin::DbAdminCapabilityHandler;
 use agentos_mcp::CapabilityHandler;
 use axum::body::Body;
@@ -30,12 +31,27 @@ use tower::ServiceExt;
 
 /// 内存库 + handler + 可登录的 router（token 签发用）。
 /// handler 与 router 共享同一 store 实例（对齐生产装配）。
-fn handler_setup() -> (
+/// 播种 admin 对齐真实内核启动行为（agentos-kernel seed_admin_user）：
+/// 安全加固 2026-08-19 后，store 存在但用户名未命中不再回退内置硬编码凭据。
+async fn handler_setup() -> (
     DbAdminCapabilityHandler,
     Router,
     Arc<agentos_engine::SqliteStore>,
 ) {
     let store = Arc::new(agentos_engine::SqliteStore::open_memory().unwrap());
+    store
+        .create_user(&agentos_core::types::UserRecord {
+            user_id: "00000000-0000-0000-0000-000000000001".to_string(),
+            username: "admin".to_string(),
+            password: "admin12345".to_string(),
+            email: Some("admin@agentos.dev".to_string()),
+            role: "admin".to_string(),
+            tenant_id: "default".to_string(),
+            created_at: chrono::Utc::now().to_rfc3339(),
+            last_login_at: None,
+        })
+        .await
+        .unwrap();
     let handler = DbAdminCapabilityHandler::new(Some(store.clone()), Some(store.clone()));
     let mut state = AppState::new();
     state.store = Some(store.clone());
@@ -118,7 +134,7 @@ fn with_auth(params: Value, token: &str) -> Value {
 
 #[tokio::test]
 async fn test_tables_lists_all_tables_dynamic() {
-    let (handler, router, _store) = handler_setup();
+    let (handler, router, _store) = handler_setup().await;
     let token = admin_token(&router).await;
     let (status, json) = call(&handler, "list_tables", with_auth(json!({}), &token)).await;
     assert_eq!(status, 200);
@@ -154,7 +170,7 @@ async fn test_tables_lists_all_tables_dynamic() {
 
 #[tokio::test]
 async fn test_query_rows_pagination_filter_sort() {
-    let (handler, router, store) = handler_setup();
+    let (handler, router, store) = handler_setup().await;
     store
         .with_conn(|conn| {
             for i in 0..3 {
@@ -222,7 +238,7 @@ async fn test_query_rows_pagination_filter_sort() {
 
 #[tokio::test]
 async fn test_query_rows_multi_filter_and() {
-    let (handler, router, store) = handler_setup();
+    let (handler, router, store) = handler_setup().await;
     store
         .with_conn(|conn| {
             for (i, (mt, sc)) in [
@@ -269,7 +285,7 @@ async fn test_query_rows_multi_filter_and() {
 
 #[tokio::test]
 async fn test_query_injection_rejected() {
-    let (handler, router, store) = handler_setup();
+    let (handler, router, store) = handler_setup().await;
     store
         .with_conn(|conn| {
             conn.execute(
@@ -308,7 +324,7 @@ async fn test_query_injection_rejected() {
 
 #[tokio::test]
 async fn test_query_unknown_column_400_and_unknown_table_404() {
-    let (handler, router, _store) = handler_setup();
+    let (handler, router, _store) = handler_setup().await;
     let token = admin_token(&router).await;
     let (status, _json) = call(
         &handler,
@@ -331,7 +347,7 @@ async fn test_query_unknown_column_400_and_unknown_table_404() {
 
 #[tokio::test]
 async fn test_crud_insert_update_delete() {
-    let (handler, router, _store) = handler_setup();
+    let (handler, router, _store) = handler_setup().await;
     let token = admin_token(&router).await;
 
     // 插入
@@ -404,7 +420,7 @@ async fn test_crud_insert_update_delete() {
 
 #[tokio::test]
 async fn test_composite_pk_crud() {
-    let (handler, router, _store) = handler_setup();
+    let (handler, router, _store) = handler_setup().await;
     let token = admin_token(&router).await;
 
     // execution_records 复合主键 (record_id, sequence)
@@ -471,7 +487,7 @@ async fn test_composite_pk_crud() {
 
 #[tokio::test]
 async fn test_auth_required_401_and_forbidden() {
-    let (handler, router, _store) = handler_setup();
+    let (handler, router, _store) = handler_setup().await;
 
     // 无 _authorization → 401
     let (status, _json) = call(&handler, "list_tables", json!({})).await;
@@ -492,7 +508,7 @@ async fn test_auth_required_401_and_forbidden() {
 
 #[tokio::test]
 async fn test_sql_execute_select_and_write_confirm() {
-    let (handler, router, _store) = handler_setup();
+    let (handler, router, _store) = handler_setup().await;
     let token = admin_token(&router).await;
 
     // SELECT 直接执行
@@ -537,7 +553,7 @@ async fn test_sql_execute_select_and_write_confirm() {
 
 #[tokio::test]
 async fn test_sql_execute_dangerous_rejected() {
-    let (handler, router, _store) = handler_setup();
+    let (handler, router, _store) = handler_setup().await;
     let token = admin_token(&router).await;
 
     // DROP → 403
@@ -613,7 +629,7 @@ async fn test_sql_execute_dangerous_rejected() {
 
 #[tokio::test]
 async fn test_extensibility_new_table_auto_visible() {
-    let (handler, router, store) = handler_setup();
+    let (handler, router, store) = handler_setup().await;
     let token = admin_token(&router).await;
 
     // 模拟内核未来新增表（扩展性验证）
@@ -671,7 +687,7 @@ async fn test_extensibility_new_table_auto_visible() {
 
 #[tokio::test]
 async fn test_tenant_isolation_applied() {
-    let (handler, router, store) = handler_setup();
+    let (handler, router, store) = handler_setup().await;
     // 插入两条不同租户的 memory
     store
         .with_conn(|conn| {

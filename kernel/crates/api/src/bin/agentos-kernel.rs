@@ -58,7 +58,7 @@ async fn seed_admin_user(store: Arc<dyn agentos_core::traits::StorageBackend>) {
             match store.create_user(&admin).await {
                 Ok(()) => info!(target: "agentos-kernel", "已播种内置 admin 用户 (tenant=default)"),
                 Err(e) => {
-                    warn!(target: "agentos-kernel", error = %e, "播种 admin 用户失败（login 将回退内置硬编码）")
+                    warn!(target: "agentos-kernel", error = %e, "播种 admin 用户失败（DB 查询将查不到 admin，登录不可用）")
                 }
             }
         }
