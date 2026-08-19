@@ -1558,11 +1558,18 @@ impl PluginInvokerImpl {
 
     /// 解析 sidecar 启动命令（uv 迁移批 A，**双轨期**）。
     ///
-    /// 在 [`Self::parse_entry`] 基础上做 venv 分流：插件目录存在 `.venv`
-    /// （Windows `.venv/Scripts/python.exe`、Unix `.venv/bin/python`）且 entry
-    /// 首词是 PATH 裸 python/python3 时，用 venv 解释器**绝对路径**替代裸命令——
-    /// SDK/第三方依赖由 venv 内 editable install 解析，不再依赖 PATH 环境。
-    /// 无 `.venv` 或 entry 非 python → 走现 plain 路径原样返回（批 A-C 双轨保留，
+    /// 在 [`Self::parse_entry`] 基础上做 venv 分流：插件目录同时存在
+    /// **pyproject.toml + `.venv`**（uv 迁移契约双标志）且 entry 首词是 PATH 裸
+    /// python/python3 时，用 venv 解释器**绝对路径**替代裸命令——SDK/第三方依赖由
+    /// venv 内 editable install 解析，不再依赖 PATH 环境。
+    ///
+    /// 门槛必须含 pyproject：仅 `.venv` 无 pyproject 的孤立 venv（如 hindsight_memory
+    /// 自建 venv，requirements.txt 时代产物，未装 SDK 及其依赖）若被分流，sidecar
+    /// 启动即 `ModuleNotFoundError: agentos_plugin_sdk / mcp_types` → G2 spawn 校验
+    /// 失败（批 A boot 实证发现，回归测试见 test_resolve_sidecar_command_venv_without_
+    /// pyproject_keeps_plain）。hindsight 既有 venv 的单轨化归批 C。
+    ///
+    /// 无双标志或 entry 非 python → 走现 plain 路径原样返回（批 A-C 双轨保留，
     /// 批 D 翻转后删 plain 分支）。
     ///
     /// 绝对路径解释器含路径分隔符与 `.`，天然绕过 mcp 侧 `resolve_windows_command`
@@ -1574,13 +1581,17 @@ impl PluginInvokerImpl {
         let (mut command, args) = self.parse_entry(&manifest.entry)?;
         if is_plain_python_command(&command) {
             if let Some(dir) = self.loader.get_plugin_dir(&manifest.id) {
-                if let Some(interp) = find_venv_interpreter(std::path::Path::new(&dir)) {
-                    info!(
-                        "[invoker] 插件 {} 走 venv 解释器（uv 双轨）| interpreter={}",
-                        manifest.id,
-                        interp.display()
-                    );
-                    command = interp.to_string_lossy().into_owned();
+                let plugin_path = std::path::Path::new(&dir);
+                // 分流门槛：pyproject + .venv 双标志（见函数注释）。
+                if plugin_path.join("pyproject.toml").is_file() {
+                    if let Some(interp) = find_venv_interpreter(plugin_path) {
+                        info!(
+                            "[invoker] 插件 {} 走 venv 解释器（uv 双轨）| interpreter={}",
+                            manifest.id,
+                            interp.display()
+                        );
+                        command = interp.to_string_lossy().into_owned();
+                    }
                 }
             }
         }
@@ -3609,6 +3620,8 @@ mod tests {
         };
         std::fs::create_dir_all(interp.parent().unwrap()).unwrap();
         std::fs::write(&interp, b"").unwrap();
+        // 分流门槛是 pyproject + .venv（uv 迁移契约双标志）——默认同时造假 pyproject。
+        std::fs::write(dir.join("pyproject.toml"), b"[project]\n").unwrap();
         interp
     }
 
@@ -3696,6 +3709,35 @@ mod tests {
 
         let (cmd, _) = invoker.resolve_sidecar_command(&manifest).unwrap();
         assert_eq!(cmd, interp.to_string_lossy().into_owned());
+    }
+
+    #[test]
+    fn test_resolve_sidecar_command_venv_without_pyproject_keeps_plain() {
+        // 回归闸（批 A boot 实证发现）：仅 .venv 无 pyproject（如 hindsight_memory
+        // 自建 venv——requirements.txt 时代产物，无 SDK/SDK 依赖）不走 venv 分流，
+        // 否则 venv 缺 agentos_plugin_sdk 及其依赖（mcp_types）→ sidecar 启动即
+        // ModuleNotFoundError → G2 spawn 校验失败。venv 分流门槛 = pyproject+.venv
+        // 双标志（迁移方案 §四），hindsight 归批 C 合并后再享受 venv 轨。
+        let tmp = tempfile::tempdir().unwrap();
+        let interp = if cfg!(windows) {
+            tmp.path().join(".venv").join("Scripts").join("python.exe")
+        } else {
+            tmp.path().join(".venv").join("bin").join("python")
+        };
+        std::fs::create_dir_all(interp.parent().unwrap()).unwrap();
+        std::fs::write(&interp, b"").unwrap();
+        assert!(interp.is_file(), "测试前置：假 venv 解释器已就位");
+
+        let loader = Arc::new(MockLoader::new());
+        loader.plugin_dirs.write().insert(
+            "legacy_venv".to_string(),
+            tmp.path().to_string_lossy().into_owned(),
+        );
+        let invoker = PluginInvokerImpl::new(loader);
+        let manifest = make_sidecar_manifest("legacy_venv", "python server.py");
+
+        let (cmd, _) = invoker.resolve_sidecar_command(&manifest).unwrap();
+        assert_eq!(cmd, "python", "无 pyproject 的孤立 venv 必须走 plain 轨");
     }
 
     #[test]
