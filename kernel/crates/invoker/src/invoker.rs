@@ -371,19 +371,9 @@ pub struct PluginInvokerImpl {
     /// sidecar 最后调用时刻 {plugin_id: Instant}——空闲软卸载依据。
     /// 每次 get_or_create_mcp_client 命中/创建时刷新；后台 GC 据此判定是否空闲超时。
     last_used: RwLock<HashMap<String, Instant>>,
-    /// 注入给 sidecar 子进程的 PYTHONPATH 项目根目录（project_root）。
-    ///
-    /// sidecar 的 import 有两种历史写法并存（见 `resolve_pythonpath_src` 注释）：
-    /// - `from src.core.logging import ...`（带 src. 前缀，需 project_root 在 sys.path）
-    /// - `from config.settings import ...`（不带前缀，需 project_root/src 在 sys.path）
-    ///
-    /// 因此实际注入的 PYTHONPATH 同时含 project_root 和 project_root/src。
-    ///
-    /// PYTHONPATH 注入由内核构造期显式注入 project_root，不依赖
-    /// `AGENTOS_PLUGINS_DIR` 环境变量（启动方式如 Git Bash 的 start_web_02.sh
-    /// 未必设置它，sidecar 的 plugin.py 会因无法 import 公共包而启动即崩溃、
-    /// initialize 永久卡到超时）；环境变量仅作向后兼容兜底。
-    pythonpath_src: RwLock<Option<std::path::PathBuf>>,
+    // （原 PYTHONPATH 注入状态字段 `pythonpath_src` 已随批 D 翻转退役——SDK 由
+    // per-plugin venv 的 editable install 解析，`resolve_pythonpath_src` 已删除，
+    // `set_pythonpath_src` 保留为兼容 no-op。）
 }
 
 impl PluginInvokerImpl {
@@ -399,85 +389,24 @@ impl PluginInvokerImpl {
             native_loader: None,
             fingerprints: RwLock::new(HashMap::new()),
             last_used: RwLock::new(HashMap::new()),
-            pythonpath_src: RwLock::new(None),
         }
     }
 
-    /// 显式设置注入给 sidecar 的 PYTHONPATH 项目根目录（project_root）。
+    /// 兼容 no-op（批 D 翻转后 PYTHONPATH 注入已整体退役，2026-08-19）。
     ///
-    /// 应传入 **`project_root`**（`src/` 的父目录），而非 `src/` 本身。
-    /// [`resolve_pythonpath_src`] 会据此推导出完整的 PYTHONPATH（同时含 project_root
-    /// 和 project_root/src，兼容两种 import 写法）。
+    /// 历史用途：内核构造期注入 project_root，invoker 据此拼 PYTHONPATH 给 sidecar
+    /// 子进程（解 SDK + src.*/config.* import）。批 A-D 全量 venv 化后 SDK 由
+    /// per-plugin venv 的 editable install 解析（清 env 实证），两套解析路径并存
+    /// 是版本不同步事故温床（方案 §八），故注入链路整体删除。
     ///
-    /// 优先级高于 `AGENTOS_PLUGINS_DIR` 环境变量推算。内核 main 在构造 invoker 后、
-    /// spawn 任何 sidecar 前调用，确保无论用何种方式启动（.bat / .sh / IDE），
-    /// sidecar 的 plugin.py 都能 import 公共业务包（src.core.logging / config.settings 等）。
+    /// **保留本方法签名仅为内核 main（crates/api）装配代码兼容**——调用是无害的：
+    /// 只打一条诊断日志（运维据此发现旧装配残留），不再影响任何 sidecar 环境。
     pub fn set_pythonpath_src(&self, project_root: impl Into<std::path::PathBuf>) {
         let path = project_root.into();
-        if path.is_dir() {
-            *self.pythonpath_src.write() = Some(path);
-        } else {
-            warn!(path = %path.display(), "set_pythonpath_src: 目录不存在，忽略");
-        }
-    }
-
-    /// 解析注入给 sidecar 的完整 PYTHONPATH 字符串（多路径，用 OS 分隔符连接）。
-    ///
-    /// sidecar 的 import 存在两种写法并存，必须同时满足：
-    /// - `from src.core.logging import ...`（带 src. 前缀）→ 需 **project_root** 在
-    ///   sys.path，Python 才在 `<project_root>/src/core/...` 解析。
-    /// - `from config.settings import ...`（不带前缀）→ 需 **project_root/src** 在
-    ///   sys.path，Python 才在 `<project_root>/src/config/...` 解析。
-    ///
-    /// 故 PYTHONPATH 同时含两者。只放其一会导致另一种写法的插件 sidecar 启动即崩
-    /// （实测：prompt_build 用 `from config.settings`、SDK 用 `from src.core.logging`）。
-    ///
-    /// 额外注入 `project_root/plugins/sdk/src`——**agentos_plugin_sdk 源码目录**。
-    /// 所有工具插件（simple/bash/download/human/builtin_tools 等）server.py 都
-    /// `from agentos_plugin_sdk import AgentOSPlugin`，而 SDK 通常未 pip install
-    /// （或版本与源码不同步），必须能从 PYTHONPATH 直接解析。缺失时 sidecar 启动即
-    /// `ModuleNotFoundError: agentos_plugin_sdk` 崩溃 → 内核 initialize 等不到响应 →
-    /// 工具调用"调用前卡死"（120s 超时，用户感知为无响应）。
-    ///
-    /// 返回的字符串已拼上原有的 PYTHONPATH 环境变量（若存在）。
-    fn resolve_pythonpath_src(&self) -> Option<String> {
-        // ① 显式注入的 project_root（最可靠）
-        let project_root = self.pythonpath_src.read().clone().or_else(|| {
-            // ② 环境变量兜底（向后兼容 .bat 等显式设置 AGENTOS_PLUGINS_DIR 的启动方式）
-            let plugins_dir = std::env::var("AGENTOS_PLUGINS_DIR").ok()?;
-            let plugins_path = std::path::Path::new(&plugins_dir);
-            // plugins/shared → plugins/ → project_root
-            Some(plugins_path.parent()?.parent()?.to_path_buf())
-        })?;
-
-        // 拼接候选目录：project_root（解 src. 前缀）+ project_root/src（解裸 import）
-        // + project_root/plugins/sdk/src（agentos_plugin_sdk 源码，工具插件公共依赖）。
-        let mut dirs: Vec<std::path::PathBuf> = vec![project_root.clone()];
-        let src_dir = project_root.join("src");
-        if src_dir.is_dir() {
-            dirs.push(src_dir);
-        }
-        let sdk_dir = project_root.join("plugins/sdk/src");
-        if sdk_dir.is_dir() {
-            dirs.push(sdk_dir);
-        }
-
-        // PYTHONPATH 是 env 变量，路径间用 **环境变量分隔符**（Windows ';'、Unix ':'）
-        // 连接——注意这跟路径组件分隔符 MAIN_SEPARATOR（Windows '\'、Unix '/'）是两回事。
-        // 误用 MAIN_SEPARATOR 会把路径粘连成 "D:\...\D:\...\src"。
-        const ENV_PATH_SEP: char = if cfg!(windows) { ';' } else { ':' };
-        let existing = std::env::var("PYTHONPATH").unwrap_or_default();
-        let joined = dirs
-            .iter()
-            .map(|d| d.to_string_lossy().into_owned())
-            .collect::<Vec<_>>()
-            .join(&ENV_PATH_SEP.to_string());
-        let result = if existing.is_empty() {
-            joined
-        } else {
-            format!("{}{}{}", joined, ENV_PATH_SEP, existing)
-        };
-        Some(result)
+        warn!(
+            path = %path.display(),
+            "set_pythonpath_src: PYTHONPATH 注入已退役（uv 单轨批 D），本调用为兼容 no-op"
+        );
     }
 
     /// 链式注入原生插件加载器（启动期装配用）。
@@ -1421,21 +1350,15 @@ impl PluginInvokerImpl {
                     c = c.with_working_dir(plugin_dir);
                 }
 
-                // 注入 PYTHONPATH：把 project_root（及 project_root/src）加进 sidecar 子进程搜索路径，
-                // 让两种 import 写法都能解析（见 resolve_pythonpath_src 注释）。
-                //
-                // 来源优先级：
-                // ① set_pythonpath_src 显式注入（内核构造期由 main 传入，最可靠）；
-                // ② AGENTOS_PLUGINS_DIR 环境变量推算（plugins/shared → project_root，向后兼容）。
-                // 两者都不可用时收空 PYTHONPATH——此时依赖 src.* / config.* 的插件会启动失败
-                // （import error），但不会静默退化（早暴露比晚卡死好）。
+                // PYTHONPATH 注入已整体退役（批 D 翻转，2026-08-19）：SDK 由 per-plugin
+                // venv 的 editable install 解析（批 A 清 env 实证 8/8、批 B 45/45、批 C
+                // 32/32、批 D 11/11 + builtin_tools），两套解析路径并存是版本不同步
+                // 事故温床（方案 §八被否方案表"保留 PYTHONPATH 作 SDK 兜底"行）。
+                // 这里只透传日志配置 env（进程级常量，适合走 env；per-request 上下文
+                // 走 JSON-RPC）。仅当父进程已设置时透传，否则让 sidecar SDK 用其默认
+                // （INFO + stderr）。SDK 启动时读这些 env 调用 setup_logging，使 sidecar
+                // 日志走统一基础设施。
                 let mut extra_env: Vec<(String, String)> = Vec::new();
-                if let Some(new_path) = self.resolve_pythonpath_src() {
-                    extra_env.push(("PYTHONPATH".to_string(), new_path));
-                }
-                // 注入日志配置 env（进程级常量，适合走 env；per-request 上下文走 JSON-RPC）。
-                // 仅当父进程已设置时透传，否则让 sidecar SDK 用其默认（INFO + stderr）。
-                // SDK 启动时读这些 env 调用 setup_logging，使 sidecar 日志走统一基础设施。
                 for key in &["LOG_LEVEL", "LOG_JSON", "LOG_FORMAT"] {
                     if let Ok(val) = std::env::var(key) {
                         if !val.is_empty() {
@@ -1556,45 +1479,78 @@ impl PluginInvokerImpl {
         Ok((command, args))
     }
 
-    /// 解析 sidecar 启动命令（uv 迁移批 A，**双轨期**）。
+    /// 解析 sidecar 启动命令（uv 迁移批 D，**单轨 fail-closed**，2026-08-19 裁定）。
     ///
-    /// 在 [`Self::parse_entry`] 基础上做 venv 分流：插件目录同时存在
-    /// **pyproject.toml + `.venv`**（uv 迁移契约双标志）且 entry 首词是 PATH 裸
-    /// python/python3 时，用 venv 解释器**绝对路径**替代裸命令——SDK/第三方依赖由
-    /// venv 内 editable install 解析，不再依赖 PATH 环境。
+    /// entry 首词是 PATH 裸 python/python3（含 `.exe`/`.bat`/`.cmd` 扩展）的 Python
+    /// sidecar **必须**命中插件目录的 venv 解释器：uv 迁移契约双标志
+    /// （**pyproject.toml + `.venv`**）缺任一、或 loader 查不到插件目录 → 直接返回
+    /// Err（带可读修复指引），**不再回退 PATH 裸 python**（plain 轨已删——兜底会
+    /// 把"venv 未建"静默糊弄成"裸解释器缺依赖启动即崩/行为漂移"，单轨契约下
+    /// 早失败比晚卡死好）。
     ///
-    /// 门槛必须含 pyproject：仅 `.venv` 无 pyproject 的孤立 venv（如 hindsight_memory
-    /// 自建 venv，requirements.txt 时代产物，未装 SDK 及其依赖）若被分流，sidecar
-    /// 启动即 `ModuleNotFoundError: agentos_plugin_sdk / mcp_types` → G2 spawn 校验
-    /// 失败（批 A boot 实证发现，回归测试见 test_resolve_sidecar_command_venv_without_
-    /// pyproject_keeps_plain）。hindsight 既有 venv 的单轨化归批 C。
+    /// 不受影响的形态：
+    /// - entry 首词非 python（如 `node server.js`）→ 原样（本函数只管 Python sidecar）；
+    /// - entry 首词带路径分隔符的显式解释器（如 `/usr/bin/python3`）→ 刻意选择，原样；
+    /// - external MCP（streamable_http / 外部 stdio command）/ native dll → 不走本函数。
     ///
-    /// 无双标志或 entry 非 python → 走现 plain 路径原样返回（批 A-C 双轨保留，
-    /// 批 D 翻转后删 plain 分支）。
-    ///
-    /// 绝对路径解释器含路径分隔符与 `.`，天然绕过 mcp 侧 `resolve_windows_command`
-    /// 的 PATHEXT 探测（该函数对带分隔符/扩展名的命令原样返回），不会被误解析。
+    /// venv 解释器以**绝对路径**替代裸命令——SDK/第三方依赖由 venv 内 editable
+    /// install 解析（PYTHONPATH 注入已随批 D 整体退役）。绝对路径含路径分隔符与
+    /// `.`，天然绕过 mcp 侧 `resolve_windows_command` 的 PATHEXT 探测（该函数对
+    /// 带分隔符/扩展名的命令原样返回），不会被误解析。
     fn resolve_sidecar_command(
         &self,
         manifest: &PluginManifest,
     ) -> Result<(String, Vec<String>), PluginError> {
         let (mut command, args) = self.parse_entry(&manifest.entry)?;
-        if is_plain_python_command(&command) {
-            if let Some(dir) = self.loader.get_plugin_dir(&manifest.id) {
-                let plugin_path = std::path::Path::new(&dir);
-                // 分流门槛：pyproject + .venv 双标志（见函数注释）。
-                if plugin_path.join("pyproject.toml").is_file() {
-                    if let Some(interp) = find_venv_interpreter(plugin_path) {
-                        info!(
-                            "[invoker] 插件 {} 走 venv 解释器（uv 双轨）| interpreter={}",
-                            manifest.id,
-                            interp.display()
-                        );
-                        command = interp.to_string_lossy().into_owned();
-                    }
-                }
-            }
+        if !is_plain_python_command(&command) {
+            return Ok((command, args));
         }
+
+        // fail-closed：Python sidecar 必须有 venv（批 D 单轨，plain 回退已删）。
+        let dir = self.loader.get_plugin_dir(&manifest.id).ok_or_else(|| {
+            PluginError {
+                message: format!(
+                    "插件 {} 是 Python sidecar（entry 首词为 PATH 裸 python），但 loader 无法定位其插件目录——\
+                     无法解析 venv 解释器（uv 单轨契约：pyproject.toml + .venv 双标志；plain PATH python 轨已于 2026-08-19 批 D 删除）",
+                    manifest.id
+                ),
+                code: Some("PLUGIN_DIR_NOT_FOUND".to_string()),
+                source: Some("plugin-invoker".to_string()),
+            }
+        })?;
+        let plugin_path = std::path::Path::new(&dir);
+        if !plugin_path.join("pyproject.toml").is_file() {
+            return Err(PluginError {
+                message: format!(
+                    "插件 {} 缺 pyproject.toml——uv 单轨契约（pyproject.toml + .venv 双标志）不满足，\
+                     Python sidecar 不再回退 PATH 裸 python（批 D 翻转，2026-08-19）。\
+                     修复：为插件补 pyproject.toml（模板见 scripts/migrate_plugins_to_uv.py），\
+                     依赖清单参照 docs/working/uv依赖人工确认清单_20260819.md（插件目录 {}）",
+                    manifest.id,
+                    plugin_path.display()
+                ),
+                code: Some("PYPROJECT_MISSING".to_string()),
+                source: Some("plugin-invoker".to_string()),
+            });
+        }
+        let interpreter = find_venv_interpreter(plugin_path).ok_or_else(|| PluginError {
+            message: format!(
+                "插件 {} 的 .venv 解释器缺失（探测 .venv/Scripts/python.exe 与 .venv/bin/python 均不存在）——\
+                 Python sidecar 不再回退 PATH 裸 python（批 D 翻转，2026-08-19）。\
+                 修复：在插件目录 {} 下 `uv venv --python 3.12 && uv pip install -e <repo>/plugins/sdk + 确认清单依赖`，\
+                 或 `uv sync --project <插件目录>`（重建口径见 docs/working/插件uv运行时迁移方案_20260819.md）",
+                manifest.id,
+                plugin_path.display()
+            ),
+            code: Some("VENV_INTERPRETER_MISSING".to_string()),
+            source: Some("plugin-invoker".to_string()),
+        })?;
+        info!(
+            "[invoker] 插件 {} 走 venv 解释器（uv 单轨）| interpreter={}",
+            manifest.id,
+            interpreter.display()
+        );
+        command = interpreter.to_string_lossy().into_owned();
         Ok((command, args))
     }
 
@@ -3587,28 +3543,16 @@ mod tests {
     }
 
     #[test]
-    fn test_resolve_pythonpath_src_includes_sdk_dir() {
-        // 根因回归：resolve_pythonpath_src 注入的 PYTHONPATH 必须包含
-        // project_root/plugins/sdk/src（agentos_plugin_sdk 源码目录）。
-        // 缺失时 sidecar 启动即 `ModuleNotFoundError: agentos_plugin_sdk` 崩溃，
-        // 内核 initialize 永远等不到响应 → 工具调用"调用前卡死"（120s 超时）。
+    fn test_set_pythonpath_src_is_compatible_noop() {
+        // 批 D 翻转：PYTHONPATH 注入整体退役，set_pythonpath_src 降级为兼容 no-op
+        // （内核 main 装配代码仍调用，签名保留；resolve_pythonpath_src 已删除）。
+        // 这里固化"调用无害"：不 panic、不 panic 之外无可见行为可断言（仅诊断日志）。
         let loader = Arc::new(MockLoader::new());
         let invoker = PluginInvokerImpl::new(loader);
-        let root = repo_root();
-        invoker.set_pythonpath_src(root.clone());
-
-        let py = invoker
-            .resolve_pythonpath_src()
-            .expect("resolve_pythonpath_src 应返回 Some");
-        let sdk_dir = root.join("plugins/sdk/src").to_string_lossy().into_owned();
-        assert!(
-            py.contains(&sdk_dir),
-            "PYTHONPATH 必须包含 plugins/sdk/src（agentos_plugin_sdk 源码目录），实际: {}",
-            py
-        );
+        invoker.set_pythonpath_src(repo_root());
     }
 
-    // ── venv 分流（uv 迁移批 A，双轨期）：路径选择逻辑单元层 ──
+    // ── venv 单轨（uv 迁移批 D 翻转）：路径选择逻辑单元层 ──
 
     /// 造一个假 .venv：只放空文件占位解释器路径（find_venv_interpreter 只做
     /// is_file 探测，不执行——真实解释器由 boot 冒烟验证）。
@@ -3654,7 +3598,7 @@ mod tests {
 
     #[test]
     fn test_find_venv_interpreter_missing_venv_returns_none() {
-        // 无 .venv → None（走 plain 路径，双轨期保留）。
+        // 无 .venv → None（resolve_sidecar_command 层据此 fail-closed，批 D 单轨）。
         let tmp = tempfile::tempdir().unwrap();
         assert_eq!(find_venv_interpreter(tmp.path()), None);
         // .venv 目录存在但解释器缺失（半成品）同样 None，不误切。
@@ -3712,12 +3656,10 @@ mod tests {
     }
 
     #[test]
-    fn test_resolve_sidecar_command_venv_without_pyproject_keeps_plain() {
-        // 回归闸（批 A boot 实证发现）：仅 .venv 无 pyproject（如 hindsight_memory
-        // 自建 venv——requirements.txt 时代产物，无 SDK/SDK 依赖）不走 venv 分流，
-        // 否则 venv 缺 agentos_plugin_sdk 及其依赖（mcp_types）→ sidecar 启动即
-        // ModuleNotFoundError → G2 spawn 校验失败。venv 分流门槛 = pyproject+.venv
-        // 双标志（迁移方案 §四），hindsight 归批 C 合并后再享受 venv 轨。
+    fn test_resolve_sidecar_command_venv_without_pyproject_fails_closed() {
+        // 批 D 翻转回归闸（原批 A 双轨版为 keeps_plain）：仅 .venv 无 pyproject
+        // → Err（PYPROJECT_MISSING）而非回退裸 python——plain 轨已删，半契约状态
+        // 必须早失败并给出修复指引（fail-closed，2026-08-19 裁定）。
         let tmp = tempfile::tempdir().unwrap();
         let interp = if cfg!(windows) {
             tmp.path().join(".venv").join("Scripts").join("python.exe")
@@ -3736,14 +3678,24 @@ mod tests {
         let invoker = PluginInvokerImpl::new(loader);
         let manifest = make_sidecar_manifest("legacy_venv", "python server.py");
 
-        let (cmd, _) = invoker.resolve_sidecar_command(&manifest).unwrap();
-        assert_eq!(cmd, "python", "无 pyproject 的孤立 venv 必须走 plain 轨");
+        let err = invoker
+            .resolve_sidecar_command(&manifest)
+            .expect_err("无 pyproject 的孤立 venv 必须失败（批 D 单轨 fail-closed）");
+        assert_eq!(err.code.as_deref(), Some("PYPROJECT_MISSING"));
+        assert!(
+            err.message.contains("pyproject.toml") && err.message.contains("migrate_plugins_to_uv"),
+            "错误信息必须含可读修复指引，实际: {}",
+            err.message
+        );
     }
 
     #[test]
-    fn test_resolve_sidecar_command_no_venv_keeps_plain() {
-        // 无 .venv → 裸 python 原样（plain 双轨保留）。
+    fn test_resolve_sidecar_command_no_venv_fails_closed() {
+        // 有 pyproject 无 .venv → Err（VENV_INTERPRETER_MISSING），错误含
+        // `uv venv`/`uv sync` 重建指引——不再回退 PATH 裸 python（批 D 翻转）。
         let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join("pyproject.toml"), b"[project]\n").unwrap();
+
         let loader = Arc::new(MockLoader::new());
         loader.plugin_dirs.write().insert(
             "demo_tool".to_string(),
@@ -3752,19 +3704,46 @@ mod tests {
         let invoker = PluginInvokerImpl::new(loader);
         let manifest = make_sidecar_manifest("demo_tool", "python server.py");
 
-        let (cmd, args) = invoker.resolve_sidecar_command(&manifest).unwrap();
-        assert_eq!(cmd, "python");
-        assert_eq!(args, vec!["server.py"]);
+        let err = invoker
+            .resolve_sidecar_command(&manifest)
+            .expect_err("缺 .venv 解释器必须失败（批 D 单轨 fail-closed）");
+        assert_eq!(err.code.as_deref(), Some("VENV_INTERPRETER_MISSING"));
+        assert!(
+            err.message.contains("uv venv") && err.message.contains("uv sync"),
+            "错误信息必须含可读修复指引，实际: {}",
+            err.message
+        );
+        // 半成品 .venv（目录存在但解释器缺失）同样失败——不误切也不兜底。
+        std::fs::create_dir_all(tmp.path().join(".venv")).unwrap();
+        let err2 = invoker
+            .resolve_sidecar_command(&manifest)
+            .expect_err("半成品 .venv（无解释器）必须失败");
+        assert_eq!(err2.code.as_deref(), Some("VENV_INTERPRETER_MISSING"));
     }
 
     #[test]
-    fn test_resolve_sidecar_command_unknown_dir_keeps_plain() {
-        // loader 查不到插件目录（get_plugin_dir None）→ 不探测，plain 原样。
+    fn test_resolve_sidecar_command_unknown_dir_fails_closed() {
+        // loader 查不到插件目录（get_plugin_dir None）→ Err（批 D 翻转：
+        // 原 keeps_plain 双轨语义删除——查不到目录就无法定位 venv，fail-closed）。
         let loader = Arc::new(MockLoader::new());
         let invoker = PluginInvokerImpl::new(loader);
         let manifest = make_sidecar_manifest("ghost", "python server.py");
-        let (cmd, _) = invoker.resolve_sidecar_command(&manifest).unwrap();
-        assert_eq!(cmd, "python");
+        let err = invoker
+            .resolve_sidecar_command(&manifest)
+            .expect_err("未知插件目录的 Python sidecar 必须失败");
+        assert_eq!(err.code.as_deref(), Some("PLUGIN_DIR_NOT_FOUND"));
+    }
+
+    #[test]
+    fn test_resolve_sidecar_command_explicit_interpreter_path_untouched() {
+        // entry 首词带路径分隔符的显式解释器是刻意选择（is_plain_python_command
+        // 不判）→ 原样返回，不替换也不 fail-closed。
+        let loader = Arc::new(MockLoader::new());
+        let invoker = PluginInvokerImpl::new(loader);
+        let manifest = make_sidecar_manifest("ghost", "/usr/bin/python3 server.py");
+        let (cmd, args) = invoker.resolve_sidecar_command(&manifest).unwrap();
+        assert_eq!(cmd, "/usr/bin/python3");
+        assert_eq!(args, vec!["server.py"]);
     }
 
     #[test]

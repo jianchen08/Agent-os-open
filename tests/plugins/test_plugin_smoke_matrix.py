@@ -42,6 +42,23 @@ _PROBE_ENV["PYTHONPATH"] = os.pathsep.join(
     [p for p in (_SRC, _SDK, _PLUGINS) if p not in _existing_py_paths] + _existing_py_paths
 )
 
+# venv 单轨（uv 迁移批 D，2026-08-19）：生产 invoker 已 fail-closed——Python sidecar
+# 必须以插件 .venv 解释器启动、无 PYTHONPATH 注入（SDK/依赖由 editable install 解析）。
+# 冒烟矩阵对齐该语义：优先 venv 解释器 + 剥离 PYTHONPATH；仅 venv 缺失的场景
+# （探针自检等非插件目录）回退 sys.executable + PYTHONPATH。
+_PROBE_ENV_NO_PYTHONPATH = {
+    k: v for k, v in _PROBE_ENV.items() if k != "PYTHONPATH"
+}
+
+
+def _venv_python(plugin_dir: Path) -> str | None:
+    """插件 venv 解释器绝对路径（与 kernel invoker `find_venv_interpreter` 同布局探测）。"""
+    for rel in (".venv/Scripts/python.exe", ".venv/bin/python"):
+        p = plugin_dir / rel
+        if p.is_file():
+            return str(p)
+    return None
+
 
 # ────────────────────────────────────────────────────────────
 # 插件目录发现
@@ -52,10 +69,22 @@ _SKIP_NAMES = {"native_test", "wasm_hello"}
 
 
 def _discover_plugin_dirs() -> list[Path]:
-    """发现所有含 plugin.json 的插件目录。"""
+    """发现所有含 plugin.json 的插件目录。
+
+    用带剪枝的 os.walk（rglob 会钻进 dsh_adapter runtime 的 node_modules
+    连接点迷宫卡死——与 scripts/migrate_plugins_to_uv.py SKIP_DIRS 同款处置，
+    2026-08-19 批 D 本地复现实证）。
+    """
+    skip_walk = {
+        "node_modules", "__pycache__", "target", "runtime", "dsh_plugins",
+        ".venv", ".venv-hindsight", ".ai_workspaces",
+    }
     dirs: list[Path] = []
-    for plugin_json in (ROOT / "plugins").rglob("plugin.json"):
-        d = plugin_json.parent
+    for cur, subdirs, files in os.walk(ROOT / "plugins"):
+        subdirs[:] = [d for d in subdirs if d not in skip_walk]
+        if "plugin.json" not in files:
+            continue
+        d = Path(cur)
         rel = d.relative_to(ROOT / "plugins")
         parts = rel.parts
         if any(part in _SKIP_NAMES for part in parts):
@@ -75,9 +104,25 @@ def _entry_of(plugin_dir: Path) -> str:
 
 
 def _is_python_sidecar(plugin_dir: Path) -> bool:
-    """entry 为 python 且存在 server.py 的插件。"""
+    """entry 为 python 且存在 server.py 的插件。
+
+    判定对齐生产 invoker（批 D 单轨）：entry **首词为 PATH 裸 python/python3**
+    （含 .exe 等扩展）才算 Python sidecar——rust native 插件（sensitive_checker
+    等带遗留 server.py 但 entry=*.dll、host_type=in_process）不经 python 轨启动，
+    不纳入（其 venv 契约不适用）。
+    """
     entry = _entry_of(plugin_dir)
-    return (plugin_dir / "server.py").exists() and not entry.startswith("mcp:external")
+    if not (plugin_dir / "server.py").exists() or entry.startswith("mcp:external"):
+        return False
+    first = entry.split()[0] if entry else ""
+    if "/" in first or "\\" in first:  # 显式路径解释器是刻意选择，非 venv 契约面
+        return False
+    stem = first.lower()
+    for ext in (".exe", ".bat", ".cmd"):
+        if stem.endswith(ext):
+            stem = stem[: -len(ext)]
+            break
+    return stem in ("python", "python3")
 
 
 def _is_native_plugin(plugin_dir: Path) -> bool:
@@ -100,15 +145,26 @@ WRAPPER_ONLY_PLUGINS = {"builtin_tools"}
 
 
 def _run_probe(plugin_dir: Path, invoke: dict | None = None) -> dict:
-    """子进程运行探针，返回 JSON 报告；超时/崩溃记为失败。"""
-    cmd = [sys.executable, str(PROBE), str(plugin_dir)]
+    """子进程运行探针，返回 JSON 报告；超时/崩溃记为失败。
+
+    生产等价（批 D 单轨）：插件目录有 .venv → 用 venv 解释器且**不注入
+    PYTHONPATH**（对齐 invoker 翻转后的真实 spawn 环境）；无 .venv 的目录
+    （探针自检等）回退 sys.executable + PYTHONPATH。
+    """
+    venv_py = _venv_python(plugin_dir)
+    if venv_py:
+        cmd = [venv_py, str(PROBE), str(plugin_dir)]
+        env = _PROBE_ENV_NO_PYTHONPATH
+    else:
+        cmd = [sys.executable, str(PROBE), str(plugin_dir)]
+        env = _PROBE_ENV
     if invoke:
         cmd += ["--invoke", json.dumps(invoke, ensure_ascii=False)]
     try:
         proc = subprocess.run(
             cmd,
             cwd=str(plugin_dir),
-            env=_PROBE_ENV,
+            env=env,
             capture_output=True,
             text=True,
             timeout=90,
@@ -254,3 +310,21 @@ def test_probe_script_self_check() -> None:
     report = _run_probe(ROOT / "plugins" / "sdk")  # 无 server.py 的目录
     assert report["load_ok"] is False
     assert report["load_error"] == "no server.py"
+
+
+def test_python_sidecar_plugins_have_uv_contract() -> None:
+    """批 D 翻转镜像（fail-closed 契约闸）：Python sidecar 插件必须
+    pyproject.toml + .venv 双标志齐备——生产 invoker 已删 plain PATH python 回退
+    （kernel/crates/invoker resolve_sidecar_command，2026-08-19），缺任一标志
+    该插件在生产侧启动即失败。矩阵层提前暴露，防"新增插件忘建 venv"回归。
+    """
+    assert PLUGIN_DIRS, "插件发现异常：0 个 python sidecar"
+    missing = [
+        str(d.relative_to(ROOT))
+        for d in PLUGIN_DIRS
+        if not (d / "pyproject.toml").is_file() or _venv_python(d) is None
+    ]
+    assert not missing, (
+        "以下 Python sidecar 插件缺 uv 单轨契约（pyproject.toml + .venv），"
+        "生产 invoker 将 fail-closed 拒绝启动：\n  " + "\n  ".join(missing)
+    )

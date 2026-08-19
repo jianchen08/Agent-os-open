@@ -412,8 +412,8 @@ async fn bench_sidecar_channel() {
     let loader = Arc::new(PluginLoaderImpl::new(plugins_dir, None));
     loader.discover(&[&input_root]).await.unwrap();
     let invoker = agentos_invoker::PluginInvokerImpl::new(loader);
-    // PYTHONPATH 注入（对齐内核 main 装配：sidecar 需解析 agentos_plugin_sdk）。
-    invoker.set_pythonpath_src(repo_root());
+    // PYTHONPATH 注入已随批 D 翻转退役：sidecar 的 SDK/依赖由插件 venv 的
+    // editable install 解析（pipeline_level_guard 批 B 已 venv 化）。
     invoker.set_router(Arc::new(BenchRouter));
 
     let (state, size0) = build_state(TIERS[0].0);
