@@ -468,10 +468,13 @@ class BashTool(WorkspaceAwareMixin):
             )
 
         # 安全检查：容器隔离模式下跳过内部安全检查
-        # 容器内执行已有独立的安全边界，反引号等 shell 特性是正常行为
+        # 容器内执行已有独立的安全边界，反引号等 shell 特性是正常行为。
+        # 注意：is_isolated 只信 _container_id（isolation_guard 服务端注入，
+        # 且 param_inject 已剥离 LLM 夹带的下划线键）——不信任 _isolation_provider
+        # 之类的声明式标记（历史版本允许其跳过黑名单，属提示注入伪造面）。
         warning = None
         container_id = inputs.get("_container_id")
-        is_isolated = bool(container_id) or inputs.get("_isolation_provider") in ("docker", "isolated")
+        is_isolated = bool(container_id)
         if not is_isolated:
             is_safe, needs_warning, message = self.security.check(command)
             if not is_safe:

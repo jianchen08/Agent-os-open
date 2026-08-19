@@ -173,6 +173,17 @@ class ParamInjectPlugin(IInputPlugin):
                 raw_args = {}
             args = dict(raw_args)
 
+            # 剥离 LLM 夹带的 `_` 前缀内部键（安全审查 2026-08-19 系统性根因）：
+            # `_owner/_call_context/_container_id/_isolation_provider` 等下划线键是
+            # 内核（dispatch 期）与管道插件（isolation_guard，位于本插件之后的
+            # 服务端注入通道——isolation_guard 无条件覆盖注入 _container_id，故
+            # 此处先剥不影响合法注入；内核注入的 _owner/_log_ctx 发生在管道之后，
+            # 亦不受影响）。任何工具 schema 均未声明下划线参数，出现即视为
+            # 提示注入伪造（如 bash 工具曾据 _isolation_provider 跳过危险命令
+            # 黑名单），先剥后注入，服务端值权威。
+            for forged_key in [k for k in args if k.startswith("_")]:
+                del args[forged_key]
+
             # 注入运行时参数（仅当参数不存在时才注入）
             if self._inject_session_id and "session_id" not in args:
                 session_id = ctx.state.get(StateKeys.SESSION_ID, "")
@@ -214,30 +225,27 @@ class ParamInjectPlugin(IInputPlugin):
                 if pipeline_id:
                     args["pipeline_id"] = pipeline_id
 
-            # ── workspace / isolation_level：task_submit 不注入 ──
-            # 这两个参数已拆分为 task_submit 的显式选择项（workspace 目标路径 +
-            # workspace_mode 拓扑 + isolation_level 执行环境），由 agent 按任务
-            # 类型直接填写（容器直接子任务不可填、普通任务可填）。注入父管道值
-            # 会与显式选择混淆（子任务继承语义下造成路径双重嵌套），故对
-            # task_submit 跳过注入；其他工具照旧注入（workspace_aware 等消费）。
+            # 注入 workspace / isolation_level / project_root：服务端权威值
+            # **无条件覆盖**（仅 task_submit 例外——其 workspace/isolation 是
+            # agent 显式选择项）。历史上"参数不存在才注入"允许 LLM 在工具
+            # 参数里夹带伪造 workspace/project_root，使 fs_tools 等把校验锚点
+            # 定到任意路径（安全审查 2026-08-19 系统性根因），故改为覆盖式。
             _tool_name = injected_tc.get("name", "")
             _skip_task_ctx = _tool_name == "task_submit"
 
-            if "workspace" not in args and not _skip_task_ctx:
+            if not _skip_task_ctx:
                 workspace = ctx.state.get("workspace", "")
                 if workspace:
                     args["workspace"] = workspace
 
-            # 会话级隔离模式注入（task_submit 跳过：隔离由 agent 显式选择或
-            # 任务类型默认，不再经 state 继承）
-            if "isolation_level" not in args and not _skip_task_ctx:
+                # 会话级隔离模式注入（task_submit 跳过：隔离由 agent 显式选择或
+                # 任务类型默认，不再经 state 继承）
                 isolation_level = ctx.state.get("isolation_level", "")
                 if isolation_level:
                     args["isolation_level"] = isolation_level
 
-            # 注入 project_root：从 state 获取 Agent OS 项目根目录
-            # 供 workspace_aware 等工具使用，与 workspace 注入同源
-            if "project_root" not in args:
+                # 注入 project_root：从 state 获取 Agent OS 项目根目录
+                # 供 workspace_aware 等工具使用，与 workspace 注入同源
                 project_root = ctx.state.get("project_root", "")
                 if project_root:
                     args["project_root"] = project_root
