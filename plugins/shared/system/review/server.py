@@ -62,7 +62,7 @@ _memory_backend: Any = None
 
 
 def set_memory_backend(backend: Any) -> None:
-    """注入 IMemoryBackend 实例（HindsightBackend / KernelMemoryBackend）。
+    """注入 IMemoryBackend 实例（HindsightBackend）。
 
     生产环境由 review 插件宿主把 hindsight_memory.get_memory_backend() 产出的
     后端注入进来；测试环境传 AsyncMock。传 None 可重置为未注入（仅内存路径）。

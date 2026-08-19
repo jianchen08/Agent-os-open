@@ -61,7 +61,7 @@ class MemoryTool:
     - get_context：获取会话上下文（更宽泛的 backend.search）
 
     后端为 duck-type 的 IMemoryBackend（AsyncMock / HindsightBackend /
-    KernelMemoryBackend 均可）；未注入时执行返回错误结果，不崩溃。
+    等实现均可）；未注入时执行返回错误结果，不崩溃。
 
     IDOR 防护（punch B6）：
     - 敏感 action（store/import_text/import_file/update/delete——写/删用户数据）

@@ -1,11 +1,11 @@
 """长期记忆后端端口与实现。
 
 定义统一的记忆后端接口（IMemoryBackend），上层（压缩/复盘/沉淀/注入）通过
-此接口落库/检索记忆，后端可插拔：
-- HindsightBackend：通过 tool-executor 调用 hindsight sidecar 工具（向量检索，高质量）
-- KernelMemoryBackend：通过 service-registry 调用内核记忆表（关键词检索，永远可用，降级）
+此接口落库/检索记忆。唯一后端：
+- HindsightBackend：经 tool-executor 调 hindsight sidecar 工具（向量检索）
 
-工厂 get_memory_backend 按配置选后端，默认 hindsight，降级 kernel。
+0.1 的内核记忆表后端（KernelMemoryBackend，关键词检索降级）已随内核 memory 表
+DROP 一并退役（2026-08-19 用户裁定：不留两套真值、禁用备用后端糊弄）。
 
 设计要点：
 - 唯一外部依赖是注入的 capability_caller（async fn `(method, params) -> Any`），
@@ -29,10 +29,6 @@ logger = logging.getLogger(__name__)
 
 # capability_caller 类型：(method: str, params: dict) -> Awaitable[Any]
 CapabilityCaller = Callable[[str, dict[str, Any]], Awaitable[Any]]
-
-# 内核记忆表切块大小（字符）——内核无原生文档导入，逐块 create
-_KERNEL_CHUNK_SIZE = 2000
-
 
 # ═══════════════════════════════════════════════════════════
 # 端口
@@ -306,162 +302,6 @@ class HindsightBackend(IMemoryBackend):
 
 
 # ═══════════════════════════════════════════════════════════
-# 内核记忆表后端（降级）
-# ═══════════════════════════════════════════════════════════
-
-
-class KernelMemoryBackend(IMemoryBackend):
-    """内核记忆表后端——经 service-registry 调用 memory.* 方法。
-
-    FALLBACK 后端：内核记忆表永远存在，搜索为简易关键词匹配（无向量），
-    质量低于 hindsight 但永远可用。无原生文档导入，本类自行切块后逐条 create。
-
-    capability_caller 在构造时注入（async fn `(method, params) -> Any`），
-    生产环境由插件把 service-registry 能力句柄的 call 方法注入进来。
-    """
-
-    def __init__(self, capability_caller: CapabilityCaller) -> None:
-        self._call = capability_caller
-
-    async def add(
-        self,
-        user_id: str,
-        content: str,
-        memory_type: str = "semantic",
-        tags: list[str] | None = None,
-        source: str = "",
-    ) -> str:
-        """写入记忆，经 service-registry 调用 memory.create。
-
-        构造 MemoryRecord 形态 {id, content, memory_type, tags, score, created_at}。
-        """
-        import secrets
-
-        record = {
-            "id": secrets.token_hex(6),  # 12-hex，与内核 MemoryRecord 对齐
-            "content": content,
-            "memory_type": memory_type,
-            "tags": tags or [],
-            "score": 0.0,
-            "created_at": _now_iso(),
-        }
-        try:
-            await self._call("memory.create", record)
-        except Exception as e:
-            # 上抛而非静默 ""：空 id 会被 memory 工具层判失败，但吞错让排查
-            # 无从下手（真实错误如 capability 超时被藏成"成功但无 id"）。
-            raise RuntimeError(f"memory.create 调用失败: {e}") from e
-        return record["id"]
-
-    async def search(
-        self,
-        query: str,
-        user_id: str,
-        top_k: int = 5,
-        memory_type: str | None = None,
-    ) -> list[dict[str, Any]]:
-        """检索记忆，经 service-registry 调用 memory.search，
-        结果映射为统一形态。"""
-        try:
-            result = await self._call(
-                "memory.search", {"query": query, "top_k": top_k}
-            )
-        except Exception as e:
-            # 上抛：search 失败 ≠ 空结果（静默 [] 曾掩盖 capability 超时根因
-            # 半天，2026-08-19 e2e 实测）。空结果只来自内核真实返回的空列表。
-            raise RuntimeError(f"memory.search 调用失败: {e}") from e
-        return self._map_kernel_results(result, memory_type)
-
-    async def delete(self, user_id: str, memory_id: str | None = None) -> bool:
-        """删除记忆，经 service-registry 调用 memory.delete。
-
-        kernel memory.delete 只支持按 id 删（无 bank 概念），memory_id 必填。
-        """
-        if not memory_id:
-            # 内核 memory.delete 需要明确 id；未指定 id 时记告警并返回 False
-            logger.warning(
-                "[KernelMemoryBackend.delete] 缺少 memory_id，内核 memory.delete 无法整库删"
-            )
-            return False
-        try:
-            result = await self._call("memory.delete", {"id": memory_id})
-        except Exception as e:
-            logger.warning("[KernelMemoryBackend.delete] 调用失败降级 | error=%s", e)
-            return False
-        if isinstance(result, dict):
-            return bool(result.get("deleted", False))
-        return True
-
-    async def import_document(
-        self,
-        user_id: str,
-        text: str | None = None,
-        file_path: str | None = None,
-        name: str = "",
-    ) -> dict[str, Any]:
-        """导入文档——内核无原生导入，自行切块后逐条 memory.create。"""
-        raw_text = text
-        if file_path:
-            try:
-                with open(file_path, encoding="utf-8") as fh:
-                    raw_text = fh.read()
-            except Exception as e:
-                return {"chunks_imported": 0, "name": name, "error": str(e)}
-        if not raw_text:
-            return {
-                "chunks_imported": 0,
-                "name": name,
-                "error": "no text provided",
-            }
-
-        chunks = _chunk_text(raw_text, _KERNEL_CHUNK_SIZE)
-        imported = 0
-        for idx, chunk in enumerate(chunks):
-            tags = ["import_document"]
-            if name:
-                tags.append(name)
-            mem_id = await self.add(
-                user_id=user_id,
-                content=chunk,
-                memory_type="semantic",
-                tags=tags,
-                source=f"import_document:{name}:{idx}/{len(chunks)}",
-            )
-            if mem_id:
-                imported += 1
-        return {"chunks_imported": imported, "name": name, "total_chunks": len(chunks)}
-
-    @staticmethod
-    def _map_kernel_results(
-        result: Any, memory_type: str | None
-    ) -> list[dict[str, Any]]:
-        """把内核 memory.search 返回的 MemoryRecord 列表映射为统一形态，
-        并可选按 memory_type 客户端过滤。"""
-        if not isinstance(result, list):
-            return []
-        mapped: list[dict[str, Any]] = []
-        for rec in result:
-            if not isinstance(rec, dict):
-                continue
-            mt = rec.get("memory_type", "semantic")
-            if memory_type and mt != memory_type:
-                continue
-            mapped.append(
-                {
-                    "id": str(rec.get("id", "")),
-                    "content": rec.get("content", ""),
-                    "score": float(rec.get("score", 0.0) or 0.0),
-                    "memory_type": mt,
-                    "metadata": {
-                        "tags": rec.get("tags", []),
-                        "created_at": rec.get("created_at", ""),
-                    },
-                }
-            )
-        return mapped
-
-
-# ═══════════════════════════════════════════════════════════
 # 工厂
 # ═══════════════════════════════════════════════════════════
 
@@ -470,46 +310,33 @@ def get_memory_backend(
     config: dict[str, Any] | None = None,
     capability_caller: CapabilityCaller | None = None,
 ) -> IMemoryBackend:
-    """按配置选记忆后端。默认 hindsight，降级 kernel。
+    """构建记忆后端（唯一后端 = HindsightBackend）。
 
     Args:
-        config: 配置字典，键 backend: "hindsight"(默认) | "kernel"
+        config: 配置字典（历史键 backend 已无 "kernel" 选项，见下）。
         capability_caller: 注入的能力调用 async 函数 `(method, params) -> Any`。
-            生产环境由插件注入（tool-executor / service-registry 句柄的 call 方法）。
+            生产环境由插件注入 tool-executor 句柄的 call 方法。
 
     Returns:
         IMemoryBackend 实例。
 
     Raises:
-        ValueError: capability_caller 为 None（必须注入，便于测试与解耦）。
+        ValueError: capability_caller 为 None；或 config 指定已退役的 kernel 后端
+            （fail loudly——内核记忆表已 DROP，禁止静默回落糊弄）。
     """
     if capability_caller is None:
         raise ValueError(
-            "capability_caller 必须注入（生产环境由插件传入 tool-executor/"
-            "service-registry 能力句柄的 call 方法）"
+            "capability_caller 必须注入（生产环境由插件传入 tool-executor 能力句柄的 call 方法）"
         )
 
     cfg = config or {}
     backend = (cfg.get("backend") or "hindsight").lower()
-
     if backend == "kernel":
-        return KernelMemoryBackend(capability_caller)
-    # 默认 hindsight（含未知值也回落到 hindsight）
+        raise ValueError(
+            'memory backend "kernel" 已退役（2026-08-19 内核记忆表 DROP，'
+            "不留两套真值）；唯一后端 = hindsight"
+        )
     return HindsightBackend(capability_caller)
 
 
-# ═══════════════════════════════════════════════════════════
-# 辅助
-# ═══════════════════════════════════════════════════════════
 
-
-def _now_iso() -> str:
-    """当前 UTC 时间 ISO8601 字符串（与内核 MemoryRecord.created_at 对齐）。"""
-    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
-
-
-def _chunk_text(text: str, chunk_size: int = _KERNEL_CHUNK_SIZE) -> list[str]:
-    """按字符数朴素切块（与 hindsight_memory/server.py._chunk_text 同款）。"""
-    if not text:
-        return []
-    return [text[i : i + chunk_size] for i in range(0, len(text), chunk_size)]

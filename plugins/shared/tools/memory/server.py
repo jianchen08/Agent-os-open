@@ -66,38 +66,17 @@ _memory_backend: Any | None = None
 
 
 def _make_capability_caller() -> Any | None:
-    """从内核注入的能力句柄构造 capability_caller（async fn `(method, params)`）。
+    """从内核注入的 tool-executor 句柄构造 capability_caller（async fn `(method, params)`）。
 
-    同时收集 tool-executor + service-registry 句柄，按 method 前缀路由：
-    - "tool-executor.*"（hindsight 后端的 retain/recall）→ tool-executor handle
-    - 无前缀域方法（kernel 后端的 memory.create/search）→ service-registry handle
-
-    此前"优先 tool-executor 单句柄"的形态会把 kernel 后端的 memory.create
-    错拼成 tool-executor.memory.create（内核 method not implemented，2026-08-19
-    e2e 实测）。至少一个句柄可用即返回 caller；均未注入返回 None。
+    唯一后端 = hindsight（retain/recall 经 tool-executor.invoke）。0.1 的内核
+    记忆表后端（memory.* 经 service-registry）已随内核 memory 表 DROP 退役
+    （2026-08-19），service-registry 路由分支随之删除。句柄未注入返回 None。
     """
-    handles: dict[str, Any] = {}
-    for cap_name in ("tool-executor", "service-registry"):
-        try:
-            handles[cap_name] = plugin.get_capability(cap_name)
-        except KeyError:
-            continue
-
-    if "service-registry" in handles:
-        sr = handles["service-registry"]
-        te = handles.get("tool-executor")
-
-        async def _call(method: str, params: dict[str, Any]) -> Any:
-            if method.startswith("tool-executor."):
-                if te is None:
-                    raise RuntimeError("tool-executor 能力未注入")
-                return await te.call(method[len("tool-executor."):], params)
-            return await sr.call(method, params)
-
-        return _call
-    if "tool-executor" in handles:
-        return _bind_caller(handles["tool-executor"], "tool-executor")
-    return None
+    try:
+        handle = plugin.get_capability("tool-executor")
+    except KeyError:
+        return None
+    return _bind_caller(handle, "tool-executor")
 
 
 def _bind_caller(handle: Any, cap_name: str) -> Any:

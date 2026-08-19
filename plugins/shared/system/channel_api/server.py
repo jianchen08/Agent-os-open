@@ -676,29 +676,27 @@ def _pydantic_to_dict(obj: Any) -> Any:
 
 
 def _make_memory_capability_caller() -> Any | None:
-    """从内核注入的能力句柄构造 capability_caller（async fn `(method, params)`）。
+    """从内核注入的 tool-executor 句柄构造 capability_caller（async fn `(method, params)`）。
 
-    优先 tool-executor（hindsight 后端），回落 service-registry（kernel 后端）；
-    均未注入时返回 None（memory 域路由保持空结果降级）。
+    唯一后端 = hindsight；service-registry 回落（内核记忆表后端）已随 memory 表
+    DROP 退役（2026-08-19）。句柄未注入返回 None（memory 域路由保持空结果降级）。
 
     桥接说明：memory_backend 的 CapabilityCaller 约定传入**完整** wire method
-    （如 "tool-executor.invoke" / "memory.create"），而 SDK CapabilityHandle.call
-    会拼接 ``f"{cap}.{method}"``。因此需剥掉已含的能力前缀，避免双命名空间
+    （如 "tool-executor.invoke"），而 SDK CapabilityHandle.call 会拼接
+    ``f"{cap}.{method}"``。因此需剥掉已含的能力前缀，避免双命名空间
     （"tool-executor.tool-executor.invoke"）。
     """
-    for cap_name in ("tool-executor", "service-registry"):
-        try:
-            handle = plugin.get_capability(cap_name)
-        except KeyError:
-            continue
-        prefix = f"{cap_name}."
+    try:
+        handle = plugin.get_capability("tool-executor")
+    except KeyError:
+        return None
+    prefix = "tool-executor."
 
-        async def _call(method: str, params: dict[str, Any]) -> Any:
-            stripped = method[len(prefix):] if method.startswith(prefix) else method
-            return await handle.call(stripped, params)
+    async def _call(method: str, params: dict[str, Any]) -> Any:
+        stripped = method[len(prefix):] if method.startswith(prefix) else method
+        return await handle.call(stripped, params)
 
-        return _call
-    return None
+    return _call
 
 
 # 记忆后端（懒构建 + 缓存，注入 routes_memory）

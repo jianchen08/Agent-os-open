@@ -1,20 +1,16 @@
 # @feature: FP-0.2.六 记忆检索 | @vision: V1 可进化 | @audit: T5#4 | @ci: none-local
-"""IMemoryBackend 端口与 Hindsight/Kernel 后端 + 工厂的 TDD 测试。
+"""IMemoryBackend 端口与 Hindsight 后端 + 工厂的 TDD 测试。
 
-验证内容（与任务规格 10 个用例对齐）：
+验证内容（KernelMemoryBackend 随内核记忆表退役删除，2026-08-19）：
 1. IMemoryBackend 不可直接实例化（抽象端口）
 2. HindsightBackend.add 调用 capability_caller，方法为 tool-executor.invoke，
    args 中含 tool_name="hindsight.retain"
 3. HindsightBackend.search 把 hindsight recall 原始格式映射为统一 dict
    {id, content, score, memory_type, metadata}
 4. HindsightBackend.add 在 capability_caller 抛错时优雅降级，返回空串不崩溃
-5. KernelMemoryBackend.add 调用方法 memory.create，参数为 MemoryRecord 形态
-   （含 id/content/memory_type/tags/created_at）
-6. KernelMemoryBackend.search 调用方法 memory.search
-7. KernelMemoryBackend.import_document 把长文本切分为多块，多次调用 memory.create
-8. get_memory_backend 默认返回 HindsightBackend
-9. get_memory_backend(config backend="kernel") 返回 KernelMemoryBackend
-10. get_memory_backend(capability_caller=None) 抛 ValueError
+5. get_memory_backend 默认返回 HindsightBackend
+6. get_memory_backend(config backend="kernel") 抛 ValueError（退役后端 fail loudly）
+7. get_memory_backend(capability_caller=None) 抛 ValueError
 
 唯一外部依赖是注入的 capability_caller（AsyncMock），不引入 hindsight 包或重依赖。
 
@@ -214,81 +210,6 @@ class TestHindsightBackend:
 # ═══════════════════════════════════════════════════════════
 
 
-class TestKernelMemoryBackend:
-    async def test_kernel_add_calls_memory_create(
-        self, mod: Any, caller: AsyncMock
-    ) -> None:
-        """KernelMemoryBackend.add 调用 memory.create，
-        参数为 MemoryRecord 形态（含 id/content/memory_type/tags/created_at）。"""
-        caller.return_value = {"ok": True}
-        backend = mod.KernelMemoryBackend(caller)
-
-        await backend.add(
-            user_id="user-1", content="hello", memory_type="semantic", tags=["t1"]
-        )
-
-        caller.assert_awaited_once()
-        method, params = caller.call_args.args
-        assert method == "memory.create"
-        # MemoryRecord 必备字段
-        for key in ("id", "content", "memory_type", "tags", "created_at"):
-            assert key in params, f"missing MemoryRecord field {key}"
-        assert params["content"] == "hello"
-        assert params["memory_type"] == "semantic"
-        assert params["tags"] == ["t1"]
-
-    async def test_kernel_search_calls_memory_search(
-        self, mod: Any, caller: AsyncMock
-    ) -> None:
-        """KernelMemoryBackend.search 调用方法 memory.search。"""
-        caller.return_value = [
-            {
-                "id": "k1",
-                "content": "foo",
-                "memory_type": "semantic",
-                "tags": [],
-                "score": 0.5,
-                "created_at": "2026-01-01",
-            }
-        ]
-        backend = mod.KernelMemoryBackend(caller)
-
-        results = await backend.search(query="foo", user_id="user-1", top_k=3)
-
-        caller.assert_awaited_once()
-        method, params = caller.call_args.args
-        assert method == "memory.search"
-        assert params["query"] == "foo"
-        assert params["top_k"] == 3
-        # 仍映射为统一形态
-        assert len(results) == 1
-        for key in ("id", "content", "score", "memory_type", "metadata"):
-            assert key in results[0]
-
-    async def test_kernel_import_document_chunks(
-        self, mod: Any, caller: AsyncMock
-    ) -> None:
-        """import_document 把长文本切分为多块，触发多次 memory.create。"""
-        caller.return_value = {"ok": True}
-        backend = mod.KernelMemoryBackend(caller)
-
-        # 5000 字符文本，chunk_size 默认 2000 → 应切 3 块
-        text = "x" * 5000
-        result = await backend.import_document(user_id="user-1", text=text, name="doc")
-
-        # 应有 3 次 memory.create
-        assert caller.await_count == 3
-        for call in caller.call_args_list:
-            method, params = call.args
-            assert method == "memory.create"
-            assert "content" in params
-        assert result["chunks_imported"] == 3
-
-
-# ═══════════════════════════════════════════════════════════
-# 8-10. 工厂
-# ═══════════════════════════════════════════════════════════
-
 
 class TestFactory:
     async def test_factory_returns_hindsight_by_default(
@@ -298,14 +219,14 @@ class TestFactory:
         backend = mod.get_memory_backend(config={}, capability_caller=caller)
         assert isinstance(backend, mod.HindsightBackend)
 
-    async def test_factory_returns_kernel_when_configured(
+    async def test_factory_kernel_backend_retired(
         self, mod: Any, caller: AsyncMock
     ) -> None:
-        """config backend="kernel" 返回 KernelMemoryBackend。"""
-        backend = mod.get_memory_backend(
-            config={"backend": "kernel"}, capability_caller=caller
-        )
-        assert isinstance(backend, mod.KernelMemoryBackend)
+        """config backend="kernel" 抛 ValueError——内核记忆表后端已退役（2026-08-19）。"""
+        with pytest.raises(ValueError, match="已退役"):
+            mod.get_memory_backend(
+                config={"backend": "kernel"}, capability_caller=caller
+            )
 
     def test_factory_requires_caller(self, mod: Any) -> None:
         """capability_caller=None 时抛 ValueError。"""

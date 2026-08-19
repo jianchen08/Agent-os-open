@@ -45,7 +45,7 @@ def set_memory_backend(backend: Any | None) -> None:
 
     Args:
         backend: 实现 add/search/delete/import_document 的后端实例
-            （HindsightBackend / KernelMemoryBackend 或 duck-type）；传 None 清空
+            （HindsightBackend 或 duck-type）；传 None 清空
     """
     global _memory_backend
     _memory_backend = backend

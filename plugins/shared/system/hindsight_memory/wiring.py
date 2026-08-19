@@ -68,7 +68,10 @@ def _bind_caller(handle: Any, cap_name: str) -> Any:
 
 
 def make_capability_caller(plugin: Any) -> Any | None:
-    """从内核注入的能力句柄构造 capability_caller。
+    """从内核注入的 tool-executor 句柄构造 capability_caller。
+
+    service-registry 回落已删（2026-08-19）：它只服务于已退役的内核记忆表
+    后端（memory.*），对 hindsight 调用反而发错命名空间。
 
     Args:
         plugin: AgentOSPlugin 实例（含 get_capability）
@@ -76,14 +79,12 @@ def make_capability_caller(plugin: Any) -> Any | None:
     Returns:
         async caller `(method, params) -> Any`；能力未注入时返回 None
     """
-    for cap_name in ("tool-executor", "service-registry"):
-        try:
-            handle = plugin.get_capability(cap_name)
-        except KeyError:
-            continue
-        return _bind_caller(handle, cap_name)
-    logger.warning("[wiring] 未注入 tool-executor/service-registry 能力，capability_caller 不可用")
-    return None
+    try:
+        handle = plugin.get_capability("tool-executor")
+    except KeyError:
+        logger.warning("[wiring] 未注入 tool-executor 能力，capability_caller 不可用")
+        return None
+    return _bind_caller(handle, "tool-executor")
 
 
 def build_memory_backend(plugin: Any) -> Any | None:
@@ -93,7 +94,7 @@ def build_memory_backend(plugin: Any) -> Any | None:
         plugin: AgentOSPlugin 实例
 
     Returns:
-        IMemoryBackend 实例（HindsightBackend 或 KernelMemoryBackend），失败返回 None
+        IMemoryBackend 实例（HindsightBackend），失败返回 None
     """
     caller = make_capability_caller(plugin)
     if caller is None:
