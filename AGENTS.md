@@ -59,6 +59,13 @@ commit 前的调查/验证工作尽量用未跟踪文件（`??` 状态）或文�
   `docs/plugin-protocol.md` 等。
 - **门禁**：机械门禁优先（测试/格式/覆盖率）；改造后必须本地补跑全部可验证车道，
   并如实区分"门禁绿"与"测试绿"。
+- **触碰即清（治理债随模块清，2026-08-19 用户要求）**：改动触碰某模块
+  （plugins/shared / kernel/crates / frontend/src）时，同刀清该模块对应的治理债：
+  Python 模块 mypy 错误不增、清了就下调 `.github/mypy-baseline.txt`（现值 337，
+  只减不增）；修好基线内既有红测试就收紧 `.github/pytest-failure-baseline.txt`
+  （plugins-coverage 116 / plugins-heavy 11）；新代码带测试（fail-under=44 兜底）。
+  基线文件改动一律走 commit 留归因。细则与三问清单：
+  docs/working/长期治理债清理方案_20260819.md。
 
 ## 测试
 
