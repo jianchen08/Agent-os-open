@@ -1144,7 +1144,9 @@ impl PluginInvokerImpl {
         &self,
         manifest: &PluginManifest,
     ) -> Result<Arc<tokio::sync::RwLock<McpClient>>, PluginError> {
-        // Fast path：无锁查缓存，命中且存活直接返回（热路径，避开 spawn 锁开销）。
+        // Fast path：无锁查缓存，命中且未死直接返回（热路径，避开 spawn 锁开销）。
+        // 判死走 is_dead_sidecar 门控（pid=Some 且 !is_alive）：HTTP transport
+        // （pid 恒 None、is_alive 恒 false——无子进程）不得误判为崩溃。
         {
             let cached = {
                 let clients = self.mcp_clients.read();
@@ -1152,7 +1154,7 @@ impl PluginInvokerImpl {
             };
             if let Some(client) = cached {
                 let client_guard = client.read().await;
-                if client_guard.is_alive().await {
+                if !Self::is_dead_sidecar(&client_guard).await {
                     // ── Pull 热加载：TTL 门 + 指纹比对 ──
                     // 缓存进程存活时，检查插件代码/配置是否变更。TTL 内跳过 stat（零开销），
                     // TTL 过后 stat 目录 mtime，发现变化则 kill 旧进程走下面的 respawn 路径
@@ -1178,7 +1180,8 @@ impl PluginInvokerImpl {
                         return Ok(Arc::clone(&client));
                     }
                 } else {
-                    // 进程已崩溃——显式 kill 旧客户端再创建新的
+                    // stdio sidecar 真死（pid=Some 且进程退出）——显式 kill 旧客户端
+                    // 再创建新的；HTTP transport（pid=None）不会进此分支。
                     error!("Plugin process crashed: {}", manifest.id);
                     drop(client_guard);
                     if let Err(e) = client.write().await.kill().await {
@@ -1205,7 +1208,8 @@ impl PluginInvokerImpl {
         let _spawn_guard = spawn_lock.lock().await;
 
         // Double-check：持 spawn 锁后再查缓存——前一个持锁者可能已创建好 client。
-        // 命中则直接复用，避免重复 spawn。
+        // 命中则直接复用，避免重复 spawn。判死与 fast path 同用 is_dead_sidecar
+        // 门控（HTTP transport 不判死，防误报）。
         {
             let cached = {
                 let clients = self.mcp_clients.read();
@@ -1213,7 +1217,7 @@ impl PluginInvokerImpl {
             };
             if let Some(client) = cached {
                 let client_guard = client.read().await;
-                if client_guard.is_alive().await {
+                if !Self::is_dead_sidecar(&client_guard).await {
                     self.touch_last_used(&manifest.id);
                     return Ok(Arc::clone(&client));
                 }
@@ -2023,7 +2027,9 @@ impl PluginInvokerImpl {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use agentos_core::traits::{LoadedPlugin, PluginManifest, PluginStatus};
+    use agentos_core::traits::{
+        LoadedPlugin, McpConfig, McpEndpoint, McpTransport, PluginManifest, PluginStatus,
+    };
     use agentos_core::types::TenantContext;
     use serde_json::json;
     use uuid::Uuid;
@@ -2747,6 +2753,137 @@ mod tests {
         );
         let dead = rt.block_on(async { PluginInvokerImpl::is_dead_sidecar(&client).await });
         assert!(!dead, "HTTP transport（无子进程）不得判为死亡");
+    }
+
+    /// 构造 StreamableHttp manifest（§3.2 测试辅助）。
+    fn make_http_manifest(id: &str, url: &str) -> PluginManifest {
+        let mut m = make_sidecar_manifest(id, "external");
+        m.mcp = Some(McpConfig {
+            transport: McpTransport::StreamableHttp,
+            endpoint: Some(McpEndpoint {
+                url: Some(url.to_string()),
+                ..Default::default()
+            }),
+            idle_timeout_secs: 300,
+            protocol_version: "2025-06-18".to_string(),
+            request_timeout_secs: None,
+        });
+        m
+    }
+
+    #[tokio::test]
+    async fn test_get_or_create_http_cached_client_not_misjudged_dead() {
+        // §3.2（0.2 收尾批次 1）：HTTP transport 客户端（pid 恒 None、is_alive 恒
+        // false——无子进程）进入缓存后，get_or_create_mcp_client 的 fast path
+        // 必须判「存活」：返回同一缓存实例，不触发 notify_crash、不逐出重建。
+        // 旧实现裸用 is_alive() 判死，HTTP 插件每次调用都误报 "Plugin process
+        // crashed" + 崩溃回调 + 缓存逐出重建（对远程 server 无谓重连）。
+        // 红测：修复前本用例失败（缓存被逐出、回调被触发、走重建路径）。
+        let loader = Arc::new(MockLoader::new());
+        let manifest = make_http_manifest("http_cached", "http://127.0.0.1:9/mcp");
+        loader.add_manifest(manifest.clone());
+
+        let invoker = PluginInvokerImpl::new(loader);
+
+        let crashed = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let crashed_clone = Arc::clone(&crashed);
+        invoker.on_crash(Arc::new(move |plugin_id: &str| {
+            crashed_clone.lock().unwrap().push(plugin_id.to_string());
+        }));
+
+        // 手工把 HTTP 客户端放进缓存（new_http 未连接态与连接后同构：
+        // child 恒 None → pid 恒 None，判定只看 pid 门控）。
+        let cached: Arc<tokio::sync::RwLock<McpClient>> = Arc::new(tokio::sync::RwLock::new(
+            McpClient::new_http("http://127.0.0.1:9/mcp", HashMap::new(), None),
+        ));
+        invoker
+            .mcp_clients
+            .write()
+            .insert("http_cached".to_string(), Arc::clone(&cached));
+
+        let got = invoker
+            .get_or_create_mcp_client(&manifest)
+            .await
+            .expect("HTTP transport 缓存客户端不得被误判死亡");
+
+        // 返回的是同一缓存实例（未重建）
+        assert!(
+            Arc::ptr_eq(&got, &cached),
+            "fast path 必须返回缓存实例，不得逐出重建"
+        );
+        // 缓存条目未被移除/替换
+        let in_cache = invoker.mcp_clients.read().get("http_cached").cloned();
+        assert!(
+            in_cache.map(|c| Arc::ptr_eq(&c, &cached)).unwrap_or(false),
+            "缓存条目不得被移除"
+        );
+        // 未触发崩溃回调
+        assert!(
+            crashed.lock().unwrap().is_empty(),
+            "HTTP transport 误判死会触发 notify_crash"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_get_or_create_dead_stdio_sidecar_still_detected_and_rebuilt() {
+        // §3.2（0.2 收尾批次 1）回归护栏：stdio sidecar 真死（pid=Some 且进程
+        // 已退出）仍必须判死——notify_crash + 缓存逐出 + 走 respawn 路径。
+        // fast path 接入 is_dead_sidecar 门控后该既有语义不得回归。
+        //
+        // 用「spawn 后立即退出」的进程模拟真死（Windows: cmd /c exit 0；
+        // Unix: /bin/sh -c exit 0）。
+        #[cfg(windows)]
+        let (cmd, args): (&str, Vec<&str>) = ("cmd", vec!["/c", "exit", "0"]);
+        #[cfg(unix)]
+        let (cmd, args): (&str, Vec<&str>) = ("/bin/sh", vec!["-c", "exit", "0"]);
+        let entry = format!("{} {}", cmd, args.join(" "));
+
+        let loader = Arc::new(MockLoader::new());
+        let manifest = make_sidecar_manifest("stdio_dead", &entry);
+        loader.add_manifest(manifest.clone());
+
+        let invoker = PluginInvokerImpl::new(loader);
+
+        let crashed = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let crashed_clone = Arc::clone(&crashed);
+        invoker.on_crash(Arc::new(move |plugin_id: &str| {
+            crashed_clone.lock().unwrap().push(plugin_id.to_string());
+        }));
+
+        // 手工构造「子进程已退出」的 stdio 客户端：connect 真实 spawn 后等它自然
+        // 退出。注意：等待期间不得对该客户端调 is_alive/pid（tokio Child 被
+        // try_wait 观察到退出后 fuse 成 Done，此后 id()=None）——纯 sleep 等
+        // 退出，与生产「首次判定前无人 poll 过 child」的时序一致。
+        let mut dying = McpClient::new_stdio(cmd, args.iter().map(|s| s.to_string()).collect());
+        dying.connect().await.expect("spawn 速死进程应成功");
+        let cached: Arc<tokio::sync::RwLock<McpClient>> = Arc::new(tokio::sync::RwLock::new(dying));
+        invoker
+            .mcp_clients
+            .write()
+            .insert("stdio_dead".to_string(), Arc::clone(&cached));
+
+        tokio::time::sleep(std::time::Duration::from_millis(700)).await;
+
+        let result = invoker.get_or_create_mcp_client(&manifest).await;
+
+        // 真死被检测：崩溃回调恰好触发一次（含 plugin_id）
+        assert_eq!(
+            crashed.lock().unwrap().as_slice(),
+            &["stdio_dead".to_string()],
+            "stdio 真死必须触发 notify_crash（一次）"
+        );
+        // 死实例被从缓存逐出
+        let in_cache = invoker.mcp_clients.read().get("stdio_dead").cloned();
+        assert!(
+            !in_cache.map(|c| Arc::ptr_eq(&c, &cached)).unwrap_or(false),
+            "死 sidecar 必须从缓存逐出"
+        );
+        // 走了 respawn 路径：速死命令完不成 initialize 握手 → Err
+        // （而非把死实例当存活返回 Ok）。
+        assert!(
+            result.is_err(),
+            "respawn 后 initialize 必然失败（速死命令），不得返回死实例"
+        );
     }
 
     // ── B2：native 工具调用返回归一单元测试 ──
