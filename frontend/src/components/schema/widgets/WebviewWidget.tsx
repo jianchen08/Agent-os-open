@@ -41,13 +41,17 @@ export interface WebviewWidgetProps {
   title?: string
 }
 
-/** 注入 iframe 的 bootstrap JS：暴露 window.agentos.postMessage 给插件 HTML。 */
-const BOOTSTRAP_JS = `<script>
+/** 注入 iframe 的 bootstrap JS：暴露 window.agentos.postMessage 给插件 HTML。
+ *  携带宿主下发的实例级令牌（__wv_token）——上行消息的身份凭据。 */
+function bootstrapJs(instanceToken: string): string {
+  const token = JSON.stringify(instanceToken)
+  return `<script>
 (function(){
   var seq = 0;
+  var TOKEN = ${token};
   function post(method, params){
     var id = 'wv_' + (++seq) + '_' + Date.now();
-    var msg = { __agentos_webview: true, id: id, method: method };
+    var msg = { __agentos_webview: true, __wv_token: TOKEN, id: id, method: method };
     if (params !== undefined) msg.params = params;
     parent.postMessage(msg, '*');
     return id;
@@ -57,6 +61,7 @@ const BOOTSTRAP_JS = `<script>
   post('__ready', {});
 })();
 </script>`
+}
 
 /** 注入 iframe 的 CSP：限制脚本/样式来源，防御 XSS。 */
 const CSP_META =
@@ -66,16 +71,16 @@ const CSP_META =
  * 把原始 HTML 包装成安全 srcDoc：插 CSP meta（head 最前）+ bootstrap JS（body 末尾）。
  * 无 head/body 时简单拼接。
  */
-function wrapHtml(html: string): string {
+function wrapHtml(html: string, instanceToken: string): string {
   if (/<head[^>]*>/i.test(html)) {
     return html.replace(/<head[^>]*>/i, (m) => `${m}${CSP_META}`)
   }
   if (/<html[^>]*>/i.test(html)) {
-    const injected = `${CSP_META}${BOOTSTRAP_JS}`
+    const injected = `${CSP_META}${bootstrapJs(instanceToken)}`
     return html.replace(/<html[^>]*>/i, (m) => `${m}<head>${injected}</head>`)
   }
   // 无结构 HTML：包一层
-  return `<!DOCTYPE html><html><head>${CSP_META}</head><body>${html}${BOOTSTRAP_JS}</body></html>`
+  return `<!DOCTYPE html><html><head>${CSP_META}</head><body>${html}${bootstrapJs(instanceToken)}</body></html>`
 }
 
 export function WebviewWidget({
@@ -87,6 +92,17 @@ export function WebviewWidget({
   const [html, setHtml] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
   const iframeRef = useRef<HTMLIFrameElement>(null)
+
+  // 实例级令牌（安全审查 2026-08-20 B-4）：每次挂载生成，注入 iframe bootstrap，
+  // 上行消息必须携带 — 封死"任意 null-origin 页面伪造消息调用宿主 REST"面
+  const instanceTokenRef = useRef<string | null>(null)
+  if (instanceTokenRef.current === null) {
+    instanceTokenRef.current =
+      typeof crypto !== 'undefined' && 'randomUUID' in crypto
+        ? crypto.randomUUID()
+        : `wv_${Math.random().toString(36).slice(2)}_${Date.now().toString(36)}`
+  }
+  const instanceToken = instanceTokenRef.current
 
   // 订阅该 widget 的下行事件
   const latest = useWidgetEventStore((s) => (widgetId ? s.latest[widgetId] : undefined))
@@ -108,7 +124,7 @@ export function WebviewWidget({
       .get<string>(endpoint, { responseType: 'text', transformResponse: [(d) => d] })
       .then((res) => {
         if (cancelled) return
-        setHtml(wrapHtml(typeof res.data === 'string' ? res.data : String(res.data)))
+        setHtml(wrapHtml(typeof res.data === 'string' ? res.data : String(res.data), instanceToken))
       })
       .catch((e) => {
         if (cancelled) return
@@ -119,12 +135,12 @@ export function WebviewWidget({
     }
   }, [endpoint])
 
-  // 收 iframe 上行消息（校验 origin + 协议）→ 按 method 路由到后端，下行 result/error 回 iframe
+  // 收 iframe 上行消息（校验 origin + 协议 + 实例令牌）→ 按 method 路由到后端
   // handler 在 window 上注册，不依赖 iframeRef 是否就绪（实际 sendDown 用 optional chaining）
   useEffect(() => {
     const handler = async (event: MessageEvent) => {
-      const msg = validateWebviewEvent(event)
-      if (!msg) return // 不可信消息丢弃
+      const msg = validateWebviewEvent(event, instanceToken)
+      if (!msg) return // 不可信消息丢弃（origin/协议/令牌任一不匹配）
       if (msg.method === '__ready') {
         loggers.websocket.info(`[WebviewWidget] ${widgetId ?? '?'} 就绪`)
         return
@@ -142,7 +158,14 @@ export function WebviewWidget({
       try {
         let res: unknown
         if (msg.method.startsWith('/')) {
-          // REST 路径约定：以 '/' 开头视为插件自定义 HTTP 端点
+          // REST 路径约定：以 '/' 开头视为插件自定义 HTTP 端点。
+          // 路由白名单（安全审查 2026-08-20 B-4）：只允许本插件的 /ext/{pluginId}/ 前缀，
+          // 防 iframe 内容（或被注入的第三方帧）借 host 的 Bearer 直呼内核 API / 他插件端点。
+          const extPrefix = `/ext/${pluginId ?? ''}/`
+          if (!msg.method.startsWith(extPrefix)) {
+            sendDown('error', { message: `method 不在本插件路由白名单: ${msg.method}` })
+            return
+          }
           // 有 params → POST（写操作）；无 params → GET（读操作）
           res =
             msg.params !== undefined
@@ -166,7 +189,7 @@ export function WebviewWidget({
     }
     window.addEventListener('message', handler)
     return () => window.removeEventListener('message', handler)
-  }, [widgetId])
+  }, [widgetId, pluginId, instanceToken])
 
   // 下行：latest 变化时推给 iframe
   useEffect(() => {

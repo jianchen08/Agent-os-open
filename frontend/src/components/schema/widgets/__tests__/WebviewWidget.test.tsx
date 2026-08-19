@@ -35,9 +35,30 @@ import { WebviewWidget } from '../WebviewWidget'
 const apiGet = apiClient.get as unknown as Mock
 const apiPost = apiClient.post as unknown as Mock
 
-/** 模拟 iframe 上行：发一条合法的 postMessage 事件（origin='null' + 魔数）。 */
+/** 从 iframe srcdoc 里读宿主注入的实例令牌（bootstrap 变量 TOKEN）。 */
+function getIframeToken(): string {
+  const iframe = screen.getByTitle('Webview') as HTMLIFrameElement
+  const src = iframe.getAttribute('srcdoc') ?? ''
+  const m = src.match(/TOKEN = "([^"]+)"/)
+  if (!m) throw new Error('iframe srcdoc 中未找到实例令牌 TOKEN')
+  return m[1]
+}
+
+/** 模拟 iframe 上行：发一条带实例令牌的合法 postMessage 事件（origin='null' + 魔数）。 */
 function postUp(method: string, params?: unknown, id = 'wv_1'): void {
-  const data: Record<string, unknown> = { __agentos_webview: true, id, method }
+  const data: Record<string, unknown> = {
+    __agentos_webview: true,
+    __wv_token: getIframeToken(),
+    id,
+    method,
+  }
+  if (params !== undefined) data.params = params
+  window.dispatchEvent(new MessageEvent('message', { origin: 'null', data }))
+}
+
+/** 模拟"无令牌/伪造令牌"的上行（安全审查 2026-08-20 B-4 负例）。 */
+function postUpForged(method: string, token: string, params?: unknown, id = 'wv_1'): void {
+  const data: Record<string, unknown> = { __agentos_webview: true, __wv_token: token, id, method }
   if (params !== undefined) data.params = params
   window.dispatchEvent(new MessageEvent('message', { origin: 'null', data }))
 }
@@ -75,32 +96,85 @@ describe('WebviewWidget — 上行消息路由', () => {
     })
   })
 
-  it('AC-2: REST 方法 (/开头) + params → POST msg.method with params', async () => {
+  it('AC-2: REST 方法 (本插件 /ext/{pluginId}/ + params) → POST msg.method with params', async () => {
     apiPost.mockResolvedValue({ data: { ok: true } })
     render(<WebviewWidget pluginId="demo" widgetId="w1" />)
 
     await waitFor(() => expect(screen.getByTitle('Webview')).toBeInTheDocument())
 
-    postUp('/api/v1/foo', { a: 1 })
+    postUp('/ext/demo/foo', { a: 1 })
 
     await waitFor(() => {
-      expect(apiPost).toHaveBeenCalledWith('/api/v1/foo', { a: 1 })
+      expect(apiPost).toHaveBeenCalledWith('/ext/demo/foo', { a: 1 })
     })
   })
 
-  it('AC-3: REST 方法 (/开头) + 无 params → GET msg.method', async () => {
+  it('AC-3: REST 方法 (本插件 /ext/{pluginId}/ + 无 params) → GET msg.method', async () => {
     apiGet.mockResolvedValue({ data: { items: [] } })
     render(<WebviewWidget pluginId="demo" widgetId="w1" />)
 
     await waitFor(() => expect(screen.getByTitle('Webview')).toBeInTheDocument())
 
-    postUp('/api/v1/items')
+    postUp('/ext/demo/items')
 
     await waitFor(() => {
       // 排除 HTML 加载那次 get（/ext/demo/webview）
-      const calls = apiGet.mock.calls.filter((c) => c[0] === '/api/v1/items')
+      const calls = apiGet.mock.calls.filter((c) => c[0] === '/ext/demo/items')
       expect(calls).toHaveLength(1)
     })
+  })
+
+  it('AC-7: REST 方法越出本插件路由白名单 → 拒绝且不调 apiClient（B-4）', async () => {
+    apiPost.mockClear()
+    render(<WebviewWidget pluginId="demo" widgetId="w1" />)
+
+    await waitFor(() => expect(screen.getByTitle('Webview')).toBeInTheDocument())
+    const iframe = screen.getByTitle('Webview') as HTMLIFrameElement
+    const downSpy = vi.spyOn(iframe.contentWindow!, 'postMessage')
+
+    // 曾可直接借 Bearer 调任意内核端点（如 /api/v1/xxx / 他插件 /ext/other/...）
+    postUp('/api/v1/admin/pipelines', { x: 1 })
+
+    await waitFor(() => {
+      const msg = findDownMessage(downSpy, '/api/v1/admin/pipelines.error')
+      expect(msg).toBeDefined()
+      expect(String((msg?.params as { message?: string })?.message ?? '')).toContain('不在本插件路由白名单')
+    })
+    expect(apiPost).not.toHaveBeenCalledWith('/api/v1/admin/pipelines', { x: 1 })
+    expect(apiPost).toHaveBeenCalledTimes(0)
+
+    // 他插件的 /ext/ 前缀同样拒绝
+    postUp('/ext/otherapp/exec', { y: 2 })
+    await waitFor(() => {
+      const msg2 = findDownMessage(downSpy, '/ext/otherapp/exec.error')
+      expect(msg2).toBeDefined()
+      const msg = msg2 as { params?: { message?: string } } | undefined
+      expect(String(msg?.params?.message ?? '')).toContain('不在本插件路由白名单')
+    })
+    expect(apiPost).toHaveBeenCalledTimes(0)
+  })
+
+  it('AC-8: 伪造/缺失实例令牌的消息一律丢弃（B-4）', async () => {
+    apiPost.mockClear()
+    render(<WebviewWidget pluginId="demo" widgetId="w1" />)
+
+    await waitFor(() => expect(screen.getByTitle('Webview')).toBeInTheDocument())
+    const iframe = screen.getByTitle('Webview') as HTMLIFrameElement
+    const downSpy = vi.spyOn(iframe.contentWindow!, 'postMessage')
+
+    // 伪造令牌（其它页面可发的 origin='null' 消息）
+    postUpForged('demo.ping', 'forged-token', { ts: 1 })
+    // 缺令牌
+    window.dispatchEvent(
+      new MessageEvent('message', {
+        origin: 'null',
+        data: { __agentos_webview: true, method: 'demo.ping', params: { ts: 1 } },
+      }),
+    )
+
+    await new Promise((r) => setTimeout(r, 50))
+    expect(apiPost).not.toHaveBeenCalled()
+    expect(apiPost).toHaveBeenCalledTimes(0)
   })
 
   it('AC-4: action 成功响应 → iframe 收到 method.result 下行（id 对应）', async () => {

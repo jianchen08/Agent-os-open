@@ -54,9 +54,9 @@ describe('postMessageSecurity', () => {
   it('validateWebviewEvent 拒绝不可信 origin', () => {
     const event = {
       origin: 'https://evil.com',
-      data: { __agentos_webview: true, method: 'x' },
+      data: { __agentos_webview: true, __wv_token: 'tok', method: 'x' },
     } as MessageEvent
-    expect(validateWebviewEvent(event)).toBeNull()
+    expect(validateWebviewEvent(event, 'tok')).toBeNull()
   })
 
   it('validateWebviewEvent 拒绝不符合协议的消息', () => {
@@ -64,15 +64,29 @@ describe('postMessageSecurity', () => {
       origin: 'null',
       data: { method: 'x' }, // 缺魔数
     } as MessageEvent
-    expect(validateWebviewEvent(event)).toBeNull()
+    expect(validateWebviewEvent(event, 'tok')).toBeNull()
   })
 
-  it('validateWebviewEvent 通过合法消息', () => {
+  it('validateWebviewEvent 拒绝缺令牌 / 令牌不匹配', () => {
+    const noToken = {
+      origin: 'null',
+      data: { __agentos_webview: true, method: 'x' },
+    } as MessageEvent
+    expect(validateWebviewEvent(noToken, 'tok')).toBeNull()
+
+    const wrongToken = {
+      origin: 'null',
+      data: { __agentos_webview: true, __wv_token: 'forged', method: 'x' },
+    } as MessageEvent
+    expect(validateWebviewEvent(wrongToken, 'tok')).toBeNull()
+  })
+
+  it('validateWebviewEvent 通过合法消息（origin + 魔数 + 令牌全匹配）', () => {
     const event = {
       origin: 'null',
-      data: { __agentos_webview: true, method: 'tool.invoke', params: { id: 't1' } },
+      data: { __agentos_webview: true, __wv_token: 'tok_123', method: 'tool.invoke', params: { id: 't1' } },
     } as MessageEvent
-    const result = validateWebviewEvent(event)
+    const result = validateWebviewEvent(event, 'tok_123')
     expect(result).not.toBeNull()
     expect(result?.method).toBe('tool.invoke')
     expect(result?.params).toEqual({ id: 't1' })
