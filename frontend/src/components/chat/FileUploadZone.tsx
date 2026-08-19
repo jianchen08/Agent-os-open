@@ -20,14 +20,12 @@ import {
   Headphones,
   Image as ImageIcon,
   Loader2,
-  Music,
   Paperclip,
   Trash2,
   Upload,
   Video,
   X,
   FileCode,
-  FileSpreadsheet,
   FileArchive,
 } from '@/assets/icons'
 import { useCallback, useEffect, useRef, useState } from 'react'
@@ -58,8 +56,6 @@ export interface UploadableFile {
     file_id: string
     filename: string
     mime_type: string
-    file_type: string
-    base64_data?: string
   }
   /** 错误信息 */
   error?: string
@@ -260,8 +256,6 @@ export function FileUploadZone({
             file_id: result.file_id,
             filename: result.filename,
             mime_type: result.mime_type,
-            file_type: result.file_type,
-            base64_data: result.base64_data,
           },
         }
 
@@ -484,8 +478,6 @@ export function FileUploadZone({
   }, [])
 
   const hasFiles = files.length > 0
-  const allUploaded = files.length > 0 && files.every((f) => f.status === 'success')
-  const hasErrors = files.some((f) => f.status === 'error')
   const isUploading = files.some((f) => f.status === 'uploading')
 
   if (!enabled) return null

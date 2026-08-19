@@ -58,6 +58,7 @@ export function groupRoutesBySpace(routes: SpaceRoute[]): Record<RenderingSpaceT
     floating: [],
     dock: [],
     fullscreen: [],
+    scene: [],
   }
 
   for (const route of routes) {

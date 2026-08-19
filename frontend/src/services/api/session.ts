@@ -5,17 +5,9 @@ import apiClient from '@/services/api/client'
 import { mapThreadToSession, type ThreadStateResponse } from '@/utils/mappers'
 import { requestWithRetry } from '@/utils/retry'
 import type { Message, MessageToolCall, Session } from '@/types/models'
-import type { MessagePart } from '@/types/messageParts'
+import type { MessagePart, ToolCallPart } from '@/types/messageParts'
 import { checkIsSystemMessage } from '@/utils/messageType'
 import type { RetryOptions } from '@/utils/retry'
-
-/** 后端线程列表响应类型 */
-interface ThreadListResponse {
-  /** 线程列表 */
-  threads: ThreadStateResponse[]
-  /** 总数 */
-  total?: number
-}
 
 /** 线程创建表单字段（插件 contributes.thread_fields 聚合声明） */
 export interface ThreadField {
@@ -122,14 +114,6 @@ export interface BackendMessageResponse {
   }>
 }
 
-/** 后端消息列表响应类型 */
-interface BackendMessagesListResponse {
-  /** 消息列表 */
-  messages: BackendMessageResponse[]
-  /** 总数 */
-  total?: number
-}
-
 /** 参数验证错误 */
 class ValidationError extends Error {
   constructor(message: string) {
@@ -192,7 +176,6 @@ export function mapBackendMessageToMessage(
     // - ToolCallItem 模型（Python 后端 routes_threads）：callId/toolName/toolArgs/...
     // - OpenAI 格式（分层持久化 tool_calls_json）：id/function.name/function.arguments
     toolCalls = backendMessage.toolCalls.map((tc: any) => {
-      const isOpenAI = !!tc.function
       const fn = tc.function || {}
       // OpenAI 规范的 arguments 是 JSON 字符串（持久化 rebuild 强制转字符串），
       // 解析回对象——与流式路径的 args（事件 payload 对象）结构一致。
@@ -297,7 +280,7 @@ export function mapBackendMessageToMessage(
   return {
     id: backendMessage.id,
     sessionId: sessionId,
-    sequence: backendMessage.sequence,
+    sequence: backendMessage.sequence ?? 0,
     role: effectiveRole,
     content: backendMessage.content,
     timestamp: backendMessage.timestamp,
@@ -372,7 +355,9 @@ export function mergeConsecutiveAssistantMessages(messages: Message[]): Message[
       continue
     }
     const assistant = { ...msg, parts: msg.parts ? [...msg.parts] : undefined }
-    const toolParts = (assistant.parts || []).filter((p: any) => p.type === 'tool_call')
+    const toolParts = (assistant.parts || []).filter(
+      (p): p is ToolCallPart => p.type === 'tool_call',
+    )
     i++
     // ★ 修复：收集 tool 消息（注入结果到 tool_call part 后保留 tool 消息本身），
     //   并在 assistant 之后入列，保持「assistant 声明 → tool 结果」的原始顺序。
@@ -571,6 +556,7 @@ export async function getMessages(
     skip?: number
     limit?: number
     before_sequence?: number
+    after_sequence?: number
   },
   options: RetryOptions = {},
 ): Promise<{ messages: Message[]; total: number; has_more: boolean }> {

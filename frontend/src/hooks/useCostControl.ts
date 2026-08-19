@@ -215,7 +215,7 @@ export function useBudgetStatus(
 }
 
 /** 使用使用统计 Hook */
-export function useUsageStatistics(autoFetch = true, refreshInterval = 60000) {
+export function useUsageStatistics(autoFetch = true) {
   const [usageStats, setUsageStats] = useState<UsageStatisticsResponse | null>(null)
   const [isLoading, setIsLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)

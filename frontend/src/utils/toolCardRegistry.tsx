@@ -7,7 +7,6 @@
  * @module toolCardRegistry
  */
 
-import { Copy } from '@/assets/icons'
 import type { ActivityAction, ActivityData, ActivityDetailBlock } from '@/types/activity'
 import type { MessageToolCall } from '@/types/models'
 import type { ReactNode } from 'react'
@@ -67,7 +66,7 @@ export function registerGlobalOpenFileCallback(
  * 获取全局文件打开回调
  */
 export function getGlobalOpenFileCallback(): (filePath: string, containerTaskId?: string) => void | Promise<void> {
-  return globalOnOpenFile || ((filePath: string, _containerTaskId?: string) => {
+  return globalOnOpenFile || ((_containerTaskId?: string) => {
     console.warn('[toolCardRegistry] 未注册文件打开回调，请在应用启动时调用 registerGlobalOpenFileCallback')
   })
 }
@@ -255,74 +254,6 @@ export function enhanceActivityWithToolConfig(
   }
 
   return enhanced
-}
-
-function buildDefaultDetails(toolCall: MessageToolCall): ActivityDetailBlock[] {
-  const details: ActivityDetailBlock[] = []
-
-  details.push({
-    id: 'args',
-    label: '参数',
-    content: toolCall.tool_args,
-    contentType: 'json',
-    collapsible: true,
-    defaultExpanded: false,
-  })
-
-  if (toolCall.result !== undefined && toolCall.result !== null) {
-    details.push({
-      id: 'result',
-      label: '结果',
-      content: toolCall.result as string | Record<string, unknown>,
-      contentType: 'json',
-      collapsible: true,
-      defaultExpanded: false,
-    })
-  }
-
-  if (toolCall.partialOutput && toolCall.partialOutput.length > 0) {
-    details.push({
-      id: 'output',
-      label: '执行输出',
-      content: toolCall.partialOutput.join('\n'),
-      contentType: 'text',
-      collapsible: false,
-    })
-  }
-
-  return details
-}
-
-function buildDefaultActions(toolCall: MessageToolCall): ActivityAction[] {
-  const actions: ActivityAction[] = [
-    {
-      id: 'copy_args',
-      icon: <Copy className="h-3.5 w-3.5" />,
-      label: '复制参数',
-      type: 'copy',
-      onClick: () => {
-        navigator.clipboard.writeText(JSON.stringify(toolCall.tool_args, null, 2))
-      },
-    },
-  ]
-
-  if (toolCall.result !== undefined) {
-    actions.push({
-      id: 'copy_result',
-      icon: <Copy className="h-3.5 w-3.5" />,
-      label: '复制结果',
-      type: 'copy',
-      onClick: () => {
-        navigator.clipboard.writeText(
-          typeof toolCall.result === 'string'
-            ? toolCall.result
-            : JSON.stringify(toolCall.result, null, 2),
-        )
-      },
-    })
-  }
-
-  return actions
 }
 
 /** ========== L0 自动推断（无声明配置时，让默认卡片也"按数据渲染"）========== */

@@ -171,7 +171,7 @@ function makeStablePartKey(part: MessagePart, index: number): string {
       return `part-system-${seq}-${contentPrefix}`
     }
     default:
-      return `part-${part.type}-${seq}-${index}`
+      return `part-${seq}-${index}`
   }
 }
 

@@ -9,8 +9,7 @@
  */
 
 import { useState, useEffect, useCallback } from 'react'
-import { useNavigate } from 'react-router-dom'
-import { RefreshCw, AlertCircle, Plug, Settings, ToggleLeft } from '@/assets/icons'
+import { RefreshCw, AlertCircle, Plug, ToggleLeft } from '@/assets/icons'
 import { PageShell } from '@/components/shared/PageShell'
 import { toast } from '@/components/ui/sonner'
 import apiClient from '@/services/api/client'
@@ -54,13 +53,11 @@ function activationLabel(a: string): string {
 
 export function PluginsSettingsPage({
   embedded = false,
-  onSelectPluginConfig,
 }: {
   embedded?: boolean
   /** 点击「配置」时回调（内联切换到对应插件配置项，不跳路由） */
   onSelectPluginConfig?: (pluginId: string, fileId: string) => void
 }) {
-  const navigate = useNavigate()
   const [plugins, setPlugins] = useState<PluginStatus[]>([])
   const [isLoading, setIsLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)

@@ -44,7 +44,6 @@ export function SubTabRouter({ sessionId: _sessionId }: SubTabRouterProps) {
   const reportedFailures = useRef<Set<string>>(new Set())
 
   const tabs = useAgentTabStore((s) => s.tabs)
-  const pipelineTabMap = useAgentTabStore((s) => s.pipelineTabMap)
   const addMessageToTab = useAgentTabStore((s) => s.addMessageToTab)
   const registerPipelineTab = useAgentTabStore((s) => s.registerPipelineTab)
   const getTabIdByPipeline = useAgentTabStore((s) => s.getTabIdByPipeline)

@@ -2,7 +2,6 @@
 
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import { Loader2 } from '@/assets/icons'
-import { DeclaredWidgetLayer } from '@/components/schema/DeclaredWidgetLayer'
 import { useModelContextInfo } from '@/hooks/useModelContextInfo'
 import { getDefaults, getLLMConfig, type LLMDefaults } from '@/services/api/config'
 import { switchThinkingMode } from '@/services/api/thinkingMode'
@@ -22,7 +21,7 @@ import {
   STRENGTH_TO_ENABLE,
   type ThinkingStrength,
 } from '@/types/thinkingMode'
-import { resolveModelDisplayName, type ModelTiers } from '@/utils/modelName'
+import { resolveModelDisplayName } from '@/utils/modelName'
 import { findModelParams, mapParamsToStrength } from '@/utils/thinkingStrength'
 import { AgentTabBar } from './AgentTabBar'
 import { ChatInput } from './ChatInput'
@@ -188,16 +187,6 @@ export const ChatContainer = ({
       if (!s.activePipelineId) return EMPTY_MESSAGES
       const msgs = s.messagesByPipeline[s.activePipelineId] ?? EMPTY_MESSAGES
       return msgs
-    },
-    (a, b) => {
-      if (a === b) return true
-      if (!Array.isArray(a) || !Array.isArray(b)) return false
-      if (a.length !== b.length) return false
-      if (a.length === 0 && b.length === 0) return true
-      for (let i = 0; i < a.length; i++) {
-        if (a[i] !== b[i]) return false
-      }
-      return true
     },
   )
 

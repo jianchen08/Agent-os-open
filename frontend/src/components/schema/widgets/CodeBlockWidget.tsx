@@ -7,7 +7,7 @@
  * @module CodeBlockWidget
  */
 
-import React, { useState, useMemo, useCallback } from 'react'
+import { useState, useMemo, useCallback } from 'react'
 
 /** 语言关键字映射 */
 const LANGUAGE_KEYWORDS: Record<string, string[]> = {

@@ -62,7 +62,7 @@ interface ReviewActions {
   /** 设置当前审查的审批 */
   setActiveReview: (reviewId: string | null) => void
   /** 获取容器任务的待审批列表 */
-  getPendingForContainer: (containerTaskId: string) => ReviewRequest[]
+  getPendingForContainer: () => ReviewRequest[]
 }
 
 const API_BASE = '/api/v1/reviews'
@@ -285,7 +285,7 @@ export const useReviewStore = create<ReviewState & ReviewActions>()((set, get) =
     set({ activeReviewId: reviewId })
   },
 
-  getPendingForContainer: (containerTaskId) => {
+  getPendingForContainer: () => {
     const { reviewRequests } = get()
     return Object.values(reviewRequests).filter(
       (r) => r.status === 'pending' || r.status === 'in_review',

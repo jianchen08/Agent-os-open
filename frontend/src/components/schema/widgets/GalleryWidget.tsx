@@ -6,7 +6,7 @@
  * @module GalleryWidget
  */
 
-import React, { useState, useCallback } from 'react'
+import { useState, useCallback } from 'react'
 
 /** 画廊项定义 */
 interface GalleryItem {

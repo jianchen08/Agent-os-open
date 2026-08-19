@@ -4,7 +4,7 @@
  * 管理多个悬浮窗实例，支持拖拽、调整大小和 z-index 层级管理
  */
 
-import React, { useState, useCallback, useRef } from 'react'
+import React, { useState, useCallback } from 'react'
 import { renderPageContent } from '@/components/schema/PageRenderer'
 import { contributionRegistry } from '@/services/schema/ContributionRegistry'
 import { widgetRegistry } from '@/services/schema/WidgetRegistry'

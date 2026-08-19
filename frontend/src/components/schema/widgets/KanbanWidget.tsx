@@ -15,7 +15,6 @@
  * `WidgetComponent = ComponentType<Record<string, unknown>>` 注册）：
  *   { columns?, data?, dataSource?, pluginId?, title?, ...rest }
  */
-import React from 'react'
 
 /** 看板列定义 */
 export interface KanbanColumn {

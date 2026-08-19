@@ -80,7 +80,7 @@ export function useRealtimeEvents(): void {
 
       if (taskId && newStatus) {
         const store = useLongTermTaskStore.getState()
-        const exists = store.tasks.some((t: Record<string, unknown>) => t.id === taskId)
+        const exists = store.tasks.some((t) => t.id === taskId)
         if (exists) {
           const updates: Record<string, unknown> = { status: newStatus }
           if (currentPhase) {

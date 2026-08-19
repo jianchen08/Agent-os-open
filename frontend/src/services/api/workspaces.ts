@@ -99,11 +99,7 @@ export async function getWorkspaceFileContent(
  * @param column - 列号（可选）
  * @returns 打开结果，包含 success 字段
  */
-export async function openFileInIDE(
-  filePath: string,
-  line?: number,
-  column?: number,
-): Promise<{ data: { success: boolean; message?: string } }> {
+export async function openFileInIDE(): Promise<{ data: { success: boolean; message?: string } }> {
   // TODO: 实现 IDE 连接器集成
   // 当前返回失败，会触发降级到内置编辑器
   return {

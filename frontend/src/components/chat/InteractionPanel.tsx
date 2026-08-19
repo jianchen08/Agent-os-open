@@ -51,12 +51,12 @@ export function InteractionPanel({ sessionId }: InteractionPanelProps) {
   )
 
   const handleNavigateToTab = useCallback(
-    async (requestId: string, pipelineId: string, title?: string, agentLevel?: string, interactionSessionId?: string) => {
+    async (requestId: string, pipelineId: string, title?: string, agentLevel?: string) => {
       if (submittingId && submittingId !== requestId) return
       setSubmittingId(requestId)
       dismissInteraction(requestId)
       try {
-        await navigateToTab(requestId, pipelineId, title, agentLevel, interactionSessionId)
+        await navigateToTab(requestId, pipelineId, title, agentLevel)
       } finally {
         setSubmittingId(null)
       }
@@ -87,7 +87,7 @@ export function InteractionPanel({ sessionId }: InteractionPanelProps) {
             handleRespondText(interaction.requestId, text)
           }
           onNavigateToTab={() =>
-            handleNavigateToTab(interaction.requestId, interaction.pipelineId || interaction.threadId, interaction.title, interaction.agentLevel, interaction.sessionId)
+            handleNavigateToTab(interaction.requestId, interaction.pipelineId || interaction.threadId, interaction.title, interaction.agentLevel)
           }
           onDismiss={() => dismissInteraction(interaction.requestId)}
           isSubmitting={submittingId === interaction.requestId}

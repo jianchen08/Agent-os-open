@@ -33,6 +33,8 @@ export interface PendingInteraction {
   threadId: string
   tabId: string
   agentId: string
+  /** 交互来源 Agent 层级（后端 agent_level 大写形式，如 L1/L2/L3） */
+  agentLevel?: string
   /** pipeline_id，用于流式消息路由到对应子 Tab */
   pipelineId?: string
   /** 选择模式的选项 */

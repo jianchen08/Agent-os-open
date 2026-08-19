@@ -15,7 +15,6 @@
  * `WidgetComponent = ComponentType<Record<string, unknown>>` 注册）：
  *   { pluginId?, terminalId?, dataSource?, title?, cols?, rows?, ...rest }
  */
-import React from 'react'
 
 /** TerminalWidget props（flat，与 WidgetRegistry 的 WidgetProps 契约一致）。 */
 export interface TerminalWidgetProps {

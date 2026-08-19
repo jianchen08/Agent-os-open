@@ -112,11 +112,11 @@ export function isPluginConfigConflict(error: unknown): error is PluginConfigCon
 
 /** 从 axios 响应对象取 ETag（优先响应头，回退响应体 etag）。 */
 function extractEtag(
-  headers: Record<string, string> | undefined,
+  headers: Record<string, unknown> | undefined,
   bodyEtag: string | undefined,
 ): string {
   const headerEtag = headers?.etag
-  if (headerEtag && headerEtag.length > 0) return headerEtag
+  if (typeof headerEtag === 'string' && headerEtag.length > 0) return headerEtag
   return bodyEtag ?? ''
 }
 

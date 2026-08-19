@@ -5,7 +5,6 @@
  * 用于审批流程中展示图片制品及对应批注。
  */
 
-import React from 'react'
 import type { Annotation } from '@/types/review'
 
 export interface ImageAnnotationViewProps {
@@ -45,7 +44,6 @@ export function ImageAnnotationView({
   imageUrl,
   altText = '标注图片',
   annotations,
-  readOnly = false,
 }: ImageAnnotationViewProps) {
   /** 过滤出图片区域类型的批注 */
   const imageAnnotations = annotations.filter(

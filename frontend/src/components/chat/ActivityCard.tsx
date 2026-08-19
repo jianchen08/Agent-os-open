@@ -14,7 +14,6 @@ import {
   Copy,
   ExternalLink,
   FileText,
-  Image,
   Link,
   Loader2,
   Sparkles,
@@ -694,7 +693,7 @@ const ActivityCard: FC<ActivityCardProps> = ({
   style,
 }) => {
   const [expanded, setExpanded] = useState(defaultExpanded)
-  const { confirm, dialogState, setDialogState } = useConfirmDialog()
+  const { confirm, dialogState } = useConfirmDialog()
 
   // 注：不自动展开。业界惯例——即使工具失败也默认折叠，
   // 用户点击头部才展开查看错误详情（用户反馈：出错不应自动展开）。

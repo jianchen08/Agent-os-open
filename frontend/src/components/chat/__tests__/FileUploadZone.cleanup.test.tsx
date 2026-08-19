@@ -14,8 +14,6 @@ vi.mock('@/services/api/files', () => ({
     file_id: 'f-1',
     filename: 'a.png',
     mime_type: 'image/png',
-    file_type: 'image',
-    base64_data: '',
   }),
   validateFile: vi.fn().mockReturnValue({ valid: true }),
 }))

@@ -216,8 +216,8 @@ export interface ApiError {
   code: string
   /** 错误消息 */
   message: string
-  /** 错误详情（可选） */
-  details?: Record<string, unknown>
+  /** 错误详情（可选；任意结构，按需在消费端窄化） */
+  details?: unknown
 }
 
 /**

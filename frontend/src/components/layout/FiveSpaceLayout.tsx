@@ -581,7 +581,7 @@ export function FiveSpaceLayout({
               <Splitter
                 orientation="horizontal"
                 className="min-h-0 flex-1 overflow-hidden"
-                onResize={(sizes) => {
+                onResize={(sizes: number[]) => {
                   // 拖动中持续写本地 %，让受控 size 跟手。
                   // panel 组合随侧栏/工作区显隐变化，索引需按当前组合解析：
                   //   侧栏可见+工作区可见: [sidebar, chat, ws]
@@ -605,7 +605,7 @@ export function FiveSpaceLayout({
                     if (total > 0) setDragWorkspacePct(((sizes[1] ?? 0) / total) * 100)
                   }
                 }}
-                onResizeEnd={(sizes) => {
+                onResizeEnd={(sizes: number[]) => {
                   const sidebarVisible = !sidebarCollapsed && !!sidebarContent
                   if (sidebarVisible && !workspaceCollapsed) {
                     const total = (sizes[0] ?? 0) + (sizes[1] ?? 0) + (sizes[2] ?? 0)

@@ -37,7 +37,7 @@ interface ArtifactActions {
 
 const API_BASE = '/ext/channel_api/artifacts'
 
-export const useArtifactStore = create<ArtifactState & ArtifactActions>()((set, get) => ({
+export const useArtifactStore = create<ArtifactState & ArtifactActions>()((set) => ({
   artifacts: {},
   versionHistories: {},
   loading: false,

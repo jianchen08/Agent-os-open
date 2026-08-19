@@ -1,10 +1,7 @@
 import { create } from 'zustand'
 import { globalWS } from '@/services/websocket/GlobalWebSocket'
 import { WebSocketStatus } from '@/constants/websocket'
-import { loggers } from '@/utils/logger'
 import type { Session } from '@/types/models'
-
-const logger = loggers.sessionStore
 
 interface SessionState {
   sessions: Session[]
@@ -16,7 +13,7 @@ interface SessionState {
   forceReconnect: boolean
   _wsUnsubscribers: { cleanup: () => void } | null
 
-  connectWebSocket: (sessionId: string, token: string) => void
+  connectWebSocket: (token: string) => void
   disconnectWebSocket: () => void
   clearError: () => void
 }
@@ -31,7 +28,7 @@ export const useSessionStore = create<SessionState>()((set, get) => ({
   forceReconnect: false,
   _wsUnsubscribers: null,
 
-  connectWebSocket: (sessionId: string, token: string) => {
+  connectWebSocket: (token: string) => {
     const { _wsUnsubscribers: prevUnsubscribers } = get()
     if (prevUnsubscribers) {
       prevUnsubscribers.cleanup()

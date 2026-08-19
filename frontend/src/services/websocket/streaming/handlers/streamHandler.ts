@@ -258,6 +258,7 @@ export function handleStreamEnd(eventData: any) {
               type: 'system',
               content: 'AI 回复内容为空，请重试',
               level: 'warning',
+              notificationType: 'empty_reply',
             })
             pipelineStore.getState().updateMessage(pipelineId, messageId, {
               status: 'completed',

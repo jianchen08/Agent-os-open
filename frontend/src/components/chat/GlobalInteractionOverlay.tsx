@@ -24,7 +24,7 @@ export function GlobalInteractionOverlay() {
   const activeSessionId = useSessionStore((s) => s.activeSessionId)
 
   const { respondChoice, respondConversation, navigateToTab } =
-    useInteractionHandler(activeSessionId)
+    useInteractionHandler(activeSessionId ?? undefined)
 
   const [submittingId, setSubmittingId] = useState<string | null>(null)
   const [currentIndex, setCurrentIndex] = useState(0)
@@ -91,8 +91,7 @@ export function GlobalInteractionOverlay() {
           currentInteraction.requestId,
           currentInteraction.pipelineId || currentInteraction.threadId,
           currentInteraction.title,
-          (currentInteraction as any).agentLevel,
-          currentInteraction.sessionId,
+          currentInteraction.agentLevel,
         )
       } finally {
         setSubmittingId(null)

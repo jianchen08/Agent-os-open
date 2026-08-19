@@ -372,7 +372,7 @@ function SwitchWidget({ id, value, onChange, disabled, readonly }: WidgetProps) 
       id={id}
       checked={Boolean(value)}
       disabled={disabled || readonly}
-      onChange={(checked) => onChange(checked)}
+      onChange={(checked: boolean) => onChange(checked)}
     />
   )
 }
@@ -447,7 +447,7 @@ function AsyncSelectWidget(props: WidgetProps) {
       loading={loading}
       placeholder={placeholder ?? '请选择'}
       value={value === undefined ? undefined : value}
-      onChange={(next) => {
+      onChange={(next: unknown) => {
         if (multiple) {
           onChange(Array.isArray(next) ? next.map((v) => String(v)) : [String(next)])
         } else {

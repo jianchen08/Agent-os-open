@@ -5,8 +5,8 @@
  * 支持三层 Agent 架构：L1 (主 Agent), L2 (Sub Agent), L3 (执行 Agent)
  */
 
-import { ChevronLeft, ChevronRight, Plus } from '@/assets/icons'
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { Plus } from '@/assets/icons'
+import { useCallback, useRef } from 'react'
 import { useNonPassiveWheel } from '@/hooks/useNonPassiveWheel'
 import { AgentTabItem } from './AgentTabItem'
 import type { AgentTab as AgentTabType } from '@/types/task'
@@ -44,34 +44,6 @@ export const AgentTabBar: React.FC<AgentTabBarProps> = ({
   onNewChat,
 }) => {
   const scrollContainerRef = useRef<HTMLDivElement>(null)
-  const [canScrollLeft, setCanScrollLeft] = useState(false)
-  const [canScrollRight, setCanScrollRight] = useState(false)
-
-  const updateScrollState = useCallback(() => {
-    const el = scrollContainerRef.current
-    if (!el) return
-    setCanScrollLeft(el.scrollLeft > 0)
-    setCanScrollRight(el.scrollLeft + el.clientWidth < el.scrollWidth - 1)
-  }, [])
-
-  useEffect(() => {
-    const el = scrollContainerRef.current
-    if (!el) return
-    updateScrollState()
-    el.addEventListener('scroll', updateScrollState)
-    const observer = new ResizeObserver(updateScrollState)
-    observer.observe(el)
-    return () => {
-      el.removeEventListener('scroll', updateScrollState)
-      observer.disconnect()
-    }
-  }, [updateScrollState, tabs])
-
-  const scroll = useCallback((direction: 'left' | 'right') => {
-    const el = scrollContainerRef.current
-    if (!el) return
-    el.scrollBy({ left: direction === 'left' ? -150 : 150, behavior: 'smooth' })
-  }, [])
 
   const handleWheel = useCallback((e: WheelEvent) => {
     const el = scrollContainerRef.current

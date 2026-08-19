@@ -265,18 +265,18 @@ function translateBlock(decl: ChatCardBlockDecl, ctx: ToolCallContext): Activity
         .map((f) => ({ key: f.key, value: toStr(evalPath(ctx, f.source)) }))
         .filter((kv) => kv.value !== '')
       if (kvItems.length === 0) return null
-      return { ...base, contentType: 'kv' as DetailContentType, kvItems }
+      return { ...base, contentType: 'kv' as DetailContentType, kvItems, content: '' }
     }
     case 'file':
     case 'image': {
       const path = toStr(evalPath(ctx, decl.source))
       if (!path) return null
-      return { ...base, contentType: decl.type as DetailContentType, path }
+      return { ...base, contentType: decl.type as DetailContentType, path, content: '' }
     }
     case 'link': {
       const url = toStr(evalPath(ctx, decl.source))
       if (!url) return null
-      return { ...base, contentType: 'link' as DetailContentType, url }
+      return { ...base, contentType: 'link' as DetailContentType, url, content: '' }
     }
     case 'log':
     case 'text':

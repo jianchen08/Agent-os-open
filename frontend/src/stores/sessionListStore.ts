@@ -13,7 +13,6 @@ import { loggers } from '@/utils/logger'
 import { uiStorage, STORAGE_KEYS } from '@/utils/storage'
 import { useAgentStore } from './agentStore'
 import { useAgentTabStore } from './agentTabStore'
-import { useLayoutModeStore } from './layoutModeStore'
 import { useNotificationStore } from './notificationStore'
 import { usePipelineMessageStore } from './pipelineMessageStore'
 import { useSessionStore } from './sessionStore'
@@ -25,8 +24,12 @@ interface CreateSessionOptions {
   agentId?: string
   /** 会话工作空间绝对路径（项目目录） */
   workspace?: string
+  /** 会话工作空间拓扑：worktree（默认）/ plain */
+  workspaceMode?: 'worktree' | 'plain'
   /** 会话隔离模式：isolated（容器）/ non_isolated（宿主+审批） */
   isolationMode?: 'isolated' | 'non_isolated'
+  /** 插件贡献字段的通用值（透传 metadata，供 execution_context 消费） */
+  extra?: Record<string, string>
 }
 
 interface SessionListState {
@@ -53,7 +56,7 @@ const generateSessionTitle = (): string => {
   return DEFAULT_AGENT_NAME
 }
 
-export const useSessionListStore = create<SessionListState>()((set, get) => ({
+export const useSessionListStore = create<SessionListState>()((_, get) => ({
   fetchSessions: async (options?: { background?: boolean }) => {
       const sessionStore = useSessionStore.getState()
       if (sessionStore.isLoading) {
@@ -116,6 +119,8 @@ export const useSessionListStore = create<SessionListState>()((set, get) => ({
         title: sessionTitle,
         agentId: options?.agentId,
         workspace: options?.workspace,
+        workspaceMode: options?.workspaceMode,
+        extra: options?.extra,
         isolationMode: options?.isolationMode,
       })
 
@@ -235,14 +240,10 @@ export const useSessionListStore = create<SessionListState>()((set, get) => ({
         const newDeletingIds = new Set(state.deletingSessionIds)
         newDeletingIds.delete(id)
 
-        const safePagination = state.messagePagination || {}
-        const { [id]: _removedPagination, ...restPagination } = safePagination
-
         return {
           sessions: state.sessions.filter((session) => session.id !== id),
           activeSessionId: state.activeSessionId === id ? null : state.activeSessionId,
           deletingSessionIds: newDeletingIds,
-          messagePagination: restPagination,
           error: null,
         }
       })
@@ -460,7 +461,7 @@ export const useSessionListStore = create<SessionListState>()((set, get) => ({
       useSessionStore.setState((state) => ({
         sessions: state.sessions.map((s) =>
           s.id === sessionId
-            ? { ...s, title: prevTitle, updatedAt: prevUpdatedAt }
+            ? { ...s, title: prevTitle ?? s.title, updatedAt: prevUpdatedAt ?? s.updatedAt }
             : s,
         ),
       }))

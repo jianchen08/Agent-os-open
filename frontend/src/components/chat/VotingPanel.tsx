@@ -9,7 +9,7 @@
  * - 方案详情展开/折叠
  */
 
-import { BarChart3, Check, ChevronDown, ChevronUp, Clock, MessageSquare, Send, ThumbsUp, X } from '@/assets/icons'
+import { BarChart3, Check, ChevronDown, ChevronUp, Clock, MessageSquare, Send, ThumbsUp } from '@/assets/icons'
 import { useCallback, useMemo, useState } from 'react'
 import { Button } from '@/components/ui/button'
 import { cn } from '@/lib/utils'
@@ -173,8 +173,6 @@ export interface VotingPanelProps {
 
 export function VotingPanel({ voting, className }: VotingPanelProps) {
   const submitVote = useVotingStore((s) => s.submitVote)
-  const closeVoting = useVotingStore((s) => s.closeVoting)
-  const cancelVoting = useVotingStore((s) => s.cancelVoting)
 
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set())
   const [reason, setReason] = useState('')

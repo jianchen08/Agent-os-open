@@ -5,7 +5,6 @@
  */
 
 import { cn } from '@/lib/utils'
-import type { ClassValue } from 'clsx'
 
 /**
  * Agent 图标组件属性

@@ -200,7 +200,7 @@ export const useThemeStore = create<ThemeState & ThemeActions>()(
           //    纯数据无 JS 执行——主题插件是"大众级定制"的正路（任务文档第 1 层）。
           let pluginTheme: PluginTheme | null = null
           if (!config) {
-            pluginTheme = contributionRegistry.getPluginTheme(themeId)
+            pluginTheme = contributionRegistry.getPluginTheme(themeId) ?? null
             if (pluginTheme) {
               const baseTheme = getPresetTheme(pluginTheme.base)
               if (baseTheme) {

@@ -45,7 +45,8 @@ export function WorkspacePanel({
 }: WorkspacePanelProps) {
   // 以非被动方式绑定 wheel，使 preventDefault() 生效（React 默认的 onWheel 是被动的）
   const tabScrollRef = useNonPassiveWheel<HTMLDivElement>((e) => {
-    const el = e.currentTarget
+    const el = e.currentTarget as HTMLDivElement | null
+    if (!el) return
     if (Math.abs(e.deltaY) > Math.abs(e.deltaX)) {
       e.preventDefault()
       el.scrollLeft += e.deltaY

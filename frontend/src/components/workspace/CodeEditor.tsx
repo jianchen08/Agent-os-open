@@ -270,7 +270,6 @@ export function CodeEditor({
   readOnly = false,
   className,
   tabId,
-  autoRefresh,
 }: CodeEditorProps) {
   const [localContent, setLocalContent] = useState(initialContent)
   const [isDirty, setIsDirty] = useState(false)

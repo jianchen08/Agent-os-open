@@ -425,7 +425,7 @@ export const ImageGallery = memo<ImageGalleryProps>(
                       <span>{formatDate(currentImage.createdAt)}</span>
                     )}
                     <span>
-                      {lightboxIndex + 1} / {images.length}
+                      {(lightboxIndex ?? 0) + 1} / {images.length}
                     </span>
                     {scale !== 1 && (
                       <span>{Math.round(scale * 100)}%</span>

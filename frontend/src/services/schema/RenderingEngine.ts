@@ -246,7 +246,7 @@ export class RenderingEngine {
   ): RenderInstruction | null {
     // 查找组件（支持降级）
     const component = this.config.enableDegradation
-      ? widgetRegistry.findFallback(config.widget)
+      ? widgetRegistry.findFallback(config.widget) ?? null
       : widgetRegistry.get(config.widget) ?? null
 
     return {
@@ -271,7 +271,7 @@ export class RenderingEngine {
   ): RenderInstruction | null {
     const widgetType = config.type
     const component = this.config.enableDegradation
-      ? widgetRegistry.findFallback(widgetType)
+      ? widgetRegistry.findFallback(widgetType) ?? null
       : widgetRegistry.get(widgetType) ?? null
 
     return {
@@ -294,7 +294,7 @@ export class RenderingEngine {
     versionHash: string,
   ): RenderInstruction | null {
     const component = this.config.enableDegradation
-      ? widgetRegistry.findFallback(contribution.widgetType)
+      ? widgetRegistry.findFallback(contribution.widgetType) ?? null
       : widgetRegistry.get(contribution.widgetType) ?? null
 
     return {
@@ -347,15 +347,6 @@ export class RenderingEngine {
     schema: ParsedSchema,
     capabilities?: ClientCapabilities,
   ): Set<RenderingSpaceType> {
-    const allSpaces: RenderingSpaceType[] = [
-      'chat',
-      'workspace',
-      'floating',
-      'dock',
-      'fullscreen',
-      'scene',
-    ]
-
     // 如果有降级 fallback 配置，优先使用 fallback 空间
     if (capabilities?.fallback) {
       const fallbackSpaces = new Set<RenderingSpaceType>([

@@ -16,7 +16,6 @@
  * 薄视图，供渲染侧逐步迁移；渲染侧最终统一消费 getPages()/getPagesBySpace()。
  */
 
-import React from 'react'
 import type { PluginTheme } from '@/types/theme'
 
 /** 贡献点类型（含统一模型的 'pages'；旧类型仍可被薄视图查询） */
@@ -140,6 +139,8 @@ export interface ContributionEntry {
   id: string
   /** 显示名称 */
   title?: string
+  /** 分类（命令面板按 category 搜索；来自插件声明，非 ContributionEntry 契约核心字段） */
+  category?: string
   /** 图标 */
   icon?: string
   /** 何时可见（条件表达式） */

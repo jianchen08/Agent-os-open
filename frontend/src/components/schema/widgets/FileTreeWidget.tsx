@@ -28,7 +28,6 @@ import { Button } from '@/components/ui/button'
 import { CreateTaskFormModal } from './CreateTaskFormModal'
 import { parseDataSourceRef, resolveDataSource } from '@/services/schema/parser'
 import { useLayoutModeStore } from '@/stores/layoutModeStore'
-import { useWorkspaceStore } from '@/stores/workspaceStore'
 import {
   FileTreeContextMenu,
   type ContextMenuContext,
@@ -132,7 +131,6 @@ interface TreeWidgetConfig {
 /** 默认状态配置映射 */
 const DEFAULT_STATUS_CONFIG: Record<string, StatusConfigItem> = {
   pending: { icon: 'clock', color: 'text-status-warning', label: '待处理' },
-  running: { icon: 'loader', color: 'text-status-info', label: '进行中' },
   completed: { icon: 'check', color: 'text-status-success', label: '已完成' },
   failed: { icon: 'x-circle', color: 'text-status-error', label: '失败' },
   blocked: { icon: 'ban', color: 'text-status-running', label: '已阻塞' },
@@ -1099,7 +1097,6 @@ function TreeNode({
   const status = getNodeField(node, nodeStatusField) as string | undefined
   const children = getNodeField(node, nodeChildrenField) as TreeNodeData[] | undefined
   const progress = node.progress as number | undefined
-  const description = node.description as string | undefined
   const priority = node.priority as string | undefined
   const createdAt = node.created_at as string | undefined
   const error = node.error as string | undefined
@@ -1118,7 +1115,6 @@ function TreeNode({
   /** 当前节点是否启用（由后端任务状态驱动） */
   const ACTIVE_STATUSES = new Set(['running', 'pending', 'evaluating', 'planning'])
   const isEnabled = ACTIVE_STATUSES.has(status ?? '')
-  const isToggling = togglingIds.has(nodeId)
 
   /** 是否有元信息需要显示第二行 */
   const hasMeta = error && error.trim().length > 0

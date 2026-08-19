@@ -92,7 +92,6 @@ describe('对话模式跳转标识符回归', () => {
       'pipe-xyz',
       '对话',
       undefined,
-      undefined,
     )
   })
 
@@ -114,7 +113,6 @@ describe('对话模式跳转标识符回归', () => {
       'req-1',
       'thread-only',
       '对话',
-      undefined,
       undefined,
     )
   })

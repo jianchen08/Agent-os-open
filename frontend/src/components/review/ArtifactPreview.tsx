@@ -22,7 +22,6 @@ import {
   ChevronDown,
   ChevronUp,
   X,
-  ZoomIn,
   Info,
   Maximize2,
 } from '@/assets/icons'

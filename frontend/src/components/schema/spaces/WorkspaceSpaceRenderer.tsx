@@ -7,7 +7,7 @@
  * @module WorkspaceSpaceRenderer
  */
 
-import React, { useState } from 'react'
+import { useState } from 'react'
 import type { RenderInstruction } from '@/services/schema/RenderingEngine'
 
 /** WorkspaceSpaceRenderer 属性 */
@@ -41,7 +41,7 @@ export function WorkspaceSpaceRenderer({
   }
 
   const activeInstruction = instructions[activeIndex]
-  const { component: WidgetComponent, moduleId, widgetType, props } = activeInstruction
+  const { component: WidgetComponent, widgetType, props } = activeInstruction
 
   return (
     <div className="flex h-full flex-col">
@@ -59,7 +59,7 @@ export function WorkspaceSpaceRenderer({
               }`}
               onClick={() => setActiveIndex(i)}
             >
-              {inst.props.title ?? inst.widgetType}
+              {String(inst.props.title ?? inst.widgetType)}
             </button>
           ))}
         </div>

@@ -6,7 +6,7 @@
  */
 
 import { Columns2, Rows3 } from '@/assets/icons'
-import React, { useMemo, useState } from 'react'
+import { useMemo, useState } from 'react'
 import type { DiffLine, DiffLineType } from '@/types/review'
 
 export interface ReviewDiffProps {

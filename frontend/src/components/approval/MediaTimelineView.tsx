@@ -38,7 +38,6 @@ export function MediaTimelineView({
   mediaType,
   duration: propDuration,
   annotations,
-  readOnly = false,
 }: MediaTimelineViewProps) {
   const mediaRef = useRef<HTMLVideoElement | HTMLAudioElement>(null)
   const timelineRef = useRef<HTMLDivElement>(null)

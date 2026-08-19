@@ -10,7 +10,7 @@
 
 import { useMemo } from 'react'
 import { contributionRegistry, type PageDeclaration } from '@/services/schema/ContributionRegistry'
-import { evaluateWhen } from '@/services/schema/whenExpression'
+import { evaluateWhen, type ContextKeys } from '@/services/schema/whenExpression'
 import { useContextKeys } from '@/stores/contextKeysStore'
 import { useWidgetEventStore } from '@/stores/widgetEventStore'
 
@@ -22,7 +22,7 @@ export function resolvePluginStatusItems(contextKeys: Record<string, unknown>): 
   return contributionRegistry
     .getPagesBySpace('dock')
     .filter((p) => p.slot === 'status')
-    .filter((item) => evaluateWhen(item.when, contextKeys))
+    .filter((item) => evaluateWhen(item.when, contextKeys as ContextKeys))
 }
 
 /**

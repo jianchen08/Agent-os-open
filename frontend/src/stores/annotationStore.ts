@@ -5,7 +5,7 @@
  */
 
 import { create } from 'zustand'
-import type { Annotation, AnnotationTarget, AnnotationStatus } from '@/types/artifact'
+import type { Annotation, AnnotationTarget } from '@/types/artifact'
 
 interface AnnotationState {
   /** 外层 key: artifact_id, 内层 key: annotation_id */

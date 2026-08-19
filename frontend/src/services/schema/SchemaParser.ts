@@ -12,8 +12,6 @@ import type {
   ParsedSchema,
   ClientCapabilities,
   RenderingSpaceType,
-  UIField,
-  UIContribution,
 } from '@/types/schema'
 
 /** Schema 解析错误 */
@@ -76,7 +74,6 @@ export class SchemaParser {
    */
   parse(
     schema: ModuleUISchema,
-    options?: SchemaParserOptions,
   ): { parsed: ParsedSchema; changed: boolean } {
     // 1. 结构验证
     const validation = this.validate(schema)
@@ -134,9 +131,8 @@ export class SchemaParser {
    */
   parseAll(
     schemas: ModuleUISchema[],
-    options?: SchemaParserOptions,
   ): Array<{ parsed: ParsedSchema; changed: boolean }> {
-    return schemas.map((s) => this.parse(s, options))
+    return schemas.map((s) => this.parse(s))
   }
 
   /**
@@ -148,9 +144,8 @@ export class SchemaParser {
    */
   parseUpdates(
     schemas: ModuleUISchema[],
-    options?: SchemaParserOptions,
   ): Array<{ parsed: ParsedSchema; changed: boolean }> {
-    return this.parseAll(schemas, options).filter((r) => r.changed)
+    return this.parseAll(schemas).filter((r) => r.changed)
   }
 
   /**

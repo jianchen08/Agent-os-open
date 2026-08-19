@@ -64,11 +64,6 @@ function DefaultTextRenderer(content: string, isStreaming: boolean): ReactNode {
   return <MarkdownRenderer content={content} isStreaming={isStreaming} />
 }
 
-/** LobeChat 文本渲染器 */
-function LobeChatTextRenderer(content: string, isStreaming: boolean): ReactNode {
-  return <LobeChatMarkdown content={content} isStreaming={isStreaming} />
-}
-
 /** 默认工具调用渲染器 */
 function DefaultToolCallRenderer(
   fragment: Extract<RenderFragment, { type: 'tool_call' }>,

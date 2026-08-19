@@ -3,6 +3,7 @@
  */
 
 import type { Message, MessageRole, MessageToolCall, ThinkingContent } from '@/types/models'
+import type { ThinkingModeState } from '@/types/thinkingMode'
 
 /**
  * 消息内容类型
@@ -141,6 +142,8 @@ export interface MessageItemProps {
   searchQuery?: string
   /** 当前 Tab 关联任务 ID（工具卡片打开文件用） */
   taskId?: string
+  /** 编辑消息保存回调（消息编辑功能由调用方接入；不传则不显示编辑入口） */
+  onEdit?: (messageId: string, newContent: string) => Promise<void> | void
 }
 
 /**

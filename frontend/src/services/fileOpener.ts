@@ -1,7 +1,5 @@
 /** 文件打开服务 提供统一的文件打开入口，根据文件后缀从后端配置解析编辑器类型， */
 
-import { resolveEditor } from './api/editorConfig'
-import { openFileInIDE } from './api/workspaces'
 import { apiClient } from './api/client'
 import { registerFileEditor } from '@/stores/fileEditorRegistry'
 import { useLayoutModeStore } from '@/stores/layoutModeStore'
@@ -10,11 +8,11 @@ import { useLayoutModeStore } from '@/stores/layoutModeStore'
 export type EditorType = 'ide' | 'builtin' | 'external'
 
 /** 内置编辑器打开处理器 */
-let builtinOpenHandler: ((filePath: string, line?: number, column?: number, containerTaskId?: string) => Promise<void>) | null = null
+let builtinOpenHandler: ((filePath: string, containerTaskId?: string) => Promise<void>) | null = null
 
 /** 设置内置编辑器打开处理器 */
 export function setBuiltinOpenHandler(
-  handler: (filePath: string, line?: number, column?: number, containerTaskId?: string) => Promise<void>,
+  handler: (filePath: string, containerTaskId?: string) => Promise<void>,
 ): void {
   builtinOpenHandler = handler
 }
@@ -23,8 +21,6 @@ export function setBuiltinOpenHandler(
 export async function openFile(
   filePath: string,
   options?: {
-    line?: number
-    column?: number
     containerTaskId?: string
   },
 ): Promise<{ success: boolean; editor: EditorType; message?: string }> {
@@ -32,13 +28,13 @@ export async function openFile(
     // 404:
     const containerTaskId = options?.containerTaskId
     if (builtinOpenHandler) {
-      await builtinOpenHandler(filePath, options?.line, options?.column, containerTaskId)
+      await builtinOpenHandler(filePath, containerTaskId)
     }
     return { success: true, editor: 'builtin' }
   } catch {
     // 解析失败，降级到内置编辑器
     if (builtinOpenHandler) {
-      await builtinOpenHandler(filePath, options?.line, options?.column, options?.containerTaskId)
+      await builtinOpenHandler(filePath, options?.containerTaskId)
     }
     return { success: true, editor: 'builtin', message: '解析失败，已使用内置编辑器' }
   }
@@ -47,8 +43,6 @@ export async function openFile(
 /** 默认的内置编辑器打开处理函数 使用 _local 工作空间接口直接读取本地文件内容，然后在内置编辑器中打开。 */
 async function defaultBuiltinOpenHandler(
   filePath: string,
-  line?: number,
-  column?: number,
   containerTaskId?: string,
 ): Promise<void> {
   const tabId = `file-local-${filePath.replace(/[/\\]/g, '_')}`

@@ -138,7 +138,7 @@ export interface ThinkingStep {
 /**
  * 工具调用状态
  */
-export type ToolCallStatus = 'pending' | 'running' | 'completed' | 'failed'
+export type ToolCallStatus = 'pending' | 'running' | 'completed' | 'failed' | 'cancelled'
 
 /**
  * 工具调用记录（消息级别）

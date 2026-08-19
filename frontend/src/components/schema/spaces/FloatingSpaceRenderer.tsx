@@ -71,7 +71,7 @@ export function FloatingSpaceRenderer({ instructions }: FloatingSpaceRendererPro
             {/* 标题栏 */}
             <div className="border-border flex items-center justify-between border-b px-3 py-2">
               <span className="text-sm font-medium">
-                {props.title ?? widgetType}
+                {String(props.title ?? widgetType)}
               </span>
             </div>
 

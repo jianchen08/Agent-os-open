@@ -5,8 +5,6 @@
  * 当前为 stub 实现，后续 Phase 会完善
  */
 
-import React from 'react'
-
 interface EditorWidgetProps {
   /** 组件配置 */
   props?: Record<string, unknown>

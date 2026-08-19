@@ -198,11 +198,11 @@ export const MessageItem = memo(function MessageItem({
 
   /** 工具消息独立渲染 */
   if (isTool) {
-    const toolName = message.toolName || message.metadata?.name || '工具'
-    const toolStatus = message.status || 'completed'
-    const toolResult = message.toolResult || message.metadata?.result || message.metadata?.output
-    const toolError = message.toolError || message.metadata?.error
-    const durationMs = message.durationMs || message.metadata?.duration_ms
+    const toolName: string = message.toolName || (message.metadata?.name as string | undefined) || '工具'
+    const toolStatus: string = message.status || 'completed'
+    const toolResult: unknown = message.toolResult || message.metadata?.result || message.metadata?.output
+    const toolError: unknown = message.toolError || message.metadata?.error
+    const durationMs: unknown = message.durationMs || message.metadata?.duration_ms
 
     return (
       <div
@@ -239,7 +239,7 @@ export const MessageItem = memo(function MessageItem({
                     ? '执行中'
                     : toolStatus}
             </span>
-            {durationMs && <span className="text-muted-foreground text-xs">{durationMs}ms</span>}
+            {durationMs ? <span className="text-muted-foreground text-xs">{String(durationMs)}ms</span> : null}
             {/* 展开/折叠按钮：默认折叠，点击才展开详情（含错误时也不自动展开） */}
             <button
               type="button"
@@ -263,8 +263,8 @@ export const MessageItem = memo(function MessageItem({
               data-testid="tool-card-body"
               className={`mt-1 space-y-1 text-sm ${TOOL_CONTENT_SCROLL_CLASS}`}
             >
-              {toolError && <div className="text-status-error">{toolError}</div>}
-              {toolResult && (
+              {toolError ? <div className="text-status-error">{String(toolError)}</div> : null}
+              {toolResult ? (
                 <div className="text-muted-foreground">
                   {(() => {
                     const parsed = safeParseResult(toolResult)
@@ -296,7 +296,7 @@ export const MessageItem = memo(function MessageItem({
                     )
                   })()}
                 </div>
-              )}
+              ) : null}
             </div>
           )}
         </div>

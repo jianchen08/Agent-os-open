@@ -116,7 +116,7 @@ export function ensureStreamingPlaceholder(
   threadId?: string,
   backendSequence?: number,
 ): void {
-  startPipelineStreaming(pipelineId, messageId, threadId)
+  startPipelineStreaming(pipelineId, messageId)
 
   const store = pipelineStore.getState()
   const existing = store.getMessages(pipelineId)
@@ -145,7 +145,6 @@ export function ensureStreamingPlaceholder(
       // - 完全无内容 → remove
       const parts = msg.parts || []
       const hasTextContent = (msg.content || '').length > 0
-      const hasParts = parts.length > 0
       const unresolvedToolCalls = parts.some(
         (p: any) => p.type === 'tool_call' && (p.state === 'calling' || p.state === 'streaming')
       )

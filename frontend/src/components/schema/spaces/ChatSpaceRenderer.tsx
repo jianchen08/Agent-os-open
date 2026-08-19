@@ -7,7 +7,6 @@
  * @module ChatSpaceRenderer
  */
 
-import React from 'react'
 import type { RenderInstruction } from '@/services/schema/RenderingEngine'
 
 /** ChatSpaceRenderer 属性 */

@@ -9,7 +9,7 @@
 
 // ===== Schema 注册表（已有）=====
 export { parseSchema, parseDataSourceRef, resolveDataSource, validateSchema } from './parser'
-export type { ParsedSchema } from './parser'
+export type { ParsedSchema } from '@/types/schema'
 
 // ===== Schema 解析器（新增）=====
 export { SchemaParser, schemaParser } from './SchemaParser'
@@ -33,8 +33,4 @@ export { SchemaRouter, schemaRouter } from './SchemaRouter'
 
 // ===== 插件能力聚合注册表（task_11 P1-6 新增，数据层非视觉）=====
 export { ContributionRegistry, contributionRegistry } from './ContributionRegistry'
-export type {
-  ContributionConfigFile,
-  ContributionPluginConfig,
-  ContributionWidget,
-} from './ContributionRegistry'
+export type { ContributionEntry } from './ContributionRegistry'

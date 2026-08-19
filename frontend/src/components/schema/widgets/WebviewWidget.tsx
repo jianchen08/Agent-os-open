@@ -26,11 +26,7 @@ import React, { useEffect, useMemo, useRef, useState } from 'react'
 import { FileWarning } from '@/assets/icons'
 import { apiClient } from '@/services/api/client'
 import { useWidgetEventStore } from '@/stores/widgetEventStore'
-import {
-  buildWebviewMessage,
-  validateWebviewEvent,
-  type WebviewMessage,
-} from '@/utils/postMessageSecurity'
+import { buildWebviewMessage, validateWebviewEvent } from '@/utils/postMessageSecurity'
 import { loggers } from '@/utils/logger'
 
 /** Webview widget 渲染指令 props（由 RenderingEngine 从 contributes.widgets 注入） */

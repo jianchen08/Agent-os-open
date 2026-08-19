@@ -17,7 +17,7 @@ import {
   FloatingSpaceRenderer,
   DockSpaceRenderer,
 } from './spaces'
-import type { ModuleUISchema, ClientCapabilities } from '@/types/schema'
+import type { ModuleUISchema, ClientCapabilities, RenderingSpaceType } from '@/types/schema'
 
 /** SchemaRenderer 属性 */
 export interface SchemaRendererProps {

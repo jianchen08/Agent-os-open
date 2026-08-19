@@ -36,7 +36,8 @@ import { useSessionListStore } from '@/stores/sessionListStore'
 import { useLayoutModeStore } from '@/stores/layoutModeStore'
 import { useNotificationStore } from '@/stores/notificationStore'
 import { useAgentTabStore } from '@/stores/agentTabStore'
-import type { PipelineRunInfo, PipelineStatus, PipelineViewEntry } from '@/types/pipeline'
+import type { PipelineStatus, PipelineViewEntry } from '@/types/pipeline'
+import type { AgentTab } from '@/types/task'
 
 // ═════════════════════════════════════════════════════════════════
 // 辅助
@@ -121,11 +122,6 @@ function statusIcon(status: string): { icon: React.ReactNode; color: string; lab
 // ═════════════════════════════════════════════════════════════════
 // 主组件
 // ═════════════════════════════════════════════════════════════════
-
-/** 任务管理 Widget 属性（兼容 schema widget 传递） */
-interface PipelineManagerWidgetProps {
-  [key: string]: unknown
-}
 
 export function PipelineManagerWidget(_rawProps: Record<string, unknown>) {
   /** 管道运行快照注册表（内核快照 + 流式事件增量） */
@@ -217,14 +213,14 @@ export function PipelineManagerWidget(_rawProps: Record<string, unknown>) {
         // 任务工作空间路径（供"打开工作空间"；取 metadata.ws_meta.path / workspace）
         workspacePath: task
           ? String(
-              (task.metadata as Record<string, unknown> | undefined)?.ws_meta?.path
+              (task.metadata as { ws_meta?: { path?: string } } | undefined)?.ws_meta?.path
               || task.workspace
               || '',
             ) || undefined
           : undefined,
         progress:
           typeof (task?.progress as Record<string, unknown> | undefined)?.progressPercent === 'number'
-            ? Number((task.progress as Record<string, unknown>).progressPercent)
+            ? Number((task?.progress as Record<string, unknown>).progressPercent)
             : undefined,
         totalTokens: run.total_tokens ?? null,
         currentPhase: st?.state.current_phase,
@@ -265,7 +261,7 @@ export function PipelineManagerWidget(_rawProps: Record<string, unknown>) {
         taskId: String(task.id),
         sessionTitle: undefined,
         workspacePath: String(
-          (task.metadata as Record<string, unknown> | undefined)?.ws_meta?.path
+          (task.metadata as { ws_meta?: { path?: string } } | undefined)?.ws_meta?.path
           || task.workspace
           || '',
         ) || undefined,
@@ -542,7 +538,7 @@ export function PipelineManagerWidget(_rawProps: Record<string, unknown>) {
       parentRecordId: pipelineId,
       agentLevel: 2,
       taskId: entry.taskId,
-      status: (entry.status as AgentTabStatus) ?? 'running',
+      status: (entry.status ?? 'running') as AgentTab['status'],
       setActive: true,
       pipelineId,
     })

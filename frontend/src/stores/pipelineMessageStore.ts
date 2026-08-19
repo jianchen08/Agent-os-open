@@ -2,7 +2,7 @@
 
 import { create } from 'zustand'
 import { persist } from 'zustand/middleware'
-import { getMessages as apiGetMessages, mergeConsecutiveAssistantMessages } from '@/services/api/session'
+import { getMessages as apiGetMessages } from '@/services/api/session'
 import { loggers } from '@/utils/logger'
 import { indexedDbStorage } from '@/utils/indexedDbStorage'
 import { useContextKeys } from '@/stores/contextKeysStore'
@@ -33,22 +33,6 @@ export const _PERSIST_LIMITS = {
   maxTotalBytes: PERSIST_MAX_TOTAL_BYTES,
 } as const
 
-/** 乐观消息的"宽限期" */
-const OPTIMISTIC_MSG_GRACE_MS = 30_000
-
-/** 判断本地独有消息（API 未返回的）是否落在「刚生成、后端可能尚未持久化」的宽限期内。
- *
- *  仅 user 乐观消息走宽限期（带 clientMessageId，后端回传同一 ID 后可对账）。
- *  assistant 消息不走宽限期：initFromAPI 是全量权威对账，应信任 API；
- *  正在 streaming 的 assistant 已由 isStreamingMessage 保护，无需时间窗口兜底。
- *  （去掉宽限期可防止 ensureStreamingPlaceholder 合并覆盖 id 后，本地气泡
- *   id ≠ API record_id 导致的刷新后 AI 回复重复渲染。） */
-function isWithinOptimisticGrace(m: Message): boolean {
-  if (m.role === 'user' && m.clientMessageId) {
-    return Date.now() - new Date(m.timestamp).getTime() < OPTIMISTIC_MSG_GRACE_MS
-  }
-  return false
-}
 
 /** 裁剪每个 pipeline 的消息列表，仅保留最近 N 条用于持久化 */
 function trimMessagesByCount(
@@ -273,12 +257,12 @@ interface PipelineMessageState {
 }
 
 /**
- * 过滤完全空白的 assistant 消息（无 content、无 parts、无 toolCalls、无 thinking、非 streaming）。
+ * 过滤完全空白的 assistant 消息（无 content、无 parts、无 tool_call part、无 thinking、非 streaming）。
  * 这些消息来自后端记录但不包含可渲染内容，渲染为空气泡。
  *
- * 注意：assistant 可能 content 为空但有 toolCalls（发起工具调用）或 thinking
+ * 注意：assistant 可能 content 为空但有 tool_call part（发起工具调用）或 thinking
  * （纯思考）。子任务管道大量存在这种消息，若只检查 content/parts 会误删，
- * 导致消息丢失。必须检查 toolCalls 和 thinking。
+ * 导致消息丢失。必须检查 tool_call part 和 thinking。
  */
 function filterBlankMessages(messages: Message[]): Message[] {
   return messages.filter((m) => {
@@ -286,51 +270,10 @@ function filterBlankMessages(messages: Message[]): Message[] {
     if (m.status === 'streaming') return true
     const hasContent = m.content && m.content.trim()
     const hasParts = m.parts && m.parts.length > 0
-    const hasToolCalls = m.toolCalls && m.toolCalls.length > 0
+    const hasToolCalls = (m.parts ?? []).some((p) => p.type === 'tool_call')
     const hasThinking = m.thinking && (m.thinking.content || '').trim()
     return hasContent || hasParts || hasToolCalls || hasThinking
   })
-}
-
-/** 判断消息是否处于流式状态（不可参与合并） */
-function isStreamingMessage(msg: Message): boolean {
-  if (msg.role !== 'assistant') return false
-  if (msg.status === 'streaming') return true
-  const parts = msg.parts as MessagePart[] | undefined
-  if (parts && parts.length > 0) {
-    return parts.some((p) => {
-      const state = (p as { state?: string }).state
-      return state === 'streaming' || state === 'calling'
-    })
-  }
-  return false
-}
-
-/** 合并连续 assistant 消息，用对话结构边界（user/system）和流式状态共同分割。 分隔符（硬边界）：user/system 消息——它们是 AI 消息之间的天然结构边界， */
-function mergePreservingStreaming(messages: Message[]): Message[] {
-  if (messages.length <= 1) return messages
-  const result: Message[] = []
-  let segment: Message[] = []
-  const flush = () => {
-    if (segment.length > 0) {
-      const merged = mergeConsecutiveAssistantMessages(segment)
-      for (const m of merged) result.push(m)
-      segment = []
-    }
-  }
-  for (const msg of messages) {
-    // user/system 是对话结构边界：AI 不能跨过它们与另一段 AI 合并
-    // （否则系统通知消失后，前后 AI 气泡被错误合并成一条）。
-    // 流式 assistant 状态未定，也不能进 segment 被合并。
-    if (msg.role === 'user' || msg.role === 'system' || isStreamingMessage(msg)) {
-      flush()
-      result.push(msg)
-    } else {
-      segment.push(msg)
-    }
-  }
-  flush()
-  return result
 }
 
 /** 排序键优先级：sequence → timestamp → id（确保 sequence/timestamp 相同时排序稳定）。 */
@@ -393,63 +336,6 @@ function isCoveredByApi(m: Message, apiIds: Set<string>, apiByClientId: Map<stri
   if (apiIds.has(m.id)) return true
   if (m.clientMessageId && apiByClientId.has(m.clientMessageId)) return true
   return false
-}
-
-/** 合并 API 权威消息与本地已有消息 策略： */
-function mergeApiWithExisting(
-  sorted: Message[],
-  existing: Message[] | undefined,
-): { finalMessages: Message[]; preservedCount: number } {
-  if (!existing || existing.length === 0) {
-    return { finalMessages: sorted, preservedCount: 0 }
-  }
-
-  const apiIds = new Set(sorted.map((m) => m.id))
-  const apiByClientId = new Map<string, Message>()
-  for (const m of sorted) {
-    if (m.clientMessageId) {
-      apiByClientId.set(m.clientMessageId, m)
-    }
-  }
-
-  // 本地独有的消息（API 没有的）保留策略：
-  // 1. 正在 streaming 的占位消息 — 必须保留（等 stream_end/new_message 收尾）
-  // 2. 刚发送的乐观 user 消息（30s 窗口内，带 clientMessageId） — 保留（后端可能尚未持久化）
-  // 3. 其余本地消息 — 丢弃，以 API 权威数据为准。
-  const localOnly = existing.filter((m) => {
-    if (isCoveredByApi(m, apiIds, apiByClientId)) return false
-    // 系统通知是 AI 消息之间的结构分隔符，必须保留：
-    // 后端 system_notification 是瞬态事件，通常不在消息历史 API 中返回，
-    // 若丢弃则刷新/切 Tab 后它消失，前后的 AI 气泡失去边界被合并成一条。
-    if (m.role === 'system') return true
-    // 正在 streaming 的占位消息必须保留
-    if (isStreamingMessage(m)) return true
-    // 乐观/刚完成的消息在持久化窗口内保留（后端可能尚未写入）
-    if (isWithinOptimisticGrace(m)) return true
-    // 其余本地消息：API 没有就以 API 为准丢弃
-    return false
-  })
-
-  if (localOnly.length === 0) {
-    return { finalMessages: sorted, preservedCount: 0 }
-  }
-
-  // localOnly 保留的消息若与 API 同 role::seq 指纹，视为同一条逻辑消息，
-  // 从 sorted 移除 API 重复项，保留 localOnly 版本（流式占位符 / 乐观版本）。
-  // // streaming 占位符与 API 权威消息 id 不同（WS UUID vs API hex），靠 role::seq
-  // 指纹识别为同一条，避免切换 Tab 时 AI 气泡重复渲染。
-  // // 宽限期保留的 completed assistant 消息同理——后端已持久化时 API 会返回同 seq
-  // 权威版本，此时去重只留一份，避免「保留乐观版 + API 版」并存成两条。
-  // 后端未持久化时 API 不含该指纹，localOnly 版本正常保留，等待下次 fetch 对账。
-  const localOnlyFingerprints = new Set(localOnly.map((m) => makeMessageFingerprint(m)))
-  const dedupedSorted = localOnlyFingerprints.size
-    ? sorted.filter((m) => !localOnlyFingerprints.has(makeMessageFingerprint(m)))
-    : sorted
-
-  // 注意：mergeSorted 要求两个输入各自升序，localOnly 来自 existing（可能无序，
-  // 如 persist 恢复或并发写入），需先排序。
-  const sortedLocalOnly = [...localOnly].sort(compareMessages)
-  return { finalMessages: mergeSorted(dedupedSorted, sortedLocalOnly), preservedCount: localOnly.length }
 }
 
 /**

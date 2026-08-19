@@ -73,7 +73,7 @@ export function ImageAreaAnnotation({
     position: { x: number; y: number }
   } | null>(null)
   const [suggestionText, setSuggestionText] = useState('')
-  const [imageSize, setImageSize] = useState<{ width: number; height: number }>({
+  const [, setImageSize] = useState<{ width: number; height: number }>({
     width: 0,
     height: 0,
   })

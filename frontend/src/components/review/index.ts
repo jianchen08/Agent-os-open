@@ -4,9 +4,6 @@
  * 所有审批相关的 React 组件从这里导出
  */
 
-export { ReviewPanel } from './ReviewPanel'
-export type { ReviewPanelProps } from './ReviewPanel'
-
 export { ReviewDiff } from './ReviewDiff'
 export type { ReviewDiffProps } from './ReviewDiff'
 

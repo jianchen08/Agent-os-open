@@ -6,7 +6,7 @@
  */
 
 import { Play, Pause, Plus, MessageSquare, SkipBack, SkipForward } from '@/assets/icons'
-import React, { useState, useCallback, useRef, useEffect } from 'react'
+import React, { useState, useCallback, useRef } from 'react'
 import type { Annotation } from '@/types/review'
 
 /** 生成简易唯一 ID */

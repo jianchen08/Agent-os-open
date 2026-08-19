@@ -255,7 +255,7 @@ function HomePage(): ReactNode {
       await setActiveSession(sessionId)
       const currentToken = useAuthStore.getState().token
       if (currentToken) {
-        connectWebSocket(sessionId, currentToken)
+        connectWebSocket(currentToken)
       }
 
       // 移动端选择会话后自动收起侧边栏

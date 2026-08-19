@@ -279,7 +279,7 @@ export const Sidebar = memo<SidebarProps>(({ isMobile = false }) => {
         } else {
           // 新建会话：createSession 内部已设置 activeSessionId，
           // ChatContainer 会随 activeSessionId 自动渲染，无需 navigate。
-          const session = await createSession(title || undefined, {
+          await createSession(title || undefined, {
             agentId: agentId || undefined,
             workspace: options?.workspace,
             workspaceMode: options?.workspaceMode,

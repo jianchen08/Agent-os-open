@@ -7,7 +7,6 @@
  * @module DockSpaceRenderer
  */
 
-import React from 'react'
 import type { RenderInstruction } from '@/services/schema/RenderingEngine'
 
 /** DockSpaceRenderer 属性 */

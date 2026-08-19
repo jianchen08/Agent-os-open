@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { ActivityData } from '@/types/activity'
-import { apiClient } from '@/services/api'
+import { apiClient } from '@/services/api/client'
 
 /** 执行记录数据（后端返回格式） */
 export interface ExecutionRecord {

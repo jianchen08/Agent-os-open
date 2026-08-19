@@ -8,7 +8,7 @@
  * @module ReviewDocumentWidget
  */
 
-import React, { useMemo, useState } from 'react'
+import { useMemo, useState } from 'react'
 import { FileText, MessageSquare, GitCompare } from '@/assets/icons'
 import { ReviewDiff } from '@/components/review/ReviewDiff'
 

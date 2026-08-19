@@ -155,7 +155,6 @@ export function useInteractionHandler(sessionId: string | undefined) {
   const navigate = useNavigate()
   const addInteraction = useInteractionStore((s) => s.addInteraction)
   const markResponded = useInteractionStore((s) => s.markResponded)
-  const markNavigated = useInteractionStore((s) => s.markNavigated)
   const markEntered = useInteractionStore((s) => s.markEntered)
   const dismissInteraction = useInteractionStore((s) => s.dismissInteraction)
   const pendingInteractions = useInteractionStore((s) => s.pendingInteractions)
@@ -426,7 +425,7 @@ export function useInteractionHandler(sessionId: string | undefined) {
   )
 
   const navigateToTab = useCallback(
-    async (requestId: string, pipelineId: string, title?: string, agentLevelStr?: string, interactionSessionId?: string) => {
+    async (requestId: string, pipelineId: string, title?: string, agentLevelStr?: string) => {
       const currentSid = useSessionStore.getState().activeSessionId
       if (!currentSid) {
         console.error('[useInteractionHandler.navigateToTab] 无活跃会话，无法处理交互跳转', requestId)
