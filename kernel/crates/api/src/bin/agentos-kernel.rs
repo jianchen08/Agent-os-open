@@ -505,7 +505,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 &registry,
                 Some(&plugin_scopes),
             );
-            info!(
+            // §3.4（0.2 收尾批次 1）：拒注是"声明与实现不一致已实际收口"的异常
+            // 事件，从 info 提升为 warn——消除"被拒数日无人知晓"（e2e G5；清单
+            // 明细另经 GET /api/v1/plugins/contract-status 暴露）。下方汇总日志
+            // 保持 info。
+            warn!(
                 target: "plugin-g2-boot",
                 plugin = %manifest.id,
                 rejected = ?outcome.rejected_tools,
