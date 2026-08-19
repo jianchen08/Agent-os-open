@@ -16,19 +16,119 @@
     "services": [
       {
         "name": "multimodal.convert",
-        "description": "将文本和附件转换为模型特定格式"
+        "description": "将文本和附件转换为模型特定格式",
+        "input_schema": {
+          "properties": {
+            "content": {
+              "type": "string",
+              "description": "文本内容"
+            },
+            "provider": {
+              "type": "string",
+              "default": "default",
+              "description": "模型提供商（openai/anthropic/zhipu/deepseek等）"
+            },
+            "attachments": {
+              "type": "array",
+              "description": "附件列表",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "filename": {
+                    "type": "string"
+                  },
+                  "mime_type": {
+                    "type": "string"
+                  },
+                  "media_type": {
+                    "type": "string",
+                    "enum": [
+                      "image",
+                      "audio",
+                      "video",
+                      "document"
+                    ]
+                  },
+                  "base64_data": {
+                    "type": "string",
+                    "description": "Base64编码的文件内容"
+                  },
+                  "url": {
+                    "type": "string",
+                    "description": "文件URL（与base64_data二选一）"
+                  }
+                },
+                "required": [
+                  "filename",
+                  "mime_type",
+                  "media_type"
+                ]
+              }
+            }
+          },
+          "required": [
+            "content"
+          ],
+          "type": "object"
+        }
       },
       {
         "name": "multimodal.capability",
-        "description": "查询模型的多模态能力"
+        "description": "查询模型的多模态能力",
+        "input_schema": {
+          "properties": {
+            "model_name": {
+              "type": "string",
+              "description": "模型名称"
+            }
+          },
+          "required": [
+            "model_name"
+          ],
+          "type": "object"
+        }
       },
       {
         "name": "multimodal.supported",
-        "description": "检查模型是否支持多模态"
+        "description": "检查模型是否支持多模态",
+        "input_schema": {
+          "properties": {
+            "model_name": {
+              "type": "string",
+              "description": "模型名称"
+            }
+          },
+          "required": [
+            "model_name"
+          ],
+          "type": "object"
+        }
       },
       {
         "name": "multimodal.transcribe",
-        "description": "语音识别（ASR）：音频转文本"
+        "description": "语音识别（ASR）：音频转文本",
+        "input_schema": {
+          "properties": {
+            "audio_base64": {
+              "type": "string",
+              "description": "Base64编码的音频数据"
+            },
+            "mime_type": {
+              "type": "string",
+              "default": "audio/webm",
+              "description": "音频MIME类型（如 audio/webm）"
+            },
+            "language": {
+              "type": "string",
+              "default": "zh-CN",
+              "description": "识别语言代码（如 zh-CN）"
+            }
+          },
+          "required": [
+            "audio_base64"
+          ],
+          "type": "object"
+        }
       }
     ]
   },
