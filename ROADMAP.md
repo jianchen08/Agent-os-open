@@ -553,27 +553,27 @@
 
 #### API 稳定
 
-- ✅ 公共 API 冻结；1.x 内只做向后兼容修复
-- ✅ 语义化版本承诺（SemVer）；弃用至少提前 1 个 minor 版本预告
-- ✅ 变更日志规约（Keep a Changelog）；强制化
+- ☐ 公共 API 冻结；1.x 内只做向后兼容修复
+- ☐ 语义化版本承诺（SemVer）；弃用至少提前 1 个 minor 版本预告
+- ☐ 变更日志规约（Keep a Changelog）；强制化
 
 #### 质量门
 
-- ✅ 全量端到端测试覆盖核心路径；用户旅程表 + 影响矩阵对应
-- ✅ 性能基线 & 回归基线；CI 卡口固化
-- ✅ 安全审计与渗透测试；第三方或内部红队报告
+- ☐ 全量端到端测试覆盖核心路径；用户旅程表 + 影响矩阵对应
+- ☐ 性能基线 & 回归基线；CI 卡口固化
+- ☐ 安全审计与渗透测试；第三方或内部红队报告
 
 #### 生态
 
-- ✅ 长期支持计划（LTS）：1.x 维护 ≥ 18 个月
-- ✅ 插件市场上架审核流程：第三方插件可用、可信、可回滚
-- ✅ 国际化（i18n）支持 10+ 语言
+- ☐ 长期支持计划（LTS）：1.x 维护 ≥ 18 个月
+- ☐ 插件市场上架审核流程：第三方插件可用、可信、可回滚
+- ☐ 国际化（i18n）支持 10+ 语言
 
 #### 核心里程碑（沿用原版）
 
-- ✅ 至少 3 个企业级生产案例
-- ✅ 完整的中英文档、视频教程、案例库
-- ✅ 社区生态规模：100+ 第三方插件、50+ 任务模板
+- ☐ 至少 3 个企业级生产案例
+- ☐ 完整的中英文档、视频教程、案例库
+- ☐ 社区生态规模：100+ 第三方插件、50+ 任务模板
 
 **通过标准**：
 
@@ -593,7 +593,7 @@
 | `PLR0912` | 函数分支过多（>12） | 需拆分函数 | 提取分支为独立方法 |
 | `PLR0915` | 函数语句过多（>50） | 需拆分函数 | 按职责拆分 |
 
-**mypy 类型注解**：当前约 470 个类型检查错误（`call-arg`/`union-attr`/`arg-type` 为主，多为 Optional 链路与字符串注解引用，非崩溃级 Bug）。CI 的 typecheck job 已设 `continue-on-error`，报告可见但不阻塞。完善类型注解是长期工作，欢迎认领：补全函数签名注解 → 收窄 Optional → 移除 `continue-on-error` 恢复硬门禁。
+**mypy 类型注解**：基线锁现值 337（`.github/mypy-baseline.txt`，只减不增；`call-arg`/`union-attr`/`arg-type` 为主，多为 Optional 链路与字符串注解引用，非崩溃级 Bug）。CI 的 typecheck job 已设 `continue-on-error`，报告可见但不阻塞。完善类型注解是长期工作，欢迎认领：补全函数签名注解 → 收窄 Optional → 移除 `continue-on-error` 恢复硬门禁。
 
 **认领方式**：搜索对应规则码（如 `# noqa: PLR0912`），逐个函数重构，移除 noqa 注释后确保 CI 通过。
 
@@ -698,15 +698,15 @@ DSH 进程内的真实 service / 装载的第三方 cordis 插件
 
 ### 工程基础设施补全（测试 / CI / 质量门禁）
 
-**触发条件**：0.2 迁移收尾后，作为"用户可信度"的硬基础。当前 mypy 仍有约 470 个类型检查错误（ROADMAP 已知技术债），测试覆盖率无硬门禁。
+**触发条件**：0.2 迁移收尾后，作为"用户可信度"的硬基础。当前 mypy 仍有 337 个类型检查错误（基线锁，`.github/mypy-baseline.txt` 只减不增；ROADMAP 已知技术债），测试覆盖率无硬门禁。
 
 **已落地（2026-08-15，机械门禁部分）**：统一机械门禁入口 `scripts/run_gates.py`（21 个门禁单一事实源，CI 跑穷尽集 + 本地 fast 廉价检查，每个承诺都有非零退出命令）+ 覆盖率豁免重型套件 `scripts/coverage_exempt.py`（94 插件子进程冒烟矩阵免插桩、与插桩 gate 并行，实测对父进程覆盖率零贡献；覆盖率地板 44% 只升不降 + 失败数基线锁只减不增自动守护名单与车道）+ electron 桌面壳编译门禁（新增 CI job）+ 修复一批门禁接入后机械暴露的既有破损（python-lint mypy 路径 bug、SDK 5 处类型错误、10 处非法追溯标记、47 个新测试文件未标记、kernel fmt 漂移、root 死 test 脚本）。详见 `docs/working/机械门禁统一入口与覆盖率豁免.md`。
 
 **现状对比**：DSH 有完整工程基础设施——oxlint + knip（未用依赖检测）+ jscpd（重复码检测）+ publint + lefthook + Vitest e2e/snapshot test，且 `test:coverage` 是 CI 硬门禁（per-file 100%）。本项目在测试/CI 门禁上明显弱于 DSH，这直接影响用户/开发者对项目的信任度。
 
 **落地方向**：
-1. mypy 类型错误清零（470 → 0），CI typecheck job 取消 `continue-on-error` 恢复硬门禁
-2. 测试覆盖率门禁收紧（✅ 底线已设：Python fail-under=50、Rust line% 基线锁只升不降、前端 vitest thresholds；逐步收紧 Python 50→80%，对标 DSH 的 per-file 100%）
+1. mypy 类型错误清零（337 → 0，基线锁只减不增），CI typecheck job 取消 `continue-on-error` 恢复硬门禁
+2. 测试覆盖率门禁收紧（底线 44%（run_gates.py `--fail-under=44`），路线 44→50→80%，对标 DSH 的 per-file 100%；Rust line% 基线锁只升不降、前端 vitest thresholds 已设）
 3. 引入 knip（未用依赖/导出检测）、jscpd（重复码）等质量工具
 4. e2e/snapshot test 基础设施（对标 DSH 的 vitest e2e + keyless snapshot replay）
 
