@@ -1,5 +1,5 @@
 {
-  "id": "task_form_service",
+  "id": "task_form",
   "name": "Task Form Service",
   "description": "任务表单声明与取数端点——新建任务表单字段（config/task_form.yaml）+ 执行 Agent/容器任务动态选项（自持服务，channel_api 零追加）",
   "version": "1.0.0",

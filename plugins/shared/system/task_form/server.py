@@ -28,7 +28,7 @@ import yaml
 
 from agentos_plugin_sdk import AgentOSPlugin
 
-plugin = AgentOSPlugin("task_form_service")
+plugin = AgentOSPlugin("task_form")
 
 # tasks 包（get_task_service）与其依赖目录入 sys.path——与 channel_api 同款限定导入。
 _PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "..", ".."))
@@ -206,3 +206,7 @@ async def http_handle(
 async def _on_load(params: dict[str, Any]) -> None:
     """Initialize task form service on load."""
     pass
+
+
+if __name__ == "__main__":
+    plugin.run()
