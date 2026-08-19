@@ -5,7 +5,9 @@
 
 from __future__ import annotations
 
+import ast
 import math
+import operator
 from typing import Any
 
 SCIENTIFIC_CALCULATOR_SCHEMA: dict[str, Any] = {
@@ -92,45 +94,104 @@ def _evaluate_single(func: str, value: Any = None, values: list | None = None) -
 
 
 def _safe_eval(expression: str) -> int | float:
-    """安全地计算数学表达式。"""
+    """安全地计算数学表达式（AST 白名单节点求值）。
+
+    替换旧实现的 eval：空 ``__builtins__`` 的 eval 可经
+    ``().__class__.__base__.__subclasses__()`` 属性链逃逸执行任意代码，
+    AST 白名单只放行数值常量/算子/白名单函数调用，属性访问与非数值节点一律拒绝。
+    """
     expr = expression.lower()
-    for name, val in _CONSTANTS.items():
-        expr = expr.replace(name, str(val))
+    try:
+        tree = ast.parse(expr, mode="eval")
+    except SyntaxError as e:
+        raise ValueError(f"表达式语法错误: {e}") from e
+    return _ast_eval(tree)
 
-    safe_funcs = {
-        "sin": "math.sin(math.radians(%s))",
-        "cos": "math.cos(math.radians(%s))",
-        "tan": "math.tan(math.radians(%s))",
-        "asin": "math.degrees(math.asin(%s))",
-        "acos": "math.degrees(math.acos(%s))",
-        "atan": "math.degrees(math.atan(%s))",
-        "sinh": "math.sinh(%s)",
-        "cosh": "math.cosh(%s)",
-        "tanh": "math.tanh(%s)",
-        "log": "math.log(%s)",
-        "ln": "math.log(%s)",
-        "log10": "math.log10(%s)",
-        "log2": "math.log2(%s)",
-        "sqrt": "math.sqrt(%s)",
-        "cbrt": "math.copysign(abs(%s)**(1/3), %s)",
-        "abs": "abs(%s)",
-        "ceil": "math.ceil(%s)",
-        "floor": "math.floor(%s)",
-        "factorial": "math.factorial(int(%s))",
-        "exp": "math.exp(%s)",
-        "degrees": "math.degrees(%s)",
-        "radians": "math.radians(%s)",
-    }
 
-    for name, pattern in safe_funcs.items():
-        # 使用占位符替换避免 % 格式化问题（cbrt 有两个 %s）
-        expr = expr.replace(name + "(", pattern.replace("%s", ""))
-        # 修正替换后多余的双右括号
-    expr = expr.replace("))", ")")
+# DoS 防护：限制幂运算指数与阶乘入参的量级（2**99999999 / factorial(10**8) 可挂死进程）
+_MAX_POW_EXPONENT = 10_000
+_MAX_FACTORIAL_INPUT = 100_000
 
-    allowed_names = {"math": math, "abs": abs, "round": round}
-    result = eval(expr, {"__builtins__": {}}, allowed_names)  # noqa: S307
-    return result
+
+def _guarded_factorial(x: Any) -> int:
+    n = int(x)
+    if abs(n) > _MAX_FACTORIAL_INPUT:
+        raise ValueError(f"阶乘入参过大: {n}")
+    return math.factorial(n)
+
+
+# 表达式上下文函数白名单（与旧字符串替换实现行为对齐：三角函数角度制、
+# log 支持单/双参、factorial 收敛 int——旧实现 "))"→")" 误替换使 factorial 语法错误，此处修复）
+_EXPR_FUNCS: dict[str, Any] = {
+    "sin": lambda x: math.sin(math.radians(x)),
+    "cos": lambda x: math.cos(math.radians(x)),
+    "tan": lambda x: math.tan(math.radians(x)),
+    "asin": lambda x: math.degrees(math.asin(x)),
+    "acos": lambda x: math.degrees(math.acos(x)),
+    "atan": lambda x: math.degrees(math.atan(x)),
+    "sinh": math.sinh,
+    "cosh": math.cosh,
+    "tanh": math.tanh,
+    "log": lambda x, base=None: math.log(x, base) if base is not None else math.log(x),
+    "ln": math.log,
+    "log10": math.log10,
+    "log2": math.log2,
+    "sqrt": math.sqrt,
+    "cbrt": lambda x: math.copysign(abs(x) ** (1 / 3), x),
+    "abs": abs,
+    "ceil": math.ceil,
+    "floor": math.floor,
+    "round": round,
+    "factorial": _guarded_factorial,
+    "exp": math.exp,
+    "degrees": math.degrees,
+    "radians": math.radians,
+}
+
+_EXPR_BIN_OPS: dict[type[ast.operator], Any] = {
+    ast.Add: operator.add,
+    ast.Sub: operator.sub,
+    ast.Mult: operator.mul,
+    ast.Div: operator.truediv,
+    ast.FloorDiv: operator.floordiv,
+    ast.Mod: operator.mod,
+    ast.Pow: operator.pow,
+}
+
+_EXPR_UNARY_OPS: dict[type[ast.unaryop], Any] = {
+    ast.UAdd: operator.pos,
+    ast.USub: operator.neg,
+}
+
+def _ast_eval(node: ast.AST) -> int | float:
+    """AST 白名单节点递归求值。"""
+    if isinstance(node, ast.Expression):
+        return _ast_eval(node.body)
+    if isinstance(node, ast.Constant):
+        if isinstance(node.value, bool) or not isinstance(node.value, (int, float)):
+            raise ValueError(f"不支持的常量: {node.value!r}")
+        return node.value
+    if isinstance(node, ast.BinOp) and type(node.op) in _EXPR_BIN_OPS:
+        left = _ast_eval(node.left)
+        right = _ast_eval(node.right)
+        if isinstance(node.op, ast.Pow) and abs(right) > _MAX_POW_EXPONENT:
+            raise ValueError(f"指数过大: {right}")
+        return _EXPR_BIN_OPS[type(node.op)](left, right)
+    if isinstance(node, ast.UnaryOp) and type(node.op) in _EXPR_UNARY_OPS:
+        return _EXPR_UNARY_OPS[type(node.op)](_ast_eval(node.operand))
+    if isinstance(node, ast.Name):
+        if node.id in _CONSTANTS:
+            return _CONSTANTS[node.id]
+        raise ValueError(f"不支持的名称: {node.id}")
+    if isinstance(node, ast.Call):
+        if not isinstance(node.func, ast.Name) or node.func.id not in _EXPR_FUNCS:
+            desc = getattr(node.func, "id", None)
+            raise ValueError(f"不支持的函数: {desc or '复合表达式'}")
+        if node.keywords:
+            raise ValueError("不支持关键字参数")
+        args = [_ast_eval(a) for a in node.args]
+        return _EXPR_FUNCS[node.func.id](*args)
+    raise ValueError(f"不支持的表达式节点: {type(node).__name__}")
 
 
 async def scientific_calculator(
