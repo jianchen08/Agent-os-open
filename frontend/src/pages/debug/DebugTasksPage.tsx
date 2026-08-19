@@ -173,7 +173,13 @@ export function DebugTasksPage({ embedded }: { embedded?: boolean } = {}) {
                       状态
                     </th>
                     <th className="text-muted-foreground px-4 py-2 text-left text-xs font-medium">
-                      说明
+                      Agent
+                    </th>
+                    <th className="text-muted-foreground px-4 py-2 text-left text-xs font-medium">
+                      阶段
+                    </th>
+                    <th className="text-muted-foreground px-4 py-2 text-left text-xs font-medium">
+                      关键数据
                     </th>
                     <th className="text-muted-foreground px-4 py-2 text-left text-xs font-medium">
                       创建时间
@@ -185,13 +191,14 @@ export function DebugTasksPage({ embedded }: { embedded?: boolean } = {}) {
                 </thead>
                 <tbody>
                   {tasks.map((task) => {
+                    const hasValidTime = task.created_at && !Number.isNaN(new Date(task.created_at).getTime())
                     return (
                       <tr
                         key={task.id}
                         className="border-t hover:bg-accent/20"
                       >
                         <td className="max-w-[200px] truncate px-4 py-2">
-                          {task.intent || task.name || task.id}
+                          {task.title || task.intent || task.name || task.id}
                         </td>
                         <td className="px-4 py-2">
                           <span
@@ -200,16 +207,24 @@ export function DebugTasksPage({ embedded }: { embedded?: boolean } = {}) {
                             {getTaskStatusLabel(task.status)}
                           </span>
                         </td>
-                        <td className="text-muted-foreground max-w-[200px] truncate px-4 py-2 text-xs">
-                          {task.error || task.description || task.current_step || '--'}
+                        <td className="text-muted-foreground max-w-[110px] truncate px-4 py-2 text-xs">
+                          {task.agent_id || '--'}
+                        </td>
+                        <td className="text-muted-foreground max-w-[110px] truncate px-4 py-2 text-xs">
+                          {task.error || task.current_phase || task.current_step || task.description || '--'}
+                        </td>
+                        <td className="text-muted-foreground px-4 py-2 text-xs whitespace-nowrap">
+                          {task.message_count !== undefined && <span className="bg-accent/30 rounded px-1.5 py-0.5 mr-1">{task.message_count} 消息</span>}
+                          {task.total_tokens !== undefined && task.total_tokens !== null && <span className="bg-accent/30 rounded px-1.5 py-0.5 mr-1">{task.total_tokens} tokens</span>}
+                          {task.ended !== undefined && <span className="bg-accent/30 rounded px-1.5 py-0.5">{task.ended ? '已结束' : '进行中'}</span>}
                         </td>
                         <td className="text-muted-foreground px-4 py-2 text-xs">
-                          {new Date(task.created_at).toLocaleString()}
+                          {hasValidTime ? new Date(task.created_at).toLocaleString() : '--'}
                         </td>
                         <td className="px-4 py-2">
-                          {task.status === 'suspended' && (
+                          {task.status === 'suspended' && task.task_id && (
                             <button
-                              onClick={() => handleResume(task.id)}
+                              onClick={() => handleResume(task.task_id as string)}
                               disabled={resumingIds.has(task.id)}
                               className="inline-flex items-center gap-1 rounded-lg bg-primary/10 text-primary hover:bg-primary/20 px-2.5 py-1 text-xs font-medium transition-colors disabled:opacity-50"
                             >

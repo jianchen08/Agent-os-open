@@ -10,6 +10,8 @@
    - debug_tasks             任务（/ext/monitoring|channel_api/tasks/*）
    - debug_users             用户（/ext/channel_api/users/*）
    - debug_evaluation_metrics 评估指标（/ext/evaluation_service/metrics）
+   - debug_llm_payload        LLM 请求快照（/ext/monitoring/payload-diag/*，
+                             2026-08-19 并入调试中心 hub）
 
 页面数据经各数据源插件 HTTP 面获取，本插件不承载任何数据。
 本插件无运行时能力；sidecar 仅为满足内核 entry 必填约束，空转即可。

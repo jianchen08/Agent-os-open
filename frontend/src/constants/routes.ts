@@ -78,6 +78,8 @@ export const ROUTES = {
     USERS: '/debug/users',
     /** 数据库管理（统一数据接口 /api/v1/db/*） */
     DB: '/debug/db',
+    /** LLM 请求快照（最近发送给大模型的真实请求体） */
+    LLM_PAYLOAD: '/debug/llm-payload',
   },
 } as const
 

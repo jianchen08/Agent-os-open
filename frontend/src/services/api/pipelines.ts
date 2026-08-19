@@ -44,6 +44,12 @@ export interface PipelineStateSummary {
   max_iterations?: number
   metadata?: Record<string, unknown>
   raw_error?: string | null
+  // GAP-1 任务域/血缘字段（内核 STATE_SUMMARY_KEYS 以扁平点号键出口）
+  'task.goal'?: string
+  'task.status'?: string
+  'task.id'?: string
+  'task.ended_at'?: string
+  'lineage.parent_pipeline_id'?: string
 }
 
 /** GET /api/v1/pipelines/state 条目（会话/任务/迭代的运行时真值，任务树数据源） */

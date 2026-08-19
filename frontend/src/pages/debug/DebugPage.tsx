@@ -53,6 +53,12 @@ const DEBUG_CARDS: DebugCard[] = [
     href: '/debug/db',
     icon: '🗄️',
   },
+  {
+    title: 'LLM 请求',
+    description: '最近发送给大模型的真实请求体快照（messages 逐条渲染）',
+    href: '/debug/llm-payload',
+    icon: '🧠',
+  },
 ]
 
 /**

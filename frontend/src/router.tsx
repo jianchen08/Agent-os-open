@@ -81,6 +81,11 @@ const DebugUsersPage = lazy(() =>
 const DbAdminPage = lazy(() =>
   import('@/pages/debug/DbAdminPage').then((m) => ({ default: m.DbAdminPage })),
 )
+const DebugLlmPayloadPage = lazy(() =>
+  import('@/pages/debug/DebugLlmPayloadPage').then((m) => ({
+    default: m.DebugLlmPayloadPage,
+  })),
+)
 const PluginsSettingsPage = lazy(() =>
   import('@/pages/settings/PluginsSettingsPage').then((m) => ({
     default: m.PluginsSettingsPage,
@@ -689,6 +694,16 @@ export function createRouter() {
         <ProtectedRoute>
           <Suspense fallback={LazyFallback}>
             <DbAdminPage />
+          </Suspense>
+        </ProtectedRoute>
+      ),
+    },
+    {
+      path: ROUTES.DEBUG.LLM_PAYLOAD,
+      element: (
+        <ProtectedRoute>
+          <Suspense fallback={LazyFallback}>
+            <DebugLlmPayloadPage />
           </Suspense>
         </ProtectedRoute>
       ),

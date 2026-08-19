@@ -71,4 +71,12 @@ export interface PipelineViewEntry {
   currentPhase?: string
   /** 消息条数（state.messages 规模，迭代轮次的粗粒度指标） */
   messageCount?: number
+  /** 任务原始状态（task.status——evaluating/planning 等细态不被 4 态映射吞掉） */
+  taskStatus?: string
+  /** 管道 state 真值状态（state['task.status'] ?? state.status） */
+  stateStatus?: string
+  /** 管道 state 是否已结束（state.ended） */
+  stateEnded?: boolean
+  /** 管道 state 原始错误（state.raw_error） */
+  rawError?: string
 }

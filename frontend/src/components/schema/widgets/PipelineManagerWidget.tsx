@@ -225,6 +225,13 @@ export function PipelineManagerWidget(_rawProps: Record<string, unknown>) {
         totalTokens: run.total_tokens ?? null,
         currentPhase: st?.state.current_phase,
         messageCount: st?.state.message_count,
+        // 原始状态与 state 真值（不被 4 态映射吞掉——evaluating/planning 等细态可见）
+        taskStatus: task ? String(task.status ?? '') || undefined : undefined,
+        stateStatus: st
+          ? String(st.state['task.status'] ?? st.state.status ?? '') || undefined
+          : undefined,
+        stateEnded: st?.state.ended === true ? true : undefined,
+        rawError: st?.state.raw_error ?? undefined,
         liveUsage: live
           ? {
               promptTokens: live.promptTokens,
@@ -239,8 +246,9 @@ export function PipelineManagerWidget(_rawProps: Record<string, unknown>) {
     for (const [pid, task] of taskByPipeline) {
       if (seen.has(pid)) continue
       const taskStatus = String(task.status ?? '')
-      const mapped = taskStatusToPipelineStatus(taskStatus)
-      if (!mapped) continue
+      // 未知状态不再丢弃（2026-08-19）：保留条目，4 态映射兜底 running，原始状态在行内展示
+      const mapped = taskStatusToPipelineStatus(taskStatus) ?? 'running'
+      const st = registryStates[pid]
       const timestamps = task.timestamps as Record<string, unknown> | undefined
       const startedAt =
         (timestamps?.startedAt as string | undefined)
@@ -270,6 +278,12 @@ export function PipelineManagerWidget(_rawProps: Record<string, unknown>) {
             ? Number((task.progress as Record<string, unknown>).progressPercent)
             : undefined,
         totalTokens: null,
+        taskStatus: taskStatus || undefined,
+        stateStatus: st
+          ? String(st.state['task.status'] ?? st.state.status ?? '') || undefined
+          : undefined,
+        stateEnded: st?.state.ended === true ? true : undefined,
+        rawError: st?.state.raw_error ?? undefined,
       })
     }
 
@@ -300,6 +314,9 @@ export function PipelineManagerWidget(_rawProps: Record<string, unknown>) {
         sessionTitle: session ? session.title : undefined,
         currentPhase: s.current_phase,
         messageCount: s.message_count,
+        stateStatus: String(s['task.status'] ?? s.status ?? '') || undefined,
+        stateEnded: s.ended === true ? true : undefined,
+        rawError: s.raw_error ?? undefined,
         workspacePath: executionCtx
           ? String(
               (executionCtx.workspace as Record<string, unknown> | undefined)?.source_path
@@ -810,8 +827,13 @@ function countNodes(nodes: PipelineTreeNode[]): number {
 /** 任务状态 → 展示文案/颜色 */
 function containerStatusInfo(status: string): { label: string; color: string } {
   const mapped = taskStatusToPipelineStatus(status)
-  const info = statusIcon(mapped ?? 'completed')
-  return { label: info.label, color: info.color }
+  if (mapped) {
+    const info = statusIcon(mapped)
+    return { label: info.label, color: info.color }
+  }
+  // 未知状态：原样展示（此前兜底 'completed' 会把未知态误标为"已完成"）
+  const info = statusIcon('running')
+  return { label: status || '未知', color: info.color }
 }
 
 /** 分组：主管道顶层（对应会话层级），子任务管道直接嵌套其下；孤儿顶层平铺 */
@@ -983,6 +1005,14 @@ function TaskRow({
       <span className={`shrink-0 rounded px-1 text-[10px] font-medium ${status.color}`}>
         {status.label}
       </span>
+      {task.status && status.label !== task.status && (
+        <span
+          className="text-muted-foreground/70 shrink-0 text-[10px] font-mono"
+          title="任务原始状态"
+        >
+          {String(task.status)}
+        </span>
+      )}
       <span className="text-muted-foreground/50 shrink-0 text-[10px]">
         [{childCount}]
       </span>
@@ -1050,12 +1080,24 @@ function EntryRow({
             无归属
           </span>
         )}
-        {/* 状态图标 */}
-        <span className="shrink-0" title={status.label}>
+        {/* 状态图标（title 带原始状态——4 态映射的细态不丢） */}
+        <span
+          className="shrink-0"
+          title={`运行状态：${status.label}${entry.taskStatus ? ` · 任务原始状态：${entry.taskStatus}` : ''}${entry.stateStatus ? ` · state 真值：${entry.stateStatus}` : ''}`}
+        >
           {status.icon}
         </span>
         {/* 名称 */}
         <span className="text-foreground/90 min-w-0 flex-1 truncate text-sm">{entry.name}</span>
+        {/* 原始状态（与 4 态标签不同才显示：evaluating/planning 等细态） */}
+        {entry.taskStatus && status.label !== entry.taskStatus && (
+          <span
+            className="text-muted-foreground/70 hidden shrink-0 text-[10px] font-mono md:inline"
+            title="任务原始状态"
+          >
+            {entry.taskStatus}
+          </span>
+        )}
         {/* 循环体阶段（内核 state.current_phase：init/main/exit…） */}
         {entry.currentPhase && (
           <span
@@ -1179,6 +1221,13 @@ function EntryDetail({ entry, depth }: { entry: PipelineViewEntry; depth: number
   ]
   if (entry.endedAt) rows.push(['结束', entry.endedAt])
   if (entry.agentName) rows.push(['Agent', entry.agentName])
+  // state 真值关键数据（2026-08-19：任务条目上的关键信息不缺位）
+  if (entry.taskStatus) rows.push(['任务状态', entry.taskStatus])
+  if (entry.stateStatus) rows.push(['State 状态', entry.stateStatus])
+  if (entry.stateEnded !== undefined) rows.push(['已结束', entry.stateEnded ? '是' : '否'])
+  if (entry.currentPhase) rows.push(['当前阶段', entry.currentPhase])
+  if (entry.messageCount != null) rows.push(['消息条数', String(entry.messageCount)])
+  if (entry.rawError) rows.push(['错误', entry.rawError])
   if (entry.totalTokens && typeof entry.totalTokens === 'object') {
     const t = entry.totalTokens
     const parts = ['input', 'output', 'total']
@@ -1309,9 +1358,17 @@ function PipelineTable({
                     {entry.agentName || '--'}
                   </td>
                   <td className="px-3 py-1.5">
-                    <span className={`flex items-center gap-1 text-xs ${status.color}`}>
+                    <span
+                      className={`flex items-center gap-1 text-xs ${status.color}`}
+                      title={`运行状态：${status.label}${entry.taskStatus ? ` · 任务原始状态：${entry.taskStatus}` : ''}${entry.stateStatus ? ` · state 真值：${entry.stateStatus}` : ''}`}
+                    >
                       {status.icon}
                       {status.label}
+                      {entry.taskStatus && status.label !== entry.taskStatus && (
+                        <span className="text-muted-foreground/70 text-[10px] font-mono">
+                          {entry.taskStatus}
+                        </span>
+                      )}
                     </span>
                   </td>
                   <td className="hidden px-3 py-1.5 text-xs tabular-nums text-muted-foreground md:table-cell">

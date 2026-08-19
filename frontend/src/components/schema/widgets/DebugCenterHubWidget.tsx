@@ -2,8 +2,8 @@
  * 调试中心面板（debug_center 插件单入口 → 工作区面板）
  *
  * 侧边栏只暴露一个「调试」入口（插件声明 when: user.role == 'admin'，仅管理员可见），
- * 本面板内部切换 6 个调试页面：
- * 数据库管理 / 执行记录 / 会话 / 任务 / 用户 / 评估指标。
+ * 本面板内部切换子页面：
+ * 数据库管理 / 执行记录 / 会话 / 任务 / 用户 / 评估指标 / LLM 请求 / 插件契约。
  * 各子页面以 embedded 模式渲染（PageShell 不渲染返回头，适配工作区面板；
  * 数据库管理页内部保留 admin 守卫，非 admin 打开时显示无权限提示）。
  */
@@ -13,6 +13,7 @@ import { cn } from '@/lib/utils'
 import { DbAdminPage } from '@/pages/debug/DbAdminPage'
 import { DebugEvaluationMetricsPage } from '@/pages/debug/DebugEvaluationMetricsPage'
 import { DebugExecutionRecordsPage } from '@/pages/debug/DebugExecutionRecordsPage'
+import { DebugLlmPayloadPage } from '@/pages/debug/DebugLlmPayloadPage'
 import { DebugSessionsPage } from '@/pages/debug/DebugSessionsPage'
 import { DebugTasksPage } from '@/pages/debug/DebugTasksPage'
 import { DebugUsersPage } from '@/pages/debug/DebugUsersPage'
@@ -33,6 +34,7 @@ const DEBUG_PAGES: DebugPageItem[] = [
   { id: 'tasks', title: '任务', icon: '⚙️', component: () => <DebugTasksPage embedded /> },
   { id: 'users', title: '用户', icon: '👤', component: () => <DebugUsersPage embedded /> },
   { id: 'evaluation', title: '评估指标', icon: '📊', component: () => <DebugEvaluationMetricsPage embedded /> },
+  { id: 'llm_payload', title: 'LLM 请求', icon: '🧠', component: () => <DebugLlmPayloadPage embedded /> },
   { id: 'contract_status', title: '插件契约', icon: '🛡️', component: () => <ContractStatusPanel /> },
 ]
 
