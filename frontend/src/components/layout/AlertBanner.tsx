@@ -8,6 +8,10 @@
  */
 
 import { useEffect, useMemo, useRef, useState } from 'react'
+import { WS_SERVER_EVENTS } from '@/constants/websocket'
+import { useBudgetStatus } from '@/hooks/useCostControl'
+import { globalWS } from '@/services/websocket/GlobalWebSocket'
+import type { BudgetStatusResponse } from '@/services/api/costControl'
 import { cn } from '@/lib/utils'
 import { useLayoutModeStore } from '@/stores/layoutModeStore'
 
@@ -133,14 +137,66 @@ export function AlertBanner({
 }
 
 /**
- * 从 layoutModeStore 派生系统告警：
+ * budget 告警派生：alert_level ∈ {warning, critical, exhausted} 时出一条
+ * （critical/exhausted → error tone），info 不出。
+ * 后端 budget_manager 已按 daily/monthly 取 max 判定单值 alert_level——
+ * 前端只出一条（id=budget，升级时同 id 覆盖），不双条刷屏。
+ */
+function deriveBudgetAlert(status: BudgetStatusResponse | null): AlertBannerItem | null {
+  const level = status?.alert_level
+  if (!status) return null
+  if (level !== 'warning' && level !== 'critical' && level !== 'exhausted') return null
+  const percent = Math.round(status.usage_percent)
+  if (level === 'exhausted') {
+    return {
+      id: 'budget',
+      kind: 'budget',
+      tone: 'error',
+      message: `预算已耗尽（使用率 ${percent}%），任务执行可能被拦截`,
+      actionLabel: '查看成本',
+    }
+  }
+  if (level === 'critical') {
+    return {
+      id: 'budget',
+      kind: 'budget',
+      tone: 'error',
+      message: `预算使用已达 ${percent}%，超过严重阈值`,
+      actionLabel: '查看成本',
+    }
+  }
+  return {
+    id: 'budget',
+    kind: 'budget',
+    tone: 'warning',
+    message: `预算使用已达 ${percent}%，接近限额`,
+    actionLabel: '查看成本',
+  }
+}
+
+/**
+ * 从 layoutModeStore + cost_control 派生系统告警：
  * - connection：断开/失败（重连中不打扰）
  * - approval：审批待处理
- * - budget：预留（预算超限由成本控制模块注入，接入点见 task 文档风险 3）
+ * - budget：预算超限（真源 cost_control /ext/cost_control/budget/status 的
+ *   alert_level；monitoring 插件 token 累计恒 0 不可用——勿接错源）
  */
 export function useLayoutAlerts(): AlertBannerItem[] {
   const connectionStatus = useLayoutModeStore((s) => s.connectionStatus)
   const pendingInteractions = useLayoutModeStore((s) => s.pendingInteractions)
+  const { budgetStatus, refetch } = useBudgetStatus()
+
+  // cost_update 事件到达时复查预算状态（事件驱动，免轮询）；
+  // 失败静默——告警以最后一次已知状态为准
+  useEffect(() => {
+    const refetchBudget = () => {
+      refetch().catch(() => undefined)
+    }
+    globalWS.subscribe(WS_SERVER_EVENTS.COST_UPDATE, refetchBudget)
+    return () => {
+      globalWS.unsubscribe(WS_SERVER_EVENTS.COST_UPDATE, refetchBudget)
+    }
+  }, [refetch])
 
   return useMemo(() => {
     const items: AlertBannerItem[] = []
@@ -165,6 +221,8 @@ export function useLayoutAlerts(): AlertBannerItem[] {
         actionLabel: '去处理',
       })
     }
+    const budgetAlert = deriveBudgetAlert(budgetStatus)
+    if (budgetAlert) items.push(budgetAlert)
     return items
-  }, [connectionStatus.state, pendingInteractions.length])
+  }, [connectionStatus.state, pendingInteractions.length, budgetStatus])
 }

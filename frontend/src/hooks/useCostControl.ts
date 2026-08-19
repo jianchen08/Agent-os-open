@@ -202,7 +202,9 @@ export function useBudgetStatus(
 
   useEffect(() => {
     if (autoFetch) {
-      fetchBudgetStatus()
+      // 自动拉取属被动获取：失败已记入 error state，不再向上抛
+      // （挂载于常驻布局时无人 await，裸抛会成为未处理 rejection）
+      fetchBudgetStatus().catch(() => undefined)
     }
   }, [autoFetch, fetchBudgetStatus])
 

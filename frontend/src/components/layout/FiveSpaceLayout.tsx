@@ -204,13 +204,18 @@ export function FiveSpaceLayout({
     setMobileWorkspaceOpen(true)
   }, [setWorkspaceCollapsed])
 
-  /** 异常提示条点击：连接 → 打开监控面板；审批 → 审批弹窗全局可见，无需跳转 */
+  /** 异常提示条点击：连接 → 打开监控面板；预算 → 成本看板；审批 → 审批弹窗全局可见，无需跳转 */
   const handleAlertAction = useCallback(
     (item: AlertBannerItem) => {
       if (item.kind === 'connection') {
         // 监控页已声明化（monitoring 插件 contributes.pages path /monitoring）——直接打开
         const opened = openWorkspacePanelByPath('/monitoring')
         if (!opened) navigate('/monitoring')
+      }
+      if (item.kind === 'budget') {
+        // 成本看板已声明化（cost_control 插件 contributes.pages path /cost）——直接打开
+        const opened = openWorkspacePanelByPath('/cost')
+        if (!opened) navigate('/cost')
       }
     },
     [navigate],
