@@ -101,7 +101,6 @@ tool_ids:
 - task_manage
 - task_evaluate
 - human_interaction
-- design_generate
 - playwright_test
 - design_review
 hard_constraints:
