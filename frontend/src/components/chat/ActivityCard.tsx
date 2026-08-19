@@ -250,10 +250,15 @@ const ImageBlockView: FC<{ src: string }> = ({ src }) => {
 
 /**
  * 链接块：点击外部浏览器打开
+ *
+ * href 走 http(s) 协议白名单（对齐 WebBlock.safeHref）：LLM 活动块解析出的
+ * url 不可信，file:/自定义协议一律降级为不可点击文本。
  */
+const SAFE_HREF_RE = /^https?:\/\//i
+
 const LinkBlockView: FC<{ url: string }> = ({ url }) => (
   <a
-    href={url}
+    href={SAFE_HREF_RE.test(url) ? url : undefined}
     target="_blank"
     rel="noreferrer"
     className="text-primary inline-flex max-w-full items-center gap-1.5 truncate hover:underline"
