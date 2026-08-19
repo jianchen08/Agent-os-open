@@ -35,8 +35,14 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 
-# 与 loader 语料扫描同款 SKIP
-SKIP_DIRS = {"node_modules", "__pycache__", "target", "runtime", "data", "dsh_plugins", ".venv", "src"}
+# 与 loader 语料扫描同款 SKIP。
+# .ai_workspaces：未跟踪运行时工作区（workspace_lifecycle 插件目录内实测存在，
+# skills 脚本含 yaml/sqlalchemy import，曾致 dry-run 复扫误报——批 B §11.4.3）。
+# .venv-hindsight：hindsight_memory 第二 venv（批 C 双 venv 设计，site-packages 勿扫）。
+SKIP_DIRS = {
+    "node_modules", "__pycache__", "target", "runtime", "data", "dsh_plugins",
+    ".venv", ".venv-hindsight", "src", ".ai_workspaces",
+}
 
 # 不再重复生成的样板（已自持 pyproject 的插件）
 ALREADY_UV = {"builtin_tools"}
