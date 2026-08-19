@@ -8,8 +8,12 @@
 //! 三表运行时零生产者、全库零行。存量库残留空表会让 db_admin 表清单出现
 //! "页面有条目、后端无读写"的死表——init 迁移负责 DROP，保证表清单一一对应。
 //!
+//! 2026-08-19 追加裁定：dynamic_tools 表同样退役——动态注册的工具是 state 域
+//! 数据，不应耦合在内核存储（跨重启重建由插件自持 state/config 承担；
+//! registry 内存注册机制与 (registry, register_tool) capability 不受影响）。
+//!
 //! 行为断言（公开 API，临时文件库模拟旧库升级路径）：
-//! - 旧库残留三张投影表 → SqliteStore::open（内含 init）后消失；
+//! - 旧库残留四张退役表 → SqliteStore::open（内含 init）后消失；
 //! - 现行引擎表不受影响（runs/message_slots/blobs/pipeline_state 抽查）。
 
 use agentos_engine::SqliteStore;
@@ -32,13 +36,14 @@ fn open_drops_retired_projection_tables() {
     let path_str = path.to_str().unwrap();
     let _ = std::fs::remove_file(&path);
 
-    // 旧库：残留三张退役投影表
+    // 旧库：残留四张退役表
     {
         let conn = Connection::open(path_str).unwrap();
         conn.execute_batch(
             "CREATE TABLE execution_records (record_id TEXT, sequence INTEGER); \
              CREATE TABLE pipeline_run_summaries (run_id TEXT); \
-             CREATE TABLE memory (id TEXT);",
+             CREATE TABLE memory (id TEXT); \
+             CREATE TABLE dynamic_tools (plugin_id TEXT, tool_name TEXT);",
         )
         .unwrap();
     }
@@ -46,7 +51,12 @@ fn open_drops_retired_projection_tables() {
     // 升级路径：SqliteStore::open → init 迁移
     let store = SqliteStore::open(path_str).unwrap();
     let conn = Connection::open(path_str).unwrap();
-    for retired in ["execution_records", "pipeline_run_summaries", "memory"] {
+    for retired in [
+        "execution_records",
+        "pipeline_run_summaries",
+        "memory",
+        "dynamic_tools",
+    ] {
         assert!(
             !table_exists(&conn, retired),
             "退役投影表应在 open/init 后被 DROP：{retired}"

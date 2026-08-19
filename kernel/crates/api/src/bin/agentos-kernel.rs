@@ -631,9 +631,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         });
 
     // G3：动态工具注册器——enablement 闸 + 写入注册表（M1 guarded 入 scope，
-    // disable 即结构性收回）+ 持久化（可重建性闸：写 dynamic_tools 表，
-    // 重启由启动路径重放，成为"最终配置"的一部分）。信封闸（granted
-    // 须含 "registry"）已由 router 入口的 G6 单点校验覆盖。
+    // disable 即结构性收回）。2026-08-19 用户裁定：dynamic_tools 表退役——
+    // 动态注册的工具是 state 域数据不落内核存储，跨重启重建由插件自持
+    // state/config 承担（registry 内存注册机制与 capability 面不变）。
+    // 信封闸（granted 须含 "registry"）已由 router 入口的 G6 单点校验覆盖。
     // enabled 集合提前构造（后续 AppState 复用同一 Arc）。
     let enabled_plugin_ids: Arc<tokio::sync::RwLock<std::collections::HashSet<String>>> =
         Arc::new(tokio::sync::RwLock::new(
@@ -646,7 +647,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let dynamic_registrar: agentos_api::capability_router::DynamicToolRegistrar = {
         let registry_for_dyn = registry.clone();
         let scopes_for_dyn = plugin_scopes.clone();
-        let store_for_dyn = sqlite_db.clone();
         let enabled_for_dyn = enabled_plugin_ids.clone();
         Arc::new(
             move |plugin_id: &str, tool: agentos_core::traits::ToolDescriptor| {
@@ -664,16 +664,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 scopes_for_dyn
                     .scope_of(plugin_id)
                     .track(registry_for_dyn.register_tool_guarded(plugin_id, tool.clone()));
-                // 持久化（可重建性闸）。
-                let descriptor_json = serde_json::to_string(&tool)
-                    .map_err(|e| format!("descriptor 序列化失败: {}", e))?;
-                let sqlite = store_for_dyn.as_ref().ok_or_else(|| {
-                    "动态注册不可用：当前存储 driver 无 SQLite 专有表（可重建性闸要求持久化）"
-                        .to_string()
-                })?;
-                sqlite
-                    .save_dynamic_tool(plugin_id, &tool.name, &descriptor_json)
-                    .map_err(|e| format!("dynamic_tools 持久化失败: {}", e))?;
                 Ok(())
             },
         )
@@ -716,43 +706,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             .with_domain_broadcaster(domain_broadcaster),
     );
     invoker.set_router(router);
-
-    // G3 启动重放：dynamic_tools 表的持久化动态注册 → registry（可重建性闸的
-    // 重放侧——重启后 enabled 插件的动态工具自动恢复，观察等价"从未重启"）。
-    // 复用 registrar 闭包（三道闸 + 持久化全复用，upsert 幂等）。
-    if let Some(sqlite_replay) = sqlite_db.as_ref() {
-        let enabled_set = enabled_plugin_ids.read().await.clone();
-        match sqlite_replay.list_dynamic_tools() {
-            Ok(rows) => {
-                let mut replayed = 0usize;
-                for (pid, _name, descriptor_json) in rows {
-                    if !enabled_set.contains(&pid) {
-                        continue; // disabled 插件的记录保留但不重放（re-enable 后插件自行重建）
-                    }
-                    match serde_json::from_str::<agentos_core::traits::ToolDescriptor>(
-                        &descriptor_json,
-                    ) {
-                        Ok(tool) => {
-                            if dynamic_registrar(&pid, tool).is_ok() {
-                                replayed += 1;
-                            }
-                        }
-                        Err(e) => {
-                            warn!(target: "agentos-kernel", plugin = %pid, error = %e,
-                                  "G3 重放：dynamic_tools 记录反序列化失败，跳过");
-                        }
-                    }
-                }
-                if replayed > 0 {
-                    info!(target: "agentos-kernel", replayed = replayed,
-                          "G3 动态注册重放完成（dynamic_tools → registry）");
-                }
-            }
-            Err(e) => {
-                warn!(target: "agentos-kernel", error = %e, "G3 重放：读取 dynamic_tools 失败（跳过）");
-            }
-        }
-    }
 
     // 监控 M3：注册崩溃回调——invoker 检测到插件崩溃时记时间戳到聚合器（last_crash_ts）。
     // 进程态轮询（memory_rss/uptime/alive/pid）由独立后台任务周期采（见下方 spawn）。

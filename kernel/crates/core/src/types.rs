@@ -426,7 +426,8 @@ pub enum ToolSource {
     /// 数据库配置
     Database,
     /// 运行时动态注册（G3：插件经 registry.register_tool capability 注册，
-    /// 非 manifest 静态声明；持久化于 dynamic_tools 表，禁用插件即收回）。
+    /// 非 manifest 静态声明；进程内注册表 + scope 收回，不落内核存储——
+    /// dynamic_tools 表已于 2026-08-19 退役，跨重启由插件自持 state/config 重建）。
     Dynamic,
 }
 

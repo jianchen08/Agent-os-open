@@ -145,18 +145,6 @@ CREATE TABLE IF NOT EXISTS pipeline_checkpoints (
     created_at     TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_cp_pipeline_step ON pipeline_checkpoints(pipeline_id, tenant_id, step_no DESC);
--- 域10：dynamic_tools（G3 运行时注册的持久化——可重建性闸）。
--- 插件运行时经 registry.register_tool capability 动态注册的工具落此表，
--- 成为『最终配置』的一部分：重启由启动路径重放（enabled 插件自动恢复注册）。
--- 插件禁用 = scope 收回注册 + 本表按插件删除（动态注册生命周期 = 插件启用周期）。
-CREATE TABLE IF NOT EXISTS dynamic_tools (
-    plugin_id       TEXT NOT NULL,
-    tool_name       TEXT NOT NULL,
-    descriptor_json TEXT NOT NULL,
-    created_at      TEXT NOT NULL,
-    PRIMARY KEY (plugin_id, tool_name)
-);
-
 -- message_slots：op-based 消息槽位表（新模型，详见 docs/message_persistence_design.md）。
 -- **纯索引表**（任务 7 收敛后）：行上零内容字段，消息全文（role/content/tool_calls/
 -- reasoning_content/tool_result envelope）整体序列化成一个 blob 存 blobs 表（内容寻址去重）。
@@ -473,9 +461,11 @@ impl SqliteStore {
         conn.execute_batch("PRAGMA journal_mode=WAL;")?;
         // 退役 0.1 投影表（2026-08-19 用户裁定：不留两套真值）：执行记录/会话消耗账本
         // 由 messages 真值派生读路径替代（调试中心执行记录/LLM 请求页），记忆面归
-        // hindsight 自持存储。三表零生产者、全库零行；必须在 DDL 之前 DROP——存量
-        // 残留表结构与现行 DDL 的 CREATE INDEX 不兼容会直接炸 init。
-        for retired in ["execution_records", "pipeline_run_summaries", "memory"] {
+        // hindsight 自持存储。2026-08-19 追加：dynamic_tools 表同样退役——动态注册
+        // 的工具是 state 域数据不落内核（跨重启由插件自持 state/config 重建）。
+        // 四表零生产者；必须在 DDL 之前 DROP——存量残留表结构与现行 DDL 的
+        // CREATE INDEX 不兼容会直接炸 init。
+        for retired in ["execution_records", "pipeline_run_summaries", "memory", "dynamic_tools"] {
             conn.execute(&format!("DROP TABLE IF EXISTS {retired}"), [])?;
         }
         conn.execute_batch(DDL)?;
@@ -511,52 +501,6 @@ impl SqliteStore {
             rusqlite::params![run_id, tenant_id, now],
         )?;
         Ok(())
-    }
-
-    /// G3：持久化一条动态工具注册（可重建性闸——upsert 同名工具覆盖）。
-    pub fn save_dynamic_tool(
-        &self,
-        plugin_id: &str,
-        tool_name: &str,
-        descriptor_json: &str,
-    ) -> Result<(), StorageError> {
-        let conn = self.conn.lock();
-        let now = chrono::Utc::now().to_rfc3339();
-        conn.execute(
-            "INSERT INTO dynamic_tools (plugin_id, tool_name, descriptor_json, created_at) \
-             VALUES (?1, ?2, ?3, ?4) \
-             ON CONFLICT(plugin_id, tool_name) DO UPDATE SET descriptor_json = ?3",
-            rusqlite::params![plugin_id, tool_name, descriptor_json, now],
-        )?;
-        Ok(())
-    }
-
-    /// G3：列出全部持久化的动态注册（启动重放用）。返回 (plugin_id, tool_name, descriptor_json)。
-    pub fn list_dynamic_tools(&self) -> Result<Vec<(String, String, String)>, StorageError> {
-        let conn = self.conn.lock();
-        let mut stmt = conn
-            .prepare("SELECT plugin_id, tool_name, descriptor_json FROM dynamic_tools ORDER BY plugin_id, tool_name")?;
-        let rows = stmt
-            .query_map([], |row| {
-                Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, String>(1)?,
-                    row.get::<_, String>(2)?,
-                ))
-            })?
-            .collect::<std::result::Result<Vec<_>, _>>()?;
-        Ok(rows)
-    }
-
-    /// G3：删除某插件的全部动态注册记录（禁用插件时调用——动态注册生命周期
-    /// = 插件启用周期，禁用即撤销）。返回删除行数。
-    pub fn delete_dynamic_tools_by_plugin(&self, plugin_id: &str) -> Result<u64, StorageError> {
-        let conn = self.conn.lock();
-        let rows = conn.execute(
-            "DELETE FROM dynamic_tools WHERE plugin_id = ?1",
-            rusqlite::params![plugin_id],
-        )?;
-        Ok(rows as u64)
     }
 
     /// G8 优雅重启排空：把所有 `running` 的 run 标记 `suspended`（不设 ended_at
@@ -1969,7 +1913,6 @@ impl SqliteStore {
         let conn = self.conn.lock();
         f(&conn)
     }
-
 }
 
 /// spawn_blocking join 失败（阻塞任务 panic / 被取消）→ [`StorageError`] 的统一转换。
@@ -3365,39 +3308,6 @@ mod tests {
         assert_eq!(state["step"], json!(10));
     }
 
-    // ── G3：dynamic_tools 持久化往返 ──
-
-    #[test]
-    fn g3_dynamic_tools_save_list_delete_roundtrip() {
-        let store = SqliteStore::open_memory().unwrap();
-        store
-            .save_dynamic_tool("p1", "t1", r#"{"name":"t1"}"#)
-            .unwrap();
-        // upsert 同名覆盖
-        store
-            .save_dynamic_tool("p1", "t1", r#"{"name":"t1","v":2}"#)
-            .unwrap();
-        store
-            .save_dynamic_tool("p1", "t2", r#"{"name":"t2"}"#)
-            .unwrap();
-        store
-            .save_dynamic_tool("p2", "t9", r#"{"name":"t9"}"#)
-            .unwrap();
-
-        let rows = store.list_dynamic_tools().unwrap();
-        assert_eq!(rows.len(), 3, "同名 upsert 后共 3 条");
-        let t1 = rows
-            .iter()
-            .find(|(p, n, _)| p == "p1" && n == "t1")
-            .unwrap();
-        assert!(t1.2.contains(r#""v":2"#), "upsert 覆盖生效: {}", t1.2);
-
-        let deleted = store.delete_dynamic_tools_by_plugin("p1").unwrap();
-        assert_eq!(deleted, 2);
-        let rows = store.list_dynamic_tools().unwrap();
-        assert_eq!(rows.len(), 1);
-        assert_eq!(rows[0].0, "p2");
-    }
 
     // ── A7：槽位 blob 解码的「合法缺失 vs 损坏」区分 ──
 
