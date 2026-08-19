@@ -196,12 +196,18 @@ pub fn extract_bearer_token(headers: &HeaderMap) -> Option<String> {
 
 // ─── 用户查找 ────────────────────────────────────────────────────────
 //
-// 持久化优先：先查 store（真实注册用户），未命中再回退内置 admin（兼容
-// AppState::new() 无 store 的测试场景 + 首次启动未播种的情况）。
+// 持久化优先：先查 store（真实注册用户）。store 存在而未命中不回退内置
+// （防换库/清库后硬编码 admin 后门复活）；仅无 store（AppState::new() 测试
+// 场景）走内置 admin。
 // get_user_by_id 走 task_local tenant 隔离，故需在调用方建立 tenant scope；
 // 但 login/register 时还不知道 tenant，get_user_by_username 跨租户全局查。
 
 /// 按凭据查用户（登录用）。store 优先，密码明文比对。
+///
+/// store 存在但用户名未命中时**不回退**内置硬编码 admin：真实内核启动即把
+/// admin 播种入库（agentos-kernel main），查不到即凭据不属于本实例——历史上
+/// 换库/清库后硬编码后门复活（安全审查 2026-08-19 二.2）。仅无 store 的
+/// 测试场景（AppState::new()）保留内置用户。
 pub async fn find_user_by_credentials(
     store: Option<&std::sync::Arc<dyn agentos_core::traits::StorageBackend>>,
     username: &str,
@@ -214,8 +220,9 @@ pub async fn find_user_by_credentials(
             }
             return None; // 用户名命中但密码不符，不再回退内置（避免 admin 绕过）
         }
+        return None; // DB 无此用户名：同样不回退内置硬编码凭据
     }
-    // 回退内置 admin（无 store 或 DB 无此用户名）
+    // 无 store（测试/无持久化场景）：内置 admin 兜底
     default_users()
         .into_iter()
         .find(|u| u.username == username && u.password == password)

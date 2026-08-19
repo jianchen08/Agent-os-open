@@ -663,15 +663,30 @@ pub async fn agents_handler(
     axum::Json(json!({ "items": items, "total": total }))
 }
 
+/// agent_id 安全校验：白名单字符集（字母/数字/`-`/`_`）。
+/// axum 的 Path 提取器会 percent-decode（`%2F`→`/`、`%5C`→`\`），
+/// 不拦则会拼进 `agents_dir.join(format!("{id}.yaml"))` 造成路径穿越
+/// （安全审查 2026-08-19：GET 匿名读任意 yaml / PUT 伪造 admin token 写任意路径）。
+fn is_safe_agent_id(agent_id: &str) -> bool {
+    !agent_id.is_empty()
+        && agent_id
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+}
+
 /// 解析 agent 配置文件路径（顶层 `config/agents/<id>.yaml` 优先，再递归分类子目录）。
 ///
 /// 与 `load_agent_config_into_state` 的定位逻辑一致：agents/ 按分类组织为
 /// `agents/<category>/<id>.yaml`（main/orchestrator/executor/...），顶层也可能放
 /// 单文件（如 code_reviewer_agent.yaml）。返回首个匹配路径，不存在返回 None。
+/// `agent_id` 先过 `is_safe_agent_id` 白名单，非法 id 一律 None。
 fn resolve_agent_yaml_path(
     project_root: &std::path::Path,
     agent_id: &str,
 ) -> Option<std::path::PathBuf> {
+    if !is_safe_agent_id(agent_id) {
+        return None;
+    }
     let agents_dir = project_root.join("config").join("agents");
     let top = agents_dir.join(format!("{}.yaml", agent_id));
     if top.is_file() {
@@ -2246,6 +2261,54 @@ mod tdd4_config_center_tests {
         let cc = state.config_center.as_ref().expect("应已注入");
         let val = cc.load("test.yaml").expect("load 应成功");
         assert_eq!(val["key"], "value");
+    }
+}
+
+#[cfg(test)]
+mod agent_yaml_path_security_tests {
+    //! 安全审查 2026-08-19 三.1：agent_id 白名单校验——axum Path 会 percent-decode，
+    //! `%2F`/`%5C`/`..` 不拦则 `agents_dir.join("{id}.yaml")` 可穿越到 agents 目录外。
+
+    use super::*;
+
+    #[test]
+    fn test_safe_agent_ids_pass() {
+        for id in [
+            "main",
+            "code_reviewer_agent",
+            "agent-2",
+            "L1_orchestrator",
+            "a",
+        ] {
+            assert!(is_safe_agent_id(id), "合法 id 被拒: {id}");
+        }
+    }
+
+    #[test]
+    fn test_traversal_agent_ids_rejected() {
+        // %2F/%5C 解码后形态 + 常见穿越载荷，一律拒绝
+        for id in [
+            "../secrets",
+            "..",
+            "a/b",
+            "a\\b",
+            "a%2Fb",
+            "..%5C..%5Cagentos_kernel.db",
+            "foo bar",
+            "id.yaml",
+            "",
+        ] {
+            assert!(!is_safe_agent_id(id), "非法 id 放行: {id:?}");
+        }
+    }
+
+    #[test]
+    fn test_resolve_agent_yaml_path_rejects_traversal_regardless_of_fs() {
+        // 不依赖文件系统存在性：非法 id 直接 None（即使构造出的穿越路径真实存在也不读）
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        assert!(resolve_agent_yaml_path(root, "../config").is_none());
+        assert!(resolve_agent_yaml_path(root, "..%5Cstorage").is_none());
+        assert!(resolve_agent_yaml_path(root, "").is_none());
     }
 }
 
