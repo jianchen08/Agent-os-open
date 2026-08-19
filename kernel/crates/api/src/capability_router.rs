@@ -2463,7 +2463,12 @@ mod tests {
             .await
             .unwrap();
         store
-            .upsert_state_field(&pid, &tenant, "task.ended_at", &json!("2026-08-18T00:40:16Z"))
+            .upsert_state_field(
+                &pid,
+                &tenant,
+                "task.ended_at",
+                &json!("2026-08-18T00:40:16Z"),
+            )
             .await
             .unwrap();
 
@@ -2478,9 +2483,7 @@ mod tests {
             .iter()
             .find(|r| r.get("pipeline_id").and_then(|v| v.as_str()) == Some(pid.as_str()))
             .unwrap_or_else(|| {
-                panic!(
-                    "冷管道兜底行应存在（registry 丢失后查询不到 = bug）; rows={arr:?}"
-                )
+                panic!("冷管道兜底行应存在（registry 丢失后查询不到 = bug）; rows={arr:?}")
             });
         // pipeline_state 表最新值必须覆盖 checkpoint 的过期 pending
         assert_eq!(
@@ -2489,7 +2492,10 @@ mod tests {
         );
         assert_eq!(row["task.goal"], "写 hello.txt 并自动评估");
         assert_eq!(row["source"], "checkpoint");
-        assert_eq!(row["thread_id"], pid, "任务管道 thread_id 回退自身 pipeline_id");
+        assert_eq!(
+            row["thread_id"], pid,
+            "任务管道 thread_id 回退自身 pipeline_id"
+        );
     }
 
     #[tokio::test]
