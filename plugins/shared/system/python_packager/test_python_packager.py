@@ -26,6 +26,14 @@ _PLUGIN_DIR = Path(__file__).resolve().parent
 if str(_PLUGIN_DIR) not in sys.path:
     sys.path.insert(0, str(_PLUGIN_DIR))
 
+
+@pytest.fixture(autouse=True)
+def _whitelist_pytest_temp(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """边界加固（2026-08-19 A-5）后：本批用例的包目录全在 pytest 临时根下，
+    经 PYTHON_PACKAGER_ALLOWED_DIRS env 通道显式白名单（临时区非安全边界，
+    其余用例按需 monkeypatch delenv 越过该白名单验证越界拒绝）。"""
+    monkeypatch.setenv("PYTHON_PACKAGER_ALLOWED_DIRS", str(tmp_path.parent))
+
 # SDK 路径（agentos_plugin_sdk 未 pip 安装时）：python_packager 位于
 # plugins/shared/system/python_packager → parents[3] = plugins → plugins/sdk/src
 _SDK_DIR = Path(__file__).resolve().parents[3] / "sdk" / "src"
@@ -147,3 +155,46 @@ async def test_not_a_uv_package_fail_closed(tmp_path):
     # 卸载：本来就是清理环境产物的空操作——非 uv 包目录也应幂等成功（无物可删）。
     res = await SERVER.uninstall(str(d))
     assert res["ok"] and res["removed"] == [], res
+
+
+# ── 包目录边界（安全审查 2026-08-19 A-5）──────────────────────────────
+class TestPackageDirBoundary:
+    """packaging.python.* 只允许 plugins/** 或 PYTHON_PACKAGER_ALLOWED_DIRS 白名单。
+
+    前提：本插件（语言域装载）的服务语义就是装"插件"包，plugins/ 即其边界；
+    越界（任意绝对目录）意味着让 uv 按攻击者构造的 pyproject 安装依赖=任意代码执行。
+    """
+
+    async def test_plugins_dir_allowed_without_env(self, monkeypatch) -> None:
+        monkeypatch.delenv("PYTHON_PACKAGER_ALLOWED_DIRS", raising=False)
+        # server.py 自身目录在 plugins/shared/system/python_packager → 边界内放行，
+        # 报错应来自"非 uv 包"而非"不在允许范围"。
+        res = await SERVER.status(str(_PLUGIN_DIR))
+        assert not res["ok"]
+        assert "不在允许范围" not in res["error"], res
+        assert "不是 uv 包" in res["error"], res
+
+    async def test_outside_plugins_denied(self, tmp_path, monkeypatch) -> None:
+        monkeypatch.delenv("PYTHON_PACKAGER_ALLOWED_DIRS", raising=False)
+        d = _make_uv_package(tmp_path)  # 真实 uv 包，但越界 → 必须在 uv 动作前被拒
+        for fn in (SERVER.install, SERVER.resolve_dependencies, SERVER.status):
+            res = await fn(str(d))
+            assert not res["ok"], f"{fn.__name__} 越界目录应 fail-closed"
+            assert "不在允许范围" in res["error"], res
+        assert not (d / ".venv").exists(), "越界时不得执行任何 uv 动作（无副作用）"
+        assert not (d / "uv.lock").exists()
+
+    async def test_outside_uninstall_denied(self, tmp_path, monkeypatch) -> None:
+        monkeypatch.delenv("PYTHON_PACKAGER_ALLOWED_DIRS", raising=False)
+        res = await SERVER.uninstall(str(tmp_path))
+        assert not res["ok"] and "不在允许范围" in res["error"], res
+
+    async def test_env_whitelist_escape_hatch(self, tmp_path, monkeypatch) -> None:
+        monkeypatch.setenv("PYTHON_PACKAGER_ALLOWED_DIRS", str(tmp_path))
+        res = await SERVER.status(str(tmp_path))
+        assert not res["ok"]
+        assert "不在允许范围" not in res["error"], res  # 放行走 uv 包校验而非越界拒绝
+
+    async def test_illegal_path_string_rejected(self, monkeypatch) -> None:
+        res = await SERVER.install("\x00bad")
+        assert not res["ok"], res

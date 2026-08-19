@@ -62,6 +62,55 @@ def _run(cmd: list[str], cwd: Path, timeout: int = 300) -> dict[str, Any]:
     return {"ok": True, "rc": 0, "stdout": (proc.stdout or "").strip()[:4000]}
 
 
+# ── 包目录边界（安全审查 2026-08-19 A-5）──────────────────────────────
+# packaging.python.* 四个工具都能让 uv 按任意目录下的 pyproject.toml 安装
+# 依赖到该目录（等价于执行任意声明依赖的安装脚本）。包目录只允许：
+#   1. 本项目 plugins/**（语言域装载插件的语义边界——本插件即"Python 包装载"）；
+#   2. 环境变量 PYTHON_PACKAGER_ALLOWED_DIRS（os.pathsep 分隔）显式列出（逃逸舱）。
+# 其余一律 fail-closed 拒绝。定位优先级：AGENTOS_PROJECT_ROOT（sidecar 若注入）
+# → 本文件位置推导（始终成立）。
+
+
+def _project_root() -> Path:
+    env = os.environ.get("AGENTOS_PROJECT_ROOT", "")
+    if env:
+        return Path(env).resolve()
+    return Path(__file__).resolve().parents[4]
+
+
+def _allowed_extra_dirs() -> list[Path]:
+    raw = os.environ.get("PYTHON_PACKAGER_ALLOWED_DIRS", "")
+    return [Path(p).resolve() for p in raw.split(os.pathsep) if p.strip()]
+
+
+def _is_within(target: Path, base: Path) -> bool:
+    try:
+        target.relative_to(base)
+        return True
+    except ValueError:
+        return False
+
+
+def _check_package_dir(package_dir: str) -> tuple[Path | None, str]:
+    """包目录边界校验；非法/越界 → (None, 原因)。"""
+    try:
+        d = Path(package_dir).resolve()
+    except (OSError, ValueError):
+        return None, f"非法路径: {package_dir!r}"
+    if not d.is_dir():
+        return None, f"目录不存在: {d}"
+    plugins_root = _project_root() / "plugins"
+    if _is_within(d, plugins_root):
+        return d, ""
+    for extra in _allowed_extra_dirs():
+        if _is_within(d, extra):
+            return d, ""
+    return (
+        None,
+        f"package_dir 不在允许范围（仅项目 plugins/** 或 PYTHON_PACKAGER_ALLOWED_DIRS 白名单；实际: {d}）",
+    )
+
+
 def _declared_dependencies(package_dir: Path) -> list[str]:
     """pyproject [project].dependencies（缺失 pyproject/无该字段 → 空清单/报错）。"""
     pyproject = package_dir / "pyproject.toml"
@@ -88,7 +137,9 @@ def _declared_dependencies(package_dir: Path) -> list[str]:
     description="uv sync 安装 Python 包依赖到 sidecar venv，生成 uv.lock（哈希完整锁定）",
 )
 async def install(package_dir: str) -> dict[str, Any]:
-    d = Path(package_dir).resolve()
+    d, err = _check_package_dir(package_dir)
+    if err:
+        return {"ok": False, "error": err}
     try:
         declared = _declared_dependencies(d)
     except FileNotFoundError as e:
@@ -129,7 +180,9 @@ async def install(package_dir: str) -> dict[str, Any]:
     description="卸载：删除插件 .venv 与 uv.lock（uv remove 语义收敛为环境整删）",
 )
 async def uninstall(package_dir: str) -> dict[str, Any]:
-    d = Path(package_dir).resolve()
+    d, err = _check_package_dir(package_dir)
+    if err:
+        return {"ok": False, "error": err}
     removed: list[str] = []
     for part in (d / ".venv", d / "uv.lock"):
         if part.exists() or part.is_symlink():
@@ -159,7 +212,9 @@ async def uninstall(package_dir: str) -> dict[str, Any]:
     description="对比 pyproject 声明依赖是否已被 uv 解析安装",
 )
 async def resolve_dependencies(package_dir: str) -> dict[str, Any]:
-    d = Path(package_dir).resolve()
+    d, err = _check_package_dir(package_dir)
+    if err:
+        return {"ok": False, "error": err}
     try:
         declared = _declared_dependencies(d)
     except FileNotFoundError as e:
@@ -194,7 +249,9 @@ async def resolve_dependencies(package_dir: str) -> dict[str, Any]:
     description="环境状态：uv 版本 / .venv / uv.lock / 声明依赖清单",
 )
 async def status(package_dir: str) -> dict[str, Any]:
-    d = Path(package_dir).resolve()
+    d, err = _check_package_dir(package_dir)
+    if err:
+        return {"ok": False, "error": err}
     try:
         declared = _declared_dependencies(d)
     except FileNotFoundError as e:
