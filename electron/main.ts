@@ -5,7 +5,7 @@
  * 生产时加载 dist/index.html），集成系统托盘、全局快捷键和窗口信息采集。
  */
 
-import { app, BrowserWindow, globalShortcut, ipcMain } from "electron";
+import { app, BrowserWindow, globalShortcut, ipcMain, shell } from "electron";
 import * as path from "path";
 
 import { createTray, destroyTray } from "./tray";
@@ -109,6 +109,55 @@ function isDevelopment(): boolean {
 }
 
 /**
+ * 应用自身源判定（安全审查 2026-08-19 B-5）：
+ *  - dev：Vite dev server（localhost:5188 / 127.0.0.1:5188，兼容 5173 默认口）；
+ *  - prod：file://（打包后的本地前端）。
+ * 用于 window:open 子窗口 URL 白名单与 will-navigate 导航拦截。
+ */
+const APP_DEV_ORIGINS = new Set([
+  "localhost:5188",
+  "127.0.0.1:5188",
+  "localhost:5173",
+  "127.0.0.1:5173",
+]);
+
+function isAppSource(rawUrl: string): boolean {
+  try {
+    const u = new URL(rawUrl);
+    if (u.protocol === "file:") {
+      return true;
+    }
+    if (u.protocol !== "http:" && u.protocol !== "https:") {
+      return false;
+    }
+    return APP_DEV_ORIGINS.has(u.host);
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * 窗口导航硬化（安全审查 B-5）：
+ *  - setWindowOpenHandler：target=_blank 类新窗请求一律拦截，http(s) 外链交给
+ *    系统浏览器（协议白名单），其余协议（file:/javascript: 等）静默拒绝；
+ *  - will-navigate：主 frame 导航离开应用源即阻止（防导航劫持后 preload
+ *    随新页面存活）。
+ */
+function hardenWindowNavigation(win: BrowserWindow): void {
+  win.webContents.setWindowOpenHandler(({ url }) => {
+    if (/^https?:\/\//i.test(url)) {
+      void shell.openExternal(url);
+    }
+    return { action: "deny" };
+  });
+  win.webContents.on("will-navigate", (event, url) => {
+    if (!isAppSource(url)) {
+      event.preventDefault();
+    }
+  });
+}
+
+/**
  * 创建主窗口。
  *
  * 开发环境加载 Vite dev server URL，生产环境加载构建后的 index.html。
@@ -126,11 +175,13 @@ function createMainWindow(): BrowserWindow {
       preload: path.join(__dirname, "preload.js"),
       contextIsolation: true,
       nodeIntegration: false,
-      sandbox: false,
+      sandbox: true,
     },
     // 窗口图标
     icon: resolveAppIcon(),
   });
+
+  hardenWindowNavigation(win);
 
   // 窗口准备好后显示
   win.once("ready-to-show", () => {
@@ -298,9 +349,11 @@ function createChildWindow(opts: ChildWindowOptions): {
       preload: path.join(__dirname, "preload.js"),
       contextIsolation: true,
       nodeIntegration: false,
-      sandbox: false,
+      sandbox: true,
     },
   });
+
+  hardenWindowNavigation(win);
 
   win.once("ready-to-show", () => {
     win.show();
@@ -339,6 +392,11 @@ function registerIpcHandlers(): void {
     if (!opts || typeof opts.id !== "string" || typeof opts.url !== "string") {
       console.warn("[Electron] window:open 参数非法，需要 {id, url}", opts);
       return { id: opts?.id ?? "", success: false };
+    }
+    // 子窗口 URL 白名单（安全审查 B-5）：仅应用自身源（dev localhost / prod file:）
+    if (!isAppSource(opts.url)) {
+      console.warn(`[Electron] window:open 拒绝非应用源 url: ${opts.url}`);
+      return { id: opts.id, success: false, reason: "url 不在应用源白名单" };
     }
     try {
       const { created } = createChildWindow(opts);
