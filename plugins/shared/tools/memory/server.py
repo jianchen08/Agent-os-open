@@ -132,17 +132,8 @@ def _build_memory_backend() -> Any | None:
     try:
         from memory_backend import get_memory_backend  # noqa: PLC0415
 
-        # config_files 注入形状为 {file_id: 文件内容}（invoker build_injected_config）。
-        # 本插件 file_id="backend" → {"backend": {backend: kernel, ...}}，解开一层
-        # 再交工厂；无 config_files 声明的历史形态（裸 {backend: ...}）也兼容。
-        injected = plugin.get_config() or {}
-        backend_cfg = (
-            injected.get("backend")
-            if isinstance(injected.get("backend"), dict)
-            else injected
-        )
         return get_memory_backend(
-            config=backend_cfg,
+            config=plugin.get_config() or {},
             capability_caller=caller,
         )
     except Exception as e:
