@@ -2,7 +2,8 @@
 //! F-API-1（映射 FP-0.2.八 多租户核心系统 / V4 多用户 + FP-DB）：api 配置写入面零鉴权 → 鉴权修复测试。
 //!
 //! 修复前：以下端点无任何鉴权（对照 db_routes.rs 的 require_read_role/require_admin_role 样板）：
-//! - routes.rs 三个 PUT config handler（agent / plugin / pipeline 配置写盘）
+//! - routes.rs 两个 PUT config handler（plugin / pipeline 配置写盘；agent PUT 已
+//!   插件化 /ext/agent_manager，admin 闸由插件自持——2026-08-20 ADR）
 //! - routes.rs actions_execute_handler（可触发插件命令执行）
 //! - server.rs interaction_response_handler（可提交人类交互响应）
 //! - session_routes.rs 会话 CRUD + routes.rs 插件 enabled（原 compat_routes.rs 转正）
@@ -29,22 +30,13 @@ use serde_json::{json, Value};
 use tokio::sync::RwLock;
 use tower::ServiceExt;
 
-/// 构造带内存 store + project_root（agent/pipeline/plugin 配置齐全）的测试 app。
+/// 构造带内存 store + project_root（pipeline/plugin 配置齐全）的测试 app。
 ///
 /// 布局对齐各端点既有测试夹具：
-/// - config/agents/main/test_agent.yaml（agent config PUT 正例）
 /// - config/pipelines/default.yaml（pipeline config PUT 正例）
 /// - config/models/llm.yaml（经 manifest config_files 映射，plugin config PUT 正例）
 async fn app_with_deps() -> (tempfile::TempDir, axum::Router) {
     let tmp = tempfile::tempdir().unwrap();
-
-    let agent_dir = tmp.path().join("config").join("agents").join("main");
-    fs::create_dir_all(&agent_dir).unwrap();
-    fs::write(
-        agent_dir.join("test_agent.yaml"),
-        "config_id: test_agent\nname: t\n",
-    )
-    .unwrap();
 
     let pipe_dir = tmp.path().join("config").join("pipelines");
     fs::create_dir_all(&pipe_dir).unwrap();
@@ -203,12 +195,8 @@ async fn send(
 /// 写面端点清单（方法 / 路径 / 请求体）。
 fn write_surface_cases() -> Vec<(Method, &'static str, Option<Value>)> {
     vec![
-        // routes.rs 三个 PUT config handler
-        (
-            Method::PUT,
-            "/api/v1/agents/test_agent/config",
-            Some(json!({"yaml": "config_id: test_agent\nname: x\n"})),
-        ),
+        // routes.rs 两个 PUT config handler（agents PUT 已插件化 /ext/agent_manager，
+        // admin 闸由插件自持——2026-08-20 ADR）
         (
             Method::PUT,
             "/api/v1/plugins/llm_service/config/llm",
@@ -318,40 +306,8 @@ async fn test_admin_token_passes_write_and_read() {
     let (_tmp, app) = app_with_deps().await;
     let admin = admin_token(&app).await;
 
-    // PUT agent config（先 GET 拿 etag 满足 A13 If-Match 乐观锁）→ 200
-    let agent_etag = {
-        let resp = app
-            .clone()
-            .oneshot(
-                Request::builder()
-                    .uri("/api/v1/agents/test_agent/config")
-                    .header("authorization", format!("Bearer {admin}"))
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), StatusCode::OK);
-        let body = axum::body::to_bytes(resp.into_body(), 8192).await.unwrap();
-        let v: Value = serde_json::from_slice(&body).unwrap();
-        v["etag"]
-            .as_str()
-            .expect("GET agent config 应带 etag")
-            .to_string()
-    };
-    let status = send(
-        &app,
-        Method::PUT,
-        "/api/v1/agents/test_agent/config",
-        Some(&admin),
-        Some(json!({"yaml": "config_id: test_agent\nname: 新名\n", "if_match": agent_etag})),
-    )
-    .await;
-    assert_eq!(
-        status,
-        StatusCode::OK,
-        "admin PUT agent config 应通过（当前 {status}）"
-    );
+    // PUT agent config 闸已插件化（/ext/agent_manager，插件自持 admin 检查——
+    // 2026-08-20 ADR）；此处保留内核侧两个 PUT config 闸的正路径。
 
     // PUT pipeline config（先 GET 拿 etag 满足 A13 If-Match 乐观锁）→ 200
     let pipe_etag = {

@@ -1,9 +1,9 @@
 /**
  * AgentConfigModal 测试
  *
- * 验证「加载 → 编辑 → 保存」闭环（对接后端 /api/v1/agents/{id}/config）：
+ * 验证「加载 → 编辑 → 保存」闭环（对接 agent_manager 插件端点 /ext/agent_manager/agents/{id}/config）：
  * - AC-1: 打开 Modal 后并行加载 schema 字段 + yaml 配置，字段以 yaml 值预填
- * - AC-2: 修改字段后保存 → PUT /api/v1/agents/{id}/config 收到新 yaml，onSaved 触发
+ * - AC-2: 修改字段后保存 → PUT /ext/agent_manager/agents/{id}/config 收到新 yaml，onSaved 触发
  * - AC-3: 取消按钮关闭 Modal（不调 PUT）
  */
 
@@ -25,7 +25,7 @@ vi.mock('@/services/api/client', () => ({
 
 import { AgentConfigModal } from '@/components/agent/AgentConfigModal'
 
-/** 模拟后端 GET /api/v1/agents/schema 返回的 12 字段 */
+/** 模拟后端 GET /ext/agent_manager/agents/schema 返回的 12 字段 */
 const SCHEMA_FIELDS: UIInputFormField[] = [
   { name: 'config_id', type: 'string', label: '配置ID', required: true },
   { name: 'name', type: 'string', label: '名称', required: true },
@@ -61,7 +61,7 @@ const SCHEMA_FIELDS: UIInputFormField[] = [
   { name: 'tags', type: 'multiselect', label: '标签' },
 ]
 
-/** 模拟后端 GET /api/v1/agents/{id}/config 返回的 yaml 原文 */
+/** 模拟 agent_manager 端点 GET /ext/agent_manager/agents/{id}/config 返回的 yaml 原文 */
 const SAMPLE_YAML = [
   '# 代码审查Agent',
   'config_id: code_reviewer_agent',
@@ -100,8 +100,8 @@ describe('AgentConfigModal', () => {
     )
 
     await waitFor(() => {
-      expect(apiGet).toHaveBeenCalledWith('/api/v1/agents/schema')
-      expect(apiGet).toHaveBeenCalledWith('/api/v1/agents/code_reviewer_agent/config')
+      expect(apiGet).toHaveBeenCalledWith('/ext/agent_manager/agents/schema')
+      expect(apiGet).toHaveBeenCalledWith('/ext/agent_manager/agents/code_reviewer_agent/config')
     })
 
     // 字段渲染（抽样）
@@ -132,7 +132,7 @@ describe('AgentConfigModal', () => {
     })
     const cfg = apiCall.mock.calls[0][0] as { method: string; url: string; data: { yaml: string } }
     expect(cfg.method).toBe('PUT')
-    expect(cfg.url).toBe('/api/v1/agents/code_reviewer_agent/config')
+    expect(cfg.url).toBe('/ext/agent_manager/agents/code_reviewer_agent/config')
     expect(cfg.data.yaml).toContain('审查专家 v2')
     expect(cfg.data.yaml).toContain('config_id: code_reviewer_agent')
     expect(onSaved).toHaveBeenCalledTimes(1)

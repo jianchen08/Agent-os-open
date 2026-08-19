@@ -33,12 +33,12 @@ beforeEach(() => {
 describe('T12：datasource 模式（吸收 SchemaFormEmbed）', () => {
   it('fieldsUri+dataUri(yaml) → 字段渲染 + 初值注入；提交 PUT {yaml}', async () => {
     apiGet.mockImplementation((url: string) => {
-      if (url === '/api/v1/agents/schema') {
+      if (url === '/ext/agent_manager/agents/schema') {
         return Promise.resolve({
           data: { fields: [{ name: 'persona', type: 'input', label: '人设' }] },
         })
       }
-      if (url === '/api/v1/agents/main/config') {
+      if (url === '/ext/agent_manager/agents/main/config') {
         return Promise.resolve({ data: { yaml: 'persona: 默认助手\n' } })
       }
       return Promise.reject(new Error(`unexpected url: ${url}`))
@@ -47,8 +47,8 @@ describe('T12：datasource 模式（吸收 SchemaFormEmbed）', () => {
 
     render(
       <FormWidget
-        fieldsUri="/api/v1/agents/schema"
-        dataUri="/api/v1/agents/main/config"
+        fieldsUri="/ext/agent_manager/agents/schema"
+        dataUri="/ext/agent_manager/agents/main/config"
         dataFormat="yaml"
         submitLabel="保存配置"
       />,
@@ -60,14 +60,14 @@ describe('T12：datasource 模式（吸收 SchemaFormEmbed）', () => {
     await waitFor(() => expect(apiRequest).toHaveBeenCalled())
     const [config] = apiRequest.mock.calls[0]
     expect(config.method).toBe('PUT')
-    expect(config.url).toBe('/api/v1/agents/main/config')
+    expect(config.url).toBe('/ext/agent_manager/agents/main/config')
     expect(config.data.yaml).toContain('persona: 新助手')
   })
 
   it('fieldsUri 响应坏形态 → 错误提示不白屏', async () => {
     apiGet.mockResolvedValue({ data: { nope: true } })
     render(
-      <FormWidget fieldsUri="/api/v1/agents/schema" dataUri="/api/v1/agents/x/config" dataFormat="yaml" />,
+      <FormWidget fieldsUri="/ext/agent_manager/agents/schema" dataUri="/ext/agent_manager/agents/x/config" dataFormat="yaml" />,
     )
     await waitFor(() =>
       expect(screen.getByRole('alert')).toHaveTextContent('fieldsUri 响应不含 fields 数组'),

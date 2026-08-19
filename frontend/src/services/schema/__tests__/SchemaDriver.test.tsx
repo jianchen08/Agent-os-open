@@ -30,7 +30,7 @@ import { SchemaDriver } from '../SchemaDriver'
  */
 const submitForm = () => fireEvent.submit(document.querySelector('form')!)
 
-/** 模拟后端 GET /api/v1/agents/schema 的 fields（覆盖 string/textarea/number/select/multiselect/date/datasource） */
+/** 模拟 agent_manager 端点 GET /ext/agent_manager/agents/schema 的 fields（覆盖 string/textarea/number/select/multiselect/date/datasource） */
 const FIELDS: UIInputFormField[] = [
   { name: 'config_id', type: 'string', label: '配置ID', required: true },
   { name: 'name', type: 'string', label: '名称', required: true },

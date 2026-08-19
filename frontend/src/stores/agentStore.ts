@@ -25,11 +25,12 @@ interface AgentState {
 }
 
 /**
- * API 基础 URL
+ * Agent 列表数据源（2026-08-20 插件化）：agent_manager 插件端点
+ * /ext/agent_manager/agents（原内核 GET /api/v1/agents 已删——ADR 2026-08-20）。
  */
-const API_BASE = import.meta.env.VITE_API_BASE_URL
-  ? `${import.meta.env.VITE_API_BASE_URL}/api/v1`
-  : '/api/v1'
+const AGENTS_LIST_URL = import.meta.env.VITE_API_BASE_URL
+  ? `${import.meta.env.VITE_API_BASE_URL}/ext/agent_manager/agents`
+  : '/ext/agent_manager/agents'
 
 export const useAgentStore = create<AgentState>((set) => ({
   agents: [],
@@ -64,9 +65,9 @@ export const useAgentStore = create<AgentState>((set) => ({
         throw new Error(errorMsg)
       }
 
-      // 不带 agent_type 过滤：后端 /agents 默认返回全部 agent（main/orchestrator/
+      // 不带 agent_type 过滤：agent_manager 端点默认返回全部 agent（main/orchestrator/
       // specialized/atomic/system），前端选择器显示全部可选 agent。
-      const response = await fetch(`${API_BASE}/agents`, {
+      const response = await fetch(AGENTS_LIST_URL, {
         headers: {
           Authorization: `Bearer ${token}`,
         },

@@ -1,8 +1,9 @@
-/** Agent 管理 API 服务 提供 Agent 配置读取接口，与后端 /api/v1/agents/* 端点对齐
+/** Agent 管理 API 服务 与 agent_manager 插件 /ext/agent_manager/agents/* 端点对齐
  *
- * 2026-08 清理：getAgent/createAgent/updateAgent/deleteAgent/getDefaultAgent 指向
- * 后端不存在的端点（kernel server.rs 仅注册 GET /api/v1/agents、GET /schema、
- * GET/PUT /{id}/config），已连同其用例删除。
+ * 2026-08-19 清理：getAgent/createAgent/updateAgent/deleteAgent/getDefaultAgent 指向
+ * 后端不存在的端点，已连同其用例删除。
+ * 2026-08-20 插件化：原内核 /api/v1/agents* 4 路由迁至 agent_manager 插件
+ * （/ext/agent_manager/agents*，ADR 2026-08-20），本服务经 API_ENDPOINTS.AGENTS 随切。
  */
 
 import { API_ENDPOINTS } from '@/constants/api'
@@ -96,13 +97,13 @@ export async function getAgents(
   }, options)
 }
 
-/** Agent 配置字段 Schema 响应（GET /api/v1/agents/schema） */
+/** Agent 配置字段 Schema 响应（GET /ext/agent_manager/agents/schema） */
 export interface AgentSchemaResponse {
   /** 字段定义（表单驱动） */
   fields: UIInputFormField[]
 }
 
-/** Agent 配置读取响应（GET /api/v1/agents/{id}/config） */
+/** Agent 配置读取响应（GET /ext/agent_manager/agents/{id}/config） */
 export interface AgentConfigResponse {
   /** Agent ID */
   config_id: string
@@ -110,7 +111,7 @@ export interface AgentConfigResponse {
   yaml: string
 }
 
-/** Agent 配置写回响应（PUT /api/v1/agents/{id}/config） */
+/** Agent 配置写回响应（PUT /ext/agent_manager/agents/{id}/config） */
 export interface AgentConfigUpdateResponse {
   /** Agent ID */
   config_id: string

@@ -40,10 +40,9 @@ export const ROUTES = {
   // planned 未实现：无对应页面与路由，保留供后续扩展
   /** 通用配置页（动态路径，需拼 configPath 参数） */
   SETTINGS_GENERIC: '/settings/generic',
-  /** 工具页面 */
-  TOOLS: '/tools',
-  /** 智能体页面 */
-  AGENTS: '/agents',
+  // /tools、/agents 路由已退役（2026-08-20 agent_manager 插件化）：
+  // 智能体页面由 agent_manager 插件 contributes.pages 声明（path=/agents，
+  // 经 openWorkspacePanelByPath 解析）；能力浏览并入 /settings/plugins。
   /** 监控页面 */
   /** 管理员页面 */
   ADMIN: '/admin',

@@ -42,11 +42,10 @@ use crate::auth::{
 };
 use crate::error::ApiError;
 use crate::routes::{
-    actions_execute_handler, agents_handler, agents_schema_handler, get_agent_config_handler,
-    get_pipeline_config_with_etag, get_plugin_config_with_etag, health_handler,
-    metrics_prometheus_handler, pipelines_handler, pipelines_runs_handler, pipelines_state_handler,
-    plugins_contract_status_handler, plugins_set_enabled_handler, plugins_status_handler,
-    put_agent_config_handler, put_pipeline_config_handler, put_plugin_config_handler,
+    actions_execute_handler, get_pipeline_config_with_etag, get_plugin_config_with_etag,
+    health_handler, metrics_prometheus_handler, pipelines_handler, pipelines_runs_handler,
+    pipelines_state_handler, plugins_contract_status_handler, plugins_set_enabled_handler,
+    plugins_status_handler, put_pipeline_config_handler, put_plugin_config_handler,
     schema_handler, serve_upload_handler, system_restart_handler, tools_handler,
     validate_all_plugins_handler, AppState,
 };
@@ -96,13 +95,9 @@ pub fn build_router(state: AppState) -> Router {
         .route("/uploads/{filename}", get(serve_upload_handler))
         // AC-06-5: Schema 聚合端点
         .route("/api/v1/schema", get(schema_handler))
-        .route("/api/v1/agents", get(agents_handler))
-        // 阶段1:agent schema(前端表单驱动)+ agent config 读写(真相源 config/agents/**/*.yaml)
-        .route("/api/v1/agents/schema", get(agents_schema_handler))
-        .route(
-            "/api/v1/agents/{id}/config",
-            get(get_agent_config_handler).put(put_agent_config_handler),
-        )
+        // agent 管理面已插件化（2026-08-20 ADR）：/api/v1/agents* 4 路由迁至
+        // agent_manager 插件 /ext/agent_manager/agents*（http_endpoints 承载，
+        // 掩码/etag/乐观锁/.bak 语义一项不丢）。
         // 阶段3:命令执行统一出口(前端 GrowthLoop.ts commandDispatcher transport 注入此端点)
         // 命令面板/快捷键/菜单触发 → 查找声明该 command 的插件 → 执行或占位
         .route("/api/v1/actions/execute", post(actions_execute_handler))
@@ -210,11 +205,12 @@ pub fn build_router(state: AppState) -> Router {
 /// - `/api/v1/sessions*`（会话 CRUD）
 /// - `/api/v1/plugins*`（status/enabled/config；注意 /api/v1/plugins 裸路径也需鉴权）
 /// - `/api/v1/actions/execute`、`/api/v1/interaction/response`
-/// - `PUT /api/v1/agents/{id}/config`、`PUT /api/v1/config/pipelines/{name}`
+/// - `PUT /api/v1/config/pipelines/{name}`
 /// - `POST /api/v1/chat`（0.2 收紧：原来放行匿名——消息触发管道执行/落库，
 ///   属写面语义，未鉴权等于任意人可驱动执行与消耗算力）
 ///
-/// 其余路径放行（/health、/api/v1/auth/*、/ws、/api/v1/db/* 等）。
+/// 其余路径放行（/health、/api/v1/auth/*、/ws、/api/v1/db/* 等；agent 配置写面
+/// 已插件化——/ext/agent_manager 的 PUT admin 闸由插件自持，见 2026-08-20 ADR）。
 async fn write_surface_auth(
     State(state): State<AppState>,
     req: Request,
@@ -229,9 +225,6 @@ async fn write_surface_auth(
         || path == "/api/v1/actions/execute"
         || path == "/api/v1/interaction/response"
         || path == "/api/v1/chat"
-        || (path.starts_with("/api/v1/agents/")
-            && path.ends_with("/config")
-            && method == Method::PUT)
         || (path.starts_with("/api/v1/config/pipelines/") && method == Method::PUT);
 
     if !needs_auth {
@@ -1418,39 +1411,6 @@ async fn stage_recover_history(
     initial_state
 }
 
-/// agents API 端点（routes.rs resolve_agent_yaml_path）定位 agent yaml 用。
-/// 引擎路径已解耦（agent 配置加载归 context_build 插件），此函数仅服务
-/// /api/v1/agents* 配置管理面。两轮匹配：文件名 → yaml 内 config_id。
-pub(crate) fn find_agent_yaml(dir: &std::path::Path, agent_id: &str) -> Option<std::path::PathBuf> {
-    let target = format!("{}.yaml", agent_id);
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        return None;
-    };
-    let mut fallback: Vec<std::path::PathBuf> = Vec::new();
-    for entry in entries.flatten() {
-        let p = entry.path();
-        if p.is_dir() {
-            if let Some(found) = find_agent_yaml(&p, agent_id) {
-                return Some(found);
-            }
-        } else if p.file_name().map(|n| n == target.as_str()).unwrap_or(false) {
-            return Some(p);
-        } else if p.extension().map(|e| e == "yaml").unwrap_or(false) {
-            fallback.push(p);
-        }
-    }
-    for p in fallback {
-        if let Ok(raw) = std::fs::read_to_string(&p) {
-            if let Ok(cfg) = serde_yaml::from_str::<serde_yaml::Value>(&raw) {
-                if cfg.get("config_id").and_then(|v| v.as_str()) == Some(agent_id) {
-                    return Some(p);
-                }
-            }
-        }
-    }
-    None
-}
-
 /// 阶段 2b：注入工具 schema。
 ///
 /// agent 配置（system_prompt/persona 等 yaml 字段）已从内核解耦（2026-08-17
@@ -2391,21 +2351,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_agents_returns_200() {
-        let app = build_router(AppState::new());
-        let response = app
-            .oneshot(
-                Request::builder()
-                    .uri("/api/v1/agents")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(response.status(), StatusCode::OK);
-    }
-
-    #[tokio::test]
     async fn test_pipelines_returns_200() {
         let app = build_router(AppState::new());
         let response = app
@@ -2578,7 +2523,7 @@ mod tests {
     #[tokio::test]
     async fn test_tools_handler_returns_tools_list() {
         // 验证 tools handler 从 config 返回工具列表（无 registry 时）。
-        // W-C2：响应信封统一为 {items, total}（对齐 /api/v1/agents）。
+        // W-C2：响应信封统一为 {items, total}。
         let config = json!({
             "tools": [{"name": "calculator", "description": "A calculator"}],
         });

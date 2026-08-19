@@ -15,15 +15,15 @@
  *   若服务误导入别的 client，单测发现不了。本测试用真实 client + spyOn，验证真实接线。
  *
  * 覆盖的 5 条契约（对应 6 条前端数据路径中的上行/读写路径）：
- *   C1. getAgentSchema()        → GET    /api/v1/agents/schema
- *   C2. putAgentConfig(id,yaml) → PUT    /api/v1/agents/{id}/config   body { yaml }
+ *   C1. getAgentSchema()        → GET    /ext/agent_manager/agents/schema
+ *   C2. putAgentConfig(id,yaml) → PUT    /ext/agent_manager/agents/{id}/config   body { yaml }
  *   C3. commandDispatcher transport → POST /api/v1/actions/execute    body { action, args }
  *   C4. WebviewWidget HTML 加载 → GET    /ext/{pluginId}{path}        (默认 path=/webview)
  *   C5. WebviewWidget action 上行 → POST /api/v1/actions/execute      body { action: method, args: params }
  *
  * 后端端点定义（kernel/crates/api/src/server.rs）：
- *   - GET  /api/v1/agents/schema         (line 95)
- *   - GET|PUT /api/v1/agents/{id}/config (line 96-99)
+ *   - GET  /ext/agent_manager/agents/schema         (line 95)
+ *   - GET|PUT /ext/agent_manager/agents/{id}/config (line 96-99)
  *   - POST /api/v1/actions/execute       (line 102)
  *   - /ext/{*rest} 通配                  (http_dispatcher.rs:197)
  */
@@ -61,18 +61,18 @@ afterEach(() => {
 })
 
 // ============================================================================
-// C1: getAgentSchema → GET /api/v1/agents/schema
+// C1: getAgentSchema → GET /ext/agent_manager/agents/schema
 // ============================================================================
 
-describe('C1 契约: getAgentSchema() → GET /api/v1/agents/schema', () => {
-  it('调用 getAgentSchema 应发 GET /api/v1/agents/schema（method + url 对齐后端）', async () => {
+describe('C1 契约: getAgentSchema() → GET /ext/agent_manager/agents/schema', () => {
+  it('调用 getAgentSchema 应发 GET /ext/agent_manager/agents/schema（method + url 对齐后端）', async () => {
     getSpy.mockResolvedValue({ data: { fields: [{ name: 'config_id', type: 'string' }] } })
 
     await getAgentSchema()
 
     expect(getSpy).toHaveBeenCalledTimes(1)
     const [url, config] = getSpy.mock.calls[0]
-    expect(url).toBe('/api/v1/agents/schema')
+    expect(url).toBe('/ext/agent_manager/agents/schema')
     // 不应附带 body（GET）
     expect(config).toBeUndefined()
   })
@@ -89,11 +89,11 @@ describe('C1 契约: getAgentSchema() → GET /api/v1/agents/schema', () => {
 })
 
 // ============================================================================
-// C2: putAgentConfig(id, yaml) → PUT /api/v1/agents/{id}/config body { yaml }
+// C2: putAgentConfig(id, yaml) → PUT /ext/agent_manager/agents/{id}/config body { yaml }
 // ============================================================================
 
-describe('C2 契约: putAgentConfig(id, yaml) → PUT /api/v1/agents/{id}/config', () => {
-  it('应发 PUT /api/v1/agents/{id}/config，body 为 { yaml }（路径插值 + body shape 对齐）', async () => {
+describe('C2 契约: putAgentConfig(id, yaml) → PUT /ext/agent_manager/agents/{id}/config', () => {
+  it('应发 PUT /ext/agent_manager/agents/{id}/config，body 为 { yaml }（路径插值 + body shape 对齐）', async () => {
     putSpy.mockResolvedValue({ data: { config_id: 'my-agent', success: true, backup: 'my-agent.yaml.bak' } })
 
     const yamlContent = 'name: 测试\nmodel: gpt-4\n'
@@ -102,7 +102,7 @@ describe('C2 契约: putAgentConfig(id, yaml) → PUT /api/v1/agents/{id}/config
     expect(putSpy).toHaveBeenCalledTimes(1)
     const [url, body] = putSpy.mock.calls[0]
     // 路径参数插值正确
-    expect(url).toBe('/api/v1/agents/my-agent/config')
+    expect(url).toBe('/ext/agent_manager/agents/my-agent/config')
     // body shape: 后端 AgentConfigUpdateRequest { yaml: String }
     expect(body).toEqual({ yaml: yamlContent })
   })
@@ -112,7 +112,7 @@ describe('C2 契约: putAgentConfig(id, yaml) → PUT /api/v1/agents/{id}/config
 
     await putAgentConfig('a.b-c', 'k: v')
 
-    expect(putSpy.mock.calls[0][0]).toBe('/api/v1/agents/a.b-c/config')
+    expect(putSpy.mock.calls[0][0]).toBe('/ext/agent_manager/agents/a.b-c/config')
   })
 })
 

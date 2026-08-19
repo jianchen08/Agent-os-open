@@ -6,10 +6,12 @@
  * - 真实状态（active/disabled）+ activation 策略（eager/lazy/manual）
  * - 配置入口（有 config_files 的插件可跳 PluginConfigEditor）
  * - 类型徽标 + host_type + version + 能力标记（contributes/http_endpoints）
+ * - 工具能力浏览（ToolsPage 退役后并入：/api/v1/schema 聚合的 tools 面，
+ *   搜索 + 展开 input_schema 摘要——2026-08-20 ADR）
  */
 
 import { useState, useEffect, useCallback } from 'react'
-import { RefreshCw, AlertCircle, Plug, ToggleLeft } from '@/assets/icons'
+import { RefreshCw, AlertCircle, Plug, ToggleLeft, Wrench } from '@/assets/icons'
 import { PageShell } from '@/components/shared/PageShell'
 import { toast } from '@/components/ui/sonner'
 import apiClient from '@/services/api/client'
@@ -29,6 +31,16 @@ interface PluginStatus {
   has_contributes: boolean
   has_http_endpoints: boolean
   error: string | null
+}
+
+/** 工具能力条目（/api/v1/schema 的 tools 面，ToolDescriptor 序列化子集） */
+interface ToolCapability {
+  name: string
+  description?: string
+  plugin_id?: string
+  category?: string
+  source?: string
+  input_schema?: Record<string, unknown>
 }
 
 /** 类型徽标样式 */
@@ -63,6 +75,10 @@ export function PluginsSettingsPage({
   const [error, setError] = useState<string | null>(null)
   const [togglingId, setTogglingId] = useState<string | null>(null)
   const [filter, setFilter] = useState<'all' | 'pipeline' | 'tool' | 'system' | 'disabled'>('all')
+  // 工具能力浏览（ToolsPage 退役并入）：schema 聚合 tools 面 + 搜索/展开
+  const [capabilities, setCapabilities] = useState<ToolCapability[]>([])
+  const [capSearch, setCapSearch] = useState('')
+  const [expandedTool, setExpandedTool] = useState<string | null>(null)
 
   const fetchPlugins = useCallback(async () => {
     setIsLoading(true)
@@ -70,6 +86,13 @@ export function PluginsSettingsPage({
     try {
       const res = await apiClient.get<PluginStatus[]>('/api/v1/plugins')
       setPlugins(res.data)
+      // 能力面与插件面同拉（读失败不阻断插件列表——能力区降级空）
+      try {
+        const schema = await apiClient.get<{ tools?: ToolCapability[] }>('/api/v1/schema')
+        setCapabilities(Array.isArray(schema.data?.tools) ? schema.data.tools : [])
+      } catch {
+        setCapabilities([])
+      }
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : '获取插件状态失败')
     } finally {
@@ -118,6 +141,15 @@ export function PluginsSettingsPage({
     if (filter === 'all') return true
     if (filter === 'disabled') return !p.enabled
     return (p.config_type || '').toLowerCase().includes(filter)
+  })
+  const capFiltered = capabilities.filter((t) => {
+    if (!capSearch) return true
+    const q = capSearch.toLowerCase()
+    return (
+      t.name?.toLowerCase().includes(q) ||
+      t.description?.toLowerCase().includes(q) ||
+      t.plugin_id?.toLowerCase().includes(q)
+    )
   })
 
   const filterTabs: Array<{ id: typeof filter; label: string }> = [
@@ -262,6 +294,68 @@ export function PluginsSettingsPage({
             )
           })}
         </div>
+      )}
+      {/* ── 工具能力浏览（ToolsPage 退役并入，2026-08-20 ADR）── */}
+      {!isLoading && !error && capabilities.length > 0 && (
+        <section className="mt-6" aria-label="工具能力浏览">
+          <div className="mb-2 flex flex-wrap items-center gap-3">
+            <h2 className="flex items-center gap-1.5 text-sm font-medium">
+              <Wrench className="h-3.5 w-3.5" />
+              工具能力
+            </h2>
+            <span className="text-muted-foreground font-mono text-[10px]">
+              {capabilities.length} 个（LLM 可见面，/api/v1/schema 聚合）
+            </span>
+            <input
+              type="text"
+              placeholder="搜索工具名/描述/插件..."
+              value={capSearch}
+              onChange={(e) => setCapSearch(e.target.value)}
+              aria-label="搜索工具能力"
+              className="bg-background focus:ring-primary ml-auto w-full max-w-xs rounded-lg border px-2.5 py-1 text-xs focus:ring-1 focus:outline-none"
+            />
+          </div>
+          <div className="flex flex-col gap-1.5">
+            {capFiltered.length === 0 && (
+              <p className="text-muted-foreground py-4 text-center text-xs">没有匹配的工具</p>
+            )}
+            {capFiltered.map((tool) => (
+              <div
+                key={tool.name}
+                className="hover:bg-[var(--hover-overlay)] cursor-pointer rounded-lg border p-2.5"
+                style={{ borderColor: 'var(--ds-border-subtle, rgba(148,163,184,0.12))' }}
+                onClick={() => setExpandedTool(expandedTool === tool.name ? null : tool.name)}
+              >
+                <div className="flex flex-wrap items-center gap-2">
+                  <span className="min-w-0 flex-1 truncate font-mono text-[11px] font-medium" title={tool.name}>
+                    {tool.name}
+                  </span>
+                  {tool.plugin_id && (
+                    <span className="text-muted-foreground font-mono text-[10px]">@{tool.plugin_id}</span>
+                  )}
+                  {tool.category && (
+                    <span className="rounded border border-[rgba(34,211,238,0.35)] bg-[rgba(34,211,238,0.12)] px-1.5 py-0.5 font-mono text-[10px]">
+                      {tool.category}
+                    </span>
+                  )}
+                  {tool.source && (
+                    <span className="text-muted-foreground rounded bg-[var(--hover-overlay)] px-1.5 py-0.5 font-mono text-[10px]">
+                      {tool.source}
+                    </span>
+                  )}
+                </div>
+                {tool.description && (
+                  <p className="text-muted-foreground mt-1 line-clamp-2 text-[11px]">{tool.description}</p>
+                )}
+                {expandedTool === tool.name && tool.input_schema && (
+                  <pre className="bg-muted/50 mt-2 max-h-48 overflow-auto rounded p-2 font-mono text-[10px] leading-relaxed">
+                    {JSON.stringify(tool.input_schema, null, 2)}
+                  </pre>
+                )}
+              </div>
+            ))}
+          </div>
+        </section>
       )}
     </div>
   )

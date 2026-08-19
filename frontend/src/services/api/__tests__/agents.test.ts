@@ -1,7 +1,7 @@
 /**
  * Agent API 服务测试
  *
- * 仅覆盖后端真实存在的端点：GET /api/v1/agents（列表）。
+ * 仅覆盖 agent_manager 插件真实端点：GET /ext/agent_manager/agents（列表）。
  * getAgent/createAgent/updateAgent/deleteAgent/getDefaultAgent 指向
  * 后端不存在的端点，已删除（2026-08 清理，详见 services/api/agents.ts 头注释）。
  */
@@ -39,7 +39,7 @@ describe('Agent API', () => {
       const result = await getAgents()
 
       expect(result).toEqual(mockResponse)
-      expect(apiClient.get).toHaveBeenCalledWith('/api/v1/agents', {
+      expect(apiClient.get).toHaveBeenCalledWith('/ext/agent_manager/agents', {
         params: {
           page: 1,
           page_size: 20,
@@ -61,7 +61,7 @@ describe('Agent API', () => {
         type: 'coder',
       })
 
-      expect(apiClient.get).toHaveBeenCalledWith('/api/v1/agents', {
+      expect(apiClient.get).toHaveBeenCalledWith('/ext/agent_manager/agents', {
         params: {
           page: 2,
           page_size: 10,

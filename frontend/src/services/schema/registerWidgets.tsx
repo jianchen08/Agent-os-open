@@ -10,7 +10,6 @@ import {
   PipelineManagerPanel,
   PluginsPanel,
   SettingsHubPanel,
-  ToolsPanel,
 } from '@/components/schema/widgets/PanelHostWidget'
 import { DecisionFormAdapter, FormWidget } from '@/components/schema/widgets/FormWidget'
 import { EditorWidget } from '@/components/schema/widgets/EditorWidget'
@@ -90,7 +89,8 @@ const WIDGETS: WidgetEntry[] = [
   // 顶栏打开的工作区面板（可关闭页签，非常驻）
   { name: 'settings_hub', component: SettingsHubPanel, spaces: ['workspace', 'floating'] },
   { name: 'plugins_panel', component: PluginsPanel, spaces: ['workspace'] },
-  { name: 'tools_panel', component: ToolsPanel, spaces: ['workspace'] },
+  // agents_panel = agent_manager 插件页面承载（原 AgentsPage 内容迁移；
+  // tools_panel 已随 ToolsPage 退役——能力浏览并入 plugins_panel，2026-08-20 ADR）
   { name: 'agents_panel', component: AgentsPanel, spaces: ['workspace'] },
   { name: 'memory_panel', component: MemoryPanel, spaces: ['workspace'] },
   { name: 'workspace_explorer', component: PipelineManagerPanel, spaces: ['workspace'] },

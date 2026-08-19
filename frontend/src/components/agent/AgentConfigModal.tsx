@@ -1,10 +1,11 @@
 /**
  * AgentConfigModal 组件
  *
- * Agent 列表页「编辑」入口：FormWidget modal 壳 + datasource 模式
+ * Agent 管理页「编辑」入口：FormWidget modal 壳 + datasource 模式
  * （widget 化 T12，原 SchemaFormEmbed 已并入 FormWidget）——
- * fieldsUri 拉 /api/v1/agents/schema 字段声明，dataUri 拉/写回
- * /api/v1/agents/{id}/config yaml，保存成功自动关闭并回调刷新。
+ * fieldsUri 拉 /ext/agent_manager/agents/schema 字段声明，dataUri 拉/写回
+ * /ext/agent_manager/agents/{id}/config yaml，保存成功自动关闭并回调刷新。
+ * （2026-08-20 插件化：URI 经 API_ENDPOINTS.AGENTS 切 agent_manager，壳零改动）
  */
 
 import { FormWidget } from '@/components/schema/widgets/FormWidget'

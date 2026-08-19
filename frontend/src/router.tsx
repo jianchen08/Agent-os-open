@@ -14,6 +14,7 @@ import { useTaskPolling } from './hooks/useTaskPolling'
 import { LoginPage } from './pages/auth/LoginPage'
 import { RegisterPage } from './pages/auth/RegisterPage'
 import { globalWS } from './services/websocket/GlobalWebSocket'
+import { openWorkspacePanelByPath } from './services/workspacePanelOpener'
 import { initStreamingEvents, destroyStreamingEvents } from './services/websocket/streamingEventService'
 import { flushStreamChunkBuffer } from './services/websocket/streaming/handlers/streamHandler'
 import { allocateNextSequence, ensureStreamingPlaceholder } from './services/websocket/streaming/handlers/utils'
@@ -43,12 +44,6 @@ const ChatContainer = lazy(() =>
 )
 const LlmSettingsPage = lazy(() =>
   import('@/pages/settings/LlmSettingsPage').then((m) => ({ default: m.LlmSettingsPage })),
-)
-const ToolsPage = lazy(() =>
-  import('@/pages/tools/ToolsPage').then((m) => ({ default: m.ToolsPage })),
-)
-const AgentsPage = lazy(() =>
-  import('@/pages/agents/AgentsPage').then((m) => ({ default: m.AgentsPage })),
 )
 const AdminPage = lazy(() =>
   import('@/pages/admin/AdminPage').then((m) => ({ default: m.AdminPage })),
@@ -474,8 +469,8 @@ function HomePage(): ReactNode {
             <span className="text-muted-foreground text-sm">直接开始一段新的对话</span>
           </span>
         </button>
-        <a
-          href={ROUTES.AGENTS}
+        <button
+          onClick={() => openWorkspacePanelByPath('/agents')}
           className="bg-card border-border hover:border-primary hover:shadow-md group flex items-start gap-4 rounded-xl border p-5 text-left transition-all"
         >
           <span className="bg-primary/10 text-primary flex h-10 w-10 shrink-0 items-center justify-center rounded-lg">
@@ -490,7 +485,7 @@ function HomePage(): ReactNode {
             <span className="text-base font-medium">浏览智能体</span>
             <span className="text-muted-foreground text-sm">按场景挑选合适的专家角色</span>
           </span>
-        </a>
+        </button>
       </div>
     </div>
   )
@@ -574,26 +569,6 @@ export function createRouter() {
         <ProtectedRoute>
           <Suspense fallback={LazyFallback}>
             <PluginConfigRoute />
-          </Suspense>
-        </ProtectedRoute>
-      ),
-    },
-    {
-      path: ROUTES.TOOLS,
-      element: (
-        <ProtectedRoute>
-          <Suspense fallback={LazyFallback}>
-            <ToolsPage />
-          </Suspense>
-        </ProtectedRoute>
-      ),
-    },
-    {
-      path: ROUTES.AGENTS,
-      element: (
-        <ProtectedRoute>
-          <Suspense fallback={LazyFallback}>
-            <AgentsPage />
           </Suspense>
         </ProtectedRoute>
       ),

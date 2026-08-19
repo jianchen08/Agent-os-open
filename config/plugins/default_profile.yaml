@@ -15,6 +15,11 @@ plugins:
   monitoring:
     enabled: true
     activation: lazy
+  # agent 配置管理面（2026-08-20 插件化）：承接原内核 /api/v1/agents* 4 路由
+  # （/ext/agent_manager/agents*）+ agent.get/list/config-validate 服务
+  agent_manager:
+    enabled: true
+    activation: lazy
   evaluation_service:
     enabled: true
     activation: lazy

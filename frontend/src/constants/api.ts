@@ -84,26 +84,14 @@ export const API_ENDPOINTS = {
     /** 获取记忆统计 */
     STATS: '/ext/channel_api/memory/stats',
   },
-  /** Agent配置相关 - 对应后端 /api/v1/agents/* */
+  /** Agent配置相关 - agent_manager 插件 /ext/agent_manager/agents/*（2026-08-20 插件化，原内核 /api/v1/agents* 已删） */
   AGENTS: {
     /** 获取Agent配置列表 */
-    LIST: '/api/v1/agents',
-    /** 获取单个Agent配置 */
-    GET: (id: string) => `/api/v1/agents/${id}`,
-    /** 创建Agent配置 */
-    CREATE: '/api/v1/agents',
-    /** 更新Agent配置 */
-    UPDATE: (id: string) => `/api/v1/agents/${id}`,
-    /** 删除Agent配置 */
-    DELETE: (id: string) => `/api/v1/agents/${id}`,
-    /** Agent健康检查 */
-    HEALTH: '/api/v1/agents/health',
-    /** 获取默认Agent */
-    DEFAULT: '/api/v1/agents/default',
+    LIST: '/ext/agent_manager/agents',
     /** Agent 配置字段 Schema（表单驱动，返回 { fields: UIInputFormField[] }） */
-    SCHEMA: '/api/v1/agents/schema',
-    /** 读写 Agent 配置 yaml 原文（PUT 写回前后端自动备份） */
-    CONFIG: (id: string) => `/api/v1/agents/${id}/config`,
+    SCHEMA: '/ext/agent_manager/agents/schema',
+    /** 读写 Agent 配置 yaml 原文（PUT 写回前后端自动备份 + If-Match 乐观锁） */
+    CONFIG: (id: string) => `/ext/agent_manager/agents/${id}/config`,
   },
   /** 配置管理相关 - 4c 迁移：已切 /ext/channel_api/config/**（经内核 dispatcher → channel_api http.handle） */
   CONFIG: {

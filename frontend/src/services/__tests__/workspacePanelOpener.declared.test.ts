@@ -72,6 +72,24 @@ function seedSchema(enabled: 'all' | 'none') {
               ],
             },
           },
+          {
+            plugin_id: 'agent_manager',
+            plugin_name: 'Agent Manager',
+            contributes: {
+              pages: [
+                {
+                  id: 'agent_manager_agents',
+                  title: '智能体',
+                  icon: 'person',
+                  space: 'workspace',
+                  slot: 'activity-bar',
+                  order: 30,
+                  path: '/agents',
+                  widget: 'agents_panel',
+                },
+              ],
+            },
+          },
         ]
       : []
 
@@ -119,5 +137,23 @@ describe('T11：面板入口声明驱动', () => {
     // 内核自持项保留（T13 拍板范围，不在 T11 动）
     expect(TOP_NAV_PANELS['/settings']).toBeDefined()
     expect(TOP_NAV_PANELS['/tasks']).toBeDefined()
+  })
+
+  it('agent_manager 声明化（2026-08-20）：/agents 由插件 pages 声明，硬编码已摘除', () => {
+    // agent_manager 插件 contributes.pages 声明 path=/agents → 命中 agents_panel
+    expect(openWorkspacePanelByPath('/agents')).toBe(true)
+    const tab = useLayoutModeStore.getState().workspaceTabs.find((t) =>
+      t.id.startsWith('ws-plugin-agent_manager'),
+    )
+    expect(tab).toBeDefined()
+    expect(tab?.component).toBe('agents_panel')
+    // 硬编码 TOP_NAV_PANELS/工具页退役：条目不再存在
+    expect(TOP_NAV_PANELS['/agents']).toBeUndefined()
+    expect(TOP_NAV_PANELS['/tools']).toBeUndefined()
+  })
+
+  it('agent_manager 禁用（声明移除）→ /agents 不再命中（不回退硬编码）', () => {
+    seedSchema('none')
+    expect(openWorkspacePanelByPath('/agents')).toBe(false)
   })
 })

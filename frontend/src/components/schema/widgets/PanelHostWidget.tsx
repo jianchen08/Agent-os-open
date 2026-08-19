@@ -6,8 +6,7 @@
 
 import { cn } from '@/lib/utils'
 import { PluginsSettingsPage } from '@/pages/settings/PluginsSettingsPage'
-import { ToolsPage } from '@/pages/tools/ToolsPage'
-import { AgentsPage } from '@/pages/agents/AgentsPage'
+import { AgentManagerPage } from '@/components/agent/AgentManagerPage'
 import { MemoryPage } from '@/pages/memory/MemoryPage'
 import { SettingsHubWidget } from './SettingsHubWidget'
 import { PipelineManagerWidget } from './PipelineManagerWidget'
@@ -15,7 +14,6 @@ import { PipelineManagerWidget } from './PipelineManagerWidget'
 type PanelKind =
   | 'settings_hub'
   | 'plugins_panel'
-  | 'tools_panel'
   | 'agents_panel'
   | 'memory_panel'
   | 'workspace_explorer'
@@ -40,10 +38,10 @@ function renderPanel(kind: PanelKind | string, props: Record<string, unknown>) {
       return <SettingsHubWidget {...props} />
     case 'plugins_panel':
       return <PluginsSettingsPage />
-    case 'tools_panel':
-      return <ToolsPage />
+    // agent_manager 插件页面承载（2026-08-20：原 AgentsPage 退役，能力浏览
+    // 并入 plugins_panel——ToolsPage/tools_panel 同批摘除）
     case 'agents_panel':
-      return <AgentsPage />
+      return <AgentManagerPage />
     case 'memory_panel':
       return <MemoryPage />
     case 'workspace_explorer':
@@ -69,9 +67,7 @@ export function SettingsHubPanel(props: Record<string, unknown>) {
 export function PluginsPanel(props: Record<string, unknown>) {
   return <PanelHostWidget {...props} panel="plugins_panel" />
 }
-export function ToolsPanel(props: Record<string, unknown>) {
-  return <PanelHostWidget {...props} panel="tools_panel" />
-}
+/** agent_manager 插件页面（agents_panel）：承接原 AgentsPanel 注册名 */
 export function AgentsPanel(props: Record<string, unknown>) {
   return <PanelHostWidget {...props} panel="agents_panel" />
 }

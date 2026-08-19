@@ -213,8 +213,8 @@ describe('DeclaredWidgetLayer watch 接线（声明级联动）', () => {
                 space: 'workspace',
                 props: {
                   watch: [{ event: 'task.created', action: 'reload' }],
-                  fieldsUri: '/api/v1/agents/schema',
-                  dataUri: '/api/v1/agents/x/config',
+                  fieldsUri: '/ext/agent_manager/agents/schema',
+                  dataUri: '/ext/agent_manager/agents/x/config',
                   dataFormat: 'json',
                 },
               },
@@ -276,8 +276,8 @@ describe('G6-b：定时轮询刷新（refresh poll）', () => {
                 space: 'workspace',
                 props: {
                   refresh: { type: 'poll', intervalSeconds: 1 },
-                  fieldsUri: '/api/v1/agents/schema',
-                  dataUri: '/api/v1/agents/x/config',
+                  fieldsUri: '/ext/agent_manager/agents/schema',
+                  dataUri: '/ext/agent_manager/agents/x/config',
                   dataFormat: 'json',
                 },
               },

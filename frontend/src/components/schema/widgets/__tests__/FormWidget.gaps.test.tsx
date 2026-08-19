@@ -99,8 +99,8 @@ describe('G1：反馈文案/成功动作声明化', () => {
     apiRequest.mockResolvedValue({ data: {} })
     render(
       <FormWidget
-        fieldsUri="/api/v1/agents/schema"
-        dataUri="/api/v1/agents/x/config"
+        fieldsUri="/ext/agent_manager/agents/schema"
+        dataUri="/ext/agent_manager/agents/x/config"
         dataFormat="json"
         successAction={{ type: 'reload' }}
       />,
