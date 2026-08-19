@@ -415,8 +415,19 @@ mod tests {
     use serde_json::json;
 
     /// 内存库 + 仅注入 db 的 state（无 store：token 校验走内置 admin 回退）。
+    /// 专用夹具表 test_notes：0.1 投影表 memory 已 DROP（2026-08-19），通用
+    /// CRUD/过滤/租户隔离语义用结构等价测试表承载，断言语义不变。
     fn handler_with_db() -> (DbAdminCapabilityHandler, Arc<agentos_engine::SqliteStore>) {
         let store = Arc::new(agentos_engine::SqliteStore::open_memory().unwrap());
+        store
+            .with_conn(|conn| {
+                conn.execute_batch(
+                    "CREATE TABLE test_notes (                         id TEXT PRIMARY KEY, content TEXT, note_type TEXT, score REAL,                         tenant_id TEXT NOT NULL DEFAULT 'default', created_at TEXT NOT NULL                     );",
+                )
+                .unwrap();
+                Ok::<(), String>(())
+            })
+            .unwrap();
         (
             DbAdminCapabilityHandler::new(None, Some(store.clone())),
             store,
@@ -471,7 +482,7 @@ mod tests {
                     [("episode", 1.0f64), ("episode", 5.0), ("semantic", 2.0)].iter().enumerate()
                 {
                     conn.execute(
-                        "INSERT INTO memory (id, content, memory_type, score, tenant_id, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                        "INSERT INTO test_notes (id, content, note_type, score, tenant_id, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
                         rusqlite::params![
                             format!("mf{i}"),
                             format!("content {i}"),
@@ -490,8 +501,8 @@ mod tests {
             .handle(
                 "table_query",
                 authed(json!({
-                    "table": "memory",
-                    "filter": ["memory_type:eq:episode", "score:gt:3"],
+                    "table": "test_notes",
+                    "filter": ["note_type:eq:episode", "score:gt:3"],
                 })),
             )
             .await
@@ -509,8 +520,8 @@ mod tests {
             .handle(
                 "table_insert",
                 authed(json!({
-                    "table": "memory",
-                    "row": { "id": "cap1", "content": "hello", "memory_type": "episode", "created_at": "2025-01-01T00:00:00Z" },
+                    "table": "test_notes",
+                    "row": { "id": "cap1", "content": "hello", "note_type": "episode", "created_at": "2025-01-01T00:00:00Z" },
                 })),
             )
             .await
@@ -523,7 +534,7 @@ mod tests {
         let env = handler
             .handle(
                 "table_get_row",
-                authed(json!({ "table": "memory", "pk_value": "cap1" })),
+                authed(json!({ "table": "test_notes", "pk_value": "cap1" })),
             )
             .await
             .unwrap();
@@ -534,7 +545,7 @@ mod tests {
         let env = handler
             .handle(
                 "table_update_row",
-                authed(json!({ "table": "memory", "pk_value": "cap1", "updates": { "content": "updated" } })),
+                authed(json!({ "table": "test_notes", "pk_value": "cap1", "updates": { "content": "updated" } })),
             )
             .await
             .unwrap();
@@ -546,7 +557,7 @@ mod tests {
             .handle(
                 "table_update_row",
                 authed(
-                    json!({ "table": "memory", "pk_value": "nope", "updates": { "content": "x" } }),
+                    json!({ "table": "test_notes", "pk_value": "nope", "updates": { "content": "x" } }),
                 ),
             )
             .await
@@ -557,7 +568,7 @@ mod tests {
         let env = handler
             .handle(
                 "table_delete_row",
-                authed(json!({ "table": "memory", "pk_value": "cap1" })),
+                authed(json!({ "table": "test_notes", "pk_value": "cap1" })),
             )
             .await
             .unwrap();
@@ -572,7 +583,7 @@ mod tests {
             .handle(
                 "execute",
                 authed(json!({
-                    "sql": "UPDATE memory SET content='x' WHERE id='none'",
+                    "sql": "UPDATE test_notes SET content='x' WHERE id='none'",
                     "confirm": false,
                 })),
             )
@@ -590,7 +601,7 @@ mod tests {
         let envelope = handler
             .handle(
                 "execute",
-                authed(json!({ "sql": "DROP TABLE memory", "confirm": true })),
+                authed(json!({ "sql": "DROP TABLE test_notes", "confirm": true })),
             )
             .await
             .unwrap();
