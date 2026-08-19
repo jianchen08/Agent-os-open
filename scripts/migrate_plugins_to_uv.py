@@ -102,7 +102,17 @@ def imported_third_party(dirpath: Path) -> list[str]:
     return found
 
 
-def pyproject_body(pid: str, version: str, deps: list[str]) -> str:
+def sdk_rel_path(plugin_dir: Path) -> str:
+    """插件目录 → plugins/sdk 的相对路径（[tool.uv.sources] editable 映射用）。
+
+    插件嵌套深度不一（tools/<name> 为 3 级、pipeline/input/<name> 为 4 级），
+    必须逐目录计算；Windows relpath 产出反斜杠，TOML 字符串里是转义符，
+    统一替换为正斜杠（uv/TOML 均接受）。
+    """
+    return os.path.relpath(ROOT / "plugins" / "sdk", plugin_dir).replace(os.sep, "/")
+
+
+def pyproject_body(pid: str, version: str, deps: list[str], sdk_rel: str) -> str:
     name = "agentos-plugin-" + pid.replace("_", "-")
     dep_lines = "".join(f'    "{d}",\n' for d in deps)
     return (
@@ -113,6 +123,11 @@ def pyproject_body(pid: str, version: str, deps: list[str]) -> str:
         'requires-python = ">=3.11"\n'
         "dependencies = [\n"
         f"{dep_lines}]\n"
+        "\n"
+        "# 本地 SDK 源映射（uv lock 解析必需——agentos-plugin-sdk 不在任何 registry）：\n"
+        "# editable 链接 plugins/sdk/src 源码目录（判据 2 案 A）。\n"
+        "[tool.uv.sources]\n"
+        f'agentos-plugin-sdk = {{ path = "{sdk_rel}", editable = true }}\n'
     )
 
 
@@ -138,6 +153,12 @@ def main() -> int:
 
     if not args.apply:
         print("\n[dry-run] 未写任何文件；--apply 后为每个插件写 pyproject.toml + uv.lock")
+        if plugins:
+            sample = plugins[0]
+            sample_meta = json.load(open(sample / "plugin.json", encoding="utf-8"))
+            print(f"\n[dry-run] 样板预览（{sample_meta['id']}，sdk_rel={sdk_rel_path(sample)}）：")
+            print(pyproject_body(sample_meta["id"], sample_meta.get("version", "0.0.0"),
+                                 ["agentos-plugin-sdk>=0.2.0"], sdk_rel_path(sample)))
         return 0
 
     written = 0
@@ -145,7 +166,9 @@ def main() -> int:
         d = json.load(open(p / "plugin.json", encoding="utf-8"))
         pid, version = d["id"], d.get("version", "0.0.0")
         deps = ["agentos-plugin-sdk>=0.2.0"]
-        (p / "pyproject.toml").write_text(pyproject_body(pid, version, deps), encoding="utf-8")
+        (p / "pyproject.toml").write_text(
+            pyproject_body(pid, version, deps, sdk_rel_path(p)), encoding="utf-8"
+        )
         written += 1
         if args.skip_lock:
             continue
