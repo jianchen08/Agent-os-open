@@ -170,7 +170,12 @@ async fn test_tables_lists_all_tables_dynamic() {
         );
     }
     // 退役 0.1 投影表不得再出现在表清单（2026-08-19 DROP 裁定）
-    for retired in ["memory", "execution_records", "pipeline_run_summaries", "messages"] {
+    for retired in [
+        "memory",
+        "execution_records",
+        "pipeline_run_summaries",
+        "messages",
+    ] {
         assert!(
             !names.contains(&retired.to_string()),
             "退役表 {retired} 不应出现: {names:?}"
@@ -518,7 +523,10 @@ async fn test_auth_required_401_and_forbidden() {
     let (status, _json) = call(
         &handler,
         "table_insert",
-        with_auth(json!({"table": "test_notes", "row": { "id": "x" }}), &user_tok),
+        with_auth(
+            json!({"table": "test_notes", "row": { "id": "x" }}),
+            &user_tok,
+        ),
     )
     .await;
     assert_eq!(status, 403, "普通用户写接口应 403");

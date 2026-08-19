@@ -159,8 +159,6 @@ fn ip_address_blocked(ip: std::net::IpAddr, block_loopback: bool) -> bool {
     }
 }
 
-/// 出网守卫单测（安全审查 2026-08-20 B-2）。
-#[cfg(test)]
 /// 校验出网 URL 通过边界检查；非法 URL / 命中禁止段 → Err（fail-closed）。
 fn is_outbound_url_allowed(url: &str) -> Result<(), McpError> {
     let parsed = reqwest::Url::parse(url).map_err(|e| McpError::ConnectionFailed {
@@ -207,6 +205,9 @@ fn is_outbound_url_allowed(url: &str) -> Result<(), McpError> {
         }
     }
 }
+
+/// 出网守卫单测（安全审查 2026-08-20 B-2）。
+#[cfg(test)]
 mod outbound_guard_tests {
     use super::*;
 
