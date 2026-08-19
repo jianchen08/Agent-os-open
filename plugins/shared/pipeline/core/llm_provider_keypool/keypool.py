@@ -102,10 +102,9 @@ class KeyPoolAdapter(_BaseLiteLLMAdapter):
             for attempt in range(max_retries):
                 slot: KeySlot = await pool.acquire_slot()
                 logger.info(
-                    "[KeyPoolAdapter] provider=%s 选用 key=%s (api_key=%s...) attempt=%d/%d",
+                    "[KeyPoolAdapter] provider=%s 选用 key=%s attempt=%d/%d",
                     provider_name,
                     slot.key_id,
-                    slot.api_key[:6],
                     attempt + 1,
                     max_retries,
                 )
