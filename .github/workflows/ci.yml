@@ -365,6 +365,24 @@ jobs:
           uv sync --frozen --extra dev
           uv pip install -e ./plugins/sdk
 
+      # 批 D 单轨（2026-08-19）：冒烟矩阵探针以插件 .venv 解释器 spawn（生产
+      # invoker fail-closed 等价），CI 需先按各插件 uv.lock 建 venv。
+      # 96+ 个 lock 全量 uv sync；缓存键含全部插件锁（setup-uv enable-cache）。
+      - name: Build plugin venvs (uv sync per locked plugin)
+        run: |
+          uv python install 3.12
+          failed=0
+          for lock in $(git ls-files 'plugins/**/uv.lock' | sort -u); do
+            d=$(dirname "$lock")
+            echo "::group::uv sync $d"
+            if ! uv sync --project "$d"; then
+              echo "::error::uv sync failed: $d"
+              failed=1
+            fi
+            echo "::endgroup::"
+          done
+          exit $failed
+
       - name: Run gates (plugins-heavy)
         run: python scripts/run_gates.py --filter plugins-heavy
 
@@ -588,6 +606,23 @@ jobs:
         run: |
           uv sync --frozen --extra dev
           uv pip install -e ./plugins/sdk
+
+      # 批 D 单轨（2026-08-19）：invoker 已删 plain PATH python 回退（fail-closed），
+      # 内核 boot/任务链 spawn sidecar 依赖各插件 .venv——先按 uv.lock 批量建。
+      - name: Build plugin venvs (uv sync per locked plugin)
+        run: |
+          uv python install 3.12
+          failed=0
+          for lock in $(git ls-files 'plugins/**/uv.lock' | sort -u); do
+            d=$(dirname "$lock")
+            echo "::group::uv sync $d"
+            if ! uv sync --project "$d"; then
+              echo "::error::uv sync failed: $d"
+              failed=1
+            fi
+            echo "::endgroup::"
+          done
+          exit $failed
 
       - name: Build kernel (release, sccache cached)
         working-directory: kernel
