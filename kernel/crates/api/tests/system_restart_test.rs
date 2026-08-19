@@ -61,12 +61,13 @@ async fn drain_and_exit75_suspends_without_exit_under_escape_hatch() {
     let store = Arc::new(SqliteStore::open_memory().unwrap());
     store.create_run("d1", "hash", "default").unwrap();
     let suspended =
-        agentos_api::routes::drain_and_exit75(Some(&store), "test: watcher cdylib change").await;
+        agentos_api::routes::drain_and_exit75(Some(&store), None, "test: watcher cdylib change")
+            .await;
     assert_eq!(suspended, 1, "应排空 1 个 running run");
     use agentos_core::traits::StorageBackend;
     let run = StorageBackend::get_run(&*store, "d1").await.unwrap();
     assert_eq!(run.status, RunStatus::Suspended, "run 应被排空为 suspended");
     // 无 db → 0（诚实降级，不 panic）
-    let none = agentos_api::routes::drain_and_exit75(None, "test").await;
+    let none = agentos_api::routes::drain_and_exit75(None, None, "test").await;
     assert_eq!(none, 0);
 }

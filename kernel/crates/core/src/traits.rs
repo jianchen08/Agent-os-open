@@ -257,6 +257,22 @@ pub trait PluginInvoker: Send + Sync {
             source: None,
         })
     }
+
+    /// 内核停机：best-effort 杀掉全部已缓存 sidecar（drain 客户端缓存 + 逐个
+    /// kill，防孤儿进程）。
+    ///
+    /// 供 graceful shutdown（Ctrl-C / SIGTERM）与 exit 75 排空路径在进程退出前
+    /// 调用（0.2 收尾 §3.3a）。best-effort 语义：单个 kill 失败只记日志不阻断
+    /// 其余。默认实现 no-op（无 sidecar 缓存的实现 / MockInvoker 不破坏编译）。
+    async fn shutdown_all(&self) {}
+
+    /// 禁用插件的窄口 kill：若该插件有已缓存 sidecar 则 kill 并移除，无则 no-op。
+    ///
+    /// 语义刻意**轻于** [`Self::force_unload`]：不做 OnUnload 事件广播、不做
+    /// loader.unload / 指纹清理（"仅禁用"下插件仍在 loader 内、热发现不失效）；
+    /// sidecar 按调用懒 spawn，reenable 后下次调用自然重生（0.2 收尾 §3.3b）。
+    /// 默认实现 no-op。
+    async fn kill_sidecar_if_any(&self, _plugin_id: &str) {}
 }
 
 /// 生命周期钩子类型。

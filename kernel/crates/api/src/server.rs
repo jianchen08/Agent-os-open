@@ -2024,7 +2024,14 @@ async fn interaction_response_handler(
 }
 
 /// 启动 API 服务器。
+///
+/// 0.2 收尾 §3.3a：`with_graceful_shutdown` 接线——Ctrl-C（Unix 另含 SIGTERM）
+/// 触发后先 best-effort 杀掉全部缓存 sidecar（`shutdown_all`，防孤儿进程），
+/// 再让 axum 收尾退出。此前是裸 `axum::serve`，内核进程死了 sidecar 子进程
+/// 全部变孤儿（e2e G4）。
 pub async fn start_server(addr: SocketAddr, state: AppState) -> Result<(), ApiError> {
+    // invoker 句柄先 clone 进 shutdown future（build_router 消费 state）。
+    let shutdown_invoker = state.invoker.clone();
     let app = build_router(state);
     let listener = tokio::net::TcpListener::bind(addr)
         .await
@@ -2033,11 +2040,39 @@ pub async fn start_server(addr: SocketAddr, state: AppState) -> Result<(), ApiEr
         })?;
     info!("API server starting on {}", addr);
     axum::serve(listener, app)
+        .with_graceful_shutdown(shutdown_signal(shutdown_invoker))
         .await
         .map_err(|e| ApiError::Internal {
             message: format!("Server error: {}", e),
         })?;
     Ok(())
+}
+
+/// 停机信号等待 + sidecar 清理（`start_server` 的 graceful shutdown future）。
+///
+/// 信号面：Ctrl-C 全平台；Unix 额外含 SIGTERM（容器/服务管理器标准停机信号）。
+/// 触发后调用 `invoker.shutdown_all()`（drain + 逐 kill，各自带 2s 超时保护，
+/// 见 invoker 实现）——best-effort，不阻塞退出超过秒级。
+async fn shutdown_signal(invoker: Option<Arc<dyn agentos_core::traits::PluginInvoker>>) {
+    #[cfg(unix)]
+    {
+        let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+            .expect("install SIGTERM handler");
+        tokio::select! {
+            _ = tokio::signal::ctrl_c() => {},
+            _ = sigterm.recv() => {},
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = tokio::signal::ctrl_c().await;
+    }
+    info!(target: "api-server", "shutdown signal received; killing cached sidecars before exit");
+    if let Some(invoker) = invoker.as_ref() {
+        // 总预算 2s：shutdown_all 内部逐 kill 已有各自超时，这里再兜一层，
+        // 保证停机信号到进程退出不被卡死的 kill 拖延（best-effort 清理）。
+        let _ = tokio::time::timeout(Duration::from_secs(2), invoker.shutdown_all()).await;
+    }
 }
 
 use futures_util::{SinkExt, StreamExt};

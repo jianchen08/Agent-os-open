@@ -1566,14 +1566,19 @@ pub async fn get_plugin_config_with_etag(
 /// 不 import axum handler）。
 ///
 /// 流程：排空（在途 `running` runs → `suspended`，重启后 resume 续跑）→ 记日志
-/// → 延迟 200ms 退出（让触发方的响应/日志先送达）。退出码 **75** =
-/// "restart requested"，监督者（启动脚本循环 / Service 重启策略）据码拉起新进程。
+/// → 延迟 200ms 退出（让触发方的响应/日志先送达）→ **exit 前 best-effort 调
+/// `invoker.shutdown_all()` 杀掉全部缓存 sidecar**（0.2 收尾 §3.3a：重启换进程
+/// 后旧 sidecar 成孤儿，e2e G4；带 2s 总预算，不阻塞退出超过秒级）。退出码
+/// **75** = "restart requested"，监督者（启动脚本循环 / Service 重启策略）据码
+/// 拉起新进程。
 ///
-/// 测试逃生门：设 `AGENTOS_DISABLE_SELF_EXIT=1` 时只排空不退出（嵌入/测试场景）。
+/// 测试逃生门：设 `AGENTOS_DISABLE_SELF_EXIT=1` 时只排空不退出（嵌入/测试场景，
+/// 也不杀 sidecar——进程不退出，懒 spawn 的 sidecar 交由 idle GC 管理）。
 ///
 /// 返回被排空的 run 数（触发方记入日志/响应）。
 pub async fn drain_and_exit75(
     db: Option<&Arc<agentos_engine::SqliteStore>>,
+    invoker: Option<Arc<dyn PluginInvoker>>,
     reason: &str,
 ) -> usize {
     let mut suspended_runs = 0usize;
@@ -1592,9 +1597,17 @@ pub async fn drain_and_exit75(
         "G8 优雅重启：排空完成，即将以 exit 75 退出（监督者负责拉起新进程）"
     );
     if std::env::var("AGENTOS_DISABLE_SELF_EXIT").is_err() {
-        tokio::spawn(async {
-            // 让触发方的响应/日志先 flush 再退出。
+        tokio::spawn(async move {
+            // 让触发方的响应/日志先 flush 再清理退出。
             tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+            // §3.3a：exit 前 best-effort 杀全部缓存 sidecar（总预算 2s，
+            // invoker 内部逐 kill 另有各自超时——重启不留孤儿，也不被卡死
+            // 的 kill 拖住退出）。
+            if let Some(invoker) = invoker.as_ref() {
+                let _ =
+                    tokio::time::timeout(std::time::Duration::from_secs(2), invoker.shutdown_all())
+                        .await;
+            }
             std::process::exit(75);
         });
     }
@@ -1619,7 +1632,12 @@ pub async fn drain_and_exit75(
 pub async fn system_restart_handler(
     axum::extract::State(state): axum::extract::State<AppState>,
 ) -> axum::Json<serde_json::Value> {
-    let suspended_runs = drain_and_exit75(state.db.as_ref(), "POST /api/v1/system/restart").await;
+    let suspended_runs = drain_and_exit75(
+        state.db.as_ref(),
+        state.invoker.clone(),
+        "POST /api/v1/system/restart",
+    )
+    .await;
     axum::Json(json!({
         "success": true,
         "message": "内核排空完成，即将退出（exit 75）；监督者将重启进程",
@@ -2014,6 +2032,14 @@ pub async fn plugins_set_enabled_handler(
                     // G3：动态注册随 scope/clear_plugin 结构性收回（dynamic_tools 表
                     // 已于 2026-08-19 退役——动态注册是 state 域数据不落内核，
                     // re-enable 后插件经 on_load/运行时自行重建）。
+                    // §3.3b（0.2 收尾批次 1）：禁用即杀该插件缓存 sidecar——窄口
+                    // kill_sidecar_if_any（只 kill 进程 + 移除缓存，不走 force_unload
+                    // 的 OnUnload 广播/loader.unload/指纹清理，"仅禁用"语义下插件
+                    // 仍在 loader 内、热发现不失效）；sidecar 按调用懒 spawn，reenable
+                    // 后下次调用自然重生。
+                    if let Some(invoker) = state.invoker.as_ref() {
+                        invoker.kill_sidecar_if_any(&plugin_id).await;
+                    }
                 }
             }
             let restart_needed = false; // 双向即时生效（G1）

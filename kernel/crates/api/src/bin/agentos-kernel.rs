@@ -990,11 +990,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         // 函数内部生效（只排空不退出）。watcher 经 env 开关
         // AGENTOS_AUTO_RESTART_ON_CDYLIB_CHANGE（默认开，0 关）自行把关。
         let hook_db = state.db.clone();
+        let hook_invoker = state.invoker.clone();
         let restart_hook: Arc<dyn Fn() + Send + Sync> = Arc::new(move || {
             let db = hook_db.clone();
+            let invoker = hook_invoker.clone();
             tokio::spawn(async move {
                 agentos_api::routes::drain_and_exit75(
                     db.as_ref(),
+                    invoker,
                     "plugin_watcher: InProcess(cdylib) plugin set changed",
                 )
                 .await;

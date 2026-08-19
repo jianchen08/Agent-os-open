@@ -1086,6 +1086,67 @@ impl PluginInvokerImpl {
         }
     }
 
+    /// 内核停机口：drain 全部 `mcp_clients` 并逐个 kill（0.2 收尾 §3.3a）。
+    ///
+    /// 直接仿 [`set_router`] 的 drain+kill 既有模式；差异在两点：
+    /// - **await 内联**：停机路径进程即将退出，不存在 respawn 竞态窗口，无需
+    ///   fire-and-forget——调用方（graceful shutdown / exit 75 排空）等 kill
+    ///   完成再退出，保证零孤儿；
+    /// - **逐 kill 超时保护**：每个 kill（含写锁获取）上限 2s——个别 sidecar
+    ///   卡死（管道阻塞 / kill 挂起）不得拖住退出路径（best-effort，超时记
+    ///   warn 后继续下一个）。
+    ///
+    /// 空（或已 drain 空）缓存 no-op。
+    pub async fn shutdown_all(&self) {
+        let drained: Vec<(String, Arc<tokio::sync::RwLock<McpClient>>)> =
+            self.mcp_clients.write().drain().collect();
+        if drained.is_empty() {
+            return;
+        }
+        let total = drained.len();
+        for (id, client) in drained {
+            // 超时盖住整个「取写锁 + kill」——写锁死锁与 kill 挂起同等会卡退出。
+            let kill_fut = async { client.write().await.kill().await };
+            match tokio::time::timeout(Duration::from_secs(2), kill_fut).await {
+                Ok(Ok(())) => {}
+                Ok(Err(e)) => {
+                    warn!("shutdown_all: best-effort kill of sidecar {id} failed: {e}")
+                }
+                Err(_) => {
+                    warn!("shutdown_all: kill of sidecar {id} timed out (2s), skipping")
+                }
+            }
+        }
+        info!("shutdown_all: drained and killed {total} cached sidecar(s)");
+    }
+
+    /// disable 窄口 kill（0.2 收尾 §3.3b）：`mcp_clients` 移除该插件条目，有则
+    /// kill，无则 no-op。
+    ///
+    /// 刻意**不走 [`Self::force_unload`]**：它含 OnUnload 事件广播 +
+    /// loader.unload + 指纹清理，对"仅禁用"语义过重（插件仍在 loader 内，热
+    /// 发现不失效）；sidecar 本就按调用懒 spawn，kill 后 reenable 下次调用
+    /// 自然重生。kill（含写锁获取）带 2s 超时保护，防个别卡死阻塞 HTTP
+    /// handler。幂等：缓存无条目（从未 spawn / 已是 HTTP 无子进程 / 重复调用）
+    /// 直接返回。
+    pub async fn kill_sidecar_if_any(&self, plugin_id: &str) {
+        let Some(client) = self.mcp_clients.write().remove(plugin_id) else {
+            return;
+        };
+        let kill_fut = async { client.write().await.kill().await };
+        match tokio::time::timeout(Duration::from_secs(2), kill_fut).await {
+            Ok(Ok(())) => info!(
+                "kill_sidecar_if_any: killed sidecar of disabled plugin {plugin_id}"
+            ),
+            Ok(Err(e)) => {
+                warn!("kill_sidecar_if_any: best-effort kill of {plugin_id} failed: {e}")
+            }
+            Err(_) => {
+                warn!("kill_sidecar_if_any: kill of {plugin_id} timed out (2s)")
+            }
+        }
+    }
+
     /// 注入生命周期钩子事件总线（旁路广播，可选）。
     ///
     /// 镜像 [`set_router`] 的 `&self` 注入形态：内核 main 在创建总线后、spawn 任何
@@ -1947,6 +2008,20 @@ impl PluginInvoker for PluginInvokerImpl {
             self.mcp_clients.write().remove(plugin_id);
         }
         Ok(raw)
+    }
+
+    /// 内核停机口（覆盖 trait 默认 no-op）：drain + 逐个 kill 全部缓存 sidecar。
+    ///
+    /// 见 inherent [`PluginInvokerImpl::shutdown_all`]（0.2 收尾 §3.3a）。
+    async fn shutdown_all(&self) {
+        PluginInvokerImpl::shutdown_all(self).await
+    }
+
+    /// disable 窄口 kill（覆盖 trait 默认 no-op）。
+    ///
+    /// 见 inherent [`PluginInvokerImpl::kill_sidecar_if_any`]（0.2 收尾 §3.3b）。
+    async fn kill_sidecar_if_any(&self, plugin_id: &str) {
+        PluginInvokerImpl::kill_sidecar_if_any(self, plugin_id).await
     }
 }
 
@@ -2884,6 +2959,107 @@ mod tests {
             result.is_err(),
             "respawn 后 initialize 必然失败（速死命令），不得返回死实例"
         );
+    }
+
+    /// 构造「长驻不退出」的 stdio 假 sidecar（§3.3 测试辅助）。
+    ///
+    /// connect 只 spawn 不做 MCP 握手，任意可执行命令都能当假进程；
+    /// 选 ping/sleep 是为了它稳定存活 ≥60s（测试窗口内不会自然退出）。
+    async fn spawn_long_lived_stdio_client() -> McpClient {
+        #[cfg(windows)]
+        let (cmd, args): (&str, Vec<&str>) = ("cmd", vec!["/c", "ping", "-n", "60", "127.0.0.1"]);
+        #[cfg(unix)]
+        let (cmd, args): (&str, Vec<&str>) = ("/bin/sh", vec!["-c", "sleep 60"]);
+        let mut client = McpClient::new_stdio(cmd, args.iter().map(|s| s.to_string()).collect());
+        client
+            .connect()
+            .await
+            .expect("spawn 长驻假 sidecar 进程应成功");
+        client
+    }
+
+    #[tokio::test]
+    async fn test_shutdown_all_drains_and_kills_cached_sidecars() {
+        // §3.3a（0.2 收尾批次 1）：内核停机口——mcp_clients 必须**全量 drain**
+        // 且每个缓存 sidecar 进程被真实 kill（Ctrl-C / exit 75 后零孤儿）。
+        // 覆盖两类有区分度的缓存条目：
+        // - stdio sidecar（有子进程）：kill 后进程必须死（性质断言，防假实现只清缓存）；
+        // - HTTP 客户端（无子进程）：kill 是 no-op，drain 不炸（HTTP transport 混存常态）。
+        let invoker = PluginInvokerImpl::new(Arc::new(MockLoader::new()));
+
+        let live = spawn_long_lived_stdio_client().await;
+        assert!(live.is_alive().await, "前置：长驻假 sidecar 必须存活");
+        let live_arc = Arc::new(tokio::sync::RwLock::new(live));
+        invoker
+            .mcp_clients
+            .write()
+            .insert("stdio_live".to_string(), Arc::clone(&live_arc));
+        invoker.mcp_clients.write().insert(
+            "http_cached".to_string(),
+            Arc::new(tokio::sync::RwLock::new(McpClient::new_http(
+                "http://127.0.0.1:9/mcp",
+                HashMap::new(),
+                None,
+            ))),
+        );
+        assert_eq!(invoker.mcp_clients.read().len(), 2, "前置：缓存 2 条");
+
+        invoker.shutdown_all().await;
+
+        assert!(
+            invoker.mcp_clients.read().is_empty(),
+            "shutdown_all 后缓存必须清空（全量 drain）"
+        );
+        assert!(
+            !live_arc.read().await.is_alive().await,
+            "stdio sidecar 进程必须被 kill（不得留孤儿）"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_shutdown_all_noop_when_cache_empty() {
+        // §3.3a 边界：空缓存 no-op 不抛（boot 后从未调用任何插件就停机）。
+        let invoker = PluginInvokerImpl::new(Arc::new(MockLoader::new()));
+        invoker.shutdown_all().await;
+        assert!(invoker.mcp_clients.read().is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_kill_sidecar_if_any_kills_cached_and_noop_when_absent() {
+        // §3.3b（0.2 收尾批次 1）：disable 窄口——
+        // - 有缓存条目：kill 进程 + 移除缓存（reenable 后按调用懒 spawn 重生）；
+        // - 无缓存条目（从未 spawn / HTTP 无子进程）：no-op 不抛。
+        // 两组输入一次覆盖（有/无是同一行为的有区分度两分支）。
+        let invoker = PluginInvokerImpl::new(Arc::new(MockLoader::new()));
+
+        let live = spawn_long_lived_stdio_client().await;
+        assert!(live.is_alive().await, "前置：长驻假 sidecar 必须存活");
+        let live_arc = Arc::new(tokio::sync::RwLock::new(live));
+        invoker
+            .mcp_clients
+            .write()
+            .insert("victim".to_string(), Arc::clone(&live_arc));
+
+        // 无缓存：no-op（不 panic、不影响其他条目）
+        invoker.kill_sidecar_if_any("never_spawned").await;
+        assert!(
+            invoker.mcp_clients.read().get("victim").is_some(),
+            "非目标插件缓存不得被误删"
+        );
+
+        // 有缓存：kill + 移除
+        invoker.kill_sidecar_if_any("victim").await;
+        assert!(
+            invoker.mcp_clients.read().get("victim").is_none(),
+            "目标插件缓存必须移除"
+        );
+        assert!(
+            !live_arc.read().await.is_alive().await,
+            "目标插件 sidecar 进程必须被 kill"
+        );
+
+        // 幂等：再次调用同一 id（已无缓存）仍 no-op 不抛
+        invoker.kill_sidecar_if_any("victim").await;
     }
 
     // ── B2：native 工具调用返回归一单元测试 ──
