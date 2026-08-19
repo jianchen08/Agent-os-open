@@ -26,8 +26,8 @@ use std::sync::Arc;
 
 use agentos_core::traits::{MessageQueryOpts, SessionListFilter, StorageBackend};
 use agentos_core::types::{
-    BlobRecord, Branch, ExecutionRecord, MemoryRecord, MessageRecord, PatchType, PipelineRunInfo,
-    PipelineRunSummary, RunRecord, RunStatus, SessionRecord, StorageError, TraceEntry, UserRecord,
+    BlobRecord, Branch, MessageRecord, PatchType, PipelineRunInfo, RunRecord, RunStatus,
+    SessionRecord, StorageError, TraceEntry, UserRecord,
 };
 use async_trait::async_trait;
 use parking_lot::Mutex;
@@ -94,59 +94,6 @@ CREATE TABLE IF NOT EXISTS sessions (
     last_active_at     TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_sessions_tenant ON sessions(tenant_id, updated_at DESC);
--- 域3：execution_records（M1，对齐 0.1 ExecutionRecordData）。
--- 复合主键 (record_id, sequence)：同一 AI 消息多轮迭代共享 record_id，按 sequence 区分。
--- 聚簇/分页键 (pipeline_run_id, sequence) 对齐 0.1 list_by_pipeline 游标分页。
-CREATE TABLE IF NOT EXISTS execution_records (
-    record_id         TEXT NOT NULL,
-    sequence          INTEGER NOT NULL,
-    pipeline_run_id   TEXT NOT NULL,
-    record_type       TEXT NOT NULL DEFAULT 'ai',
-    iteration         INTEGER NOT NULL DEFAULT 0,
-    role              TEXT NOT NULL DEFAULT '',
-    content           TEXT NOT NULL DEFAULT '',
-    name              TEXT,
-    tool_call_id      TEXT,
-    tool_input        TEXT,
-    thinking_content  TEXT,
-    tool_calls_json   TEXT,
-    attachments_json  TEXT,
-    container_task_id TEXT,
-    error             TEXT,
-    client_message_id TEXT,
-    tenant_id         TEXT NOT NULL DEFAULT 'default',
-    created_at        TEXT NOT NULL,
-    PRIMARY KEY (record_id, sequence)
-);
-CREATE INDEX IF NOT EXISTS idx_exec_pipeline_seq ON execution_records(pipeline_run_id, tenant_id, sequence);
--- 域4：pipeline_run_summaries（M1，对齐 0.1 PipelineRunSummary）。
-CREATE TABLE IF NOT EXISTS pipeline_run_summaries (
-    run_id           TEXT PRIMARY KEY,
-    thread_id        TEXT NOT NULL DEFAULT '',
-    total_iterations INTEGER NOT NULL DEFAULT 0,
-    total_tokens     TEXT NOT NULL DEFAULT '{}',
-    total_seconds    REAL NOT NULL DEFAULT 0,
-    total_records    INTEGER NOT NULL DEFAULT 0,
-    status           TEXT NOT NULL DEFAULT '',
-    final_output     TEXT NOT NULL DEFAULT '',
-    error            TEXT,
-    review_status    TEXT NOT NULL DEFAULT 'pending',
-    reviewed_at      TEXT,
-    tenant_id        TEXT NOT NULL DEFAULT 'default',
-    created_at       TEXT NOT NULL
-);
-CREATE INDEX IF NOT EXISTS idx_summaries_tenant ON pipeline_run_summaries(tenant_id, created_at DESC);
--- 域5：memory（M1，对齐 0.1 MemoryStore.memories）。0.1 为进程内字典无持久化，下沉内核落 SQLite。
-CREATE TABLE IF NOT EXISTS memory (
-    id          TEXT PRIMARY KEY,
-    content     TEXT NOT NULL,
-    memory_type TEXT NOT NULL DEFAULT 'episode',
-    tags        TEXT NOT NULL DEFAULT '[]',
-    score       REAL NOT NULL DEFAULT 0,
-    tenant_id   TEXT NOT NULL DEFAULT 'default',
-    created_at  TEXT NOT NULL
-);
-CREATE INDEX IF NOT EXISTS idx_memory_tenant ON memory(tenant_id, memory_type);
 -- 域6：users（0.5.0 完整用户系统的最小持久化地基）。
 -- 一用户一租户：tenant_id = user_id（admin 种子 = 'default'）。username 跨租户全局唯一。
 -- 密码明文（DEBT: 0.5.0 替换为哈希）。
@@ -524,6 +471,13 @@ impl SqliteStore {
 
     fn init(conn: &Connection) -> Result<(), StorageError> {
         conn.execute_batch("PRAGMA journal_mode=WAL;")?;
+        // 退役 0.1 投影表（2026-08-19 用户裁定：不留两套真值）：执行记录/会话消耗账本
+        // 由 messages 真值派生读路径替代（调试中心执行记录/LLM 请求页），记忆面归
+        // hindsight 自持存储。三表零生产者、全库零行；必须在 DDL 之前 DROP——存量
+        // 残留表结构与现行 DDL 的 CREATE INDEX 不兼容会直接炸 init。
+        for retired in ["execution_records", "pipeline_run_summaries", "memory"] {
+            conn.execute(&format!("DROP TABLE IF EXISTS {retired}"), [])?;
+        }
         conn.execute_batch(DDL)?;
         migrate_drop_legacy_message_slots(conn)?;
         // 零兼容：0.2 消息真值 = message_slots ⨝ blobs（见文件头注释），旧 messages
@@ -718,9 +672,10 @@ impl SqliteStore {
 
     /// 管道运行快照列表（统一管道管理查询，`GET /api/v1/pipelines/runs`）。
     ///
-    /// runs × message_slots × pipeline_sessions × pipeline_run_summaries 四表联结：
+    /// runs × message_slots × pipeline_sessions 三表联结：
     /// run → pipeline 映射经 message_slots.run_id（op-based 落槽时写入），pipeline → 会话
-    /// 经 pipeline_sessions，消耗账本经 pipeline_run_summaries（sidecar 汇总，可为空）。
+    /// 经 pipeline_sessions。0.1 的 pipeline_run_summaries 消耗账本投影已退役
+    /// （2026-08-19），消耗真值在 state 的 track.total_tokens。
     /// 无消息槽的 run（旧引擎 start_run 占位/孤儿）被过滤——只呈现真实执行的管道。
     /// 按 started_at（created_at）倒序；`status` 传 None 返回全部状态；limit 由调用方给。
     pub fn list_pipelines_inner(
@@ -732,8 +687,7 @@ impl SqliteStore {
         let conn = self.conn.lock();
         let mut stmt = conn.prepare(
             "SELECT r.run_id, r.status, r.created_at, r.ended_at, \
-                    ms.pipeline_id, ps.thread_id, \
-                    s.total_tokens, s.total_seconds \
+                    ms.pipeline_id, ps.thread_id \
              FROM runs r \
              LEFT JOIN (SELECT run_id, MAX(pipeline_id) AS pipeline_id \
                         FROM message_slots \
@@ -741,7 +695,6 @@ impl SqliteStore {
                         GROUP BY run_id) ms ON ms.run_id = r.run_id \
              LEFT JOIN pipeline_sessions ps \
                     ON ps.pipeline_id = ms.pipeline_id AND ps.tenant_id = ?1 \
-             LEFT JOIN pipeline_run_summaries s ON s.run_id = r.run_id \
              WHERE r.tenant_id = ?1 \
                AND ms.pipeline_id IS NOT NULL \
                AND (?2 IS NULL OR r.status = ?2) \
@@ -750,7 +703,6 @@ impl SqliteStore {
         )?;
         let rows = stmt.query_map(rusqlite::params![tenant_id, status, limit], |row| {
             let status_str: String = row.get(1)?;
-            let tokens_str: Option<String> = row.get(6)?;
             Ok(PipelineRunInfo {
                 run_id: row.get(0)?,
                 status: match status_str.as_str() {
@@ -763,10 +715,6 @@ impl SqliteStore {
                 ended_at: row.get(3)?,
                 pipeline_id: row.get(4)?,
                 thread_id: row.get(5)?,
-                total_tokens: tokens_str
-                    .filter(|s| !s.is_empty())
-                    .and_then(|s| serde_json::from_str(&s).ok()),
-                total_seconds: row.get(7)?,
             })
         })?;
         let mut out = Vec::new();
@@ -1353,8 +1301,8 @@ impl SqliteStore {
     /// 级联删除会话及其全部关联数据（主管道 + 子任务管道的 messages/traces/runs/state）。
     ///
     /// 通过 `pipeline_sessions` 映射表按 thread_id 找到该会话下所有 pipeline_id
-    /// （主管道 + 子管道，无需父子关系），再级联清理它们产生的 messages / execution_records /
-    /// traces / branches / pipeline_run_summaries / runs，最后删映射表与 sessions 行。
+    /// （主管道 + 子管道，无需父子关系），再级联清理它们产生的 messages / traces /
+    /// branches / runs，最后删映射表与 sessions 行。
     /// 无记录时同样返回 Ok(())（幂等）。tenant_id 由调用方在 spawn_blocking 前解析。
     /// 单次事务包裹，失败回滚。
     fn delete_session_inner(&self, thread_id: &str, tenant_id: &str) -> Result<(), StorageError> {
@@ -1408,14 +1356,6 @@ impl SqliteStore {
                 .map_err(|e| StorageError::Database(format!("commit: {e}")));
         }
 
-        // 2. execution_records 直接按 pipeline_run_id 删（与 pipeline_id 同义）
-        Self::delete_in_clause(
-            &tx,
-            "DELETE FROM execution_records WHERE pipeline_run_id IN ({placeholders}) AND tenant_id = ?",
-            &pipeline_ids,
-            tenant_id,
-        )?;
-
         // 3. 收集这些 pipeline_id 产生的 run_id（traces/branches/summaries/runs 按 run_id 删）
         let run_ids: Vec<String> = {
             let placeholders = (0..pipeline_ids.len())
@@ -1456,12 +1396,6 @@ impl SqliteStore {
             Self::delete_in_clause(
                 &tx,
                 "DELETE FROM branches WHERE run_id IN ({placeholders})",
-                &run_ids,
-                "",
-            )?;
-            Self::delete_in_clause(
-                &tx,
-                "DELETE FROM pipeline_run_summaries WHERE run_id IN ({placeholders})",
                 &run_ids,
                 "",
             )?;
@@ -2036,466 +1970,6 @@ impl SqliteStore {
         f(&conn)
     }
 
-    // ── 域3/4/5：execution_records / summaries / memory（M1）──────────
-
-    /// 从查询行构造 ExecutionRecord（JSON 列反序列化）。
-    /// 列顺序须与各 SELECT 语句一致：
-    /// record_id, sequence, pipeline_run_id, record_type, iteration, role, content,
-    /// name, tool_call_id, tool_input, thinking_content, tool_calls_json, attachments_json,
-    /// container_task_id, error, client_message_id, created_at
-    fn row_to_execution_record(row: &rusqlite::Row<'_>) -> rusqlite::Result<ExecutionRecord> {
-        let tool_input = row
-            .get::<_, Option<String>>(9)?
-            .as_deref()
-            .and_then(|s| serde_json::from_str(s).ok());
-        Ok(ExecutionRecord {
-            record_id: row.get(0)?,
-            sequence: row.get::<_, i64>(1)? as u32,
-            pipeline_run_id: row.get(2)?,
-            record_type: row.get(3)?,
-            iteration: row.get::<_, i64>(4)? as u32,
-            role: row.get(5)?,
-            content: row.get(6)?,
-            name: row.get(7)?,
-            tool_call_id: row.get(8)?,
-            tool_input,
-            thinking_content: row.get(10)?,
-            tool_calls_json: row.get(11)?,
-            attachments_json: row.get(12)?,
-            container_task_id: row.get(13)?,
-            error: row.get(14)?,
-            client_message_id: row.get(15)?,
-            created_at: row.get(16)?,
-        })
-    }
-
-    /// 追加/覆盖一条执行记录（composite key）。
-    /// tenant_id 由调用方在 spawn_blocking 前解析（task_local 不跨 spawn_blocking）。
-    fn append_execution_record_inner(
-        &self,
-        record: &ExecutionRecord,
-        tenant_id: &str,
-    ) -> Result<(), StorageError> {
-        let tool_input_json = record
-            .tool_input
-            .as_ref()
-            .map(|v| serde_json::to_string(v).unwrap_or_else(|_| "null".to_string()));
-        let conn = self.conn.lock();
-        conn.execute(
-            "INSERT INTO execution_records (
-                record_id, sequence, pipeline_run_id, record_type, iteration, role, content,
-                name, tool_call_id, tool_input, thinking_content, tool_calls_json,
-                attachments_json, container_task_id, error, client_message_id, tenant_id,
-                created_at
-             )
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)
-             ON CONFLICT(record_id, sequence) DO UPDATE SET
-                pipeline_run_id = excluded.pipeline_run_id,
-                record_type = excluded.record_type,
-                iteration = excluded.iteration,
-                role = excluded.role,
-                content = excluded.content,
-                name = excluded.name,
-                tool_call_id = excluded.tool_call_id,
-                tool_input = excluded.tool_input,
-                thinking_content = excluded.thinking_content,
-                tool_calls_json = excluded.tool_calls_json,
-                attachments_json = excluded.attachments_json,
-                container_task_id = excluded.container_task_id,
-                error = excluded.error,
-                client_message_id = excluded.client_message_id,
-                created_at = excluded.created_at",
-            rusqlite::params![
-                record.record_id,
-                record.sequence as i64,
-                record.pipeline_run_id,
-                record.record_type,
-                record.iteration as i64,
-                record.role,
-                record.content,
-                record.name,
-                record.tool_call_id,
-                tool_input_json,
-                record.thinking_content,
-                record.tool_calls_json,
-                record.attachments_json,
-                record.container_task_id,
-                record.error,
-                record.client_message_id,
-                tenant_id,
-                record.created_at,
-            ],
-        )?;
-        Ok(())
-    }
-
-    /// 按 pipeline_run_id 游标分页查询执行记录。
-    fn list_execution_records_inner(
-        &self,
-        pipeline_run_id: &str,
-        opts: &MessageQueryOpts,
-        tenant_id: &str,
-    ) -> Result<Vec<ExecutionRecord>, StorageError> {
-        let conn = self.conn.lock();
-        let mut sql = String::from(
-            "SELECT record_id, sequence, pipeline_run_id, record_type, iteration, role, content,
-                    name, tool_call_id, tool_input, thinking_content, tool_calls_json,
-                    attachments_json, container_task_id, error, client_message_id, created_at
-             FROM execution_records WHERE pipeline_run_id = ? AND tenant_id = ?",
-        );
-        let mut params: Vec<Box<dyn rusqlite::ToSql>> =
-            vec![Box::new(pipeline_run_id.to_string()), Box::new(tenant_id)];
-        if let Some(s) = opts.before_sequence {
-            sql.push_str(" AND sequence < ?");
-            params.push(Box::new(s as i64));
-        }
-        if let Some(s) = opts.after_sequence {
-            sql.push_str(" AND sequence > ?");
-            params.push(Box::new(s as i64));
-        }
-        sql.push_str(" ORDER BY sequence ASC");
-        if let Some(lim) = opts.limit {
-            sql.push_str(" LIMIT ?");
-            params.push(Box::new(lim as i64));
-        }
-        let mut stmt = conn.prepare(&sql)?;
-        let param_refs: Vec<&dyn rusqlite::ToSql> = params.iter().map(|p| p.as_ref()).collect();
-        let rows = stmt.query_map(param_refs.as_slice(), Self::row_to_execution_record)?;
-        rows.into_iter()
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(StorageError::from)
-    }
-
-    /// 统计某 pipeline_run_id 的执行记录数。
-    fn count_execution_records_inner(
-        &self,
-        pipeline_run_id: &str,
-        tenant_id: &str,
-    ) -> Result<u64, StorageError> {
-        let conn = self.conn.lock();
-        let count: i64 = conn.query_row(
-            "SELECT COUNT(*) FROM execution_records WHERE pipeline_run_id = ?1 AND tenant_id = ?2",
-            rusqlite::params![pipeline_run_id, tenant_id],
-            |row| row.get(0),
-        )?;
-        Ok(count as u64)
-    }
-
-    /// 删除某 pipeline_run_id 的全部执行记录，返回删除条数。
-    fn delete_execution_records_by_session_inner(
-        &self,
-        pipeline_run_id: &str,
-        tenant_id: &str,
-    ) -> Result<u64, StorageError> {
-        let conn = self.conn.lock();
-        let n = conn.execute(
-            "DELETE FROM execution_records WHERE pipeline_run_id = ?1 AND tenant_id = ?2",
-            rusqlite::params![pipeline_run_id, tenant_id],
-        )?;
-        Ok(n as u64)
-    }
-
-    /// 从查询行构造 PipelineRunSummary（total_tokens JSON 反序列化）。
-    fn row_to_run_summary(row: &rusqlite::Row<'_>) -> rusqlite::Result<PipelineRunSummary> {
-        let total_tokens_str: String = row.get(3)?;
-        // 写侧 save_run_summary_inner 用 to_string 序列化（内部往返）；
-        // 解析失败是数据损坏，报错而非静默清空统计。
-        let total_tokens = serde_json::from_str(&total_tokens_str).map_err(|e| {
-            rusqlite::Error::FromSqlConversionFailure(3, rusqlite::types::Type::Text, Box::new(e))
-        })?;
-        Ok(PipelineRunSummary {
-            run_id: row.get(0)?,
-            thread_id: row.get(1)?,
-            total_iterations: row.get::<_, i64>(2)? as u32,
-            total_tokens,
-            total_seconds: row.get(4)?,
-            total_records: row.get::<_, i64>(5)? as u32,
-            status: row.get(6)?,
-            final_output: row.get(7)?,
-            error: row.get(8)?,
-            review_status: row.get(9)?,
-            reviewed_at: row.get(10)?,
-            created_at: row.get(12)?,
-        })
-    }
-
-    /// upsert 管道运行汇总。
-    fn save_run_summary_inner(
-        &self,
-        summary: &PipelineRunSummary,
-        tenant_id: &str,
-    ) -> Result<(), StorageError> {
-        let total_tokens_json = serde_json::to_string(&summary.total_tokens)
-            .map_err(|e| StorageError::Database(format!("serialize total_tokens: {e}")))?;
-        let conn = self.conn.lock();
-        conn.execute(
-            "INSERT INTO pipeline_run_summaries (
-                run_id, thread_id, total_iterations, total_tokens, total_seconds, total_records,
-                status, final_output, error, review_status, reviewed_at, tenant_id, created_at
-             )
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
-             ON CONFLICT(run_id) DO UPDATE SET
-                thread_id = excluded.thread_id,
-                total_iterations = excluded.total_iterations,
-                total_tokens = excluded.total_tokens,
-                total_seconds = excluded.total_seconds,
-                total_records = excluded.total_records,
-                status = excluded.status,
-                final_output = excluded.final_output,
-                error = excluded.error,
-                review_status = excluded.review_status,
-                reviewed_at = excluded.reviewed_at,
-                created_at = excluded.created_at",
-            rusqlite::params![
-                summary.run_id,
-                summary.thread_id,
-                summary.total_iterations as i64,
-                total_tokens_json,
-                summary.total_seconds,
-                summary.total_records as i64,
-                summary.status,
-                summary.final_output,
-                summary.error,
-                summary.review_status,
-                summary.reviewed_at,
-                tenant_id,
-                summary.created_at,
-            ],
-        )?;
-        Ok(())
-    }
-
-    /// 取单个汇总。
-    fn get_run_summary_inner(
-        &self,
-        run_id: &str,
-        tenant_id: &str,
-    ) -> Result<Option<PipelineRunSummary>, StorageError> {
-        let conn = self.conn.lock();
-        let row = conn.query_row(
-            "SELECT run_id, thread_id, total_iterations, total_tokens, total_seconds,
-                    total_records, status, final_output, error, review_status, reviewed_at,
-                    tenant_id, created_at
-             FROM pipeline_run_summaries WHERE run_id = ?1 AND tenant_id = ?2",
-            rusqlite::params![run_id, tenant_id],
-            Self::row_to_run_summary,
-        );
-        match row {
-            Ok(s) => Ok(Some(s)),
-            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
-            Err(e) => Err(e.into()),
-        }
-    }
-
-    /// 局部更新汇总字段（updates 为对象，键=字段名）。run_id 不存在返回 NotFound。
-    fn update_run_summary_inner(
-        &self,
-        run_id: &str,
-        updates: &serde_json::Value,
-        tenant_id: &str,
-    ) -> Result<(), StorageError> {
-        let obj = updates
-            .as_object()
-            .ok_or_else(|| StorageError::Serialization("updates must be a JSON object".into()))?;
-        // 取现有记录（拿 total_tokens 整体重写等），不存在则报错
-        let mut existing = self
-            .get_run_summary_inner(run_id, tenant_id)?
-            .ok_or_else(|| StorageError::NotFound(format!("run summary not found: {run_id}")))?;
-        let mut total_tokens = existing.total_tokens.clone();
-        let total_tokens_obj = total_tokens.as_object().cloned().unwrap_or_default();
-        for (k, v) in obj {
-            match k.as_str() {
-                "thread_id" => existing.thread_id = v.as_str().unwrap_or("").to_string(),
-                "total_iterations" => existing.total_iterations = v.as_u64().unwrap_or(0) as u32,
-                "total_seconds" => existing.total_seconds = v.as_f64().unwrap_or(0.0),
-                "total_records" => existing.total_records = v.as_u64().unwrap_or(0) as u32,
-                "status" => existing.status = v.as_str().unwrap_or("").to_string(),
-                "final_output" => existing.final_output = v.as_str().unwrap_or("").to_string(),
-                "error" => existing.error = v.as_str().map(|s| s.to_string()),
-                "review_status" => existing.review_status = v.as_str().unwrap_or("").to_string(),
-                "reviewed_at" => existing.reviewed_at = v.as_str().map(|s| s.to_string()),
-                "total_tokens" => {
-                    if let Some(o) = v.as_object() {
-                        let mut merged = total_tokens_obj.clone();
-                        for (tk, tv) in o {
-                            merged.insert(tk.clone(), tv.clone());
-                        }
-                        total_tokens = serde_json::Value::Object(merged);
-                    }
-                }
-                _ => { /* 未知字段忽略，对齐 0.1 setattr 宽松语义 */ }
-            }
-        }
-        existing.total_tokens = total_tokens;
-        self.save_run_summary_inner(&existing, tenant_id)
-    }
-
-    /// 列汇总，新创建优先（created_at DESC）。limit=None 取全部。
-    fn list_run_summaries_inner(
-        &self,
-        limit: Option<usize>,
-        tenant_id: &str,
-    ) -> Result<Vec<PipelineRunSummary>, StorageError> {
-        let conn = self.conn.lock();
-        let mut sql = String::from(
-            "SELECT run_id, thread_id, total_iterations, total_tokens, total_seconds,
-                    total_records, status, final_output, error, review_status, reviewed_at,
-                    tenant_id, created_at
-             FROM pipeline_run_summaries WHERE tenant_id = ? ORDER BY created_at DESC",
-        );
-        let mut params: Vec<Box<dyn rusqlite::ToSql>> = vec![Box::new(tenant_id)];
-        if let Some(lim) = limit {
-            sql.push_str(" LIMIT ?");
-            params.push(Box::new(lim as i64));
-        }
-        let mut stmt = conn.prepare(&sql)?;
-        let param_refs: Vec<&dyn rusqlite::ToSql> = params.iter().map(|p| p.as_ref()).collect();
-        let rows = stmt.query_map(param_refs.as_slice(), Self::row_to_run_summary)?;
-        rows.into_iter()
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(StorageError::from)
-    }
-
-    /// 从查询行构造 MemoryRecord（tags JSON 反序列化）。
-    fn row_to_memory(row: &rusqlite::Row<'_>) -> rusqlite::Result<MemoryRecord> {
-        let tags_str: String = row.get(3)?;
-        // 写侧 create_memory_inner 用 to_string 序列化（内部往返）；
-        // 解析失败是数据损坏，报错而非静默清空。
-        let tags = serde_json::from_str(&tags_str).map_err(|e| {
-            rusqlite::Error::FromSqlConversionFailure(3, rusqlite::types::Type::Text, Box::new(e))
-        })?;
-        Ok(MemoryRecord {
-            id: row.get(0)?,
-            content: row.get(1)?,
-            memory_type: row.get(2)?,
-            tags,
-            score: row.get::<_, Option<f64>>(4)?.unwrap_or(0.0),
-            created_at: row.get(6)?,
-        })
-    }
-
-    /// 创建记忆条目（id 已存在则替换）。
-    fn create_memory_inner(
-        &self,
-        memory: &MemoryRecord,
-        tenant_id: &str,
-    ) -> Result<(), StorageError> {
-        let tags_json = serde_json::to_string(&memory.tags)
-            .map_err(|e| StorageError::Database(format!("serialize tags: {e}")))?;
-        let conn = self.conn.lock();
-        conn.execute(
-            "INSERT INTO memory (id, content, memory_type, tags, score, tenant_id, created_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
-             ON CONFLICT(id) DO UPDATE SET
-                content = excluded.content,
-                memory_type = excluded.memory_type,
-                tags = excluded.tags,
-                score = excluded.score,
-                created_at = excluded.created_at",
-            rusqlite::params![
-                memory.id,
-                memory.content,
-                memory.memory_type,
-                tags_json,
-                memory.score,
-                tenant_id,
-                memory.created_at,
-            ],
-        )?;
-        Ok(())
-    }
-
-    /// 取单条记忆。
-    fn get_memory_inner(
-        &self,
-        id: &str,
-        tenant_id: &str,
-    ) -> Result<Option<MemoryRecord>, StorageError> {
-        let conn = self.conn.lock();
-        let row = conn.query_row(
-            "SELECT id, content, memory_type, tags, score, tenant_id, created_at
-             FROM memory WHERE id = ?1 AND tenant_id = ?2",
-            rusqlite::params![id, tenant_id],
-            Self::row_to_memory,
-        );
-        match row {
-            Ok(m) => Ok(Some(m)),
-            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
-            Err(e) => Err(e.into()),
-        }
-    }
-
-    /// 列记忆（memory_type 可过滤，limit/offset 分页）。
-    fn list_memory_inner(
-        &self,
-        memory_type: Option<&str>,
-        limit: usize,
-        offset: usize,
-        tenant_id: &str,
-    ) -> Result<Vec<MemoryRecord>, StorageError> {
-        let conn = self.conn.lock();
-        // 用位置无关的参数列表：按出现顺序绑定，LIMIT/OFFSET 用后续占位符
-        let mut sql = String::from(
-            "SELECT id, content, memory_type, tags, score, tenant_id, created_at
-             FROM memory WHERE tenant_id = ?",
-        );
-        let mut params: Vec<Box<dyn rusqlite::ToSql>> = vec![Box::new(tenant_id)];
-        if let Some(mt) = memory_type {
-            sql.push_str(" AND memory_type = ?");
-            params.push(Box::new(mt.to_string()));
-        }
-        sql.push_str(" ORDER BY created_at DESC LIMIT ? OFFSET ?");
-        params.push(Box::new(limit as i64));
-        params.push(Box::new(offset as i64));
-        let mut stmt = conn.prepare(&sql)?;
-        let param_refs: Vec<&dyn rusqlite::ToSql> = params.iter().map(|p| p.as_ref()).collect();
-        let rows = stmt.query_map(param_refs.as_slice(), Self::row_to_memory)?;
-        rows.into_iter()
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(StorageError::from)
-    }
-
-    /// 关键词搜索记忆（评分=匹配次数/内容长度，倒序取 top_k）。
-    fn search_memory_inner(
-        &self,
-        query: &str,
-        top_k: usize,
-        tenant_id: &str,
-    ) -> Result<Vec<MemoryRecord>, StorageError> {
-        let all = self.list_memory_inner(None, usize::MAX, 0, tenant_id)?;
-        let query_lower = query.to_lowercase();
-        let mut scored: Vec<MemoryRecord> = all
-            .into_iter()
-            .filter_map(|mut m| {
-                let content_lower = m.content.to_lowercase();
-                if content_lower.contains(&query_lower) {
-                    let count = content_lower.matches(&query_lower).count() as f64;
-                    m.score =
-                        (count / content_lower.len().max(1) as f64 * 10000.0).round() / 10000.0;
-                    Some(m)
-                } else {
-                    None
-                }
-            })
-            .collect();
-        scored.sort_by(|a, b| {
-            b.score
-                .partial_cmp(&a.score)
-                .unwrap_or(std::cmp::Ordering::Equal)
-        });
-        scored.truncate(top_k);
-        Ok(scored)
-    }
-
-    /// 删除记忆，返回是否删除成功。
-    fn delete_memory_inner(&self, id: &str, tenant_id: &str) -> Result<bool, StorageError> {
-        let conn = self.conn.lock();
-        let n = conn.execute(
-            "DELETE FROM memory WHERE id = ?1 AND tenant_id = ?2",
-            rusqlite::params![id, tenant_id],
-        )?;
-        Ok(n > 0)
-    }
 }
 
 /// spawn_blocking join 失败（阻塞任务 panic / 被取消）→ [`StorageError`] 的统一转换。
@@ -2958,161 +2432,6 @@ impl StorageBackend for SqliteStore {
         .map_err(join_err)?
     }
 
-    // ── 域3/4/5：execution_records / summaries / memory（M1）──────────
-    // 注意：tenant_id 必须在 spawn_blocking 之前解析——tokio::task_local 不跨 spawn_blocking。
-    async fn append_execution_record(&self, record: &ExecutionRecord) -> Result<(), StorageError> {
-        let tenant_id = agentos_tenant::current_or_default("default").tenant_id;
-        let this = self.clone();
-        let record = record.clone();
-        tokio::task::spawn_blocking(move || this.append_execution_record_inner(&record, &tenant_id))
-            .await
-            .map_err(join_err)?
-    }
-
-    async fn list_execution_records(
-        &self,
-        pipeline_run_id: &str,
-        opts: MessageQueryOpts,
-    ) -> Result<Vec<ExecutionRecord>, StorageError> {
-        let tenant_id = agentos_tenant::current_or_default("default").tenant_id;
-        let this = self.clone();
-        let pipeline_run_id = pipeline_run_id.to_string();
-        tokio::task::spawn_blocking(move || {
-            this.list_execution_records_inner(&pipeline_run_id, &opts, &tenant_id)
-        })
-        .await
-        .map_err(join_err)?
-    }
-
-    async fn count_execution_records(&self, pipeline_run_id: &str) -> Result<u64, StorageError> {
-        let tenant_id = agentos_tenant::current_or_default("default").tenant_id;
-        let this = self.clone();
-        let pipeline_run_id = pipeline_run_id.to_string();
-        tokio::task::spawn_blocking(move || {
-            this.count_execution_records_inner(&pipeline_run_id, &tenant_id)
-        })
-        .await
-        .map_err(join_err)?
-    }
-
-    async fn delete_execution_records_by_session(
-        &self,
-        pipeline_run_id: &str,
-    ) -> Result<u64, StorageError> {
-        let tenant_id = agentos_tenant::current_or_default("default").tenant_id;
-        let this = self.clone();
-        let pipeline_run_id = pipeline_run_id.to_string();
-        tokio::task::spawn_blocking(move || {
-            this.delete_execution_records_by_session_inner(&pipeline_run_id, &tenant_id)
-        })
-        .await
-        .map_err(join_err)?
-    }
-
-    async fn save_run_summary(&self, summary: &PipelineRunSummary) -> Result<(), StorageError> {
-        let tenant_id = agentos_tenant::current_or_default("default").tenant_id;
-        let this = self.clone();
-        let summary = summary.clone();
-        tokio::task::spawn_blocking(move || this.save_run_summary_inner(&summary, &tenant_id))
-            .await
-            .map_err(join_err)?
-    }
-
-    async fn get_run_summary(
-        &self,
-        run_id: &str,
-    ) -> Result<Option<PipelineRunSummary>, StorageError> {
-        let tenant_id = agentos_tenant::current_or_default("default").tenant_id;
-        let this = self.clone();
-        let run_id = run_id.to_string();
-        tokio::task::spawn_blocking(move || this.get_run_summary_inner(&run_id, &tenant_id))
-            .await
-            .map_err(join_err)?
-    }
-
-    async fn update_run_summary(
-        &self,
-        run_id: &str,
-        updates: &serde_json::Value,
-    ) -> Result<(), StorageError> {
-        let tenant_id = agentos_tenant::current_or_default("default").tenant_id;
-        let this = self.clone();
-        let run_id = run_id.to_string();
-        let updates = updates.clone();
-        tokio::task::spawn_blocking(move || {
-            this.update_run_summary_inner(&run_id, &updates, &tenant_id)
-        })
-        .await
-        .map_err(join_err)?
-    }
-
-    async fn list_run_summaries(
-        &self,
-        limit: Option<usize>,
-    ) -> Result<Vec<PipelineRunSummary>, StorageError> {
-        let tenant_id = agentos_tenant::current_or_default("default").tenant_id;
-        let this = self.clone();
-        tokio::task::spawn_blocking(move || this.list_run_summaries_inner(limit, &tenant_id))
-            .await
-            .map_err(join_err)?
-    }
-
-    async fn create_memory(&self, memory: &MemoryRecord) -> Result<(), StorageError> {
-        let tenant_id = agentos_tenant::current_or_default("default").tenant_id;
-        let this = self.clone();
-        let memory = memory.clone();
-        tokio::task::spawn_blocking(move || this.create_memory_inner(&memory, &tenant_id))
-            .await
-            .map_err(join_err)?
-    }
-
-    async fn get_memory(&self, id: &str) -> Result<Option<MemoryRecord>, StorageError> {
-        let tenant_id = agentos_tenant::current_or_default("default").tenant_id;
-        let this = self.clone();
-        let id = id.to_string();
-        tokio::task::spawn_blocking(move || this.get_memory_inner(&id, &tenant_id))
-            .await
-            .map_err(join_err)?
-    }
-
-    async fn list_memory(
-        &self,
-        memory_type: Option<&str>,
-        limit: usize,
-        offset: usize,
-    ) -> Result<Vec<MemoryRecord>, StorageError> {
-        let tenant_id = agentos_tenant::current_or_default("default").tenant_id;
-        let this = self.clone();
-        let memory_type = memory_type.map(|s| s.to_string());
-        tokio::task::spawn_blocking(move || {
-            this.list_memory_inner(memory_type.as_deref(), limit, offset, &tenant_id)
-        })
-        .await
-        .map_err(join_err)?
-    }
-
-    async fn search_memory(
-        &self,
-        query: &str,
-        top_k: usize,
-    ) -> Result<Vec<MemoryRecord>, StorageError> {
-        let tenant_id = agentos_tenant::current_or_default("default").tenant_id;
-        let this = self.clone();
-        let query = query.to_string();
-        tokio::task::spawn_blocking(move || this.search_memory_inner(&query, top_k, &tenant_id))
-            .await
-            .map_err(join_err)?
-    }
-
-    async fn delete_memory(&self, id: &str) -> Result<bool, StorageError> {
-        let tenant_id = agentos_tenant::current_or_default("default").tenant_id;
-        let this = self.clone();
-        let id = id.to_string();
-        tokio::task::spawn_blocking(move || this.delete_memory_inner(&id, &tenant_id))
-            .await
-            .map_err(join_err)?
-    }
-
     // ── 域6：users async wrapper（0.5.0 最小持久化地基）──────────────
     // 注意：get_user_by_username / list_users 跨租户查询，不解析 task_local tenant。
     // get_user_by_id 按 tenant 隔离（与消息/会话一致，task_local 在 spawn_blocking 前解析）。
@@ -3354,23 +2673,6 @@ mod tests {
                 })],
             )
             .unwrap();
-        store
-            .save_run_summary(&PipelineRunSummary {
-                run_id: "run_1".to_string(),
-                thread_id: "thread_1".to_string(),
-                total_iterations: 1,
-                total_tokens: json!({"input": 10, "output": 5, "total": 15}),
-                total_seconds: 3.5,
-                total_records: 1,
-                status: "running".to_string(),
-                final_output: String::new(),
-                error: None,
-                review_status: "pending".to_string(),
-                reviewed_at: None,
-                created_at: String::new(),
-            })
-            .await
-            .unwrap();
 
         // 占位 run：无消息槽 → 不应出现在管道快照
         store.create_run("run_orphan", "hash_2", "default").unwrap();
@@ -3383,13 +2685,6 @@ mod tests {
         assert_eq!(r.thread_id.as_deref(), Some("thread_1"));
         assert_eq!(r.status, RunStatus::Running);
         assert!(r.ended_at.is_none());
-        let total = r
-            .total_tokens
-            .as_ref()
-            .and_then(|v| v.get("total"))
-            .and_then(|v| v.as_u64());
-        assert_eq!(total, Some(15));
-        assert_eq!(r.total_seconds, Some(3.5));
 
         // status 过滤：completed 尚无为空；完成后可查到且 ended_at 就位
         let completed = store
@@ -3645,7 +2940,7 @@ mod tests {
         store.delete_session("thread_1").await.unwrap();
     }
 
-    /// 验证删除会话级联：主管道 + 子任务管道的 messages/traces/runs/execution_records 全清，
+    /// 验证删除会话级联：主管道 + 子任务管道的 messages/traces/runs 全清，
     /// 映射表同步清理，且不误删其他会话数据。
     #[tokio::test]
     async fn test_delete_session_cascade_includes_sub_pipelines() {
@@ -3950,338 +3245,6 @@ mod tests {
         .await;
     }
 
-    // ── M1：execution_records / summaries / memory 测试 ──────────────
-
-    /// 执行记录：复合主键（record_id+sequence）、游标分页、count、删除。
-    #[tokio::test]
-    async fn test_execution_record_crud_and_pagination() {
-        use agentos_core::traits::MessageQueryOpts;
-        let store = SqliteStore::open_memory().unwrap();
-        let now = chrono::Utc::now().to_rfc3339();
-
-        // 同一 record_id 的两轮迭代（共享 record_id，sequence 不同）——复合主键不丢
-        for seq in 0..2u32 {
-            let r = ExecutionRecord {
-                record_id: "rec_a".to_string(),
-                pipeline_run_id: "pipe_1".to_string(),
-                record_type: "ai".to_string(),
-                sequence: seq,
-                iteration: seq,
-                role: "assistant".to_string(),
-                content: format!("reply iter {seq}"),
-                name: None,
-                tool_call_id: None,
-                tool_input: Some(json!({"name": "search", "args": {"q": "x"}})),
-                thinking_content: Some("thinking...".to_string()),
-                tool_calls_json: None,
-                attachments_json: None,
-                container_task_id: Some("task_1".to_string()),
-                error: None,
-                client_message_id: None,
-                created_at: now.clone(),
-            };
-            store.append_execution_record(&r).await.unwrap();
-        }
-        // 另一条 tool 记录
-        store
-            .append_execution_record(&ExecutionRecord {
-                record_id: "rec_b".to_string(),
-                pipeline_run_id: "pipe_1".to_string(),
-                record_type: "tool".to_string(),
-                sequence: 2,
-                iteration: 1,
-                role: "tool".to_string(),
-                content: "tool output".to_string(),
-                name: Some("search".to_string()),
-                tool_call_id: Some("call_1".to_string()),
-                tool_input: None,
-                thinking_content: None,
-                tool_calls_json: None,
-                attachments_json: None,
-                container_task_id: None,
-                error: None,
-                client_message_id: None,
-                created_at: now.clone(),
-            })
-            .await
-            .unwrap();
-
-        // count
-        assert_eq!(store.count_execution_records("pipe_1").await.unwrap(), 3);
-
-        // list 全部（按 sequence 升序）
-        let all = store
-            .list_execution_records("pipe_1", MessageQueryOpts::default())
-            .await
-            .unwrap();
-        assert_eq!(all.len(), 3);
-        // 复合主键：两轮迭代都在（record_id=rec_a 出现两次）
-        assert_eq!(all.iter().filter(|r| r.record_id == "rec_a").count(), 2);
-        assert_eq!(all[0].sequence, 0);
-        assert_eq!(all[2].record_type, "tool");
-        assert_eq!(all[2].tool_call_id.as_deref(), Some("call_1"));
-        // JSON 字段往返
-        assert_eq!(all[0].tool_input.as_ref().unwrap()["name"], "search");
-
-        // 游标分页：before_sequence=2 → seq 0,1
-        let before = store
-            .list_execution_records(
-                "pipe_1",
-                MessageQueryOpts {
-                    before_sequence: Some(2),
-                    after_sequence: None,
-                    limit: None,
-                },
-            )
-            .await
-            .unwrap();
-        assert_eq!(before.len(), 2);
-        assert_eq!(before[1].sequence, 1);
-
-        // limit 截断
-        let lim = store
-            .list_execution_records(
-                "pipe_1",
-                MessageQueryOpts {
-                    before_sequence: None,
-                    after_sequence: None,
-                    limit: Some(1),
-                },
-            )
-            .await
-            .unwrap();
-        assert_eq!(lim.len(), 1);
-
-        // 覆盖（同 composite key 覆盖 content）
-        let mut dup = all[1].clone();
-        dup.content = "updated".to_string();
-        store.append_execution_record(&dup).await.unwrap();
-        assert_eq!(
-            store.count_execution_records("pipe_1").await.unwrap(),
-            3,
-            "覆盖不新增"
-        );
-        let after_dup = store
-            .list_execution_records("pipe_1", MessageQueryOpts::default())
-            .await
-            .unwrap();
-        assert_eq!(after_dup[1].content, "updated");
-
-        // 按会话删除
-        let n = store
-            .delete_execution_records_by_session("pipe_1")
-            .await
-            .unwrap();
-        assert_eq!(n, 3);
-        assert_eq!(store.count_execution_records("pipe_1").await.unwrap(), 0);
-        // 幂等：再删返回 0
-        assert_eq!(
-            store
-                .delete_execution_records_by_session("pipe_1")
-                .await
-                .unwrap(),
-            0
-        );
-    }
-
-    /// 汇总：upsert / get / 局部更新（含 total_tokens 合并）/ list 倒序。
-    #[tokio::test]
-    async fn test_run_summary_crud_and_update() {
-        let store = SqliteStore::open_memory().unwrap();
-        let now = chrono::Utc::now().to_rfc3339();
-
-        let s1 = PipelineRunSummary {
-            run_id: "run_x".to_string(),
-            thread_id: "thread_1".to_string(),
-            total_iterations: 3,
-            total_tokens: json!({"input_tokens": 100, "output_tokens": 50}),
-            total_seconds: 12.5,
-            total_records: 3,
-            status: "completed".to_string(),
-            final_output: "done".to_string(),
-            error: None,
-            review_status: "pending".to_string(),
-            reviewed_at: None,
-            created_at: now.clone(),
-        };
-        store.save_run_summary(&s1).await.unwrap();
-        // 第二个（更晚创建，验证 list 倒序）
-        let s2 = PipelineRunSummary {
-            run_id: "run_y".to_string(),
-            created_at: chrono::Utc::now().to_rfc3339(),
-            ..s1.clone()
-        };
-        store.save_run_summary(&s2).await.unwrap();
-
-        // get
-        let got = store.get_run_summary("run_x").await.unwrap().unwrap();
-        assert_eq!(got.total_iterations, 3);
-        assert_eq!(got.total_tokens["input_tokens"], 100);
-        assert_eq!(got.review_status, "pending");
-
-        // 局部更新：status + review_status + total_tokens 合并新增 cached_tokens
-        store
-            .update_run_summary(
-                "run_x",
-                &json!({
-                    "status": "reviewed",
-                    "review_status": "reviewed",
-                    "total_tokens": {"cached_tokens": 20}
-                }),
-            )
-            .await
-            .unwrap();
-        let got2 = store.get_run_summary("run_x").await.unwrap().unwrap();
-        assert_eq!(got2.status, "reviewed");
-        assert_eq!(got2.review_status, "reviewed");
-        // total_tokens 合并：原 input/output 仍在 + 新增 cached
-        assert_eq!(got2.total_tokens["input_tokens"], 100);
-        assert_eq!(got2.total_tokens["cached_tokens"], 20);
-
-        // update 不存在的 run_id → NotFound
-        let err = store
-            .update_run_summary("nope", &json!({"status": "x"}))
-            .await;
-        assert!(matches!(err, Err(StorageError::NotFound(_))));
-
-        // list：created_at DESC（run_y 更晚在前）
-        let listed = store.list_run_summaries(Some(10)).await.unwrap();
-        assert_eq!(listed.len(), 2);
-        assert_eq!(listed[0].run_id, "run_y");
-    }
-
-    /// memory：CRUD + memory_type 过滤 + 关键词搜索评分。
-    #[tokio::test]
-    async fn test_memory_crud_search() {
-        let store = SqliteStore::open_memory().unwrap();
-        let now = chrono::Utc::now().to_rfc3339();
-
-        store
-            .create_memory(&MemoryRecord {
-                id: "mem_1".to_string(),
-                content: "the quick brown fox".to_string(),
-                memory_type: "episode".to_string(),
-                tags: vec!["animal".to_string()],
-                score: 0.0,
-                created_at: now.clone(),
-            })
-            .await
-            .unwrap();
-        store
-            .create_memory(&MemoryRecord {
-                id: "mem_2".to_string(),
-                content: "fox fox fox everywhere".to_string(),
-                memory_type: "semantic".to_string(),
-                tags: vec![],
-                score: 0.0,
-                created_at: now.clone(),
-            })
-            .await
-            .unwrap();
-
-        // get
-        let got = store.get_memory("mem_1").await.unwrap().unwrap();
-        assert_eq!(got.tags, vec!["animal".to_string()]);
-
-        // list 全部
-        assert_eq!(store.list_memory(None, 100, 0).await.unwrap().len(), 2);
-        // list 按 memory_type 过滤
-        assert_eq!(
-            store
-                .list_memory(Some("semantic"), 100, 0)
-                .await
-                .unwrap()
-                .len(),
-            1
-        );
-
-        // 搜索 "fox"：两命中，多次匹配的 mem_2 得分更高排前
-        let results = store.search_memory("fox", 5).await.unwrap();
-        assert_eq!(results.len(), 2);
-        assert_eq!(results[0].id, "mem_2", "多次匹配应得分更高");
-        assert!(results[0].score > results[1].score);
-
-        // 删除
-        assert!(store.delete_memory("mem_1").await.unwrap());
-        assert!(
-            !store.delete_memory("mem_1").await.unwrap(),
-            "幂等返回 false"
-        );
-        assert!(store.get_memory("mem_1").await.unwrap().is_none());
-    }
-
-    /// execution_records / memory 跨租户隔离（核心不变量）。
-    #[tokio::test]
-    async fn test_m1_cross_tenant_isolation() {
-        let store = SqliteStore::open_memory().unwrap();
-        let now = chrono::Utc::now().to_rfc3339();
-
-        // 租户 A：写执行记录 + memory
-        let ctx_a = TenantContext::new("tenant_a", "session_a");
-        agentos_tenant::scope(ctx_a, async {
-            store
-                .append_execution_record(&ExecutionRecord {
-                    record_id: "rec_a".to_string(),
-                    pipeline_run_id: "pipe_a".to_string(),
-                    record_type: "user".to_string(),
-                    sequence: 0,
-                    iteration: 0,
-                    role: "user".to_string(),
-                    content: "hi-a".to_string(),
-                    name: None,
-                    tool_call_id: None,
-                    tool_input: None,
-                    thinking_content: None,
-                    tool_calls_json: None,
-                    attachments_json: None,
-                    container_task_id: None,
-                    error: None,
-                    client_message_id: None,
-                    created_at: now.clone(),
-                })
-                .await
-                .unwrap();
-            store
-                .create_memory(&MemoryRecord {
-                    id: "mem_a".to_string(),
-                    content: "tenant a memory".to_string(),
-                    memory_type: "episode".to_string(),
-                    tags: vec![],
-                    score: 0.0,
-                    created_at: now.clone(),
-                })
-                .await
-                .unwrap();
-        })
-        .await;
-
-        // 租户 B：读不到 A 的数据
-        let ctx_b = TenantContext::new("tenant_b", "session_b");
-        agentos_tenant::scope(ctx_b, async {
-            assert_eq!(store.count_execution_records("pipe_a").await.unwrap(), 0);
-            assert!(store
-                .list_execution_records("pipe_a", agentos_core::traits::MessageQueryOpts::default())
-                .await
-                .unwrap()
-                .is_empty());
-            assert!(store.get_memory("mem_a").await.unwrap().is_none());
-            assert!(store.list_memory(None, 100, 0).await.unwrap().is_empty());
-        })
-        .await;
-
-        // 切回 A：数据仍在
-        agentos_tenant::scope(TenantContext::new("tenant_a", "session_a"), async {
-            assert_eq!(store.count_execution_records("pipe_a").await.unwrap(), 1);
-            assert!(store.get_memory("mem_a").await.unwrap().is_some());
-        })
-        .await;
-    }
-
-    /// session 域跨租户隔离。
-    ///
-    /// 契约：session 全部读写按 task_local tenant 隔离——tenant_id 须在
-    /// async wrapper 解析后传入 spawn_blocking 闭包（tokio::task_local
-    /// 不跨 spawn_blocking）；delete 强制 tenant 过滤。
     #[tokio::test]
     async fn test_session_cross_tenant_isolation() {
         use agentos_core::traits::SessionListFilter;

@@ -52,6 +52,17 @@ async fn handler_setup() -> (
         })
         .await
         .unwrap();
+    // 专用夹具表（2026-08-19）：0.1 投影表 memory/execution_records 已 DROP，
+    // 通用 CRUD/复合主键/租户隔离场景改用结构等价的测试表，语义不变。
+    store
+        .with_conn(|conn| {
+            conn.execute_batch(
+                "CREATE TABLE test_notes (                     id TEXT PRIMARY KEY, content TEXT, note_type TEXT, score REAL,                     tenant_id TEXT NOT NULL DEFAULT 'default', created_at TEXT NOT NULL                 );                 CREATE TABLE test_exec_records (                     record_id TEXT NOT NULL, sequence INTEGER NOT NULL,                     pipeline_run_id TEXT NOT NULL, content TEXT, created_at TEXT,                     PRIMARY KEY (record_id, sequence)                 );",
+            )
+            .unwrap();
+            Ok::<(), String>(())
+        })
+        .unwrap();
     let handler = DbAdminCapabilityHandler::new(Some(store.clone()), Some(store.clone()));
     let mut state = AppState::new();
     state.store = Some(store.clone());
@@ -150,12 +161,19 @@ async fn test_tables_lists_all_tables_dynamic() {
         "blobs",
         "branches",
         "sessions",
-        "memory",
+        "test_notes",
         "users",
     ] {
         assert!(
             names.contains(&expect.to_string()),
             "缺少表 {expect}: {names:?}"
+        );
+    }
+    // 退役 0.1 投影表不得再出现在表清单（2026-08-19 DROP 裁定）
+    for retired in ["memory", "execution_records", "pipeline_run_summaries", "messages"] {
+        assert!(
+            !names.contains(&retired.to_string()),
+            "退役表 {retired} 不应出现: {names:?}"
         );
     }
     // 每个表有 columns 与 row_count
@@ -175,7 +193,7 @@ async fn test_query_rows_pagination_filter_sort() {
         .with_conn(|conn| {
             for i in 0..3 {
                 conn.execute(
-                    "INSERT INTO memory (id, content, memory_type, tenant_id, created_at) VALUES (?1, ?2, ?3, ?4, ?5)",
+                    "INSERT INTO test_notes (id, content, note_type, tenant_id, created_at) VALUES (?1, ?2, ?3, ?4, ?5)",
                     rusqlite::params![
                         format!("m{i}"),
                         format!("content {i}"),
@@ -196,7 +214,7 @@ async fn test_query_rows_pagination_filter_sort() {
         &handler,
         "table_query",
         with_auth(
-            json!({"table": "memory", "filter": "memory_type:eq:episode", "sort": "created_at:desc"}),
+            json!({"table": "test_notes", "filter": "note_type:eq:episode", "sort": "created_at:desc"}),
             &token,
         ),
     )
@@ -212,7 +230,7 @@ async fn test_query_rows_pagination_filter_sort() {
         &handler,
         "table_query",
         with_auth(
-            json!({"table": "memory", "filter": "content:contains:content 1"}),
+            json!({"table": "test_notes", "filter": "content:contains:content 1"}),
             &token,
         ),
     )
@@ -226,7 +244,7 @@ async fn test_query_rows_pagination_filter_sort() {
         &handler,
         "table_query",
         with_auth(
-            json!({"table": "memory", "limit": 2, "offset": 1, "sort": "created_at:asc"}),
+            json!({"table": "test_notes", "limit": 2, "offset": 1, "sort": "created_at:asc"}),
             &token,
         ),
     )
@@ -251,7 +269,7 @@ async fn test_query_rows_multi_filter_and() {
             .enumerate()
             {
                 conn.execute(
-                    "INSERT INTO memory (id, content, memory_type, score, tenant_id, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                    "INSERT INTO test_notes (id, content, note_type, score, tenant_id, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
                     rusqlite::params![
                         format!("mf{i}"),
                         format!("content {i}"),
@@ -273,7 +291,7 @@ async fn test_query_rows_multi_filter_and() {
         &handler,
         "table_query",
         with_auth(
-            json!({"table": "memory", "filter": ["memory_type:eq:episode", "score:gt:3"]}),
+            json!({"table": "test_notes", "filter": ["note_type:eq:episode", "score:gt:3"]}),
             &token,
         ),
     )
@@ -289,7 +307,7 @@ async fn test_query_injection_rejected() {
     store
         .with_conn(|conn| {
             conn.execute(
-                "INSERT INTO memory (id, content, memory_type, tenant_id, created_at) VALUES ('m0', 'safe', 'episode', 'default', '2025-01-01T00:00:00Z')",
+                "INSERT INTO test_notes (id, content, note_type, tenant_id, created_at) VALUES ('m0', 'safe', 'episode', 'default', '2025-01-01T00:00:00Z')",
                 [],
             )
             .unwrap();
@@ -302,24 +320,24 @@ async fn test_query_injection_rejected() {
         &handler,
         "table_query",
         with_auth(
-            json!({"table": "memory", "filter": "content:eq:'; DROP TABLE memory--"}),
+            json!({"table": "test_notes", "filter": "content:eq:'; DROP TABLE test_notes--"}),
             &token,
         ),
     )
     .await;
     assert_eq!(status, 200); // 值绑定：查询正常返回（0 行）
-                             // memory 表仍在
+                             // test_notes 表仍在
     let exists: bool = store
         .with_conn(|conn| {
             conn.query_row(
-                "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name='memory')",
+                "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name='test_notes')",
                 [],
                 |r| r.get(0),
             )
             .map_err(|e| e.to_string())
         })
         .unwrap();
-    assert!(exists, "注入导致 memory 表被删");
+    assert!(exists, "注入导致 test_notes 表被删");
 }
 
 #[tokio::test]
@@ -330,7 +348,7 @@ async fn test_query_unknown_column_400_and_unknown_table_404() {
         &handler,
         "table_query",
         with_auth(
-            json!({"table": "memory", "filter": "nonexistent_col:eq:x"}),
+            json!({"table": "test_notes", "filter": "nonexistent_col:eq:x"}),
             &token,
         ),
     )
@@ -355,7 +373,7 @@ async fn test_crud_insert_update_delete() {
         &handler,
         "table_insert",
         with_auth(
-            json!({"table": "memory", "row": { "id": "crud1", "content": "hello", "memory_type": "episode", "created_at": "2025-01-01T00:00:00Z" }}),
+            json!({"table": "test_notes", "row": { "id": "crud1", "content": "hello", "note_type": "episode", "created_at": "2025-01-01T00:00:00Z" }}),
             &token,
         ),
     )
@@ -368,7 +386,7 @@ async fn test_crud_insert_update_delete() {
     let (status, json) = call(
         &handler,
         "table_get_row",
-        with_auth(json!({"table": "memory", "pk_value": "crud1"}), &token),
+        with_auth(json!({"table": "test_notes", "pk_value": "crud1"}), &token),
     )
     .await;
     assert_eq!(status, 200);
@@ -380,7 +398,7 @@ async fn test_crud_insert_update_delete() {
         &handler,
         "table_update_row",
         with_auth(
-            json!({"table": "memory", "pk_value": "crud1", "updates": { "content": "updated" }}),
+            json!({"table": "test_notes", "pk_value": "crud1", "updates": { "content": "updated" }}),
             &token,
         ),
     )
@@ -393,7 +411,7 @@ async fn test_crud_insert_update_delete() {
         &handler,
         "table_update_row",
         with_auth(
-            json!({"table": "memory", "pk_value": "nope", "updates": { "content": "x" }}),
+            json!({"table": "test_notes", "pk_value": "nope", "updates": { "content": "x" }}),
             &token,
         ),
     )
@@ -404,7 +422,7 @@ async fn test_crud_insert_update_delete() {
     let (status, json) = call(
         &handler,
         "table_delete_row",
-        with_auth(json!({"table": "memory", "pk_value": "crud1"}), &token),
+        with_auth(json!({"table": "test_notes", "pk_value": "crud1"}), &token),
     )
     .await;
     assert_eq!(status, 200, "删除失败: {json}");
@@ -412,7 +430,7 @@ async fn test_crud_insert_update_delete() {
     let (status, _json) = call(
         &handler,
         "table_get_row",
-        with_auth(json!({"table": "memory", "pk_value": "crud1"}), &token),
+        with_auth(json!({"table": "test_notes", "pk_value": "crud1"}), &token),
     )
     .await;
     assert_eq!(status, 404);
@@ -428,7 +446,7 @@ async fn test_composite_pk_crud() {
         &handler,
         "table_insert",
         with_auth(
-            json!({"table": "execution_records", "row": { "record_id": "r1", "sequence": 1, "pipeline_run_id": "p1", "content": "first", "created_at": "2025-01-01T00:00:00Z" }}),
+            json!({"table": "test_exec_records", "row": { "record_id": "r1", "sequence": 1, "pipeline_run_id": "p1", "content": "first", "created_at": "2025-01-01T00:00:00Z" }}),
             &token,
         ),
     )
@@ -441,7 +459,7 @@ async fn test_composite_pk_crud() {
         &handler,
         "table_get_row",
         with_auth(
-            json!({"table": "execution_records", "pk_value": "r1,1"}),
+            json!({"table": "test_exec_records", "pk_value": "r1,1"}),
             &token,
         ),
     )
@@ -454,7 +472,7 @@ async fn test_composite_pk_crud() {
         &handler,
         "table_update_row",
         with_auth(
-            json!({"table": "execution_records", "pk_value": "r1,1", "updates": { "content": "second" }}),
+            json!({"table": "test_exec_records", "pk_value": "r1,1", "updates": { "content": "second" }}),
             &token,
         ),
     )
@@ -467,7 +485,7 @@ async fn test_composite_pk_crud() {
         &handler,
         "table_delete_row",
         with_auth(
-            json!({"table": "execution_records", "pk_value": "r1,1"}),
+            json!({"table": "test_exec_records", "pk_value": "r1,1"}),
             &token,
         ),
     )
@@ -477,7 +495,7 @@ async fn test_composite_pk_crud() {
         &handler,
         "table_get_row",
         with_auth(
-            json!({"table": "execution_records", "pk_value": "r1,1"}),
+            json!({"table": "test_exec_records", "pk_value": "r1,1"}),
             &token,
         ),
     )
@@ -500,7 +518,7 @@ async fn test_auth_required_401_and_forbidden() {
     let (status, _json) = call(
         &handler,
         "table_insert",
-        with_auth(json!({"table": "memory", "row": { "id": "x" }}), &user_tok),
+        with_auth(json!({"table": "test_notes", "row": { "id": "x" }}), &user_tok),
     )
     .await;
     assert_eq!(status, 403, "普通用户写接口应 403");
@@ -530,7 +548,7 @@ async fn test_sql_execute_select_and_write_confirm() {
         &handler,
         "execute",
         with_auth(
-            json!({ "sql": "UPDATE memory SET content='x' WHERE id='none'", "confirm": false }),
+            json!({ "sql": "UPDATE test_notes SET content='x' WHERE id='none'", "confirm": false }),
             &token,
         ),
     )
@@ -542,7 +560,7 @@ async fn test_sql_execute_select_and_write_confirm() {
         &handler,
         "execute",
         with_auth(
-            json!({ "sql": "UPDATE memory SET content='x' WHERE id='none'", "confirm": true }),
+            json!({ "sql": "UPDATE test_notes SET content='x' WHERE id='none'", "confirm": true }),
             &token,
         ),
     )
@@ -561,7 +579,7 @@ async fn test_sql_execute_dangerous_rejected() {
         &handler,
         "execute",
         with_auth(
-            json!({ "sql": "DROP TABLE memory", "confirm": true }),
+            json!({ "sql": "DROP TABLE test_notes", "confirm": true }),
             &token,
         ),
     )
@@ -573,7 +591,7 @@ async fn test_sql_execute_dangerous_rejected() {
         &handler,
         "execute",
         with_auth(
-            json!({ "sql": "ALTER TABLE memory ADD COLUMN x TEXT", "confirm": true }),
+            json!({ "sql": "ALTER TABLE test_notes ADD COLUMN x TEXT", "confirm": true }),
             &token,
         ),
     )
@@ -597,7 +615,7 @@ async fn test_sql_execute_dangerous_rejected() {
         &handler,
         "execute",
         with_auth(
-            json!({ "sql": "DELETE FROM memory", "confirm": true }),
+            json!({ "sql": "DELETE FROM test_notes", "confirm": true }),
             &token,
         ),
     )
@@ -688,16 +706,16 @@ async fn test_extensibility_new_table_auto_visible() {
 #[tokio::test]
 async fn test_tenant_isolation_applied() {
     let (handler, router, store) = handler_setup().await;
-    // 插入两条不同租户的 memory
+    // 插入两条不同租户的 test_notes
     store
         .with_conn(|conn| {
             conn.execute(
-                "INSERT INTO memory (id, content, memory_type, tenant_id, created_at) VALUES ('t-a', 'tenantA', 'episode', 'tenantA', '2025-01-01T00:00:00Z')",
+                "INSERT INTO test_notes (id, content, note_type, tenant_id, created_at) VALUES ('t-a', 'tenantA', 'episode', 'tenantA', '2025-01-01T00:00:00Z')",
                 [],
             )
             .unwrap();
             conn.execute(
-                "INSERT INTO memory (id, content, memory_type, tenant_id, created_at) VALUES ('t-d', 'tenantDefault', 'episode', 'default', '2025-01-01T00:00:00Z')",
+                "INSERT INTO test_notes (id, content, note_type, tenant_id, created_at) VALUES ('t-d', 'tenantDefault', 'episode', 'default', '2025-01-01T00:00:00Z')",
                 [],
             )
             .unwrap();
@@ -708,7 +726,7 @@ async fn test_tenant_isolation_applied() {
     let (status, json) = call(
         &handler,
         "table_query",
-        with_auth(json!({"table": "memory"}), &token),
+        with_auth(json!({"table": "test_notes"}), &token),
     )
     .await;
     assert_eq!(status, 200);

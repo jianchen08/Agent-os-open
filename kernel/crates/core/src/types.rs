@@ -516,10 +516,11 @@ pub struct RunRecord {
 
 /// 管道运行快照（统一管道管理查询：`GET /api/v1/pipelines/runs`）。
 ///
-/// runs × message_slots × pipeline_sessions × pipeline_run_summaries 四表联结：
+/// runs × message_slots × pipeline_sessions 三表联结：
 /// - run → pipeline 映射经 message_slots.run_id（op-based 落槽时写入）；
 /// - pipeline → 会话映射经 pipeline_sessions；
-/// - 消耗账本（total_tokens/total_seconds）经 pipeline_run_summaries（sidecar 写，可为空）。
+/// - 消耗账本真值在 state 的 track.total_tokens（0.1 的 pipeline_run_summaries
+///   投影表已退役，2026-08-19）。
 ///
 /// 无消息槽的 run（旧引擎 start_run 占位）在查询层被过滤，只呈现真实执行的管道。
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -539,12 +540,6 @@ pub struct PipelineRunInfo {
     /// 结束时间（None = 未结束）
     #[serde(skip_serializing_if = "Option::is_none")]
     pub ended_at: Option<String>,
-    /// token 用量明细（input/output/... 键值 JSON，sidecar 汇总写入；未汇总时为 None）
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub total_tokens: Option<serde_json::Value>,
-    /// 总耗时秒（sidecar 汇总写入；未汇总时为 None）
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub total_seconds: Option<f64>,
 }
 
 /// messages 表记录——消息表（含分支标识）。
@@ -682,137 +677,6 @@ pub struct UserRecord {
     /// 最近登录时间（可空）
     #[serde(skip_serializing_if = "Option::is_none")]
     pub last_login_at: Option<String>,
-}
-
-// ── M1：execution_records / pipeline_run_summaries / memory 三表记录 ──
-// 对齐 0.1 channel_api 的 ExecutionRecordData / PipelineRunSummary / MemoryStore，
-// 为「基础设施下沉内核」提供内核侧存储能力（M1）。capability 通路在 M2。
-
-/// execution_records 表记录——单条管道执行步骤（对齐 0.1 ExecutionRecordData）。
-///
-/// 一次 LLM 输出 = 一条 `record_type="ai"`；一次工具调用 = 一条 `record_type="tool"`。
-///
-/// **关键**：真正的唯一键是复合 `(record_id, sequence)`——同一 AI 消息多轮迭代共享
-/// 同一 `record_id`（== WS message_id 契约），按 `sequence` 区分迭代。不可仅以 record_id 为主键，
-/// 否则会静默丢多轮迭代消息。聚簇/分页键是 `(pipeline_run_id, sequence)`。
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ExecutionRecord {
-    /// 记录 ID（12-hex；ai 记录等于 WS message_id；非全局唯一，需配 sequence）
-    pub record_id: String,
-    /// 所属管道运行 ID（== 0.1 pipeline_run_id == API 层 session_id）
-    pub pipeline_run_id: String,
-    /// 记录类型：user / ai / tool / system / compression_marker
-    pub record_type: String,
-    /// 管道内单调递增序号（跨多轮、跨 run_id），分页游标
-    #[serde(default)]
-    pub sequence: u32,
-    /// LLM 迭代轮次
-    #[serde(default)]
-    pub iteration: u32,
-    /// 角色：user / assistant / tool / system
-    #[serde(default)]
-    pub role: String,
-    /// 主文本载荷
-    #[serde(default)]
-    pub content: String,
-    /// 工具名（仅 tool 记录）
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub name: Option<String>,
-    /// OpenAI tool_call id（tool 记录）
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub tool_call_id: Option<String>,
-    /// 工具输入 `{name, args}`（JSON）
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub tool_input: Option<serde_json::Value>,
-    /// 推理模型思考轨迹
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub thinking_content: Option<String>,
-    /// tool_calls 数组的 JSON 字符串（ai 记录）
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub tool_calls_json: Option<String>,
-    /// 前端附件列表的 JSON 字符串
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub attachments_json: Option<String>,
-    /// 所属容器任务
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub container_task_id: Option<String>,
-    /// 错误文本（存在即 status="failed"）
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub error: Option<String>,
-    /// 前端乐观 ID（去重）
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub client_message_id: Option<String>,
-    /// 创建时间（ISO8601）
-    pub created_at: String,
-}
-
-/// pipeline_run_summaries 表记录——单次管道运行汇总（对齐 0.1 PipelineRunSummary）。
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct PipelineRunSummary {
-    /// 运行 ID（== pipeline_run_id，主键）
-    pub run_id: String,
-    /// 父线程（经 update_run_summary 设置）
-    #[serde(default)]
-    pub thread_id: String,
-    /// 总迭代轮次
-    #[serde(default)]
-    pub total_iterations: u32,
-    /// token 用量明细（input_tokens/output_tokens/... 键值，JSON）
-    #[serde(default)]
-    pub total_tokens: serde_json::Value,
-    /// 总耗时秒
-    #[serde(default)]
-    pub total_seconds: f64,
-    /// 总记录数
-    #[serde(default)]
-    pub total_records: u32,
-    /// 运行状态
-    #[serde(default)]
-    pub status: String,
-    /// 最终输出
-    #[serde(default)]
-    pub final_output: String,
-    /// 错误（可空）
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub error: Option<String>,
-    /// 评审状态：pending / reviewed
-    #[serde(default = "default_review_status")]
-    pub review_status: String,
-    /// 评审时间（ISO8601，可空）
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub reviewed_at: Option<String>,
-    /// 创建时间（ISO8601）
-    pub created_at: String,
-}
-
-fn default_review_status() -> String {
-    "pending".to_string()
-}
-
-/// memory 表记录——记忆条目（对齐 0.1 MemoryStore.memories）。
-///
-/// 0.1 为进程内字典无持久化；下沉内核后落 SQLite，搜索仍为简易关键词匹配（M1 不引入向量检索）。
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct MemoryRecord {
-    /// 记忆 ID（12-hex）
-    pub id: String,
-    /// 记忆内容文本
-    pub content: String,
-    /// 记忆类型：episode / semantic / ...
-    #[serde(default = "default_memory_type")]
-    pub memory_type: String,
-    /// 标签列表
-    #[serde(default)]
-    pub tags: Vec<String>,
-    /// 相关性得分（搜索时填充）
-    #[serde(default)]
-    pub score: f64,
-    /// 创建时间（ISO8601）
-    pub created_at: String,
-}
-
-fn default_memory_type() -> String {
-    "episode".to_string()
 }
 
 /// traces 表 Patch 类型（traces 表 patch_type 字段）。
