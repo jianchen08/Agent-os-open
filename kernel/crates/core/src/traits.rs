@@ -1560,6 +1560,17 @@ pub trait StorageBackend: Send + Sync {
         Ok(None)
     }
 
+    /// 枚举租户内带持久化 state（pipeline_state 标量 / checkpoint 二者有其一）的管道
+    /// `(pipeline_id, thread_id)`。冷读路径（pipeline-state.list / /pipelines/state 的
+    /// DB 兜底）据此列 registry 未覆盖的管道——thread_id 以 pipeline_sessions 为准，
+    /// 缺省回退 pipeline_id（任务管道 thread_id 恒等于自身 pipeline_id）。
+    async fn list_state_pipeline_ids(
+        &self,
+        _tenant_id: &str,
+    ) -> Result<Vec<(String, String)>, StorageError> {
+        Ok(vec![])
+    }
+
     /// 冷启动历史读路径：从 message_slots（消息队列持久真值）join blobs 重建完整
     /// 消息对象数组（元素自带稳定 seq），零回放。
     async fn load_message_history(

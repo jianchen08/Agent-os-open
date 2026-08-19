@@ -1241,6 +1241,35 @@ impl SqliteStore {
         }
     }
 
+    /// 枚举租户内带持久化 state 的管道 (pipeline_id, thread_id)（冷读 DB 兜底）。
+    /// 来源 = pipeline_state 标量 ∪ checkpoint（二者覆盖任务完成态与执行快照）；
+    /// thread_id 以 pipeline_sessions 为准，缺省回退 pipeline_id（任务管道自持）。
+    pub fn list_state_pipeline_ids(
+        &self,
+        tenant_id: &str,
+    ) -> Result<Vec<(String, String)>, StorageError> {
+        let conn = self.conn.lock();
+        let mut stmt = conn.prepare(
+            "SELECT t.pipeline_id, COALESCE(ses.thread_id, t.pipeline_id) AS thread_id \
+             FROM ( \
+                 SELECT pipeline_id FROM pipeline_state WHERE tenant_id = ?1 \
+                 UNION \
+                 SELECT pipeline_id FROM pipeline_checkpoints WHERE tenant_id = ?1 \
+             ) t \
+             LEFT JOIN pipeline_sessions ses \
+                    ON ses.pipeline_id = t.pipeline_id AND ses.tenant_id = ?1 \
+             ORDER BY t.pipeline_id",
+        )?;
+        let rows = stmt.query_map(rusqlite::params![tenant_id], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row?);
+        }
+        Ok(out)
+    }
+
     /// 在已有锁定连接上确保 blob 存在，返回 (blob_id, mime)。
     /// project_messages 复用同锁内的 conn，避免重复加锁死锁。
     fn ensure_blob_locked(
@@ -2760,6 +2789,17 @@ impl StorageBackend for SqliteStore {
         let pipeline_id = pipeline_id.to_string();
         let tenant_id = tenant_id.to_string();
         tokio::task::spawn_blocking(move || this.load_latest_checkpoint(&pipeline_id, &tenant_id))
+            .await
+            .map_err(join_err)?
+    }
+
+    async fn list_state_pipeline_ids(
+        &self,
+        tenant_id: &str,
+    ) -> Result<Vec<(String, String)>, StorageError> {
+        let this = self.clone();
+        let tenant_id = tenant_id.to_string();
+        tokio::task::spawn_blocking(move || this.list_state_pipeline_ids(&tenant_id))
             .await
             .map_err(join_err)?
     }

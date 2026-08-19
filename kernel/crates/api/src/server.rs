@@ -3889,6 +3889,68 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn test_pipelines_state_cold_fallback_overlays_pipeline_state_after_restart() {
+        // 重启语义回归：引擎跑完任务管道 → 从 registry 移除模拟重启内存丢失 →
+        // /api/v1/pipelines/state 冷兜底行必须在 checkpoint 之上叠加 pipeline_state
+        // 表最新值（task.status=completed），不得返回 checkpoint 里的过期 pending
+        // （checkpoint 拍在终态回写前）。曾是"重启后任务状态倒退回 pending"的病根。
+        // 注：handler 无 token 时租户解析回落 DEFAULT_TENANT_ID，故引擎也用 default 跑。
+        let (state, _invoker, _store, _sqlite) = make_engine_state();
+        let tenant_id = "default".to_string(); // handler 无 token 租户回落 default
+        let pipe = "pipe_coldhttp_task";
+        let thread = "thread_coldhttp";
+        let overlay = json!({
+            "task.id": "t_coldhttp",
+            "task.goal": "写 hello.txt 并自动评估",
+            "task.status": "pending",
+        });
+        let r = agentos_tenant::scope(
+            agentos_core::types::TenantContext::new(&tenant_id, thread),
+            process_via_engine(
+                &state,
+                "执行任务",
+                "agentos",
+                &[],
+                pipe,
+                thread,
+                "o1",
+                "",
+                "",
+                None,
+                Some(&overlay),
+            ),
+        )
+        .await;
+        assert!(!r.content.is_empty(), "引擎应正常跑完一轮");
+
+        // 模拟重启：清空内存 registry（冷读兜底应依赖 DB，而非内存）
+        let reg = agentos_session::global_registry();
+        reg.remove(&tenant_id, pipe);
+        assert!(
+            reg.get(&tenant_id, pipe).is_none(),
+            "registry 应已移除该管道（模拟重启内存丢失）"
+        );
+
+        let resp = crate::routes::pipelines_state_handler(
+            axum::extract::State(state),
+            axum::http::HeaderMap::new(),
+        )
+        .await
+        .expect("state handler 不应失败");
+        let items = resp.0["items"].as_array().expect("items 数组");
+        let row = items
+            .iter()
+            .find(|r| r.get("pipeline_id").and_then(|v| v.as_str()) == Some(pipe))
+            .unwrap_or_else(|| panic!("冷兜底行应存在; items={items:?}"));
+        // pipeline_state 表最新值必须覆盖 checkpoint 的过期 pending
+        assert_eq!(
+            row["state"]["task.status"], "completed",
+            "重启后冷兜底须返回 pipeline_state 表最新 completed"
+        );
+    }
+
+    #[tokio::test]
     async fn test_engine_run_does_not_write_task_status_for_session_pipeline() {
         // 非任务管道（无 task.* 字段）：run 终态不得误写 task.status
         let (state, _invoker, _store, _sqlite) = make_engine_state();

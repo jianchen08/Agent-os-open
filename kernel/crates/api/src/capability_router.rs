@@ -1024,6 +1024,7 @@ impl CapabilityRouter for KernelCapabilityRouter {
                 let tenant_id = agentos_tenant::current_or_default("default").tenant_id;
                 let registry = agentos_session::pipeline_state_registry::global_registry();
                 let mut rows: Vec<Value> = Vec::new();
+                let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
                 for listing in registry.list() {
                     if listing.tenant_id != tenant_id {
                         continue;
@@ -1031,6 +1032,7 @@ impl CapabilityRouter for KernelCapabilityRouter {
                     let Some(entry) = registry.get(&listing.tenant_id, &listing.pipeline_id) else {
                         continue;
                     };
+                    seen.insert(listing.pipeline_id.clone());
                     let mut row = {
                         let e = entry.read();
                         crate::routes::summarize_state(&e.state)
@@ -1044,6 +1046,41 @@ impl CapabilityRouter for KernelCapabilityRouter {
                         obj.insert("source".to_string(), json!("memory"));
                     }
                     rows.push(row);
+                }
+                // DB 冷数据兜底（与 /api/v1/pipelines/state 同策略）：registry 未覆盖的
+                // 冷管道（重启后未再轮）从「最新 checkpoint + pipeline_state 表最新标量
+                // 覆盖」组装扁平行——任务完成态（task.status=completed 落 pipeline_state
+                // 表）在内存 registry 丢失后仍可见，task_manage 冷任务查询不再
+                // "任务不存在"/过期 pending。枚举失败降级为仅内存行（读面不崩）。
+                if let Some(store) = &self.store {
+                    let owners = match store.list_state_pipeline_ids(&tenant_id).await {
+                        Ok(o) => o,
+                        Err(e) => {
+                            warn!(
+                                target: "capability_router",
+                                tenant = %tenant_id, error = %e,
+                                "pipeline-state.list DB 冷枚举失败（降级：仅内存行）"
+                            );
+                            Vec::new()
+                        }
+                    };
+                    for (pid, th) in owners {
+                        if seen.contains(&pid) {
+                            continue;
+                        }
+                        let Some(merged) =
+                            crate::routes::cold_state_row(store, &pid, &tenant_id).await
+                        else {
+                            continue; // 无 checkpoint 的孤儿不出口（对齐 /pipelines/state）
+                        };
+                        let mut row = crate::routes::summarize_state(&merged);
+                        if let Some(obj) = row.as_object_mut() {
+                            obj.insert("pipeline_id".to_string(), json!(pid));
+                            obj.insert("thread_id".to_string(), json!(th));
+                            obj.insert("source".to_string(), json!("checkpoint"));
+                        }
+                        rows.push(row);
+                    }
                 }
                 Ok(Value::Array(rows))
             }
@@ -2362,6 +2399,74 @@ mod tests {
         );
         assert_eq!(row["task.status"], "failed");
         assert_eq!(row["status"], "failed");
+    }
+
+    #[tokio::test]
+    async fn test_pipeline_state_list_db_fallback_overlays_completed_status() {
+        // 冷管道兜底（registry 未命中 = 重启后未再轮）：pipeline-state.list 必须从
+        // DB 补回。checkpoint 拍在终态回写前（task.status=pending），pipeline_state
+        // 表才是最新真值（completed）。修复前冷任务查询返回空列表 → task_manage
+        // "任务不存在"；修复后须返回 pipeline_state 表覆盖后的 completed。
+        let tenant = format!("tenant_flbk_{}", uuid::Uuid::new_v4().simple());
+        let pid = format!("pipe_flbk_{}", uuid::Uuid::new_v4().simple());
+        let router = router_with_store();
+        // 内存 registry 不注册该管道（模拟重启后内存丢失）
+        let store = router
+            .store
+            .as_ref()
+            .expect("router_with_store 已注 store")
+            .clone();
+        store
+            .save_checkpoint(
+                &pid,
+                &tenant,
+                9,
+                &json!({
+                    "pipeline_id": pid,
+                    "status": "active",
+                    "ended": true,
+                    "current_phase": "exit",
+                    "task.id": pid,
+                    "task.goal": "写 hello.txt 并自动评估",
+                    "task.status": "pending",
+                    "track.total_tokens": 6595,
+                }),
+            )
+            .await
+            .unwrap();
+        // pipeline_state 表 = 终态回写后的最新真值
+        store
+            .upsert_state_field(&pid, &tenant, "task.status", &json!("completed"))
+            .await
+            .unwrap();
+        store
+            .upsert_state_field(&pid, &tenant, "task.ended_at", &json!("2026-08-18T00:40:16Z"))
+            .await
+            .unwrap();
+
+        let rows = agentos_tenant::scope(
+            agentos_core::types::TenantContext::new(&tenant, "th_flbk"),
+            router.handle("pipeline-state", "list", json!({})),
+        )
+        .await
+        .unwrap();
+        let arr = rows.as_array().expect("返回应为行数组");
+        let row = arr
+            .iter()
+            .find(|r| r.get("pipeline_id").and_then(|v| v.as_str()) == Some(pid.as_str()))
+            .unwrap_or_else(|| {
+                panic!(
+                    "冷管道兜底行应存在（registry 丢失后查询不到 = bug）; rows={arr:?}"
+                )
+            });
+        // pipeline_state 表最新值必须覆盖 checkpoint 的过期 pending
+        assert_eq!(
+            row["task.status"], "completed",
+            "冷兜底须返回 pipeline_state 表最新 completed"
+        );
+        assert_eq!(row["task.goal"], "写 hello.txt 并自动评估");
+        assert_eq!(row["source"], "checkpoint");
+        assert_eq!(row["thread_id"], pid, "任务管道 thread_id 回退自身 pipeline_id");
     }
 
     #[tokio::test]

@@ -1073,6 +1073,32 @@ pub(crate) fn summarize_state(state: &serde_json::Value) -> serde_json::Value {
     serde_json::Value::Object(out)
 }
 
+/// 冷读兜底：取最新 checkpoint，并把 `pipeline_state` 表最新标量覆盖上去。
+///
+/// 顺序对齐 `stage_recover_history` 的冷恢复（checkpoint 标量 → pipeline_state 表
+/// 补充，表的最新值覆盖 checkpoint 里的出生/过期值，如 `task.status` pending →
+/// completed）。registry 未命中（重启后未再轮）时 `/pipelines/state` 与
+/// `pipeline-state.list` 的 DB 兜底共用；无 checkpoint / 读取失败返回 None
+/// （读面降级不崩，调用方跳过该行）。
+pub(crate) async fn cold_state_row(
+    store: &std::sync::Arc<dyn agentos_core::traits::StorageBackend>,
+    pipeline_id: &str,
+    tenant_id: &str,
+) -> Option<serde_json::Value> {
+    let (_step, mut ckpt) = store
+        .load_latest_checkpoint(pipeline_id, tenant_id)
+        .await
+        .ok()??;
+    if let Ok(fields) = store.load_pipeline_state(pipeline_id, tenant_id).await {
+        if let Some(obj) = ckpt.as_object_mut() {
+            for (k, v) in fields {
+                obj.insert(k, v);
+            }
+        }
+    }
+    Some(ckpt)
+}
+
 /// GET /api/v1/pipelines/state — 管道 state 摘要列表（前端任务树数据源）。
 ///
 /// 数据分层（state 是会话/任务/迭代的运行时真值，直接供前端消费）：
@@ -1135,18 +1161,13 @@ pub async fn pipelines_state_handler(
             if seen.contains(&pid) {
                 continue;
             }
-            let db2 = state.db.as_ref().expect("db checked above").clone();
-            let tid2 = tenant_id.clone();
-            let pid2 = pid.clone();
-            let ckpt =
-                tokio::task::spawn_blocking(move || db2.load_latest_checkpoint(&pid2, &tid2))
-                    .await
-                    .map_err(|e| ApiError::Internal {
-                        message: format!("checkpoint join 失败: {e}"),
-                    })?
-                    .unwrap_or(None);
-            let summary = match ckpt {
-                Some((_, st)) => summarize_state(&st),
+            // 冷兜底行 = 最新 checkpoint + pipeline_state 表最新标量覆盖（复用
+            // cold_state_row：checkpoint 拍在终态回写前 → task.status 等完成态以
+            // pipeline_state 表为准，重启后不再倒退回 pending）。
+            let store: std::sync::Arc<dyn agentos_core::traits::StorageBackend> =
+                state.db.as_ref().expect("db checked above").clone();
+            let summary = match cold_state_row(&store, &pid, &tenant_id).await {
+                Some(st) => summarize_state(&st),
                 None => continue, // 无 checkpoint 的孤儿 run 不出口
             };
             items.push(json!({
