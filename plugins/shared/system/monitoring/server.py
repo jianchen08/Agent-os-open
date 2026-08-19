@@ -362,6 +362,51 @@ def _collect_task_statistics() -> dict[str, Any]:
     }
 
 
+async def _collect_state_tasks(status: str | None = None) -> list[dict[str, Any]]:
+    """从全部管道 state（内存热数据 + DB 冷兜底）派生任务列表。
+
+    task = pipeline（单一真值）：每行一个条目，**不过滤状态**——status 过滤
+    仅由调用方 query 决定（2026-08-19 调试中心修复：原实现硬编码空列表）。
+    行字段对齐前端 TaskInfo 子集，并携带 state 关键数据
+    （current_phase/ended/suspended/message_count/tokens）。
+    """
+    try:
+        handle = plugin.get_capability("pipeline-state")
+        rows = await handle.call("list", {})
+    except Exception as exc:  # noqa: BLE001 — 能力未就绪降级空列表（契约不破坏）
+        logger.warning("[monitoring] pipeline-state.list 调用失败（任务列表降级空）: %s", exc)
+        return []
+    if not isinstance(rows, list):
+        return []
+
+    items: list[dict[str, Any]] = []
+    for row in rows:
+        if not isinstance(row, dict) or not row.get("pipeline_id"):
+            continue
+        st = row.get("task.status") or row.get("status") or "unknown"
+        if status and st != status:
+            continue
+        items.append({
+            "id": row.get("task.id") or row.get("pipeline_id"),
+            "task_id": row.get("task.id"),
+            "pipeline_id": row.get("pipeline_id"),
+            "thread_id": row.get("thread_id"),
+            "agent_id": row.get("agent_id"),
+            "title": row.get("task.goal") or row.get("display_name")
+            or row.get("name") or row["pipeline_id"][:12],
+            "status": st,
+            "current_phase": row.get("current_phase"),
+            "ended": row.get("ended"),
+            "suspended": row.get("suspended"),
+            "message_count": row.get("message_count"),
+            "total_tokens": row.get("track.total_tokens")
+            or row.get("cost_control.total_tokens"),
+            "run_status": row.get("router.stop_reason"),
+            "source": "pipeline_state",
+        })
+    return items
+
+
 def _collect_token_usage() -> dict[str, Any]:
     """读 PerformanceMonitor._llm_stats，对齐前端 TokenUsage。"""
     monitor = _ensure_monitor()
@@ -428,11 +473,26 @@ async def http_handle(
             return _ok(_json_response({"statistics": _collect_task_statistics()}))
 
         if path == "/ext/monitoring/tasks" and method == "GET":
-            # task list：本地无持久化任务，返回空列表（对齐 TaskListResponse shape）
+            # task list：全部管道 state 派生（内存热 + DB 冷兜底，不过滤状态；
+            # status 过滤由 query 决定）。对齐 TaskListResponse shape。
             q = query or {}
-            page = int(q.get("page", 1))
-            page_size = int(q.get("page_size", 20))
-            return _ok(_json_response({"items": [], "total": 0, "page": page, "page_size": page_size}))
+
+            def _qint(key: str, default: int) -> int:
+                try:
+                    return int(q.get(key, default))
+                except (TypeError, ValueError):
+                    return default
+
+            page = max(1, _qint("page", 1))
+            page_size = min(200, max(1, _qint("page_size", 20)))
+            items = await _collect_state_tasks(status=q.get("status") or None)
+            start = (page - 1) * page_size
+            return _ok(_json_response({
+                "items": items[start:start + page_size],
+                "total": len(items),
+                "page": page,
+                "page_size": page_size,
+            }))
 
         if path == "/ext/monitoring/token-usage" and method == "GET":
             return _ok(_json_response({"token_usage": _collect_token_usage()}))
@@ -487,10 +547,25 @@ def _html_response(html: str) -> dict[str, Any]:
 # ── T4：Payload 诊断 ──────────────────────────────────────────────────────
 
 
+def _resolve_project_root() -> str:
+    """向上探测项目根（含 config/models 的目录），sidecar cwd 会漂移到插件目录。
+
+    与写入方 adapter.py 的锚定逻辑同源（2026-08-19 修复）：两端都用
+    AGENTOS_LOG_DIR 优先 + 文件位置向上探测，保证读写落在同一目录。
+    """
+    here = os.path.dirname(os.path.abspath(__file__))
+    cand = here
+    while cand and cand != os.path.dirname(cand):
+        if os.path.isdir(os.path.join(cand, "config", "models")):
+            return cand
+        cand = os.path.dirname(cand)
+    return here
+
+
 def _payload_diag_dir() -> str:
-    """返回 payload_diag 目录路径（与 adapter.py 的 _log_final_payload 一致）。"""
+    """返回 payload_diag 目录路径（与 adapter.py 的写入端同源锚定）。"""
     return os.path.join(
-        os.environ.get("AGENTOS_LOG_DIR", os.getcwd()),
+        os.environ.get("AGENTOS_LOG_DIR") or _resolve_project_root(),
         "logs", "payload_diag",
     )
 

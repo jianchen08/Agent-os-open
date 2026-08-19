@@ -88,9 +88,20 @@ def _install_payload_diag_hook() -> None:
                 # 写入原始 body（litellm 真实发送的结构），供逐字节 diff
                 # 文件名携带元数据：{ts}_{model}_{msgs_hash}_{msg_count}msg.json
                 # 这样前端列目录后无需读文件即可展示列表（时间/模型/消息数）。
-                # 目录从 AGENTOS_LOG_DIR 解析（默认 cwd），避免 cwd 漂移导致目录不在项目根。
+                # 目录锚定（2026-08-19 修复）：AGENTOS_LOG_DIR 优先，否则从本文件
+                # 向上探测项目根（含 config/models 的目录）。sidecar cwd 会漂移到
+                # 各插件目录，用 cwd 曾导致 200 个快照散落在 llm_core 插件目录下、
+                # 与 monitoring 读取端（同样锚定项目根）错位。
+                _diag_base = _os.environ.get("AGENTOS_LOG_DIR", "")
+                if not _diag_base:
+                    _cand = _os.path.dirname(_os.path.abspath(__file__))
+                    while _cand and _cand != _os.path.dirname(_cand):
+                        if _os.path.isdir(_os.path.join(_cand, "config", "models")):
+                            _diag_base = _cand
+                            break
+                        _cand = _os.path.dirname(_cand)
                 _diag_dir = _os.path.join(
-                    _os.environ.get("AGENTOS_LOG_DIR", _os.getcwd()),
+                    _diag_base or _os.getcwd(),
                     "logs", "payload_diag",
                 )
                 _os.makedirs(_diag_dir, exist_ok=True)
