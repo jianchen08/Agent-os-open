@@ -1,3 +1,4 @@
+# @feature: FP-0.2.可观测性 | @vision: V3 可观测
 """调试中心数据链行为测试（2026-08-19 修复批次）。
 
 背景：execution/users 域 handler 原为 routes_missing 空 stub，调试中心

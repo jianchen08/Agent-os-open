@@ -1,3 +1,4 @@
+# @feature: FP-0.2.二 | @vision: V2 安全
 """命令指纹单元测试 — security_check 的 _make_signature 支持 paths 批量参数。
 
 验证「本管道内同命令免批」对批量删除/移动工具生效：

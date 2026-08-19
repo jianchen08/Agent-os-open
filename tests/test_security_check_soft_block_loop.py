@@ -1,3 +1,4 @@
+# @feature: FP-0.2.二 | @vision: V2 安全
 """security_check 软拦截死循环回归测试。
 
 历史 Bug（任务 d6ac591c393c，87 轮空转）：

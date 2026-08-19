@@ -1,3 +1,4 @@
+# @feature: FP-0.2.二 | @vision: V2 安全
 """隔离判断单元测试 — security_check 的 _is_isolated 按 task_isolated 判定。
 
 验证隔离判断契约（纯单元测试）：
