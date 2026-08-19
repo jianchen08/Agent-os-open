@@ -178,3 +178,6 @@ kernel/schema_tmp.json
 
 # uv（python 包装载插件 python_packager）sidecar venv 不入库
 .venv/
+
+# e2e 产物 token 文件（已过期凭据物证，不入库）
+.e2e_token_*
