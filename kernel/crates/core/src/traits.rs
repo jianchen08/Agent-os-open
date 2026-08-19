@@ -1634,6 +1634,18 @@ pub trait StorageBackend: Send + Sync {
         tenant_id: &str,
     ) -> Result<Vec<String>, StorageError>;
 
+    /// 按管道唯一坐标反查所属会话 thread_id（注入分支坐标解析）。
+    /// pipeline_id 全局唯一（uuid），单查无歧义，不按租户过滤。
+    /// 只查 pipeline_sessions 映射表（唯一真值源），未命中即 None——调用方
+    /// （chat.send_message 注入分支）据此报协议错误，不做 sessions 回退。
+    /// 默认 `Ok(None)`（mock/null store 不破），SqliteStore 覆盖为真实查询。
+    async fn get_thread_id_by_pipeline(
+        &self,
+        _pipeline_id: &str,
+    ) -> Result<Option<String>, StorageError> {
+        Ok(None)
+    }
+
     /// 查询某会话下的 step 级轨迹（冷启动统一回放用）。
     /// 经 pipeline_sessions 映射 → run_id → traces，只取 step 级（plugin_id 为配置
     /// step id），按 created_at 升序以便按序 merge 回放重建完整 state（含 messages）。

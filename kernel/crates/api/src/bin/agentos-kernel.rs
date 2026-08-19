@@ -917,7 +917,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 state.clone(),
             ));
         handler_registry.register(std::sync::Arc::new(
-            agentos_api::chat_send_handler::ChatSendHandler::new(dispatcher),
+            agentos_api::chat_send_handler::ChatSendHandler::with_store(
+                dispatcher,
+                state.store.clone(),
+            ),
         ));
         info!(target: "agentos-kernel", "Registered chat.send_message capability (trigger fire path)");
     }

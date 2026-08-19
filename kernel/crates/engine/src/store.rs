@@ -1563,6 +1563,26 @@ impl SqliteStore {
         Ok(out)
     }
 
+    /// 按管道唯一坐标反查所属会话 thread_id（注入分支坐标解析）。
+    /// 只查 pipeline_sessions（唯一真值源），未命中即 None，不做 sessions 回退。
+    /// pipeline_id 全局唯一（uuid），单查无歧义。
+    fn get_thread_id_by_pipeline_inner(
+        &self,
+        pipeline_id: &str,
+    ) -> Result<Option<String>, StorageError> {
+        let conn = self.conn.lock();
+        let row = conn.query_row(
+            "SELECT thread_id FROM pipeline_sessions WHERE pipeline_id = ?1",
+            rusqlite::params![pipeline_id],
+            |row| row.get::<_, String>(0),
+        );
+        match row {
+            Ok(t) => Ok(Some(t)),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(e) => Err(e.into()),
+        }
+    }
+
     /// 按 thread_id 取单个会话。tenant_id 由调用方在 spawn_blocking 前解析。
     fn get_session_inner(
         &self,
@@ -2912,6 +2932,17 @@ impl StorageBackend for SqliteStore {
         .map_err(join_err)?
     }
 
+    async fn get_thread_id_by_pipeline(
+        &self,
+        pipeline_id: &str,
+    ) -> Result<Option<String>, StorageError> {
+        let this = self.clone();
+        let pipeline_id = pipeline_id.to_string();
+        tokio::task::spawn_blocking(move || this.get_thread_id_by_pipeline_inner(&pipeline_id))
+            .await
+            .map_err(join_err)?
+    }
+
     async fn get_step_traces_by_thread(
         &self,
         thread_id: &str,
@@ -3759,6 +3790,47 @@ mod tests {
 
         // 幂等：再删一次不报错
         store.delete_session("thread_1").await.unwrap();
+    }
+
+    /// 按管道唯一坐标反查所属会话 thread_id（chat.send_message 注入分支坐标解析）。
+    /// 只查 pipeline_sessions：命中返回真实 thread、未命中 None（不做 sessions 回退）。
+    #[tokio::test]
+    async fn test_get_thread_id_by_pipeline() {
+        let store = SqliteStore::open_memory().unwrap();
+        store
+            .link_pipeline_session("32hex_main", "thread-abc", "default")
+            .await
+            .unwrap();
+        store
+            .link_pipeline_session("32hex_sub", "thread-abc", "default")
+            .await
+            .unwrap();
+
+        // 命中：主管道 / 子任务管道均解析回所属会话 thread
+        assert_eq!(
+            store.get_thread_id_by_pipeline("32hex_main").await.unwrap(),
+            Some("thread-abc".to_string()),
+            "主管道应解析出所属 thread"
+        );
+        assert_eq!(
+            store.get_thread_id_by_pipeline("32hex_sub").await.unwrap(),
+            Some("thread-abc".to_string()),
+            "子任务管道应解析出所属 thread"
+        );
+
+        // 未命中：孤儿/伪造 id → None（调用方据此报协议错误），无 sessions 回退
+        assert_eq!(
+            store.get_thread_id_by_pipeline("orphan").await.unwrap(),
+            None,
+            "无映射的 pipeline_id 应返回 None"
+        );
+
+        // 边界：空串同样 None（不 panic、不误报）
+        assert_eq!(
+            store.get_thread_id_by_pipeline("").await.unwrap(),
+            None,
+            "空 pipeline_id 应返回 None"
+        );
     }
 
     #[tokio::test]

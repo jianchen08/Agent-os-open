@@ -4,6 +4,11 @@
 //! 复用前端同一条 WS 派发路径（`dispatch_user_input` → `process_via_engine`）：
 //! 以触发消息为新一轮用户消息投给该会话 agent，agent 处理后流式回复前端。
 //!
+//! 坐标语义（2026-08-19 定案）：对外契约只含 `pipeline_id + message + user_id`，
+//! thread 是由坐标推导的派生物——注入分支在接口内部用 `pipeline_id` 反查
+//! `pipeline_sessions` 解析真实会话 thread（黑盒），解析失败即协议错误；
+//! 两个 id 形态不同（32hex vs `thread-` 前缀），绝不互填、不做参数搬运。
+//!
 //! GAP-1 阶段 1（管道创建契约）：`send_message` 额外支持——
 //! - 可选 `state` 对象：自由注入 initial_state 顶层扁平键（任务域 `task.*`），
 //!   经 dispatch → process_via_engine 的 execution_context 合并点（1a2）之后并入；
@@ -20,6 +25,7 @@
 
 use std::sync::Arc;
 
+use agentos_core::traits::StorageBackend;
 use async_trait::async_trait;
 use serde_json::{json, Map, Value};
 
@@ -54,12 +60,28 @@ const LINEAGE_ORIGIN_KINDS: &[&str] = &["channel", "external_service", "plugin",
 /// new_message），保证触发消息和用户手发的消息行为一致。
 pub struct ChatSendHandler {
     dispatcher: Arc<dyn PipelineDispatcher>,
+    /// 注入分支坐标解析用（pipeline_id → 所属会话 thread）。
+    /// None = 无存储构造（单测/兼容路径），注入坐标回退 pipeline 兼作派发键。
+    store: Option<Arc<dyn StorageBackend>>,
 }
 
 impl ChatSendHandler {
-    /// 用内核 WS 派发器构造。
+    /// 用内核 WS 派发器构造（无存储）：注入分支回退 pipeline 兼作 thread 派发键。
+    /// 生产注册点请用 [`ChatSendHandler::with_store`]（坐标解析 + 未命中拒绝）。
     pub fn new(dispatcher: Arc<dyn PipelineDispatcher>) -> Self {
-        Self { dispatcher }
+        Self {
+            dispatcher,
+            store: None,
+        }
+    }
+
+    /// 生产构造：带存储，注入分支用 pipeline_id 反查所属会话的真实 thread
+    /// （坐标解析封装在接口内部黑盒，对外契约不含 thread 参数）。
+    pub fn with_store(
+        dispatcher: Arc<dyn PipelineDispatcher>,
+        store: Option<Arc<dyn StorageBackend>>,
+    ) -> Self {
+        Self { dispatcher, store }
     }
 }
 
@@ -140,7 +162,7 @@ impl ChatSendHandler {
         // state 注入（可选）：校验保留字后作为 overlay 透传。
         let mut overlay = validate_state_overlay(params.get("state"))?;
 
-        let (pipeline_id, created) = if create_flag || supplied_pid.is_none() {
+        let (pipeline_id, thread_id, created) = if create_flag || supplied_pid.is_none() {
             // ── 创建分支 ──
             if let Some(pid) = supplied_pid {
                 return Err(McpError::Protocol {
@@ -175,9 +197,12 @@ impl ChatSendHandler {
             if let Some(obj) = overlay_obj.as_object_mut() {
                 obj.insert("task.id".to_string(), Value::String(pipeline_id.clone()));
             }
-            (pipeline_id, true)
+            // 新管道尚无会话映射：以引擎新 id 兼作派发坐标（resolve 链路对
+            // 陌生 id 落回退分支 ③ 原样穿透到引擎 get_or_init 新 state）。
+            let thread_id = pipeline_id.clone();
+            (pipeline_id, thread_id, true)
         } else if let Some(pid) = supplied_pid {
-            // ── 注入分支（现状不变）──
+            // ── 注入分支 ──
             // lineage 是引擎出生写入的保护字段，注入已有管道不得携带（防覆写）。
             if params.get("lineage").filter(|v| !v.is_null()).is_some() {
                 return Err(McpError::Protocol {
@@ -186,7 +211,10 @@ impl ChatSendHandler {
                         .to_string(),
                 });
             }
-            (pid.to_string(), false)
+            // 坐标解析（接口内部黑盒）：pipeline_id → 所属会话真实 thread。
+            // thread 是派生物，对外契约不含该参数；解析失败 = 孤儿/伪造 id。
+            let thread_id = self.resolve_inject_thread(pid).await?;
+            (pid.to_string(), thread_id, false)
         } else {
             unreachable!("supplied_pid 为 None 时已在创建分支 return/自生成 pipeline_id")
         };
@@ -194,6 +222,7 @@ impl ChatSendHandler {
         tracing::info!(
             target: "capability:chat",
             pipeline = %pipeline_id,
+            thread = %thread_id,
             user = %user_id,
             msg_len = message.len(),
             created,
@@ -203,9 +232,11 @@ impl ChatSendHandler {
             "chat.send_message 派发触发消息"
         );
 
-        // 复用 WS 派发：主会话下 thread_id 与 pipeline_id 同值（effective_pipeline_id），
-        // dispatch_user_input 内部会 resolve 真实 route_id 并发 stream_start →
-        // process_via_engine → new_message，前端按既有协议流式渲染回复。
+        // 复用 WS 派发：thread_id 与 pipeline_id 各归其位——注入分支是解析出的
+        // 真实会话坐标（thread-xxx），创建分支是引擎新 id；pipeline_id 槽位
+        // 始终保持调用方/引擎生成的原值，不做参数搬运。dispatch_user_input
+        // 内部会 resolve 真实 route_id 并发 stream_start → process_via_engine →
+        // new_message，前端按既有协议流式渲染回复。
         // tenant 由 dispatch_user_input 用 user_id 反查（与 WS 路径同源）。
         // thinking_strength：HTTP 通道暂不携带（"" = 引擎不覆盖参数）。
         //
@@ -215,6 +246,7 @@ impl ChatSendHandler {
         if background {
             let dispatcher = self.dispatcher.clone();
             let pid = pipeline_id.clone();
+            let tid = thread_id.clone();
             let uid = user_id.to_string();
             let msg = message.to_string();
             let ec = execution_context.cloned();
@@ -222,11 +254,12 @@ impl ChatSendHandler {
             let aid = agent_id.clone();
             tokio::spawn(async move {
                 if let Err(e) = dispatcher
-                    .dispatch_user_input(&pid, &uid, &msg, &pid, "", ec.as_ref(), ov.as_ref(), &aid)
+                    .dispatch_user_input(&tid, &uid, &msg, &pid, "", ec.as_ref(), ov.as_ref(), &aid)
                     .await
                 {
                     tracing::error!(
                         pipeline = %pid,
+                        thread = %tid,
                         error = %e,
                         "chat.send_message 后台派发失败（任务管道未启动）"
                     );
@@ -239,7 +272,7 @@ impl ChatSendHandler {
         }
         self.dispatcher
             .dispatch_user_input(
-                &pipeline_id,
+                &thread_id,
                 user_id,
                 message,
                 &pipeline_id,
@@ -259,6 +292,31 @@ impl ChatSendHandler {
             .map_err(|e| McpError::Protocol {
                 message: format!("chat.send_message 派发失败: {e}"),
             })
+    }
+
+    /// 注入分支坐标解析（接口内部黑盒）：用 pipeline_id 查所属会话的真实 thread_id。
+    ///
+    /// 对外契约只含 `pipeline_id + message + user_id`——thread 是由坐标推导的
+    /// 派生物，不该让调用方传（传了反而要被造伪）。解析失败 → [`McpError::Protocol`]：
+    /// 宁可接口消费方报错，也不静默跑完把回复发到无人订阅的频道。
+    /// 无 store（`new()` 构造）回退现状：pipeline 兼作派发键（单测/兼容路径）。
+    async fn resolve_inject_thread(&self, pipeline_id: &str) -> Result<String, McpError> {
+        let Some(store) = self.store.as_ref() else {
+            return Ok(pipeline_id.to_string());
+        };
+        let thread = store
+            .get_thread_id_by_pipeline(pipeline_id)
+            .await
+            .map_err(|e| McpError::Protocol {
+                message: format!("chat.send_message 解析 pipeline 会话坐标失败: {e}"),
+            })?;
+        thread.ok_or_else(|| McpError::Protocol {
+            message: format!(
+                "chat.send_message 注入的 pipeline_id（{pipeline_id}）不属于任何会话\
+                 （pipeline_sessions 未命中）：孤儿或伪造 id，拒绝派发——\
+                 静默跑完会把回复发到无人订阅的频道"
+            ),
+        })
     }
 }
 
@@ -500,6 +558,8 @@ mod tests {
 
     #[tokio::test]
     async fn inject_existing_pipeline_keeps_current_contract() {
+        // 无 store 构造（new()，单测/兼容路径）：注入坐标回退 pipeline 兼作
+        // thread 派发键。生产注册点走 with_store（见下方坐标解析三连测试）。
         // 两组有区分度的输入：不同 pipeline_id 均按原样派发、响应 status=dispatched
         for pid in ["pipe_existing", "pipe_trigger_42"] {
             let (h, d) = handler();
@@ -514,7 +574,7 @@ mod tests {
             assert_eq!(res["pipeline_id"], pid);
             let c = calls(&d);
             assert_eq!(c.len(), 1);
-            assert_eq!(c[0].0, pid, "thread_id 应与 pipeline_id 同值");
+            assert_eq!(c[0].0, pid, "无 store 回退：thread_id 与 pipeline_id 同值");
             assert_eq!(c[0].3, pid);
             assert!(c[0].6.is_none(), "无 state 参数时 overlay 为 None");
         }
@@ -550,6 +610,99 @@ mod tests {
                 .all(|k| !k.starts_with("lineage")),
             "注入分支 overlay 不应携带 lineage 键"
         );
+    }
+
+    // ── 注入分支坐标解析（2026-08-19 触发器空回复修复）──────────────
+    // 修复前：chat_send_handler 把同一个 pipeline_id 复制填进 dispatch 的
+    // thread_id 与 pipeline_id 两个槽位——事件发到无人订阅的频道（32hex 键
+    // 在 registry 只注册 thread-xxx），表现为「LLM 日志有、前端收不到回复」。
+    // 修复后：坐标解析封装在接口黑盒内（pipeline_sessions 反查真实 thread），
+    // 解析失败即协议错误。三连负样本 = A.3 验收口径。
+
+    /// 生产构造（with_store）+ 会话映射命中：派发的 thread_id 必须是解析出的
+    /// 真实会话坐标（`thread-` 前缀），pipeline_id 槽位保持原值，绝不互填。
+    #[tokio::test]
+    async fn inject_with_store_resolves_real_thread_coordinate() {
+        let store = Arc::new(agentos_engine::SqliteStore::open_memory().unwrap());
+        store
+            .link_pipeline_session("a1b2c3d4e5f64789abcdef0123456789", "thread-trig-1", "default")
+            .await
+            .unwrap();
+        let d = RecordingDispatcher::shared();
+        let h = ChatSendHandler::with_store(d.clone(), Some(store));
+        let res = h
+            .handle(
+                "send_message",
+                json!({
+                    "pipeline_id": "a1b2c3d4e5f64789abcdef0123456789",
+                    "message": "触发提醒", "user_id": "u1"
+                }),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res["status"], "dispatched");
+        assert_eq!(res["pipeline_id"], "a1b2c3d4e5f64789abcdef0123456789");
+        let c = calls(&d);
+        assert_eq!(c.len(), 1);
+        assert_eq!(
+            c[0].0, "thread-trig-1",
+            "thread 槽位应是黑盒解析出的真实会话坐标，不是 pipeline_id"
+        );
+        assert_eq!(
+            c[0].3, "a1b2c3d4e5f64789abcdef0123456789",
+            "pipeline 槽位保持调用方原值"
+        );
+    }
+
+    /// 有 store 无记录：孤儿/伪造 pipeline_id → 协议错误且未派发
+    /// （原 bug 的静默行为变成显式拒绝——宁可报错也不把回复发到无人频道）。
+    #[tokio::test]
+    async fn inject_orphan_pipeline_id_rejected_with_protocol_error() {
+        let store = Arc::new(agentos_engine::SqliteStore::open_memory().unwrap());
+        let d = RecordingDispatcher::shared();
+        let h = ChatSendHandler::with_store(d.clone(), Some(store));
+        expect_protocol_error(
+            &h,
+            &d,
+            json!({"pipeline_id": "ffffffffffffffffffffffffffffffff", "message": "m", "user_id": "u1"}),
+            "孤儿 pipeline_id（pipeline_sessions 未命中）应拒绝",
+        )
+        .await;
+    }
+
+    /// background 注入同刀：坐标解析在派发前完成，后台线程拿到的也是真实 thread。
+    #[tokio::test]
+    async fn inject_background_resolves_real_thread_coordinate() {
+        let store = Arc::new(agentos_engine::SqliteStore::open_memory().unwrap());
+        store
+            .link_pipeline_session("b1b2c3d4e5f64789abcdef0123456789", "thread-trig-2", "default")
+            .await
+            .unwrap();
+        let d = RecordingDispatcher::shared();
+        let h = ChatSendHandler::with_store(d.clone(), Some(store));
+        let res = h
+            .handle(
+                "send_message",
+                json!({
+                    "pipeline_id": "b1b2c3d4e5f64789abcdef0123456789",
+                    "message": "重跑一轮", "user_id": "u1", "background": true
+                }),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res["status"], "dispatched");
+        // 后台派发最终执行，且 thread 槽位 = 解析出的真实坐标
+        let mut rec: Option<DispatchRecord> = None;
+        for _ in 0..40 {
+            if let Some(r) = calls(&d).into_iter().next() {
+                rec = Some(r);
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+        let rec = rec.expect("background 注入应最终派发");
+        assert_eq!(rec.0, "thread-trig-2", "background 分支 thread 槽位同样解析");
+        assert_eq!(rec.3, "b1b2c3d4e5f64789abcdef0123456789");
     }
 
     // ── 创建分支：id 生成与响应 ──────────────────────────────────
