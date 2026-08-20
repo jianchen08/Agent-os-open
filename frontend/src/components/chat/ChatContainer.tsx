@@ -333,7 +333,10 @@ export const ChatContainer = ({
 
   return (
     <div
-      className={`theme-chat-area bg-[var(--chat-bg,transparent)] flex h-full min-h-0 flex-col overflow-hidden ${className}`}
+      // 聊天区背景由 .theme-chat-area 类消费（--chat-bg-image/-color 双通道）：
+      // bg-[var(--chat-bg)] 生成 background-color 位，渐变主题（deep-space 等）
+      // 塞进去会整条失效→聊天区透明→全屏纹理层穿透内容区
+      className={`theme-chat-area flex h-full min-h-0 flex-col overflow-hidden ${className}`}
       data-testid="chat-container"
       data-session-id={sessionId}
     >

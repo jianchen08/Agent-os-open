@@ -94,6 +94,14 @@ button, input, select, textarea {
   font-family: inherit !important;
 }
 
+/* antd Splitter 是布局容器，cssinjs 会给面板注入默认亮色 token 文字色
+   rgba(0,0,0,0.88)，深色主题下整个侧边栏/内容区继承黑字落在深底上不可见。
+   布局容器的文字色必须跟随页面主题（继承），内容文字色由主题变量接管。 */
+.ant-splitter,
+.ant-splitter-panel {
+  color: inherit;
+}
+
 body {
   height: 100%;
   margin: 0;
@@ -151,9 +159,14 @@ body.has-bg-image::after {
   background-size: var(--sidebar-texture-size, 24px) var(--sidebar-texture-size, 24px);
 }
 
+/* 聊天区背景双通道：渐变走 image 位、纯色走 color 位（background-color 位塞渐变
+   会失效→聊天区透明→body 全屏纹理层穿透内容区，主题纹理只应作为页面背景装饰） */
 .theme-chat-area {
-  background-image: var(--chat-texture, none);
-  background-size: var(--chat-texture-size, 24px) var(--chat-texture-size, 24px);
+  background-image: var(--chat-texture, none), var(--chat-bg-image, none);
+  background-color: var(--chat-bg-color, transparent);
+  background-size: var(--chat-texture-size, 24px) var(--chat-texture-size, 24px), auto;
+  background-repeat: repeat, no-repeat;
+  background-position: center, center;
 }
 
 @media (max-height: 700px) {

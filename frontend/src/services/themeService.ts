@@ -463,6 +463,12 @@ export function compileThemeVariables(config: ThemeConfig): string {
   const chatAreaBg = config.backgrounds?.chat?.value || config.colors.background.main
   if (chatAreaBg) {
     vars.push(`--chat-bg: ${chatAreaBg}`)
+    // 聊天区背景双通道：渐变只能进 background-image 位（background-color 位塞渐变
+    // 会整条失效→聊天区透明→body 全屏纹理层穿透内容区）。
+    // .theme-chat-area 按 image/color 两位分别消费，纯色与渐变主题统一承载。
+    const isGradientBg = /gradient\(/.test(chatAreaBg)
+    vars.push(`--chat-bg-image: ${isGradientBg ? chatAreaBg : 'none'}`)
+    vars.push(`--chat-bg-color: ${isGradientBg ? 'transparent' : chatAreaBg}`)
   }
 
   // === 圆角 ===
@@ -857,10 +863,26 @@ function rgbToHsl(r: number, g: number, b: number, alpha?: number): string {
 }
 
 /**
+ * 从渐变等复杂颜色值中提取实色（取色标中位近似整体观感）
+ *
+ * 渐变字符串塞进 hsl(var(--xxx)) 桥接会全线失效（面板透明），
+ * 这里为 shadcn 桥接提取一个可解析的实色近似值。
+ *
+ * @param color - 颜色值字符串
+ * @returns 实色 HEX，无法提取时返回 null
+ */
+function extractSolidFromGradient(color: string): string | null {
+  const stops = color.match(/#[0-9a-f]{6}\b/gi)
+  if (!stops || stops.length === 0) return null
+  return stops[Math.floor((stops.length - 1) / 2)]
+}
+
+/**
  * 将任意颜色值转换为 HSL 原始格式
  *
  * 支持 HEX (#rrggbb) 和 RGBA (rgba(r,g,b,a)) 格式，
- * 输出 shadcn/ui 期望的 HSL 原始值（用于 hsl(var(--xxx)) 模式）
+ * 输出 shadcn/ui 期望的 HSL 原始值（用于 hsl(var(--xxx)) 模式）。
+ * 渐变值提取色标中位转实色（渐变原样输出会让 hsl() 桥接全线失效）。
  *
  * @param color - 颜色值字符串
  * @returns HSL 格式字符串，解析失败时返回原值
@@ -880,13 +902,20 @@ function colorToHsl(color: string): string {
     return rgbToHsl(r, g, b, a)
   }
 
+  const solidFromGradient = extractSolidFromGradient(color)
+  if (solidFromGradient) {
+    const rgb = hexToRgb(solidFromGradient)
+    if (rgb) return rgbToHsl(rgb.r, rgb.g, rgb.b)
+  }
+
   return color
 }
 
 /**
  * 将颜色转换为不透明的 HSL 原始格式
  *
- * 与 colorToHsl 相同，但强制忽略 alpha 通道，确保输出为完全不透明
+ * 与 colorToHsl 相同，但强制忽略 alpha 通道，确保输出为完全不透明；
+ * 渐变值同样提取色标中位转实色。
  *
  * @param color - 颜色值字符串
  * @returns 不透明的 HSL 格式字符串
@@ -903,6 +932,12 @@ function colorToHslSolid(color: string): string {
     const g = parseInt(rgbaMatch[2])
     const b = parseInt(rgbaMatch[3])
     return rgbToHsl(r, g, b)
+  }
+
+  const solidFromGradient = extractSolidFromGradient(color)
+  if (solidFromGradient) {
+    const rgb = hexToRgb(solidFromGradient)
+    if (rgb) return rgbToHsl(rgb.r, rgb.g, rgb.b)
   }
 
   return color
