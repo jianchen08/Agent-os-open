@@ -12,8 +12,8 @@ import sys
 import uuid
 from typing import Any
 
-from artifacts_sidecar.annotation_service import get_annotation_service
-from artifacts_sidecar.artifact_service import get_artifact_service
+from artifacts.annotation_service import get_annotation_service
+from artifacts.artifact_service import get_artifact_service
 from deps import require_auth
 from fastapi import APIRouter, Depends, File, Form, Query, UploadFile
 from multimodal.mm_types import AttachmentInfo, MediaType  # noqa: F811
