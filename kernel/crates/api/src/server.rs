@@ -45,9 +45,9 @@ use crate::routes::{
     actions_execute_handler, get_pipeline_config_with_etag, get_plugin_config_with_etag,
     health_handler, metrics_prometheus_handler, pipelines_handler, pipelines_runs_handler,
     pipelines_state_handler, plugins_contract_status_handler, plugins_set_enabled_handler,
-    plugins_status_handler, put_pipeline_config_handler, put_plugin_config_handler,
-    schema_handler, serve_upload_handler, system_restart_handler, tools_handler,
-    validate_all_plugins_handler, AppState,
+    plugins_status_handler, put_pipeline_config_handler, put_plugin_config_handler, schema_handler,
+    serve_upload_handler, system_restart_handler, tools_handler, validate_all_plugins_handler,
+    AppState,
 };
 use crate::session_routes::{
     create_session_handler, delete_session_handler, list_session_messages_handler,

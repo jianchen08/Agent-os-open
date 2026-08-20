@@ -398,7 +398,6 @@ mod tests {
 
     #[test]
     fn load_malformed_files_rejected() {
-        let dir = tempfile::tempdir().unwrap();
         let cases: Vec<(&str, String, &str)> = vec![
             ("bad_json.json", "{ not json".to_string(), "坏 JSON"),
             (

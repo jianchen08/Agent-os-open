@@ -639,7 +639,6 @@ impl McpClient {
     }
 
     /// 构建 HTTP reqwest 客户端：解析 `${ENV_VAR}` 鉴权占位、合并额外头、设超时。
-
     fn build_http_client(
         &self,
         url: &str,

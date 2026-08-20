@@ -465,7 +465,12 @@ impl SqliteStore {
         // 的工具是 state 域数据不落内核（跨重启由插件自持 state/config 重建）。
         // 四表零生产者；必须在 DDL 之前 DROP——存量残留表结构与现行 DDL 的
         // CREATE INDEX 不兼容会直接炸 init。
-        for retired in ["execution_records", "pipeline_run_summaries", "memory", "dynamic_tools"] {
+        for retired in [
+            "execution_records",
+            "pipeline_run_summaries",
+            "memory",
+            "dynamic_tools",
+        ] {
             conn.execute(&format!("DROP TABLE IF EXISTS {retired}"), [])?;
         }
         conn.execute_batch(DDL)?;
@@ -3307,7 +3312,6 @@ mod tests {
         assert_eq!(step_no, 10, "应取 step_no 最大的 checkpoint");
         assert_eq!(state["step"], json!(10));
     }
-
 
     // ── A7：槽位 blob 解码的「合法缺失 vs 损坏」区分 ──
 
