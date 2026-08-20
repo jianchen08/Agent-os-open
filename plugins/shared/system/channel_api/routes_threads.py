@@ -208,6 +208,22 @@ def _expand_pipeline_ids_with_tasks(
     return ordered
 
 
+def _task_linked_to_thread(task: Any, thread_id: str, pipeline_ids: set[str]) -> bool:
+    """判断任务是否关联到指定会话（读写统一口径，2026-08-20 用户裁定）。
+
+    与读侧 routes_missing.get_task_tree 的任务-会话匹配策略对齐
+    （统一方向：以读侧展示口径为准，任务凭 metadata.session_id 关联会话即属该会话）：
+    1. parent_pipeline_id ∈ pipeline_ids（会话管道集，含迭代扩展出的子管道）；
+    2. parent_pipeline_id == thread_id（会话主管道直接创建）；
+    3. metadata.session_id == thread_id（读侧策略 1；原写侧缺失该维度致
+       删除后会话残留任务，读展示/删除级联分叉已闭环）。
+    """
+    if task.parent_pipeline_id in pipeline_ids or task.parent_pipeline_id == thread_id:
+        return True
+    meta = getattr(task, "metadata", None) or {}
+    return isinstance(meta, dict) and meta.get("session_id") == thread_id
+
+
 def _build_thread_response(t: dict) -> ThreadResponse:
     """将存储层的线程字典转换为前端期望的 ThreadResponse 格式。"""
 
@@ -574,10 +590,13 @@ def delete_thread(  # noqa: PLR0912
 
     # 迭代式收集关联管道（以 all_pipeline_ids 中每个 ID 匹配直到不动点）。
     # 0.2 架构下仅靠 task_service 收集（内核 SQLite 接管，YAML 存储已废弃）。
+    # 关联判定走 _task_linked_to_thread（读写统一：含 metadata.session_id 维度）；
+    # prev_size 起步 -1 保证至少收集一轮——空管道种子会话（pipeline_ids=[]）下
+    # 仅凭 metadata.session_id 关联的任务同样进入级联收集。
 
     all_pipeline_ids = set(pipeline_ids)
 
-    prev_size = 0
+    prev_size = -1
 
     while len(all_pipeline_ids) > prev_size:
         prev_size = len(all_pipeline_ids)
@@ -586,7 +605,7 @@ def delete_thread(  # noqa: PLR0912
 
         if task_service:
             for task in task_service.get_all_tasks():
-                if task.parent_pipeline_id in all_pipeline_ids or task.parent_pipeline_id == thread_id:
+                if _task_linked_to_thread(task, thread_id, all_pipeline_ids):
                     all_pipeline_ids.add(task.id)
 
                     if task.pipeline_run_id:
@@ -612,7 +631,7 @@ def delete_thread(  # noqa: PLR0912
 
     if task_service:
         for task in task_service.get_all_tasks():
-            if task.parent_pipeline_id in all_pipeline_ids or task.parent_pipeline_id == thread_id:
+            if _task_linked_to_thread(task, thread_id, all_pipeline_ids):
                 try:
                     task_service.hard_delete_sync(task.id)
 
