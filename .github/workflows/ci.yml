@@ -385,6 +385,28 @@ jobs:
           done
           exit $failed
 
+      # rust native 插件产物不入库（.gitignore *.dll/*.so），CI 冒烟矩阵的
+      # test_native_plugin_json_valid 按生产同规则解析 native.artifact——
+      # Linux 产物为 lib{name}.so，需先构建并落位到插件目录（本地 Windows
+      # 同理由开发者 cargo build 后自持）。RUSTC_WRAPPER 置空：本 job 未装
+      # sccache，全局 env 的 RUSTC_WRAPPER 指向不存在二进制会直接失败。
+      - name: Build native plugin artifacts (cdylib)
+        run: |
+          for crate in \
+            plugins/shared/pipeline/core/tool_core \
+            plugins/shared/pipeline/output/sensitive_checker \
+            plugins/shared/pipeline/output/spill_guard; do
+            echo "::group::cargo build $crate"
+            RUSTC_WRAPPER= cargo build --release --manifest-path "$crate/Cargo.toml"
+            name=$(python -c "import json;print(json.load(open('$crate/plugin.json'))['native']['artifact'])")
+            if [ -f "$crate/target/release/$name.dll" ]; then
+              cp "$crate/target/release/$name.dll" "$crate/"
+            else
+              cp "$crate/target/release/lib$name.so" "$crate/"
+            fi
+            echo "::endgroup::"
+          done
+
       - name: Run gates (plugins-heavy)
         run: python scripts/run_gates.py --filter plugins-heavy
 

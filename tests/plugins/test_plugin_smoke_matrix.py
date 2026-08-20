@@ -242,8 +242,17 @@ def test_plugin_loads_and_executes(plugin_dir: Path, tmp_path: Path) -> None:
         f"探针报告: {json.dumps(report, ensure_ascii=False)[:500]}"
     )
 
+    # 声明式插件（capabilities.tools 空 + contributes 前端声明，如 debug_center
+    # 纯页面路由、visual_customization_demo 纯主题包）：零工具是**契约本身**，
+    # 不适用"至少注册 1 个工具"断言——只验加载 + 生命周期。声明了 tools 的
+    # 插件注册数为零仍是红灯。
+    meta = _plugin_meta(plugin_dir)
+    declared_tools = meta.get("capabilities", {}).get("tools", [])
+    declarative = not declared_tools and bool(meta.get("contributes"))
+
     tools = report.get("tools", [])
-    assert len(tools) >= 1, f"插件 {plugin_dir.name} 未注册任何工具"
+    if not declarative:
+        assert len(tools) >= 1, f"插件 {plugin_dir.name} 未注册任何工具"
 
     assert report.get("lifecycle_on_load") is True, (
         f"插件 {plugin_dir.name} on_load 失败: {report.get('lifecycle_on_load_error')}"
@@ -261,18 +270,28 @@ def test_plugin_loads_and_executes(plugin_dir: Path, tmp_path: Path) -> None:
 
 @pytest.mark.parametrize("plugin_dir", EXTERNAL_MCP_DIRS, ids=[str(d.relative_to(ROOT)) for d in EXTERNAL_MCP_DIRS])
 def test_external_mcp_plugin_json_valid(plugin_dir: Path) -> None:
-    """external_mcp 插件：plugin.json 结构完整，mcp_endpoint 指向存在的服务。"""
+    """external_mcp 插件：plugin.json 结构完整，mcp 端点指向存在的服务。
+
+    契约对齐 kernel core traits（2026-08 收敛）：endpoint 嵌套在顶层 `mcp` 下
+    （McpConfig{transport, endpoint}），transport ∈ {stdio, streamable_http}
+    （serde snake_case）。旧 `mcp_endpoint` 顶层字段已废弃。
+    """
     meta = _plugin_meta(plugin_dir)
     assert meta.get("entry") == "mcp:external"
-    endpoint = meta.get("mcp_endpoint", {})
-    transport = str(endpoint.get("transport", ""))
-    assert transport in ("stdio", "http"), f"{plugin_dir.name} mcp_endpoint 未知 transport: {transport}"
+    mcp = meta.get("mcp")
+    assert isinstance(mcp, dict), f"{plugin_dir.name} 缺少顶层 mcp 配置（McpConfig）"
+    transport = str(mcp.get("transport", ""))
+    assert transport in ("stdio", "streamable_http"), (
+        f"{plugin_dir.name} mcp.transport 未知: {transport}"
+    )
+    endpoint = mcp.get("endpoint")
+    assert isinstance(endpoint, dict), f"{plugin_dir.name} mcp.endpoint 缺失"
     if transport == "stdio":
         # stdio 端点必须给出 command + args，且引用的 python 服务端存在
         command = str(endpoint.get("command", ""))
         args = endpoint.get("args", [])
-        assert command, f"{plugin_dir.name} mcp_endpoint 缺少 command"
-        assert args, f"{plugin_dir.name} mcp_endpoint 缺少 args"
+        assert command, f"{plugin_dir.name} mcp.endpoint 缺少 command"
+        assert args, f"{plugin_dir.name} mcp.endpoint 缺少 args"
         for arg in args:
             p = ROOT / arg
             if p.suffix == ".py" and p.exists():
@@ -280,17 +299,41 @@ def test_external_mcp_plugin_json_valid(plugin_dir: Path) -> None:
             elif p.suffix == ".py":
                 pytest.fail(f"{plugin_dir.name} 引用不存在的服务端脚本: {arg}")
     else:
-        # http 端点必须给出 url
-        assert "url" in endpoint, f"{plugin_dir.name} http 端点缺少 url"
+        # streamable_http 端点必须给出 url
+        assert "url" in endpoint, f"{plugin_dir.name} streamable_http 端点缺少 url"
 
 
 @pytest.mark.parametrize("plugin_dir", NATIVE_PLUGIN_DIRS, ids=[str(d.relative_to(ROOT)) for d in NATIVE_PLUGIN_DIRS])
 def test_native_plugin_json_valid(plugin_dir: Path) -> None:
-    """原生插件（.dll/.wasm）：plugin.json 完整，entry 指向存在的产物文件。"""
+    """原生插件（.dll/.wasm）：plugin.json 完整，entry 指向存在的产物文件。
+
+    产物存在性按**生产同规则**解析：取 `native.artifact` 裸名，按平台补
+    cdylib 前后缀（对齐 kernel NativePluginLoader::platform_artifact_name：
+    Windows `{name}.dll`、Linux `lib{name}.so`、macOS `lib{name}.dylib`）。
+    manifest `entry` 字段常写死构建机后缀（.dll），跨平台 CI 直接拿 entry
+    找文件会误报缺失——加载器实际走的是 native.artifact 解析路径。
+    """
     meta = _plugin_meta(plugin_dir)
     entry = _entry_of(plugin_dir)
-    assert (plugin_dir / entry).exists(), f"{plugin_dir.name} entry 产物不存在: {entry}"
+    artifact = str(meta.get("native", {}).get("artifact", ""))
+    assert artifact, f"{plugin_dir.name} native.artifact 缺失"
+    resolved = _platform_artifact_name(artifact)
+    assert (plugin_dir / resolved).exists(), (
+        f"{plugin_dir.name} native 产物不存在: {resolved}（cdylib 未构建或 artifact 声明有误）"
+    )
     assert meta.get("plugin_type") in ("tool", "pipeline", "system")
+    assert entry.endswith((".dll", ".wasm")), f"{plugin_dir.name} entry 非 cdylib/wasm: {entry}"
+
+
+def _platform_artifact_name(artifact: str) -> str:
+    """按平台约定补全 cdylib 文件名前缀/后缀（镜像 kernel native_loader）。"""
+    if artifact.lower().endswith((".dll", ".so", ".dylib")):
+        return artifact
+    if sys.platform == "win32":
+        return f"{artifact}.dll"
+    if sys.platform == "darwin":
+        return f"lib{artifact}.dylib"
+    return f"lib{artifact}.so"
 
 
 def _assert_python_server_loadable(server_path: Path) -> None:
