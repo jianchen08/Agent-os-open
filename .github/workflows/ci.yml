@@ -328,14 +328,16 @@ jobs:
           uv pip install -e ./plugins/sdk
 
       # 门禁：plugins-coverage-pairing（名单配对校验，瞬时）
+      #     + channel-copy-guard（渠道共享拷贝守卫，瞬时——channel_common 模块名
+      #       黑名单不得重回 channel_* 目录，C1 合流防复发）
       #     + plugins-coverage（插桩：pytest || true 经 tee 捕获 → 失败数基线锁
       #       .github/pytest-failure-baseline.txt 只减不增 → coverage report
       #       --fail-under=44 地板（独立执行不被 || true 吞掉；44 为 2026-08-15
       #       dev/0.2 实测，只升不降棘轮至 50→80%；coverage.xml 供矩阵回填消费））
       #     + plugins-mypy-baseline（plugins/shared mypy 只减不增，
       #       基线 .github/mypy-baseline.txt；uv run 保证与本地计数口径一致）
-      - name: Run gates (pairing + coverage + mypy baseline)
-        run: python scripts/run_gates.py --filter plugins-coverage-pairing,plugins-coverage,plugins-mypy-baseline
+      - name: Run gates (pairing + copy-guard + coverage + mypy baseline)
+        run: python scripts/run_gates.py --filter plugins-coverage-pairing,channel-copy-guard,plugins-coverage,plugins-mypy-baseline
 
   # ── Python Heavy Suites（免插桩 gate：重型套件并排执行）────────────────
   # 与 python-coverage 并行（无 needs 依赖）：94 插件（85 sidecar + 8

@@ -191,6 +191,16 @@ GATES: list[Gate] = [
         fast=True,
     ),
     Gate(
+        # C1 渠道合流防复发守卫（2026-08-20）：channel_common 模块名黑名单
+        # 不得重回任何 channel_* 目录；负样本演示见
+        # docs/working/渠道合流C1C2与CLI插件化方案_20260819.md §1.3 第 6 步执行记录。
+        id="channel-copy-guard",
+        label="渠道共享拷贝守卫（channel_common 黑名单 0 命中）",
+        domain="plugins",
+        command=(sys.executable, "scripts/check_channel_copy_guard.py"),
+        fast=True,
+    ),
+    Gate(
         id="plugins-coverage",
         label="插件测试（插桩，免豁免重型套件）+ 失败数基线锁 + 覆盖率地板 44%",
         domain="plugins",
