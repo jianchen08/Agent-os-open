@@ -229,7 +229,11 @@ class CompressionConfig:
                 recent_ratio=budgets.get("recent", 0.18),
                 retrieval_ratio=budgets.get("retrieval", 0.05),
             )
-        except Exception:
+        except Exception as e:
+            logger.warning(
+                "[context_window_guard] 压缩预算配置读取失败，回退代码默认 | path=system/context_window_config.yaml | error=%s",
+                e,
+            )
             return cls(context_window=context_window)
 
     def get_budgets(self) -> dict[str, int]:
@@ -1625,7 +1629,12 @@ class ContextWindowGuardPlugin(IInputPlugin):
                 top_k=20,
                 memory_type="chunk",
             )
-        except Exception:
+        except Exception as e:
+            logger.warning(
+                "[context_window_guard] 记忆后端检索失败（按无 L1 预算处理）| pipeline_id=%s | error=%s",
+                pipeline_id,
+                e,
+            )
             return -1
 
         l1_chunks, snapshot_chunks = self._filter_chunks(results)
@@ -1994,7 +2003,12 @@ class ContextWindowGuardPlugin(IInputPlugin):
                 top_k=20,
                 memory_type="chunk",
             )
-        except Exception:
+        except Exception as e:
+            logger.warning(
+                "[context_window_guard] 记忆后端检索失败（跳过压缩消息注入）| pipeline_id=%s | error=%s",
+                pipeline_id,
+                e,
+            )
             return messages
 
         l1_chunks, _ = self._filter_chunks(results)
@@ -2078,7 +2092,12 @@ class ContextWindowGuardPlugin(IInputPlugin):
                 top_k=20,
                 memory_type="chunk",
             )
-        except Exception:
+        except Exception as e:
+            logger.warning(
+                "[context_window_guard] 记忆后端检索失败（跳过 window 变更检测）| pipeline_id=%s | error=%s",
+                pipeline_id,
+                e,
+            )
             return None
 
         l1_chunks, _ = self._filter_chunks(results)

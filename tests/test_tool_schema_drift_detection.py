@@ -61,3 +61,22 @@ def test_no_drift_no_warning(caplog):
     with caplog.at_level(logging.WARNING, logger=plugin.name):
         asyncio.run(plugin.execute(_ctx(state)))
     assert not [r for r in caplog.records if "工具面漂移" in r.message]
+
+
+def test_empty_tool_ids_warns_config_break(caplog):
+    """K10 配套：agent/state 完全无 tool_ids → warning（配置加载断链信号）。
+
+    内核侧 K10 已改为无 tool_ids 不再全量注入；sidecar 同点报警，
+    双侧对齐暴露"agent 配置没接上"而非静默全量/空面。
+    """
+    state = {
+        "tool_schemas": [_schema("file_read"), _schema("task_submit")],
+        # 无 tool_ids 键（context_build 未装载/agent yaml 断链）
+    }
+    plugin = tool_schema_mod.ToolSchemaPlugin(config={})
+    with caplog.at_level(logging.WARNING, logger=plugin.name):
+        updates = asyncio.run(plugin.execute(_ctx(state))).state_updates
+    assert updates == {}, "无 tool_ids 时不覆盖内核注入（行为保持）"
+    warn_logs = [r for r in caplog.records if "未声明 tool_ids" in r.message]
+    assert warn_logs, "agent 无 tool_ids 必须告警（检查配置加载断链）"
+    assert "断链" in warn_logs[0].getMessage()

@@ -338,3 +338,68 @@ class TestUnknownPlaceholderWarns:
             out = _run(plugin._resolve_placeholder(ctx, "session"))
         assert out == "s-1"
         assert "未识别" not in caplog.text
+
+
+# ═══════════════════════════════════════════════════════════
+# 压缩预算配置回退可观测（兜底反模式审查 P12，2026-08-20）
+# ═══════════════════════════════════════════════════════════
+
+
+class TestCompressionConfigFallbackWarns:
+    """P12：预算配置读取失败回退代码默认必须 warning 留痕（path + 异常）。"""
+
+    def test_from_yaml_config_failure_warns(self, caplog, monkeypatch) -> None:
+        import logging
+
+        mod = _load_plugin_module()
+        monkeypatch.setitem(sys.modules, "config.config_center", None)  # 模拟配置中心不可达
+        with caplog.at_level(logging.WARNING):
+            cfg = mod._LocalCompressionConfig.from_yaml_config(64000)
+        assert cfg.context_window == 64000, "回退代码默认（行为保持）"
+        msgs = [r.getMessage() for r in caplog.records if r.levelno >= logging.WARNING]
+        assert any("压缩预算配置读取失败" in m for m in msgs)
+        assert any("context_window_config.yaml" in m for m in msgs), "留痕需带配置路径"
+
+
+# ═══════════════════════════════════════════════════════════
+# 知识注入/状态快照静默落空可观测（兜底反模式审查 P16/P17，2026-08-20）
+# ═══════════════════════════════════════════════════════════
+
+
+class TestKnowledgeAndSnapshotObservability:
+    def test_memory_service_missing_warns(self, caplog) -> None:
+        """P16：static_vars 声明知识注入但 memory_service 未注册 → warning。"""
+        import logging
+
+        mod = _load_plugin_module()
+        plugin = mod.PromptBuildPlugin(config={})
+        ctx = _make_ctx({})  # 无 services → get_service 抛 KeyError
+        var_def = {
+            "type": "retrieval",
+            "name": "知识",
+            "tags": ["a", "b"],
+            "top_k": 3,
+            "inject_type": "full",
+        }
+        with caplog.at_level(logging.WARNING):
+            out = _run(plugin._resolve_single_var_content(ctx, var_def, "sess-1", {}))
+        assert out == "", "降级语义保持（空知识）"
+        assert any("memory_service 未注册" in r.getMessage() for r in caplog.records)
+
+    def test_state_snapshot_retrieval_failure_warns(self, caplog, monkeypatch) -> None:
+        """P17：快照检索异常 → 空消息 + warning（不再静默 pass）。"""
+        import logging
+
+        mod = _load_plugin_module()
+        plugin = mod.PromptBuildPlugin(config={})
+
+        class BoomBackend:
+            async def search(self, **kwargs):
+                raise RuntimeError("snapshot backend down")
+
+        monkeypatch.setattr(mod, "_memory_backend", BoomBackend())
+        ctx = _make_ctx({"user_id": "u1"})
+        with caplog.at_level(logging.WARNING):
+            msgs = _run(plugin._load_state_snapshot_message(ctx, "pipe-1"))
+        assert msgs == [], "降级语义保持（缺 <current_state>）"
+        assert any("状态快照检索失败" in r.getMessage() for r in caplog.records)

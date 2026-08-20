@@ -138,6 +138,16 @@ class ToolSchemaPlugin(IInputPlugin):
                             self.name, len(schemas), len(filtered),
                         )
                         return {"tool_schemas": filtered}
+                else:
+                    # K10 配套（2026-08-20）：agent/state 完全无 tool_ids =
+                    # agent 配置加载断链的信号（context_build 应按 agent yaml
+                    # 注入 state.tool_ids；内核侧无 tool_ids 已不再全量注入）。
+                    # 报警暴露而非静默全量/空面。
+                    logger.warning(
+                        "[%s] agent 未声明 tool_ids，工具面为空——检查 agent 配置"
+                        "加载是否断链（context_build 按 agent yaml 注入 state.tool_ids）",
+                        self.name,
+                    )
                 return {}  # 不覆盖，保留内核注入的 schema
             return {"tool_schemas": []}
 

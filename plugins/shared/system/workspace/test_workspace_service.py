@@ -335,3 +335,53 @@ class TestModels:
     def test_workspace_from_dict_defaults(self) -> None:
         ws = Workspace.from_dict({})
         assert ws.id and ws.container_task_id == ""
+
+
+# ═══════════════════════════════════════════════════════════
+# 子任务聚合失败可观测（兜底反模式审查 P15，2026-08-20）
+# ═══════════════════════════════════════════════════════════
+
+
+class TestChildTaskAggregationFailureWarns:
+    def test_state_path_failure_warns_and_empty_set(self, caplog, monkeypatch) -> None:
+        """P15：state 路径聚合异常 → 空集 + warning（制品列表不完整可见）。"""
+        import asyncio
+        import logging
+
+        svc = WorkspaceService()
+
+        async def boom():
+            raise RuntimeError("state bridge broke")
+
+        monkeypatch.setattr(svc, "_read_state_rows", boom, raising=False)
+        with caplog.at_level(logging.WARNING):
+            result = asyncio.run(svc._get_child_task_ids("container-1"))
+        assert result == set(), "降级语义保持（空集）"
+        assert any("子任务聚合失败" in r.getMessage() for r in caplog.records)
+
+    def test_legacy_path_failure_warns_and_empty_set(self, caplog, monkeypatch) -> None:
+        """P15：legacy 路径同款留痕。"""
+        import asyncio
+        import logging
+        import sys as _sys
+        import types as _types
+
+        svc = WorkspaceService()
+
+        async def rows_none():
+            return None  # 触发 legacy 回退路径
+
+        # legacy 方法内部 from tasks.service_access import get_task_service →
+        # 用抛错桩顶替该模块，让 legacy 自身 except 分支命中
+        stub = _types.ModuleType("tasks.service_access_stub_p15")
+
+        def gts():
+            raise RuntimeError("task service broke")
+
+        stub.get_task_service = gts  # type: ignore[attr-defined]
+        monkeypatch.setitem(_sys.modules, "tasks.service_access", stub)
+        monkeypatch.setattr(svc, "_read_state_rows", rows_none, raising=False)
+        with caplog.at_level(logging.WARNING):
+            result = asyncio.run(svc._get_child_task_ids("container-2"))
+        assert result == set()
+        assert any("legacy" in r.getMessage() and "子任务聚合失败" in r.getMessage() for r in caplog.records)

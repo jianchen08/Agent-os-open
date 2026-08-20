@@ -229,5 +229,17 @@ class KnowledgeInjectPlugin(IInputPlugin):
         scored.sort(key=lambda x: (-x[0], x[1]))
         filtered = [item for hit, _, item in scored if hit > 0]
 
-        # 若全部零命中，回退到原始列表（保证有内容可用）
-        return filtered[: self._top_k] if filtered else items[: self._top_k]
+        # 若全部零命中，回退到原始列表（保证有内容可用）——显式标记：
+        # 检索质量故障被兜成"注入不相关信息"必须可观测（注入内容 + 日志双留痕）
+        if not filtered:
+            logger.warning(
+                "[KnowledgeInjectPlugin] 关键词零命中，回退全量未过滤注入（检索质量可疑）| query=%s | top_k=%d",
+                query,
+                self._top_k,
+            )
+            marker = {
+                "content": "[关键词未命中，已回退全量（未按相关性过滤）]",
+                "tags": ["system-marker"],
+            }
+            return [marker, *items[: self._top_k]]
+        return filtered[: self._top_k]

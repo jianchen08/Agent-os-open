@@ -140,7 +140,11 @@ class _LocalCompressionConfig:
                 l2_ratio=budgets.get("l2", 0.05),
                 recent_ratio=budgets.get("recent", 0.18),
             )
-        except Exception:
+        except Exception as e:
+            logger.warning(
+                "[prompt_build] 压缩预算配置读取失败，回退代码默认 | path=system/context_window_config.yaml | error=%s",
+                e,
+            )
             return cls(context_window=context_window)
 
     def get_budgets(self) -> dict[str, int]:
@@ -931,6 +935,13 @@ class PromptBuildPlugin(IInputPlugin):
         try:
             memory_service = ctx.get_service("memory_service")
         except KeyError:
+            # static_vars 已声明知识注入 opt-in（配置明确要），服务缺失时
+            # 配置意图无声落空——warning 留痕
+            logger.warning(
+                "[%s] memory_service 未注册，知识注入（retrieval）配置落空 | tags=%s",
+                self.name,
+                var_def.get("tags"),
+            )
             return ""
 
         user_id = ctx.state.get("user_id", "")
@@ -1363,8 +1374,13 @@ class PromptBuildPlugin(IInputPlugin):
                                 "_context_form": "snapshot",
                             }
                         ]
-        except Exception:
-            pass
+        except Exception as e:
+            # 压缩恢复后对话静默丢失 <current_state> 快照必须可见
+            logger.warning(
+                "[%s] 状态快照检索失败，本轮缺少 <current_state> | error=%s",
+                self.name,
+                e,
+            )
         return []
 
     @staticmethod

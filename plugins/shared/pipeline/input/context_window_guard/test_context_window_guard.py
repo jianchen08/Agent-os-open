@@ -612,3 +612,47 @@ class TestOpModeEmission:
         result = _run(plugin.execute(ctx))
         # 没有 clean/trim/压缩 → 不 emit messages key（仅 _tracked_msg_count）
         assert "messages" not in result.state_updates
+
+
+# ═══════════════════════════════════════════════════════════
+# 预算配置回退/记忆后端检索可观测（兜底反模式审查 P12/P13，2026-08-20）
+# ═══════════════════════════════════════════════════════════
+
+
+class TestFallbackObservability:
+    def test_from_yaml_config_failure_warns(self, caplog, monkeypatch) -> None:
+        """P12：预算配置读取失败回退代码默认必须 warning 留痕。"""
+        import logging
+
+        mod = _load_plugin_module()
+        monkeypatch.setitem(sys.modules, "config.config_center", None)
+        with caplog.at_level(logging.WARNING):
+            cfg = mod.CompressionConfig.from_yaml_config(128000)
+        assert cfg.context_window == 128000, "回退代码默认（行为保持）"
+        msgs = [r.getMessage() for r in caplog.records if r.levelno >= logging.WARNING]
+        assert any("压缩预算配置读取失败" in m for m in msgs)
+        assert any("context_window_config.yaml" in m for m in msgs)
+
+    def _make_plugin(self, mod) -> Any:
+        return mod.ContextWindowGuardPlugin(config={})
+
+    def test_memory_backend_search_failure_warns(self, caplog, monkeypatch) -> None:
+        """P13：记忆后端检索异常按无历史处理但必须 warning（三处之一回归）。"""
+        import logging
+
+        mod = _load_plugin_module()
+
+        class BoomBackend:
+            async def search(self, **kwargs):
+                raise RuntimeError("backend down")
+
+        monkeypatch.setattr(mod, "_memory_backend", BoomBackend())
+        plugin = self._make_plugin(mod)
+        ctx = mod.PluginContext(
+            state={mod.StateKeys.PIPELINE_ID: "pipe-p13", "user_id": "u1", "messages": []},
+            config={},
+        )
+        with caplog.at_level(logging.WARNING):
+            messages = asyncio.run(plugin._trim_covered_messages(ctx, []))
+        assert messages == [], "检索失败按无历史处理（行为保持）"
+        assert any("记忆后端检索失败" in r.getMessage() for r in caplog.records)

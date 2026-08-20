@@ -214,7 +214,13 @@ class WorkspaceService:
                     child_ids.add(cid)
                     queue.append(cid)
             return child_ids
-        except Exception:
+        except Exception as e:
+            # 子任务聚合失败静默空集会让容器制品列表只剩自身条目——留痕可观测
+            logger.warning(
+                "[workspace] 子任务聚合失败（返回空集，制品列表可能不完整）| container_task_id=%s | error=%s",
+                container_task_id,
+                e,
+            )
             return set()
 
     async def _get_child_task_ids_legacy(self, container_task_id: str) -> set[str]:
@@ -238,7 +244,13 @@ class WorkspaceService:
                     child_ids.add(t.id)
                     queue.append(t.id)
             return child_ids
-        except Exception:
+        except Exception as e:
+            # legacy 路径同款留痕（218/241 两条聚合路径口径一致）
+            logger.warning(
+                "[workspace] 子任务聚合失败 legacy（返回空集，制品列表可能不完整）| container_task_id=%s | error=%s",
+                container_task_id,
+                e,
+            )
             return set()
 
     async def _read_state_rows(self) -> list[dict[str, Any]] | None:

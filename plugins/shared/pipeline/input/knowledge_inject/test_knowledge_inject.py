@@ -163,3 +163,39 @@ class TestRetrievalWritesContext:
         assert call["user_id"] == "u-1"
         assert call["top_k"] == 5
         assert call["memory_type"] == "semantic"
+
+
+# ═══════════════════════════════════════════════════════════
+# 关键词零命中回退全量显式标记（兜底反模式审查 P18，2026-08-20）
+# ═══════════════════════════════════════════════════════════
+
+
+class TestRelevanceFallbackMarked:
+    def test_zero_hit_fallback_carries_marker_and_warns(self, caplog) -> None:
+        """P18：关键词零命中回退全量 → 注入内容带标记 + warning。"""
+        import logging
+
+        plugin = _load_plugin_module().KnowledgeInjectPlugin(config={})
+        items = [
+            {"content": "苹果的营养价值", "tags": ["fruit"]},
+            {"content": "汽车保养常识", "tags": ["auto"]},
+        ]
+        with caplog.at_level(logging.WARNING):
+            out = plugin._filter_by_relevance(items, "量子计算")
+        assert any("关键词未命中" in str(i.get("content", "")) for i in out), (
+            "回退注入的内容必须显式注明未命中回退"
+        )
+        # 原条目仍在（保证有内容可用的回退语义保持）
+        assert any("苹果" in str(i.get("content", "")) for i in out)
+        assert any("关键词零命中" in r.getMessage() for r in caplog.records)
+
+    def test_hit_filter_unchanged_no_marker(self) -> None:
+        """P18 回归：有命中 → 正常过滤，无标记无告警路径。"""
+        plugin = _load_plugin_module().KnowledgeInjectPlugin(config={})
+        items = [
+            {"content": "苹果的营养价值", "tags": ["fruit"]},
+            {"content": "汽车保养常识", "tags": ["auto"]},
+        ]
+        out = plugin._filter_by_relevance(items, "苹果 营养")
+        assert len(out) == 1 and "苹果" in out[0]["content"]
+        assert all("关键词未命中" not in str(i.get("content", "")) for i in out)

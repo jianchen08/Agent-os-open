@@ -196,7 +196,14 @@ class TaskTool(BuiltinTool):
         try:
             status = TaskStatus(status_str)
         except (ValueError, AttributeError):
-            status = TaskStatus.PENDING
+            # 内核新增状态而本地枚举副本未同步 → 保留原串展示（不再静默变
+            # PENDING 触发错误的可操作动作），warning 留痕提示同步枚举
+            logger.warning(
+                "[TaskTool] 未知任务状态（枚举副本与内核漂移？），保留原串展示 | status=%s | task=%s",
+                status_str,
+                task_id,
+            )
+            status = status_str
         # 会话锚点取舍：任务管道无 sessions 行，其 thread_id 恒等于自身
         # pipeline_id；出生侧 lineage.origin_session_id 修正后为真 thread id。
         # 取「不等于自身 pipeline_id」的那个，两侧语义偏差互为兜底。
@@ -204,6 +211,11 @@ class TaskTool(BuiltinTool):
         origin_sess = str(row.get("lineage.origin_session_id") or "")
         row_thread = str(row.get("thread_id") or "")
         anchor = origin_sess if origin_sess and origin_sess != pid else (row_thread if row_thread and row_thread != pid else origin_sess or row_thread)
+        if not anchor or anchor == pid:
+            # 三段式兜底命中 pid 充当 session_id：语义降级，debug 留痕
+            logger.debug(
+                "[TaskTool] 会话锚点兜底命中 pipeline_id 充当 session_id | task=%s", task_id
+            )
         metadata: dict[str, Any] = {
             "session_id": anchor,
             "target_id": str(row.get("task.submitted_by") or ""),
@@ -237,10 +249,17 @@ class TaskTool(BuiltinTool):
             pid = str(row.get("pipeline_id") or "")
             if not pid:
                 continue
+            status_raw = str(row.get("task.status") or "pending")
             try:
-                status = TaskStatus(str(row.get("task.status") or "pending"))
+                status = TaskStatus(status_raw)
             except (ValueError, AttributeError):
-                status = TaskStatus.PENDING
+                # 同 _get_task_from_state：枚举漂移保留原串展示 + warning
+                logger.warning(
+                    "[TaskTool] 未知任务状态（枚举副本与内核漂移？），保留原串展示 | status=%s | task=%s",
+                    status_raw,
+                    pid,
+                )
+                status = status_raw
             out.append(
                 types.SimpleNamespace(
                     id=pid,
@@ -666,7 +685,7 @@ class TaskTool(BuiltinTool):
 
             if not has_permission:
                 return create_failure_result(
-                    error=error_msg,
+                    error=error_msg or "权限不足",
                     error_code="INSUFFICIENT_PERMISSION",
                 )
 
@@ -861,7 +880,7 @@ class TaskTool(BuiltinTool):
 
             if not has_permission:
                 return create_failure_result(
-                    error=error_msg,
+                    error=error_msg or "权限不足",
                     error_code="INSUFFICIENT_PERMISSION",
                 )
 
@@ -916,7 +935,7 @@ class TaskTool(BuiltinTool):
 
         if not has_permission:
             return create_failure_result(
-                error=error_msg,
+                error=error_msg or "权限不足",
                 error_code="INSUFFICIENT_PERMISSION",
             )
 
@@ -988,7 +1007,7 @@ class TaskTool(BuiltinTool):
 
         if not has_permission:
             return create_failure_result(
-                error=error_msg,
+                error=error_msg or "权限不足",
                 error_code="INSUFFICIENT_PERMISSION",
             )
 
@@ -1059,7 +1078,7 @@ class TaskTool(BuiltinTool):
 
         if not has_permission:
             return create_failure_result(
-                error=error_msg,
+                error=error_msg or "权限不足",
                 error_code="INSUFFICIENT_PERMISSION",
             )
 
@@ -1165,12 +1184,12 @@ class TaskTool(BuiltinTool):
 
             if not has_permission:
                 return create_failure_result(
-                    error=error_msg,
+                    error=error_msg or "权限不足",
                     error_code="INSUFFICIENT_PERMISSION",
                 )
 
             status = getattr(task, "status", None)
-            status_str = status.value if hasattr(status, "value") else str(status or "pending")
+            status_str = str(getattr(status, "value", None) or status or "pending")
             stoppable = {"pending", "running", "suspended"}
             if status_str not in stoppable:
                 return create_failure_result(
@@ -1272,7 +1291,7 @@ class TaskTool(BuiltinTool):
 
             if not has_permission:
                 return create_failure_result(
-                    error=error_msg,
+                    error=error_msg or "权限不足",
                     error_code="INSUFFICIENT_PERMISSION",
                 )
 

@@ -1151,8 +1151,15 @@ class SecurityCheckPlugin(IInputPlugin):
                     decoded2 = urllib.parse.unquote(decoded)
                     if ".." in decoded.replace("\\", "/") or ".." in decoded2.replace("\\", "/"):
                         return f"Encoded path traversal detected: {path}"
-                except Exception:
-                    pass
+                except Exception as e:
+                    # fail-closed：检查器解码失败按检测命中处理——静默跳过
+                    # 等于给编码穿越留绕过通道；warning 留痕便于甄别误报
+                    logger.warning(
+                        "[security_check] URL 解码异常，按编码穿越命中处理（fail-closed）| path=%s | error=%s",
+                        path,
+                        e,
+                    )
+                    return f"Encoded path traversal detected (decode failed): {path}"
 
             # 4. 检查空字节注入（Windows）
             if "\x00" in path:

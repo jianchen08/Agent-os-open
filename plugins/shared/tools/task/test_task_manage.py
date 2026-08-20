@@ -78,3 +78,77 @@ async def test_continue_resume_restores_status() -> None:
     assert after is not None
 
     await svc.hard_delete_task(task.id)
+
+
+# ─────────────── 状态枚举漂移/锚点兜底可观测（兜底反模式审查 P11，2026-08-20） ───────────────
+
+
+async def test_unknown_status_preserved_with_warning(caplog) -> None:
+    """P11：内核新增状态而本地枚举未同步 → 保留原串展示 + warning（不静默变 PENDING）。"""
+    import logging
+
+    tool = TaskTool()
+
+    async def fake_rows():
+        return [
+            {
+                "pipeline_id": "pipe-unknown-status",
+                "task.status": "archived_v2",  # 不在 7 态枚举内
+                "task.goal": "目标",
+            }
+        ]
+
+    tool._read_state_rows = fake_rows  # type: ignore[method-assign]
+    with caplog.at_level(logging.WARNING):
+        task = await tool._get_task_from_state("pipe-unknown-status")
+    assert task is not None
+    assert task.status == "archived_v2", "未知状态保留原串（展示真值）"
+    assert any("未知任务状态" in r.getMessage() for r in caplog.records)
+
+
+async def test_list_unknown_status_preserved_with_warning(caplog) -> None:
+    """P11（list 路径同款）：批量组装保留原串 + warning。"""
+    import logging
+
+    tool = TaskTool()
+
+    async def fake_rows():
+        return [
+            {
+                "pipeline_id": "pipe-list-unknown",
+                "task.status": "quarantined",
+                "task.goal": "目标",
+            }
+        ]
+
+    tool._read_state_rows = fake_rows  # type: ignore[method-assign]
+    with caplog.at_level(logging.WARNING):
+        tasks = await tool._list_tasks_from_state()
+    assert tasks is not None
+    assert tasks[0].status == "quarantined"
+    assert any("未知任务状态" in r.getMessage() for r in caplog.records)
+
+
+async def test_anchor_fallback_hits_pid_logs_debug(caplog) -> None:
+    """P11：锚点三段式兜底两键都=pid → 拿 pid 充当 session_id 时 debug 留痕。"""
+    import logging
+
+    tool = TaskTool()
+
+    async def fake_rows():
+        return [
+            {
+                "pipeline_id": "pipe-anchor",
+                "task.status": "running",
+                "task.goal": "目标",
+                "lineage.origin_session_id": "pipe-anchor",  # 两键都等于 pid
+                "thread_id": "pipe-anchor",
+            }
+        ]
+
+    tool._read_state_rows = fake_rows  # type: ignore[method-assign]
+    with caplog.at_level(logging.DEBUG):
+        task = await tool._get_task_from_state("pipe-anchor")
+    assert task is not None
+    assert task.metadata["session_id"] == "pipe-anchor", "兜底语义保持（pid 充当锚点）"
+    assert any("会话锚点" in r.getMessage() for r in caplog.records)
