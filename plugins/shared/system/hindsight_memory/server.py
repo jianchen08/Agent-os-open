@@ -798,14 +798,23 @@ async def _on_load(params: dict[str, Any]) -> None:
                     _venv_python,
                 )
                 raise RuntimeError("hindsight venv 未初始化")
+            # 子进程 stderr 落盘不 DEVNULL（F6，2026-08-20）：今晚 hindsight-api
+            # 连续 exit code=1（13:19/13:27/13:41/13:59 四次全灭），stderr 进
+            # DEVNULL 导致崩溃原因完全不可诊断（手动复现才知是 env/pg0 锁类
+            # 问题）。追加写 data 目录，崩溃时带 tail 进错误消息。
+            _stderr_path = os.path.join(data_dir, "hindsight_api_stderr.log")
+            _stderr_file = open(_stderr_path, "ab")  # noqa: SIM115
             _api_process = subprocess.Popen(
                 [_venv_python, "-m", "hindsight_api.main",
                  "--port", str(port), "--host", "127.0.0.1"],
                 stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
+                stderr=_stderr_file,
                 env=os.environ.copy(),
             )
-            logger.info("[hindsight] hindsight-api 子进程已启动 PID=%s port=%s", _api_process.pid, port)
+            logger.info(
+                "[hindsight] hindsight-api 子进程已启动 PID=%s port=%s stderr_log=%s",
+                _api_process.pid, port, _stderr_path,
+            )
 
             # 等待服务器就绪(轮询 /health,最多 60s)
             import asyncio as _aio  # noqa: PLC0415
@@ -819,10 +828,20 @@ async def _on_load(params: dict[str, Any]) -> None:
                             logger.info("[hindsight] 服务器就绪 (attempt=%d)", _attempt + 1)
                             break
                 except Exception:
-                    # 检查子进程是否已退出
+                    # 检查子进程是否已退出：带上 stderr tail（落盘日志最后 800
+                    # 字符）——崩溃原因可见，不再只有裸 exit code。
                     if _api_process.poll() is not None:
+                        _tail = ""
+                        try:
+                            _stderr_file.flush()
+                            with open(_stderr_path, "rb") as _f:
+                                _raw = _f.read()
+                            _tail = _raw[-800:].decode("utf-8", errors="replace")
+                        except Exception:  # noqa: BLE001
+                            pass
                         raise RuntimeError(
                             f"hindsight-api 子进程已退出 code={_api_process.returncode}"
+                            f" stderr_tail={_tail!r}"
                         )
             else:
                 raise RuntimeError("hindsight-api 服务器 60s 内未就绪")
