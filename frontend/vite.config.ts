@@ -1,5 +1,6 @@
 /// <reference types="vitest/config" />
 import react from '@vitejs/plugin-react'
+import { createRequire } from 'node:module'
 import path from 'path'
 import { defineConfig, loadEnv } from 'vite'
 
@@ -78,13 +79,22 @@ export default defineConfig(({ mode }) => {
         // （@ant-design/icons-svg/es/asn/*）：ESM 可被浏览器直接加载，无需在
         // optimizeDeps.include 中逐个预构建 847 项 CJS asn，显著降低 dev 启动预构建
         // 时间与"每次启动都重新做"的概率。
-        // DEBT: alias 写死了 @ant-design/icons-svg 的 CJS 子目录名（lib/asn）改向 ESM
+        // DEBT: alias 把 @ant-design/icons-svg 的 CJS 子目录名（lib/asn）改向 ESM
         // （es/asn），以减少 noDiscovery 下 847 项预构建。ceiling: 依赖 antd/icons-svg
         // 4.x 保持 lib/asn + es/asn 对称结构；一旦上游移除 CJS 入口或改名，本 alias 失效。
         // upgrade: 评估切换到 babel-plugin-import / unplugin 等更稳定按需方案时移除本 alias。
+        // 目标路径经 @ant-design/icons 包上下文解析（pnpm 严格布局下 icons-svg 链接
+        // 在 .pnpm 依赖方目录层，frontend/node_modules 顶层与 icons 嵌套处都不存在——
+        // 写死平铺路径会 846 项图标加载 os error 3，2026-08-20）。
         '@ant-design/icons-svg/lib/asn': path.resolve(
-          __dirname,
-          'node_modules/@ant-design/icons-svg/es/asn',
+          path.dirname(
+            createRequire(
+              path.dirname(
+                createRequire(import.meta.url).resolve('@ant-design/icons/package.json'),
+              ),
+            ).resolve('@ant-design/icons-svg/package.json'),
+          ),
+          'es/asn',
         ),
       },
     },

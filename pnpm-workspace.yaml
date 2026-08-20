@@ -11,3 +11,10 @@ allowBuilds:
   electron-winstaller: true
   unrs-resolver: true
   esbuild: true
+
+# 依赖边修复（2026-08-20）：react-syntax-highlighter@16 的 async 语言表引用
+# highlight.js/lib/languages/sql_more，该文件只在 10.7.x 存在（10.4.1 没有）；
+# a4574ab5 lock 全量重生成时此边被锚回 10.4.1 → vite build 必挂（CI run
+# 32333595329 后本地复现）。override 强制 ^10.4.1 range 解析到 10.7.3。
+overrides:
+  highlight.js@^10.4.1: 10.7.3
