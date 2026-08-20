@@ -280,6 +280,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    #[test]
     fn platform_artifact_name_keeps_known_extensions() {
         assert_eq!(NativePluginLoader::platform_artifact_name("p.dll"), "p.dll");
         assert_eq!(
