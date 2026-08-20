@@ -1374,8 +1374,9 @@ class PromptBuildPlugin(IInputPlugin):
         产出完整的消息 dict（含 role/name/content），
         LLMCore 直接追加到消息列表末尾，无需二次包装。
 
-        优先从 state["context.dynamic_vars"] 读取 Agent YAML 配置的
-        dynamic_vars.items，回退到硬编码的默认动态变量。
+        优先级（2026-08-20 裁定"零兜底"）：agent 配置
+        （state["context.dynamic_vars"]，context_build 装载）> 插件配置默认
+        （config 的 dynamic_vars，全局变量声明口子）> 不注入（无硬编码兜底）。
 
         Args:
             ctx: 插件执行上下文
@@ -1386,7 +1387,14 @@ class PromptBuildPlugin(IInputPlugin):
         now, suffix = self._now_in_configured_tz()
         parts: list[str] = []
 
-        dynamic_vars_def = ctx.state.get("context.dynamic_vars", [])
+        # 优先级（F9，2026-08-20 裁定"零兜底"）：agent 配置（context.dynamic_vars，
+        # context_build 装载）> 插件配置默认（config 的 dynamic_vars，全局变量
+        # 声明口子）。两者皆无 → 不注入任何动态变量（返回 None）——硬编码
+        # 兜底块（日期/时间/Agent/会话）已删：配置没声明的变量一律不注入，
+        # 配置是单一真值源。
+        dynamic_vars_def = ctx.state.get("context.dynamic_vars") or self._config.get(
+            "dynamic_vars", []
+        )
         if dynamic_vars_def:
             session_id = ctx.state.get("context.session_id", "")
             agent_name = ctx.state.get("context.agent_name", "")
@@ -1435,18 +1443,11 @@ class PromptBuildPlugin(IInputPlugin):
                     content = await self._resolve_routed_var(ctx, var_def)
                     if content:
                         parts.append(f"- {var_name}: {content}")
-        else:
-            parts.append(f"- 日期: {now.strftime('%Y-%m-%d')}")
-            parts.append(f"- 时间: {now.strftime('%H:%M:%S')} {suffix}")
-
-            agent_name = ctx.state.get("context.agent_name", "")
-            if agent_name:
-                parts.append(f"- Agent: {agent_name}")
-
-            session_id = ctx.state.get("context.session_id", "")
-            if session_id:
-                parts.append(f"- 会话: {session_id}")
-
+        # 零兜底：未声明（agent 配置与插件默认皆无）→ 无动态变量。
+        # 旧硬编码兜底块（日期/时间/Agent/会话）已删（2026-08-20 裁定）——
+        # 需要环境事实由配置声明（类型系统已支持 timestamp/session/agent/
+        # model/placeholder）；身份信息属 system prompt（persona）职责，
+        # dynamic_vars 不注入第二个真值源。
         if not parts:
             return None
 

@@ -114,6 +114,24 @@ class ToolSchemaPlugin(IInputPlugin):
                         if isinstance(s, dict)
                         and (s.get("function") or {}).get("name") in keep
                     ]
+                    # F5（2026-08-20）：加载期工具面漂移检测——agent tool_ids
+                    # 引用了注册表不存在的工具 = 配置错误/注册异常（被 G2 净化、
+                    # 插件未启用、名字写错），报警暴露而非静默缩面（实测：
+                    # task_manage 被 G2 净化后 LLM 工具面 11→9 无人知晓）。
+                    available = {
+                        (s.get("function") or {}).get("name")
+                        for s in schemas
+                        if isinstance(s, dict)
+                    }
+                    # 只检 agent 声明的 wanted——框架强制工具（spill_retrieve）
+                    # 非 agent 配置管辖，不计入漂移
+                    missing = sorted(t for t in set(wanted) if t not in available)
+                    if missing:
+                        logger.warning(
+                            "[%s] 工具面漂移：agent tool_ids 引用的工具不在注册表"
+                            "（被 G2 净化/插件未启用/名字有误，需排查）| missing=%s",
+                            self.name, missing,
+                        )
                     if len(filtered) != len(schemas):
                         logger.info(
                             "[%s] 按 agent tool_ids 过滤工具面 | %d -> %d",

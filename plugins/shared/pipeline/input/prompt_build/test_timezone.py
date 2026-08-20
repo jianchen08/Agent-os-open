@@ -119,19 +119,55 @@ async def test_timestamp_utc_explicit(plugin):
     assert suffix == "(UTC+0, UTC)"
 
 
-# ── 兜底路径：_build_dynamic_vars（无 dynamic_vars 配置） ───────
+# ── 零兜底路径：_build_dynamic_vars（无配置 → 不注入） ──────────
 
 @pytest.mark.asyncio
-async def test_dynamic_vars_fallback_has_tz_suffix(plugin):
-    """兜底分支的时间行也带时区后缀。"""
+async def test_dynamic_vars_no_config_no_injection(plugin):
+    """零兜底（2026-08-20 裁定）：agent 配置与插件默认皆无 → 不注入任何动态变量。
+
+    旧硬编码兜底块（日期/时间/Agent/会话）已删——配置没声明的变量一律不注入。
+    """
     _set_tz("Asia/Shanghai")
-    ctx = _make_ctx()  # state 无 context.dynamic_vars → 走兜底
+    ctx = _make_ctx()  # state 无 context.dynamic_vars，插件 config 无 dynamic_vars
+    with _freeze_now(plugin):
+        msg = await plugin._build_dynamic_vars(ctx)
+    assert msg is None, "未声明配置 → 不注入动态变量消息"
+
+
+@pytest.mark.asyncio
+async def test_dynamic_vars_plugin_config_default_renders_timestamp(plugin):
+    """插件配置口子（全局变量声明）：无 agent 配置时插件默认变量生效。"""
+    _set_tz("Asia/Shanghai")
+    plugin._config = {
+        "dynamic_vars": [
+            {"type": "timestamp", "name": "时间", "format": "%H:%M:%S"},
+        ],
+    }
+    ctx = _make_ctx()
     with _freeze_now(plugin):
         msg = await plugin._build_dynamic_vars(ctx)
     assert msg is not None
-    content = msg["content"]
-    assert "- 时间: 11:24:00 (UTC+8, Asia/Shanghai)" in content
-    assert "- 日期: 2026-07-02" in content
+    assert "- 时间: 11:24:00 (UTC+8, Asia/Shanghai)" in msg["content"]
+
+
+@pytest.mark.asyncio
+async def test_dynamic_vars_agent_config_overrides_plugin_default(plugin):
+    """优先级：agent 配置（context.dynamic_vars）> 插件默认。"""
+    _set_tz("Asia/Shanghai")
+    plugin._config = {
+        "dynamic_vars": [
+            {"type": "timestamp", "name": "插件默认时间", "format": "%H:%M:%S"},
+        ],
+    }
+    ctx = _make_ctx()
+    ctx.state["context.dynamic_vars"] = [
+        {"type": "timestamp", "name": "agent时间", "format": "%H:%M:%S"},
+    ]
+    with _freeze_now(plugin):
+        msg = await plugin._build_dynamic_vars(ctx)
+    assert msg is not None
+    assert "- agent时间: 11:24:00" in msg["content"]
+    assert "插件默认时间" not in msg["content"], "agent 配置优先，插件默认被覆盖"
 
 
 # ── 端到端：占位符经 _resolve_single_var_content ───────────────
