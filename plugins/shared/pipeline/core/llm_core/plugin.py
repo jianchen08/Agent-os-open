@@ -11,24 +11,35 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
 import logging
+import os
+import sys
 import uuid
 from collections.abc import Callable
+from pathlib import Path
 from typing import Any
 
-from _message_normalizer import (
+# 共享上传目录解析（plugins/shared/uploads_path.py，ADR 2026-08-21）：
+# 本文件位于 plugins/shared/pipeline/core/llm_core/，上溯 3 级到 shared。
+_SHARED_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", ".."))
+if _SHARED_ROOT not in sys.path:
+    sys.path.insert(0, _SHARED_ROOT)
+
+from _message_normalizer import (  # noqa: E402
     _is_valid_tool_call_id,
     normalize_messages_for_provider,
 )
-from _stream_repeat_monitor import StreamRepetitionMonitor
-from adapter import (
+from _stream_repeat_monitor import StreamRepetitionMonitor  # noqa: E402
+from adapter import (  # noqa: E402
     LiteLLMAdapter,
     LLMAdapter,
     LLMResponse,
 )
-from pipeline.plugin import ICorePlugin, PluginContext
-from pipeline.types import StateKeys
+from pipeline.plugin import ICorePlugin, PluginContext  # noqa: E402
+from pipeline.types import StateKeys  # noqa: E402
+from uploads_path import resolve_uploads_url  # noqa: E402
 
 logger = logging.getLogger(__name__)
 
@@ -630,6 +641,94 @@ class LLMCore(ICorePlugin):
                 )
             raise
 
+    # 多模态引用→二进制的解析上限（与 preprocessor max_file_size 默认对齐，20MB）
+    _MAX_IMAGE_BYTES = 20 * 1024 * 1024
+
+    @classmethod
+    def _resolve_multimodal_blocks(
+        cls, blocks: Any
+    ) -> list[dict[str, Any]]:
+        """把 multimodal_content 里的本地引用解析成 base64 data URL（发送前转换）。
+
+        分工（ADR 2026-08-21）：preprocessor 只输出引用（/uploads/... 或绝对
+        路径——state/trace 恒小）；本方法在 LLM 请求装配时读文件转
+        ``data:{mime};base64,...``，二进制不进任何持久层。
+
+        - http(s) URL：原样透传（API 直连拉取）；
+        - /uploads/ 引用 / 已存在文件的绝对路径：读文件 → base64 data URL；
+        - 非 image_url 块（text 等）：原样透传；
+        - 解析失败（文件丢失/过大/读错）：warning + 丢弃该块，不阻断请求
+          （模型收到剩余内容，损失可见）。
+
+        Args:
+            blocks: state["multimodal_content"]（None/非列表 → 空结果）
+
+        Returns:
+            解析后的内容块列表
+        """
+        if not isinstance(blocks, list):
+            return []
+        resolved_blocks: list[dict[str, Any]] = []
+        for block in blocks:
+            if not isinstance(block, dict) or block.get("type") != "image_url":
+                if isinstance(block, dict):
+                    resolved_blocks.append(block)
+                continue
+            url = (block.get("image_url") or {}).get("url", "")
+            data_url = cls._resolve_image_ref(url)
+            if data_url:
+                resolved_blocks.append(
+                    {"type": "image_url", "image_url": {"url": data_url}}
+                )
+            elif url.startswith(("http://", "https://", "data:")):
+                resolved_blocks.append(block)
+            else:
+                logger.warning(
+                    "[LLMCore] 多模态图片引用解析失败，已丢弃该块: %s", url
+                )
+        return resolved_blocks
+
+    @classmethod
+    def _resolve_image_ref(cls, url: str) -> str:
+        """单条图片引用 → base64 data URL（仅本地引用；http/data 返回空串）。
+
+        Args:
+            url: /uploads/ 引用或本地绝对路径
+
+        Returns:
+            data URL；非本地引用、文件不存在、过大或读取失败返回空串
+        """
+        if not url or url.startswith(("http://", "https://", "data:")):
+            return ""
+        path = resolve_uploads_url(url)
+        if path is None:
+            # 绝对路径引用（preprocessor 透传的用户本地路径）
+            if not os.path.isabs(url) or not os.path.isfile(url):  # noqa: PTH117
+                return ""
+            path = Path(url)
+        try:
+            if not path.is_file():
+                return ""
+            if path.stat().st_size > cls._MAX_IMAGE_BYTES:
+                logger.warning(
+                    "[LLMCore] 图片超过 %d 字节上限，跳过: %s", cls._MAX_IMAGE_BYTES, url
+                )
+                return ""
+            b64 = base64.b64encode(path.read_bytes()).decode("utf-8")
+            ext = path.suffix.lower()
+            mime = {
+                ".jpg": "image/jpeg",
+                ".jpeg": "image/jpeg",
+                ".png": "image/png",
+                ".gif": "image/gif",
+                ".webp": "image/webp",
+                ".svg": "image/svg+xml",
+            }.get(ext, "image/png")
+            return f"data:{mime};base64,{b64}"
+        except OSError as exc:
+            logger.warning("[LLMCore] 读取图片失败: %s, %s", url, exc)
+            return ""
+
     def _build_messages(self, state: dict[str, Any]) -> list[dict[str, Any]]:
         """从管道状态构建 LLM messages 列表。
 
@@ -675,7 +774,10 @@ class LLMCore(ICorePlugin):
             messages.append(m)
 
         # 4. 多模态内容（合并到最后一条用户消息）
-        multimodal_content = state.get("multimodal_content")
+        #    引用块在此处解析成 base64 data URL（发送前转换，ADR 2026-08-21）：
+        #    preprocessor 输出的 /uploads/ 引用与绝对路径引用保持 state/trace 恒小，
+        #    二进制只活在本次请求装配的局部变量里。
+        multimodal_content = self._resolve_multimodal_blocks(state.get("multimodal_content"))
         if multimodal_content and messages:
             # 找到最后一条用户消息
             for i in range(len(messages) - 1, -1, -1):

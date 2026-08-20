@@ -6,6 +6,10 @@
 State 命名空间：
     - multimodal_content : 检测到的多模态内容块列表
     - has_multimodal : 是否包含多模态内容
+
+引用语义（ADR 2026-08-21）：本地引用（``/uploads/...``、绝对路径）在
+multimodal_content 里**保持引用原样**（不转 base64）——state/trace 恒小；
+llm_core 在请求装配时读文件转 base64 data URL（发送前转换，二进制瞬态）。
 """
 
 from __future__ import annotations
@@ -14,11 +18,27 @@ import base64
 import logging
 import os
 import re
+import sys
 from typing import Any
 
-from pipeline.plugin import IInputPlugin, PluginContext, PluginResult
+# 共享上传目录解析（plugins/shared/uploads_path.py，ADR 2026-08-21 三方对齐）：
+# 本文件位于 plugins/shared/pipeline/input/multimodal_preprocessor/，上溯 3 级到 shared。
+_SHARED_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", ".."))
+if _SHARED_ROOT not in sys.path:
+    sys.path.insert(0, _SHARED_ROOT)
+
+from pipeline.plugin import IInputPlugin, PluginContext, PluginResult  # noqa: E402
+from uploads_path import resolve_uploads_url  # noqa: E402
 
 logger = logging.getLogger(__name__)
+
+# markdown 图片引用（前端发送时并入正文的附件索引，ADR 2026-08-21）：
+# ![filename](/uploads/xxx.png)——整 token 匹配（含 ![]() 括号），剩余文本干净。
+# 只认 /uploads/ 前缀（平台管理的引用），不劫持用户手打的任意 markdown。
+_MD_IMAGE_PATTERN = re.compile(
+    r"!\[[^\]]*\]\((/uploads/[^\s)]+\.(?:jpg|jpeg|png|gif|webp|svg))\)",
+    re.IGNORECASE,
+)
 
 # 图片URL正则：匹配 http(s)://...jpg/png/gif/webp/svg
 _IMAGE_URL_PATTERN = re.compile(
@@ -205,14 +225,14 @@ class MultimodalPreprocessor(IInputPlugin):
     def _read_audio_bytes(self, url: str, mime_type: str) -> bytes:
         """读取音频附件为字节流。
 
-        支持本地路径（如 /uploads/xxx）和 base64 data URL 两种来源。
+        支持本地 /uploads/ 引用和 base64 data URL 两种来源。
 
         Args:
-            url: 本地路径或 data URL
+            url: /uploads/ 引用或 data URL
             mime_type: 音频 MIME 类型（用于解析 data URL）
 
         Returns:
-            音频字节流；读取失败时返回空 bytes
+            音频字节流；读取失败返回空 bytes
         """
         # base64 data URL
         if url.startswith("data:"):
@@ -223,20 +243,17 @@ class MultimodalPreprocessor(IInputPlugin):
                     return base64.b64decode(payload)
             except Exception as exc:  # noqa: BLE001
                 logger.error("[MultimodalPreprocessor] 解析 data URL 失败: %s", exc)
-                return ""
+                return b""
             return b""
 
-        # 本地路径
-        if url.startswith("/"):
-            uploads_dir = os.environ.get("UPLOADS_DIR", "./data/uploads")
-            filename = os.path.basename(url)
-            full_path = os.path.join(uploads_dir, filename)
-            if not os.path.isfile(full_path):
+        # /uploads/ 引用（shared/uploads_path.py 统一解析，ADR 2026-08-21）
+        full_path = resolve_uploads_url(url)
+        if full_path is not None:
+            if not full_path.is_file():
                 logger.warning("[MultimodalPreprocessor] 音频文件不存在: %s", full_path)
                 return b""
             try:
-                with open(full_path, "rb") as f:
-                    return f.read()
+                return full_path.read_bytes()
             except OSError as exc:
                 logger.error("[MultimodalPreprocessor] 读取音频文件失败: %s, %s", full_path, exc)
                 return b""
@@ -279,19 +296,19 @@ class MultimodalPreprocessor(IInputPlugin):
         return self._convert_document_to_text(full_path)
 
     def _resolve_upload_path(self, url: str) -> str:
-        """将附件 URL（如 /uploads/xxx）解析为本地磁盘绝对路径。
+        """将附件引用（如 /uploads/xxx）解析为本地磁盘绝对路径。
+
+        经 shared/uploads_path.py 统一解析（UPLOADS_DIR 环境变量 >
+        data/{tenant}/uploads，与 channel_api 落盘/内核静态服务三方对齐）。
 
         Args:
-            url: 附件 URL
+            url: 附件引用 URL
 
         Returns:
-            本地文件路径；非本地路径时返回空串
+            本地文件路径；非 /uploads/ 形态时返回空串
         """
-        if not url.startswith("/"):
-            return ""
-        uploads_dir = os.environ.get("UPLOADS_DIR", "./data/uploads")
-        filename = os.path.basename(url)
-        return os.path.join(uploads_dir, filename)
+        resolved = resolve_uploads_url(url)
+        return str(resolved) if resolved is not None else ""
 
     @staticmethod
     def _is_plain_text_mime(mime_type: str) -> bool:
@@ -360,33 +377,31 @@ class MultimodalPreprocessor(IInputPlugin):
         return ""
 
     def _local_file_to_data_url(self, file_path: str, mime_type: str) -> str:
-        """将本地文件转为 base64 data URL。
+        """将 /uploads/ 引用文件转为 base64 data URL。
+
+        仅供附件分支（state["attachments"]，0.2 链路暂无生产者）使用；
+        content 检测出的图片引用保持原样（llm_core 发送前解析，ADR 2026-08-21）。
 
         Args:
-            file_path: 文件路径（如 /uploads/xxx.jpg）
+            file_path: /uploads/ 引用（如 /uploads/xxx.jpg）
             mime_type: MIME 类型
 
         Returns:
-            base64 data URL 字符串
+            base64 data URL 字符串；解析/读取失败返回空串
         """
+        resolved = resolve_uploads_url(file_path)
+        if resolved is None:
+            logger.warning("[MultimodalPreprocessor] 非 /uploads/ 引用: %s", file_path)
+            return ""
         try:
-            # 从环境变量获取上传目录
-            uploads_dir = os.environ.get("UPLOADS_DIR", "./data/uploads")
-            # 构建完整路径
-            filename = os.path.basename(file_path)
-            full_path = os.path.join(uploads_dir, filename)
-
-            if not os.path.isfile(full_path):
-                logger.warning("文件不存在: %s", full_path)
+            if not resolved.is_file():
+                logger.warning("文件不存在: %s", resolved)
                 return ""
 
-            with open(full_path, "rb") as f:
-                file_data = f.read()
-
-            b64_data = base64.b64encode(file_data).decode("utf-8")
+            b64_data = base64.b64encode(resolved.read_bytes()).decode("utf-8")
             return f"data:{mime_type};base64,{b64_data}"
-        except Exception as e:
-            logger.error("读取文件失败: %s, error=%s", file_path, e)
+        except Exception as e:  # noqa: BLE001
+            logger.error("读取文件失败: %s, error=%s", resolved, e)
             return ""
 
     def _detect_multimodal(self, text: str) -> list[dict]:
@@ -405,6 +420,19 @@ class MultimodalPreprocessor(IInputPlugin):
         content_blocks: list[dict] = []
         matched_spans: list[tuple[int, int]] = []
 
+        # markdown 图片引用（![f](/uploads/x.png) 整 token）：最先匹配——
+        # 整 token 从剩余文本移除（括号残渣不留给 LLM），只认 /uploads/ 前缀。
+        for match in _MD_IMAGE_PATTERN.finditer(text):
+            url = match.group(1)
+            start, end = match.span(0)
+            matched_spans.append((start, end))
+            content_blocks.append(
+                {
+                    "type": "image_url",
+                    "image_url": {"url": url},
+                }
+            )
+
         # 检测图片URL
         for match in _IMAGE_URL_PATTERN.finditer(text):
             url = match.group(1)
@@ -417,10 +445,16 @@ class MultimodalPreprocessor(IInputPlugin):
                 }
             )
 
-        # 检测本地文件路径
+        # 检测本地文件路径（跳过已被 markdown 引用整 token 消费的 span——
+        # ![f](/uploads/x.png) 里的 /uploads/x.png 不重复建块）
+        def _overlaps_md_span(start: int, end: int) -> bool:
+            return any(s < end and start < e for s, e in matched_spans)
+
         for match in _LOCAL_FILE_PATTERN.finditer(text):
-            file_path = match.group(1)
             start, end = match.span(1)
+            if _overlaps_md_span(start, end):
+                continue
+            file_path = match.group(1)
             matched_spans.append((start, end))
             content_blocks.append(self._build_local_file_block(file_path))
 
@@ -436,32 +470,37 @@ class MultimodalPreprocessor(IInputPlugin):
         return content_blocks
 
     def _build_local_file_block(self, file_path: str) -> dict:
-        """构建本地文件的内容块。
+        """构建本地文件的内容块（引用，不转 base64——ADR 2026-08-21）。
 
-        检查文件是否存在且大小在限制内，满足条件时
-        读取文件并编码为 data URI 格式。
+        检查文件存在且大小在限制内（存在性经 /uploads/ 统一解析或直接判
+        绝对路径），满足条件时输出 image_url 引用块，由 llm_core 在请求装配
+        时读文件转 base64 data URL。
 
         Args:
-            file_path: 本地文件路径
+            file_path: /uploads/ 引用或本地绝对路径
 
         Returns:
-            OpenAI vision 格式的图片内容块，或文本描述块
+            OpenAI vision 格式的图片引用块，或文本描述块
         """
-        if not os.path.isfile(file_path):  # noqa: PTH113
+        resolved = resolve_uploads_url(file_path)
+        check_path = str(resolved) if resolved is not None else file_path
+
+        if not os.path.isfile(check_path):  # noqa: PTH113
             return {"type": "text", "text": f"[文件不存在: {file_path}]"}
 
-        file_size = os.path.getsize(file_path)  # noqa: PTH202
+        file_size = os.path.getsize(check_path)  # noqa: PTH202
         if file_size > self._max_file_size:
             return {
                 "type": "text",
                 "text": f"[文件过大: {file_path} ({file_size} bytes)]",
             }
 
-        _, ext = os.path.splitext(file_path)  # noqa: PTH122
+        _, ext = os.path.splitext(check_path)  # noqa: PTH122
         mime_type = _EXT_TO_MIME.get(ext.lower())
         if not mime_type:
             return {"type": "text", "text": f"[不支持的文件类型: {ext}]"}
 
+        # 引用原样输出（http/绝对路径/uploads 引用统一语义：发送前由 llm_core 解析）
         return {"type": "image_url", "image_url": {"url": file_path}}
 
     def _extract_remaining_text(self, text: str, spans: list[tuple[int, int]]) -> str:
