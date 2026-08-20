@@ -101,9 +101,13 @@ class ContextBuildPlugin(IInputPlugin):
         root = os.environ.get("AGENTOS_CONFIG_ROOT", "")
         agents_dir = Path(root) / "agents" if root else None
         if agents_dir is None or not agents_dir.is_dir():
+            logger.debug(
+                "[context_build] agents 目录不存在（按默认配置运行）| root=%s", root
+            )
             return {}
         found = self._find_agent_yaml(agents_dir, agent_id)
         if found is None:
+            logger.debug("[context_build] 未找到 agent yaml（按默认配置运行）| agent_id=%s", agent_id)
             return {}
         path, mtime = found
         cached = self._agent_yaml_cache.get(str(path))
@@ -112,7 +116,13 @@ class ContextBuildPlugin(IInputPlugin):
         try:
             with open(path, encoding="utf-8") as f:
                 data = _yaml.safe_load(f) or {}
-        except Exception:
+        except Exception as exc:
+            # 找到但解析失败 = 配置错误：agent 人格整体取默认值必须可见
+            logger.error(
+                "[context_build] agent yaml 解析失败（按默认配置降级运行）| path=%s | error=%s",
+                path,
+                exc,
+            )
             return {}
         if not isinstance(data, dict):
             data = {}

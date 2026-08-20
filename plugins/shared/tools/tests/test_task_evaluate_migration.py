@@ -347,3 +347,86 @@ class TestTaskEvaluateFunc:
     async def test_invalid_action(self, mod):
         result = await mod.task_evaluate_func({"action": "bogus", "task_id": "t-1"})
         assert result["error_code"] == "INVALID_ACTION"
+
+
+# ═══════════════════════════════════════════════════════════
+# criteria 兜底显式标记（兜底反模式审查 P6，2026-08-20）
+# ═══════════════════════════════════════════════════════════
+
+
+class TestCriteriaFallbackMarked:
+    """P6：指标缺 criteria 用任务描述顶替时必须在评估结果显式标记。
+
+    选"保留顶替+显式标记"分支的依据：既有调用方（工具型指标
+    file_check/bash_check 的 params_schema 无 criteria 字段，迁移测试
+    全部以无 criteria 的 input_params 构造且期待评估照常执行）普遍
+    依赖顶替行为——报配置错误会打断合法工具指标路径。
+    """
+
+    def _inject(self, mod, monkeypatch, task: MagicMock, executor: Any) -> tuple[Any, MagicMock]:
+        service = _make_service(task=task)
+        monkeypatch.setattr(mod.TaskEvaluateTool, "_get_task_service", lambda self: service)
+        monkeypatch.setattr(mod, "_get_service_provider", _no_provider)
+        tool = mod.TaskEvaluateTool(executor=executor)
+        return tool, service
+
+    @pytest.mark.asyncio
+    async def test_fallback_ids_reported_by_get_input_params(self, mod, monkeypatch):
+        """_get_input_params 第二返回值列出走了任务描述兜底的指标。"""
+        task = _make_task(
+            metadata={
+                "evaluation_metric_ids": ["file_check"],
+                "acceptance_criteria": {"file_check": {"input_params": {"path": "src/a.py"}}},
+            }
+        )
+        tool = mod.TaskEvaluateTool()
+        params, fallback_ids = tool._get_input_params(task)
+        assert params["file_check"]["criteria"] == task.description, "顶替行为保留"
+        assert fallback_ids == ["file_check"]
+
+    @pytest.mark.asyncio
+    async def test_configured_criteria_not_marked(self, mod, monkeypatch):
+        """显式配置了 criteria 的指标不进兜底名单。"""
+        task = _make_task(
+            metadata={
+                "evaluation_metric_ids": ["semantic_check"],
+                "acceptance_criteria": {
+                    "semantic_check": {"input_params": {"criteria": "必须包含结论"}}
+                },
+            }
+        )
+        tool = mod.TaskEvaluateTool()
+        params, fallback_ids = tool._get_input_params(task)
+        assert params["semantic_check"]["criteria"] == "必须包含结论"
+        assert fallback_ids == []
+
+    @pytest.mark.asyncio
+    async def test_auto_complete_summary_carries_fallback_mark(self, mod, monkeypatch):
+        """auto_complete：评估结果 summary 与 evaluation_history 带兜底标记。"""
+        from _eval_core import EvaluationResult, MetricResult
+
+        task = _make_task(
+            metadata={
+                "evaluation_metric_ids": ["file_check"],
+                "acceptance_criteria": {"file_check": {"input_params": {"path": "src/a.py"}}},
+            }
+        )
+
+        class FakeExecutor:
+            async def run_evaluation(self, **kwargs):
+                return EvaluationResult(
+                    task_id=task.id,
+                    results=[MetricResult(metric_id="file_check", passed=True, message="ok")],
+                    overall_passed=True,
+                    summary="全部通过",
+                )
+
+        tool, service = self._inject(mod, monkeypatch, task, executor=FakeExecutor())
+        result = await tool.execute({"action": "auto_complete", "task_id": task.id})
+        assert result.success is True
+        history = task.metadata.get("evaluation_history") or []
+        assert history, "评估历史应被记录"
+        assert "未配置 criteria，用任务描述兜底" in history[-1]["summary"], (
+            "质量闸门标准来源是任务描述兜底必须在评估结果可见"
+        )
+        assert "全部通过" in history[-1]["summary"], "原 summary 保留"

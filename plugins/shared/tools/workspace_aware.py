@@ -13,6 +13,25 @@ import re
 from pathlib import Path
 from typing import Any
 
+import logging
+
+_logger = logging.getLogger(__name__)
+
+# isolation 插件不可用降级放行的一次性告警开关（多层防线同时哑火必须可观测）
+_isolation_degrade_warned = False
+
+
+def _warn_isolation_degraded() -> None:
+    """isolation 降级放行一次性留痕（避免每次路径校验刷屏）。"""
+    global _isolation_degrade_warned
+    if _isolation_degrade_warned:
+        return
+    _isolation_degrade_warned = True
+    _logger.warning(
+        "[workspace_aware] isolation 插件不可用，路径权限校验降级放行"
+        "（本层与 security_check 第二道防线同时哑火时将不可观测，仅提示一次）"
+    )
+
 
 class WorkspaceAwareMixin:
     """工作空间感知 Mixin，统一管理工具的 workspace 消费逻辑。
@@ -37,6 +56,7 @@ class WorkspaceAwareMixin:
 
                 cls._policy_manager = PermissionPolicyManager()
             except ImportError:
+                _warn_isolation_degraded()
                 return None
         return cls._policy_manager
 
@@ -93,6 +113,7 @@ class WorkspaceAwareMixin:
                 )
             return ok, err
         except ImportError:
+            _warn_isolation_degraded()
             return True, ""
 
     def _init_workspace(self, inputs: dict[str, Any]) -> None:

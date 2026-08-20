@@ -140,3 +140,103 @@ def test_registry_no_match_keeps_behavior_unchanged() -> None:
 
 def test_registry_extract_thinking_dispatches() -> None:
     assert extract_thinking_from_content("a<think>t</think>b") == ("t", "ab")
+
+
+# ═══════════════════════════════════════════════════════════
+# provider 前缀映射零静默回退（兜底反模式审查 P8，2026-08-20）
+# ═══════════════════════════════════════════════════════════
+
+
+def _load_llm_core_plugin():
+    """按唯一模块名加载 llm_core/plugin.py（避免与其它插件的 plugin 撞名）。"""
+    import importlib.util
+
+    _shared_dir = _REPO_ROOT / "plugins" / "shared"
+    if str(_shared_dir) not in sys.path:
+        sys.path.insert(0, str(_shared_dir))  # pipeline 包（ICorePlugin 基类）
+    mod_name = "llm_core_plugin_prefix_test"
+    if mod_name in sys.modules:
+        del sys.modules[mod_name]
+    spec = importlib.util.spec_from_file_location(mod_name, _LLM_CORE_DIR / "plugin.py")
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[mod_name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+def _bare_plugin(mod, provider: str, model: str = "test-model"):
+    """绕过重量级 __init__ 构造最小实例（_get_model_string 只看 _provider/_model）。"""
+    plugin = object.__new__(mod.LLMCore)
+    plugin._provider = provider  # type: ignore[attr-defined]
+    plugin._model = model  # type: ignore[attr-defined]
+    return plugin
+
+
+def _stub_router_factory(monkeypatch, prefix_by_provider: dict[str, str]):
+    """注入 router_factory 桩模块（get_litellm_prefix 按表返回，未命中返回原名）。"""
+    import types
+
+    stub = types.ModuleType("router_factory_stub_p8")
+
+    def get_litellm_prefix(provider_name: str) -> str:
+        return prefix_by_provider.get(provider_name, provider_name)
+
+    stub.get_litellm_prefix = get_litellm_prefix  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "router_factory", stub)
+
+
+class TestProviderPrefixMappingNoSilentFallback:
+    """P8：动态映射失败不静默回退——except/未命中留痕，自定义 provider 回退自身报配置错误。"""
+
+    def test_import_failure_warns_and_uses_builtin(self, monkeypatch, caplog):
+        """router_factory 加载失败 → warning + 内置映射兜底（openai 恒等）。"""
+        import logging
+
+        mod = _load_llm_core_plugin()
+        monkeypatch.setitem(sys.modules, "router_factory", None)  # import → ImportError
+        plugin = _bare_plugin(mod, "openai")
+        with caplog.at_level(logging.WARNING):
+            assert plugin._get_model_string() == "openai/test-model"
+        assert any("加载失败" in r.getMessage() for r in caplog.records)
+
+    def test_miss_with_remapping_warns(self, monkeypatch, caplog):
+        """未命中且内置表改变前缀（zhipu→zai）→ warning 留痕。"""
+        import logging
+
+        mod = _load_llm_core_plugin()
+        _stub_router_factory(monkeypatch, {})  # 未配置任何映射
+        plugin = _bare_plugin(mod, "zhipu")
+        with caplog.at_level(logging.WARNING):
+            assert plugin._get_model_string() == "zai/test-model"
+        assert any("回退内置映射" in r.getMessage() for r in caplog.records)
+
+    def test_custom_provider_fallback_to_self_raises(self, monkeypatch):
+        """自定义 provider 未命中内置表 → 显式配置错误（拒绝 provider_name 充当前缀）。"""
+        mod = _load_llm_core_plugin()
+        _stub_router_factory(monkeypatch, {})  # apigo 未配置 → 返回原名（未命中）
+        plugin = _bare_plugin(mod, "apigo")
+        with pytest.raises(ValueError, match="前缀映射缺失"):
+            plugin._get_model_string()
+
+    def test_dynamic_hit_no_warning(self, monkeypatch, caplog):
+        """动态映射命中（apigo→openai）→ 正常前缀，无回退告警。"""
+        import logging
+
+        mod = _load_llm_core_plugin()
+        _stub_router_factory(monkeypatch, {"apigo": "openai"})
+        plugin = _bare_plugin(mod, "apigo")
+        with caplog.at_level(logging.WARNING):
+            assert plugin._get_model_string() == "openai/test-model"
+        assert not [r for r in caplog.records if "回退" in r.getMessage()]
+
+    def test_identity_builtin_miss_stays_quiet(self, monkeypatch, caplog):
+        """恒等映射（openai）未命中：回退结果与动态结果相同 → 仅 debug，不告警。"""
+        import logging
+
+        mod = _load_llm_core_plugin()
+        _stub_router_factory(monkeypatch, {})
+        plugin = _bare_plugin(mod, "openai")
+        with caplog.at_level(logging.WARNING):
+            assert plugin._get_model_string() == "openai/test-model"
+        assert not [r for r in caplog.records if r.levelno >= logging.WARNING]

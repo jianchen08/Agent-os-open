@@ -403,5 +403,103 @@ def test_submit_writes_submitted_by_user_id_into_initial_state():
     ), "初始 state 必须写 task.submitted_by（内核事件带出 user_id 的依据）"
 
 
+# ─────────────── 层级闸门零兜底（兜底反模式审查 P1/P19，2026-08-20） ───────────────
+
+
+class TestValidateTargetAgentLevelGate:
+    """P1：level 缺失/非法必须显式拒绝（0 会让两道层级闸门全短路）。
+
+    P19：agent yaml 损坏与"Agent 不存在"分开归因，不再误导用户检查 target_id。
+    """
+
+    def test_registry_invalid_level_rejected(self) -> None:
+        """registry 路：小写 l2 等非法值 → 校验失败（非静默放行）。"""
+
+        async def fake_lookup(agent_id: str):
+            return {"level": "l2", "is_active": True}
+
+        with patch.object(_tool_mod, "_agent_registry_lookup", fake_lookup):
+            ok, msg, code = asyncio.run(
+                TaskSubmitTool()._validate_target_agent("bad_level_agent", 1)
+            )
+        assert ok is False
+        assert code == "TARGET_AGENT_LEVEL_MISSING"
+        assert "bad_level_agent" in msg and "l2" in msg
+
+    def test_registry_missing_level_rejected(self) -> None:
+        """registry 路：level 缺失（空串）→ 校验失败。"""
+
+        async def fake_lookup(agent_id: str):
+            return {"level": "", "is_active": True}
+
+        with patch.object(_tool_mod, "_agent_registry_lookup", fake_lookup):
+            ok, msg, code = asyncio.run(
+                TaskSubmitTool()._validate_target_agent("no_level_agent", 1)
+            )
+        assert ok is False
+        assert code == "TARGET_AGENT_LEVEL_MISSING"
+
+    def test_disk_invalid_level_rejected(self) -> None:
+        """磁盘路：未知名单值（L9）→ 校验失败。"""
+        with patch.object(
+            TaskSubmitTool,
+            "_lookup_agent_from_disk",
+            return_value=(True, "L9", 0, True, ""),
+        ):
+            ok, msg, code = asyncio.run(
+                TaskSubmitTool()._validate_target_agent("weird_agent", 1)
+            )
+        assert ok is False
+        assert code == "TARGET_AGENT_LEVEL_MISSING"
+        assert "L9" in msg
+
+    def test_disk_corrupt_yaml_reports_config_corrupt(self) -> None:
+        """磁盘路：yaml 损坏 → 报配置损坏而非"Agent 不存在"。"""
+        with patch.object(
+            TaskSubmitTool,
+            "_lookup_agent_from_disk",
+            return_value=(False, "", 0, True, "config/agents/x/broken.yaml"),
+        ):
+            ok, msg, code = asyncio.run(
+                TaskSubmitTool()._validate_target_agent("broken_agent", 1)
+            )
+        assert ok is False
+        assert code == "TARGET_AGENT_CONFIG_CORRUPT"
+        assert "损坏" in msg and "broken.yaml" in msg
+
+    def test_disk_valid_l2_passes(self) -> None:
+        """合法 L2 + parent L1 → 放行（回归：正常路径不受影响）。"""
+        with patch.object(
+            TaskSubmitTool,
+            "_lookup_agent_from_disk",
+            return_value=(True, "L2", 2, True, ""),
+        ):
+            ok, msg, code = asyncio.run(
+                TaskSubmitTool()._validate_target_agent("l2_agent", 1)
+            )
+        assert (ok, msg, code) == (True, "", "")
+
+    def test_lookup_agent_from_disk_corrupt_file_detected(
+        self, tmp_path, monkeypatch
+    ) -> None:
+        """真实损坏 yaml：_lookup_agent_from_disk 返回损坏路径（第 5 位）。"""
+        import pathlib
+
+        bad = tmp_path / "broken.yaml"
+        bad.write_text("level: [unclosed\n", encoding="utf-8")
+
+        def fake_rglob(self, pattern):
+            if pattern.endswith(".yaml") and "agents" in str(self):
+                return iter([bad])
+            return iter([])
+
+        monkeypatch.setattr(pathlib.Path, "rglob", fake_rglob)
+        found, level_str, level, is_active, corrupt = (
+            TaskSubmitTool._lookup_agent_from_disk("broken")
+        )
+        assert found is False
+        assert corrupt == str(bad), "解析失败应带回损坏文件路径"
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

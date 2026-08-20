@@ -51,6 +51,9 @@ _HINDSIGHT_PORT = "8420"
 # bank_id 缺省值（多租户隔离 key 缺省；运行时由内核注入 tenant_id）
 _DEFAULT_BANK_ID = os.environ.get("HINDSIGHT_DEFAULT_BANK_ID", "default")
 
+# 缺省回落 "default" 的一次性告警开关（租户隔离未生效必须可观测）
+_bank_default_warned = False
+
 # 文档切块大小（字符）
 _CHUNK_SIZE = 2000
 
@@ -79,7 +82,18 @@ def _resolve_bank_id(bank_id: str | None) -> str:
     if bank_id:
         return bank_id
     # 运行时可被 on_load 从 config 覆盖
-    return getattr(sys.modules[__name__], "_DEFAULT_BANK_ID", "default")
+    fallback = getattr(sys.modules[__name__], "_DEFAULT_BANK_ID", "default")
+    # 未配置缺省库而回落字面 "default" = 租户隔离未生效，一次性告警
+    if fallback == "default":
+        global _bank_default_warned
+        if not _bank_default_warned:
+            _bank_default_warned = True
+            logger.warning(
+                "[hindsight] bank_id 未提供且未配置缺省库"
+                "（config default_bank_id / env HINDSIGHT_DEFAULT_BANK_ID），"
+                "回落 'default'——多租户隔离未生效"
+            )
+    return fallback
 
 
 def _filter_by_memory_type(
@@ -739,11 +753,10 @@ async def _on_load(params: dict[str, Any]) -> None:
     global _client, _DEFAULT_BANK_ID, _api_process
 
     config = plugin.get_config() or {}
-    cfg_default_bank = (
-        config.get("default_bank_id")
-        or config.get("bank_id")
-        or config.get("tenant_id")
-    )
+    # 单键：default_bank_id（与 env HINDSIGHT_DEFAULT_BANK_ID 同名）。
+    # 不做 bank_id/tenant_id 别名猜测——三键全仓无配置定义，
+    # 猜测链只会掩盖"配置没接上"的事实。
+    cfg_default_bank = config.get("default_bank_id")
     if cfg_default_bank:
         _DEFAULT_BANK_ID = str(cfg_default_bank)
 

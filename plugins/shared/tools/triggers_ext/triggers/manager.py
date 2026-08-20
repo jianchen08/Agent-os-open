@@ -94,7 +94,23 @@ class TriggerManager:
 
             config: 触发器配置。
 
+        Raises:
+
+            ValueError: 条件表达式语法错误（注册期编译校验，拒绝静默永假触发器）。
         """
+
+        # 注册期编译校验：语法错误的条件若被接受，运行期每轮静默求值为
+        # False，触发器永不触发且零报错——必须在注册点显式拒绝
+        condition_expr = (getattr(config, "condition_expression", "") or "").strip()
+        if condition_expr:
+            from .condition_parser import compile_condition  # noqa: PLC0415
+
+            try:
+                compile_condition(condition_expr)
+            except Exception as exc:
+                raise ValueError(
+                    f"触发器 {config.trigger_id} 条件表达式语法错误，拒绝注册: {exc}"
+                ) from exc
 
         config.status = TriggerStatus.ACTIVE
 

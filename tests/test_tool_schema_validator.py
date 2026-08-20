@@ -331,3 +331,68 @@ class TestRegistrySourceFallback:
         result = await plugin.execute(ctx)
         # 回退路径也能拦截缺 action
         assert result.state_updates.get(StateKeys.RAW_TOOL_CALLS, []) == []
+
+
+class TestObjectArrayParseFailureKeepsOriginal:
+    """P9（兜底反模式审查）：object/array 解析失败返回原值交给类型校验。
+
+    旧缺陷：解析失败返回 {}/[] 是合法目标类型，会通过类型校验——
+    坏参数静默变"合法空参"（与 integer 分支返回原值的语义不一致）。
+    """
+
+    _OPT_SCHEMA: dict[str, Any] = {
+        "type": "object",
+        "properties": {
+            "options": {"type": "object"},
+            "tags": {"type": "array"},
+        },
+        "required": ["options"],
+    }
+
+    def _ctx_with(self, tc: dict[str, Any]) -> PluginContext:
+        registry = _FakeRegistry([_FakeTool("options_tool", self._OPT_SCHEMA)])
+        return PluginContext(
+            state={
+                StateKeys.CORE_TYPE: "tool_execute",
+                StateKeys.RAW_TOOL_CALLS: [tc],
+                "messages": [],
+            },
+            _services={"tool_registry": registry},
+        )
+
+    @pytest.mark.asyncio
+    async def test_invalid_object_string_blocked_as_type_error(self) -> None:
+        """非 JSON 的 object 参数 → 保留原值 → 拦截 + 诊断（不再伪装空 dict）。"""
+        plugin = _make_plugin()
+        tc = {"name": "options_tool", "args": {"options": "not-json{"}, "id": "c_obj"}
+        result = await plugin.execute(self._ctx_with(tc))
+        updates = result.state_updates
+        assert updates.get(StateKeys.RAW_TOOL_CALLS, []) == [], "坏参数应被拦截"
+        tool_msgs = _tool_msgs(updates.get("messages", []))
+        assert tool_msgs and "SCHEMA_VALIDATION_FAILED" in tool_msgs[0]["content"]
+
+    @pytest.mark.asyncio
+    async def test_invalid_array_string_blocked_as_type_error(self) -> None:
+        """非 JSON 的 array 参数 → 保留原值 → 拦截 + 诊断（不再伪装空 list）。"""
+        plugin = _make_plugin()
+        tc = {"name": "options_tool", "args": {"options": {}, "tags": "a, b"}, "id": "c_arr"}
+        result = await plugin.execute(self._ctx_with(tc))
+        updates = result.state_updates
+        assert updates.get(StateKeys.RAW_TOOL_CALLS, []) == []
+        tool_msgs = _tool_msgs(updates.get("messages", []))
+        assert tool_msgs and "SCHEMA_VALIDATION_FAILED" in tool_msgs[0]["content"]
+
+    @pytest.mark.asyncio
+    async def test_valid_stringified_object_still_converted(self) -> None:
+        """合法 JSON 字符串 → 照常转换放行（回归：修复意图不受影响）。"""
+        plugin = _make_plugin()
+        tc = {
+            "name": "options_tool",
+            "args": {"options": '{"a": 1}', "tags": "[1, 2]"},
+            "id": "c_ok",
+        }
+        result = await plugin.execute(self._ctx_with(tc))
+        calls = result.state_updates.get(StateKeys.RAW_TOOL_CALLS, [])
+        assert len(calls) == 1, "合法字符串化 JSON 应转换后放行"
+        assert calls[0]["args"]["options"] == {"a": 1}
+        assert calls[0]["args"]["tags"] == [1, 2]

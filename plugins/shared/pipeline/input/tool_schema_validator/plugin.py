@@ -365,7 +365,9 @@ class ToolSchemaValidator(IInputPlugin):
                 try:
                     return json.loads(value)
                 except (json.JSONDecodeError, ValueError):
-                    return {}
+                    # 对齐 integer/number 分支：解析失败返回原值，
+                    # 交给类型校验报错——不能伪装成合法空对象通过校验
+                    return value
 
             if target_type == "string" and isinstance(value, (int, float)):
                 return str(value)
@@ -380,7 +382,8 @@ class ToolSchemaValidator(IInputPlugin):
                 try:
                     return json.loads(value)
                 except (json.JSONDecodeError, ValueError):
-                    return []
+                    # 同上：返回原值暴露为类型错误，不伪装成合法空数组
+                    return value
 
             if target_type == "number" and isinstance(value, str):
                 try:

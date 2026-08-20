@@ -558,3 +558,49 @@ class TestToolWorkflow:
         (tmp_path / "__pycache__").mkdir()
         files = tool._scan_workspace_files(tmp_path)
         assert files == ["keep.txt"]
+
+
+# ═══════════════════════════════════════════════════════════
+# 工作区扫描失败显式失败（兜底反模式审查 P5，2026-08-20）
+# ═══════════════════════════════════════════════════════════
+
+
+class TestScanFailureExplicit:
+    """P5：扫描异常不再静默截断（不完整文件集伪装成功的反模式）。"""
+
+    def test_scan_exception_propagates(self, tmp_path: Path, monkeypatch) -> None:
+        """扫描异常向上抛（静态方法不再吞）。"""
+        import pathlib
+
+        def boom(self, pattern):
+            raise OSError("disk gone")
+
+        monkeypatch.setattr(pathlib.Path, "rglob", boom)
+        tool = _load_tool().ResourceMergeTool(base_path=str(tmp_path))
+        with pytest.raises(OSError):
+            tool._scan_workspace_files(tmp_path)
+
+    def test_merge_scan_failure_returns_failure_result(self, tmp_path: Path) -> None:
+        """merge 途中扫描失败 → WORKSPACE_SCAN_FAILED failure result（对齐 git diff 失败标准）。"""
+        tool = _load_tool().ResourceMergeTool(base_path=str(tmp_path / "repo"))
+        ws = tmp_path / "ws"
+        ws.mkdir()
+        (ws / "a.txt").write_text("a", encoding="utf-8")
+
+        def boom(workspace):
+            raise OSError("scan broke mid-way")
+
+        tool._scan_workspace_files = boom  # type: ignore[method-assign]
+        result = _run(
+            tool.execute(
+                {
+                    "action": "merge",
+                    "workspace": str(ws),
+                    "target_dir": str(tmp_path / "dst"),
+                    "merge_strategy": "copy",
+                }
+            )
+        )
+        assert result.success is False
+        assert result.error_code == "WORKSPACE_SCAN_FAILED"
+        assert "扫描失败" in (result.error or "")

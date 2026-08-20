@@ -1694,7 +1694,17 @@ class TaskSubmitTool(BuiltinTool):
                 "[TaskSubmit] Agent '%s' 未在 registry 中找到，回退到磁盘文件查找",
                 target_id,
             )
-            found, agent_level_str, agent_level, is_active = self._lookup_agent_from_disk(target_id)
+            found, agent_level_str, agent_level, is_active, corrupt_path = (
+                self._lookup_agent_from_disk(target_id)
+            )
+            # agent yaml 损坏是配置故障，与"Agent 不存在"分开归因，
+            # 避免误导用户去检查 target_id
+            if corrupt_path:
+                return (
+                    False,
+                    f"agent 配置文件损坏: {corrupt_path}",
+                    "TARGET_AGENT_CONFIG_CORRUPT",
+                )
             if not found:
                 return (
                     False,
@@ -1702,6 +1712,16 @@ class TaskSubmitTool(BuiltinTool):
                     f"请检查 target_id 是否正确。如果系统提供了 Agent 映射表，请使用映射表中的 Agent ID。",
                     "TARGET_AGENT_NOT_FOUND",
                 )
+
+        # level 缺失/非法 → 0 会让下方两道层级闸门全部短路（0≠1 且不>0），
+        # 必须显式拒绝而非静默放行
+        if agent_level == 0:
+            return (
+                False,
+                f"Agent level 缺失/非法（agent='{target_id}'，level={agent_level_str!r}）。"
+                f"层级闸门无法判定，拒绝派发——请修复该 Agent 的 level 配置（合法值：L1/L2/L3）。",
+                "TARGET_AGENT_LEVEL_MISSING",
+            )
 
         if agent_level == 1:
             return (
@@ -1758,8 +1778,13 @@ class TaskSubmitTool(BuiltinTool):
         )
 
     @staticmethod
-    def _lookup_agent_from_disk(target_id: str) -> tuple[bool, str, int, bool]:
-        """从磁盘 YAML 文件查找 Agent 配置（回退方案）。"""
+    def _lookup_agent_from_disk(target_id: str) -> tuple[bool, str, int, bool, str]:
+        """从磁盘 YAML 文件查找 Agent 配置（回退方案）。
+
+        Returns:
+            (found, level 串, level 数值, is_active, 损坏文件路径)。
+            末位非空表示找到了匹配的 yaml 但解析失败（配置损坏，与"不存在"区分归因）。
+        """
         from pathlib import Path  # noqa: PLC0415
 
         import yaml  # noqa: PLC0415
@@ -1784,16 +1809,16 @@ class TaskSubmitTool(BuiltinTool):
                     continue
 
         if not yaml_path or not yaml_path.exists():
-            return (False, "", 0, True)
+            return (False, "", 0, True, "")
 
         try:
             with open(yaml_path, encoding="utf-8") as f:
                 config = yaml.safe_load(f) or {}
         except Exception:
-            return (False, "", 0, True)
+            return (False, "", 0, True, str(yaml_path))
 
         agent_level_str = config.get("level", "")
         level_map = {"L1": 1, "L2": 2, "L3": 3}
         agent_level = level_map.get(agent_level_str, 0)
         is_active = config.get("is_active", True)
-        return (True, agent_level_str, agent_level, is_active)
+        return (True, agent_level_str, agent_level, is_active, "")

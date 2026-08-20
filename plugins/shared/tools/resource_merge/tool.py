@@ -360,7 +360,20 @@ class ResourceMergeTool(BuiltinTool):
             elif target_files:
                 changed_files = target_files
             else:
-                changed_files = self._scan_workspace_files(workspace)
+                # 扫描失败返回显式 failure（对齐同文件 git diff 失败路径），
+                # 不允许不完整文件集伪装成合并成功
+                try:
+                    changed_files = self._scan_workspace_files(workspace)
+                except Exception as e:
+                    logger.error(
+                        "[ResourceMerge] 工作区扫描失败，中止合并 | workspace=%s | error=%s",
+                        workspace,
+                        e,
+                    )
+                    return create_failure_result(
+                        error=f"工作区扫描失败，中止合并（文件集不完整）: {e}",
+                        error_code="WORKSPACE_SCAN_FAILED",
+                    )
 
             merged_files: list[str] = []
             change_report: dict[str, list[str]] = {
@@ -613,16 +626,14 @@ class ResourceMergeTool(BuiltinTool):
         """
         skip_dirs = {".git", ".ai_workspaces", "__pycache__", ".pytest_cache", "node_modules"}
         result = []
-        try:
-            for item in workspace.rglob("*"):
-                if not item.is_file():
-                    continue
-                parts = item.relative_to(workspace).parts
-                if any(p in skip_dirs for p in parts):
-                    continue
-                result.append(str(item.relative_to(workspace)))
-        except Exception:
-            pass
+        # 扫描异常向上抛：半途失败若静默截断，不完整文件集会伪装成合并成功
+        for item in workspace.rglob("*"):
+            if not item.is_file():
+                continue
+            parts = item.relative_to(workspace).parts
+            if any(p in skip_dirs for p in parts):
+                continue
+            result.append(str(item.relative_to(workspace)))
         return result
 
     async def _rollback(self, inputs: dict[str, Any], workspace: Path) -> ToolExecutionResult:

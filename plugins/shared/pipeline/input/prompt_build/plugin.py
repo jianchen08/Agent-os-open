@@ -726,6 +726,12 @@ class PromptBuildPlugin(IInputPlugin):
             routes = {k: v for k, v in params.items() if k != "route_key"}
             var_def["routes"] = routes
         else:
+            # 未识别占位符（拼错/格式错）不能静默消失——配置作者需要留痕定位
+            logger.warning(
+                "[%s] 未识别的占位符，已替换为空串（检查拼写/格式）| placeholder={{%s}}",
+                self.name,
+                placeholder_content,
+            )
             return ""
 
         session_id = ctx.state.get("context.session_id", "")

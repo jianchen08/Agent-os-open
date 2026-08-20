@@ -247,12 +247,29 @@ class TestEvaluateCondition:
         # 条件不满足 → 不触发（且不产生新边沿）
         assert mgr.evaluate_condition({"ready": False}) == []
 
-    def test_condition_invalid_syntax_degrades(self) -> None:
-        """非法表达式 → 求值安全兜底为 False，不崩溃不触发（GAP-2）。"""
+    def test_condition_invalid_syntax_rejected_at_register(self) -> None:
+        """P4（兜底反模式审查）：语法错误注册期编译校验拒绝注册。
+
+        旧缺陷：语法错误的 condition 被接受 → 每轮静默求值 False →
+        触发器永不触发且零报错。
+        """
         mgr = TriggerManager()
         cfg = _make_config(trigger_type=TriggerType.CONDITION, condition_expression="!!!invalid")
-        mgr.register(cfg)
-        assert mgr.evaluate_condition({"x": 1}) == []
+        with pytest.raises(ValueError, match="语法错误"):
+            mgr.register(cfg)
+        assert "t1" not in mgr._triggers, "被拒绝的触发器不得进入注册表"
+
+        # 未闭合字符串同属语法错误（tokenize/parse 阶段可捕获）
+        cfg2 = _make_config(trigger_id="t2", trigger_type=TriggerType.CONDITION,
+                            condition_expression="name == 'foo")
+        with pytest.raises(ValueError):
+            mgr.register(cfg2)
+
+    def test_condition_invalid_syntax_eval_degrades(self) -> None:
+        """求值期语法异常安全兜底为 False（纵深防御；注册期已拦截）。"""
+        from triggers.condition_parser import parse_condition
+
+        assert parse_condition("!!!invalid", {"x": 1}) is False
 
     def test_condition_skipped_without_expression(self) -> None:
         mgr = TriggerManager()

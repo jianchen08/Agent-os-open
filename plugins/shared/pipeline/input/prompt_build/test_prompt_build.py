@@ -293,3 +293,48 @@ class TestRoutedVar:
             "routes": {"llm_call": {"type": "content", "content": "嵌套内容"}},
         }
         assert _run(plugin._resolve_routed_var(ctx, var_def)) == "嵌套内容"
+
+
+# ═══════════════════════════════════════════════════════════
+# 未知占位符可观测（兜底反模式审查 P2，2026-08-20）
+# ═══════════════════════════════════════════════════════════
+
+
+class TestUnknownPlaceholderWarns:
+    """P2：未识别占位符替换为空串必须 warning 留痕（含原文）。"""
+
+    def test_unknown_placeholder_warns_with_original_text(self, caplog) -> None:
+        """拼错的占位符 → 空串 + warning 含占位符原文。"""
+        import logging as _logging
+
+        mod = _load_plugin_module()
+        plugin = mod.PromptBuildPlugin()
+        ctx = _make_ctx({})
+        with caplog.at_level(_logging.WARNING):
+            out = _run(plugin._resolve_placeholder(ctx, "timestmp"))
+        assert out == ""
+        assert "未识别" in caplog.text and "timestmp" in caplog.text
+
+    def test_empty_placeholder_warns(self, caplog) -> None:
+        """空占位符（{{}}）同样未识别 → 留痕。"""
+        import logging as _logging
+
+        mod = _load_plugin_module()
+        plugin = mod.PromptBuildPlugin()
+        ctx = _make_ctx({})
+        with caplog.at_level(_logging.WARNING):
+            out = _run(plugin._resolve_placeholder(ctx, ""))
+        assert out == ""
+        assert "未识别" in caplog.text
+
+    def test_known_placeholder_no_warning(self, caplog) -> None:
+        """合法占位符（session）正常解析且不触发未识别告警。"""
+        import logging as _logging
+
+        mod = _load_plugin_module()
+        plugin = mod.PromptBuildPlugin()
+        ctx = _make_ctx({"context.session_id": "s-1"})
+        with caplog.at_level(_logging.WARNING):
+            out = _run(plugin._resolve_placeholder(ctx, "session"))
+        assert out == "s-1"
+        assert "未识别" not in caplog.text

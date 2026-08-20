@@ -480,7 +480,7 @@ class TaskEvaluateTool(BuiltinTool):
             self._get_metric_ids(task),
         )
         metric_ids = self._get_metric_ids(task)
-        input_params = self._get_input_params(task)
+        input_params, criteria_fallback_ids = self._get_input_params(task)
 
         if not metric_ids:
             logger.warning(
@@ -565,6 +565,20 @@ class TaskEvaluateTool(BuiltinTool):
                 ),
                 timeout=timeout,
             )
+            # criteria 兜底必须在评估结果中显式可见（质量闸门标准来源）
+            if criteria_fallback_ids:
+                _fallback_mark = (
+                    "未配置 criteria，用任务描述兜底: "
+                    + ", ".join(sorted(criteria_fallback_ids))
+                )
+                _base_summary = getattr(result, "summary", None) or ""
+                try:
+                    result.summary = f"[{_fallback_mark}] {_base_summary}"
+                except Exception:  # noqa: BLE001 — 标记失败不阻断评估结果流转
+                    logger.warning(
+                        "[TaskEvaluate] 评估结果 summary 不可写，criteria 兜底标记仅留日志 | task_id=%s",
+                        task.id,
+                    )
             return await self._handle_evaluation_result(inputs, task_service, task, result)
         except asyncio.TimeoutError:
             logger.warning(
@@ -1145,10 +1159,11 @@ class TaskEvaluateTool(BuiltinTool):
                 return list(ac.keys())
         return []
 
-    def _get_input_params(self, task: Any) -> dict[str, dict[str, Any]]:  # noqa: PLR0912
+    def _get_input_params(self, task: Any) -> tuple[dict[str, dict[str, Any]], list[str]]:  # noqa: PLR0912
         """从任务模型的 acceptance_criteria 中提取各指标的输入参数。
 
-        对于 input_params 为空的指标，自动从任务描述中构建 criteria。
+        对于 input_params 为空的指标，自动从任务描述中构建 criteria
+        （返回值第二项记录走了该兜底的 metric_id，供调用方在评估结果显式标记）。
         对于工具型评估指标（如 file_check），自动注入 workspace 参数，
         确保评估工具在正确的工作目录下解析文件路径。
         从 task.metadata 解析 workspace 绝对路径，注入到工具型评估指标的参数中，
@@ -1158,9 +1173,10 @@ class TaskEvaluateTool(BuiltinTool):
             task: TaskModel 实例
 
         Returns:
-            key=metric_id, value=input_params 的字典
+            (key=metric_id, value=input_params 的字典, criteria 兜底 metric_id 列表)
         """
         params: dict[str, dict[str, Any]] = {}
+        criteria_fallback_ids: list[str] = []
         ac = {}
         if task.metadata and "acceptance_criteria" in task.metadata:
             ac = task.metadata["acceptance_criteria"]
@@ -1194,6 +1210,13 @@ class TaskEvaluateTool(BuiltinTool):
             p = params.get(metric_id, {})
             if not p.get("criteria") and task_desc:
                 p.setdefault("criteria", task_desc)
+                # 质量闸门用了任务描述兜底必须可见——静默顶替会掩盖配置漏配
+                criteria_fallback_ids.append(metric_id)
+                logger.warning(
+                    "[TaskEvaluate] 指标未配置 criteria，已用任务描述兜底 | task_id=%s | metric_id=%s",
+                    task.id,
+                    metric_id,
+                )
             if workspace_abs:
                 p["workspace"] = workspace_abs
             for key, val in list(p.items()):
@@ -1214,7 +1237,7 @@ class TaskEvaluateTool(BuiltinTool):
                         p[key] = val.replace("{tool_id}", _tool_id_val)
                 params[metric_id] = p
 
-        return params
+        return params, criteria_fallback_ids
 
     @staticmethod
     def _resolve_tool_id_from_workspace(task: Any, workspace_abs: str | None) -> str | None:  # noqa: ARG004

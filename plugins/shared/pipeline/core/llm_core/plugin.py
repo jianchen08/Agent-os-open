@@ -770,9 +770,20 @@ class LLMCore(ICorePlugin):
 
             provider_prefix = get_litellm_prefix(self._provider)
         except Exception:  # noqa: BLE001
+            logger.warning(
+                "[%s] router_factory 前缀映射加载失败，回退内置映射 | provider=%s",
+                self.name,
+                self._provider,
+                exc_info=True,
+            )
             provider_prefix = ""
 
-        # 动态映射未命中（空或返回原名）→ 回退到内置映射
+        # 动态映射未命中（空或返回原名）→ 回退到内置映射。
+        # 注意：恒等映射 provider（如 openai）动态命中与未命中不可区分，
+        # 回退结果与动态结果相同，仅 debug 留痕避免噪声；
+        # 真正改变结果的回退（zhipu→zai 类）warning；自定义 provider
+        # 回退 provider_name 自身 = 非法 litellm 前缀，显式报配置错误不吞
+        # （对齐 router_factory "绝不回退到 provider_name 本身" 的设计原则）。
         if not provider_prefix or provider_prefix == self._provider:
             provider_map = {
                 "openai": "openai",
@@ -782,7 +793,28 @@ class LLMCore(ICorePlugin):
                 "zhipu_coding": "zai",
                 "zhipu": "zai",
             }
-            provider_prefix = provider_map.get(self._provider, self._provider)
+            mapped = provider_map.get(self._provider)
+            if mapped is None:
+                raise ValueError(
+                    f"provider '{self._provider}' 的 litellm 前缀映射缺失"
+                    f"（llm.yaml providers.type 未配置或未加载），拒绝用 provider_name"
+                    f" 自身充当前缀（非法前缀，会在调用侧报 unknown provider 掩盖根因），"
+                    f"请检查 LLM 配置注入链路"
+                )
+            if mapped != self._provider:
+                logger.warning(
+                    "[%s] provider 动态映射未命中，回退内置映射表 | provider=%s | prefix=%s",
+                    self.name,
+                    self._provider,
+                    mapped,
+                )
+            else:
+                logger.debug(
+                    "[%s] provider 动态映射未命中（恒等前缀，结果不受回退影响）| provider=%s",
+                    self.name,
+                    self._provider,
+                )
+            provider_prefix = mapped
         return f"{provider_prefix}/{self._model}"
 
     async def _call_llm(  # noqa: PLR0912

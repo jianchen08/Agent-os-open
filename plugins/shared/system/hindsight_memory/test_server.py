@@ -618,3 +618,40 @@ class TestDeleteFix:
 
         mock_client.adelete.assert_awaited_once_with(bank_id="b2")
         assert result["deleted"] is True
+
+
+# ═══════════════════════════════════════════════════════════
+# bank_id 缺省回落可观测（兜底反模式审查 P10，2026-08-20）
+# ═══════════════════════════════════════════════════════════
+
+
+class TestBankIdDefaultWarnsOnce:
+    """P10：回落字面 'default' 必须一次性 warning（租户隔离未生效可见）。"""
+
+    def test_default_fallback_warns_once(self, mod: Any, monkeypatch, caplog) -> None:
+        """未配置缺省库回落 'default' → 首次 warning，后续静默。"""
+        import logging
+
+        monkeypatch.setattr(mod, "_bank_default_warned", False)
+        monkeypatch.setattr(mod, "_DEFAULT_BANK_ID", "default")
+        with caplog.at_level(logging.WARNING):
+            assert mod._resolve_bank_id(None) == "default"
+            first = [r for r in caplog.records if "隔离未生效" in r.getMessage()]
+            assert first, "首次回落 default 必须告警"
+            n = len(caplog.records)
+            assert mod._resolve_bank_id("") == "default"
+            assert len(caplog.records) == n, "一次性告警：回落不重复刷屏"
+
+    def test_configured_bank_no_warning(self, mod: Any, monkeypatch, caplog) -> None:
+        """配置了缺省库（非 'default'）→ 回落该值不告警。"""
+        import logging
+
+        monkeypatch.setattr(mod, "_bank_default_warned", False)
+        monkeypatch.setattr(mod, "_DEFAULT_BANK_ID", "tenant_42")
+        with caplog.at_level(logging.WARNING):
+            assert mod._resolve_bank_id(None) == "tenant_42"
+            assert not [r for r in caplog.records if "隔离未生效" in r.getMessage()]
+
+    def test_explicit_bank_id_short_circuits(self, mod: Any) -> None:
+        """显式 bank_id 优先（回归）。"""
+        assert mod._resolve_bank_id("bank_X") == "bank_X"
