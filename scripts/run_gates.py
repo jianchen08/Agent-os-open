@@ -158,6 +158,24 @@ GATES: list[Gate] = [
             "&& python ../scripts/check_rust_coverage_baseline.py --lcov coverage.lcov"
         ),
     ),
+    Gate(
+        # Rust 改动行 100%（ADR 2026-08-20 覆盖率棘轮门禁）。scope 限
+        # kernel/crates（库 crate，由各自单测驱动）；kernel/src 主进程 bin
+        # 由 e2e 车道覆盖、build.rs 编译期运行不进 llvm-cov 口径，均不在 scope。
+        id="kernel-diff-coverage",
+        label="Rust 改动行覆盖率 100%（diff coverage）",
+        domain="kernel",
+        command=(
+            sys.executable,
+            "scripts/check_diff_coverage.py",
+            "--coverage-file", "kernel/coverage.lcov",
+            "--format", "lcov",
+            "--scope", "kernel/crates",
+            "--ext", ".rs",
+            "--omit", r"build\.rs$",
+        ),
+        needs=("kernel-coverage",),
+    ),
     # ── 插件 SDK（plugins/sdk，独立包）────────────────────────────────
     Gate(
         id="sdk-lint",
@@ -202,7 +220,7 @@ GATES: list[Gate] = [
     ),
     Gate(
         id="plugins-coverage",
-        label="插件测试（插桩，免豁免重型套件）+ 失败数基线锁 + 覆盖率地板 44%",
+        label="插件测试（插桩，免豁免重型套件）+ 失败数基线锁 + 覆盖率基线锁",
         domain="plugins",
         shell=(
             "T=$(mktemp); ( uv run --frozen python -m pytest -v "
@@ -210,8 +228,29 @@ GATES: list[Gate] = [
             + " --cov=plugins --cov-report=term-missing --cov-report=xml:coverage.xml"
             + ' 2>&1 || true ) | tee "$T"; '
             'python scripts/check_pytest_failure_baseline.py --lane plugins-coverage --from-file "$T" '
-            "&& uv run --frozen python -m coverage report --fail-under=44"
+            "&& python scripts/check_python_coverage_baseline.py"
         ),
+        env=_PLUGINS_ENV,
+    ),
+    Gate(
+        # Python 改动行 100%（ADR 2026-08-20 覆盖率棘轮门禁）。omit 与
+        # pyproject [tool.coverage.run] omit 对齐（tests 自身/sdk/__init__ 不度量）。
+        id="plugins-diff-coverage",
+        label="Python 改动行覆盖率 100%（diff coverage）",
+        domain="plugins",
+        command=(
+            sys.executable,
+            "scripts/check_diff_coverage.py",
+            "--coverage-file", "coverage.xml",
+            "--format", "xml",
+            "--scope", "plugins",
+            "--ext", ".py",
+            "--omit", "^plugins/sdk/",
+            "--omit", "/tests/",
+            "--omit", r"/test_[^/]+\.py$",
+            "--omit", r"/__init__\.py$",
+        ),
+        needs=("plugins-coverage",),
         env=_PLUGINS_ENV,
     ),
     Gate(
@@ -272,13 +311,36 @@ GATES: list[Gate] = [
     ),
     Gate(
         id="frontend-coverage",
-        label="vitest 覆盖率 + 基线锁（只减不增）",
+        label="vitest 覆盖率%基线锁 + 失败数基线锁（只减不增/只升不降）",
         domain="frontend",
         cwd="frontend",
         shell=(
             'T=$(mktemp); ( npm run test:coverage 2>&1 || true ) | tee "$T"; '
             'python ../scripts/check_frontend_baseline.py --vitest-file "$T"'
         ),
+    ),
+    Gate(
+        # 前端改动行 100%（ADR 2026-08-20 覆盖率棘轮门禁）。omit 与
+        # frontend/vitest.config.ts coverage.exclude 对齐（测试自身/main.tsx/
+        # d.ts 不度量）。lcov 产物 = frontend/coverage/lcov.info。
+        id="frontend-diff-coverage",
+        label="前端改动行覆盖率 100%（diff coverage）",
+        domain="frontend",
+        command=(
+            sys.executable,
+            "scripts/check_diff_coverage.py",
+            "--coverage-file", "frontend/coverage/lcov.info",
+            "--format", "lcov",
+            "--scope", "frontend/src",
+            "--ext", ".ts",
+            "--ext", ".tsx",
+            "--omit", "/__tests__/",
+            "--omit", r"\.test\.(ts|tsx)$",
+            "--omit", "^frontend/src/test/",
+            "--omit", r"\.d\.ts$",
+            "--omit", r"^frontend/src/main\.tsx$",
+        ),
+        needs=("frontend-coverage",),
     ),
     Gate(
         id="frontend-e2e-smoke",

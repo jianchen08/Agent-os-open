@@ -7,7 +7,7 @@
 #     scripts/run_gates.py 定义一次，CI job 与本地调用同一入口（--filter），
 #     不存在第二套口径。
 #   - 覆盖率豁免重型套件：插件测试拆两个并行 job——python-coverage（插桩，
-#     fail-under=50 阈值自动守护豁免名单）+ python-heavy-suites（免插桩跑
+#     覆盖率基线锁自动守护豁免名单）+ python-heavy-suites（免插桩跑
 #     94 插件子进程冒烟矩阵，正确性信号不缩水）。名单单点：
 #     scripts/coverage_exempt.py。
 #
@@ -174,10 +174,13 @@ jobs:
   # STATUS_ACCESS_VIOLATION 用 --ignore-run-fail 容错；integration-tests 的
   # /tmp mock + 跨平台噪音用 --exclude 排除。
   rust-coverage:
-    name: Rust Coverage (llvm-cov line% 基线锁)
+    name: Rust Coverage (llvm-cov line% 基线锁 + 改动行 100%)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          # kernel-diff-coverage 需要完整历史做 merge-base diff
+          fetch-depth: 0
 
       - name: Install Rust toolchain
         run: rustup show
@@ -202,8 +205,10 @@ jobs:
         with:
           python-version: "3.11"
 
-      - name: Run gates (kernel-coverage)
-        run: python scripts/run_gates.py --filter kernel-coverage
+      - name: Run gates (kernel-coverage + 改动行 100%)
+        env:
+          GITHUB_BASE_REF: ${{ github.base_ref }}
+        run: python scripts/run_gates.py --filter kernel-coverage,kernel-diff-coverage
 
       - name: Cache Rust artifacts
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
@@ -303,10 +308,13 @@ jobs:
   # 阈值守护：fail-under=50 会自动验证豁免名单正确性——若豁免套件实际
   # 独家贡献了覆盖率，本 job 当场红（misconfiguration fails loud）。
   python-coverage:
-    name: Python Coverage (插桩 + fail-under=50 + mypy 基线)
+    name: Python Coverage (插桩 + 覆盖率基线锁 + mypy 基线 + 改动行 100%)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          # 改动行覆盖率门禁（plugins-diff-coverage）需要完整历史做 merge-base diff
+          fetch-depth: 0
 
       - name: Set up Python
         uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
@@ -331,13 +339,17 @@ jobs:
       #     + channel-copy-guard（渠道共享拷贝守卫，瞬时——channel_common 模块名
       #       黑名单不得重回 channel_* 目录，C1 合流防复发）
       #     + plugins-coverage（插桩：pytest || true 经 tee 捕获 → 失败数基线锁
-      #       .github/pytest-failure-baseline.txt 只减不增 → coverage report
-      #       --fail-under=44 地板（独立执行不被 || true 吞掉；44 为 2026-08-15
-      #       dev/0.2 实测，只升不降棘轮至 50→80%；coverage.xml 供矩阵回填消费））
+      #       .github/pytest-failure-baseline.txt 只减不增 → 整体覆盖率基线锁
+      #       .github/python-coverage-baseline.txt 只升不降（取代旧 fail-under=44
+      #       静态地板；coverage.xml 供 diff 门禁与矩阵回填消费））
+      #     + plugins-diff-coverage（改动行覆盖率 100%：PR 事件按 merge-base，
+      #       push 事件查最后一个提交；[skip-diff-cov] 逃生口，ADR 2026-08-20）
       #     + plugins-mypy-baseline（plugins/shared mypy 只减不增，
       #       基线 .github/mypy-baseline.txt；uv run 保证与本地计数口径一致）
-      - name: Run gates (pairing + copy-guard + coverage + mypy baseline)
-        run: python scripts/run_gates.py --filter plugins-coverage-pairing,channel-copy-guard,plugins-coverage,plugins-mypy-baseline
+      - name: Run gates (pairing + copy-guard + coverage + diff-coverage + mypy baseline)
+        env:
+          GITHUB_BASE_REF: ${{ github.base_ref }}
+        run: python scripts/run_gates.py --filter plugins-coverage-pairing,channel-copy-guard,plugins-coverage,plugins-diff-coverage,plugins-mypy-baseline
 
   # ── Python Heavy Suites（免插桩 gate：重型套件并排执行）────────────────
   # 与 python-coverage 并行（无 needs 依赖）：94 插件（85 sidecar + 8
@@ -447,10 +459,13 @@ jobs:
   # vitest/eslint 存量失败走"只减不增"基线锁（.github/frontend-baseline.txt）：
   # 失败/error 数增长 → CI 红；减少或持平 → 放行。
   frontend-test:
-    name: Frontend Test (tsc + lint + vitest)
+    name: Frontend Test (tsc + lint + vitest + 改动行 100%)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          # frontend-diff-coverage 需要完整历史做 merge-base diff
+          fetch-depth: 0
 
       - name: Set up Python (gate runner + 基线锁脚本)
         uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
@@ -470,8 +485,10 @@ jobs:
       - name: Install dependencies (pnpm workspace,根 lock；不同步直接红——安全审查：禁 fallback 绕过锁定)
         run: pnpm install --frozen-lockfile
 
-      - name: Run gates (typecheck + lint 基线 + coverage 基线)
-        run: python scripts/run_gates.py --filter frontend-typecheck,frontend-lint,frontend-coverage
+      - name: Run gates (typecheck + lint 基线 + coverage 基线 + 改动行 100%)
+        env:
+          GITHUB_BASE_REF: ${{ github.base_ref }}
+        run: python scripts/run_gates.py --filter frontend-typecheck,frontend-lint,frontend-coverage,frontend-diff-coverage
 
   # ── Frontend E2E 冒烟（零后端依赖）──────────────────────────────────────
   # PR 级 e2e 门禁：构建前端 → vite preview 服务于 5188 → 跑零外部依赖冒烟子集

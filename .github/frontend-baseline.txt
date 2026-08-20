@@ -7,5 +7,11 @@
 #     MediaTimelineView/ApprovalRouter/store 流式逻辑），按文件逐个调和（L，进行中）
 # eslint 74（chat_card 存量 error，待 lint:fix 逐组清零）
 # CI（Ubuntu + Node20）首次跑通后若计数有环境差异，以 CI 实测为准收紧。
+#
+# 覆盖率%（只升不降，ADR 2026-08-20 覆盖率棘轮门禁）：
+#   token=1 起手——无实测可依（本地 Node25 vitest 双 provider 均不出覆盖率
+#   产物 + CI 前端车道卡 pnpm 安装红）。CI 首绿产出 Lines% 后立即用
+#   实测+压力收紧（用户裁决：基线略高于实测留压力），此后缺数据即红。
 vitest_failures=73
 eslint_errors=74
+vitest_coverage_pct=1.00

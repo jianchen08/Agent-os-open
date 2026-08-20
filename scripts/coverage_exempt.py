@@ -49,6 +49,9 @@ BASE_TEST_PATHS: list[str] = [
     "tests/plugins/",
     "tests/suites/plugins/",
     "tests/channels/",
+    # 门禁脚本单测（2026-08-20 覆盖率棘轮门禁批次：check_diff_coverage /
+    # check_python_coverage_baseline / check_frontend_baseline 的解析器测试）
+    "tests/gates/",
     "tests/test_security_check_allow_priority.py",
     "tests/test_security_check_isolation.py",
     "tests/test_track_cost_update_event.py",

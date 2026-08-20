@@ -1,0 +1,11 @@
+# Python 插件整体行覆盖率基线（line%，只升不降，
+# 见 scripts/check_python_coverage_baseline.py；数据源 plugins-coverage gate
+# 产出的 coverage.xml line-rate，未取整口径）。
+#
+# 首次基线（2026-08-20，用户裁决"基线略高于实测留压力"）：
+#   - CI 实测 43.77%（run 32333595329 TOTAL 22177/miss 12470；旧
+#     fail-under=44 靠显示取整才过——本基线按未取整 line-rate 判定，故
+#     44.0 即真实压力线）。
+#   - 达到 44.0 后：--init 写入实测，再上调至新实测+压力，commit 留归因。
+#   - 只许升不许降；如确有正当理由（度量口径变更），手改并 commit 归因。
+python_line_coverage=44.00
