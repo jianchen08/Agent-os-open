@@ -517,6 +517,43 @@ def list_available_skins(base_dir: str | Path | None = None) -> list[str]:
     return sorted(d.name for d in base.iterdir() if d.is_dir() and (d / "skin.css").is_file())
 
 
+def describe_available_skins(base_dir: str | Path | None = None) -> list[dict[str, Any]]:
+    """动态皮肤清单（运行时读当前装载的皮肤插件，供设置页/清单端点消费）。
+
+    每条：id/name/tagline/description/accent/base/tags/has_background_media——
+    皮肤集合变化（dsh_plugins/ 放入新皮肤插件包）即时反映，零 manifest 改动。
+    """
+    base = Path(base_dir) if base_dir is not None else SKIN_CENTER_SKINS_DIR
+    out: list[dict[str, Any]] = []
+    for skin_id in list_available_skins(base):
+        entry: dict[str, Any] = {
+            "id": skin_id,
+            "name": skin_id,
+            "tagline": "",
+            "accent": "",
+            "base": "dark",
+            "tags": [],
+            "has_background_media": False,
+        }
+        manifest = base / skin_id / "skin.json"
+        if manifest.is_file():
+            try:
+                meta = json.loads(manifest.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                meta = {}
+            if isinstance(meta, dict):
+                entry["name"] = str(meta.get("name") or skin_id)
+                entry["tagline"] = str(meta.get("tagline") or "")
+                entry["accent"] = str(meta.get("accent") or "")
+                tags = [str(t).lower() for t in meta.get("tags", []) if isinstance(t, (str, int))]
+                entry["tags"] = tags
+                if "light" in tags and "dark" not in tags:
+                    entry["base"] = "light"
+        entry["has_background_media"] = resolve_skin_background(skin_id, base) is not None
+        out.append(entry)
+    return out
+
+
 def load_skin_selection() -> str | None:
     """读适配器配置（config/dsh_adapter.yaml）顶层 ``skin`` 字段。
 

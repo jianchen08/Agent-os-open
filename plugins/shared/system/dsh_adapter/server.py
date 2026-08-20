@@ -251,10 +251,13 @@ async def _on_dsh_adapter_unload(params: dict) -> None:  # noqa: ARG001
 # 契约：body base64 原样回写）。
 
 import base64  # noqa: E402
+import json  # noqa: E402
+import re  # noqa: E402
 
 from translator import (  # noqa: E402
     SKIN_ASSET_EXTS,
     SKIN_CENTER_SKINS_DIR,
+    describe_available_skins,
     list_available_skins,
     load_skin_selection,
     resolve_skin_background,
@@ -274,6 +277,8 @@ _STYLE_ROUTES: dict[str, tuple[str, str]] = {
 _SKIN_CSS_ROUTE = "/ext/dsh_adapter/styles/skin.css"
 _SKIN_ASSET_ROUTE_PREFIX = "/ext/dsh_adapter/styles/skin-assets/"
 _SKIN_DISABLED_CSS = "/* dsh skin not selected (config/dsh_adapter.yaml: skin: <id>|none) */\n"
+_SKIN_LIST_ROUTE = "/ext/dsh_adapter/skins"
+_SKIN_SELECT_ROUTE = "/ext/dsh_adapter/skins/current"
 
 
 def _resolve_skin_route() -> tuple[str, bytes] | None:
@@ -299,6 +304,58 @@ def _resolve_skin_route() -> tuple[str, bytes] | None:
     if bg is not None:
         text += "\n" + translate_background_css(bg, f"{_SKIN_ASSET_ROUTE_PREFIX}{skin}")
     return skin, text.encode("utf-8")
+
+
+def _skin_config_path() -> str:
+    """config 目录路径（复用 translator 的项目根解析）。"""
+    from translator import _project_root
+
+    return str(Path(_project_root()) / "config")
+
+
+def _skin_list_payload() -> dict[str, Any]:
+    """动态皮肤清单（运行时读 skin-center 装载现状——设置页数据源）。"""
+    from translator import describe_available_skins
+
+    skins = describe_available_skins()
+    return {
+        "current": load_skin_selection(),
+        "count": len(skins),
+        "skins": skins,
+    }
+
+
+def _select_skin(raw_body: str) -> dict[str, Any]:
+    """PUT /ext/dsh_adapter/skins/current——写回 config 的 skin 字段。
+
+    body: ``{"skin": "<id>"}``（id 必须 ∈ 当前装载皮肤；"none" = 关闭注入）。
+    写回用文本级替换（保住 yaml 注释与 plugins 段）；skin 行缺失则尾追加。
+    """
+    try:
+        body = json.loads(base64.b64decode(raw_body).decode("utf-8")) if raw_body else {}
+    except (ValueError, UnicodeDecodeError):
+        return {"status": 400, "headers": {}, "body": "bad json body", "body_encoding": "utf-8"}
+    skin = body.get("skin") if isinstance(body, dict) else None
+    if skin not in (*list_available_skins(), "none"):
+        return {"status": 400, "headers": {}, "body": f"unknown skin: {skin!r}", "body_encoding": "utf-8"}
+    cfg_path = Path(_skin_config_path()) / "dsh_adapter.yaml"
+    try:
+        text = cfg_path.read_text(encoding="utf-8")
+    except OSError as e:
+        logger.warning("dsh_adapter: skin select read config failed: %s", e)
+        return {"status": 500, "headers": {}, "body": "config read failed", "body_encoding": "utf-8"}
+    new_line = f"skin: {skin}\n"
+    if re.search(r"^skin:.*$", text, flags=re.MULTILINE):
+        text = re.sub(r"^skin:.*$", new_line.rstrip("\n"), text, flags=re.MULTILINE)
+    else:
+        text = text.rstrip("\n") + "\n" + new_line
+    try:
+        cfg_path.write_text(text, encoding="utf-8")
+    except OSError as e:
+        logger.warning("dsh_adapter: skin select write config failed: %s", e)
+        return {"status": 500, "headers": {}, "body": "config write failed", "body_encoding": "utf-8"}
+    logger.info("dsh_adapter: skin selected -> %s", skin)
+    return {"status": 200, "headers": {"content-type": "application/json"}, "body": "{}", "body_encoding": "utf-8"}
 
 
 _CONTENT_TYPES = {
@@ -364,6 +421,16 @@ async def _http_handle_style(
     query: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     """serve client_styles 贡献的静态 CSS（dispatcher 契约：body base64 原样回写）。"""
+    if path == _SKIN_LIST_ROUTE and method == "GET":
+        payload = json.dumps(_skin_list_payload(), ensure_ascii=False)
+        return {
+            "status": 200,
+            "headers": {"content-type": "application/json"},
+            "body": base64.b64encode(payload.encode("utf-8")).decode(),
+            "body_encoding": "base64",
+        }
+    if path == _SKIN_SELECT_ROUTE and method == "PUT":
+        return _select_skin(raw_body)
     if path == _SKIN_CSS_ROUTE:
         resolved = _resolve_skin_route()
         if resolved is None:

@@ -269,6 +269,26 @@
       "timeout_ms": 5000,
       "max_concurrency": 8,
       "description": "Serve DSH skin background media assets (v2 contributes.backgroundMedia; image extensions whitelist)"
+    },
+    {
+      "route_id": "dsh_skin_list",
+      "method": "GET",
+      "path": "/ext/dsh_adapter/skins",
+      "auth": "user",
+      "handler_capability": "http.handle",
+      "timeout_ms": 5000,
+      "max_concurrency": 8,
+      "description": "Dynamic DSH skin list from loaded skin-center packages (settings page data source)"
+    },
+    {
+      "route_id": "dsh_skin_select",
+      "method": "PUT",
+      "path": "/ext/dsh_adapter/skins/current",
+      "auth": "user",
+      "handler_capability": "http.handle",
+      "timeout_ms": 5000,
+      "max_concurrency": 4,
+      "description": "Select active DSH skin (writes config/dsh_adapter.yaml skin field; body {skin: id|none})"
     }
   ]
 }

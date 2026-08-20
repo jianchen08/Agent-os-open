@@ -760,3 +760,61 @@ class TestSkinAssetRoute:
         body = base64.b64decode(resp["body"]).decode("utf-8")
         assert "--dsw-" in body  # 令牌层仍在
         assert "background-media" in body and "miku-art.webp" in body  # 背景段已追加
+
+
+class TestSkinListAndSelect:
+    """动态皮肤清单端点 + 选择写回（PUT 用 tmp config，不污染仓库配置）。"""
+
+    def _call(self, path: str, method: str, raw_body: str = "") -> dict:
+        import server  # noqa: PLC0415
+
+        return asyncio.run(
+            server._http_handle_style(path=path, method=method, raw_body=raw_body, plugin_id="", headers=None, query=None)
+        )
+
+    def test_list_skins_dynamic(self):
+        resp = self._call("/ext/dsh_adapter/skins", "GET")
+        assert resp["status"] == 200
+        data = json.loads(base64.b64decode(resp["body"]).decode("utf-8"))
+        assert data["count"] == len(data["skins"]) >= 15
+        miku = next(s for s in data["skins"] if s["id"] == "miku")
+        assert miku["has_background_media"] is True
+        assert miku["accent"].startswith("#")
+        matrix = next(s for s in data["skins"] if s["id"] == "matrix")
+        assert matrix["has_background_media"] is False
+
+    def test_select_skin_writes_config(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
+        import server  # noqa: PLC0415
+
+        cfg_dir = tmp_path / "config"
+        cfg_dir.mkdir()
+        (cfg_dir / "dsh_adapter.yaml").write_text(
+            "# 注释保留验证\nplugins: {}\nskin: miku\n", encoding="utf-8"
+        )
+        monkeypatch.setattr("server._skin_config_path", lambda: str(cfg_dir))
+        body = base64.b64encode(json.dumps({"skin": "matrix"}).encode()).decode()
+        resp = self._call("/ext/dsh_adapter/skins/current", "PUT", raw_body=body)
+        assert resp["status"] == 200
+        text = (cfg_dir / "dsh_adapter.yaml").read_text(encoding="utf-8")
+        assert "skin: matrix" in text
+        assert text.startswith("# 注释保留验证")  # 注释未被破坏
+        assert "plugins: {}" in text
+
+    def test_select_skin_unknown_rejected(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+        cfg_dir = tmp_path / "config"
+        cfg_dir.mkdir()
+        (cfg_dir / "dsh_adapter.yaml").write_text("skin: miku\n", encoding="utf-8")
+        monkeypatch.setattr("server._skin_config_path", lambda: str(cfg_dir))
+        body = base64.b64encode(json.dumps({"skin": "hack"}).encode()).decode()
+        resp = self._call("/ext/dsh_adapter/skins/current", "PUT", raw_body=body)
+        assert resp["status"] == 400
+        assert (cfg_dir / "dsh_adapter.yaml").read_text(encoding="utf-8") == "skin: miku\n"  # 未被改写
+
+    def test_manifest_http_endpoints_declared(self):
+        manifest = json.loads((PLUGIN_DIR / "plugin.json").read_text(encoding="utf-8"))
+        routes = {(e["method"], e["path"]) for e in manifest["http_endpoints"]}
+        assert ("GET", "/ext/dsh_adapter/skins") in routes
+        assert ("PUT", "/ext/dsh_adapter/skins/current") in routes
+        assert ("GET", "/ext/dsh_adapter/styles/skin-assets/{skin}/{file:path}") in routes
+        # 静态 themes 已撤：皮肤清单必须动态（用户裁决：加新皮肤插件零 manifest 改动）
+        assert "themes" not in manifest["contributes"]
