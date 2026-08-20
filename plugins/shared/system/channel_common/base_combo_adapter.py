@@ -1,4 +1,10 @@
-"""组合适配器基类。
+"""组合适配器基类（channel_common 渠道共享包）。
+
+[0.2 C1 合流 2026-08-20] 单一事实源：原 channel_{dingtalk,feishu,qq,wecom}/
+base_combo_adapter.py 四份逐字节一致拷贝（md5 25584b15…）收敛为本文件。
+消费方经 server.py 把本目录 sys.path.**append** 注入（绝不 insert(0)——
+三起模块名抢占事故纪律，见 docs/working/渠道合流C1C2与CLI插件化方案_20260819.md §三）。
+防复发守卫：scripts/check_channel_copy_guard.py 禁止本模块名重回 channel_* 目录。
 
 为通道组合适配器（DingTalk/Feishu/QQ/WeCom）提供通用的
 is_connected、health_check、get_status 实现。

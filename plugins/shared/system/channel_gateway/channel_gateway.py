@@ -25,9 +25,10 @@ from collections.abc import Awaitable, Callable
 from typing import Any
 
 from message_normalizer import MessageNormalizer
-from pipeline_types import StateKeys, create_initial_state
 from session_bridge import SessionBridge
 from unified_types import UnifiedResponse
+
+from agentos_plugin_sdk.pipeline_types import StateKeys, create_initial_state
 
 logger = logging.getLogger(__name__)
 

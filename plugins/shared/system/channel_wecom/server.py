@@ -15,6 +15,12 @@ from typing import Any
 
 sys.path.insert(0, os.path.dirname(__file__))
 
+# 渠道共享包 channel_common（input_adapter/output_adapter/base_combo_adapter 单一事实源）。
+# 纪律：append 注入、绝不 insert(0)——避免遮蔽其他插件同名模块
+#（三起模块名抢占事故，见 docs/working/渠道合流C1C2与CLI插件化方案_20260819.md §三）。
+if (_cc := os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "channel_common"))) not in sys.path and os.path.isdir(_cc):
+    sys.path.append(_cc)
+
 from adapter import WeComAdapter
 
 from agentos_plugin_sdk import AgentOSPlugin

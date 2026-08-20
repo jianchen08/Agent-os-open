@@ -112,6 +112,11 @@ class TestAdapterClasses:
         # Save and restore sys.path
         old_path = sys.path[:]
         sys.path.insert(0, ch_path)
+        # 渠道共享包 channel_common（C1 合流 2026-08-20）：append 注入，
+        # 与 server.py 接线同款纪律（绝不 insert(0)）。
+        cc_path = str(PLUGINS_BASE / "channel_common")
+        if cc_path not in sys.path:
+            sys.path.append(cc_path)
         try:
             # Clear cached modules to avoid cross-test pollution
             keys_to_clear = [

@@ -19,8 +19,9 @@ from typing import Any
 from base_combo_adapter import BaseComboAdapter
 from input_adapter import IInputAdapter
 from output_adapter import IOutputAdapter
-from pipeline_types import StateKeys
 from stream_client import FeishuStreamClient
+
+from agentos_plugin_sdk.pipeline_types import StateKeys
 
 logger = logging.getLogger(__name__)
 

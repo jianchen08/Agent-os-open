@@ -25,9 +25,18 @@ _CHANNEL_DIRS: dict[str, Path] = {
     "qq": _SYSTEM_DIR / "channel_qq",
     "wecom": _SYSTEM_DIR / "channel_wecom",
     "api": _SYSTEM_DIR / "channel_api",
+    "cli": _SYSTEM_DIR / "channel_cli",
 }
 
-# 各通道目录下可能发生跨通道同名冲突的模块名（按需维护）
+# 渠道共享包（C1 合流 2026-08-20）：input_adapter/output_adapter/base_combo_adapter
+# 的单一事实源。镜像 server.py 的接线纪律：sys.path.**append**（绝不 insert(0)，
+# 避免遮蔽其他插件同名模块）。
+_CHANNEL_COMMON_DIR = _SYSTEM_DIR / "channel_common"
+
+# 各通道目录下可能发生跨通道同名冲突的模块名（按需维护）。
+# 注：input_adapter/output_adapter/base_combo_adapter/pipeline_types 四名
+# 自 C1 合流后渠道目录内已无本地拷贝（共享包 channel_common / SDK 单一事实源），
+# 逐出后重新解析的目标即共享源，逐出逻辑保持不变。
 _AMBIGUOUS_MODULES = {
     "adapter",
     "base_combo_adapter",
@@ -79,6 +88,12 @@ def use_channel(channel: str) -> None:
     d = str(_CHANNEL_DIRS[channel])
     if not sys.path or sys.path[0] != d:
         sys.path.insert(0, d)
+    # 渠道共享包 channel_common：append 注入（与 server.py 接线同款纪律），
+    # 供各渠道 adapter 的 `from input_adapter/output_adapter/base_combo_adapter import`
+    # 平铺解析到共享单一事实源。
+    _cc = str(_CHANNEL_COMMON_DIR)
+    if _cc not in sys.path:
+        sys.path.append(_cc)
     # channel_api 的路由模块按 namespace package 访问兄弟系统插件
     #（workspace/tasks/multimodal 等），需把 system/ 也加入 path。
     if channel == "api":
