@@ -5,8 +5,32 @@
 #   - 列出且 enabled: false 的包：跳过装载（不翻译、不出现在 dsh_list_plugins）
 #   - 未列出的包：默认启用
 #
-# 示例（放入 dsh_plugins/my-plugin 后）：
-#   plugins:
-#     my-plugin:
-#       enabled: false
-plugins: {}
+# 当前装载（显式列出以便设置中心可见可操作）：
+plugins:
+  dsh-tool-calculator:
+    enabled: true
+  dsh-tool-csv:
+    enabled: true
+  dsh-tool-diff:
+    enabled: true
+  dsh-tool-json:
+    enabled: true
+  dsh-tool-time:
+    enabled: true
+  modlens:
+    enabled: true
+  skin-center:
+    enabled: true
+  ui-brand-official:
+    enabled: true
+  ui-theme:
+    enabled: true
+
+# ── 皮肤注入（skin-center 令牌层） ─────────────────────────────────────
+# 可选值 = dsh_plugins/skin-center/skins/ 下的皮肤 id：
+#   matrix miku mint xp minecraft harbor trading whale-song whale-mom
+#   blue-fantasy dragon-heir maid-atelier(非商业许可) cyber-night furina
+#   summer-liquid-glass
+# 换肤 = 改此字段 → reenable dsh_adapter（或重启内核）→ 刷新前端页面。
+# none / 删除字段 = 关闭注入（返回空 CSS）。
+skin: matrix

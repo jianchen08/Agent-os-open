@@ -434,10 +434,16 @@ def discover_dsh_plugins(base_dir: str | Path | None = None) -> list[Path]:
 
 
 def _project_root() -> str:
-    """定位项目根：优先 AGENTOS_PROJECT_ROOT，回退上溯找 config/ 目录。"""
+    """定位项目根：优先 AGENTOS_PROJECT_ROOT；否则以本文件位置锚定
+    （translator.py 在 plugins/shared/system/dsh_adapter/ 下，parents[4]
+    恒为项目根——sidecar 的 cwd 不可控，cwd 上溯在 target/release 等
+    深目录下不可靠）；最后回退 cwd 上溯找 config/。"""
     root = os.environ.get("AGENTOS_PROJECT_ROOT")
     if root and os.path.isdir(root):
         return root
+    anchored = Path(__file__).resolve().parents[4]
+    if (anchored / "config").is_dir():
+        return str(anchored)
     cur = Path.cwd()
     for _ in range(6):
         if (cur / "config").is_dir():
@@ -489,3 +495,51 @@ def load_installed_plugins() -> dict[str, Any]:
     out["count"] = len(enabled)
     out["disabled"] = [p.name for p in packages if not _plugin_enabled(p.name, config)]
     return out
+
+
+# ── DSH 皮肤中心资产解析（skin-center 令牌层注入通道） ──────────────────
+#
+# 第三方 skin-center 包（dsh_plugins/skin-center/）的皮肤是分层资产：
+# skin.json manifest（v2）声明 contributes.stylesheet（skin.css = 令牌层，
+# :root 上的 CSS 变量 + 背景/字体/配色，不依赖 DSH DOM 结构，可注入任意
+# 宿主页面）与 contributes.patches（patches.css / hooks.mjs = DOM 补丁层，
+# 选择器/钩子只对 DSH Web UI 的 DOM 有效——**不接入**，对灵汐 DOM 无效且
+# 可能误伤）。本通道只消费令牌层。
+
+SKIN_CENTER_SKINS_DIR = Path(__file__).parent / "dsh_plugins" / "skin-center" / "skins"
+
+
+def list_available_skins(base_dir: str | Path | None = None) -> list[str]:
+    """列出 skin-center 内可用的皮肤 id（有 skin.css 的目录，按 skin.json order 无关的字母序）。"""
+    base = Path(base_dir) if base_dir is not None else SKIN_CENTER_SKINS_DIR
+    if not base.is_dir():
+        return []
+    return sorted(d.name for d in base.iterdir() if d.is_dir() and (d / "skin.css").is_file())
+
+
+def load_skin_selection() -> str | None:
+    """读适配器配置（config/dsh_adapter.yaml）顶层 ``skin`` 字段。
+
+    语义：皮肤 id（如 matrix）= 注入该皮肤令牌层；缺省/none/空 = 不注入。
+    """
+    cfg_path = Path(_project_root()) / "config" / "dsh_adapter.yaml"
+    try:
+        with open(cfg_path, encoding="utf-8") as f:
+            data = yaml.safe_load(f) or {}
+    except (OSError, yaml.YAMLError):
+        return None
+    if not isinstance(data, dict):
+        return None
+    skin = data.get("skin")
+    if not isinstance(skin, str) or skin.strip() == "" or skin.strip().lower() == "none":
+        return None
+    return skin.strip()
+
+
+def resolve_skin_css(skin_id: str, base_dir: str | Path | None = None) -> Path | None:
+    """皮肤 id → skin.css 路径（纯函数；皮肤不存在返回 None）。"""
+    if not skin_id or "/" in skin_id or "\\" in skin_id or ".." in skin_id:
+        return None
+    base = Path(base_dir) if base_dir is not None else SKIN_CENTER_SKINS_DIR
+    css = base / skin_id / "skin.css"
+    return css if css.is_file() else None

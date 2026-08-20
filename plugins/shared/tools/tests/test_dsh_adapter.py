@@ -12,6 +12,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
 import os
 import sys
@@ -28,9 +29,12 @@ from translator import (  # noqa: E402
     DSH_SOURCE_VERSION,
     discover_dsh_plugins,
     dsh_params_to_json_schema,
+    list_available_skins,
     load_installed_plugins,
     load_plugin_config,
+    load_skin_selection,
     map_dsh_slot,
+    resolve_skin_css,
     to_lingxi_tool_entry,
     translate_hooks_config,
     translate_package,
@@ -631,3 +635,69 @@ class TestTranslateHooksConfig:
         )
         assert r["mapped"] == 1
         assert r["triggers"][0]["event_type"] == "run.completed"
+
+
+# ── 皮肤中心令牌层注入（skin-center 通道，2026-08-21） ─────────────────
+
+class TestSkinCenterResolution:
+    """translator 皮肤解析纯函数（对真实 skin-center 资产跑，仓库内自带 15 套）。"""
+
+    def test_list_available_skins(self):
+        skins = list_available_skins()
+        assert "matrix" in skins and "miku" in skins
+        assert len(skins) >= 15
+
+    def test_resolve_known_skin(self):
+        css = resolve_skin_css("matrix")
+        assert css is not None and css.is_file()
+        text = css.read_text(encoding="utf-8")
+        assert "--dsw-" in text  # 令牌层特征（CSS 变量）
+
+    def test_resolve_unknown_skin(self):
+        assert resolve_skin_css("no-such-skin") is None
+
+    def test_path_traversal_guard(self):
+        assert resolve_skin_css("../ui-theme") is None
+        assert resolve_skin_css("a/b") is None
+
+    def test_selection_reads_config(self):
+        # 仓库 config/dsh_adapter.yaml 现值 skin: matrix（换肤后此断言随配置同步改）
+        assert load_skin_selection() == "matrix"
+
+
+class TestSkinServeHandler:
+    """server._http_handle_style 的皮肤路由（dispatcher 契约 body base64）。"""
+
+    def _get_skin_css(self) -> tuple[int, str]:
+        import server  # noqa: PLC0415
+
+        resp = asyncio.run(
+            server._http_handle_style(path="/ext/dsh_adapter/styles/skin.css", method="GET")
+        )
+        body = base64.b64decode(resp["body"]).decode("utf-8") if resp["body"] else ""
+        return resp["status"], body
+
+    def test_serve_selected_skin(self):
+        status, body = self._get_skin_css()
+        assert status == 200
+        assert "--dsw-" in body  # 注入的是令牌层 CSS 本体
+
+    def test_disabled_skin_returns_empty_css(self, monkeypatch: pytest.MonkeyPatch):
+        import server  # noqa: PLC0415
+
+        monkeypatch.setattr("server.load_skin_selection", lambda: None)
+        resp = asyncio.run(
+            server._http_handle_style(path="/ext/dsh_adapter/styles/skin.css", method="GET")
+        )
+        assert resp["status"] == 200
+        assert base64.b64decode(resp["body"]).decode("utf-8").startswith("/*")
+
+    def test_unknown_skin_falls_back_empty(self, monkeypatch: pytest.MonkeyPatch):
+        import server  # noqa: PLC0415
+
+        monkeypatch.setattr("server.load_skin_selection", lambda: "no-such-skin")
+        resp = asyncio.run(
+            server._http_handle_style(path="/ext/dsh_adapter/styles/skin.css", method="GET")
+        )
+        assert resp["status"] == 200
+        assert base64.b64decode(resp["body"]).decode("utf-8").startswith("/*")

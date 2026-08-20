@@ -220,6 +220,12 @@
         "path": "styles/dsh-bg.css",
         "scope": "global",
         "description": "DSH 视觉插件 dsh-background 背景图语义（client_styles 通道）"
+      },
+      {
+        "id": "dsh-skin",
+        "path": "styles/skin.css",
+        "scope": "global",
+        "description": "DSH 皮肤中心令牌层注入（skin-center 的 skin.css；皮肤选择 = config/dsh_adapter.yaml 的 skin 字段，none/缺省 = 关闭。DOM 补丁层 patches.css/hooks.mjs 不接入）"
       }
     ]
   },
@@ -243,6 +249,16 @@
       "timeout_ms": 5000,
       "max_concurrency": 8,
       "description": "Serve DSH adapter client_styles 背景图"
+    },
+    {
+      "route_id": "dsh_skin_css",
+      "method": "GET",
+      "path": "/ext/dsh_adapter/styles/skin.css",
+      "auth": "user",
+      "handler_capability": "http.handle",
+      "timeout_ms": 5000,
+      "max_concurrency": 8,
+      "description": "Serve DSH skin-center token-layer CSS (selected by config/dsh_adapter.yaml skin field)"
     }
   ]
 }

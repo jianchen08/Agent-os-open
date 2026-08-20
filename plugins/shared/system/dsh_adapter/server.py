@@ -252,11 +252,42 @@ async def _on_dsh_adapter_unload(params: dict) -> None:  # noqa: ARG001
 
 import base64  # noqa: E402
 
+from translator import (  # noqa: E402
+    list_available_skins,
+    load_skin_selection,
+    resolve_skin_css,
+)
+
 _STYLES_DIR = Path(__file__).parent / "styles"
 _STYLE_ROUTES: dict[str, tuple[str, str]] = {
     "/ext/dsh_adapter/styles/dsh-bg.css": ("text/css", "dsh-bg.css"),
     "/ext/dsh_adapter/styles/dsh-bg.png": ("image/png", "dsh-bg.png"),
 }
+# 皮肤令牌层注入路由：实际文件由 config/dsh_adapter.yaml 的 skin 字段动态
+# 决定（skin-center 的 skin.css）；未选择时返回空 CSS（200，注入空 style
+# 无副作用，避免前端拉取 404 噪音）。DOM 补丁层（patches.css/hooks.mjs）
+# 不接入——选择器只对 DSH Web UI 的 DOM 有效。
+_SKIN_CSS_ROUTE = "/ext/dsh_adapter/styles/skin.css"
+_SKIN_DISABLED_CSS = "/* dsh skin not selected (config/dsh_adapter.yaml: skin: <id>|none) */\n"
+
+
+def _resolve_skin_route() -> tuple[str, bytes] | None:
+    """按配置解析皮肤 CSS（None = 未选/无效 → 空注释 CSS）。"""
+    skin = load_skin_selection()
+    if skin is None:
+        return None
+    css = resolve_skin_css(skin)
+    if css is None:
+        logger.warning(
+            "dsh_adapter: skin %r not found (available: %s); injecting empty css",
+            skin, ", ".join(list_available_skins()) or "<none>",
+        )
+        return None
+    try:
+        return skin, css.read_bytes()
+    except OSError as e:
+        logger.warning("dsh_adapter: skin css read failed (%s): %s", skin, e)
+        return None
 
 
 @plugin.tool(
@@ -283,6 +314,18 @@ async def _http_handle_style(
     query: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     """serve client_styles 贡献的静态 CSS（dispatcher 契约：body base64 原样回写）。"""
+    if path == _SKIN_CSS_ROUTE:
+        resolved = _resolve_skin_route()
+        if resolved is None:
+            body = _SKIN_DISABLED_CSS.encode()
+        else:
+            body = resolved[1]
+        return {
+            "status": 200,
+            "headers": {"content-type": "text/css"},
+            "body": base64.b64encode(body).decode(),
+            "body_encoding": "base64",
+        }
     route = _STYLE_ROUTES.get(path)
     if route is None or method != "GET":
         return {"status": 404, "headers": {}, "body": "", "body_encoding": "utf-8"}
