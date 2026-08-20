@@ -1,7 +1,13 @@
 packages:
   - frontend
 
+# pnpm 11 构建脚本放行名单（单一真值源）。证据（CI run 32333595329）：
+# root package.json 的 pnpm.onlyBuiltDependencies 含 esbuild 仍被拒
+# （ERR_PNPM_IGNORED_BUILDS: esbuild@0.28.2）——pnpm 11 只认本文件的
+# allowBuilds，package.json 旧机制已删（防双源漂移）。
+# esbuild：frontend 构建链依赖（vite），workspace 纳入 frontend 后需要。
 allowBuilds:
   electron: true
   electron-winstaller: true
   unrs-resolver: true
+  esbuild: true
