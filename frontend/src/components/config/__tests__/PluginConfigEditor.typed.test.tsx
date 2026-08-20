@@ -1,3 +1,4 @@
+/** @feature FP-0.2.四/五 fallback-audit FE项 插件配置加载失败禁存 @ci frontend-test */
 /**
  * PluginConfigEditor 类型化表单分支测试（widget 化 T1）
  *

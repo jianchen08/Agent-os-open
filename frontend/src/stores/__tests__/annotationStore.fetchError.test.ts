@@ -1,4 +1,4 @@
-/** @feature FP-兜底反模式修复.FE10 批注加载失败置错误态 @ci frontend-test */
+/** @feature FP-0.2.四/五 fallback-audit FE项 批注加载失败置错误态 @ci frontend-test */
 /**
  * annotationStore.fetchAnnotations：查 resp.ok；失败置 error 状态——
  * 评审工作流故障不得伪装成"无批注"（审批决策基于不全信息）。

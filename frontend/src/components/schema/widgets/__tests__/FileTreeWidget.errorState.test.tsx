@@ -1,4 +1,4 @@
-/** @feature FP-兜底反模式修复.FE8 FileTreeWidget 错误态 @ci frontend-test */
+/** @feature FP-0.2.四/五 fallback-audit FE项 FileTreeWidget 错误态 @ci frontend-test */
 /**
  * FileTreeWidget 远程加载失败不得伪装成空树：
  * - 失败 → 显式错误态 + 重试按钮（对齐 FormWidget setDsError 先例）

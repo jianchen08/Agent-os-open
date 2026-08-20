@@ -1,4 +1,4 @@
-/** @feature FP-兜底反模式修复.FE6 states 拉取失败留痕 @ci frontend-test */
+/** @feature FP-0.2.四/五 fallback-audit FE项 states 拉取失败留痕 @ci frontend-test */
 /**
  * pipelineRegistryStore.fetch：states 侧拉取失败不再静默吞掉——
  * statesError 置位（供 UI 提示"状态可能不全"）+ console.warn，

@@ -1,4 +1,4 @@
-/** @feature FP-兜底反模式修复.FE12 注册流程不伪造 unknown 用户 @ci frontend-test */
+/** @feature FP-0.2.四/五 fallback-audit FE项 注册流程不伪造 unknown 用户 @ci frontend-test */
 /**
  * register 获取用户信息失败：对齐 login 路径——
  * 不伪造 id:'unknown' 用户写 localStorage，置错误要求重新登录。

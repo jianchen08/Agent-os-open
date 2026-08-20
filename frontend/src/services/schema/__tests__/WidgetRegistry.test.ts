@@ -1,3 +1,4 @@
+/** @feature FP-0.2.四/五 fallback-audit FE项 widget降级仅限显式映射 @ci frontend-test */
 /**
  * WidgetRegistry 测试
  *

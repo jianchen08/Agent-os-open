@@ -1,3 +1,4 @@
+/** @feature FP-0.2.四/五 fallback-audit FE项 管道配置加载失败禁存 @ci frontend-test */
 /**
  * PipelineSettingsPage 组件测试（0.2 多循环体可视化版）
  *

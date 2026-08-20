@@ -1,4 +1,4 @@
-/** @feature FP-兜底反模式修复.FE1/FE2 配置编辑器禁存守卫 @ci frontend-test */
+/** @feature FP-0.2.四/五 fallback-audit FE项 配置编辑器禁存守卫 @ci frontend-test */
 /**
  * shouldDisableConfigSave：配置编辑器「加载失败 = 只读/禁存」共用守卫。
  *

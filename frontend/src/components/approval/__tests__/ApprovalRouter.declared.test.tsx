@@ -1,3 +1,4 @@
+/** @feature FP-0.2.四/五 fallback-audit FE项 审批声明widget未注册显式占位 @ci frontend-test */
 /**
  * 审批视图模式声明路由测试（widget 化 T10）
  *

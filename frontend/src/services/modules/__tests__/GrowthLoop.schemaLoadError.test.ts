@@ -1,4 +1,4 @@
-/** @feature FP-兜底反模式修复.FE11 插件贡献加载失败可见降级 @ci frontend-test */
+/** @feature FP-0.2.四/五 fallback-audit FE项 插件贡献加载失败可见降级 @ci frontend-test */
 /**
  * reloadContributionRegistry 失败链路（经 refreshPluginContributions 出口）：
  * 不阻塞主流程（不抛出）+ console.warn 留痕 + 非阻塞通知（60s 节流）——

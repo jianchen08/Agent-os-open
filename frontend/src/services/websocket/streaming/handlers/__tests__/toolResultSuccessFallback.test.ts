@@ -1,3 +1,4 @@
+/** @feature FP-0.2.四/五 fallback-audit FE项 工具结果缺success不默认成功 @ci frontend-test */
 /**
  * tool_result 终态解析回归测试（FE4 兜底反模式修复）
  *

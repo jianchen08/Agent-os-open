@@ -1,3 +1,4 @@
+/** @feature FP-0.2.四/五 fallback-audit FE项 交互选项缺id提交留痕 @ci frontend-test */
 /**
  * 交互模式声明测试（widget 化 T9）
  *
