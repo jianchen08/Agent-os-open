@@ -183,9 +183,7 @@ class KernelChannel:
             raise RuntimeError("kernel channel not attached (initialize handshake not received)")
         return self._outbound
 
-    async def send_request(
-        self, method: str, params: dict[str, Any], timeout: float | None = None
-    ) -> Any:
+    async def send_request(self, method: str, params: dict[str, Any], timeout: float | None = None) -> Any:
         """向内核发起一次反向 capability 调用，等待响应。
 
         Args:

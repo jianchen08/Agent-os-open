@@ -18,13 +18,13 @@ schema 写回**该提供方自己的 plugin.json**。
     python scripts/backfill_service_schemas.py            # 应用（写回 plugin.json）
     python scripts/backfill_service_schemas.py --dry-run  # 只报告不写
 """
+
 from __future__ import annotations
 
 import argparse
 import asyncio
 import json
 import os
-import sys
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[1]
@@ -50,20 +50,19 @@ async def fetch_tools(plugin_dir: Path, entry: str) -> tuple[list[dict], str | N
 
     async def _run() -> list[dict]:
         params = StdioServerParameters(command=proc_argv[0], args=proc_argv[1:], cwd=proc_cwd, env=env)
-        async with stdio_client(params) as (r, w):
-            async with ClientSession(r, w) as s:
-                await s.initialize()
-                res = await s.list_tools()
-                tools = []
-                for t in res.tools:
-                    tools.append(
-                        {
-                            "name": t.name,
-                            "input_schema": getattr(t, "input_schema", None),
-                            "output_schema": getattr(t, "output_schema", None),
-                        }
-                    )
-                return tools
+        async with stdio_client(params) as (r, w), ClientSession(r, w) as s:
+            await s.initialize()
+            res = await s.list_tools()
+            tools = []
+            for t in res.tools:
+                tools.append(
+                    {
+                        "name": t.name,
+                        "input_schema": getattr(t, "input_schema", None),
+                        "output_schema": getattr(t, "output_schema", None),
+                    }
+                )
+            return tools
 
     try:
         return await asyncio.wait_for(_run(), timeout=60), None
@@ -74,7 +73,9 @@ async def fetch_tools(plugin_dir: Path, entry: str) -> tuple[list[dict], str | N
 def find_plugins() -> list[Path]:
     out = []
     for dirpath, dirnames, filenames in os.walk(SHARED):
-        dirnames[:] = [d for d in dirnames if d not in ("node_modules", ".venv", "__pycache__", "dsh_plugins", "runtime")]
+        dirnames[:] = [
+            d for d in dirnames if d not in ("node_modules", ".venv", "__pycache__", "dsh_plugins", "runtime")
+        ]
         if "plugin.json" in filenames:
             out.append(Path(dirpath) / "plugin.json")
     return sorted(out)
@@ -109,9 +110,7 @@ async def main() -> int:
             new_s = dict(s)
             # 提供方真实 input_schema 优先；已显式声明且与真实一致则不覆盖
             declared_input = s.get("input_schema")
-            if declared_input and declared_input != tool["input_schema"]:
-                new_s["input_schema"] = tool["input_schema"]
-            elif declared_input is None:
+            if declared_input and declared_input != tool["input_schema"] or declared_input is None:
                 new_s["input_schema"] = tool["input_schema"]
             if not new_s.get("output_schema") and tool.get("output_schema") is not None:
                 new_s["output_schema"] = tool["output_schema"]

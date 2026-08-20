@@ -40,8 +40,16 @@ ROOT = Path(__file__).resolve().parents[1]
 # skills 脚本含 yaml/sqlalchemy import，曾致 dry-run 复扫误报——批 B §11.4.3）。
 # .venv-hindsight：hindsight_memory 第二 venv（批 C 双 venv 设计，site-packages 勿扫）。
 SKIP_DIRS = {
-    "node_modules", "__pycache__", "target", "runtime", "data", "dsh_plugins",
-    ".venv", ".venv-hindsight", "src", ".ai_workspaces",
+    "node_modules",
+    "__pycache__",
+    "target",
+    "runtime",
+    "data",
+    "dsh_plugins",
+    ".venv",
+    ".venv-hindsight",
+    "src",
+    ".ai_workspaces",
 }
 
 # 不再重复生成的样板（已自持 pyproject 的插件）
@@ -49,20 +57,82 @@ ALREADY_UV = {"builtin_tools"}
 
 # 标准库 + SDK + 本地白名单（不当作第三方依赖提示）
 STDLIB = {
-    "abc", "argparse", "asyncio", "base64", "collections", "contextlib", "copy",
-    "csv", "datetime", "enum", "functools", "hashlib", "hmac", "html", "http",
-    "importlib", "inspect", "io", "itertools", "json", "logging", "math", "mimetypes",
-    "os", "pathlib", "queue", "random", "re", "select", "shlex", "shutil", "signal",
-    "socket", "socketserver", "sqlite3", "ssl", "stat", "string", "struct",
-    "subprocess", "sys", "tempfile", "threading", "time", "tomllib", "traceback",
-    "types", "typing", "unittest", "urllib", "uuid", "warnings", "weakref", "zipfile",
-    "zoneinfo", "platform", "gc", "dataclasses", "ast", "textwrap", "statistics",
+    "abc",
+    "argparse",
+    "asyncio",
+    "base64",
+    "collections",
+    "contextlib",
+    "copy",
+    "csv",
+    "datetime",
+    "enum",
+    "functools",
+    "hashlib",
+    "hmac",
+    "html",
+    "http",
+    "importlib",
+    "inspect",
+    "io",
+    "itertools",
+    "json",
+    "logging",
+    "math",
+    "mimetypes",
+    "os",
+    "pathlib",
+    "queue",
+    "random",
+    "re",
+    "select",
+    "shlex",
+    "shutil",
+    "signal",
+    "socket",
+    "socketserver",
+    "sqlite3",
+    "ssl",
+    "stat",
+    "string",
+    "struct",
+    "subprocess",
+    "sys",
+    "tempfile",
+    "threading",
+    "time",
+    "tomllib",
+    "traceback",
+    "types",
+    "typing",
+    "unittest",
+    "urllib",
+    "uuid",
+    "warnings",
+    "weakref",
+    "zipfile",
+    "zoneinfo",
+    "platform",
+    "gc",
+    "dataclasses",
+    "ast",
+    "textwrap",
+    "statistics",
 }
 WELL_KNOWN_THIRD_PARTY = {
-    "yaml": "PyYAML", "requests": "requests", "aiohttp": "aiohttp",
-    "mcp": "mcp", "pydantic": "pydantic", "fastapi": "fastapi", "uvicorn": "uvicorn",
-    "websockets": "websockets", "pytest": "pytest", "bs4": "beautifulsoup4",
-    "PIL": "pillow", "numpy": "numpy", "defusedxml": "defusedxml",
+    "yaml": "PyYAML",
+    "requests": "requests",
+    "aiohttp": "aiohttp",
+    "mcp": "mcp",
+    "pydantic": "pydantic",
+    "fastapi": "fastapi",
+    "uvicorn": "uvicorn",
+    "websockets": "websockets",
+    "pytest": "pytest",
+    "bs4": "beautifulsoup4",
+    "PIL": "pillow",
+    "numpy": "numpy",
+    "defusedxml": "defusedxml",
 }
 
 
@@ -72,13 +142,14 @@ def find_python_plugins(root: Path) -> list[Path]:
         dirnames[:] = [d for d in dirnames if d not in SKIP_DIRS]
         if "plugin.json" not in filenames:
             continue
-        d = json.load(open(os.path.join(dirpath, "plugin.json"), encoding="utf-8"))
+        with open(os.path.join(dirpath, "plugin.json"), encoding="utf-8") as f:
+            d = json.load(f)
         pid = d.get("id", "")
         if d.get("language") != "python":
             continue
         if pid in ALREADY_UV or Path(dirpath, "pyproject.toml").exists():
             continue
-        if (Path(dirpath, "server.py").exists() or Path(dirpath, "src").exists()):
+        if Path(dirpath, "server.py").exists() or Path(dirpath, "src").exists():
             out.append(Path(dirpath))
     return sorted(out)
 
@@ -148,7 +219,8 @@ def main() -> int:
     print(f"将迁移的 Python 插件（无 pyproject）：{len(plugins)}")
     third_party_hits: dict[str, list[str]] = {}
     for p in plugins:
-        pid = json.load(open(p / "plugin.json", encoding="utf-8"))["id"]
+        with open(p / "plugin.json", encoding="utf-8") as f:
+            pid = json.load(f)["id"]
         tps = imported_third_party(p)
         if tps:
             third_party_hits[pid] = tps
@@ -161,25 +233,31 @@ def main() -> int:
         print("\n[dry-run] 未写任何文件；--apply 后为每个插件写 pyproject.toml + uv.lock")
         if plugins:
             sample = plugins[0]
-            sample_meta = json.load(open(sample / "plugin.json", encoding="utf-8"))
+            with open(sample / "plugin.json", encoding="utf-8") as f:
+                sample_meta = json.load(f)
             print(f"\n[dry-run] 样板预览（{sample_meta['id']}，sdk_rel={sdk_rel_path(sample)}）：")
-            print(pyproject_body(sample_meta["id"], sample_meta.get("version", "0.0.0"),
-                                 ["agentos-plugin-sdk>=0.2.0"], sdk_rel_path(sample)))
+            print(
+                pyproject_body(
+                    sample_meta["id"],
+                    sample_meta.get("version", "0.0.0"),
+                    ["agentos-plugin-sdk>=0.2.0"],
+                    sdk_rel_path(sample),
+                )
+            )
         return 0
 
     written = 0
     for p in plugins:
-        d = json.load(open(p / "plugin.json", encoding="utf-8"))
+        with open(p / "plugin.json", encoding="utf-8") as f:
+            d = json.load(f)
         pid, version = d["id"], d.get("version", "0.0.0")
         deps = ["agentos-plugin-sdk>=0.2.0"]
-        (p / "pyproject.toml").write_text(
-            pyproject_body(pid, version, deps, sdk_rel_path(p)), encoding="utf-8"
-        )
+        (p / "pyproject.toml").write_text(pyproject_body(pid, version, deps, sdk_rel_path(p)), encoding="utf-8")
         written += 1
         if args.skip_lock:
             continue
         proc = subprocess.run(
-            ["uv", "lock", "--project", str(p)], capture_output=True, text=True, timeout=120
+            ["uv", "lock", "--project", str(p)], capture_output=True, text=True, timeout=120, check=False
         )
         if proc.returncode != 0:
             print(f"    ✗ uv lock 失败 {pid}: {(proc.stderr or proc.stdout).strip()[:200]}")

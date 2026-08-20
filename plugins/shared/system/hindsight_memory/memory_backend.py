@@ -423,6 +423,3 @@ def get_memory_backend(
             "不留两套真值）；唯一后端 = hindsight"
         )
     return HindsightBackend(capability_caller)
-
-
-
