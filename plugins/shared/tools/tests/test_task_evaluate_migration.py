@@ -141,12 +141,13 @@ class TestTaskEvaluateValidation:
 
     @pytest.mark.asyncio
     async def test_service_unavailable(self, mod, monkeypatch):
-        """TaskService 不可用 → SERVICE_UNAVAILABLE。"""
+        """GAP-1 后语义（eb56db0f）：service 不可用不再是错误——读面以 state 聚合
+        为真值，service 仅状态写与回退；state 亦无此任务 → TASK_NOT_FOUND。"""
         monkeypatch.setattr(mod.TaskEvaluateTool, "_get_task_service", lambda self: None)
         tool = mod.TaskEvaluateTool()
         result = await tool.execute({"action": "auto_complete", "task_id": "t-1"})
         assert result.success is False
-        assert result.error_code == "SERVICE_UNAVAILABLE"
+        assert result.error_code == "TASK_NOT_FOUND"
 
     @pytest.mark.asyncio
     async def test_task_not_found(self, mod, monkeypatch):

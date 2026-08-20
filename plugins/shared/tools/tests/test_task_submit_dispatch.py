@@ -90,7 +90,11 @@ def _base_inputs(**over: Any) -> dict:
 def _make_tool(mod: Any) -> Any:
     """构造工具实例并 stub 纯参数校验（target 存在性等与存储无关的面）。"""
     tool = mod.TaskSubmitTool()
-    tool._validate_target_agent = lambda t, l: (True, "", "")  # type: ignore[method-assign]
+
+    async def _ok(t, l):
+        return (True, "", "")
+
+    tool._validate_target_agent = _ok  # type: ignore[method-assign]
     return tool
 
 

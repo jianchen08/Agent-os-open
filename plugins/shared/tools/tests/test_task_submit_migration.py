@@ -271,7 +271,10 @@ class TestTaskSubmitCoreSubmit:
         provider.get.return_value = None  # 无 task_worker 实例（0.2 现状）
 
         monkeypatch.setattr(mod.TaskSubmitTool, "_get_task_service", lambda self: task_service)
-        monkeypatch.setattr(mod.TaskSubmitTool, "_validate_target_agent", lambda self, t, l: (True, "", ""))
+        async def _ok(self, t, l):
+            return (True, "", "")
+
+        monkeypatch.setattr(mod.TaskSubmitTool, "_validate_target_agent", _ok)
         monkeypatch.setattr(mod.TaskSubmitTool, "_check_dependencies_exist", lambda self, d: [])
         monkeypatch.setattr(mod, "_get_service_provider", lambda: provider)
         return task_service, provider
@@ -315,11 +318,8 @@ class TestTaskSubmitCoreSubmit:
         task = _make_task()
         task_service, _ = self._patch_submit_deps(mod, monkeypatch, task)
         # provider.get 全部返回 None（helper 默认），模拟 worker/执行器不可用
-
-        async def fake_init(t, workspace, task_data, ts, *, is_container=False):
-            return t, None
-
-        monkeypatch.setattr(mod.TaskSubmitTool, "_init_workspace", staticmethod(fake_init))
+        # （_init_workspace 补丁已删：该链路随 task_service 写路径时代退役，
+        #  见 task_submit/tool.py "ws_meta 链路"注释）
 
         tool = mod.TaskSubmitTool()
         result = await tool.execute(
