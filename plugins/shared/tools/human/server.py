@@ -181,20 +181,91 @@ def _normalize_options(raw: Any) -> list[dict[str, Any]] | None:
 @plugin.tool(
     name="human_interaction",
     schema={
-        "type": "object",
-        "properties": {
-            "mode": {"type": "string", "enum": ["choice", "conversation", "notification"]},
-            "title": {"type": "string"},
-            "description": {"type": "string"},
-            "options": {"type": "array"},
-            "questions": {"type": "array"},
-            "initial_message": {"type": "string"},
-            "file_paths": {"type": "array"},
-            "timeout_seconds": {"type": "number", "default": 86400},
-            "priority": {"type": "string", "default": "normal"},
+            'type': 'object',
+            'properties': {
+                'mode': {
+                    'type': 'string',
+                    'enum': [
+                        'choice',
+                        'conversation',
+                        'notification',
+                    ],
+                    'description': '交互模式：choice=选择模式（弹出选择框），conversation=对话模式（跳转标签页），notification=通知模式（非阻塞推送）',
+                },
+                'title': {
+                    'type': 'string',
+                    'description': '交互标题',
+                },
+                'description': {
+                    'type': 'string',
+                    'description': '详细说明',
+                },
+                'options': {
+                    'type': 'array',
+                    'items': {
+                        'type': 'object',
+                        'properties': {
+                            'id': {
+                                'type': 'string',
+                            },
+                            'label': {
+                                'type': 'string',
+                            },
+                        },
+                    },
+                    'description': '选项列表（选择模式）。必须是 JSON 数组，例如 ["批准","拒绝"] 或 [{"id":"1","label":"批准"},{"id":"2","label":"拒绝"}]。禁止包一层对象（如 {"item":[...]}）',
+                },
+                'questions': {
+                    'type': 'array',
+                    'items': {
+                        'type': 'string',
+                    },
+                    'description': '问题列表（澄清场景）',
+                },
+                'initial_message': {
+                    'type': 'string',
+                    'description': '开场消息（对话模式）/ 通知内容（通知模式）',
+                },
+                'suggestions': {
+                    'type': 'array',
+                    'items': {
+                        'type': 'string',
+                    },
+                    'description': '快捷回复建议（对话模式）',
+                },
+                'timeout_seconds': {
+                    'type': 'number',
+                    'default': 86400,
+                    'description': '超时时间（秒）',
+                },
+                'priority': {
+                    'type': 'string',
+                    'enum': [
+                        'low',
+                        'normal',
+                        'high',
+                        'critical',
+                    ],
+                    'default': 'normal',
+                    'description': '优先级',
+                },
+                'progress': {
+                    'type': 'number',
+                    'description': '进度百分比 0-100（通知模式）',
+                },
+                'file_paths': {
+                    'type': 'array',
+                    'items': {
+                        'type': 'string',
+                    },
+                    'description': '需要展示给用户的文件路径列表。系统会自动读取文件内容并在交互面板中展示。以下两种情况都必须使用此参数：（1）主动展示——当你需要将文件内容、设计方案、代码变更等信息呈现给用户查看或审批时（如通知模式推送文件、选择/对话模式展示文件变更）；（2）用户请求——当用户明确要求查看某个文件、某个结果，或要求省略/跳过某些内容并需要确认时。使用此参数时必须选择 choice 或 conversation 模式，不支持 notification 模式。支持相对路径（基于工作空间）和绝对路径，单文件不超过10MB，最多10个文件。工作空间范围限制仅对子任务（L2+）生效；主 agent（L1）可展示项目内任意路径。',
+                },
+            },
+            'required': [
+                'mode',
+                'title',
+            ],
         },
-        "required": ["mode", "title"],
-    },
     description="与用户交互（choice/conversation/notification 三种模式）",
 )
 async def human_interaction(**kwargs: Any) -> dict[str, Any]:

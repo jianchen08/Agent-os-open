@@ -40,13 +40,28 @@ async def _on_load(_params: dict[str, Any]) -> None:
 @plugin.tool(
     name="task_evaluate",
     schema={
-        "type": "object",
-        "properties": {
-            "action": {"type": "string", "enum": ["evaluate_single", "auto_complete"], "default": "auto_complete"},
-            "metric_id": {"type": "string"},
-            "summary": {"type": "string"},
+            'type': 'object',
+            'properties': {
+                'action': {
+                    'type': 'string',
+                    'enum': [
+                        'evaluate_single',
+                        'auto_complete',
+                    ],
+                    'description': '评估模式：evaluate_single-评估单个指标(需提供metric_id)，所有指标逐一通过后任务自动完成；auto_complete-评估所有未通过的指标(已通过的自动跳过)，默认',
+                    'default': 'auto_complete',
+                },
+                'metric_id': {
+                    'type': 'string',
+                    'description': '评估指标ID，仅在evaluate_single模式时必填',
+                },
+                'summary': {
+                    'type': 'string',
+                    'description': "任务完成摘要（推荐填写）。内容应包含：1) 完成了什么工作（简要说明实现思路和做了哪些改动）；2) 产出了什么（文件、配置、数据等产物）；3) 产物的存放路径（相对路径，如 src/auth/login.py、config/rules.yaml）。示例：'实现了用户登录功能，新增 JWT 认证模块。产出：src/auth/login.py、src/auth/jwt_handler.py、tests/test_login.py。'评估器将依据此摘要了解任务成果并验证产物。",
+                },
+            },
+            'required': [],
         },
-    },
     description="任务评估工具",
 )
 async def task_evaluate(**kwargs):
