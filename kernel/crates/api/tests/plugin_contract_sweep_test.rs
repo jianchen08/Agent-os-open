@@ -95,7 +95,8 @@ fn all_plugin_contracts_are_executor_consumable() {
         manifests.len()
     );
 
-    let (mut tools, mut tools_props, mut tools_pattern, mut tools_output) = (0u32, 0u32, 0u32, 0u32);
+    let (mut tools, mut tools_props, mut tools_pattern, mut tools_output) =
+        (0u32, 0u32, 0u32, 0u32);
     let (mut services, mut services_input) = (0u32, 0u32);
 
     for mf in &manifests {
