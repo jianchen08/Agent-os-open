@@ -136,6 +136,27 @@
           "required": [
             "text"
           ]
+        },
+        "output_schema": {
+          "type": "object",
+          "properties": {
+            "file_path": {
+              "type": "string",
+              "description": "生成的音频文件路径"
+            },
+            "duration_seconds": {
+              "type": "number",
+              "description": "音频时长（秒）"
+            },
+            "format": {
+              "type": "string",
+              "description": "音频格式"
+            },
+            "voice": {
+              "type": "string",
+              "description": "使用的语音名称"
+            }
+          }
         }
       }
     ],

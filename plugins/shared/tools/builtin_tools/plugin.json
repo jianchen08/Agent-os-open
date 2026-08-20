@@ -39,6 +39,23 @@
           "required": [
             "path"
           ]
+        },
+        "output_schema": {
+          "type": "object",
+          "properties": {
+            "file": {
+              "type": "string"
+            },
+            "lines": {
+              "type": "integer"
+            },
+            "size": {
+              "type": "integer"
+            },
+            "content": {
+              "type": "string"
+            }
+          }
         }
       },
       {
@@ -151,6 +168,23 @@
             "path",
             "action"
           ]
+        },
+        "output_schema": {
+          "type": "object",
+          "properties": {
+            "added": {
+              "type": "integer"
+            },
+            "removed": {
+              "type": "integer"
+            },
+            "backup": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          }
         }
       },
       {
@@ -191,6 +225,26 @@
           "required": [
             "command"
           ]
+        },
+        "output_schema": {
+          "type": "object",
+          "properties": {
+            "stdout": {
+              "type": "string"
+            },
+            "stderr": {
+              "type": "string"
+            },
+            "exit_code": {
+              "type": "integer"
+            },
+            "pid": {
+              "type": [
+                "integer",
+                "null"
+              ]
+            }
+          }
         }
       },
       {
@@ -312,6 +366,32 @@
           "required": [
             "path"
           ]
+        },
+        "output_schema": {
+          "type": "object",
+          "properties": {
+            "items": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "name": {
+                    "type": "string"
+                  },
+                  "type": {
+                    "type": "string",
+                    "enum": [
+                      "file",
+                      "directory"
+                    ]
+                  },
+                  "size": {
+                    "type": "integer"
+                  }
+                }
+              }
+            }
+          }
         }
       },
       {

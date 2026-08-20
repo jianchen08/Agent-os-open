@@ -95,7 +95,7 @@ fn all_plugin_contracts_are_executor_consumable() {
         manifests.len()
     );
 
-    let (mut tools, mut tools_props, mut tools_pattern) = (0u32, 0u32, 0u32);
+    let (mut tools, mut tools_props, mut tools_pattern, mut tools_output) = (0u32, 0u32, 0u32, 0u32);
     let (mut services, mut services_input) = (0u32, 0u32);
 
     for mf in &manifests {
@@ -137,6 +137,9 @@ fn all_plugin_contracts_are_executor_consumable() {
                 .is_some_and(|p| !p.is_empty())
             {
                 tools_props += 1;
+            }
+            if outs.is_some_and(|o| o.get("properties").is_some()) {
+                tools_output += 1;
             }
             let mut tool_patterns = Vec::new();
             if let Some(schema) = ins {
@@ -240,9 +243,16 @@ fn all_plugin_contracts_are_executor_consumable() {
         services_input >= 88,
         "带契约服务数退化: {services_input} < 88"
     );
+    // output_schema 棘轮：builtin×4（常量接线）+ tts_generate + 既有 bash/
+    // enhanced_search/spill_retrieve/demo = 11。剩余 ~47 个的补齐是 2026-08-15
+    // "存量 output_schema 缓补"挂账债的延续，需按各工具返回形状 AUTHOR（非同步）。
+    assert!(
+        tools_output >= 11,
+        "带 output_schema 的工具数退化: {tools_output} < 11"
+    );
 
     eprintln!(
-        "插件契约盘点: plugins={} tools={} with_input_props={} with_pattern={} services={} with_input={}",
-        manifests.len(), tools, tools_props, tools_pattern, services, services_input
+        "插件契约盘点: plugins={} tools={} with_input_props={} with_pattern={} with_output={} services={} with_input={}",
+        manifests.len(), tools, tools_props, tools_pattern, tools_output, services, services_input
     );
 }
