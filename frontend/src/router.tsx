@@ -18,6 +18,7 @@ import { openWorkspacePanelByPath } from './services/workspacePanelOpener'
 import { initStreamingEvents, destroyStreamingEvents } from './services/websocket/streamingEventService'
 import { flushStreamChunkBuffer } from './services/websocket/streaming/handlers/streamHandler'
 import { allocateNextSequence, ensureStreamingPlaceholder } from './services/websocket/streaming/handlers/utils'
+import { appendAttachmentRefs } from './utils/attachmentRefs'
 import { useAgentStore } from './stores/agentStore'
 import { useAgentTabStore } from './stores/agentTabStore'
 import { useAuthStore } from './stores/authStore'
@@ -320,22 +321,21 @@ function HomePage(): ReactNode {
       }
 
       const userMessageId = generateUUID()
+      // 附件索引随 content 携带（ADR 2026-08-21）：markdown 引用并入正文——
+      // 内核零改动（照旧只存文本 content），multimodal_preprocessor 识别
+      // /uploads/ 引用、llm_core 发送前读文件转 base64；用户消息气泡 markdown
+      // 渲染图片/链接，历史回读天然带引用。不再挂 attachments 数组（避免与
+      // markdown 图片双重显示）。
+      const contentWithRefs = appendAttachmentRefs(params.content, params.attachments)
       const userMessage: Message = {
         id: userMessageId,
         sessionId: sid,
         role: 'user',
-        content: params.content,
+        content: contentWithRefs,
         timestamp: new Date().toISOString(),
         sequence: allocateNextSequence(targetPipelineId),
         status: 'completed',
         clientMessageId: userMessageId,
-        attachments: params.attachments?.map((att) => ({
-          id: att.id,
-          name: att.name,
-          type: att.type,
-          mime_type: att.type,
-          url: att.url || '',
-        })),
       }
 
       pipelineStore.addMessage(targetPipelineId, userMessage)
@@ -360,18 +360,10 @@ function HomePage(): ReactNode {
       const placeholderMsgId = `placeholder_${generateUUID()}`
       ensureStreamingPlaceholder(targetPipelineId, placeholderMsgId, sid)
 
-      globalWS.sendUserInput(sid, params.content, {
+      globalWS.sendUserInput(sid, contentWithRefs, {
         enableThinking: params.enableThinking,
         pipelineId: targetPipelineId,
         clientMessageId: userMessage.id,
-        attachments: params.attachments?.map((att) => ({
-          file_id: att.id,
-          filename: att.name,
-          mime_type: att.type,
-          media_type: att.type?.startsWith('image/') ? 'image' : att.type?.startsWith('audio/') ? 'audio' : att.type?.startsWith('video/') ? 'video' : 'document',
-          size: att.size || 0,
-          url: att.url,
-        })),
       })
     },
     [],

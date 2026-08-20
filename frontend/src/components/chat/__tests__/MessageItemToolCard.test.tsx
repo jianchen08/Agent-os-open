@@ -49,6 +49,15 @@ vi.mock('@/components/chat/MessageActions', () => ({
   MessageActions: () => null,
 }))
 
+// LobeChatMarkdown 拉起 @lobehub/ui 全家桶（vitest 下 fluent-emoji ESM 目录
+// 导入解析失败）——用户消息 markdown 统一渲染（ADR 2026-08-21）引入的依赖，
+// 按本文件"重依赖 mock"惯例桩掉（渲染细节归 MessageItemUserMarkdown 测试）。
+vi.mock('@/components/chat/LobeChatMarkdown', () => ({
+  LobeChatMarkdown: ({ content }: { content: string }) => (
+    <div data-testid="user-markdown">{content}</div>
+  ),
+}))
+
 vi.mock('@/components/chat/MessageContentRenderer', () => ({
   default: () => null,
 }))

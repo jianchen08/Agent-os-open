@@ -15,6 +15,7 @@ import {
 import { memo, useEffect, useRef, useState } from 'react'
 import ActivityCard from './ActivityCard'
 import { ImageGallery } from '@/components/media/ImageGallery'
+import { LobeChatMarkdown } from '@/components/chat/LobeChatMarkdown'
 import { Avatar, AvatarFallback } from '@/components/ui/avatar'
 import { Button } from '@/components/ui/button'
 import { cn } from '@/lib/utils'
@@ -397,7 +398,12 @@ export const MessageItem = memo(function MessageItem({
                 return (
                   <div className={bubbleCls} style={bubbleStyle}>
                     {userContent && (
-                      <div className="whitespace-pre-wrap break-words text-sm">{userContent}</div>
+                      // 用户消息统一 markdown 渲染（ADR 2026-08-21，与 assistant 同款）：
+                      // 附件索引以 markdown 引用并入 content（![f](/uploads/x.png)），
+                      // 图片/链接由此直接渲染，历史回读天然带引用。
+                      <div className="text-sm">
+                        <LobeChatMarkdown content={userContent} />
+                      </div>
                     )}
                     {imageAttachments.length > 0 && (
                       <div className="mt-2">
