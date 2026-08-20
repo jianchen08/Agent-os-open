@@ -238,11 +238,15 @@ npm install
 npm run dev    # frontend dev server at http://localhost:6390 (proxies to kernel :9100)
 ```
 
-> **About CLI mode**: the 0.1 standalone CLI entries (`cli_cn.bat` / `run.py` / `channels.cli.cli_main`)
-> were not migrated to 0.2 — `plugins/shared/system/channel_cli` currently only runs as an MCP
-> plugin exposing status queries and text formatting; the full interactive CLI depended on 0.1
-> modules (`infrastructure`, etc.) that no longer exist. Use Web mode (`start_web_02.bat` /
-> `start_web_02.sh`) in this version.
+> **About CLI mode**: the 0.1 standalone CLI entries (`cli_cn.bat` / `run.py` /
+> `channels.cli.cli_main`) were cut by decision on 2026-08-20 (CLI pluginization inventory):
+> the interactive REPL depended on the 0.1 in-process Python pipeline engine
+> (`pipeline.engine` / `infrastructure.*`), which 0.2 replaced with the Rust kernel engine —
+> no equivalent, no real consumers; interactive usage is unified in the Web frontend
+> (`start_web_02.bat` / `start_web_02.sh`). `plugins/shared/system/channel_cli` remains a
+> plugin shell loaded via sidecar (the only supported path), exposing the
+> `cli.get_status` / `cli.sanitize_text` services plus `CLIOutputAdapter` (terminal text
+> sanitizing; interface from the `channel_common` shared package).
 
 ---
 

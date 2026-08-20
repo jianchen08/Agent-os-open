@@ -238,9 +238,12 @@ npm run dev    # 前端开发服务器运行在 http://localhost:6390（反代�
 ```
 
 > **关于 CLI 模式**：0.1 的独立 CLI 入口（`cli_cn.bat` / `run.py` / `channels.cli.cli_main`）
-> 未迁移到 0.2——`plugins/shared/system/channel_cli` 目前仅作为 MCP 插件提供状态查询与
-> 文本格式化能力，完整交互式 CLI 依赖的 0.1 模块（`infrastructure` 等）已删除。
-> 当前版本请使用 Web 模式（`start_web_02.bat` / `start_web_02.sh`）。
+> 已于 0.2 裁定砍掉（CLI 插件化盘点结论，2026-08-20）：交互式 REPL 依赖的 0.1 进程内
+> Python 管道引擎（`pipeline.engine` / `infrastructure.*` 等）在 0.2 已由 Rust 内核引擎
+> 取代，无等价物也无真实消费场景，交互体验统一走 Web 前端（`start_web_02.bat` /
+> `start_web_02.sh`）。`plugins/shared/system/channel_cli` 保留为插件壳，经 sidecar
+> 加载（唯一正途），提供 `cli.get_status` / `cli.sanitize_text` 服务与
+> `CLIOutputAdapter`（终端文本清理，接口来自 `channel_common` 渠道共享包）。
 
 
 ---
