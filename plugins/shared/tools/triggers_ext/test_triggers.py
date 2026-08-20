@@ -1175,6 +1175,46 @@ class TestDomainEventBridge:
         finally:
             mgr.stop_check_loop()
 
+    def test_task_completed_explicit_trigger_and_auto_notify_coexist(self) -> None:
+        """显式触发器命中 + parent_pipeline_id → 两条注入并存（2026-08-20 裁定）。
+
+        推翻旧"互斥去重"定案：LLM 自设的 task_completed 测试触发器命中后，
+        父管道只收到测试消息、永远等不到系统完成通知——显式触发器消息是
+        用户自定义内容，无权顶替 task_submit 承诺的系统恢复锚点。
+        """
+        received: list[tuple] = []
+
+        async def fake_injector(pipeline_id: str, message: str, user_id: str) -> str:
+            received.append((pipeline_id, message, user_id))
+            return "ok"
+
+        mgr = TriggerManager()
+        mgr.set_injector(fake_injector)
+        # 显式触发器：注册在父管道上监听 task_completed（复刻实测场景）
+        mgr.register(_make_config(event_name="task_completed", max_fires=3, metadata={"user_id": "u-7"}))
+        try:
+            fired = _run(
+                mgr.handle_domain_event(
+                    "task_completed",
+                    {
+                        "pipeline_id": "child_pipe",
+                        "task_id": "t_child",
+                        "parent_pipeline_id": "pipe-1",
+                        "user_id": "u_admin",
+                    },
+                )
+            )
+            assert fired == ["t1"], "显式触发器照常命中"
+            assert len(received) == 2, "触发器消息 + 系统父通知，两条并存"
+            targets = [r[0] for r in received]
+            assert targets == ["pipe-1", "pipe-1"], "本用例触发器与父管道同目标"
+            # 系统通知先注入（含子任务标识 + 透传事件 user_id），触发器消息随后
+            assert "t_child" in received[0][1], "系统通知应包含子任务标识"
+            assert received[0][2] == "u_admin", "系统通知透传事件 user_id"
+            assert "触发器通知" in received[1][1], "第二条为显式触发器消息"
+        finally:
+            mgr.stop_check_loop()
+
     def test_non_task_event_does_not_auto_notify(self) -> None:
         """非任务事件（run.completed 等）不触发自动父通知。"""
         received: list[tuple] = []

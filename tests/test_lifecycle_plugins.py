@@ -46,6 +46,7 @@ def plugins():
     env_mod = _load_plugin(_ENV_DIR, "env_lc_test_mod")
     return {
         "ws": ws_mod.WorkspaceLifecyclePlugin(),
+        "ws_mod": ws_mod,
         "env": env_mod.EnvironmentLifecyclePlugin(),
         "ctx_factory": lambda state: PluginContext(state=state),
     }
@@ -154,3 +155,64 @@ async def test_main_phase_noop(plugins):
     env_result = await plugins["env"].execute(plugins["ctx_factory"]({"current_phase": "main"}))
     assert ws_result.state_updates == {}
     assert env_result.state_updates == {}
+
+
+# ── state 聚合读取器缓存（2026-08-20 F7：sync 消费端只读缓存，不在 sync 上下文调 async reader）──
+
+
+@pytest.mark.asyncio
+async def test_refresh_state_rows_populates_cache_for_sync_reader(plugins):
+    """sync reader：refresh 直接调用并落缓存，_read_rows 读到。"""
+    ws_mod = plugins["ws_mod"]
+    ws_mod.set_state_reader(lambda: [{"pipeline_id": "p1", "task.scope": "container"}])
+    try:
+        await ws_mod.refresh_state_rows()
+        tree = ws_mod._ExecutionContextTaskTree(plugins["ws"], None)
+        rows = tree._read_rows()
+        assert rows == [{"pipeline_id": "p1", "task.scope": "container"}]
+    finally:
+        ws_mod.set_state_reader(None)
+
+
+@pytest.mark.asyncio
+async def test_refresh_state_rows_awaits_async_reader_no_warning(plugins):
+    """async reader：refresh await 后落缓存——sync 读路径不再产生永不 await 的协程。"""
+    import asyncio as _asyncio  # noqa: PLC0415
+    import warnings  # noqa: PLC0415
+
+    ws_mod = plugins["ws_mod"]
+
+    async def _reader() -> list[dict]:
+        await _asyncio.sleep(0)
+        return [{"pipeline_id": "p2", "lineage.parent_pipeline_id": "p0"}]
+
+    ws_mod.set_state_reader(_reader)
+    try:
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")  # RuntimeWarning（coroutine never awaited）即失败
+            await ws_mod.refresh_state_rows()
+        tree = ws_mod._ExecutionContextTaskTree(plugins["ws"], None)
+        assert tree._read_rows() == [{"pipeline_id": "p2", "lineage.parent_pipeline_id": "p0"}]
+    finally:
+        ws_mod.set_state_reader(None)
+
+
+@pytest.mark.asyncio
+async def test_read_rows_without_refresh_returns_empty(plugins):
+    """未刷新（缓存空）→ sync 读路径安全返回空，且绝不调用 reader（零协程）。"""
+    import warnings  # noqa: PLC0415
+
+    ws_mod = plugins["ws_mod"]
+
+    async def _never_called() -> list[dict]:
+        raise AssertionError("sync 读路径不得调用 async reader")
+
+    ws_mod._state_rows_cache = []  # 重置模块级缓存（隔离前序用例污染）
+    ws_mod.set_state_reader(_never_called)
+    try:
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")  # 若产生协程必报 RuntimeWarning
+            tree = ws_mod._ExecutionContextTaskTree(plugins["ws"], None)
+            assert tree._read_rows() == []
+    finally:
+        ws_mod.set_state_reader(None)

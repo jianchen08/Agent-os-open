@@ -211,6 +211,7 @@
   "granted_capabilities": [
     "chat",
     "tenant-context",
-    "pipeline-state"
+    "pipeline-state",
+    "tool-executor"
   ]
 }

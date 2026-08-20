@@ -48,12 +48,32 @@ def _ensure_isolation_path() -> None:
 
 # ── GAP-1 统一：state 聚合读取器（server.py on_load 注入，pipeline-state capability）──
 _state_reader: Any = None
+# 最近一次聚合行快照（async 上下文刷新，sync 消费端只读缓存——
+# 消费链 task_tree.get_task 是同步库接口，直接调用 async reader 会产生
+# 永不 await 的协程（RuntimeWarning）且恒降级为空）
+_state_rows_cache: list[dict[str, Any]] = []
 
 
 def set_state_reader(reader: Any) -> None:
     """注入 state 聚合读取器（sidecar on_load 经 pipeline-state capability）。"""
     global _state_reader  # noqa: PLW0603
     _state_reader = reader
+
+
+async def refresh_state_rows() -> None:
+    """在 async 上下文刷新聚合行快照（execute 入口调用，供 sync 消费端读取）。"""
+    global _state_rows_cache  # noqa: PLW0603
+    reader = _state_reader
+    if reader is None:
+        return
+    try:
+        rows = reader()
+        if asyncio.iscoroutine(rows):
+            rows = await rows
+        if isinstance(rows, list):
+            _state_rows_cache = [r for r in rows if isinstance(r, dict)]
+    except Exception:
+        pass
 
 
 class _ExecutionContextTaskTree:
@@ -77,17 +97,10 @@ class _ExecutionContextTaskTree:
         self._manager = manager
 
     def _read_rows(self) -> list[dict[str, Any]]:
-        reader = _state_reader
-        if reader is None:
-            return []
-        try:
-            rows = reader()
-            if asyncio.iscoroutine(rows):
-                # sync 上下文不可 await——读面未同步化时降级为空
-                return []
-            return [r for r in rows if isinstance(r, dict)] if isinstance(rows, list) else []
-        except Exception:
-            return []
+        # sync 消费端只读缓存：聚合行由 refresh_state_rows() 在 async 上下文
+        # （execute 入口）刷新——不在此调用 reader（async reader 会产生永不
+        # await 的协程，见 refresh_state_rows 注释）
+        return list(_state_rows_cache)
 
     def get_task(self, task_id: str):
         state = self._plugin._last_state or {}
@@ -195,6 +208,8 @@ class WorkspaceLifecyclePlugin(IInputPlugin):
     async def execute(self, ctx: PluginContext) -> PluginResult:
         """按 current_phase 分发 init/exit 阶段。"""
         self._last_state = ctx.state
+        # 刷新聚合行快照：init/exit 体内 task_tree.get_task 走 sync 缓存读
+        await refresh_state_rows()
         phase = ctx.state.get("current_phase", "")
         if phase == "init":
             return await self._bootstrap(ctx)

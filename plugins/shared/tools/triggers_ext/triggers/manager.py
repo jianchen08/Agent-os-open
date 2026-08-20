@@ -950,11 +950,13 @@ class TriggerManager:
         注入器直接投递（async 上下文，无需 run_coroutine_threadsafe）。
 
         子任务自动通知（GAP-1）：任务事件携带 ``parent_pipeline_id`` 时，
-        即使没有显式注册的触发器也向父管道注入一条完成/失败通知——等效
-        "任务系统提交后自动注册触发器"，注册逻辑收敛在统一触发服务，
-        任务系统零触发代码。该注入与显式触发器互斥去重：同一事件既有
-        显式触发器命中又带 parent_pipeline_id 时，只按显式触发器注入
-        （自动注入仅在 fired 为空时兜底）。
+        向父管道注入一条完成/失败通知——等效"任务系统提交后自动注册触发器"，
+        注册逻辑收敛在统一触发服务，任务系统零触发代码。
+        自动父通知与显式触发器**并存不去重**（2026-08-20 裁定，推翻旧互斥
+        定案）：显式触发器消息是用户自定义内容，系统通知是 task_submit
+        承诺的父管道恢复锚点——语义不等价，任何显式触发器都无权顶替
+        系统通知（实测：LLM 自设 task_completed 测试触发器命中后，父管道
+        只收到测试消息，永远等不到完成通知）。
 
         Args:
 
@@ -969,10 +971,9 @@ class TriggerManager:
         """
         fired = self.evaluate_event(event_name, event_data or {})
 
-        if not fired:
-            # GAP-1：无显式触发器命中 → 尝试子任务自动父通知（task_completed /
-            # task_failed + parent_pipeline_id 非空）。注入失败仅记录，不阻断。
-            await self._auto_notify_parent(event_name, event_data or {})
+        # GAP-1：task_completed/task_failed + parent_pipeline_id 非空 → 无条件
+        # 自动父通知（与显式触发器并存）。注入失败仅记录，不阻断。
+        await self._auto_notify_parent(event_name, event_data or {})
 
         for trigger_id in fired:
             trigger = self._triggers.get(trigger_id)
