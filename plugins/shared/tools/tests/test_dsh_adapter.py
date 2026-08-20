@@ -34,8 +34,10 @@ from translator import (  # noqa: E402
     load_plugin_config,
     load_skin_selection,
     map_dsh_slot,
+    resolve_skin_background,
     resolve_skin_css,
     to_lingxi_tool_entry,
+    translate_background_css,
     translate_hooks_config,
     translate_package,
     translate_packages,
@@ -661,8 +663,8 @@ class TestSkinCenterResolution:
         assert resolve_skin_css("a/b") is None
 
     def test_selection_reads_config(self):
-        # 仓库 config/dsh_adapter.yaml 现值 skin: matrix（换肤后此断言随配置同步改）
-        assert load_skin_selection() == "matrix"
+        # 仓库 config/dsh_adapter.yaml 现值 skin: miku（换肤后此断言随配置同步改）
+        assert load_skin_selection() == "miku"
 
 
 class TestSkinServeHandler:
@@ -701,3 +703,60 @@ class TestSkinServeHandler:
         )
         assert resp["status"] == 200
         assert base64.b64decode(resp["body"]).decode("utf-8").startswith("/*")
+
+
+class TestSkinBackgroundMedia:
+    """v2 声明式背景媒体（contributes.backgroundMedia）翻译。"""
+
+    def test_resolve_image_skin(self):
+        bg = resolve_skin_background("miku")
+        assert bg is not None and bg["skin"] == "miku"
+        assert bg["dark"]["src"].startswith("assets/")
+        assert "scrim" in bg["dark"] and "linear-gradient" in bg["dark"]["scrim"]
+
+    def test_resolve_plain_skin_none(self):
+        # matrix 是纯令牌皮肤（无 backgroundMedia 声明）
+        assert resolve_skin_background("matrix") is None
+
+    def test_resolve_unknown_skin(self):
+        assert resolve_skin_background("no-such-skin") is None
+
+    def test_translate_background_css(self):
+        bg = resolve_skin_background("dragon-heir")
+        assert bg is not None
+        css = translate_background_css(bg, "/ext/dsh_adapter/styles/skin-assets/dragon-heir")
+        assert "background-image" in css and "!important" in css
+        assert "linear-gradient" in css  # scrim 在上层
+        assert "url(" in css and "/ext/dsh_adapter/styles/skin-assets/dragon-heir/assets/" in css
+        assert "prefers-color-scheme: light" in css  # 亮暗双态
+
+
+class TestSkinAssetRoute:
+    """背景图资产路由（白名单 + 防穿越）。"""
+
+    def _serve(self, path: str) -> dict:
+        import server  # noqa: PLC0415
+
+        return asyncio.run(server._http_handle_style(path=path, method="GET"))
+
+    def test_serve_image_asset(self):
+        resp = self._serve("/ext/dsh_adapter/styles/skin-assets/miku/assets/miku-art.webp")
+        assert resp["status"] == 200
+        assert resp["headers"]["content-type"] == "image/webp"
+        assert len(base64.b64decode(resp["body"])) > 10000  # 真图（非空体）
+
+    def test_reject_non_image(self):
+        resp = self._serve("/ext/dsh_adapter/styles/skin-assets/miku/skin.json")
+        assert resp["status"] == 404
+
+    def test_reject_traversal(self):
+        resp = self._serve("/ext/dsh_adapter/styles/skin-assets/miku/../../skin.json")
+        assert resp["status"] == 404
+
+    def test_skin_css_includes_background(self):
+        # 当前配置 skin: miku（有 backgroundMedia）→ 注入 CSS 尾部带背景段
+        resp = self._serve("/ext/dsh_adapter/styles/skin.css")
+        assert resp["status"] == 200
+        body = base64.b64decode(resp["body"]).decode("utf-8")
+        assert "--dsw-" in body  # 令牌层仍在
+        assert "background-media" in body and "miku-art.webp" in body  # 背景段已追加

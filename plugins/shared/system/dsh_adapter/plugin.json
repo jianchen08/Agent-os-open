@@ -259,6 +259,16 @@
       "timeout_ms": 5000,
       "max_concurrency": 8,
       "description": "Serve DSH skin-center token-layer CSS (selected by config/dsh_adapter.yaml skin field)"
+    },
+    {
+      "route_id": "dsh_skin_assets",
+      "method": "GET",
+      "path": "/ext/dsh_adapter/styles/skin-assets/{skin}/{file:path}",
+      "auth": "user",
+      "handler_capability": "http.handle",
+      "timeout_ms": 5000,
+      "max_concurrency": 8,
+      "description": "Serve DSH skin background media assets (v2 contributes.backgroundMedia; image extensions whitelist)"
     }
   ]
 }

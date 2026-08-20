@@ -253,9 +253,13 @@ async def _on_dsh_adapter_unload(params: dict) -> None:  # noqa: ARG001
 import base64  # noqa: E402
 
 from translator import (  # noqa: E402
+    SKIN_ASSET_EXTS,
+    SKIN_CENTER_SKINS_DIR,
     list_available_skins,
     load_skin_selection,
+    resolve_skin_background,
     resolve_skin_css,
+    translate_background_css,
 )
 
 _STYLES_DIR = Path(__file__).parent / "styles"
@@ -268,6 +272,7 @@ _STYLE_ROUTES: dict[str, tuple[str, str]] = {
 # 无副作用，避免前端拉取 404 噪音）。DOM 补丁层（patches.css/hooks.mjs）
 # 不接入——选择器只对 DSH Web UI 的 DOM 有效。
 _SKIN_CSS_ROUTE = "/ext/dsh_adapter/styles/skin.css"
+_SKIN_ASSET_ROUTE_PREFIX = "/ext/dsh_adapter/styles/skin-assets/"
 _SKIN_DISABLED_CSS = "/* dsh skin not selected (config/dsh_adapter.yaml: skin: <id>|none) */\n"
 
 
@@ -284,10 +289,55 @@ def _resolve_skin_route() -> tuple[str, bytes] | None:
         )
         return None
     try:
-        return skin, css.read_bytes()
+        text = css.read_text(encoding="utf-8")
     except OSError as e:
         logger.warning("dsh_adapter: skin css read failed (%s): %s", skin, e)
         return None
+    # 声明式背景媒体（v2 skin.json contributes.backgroundMedia）→ 等价 CSS
+    # 追加在令牌层之后（!important 立绘优先于 :root 渐变底）。
+    bg = resolve_skin_background(skin)
+    if bg is not None:
+        text += "\n" + translate_background_css(bg, f"{_SKIN_ASSET_ROUTE_PREFIX}{skin}")
+    return skin, text.encode("utf-8")
+
+
+_CONTENT_TYPES = {
+    ".webp": "image/webp", ".jpg": "image/jpeg", ".jpeg": "image/jpeg",
+    ".png": "image/png", ".svg": "image/svg+xml", ".gif": "image/gif", ".avif": "image/avif",
+}
+
+
+def _serve_skin_asset(path: str) -> dict[str, Any]:
+    """serve 皮肤背景图资产（/ext/dsh_adapter/styles/skin-assets/<skin>/<file>）。
+
+    白名单约束：皮肤 id 必须在装载的 skin-center 内、文件扩展名限图片、
+    resolve 后必须落在 skins 目录内（防穿越）。
+    """
+    rel = path[len(_SKIN_ASSET_ROUTE_PREFIX):]
+    parts = rel.split("/")
+    if len(parts) < 2 or not parts[0] or not parts[-1]:
+        return {"status": 404, "headers": {}, "body": "", "body_encoding": "utf-8"}
+    skin, file_parts = parts[0], parts[1:]
+    if any(seg in ("", ".", "..") for seg in [skin, *file_parts]):
+        return {"status": 404, "headers": {}, "body": "", "body_encoding": "utf-8"}
+    filename = file_parts[-1]
+    if Path(filename).suffix.lower() not in SKIN_ASSET_EXTS:
+        return {"status": 404, "headers": {}, "body": "", "body_encoding": "utf-8"}
+    target = (SKIN_CENTER_SKINS_DIR / skin / Path(*file_parts)).resolve()
+    if SKIN_CENTER_SKINS_DIR.resolve() not in target.parents or not target.is_file():
+        return {"status": 404, "headers": {}, "body": "", "body_encoding": "utf-8"}
+    try:
+        data = target.read_bytes()
+    except OSError as e:
+        logger.warning("dsh_adapter: skin asset read failed (%s): %s", rel, e)
+        return {"status": 500, "headers": {}, "body": "", "body_encoding": "utf-8"}
+    ct = _CONTENT_TYPES.get(Path(filename).suffix.lower(), "application/octet-stream")
+    return {
+        "status": 200,
+        "headers": {"content-type": ct},
+        "body": base64.b64encode(data).decode(),
+        "body_encoding": "base64",
+    }
 
 
 @plugin.tool(
@@ -326,6 +376,8 @@ async def _http_handle_style(
             "body": base64.b64encode(body).decode(),
             "body_encoding": "base64",
         }
+    if path.startswith(_SKIN_ASSET_ROUTE_PREFIX):
+        return _serve_skin_asset(path)
     route = _STYLE_ROUTES.get(path)
     if route is None or method != "GET":
         return {"status": 404, "headers": {}, "body": "", "body_encoding": "utf-8"}

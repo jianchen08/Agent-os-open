@@ -543,3 +543,69 @@ def resolve_skin_css(skin_id: str, base_dir: str | Path | None = None) -> Path |
     base = Path(base_dir) if base_dir is not None else SKIN_CENTER_SKINS_DIR
     css = base / skin_id / "skin.css"
     return css if css.is_file() else None
+
+
+# 背景图资产扩展名白名单（backgroundMedia src / favicon 类资产 serve 用）
+SKIN_ASSET_EXTS = {".webp", ".jpg", ".jpeg", ".png", ".svg", ".gif", ".avif"}
+
+
+def resolve_skin_background(skin_id: str, base_dir: str | Path | None = None) -> dict[str, Any] | None:
+    """解析皮肤 v2 manifest 的声明式背景媒体（contributes.backgroundMedia）。
+
+    返回 ``{"dark": {src, scrim}, "light": {src, scrim}, "skin": id}``（任一
+    态缺省则该键缺省）；无声明/皮肤不存在返回 None。图片文件存在性由
+    serve 端资产路由兜底（此处只翻译声明，与 skin-center 宿主的职责切分
+    一致——DSH 侧也是宿主渲染 backgroundMedia，不靠皮肤 JS）。
+    """
+    if not skin_id or "/" in skin_id or "\\" in skin_id or ".." in skin_id:
+        return None
+    base = Path(base_dir) if base_dir is not None else SKIN_CENTER_SKINS_DIR
+    manifest = base / skin_id / "skin.json"
+    if not manifest.is_file():
+        return None
+    try:
+        data = json.loads(manifest.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    bm = data.get("contributes", {}).get("backgroundMedia") if isinstance(data, dict) else None
+    if not isinstance(bm, dict):
+        return None
+    out: dict[str, Any] = {"skin": skin_id}
+    for mode in ("dark", "light"):
+        spec = bm.get(mode)
+        if isinstance(spec, dict) and isinstance(spec.get("src"), str):
+            out[mode] = {"src": spec["src"], "scrim": spec.get("scrim", "")}
+    # 两态全缺 = 声明无效
+    if "dark" not in out and "light" not in out:
+        return None
+    return out
+
+
+def translate_background_css(bg: dict[str, Any], asset_url_base: str) -> str:
+    """backgroundMedia 声明 → 等价注入 CSS（亮暗双态跟随系统偏好）。
+
+    scrim 是叠在图上的可读性渐变（DSH 语义：scrim 在上层）——CSS 多背景
+    列表前者在上层，故 scrim 放前、图放后。!important 盖过 skin.css 的
+    :root 渐变底（backgroundMedia 皮肤的立绘优先）。灵汐手动切主题不联动
+    （静态注入按 prefers-color-scheme 近似，诚实边界）。
+    """
+    def layer(spec: dict[str, str]) -> str:
+        img = f'url("{asset_url_base}/{spec["src"]}")'
+        scrim = spec.get("scrim", "").strip()
+        return f"{scrim}, {img}" if scrim else img
+
+    def full(spec: dict[str, str]) -> str:
+        return (
+            f"background-image: {layer(spec)} !important; "
+            "background-size: cover !important; background-position: center !important; "
+            "background-attachment: fixed !important; background-repeat: no-repeat !important;"
+        )
+
+    dark = bg.get("dark")
+    light = bg.get("light")
+    parts = ["/* dsh-skin background-media (translated from skin.json contributes.backgroundMedia) */"]
+    if dark:
+        parts.append(f"body, :root {{ {full(dark)} }}")
+    if light:
+        parts.append(f"@media (prefers-color-scheme: light) {{ body, :root {{ {full(light)} }} }}")
+    return "\n".join(parts) + "\n"

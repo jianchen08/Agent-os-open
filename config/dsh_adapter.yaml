@@ -33,4 +33,4 @@ plugins:
 #   summer-liquid-glass
 # 换肤 = 改此字段 → reenable dsh_adapter（或重启内核）→ 刷新前端页面。
 # none / 删除字段 = 关闭注入（返回空 CSS）。
-skin: matrix
+skin: miku
