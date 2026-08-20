@@ -24,7 +24,7 @@ pub struct ContractGates {
     /// 加载通过 = manifest schema 合法（loader 严格反序列化 fail-closed）。
     pub manifest_schema_valid: bool,
     pub dep_ok: bool,
-    /// `ok` | `drift` | `not_covered`（spawn 不可用 = 没验到，不是验出问题）。
+    /// `ok` | `drift` | `verify_incomplete`（观测通道故障 = 没验到，声明注册保留待复验）| `not_covered`。
     pub g2_consistency: String,
     /// `ok` | `failed` | `skipped` | `not_covered`.
     pub smoke_result: String,
@@ -53,8 +53,11 @@ impl PluginContractState {
         let (g2_consistency, smoke_result, last_error) = match g2 {
             None => ("not_covered".to_string(), "not_covered".to_string(), None),
             Some(o) => {
+                // 观测失败 ≠ 判定失败（2026-08-20 裁定）：spawn/list 失败时声明
+                // 注册保留——账本标记"校验未完成"（区别于未覆盖/漂移），
+                // 前端/契约状态页可见"待复验"。
                 let g2_consistency = if o.spawn_failed {
-                    "not_covered"
+                    "verify_incomplete"
                 } else if o.drift {
                     "drift"
                 } else {
@@ -72,11 +75,13 @@ impl PluginContractState {
                 } else {
                     "skipped"
                 };
-                let last_error = if o.rejected_tools.is_empty() {
+                let last_error = if o.spawn_failed {
+                    Some("校验未完成（观测通道故障：spawn/tools-list 重试后仍失败，声明注册保留待复验）".to_string())
+                } else if o.rejected_tools.is_empty() {
                     None
                 } else {
                     Some(format!(
-                        "拒绝注册/剔除工具: {}",
+                        "声明与实现不一致，剔除工具（需修改插件）: {}",
                         o.rejected_tools.join(", ")
                     ))
                 };
@@ -211,9 +216,10 @@ mod tests {
     }
 
     #[test]
-    fn spawn_failure_is_not_covered_not_drift() {
+    fn spawn_failure_is_verify_incomplete_not_drift() {
         let st = PluginContractState::derived(&manifest("a"), true, Some(&outcome(false, true)));
-        assert_eq!(st.gates.g2_consistency, "not_covered");
+        assert_eq!(st.gates.g2_consistency, "verify_incomplete");
+        assert!(st.gates.last_error.is_some(), "观测失败可见：校验未完成待复验");
     }
 
     #[test]

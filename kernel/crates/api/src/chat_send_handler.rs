@@ -222,6 +222,30 @@ impl ChatSendHandler {
             unreachable!("supplied_pid 为 None 时已在创建分支 return/自生成 pipeline_id")
         };
 
+        // 创建分支先落 pipeline↔thread 映射（F8，2026-08-20）：此前映射由
+        // 引擎 persist 路径稍后补写，dispatch 内 resolve_pipeline_id_for_thread
+        // 校验必失败 → 每次任务派发刷一条“前端传来的 pipeline_id 不属于该
+        // thread”误告警。映射幂等（INSERT OR IGNORE），落库失败不阻断派发
+        // （引擎路径仍会补写——此处只是消除误告警 + 提前可见性）。
+        if created {
+            if let Some(store) = self.store.as_ref() {
+                let tenant_id =
+                    crate::auth::resolve_tenant_id_by_user(Some(store), user_id).await;
+                if let Err(e) = store
+                    .link_pipeline_session(&pipeline_id, &thread_id, &tenant_id)
+                    .await
+                {
+                    tracing::warn!(
+                        target: "capability:chat",
+                        pipeline = %pipeline_id,
+                        thread = %thread_id,
+                        error = %e.to_string(),
+                        "chat.send_message 创建分支 pipeline↔thread 映射落库失败（引擎路径将补写）"
+                    );
+                }
+            }
+        }
+
         tracing::info!(
             target: "capability:chat",
             pipeline = %pipeline_id,

@@ -248,15 +248,6 @@ pub fn apply_discovered_plugins(
     }
 }
 
-/// `AGENTOS_G2_STRICT_SPAWN_FAIL` 开关（G2 spawn/list_tools 失败的处置，灰度）。
-///
-/// 默认严格（fail-closed）：spawn/上报失败 → 拒绝注册该插件声明的全部工具；
-/// 仅显式 `0`（trim 后）→ lenient（warn + 按声明注册，旧行为）。纯函数吃
-/// Option<String> 而非直接读 env——避免测试进程级环境变量并发污染。
-pub fn g2_strict_env_enabled(value: Option<String>) -> bool {
-    !matches!(value, Some(v) if v.trim() == "0")
-}
-
 /// G2 校验+净化结果。
 #[derive(Debug, Clone)]
 pub struct G2VerifyOutcome {
@@ -388,19 +379,26 @@ async fn run_smoke(
     (rejected, failed)
 }
 
+/// 观测失败重试退避序列（300ms / 1s）：启动期 sidecar 冷启动竞态下探测进程
+/// 瞬态死亡（2026-08-20 实测单次启动 45 例 stderr EOF）——重试即过；真漂移
+/// 走"比对出不一致"路径不受影响。
+const G2_OBSERVE_RETRY_BACKOFF_MS: [u64; 2] = [300, 1000];
+
 /// G2：单插件"声明 ↔ 实际暴露"一致性校验 + 冒烟 + 处置（公共化，供注册/启动/重启用复用）。
 ///
 /// - 无 tools 且无 services（route 仅插件 / InProcess / native）→ 跳过，原样返回；
 /// - 比对出可拒绝漂移（missing / schema_mismatch）→ 剔除漂移工具，其余照常；
-/// - spawn/list_tools 失败 → `strict_spawn_fail` 决定：拒绝全部工具（fail-closed）
-///   或 warn+按声明注册（lenient 灰度）；
+/// - spawn/list_tools 失败 = **观测失败 ≠ 判定失败**（2026-08-20 裁定，推翻旧
+///   strict 净化定案）：重试 2 次（退避见 [`G2_OBSERVE_RETRY_BACKOFF_MS`]）后仍
+///   失败 → 保留声明注册不动（spawn_failed=true 供账本标记"校验未完成"，调用方
+///   择机复验）。观测通道故障永远无权处置被校验对象——把好插件工具砍掉的
+///   "strict 拒绝全部"旧路径已删除（AGENTOS_G2_STRICT_SPAWN_FAIL 开关随之退役）；
 /// - 声明了 `smoke: true` 的工具 → 样例输入真调一次，失败拒绝（fail-closed）。
 ///
 /// 纯校验+净化，无注册副作用；调用方决定后续注册行为。
 pub async fn g2_verify_and_sanitize(
     invoker: &dyn PluginInvoker,
     manifest: PluginManifest,
-    strict_spawn_fail: bool,
 ) -> G2VerifyOutcome {
     // G2 只验 sidecar（InProcess/native 无 describe 通道，verify.rs 自述——它们
     // 的一致性走 A3 重启 + native describe 后续落地）；无 tools 且无 services
@@ -416,7 +414,31 @@ pub async fn g2_verify_and_sanitize(
             smoke_failed: false,
         };
     }
-    match invoker.list_plugin_tools(&manifest.id).await {
+    let listed = 'probe: {
+        let mut attempt = 0usize;
+        loop {
+            match invoker.list_plugin_tools(&manifest.id).await {
+                Ok(raw) => break 'probe Ok(raw),
+                Err(first) => {
+                    if attempt >= G2_OBSERVE_RETRY_BACKOFF_MS.len() {
+                        break 'probe Err(first);
+                    }
+                    let backoff = G2_OBSERVE_RETRY_BACKOFF_MS[attempt];
+                    attempt += 1;
+                    warn!(
+                        target: "plugin_watcher",
+                        plugin = %manifest.id,
+                        attempt,
+                        backoff_ms = backoff,
+                        error = %first.message,
+                        "G2 观测失败（spawn/tools-list），退避重试（观测失败≠判定失败）"
+                    );
+                    tokio::time::sleep(std::time::Duration::from_millis(backoff)).await;
+                }
+            }
+        }
+    };
+    match listed {
         Ok(raw) => {
             let (actual, _malformed) = parse_actual_tools(&raw);
             let mismatches = compare_tools(&declared_with_services(&manifest), &actual);
@@ -472,37 +494,20 @@ pub async fn g2_verify_and_sanitize(
             outcome
         }
         Err(e) => {
+            // 观测失败 ≠ 判定失败：探测通道自身故障，不是"实现缺了声明的工具"
+            // ——保留声明注册（spawn_failed 供账本标记"校验未完成"，调用方复验）。
             warn!(
                 target: "plugin_watcher",
                 plugin = %manifest.id,
                 error = %e.message,
-                strict = strict_spawn_fail,
-                "G2 校验失败（spawn/上报不可用）"
+                "G2 观测失败（spawn/上报不可用，重试后仍失败）——保留声明注册，待复验"
             );
-            if strict_spawn_fail {
-                let rejected_tools = manifest
-                    .capabilities
-                    .tools
-                    .iter()
-                    .map(|t| t.name.clone())
-                    .collect::<Vec<_>>();
-                let mut sanitized = manifest;
-                sanitized.capabilities.tools.clear();
-                G2VerifyOutcome {
-                    manifest: sanitized,
-                    rejected_tools,
-                    drift: true,
-                    spawn_failed: true,
-                    smoke_failed: false,
-                }
-            } else {
-                G2VerifyOutcome {
-                    manifest,
-                    rejected_tools: Vec::new(),
-                    drift: false,
-                    spawn_failed: true,
-                    smoke_failed: false,
-                }
+            G2VerifyOutcome {
+                manifest,
+                rejected_tools: Vec::new(),
+                drift: false,
+                spawn_failed: true,
+                smoke_failed: false,
             }
         }
     }
@@ -556,7 +561,6 @@ pub async fn sync_once(
         None,
         &mut throwaway,
         None,
-        true,
         None,
     )
     .await
@@ -622,7 +626,6 @@ pub async fn sync_once_with_store(
     manifests_store: Option<&ManifestsStore>,
     known_manifest_hashes: &mut HashMap<String, u64>,
     enablement: Option<&PluginEnablement>,
-    strict_spawn_fail: bool,
     contract_states: Option<&crate::contract::ContractLedger>,
 ) -> Result<SyncReport, PluginError> {
     let all = invoker.discover_new_plugins().await?;
@@ -659,7 +662,7 @@ pub async fn sync_once_with_store(
 
     // G2 安装期一致性校验（公共化 g2_verify_and_sanitize）：对新发现的 tool 插件
     // spawn → tools/list → 对照声明。漂移工具的贡献拒绝注册，其余能力照常；
-    // spawn 失败按 strict_spawn_fail 处置（默认严格：拒绝该插件全部工具）。
+    // 观测失败（重试后仍 spawn/list 失败）保留声明注册（2026-08-20 裁定）。
     let mut filtered: Vec<PluginManifest> = Vec::with_capacity(kept_refs.len());
     let mut drifted_plugins = Vec::new();
     let mut dependency_rejected = Vec::new();
@@ -689,7 +692,7 @@ pub async fn sync_once_with_store(
             dependency_rejected.push(m.id.clone());
             continue;
         }
-        let outcome = g2_verify_and_sanitize(invoker, m.clone(), strict_spawn_fail).await;
+        let outcome = g2_verify_and_sanitize(invoker, m.clone()).await;
         if let Some(ledger) = contract_states {
             ledger.upsert(crate::contract::PluginContractState::derived(
                 m,
@@ -715,11 +718,11 @@ pub async fn sync_once_with_store(
                 drifted_plugins.push(m.id.clone());
             }
         }
-        if outcome.spawn_failed && !strict_spawn_fail {
+        if outcome.spawn_failed {
             warn!(
                 target: "plugin_watcher",
                 plugin = %m.id,
-                "G2 校验失败（spawn/上报不可用）——lenient 模式按声明注册（AGENTOS_G2_STRICT_SPAWN_FAIL=0）"
+                "G2 观测失败（重试后仍 spawn/上报不可用）——按声明注册，账本标记校验未完成，待复验"
             );
         }
         filtered.push(outcome.manifest);
@@ -1040,7 +1043,6 @@ impl PluginWatcher {
                     manifests_store.as_ref(),
                     &mut known_hashes,
                     enablement.as_ref(),
-                    g2_strict_env_enabled(std::env::var("AGENTOS_G2_STRICT_SPAWN_FAIL").ok()),
                     contract_states.as_deref(),
                 )
                 .await
@@ -1188,6 +1190,10 @@ mod tests {
         list_tools: std::collections::HashMap<String, serde_json::Value>,
         /// 置 true 时 list_plugin_tools 返回错误（模拟 spawn/上报失败）。
         list_tools_fail: bool,
+        /// 前 N 次调用失败后恢复成功（模拟瞬态观测失败，测重试路径）。
+        list_tools_fail_times: usize,
+        /// list_plugin_tools 调用计数（断言重试次数）。
+        list_calls: std::sync::atomic::AtomicUsize,
         /// 置 true 时 invoke_tool 返回 Err（模拟冒烟调用异常）。
         invoke_tool_fail: bool,
         /// 冒烟 invoke_tool 的调用计数（断言未声明 smoke 的工具不被冒烟）。
@@ -1243,7 +1249,8 @@ mod tests {
             &self,
             plugin_id: &str,
         ) -> Result<serde_json::Value, PluginError> {
-            if self.list_tools_fail {
+            let calls = self.list_calls.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            if self.list_tools_fail || calls < self.list_tools_fail_times {
                 return Err(PluginError {
                     message: "list_tools boom".into(),
                     code: None,
@@ -1276,6 +1283,8 @@ mod tests {
                 fail: false,
                 list_tools,
                 list_tools_fail: false,
+                list_tools_fail_times: 0,
+                list_calls: std::sync::atomic::AtomicUsize::new(0),
                 invoke_tool_fail: false,
                 invoke_calls: std::sync::atomic::AtomicUsize::new(0),
             }
@@ -1321,6 +1330,8 @@ mod tests {
             fail: true,
             list_tools: std::collections::HashMap::new(),
             list_tools_fail: false,
+            list_tools_fail_times: 0,
+            list_calls: std::sync::atomic::AtomicUsize::new(0),
             invoke_tool_fail: false,
             invoke_calls: std::sync::atomic::AtomicUsize::new(0),
         };
@@ -1452,8 +1463,9 @@ mod tests {
         assert_eq!(names, vec!["t1".to_string()]);
     }
 
-    /// G2：校验失败（list_tools 报错）默认严格（fail-closed）——拒绝该插件全部工具，
-    /// 注册流程继续不阻断；lenient 由 `AGENTOS_G2_STRICT_SPAWN_FAIL=0` 回退。
+    /// G2：观测失败（list_tools 报错）≠ 判定失败（2026-08-20 裁定）——按声明注册
+    /// 不净化，注册流程继续不阻断（drifted_plugins 不含该插件，账本另标记
+    /// verify_incomplete 待复验）。
     #[tokio::test]
     async fn sync_once_verify_failure_does_not_block_install() {
         let mut invoker = MockInvoker::new(vec![mk_manifest("p1", "tool", &["t1"], false)]);
@@ -1464,14 +1476,14 @@ mod tests {
             .await
             .unwrap();
         assert!(
-            report.drifted_plugins.contains(&"p1".to_string()),
-            "spawn 失败严格模式 → 漂移插件报告可见"
+            !report.drifted_plugins.contains(&"p1".to_string()),
+            "观测失败不是漂移：不进 drift 报告（账本标记 verify_incomplete）"
         );
         assert_eq!(
-            report.tools_registered, 0,
-            "严格模式：spawn 失败拒绝声明工具，不再带病注册"
+            report.tools_registered, 1,
+            "观测失败：按声明注册，不净化工具"
         );
-        assert!(registry_arc.list_tools().is_empty());
+        assert_eq!(registry_arc.list_tools().len(), 1);
     }
 
     /// G2：校验失败 lenient（灰度回退）→ 保留声明工具（旧行为）。
@@ -1490,7 +1502,6 @@ mod tests {
             None,
             &mut HashMap::new(),
             None,
-            false,
             None,
         )
         .await
@@ -1659,7 +1670,6 @@ mod tests {
             Some(&store),
             &mut hashes,
             None,
-            true,
             None,
         )
         .await
@@ -1677,7 +1687,6 @@ mod tests {
             Some(&store),
             &mut hashes,
             None,
-            true,
             None,
         )
         .await
@@ -1709,7 +1718,6 @@ mod tests {
             Some(&store),
             &mut hashes,
             None,
-            true,
             None,
         )
         .await
@@ -1736,7 +1744,6 @@ mod tests {
             None,
             &mut hashes,
             None,
-            true,
             None,
         )
         .await
@@ -1756,7 +1763,6 @@ mod tests {
             None,
             &mut hashes,
             None,
-            true,
             None,
         )
         .await
@@ -1852,15 +1858,9 @@ mod tests {
     // ── Phase 0：注册闸——G2 公共化 / disabled 过滤 / 依赖拒绝 ──────────────
 
     /// G2 spawn 失败处置开关：默认严格（fail-closed），仅 "0" 置 lenient。
-    #[test]
-    fn g2_strict_env_switch_parsing() {
-        assert!(g2_strict_env_enabled(None), "未设 → 严格（fail-closed）");
-        assert!(g2_strict_env_enabled(Some("1".to_string())));
-        assert!(g2_strict_env_enabled(Some("yes".to_string())));
-        assert!(!g2_strict_env_enabled(Some("0".to_string())));
-        assert!(!g2_strict_env_enabled(Some(" 0 ".to_string())));
-    }
-
+    // g2_strict_env_switch_parsing 测试已随 AGENTOS_G2_STRICT_SPAWN_FAIL 开关
+    // 一并退役（2026-08-20 裁定：观测失败≠判定失败，永远保留声明注册——
+    // 开关失去存在意义，函数与解析测试同步删除，不留死开关）。
     /// enablement 过滤纯函数：disabled 跳过并计数，保留序不变。
     #[test]
     fn filter_enabled_skips_disabled_and_counts() {
@@ -1885,7 +1885,7 @@ mod tests {
     async fn g2_verify_consistent_returns_unchanged() {
         let invoker = MockInvoker::new(vec![mk_manifest("p1", "tool", &["t1", "t2"], false)]);
         let m = mk_manifest("p1", "tool", &["t1", "t2"], false);
-        let out = g2_verify_and_sanitize(&invoker, m, true).await;
+        let out = g2_verify_and_sanitize(&invoker, m).await;
         assert!(!out.drift && !out.spawn_failed);
         assert!(out.rejected_tools.is_empty());
         assert_eq!(out.manifest.capabilities.tools.len(), 2);
@@ -1900,7 +1900,7 @@ mod tests {
             json!({ "tools": [{"name": "t1", "description": "t1"}] }),
         );
         let m = mk_manifest("p1", "tool", &["t1", "ghost"], false);
-        let out = g2_verify_and_sanitize(&invoker, m, true).await;
+        let out = g2_verify_and_sanitize(&invoker, m).await;
         assert!(out.drift);
         assert_eq!(out.rejected_tools, vec!["ghost".to_string()]);
         let names: Vec<String> = out
@@ -1914,32 +1914,35 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn g2_verify_spawn_fail_strict_empties_tools() {
+    async fn g2_verify_spawn_fail_keeps_declared_tools() {
+        // 观测失败≠判定失败（2026-08-20 裁定）：重试后仍 spawn/list 失败 →
+        // 保留声明注册（spawn_failed 供账本标记校验未完成），不再净化工具。
         let mut invoker = MockInvoker::new(vec![mk_manifest("p1", "tool", &["t1", "t2"], false)]);
         invoker.list_tools_fail = true;
         let m = mk_manifest("p1", "tool", &["t1", "t2"], false);
-        let out = g2_verify_and_sanitize(&invoker, m, true).await;
-        assert!(out.spawn_failed && out.drift);
-        assert!(
-            out.manifest.capabilities.tools.is_empty(),
-            "strict：拒绝全部声明工具"
+        let out = g2_verify_and_sanitize(&invoker, m).await;
+        assert!(out.spawn_failed && !out.drift);
+        assert_eq!(
+            out.manifest.capabilities.tools.len(),
+            2,
+            "观测失败：声明注册原样保留"
         );
-        assert_eq!(out.rejected_tools.len(), 2);
+        assert!(out.rejected_tools.is_empty(), "观测失败无权拒工具");
     }
 
     #[tokio::test]
-    async fn g2_verify_spawn_fail_lenient_keeps_tools() {
+    async fn g2_verify_observation_fail_retries_then_passes() {
+        // 瞬态观测失败（首探失败，重试成功）→ 正常走比对路径，不产生 spawn_failed。
         let mut invoker = MockInvoker::new(vec![mk_manifest("p1", "tool", &["t1"], false)]);
-        invoker.list_tools_fail = true;
-        let m = mk_manifest("p1", "tool", &["t1"], false);
-        let out = g2_verify_and_sanitize(&invoker, m, false).await;
-        assert!(out.spawn_failed);
-        assert_eq!(
-            out.manifest.capabilities.tools.len(),
-            1,
-            "lenient：按声明注册（warn）"
+        invoker.list_tools_fail_times = 1; // 首次 Err，重试 Ok
+        invoker.list_tools.insert(
+            "p1".into(),
+            json!({ "tools": [{"name": "t1", "description": "t1"}] }),
         );
-        assert!(!out.drift);
+        let m = mk_manifest("p1", "tool", &["t1"], false);
+        let out = g2_verify_and_sanitize(&invoker, m).await;
+        assert!(!out.spawn_failed && !out.drift, "重试即过，不误杀");
+        assert_eq!(out.manifest.capabilities.tools.len(), 1);
     }
 
     /// services-only（无 tools）插件：不 spawn 校验，原样返回（若被调用会因
@@ -1949,7 +1952,7 @@ mod tests {
         let mut invoker = MockInvoker::new(vec![mk_manifest("s", "system", &[], false)]);
         invoker.list_tools_fail = true;
         let m = mk_manifest("s", "system", &[], false);
-        let out = g2_verify_and_sanitize(&invoker, m, true).await;
+        let out = g2_verify_and_sanitize(&invoker, m).await;
         assert!(!out.spawn_failed && !out.drift);
         assert!(out.manifest.capabilities.tools.is_empty());
     }
@@ -1961,7 +1964,7 @@ mod tests {
         let mut invoker = MockInvoker::new(vec![mk_manifest_host("nativeish", "in_process")]);
         invoker.list_tools_fail = true;
         let m = mk_manifest_host("nativeish", "in_process");
-        let out = g2_verify_and_sanitize(&invoker, m, true).await;
+        let out = g2_verify_and_sanitize(&invoker, m).await;
         assert!(!out.spawn_failed && !out.drift);
     }
 
@@ -1998,7 +2001,6 @@ mod tests {
             None,
             &mut HashMap::new(),
             Some(&enablement),
-            true,
             None,
         )
         .await
@@ -2030,7 +2032,6 @@ mod tests {
             None,
             &mut HashMap::new(),
             None,
-            true,
             None,
         )
         .await
@@ -2069,7 +2070,6 @@ mod tests {
                 None,
                 &mut HashMap::new(),
                 None,
-                true,
                 None,
             )
             .await
@@ -2091,7 +2091,6 @@ mod tests {
             None,
             &mut HashMap::new(),
             None,
-            true,
             None,
         )
         .await
@@ -2115,7 +2114,6 @@ mod tests {
             None,
             &mut HashMap::new(),
             None,
-            true,
             None,
         )
         .await
@@ -2142,7 +2140,6 @@ mod tests {
             None,
             &mut HashMap::new(),
             None,
-            true,
             None,
         )
         .await
@@ -2160,7 +2157,6 @@ mod tests {
             None,
             &mut HashMap::new(),
             None,
-            true,
             None,
         )
         .await
@@ -2231,7 +2227,7 @@ mod tests {
         )]);
         invoker.invoke_tool_fail = true;
         let out =
-            g2_verify_and_sanitize(&invoker, mk_manifest_smoke("p1", "t_smoke", true), true).await;
+            g2_verify_and_sanitize(&invoker, mk_manifest_smoke("p1", "t_smoke", true)).await;
         assert!(out.smoke_failed, "冒烟失败须标记");
         assert!(
             out.manifest.capabilities.tools.is_empty(),
@@ -2248,7 +2244,7 @@ mod tests {
             assert_input_schema_ok(json!({"tools":[{ "name": "t_smoke" }]})),
         )]);
         let out =
-            g2_verify_and_sanitize(&invoker, mk_manifest_smoke("p1", "t_smoke", true), true).await;
+            g2_verify_and_sanitize(&invoker, mk_manifest_smoke("p1", "t_smoke", true)).await;
         assert!(!out.smoke_failed);
         assert_eq!(out.manifest.capabilities.tools.len(), 1, "冒烟成功则保留");
         assert_eq!(
@@ -2267,7 +2263,7 @@ mod tests {
             assert_input_schema_ok(json!({"tools":[{ "name": "t_no_smoke" }]})),
         )]);
         let _ =
-            g2_verify_and_sanitize(&invoker, mk_manifest_smoke("p1", "t_no_smoke", false), true)
+            g2_verify_and_sanitize(&invoker, mk_manifest_smoke("p1", "t_no_smoke", false))
                 .await;
         assert_eq!(
             invoker
@@ -2295,7 +2291,7 @@ mod tests {
         });
         let m: PluginManifest = serde_json::from_value(v).unwrap();
         let invoker = MockInvoker::new(vec![m.clone()]);
-        let out = g2_verify_and_sanitize(&invoker, m, true).await;
+        let out = g2_verify_and_sanitize(&invoker, m).await;
         assert!(
             out.rejected_tools.contains(&"t_bad".to_string()),
             "畸形 output_schema 的工具必须被拒"

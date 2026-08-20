@@ -1687,32 +1687,35 @@ pub async fn plugins_set_enabled_handler(
                     {
                         Some(m) => {
                             // 注册闸 G2 复核（reenable 复用注册校验，不另设校验层）：
-                            // sidecar tool 插件先 spawn 校验，漂移/失败（默认严格）则用
-                            // 净化后 manifest 重注册，禁止把"声明与实现不服"的能力在启用
-                            // 时带进来（AGENTOS_G2_STRICT_SPAWN_FAIL=0 回退 lenient）。
+                            // sidecar tool 插件先 spawn 校验。判定失败（漂移）→ 用净化后
+                            // manifest 重注册，禁止把"声明与实现不服"的能力在启用时带
+                            // 进来；观测失败（重试后仍 spawn/list 失败）≠ 判定失败
+                            //（2026-08-20 裁定）→ 按声明注册，账本标记校验未完成。
                             let mut manifest_for_register = m.clone();
                             let mut g2_outcome: Option<crate::plugin_watcher::G2VerifyOutcome> =
                                 None;
                             if let Some(invoker) = &state.invoker {
-                                let strict = crate::plugin_watcher::g2_strict_env_enabled(
-                                    std::env::var("AGENTOS_G2_STRICT_SPAWN_FAIL").ok(),
-                                );
                                 let outcome = crate::plugin_watcher::g2_verify_and_sanitize(
                                     invoker.as_ref(),
                                     m.clone(),
-                                    strict,
                                 )
                                 .await;
                                 g2_outcome = Some(outcome.clone());
-                                if outcome.drift || outcome.spawn_failed {
+                                if outcome.drift {
                                     tracing::warn!(
                                         target: "plugin-enablement",
                                         plugin = %plugin_id,
                                         rejected = ?outcome.rejected_tools,
                                         spawn_failed = outcome.spawn_failed,
-                                        "注册闸 G2：启用复核发现声明与实现不一致，按净化后能力注册"
+                                        "注册闸 G2：启用复核判定声明与实现不一致，按净化后能力注册（需修改插件）"
                                     );
                                     manifest_for_register = outcome.manifest;
+                                } else if outcome.spawn_failed {
+                                    tracing::warn!(
+                                        target: "plugin-enablement",
+                                        plugin = %plugin_id,
+                                        "注册闸 G2：启用复核观测失败——按声明注册，账本标记校验未完成（待复验）"
+                                    );
                                 }
                             }
                             // 闸2·观测：启用复核结果收口（无 invoker = not_covered 缺省）

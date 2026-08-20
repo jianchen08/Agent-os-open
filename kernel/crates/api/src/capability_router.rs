@@ -1005,18 +1005,32 @@ impl CapabilityRouter for KernelCapabilityRouter {
                 // hindsight.recall 不在 CapabilityRegistry——ADR 附录D① 只注册
                 // tool 类插件工具给 LLM，反查必然失败）；缺省时从注册表反查
                 // tool_name → plugin_id（tool_core 走 LLM 工具链的既有路径）。
+                // 反查失败 = 工具未注册，fail-closed 直接报错（2026-08-20 裁定，
+                // 删旧"工具名当插件 ID"兜底——隐式契约"工具名==插件名才碰巧
+                // 能用"掩盖配置错误，实测 task_manage≠task_manage_tool 报出
+                // 误导性的 plugin not found）。
                 let explicit_plugin_id = params
                     .get("plugin_id")
                     .and_then(|v| v.as_str())
                     .filter(|s| !s.is_empty());
                 let plugin_id = match explicit_plugin_id {
                     Some(pid) => pid.to_string(),
-                    None => self
+                    None => match self
                         .registry
                         .as_ref()
                         .and_then(|r| r.get_tool(tool_name))
-                        .map(|td| td.plugin_id.clone())
-                        .unwrap_or_else(|| tool_name.to_string()),
+                    {
+                        Some(td) => td.plugin_id.clone(),
+                        None => {
+                            return Ok(json!({
+                                "success": false,
+                                "error": format!(
+                                    "工具 {} 未注册（不在插件工具注册表；可能被 G2 注册闸净化或插件未启用；非注册表工具请显式传 plugin_id）",
+                                    tool_name
+                                ),
+                            }));
+                        }
+                    },
                 };
                 let invoker = self.invoker.as_ref().ok_or_else(|| McpError::Protocol {
                     message: "tool-executor 未配置 invoker".to_string(),
@@ -1967,8 +1981,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_tool_executor_no_registry_falls_back_to_tool_name() {
-        // 无注册表注入 + 无显式 plugin_id → plugin_id 兜底为 tool_name 本身。
+    async fn test_tool_executor_unregistered_tool_fails_closed() {
+        // 反查失败（无注册表/工具未注册）+ 无显式 plugin_id → fail-closed 报
+        // "工具未注册"，不落 invoker（2026-08-20 裁定：删"工具名当插件 ID"兜底）。
         let captured = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
         let router = KernelCapabilityRouter::with_metrics(MetricsAggregator::new()).with_invoker(
             Arc::new(CaptureInvoker {
@@ -1980,14 +1995,19 @@ mod tests {
             "tool_name": "some_tool",
             "args": {"x": 1},
         });
-        let _ = router
+        let res = router
             .handle("tool-executor", "invoke", params)
             .await
             .unwrap();
 
+        assert_eq!(res["success"], false);
+        assert!(
+            res["error"].as_str().unwrap().contains("未注册"),
+            "应报工具未注册，got: {}",
+            res["error"].as_str().unwrap()
+        );
         let calls = captured.lock().unwrap().clone();
-        assert_eq!(calls.len(), 1);
-        assert_eq!(calls[0].0, "some_tool", "无注册表时应兜底为 tool_name");
+        assert!(calls.is_empty(), "未注册工具不应触达 invoker");
     }
 
     /// 固定返回错误的 invoker（验证 tool-executor.invoke 的错误归一化）。
@@ -2032,8 +2052,27 @@ mod tests {
     async fn test_tool_executor_invoke_error_normalized_to_failure_json() {
         // invoke_tool 返回 Err → capability 层归一化为 {"success": false, "error": ...}，
         // 不把内核 PluginError 泄漏给 sidecar。
+        use agentos_core::traits::ToolDescriptor;
+        use agentos_core::types::{ToolCategory, ToolSource};
+        use agentos_plugin_loader::CapabilityRegistryImpl;
+        let registry = CapabilityRegistryImpl::new();
+        registry.register_tool(
+            "plugin_bash",
+            ToolDescriptor {
+                name: "bash_execute".into(),
+                description: String::new(),
+                plugin_id: "plugin_bash".into(),
+                input_schema: json!({}),
+                output_schema: None,
+                category: ToolCategory::System,
+                source: ToolSource::Mcp,
+                ui: None,
+                render: None,
+            },
+        );
         let router = KernelCapabilityRouter::with_metrics(MetricsAggregator::new())
-            .with_invoker(Arc::new(ErroringInvoker));
+            .with_invoker(Arc::new(ErroringInvoker))
+            .with_registry(Arc::new(registry));
 
         let res = router
             .handle(
@@ -2050,7 +2089,27 @@ mod tests {
     #[tokio::test]
     async fn test_tool_executor_missing_invoker_returns_protocol_error() {
         // 未注入 invoker → Protocol 错误（配置缺失早暴露）。
-        let router = KernelCapabilityRouter::with_metrics(MetricsAggregator::new());
+        // 工具先经注册表反查可达（否则 fail-closed 走"未注册"分支）。
+        use agentos_core::traits::ToolDescriptor;
+        use agentos_core::types::{ToolCategory, ToolSource};
+        use agentos_plugin_loader::CapabilityRegistryImpl;
+        let registry = CapabilityRegistryImpl::new();
+        registry.register_tool(
+            "plugin_bash",
+            ToolDescriptor {
+                name: "bash_execute".into(),
+                description: String::new(),
+                plugin_id: "plugin_bash".into(),
+                input_schema: json!({}),
+                output_schema: None,
+                category: ToolCategory::System,
+                source: ToolSource::Mcp,
+                ui: None,
+                render: None,
+            },
+        );
+        let router = KernelCapabilityRouter::with_metrics(MetricsAggregator::new())
+            .with_registry(Arc::new(registry));
         let res = router
             .handle(
                 "tool-executor",

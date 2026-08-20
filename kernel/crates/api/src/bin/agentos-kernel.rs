@@ -460,17 +460,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // validate-all 共享写入；与 AppState 同一实例注入，`GET /contract-status` 消费）。
     let contract_states = Arc::new(agentos_api::contract::ContractLedger::new());
     // 注册闸 G2 启动期存量校验（与热发现同源公共函数）：对 enabled 的 sidecar
-    // tool 插件 spawn → tools/list → 对照声明。漂移工具剔除 / spawn 失败（默认
-    // 严格）清空该插件工具，均经 re-enable 路径重注册净化后 manifest——拦截在
-    // boot 产生，不把"声明与实现不服"的插件带病注册进运行期。
-    // 灰度：AGENTOS_G2_STRICT_SPAWN_FAIL=0 回退 lenient（warn + 按声明注册旧行为）。
+    // tool 插件 spawn → tools/list → 对照声明。判定失败（tools/list 成功但声明
+    // 工具缺失）→ 剔除漂移工具并按净化后 manifest 重注册（前端经契约状态页可见）。
+    // 观测失败（spawn/list 重试后仍失败）≠ 判定失败（2026-08-20 裁定）：保留
+    // 声明注册 + 账本标记"校验未完成"，30s 后后台复验——复验出真漂移才净化。
     // 只验 tools 非空的 sidecar（services 方向 schema 契约在 Phase 1 补）。
     {
-        use agentos_api::plugin_watcher::{g2_strict_env_enabled, g2_verify_and_sanitize};
-        let strict = g2_strict_env_enabled(std::env::var("AGENTOS_G2_STRICT_SPAWN_FAIL").ok());
+        use agentos_api::plugin_watcher::g2_verify_and_sanitize;
         let mut verified = 0usize;
         let mut drifted = 0usize;
         let mut spawn_failed = 0usize;
+        let mut observe_incomplete: Vec<agentos_core::traits::PluginManifest> = Vec::new();
         for manifest in &manifests {
             let enabled = enablement.is_enabled(&manifest.id, manifest.enabled);
             let g2_applicable = enabled
@@ -484,22 +484,29 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 ));
                 continue;
             }
-            let outcome = g2_verify_and_sanitize(invoker.as_ref(), manifest.clone(), strict).await;
+            let outcome = g2_verify_and_sanitize(invoker.as_ref(), manifest.clone()).await;
             contract_states.upsert(agentos_api::contract::PluginContractState::derived(
                 manifest,
                 enabled,
                 Some(&outcome),
             ));
-            if !outcome.drift && !outcome.spawn_failed {
+            if outcome.spawn_failed {
+                // 观测失败：声明注册不动（启动注册循环已按声明注册），待复验。
+                spawn_failed += 1;
+                observe_incomplete.push(manifest.clone());
+                warn!(
+                    target: "plugin-g2-boot",
+                    plugin = %manifest.id,
+                    "注册闸 G2（boot）：观测失败（重试后仍 spawn/tools-list 失败）——保留声明注册，30s 后复验"
+                );
+                continue;
+            }
+            if !outcome.drift {
                 verified += 1;
                 continue;
             }
-            if outcome.spawn_failed {
-                spawn_failed += 1;
-            } else {
-                drifted += 1;
-            }
-            // 用净化后 manifest 重注册该插件能力（复用 re-enable：scope revoke + 重注册）。
+            drifted += 1;
+            // 判定失败：用净化后 manifest 重注册该插件能力（复用 re-enable：scope revoke + 重注册）。
             let (tools, http_routes) = agentos_api::plugin_lifecycle::reenable_plugin_capabilities(
                 &outcome.manifest,
                 &registry,
@@ -513,10 +520,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 target: "plugin-g2-boot",
                 plugin = %manifest.id,
                 rejected = ?outcome.rejected_tools,
-                strict,
                 tools,
                 http_routes,
-                "注册闸 G2（boot）：插件声明与实现不一致，已按净化后 manifest 重注册"
+                "注册闸 G2（boot）：插件声明与实现不一致，已按净化后 manifest 重注册（需修改插件）"
             );
         }
         info!(
@@ -524,9 +530,57 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             verified,
             drifted,
             spawn_failed,
-            strict,
             "注册闸 G2 启动期存量校验完成"
         );
+        // 观测失败复验（fire-and-forget）：30s 后重验，复验出真漂移（判定失败）
+        // 才净化重注册；复验仍观测失败则保持声明注册（下次 boot/热校验再试）。
+        if !observe_incomplete.is_empty() {
+            let inv2 = invoker.clone();
+            let reg2 = registry.clone();
+            let scopes2 = plugin_scopes.clone();
+            let ledger2 = contract_states.clone();
+            tokio::spawn(async move {
+                tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+                for manifest in &observe_incomplete {
+                    let outcome = g2_verify_and_sanitize(inv2.as_ref(), manifest.clone()).await;
+                    ledger2.upsert(agentos_api::contract::PluginContractState::derived(
+                        manifest,
+                        true,
+                        Some(&outcome),
+                    ));
+                    if outcome.spawn_failed {
+                        warn!(
+                            target: "plugin-g2-boot",
+                            plugin = %manifest.id,
+                            "注册闸 G2（复验）：观测仍失败——保持声明注册，待下次校验"
+                        );
+                        continue;
+                    }
+                    if outcome.drift {
+                        let (tools, http_routes) =
+                            agentos_api::plugin_lifecycle::reenable_plugin_capabilities(
+                                &outcome.manifest,
+                                &reg2,
+                                Some(&scopes2),
+                            );
+                        warn!(
+                            target: "plugin-g2-boot",
+                            plugin = %manifest.id,
+                            rejected = ?outcome.rejected_tools,
+                            tools,
+                            http_routes,
+                            "注册闸 G2（复验）：判定声明与实现不一致，已按净化后 manifest 重注册（需修改插件）"
+                        );
+                    } else {
+                        info!(
+                            target: "plugin-g2-boot",
+                            plugin = %manifest.id,
+                            "注册闸 G2（复验）：观测恢复，校验通过"
+                        );
+                    }
+                }
+            });
+        }
     }
 
     // 监控 M1：创建指标聚合器（三通道汇聚：内核自采 + 插件 record_metric + invoker 代采进程态）。

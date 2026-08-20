@@ -2041,8 +2041,12 @@ impl PluginInvoker for PluginInvokerImpl {
                 source: None,
             })?
         };
-        // 本次新 spawn 的进程：校验完回收（kill + 移除缓存），懒加载语义不被破坏
-        if was_new {
+        // 本次新 spawn 的进程：校验完回收（kill + 移除缓存），懒加载语义不被破坏。
+        // 例外（2026-08-20）：声明了 lifecycle_hooks 的插件 on_load 有副作用
+        // （起子进程/绑端口——hindsight-api 占 8420 即实测案例），探测完 kill 会
+        // 把初始化成果毁掉且孤儿子进程占端口 → 此类插件不 kill，进程交 idle GC
+        // 空闲回收。
+        if was_new && manifest.capabilities.lifecycle_hooks.is_empty() {
             if let Err(e) = client.write().await.kill().await {
                 tracing::debug!(
                     "G2 verify: best-effort kill of freshly spawned sidecar {} failed (idle GC will reap): {e}",
