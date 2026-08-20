@@ -15,6 +15,38 @@
         "render": {
           "card": "form",
           "title": "单位换算"
+        },
+        "input_schema": {
+          "type": "object",
+          "properties": {
+            "value": {
+              "type": "number",
+              "description": "要转换的值"
+            },
+            "from_unit": {
+              "type": "string",
+              "description": "源单位"
+            },
+            "to_unit": {
+              "type": "string",
+              "description": "目标单位"
+            },
+            "category": {
+              "type": "string",
+              "enum": [
+                "length",
+                "weight",
+                "temperature"
+              ],
+              "default": "length",
+              "description": "单位类别"
+            }
+          },
+          "required": [
+            "value",
+            "from_unit",
+            "to_unit"
+          ]
         }
       },
       {
@@ -23,6 +55,40 @@
         "render": {
           "card": "form",
           "title": "科学计算"
+        },
+        "input_schema": {
+          "type": "object",
+          "properties": {
+            "operation": {
+              "type": "string",
+              "enum": [
+                "calculate",
+                "evaluate"
+              ],
+              "description": "运算类型：calculate（计算表达式）、evaluate（求值单个操作）"
+            },
+            "expression": {
+              "type": "string",
+              "description": "数学表达式（operation为calculate时使用）"
+            },
+            "func": {
+              "type": "string",
+              "description": "数学函数名（operation为evaluate时使用）"
+            },
+            "value": {
+              "description": "运算值（单参数函数使用）"
+            },
+            "values": {
+              "type": "array",
+              "items": {
+                "type": "number"
+              },
+              "description": "运算值数组（双参数函数如pow、log使用）"
+            }
+          },
+          "required": [
+            "operation"
+          ]
         }
       },
       {
@@ -31,6 +97,35 @@
         "render": {
           "card": "form",
           "title": "YAML 校验"
+        },
+        "input_schema": {
+          "type": "object",
+          "properties": {
+            "content": {
+              "type": "string",
+              "description": "YAML 内容字符串"
+            },
+            "file_path": {
+              "type": "string",
+              "description": "YAML 文件路径"
+            },
+            "schema_type": {
+              "type": "string",
+              "enum": [
+                "agent",
+                "workflow",
+                "ui_scene",
+                "generic"
+              ],
+              "default": "generic"
+            },
+            "required_fields": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          }
         }
       },
       {
@@ -39,6 +134,18 @@
         "render": {
           "card": "form",
           "title": "文件转 Markdown"
+        },
+        "input_schema": {
+          "type": "object",
+          "properties": {
+            "file_path": {
+              "type": "string",
+              "description": "要转换的二进制文件路径（PDF/DOCX/XLSX/PPTX/图片等）"
+            }
+          },
+          "required": [
+            "file_path"
+          ]
         }
       },
       {
@@ -47,6 +154,10 @@
         "render": {
           "card": "form",
           "title": "获取 IDE 选区"
+        },
+        "input_schema": {
+          "type": "object",
+          "properties": {}
         }
       },
       {
@@ -55,6 +166,26 @@
         "render": {
           "card": "form",
           "title": "IDE 打开文件"
+        },
+        "input_schema": {
+          "type": "object",
+          "properties": {
+            "file_path": {
+              "type": "string",
+              "description": "要打开的文件路径"
+            },
+            "line": {
+              "type": "integer",
+              "description": "跳转到的行号（可选）"
+            },
+            "column": {
+              "type": "integer",
+              "description": "跳转到的列号（可选）"
+            }
+          },
+          "required": [
+            "file_path"
+          ]
         }
       },
       {
@@ -63,6 +194,32 @@
         "render": {
           "card": "form",
           "title": "IDE 展示差异"
+        },
+        "input_schema": {
+          "type": "object",
+          "properties": {
+            "file_path": {
+              "type": "string",
+              "description": "文件路径"
+            },
+            "original_content": {
+              "type": "string",
+              "description": "原始文件内容"
+            },
+            "new_content": {
+              "type": "string",
+              "description": "修改后的文件内容"
+            },
+            "title": {
+              "type": "string",
+              "description": "差异视图标题（可选）"
+            }
+          },
+          "required": [
+            "file_path",
+            "original_content",
+            "new_content"
+          ]
         }
       },
       {
@@ -71,6 +228,19 @@
         "render": {
           "card": "form",
           "title": "状态更新"
+        },
+        "input_schema": {
+          "type": "object",
+          "properties": {
+            "updates": {
+              "type": "object",
+              "description": "要更新的状态变量键值对。支持 increment/append 操作模式",
+              "additionalProperties": true
+            }
+          },
+          "required": [
+            "updates"
+          ]
         }
       },
       {
@@ -79,6 +249,42 @@
         "render": {
           "card": "form",
           "title": "兼容性检查"
+        },
+        "input_schema": {
+          "type": "object",
+          "properties": {
+            "original_resource": {
+              "type": "object",
+              "description": "原始资源信息对象"
+            },
+            "modified_resource": {
+              "type": "object",
+              "description": "修改后的资源信息对象"
+            },
+            "system_dependencies": {
+              "type": "object",
+              "description": "系统依赖信息对象"
+            },
+            "check_types": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "enum": [
+                  "config",
+                  "interface",
+                  "dependency",
+                  "all"
+                ]
+              },
+              "default": [
+                "all"
+              ]
+            }
+          },
+          "required": [
+            "original_resource",
+            "modified_resource"
+          ]
         }
       },
       {
@@ -87,6 +293,39 @@
         "render": {
           "card": "form",
           "title": "执行详情"
+        },
+        "input_schema": {
+          "type": "object",
+          "properties": {
+            "pipeline_run_id": {
+              "type": "string",
+              "description": "管道运行 ID"
+            },
+            "level": {
+              "type": "string",
+              "enum": [
+                "skeleton",
+                "L1",
+                "L0"
+              ],
+              "description": "skeleton=骨架, L1=压缩块, L0=原始记录"
+            },
+            "iteration": {
+              "type": "integer",
+              "description": "目标轮次"
+            },
+            "fields": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "description": "L0层专用字段过滤"
+            }
+          },
+          "required": [
+            "pipeline_run_id",
+            "level"
+          ]
         }
       },
       {
@@ -95,6 +334,38 @@
         "render": {
           "card": "form",
           "title": "注册资源"
+        },
+        "input_schema": {
+          "type": "object",
+          "properties": {
+            "resource_type": {
+              "type": "string",
+              "enum": [
+                "agent",
+                "tool",
+                "template",
+                "pipeline_config"
+              ],
+              "description": "资源类型"
+            },
+            "resource_id": {
+              "type": "string",
+              "description": "资源唯一标识"
+            },
+            "config": {
+              "type": "object",
+              "description": "资源配置数据"
+            },
+            "overwrite": {
+              "type": "boolean",
+              "default": false
+            }
+          },
+          "required": [
+            "resource_type",
+            "resource_id",
+            "config"
+          ]
         }
       }
     ],

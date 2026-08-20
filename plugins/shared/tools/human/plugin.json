@@ -95,31 +95,269 @@
               "icon": "alert-circle"
             }
           ]
+        },
+        "input_schema": {
+          "type": "object",
+          "properties": {
+            "mode": {
+              "type": "string",
+              "enum": [
+                "choice",
+                "conversation",
+                "notification"
+              ],
+              "description": "交互模式：choice=选择模式（弹出选择框），conversation=对话模式（跳转标签页），notification=通知模式（非阻塞推送）"
+            },
+            "title": {
+              "type": "string",
+              "description": "交互标题"
+            },
+            "description": {
+              "type": "string",
+              "description": "详细说明"
+            },
+            "options": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "id": {
+                    "type": "string"
+                  },
+                  "label": {
+                    "type": "string"
+                  }
+                }
+              },
+              "description": "选项列表（选择模式）。必须是 JSON 数组，例如 [\"批准\",\"拒绝\"] 或 [{\"id\":\"1\",\"label\":\"批准\"},{\"id\":\"2\",\"label\":\"拒绝\"}]。禁止包一层对象（如 {\"item\":[...]}）"
+            },
+            "questions": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "description": "问题列表（澄清场景）"
+            },
+            "initial_message": {
+              "type": "string",
+              "description": "开场消息（对话模式）/ 通知内容（通知模式）"
+            },
+            "suggestions": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "description": "快捷回复建议（对话模式）"
+            },
+            "timeout_seconds": {
+              "type": "number",
+              "default": 86400,
+              "description": "超时时间（秒）"
+            },
+            "priority": {
+              "type": "string",
+              "enum": [
+                "low",
+                "normal",
+                "high",
+                "critical"
+              ],
+              "default": "normal",
+              "description": "优先级"
+            },
+            "progress": {
+              "type": "number",
+              "description": "进度百分比 0-100（通知模式）"
+            },
+            "file_paths": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "description": "需要展示给用户的文件路径列表。系统会自动读取文件内容并在交互面板中展示。以下两种情况都必须使用此参数：（1）主动展示——当你需要将文件内容、设计方案、代码变更等信息呈现给用户查看或审批时（如通知模式推送文件、选择/对话模式展示文件变更）；（2）用户请求——当用户明确要求查看某个文件、某个结果，或要求省略/跳过某些内容并需要确认时。使用此参数时必须选择 choice 或 conversation 模式，不支持 notification 模式。支持相对路径（基于工作空间）和绝对路径，单文件不超过10MB，最多10个文件。工作空间范围限制仅对子任务（L2+）生效；主 agent（L1）可展示项目内任意路径。"
+            }
+          },
+          "required": [
+            "mode",
+            "title"
+          ]
         }
       },
       {
         "name": "interaction.send_notification",
-        "description": "发送非阻塞通知（服务能力）"
+        "description": "发送非阻塞通知（服务能力）",
+        "input_schema": {
+          "type": "object",
+          "properties": {
+            "session_id": {
+              "type": "string"
+            },
+            "thread_id": {
+              "type": "string"
+            },
+            "title": {
+              "type": "string"
+            },
+            "message": {
+              "type": "string",
+              "default": ""
+            },
+            "priority": {
+              "type": "string",
+              "enum": [
+                "low",
+                "normal",
+                "high",
+                "critical"
+              ],
+              "default": "normal"
+            }
+          },
+          "required": [
+            "session_id",
+            "thread_id",
+            "title"
+          ]
+        }
       },
       {
         "name": "interaction.create_choice",
-        "description": "创建选择模式交互请求（服务能力）"
+        "description": "创建选择模式交互请求（服务能力）",
+        "input_schema": {
+          "type": "object",
+          "properties": {
+            "session_id": {
+              "type": "string"
+            },
+            "thread_id": {
+              "type": "string"
+            },
+            "tab_id": {
+              "type": "string"
+            },
+            "title": {
+              "type": "string"
+            },
+            "description": {
+              "type": "string",
+              "default": ""
+            },
+            "options": {
+              "type": "array"
+            },
+            "questions": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "timeout_seconds": {
+              "type": "integer",
+              "default": 86400
+            },
+            "priority": {
+              "type": "string",
+              "enum": [
+                "low",
+                "normal",
+                "high",
+                "critical"
+              ],
+              "default": "normal"
+            }
+          },
+          "required": [
+            "session_id",
+            "thread_id",
+            "tab_id",
+            "title"
+          ]
+        }
       },
       {
         "name": "interaction.wait_for_choice",
-        "description": "等待用户选择响应（服务能力）"
+        "description": "等待用户选择响应（服务能力）",
+        "input_schema": {
+          "type": "object",
+          "properties": {
+            "request_id": {
+              "type": "string"
+            },
+            "timeout": {
+              "type": "number",
+              "default": 86400
+            }
+          },
+          "required": [
+            "request_id"
+          ]
+        }
       },
       {
         "name": "interaction.respond",
-        "description": "提交交互响应（前端响应回路）"
+        "description": "提交交互响应（前端响应回路）",
+        "input_schema": {
+          "type": "object",
+          "properties": {
+            "request_id": {
+              "type": "string"
+            },
+            "response_type": {
+              "type": "string",
+              "description": "approved/denied/answered/timeout/cancelled"
+            },
+            "selected_option": {
+              "type": "string"
+            },
+            "answers": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "feedback": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "request_id",
+            "response_type"
+          ]
+        }
       },
       {
         "name": "interaction.cancel",
-        "description": "取消交互请求（服务能力）"
+        "description": "取消交互请求（服务能力）",
+        "input_schema": {
+          "type": "object",
+          "properties": {
+            "request_id": {
+              "type": "string"
+            },
+            "reason": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "request_id"
+          ]
+        }
       },
       {
         "name": "interaction.get_pending",
-        "description": "获取待处理请求列表（服务能力）"
+        "description": "获取待处理请求列表（服务能力）",
+        "input_schema": {
+          "type": "object",
+          "properties": {
+            "session_id": {
+              "type": "string"
+            },
+            "limit": {
+              "type": "integer",
+              "default": 50
+            }
+          }
+        }
       }
     ],
     "lifecycle_hooks": [

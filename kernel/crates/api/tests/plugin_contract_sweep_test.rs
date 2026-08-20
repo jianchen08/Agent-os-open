@@ -198,8 +198,13 @@ fn all_plugin_contracts_are_executor_consumable() {
         );
     }
 
-    // 棘轮（2026-08-20 基线：47 插件 / 58 工具 in=8 pat=2 / 88 服务 in=88）
-    assert!(tools_props >= 8, "带参数面工具数退化: {tools_props} < 8");
+    // 棘轮（2026-08-20 L2 补齐后基线：47 插件 / 58 工具，56/58 声明 input_schema
+    // （唯二缺 = widget_demo 死演示工具，无 Python 实现不造伪），53 带参数面 /
+    // 2 空参声明 / 2 带形态 pattern / 88 服务）
+    assert!(
+        tools_props >= 53,
+        "带参数面工具数退化: {tools_props} < 53（L2 补齐基线）"
+    );
     assert!(
         tools_pattern >= 2,
         "带形态 pattern 的工具数退化: {tools_pattern} < 2（基线 trigger_setup/task_submit）"

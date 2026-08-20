@@ -14,6 +14,31 @@
         "description": "读取文件内容",
         "render": {
           "card": "read"
+        },
+        "input_schema": {
+          "type": "object",
+          "properties": {
+            "path": {
+              "type": "string",
+              "description": "文件路径（相对路径或绝对路径）"
+            },
+            "start_line": {
+              "type": "integer",
+              "description": "起始行号（从1开始），仅读取指定行范围",
+              "default": 1
+            },
+            "end_line": {
+              "type": "integer",
+              "description": "结束行号（从1开始，包含该行），仅读取指定行范围"
+            },
+            "tail": {
+              "type": "integer",
+              "description": "仅读取文件最后 N 行"
+            }
+          },
+          "required": [
+            "path"
+          ]
         }
       },
       {
@@ -72,6 +97,60 @@
               }
             ]
           }
+        },
+        "input_schema": {
+          "type": "object",
+          "properties": {
+            "path": {
+              "type": "string",
+              "description": "文件路径"
+            },
+            "content": {
+              "type": "string",
+              "description": "文件内容"
+            },
+            "action": {
+              "type": "string",
+              "enum": [
+                "write",
+                "search_replace",
+                "insert",
+                "delete_lines",
+                "append"
+              ],
+              "description": "编辑操作类型",
+              "default": "write"
+            },
+            "start_line": {
+              "type": "integer",
+              "description": "起始行号（write/insert/delete_lines 使用）"
+            },
+            "end_line": {
+              "type": "integer",
+              "description": "结束行号（write/delete_lines 使用）"
+            },
+            "line": {
+              "type": "integer",
+              "description": "插入位置行号（insert 使用）"
+            },
+            "old_str": {
+              "type": "string",
+              "description": "要搜索的原始文本（search_replace 使用）"
+            },
+            "new_str": {
+              "type": "string",
+              "description": "替换后的新文本（search_replace 使用）"
+            },
+            "create_backup": {
+              "type": "boolean",
+              "description": "是否创建 .bak 备份",
+              "default": true
+            }
+          },
+          "required": [
+            "path",
+            "action"
+          ]
         }
       },
       {
@@ -79,6 +158,39 @@
         "description": "执行 Shell 命令",
         "render": {
           "card": "terminal"
+        },
+        "input_schema": {
+          "type": "object",
+          "properties": {
+            "command": {
+              "type": "string",
+              "description": "要执行的 Shell 命令"
+            },
+            "timeout": {
+              "type": "integer",
+              "description": "超时时间（秒），默认 30",
+              "default": 30
+            },
+            "working_dir": {
+              "type": "string",
+              "description": "工作目录（可选）"
+            },
+            "action": {
+              "type": "string",
+              "enum": [
+                "execute",
+                "continue",
+                "terminate",
+                "input",
+                "read_log"
+              ],
+              "description": "操作类型",
+              "default": "execute"
+            }
+          },
+          "required": [
+            "command"
+          ]
         }
       },
       {
@@ -179,6 +291,27 @@
         "description": "目录列举",
         "render": {
           "card": "table"
+        },
+        "input_schema": {
+          "type": "object",
+          "properties": {
+            "path": {
+              "type": "string",
+              "description": "目录路径（相对路径或绝对路径）"
+            },
+            "include_hidden": {
+              "type": "boolean",
+              "description": "是否包含隐藏文件（以.开头），默认 false",
+              "default": false
+            },
+            "pattern": {
+              "type": "string",
+              "description": "文件名匹配模式（支持 glob 语法，如 *.py）"
+            }
+          },
+          "required": [
+            "path"
+          ]
         }
       },
       {
@@ -186,6 +319,23 @@
         "description": "创建目录",
         "render": {
           "card": "file"
+        },
+        "input_schema": {
+          "type": "object",
+          "properties": {
+            "path": {
+              "type": "string",
+              "description": "目录路径"
+            },
+            "parents": {
+              "type": "boolean",
+              "description": "是否创建父目录（默认 true）",
+              "default": true
+            }
+          },
+          "required": [
+            "path"
+          ]
         }
       },
       {
@@ -193,6 +343,40 @@
         "description": "复制文件",
         "render": {
           "card": "form"
+        },
+        "input_schema": {
+          "type": "object",
+          "properties": {
+            "source": {
+              "type": "string",
+              "description": "源文件或目录路径"
+            },
+            "destination": {
+              "type": "string",
+              "description": "目标路径"
+            },
+            "copies": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "source": {
+                    "type": "string"
+                  },
+                  "destination": {
+                    "type": "string"
+                  }
+                }
+              },
+              "description": "批量复制列表（与 source/destination 二选一）"
+            },
+            "overwrite": {
+              "type": "boolean",
+              "description": "是否覆盖已存在的目标（默认 false）",
+              "default": false
+            }
+          },
+          "required": []
         }
       },
       {
@@ -200,6 +384,40 @@
         "description": "移动文件",
         "render": {
           "card": "form"
+        },
+        "input_schema": {
+          "type": "object",
+          "properties": {
+            "source": {
+              "type": "string",
+              "description": "源路径"
+            },
+            "destination": {
+              "type": "string",
+              "description": "目标路径"
+            },
+            "moves": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "source": {
+                    "type": "string"
+                  },
+                  "destination": {
+                    "type": "string"
+                  }
+                }
+              },
+              "description": "批量移动列表"
+            },
+            "overwrite": {
+              "type": "boolean",
+              "description": "是否覆盖已存在的目标（默认 false）",
+              "default": false
+            }
+          },
+          "required": []
         }
       },
       {
@@ -207,6 +425,33 @@
         "description": "删除文件",
         "render": {
           "card": "form"
+        },
+        "input_schema": {
+          "type": "object",
+          "properties": {
+            "path": {
+              "type": "string",
+              "description": "要删除的文件或目录路径"
+            },
+            "paths": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "description": "批量删除路径列表"
+            },
+            "recursive": {
+              "type": "boolean",
+              "description": "是否递归删除目录（默认 false）",
+              "default": false
+            },
+            "force": {
+              "type": "boolean",
+              "description": "是否强制删除（包括只读文件，默认 false）",
+              "default": false
+            }
+          },
+          "required": []
         }
       },
       {
@@ -214,6 +459,50 @@
         "description": "Web 操作",
         "render": {
           "card": "web"
+        },
+        "input_schema": {
+          "type": "object",
+          "properties": {
+            "action": {
+              "type": "string",
+              "enum": [
+                "get",
+                "post",
+                "fetch"
+              ],
+              "description": "操作类型：get=HTTP GET，post=HTTP POST，fetch=网页抓取"
+            },
+            "url": {
+              "type": "string",
+              "description": "目标 URL"
+            },
+            "headers": {
+              "type": "object",
+              "description": "请求头（可选）"
+            },
+            "data": {
+              "type": "object",
+              "description": "POST 请求体（可选）"
+            },
+            "params": {
+              "type": "object",
+              "description": "URL 查询参数（可选）"
+            },
+            "timeout": {
+              "type": "integer",
+              "description": "超时时间（秒），默认 30",
+              "default": 30
+            },
+            "extract_text": {
+              "type": "boolean",
+              "description": "fetch 模式是否提取纯文本",
+              "default": true
+            }
+          },
+          "required": [
+            "action",
+            "url"
+          ]
         }
       }
     ],

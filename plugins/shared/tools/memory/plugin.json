@@ -15,6 +15,98 @@
         "render": {
           "card": "form",
           "title": "记忆操作"
+        },
+        "input_schema": {
+          "type": "object",
+          "properties": {
+            "action": {
+              "type": "string",
+              "enum": [
+                "store",
+                "retrieve",
+                "import_text",
+                "import_file",
+                "update",
+                "delete",
+                "get_context",
+                "list"
+              ],
+              "description": "操作类型"
+            },
+            "content": {
+              "type": "string",
+              "description": "内容（store/import_text时使用）"
+            },
+            "name": {
+              "type": "string",
+              "description": "知识名称（import_text时使用）"
+            },
+            "file_path": {
+              "type": "string",
+              "description": "文件路径（import_file/update/delete时使用）"
+            },
+            "memory_id": {
+              "type": "string",
+              "description": "记忆ID（delete时使用，与 file_path 二选一）"
+            },
+            "query": {
+              "type": "string",
+              "description": "检索查询（retrieve时使用）"
+            },
+            "tags": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "description": "标签列表（强烈建议填写）。用于标记内容分类和主题，支持后续按标签精准检索。例如：['coding_standards', 'python']、['bug_pattern', 'timeout']。系统会自动追加当前 Agent 名称作为标签。"
+            },
+            "filter": {
+              "type": "object",
+              "description": "筛选条件（第一层决策）",
+              "properties": {
+                "memory_type": {
+                  "type": "string",
+                  "enum": [
+                    "semantic",
+                    "episode"
+                  ],
+                  "default": "semantic",
+                  "description": "记忆类型"
+                },
+                "knowledge_id": {
+                  "type": "string",
+                  "description": "知识库ID（与 knowledge_name 二选一）"
+                },
+                "knowledge_name": {
+                  "type": "string",
+                  "description": "知识库名称（与 knowledge_id 二选一）"
+                },
+                "tags": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  },
+                  "description": "标签筛选"
+                },
+                "session_id": {
+                  "type": "string",
+                  "description": "会话ID"
+                }
+              }
+            },
+            "top_k": {
+              "type": "integer",
+              "default": 5,
+              "description": "检索数量"
+            },
+            "session_id": {
+              "type": "string",
+              "description": "会话ID（get_context时使用）"
+            }
+          },
+          "required": [
+            "action"
+          ]
         }
       }
     ],

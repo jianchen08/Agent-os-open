@@ -26,11 +26,48 @@
               "widget": "media_timeline"
             }
           ]
+        },
+        "input_schema": {
+          "type": "object",
+          "properties": {
+            "task_id": {
+              "type": "string"
+            },
+            "summary": {
+              "type": "string"
+            },
+            "artifacts": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "default": []
+            },
+            "metrics": {
+              "type": "object",
+              "default": {}
+            }
+          },
+          "required": [
+            "task_id",
+            "summary"
+          ]
         }
       },
       {
         "name": "review.get_report",
-        "description": "Get review report by ID"
+        "description": "Get review report by ID",
+        "input_schema": {
+          "type": "object",
+          "properties": {
+            "review_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "review_id"
+          ]
+        }
       }
     ],
     "route_signals": [],

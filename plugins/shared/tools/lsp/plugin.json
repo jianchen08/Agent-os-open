@@ -11,27 +11,148 @@
     "tools": [
       {
         "name": "lsp.definition",
-        "description": "跳转到符号定义位置"
+        "description": "跳转到符号定义位置",
+        "input_schema": {
+          "type": "object",
+          "properties": {
+            "file_path": {
+              "type": "string",
+              "description": "文件路径"
+            },
+            "line": {
+              "type": "integer",
+              "description": "行号（从0开始）"
+            },
+            "character": {
+              "type": "integer",
+              "description": "列号（从0开始）",
+              "default": 0
+            },
+            "language": {
+              "type": "string",
+              "description": "编程语言（不传则自动检测）"
+            }
+          },
+          "required": [
+            "file_path",
+            "line"
+          ]
+        }
       },
       {
         "name": "lsp.references",
-        "description": "查找符号的所有引用位置"
+        "description": "查找符号的所有引用位置",
+        "input_schema": {
+          "type": "object",
+          "properties": {
+            "file_path": {
+              "type": "string",
+              "description": "文件路径"
+            },
+            "line": {
+              "type": "integer",
+              "description": "行号（从0开始）"
+            },
+            "character": {
+              "type": "integer",
+              "description": "列号（从0开始）",
+              "default": 0
+            },
+            "language": {
+              "type": "string",
+              "description": "编程语言（不传则自动检测）"
+            }
+          },
+          "required": [
+            "file_path",
+            "line"
+          ]
+        }
       },
       {
         "name": "lsp.diagnostics",
-        "description": "获取文件的诊断信息（错误和警告）"
+        "description": "获取文件的诊断信息（错误和警告）",
+        "input_schema": {
+          "type": "object",
+          "properties": {
+            "file_path": {
+              "type": "string",
+              "description": "文件路径"
+            },
+            "language": {
+              "type": "string",
+              "description": "编程语言（不传则自动检测）"
+            }
+          },
+          "required": [
+            "file_path"
+          ]
+        }
       },
       {
         "name": "lsp.completion",
-        "description": "获取代码补全建议"
+        "description": "获取代码补全建议",
+        "input_schema": {
+          "type": "object",
+          "properties": {
+            "file_path": {
+              "type": "string",
+              "description": "文件路径"
+            },
+            "line": {
+              "type": "integer",
+              "description": "行号（从0开始）"
+            },
+            "character": {
+              "type": "integer",
+              "description": "列号（从0开始）",
+              "default": 0
+            },
+            "language": {
+              "type": "string",
+              "description": "编程语言（不传则自动检测）"
+            }
+          },
+          "required": [
+            "file_path",
+            "line"
+          ]
+        }
       },
       {
         "name": "lsp.jump_to_file",
-        "description": "在 IDE 中打开文件并跳转到指定位置"
+        "description": "在 IDE 中打开文件并跳转到指定位置",
+        "input_schema": {
+          "type": "object",
+          "properties": {
+            "file_path": {
+              "type": "string",
+              "description": "文件路径"
+            },
+            "line": {
+              "type": "integer",
+              "description": "行号（从0开始）",
+              "default": 0
+            },
+            "character": {
+              "type": "integer",
+              "description": "列号（从0开始）",
+              "default": 0
+            }
+          },
+          "required": [
+            "file_path"
+          ]
+        }
       },
       {
         "name": "lsp.supported_languages",
-        "description": "获取支持的编程语言列表"
+        "description": "获取支持的编程语言列表",
+        "input_schema": {
+          "type": "object",
+          "properties": {},
+          "required": []
+        }
       }
     ],
     "lifecycle_hooks": [

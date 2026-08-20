@@ -14,6 +14,44 @@
         "description": "Web 操作：HTTP 请求和网页抓取",
         "render": {
           "card": "web"
+        },
+        "input_schema": {
+          "type": "object",
+          "properties": {
+            "action": {
+              "type": "string",
+              "enum": [
+                "get",
+                "post",
+                "fetch"
+              ],
+              "default": "get"
+            },
+            "url": {
+              "type": "string"
+            },
+            "headers": {
+              "type": "object"
+            },
+            "data": {
+              "type": "object"
+            },
+            "params": {
+              "type": "object"
+            },
+            "timeout": {
+              "type": "integer",
+              "default": 30
+            },
+            "extract_text": {
+              "type": "boolean",
+              "default": true
+            }
+          },
+          "required": [
+            "action",
+            "url"
+          ]
         }
       }
     ],
