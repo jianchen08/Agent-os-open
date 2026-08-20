@@ -1617,14 +1617,43 @@ pub async fn plugins_set_enabled_handler(
         .join("plugins")
         .join("default_profile.yaml");
 
-    // 读现有 profile（不存在则用空结构）
-    let raw = std::fs::read_to_string(&profile_path).unwrap_or_default();
-    let mut doc: serde_yaml::Value = serde_yaml::from_str(&raw).unwrap_or_else(|_| {
-        serde_yaml::from_str(
-            "version: 1\nplugins:\ndefaults:\n  enabled: true\n  activation: lazy\n",
-        )
-        .unwrap()
-    });
+    // 读现有 profile：文件缺失/空白 → 全新 Mapping（首次落盘，无存量可破坏）；
+    // 文件存在但解析失败/非 Mapping → 422 拒绝写入（K1：此前会用硬编码模板顶替
+    // 并覆写，profile 里其他插件的启停设置被物理清空；损坏现场必须保留给运维
+    // 排查，不得静默重建）。其余读失败（权限等）→ 500，同样不写。
+    let mut doc: serde_yaml::Value = match std::fs::read_to_string(&profile_path) {
+        Ok(raw) if raw.trim().is_empty() => serde_yaml::Value::Mapping(serde_yaml::Mapping::new()),
+        Ok(raw) => match serde_yaml::from_str::<serde_yaml::Value>(&raw) {
+            Ok(v @ serde_yaml::Value::Mapping(_)) => v,
+            Ok(_) => {
+                tracing::error!(
+                    path = %profile_path.display(),
+                    "default_profile.yaml 顶层非 Mapping，拒绝覆写（profile corrupted）"
+                );
+                return Err(ApiError::UnprocessableEntity {
+                    message: "profile corrupted, refusing to overwrite".to_string(),
+                });
+            }
+            Err(e) => {
+                tracing::error!(
+                    path = %profile_path.display(),
+                    error = %e,
+                    "default_profile.yaml 解析失败，拒绝覆写（profile corrupted）"
+                );
+                return Err(ApiError::UnprocessableEntity {
+                    message: "profile corrupted, refusing to overwrite".to_string(),
+                });
+            }
+        },
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            serde_yaml::Value::Mapping(serde_yaml::Mapping::new())
+        }
+        Err(e) => {
+            return Err(ApiError::Internal {
+                message: format!("读取 default_profile.yaml 失败：{e}"),
+            })
+        }
+    };
 
     // 改 plugins.<id>.enabled（手动操作 serde_yaml Mapping）
     if let serde_yaml::Value::Mapping(ref mut top) = doc {
@@ -1654,8 +1683,11 @@ pub async fn plugins_set_enabled_handler(
         }
     }
 
-    // 写回
-    let new_raw = serde_yaml::to_string(&doc).unwrap_or_default();
+    // 写回：序列化失败直接报错（K1：此前 unwrap_or_default() 会把空串写盘，
+    // 物理清空整个 profile——序列化对 Mapping 几乎不会失败，但兜底不得是破坏性写）。
+    let new_raw = serde_yaml::to_string(&doc).map_err(|e| ApiError::Internal {
+        message: format!("序列化 default_profile.yaml 失败：{e}"),
+    })?;
     match std::fs::write(&profile_path, new_raw) {
         Ok(_) => {
             // ── 热加载：立即改内存状态，不用重启 ──
@@ -2115,5 +2147,129 @@ mod state_summary_tests {
         let s3 =
             summarize_state(&json!({"pipeline_id": "p5", "task.ended_at": "2026-08-16T09:00:00Z"}));
         assert_eq!(s3["task.ended_at"], "2026-08-16T09:00:00Z");
+    }
+}
+
+#[cfg(test)]
+mod plugin_profile_write_tests {
+    //! K1：default_profile.yaml 损坏时 PUT enabled 拒绝写（422），不再用
+    //! 硬编码模板顶替并覆写（清空全部插件启停配置）；文件缺失 → 正常新建。
+
+    use super::*;
+
+    fn app_state_with_project_root(tmp: &tempfile::TempDir) -> AppState {
+        let mut state = AppState::new();
+        state.project_root = Some(tmp.path().to_path_buf());
+        state
+    }
+
+    fn profile_path(tmp: &tempfile::TempDir) -> std::path::PathBuf {
+        tmp.path()
+            .join("config")
+            .join("plugins")
+            .join("default_profile.yaml")
+    }
+
+    #[tokio::test]
+    async fn corrupted_profile_refuses_overwrite_with_422() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(profile_path(&tmp).parent().unwrap()).unwrap();
+        let corrupted = "version: 1\nplugins: [broken\n";
+        std::fs::write(profile_path(&tmp), corrupted).unwrap();
+
+        let state = app_state_with_project_root(&tmp);
+        let err = plugins_set_enabled_handler(
+            axum::extract::Path("some_plugin".to_string()),
+            axum::extract::State(state),
+            axum::Json(EnabledBody { enabled: true }),
+        )
+        .await
+        .unwrap_err();
+
+        assert!(
+            matches!(err, ApiError::UnprocessableEntity { .. }),
+            "损坏 profile 应 422 拒写，实际 {err:?}"
+        );
+        assert_eq!(
+            std::fs::read_to_string(profile_path(&tmp)).unwrap(),
+            corrupted,
+            "损坏现场必须原样保留（拒写不覆写）"
+        );
+    }
+
+    #[tokio::test]
+    async fn scalar_top_level_profile_refuses_overwrite_with_422() {
+        // 解析成功但顶层非 Mapping（标量）：此前 if-let Mapping 静默跳过补丁、
+        // 写回仍会覆盖原文——同样按损坏拒写。
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(profile_path(&tmp).parent().unwrap()).unwrap();
+        std::fs::write(profile_path(&tmp), "just_a_string\n").unwrap();
+
+        let state = app_state_with_project_root(&tmp);
+        let err = plugins_set_enabled_handler(
+            axum::extract::Path("some_plugin".to_string()),
+            axum::extract::State(state),
+            axum::Json(EnabledBody { enabled: false }),
+        )
+        .await
+        .unwrap_err();
+
+        assert!(matches!(err, ApiError::UnprocessableEntity { .. }));
+        assert_eq!(
+            std::fs::read_to_string(profile_path(&tmp)).unwrap(),
+            "just_a_string\n"
+        );
+    }
+
+    #[tokio::test]
+    async fn missing_profile_creates_fresh_one_on_enable() {
+        // 文件缺失（非损坏）：首次落盘合法——新建 Mapping 写入该插件开关，
+        // 其他插件无存量可破坏。
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(profile_path(&tmp).parent().unwrap()).unwrap();
+
+        let state = app_state_with_project_root(&tmp);
+        let resp = plugins_set_enabled_handler(
+            axum::extract::Path("fresh_plugin".to_string()),
+            axum::extract::State(state),
+            axum::Json(EnabledBody { enabled: true }),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(resp.0["success"], true);
+        let raw = std::fs::read_to_string(profile_path(&tmp)).unwrap();
+        assert!(raw.contains("fresh_plugin"), "新 profile 应含该插件条目");
+        assert!(raw.contains("enabled: true"));
+    }
+
+    #[tokio::test]
+    async fn valid_profile_roundtrip_preserves_other_plugins() {
+        // 回归：合法 profile 上切换某插件开关，其他插件启停设置必须保留
+        // （K1 修复守护的正是这条不变量）。
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(profile_path(&tmp).parent().unwrap()).unwrap();
+        std::fs::write(
+            profile_path(&tmp),
+            "version: 1\nplugins:\n  other_plugin:\n    enabled: false\ndefaults:\n  enabled: true\n",
+        )
+        .unwrap();
+
+        let state = app_state_with_project_root(&tmp);
+        let _resp = plugins_set_enabled_handler(
+            axum::extract::Path("target_plugin".to_string()),
+            axum::extract::State(state),
+            axum::Json(EnabledBody { enabled: true }),
+        )
+        .await
+        .unwrap();
+
+        let doc: serde_yaml::Value =
+            serde_yaml::from_str(&std::fs::read_to_string(profile_path(&tmp)).unwrap()).unwrap();
+        assert_eq!(
+            doc["plugins"]["other_plugin"]["enabled"], false,
+            "其他插件启停设置必须保留"
+        );
+        assert_eq!(doc["plugins"]["target_plugin"]["enabled"], true);
     }
 }

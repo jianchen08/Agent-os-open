@@ -33,6 +33,22 @@ pub fn register_plugin_capabilities(
     {
         for tool_cap in &manifest.capabilities.tools {
             let category = tool_cap.category.clone().unwrap_or(ToolCategory::System);
+            // K9：input_schema 缺失仍按 {} 补注册（存量 manifest 确有缺失——
+            // 2026-08-20 全量统计：plugins/ 下 84 个 manifest 工具中 28 个缺声明，
+            // 集中在 external_mcp 系列 / admin 与 security_check 的 http.handle、
+            // status 对 / widget_demo 演示工具，补声明属 plugins/ 侧治理，内核
+            // 不一刀切拒注册），但必须 warn 可见：{} 是 object，LLM 侧
+            // `input_schema.is_object()` 过滤（server.rs inject_tool_schemas）对
+            // 它恒不触发——工具以零参数描述进工具面，LLM 只能盲调。真正的
+            // 防线在此处的 manifest 声明。
+            if tool_cap.input_schema.is_none() {
+                tracing::warn!(
+                    target: "plugin-registration",
+                    plugin_id = %manifest.id,
+                    tool = %tool_cap.name,
+                    "tool manifest 缺 input_schema，以 {{}} 补注册（LLM 侧 object 过滤恒不触发，LLM 只能盲调；请补声明）"
+                );
+            }
             let descriptor = ToolDescriptor {
                 name: tool_cap.name.clone(),
                 description: tool_cap

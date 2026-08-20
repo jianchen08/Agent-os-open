@@ -24,6 +24,11 @@ pub enum ApiError {
     #[error("conflict: {message}")]
     Conflict { message: String },
 
+    /// 422 Unprocessable Entity——请求语义可解但目标资源状态不允许该操作
+    /// （如目标配置文件已损坏，写入会破坏现场，拒绝执行）。
+    #[error("unprocessable entity: {message}")]
+    UnprocessableEntity { message: String },
+
     #[error("internal error: {message}")]
     Internal { message: String },
 
@@ -43,6 +48,9 @@ impl IntoResponse for ApiError {
             ApiError::Forbidden { message } => (StatusCode::FORBIDDEN, message.clone()),
             ApiError::NotFound { message } => (StatusCode::NOT_FOUND, message.clone()),
             ApiError::Conflict { message } => (StatusCode::CONFLICT, message.clone()),
+            ApiError::UnprocessableEntity { message } => {
+                (StatusCode::UNPROCESSABLE_ENTITY, message.clone())
+            }
             // A12：内部错误细节（IO 报错含路径、底层库错误串等）不透传给客户端，
             // 避免泄漏服务端内部结构；细节完整保留在服务端 tracing（无 request_id
             // 基础设施，以 error 字段 + target 定位）。对外固定通用文案。

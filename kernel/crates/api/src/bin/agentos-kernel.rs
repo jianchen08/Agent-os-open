@@ -26,7 +26,7 @@ use agentos_core::traits::{CapabilityRegistry, PluginLoader, ToolDescriptor};
 use agentos_core::types::{ToolCategory, ToolSource, UserRecord};
 use agentos_invoker::PluginInvokerImpl;
 use agentos_plugin_loader::{CapabilityRegistryImpl, NativePluginLoader, PluginLoaderImpl};
-use tracing::{info, warn};
+use tracing::{error, info, warn};
 use tracing_subscriber::{fmt, prelude::*};
 
 /// 播种内置 admin 用户（首次启动插入，已存在则跳过）。
@@ -289,11 +289,23 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // 安装触发模型 L1：加载 default_profile.yaml 启用层。
     // disabled 的插件不进注册表出口（tools/route_signals/http_routes 不暴露）。
     // 优先级：manifest.enabled > profile.plugins[id] > defaults > enabled=true。
+    // K6：profile 解析失败 → 保守全禁（is_enabled 恒 false），此处升级为 error
+    // 级启动报告——下方注册循环会以"全部插件 skipped_disabled"落地该裁决。
     let enablement = agentos_plugin_loader::PluginEnablement::load(&config_root);
+    if enablement.is_corrupted() {
+        error!(
+            target: "agentos-kernel",
+            "default_profile.yaml 解析失败：启用层进入保守全禁（K6 fail-closed），\
+             所有插件本次启动不注册；修复 config/plugins/default_profile.yaml 后重启"
+        );
+    }
 
     // 将 manifest 中声明的工具注册到 CapabilityRegistry
     let mut tool_count = 0usize;
     let mut skipped_disabled = 0usize;
+    // K9：缺 input_schema 而以 {} 补注册的工具计数（进启动报告；2026-08-20
+    // 全量统计 plugins/ 下 84 个 manifest 工具中 28 个缺声明）。
+    let mut missing_input_schema = 0usize;
     for manifest in &manifests {
         // L1 Enabled 过滤：disabled 插件不进出口（安装触发模型 §1.1）
         if !enablement.is_enabled(&manifest.id, manifest.enabled) {
@@ -308,6 +320,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let scope = plugin_scopes.scope_of(&manifest.id);
             for tool_cap in &manifest.capabilities.tools {
                 let category = tool_cap.category.clone().unwrap_or(ToolCategory::System);
+                // K9：缺 input_schema 以 {} 补注册但必须可见（warn + 计数进启动
+                // 报告）。{} 是 object，LLM 侧 input_schema.is_object() 过滤对它
+                // 恒不触发——零参数描述进工具面，LLM 只能盲调；补声明属
+                // plugins/ 侧治理。运行时新增插件注册路径同款 warn 见
+                // plugin_lifecycle::register_plugin_capabilities。
+                if tool_cap.input_schema.is_none() {
+                    missing_input_schema += 1;
+                    warn!(
+                        target: "plugin-registration",
+                        plugin_id = %manifest.id,
+                        tool = %tool_cap.name,
+                        "tool manifest 缺 input_schema，以 {{}} 补注册（LLM 侧 object 过滤恒不触发，LLM 只能盲调；请补声明）"
+                    );
+                }
                 let descriptor = ToolDescriptor {
                     name: tool_cap.name.clone(),
                     description: tool_cap
@@ -347,10 +373,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     info!(
         target: "agentos-kernel",
-        "Registered {} tools from {} plugins (declaration-based, D.6 slot split; {} disabled by profile)",
+        "Registered {} tools from {} plugins (declaration-based, D.6 slot split; {} disabled by profile; {} missing input_schema registered as {{}} — K9)",
         tool_count,
         manifests.len(),
-        skipped_disabled
+        skipped_disabled,
+        missing_input_schema
     );
 
     // P3：注册插件 HTTP 端点（ADR §3.3）——聚合报错（fail-closed，不逐个 panic）。

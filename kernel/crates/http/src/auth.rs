@@ -145,7 +145,7 @@ pub async fn resolve_request_user(
     let token = extract_bearer_token(headers).ok_or(ApiError::Unauthorized {
         message: "缺少认证信息".to_string(),
     })?;
-    let (user_id, username, exp) = decode_token(&token).ok_or(ApiError::Unauthorized {
+    let (_, username, exp) = decode_token(&token).ok_or(ApiError::Unauthorized {
         message: "无效的认证令牌".to_string(),
     })?;
     if is_token_expired(exp) {
@@ -159,10 +159,12 @@ pub async fn resolve_request_user(
             message: "无效的认证令牌".to_string(),
         });
     }
-    // token 校验场景无 tenant scope，用 username 跨租户查询（token 自带 username）
+    // token 校验场景无 tenant scope，用 username 跨租户查询（token 自带 username）。
+    // find_user_by_username 自身 fail-closed（store 存在未命中不回退内置表），
+    // 此处不得再叠 or_else 内置回退——否则换库后已签发 token 依旧把"用户已
+    // 不存在"伪装成合法内置用户（K4，对齐 find_user_by_credentials 2026-08-19 裁决）。
     let user = find_user_by_username(store, &username)
         .await
-        .or_else(|| default_users().into_iter().find(|u| u.id == user_id))
         .ok_or(ApiError::Unauthorized {
             message: "用户不存在".to_string(),
         })?;
@@ -171,8 +173,10 @@ pub async fn resolve_request_user(
 
 /// 按 user_id 解析其归属的租户 ID（WS 路径用，与 HTTP 路径同源）。
 ///
-/// store 优先查持久化用户的 tenant_id；未命中回退内置 admin（兼容无 store 测试），
-/// 再不命中回退 [`DEFAULT_TENANT_ID`]。
+/// store 优先查持久化用户的 tenant_id；store 存在但解析不出（用户已删除 /
+/// 存储故障）时**不再静默**——warn 审计标记后回退 [`DEFAULT_TENANT_ID`]
+/// （K8：归因可见的降级，防读写串租户无痕发生）。仅无 store（测试场景）
+/// 走内置 admin 表，再不命中回退默认租户。
 ///
 /// WebSocket 握手链路只透传 `user_id`（受 `PipelineDispatcher` trait 签名约束），
 /// 无法携带 `HeaderMap`。本函数让 WS 入站分发器能用同一套用户表查出真正的
@@ -181,10 +185,23 @@ pub async fn resolve_tenant_id_by_user(
     store: Option<&std::sync::Arc<dyn agentos_core::traits::StorageBackend>>,
     user_id: &str,
 ) -> String {
-    find_user_by_id(store, user_id)
-        .await
-        .map(|u| u.tenant_id)
-        .unwrap_or_else(|| DEFAULT_TENANT_ID.to_string())
+    match find_user_by_id(store, user_id).await {
+        Some(u) => u.tenant_id,
+        None => {
+            if store.is_some() {
+                // K8 审计标记：store 在而用户解析不出（get_user_by_id 按 task_local
+                // tenant 隔离，跨租户/已删除用户在此不可见）。降级值与旧版一致
+                // （default），但从无痕变为有 warn 可审计。
+                tracing::warn!(
+                    target: "auth-tenant-degrade",
+                    user_id = %user_id,
+                    fallback_tenant = DEFAULT_TENANT_ID,
+                    "用户→租户解析失败，降级 default 租户（用户已删除/跨租户不可见/存储故障；K8 审计标记）"
+                );
+            }
+            DEFAULT_TENANT_ID.to_string()
+        }
+    }
 }
 
 /// 从 Authorization 头提取 bearer token。
@@ -229,8 +246,10 @@ pub async fn find_user_by_credentials(
 }
 
 /// 按 user_id 查用户（token 解析 / WS 握手用）。
-/// 注意：get_user_by_id 按 task_local tenant 隔离，调用方需在正确租户 scope 内。
-/// 跨租户场景下若 task_local 未命中，会回退内置 admin 兜底。
+///
+/// store 存在但未命中（含 get_user_by_id 按租户隔离导致的跨租户不可见）**不回退**
+/// 内置 admin：换库/清库后按旧 token 的 user_id 命中硬编码表 = 已删除用户复活
+/// （K4，对齐 find_user_by_credentials）。仅无 store（测试场景）走内置表。
 pub async fn find_user_by_id(
     store: Option<&std::sync::Arc<dyn agentos_core::traits::StorageBackend>>,
     id: &str,
@@ -239,12 +258,17 @@ pub async fn find_user_by_id(
         if let Ok(Some(u)) = store.get_user_by_id(id).await {
             return Some(BuiltInUser::from(&u));
         }
+        return None; // store 在而未命中：不回退内置（防硬编码后门复活）
     }
+    // 无 store（测试/无持久化场景）：内置 admin 兜底
     default_users().into_iter().find(|u| u.id == id)
 }
 
 /// 按用户名查用户（token 校验场景用，跨租户全局查询，不校验密码）。
-/// store 优先，未命中回退内置 admin。
+///
+/// store 存在但未命中**不回退**内置 admin（K4，对齐 find_user_by_credentials：
+/// token 校验路径与登录路径同一裁决——查不到即不属于本实例）。
+/// 仅无 store（测试场景）走内置表。
 pub async fn find_user_by_username(
     store: Option<&std::sync::Arc<dyn agentos_core::traits::StorageBackend>>,
     username: &str,
@@ -253,7 +277,9 @@ pub async fn find_user_by_username(
         if let Ok(Some(u)) = store.get_user_by_username(username).await {
             return Some(BuiltInUser::from(&u));
         }
+        return None; // store 在而未命中：不回退内置（防硬编码后门复活）
     }
+    // 无 store（测试/无持久化场景）：内置 admin 兜底
     default_users().into_iter().find(|u| u.username == username)
 }
 

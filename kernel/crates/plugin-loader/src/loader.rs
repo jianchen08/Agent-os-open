@@ -55,7 +55,13 @@ pub struct AllowlistConfig {
     pub plugins: Vec<AllowlistEntry>,
 }
 
-/// 加载插件准入白名单配置（容错）：文件缺失/解析失败 → 默认 permissive 空白名单。
+/// 加载插件准入白名单配置（缺失与损坏分化，K2）：
+/// - 文件缺失 → 默认 permissive 空白名单（文档化引导默认：未部署 allowlist 的
+///   实例按放行 + 可选 sha256 校验运行，保留）；
+/// - 文件存在但解析失败 → **fail-closed**：退化为 strict 空名单——strict 语义
+///   （白名单外拒载）下零条目 = 所有插件在发现期被拒（scan_root 逐插件 warn
+///   "not in the allowlist"），内核以零插件面启动而非静默全放行。安全配置
+///   损坏不得伪装成最宽松默认态。
 ///
 /// 生产接线（build_plugin_loader）把 `config/system/plugin_allowlist.yaml` 从"空挂"
 /// 变成真·准入——permissive=放行 + 条目 sha256 校验（真实语料校准：106 插件
@@ -66,12 +72,22 @@ pub fn load_allowlist_file(path: &Path) -> AllowlistConfig {
         Ok(text) => match serde_yaml::from_str::<AllowlistConfig>(&text) {
             Ok(cfg) => cfg,
             Err(e) => {
-                warn!(path = %path.display(), error = %e, "plugin_allowlist.yaml 解析失败 → 回退默认 permissive 空白名单");
-                AllowlistConfig::default()
+                warn!(
+                    path = %path.display(),
+                    error = %e,
+                    "plugin_allowlist.yaml 解析失败 → fail-closed：退化为 strict 空名单（所有插件拒载），修复配置后重启"
+                );
+                AllowlistConfig {
+                    mode: AllowlistMode::Strict,
+                    plugins: Vec::new(),
+                }
             }
         },
         Err(_) => {
-            warn!(path = %path.display(), "plugin_allowlist.yaml 缺失 → 回退默认 permissive 空白名单");
+            warn!(
+                path = %path.display(),
+                "plugin_allowlist.yaml 缺失 → 默认 permissive 空白名单（文档化默认，非损坏）"
+            );
             AllowlistConfig::default()
         }
     }
@@ -2076,5 +2092,42 @@ mod tests {
         assert_eq!(cfg.plugins.len(), 1);
         assert_eq!(cfg.plugins[0].id, "foo");
         assert_eq!(cfg.plugins[0].sha256, "abc123");
+    }
+
+    /// K2：解析失败（文件存在但损坏）→ fail-closed：strict 空名单（所有插件
+    /// 在发现期被拒），不再静默降为 permissive 全放行。文件缺失仍 permissive
+    /// （文档化默认，见 load_allowlist_missing_file_defaults_to_permissive）。
+    #[test]
+    fn load_allowlist_corrupt_file_fails_closed_to_strict_empty() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("plugin_allowlist.yaml");
+        std::fs::write(&p, "mode: [broken\n  ::::").unwrap();
+        let cfg = load_allowlist_file(&p);
+        assert_eq!(
+            cfg.mode,
+            AllowlistMode::Strict,
+            "损坏文件必须 fail-closed 为 strict"
+        );
+        assert!(cfg.plugins.is_empty(), "strict 空名单 = 全部插件拒载");
+    }
+
+    /// K2 端到端：解析失败的 allowlist 接入 loader 后，白名单外插件被拒载
+    /// （fail-closed 的实际效果，非仅配置对象形态）。
+    #[tokio::test]
+    async fn corrupt_allowlist_rejects_plugin_load() {
+        let builtin = tempfile::tempdir().unwrap();
+        create_test_plugin_dir(builtin.path(), "some_plugin", "tool");
+
+        let cfg_dir = tempfile::tempdir().unwrap();
+        let allowlist_path = cfg_dir.path().join("plugin_allowlist.yaml");
+        std::fs::write(&allowlist_path, "mode: [broken").unwrap();
+        let allowlist = load_allowlist_file(&allowlist_path);
+
+        let loader = PluginLoaderImpl::new(builtin.path(), None).with_allowlist(allowlist);
+        let discovered = loader.discover(&[]).await.unwrap();
+        assert!(
+            discovered.is_empty(),
+            "strict 空名单下损坏 allowlist 应拒载所有插件（fail-closed）"
+        );
     }
 }

@@ -1015,11 +1015,7 @@ impl CapabilityRouter for KernelCapabilityRouter {
                     .filter(|s| !s.is_empty());
                 let plugin_id = match explicit_plugin_id {
                     Some(pid) => pid.to_string(),
-                    None => match self
-                        .registry
-                        .as_ref()
-                        .and_then(|r| r.get_tool(tool_name))
-                    {
+                    None => match self.registry.as_ref().and_then(|r| r.get_tool(tool_name)) {
                         Some(td) => td.plugin_id.clone(),
                         None => {
                             return Ok(json!({

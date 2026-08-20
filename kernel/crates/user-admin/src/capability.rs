@@ -340,6 +340,7 @@ fn api_error_parts(e: &ApiError) -> (u16, String) {
         ApiError::Forbidden { message } => (403, message.clone()),
         ApiError::NotFound { message } => (404, message.clone()),
         ApiError::Conflict { message } => (409, message.clone()),
+        ApiError::UnprocessableEntity { message } => (422, message.clone()),
         ApiError::Internal { message } | ApiError::WebSocket { message } => (500, message.clone()),
         ApiError::ServiceUnavailable { message } => (503, message.clone()),
     }

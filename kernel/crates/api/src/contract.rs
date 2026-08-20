@@ -219,7 +219,10 @@ mod tests {
     fn spawn_failure_is_verify_incomplete_not_drift() {
         let st = PluginContractState::derived(&manifest("a"), true, Some(&outcome(false, true)));
         assert_eq!(st.gates.g2_consistency, "verify_incomplete");
-        assert!(st.gates.last_error.is_some(), "观测失败可见：校验未完成待复验");
+        assert!(
+            st.gates.last_error.is_some(),
+            "观测失败可见：校验未完成待复验"
+        );
     }
 
     #[test]

@@ -10,6 +10,7 @@
 use crate::config_center::ConfigCenter;
 use crate::pipeline::find_agent_yaml;
 use serde_json::Value;
+use tracing::warn;
 
 /// 把 agent yaml 的所有顶层字段注入 state（泛化注入）。
 ///
@@ -20,11 +21,29 @@ use serde_json::Value;
 /// - 普通字段：`or_insert`（state 已有值不覆盖，调用方优先）
 /// - `core_plugin`：`insert` 直接覆盖（agent 能切换核心插件）
 ///
-/// 文件不存在 / 解析失败时 state 不变（静默降级，和旧版 load_agent_config_into_state 一致）。
+/// 失败可见性（K5）：文件不存在 / 解析失败 / 顶层非对象 → warn +
+/// state 标记 `_agent_config_missing = true`（诊断出口可见——此前静默跳过，
+/// agent_id 打错字/yaml 写坏会被下游默认提示词 + 全量工具面放大成"照跑"）。
+/// 加载成功时移除该标记（per-iteration 热加载自愈：跑图中修好 yaml，
+/// 下一轮迭代标记消失）。
 pub fn load_agent_into_state(cc: &ConfigCenter, state: &mut Value, agent_id: &str) {
+    /// 失败路径统一出口：warn + state 标记（要求 state 可变借用可用）。
+    fn mark_missing(state: &mut Value, agent_id: &str, reason: &str) {
+        warn!(
+            target: "agent-config-load",
+            agent_id = %agent_id,
+            reason = %reason,
+            "agent 配置加载失败，state 标记 _agent_config_missing（诊断出口可见）"
+        );
+        if let Some(obj) = state.as_object_mut() {
+            obj.insert("_agent_config_missing".to_string(), Value::Bool(true));
+        }
+    }
+
     let agents_dir = cc.config_root().join("agents");
     let Some(path) = find_agent_yaml(&agents_dir, agent_id) else {
-        return; // 文件不存在，静默跳过
+        mark_missing(state, agent_id, "agent yaml not found");
+        return;
     };
 
     // 转成相对 config_root 的路径，供 ConfigCenter.load() 用（享受 mtime 缓存）
@@ -36,13 +55,24 @@ pub fn load_agent_into_state(cc: &ConfigCenter, state: &mut Value, agent_id: &st
 
     let agent_cfg = match cc.load(&rel_path) {
         Ok(v) => v,
-        Err(_) => return, // 解析失败：ConfigCenter 已保留旧缓存，state 不变
+        Err(e) => {
+            // ConfigCenter 已保留旧缓存，但当前文件确实坏了：标记 + warn 暴露
+            mark_missing(state, agent_id, &format!("agent yaml parse failed: {e}"));
+            return;
+        }
     };
 
     let Some(state_obj) = state.as_object_mut() else {
         return;
     };
     let Some(agent_obj) = agent_cfg.as_object() else {
+        // 顶层非对象（如纯标量 yaml）：同样视为配置损坏
+        warn!(
+            target: "agent-config-load",
+            agent_id = %agent_id,
+            "agent yaml 顶层非对象，state 标记 _agent_config_missing"
+        );
+        state_obj.insert("_agent_config_missing".to_string(), Value::Bool(true));
         return;
     };
 
@@ -55,6 +85,8 @@ pub fn load_agent_into_state(cc: &ConfigCenter, state: &mut Value, agent_id: &st
             state_obj.entry(k.clone()).or_insert(v.clone());
         }
     }
+    // 成功即自愈：清除历史失败标记（per-iteration 热加载修好 yaml 后消失）
+    state_obj.remove("_agent_config_missing");
 }
 
 #[cfg(test)]
@@ -119,16 +151,54 @@ mod tests {
     }
 
     #[test]
-    fn test_missing_agent_leaves_state_unchanged() {
-        // 契约：agent 文件不存在时 state 不变（静默降级）
+    fn test_missing_agent_marks_state() {
+        // 契约（K5）：agent 文件不存在时不再静默跳过——state 加
+        // _agent_config_missing 标记（诊断出口可见），其余字段不变。
         let temp = tempfile::tempdir().unwrap();
         let cc = ConfigCenter::new(temp.path().to_path_buf());
         let mut state = serde_json::json!({"existing": true});
 
         load_agent_into_state(&cc, &mut state, "nonexistent");
 
-        assert_eq!(state["existing"], true, "state 应不变");
-        assert_eq!(state.as_object().unwrap().len(), 1);
+        assert_eq!(state["existing"], true, "state 既有字段应不变");
+        assert_eq!(
+            state["_agent_config_missing"], true,
+            "缺失 agent 应打 _agent_config_missing 标记"
+        );
+        assert_eq!(state.as_object().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn test_corrupt_agent_yaml_marks_state() {
+        // 契约（K5）：yaml 解析失败（缩进/语法坏）同样打标记，不静默。
+        let temp = tempfile::tempdir().unwrap();
+        // tab 缩进在 YAML 里非法，稳定触发解析失败
+        let cc = setup(temp.path().to_path_buf(), "broken", "a:\n\tb: 1\n");
+        let mut state = serde_json::json!({});
+
+        load_agent_into_state(&cc, &mut state, "broken");
+
+        assert_eq!(
+            state["_agent_config_missing"], true,
+            "解析失败应打 _agent_config_missing 标记"
+        );
+        assert!(state.get("tool_ids").is_none(), "解析失败不得注入半截配置");
+    }
+
+    #[test]
+    fn test_successful_load_clears_missing_marker() {
+        // 契约（K5）：加载成功清除历史失败标记（per-iteration 热加载自愈）。
+        let temp = tempfile::tempdir().unwrap();
+        let cc = setup(temp.path().to_path_buf(), "a4", "v: 1\n");
+        let mut state = serde_json::json!({"_agent_config_missing": true});
+
+        load_agent_into_state(&cc, &mut state, "a4");
+
+        assert_eq!(state["v"], 1);
+        assert!(
+            state.get("_agent_config_missing").is_none(),
+            "成功加载后标记应被移除"
+        );
     }
 
     #[test]

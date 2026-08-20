@@ -1249,7 +1249,9 @@ mod tests {
             &self,
             plugin_id: &str,
         ) -> Result<serde_json::Value, PluginError> {
-            let calls = self.list_calls.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            let calls = self
+                .list_calls
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             if self.list_tools_fail || calls < self.list_tools_fail_times {
                 return Err(PluginError {
                     message: "list_tools boom".into(),
@@ -2226,8 +2228,7 @@ mod tests {
             assert_input_schema_ok(json!({"tools":[{ "name": "t_smoke" }]})),
         )]);
         invoker.invoke_tool_fail = true;
-        let out =
-            g2_verify_and_sanitize(&invoker, mk_manifest_smoke("p1", "t_smoke", true)).await;
+        let out = g2_verify_and_sanitize(&invoker, mk_manifest_smoke("p1", "t_smoke", true)).await;
         assert!(out.smoke_failed, "冒烟失败须标记");
         assert!(
             out.manifest.capabilities.tools.is_empty(),
@@ -2243,8 +2244,7 @@ mod tests {
             "p1".into(),
             assert_input_schema_ok(json!({"tools":[{ "name": "t_smoke" }]})),
         )]);
-        let out =
-            g2_verify_and_sanitize(&invoker, mk_manifest_smoke("p1", "t_smoke", true)).await;
+        let out = g2_verify_and_sanitize(&invoker, mk_manifest_smoke("p1", "t_smoke", true)).await;
         assert!(!out.smoke_failed);
         assert_eq!(out.manifest.capabilities.tools.len(), 1, "冒烟成功则保留");
         assert_eq!(
@@ -2263,8 +2263,7 @@ mod tests {
             assert_input_schema_ok(json!({"tools":[{ "name": "t_no_smoke" }]})),
         )]);
         let _ =
-            g2_verify_and_sanitize(&invoker, mk_manifest_smoke("p1", "t_no_smoke", false))
-                .await;
+            g2_verify_and_sanitize(&invoker, mk_manifest_smoke("p1", "t_no_smoke", false)).await;
         assert_eq!(
             invoker
                 .invoke_calls

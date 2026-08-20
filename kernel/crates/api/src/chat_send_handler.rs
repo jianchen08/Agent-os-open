@@ -229,8 +229,7 @@ impl ChatSendHandler {
         // （引擎路径仍会补写——此处只是消除误告警 + 提前可见性）。
         if created {
             if let Some(store) = self.store.as_ref() {
-                let tenant_id =
-                    crate::auth::resolve_tenant_id_by_user(Some(store), user_id).await;
+                let tenant_id = crate::auth::resolve_tenant_id_by_user(Some(store), user_id).await;
                 if let Err(e) = store
                     .link_pipeline_session(&pipeline_id, &thread_id, &tenant_id)
                     .await

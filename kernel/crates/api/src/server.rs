@@ -1637,6 +1637,49 @@ fn extract_response_content(final_state: &serde_json::Value) -> String {
 /// 存在 = 已安装"即可作为注入判据，无需读 pipeline 配置做条件联动。
 const FRAMEWORK_ALWAYS_INCLUDE_TOOLS: &[&str] = &["spill_retrieve"];
 
+/// state 无 tool_ids 时按 `state.agent_id` 从 ConfigCenter 解析 agent yaml 的
+/// tool_ids（K10：内核侧工具面过滤的配置解析点，与 engine per-iteration
+/// `load_agent_into_state` 同一 yaml 同一语义）。
+///
+/// 返回：
+/// - `Some(集合)`：yaml 带 `tool_ids` 键（含显式空表 = agent 声明零工具）；
+/// - `None`：配置断链（无 config_center / 无 agent_id / yaml 缺失或损坏 /
+///   yaml 无 tool_ids 键）。yaml 缺失或损坏时顺带把 `_agent_config_missing`
+///   标记写进真实 state（与 K5 引擎侧标记同键，诊断出口统一；引擎
+///   per-iteration 加载成功会自愈移除）。
+///
+/// scratch state：只借 `load_agent_into_state` 的定位/解析/失败语义，不把
+/// 整个 yaml 泛化注入真实 state——此阶段的 state 组装权在 sidecar context_build。
+fn resolve_agent_tool_ids(
+    state: &mut serde_json::Value,
+    app_state: &AppState,
+) -> Option<std::collections::HashSet<String>> {
+    let cc = app_state.config_center.as_ref()?;
+    let agent_id = state
+        .get("agent_id")
+        .and_then(|v| v.as_str())
+        .map(str::to_string)?;
+    let mut scratch = serde_json::json!({});
+    agentos_config::load_agent_into_state(cc, &mut scratch, &agent_id);
+    if scratch.get("_agent_config_missing").is_some() {
+        if let Some(obj) = state.as_object_mut() {
+            obj.insert(
+                "_agent_config_missing".to_string(),
+                serde_json::Value::Bool(true),
+            );
+        }
+        return None;
+    }
+    scratch
+        .get("tool_ids")
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|t| t.as_str().map(str::to_string))
+                .collect()
+        })
+}
+
 /// 注入工具 schema 到 state["tool_schemas"]（0.2 sidecar 架构适配）。
 /// RFC 7396 JSON Merge Patch：把 patch 按序合并进 target。
 /// 用于冷启动时按 step 级轨迹逐条 merge 回放，重建完整 state（**仅标量字段**）。
@@ -1674,23 +1717,37 @@ fn merge_patch(target: &mut serde_json::Value, patch: &serde_json::Value) {
 
 ///
 /// 按 state["tool_ids"] 过滤 capability_registry 的工具，转成 OpenAI function-calling
-/// 格式（`{type:"function", function:{name, description, parameters}}`）。tool_ids
-/// 缺失时注入全部工具（兜底）。registry 不可用时注入空列表（LLM 无工具可用）。
+/// 格式（`{type:"function", function:{name, description, parameters}}`）。
+///
+/// tool_ids 解析链（K10）：state 显式 tool_ids（overlay/上游注入）优先；缺失时按
+/// state.agent_id 从 ConfigCenter 解析 agent yaml 的 tool_ids（0.2 契约：agentos.yaml
+/// tool_ids 白名单控制 LLM 工具面）。两层都解析不出 = 配置断链 → **空工具面**
+/// （仅保留 FRAMEWORK_ALWAYS_INCLUDE_TOOLS 框架强制工具）+ warn 报警，禁止
+/// 静默全量（agent 配置断链时权限边界消失、配置错误伪装成"全工具可用"）。
+/// registry 不可用时注入空列表（LLM 无工具可用）。
 fn inject_tool_schemas(state: &mut serde_json::Value, app_state: &AppState) {
     let Some(registry) = app_state.capability_registry.as_ref() else {
         return;
     };
     let all_tools = registry.list_tools();
 
-    // 按 agent 的 tool_ids 过滤；缺失则用全部（兜底，避免无工具可用）
-    let wanted_ids: Option<Vec<String>> =
-        state.get("tool_ids").and_then(|v| v.as_array()).map(|arr| {
-            arr.iter()
-                .filter_map(|t| t.as_str().map(String::from))
-                .collect()
-        });
+    // 按 agent 的 tool_ids 过滤；state 未带时按 agent_id 从 agent yaml 解析（K10）
     let wanted: Option<std::collections::HashSet<String>> =
-        wanted_ids.map(|ids| ids.into_iter().collect());
+        match state.get("tool_ids").and_then(|v| v.as_array()) {
+            Some(arr) => Some(
+                arr.iter()
+                    .filter_map(|t| t.as_str().map(String::from))
+                    .collect(),
+            ),
+            None => resolve_agent_tool_ids(state, app_state),
+        };
+    if wanted.is_none() {
+        tracing::warn!(
+            target: "tool-surface",
+            agent_id = state.get("agent_id").and_then(|v| v.as_str()).unwrap_or(""),
+            "state 无 tool_ids 且按 agent yaml 解析不出（配置断链，K10）：工具面置空（仅保留框架强制工具），拒绝兜底全量"
+        );
+    }
     let schemas: Vec<serde_json::Value> = all_tools
         .iter()
         .filter(|t| match &wanted {
@@ -1698,13 +1755,18 @@ fn inject_tool_schemas(state: &mut serde_json::Value, app_state: &AppState) {
                 // tool_ids 命中 或 框架级强制工具（spill_retrieve 等，无视 agent 配置）
                 ids.contains(&t.name) || FRAMEWORK_ALWAYS_INCLUDE_TOOLS.contains(&t.name.as_str())
             }
-            None => true,
+            // 配置断链：不再全量兜底（K10）。FRAMEWORK_ALWAYS_INCLUDE_TOOLS 是
+            // 文档化框架机制（spill_retrieve 配套），保留。
+            None => FRAMEWORK_ALWAYS_INCLUDE_TOOLS.contains(&t.name.as_str()),
         })
         .filter(|t| {
             // LLM 严格校验工具 schema:parameters 必须是 type:object 的 JSON Schema。
-            // 过滤掉 input_schema 缺失/非 object 的工具(如 simple_tools 的部分工具
-            // manifest 未声明 input_schema),否则 DeepSeek/OpenAI 拒绝整个请求
-            // (BadRequest: schema must be a JSON Schema of 'type: "object"')。
+            // 注意（K9 勘误）：注册路径（plugin_lifecycle / agentos-kernel 启动循环）
+            // 对缺 input_schema 的 manifest 工具按 {} 补注册，{} 是 object——本过滤
+            // 对这些工具**恒不触发**（2026-08-20 统计：plugins/ 下 84 个 manifest
+            // 工具中 28 个缺声明，external_mcp/admin http.handle 与 status 对等），
+            // 真正的防线在注册期的 warn + 启动报告计数，此处过滤只拦"注册后 schema
+            // 被改写成非 object"的极端形态。
             t.input_schema.is_object()
         })
         .map(|t| {
@@ -3360,11 +3422,13 @@ mod tests {
         );
     }
 
-    /// 没有 tool_ids（兜底全量）时，spill_retrieve 自然在内。
+    /// K10 新契约：无 tool_ids（且解析不出 agent yaml 的 tool_ids）= 配置断链
+    /// → 空工具面，仅 FRAMEWORK_ALWAYS_INCLUDE_TOOLS（spill_retrieve）保留。
+    /// 旧语义"无 tool_ids → 全量兜底"已废止（权限边界不得静默放宽）。
     #[test]
-    fn inject_tool_schemas_all_mode_includes_everything() {
+    fn inject_tool_schemas_missing_tool_ids_yields_framework_only() {
         let app_state = app_state_with_tools(&["bash_execute", "spill_retrieve"]);
-        let mut state = json!({}); // 无 tool_ids → 全量
+        let mut state = json!({"agent_id": "ghost_agent"}); // 无 tool_ids，AppState 无 config_center
         inject_tool_schemas(&mut state, &app_state);
         let names: Vec<&str> = state["tool_schemas"]
             .as_array()
@@ -3372,8 +3436,109 @@ mod tests {
             .iter()
             .map(|s| s["function"]["name"].as_str().unwrap())
             .collect();
-        assert!(names.contains(&"spill_retrieve"));
-        assert!(names.contains(&"bash_execute"));
+        assert!(
+            names.contains(&"spill_retrieve"),
+            "框架强制工具保留: {names:?}"
+        );
+        assert!(
+            !names.contains(&"bash_execute"),
+            "配置断链不得兜底全量（K10）: {names:?}"
+        );
+    }
+
+    /// K10：state 无 tool_ids 但 agent yaml 可解析 → 按 yaml 的 tool_ids 过滤
+    /// （agentos.yaml tool_ids 白名单是 0.2 工具面契约，内核读 yaml 的权威点）。
+    #[test]
+    fn inject_tool_schemas_resolves_tool_ids_from_agent_yaml() {
+        let tmp = tempfile::tempdir().unwrap();
+        let agents_dir = tmp.path().join("agents");
+        std::fs::create_dir_all(&agents_dir).unwrap();
+        std::fs::write(
+            agents_dir.join("main_agent.yaml"),
+            "name: t\ntool_ids: [bash_execute]\n",
+        )
+        .unwrap();
+        let cc = std::sync::Arc::new(agentos_config::config_center::ConfigCenter::new(
+            tmp.path().to_path_buf(),
+        ));
+
+        let mut app_state = app_state_with_tools(&["bash_execute", "file_read", "spill_retrieve"]);
+        app_state.config_center = Some(cc);
+        let mut state = json!({"agent_id": "main_agent"});
+        inject_tool_schemas(&mut state, &app_state);
+
+        let names: Vec<&str> = state["tool_schemas"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|s| s["function"]["name"].as_str().unwrap())
+            .collect();
+        assert!(names.contains(&"bash_execute"), "yaml tool_ids 命中注入");
+        assert!(
+            !names.contains(&"file_read"),
+            "yaml 未列的工具不得注入: {names:?}"
+        );
+        assert!(
+            names.contains(&"spill_retrieve"),
+            "框架强制工具无视 yaml 保留: {names:?}"
+        );
+    }
+
+    /// K10：agent yaml 存在且解析正常但无 tool_ids 键 = 白名单未声明 = 配置断链
+    /// → 空面（仅框架强制工具）；yaml 本身没坏，不打 _agent_config_missing 标记。
+    #[test]
+    fn inject_tool_schemas_yaml_without_tool_ids_keys_is_empty_surface() {
+        let tmp = tempfile::tempdir().unwrap();
+        let agents_dir = tmp.path().join("agents");
+        std::fs::create_dir_all(&agents_dir).unwrap();
+        std::fs::write(agents_dir.join("no_tools.yaml"), "name: t\n").unwrap();
+        let cc = std::sync::Arc::new(agentos_config::config_center::ConfigCenter::new(
+            tmp.path().to_path_buf(),
+        ));
+
+        let mut app_state = app_state_with_tools(&["bash_execute", "spill_retrieve"]);
+        app_state.config_center = Some(cc);
+        let mut state = json!({"agent_id": "no_tools"});
+        inject_tool_schemas(&mut state, &app_state);
+
+        let names: Vec<&str> = state["tool_schemas"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|s| s["function"]["name"].as_str().unwrap())
+            .collect();
+        assert_eq!(names, vec!["spill_retrieve"], "仅框架强制工具");
+        assert!(
+            state.get("_agent_config_missing").is_none(),
+            "yaml 正常解析不打配置缺失标记"
+        );
+    }
+
+    /// K10 + K5 联动：agent yaml 缺失（agent_id 打错字）→ 空面 + 真实 state 打
+    /// _agent_config_missing 标记（诊断出口可见）。
+    #[test]
+    fn inject_tool_schemas_missing_agent_yaml_marks_state() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cc = std::sync::Arc::new(agentos_config::config_center::ConfigCenter::new(
+            tmp.path().to_path_buf(),
+        ));
+
+        let mut app_state = app_state_with_tools(&["bash_execute", "spill_retrieve"]);
+        app_state.config_center = Some(cc);
+        let mut state = json!({"agent_id": "typo_agent"});
+        inject_tool_schemas(&mut state, &app_state);
+
+        assert_eq!(
+            state["_agent_config_missing"], true,
+            "agent yaml 缺失应打标记（K5/K10 联动）"
+        );
+        let names: Vec<&str> = state["tool_schemas"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|s| s["function"]["name"].as_str().unwrap())
+            .collect();
+        assert_eq!(names, vec!["spill_retrieve"], "断链空面（仅框架工具）");
     }
 
     /// registry 里没有 spill_retrieve（插件未安装）时不会凭空注入。

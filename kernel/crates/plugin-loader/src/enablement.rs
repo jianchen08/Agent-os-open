@@ -51,16 +51,29 @@ pub struct PluginProfile {
 #[derive(Debug, Clone, Default)]
 pub struct PluginEnablement {
     profile: PluginProfile,
+    /// profile 文件解析失败标记（K6）：损坏 = 启停配置不可信 → is_enabled
+    /// 一律 false（保守全禁），由启动日志/报告暴露，运维修复后重启恢复。
+    corrupted: bool,
 }
 
 impl PluginEnablement {
     /// 测试用：直接传入 profile 构造。
     pub fn with_profile(profile: PluginProfile) -> Self {
-        Self { profile }
+        Self {
+            profile,
+            corrupted: false,
+        }
     }
 
-    /// 从 config_root 下的 `plugins/default_profile.yaml` 加载。
-    /// 文件不存在或解析失败时返回空 profile（全部走默认：enabled=true, lazy）。
+    /// profile 是否因解析失败而进入保守全禁态（启动报告用）。
+    pub fn is_corrupted(&self) -> bool {
+        self.corrupted
+    }
+
+    /// 从 config_root 下的 `plugins/default_profile.yaml` 加载（缺失与损坏分化，K6）：
+    /// - 文件缺失 → 空 profile（全部走默认：enabled=true, lazy。文档化引导默认，保留）；
+    /// - 解析失败 → 空 profile + corrupted 标记：显式禁用过的插件不得借"回退默认
+    ///   启用"静默复活——保守全禁（is_enabled 恒 false），warn + 启动报告可见。
     pub fn load(config_root: &Path) -> Self {
         let path = config_root.join("plugins").join("default_profile.yaml");
         match std::fs::read_to_string(&path) {
@@ -72,16 +85,22 @@ impl PluginEnablement {
                         "default_profile.yaml loaded ({} plugins)",
                         p.plugins.len()
                     );
-                    Self { profile: p }
+                    Self {
+                        profile: p,
+                        corrupted: false,
+                    }
                 }
                 Err(e) => {
                     tracing::warn!(
                         target: "plugin-enablement",
-                        "failed to parse {}: {}, all plugins default to enabled+lazy",
+                        "failed to parse {}: {}, fail-closed: all plugins disabled until profile is fixed",
                         path.display(),
                         e
                     );
-                    Self::default()
+                    Self {
+                        profile: PluginProfile::default(),
+                        corrupted: true,
+                    }
                 }
             },
             Err(_) => {
@@ -99,7 +118,13 @@ impl PluginEnablement {
     ///
     /// 合并优先级：manifest_enabled > profile.plugins[id].enabled > defaults.enabled > true。
     /// manifest 显式 false 则禁用（插件自声明不参与）；显式 true 或缺省则看 profile。
+    ///
+    /// 例外（K6）：profile 损坏（corrupted）时恒 false——启停配置不可信，manifest
+    /// 声明也无法作为放行依据（保守全禁，防显式禁用过的插件复活）。
     pub fn is_enabled(&self, plugin_id: &str, manifest_enabled: Option<bool>) -> bool {
+        if self.corrupted {
+            return false;
+        }
         if let Some(b) = manifest_enabled {
             return b;
         }
@@ -207,5 +232,44 @@ defaults:
             Some(ActivationPolicy::Eager)
         );
         assert!(!profile.plugins["disabled_plugin"].enabled.unwrap());
+    }
+
+    /// K6：profile 文件解析失败 → 保守全禁（is_enabled 恒 false，manifest
+    /// 显式 true 也不放行）+ is_corrupted 可查（启动报告）。
+    /// 显式禁用过的插件不得借"回退默认启用"静默复活。
+    #[test]
+    fn test_corrupted_profile_disables_everything() {
+        let dir = tempfile::tempdir().unwrap();
+        let plugins_cfg = dir.path().join("plugins");
+        std::fs::create_dir_all(&plugins_cfg).unwrap();
+        std::fs::write(
+            plugins_cfg.join("default_profile.yaml"),
+            "version: 1\nplugins: [broken\n",
+        )
+        .unwrap();
+
+        let en = PluginEnablement::load(dir.path());
+        assert!(en.is_corrupted(), "解析失败应标记 corrupted");
+        assert!(
+            !en.is_enabled("any_plugin", None),
+            "保守全禁：缺省 manifest"
+        );
+        assert!(
+            !en.is_enabled("any_plugin", Some(true)),
+            "保守全禁：manifest 显式 true 也不放行（启停配置不可信）"
+        );
+        assert!(!en.is_enabled("any_plugin", Some(false)));
+    }
+
+    /// K6 对照：文件缺失（非损坏）→ 保留文档化默认（默认启用 + 非 corrupted）。
+    #[test]
+    fn test_missing_profile_keeps_default_enabled() {
+        let dir = tempfile::tempdir().unwrap();
+        let en = PluginEnablement::load(dir.path());
+        assert!(!en.is_corrupted(), "缺失不是损坏");
+        assert!(
+            en.is_enabled("any_plugin", None),
+            "缺失 → 默认启用（文档化默认）"
+        );
     }
 }

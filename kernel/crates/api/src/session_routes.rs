@@ -16,6 +16,7 @@ use axum::Json;
 use serde::Deserialize;
 use serde_json::{json, Value};
 
+use crate::error::ApiError;
 use crate::routes::AppState;
 
 // ─── Sessions ─────────────────────────────────────────────────────────────
@@ -429,9 +430,11 @@ pub async fn list_session_messages_handler(
     headers: HeaderMap,
     Path(id): Path<String>,
     Query(q): Query<MessageListQuery>,
-) -> Json<Value> {
+) -> Result<Json<Value>, ApiError> {
     let Some(store) = state.store.as_ref() else {
-        return Json(json!({ "messages": [], "total": 0, "has_more": false }));
+        return Ok(Json(
+            json!({ "messages": [], "total": 0, "has_more": false }),
+        ));
     };
 
     // 传了 pipeline_run_id 就用它，否则回退路径 id；再回退线程的 active_pipeline_id
@@ -468,10 +471,7 @@ pub async fn list_session_messages_handler(
     .await
     {
         Ok(r) => r,
-        Err(e) => {
-            tracing::warn!(pipeline_id = %target_pid, error = %e, "get_messages_by_pipeline 查询失败");
-            return Json(json!({ "messages": [], "total": 0, "has_more": false }));
-        }
+        Err(e) => return Err(map_messages_query_failure(&target_pid, e)),
     };
 
     // content 直接取 slot 行读时重建的 content_preview：存储收敛后（任务 7）
@@ -554,7 +554,25 @@ pub async fn list_session_messages_handler(
     let total = messages.len();
     // has_more：若带 limit 且返回条数等于 limit，则可能还有更多
     let has_more = q.limit.map(|lim| total >= lim).unwrap_or(false);
-    Json(json!({ "messages": messages, "total": total, "has_more": has_more }))
+    Ok(Json(
+        json!({ "messages": messages, "total": total, "has_more": has_more }),
+    ))
+}
+
+/// 历史消息查询失败 → ApiError（K3：此前转成 200 空数组，前端无法区分
+/// 「新会话无历史」与「查询挂了」，对话历史"消失"无迹可查）。
+///
+/// DB 断连/租户错配属存储依赖故障 → 503（前端可渲染错误态并重试）；
+/// 细节留服务端 warn（含 pipeline_id + 底层错误串），对外文案不泄漏内部结构。
+fn map_messages_query_failure(pipeline_id: &str, e: agentos_core::types::StorageError) -> ApiError {
+    tracing::warn!(
+        pipeline_id = %pipeline_id,
+        error = %e,
+        "get_messages_by_pipeline 查询失败，返回 503（不再伪装成空历史）"
+    );
+    ApiError::ServiceUnavailable {
+        message: "消息历史查询暂时不可用（存储异常），请稍后重试".to_string(),
+    }
 }
 
 /// `GET /api/v1/sessions/{id}/messages` 查询参数。
@@ -609,4 +627,41 @@ pub async fn sessions_schema_handler(State(state): State<AppState>) -> Json<Valu
     }
 
     Json(json!({ "fields": fields }))
+}
+
+#[cfg(test)]
+mod messages_query_tests {
+    //! K3：历史消息查询失败 → ApiError::ServiceUnavailable（503），不再伪装成
+    //! 200 空数组（前端无法区分「新会话无历史」与「查询挂了」）。
+
+    use super::*;
+
+    #[test]
+    fn map_messages_query_failure_yields_service_unavailable() {
+        let e = map_messages_query_failure(
+            "pipe-1",
+            agentos_core::types::StorageError::Database("connection lost".to_string()),
+        );
+        match e {
+            ApiError::ServiceUnavailable { message } => {
+                assert!(!message.is_empty(), "对外文案非空（前端渲染错误态）");
+            }
+            other => panic!("DB 查询失败应映射 503，实际 {other:?}"),
+        }
+    }
+
+    #[test]
+    fn map_messages_query_failure_covers_all_storage_error_kinds() {
+        // 各类存储错误（NotFound 之外的故障形态）都不得回落 200 空数组
+        for e in [
+            agentos_core::types::StorageError::Database("db".to_string()),
+            agentos_core::types::StorageError::Io("io".to_string()),
+            agentos_core::types::StorageError::Serialization("ser".to_string()),
+        ] {
+            assert!(matches!(
+                map_messages_query_failure("p", e),
+                ApiError::ServiceUnavailable { .. }
+            ));
+        }
+    }
 }

@@ -148,7 +148,7 @@ pub async fn me_handler(
         message: "缺少认证信息".to_string(),
     })?;
 
-    let (user_id, username, exp) = decode_token(&token).ok_or(ApiError::Unauthorized {
+    let (_, username, exp) = decode_token(&token).ok_or(ApiError::Unauthorized {
         message: "无效的认证令牌".to_string(),
     })?;
 
@@ -158,13 +158,11 @@ pub async fn me_handler(
         });
     }
 
-    // token 校验场景无 tenant scope，用 username 跨租户查询（token 自带 username）
+    // token 校验场景无 tenant scope，用 username 跨租户查询（token 自带 username）。
+    // find_user_by_username 已 fail-closed（store 存在未命中不回退内置表，K4），
+    // 此处不得再叠 user_id 命中内置的回退——否则换库后旧 token 依旧合法。
     let user = find_user_by_username(state.store.as_ref(), &username)
         .await
-        .or_else(|| {
-            // 回退：user_id 命中内置 admin（兼容无 store 测试）
-            default_users().into_iter().find(|u| u.id == user_id)
-        })
         .ok_or(ApiError::Unauthorized {
             message: "用户不存在".to_string(),
         })?;
@@ -185,7 +183,7 @@ pub async fn refresh_handler(
     State(state): State<AppState>,
     Json(req): Json<RefreshRequest>,
 ) -> Result<Json<RefreshResponse>, ApiError> {
-    let (user_id, username, exp) =
+    let (_, username, exp) =
         decode_token(&req.refresh_token).ok_or_else(|| ApiError::Unauthorized {
             message: "无效的刷新令牌".to_string(),
         })?;
@@ -196,9 +194,10 @@ pub async fn refresh_handler(
         });
     }
 
+    // find_user_by_username fail-closed（store 存在未命中不回退内置表，K4）——
+    // refresh 也是 token 校验路径：已删除用户不得借内置表换发新 token。
     let user = find_user_by_username(state.store.as_ref(), &username)
         .await
-        .or_else(|| default_users().into_iter().find(|u| u.id == user_id))
         .ok_or(ApiError::Unauthorized {
             message: "用户不存在".to_string(),
         })?;
@@ -299,7 +298,7 @@ pub async fn register_handler(
 mod tests {
     use super::*;
     use axum::body::Body;
-    use axum::http::{Request, StatusCode};
+    use axum::http::{Method, Request, StatusCode};
     use serde_json::json;
     use tower::ServiceExt;
 
@@ -588,7 +587,7 @@ mod tests {
         let resp = app()
             .oneshot(
                 Request::builder()
-                    .method("POST")
+                    .method(Method::POST)
                     .uri("/api/v1/auth/refresh")
                     .header("content-type", "application/json")
                     .body(Body::from(body))
@@ -597,6 +596,104 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    // ── K4：token 校验路径不回退内置 admin（对齐 find_user_by_credentials）──
+
+    /// 手造内置 admin 形状的 access token（无签名 base64，格式见模块头）。
+    fn forged_builtin_admin_access_token() -> String {
+        use base64::Engine;
+        let exp = chrono::Utc::now().timestamp() as u64 + 3600;
+        let payload = format!("access:00000000-0000-0000-0000-000000000001:admin:{exp}");
+        base64::engine::general_purpose::STANDARD_NO_PAD.encode(payload)
+    }
+
+    /// store 存在但库里没有该用户（换库/清库后旧 token）→ /me 必须 401，
+    /// 不得借内置 admin 表复活（K4：token 校验路径对齐 find_user_by_credentials）。
+    #[tokio::test]
+    async fn test_me_rejects_token_when_user_absent_from_store() {
+        // 内存 store，故意不播种 admin（模拟换库/清库）
+        let store = std::sync::Arc::new(
+            agentos_engine::SqliteStore::open_memory().expect("open_memory 失败"),
+        );
+        let mut state = AppState::new();
+        state.store = Some(store);
+        let app = crate::server::build_router(state);
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri("/api/v1/auth/me")
+                    .header(
+                        "authorization",
+                        format!("Bearer {}", forged_builtin_admin_access_token()),
+                    )
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::UNAUTHORIZED,
+            "store 在而用户不存在：旧 token 不得命中内置表复活"
+        );
+    }
+
+    /// 同款裁决覆盖 refresh：store 无此用户 → 拒绝换发新 token（401）。
+    #[tokio::test]
+    async fn test_refresh_rejects_token_when_user_absent_from_store() {
+        use base64::Engine;
+        let store = std::sync::Arc::new(
+            agentos_engine::SqliteStore::open_memory().expect("open_memory 失败"),
+        );
+        let mut state = AppState::new();
+        state.store = Some(store);
+        let app = crate::server::build_router(state);
+
+        let exp = chrono::Utc::now().timestamp() as u64 + 3600;
+        let payload = format!("refresh:00000000-0000-0000-0000-000000000001:admin:{exp}");
+        let refresh = base64::engine::general_purpose::STANDARD_NO_PAD.encode(payload);
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/api/v1/auth/refresh")
+                    .header("content-type", "application/json")
+                    .body(Body::from(json!({ "refresh_token": refresh }).to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::UNAUTHORIZED,
+            "已删除用户不得借内置表换发新 token"
+        );
+    }
+
+    /// resolve_request_user（db-admin/user-admin/metrics 管理面共用鉴权入口）
+    /// 同款 fail-closed：store 在而用户不存在 → 401。
+    #[tokio::test]
+    async fn test_resolve_request_user_fail_closed_with_store() {
+        let store: std::sync::Arc<dyn agentos_core::traits::StorageBackend> = std::sync::Arc::new(
+            agentos_engine::SqliteStore::open_memory().expect("open_memory 失败"),
+        );
+        let mut headers = axum::http::HeaderMap::new();
+        headers.insert(
+            "authorization",
+            format!("Bearer {}", forged_builtin_admin_access_token())
+                .parse()
+                .unwrap(),
+        );
+        let err = agentos_http::auth::resolve_request_user(Some(&store), &headers)
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err, crate::error::ApiError::Unauthorized { .. }),
+            "store 在而用户不存在应 401，实际 {err:?}"
+        );
     }
 
     // ── logout ──

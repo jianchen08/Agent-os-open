@@ -240,9 +240,73 @@ fn extract_mcp_content(mcp_result: &serde_json::Value) -> serde_json::Value {
     }
 }
 
+/// MCP 工具调用返回归一（sidecar 决策树，`invoke_mcp_tool` 的纯函数核心）。
+///
+/// 输入是 `extract_mcp_content` 提取的工具 handler 原始返回（业务 dict）。按形状分流：
+/// - ②-a 真 ToolExecutionResult 信封（同时带 success + data）→ 直接 from_value；
+/// - ②-b Python ToolResult 形状（带 success 但无 data）→ 归一化：
+///   - (A) 带 output 键（builtin_tools 的 ToolResult.to_dict()）→ data = output；
+///   - (B) 无 output 键（server.py 解包直返、恰带 success 键的业务 dict）→ data = inner；
+///   - success=false → failure(error)；
+/// - ① MCP isError=true / 工具返回 `{"error":"..."}`（无 success）→ failure；
+/// - ③ 纯业务数据（无 success 无 error）→ success(data=inner)。
+///
+/// K7：②-b 的 `success` 键存在但非 bool（字符串/整数状态码等信封漂移）→
+/// `PARSE_ERROR`（与 ②-a 对信封解析失败同判）。禁止 `unwrap_or(true)` 把失败
+/// 工具调用包装成成功污染下游 state——原始信封此时已丢，成功偏置无法追溯。
+fn normalize_mcp_tool_result(
+    inner: Value,
+    tool_name: &str,
+) -> Result<ToolExecutionResult, PluginError> {
+    if inner.get("success").is_some() && inner.get("data").is_some() {
+        // ②-a 真 ToolExecutionResult 信封（from_value 对非 bool success 同样报错）
+        serde_json::from_value(inner).map_err(|e| PluginError {
+            message: format!("failed to parse MCP response as ToolExecutionResult: {}", e),
+            code: Some("PARSE_ERROR".to_string()),
+            source: Some("plugin-invoker".to_string()),
+        })
+    } else if inner.get("success").is_some() {
+        // ②-b 带 success 但无 data。与流式 tool_result 事件使用同一个 success
+        // 信号（tool_core/src/lib.rs:351）。
+        let ok = inner
+            .get("success")
+            .and_then(|v| v.as_bool())
+            .ok_or_else(|| PluginError {
+                message: format!(
+                    "MCP tool '{}' returned non-boolean 'success' field: {:?} (envelope drift, refusing to default to success)",
+                    tool_name, inner["success"]
+                ),
+                code: Some("PARSE_ERROR".to_string()),
+                source: Some("plugin-invoker".to_string()),
+            })?;
+        if ok {
+            let data = if inner.get("output").is_some() {
+                inner
+                    .get("output")
+                    .cloned()
+                    .unwrap_or(serde_json::Value::Null)
+            } else {
+                inner.clone()
+            };
+            Ok(ToolExecutionResult::success(data))
+        } else {
+            let err_msg = inner
+                .get("error")
+                .and_then(|v| v.as_str())
+                .unwrap_or("tool execution failed");
+            Ok(ToolExecutionResult::failure(err_msg))
+        }
+    } else if let Some(err) = inner.get("error").and_then(|v| v.as_str()) {
+        // ① MCP isError=true 或工具自身返回 {"error": "..."} 且无 success 字段
+        Ok(ToolExecutionResult::failure(err))
+    } else {
+        // ③ 纯业务数据 → 包成 success 信封
+        Ok(ToolExecutionResult::success(inner))
+    }
+}
+
 /// B2：native 工具调用返回归一（对齐 [`PluginInvokerImpl::invoke_tool`] sidecar
 /// 决策树的归一层：纯业务数据包 success 信封）。
-///
 /// 插件 execute 的返回 JSON 按形状分流：
 /// - 带 `success`（bool）→ ToolExecutionResult 信封形态（新工具插件的约定返回）：
 ///   - `success=true` → success(data 字段，缺省 Null)，保留 duration_ms；
@@ -749,57 +813,7 @@ impl PluginInvokerImpl {
         //   ③ 否则视为纯业务数据 → success(data=inner)，与 pipeline 路径
         //      （ToolExecutionResult::success(to_value(plugin_result))）对齐。
         let inner = extract_mcp_content(&result);
-        // 决策树（统一 Python ToolResult 与 ToolExecutionResult 两种信封）：
-        //   ②-a 返回已是 ToolExecutionResult 信封（同时带 success + data）→ 直接 from_value
-        //   ②-b Python ToolResult 形状（带 success 但无 data，有 output/error）→ 归一化：
-        //        success=true  → success(data=output)
-        //        success=false → failure(error)
-        //   ①   MCP isError=true / 工具返回 {"error":"..."}（无 success）→ failure
-        //   ③   纯业务数据（无 success 无 error）→ success(data=inner)
-        let tool_result = if inner.get("success").is_some() && inner.get("data").is_some() {
-            // ②-a 真 ToolExecutionResult 信封
-            serde_json::from_value(inner).map_err(|e| PluginError {
-                message: format!("failed to parse MCP response as ToolExecutionResult: {}", e),
-                code: Some("PARSE_ERROR".to_string()),
-                source: Some("plugin-invoker".to_string()),
-            })?
-        } else if inner.get("success").is_some() {
-            // ②-b 带 success 但无 data 字段。两种实际形态：
-            //   (A) builtin_tools 的 ToolResult.to_dict() 信封 {success, output, error, metadata}
-            //       → 业务数据在 output 里，取 output 作为 data。
-            //   (B) memory 等 server.py 把 result.output 解包后直接返回（inner 本身就是业务 dict，
-            //       恰好带 success 键，如 {success:true, memory_id:...}，无 output 键）
-            //       → inner 本身即 data。
-            //   区分：inner 有 "output" 键 → (A)；否则 → (B)。
-            //   与流式 tool_result 事件使用同一个 success 信号（tool_core/src/lib.rs:351）。
-            let ok = inner
-                .get("success")
-                .and_then(|v| v.as_bool())
-                .unwrap_or(true);
-            if ok {
-                let data = if inner.get("output").is_some() {
-                    inner
-                        .get("output")
-                        .cloned()
-                        .unwrap_or(serde_json::Value::Null)
-                } else {
-                    inner.clone()
-                };
-                ToolExecutionResult::success(data)
-            } else {
-                let err_msg = inner
-                    .get("error")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("tool execution failed");
-                ToolExecutionResult::failure(err_msg)
-            }
-        } else if let Some(err) = inner.get("error").and_then(|v| v.as_str()) {
-            // ① MCP isError=true 或工具自身返回 {"error": "..."} 且无 success 字段
-            ToolExecutionResult::failure(err)
-        } else {
-            // ③ 纯业务数据 → 包成 success 信封
-            ToolExecutionResult::success(inner)
-        };
+        let tool_result = normalize_mcp_tool_result(inner, tool_name)?;
 
         Ok(tool_result)
     }
@@ -3161,6 +3175,64 @@ mod tests {
         let r = normalize_native_tool_output(&json!({"success": true}));
         assert!(r.success);
         assert_eq!(r.data, serde_json::Value::Null);
+    }
+
+    // ── normalize_mcp_tool_result（sidecar 决策树）单元测试 ──
+
+    #[test]
+    fn test_normalize_mcp_result_python_toolresult_shapes() {
+        // ②-b (A)：ToolResult.to_dict() 信封 {success, output} → data=output
+        let ok = normalize_mcp_tool_result(json!({"success": true, "output": {"rows": 3}}), "t1")
+            .unwrap();
+        assert!(ok.success);
+        assert_eq!(ok.data, json!({"rows": 3}));
+
+        // ②-b (B)：解包直返的业务 dict 恰带 success 键 → data=inner
+        let ok2 =
+            normalize_mcp_tool_result(json!({"success": true, "memory_id": "m-1"}), "t1").unwrap();
+        assert!(ok2.success);
+        assert_eq!(ok2.data, json!({"success": true, "memory_id": "m-1"}));
+
+        // ②-b success=false → failure(error)
+        let fail =
+            normalize_mcp_tool_result(json!({"success": false, "error": "boom"}), "t1").unwrap();
+        assert!(!fail.success);
+        assert_eq!(fail.error.as_deref(), Some("boom"));
+    }
+
+    #[test]
+    fn test_normalize_mcp_result_error_and_plain_data_shapes() {
+        // ① isError=true 提取产物 {"error": "..."}（无 success）→ failure
+        let fail = normalize_mcp_tool_result(json!({"error": "isError"}), "t1").unwrap();
+        assert!(!fail.success);
+        assert_eq!(fail.error.as_deref(), Some("isError"));
+
+        // ③ 纯业务数据 → success(data=inner)
+        let plain = normalize_mcp_tool_result(json!({"result": [1, 2]}), "t1").unwrap();
+        assert!(plain.success);
+        assert_eq!(plain.data, json!({"result": [1, 2]}));
+    }
+
+    #[test]
+    fn test_normalize_mcp_result_non_boolean_success_is_parse_error() {
+        // K7：success 键存在但非 bool（字符串/整数状态码等信封漂移）→ PARSE_ERROR，
+        // 不得 unwrap_or(true) 把失败包装成成功污染下游 state。
+        for bad in [
+            json!({"success": "true"}),
+            json!({"success": 0}),
+            json!({"success": "ok", "output": {}}),
+        ] {
+            let err = normalize_mcp_tool_result(bad, "drifting_tool").unwrap_err();
+            assert_eq!(
+                err.code.as_deref(),
+                Some("PARSE_ERROR"),
+                "非布尔 success 必须 PARSE_ERROR: {err}"
+            );
+            assert!(
+                err.message.contains("non-boolean"),
+                "报错应指明信封漂移: {err}"
+            );
+        }
     }
 
     // ── extract_mcp_content 辅助函数单元测试 ──
