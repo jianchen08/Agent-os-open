@@ -307,10 +307,12 @@ class TaskSubmitTool(BuiltinTool):
                     },
                     "target_id": {
                         "type": "string",
+                        "minLength": 1,
                         "description": "目标 Agent ID。non_container 必填，container 不需要。如果系统提供了 Agent 映射表，直接使用映射表中的 ID，不要用 resource_search 搜索",
                     },
                     "goal_title": {
                         "type": "string",
+                        "minLength": 1,
                         "description": "任务标题（必填），简短明确",
                     },
                     "goal_description": {
@@ -389,7 +391,11 @@ class TaskSubmitTool(BuiltinTool):
                     },
                     "parent_task_id": {
                         "type": "string",
-                        "description": ("父任务 ID。为容器任务创建子任务时需要指定此参数，将子任务关联到对应的容器。"),
+                        "pattern": "^[0-9a-f]{32}$",
+                        "description": (
+                            "父任务 ID（task=pipeline 统一后即引擎管道身份，32 位 hex）。"
+                            "为容器任务创建子任务时需要指定此参数，将子任务关联到对应的容器。"
+                        ),
                     },
                     "workspace": {
                         "type": "string",
@@ -1417,13 +1423,6 @@ class TaskSubmitTool(BuiltinTool):
                 error_code="L2_CANNOT_SUBMIT_CONTAINER",
             )
 
-        task_service = self._get_task_service()
-        if task_service is None:
-            return create_failure_result(
-                error="任务服务不可用，请检查系统配置",
-                error_code="SERVICE_UNAVAILABLE",
-            )
-
         # GAP-1 统一（state 单一真值）：容器任务也是管道——直接经 chat.send_message
         # 创建（task.scope=container 出生即入 state，空间拓扑由执行管道 init 体
         # workspace_lifecycle 消费 execution_context 处理），不再创建 YAML 任务
@@ -1448,49 +1447,25 @@ class TaskSubmitTool(BuiltinTool):
         # src/channels/websocket/ws_interaction_notifier（task_11 P2-7）。
         # 待 SDK 实现后改用 ctx.frontend.emit(event="task_status_update", scope=...) 恢复。
 
-        from isolation.workspace import resolve_container_workspace_path  # noqa: PLC0415
-
-        container_workspace_path = resolve_container_workspace_path(
-            inputs.get("workspace"),
-            task_id,
-            # 容器任务不可选隔离（校验已拒绝）→ 恒为隔离复制（isolated）
-            isolation_mode="isolated",
-        )
-
-        # ── 同步初始化容器工作空间 ──
-        # 与非容器任务一致：submit 返回前必须完成工作空间创建。
-        # 容器空间恒复制（isolated），不再携带 isolation_mode 分支。
-        _container_task_data = {"isolation_mode": "isolated"}
-        task, ws_err = await self._init_workspace(
-            task,
-            inputs.get("workspace") or "",
-            _container_task_data,
-            task_service,
-            is_container=True,
-        )
-        if ws_err:
-            await task_service.hard_delete(task.id)
-            return create_failure_result(error=ws_err, error_code="WORKSPACE_INIT_FAILED")
-
-        # on_task_start 可能重算路径，以 ws_meta 为准
-        _ws_meta_path = (task.metadata or {}).get("ws_meta", {}).get("path", "")
-        if _ws_meta_path:
-            container_workspace_path = _ws_meta_path
-
+        # GAP-1 收尾（2026-08-20 触碰即清）：提交期不再初始化容器工作空间——
+        # 空间拓扑经 execution_context（workspace.mode=container_copy）由执行管道
+        # init 体 workspace_lifecycle 统一处理（与非容器任务同一管线）；旧的
+        # _init_workspace/hard_delete/ws_meta 链路是 task_service 写路径时代的
+        # 遗留（且引用已不存在的 task 对象，带 sender 的真实路径必 NameError）。
+        title = str(goal["title"]) if goal else ""
         result_data = {
-            "task_id": task.id,
-            "title": task.title,
-            "status": task.status.value,
+            "task_id": task_id,
+            "title": title,
+            "status": "running",
             "task_scope": "container",
             "workspace": inputs.get("workspace") or "",
-            "resolved_workspace": container_workspace_path,
         }
 
         result_data["message"] = (
-            f"容器任务 [{task.title}]（ID: {task.id}）已提交"
-            + (f"，工作空间：{container_workspace_path}。" if parent_agent_level == 1 else "。")
-            + "容器只是组织框架，不直接执行。你现在必须立即继续操作："
-            f"下一步——使用 task_submit(parent_task_id='{task.id}', target_type='agent', "
+            f"容器任务 [{title}]（ID: {task_id}）已提交，执行管道已创建"
+            f"（pipeline {task_id}），容器空间由执行管道初始化。"
+            "容器只是组织框架，不直接执行。你现在必须立即继续操作："
+            f"下一步——使用 task_submit(parent_task_id='{task_id}', target_type='agent', "
             "target_id='solution_planning_agent') 提交方案规划子任务。"
             "请在同一轮对话中立即调用，不要等待。"
         )
@@ -1499,77 +1474,6 @@ class TaskSubmitTool(BuiltinTool):
             data=result_data,
             metadata={"action": "task_submit_container"},
         )
-
-    @staticmethod
-    async def _init_workspace(
-        task: Any,
-        workspace: str,
-        task_data: dict[str, Any],
-        task_service: Any,
-        *,
-        is_container: bool = False,
-    ) -> tuple[Any, str | None]:
-        """同步初始化工作空间，确保 ws_meta 写入 task.metadata 后才返回。"""
-
-        provider = _get_service_provider()
-        lifecycle = provider.get("workspace_lifecycle_manager") if provider else None
-        if lifecycle is None:
-            # 0.2 文档化降级（FP-MIGR）：sidecar 无 workspace_lifecycle_manager
-            # 实例（0.1 infrastructure 层已废弃）→ 跳过工作空间初始化并记录警告，
-            # 不阻塞任务提交（否则 0.2 下所有提交都会硬失败）。
-            logger.warning(
-                "[TaskSubmit] workspace_lifecycle_manager 不可用，跳过工作空间初始化 | task_id=%s",
-                task.id,
-            )
-            return task, None
-
-        # 兼容注入 isolation_mode（0.1 lifecycle 其余消费者仍读此字段；
-        # 拓扑决策已改读 workspace_mode，见 workspace_lifecycle._start_root_task）
-        if "isolation_mode" not in task_data:
-            iso_level = (task.metadata or {}).get("isolation_level", "")
-            if iso_level:
-                task_data["isolation_mode"] = iso_level
-
-        fn = lifecycle.init_container_workspace if is_container else lifecycle.on_task_start
-        try:
-            loop = asyncio.get_running_loop()
-            ws_meta = await loop.run_in_executor(None, fn, task.id, workspace, task_data)
-        except Exception as ws_err:
-            logger.error(
-                "[TaskSubmit] 工作空间初始化失败 | task_id=%s | container=%s | error=%s",
-                task.id,
-                is_container,
-                ws_err,
-            )
-            return task, f"工作空间初始化失败: {ws_err}"
-
-        # on_task_start 内部已调 _persist_ws_meta 写入 task.metadata；
-        # init_container_workspace 只写内存 _ws_meta_store，不持久化，
-        # 需要在此手动写入 task.metadata 以便后续统一读取。
-        if is_container and isinstance(ws_meta, dict) and ws_meta.get("path"):
-            task.metadata = task.metadata or {}
-            task.metadata["ws_meta"] = ws_meta
-            try:
-                await task_service.save_task(task)
-            except Exception as save_err:
-                logger.warning(
-                    "[TaskSubmit] 容器 ws_meta 持久化失败 (non-fatal) | task_id=%s | error=%s",
-                    task.id,
-                    save_err,
-                )
-
-        # 重新读取 task 获取 lifecycle 写入的最新 metadata（含 ws_meta）
-        refreshed = task_service.get_task(task.id)
-        if refreshed:
-            task = refreshed
-        if not (task.metadata or {}).get("ws_meta"):
-            logger.error(
-                "[TaskSubmit] 工作空间初始化完成但 ws_meta 缺失 | task_id=%s",
-                task.id,
-            )
-            return task, "工作空间初始化异常：ws_meta 未生成"
-
-        return task, None
 
     def _check_parent_ownership(
         self,

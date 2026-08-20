@@ -28,10 +28,12 @@
             },
             "target_id": {
               "type": "string",
+              "minLength": 1,
               "description": "目标 Agent ID。non_container 必填，container 不需要。如果系统提供了 Agent 映射表，直接使用映射表中的 ID，不要用 resource_search 搜索"
             },
             "goal_title": {
               "type": "string",
+              "minLength": 1,
               "description": "任务标题（必填），简短明确"
             },
             "goal_description": {
@@ -88,7 +90,8 @@
             },
             "parent_task_id": {
               "type": "string",
-              "description": "父任务 ID。为容器任务创建子任务时需要指定此参数，将子任务关联到对应的容器。"
+              "pattern": "^[0-9a-f]{32}$",
+              "description": "父任务 ID（task=pipeline 统一后即引擎管道身份，32 位 hex）。为容器任务创建子任务时需要指定此参数，将子任务关联到对应的容器。"
             },
             "workspace": {
               "type": "string",

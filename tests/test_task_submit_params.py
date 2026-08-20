@@ -105,8 +105,9 @@ class FakeTaskService:
 def make_tool(tool_module, service: FakeTaskService):
     """构造 TaskSubmitTool，monkeypatch 服务提供者与校验钩子。
 
-    0.2 收尾：提交即落库（start_run 占位已移除），task_data 在 _init_workspace
-    处消费——测试 monkeypatch _init_workspace 捕获 task_data。
+    GAP-1 统一后：提交不再走 YAML/task_service 写路径，workspace/隔离语义经
+    chat.send_message 的 execution_context 透传（执行管道 workspace_lifecycle
+    消费）——测试注入假 chat sender 捕获派发 params，断言 execution_context。
     """
     tool = tool_module.TaskSubmitTool()
     captured: dict = {}
@@ -127,14 +128,20 @@ def make_tool(tool_module, service: FakeTaskService):
     tool._validate_target_agent = _fake_validate_target
     tool._check_parent_ownership = lambda level, pid: (True, None)
 
-    async def fake_init_workspace(task, workspace, task_data, task_service, *, is_container=False):
-        captured["workspace"] = workspace
-        captured["task_data"] = task_data
-        captured["is_container"] = is_container
-        return task, None
+    async def fake_sender(params: dict) -> dict:
+        captured["params"] = params
+        # 模拟引擎创建分支响应（uuid v4 simple 32hex，形态见 chat 契约）
+        return {"status": "created", "pipeline_id": "a1b2c3d4e5f64789abcdef0123456789"}
 
-    tool._init_workspace = fake_init_workspace
+    tool_module.set_chat_sender(fake_sender)
     return tool, captured
+
+
+@pytest.fixture(autouse=True)
+def _reset_chat_sender(tool_module):
+    """模块级全局 chat sender 用后复位——不泄漏到后续测试文件。"""
+    yield
+    tool_module._chat_sender = None
 
 
 def base_inputs(**overrides):
@@ -181,15 +188,19 @@ async def test_container_forbids_workspace_mode_and_isolation(tool_module):
 
 @pytest.mark.asyncio
 async def test_container_allows_workspace_source(tool_module, tmp_proj):
-    """容器任务：workspace 可填（作为容器空间源项目），且恒为隔离复制。"""
+    """容器任务：workspace 可填（作为容器空间源项目），恒 container_copy 复制。"""
     tool, captured = make_tool(tool_module, FakeTaskService())
 
     inputs = base_inputs(task_scope="container", parent_agent_level=1, workspace=tmp_proj)
     result = await tool.execute(inputs)
     assert result.success, result.error
-    assert captured["workspace"] == tmp_proj
-    # 容器任务不可选隔离 → 恒 isolated（复制到容器空间）
-    assert captured["task_data"]["isolation_mode"] == "isolated"
+    ec = captured["params"]["execution_context"]
+    # 容器空间拓扑恒复制（mode=container_copy），源空间透传给执行管道
+    assert ec["workspace"]["source_path"] == tmp_proj
+    assert ec["workspace"]["mode"] == "container_copy"
+    assert ec["workspace"]["explicit"] is True
+    # 容器任务不可选隔离 → execution_context 不携带 isolation（系统默认）
+    assert "isolation" not in ec
 
 
 # ── 容器直接子任务 ─────────────────────────────────────────────
@@ -218,10 +229,12 @@ async def test_container_child_can_choose_mode_and_isolation(tool_module, tmp_pr
     )
     result = await tool.execute(inputs)
     assert result.success, result.error
-    assert captured["task_data"]["workspace_mode"] == "worktree"
-    assert captured["task_data"]["isolation_level"] == "isolated"
-    # 不填 workspace → 继承容器空间（空值由父链解析）
-    assert captured["task_data"]["workspace"] == ""
+    ec = captured["params"]["execution_context"]
+    assert ec["workspace"]["mode"] == "worktree"
+    assert ec["isolation"]["level"] == "isolated"
+    # 不填 workspace → 空值由父链在执行管道解析（explicit=False 交下游继承）
+    assert ec["workspace"]["source_path"] == ""
+    assert ec["workspace"]["explicit"] is False
 
 
 @pytest.mark.asyncio
@@ -273,16 +286,17 @@ async def test_container_child_inherit_pipe_allowed(tool_module, tmp_proj):
 
 @pytest.mark.asyncio
 async def test_container_child_without_params_submits_inherited(tool_module, tmp_proj):
-    """容器直接子任务不带空间/隔离字段：正常提交，工作空间继承容器（空值）。"""
+    """容器直接子任务不带空间/隔离字段：正常提交，空间继承交执行管道父链解析。"""
     service = container_child_service(tmp_proj)
     tool, captured = make_tool(tool_module, service)
 
     inputs = base_inputs(task_id="container_p")
     result = await tool.execute(inputs)
     assert result.success, result.error
-    assert captured["task_data"]["workspace"] == ""
-    assert captured["task_data"]["workspace_mode"] == ""
-    assert captured["task_data"]["isolation_level"] == ""
+    ec = captured["params"]["execution_context"]
+    # 不显式指定 → 空源路径 + explicit=False（继承语义由 workspace_lifecycle 按父链解析）
+    assert ec["workspace"]["source_path"] == ""
+    assert ec["workspace"]["explicit"] is False
 
 
 # ── 普通子任务（继承父任务，除非管道继承）─────────────────────
@@ -323,8 +337,11 @@ async def test_ordinary_subtask_without_params_submits(tool_module):
     inputs = base_inputs(task_id="parent_p")
     result = await tool.execute(inputs)
     assert result.success, result.error
-    assert captured["task_data"]["workspace"] == ""
-    assert captured["task_data"]["workspace_mode"] == ""
+    ec = captured["params"]["execution_context"]
+    assert ec["workspace"]["source_path"] == ""
+    assert ec["workspace"]["explicit"] is False
+    # 普通任务默认隔离执行（0.1 coordinator.default_level 对齐）
+    assert ec["isolation"]["level"] == "isolated"
 
 
 @pytest.mark.asyncio
@@ -363,7 +380,7 @@ async def test_ordinary_subtask_inherit_pipe_allowed(tool_module, tmp_proj):
 
 @pytest.mark.asyncio
 async def test_ordinary_root_task_accepts_all_three(tool_module, tmp_proj):
-    """普通根任务：workspace / workspace_mode / isolation_level 三者可填并进入 task_data。"""
+    """普通根任务：workspace / workspace_mode / isolation_level 三者可填并进入 execution_context。"""
     service = FakeTaskService()
     tool, captured = make_tool(tool_module, service)
 
@@ -375,19 +392,20 @@ async def test_ordinary_root_task_accepts_all_three(tool_module, tmp_proj):
     )
     result = await tool.execute(inputs)
     assert result.success, result.error
-    assert captured["task_data"]["workspace"] == tmp_proj
-    assert captured["task_data"]["workspace_mode"] == "worktree"
-    assert captured["task_data"]["isolation_level"] == "isolated"
-    # metadata 落账（供运行期 isolation_guard / workspace 插件读取）
-    meta = service.created[0]["metadata"]
-    assert meta["workspace"] == tmp_proj
-    assert meta["workspace_mode"] == "worktree"
-    assert meta["isolation_level"] == "isolated"
+    ec = captured["params"]["execution_context"]
+    assert ec["workspace"]["source_path"] == tmp_proj
+    assert ec["workspace"]["mode"] == "worktree"
+    assert ec["workspace"]["explicit"] is True
+    assert ec["isolation"]["level"] == "isolated"
+    # 任务域字段出生即入 state（GAP-1：task=pipeline，YAML metadata 写路径退役）
+    state = captured["params"]["state"]
+    assert state["task.scope"] == "non_container"
+    assert state["task.goal"] == "测试任务"
 
 
 @pytest.mark.asyncio
 async def test_ordinary_root_task_plain_mode(tool_module, tmp_proj):
-    """普通根任务：plain 拓扑显式选择（与隔离解耦，两者独立落账）。"""
+    """普通根任务：plain 拓扑显式选择（与隔离解耦，两者独立透传）。"""
     service = FakeTaskService()
     tool, captured = make_tool(tool_module, service)
 
@@ -399,9 +417,9 @@ async def test_ordinary_root_task_plain_mode(tool_module, tmp_proj):
     )
     result = await tool.execute(inputs)
     assert result.success, result.error
-    assert captured["task_data"]["workspace_mode"] == "plain"
-    assert captured["task_data"]["isolation_level"] == "non_isolated"
-    assert service.created[0]["metadata"]["workspace_mode"] == "plain"
+    ec = captured["params"]["execution_context"]
+    assert ec["workspace"]["mode"] == "plain"
+    assert ec["isolation"]["level"] == "non_isolated"
 
 
 # ── schema ─────────────────────────────────────────────────────

@@ -119,7 +119,8 @@ class TriggerSetupTool(BuiltinTool):
                     },
                     "trigger_id": {
                         "type": "string",
-                        "description": "触发器 ID（action=cancel/update 时必填）",
+                        "pattern": "^trigger_[a-z]+_[0-9a-f]{12}$",
+                        "description": "触发器 ID（action=cancel/update 时必填，格式 trigger_<类型>_<12位hex>）",
                     },
                     "trigger_type": {
                         "type": "string",
@@ -135,18 +136,23 @@ class TriggerSetupTool(BuiltinTool):
                     },
                     "message": {
                         "type": "string",
+                        "minLength": 1,
                         "description": "触发时注入的消息内容",
                     },
                     "delay_seconds": {
                         "type": "integer",
+                        "minimum": 1,
+                        "maximum": 86400,
                         "description": "延迟秒数（trigger_type=delay 时必填），最小 1 秒，最大 86400 秒（24小时）",
                     },
                     "schedule_time": {
                         "type": "string",
+                        "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}",
                         "description": "定时触发时间（trigger_type=schedule 时必填），ISO 8601 格式，如: 2026-03-15T15:00:00",
                     },
                     "interval": {
                         "type": "string",
+                        "pattern": "^[0-9]+[smhd]",
                         "description": (
                             "周期间隔（trigger_type=interval 时必填），"
                             "支持格式: '30s', '5m', '1h', '1d', '1h30m'。"
@@ -155,10 +161,12 @@ class TriggerSetupTool(BuiltinTool):
                     },
                     "max_count": {
                         "type": "integer",
+                        "minimum": 0,
                         "description": "最大触发次数（0 或不填表示无限），到达后触发器自动停止",
                     },
                     "max_time": {
                         "type": "string",
+                        "pattern": "^[0-9]+[smhd]",
                         "description": (
                             "最长运行时间（到达后触发器自动停止），支持格式: '30m', '2h', '3d', '1h30m'。不填表示无限"
                         ),
