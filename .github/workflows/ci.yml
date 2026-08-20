@@ -648,6 +648,25 @@ jobs:
           done
           exit $failed
 
+      - name: Build native plugin artifacts (cdylib, Linux .so)
+        run: |
+          for mf in $(git ls-files 'plugins/**/plugin.json' | sort -u); do
+            d=$(dirname "$mf")
+            if grep -q '"native"' "$mf" && [ -f "$d/Cargo.toml" ]; then
+              echo "::group::native build $d"
+              (cd "$d" && cargo build --release)
+              art=$(python3 -c "import json;print(json.load(open('plugin.json'))['native']['artifact'])" 2>/dev/null)
+              stem="${art%.*}"
+              if [ -n "$stem" ]; then
+                for cand in "lib${stem}.so" "${stem}.so" "${stem}.dll"; do
+                  [ -f "target/release/$cand" ] && cp "target/release/$cand" . && break
+                done
+              fi
+              echo "::endgroup::"
+            fi
+          done
+          ls plugins/shared/pipeline/output/spill_guard/ || true
+
       - name: Build kernel (release, sccache cached)
         working-directory: kernel
         run: |
