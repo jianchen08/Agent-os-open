@@ -2302,6 +2302,3 @@ def create_compress_llm_call_fn(caller: CapabilityCaller) -> LLMCallFn:
     """
     return _build_compress_llm_call_fn(caller)
 
-
-# asyncio 仅在 _build_compress_llm_call_fn 内引用以表明导入意图；保留以兼容静态检查
-_ = asyncio if False else None  # type: ignore[func-returns-value]

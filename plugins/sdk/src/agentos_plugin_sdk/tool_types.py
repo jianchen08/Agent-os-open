@@ -166,7 +166,7 @@ class Tool(BaseModel):
 
     # Schema 定义
     input_schema: dict[str, Any] = Field(..., description="输入参数 JSON Schema")
-    output_schema: dict[str, Any] | None = Field(None, description="输出 Schema")
+    output_schema: dict[str, Any] | None = Field(default=None, description="输出 Schema")
 
     # 注入参数声明（运行时注入，不传给 LLM）
     injected_params: list[str] = Field(
@@ -197,27 +197,27 @@ class Tool(BaseModel):
 
     # 元数据
     source: ToolSource = Field(..., description="工具来源: code/mcp/http")
-    category: ToolCategory | None = Field(None, description="工具功能分类")
-    level: ToolLevel = Field(ToolLevel.USER, description="工具级别：system/user")
-    version: str = Field("1.0.0", description="版本号")
+    category: ToolCategory | None = Field(default=None, description="工具功能分类")
+    level: ToolLevel = Field(default=ToolLevel.USER, description="工具级别：system/user")
+    version: str = Field(default="1.0.0", description="版本号")
     tags: list[str] = Field(default_factory=list, description="标签")
     metadata: dict[str, Any] = Field(default_factory=dict, description="扩展元数据")
 
     # 状态与权限
-    status: ToolStatus = Field(ToolStatus.ACTIVE, description="工具状态")
+    status: ToolStatus = Field(default=ToolStatus.ACTIVE, description="工具状态")
     dangerous_operations: list[str] = Field(default_factory=list, description="危险操作列表，由安全插件统一决策审批")
 
     # 数据库同步字段
-    db_id: str | None = Field(None, description="数据库记录 ID")
-    checksum: str | None = Field(None, description="定义校验和，用于检测变更")
+    db_id: str | None = Field(default=None, description="数据库记录 ID")
+    checksum: str | None = Field(default=None, description="定义校验和，用于检测变更")
 
     # 业务字段（从 ToolServiceTool 合并）
-    enabled: bool = Field(True, description="工具是否启用")
+    enabled: bool = Field(default=True, description="工具是否启用")
     permissions: list[str] = Field(default_factory=list, description="工具权限列表")
     parameters: dict[str, Any] = Field(default_factory=dict, description="参数定义（兼容字段）")
-    handler: Callable[..., Any] | None = Field(None, description="工具处理函数")
-    author: str = Field("system", description="工具作者")
-    created_at: datetime | None = Field(None, description="创建时间")
+    handler: Callable[..., Any] | None = Field(default=None, description="工具处理函数")
+    author: str = Field(default="system", description="工具作者")
+    created_at: datetime | None = Field(default=None, description="创建时间")
 
     @field_validator("name")
     @classmethod

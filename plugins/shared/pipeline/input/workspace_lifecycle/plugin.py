@@ -23,6 +23,7 @@ State 命名空间：
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 import sys

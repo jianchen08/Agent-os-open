@@ -1113,7 +1113,9 @@ async def resume_task(
 
     """
 
-    # GAP-1 统一：恢复 = resume_pipeline（按管道恢复最新 suspended run）
+    # GAP-1 统一：恢复 = resume_pipeline（按管道恢复最新 suspended run）；
+    # 不再走 task_service 重新提交（task_submitted 恒 False，旧字段仅保留响应形状）
+    task_submitted = False
     if not await _resume_task_pipeline(task_id):
         raise APIError(
             status_code=404,
