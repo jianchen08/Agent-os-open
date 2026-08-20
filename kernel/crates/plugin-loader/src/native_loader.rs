@@ -209,6 +209,27 @@ impl NativePluginLoader {
         self.loaded.read().keys().cloned().collect()
     }
 
+    /// 解析产物实际路径：声明名（含已带后缀）原样优先，磁盘缺失时按**本平台**
+    /// 重映射回退（manifest 常见写死 `.dll`，Linux 产物是 `lib{}.so`——跨平台
+    /// 声明兼容，CI/Linux boot 必需）。两处消费（loader 预检 + invoker 实加载）
+    /// 同规则。仍未命中返回 None（调用方各自报错）。
+    pub fn resolve_artifact(dir: &std::path::Path, artifact: &str) -> Option<std::path::PathBuf> {
+        let primary = dir.join(Self::platform_artifact_name(artifact));
+        if primary.exists() {
+            return Some(primary);
+        }
+        let lower = artifact.to_lowercase();
+        let stem = [".dll", ".so", ".dylib"]
+            .iter()
+            .find_map(|e| lower.strip_suffix(e))
+            .unwrap_or(artifact);
+        let mapped = dir.join(Self::platform_artifact_name(stem));
+        if mapped.exists() {
+            return Some(mapped);
+        }
+        None
+    }
+
     /// 按平台约定补全 cdylib 文件名前缀/后缀。
     pub fn platform_artifact_name(artifact: &str) -> String {
         let has_ext = [".dll", ".so", ".dylib"]
@@ -232,6 +253,33 @@ mod tests {
     use super::*;
 
     #[test]
+    fn resolve_artifact_falls_back_cross_platform() {
+        let dir = std::env::temp_dir().join("agentos_resolve_artifact_test");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        // 只放本平台产物名（Linux=libx.so / Windows=x.dll）——声明却写死异平台后缀
+        let local = NativePluginLoader::platform_artifact_name("x");
+        std::fs::write(dir.join(&local), b"").unwrap();
+        let got = NativePluginLoader::resolve_artifact(&dir, "x.dll");
+        assert_eq!(
+            got.as_ref()
+                .and_then(|p| p.file_name())
+                .map(|n| n.to_string_lossy().to_string()),
+            Some(local.clone())
+        );
+        // 声明即本平台名 → 原样命中
+        assert_eq!(
+            NativePluginLoader::resolve_artifact(&dir, &local)
+                .as_ref()
+                .and_then(|p| p.file_name())
+                .map(|n| n.to_string_lossy().to_string()),
+            Some(local.clone())
+        );
+        // 两者皆无 → None
+        assert_eq!(NativePluginLoader::resolve_artifact(&dir, "y.dll"), None);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     fn platform_artifact_name_keeps_known_extensions() {
         assert_eq!(NativePluginLoader::platform_artifact_name("p.dll"), "p.dll");
         assert_eq!(

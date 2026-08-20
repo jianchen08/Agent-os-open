@@ -451,9 +451,17 @@ impl PluginInvokerImpl {
                 code: Some("NATIVE_PLUGIN_DIR_NOT_FOUND".to_string()),
                 source: Some("plugin-invoker".to_string()),
             })?;
-        // 裸名自动补平台后缀，带后缀的原样保留
-        let resolved = NativePluginLoader::platform_artifact_name(artifact);
-        Ok(std::path::PathBuf::from(dir).join(resolved))
+        // 裸名自动补平台后缀；声明带异平台后缀时回退本平台重映射（与 loader 预检同规则）
+        let dir_path = std::path::PathBuf::from(dir);
+        NativePluginLoader::resolve_artifact(&dir_path, artifact).ok_or_else(|| PluginError {
+            message: format!(
+                "Native plugin '{}' artifact not found: {}（已按声明与本平台名双查；cdylib 未构建？）",
+                plugin_id,
+                dir_path.join(artifact).display()
+            ),
+            code: Some("NATIVE_ARTIFACT_NOT_FOUND".to_string()),
+            source: Some("plugin-invoker".to_string()),
+        })
     }
 
     /// 取 native loader 或返回配置缺失错误（三个 native 调用路径共用）。
@@ -4012,7 +4020,8 @@ mod tests {
             .invoke_tool("native_tool_bad_artifact", "some_tool", &json!({}))
             .await
             .unwrap_err();
-        assert_eq!(err.code.as_deref(), Some("NATIVE_LOAD_FAILED"));
+        // resolve_artifact 双查后前置报 NOT_FOUND（比拖到 dlopen 的 LOAD_FAILED 更可读）
+        assert_eq!(err.code.as_deref(), Some("NATIVE_ARTIFACT_NOT_FOUND"));
     }
 
     // ── unload_if_idle 各 host_type 分支 ──

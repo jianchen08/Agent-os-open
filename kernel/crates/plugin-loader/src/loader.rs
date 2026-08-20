@@ -282,17 +282,21 @@ impl PluginLoaderImpl {
                     ),
                 });
             };
-            // 与真实加载路径同规则：裸名按平台补 cdylib 后缀（.dll/lib{}.so），
-            // 已带已知扩展名则原样——否则声明 `pipeline_tool_core_native` 会因
-            // 磁盘上是 `..._native.dll` 而被误判缺失。
-            let artifact_path =
-                dir.join(NativePluginLoader::platform_artifact_name(&native.artifact));
-            if !artifact_path.exists() {
+            // 与真实加载路径同规则：裸名按平台补 cdylib 后缀；声明带异平台后缀
+            // （如 `.dll` 声明在 Linux）时回退到本平台重映射名（resolve_artifact）。
+            let artifact_path = NativePluginLoader::resolve_artifact(dir, &native.artifact);
+            if artifact_path.is_none() {
                 return Err(LoaderError::ManifestValidation {
                     plugin_id: manifest.id.clone(),
                     reason: format!(
-                        "native artifact 缺失: {}（cdylib 产物未构建或路径声明有误）",
-                        artifact_path.display()
+                        "native artifact 缺失: {}（cdylib 产物未构建或路径声明有误；已按声明名与本平台名 {} 双查）",
+                        dir.join(&native.artifact).display(),
+                        NativePluginLoader::platform_artifact_name(
+                            native.artifact
+                                .trim_end_matches(".dll")
+                                .trim_end_matches(".so")
+                                .trim_end_matches(".dylib"),
+                        )
                     ),
                 });
             }
