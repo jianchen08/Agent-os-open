@@ -2301,4 +2301,3 @@ def create_compress_llm_call_fn(caller: CapabilityCaller) -> LLMCallFn:
         async (prompt) -> response_text
     """
     return _build_compress_llm_call_fn(caller)
-
