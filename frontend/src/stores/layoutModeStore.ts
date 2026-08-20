@@ -138,8 +138,11 @@ export const useLayoutModeStore = create<LayoutModeState & LayoutModeActions>()(
       // Real-time data
       activeExecutions: [],
       pendingInteractions: [],
+      // 初始 'connecting'：刷新后尚未发起首次连接，「从未连接」≠「断开」，
+      // 避免 AlertBanner 在首连期间弹"内核连接已断开"误导横幅（叠加 4s
+      // 解除保留期 = 用户感知的"刷新后 5-10s 才连上"）。
       connectionStatus: {
-        state: 'disconnected',
+        state: 'connecting',
         latencyMs: null,
         reconnectAttempt: 0,
         lastConnectedAt: null,

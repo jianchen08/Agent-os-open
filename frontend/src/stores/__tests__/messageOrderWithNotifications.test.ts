@@ -1,18 +1,20 @@
 /**
  * 系统通知 + 注入消息 + 刷新复杂场景的消息顺序测试。
  *
- * 【initFromAPI 新语义】initFromAPI 现为全量替换：完全丢弃本地所有消息，仅使用传入的 API 数据。
- * 不再 merge、不再保护 localOnly（不保护 streaming、不保护 grace、不保留 system 通知、不保留 optimistic user）。
- * 刷新 = 从后端持久化全量重载。后端正在输出时，WS 重连的 backfill 增量补漏 + 续流会补回新内容。
+ * 【initFromAPI 语义】（2026-08-20 演进）API 权威替换本地缓存，但保留两类
+ * 「飞行中」本地消息（回归背景见 initFromAPIInflightPreservation.test.ts）：
+ *   1) 乐观 user（clientMessageId 未被 API 对账覆盖、timestamp ≤90s）
+ *   2) 新鲜 streaming 占位（_lastUpdated ≤90s，发送/stream_start 瞬间创建）
+ * 其余 localOnly（system 通知、persist 残留、stale streaming）一律丢弃。
  *
  * 因此本文件分两类断言：
  * 1. 流式期间（未触发 initFromAPI）的到达顺序断言 —— 仍然有效：渲染顺序 = store 数组顺序 = 到达顺序。
- * 2. 触发 initFromAPI 之后的断言 —— 必须 assert「store 恰好等于 API 返回数据，无任何 localOnly 残留」。
+ * 2. 触发 initFromAPI 之后的断言 —— store = API 权威消息 + 飞行中保留消息（sequence 排序）。
  *
  * 设计原则（与 multiturnOrderE2E 对齐）：
  * - 用真实 pipelineMessageStore + 真实 handlers（不 mock store）
  * - 流式期间：渲染顺序 = 到达顺序（system 通知按到达序夹在 AI 气泡之间）
- * - initFromAPI 后：store 仅含 API 权威消息，本地流式/占位/system/optimistic 一律丢弃
+ * - initFromAPI 后：非飞行中 localOnly 丢弃；飞行中（占位/乐观 user）保留
  */
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import type { Message } from '@/types/models'
@@ -163,8 +165,9 @@ describe('系统通知 + 注入消息 + 刷新的消息顺序', () => {
       makeMsg('user-injected', { role: 'user', content: '[上级]继续', sequence: 3 }),
     ])
 
-    // 新语义：API 三条按 sequence 排序，占位被丢弃（不在 API 列表里）
-    expect(ids()).toEqual(['user-1', 'ai-1', 'user-injected'])
+    // 契约（2026-08-20）：API 三条按 sequence 排序；流式占位是飞行中消息（新鲜
+    // _lastUpdated，后端尚未落库）→ 保留并排在 API 数据之后，等续流/backfill 补正。
+    expect(ids()).toEqual(['user-1', 'ai-1', MSG, 'user-injected'])
   })
 
   it('场景2: 系统通知 + 流式占位 + 切 Tab 刷新，刷新后仅剩 API 数据（system + 占位都丢弃）', () => {
@@ -188,14 +191,13 @@ describe('系统通知 + 注入消息 + 刷新的消息顺序', () => {
     expect(beforeIds[beforeIds.length - 1]).toBe(sysId)
 
     // 切 Tab 触发 initFromAPI（全量替换语义）：API 只返回 user-1
-    // 新语义：system 通知 / 流式占位都不在 API 列表里 → 全部丢弃，store 恰好等于 API。
-    // 后端正在输出时，WS 重连的 backfill 补漏 + 续流会补回 system 通知与流式内容。
+    // 契约（2026-08-20）：system 通知（非飞行中）丢弃；流式占位（新鲜）保留。
     pipelineStore.getState().initFromAPI(PIPELINE_ID, [
       makeMsg('user-1', { role: 'user', content: '问1', sequence: 1 }),
     ])
 
-    // 期望：store 仅含 API 返回的 user-1，占位与 system 通知都被丢弃
-    expect(ids()).toEqual(['user-1'])
+    // 期望：API 的 user-1 + 飞行中保留的流式占位；system 通知被丢弃
+    expect(ids()).toEqual(['user-1', MSG])
     expect(systemIds(), '刷新后 system 通知应被丢弃（API 未返回）').toHaveLength(0)
   })
 
@@ -225,11 +227,12 @@ describe('系统通知 + 注入消息 + 刷新的消息顺序', () => {
       makeMsg('user-injected', { role: 'user', content: '[上级]补充', sequence: 4 }),
     ])
 
-    // 新语义：API 四条按 sequence 排序，流式占位被丢弃（不在 API 列表里）
-    expect(ids()).toEqual(['user-1', 'ai-1', 'user-2', 'user-injected'])
+    // 契约（2026-08-20）：API 四条按 sequence 排序（本地乐观 user-2 已被 API 版
+    // 对账覆盖让位）；流式占位（飞行中，后端 seq=5 未落库）保留在末尾。
+    expect(ids()).toEqual(['user-1', 'ai-1', 'user-2', MSG, 'user-injected'])
   })
 
-  it('场景4: optimistic grace user 消息 + 流式，刷新后 grace 消息与占位都被丢弃', () => {
+  it('场景4: 飞行中乐观 user + 流式占位，initFromAPI 后均保留（2026-08-20 回归修复）', () => {
     const MSG = 'msg_streaming_d000000'
 
     pipelineStore.getState().initFromAPI(PIPELINE_ID, [
@@ -246,15 +249,16 @@ describe('系统通知 + 注入消息 + 刷新的消息顺序', () => {
     expect(ids()).toContain('user-2')
     expect(ids()).toContain(MSG)
 
-    // 刷新（全量替换语义）：后端尚未持久化 user-2 和占位 → API 只返回到 ai-1
-    // 新语义：grace user 与流式占位都不在 API 列表里 → 全部丢弃
+    // initFromAPI 响应迟到：后端尚未持久化 user-2 和占位 → API 只返回到 ai-1
     pipelineStore.getState().initFromAPI(PIPELINE_ID, [
       makeMsg('user-1', { role: 'user', content: '问1', sequence: 1 }),
       makeMsg('ai-1', { role: 'assistant', content: '答1', sequence: 2 }),
     ])
 
-    // store 恰好等于 API：user-1 + ai-1，grace 与占位都消失
-    expect(ids()).toEqual(['user-1', 'ai-1'])
+    // 契约（2026-08-20）：飞行中乐观 user（clientMessageId 未对账、timestamp 新鲜）
+    // 与流式占位（_lastUpdated 新鲜）均保留——用户输入不得因历史加载而凭空消失。
+    // 这正是「刷新后第一条消息气泡消失、列表回退旧历史」bug 的回归保护。
+    expect(ids()).toEqual(['user-1', 'ai-1', 'user-2', MSG])
   })
 
   it('场景5: 回归 — persist 残留的 completed 旧消息不复活 refresh_order 旧 bug', () => {

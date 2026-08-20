@@ -174,7 +174,9 @@ if not exist "%FRONTEND_DIR%\node_modules\.bin\vite.cmd" (
 
 pushd "%FRONTEND_DIR%"
 REM --yes: if local vite still missing, npx auto-downloads without prompt.
-start "AgentOS Frontend" /B cmd /c "set VITE_PROXY_TARGET=http://localhost:%AGENTOS_KERNEL_PORT%&& npx --yes vite --host 0.0.0.0 --port %AGENTOS_FRONTEND_PORT%"
+REM 127.0.0.1 而非 localhost：Windows 下 localhost 先解析 IPv6(::1)，内核仅监听 IPv4，
+逐请求多一次 ::1 失败回退（部分防火墙为静默丢弃时表现为首屏/WS 连接慢数秒）。
+start "AgentOS Frontend" /B cmd /c "set VITE_PROXY_TARGET=http://127.0.0.1:%AGENTOS_KERNEL_PORT%&& npx --yes vite --host 0.0.0.0 --port %AGENTOS_FRONTEND_PORT%"
 popd
 
 echo        Waiting for frontend...

@@ -71,6 +71,14 @@ class GlobalWebSocketService {
 
   private _connectionTimeoutTimer: ReturnType<typeof setTimeout> | null = null
 
+  /** 是否发起过至少一次连接（connect 被调用过）。刷新后 token 恢复期为 false：
+   *  「从未连接」≠「断开」，连接状态映射据此区分首连中与真断开（不出误导横幅）。 */
+  private _hasAttemptedConnect = false
+
+  get hasAttemptedConnect(): boolean {
+    return this._hasAttemptedConnect
+  }
+
   /** 本页是否被新连接替换（4000 踢旧）：true 时自动路径不得重连。 */
   wasKickedByReplacement(): boolean {
     return this._kickedByReplacement
@@ -78,6 +86,7 @@ class GlobalWebSocketService {
 
   /** 建立全局 WS 连接（登录后调用一次） */
   connect(token: string): void {
+    this._hasAttemptedConnect = true
     if (this._disposed) return
     // 正在等 token 刷新重连时，拒绝外部 connect（通常是用过期 token 的抢占调用）。
     // 否则会 _clearTimers 清掉 refresh 退避、用过期 token 硬连 → 4001 死循环，

@@ -158,7 +158,7 @@ describe('AI 消息刷新对账（initFromAPI 全量权威）', () => {
     expect(store.getMessages(PIPELINE_ID).find((m) => m.id === 'no-lu-5')).toBeUndefined()
   })
 
-  it('场景6: 新语义下 user 乐观消息也被 initFromAPI 丢弃（API 不含即不保留）', () => {
+  it('场景6: 飞行中 user 乐观消息（新鲜 timestamp）在 initFromAPI 后保留（2026-08-20 回归修复）', () => {
     const store = usePipelineMessageStore.getState()
 
     const optimisticUser = makeMsg('client-uuid-6', 1, {
@@ -174,11 +174,11 @@ describe('AI 消息刷新对账（initFromAPI 全量权威）', () => {
       makeMsg('api-ai-6', 2, { role: 'assistant', content: 'reply' }),
     ])
 
-    // 新语义：initFromAPI 不再保留任何 localOnly（含 user 乐观宽限期）。
-    // API 未返回该 user 消息（后端尚未持久化）时，刷新后该消息被丢弃；
-    // 后端持久化后，下一次 API 调用会带它回来。
+    // 契约（2026-08-20）：飞行中乐观 user（clientMessageId 未对账、timestamp ≤90s）
+    // 保留——用户输入不得因历史加载而凭空消失；后端落库后经 isCoveredByApi 让位 API 版。
     const userMsg = store.getMessages(PIPELINE_ID).find((m) => m.role === 'user')
-    expect(userMsg).toBeUndefined()
+    expect(userMsg).toBeDefined()
+    expect(userMsg!.clientMessageId).toBe('client-uuid-6')
   })
 
   // ★ 回归保护：ensureStreamingPlaceholder 合并覆盖 id 后，

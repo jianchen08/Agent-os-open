@@ -126,6 +126,11 @@ export function trimMessagesForPersistence(
 /** 单个管道在「内存」中保留的最大消息条数 与 PERSIST_MAX_MESSAGES_PER_PIPELINE（仅持久化裁剪）不同：内存里的 */
 const MAX_MESSAGES_PER_PIPELINE_IN_MEMORY = 2000
 
+/** initFromAPI 保留「飞行中」本地消息的新鲜度窗口（ms）：乐观 user 以 timestamp、
+ *  streaming 占位以 _lastUpdated 判定；超窗的视为 persist 残留/断线残留，按
+ *  刷新去漂移语义丢弃。窗口需覆盖后端 init 慢读（大会话全量读 10-40s）。 */
+const INFLIGHT_FRESH_MS = 90_000
+
 /** 限制单管道内存消息数，防止无限增长导致浏览器 OOM。 仅在超量时裁剪：按 sequence 排序后保留最新的 N 条。未超限时只做一次 */
 function capMessagesForMemory(msgs: Message[]): Message[] {
   if (msgs.length <= MAX_MESSAGES_PER_PIPELINE_IN_MEMORY) return msgs
@@ -641,21 +646,49 @@ export const usePipelineMessageStore = create<PipelineMessageState>()(
       logger.info('[initFromAPI] pipelineId=%s apiMsgs=%d existingMsgs=%d',
         pipelineId?.slice(0, 12), sorted.length, existing?.length || 0)
 
-      // ★ 刷新语义：完全丢弃本地消息，只用 API 权威数据。
-      // 不保留任何 localOnly（不合并、不宽限、不 streaming 保护）——
-      // 刷新后所有内容都从后端持久化拿，本地流式缓存一律丢弃。
-      // 后端正在输出时，WS 重连的 backfill 增量补漏 + 续流会补回新内容。
-      let finalMessages = sorted
+      // ★ 刷新语义：API 权威替换本地缓存（不合并、不宽限），但保留两类
+      // 「飞行中」本地消息（2026-08-20 回归：刷新后首条消息被迟到的 init
+      // 响应冲掉、用户输入凭空消失——后端大会话 init 全量读可达 10-40s，
+      // 竞争窗口内后端可能尚未收到/落库该消息，丢弃后无从找回）：
+      //   1) 乐观 user 消息（带 clientMessageId、未被 API 对账覆盖、timestamp
+      //      新鲜）——后端确认落库后，后续 init/append 会经 isCoveredByApi 让位
+      //      API 版；
+      //   2) 新鲜 streaming 占位（_lastUpdated ≤90s，发送瞬间创建）——
+      //      stale 残留（无新鲜 _lastUpdated）照旧丢弃，去漂移语义不变。
+      const apiIds = new Set(sorted.map((m) => m.id))
+      const apiByClientId = new Map<string, Message>()
+      for (const m of sorted) {
+        if (m.clientMessageId) apiByClientId.set(m.clientMessageId, m)
+      }
+      const now = Date.now()
+      const isFresh = (ts: number | undefined) =>
+        typeof ts === 'number' && now - ts <= INFLIGHT_FRESH_MS
+      const inflight = (existing || []).filter((m) => {
+        if (
+          m.role === 'user'
+          && m.clientMessageId
+          && !isCoveredByApi(m, apiIds, apiByClientId)
+          && isFresh(new Date(m.timestamp).getTime())
+        ) {
+          return true
+        }
+        return m.status === 'streaming' && isFresh(m._lastUpdated)
+      })
+      let finalMessages = inflight.length > 0 ? mergeSorted(sorted, [...inflight].sort(compareMessages)) : sorted
       // 过滤空白 assistant 消息（无 content 无 parts），避免空气泡
       finalMessages = filterBlankMessages(finalMessages)
       // 内存封顶：超量时丢弃最老消息，防止长会话撑爆内存（OOM）
       finalMessages = capMessagesForMemory(finalMessages)
 
-      const topCursor = finalMessages.length > 0 ? (finalMessages[0].sequence ?? 0) : 0
-      const bottomCursor = calculateBottomCursor(finalMessages, state.bottomCursorsByPipeline[pipelineId])
+      // 游标只按 API 权威消息计算：保留的乐观消息 sequence 是本地分配值
+      // （localMax+1），进入 bottomCursor 会让 after_sequence 补漏跳过真正
+      // 未加载的权威消息（同 addMessage 不推进游标的理由）。
+      const apiFinal = capMessagesForMemory(filterBlankMessages(sorted))
+      const topCursor = apiFinal.length > 0 ? (apiFinal[0].sequence ?? 0) : 0
+      const bottomCursor = calculateBottomCursor(apiFinal, state.bottomCursorsByPipeline[pipelineId])
 
-      logger.info('[initFromAPI] done: pipelineId=%s finalMsgs=%d (全量替换，不保留本地)',
-        pipelineId?.slice(0, 12), finalMessages.length)
+      logger.info('[initFromAPI] done: pipelineId=%s finalMsgs=%d inflightKept=%d (全量替换，保留飞行中)',
+        pipelineId?.slice(0, 12), finalMessages.length, inflight.length)
 
       return {
         messagesByPipeline: {
@@ -703,7 +736,7 @@ export const usePipelineMessageStore = create<PipelineMessageState>()(
       // 数据层保持原始消息、sequence 连续。
       const merged = mergeIncrementalApiWithLocal(sorted, existing)
       // 过滤空白 assistant 消息（无 content 无 parts 无 toolCalls），避免空气泡
-      let finalMerged = filterBlankMessages(merged)
+      const finalMerged = filterBlankMessages(merged)
       const topCursor = finalMerged[0]?.sequence ?? 0
       return {
         messagesByPipeline: {

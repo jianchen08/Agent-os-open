@@ -35,8 +35,16 @@ export function useConnectionStatus(): void {
         lastConnectedAt: new Date().toISOString(),
       })
     } else {
+      // 「从未连接」（刷新后 token/JS 加载期，connect 尚未发起）≠「断开」：
+      // 映射为 connecting，避免刷新瞬间就弹"内核连接已断开，正在尝试恢复…"横幅
+      // （2026-08-20 回归：该横幅叠加 AlertBanner 的 4s 解除保留期，用户感知
+      // 为"每次刷新要 5-10s 才连上后端"）。connect 发起过之后的断开才是真断开。
+      const state =
+        globalWS.status === 'connecting' || !globalWS.hasAttemptedConnect
+          ? 'connecting'
+          : 'disconnected'
       updateConnectionStatus({
-        state: globalWS.status === 'connecting' ? 'connecting' : 'disconnected',
+        state,
       })
     }
 

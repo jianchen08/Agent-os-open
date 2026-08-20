@@ -9,7 +9,15 @@ import { defineConfig, loadEnv } from 'vite'
  */
 export default defineConfig(({ mode }) => {
   const env = loadEnv(mode, process.cwd(), '')
-  const apiTarget = process.env.VITE_PROXY_TARGET || env.VITE_PROXY_TARGET || process.env.VITE_API_BASE_URL || env.VITE_API_BASE_URL || ''
+  // 代理目标默认 127.0.0.1:9100（内核默认端口）——裸 `pnpm dev` 不带 env 时 proxy
+  // 曾解析为空字符串 target，所有 /api /ws 转发 502（2026-08-20 实测复现）。
+  // 用 127.0.0.1 而非 localhost：Windows 下 localhost 先解析 ::1，内核仅监听 IPv4。
+  const apiTarget =
+    process.env.VITE_PROXY_TARGET
+    || env.VITE_PROXY_TARGET
+    || process.env.VITE_API_BASE_URL
+    || env.VITE_API_BASE_URL
+    || 'http://127.0.0.1:9100'
 
   return {
     plugins: [

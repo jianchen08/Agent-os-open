@@ -46,11 +46,11 @@ describe('乐观 user 消息宽限期', () => {
     })
   })
 
-  it('场景1: 刚发送的乐观 user 消息，API 未返回时被丢弃（刷新全量替换语义）', () => {
+  it('场景1: 刚发送的乐观 user 消息，API 未返回时保留（飞行中不丢，2026-08-20 回归）', () => {
     const store = usePipelineMessageStore.getState()
 
     // 用户发送乐观消息（带 clientMessageId，timestamp 为当前时间）
-    const optimisticMsg = makeMsg('client-uuid-1', 1, {
+    const optimisticMsg = makeMsg('client-uuid-1', 2, {
       role: 'user',
       content: 'hello world',
       status: 'completed',
@@ -60,16 +60,21 @@ describe('乐观 user 消息宽限期', () => {
     store.addMessage(PIPELINE_ID, optimisticMsg)
     expect(store.getMessages(PIPELINE_ID)).toHaveLength(1)
 
-    // initFromAPI（刷新）：完全丢弃本地，只用 API 权威数据
+    // initFromAPI（迟到的历史响应）：API 未含该消息（后端尚未落库）
     store.initFromAPI(PIPELINE_ID, [
       makeMsg('api-old-1', 1, { role: 'assistant', content: 'old reply' }),
     ])
 
-    // 新语义：刷新后本地乐观消息被丢弃，只有 API 数据。后端持久化后下次刷新会返回。
+    // 修复后契约：飞行中乐观消息保留——用户输入不得因历史加载而凭空消失
+    // （旧契约为全量替换丢弃，2026-08-20 用户真实反馈刷新后首条消息气泡
+    //  消失、列表回退旧历史，故收紧为「保留飞行中 + 丢弃 stale 残留」）
     const msgs = store.getMessages(PIPELINE_ID)
-    expect(msgs.find((m) => m.role === 'user')).toBeUndefined()
-    expect(msgs).toHaveLength(1)
-    expect(msgs[0].id).toBe('api-old-1')
+    const kept = msgs.find((m) => m.clientMessageId === 'client-uuid-1')
+    expect(kept).toBeDefined()
+    expect(kept!.content).toBe('hello world')
+    expect(msgs).toHaveLength(2)
+    // 排序：API 历史（seq 1）在前，乐观消息（seq 2）在后
+    expect(msgs.map((m) => m.sequence)).toEqual([1, 2])
   })
 
   it('场景2: 乐观 user 消息在宽限期外的 persist 残留被丢弃', () => {
