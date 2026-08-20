@@ -25,6 +25,7 @@ sys.path.insert(0, str(PLUGIN_DIR))
 from bridge import DshRuntimeBridge  # noqa: E402
 from translator import (  # noqa: E402
     DSH_SOURCE_COMMIT,
+    DSH_SOURCE_VERSION,
     discover_dsh_plugins,
     dsh_params_to_json_schema,
     load_installed_plugins,
@@ -169,7 +170,7 @@ class TestTranslatePackage:
         # 来源版本记录：包自身版本 + vendor 锁定基线分开
         assert m["source"]["version"] == "0.0.1-rc.1"
         assert m["source"]["dsh"]["vendor_pinned"]["commit"] == DSH_SOURCE_COMMIT
-        assert m["source"]["dsh"]["vendor_pinned"]["package_version"] == "0.1.0-rc.5"
+        assert m["source"]["dsh"]["vendor_pinned"]["package_version"] == DSH_SOURCE_VERSION
 
     def test_dsh_dir_client_scanned(self, tmp_path: Path):
         """modlens 布局（client 面在 dsh/*.js）的 settings 槽位可扫出（registry 视觉类）。"""

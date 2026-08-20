@@ -23,7 +23,7 @@ from typing import Any
 logger = logging.getLogger(__name__)
 
 _RUNTIME_SCRIPT = Path(__file__).parent / "runtime" / "dsh-rpc-bridge.mjs"
-_DEFAULT_REPO_ROOT = r"D:\reference_repos\deepseek-harness"
+_DEFAULT_REPO_ROOT = r"D:\reference_repos\deepseek-harness-rc8"
 _DEFAULT_CWD = os.getcwd()
 
 _JSONRPC_PARSE_ERROR = -32700

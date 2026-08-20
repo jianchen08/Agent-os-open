@@ -82,7 +82,7 @@ commit 前的调查/验证工作尽量用未跟踪文件（`??` 状态）或文�
 
 - `plugins/shared/system/dsh_adapter/`：Node runtime 桥（dsh_read/dsh_glob 等工具）、
   DSH 插件包装载（`dsh_plugins/` 子目录，npm 解压物原样放）、清单翻译。
-- **DSH 源码零改动**（只读参考 `D:\reference_repos\deepseek-harness`，commit 47f9438 锁定）。
+- **DSH 源码零改动**（只读参考 `D:\reference_repos\deepseek-harness-rc8`，commit 141eb6fe 锁定；旧 rc.5 git 检出保留在 `D:\reference_repos\deepseek-harness`）。
 - 加装 DSH 插件 = 放 `dsh_plugins/` 子目录；逐包启停 = `config/dsh_adapter.yaml`。
 - 升级 DSH = 重跑适配器 e2e + 更新 plugin.json 锁定契约。
 - 当前分支：`dev/0.2`（PR 目标 `main`）。

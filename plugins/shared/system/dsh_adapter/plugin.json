@@ -1,7 +1,7 @@
 {
   "id": "dsh_adapter",
   "name": "DSH Plugin Adapter",
-  "description": "DeepSeek Harness (DSH) 插件适配器：非 MCP 后端工具经 Node runtime 桥接（通道 A）、前端视觉组件经 vendor 移植层 + render 意图路由、DSH 插件包清单翻译。DSH 源码零改动（只读参考 D:\\reference_repos\\deepseek-harness，commit 47f9438 锁定，MIT）。 D.6 槽位拆分后工具声明即注册（capabilities.tools = LLM 面，无需类型豁免）。",
+  "description": "DeepSeek Harness (DSH) 插件适配器：非 MCP 后端工具经 Node runtime 桥接（通道 A）、前端视觉组件经 vendor 移植层 + render 意图路由、DSH 插件包清单翻译。DSH 源码零改动（只读参考 D:\\reference_repos\\deepseek-harness-rc8，commit 141eb6fe 锁定，MIT）。 D.6 槽位拆分后工具声明即注册（capabilities.tools = LLM 面，无需类型豁免）。",
   "version": "0.1.0",
   "plugin_type": "system",
   "language": "python",
@@ -195,8 +195,8 @@
       }
     ],
     "dsh_adapter": {
-      "source_commit": "47f943859bef60e4160492346772ded9b24f765a",
-      "source_version": "0.1.0-rc.5",
+      "source_commit": "141eb6fef83422698aef7a981029e843e8161534",
+      "source_version": "0.1.0-rc.8",
       "backend_channel": "node-runtime-bridge",
       "frontend_channel": "vendor-port + render-intent",
       "components": [

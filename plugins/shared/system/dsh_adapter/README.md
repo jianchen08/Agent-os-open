@@ -2,8 +2,11 @@
 
 > task_dsh_plugin_adapter。让 DSH 的非 MCP 后端工具（Node runtime 桥接）
 > 与前端视觉组件（vendor 移植 + render 意图路由）在灵汐稳定运行。
-> **DSH 源码零改动**（只读参考 `D:\reference_repos\deepseek-harness`，
-> commit `47f9438` / 0.1.0-rc.5 锁定，MIT 出处见各文件头）。
+> **DSH 源码零改动**（只读参考 `D:\reference_repos\deepseek-harness-rc8`，
+> commit `141eb6fe` / 0.1.0-rc.8 锁定，MIT 出处见各文件头；2026-08-21 自
+> rc.5 升级，gh api tarball 路线——git 直连 github.com 不通时用
+> `gh api repos/deepseek-ai/deepseek-harness/tarball/<sha>` 拉源码快照，
+> `pnpm install --frozen-lockfile --registry=npmmirror` + `pnpm build:lib:host`）。
 
 ## 为什么是 tool 型插件（而非任务书原写的 system 级）
 
@@ -49,7 +52,7 @@ output_schema 校验 + spill_guard 执行（见 docs/dsh_hook_translation.md）�
 ### 环境要求
 
 - Node ≥ 20；`AGENTOS_DSH_REPO_ROOT` 指向已构建的 deepseek-harness 仓库
-  （默认 `D:\reference_repos\deepseek-harness`，需含 `apps/cli/node_modules`）
+  （默认 `D:\reference_repos\deepseek-harness-rc8`，需含 `apps/cli/node_modules`）
 - DSH 仓库升级 = 重跑 e2e（`AGENTOS_DSH_E2E=1 pytest
   plugins/shared/tools/tests/test_dsh_adapter.py`）+ 更新 plugin.json 锁定契约
 

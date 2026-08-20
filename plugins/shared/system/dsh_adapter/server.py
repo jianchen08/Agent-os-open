@@ -45,7 +45,7 @@ plugin = AgentOSPlugin("dsh_adapter")
 # '@deepseek-ai/dsh-tools' 从包目录上溯命中同目录 peer 链接。
 _RUNTIME_DIR = Path(__file__).parent / "runtime"
 _EXTRA_TOOLS_DIR = _RUNTIME_DIR / "extra-tools" / "node_modules" / "@deepseek-ai"
-_DEFAULT_DSH_REPO = "D:/reference_repos/deepseek-harness"
+_DEFAULT_DSH_REPO = "D:/reference_repos/deepseek-harness-rc8"
 _PEER_PKGS: dict[str, str] = {
     "dsh-tools": "packages/core/tools",
     "dsh-invariants": "packages/runtime-diagnostics/invariants",
