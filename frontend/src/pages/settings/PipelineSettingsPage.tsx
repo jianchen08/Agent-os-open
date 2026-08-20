@@ -27,6 +27,7 @@ import {
   savePipelineConfig,
 } from '@/services/api/pipelineConfig'
 import { fetchPipelinePluginCatalog } from '@/services/api/pipelines'
+import { shouldDisableConfigSave } from '@/utils/configEditorGuard'
 import {
   deleteAtPath,
   insertAtPath,
@@ -78,7 +79,8 @@ export function PipelineSettingsPage({ embedded = false }: { embedded?: boolean 
       .catch((error: unknown) => {
         if (cancelled) return
         const msg = error instanceof Error ? error.message : '无法加载配置'
-        setConfig({})
+        // 失败保持 config=null（编辑区不渲染、保存禁用）——落 {} 会使用户
+        // 点保存把空对象写进 autonomous.yaml（内核唯一执行的管道）
         setLoadError('无法加载配置')
         toast.error('配置加载失败', { description: msg })
       })
@@ -203,7 +205,11 @@ export function PipelineSettingsPage({ embedded = false }: { embedded?: boolean 
               保存失败
             </span>
           )}
-          <Button onClick={handleSave} disabled={saveState === 'saving'} size="sm">
+          <Button
+            onClick={handleSave}
+            disabled={shouldDisableConfigSave(saveState === 'saving', loadError, config)}
+            size="sm"
+          >
             {saveState === 'saving' ? (
               <>
                 <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" />

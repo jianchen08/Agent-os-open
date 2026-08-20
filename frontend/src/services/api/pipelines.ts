@@ -105,7 +105,8 @@ export interface PipelinePluginCatalogEntry {
   role: string | null
   hostType: string
   version: string | null
-  enabled: boolean
+  /** 三态：true/false=状态接口返回；null=状态侧缺失（禁用后下架/分页遗漏）——不默认已启用 */
+  enabled: boolean | null
   configFiles: Array<{ id: string; label: string; path: string }>
 }
 
@@ -136,7 +137,9 @@ export async function fetchPipelinePluginCatalog(): Promise<PipelinePluginCatalo
       role: catalog?.role ?? null,
       hostType: catalog?.host_type ?? status?.host_type ?? '',
       version: catalog?.version ?? status?.version ?? null,
-      enabled: status?.enabled ?? true,
+      // 状态侧缺失用 null（三态"未知"），对齐同函数 role 用 null 的标准——
+      // 默认 enabled:true 会让"禁用后下架"的插件在编辑器显示"已启用"（FE7）
+      enabled: status?.enabled ?? null,
       configFiles: status?.config_files ?? [],
     })
   }

@@ -41,6 +41,7 @@ export function FloatingSpaceRenderer({ instructions }: FloatingSpaceRendererPro
           widgetType,
           props,
           layout,
+          viaFallback,
         } = instruction
         const stableKey = `${moduleId}::floating::${widgetType}`
 
@@ -75,8 +76,8 @@ export function FloatingSpaceRenderer({ instructions }: FloatingSpaceRendererPro
               </span>
             </div>
 
-            {/* 内容区 */}
-            <div className="overflow-auto p-3">
+            {/* 内容区（viaFallback=降级映射解析，打 data-fallback 标记） */}
+            <div className="overflow-auto p-3" data-fallback={viaFallback ? widgetType : undefined}>
               {!WidgetComponent ? (
                 <div className="text-muted-foreground p-4 text-center text-sm">
                   未注册的组件类型: {widgetType}

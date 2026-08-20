@@ -114,16 +114,28 @@ function RefChip({
     label: entry?.role ?? '插件',
     className: 'text-muted-foreground border-border',
   }
+  // 启用状态三态（FE7）：true=已启用 / false=已禁用 / null=状态侧缺失（未知）
+  const enabledState: 'enabled' | 'disabled' | 'unknown' =
+    entry?.enabled === false ? 'disabled' : entry?.enabled == null ? 'unknown' : 'enabled'
+  const enabledTitle: Record<typeof enabledState, string> = {
+    enabled: itemRef,
+    disabled: `${itemRef}（插件当前已禁用，需在插件管理中启用后参与执行）`,
+    unknown: `${itemRef}（启用状态未知：状态接口未返回该插件）`,
+  }
   return (
     <span
       className={`${base} ${role.className} bg-[var(--hover-overlay)]`}
-      title={`${itemRef}${entry?.enabled === false ? '（插件当前已禁用，需在插件管理中启用后参与执行）' : ''}`}
+      title={enabledTitle[enabledState]}
     >
       <span
         className={`h-1.5 w-1.5 shrink-0 rounded-full ${
-          entry?.enabled === false ? 'bg-[var(--status-pending)]' : 'bg-status-success'
+          enabledState === 'disabled'
+            ? 'bg-[var(--status-pending)]'
+            : enabledState === 'unknown'
+              ? 'bg-muted-foreground/50'
+              : 'bg-status-success'
         }`}
-        aria-label={entry?.enabled === false ? '已禁用' : '已启用'}
+        aria-label={enabledState === 'disabled' ? '已禁用' : enabledState === 'unknown' ? '状态未知' : '已启用'}
       />
       <span className="text-foreground truncate font-medium">{shortName(itemRef)}</span>
       <span className={`shrink-0 text-[10px] ${role.className}`}>{role.label}</span>

@@ -243,14 +243,14 @@ export const useAuthStore = create<AuthState>((set, get) => ({
 
         set({ user })
       } catch (_userError) {
-        // 获取用户信息失败，但注册/登录已成功，使用基本用户信息
-        const basicUser: User = {
-          id: 'unknown',
-          username,
-          createdAt: new Date().toISOString(),
-        }
-        localStorage.setItem(STORAGE_KEYS.AUTH_USER, JSON.stringify(basicUser))
-        set({ user: basicUser })
+        // 对齐 login 路径：获取用户信息失败不伪造 'unknown' 用户持久化——
+        // 伪造用户写入 localStorage 会掩盖故障（错误的不一致即掩盖）
+        localStorage.removeItem(STORAGE_KEYS.AUTH_USER)
+        const userError = _userError instanceof Error ? _userError.message : '获取用户信息失败'
+        set({
+          user: null,
+          error: `注册成功但获取用户信息失败：${userError}，请重新登录`,
+        })
       }
 
       // 安排主动刷新：token 过期前续期，避免 WS 因 token 过期反复断连

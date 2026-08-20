@@ -70,6 +70,9 @@ class WidgetRegistry {
   /** 组件注册表：type → WidgetEntry */
   private readonly entries: Map<string, WidgetEntry> = new Map()
 
+  /** 已告警过降级失败的 type（每 type 只 warn 一次，避免渲染循环刷屏） */
+  private readonly fallbackWarnedTypes: Set<string> = new Set()
+
   /**
    * 注册一个 Widget 组件
    *
@@ -186,10 +189,13 @@ class WidgetRegistry {
   /**
    * 查找最接近的可用组件（降级机制）
    *
-   * 按优先级查找：精确匹配 → metadata.fallbackWidget → 降级映射表
+   * 按优先级查找：精确匹配 → 降级映射表内显式条目。
+   * 映射表外的未知 type 不再默认回退 status_card——未知 widget 被静默替换成
+   * 无关组件（props 还不匹配）会让"声明 ↔ 注册表断链"永不暴露；表外返回
+   * undefined 交由调用方渲染显式占位（FE3 兜底反模式修复），并 warn 一次。
    *
    * @param type - 目标组件类型
-   * @returns 可用的 React 组件或 undefined
+   * @returns 可用的 React 组件或 undefined（表外 / 候选全缺）
    */
   findFallback(type: string): WidgetComponent | undefined {
     // 1. 精确匹配
@@ -216,12 +222,21 @@ class WidgetRegistry {
       tree: ['table'],
     }
 
-    const candidates = fallbackMap[type] ?? ['status_card']
-    for (const candidate of candidates) {
-      const entry = this.entries.get(candidate)
-      if (entry) return entry.component
+    const candidates = fallbackMap[type]
+    if (candidates) {
+      for (const candidate of candidates) {
+        const entry = this.entries.get(candidate)
+        if (entry) return entry.component
+      }
     }
 
+    // 表外（或候选全缺）：降级链断裂须可见——warn 一次，调用方走显式占位
+    if (!this.fallbackWarnedTypes.has(type)) {
+      this.fallbackWarnedTypes.add(type)
+      console.warn(
+        `[WidgetRegistry] widget "${type}" 未注册且无可用降级（映射表外或候选均未注册），将渲染占位`,
+      )
+    }
     return undefined
   }
 
@@ -241,6 +256,7 @@ class WidgetRegistry {
    */
   clear(): void {
     this.entries.clear()
+    this.fallbackWarnedTypes.clear()
   }
 }
 

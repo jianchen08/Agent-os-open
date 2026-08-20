@@ -334,14 +334,18 @@ describe('PipelineSettingsPage', () => {
   })
 
   describe('加载失败', () => {
-    it('显示错误提示且保存按钮可用', async () => {
+    it('显示错误提示且禁存（保存禁用、编辑区不渲染）——防止空对象写回 autonomous.yaml', async () => {
       mockGetPipelineConfig.mockRejectedValue(new Error('Network error'))
       renderWithProviders(<PipelineSettingsPage />)
 
       await waitFor(() => {
         expect(screen.getByText('无法加载配置')).toBeInTheDocument()
       })
-      expect(screen.getByTestId('save-btn')).toBeEnabled()
+      // 加载失败 = 只读：保存按钮禁用，可视化/源码编辑区均不渲染
+      expect(screen.getByTestId('save-btn')).toBeDisabled()
+      expect(mockSavePipelineConfig).not.toHaveBeenCalled()
+      expect(screen.queryByTestId('pipeline-flow-editor')).not.toBeInTheDocument()
+      expect(screen.queryByRole('form', { name: '管道配置表单' })).not.toBeInTheDocument()
     })
   })
 

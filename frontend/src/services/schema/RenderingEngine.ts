@@ -27,6 +27,8 @@ export interface RenderInstruction {
   widgetType: string
   /** Widget 组件（已从 WidgetRegistry 解析） */
   component: React.ComponentType<Record<string, unknown>> | null
+  /** 组件是否经降级映射解析（非精确注册；渲染层打 data-fallback 标记） */
+  viaFallback?: boolean
   /** 传递给组件的属性 */
   props: Record<string, unknown>
   /** 数据源引用 */
@@ -244,16 +246,18 @@ export class RenderingEngine {
     moduleId: string,
     versionHash: string,
   ): RenderInstruction | null {
-    // 查找组件（支持降级）
+    // 查找组件（支持降级；降级仅限映射表内条目，表外返回 null 走渲染层占位）
+    const exact = widgetRegistry.get(config.widget)
     const component = this.config.enableDegradation
-      ? widgetRegistry.findFallback(config.widget) ?? null
-      : widgetRegistry.get(config.widget) ?? null
+      ? exact ?? widgetRegistry.findFallback(config.widget) ?? null
+      : exact ?? null
 
     return {
       id: `${moduleId}::${config.space}::${config.widget}::${versionHash}`,
       space: config.space,
       widgetType: config.widget,
       component,
+      viaFallback: !exact && !!component,
       props: config.props ?? {},
       dataSource: config.dataSource,
       layout: config.layout,
@@ -270,15 +274,17 @@ export class RenderingEngine {
     versionHash: string,
   ): RenderInstruction | null {
     const widgetType = config.type
+    const exact = widgetRegistry.get(widgetType)
     const component = this.config.enableDegradation
-      ? widgetRegistry.findFallback(widgetType) ?? null
-      : widgetRegistry.get(widgetType) ?? null
+      ? exact ?? widgetRegistry.findFallback(widgetType) ?? null
+      : exact ?? null
 
     return {
       id: `${moduleId}::chat::${widgetType}::${versionHash}`,
       space: 'chat',
       widgetType,
       component,
+      viaFallback: !exact && !!component,
       props: config.props ?? {},
       dataSource: config.dataSource,
       moduleId,
@@ -293,15 +299,17 @@ export class RenderingEngine {
     moduleId: string,
     versionHash: string,
   ): RenderInstruction | null {
+    const exact = widgetRegistry.get(contribution.widgetType)
     const component = this.config.enableDegradation
-      ? widgetRegistry.findFallback(contribution.widgetType) ?? null
-      : widgetRegistry.get(contribution.widgetType) ?? null
+      ? exact ?? widgetRegistry.findFallback(contribution.widgetType) ?? null
+      : exact ?? null
 
     return {
       id: `${moduleId}::${contribution.renderSpace}::${contribution.widgetType}::${versionHash}`,
       space: contribution.renderSpace,
       widgetType: contribution.widgetType,
       component,
+      viaFallback: !exact && !!component,
       props: {
         ...(contribution.schema ?? {}),
         label: contribution.label,

@@ -14,6 +14,8 @@ interface AnnotationState {
   activeAnnotationId: string | null
   /** 当前批注模式 */
   annotationMode: 'none' | 'text' | 'image' | 'video'
+  /** 批注加载失败信息（null=正常；失败不得伪装成"无批注"——审批决策基于不全信息） */
+  error: string | null
 }
 
 interface AnnotationActions {
@@ -54,10 +56,16 @@ export const useAnnotationStore = create<AnnotationState & AnnotationActions>()(
   annotations: {},
   activeAnnotationId: null,
   annotationMode: 'none',
+  error: null,
 
   fetchAnnotations: async (artifactId) => {
     try {
       const resp = await fetch(`${API_BASE}/${artifactId}/annotations`)
+      // 非 2xx 不得走正常解析（HTML 错误页 json() 解析失败会落 catch，但
+      // 2xx 外的 JSON 错误体会被当成功）——显式查 resp.ok 并置错误态
+      if (!resp.ok) {
+        throw new Error(`批注加载失败（HTTP ${resp.status}）`)
+      }
       const data = await resp.json()
       const items = (data.items || []).map(_normalizeAnnotation)
       set((state) => {
@@ -66,6 +74,7 @@ export const useAnnotationStore = create<AnnotationState & AnnotationActions>()(
           artifactMap[a.id] = a
         }
         return {
+          error: null,
           annotations: {
             ...state.annotations,
             [artifactId]: { ...(state.annotations[artifactId] || {}), ...artifactMap },
@@ -73,7 +82,9 @@ export const useAnnotationStore = create<AnnotationState & AnnotationActions>()(
         }
       })
       return items
-    } catch {
+    } catch (e) {
+      // 失败置 error 状态（评审工作流可见），不再静默返回空列表伪装"无批注"
+      set({ error: e instanceof Error ? e.message : '批注加载失败' })
       return []
     }
   },
@@ -213,7 +224,7 @@ export const useAnnotationStore = create<AnnotationState & AnnotationActions>()(
   },
 
   clearCache: () => {
-    set({ annotations: {}, activeAnnotationId: null, annotationMode: 'none' })
+    set({ annotations: {}, activeAnnotationId: null, annotationMode: 'none', error: null })
   },
 }))
 

@@ -125,8 +125,11 @@ export function PluginPickerDialog({
                             {entry.id}
                           </span>
                           <span className="ml-auto flex shrink-0 items-center gap-1.5 text-[10px]">
-                            {!entry.enabled && (
+                            {entry.enabled === false && (
                               <span className="text-status-warning">已禁用</span>
+                            )}
+                            {entry.enabled === null && (
+                              <span className="text-muted-foreground">状态未知</span>
                             )}
                             {added && <span className="text-muted-foreground">已添加</span>}
                           </span>

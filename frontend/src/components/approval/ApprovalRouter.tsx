@@ -76,7 +76,21 @@ export function ApprovalRouter({
         </div>
       )
     }
-    // 声明了但 widget 未注册（拼写错/组件未上线）→ 落内置/兜底，不白屏
+    // 声明了但 widget 未注册（拼写错/组件未上线）→ 显式错误占位，不落文本 diff：
+    // 审批是决策链路，静默降级 text_diff 会让审批者对图片/媒体的 URL 做文本决策
+    // （给了错误内容形态供人决策）。参照 ExtensionHost 的"未知 widget 显式提示"先例。
+    return (
+      <div
+        data-testid="approval-route-unregistered"
+        role="alert"
+        className="text-status-error flex h-full min-h-[80px] flex-col items-center justify-center gap-1 rounded-lg border border-dashed p-4 text-center text-sm"
+      >
+        <span>声明的审批视图组件未注册：{route.widget}</span>
+        <span className="text-muted-foreground text-xs">
+          view_mode「{viewMode}」声明指向的 widget 不在前端注册表，已阻止降级为文本对比——请核对插件 ui.view_modes 声明与前端 widget 注册
+        </span>
+      </div>
+    )
   }
 
   // 内置默认件：直连组件（不依赖 registry 初始化时序）
@@ -113,7 +127,7 @@ export function ApprovalRouter({
     }
   }
 
-  // 完全未知 view_mode（含声明了但 widget 未注册）→ 降级文本差异视图
+  // 完全未知 view_mode（未声明、非内置）→ 降级文本差异视图
   return (
     <div data-testid="approval-route-text_diff">
       <TextDiffView oldContent={oldContent} newContent={newContent} />

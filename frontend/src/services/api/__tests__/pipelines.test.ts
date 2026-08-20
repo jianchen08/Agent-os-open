@@ -105,8 +105,8 @@ describe('fetchPipelinePluginCatalog', () => {
     const entries = await fetchPipelinePluginCatalog()
     expect(entries.map((e) => e.id)).toEqual(['pipeline_a', 'pipeline_b'])
     expect(entries[0].enabled).toBe(false)
-    // 目录缺失 status 侧信息 → 默认可用
-    expect(entries[1].enabled).toBe(true)
+    // 目录缺失 status 侧信息 → enabled=null（三态"未知"，不默认已启用——FE7）
+    expect(entries[1].enabled).toBeNull()
     expect(entries[1].configFiles).toEqual([])
   })
 

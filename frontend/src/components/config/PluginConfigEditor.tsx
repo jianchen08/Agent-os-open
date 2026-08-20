@@ -31,6 +31,7 @@ import {
   mergeFormValues,
   toFormFields,
 } from '@/utils/configFormFields'
+import { shouldDisableConfigSave } from '@/utils/configEditorGuard'
 
 export interface PluginConfigEditorProps {
   pluginId: string
@@ -101,7 +102,8 @@ export function PluginConfigEditor({
       .catch((error: unknown) => {
         if (cancelled) return
         const msg = error instanceof Error ? error.message : '无法加载配置'
-        setConfig({})
+        // 失败保持 config=null（编辑区不渲染、保存禁用）——落 {} 会使
+        // persistConfig({}) 覆盖插件配置文件（与 PipelineSettingsPage 共用守卫口径）
         setLoadError(msg)
         toast.error('配置加载失败', { description: msg })
       })
@@ -263,7 +265,10 @@ export function PluginConfigEditor({
           )}
           <ConfigObject obj={config} parentPath={[]} onChange={handleChange} onDelete={handleDelete} onAddField={handleAddField} allowAddField />
           <div className="mt-6 flex items-center gap-3 border-t pt-4">
-            <Button onClick={handleSave} disabled={saveState === 'saving'}>
+            <Button
+              onClick={handleSave}
+              disabled={shouldDisableConfigSave(saveState === 'saving', loadError, config)}
+            >
               {saveState === 'saving' ? (
                 <>
                   <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" />

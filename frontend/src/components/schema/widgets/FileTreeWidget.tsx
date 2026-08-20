@@ -446,6 +446,8 @@ export function FileTreeWidget(rawProps: Record<string, unknown>) {
   const [remoteTreeData, setRemoteTreeData] = useState<TreeNodeData[]>([])
   /** 是否正在加载远程数据 */
   const [isLoadingRemote, setIsLoadingRemote] = useState(false)
+  /** 远程加载失败信息（null=正常；空树 + 错误 → 显式错误态而非伪装"无数据"） */
+  const [remoteError, setRemoteError] = useState<string | null>(null)
   /** 内部刷新计数器（暂停/恢复操作后递增以触发重新加载） */
   const [internalRefresh, setInternalRefresh] = useState(0)
   /** 标记是否已完成首次加载，用于区分首次加载与刷新，避免刷新时闪烁 loading */
@@ -556,6 +558,7 @@ export function FileTreeWidget(rawProps: Record<string, unknown>) {
       if (!hasLoadedRef.current) {
         setIsLoadingRemote(true)
       }
+      setRemoteError(null)
       try {
         const ref = parseDataSourceRef(rawProps.dataSource as string)
         const resolved = resolveDataSource(ref)
@@ -573,6 +576,10 @@ export function FileTreeWidget(rawProps: Record<string, unknown>) {
         if (filteredData.length > 0) {
           setRemoteTreeData(filteredData)
         } else if (sessionId) {
+          // 产品决策（有意保留）：会话域查询为空时回退去掉 session_id 的宽域请求——
+          // 会话尚未产生数据时仍展示全局任务树，避免新会话开局一棵空树。
+          // 宽域回退发生时 debug 一次，供排查"真没数据"与"查错作用域"混淆。
+          console.debug('[FileTreeWidget] 会话域任务树为空，回退全局树（宽域请求）: session=%s', sessionId)
           const fallbackParams: Record<string, string> = { ...resolved.params as Record<string, string> }
           const fallbackResp = await apiClient.get(resolved.endpoint, { params: fallbackParams })
           if (cancelled) return
@@ -584,9 +591,11 @@ export function FileTreeWidget(rawProps: Record<string, unknown>) {
           setRemoteTreeData([])
         }
         hasLoadedRef.current = true
-      } catch {
+      } catch (e) {
         if (!cancelled) {
+          // 失败不得伪装成空树：置错误态供渲染"加载失败 + 重试"（对齐 FormWidget 先例）
           setRemoteTreeData([])
+          setRemoteError(e instanceof Error ? e.message : '任务树加载失败')
         }
       } finally {
         if (!cancelled) {
@@ -859,6 +868,28 @@ export function FileTreeWidget(rawProps: Record<string, unknown>) {
     },
     [effectiveData, nodeChildrenField, triggerRefresh],
   )
+
+  /** 远程加载失败态：显式错误 + 重试（失败不得伪装成"无数据"空树） */
+  if (rawProps.dataSource && remoteError && effectiveData.length === 0 && !isLoadingRemote) {
+    return (
+      <div data-testid="file-tree-error" className="w-full rounded-lg border">
+        <div className="flex flex-col items-center justify-center p-8">
+          <FolderTree className="mb-3 h-12 w-12 text-status-error" />
+          <p className="text-sm text-status-error">任务树加载失败</p>
+          <p className="mt-1 max-w-md break-all text-center text-xs text-muted-foreground">{remoteError}</p>
+          <Button
+            variant="outline"
+            size="sm"
+            className="mt-3"
+            onClick={triggerRefresh}
+            aria-label="重试加载任务树"
+          >
+            重试
+          </Button>
+        </div>
+      </div>
+    )
+  }
 
   /** 空状态渲染 */
   if (effectiveData.length === 0 && !isLoadingRemote) {

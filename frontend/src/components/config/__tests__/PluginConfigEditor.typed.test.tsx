@@ -139,3 +139,22 @@ describe('T1：无 fields → KV 兜底（既有行为保持）', () => {
     expect(screen.queryByText('原始 KV 编辑（fields 未覆盖的键）')).not.toBeInTheDocument()
   })
 })
+
+describe('加载失败 = 只读/禁存（FE2 兜底反模式修复）', () => {
+  it('加载失败渲染错误提示，KV 树不渲染且保存入口不可达——防止 persistConfig({}) 覆盖插件配置', async () => {
+    seedRegistry(undefined)
+    getPluginConfigFile.mockRejectedValue(new Error('boom'))
+    render(
+      <PluginConfigEditor
+        pluginId="pipeline_llm_core"
+        fileId="embedding"
+        title="向量模型配置"
+      />,
+    )
+    expect(await screen.findByText('boom')).toBeInTheDocument()
+    // config 保持 null：KV 编辑区与保存按钮均不渲染
+    expect(screen.queryByText('添加自定义字段')).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: /保存配置/ })).not.toBeInTheDocument()
+    expect(savePluginConfigFile).not.toHaveBeenCalled()
+  })
+})

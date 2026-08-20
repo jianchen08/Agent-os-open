@@ -128,10 +128,14 @@ export function PipelineManagerWidget(_rawProps: Record<string, unknown>) {
   const registryRuns = usePipelineRegistryStore((s) => s.runs)
   /** 管道 state 摘要（内核 /pipelines/state：phase/迭代/上下文真值） */
   const registryStates = usePipelineRegistryStore((s) => s.states)
+  /** states 侧拉取失败（runs 仍可用；null=正常）——UI 提示状态可能不全 */
+  const registryStatesError = usePipelineRegistryStore((s) => s.statesError)
   /** 实时 token 用量（cost_update 事件驱动） */
   const usageByPipeline = useContextUsageStore((s) => s.usageByPipeline)
   /** 全量任务（/ext/channel_api/tasks 不过滤 long-term；任务节点/任务管道判定权威源） */
   const [allTasks, setAllTasks] = useState<Record<string, unknown>[]>([])
+  /** 任务列表拉取失败（管道列表仍可用；null=正常）。30s 轮询保留自愈 */
+  const [tasksError, setTasksError] = useState<string | null>(null)
   useEffect(() => {
     let cancelled = false
     const load = async () => {
@@ -139,9 +143,16 @@ export function PipelineManagerWidget(_rawProps: Record<string, unknown>) {
         const resp = await apiClient.get('/ext/channel_api/tasks', {
           params: { skip: 0, limit: 100 },
         })
-        if (!cancelled) setAllTasks(resp.data.items ?? [])
-      } catch {
-        // 任务列表不可用时静默（管道列表仍可用）
+        if (!cancelled) {
+          setAllTasks(resp.data.items ?? [])
+          setTasksError(null)
+        }
+      } catch (e) {
+        // 任务列表不可用时降级（管道列表仍可用），但置位提示——
+        // 持久失败时用户不应把"服务故障"读成"没有任务"
+        if (!cancelled) {
+          setTasksError(e instanceof Error ? e.message : '任务列表不可用')
+        }
       }
     }
     load()
@@ -701,6 +712,18 @@ export function PipelineManagerWidget(_rawProps: Record<string, unknown>) {
           ))}
         </div>
       </div>
+
+      {/* 降级留痕（FE6/FE9）：states 或任务列表拉取失败时提示，不伪装成"无数据" */}
+      {(registryStatesError || tasksError) && (
+        <div className="border-b bg-status-warning/10 px-3 py-1.5 text-[11px] text-status-warning">
+          {registryStatesError && (
+            <div>管道状态拉取失败（{registryStatesError}）——phase/任务状态可能不全，30s 后自动重试。</div>
+          )}
+          {tasksError && (
+            <div>任务列表不可用（{tasksError}）——管道列表仍可展示，30s 后自动重试。</div>
+          )}
+        </div>
+      )}
 
       {/* 管道管理视图 */}
       <div className="min-h-0 flex-1 overflow-auto">

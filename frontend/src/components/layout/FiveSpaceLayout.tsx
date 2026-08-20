@@ -350,11 +350,12 @@ export function FiveSpaceLayout({
 
       // 顶栏打开的内置面板：优先走 component 注册的 widget
       if (tab.component && (tab.moduleId?.startsWith('__panel_') || tab.moduleId?.startsWith('__builtin_'))) {
-        const WidgetComponent =
-          widgetRegistry.get(tab.component) ?? widgetRegistry.findFallback(tab.component)
+        // 降级映射命中的渲染打 data-fallback 标记（声明↔注册断链可排查，FE3）
+        const panelExact = widgetRegistry.get(tab.component)
+        const WidgetComponent = panelExact ?? widgetRegistry.findFallback(tab.component)
         if (WidgetComponent) {
           return (
-            <div className="h-full min-h-0 overflow-hidden">
+            <div className="h-full min-h-0 overflow-hidden" data-fallback={panelExact ? undefined : tab.component}>
               <WidgetComponent panel={tab.component} dataSource={tab.dataSource} />
             </div>
           )
@@ -363,7 +364,8 @@ export function FiveSpaceLayout({
 
       // component-based 渲染路径：通过 tab.component 直接查找 widget
       if (tab.component) {
-        const WidgetComponent = widgetRegistry.get(tab.component) ?? widgetRegistry.findFallback(tab.component)
+        const componentExact = widgetRegistry.get(tab.component)
+        const WidgetComponent = componentExact ?? widgetRegistry.findFallback(tab.component)
         if (WidgetComponent) {
           /** 处理工作空间文件树中的文件点击 加载文件内容并注册为文件编辑器 Tab，在工作区中以 CodeEditor 或 FilePreview 组件展示。 */
           const handleFileClick = async (filePath: string, fileName: string) => {
@@ -431,7 +433,10 @@ export function FiveSpaceLayout({
                   打开文件夹
                 </button>
               )}
-              <div className="h-full overflow-auto p-2 sm:p-4">
+              <div
+                className="h-full overflow-auto p-2 sm:p-4"
+                data-fallback={componentExact ? undefined : tab.component}
+              >
                 <WidgetComponent
                   {...(tab.props ?? {})}
                   dataSource={tab.dataSource}

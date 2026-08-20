@@ -133,15 +133,19 @@ export function InteractionCard({
                 variant="outline"
                 size="sm"
                 disabled={isSubmitting}
-                onClick={() => {
-                  // AC-1.2-3: 短 description（<20字符）直接执行选择；长描述（>=20字符）弹窗展示详情
-                  if (features.has('options_detail') && opt.description && opt.description.length >= 20) {
-                    setDetailOption(opt)
-                  } else {
-                    // 后端 options 可能缺 id（LLM 传参差异）——label 兜底；父层已绑定 requestId
-                    onRespondChoice(opt.id ?? opt.label ?? String(i))
-                  }
-                }}
+                  onClick={() => {
+                    // AC-1.2-3: 短 description（<20字符）直接执行选择；长描述（>=20字符）弹窗展示详情
+                    if (features.has('options_detail') && opt.description && opt.description.length >= 20) {
+                      setDetailOption(opt)
+                    } else {
+                      // 后端 options 可能缺 id（LLM 传参差异）——label 兜底；父层已绑定 requestId。
+                      // 缺 id 时 debug 留痕统计违规率（回传是提交数据非展示文案，label 重复可能选错）
+                      if (!opt.id) {
+                        console.debug('[InteractionCard] 交互选项缺 id，回退 label 提交: label=%s', opt.label)
+                      }
+                      onRespondChoice(opt.id ?? opt.label ?? String(i))
+                    }
+                  }}
                 className="text-sm"
               >
                 <span className="flex flex-col items-start gap-0.5">
@@ -247,6 +251,10 @@ export function InteractionCard({
               disabled={isSubmitting}
               onClick={() => {
                 if (detailOption) {
+                  // 同上：缺 id 回退 label 提交时 debug 留痕（统计后端契约违规率）
+                  if (!detailOption.id) {
+                    console.debug('[InteractionCard] 弹窗确认选项缺 id，回退 label 提交: label=%s', detailOption.label)
+                  }
                   onRespondChoice(detailOption.id ?? detailOption.label ?? '')
                   setDetailOption(null)
                 }

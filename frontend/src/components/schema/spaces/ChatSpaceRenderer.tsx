@@ -49,7 +49,11 @@ export function ChatSpaceRenderer({ instructions }: ChatSpaceRendererProps) {
         }
 
         return (
-          <div key={stableKey} className="chat-widget-container">
+          <div
+            key={stableKey}
+            className="chat-widget-container"
+            data-fallback={instruction.viaFallback ? widgetType : undefined}
+          >
             <WidgetComponent {...props} />
           </div>
         )

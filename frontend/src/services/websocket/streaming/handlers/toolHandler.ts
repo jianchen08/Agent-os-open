@@ -9,6 +9,36 @@ import { ensureStreamingPlaceholder, extractMessageId, extractThreadId } from '.
 
 const _debugLogger = loggers.websocket
 
+/** tool_result 缺 success 字段的告警节流（避免流式高频刷屏；30s 至多一条） */
+let _lastMissingSuccessWarnAt = 0
+
+/**
+ * 解析 tool_result 的终态：缺 success 且 error 非空 → error（fail-closed）；
+ * success 缺失时不再默认成功（后端契约漂移会让失败工具在 UI 呈现为成功），
+ * 两者皆缺按 done 渲染但节流 warn 一条，契约漂移可观测。
+ */
+function resolveToolResultState(
+  success: unknown,
+  error: unknown,
+  toolName: string,
+): 'done' | 'error' {
+  if (success !== undefined) {
+    return success === false ? 'error' : 'done'
+  }
+  if (error !== null && error !== undefined && error !== '') {
+    return 'error'
+  }
+  const now = Date.now()
+  if (now - _lastMissingSuccessWarnAt > 30_000) {
+    _lastMissingSuccessWarnAt = now
+    _debugLogger.warn(
+      '[TOOL_RESULT] success/error 字段均缺失，按 done 渲染（后端契约漂移？）: tool=%s',
+      toolName,
+    )
+  }
+  return 'done'
+}
+
 /** 处理工具调用开始事件 向 parts[] 追加一个 tool_call part；若 call_id 缺失则跳过（等数据完整再渲染）。 */
 export function handleToolStart(eventData: any) {
   const pipelineId = resolvePipelineId(eventData)
@@ -193,7 +223,11 @@ export function handleToolResult(eventData: any) {
   if (partIndex >= 0) {
     const resultToolName = eventData.tool_name || eventData.data?.tool_name
     const updates: Record<string, unknown> = {
-      state: (eventData.success ?? eventData.data?.success ?? true) === false ? 'error' : 'done',
+      state: resolveToolResultState(
+        eventData.success ?? eventData.data?.success,
+        eventData.error ?? eventData.data?.error,
+        resultToolName ?? 'unknown',
+      ),
       result: eventData.result ?? eventData.data?.result,
       // 后端在 tool_result 事件携带的结构化完整数据（含 diff 的 added/removed/old_content/new_content），
       // 流式 result 字段为截断字符串仅供预览；result_data 供工具卡片渲染 +/- 徽标与展开 diff。

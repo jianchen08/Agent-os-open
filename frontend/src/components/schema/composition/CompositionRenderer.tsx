@@ -145,7 +145,7 @@ export function CompositionRenderer({
  * @returns 组件渲染结果
  */
 function WidgetRenderer({ resolved }: { resolved: ResolvedComponent }): React.ReactNode {
-  const { component, props, type } = resolved
+  const { component, props, type, viaFallback } = resolved
 
   if (!component) {
     return (
@@ -173,7 +173,12 @@ function WidgetRenderer({ resolved }: { resolved: ResolvedComponent }): React.Re
     ...(resolved.polling ? { _polling: resolved.polling } : {}),
   }
 
-  return React.createElement(component, mergedProps)
+  // 降级映射解析（非精确注册）打 data-fallback 标记，声明↔注册断链可排查
+  const element = React.createElement(component, mergedProps)
+  if (viaFallback) {
+    return <div data-fallback={type}>{element}</div>
+  }
+  return element
 }
 
 export default CompositionRenderer

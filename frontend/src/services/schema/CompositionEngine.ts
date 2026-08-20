@@ -53,8 +53,10 @@ export interface CompositionNode {
 export interface ResolvedComponent {
   /** 组件类型标识 */
   type: string
-  /** React 组件（可能为 null 表示未找到） */
+  /** React 组件（可能为 null 表示未找到，渲染层走显式占位） */
   component: ComponentType<Record<string, unknown>> | null
+  /** 组件是否经降级映射解析（非精确注册；渲染层打 data-fallback 标记） */
+  viaFallback?: boolean
   /** 传递给组件的属性 */
   props: Record<string, unknown>
   /** 已解析的数据源 */
@@ -184,8 +186,9 @@ export class CompositionEngine {
     props: Record<string, unknown>,
     dataSourceRef?: string,
   ): ResolvedComponent {
-    // 从注册表获取组件（优先精确匹配，支持降级）
-    const component = widgetRegistry.get(componentType) ?? widgetRegistry.findFallback(componentType) ?? null
+    // 从注册表获取组件（优先精确匹配；降级仅限映射表内条目，表外 null 走渲染层占位）
+    const exact = widgetRegistry.get(componentType)
+    const component = exact ?? widgetRegistry.findFallback(componentType) ?? null
 
     // 解析数据源
     let resolvedDataSource: ResolvedDataSource | undefined
@@ -201,6 +204,7 @@ export class CompositionEngine {
     return {
       type: componentType,
       component,
+      viaFallback: !exact && !!component,
       props,
       resolvedDataSource,
     }

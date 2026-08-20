@@ -185,3 +185,40 @@ describe('InteractionCard 特性驱动渲染', () => {
     expect(screen.getByText('确认选择')).toBeInTheDocument()
   })
 })
+
+describe('选项缺 id 的 debug 留痕（FE13：宽松契约保留 + 违规率可统计）', () => {
+  it('缺 id 选项点选：仍按 label 回退提交，并 console.debug 一次', () => {
+    const debugSpy = vi.spyOn(console, 'debug').mockImplementation(() => {})
+    try {
+      const props = cardProps(
+        makeInteraction({ options: [{ label: '唯一方案' }] } as Partial<PendingInteraction>),
+      )
+      render(<InteractionCard {...props} />)
+      fireEvent.click(screen.getByText('唯一方案'))
+      // 行为不变：label 兜底提交
+      expect(props.onRespondChoice).toHaveBeenCalledWith('唯一方案')
+      // 留痕：缺 id 的违规可统计
+      expect(debugSpy).toHaveBeenCalledWith(
+        expect.stringContaining('交互选项缺 id'),
+        '唯一方案',
+      )
+    } finally {
+      debugSpy.mockRestore()
+    }
+  })
+
+  it('带 id 选项点选：不触发 debug', () => {
+    const debugSpy = vi.spyOn(console, 'debug').mockImplementation(() => {})
+    try {
+      const props = cardProps(
+        makeInteraction({ options: [{ id: 'opt-1', label: '方案一' }] } as Partial<PendingInteraction>),
+      )
+      render(<InteractionCard {...props} />)
+      fireEvent.click(screen.getByText('方案一'))
+      expect(props.onRespondChoice).toHaveBeenCalledWith('opt-1')
+      expect(debugSpy).not.toHaveBeenCalled()
+    } finally {
+      debugSpy.mockRestore()
+    }
+  })
+})

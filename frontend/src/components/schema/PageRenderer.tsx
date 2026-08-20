@@ -126,10 +126,20 @@ function buildSubmitHandler(
 }
 
 /** 占位渲染（widget 未注册 / 页面无内容 / 未支持空间） */
-function PagePlaceholder({ page, reason }: { page: PageDeclaration; reason?: string }) {
+function PagePlaceholder({
+  page,
+  reason,
+  fallbackType,
+}: {
+  page: PageDeclaration
+  reason?: string
+  /** 未注册的 widget type（打 data-fallback 标记供排查） */
+  fallbackType?: string
+}) {
   return (
     <div
       data-testid={`page-placeholder-${page.id}`}
+      data-fallback={fallbackType}
       className="text-muted-foreground flex h-full min-h-[60px] flex-col items-center justify-center gap-1 p-4 text-center text-xs"
     >
       <span>
@@ -202,12 +212,22 @@ function PagePopoutButton({ page }: { page: PageDeclaration }) {
  */
 export function renderPageContent(page: PageDeclaration): ReactNode {
   // 1) widget 优先（workspace/settings/chat 等空间的 L3 自定义组件）
+  //    精确注册优先；降级映射命中的渲染打 data-fallback 标记（声明↔注册断链可排查）；
+  //    均未命中走显式占位——不静默替换成无关组件（FE3）
   if (page.widget) {
-    const Widget = widgetRegistry.get(page.widget) ?? widgetRegistry.findFallback(page.widget)
+    const exact = widgetRegistry.get(page.widget)
+    const Widget = exact ?? widgetRegistry.findFallback(page.widget)
     if (Widget) {
-      return <Widget {...(page.props ?? {})} />
+      if (exact) {
+        return <Widget {...(page.props ?? {})} />
+      }
+      return (
+        <div data-fallback={page.widget}>
+          <Widget {...(page.props ?? {})} />
+        </div>
+      )
     }
-    return <PagePlaceholder page={page} reason={`组件 ${page.widget} 未注册`} />
+    return <PagePlaceholder page={page} reason={`组件 ${page.widget} 未注册`} fallbackType={page.widget} />
   }
 
   // 2) schema → SchemaDriver 表单（配置类页面）

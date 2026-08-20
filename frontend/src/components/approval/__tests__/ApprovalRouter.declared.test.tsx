@@ -89,12 +89,15 @@ describe('ApprovalRouter 声明驱动路由', () => {
     expect(screen.getByTestId('custom-diff')).toHaveTextContent('OLD')
   })
 
-  it('声明了但 widget 未注册 → 降级 text_diff 不白屏', () => {
+  it('声明了但 widget 未注册 → 显式错误占位（不静默降级 text_diff，FE5）', () => {
     loadViewModes([
       { ui: { view_modes: [{ view_mode: 'storyboard', widget: 'not_registered' }] } },
     ])
     render(<ApprovalRouter viewMode="storyboard" oldContent="x" newContent="y" />)
-    expect(screen.getByTestId('approval-route-text_diff')).toBeInTheDocument()
+    // 审批是决策链路：声明断链必须显式暴露，不得给审批者错误的内容形态
+    expect(screen.getByTestId('approval-route-unregistered')).toBeInTheDocument()
+    expect(screen.getByText(/not_registered/)).toBeInTheDocument()
+    expect(screen.queryByTestId('approval-route-text_diff')).not.toBeInTheDocument()
   })
 })
 

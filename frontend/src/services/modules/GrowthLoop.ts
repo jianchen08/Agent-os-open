@@ -9,6 +9,7 @@ import { contributionRegistry } from '@/services/schema/ContributionRegistry'
 import { initializeWidgets } from '@/services/schema/registerWidgets'
 import { shortcutRegistry } from '@/services/schema/shortcutRegistry'
 import { useLayoutModeStore } from '@/stores/layoutModeStore'
+import { useNotificationStore } from '@/stores/notificationStore'
 import { useThemeStore } from '@/stores/themeStore'
 import { loggers } from '@/utils/logger'
 import { loadChatCardDeclarations } from '@/utils/chatCardInterpreter'
@@ -48,8 +49,12 @@ export async function initializeGrowthLoop(): Promise<void> {
  * 重新拉取 schema 并刷新 ContributionRegistry + 导航 + 快捷键 + 插件主题/CSS。
  *
  * 集中了 contributes 数据的加载逻辑，供初始化、重启、schema_updated 事件复用。
- * 失败仅 warn 不抛出（contributes 加载失败不应阻塞主流程）。
+ * 失败不阻塞主流程（刻意设计），但须可见降级：console.warn 留痕 + 非阻塞通知
+ * （节流去重，避免 schema_updated 重复事件刷屏）——否则用户视角"插件功能
+ * 整体消失"无任何指示。
  */
+let _lastSchemaLoadNotifyAt = 0
+
 async function reloadContributionRegistry(): Promise<void> {
   try {
     const schema = await getSchema()
@@ -128,6 +133,20 @@ async function reloadContributionRegistry(): Promise<void> {
     syncPluginStyles(contributionRegistry.getClientStyles())
   } catch (error) {
     loggers.websocket.warn('ContributionRegistry 加载失败:', error)
+    // 可见降级（FE11）：插件贡献（pages/导航/命令/卡片）单一装载点失败时
+    // 发非阻塞通知；60s 节流防 schema_updated 连发刷屏
+    const now = Date.now()
+    if (now - _lastSchemaLoadNotifyAt > 60_000) {
+      _lastSchemaLoadNotifyAt = now
+      useNotificationStore.getState().addNotification({
+        category: 'error',
+        title: '插件贡献加载失败',
+        message: `页面/导航/命令等插件功能暂不可用（${error instanceof Error ? error.message : String(error)}），将在下次 schema 更新时自动重试。`,
+        priority: 'normal',
+        isBlocking: false,
+        autoDismissMs: 10_000,
+      })
+    }
   }
 }
 

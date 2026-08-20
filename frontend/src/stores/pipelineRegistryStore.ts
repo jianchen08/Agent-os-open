@@ -26,6 +26,8 @@ interface PipelineRegistryState {
   runs: Record<string, PipelineRunInfo>
   /** 管道 state 摘要（pipeline_id → phase/迭代/上下文真值，任务树数据源） */
   states: Record<string, PipelineStateInfo>
+  /** states 侧拉取失败信息（runs 快照仍可用；null=正常。UI 据此提示"状态可能不全"） */
+  statesError: string | null
   /** 最近一次快照拉取时间 */
   lastFetchedAt: number | null
   /** 是否正在拉取 */
@@ -50,6 +52,7 @@ interface PipelineRegistryState {
 export const usePipelineRegistryStore = create<PipelineRegistryState>((set, get) => ({
   runs: {},
   states: {},
+  statesError: null,
   lastFetchedAt: null,
   isLoading: false,
   error: null,
@@ -60,10 +63,16 @@ export const usePipelineRegistryStore = create<PipelineRegistryState>((set, get)
     if (get().isLoading) return
     set({ isLoading: true })
     try {
-      // runs 与 state 并行拉取；state 失败降级为空（不阻断 runs 快照）
+      // runs 与 state 并行拉取；state 失败降级为空（不阻断 runs 快照），
+      // 但须留痕：statesError 置位供 UI 提示，避免服务故障伪装成"无状态/无任务"
+      let statesError: string | null = null
       const [items, stateItems] = await Promise.all([
         fetchPipelineRuns({ limit: 100 }),
-        fetchPipelineStates().catch(() => [] as PipelineStateInfo[]),
+        fetchPipelineStates().catch((e: unknown) => {
+          statesError = e instanceof Error ? e.message : '管道 state 拉取失败'
+          console.warn('[pipelineRegistry] 拉取管道 state 失败（states 置空，runs 快照不受影响）', e)
+          return [] as PipelineStateInfo[]
+        }),
       ])
       const next: Record<string, PipelineRunInfo> = {}
       for (const item of items) {
@@ -78,7 +87,14 @@ export const usePipelineRegistryStore = create<PipelineRegistryState>((set, get)
       for (const st of stateItems) {
         nextStates[st.pipeline_id] = st
       }
-      set({ runs: next, states: nextStates, lastFetchedAt: Date.now(), error: null, isLoading: false })
+      set({
+        runs: next,
+        states: nextStates,
+        statesError,
+        lastFetchedAt: Date.now(),
+        error: null,
+        isLoading: false,
+      })
     } catch (e) {
       console.error('[pipelineRegistry] 拉取管道快照失败', e)
       set({ error: e instanceof Error ? e.message : '拉取管道快照失败', isLoading: false })
@@ -150,6 +166,6 @@ export const usePipelineRegistryStore = create<PipelineRegistryState>((set, get)
 
   reset: () => {
     get().stopAutoRefresh()
-    set({ runs: {}, states: {}, lastFetchedAt: null, isLoading: false, error: null })
+    set({ runs: {}, states: {}, statesError: null, lastFetchedAt: null, isLoading: false, error: null })
   },
 }))

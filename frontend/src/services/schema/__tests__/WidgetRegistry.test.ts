@@ -12,7 +12,7 @@
  * - 重复注册覆盖更新
  */
 
-import { describe, it, expect, beforeEach } from 'vitest'
+import { describe, it, expect, beforeEach, vi } from 'vitest'
 // 直接引入 class 而非单例，避免测试间互相影响
 import type { WidgetComponent, WidgetEntry } from '@/services/schema/WidgetRegistry'
 
@@ -25,8 +25,10 @@ const WidgetRegistryClass = WidgetRegistryModule.default?.constructor as typeof 
 let RegistryClass: any
 
 // 直接 new 一个实例用于测试（绕过单例）
+// 注：本类是真实 WidgetRegistry 的镜像副本（findFallback 行为须与源同步）
 class TestableWidgetRegistry {
   private entries: Map<string, WidgetEntry> = new Map()
+  private fallbackWarnedTypes: Set<string> = new Set()
 
   register(type: string, component: WidgetComponent, metadata: any): void {
     if (!type || type.trim() === '') {
@@ -86,12 +88,21 @@ class TestableWidgetRegistry {
       dashboard: ['chart'],
     }
 
-    const candidates = fallbackMap[type] ?? ['status_card']
-    for (const candidate of candidates) {
-      const entry = this.entries.get(candidate)
-      if (entry) return entry.component
+    // FE3：降级仅限映射表内显式条目；表外返回 undefined（调用方渲染显式占位）
+    const candidates = fallbackMap[type]
+    if (candidates) {
+      for (const candidate of candidates) {
+        const entry = this.entries.get(candidate)
+        if (entry) return entry.component
+      }
     }
 
+    if (!this.fallbackWarnedTypes.has(type)) {
+      this.fallbackWarnedTypes.add(type)
+      console.warn(
+        `[WidgetRegistry] widget "${type}" 未注册且无可用降级（映射表外或候选均未注册），将渲染占位`,
+      )
+    }
     return undefined
   }
 
@@ -101,6 +112,7 @@ class TestableWidgetRegistry {
 
   clear(): void {
     this.entries.clear()
+    this.fallbackWarnedTypes.clear()
   }
 }
 
@@ -314,9 +326,34 @@ describe('WidgetRegistry.findFallback', () => {
     expect(comp).toBeDefined()
   })
 
-  it('完全未知且无降级映射的组件应回退到 status_card', () => {
-    const comp = registry.findFallback('completely_unknown_widget')
-    expect(comp).toBeDefined()
+  it('完全未知且无降级映射的组件返回 undefined（不再默认 status_card）并 warn 一次', () => {
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    try {
+      // FE3：表外类型不得静默替换成无关组件——返回 undefined 交调用方渲染显式占位
+      expect(registry.findFallback('completely_unknown_widget')).toBeUndefined()
+      expect(warnSpy).toHaveBeenCalledTimes(1)
+      // 同 type 重复查找只 warn 一次（避免渲染循环刷屏）
+      registry.findFallback('completely_unknown_widget')
+      expect(warnSpy).toHaveBeenCalledTimes(1)
+    } finally {
+      warnSpy.mockRestore()
+    }
+  })
+
+  it('映射表内但候选全缺同样返回 undefined 并 warn 一次', () => {
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    try {
+      // kanban 在映射表内但 table/status_card 均未注册（本 describe 只注册部分组件）
+      const onlyChart = new TestableWidgetRegistry()
+      onlyChart.register('chart', createMockComponent('Chart'), {
+        name: 'Chart',
+        supportedSpaces: ['chat'],
+      })
+      expect(onlyChart.findFallback('kanban')).toBeUndefined()
+      expect(warnSpy).toHaveBeenCalledTimes(1)
+    } finally {
+      warnSpy.mockRestore()
+    }
   })
 
   it('无任何已注册组件时返回 undefined', () => {
@@ -405,5 +442,37 @@ describe('WidgetRegistry - size 和 clear', () => {
     registry.clear()
     expect(registry.size).toBe(0)
     expect(registry.list()).toEqual([])
+  })
+})
+
+// ============================================================
+// 真实单例 findFallback（FE3 兜底反模式修复：镜像副本之上的源行为验证）
+// ============================================================
+
+describe('WidgetRegistry 单例 findFallback（真实实现）', () => {
+  it('映射表内条目按候选降级（kanban → table）', () => {
+    const { widgetRegistry } = WidgetRegistryModule
+    const table = createMockComponent('Table')
+    widgetRegistry.register('table', table, { name: 'table' })
+    try {
+      expect(widgetRegistry.findFallback('kanban')).toBe(table)
+    } finally {
+      widgetRegistry.unregister('table')
+      widgetRegistry.clear()
+    }
+  })
+
+  it('表外未知类型返回 undefined 并 warn 一次（不默认 status_card）', () => {
+    const { widgetRegistry } = WidgetRegistryModule
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    try {
+      expect(widgetRegistry.findFallback('totally_unknown_type_fe3')).toBeUndefined()
+      expect(warnSpy).toHaveBeenCalledTimes(1)
+      widgetRegistry.findFallback('totally_unknown_type_fe3')
+      expect(warnSpy).toHaveBeenCalledTimes(1)
+    } finally {
+      warnSpy.mockRestore()
+      widgetRegistry.clear()
+    }
   })
 })

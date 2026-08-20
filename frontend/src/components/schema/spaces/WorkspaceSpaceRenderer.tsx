@@ -65,8 +65,11 @@ export function WorkspaceSpaceRenderer({
         </div>
       )}
 
-      {/* 渲染区域 */}
-      <div className="flex-1 overflow-auto p-2">
+      {/* 渲染区域（viaFallback=降级映射解析，打 data-fallback 标记） */}
+      <div
+        className="flex-1 overflow-auto p-2"
+        data-fallback={activeInstruction.viaFallback ? widgetType : undefined}
+      >
         {!WidgetComponent ? (
           <div className="flex h-full items-center justify-center">
             <p className="text-muted-foreground text-sm">
