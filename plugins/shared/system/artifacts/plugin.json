@@ -1,0 +1,153 @@
+{
+  "id": "artifacts",
+  "name": "Artifacts Service",
+  "description": "制品 + 批注域 HTTP 面（channel_api 拆迁批次 1 承接）——制品 CRUD/版本/diff、批注 CRUD/resolve、多模态文件上传；服务实现为本目录 artifact_service/annotation_service（纯内存单例）",
+  "version": "1.0.0",
+  "plugin_type": "system",
+  "language": "python",
+  "host_type": "sidecar",
+  "entry": "python server.py",
+  "capabilities": {
+    "tools": [],
+    "route_signals": [],
+    "lifecycle_hooks": [
+      "on_load"
+    ],
+    "services": []
+  },
+  "permissions": {},
+  "priority": 50,
+  "requires_content": 5,
+  "http_endpoints": [
+    {
+      "route_id": "artifacts_upload",
+      "method": "POST",
+      "path": "/ext/artifacts/upload",
+      "auth": "user",
+      "handler_capability": "http.handle",
+      "timeout_ms": 30000,
+      "max_concurrency": 2,
+      "description": "上传多模态文件（multipart/form-data；落盘 uploads 目录 + DiskFileStorage 元数据——原 POST /ext/channel_api/artifacts/upload 语义）"
+    },
+    {
+      "route_id": "artifacts_list",
+      "method": "GET",
+      "path": "/ext/artifacts",
+      "auth": "user",
+      "handler_capability": "http.handle",
+      "timeout_ms": 5000,
+      "max_concurrency": 8,
+      "description": "制品列表（query: task_id/limit/offset，{items,total}——原 GET /ext/channel_api/artifacts 语义）"
+    },
+    {
+      "route_id": "artifacts_create",
+      "method": "POST",
+      "path": "/ext/artifacts",
+      "auth": "user",
+      "handler_capability": "http.handle",
+      "timeout_ms": 5000,
+      "max_concurrency": 4,
+      "description": "创建制品（body: task_id/title/artifact_type/content/file_path/metadata——原 POST /ext/channel_api/artifacts 语义）"
+    },
+    {
+      "route_id": "artifacts_get",
+      "method": "GET",
+      "path": "/ext/artifacts/{artifact_id}",
+      "auth": "user",
+      "handler_capability": "http.handle",
+      "timeout_ms": 5000,
+      "max_concurrency": 8,
+      "description": "制品详情（原 GET /ext/channel_api/artifacts/{id} 语义）"
+    },
+    {
+      "route_id": "artifacts_update",
+      "method": "PUT",
+      "path": "/ext/artifacts/{artifact_id}",
+      "auth": "user",
+      "handler_capability": "http.handle",
+      "timeout_ms": 5000,
+      "max_concurrency": 4,
+      "description": "更新制品（创建新版本；body: content/title/metadata——原 PUT /ext/channel_api/artifacts/{id} 语义）"
+    },
+    {
+      "route_id": "artifacts_delete",
+      "method": "DELETE",
+      "path": "/ext/artifacts/{artifact_id}",
+      "auth": "user",
+      "handler_capability": "http.handle",
+      "timeout_ms": 5000,
+      "max_concurrency": 4,
+      "description": "删除制品（原 DELETE /ext/channel_api/artifacts/{id} 语义）"
+    },
+    {
+      "route_id": "artifacts_versions",
+      "method": "GET",
+      "path": "/ext/artifacts/{artifact_id}/versions",
+      "auth": "user",
+      "handler_capability": "http.handle",
+      "timeout_ms": 5000,
+      "max_concurrency": 8,
+      "description": "制品版本历史（原 GET /ext/channel_api/artifacts/{id}/versions 语义）"
+    },
+    {
+      "route_id": "artifacts_diff",
+      "method": "GET",
+      "path": "/ext/artifacts/{artifact_id}/diff",
+      "auth": "user",
+      "handler_capability": "http.handle",
+      "timeout_ms": 5000,
+      "max_concurrency": 8,
+      "description": "版本差异（query: from/to——原 GET /ext/channel_api/artifacts/{id}/diff 语义）"
+    },
+    {
+      "route_id": "artifacts_annotations_list",
+      "method": "GET",
+      "path": "/ext/artifacts/{artifact_id}/annotations",
+      "auth": "user",
+      "handler_capability": "http.handle",
+      "timeout_ms": 5000,
+      "max_concurrency": 8,
+      "description": "制品批注列表（query: status/limit——原 GET /ext/channel_api/artifacts/{id}/annotations 语义）"
+    },
+    {
+      "route_id": "artifacts_annotations_create",
+      "method": "POST",
+      "path": "/ext/artifacts/{artifact_id}/annotations",
+      "auth": "user",
+      "handler_capability": "http.handle",
+      "timeout_ms": 5000,
+      "max_concurrency": 4,
+      "description": "添加批注（body: target_type/target_data/content/author_type/author_id——原 POST /ext/channel_api/artifacts/{id}/annotations 语义）"
+    },
+    {
+      "route_id": "annotations_update",
+      "method": "PUT",
+      "path": "/ext/artifacts/annotations/{annotation_id}",
+      "auth": "user",
+      "handler_capability": "http.handle",
+      "timeout_ms": 5000,
+      "max_concurrency": 4,
+      "description": "更新批注（body: content/target_data——原 PUT /ext/channel_api/annotations/{id} 语义）"
+    },
+    {
+      "route_id": "annotations_delete",
+      "method": "DELETE",
+      "path": "/ext/artifacts/annotations/{annotation_id}",
+      "auth": "user",
+      "handler_capability": "http.handle",
+      "timeout_ms": 5000,
+      "max_concurrency": 4,
+      "description": "删除批注（原 DELETE /ext/channel_api/annotations/{id} 语义）"
+    },
+    {
+      "route_id": "annotations_resolve",
+      "method": "POST",
+      "path": "/ext/artifacts/annotations/{annotation_id}/resolve",
+      "auth": "user",
+      "handler_capability": "http.handle",
+      "timeout_ms": 5000,
+      "max_concurrency": 4,
+      "description": "标记批注为已解决（原 POST /ext/channel_api/annotations/{id}/resolve 语义）"
+    }
+  ]
+}
