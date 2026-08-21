@@ -8,4 +8,11 @@
 #     44.0 即真实压力线）。
 #   - 达到 44.0 后：--init 写入实测，再上调至新实测+压力，commit 留归因。
 #   - 只许升不许降；如确有正当理由（度量口径变更），手改并 commit 归因。
-python_line_coverage=44.00
+python_line_coverage=46.50
+
+# 收紧（2026-08-21，车道接线+补测批）：本地实测 47.48%（12356/26025，
+# run_gates plugins-coverage 门禁内产出）。既有绿灯测试目录接线进插桩车道
+# （python_packager/monitoring/download/triggers_ext/workspace_aware，
+# scripts/coverage_exempt.py）+ performance_monitor 等 5 个新测试文件贡献。
+# 基线取 46.50 留本地-CI 口径余量（上次实测差 -0.55pp：本地 44.32 vs CI 43.77）；
+# CI（Linux）首跑实测后按本文件规则以 CI 为准再收紧。
