@@ -49,12 +49,11 @@ _HINDSIGHT_MEMORY_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), 
 if _HINDSIGHT_MEMORY_DIR not in sys.path:
     sys.path.insert(0, _HINDSIGHT_MEMORY_DIR)
 
-from wiring import build_memory_backend  # noqa: E402
-
 # 审批域（P1-2 接真，channel_api 退役批次 5）：状态机 + 媒体审阅迁入本插件包后
 # 平铺导入（server.py 运行目录即插件目录，与 workspace_service 同款惯例）。
-from review_service import get_review_service, reset_review_service  # noqa: E402
 import media_review_service  # noqa: E402
+from review_service import get_review_service  # noqa: E402
+from wiring import build_memory_backend  # noqa: E402
 
 logger = logging.getLogger(__name__)
 
@@ -727,6 +726,9 @@ async def _reviews_media_review(raw_body: str, headers: dict[str, str] | None) -
 
     文件经内核透传 raw_body base64 解出后落临时文件，审阅完即清理。
     media_type 留空时按文件扩展名自动推断（image/video）。
+
+    本 handler 直接返回完整 HttpHandleResponse（其余端点由分发层统一包装）——
+    协议级错误需携带真实 HTTP 状态（400）而非 200+error 体，故不走统一包装。
     """
     try:
         body_bytes = base64.b64decode(raw_body) if raw_body else b""
@@ -769,30 +771,40 @@ async def _reviews_media_review(raw_body: str, headers: dict[str, str] | None) -
             try:
                 effective_media_type = media_review_service._infer_media_type(tmp_path)
             except ValueError:
-                return {
-                    "error": {
-                        "code": "INVALID",
-                        "message": (
-                            f"无法推断媒体类型，请显式指定 media_type"
-                            f"（文件: {filename}）"
-                        ),
-                    }
-                }
+                return _ok(
+                    _json_response(
+                        {
+                            "error": {
+                                "code": "INVALID",
+                                "message": (
+                                    f"无法推断媒体类型，请显式指定 media_type"
+                                    f"（文件: {filename}）"
+                                ),
+                            }
+                        }
+                    )
+                )
 
         media_svc = get_media_review_service()
         result = await media_svc.review_media(tmp_path, effective_media_type)
         result_dict = result.to_dict()
         result_dict["media_type"] = effective_media_type
         result_dict["filename"] = filename
-        return result_dict
+        return _ok(_json_response(result_dict))
 
     except FileNotFoundError as exc:
-        return {"error": {"code": "NOT_FOUND", "message": str(exc)}}
+        return _ok(
+            _json_response({"error": {"code": "NOT_FOUND", "message": str(exc)}})
+        )
     except ValueError as exc:
-        return {"error": {"code": "INVALID", "message": str(exc)}}
+        return _ok(_json_response({"error": {"code": "INVALID", "message": str(exc)}}))
     except Exception as exc:  # noqa: BLE001
         logger.error("[review] 媒体审阅失败 | error=%s", exc)
-        return {"error": {"code": "INTERNAL", "message": f"媒体审阅失败: {exc}"}}
+        return _ok(
+            _json_response(
+                {"error": {"code": "INTERNAL", "message": f"媒体审阅失败: {exc}"}}
+            )
+        )
     finally:
         # 清理临时文件
         if os.path.isfile(tmp_path):  # noqa: PTH113
@@ -991,8 +1003,9 @@ async def http_handle(
 
     try:
         # POST /media-review（multipart：file + media_type）
+        # POST /media-review（multipart：file + media_type）——handler 自产完整响应
         if path == f"{_PREFIX}/media-review" and method == "POST":
-            return _ok(_json_response(await _reviews_media_review(raw_body, headers)))
+            return await _reviews_media_review(raw_body, headers)
         # POST ""（create）
         if path == _PREFIX and method == "POST":
             body = _decode_body(raw_body) or {}

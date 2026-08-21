@@ -28,7 +28,6 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-
 import review_service
 from models import ImageReviewResult, VideoReviewResult
 
@@ -71,10 +70,7 @@ def _run(coro: Any) -> Any:
 
         async def _cleanup() -> None:
             current = asyncio.current_task()
-            pending = [
-                t for t in asyncio.all_tasks(loop)
-                if not t.done() and t is not current
-            ]
+            pending = [t for t in asyncio.all_tasks(loop) if not t.done() and t is not current]
             for t in pending:
                 t.cancel()
             if pending:
@@ -113,11 +109,7 @@ def _make_multipart(file_bytes: bytes, filename: str, media_type: str = "") -> t
     parts = []
     if media_type:
         parts.append(
-            (
-                f"--{boundary}\r\n"
-                'Content-Disposition: form-data; name="media_type"\r\n\r\n'
-                f"{media_type}\r\n"
-            ).encode()
+            (f'--{boundary}\r\nContent-Disposition: form-data; name="media_type"\r\n\r\n{media_type}\r\n').encode()
         )
     parts.append(
         (
@@ -257,9 +249,7 @@ class TestListEndpoint:
         _create(server, task_id="t1", title="b")
         _create(server, task_id="t2", title="c")
 
-        status, body = _decode(
-            _call(server, path="/ext/review_service/reviews", method="GET", query={"task_id": "t1"})
-        )
+        status, body = _decode(_call(server, path="/ext/review_service/reviews", method="GET", query={"task_id": "t1"}))
         assert status == 200
         assert body["total"] == 2
         assert {i["title"] for i in body["items"]} == {"a", "b"}
@@ -470,7 +460,13 @@ class TestMediaReviewEndpoint:
 
         raw, ct = _make_multipart(b"PNGDATA", "photo.jpg")
         _, body = _decode(
-            _call(server, path="/ext/review_service/reviews/media-review", method="POST", raw_body=raw, headers={"Content-Type": ct})
+            _call(
+                server,
+                path="/ext/review_service/reviews/media-review",
+                method="POST",
+                raw_body=raw,
+                headers={"Content-Type": ct},
+            )
         )
         assert body["media_type"] == "image"
         assert fake.called_with[0][1] == "image"
@@ -482,7 +478,13 @@ class TestMediaReviewEndpoint:
 
         raw, ct = _make_multipart(b"MP4DATA", "clip.mp4", media_type="video")
         _, body = _decode(
-            _call(server, path="/ext/review_service/reviews/media-review", method="POST", raw_body=raw, headers={"Content-Type": ct})
+            _call(
+                server,
+                path="/ext/review_service/reviews/media-review",
+                method="POST",
+                raw_body=raw,
+                headers={"Content-Type": ct},
+            )
         )
         assert body["media_type"] == "video"
         assert body["format"] == "MP4"
@@ -511,7 +513,13 @@ class TestMediaReviewEndpoint:
         try:
             raw, ct = _make_multipart(b"PNGDATA", "a.png", media_type="image")
             _, body = _decode(
-                _call(server, path="/ext/review_service/reviews/media-review", method="POST", raw_body=raw, headers={"Content-Type": ct})
+                _call(
+                    server,
+                    path="/ext/review_service/reviews/media-review",
+                    method="POST",
+                    raw_body=raw,
+                    headers={"Content-Type": ct},
+                )
             )
         finally:
             _tf.mkdtemp = real_mkdtemp  # type: ignore[assignment]
@@ -533,7 +541,13 @@ class TestMediaReviewEndpoint:
 
         raw, ct = _make_multipart(b"TEXT", "notes.txt")
         _, body = _decode(
-            _call(server, path="/ext/review_service/reviews/media-review", method="POST", raw_body=raw, headers={"Content-Type": ct})
+            _call(
+                server,
+                path="/ext/review_service/reviews/media-review",
+                method="POST",
+                raw_body=raw,
+                headers={"Content-Type": ct},
+            )
         )
         assert body["error"]["code"] == "INVALID"
         assert "无法推断媒体类型" in body["error"]["message"]
@@ -546,7 +560,13 @@ class TestMediaReviewEndpoint:
 
         raw, ct = _make_multipart(b"DATA", "a.png", media_type="image")
         _, body = _decode(
-            _call(server, path="/ext/review_service/reviews/media-review", method="POST", raw_body=raw, headers={"Content-Type": ct})
+            _call(
+                server,
+                path="/ext/review_service/reviews/media-review",
+                method="POST",
+                raw_body=raw,
+                headers={"Content-Type": ct},
+            )
         )
         assert body["error"]["code"] == "NOT_FOUND"
 
@@ -557,7 +577,13 @@ class TestMediaReviewEndpoint:
 
         raw, ct = _make_multipart(b"DATA", "a.png", media_type="audio")
         _, body = _decode(
-            _call(server, path="/ext/review_service/reviews/media-review", method="POST", raw_body=raw, headers={"Content-Type": ct})
+            _call(
+                server,
+                path="/ext/review_service/reviews/media-review",
+                method="POST",
+                raw_body=raw,
+                headers={"Content-Type": ct},
+            )
         )
         assert body["error"]["code"] == "INVALID"
 
@@ -568,7 +594,13 @@ class TestMediaReviewEndpoint:
 
         raw, ct = _make_multipart(b"DATA", "a.png", media_type="image")
         _, body = _decode(
-            _call(server, path="/ext/review_service/reviews/media-review", method="POST", raw_body=raw, headers={"Content-Type": ct})
+            _call(
+                server,
+                path="/ext/review_service/reviews/media-review",
+                method="POST",
+                raw_body=raw,
+                headers={"Content-Type": ct},
+            )
         )
         assert body["error"]["code"] == "INTERNAL"
 
@@ -645,9 +677,7 @@ class TestMediaMetadataEndpoint:
         _inject_media_service(server, fake)
 
         _, body = _decode(_call(server, path=f"/ext/review_service/reviews/{rid}/media-metadata", method="GET"))
-        assert body["media_metadata"] == [
-            {"file_path": str(p), "media_type": "image", "format": "PNG", "width": 8}
-        ]
+        assert body["media_metadata"] == [{"file_path": str(p), "media_type": "image", "format": "PNG", "width": 8}]
 
     def test_metadata_missing_file_entry(self, server: Any) -> None:
         rid = _create(server, metadata={"media_files": [{"path": "/no/such/file.png", "media_type": "image"}]})
@@ -696,7 +726,12 @@ class TestAttachmentsEndpoint:
     def test_attachments_empty_files_invalid(self, server: Any) -> None:
         rid = _create(server)
         _, body = _decode(
-            _call(server, path=f"/ext/review_service/reviews/{rid}/attachments", method="POST", raw_body=_body({"files": []}))
+            _call(
+                server,
+                path=f"/ext/review_service/reviews/{rid}/attachments",
+                method="POST",
+                raw_body=_body({"files": []}),
+            )
         )
         assert body["error"]["code"] == "INVALID"
 
@@ -849,9 +884,7 @@ class TestDispatchLayer:
         assert status == 404
 
     def test_plugin_id_ignored(self, server: Any) -> None:
-        status, body = _decode(
-            _call(server, path="/ext/review_service/reviews", method="GET", plugin_id="whatever")
-        )
+        status, body = _decode(_call(server, path="/ext/review_service/reviews", method="GET", plugin_id="whatever"))
         assert status == 200
 
     def test_missing_raw_body_defaults(self, server: Any) -> None:

@@ -24,10 +24,8 @@ import sys
 import types
 from typing import Any
 
-import pytest
-
 import media_reviewer
-import media_review_service
+import pytest
 from media_review_service import MediaReviewService, _infer_media_type
 from media_reviewer import ImageReviewer, VideoReviewer
 from models import ImageReviewResult, MediaReviewConfig, VideoReviewResult
@@ -75,7 +73,7 @@ class TestInferMediaType:
 class TestReviewMedia:
     def test_image_routes_to_image_reviewer(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Any) -> None:
         fake = ImageReviewResult(is_valid=True, format="PNG", width=10, height=10)
-        monkeypatch.setattr(ImageReviewer, "review", staticmethod(lambda *a, **k: fake))  # type: ignore[method-assign]
+        monkeypatch.setattr(ImageReviewer, "review", staticmethod(lambda *_a, **_k: fake))  # type: ignore[method-assign]
         p = _write_file(tmp_path, "a.png")
         svc = MediaReviewService()
         result = _run(svc.review_media(p, "image"))
@@ -83,7 +81,7 @@ class TestReviewMedia:
 
     def test_video_routes_to_video_reviewer(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Any) -> None:
         fake = VideoReviewResult(is_valid=True, format="MP4", duration_seconds=1.0)
-        monkeypatch.setattr(VideoReviewer, "review", staticmethod(lambda *a, **k: fake))  # type: ignore[method-assign]
+        monkeypatch.setattr(VideoReviewer, "review", staticmethod(lambda *_a, **_k: fake))  # type: ignore[method-assign]
         p = _write_file(tmp_path, "a.mp4")
         svc = MediaReviewService()
         result = _run(svc.review_media(p, "video"))
@@ -99,7 +97,7 @@ class TestReviewMedia:
         monkeypatch.setattr(
             ImageReviewer,
             "review",
-            staticmethod(lambda *a, **k: (_ for _ in ()).throw(FileNotFoundError("文件不存在: no"))),  # type: ignore[method-assign]
+            staticmethod(lambda *_a, **_k: (_ for _ in ()).throw(FileNotFoundError("文件不存在: no"))),  # type: ignore[method-assign]
         )
         svc = MediaReviewService()
         with pytest.raises(FileNotFoundError):
@@ -140,7 +138,7 @@ class TestReviewArtifacts:
 
     def test_success_with_explicit_media_type(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Any) -> None:
         fake = ImageReviewResult(is_valid=True, format="PNG")
-        monkeypatch.setattr(ImageReviewer, "review", staticmethod(lambda *a, **k: fake))  # type: ignore[method-assign]
+        monkeypatch.setattr(ImageReviewer, "review", staticmethod(lambda *_a, **_k: fake))  # type: ignore[method-assign]
         p = _write_file(tmp_path, "a.png")
         svc = MediaReviewService()
         storage = _FakeStorage({"a1": {"file_path": p, "media_type": "image"}})
@@ -192,6 +190,7 @@ def _install_fake_pil(monkeypatch: pytest.MonkeyPatch) -> Any:
     Image.open 是每次审阅的新调用，参数化必须落到 open 闭包持有的状态上
     （fake image 的 format/size 经实例属性读取）。
     """
+
     class _FakeExif(dict):
         def get_ifd(self, tag: int) -> dict[Any, Any]:
             return {}
@@ -304,7 +303,7 @@ class TestGetMediaMetadata:
         # ``from PIL import Image`` 取包属性；仅替换 sys.modules 的子模块
         # 条目不生效）
         sys.modules["PIL"].Image = types.SimpleNamespace(  # type: ignore[attr-defined]
-            open=lambda path: (_ for _ in ()).throw(ValueError("bad"))
+            open=lambda _path: (_ for _ in ()).throw(ValueError("bad"))
         )
         meta = svc.get_media_metadata(p, "image")
         assert "error" in meta
@@ -315,7 +314,7 @@ class TestGetMediaMetadata:
             VideoReviewer,
             "_extract_metadata",
             staticmethod(
-                lambda path: {
+                lambda _path: {
                     "format": "MP4",
                     "duration_seconds": 10.5,
                     "width": 1920,
@@ -335,7 +334,7 @@ class TestGetMediaMetadata:
         assert meta["codec"] == "h264"
 
     def test_video_metadata_unparseable(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Any) -> None:
-        monkeypatch.setattr(VideoReviewer, "_extract_metadata", staticmethod(lambda path: None))  # type: ignore[method-assign]
+        monkeypatch.setattr(VideoReviewer, "_extract_metadata", staticmethod(lambda _path: None))  # type: ignore[method-assign]
         p = _write_file(tmp_path, "a.mp4", content=bytes(1))
         svc = MediaReviewService()
         meta = svc.get_media_metadata(p, "video")
@@ -355,16 +354,19 @@ class TestGetMediaMetadata:
 
 class TestExtractVideoThumbnails:
     def test_delegates_to_video_reviewer(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Any) -> None:
+        # 假 extract_keyframes 真实使用入参（关键字调用要求形参名保持原契约）
         monkeypatch.setattr(
             VideoReviewer,
             "extract_keyframes",
             staticmethod(
-                lambda file_path, interval_seconds=5.0, output_dir=None: [output_dir or "k1.jpg"]  # type: ignore[method-assign]
+                lambda file_path, interval_seconds=5.0, output_dir=None: [
+                    f"kf_{file_path}:{interval_seconds}:{output_dir}"
+                ]  # type: ignore[method-assign]
             ),
         )
         p = _write_file(tmp_path, "a.mp4")
         svc = MediaReviewService()
-        assert svc.extract_video_thumbnails(p, interval=2.0, output_dir="out") == ["out"]
+        assert svc.extract_video_thumbnails(p, interval=2.0, output_dir="out") == [f"kf_{p}:2.0:out"]
 
 
 # ---------------------------------------------------------------------------
@@ -409,7 +411,7 @@ class TestImageReviewer:
         # 替换 media_reviewer.Image 为 open 必抛的假对象（模拟损坏文件）
         class _Broken:
             @staticmethod
-            def open(path: str) -> Any:
+            def open(_path: str) -> Any:
                 raise ValueError("cannot identify image file")
 
         media_reviewer.Image = _Broken  # type: ignore[assignment]
@@ -471,7 +473,7 @@ def _install_fake_av(
         time_base = 1000000
 
         @staticmethod
-        def open(path: str) -> Any:
+        def open(_path: str) -> Any:
             if open_raises is not None:
                 raise open_raises
             if metadata is None:
@@ -504,9 +506,7 @@ class TestVideoReviewer:
     def test_review_duration_out_of_range(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Any) -> None:
         _install_fake_av(monkeypatch)
         p = _write_file(tmp_path, "a.mp4")
-        result = VideoReviewer.review(
-            p, MediaReviewConfig(video_min_duration=20.0, video_max_duration=5.0)
-        )
+        result = VideoReviewer.review(p, MediaReviewConfig(video_min_duration=20.0, video_max_duration=5.0))
         assert result.is_valid is False
         assert any("小于最短限制" in e for e in result.errors)
         assert any("超过最长限制" in e for e in result.errors)
@@ -542,7 +542,13 @@ class TestVideoReviewer:
             def close(self) -> None:
                 return None
 
-        monkeypatch.setattr(media_reviewer.av, "open", staticmethod(lambda path: _NoStreamContainer()))
+        # 直接替换 media_reviewer.av 模块属性（av 在测试根 venv 可能未安装
+        # = None，setattr(None, ...) 会炸——补丁目标是模块属性而非其成员）
+        monkeypatch.setattr(
+            media_reviewer,
+            "av",
+            types.SimpleNamespace(open=staticmethod(lambda _path: _NoStreamContainer())),  # type: ignore[arg-type]
+        )
         p = _write_file(tmp_path, "a.mp4")
         assert VideoReviewer._extract_metadata(p) is None
 
@@ -576,7 +582,12 @@ class TestVideoReviewer:
             def close(self) -> None:
                 return None
 
-        monkeypatch.setattr(media_reviewer.av, "open", staticmethod(lambda path: _FakeContainer()))
+        # 直接替换 media_reviewer.av 模块属性（同 test_extract_metadata_no_video_stream）
+        monkeypatch.setattr(
+            media_reviewer,
+            "av",
+            types.SimpleNamespace(open=staticmethod(lambda _path: _FakeContainer())),  # type: ignore[arg-type]
+        )
         p = _write_file(tmp_path, "clip.mp4")
         paths = VideoReviewer.extract_keyframes(p, interval_seconds=5.0, output_dir=str(tmp_path))
         assert len(paths) == 1

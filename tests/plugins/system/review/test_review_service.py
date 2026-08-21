@@ -22,7 +22,6 @@ import asyncio
 from typing import Any
 
 import pytest
-
 from models import ReviewStatus
 from review_service import ReviewService, get_review_service, reset_review_service
 
@@ -48,10 +47,7 @@ def _run(coro: Any) -> Any:
 
         async def _cleanup() -> None:
             current = asyncio.current_task()
-            pending = [
-                t for t in asyncio.all_tasks(loop)
-                if not t.done() and t is not current
-            ]
+            pending = [t for t in asyncio.all_tasks(loop) if not t.done() and t is not current]
             for t in pending:
                 t.cancel()
             if pending:
@@ -236,11 +232,7 @@ class TestSubmitFeedback:
         service = ReviewService()
         review = _create_basic(service)
         annotations = [{"artifact_id": "a1", "content": "x"}]
-        feedback = _run(
-            service.submit_feedback(
-                review.id, "approved", annotations=annotations, user_id="u1"
-            )
-        )
+        feedback = _run(service.submit_feedback(review.id, "approved", annotations=annotations, user_id="u1"))
         assert feedback is not None
         assert feedback.annotations == annotations
         assert feedback.user_id == "u1"
@@ -359,13 +351,18 @@ class TestAutoTimeout:
         try:
             review = loop.run_until_complete(
                 service.create_review(
-                    task_id="t", thread_id="", session_id="", tab_id="", title="x",
+                    task_id="t",
+                    thread_id="",
+                    session_id="",
+                    tab_id="",
+                    title="x",
                     timeout_seconds=0.05,
                 )
             )
             loop.run_until_complete(asyncio.sleep(0.2))
             updated = loop.run_until_complete(service.get_review(review.id))
         finally:
+
             async def _cancel() -> None:
                 for task in list(service._timeout_tasks.values()):
                     if not task.done():
