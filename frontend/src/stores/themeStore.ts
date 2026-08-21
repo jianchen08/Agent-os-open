@@ -183,7 +183,13 @@ export const useThemeStore = create<ThemeState & ThemeActions>()(
           // 2. 如果预设主题不存在，尝试从用户主题加载
           if (!config) {
             const userTheme = ThemeStorageService.getUserTheme(themeId)
-            if (userTheme) {
+            if (userTheme && themeId.startsWith('dsh-skin-')) {
+              // 已退役方案的 localStorage 残留（dshSkinTheme.ts 曾把 DSH 皮肤写成
+              // 用户主题；该文件已删，皮肤现走 contributes.themes 插件主题通道）。
+              // 用户主题分支优先于插件主题，残留会把皮肤选择截胡成无立绘的
+              // 旧配置——清残留后落到下方 pluginTheme 分支。
+              ThemeStorageService.deleteUserTheme(themeId)
+            } else if (userTheme) {
               // 加载基础主题
               const baseTheme = getPresetTheme(userTheme.basedOn)
               if (baseTheme) {
