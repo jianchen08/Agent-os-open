@@ -91,5 +91,80 @@
         }
       }
     ]
-  }
+  },
+  "granted_capabilities": [
+    "tool-executor"
+  ],
+  "http_endpoints": [
+    {
+      "route_id": "interaction_response",
+      "method": "POST",
+      "path": "/ext/approval_service/interaction/response",
+      "auth": "user",
+      "handler_capability": "http.handle",
+      "timeout_ms": 10000,
+      "max_concurrency": 4,
+      "description": "提交交互响应（body.request_id 必填；经 tool-executor 代理 human_interaction_tool interaction.respond——原 POST /ext/channel_api/interaction/response）"
+    },
+    {
+      "route_id": "interaction_pending",
+      "method": "GET",
+      "path": "/ext/approval_service/interaction/pending",
+      "auth": "user",
+      "handler_capability": "http.handle",
+      "timeout_ms": 5000,
+      "max_concurrency": 8,
+      "description": "获取待处理交互请求列表（interaction.get_pending 工具代理——原 GET /ext/channel_api/interaction/pending）"
+    },
+    {
+      "route_id": "interaction_get",
+      "method": "GET",
+      "path": "/ext/approval_service/interaction/{request_id}",
+      "auth": "user",
+      "handler_capability": "http.handle",
+      "timeout_ms": 5000,
+      "max_concurrency": 8,
+      "description": "获取交互请求详情（不存在 404——原 GET /ext/channel_api/interaction/{request_id}）"
+    },
+    {
+      "route_id": "interaction_approve",
+      "method": "POST",
+      "path": "/ext/approval_service/interaction/{request_id}/approve",
+      "auth": "user",
+      "handler_capability": "http.handle",
+      "timeout_ms": 10000,
+      "max_concurrency": 4,
+      "description": "批准交互请求（submit_response approved/approve——原 POST /ext/channel_api/interaction/{request_id}/approve）"
+    },
+    {
+      "route_id": "interaction_deny",
+      "method": "POST",
+      "path": "/ext/approval_service/interaction/{request_id}/deny",
+      "auth": "user",
+      "handler_capability": "http.handle",
+      "timeout_ms": 10000,
+      "max_concurrency": 4,
+      "description": "拒绝交互请求（submit_response denied/reject——原 POST /ext/channel_api/interaction/{request_id}/deny）"
+    },
+    {
+      "route_id": "interaction_cancel",
+      "method": "POST",
+      "path": "/ext/approval_service/interaction/{request_id}/cancel",
+      "auth": "user",
+      "handler_capability": "http.handle",
+      "timeout_ms": 10000,
+      "max_concurrency": 4,
+      "description": "取消交互请求（interaction.cancel 工具代理——原 POST /ext/channel_api/interaction/{request_id}/cancel）"
+    },
+    {
+      "route_id": "interaction_viewed",
+      "method": "POST",
+      "path": "/ext/approval_service/interaction/{request_id}/viewed",
+      "auth": "user",
+      "handler_capability": "http.handle",
+      "timeout_ms": 5000,
+      "max_concurrency": 4,
+      "description": "标记交互请求已查看（human sidecar 无 viewed 工具，确认应答不落库——原 POST /ext/channel_api/interaction/{request_id}/viewed）"
+    }
+  ]
 }
