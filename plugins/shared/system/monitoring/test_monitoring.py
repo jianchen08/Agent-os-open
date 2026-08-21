@@ -101,10 +101,12 @@ class FakePerformanceMonitor:
 
 
 def _install_fake_performance_monitor() -> None:
-    if "performance_monitor" not in sys.modules:
-        fake_mod = types.ModuleType("performance_monitor")
-        fake_mod.PerformanceMonitor = FakePerformanceMonitor
-        sys.modules["performance_monitor"] = fake_mod
+    """无条件替换为 fake（真实模块由 _restore_performance_monitor_module
+    在用例后还原——车道内更早的模块会把真 performance_monitor 灌进缓存，
+    旧的 not-in-sys.modules 守卫会静默跳过注入导致 fake 断言失败）。"""
+    fake_mod = types.ModuleType("performance_monitor")
+    fake_mod.PerformanceMonitor = FakePerformanceMonitor
+    sys.modules["performance_monitor"] = fake_mod
 
 
 def _load_server() -> Any:

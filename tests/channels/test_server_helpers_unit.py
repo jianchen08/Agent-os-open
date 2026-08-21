@@ -23,15 +23,23 @@ use_channel("api")
 
 import server as srv  # noqa: E402
 
-# 域处理器内部是函数级裸名 import（import routes_missing 等），执行期才解析；
-# 车道里 tests/plugins/* 的逐出钩子会把各插件目录（含同名 models.py 的
-# tools/human）提升到 sys.path[0]，执行期解析会命中错误模块。此处模块级
-# （收集期，路径已被 use_channel 归位）预导入缓存，与 test_api_routes 同款。
-import routes_missing  # noqa: E402,F401
-import routes_tasks  # noqa: E402,F401
-import routes_thinking_mode  # noqa: E402,F401
-
 pytestmark = pytest.mark.unit
+
+
+@pytest.fixture(autouse=True)
+def _api_channel_paths():
+    """执行期归位 sys.path 并预导入域路由模块。
+
+    收集期的 use_channel/预导入缓存会被同目录后续模块的 use_channel 逐出，
+    执行期 sys.path[0] 又可能被 tests/plugins/* 逐出钩子指向含同名 models.py
+    的插件目录——域处理器的函数级裸名 import 在执行期解析会命中错误模块。
+    故每个用例执行前重新归位并缓存路由模块。
+    """
+    use_channel("api")
+    import routes_missing  # noqa: PLC0415
+    import routes_tasks  # noqa: PLC0415
+    import routes_thinking_mode  # noqa: PLC0415
+    yield
 
 
 def _status_of(resp: dict) -> int:
