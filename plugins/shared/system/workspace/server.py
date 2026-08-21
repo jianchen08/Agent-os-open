@@ -18,6 +18,7 @@ plugin.json ``http_endpoints`` 声明（/ext/workspace_service/workspaces/**）�
   只读镜像语义不变）。
 [来源: docs/working/channel_api插件拆迁方案_20260821.md 批次 1]
 """
+
 from __future__ import annotations
 
 import base64
@@ -697,7 +698,7 @@ async def http_handle(
 
         # /{container_task_id} 系列路由
         if path.startswith(_PREFIX + "/"):
-            rest = path[len(_PREFIX) + 1:]  # "{id}" 或 "{id}/file-tree" 等
+            rest = path[len(_PREFIX) + 1 :]  # "{id}" 或 "{id}/file-tree" 等
             if not rest or "/" not in rest:
                 if rest and method == "GET":  # 单级：/{id} GET workspace
                     return _ok(_json_response(await get_workspace(rest)))
@@ -708,21 +709,37 @@ async def http_handle(
                 if action == "file-tree" and method == "GET":
                     return _ok(_json_response(await get_file_tree(cid)))
                 if action == "file-content" and method == "GET":
-                    return _ok(_json_response(await get_file_content(
-                        cid, path=q.get("path", ""),
-                    )))
+                    return _ok(
+                        _json_response(
+                            await get_file_content(
+                                cid,
+                                path=q.get("path", ""),
+                            )
+                        )
+                    )
                 if action == "file-content" and method == "PUT":
                     body = _decode_body(raw_body)
-                    return _ok(_json_response(await save_file_content(
-                        cid, path=q.get("path", ""), body=body,
-                    )))
+                    return _ok(
+                        _json_response(
+                            await save_file_content(
+                                cid,
+                                path=q.get("path", ""),
+                                body=body,
+                            )
+                        )
+                    )
                 if action == "create-entry" and method == "POST":
                     body = _decode_body(raw_body) or {}
                     return _ok(_json_response(await create_entry(cid, body)))
                 if action == "entries" and method == "DELETE":
-                    return _ok(_json_response(await delete_entry(
-                        cid, path=q.get("path", ""),
-                    )))
+                    return _ok(
+                        _json_response(
+                            await delete_entry(
+                                cid,
+                                path=q.get("path", ""),
+                            )
+                        )
+                    )
                 if action == "rename-entry" and method == "POST":
                     body = _decode_body(raw_body) or {}
                     return _ok(_json_response(await rename_entry(cid, body)))

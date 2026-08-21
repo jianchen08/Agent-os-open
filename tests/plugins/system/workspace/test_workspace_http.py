@@ -37,19 +37,20 @@ def _load_server() -> Any:
         "workspace_server_http_test",
         str(_PLUGIN_DIR / "server.py"),
     )
-    assert spec and spec.loader
+    assert spec is not None
+    assert spec.loader is not None
     mod = importlib.util.module_from_spec(spec)
     sys.modules["workspace_server_http_test"] = mod
     spec.loader.exec_module(mod)
     return mod
 
 
-@pytest.fixture()
+@pytest.fixture
 def server() -> Any:
     return _load_server()
 
 
-@pytest.fixture()
+@pytest.fixture
 def ws_dir(tmp_path: Path) -> str:
     """真实工作空间目录（create-entry 等 FS 操作目标）。"""
     d = tmp_path / "ws"
@@ -168,26 +169,42 @@ class _FakeRegistry:
 
 class TestWorkspaceDetail:
     def test_get_workspace_creates_on_miss(self, server: Any) -> None:
-        status, body = _decode_http(_call(
-            server, path="/ext/workspace_service/workspaces/task-001", method="GET",
-        ))
+        status, body = _decode_http(
+            _call(
+                server,
+                path="/ext/workspace_service/workspaces/task-001",
+                method="GET",
+            )
+        )
         assert status == 200
         assert body["container_task_id"] == "task-001"
 
     def test_get_workspace_second_call_returns_same_id(self, server: Any) -> None:
-        _, first = _decode_http(_call(
-            server, path="/ext/workspace_service/workspaces/task-001", method="GET",
-        ))
-        _, second = _decode_http(_call(
-            server, path="/ext/workspace_service/workspaces/task-001", method="GET",
-        ))
+        _, first = _decode_http(
+            _call(
+                server,
+                path="/ext/workspace_service/workspaces/task-001",
+                method="GET",
+            )
+        )
+        _, second = _decode_http(
+            _call(
+                server,
+                path="/ext/workspace_service/workspaces/task-001",
+                method="GET",
+            )
+        )
         assert first["id"] == second["id"]
 
     def test_get_workspace_artifacts_empty(self, server: Any) -> None:
         """无工作空间 → {items:[], total:0}。"""
-        status, body = _decode_http(_call(
-            server, path="/ext/workspace_service/workspaces/ghost/artifacts", method="GET",
-        ))
+        status, body = _decode_http(
+            _call(
+                server,
+                path="/ext/workspace_service/workspaces/ghost/artifacts",
+                method="GET",
+            )
+        )
         assert status == 200
         assert body == {"items": [], "total": 0}
 
@@ -208,9 +225,13 @@ class TestWorkspaceDetail:
         )
         monkeypatch.setitem(sys.modules, "artifacts.artifact_service", fake_art)
 
-        status, body = _decode_http(_call(
-            server, path="/ext/workspace_service/workspaces/root/artifacts", method="GET",
-        ))
+        status, body = _decode_http(
+            _call(
+                server,
+                path="/ext/workspace_service/workspaces/root/artifacts",
+                method="GET",
+            )
+        )
         assert status == 200
         assert body["total"] == 2
         assert {i["task_id"] for i in body["items"]} == {"root", "child-1"}
@@ -221,18 +242,26 @@ class TestWorkspaceDetail:
         (Path(ws_dir) / "sub").mkdir()
         (Path(ws_dir) / ".hidden").write_text("h", encoding="utf-8")
 
-        status, body = _decode_http(_call(
-            server, path="/ext/workspace_service/workspaces/t1/file-tree", method="GET",
-        ))
+        status, body = _decode_http(
+            _call(
+                server,
+                path="/ext/workspace_service/workspaces/t1/file-tree",
+                method="GET",
+            )
+        )
         assert status == 200
         names = {n["name"] for n in body["tree"]}
         assert names == {"a.txt", "sub"}
 
     def test_get_file_tree_no_workspace_path(self, server: Any) -> None:
         _inject_workspace_path(server, None)
-        status, body = _decode_http(_call(
-            server, path="/ext/workspace_service/workspaces/t1/file-tree", method="GET",
-        ))
+        status, body = _decode_http(
+            _call(
+                server,
+                path="/ext/workspace_service/workspaces/t1/file-tree",
+                method="GET",
+            )
+        )
         assert status == 200
         assert body["tree"] == []
 
@@ -246,12 +275,14 @@ class TestFileContent:
     def test_read_file_success(self, server: Any, ws_dir: str) -> None:
         _inject_workspace_path(server, ws_dir)
         (Path(ws_dir) / "note.md").write_text("hello", encoding="utf-8")
-        status, body = _decode_http(_call(
-            server,
-            path="/ext/workspace_service/workspaces/t1/file-content",
-            method="GET",
-            query={"path": "note.md"},
-        ))
+        status, body = _decode_http(
+            _call(
+                server,
+                path="/ext/workspace_service/workspaces/t1/file-content",
+                method="GET",
+                query={"path": "note.md"},
+            )
+        )
         assert status == 200
         assert body["success"] is True
         assert body["content"] == "hello"
@@ -259,12 +290,14 @@ class TestFileContent:
 
     def test_read_file_absolute_path(self, server: Any, ws_dir: str) -> None:
         (Path(ws_dir) / "abs.txt").write_text("abs", encoding="utf-8")
-        status, body = _decode_http(_call(
-            server,
-            path="/ext/workspace_service/workspaces/_local/file-content",
-            method="GET",
-            query={"path": str(Path(ws_dir) / "abs.txt")},
-        ))
+        status, body = _decode_http(
+            _call(
+                server,
+                path="/ext/workspace_service/workspaces/_local/file-content",
+                method="GET",
+                query={"path": str(Path(ws_dir) / "abs.txt")},
+            )
+        )
         assert status == 200
         assert body["success"] is True
 
@@ -272,24 +305,28 @@ class TestFileContent:
         _inject_workspace_path(server, ws_dir)
         outside = tmp_path / "outside.txt"
         outside.write_text("x", encoding="utf-8")
-        status, body = _decode_http(_call(
-            server,
-            path="/ext/workspace_service/workspaces/t1/file-content",
-            method="GET",
-            query={"path": f"../{outside.name}"},
-        ))
+        status, body = _decode_http(
+            _call(
+                server,
+                path="/ext/workspace_service/workspaces/t1/file-content",
+                method="GET",
+                query={"path": f"../{outside.name}"},
+            )
+        )
         assert status == 200
         assert body["success"] is False
         assert "超出工作空间范围" in body["message"]
 
     def test_read_file_missing(self, server: Any, ws_dir: str) -> None:
         _inject_workspace_path(server, ws_dir)
-        status, body = _decode_http(_call(
-            server,
-            path="/ext/workspace_service/workspaces/t1/file-content",
-            method="GET",
-            query={"path": "nope.md"},
-        ))
+        status, body = _decode_http(
+            _call(
+                server,
+                path="/ext/workspace_service/workspaces/t1/file-content",
+                method="GET",
+                query={"path": "nope.md"},
+            )
+        )
         assert status == 200
         assert body["success"] is False
         assert "文件不存在" in body["message"]
@@ -298,64 +335,74 @@ class TestFileContent:
         _inject_workspace_path(server, ws_dir)
         target = Path(ws_dir) / "locked.txt"
         target.write_text("x", encoding="utf-8")
-        monkeypatch.setattr(Path, "read_text", lambda *a, **k: (_ for _ in ()).throw(OSError("denied")))
-        status, body = _decode_http(_call(
-            server,
-            path="/ext/workspace_service/workspaces/t1/file-content",
-            method="GET",
-            query={"path": "locked.txt"},
-        ))
+        monkeypatch.setattr(Path, "read_text", lambda *_a, **_k: (_ for _ in ()).throw(OSError("denied")))
+        status, body = _decode_http(
+            _call(
+                server,
+                path="/ext/workspace_service/workspaces/t1/file-content",
+                method="GET",
+                query={"path": "locked.txt"},
+            )
+        )
         assert status == 200
         assert body["success"] is False
 
     def test_save_file_success(self, server: Any, ws_dir: str) -> None:
         _inject_workspace_path(server, ws_dir)
-        status, body = _decode_http(_call(
-            server,
-            path="/ext/workspace_service/workspaces/t1/file-content",
-            method="PUT",
-            query={"path": "out.md"},
-            raw_body=base64.b64encode(b'{"content": "saved"}').decode(),
-        ))
+        status, body = _decode_http(
+            _call(
+                server,
+                path="/ext/workspace_service/workspaces/t1/file-content",
+                method="PUT",
+                query={"path": "out.md"},
+                raw_body=base64.b64encode(b'{"content": "saved"}').decode(),
+            )
+        )
         assert status == 200
         assert body["success"] is True
         assert (Path(ws_dir) / "out.md").read_text(encoding="utf-8") == "saved"
 
     def test_save_file_no_workspace(self, server: Any) -> None:
         _inject_workspace_path(server, None)
-        status, body = _decode_http(_call(
-            server,
-            path="/ext/workspace_service/workspaces/t1/file-content",
-            method="PUT",
-            query={"path": "out.md"},
-            raw_body='{"content": "x"}',
-        ))
+        status, body = _decode_http(
+            _call(
+                server,
+                path="/ext/workspace_service/workspaces/t1/file-content",
+                method="PUT",
+                query={"path": "out.md"},
+                raw_body='{"content": "x"}',
+            )
+        )
         assert status == 200
         assert body["success"] is False
         assert "未找到工作空间路径" in body["message"]
 
     def test_save_file_escape(self, server: Any, ws_dir: str) -> None:
         _inject_workspace_path(server, ws_dir)
-        status, body = _decode_http(_call(
-            server,
-            path="/ext/workspace_service/workspaces/t1/file-content",
-            method="PUT",
-            query={"path": "../evil.md"},
-            raw_body='{"content": "x"}',
-        ))
+        status, body = _decode_http(
+            _call(
+                server,
+                path="/ext/workspace_service/workspaces/t1/file-content",
+                method="PUT",
+                query={"path": "../evil.md"},
+                raw_body='{"content": "x"}',
+            )
+        )
         assert status == 200
         assert body["success"] is False
         assert "超出工作空间范围" in body["message"]
 
     def test_save_file_parent_missing(self, server: Any, ws_dir: str) -> None:
         _inject_workspace_path(server, ws_dir)
-        status, body = _decode_http(_call(
-            server,
-            path="/ext/workspace_service/workspaces/t1/file-content",
-            method="PUT",
-            query={"path": "no/such/dir/out.md"},
-            raw_body='{"content": "x"}',
-        ))
+        status, body = _decode_http(
+            _call(
+                server,
+                path="/ext/workspace_service/workspaces/t1/file-content",
+                method="PUT",
+                query={"path": "no/such/dir/out.md"},
+                raw_body='{"content": "x"}',
+            )
+        )
         assert status == 200
         assert body["success"] is False
         assert "目标目录不存在" in body["message"]
@@ -369,60 +416,70 @@ class TestFileContent:
 class TestEntryOps:
     def test_create_file_success(self, server: Any, ws_dir: str) -> None:
         _inject_workspace_path(server, ws_dir)
-        status, body = _decode_http(_call(
-            server,
-            path="/ext/workspace_service/workspaces/t1/create-entry",
-            method="POST",
-            raw_body='{"path": "new.py", "type": "file"}',
-        ))
+        status, body = _decode_http(
+            _call(
+                server,
+                path="/ext/workspace_service/workspaces/t1/create-entry",
+                method="POST",
+                raw_body='{"path": "new.py", "type": "file"}',
+            )
+        )
         assert status == 200
         assert body["success"] is True
         assert (Path(ws_dir) / "new.py").exists()
 
     def test_create_directory_success(self, server: Any, ws_dir: str) -> None:
         _inject_workspace_path(server, ws_dir)
-        status, body = _decode_http(_call(
-            server,
-            path="/ext/workspace_service/workspaces/t1/create-entry",
-            method="POST",
-            raw_body='{"path": "d1", "type": "directory"}',
-        ))
+        status, body = _decode_http(
+            _call(
+                server,
+                path="/ext/workspace_service/workspaces/t1/create-entry",
+                method="POST",
+                raw_body='{"path": "d1", "type": "directory"}',
+            )
+        )
         assert status == 200
         assert body["success"] is True
         assert (Path(ws_dir) / "d1").is_dir()
 
     def test_create_entry_missing_path(self, server: Any, ws_dir: str) -> None:
         _inject_workspace_path(server, ws_dir)
-        status, body = _decode_http(_call(
-            server,
-            path="/ext/workspace_service/workspaces/t1/create-entry",
-            method="POST",
-            raw_body='{"path": "", "type": "file"}',
-        ))
+        status, body = _decode_http(
+            _call(
+                server,
+                path="/ext/workspace_service/workspaces/t1/create-entry",
+                method="POST",
+                raw_body='{"path": "", "type": "file"}',
+            )
+        )
         assert status == 200
         assert body["success"] is False
         assert "path 参数不能为空" in body["message"]
 
     def test_create_entry_bad_type(self, server: Any, ws_dir: str) -> None:
         _inject_workspace_path(server, ws_dir)
-        status, body = _decode_http(_call(
-            server,
-            path="/ext/workspace_service/workspaces/t1/create-entry",
-            method="POST",
-            raw_body='{"path": "x", "type": "symlink"}',
-        ))
+        status, body = _decode_http(
+            _call(
+                server,
+                path="/ext/workspace_service/workspaces/t1/create-entry",
+                method="POST",
+                raw_body='{"path": "x", "type": "symlink"}',
+            )
+        )
         assert status == 200
         assert body["success"] is False
         assert "type 参数必须为 file 或 directory" in body["message"]
 
     def test_create_entry_escape(self, server: Any, ws_dir: str) -> None:
         _inject_workspace_path(server, ws_dir)
-        status, body = _decode_http(_call(
-            server,
-            path="/ext/workspace_service/workspaces/t1/create-entry",
-            method="POST",
-            raw_body='{"path": "../evil", "type": "file"}',
-        ))
+        status, body = _decode_http(
+            _call(
+                server,
+                path="/ext/workspace_service/workspaces/t1/create-entry",
+                method="POST",
+                raw_body='{"path": "../evil", "type": "file"}',
+            )
+        )
         assert status == 200
         assert body["success"] is False
         assert "路径超出工作空间范围" in body["message"]
@@ -430,24 +487,28 @@ class TestEntryOps:
     def test_create_entry_existing(self, server: Any, ws_dir: str) -> None:
         _inject_workspace_path(server, ws_dir)
         (Path(ws_dir) / "dup.py").write_text("x", encoding="utf-8")
-        status, body = _decode_http(_call(
-            server,
-            path="/ext/workspace_service/workspaces/t1/create-entry",
-            method="POST",
-            raw_body='{"path": "dup.py", "type": "file"}',
-        ))
+        status, body = _decode_http(
+            _call(
+                server,
+                path="/ext/workspace_service/workspaces/t1/create-entry",
+                method="POST",
+                raw_body='{"path": "dup.py", "type": "file"}',
+            )
+        )
         assert status == 200
         assert body["success"] is False
         assert "路径已存在" in body["message"]
 
     def test_create_entry_no_workspace(self, server: Any) -> None:
         _inject_workspace_path(server, None)
-        status, body = _decode_http(_call(
-            server,
-            path="/ext/workspace_service/workspaces/t1/create-entry",
-            method="POST",
-            raw_body='{"path": "x.py", "type": "file"}',
-        ))
+        status, body = _decode_http(
+            _call(
+                server,
+                path="/ext/workspace_service/workspaces/t1/create-entry",
+                method="POST",
+                raw_body='{"path": "x.py", "type": "file"}',
+            )
+        )
         assert status == 200
         assert body["success"] is False
         assert "未找到工作空间路径" in body["message"]
@@ -459,12 +520,14 @@ class TestEntryOps:
             raise OSError("denied")
 
         monkeypatch.setattr(Path, "write_text", boom)
-        status, body = _decode_http(_call(
-            server,
-            path="/ext/workspace_service/workspaces/t1/create-entry",
-            method="POST",
-            raw_body='{"path": "x.py", "type": "file"}',
-        ))
+        status, body = _decode_http(
+            _call(
+                server,
+                path="/ext/workspace_service/workspaces/t1/create-entry",
+                method="POST",
+                raw_body='{"path": "x.py", "type": "file"}',
+            )
+        )
         assert status == 200
         assert body["success"] is False
         assert "创建失败" in body["message"]
@@ -472,12 +535,14 @@ class TestEntryOps:
     def test_delete_file_success(self, server: Any, ws_dir: str) -> None:
         _inject_workspace_path(server, ws_dir)
         (Path(ws_dir) / "rm.txt").write_text("x", encoding="utf-8")
-        status, body = _decode_http(_call(
-            server,
-            path="/ext/workspace_service/workspaces/t1/entries",
-            method="DELETE",
-            query={"path": "rm.txt"},
-        ))
+        status, body = _decode_http(
+            _call(
+                server,
+                path="/ext/workspace_service/workspaces/t1/entries",
+                method="DELETE",
+                query={"path": "rm.txt"},
+            )
+        )
         assert status == 200
         assert body["success"] is True
         assert not (Path(ws_dir) / "rm.txt").exists()
@@ -485,57 +550,67 @@ class TestEntryOps:
     def test_delete_directory_success(self, server: Any, ws_dir: str) -> None:
         _inject_workspace_path(server, ws_dir)
         (Path(ws_dir) / "rmdir").mkdir()
-        status, body = _decode_http(_call(
-            server,
-            path="/ext/workspace_service/workspaces/t1/entries",
-            method="DELETE",
-            query={"path": "rmdir"},
-        ))
+        status, body = _decode_http(
+            _call(
+                server,
+                path="/ext/workspace_service/workspaces/t1/entries",
+                method="DELETE",
+                query={"path": "rmdir"},
+            )
+        )
         assert body["success"] is True
 
     def test_delete_empty_path(self, server: Any, ws_dir: str) -> None:
         _inject_workspace_path(server, ws_dir)
-        status, body = _decode_http(_call(
-            server,
-            path="/ext/workspace_service/workspaces/t1/entries",
-            method="DELETE",
-            query={"path": ""},
-        ))
+        status, body = _decode_http(
+            _call(
+                server,
+                path="/ext/workspace_service/workspaces/t1/entries",
+                method="DELETE",
+                query={"path": ""},
+            )
+        )
         assert status == 200
         assert body["success"] is False
         assert "path 参数不能为空" in body["message"]
 
     def test_delete_root_forbidden(self, server: Any, ws_dir: str) -> None:
         _inject_workspace_path(server, ws_dir)
-        status, body = _decode_http(_call(
-            server,
-            path="/ext/workspace_service/workspaces/t1/entries",
-            method="DELETE",
-            query={"path": "."},
-        ))
+        status, body = _decode_http(
+            _call(
+                server,
+                path="/ext/workspace_service/workspaces/t1/entries",
+                method="DELETE",
+                query={"path": "."},
+            )
+        )
         assert status == 200
         assert body["success"] is False
         assert "禁止删除工作空间根目录" in body["message"]
 
     def test_delete_escape(self, server: Any, ws_dir: str) -> None:
         _inject_workspace_path(server, ws_dir)
-        status, body = _decode_http(_call(
-            server,
-            path="/ext/workspace_service/workspaces/t1/entries",
-            method="DELETE",
-            query={"path": "../evil"},
-        ))
+        status, body = _decode_http(
+            _call(
+                server,
+                path="/ext/workspace_service/workspaces/t1/entries",
+                method="DELETE",
+                query={"path": "../evil"},
+            )
+        )
         assert status == 200
         assert body["success"] is False
 
     def test_delete_missing_entry(self, server: Any, ws_dir: str) -> None:
         _inject_workspace_path(server, ws_dir)
-        status, body = _decode_http(_call(
-            server,
-            path="/ext/workspace_service/workspaces/t1/entries",
-            method="DELETE",
-            query={"path": "ghost.txt"},
-        ))
+        status, body = _decode_http(
+            _call(
+                server,
+                path="/ext/workspace_service/workspaces/t1/entries",
+                method="DELETE",
+                query={"path": "ghost.txt"},
+            )
+        )
         assert status == 200
         assert body["success"] is False
         assert "路径不存在" in body["message"]
@@ -543,13 +618,15 @@ class TestEntryOps:
     def test_delete_io_error(self, server: Any, ws_dir: str, monkeypatch: pytest.MonkeyPatch) -> None:
         _inject_workspace_path(server, ws_dir)
         (Path(ws_dir) / "locked.txt").write_text("x", encoding="utf-8")
-        monkeypatch.setattr(Path, "unlink", lambda *a, **k: (_ for _ in ()).throw(OSError("denied")))
-        status, body = _decode_http(_call(
-            server,
-            path="/ext/workspace_service/workspaces/t1/entries",
-            method="DELETE",
-            query={"path": "locked.txt"},
-        ))
+        monkeypatch.setattr(Path, "unlink", lambda *_a, **_k: (_ for _ in ()).throw(OSError("denied")))
+        status, body = _decode_http(
+            _call(
+                server,
+                path="/ext/workspace_service/workspaces/t1/entries",
+                method="DELETE",
+                query={"path": "locked.txt"},
+            )
+        )
         assert status == 200
         assert body["success"] is False
         assert "删除失败" in body["message"]
@@ -557,12 +634,14 @@ class TestEntryOps:
     def test_rename_success(self, server: Any, ws_dir: str) -> None:
         _inject_workspace_path(server, ws_dir)
         (Path(ws_dir) / "old.py").write_text("x", encoding="utf-8")
-        status, body = _decode_http(_call(
-            server,
-            path="/ext/workspace_service/workspaces/t1/rename-entry",
-            method="POST",
-            raw_body='{"old_path": "old.py", "new_name": "new.py"}',
-        ))
+        status, body = _decode_http(
+            _call(
+                server,
+                path="/ext/workspace_service/workspaces/t1/rename-entry",
+                method="POST",
+                raw_body='{"old_path": "old.py", "new_name": "new.py"}',
+            )
+        )
         assert status == 200
         assert body["success"] is True
         assert body["new_path"] == "new.py"
@@ -573,59 +652,69 @@ class TestEntryOps:
         sub = Path(ws_dir) / "sub"
         sub.mkdir()
         (sub / "a.py").write_text("x", encoding="utf-8")
-        status, body = _decode_http(_call(
-            server,
-            path="/ext/workspace_service/workspaces/t1/rename-entry",
-            method="POST",
-            raw_body='{"old_path": "sub/a.py", "new_name": "b.py"}',
-        ))
+        status, body = _decode_http(
+            _call(
+                server,
+                path="/ext/workspace_service/workspaces/t1/rename-entry",
+                method="POST",
+                raw_body='{"old_path": "sub/a.py", "new_name": "b.py"}',
+            )
+        )
         assert status == 200
         assert body["new_path"] == str(Path("sub") / "b.py")
 
     def test_rename_missing_old_path(self, server: Any, ws_dir: str) -> None:
         _inject_workspace_path(server, ws_dir)
-        status, body = _decode_http(_call(
-            server,
-            path="/ext/workspace_service/workspaces/t1/rename-entry",
-            method="POST",
-            raw_body='{"old_path": "", "new_name": "b.py"}',
-        ))
+        status, body = _decode_http(
+            _call(
+                server,
+                path="/ext/workspace_service/workspaces/t1/rename-entry",
+                method="POST",
+                raw_body='{"old_path": "", "new_name": "b.py"}',
+            )
+        )
         assert status == 200
         assert body["success"] is False
         assert "old_path 参数不能为空" in body["message"]
 
     def test_rename_missing_new_name(self, server: Any, ws_dir: str) -> None:
         _inject_workspace_path(server, ws_dir)
-        status, body = _decode_http(_call(
-            server,
-            path="/ext/workspace_service/workspaces/t1/rename-entry",
-            method="POST",
-            raw_body='{"old_path": "a.py", "new_name": ""}',
-        ))
+        status, body = _decode_http(
+            _call(
+                server,
+                path="/ext/workspace_service/workspaces/t1/rename-entry",
+                method="POST",
+                raw_body='{"old_path": "a.py", "new_name": ""}',
+            )
+        )
         assert status == 200
         assert body["success"] is False
         assert "new_name 参数不能为空" in body["message"]
 
     def test_rename_new_name_with_separator(self, server: Any, ws_dir: str) -> None:
         _inject_workspace_path(server, ws_dir)
-        status, body = _decode_http(_call(
-            server,
-            path="/ext/workspace_service/workspaces/t1/rename-entry",
-            method="POST",
-            raw_body='{"old_path": "a.py", "new_name": "evil/../b.py"}',
-        ))
+        status, body = _decode_http(
+            _call(
+                server,
+                path="/ext/workspace_service/workspaces/t1/rename-entry",
+                method="POST",
+                raw_body='{"old_path": "a.py", "new_name": "evil/../b.py"}',
+            )
+        )
         assert status == 200
         assert body["success"] is False
         assert "new_name 不能包含路径分隔符" in body["message"]
 
     def test_rename_missing_old(self, server: Any, ws_dir: str) -> None:
         _inject_workspace_path(server, ws_dir)
-        status, body = _decode_http(_call(
-            server,
-            path="/ext/workspace_service/workspaces/t1/rename-entry",
-            method="POST",
-            raw_body='{"old_path": "ghost.py", "new_name": "b.py"}',
-        ))
+        status, body = _decode_http(
+            _call(
+                server,
+                path="/ext/workspace_service/workspaces/t1/rename-entry",
+                method="POST",
+                raw_body='{"old_path": "ghost.py", "new_name": "b.py"}',
+            )
+        )
         assert status == 200
         assert body["success"] is False
         assert "路径不存在" in body["message"]
@@ -634,12 +723,14 @@ class TestEntryOps:
         _inject_workspace_path(server, ws_dir)
         (Path(ws_dir) / "a.py").write_text("x", encoding="utf-8")
         (Path(ws_dir) / "b.py").write_text("x", encoding="utf-8")
-        status, body = _decode_http(_call(
-            server,
-            path="/ext/workspace_service/workspaces/t1/rename-entry",
-            method="POST",
-            raw_body='{"old_path": "a.py", "new_name": "b.py"}',
-        ))
+        status, body = _decode_http(
+            _call(
+                server,
+                path="/ext/workspace_service/workspaces/t1/rename-entry",
+                method="POST",
+                raw_body='{"old_path": "a.py", "new_name": "b.py"}',
+            )
+        )
         assert status == 200
         assert body["success"] is False
         assert "目标名称已存在" in body["message"]
@@ -647,13 +738,15 @@ class TestEntryOps:
     def test_rename_io_error(self, server: Any, ws_dir: str, monkeypatch: pytest.MonkeyPatch) -> None:
         _inject_workspace_path(server, ws_dir)
         (Path(ws_dir) / "a.py").write_text("x", encoding="utf-8")
-        monkeypatch.setattr(Path, "rename", lambda *a, **k: (_ for _ in ()).throw(OSError("denied")))
-        status, body = _decode_http(_call(
-            server,
-            path="/ext/workspace_service/workspaces/t1/rename-entry",
-            method="POST",
-            raw_body='{"old_path": "a.py", "new_name": "b.py"}',
-        ))
+        monkeypatch.setattr(Path, "rename", lambda *_a, **_k: (_ for _ in ()).throw(OSError("denied")))
+        status, body = _decode_http(
+            _call(
+                server,
+                path="/ext/workspace_service/workspaces/t1/rename-entry",
+                method="POST",
+                raw_body='{"old_path": "a.py", "new_name": "b.py"}',
+            )
+        )
         assert status == 200
         assert body["success"] is False
         assert "重命名失败" in body["message"]
@@ -662,12 +755,14 @@ class TestEntryOps:
         _inject_workspace_path(server, ws_dir)
         (Path(ws_dir) / "m.py").write_text("x", encoding="utf-8")
         (Path(ws_dir) / "dest").mkdir()
-        status, body = _decode_http(_call(
-            server,
-            path="/ext/workspace_service/workspaces/t1/move-entry",
-            method="POST",
-            raw_body='{"source_path": "m.py", "destination_dir": "dest"}',
-        ))
+        status, body = _decode_http(
+            _call(
+                server,
+                path="/ext/workspace_service/workspaces/t1/move-entry",
+                method="POST",
+                raw_body='{"source_path": "m.py", "destination_dir": "dest"}',
+            )
+        )
         assert status == 200
         assert body["success"] is True
         assert body["destination_path"] == str(Path("dest") / "m.py")
@@ -675,12 +770,14 @@ class TestEntryOps:
 
     def test_move_missing_source_path(self, server: Any, ws_dir: str) -> None:
         _inject_workspace_path(server, ws_dir)
-        status, body = _decode_http(_call(
-            server,
-            path="/ext/workspace_service/workspaces/t1/move-entry",
-            method="POST",
-            raw_body='{"source_path": "", "destination_dir": "dest"}',
-        ))
+        status, body = _decode_http(
+            _call(
+                server,
+                path="/ext/workspace_service/workspaces/t1/move-entry",
+                method="POST",
+                raw_body='{"source_path": "", "destination_dir": "dest"}',
+            )
+        )
         assert status == 200
         assert body["success"] is False
         assert "source_path 参数不能为空" in body["message"]
@@ -688,12 +785,14 @@ class TestEntryOps:
     def test_move_missing_dest(self, server: Any, ws_dir: str) -> None:
         _inject_workspace_path(server, ws_dir)
         (Path(ws_dir) / "m.py").write_text("x", encoding="utf-8")
-        status, body = _decode_http(_call(
-            server,
-            path="/ext/workspace_service/workspaces/t1/move-entry",
-            method="POST",
-            raw_body='{"source_path": "m.py", "destination_dir": ""}',
-        ))
+        status, body = _decode_http(
+            _call(
+                server,
+                path="/ext/workspace_service/workspaces/t1/move-entry",
+                method="POST",
+                raw_body='{"source_path": "m.py", "destination_dir": ""}',
+            )
+        )
         assert status == 200
         assert body["success"] is False
         assert "destination_dir 参数不能为空" in body["message"]
@@ -701,12 +800,14 @@ class TestEntryOps:
     def test_move_missing_source(self, server: Any, ws_dir: str) -> None:
         _inject_workspace_path(server, ws_dir)
         (Path(ws_dir) / "dest").mkdir()
-        status, body = _decode_http(_call(
-            server,
-            path="/ext/workspace_service/workspaces/t1/move-entry",
-            method="POST",
-            raw_body='{"source_path": "ghost.py", "destination_dir": "dest"}',
-        ))
+        status, body = _decode_http(
+            _call(
+                server,
+                path="/ext/workspace_service/workspaces/t1/move-entry",
+                method="POST",
+                raw_body='{"source_path": "ghost.py", "destination_dir": "dest"}',
+            )
+        )
         assert status == 200
         assert body["success"] is False
         assert "源路径不存在" in body["message"]
@@ -714,12 +815,14 @@ class TestEntryOps:
     def test_move_dest_not_dir(self, server: Any, ws_dir: str) -> None:
         _inject_workspace_path(server, ws_dir)
         (Path(ws_dir) / "m.py").write_text("x", encoding="utf-8")
-        status, body = _decode_http(_call(
-            server,
-            path="/ext/workspace_service/workspaces/t1/move-entry",
-            method="POST",
-            raw_body='{"source_path": "m.py", "destination_dir": "notadir"}',
-        ))
+        status, body = _decode_http(
+            _call(
+                server,
+                path="/ext/workspace_service/workspaces/t1/move-entry",
+                method="POST",
+                raw_body='{"source_path": "m.py", "destination_dir": "notadir"}',
+            )
+        )
         assert status == 200
         assert body["success"] is False
         assert "目标目录不存在或不是目录" in body["message"]
@@ -728,12 +831,14 @@ class TestEntryOps:
         _inject_workspace_path(server, ws_dir)
         (Path(ws_dir) / "dir").mkdir()
         (Path(ws_dir) / "dir" / "inner").mkdir()
-        status, body = _decode_http(_call(
-            server,
-            path="/ext/workspace_service/workspaces/t1/move-entry",
-            method="POST",
-            raw_body='{"source_path": "dir", "destination_dir": "dir/inner"}',
-        ))
+        status, body = _decode_http(
+            _call(
+                server,
+                path="/ext/workspace_service/workspaces/t1/move-entry",
+                method="POST",
+                raw_body='{"source_path": "dir", "destination_dir": "dir/inner"}',
+            )
+        )
         assert status == 200
         assert body["success"] is False
         assert "自身子目录" in body["message"]
@@ -743,12 +848,14 @@ class TestEntryOps:
         (Path(ws_dir) / "m.py").write_text("x", encoding="utf-8")
         (Path(ws_dir) / "dest").mkdir()
         (Path(ws_dir) / "dest" / "m.py").write_text("x", encoding="utf-8")
-        status, body = _decode_http(_call(
-            server,
-            path="/ext/workspace_service/workspaces/t1/move-entry",
-            method="POST",
-            raw_body='{"source_path": "m.py", "destination_dir": "dest"}',
-        ))
+        status, body = _decode_http(
+            _call(
+                server,
+                path="/ext/workspace_service/workspaces/t1/move-entry",
+                method="POST",
+                raw_body='{"source_path": "m.py", "destination_dir": "dest"}',
+            )
+        )
         assert status == 200
         assert body["success"] is False
         assert "已存在同名文件" in body["message"]
@@ -759,13 +866,15 @@ class TestEntryOps:
         (Path(ws_dir) / "dest").mkdir()
         import shutil
 
-        monkeypatch.setattr(shutil, "move", lambda *a, **k: (_ for _ in ()).throw(OSError("denied")))
-        status, body = _decode_http(_call(
-            server,
-            path="/ext/workspace_service/workspaces/t1/move-entry",
-            method="POST",
-            raw_body='{"source_path": "m.py", "destination_dir": "dest"}',
-        ))
+        monkeypatch.setattr(shutil, "move", lambda *_a, **_k: (_ for _ in ()).throw(OSError("denied")))
+        status, body = _decode_http(
+            _call(
+                server,
+                path="/ext/workspace_service/workspaces/t1/move-entry",
+                method="POST",
+                raw_body='{"source_path": "m.py", "destination_dir": "dest"}',
+            )
+        )
         assert status == 200
         assert body["success"] is False
         assert "移动失败" in body["message"]
@@ -778,12 +887,14 @@ class TestEntryOps:
 
 class TestIdeOpenFile:
     def test_open_file_missing_path(self, server: Any) -> None:
-        status, body = _decode_http(_call(
-            server,
-            path="/ext/workspace_service/workspaces/open-file",
-            method="POST",
-            raw_body='{"file_path": ""}',
-        ))
+        status, body = _decode_http(
+            _call(
+                server,
+                path="/ext/workspace_service/workspaces/open-file",
+                method="POST",
+                raw_body='{"file_path": ""}',
+            )
+        )
         assert status == 200
         assert body["success"] is False
         assert "file_path 参数不能为空" in body["message"]
@@ -791,12 +902,14 @@ class TestIdeOpenFile:
     def test_open_file_no_connector_none_registry(self, server: Any) -> None:
         """_connector_registry 单例尚未创建 → 真实 ConnectorRegistry 实例化 + 无连接器。"""
         server._connector_registry = None  # type: ignore[attr-defined]
-        status, body = _decode_http(_call(
-            server,
-            path="/ext/workspace_service/workspaces/open-file",
-            method="POST",
-            raw_body='{"file_path": "a.py"}',
-        ))
+        status, body = _decode_http(
+            _call(
+                server,
+                path="/ext/workspace_service/workspaces/open-file",
+                method="POST",
+                raw_body='{"file_path": "a.py"}',
+            )
+        )
         assert status == 200
         assert body["success"] is False
         assert "没有可用的 IDE 连接器" in body["message"]
@@ -804,24 +917,28 @@ class TestIdeOpenFile:
 
     def test_open_file_no_connector_injected_registry(self, server: Any) -> None:
         server._connector_registry = _FakeRegistry(None)  # type: ignore[attr-defined]
-        status, body = _decode_http(_call(
-            server,
-            path="/ext/workspace_service/workspaces/open-file",
-            method="POST",
-            raw_body='{"file_path": "a.py"}',
-        ))
+        status, body = _decode_http(
+            _call(
+                server,
+                path="/ext/workspace_service/workspaces/open-file",
+                method="POST",
+                raw_body='{"file_path": "a.py"}',
+            )
+        )
         assert status == 200
         assert body["success"] is False
 
     def test_open_file_connector_success(self, server: Any) -> None:
         conn = _FakeConnector(["open_file"], _FakeResult(True))
         server._connector_registry = _FakeRegistry(conn)  # type: ignore[attr-defined]
-        status, body = _decode_http(_call(
-            server,
-            path="/ext/workspace_service/workspaces/open-file",
-            method="POST",
-            raw_body='{"file_path": "a.py", "line": 3, "column": 5}',
-        ))
+        status, body = _decode_http(
+            _call(
+                server,
+                path="/ext/workspace_service/workspaces/open-file",
+                method="POST",
+                raw_body='{"file_path": "a.py", "line": 3, "column": 5}',
+            )
+        )
         assert status == 200
         assert body["success"] is True
         assert conn.action_calls == ["open_file"]
@@ -830,12 +947,14 @@ class TestIdeOpenFile:
     def test_open_file_connector_failure(self, server: Any) -> None:
         conn = _FakeConnector(["open_file"], _FakeResult(False, "connector boom"))
         server._connector_registry = _FakeRegistry(conn)  # type: ignore[attr-defined]
-        status, body = _decode_http(_call(
-            server,
-            path="/ext/workspace_service/workspaces/open-file",
-            method="POST",
-            raw_body='{"file_path": "a.py"}',
-        ))
+        status, body = _decode_http(
+            _call(
+                server,
+                path="/ext/workspace_service/workspaces/open-file",
+                method="POST",
+                raw_body='{"file_path": "a.py"}',
+            )
+        )
         assert status == 200
         assert body["success"] is False
         assert "连接器执行失败" in body["message"]
@@ -843,12 +962,14 @@ class TestIdeOpenFile:
     def test_open_file_connector_exception(self, server: Any) -> None:
         conn = _FakeConnector(["open_file"], raise_on_execute=RuntimeError("kaput"))
         server._connector_registry = _FakeRegistry(conn)  # type: ignore[attr-defined]
-        status, body = _decode_http(_call(
-            server,
-            path="/ext/workspace_service/workspaces/open-file",
-            method="POST",
-            raw_body='{"file_path": "a.py"}',
-        ))
+        status, body = _decode_http(
+            _call(
+                server,
+                path="/ext/workspace_service/workspaces/open-file",
+                method="POST",
+                raw_body='{"file_path": "a.py"}',
+            )
+        )
         assert status == 200
         assert body["success"] is False
         assert "打开文件失败" in body["message"]
@@ -857,11 +978,13 @@ class TestIdeOpenFile:
 class TestIdeOpenWorkspace:
     def test_open_workspace_no_path_found(self, server: Any) -> None:
         _inject_workspace_path(server, None)
-        status, body = _decode_http(_call(
-            server,
-            path="/ext/workspace_service/workspaces/t1/open",
-            method="POST",
-        ))
+        status, body = _decode_http(
+            _call(
+                server,
+                path="/ext/workspace_service/workspaces/t1/open",
+                method="POST",
+            )
+        )
         assert status == 200
         assert body["success"] is False
         assert "未找到任务" in body["message"]
@@ -871,12 +994,14 @@ class TestIdeOpenWorkspace:
     ) -> None:
         _inject_workspace_path(server, ws_dir)
         server._connector_registry = _FakeRegistry(None)  # type: ignore[attr-defined]
-        monkeypatch.setattr(server, "_open_in_system_file_manager", lambda p: True)
-        status, body = _decode_http(_call(
-            server,
-            path="/ext/workspace_service/workspaces/t1/open",
-            method="POST",
-        ))
+        monkeypatch.setattr(server, "_open_in_system_file_manager", lambda _p: True)
+        status, body = _decode_http(
+            _call(
+                server,
+                path="/ext/workspace_service/workspaces/t1/open",
+                method="POST",
+            )
+        )
         assert status == 200
         assert body["success"] is True
         assert "系统文件管理器" in body["message"]
@@ -886,12 +1011,14 @@ class TestIdeOpenWorkspace:
     ) -> None:
         _inject_workspace_path(server, ws_dir)
         server._connector_registry = _FakeRegistry(None)  # type: ignore[attr-defined]
-        monkeypatch.setattr(server, "_open_in_system_file_manager", lambda p: False)
-        status, body = _decode_http(_call(
-            server,
-            path="/ext/workspace_service/workspaces/t1/open",
-            method="POST",
-        ))
+        monkeypatch.setattr(server, "_open_in_system_file_manager", lambda _p: False)
+        status, body = _decode_http(
+            _call(
+                server,
+                path="/ext/workspace_service/workspaces/t1/open",
+                method="POST",
+            )
+        )
         assert status == 200
         assert body["success"] is False
         assert "无法启动系统文件管理器" in body["message"]
@@ -900,11 +1027,13 @@ class TestIdeOpenWorkspace:
         _inject_workspace_path(server, ws_dir)
         conn = _FakeConnector(["open_folder"], _FakeResult(True))
         server._connector_registry = _FakeRegistry(conn)  # type: ignore[attr-defined]
-        status, body = _decode_http(_call(
-            server,
-            path="/ext/workspace_service/workspaces/t1/open",
-            method="POST",
-        ))
+        status, body = _decode_http(
+            _call(
+                server,
+                path="/ext/workspace_service/workspaces/t1/open",
+                method="POST",
+            )
+        )
         assert status == 200
         assert body["success"] is True
         assert conn.action_calls == ["open_folder"]
@@ -913,11 +1042,13 @@ class TestIdeOpenWorkspace:
         _inject_workspace_path(server, ws_dir)
         conn = _FakeConnector(["open_folder"], _FakeResult(False, "boom"))
         server._connector_registry = _FakeRegistry(conn)  # type: ignore[attr-defined]
-        status, body = _decode_http(_call(
-            server,
-            path="/ext/workspace_service/workspaces/t1/open",
-            method="POST",
-        ))
+        status, body = _decode_http(
+            _call(
+                server,
+                path="/ext/workspace_service/workspaces/t1/open",
+                method="POST",
+            )
+        )
         assert status == 200
         assert body["success"] is False
         assert "连接器执行失败" in body["message"]
@@ -926,11 +1057,13 @@ class TestIdeOpenWorkspace:
         _inject_workspace_path(server, ws_dir)
         conn = _FakeConnector(["open_folder"], raise_on_execute=RuntimeError("kaput"))
         server._connector_registry = _FakeRegistry(conn)  # type: ignore[attr-defined]
-        status, body = _decode_http(_call(
-            server,
-            path="/ext/workspace_service/workspaces/t1/open",
-            method="POST",
-        ))
+        status, body = _decode_http(
+            _call(
+                server,
+                path="/ext/workspace_service/workspaces/t1/open",
+                method="POST",
+            )
+        )
         assert status == 200
         assert body["success"] is False
         assert "打开工作空间失败" in body["message"]
@@ -947,20 +1080,24 @@ class TestIdeOpenWorkspace:
 
 class TestDispatch:
     def test_unknown_path_404(self, server: Any) -> None:
-        status, body = _decode_http(_call(
-            server,
-            path="/ext/workspace_service/workspaces/t1/unknown",
-            method="GET",
-        ))
+        status, body = _decode_http(
+            _call(
+                server,
+                path="/ext/workspace_service/workspaces/t1/unknown",
+                method="GET",
+            )
+        )
         assert status == 404
         assert "not found" in body["error"]
 
     def test_wrong_method_404(self, server: Any) -> None:
-        status, body = _decode_http(_call(
-            server,
-            path="/ext/workspace_service/workspaces/t1/file-tree",
-            method="POST",
-        ))
+        status, body = _decode_http(
+            _call(
+                server,
+                path="/ext/workspace_service/workspaces/t1/file-tree",
+                method="POST",
+            )
+        )
         assert status == 404
 
     def test_invalid_json_body_500(self, server: Any) -> None:
@@ -975,12 +1112,14 @@ class TestDispatch:
 
     def test_plain_json_body_decoded(self, server: Any, ws_dir: str) -> None:
         _inject_workspace_path(server, ws_dir)
-        status, body = _decode_http(_call(
-            server,
-            path="/ext/workspace_service/workspaces/t1/create-entry",
-            method="POST",
-            raw_body='{"path": "plain.py", "type": "file"}',
-        ))
+        status, body = _decode_http(
+            _call(
+                server,
+                path="/ext/workspace_service/workspaces/t1/create-entry",
+                method="POST",
+                raw_body='{"path": "plain.py", "type": "file"}',
+            )
+        )
         assert status == 200
         assert body["success"] is True
 
@@ -1004,9 +1143,7 @@ class TestDispatch:
         root = _run(server._resolve_workspace_path("_local"))
         assert root == str(Path(__file__).resolve().parents[4])
 
-    def test_resolve_workspace_path_exception_degrades(
-        self, server: Any, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_resolve_workspace_path_exception_degrades(self, server: Any, monkeypatch: pytest.MonkeyPatch) -> None:
         mod = types.ModuleType("tasks.service_access")
 
         def gts() -> Any:
@@ -1032,14 +1169,14 @@ class TestStateReaderInjection:
                 return [{"pipeline_id": "p1"}]
 
         monkeypatch.setitem(server.plugin._capabilities, "pipeline-state", _FakeHandle())
-        monkeypatch.setattr(server, "set_state_reader", lambda reader: calls.append(reader))
+        monkeypatch.setattr(server, "set_state_reader", calls.append)
         _run(server._on_load({}))
         assert len(calls) == 1
         assert _run(calls[0]()) == [{"pipeline_id": "p1"}]
 
     def test_on_load_injection_failure_degrades(self, server: Any, monkeypatch: pytest.MonkeyPatch) -> None:
         """能力未授予（get_capability KeyError）→ 警告降级，不抛。"""
-        monkeypatch.setattr(server, "set_state_reader", lambda reader: pytest.fail("不应注入"))
+        monkeypatch.setattr(server, "set_state_reader", lambda _reader: pytest.fail("不应注入"))
         _run(server._on_load({}))  # 不抛即过
 
     def test_on_load_resets_service_singleton(self, server: Any) -> None:

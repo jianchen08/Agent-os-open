@@ -13,6 +13,7 @@ plugin.json ``http_endpoints`` 声明（/ext/artifacts/**，auth:user）。
   内部，留待收尾轨随 channel_api 整体删除；本插件不依赖它。
 [来源: docs/working/channel_api插件拆迁方案_20260821.md 批次 1]
 """
+
 from __future__ import annotations
 
 import base64
@@ -128,9 +129,7 @@ def _parse_multipart(content_type: str, body_bytes: bytes) -> dict[str, Any]:
         else:
             # 普通字段
             payload = part.get_payload(decode=True)
-            fields[name] = (
-                payload.decode("utf-8", errors="replace") if isinstance(payload, bytes) else ""
-            )
+            fields[name] = payload.decode("utf-8", errors="replace") if isinstance(payload, bytes) else ""
     return fields
 
 
@@ -196,9 +195,12 @@ async def handle_upload(raw_body: str, headers: dict[str, str] | None) -> dict[s
 
     content_type = (headers or {}).get("content-type", "") or (headers or {}).get("Content-Type", "")
     if "multipart/form-data" not in content_type:
-        return _ok(_json_response(
-            {"error": "upload requires multipart/form-data", "content_type": content_type}, 400,
-        ))
+        return _ok(
+            _json_response(
+                {"error": "upload requires multipart/form-data", "content_type": content_type},
+                400,
+            )
+        )
 
     try:
         fields = _parse_multipart(content_type, body_bytes)
@@ -238,16 +240,25 @@ async def handle_upload(raw_body: str, headers: dict[str, str] | None) -> dict[s
     storage = get_file_storage()
     await storage.save(file_id, attachment)
 
-    logger.info("[upload] 文件上传成功 | file_id=%s filename=%s media_type=%s size=%d",
-                file_id, filename, media_type, len(content))
-    return _ok(_json_response({
-        "file_id": file_id,
-        "filename": filename,
-        "mime_type": mime_type,
-        "media_type": media_type,
-        "size": len(content),
-        "url": url,
-    }))
+    logger.info(
+        "[upload] 文件上传成功 | file_id=%s filename=%s media_type=%s size=%d",
+        file_id,
+        filename,
+        media_type,
+        len(content),
+    )
+    return _ok(
+        _json_response(
+            {
+                "file_id": file_id,
+                "filename": filename,
+                "mime_type": mime_type,
+                "media_type": media_type,
+                "size": len(content),
+                "url": url,
+            }
+        )
+    )
 
 
 # ══ 制品 handler（routes_artifacts.py 迁入，剥 FastAPI 装饰器）══
@@ -321,7 +332,9 @@ async def get_version_diff(artifact_id: str, from_version: int, to_version: int)
 
 
 async def list_annotations(
-    artifact_id: str, status: str | None, limit: int,
+    artifact_id: str,
+    status: str | None,
+    limit: int,
 ) -> dict[str, Any]:
     """获取制品的批注列表（query: status/limit）。"""
     service = get_annotation_service()
@@ -420,7 +433,7 @@ async def http_handle(
 
         # ── annotations 独立资源（/ext/artifacts/annotations/{id}[...]）──
         if path.startswith(f"{_PREFIX}/annotations/"):
-            ann_rest = path[len(f"{_PREFIX}/annotations/"):]
+            ann_rest = path[len(f"{_PREFIX}/annotations/") :]
             if "/" in ann_rest:
                 aid, rest = ann_rest.split("/", 1)
                 if rest == "resolve" and method == "POST":
@@ -434,30 +447,46 @@ async def http_handle(
 
         # ── artifacts 集合（/ext/artifacts[?task_id&limit&offset]）──
         if path == _PREFIX and method == "GET":
-            return _ok(_json_response(await list_artifacts(
-                task_id=q.get("task_id", ""),
-                limit=_qint(q, "limit", 50),
-                offset=_qint(q, "offset", 0),
-            )))
+            return _ok(
+                _json_response(
+                    await list_artifacts(
+                        task_id=q.get("task_id", ""),
+                        limit=_qint(q, "limit", 50),
+                        offset=_qint(q, "offset", 0),
+                    )
+                )
+            )
         if path == _PREFIX and method == "POST":
             body = _decode_body(raw_body)
             return _ok(_json_response(await create_artifact(body)))
 
         # ── 子路径（versions/diff/annotations）──
         if path.startswith(_PREFIX + "/"):
-            rest = path[len(_PREFIX) + 1:]  # "{artifact_id}" 或 "{artifact_id}/xxx"
+            rest = path[len(_PREFIX) + 1 :]  # "{artifact_id}" 或 "{artifact_id}/xxx"
             if "/" in rest:
                 art_id, sub_path = rest.split("/", 1)
                 if sub_path == "versions" and method == "GET":
                     return _ok(_json_response(await get_version_history(art_id)))
                 if sub_path == "diff" and method == "GET":
-                    return _ok(_json_response(await get_version_diff(
-                        art_id, _qint(q, "from", 1), _qint(q, "to", 2),
-                    )))
+                    return _ok(
+                        _json_response(
+                            await get_version_diff(
+                                art_id,
+                                _qint(q, "from", 1),
+                                _qint(q, "to", 2),
+                            )
+                        )
+                    )
                 if sub_path == "annotations" and method == "GET":
-                    return _ok(_json_response(await list_annotations(
-                        art_id, status=q.get("status"), limit=_qint(q, "limit", 100),
-                    )))
+                    return _ok(
+                        _json_response(
+                            await list_annotations(
+                                art_id,
+                                status=q.get("status"),
+                                limit=_qint(q, "limit", 100),
+                            )
+                        )
+                    )
                 if sub_path == "annotations" and method == "POST":
                     body = _decode_body(raw_body)
                     return _ok(_json_response(await create_annotation(art_id, body)))

@@ -20,7 +20,6 @@ import base64
 import importlib.util
 import json
 import sys
-import types
 from pathlib import Path
 from typing import Any
 
@@ -39,19 +38,20 @@ def _load_server() -> Any:
         "artifacts_server_http_test",
         str(_PLUGIN_DIR / "server.py"),
     )
-    assert spec and spec.loader
+    assert spec is not None
+    assert spec.loader is not None
     mod = importlib.util.module_from_spec(spec)
     sys.modules["artifacts_server_http_test"] = mod
     spec.loader.exec_module(mod)
     return mod
 
 
-@pytest.fixture()
+@pytest.fixture
 def server() -> Any:
     return _load_server()
 
 
-@pytest.fixture()
+@pytest.fixture
 def storage_dirs(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[str, str]:
     """上传与元数据落 tmp（不污染仓库 data/）。"""
     uploads = tmp_path / "uploads"
@@ -70,7 +70,9 @@ def _multipart(
     """构造 multipart/form-data 请求 → (raw_body base64, content-type)。"""
     parts = [
         f'--{_BOUNDARY}\r\nContent-Disposition: form-data; name="file"; filename="{filename}"\r\n'
-        f'Content-Type: {content_type}\r\n\r\n'.encode() + content + b"\r\n",
+        f"Content-Type: {content_type}\r\n\r\n".encode()
+        + content
+        + b"\r\n",
         f'--{_BOUNDARY}\r\nContent-Disposition: form-data; name="thread_id"\r\n\r\n{thread_id}\r\n'.encode(),
         f"--{_BOUNDARY}--\r\n".encode(),
     ]
@@ -103,18 +105,22 @@ def _decode_http(result: dict[str, Any]) -> tuple[int, Any]:
 
 def _make_artifact(server: Any, task_id: str = "t1", title: str = "报告") -> dict[str, Any]:
     """经 create 端点建一个制品，返回 artifact dict。"""
-    _, body = _decode_http(_call(
-        server,
-        path="/ext/artifacts",
-        method="POST",
-        raw_body=json.dumps({
-            "task_id": task_id,
-            "title": title,
-            "artifact_type": "text",
-            "content": "v1 content",
-            "metadata": {"k": "v"},
-        }),
-    ))
+    _, body = _decode_http(
+        _call(
+            server,
+            path="/ext/artifacts",
+            method="POST",
+            raw_body=json.dumps(
+                {
+                    "task_id": task_id,
+                    "title": title,
+                    "artifact_type": "text",
+                    "content": "v1 content",
+                    "metadata": {"k": "v"},
+                }
+            ),
+        )
+    )
     return body
 
 
@@ -127,13 +133,15 @@ class TestUpload:
     def test_upload_success(self, server: Any, storage_dirs: tuple[str, str]) -> None:
         uploads, meta = storage_dirs
         raw, content_type = _multipart()
-        status, body = _decode_http(_call(
-            server,
-            path="/ext/artifacts/upload",
-            method="POST",
-            raw_body=raw,
-            headers={"content-type": content_type},
-        ))
+        status, body = _decode_http(
+            _call(
+                server,
+                path="/ext/artifacts/upload",
+                method="POST",
+                raw_body=raw,
+                headers={"content-type": content_type},
+            )
+        )
         assert status == 200
         assert body["filename"] == "a.png"
         assert body["mime_type"] == "image/png"
@@ -144,13 +152,15 @@ class TestUpload:
         assert (Path(meta) / f"{body['file_id']}.json").exists()
 
     def test_upload_plain_json_content_type(self, server: Any) -> None:
-        status, body = _decode_http(_call(
-            server,
-            path="/ext/artifacts/upload",
-            method="POST",
-            raw_body=base64.b64encode(b"whatever").decode(),
-            headers={"content-type": "application/json"},
-        ))
+        status, body = _decode_http(
+            _call(
+                server,
+                path="/ext/artifacts/upload",
+                method="POST",
+                raw_body=base64.b64encode(b"whatever").decode(),
+                headers={"content-type": "application/json"},
+            )
+        )
         assert status == 400
         assert "multipart/form-data" in body["error"]
 
@@ -160,36 +170,42 @@ class TestUpload:
             f"--{_BOUNDARY}--\r\n".encode(),
         ]
         raw = base64.b64encode(b"".join(parts)).decode()
-        status, body = _decode_http(_call(
-            server,
-            path="/ext/artifacts/upload",
-            method="POST",
-            raw_body=raw,
-            headers={"content-type": f"multipart/form-data; boundary={_BOUNDARY}"},
-        ))
+        status, body = _decode_http(
+            _call(
+                server,
+                path="/ext/artifacts/upload",
+                method="POST",
+                raw_body=raw,
+                headers={"content-type": f"multipart/form-data; boundary={_BOUNDARY}"},
+            )
+        )
         assert status == 400
         assert "missing 'file' field" in body["error"]
 
     def test_upload_invalid_base64(self, server: Any) -> None:
-        status, body = _decode_http(_call(
-            server,
-            path="/ext/artifacts/upload",
-            method="POST",
-            raw_body="!!!!not-base64!!!!",
-            headers={"content-type": "multipart/form-data; boundary=x"},
-        ))
+        status, body = _decode_http(
+            _call(
+                server,
+                path="/ext/artifacts/upload",
+                method="POST",
+                raw_body="!!!!not-base64!!!!",
+                headers={"content-type": "multipart/form-data; boundary=x"},
+            )
+        )
         assert status == 400
         assert "invalid upload body" in body["error"]
 
     def test_upload_document_media_type(self, server: Any, storage_dirs: tuple[str, str]) -> None:
         raw, content_type = _multipart(filename="doc.pdf", content_type="application/pdf")
-        status, body = _decode_http(_call(
-            server,
-            path="/ext/artifacts/upload",
-            method="POST",
-            raw_body=raw,
-            headers={"content-type": content_type},
-        ))
+        status, body = _decode_http(
+            _call(
+                server,
+                path="/ext/artifacts/upload",
+                method="POST",
+                raw_body=raw,
+                headers={"content-type": content_type},
+            )
+        )
         assert status == 200
         assert body["media_type"] == "document"
         assert body["url"].endswith(".pdf")
@@ -208,9 +224,14 @@ class TestArtifactCollection:
 
     def test_create_and_list(self, server: Any) -> None:
         art = _make_artifact(server, task_id="t1")
-        status, body = _decode_http(_call(
-            server, path="/ext/artifacts", method="GET", query={"task_id": "t1"},
-        ))
+        status, body = _decode_http(
+            _call(
+                server,
+                path="/ext/artifacts",
+                method="GET",
+                query={"task_id": "t1"},
+            )
+        )
         assert status == 200
         assert body["total"] == 1
         assert body["items"][0]["id"] == art["id"]
@@ -220,20 +241,28 @@ class TestArtifactCollection:
     def test_list_limit_offset(self, server: Any) -> None:
         for i in range(3):
             _make_artifact(server, task_id="t2", title=f"制品{i}")
-        status, body = _decode_http(_call(
-            server, path="/ext/artifacts", method="GET",
-            query={"task_id": "t2", "limit": "2", "offset": "1"},
-        ))
+        status, body = _decode_http(
+            _call(
+                server,
+                path="/ext/artifacts",
+                method="GET",
+                query={"task_id": "t2", "limit": "2", "offset": "1"},
+            )
+        )
         assert status == 200
         assert body["total"] == 3
         assert len(body["items"]) == 2
 
     def test_list_bad_int_falls_back(self, server: Any) -> None:
         _make_artifact(server, task_id="t3")
-        status, body = _decode_http(_call(
-            server, path="/ext/artifacts", method="GET",
-            query={"task_id": "t3", "limit": "abc", "offset": "-x"},
-        ))
+        status, body = _decode_http(
+            _call(
+                server,
+                path="/ext/artifacts",
+                method="GET",
+                query={"task_id": "t3", "limit": "abc", "offset": "-x"},
+            )
+        )
         assert status == 200
         assert body["total"] == 1
 
@@ -246,58 +275,82 @@ class TestArtifactCollection:
 class TestArtifactItem:
     def test_get_artifact(self, server: Any) -> None:
         art = _make_artifact(server)
-        status, body = _decode_http(_call(
-            server, path=f"/ext/artifacts/{art['id']}", method="GET",
-        ))
+        status, body = _decode_http(
+            _call(
+                server,
+                path=f"/ext/artifacts/{art['id']}",
+                method="GET",
+            )
+        )
         assert status == 200
         assert body["id"] == art["id"]
 
     def test_get_artifact_missing(self, server: Any) -> None:
-        status, body = _decode_http(_call(
-            server, path="/ext/artifacts/ghost-123", method="GET",
-        ))
+        status, body = _decode_http(
+            _call(
+                server,
+                path="/ext/artifacts/ghost-123",
+                method="GET",
+            )
+        )
         assert status == 200
         assert body["error"]["code"] == "NOT_FOUND"
 
     def test_update_artifact_creates_version(self, server: Any) -> None:
         art = _make_artifact(server)
-        status, body = _decode_http(_call(
-            server,
-            path=f"/ext/artifacts/{art['id']}",
-            method="PUT",
-            raw_body='{"content": "v2 content", "title": "报告v2"}',
-        ))
+        status, body = _decode_http(
+            _call(
+                server,
+                path=f"/ext/artifacts/{art['id']}",
+                method="PUT",
+                raw_body='{"content": "v2 content", "title": "报告v2"}',
+            )
+        )
         assert status == 200
         assert body["version"] == 2
         assert body["content"] == "v2 content"
         assert body["parent_artifact_id"] == art["id"]
 
     def test_update_artifact_missing(self, server: Any) -> None:
-        status, body = _decode_http(_call(
-            server,
-            path="/ext/artifacts/ghost-123",
-            method="PUT",
-            raw_body='{"content": "x"}',
-        ))
+        status, body = _decode_http(
+            _call(
+                server,
+                path="/ext/artifacts/ghost-123",
+                method="PUT",
+                raw_body='{"content": "x"}',
+            )
+        )
         assert status == 200
         assert body["error"]["code"] == "NOT_FOUND"
 
     def test_delete_artifact(self, server: Any) -> None:
         art = _make_artifact(server)
-        status, body = _decode_http(_call(
-            server, path=f"/ext/artifacts/{art['id']}", method="DELETE",
-        ))
+        status, body = _decode_http(
+            _call(
+                server,
+                path=f"/ext/artifacts/{art['id']}",
+                method="DELETE",
+            )
+        )
         assert status == 200
         assert body == {"success": True}
-        _, gone = _decode_http(_call(
-            server, path=f"/ext/artifacts/{art['id']}", method="GET",
-        ))
+        _, gone = _decode_http(
+            _call(
+                server,
+                path=f"/ext/artifacts/{art['id']}",
+                method="GET",
+            )
+        )
         assert gone["error"]["code"] == "NOT_FOUND"
 
     def test_delete_artifact_missing(self, server: Any) -> None:
-        status, body = _decode_http(_call(
-            server, path="/ext/artifacts/ghost-123", method="DELETE",
-        ))
+        status, body = _decode_http(
+            _call(
+                server,
+                path="/ext/artifacts/ghost-123",
+                method="DELETE",
+            )
+        )
         assert status == 200
         assert body == {"success": False}
 
@@ -310,42 +363,56 @@ class TestArtifactItem:
 class TestVersions:
     def test_version_history(self, server: Any) -> None:
         art = _make_artifact(server, title="V")
-        _, v2 = _decode_http(_call(
-            server,
-            path=f"/ext/artifacts/{art['id']}",
-            method="PUT",
-            raw_body='{"content": "v2"}',
-        ))
+        _, v2 = _decode_http(
+            _call(
+                server,
+                path=f"/ext/artifacts/{art['id']}",
+                method="PUT",
+                raw_body='{"content": "v2"}',
+            )
+        )
         # 版本链从最新制品 id 向上追溯（v1 起点的链只有自身）
-        status, body = _decode_http(_call(
-            server, path=f"/ext/artifacts/{v2['id']}/versions", method="GET",
-        ))
+        status, body = _decode_http(
+            _call(
+                server,
+                path=f"/ext/artifacts/{v2['id']}/versions",
+                method="GET",
+            )
+        )
         assert status == 200
         assert body["total"] == 2
         assert body["items"][0]["version"] == 2
         assert body["items"][1]["version"] == 1
 
     def test_version_history_missing(self, server: Any) -> None:
-        status, body = _decode_http(_call(
-            server, path="/ext/artifacts/ghost/versions", method="GET",
-        ))
+        status, body = _decode_http(
+            _call(
+                server,
+                path="/ext/artifacts/ghost/versions",
+                method="GET",
+            )
+        )
         assert status == 200
         assert body == {"items": [], "total": 0}
 
     def test_version_diff(self, server: Any) -> None:
         art = _make_artifact(server, title="D")
-        _, v2 = _decode_http(_call(
-            server,
-            path=f"/ext/artifacts/{art['id']}",
-            method="PUT",
-            raw_body='{"content": "v2 differs"}',
-        ))
-        status, body = _decode_http(_call(
-            server,
-            path=f"/ext/artifacts/{v2['id']}/diff",
-            method="GET",
-            query={"from": "1", "to": "2"},
-        ))
+        _, v2 = _decode_http(
+            _call(
+                server,
+                path=f"/ext/artifacts/{art['id']}",
+                method="PUT",
+                raw_body='{"content": "v2 differs"}',
+            )
+        )
+        status, body = _decode_http(
+            _call(
+                server,
+                path=f"/ext/artifacts/{v2['id']}/diff",
+                method="GET",
+                query={"from": "1", "to": "2"},
+            )
+        )
         assert status == 200
         assert body["from_version"] == 1
         assert body["to_version"] == 2
@@ -354,15 +421,21 @@ class TestVersions:
 
     def test_version_diff_default_versions(self, server: Any) -> None:
         art = _make_artifact(server, title="D2")
-        _, v2 = _decode_http(_call(
-            server,
-            path=f"/ext/artifacts/{art['id']}",
-            method="PUT",
-            raw_body='{"content": "v2"}',
-        ))
-        status, body = _decode_http(_call(
-            server, path=f"/ext/artifacts/{v2['id']}/diff", method="GET",
-        ))
+        _, v2 = _decode_http(
+            _call(
+                server,
+                path=f"/ext/artifacts/{art['id']}",
+                method="PUT",
+                raw_body='{"content": "v2"}',
+            )
+        )
+        status, body = _decode_http(
+            _call(
+                server,
+                path=f"/ext/artifacts/{v2['id']}/diff",
+                method="GET",
+            )
+        )
         assert status == 200
         assert body["from_version"] == 1
         assert body["to_version"] == 2
@@ -377,122 +450,152 @@ class TestVersions:
 class TestAnnotations:
     def test_create_and_list_annotations(self, server: Any) -> None:
         art = _make_artifact(server)
-        status, body = _decode_http(_call(
-            server,
-            path=f"/ext/artifacts/{art['id']}/annotations",
-            method="POST",
-            raw_body=json.dumps({
-                "target_type": "text_selection",
-                "target_data": {"line": 3},
-                "content": "这里有问题",
-                "author_type": "user",
-                "author_id": "u-1",
-            }),
-        ))
+        status, body = _decode_http(
+            _call(
+                server,
+                path=f"/ext/artifacts/{art['id']}/annotations",
+                method="POST",
+                raw_body=json.dumps(
+                    {
+                        "target_type": "text_selection",
+                        "target_data": {"line": 3},
+                        "content": "这里有问题",
+                        "author_type": "user",
+                        "author_id": "u-1",
+                    }
+                ),
+            )
+        )
         assert status == 200
         assert body["content"] == "这里有问题"
         assert body["target_type"] == "text_selection"
 
-        status, listed = _decode_http(_call(
-            server, path=f"/ext/artifacts/{art['id']}/annotations", method="GET",
-        ))
+        status, listed = _decode_http(
+            _call(
+                server,
+                path=f"/ext/artifacts/{art['id']}/annotations",
+                method="GET",
+            )
+        )
         assert status == 200
         assert listed["total"] == 1
         assert listed["items"][0]["id"] == body["id"]
 
     def test_list_annotations_status_filter(self, server: Any) -> None:
         art = _make_artifact(server)
-        _decode_http(_call(
-            server,
-            path=f"/ext/artifacts/{art['id']}/annotations",
-            method="POST",
-            raw_body=json.dumps({"content": "a1", "author_id": "u-1"}),
-        ))
-        status, body = _decode_http(_call(
-            server,
-            path=f"/ext/artifacts/{art['id']}/annotations",
-            method="GET",
-            query={"status": "resolved"},
-        ))
+        _decode_http(
+            _call(
+                server,
+                path=f"/ext/artifacts/{art['id']}/annotations",
+                method="POST",
+                raw_body=json.dumps({"content": "a1", "author_id": "u-1"}),
+            )
+        )
+        status, body = _decode_http(
+            _call(
+                server,
+                path=f"/ext/artifacts/{art['id']}/annotations",
+                method="GET",
+                query={"status": "resolved"},
+            )
+        )
         assert status == 200
         assert body["total"] == 0
 
     def test_update_annotation(self, server: Any) -> None:
         art = _make_artifact(server)
-        _, ann = _decode_http(_call(
-            server,
-            path=f"/ext/artifacts/{art['id']}/annotations",
-            method="POST",
-            raw_body=json.dumps({"content": "old"}),
-        ))
-        status, body = _decode_http(_call(
-            server,
-            path=f"/ext/artifacts/annotations/{ann['id']}",
-            method="PUT",
-            raw_body=json.dumps({"content": "new", "target_data": {"x": 1}}),
-        ))
+        _, ann = _decode_http(
+            _call(
+                server,
+                path=f"/ext/artifacts/{art['id']}/annotations",
+                method="POST",
+                raw_body=json.dumps({"content": "old"}),
+            )
+        )
+        status, body = _decode_http(
+            _call(
+                server,
+                path=f"/ext/artifacts/annotations/{ann['id']}",
+                method="PUT",
+                raw_body=json.dumps({"content": "new", "target_data": {"x": 1}}),
+            )
+        )
         assert status == 200
         assert body["content"] == "new"
         assert body["target_data"] == {"x": 1}
 
     def test_update_annotation_missing(self, server: Any) -> None:
-        status, body = _decode_http(_call(
-            server,
-            path="/ext/artifacts/annotations/ghost-ann",
-            method="PUT",
-            raw_body='{"content": "x"}',
-        ))
+        status, body = _decode_http(
+            _call(
+                server,
+                path="/ext/artifacts/annotations/ghost-ann",
+                method="PUT",
+                raw_body='{"content": "x"}',
+            )
+        )
         assert status == 200
         assert body["error"]["code"] == "NOT_FOUND"
 
     def test_delete_annotation(self, server: Any) -> None:
         art = _make_artifact(server)
-        _, ann = _decode_http(_call(
-            server,
-            path=f"/ext/artifacts/{art['id']}/annotations",
-            method="POST",
-            raw_body=json.dumps({"content": "a"}),
-        ))
-        status, body = _decode_http(_call(
-            server,
-            path=f"/ext/artifacts/annotations/{ann['id']}",
-            method="DELETE",
-        ))
+        _, ann = _decode_http(
+            _call(
+                server,
+                path=f"/ext/artifacts/{art['id']}/annotations",
+                method="POST",
+                raw_body=json.dumps({"content": "a"}),
+            )
+        )
+        status, body = _decode_http(
+            _call(
+                server,
+                path=f"/ext/artifacts/annotations/{ann['id']}",
+                method="DELETE",
+            )
+        )
         assert status == 200
         assert body == {"success": True}
 
     def test_delete_annotation_missing(self, server: Any) -> None:
-        status, body = _decode_http(_call(
-            server,
-            path="/ext/artifacts/annotations/ghost-ann",
-            method="DELETE",
-        ))
+        status, body = _decode_http(
+            _call(
+                server,
+                path="/ext/artifacts/annotations/ghost-ann",
+                method="DELETE",
+            )
+        )
         assert status == 200
         assert body == {"success": False}
 
     def test_resolve_annotation(self, server: Any) -> None:
         art = _make_artifact(server)
-        _, ann = _decode_http(_call(
-            server,
-            path=f"/ext/artifacts/{art['id']}/annotations",
-            method="POST",
-            raw_body=json.dumps({"content": "r"}),
-        ))
-        status, body = _decode_http(_call(
-            server,
-            path=f"/ext/artifacts/annotations/{ann['id']}/resolve",
-            method="POST",
-        ))
+        _, ann = _decode_http(
+            _call(
+                server,
+                path=f"/ext/artifacts/{art['id']}/annotations",
+                method="POST",
+                raw_body=json.dumps({"content": "r"}),
+            )
+        )
+        status, body = _decode_http(
+            _call(
+                server,
+                path=f"/ext/artifacts/annotations/{ann['id']}/resolve",
+                method="POST",
+            )
+        )
         assert status == 200
         assert body["status"] == "resolved"
         assert body["resolved_at"]
 
     def test_resolve_annotation_missing(self, server: Any) -> None:
-        status, body = _decode_http(_call(
-            server,
-            path="/ext/artifacts/annotations/ghost-ann/resolve",
-            method="POST",
-        ))
+        status, body = _decode_http(
+            _call(
+                server,
+                path="/ext/artifacts/annotations/ghost-ann/resolve",
+                method="POST",
+            )
+        )
         assert status == 200
         assert body["error"]["code"] == "NOT_FOUND"
 
@@ -505,17 +608,25 @@ class TestAnnotations:
 class TestDispatch:
     def test_unknown_path_404(self, server: Any) -> None:
         # 三级未知路径不匹配任何模板 → 404（单级/两级段按 artifact_id 语义走 NOT_FOUND）
-        status, body = _decode_http(_call(
-            server, path="/ext/artifacts/a/b/c", method="GET",
-        ))
+        status, body = _decode_http(
+            _call(
+                server,
+                path="/ext/artifacts/a/b/c",
+                method="GET",
+            )
+        )
         assert status == 404
         assert "not found" in body["error"]
 
     def test_wrong_method_404(self, server: Any) -> None:
         art = _make_artifact(server)
-        status, body = _decode_http(_call(
-            server, path=f"/ext/artifacts/{art['id']}/versions", method="POST",
-        ))
+        status, body = _decode_http(
+            _call(
+                server,
+                path=f"/ext/artifacts/{art['id']}/versions",
+                method="POST",
+            )
+        )
         assert status == 404
 
     def test_invalid_json_body_500(self, server: Any) -> None:
@@ -524,10 +635,14 @@ class TestDispatch:
         assert result["data"]["status"] == 500
 
     def test_plain_json_body_decoded(self, server: Any) -> None:
-        status, body = _decode_http(_call(
-            server, path="/ext/artifacts", method="POST",
-            raw_body='{"task_id": "plain", "title": "t", "content": "c"}',
-        ))
+        status, body = _decode_http(
+            _call(
+                server,
+                path="/ext/artifacts",
+                method="POST",
+                raw_body='{"task_id": "plain", "title": "t", "content": "c"}',
+            )
+        )
         assert status == 200
         assert body["task_id"] == "plain"
 
