@@ -11,7 +11,8 @@ routes_config.py llm 段语义 + 新 http.handle 分发层）
    providers（GET/POST/PUT/DELETE）、provider-types、remote-models
    （404/400/502 错误映射）
 3. LLM 配置写入语义：models/providers 写入 llm.yaml、明文 api_key 落 .env
-   并改写 ${VAR} 占位符、mask 值回传剔除、409 重复创建防护、404 detail 形态
+   并改写 ${VAR} 占位符、mask 值回传剔除、409 重复创建防护、400 必填字段
+   校验（不落盘）、404 detail 形态
 4. plugin.json http_endpoints 声明 ↔ 分发路径对齐断言（19 端点、auth=user、
    timeout 沿用源值）
 
@@ -532,6 +533,89 @@ def test_post_provider_dup_409(server: Any, llm_yaml: Path) -> None:
     )
     assert status == 409
     assert body == {"detail": "提供商 'openai' 已存在"}
+
+
+# ── config/llm 段：必填字段校验（镜像源 pydantic 必填语义，缺字段不落盘）──
+
+
+def test_post_model_missing_models_field_400(server: Any, llm_yaml: Path) -> None:
+    """POST /config/llm/models 缺 models 字段 → 400，不写盘（源 ModelAddRequest 必填）。"""
+    before = llm_yaml.read_text(encoding="utf-8")
+    status, body = _decode_http(
+        _call(
+            server,
+            path="/ext/llm_service/config/llm/models",
+            method="POST",
+            raw_body=_b64({}),
+        )
+    )
+    assert status == 400
+    assert "models" in body["detail"]
+    assert llm_yaml.read_text(encoding="utf-8") == before
+
+
+def test_put_model_missing_config_400(server: Any, llm_yaml: Path) -> None:
+    """PUT /config/llm/models/{id} 缺 config 字段 → 400，不写盘（源 ModelConfigUpdateRequest 必填）。"""
+    before = llm_yaml.read_text(encoding="utf-8")
+    status, body = _decode_http(
+        _call(
+            server,
+            path="/ext/llm_service/config/llm/models/reason-m1",
+            method="PUT",
+            raw_body=_b64({}),
+        )
+    )
+    assert status == 400
+    assert "config" in body["detail"]
+    assert llm_yaml.read_text(encoding="utf-8") == before
+
+
+def test_post_provider_missing_fields_400(server: Any, llm_yaml: Path, tmp_path: Path) -> None:
+    """POST /config/llm/providers 缺 provider_id/config → 400，不落 yaml/env。
+
+    防回归：空 body 曾会把空 provider 写进 llm.yaml（源 ProviderCreateRequest 必填语义）。
+    """
+    before = llm_yaml.read_text(encoding="utf-8")
+    status, body = _decode_http(
+        _call(
+            server,
+            path="/ext/llm_service/config/llm/providers",
+            method="POST",
+            raw_body=_b64({}),
+        )
+    )
+    assert status == 400
+    assert "provider_id" in body["detail"]
+    assert llm_yaml.read_text(encoding="utf-8") == before
+    assert not (tmp_path / ".env").exists()
+
+    status, body = _decode_http(
+        _call(
+            server,
+            path="/ext/llm_service/config/llm/providers",
+            method="POST",
+            raw_body=_b64({"provider_id": "np2", "config": "not-a-dict"}),
+        )
+    )
+    assert status == 400
+    assert "config" in body["detail"]
+    assert llm_yaml.read_text(encoding="utf-8") == before
+
+
+def test_put_provider_missing_config_400(server: Any, llm_yaml: Path) -> None:
+    """PUT /config/llm/providers/{id} 缺 config 字段 → 400，不写盘（源 ProviderConfigUpdateRequest 必填）。"""
+    before = llm_yaml.read_text(encoding="utf-8")
+    status, body = _decode_http(
+        _call(
+            server,
+            path="/ext/llm_service/config/llm/providers/openai",
+            method="PUT",
+            raw_body=_b64({}),
+        )
+    )
+    assert status == 400
+    assert "config" in body["detail"]
+    assert llm_yaml.read_text(encoding="utf-8") == before
 
 
 def test_put_provider(server: Any, llm_yaml: Path) -> None:

@@ -387,11 +387,14 @@ def add_model(body: dict[str, Any]) -> dict[str, Any]:
     """添加模型。
 
     Raises:
+        ConfigAPIError 400: models 字段缺失或类型错误（镜像源 ModelAddRequest 必填语义）
         ConfigAPIError 409: model_id 已存在（避免静默覆盖既有配置）
     """
     data = _read_yaml(_LLM_YAML)
     models = data.setdefault("models", {})
-    model_entries = body.get("models") or {}
+    model_entries = body.get("models")
+    if not isinstance(model_entries, dict):
+        raise ConfigAPIError(status_code=400, detail="models 字段必填（模型 ID → 配置字典）")
     # 写入前逐个检测：已存在的 model_id 视为冲突，避免静默覆盖既有配置。
     for model_id in model_entries:
         if model_id in models:
@@ -408,13 +411,17 @@ def update_model(model_id: str, body: dict[str, Any]) -> dict[str, Any]:
     """更新模型配置（config 字段透传合并）。
 
     Raises:
+        ConfigAPIError 400: config 字段缺失或类型错误（镜像源 ModelConfigUpdateRequest 必填语义）
         ConfigAPIError 404: 模型不存在
     """
     data = _read_yaml(_LLM_YAML)
     models = data.setdefault("models", {})
+    update_config = body.get("config")
+    if not isinstance(update_config, dict):
+        raise ConfigAPIError(status_code=400, detail="config 字段必填（模型配置字典）")
     if model_id not in models:
         raise ConfigAPIError(status_code=404, detail=f"模型 '{model_id}' 不存在")
-    models[model_id].update(body.get("config") or {})
+    models[model_id].update(update_config)
     _write_yaml(_LLM_YAML, data)
     _invalidate_llm_caches()
     logger.info("更新模型配置: %s", model_id)
@@ -446,15 +453,20 @@ def add_provider(body: dict[str, Any]) -> dict[str, Any]:
     占位符（见 ``_extract_api_key_to_env``）。
 
     Raises:
+        ConfigAPIError 400: provider_id/config 缺失或类型错误（镜像源 ProviderCreateRequest 必填语义）
         ConfigAPIError 409: provider_id 已存在
     """
     data = _read_yaml(_LLM_YAML)
     providers = data.setdefault("providers", {})
-    provider_id = body.get("provider_id", "")
+    provider_id = body.get("provider_id")
+    if not isinstance(provider_id, str):
+        raise ConfigAPIError(status_code=400, detail="provider_id 必填（提供商唯一标识）")
+    provider_config = copy.deepcopy(body.get("config"))
+    if not isinstance(provider_config, dict):
+        raise ConfigAPIError(status_code=400, detail="config 字段必填（提供商配置字典）")
     if provider_id in providers:
         raise ConfigAPIError(status_code=409, detail=f"提供商 '{provider_id}' 已存在")
 
-    provider_config = copy.deepcopy(body.get("config") or {})
     _extract_api_key_to_env(provider_id, provider_config)
 
     providers[provider_id] = provider_config
@@ -475,13 +487,16 @@ def update_provider(provider_id: str, body: dict[str, Any]) -> dict[str, Any]:
     只改并发/RPM 时不带 api_key，合并保证磁盘上的占位符不被清掉。
 
     Raises:
+        ConfigAPIError 400: config 字段缺失或类型错误（镜像源 ProviderConfigUpdateRequest 必填语义）
         ConfigAPIError 404: 提供商不存在
     """
     data = _read_yaml(_LLM_YAML)
     providers = data.get("providers", {})
+    provider_config = copy.deepcopy(body.get("config"))
+    if not isinstance(provider_config, dict):
+        raise ConfigAPIError(status_code=400, detail="config 字段必填（提供商配置字典）")
     if provider_id not in providers:
         raise ConfigAPIError(status_code=404, detail=f"提供商 '{provider_id}' 不存在")
-    provider_config = copy.deepcopy(body.get("config") or {})
     _extract_api_key_to_env(provider_id, provider_config)
 
     # keys 条目合并：按索引把提交项覆盖到磁盘现状上（api_key 等
