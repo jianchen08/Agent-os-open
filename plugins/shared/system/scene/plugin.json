@@ -144,10 +144,109 @@
           "properties": {},
           "type": "object"
         }
+      },
+      {
+        "name": "http.handle",
+        "description": "HTTP endpoint handler for /ext/scene_service/** (scenes domain, channel_api 拆迁批次 1)",
+        "input_schema": {
+          "properties": {
+            "path": {
+              "type": "string"
+            },
+            "method": {
+              "type": "string"
+            },
+            "plugin_id": {
+              "type": "string"
+            },
+            "raw_body": {
+              "type": "string"
+            },
+            "headers": {
+              "type": "object"
+            },
+            "query": {
+              "type": "object"
+            }
+          },
+          "type": "object"
+        }
       }
     ]
   },
   "permissions": {},
   "priority": 50,
-  "requires_content": 5
+  "requires_content": 5,
+  "http_endpoints": [
+    {
+      "route_id": "scenes_create",
+      "method": "POST",
+      "path": "/ext/scene_service/scenes",
+      "auth": "user",
+      "handler_capability": "http.handle",
+      "timeout_ms": 5000,
+      "max_concurrency": 4,
+      "description": "创建场景，可基于模板（body: name/description/template_id/layout/widgets——原 POST /ext/channel_api/scenes 语义）"
+    },
+    {
+      "route_id": "scenes_list",
+      "method": "GET",
+      "path": "/ext/scene_service/scenes",
+      "auth": "user",
+      "handler_capability": "http.handle",
+      "timeout_ms": 5000,
+      "max_concurrency": 8,
+      "description": "列出所有场景（原 GET /ext/channel_api/scenes 语义）"
+    },
+    {
+      "route_id": "scenes_templates",
+      "method": "GET",
+      "path": "/ext/scene_service/scenes/templates",
+      "auth": "user",
+      "handler_capability": "http.handle",
+      "timeout_ms": 5000,
+      "max_concurrency": 8,
+      "description": "获取场景模板列表（原 GET /ext/channel_api/scenes/templates 语义）"
+    },
+    {
+      "route_id": "scene_get",
+      "method": "GET",
+      "path": "/ext/scene_service/scenes/{scene_id}",
+      "auth": "user",
+      "handler_capability": "http.handle",
+      "timeout_ms": 5000,
+      "max_concurrency": 8,
+      "description": "获取场景详情（原 GET /ext/channel_api/scenes/{scene_id} 语义）"
+    },
+    {
+      "route_id": "scene_update",
+      "method": "PUT",
+      "path": "/ext/scene_service/scenes/{scene_id}",
+      "auth": "user",
+      "handler_capability": "http.handle",
+      "timeout_ms": 5000,
+      "max_concurrency": 4,
+      "description": "更新场景属性（body: name/description——原 PUT /ext/channel_api/scenes/{scene_id} 语义）"
+    },
+    {
+      "route_id": "scene_delete",
+      "method": "DELETE",
+      "path": "/ext/scene_service/scenes/{scene_id}",
+      "auth": "user",
+      "handler_capability": "http.handle",
+      "timeout_ms": 5000,
+      "max_concurrency": 4,
+      "description": "删除场景（原 DELETE /ext/channel_api/scenes/{scene_id} 语义）"
+    },
+    {
+      "route_id": "scene_switch",
+      "method": "POST",
+      "path": "/ext/scene_service/scenes/{scene_id}/switch",
+      "auth": "user",
+      "handler_capability": "http.handle",
+      "timeout_ms": 5000,
+      "max_concurrency": 4,
+      "description": "切换活跃场景（原 POST /ext/channel_api/scenes/{scene_id}/switch 语义）"
+    }
+  ]
 }

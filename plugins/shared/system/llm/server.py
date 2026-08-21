@@ -8,10 +8,19 @@
 - llm.complete: 统一 LLM 调用（非流式），支持 messages + tools
 - llm.health_check: 检查模型是否可用
 
-[来源: docs/working/module_migration_plan.md §六 P2 迁移]
+channel_api 退役批次 1 起同时承载 thinking-mode 域与 config/llm 段 HTTP 面：
+``http.handle`` 按 path 分发（协议与 agent_manager/monitoring 同款），
+plugin.json ``http_endpoints`` 声明（/ext/llm_service/thinking-mode/** 与
+/ext/llm_service/config/llm/**）；业务函数在 ``routes_thinking_mode.py``
+与 ``routes_llm_config.py``（原 channel_api 同名路由自持迁移）。
+
+[来源: docs/working/module_migration_plan.md §六 P2 迁移；
+docs/working/channel_api插件拆迁方案_20260821.md 批次 1]
 """
 from __future__ import annotations
 
+import base64
+import json
 import logging
 import os
 import sys
@@ -185,6 +194,162 @@ async def llm_health_check(model: str) -> dict[str, Any]:
     except Exception as exc:
         logger.warning("Health check failed for %s: %s", model, exc)
         return {"healthy": False, "model": model, "error": str(exc)}
+
+
+# ══ http.handle 响应封装（内核 HttpHandleResponse 约定，与 workspace/monitoring 同款）══
+
+
+def _json_response(payload: Any, status: int = 200) -> dict[str, Any]:
+    """包成内核期望的 HttpHandleResponse（body base64）。"""
+    body_str = json.dumps(payload, default=str, ensure_ascii=False)
+    body_b64 = base64.b64encode(body_str.encode("utf-8")).decode("ascii")
+    return {
+        "status": status,
+        "headers": {"Content-Type": "application/json; charset=utf-8"},
+        "body": body_b64,
+        "body_encoding": "base64",
+    }
+
+
+def _ok(data: Any) -> dict[str, Any]:
+    return {"success": True, "data": data}
+
+
+def _error(message: str, status: int = 503) -> dict[str, Any]:
+    return {"success": False, "error": message, "data": _json_response({"error": message}, status)}
+
+
+def _decode_body(raw_body: str) -> dict[str, Any]:
+    """解码 http.handle 的 raw_body（base64 或明文 JSON）为 dict。"""
+    if not raw_body:
+        return {}
+    try:
+        try:
+            decoded = base64.b64decode(raw_body).decode("utf-8")
+            if not decoded.lstrip().startswith(("{", "[")):
+                decoded = raw_body
+        except Exception:  # noqa: BLE001
+            decoded = raw_body
+        return json.loads(decoded) if decoded.strip() else {}
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"invalid JSON body: {exc}") from exc
+
+
+# ══ 域分发（channel_api 退役批次 1：thinking-mode + config/llm 迁入）══
+
+_THINKING_MODE_PREFIX = "/ext/llm_service/thinking-mode"
+_CONFIG_LLM_PREFIX = "/ext/llm_service/config/llm"
+
+
+def _api_error_response(exc: Exception) -> dict[str, Any]:
+    """把域业务异常（含 status_code + message/detail）转 HTTP 响应（404/400/409/502）。"""
+    status = int(getattr(exc, "status_code", 500) or 500)
+    message = getattr(exc, "message", None) or getattr(exc, "detail", None) or str(exc)
+    return _ok(_json_response({"detail": message}, status))
+
+
+@plugin.tool(
+    name="http.handle",
+    schema={
+        "type": "object",
+        "properties": {
+            "path": {"type": "string"},
+            "method": {"type": "string"},
+            "plugin_id": {"type": "string"},
+            "raw_body": {"type": "string"},
+            "headers": {"type": "object"},
+            "query": {"type": "object"},
+        },
+    },
+    description="HTTP endpoint handler for /ext/llm_service/** (thinking-mode + config/llm domains, channel_api 拆迁批次 1)",
+)
+async def http_handle(
+    path: str = "",
+    method: str = "GET",
+    plugin_id: str = "",
+    raw_body: str = "",
+    headers: dict[str, str] | None = None,
+    query: dict[str, str] | None = None,
+) -> dict[str, Any]:
+    """按 path 分发：thinking-mode 域 6 端点 + config/llm 段 13 端点。
+
+    路径语义与原 /ext/channel_api/thinking-mode/** 与 /ext/channel_api/
+    config/llm/** 逐项对齐（前端消费同一响应形态）；auth 由 http_endpoints
+    auth=user 声明（dispatcher 层），handler 不读 _user。业务异常
+    （status_code 属性）转对应 HTTP 状态，错误 body 形态与 FastAPI 版一致
+    （``{"detail": ...}``）。
+    """
+    try:
+        # ── thinking-mode 域 ──
+        if path.startswith(_THINKING_MODE_PREFIX):
+            import routes_thinking_mode as rtm  # noqa: PLC0415
+
+            sub = path[len(_THINKING_MODE_PREFIX):]
+            if sub == "/healthz" and method == "GET":
+                return _ok(_json_response(rtm.health()))
+            if sub == "/models" and method == "GET":
+                return _ok(_json_response(rtm.list_models()))
+            if sub.startswith("/models/") and method == "GET":
+                model_name = sub[len("/models/"):]
+                return _ok(_json_response(rtm.get_model_info(model_name)))
+            if sub.startswith("/check/") and method == "GET":
+                model_name = sub[len("/check/"):]
+                return _ok(_json_response(rtm.check_support(model_name)))
+            if sub == "/switch" and method == "POST":
+                return _ok(_json_response(rtm.switch_mode(_decode_body(raw_body))))
+            if sub == "/recommendations" and method == "POST":
+                recs_body = _decode_body(raw_body) or None
+                return _ok(_json_response(rtm.recommendations(recs_body)))
+
+            logger.warning("llm http.handle: no thinking-mode route for sub=%s method=%s", sub, method)
+            return _ok(_json_response({"error": "not found", "path": path}, 404))
+
+        # ── config/llm 段 ──
+        if path.startswith(_CONFIG_LLM_PREFIX):
+            import routes_llm_config as rlc  # noqa: PLC0415
+
+            sub = path[len(_CONFIG_LLM_PREFIX):]  # "" / "/providers" / "/models/xxx" ...
+            if sub == "" and method == "GET":
+                return _ok(_json_response(rlc.get_llm_config()))
+            if sub == "/providers" and method == "GET":
+                return _ok(_json_response(rlc.get_providers()))
+            if sub == "/providers" and method == "POST":
+                return _ok(_json_response(rlc.add_provider(_decode_body(raw_body))))
+            if sub == "/provider-types" and method == "GET":
+                return _ok(_json_response(rlc.get_provider_types()))
+            if sub.startswith("/providers/") and sub.endswith("/remote-models") and method == "GET":
+                provider_id = sub[len("/providers/"):-len("/remote-models")]
+                return _ok(_json_response(rlc.get_remote_models(provider_id)))
+            if sub.startswith("/providers/") and method == "PUT":
+                provider_id = sub[len("/providers/"):]
+                return _ok(_json_response(rlc.update_provider(provider_id, _decode_body(raw_body))))
+            if sub.startswith("/providers/") and method == "DELETE":
+                provider_id = sub[len("/providers/"):]
+                return _ok(_json_response(rlc.delete_provider(provider_id)))
+            if sub == "/models" and method == "GET":
+                return _ok(_json_response(rlc.get_models()))
+            if sub == "/models" and method == "POST":
+                return _ok(_json_response(rlc.add_model(_decode_body(raw_body))))
+            if sub.startswith("/models/") and method == "PUT":
+                model_id = sub[len("/models/"):]
+                return _ok(_json_response(rlc.update_model(model_id, _decode_body(raw_body))))
+            if sub.startswith("/models/") and method == "DELETE":
+                model_id = sub[len("/models/"):]
+                return _ok(_json_response(rlc.delete_model(model_id)))
+            if sub == "/defaults" and method == "GET":
+                return _ok(_json_response(rlc.get_defaults()))
+            if sub == "/defaults" and method == "PUT":
+                return _ok(_json_response(rlc.save_defaults(_decode_body(raw_body))))
+
+            logger.warning("llm http.handle: no config/llm route for sub=%s method=%s", sub, method)
+            return _ok(_json_response({"error": "not found", "path": path}, 404))
+
+        return _ok(_json_response({"error": "not found", "path": path}, 404))
+    except Exception as exc:  # noqa: BLE001
+        if hasattr(exc, "status_code"):
+            return _api_error_response(exc)
+        logger.error("llm http.handle 未预期错误: %s", exc, exc_info=True)
+        return _ok(_json_response({"error": "internal server error", "detail": str(exc)}, 500))
 
 
 if __name__ == "__main__":

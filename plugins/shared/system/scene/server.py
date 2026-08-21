@@ -4,10 +4,18 @@
 老代码从 0.1 src/scene/ 原封不动复制到本目录（平铺），
 本文件只做接口适配：调用老代码逻辑，通过 MCP SDK 暴露为工具。
 
-[来源: docs/working/module_migration_plan.md §六 P2 scene]
+channel_api 退役批次 1 起同时承载 scenes 域 HTTP 面：
+``http.handle`` 按 path 分发（协议与 agent_manager/monitoring 同款），
+plugin.json ``http_endpoints`` 声明（/ext/scene_service/scenes/**）；
+业务函数在 ``routes_scene.py``（原 channel_api/routes_scene.py 自持迁移）。
+
+[来源: docs/working/module_migration_plan.md §六 P2 scene；
+docs/working/channel_api插件拆迁方案_20260821.md 批次 1]
 """
 from __future__ import annotations
 
+import base64
+import json
 import logging
 import os
 import sys
@@ -18,11 +26,11 @@ _SYSTEM_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 if _SYSTEM_DIR not in sys.path:
     sys.path.insert(0, _SYSTEM_DIR)
 
-# 直接导入同目录老代码
-from scene.manager import SceneManager
-from scene.templates import list_templates
+# 直接导入同目录老代码（sys.path 自举后导入——E402 依 workspace 迁移同款）
+from scene.manager import SceneManager  # noqa: E402
+from scene.templates import list_templates  # noqa: E402
 
-from agentos_plugin_sdk import AgentOSPlugin
+from agentos_plugin_sdk import AgentOSPlugin  # noqa: E402
 
 logger = logging.getLogger(__name__)
 plugin = AgentOSPlugin("scene_service")
@@ -244,6 +252,122 @@ async def scene_list_templates() -> dict[str, Any]:
         "templates": [t.model_dump(mode="json") for t in templates],
         "count": len(templates),
     }
+
+
+# ══ http.handle 响应封装（内核 HttpHandleResponse 约定，与 workspace/monitoring 同款）══
+
+
+def _json_response(payload: Any, status: int = 200) -> dict[str, Any]:
+    """包成内核期望的 HttpHandleResponse（body base64）。"""
+    body_str = json.dumps(payload, default=str, ensure_ascii=False)
+    body_b64 = base64.b64encode(body_str.encode("utf-8")).decode("ascii")
+    return {
+        "status": status,
+        "headers": {"Content-Type": "application/json; charset=utf-8"},
+        "body": body_b64,
+        "body_encoding": "base64",
+    }
+
+
+def _ok(data: Any) -> dict[str, Any]:
+    return {"success": True, "data": data}
+
+
+def _error(message: str, status: int = 503) -> dict[str, Any]:
+    return {"success": False, "error": message, "data": _json_response({"error": message}, status)}
+
+
+def _decode_body(raw_body: str) -> dict[str, Any]:
+    """解码 http.handle 的 raw_body（base64 或明文 JSON）为 dict。"""
+    if not raw_body:
+        return {}
+    try:
+        try:
+            decoded = base64.b64decode(raw_body).decode("utf-8")
+            if not decoded.lstrip().startswith(("{", "[")):
+                decoded = raw_body
+        except Exception:  # noqa: BLE001
+            decoded = raw_body
+        return json.loads(decoded) if decoded.strip() else {}
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"invalid JSON body: {exc}") from exc
+
+
+# ══ scenes 域（channel_api 退役批次 1：routes_scene.py handler 迁入）══
+
+_PREFIX = "/ext/scene_service/scenes"
+
+
+@plugin.tool(
+    name="http.handle",
+    schema={
+        "type": "object",
+        "properties": {
+            "path": {"type": "string"},
+            "method": {"type": "string"},
+            "plugin_id": {"type": "string"},
+            "raw_body": {"type": "string"},
+            "headers": {"type": "object"},
+            "query": {"type": "object"},
+        },
+    },
+    description="HTTP endpoint handler for /ext/scene_service/** (scenes domain, channel_api 拆迁批次 1)",
+)
+async def http_handle(
+    path: str = "",
+    method: str = "GET",
+    plugin_id: str = "",
+    raw_body: str = "",
+    headers: dict[str, str] | None = None,
+    query: dict[str, str] | None = None,
+) -> dict[str, Any]:
+    """按 path 分发到 scenes 域 7 端点（语义对齐原 /ext/channel_api/scenes/**）。
+
+    业务函数全 dict body；path-param {scene_id}；auth 由 http_endpoints
+    auth=user 声明（dispatcher 层），handler 不读 _user。业务异常
+    SceneHTTPError（status_code）转对应 HTTP 状态，404/400 body 形态与
+    FastAPI 版一致（``{"detail": ...}``）。
+    """
+    if not path.startswith(_PREFIX):
+        return _ok(_json_response({"error": "not a scenes path", "path": path}, 404))
+
+    import routes_scene as rsc  # noqa: PLC0415
+
+    sub = path[len(_PREFIX):]  # "" / "/templates" / "/{scene_id}" / "/{scene_id}/switch"
+
+    try:
+        # GET "" (list)
+        if sub in ("", "/") and method == "GET":
+            return _ok(_json_response(rsc.list_scenes()))
+        # POST "" (create, dict body)
+        if sub in ("", "/") and method == "POST":
+            return _ok(_json_response(rsc.create_scene(_decode_body(raw_body))))
+        # GET /templates
+        if sub == "/templates" and method == "GET":
+            return _ok(_json_response(rsc.get_templates()))
+        # /{scene_id} 系列
+        if sub.startswith("/") and "/" not in sub[1:]:
+            scene_id = sub[1:]
+            if method == "GET":
+                return _ok(_json_response(rsc.get_scene(scene_id)))
+            if method == "PUT":
+                return _ok(_json_response(rsc.update_scene(scene_id, _decode_body(raw_body))))
+            if method == "DELETE":
+                return _ok(_json_response(rsc.delete_scene(scene_id)))
+        # /{scene_id}/switch
+        if sub.endswith("/switch") and method == "POST":
+            scene_id = sub[1:].rsplit("/switch", 1)[0]
+            return _ok(_json_response(rsc.switch_scene(scene_id)))
+
+        logger.warning("scenes http.handle: no route for sub=%s method=%s", sub, method)
+        return _ok(_json_response({"error": "not found", "path": path}, 404))
+    except Exception as exc:  # noqa: BLE001
+        if hasattr(exc, "status_code"):
+            status = int(getattr(exc, "status_code", 500) or 500)
+            message = getattr(exc, "message", None) or str(exc)
+            return _ok(_json_response({"detail": message}, status))
+        logger.error("scenes http.handle 未预期错误: %s", exc, exc_info=True)
+        return _ok(_json_response({"error": "internal server error", "detail": str(exc)}, 500))
 
 
 if __name__ == "__main__":
