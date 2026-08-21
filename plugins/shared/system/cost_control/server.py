@@ -4,18 +4,29 @@
 老代码从 0.1 src/cost_control/ 原封不动复制到本目录（平铺），
 本文件只做接口适配：调用老代码逻辑，通过 MCP SDK 暴露为工具。
 
+channel_api 退役批次 1（config/cost-control 域 → cost_control 插件）：
+新增 /ext/cost_control/config/cost-control GET/PUT —— 成本控制 **YAML 配置
+全文**读写（config/system/cost_control.yaml，前端 services/api/config.ts 的
+CostControlConfigResponse 嵌套形态消费），与既有 /ext/cost_control/config
+（展平形态，前端 costControl.ts 消费）并存，语义逐项对齐 channel_api
+routes_config.py 的 cost-control 段（_DEFAULT_COST_CONTROL 兜底 + 全文覆写）。
+
 [来源: docs/working/module_migration_plan.md §5.1]
 """
 from __future__ import annotations
 
 import base64
+import copy
 import datetime
 import json
 import logging
 import os
 import sys
 from dataclasses import asdict
+from pathlib import Path
 from typing import Any
+
+import yaml
 
 sys.path.insert(0, os.path.dirname(__file__))  # 让同目录老代码的导入可用
 
@@ -230,6 +241,65 @@ async def cost_control_reset_session_budget(session_id: str) -> dict[str, Any]:
 # 字段形状严格对齐 frontend/src/services/api/costControl.ts 的 TS 类型。
 
 
+# ── 成本控制 YAML 配置全文读写（批次1 迁入，源 channel_api routes_config.py）──
+# 注意与插件内 CostControlConfig（config/cost_control.yaml via config_center，
+# global_budget 字段）不同：本组端点读写 **config/system/cost_control.yaml**
+# （channel_api 原路径不变，global_config 字段），是前端 settings 页的配置编辑面。
+
+
+def _resolve_project_root() -> Path:
+    """向上查找项目根（含 config/ + config/models/ 的目录）。
+
+    与 channel_api routes_config._resolve_project_root 同构：按目录特征探测，
+    不硬编码 parent×N（模块相对项目根的深度随布局变化不可靠）。
+    """
+    here = Path(__file__).resolve().parent
+    for candidate in [here, *here.parents]:
+        if (candidate / "config").is_dir() and (candidate / "config" / "models").is_dir():
+            return candidate
+    return Path(__file__).resolve().parent.parent.parent.parent
+
+
+_COST_CONTROL_YAML = _resolve_project_root() / "config" / "system" / "cost_control.yaml"
+
+_DEFAULT_COST_CONTROL: dict[str, Any] = {
+    "enabled": True,
+    "global_config": {
+        "daily_token_limit": 1000000,
+        "monthly_token_limit": 30000000,
+        "per_task_token_limit": 200000,
+        "per_session_token_limit": 500000,
+    },
+    "alerts": {
+        "warning_threshold": 70,
+        "critical_threshold": 90,
+        "exhausted_threshold": 100,
+    },
+    "protection": {
+        "auto_save_at_warning": True,
+        "auto_pause_at_critical": True,
+        "auto_stop_at_exhausted": True,
+    },
+}
+
+
+def _read_cost_control_yaml() -> dict[str, Any]:
+    """读成本控制 YAML；文件不存在时返回默认值（对齐 channel_api 语义）。"""
+    if _COST_CONTROL_YAML.exists():
+        with open(_COST_CONTROL_YAML, encoding="utf-8") as f:
+            data = yaml.safe_load(f) or {}
+        if isinstance(data, dict):
+            return data
+    return copy.deepcopy(_DEFAULT_COST_CONTROL)
+
+
+def _write_cost_control_yaml(data: dict[str, Any]) -> None:
+    """全文覆写成本控制 YAML（通道与 channel_api 原 _write_yaml 一致）。"""
+    _COST_CONTROL_YAML.parent.mkdir(parents=True, exist_ok=True)
+    with open(_COST_CONTROL_YAML, "w", encoding="utf-8") as f:
+        yaml.dump(data, f, allow_unicode=True, sort_keys=False, default_flow_style=False)
+
+
 def _json_response(payload: Any, status: int = 200) -> dict[str, Any]:
     """把任意 JSON 可序列化对象包成内核期望的 HttpHandleResponse（body base64）。"""
     body_str = json.dumps(payload, default=str, ensure_ascii=False)
@@ -250,6 +320,24 @@ def _ok(data: Any) -> dict[str, Any]:
 def _error(message: str, status: int = 503) -> dict[str, Any]:
     """错误响应：{success:false, error}。503 表示 sidecar 未就绪。"""
     return {"success": False, "error": message, "data": _json_response({"error": message}, status)}
+
+
+def _decode_body(raw_body: str) -> dict[str, Any]:
+    """解码 http.handle 的 raw_body（base64 → JSON dict；空 body 返回 {}）。"""
+    if not raw_body:
+        return {}
+    decoded = raw_body
+    try:
+        candidate = base64.b64decode(raw_body).decode("utf-8")
+        if candidate.lstrip().startswith(("{", "[")):
+            decoded = candidate
+    except Exception:  # noqa: BLE001 —— 非 base64 明文 body 直接按 JSON 解
+        pass
+    try:
+        parsed = json.loads(decoded) if decoded.strip() else {}
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"invalid JSON body: {exc}") from exc
+    return parsed if isinstance(parsed, dict) else {}
 
 
 def _reshape_usage_statistics(raw: dict[str, Any]) -> dict[str, Any]:
@@ -349,11 +437,27 @@ async def http_handle(
     headers: dict[str, str] | None = None,
     query: dict[str, str] | None = None,
 ) -> dict[str, Any]:
-    """按 path 分发到 5 个 cost 端点。
+    """按 path 分发到 7 个子端点（5 既有 + 2 批次1 迁入的 YAML 配置读写）。
 
     签名覆盖 HttpHandleRequest 全部字段（SDK 的 td.handler(**arguments) 展开）。
-    BudgetManager 未初始化时返回 503（不崩，前端 axios 会重试/降级）。
+    BudgetManager 未初始化时返回 503（不崩，前端 axios 会重试/降级）——
+    但 YAML 配置读写不依赖 BudgetManager，先于初始化守卫分发。
     """
+    # ── 成本控制 YAML 配置全文读写（批次1 迁入；不依赖 BudgetManager）──
+    if path == "/ext/cost_control/config/cost-control" and method == "GET":
+        return _ok(_json_response(_read_cost_control_yaml()))
+
+    if path == "/ext/cost_control/config/cost-control" and method == "PUT":
+        try:
+            body = _decode_body(raw_body)
+        except ValueError as exc:
+            return _ok(_json_response({"error": str(exc)}, 400))
+        if not body:
+            return _ok(_json_response({"error": "配置不能为空"}, 400))
+        _write_cost_control_yaml(body)
+        logger.info("cost-control YAML 配置已更新: %s", _COST_CONTROL_YAML)
+        return _ok(_json_response(body))
+
     global _budget_manager
     if _budget_manager is None:
         logger.warning("http.handle called but BudgetManager not initialized (on_load pending)")

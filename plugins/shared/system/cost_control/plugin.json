@@ -278,6 +278,26 @@
       "timeout_ms": 5000,
       "max_concurrency": 4,
       "description": "Reset global budget tracking"
+    },
+    {
+      "route_id": "cost_config_file_get",
+      "method": "GET",
+      "path": "/ext/cost_control/config/cost-control",
+      "auth": "user",
+      "handler_capability": "http.handle",
+      "timeout_ms": 5000,
+      "max_concurrency": 8,
+      "description": "读取成本控制 YAML 配置全文（config/system/cost_control.yaml，嵌套 CostControlConfigResponse 形态，前端 config.ts 消费——channel_api 批次1 迁入，原 GET /ext/channel_api/config/cost-control）"
+    },
+    {
+      "route_id": "cost_config_file_put",
+      "method": "PUT",
+      "path": "/ext/cost_control/config/cost-control",
+      "auth": "user",
+      "handler_capability": "http.handle",
+      "timeout_ms": 5000,
+      "max_concurrency": 4,
+      "description": "写入成本控制 YAML 配置全文（body=完整嵌套配置；channel_api 批次1 迁入，原 PUT /ext/channel_api/config/cost-control）"
     }
   ],
   "ui_schema": {
