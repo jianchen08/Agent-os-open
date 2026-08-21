@@ -167,12 +167,11 @@ class TestPackageDirBoundary:
 
     async def test_plugins_dir_allowed_without_env(self, monkeypatch) -> None:
         monkeypatch.delenv("PYTHON_PACKAGER_ALLOWED_DIRS", raising=False)
-        # server.py 自身目录在 plugins/shared/system/python_packager → 边界内放行，
-        # 报错应来自"非 uv 包"而非"不在允许范围"。
+        # server.py 自身目录在 plugins/shared/system/python_packager → 边界内放行。
+        # 批 C venv 化（1b31d7ab）后本插件自身即是合法 uv 包（pyproject+uv.lock
+        # 在位），status 应成功；无论环境差异，错误绝不能是"不在允许范围"（越界）。
         res = await SERVER.status(str(_PLUGIN_DIR))
-        assert not res["ok"]
-        assert "不在允许范围" not in res["error"], res
-        assert "不是 uv 包" in res["error"], res
+        assert "不在允许范围" not in (res.get("error") or ""), res
 
     async def test_outside_plugins_denied(self, tmp_path, monkeypatch) -> None:
         monkeypatch.delenv("PYTHON_PACKAGER_ALLOWED_DIRS", raising=False)

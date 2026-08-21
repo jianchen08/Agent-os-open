@@ -33,6 +33,23 @@ if str(_PLUGIN_DIR) not in sys.path:
     sys.path.insert(0, str(_PLUGIN_DIR))
 
 
+@pytest.fixture(autouse=True)
+def _restore_performance_monitor_module():
+    """用例后还原 performance_monitor 的 sys.modules 缓存。
+
+    本文件的 fake 模块只带 PerformanceMonitor 一个名字；若不清除，同进程
+    后续测试（如 test_active_requests 经 server.py 平铺 import）会拿到残缺
+    fake 而 ERROR/断言失败——车道内实测串扰（2026-08-21 接线进插桩车道暴露）。
+    """
+    had = "performance_monitor" in sys.modules
+    saved = sys.modules.get("performance_monitor")
+    yield
+    if had:
+        sys.modules["performance_monitor"] = saved
+    else:
+        sys.modules.pop("performance_monitor", None)
+
+
 # ── 伪 performance_monitor 模块（server 懒加载路径） ──
 class FakePerformanceMonitor:
     """模拟 PerformanceMonitor 的最小接口。"""

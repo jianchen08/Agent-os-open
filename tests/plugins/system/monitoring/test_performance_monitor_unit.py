@@ -22,10 +22,30 @@ import pytest
 pytestmark = pytest.mark.unit
 
 _MON_DIR = Path(__file__).resolve().parents[4] / "plugins" / "shared" / "system" / "monitoring"
-if str(_MON_DIR) not in sys.path:
-    sys.path.insert(0, str(_MON_DIR))
 
-import performance_monitor as pm  # noqa: E402
+
+def _load_pm():
+    """唯一模块名装载 performance_monitor。
+
+    不裸名 `import performance_monitor`：那会在收集期把真模块灌进 sys.modules，
+    破坏同车道 test_monitoring.py 的 fake 注入守卫
+    （`if "performance_monitor" not in sys.modules`）——与本目录其他测试的
+    _load_* 惯例一致。
+    """
+    import importlib.util
+
+    mod_name = "performance_monitor_unit_test"
+    if mod_name in sys.modules:
+        del sys.modules[mod_name]
+    spec = importlib.util.spec_from_file_location(mod_name, _MON_DIR / "performance_monitor.py")
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[mod_name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+pm = _load_pm()
 
 
 @pytest.fixture
