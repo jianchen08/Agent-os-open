@@ -1827,8 +1827,9 @@ async def handle_http(
         if path.startswith(f"{_PREFIX}/projects"):
             sub = path[len(f"{_PREFIX}/projects"):]
             if sub in ("", "/") and method == "GET":
+                limit = _qint(q, "limit", 20)
                 return _ok(_json_response(await list_projects(
-                    limit=_qint(q, "limit", 20) or 20,
+                    limit=limit if limit is not None else 20,
                     offset=_qint(q, "offset", 0) or 0,
                     page=_qint(q, "page", None),
                     status=_qopt(q, "status"),
@@ -1859,12 +1860,13 @@ async def handle_http(
             sub = path[len(f"{_PREFIX}/tasks"):]
             # 顶层路由
             if sub in ("", "/") and method == "GET":
+                limit = _qint(q, "limit", 20)
                 skip = _qint(q, "skip", None) if "skip" in q else None
                 return _ok(_json_response(_pydantic_to_dict(await list_tasks(
                     status=_qopt(q, "status"),
                     priority=_qint(q, "priority", None),
                     session_id=_qopt(q, "session_id"),
-                    limit=_qint(q, "limit", 20) or 20,
+                    limit=limit if limit is not None else 20,
                     offset=_qint(q, "offset", 0) or 0,
                     skip=skip,
                     _user=caller,
