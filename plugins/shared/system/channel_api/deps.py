@@ -6,11 +6,20 @@ import logging
 import time
 from typing import Any
 
-from auth import get_current_user
 from fastapi import Header, HTTPException, Request, status
 from fastapi.responses import JSONResponse
 
 logger = logging.getLogger(__name__)
+
+
+def _legacy_get_current_user(token: str) -> dict[str, Any] | None:
+    """0.1 遗留占位：本地自持 JWT 栈（auth.py/auth_token.py）已随批次 0-3 删除。
+
+    require_auth/optional_auth 是死装饰——http.handle 直调不解析 FastAPI 依赖，
+    鉴权由内核 dispatcher 按 http_endpoints.auth 执行；恒返回 None（require_auth
+    因此恒 401），随批次 1-2 域搬迁时整体移除。
+    """
+    return None
 
 
 # 认证依赖注入
@@ -35,7 +44,7 @@ async def require_auth(
             headers={"WWW-Authenticate": "Bearer"},
         )
 
-    user_info = get_current_user(actual_token)
+    user_info = _legacy_get_current_user(actual_token)
     if user_info is None:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
@@ -52,7 +61,7 @@ async def optional_auth(
     actual_token = _extract_token(authorization)
     if not actual_token:
         return None
-    return get_current_user(actual_token)
+    return _legacy_get_current_user(actual_token)
 
 
 # 标准错误响应工具

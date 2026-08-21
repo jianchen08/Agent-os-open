@@ -76,7 +76,8 @@ def config_client(
 ) -> TestClient:
     """创建隔离的 TestClient（最小 FastAPI 应用，仅挂载 config 路由）。
 
-    - 跳过认证（patch get_current_user 让任意 token 通过）
+    - 跳过认证（patch _legacy_get_current_user 让任意 token 通过；
+      0.1 遗留 require_auth 的取用户函数已随批次 0-3 迁为同名桩）
     - llm.yaml 指向临时文件，含预置测试数据
     - .env 指向临时文件
 
@@ -84,7 +85,7 @@ def config_client(
     """
     # 跳过认证
     monkeypatch.setattr(
-        "channels.api.deps.get_current_user",
+        "channels.api.deps._legacy_get_current_user",
         lambda token: {"sub": "test-user", "username": "tester"},
     )
 

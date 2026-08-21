@@ -1,7 +1,7 @@
 """基于字典的内存存储，支持 JSON 文件持久化。
 
-从 channels.api.models 中提取的 MemoryStore 类，
-管理用户、线程、消息、记忆和会话5种资源。
+从 channels.api.models 中提取的 MemoryStore 类，管理线程、记忆和会话；
+用户/消息资源随 0.1 遗留 auth 栈与 routes_threads 批次 0-3 清理时移除。
 """
 
 from __future__ import annotations
@@ -88,25 +88,23 @@ def _parse_iso_time(s: str) -> float:
 class MemoryStore:
     """基于字典的内存存储，支持 JSON 文件持久化。
 
-    存储用户、线程等数据。初始化时创建演示用户 demo/demo123。
+    存储线程、记忆等数据；threads 字典被 routes_tasks / routes_search 直读
+    （批次 1-3 随域迁移后随 channel_api 整体退役）。
     当指定 persist_dir 时，线程和会话数据会自动持久化到 JSON 文件。
     消息数据仅存储在管道执行记录（YAML）中，不在本 store 中保存。
 
     Attributes:
-        users: 用户存储字典，key 为用户名
         threads: 线程存储字典，key 为线程 ID
         memories: 记忆存储字典，key 为记忆 ID
-        refresh_tokens: refresh token 黑名单（已登出的 token）
         sessions: SessionModel 桥接映射
     """
 
     def __init__(self, persist_dir: str | None = None) -> None:
-        """初始化内存存储，创建演示用户。
+        """初始化内存存储。
 
         Args:
             persist_dir: 持久化目录路径，为 None 则不持久化
         """
-        self.users: dict[str, dict[str, Any]] = {}
         self.threads: dict[str, dict[str, Any]] = {}
         self.memories: dict[str, dict[str, Any]] = {}
         # token 撤销统一走 TokenManager（Redis）。
@@ -115,36 +113,7 @@ class MemoryStore:
         self._persist_lock = threading.Lock()
         self._load_failed: bool = False
 
-        self._create_default_users()
         self._load_persisted_data()
-
-    def _create_default_users(self) -> None:
-        """创建默认管理员用户。
-
-        仅当显式配置了环境变量 DEFAULT_ADMIN_PASSWORD 时才创建 admin 账号，
-        密码使用 bcrypt 哈希存储，从不保存明文。
-        未配置时不创建任何默认用户，避免落入无人知晓的兜底密码陷阱。
-        """
-        import os  # noqa: PLC0415
-
-        from password import hash_password  # noqa: PLC0415
-
-        admin_password = os.environ.get("DEFAULT_ADMIN_PASSWORD")
-        if not admin_password:
-            _log.warning(
-                "未配置 DEFAULT_ADMIN_PASSWORD，不创建默认 admin 账号。"
-                "请在 .env 中设置 DEFAULT_ADMIN_PASSWORD 后重启，否则 admin 登录将失败（401）。"
-            )
-            return
-
-        self.users["admin"] = {
-            "id": "admin_user_001",
-            "username": "admin",
-            "password": hash_password(admin_password),
-            "email": "admin@example.com",
-            "role": "admin",
-            "created_at": _now_iso(),
-        }
 
     def _persist_file(self) -> str | None:
         """返回持久化文件路径。"""
@@ -224,54 +193,6 @@ class MemoryStore:
                     os.rename(tmp_path, path)  # noqa: PTH104
             except Exception as e:
                 _log.warning("持久化保存失败: %s [path=%s]", e, path)
-
-    def get_user_by_username(self, username: str) -> dict[str, Any] | None:
-        """根据用户名查找用户。"""
-        return self.users.get(username)
-
-    def get_user_by_id(self, user_id: str) -> dict[str, Any] | None:
-        """根据用户 ID 查找用户。"""
-        for user in self.users.values():
-            if user["id"] == user_id:
-                return user
-        return None
-
-    def create_user(
-        self,
-        username: str,
-        password: str,
-        email: str | None = None,
-    ) -> dict[str, Any]:
-        """创建新用户并存入内存。
-
-        密码使用 bcrypt 哈希存储，从不保存明文。
-
-        Args:
-            username: 用户名
-            password: 明文密码（将被哈希）
-            email: 可选邮箱
-
-        Returns:
-            创建的用户字典
-
-        Raises:
-            ValueError: 用户名已存在
-        """
-        if username in self.users:
-            raise ValueError(f"用户名 '{username}' 已存在")
-
-        from password import hash_password  # noqa: PLC0415
-
-        user_id = uuid.uuid4().hex[:12]
-        user = {
-            "id": user_id,
-            "username": username,
-            "password": hash_password(password),
-            "email": email,
-            "created_at": _now_iso(),
-        }
-        self.users[username] = user
-        return user
 
     def get_session(self, thread_id: str) -> SessionModel | None:
         """获取指定线程关联的会话模型。

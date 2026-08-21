@@ -16,7 +16,6 @@ from __future__ import annotations
 
 import base64
 import json
-from unittest.mock import MagicMock
 
 import pytest
 from fastapi import HTTPException
@@ -145,32 +144,29 @@ def test_require_admin_role_passes_for_admin() -> None:
 # ═══════════════════════════════════════════════════════════
 
 
+def _kernel_token(user_id: str, username: str, exp: int = 9999999999) -> str:
+    """构造内核格式 access token：base64 NO_PAD of '{type}:{user_id}:{username}:{exp}'。
+
+    与 kernel/crates/http/src/auth.rs encode_token 同构（无签名、无 role 段）。
+    """
+    payload = f"access:{user_id}:{username}:{exp}"
+    return base64.b64encode(payload.encode("utf-8")).decode("ascii").rstrip("=")
+
+
 @pytest.mark.asyncio
-async def test_http_handle_resolves_caller_and_blocks_non_admin(monkeypatch: pytest.MonkeyPatch) -> None:
-    """http_handle(users create_user)：Authorization 头解析出 role=user → 403。
+async def test_http_handle_resolves_caller_and_blocks_non_admin() -> None:
+    """http_handle(users create_user)：内核 token 解析出真实身份，无 role → 403。
 
     证明 caller 身份从 headers → http_handle → _handle_users_domain 完整透传，
-    且管理员端点据此做垂直越权检查。用 monkeypatch 把 verify_token 替换为
-    确定性返回（避免依赖 Redis 撤销检查）。
+    且管理员端点据此做垂直越权检查。批次 0 语义：内核 token 载荷无 role 段，
+    _resolve_caller 缺省 non-admin → 管理员端点默认拒绝；admin 判定随批次 2
+    users 域迁 user_admin（db-admin 凭证透传，内核真鉴权）恢复。
     """
-    import auth  # noqa: PLC0415
-
-    monkeypatch.setattr(
-        auth,
-        "verify_token",
-        MagicMock(return_value={
-            "sub": "u1",
-            "username": "normal",
-            "role": "user",
-            "type": "access",
-        }),
-    )
-
     resp = await srv.http_handle(
         path="/ext/channel_api/users",
         method="POST",
         raw_body="",
-        headers={"Authorization": "Bearer faketoken"},
+        headers={"Authorization": f"Bearer {_kernel_token('u1', 'normal')}"},
         query={"username": "x", "password": "y", "role": "admin"},
     )
     status, _ = _decode_http(resp)
@@ -178,48 +174,38 @@ async def test_http_handle_resolves_caller_and_blocks_non_admin(monkeypatch: pyt
 
 
 @pytest.mark.asyncio
-async def test_http_handle_resolves_caller_and_allows_admin(monkeypatch: pytest.MonkeyPatch) -> None:
-    """http_handle(users create_user)：Authorization 头解析出 role=admin → 200。"""
-    import auth  # noqa: PLC0415
+async def test_http_handle_kernel_token_admin_endpoint_denied() -> None:
+    """http_handle(users create_user)：内核 token 无 role → 管理员端点 403。
 
-    monkeypatch.setattr(
-        auth,
-        "verify_token",
-        MagicMock(return_value={
-            "sub": "a1",
-            "username": "root",
-            "role": "admin",
-            "type": "access",
-        }),
-    )
-
+    0.1 自持 JWT 栈（auth.verify_token 携带 role 声明）已删；内核 token 载荷
+    仅 {type}:{user_id}:{username}:{exp}，批次 0 起管理员端点一律默认拒绝
+    （不伪造 role），批次 2 users 域迁 user_admin 后由内核真鉴权恢复 admin。
+    """
     resp = await srv.http_handle(
         path="/ext/channel_api/users",
         method="POST",
         raw_body="",
-        headers={"Authorization": "Bearer faketoken"},
+        headers={"Authorization": f"Bearer {_kernel_token('u1', 'normal')}"},
         query={"username": "x", "password": "y", "role": "user"},
     )
     status, _ = _decode_http(resp)
-    assert status == 200
+    assert status == 403
 
 
-def test_resolve_caller_returns_role_from_token(monkeypatch: pytest.MonkeyPatch) -> None:
-    """_resolve_caller 从 Authorization 头解出 sub/username/role。"""
-    import auth  # noqa: PLC0415
-
-    monkeypatch.setattr(
-        auth,
-        "verify_token",
-        MagicMock(return_value={
-            "sub": "z",
-            "username": "zeus",
-            "role": "admin",
-            "type": "access",
-        }),
+def test_resolve_caller_decodes_kernel_token() -> None:
+    """_resolve_caller 从内核 base64 token 解出 sub/username（role 缺省 user）。"""
+    caller = srv._resolve_caller(
+        {"Authorization": f"Bearer {_kernel_token('z', 'zeus')}"}
     )
-    caller = srv._resolve_caller({"Authorization": "Bearer abc"})
-    assert caller == {"sub": "z", "username": "zeus", "role": "admin"}
+    assert caller == {"sub": "z", "username": "zeus", "role": "user"}
+
+
+def test_resolve_caller_rejects_malformed_payload() -> None:
+    """解码成功但载荷结构不符（非 4 段 / 非 access|refresh 类型）→ {}。"""
+    junk = base64.b64encode(b"junk").decode("ascii")
+    assert srv._resolve_caller({"Authorization": f"Bearer {junk}"}) == {}
+    unknown = base64.b64encode(b"bespoke:z:zeus:999").decode("ascii").rstrip("=")
+    assert srv._resolve_caller({"Authorization": f"Bearer {unknown}"}) == {}
 
 
 def test_resolve_caller_returns_empty_when_no_token() -> None:

@@ -251,9 +251,15 @@ def _resolve_caller(headers: dict[str, str] | None) -> dict[str, Any]:
     ``http.handle`` 由内核 dispatcher 调度（鉴权在 dispatcher 层按
     ``http_endpoints.auth=user`` 完成），但 handler 需要拿到真实 caller 身份
     （尤其 ``role``）才能做垂直越权检查。本函数从 ``Authorization`` 头取 Bearer
-    token，复用 ``auth.verify_token`` 解出 sub/username/role。
+    token 解析出 sub/username。
 
-    无/无效 token → 返回 ``{}``（保持既有未鉴权兼容行为，鉴权 401 由 dispatcher 负责，
+    内核 token 是 base64 无签名载荷 ``{type}:{user_id}:{username}:{exp}``
+    （见 kernel/crates/http/src/auth.rs encode_token/decode_token），非自持
+    HS256 JWT。0.1 遗留的自持 JWT 栈（auth.py/auth_token.py）已随批次 0-3
+    删除——原 verify_token 对内核 token 验签必失败 → 空身份降级放行；现直接
+    base64 解码解析真实身份。
+
+    解析失败 → 返回 ``{}``（保持既有未鉴权兼容行为，鉴权 401 由 dispatcher 负责，
     不在此处重复；下游管理员端点会对空身份默认拒绝）。
     """
     authz = ""
@@ -265,18 +271,24 @@ def _resolve_caller(headers: dict[str, str] | None) -> dict[str, Any]:
     if not token:
         return {}
     try:
-        from auth import verify_token  # noqa: PLC0415
+        # 与内核 decode_token 同构：STANDARD_NO_PAD base64 → utf-8 →
+        # splitn(4, ':') → (type, user_id, username, exp)
+        import base64 as _b64  # noqa: PLC0415
 
-        payload = verify_token(token)
-    except Exception:  # noqa: BLE001
+        raw = token.strip()
+        # STANDARD_NO_PAD 容忍长度非 4 倍数，手动补 padding 兼容带 pad 输入
+        padded = raw + "=" * (-len(raw) % 4)
+        decoded = _b64.b64decode(padded, validate=False).decode("utf-8")
+        parts = decoded.split(":")
+        if len(parts) != 4 or parts[0] not in ("access", "refresh"):
+            return {}
+        user_id, username = parts[1], parts[2]
+        # 注：载荷无 role 段——users 域管理员端点（_require_admin_role）在
+        # 批次 0 保持默认拒绝（role 缺省 non-admin）；批次 2 随 users 域迁
+        # user_admin 改 db-admin 凭证透传（内核真鉴权）恢复 admin 判定。
+        return {"sub": user_id, "username": username, "role": "user"}
+    except Exception:  # noqa: BLE001 — 解析失败降级空身份，语义与既有一致
         return {}
-    if not payload:
-        return {}
-    return {
-        "sub": payload.get("sub"),
-        "username": payload.get("username"),
-        "role": payload.get("role", "user"),
-    }
 
 
 def _require_admin_role(_user: dict[str, Any] | None) -> None:

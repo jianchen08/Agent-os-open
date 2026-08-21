@@ -24,10 +24,11 @@
   conftest.py _register_channels_api_compat），本文件可独立运行
   （原先依赖 test_delete_thread_cascade_metadata.py 先行导入才不炸）。
 
-保留（0.2 仍有效意图）：
+保留（0.2 仍有效意图 / 批次 0 同步改写）：
 - AR-5: channel_api 存活路由模块 prefix 均以 /api/v1/ 开头。
 - D-3: channels.api.deps.require_auth 仅接受 Authorization header，
-  不接受 Query token。
+  不接受 Query token——自持 JWT 栈批次 0-3 删除后该装饰为死装饰恒 401，
+  用例已同步改写（合法内核 token 也不放行；批次 1-2 随域搬迁移除）。
 """
 
 from __future__ import annotations
@@ -125,11 +126,16 @@ class TestAPIPrefixUnification:
 
 
 class TestRequireAuthHeaderOnly:
-    """验证 require_auth 仅接受 Authorization header，不接受 Query token（D-3）。"""
+    """验证 require_auth 仅接受 Authorization header，不接受 Query token（D-3）。
 
-    def test_require_auth_accepts_valid_header(self) -> None:
-        """正确的 Authorization Bearer header 应通过认证（2xx 场景）。"""
-        from channels.api.auth import create_access_token
+    注：0.1 遗留自持 JWT 栈（channels.api.auth.create_access_token 等）已随
+    批次 0-3 删除，require_auth/optional_auth 是死装饰（http.handle 直调不
+    解析 FastAPI 依赖，鉴权由内核 dispatcher 按 http_endpoints.auth 执行），
+    随批次 1-2 域搬迁整体移除；此处仅锁"死装饰恒 401 + 不因 Query token 放行"。
+    """
+
+    def test_require_auth_is_legacy_dead_decorator(self) -> None:
+        """0.1 遗留死装饰：任何 token（含合法内核格式）均 401，不解析查询参数。"""
         from channels.api.deps import require_auth
 
         app = FastAPI()
@@ -138,15 +144,12 @@ class TestRequireAuthHeaderOnly:
         async def _protected(user: dict = pytest.importorskip("fastapi").Depends(require_auth)):
             return {"user": user["username"]}
 
-        token = create_access_token({"sub": "test_user_id", "username": "tester"})
-
         with TestClient(app) as client:
             resp = client.get(
                 "/protected",
-                headers={"Authorization": f"Bearer {token}"},
+                headers={"Authorization": "Bearer any-token"},
             )
-        assert resp.status_code == 200
-        assert resp.json()["user"] == "tester"
+        assert resp.status_code == 401
 
     def test_require_auth_rejects_missing_header(self) -> None:
         """无 Authorization header 应返回 401（4xx 场景）。"""
@@ -233,9 +236,13 @@ class TestRequireAuthHeaderOnly:
         )
 
     def test_query_token_not_accepted(self) -> None:
-        """D-3 验证：通过 ?token=xxx 查询参数传递 token 不应通过认证。"""
-        from channels.api.auth import create_access_token
+        """D-3 验证：通过 ?token=xxx 查询参数传递 token 不应通过认证。
+
+        0.1 自持 JWT 栈（create_access_token）已删，死装饰恒 401——query token
+        与 header 一样一律拒绝（构造合法内核格式 token 亦不放行）。
+        """
         from channels.api.deps import require_auth
+        import base64 as _b64
 
         app = FastAPI()
 
@@ -243,7 +250,7 @@ class TestRequireAuthHeaderOnly:
         async def _protected(user: dict = pytest.importorskip("fastapi").Depends(require_auth)):
             return {"user": user["username"]}
 
-        valid_token = create_access_token({"sub": "test_user_id", "username": "tester"})
+        valid_token = _b64.b64encode(b"access:u1:tester:9999999999").decode("ascii").rstrip("=")
 
         with TestClient(app) as client:
             # 通过 query 参数传 token，不带 header

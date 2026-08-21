@@ -55,7 +55,6 @@ _AMBIGUOUS_MODULES = {
     "workspace_service",
     # channel_api 内部模块（与其它通道同目录平铺导入时可能冲突）
     "deps",
-    "auth",
     "models",
     "server",
     "routes_missing",
