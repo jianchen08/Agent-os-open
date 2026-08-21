@@ -774,9 +774,14 @@ def translate_skin_adaptation(skin_id: str, base_dir: str | Path | None = None) 
     def imp(k: str, v: str) -> str:
         return f"  {k}: {v} !important;"
 
+    # shadcn 全套桥（缺项=区域回落灵汐默认 → 字色风格混杂，用户实测三报）
+    fg_hsl = _hex_to_hsl(text) if text.startswith("#") else "0 0% 95%"
+    canvas_hsl = _hex_to_hsl(canvas) if canvas.startswith("#") else "229 58% 4%"
+    accent_hsl = _hex_to_hsl(accent) if accent.startswith("#") else "190 95% 42%"
+
     lines = [
         "/* == dsh-skin lingxi adaptation v2 ==",
-        f"/* skin: {skin_id} | tokens(!important, 内联可压) + shadcn bridge + regions */",
+        f"/* skin: {skin_id} | tokens(!important) + full shadcn bridge + regions */",
         ":root {",
         imp("--ds-bg-canvas", canvas),
         imp("--ds-bg-panel", panel),
@@ -785,25 +790,46 @@ def translate_skin_adaptation(skin_id: str, base_dir: str | Path | None = None) 
         imp("--ds-text-primary", text),
         imp("--ds-text-secondary", f"color-mix(in srgb, {text} 78%, {canvas})"),
         imp("--ds-text-muted", f"color-mix(in srgb, {text} 55%, {canvas})"),
+        imp("--ds-text-disabled", f"color-mix(in srgb, {text} 35%, {canvas})"),
         imp("--ds-accent-primary", accent),
         imp("--ds-accent-ai", accent),
         imp("--ds-border-subtle", f"color-mix(in srgb, {text} 16%, transparent)"),
+        imp("--ds-border-strong", f"color-mix(in srgb, {text} 28%, transparent)"),
         imp("--ds-border-active", f"color-mix(in srgb, {accent} 70%, transparent)"),
-        # shadcn 桥（tailwind 原子类/主容器消费层）
-        imp("--background", _hex_to_hsl(canvas)),
-        imp("--foreground", _hex_to_hsl(text) if text.startswith("#") else "0 0% 95%"),
-        imp("--card", _hex_to_hsl(canvas) if canvas.startswith("#") else "229 58% 4%"),
-        imp("--primary", _hex_to_hsl(accent)),
-        imp("--accent", _hex_to_hsl(accent)),
+        imp("--ds-shadow-glow-running", f"color-mix(in srgb, {accent} 45%, transparent)"),
+        # —— shadcn 全套（tailwind 原子类消费层）——
+        # 主框架背景带 alpha：全局固定装饰层（body::after 立绘）由此透出；
+        # 全套 foreground 系避免各区域回落默认造成的风格混杂
+        imp("--background", f"{canvas_hsl} / 0.9"),
+        imp("--foreground", fg_hsl),
+        imp("--card", canvas_hsl),
+        imp("--card-foreground", fg_hsl),
+        imp("--popover", canvas_hsl),
+        imp("--popover-foreground", fg_hsl),
+        imp("--primary", accent_hsl),
+        imp("--primary-foreground", canvas_hsl),
+        imp("--secondary", f"color-mix(in srgb, {canvas} 70%, white)"),
+        imp("--secondary-foreground", fg_hsl),
+        imp("--muted", f"color-mix(in srgb, {canvas} 60%, white)"),
+        imp("--muted-foreground", f"color-mix(in srgb, {text} 60%, {canvas})"),
+        imp("--accent", accent_hsl),
+        imp("--accent-foreground", canvas_hsl),
+        imp("--destructive", "0 72% 51%"),
+        imp("--destructive-foreground", "0 0% 100%"),
         imp("--border", f"color-mix(in srgb, {text} 16%, transparent)"),
+        imp("--input", f"color-mix(in srgb, {text} 20%, transparent)"),
+        imp("--ring", accent_hsl),
+        imp("--radius", "0.5rem"),
         "}",
         "/* header：保持 左图标|居中标题|右图标 原生结构，紧凑收窄 */",
         '[data-testid="app-header"] { padding-block: 1px; }',
+        "/* 聊天区容器透明：全局装饰层（立绘）由半透明主框架透出 */",
+        '[data-region="chat"] { background: transparent !important; }',
         "/* 侧栏：皮肤面板实底（DSH 侧栏风格）+ 右边框 */",
         '[data-region="sidebar"] { background: var(--ds-bg-panel) !important; backdrop-filter: none; border-right: 1px solid var(--ds-border-subtle); }',
         "/* 工作区：elevated 实底（对齐 DSH 设置页面板） */",
         '[data-region="workspace"] { background: var(--ds-bg-elevated) !important; border-left: 1px solid var(--ds-border-subtle); }',
-        "/* 画布底：皮肤 :root 原渐变挂 body（仅聊天区之外透出） */",
+        "/* 画布底：皮肤 :root 原渐变挂 body（装饰层之下） */",
         f"body {{ background-color: {canvas} !important; }}",
     ]
     if font_m:

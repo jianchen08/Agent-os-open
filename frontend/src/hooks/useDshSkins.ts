@@ -65,6 +65,18 @@ function patchCacheCurrent(skinId: string) {
   }
 }
 
+/** 即时换装：重拉 skin.css 就地替换 <style> 标签（无需刷新页面）。 */
+async function applySkinCssImmediately() {
+  try {
+    const el = document.querySelector<HTMLStyleElement>('style[data-plugin-style="dsh_adapter:dsh-skin"]')
+    if (!el) return
+    const resp = await apiClient.get<string>('/ext/dsh_adapter/styles/skin.css', { responseType: 'text' })
+    el.textContent = typeof resp.data === 'string' ? resp.data : String(resp.data)
+  } catch {
+    // 换装失败不阻断（刷新页面仍可兜底）
+  }
+}
+
 export function useDshSkins() {
   const { message } = AntdApp.useApp()
   const [list, setList] = useState<DshSkinList | null>(skinCache?.data ?? null)
@@ -95,6 +107,7 @@ export function useDshSkins() {
         await apiClient.put('/ext/dsh_adapter/skins/current', { skin: skinId })
         setCurrent(skinId)
         patchCacheCurrent(skinId)
+        await applySkinCssImmediately()
         // 基准回退规则（用户裁决 2026-08-21）：皮肤 = 整体替换，基准是内置
         // 暗/亮主题（按皮肤 base）而非叠加在当前灵汐主题上——皮肤未覆盖处
         // 回落基准暗/亮。none 时恢复皮肤激活前的用户主题。
