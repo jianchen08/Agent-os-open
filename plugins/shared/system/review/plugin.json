@@ -81,5 +81,97 @@
     "chat",
     "pipeline-state",
     "pipeline-executor"
+  ],
+  "http_endpoints": [
+    {
+      "route_id": "review_create",
+      "method": "POST",
+      "path": "/ext/review_service/reviews",
+      "auth": "user",
+      "handler_capability": "http.handle",
+      "timeout_ms": 5000,
+      "max_concurrency": 4,
+      "description": "reviews 域：创建审批请求（原 POST /ext/channel_api/reviews 语义——body: task_id/thread_id/session_id/tab_id/title/description/artifact_ids/priority/timeout_seconds/metadata）"
+    },
+    {
+      "route_id": "review_list",
+      "method": "GET",
+      "path": "/ext/review_service/reviews",
+      "auth": "user",
+      "handler_capability": "http.handle",
+      "timeout_ms": 5000,
+      "max_concurrency": 8,
+      "description": "reviews 域：审批列表（query: task_id/limit——原 GET /ext/channel_api/reviews 语义）"
+    },
+    {
+      "route_id": "review_media_review",
+      "method": "POST",
+      "path": "/ext/review_service/reviews/media-review",
+      "auth": "user",
+      "handler_capability": "http.handle",
+      "timeout_ms": 120000,
+      "max_concurrency": 2,
+      "description": "reviews 域：上传文件并执行媒体审阅（multipart: file + media_type；timeout 由源值 60s 放大至 120s——PyAV 解码/关键帧提取大文件可超 60s——原 POST /ext/channel_api/reviews/media-review 语义）"
+    },
+    {
+      "route_id": "review_get",
+      "method": "GET",
+      "path": "/ext/review_service/reviews/{review_id}",
+      "auth": "user",
+      "handler_capability": "http.handle",
+      "timeout_ms": 5000,
+      "max_concurrency": 8,
+      "description": "reviews 域：审批详情（原 GET /ext/channel_api/reviews/{review_id} 语义；不存在返回 {error:{code:NOT_FOUND}}）"
+    },
+    {
+      "route_id": "review_feedback",
+      "method": "POST",
+      "path": "/ext/review_service/reviews/{review_id}/feedback",
+      "auth": "user",
+      "handler_capability": "http.handle",
+      "timeout_ms": 5000,
+      "max_concurrency": 4,
+      "description": "reviews 域：提交审批反馈（body: response_type/overall_comment/annotations/user_id——原 POST /ext/channel_api/reviews/{review_id}/feedback 语义）"
+    },
+    {
+      "route_id": "review_viewed",
+      "method": "POST",
+      "path": "/ext/review_service/reviews/{review_id}/viewed",
+      "auth": "user",
+      "handler_capability": "http.handle",
+      "timeout_ms": 5000,
+      "max_concurrency": 4,
+      "description": "reviews 域：标记已查看（状态 pending → in_review——原 POST /ext/channel_api/reviews/{review_id}/viewed 语义）"
+    },
+    {
+      "route_id": "review_cancel",
+      "method": "POST",
+      "path": "/ext/review_service/reviews/{review_id}/cancel",
+      "auth": "user",
+      "handler_capability": "http.handle",
+      "timeout_ms": 5000,
+      "max_concurrency": 4,
+      "description": "reviews 域：取消审批（body: reason——原 POST /ext/channel_api/reviews/{review_id}/cancel 语义）"
+    },
+    {
+      "route_id": "review_media_metadata",
+      "method": "GET",
+      "path": "/ext/review_service/reviews/{review_id}/media-metadata",
+      "auth": "user",
+      "handler_capability": "http.handle",
+      "timeout_ms": 5000,
+      "max_concurrency": 8,
+      "description": "reviews 域：审批关联的媒体元数据（优先返回已存审阅结果，否则按 media_files 实时解析——原 GET /ext/channel_api/reviews/{review_id}/media-metadata 语义）"
+    },
+    {
+      "route_id": "review_attachments",
+      "method": "POST",
+      "path": "/ext/review_service/reviews/{review_id}/attachments",
+      "auth": "user",
+      "handler_capability": "http.handle",
+      "timeout_ms": 30000,
+      "max_concurrency": 2,
+      "description": "reviews 域：为审批添加媒体附件（JSON body: files/auto_review，文件路径非上传；auto_review 触发媒体审阅——原 POST /ext/channel_api/reviews/{review_id}/attachments 语义）"
+    }
   ]
 }

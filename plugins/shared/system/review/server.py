@@ -18,15 +18,26 @@ agent_id/source 命名沿用 src/memory/maintenance/service.py 约定：
 - agent_id = "review_agent"（config/agents/system/review_agent.yaml）
 - source = "tool_review"（触发来源溯源）
 
+channel_api 退役批次 5（2026-08-21，review P1-2 sidecar 化）：
+- src/review/ 的审批状态机（review_service/models）与媒体审阅
+  （media_review_service/media_reviewer）已迁入本插件包，http.handle 按
+  path 分发 9 端点（/ext/review_service/reviews/**，语义对齐原
+  /ext/channel_api/reviews/**——routes_reviews.py handler 迁入）。
+- media-review multipart 经内核透传 raw_body base64 + _parse_multipart
+  （email 标准库，与 multimodal/channel_api 同构）。
+
 [来源: docs/tasks/task_10_system_plugins.md AC-09-4]
+[来源: docs/working/channel_api插件拆迁方案_20260821.md 批次 5]
 """
 
 from __future__ import annotations
 
+import base64
 import json
 import logging
 import os
 import sys
+import tempfile
 import time
 import uuid
 from typing import Any
@@ -39,6 +50,11 @@ if _HINDSIGHT_MEMORY_DIR not in sys.path:
     sys.path.insert(0, _HINDSIGHT_MEMORY_DIR)
 
 from wiring import build_memory_backend  # noqa: E402
+
+# 审批域（P1-2 接真，channel_api 退役批次 5）：状态机 + 媒体审阅迁入本插件包后
+# 平铺导入（server.py 运行目录即插件目录，与 workspace_service 同款惯例）。
+from review_service import get_review_service, reset_review_service  # noqa: E402
+import media_review_service  # noqa: E402
 
 logger = logging.getLogger(__name__)
 
@@ -535,6 +551,489 @@ async def _on_load(params: dict[str, Any]) -> None:
         logger.info("[Review] 记忆后端已注入，复盘报告将持久化")
     else:
         logger.warning("[Review] 记忆后端未注入，复盘报告仅存内存（降级）")
+
+
+# ══ reviews 域 HTTP 面（channel_api 退役批次 5：P1-2 接真）═══════════════════
+# 返回契约与既有 17 插件 http.handle 一致：ToolExecutionResult{success,data}，
+# data 为 HttpHandleResponse{status,headers,body,body_encoding}（body base64）。
+# 业务错误沿 routes_reviews 源语义：NOT_FOUND/INVALID/INTERNAL 以 200 +
+# {"error": {"code", "message"}} 返回（前端 reviewStore 读 data.error 降级）；
+# 协议级错误（非 multipart / 缺 file 字段 / multipart 解析失败）400。
+
+_PREFIX = "/ext/review_service/reviews"
+
+# 全局媒体审阅服务实例（与 routes_reviews 同款懒单例）
+_media_review_service: Any = None
+
+
+def _json_response(payload: Any, status: int = 200) -> dict[str, Any]:
+    """把任意 JSON 可序列化对象包成内核期望的 HttpHandleResponse（body base64）。"""
+    body_str = json.dumps(payload, default=str, ensure_ascii=False)
+    body_b64 = base64.b64encode(body_str.encode("utf-8")).decode("ascii")
+    return {
+        "status": status,
+        "headers": {"Content-Type": "application/json; charset=utf-8"},
+        "body": body_b64,
+        "body_encoding": "base64",
+    }
+
+
+def _ok(data: Any) -> dict[str, Any]:
+    """成功响应：{success, data}（ToolExecutionResult 契约）。"""
+    return {"success": True, "data": data}
+
+
+def _error(status: int, message: str) -> dict[str, Any]:
+    """协议级错误响应：{success:true, data:{status, body}}（插件全权控制响应形态）。"""
+    return _ok(_json_response({"error": {"code": str(status), "message": message}}, status))
+
+
+def _decode_body(raw_body: str) -> dict[str, Any]:
+    """解码 http.handle 的 raw_body（base64 或明文 JSON）为 dict。"""
+    if not raw_body:
+        return {}
+    decoded = raw_body
+    try:
+        attempt = base64.b64decode(raw_body).decode("utf-8")
+        if attempt.lstrip().startswith(("{", "[")):
+            decoded = attempt
+    except (ValueError, UnicodeDecodeError):
+        pass
+    try:
+        parsed = json.loads(decoded) if decoded.strip() else {}
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"invalid JSON body: {exc}") from exc
+    return parsed if isinstance(parsed, dict) else {}
+
+
+def _parse_multipart(content_type: str, body_bytes: bytes) -> dict[str, Any]:
+    """解析 multipart/form-data（内核透传的 raw_body base64 解码后的字节）。
+
+    返回 {字段名: 值}；文件字段值为 {filename, content_type, data(bytes)}，
+    普通字段为 str。用 email.parser 解析（标准库，无外部依赖）——
+    与 multimodal/channel_api server._parse_multipart 同构随迁。
+    """
+    import email  # noqa: PLC0415
+    from email.policy import default as default_policy  # noqa: PLC0415
+
+    header = f"Content-Type: {content_type}\r\n\r\n".encode()
+    msg = email.message_from_bytes(header + body_bytes, policy=default_policy)
+    fields: dict[str, Any] = {}
+    if not msg.is_multipart():
+        return fields
+    parts = msg.get_payload()
+    if not isinstance(parts, list):  # pragma: no cover —— 防御 typeshed
+        return fields
+    for part in parts:
+        if not isinstance(part, email.message.Message):  # pragma: no cover
+            continue
+        name = part.get_param("name", header="content-disposition")
+        if not isinstance(name, str):
+            continue
+        filename = part.get_filename()
+        if filename is not None:
+            data = part.get_payload(decode=True) or b""
+            fields[name] = {
+                "filename": filename,
+                "content_type": part.get_content_type(),
+                "data": data,
+            }
+        else:
+            payload = part.get_payload(decode=True)
+            fields[name] = (
+                payload.decode("utf-8", errors="replace") if isinstance(payload, bytes) else ""
+            )
+    return fields
+
+
+def get_media_review_service() -> Any:
+    """获取全局媒体审阅服务单例（懒加载，与 routes_reviews 同款）。"""
+    global _media_review_service  # noqa: PLW0603
+    if _media_review_service is None:
+        _media_review_service = media_review_service.MediaReviewService()
+    return _media_review_service
+
+
+# ── 端点 handler（语义对齐 routes_reviews.py 各路由，剥 FastAPI 装饰器/require_auth）──
+
+
+async def _reviews_create(body: dict[str, Any]) -> dict[str, Any]:
+    """创建审批请求（原 POST /reviews —— body: task_id/thread_id/session_id/...）。"""
+    service = get_review_service()
+    review = await service.create_review(
+        task_id=body.get("task_id", ""),
+        thread_id=body.get("thread_id", ""),
+        session_id=body.get("session_id", ""),
+        tab_id=body.get("tab_id", ""),
+        title=body.get("title", ""),
+        description=body.get("description", ""),
+        artifact_ids=body.get("artifact_ids"),
+        priority=body.get("priority", "normal"),
+        timeout_seconds=body.get("timeout_seconds"),
+        metadata=body.get("metadata"),
+    )
+    return review.to_dict()
+
+
+async def _reviews_list(task_id: str, limit: int = 50) -> dict[str, Any]:
+    """获取任务的审批列表（原 GET /reviews，query: task_id/limit）。"""
+    if not task_id:
+        return {"items": [], "total": 0}
+    service = get_review_service()
+    return await service.list_reviews_by_task(task_id, limit=limit)
+
+
+async def _reviews_get(review_id: str) -> dict[str, Any]:
+    """获取审批详情（原 GET /reviews/{review_id}）。"""
+    service = get_review_service()
+    review = await service.get_review(review_id)
+    if not review:
+        return {"error": {"code": "NOT_FOUND", "message": f"审批不存在: {review_id}"}}
+    return review.to_dict()
+
+
+async def _reviews_submit_feedback(review_id: str, body: dict[str, Any]) -> dict[str, Any]:
+    """提交审批反馈（原 POST /reviews/{review_id}/feedback）。"""
+    service = get_review_service()
+    feedback = await service.submit_feedback(
+        review_id=review_id,
+        response_type=body.get("response_type", "approved"),
+        overall_comment=body.get("overall_comment", ""),
+        annotations=body.get("annotations"),
+        user_id=body.get("user_id"),
+    )
+    if not feedback:
+        return {"error": {"code": "INVALID", "message": "审批不存在或状态不允许反馈"}}
+    return feedback.to_dict()
+
+
+async def _reviews_mark_viewed(review_id: str) -> dict[str, Any]:
+    """标记审批为已查看（原 POST /reviews/{review_id}/viewed）。"""
+    service = get_review_service()
+    success = await service.mark_as_viewed(review_id)
+    return {"id": review_id, "viewed": success}
+
+
+async def _reviews_cancel(review_id: str, body: dict[str, Any]) -> dict[str, Any]:
+    """取消审批（原 POST /reviews/{review_id}/cancel，body: reason）。"""
+    service = get_review_service()
+    reason = body.get("reason")
+    success = await service.cancel_review(review_id, reason=reason)
+    return {"id": review_id, "cancelled": success}
+
+
+async def _reviews_media_review(raw_body: str, headers: dict[str, str] | None) -> dict[str, Any]:
+    """上传文件并执行媒体审阅（原 POST /reviews/media-review，multipart: file + media_type）。
+
+    文件经内核透传 raw_body base64 解出后落临时文件，审阅完即清理。
+    media_type 留空时按文件扩展名自动推断（image/video）。
+    """
+    try:
+        body_bytes = base64.b64decode(raw_body) if raw_body else b""
+    except Exception as exc:  # noqa: BLE001
+        return _error(400, f"invalid upload body: {exc}")
+
+    content_type = ""
+    for k, v in (headers or {}).items():
+        if isinstance(k, str) and k.lower() == "content-type" and v:
+            content_type = str(v)
+            break
+    if "multipart/form-data" not in content_type:
+        return _error(400, "media-review requires multipart/form-data")
+
+    try:
+        fields = _parse_multipart(content_type, body_bytes)
+    except Exception as exc:  # noqa: BLE001
+        return _error(400, f"multipart parse failed: {exc}")
+
+    file_field = fields.get("file")
+    if not isinstance(file_field, dict) or not file_field.get("data"):
+        return _error(400, "missing or empty 'file' field")
+
+    media_type = fields.get("media_type") or ""
+    if isinstance(media_type, str):
+        media_type = media_type.strip()
+
+    filename = file_field.get("filename") or "upload"
+    content: bytes = file_field["data"]
+    suffix = os.path.splitext(filename)[1]  # noqa: PTH122
+    tmp_dir = tempfile.mkdtemp(prefix="media_review_")
+    tmp_path = os.path.join(tmp_dir, filename if filename else f"upload{suffix}")
+
+    try:
+        with open(tmp_path, "wb") as f:
+            f.write(content)
+
+        effective_media_type = media_type
+        if not effective_media_type:
+            try:
+                effective_media_type = media_review_service._infer_media_type(tmp_path)
+            except ValueError:
+                return {
+                    "error": {
+                        "code": "INVALID",
+                        "message": (
+                            f"无法推断媒体类型，请显式指定 media_type"
+                            f"（文件: {filename}）"
+                        ),
+                    }
+                }
+
+        media_svc = get_media_review_service()
+        result = await media_svc.review_media(tmp_path, effective_media_type)
+        result_dict = result.to_dict()
+        result_dict["media_type"] = effective_media_type
+        result_dict["filename"] = filename
+        return result_dict
+
+    except FileNotFoundError as exc:
+        return {"error": {"code": "NOT_FOUND", "message": str(exc)}}
+    except ValueError as exc:
+        return {"error": {"code": "INVALID", "message": str(exc)}}
+    except Exception as exc:  # noqa: BLE001
+        logger.error("[review] 媒体审阅失败 | error=%s", exc)
+        return {"error": {"code": "INTERNAL", "message": f"媒体审阅失败: {exc}"}}
+    finally:
+        # 清理临时文件
+        if os.path.isfile(tmp_path):  # noqa: PTH113
+            os.remove(tmp_path)  # noqa: PTH107
+        if os.path.isdir(tmp_dir):  # noqa: PTH112
+            os.rmdir(tmp_dir)  # noqa: PTH106
+
+
+async def _reviews_media_metadata(review_id: str) -> dict[str, Any]:
+    """获取审批关联的媒体元数据（原 GET /reviews/{review_id}/media-metadata）。
+
+    优先返回 metadata.media_review_results 已存审阅结果；否则对
+    metadata.media_files 逐条重新生成元数据摘要（PIL/PyAV 实时解析）。
+    """
+    service = get_review_service()
+    review = await service.get_review(review_id)
+    if not review:
+        return {"error": {"code": "NOT_FOUND", "message": f"审批不存在: {review_id}"}}
+
+    metadata = review.metadata
+    review_results = metadata.get("media_review_results", {})
+    media_files = metadata.get("media_files", [])
+
+    # 如果有存储的审阅结果，直接返回
+    if review_results:
+        return {
+            "review_id": review_id,
+            "media_metadata": review_results,
+        }
+
+    # 否则尝试从 media_files 重新生成元数据
+    if not media_files:
+        return {
+            "review_id": review_id,
+            "media_metadata": [],
+        }
+
+    media_svc = get_media_review_service()
+    metadata_list: list[dict[str, Any]] = []
+
+    for file_info in media_files:
+        file_path = file_info if isinstance(file_info, str) else file_info.get("path", "")
+        media_type = ""
+        if isinstance(file_info, dict):
+            media_type = file_info.get("media_type", "")
+
+        if not file_path or not os.path.isfile(file_path):  # noqa: PTH113
+            metadata_list.append(
+                {
+                    "file_path": file_path,
+                    "error": "文件不存在或路径无效",
+                }
+            )
+            continue
+
+        try:
+            if not media_type:
+                media_type = media_review_service._infer_media_type(file_path)
+            meta = media_svc.get_media_metadata(file_path, media_type)
+            metadata_list.append(meta)
+        except (ValueError, FileNotFoundError) as exc:
+            metadata_list.append(
+                {
+                    "file_path": file_path,
+                    "error": str(exc),
+                }
+            )
+
+    return {
+        "review_id": review_id,
+        "media_metadata": metadata_list,
+    }
+
+
+async def _reviews_add_attachments(review_id: str, body: dict[str, Any]) -> dict[str, Any]:
+    """为审批添加媒体附件（原 POST /reviews/{review_id}/attachments，JSON body）。
+
+    body: {"files": [{"path", "media_type"} | str], "auto_review": bool}。
+    auto_review=true 时对已存在文件执行媒体审阅并写入 metadata.media_review_results。
+    """
+    service = get_review_service()
+    review = await service.get_review(review_id)
+    if not review:
+        return {"error": {"code": "NOT_FOUND", "message": f"审批不存在: {review_id}"}}
+
+    files = body.get("files", [])
+    auto_review = body.get("auto_review", False)
+
+    if not files:
+        return {"error": {"code": "INVALID", "message": "files 列表不能为空"}}
+
+    # 更新 media_files
+    media_files = review.metadata.get("media_files", [])
+    review_results = review.metadata.get("media_review_results", {})
+
+    added: list[dict[str, Any]] = []
+    media_svc = get_media_review_service()
+
+    for file_info in files:
+        file_path = file_info.get("path", "") if isinstance(file_info, dict) else file_info
+        media_type = file_info.get("media_type", "") if isinstance(file_info, dict) else ""
+
+        if not file_path:
+            added.append({"error": "缺少 path 字段"})
+            continue
+
+        # 如果未指定 media_type，尝试推断
+        if not media_type:
+            try:
+                media_type = media_review_service._infer_media_type(file_path)
+            except ValueError:
+                added.append(
+                    {
+                        "file_path": file_path,
+                        "error": "无法推断媒体类型",
+                    }
+                )
+                continue
+
+        entry = {"path": file_path, "media_type": media_type}
+        media_files.append(entry)
+
+        # 可选自动审阅
+        review_result_dict: dict[str, Any] | None = None
+        if auto_review and os.path.isfile(file_path):  # noqa: PTH113
+            try:
+                result = await media_svc.review_media(file_path, media_type)
+                review_result_dict = result.to_dict()
+                review_results[file_path] = review_result_dict
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "[review] 附件审阅失败 | path=%s | error=%s",
+                    file_path,
+                    exc,
+                )
+                review_result_dict = {"error": str(exc)}
+                review_results[file_path] = review_result_dict
+
+        added.append(
+            {
+                **entry,
+                "review_result": review_result_dict,
+            }
+        )
+
+    # 更新审批的 metadata
+    review.metadata["media_files"] = media_files
+    review.metadata["media_review_results"] = review_results
+
+    return {
+        "review_id": review_id,
+        "added_count": len(added),
+        "attachments": added,
+    }
+
+
+@plugin.tool(
+    name="http.handle",
+    schema={
+        "type": "object",
+        "properties": {
+            "path": {"type": "string"},
+            "method": {"type": "string"},
+            "plugin_id": {"type": "string"},
+            "raw_body": {"type": "string"},
+            "headers": {"type": "object"},
+            "query": {"type": "object"},
+        },
+    },
+    description=(
+        "HTTP endpoint handler for /ext/review_service/** (reviews domain 9 endpoints, "
+        "channel_api 退役批次 5 P1-2 接真)"
+    ),
+)
+async def http_handle(
+    path: str = "",
+    method: str = "GET",
+    plugin_id: str = "",
+    raw_body: str = "",
+    headers: dict[str, str] | None = None,
+    query: dict[str, str] | None = None,
+) -> dict[str, Any]:
+    """按 path 分发到 reviews 域 9 端点（语义对齐原 /ext/channel_api/reviews/**）。
+
+    认证由 plugin.json http_endpoints auth=user 声明（dispatcher 层），
+    handler 不读 _user。multipart（media-review）经 headers content-type 识别。
+    """
+    del plugin_id
+    q = query or {}
+
+    def _qint(key: str, default: int) -> int:
+        try:
+            return int(q[key]) if key in q else default
+        except (TypeError, ValueError):
+            return default
+
+    try:
+        # POST /media-review（multipart：file + media_type）
+        if path == f"{_PREFIX}/media-review" and method == "POST":
+            return _ok(_json_response(await _reviews_media_review(raw_body, headers)))
+        # POST ""（create）
+        if path == _PREFIX and method == "POST":
+            body = _decode_body(raw_body) or {}
+            return _ok(_json_response(await _reviews_create(body)))
+        # GET ""（list，query: task_id/limit）
+        if path == _PREFIX and method == "GET":
+            return _ok(
+                _json_response(
+                    await _reviews_list(
+                        task_id=q.get("task_id", ""),
+                        limit=_qint("limit", 50),
+                    )
+                )
+            )
+        # /{review_id} 系列
+        if path.startswith(_PREFIX + "/"):
+            rest = path[len(_PREFIX) + 1 :]
+            if "/" not in rest:
+                if rest and method == "GET":
+                    return _ok(_json_response(await _reviews_get(rest)))
+            else:
+                rid, action = rest.split("/", 1)
+                if action == "feedback" and method == "POST":
+                    body = _decode_body(raw_body) or {}
+                    return _ok(_json_response(await _reviews_submit_feedback(rid, body)))
+                if action == "viewed" and method == "POST":
+                    return _ok(_json_response(await _reviews_mark_viewed(rid)))
+                if action == "cancel" and method == "POST":
+                    body = _decode_body(raw_body) or {}
+                    return _ok(_json_response(await _reviews_cancel(rid, body)))
+                if action == "media-metadata" and method == "GET":
+                    return _ok(_json_response(await _reviews_media_metadata(rid)))
+                if action == "attachments" and method == "POST":
+                    body = _decode_body(raw_body) or {}
+                    return _ok(_json_response(await _reviews_add_attachments(rid, body)))
+
+        logger.warning("review http.handle: no route for path=%s method=%s", path, method)
+        return _ok(_json_response({"error": "not found", "path": path}, 404))
+    except Exception as exc:  # noqa: BLE001
+        logger.error("review http.handle 未预期错误: %s", exc, exc_info=True)
+        return _ok(_json_response({"error": "internal server error", "detail": str(exc)}, 500))
 
 
 if __name__ == "__main__":
