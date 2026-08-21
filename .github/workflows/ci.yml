@@ -422,6 +422,29 @@ jobs:
       - name: Run gates (plugins-heavy)
         run: python scripts/run_gates.py --filter plugins-heavy
 
+  # ── 前端端点供给一致性（生成物漂移闸 + /ext/ 手写棘轮闸）──────────────
+  # 插件端点 URL 唯一真值源 = 各插件 plugin.json 的 http_endpoints 声明
+  # （ADR 2026-08-21 channel_api 退役：前端端点供给模型改生成式）。
+  # 两条检查（scripts/check_frontend_endpoints_sync.py）：
+  #   1. 漂移闸：重新生成 endpoints.generated.ts 与仓库内文件 diff 非空即红；
+  #   2. 手写棘轮闸：frontend/src 的 /ext/ 字面量（排除生成物与测试断言）
+  #      计数只减不增（baseline 内嵌脚本，随 channel_api 批次逐域下调）。
+  # 纯 Python 检查（重新生成 + 计数），不依赖 Node/内核，独立轻量 job，
+  # 与 run_gates.py 无耦合（本闸承诺由本 job 持有）。
+  frontend-endpoints-sync:
+    name: Frontend Endpoints Sync (生成物漂移闸 + /ext/ 手写棘轮闸)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Set up Python
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: "3.11"
+
+      - name: Run endpoints sync checks (drift + handwritten ratchet)
+        run: python scripts/check_frontend_endpoints_sync.py
+
   # ── Timing Gate（关键时序不变量，独立阻塞，§9.4/§6.4）──────────────
   # 专门运行标记了 @pytest.mark.timing 的用例（事件顺序 / 间隔 / 超时边界）。
   # 与单元测试 stage 隔离运行（避免真实延迟影响主套件稳定性）；
