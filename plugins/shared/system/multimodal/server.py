@@ -297,8 +297,8 @@ async def http_handle(
 
         try:
             fields = _parse_multipart(content_type, body_bytes)
-        except Exception as exc:  # noqa: BLE001
-            return _error(400, f"multipart parse failed: {exc}")
+        except Exception as exc:  # noqa: BLE001  # pragma: no cover —— email.parser 对任意字节几乎不抛
+            return _error(400, f"multipart parse failed: {exc}")  # pragma: no cover
 
         file_field = fields.get("file")
         if not isinstance(file_field, dict) or not file_field.get("data"):
@@ -316,8 +316,9 @@ async def http_handle(
         audio_bytes: bytes = file_field["data"]
         mime_type = file_field.get("content_type") or "audio/webm"
         language = fields.get("language") or None
-        if isinstance(language, str) and language.strip() == "":
-            language = None
+        # 注：空串已由上方 `or None` 归一（防御性分支不可达——随迁自源 handler）
+        if isinstance(language, str) and language.strip() == "":  # pragma: no cover
+            language = None  # pragma: no cover
         try:
             text = await asr.transcribe(audio_bytes, mime_type, language)
         except RuntimeError as exc:

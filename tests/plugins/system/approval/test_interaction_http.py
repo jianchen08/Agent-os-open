@@ -400,6 +400,201 @@ def test_proxy_tool_error_is_false(server: Any) -> None:
 # ── 边界 ──────────────────────────────────────────────────────────────────
 
 
+def test_proxy_unknown_method_raises(server: Any) -> None:
+    """代理不支持的方法名 → RuntimeError（无对应工具）。"""
+    proxy = server._HumanInteractionCapabilityProxy(lambda *a, **k: {})
+
+    with pytest.raises(RuntimeError, match="无对应工具"):
+        _run(proxy._call("viewed", {"request_id": "r1"}))
+
+
+def test_proxy_respond_non_dict_body(server: Any) -> None:
+    """respond 收到非 dict body → 空 inner → 默认 answered 形状转发。"""
+
+    class _Exec:
+        def __init__(self) -> None:
+            self.calls: list[dict[str, Any]] = []
+
+        async def call(self, method: str, params: dict[str, Any], timeout: float | None = None) -> Any:
+            self.calls.append(params)
+            return {"ok": True, "request_id": "r1"}
+
+    exec_ = _Exec()
+    proxy = server._HumanInteractionCapabilityProxy(exec_.call)
+
+    result = _run(proxy.respond("r1", "not-a-dict"))
+
+    assert result is True
+    args = exec_.calls[0]["args"]
+    assert args["response_type"] == "answered"
+    assert args["selected_option"] is None
+
+
+def test_proxy_non_dict_result_raises_500(server: Any) -> None:
+    """executor 返回非 dict（如字符串）→ RuntimeError → http 500（响应可解析）。"""
+    executor = FakeToolExecutor({
+        "interaction.get_pending": "oops-not-a-dict",
+    }, [])
+    server.plugin._capabilities["tool-executor"] = executor
+
+    status, body = _decode(_call(server, "/ext/approval_service/interaction/pending"))
+
+    assert status == 500
+    assert "internal server error" in body["error"]
+
+
+def test_degraded_via_missing_tool_executor(server: Any) -> None:
+    """plugin 无 tool-executor 注入 → 真实 _get_human_interaction_service 降级
+    （不 monkeypatch 函数本体，验证 except 分支 + 空 pending 语义）。"""
+    status, body = _decode(_call(server, "/ext/approval_service/interaction/pending"))
+
+    assert status == 200
+    assert body == {"items": [], "total": 0}
+
+    status, body = _decode(_call(server, "/ext/approval_service/interaction/r1/approve", "POST"))
+    assert status == 200
+    assert body["success"] is False
+
+    status, body = _decode(_call(server, "/ext/approval_service/interaction/r1"))
+    assert status == 404
+
+
+def test_get_request_matches_by_request_id_key(server: Any) -> None:
+    """详情匹配兼容 id 与 request_id 两种键（get_request 循环两个分支）。"""
+    svc = FakeService()
+    svc.pending = [
+        {"request_id": "rid-only", "session_id": "s"},
+        {"id": "id-only", "session_id": "s2", "message_data": {"request_id": "id-only"}},
+    ]
+    _inject_service(server, svc)
+
+    _, body = _decode(_call(server, "/ext/approval_service/interaction/rid-only"))
+    assert body["request_id"] == "rid-only"
+
+    _, body = _decode(_call(server, "/ext/approval_service/interaction/id-only"))
+    assert body["id"] == "id-only"
+
+
+def test_proxy_get_detail_via_tool_executor(server: Any) -> None:
+    """真实代理 get_request（pending 过滤匹配）经 tool-executor 链路。"""
+    executor = FakeToolExecutor({
+        "interaction.get_pending": {
+            "requests": [{"request_id": "r-x", "session_id": "s"}], "count": 1,
+        },
+    }, [])
+    server.plugin._capabilities["tool-executor"] = executor
+
+    status, body = _decode(_call(server, "/ext/approval_service/interaction/r-x"))
+
+    assert status == 200
+    assert body["request_id"] == "r-x"
+
+    status, _ = _decode(_call(server, "/ext/approval_service/interaction/nope"))
+    assert status == 404
+
+
+def test_proxy_respond_via_tool_executor(server: Any) -> None:
+    """真实代理 respond（嵌套 unwrap）→ interaction.respond 载荷。"""
+    calls: list[tuple[dict[str, Any], float | None]] = []
+    executor = FakeToolExecutor({
+        "interaction.respond": {"ok": True, "request_id": "r1", "status": "submitted"},
+    }, calls)
+    server.plugin._capabilities["tool-executor"] = executor
+
+    status, body = _decode(_call(
+        server, "/ext/approval_service/interaction/response", "POST",
+        raw_body=_b64(json.dumps({
+            "request_id": "r1",
+            "response": {"response_type": "answered", "selected_option": "opt", "feedback": "f"},
+        })),
+    ))
+
+    assert status == 200
+    assert body == {"success": True}
+    args = calls[0][0]["args"]
+    assert args["request_id"] == "r1"
+    assert args["response_type"] == "answered"
+    assert args["selected_option"] == "opt"
+    assert args["feedback"] == "f"
+
+
+def test_proxy_cancel_tool_error_false(server: Any) -> None:
+    """interaction.cancel 工具返回 error → 取消转发失败 → success False（448-450 分支）。"""
+    executor = FakeToolExecutor({
+        "interaction.cancel": {"error": "request not found"},
+    }, [])
+    server.plugin._capabilities["tool-executor"] = executor
+
+    status, body = _decode(_call(
+        server, "/ext/approval_service/interaction/r1/cancel", "POST", raw_body=_b64("{}"),
+    ))
+
+    assert status == 200
+    assert body == {"success": False, "request_id": "r1", "status": "cancelled"}
+
+
+def test_proxy_viewed_via_tool_executor(server: Any) -> None:
+    """viewed 端点经真实代理：确认应答（human sidecar 无 viewed 工具，不落库）。"""
+    executor = FakeToolExecutor({}, [])
+    server.plugin._capabilities["tool-executor"] = executor
+
+    status, body = _decode(_call(server, "/ext/approval_service/interaction/r1/viewed", "POST"))
+
+    assert status == 200
+    assert body == {"success": True, "request_id": "r1", "viewed": True}
+    assert executor._calls == []  # 无工具调用（确认应答）
+
+
+def test_response_degraded_false(server: Any) -> None:
+    server._get_human_interaction_service = lambda: None
+
+    status, body = _decode(_call(
+        server, "/ext/approval_service/interaction/response", "POST",
+        raw_body=_b64(json.dumps({"request_id": "r1"})),
+    ))
+
+    assert status == 200
+    assert body == {"success": False}
+
+
+def test_cancel_degraded_false(server: Any) -> None:
+    server._get_human_interaction_service = lambda: None
+
+    status, body = _decode(_call(server, "/ext/approval_service/interaction/r1/cancel", "POST"))
+
+    assert status == 200
+    assert body == {"success": False, "request_id": "r1", "status": "cancelled"}
+
+
+def test_fallthrough_404_within_prefix(server: Any) -> None:
+    """前缀内无匹配子路由（未知 action）→ 分派层 404（与命名空间外 404 区分）。"""
+    _inject_service(server, FakeService())
+
+    status, body = _decode(_call(server, "/ext/approval_service/interaction/r1/unknown-action", "POST"))
+
+    assert status == 404
+    assert body["error"] == "not found"
+
+
+def test_response_empty_body_400(server: Any) -> None:
+    """空 body（无 request_id）→ 400（_decode_body 空串分支）。"""
+    _inject_service(server, FakeService())
+
+    status, body = _decode(_call(server, "/ext/approval_service/interaction/response", "POST"))
+
+    assert status == 400
+    assert body["detail"] == "缺少 request_id"
+
+
+def test_viewed_with_degraded_service(server: Any) -> None:
+    server._get_human_interaction_service = lambda: None
+
+    status, body = _decode(_call(server, "/ext/approval_service/interaction/r1/viewed", "POST"))
+
+    assert status == 200
+    assert body == {"success": False, "request_id": "r1", "viewed": True}
+
+
 def test_unknown_route_404(server: Any) -> None:
     status, body = _decode(_call(server, "/ext/approval_service/whatever"))
 

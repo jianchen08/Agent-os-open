@@ -356,3 +356,156 @@ def test_role_update_invalid_json_400(server: Any) -> None:
     status, _ = _decode(_call(server, "/ext/user_admin/users/u2/role", "PUT", raw_body=_b64("{bad")))
 
     assert status == 400
+
+
+# ── 补充分支覆盖（diff coverage 收口）────────────────────────────────────
+
+
+def test_list_row_mapping_edge_cases(server: Any) -> None:
+    """行映射边界：password_hash 敏感列、id 直供、双缺 id、is_active False 保留。"""
+    resp = {"table": "users", "total": 3, "limit": 100, "offset": 0, "rows": [
+        {"id": "direct", "username": "u-a", "password_hash": "x", "is_active": False},
+        {"username": "u-b"},  # 无 user_id 也无 id → id 空串
+        {"user_id": "u3", "username": "u-c", "is_active": False},
+    ]}
+    _inject(server, "db-admin", {"table_query": _db_envelope(resp)})
+
+    status, body = _decode(_call(server, "/ext/user_admin/users"))
+
+    assert status == 200
+    assert [u["id"] for u in body] == ["direct", "", "u3"]
+    assert "password_hash" not in body[0]
+    assert [u["is_active"] for u in body] == [False, True, False]
+
+
+def test_stats_active_count_excludes_inactive(server: Any) -> None:
+    resp = {"table": "users", "total": 3, "limit": 500, "offset": 0, "rows": [
+        {"role": "admin"}, {"role": "user", "is_active": False}, {"role": "viewer"},
+    ]}
+    _inject(server, "db-admin", {"table_query": _db_envelope(resp)})
+
+    status, body = _decode(_call(server, "/ext/user_admin/users/stats"))
+
+    assert status == 200
+    assert body == {"total_users": 3, "active_users": 2, "admin_count": 1}
+
+
+def test_status_tool_reports_injection(server: Any) -> None:
+    status_resp = _run(server.user_admin_status())
+    assert status_resp == {
+        "plugin": "user_admin",
+        "capability": "user-admin",
+        "capability_injected": {"user-admin": False, "db-admin": False},
+    }
+
+    _inject(server, "db-admin", {})
+    status_resp = _run(server.user_admin_status())
+    assert status_resp["capability_injected"] == {"user-admin": False, "db-admin": True}
+
+
+def test_patch_role_without_capability_502(server: Any) -> None:
+    status, body = _decode(_call(
+        server, "/ext/user_admin/users/u2/role", "PATCH", raw_body=_b64(json.dumps({"role": "admin"})),
+    ))
+
+    assert status == 502
+    assert "not injected" in body["error"]["message"]
+
+
+def test_patch_role_capability_bad_envelope_502(server: Any) -> None:
+    _inject(server, "user-admin", {"update_role": "not-a-dict"})
+
+    status, _ = _decode(_call(
+        server, "/ext/user_admin/users/u2/role", "PATCH", raw_body=_b64(json.dumps({"role": "admin"})),
+    ))
+
+    assert status == 502
+
+
+def test_patch_role_capability_2xx_body(server: Any) -> None:
+    env = {"status": 200, "body": {"user": {"id": "u2", "role": "user"}}}
+    _inject(server, "user-admin", {"update_role": env})
+
+    status, body = _decode(_call(
+        server, "/ext/user_admin/users/u2/role", "PATCH", raw_body=_b64(json.dumps({"role": "user"})),
+    ))
+
+    assert status == 200
+    assert body == {"user": {"id": "u2", "role": "user"}}
+
+
+def test_patch_role_invalid_json_body_400(server: Any) -> None:
+    _inject(server, "user-admin", {"update_role": {"status": 200, "body": {}}})
+
+    status, _ = _decode(_call(server, "/ext/user_admin/users/u2/role", "PATCH", raw_body=_b64("{bad")))
+
+    assert status == 400
+
+
+def test_route_fallthrough_non_users_patch_404(server: Any) -> None:
+    status, _ = _decode(_call(server, "/ext/user_admin/other/x/y", "PATCH"))
+
+    assert status == 404
+
+
+def test_authorization_empty_when_no_auth_header(server: Any) -> None:
+    calls = _inject(server, "user-admin", {
+        "update_role": {"status": 200, "body": {"user": {"id": "u2"}}},
+    })
+
+    _decode(_call(
+        server, "/ext/user_admin/users/u2/role", "PATCH",
+        raw_body=_b64(json.dumps({"role": "user"})), headers={"X-Other": "1"},
+    ))
+
+    assert calls[0][1]["_authorization"] == ""  # 无 Authorization 头 → 空凭证
+
+
+def test_query_invalid_ints_fall_back_to_defaults(server: Any) -> None:
+    """非法 skip/limit 回退默认（_qint 异常分支）。"""
+    resp = {"table": "users", "total": 0, "limit": 100, "offset": 0, "rows": []}
+    calls = _inject(server, "db-admin", {"table_query": _db_envelope(resp)})
+
+    _decode(_call(server, "/ext/user_admin/users", query={"skip": "abc", "limit": "xyz"}))
+
+    params = calls[0][1]
+    assert params["limit"] == 100
+    assert params["offset"] == 0
+
+
+def test_capability_call_exception_degrades(server: Any) -> None:
+    """db-admin 能力调用抛异常 → 读面降级 200 空（_call_db 异常分支）。"""
+
+    class _Boom:
+        async def call(self, method: str, params: dict[str, Any], timeout: float | None = None) -> Any:
+            raise ConnectionError("kernel gone")
+
+    server.plugin._capabilities["db-admin"] = _Boom()
+
+    status, body = _decode(_call(server, "/ext/user_admin/users"))
+    assert status == 200
+    assert body == []
+
+
+def test_stats_kernel_403_passthrough(server: Any) -> None:
+    _inject(server, "db-admin", {"table_query": _db_envelope({}, status=403)})
+
+    status, body = _decode(_call(server, "/ext/user_admin/users/stats"))
+
+    assert status == 403
+
+
+def test_role_update_without_capability_502(server: Any) -> None:
+    status, body = _decode(_call(
+        server, "/ext/user_admin/users/u2/role", "PUT", raw_body=_b64(json.dumps({"role": "user"})),
+    ))
+
+    assert status == 502
+    assert "not injected" in body["error"]["message"]
+
+
+def test_delete_without_capability_502(server: Any) -> None:
+    status, body = _decode(_call(server, "/ext/user_admin/users/u1", "DELETE"))
+
+    assert status == 502
+    assert "not injected" in body["error"]["message"]

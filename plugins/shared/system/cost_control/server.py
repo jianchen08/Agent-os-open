@@ -257,7 +257,8 @@ def _resolve_project_root() -> Path:
     for candidate in [here, *here.parents]:
         if (candidate / "config").is_dir() and (candidate / "config" / "models").is_dir():
             return candidate
-    return Path(__file__).resolve().parent.parent.parent.parent
+    # 兜底：仓库布局内必有 config/ 探测命中（与 channel_api 同构）
+    return Path(__file__).resolve().parent.parent.parent.parent  # pragma: no cover
 
 
 _COST_CONTROL_YAML = _resolve_project_root() / "config" / "system" / "cost_control.yaml"

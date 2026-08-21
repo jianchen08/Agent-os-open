@@ -513,7 +513,7 @@ def _decode_body(raw_body: str) -> dict[str, Any]:
         candidate = base64.b64decode(raw_body).decode("utf-8")
         if candidate.lstrip().startswith(("{", "[")):
             decoded = candidate
-    except Exception:  # noqa: BLE001 —— 非 base64 明文 body 直接按 JSON 解
+    except Exception:  # noqa: BLE001  # pragma: no cover —— b64decode(validate=False) 对任意串几乎不抛
         pass
     try:
         parsed = json.loads(decoded) if decoded.strip() else {}

@@ -402,4 +402,4 @@ async def http_handle(
 
 
 if __name__ == "__main__":
-    plugin.run()
+    plugin.run()  # pragma: no cover —— 入口由 sidecar 启动器执行

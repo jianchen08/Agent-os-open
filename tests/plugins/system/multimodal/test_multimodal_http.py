@@ -296,3 +296,90 @@ def test_unknown_route_404(server: Any) -> None:
 
     assert status == 404
     assert "not found" in body["error"]["message"]
+
+
+# ── 补充分支覆盖（diff coverage 收口）────────────────────────────────────
+
+
+def test_transcribe_generic_exception_500(server: Any) -> None:
+    import asr as asr_mod
+
+    class _Boom2(_FakeASR):
+        async def transcribe(self, audio_bytes: bytes, mime_type: str, language: str | None) -> str:
+            raise ValueError("unexpected")
+
+    monkeypatch = pytest.MonkeyPatch()
+    monkeypatch.setattr(asr_mod, "get_asr_service", lambda: _Boom2())
+    content_type, body = _multipart({"file": ("a.webm", "audio/webm", b"data")})
+    try:
+        status, body_resp = _decode(_call(
+            server, "/ext/multimodal_service/audio/transcriptions", "POST",
+            raw_body=body, headers={"Content-Type": content_type},
+        ))
+    finally:
+        monkeypatch.undo()
+
+    assert status == 500
+
+
+def test_transcribe_empty_language_normalized(server: Any, monkeypatch: pytest.MonkeyPatch) -> None:
+    import asr as asr_mod
+
+    captured: dict[str, Any] = {}
+
+    class _Recorder2(_FakeASR):
+        async def transcribe(self, audio_bytes: bytes, mime_type: str, language: str | None) -> str:
+            captured["lang"] = language
+            return "ok"
+
+    monkeypatch.setattr(asr_mod, "get_asr_service", lambda: _Recorder2())
+    content_type, body = _multipart({"file": ("a.webm", "audio/webm", b"d"), "language": ""})
+
+    status, _ = _decode(_call(
+        server, "/ext/multimodal_service/audio/transcriptions", "POST",
+        raw_body=body, headers={"Content-Type": content_type},
+    ))
+
+    assert status == 200
+    assert captured["lang"] is None  # 空串 language → None（默认配置）
+
+
+def test_transcribe_without_content_type_header_400(server: Any) -> None:
+    """headers 缺失 content-type → 400（requires multipart，头循环穷尽分支）。"""
+    _, body_b64 = _multipart({"file": ("a.webm", "audio/webm", b"d")})
+
+    status, _ = _decode(_call(
+        server, "/ext/multimodal_service/audio/transcriptions", "POST", raw_body=body_b64,
+    ))
+
+    assert status == 400
+
+
+def test_transcribe_non_multipart_body_with_multipart_header_400(server: Any) -> None:
+    """声明 multipart 但 body 不是 multipart 报文 → email 解析非 multipart → 缺 file 400。"""
+    status, _ = _decode(_call(
+        server, "/ext/multimodal_service/audio/transcriptions", "POST",
+        raw_body=base64.b64encode(b"plain text body").decode(),
+        headers={"Content-Type": "multipart/form-data; boundary=xyz"},
+    ))
+
+    assert status == 400
+
+
+def test_transcribe_part_without_name_skipped(server: Any) -> None:
+    """multipart 内含无 Content-Disposition 名段的 part → 解析跳过 → 缺 file 400。"""
+    boundary = "bndr"
+    raw = (
+        f"--{boundary}\r\n"
+        "Content-Type: text/plain\r\n"
+        "\r\n"
+        "orphan part without name\r\n"
+        f"--{boundary}--\r\n"
+    ).encode()
+    status, _ = _decode(_call(
+        server, "/ext/multimodal_service/audio/transcriptions", "POST",
+        raw_body=base64.b64encode(raw).decode(),
+        headers={"Content-Type": f"multipart/form-data; boundary={boundary}"},
+    ))
+
+    assert status == 400
