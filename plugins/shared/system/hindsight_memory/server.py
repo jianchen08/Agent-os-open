@@ -935,6 +935,131 @@ def _ok(data: Any) -> dict[str, Any]:
     return {"success": True, "data": data}
 
 
+def _decode_body(raw_body: str) -> dict[str, Any]:
+    """解码 http.handle 的 raw_body（base64 或明文 JSON）为 dict。"""
+    if not raw_body:
+        return {}
+    try:
+        try:
+            decoded = base64.b64decode(raw_body).decode("utf-8")
+            if not decoded.lstrip().startswith(("{", "[")):
+                decoded = raw_body
+        except Exception:  # noqa: BLE001
+            decoded = raw_body
+        return json.loads(decoded) if decoded.strip() else {}
+    except json.JSONDecodeError as e:
+        raise ValueError(f"invalid JSON body: {e}") from e
+
+
+# ── memory 域：IMemoryBackend 懒构建注入（channel_api 退役批次 1 随迁）────────
+
+_memory_backend: Any | None = None
+_memory_backend_attempted = False
+
+
+def _ensure_memory_backend() -> Any | None:
+    """构建并缓存 IMemoryBackend（幂等）；能力缺失/构建失败时返回 None。
+
+    与 channel_api server.py 同款懒注入：tool-executor 能力注入经
+    wiring.build_memory_backend 构造 HindsightBackend（唯一后端），
+    None 时 memory 域端点空结果降级。
+    """
+    global _memory_backend, _memory_backend_attempted
+    if not _memory_backend_attempted:
+        _memory_backend_attempted = True
+        try:
+            from wiring import build_memory_backend  # noqa: PLC0415
+
+            _memory_backend = build_memory_backend(plugin)
+        except Exception as e:  # noqa: BLE001
+            logger.warning("[hindsight] 记忆后端构建失败 | error=%s", e)
+    return _memory_backend
+
+
+def _kberr_response(exc: Exception) -> dict[str, Any]:
+    """把知识库/记忆域业务异常（KBError/MemoryAPIError，含 status_code）转 HTTP 响应。"""
+    status = int(getattr(exc, "status_code", 500) or 500)
+    message = getattr(exc, "message", None) or str(exc)
+    return _ok(_json_response({"detail": message}, status))
+
+
+async def _handle_memory_domain(path: str, method: str, raw_body: str, query: dict[str, str]) -> dict[str, Any]:
+    """memory 域分发：/ext/hindsight_memory_service/memory/** → routes_memory 业务函数。
+
+    自持迁移（channel_api 退役批次 1）：分发前懒注入记忆后端（幂等；无能力时
+    保持 None → 路由空结果降级）。路径语义与原 /ext/channel_api/memory/** 逐项
+    对齐（前端 memory.ts 消费同一响应形态）。
+    """
+    import routes_memory as rmm  # noqa: PLC0415
+
+    rmm.set_memory_backend(_ensure_memory_backend())
+
+    prefix = "/ext/hindsight_memory_service/memory"
+    if not path.startswith(prefix):
+        return _ok(_json_response({"error": "not a memory path", "path": path}, 404))
+    sub = path[len(prefix):]  # "" / "/search" / "/episodes" / "/{memory_id}" ...
+
+    def _qint(key: str, default: int) -> int:
+        try:
+            return int(query[key]) if key in query else default
+        except (TypeError, ValueError):
+            return default
+
+    try:
+        # GET ""（list，query: memory_type/limit/offset）
+        if sub in ("", "/") and method == "GET":
+            return _ok(_json_response(await rmm.list_memories(
+                memory_type=query.get("memory_type"),
+                limit=_qint("limit", 20),
+                offset=_qint("offset", 0),
+            )))
+        # GET /search（query: query/top_k/method）
+        if sub == "/search" and method == "GET":
+            return _ok(_json_response(await rmm.search_memories(
+                query=query.get("query", ""),
+                top_k=_qint("top_k", 5),
+                method=query.get("method", "keyword"),
+            )))
+        # POST /search（body: query/top_k）
+        if sub == "/search" and method == "POST":
+            body = _decode_body(raw_body) or None
+            return _ok(_json_response(await rmm.search_memories_post(body)))
+        # GET /episodes（query: page/page_size）
+        if sub == "/episodes" and method == "GET":
+            return _ok(_json_response(await rmm.list_episodes(
+                page=_qint("page", 1), page_size=_qint("page_size", 20),
+            )))
+        # GET /episodes/{episode_id}
+        if sub.startswith("/episodes/") and method == "GET":
+            episode_id = sub[len("/episodes/"):]
+            return _ok(_json_response(await rmm.get_episode(episode_id)))
+        # GET /semantic
+        if sub == "/semantic" and method == "GET":
+            return _ok(_json_response(await rmm.list_semantic()))
+        # POST /consolidate
+        if sub == "/consolidate" and method == "POST":
+            return _ok(_json_response(await rmm.consolidate_memory()))
+        # GET /stats
+        if sub == "/stats" and method == "GET":
+            return _ok(_json_response(await rmm.get_memory_stats()))
+        # GET /{memory_id}（动态路径，放最后）
+        if sub.startswith("/") and method == "GET" and "/" not in sub[1:]:
+            memory_id = sub[1:]
+            return _ok(_json_response(await rmm.get_memory(memory_id)))
+        # DELETE /{memory_id}
+        if sub.startswith("/") and method == "DELETE" and "/" not in sub[1:]:
+            memory_id = sub[1:]
+            return _ok(_json_response(await rmm.delete_memory(memory_id)))
+
+        logger.warning("memory http.handle: no route for sub=%s method=%s", sub, method)
+        return _ok(_json_response({"error": "not found", "path": path}, 404))
+    except Exception as exc:  # noqa: BLE001
+        if hasattr(exc, "status_code"):
+            return _kberr_response(exc)
+        logger.error("memory http.handle 未预期错误: %s", exc, exc_info=True)
+        return _ok(_json_response({"error": "internal server error", "detail": str(exc)}, 500))
+
+
 @plugin.tool(
     name="http.handle",
     schema={
@@ -958,7 +1083,7 @@ async def http_handle(
     headers: dict[str, str] | None = None,
     query: dict[str, str] | None = None,
 ) -> dict[str, Any]:
-    """按 path 分发：recall（记忆回顾）/ stats（降级状态）。"""
+    """按 path 分发：recall/stats（既有）/ memory 域 / knowledge-base 域。"""
     q = query or {}
     try:
         if path == "/ext/hindsight_memory_service/recall" and method == "GET":
@@ -979,6 +1104,10 @@ async def http_handle(
                     }
                 )
             )
+
+        # memory 域（channel_api 退役批次 1 自持迁移）
+        if path.startswith("/ext/hindsight_memory_service/memory"):
+            return await _handle_memory_domain(path, method, raw_body, q)
 
         return _ok(_json_response({"error": "not found", "path": path}, 404))
     except Exception as exc:

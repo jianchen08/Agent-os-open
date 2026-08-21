@@ -193,6 +193,33 @@
           },
           "type": "object"
         }
+      },
+      {
+        "name": "http.handle",
+        "description": "HTTP endpoint handler for /ext/hindsight_memory_service/** (recall/stats + memory 域 + knowledge-base 域)",
+        "input_schema": {
+          "properties": {
+            "path": {
+              "type": "string"
+            },
+            "method": {
+              "type": "string"
+            },
+            "plugin_id": {
+              "type": "string"
+            },
+            "raw_body": {
+              "type": "string"
+            },
+            "headers": {
+              "type": "object"
+            },
+            "query": {
+              "type": "object"
+            }
+          },
+          "type": "object"
+        }
       }
     ]
   },
@@ -220,7 +247,110 @@
       "timeout_ms": 5000,
       "max_concurrency": 8,
       "description": "记忆后端状态"
+    },
+    {
+      "route_id": "memory_list",
+      "method": "GET",
+      "path": "/ext/hindsight_memory_service/memory",
+      "auth": "user",
+      "handler_capability": "http.handle",
+      "timeout_ms": 5000,
+      "max_concurrency": 8,
+      "description": "memory 域：记忆列表（query: memory_type/limit/offset）"
+    },
+    {
+      "route_id": "memory_search_get",
+      "method": "GET",
+      "path": "/ext/hindsight_memory_service/memory/search",
+      "auth": "user",
+      "handler_capability": "http.handle",
+      "timeout_ms": 5000,
+      "max_concurrency": 8,
+      "description": "memory 域：关键词搜索（query: query/top_k/method）"
+    },
+    {
+      "route_id": "memory_search_post",
+      "method": "POST",
+      "path": "/ext/hindsight_memory_service/memory/search",
+      "auth": "user",
+      "handler_capability": "http.handle",
+      "timeout_ms": 5000,
+      "max_concurrency": 8,
+      "description": "memory 域：关键词搜索（POST）"
+    },
+    {
+      "route_id": "memory_episodes_list",
+      "method": "GET",
+      "path": "/ext/hindsight_memory_service/memory/episodes",
+      "auth": "user",
+      "handler_capability": "http.handle",
+      "timeout_ms": 5000,
+      "max_concurrency": 8,
+      "description": "memory 域：情景记忆列表（query: page/page_size）"
+    },
+    {
+      "route_id": "memory_episode_get",
+      "method": "GET",
+      "path": "/ext/hindsight_memory_service/memory/episodes/{episode_id}",
+      "auth": "user",
+      "handler_capability": "http.handle",
+      "timeout_ms": 5000,
+      "max_concurrency": 8,
+      "description": "memory 域：单个情景记忆"
+    },
+    {
+      "route_id": "memory_semantic_list",
+      "method": "GET",
+      "path": "/ext/hindsight_memory_service/memory/semantic",
+      "auth": "user",
+      "handler_capability": "http.handle",
+      "timeout_ms": 5000,
+      "max_concurrency": 8,
+      "description": "memory 域：语义记忆列表"
+    },
+    {
+      "route_id": "memory_consolidate",
+      "method": "POST",
+      "path": "/ext/hindsight_memory_service/memory/consolidate",
+      "auth": "user",
+      "handler_capability": "http.handle",
+      "timeout_ms": 10000,
+      "max_concurrency": 2,
+      "description": "memory 域：记忆整合"
+    },
+    {
+      "route_id": "memory_stats",
+      "method": "GET",
+      "path": "/ext/hindsight_memory_service/memory/stats",
+      "auth": "user",
+      "handler_capability": "http.handle",
+      "timeout_ms": 5000,
+      "max_concurrency": 8,
+      "description": "memory 域：记忆统计"
+    },
+    {
+      "route_id": "memory_get",
+      "method": "GET",
+      "path": "/ext/hindsight_memory_service/memory/{memory_id}",
+      "auth": "user",
+      "handler_capability": "http.handle",
+      "timeout_ms": 5000,
+      "max_concurrency": 8,
+      "description": "memory 域：记忆详情"
+    },
+    {
+      "route_id": "memory_delete",
+      "method": "DELETE",
+      "path": "/ext/hindsight_memory_service/memory/{memory_id}",
+      "auth": "user",
+      "handler_capability": "http.handle",
+      "timeout_ms": 5000,
+      "max_concurrency": 4,
+      "description": "memory 域：删除记忆"
     }
+  ],
+  "granted_capabilities": [
+    "tool-executor"
   ],
   "ui_schema": {
     "widgets": [

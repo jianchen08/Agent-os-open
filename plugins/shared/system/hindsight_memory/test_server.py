@@ -655,3 +655,96 @@ class TestBankIdDefaultWarnsOnce:
     def test_explicit_bank_id_short_circuits(self, mod: Any) -> None:
         """显式 bank_id 优先（回归）。"""
         assert mod._resolve_bank_id("bank_X") == "bank_X"
+
+
+# ═══════════════════════════════════════════════════════════
+# memory 域 / knowledge-base 域 http.handle 分发（channel_api 退役自持迁移）
+# ═══════════════════════════════════════════════════════════
+
+def _http_ok(out):
+    """http_handle 返回 {success, data(HttpHandleResponse)} → 解出 body dict。"""
+    import base64
+    assert out["success"] is True, out
+    data = out["data"]
+    assert data.get("status") == 200, data
+    return json.loads(base64.b64decode(data["body"]).decode("utf-8"))
+
+
+def test_http_memory_episodes_dispatch():
+    """memory 域：http.handle 分发到 routes_memory，注入的 mock 后端结果回传。
+
+    注入路径经 server 模块级_ensure_memory_backend（分发时懒构建）——
+    测试通过 server._memory_backend + _memory_backend_attempted 短路注入。
+    """
+    import server as srv
+    from routes_memory import set_memory_backend
+    from unittest.mock import AsyncMock, MagicMock
+
+    backend = MagicMock()
+    backend.search = AsyncMock(return_value=[
+        {"id": "e1", "content": "intent", "score": 1.0, "memory_type": "episode",
+         "metadata": {"tags": ["t"], "created_at": "t0"}},
+    ])
+    srv._memory_backend = backend
+    srv._memory_backend_attempted = True
+    try:
+        out = _http_call("/ext/hindsight_memory_service/memory/episodes",
+                         query={"page": "1", "page_size": "10"})
+        payload = _http_ok(out)
+        assert payload["total"] == 1
+        assert payload["items"][0]["id"] == "e1"
+        assert payload["items"][0]["intent_text"] == "intent"
+        backend.search.assert_awaited_once()
+    finally:
+        srv._memory_backend = None
+        srv._memory_backend_attempted = False
+        set_memory_backend(None)
+
+
+def test_http_memory_search_get_dispatch():
+    import server as srv
+    from routes_memory import set_memory_backend
+    from unittest.mock import AsyncMock, MagicMock
+
+    backend = MagicMock()
+    backend.search = AsyncMock(return_value=[
+        {"id": "m1", "content": "hit", "score": 0.9, "memory_type": "semantic", "metadata": {}},
+    ])
+    srv._memory_backend = backend
+    srv._memory_backend_attempted = True
+    try:
+        out = _http_call("/ext/hindsight_memory_service/memory/search",
+                         query={"query": "q", "top_k": "5"})
+        payload = _http_ok(out)
+        assert payload["total"] == 1
+        assert payload["items"][0]["content"] == "hit"
+        assert backend.search.call_args.kwargs["query"] == "q"
+    finally:
+        srv._memory_backend = None
+        srv._memory_backend_attempted = False
+        set_memory_backend(None)
+
+
+def test_http_memory_delete_missing_404():
+    """memory 域 DELETE 未命中 → HTTP 404（body {"detail": ...}，与旧版一致）。"""
+    import server as srv
+    from routes_memory import set_memory_backend
+    from unittest.mock import AsyncMock, MagicMock
+
+    backend = MagicMock()
+    backend.search = AsyncMock(return_value=[])
+    backend.delete = AsyncMock(return_value=False)
+    srv._memory_backend = backend
+    srv._memory_backend_attempted = True
+    try:
+        out = _http_call("/ext/hindsight_memory_service/memory/nope", method="DELETE")
+        assert out["success"] is True
+        assert out["data"]["status"] == 404
+        payload = json.loads(__import__("base64").b64decode(out["data"]["body"]).decode("utf-8"))
+        assert payload["detail"] == "未找到相关记忆"
+    finally:
+        srv._memory_backend = None
+        srv._memory_backend_attempted = False
+        set_memory_backend(None)
+
+
