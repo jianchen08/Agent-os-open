@@ -162,6 +162,14 @@ body.has-bg-image #root {
   z-index: 1;
 }
 
+/* 背景图模式的第二环（同日）：#root 首层主容器自带不透明 bg-background，
+   会把整个装饰层盖死——立绘只能从半透明侧栏微漏、视觉上等于没有背景图。
+   背景图模式下主容器背景让位（各区域自带面板底：侧栏/工作区实底、
+   聊天区透明透出立绘）*/
+body.has-bg-image #root > div:first-child {
+  background: transparent;
+}
+
 /* 主题区域纹理：侧边栏 / 聊天区（叠加在各自 --sidebar-bg / --chat-bg 之上） */
 .theme-sidebar-area {
   background-image: var(--sidebar-texture, none);
