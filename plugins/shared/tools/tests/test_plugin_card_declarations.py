@@ -14,6 +14,8 @@
 from __future__ import annotations
 
 import json
+import os
+from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
@@ -46,12 +48,29 @@ CHAT_CARD_BLOCK_TYPES = {
     "image",
     "link",
     "log",
+    "form",  # 交互表单块（widget 化 T2 引入，widget_demo 使用）
 }
 
+# 遍历剪枝集：.venv（各插件独立 venv）/ node_modules / 缓存目录；
+# 另剪一切 junction——dsh_adapter 装载区以 peer junction 指向 DSH 参考仓
+# （设计机制，见 docs/dsh_decision_records.md），rglob 旧写法会跟进 junction
+# 遍历整个参考仓（junction 环 + .pnpm 巨树，2026-08-21 实测收集期挂死 45min+）。
+_SKIP_DIRS = {".venv", "node_modules", "__pycache__", ".git", ".pytest_cache"}
+
+
+def _iter_plugin_jsons(root: Path) -> Iterator[Path]:
+    for dirpath, dirnames, filenames in os.walk(root):
+        dirnames[:] = [
+            d
+            for d in dirnames
+            if d not in _SKIP_DIRS and not os.path.isjunction(os.path.join(dirpath, d))
+        ]
+        if "plugin.json" in filenames:
+            yield Path(dirpath) / "plugin.json"
+
+
 # 全部工具插件（含工具声明的 plugin.json）
-TOOL_PLUGIN_JSONS = sorted(
-    p for p in (_TOOLS_ROOT / "..").rglob("plugin.json") if "node_modules" not in str(p)
-)
+TOOL_PLUGIN_JSONS = sorted(_iter_plugin_jsons(_TOOLS_ROOT.parent))
 
 
 def _tool_entries(path: Path) -> list[dict]:
