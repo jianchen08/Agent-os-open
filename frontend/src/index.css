@@ -153,6 +153,15 @@ body.has-bg-image::after {
   opacity: var(--bg-overlay-opacity, 1);
 }
 
+/* 背景图模式下内容必须浮到装饰层之上：fixed + z-index:0 的 ::after 画在
+   全部 static 内容之上（CSS 定位元素 vs 非定位元素），无本规则时背景图
+   会盖住整个 UI——原生背景图功能的层叠 bug（内置预设从未启用背景图，
+   坏了未被发现；DSH 皮肤立绘走同机制时暴露，2026-08-21）*/
+body.has-bg-image #root {
+  position: relative;
+  z-index: 1;
+}
+
 /* 主题区域纹理：侧边栏 / 聊天区（叠加在各自 --sidebar-bg / --chat-bg 之上） */
 .theme-sidebar-area {
   background-image: var(--sidebar-texture, none);
