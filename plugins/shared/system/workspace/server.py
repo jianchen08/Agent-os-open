@@ -431,8 +431,9 @@ async def rename_entry(container_task_id: str, body: dict[str, Any]) -> dict[str
         return {"success": False, "message": f"路径不存在: {old_path}"}
 
     # 计算新路径：在同一个目录下替换文件/目录名
-    full_new_path = full_old_path.parent / new_name
-    # 确保新路径也在工作空间范围内
+    full_new_path = (full_old_path.parent / new_name).resolve()
+    # 确保新路径也在工作空间范围内（resolve 后再比较——new_name 为 `..` 等
+    # 单段特殊名时字符串前缀比较会漏判，原 channel_api 实现此处为死检查）
     if not str(full_new_path).startswith(str(workspace_path)):
         return {"success": False, "message": "目标路径超出工作空间范围"}
 

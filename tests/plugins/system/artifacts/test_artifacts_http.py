@@ -661,3 +661,77 @@ class TestDispatch:
     def test_on_load_smoke(self, server: Any) -> None:
         _run(server._on_load({}))  # 不抛即过
         assert server.plugin._lifecycle_handlers  # on_load 已注册
+
+
+# ═══════════════════════════════════════════════════════════
+# 7. 补充覆盖：引导分支 / base64 body / multipart 防御分支 / 上传目录默认值
+# ═══════════════════════════════════════════════════════════
+
+
+class TestExtraBranches:
+    def test_load_adds_system_dir(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """system / shared 目录不在 sys.path 时，server.py 自举补入（含 tenant_data）。"""
+        sys_dir = str(_PLUGIN_DIR.parent)
+        shared_dir = str(_PLUGIN_DIR.parents[1])
+        prev = [p for p in list(sys.path) if p in (sys_dir, shared_dir)]
+        for p in prev:
+            sys.path.remove(p)
+        try:
+            loaded = _load_server()
+            assert "http.handle" in loaded.plugin._tools
+            assert sys_dir in sys.path
+            assert shared_dir in sys.path
+        finally:
+            for p in prev:
+                if p not in sys.path:
+                    sys.path.insert(0, p)
+
+    def test_put_artifact_with_base64_body(self, server: Any) -> None:
+        """raw_body 为 base64 编码 JSON → _decode_body 走 base64 分支。"""
+        art = _make_artifact(server)
+        status, body = _decode_http(
+            _call(
+                server,
+                path=f"/ext/artifacts/{art['id']}",
+                method="PUT",
+                raw_body=base64.b64encode(b'{"content": "v2 from base64"}').decode(),
+            )
+        )
+        assert status == 200
+        assert body["content"] == "v2 from base64"
+        assert body["version"] == 2
+
+    def test_parse_multipart_non_multipart(self, server: Any) -> None:
+        """非 multipart content-type → 空字段字典。"""
+        assert server._parse_multipart("text/plain", b"hello") == {}
+
+    def test_parse_multipart_part_without_name(self, server: Any) -> None:
+        """part 缺 name 参数 → 跳过该 part。"""
+        body = f"--{_BOUNDARY}\r\nContent-Disposition: form-data\r\n\r\nno-name-value\r\n--{_BOUNDARY}--\r\n".encode()
+        fields = server._parse_multipart(f"multipart/form-data; boundary={_BOUNDARY}", body)
+        assert fields == {}
+
+    def test_get_uploads_dir_default_tenant(self, server: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        """UPLOADS_DIR 未设 → 多租户数据根 data/{tenant}/uploads（AGENTOS_DATA_DIR 隔离）。"""
+        monkeypatch.delenv("UPLOADS_DIR", raising=False)
+        monkeypatch.setenv("AGENTOS_DATA_DIR", str(tmp_path))
+        assert server._get_uploads_dir() == str(tmp_path / "default" / "uploads")
+
+    def test_upload_parse_failure(self, server: Any, monkeypatch: pytest.MonkeyPatch) -> None:
+        """_parse_multipart 抛错 → 400 multipart parse failed。"""
+
+        def boom(*_a: Any, **_k: Any) -> Any:
+            raise RuntimeError("malformed")
+
+        monkeypatch.setattr(server, "_parse_multipart", boom)
+        status, body = _decode_http(
+            _call(
+                server,
+                path="/ext/artifacts/upload",
+                method="POST",
+                raw_body=base64.b64encode(b"garbage").decode(),
+                headers={"content-type": f"multipart/form-data; boundary={_BOUNDARY}"},
+            )
+        )
+        assert status == 400
+        assert "multipart parse failed" in body["error"]

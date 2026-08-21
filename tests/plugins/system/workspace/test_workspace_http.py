@@ -1197,3 +1197,317 @@ class TestToolsStillRegistered:
     def test_workspace_get_tool_uninitialized(self, server: Any) -> None:
         server._service = None  # type: ignore[attr-defined]
         assert _run(server.workspace_get("t1"))["success"] is False
+
+
+# ═══════════════════════════════════════════════════════════
+# 7. 补充覆盖：引导分支 / 空 body / 大文件 / 防御分支（diff coverage 100%）
+# ═══════════════════════════════════════════════════════════
+
+
+class TestBootstrapBranches:
+    def test_load_adds_system_dir(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """system 目录不在 sys.path 时，server.py 自举补入（对齐 sidecar 生产行为）。"""
+        sys_dir = str(_PLUGIN_DIR.parent)
+        removed: list[str] = []
+        for p in list(sys.path):
+            if p == sys_dir:
+                sys.path.remove(p)
+                removed.append(p)
+        assert removed, "测试前置：system 目录应本就在 sys.path 上"
+        try:
+            loaded = _load_server()
+            assert "http.handle" in loaded.plugin._tools
+            assert sys_dir in sys.path
+        finally:
+            for p in removed:
+                if p not in sys.path:
+                    sys.path.insert(0, p)
+
+    def test_on_load_no_capability_keeps_legacy_reader(self, server: Any) -> None:
+        """on_load 后未注入读面：_read_state_rows 走 None 回退（legacy 镜像）。"""
+        _run(server._on_load({}))
+        svc = server.get_workspace_service()
+        assert _run(svc._read_state_rows()) is None
+
+
+class TestEmptyAndOversizedPayloads:
+    def test_create_entry_empty_raw_body(self, server: Any, ws_dir: str) -> None:
+        """raw_body 空串 → _decode_body 返回 {} → create_entry 参数校验兜住。"""
+        _inject_workspace_path(server, ws_dir)
+        status, body = _decode_http(_call(
+            server,
+            path="/ext/workspace_service/workspaces/t1/create-entry",
+            method="POST",
+        ))
+        assert status == 200
+        assert body["success"] is False
+        assert "path 参数不能为空" in body["message"]
+
+    def test_save_file_body_none_direct_call(self, server: Any, ws_dir: str) -> None:
+        """save_file_content body=None → {}（handler 直调路径，dispatch 恒传 dict）。"""
+        _inject_workspace_path(server, ws_dir)
+        result = _run(server.save_file_content("t1", "x.md", None))
+        assert result["success"] is True
+        assert (Path(ws_dir) / "x.md").exists()
+
+    def test_read_file_too_large(self, server: Any, ws_dir: str) -> None:
+        _inject_workspace_path(server, ws_dir)
+        huge = Path(ws_dir) / "huge.txt"
+        huge.write_text("x" * (10 * 1024 * 1024 + 1), encoding="utf-8")
+        status, body = _decode_http(_call(
+            server,
+            path="/ext/workspace_service/workspaces/t1/file-content",
+            method="GET",
+            query={"path": "huge.txt"},
+        ))
+        assert status == 200
+        assert body["success"] is False
+        assert "文件过大" in body["message"]
+
+    def test_save_file_too_large(self, server: Any, ws_dir: str) -> None:
+        _inject_workspace_path(server, ws_dir)
+        status, body = _decode_http(_call(
+            server,
+            path="/ext/workspace_service/workspaces/t1/file-content",
+            method="PUT",
+            query={"path": "huge.md"},
+            raw_body=json.dumps({"content": "x" * (10 * 1024 * 1024 + 1)}),
+        ))
+        assert status == 200
+        assert body["success"] is False
+        assert "内容过大" in body["message"]
+
+    def test_save_file_write_io_error(self, server: Any, ws_dir: str, monkeypatch: pytest.MonkeyPatch) -> None:
+        _inject_workspace_path(server, ws_dir)
+        monkeypatch.setattr(Path, "write_text", lambda *_a, **_k: (_ for _ in ()).throw(OSError("denied")))
+        status, body = _decode_http(_call(
+            server,
+            path="/ext/workspace_service/workspaces/t1/file-content",
+            method="PUT",
+            query={"path": "out.md"},
+            raw_body=json.dumps({"content": "x"}),
+        ))
+        assert status == 200
+        assert body["success"] is False
+        assert "保存文件失败" in body["message"]
+
+    def test_read_relative_path_no_workspace_in_range(self, server: Any) -> None:
+        """无工作空间 + 相对路径在项目根内 → 按项目根解析读取。"""
+        _inject_workspace_path(server, None)
+        status, body = _decode_http(_call(
+            server,
+            path="/ext/workspace_service/workspaces/_missing/file-content",
+            method="GET",
+            query={"path": "AGENTS.md"},
+        ))
+        assert status == 200
+        assert body["success"] is True
+
+    def test_read_relative_path_no_workspace_escape(self, server: Any) -> None:
+        """无工作空间 + 相对路径越出项目根 → 拒绝。"""
+        _inject_workspace_path(server, None)
+        status, body = _decode_http(_call(
+            server,
+            path="/ext/workspace_service/workspaces/_missing/file-content",
+            method="GET",
+            query={"path": "../escape.txt"},
+        ))
+        assert status == 200
+        assert body["success"] is False
+        assert "超出工作空间范围" in body["message"]
+
+
+class TestEntryDefensiveBranches:
+    def test_delete_entry_no_workspace(self, server: Any) -> None:
+        _inject_workspace_path(server, None)
+        status, body = _decode_http(_call(
+            server,
+            path="/ext/workspace_service/workspaces/t1/entries",
+            method="DELETE",
+            query={"path": "x.txt"},
+        ))
+        assert status == 200
+        assert body["success"] is False
+        assert "未找到工作空间路径" in body["message"]
+
+    def test_rename_no_workspace(self, server: Any) -> None:
+        _inject_workspace_path(server, None)
+        status, body = _decode_http(_call(
+            server,
+            path="/ext/workspace_service/workspaces/t1/rename-entry",
+            method="POST",
+            raw_body=json.dumps({"old_path": "a.py", "new_name": "b.py"}),
+        ))
+        assert status == 200
+        assert body["success"] is False
+        assert "未找到工作空间路径" in body["message"]
+
+    def test_rename_source_escape(self, server: Any, ws_dir: str) -> None:
+        _inject_workspace_path(server, ws_dir)
+        status, body = _decode_http(_call(
+            server,
+            path="/ext/workspace_service/workspaces/t1/rename-entry",
+            method="POST",
+            raw_body=json.dumps({"old_path": "../evil.py", "new_name": "b.py"}),
+        ))
+        assert status == 200
+        assert body["success"] is False
+        assert "路径超出工作空间范围" in body["message"]
+
+    def test_rename_new_path_out_of_workspace(self, server: Any, ws_dir: str) -> None:
+        """new_name=.. 无路径分隔符，但解析后越出工作空间 → 拒绝。"""
+        _inject_workspace_path(server, ws_dir)
+        (Path(ws_dir) / "a.py").write_text("x", encoding="utf-8")
+        status, body = _decode_http(_call(
+            server,
+            path="/ext/workspace_service/workspaces/t1/rename-entry",
+            method="POST",
+            raw_body=json.dumps({"old_path": "a.py", "new_name": ".."}),
+        ))
+        assert status == 200
+        assert body["success"] is False
+        assert "目标路径超出工作空间范围" in body["message"]
+
+    def test_move_no_workspace(self, server: Any) -> None:
+        _inject_workspace_path(server, None)
+        status, body = _decode_http(_call(
+            server,
+            path="/ext/workspace_service/workspaces/t1/move-entry",
+            method="POST",
+            raw_body=json.dumps({"source_path": "a.py", "destination_dir": "dest"}),
+        ))
+        assert status == 200
+        assert body["success"] is False
+        assert "未找到工作空间路径" in body["message"]
+
+    def test_move_source_escape(self, server: Any, ws_dir: str) -> None:
+        _inject_workspace_path(server, ws_dir)
+        status, body = _decode_http(_call(
+            server,
+            path="/ext/workspace_service/workspaces/t1/move-entry",
+            method="POST",
+            raw_body=json.dumps({"source_path": "../evil.py", "destination_dir": "dest"}),
+        ))
+        assert status == 200
+        assert body["success"] is False
+        assert "源路径超出工作空间范围" in body["message"]
+
+    def test_move_dest_escape(self, server: Any, ws_dir: str) -> None:
+        _inject_workspace_path(server, ws_dir)
+        (Path(ws_dir) / "m.py").write_text("x", encoding="utf-8")
+        status, body = _decode_http(_call(
+            server,
+            path="/ext/workspace_service/workspaces/t1/move-entry",
+            method="POST",
+            raw_body=json.dumps({"source_path": "m.py", "destination_dir": "../evil"}),
+        ))
+        assert status == 200
+        assert body["success"] is False
+        assert "目标路径超出工作空间范围" in body["message"]
+
+    def test_move_dest_outside_workspace(self, server: Any, ws_dir: str, tmp_path: Path) -> None:
+        """防御分支：目标解析路径不落在工作空间内（经校验函数注入外部目录触发）。"""
+        _inject_workspace_path(server, ws_dir)
+        (Path(ws_dir) / "m.py").write_text("x", encoding="utf-8")
+        outside = tmp_path / "outside_dest"
+        outside.mkdir()
+        orig = server._validate_path_in_workspace
+
+        def fake(workspace_path: Path, rel_path: str) -> Path | None:
+            if rel_path == "dest":
+                return outside
+            return orig(workspace_path, rel_path)
+
+        server._validate_path_in_workspace = fake  # type: ignore[method-assign]
+        status, body = _decode_http(_call(
+            server,
+            path="/ext/workspace_service/workspaces/t1/move-entry",
+            method="POST",
+            raw_body=json.dumps({"source_path": "m.py", "destination_dir": "dest"}),
+        ))
+        assert status == 200
+        assert body["success"] is False
+        assert "目标路径超出工作空间范围" in body["message"]
+
+
+class TestSystemFileManager:
+    def test_open_in_system_file_manager_win32(
+        self, tmp_path: Path, server: Any, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        d = tmp_path / "openme"
+        d.mkdir()
+        calls: list[list[str]] = []
+        monkeypatch.setattr(server.subprocess, "Popen", calls.append)
+        monkeypatch.setattr(server.sys, "platform", "win32")
+        assert server._open_in_system_file_manager(str(d)) is True
+        assert calls
+        assert calls[0][0] == "explorer"
+
+    def test_open_in_system_file_manager_darwin(
+        self, tmp_path: Path, server: Any, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        d = tmp_path / "openme"
+        d.mkdir()
+        calls: list[list[str]] = []
+        monkeypatch.setattr(server.subprocess, "Popen", calls.append)
+        monkeypatch.setattr(server.sys, "platform", "darwin")
+        assert server._open_in_system_file_manager(str(d)) is True
+        assert calls[0][0] == "open"
+
+    def test_open_in_system_file_manager_linux(
+        self, tmp_path: Path, server: Any, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        d = tmp_path / "openme"
+        d.mkdir()
+        calls: list[list[str]] = []
+        monkeypatch.setattr(server.subprocess, "Popen", calls.append)
+        monkeypatch.setattr(server.sys, "platform", "linux")
+        assert server._open_in_system_file_manager(str(d)) is True
+        assert calls[0][0] == "xdg-open"
+
+    def test_open_in_system_file_manager_popen_error(
+        self, tmp_path: Path, server: Any, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        d = tmp_path / "openme"
+        d.mkdir()
+
+        def boom(*_a: Any, **_k: Any) -> Any:
+            raise OSError("no explorer")
+
+        monkeypatch.setattr(server.subprocess, "Popen", boom)
+        assert server._open_in_system_file_manager(str(d)) is False
+
+
+class TestWorkspaceToolsSuccess:
+    def test_get_or_create_tool_success(self, server: Any) -> None:
+        _run(server._on_load({}))
+        result = _run(server.workspace_get_or_create("t1", session_id="s1", title="标题"))
+        assert result["success"] is True
+        assert result["workspace"]["container_task_id"] == "t1"
+
+    def test_get_or_create_tool_uninitialized(self, server: Any) -> None:
+        server._service = None  # type: ignore[attr-defined]
+        result = _run(server.workspace_get_or_create("t1"))
+        assert result["success"] is False
+
+    def test_get_tool_success_and_missing(self, server: Any) -> None:
+        _run(server._on_load({}))
+        ws = _run(server.workspace_get_or_create("t1"))
+        found = _run(server.workspace_get("t1"))
+        assert found["success"] is True
+        assert found["workspace"]["id"] == ws["workspace"]["id"]
+        missing = _run(server.workspace_get("ghost"))
+        assert missing["success"] is False
+        assert "不存在" in missing["error"]
+
+    def test_get_file_tree_tool_success(self, server: Any, tmp_path: Path) -> None:
+        _run(server._on_load({}))
+        (tmp_path / "f.txt").write_text("x", encoding="utf-8")
+        result = _run(server.workspace_get_file_tree("t1", base_path=str(tmp_path)))
+        assert result["success"] is True
+        assert {n["name"] for n in result["tree"]} == {"f.txt"}
+
+    def test_get_file_tree_tool_uninitialized(self, server: Any) -> None:
+        server._service = None  # type: ignore[attr-defined]
+        result = _run(server.workspace_get_file_tree("t1"))
+        assert result["success"] is False
