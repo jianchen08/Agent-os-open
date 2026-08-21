@@ -221,6 +221,457 @@
         "scope": "global",
         "description": "DSH 皮肤中心令牌层注入（skin-center 的 skin.css；皮肤选择 = config/dsh_adapter.yaml 的 skin 字段，none/缺省 = 关闭。DOM 补丁层 patches.css/hooks.mjs 不接入）"
       }
+    ],
+    "themes": [
+      {
+        "id": "dsh-skin-blue-fantasy",
+        "name": "蓝色幻想",
+        "description": "鲸鱼插画背景 · periwinkle 靛蓝调色板 · 半透明面板（DSH 皮肤 · dsh_adapter）",
+        "base": "light",
+        "variables": {
+          "--ds-bg-canvas": "#e8ecf5",
+          "--ds-bg-elevated": "color-mix(in srgb, #e8ecf5 82%, white)",
+          "--ds-bg-panel": "#f3f5fb80",
+          "--ds-accent-primary": "#4a5fa8",
+          "--ds-accent-ai": "#4a5fa8",
+          "--ds-bg-hover": "color-mix(in srgb, #4a5fa8 12%, transparent)",
+          "--ds-text-primary": "#1d2539",
+          "--ds-text-secondary": "color-mix(in srgb, #1d2539 78%, #e8ecf5)",
+          "--ds-text-muted": "color-mix(in srgb, #1d2539 55%, #e8ecf5)",
+          "--ds-border-subtle": "color-mix(in srgb, #1d2539 16%, transparent)",
+          "--background": "222 39% 94%",
+          "--foreground": "223 33% 17%",
+          "--card": "222 39% 94%",
+          "--primary": "227 39% 47%",
+          "--ring": "227 39% 47%"
+        },
+        "backgrounds": {
+          "image": {
+            "enabled": true,
+            "url": "/ext/dsh_adapter/styles/skin-assets/blue-fantasy/assets/whale-art.jpg",
+            "position": "center",
+            "size": "cover",
+            "attachment": "fixed",
+            "overlay": "rgba(246, 248, 253, 0.08)",
+            "overlayOpacity": 1
+          }
+        }
+      },
+      {
+        "id": "dsh-skin-cyber-night",
+        "name": "赛博夜城",
+        "description": "霓虹夜城背景 · 青品双色光晕 · 半透明深墨面板 · 全 token 霓虹重映射（DSH 皮肤 · dsh_adapter）",
+        "base": "dark",
+        "variables": {
+          "--ds-bg-canvas": "#04060d",
+          "--ds-bg-elevated": "color-mix(in srgb, #04060d 82%, white)",
+          "--ds-bg-panel": "rgba(236, 250, 255, 0.55)",
+          "--ds-accent-primary": "#00e5ff",
+          "--ds-accent-ai": "#00e5ff",
+          "--ds-bg-hover": "color-mix(in srgb, #00e5ff 12%, transparent)",
+          "--ds-text-primary": "#1a6d88",
+          "--ds-text-secondary": "color-mix(in srgb, #1a6d88 78%, #04060d)",
+          "--ds-text-muted": "color-mix(in srgb, #1a6d88 55%, #04060d)",
+          "--ds-border-subtle": "color-mix(in srgb, #1a6d88 16%, transparent)",
+          "--background": "227 53% 3%",
+          "--foreground": "195 68% 32%",
+          "--card": "227 53% 3%",
+          "--primary": "186 100% 50%",
+          "--ring": "186 100% 50%"
+        },
+        "backgrounds": {
+          "image": {
+            "enabled": true,
+            "url": "/ext/dsh_adapter/styles/skin-assets/cyber-night/assets/cyber-night-art.webp",
+            "position": "center",
+            "size": "cover",
+            "attachment": "fixed",
+            "overlay": "rgba(5, 8, 18, 0.20)",
+            "overlayOpacity": 1
+          }
+        }
+      },
+      {
+        "id": "dsh-skin-dragon-heir",
+        "name": "龙的传人",
+        "description": "不屈龙魂 · 万里长城双主题 · 朱砂龙印（DSH 皮肤 · dsh_adapter）",
+        "base": "light",
+        "variables": {
+          "--ds-bg-canvas": "#f4efe4",
+          "--ds-bg-elevated": "color-mix(in srgb, #f4efe4 82%, white)",
+          "--ds-bg-panel": "#f4efe461",
+          "--ds-accent-primary": "#c3272b",
+          "--ds-accent-ai": "#c3272b",
+          "--ds-bg-hover": "color-mix(in srgb, #c3272b 12%, transparent)",
+          "--ds-text-primary": "#262319",
+          "--ds-text-secondary": "color-mix(in srgb, #262319 78%, #f4efe4)",
+          "--ds-text-muted": "color-mix(in srgb, #262319 55%, #f4efe4)",
+          "--ds-border-subtle": "color-mix(in srgb, #262319 16%, transparent)",
+          "--background": "41 42% 93%",
+          "--foreground": "46 21% 12%",
+          "--card": "41 42% 93%",
+          "--primary": "358 67% 46%",
+          "--ring": "358 67% 46%"
+        },
+        "backgrounds": {
+          "image": {
+            "enabled": true,
+            "url": "/ext/dsh_adapter/styles/skin-assets/dragon-heir/assets/light-art.webp",
+            "position": "center",
+            "size": "cover",
+            "attachment": "fixed",
+            "overlay": "rgba(240, 236, 224, 0.05)",
+            "overlayOpacity": 1
+          }
+        }
+      },
+      {
+        "id": "dsh-skin-furina",
+        "name": "芙宁娜",
+        "description": "芙宁娜背景 · 淡蓝主题 · 半透明面板（DSH 皮肤 · dsh_adapter）",
+        "base": "light",
+        "variables": {
+          "--ds-bg-canvas": "#e8ecf5",
+          "--ds-bg-elevated": "color-mix(in srgb, #e8ecf5 82%, white)",
+          "--ds-bg-panel": "#f3f5fb80",
+          "--ds-accent-primary": "#4a5fb5",
+          "--ds-accent-ai": "#4a5fb5",
+          "--ds-bg-hover": "color-mix(in srgb, #4a5fb5 12%, transparent)",
+          "--ds-text-primary": "#1d2539",
+          "--ds-text-secondary": "color-mix(in srgb, #1d2539 78%, #e8ecf5)",
+          "--ds-text-muted": "color-mix(in srgb, #1d2539 55%, #e8ecf5)",
+          "--ds-border-subtle": "color-mix(in srgb, #1d2539 16%, transparent)",
+          "--background": "222 39% 94%",
+          "--foreground": "223 33% 17%",
+          "--card": "222 39% 94%",
+          "--primary": "228 42% 50%",
+          "--ring": "228 42% 50%"
+        },
+        "backgrounds": {
+          "image": {
+            "enabled": true,
+            "url": "/ext/dsh_adapter/styles/skin-assets/furina/assets/furina-art.jpg",
+            "position": "center",
+            "size": "cover",
+            "attachment": "fixed",
+            "overlay": "rgba(246, 248, 253, 0.08)",
+            "overlayOpacity": 1
+          }
+        }
+      },
+      {
+        "id": "dsh-skin-harbor",
+        "name": "夕港",
+        "description": "暮光蓝港 · 日落橙辉 · 半透明夜色面板（DSH 皮肤 · dsh_adapter）",
+        "base": "dark",
+        "variables": {
+          "--ds-bg-canvas": "#141a2e",
+          "--ds-bg-elevated": "color-mix(in srgb, #141a2e 82%, white)",
+          "--ds-bg-panel": "#181f36b3",
+          "--ds-accent-primary": "#ff9d5c",
+          "--ds-accent-ai": "#ff9d5c",
+          "--ds-bg-hover": "color-mix(in srgb, #ff9d5c 12%, transparent)",
+          "--ds-text-primary": "#fff5ec",
+          "--ds-text-secondary": "color-mix(in srgb, #fff5ec 78%, #141a2e)",
+          "--ds-text-muted": "color-mix(in srgb, #fff5ec 55%, #141a2e)",
+          "--ds-border-subtle": "color-mix(in srgb, #fff5ec 16%, transparent)",
+          "--background": "226 39% 13%",
+          "--foreground": "28 100% 96%",
+          "--card": "226 39% 13%",
+          "--primary": "24 100% 68%",
+          "--ring": "24 100% 68%"
+        },
+        "backgrounds": {
+          "image": {
+            "enabled": true,
+            "url": "/ext/dsh_adapter/styles/skin-assets/harbor/assets/harbor-art.webp",
+            "position": "center",
+            "size": "cover",
+            "attachment": "fixed",
+            "overlay": "rgba(11, 14, 26, 0.42)",
+            "overlayOpacity": 1
+          }
+        }
+      },
+      {
+        "id": "dsh-skin-maid-atelier",
+        "name": "深海女仆工坊",
+        "description": "双女仆背景、深海蓝蕾丝界面与 Q 版侧栏（DSH 皮肤 · dsh_adapter）",
+        "base": "light",
+        "variables": {
+          "--ds-bg-canvas": "#dce6f5",
+          "--ds-bg-elevated": "color-mix(in srgb, #dce6f5 82%, white)",
+          "--ds-bg-panel": "#f8faffb8",
+          "--ds-accent-primary": "#c5a468",
+          "--ds-accent-ai": "#c5a468",
+          "--ds-bg-hover": "color-mix(in srgb, #c5a468 12%, transparent)",
+          "--ds-text-primary": "#172347",
+          "--ds-text-secondary": "color-mix(in srgb, #172347 78%, #dce6f5)",
+          "--ds-text-muted": "color-mix(in srgb, #172347 55%, #dce6f5)",
+          "--ds-border-subtle": "color-mix(in srgb, #172347 16%, transparent)",
+          "--background": "216 56% 91%",
+          "--foreground": "225 51% 18%",
+          "--card": "216 56% 91%",
+          "--primary": "39 44% 59%",
+          "--ring": "39 44% 59%"
+        }
+      },
+      {
+        "id": "dsh-skin-matrix",
+        "name": "Matrix 骇客帝国",
+        "description": "深夜护眼 · 墨绿暗色 · 数字雨（DSH 皮肤 · dsh_adapter）",
+        "base": "dark",
+        "variables": {
+          "--ds-bg-canvas": "#040805",
+          "--ds-bg-elevated": "color-mix(in srgb, #040805 82%, white)",
+          "--ds-bg-panel": "#071009",
+          "--ds-accent-primary": "#00e676",
+          "--ds-accent-ai": "#00e676",
+          "--ds-bg-hover": "color-mix(in srgb, #00e676 12%, transparent)",
+          "--ds-text-primary": "#7dffb3",
+          "--ds-text-secondary": "color-mix(in srgb, #7dffb3 78%, #040805)",
+          "--ds-text-muted": "color-mix(in srgb, #7dffb3 55%, #040805)",
+          "--ds-border-subtle": "color-mix(in srgb, #7dffb3 16%, transparent)",
+          "--background": "135 33% 2%",
+          "--foreground": "145 100% 75%",
+          "--card": "135 33% 2%",
+          "--primary": "151 100% 45%",
+          "--ring": "151 100% 45%",
+          "--font-ui": "\"Menlo\",\"Consolas\",\"JetBrains Mono\",\"Source Code Pro\",\"PingFang SC\",\"Microsoft YaHei\",monospace"
+        }
+      },
+      {
+        "id": "dsh-skin-miku",
+        "name": "初音未来 · 电子歌姬",
+        "description": "蓝紫双马尾 · 01 编号 · 音符波形 · 电子歌姬主题（DSH 皮肤 · dsh_adapter）",
+        "base": "light",
+        "variables": {
+          "--ds-bg-canvas": "#eef5ff",
+          "--ds-bg-elevated": "color-mix(in srgb, #eef5ff 82%, white)",
+          "--ds-bg-panel": "#f3f8ff2e",
+          "--ds-accent-primary": "#2e9bff",
+          "--ds-accent-ai": "#2e9bff",
+          "--ds-bg-hover": "color-mix(in srgb, #2e9bff 12%, transparent)",
+          "--ds-text-primary": "#14263f",
+          "--ds-text-secondary": "color-mix(in srgb, #14263f 78%, #eef5ff)",
+          "--ds-text-muted": "color-mix(in srgb, #14263f 55%, #eef5ff)",
+          "--ds-border-subtle": "color-mix(in srgb, #14263f 16%, transparent)",
+          "--background": "215 100% 97%",
+          "--foreground": "215 52% 16%",
+          "--card": "215 100% 97%",
+          "--primary": "209 100% 59%",
+          "--ring": "209 100% 59%",
+          "--font-ui": "\"PingFang SC\", \"Microsoft YaHei\", \"Hiragino Sans GB\", \"Helvetica Neue\", \"Segoe UI\", sans-serif"
+        },
+        "backgrounds": {
+          "image": {
+            "enabled": true,
+            "url": "/ext/dsh_adapter/styles/skin-assets/miku/assets/miku-art-light.jpg",
+            "position": "center",
+            "size": "cover",
+            "attachment": "fixed",
+            "overlay": "rgba(244, 250, 255, 0.5)",
+            "overlayOpacity": 1
+          }
+        }
+      },
+      {
+        "id": "dsh-skin-minecraft",
+        "name": "Minecraft 方块世界",
+        "description": "动态全景天空盒 · 方块按钮 · 告示牌输入框（DSH 皮肤 · dsh_adapter）",
+        "base": "dark",
+        "variables": {
+          "--ds-bg-canvas": "#18221b",
+          "--ds-bg-elevated": "color-mix(in srgb, #18221b 82%, white)",
+          "--ds-bg-panel": "#1a251d",
+          "--ds-accent-primary": "#7cbd4b",
+          "--ds-accent-ai": "#7cbd4b",
+          "--ds-bg-hover": "color-mix(in srgb, #7cbd4b 12%, transparent)",
+          "--ds-text-primary": "#e7ead7",
+          "--ds-text-secondary": "color-mix(in srgb, #e7ead7 78%, #18221b)",
+          "--ds-text-muted": "color-mix(in srgb, #e7ead7 55%, #18221b)",
+          "--ds-border-subtle": "color-mix(in srgb, #e7ead7 16%, transparent)",
+          "--background": "138 17% 11%",
+          "--foreground": "69 31% 88%",
+          "--card": "138 17% 11%",
+          "--primary": "94 46% 52%",
+          "--ring": "94 46% 52%",
+          "--font-ui": "\"Courier New\", \"PingFang SC\", \"Microsoft YaHei\", \"SimSun\", monospace"
+        }
+      },
+      {
+        "id": "dsh-skin-mint",
+        "name": "薄荷",
+        "description": "纯 token 范例皮肤 · 零补丁零脚本 · 社区作者的起点模板（DSH 皮肤 · dsh_adapter）",
+        "base": "light",
+        "variables": {
+          "--ds-bg-canvas": "#f4faf7",
+          "--ds-bg-elevated": "color-mix(in srgb, #f4faf7 82%, white)",
+          "--ds-bg-panel": "#ffffff",
+          "--ds-accent-primary": "#2fbf8f",
+          "--ds-accent-ai": "#2fbf8f",
+          "--ds-bg-hover": "color-mix(in srgb, #2fbf8f 12%, transparent)",
+          "--ds-text-primary": "#e6e6e6",
+          "--ds-text-secondary": "color-mix(in srgb, #e6e6e6 78%, #f4faf7)",
+          "--ds-text-muted": "color-mix(in srgb, #e6e6e6 55%, #f4faf7)",
+          "--ds-border-subtle": "color-mix(in srgb, #e6e6e6 16%, transparent)",
+          "--background": "150 37% 97%",
+          "--foreground": "0 0% 90%",
+          "--card": "150 37% 97%",
+          "--primary": "160 61% 47%",
+          "--ring": "160 61% 47%"
+        }
+      },
+      {
+        "id": "dsh-skin-summer-liquid-glass",
+        "name": "夏沫琉璃",
+        "description": "日系夏祭背景 · iOS 26 液态玻璃 · 冰青玫瑰琥珀三强调（DSH 皮肤 · dsh_adapter）",
+        "base": "dark",
+        "variables": {
+          "--ds-bg-canvas": "#071321",
+          "--ds-bg-elevated": "color-mix(in srgb, #071321 82%, white)",
+          "--ds-bg-panel": "rgba(17, 25, 39, calc(.42 + var(--dsh-skin-scrim, 0) * .3))",
+          "--ds-accent-primary": "#67DCE7",
+          "--ds-accent-ai": "#67DCE7",
+          "--ds-bg-hover": "color-mix(in srgb, #67DCE7 12%, transparent)",
+          "--ds-text-primary": "#F8F3F5",
+          "--ds-text-secondary": "color-mix(in srgb, #F8F3F5 78%, #071321)",
+          "--ds-text-muted": "color-mix(in srgb, #F8F3F5 55%, #071321)",
+          "--ds-border-subtle": "color-mix(in srgb, #F8F3F5 16%, transparent)",
+          "--background": "212 65% 8%",
+          "--foreground": "336 26% 96%",
+          "--card": "212 65% 8%",
+          "--primary": "185 73% 65%",
+          "--ring": "185 73% 65%"
+        },
+        "backgrounds": {
+          "image": {
+            "enabled": true,
+            "url": "/ext/dsh_adapter/styles/skin-assets/summer-liquid-glass/assets/summer-liquid-glass-art.jpg",
+            "position": "center",
+            "size": "cover",
+            "attachment": "fixed",
+            "overlay": "rgba(7, 19, 33, 0.34)",
+            "overlayOpacity": 1
+          }
+        }
+      },
+      {
+        "id": "dsh-skin-trading",
+        "name": "交易终端",
+        "description": "实时行情跑马灯 · 长桥港美股行情 · 红涨绿跌交易终端（DSH 皮肤 · dsh_adapter）",
+        "base": "light",
+        "variables": {
+          "--ds-bg-canvas": "#eef1f5",
+          "--ds-bg-elevated": "color-mix(in srgb, #eef1f5 82%, white)",
+          "--ds-bg-panel": "#f5f7fa",
+          "--ds-accent-primary": "#f23645",
+          "--ds-accent-ai": "#f23645",
+          "--ds-bg-hover": "color-mix(in srgb, #f23645 12%, transparent)",
+          "--ds-text-primary": "#1b2431",
+          "--ds-text-secondary": "color-mix(in srgb, #1b2431 78%, #eef1f5)",
+          "--ds-text-muted": "color-mix(in srgb, #1b2431 55%, #eef1f5)",
+          "--ds-border-subtle": "color-mix(in srgb, #1b2431 16%, transparent)",
+          "--background": "214 26% 95%",
+          "--foreground": "215 29% 15%",
+          "--card": "214 26% 95%",
+          "--primary": "355 88% 58%",
+          "--ring": "355 88% 58%",
+          "--font-ui": "\"PingFang SC\", \"Hiragino Sans GB\", \"Microsoft YaHei\", \"WenQuanYi Micro Hei\", \"Segoe UI\", sans-serif"
+        }
+      },
+      {
+        "id": "dsh-skin-whale-mom",
+        "name": "鲸鱼妈妈",
+        "description": "深海鲸鱼妈妈与幼崽的画作 · 全透面板由背景遮挡驱动 · 金线点缀（DSH 皮肤 · dsh_adapter）",
+        "base": "dark",
+        "variables": {
+          "--ds-bg-canvas": "#16244a",
+          "--ds-bg-elevated": "color-mix(in srgb, #16244a 82%, white)",
+          "--ds-bg-panel": "rgba(var(--dsh-skin-sidebar-rgb), calc(var(--dsh-skin-sidebar-alpha) + var(--dsh-skin-scrim, 0) * .3))",
+          "--ds-accent-primary": "#d9a53c",
+          "--ds-accent-ai": "#d9a53c",
+          "--ds-bg-hover": "color-mix(in srgb, #d9a53c 12%, transparent)",
+          "--ds-text-primary": "#0b111f",
+          "--ds-text-secondary": "color-mix(in srgb, #0b111f 78%, #16244a)",
+          "--ds-text-muted": "color-mix(in srgb, #0b111f 55%, #16244a)",
+          "--ds-border-subtle": "color-mix(in srgb, #0b111f 16%, transparent)",
+          "--background": "224 54% 19%",
+          "--foreground": "222 48% 8%",
+          "--card": "224 54% 19%",
+          "--primary": "40 67% 54%",
+          "--ring": "40 67% 54%"
+        },
+        "backgrounds": {
+          "image": {
+            "enabled": true,
+            "url": "/ext/dsh_adapter/styles/skin-assets/whale-mom/assets/whale-mom-art.jpg",
+            "position": "center",
+            "size": "cover",
+            "attachment": "fixed",
+            "overlay": "rgba(6, 10, 22, 0.42)",
+            "overlayOpacity": 1
+          }
+        }
+      },
+      {
+        "id": "dsh-skin-whale-song",
+        "name": "鲸吟",
+        "description": "深海鲸语女神背景 · 冰蓝海洋调色板 · 金色细线点缀（DSH 皮肤 · dsh_adapter）",
+        "base": "light",
+        "variables": {
+          "--ds-bg-canvas": "#d0e8f8",
+          "--ds-bg-elevated": "color-mix(in srgb, #d0e8f8 82%, white)",
+          "--ds-bg-panel": "#f4f8fd7a",
+          "--ds-accent-primary": "#4d8fd4",
+          "--ds-accent-ai": "#4d8fd4",
+          "--ds-bg-hover": "color-mix(in srgb, #4d8fd4 12%, transparent)",
+          "--ds-text-primary": "#0a1e4a",
+          "--ds-text-secondary": "color-mix(in srgb, #0a1e4a 78%, #d0e8f8)",
+          "--ds-text-muted": "color-mix(in srgb, #0a1e4a 55%, #d0e8f8)",
+          "--ds-border-subtle": "color-mix(in srgb, #0a1e4a 16%, transparent)",
+          "--background": "204 74% 89%",
+          "--foreground": "221 76% 16%",
+          "--card": "204 74% 89%",
+          "--primary": "211 61% 57%",
+          "--ring": "211 61% 57%"
+        },
+        "backgrounds": {
+          "image": {
+            "enabled": true,
+            "url": "/ext/dsh_adapter/styles/skin-assets/whale-song/assets/whale-art.webp",
+            "position": "center",
+            "size": "cover",
+            "attachment": "fixed",
+            "overlay": "rgba(240, 246, 252, 0.05)",
+            "overlayOpacity": 1
+          }
+        }
+      },
+      {
+        "id": "dsh-skin-xp",
+        "name": "Windows XP (Luna)",
+        "description": "Luna 蓝窗口条 · 绿色开始按钮 · Bliss 蓝天桌面（DSH 皮肤 · dsh_adapter）",
+        "base": "dark",
+        "variables": {
+          "--ds-bg-canvas": "#2c66b8",
+          "--ds-bg-elevated": "color-mix(in srgb, #2c66b8 82%, white)",
+          "--ds-bg-panel": "#f6f4ec",
+          "--ds-accent-primary": "#316ac5",
+          "--ds-accent-ai": "#316ac5",
+          "--ds-bg-hover": "color-mix(in srgb, #316ac5 12%, transparent)",
+          "--ds-text-primary": "#000",
+          "--ds-text-secondary": "color-mix(in srgb, #000 78%, #2c66b8)",
+          "--ds-text-muted": "color-mix(in srgb, #000 55%, #2c66b8)",
+          "--ds-border-subtle": "color-mix(in srgb, #000 16%, transparent)",
+          "--background": "215 61% 45%",
+          "--foreground": "0 0% 0%",
+          "--card": "215 61% 45%",
+          "--primary": "217 60% 48%",
+          "--ring": "217 60% 48%",
+          "--font-ui": "Tahoma, \"Microsoft YaHei\", \"PingFang SC\", \"SimSun\", \"宋体\", sans-serif"
+        }
+      }
     ]
   },
   "http_endpoints": [

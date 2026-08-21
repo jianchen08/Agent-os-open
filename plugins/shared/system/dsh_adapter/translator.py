@@ -520,8 +520,11 @@ def list_available_skins(base_dir: str | Path | None = None) -> list[str]:
 def describe_available_skins(base_dir: str | Path | None = None) -> list[dict[str, Any]]:
     """动态皮肤清单（运行时读当前装载的皮肤插件，供设置页/清单端点消费）。
 
-    每条：id/name/tagline/description/accent/base/tags/has_background_media——
-    皮肤集合变化（dsh_plugins/ 放入新皮肤插件包）即时反映，零 manifest 改动。
+    每条含 ThemeConfig 转换素材（2026-08-21 形态路由定案）：colors
+    (canvas/text/panel/accent hex) + base（亮度判定）+ background_media
+    （src/scrim/asset_url）——前端据此克隆基准主题生成灵汐原生
+    ThemeConfig（立绘→backgrounds.image、配色→colors，全走主题管线）。
+    皮肤集合变化即时反映，零 manifest 改动。
     """
     base = Path(base_dir) if base_dir is not None else SKIN_CENTER_SKINS_DIR
     out: list[dict[str, Any]] = []
@@ -534,7 +537,16 @@ def describe_available_skins(base_dir: str | Path | None = None) -> list[dict[st
             "base": "dark",
             "tags": [],
             "has_background_media": False,
+            "colors": {},
+            "background_media": None,
         }
+        skin_css = base / skin_id / "skin.css"
+        css = ""
+        if skin_css.is_file():
+            try:
+                css = skin_css.read_text(encoding="utf-8", errors="replace")
+            except OSError:
+                css = ""
         manifest = base / skin_id / "skin.json"
         if manifest.is_file():
             try:
@@ -548,14 +560,26 @@ def describe_available_skins(base_dir: str | Path | None = None) -> list[dict[st
                 tags = [str(t).lower() for t in meta.get("tags", []) if isinstance(t, (str, int))]
                 entry["tags"] = tags
         # 基准判定 = 画布色亮度（tags 无 dark/light 标签，按 tags 判恒 dark 是错的）
-        skin_css = base / skin_id / "skin.css"
-        if skin_css.is_file():
-            try:
-                canvas, _ = _extract_skin_colors(skin_css.read_text(encoding="utf-8", errors="replace"))
-                entry["base"] = skin_base_of(canvas)
-            except OSError:
-                pass
-        entry["has_background_media"] = resolve_skin_background(skin_id, base) is not None
+        if css:
+            canvas, text = _extract_skin_colors(css)
+            entry["base"] = skin_base_of(canvas)
+            panel_m = _ALIAS_PANEL_RE.search(css) or _ALIAS_L1_RE.search(css)
+            panel = panel_m.group(1).strip() if panel_m else f"color-mix(in srgb, {canvas} 88%, white)"
+            entry["colors"] = {"canvas": canvas, "text": text, "panel": panel,
+                               "accent": entry["accent"] or "#4a90d9"}
+        bg = resolve_skin_background(skin_id, base)
+        if bg is not None:
+            entry["has_background_media"] = True
+            media: dict[str, Any] = {}
+            for mode in ("dark", "light"):
+                spec = bg.get(mode)
+                if spec:
+                    media[mode] = {
+                        "src": spec["src"],
+                        "scrim": spec.get("scrim", ""),
+                        "asset_url": f"/ext/dsh_adapter/styles/skin-assets/{skin_id}/{spec['src']}",
+                    }
+            entry["background_media"] = media
         out.append(entry)
     return out
 
@@ -623,51 +647,6 @@ def resolve_skin_background(skin_id: str, base_dir: str | Path | None = None) ->
         return None
     return out
 
-
-def translate_background_css(bg: dict[str, Any], asset_url_base: str) -> str:
-    """backgroundMedia → 灵汐全局固定装饰层（统一映射，2026-08-21 三改）。
-
-    DSH schema 原文语义："Fills the fixed decoration layer 'background'"
-    ——全局 fixed 装饰层（非聊天区局部），优先级 动态壁纸 > 用户手动背景 >
-    皮肤声明。灵汐等价物 = body.has-bg-image::after 机制（fixed 全屏层 +
-    overlay 可读性蒙层）——适配层直接复刻该层（不依赖 themeStore 加类），
-    scrim 渐变即 overlay。亮暗双态跟随系统偏好。
-    """
-    def layer(spec: dict[str, str]) -> str:
-        img = f'url("{asset_url_base}/{spec["src"]}")'
-        scrim = spec.get("scrim", "").strip()
-        return f"{scrim}, {img}" if scrim else img
-
-    def fixed_layer(bgimg: str) -> str:
-        return (
-            "body::after { content: ''; position: fixed; inset: 0; z-index: 0; "
-            "pointer-events: none; "
-            f"background-image: {bgimg}; "
-            "background-position: center; background-size: cover; "
-            "background-attachment: fixed; background-repeat: no-repeat; }"
-        )
-
-    dark = bg.get("dark")
-    light = bg.get("light")
-    parts = ["/* dsh-skin background-media → global fixed decoration layer (DSH schema 语义) */"]
-    if dark:
-        parts.append(fixed_layer(layer(dark)))
-    if light:
-        parts.append(f"@media (prefers-color-scheme: light) {{ {fixed_layer(layer(light))} }}")
-    return "\n".join(parts) + "\n"
-
-
-# ── 皮肤 → 灵汐适配层（令牌接管 + 布局适配，2026-08-21 区域语义重写） ────
-#
-# 用户裁决的皮肤语义：**完全替换**灵汐暗/亮主题（内部组件也吃皮肤色），
-# 不是叠加一层背景图。三段产出：
-# 1. 令牌接管：皮肤色值 → 灵汐 --ds-* 全套（bg-canvas/panel/elevated、
-#    text 三级、accent、border 两级），内部组件全量换肤；
-# 2. 布局适配：header 收成图标条（去导航文字），侧栏半透明面板（底色微透），
-#    聊天区立绘背景（translate_background_css），工作区实底；
-# 3. 皮肤原文 :root 段挂 body 画布底（供侧栏半透明透出）。
-# 色值提取链：--dsw-alias-bg-* 令牌（DSH 别名层，多数皮肤有）→ skin.css
-# :root 的 background-color/color → skin.json accent；缺项用 color-mix 派生。
 
 _ALIAS_RE = re.compile(r"--dsw-alias-bg-base:\s*([^;]+);")
 _ALIAS_L1_RE = re.compile(r"--dsw-alias-bg-layer-1:\s*([^;]+);")
@@ -738,106 +717,91 @@ def _extract_skin_colors(css: str) -> tuple[str, str]:
     return canvas, text
 
 
-def translate_skin_adaptation(skin_id: str, base_dir: str | Path | None = None) -> str:
-    """生成皮肤的区域适配 CSS（令牌接管 + 布局），皮肤激活注入时拼接。
+def skins_to_plugin_themes(base_dir: str | Path | None = None) -> list[dict[str, Any]]:
+    """DSH 皮肤 → 灵汐 PluginTheme 声明（contributes.themes 条目，形态路由终态）。
 
-    2026-08-21 二次重写（用户实测三座山）：
-    - 令牌全部 !important——themeStore 运行时 setProperty（内联）会盖过
-      样式表非 important 声明，导致"注入了但看不见"；
-    - 补 shadcn HSL 桥（--background/--foreground/--card/--border/--primary…）——
-      主容器/原子类吃 hsl(var(--background)) 这层，仅 --ds-* 不够；
-    - 基准回退（用户规则）：前端 selectSkin 已联动 setTheme(皮肤 base 对应
-      内置 dark/light)——当前灵汐主题被整体替换为基准，皮肤再盖皮肤色，
-      未覆盖处=基准暗/亮而非"当前主题透下来"；
-    - header 保持"左图标+居中标题+右图标"原生结构（撤藏文字规则），仅
-      紧凑收窄；侧栏=皮肤面板实底（DSH 风格）；工作区=elevated 实底。
+    用户裁决（2026-08-21）：dsh_adapter = 特殊皮肤插件——装载的每套皮肤以
+    contributes.themes 声明，前端既有插件主题通道自动发现/渲染/选择，
+    零前端改动；添加皮肤 = 放包进 dsh_plugins（适配器 on_load 自动同步
+    本声明，无需手工翻译或改 manifest）。
+
+    条目形态（PluginTheme，types/theme.ts）：
+    - id: dsh-skin-<skin>（contributionRegistry 全局键 dsh_adapter:dsh-skin-*）
+    - base: 画布色亮度判定（基准回退：先 applyTheme(base) 再 variables 后写者胜）
+    - variables: --ds-* 令牌 + shadcn 桥（H S% L%，tailwind hsl() 消费）+ --font-ui
+    - backgrounds.image: 立绘 → 灵汐原生背景图层（overlay 取 scrim 首 rgba）
     """
-    base = Path(base_dir) if base_dir is not None else SKIN_CENTER_SKINS_DIR
-    skin_dir = base / skin_id
-    css_path = skin_dir / "skin.css"
-    manifest = skin_dir / "skin.json"
-    css = css_path.read_text(encoding="utf-8", errors="replace") if css_path.is_file() else ""
-    try:
-        meta = json.loads(manifest.read_text(encoding="utf-8")) if manifest.is_file() else {}
-    except ValueError:
-        meta = {}
+    themes: list[dict[str, Any]] = []
+    for skin in describe_available_skins(base_dir):
+        c = skin.get("colors") or {}
+        canvas = c.get("canvas", "")
+        text = c.get("text", "")
+        panel = c.get("panel", "")
+        accent = c.get("accent", "")
+        base = skin.get("base", "dark")
 
-    root_block = _ROOT_BLOCK_RE.search(css)
-    root_body = root_block.group(1) if root_block else css
-    root_img_m = _ROOT_BGIMG_RE.search(root_body)
-    canvas, text = _extract_skin_colors(css)
-    accent = str(meta.get("accent", "")).strip() or "#4a90d9"
-    panel_m = _ALIAS_PANEL_RE.search(css) or _ALIAS_L1_RE.search(css)
-    panel = panel_m.group(1).strip() if panel_m else f"color-mix(in srgb, {canvas} 88%, white)"
-    font_m = _DSW_FONT_RE.search(css)
+        variables: dict[str, str] = {}
+        if canvas:
+            variables["--ds-bg-canvas"] = canvas
+            variables["--ds-bg-elevated"] = f"color-mix(in srgb, {canvas} 82%, white)"
+        if panel:
+            variables["--ds-bg-panel"] = panel
+        if accent:
+            variables["--ds-accent-primary"] = accent
+            variables["--ds-accent-ai"] = accent
+            variables["--ds-bg-hover"] = f"color-mix(in srgb, {accent} 12%, transparent)"
+        if text and canvas:
+            variables["--ds-text-primary"] = text
+            variables["--ds-text-secondary"] = f"color-mix(in srgb, {text} 78%, {canvas})"
+            variables["--ds-text-muted"] = f"color-mix(in srgb, {text} 55%, {canvas})"
+            variables["--ds-border-subtle"] = f"color-mix(in srgb, {text} 16%, transparent)"
+            # shadcn 桥（必须 H S% L% 纯串——hsl(var(--x)) 内 color-mix 非法）
+            if canvas.startswith("#") and text.startswith("#"):
+                variables["--background"] = _hex_to_hsl(canvas)
+                variables["--foreground"] = _hex_to_hsl(text)
+                variables["--card"] = _hex_to_hsl(canvas)
+            if accent.startswith("#"):
+                variables["--primary"] = _hex_to_hsl(accent)
+                variables["--ring"] = _hex_to_hsl(accent)
 
-    def imp(k: str, v: str) -> str:
-        return f"  {k}: {v} !important;"
+        # 皮肤字体 → --font-ui（主题管线原生消费 main.tsx fontFamily）
+        skin_css = SKIN_CENTER_SKINS_DIR / str(skin["id"]) / "skin.css"
+        if base_dir is not None:
+            skin_css = Path(base_dir) / str(skin["id"]) / "skin.css"
+        if skin_css.is_file():
+            try:
+                m = _DSW_FONT_RE.search(skin_css.read_text(encoding="utf-8", errors="replace"))
+                if m:
+                    variables["--font-ui"] = m.group(1).strip()
+            except OSError:
+                pass
 
-    # shadcn 全套桥（缺项=区域回落灵汐默认 → 字色风格混杂，用户实测三报）
-    fg_hsl = _hex_to_hsl(text) if text.startswith("#") else "0 0% 95%"
-    canvas_hsl = _hex_to_hsl(canvas) if canvas.startswith("#") else "229 58% 4%"
-    accent_hsl = _hex_to_hsl(accent) if accent.startswith("#") else "190 95% 42%"
+        entry: dict[str, Any] = {
+            "id": f"dsh-skin-{skin['id']}",
+            "name": skin.get("name") or skin["id"],
+            "description": f"{skin.get('tagline') or skin['id']}（DSH 皮肤 · dsh_adapter）",
+            "base": base,
+        }
+        if variables:
+            entry["variables"] = variables
+        # 立绘 → 原生背景图层（取 base 对应态：皮肤自选基准优先于系统偏好）
+        bg = skin.get("background_media") or {}
+        media = bg.get(base) or bg.get("dark") or bg.get("light")
+        if media:
+            scrim = str(media.get("scrim", ""))
+            m = re.search(r"rgba?\([^)]+\)", scrim)
+            overlay = m.group(0) if m else ("rgba(255,255,255,0.45)" if base == "light" else "rgba(0,0,0,0.35)")
+            entry["backgrounds"] = {
+                "image": {
+                    "enabled": True,
+                    "url": media["asset_url"],
+                    "position": "center",
+                    "size": "cover",
+                    "attachment": "fixed",
+                    "overlay": overlay,
+                    "overlayOpacity": 1,
+                }
+            }
+        themes.append(entry)
+    return themes
 
-    lines = [
-        "/* == dsh-skin lingxi adaptation v2 ==",
-        f"/* skin: {skin_id} | tokens(!important) + full shadcn bridge + regions */",
-        ":root {",
-        imp("--ds-bg-canvas", canvas),
-        imp("--ds-bg-panel", panel),
-        imp("--ds-bg-elevated", f"color-mix(in srgb, {canvas} 82%, white)"),
-        imp("--ds-bg-hover", f"color-mix(in srgb, {accent} 12%, transparent)"),
-        imp("--ds-text-primary", text),
-        imp("--ds-text-secondary", f"color-mix(in srgb, {text} 78%, {canvas})"),
-        imp("--ds-text-muted", f"color-mix(in srgb, {text} 55%, {canvas})"),
-        imp("--ds-text-disabled", f"color-mix(in srgb, {text} 35%, {canvas})"),
-        imp("--ds-accent-primary", accent),
-        imp("--ds-accent-ai", accent),
-        imp("--ds-border-subtle", f"color-mix(in srgb, {text} 16%, transparent)"),
-        imp("--ds-border-strong", f"color-mix(in srgb, {text} 28%, transparent)"),
-        imp("--ds-border-active", f"color-mix(in srgb, {accent} 70%, transparent)"),
-        imp("--ds-shadow-glow-running", f"color-mix(in srgb, {accent} 45%, transparent)"),
-        # —— shadcn 全套（tailwind 原子类消费层）——
-        # 主框架背景带 alpha：全局固定装饰层（body::after 立绘）由此透出；
-        # 全套 foreground 系避免各区域回落默认造成的风格混杂
-        imp("--background", f"{canvas_hsl} / 0.9"),
-        imp("--foreground", fg_hsl),
-        imp("--card", canvas_hsl),
-        imp("--card-foreground", fg_hsl),
-        imp("--popover", canvas_hsl),
-        imp("--popover-foreground", fg_hsl),
-        imp("--primary", accent_hsl),
-        imp("--primary-foreground", canvas_hsl),
-        imp("--secondary", f"color-mix(in srgb, {canvas} 70%, white)"),
-        imp("--secondary-foreground", fg_hsl),
-        imp("--muted", f"color-mix(in srgb, {canvas} 60%, white)"),
-        imp("--muted-foreground", f"color-mix(in srgb, {text} 60%, {canvas})"),
-        imp("--accent", accent_hsl),
-        imp("--accent-foreground", canvas_hsl),
-        imp("--destructive", "0 72% 51%"),
-        imp("--destructive-foreground", "0 0% 100%"),
-        imp("--border", f"color-mix(in srgb, {text} 16%, transparent)"),
-        imp("--input", f"color-mix(in srgb, {text} 20%, transparent)"),
-        imp("--ring", accent_hsl),
-        imp("--radius", "0.5rem"),
-        "}",
-        "/* header：保持 左图标|居中标题|右图标 原生结构，紧凑收窄 */",
-        '[data-testid="app-header"] { padding-block: 1px; }',
-        "/* 聊天区容器透明：全局装饰层（立绘）由半透明主框架透出 */",
-        '[data-region="chat"] { background: transparent !important; }',
-        "/* 侧栏：皮肤面板实底（DSH 侧栏风格）+ 右边框 */",
-        '[data-region="sidebar"] { background: var(--ds-bg-panel) !important; backdrop-filter: none; border-right: 1px solid var(--ds-border-subtle); }',
-        "/* 工作区：elevated 实底（对齐 DSH 设置页面板） */",
-        '[data-region="workspace"] { background: var(--ds-bg-elevated) !important; border-left: 1px solid var(--ds-border-subtle); }',
-        "/* 画布底：皮肤 :root 原渐变挂 body（装饰层之下） */",
-        f"body {{ background-color: {canvas} !important; }}",
-    ]
-    if font_m:
-        # 字体统一透传：皮肤字体应用到全局（组件渲染统一随皮肤，用户裁决）
-        lines.append(f"body, button, input, select, textarea {{ font-family: {font_m.group(1).strip()} !important; }}")
-    if root_img_m:
-        lines.append(f"body {{ background-image: {root_img_m.group(1).strip()} !important; background-attachment: fixed; }}")
-    return "\n".join(lines) + "\n"
-
-
-_ROOT_BGIMG_RE = re.compile(r"^\s*background-image:\s*(.+);$", re.MULTILINE)

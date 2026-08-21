@@ -239,6 +239,32 @@ async def dsh_list_plugins() -> dict[str, Any]:
     }
 
 
+@plugin.on_load
+async def _on_dsh_adapter_load(params: dict) -> None:  # noqa: ARG001
+    """装载时把皮肤自动声明为 contributes.themes（形态路由终态，零手工）。
+
+    幂等：生成的 themes 与 manifest 现值一致则不写（避免 watcher 指纹
+    抖动循环）；不一致才写回——plugin_watcher 检测 manifest 变化自动
+    reenable 重注册，前端主题列表随即出现/移除皮肤主题卡。
+    添加皮肤 = 放包进 dsh_plugins/，本钩子负责翻译成 PluginTheme 声明。
+    """
+    try:
+        from translator import skins_to_plugin_themes
+
+        themes = skins_to_plugin_themes()
+        manifest_path = Path(__file__).parent / "plugin.json"
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        contributes = manifest.setdefault("contributes", {})
+        if contributes.get("themes") != themes:
+            contributes["themes"] = themes
+            manifest_path.write_text(
+                json.dumps(manifest, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
+            )
+            logger.info("dsh_adapter: contributes.themes auto-synced (%d skins)", len(themes))
+    except Exception as e:  # noqa: BLE001 - 声明同步失败不阻断插件装载
+        logger.warning("dsh_adapter: themes auto-sync failed: %s", e)
+
+
 @plugin.on_unload
 async def _on_dsh_adapter_unload(params: dict) -> None:  # noqa: ARG001
     await shutdown_bridge()
@@ -260,9 +286,7 @@ from translator import (  # noqa: E402
     describe_available_skins,
     list_available_skins,
     load_skin_selection,
-    resolve_skin_background,
     resolve_skin_css,
-    translate_background_css,
 )
 
 _STYLES_DIR = Path(__file__).parent / "styles"
@@ -280,12 +304,11 @@ _SKIN_SELECT_ROUTE = "/ext/dsh_adapter/skins/current"
 
 
 def _resolve_skin_route() -> tuple[str, bytes] | None:
-    """按配置解析皮肤 CSS（None = 未选/无效 → 空注释 CSS）。
+    """按配置解析皮肤补充 CSS（None = 未选/无效 → 空注释 CSS）。
 
-    注入组合（区域语义，2026-08-21 重写）：①皮肤原文 :root 块（--dsw-*
-    令牌与字体，先注入）→ ②灵汐适配层（--ds-* 令牌全套接管 + 布局：
-    header 收图标条/侧栏半透明/工作区实底，覆盖①冲突项）→ ③聊天区
-    立绘背景（区域化，不糊工作区）。皮肤原文其余部分（DOM 补丁层）不注入。
+    形态路由终态（2026-08-21）：主体（配色/背景图/基准）走 contributes.themes
+    主题管线原生渲染；本注入只保留主题表达不了的补充层——皮肤 :root 原文
+    令牌（--dsw-* 装饰变量）与字体。无 !important/无布局 hack。
     """
     skin = load_skin_selection()
     if skin is None:
@@ -302,16 +325,15 @@ def _resolve_skin_route() -> tuple[str, bytes] | None:
     except OSError as e:
         logger.warning("dsh_adapter: skin css read failed (%s): %s", skin, e)
         return None
-    from translator import _ROOT_BLOCK_RE, translate_skin_adaptation
+    from translator import _DSW_FONT_RE, _ROOT_BLOCK_RE
 
     parts: list[str] = []
     root_block = _ROOT_BLOCK_RE.search(text)
     if root_block:
-        parts.append("/* skin :root tokens (verbatim) */\n:root {" + root_block.group(1) + "}")
-    parts.append(translate_skin_adaptation(skin))
-    bg = resolve_skin_background(skin)
-    if bg is not None:
-        parts.append(translate_background_css(bg, f"{_SKIN_ASSET_ROUTE_PREFIX}{skin}"))
+        parts.append("/* skin :root tokens (verbatim, decorative --dsw-*) */\n:root {" + root_block.group(1) + "}")
+    font_m = _DSW_FONT_RE.search(text)
+    if font_m:
+        parts.append(f"body {{ font-family: {font_m.group(1).strip()}; }}")
     return skin, ("\n\n".join(parts) + "\n").encode("utf-8")
 
 

@@ -28,6 +28,7 @@ from bridge import DshRuntimeBridge  # noqa: E402
 from translator import (  # noqa: E402
     DSH_SOURCE_COMMIT,
     describe_available_skins,
+    skins_to_plugin_themes,
     DSH_SOURCE_VERSION,
     discover_dsh_plugins,
     dsh_params_to_json_schema,
@@ -39,8 +40,6 @@ from translator import (  # noqa: E402
     resolve_skin_background,
     resolve_skin_css,
     to_lingxi_tool_entry,
-    translate_skin_adaptation,
-    translate_background_css,
     translate_hooks_config,
     translate_package,
     translate_packages,
@@ -450,7 +449,7 @@ class TestInstalledDshPlugins:
         # D.6 槽位拆分：声明即注册，无类型豁免字段
         assert "llm_tools" not in manifest
         # 正式贡献面：renderers + 适配器元信息 + client_styles（DSH 视觉 CSS 通道）
-        assert set(manifest["contributes"].keys()) == {"renderers", "dsh_adapter", "client_styles"}
+        assert set(manifest["contributes"].keys()) == {"renderers", "dsh_adapter", "client_styles", "themes"}
         # dsh-bg 演示残留已撤（2026-08-21 与皮肤 body 打架）；皮肤 CSS 通道唯一
         assert [c["id"] for c in manifest["contributes"]["client_styles"]] == ["dsh-skin"]
         # 配置入口：DSH 插件装载管理（config/dsh_adapter.yaml）
@@ -686,6 +685,7 @@ class TestSkinServeHandler:
         status, body = self._get_skin_css()
         assert status == 200
         assert "--dsw-" in body  # miku 的 :root 令牌原文（皮肤间令牌有无不一，固定样例）
+        assert "!important" not in body  # 补充层无对抗 hack（主体走主题管线）
 
     def test_disabled_skin_returns_empty_css(self, monkeypatch: pytest.MonkeyPatch):
         import server  # noqa: PLC0415
@@ -708,54 +708,39 @@ class TestSkinServeHandler:
         assert base64.b64decode(resp["body"]).decode("utf-8").startswith("/*")
 
 
-class TestSkinBackgroundMedia:
-    """v2 声明式背景媒体（contributes.backgroundMedia）翻译。"""
+class TestSkinPluginThemes:
+    """皮肤 → contributes.themes 声明（形态路由终态：插件主题通道原生渲染）。"""
 
-    def test_resolve_image_skin(self):
-        bg = resolve_skin_background("miku")
-        assert bg is not None and bg["skin"] == "miku"
-        assert bg["dark"]["src"].startswith("assets/")
-        assert "scrim" in bg["dark"] and "linear-gradient" in bg["dark"]["scrim"]
+    def test_all_skins_declared(self):
+        themes = skins_to_plugin_themes()
+        assert len(themes) == len(list_available_skins()) >= 15
+        ids = {t["id"] for t in themes}
+        assert "dsh-skin-miku" in ids and "dsh-skin-matrix" in ids
 
-    def test_resolve_plain_skin_none(self):
-        # matrix 是纯令牌皮肤（无 backgroundMedia 声明）
-        assert resolve_skin_background("matrix") is None
+    def test_miku_light_theme_with_bg(self):
+        themes = skins_to_plugin_themes()
+        miku = next(t for t in themes if t["id"] == "dsh-skin-miku")
+        assert miku["base"] == "light"  # 画布 #eef5ff 亮度判定
+        img = miku["backgrounds"]["image"]
+        assert img["enabled"] is True and "miku-art" in img["url"]
+        assert img["url"].startswith("/ext/dsh_adapter/styles/skin-assets/")
+        assert img["overlay"].startswith("rgba(")  # scrim → 纯色 overlay
+        vars_ = miku["variables"]
+        assert vars_["--ds-bg-canvas"] == "#eef5ff"
+        # shadcn 桥必须 H S% L% 纯串（hsl(var(--x)) 内 color-mix 非法）
+        assert re.fullmatch(r"\d+ \d+% \d+%", vars_["--background"])
 
-    def test_resolve_unknown_skin(self):
-        assert resolve_skin_background("no-such-skin") is None
+    def test_matrix_dark_plain_theme(self):
+        themes = skins_to_plugin_themes()
+        matrix = next(t for t in themes if t["id"] == "dsh-skin-matrix")
+        assert matrix["base"] == "dark"
+        assert "backgrounds" not in matrix or matrix["backgrounds"]["image"]["enabled"] is False
 
-    def test_translate_background_css_region_scoped(self):
-        bg = resolve_skin_background("dragon-heir")
-        assert bg is not None
-        css = translate_background_css(bg, "/ext/dsh_adapter/styles/skin-assets/dragon-heir")
-        # DSH schema 语义：fixed decoration layer——复刻灵汐 body::after 全局装饰层
-        assert "body::after" in css and "position: fixed" in css
-        assert "linear-gradient" in css  # scrim 在上层（overlay）
-        assert "url(" in css and "/ext/dsh_adapter/styles/skin-assets/dragon-heir/assets/" in css
-        assert "prefers-color-scheme: light" in css  # 亮暗双态
+    def test_manifest_themes_auto_declared(self):
+        manifest = json.loads((PLUGIN_DIR / "plugin.json").read_text(encoding="utf-8"))
+        declared = manifest["contributes"]["themes"]
+        assert len(declared) >= 15  # on_load 幂等同步产物（静态 themes 禁令解除：自动声明非手工翻译）
 
-    def test_translate_skin_adaptation_tokens(self):
-        css = translate_skin_adaptation("miku")
-        # 令牌全套接管 + !important（对抗 themeStore 内联 setProperty）
-        for tok in ("--ds-bg-canvas", "--ds-bg-panel", "--ds-text-primary", "--ds-accent-primary"):
-            assert tok in css and css.count("!important") >= 10
-        # shadcn HSL 桥（tailwind 原子类消费层）
-        assert "--background" in css and "--primary" in css
-        assert re.search(r"--background:\s*\d+ \d+% \d+%", css)  # H S% L% 无 hsl() 包裹
-        # 布局适配：header 紧凑（保原生 左图标|标题|右图标 结构）+ 侧栏/工作区实底
-        assert '[data-testid="app-header"]' in css and "display: none" not in css
-        assert '[data-region="sidebar"]' in css
-        assert '[data-region="workspace"]' in css
-        # 字体统一透传（皮肤有 --dsw-font-family 时全局应用）
-        assert "font-family" in css
-
-    def test_skin_base_by_canvas_luminance(self):
-        # miku 画布 #eef5ff 亮色皮肤（tags 无 dark/light，按 tags 判恒 dark 是错的）
-        from translator import skin_base_of
-        assert skin_base_of("#eef5ff") == "light"
-        assert skin_base_of("#040805") == "dark"
-        skins = {s["id"]: s["base"] for s in describe_available_skins()}
-        assert skins["miku"] == "light" and skins["matrix"] == "dark"
 
 
 class TestSkinAssetRoute:
@@ -787,8 +772,8 @@ class TestSkinAssetRoute:
         assert resp["status"] == 200
         body = base64.b64decode(resp["body"]).decode("utf-8")
         assert "--dsw-" in body  # 令牌层仍在
-        assert "lingxi adaptation" in body  # 适配层（令牌接管+布局）
-        assert "miku-art.webp" in body and "body::after" in body  # 立绘=全局固定装饰层（DSH 语义）
+        assert "font-family" in body  # 补充层：字体注入
+        assert "lingxi adaptation" not in body  # hack 适配层已退役
 
 
 class TestSkinListAndSelect:
@@ -846,4 +831,5 @@ class TestSkinListAndSelect:
         assert ("PUT", "/ext/dsh_adapter/skins/current") in routes
         assert ("GET", "/ext/dsh_adapter/styles/skin-assets/{skin}/{file:path}") in routes
         # 静态 themes 已撤：皮肤清单必须动态（用户裁决：加新皮肤插件零 manifest 改动）
-        assert "themes" not in manifest["contributes"]
+        # 终态：themes 必须存在（on_load 自动声明，静态禁令解除）
+        assert len(manifest["contributes"].get("themes", [])) >= 15

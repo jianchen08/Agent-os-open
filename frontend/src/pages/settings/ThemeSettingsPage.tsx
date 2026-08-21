@@ -3,14 +3,10 @@
  *
  * 提供多套预设主题的选择切换，支持 light/dark/system 模式。
  * 主题系统完全前端化，无后端依赖。
- * 另含「DSH 皮肤」区块：清单动态来自 dsh_adapter 装载的皮肤插件
- * （skin-center），选择写回后端 config（skin.css 注入通道），与前端
- * 主题体系并存——数量随装载自动增减，无需改前端。
  */
 
 import { PageShell } from '@/components/shared/PageShell'
 import { themeList } from '@/config/themes'
-import { useDshSkins } from '@/hooks/useDshSkins'
 import { useThemeStore } from '@/stores/themeStore'
 import type { ThemeInfo } from '@/types/theme'
 
@@ -37,7 +33,7 @@ export function ThemeSettingsPage({ embedded = false }: { embedded?: boolean }) 
               type="button"
               onClick={() => setMode(m)}
               className={`rounded-lg border px-4 py-2 text-sm transition-colors ${
-                mode === 'light'
+                mode === m
                   ? 'bg-primary/10 text-primary border-primary/30'
                   : 'hover:bg-accent/30 border-border'
               }`}
@@ -67,8 +63,6 @@ export function ThemeSettingsPage({ embedded = false }: { embedded?: boolean }) 
           ))}
         </div>
       </section>
-
-      <DshSkinSection />
     </>
   )
 
@@ -165,78 +159,5 @@ function ThemeCard({
         {theme.category === 'light' ? '浅色' : theme.category === 'dark' ? '深色' : '特殊'}
       </span>
     </button>
-  )
-}
-
-/** DSH 皮肤区块：清单动态来自 dsh_adapter（装载多少显示多少），选择写回后端 */
-function DshSkinSection() {
-  const { current: activeSkin, skins, count, switching, selectSkin } = useDshSkins()
-
-  if (count === 0) return null
-
-  return (
-    <section className="mt-8">
-      <h2 className="mb-1 text-sm font-semibold">
-        DSH 皮肤<span className="text-muted-foreground ml-2 font-normal">来自 dsh_adapter 插件 · {count} 套</span>
-      </h2>
-      <p className="text-muted-foreground mb-3 text-xs">
-        全局 CSS 注入（配色/字体/背景立绘），随装载的皮肤插件自动增减；与上方前端主题可叠加。
-      </p>
-      <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
-        <button
-          type="button"
-          disabled={switching !== null}
-          onClick={() => void selectSkin('none')}
-          className={`rounded-lg border p-4 text-left transition-all ${
-            activeSkin === 'none' ? 'border-primary ring-primary/30 ring-2' : 'hover:border-primary/50 border-border'
-          }`}
-        >
-          <h3 className="text-sm font-semibold">不使用 DSH 皮肤</h3>
-          <p className="text-muted-foreground mt-1 text-xs">仅使用上方前端主题</p>
-          {activeSkin === 'none' && <span className="text-primary mt-2 inline-block text-xs font-medium">✓ 当前</span>}
-        </button>
-        {skins.map((skin) => (
-          <button
-            key={skin.id}
-            type="button"
-            disabled={switching !== null}
-            onClick={() => void selectSkin(skin.id)}
-            className={`rounded-lg border p-4 text-left transition-all ${
-              activeSkin === skin.id
-                ? 'border-primary ring-primary/30 ring-2'
-                : 'hover:border-primary/50 border-border'
-            }`}
-          >
-            <div className="mb-2 flex items-center gap-2">
-              {skin.accent && (
-                <span
-                  className="h-4 w-4 rounded-full border"
-                  style={{ backgroundColor: skin.accent }}
-                  title="强调色"
-                />
-              )}
-              {skin.has_background_media && (
-                <span className="rounded bg-purple-500/10 px-1.5 py-0.5 text-[10px] text-purple-400">背景图</span>
-              )}
-              <span
-                className={`rounded px-1.5 py-0.5 text-[10px] ${
-                  skin.base === 'dark' ? 'bg-status-info/100/10 text-status-info' : 'bg-status-warning/100/10 text-status-warning'
-                }`}
-              >
-                {skin.base === 'dark' ? '深色' : '浅色'}
-              </span>
-            </div>
-            <h3 className="text-sm font-semibold">{skin.name}</h3>
-            {skin.tagline && <p className="text-muted-foreground mt-1 line-clamp-2 text-xs">{skin.tagline}</p>}
-            <span className="text-muted-foreground mt-2 inline-block rounded bg-[var(--hover-overlay)] px-1.5 py-0.5 font-mono text-[10px]">
-              插件 · dsh_adapter
-            </span>
-            {activeSkin === skin.id && (
-              <span className="text-primary mt-2 inline-block text-xs font-medium">✓ 当前</span>
-            )}
-          </button>
-        ))}
-      </div>
-    </section>
   )
 }
