@@ -24,7 +24,6 @@ _CHANNEL_DIRS: dict[str, Path] = {
     "dingtalk": _SYSTEM_DIR / "channel_dingtalk",
     "qq": _SYSTEM_DIR / "channel_qq",
     "wecom": _SYSTEM_DIR / "channel_wecom",
-    "api": _SYSTEM_DIR / "channel_api",
     "cli": _SYSTEM_DIR / "channel_cli",
 }
 
@@ -53,22 +52,6 @@ _AMBIGUOUS_MODULES = {
     # vs system/workspace/ 包）——逐出确保重新解析到 system/workspace/ 包
     "workspace",
     "workspace_service",
-    # channel_api 内部模块（与其它通道同目录平铺导入时可能冲突）
-    "deps",
-    "models",
-    "server",
-    "routes_missing",
-    "routes_tasks",
-    "routes_workspaces",
-    "routes_reviews",
-    "routes_artifacts",
-    "routes_config",
-    "routes_scene",
-    "routes_ui",
-    "routes_asr",
-    "routes_evaluation",
-    "routes_thinking_mode",
-    "memory_store",
 }
 
 
@@ -90,19 +73,12 @@ def use_channel(channel: str) -> None:
     _cc = str(_CHANNEL_COMMON_DIR)
     if _cc not in sys.path:
         sys.path.append(_cc)
-    # channel_api 的路由模块按 namespace package 访问兄弟系统插件
-    #（workspace/tasks/multimodal 等），需把 system/ 也加入 path。
-    if channel == "api":
-        _s = str(_SYSTEM_DIR)
-        if _s not in sys.path:
-            sys.path.insert(0, _s)
-        _register_channels_api_compat()
     for m in _AMBIGUOUS_MODULES:
         sys.modules.pop(m, None)
     # 移除含同名 workspace.py 的平铺目录（pytest 收集其它插件测试（tasks 等）时
     # 会把其目录插入 sys.path）：裸 `import workspace` 会命中 tasks/workspace.py
     # 模块而压过 system/workspace/ 包（PathFinder 模块优先于 namespace 包）。
-    # 此处移除保证 channel_api 路由的 `from workspace.workspace_service import`
+    # 此处移除保证通道测试的 `from workspace.workspace_service import`
     # 解析到 0.2 真相源 system/workspace/ 包。
     for _conflict in (_SYSTEM_DIR / "tasks", _SYSTEM_DIR / "isolation"):
         _s = str(_conflict)
@@ -110,23 +86,6 @@ def use_channel(channel: str) -> None:
             sys.path.remove(_s)
 
 
-def _register_channels_api_compat() -> None:
-    """0.1 `channels.api.*` 命名空间兼容：把 channel_api 目录挂为 `channels.api` 包。
-
-    0.2 迁移后通道插件平铺在 plugins/shared/system/channel_api/（`from routes_config
-    import ...`），但部分测试仍按 0.1 命名空间 import（`from channels.api.models
-    import ...`）。注册命名空间包后，`channels.api.X` 自动解析到 channel_api/X.py，
-    与平铺 import 并存。
-    """
-    import types  # noqa: PLC0415
-
-    channels_ns = sys.modules.setdefault("channels", types.ModuleType("channels"))
-    channels_ns.__path__ = []  # namespace package
-    api_ns = sys.modules.setdefault("channels.api", types.ModuleType("channels.api"))
-    api_ns.__path__ = [str(_CHANNEL_DIRS["api"])]
-
-
-# 这几个 channels.api 路由测试依赖的路由模块（routes_missing/routes_workspaces/
-# routes_search）内部仍含 0.1 式懒加载 import（from human_interaction / workspace /
-# infrastructure 等），属 Phase 1d 待修源码。修好前跳过收集，避免阻塞 channels 套件。
-collect_ignore_glob = []  # routes 测试已修复，不再跳过
+# channel_api 于 2026-08-21 整体退役；channels.api 命名空间兼容注册
+# 与 routes_* 懒加载跳过清单（collect_ignore_glob）随其删除。
+collect_ignore_glob = []
