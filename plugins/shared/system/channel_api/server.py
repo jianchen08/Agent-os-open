@@ -1606,10 +1606,10 @@ def _parse_multipart(content_type: str, body_bytes: bytes) -> dict[str, Any]:
     if not msg.is_multipart():
         return fields
     parts = msg.get_payload()
-    if not isinstance(parts, list):
+    if not isinstance(parts, list):  # pragma: no cover —— 防御 typeshed（multipart 时恒 list）
         return fields
     for part in parts:
-        if not isinstance(part, email.message.Message):
+        if not isinstance(part, email.message.Message):  # pragma: no cover —— 同上防御
             continue
         name = part.get_param("name", header="content-disposition")
         if not isinstance(name, str):
