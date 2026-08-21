@@ -1,11 +1,14 @@
 # @feature: FP-GATE 覆盖率棘轮门禁 | @ci: python-coverage
 """覆盖率棘轮门禁检查器单测（ADR 2026-08-20）。
 
-覆盖三个检查器的可单测面：
-1. check_python_coverage_baseline：coverage.xml line-rate 解析 + 基线对照 + --init 拒降；
+覆盖检查器的可单测面：
+1. check_python_coverage_baseline：coverage.xml line-rate 解析 + 基线对照 +
+   --init 拒降 + **自动棘轮（2026-08-21 用户裁决：绿跑即写 floor(实测)+1，
+   只替换数值行保留归因注释；红跑不动文件）**；
 2. check_diff_coverage：unified diff / coverage.xml / lcov 解析 + 真 git 仓库集成
    （红/绿/缺文件 fail-loud/[skip-diff-cov] 逃生）；
-3. check_frontend_baseline：vitest 覆盖率%解析（text-summary / All files 表 / 无数据）。
+3. check_frontend_baseline：vitest 覆盖率%解析（text-summary / All files 表 / 无数据）；
+4. check_rust_coverage_baseline：lcov line% 解析 + 自动棘轮同款行为。
 """
 
 from __future__ import annotations
@@ -33,6 +36,7 @@ def _load(name: str):
 py_cov = _load("check_python_coverage_baseline")
 diff_cov = _load("check_diff_coverage")
 fe_base = _load("check_frontend_baseline")
+rust_cov = _load("check_rust_coverage_baseline")
 
 
 # ── check_python_coverage_baseline ────────────────────────────────
@@ -101,6 +105,41 @@ class TestPythonCoverageBaseline:
         )
         assert py_cov.main() == 0
         assert "python_line_coverage=51.23" in bf.read_text(encoding="utf-8")
+
+    def test_green_run_auto_ratchets_to_next_integer(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
+    ) -> None:
+        # 2026-08-21 用户裁决：绿跑自动把基线写到 floor(实测)+1（47.48→48 式）
+        bf = tmp_path / "baseline.txt"
+        monkeypatch.setattr(py_cov, "BASELINE_FILE", bf)
+        bf.write_text("# 归因注释\npython_line_coverage=51.0\n", encoding="utf-8")
+        monkeypatch.setattr(sys, "argv", ["x", "--xml", str(_write_cov_xml(tmp_path, "0.5123"))])
+        assert py_cov.main() == 0
+        text = bf.read_text(encoding="utf-8")
+        assert "python_line_coverage=52.00" in text
+        assert "# 归因注释" in text  # 只替换数值行，归因注释保留
+        assert "自动棘轮" in capsys.readouterr().out
+
+    def test_red_run_leaves_baseline_untouched(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        bf = tmp_path / "baseline.txt"
+        monkeypatch.setattr(py_cov, "BASELINE_FILE", bf)
+        bf.write_text("python_line_coverage=60\n", encoding="utf-8")
+        monkeypatch.setattr(sys, "argv", ["x", "--xml", str(_write_cov_xml(tmp_path, "0.5123"))])
+        assert py_cov.main() == 1
+        assert bf.read_text(encoding="utf-8") == "python_line_coverage=60\n"
+
+    def test_exact_integer_measured_ratchets_plus_one(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # 实测恰为整数（52.00）且等于基线 → 绿，棘轮到 53（保持恒高于实测）
+        bf = tmp_path / "baseline.txt"
+        monkeypatch.setattr(py_cov, "BASELINE_FILE", bf)
+        bf.write_text("python_line_coverage=52.00\n", encoding="utf-8")
+        monkeypatch.setattr(sys, "argv", ["x", "--xml", str(_write_cov_xml(tmp_path, "0.52"))])
+        assert py_cov.main() == 0
+        assert "python_line_coverage=53.00" in bf.read_text(encoding="utf-8")
 
 
 # ── check_diff_coverage：纯解析函数 ────────────────────────────────
@@ -310,6 +349,66 @@ class TestDiffCoverageIntegration:
             "--range", "HEAD^..HEAD",
         )
         assert rc == 0  # 无可度量源码行 → 放行
+
+
+# ── check_rust_coverage_baseline：解析 + 自动棘轮 ─────────────────
+
+LCOV_50 = "SF:crates/a.rs\nDA:1,1\nDA:2,0\nend_of_record\n"
+
+
+class TestRustCoverageBaseline:
+    def _lcov(self, tmp_path: Path) -> Path:
+        p = tmp_path / "coverage.lcov"
+        p.write_text(LCOV_50, encoding="utf-8")
+        return p
+
+    def test_parse_lcov_line_pct(self, tmp_path: Path) -> None:
+        assert rust_cov.parse_lcov_line_pct(self._lcov(tmp_path)) == pytest.approx(50.0)
+
+    def test_green_auto_ratchets_to_next_integer(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
+    ) -> None:
+        # 实测 50.0 恰为整数且等于基线 → 绿，棘轮 51.0（恒高于实测）
+        bf = tmp_path / "baseline.txt"
+        monkeypatch.setattr(rust_cov, "BASELINE_FILE", bf)
+        bf.write_text("# 归因注释\nrust_line_coverage=50.0\n", encoding="utf-8")
+        monkeypatch.setattr(sys, "argv", ["x", "--lcov", str(self._lcov(tmp_path))])
+        assert rust_cov.main() == 0
+        text = bf.read_text(encoding="utf-8")
+        assert "rust_line_coverage=51.0" in text
+        assert "# 归因注释" in text
+        assert "自动棘轮" in capsys.readouterr().out
+
+    def test_below_baseline_fails_untouched(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        bf = tmp_path / "baseline.txt"
+        monkeypatch.setattr(rust_cov, "BASELINE_FILE", bf)
+        bf.write_text("rust_line_coverage=60.0\n", encoding="utf-8")
+        monkeypatch.setattr(sys, "argv", ["x", "--lcov", str(self._lcov(tmp_path))])
+        assert rust_cov.main() == 1
+        assert bf.read_text(encoding="utf-8") == "rust_line_coverage=60.0\n"
+
+    def test_init_refuses_lowering(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        bf = tmp_path / "baseline.txt"
+        monkeypatch.setattr(rust_cov, "BASELINE_FILE", bf)
+        bf.write_text("rust_line_coverage=60.0\n", encoding="utf-8")
+        monkeypatch.setattr(
+            sys, "argv", ["x", "--lcov", str(self._lcov(tmp_path)), "--init"]
+        )
+        assert rust_cov.main() == 1
+
+    def test_init_writes_exact_measured(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        bf = tmp_path / "baseline.txt"
+        monkeypatch.setattr(rust_cov, "BASELINE_FILE", bf)
+        bf.write_text("rust_line_coverage=45.0\n", encoding="utf-8")
+        monkeypatch.setattr(
+            sys, "argv", ["x", "--lcov", str(self._lcov(tmp_path)), "--init"]
+        )
+        assert rust_cov.main() == 0
+        assert "rust_line_coverage=50.0" in bf.read_text(encoding="utf-8")
 
 
 # ── check_frontend_baseline：覆盖率%解析 ───────────────────────────

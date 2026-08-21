@@ -4,8 +4,13 @@
 机制（对齐 check_rust_coverage_baseline.py / check_pytest_failure_baseline.py）：
 - plugins-coverage gate 产出的 coverage.xml（line-rate）对照
   .github/python-coverage-baseline.txt；
-- 实测 < 基线 → 退出码 1（CI 红）；实测 ≥ 基线 → 放行；
-- 覆盖率提升后运行 --init 收紧基线（只许升不许降，防止棘轮倒退）；
+- 实测 < 基线 → 退出码 1（CI 红）；
+- **自动棘轮（2026-08-21 用户裁决）**：实测 ≥ 基线（绿跑）→ 自动把基线写到
+  floor(实测)+1——向上取整到下一个整数百分比（47.48→48、45.5→46、恰为整数
+  →再 +1），恒高于实测留压力，下轮未提升即红是预期设计。写入只替换数值行、
+  保留归因注释；改动随本批 commit 留归因（CI job 内的写入随 job 丢弃，
+  以仓库提交为准）；
+- --init 保留为人工精确锚定（写实测原值、拒降），仅校准场景用；
 - 基线文件改动一律走 commit 留归因（AGENTS.md 门禁约定）。
 
 取代原 `coverage report --fail-under=44` 静态地板（2026-08-20 ADR：
@@ -13,13 +18,14 @@
 此后只升不降，向 100% 推进。
 
 用法：
-    python scripts/check_python_coverage_baseline.py               # CI：对照基线
-    python scripts/check_python_coverage_baseline.py --init        # 收紧基线（只升）
+    python scripts/check_python_coverage_baseline.py               # 对照 + 绿跑自动棘轮
+    python scripts/check_python_coverage_baseline.py --init        # 人工精确锚定（只升）
 """
 
 from __future__ import annotations
 
 import argparse
+import math
 import re
 import sys
 import xml.etree.ElementTree as ET
@@ -56,14 +62,21 @@ def read_baseline() -> float:
     return float(m.group(1)) if m else 0.0
 
 
-def write_baseline(pct: float) -> None:
-    BASELINE_FILE.write_text(
-        "# Python 插件整体行覆盖率基线（line%，只升不降，\n"
-        "# 见 scripts/check_python_coverage_baseline.py；数据源 plugins-coverage\n"
-        "# gate 的 coverage.xml）。提升覆盖率后 --init 收紧；终极目标 100%。\n"
-        f"{KEY}={pct:.2f}\n",
-        encoding="utf-8",
-    )
+def next_pressure_line(measured_pct: float) -> int:
+    """棘轮压力线：实测向上取整到下一个整数百分比（47.48→48、45.5→46、
+    恰为整数→再 +1）——基线恒高于实测，绿跑即顶到下一档。"""
+    return math.floor(measured_pct) + 1
+
+
+def update_baseline_value(pct: float) -> None:
+    """只替换 KEY= 数值行，保留归因注释（旧 write_baseline 整文件重写会抹注释）。"""
+    text = BASELINE_FILE.read_text(encoding="utf-8") if BASELINE_FILE.exists() else ""
+    new_line = f"{KEY}={pct:.2f}"
+    if re.search(rf"{KEY}=[0-9.]+", text):
+        text = re.sub(rf"{KEY}=[0-9.]+", new_line, text, count=1)
+    else:
+        text = (text.rstrip("\n") + "\n" if text else "") + new_line + "\n"
+    BASELINE_FILE.write_text(text, encoding="utf-8")
 
 
 def main() -> int:
@@ -96,8 +109,8 @@ def main() -> int:
                 file=sys.stderr,
             )
             return 1
-        write_baseline(pct)
-        print(f"[python-cov] 基线已收紧: {baseline:.2f}% → {pct:.2f}%")
+        update_baseline_value(pct)
+        print(f"[python-cov] 基线已锚定实测: {baseline:.2f}% → {pct:.2f}%")
         return 0
 
     if pct < baseline:
@@ -107,7 +120,18 @@ def main() -> int:
             file=sys.stderr,
         )
         return 1
+
+    ratchet_to = next_pressure_line(pct)
+    update_baseline_value(ratchet_to)
     print(f"[python-cov] ✅ 行覆盖率 {pct:.2f}% ≥ 基线 {baseline:.2f}%")
+    print(
+        f"[python-cov] 🔧 基线自动棘轮: {baseline:.2f}% → {ratchet_to:.2f}%"
+        f"（实测 {pct:.2f} 向上取整到下一整数；下轮需 ≥ {ratchet_to:.2f} 才绿）。"
+    )
+    print(
+        "[python-cov] 基线文件已就地更新，随本批改动 commit 留归因"
+        "（CI job 内的写入随 job 丢弃，以仓库提交为准）。"
+    )
     return 0
 
 
