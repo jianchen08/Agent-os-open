@@ -492,14 +492,21 @@ def test_on_load_injects_kernel_reads_providers(server: Any, kr: Any) -> None:
     kr.reset_providers()
 
 
-def test_on_load_injection_failure_degrades(server: Any, kr: Any) -> None:
-    """get_capability 抛 KeyError（能力未授予）→ 注入失败被吞，provider 表为空。"""
-    def _raise(name: str) -> Any:  # noqa: ARG001
+def test_capability_failure_degrades_at_call_time(server: Any, kr: Any) -> None:
+    """能力未授予（get_capability 抛 KeyError）：注入为惰性闭包、注册期不抛，
+    调用期 kernel_reads._call 吞错降级空数据——HTTP 200 空载荷契约不破坏。"""
+    async def _raiser(status=None, limit=100):  # noqa: ARG001
         raise KeyError("capability not granted")
 
-    server.plugin.get_capability = _raise  # type: ignore[method-assign]
-    _run(server._on_load({}))
-    assert kr._PROVIDERS == {}
+    kr.reset_providers()
+    kr.set_provider("pipeline-runs", _raiser)
+    kr.set_provider("pipeline-state", _raiser)
+    status, body = _decode_http(_call(
+        server, path="/ext/monitoring/execution/records/sessions", method="GET",
+    ))
+    assert status == 200
+    assert body["sessions"] == [] and body["total"] == 0
+    kr.reset_providers()
 
 
 def test_domain_unrelated_routes_untouched(server: Any, kr: Any) -> None:

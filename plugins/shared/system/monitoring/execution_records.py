@@ -148,6 +148,8 @@ async def list_execution_records(
 async def get_execution_record_sessions() -> dict[str, Any]:
     """有记录的会话列表（runs 倒序去重 + state 摘要补充标题/消息数）。"""
     runs = await kernel_reads.list_pipeline_runs(limit=500)
+    # 上游 pipeline-runs.list 约定倒序，此处显式排序兜底（对约定幂等、对乱序防御）
+    runs = sorted(runs, key=lambda r: r.get("started_at") or "", reverse=True)
     states = {
         row.get("pipeline_id"): row
         for row in await kernel_reads.list_state_rows()
