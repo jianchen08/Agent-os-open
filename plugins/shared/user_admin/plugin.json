@@ -1,7 +1,7 @@
 {
   "id": "user_admin",
   "name": "User Admin HTTP Face",
-  "description": "用户管理策略面的 HTTP 面层（boot-plugin 第二刀）：/ext/user_admin/** 端点经内核 dispatcher 进本插件 http.handle，反向调用内核 user-admin capability（用户列表/改角色/改租户/删用户；auth 执行门 login/logout/me/register/refresh 永留内核不动）。鉴权凭证（Authorization 头）由本插件原样转发、内核侧解析（admin 角色 + self-service 防护），插件不做鉴权决策。",
+  "description": "用户管理 HTTP 面（channel_api 退役批次2 users 域并入）：/ext/user_admin/** 经内核 dispatcher 进本插件 http.handle。既有 user-admin capability 面（PATCH 改角色/改租户，内核自保护）+ users 域六组端点（列表/统计/角色 PUT/激活/删除/设置）经 db-admin capability 查/写内核 users 表。鉴权凭证（Authorization 头）原样透传 _authorization、内核侧真角色校验；插件不做鉴权决策。",
   "version": "1.0.0",
   "plugin_type": "tool",
   "language": "python",
@@ -25,7 +25,8 @@
   "permissions": {},
   "priority": 50,
   "granted_capabilities": [
-    "user-admin"
+    "user-admin",
+    "db-admin"
   ],
   "http_endpoints": [
     {
@@ -59,6 +60,66 @@
       "auth": "admin",
       "handler_capability": "http.handle",
       "description": "删用户（内核侧校验 admin 角色 + 不能删自己，防锁死系统）"
+    },
+    {
+      "route_id": "users_stats",
+      "method": "GET",
+      "path": "/ext/user_admin/users/stats",
+      "auth": "user",
+      "handler_capability": "http.handle",
+      "timeout_ms": 5000,
+      "max_concurrency": 8,
+      "description": "用户统计（total_users/active_users/admin_count；db-admin.table_query 凭证透传，内核 admin/viewer 读校验——原 GET /ext/channel_api/users/stats）"
+    },
+    {
+      "route_id": "user_role_update_put",
+      "method": "PUT",
+      "path": "/ext/user_admin/users/{user_id}/role",
+      "auth": "user",
+      "handler_capability": "http.handle",
+      "timeout_ms": 5000,
+      "max_concurrency": 4,
+      "description": "改用户角色（body: {role: admin|user}；db-admin.table_update_row 凭证透传，内核 admin 写校验；PATCH 同路径仍走 user-admin capability 自保护面——原 PUT /ext/channel_api/users/{user_id}/role）"
+    },
+    {
+      "route_id": "user_active_update",
+      "method": "PUT",
+      "path": "/ext/user_admin/users/{user_id}/active",
+      "auth": "user",
+      "handler_capability": "http.handle",
+      "timeout_ms": 5000,
+      "max_concurrency": 4,
+      "description": "更新用户激活状态（users 表无 is_active 列，保持存根语义——原 PUT /ext/channel_api/users/{user_id}/active）"
+    },
+    {
+      "route_id": "user_active_update_patch",
+      "method": "PATCH",
+      "path": "/ext/user_admin/users/{user_id}/active",
+      "auth": "user",
+      "handler_capability": "http.handle",
+      "timeout_ms": 5000,
+      "max_concurrency": 4,
+      "description": "更新用户激活状态（PATCH 形态，同 PUT 存根语义——原 PATCH /ext/channel_api/users/{user_id}/active）"
+    },
+    {
+      "route_id": "user_settings_get",
+      "method": "GET",
+      "path": "/ext/user_admin/users/settings",
+      "auth": "user",
+      "handler_capability": "http.handle",
+      "timeout_ms": 5000,
+      "max_concurrency": 8,
+      "description": "获取用户设置（存根——原 GET /ext/channel_api/users/settings）"
+    },
+    {
+      "route_id": "user_settings_put",
+      "method": "PUT",
+      "path": "/ext/user_admin/users/settings",
+      "auth": "user",
+      "handler_capability": "http.handle",
+      "timeout_ms": 5000,
+      "max_concurrency": 4,
+      "description": "更新用户设置（存根——原 PUT /ext/channel_api/users/settings）"
     }
   ]
 }
