@@ -215,7 +215,7 @@ def translate_hooks_config(hooks: list[dict[str, Any]] | str | None) -> dict[str
                 unmapped.append({"on": on, "when": when, "run": run, "reason": "unknown turn/end reason"})
                 continue
         else:
-            event = HOOK_EVENT_LINGXI_MAP.get(on)
+            event = HOOK_EVENT_LINGXI_MAP.get(on) if on is not None else None
             if event is None:
                 unmapped.append({"on": on, "when": when, "run": run, "reason": "no lingxi domain event equivalent"})
                 continue
@@ -547,8 +547,14 @@ def describe_available_skins(base_dir: str | Path | None = None) -> list[dict[st
                 entry["accent"] = str(meta.get("accent") or "")
                 tags = [str(t).lower() for t in meta.get("tags", []) if isinstance(t, (str, int))]
                 entry["tags"] = tags
-                if "light" in tags and "dark" not in tags:
-                    entry["base"] = "light"
+        # 基准判定 = 画布色亮度（tags 无 dark/light 标签，按 tags 判恒 dark 是错的）
+        skin_css = base / skin_id / "skin.css"
+        if skin_css.is_file():
+            try:
+                canvas, _ = _extract_skin_colors(skin_css.read_text(encoding="utf-8", errors="replace"))
+                entry["base"] = skin_base_of(canvas)
+            except OSError:
+                pass
         entry["has_background_media"] = resolve_skin_background(skin_id, base) is not None
         out.append(entry)
     return out
@@ -619,30 +625,35 @@ def resolve_skin_background(skin_id: str, base_dir: str | Path | None = None) ->
 
 
 def translate_background_css(bg: dict[str, Any], asset_url_base: str) -> str:
-    """backgroundMedia 声明 → 区域化背景 CSS（立绘只挂聊天区，工作区不糊图）。
+    """backgroundMedia → 灵汐全局固定装饰层（统一映射，2026-08-21 三改）。
 
-    用户裁决（2026-08-21）：全屏糊一张图覆盖栏位/图标是错误语义——背景严格
-    区域化：聊天区挂立绘 + scrim（DSH 皮肤本意=对话背景），工作区保持实底
-    （可读性优先，"没有的就不要覆盖"）。亮暗双态跟随系统偏好。
+    DSH schema 原文语义："Fills the fixed decoration layer 'background'"
+    ——全局 fixed 装饰层（非聊天区局部），优先级 动态壁纸 > 用户手动背景 >
+    皮肤声明。灵汐等价物 = body.has-bg-image::after 机制（fixed 全屏层 +
+    overlay 可读性蒙层）——适配层直接复刻该层（不依赖 themeStore 加类），
+    scrim 渐变即 overlay。亮暗双态跟随系统偏好。
     """
     def layer(spec: dict[str, str]) -> str:
         img = f'url("{asset_url_base}/{spec["src"]}")'
         scrim = spec.get("scrim", "").strip()
         return f"{scrim}, {img}" if scrim else img
 
+    def fixed_layer(bgimg: str) -> str:
+        return (
+            "body::after { content: ''; position: fixed; inset: 0; z-index: 0; "
+            "pointer-events: none; "
+            f"background-image: {bgimg}; "
+            "background-position: center; background-size: cover; "
+            "background-attachment: fixed; background-repeat: no-repeat; }"
+        )
+
     dark = bg.get("dark")
     light = bg.get("light")
-    parts = ["/* dsh-skin background-media → chat region only */"]
+    parts = ["/* dsh-skin background-media → global fixed decoration layer (DSH schema 语义) */"]
     if dark:
-        parts.append(
-            f'[data-region="chat"] {{ background-image: {layer(dark)}; '
-            "background-size: cover; background-position: center; background-repeat: no-repeat; }}"
-        )
+        parts.append(fixed_layer(layer(dark)))
     if light:
-        parts.append(
-            f'@media (prefers-color-scheme: light) {{ [data-region="chat"] {{ '
-            f"background-image: {layer(light)}; }} }}"
-        )
+        parts.append(f"@media (prefers-color-scheme: light) {{ {fixed_layer(layer(light))} }}")
     return "\n".join(parts) + "\n"
 
 
@@ -661,6 +672,7 @@ def translate_background_css(bg: dict[str, Any], asset_url_base: str) -> str:
 _ALIAS_RE = re.compile(r"--dsw-alias-bg-base:\s*([^;]+);")
 _ALIAS_L1_RE = re.compile(r"--dsw-alias-bg-layer-1:\s*([^;]+);")
 _ALIAS_PANEL_RE = re.compile(r"--dsw-alias-bg-panel:\s*([^;]+);")
+_DSW_FONT_RE = re.compile(r"--dsw-font-family:\s*([^;]+);")
 _ROOT_BLOCK_RE = re.compile(r":root\s*\{([^}]*)\}")
 _BG_RE = re.compile(r"background-color:\s*([^;]+);")
 _FG_RE = re.compile(r"(?<![-\w])color:\s*(#[0-9a-fA-F]{3,8}|rgba?\([^)]*\))\s*;")
@@ -671,12 +683,12 @@ def _hex_to_hsl(hexc: str) -> str:
     """'#RRGGBB' → 'H S% L%'（shadcn 变量格式，无 hsl() 包裹）。非 hex 原样返回。"""
     m3 = re.fullmatch(r"#([0-9a-fA-F]{3})", hexc.strip())
     m6 = re.fullmatch(r"#([0-9a-fA-F]{6})", hexc.strip())
-    if not (m3 or m6):
-        return hexc.strip()
     if m3:
         h = "".join(c * 2 for c in m3.group(1))
-    else:
+    elif m6:
         h = m6.group(1)
+    else:
+        return hexc.strip()
     r, g, b = (int(h[i : i + 2], 16) / 255 for i in (0, 2, 4))
     mx, mn = max(r, g, b), min(r, g, b)
     l = (mx + mn) / 2
@@ -692,6 +704,38 @@ def _hex_to_hsl(hexc: str) -> str:
         else:
             hue = ((r - g) / d + 4) / 6
     return f"{round(hue * 360)} {round(sat * 100)}% {round(l * 100)}%"
+
+
+def _luminance(hexc: str) -> float:
+    """'#RRGGBB' → 相对亮度 0~1（WCAG 公式）；非 hex 返回 0（按暗处理）。"""
+    m3 = re.fullmatch(r"#([0-9a-fA-F]{3})", hexc.strip())
+    m6 = re.fullmatch(r"#([0-9a-fA-F]{6})", hexc.strip())
+    if m3:
+        h = "".join(c * 2 for c in m3.group(1))
+    elif m6:
+        h = m6.group(1)
+    else:
+        return 0.0
+    chan = []
+    for i in (0, 2, 4):
+        c = int(h[i : i + 2], 16) / 255
+        chan.append(c / 12.92 if c <= 0.03928 else ((c + 0.055) / 1.055) ** 2.4)
+    return 0.2126 * chan[0] + 0.7152 * chan[1] + 0.0722 * chan[2]
+
+
+def skin_base_of(canvas: str) -> str:
+    """皮肤基准（暗/亮）判定：画布色相对亮度（skin tags 无 dark/light 标签，
+    全按 tags 判定恒 dark 是错的——miku 画布 #eef5ff 实为亮色皮肤）。"""
+    return "light" if _luminance(canvas) > 0.35 else "dark"
+
+
+def _extract_skin_colors(css: str) -> tuple[str, str]:
+    """skin.css → (canvas, text)：--dsw-alias-bg-base / :root background-color / color。"""
+    bg_m = _BG_RE.search(css) or _ALIAS_RE.search(css)
+    fg_m = _FG_RE.search(css)
+    canvas = bg_m.group(1).strip() if bg_m else "#111318"
+    text = fg_m.group(1).strip() if fg_m else "#e6e6e6"
+    return canvas, text
 
 
 def translate_skin_adaptation(skin_id: str, base_dir: str | Path | None = None) -> str:
@@ -718,16 +762,14 @@ def translate_skin_adaptation(skin_id: str, base_dir: str | Path | None = None) 
     except ValueError:
         meta = {}
 
-    bg_m = _BG_RE.search(css) or _ALIAS_RE.search(css)
-    fg_m = _FG_RE.search(css)
     root_block = _ROOT_BLOCK_RE.search(css)
     root_body = root_block.group(1) if root_block else css
     root_img_m = _ROOT_BGIMG_RE.search(root_body)
-    canvas = bg_m.group(1).strip() if bg_m else "#111318"
-    text = fg_m.group(1).strip() if fg_m else "#e6e6e6"
+    canvas, text = _extract_skin_colors(css)
     accent = str(meta.get("accent", "")).strip() or "#4a90d9"
     panel_m = _ALIAS_PANEL_RE.search(css) or _ALIAS_L1_RE.search(css)
     panel = panel_m.group(1).strip() if panel_m else f"color-mix(in srgb, {canvas} 88%, white)"
+    font_m = _DSW_FONT_RE.search(css)
 
     def imp(k: str, v: str) -> str:
         return f"  {k}: {v} !important;"
@@ -764,6 +806,9 @@ def translate_skin_adaptation(skin_id: str, base_dir: str | Path | None = None) 
         "/* 画布底：皮肤 :root 原渐变挂 body（仅聊天区之外透出） */",
         f"body {{ background-color: {canvas} !important; }}",
     ]
+    if font_m:
+        # 字体统一透传：皮肤字体应用到全局（组件渲染统一随皮肤，用户裁决）
+        lines.append(f"body, button, input, select, textarea {{ font-family: {font_m.group(1).strip()} !important; }}")
     if root_img_m:
         lines.append(f"body {{ background-image: {root_img_m.group(1).strip()} !important; background-attachment: fixed; }}")
     return "\n".join(lines) + "\n"

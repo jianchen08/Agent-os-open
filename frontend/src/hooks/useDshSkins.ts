@@ -29,20 +29,55 @@ interface DshSkinList {
   skins: DshSkin[]
 }
 
+/**
+ * 模块级清单缓存：浮框每次悬停都重新挂载组件，不能每次都打端点
+ * （用户实测：反复 hover 反复加载）。30s 内复用，之后静默重验证。
+ */
+interface SkinCache {
+  data: DshSkinList
+  at: number
+}
+let skinCache: SkinCache | null = null
+let inflight: Promise<DshSkinList> | null = null
+
+const CACHE_TTL_MS = 30_000
+
+function fetchSkinList(force = false): Promise<DshSkinList> {
+  if (!force && skinCache && Date.now() - skinCache.at < CACHE_TTL_MS) {
+    return Promise.resolve(skinCache.data)
+  }
+  if (inflight) return inflight
+  inflight = apiClient
+    .get<DshSkinList>('/ext/dsh_adapter/skins')
+    .then((resp) => {
+      skinCache = { data: resp.data, at: Date.now() }
+      return resp.data
+    })
+    .finally(() => {
+      inflight = null
+    })
+  return inflight
+}
+
+function patchCacheCurrent(skinId: string) {
+  if (skinCache) {
+    skinCache = { ...skinCache, data: { ...skinCache.data, current: skinId } }
+  }
+}
+
 export function useDshSkins() {
   const { message } = AntdApp.useApp()
-  const [list, setList] = useState<DshSkinList | null>(null)
-  const [current, setCurrent] = useState<string | null>(null)
+  const [list, setList] = useState<DshSkinList | null>(skinCache?.data ?? null)
+  const [current, setCurrent] = useState<string | null>(skinCache?.data.current ?? null)
   const [switching, setSwitching] = useState<string | null>(null)
 
   useEffect(() => {
     let cancelled = false
-    apiClient
-      .get<DshSkinList>('/ext/dsh_adapter/skins')
-      .then((resp) => {
+    fetchSkinList()
+      .then((data) => {
         if (!cancelled) {
-          setList(resp.data)
-          setCurrent(resp.data.current)
+          setList(data)
+          setCurrent(data.current)
         }
       })
       .catch(() => {
@@ -59,6 +94,7 @@ export function useDshSkins() {
       try {
         await apiClient.put('/ext/dsh_adapter/skins/current', { skin: skinId })
         setCurrent(skinId)
+        patchCacheCurrent(skinId)
         // 基准回退规则（用户裁决 2026-08-21）：皮肤 = 整体替换，基准是内置
         // 暗/亮主题（按皮肤 base）而非叠加在当前灵汐主题上——皮肤未覆盖处
         // 回落基准暗/亮。none 时恢复皮肤激活前的用户主题。

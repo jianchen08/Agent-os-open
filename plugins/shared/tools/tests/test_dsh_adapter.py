@@ -27,6 +27,7 @@ sys.path.insert(0, str(PLUGIN_DIR))
 from bridge import DshRuntimeBridge  # noqa: E402
 from translator import (  # noqa: E402
     DSH_SOURCE_COMMIT,
+    describe_available_skins,
     DSH_SOURCE_VERSION,
     discover_dsh_plugins,
     dsh_params_to_json_schema,
@@ -727,12 +728,11 @@ class TestSkinBackgroundMedia:
         bg = resolve_skin_background("dragon-heir")
         assert bg is not None
         css = translate_background_css(bg, "/ext/dsh_adapter/styles/skin-assets/dragon-heir")
-        # 区域化语义（2026-08-21）：立绘只挂聊天区，不糊 body/工作区
-        assert '[data-region="chat"]' in css
-        assert "linear-gradient" in css  # scrim 在上层
+        # DSH schema 语义：fixed decoration layer——复刻灵汐 body::after 全局装饰层
+        assert "body::after" in css and "position: fixed" in css
+        assert "linear-gradient" in css  # scrim 在上层（overlay）
         assert "url(" in css and "/ext/dsh_adapter/styles/skin-assets/dragon-heir/assets/" in css
         assert "prefers-color-scheme: light" in css  # 亮暗双态
-        assert "body" not in css  # 不再全屏糊图
 
     def test_translate_skin_adaptation_tokens(self):
         css = translate_skin_adaptation("miku")
@@ -746,6 +746,16 @@ class TestSkinBackgroundMedia:
         assert '[data-testid="app-header"]' in css and "display: none" not in css
         assert '[data-region="sidebar"]' in css
         assert '[data-region="workspace"]' in css
+        # 字体统一透传（皮肤有 --dsw-font-family 时全局应用）
+        assert "font-family" in css
+
+    def test_skin_base_by_canvas_luminance(self):
+        # miku 画布 #eef5ff 亮色皮肤（tags 无 dark/light，按 tags 判恒 dark 是错的）
+        from translator import skin_base_of
+        assert skin_base_of("#eef5ff") == "light"
+        assert skin_base_of("#040805") == "dark"
+        skins = {s["id"]: s["base"] for s in describe_available_skins()}
+        assert skins["miku"] == "light" and skins["matrix"] == "dark"
 
 
 class TestSkinAssetRoute:
@@ -778,7 +788,7 @@ class TestSkinAssetRoute:
         body = base64.b64decode(resp["body"]).decode("utf-8")
         assert "--dsw-" in body  # 令牌层仍在
         assert "lingxi adaptation" in body  # 适配层（令牌接管+布局）
-        assert "miku-art.webp" in body and '[data-region="chat"]' in body  # 立绘区域化
+        assert "miku-art.webp" in body and "body::after" in body  # 立绘=全局固定装饰层（DSH 语义）
 
 
 class TestSkinListAndSelect:
