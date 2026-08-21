@@ -33,6 +33,8 @@ export interface ThemeState {
   themeConfig: ThemeConfig | null
   /** 当前生效的插件主题（contributes.themes；null 表示无插件主题覆盖） */
   activePluginTheme: PluginTheme | null
+  /** 会话恢复时 registry 未就绪而挂起的主题 id（schema 注册后重放） */
+  pendingThemeId: string | null
   /** 可用主题列表（预设 + 用户自定义 + 插件贡献） */
   availableThemes: ThemeInfo[]
   /** 是否正在加载 */
@@ -48,6 +50,8 @@ export interface ThemeActions {
   loadTheme: (themeId: string) => Promise<void>
   /** 加载用户自定义主题 */
   loadUserThemes: () => void
+  /** schema 注册完成后重放挂起的插件主题（会话恢复时序修复） */
+  retryPendingTheme: () => Promise<void>
   /** 应用主题到 DOM */
   applyTheme: () => void
   /** 重置为默认主题 */
@@ -149,6 +153,7 @@ export const useThemeStore = create<ThemeState & ThemeActions>()(
       resolvedTheme: 'dark',
       themeConfig: null,
       activePluginTheme: null,
+      pendingThemeId: null,
       availableThemes: [],
       isLoading: false,
 
@@ -225,6 +230,14 @@ export const useThemeStore = create<ThemeState & ThemeActions>()(
               activePluginTheme: pluginTheme,
             })
             get().applyTheme()
+          } else if (!contributionRegistry.isInitialized()) {
+            // 插件主题（如 DSH 皮肤）在会话恢复时序里早于 growthLoop 的 schema
+            // 注册——registry 未就绪时查不到≠主题不存在：挂起等待（不回退
+            // dark、不覆盖持久化选择；retryPendingTheme 在注册完成后重放）。
+            // 回退+persist 会把用户选择永久改写成 dark（2026-08-21 实锤：
+            // 点皮肤卡生效→刷新→被打回 dark 且 themeId 被覆盖）。
+            set({ pendingThemeId: themeId, isLoading: false })
+            return
           } else {
             console.error(`无法加载主题: ${themeId}`)
             // 回退到深色主题
@@ -261,6 +274,21 @@ export const useThemeStore = create<ThemeState & ThemeActions>()(
       loadUserThemes: () => {
         // 用户主题会在 updateAvailableThemes 中合并到 availableThemes
         get().updateAvailableThemes()
+      },
+
+      // schema 注册完成后重放挂起的插件主题（grewLoop 调用）
+      retryPendingTheme: async () => {
+        const pending = get().pendingThemeId
+        if (!pending) return
+        if (!contributionRegistry.isInitialized()) return
+        const hit =
+          getPresetTheme(pending) ||
+          ThemeStorageService.getUserTheme(pending) ||
+          contributionRegistry.getPluginTheme(pending)
+        if (hit) {
+          set({ pendingThemeId: null })
+          await get().loadTheme(pending)
+        }
       },
 
       // 更新可用主题列表
