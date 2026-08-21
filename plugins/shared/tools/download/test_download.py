@@ -1,4 +1,4 @@
-# @feature: FP-0.2.〇 管道引擎 | @vision: V3 可嵌入 | @ci: none-local
+# @feature: FP-0.2.〇 管道引擎 | @vision: V3 可嵌入 | @ci: python-coverage
 """download 插件（通用文件下载工具）单元测试。
 
 覆盖（对齐 plugins/shared/tools/download/tool.py）：

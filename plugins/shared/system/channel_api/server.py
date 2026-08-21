@@ -224,7 +224,7 @@ def _http_exc_response(exc: Exception) -> dict[str, Any]:
         detail = detail or str(exc)
     if detail is None:
         detail = str(exc)
-    return _ok(_json_response({"detail": detail}, int(status)))
+    return _ok(_json_response({"detail": detail}, int(status) if status is not None else 500))
 
 
 def _decode_body(raw_body: str) -> dict[str, Any]:
@@ -424,8 +424,8 @@ def _handle_thinking_mode_domain(path: str, method: str, raw_body: str, query: d
             body = _decode_body(raw_body)
             return _ok(_json_response(rtm.switch_mode(body)))
         if sub == "/recommendations" and method == "POST":
-            body = _decode_body(raw_body) or None
-            return _ok(_json_response(rtm.recommendations(body)))
+            recs_body = _decode_body(raw_body) or None
+            return _ok(_json_response(rtm.recommendations(recs_body)))
 
         logger.warning("thinking-mode http.handle: no route for sub=%s method=%s", sub, method)
         return _ok(_json_response({"error": "not found", "path": path}, 404))
@@ -1125,7 +1125,7 @@ async def _handle_tasks_domain(
     import routes_tasks as rt  # noqa: PLC0415
     from fastapi import HTTPException  # noqa: PLC0415
 
-    def _qint(key: str, default: int) -> int | None:
+    def _qint(key: str, default: int | None) -> int | None:
         if key not in query:
             return default
         try:
@@ -1605,9 +1605,14 @@ def _parse_multipart(content_type: str, body_bytes: bytes) -> dict[str, Any]:
     fields: dict[str, Any] = {}
     if not msg.is_multipart():
         return fields
-    for part in msg.get_payload():
+    parts = msg.get_payload()
+    if not isinstance(parts, list):
+        return fields
+    for part in parts:
+        if not isinstance(part, email.message.Message):
+            continue
         name = part.get_param("name", header="content-disposition")
-        if name is None:
+        if not isinstance(name, str):
             continue
         filename = part.get_filename()
         if filename is not None:
@@ -1621,7 +1626,9 @@ def _parse_multipart(content_type: str, body_bytes: bytes) -> dict[str, Any]:
         else:
             # 普通字段
             payload = part.get_payload(decode=True)
-            fields[name] = payload.decode("utf-8", errors="replace") if payload else ""
+            fields[name] = (
+                payload.decode("utf-8", errors="replace") if isinstance(payload, bytes) else ""
+            )
     return fields
 
 

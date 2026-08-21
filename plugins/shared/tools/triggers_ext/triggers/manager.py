@@ -24,8 +24,8 @@ import os
 import subprocess
 import threading
 import time
-from collections.abc import Callable
-from typing import Any
+from collections.abc import Callable, Coroutine
+from typing import Any, cast
 
 from .types import TriggerConfig, TriggerStatus, TriggerType
 
@@ -702,7 +702,11 @@ class TriggerManager:
                         "[TriggerManager] 主事件循环不可用，跳过本轮条件轮询"
                     )
                     return None
-                result = asyncio.run_coroutine_threadsafe(result, loop).result(timeout=15)
+                # isawaitable 只收窄到 Awaitable；state provider 返回协程，
+                # run_coroutine_threadsafe 形参要求 Coroutine。
+                result = asyncio.run_coroutine_threadsafe(
+                    cast("Coroutine[Any, Any, Any]", result), loop
+                ).result(timeout=15)
 
         except Exception as e:
             logger.error(f"[TriggerManager] state 聚合读取失败，跳过本轮: {e}")

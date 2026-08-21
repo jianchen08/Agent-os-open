@@ -1,4 +1,4 @@
-# @feature: FP-0.2.〇 管道引擎 | @vision: V3 可嵌入 | @ci: none-local
+# @feature: FP-0.2.〇 管道引擎 | @vision: V3 可嵌入 | @ci: python-coverage
 """workspace_aware 插件（工作空间感知 Mixin）单元测试。
 
 覆盖（对齐 plugins/shared/tools/workspace_aware.py）：
@@ -43,7 +43,8 @@ def _load_mixin() -> Any:
 
 
 _MOD = _load_mixin()
-WorkspaceAwareMixin = _MOD.WorkspaceAwareMixin
+# 动态装载的模块属性无静态类型；注解 Any 使其可作基类（mypy 动态类标准解法）。
+WorkspaceAwareMixin: Any = _MOD.WorkspaceAwareMixin
 
 
 class _Tool(WorkspaceAwareMixin):

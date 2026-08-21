@@ -140,6 +140,7 @@ async def install(package_dir: str) -> dict[str, Any]:
     d, err = _check_package_dir(package_dir)
     if err:
         return {"ok": False, "error": err}
+    assert d is not None  # _check_package_dir 约定：err 非空 ⟺ d 为 None
     try:
         declared = _declared_dependencies(d)
     except FileNotFoundError as e:
@@ -183,6 +184,7 @@ async def uninstall(package_dir: str) -> dict[str, Any]:
     d, err = _check_package_dir(package_dir)
     if err:
         return {"ok": False, "error": err}
+    assert d is not None  # _check_package_dir 约定：err 非空 ⟺ d 为 None
     removed: list[str] = []
     for part in (d / ".venv", d / "uv.lock"):
         if part.exists() or part.is_symlink():
@@ -215,6 +217,7 @@ async def resolve_dependencies(package_dir: str) -> dict[str, Any]:
     d, err = _check_package_dir(package_dir)
     if err:
         return {"ok": False, "error": err}
+    assert d is not None  # _check_package_dir 约定：err 非空 ⟺ d 为 None
     try:
         declared = _declared_dependencies(d)
     except FileNotFoundError as e:
@@ -252,6 +255,7 @@ async def status(package_dir: str) -> dict[str, Any]:
     d, err = _check_package_dir(package_dir)
     if err:
         return {"ok": False, "error": err}
+    assert d is not None  # _check_package_dir 约定：err 非空 ⟺ d 为 None
     try:
         declared = _declared_dependencies(d)
     except FileNotFoundError as e:

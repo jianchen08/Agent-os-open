@@ -1386,6 +1386,13 @@ class TaskSubmitTool(BuiltinTool):
                 "title": inputs.get("goal_title"),
                 "description": inputs.get("goal_description", ""),
             }
+        # 镜像 execute() 的基础参数闸门：goal 缺失即显式失败，
+        # 不允许 None 漂到 _dispatch_task_pipeline 处 TypeError 崩溃。
+        if not isinstance(goal, dict) or not goal.get("title"):
+            return create_failure_result(
+                error="必须提供 goal（含 title 字段）",
+                error_code="MISSING_GOAL",
+            )
         parent_agent_level = inputs.get("parent_agent_level")
 
         # ── 容器任务参数可用性：workspace_mode / isolation_level 不可选 ──

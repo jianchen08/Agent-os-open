@@ -74,6 +74,15 @@ BASE_TEST_PATHS: list[str] = [
     "tests/test_isolation_prune_throttle.py",
     "tests/test_isolation_sandbox.py",
     "tests/test_isolation_skills_copy.py",
+    # 2026-08-21 覆盖率批次：既有绿灯测试接线进插桩车道（此前 @ci: none-local
+    # 未接车道，目标模块整体不进覆盖面：python_packager/server.py（sidecar-only
+    # 缺进程内导入）、download/tool.py、triggers_ext、monitoring 等）。
+    # 全部目录 2026-08-21 本地单跑绿后接入。
+    "plugins/shared/system/python_packager/",
+    "plugins/shared/system/monitoring/",
+    "plugins/shared/tools/download/",
+    "plugins/shared/tools/triggers_ext/",
+    "plugins/shared/tools/test_workspace_aware.py",
 ]
 
 # 外部依赖 marker 过滤（与原 ci.yml 一致：排除需真实 API/Redis/DB/bwrap 的用例）。

@@ -37,6 +37,7 @@ from agentos_plugin_sdk import (
     BuiltinTool,
     Tool,
     ToolCategory,
+    ToolExample,
     ToolLevel,
     ToolResult,
     ToolSource,
@@ -201,20 +202,20 @@ class DownloadTool(WorkspaceAwareMixin, BuiltinTool):
             level=ToolLevel.ALL,
             source=ToolSource.BUILTIN,
             examples=[
-                {
-                    "input": {
+                ToolExample(
+                    input={
                         "url": "https://example.com/file.zip",
                         "save_path": "/tmp/downloads",
                     },
-                    "output": {
+                    output={
                         "success": True,
                         "path": "/tmp/downloads/file.zip",
                         "size": 1048576,
                         "duration": 2.5,
                         "avg_speed": "400.0 KB/s",
                     },
-                    "description": "下载文件到指定目录",
-                },
+                    description="下载文件到指定目录",
+                ),
             ],
         )
 
@@ -336,7 +337,7 @@ class DownloadTool(WorkspaceAwareMixin, BuiltinTool):
         4. 合并分片并原子重命名
         """
 
-        client_kwargs = {
+        client_kwargs: dict[str, Any] = {
             # 重定向由 _follow_redirects 手动逐跳处理（每跳 SSRF 复检）：
             # httpx 自动跟随会对 302 目标绕过入口校验（公网入口跳内网旁路）。
             "follow_redirects": False,
@@ -648,7 +649,9 @@ class DownloadTool(WorkspaceAwareMixin, BuiltinTool):
                     await asyncio.sleep(wait)
                 else:
                     raise RuntimeError(f"下载失败（已重试 {max_retries} 次）: {e}")  # noqa: B904
-        # max_retries >= 1（入口已钳制）：循环必经 return 或 raise，此路径不可达
+        # max_retries >= 1（入口已钳制）：循环必经 return 或 raise，此路径不可达；
+        # pragma 排除因不可达（diff-coverage 口径下不可执行行不进度量面）。
+        raise RuntimeError("unreachable: _stream_download 循环被钳制至少执行一次")  # pragma: no cover
 
     # ────────────────────────────────────────────────────────
     # 工具方法

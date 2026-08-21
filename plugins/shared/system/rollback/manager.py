@@ -434,6 +434,7 @@ class RollbackManager:
 
     def _save_checkpoint_to_db(self, checkpoint: Checkpoint) -> None:
         """保存检查点到数据库"""
+        assert self.session is not None  # 仅经 if self.session 分支的 to_thread 调用
         from _db_models import RollbackCheckpoint  # noqa: PLC0415
 
         db_checkpoint = RollbackCheckpoint(
@@ -450,6 +451,7 @@ class RollbackManager:
 
     def _load_checkpoint_from_db(self, checkpoint_id: str) -> Checkpoint | None:
         """从数据库加载检查点"""
+        assert self.session is not None  # 仅经 if self.session 分支的 to_thread 调用
         from _db_models import RollbackCheckpoint  # noqa: PLC0415
 
         result = self.session.execute(select(RollbackCheckpoint).where(RollbackCheckpoint.id == checkpoint_id))
@@ -469,6 +471,7 @@ class RollbackManager:
 
     def _list_checkpoints_from_db(self, task_id: str) -> list[Checkpoint]:
         """从数据库列出检查点"""
+        assert self.session is not None  # 仅经 if self.session 分支的 to_thread 调用
         from _db_models import RollbackCheckpoint  # noqa: PLC0415
 
         result = self.session.execute(
@@ -492,6 +495,7 @@ class RollbackManager:
 
     def _delete_checkpoint_from_db(self, checkpoint_id: str) -> bool:
         """从数据库删除检查点"""
+        assert self.session is not None  # 仅经 if self.session 分支的 to_thread 调用
         from _db_models import RollbackCheckpoint  # noqa: PLC0415
 
         result = self.session.execute(select(RollbackCheckpoint).where(RollbackCheckpoint.id == checkpoint_id))
@@ -505,6 +509,7 @@ class RollbackManager:
 
     def _save_operation_to_db(self, operation: OperationLog) -> None:
         """保存操作日志到数据库"""
+        assert self.session is not None  # 仅经 if self.session 分支的 to_thread 调用
         from _db_models import RollbackOperationLog  # noqa: PLC0415
 
         db_operation = RollbackOperationLog(
@@ -529,6 +534,7 @@ class RollbackManager:
 
     def _load_operation_from_db(self, operation_id: str) -> OperationLog | None:
         """从数据库加载操作日志"""
+        assert self.session is not None  # 仅经 if self.session 分支的 to_thread 调用
         from _db_models import RollbackOperationLog  # noqa: PLC0415
 
         result = self.session.execute(select(RollbackOperationLog).where(RollbackOperationLog.id == operation_id))
@@ -563,6 +569,7 @@ class RollbackManager:
         status: OperationStatus | None,
     ) -> list[OperationLog]:
         """从数据库列出操作日志"""
+        assert self.session is not None  # 仅经 if self.session 分支的 to_thread 调用
         from _db_models import RollbackOperationLog  # noqa: PLC0415
 
         query = select(RollbackOperationLog).where(RollbackOperationLog.task_id == task_id)
@@ -610,6 +617,7 @@ class RollbackManager:
 
     def _update_operation_status_in_db(self, operation_id: str, status: OperationStatus) -> None:
         """更新数据库中的操作状态"""
+        assert self.session is not None  # 仅经 if self.session 分支的 to_thread 调用
         from _db_models import RollbackOperationLog  # noqa: PLC0415
 
         result = self.session.execute(select(RollbackOperationLog).where(RollbackOperationLog.id == operation_id))

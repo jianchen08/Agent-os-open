@@ -98,31 +98,32 @@ class PerformanceMonitor:
             alert_callback: 告警回调函数
         """
         self._alert_callback = alert_callback
-        self._metrics_history: dict[str, list[PerformanceMetric]] = {}
+        self._metrics_history: dict[str, list[dict[str, Any]]] = {}
         self._max_history_size = 1000
         self._last_network_stats = psutil.net_io_counters()
         self._last_network_time = time.time()
-        self._database_stats = {
+        # 计数字段 int / 累计耗时 float 混存：统一 float（int 可并入，mypy 不失真）
+        self._database_stats: dict[str, float] = {
             "active_connections": 0,
             "connection_pool_size": 0,
             "connection_wait_time": 0,
             "query_execution_time": 0,
         }
-        self._llm_stats = {
+        self._llm_stats: dict[str, float] = {
             "active_requests": 0,
             "request_count": 0,
             "total_response_time": 0,
             "error_count": 0,
             "last_request_time": 0,
         }
-        self._tool_stats = {
+        self._tool_stats: dict[str, float] = {
             "execution_count": 0,
             "total_execution_time": 0,
             "cache_hits": 0,
             "cache_misses": 0,
             "error_count": 0,
         }
-        self._task_stats = {
+        self._task_stats: dict[str, float] = {
             "pending_tasks": 0,
             "running_tasks": 0,
             "completed_tasks": 0,
@@ -210,8 +211,8 @@ class PerformanceMonitor:
     async def get_database_metrics(self) -> DatabaseMetrics:
         """获取数据库指标"""
         return DatabaseMetrics(
-            active_connections=self._database_stats["active_connections"],
-            connection_pool_size=self._database_stats["connection_pool_size"],
+            active_connections=int(self._database_stats["active_connections"]),
+            connection_pool_size=int(self._database_stats["connection_pool_size"]),
             connection_wait_time=self._database_stats["connection_wait_time"],
             query_execution_time=self._database_stats["query_execution_time"],
         )
@@ -223,7 +224,7 @@ class PerformanceMonitor:
         total_requests = self._llm_stats["request_count"]
 
         return LLMMetrics(
-            active_requests=self._llm_stats["active_requests"],
+            active_requests=int(self._llm_stats["active_requests"]),
             request_rate=self._llm_stats["request_count"] / time_diff if time_diff > 0 else 0,
             average_response_time=self._llm_stats["total_response_time"] / total_requests if total_requests > 0 else 0,
             error_rate=self._llm_stats["error_count"] / total_requests if total_requests > 0 else 0,
@@ -235,12 +236,12 @@ class PerformanceMonitor:
         total_cache = self._tool_stats["cache_hits"] + self._tool_stats["cache_misses"]
 
         return ToolMetrics(
-            execution_count=total_executions,
+            execution_count=int(total_executions),
             average_execution_time=self._tool_stats["total_execution_time"] / total_executions
             if total_executions > 0
             else 0,
             cache_hit_rate=self._tool_stats["cache_hits"] / total_cache if total_cache > 0 else 0,
-            error_count=self._tool_stats["error_count"],
+            error_count=int(self._tool_stats["error_count"]),
         )
 
     async def get_task_metrics(self) -> TaskMetrics:
@@ -248,9 +249,9 @@ class PerformanceMonitor:
         total_completed = self._task_stats["completed_tasks"]
 
         return TaskMetrics(
-            pending_tasks=self._task_stats["pending_tasks"],
-            running_tasks=self._task_stats["running_tasks"],
-            completed_tasks=total_completed,
+            pending_tasks=int(self._task_stats["pending_tasks"]),
+            running_tasks=int(self._task_stats["running_tasks"]),
+            completed_tasks=int(total_completed),
             average_task_time=self._task_stats["total_task_time"] / total_completed if total_completed > 0 else 0,
         )
 
@@ -488,7 +489,7 @@ class PerformanceMonitor:
         """启动性能监控"""
         self._monitoring_interval = interval
         self._monitoring_active = True
-        self._response_times = []
+        self._response_times: list[float] = []
         await self.start()
 
     async def stop_monitoring(self):
@@ -512,7 +513,7 @@ class ResponseTimeContext:
 
     def __init__(self, monitor: PerformanceMonitor):
         self.monitor = monitor
-        self.start_time = 0
+        self.start_time: float = 0
 
     async def __aenter__(self):
         """进入上下文，开始计时"""
