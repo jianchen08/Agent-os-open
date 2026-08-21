@@ -141,5 +141,37 @@
       "path": "config/models/media_providers.yaml",
       "label": "媒体提供商配置"
     }
+  ],
+  "http_endpoints": [
+    {
+      "route_id": "mm_asr_transcriptions",
+      "method": "POST",
+      "path": "/ext/multimodal_service/audio/transcriptions",
+      "auth": "user",
+      "handler_capability": "http.handle",
+      "timeout_ms": 30000,
+      "max_concurrency": 2,
+      "description": "语音识别（ASR）：音频转文本（multipart file+language，config/models/asr.yaml 驱动；503 未配置/400 空文件/502 转写失败——原 POST /ext/channel_api/audio/transcriptions）"
+    },
+    {
+      "route_id": "mm_files_capabilities",
+      "method": "GET",
+      "path": "/ext/multimodal_service/files/capabilities",
+      "auth": "user",
+      "handler_capability": "http.handle",
+      "timeout_ms": 5000,
+      "max_concurrency": 8,
+      "description": "获取模型文件能力（ModelCapabilityRegistry 真实能力，前端 services/api/files.ts 消费——原 GET /ext/channel_api/files/capabilities）"
+    },
+    {
+      "route_id": "mm_files_supported_types",
+      "method": "GET",
+      "path": "/ext/multimodal_service/files/supported-types",
+      "auth": "user",
+      "handler_capability": "http.handle",
+      "timeout_ms": 5000,
+      "max_concurrency": 8,
+      "description": "获取支持的文件类型（静态宽类型声明——原 GET /ext/channel_api/files/supported-types）"
+    }
   ]
 }
