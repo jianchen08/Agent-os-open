@@ -38,7 +38,9 @@ FRONTEND_SRC = ROOT / "frontend" / "src"
 # 222 处（channel_api 相关占大头，随批次 1-5 逐域清零；baseline 变动走
 # commit 留归因，只减不增。注：批次 0 执行期间批次 1 的 memory/workspace
 # 域已并行迁移，实测从 247 降至 222）。
-HANDWRITTEN_EXT_BASELINE = 222
+# 批次 0-4 更新：删 config/generic + floating-chat + modules/ui + editorConfig
+# 前端引用 → 实测 215（222 - 本批删除 8 处 + 并行批次净增 1）。
+HANDWRITTEN_EXT_BASELINE = 215
 
 TEST_FILE_RE = re.compile(r"\.(test|spec)\.")
 TS_FILE_SUFFIXES = (".ts", ".tsx")

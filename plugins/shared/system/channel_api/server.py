@@ -356,44 +356,12 @@ def _handle_config_domain(path: str, method: str, raw_body: str, query: dict[str
             provider_id = sub[len("/llm/providers/"):]
             return _ok(_json_response(rc.delete_provider(provider_id)))
 
-        # ── 上下文窗口配置 ──
-        if sub == "/context-window" and method == "GET":
-            return _ok(_json_response(rc.get_context_window_config()))
-        if sub == "/context-window" and method == "PUT":
-            body = rc.ContextWindowUpdateRequest(**_decode_body(raw_body))
-            return _ok(_json_response(rc.update_context_window_config(body)))
-        if sub == "/context-window/reset" and method == "POST":
-            return _ok(_json_response(rc.reset_context_window_config()))
-
-        # ── API 运行配置 ──
-        if sub == "/api" and method == "GET":
-            return _ok(_json_response(rc.get_api_config()))
-        if sub == "/api" and method == "PUT":
-            body = rc.GenericConfigUpdateRequest(**_decode_body(raw_body))
-            return _ok(_json_response(rc.save_api_config(body)))
-
-        # ── 并发配置 ──
-        if sub == "/concurrency" and method == "GET":
-            return _ok(_json_response(rc.get_concurrency_config()))
-        if sub == "/concurrency" and method == "PUT":
-            body = rc.GenericConfigUpdateRequest(**_decode_body(raw_body))
-            return _ok(_json_response(rc.save_concurrency_config(body)))
-
         # ── 成本控制配置（注意：与 cost_control 插件不同，这里是配置读写） ──
         if sub == "/cost-control" and method == "GET":
             return _ok(_json_response(rc.get_cost_control_config()))
         if sub == "/cost-control" and method == "PUT":
             body = rc.GenericConfigUpdateRequest(**_decode_body(raw_body))
             return _ok(_json_response(rc.save_cost_control_config(body)))
-
-        # ── 通用配置（白名单分发，config_path:path 多段） ──
-        if sub.startswith("/generic/") and method == "GET":
-            config_path = sub[len("/generic/"):]
-            return _ok(_json_response(rc.get_generic_config(config_path)))
-        if sub.startswith("/generic/") and method == "PUT":
-            config_path = sub[len("/generic/"):]
-            body = rc.GenericConfigUpdateRequest(**_decode_body(raw_body))
-            return _ok(_json_response(rc.save_generic_config(config_path, body)))
 
         # 未匹配
         logger.warning("config http.handle: no route for sub=%s method=%s", sub, method)
@@ -632,51 +600,6 @@ async def _handle_execution_domain(path: str, method: str, raw_body: str, query:
         return _http_exc_response(exc)
     except Exception as exc:  # noqa: BLE001
         logger.error("execution http.handle 未预期错误: %s", exc, exc_info=True)
-        return _ok(_json_response({"error": "internal server error", "detail": str(exc)}, 500))
-
-
-def _handle_modules_ui_domain(path: str, method: str, raw_body: str, query: dict[str, str]) -> dict[str, Any]:
-    """modules/ui 域分发：/ext/channel_api/modules/ui/** → routes_ui 业务函数。
-
-    仅迁 schema 查询（list/get）；data CRUD（get_module_data_router）不迁（前端 modules.ts
-    仅消费 ui schema 列表）。_get_schema_parser 已修 config/modules 路径（_resolve_project_root）。
-
-    0.2 防御：routes_ui 依赖 ui_schema 包（0.2 暂不存在，sidecar 化未完成）。前端
-    ModuleManager.ts 定期轮询 /api/v1/modules/ui 并按 response.items ?? [] 降级，故保留
-    路由：导入失败时返回 {items: [], total: 0}（空列表，前端正常同步空布局），不崩溃。
-    """
-    try:
-        import routes_ui as rui  # noqa: PLC0415
-    except ImportError as exc:
-        logger.warning(
-            "modules/ui 域 routes_ui 不可用（ui_schema 包未迁移）: %s —— 返回空列表 stub", exc,
-        )
-        return _ok(_json_response({"items": [], "total": 0}))
-
-    from fastapi import HTTPException  # noqa: PLC0415
-
-    prefix = "/ext/channel_api/modules/ui"
-    if not path.startswith(prefix):
-        return _ok(_json_response({"error": "not a modules/ui path", "path": path}, 404))
-    sub = path[len(prefix):]  # "" / "/{module_id}"
-    client_type = query.get("client_type")
-
-    try:
-        if sub in ("", "/") and method == "GET":
-            return _ok(_json_response(rui.list_ui_schemas(client_type=client_type)))
-        if sub.startswith("/") and method == "GET":
-            module_id = sub[1:]
-            return _ok(_json_response(rui.get_ui_schema(module_id, client_type=client_type)))
-
-        logger.warning("modules/ui http.handle: no route for sub=%s method=%s", sub, method)
-        return _ok(_json_response({"error": "not found", "path": path}, 404))
-    except HTTPException as exc:
-        return _http_exc_response(exc)
-    except Exception as exc:  # noqa: BLE001
-        # APIError（deps 自定义，get_ui_schema 未找到时抛）→ 转 HTTP status
-        if hasattr(exc, "status_code") or exc.__class__.__name__ == "APIError":
-            return _http_exc_response(exc)
-        logger.error("modules/ui http.handle 未预期错误: %s", exc, exc_info=True)
         return _ok(_json_response({"error": "internal server error", "detail": str(exc)}, 500))
 
 
@@ -1387,36 +1310,6 @@ async def _handle_interaction_domain(
         return _ok(_json_response({"error": "internal server error", "detail": str(exc)}, 500))
 
 
-async def _handle_floating_chat_domain(
-    path: str, method: str, raw_body: str, query: dict[str, str]
-) -> dict[str, Any]:
-    """floating-chat 域分发：/ext/channel_api/floating-chat/** → routes_missing.floating_chat_router。
-
-    2 路由 stub：status(GET)/launch(POST)。前端 FLOATING_CHAT 块 2 端点完全对应。
-    """
-    import routes_missing as rm  # noqa: PLC0415
-    from fastapi import HTTPException  # noqa: PLC0415
-
-    if path == "/ext/channel_api/floating-chat/status" and method == "GET":
-        try:
-            return _ok(_json_response(await rm.get_floating_chat_status()))
-        except HTTPException as exc:
-            return _http_exc_response(exc)
-        except Exception as exc:  # noqa: BLE001
-            logger.error("floating-chat http.handle 未预期错误: %s", exc, exc_info=True)
-            return _ok(_json_response({"error": "internal server error", "detail": str(exc)}, 500))
-    if path == "/ext/channel_api/floating-chat/launch" and method == "POST":
-        try:
-            return _ok(_json_response(await rm.launch_floating_chat()))
-        except HTTPException as exc:
-            return _http_exc_response(exc)
-        except Exception as exc:  # noqa: BLE001
-            logger.error("floating-chat http.handle 未预期错误: %s", exc, exc_info=True)
-            return _ok(_json_response({"error": "internal server error", "detail": str(exc)}, 500))
-
-    return _ok(_json_response({"error": "not found", "path": path}, 404))
-
-
 async def _handle_agent_calls_domain(
     path: str, method: str, raw_body: str, query: dict[str, str]
 ) -> dict[str, Any]:
@@ -1861,10 +1754,6 @@ async def http_handle(
     if path.startswith("/ext/channel_api/execution"):
         return await _handle_execution_domain(path, method, raw_body, q)
 
-    # ── modules/ui 域 ──
-    if path.startswith("/ext/channel_api/modules/ui"):
-        return _handle_modules_ui_domain(path, method, raw_body, q)
-
     # ── memory 域 ──
     if path.startswith("/ext/channel_api/memory"):
         return await _handle_memory_domain(path, method, raw_body, q)
@@ -1896,10 +1785,6 @@ async def http_handle(
     # ── interaction 域（批次5，有前端消费，7 路由）──
     if path.startswith("/ext/channel_api/interaction"):
         return await _handle_interaction_domain(path, method, raw_body, q)
-
-    # ── floating-chat 域（批次5，有前端消费，2 路由 stub）──
-    if path.startswith("/ext/channel_api/floating-chat"):
-        return await _handle_floating_chat_domain(path, method, raw_body, q)
 
     # ── agent-calls 域（批次5，有前端消费，3 路由 stub）──
     if path.startswith("/ext/channel_api/agent-calls"):

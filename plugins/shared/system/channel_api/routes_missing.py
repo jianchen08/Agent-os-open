@@ -1095,22 +1095,6 @@ async def delete_knowledge_base_item(item_id: str, _user: dict = Depends(require
 
 
 # ---------------------------------------------------------------------------
-# Floating Chat 路由 - /api/v1/floating-chat
-# ---------------------------------------------------------------------------
-floating_chat_router = APIRouter(prefix="/api/v1/floating-chat", tags=["悬浮窗"], dependencies=[Depends(require_auth)])
-
-
-@floating_chat_router.get("/status", summary="获取悬浮窗状态")
-async def get_floating_chat_status(_user: dict = Depends(require_auth)) -> dict[str, Any]:
-    return {"active": False}
-
-
-@floating_chat_router.post("/launch", summary="启动悬浮窗")
-async def launch_floating_chat(_user: dict = Depends(require_auth)) -> dict[str, Any]:
-    return {"active": True, "message": "悬浮窗已启动"}
-
-
-# ---------------------------------------------------------------------------
 # Files Capabilities 路由 - /api/v1/files
 # ---------------------------------------------------------------------------
 files_router = APIRouter(prefix="/api/v1/files", tags=["文件"], dependencies=[Depends(require_auth)])

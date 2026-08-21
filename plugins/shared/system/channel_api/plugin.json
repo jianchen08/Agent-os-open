@@ -194,76 +194,6 @@
       "description": "config 域：更新默认模型/tier"
     },
     {
-      "route_id": "config_context_window_get",
-      "method": "GET",
-      "path": "/ext/channel_api/config/context-window",
-      "auth": "user",
-      "handler_capability": "http.handle",
-      "timeout_ms": 5000,
-      "max_concurrency": 8,
-      "description": "config 域：获取上下文窗口配置"
-    },
-    {
-      "route_id": "config_context_window_update",
-      "method": "PUT",
-      "path": "/ext/channel_api/config/context-window",
-      "auth": "user",
-      "handler_capability": "http.handle",
-      "timeout_ms": 5000,
-      "max_concurrency": 4,
-      "description": "config 域：更新上下文窗口配置"
-    },
-    {
-      "route_id": "config_context_window_reset",
-      "method": "POST",
-      "path": "/ext/channel_api/config/context-window/reset",
-      "auth": "user",
-      "handler_capability": "http.handle",
-      "timeout_ms": 5000,
-      "max_concurrency": 4,
-      "description": "config 域：重置上下文窗口配置"
-    },
-    {
-      "route_id": "config_api_get",
-      "method": "GET",
-      "path": "/ext/channel_api/config/api",
-      "auth": "user",
-      "handler_capability": "http.handle",
-      "timeout_ms": 5000,
-      "max_concurrency": 8,
-      "description": "config 域：获取 API 运行配置"
-    },
-    {
-      "route_id": "config_api_update",
-      "method": "PUT",
-      "path": "/ext/channel_api/config/api",
-      "auth": "user",
-      "handler_capability": "http.handle",
-      "timeout_ms": 5000,
-      "max_concurrency": 4,
-      "description": "config 域：更新 API 运行配置"
-    },
-    {
-      "route_id": "config_concurrency_get",
-      "method": "GET",
-      "path": "/ext/channel_api/config/concurrency",
-      "auth": "user",
-      "handler_capability": "http.handle",
-      "timeout_ms": 5000,
-      "max_concurrency": 8,
-      "description": "config 域：获取并发配置"
-    },
-    {
-      "route_id": "config_concurrency_update",
-      "method": "PUT",
-      "path": "/ext/channel_api/config/concurrency",
-      "auth": "user",
-      "handler_capability": "http.handle",
-      "timeout_ms": 5000,
-      "max_concurrency": 4,
-      "description": "config 域：更新并发配置"
-    },
-    {
       "route_id": "config_cost_control_get",
       "method": "GET",
       "path": "/ext/channel_api/config/cost-control",
@@ -282,26 +212,6 @@
       "timeout_ms": 5000,
       "max_concurrency": 4,
       "description": "config 域：更新成本控制配置"
-    },
-    {
-      "route_id": "config_generic_get",
-      "method": "GET",
-      "path": "/ext/channel_api/config/generic/{config_path:path}",
-      "auth": "user",
-      "handler_capability": "http.handle",
-      "timeout_ms": 5000,
-      "max_concurrency": 8,
-      "description": "config 域：按白名单路径读通用 YAML 配置"
-    },
-    {
-      "route_id": "config_generic_update",
-      "method": "PUT",
-      "path": "/ext/channel_api/config/generic/{config_path:path}",
-      "auth": "user",
-      "handler_capability": "http.handle",
-      "timeout_ms": 5000,
-      "max_concurrency": 4,
-      "description": "config 域：按白名单路径写通用 YAML 配置"
     },
     {
       "route_id": "thinking_mode_health",
@@ -572,26 +482,6 @@
       "timeout_ms": 10000,
       "max_concurrency": 2,
       "description": "execution 域：清理所有执行记录（stub）"
-    },
-    {
-      "route_id": "modules_ui_list",
-      "method": "GET",
-      "path": "/ext/channel_api/modules/ui",
-      "auth": "user",
-      "handler_capability": "http.handle",
-      "timeout_ms": 5000,
-      "max_concurrency": 8,
-      "description": "modules/ui 域：所有模块 UI Schema 列表（query: client_type 过滤）"
-    },
-    {
-      "route_id": "modules_ui_get",
-      "method": "GET",
-      "path": "/ext/channel_api/modules/ui/{module_id}",
-      "auth": "user",
-      "handler_capability": "http.handle",
-      "timeout_ms": 5000,
-      "max_concurrency": 8,
-      "description": "modules/ui 域：指定模块 UI Schema"
     },
     {
       "route_id": "memory_list",
@@ -1542,26 +1432,6 @@
       "timeout_ms": 5000,
       "max_concurrency": 4,
       "description": "interaction 域：标记已查看"
-    },
-    {
-      "route_id": "floating_chat_status",
-      "method": "GET",
-      "path": "/ext/channel_api/floating-chat/status",
-      "auth": "user",
-      "handler_capability": "http.handle",
-      "timeout_ms": 5000,
-      "max_concurrency": 8,
-      "description": "floating-chat 域：悬浮窗状态"
-    },
-    {
-      "route_id": "floating_chat_launch",
-      "method": "POST",
-      "path": "/ext/channel_api/floating-chat/launch",
-      "auth": "user",
-      "handler_capability": "http.handle",
-      "timeout_ms": 5000,
-      "max_concurrency": 4,
-      "description": "floating-chat 域：启动悬浮窗"
     },
     {
       "route_id": "agent_calls_list",

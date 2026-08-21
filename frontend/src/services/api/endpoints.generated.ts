@@ -118,6 +118,29 @@
     'hindsight_stats': '/ext/hindsight_memory_service/stats',
   } as const
 
+  /** llm_service（LLM Service）：plugin.json 声明 19 端点 */
+  export const LLM_SERVICE_ENDPOINTS = {
+    'config_llm_get': '/ext/llm_service/config/llm',
+    'config_llm_defaults_get': '/ext/llm_service/config/llm/defaults',
+    'config_llm_defaults_update': '/ext/llm_service/config/llm/defaults',
+    'config_llm_models_create': '/ext/llm_service/config/llm/models',
+    'config_llm_models_get': '/ext/llm_service/config/llm/models',
+    'config_llm_models_delete': '/ext/llm_service/config/llm/models/{model_id}',
+    'config_llm_models_update': '/ext/llm_service/config/llm/models/{model_id}',
+    'config_llm_provider_types_get': '/ext/llm_service/config/llm/provider-types',
+    'config_llm_providers_create': '/ext/llm_service/config/llm/providers',
+    'config_llm_providers_get': '/ext/llm_service/config/llm/providers',
+    'config_llm_providers_delete': '/ext/llm_service/config/llm/providers/{provider_id}',
+    'config_llm_providers_update': '/ext/llm_service/config/llm/providers/{provider_id}',
+    'config_llm_providers_remote_models_get': '/ext/llm_service/config/llm/providers/{provider_id}/remote-models',
+    'thinking_mode_check': '/ext/llm_service/thinking-mode/check/{model_name}',
+    'thinking_mode_health': '/ext/llm_service/thinking-mode/healthz',
+    'thinking_mode_models_list': '/ext/llm_service/thinking-mode/models',
+    'thinking_mode_model_info': '/ext/llm_service/thinking-mode/models/{model_name}',
+    'thinking_mode_recommendations': '/ext/llm_service/thinking-mode/recommendations',
+    'thinking_mode_switch': '/ext/llm_service/thinking-mode/switch',
+  } as const
+
   /** metrics_admin（Metrics Admin HTTP Face）：plugin.json 声明 3 端点 */
   export const METRICS_ADMIN_ENDPOINTS = {
     'prometheus': '/ext/metrics_admin/prometheus',
@@ -151,6 +174,17 @@
   export const PIPELINE_SECURITY_CHECK_ENDPOINTS = {
     'permission_mode_get': '/ext/pipeline_security_check/permission_mode',
     'permission_mode_switch': '/ext/pipeline_security_check/permission_mode',
+  } as const
+
+  /** scene_service（Scene Service）：plugin.json 声明 7 端点 */
+  export const SCENE_SERVICE_ENDPOINTS = {
+    'scenes_create': '/ext/scene_service/scenes',
+    'scenes_list': '/ext/scene_service/scenes',
+    'scenes_templates': '/ext/scene_service/scenes/templates',
+    'scene_delete': '/ext/scene_service/scenes/{scene_id}',
+    'scene_get': '/ext/scene_service/scenes/{scene_id}',
+    'scene_update': '/ext/scene_service/scenes/{scene_id}',
+    'scene_switch': '/ext/scene_service/scenes/{scene_id}/switch',
   } as const
 
   /** task_form（Task Form Service）：plugin.json 声明 3 端点 */

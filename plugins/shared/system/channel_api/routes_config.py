@@ -77,9 +77,6 @@ _CONFIG_SYSTEM_DIR = _CONFIG_ROOT / "system"
 
 _LLM_YAML = _CONFIG_MODELS_DIR / "llm.yaml"
 _ENV_FILE = _PROJECT_ROOT / ".env"
-_CONTEXT_WINDOW_YAML = _CONFIG_SYSTEM_DIR / "context_window_config.yaml"
-_API_YAML = _CONFIG_SYSTEM_DIR / "api_config.yaml"
-_CONCURRENCY_YAML = _CONFIG_SYSTEM_DIR / "concurrency_config.yaml"
 
 
 # ---------------------------------------------------------------------------
@@ -122,20 +119,6 @@ class ProviderCreateRequest(BaseModel):
 
     provider_id: str = Field(description="提供商唯一标识（如 deepseek）")
     config: dict[str, Any] = Field(description="提供商完整配置")
-
-
-class ContextWindowUpdateRequest(BaseModel):
-    """上下文窗口配置更新请求，仅允许白名单字段。"""
-
-    max_context_length: int | None = None
-    compress_trigger_ratio: float | None = None
-    budgets: dict[str, Any] | None = None
-    compression: dict[str, Any] | None = None
-    layer_order: list[str] | None = None
-    include_tools_description_in_prompt: bool | None = None
-    static_vars: dict[str, Any] | None = None
-    dynamic_vars: dict[str, Any] | None = None
-    custom_layers: dict[str, Any] | None = None
 
 
 class GenericConfigUpdateRequest(BaseModel):
@@ -669,174 +652,6 @@ def delete_provider(provider_id: str) -> dict[str, Any]:
 
 
 # ---------------------------------------------------------------------------
-# 上下文窗口配置
-# ---------------------------------------------------------------------------
-
-_DEFAULT_CONTEXT_WINDOW: dict[str, Any] = {
-    "version": "2.0",
-    "compress_trigger_ratio": 0.55,
-    "budgets": {
-        "system_prompt": 0.06,
-        "tools_description": 0.0,
-        "static_vars": 0.03,
-        "dynamic_variables": 0.03,
-        "l3": 0.02,
-        "l2": 0.05,
-        "l1": 0.1,
-        "recent": 0.18,
-        "retrieval": 0.05,
-        "response_reserve": 0.14,
-    },
-    "include_tools_description_in_prompt": False,
-    "templates": {},
-    "stability": {
-        "system_prompt": "stable",
-        "tools_description": "stable",
-        "static_vars": "stable",
-        "l3_memory": "semi_stable",
-        "l2_memory": "semi_stable",
-        "l1_memory": "semi_stable",
-        "recent_messages": "dynamic",
-        "dynamic_vars": "dynamic",
-    },
-    "budget_mapping": {},
-    "layer_order": [
-        "system_prompt",
-        "tools_description",
-        "static_vars",
-        "l3",
-        "l2",
-        "l1",
-        "recent",
-        "dynamic_variables",
-    ],
-    "static_vars": {"enabled": True, "sources": []},
-    "dynamic_vars": {
-        "enabled": True,
-        "vars": ["Date", "Time", "Knowledge", "Retrieval", "Rules"],
-        "rules": {"enabled": True, "hard_constraints": [], "max_rules": 10},
-    },
-    "compression": {
-        "enabled": True,
-        "model": "",
-        "layer_trigger_ratio": 0.8,
-        "max_turn_ratio": 0.5,
-    },
-    "custom_layers": {},
-}
-
-
-@router.get("/context-window", summary="获取上下文窗口配置")
-def get_context_window_config() -> dict[str, Any]:
-    """返回完整的上下文窗口配置，字段与 YAML 文件一一对应。"""
-    return _read_yaml(_CONTEXT_WINDOW_YAML)
-
-
-@router.put("/context-window", summary="更新上下文窗口配置")
-def update_context_window_config(body: ContextWindowUpdateRequest) -> dict[str, Any]:
-    """合并前端提交的字段到现有配置，支持 budgets/compression 等嵌套对象。"""
-    data = _read_yaml(_CONTEXT_WINDOW_YAML)
-    _EDITABLE_KEYS = {  # noqa: N806
-        "max_context_length",
-        "compress_trigger_ratio",
-        "budgets",
-        "compression",
-        "layer_order",
-        "include_tools_description_in_prompt",
-        "static_vars",
-        "dynamic_vars",
-        "custom_layers",
-    }
-    body_data = body.model_dump(exclude_none=True)
-    for key in _EDITABLE_KEYS:
-        if key in body_data:
-            data[key] = body_data[key]
-    _write_yaml(_CONTEXT_WINDOW_YAML, data)
-    logger.info("上下文窗口配置已更新: %s", list(body_data.keys()))
-    return get_context_window_config()
-
-
-@router.post("/context-window/reset", summary="重置上下文窗口配置")
-def reset_context_window_config() -> dict[str, Any]:
-    _write_yaml(_CONTEXT_WINDOW_YAML, copy.deepcopy(_DEFAULT_CONTEXT_WINDOW))
-    logger.info("上下文窗口配置已重置")
-    return get_context_window_config()
-
-
-# ---------------------------------------------------------------------------
-# API 配置（运行时状态）
-# ---------------------------------------------------------------------------
-
-
-@router.get("/api", summary="获取 API 配置")
-def get_api_config() -> dict[str, Any]:
-    if _API_YAML.exists():
-        return _read_yaml(_API_YAML)
-    return {
-        "endpoint": {
-            "base_url": "http://localhost:8988",
-            "version": "v1",
-            "timeout": 30,
-        },
-        "rate_limit": {
-            "global_limit": "100/minute",
-            "auth": "5/minute",
-            "tasks": "20/minute",
-            "websocket": "50/minute",
-        },
-        "cors_origins": ["*"],
-    }
-
-
-@router.put("/api", summary="更新 API 配置")
-def save_api_config(body: GenericConfigUpdateRequest) -> dict[str, Any]:
-    _write_yaml(_API_YAML, body.data)
-    logger.info("API 配置已更新")
-    return body.data
-
-
-# ---------------------------------------------------------------------------
-# 并发配置
-# ---------------------------------------------------------------------------
-
-
-@router.get("/concurrency", summary="获取并发配置")
-def get_concurrency_config() -> dict[str, Any]:
-    if _CONCURRENCY_YAML.exists():
-        return _read_yaml(_CONCURRENCY_YAML)
-    data = _read_yaml(_LLM_YAML)
-    conc = data.get("concurrency", {})
-    return {
-        "task": {
-            "max_concurrent_tasks": conc.get("default_concurrency", 3),
-            "task_max_workers": 4,
-            "task_timeout": 600,
-        },
-        "agent": {
-            "l1_max_concurrent": 2,
-            "l2_max_concurrent": 4,
-            "l3_max_concurrent": 8,
-        },
-        "workflow": {
-            "max_concurrent": conc.get("max_concurrency", 4),
-        },
-        "llm": {
-            "zhipu_max_concurrent": conc.get("default_concurrency", 3),
-            "openai_max_concurrent": 2,
-            "anthropic_max_concurrent": 2,
-            "default_max_concurrent": conc.get("min_concurrency", 1),
-        },
-    }
-
-
-@router.put("/concurrency", summary="更新并发配置")
-def save_concurrency_config(body: GenericConfigUpdateRequest) -> dict[str, Any]:
-    _write_yaml(_CONCURRENCY_YAML, body.data)
-    logger.info("并发配置已更新")
-    return body.data
-
-
-# ---------------------------------------------------------------------------
 # 成本控制配置
 # ---------------------------------------------------------------------------
 
@@ -874,66 +689,6 @@ def get_cost_control_config() -> dict[str, Any]:
 def save_cost_control_config(body: GenericConfigUpdateRequest) -> dict[str, Any]:
     _write_yaml(_COST_CONTROL_YAML, body.data)
     logger.info("成本控制配置已更新")
-    return body.data
-
-
-# ---------------------------------------------------------------------------
-# 通用配置端点（白名单模式，供前端 GenericConfigPage 使用）
-# ---------------------------------------------------------------------------
-
-_GENERIC_CONFIG_WHITELIST: dict[str, Path] = {
-    "system/api_config": _CONFIG_SYSTEM_DIR / "api_config.yaml",
-    "system/concurrency_config": _CONFIG_SYSTEM_DIR / "concurrency_config.yaml",
-    "system/context_window_config": _CONFIG_SYSTEM_DIR / "context_window_config.yaml",
-    "system/cost_control": _CONFIG_SYSTEM_DIR / "cost_control.yaml",
-    "system/memory_storage": _CONFIG_SYSTEM_DIR / "memory_storage.yaml",
-    "system/editor_config": _CONFIG_SYSTEM_DIR / "editor_config.yaml",
-    "system/long_term_task": _CONFIG_SYSTEM_DIR / "long_term_task.yaml",
-    "models/media_providers": _CONFIG_MODELS_DIR / "media_providers.yaml",
-    "isolation/isolation_config": _CONFIG_ROOT / "isolation" / "isolation_config.yaml",
-    "isolation/isolation_policy": _CONFIG_ROOT / "isolation" / "isolation_policy.yaml",
-    "isolation/security_rules": _CONFIG_ROOT / "isolation" / "security_rules.yaml",
-    "isolation/approval": _CONFIG_ROOT / "isolation" / "approval.yaml",
-    "evaluation/evaluation_metrics": _CONFIG_ROOT / "evaluation" / "evaluation_metrics.yaml",
-    "capability_adapters": _CONFIG_ROOT / "capability_adapters.yaml",
-    "external_tools/default": _CONFIG_ROOT / "external_tools" / "default.yaml",
-    "external_tools/godot": _CONFIG_ROOT / "external_tools" / "godot.yaml",
-    "external_tools/vscode": _CONFIG_ROOT / "external_tools" / "vscode.yaml",
-    "pipelines/default": _CONFIG_ROOT / "pipelines" / "default.yaml",
-    "pipelines/l1-main": _CONFIG_ROOT / "pipelines" / "l1-main.yaml",
-    "pipelines/l2-evaluator": _CONFIG_ROOT / "pipelines" / "l2-evaluator.yaml",
-    "pipelines/l2-subtask": _CONFIG_ROOT / "pipelines" / "l2-subtask.yaml",
-}
-
-
-@router.get("/generic/{config_path:path}", summary="获取通用配置")
-def get_generic_config(config_path: str) -> dict[str, Any]:
-    """根据路径读取 YAML 配置文件（白名单校验）。"""
-    if config_path not in _GENERIC_CONFIG_WHITELIST:
-        raise HTTPException(status_code=404, detail=f"未知配置路径: {config_path}")
-    return _read_yaml(_GENERIC_CONFIG_WHITELIST[config_path])
-
-
-@router.put("/generic/{config_path:path}", summary="更新通用配置")
-def save_generic_config(config_path: str, body: GenericConfigUpdateRequest) -> dict[str, Any]:
-    """根据路径写入 YAML 配置文件（白名单校验），并触发 config_center reload。"""
-    if config_path not in _GENERIC_CONFIG_WHITELIST:
-        raise HTTPException(status_code=404, detail=f"未知配置路径: {config_path}")
-    file_path = _GENERIC_CONFIG_WHITELIST[config_path]
-    _write_yaml(file_path, body.data)
-
-    # 触发 config_center reload，使 watcher 生效（热更新）
-    try:
-        from config.config_center import get_config_center  # noqa: PLC0415
-
-        rel = str(file_path).replace("\\", "/")
-        if "config/" in rel:
-            rel = rel[rel.index("config/") + len("config/") :]
-        get_config_center().reload(rel)
-        logger.info("通用配置已更新并触发 reload: %s", config_path)
-    except Exception as e:
-        logger.warning("通用配置 reload 失败: %s | error=%s", config_path, e)
-
     return body.data
 
 

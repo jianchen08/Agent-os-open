@@ -95,8 +95,6 @@ export const API_ENDPOINTS = {
   },
   /** 配置管理相关 - 4c 迁移：已切 /ext/channel_api/config/**（经内核 dispatcher → channel_api http.handle） */
   CONFIG: {
-    /** 获取 API 配置 */
-    /** 更新 API 配置 */
     /** 获取 LLM 配置 */
     LLM_GET: '/ext/channel_api/config/llm',
     /** 获取提供商列表 */
@@ -110,15 +108,10 @@ export const API_ENDPOINTS = {
     LLM_MODELS: '/ext/channel_api/config/llm/models',
     /** 获取默认配置 */
     LLM_DEFAULTS: '/ext/channel_api/config/llm/defaults',
-    /** 获取并发配置 */
-    /** 更新并发配置 */
     /** 获取成本控制配置 */
     COST_CONTROL_GET: '/ext/channel_api/config/cost-control',
     /** 更新成本控制配置 */
     COST_CONTROL_UPDATE: '/ext/channel_api/config/cost-control',
-    /** 通用配置（动态路径） */
-    GENERIC_GET: (path: string) => `/ext/channel_api/config/generic/${path}`,
-    GENERIC_UPDATE: (path: string) => `/ext/channel_api/config/generic/${path}`,
     /** 管道配置（P7 内核专用端点，config_service denylist 含 pipelines，不走 generic） */
     PIPELINE_GET: (name: string) => `/api/v1/config/pipelines/${name}`,
     PIPELINE_UPDATE: (name: string) => `/api/v1/config/pipelines/${name}`,
@@ -303,13 +296,6 @@ export const API_ENDPOINTS = {
   PLUGIN_CONFIG: {
     /** 取/存某个插件的某个配置文件；需填充 pluginId 与 fileId */
     FILE: (pluginId: string, fileId: string) => `/api/v1/plugins/${pluginId}/config/${fileId}`,
-  },
-  /** 悬浮窗相关 - 对应后端 /api/v1/floating-chat/* */
-  FLOATING_CHAT: {
-    /** 获取悬浮窗状态 */
-    STATUS: '/ext/channel_api/floating-chat/status',
-    /** 启动悬浮窗 */
-    LAUNCH: '/ext/channel_api/floating-chat/launch',
   },
   /** 触发器相关 - 对应后端 /api/v1/triggers/* */
   TRIGGERS: {
