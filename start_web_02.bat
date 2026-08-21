@@ -72,8 +72,21 @@ echo [CLEAN] Stopping old instances (port-targeted)...
 call :KillPort "%AGENTOS_KERNEL_PORT%" "kernel"
 call :KillPort "%AGENTOS_FRONTEND_PORT%" "frontend"
 
-REM give Windows time to release the exe file handle (avoids cargo os error 5)
-timeout /t 3 /nobreak >nul
+REM Image-name fallback: agentos-kernel.exe is a product-unique image, so
+REM killing by name cannot hit unrelated projects (the old carpet-bomb problem
+REM was node.exe). Port scan alone misses instances bound to other ports
+REM (manual/debug runs with AGENTOS_KERNEL_PORT override).
+tasklist /FI "IMAGENAME eq agentos-kernel.exe" 2>nul | findstr /I "agentos-kernel" >nul 2>&1
+if not errorlevel 1 (
+    echo        [CLEAN] killing lingering agentos-kernel.exe by image name
+    taskkill /F /IM agentos-kernel.exe >nul 2>&1
+)
+
+REM Wait until the exe is actually replaceable, not a blind 3s sleep:
+REM after taskkill the image handle can linger a few seconds (AV scan / WER),
+REM and the external supervisor may even re-launch it (see note above).
+REM A rename round-trip proves the lock is really gone before cargo touches it.
+call :WaitExeUnlock "%KERNEL_BIN%"
 echo [OK] Old instances stopped.
 echo.
 
@@ -229,3 +242,28 @@ for /f "tokens=5" %%p in ('netstat -ano ^| findstr /C:":%~1 " ^| findstr /C:"LIS
 if "!KILLPORT_FOUND!"=="0" echo        [CLEAN] %~2: no listener on port %~1
 set "KILLPORT_FOUND="
 goto :eof
+
+REM ------------------------------------------------------------
+REM  WaitExeUnlock <exe-path>
+REM  Poll up to ~15s until the exe can be opened for exclusive
+REM  read-write - the same access cargo's linker needs to replace
+REM  it. NOTE: rename/move of a running exe SUCCEEDS on Windows
+REM  (only delete/write are blocked), so a rename round-trip is NOT
+REM  a valid lock probe; an exclusive File.Open is. Each failed
+REM  probe is followed by a name-targeted kill, so instances the
+REM  port scan missed also get cleared here.
+REM ------------------------------------------------------------
+:WaitExeUnlock
+if not exist "%~1" goto :eof
+set "WEU_N=0"
+:WaitExeUnlockLoop
+powershell -NoProfile -Command "try { $f=[System.IO.File]::Open('%~1','Open','ReadWrite','None'); $f.Close(); exit 0 } catch { exit 1 }" >nul 2>&1
+if not errorlevel 1 goto :eof
+taskkill /F /IM agentos-kernel.exe >nul 2>&1
+set /a WEU_N+=1
+if !WEU_N! GEQ 15 (
+    echo        [WARN] exe still locked after 15s - cargo build may fail with os error 5
+    goto :eof
+)
+timeout /t 1 /nobreak >nul
+goto :WaitExeUnlockLoop
