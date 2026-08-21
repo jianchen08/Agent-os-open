@@ -36,9 +36,8 @@ import sys
 import time
 from typing import Any
 
-from pydantic import BaseModel, Field
-
 from enum_utils import safe_enum_value
+from pydantic import BaseModel, Field
 from service_access import get_task_service
 
 logger = logging.getLogger(__name__)

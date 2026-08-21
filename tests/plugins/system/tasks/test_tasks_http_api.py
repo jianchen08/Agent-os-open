@@ -354,7 +354,8 @@ class TestTasksEndpoints:
         # 级联挂起：父管道 + lineage 子管道都在 suspend_pipeline 调用里
         suspend_ids = [p["pipeline_id"] for m, p in hub.handles["pipeline-executor"].calls
                        if m == "suspend_pipeline"]
-        assert parent.id in suspend_ids and child.id in suspend_ids
+        assert parent.id in suspend_ids
+        assert child.id in suspend_ids
 
     async def test_create_root_task_validation(self, monkeypatch: pytest.MonkeyPatch,
                                                service: Any, hub: _FakeCapabilityHub) -> None:
@@ -727,8 +728,9 @@ class TestEdgeAndDegradedBranches:
         assert http_api._resolve_caller({"Authorization": f"Bearer {expired}"}) == {}
 
     def test_capability_not_injected_raises_keyerror(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        import http_api
         import types
+
+        import http_api
 
         fake = types.ModuleType("server")
 
@@ -1087,8 +1089,9 @@ class TestCoverageRemainingBranches:
         ) == {}
 
     def test_task_to_response_agent_level_value(self) -> None:
-        import http_api
         import types
+
+        import http_api
 
         out = http_api._task_to_response({
             "id": "x",
