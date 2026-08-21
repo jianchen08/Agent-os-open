@@ -450,7 +450,8 @@ async def _http_handle_style(
             body = resolved[1]
         return {
             "status": 200,
-            "headers": {"content-type": "text/css"},
+            # 皮肤可经 PUT 热切换，禁缓存避免刷新后仍见旧皮肤（dispatcher 原样回写）
+            "headers": {"content-type": "text/css", "cache-control": "no-cache"},
             "body": base64.b64encode(body).decode(),
             "body_encoding": "base64",
         }

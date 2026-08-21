@@ -7,6 +7,7 @@
 
 import { useEffect } from 'react'
 import { Check } from '@/assets/icons'
+import { useDshSkins } from '@/hooks/useDshSkins'
 import { cn } from '@/lib/utils'
 import { useThemeStore } from '@/stores/themeStore'
 import type { ThemeInfo } from '@/types/theme'
@@ -96,6 +97,69 @@ function useThemeList() {
   return { currentThemeId, setTheme, themes }
 }
 
+/** DSH 皮肤紧凑分组（浮框/面板共用；适配器不可用时整组不渲染） */
+function DshSkinRows({ onSelected }: { onSelected?: () => void }) {
+  const { current, skins, count, switching, selectSkin } = useDshSkins()
+  if (count === 0) return null
+
+  return (
+    <>
+      <div className="text-muted-foreground border-border border-t px-2.5 py-1.5 text-[10px] font-medium tracking-wide">
+        DSH 皮肤（{count}）
+      </div>
+      <div className="max-h-44 overflow-y-auto px-1 pb-1">
+        <button
+          type="button"
+          disabled={switching !== null}
+          onClick={() => {
+            void selectSkin('none')
+            onSelected?.()
+          }}
+          className="flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left transition-colors hover:bg-[var(--hover-overlay)]"
+        >
+          <span className="border-border flex h-5 w-5 shrink-0 items-center justify-center rounded-full border text-[9px]">
+            ✕
+          </span>
+          <span className="text-foreground min-w-0 flex-1 truncate text-[12px]">不使用 DSH 皮肤</span>
+          {current === 'none' && (
+            <Check className="h-3 w-3 text-[var(--ds-accent-primary,#22D3EE)] shrink-0" />
+          )}
+        </button>
+        {skins.map((skin) => (
+          <button
+            key={skin.id}
+            type="button"
+            disabled={switching !== null}
+            onClick={() => {
+              void selectSkin(skin.id)
+              onSelected?.()
+            }}
+            title={skin.tagline || skin.id}
+            className="flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left transition-colors hover:bg-[var(--hover-overlay)]"
+          >
+            <span
+              className="flex h-5 w-5 shrink-0 items-center justify-center rounded-full border"
+              style={{
+                backgroundColor: skin.accent || 'transparent',
+                borderColor: current === skin.id ? skin.accent : 'rgba(148,163,184,0.35)',
+              }}
+            />
+            <span className="text-foreground min-w-0 flex-1 truncate text-[12px]">{skin.name}</span>
+            {skin.has_background_media && (
+              <span className="shrink-0 rounded bg-purple-500/10 px-1 py-0.5 text-[9px] text-purple-400">
+                图
+              </span>
+            )}
+            {current === skin.id && (
+              <Check className="h-3 w-3 text-[var(--ds-accent-primary,#22D3EE)] shrink-0" />
+            )}
+          </button>
+        ))}
+      </div>
+    </>
+  )
+}
+
 /**
  * 悬停弹出的紧凑主题选择小窗（锚定 ThemeButton）
  */
@@ -141,6 +205,7 @@ export function ThemePopover({
           />
         ))}
       </div>
+      <DshSkinRows onSelected={() => onOpenChange?.(false)} />
     </div>
   )
 }
@@ -179,6 +244,9 @@ export function ThemePanel({ isOpen, onClose }: ThemePanelProps) {
               }}
             />
           ))}
+        </div>
+        <div className="px-0.5 pb-0.5">
+          <DshSkinRows onSelected={() => onClose?.()} />
         </div>
       </div>
     </>

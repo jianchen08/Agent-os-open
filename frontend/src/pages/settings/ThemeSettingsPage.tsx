@@ -8,32 +8,11 @@
  * 主题体系并存——数量随装载自动增减，无需改前端。
  */
 
-import { useCallback, useEffect, useState } from 'react'
-
-import { App as AntdApp } from 'antd'
-
 import { PageShell } from '@/components/shared/PageShell'
 import { themeList } from '@/config/themes'
-import { apiClient } from '@/services/api/client'
+import { useDshSkins } from '@/hooks/useDshSkins'
 import { useThemeStore } from '@/stores/themeStore'
 import type { ThemeInfo } from '@/types/theme'
-
-/** DSH 皮肤清单条目（GET /ext/dsh_adapter/skins） */
-interface DshSkin {
-  id: string
-  name: string
-  tagline: string
-  accent: string
-  base: 'light' | 'dark'
-  tags: string[]
-  has_background_media: boolean
-}
-
-interface DshSkinList {
-  current: string | null
-  count: number
-  skins: DshSkin[]
-}
 
 /**
  * 主题设置页面组件
@@ -191,56 +170,14 @@ function ThemeCard({
 
 /** DSH 皮肤区块：清单动态来自 dsh_adapter（装载多少显示多少），选择写回后端 */
 function DshSkinSection() {
-  const { message } = AntdApp.useApp()
-  const [list, setList] = useState<DshSkinList | null>(null)
-  const [current, setCurrent] = useState<string | null>(null)
-  const [switching, setSwitching] = useState<string | null>(null)
+  const { current: activeSkin, skins, count, switching, selectSkin } = useDshSkins()
 
-  useEffect(() => {
-    let cancelled = false
-    apiClient
-      .get<DshSkinList>('/ext/dsh_adapter/skins')
-      .then((resp) => {
-        if (!cancelled) {
-          setList(resp.data)
-          setCurrent(resp.data.current)
-        }
-      })
-      .catch(() => {
-        // 适配器不可用/未启用：区块静默不渲染（主题页其余功能不受影响）
-      })
-    return () => {
-      cancelled = true
-    }
-  }, [])
-
-  const selectSkin = useCallback(
-    async (skinId: string) => {
-      setSwitching(skinId)
-      try {
-        await apiClient.put('/ext/dsh_adapter/skins/current', { skin: skinId })
-        setCurrent(skinId)
-        void message.success(
-          skinId === 'none'
-            ? '已关闭 DSH 皮肤，刷新页面后生效'
-            : `已切换 DSH 皮肤：${skinId}，刷新页面后完全生效（背景图/字体）`
-        )
-      } catch {
-        void message.error('DSH 皮肤切换失败（适配器不可用或皮肤 id 无效）')
-      } finally {
-        setSwitching(null)
-      }
-    },
-    [message]
-  )
-
-  if (!list || list.count === 0) return null
-  const activeSkin = current ?? 'none'
+  if (count === 0) return null
 
   return (
     <section className="mt-8">
       <h2 className="mb-1 text-sm font-semibold">
-        DSH 皮肤<span className="text-muted-foreground ml-2 font-normal">来自 dsh_adapter 插件 · {list.count} 套</span>
+        DSH 皮肤<span className="text-muted-foreground ml-2 font-normal">来自 dsh_adapter 插件 · {count} 套</span>
       </h2>
       <p className="text-muted-foreground mb-3 text-xs">
         全局 CSS 注入（配色/字体/背景立绘），随装载的皮肤插件自动增减；与上方前端主题可叠加。
@@ -258,7 +195,7 @@ function DshSkinSection() {
           <p className="text-muted-foreground mt-1 text-xs">仅使用上方前端主题</p>
           {activeSkin === 'none' && <span className="text-primary mt-2 inline-block text-xs font-medium">✓ 当前</span>}
         </button>
-        {list.skins.map((skin) => (
+        {skins.map((skin) => (
           <button
             key={skin.id}
             type="button"
