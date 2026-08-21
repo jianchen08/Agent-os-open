@@ -114,6 +114,11 @@
   "permissions": {},
   "priority": 40,
   "requires_content": 3,
+  "granted_capabilities": [
+    "pipeline-state",
+    "service-registry",
+    "db-admin"
+  ],
   "http_endpoints": [
     {
       "route_id": "mon_system_metrics",
@@ -214,6 +219,156 @@
       "timeout_ms": 5000,
       "max_concurrency": 4,
       "description": "Webview HTML page: tool call records viewer"
+    },
+    {
+      "route_id": "mon_execution_records_list",
+      "method": "GET",
+      "path": "/ext/monitoring/execution/records",
+      "auth": "user",
+      "handler_capability": "http.handle",
+      "timeout_ms": 10000,
+      "max_concurrency": 8,
+      "description": "execution 域（channel_api 批次2 随迁）：执行记录列表（query: session_id/parent_record_id/limit/offset，内核能力桥组装）"
+    },
+    {
+      "route_id": "mon_execution_records_sessions",
+      "method": "GET",
+      "path": "/ext/monitoring/execution/records/sessions",
+      "auth": "user",
+      "handler_capability": "http.handle",
+      "timeout_ms": 10000,
+      "max_concurrency": 8,
+      "description": "execution 域：有记录的会话列表（pipeline-runs + pipeline-state 聚合）"
+    },
+    {
+      "route_id": "mon_execution_records_group_summary",
+      "method": "GET",
+      "path": "/ext/monitoring/execution/records/group-summary",
+      "auth": "user",
+      "handler_capability": "http.handle",
+      "timeout_ms": 10000,
+      "max_concurrency": 8,
+      "description": "execution 域：记录分组概要（query: session_id）"
+    },
+    {
+      "route_id": "mon_execution_records_tree",
+      "method": "GET",
+      "path": "/ext/monitoring/execution/records/tree/{session_id}",
+      "auth": "user",
+      "handler_capability": "http.handle",
+      "timeout_ms": 10000,
+      "max_concurrency": 8,
+      "description": "execution 域：执行记录树（query: max_depth）"
+    },
+    {
+      "route_id": "mon_execution_record_children",
+      "method": "GET",
+      "path": "/ext/monitoring/execution/records/{record_id}/children",
+      "auth": "user",
+      "handler_capability": "http.handle",
+      "timeout_ms": 5000,
+      "max_concurrency": 8,
+      "description": "execution 域：子执行记录（无层级，返回 []）"
+    },
+    {
+      "route_id": "mon_execution_record_get",
+      "method": "GET",
+      "path": "/ext/monitoring/execution/records/{record_id}",
+      "auth": "user",
+      "handler_capability": "http.handle",
+      "timeout_ms": 5000,
+      "max_concurrency": 8,
+      "description": "execution 域：获取单条执行记录"
+    },
+    {
+      "route_id": "mon_execution_record_delete",
+      "method": "DELETE",
+      "path": "/ext/monitoring/execution/records/{record_id}",
+      "auth": "user",
+      "handler_capability": "http.handle",
+      "timeout_ms": 5000,
+      "max_concurrency": 4,
+      "description": "execution 域：删除执行记录（读面无删除，成功形态由前端消费）"
+    },
+    {
+      "route_id": "mon_execution_records_delete_by_session",
+      "method": "DELETE",
+      "path": "/ext/monitoring/execution/records/session/{session_id}",
+      "auth": "user",
+      "handler_capability": "http.handle",
+      "timeout_ms": 10000,
+      "max_concurrency": 4,
+      "description": "execution 域：按会话删除执行记录（读面无删除，成功形态由前端消费）"
+    },
+    {
+      "route_id": "mon_execution_records_clear_all",
+      "method": "POST",
+      "path": "/ext/monitoring/execution/records/clear-all",
+      "auth": "user",
+      "handler_capability": "http.handle",
+      "timeout_ms": 10000,
+      "max_concurrency": 2,
+      "description": "execution 域：清理所有执行记录（读面无清理，成功形态由前端消费）"
+    },
+    {
+      "route_id": "mon_sessions_total_token_usage",
+      "method": "GET",
+      "path": "/ext/monitoring/sessions/{session_id}/total-token-usage",
+      "auth": "user",
+      "handler_capability": "http.handle",
+      "timeout_ms": 5000,
+      "max_concurrency": 8,
+      "description": "sessions 域（批次2 随迁接真）：会话总 Token 用量（pipeline-state 累计 + run 请求数）"
+    },
+    {
+      "route_id": "mon_sessions_context_token_usage",
+      "method": "GET",
+      "path": "/ext/monitoring/sessions/{session_id}/context-token-usage",
+      "auth": "user",
+      "handler_capability": "http.handle",
+      "timeout_ms": 5000,
+      "max_concurrency": 8,
+      "description": "sessions 域：上下文 Token 用量（估算，query: parent_execution_record_id）"
+    },
+    {
+      "route_id": "mon_agent_calls_list",
+      "method": "GET",
+      "path": "/ext/monitoring/agent-calls",
+      "auth": "user",
+      "handler_capability": "http.handle",
+      "timeout_ms": 5000,
+      "max_concurrency": 8,
+      "description": "agent-calls 域（批次3 接真）：Agent 调用记录列表（一次 run = 一次调用）"
+    },
+    {
+      "route_id": "mon_agent_calls_statistics",
+      "method": "GET",
+      "path": "/ext/monitoring/agent-calls/statistics",
+      "auth": "user",
+      "handler_capability": "http.handle",
+      "timeout_ms": 5000,
+      "max_concurrency": 8,
+      "description": "agent-calls 域：调用统计（调用数/成功率/平均耗时）"
+    },
+    {
+      "route_id": "mon_agent_call_get",
+      "method": "GET",
+      "path": "/ext/monitoring/agent-calls/{execution_id}",
+      "auth": "user",
+      "handler_capability": "http.handle",
+      "timeout_ms": 5000,
+      "max_concurrency": 8,
+      "description": "agent-calls 域：调用记录详情（run 快照 + 最近消息）"
+    },
+    {
+      "route_id": "mon_search_global",
+      "method": "GET",
+      "path": "/ext/monitoring/search",
+      "auth": "user",
+      "handler_capability": "http.handle",
+      "timeout_ms": 5000,
+      "max_concurrency": 8,
+      "description": "search 域（批次3 接真）：统一搜索会话与消息（query: q/type/limit，响应形态对齐前端 search.ts）"
     }
   ],
   "ui_schema": {

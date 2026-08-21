@@ -57,6 +57,49 @@ async def _on_load(params: dict[str, Any]) -> None:
     _reporter_task = asyncio.create_task(_report_metrics_loop())
     logger.info("Monitoring service started (record_metric reporter enabled)")
 
+    # 调试中心数据链（channel_api 退役批次 2/3 随迁）：execution/sessions/
+    # agent-calls/search 域真实数据 = 内核只读能力（messages.list /
+    # pipeline-runs.list / pipeline-state.list / db-admin.table_query），经
+    # kernel_reads 桥接注入（逻辑随迁自 channel_api server._on_load，零改动）；
+    # 能力未就绪时 handler 降级空载荷（前端契约不破坏）。
+    try:
+        import kernel_reads  # noqa: PLC0415
+
+        async def _kr_list_pipeline_runs(status: str | None = None, limit: int = 100):
+            # service-registry 约定：handle.call("<域>.<op>")——pipeline-runs 域挂在
+            # capability_router 的 service-registry 分发下（直连式需登记两端
+            # STANDARD_CAPABILITIES，未走该通道）。
+            handle = plugin.get_capability("service-registry")
+            return await handle.call("pipeline-runs.list", {"status": status or "", "limit": int(limit)})
+
+        async def _kr_list_messages(pipeline_id: str, limit: int | None = None):
+            params: dict[str, Any] = {"pipeline_id": pipeline_id}
+            if limit is not None:
+                params["limit"] = int(limit)
+            handle = plugin.get_capability("service-registry")
+            return await handle.call("messages.list", params)
+
+        async def _kr_list_state_rows():
+            handle = plugin.get_capability("pipeline-state")
+            rows = await handle.call("list", {})
+            return rows if isinstance(rows, list) else []
+
+        async def _kr_query_table(
+            table: str, limit: int = 50, offset: int = 0, authorization: str = ""
+        ):
+            params: dict[str, Any] = {"table": table, "limit": int(limit), "offset": int(offset)}
+            if authorization:
+                params["_authorization"] = authorization
+            handle = plugin.get_capability("db-admin")
+            return await handle.call("table_query", params)
+
+        kernel_reads.set_provider("pipeline-runs", _kr_list_pipeline_runs)
+        kernel_reads.set_provider("messages", _kr_list_messages)
+        kernel_reads.set_provider("pipeline-state", _kr_list_state_rows)
+        kernel_reads.set_provider("db-admin", _kr_query_table)
+    except Exception as exc:  # noqa: BLE001 — 注入失败降级（handler 返回空结构）
+        logger.warning("[monitoring] kernel_reads provider 注入失败: %s", exc)
+
 
 @plugin.on_unload
 async def _on_unload(params: dict[str, Any]) -> None:
@@ -522,11 +565,202 @@ async def http_handle(
         if path == "/ext/monitoring/page/tool-calls" and method == "GET":
             return _ok(_html_response(_TOOL_CALLS_HTML))
 
+        # ── execution/records 域（channel_api 退役批次 2 自持迁移）──
+        # 数据 = 内核只读能力桥（kernel_reads：pipeline-runs.list/messages.list/
+        # pipeline-state.list），能力不可用降级空结构（HTTP 200 空载荷）。
+        if path.startswith("/ext/monitoring/execution"):
+            return await _handle_execution_domain(path, method, raw_body, query or {})
+
+        # ── sessions token-usage 域（批次 2 随迁，stub 接真）──
+        if path.startswith("/ext/monitoring/sessions"):
+            return await _handle_sessions_domain(path, method, raw_body, query or {})
+
+        # ── agent-calls 域（批次 3 接真：pipeline-runs/messages 组装调用视图）──
+        if path.startswith("/ext/monitoring/agent-calls"):
+            return await _handle_agent_calls_domain(path, method, raw_body, query or {})
+
+        # ── search 域（批次 3 接真：pipeline-state/messages 全局搜索）──
+        if path.startswith("/ext/monitoring/search"):
+            return await _handle_search_domain(path, method, raw_body, query or {})
+
         logger.warning("http.handle: no route for path=%s method=%s", path, method)
         return _ok(_json_response({"error": "not found", "path": path}, 404))
     except Exception as exc:
         logger.exception("monitoring http.handle failed: %s", exc)
         return _error(f"monitoring service error: {exc}", 500)
+
+
+# ════════════════════════════════════════════════════════════════════════════
+# channel_api 退役批次 2/3 自持域分发（execution/records + sessions +
+# agent-calls + search）——路径语义与 /ext/channel_api/** 原值逐项对齐，
+# 数据统一经 kernel_reads 能力桥（provider 由 _on_load 注入）。
+# ════════════════════════════════════════════════════════════════════════════
+
+
+def _qint(query: dict[str, str], key: str, default: int) -> int:
+    """读取 query 整型参数；缺失/非法回退 default。"""
+    try:
+        return int(query[key]) if key in query else default
+    except (TypeError, ValueError):
+        return default
+
+
+async def _handle_execution_domain(
+    path: str, method: str, raw_body: str, query: dict[str, str]
+) -> dict[str, Any]:
+    """execution 域分发：/ext/monitoring/execution/** → execution_records 业务函数。
+
+    仅迁前端实际消费的 /records* 子集（前端 executionRecords.ts / 调试中心），
+    与 channel_api 原分发逐项同构（含 404/500 语义）。
+    """
+    import execution_records as er  # noqa: PLC0415
+
+    prefix = "/ext/monitoring/execution"
+    if not path.startswith(prefix):
+        return _ok(_json_response({"error": "not an execution path", "path": path}, 404))
+    sub = path[len(prefix):]  # "/records" / "/records/sessions" / "/records/{id}" / ...
+
+    try:
+        # GET /records（list，query: session_id/parent_record_id/limit/offset）
+        if sub == "/records" and method == "GET":
+            return _ok(_json_response(await er.list_execution_records(
+                session_id=query.get("session_id"),
+                parent_record_id=query.get("parent_record_id"),
+                limit=_qint(query, "limit", 50),
+                offset=_qint(query, "offset", 0),
+            )))
+        # GET /records/sessions
+        if sub == "/records/sessions" and method == "GET":
+            return _ok(_json_response(await er.get_execution_record_sessions()))
+        # GET /records/group-summary（query: session_id）
+        if sub == "/records/group-summary" and method == "GET":
+            return _ok(_json_response(await er.get_record_group_summary(
+                session_id=query.get("session_id"),
+            )))
+        # GET /records/tree/{session_id}（query: max_depth）
+        if sub.startswith("/records/tree/") and method == "GET":
+            session_id = sub[len("/records/tree/"):]
+            return _ok(_json_response(await er.get_execution_tree(
+                session_id, max_depth=_qint(query, "max_depth", 5),
+            )))
+        # GET /records/{record_id}/children
+        if sub.endswith("/children") and sub.startswith("/records/") and method == "GET":
+            record_id = sub[len("/records/"):-len("/children")]
+            return _ok(_json_response(await er.get_children_records(record_id)))
+        # GET /records/{record_id}
+        if sub.startswith("/records/") and method == "GET" and "/" not in sub[len("/records/"):]:
+            record_id = sub[len("/records/"):]
+            return _ok(_json_response(await er.get_execution_record(record_id)))
+        # DELETE /records/{record_id}
+        if sub.startswith("/records/") and method == "DELETE" and "/" not in sub[len("/records/"):]:
+            record_id = sub[len("/records/"):]
+            return _ok(_json_response(await er.delete_execution_record(record_id)))
+        # DELETE /records/session/{session_id}
+        if sub.startswith("/records/session/") and method == "DELETE":
+            session_id = sub[len("/records/session/"):]
+            return _ok(_json_response(await er.delete_execution_records_by_session(session_id)))
+        # POST /records/clear-all
+        if sub == "/records/clear-all" and method == "POST":
+            return _ok(_json_response(await er.clear_all_records()))
+
+        logger.warning("execution http.handle: no route for sub=%s method=%s", sub, method)
+        return _ok(_json_response({"error": "not found", "path": path}, 404))
+    except Exception as exc:  # noqa: BLE001
+        logger.error("execution http.handle 未预期错误: %s", exc, exc_info=True)
+        return _ok(_json_response({"error": "internal server error", "detail": str(exc)}, 500))
+
+
+async def _handle_sessions_domain(
+    path: str, method: str, raw_body: str, query: dict[str, str]
+) -> dict[str, Any]:
+    """sessions 域分发：/ext/monitoring/sessions/** → token-usage 接真业务函数。"""
+    import execution_records as er  # noqa: PLC0415
+
+    prefix = "/ext/monitoring/sessions"
+    if not path.startswith(prefix):
+        return _ok(_json_response({"error": "not a sessions path", "path": path}, 404))
+    sub = path[len(prefix):]  # "/{session_id}/total-token-usage" 等
+
+    try:
+        if sub.endswith("/total-token-usage") and method == "GET":
+            session_id = sub[1:].rsplit("/total-token-usage", 1)[0]
+            return _ok(_json_response(await er.get_session_total_token_usage(session_id)))
+        if sub.endswith("/context-token-usage") and method == "GET":
+            session_id = sub[1:].rsplit("/context-token-usage", 1)[0]
+            parent = query.get("parent_execution_record_id")
+            return _ok(_json_response(
+                await er.get_session_context_token_usage(session_id, parent_execution_record_id=parent)
+            ))
+
+        logger.warning("sessions http.handle: no route for sub=%s method=%s", sub, method)
+        return _ok(_json_response({"error": "not found", "path": path}, 404))
+    except Exception as exc:  # noqa: BLE001
+        logger.error("sessions http.handle 未预期错误: %s", exc, exc_info=True)
+        return _ok(_json_response({"error": "internal server error", "detail": str(exc)}, 500))
+
+
+async def _handle_agent_calls_domain(
+    path: str, method: str, raw_body: str, query: dict[str, str]
+) -> dict[str, Any]:
+    """agent-calls 域分发：/ext/monitoring/agent-calls/** → 管道运行聚合业务函数。"""
+    import agent_calls as ac  # noqa: PLC0415
+
+    prefix = "/ext/monitoring/agent-calls"
+    if not path.startswith(prefix):
+        return _ok(_json_response({"error": "not an agent-calls path", "path": path}, 404))
+    sub = path[len(prefix):]  # "" / "/statistics" / "/{execution_id}"
+
+    try:
+        if sub in ("", "/") and method == "GET":
+            return _ok(_json_response(await ac.list_agent_calls(
+                limit=_qint(query, "limit", 50),
+                offset=_qint(query, "offset", 0),
+            )))
+        if sub == "/statistics" and method == "GET":
+            return _ok(_json_response(await ac.get_agent_call_statistics()))
+        if sub.startswith("/") and len(sub) > 1 and method == "GET":
+            exec_id = sub[1:]
+            return _ok(_json_response(await ac.get_agent_call(exec_id)))
+
+        logger.warning("agent-calls http.handle: no route for sub=%s method=%s", sub, method)
+        return _ok(_json_response({"error": "not found", "path": path}, 404))
+    except Exception as exc:  # noqa: BLE001
+        logger.error("agent-calls http.handle 未预期错误: %s", exc, exc_info=True)
+        return _ok(_json_response({"error": "internal server error", "detail": str(exc)}, 500))
+
+
+async def _handle_search_domain(
+    path: str, method: str, raw_body: str, query: dict[str, str]
+) -> dict[str, Any]:
+    """search 域分发：/ext/monitoring/search → 内核搜索业务函数（会话标题+消息内容）。
+
+    GET /search?q=xxx&type=all|session|message&limit=20 统一搜索。
+    响应形态对齐前端 services/api/search.ts（SearchResponse）。type 非法 → 422
+    （语义同原 APIError VAL_ENUM_7002）。
+    """
+    import routes_search as rsearch  # noqa: PLC0415
+
+    prefix = "/ext/monitoring/search"
+    if not path.startswith(prefix):
+        return _ok(_json_response({"error": "not a search path", "path": path}, 404))
+    sub = path[len(prefix):]  # "" / "/"
+
+    try:
+        if sub in ("", "/") and method == "GET":
+            return _ok(_json_response(await rsearch.search(
+                q=query.get("q", ""),
+                type=query.get("type", "all"),
+                limit=_qint(query, "limit", 20),
+            )))
+
+        logger.warning("search http.handle: no route for sub=%s method=%s", sub, method)
+        return _ok(_json_response({"error": "not found", "path": path}, 404))
+    except ValueError as exc:
+        # 参数校验失败（type 枚举非法）：422，语义对齐原 search APIError
+        return _ok(_json_response({"error": str(exc)}, 422))
+    except Exception as exc:  # noqa: BLE001
+        logger.error("search http.handle 未预期错误: %s", exc, exc_info=True)
+        return _ok(_json_response({"error": "internal server error", "detail": str(exc)}, 500))
 
 
 # ════════════════════════════════════════════════════════════════════════════
