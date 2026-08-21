@@ -101,9 +101,9 @@ describe('FiveSpaceLayout — 响应式两档（768px 分界，平板=触屏桌�
 
     // 顶栏永久移除（用户裁决：全界面只留侧栏|聊天|工作区两条分割）
     expect(screen.queryByTestId('app-header')).not.toBeInTheDocument()
-    // 原顶栏图标迁至侧栏底部工具行
-    expect(screen.getByTestId('sidebar-collapse-btn')).toBeInTheDocument()
-    expect(screen.getByTestId('sidebar-workspace-btn')).toBeInTheDocument()
+    // 布局 v3：左上角恒定图标组（侧栏/工作区浮出开关），无分割线
+    expect(screen.getByTestId('sidebar-toggle-float')).toBeInTheDocument()
+    expect(screen.getByTestId('workspace-toggle-float')).toBeInTheDocument()
     expect(screen.getByTestId('chat-content')).toBeInTheDocument()
     expect(screen.getByTestId('sidebar-content')).toBeInTheDocument()
     // 桌面形态：Sidebar 由调用方传入并以 Splitter 面板呈现

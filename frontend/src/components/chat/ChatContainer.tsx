@@ -280,7 +280,8 @@ export const ChatContainer = ({
   )
 
   /** 是否显示 AgentTabBar（至少存在一个 Tab 时显示） */
-  const showTabBar = tabs.length > 1
+  // 单主对话标签也显示（用户裁决 2026-08-21：顶部中间恒有标签条）
+  const showTabBar = tabs.length >= 1
 
   /** 处理 Tab 切换 */
   const handleTabChange = useCallback(
@@ -342,7 +343,7 @@ export const ChatContainer = ({
     >
       {/* Agent Tab 导航栏（多 Tab 时显示） */}
       {showTabBar && (
-        <div className="bg-background shrink-0 border-b">
+        <div className="flex shrink-0 justify-center">
           <AgentTabBar
             tabs={barTabs}
             onTabChange={handleTabChange}

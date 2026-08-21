@@ -1,6 +1,5 @@
 /** Five Space Layout Component Implements the five-rendering-space layout: */
 
-import Splitter from 'antd/es/splitter'
 import React, { useCallback, useMemo, useState, useEffect, useRef } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { FolderOpen, Menu, Minimize2, PanelRightIcon } from '@/assets/icons'
@@ -17,6 +16,7 @@ import { getFileEditorData, registerFileEditor, removeFileEditorData, updateFile
 import { useLayoutModeStore } from '@/stores/layoutModeStore'
 import { useSessionStore } from '@/stores/sessionStore'
 import { useThemeStore } from '@/stores/themeStore'
+import { cn } from '@/lib/utils'
 import { useUIStore } from '@/stores/uiStore'
 import { AlertBanner, useLayoutAlerts, type AlertBannerItem } from './AlertBanner'
 import { FloatingWindowManager, renderFloatingWindowContent } from './FloatingWindowManager'
@@ -68,13 +68,7 @@ export function FiveSpaceLayout({
   const setWorkspaceCollapsed = useUIStore((s) => s.setWorkspaceCollapsed)
   const workspaceMaximized = useUIStore((s) => s.workspaceMaximized)
   const setWorkspaceMaximized = useUIStore((s) => s.setWorkspaceMaximized)
-  const workspacePanelRatio = useUIStore((s) => s.workspacePanelRatio)
-  const setWorkspacePanelRatio = useUIStore((s) => s.setWorkspacePanelRatio)
-  const sidebarRatio = useUIStore((s) => s.sidebarRatio)
-  const setSidebarRatio = useUIStore((s) => s.setSidebarRatio)
   // 本地拖动百分比（受控 size 必须在 onResize 中更新，否则会弹回导致“拖不动”）
-  const [dragSidebarPct, setDragSidebarPct] = useState<number | null>(null)
-  const [dragWorkspacePct, setDragWorkspacePct] = useState<number | null>(null)
 
   const activeSessionId = useSessionStore((s) => s.activeSessionId)
   const [workspaceFullscreen, setWorkspaceFullscreen] = useState(false)
@@ -580,136 +574,77 @@ export function FiveSpaceLayout({
                 </section>
               </div>
             ) : (
-              /* 桌面：比例拖动 — 侧栏 | (聊天 + 工作区)；隐藏时侧栏 0 宽完全消失 */
-              <Splitter
-                orientation="horizontal"
-                className="min-h-0 flex-1 overflow-hidden"
-                onResize={(sizes: number[]) => {
-                  // 拖动中持续写本地 %，让受控 size 跟手。
-                  // panel 组合随侧栏/工作区显隐变化，索引需按当前组合解析：
-                  //   侧栏可见+工作区可见: [sidebar, chat, ws]
-                  //   侧栏折叠+工作区可见: [chat, ws]
-                  //   侧栏可见+工作区折叠: [sidebar, chat]
-                  //   全折叠: [chat]（无 dragger，不会进入）
-                  const sidebarVisible = !sidebarCollapsed && !!sidebarContent
-                  if (sidebarVisible && !workspaceCollapsed) {
-                    const total = (sizes[0] ?? 0) + (sizes[1] ?? 0) + (sizes[2] ?? 0)
-                    if (total <= 0) return
-                    setDragSidebarPct(((sizes[0] ?? 0) / total) * 100)
-                    const rest = total - (sizes[0] ?? 0)
-                    if (rest > 0) setDragWorkspacePct(((sizes[2] ?? 0) / rest) * 100)
-                  } else if (sidebarVisible && workspaceCollapsed) {
-                    // [sidebar, chat]：只改侧栏占比
-                    const total = (sizes[0] ?? 0) + (sizes[1] ?? 0)
-                    if (total > 0) setDragSidebarPct(((sizes[0] ?? 0) / total) * 100)
-                  } else {
-                    // [chat, ws]
-                    const total = (sizes[0] ?? 0) + (sizes[1] ?? 0)
-                    if (total > 0) setDragWorkspacePct(((sizes[1] ?? 0) / total) * 100)
-                  }
-                }}
-                onResizeEnd={(sizes: number[]) => {
-                  const sidebarVisible = !sidebarCollapsed && !!sidebarContent
-                  if (sidebarVisible && !workspaceCollapsed) {
-                    const total = (sizes[0] ?? 0) + (sizes[1] ?? 0) + (sizes[2] ?? 0)
-                    if (!total) return
-                    setSidebarRatio(Math.min(0.4, Math.max(0.12, (sizes[0] ?? 0) / total)))
-                    const rest = total - (sizes[0] ?? 0)
-                    if (rest > 0) {
-                      setWorkspacePanelRatio(Math.min(0.75, Math.max(0.25, (sizes[2] ?? 0) / rest)))
-                    }
-                  } else if (sidebarVisible && workspaceCollapsed) {
-                    const total = (sizes[0] ?? 0) + (sizes[1] ?? 0)
-                    if (!total) return
-                    setSidebarRatio(Math.min(0.4, Math.max(0.12, (sizes[0] ?? 0) / total)))
-                  } else {
-                    const total = (sizes[0] ?? 0) + (sizes[1] ?? 0)
-                    if (!total) return
-                    setWorkspacePanelRatio(Math.min(0.75, Math.max(0.25, (sizes[1] ?? 0) / total)))
-                  }
-                  setDragSidebarPct(null)
-                  setDragWorkspacePct(null)
-                }}
-              >
+              /* 桌面（布局 v3，用户裁决 2026-08-21）：聊天全宽常驻；侧栏/工作区为
+                 浮出面板（左上角恒定图标组切换，无遮罩不阻断聊天交互）；
+                 全界面无分割线（浮层自带阴影边界）。 */
+              <section className="relative flex min-h-0 flex-1 flex-col overflow-hidden" data-region="chat">
+                {/* 左上角常驻图标组（位置恒定：侧栏 / 工作区） */}
+                <div className="absolute left-2 top-2 z-30 flex items-center gap-1 rounded-lg p-0.5">
+                  <button
+                    type="button"
+                    onClick={() => useUIStore.getState().setSidebarCollapsed(!sidebarCollapsed)}
+                    className={cn(
+                      'flex h-7 w-7 items-center justify-center rounded-md transition-colors',
+                      !sidebarCollapsed && sidebarContent
+                        ? 'bg-accent text-foreground'
+                        : 'text-muted-foreground hover:bg-accent hover:text-foreground',
+                    )}
+                    title={sidebarCollapsed ? '展开侧边栏' : '收起侧边栏'}
+                    aria-label="侧边栏"
+                    data-testid="sidebar-toggle-float"
+                  >
+                    <Menu className="h-4 w-4" />
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setWorkspaceCollapsed(!workspaceCollapsed)}
+                    className={cn(
+                      'flex h-7 w-7 items-center justify-center rounded-md transition-colors',
+                      !workspaceCollapsed
+                        ? 'bg-accent text-foreground'
+                        : 'text-muted-foreground hover:bg-accent hover:text-foreground',
+                    )}
+                    title={workspaceCollapsed ? '展开工作区' : '收起工作区'}
+                    aria-label="工作区"
+                    data-testid="workspace-toggle-float"
+                  >
+                    <PanelRightIcon className="h-4 w-4" />
+                  </button>
+                </div>
+
+                {chatContent}
+
+                {/* 侧栏浮出面板（左）：主题侧栏样式（--ds-bg-panel） */}
                 {sidebarContent && !sidebarCollapsed && (
-                  <Splitter.Panel
-                    size={`${Math.round(dragSidebarPct ?? (sidebarRatio ?? 0.18) * 100)}%`}
-                    min="12%"
-                    max="40%"
-                    resizable
+                  <aside
+                    className="absolute inset-y-0 left-0 z-20 flex w-[248px] min-w-[200px] max-w-[320px] flex-col shadow-2xl"
+                    style={{ background: 'var(--ds-bg-panel, hsl(var(--card)))' }}
+                    data-testid="sidebar-panel"
+                    data-region="sidebar"
                   >
-                    <div
-                      className="flex h-full min-h-0 min-w-0 flex-col overflow-hidden"
-                      data-testid="sidebar-panel"
-                      data-region="sidebar"
-                    >
-                      <div className="min-h-0 flex-1 overflow-hidden">{sidebarContent}</div>
-                      <div className="flex items-center gap-1 border-t-0 px-2 py-1.5">
-                        <button
-                          type="button"
-                          onClick={() => useUIStore.getState().setSidebarCollapsed(true)}
-                          className="text-muted-foreground hover:bg-accent hover:text-foreground flex h-7 w-7 items-center justify-center rounded-md transition-colors"
-                          title="收起侧边栏"
-                          aria-label="收起侧边栏"
-                          data-testid="sidebar-collapse-btn"
-                        >
-                          <Menu className="h-4 w-4" />
-                        </button>
-                        <button
-                          type="button"
-                          onClick={() => setWorkspaceCollapsed(!workspaceCollapsed)}
-                          className="text-muted-foreground hover:bg-accent hover:text-foreground flex h-7 w-7 items-center justify-center rounded-md transition-colors"
-                          title={workspaceCollapsed ? '显示工作区' : '隐藏工作区'}
-                          aria-label="工作区"
-                          data-testid="sidebar-workspace-btn"
-                        >
-                          <PanelRightIcon className="h-4 w-4" />
-                        </button>
-                      </div>
-                    </div>
-                  </Splitter.Panel>
+                    <div className="min-h-0 flex-1 overflow-hidden">{sidebarContent}</div>
+                  </aside>
                 )}
 
-                <Splitter.Panel
-                  size={`${Math.round(
-                    // 工作区隐藏时 chat 占满剩余宽度（减去侧栏占比，若有）；可见时为 1 - workspacePct
-                    workspaceCollapsed
-                      ? 100 - (sidebarCollapsed || !sidebarContent
-                          ? 0
-                          : (dragSidebarPct ?? (sidebarRatio ?? 0.18) * 100))
-                      : 100 - (dragWorkspacePct ?? (workspacePanelRatio ?? layoutConfig.panelSplit.workspaceRatio) * 100),
-                  )}%`}
-                  min="25%"
-                  resizable
-                >
-                  <div className="h-full overflow-hidden" data-region="chat">
-                    {chatContent}
-                  </div>
-                </Splitter.Panel>
-
-                {/* 工作区：条件渲染，折叠时整个 Panel 移除（同侧栏）。
-                    注：曾用 antd collapsible，但与受控 size 冲突——折叠后 size 仍按比例渲染，
-                    导致「隐藏工作区」无效，故改为条件渲染彻底移除。 */}
+                {/* 工作区浮出面板（右）：主题面板样式 */}
                 {!workspaceCollapsed && (
-                  <Splitter.Panel
-                    size={`${Math.round(dragWorkspacePct ?? (workspacePanelRatio ?? layoutConfig.panelSplit.workspaceRatio) * 100)}%`}
-                    min="25%"
-                    resizable
+                  <div
+                    className="absolute inset-y-0 right-0 z-20 flex w-[46%] min-w-[380px] flex-col shadow-2xl"
+                    style={{ background: 'var(--ds-bg-elevated, hsl(var(--card)))' }}
+                    data-region="workspace"
                   >
-                    <section className="h-full min-w-0 overflow-hidden" data-region="workspace">
-                      <WorkspaceHost
-                        tabs={workspaceTabs}
-                        onTabChange={setActiveTab}
-                        onTabClose={handleCloseTab}
-                        renderTabContent={renderTabContent}
-                        onFullscreen={toggleWorkspaceFullscreen}
-                        isFullscreen={false}
-                        visitedTabIds={visitedTabIds}
-                      />
-                    </section>
-                  </Splitter.Panel>
+                    <WorkspaceHost
+                      tabs={workspaceTabs}
+                      onTabChange={setActiveTab}
+                      onTabClose={handleCloseTab}
+                      renderTabContent={renderTabContent}
+                      onFullscreen={toggleWorkspaceFullscreen}
+                      isFullscreen={false}
+                      visitedTabIds={visitedTabIds}
+                    />
+                  </div>
                 )}
-              </Splitter>
+              </section>
             )}
           </div>
 
