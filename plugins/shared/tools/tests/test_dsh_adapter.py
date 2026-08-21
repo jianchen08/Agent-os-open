@@ -676,10 +676,13 @@ class TestSkinServeHandler:
         body = base64.b64decode(resp["body"]).decode("utf-8") if resp["body"] else ""
         return resp["status"], body
 
-    def test_serve_selected_skin(self):
+    def test_serve_selected_skin(self, monkeypatch: pytest.MonkeyPatch):
+        import server  # noqa: PLC0415
+
+        monkeypatch.setattr("server.load_skin_selection", lambda: "miku")
         status, body = self._get_skin_css()
         assert status == 200
-        assert "--dsw-" in body  # 注入的是令牌层 CSS 本体
+        assert "--dsw-" in body  # miku 的 :root 令牌原文（皮肤间令牌有无不一，固定样例）
 
     def test_disabled_skin_returns_empty_css(self, monkeypatch: pytest.MonkeyPatch):
         import server  # noqa: PLC0415
