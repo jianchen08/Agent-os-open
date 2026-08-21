@@ -20,6 +20,10 @@ from task_types import TaskStatus  # noqa: E402
 
 from agentos_plugin_sdk import AgentOSPlugin  # noqa: E402
 
+# channel_api tasks/projects 域拆迁落户（2026-08-21）：HTTP 面自持。
+# http_api 内部懒 import server.plugin 取能力句柄，此处顶层 import 无环。
+import http_api  # noqa: E402,PLC0415
+
 logger = logging.getLogger(__name__)
 plugin = AgentOSPlugin("task_service")
 
@@ -310,6 +314,41 @@ async def task_get_transitions(task_id: str) -> dict[str, Any]:
     svc = _get_service()
     transitions = svc.get_valid_transitions(task_id)
     return {"transitions": transitions, "task_id": task_id}
+
+
+# ──────────────────────────────────────────────
+# HTTP 面（/ext/task_service/**，channel_api tasks/projects 域拆迁落户）
+# ──────────────────────────────────────────────
+
+
+@plugin.tool(
+    name="http.handle",
+    schema={
+        "type": "object",
+        "properties": {
+            "path": {"type": "string"},
+            "method": {"type": "string"},
+            "plugin_id": {"type": "string"},
+            "raw_body": {"type": "string"},
+            "headers": {"type": "object"},
+            "query": {"type": "object"},
+        },
+    },
+    description="HTTP endpoint handler for /ext/task_service/** (tasks 21 端点 + projects 7 端点)",
+)
+async def http_handle(
+    path: str = "",
+    method: str = "GET",
+    plugin_id: str = "",
+    raw_body: str = "",
+    headers: dict[str, str] | None = None,
+    query: dict[str, str] | None = None,
+) -> dict[str, Any]:
+    """按 path 分发到 tasks/projects 域 handler（http_api 统一持有）。
+
+    签名覆盖 HttpHandleRequest 全部字段（SDK 的 td.handler(**arguments) 展开）。
+    """
+    return await http_api.handle_http(path, method, raw_body, query or {}, headers)
 
 
 if __name__ == "__main__":
