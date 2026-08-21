@@ -242,7 +242,9 @@ async def get_task_tree(  # noqa: PLR0912,PLR0915
     if session_id:
         related_pipeline_ids: set[str] = set()
         try:
-            from routes_threads import store as api_store  # noqa: PLC0415
+            # routes_threads 已随批次 0 删除（死代码），会话数据仍由
+            # memory_store 的 store 承载（get_session 保留，routes_tasks 亦在用）
+            from memory_store import store as api_store  # noqa: PLC0415
 
             session = api_store.get_session(session_id)
             if session and session.pipeline_ids:

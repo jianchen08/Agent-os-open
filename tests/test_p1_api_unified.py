@@ -51,15 +51,14 @@ class TestAPIPrefixUnification:
     """验证 0.2 存活路由模块的 prefix 均以 /api/v1/ 开头（AR-5）。"""
 
     # 0.2 channel_api sidecar 实际按域分发（server.py import routes_xxx）且
-    # import 链存活的模块清单。
+    # import 链存活的模块清单（routes_threads/routes_external_chat 已于批次 0
+    # 删除——死代码，未挂 http.handle 分派）。
     ROUTE_MODULES = [
-        ("channels.api.routes_threads", "router"),
         ("channels.api.routes_tasks", "router"),
         ("channels.api.routes_memory", "router"),
         ("channels.api.routes_evaluation", "router"),
         ("channels.api.routes_config", "router"),
         ("channels.api.routes_thinking_mode", "router"),
-        ("channels.api.routes_external_chat", "router"),
         ("channels.api.routes_scene", "router"),
     ]
 
