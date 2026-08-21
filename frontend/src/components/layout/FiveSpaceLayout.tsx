@@ -574,76 +574,80 @@ export function FiveSpaceLayout({
                 </section>
               </div>
             ) : (
-              /* 桌面（布局 v3，用户裁决 2026-08-21）：聊天全宽常驻；侧栏/工作区为
-                 浮出面板（左上角恒定图标组切换，无遮罩不阻断聊天交互）；
-                 全界面无分割线（浮层自带阴影边界）。 */
-              <section className="relative flex min-h-0 flex-1 flex-col overflow-hidden" data-region="chat">
-                {/* 左上角常驻图标组（位置恒定：侧栏 / 工作区） */}
-                <div className="absolute left-2 top-2 z-30 flex items-center gap-1 rounded-lg p-0.5">
-                  <button
-                    type="button"
-                    onClick={() => useUIStore.getState().setSidebarCollapsed(!sidebarCollapsed)}
-                    className={cn(
-                      'flex h-7 w-7 items-center justify-center rounded-md transition-colors',
-                      !sidebarCollapsed && sidebarContent
-                        ? 'bg-accent text-foreground'
-                        : 'text-muted-foreground hover:bg-accent hover:text-foreground',
-                    )}
-                    title={sidebarCollapsed ? '展开侧边栏' : '收起侧边栏'}
-                    aria-label="侧边栏"
-                    data-testid="sidebar-toggle-float"
-                  >
-                    <Menu className="h-4 w-4" />
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => setWorkspaceCollapsed(!workspaceCollapsed)}
-                    className={cn(
-                      'flex h-7 w-7 items-center justify-center rounded-md transition-colors',
-                      !workspaceCollapsed
-                        ? 'bg-accent text-foreground'
-                        : 'text-muted-foreground hover:bg-accent hover:text-foreground',
-                    )}
-                    title={workspaceCollapsed ? '展开工作区' : '收起工作区'}
-                    aria-label="工作区"
-                    data-testid="workspace-toggle-float"
-                  >
-                    <PanelRightIcon className="h-4 w-4" />
-                  </button>
-                </div>
+              /* 桌面（布局 v4，用户裁决 2026-08-21 二修）：并排让位式——侧栏/工作区
+                 展开时聊天区让位（不遮挡），收起时聊天全宽；图标各归其边
+                 （侧栏开关=左上角、工作区开关=右上角）；边界无边线。 */
+              <section className="relative flex min-h-0 flex-1 overflow-hidden" data-region="chat">
+                {/* 左上角：侧栏开关（位置恒定） */}
+                <button
+                  type="button"
+                  onClick={() => useUIStore.getState().setSidebarCollapsed(!sidebarCollapsed)}
+                  className={cn(
+                    'absolute left-2 top-2 z-30 flex h-7 w-7 items-center justify-center rounded-md transition-colors',
+                    !sidebarCollapsed && sidebarContent
+                      ? 'bg-accent text-foreground'
+                      : 'text-muted-foreground hover:bg-accent hover:text-foreground',
+                  )}
+                  title={sidebarCollapsed ? '展开侧边栏' : '收起侧边栏'}
+                  aria-label="侧边栏"
+                  data-testid="sidebar-toggle-float"
+                >
+                  <Menu className="h-4 w-4" />
+                </button>
+                {/* 右上角：工作区开关（位置恒定，各归其边） */}
+                <button
+                  type="button"
+                  onClick={() => setWorkspaceCollapsed(!workspaceCollapsed)}
+                  className={cn(
+                    'absolute right-2 top-2 z-30 flex h-7 w-7 items-center justify-center rounded-md transition-colors',
+                    !workspaceCollapsed
+                      ? 'bg-accent text-foreground'
+                      : 'text-muted-foreground hover:bg-accent hover:text-foreground',
+                  )}
+                  title={workspaceCollapsed ? '展开工作区' : '收起工作区'}
+                  aria-label="工作区"
+                  data-testid="workspace-toggle-float"
+                >
+                  <PanelRightIcon className="h-4 w-4" />
+                </button>
 
-                {chatContent}
+                <div className="flex min-h-0 flex-1 overflow-hidden">
+                  {/* 侧栏（让位式，主题面板样式，无边线） */}
+                  {sidebarContent && !sidebarCollapsed && (
+                    <aside
+                      className="flex w-[248px] min-w-[200px] max-w-[320px] shrink-0 flex-col overflow-hidden"
+                      style={{ background: 'var(--ds-bg-panel, hsl(var(--card)))' }}
+                      data-testid="sidebar-panel"
+                      data-region="sidebar"
+                    >
+                      <div className="min-h-0 flex-1 overflow-hidden">{sidebarContent}</div>
+                    </aside>
+                  )}
 
-                {/* 侧栏浮出面板（左）：主题侧栏样式（--ds-bg-panel） */}
-                {sidebarContent && !sidebarCollapsed && (
-                  <aside
-                    className="absolute inset-y-0 left-0 z-20 flex w-[248px] min-w-[200px] max-w-[320px] flex-col shadow-2xl"
-                    style={{ background: 'var(--ds-bg-panel, hsl(var(--card)))' }}
-                    data-testid="sidebar-panel"
-                    data-region="sidebar"
-                  >
-                    <div className="min-h-0 flex-1 overflow-hidden">{sidebarContent}</div>
-                  </aside>
-                )}
-
-                {/* 工作区浮出面板（右）：主题面板样式 */}
-                {!workspaceCollapsed && (
-                  <div
-                    className="absolute inset-y-0 right-0 z-20 flex w-[46%] min-w-[380px] flex-col shadow-2xl"
-                    style={{ background: 'var(--ds-bg-elevated, hsl(var(--card)))' }}
-                    data-region="workspace"
-                  >
-                    <WorkspaceHost
-                      tabs={workspaceTabs}
-                      onTabChange={setActiveTab}
-                      onTabClose={handleCloseTab}
-                      renderTabContent={renderTabContent}
-                      onFullscreen={toggleWorkspaceFullscreen}
-                      isFullscreen={false}
-                      visitedTabIds={visitedTabIds}
-                    />
+                  {/* 聊天（弹性让位/全宽） */}
+                  <div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">
+                    {chatContent}
                   </div>
-                )}
+
+                  {/* 工作区（让位式，无边线） */}
+                  {!workspaceCollapsed && (
+                    <div
+                      className="flex w-[42%] min-w-[360px] shrink-0 flex-col overflow-hidden"
+                      style={{ background: 'var(--ds-bg-elevated, hsl(var(--card)))' }}
+                      data-region="workspace"
+                    >
+                      <WorkspaceHost
+                        tabs={workspaceTabs}
+                        onTabChange={setActiveTab}
+                        onTabClose={handleCloseTab}
+                        renderTabContent={renderTabContent}
+                        onFullscreen={toggleWorkspaceFullscreen}
+                        isFullscreen={false}
+                        visitedTabIds={visitedTabIds}
+                      />
+                    </div>
+                  )}
+                </div>
               </section>
             )}
           </div>
