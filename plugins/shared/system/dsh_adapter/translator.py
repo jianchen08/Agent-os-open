@@ -619,30 +619,108 @@ def resolve_skin_background(skin_id: str, base_dir: str | Path | None = None) ->
 
 
 def translate_background_css(bg: dict[str, Any], asset_url_base: str) -> str:
-    """backgroundMedia 声明 → 等价注入 CSS（亮暗双态跟随系统偏好）。
+    """backgroundMedia 声明 → 区域化背景 CSS（立绘只挂聊天区，工作区不糊图）。
 
-    scrim 是叠在图上的可读性渐变（DSH 语义：scrim 在上层）——CSS 多背景
-    列表前者在上层，故 scrim 放前、图放后。!important 盖过 skin.css 的
-    :root 渐变底（backgroundMedia 皮肤的立绘优先）。灵汐手动切主题不联动
-    （静态注入按 prefers-color-scheme 近似，诚实边界）。
+    用户裁决（2026-08-21）：全屏糊一张图覆盖栏位/图标是错误语义——背景严格
+    区域化：聊天区挂立绘 + scrim（DSH 皮肤本意=对话背景），工作区保持实底
+    （可读性优先，"没有的就不要覆盖"）。亮暗双态跟随系统偏好。
     """
     def layer(spec: dict[str, str]) -> str:
         img = f'url("{asset_url_base}/{spec["src"]}")'
         scrim = spec.get("scrim", "").strip()
         return f"{scrim}, {img}" if scrim else img
 
-    def full(spec: dict[str, str]) -> str:
-        return (
-            f"background-image: {layer(spec)} !important; "
-            "background-size: cover !important; background-position: center !important; "
-            "background-attachment: fixed !important; background-repeat: no-repeat !important;"
-        )
-
     dark = bg.get("dark")
     light = bg.get("light")
-    parts = ["/* dsh-skin background-media (translated from skin.json contributes.backgroundMedia) */"]
+    parts = ["/* dsh-skin background-media → chat region only */"]
     if dark:
-        parts.append(f"body, :root {{ {full(dark)} }}")
+        parts.append(
+            f'[data-region="chat"] {{ background-image: {layer(dark)}; '
+            "background-size: cover; background-position: center; background-repeat: no-repeat; }}"
+        )
     if light:
-        parts.append(f"@media (prefers-color-scheme: light) {{ body, :root {{ {full(light)} }} }}")
+        parts.append(
+            f'@media (prefers-color-scheme: light) {{ [data-region="chat"] {{ '
+            f"background-image: {layer(light)}; }} }}"
+        )
     return "\n".join(parts) + "\n"
+
+
+# ── 皮肤 → 灵汐适配层（令牌接管 + 布局适配，2026-08-21 区域语义重写） ────
+#
+# 用户裁决的皮肤语义：**完全替换**灵汐暗/亮主题（内部组件也吃皮肤色），
+# 不是叠加一层背景图。三段产出：
+# 1. 令牌接管：皮肤色值 → 灵汐 --ds-* 全套（bg-canvas/panel/elevated、
+#    text 三级、accent、border 两级），内部组件全量换肤；
+# 2. 布局适配：header 收成图标条（去导航文字），侧栏半透明面板（底色微透），
+#    聊天区立绘背景（translate_background_css），工作区实底；
+# 3. 皮肤原文 :root 段挂 body 画布底（供侧栏半透明透出）。
+# 色值提取链：--dsw-alias-bg-* 令牌（DSH 别名层，多数皮肤有）→ skin.css
+# :root 的 background-color/color → skin.json accent；缺项用 color-mix 派生。
+
+_ALIAS_RE = re.compile(r"--dsw-alias-bg-base:\s*([^;]+);")
+_ALIAS_L1_RE = re.compile(r"--dsw-alias-bg-layer-1:\s*([^;]+);")
+_ALIAS_PANEL_RE = re.compile(r"--dsw-alias-bg-panel:\s*([^;]+);")
+_ROOT_BLOCK_RE = re.compile(r":root\s*\{([^}]*)\}")
+_BG_RE = re.compile(r"background-color:\s*([^;]+);")
+_FG_RE = re.compile(r"(?<![-\w])color:\s*(#[0-9a-fA-F]{3,8}|rgba?\([^)]*\))\s*;")
+_ROOT_BGIMG_RE = re.compile(r"background-image:\s*(.+);")
+
+
+def translate_skin_adaptation(skin_id: str, base_dir: str | Path | None = None) -> str:
+    """生成皮肤的区域适配 CSS（令牌接管 + 布局），皮肤激活注入时拼接。"""
+    base = Path(base_dir) if base_dir is not None else SKIN_CENTER_SKINS_DIR
+    skin_dir = base / skin_id
+    css_path = skin_dir / "skin.css"
+    manifest = skin_dir / "skin.json"
+    css = css_path.read_text(encoding="utf-8", errors="replace") if css_path.is_file() else ""
+    try:
+        meta = json.loads(manifest.read_text(encoding="utf-8")) if manifest.is_file() else {}
+    except ValueError:
+        meta = {}
+
+    bg_m = _BG_RE.search(css) or _ALIAS_RE.search(css)
+    fg_m = _FG_RE.search(css)
+    root_block = _ROOT_BLOCK_RE.search(css)
+    root_body = root_block.group(1) if root_block else css
+    root_img_m = _ROOT_BGIMG_RE.search(root_body)
+    canvas = bg_m.group(1).strip() if bg_m else "#111318"
+    text = fg_m.group(1).strip() if fg_m else "#e6e6e6"
+    accent = str(meta.get("accent", "")).strip() or "#4a90d9"
+    panel_m = _ALIAS_PANEL_RE.search(css) or _ALIAS_L1_RE.search(css)
+    panel = panel_m.group(1).strip() if panel_m else f"color-mix(in srgb, {canvas} 88%, white)"
+
+    lines = [
+        "/* == dsh-skin lingxi adaptation ==",
+        f"/* skin: {skin_id} | token takeover + region layout */",
+        ":root {",
+        f"  --ds-bg-canvas: {canvas};",
+        f"  --ds-bg-panel: {panel};",
+        f"  --ds-bg-elevated: color-mix(in srgb, {canvas} 82%, white);",
+        f"  --ds-bg-hover: color-mix(in srgb, {accent} 12%, transparent);",
+        f"  --ds-text-primary: {text};",
+        f"  --ds-text-secondary: color-mix(in srgb, {text} 78%, {canvas});",
+        f"  --ds-text-muted: color-mix(in srgb, {text} 55%, {canvas});",
+        f"  --ds-accent-primary: {accent};",
+        f"  --ds-accent-ai: {accent};",
+        f"  --ds-border-subtle: color-mix(in srgb, {text} 16%, transparent);",
+        f"  --ds-border-active: color-mix(in srgb, {accent} 70%, transparent);",
+        "}",
+        "/* 布局适配：header 收成图标条（导航文字隐藏，图标按钮保留原位） */",
+        '[data-testid="app-header"] { grid-template-columns: auto 1fr auto; padding-block: 2px; }',
+        '[data-testid="app-header"] h1, [data-testid="app-header"] [data-skin-hide],',
+        '[data-testid="app-header"] .text-sm, [data-testid="app-header"] .text-xs,',
+        '[data-testid="app-header"] .text-base { display: none; }',
+        "/* 侧栏：半透明面板（透出画布底色，图标保留原位） */",
+        '[data-region="sidebar"] { background: color-mix(in srgb, var(--ds-bg-panel) 86%, transparent); backdrop-filter: blur(8px); }',
+        "/* 工作区：实底优先可读（不糊背景图） */",
+        '[data-region="workspace"] { background: var(--ds-bg-panel); }',
+        "/* 画布底：皮肤 :root 原渐变挂 body（供侧栏半透明透出） */",
+        f"body {{ background-color: {canvas}; }}",
+    ]
+    if root_img_m:
+        lines.append(f"body {{ background-image: {root_img_m.group(1).strip()}; background-attachment: fixed; }}")
+    return "\n".join(lines) + "\n"
+
+
+_ROOT_BGIMG_RE = re.compile(r"^\s*background-image:\s*(.+);$", re.MULTILINE)

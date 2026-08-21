@@ -582,7 +582,7 @@ export function FiveSpaceLayout({
 
             {isMobile ? (
               <div className="flex min-h-0 flex-1 overflow-hidden">
-                <section className="flex flex-1 flex-col overflow-hidden">
+                <section className="flex flex-1 flex-col overflow-hidden" data-region="chat">
                   {chatContent}
                 </section>
               </div>
@@ -648,6 +648,7 @@ export function FiveSpaceLayout({
                     <div
                       className="flex h-full min-h-0 min-w-0 flex-col overflow-hidden"
                       data-testid="sidebar-panel"
+                      data-region="sidebar"
                     >
                       {sidebarContent}
                     </div>
@@ -666,7 +667,7 @@ export function FiveSpaceLayout({
                   min="25%"
                   resizable
                 >
-                  <div className="border-border h-full overflow-hidden border-r">
+                  <div className="border-border h-full overflow-hidden border-r" data-region="chat">
                     {chatContent}
                   </div>
                 </Splitter.Panel>
@@ -680,7 +681,7 @@ export function FiveSpaceLayout({
                     min="25%"
                     resizable
                   >
-                    <section className="h-full min-w-0 overflow-hidden">
+                    <section className="h-full min-w-0 overflow-hidden" data-region="workspace">
                       <WorkspaceHost
                         tabs={workspaceTabs}
                         onTabChange={setActiveTab}

@@ -282,7 +282,13 @@ _SKIN_SELECT_ROUTE = "/ext/dsh_adapter/skins/current"
 
 
 def _resolve_skin_route() -> tuple[str, bytes] | None:
-    """按配置解析皮肤 CSS（None = 未选/无效 → 空注释 CSS）。"""
+    """按配置解析皮肤 CSS（None = 未选/无效 → 空注释 CSS）。
+
+    注入组合（区域语义，2026-08-21 重写）：①皮肤原文 :root 块（--dsw-*
+    令牌与字体，先注入）→ ②灵汐适配层（--ds-* 令牌全套接管 + 布局：
+    header 收图标条/侧栏半透明/工作区实底，覆盖①冲突项）→ ③聊天区
+    立绘背景（区域化，不糊工作区）。皮肤原文其余部分（DOM 补丁层）不注入。
+    """
     skin = load_skin_selection()
     if skin is None:
         return None
@@ -294,16 +300,21 @@ def _resolve_skin_route() -> tuple[str, bytes] | None:
         )
         return None
     try:
-        text = css.read_text(encoding="utf-8")
+        text = css.read_text(encoding="utf-8", errors="replace")
     except OSError as e:
         logger.warning("dsh_adapter: skin css read failed (%s): %s", skin, e)
         return None
-    # 声明式背景媒体（v2 skin.json contributes.backgroundMedia）→ 等价 CSS
-    # 追加在令牌层之后（!important 立绘优先于 :root 渐变底）。
+    from translator import _ROOT_BLOCK_RE, translate_skin_adaptation
+
+    parts: list[str] = []
+    root_block = _ROOT_BLOCK_RE.search(text)
+    if root_block:
+        parts.append("/* skin :root tokens (verbatim) */\n:root {" + root_block.group(1) + "}")
+    parts.append(translate_skin_adaptation(skin))
     bg = resolve_skin_background(skin)
     if bg is not None:
-        text += "\n" + translate_background_css(bg, f"{_SKIN_ASSET_ROUTE_PREFIX}{skin}")
-    return skin, text.encode("utf-8")
+        parts.append(translate_background_css(bg, f"{_SKIN_ASSET_ROUTE_PREFIX}{skin}"))
+    return skin, ("\n\n".join(parts) + "\n").encode("utf-8")
 
 
 def _skin_config_path() -> str:

@@ -37,6 +37,7 @@ from translator import (  # noqa: E402
     resolve_skin_background,
     resolve_skin_css,
     to_lingxi_tool_entry,
+    translate_skin_adaptation,
     translate_background_css,
     translate_hooks_config,
     translate_package,
@@ -662,10 +663,6 @@ class TestSkinCenterResolution:
         assert resolve_skin_css("../ui-theme") is None
         assert resolve_skin_css("a/b") is None
 
-    def test_selection_reads_config(self):
-        # 仓库 config/dsh_adapter.yaml 现值 skin: miku（换肤后此断言随配置同步改）
-        assert load_skin_selection() == "miku"
-
 
 class TestSkinServeHandler:
     """server._http_handle_style 的皮肤路由（dispatcher 契约 body base64）。"""
@@ -721,14 +718,26 @@ class TestSkinBackgroundMedia:
     def test_resolve_unknown_skin(self):
         assert resolve_skin_background("no-such-skin") is None
 
-    def test_translate_background_css(self):
+    def test_translate_background_css_region_scoped(self):
         bg = resolve_skin_background("dragon-heir")
         assert bg is not None
         css = translate_background_css(bg, "/ext/dsh_adapter/styles/skin-assets/dragon-heir")
-        assert "background-image" in css and "!important" in css
+        # 区域化语义（2026-08-21）：立绘只挂聊天区，不糊 body/工作区
+        assert '[data-region="chat"]' in css
         assert "linear-gradient" in css  # scrim 在上层
         assert "url(" in css and "/ext/dsh_adapter/styles/skin-assets/dragon-heir/assets/" in css
         assert "prefers-color-scheme: light" in css  # 亮暗双态
+        assert "body" not in css  # 不再全屏糊图
+
+    def test_translate_skin_adaptation_tokens(self):
+        css = translate_skin_adaptation("miku")
+        # 令牌全套接管（内部组件吃皮肤色）
+        for tok in ("--ds-bg-canvas", "--ds-bg-panel", "--ds-text-primary", "--ds-accent-primary"):
+            assert tok in css
+        # 布局适配：header 图标条 + 侧栏半透明 + 工作区实底
+        assert '[data-testid="app-header"]' in css
+        assert '[data-region="sidebar"]' in css and "backdrop-filter" in css
+        assert '[data-region="workspace"]' in css
 
 
 class TestSkinAssetRoute:
@@ -753,13 +762,15 @@ class TestSkinAssetRoute:
         resp = self._serve("/ext/dsh_adapter/styles/skin-assets/miku/../../skin.json")
         assert resp["status"] == 404
 
-    def test_skin_css_includes_background(self):
-        # 当前配置 skin: miku（有 backgroundMedia）→ 注入 CSS 尾部带背景段
+    def test_skin_css_includes_background(self, monkeypatch: pytest.MonkeyPatch):
+        # 与真机状态隔离：固定 miku（有 backgroundMedia）验证注入组合三段
+        monkeypatch.setattr("server.load_skin_selection", lambda: "miku")
         resp = self._serve("/ext/dsh_adapter/styles/skin.css")
         assert resp["status"] == 200
         body = base64.b64decode(resp["body"]).decode("utf-8")
         assert "--dsw-" in body  # 令牌层仍在
-        assert "background-media" in body and "miku-art.webp" in body  # 背景段已追加
+        assert "lingxi adaptation" in body  # 适配层（令牌接管+布局）
+        assert "miku-art.webp" in body and '[data-region="chat"]' in body  # 立绘区域化
 
 
 class TestSkinListAndSelect:
