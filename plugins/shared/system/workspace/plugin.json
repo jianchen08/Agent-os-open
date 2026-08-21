@@ -85,5 +85,120 @@
   },
   "permissions": {},
   "priority": 50,
-  "requires_content": 5
+  "requires_content": 5,
+  "granted_capabilities": [
+    "pipeline-state"
+  ],
+  "http_endpoints": [
+    {
+      "route_id": "workspaces_open_file",
+      "method": "POST",
+      "path": "/ext/workspace_service/workspaces/open-file",
+      "auth": "user",
+      "handler_capability": "http.handle",
+      "timeout_ms": 5000,
+      "max_concurrency": 4,
+      "description": "在 IDE 中打开指定文件（body: file_path/line/column，经活跃连接器 open_file 能力——原 POST /ext/channel_api/workspaces/open-file 语义）"
+    },
+    {
+      "route_id": "workspaces_get",
+      "method": "GET",
+      "path": "/ext/workspace_service/workspaces/{container_task_id}",
+      "auth": "user",
+      "handler_capability": "http.handle",
+      "timeout_ms": 5000,
+      "max_concurrency": 8,
+      "description": "获取工作空间详情（不存在时自动创建——原 GET /ext/channel_api/workspaces/{id} 语义）"
+    },
+    {
+      "route_id": "workspaces_artifacts",
+      "method": "GET",
+      "path": "/ext/workspace_service/workspaces/{container_task_id}/artifacts",
+      "auth": "user",
+      "handler_capability": "http.handle",
+      "timeout_ms": 5000,
+      "max_concurrency": 8,
+      "description": "获取工作空间下所有制品（聚合容器任务下所有子任务的制品——原 GET /ext/channel_api/workspaces/{id}/artifacts 语义）"
+    },
+    {
+      "route_id": "workspaces_file_tree",
+      "method": "GET",
+      "path": "/ext/workspace_service/workspaces/{container_task_id}/file-tree",
+      "auth": "user",
+      "handler_capability": "http.handle",
+      "timeout_ms": 5000,
+      "max_concurrency": 8,
+      "description": "获取工作空间的文件目录树（原 GET /ext/channel_api/workspaces/{id}/file-tree 语义）"
+    },
+    {
+      "route_id": "workspaces_file_content_get",
+      "method": "GET",
+      "path": "/ext/workspace_service/workspaces/{container_task_id}/file-content",
+      "auth": "user",
+      "handler_capability": "http.handle",
+      "timeout_ms": 5000,
+      "max_concurrency": 8,
+      "description": "读取文件内容（query: path=，绝对路径或相对路径——原 GET /ext/channel_api/workspaces/{id}/file-content 语义）"
+    },
+    {
+      "route_id": "workspaces_file_content_put",
+      "method": "PUT",
+      "path": "/ext/workspace_service/workspaces/{container_task_id}/file-content",
+      "auth": "user",
+      "handler_capability": "http.handle",
+      "timeout_ms": 5000,
+      "max_concurrency": 4,
+      "description": "保存文件内容（query: path=相对路径，body: content——原 PUT /ext/channel_api/workspaces/{id}/file-content 语义）"
+    },
+    {
+      "route_id": "workspaces_create_entry",
+      "method": "POST",
+      "path": "/ext/workspace_service/workspaces/{container_task_id}/create-entry",
+      "auth": "user",
+      "handler_capability": "http.handle",
+      "timeout_ms": 5000,
+      "max_concurrency": 4,
+      "description": "创建文件或文件夹（body: path/type=file|directory——原 POST /ext/channel_api/workspaces/{id}/create-entry 语义）"
+    },
+    {
+      "route_id": "workspaces_delete_entry",
+      "method": "DELETE",
+      "path": "/ext/workspace_service/workspaces/{container_task_id}/entries",
+      "auth": "user",
+      "handler_capability": "http.handle",
+      "timeout_ms": 5000,
+      "max_concurrency": 4,
+      "description": "删除文件或文件夹（query: path=相对路径——原 DELETE /ext/channel_api/workspaces/{id}/entries 语义）"
+    },
+    {
+      "route_id": "workspaces_rename_entry",
+      "method": "POST",
+      "path": "/ext/workspace_service/workspaces/{container_task_id}/rename-entry",
+      "auth": "user",
+      "handler_capability": "http.handle",
+      "timeout_ms": 5000,
+      "max_concurrency": 4,
+      "description": "重命名文件或文件夹（body: old_path/new_name——原 POST /ext/channel_api/workspaces/{id}/rename-entry 语义）"
+    },
+    {
+      "route_id": "workspaces_move_entry",
+      "method": "POST",
+      "path": "/ext/workspace_service/workspaces/{container_task_id}/move-entry",
+      "auth": "user",
+      "handler_capability": "http.handle",
+      "timeout_ms": 5000,
+      "max_concurrency": 4,
+      "description": "移动文件或文件夹到指定目录（body: source_path/destination_dir——原 POST /ext/channel_api/workspaces/{id}/move-entry 语义）"
+    },
+    {
+      "route_id": "workspaces_open",
+      "method": "POST",
+      "path": "/ext/workspace_service/workspaces/{container_task_id}/open",
+      "auth": "user",
+      "handler_capability": "http.handle",
+      "timeout_ms": 5000,
+      "max_concurrency": 4,
+      "description": "在 IDE 中打开任务工作空间目录（无连接器时回退系统文件管理器——原 POST /ext/channel_api/workspaces/{id}/open 语义）"
+    }
+  ]
 }
