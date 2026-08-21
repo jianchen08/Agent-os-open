@@ -170,6 +170,14 @@ body.has-bg-image #root > div:first-child {
   background: transparent;
 }
 
+/* 背景图模式第三环（v4 让位式布局实测）：聊天区自己的 --chat-bg 实色
+   （.theme-chat-area 双通道的颜色位）同样盖住装饰层——立绘在并排式下
+   仅从边缘微漏。背景图模式聊天区颜色让位（scrim 可读性由装饰层 overlay
+   承担）*/
+body.has-bg-image .theme-chat-area {
+  background-color: transparent;
+}
+
 /* 主题区域纹理：侧边栏 / 聊天区（叠加在各自 --sidebar-bg / --chat-bg 之上） */
 .theme-sidebar-area {
   background-image: var(--sidebar-texture, none);

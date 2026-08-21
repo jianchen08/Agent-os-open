@@ -578,7 +578,8 @@ export function FiveSpaceLayout({
                  展开时聊天区让位（不遮挡），收起时聊天全宽；图标各归其边
                  （侧栏开关=左上角、工作区开关=右上角）；边界无边线。 */
               <section className="relative flex min-h-0 flex-1 overflow-hidden" data-region="chat">
-                {/* 左上角：侧栏开关（位置恒定） */}
+                {/* 图标钉在页面左/右上角（位置恒定，用户硬要求）；面板区顶部
+                    让出 40px 图标带——位置计算避开而非移动图标 */}
                 <button
                   type="button"
                   onClick={() => useUIStore.getState().setSidebarCollapsed(!sidebarCollapsed)}
@@ -594,7 +595,6 @@ export function FiveSpaceLayout({
                 >
                   <Menu className="h-4 w-4" />
                 </button>
-                {/* 右上角：工作区开关（位置恒定，各归其边） */}
                 <button
                   type="button"
                   onClick={() => setWorkspaceCollapsed(!workspaceCollapsed)}
@@ -611,42 +611,44 @@ export function FiveSpaceLayout({
                   <PanelRightIcon className="h-4 w-4" />
                 </button>
 
-                <div className="flex min-h-0 flex-1 overflow-hidden">
-                  {/* 侧栏（让位式，主题面板样式，无边线） */}
-                  {sidebarContent && !sidebarCollapsed && (
-                    <aside
-                      className="flex w-[248px] min-w-[200px] max-w-[320px] shrink-0 flex-col overflow-hidden"
-                      style={{ background: 'var(--ds-bg-panel, hsl(var(--card)))' }}
-                      data-testid="sidebar-panel"
-                      data-region="sidebar"
-                    >
-                      <div className="min-h-0 flex-1 overflow-hidden">{sidebarContent}</div>
-                    </aside>
-                  )}
+                <div className="flex min-h-0 flex-1 flex-col overflow-hidden pt-10">
+                  <div className="flex min-h-0 flex-1 overflow-hidden">
+                    {/* 侧栏（让位式，主题面板样式，无边线） */}
+                    {sidebarContent && !sidebarCollapsed && (
+                      <aside
+                        className="flex w-[248px] min-w-[200px] max-w-[320px] shrink-0 flex-col overflow-hidden"
+                        style={{ background: 'var(--ds-bg-panel, hsl(var(--card)))' }}
+                        data-testid="sidebar-panel"
+                        data-region="sidebar"
+                      >
+                        <div className="min-h-0 flex-1 overflow-hidden">{sidebarContent}</div>
+                      </aside>
+                    )}
 
-                  {/* 聊天（弹性让位/全宽） */}
-                  <div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">
-                    {chatContent}
-                  </div>
-
-                  {/* 工作区（让位式，无边线） */}
-                  {!workspaceCollapsed && (
-                    <div
-                      className="flex w-[42%] min-w-[360px] shrink-0 flex-col overflow-hidden"
-                      style={{ background: 'var(--ds-bg-elevated, hsl(var(--card)))' }}
-                      data-region="workspace"
-                    >
-                      <WorkspaceHost
-                        tabs={workspaceTabs}
-                        onTabChange={setActiveTab}
-                        onTabClose={handleCloseTab}
-                        renderTabContent={renderTabContent}
-                        onFullscreen={toggleWorkspaceFullscreen}
-                        isFullscreen={false}
-                        visitedTabIds={visitedTabIds}
-                      />
+                    {/* 聊天（弹性让位/全宽） */}
+                    <div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">
+                      {chatContent}
                     </div>
-                  )}
+
+                    {/* 工作区（让位式，无边线） */}
+                    {!workspaceCollapsed && (
+                      <div
+                        className="flex w-[42%] min-w-[360px] shrink-0 flex-col overflow-hidden"
+                        style={{ background: 'var(--ds-bg-elevated, hsl(var(--card)))' }}
+                        data-region="workspace"
+                      >
+                        <WorkspaceHost
+                          tabs={workspaceTabs}
+                          onTabChange={setActiveTab}
+                          onTabClose={handleCloseTab}
+                          renderTabContent={renderTabContent}
+                          onFullscreen={toggleWorkspaceFullscreen}
+                          isFullscreen={false}
+                          visitedTabIds={visitedTabIds}
+                        />
+                      </div>
+                    )}
+                  </div>
                 </div>
               </section>
             )}
