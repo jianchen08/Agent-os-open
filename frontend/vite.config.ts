@@ -163,6 +163,16 @@ export default defineConfig(({ mode }) => {
         '@pierre/diffs/react',
         'mermaid',
         'react-markdown',
+        // react-markdown 的传递依赖在 node_modules 重铺（99132238 frozen 全新安装）
+        // 后不再被其预构建产物内联，裸 /@fs 加载 CJS style-to-js 报
+        // "does not provide an export named 'default'" → React 挂载中断 → 整页
+        // 白屏（与 fast-uri 2026-08-15 同型）。显式预构建断链两端根治。
+        'hast-util-to-jsx-runtime',
+        'style-to-js',
+        'debug',
+        'micromark',
+        'unified',
+        'extend',
         'remark-gfm',
         'react-syntax-highlighter/dist/esm/styles/prism',
         '@ant-design/cssinjs',
@@ -433,6 +443,10 @@ export default defineConfig(({ mode }) => {
         'split-string',
         'string-convert',
         'style-to-js',
+        'debug',
+        'micromark',
+        'unified',
+        'extend',
         'supports-preserve-symlinks-flag',
         'swr',
         'tabbable',
