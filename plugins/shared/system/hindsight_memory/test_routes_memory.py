@@ -35,7 +35,8 @@ def _load_module() -> Any:
     mod_name = "hindsight_routes_memory_test"
     path = _PLUGIN_DIR / "routes_memory.py"
     spec = importlib.util.spec_from_file_location(mod_name, path)
-    assert spec is not None and spec.loader is not None, "Cannot load routes_memory.py"
+    assert spec is not None, "Cannot load routes_memory.py"
+    assert spec.loader is not None, "Cannot load routes_memory.py"
     module = importlib.util.module_from_spec(spec)
     sys.modules[mod_name] = module
     spec.loader.exec_module(module)
@@ -303,7 +304,6 @@ class TestManifestMemoryEndpoints:
     def test_manifest_declares_memory_endpoints(self) -> None:
         """10 个 memory 域端点全部声明（auth=user，前缀 hindsight_memory_service）。"""
         data = json.loads((_PLUGIN_DIR / "plugin.json").read_text(encoding="utf-8"))
-        endpoints = {e["path"]: e for e in data["http_endpoints"]}
         expected = [
             ("/ext/hindsight_memory_service/memory", "GET"),
             ("/ext/hindsight_memory_service/memory/search", "GET"),

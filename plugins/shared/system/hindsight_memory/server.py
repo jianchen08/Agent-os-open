@@ -671,7 +671,7 @@ def _load_env_file_keys() -> dict[str, str]:
     env_path = os.path.join(root, ".env")
     out: dict[str, str] = {}
     try:
-        with open(env_path, "r", encoding="utf-8") as f:
+        with open(env_path, encoding="utf-8") as f:
             for line in f:
                 line = line.strip()
                 if not line or line.startswith("#") or "=" not in line:
@@ -951,6 +951,46 @@ def _decode_body(raw_body: str) -> dict[str, Any]:
         raise ValueError(f"invalid JSON body: {e}") from e
 
 
+def _parse_multipart(content_type: str, body_bytes: bytes) -> dict[str, Any]:
+    """解析 multipart/form-data（内核透传的 raw_body base64 解码后的字节）。
+
+    返回 {字段名: 值}；文件字段值为 {filename, content_type, data(bytes)}，
+    普通字段为 str。用 email.parser 解析（标准库，无需外部依赖）——
+    与 channel_api 同款实现。
+    """
+    import email  # noqa: PLC0415
+    from email.policy import default as default_policy  # noqa: PLC0415
+
+    header = f"Content-Type: {content_type}\r\n\r\n".encode()
+    msg = email.message_from_bytes(header + body_bytes, policy=default_policy)
+    fields: dict[str, Any] = {}
+    if not msg.is_multipart():
+        return fields
+    parts = msg.get_payload()
+    if not isinstance(parts, list):  # pragma: no cover —— 防御 typeshed（multipart 时恒 list）
+        return fields
+    for part in parts:
+        if not isinstance(part, email.message.Message):  # pragma: no cover —— 同上防御
+            continue
+        name = part.get_param("name", header="content-disposition")
+        if not isinstance(name, str):
+            continue
+        filename = part.get_filename()
+        if filename is not None:
+            data = part.get_payload(decode=True) or b""
+            fields[name] = {
+                "filename": filename,
+                "content_type": part.get_content_type(),
+                "data": data,
+            }
+        else:
+            payload = part.get_payload(decode=True)
+            fields[name] = (
+                payload.decode("utf-8", errors="replace") if isinstance(payload, bytes) else ""
+            )
+    return fields
+
+
 # ── memory 域：IMemoryBackend 懒构建注入（channel_api 退役批次 1 随迁）────────
 
 _memory_backend: Any | None = None
@@ -1060,6 +1100,109 @@ async def _handle_memory_domain(path: str, method: str, raw_body: str, query: di
         return _ok(_json_response({"error": "internal server error", "detail": str(exc)}, 500))
 
 
+async def _handle_kb_domain(
+    path: str, method: str, raw_body: str, query: dict[str, str], headers: dict[str, str] | None
+) -> dict[str, Any]:
+    """knowledge-base 域分发：/ext/hindsight_memory_service/knowledge-base/**。
+
+    channel_api 退役批次 4 功能扩展：stub → 真实现（上传/分块/向量化/分类/
+    标签/统计/check/条目/检索）。分发前注入 hindsight client（_client）——
+    knowledge_base 模块直接复用本 sidecar 的客户端（同进程同事件循环）。
+    """
+    import base64 as _b64  # noqa: PLC0415
+
+    import knowledge_base as kb  # noqa: PLC0415
+
+    kb.set_client(_client)
+
+    prefix = "/ext/hindsight_memory_service/knowledge-base"
+    if not path.startswith(prefix):
+        return _ok(_json_response({"error": "not a knowledge-base path", "path": path}, 404))
+    sub = path[len(prefix):]  # "" / "/stats" / "/upload" / "/search" / "/{item_id}" ...
+
+    def _qint(key: str, default: int) -> int:
+        try:
+            return int(query[key]) if key in query else default
+        except (TypeError, ValueError):
+            return default
+
+    try:
+        # GET ""（列表，返回数组——KnowledgeBasePage 消费形态）
+        if sub in ("", "/") and method == "GET":
+            return _ok(_json_response(kb.list_items()))
+        # GET /stats
+        if sub == "/stats" and method == "GET":
+            return _ok(_json_response(kb.get_stats()))
+        # GET /check
+        if sub == "/check" and method == "GET":
+            return _ok(_json_response(await kb.check_available()))
+        # GET /search（query: query/top_k/category/tag）
+        if sub == "/search" and method == "GET":
+            return _ok(_json_response(await kb.search(
+                query=query.get("query", ""),
+                top_k=_qint("top_k", 10),
+                category=query.get("category"),
+                tag=query.get("tag"),
+            )))
+        # POST /upload（multipart/form-data，file 字段）
+        if sub == "/upload" and method == "POST":
+            try:
+                body_bytes = _b64.b64decode(raw_body) if raw_body else b""
+            except Exception as exc:  # noqa: BLE001
+                return _ok(_json_response({"error": f"invalid upload body: {exc}"}, 400))
+            content_type = ""
+            for k, v in (headers or {}).items():
+                if isinstance(k, str) and k.lower() == "content-type" and v:
+                    content_type = str(v)
+                    break
+            if "multipart/form-data" not in content_type:
+                return _ok(_json_response(
+                    {"error": "upload requires multipart/form-data", "content_type": content_type}, 400,
+                ))
+            try:
+                fields = _parse_multipart(content_type, body_bytes)
+            except Exception as exc:  # noqa: BLE001
+                return _ok(_json_response({"error": f"multipart parse failed: {exc}"}, 400))
+            file_field = fields.get("file")
+            if not isinstance(file_field, dict):
+                return _ok(_json_response({"error": "missing 'file' field in multipart"}, 400))
+            filename = file_field.get("filename") or "upload"
+            mime_type = file_field.get("content_type") or "application/octet-stream"
+            data = file_field.get("data") or b""
+            return _ok(_json_response(await kb.upload_document(
+                filename=str(filename), content=data, mime_type=str(mime_type),
+            )))
+        # GET/POST /categories（列表 / 创建）
+        if sub == "/categories" and method == "GET":
+            return _ok(_json_response(kb.list_categories()))
+        if sub == "/categories" and method == "POST":
+            body = _decode_body(raw_body) or {}
+            return _ok(_json_response(kb.create_category(str(body.get("name", "")))))
+        # DELETE /categories/{name}
+        if sub.startswith("/categories/") and method == "DELETE":
+            name = sub[len("/categories/"):]
+            return _ok(_json_response(kb.delete_category(name)))
+        # GET /tags
+        if sub == "/tags" and method == "GET":
+            return _ok(_json_response(kb.list_tags()))
+        # GET /{item_id}（动态路径，放固定路径之后）
+        if sub.startswith("/") and method == "GET" and "/" not in sub[1:]:
+            item_id = sub[1:]
+            return _ok(_json_response(kb.get_item(item_id)))
+        # DELETE /{item_id}
+        if sub.startswith("/") and method == "DELETE" and "/" not in sub[1:]:
+            item_id = sub[1:]
+            return _ok(_json_response(await kb.delete_item(item_id)))
+
+        logger.warning("knowledge-base http.handle: no route for sub=%s method=%s", sub, method)
+        return _ok(_json_response({"error": "not found", "path": path}, 404))
+    except Exception as exc:  # noqa: BLE001
+        if hasattr(exc, "status_code"):
+            return _kberr_response(exc)
+        logger.error("knowledge-base http.handle 未预期错误: %s", exc, exc_info=True)
+        return _ok(_json_response({"error": "internal server error", "detail": str(exc)}, 500))
+
+
 @plugin.tool(
     name="http.handle",
     schema={
@@ -1108,6 +1251,10 @@ async def http_handle(
         # memory 域（channel_api 退役批次 1 自持迁移）
         if path.startswith("/ext/hindsight_memory_service/memory"):
             return await _handle_memory_domain(path, method, raw_body, q)
+
+        # knowledge-base 域（channel_api 退役批次 4 功能扩展）
+        if path.startswith("/ext/hindsight_memory_service/knowledge-base"):
+            return await _handle_kb_domain(path, method, raw_body, q, headers)
 
         return _ok(_json_response({"error": "not found", "path": path}, 404))
     except Exception as exc:

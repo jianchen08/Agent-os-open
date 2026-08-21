@@ -347,6 +347,116 @@
       "timeout_ms": 5000,
       "max_concurrency": 4,
       "description": "memory 域：删除记忆"
+    },
+    {
+      "route_id": "kb_list",
+      "method": "GET",
+      "path": "/ext/hindsight_memory_service/knowledge-base",
+      "auth": "user",
+      "handler_capability": "http.handle",
+      "timeout_ms": 5000,
+      "max_concurrency": 8,
+      "description": "knowledge-base 域：知识库列表"
+    },
+    {
+      "route_id": "kb_upload",
+      "method": "POST",
+      "path": "/ext/hindsight_memory_service/knowledge-base/upload",
+      "auth": "user",
+      "handler_capability": "http.handle",
+      "timeout_ms": 10000,
+      "max_concurrency": 2,
+      "description": "knowledge-base 域：上传文件（multipart file 字段；切块+向量化入库）"
+    },
+    {
+      "route_id": "kb_stats",
+      "method": "GET",
+      "path": "/ext/hindsight_memory_service/knowledge-base/stats",
+      "auth": "user",
+      "handler_capability": "http.handle",
+      "timeout_ms": 5000,
+      "max_concurrency": 8,
+      "description": "knowledge-base 域：知识库统计"
+    },
+    {
+      "route_id": "kb_check",
+      "method": "GET",
+      "path": "/ext/hindsight_memory_service/knowledge-base/check",
+      "auth": "user",
+      "handler_capability": "http.handle",
+      "timeout_ms": 5000,
+      "max_concurrency": 8,
+      "description": "knowledge-base 域：检查知识库可用性"
+    },
+    {
+      "route_id": "kb_categories_list",
+      "method": "GET",
+      "path": "/ext/hindsight_memory_service/knowledge-base/categories",
+      "auth": "user",
+      "handler_capability": "http.handle",
+      "timeout_ms": 5000,
+      "max_concurrency": 8,
+      "description": "knowledge-base 域：分类列表"
+    },
+    {
+      "route_id": "kb_category_create",
+      "method": "POST",
+      "path": "/ext/hindsight_memory_service/knowledge-base/categories",
+      "auth": "user",
+      "handler_capability": "http.handle",
+      "timeout_ms": 5000,
+      "max_concurrency": 4,
+      "description": "knowledge-base 域：创建分类"
+    },
+    {
+      "route_id": "kb_category_delete",
+      "method": "DELETE",
+      "path": "/ext/hindsight_memory_service/knowledge-base/categories/{name}",
+      "auth": "user",
+      "handler_capability": "http.handle",
+      "timeout_ms": 5000,
+      "max_concurrency": 4,
+      "description": "knowledge-base 域：删除分类"
+    },
+    {
+      "route_id": "kb_tags",
+      "method": "GET",
+      "path": "/ext/hindsight_memory_service/knowledge-base/tags",
+      "auth": "user",
+      "handler_capability": "http.handle",
+      "timeout_ms": 5000,
+      "max_concurrency": 8,
+      "description": "knowledge-base 域：标签列表"
+    },
+    {
+      "route_id": "kb_search",
+      "method": "GET",
+      "path": "/ext/hindsight_memory_service/knowledge-base/search",
+      "auth": "user",
+      "handler_capability": "http.handle",
+      "timeout_ms": 5000,
+      "max_concurrency": 8,
+      "description": "knowledge-base 域：知识库检索（query: query/top_k/category/tag，语义向量召回）"
+    },
+    {
+      "route_id": "kb_item_get",
+      "method": "GET",
+      "path": "/ext/hindsight_memory_service/knowledge-base/{item_id}",
+      "auth": "user",
+      "handler_capability": "http.handle",
+      "timeout_ms": 5000,
+      "max_concurrency": 8,
+      "description": "knowledge-base 域：知识库详情"
+    },
+    {
+      "route_id": "kb_item_delete",
+      "method": "DELETE",
+      "path": "/ext/hindsight_memory_service/knowledge-base/{item_id}",
+      "auth": "user",
+      "handler_capability": "http.handle",
+      "timeout_ms": 5000,
+      "max_concurrency": 4,
+      "description": "knowledge-base 域：删除知识库条目"
     }
   ],
   "granted_capabilities": [

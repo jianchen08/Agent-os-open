@@ -313,8 +313,9 @@ class TestBankIdDefault:
 # ═══════════════════════════════════════════════════════════
 
 def _http_call(path, method="GET", query=None):
-    from server import http_handle
     import asyncio
+
+    from server import http_handle
     return asyncio.run(http_handle(path=path, method=method, plugin_id="hindsight_memory", query=query or {}))
 
 
@@ -676,9 +677,10 @@ def test_http_memory_episodes_dispatch():
     注入路径经 server 模块级_ensure_memory_backend（分发时懒构建）——
     测试通过 server._memory_backend + _memory_backend_attempted 短路注入。
     """
+    from unittest.mock import AsyncMock, MagicMock
+
     import server as srv
     from routes_memory import set_memory_backend
-    from unittest.mock import AsyncMock, MagicMock
 
     backend = MagicMock()
     backend.search = AsyncMock(return_value=[
@@ -702,9 +704,10 @@ def test_http_memory_episodes_dispatch():
 
 
 def test_http_memory_search_get_dispatch():
+    from unittest.mock import AsyncMock, MagicMock
+
     import server as srv
     from routes_memory import set_memory_backend
-    from unittest.mock import AsyncMock, MagicMock
 
     backend = MagicMock()
     backend.search = AsyncMock(return_value=[
@@ -727,9 +730,10 @@ def test_http_memory_search_get_dispatch():
 
 def test_http_memory_delete_missing_404():
     """memory 域 DELETE 未命中 → HTTP 404（body {"detail": ...}，与旧版一致）。"""
+    from unittest.mock import AsyncMock, MagicMock
+
     import server as srv
     from routes_memory import set_memory_backend
-    from unittest.mock import AsyncMock, MagicMock
 
     backend = MagicMock()
     backend.search = AsyncMock(return_value=[])
@@ -748,3 +752,77 @@ def test_http_memory_delete_missing_404():
         set_memory_backend(None)
 
 
+def test_http_kb_list_and_stats_dispatch():
+    """knowledge-base 域：列表/统计走本地元数据仓（不依赖 client）。"""
+    import knowledge_base as kb
+
+    kb.set_data_dir(__import__("tempfile").mkdtemp(prefix="kb_test_"))
+
+    out = _http_call("/ext/hindsight_memory_service/knowledge-base")
+    assert _http_ok(out) == []
+
+    out = _http_call("/ext/hindsight_memory_service/knowledge-base/stats")
+    stats = _http_ok(out)
+    assert stats["total"] == 0
+    assert "categories_count" in stats
+
+
+def test_http_kb_check_degrades_without_client():
+    """knowledge-base check：client 未初始化如实报告 unavailable（HTTP 200）。"""
+    import server as srv
+
+    srv._client = None  # 显式复位（防其它测试泄漏注入的 client）
+    out = _http_call("/ext/hindsight_memory_service/knowledge-base/check")
+    payload = _http_ok(out)
+    assert payload["available"] is False
+    assert payload["bank"] == "kb"
+
+
+def test_http_kb_upload_dispatch_multipart():
+    """knowledge-base 上传：multipart 解析 → mock client 入库 → 注册条目。
+
+    分发时 kb.set_client(server._client)——注入路径经 server 模块级 _client。
+    """
+    from unittest.mock import AsyncMock, MagicMock
+
+    import knowledge_base as kb
+    import server as srv
+
+    kb.set_data_dir(__import__("tempfile").mkdtemp(prefix="kb_test_"))
+    client = MagicMock()
+    client.aretain = AsyncMock(side_effect=lambda **kw: MagicMock(
+        operation_id=f"c{kw['metadata']['kb_chunk_index']}", accepted=True))
+    client.acreate_bank = AsyncMock(return_value=None)
+    srv._client = client
+    try:
+        import base64 as b64
+        boundary = "----kbTestBoundary"
+        body = (
+            f"--{boundary}\r\n"
+            f'Content-Disposition: form-data; name="file"; filename="doc.md"\r\n'
+            f"Content-Type: text/markdown\r\n\r\n"
+            f"{'hello 知识库 ' * 500}\r\n"
+            f"--{boundary}--\r\n"
+        ).encode()
+        # 手工构造完整 http_handle 调用（含 headers）
+        import asyncio
+
+        from server import http_handle
+
+        result = asyncio.run(http_handle(
+            path="/ext/hindsight_memory_service/knowledge-base/upload",
+            method="POST",
+            plugin_id="hindsight_memory_service",
+            raw_body=b64.b64encode(body).decode("ascii"),
+            headers={"Content-Type": f"multipart/form-data; boundary={boundary}"},
+            query={},
+        ))
+        assert result["success"] is True, result
+        assert result["data"]["status"] == 200, result
+        payload = json.loads(b64.b64decode(result["data"]["body"]).decode("utf-8"))
+        assert payload["message"] == "文件上传成功"
+        assert payload["chunks_imported"] >= 1
+        assert client.aretain.call_count == payload["chunks_imported"]
+    finally:
+        srv._client = None
+        kb.set_client(None)
