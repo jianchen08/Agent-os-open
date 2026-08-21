@@ -95,11 +95,15 @@ describe('FiveSpaceLayout — 响应式两档（768px 分界，平板=触屏桌�
     vi.restoreAllMocks()
   })
 
-  it('桌面（≥768px）：顶栏 + 侧栏 + 对话 + 工作区，无底栏', () => {
+  it('桌面（≥768px）：侧栏 + 对话 + 工作区，无顶栏无底栏（布局简化 2026-08-21）', () => {
     setViewportWidth(1280)
     renderLayout()
 
-    expect(screen.getByTestId('app-header')).toBeInTheDocument()
+    // 顶栏永久移除（用户裁决：全界面只留侧栏|聊天|工作区两条分割）
+    expect(screen.queryByTestId('app-header')).not.toBeInTheDocument()
+    // 原顶栏图标迁至侧栏底部工具行
+    expect(screen.getByTestId('sidebar-collapse-btn')).toBeInTheDocument()
+    expect(screen.getByTestId('sidebar-workspace-btn')).toBeInTheDocument()
     expect(screen.getByTestId('chat-content')).toBeInTheDocument()
     expect(screen.getByTestId('sidebar-content')).toBeInTheDocument()
     // 桌面形态：Sidebar 由调用方传入并以 Splitter 面板呈现
@@ -133,7 +137,7 @@ describe('FiveSpaceLayout — 响应式两档（768px 分界，平板=触屏桌�
     expect(screen.queryByTestId('mobile-sidebar-drawer')).not.toBeInTheDocument()
 
     // ☰ 打开抽屉 → 侧栏内容出现在抽屉里
-    fireEvent.click(screen.getByTestId('titlebar-toggle-sidebar'))
+    fireEvent.click(screen.getByTestId('sidebar-expand-float'))
     expect(screen.getByTestId('mobile-sidebar-drawer')).toBeInTheDocument()
     expect(screen.getByTestId('sidebar-content')).toBeInTheDocument()
 
@@ -146,7 +150,8 @@ describe('FiveSpaceLayout — 响应式两档（768px 分界，平板=触屏桌�
     setViewportWidth(375)
     renderLayout()
 
-    fireEvent.click(screen.getByTestId('titlebar-workspace'))
+    fireEvent.click(screen.getByTestId('sidebar-expand-float'))
+    fireEvent.click(screen.getByTestId('mobile-workspace-btn'))
     expect(screen.getByTestId('mobile-workspace-overlay')).toBeInTheDocument()
 
     // 返回按钮 → 回到对话（覆盖层关闭）
@@ -158,7 +163,8 @@ describe('FiveSpaceLayout — 响应式两档（768px 分界，平板=触屏桌�
     setViewportWidth(375)
     renderLayout()
 
-    fireEvent.click(screen.getByTestId('titlebar-workspace'))
+    fireEvent.click(screen.getByTestId('sidebar-expand-float'))
+    fireEvent.click(screen.getByTestId('mobile-workspace-btn'))
     expect(screen.getByTestId('mobile-workspace-overlay')).toBeInTheDocument()
 
     // Esc 退出全屏/工作区视图（任务 4 验收：桌面全屏 Esc 退出，移动工作区同样支持）
@@ -185,7 +191,7 @@ describe('FiveSpaceLayout — 响应式两档（768px 分界，平板=触屏桌�
     })
     // 回桌面：移动端进入时折叠的侧栏保持折叠（内容可达），☰ 可展开回三区
     expect(screen.queryByTestId('mobile-sidebar-drawer')).not.toBeInTheDocument()
-    fireEvent.click(screen.getByTestId('titlebar-toggle-sidebar'))
+    fireEvent.click(screen.getByTestId('sidebar-expand-float'))
     expect(screen.getByTestId('sidebar-panel')).toBeInTheDocument()
   })
 

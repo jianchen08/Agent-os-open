@@ -3,7 +3,7 @@
 import Splitter from 'antd/es/splitter'
 import React, { useCallback, useMemo, useState, useEffect, useRef } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { Minimize2, FolderOpen } from '@/assets/icons'
+import { FolderOpen, Menu, Minimize2, PanelRightIcon } from '@/assets/icons'
 import { HtmlPreviewWidget } from '@/components/schema/widgets/HtmlPreviewWidget'
 import { getEditorForFile } from '@/config/fileEditors'
 // 按需引入 antd Splitter 子模块，避免加载 antd 全量入口（26+ 组件 → 全部 icons →
@@ -19,7 +19,6 @@ import { useSessionStore } from '@/stores/sessionStore'
 import { useThemeStore } from '@/stores/themeStore'
 import { useUIStore } from '@/stores/uiStore'
 import { AlertBanner, useLayoutAlerts, type AlertBannerItem } from './AlertBanner'
-import { AppHeader } from './AppHeader'
 import { FloatingWindowManager, renderFloatingWindowContent } from './FloatingWindowManager'
 import { FullscreenOverlay } from './FullscreenOverlay'
 import { WorkspaceHost } from './WorkspaceHost'
@@ -93,7 +92,6 @@ export function FiveSpaceLayout({
   const fullscreenActive = useLayoutModeStore((s) => s.fullscreenActive)
   const fullscreenTitle = useLayoutModeStore((s) => s.fullscreenTitle)
   const fullscreenContent = useLayoutModeStore((s) => s.fullscreenContent)
-  const pendingInteractions = useLayoutModeStore((s) => s.pendingInteractions)
   const connectionStatus = useLayoutModeStore((s) => s.connectionStatus)
   const workspaceDataVersion = useLayoutModeStore((s) => s.workspaceDataVersion)
   const updateFloatingWindow = useLayoutModeStore((s) => s.updateFloatingWindow)
@@ -198,11 +196,6 @@ export function FiveSpaceLayout({
 
   const toggleWorkspaceFullscreen = useCallback(() => setWorkspaceFullscreen((prev) => !prev), [])
 
-  /** 打开移动端工作区全屏视图（顶栏 ⋯ → 工作区） */
-  const handleOpenWorkspaceView = useCallback(() => {
-    setWorkspaceCollapsed(false)
-    setMobileWorkspaceOpen(true)
-  }, [setWorkspaceCollapsed])
 
   /** 异常提示条点击：连接 → 打开监控面板；预算 → 成本看板；审批 → 审批弹窗全局可见，无需跳转 */
   const handleAlertAction = useCallback(
@@ -512,19 +505,7 @@ export function FiveSpaceLayout({
         </div>
       ) : workspaceMaximized ? (
         <>
-          {/* 最大化模式：保留顶栏（工作区 100% 占满） */}
-          <AppHeader
-            isMobile={isMobile}
-            onOpenWorkspaceView={handleOpenWorkspaceView}
-            extraRight={
-              pendingInteractions.length > 0 ? (
-                <div className="flex items-center gap-1 rounded-md bg-status-running/10 px-2 py-0.5 text-xs text-status-running">
-                  <span className="font-bold">{pendingInteractions.length}</span>
-                  <span>pending</span>
-                </div>
-              ) : undefined
-            }
-          />
+          {/* 最大化模式：工作区 100% 占满（顶栏已移除，2026-08-21 布局简化） */}
           <AlertBanner alerts={layoutAlerts} onAction={handleAlertAction} />
           <div className="min-h-0 flex-1 overflow-hidden">
             <WorkspaceHost
@@ -541,24 +522,24 @@ export function FiveSpaceLayout({
       ) : (
         <>
           {/* ---- Top Navigation Bar (shared AppHeader) ---- */}
-          <AppHeader
-            isMobile={isMobile}
-            onOpenWorkspaceView={handleOpenWorkspaceView}
-            extraRight={
-              pendingInteractions.length > 0 ? (
-                <div className="flex items-center gap-1 rounded-md bg-status-running/10 px-2 py-0.5 text-xs text-status-running">
-                  <span className="font-bold">{pendingInteractions.length}</span>
-                  <span>pending</span>
-                </div>
-              ) : undefined
-            }
-          />
 
           {/* ---- 异常浮现提示条（无常驻底栏；连接断开/审批待处理时出现） ---- */}
           <AlertBanner alerts={layoutAlerts} onAction={handleAlertAction} />
 
           {/* ---- Main Content Area ---- */}
           <div className="relative flex min-h-0 flex-1 overflow-hidden">
+            {(isMobile || sidebarCollapsed) && (
+              <button
+                type="button"
+                onClick={() => useUIStore.getState().setSidebarCollapsed(false)}
+                className="text-muted-foreground hover:bg-accent hover:text-foreground absolute left-1 top-2 z-10 flex h-7 w-7 items-center justify-center rounded-md transition-colors"
+                title="展开侧边栏"
+                aria-label="展开侧边栏"
+                data-testid="sidebar-expand-float"
+              >
+                <Menu className="h-4 w-4" />
+              </button>
+            )}
             {/* 移动端侧边栏：抽屉，隐藏时完全不占位 */}
             {sidebarContent && isMobile && !sidebarCollapsed && (
               <div
@@ -572,10 +553,22 @@ export function FiveSpaceLayout({
                   data-testid="mobile-sidebar-backdrop"
                 />
                 <aside
-                  className="absolute bottom-0 left-0 top-0 z-50 flex w-[78%] max-w-[320px] flex-col border-r shadow-xl safe-area-pb"
+                  className="absolute bottom-0 left-0 top-0 z-50 flex w-[78%] max-w-[320px] flex-col shadow-xl safe-area-pb"
                   style={{ background: 'var(--ds-bg-panel, hsl(var(--card)))' }}
                 >
-                  {sidebarContent}
+                  <div className="min-h-0 flex-1 overflow-hidden">{sidebarContent}</div>
+                  <div className="flex items-center gap-1 px-2 py-1.5">
+                    <button
+                      type="button"
+                      onClick={() => setMobileWorkspaceOpen(true)}
+                      className="text-muted-foreground hover:bg-accent hover:text-foreground flex h-7 w-7 items-center justify-center rounded-md transition-colors"
+                      title="工作区"
+                      aria-label="工作区"
+                      data-testid="mobile-workspace-btn"
+                    >
+                      <PanelRightIcon className="h-4 w-4" />
+                    </button>
+                  </div>
                 </aside>
               </div>
             )}
@@ -650,7 +643,29 @@ export function FiveSpaceLayout({
                       data-testid="sidebar-panel"
                       data-region="sidebar"
                     >
-                      {sidebarContent}
+                      <div className="min-h-0 flex-1 overflow-hidden">{sidebarContent}</div>
+                      <div className="flex items-center gap-1 border-t-0 px-2 py-1.5">
+                        <button
+                          type="button"
+                          onClick={() => useUIStore.getState().setSidebarCollapsed(true)}
+                          className="text-muted-foreground hover:bg-accent hover:text-foreground flex h-7 w-7 items-center justify-center rounded-md transition-colors"
+                          title="收起侧边栏"
+                          aria-label="收起侧边栏"
+                          data-testid="sidebar-collapse-btn"
+                        >
+                          <Menu className="h-4 w-4" />
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => setWorkspaceCollapsed(!workspaceCollapsed)}
+                          className="text-muted-foreground hover:bg-accent hover:text-foreground flex h-7 w-7 items-center justify-center rounded-md transition-colors"
+                          title={workspaceCollapsed ? '显示工作区' : '隐藏工作区'}
+                          aria-label="工作区"
+                          data-testid="sidebar-workspace-btn"
+                        >
+                          <PanelRightIcon className="h-4 w-4" />
+                        </button>
+                      </div>
                     </div>
                   </Splitter.Panel>
                 )}
@@ -667,7 +682,7 @@ export function FiveSpaceLayout({
                   min="25%"
                   resizable
                 >
-                  <div className="border-border h-full overflow-hidden border-r" data-region="chat">
+                  <div className="h-full overflow-hidden" data-region="chat">
                     {chatContent}
                   </div>
                 </Splitter.Panel>
