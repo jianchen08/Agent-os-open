@@ -11,6 +11,7 @@ import { useCallback, useEffect, useState } from 'react'
 import { App as AntdApp } from 'antd'
 
 import { apiClient } from '@/services/api/client'
+import { useThemeStore } from '@/stores/themeStore'
 
 export interface DshSkin {
   id: string
@@ -58,6 +59,24 @@ export function useDshSkins() {
       try {
         await apiClient.put('/ext/dsh_adapter/skins/current', { skin: skinId })
         setCurrent(skinId)
+        // 基准回退规则（用户裁决 2026-08-21）：皮肤 = 整体替换，基准是内置
+        // 暗/亮主题（按皮肤 base）而非叠加在当前灵汐主题上——皮肤未覆盖处
+        // 回落基准暗/亮。none 时恢复皮肤激活前的用户主题。
+        const themeStore = useThemeStore.getState()
+        if (skinId === 'none') {
+          const prev = localStorage.getItem('dsh-skin-prev-theme')
+          if (prev && prev !== themeStore.currentThemeId) {
+            void themeStore.setTheme(prev)
+          }
+          localStorage.removeItem('dsh-skin-prev-theme')
+        } else {
+          const skin = (list?.skins ?? []).find((s) => s.id === skinId)
+          const baseTheme = skin?.base === 'light' ? 'light' : 'dark'
+          if (themeStore.currentThemeId !== baseTheme) {
+            localStorage.setItem('dsh-skin-prev-theme', themeStore.currentThemeId)
+          }
+          void themeStore.setTheme(baseTheme)
+        }
         void message.success(
           skinId === 'none'
             ? '已关闭 DSH 皮肤，刷新页面后生效'
@@ -69,7 +88,7 @@ export function useDshSkins() {
         setSwitching(null)
       }
     },
-    [message],
+    [message, list],
   )
 
   return { list, current: current ?? 'none', skins: list?.skins ?? [], count: list?.count ?? 0, switching, selectSkin }

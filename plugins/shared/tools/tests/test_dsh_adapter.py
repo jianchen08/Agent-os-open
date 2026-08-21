@@ -14,6 +14,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import json
+import re
 import os
 import sys
 from pathlib import Path
@@ -449,7 +450,8 @@ class TestInstalledDshPlugins:
         assert "llm_tools" not in manifest
         # 正式贡献面：renderers + 适配器元信息 + client_styles（DSH 视觉 CSS 通道）
         assert set(manifest["contributes"].keys()) == {"renderers", "dsh_adapter", "client_styles"}
-        assert manifest["contributes"]["client_styles"][0]["id"] == "dsh-bg-image"
+        # dsh-bg 演示残留已撤（2026-08-21 与皮肤 body 打架）；皮肤 CSS 通道唯一
+        assert [c["id"] for c in manifest["contributes"]["client_styles"]] == ["dsh-skin"]
         # 配置入口：DSH 插件装载管理（config/dsh_adapter.yaml）
         assert manifest["config_files"] == [
             {"id": "dsh_plugins", "path": "config/dsh_adapter.yaml", "label": "DSH 插件配置"}
@@ -734,12 +736,15 @@ class TestSkinBackgroundMedia:
 
     def test_translate_skin_adaptation_tokens(self):
         css = translate_skin_adaptation("miku")
-        # 令牌全套接管（内部组件吃皮肤色）
+        # 令牌全套接管 + !important（对抗 themeStore 内联 setProperty）
         for tok in ("--ds-bg-canvas", "--ds-bg-panel", "--ds-text-primary", "--ds-accent-primary"):
-            assert tok in css
-        # 布局适配：header 图标条 + 侧栏半透明 + 工作区实底
-        assert '[data-testid="app-header"]' in css
-        assert '[data-region="sidebar"]' in css and "backdrop-filter" in css
+            assert tok in css and css.count("!important") >= 10
+        # shadcn HSL 桥（tailwind 原子类消费层）
+        assert "--background" in css and "--primary" in css
+        assert re.search(r"--background:\s*\d+ \d+% \d+%", css)  # H S% L% 无 hsl() 包裹
+        # 布局适配：header 紧凑（保原生 左图标|标题|右图标 结构）+ 侧栏/工作区实底
+        assert '[data-testid="app-header"]' in css and "display: none" not in css
+        assert '[data-region="sidebar"]' in css
         assert '[data-region="workspace"]' in css
 
 

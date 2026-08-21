@@ -266,10 +266,8 @@ from translator import (  # noqa: E402
 )
 
 _STYLES_DIR = Path(__file__).parent / "styles"
-_STYLE_ROUTES: dict[str, tuple[str, str]] = {
-    "/ext/dsh_adapter/styles/dsh-bg.css": ("text/css", "dsh-bg.css"),
-    "/ext/dsh_adapter/styles/dsh-bg.png": ("image/png", "dsh-bg.png"),
-}
+# dsh-bg 演示残留已撤（与皮肤通道 body 背景打架，2026-08-21）；文件保留于 styles/
+_STYLE_ROUTES: dict[str, tuple[str, str]] = {}
 # 皮肤令牌层注入路由：实际文件由 config/dsh_adapter.yaml 的 skin 字段动态
 # 决定（skin-center 的 skin.css）；未选择时返回空 CSS（200，注入空 style
 # 无副作用，避免前端拉取 404 噪音）。DOM 补丁层（patches.css/hooks.mjs）

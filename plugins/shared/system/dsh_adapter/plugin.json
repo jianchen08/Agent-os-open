@@ -216,12 +216,6 @@
     },
     "client_styles": [
       {
-        "id": "dsh-bg-image",
-        "path": "styles/dsh-bg.css",
-        "scope": "global",
-        "description": "DSH 视觉插件 dsh-background 背景图语义（client_styles 通道）"
-      },
-      {
         "id": "dsh-skin",
         "path": "styles/skin.css",
         "scope": "global",
@@ -230,26 +224,6 @@
     ]
   },
   "http_endpoints": [
-    {
-      "route_id": "dsh_style_css",
-      "method": "GET",
-      "path": "/ext/dsh_adapter/styles/dsh-bg.css",
-      "auth": "user",
-      "handler_capability": "http.handle",
-      "timeout_ms": 5000,
-      "max_concurrency": 8,
-      "description": "Serve DSH adapter client_styles CSS (dsh-background 背景图语义)"
-    },
-    {
-      "route_id": "dsh_bg_image",
-      "method": "GET",
-      "path": "/ext/dsh_adapter/styles/dsh-bg.png",
-      "auth": "user",
-      "handler_capability": "http.handle",
-      "timeout_ms": 5000,
-      "max_concurrency": 8,
-      "description": "Serve DSH adapter client_styles 背景图"
-    },
     {
       "route_id": "dsh_skin_css",
       "method": "GET",

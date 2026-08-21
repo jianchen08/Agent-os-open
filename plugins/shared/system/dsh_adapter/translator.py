@@ -667,8 +667,47 @@ _FG_RE = re.compile(r"(?<![-\w])color:\s*(#[0-9a-fA-F]{3,8}|rgba?\([^)]*\))\s*;"
 _ROOT_BGIMG_RE = re.compile(r"background-image:\s*(.+);")
 
 
+def _hex_to_hsl(hexc: str) -> str:
+    """'#RRGGBB' → 'H S% L%'（shadcn 变量格式，无 hsl() 包裹）。非 hex 原样返回。"""
+    m3 = re.fullmatch(r"#([0-9a-fA-F]{3})", hexc.strip())
+    m6 = re.fullmatch(r"#([0-9a-fA-F]{6})", hexc.strip())
+    if not (m3 or m6):
+        return hexc.strip()
+    if m3:
+        h = "".join(c * 2 for c in m3.group(1))
+    else:
+        h = m6.group(1)
+    r, g, b = (int(h[i : i + 2], 16) / 255 for i in (0, 2, 4))
+    mx, mn = max(r, g, b), min(r, g, b)
+    l = (mx + mn) / 2
+    if mx == mn:
+        hue = sat = 0.0
+    else:
+        d = mx - mn
+        sat = d / (2 - mx - mn) if l > 0.5 else d / (mx + mn)
+        if mx == r:
+            hue = ((g - b) / d + (6 if g < b else 0)) / 6
+        elif mx == g:
+            hue = ((b - r) / d + 2) / 6
+        else:
+            hue = ((r - g) / d + 4) / 6
+    return f"{round(hue * 360)} {round(sat * 100)}% {round(l * 100)}%"
+
+
 def translate_skin_adaptation(skin_id: str, base_dir: str | Path | None = None) -> str:
-    """生成皮肤的区域适配 CSS（令牌接管 + 布局），皮肤激活注入时拼接。"""
+    """生成皮肤的区域适配 CSS（令牌接管 + 布局），皮肤激活注入时拼接。
+
+    2026-08-21 二次重写（用户实测三座山）：
+    - 令牌全部 !important——themeStore 运行时 setProperty（内联）会盖过
+      样式表非 important 声明，导致"注入了但看不见"；
+    - 补 shadcn HSL 桥（--background/--foreground/--card/--border/--primary…）——
+      主容器/原子类吃 hsl(var(--background)) 这层，仅 --ds-* 不够；
+    - 基准回退（用户规则）：前端 selectSkin 已联动 setTheme(皮肤 base 对应
+      内置 dark/light)——当前灵汐主题被整体替换为基准，皮肤再盖皮肤色，
+      未覆盖处=基准暗/亮而非"当前主题透下来"；
+    - header 保持"左图标+居中标题+右图标"原生结构（撤藏文字规则），仅
+      紧凑收窄；侧栏=皮肤面板实底（DSH 风格）；工作区=elevated 实底。
+    """
     base = Path(base_dir) if base_dir is not None else SKIN_CENTER_SKINS_DIR
     skin_dir = base / skin_id
     css_path = skin_dir / "skin.css"
@@ -690,36 +729,43 @@ def translate_skin_adaptation(skin_id: str, base_dir: str | Path | None = None) 
     panel_m = _ALIAS_PANEL_RE.search(css) or _ALIAS_L1_RE.search(css)
     panel = panel_m.group(1).strip() if panel_m else f"color-mix(in srgb, {canvas} 88%, white)"
 
+    def imp(k: str, v: str) -> str:
+        return f"  {k}: {v} !important;"
+
     lines = [
-        "/* == dsh-skin lingxi adaptation ==",
-        f"/* skin: {skin_id} | token takeover + region layout */",
+        "/* == dsh-skin lingxi adaptation v2 ==",
+        f"/* skin: {skin_id} | tokens(!important, 内联可压) + shadcn bridge + regions */",
         ":root {",
-        f"  --ds-bg-canvas: {canvas};",
-        f"  --ds-bg-panel: {panel};",
-        f"  --ds-bg-elevated: color-mix(in srgb, {canvas} 82%, white);",
-        f"  --ds-bg-hover: color-mix(in srgb, {accent} 12%, transparent);",
-        f"  --ds-text-primary: {text};",
-        f"  --ds-text-secondary: color-mix(in srgb, {text} 78%, {canvas});",
-        f"  --ds-text-muted: color-mix(in srgb, {text} 55%, {canvas});",
-        f"  --ds-accent-primary: {accent};",
-        f"  --ds-accent-ai: {accent};",
-        f"  --ds-border-subtle: color-mix(in srgb, {text} 16%, transparent);",
-        f"  --ds-border-active: color-mix(in srgb, {accent} 70%, transparent);",
+        imp("--ds-bg-canvas", canvas),
+        imp("--ds-bg-panel", panel),
+        imp("--ds-bg-elevated", f"color-mix(in srgb, {canvas} 82%, white)"),
+        imp("--ds-bg-hover", f"color-mix(in srgb, {accent} 12%, transparent)"),
+        imp("--ds-text-primary", text),
+        imp("--ds-text-secondary", f"color-mix(in srgb, {text} 78%, {canvas})"),
+        imp("--ds-text-muted", f"color-mix(in srgb, {text} 55%, {canvas})"),
+        imp("--ds-accent-primary", accent),
+        imp("--ds-accent-ai", accent),
+        imp("--ds-border-subtle", f"color-mix(in srgb, {text} 16%, transparent)"),
+        imp("--ds-border-active", f"color-mix(in srgb, {accent} 70%, transparent)"),
+        # shadcn 桥（tailwind 原子类/主容器消费层）
+        imp("--background", _hex_to_hsl(canvas)),
+        imp("--foreground", _hex_to_hsl(text) if text.startswith("#") else "0 0% 95%"),
+        imp("--card", _hex_to_hsl(canvas) if canvas.startswith("#") else "229 58% 4%"),
+        imp("--primary", _hex_to_hsl(accent)),
+        imp("--accent", _hex_to_hsl(accent)),
+        imp("--border", f"color-mix(in srgb, {text} 16%, transparent)"),
         "}",
-        "/* 布局适配：header 收成图标条（导航文字隐藏，图标按钮保留原位） */",
-        '[data-testid="app-header"] { grid-template-columns: auto 1fr auto; padding-block: 2px; }',
-        '[data-testid="app-header"] h1, [data-testid="app-header"] [data-skin-hide],',
-        '[data-testid="app-header"] .text-sm, [data-testid="app-header"] .text-xs,',
-        '[data-testid="app-header"] .text-base { display: none; }',
-        "/* 侧栏：半透明面板（透出画布底色，图标保留原位） */",
-        '[data-region="sidebar"] { background: color-mix(in srgb, var(--ds-bg-panel) 86%, transparent); backdrop-filter: blur(8px); }',
-        "/* 工作区：实底优先可读（不糊背景图） */",
-        '[data-region="workspace"] { background: var(--ds-bg-panel); }',
-        "/* 画布底：皮肤 :root 原渐变挂 body（供侧栏半透明透出） */",
-        f"body {{ background-color: {canvas}; }}",
+        "/* header：保持 左图标|居中标题|右图标 原生结构，紧凑收窄 */",
+        '[data-testid="app-header"] { padding-block: 1px; }',
+        "/* 侧栏：皮肤面板实底（DSH 侧栏风格）+ 右边框 */",
+        '[data-region="sidebar"] { background: var(--ds-bg-panel) !important; backdrop-filter: none; border-right: 1px solid var(--ds-border-subtle); }',
+        "/* 工作区：elevated 实底（对齐 DSH 设置页面板） */",
+        '[data-region="workspace"] { background: var(--ds-bg-elevated) !important; border-left: 1px solid var(--ds-border-subtle); }',
+        "/* 画布底：皮肤 :root 原渐变挂 body（仅聊天区之外透出） */",
+        f"body {{ background-color: {canvas} !important; }}",
     ]
     if root_img_m:
-        lines.append(f"body {{ background-image: {root_img_m.group(1).strip()}; background-attachment: fixed; }}")
+        lines.append(f"body {{ background-image: {root_img_m.group(1).strip()} !important; background-attachment: fixed; }}")
     return "\n".join(lines) + "\n"
 
 
