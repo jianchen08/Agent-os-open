@@ -23,5 +23,17 @@
 # +1 余量 → 116。归属说明：其中含并行开发分支对 plugins/shared src 的修复
 # 贡献，非治理单方面所致；若 CI（Linux）实测高于本地（Windows），以 CI 实测
 # 为准回调本行。
-plugins-coverage_failed=116
-plugins-heavy_failed=11
+#
+# 收紧（2026-08-23）：plugins-heavy 本地实测 110 passed / 0 failed（94 插件
+# 冒烟矩阵全绿——2026-08-15 首基线的 multimodal/external_mcp 失败已在后续
+# 批次修复）→ 0，无余量。
+#
+# 收紧（2026-08-23，CI 治理批）：plugins-coverage 272（136F+136E）→ 19
+# （本地全车道实测 2369 passed / 19 failed）。构成：test_dsh_adapter 18
+# （并发会话在改 dsh_adapter/translator.py，其修复后应继续收紧）+
+# task_manage continue_resume 1（平铺裸模块跨代际枚举身份 flake，轮转出现）。
+# 归因：串扰中央修复（conftest 钩子按 pluginmanager 定位 + 裸名逐出扩容）、
+# 孤儿测试删除（task_event_receiver）、API 漂移对齐 9 文件、task_submit
+# 漏 await 真 bug 修复。CI（Linux）实测高于本地则以 CI 为准回调。
+plugins-coverage_failed=19
+plugins-heavy_failed=0
