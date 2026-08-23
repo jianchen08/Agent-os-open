@@ -5,6 +5,7 @@ description = "Lingxi AgentOS 0.2 plugin — isolation_service（uv 单轨迁移
 requires-python = ">=3.11"
 dependencies = [
     "agentos-plugin-sdk>=0.2.0",
+    "docker>=7.0",
     "pyyaml",
 ]
 
