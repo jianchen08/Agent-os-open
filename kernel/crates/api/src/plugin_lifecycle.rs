@@ -33,15 +33,27 @@ pub fn register_plugin_capabilities(
     {
         for tool_cap in &manifest.capabilities.tools {
             let category = tool_cap.category.clone().unwrap_or(ToolCategory::System);
-            // K9：input_schema 缺失仍按 {} 补注册（存量 manifest 确有缺失——
-            // 2026-08-20 全量统计：plugins/ 下 84 个 manifest 工具中 28 个缺声明，
-            // 集中在 external_mcp 系列 / admin 与 security_check 的 http.handle、
-            // status 对 / widget_demo 演示工具，补声明属 plugins/ 侧治理，内核
-            // 不一刀切拒注册），但必须 warn 可见：{} 是 object，LLM 侧
-            // `input_schema.is_object()` 过滤（server.rs inject_tool_schemas）对
-            // 它恒不触发——工具以零参数描述进工具面，LLM 只能盲调。真正的
-            // 防线在此处的 manifest 声明。
+            // K9 + 强制规则（2026-08-23 升级）：input_schema 缺失时的行为按宿主分档——
+            //   - external MCP 工具（entry="mcp:external"）：**拒注册**。此类工具
+            //     的 manifest 声明是 LLM 工具面 input_schema 的唯一真值源（G2 只
+            //     比对、不回填握手 schema），缺声明 = 注册出 {} = LLM 收到零参数
+            //     工具 → 调用必因缺参被服务端校验拒绝（2026-08-23 真机：omnisearch
+            //     universal_search 缺 mode 100% 失败、调研 agent 空转 45 万 token）。
+            //     拒注册直接暴露问题，不给"盲调工具"留后门。
+            //   - 内置/sidecar 自研（http.handle、*.status 哨兵、widget_demo 演示
+            //     工具）：零参合法（HTTP 处理器/无参状态查询），维持 {} 补注册，
+            //     仅 warn（K9 既有行为）。
+            let is_external_mcp = manifest.entry == "mcp:external";
             if tool_cap.input_schema.is_none() {
+                if is_external_mcp {
+                    tracing::error!(
+                        target: "plugin-registration",
+                        plugin_id = %manifest.id,
+                        tool = %tool_cap.name,
+                        "external MCP 工具缺 input_schema，拒绝注册（LLM 工具面唯一真值源缺失，注册即零参数盲调；请按 MCP tools/list inputSchema 补声明）"
+                    );
+                    continue;
+                }
                 tracing::warn!(
                     target: "plugin-registration",
                     plugin_id = %manifest.id,
@@ -372,5 +384,107 @@ mod domain_event_tests {
             vec![("p_a".to_string(), "session.created".to_string())],
             "只投递给声明了 domain_event 且启用的插件"
         );
+    }
+}
+
+#[cfg(test)]
+mod external_mcp_schema_gate_tests {
+    use super::*;
+    use agentos_core::traits::{HostType, ManifestCapabilities, PluginManifest, PluginType, ToolCapability};
+    use agentos_core::types::ToolCategory;
+
+    fn manifest_with(entry: &str, tool_input_schema: Option<serde_json::Value>) -> PluginManifest {
+        PluginManifest {
+            id: "p_gate".to_string(),
+            name: "p_gate".to_string(),
+            description: None,
+            version: "1.0.0".to_string(),
+            plugin_type: PluginType::Tool,
+            pipeline_role: None,
+            language: "external".to_string(),
+            host_type: HostType::Sidecar,
+            entry: entry.to_string(),
+            capabilities: ManifestCapabilities {
+                tools: vec![ToolCapability {
+                    name: "ext_tool".to_string(),
+                    description: Some("desc".to_string()),
+                    input_schema: tool_input_schema,
+                    output_schema: None,
+                    smoke: None,
+                    category: Some(ToolCategory::Search),
+                    ui: None,
+                    render: None,
+                }],
+                ..Default::default()
+            },
+            requires_services: vec![],
+            permissions: Default::default(),
+            error_policy: Default::default(),
+            priority: 100,
+            mcp: None,
+            lifecycle: None,
+            native: None,
+            granted_capabilities: vec![],
+            requires_content: None,
+            invoke_entry: None,
+            config_files: vec![],
+            http_endpoints: vec![],
+            ui_schema: None,
+            contributes: None,
+            enabled: None,
+            activation: None,
+            persistent_fields: vec![],
+            provides: None,
+        }
+    }
+
+    #[test]
+    fn external_mcp_tool_without_input_schema_rejected() {
+        // external MCP 工具缺 input_schema → 拒注册。manifest 声明是 LLM 工具面
+        // input_schema 的唯一真值源（G2 只比对不回填），缺声明 = 注册出 {} =
+        // LLM 收到零参数工具 → 调用必因缺参被服务端校验拒绝（2026-08-23 真机：
+        // omnisearch universal_search 缺 mode 100% 失败、调研 agent 空转 45 万 token）。
+        let m = manifest_with("mcp:external", None);
+        let registry = Arc::new(CapabilityRegistryImpl::new());
+        let n = register_plugin_capabilities(&m, &registry, None);
+        assert_eq!(n, 0, "external MCP 缺 schema 必须拒注册");
+        assert!(
+            registry.list_tools().iter().all(|t| t.plugin_id != m.id),
+            "被拒工具不得出现在能力注册表"
+        );
+    }
+
+    #[test]
+    fn external_mcp_tool_with_input_schema_registered() {
+        let m = manifest_with(
+            "mcp:external",
+            Some(serde_json::json!({
+                "type": "object",
+                "properties": {"mode": {"type": "string"}},
+                "required": ["mode"],
+            })),
+        );
+        let registry = Arc::new(CapabilityRegistryImpl::new());
+        let n = register_plugin_capabilities(&m, &registry, None);
+        assert_eq!(n, 1, "带 schema 的 external MCP 工具正常注册");
+        let tools = registry.list_tools();
+        let t = tools.iter().find(|t| t.plugin_id == m.id).expect("应注册");
+        assert_eq!(t.input_schema["required"][0], "mode");
+    }
+
+    #[test]
+    fn sidecar_builtin_tool_without_input_schema_still_registered() {
+        // 内置 sidecar 哨兵（http.handle / *.status / widget_demo 演示工具）零参
+        // 合法——维持 {} 补注册（K9 既有行为），不被新规则误伤
+        let mut m2 = manifest_with("plugin:main", None);
+        m2.plugin_type = PluginType::System;
+        m2.language = "python".to_string();
+        m2.capabilities.tools[0].name = "http.handle".to_string();
+        let registry = Arc::new(CapabilityRegistryImpl::new());
+        let n = register_plugin_capabilities(&m2, &registry, None);
+        assert_eq!(n, 1, "内置工具缺 schema 仍补注册");
+        let tools = registry.list_tools();
+        let t = tools.iter().find(|t| t.plugin_id == m2.id).expect("应注册");
+        assert!(t.input_schema.is_object() && t.input_schema.as_object().unwrap().is_empty());
     }
 }

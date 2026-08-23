@@ -26,7 +26,27 @@
     "tools": [
       {
         "name": "langchain_hub_search",
-        "description": "Search LangChain Hub for prompt templates and tools. Parameters: query (search keyword), repo_type (prompt/tool), limit (max results)."
+        "description": "Search LangChain Hub for prompt templates and tools. Parameters: query (search keyword), repo_type (prompt/tool), limit (max results).",
+        "input_schema": {
+          "type": "object",
+          "properties": {
+            "query": {
+              "type": "string",
+              "description": "搜索关键词"
+            },
+            "repo_type": {
+              "type": "string",
+              "description": "仓库类型: prompt/tool"
+            },
+            "limit": {
+              "type": "integer",
+              "description": "最大结果数"
+            }
+          },
+          "required": [
+            "query"
+          ]
+        }
       }
     ]
   },

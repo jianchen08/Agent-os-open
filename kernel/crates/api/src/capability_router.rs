@@ -70,6 +70,12 @@ pub struct KernelCapabilityRouter {
     /// 流式声明查询器（ADR 2026-08-22 流式协议）：(plugin_id) → capabilities.streaming
     /// 声明。None = 未装配 → 声明闸放行（兼容旧装配/测试）。装配后未声明即拒。
     streaming_declaration_lookup: Option<StreamingDeclarationLookupFn>,
+    /// 工具连续失败告警器（2026-08-23）：同一工具名在调用侧连续返回
+    /// success=false（参数校验失败/执行错误）达到阈值即告警——真机教训：
+    /// omnisearch universal_search 缺 mode 导致 100% 校验失败，日志里每轮
+    /// 一条 pydantic 错误，但没有闸门把"同一工具连续 N 次失败"这个信号
+    /// 汇总成一条可操作的告警，调研 agent 空转 45 万 token 无人察觉。
+    tool_failure_tracker: Option<std::sync::Arc<dyn crate::tools::ToolFailureTracker + Send + Sync>>,
 }
 
     /// 域事件广播闭包：(event_name, tags) → 点对点投递给声明 domain_event 的
@@ -118,6 +124,7 @@ impl KernelCapabilityRouter {
             domain_broadcaster: None,
             capability_contracts: None,
             streaming_declaration_lookup: None,
+            tool_failure_tracker: None,
         }
     }
 
@@ -135,6 +142,7 @@ impl KernelCapabilityRouter {
             domain_broadcaster: None,
             capability_contracts: None,
             streaming_declaration_lookup: None,
+            tool_failure_tracker: None,
         }
     }
 
@@ -164,6 +172,15 @@ impl KernelCapabilityRouter {
         lookup: StreamingDeclarationLookupFn,
     ) -> Self {
         self.streaming_declaration_lookup = Some(lookup);
+        self
+    }
+
+    /// 注入工具失败追踪器（启用「同一工具连续失败」告警，2026-08-23）。
+    pub fn with_tool_failure_tracker(
+        mut self,
+        tracker: std::sync::Arc<dyn crate::tools::ToolFailureTracker + Send + Sync>,
+    ) -> Self {
+        self.tool_failure_tracker = Some(tracker);
         self
     }
 
@@ -1128,6 +1145,31 @@ impl CapabilityRouter for KernelCapabilityRouter {
                 })?;
                 match invoker.invoke_tool(&plugin_id, tool_name, &tool_args).await {
                     Ok(result) => {
+                        // 工具连续失败告警（2026-08-23）：结果 success=false（参数校验
+                        // 失败/执行错误，非网络 Err）计入同工具连续失败计数，达到阈值
+                        // 即告警——防止「同一工具 100% 失败」在流水日志里被淹没
+                        // （omnisearch universal_search 缺 mode 空转 45 万 token 的教训）。
+                        if !result.success {
+                            if let Some(tracker) = &self.tool_failure_tracker {
+                                let sample = result
+                                    .error
+                                    .clone()
+                                    .unwrap_or_else(|| result.data.to_string());
+                                if let Some(alert) = tracker.record(tool_name, false, &sample) {
+                                    tracing::error!(
+                                        target: "tool-executor",
+                                        tool = %alert.tool_name,
+                                        consecutive = alert.consecutive,
+                                        since_secs = alert.since_secs,
+                                        "工具连续失败 {} 次（校验/执行错误，非网络类），请检查工具声明与实现: {}",
+                                        alert.consecutive,
+                                        alert.error_sample
+                                    );
+                                }
+                            }
+                        } else if let Some(tracker) = &self.tool_failure_tracker {
+                            tracker.record(tool_name, true, "");
+                        }
                         Ok(serde_json::to_value(result)
                             .unwrap_or_else(|_| json!({"success": false})))
                     }
@@ -3027,5 +3069,116 @@ mod tests {
             },
         )
         .await;
+    }
+}
+
+/// 工具连续失败告警集成（2026-08-23）：tool-executor.invoke 结果 success=false
+/// 计入同工具连续失败计数，达到阈值产出告警——把「同一工具 100% 校验失败」
+/// 从流水日志淹没中捞出来（omnisearch universal_search 空转 45 万 token 教训）。
+mod tool_failure_alert_tests {
+    use super::*;
+    use crate::tools::{FAILURE_ALERT_THRESHOLD, ToolFailureAlert, ToolFailureTracker};
+    use std::sync::Mutex;
+
+    /// 返回 success=false 的 invoker（模拟参数校验失败）。
+    struct FailingInvoker;
+    #[async_trait::async_trait]
+    impl agentos_core::traits::PluginInvoker for FailingInvoker {
+        async fn invoke_pipeline_plugin(
+            &self,
+            _plugin_id: &str,
+            _ctx: &agentos_core::types::PluginContext,
+        ) -> Result<agentos_core::types::PluginResult, agentos_core::types::PluginError> {
+            Err(agentos_core::types::PluginError { message: "n/a".into(), code: None, source: None })
+        }
+        async fn send_lifecycle_hook(
+            &self,
+            _plugin_id: &str,
+            _hook: agentos_core::traits::LifecycleHook,
+            _ctx: &agentos_core::traits::HookContext,
+        ) -> Result<(), agentos_core::types::PluginError> {
+            Ok(())
+        }
+        async fn invoke_tool(
+            &self,
+            _plugin_id: &str,
+            _tool_name: &str,
+            _inputs: &Value,
+        ) -> Result<agentos_core::types::ToolExecutionResult, agentos_core::types::PluginError> {
+            Ok(agentos_core::types::ToolExecutionResult {
+                success: false,
+                data: json!({}),
+                error: Some("mode Field required (pydantic validation)".into()),
+                duration_ms: Some(1),
+            })
+        }
+    }
+
+    /// 记录告警产出的追踪器（代替 tracing 断言，测路由逻辑）。
+    struct RecordingTracker {
+        alerts: Arc<Mutex<Vec<ToolFailureAlert>>>,
+        records: Arc<Mutex<Vec<(String, bool)>>>,
+    }
+    impl ToolFailureTracker for RecordingTracker {
+        fn record(&self, tool_name: &str, success: bool, _sample: &str) -> Option<ToolFailureAlert> {
+            self.records.lock().unwrap().push((tool_name.to_string(), success));
+            let n = self.records.lock().unwrap().iter().filter(|(n, s)| n == tool_name && !s).count();
+            if n as u32 >= FAILURE_ALERT_THRESHOLD {
+                let a = ToolFailureAlert {
+                    tool_name: tool_name.to_string(),
+                    consecutive: n as u32,
+                    error_sample: "mode Field required".to_string(),
+                    since_secs: 1,
+                };
+                self.alerts.lock().unwrap().push(a.clone());
+                Some(a)
+            } else {
+                None
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn consecutive_tool_failures_produce_alert_through_router() {
+        let alerts: Arc<Mutex<Vec<ToolFailureAlert>>> = Arc::new(Mutex::new(Vec::new()));
+        let records: Arc<Mutex<Vec<(String, bool)>>> = Arc::new(Mutex::new(Vec::new()));
+        let router = KernelCapabilityRouter::new()
+            .with_invoker(Arc::new(FailingInvoker))
+            .with_tool_failure_tracker(Arc::new(RecordingTracker {
+                alerts: alerts.clone(),
+                records: records.clone(),
+            }));
+        let params = json!({
+            "tool_name": "universal_search",
+            "args": {"query": "x"},
+            "plugin_id": "omnisearch",
+        });
+        // 阈值前（4 次）：无告警，record 计数 4
+        for _ in 0..(FAILURE_ALERT_THRESHOLD - 1) {
+            let resp = router.handle("tool-executor", "invoke", params.clone()).await.unwrap();
+            assert_eq!(resp["success"], false, "失败结果按信封返回");
+            assert!(
+                resp["error"].as_str().unwrap_or("").contains("Field required"),
+                "错误详情透传"
+            );
+        }
+        assert!(alerts.lock().unwrap().is_empty(), "阈值前不得告警");
+        // 第 5 次：达到阈值 → 告警产出（经 tracker 记录在案）
+        let resp = router
+            .handle("tool-executor", "invoke", params.clone())
+            .await
+            .unwrap();
+        assert_eq!(resp["success"], false);
+        let got = alerts.lock().unwrap().clone();
+        assert_eq!(got.len(), 1, "连续失败达到阈值应产出告警");
+        assert_eq!(got[0].tool_name, "universal_search");
+        assert_eq!(got[0].consecutive, FAILURE_ALERT_THRESHOLD);
+        // 冷却/清零语义由 tools::ConsecutiveFailureTracker 单测覆盖（本测试用
+        // RecordingTracker 只验证「路由把 success=false 送进 tracker 并透传告警」），
+        // 此处补一轮确认记录计数与失败次数一致。
+        for _ in 0..3 {
+            let _ = router.handle("tool-executor", "invoke", params.clone()).await.unwrap();
+        }
+        assert_eq!(records.lock().unwrap().len(), 8, "8 次失败全部送进 tracker");
     }
 }

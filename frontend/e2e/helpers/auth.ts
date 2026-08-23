@@ -118,8 +118,7 @@ export async function injectTokensAndReload(
     },
   );
 
-  await page.reload();
-  await page.waitForLoadState('networkidle');
+  await page.reload({ waitUntil: 'domcontentloaded' });
 }
 
 /**
@@ -169,11 +168,20 @@ export async function loginAndWaitReady(
   }, sessionId);
   await page.reload();
 
-  // 等待聊天输入框就绪
-  await expect(
-    page.locator('[data-testid="chat-input-textarea"]'),
-    '聊天输入框应可见',
-  ).toBeVisible({ timeout: 20_000 });
+  // 等待聊天输入框就绪——轮询而非硬超时：本机高负载/冷启动/长会话列表下
+  // 会话恢复链（query 缓存 → restoreActiveSessionIfNeeded → setActiveSession →
+  // loadPipelineMessages）可达 10s+，硬 20s 在慢机器上偶发误报（2026-08-23
+  // 实测 6s~30s 抖动）。poll 45s 把慢启动留成环境容忍，不掩盖真故障。
+  await expect
+    .poll(
+      async () =>
+        await page
+          .locator('[data-testid="chat-input-textarea"]')
+          .isVisible()
+          .catch(() => false),
+      { timeout: 45_000, message: '聊天输入框应在会话恢复后可见' },
+    )
+    .toBe(true);
 
   console.log('✅ 聊天界面就绪');
 }
@@ -200,6 +208,5 @@ export async function logout(page: Page): Promise<void> {
     localStorage.removeItem('access_token_expiry');
     localStorage.removeItem('auth_user');
   });
-  await page.reload();
-  await page.waitForLoadState('networkidle');
+  await page.reload({ waitUntil: 'domcontentloaded' });
 }

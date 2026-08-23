@@ -23,7 +23,12 @@
     "tools": [
       {
         "name": "design_review",
-        "description": "Review design using Playwright MCP"
+        "description": "Review design using Playwright MCP",
+        "input_schema": {
+          "type": "object",
+          "properties": {},
+          "required": []
+        }
       }
     ]
   },

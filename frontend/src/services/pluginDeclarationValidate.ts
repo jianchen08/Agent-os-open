@@ -27,6 +27,12 @@ export interface PluginDeclarationInput {
   uiSchemaWidgets?: Array<Record<string, unknown>>
   /** 流式能力声明（capabilities.streaming，协议见 docs/streaming-protocol.md） */
   streaming?: Record<string, unknown>
+  /**
+   * 本插件是否为 external MCP（plugin.json entry === "mcp:external"）。
+   * 聚合 schema 是跨插件平铺的 tools 数组、无法逐工具追溯 entry，此标记由
+   * 逐插件扫描侧（真实语料测试/未来 schema 细分）显式传入。
+   */
+  externalMcp?: boolean
 }
 
 /** 流式协议事件清单（与 config/kernel_capabilities/streaming.json 的 10 个
@@ -210,8 +216,22 @@ export function validatePluginDeclaration(
   }
 
   for (const tool of input.tools ?? []) {
-    if (tool && typeof tool === 'object') validateTool(tool as Record<string, unknown>, errors, warnings)
-    else warnings.push('tools 有非对象条目')
+    if (tool && typeof tool === 'object') {
+      const rec = tool as Record<string, unknown>
+      // 2026-08-23 强制规则：external MCP 工具必须声明 input_schema。
+      // manifest 声明是 LLM 工具面参数 schema 的唯一真值源（G2 只比对不回填
+      // 握手 schema），缺声明 = 内核补注册 {} = LLM 收到零参数工具 → 调用必因
+      // 缺参被服务端校验拒绝（omnisearch universal_search 缺 mode 100% 失败、
+      // 调研 agent 空转 45 万 token 的根因）。前端校验器与内核注册闸（
+      // plugin_lifecycle.rs 拒注册）双端对齐，此规则抓声明侧提前暴露。
+      if (input.externalMcp && !rec.input_schema) {
+        const name = nonEmptyString(rec.name) ? String(rec.name) : '?'
+        errors.push(
+          `tools[name=${name}] external MCP 工具缺 input_schema（声明是 LLM 工具面唯一真源，缺失=内核注册 {} + 零参数盲调，内核将拒绝注册；请按 MCP tools/list inputSchema 补齐）`,
+        )
+      }
+      validateTool(rec, errors, warnings)
+    } else warnings.push('tools 有非对象条目')
   }
 
   for (const [i, w] of (input.uiSchemaWidgets ?? []).entries()) {

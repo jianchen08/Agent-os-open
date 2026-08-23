@@ -25,7 +25,23 @@
     "tools": [
       {
         "name": "smithery_search",
-        "description": "Search Smithery for MCP tools and servers"
+        "description": "Search Smithery for MCP tools and servers",
+        "input_schema": {
+          "type": "object",
+          "properties": {
+            "query": {
+              "type": "string",
+              "description": "搜索关键词"
+            },
+            "limit": {
+              "type": "integer",
+              "description": "最大结果数"
+            }
+          },
+          "required": [
+            "query"
+          ]
+        }
       }
     ]
   },

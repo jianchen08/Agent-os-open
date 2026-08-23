@@ -57,10 +57,32 @@ describe('validatePluginDeclaration 负例（校验器不空转）', () => {
   })
 
   it('select 字段缺 options 且无 datasource → warning（下拉为空）', () => {
-    const r = validatePluginDeclaration({
-      pages: [{ id: 'p', space: 'settings', schema: { fields: [{ name: 'mode', type: 'select', label: '模式' }] } }],
+    const r = validatePluginDeclaration({      pages: [{ id: 'p', space: 'settings', schema: { fields: [{ name: 'mode', type: 'select', label: '模式' }] } }],
     })
     expect(r.warnings.some((e) => e.includes('缺 options/datasourceUri'))).toBe(true)
+  })
+
+  it('external MCP 工具缺 input_schema → error（声明是 LLM 工具面唯一真源，缺失=零参数盲调）', () => {
+    const errs = errorsOf({
+      externalMcp: true,
+      tools: [{ name: 'universal_search', description: 'x' }],
+    })
+    expect(errs.some((e) => e.includes('缺 input_schema'))).toBe(true)
+  })
+
+  it('external MCP 工具带 input_schema → 通过', () => {
+    const r = validatePluginDeclaration({
+      externalMcp: true,
+      tools: [{ name: 't', description: 'x', input_schema: { type: 'object', properties: { q: { type: 'string' } }, required: ['q'] } }],
+    })
+    expect(r.errors).toEqual([])
+  })
+
+  it('非 external 工具缺 input_schema → 不报错（内置哨兵零参合法）', () => {
+    const r = validatePluginDeclaration({
+      tools: [{ name: 'http.handle', description: 'x' }],
+    })
+    expect(r.errors).toEqual([])
   })
 
   it('source 模板括号未配平 → warning（渲染空值）', () => {
@@ -141,6 +163,7 @@ describe('validatePluginDeclaration 真实语料（校验器在真实数据上�
       const tools = (d.capabilities?.tools ?? []) as Array<Record<string, unknown>>
       if (tools.length) {
         input.tools = tools
+        input.externalMcp = d.entry === 'mcp:external'
         declKinds.set('tools', (declKinds.get('tools') ?? 0) + tools.length)
       }
       const widgets = (d.ui_schema?.widgets ?? []) as Array<Record<string, unknown>>

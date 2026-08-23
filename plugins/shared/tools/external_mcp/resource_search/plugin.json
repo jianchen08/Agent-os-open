@@ -25,7 +25,27 @@
     "tools": [
       {
         "name": "mcp_marketplace_search",
-        "description": "Aggregate search across MCP Registry and Smithery platforms (external remote MCP)"
+        "description": "Aggregate search across MCP Registry and Smithery platforms (external remote MCP)",
+        "input_schema": {
+          "type": "object",
+          "properties": {
+            "query": {
+              "type": "string",
+              "description": "搜索关键词"
+            },
+            "platform": {
+              "type": "string",
+              "description": "平台: mcp_registry/smithery/all"
+            },
+            "limit": {
+              "type": "integer",
+              "description": "最大结果数"
+            }
+          },
+          "required": [
+            "query"
+          ]
+        }
       }
     ]
   },

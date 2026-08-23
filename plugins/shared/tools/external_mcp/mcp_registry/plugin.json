@@ -25,7 +25,19 @@
     "tools": [
       {
         "name": "mcp_registry_search",
-        "description": "Search MCP Registry for registered servers"
+        "description": "Search MCP Registry for registered servers",
+        "input_schema": {
+          "type": "object",
+          "properties": {
+            "query": {
+              "type": "string",
+              "description": "搜索关键词"
+            }
+          },
+          "required": [
+            "query"
+          ]
+        }
       }
     ]
   },

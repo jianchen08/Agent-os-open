@@ -22,7 +22,27 @@
     "tools": [
       {
         "name": "design_generate",
-        "description": "Generate design from screenshot"
+        "description": "Generate design from screenshot",
+        "input_schema": {
+          "type": "object",
+          "properties": {
+            "image_path": {
+              "type": "string",
+              "description": "截图/图片路径"
+            },
+            "prompt": {
+              "type": "string",
+              "description": "生成要求"
+            },
+            "output_dir": {
+              "type": "string",
+              "description": "输出目录"
+            }
+          },
+          "required": [
+            "image_path"
+          ]
+        }
       }
     ]
   },

@@ -27,6 +27,7 @@ pub mod routes;
 pub mod run_chain;
 pub mod server;
 pub mod session_routes;
+pub mod tools;
 pub mod ws_session;
 
 pub use auth::{
