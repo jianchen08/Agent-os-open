@@ -1,9 +1,10 @@
 /**
- * channel_api 触发器声明契约测试（B1：TriggersPage 声明化替代）
+ * triggers 触发器声明契约测试（B1：TriggersPage 声明化替代）
  *
- * 读 channel_api plugin.json（生产声明）→ 装载 → 渲染 widget_stage
- * space=triggers：断言 table 行操作（trigger/enable/disable when 分支/delete）
- * + 创建 form 的字段/提交，全部走声明链路。
+ * 读 trigger_setup_tool plugin.json（生产声明，channel_api 退役后随域迁入）
+ * → 装载 → 渲染 widget_stage space=triggers：断言 table 行操作
+ * （trigger/enable/disable when 分支/delete）+ 创建 form 的字段/提交，
+ * 全部走声明链路。
  */
 import { fireEvent, render, screen, waitFor } from '@testing-library/react'
 import fs from 'node:fs'
@@ -29,7 +30,7 @@ vi.mock('@/components/ui/sonner', () => ({
 
 const PLUGIN = JSON.parse(
   fs.readFileSync(
-    path.resolve(__dirname, '../../../../../plugins/shared/system/channel_api/plugin.json'),
+    path.resolve(__dirname, '../../../../../plugins/shared/tools/triggers_ext/plugin.json'),
     'utf-8',
   ),
 ) as {
@@ -55,7 +56,7 @@ beforeEach(() => {
   })
 })
 
-describe('channel_api 触发器声明（B1）', () => {
+describe('trigger_setup_tool 触发器声明（B1）', () => {
   it('声明存在：triggers_table（rowActions）与 triggers_create（form）', () => {
     const widgets = contributionRegistry.getAllWidgets()
     const table = widgets.find((w) => w.id === 'triggers_table')
@@ -105,12 +106,12 @@ describe('channel_api 触发器声明（B1）', () => {
     await waitFor(() => expect(apiCall).toHaveBeenCalled())
     expect(apiCall.mock.calls[0][0]).toMatchObject({
       method: 'POST',
-      url: '/ext/channel_api/triggers/t9/trigger',
+      url: '/ext/trigger_setup_tool/triggers/t9/trigger',
     })
     await waitFor(() => expect(apiGet.mock.calls.length).toBeGreaterThan(getsBefore))
   })
 
-  it('创建表单：字段渲染 + 提交 POST /ext/channel_api/triggers', async () => {
+  it('创建表单：字段渲染 + 提交 POST /ext/trigger_setup_tool/triggers', async () => {
     const fetchMock = vi.fn().mockResolvedValue({ json: async () => ({ ok: true }) })
     vi.stubGlobal('fetch', fetchMock)
     apiGet.mockResolvedValue({ data: { columns: [], rows: [] } })
@@ -119,7 +120,7 @@ describe('channel_api 触发器声明（B1）', () => {
     fireEvent.submit((screen.getByLabelText('名称') as HTMLElement).closest('form')!)
     await waitFor(() => expect(fetchMock).toHaveBeenCalled())
     const [url, init] = fetchMock.mock.calls[0]
-    expect(url).toBe('/ext/channel_api/triggers')
+    expect(url).toBe('/ext/trigger_setup_tool/triggers')
     expect(JSON.parse(init.body)).toMatchObject({ name: '新触发器', type: 'schedule' })
     vi.unstubAllGlobals()
   })

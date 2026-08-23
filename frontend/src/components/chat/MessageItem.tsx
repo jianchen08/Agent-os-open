@@ -1,6 +1,7 @@
 /** 消息项组件 显示单条消息，支持用户消息和 AI 消息的不同样式 */
 
 import {
+  AlertCircleIcon as AlertCircle,
   Bell,
   Bot,
   Check,
@@ -21,9 +22,10 @@ import { Button } from '@/components/ui/button'
 import { cn } from '@/lib/utils'
 import { ErrorType, reportError } from '@/services/errorReporting'
 import { openAttachment } from '@/services/attachmentOpener'
-import { useAgentStore } from '@/stores/agentStore'
 import { useInteractionStore } from '@/stores/interactionStore'
+import { useAgentsQuery } from '@/hooks/queries/useAgentsQuery'
 import { useSessionStore } from '@/stores/sessionStore'
+import { useThemeStore } from '@/stores/themeStore'
 import { formatTimestamp } from '@/utils/format'
 import { toolCallToActivity } from '@/utils/activityConverter'
 import { getGlobalOpenFileCallback } from '@/utils/toolCardRegistry'
@@ -134,6 +136,12 @@ export const MessageItem = memo(function MessageItem({
 
   const isUser = message.role === 'user'
   const isAssistant = message.role === 'assistant'
+  // AI 消息气泡形态（主题声明开关：DSH 皮肤主题 flat=平铺跟原生一致；
+  // 角色扮演类主题可声明 bubble 恢复沉浸感气泡）
+  const bubbleAiMode = useThemeStore((s) => s.bubbleAiMode)
+  // 背景图激活信号（背景图主题/皮肤）：平铺 AI 消息在背景图上必须框起
+  // 气泡面（用户裁决：文字不许裸贴背景图；只框气泡区域不糊整块）
+  const bgImageActive = useThemeStore((s) => s.bgImageActive)
   const isTool = message.role === 'tool'
 
   const isSystemMessage = message.role === 'system'
@@ -141,7 +149,7 @@ export const MessageItem = memo(function MessageItem({
   const activeSessionId = useSessionStore((s) => s.activeSessionId)
   const isMessageStreaming = message.status === 'streaming'
 
-  const agents = useAgentStore((s) => s.agents)
+  const { data: agents = [] } = useAgentsQuery()
   const agent = message.agentId ? agents.find((a) => a.id === message.agentId) : null
 
   const hasPendingInteraction = useInteractionStore(
@@ -344,6 +352,9 @@ export const MessageItem = memo(function MessageItem({
                   : isUser
                     ? 'var(--bubble-user-padding, 0.625rem 1rem)'
                     : 'var(--bubble-ai-padding, 0.75rem 1rem)',
+                // 背景图平铺态的气泡面模糊（仅气泡盒内，不糊整块；非激活时
+                // 空串 = React 省略该内联属性）
+                backdropFilter: '',
               }
               const bubbleCls = cn(
                 'overflow-hidden',
@@ -353,6 +364,33 @@ export const MessageItem = memo(function MessageItem({
                     ? 'max-w-full'
                     : 'w-full',
               )
+              // AI 平铺模式（DeepSeek/DSH 原生形态）：去气泡盒——透明底、
+              // 无圆角/阴影/边框，文字随对话区区域前景（--region-chat-fg）
+              if (!isUser && !isSystemMessage && bubbleAiMode === 'flat') {
+                if (bgImageActive) {
+                  // 背景图上平铺文本不许裸贴（用户裁决 2026-08-22）：换成
+                  // 半透明气泡面——面用皮肤原生气泡令牌（翻译器按皮肤
+                  // patches.css 提取 --bubble-ai-bg，跟皮肤颜色一样），
+                  // 无皮肤气泡声明的主题回退 --card；局部仅内容区（收拢由
+                  // index.css fit-content 规则完成），模糊限定在气泡盒内
+                  bubbleStyle.background = 'var(--bubble-ai-bg, color-mix(in srgb, var(--card) 80%, transparent))'
+                  bubbleStyle.color = 'var(--bubble-ai-text, var(--foreground))'
+                  bubbleStyle.borderRadius = '18px 18px 18px 6px'
+                  bubbleStyle.boxShadow = '0 3px 10px rgb(0 0 0 / 0.08)'
+                  bubbleStyle.border = '1px solid color-mix(in srgb, var(--border) 50%, transparent)'
+                  bubbleStyle.padding = '0.5rem 0.75rem'
+                  bubbleStyle.backdropFilter = 'blur(6px)'
+                } else {
+                  // 空串赋值 = React 省略该内联属性：透明底、无圆角/阴影/边框，
+                  // 文字继承对话区区域前景（--region-chat-fg）
+                  bubbleStyle.background = 'transparent'
+                  bubbleStyle.color = ''
+                  bubbleStyle.borderRadius = ''
+                  bubbleStyle.boxShadow = ''
+                  bubbleStyle.border = ''
+                  bubbleStyle.padding = '0.35rem 0.5rem'
+                }
+              }
 
               if (isUser) {
                 // 插件注入的 Godot 引用消息（<reference source="godot">）：渲染为引用卡片行而非普通气泡
@@ -459,12 +497,16 @@ export const MessageItem = memo(function MessageItem({
               // 挂起等待用户交互的 assistant 消息（工具阻塞中、无文本输出）不能整块隐藏：
               // 否则只剩头像/时间戳的空气泡，用户看不到"agent 正在等我审批"。
               const _waitingInteraction = isAssistant && hasPendingInteraction
+              // 失败/中断消息不能隐藏：stream_error 标记 error 且无内容时，
+              // 隐藏会导致消息凭空消失（2026-08-22 错误透传收口）。
+              const _isFailedMessage = message.status === 'error' || message.status === 'failed'
 
               if (
                 !isMessageStreaming &&
                 renderContext.fragments.length === 0 &&
                 !_displayFallback &&
-                !_waitingInteraction
+                !_waitingInteraction &&
+                !_isFailedMessage
               ) {
                 return null
               }
@@ -485,6 +527,13 @@ export const MessageItem = memo(function MessageItem({
                             <span className="text-sm">思考中...</span>
                           </>
                         )}
+                      </div>
+                    ) : _isFailedMessage ? (
+                      <div className="flex items-center gap-2">
+                        <AlertCircle className="h-icon-md w-icon-md text-status-error" />
+                        <span className="text-sm text-status-error">
+                          {message.status === 'failed' ? '生成已中断' : '生成失败，请重试'}
+                        </span>
                       </div>
                     ) : _displayFallback ? (
                       <div className="whitespace-pre-wrap break-words text-sm">{_displayFallback}</div>

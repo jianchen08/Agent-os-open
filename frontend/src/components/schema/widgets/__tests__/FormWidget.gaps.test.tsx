@@ -65,7 +65,7 @@ describe('G1：反馈文案/成功动作声明化', () => {
     render(
       <FormWidget
         fields={[textField('title', '标题')]}
-        endpoint="/ext/channel_api/tasks/root"
+        endpoint="/ext/task_service/tasks/root"
         submitLabel="创建"
         successText="已创建任务"
       />,

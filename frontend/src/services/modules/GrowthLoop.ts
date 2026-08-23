@@ -2,7 +2,7 @@
 
 import { syncNavItemsFromContributes } from '@/constants/navItems'
 import apiClient from '@/services/api/client'
-import { getSchema } from '@/services/api/schema'
+import { fetchSchemaCached, invalidateSchemaCache } from '@/hooks/queries/useSchemaQuery'
 import { syncPluginStyles, removeAllPluginStyles } from '@/services/pluginStyles'
 import { commandDispatcher } from '@/services/schema/commandDispatcher'
 import { contributionRegistry } from '@/services/schema/ContributionRegistry'
@@ -57,7 +57,8 @@ let _lastSchemaLoadNotifyAt = 0
 
 async function reloadContributionRegistry(): Promise<void> {
   try {
-    const schema = await getSchema()
+    // 缓存新鲜直读（与设置页共享同一 query 条目），事件路径已先行 invalidate
+    const schema = await fetchSchemaCached()
     contributionRegistry.loadFromSchema(schema as unknown as Record<string, unknown>)
     // 插件主题（如 DSH 皮肤）的会话恢复重放：主题初始化早于本注册，
     // 挂起的 pendingThemeId 现在能查到了（时序修复配套，2026-08-21）
@@ -108,6 +109,7 @@ async function reloadContributionRegistry(): Promise<void> {
         pages: pluginContribPages as Array<Record<string, unknown>>,
         tools: (schemaVal.tools as Array<Record<string, unknown>> | undefined) ?? [],
         uiSchemaWidgets: widgetSources.flatMap((u) => (u.widgets ?? []) as never[]),
+        streaming: (schemaVal.capabilities as { streaming?: Record<string, unknown> } | undefined)?.streaming,
       })
       if (declResult.errors.length > 0) {
         loggers.websocket.warn(
@@ -159,8 +161,9 @@ export function handleSchemaUpdate(_event: {
   schema_version: string
   changes: string[]
 }): void {
-  // 重新拉取 schema 刷新 ContributionRegistry（contributes 可能已变）
-  void reloadContributionRegistry()
+  // 重新拉取 schema 刷新 ContributionRegistry（contributes 可能已变）：
+  // 先失效缓存再装载，fetchSchemaCached 必发新请求（事件驱动强制新鲜）
+  void invalidateSchemaCache().then(() => reloadContributionRegistry())
 }
 
 /**
@@ -170,7 +173,8 @@ export function handleSchemaUpdate(_event: {
  * 注入 CSS 被清理；当前在用其主题时回退 base（syncPluginThemes 内处理）。
  */
 export function refreshPluginContributions(): Promise<void> {
-  return reloadContributionRegistry()
+  // 插件启停即刻生效：先失效缓存，避免 staleTime 窗口内拿到旧 contributes
+  return invalidateSchemaCache().then(() => reloadContributionRegistry())
 }
 
 /** 销毁自生长闭环（完全清理） 用于登出、认证过期等场景，需要彻底清除所有模块状态。 */

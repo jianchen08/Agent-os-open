@@ -1,45 +1,28 @@
 /**
- * 调试会话页面
+ * 调试会话页面（query 化：useDebugSessionsQuery 缓存 SWR，重挂零请求）
  *
  * 展示调试会话列表
  */
 
-import { useState, useEffect, useCallback } from 'react'
 import { ErrorState } from '@/components/shared/ErrorState'
 import { LoadingState } from '@/components/shared/LoadingState'
 import { PageShell } from '@/components/shared/PageShell'
-import { getExecutionRecordsSessions } from '@/services/api/executionRecords'
-import type { SessionInfo } from '@/services/api/executionRecords'
+import { useDebugSessionsQuery } from '@/hooks/queries/useDebugQueries'
 
 /**
  * 调试会话页面组件
  */
 export function DebugSessionsPage({ embedded }: { embedded?: boolean } = {}) {
-  const [sessions, setSessions] = useState<SessionInfo[]>([])
-  const [total, setTotal] = useState(0)
-  const [isLoading, setIsLoading] = useState(true)
-  const [error, setError] = useState<string | null>(null)
-
-  /**
-   * 加载会话列表
-   */
-  const fetchSessions = useCallback(async () => {
-    setIsLoading(true)
-    setError(null)
-    try {
-      const res = await getExecutionRecordsSessions()
-      setSessions(res.sessions || [])
-      setTotal(res.total)
-    } catch (err: any) {
-      setError(err.message || '获取会话列表失败')
-    } finally {
-      setIsLoading(false)
-    }
-  }, [])
-
-  useEffect(() => {
-    fetchSessions()
-  }, [fetchSessions])
+  const sessionsQuery = useDebugSessionsQuery()
+  const sessions = sessionsQuery.data?.sessions ?? []
+  const total = sessionsQuery.data?.total ?? 0
+  // 无缓存数据时显示 loading（有缓存先渲染缓存不闪 loading）
+  const isLoading = sessionsQuery.isPending && !sessionsQuery.data
+  const error = sessionsQuery.isError
+    ? sessionsQuery.error instanceof Error
+      ? sessionsQuery.error.message
+      : '获取会话列表失败'
+    : null
 
   return (
     <PageShell

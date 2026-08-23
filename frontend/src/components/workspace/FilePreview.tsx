@@ -8,6 +8,7 @@
  */
 
 import { FileQuestion, Download, ZoomIn, ZoomOut, RotateCw } from '@/assets/icons'
+import { WORKSPACE_SERVICE_ENDPOINTS } from '@/services/api/endpoints.generated'
 import { useCallback, useMemo, useState } from 'react'
 import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter'
 import { oneDark } from 'react-syntax-highlighter/dist/esm/styles/prism'
@@ -168,7 +169,7 @@ export function FilePreview({
     // 附件直链优先（不依赖 workspaces API）
     if (url) return url
     if (!containerTaskId) return ''
-    return `/ext/channel_api/workspaces/${containerTaskId}/file-content?path=${encodeURIComponent(filePath)}`
+    return `${WORKSPACE_SERVICE_ENDPOINTS.workspaces_file_content_get.replace('{container_task_id}', containerTaskId)}?path=${encodeURIComponent(filePath)}`
   }, [url, containerTaskId, filePath])
 
   const handleZoomIn = useCallback(() => {

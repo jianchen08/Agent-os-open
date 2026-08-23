@@ -161,8 +161,10 @@ async function renderLoaded(
   mockGetPipelineConfig.mockResolvedValue({ name: 'autonomous', data, etag: 'e1' })
   mockFetchCatalog.mockResolvedValue(catalog)
   renderWithProviders(<PipelineSettingsPage />)
+  // 等加载占位消失（isLoading=false 与 config 就位同批 effect，query 版比直连
+  // promise 多一轮状态机周期，等按钮会提前命中）
   await waitFor(() => {
-    expect(screen.getByText('保存配置')).toBeInTheDocument()
+    expect(screen.queryByText(/加载配置/)).not.toBeInTheDocument()
   })
 }
 

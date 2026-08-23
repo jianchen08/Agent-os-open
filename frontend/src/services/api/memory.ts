@@ -20,6 +20,7 @@
  */
 
 import { API_ENDPOINTS } from '@/constants/api'
+import { HINDSIGHT_MEMORY_SERVICE_ENDPOINTS } from './endpoints.generated'
 import apiClient from '@/services/api/client'
 import { requestWithRetry } from '@/utils/retry'
 import type { RetryOptions } from '@/utils/retry'
@@ -156,9 +157,9 @@ export async function getEpisode(id: string, options: RetryOptions = {}): Promis
 
 /**
  * Hindsight 语义检索（成熟包数据面，widget 化 B3 收口）：
- * GET /ext/hindsight_memory_service/recall → {results, total} → {items,total,query}。
+ * GET hindsight_memory_service recall → {results, total} → {items,total,query}。
  * 记忆数据已接入成熟 Hindsight（向量检索，嵌入式 PostgreSQL），本函数是
- * 前端消费入口（替代 channel_api 旧 memory 域 search）。
+ * 前端消费入口（替代已退役 channel_api memory 域 search）。
  */
 export async function searchHindsight(
   query: string,
@@ -167,7 +168,7 @@ export async function searchHindsight(
 ): Promise<MemorySearchResponse> {
   return requestWithRetry(async () => {
     const response = await apiClient.get<{ results: unknown[]; total: number }>(
-      `/ext/hindsight_memory_service/recall?query=${encodeURIComponent(query)}&limit=${top_k}`,
+      `${HINDSIGHT_MEMORY_SERVICE_ENDPOINTS.hindsight_recall}?query=${encodeURIComponent(query)}&limit=${top_k}`,
     )
     const results = response.data.results ?? []
     return {

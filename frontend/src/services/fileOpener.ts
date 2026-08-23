@@ -1,6 +1,7 @@
 /** 文件打开服务 提供统一的文件打开入口，根据文件后缀从后端配置解析编辑器类型， */
 
 import { apiClient } from './api/client'
+import { WORKSPACE_SERVICE_ENDPOINTS } from '@/services/api/endpoints.generated'
 import { registerFileEditor } from '@/stores/fileEditorRegistry'
 import { useLayoutModeStore } from '@/stores/layoutModeStore'
 
@@ -58,13 +59,13 @@ async function defaultBuiltinOpenHandler(
   try {
     // 优先使用任务容器 ID，否则 fallback 到 _local（项目根目录）
     const resolvedContainerId = containerTaskId || '_local'
-    let resp = await apiClient.get(`/ext/channel_api/workspaces/${resolvedContainerId}/file-content`, {
+    let resp = await apiClient.get(WORKSPACE_SERVICE_ENDPOINTS.workspaces_file_content_get.replace('{container_task_id}', resolvedContainerId), {
       params: { path: filePath },
     })
 
     // 任务工作空间未找到文件时，回退到项目根目录 _local 重试
     if (!resp.data?.success && resolvedContainerId !== '_local') {
-      resp = await apiClient.get('/ext/channel_api/workspaces/_local/file-content', {
+      resp = await apiClient.get(WORKSPACE_SERVICE_ENDPOINTS.workspaces_file_content_get.replace('{container_task_id}', '_local'), {
         params: { path: filePath },
       })
     }

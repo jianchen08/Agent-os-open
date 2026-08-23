@@ -2,45 +2,168 @@
 import { usePipelineMessageStore as pipelineStore } from '@/stores/pipelineMessageStore'
 import { loggers } from '@/utils/logger'
 
-import { resolvePipelineId } from '../router'
-
-/** 合并本地流式累积的 parts 与后端 stream_end/new_message 下发的 serverParts。 */
+/** 合并本地流式累积的 parts 与后端 stream_end/new_message 下发的 serverParts。
+ *
+ * 两个调用方语义不同（2026-08-22 修正）：
+ * - `new_message`（preferServer=true）：data.message 是**落库权威完整形态**
+ *   （经共享 mapper 还原，含全部轮次的 thinking/text/tool_call）。以 server
+ *   为基底，本地只补充 server 缺失的增量（tool_result 结果注入、本地独有
+ *   text/thinking）。绝不丢弃 server 权威文本——否则「工具卡片在、最终文本
+ *   消失」（本地有 tool_call 即视为有内容、server 文本被整体丢弃）。
+ * - `stream_end`（preferServer=false，默认）：parts 是**末轮快照**（可能只有
+ *   tool_call 或只有 text，残缺）。本地已按真实时序累积完整 parts
+ *   （text→tool_call→text）时以本地为基底，server 快照只补充本地缺失的
+ *   权威增量（断线期间丢失的 chunk）。
+ *
+ * 两种模式都做：残留 streaming 态收敛为 done + tool_call 结果增量回填。
+ */
 export function mergeStreamingParts(
   localParts: any[] | undefined,
   serverParts: any[] | undefined,
   serverFullContent?: string,
   localContent?: string,
+  opts?: { preferServer?: boolean },
 ): { parts: any[]; content: string } {
-  const hasLocalContent =
-    !!localParts &&
-    localParts.length > 0 &&
-    localParts.some(
-      (p) =>
-        (p.type === 'text' && p.content) ||
-        (p.type === 'thinking' && p.content) ||
-        p.type === 'tool_call' ||
-        (p.type === 'system' && p.content),
-    )
+  const local = localParts || []
+  const server = serverParts || []
+  const preferServer = opts?.preferServer ?? false
 
-  // 本地有完整流式内容 → 优先保留本地 parts，避免被末轮残缺 serverParts 覆盖。
-  // 同时收敛残留 state='streaming' 的 text/thinking part 为 'done'：stream_end 已标志
-  // 流终止，残留的 streaming 状态通常来自 thinking_end 丢失/乱序，不收尾会让卡片图标
-  // 一直转圈（参见 streamTimingRepro 场景3）。仅在实际存在残留时才新建数组，保持引用稳定。
-  let parts: any[]
-  if (hasLocalContent) {
-    const needsFinalize = localParts!.some(
+  // 收敛残留 state='streaming' 的 text/thinking part 为 'done'：stream_end 已标志
+  // 流终止，残留的 streaming 状态通常来自 thinking_end 丢失/乱序，不收尾会让卡片
+  // 图标一直转圈（参见 streamTimingRepro 场景3）。
+  const finalize = (p: any) =>
+    (p.type === 'text' || p.type === 'thinking') && p.state === 'streaming'
+      ? { ...p, state: 'done' as const }
+      : p
+
+  // part 是否有实质内容（text/thinking 有内容、tool_call/system 存在即算）。
+  const hasSubstance = (p: any) =>
+    (p.type === 'text' && p.content) ||
+    (p.type === 'thinking' && p.content) ||
+    p.type === 'tool_call' ||
+    (p.type === 'system' && p.content)
+
+  // 无 server parts（旧后端/未下发）→ 本地原样保留（仅收敛 streaming 态）。
+  if (server.length === 0) {
+    const needsFinalize = local.some(
       (p) => (p.type === 'text' || p.type === 'thinking') && p.state === 'streaming',
     )
-    parts = needsFinalize
-      ? localParts!.map((p) =>
-          (p.type === 'text' || p.type === 'thinking') && p.state === 'streaming'
-            ? { ...p, state: 'done' as const }
-            : p,
-        )
-      : localParts!
-  } else {
-    parts = serverParts && serverParts.length > 0 ? serverParts : []
+    const parts = needsFinalize ? local.map(finalize) : local
+    const currentContent = localContent || ''
+    const content =
+      serverFullContent && serverFullContent.length > currentContent.length
+        ? serverFullContent
+        : currentContent
+    return { parts, content }
   }
+
+  // 默认模式（stream_end 残缺快照）且本地为空 → 直接用 server（保持引用）。
+  if (!preferServer && local.length === 0) {
+    const needsFinalize = server.some(
+      (p) => (p.type === 'text' || p.type === 'thinking') && p.state === 'streaming',
+    )
+    const parts = needsFinalize ? server.map(finalize) : server
+    const currentContent = localContent || ''
+    const content =
+      serverFullContent && serverFullContent.length > currentContent.length
+        ? serverFullContent
+        : currentContent
+    return { parts, content }
+  }
+
+  // 默认模式且本地全部无实质内容（空占位残留）→ 直接用 server（保持引用）。
+  if (!preferServer && local.every((p: any) => !hasSubstance(p))) {
+    const needsFinalize = server.some(
+      (p) => (p.type === 'text' || p.type === 'thinking') && p.state === 'streaming',
+    )
+    const parts = needsFinalize ? server.map(finalize) : server
+    const currentContent = localContent || ''
+    const content =
+      serverFullContent && serverFullContent.length > currentContent.length
+        ? serverFullContent
+        : currentContent
+    return { parts, content }
+  }
+
+  // 基底选择：preferServer（new_message 权威完整形态）→ server；
+  // 否则（stream_end 残缺快照）→ 本地完整累积优先。
+  const base = preferServer ? server : local
+  const supplement = preferServer ? local : server
+
+  // 收敛基底残留 streaming 态（无残留时保持原引用）。
+  const needsFinalize = base.some(
+    (p) => (p.type === 'text' || p.type === 'thinking') && p.state === 'streaming',
+  )
+  const baseParts = needsFinalize ? base.map(finalize) : base
+
+  // 增量补充（supplement 中基底缺失的 text/thinking/tool_call，按内容指纹去重）。
+  const baseTexts = new Set(
+    baseParts
+      .filter((p: any) => p.type === 'text' && p.content)
+      .map((p: any) => p.content),
+  )
+  const baseThink = new Set(
+    baseParts
+      .filter((p: any) => p.type === 'thinking' && p.content)
+      .map((p: any) => p.content),
+  )
+  const baseToolIds = new Set(
+    baseParts.filter((p: any) => p.type === 'tool_call').map((p: any) => p.callId),
+  )
+
+  // tool_call 结果增量回填：supplement 中同名 tool_call 携带的
+  // result/error/resultData/containerTaskId/durationMs/partialOutput，
+  // 基底缺失时补入（不覆盖基底权威字段）。
+  const hasToolEnrich = baseParts.some(
+    (p: any) =>
+      p.type === 'tool_call' &&
+      supplement.some(
+        (sp: any) =>
+          sp.type === 'tool_call' &&
+          sp.callId === p.callId &&
+          (sp.result !== undefined ||
+            sp.error !== undefined ||
+            sp.resultData !== undefined ||
+            sp.containerTaskId !== undefined ||
+            sp.durationMs !== undefined ||
+            sp.partialOutput !== undefined),
+      ),
+  )
+  const enriched = hasToolEnrich
+    ? baseParts.map((p: any) => {
+        if (p.type !== 'tool_call') return p
+        const supMatch = supplement.find(
+          (sp: any) => sp.type === 'tool_call' && sp.callId === p.callId,
+        )
+        if (!supMatch) return p
+        const merged: any = { ...p }
+        for (const k of [
+          'result', 'error', 'resultData', 'containerTaskId', 'durationMs', 'partialOutput',
+        ]) {
+          if (supMatch[k] !== undefined && merged[k] === undefined) {
+            merged[k] = supMatch[k]
+          }
+        }
+        return merged
+      })
+    : baseParts
+
+  const extra: any[] = []
+  for (const sp of supplement) {
+    if (sp.type === 'text' && sp.content && !baseTexts.has(sp.content)) {
+      extra.push(finalize(sp))
+      baseTexts.add(sp.content)
+    } else if (sp.type === 'thinking' && sp.content && !baseThink.has(sp.content)) {
+      extra.push(finalize(sp))
+      baseThink.add(sp.content)
+    } else if (sp.type === 'tool_call' && !baseToolIds.has(sp.callId)) {
+      // supplement 有基底未带的 tool_call（快照截断）→ 保留
+      extra.push(finalize(sp))
+      baseToolIds.add(sp.callId)
+    }
+  }
+
+  const parts = extra.length > 0 ? [...enriched, ...extra] : enriched
 
   // content 校准：server 的 full_content 更长时采用（本地逐 chunk 拼接可能不完整）
   const currentContent = localContent || ''
@@ -89,27 +212,23 @@ export function startPipelineStreaming(
   }, 90000)
 }
 
-/** 停止管道流式传输 */
-export function stopPipelineStreaming(pipelineId: string, threadId?: string): void {
+/** 停止管道流式传输——只清事件明确归属的管道。
+ *  ADR 2026-08-21「清别人状态」废除：不再顺带 stopStreaming(threadId)——
+ *  threadId 是会话坐标非管道 ID，拿它当管道清是"主管道 ID == sessionId"
+ *  隐性等式的猜测，等式不成立时清不到任何东西、成立时纯属重复。 */
+export function stopPipelineStreaming(pipelineId: string): void {
   pipelineStore.getState().stopStreaming(pipelineId)
-  if (threadId && threadId !== pipelineId) {
-    pipelineStore.getState().stopStreaming(threadId)
-  }
 }
 
-/** 分配下一个 sequence 值。 - 后端消息：直接使用后端 sequence（后端 emit_notification / new_message / stream_end 都从 _entry.next_sequence() 共享计数器取值，是权威值，与流式输出共序，保证相对顺序正确）。 - 本地乐观消息（无 backendSequence，如 stream_start 占位、用户刚发的消息）：用 localMax+1 占位，待后端权威值到达后由 initFromAPI 对账纠正。 不再用 Math.max(backendSeq, localMax+1) 抬升后端权威值——那会让延迟到达的系统通知（后端 seq 早于本地 localMax）被错误排到后续 AI 回复之后。 */
-export function allocateNextSequence(pipelineId: string, backendSequence?: number): number {
-  if (backendSequence != null && backendSequence > 0) {
-    return backendSequence
-  }
-  const existingMsgs = pipelineStore.getState().getMessages(pipelineId)
-  const localMax = existingMsgs.reduce(
-    (max: number, m: any) => Math.max(max, m.sequence ?? 0), 0,
-  )
-  return localMax + 1
-}
+// allocateNextSequence（本地拼 localMax+1）已按 ADR 2026-08-21 废除：客户端
+// 不再为 store 消息伪造 sequence——事件未携带权威 seq 时挂空（compareMessages
+// 回落 timestamp 排序），权威值到达后由对账纠正。
 
-/** 确保流式占位符消息存在 合并 startStreaming + setStreamingForTab + addMessage 三步操作， */
+/** 确保流式占位符消息存在 精确 ID 生命周期（ADR 2026-08-21）：占位气泡以后端
+ * 真实 message_id 为键（stream_start 事件携带；发送瞬间的反馈由 pending 区承担，
+ * 不再在主 store 建 placeholder_ 前缀气泡）。同 id 已存在（chunk 先于 start 自动
+ * 建占位 / 事件重放）→ 原地保留，绝不改写别的消息的 id（旧"并入前一条改写 ID"
+ * 是迟到事件劫持当前气泡的空气泡根因，已废除）。 */
 export function ensureStreamingPlaceholder(
   pipelineId: string,
   messageId: string,
@@ -120,29 +239,15 @@ export function ensureStreamingPlaceholder(
 
   const store = pipelineStore.getState()
   const existing = store.getMessages(pipelineId)
-  // 当前轮次的占位气泡：列表中最后一条 streaming 的 placeholder_* assistant
-  // （由 handleSendMessage 刚创建，等待本 stream_start 合并）。清理时必须保留它，
-  // 只清理更早轮次残留的 orphan——现在也覆盖 placeholder_* 占位气泡（abort 后
-  // 上一轮的占位气泡若残留 streaming 状态会一直显示"思考中"）。
-  const lastMsg = existing[existing.length - 1]
-  const currentPlaceholderId =
-    lastMsg && lastMsg.role === 'assistant' && lastMsg.status === 'streaming'
-    && typeof lastMsg.id === 'string' && lastMsg.id.startsWith('placeholder_')
-      ? lastMsg.id
-      : null
+
+  // 精确匹配：同 id 消息已存在（含已积累的流式内容）→ 原地保留
+  if (existing.some((m) => m.id === messageId)) return
+
+  // orphan 清理：本轮 start 之前残留的 streaming assistant（上一轮 stream_end
+  // 丢失/断线遗留）。有完整内容 → completed 保留；有未解析 tool_call 或完全
+  // 无内容 → 移除（后端权威内容由对账补回）。
   for (const msg of existing) {
-    if (
-      msg.role === 'assistant'
-      && msg.status === 'streaming'
-      && msg.id !== messageId
-      && (
-        !msg.id.startsWith('placeholder_') // 非占位符残留：照旧清理（原行为）
-        || msg.id !== currentPlaceholderId  // 占位符 orphan（非当前轮次）：清理
-      )
-    ) {
-      // 这些残留消息被标记 completed 后会与新的流式消息合并，造成渲染混乱。
-      // - 所有 tool_call 已解析 + 有内容 → 标记 completed 保留
-      // - 完全无内容 → remove
+    if (msg.role === 'assistant' && msg.status === 'streaming' && msg.id !== messageId) {
       const parts = msg.parts || []
       const hasTextContent = (msg.content || '').length > 0
       const unresolvedToolCalls = parts.some(
@@ -153,12 +258,8 @@ export function ensureStreamingPlaceholder(
       )
 
       if (unresolvedToolCalls) {
-        // 有未解析的 tool_call → 消息不完整，直接移除
         store.removeMessage(pipelineId, msg.id)
       } else if (hasTextContent || resolvedParts.length > 0) {
-        // 有完整内容 → 保留但标记 completed，同时收尾所有 part 状态
-        // （text/thinking 'streaming' -> 'done'，tool_call -> 'done'），避免
-        // isStreamingMessage 因残留 streaming part 仍判定为流式。
         const finalizedParts = resolvedParts.map((p: any) => {
           if (p.type === 'tool_call') return { ...p, state: 'done' as const }
           if (p.type === 'text' || p.type === 'thinking') {
@@ -171,42 +272,18 @@ export function ensureStreamingPlaceholder(
           parts: finalizedParts.length > 0 ? finalizedParts : undefined,
         } as any)
       } else {
-        // 完全空消息 → 移除
         store.removeMessage(pipelineId, msg.id)
       }
     }
   }
 
-  // 新 AI 消息来了，看前一条是什么：
-  // - 前一条是 user/system（或没有前一条）→ 新建独立气泡
-  // - 前一条是 assistant 且仍处于 streaming → 合并到前一条（不新建气泡，新内容追加进去）
-  // 前一条 assistant 已 completed 时 id 冻结，绝不改写：否则会污染已完成消息的权威 id，
-  // 导致后续 chunk 按 hex id 查找命中错误消息（断线重连场景的空气泡根因）。
-  const after = store.getMessages(pipelineId)
-  const prevMsg = after[after.length - 1]
-  // ★ 诊断：stream_start 到达时的 store 状态
-  loggers.websocket.info(
-    '[STREAM-ARRIVE] total=%d prev=[%s/%s/%s] newMsg=%s willMerge=%s',
-    after.length,
-    prevMsg?.role ?? 'null',
-    prevMsg?.status ?? 'null',
-    (prevMsg?.id ?? '').slice(0, 10),
-    messageId.slice(0, 10),
-    prevMsg?.role === 'assistant' && prevMsg?.status === 'streaming',
-  )
-  if (prevMsg && prevMsg.role === 'assistant' && prevMsg.status === 'streaming') {
-    // 合并到前一条 AI：把它的 id 更新为本轮的新 messageId，
-    // 这样后续 stream_chunk / tool_start 按新 messageId 操作时落到同一条消息。
-    // 同时重新置为 streaming，继续接收新内容。
-    store.updateMessage(pipelineId, prevMsg.id, {
-      id: messageId,
-      status: 'streaming',
-    } as any)
-    return
-  }
-
-  // 前一条是 user/system 或没有前一条 → 新建独立气泡
-  const placeholderSeq = allocateNextSequence(pipelineId, backendSequence)
+  // 前一条不是本消息（正常路径：前一条是 user/已完成的 assistant）→ 新建占位。
+  // sequence：stream_start 事件不携带消息 seq（后端在引擎执行时才分配），
+  // 挂 undefined（排序落到末尾按 timestamp），stream_end 的 final_sequence /
+  // new_message 的权威 seq 到达后由对账纠正——绝不本地拼 localMax+1 冒充权威值。
+  const placeholderSeq = backendSequence != null && backendSequence > 0
+    ? backendSequence
+    : undefined
 
   store.addMessage(pipelineId, {
     id: messageId,
@@ -217,8 +294,6 @@ export function ensureStreamingPlaceholder(
     parentId: null,
     sequence: placeholderSeq,
     status: 'streaming',
-    // F1：带 _lastUpdated，让 persist merge 的 5min grace 可靠保留 streaming 占位，
-    // 刷新后 handleReconnected 才能据 status==='streaming' 扫到并 backfill（否则会被 grace 丢弃）。
     _lastUpdated: Date.now(),
   } as any)
 }
@@ -228,18 +303,9 @@ export function extractThreadId(eventData: any): string | undefined {
   return eventData.data?._threadId || eventData._threadId
 }
 
-/** 终止管道：清理 streamingState 仅在 stream_end / stream_error 等终止事件到达时调用。 */
-export function terminatePipeline(pipelineId: string, threadId?: string): void {
-  stopPipelineStreaming(pipelineId, threadId)
+/** 终止管道：清理 streamingState 仅在 stream_end / stream_error 等终止事件到达时调用。
+ *  只清事件明确归属的管道（ADR 2026-08-21）。 */
+export function terminatePipeline(pipelineId: string): void {
+  stopPipelineStreaming(pipelineId)
 }
 
-/** 解析 pipelineId 并执行空值守卫 + warn 日志 返回 null 表示 pipelineId 为空，调用方应跳过处理。 */
-export function resolveRequiredPipelineId(eventData: any, context: string): string | null {
-  const pipelineId = resolvePipelineId(eventData)
-  if (!pipelineId) {
-    // -M03: WS handler 层 console 残留
-    loggers.websocket.warn('[streaming] %s: pipelineId 为空，跳过事件', context)
-    return null
-  }
-  return pipelineId
-}

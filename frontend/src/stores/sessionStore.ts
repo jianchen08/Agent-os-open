@@ -1,29 +1,29 @@
+/**
+ * 会话会话级 UI 状态 store（服务端状态 query 化批次 1 瘦身）
+ *
+ * sessions 列表数据已迁 TanStack Query（hooks/queries/useSessionsQuery），
+ * 本 store 只保留纯客户端状态：当前选中会话、删除中标记、WS 连接状态。
+ * 历史字段 sessions/isLoading/error/clearError 已随迁移退役。
+ */
+
 import { create } from 'zustand'
 import { globalWS } from '@/services/websocket/GlobalWebSocket'
 import { WebSocketStatus } from '@/constants/websocket'
-import type { Session } from '@/types/models'
 
 interface SessionState {
-  sessions: Session[]
   activeSessionId: string | null
-  isLoading: boolean
   deletingSessionIds: Set<string>
-  error: string | null
   wsStatus: string
   forceReconnect: boolean
   _wsUnsubscribers: { cleanup: () => void } | null
 
   connectWebSocket: (token: string) => void
   disconnectWebSocket: () => void
-  clearError: () => void
 }
 
 export const useSessionStore = create<SessionState>()((set, get) => ({
-  sessions: [],
   activeSessionId: null,
-  isLoading: false,
   deletingSessionIds: new Set<string>(),
-  error: null,
   wsStatus: WebSocketStatus.DISCONNECTED,
   forceReconnect: false,
   _wsUnsubscribers: null,
@@ -41,9 +41,5 @@ export const useSessionStore = create<SessionState>()((set, get) => ({
 
   disconnectWebSocket: () => {
     set({ wsStatus: WebSocketStatus.DISCONNECTED, _wsUnsubscribers: null })
-  },
-
-  clearError: () => {
-    set({ error: null })
   },
 }))

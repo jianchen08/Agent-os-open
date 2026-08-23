@@ -9,6 +9,7 @@ import { useContextKeys } from '@/stores/contextKeysStore'
 // retry removed per audit: 内部 API 不应内置重试，429/5xx 重试统一由 axios interceptor 管理
 import type { Message } from '@/types/models'
 import type { MessagePart, ToolCallPart } from '@/types/messageParts'
+import { decideClaim } from '@/streaming/claim'
 
 const logger = loggers.sessionStore
 
@@ -126,11 +127,6 @@ export function trimMessagesForPersistence(
 /** 单个管道在「内存」中保留的最大消息条数 与 PERSIST_MAX_MESSAGES_PER_PIPELINE（仅持久化裁剪）不同：内存里的 */
 const MAX_MESSAGES_PER_PIPELINE_IN_MEMORY = 2000
 
-/** initFromAPI 保留「飞行中」本地消息的新鲜度窗口（ms）：乐观 user 以 timestamp、
- *  streaming 占位以 _lastUpdated 判定；超窗的视为 persist 残留/断线残留，按
- *  刷新去漂移语义丢弃。窗口需覆盖后端 init 慢读（大会话全量读 10-40s）。 */
-const INFLIGHT_FRESH_MS = 90_000
-
 /** 限制单管道内存消息数，防止无限增长导致浏览器 OOM。 仅在超量时裁剪：按 sequence 排序后保留最新的 N 条。未超限时只做一次 */
 function capMessagesForMemory(msgs: Message[]): Message[] {
   if (msgs.length <= MAX_MESSAGES_PER_PIPELINE_IN_MEMORY) return msgs
@@ -139,6 +135,56 @@ function capMessagesForMemory(msgs: Message[]): Message[] {
 
 /** 并发去重：跟踪正在进行的 fetch 请求，避免同一 pipelineId 重复请求 */
 const _fetchingPipelines = new Map<string, Promise<void>>()
+
+/** 刷新后后台全量对账去重（同一管道只对账一次；流式结束前的对账推迟） */
+const _reconcilingPipelines = new Set<string>()
+
+/**
+ * 刷新后后台静默全量对账（2026-08-22）：auto 首次进入且本地有 IndexedDB 缓存时，
+ * 页面立即用缓存渲染（秒开），全量 API 对账放后台执行——initFromAPI 权威替换
+ * 能修正刷新前流式断线留下的空洞/残影（增量补漏 after_sequence 拉不到已加载
+ * 区间内的缺失消息）。对账无变化时对 UI 零影响；失败静默（缓存已渲染，下次
+ * 进入/WS 重连重试）。流式进行中跳过——init 全量替换会清流式占位。
+ */
+async function reconcileFromAPI(pipelineId: string, threadId: string): Promise<void> {
+  if (_reconcilingPipelines.has(pipelineId)) return
+  const store = usePipelineMessageStore.getState()
+  if (store.isStreaming(pipelineId)) return
+  _reconcilingPipelines.add(pipelineId)
+  try {
+    await store.fetchMessages(pipelineId, { threadId })
+    usePipelineMessageStore.setState((s) => ({
+      reconciledByPipeline: { ...s.reconciledByPipeline, [pipelineId]: true },
+    }))
+  } catch {
+    // 静默失败：缓存已渲染，待下次触发重试
+  } finally {
+    _reconcilingPipelines.delete(pipelineId)
+  }
+}
+
+/** IndexedDB rehydrate 完成信号（persist onFinishHydration 设置；刷新后首屏
+ *  loadPipelineMessages 在 rehydrate 前到达时等待，否则本地缓存不可见 →
+ *  auto 判定"未对账"全量 init，IndexedDB 缓存形同虚设，2026-08-22 实锤） */
+let _hydrated = false
+const _hydrationWaiters: Array<() => void> = []
+const _markHydrated = () => {
+  _hydrated = true
+  for (const resolve of _hydrationWaiters.splice(0)) resolve()
+}
+/** 等待 persist rehydrate 完成（已完成立即返回；500ms 兜底防极端情况挂起） */
+function waitForMessageHydration(): Promise<void> {
+  if (_hydrated) return Promise.resolve()
+  return new Promise((resolve) => {
+    _hydrationWaiters.push(resolve)
+    // 兜底：rehydrate 未触发（存储异常等）也不阻塞加载，缓存恢复退化为全量 API
+    window.setTimeout(() => {
+      const idx = _hydrationWaiters.indexOf(resolve)
+      if (idx !== -1) _hydrationWaiters.splice(idx, 1)
+      resolve()
+    }, 500)
+  })
+}
 
 /** 管道元数据 */
 export interface PipelineMeta {
@@ -205,6 +251,22 @@ interface PipelineMessageState {
   removeMessage: (pipelineId: string, messageId: string) => void
   /** 获取指定管道的消息列表 */
   getMessages: (pipelineId: string) => Message[]
+
+  /** 认领 user 消息（ADR 2026-08-22「认领替代驱逐」）：按 cmid 找到乐观 user
+   *  消息 → 权威 record_id/seq 记入独立 recordId 字段（UI 寻址 id 永不变），
+   *  status='completed'。候选缺失（断线期间确认到达/刷新窗口）→ 以
+   *  cmid 为 id 插入权威 user 版——「发送后用户消息消失」结构性不可能。 */
+  claimUserMessage: (pipelineId: string, cmid: string, userRecord: {
+    id?: string
+    content?: unknown
+    sequence?: number
+    metadata?: Record<string, unknown> | null
+  }) => 'upgraded' | 'inserted' | 'skipped'
+
+  /** 确认主数组乐观 user（旧内核无 user_message 回传的兼容路径）：按 cmid 把
+   *  status='sending' 标记为 'completed'（后端已持久化；权威 id/seq 由对账补正）。
+   *  无候选 → skipped（不插不建——后端记录由对账拉取）。 */
+  confirmUserMessage: (pipelineId: string, cmid: string) => boolean
 
   /** 开始流式传输 */
   startStreaming: (pipelineId: string, messageId: string) => void
@@ -315,17 +377,6 @@ function mergeSorted(a: Message[], b: Message[]): Message[] {
   return result
 }
 
-/** 生成消息指纹，用于跨 ID 格式（WS UUID vs API hex）去重 */
-function makeMessageFingerprint(m: Message): string {
-  const seq = m.sequence
-  if (seq != null) {
-    return m.role + '::seq::' + seq
-  }
-  // Fallback: include content prefix for disambiguation
-  const contentPrefix = (m.content || '').substring(0, 80)
-  return m.role + '::' + m.timestamp + '::' + contentPrefix
-}
-
 /**
  * 判断本地消息是否被 API 权威消息覆盖（即二者是同一条逻辑消息）。
  *
@@ -333,13 +384,27 @@ function makeMessageFingerprint(m: Message): string {
  * - id 相同 → 同一条（后端 record_id == WS message_id，正常路径）
  * - clientMessageId 相同 → 同一条（user 乐观版 id=前端 UUID，API 版 id=后端
  *   record_id，id 不同但后端从乐观消息回传了相同 clientMessageId）
+ * - recordId 相同 → 同一条（ADR 2026-08-22 双字段范式：本地已认领的 user 消息
+ *   UI id 是前端 uuid、API 权威版 id 是后端 record_id，按 recordId 收敛）
  *
  * 命中时本地版让位 API 版（丢弃本地、保留 API），保证全量与增量两条路径的
  * 渲染终态一致 —— 切会话回来（增量）与刷新（全量）不会产生不同的消息列表。
+ * （ADR 2026-08-21/2026-08-22：仅精确键裁决，不做 role::seq 指纹等模糊匹配——
+ * 非唯一键，撞号时写错目标/误删，业界流式系统一律事件携带权威 ID 精确匹配。）
  */
-function isCoveredByApi(m: Message, apiIds: Set<string>, apiByClientId: Map<string, Message>): boolean {
+function isCoveredByApi(
+  m: Message,
+  apiIds: Set<string>,
+  apiByClientId: Map<string, Message>,
+  apiByRecordId?: Map<string, Message>,
+): boolean {
   if (apiIds.has(m.id)) return true
   if (m.clientMessageId && apiByClientId.has(m.clientMessageId)) return true
+  // ADR 2026-08-22 双字段范式：本地已认领 user（UI id=uuid, recordId=mc_ 指纹）
+  // 与 API 权威版（id=后端 record_id，与 recordId 同值）收敛——按 recordId 命中
+  // API id 集即同一条，刷新/补漏后不产生重复气泡
+  if (m.recordId && apiIds.has(m.recordId)) return true
+  if (m.recordId && apiByRecordId?.has(m.recordId)) return true
   return false
 }
 
@@ -360,12 +425,14 @@ function mergeIncrementalApiWithLocal(apiSorted: Message[], existing: Message[])
 
   const apiIds = new Set(apiSorted.map((m) => m.id))
   const apiByClientId = new Map<string, Message>()
+  const apiByRecordId = new Map<string, Message>()
   for (const m of apiSorted) {
     if (m.clientMessageId) apiByClientId.set(m.clientMessageId, m)
+    if (m.recordId) apiByRecordId.set(m.recordId, m)
   }
 
   // 本地消息：被 API 覆盖 → 让位 API 版（丢弃本地乐观版）；其余全部保留（增量语义）。
-  const keptLocal = existing.filter((m) => !isCoveredByApi(m, apiIds, apiByClientId))
+  const keptLocal = existing.filter((m) => !isCoveredByApi(m, apiIds, apiByClientId, apiByRecordId))
 
   // mergeSorted 要求两边各自升序；keptLocal 来自 existing（可能无序），先排序。
   return mergeSorted([...keptLocal].sort(compareMessages), apiSorted)
@@ -468,9 +535,9 @@ export const usePipelineMessageStore = create<PipelineMessageState>()(
       }
 
       // bottomCursor 只由 API 权威路径（initFromAPI / appendMessages / prependMessages）维护。
-      // addMessage 是乐观/流式/通知消息的入口（router 乐观 user、ensureStreamingPlaceholder
-      // 流式占位、handleSystemNotification 系统通知），其 sequence 来自本地分配
-      // （allocateNextSequence 可能用 Math.max(localMax+1) 抬升），并非后端权威值。
+      // addMessage 是乐观/流式/通知消息的入口（pending 乐观 user、ensureStreamingPlaceholder
+      // 流式占位、handleSystemNotification 系统通知、send_failed 错误气泡），其
+      // sequence 非后端权威值（无权威 seq 时挂空，ADR 2026-08-21 已废除本地拼号）。
       // 若让它推进 bottomCursor，会污染双游标：
       //   - 系统通知 sequence 被抬到 localMax+1，initFromAPI 重排时被 mergeSorted 排到末尾，
       //     导致「通知跑到 AI 回复后面」（排序错乱）。
@@ -490,34 +557,120 @@ export const usePipelineMessageStore = create<PipelineMessageState>()(
     })
   },
 
-  /** 更新指定管道中的消息（部分更新），支持模糊匹配 注意：找不到消息时不会自动创建，仅输出 warn 日志。 */
+  /** 认领 user 消息（ADR 2026-08-22「认领替代驱逐 + UI 寻址 id 永不迁移」）。
+   *  裁决规则（纯逻辑见 src/streaming/claim.ts）：
+   *  - 主数组候选命中 → upgrade：权威 record_id/seq 记入独立 recordId 字段，
+   *    UI id 不变（React key 稳定），status='completed'
+   *  - 候选缺失 → insert：以 cmid 为 id 补插权威 user 版（后端已持久化，不能丢）
+   *  - 已认领/不匹配 → skip（幂等）
+   *  乐观 user 消息自发送瞬间就在主数组（单一消息数组，ADR 2026-08-22）——
+   *  认领即原地升级，无 pending 区。 */
+  claimUserMessage: (pipelineId, cmid, userRecord) => {
+    const state = get()
+    // 主数组候选：优先同 cmid（认领过的 recordId 幂等判据在裁决内）
+    const mainMsgs = state.messagesByPipeline[pipelineId] || []
+    const candidate = mainMsgs.find((m) => m.clientMessageId === cmid)
+      || mainMsgs.find((m) => m.recordId === userRecord.id)
+
+    const act = decideClaim(
+      candidate
+        ? { id: candidate.id, clientMessageId: candidate.clientMessageId, status: candidate.status, recordId: candidate.recordId }
+        : undefined,
+      userRecord,
+      cmid,
+    )
+
+    if (act.kind === 'skip') return 'skipped'
+
+    set((stateInner) => {
+      const msgs = stateInner.messagesByPipeline[pipelineId] || []
+      if (act.kind === 'upgrade') {
+        const idx = msgs.findIndex((m) => m.id === act.messageId)
+        const next = [...msgs]
+        if (idx >= 0) {
+          next[idx] = {
+            ...next[idx],
+            recordId: act.recordId,
+            status: 'completed',
+            ...(act.sequence != null ? { sequence: act.sequence } : {}),
+          }
+        } else {
+          // 候选在主数组不存在（断线期间确认到达/刷新窗口）→ 补插权威版（保留 UI id）
+          next.push({
+            id: act.messageId,
+            sessionId: stateInner.pipelineSessionMap[pipelineId] || '',
+            role: 'user',
+            content: typeof userRecord.content === 'string' ? userRecord.content : '',
+            timestamp: new Date().toISOString(),
+            status: 'completed',
+            clientMessageId: cmid,
+            recordId: act.recordId,
+            sequence: act.sequence,
+          } as Message)
+        }
+        return {
+          messagesByPipeline: { ...stateInner.messagesByPipeline, [pipelineId]: capMessagesForMemory(next) },
+        }
+      }
+      // insert：以 cmid 为 UI id 补插（权威 user 已持久化，绝不能因本地缺候选而丢）
+      if (msgs.some((m) => m.id === act.messageId || m.recordId === act.recordId)) {
+        return stateInner
+      }
+      return {
+        messagesByPipeline: {
+          ...stateInner.messagesByPipeline,
+          [pipelineId]: capMessagesForMemory([
+            ...msgs,
+            {
+              id: act.messageId,
+              sessionId: stateInner.pipelineSessionMap[pipelineId] || '',
+              role: 'user',
+              content: typeof userRecord.content === 'string' ? userRecord.content : '',
+              timestamp: new Date().toISOString(),
+              status: 'completed',
+              clientMessageId: cmid,
+              recordId: act.recordId,
+              sequence: act.sequence,
+            } as Message,
+          ]),
+        },
+      }
+    })
+    return act.kind === 'upgrade' ? 'upgraded' : 'inserted'
+  },
+
+  /** 确认主数组乐观 user（旧内核无 user_message 回传的兼容路径）。 */
+  confirmUserMessage: (pipelineId, cmid) => {
+    let hit = false
+    set((stateInner) => {
+      const msgs = stateInner.messagesByPipeline[pipelineId] || []
+      const idx = msgs.findIndex((m) => m.clientMessageId === cmid)
+      if (idx < 0 || msgs[idx].status === 'completed') return stateInner
+      hit = true
+      const next = [...msgs]
+      next[idx] = { ...next[idx], status: 'completed' }
+      return {
+        messagesByPipeline: { ...stateInner.messagesByPipeline, [pipelineId]: next },
+      }
+    })
+    return hit
+  },
+
+  /** 更新指定管道中的消息（部分更新）。精确 ID 匹配（ADR 2026-08-21）：失配即
+   * 记 error 并跳过——不做 role+sequence/指纹等模糊匹配（非唯一键，迟到事件
+   * 会写错旧消息）。找不到目标说明事件与本地状态脱节，正确处置是等对账补正，
+   * 而不是猜一条相近的写。 */
   updateMessage: (pipelineId: string, messageId: string, partial: Partial<Message>) => {
     set((state) => {
       const pipelineMessages = state.messagesByPipeline[pipelineId] || []
 
-      let messageIndex = pipelineMessages.findIndex((m) => m.id === messageId)
-
-      // 精确匹配失败时，assistant 消息尝试基于 sequence 模糊匹配
-      if (messageIndex < 0 && partial.role === 'assistant' && partial.sequence != null) {
-        messageIndex = pipelineMessages.findIndex((m) =>
-          m.role === 'assistant' && m.sequence === partial.sequence,
-        )
-      }
-
-      if (messageIndex < 0) {
-        if (partial.sequence != null) {
-          const fingerprint = (partial.role || 'assistant') + '::seq::' + partial.sequence
-          messageIndex = pipelineMessages.findIndex((m) => makeMessageFingerprint(m) === fingerprint)
-        }
-      }
+      const messageIndex = pipelineMessages.findIndex((m) => m.id === messageId)
 
       if (messageIndex < 0) {
         logger.error(
-          '[updateMessage] 目标消息不存在，跳过更新（不创建避免重复）: pipelineId=%s messageId=%s role=%s seq=%s',
+          '[updateMessage] 目标消息不存在，跳过更新（精确匹配，不创建不模糊匹配）: pipelineId=%s messageId=%s',
           pipelineId?.slice(0, 12),
           messageId?.slice(0, 12),
-          partial.role ?? 'unknown',
-          partial.sequence ?? 'unknown',
         )
         return state
       }
@@ -591,34 +744,39 @@ export const usePipelineMessageStore = create<PipelineMessageState>()(
         if (messageIndex >= 0) {
           const updatedMessages = [...pipelineMessages]
           const stoppedMsg = updatedMessages[messageIndex]
-          // 收尾 part 状态：仅设置 message.status='completed' 会让 isStreamingMessage
-          // 仍因残留的 'streaming'/'calling' part 返回 true（数据不一致，Stop 后再发新
-          // 消息会卡在"思考中"）。与 handleStreamError 对齐：
-          //   text/thinking 'streaming' -> 'done'
-          //   tool_call 'calling'/'streaming' -> 'error'（abort 后未返回的工具调用视为失败）
-          const finalizedParts = (stoppedMsg.parts || []).map((p) => {
-            const partState = (p as { state?: string }).state
-            if ((p.type === 'text' || p.type === 'thinking') && partState === 'streaming') {
-              return { ...p, state: 'done' as const } as MessagePart
+          // 只收尾「流式 assistant」：sending/failed 的 user 乐观消息不归本方法管
+          // （发送失败标 failed 后 stopStreaming 不得把它覆盖成 completed——
+          // 2026-08-22 单一消息数组：失败语义由调用方显式设置）。
+          if (stoppedMsg.role === 'assistant') {
+            // 收尾 part 状态：仅设置 message.status='completed' 会让 isStreamingMessage
+            // 仍因残留的 'streaming'/'calling' part 返回 true（数据不一致，Stop 后再发新
+            // 消息会卡在"思考中"）。与 handleStreamError 对齐：
+            //   text/thinking 'streaming' -> 'done'
+            //   tool_call 'calling'/'streaming' -> 'error'（abort 后未返回的工具调用视为失败）
+            const finalizedParts = (stoppedMsg.parts || []).map((p) => {
+              const partState = (p as { state?: string }).state
+              if ((p.type === 'text' || p.type === 'thinking') && partState === 'streaming') {
+                return { ...p, state: 'done' as const } as MessagePart
+              }
+              if (p.type === 'tool_call' && (partState === 'calling' || partState === 'streaming')) {
+                return { ...p, state: 'error' as const } as MessagePart
+              }
+              return p
+            })
+            updatedMessages[messageIndex] = {
+              ...stoppedMsg,
+              parts: finalizedParts,
+              status: 'completed',
+              _lastUpdated: Date.now(),
             }
-            if (p.type === 'tool_call' && (partState === 'calling' || partState === 'streaming')) {
-              return { ...p, state: 'error' as const } as MessagePart
-            }
-            return p
-          })
-          updatedMessages[messageIndex] = {
-            ...stoppedMsg,
-            parts: finalizedParts,
-            status: 'completed',
-            _lastUpdated: Date.now(),
-          }
 
-          return {
-            streamingState: newStreamingState,
-            messagesByPipeline: {
-              ...state.messagesByPipeline,
-              [pipelineId]: updatedMessages,
-            },
+            return {
+              streamingState: newStreamingState,
+              messagesByPipeline: {
+                ...state.messagesByPipeline,
+                [pipelineId]: updatedMessages,
+              },
+            }
           }
         }
       }
@@ -646,49 +804,32 @@ export const usePipelineMessageStore = create<PipelineMessageState>()(
       logger.info('[initFromAPI] pipelineId=%s apiMsgs=%d existingMsgs=%d',
         pipelineId?.slice(0, 12), sorted.length, existing?.length || 0)
 
-      // ★ 刷新语义：API 权威替换本地缓存（不合并、不宽限），但保留两类
-      // 「飞行中」本地消息（2026-08-20 回归：刷新后首条消息被迟到的 init
-      // 响应冲掉、用户输入凭空消失——后端大会话 init 全量读可达 10-40s，
-      // 竞争窗口内后端可能尚未收到/落库该消息，丢弃后无从找回）：
-      //   1) 乐观 user 消息（带 clientMessageId、未被 API 对账覆盖、timestamp
-      //      新鲜）——后端确认落库后，后续 init/append 会经 isCoveredByApi 让位
-      //      API 版；
-      //   2) 新鲜 streaming 占位（_lastUpdated ≤90s，发送瞬间创建）——
-      //      stale 残留（无新鲜 _lastUpdated）照旧丢弃，去漂移语义不变。
-      const apiIds = new Set(sorted.map((m) => m.id))
+      // ★ 刷新语义（ADR 2026-08-21 纯化）：API 权威全量替换本地缓存——不合并、
+      // 不宽限、不保留飞行中消息。旧 90s「飞行保留」窗口（2026-08-20 为 YAML 慢读
+      // 竞态引入）已废除：乐观 user 由 pending 区承担保护（cmid 对账驱逐），
+      // streaming 占位刷新即弃（重连 replay 按 last_sequence watermark 重建、
+      // 完成后由 backfill 按权威记录补回——内容不丢，只是中途回显等完成）。
       const apiByClientId = new Map<string, Message>()
+      const apiByRecordId = new Map<string, Message>()
       for (const m of sorted) {
         if (m.clientMessageId) apiByClientId.set(m.clientMessageId, m)
+        if (m.recordId) apiByRecordId.set(m.recordId, m)
       }
-      const now = Date.now()
-      const isFresh = (ts: number | undefined) =>
-        typeof ts === 'number' && now - ts <= INFLIGHT_FRESH_MS
-      const inflight = (existing || []).filter((m) => {
-        if (
-          m.role === 'user'
-          && m.clientMessageId
-          && !isCoveredByApi(m, apiIds, apiByClientId)
-          && isFresh(new Date(m.timestamp).getTime())
-        ) {
-          return true
-        }
-        return m.status === 'streaming' && isFresh(m._lastUpdated)
-      })
-      let finalMessages = inflight.length > 0 ? mergeSorted(sorted, [...inflight].sort(compareMessages)) : sorted
+      // 本地乐观/流式消息让位 API 权威版（isCoveredByApi 按 id/cmid/recordId
+      // 双键收敛，ADR 2026-08-21/2026-08-22）；乐观 user 在主数组内，被 API
+      // 权威版覆盖即让位（不并存、不重复），认领后的 recordId 匹配同值收敛。
+      let finalMessages = sorted
       // 过滤空白 assistant 消息（无 content 无 parts），避免空气泡
       finalMessages = filterBlankMessages(finalMessages)
       // 内存封顶：超量时丢弃最老消息，防止长会话撑爆内存（OOM）
       finalMessages = capMessagesForMemory(finalMessages)
 
-      // 游标只按 API 权威消息计算：保留的乐观消息 sequence 是本地分配值
-      // （localMax+1），进入 bottomCursor 会让 after_sequence 补漏跳过真正
-      // 未加载的权威消息（同 addMessage 不推进游标的理由）。
-      const apiFinal = capMessagesForMemory(filterBlankMessages(sorted))
-      const topCursor = apiFinal.length > 0 ? (apiFinal[0].sequence ?? 0) : 0
-      const bottomCursor = calculateBottomCursor(apiFinal, state.bottomCursorsByPipeline[pipelineId])
+      // 游标只按 API 权威消息计算（appendMessages 已对齐同口径）。
+      const topCursor = finalMessages.length > 0 ? (finalMessages[0].sequence ?? 0) : 0
+      const bottomCursor = calculateBottomCursor(finalMessages, state.bottomCursorsByPipeline[pipelineId])
 
-      logger.info('[initFromAPI] done: pipelineId=%s finalMsgs=%d inflightKept=%d (全量替换，保留飞行中)',
-        pipelineId?.slice(0, 12), finalMessages.length, inflight.length)
+      logger.info('[initFromAPI] done: pipelineId=%s finalMsgs=%d (API 权威全量替换)',
+        pipelineId?.slice(0, 12), finalMessages.length)
 
       return {
         messagesByPipeline: {
@@ -766,12 +907,16 @@ export const usePipelineMessageStore = create<PipelineMessageState>()(
       if (messages.length === 0) return state
       const sorted = [...messages].sort(compareMessages)
       const existing = state.messagesByPipeline[pipelineId] || []
-      // 含 clientMessageId 对账：user 乐观版（UUID id）与 API 版（record_id）
-      // 同 clientMessageId 时丢弃本地乐观版，避免切会话回来两条 user 并存。
+      // 含 clientMessageId/recordId 双键对账（ADR 2026-08-21/2026-08-22）：
+      // user 乐观版（UUID id）与 API 权威版（record_id）同键时丢弃本地乐观版，
+      // 避免切会话回来两条 user 并存。
       const merged = mergeIncrementalApiWithLocal(sorted, existing)
       // 内存封顶：超量时丢弃最老消息，防止长会话撑爆内存（OOM）
       const finalMerged = capMessagesForMemory(merged)
-      const bottomCursor = finalMerged.reduce((max, m) => Math.max(max, m.sequence ?? 0), 0)
+      // 游标只按 API 权威消息计算（ADR 2026-08-21 对齐 initFromAPI 口径）：
+      // 本地乐观/流式占位的 seq 不进游标，after_sequence 补漏不跳空。
+      const apiFinal = capMessagesForMemory(filterBlankMessages(sorted))
+      const bottomCursor = calculateBottomCursor(apiFinal, state.bottomCursorsByPipeline[pipelineId])
       return {
         messagesByPipeline: {
           ...state.messagesByPipeline,
@@ -813,11 +958,6 @@ export const usePipelineMessageStore = create<PipelineMessageState>()(
     pipelineId: string,
     options?: { limit?: number; before_sequence?: number; after_sequence?: number; threadId?: string },
   ) => {
-    if (pipelineId.startsWith('temp-')) {
-      get().initFromAPI(pipelineId, [])
-      return
-    }
-
     // 并发去重：按方向区分 key，避免向上翻页和向下补漏互相阻塞
     const dedupeKey = options?.before_sequence !== undefined
       ? `${pipelineId}::older`
@@ -918,6 +1058,10 @@ export const usePipelineMessageStore = create<PipelineMessageState>()(
   /** 加载管道消息的统一入口。收敛所有加载场景的流式保护 + 双游标决策。 详见接口声明处的注释。 */
   loadPipelineMessages: async (pipelineId, options) => {
     const { threadId, mode = 'auto', skipStreamingCheck = false } = options
+    // 刷新后首屏：等 IndexedDB rehydrate 完成再决策——不等待时本地缓存不可见，
+    // auto 会误判"未对账"走全量 init，缓存恢复路径被跳过（2026-08-22）。
+    // init（显式强制全量）不需要缓存，跳过等待直接请求。
+    if (mode !== 'init') await waitForMessageHydration()
     const state = get()
     const existingCount = (state.messagesByPipeline[pipelineId] || []).length
 
@@ -931,14 +1075,23 @@ export const usePipelineMessageStore = create<PipelineMessageState>()(
     // - mode='auto'：切换会话 → 该管道尚未对账（刷新后首次进入 / 无缓存）：全量对账一次；
     //   已对账：不做任何 API 调用，直接用缓存
     // - mode='backfill'：WS 重连补漏 → 增量追加
+    // 对账标记的信任条件（2026-08-22）：rehydrate 后 reconciledByPipeline 被重置为 {}，
+    // 但 IndexedDB 缓存里的消息本体仍有效（persist 快照只含已确认消息）。刷新后首次
+    // auto 进入：本地有缓存 → 页面立即用缓存渲染（秒开），同时后台静默全量对账
+    // （修正断线空洞/残影，见 reconcileFromAPI）；仅缓存缺失/为空时才同步全量重建。
     const reconciled = state.reconciledByPipeline[pipelineId] ?? false
-    const isInit = mode === 'init' || (mode === 'auto' && !reconciled)
+    const hasLocalMessages = existingCount > 0
+    const isInit = mode === 'init' || (mode === 'auto' && !reconciled && !hasLocalMessages)
+    const needReconcile = mode === 'auto' && !reconciled && hasLocalMessages
     const needBackfill = mode === 'backfill'
 
     try {
       if (isInit) {
         await state.fetchMessages(pipelineId, { threadId })
         set((s) => ({ reconciledByPipeline: { ...s.reconciledByPipeline, [pipelineId]: true } }))
+      } else if (needReconcile) {
+        // 刷新后缓存秒开 + 后台静默全量对账（不等结果，修正空洞/残影）
+        void reconcileFromAPI(pipelineId, threadId)
       } else if (needBackfill) {
         const bottomCursor = state.bottomCursorsByPipeline[pipelineId] ?? 0
         await state.fetchMessages(pipelineId, { threadId, after_sequence: bottomCursor })
@@ -1152,45 +1305,15 @@ export const usePipelineMessageStore = create<PipelineMessageState>()(
     // 恢复时合并默认状态（运行时状态用默认值）
     merge: (persisted, current) => {
       const p = (persisted as Partial<PipelineMessageState>) || {}
-      // 近期 streaming 消息宽限期（5 分钟）：
-      // 刷新时后端可能还在输出 → 保留 streaming 状态，让 initFromAPI 的
-      // isStreamingMessage 保护它不被丢弃；WS 重连后续流。
-      // 超过宽限期的 orphan streaming 才标记 completed 兜底。
-      const STREAMING_GRACE_MS = 5 * 60 * 1000
-      const now = Date.now()
+      // ADR 2026-08-21 复活链废除：rehydrate 一律丢弃 streaming/占位消息——
+      // 刷新后的飞行中内容由两条成熟机制恢复：WS 重连 replay（last_sequence
+      // watermark 回放事件流，前端按精确 ID 重建）+ 完成后 backfill（API 权威
+      // 记录）。持久化快照只保留已确认消息，杜绝「刷新后本地残影复活」通道。
       const cleanedMessages: Record<string, Message[]> = {}
       if (p.messagesByPipeline) {
         for (const [pid, msgs] of Object.entries(p.messagesByPipeline)) {
           if (!msgs) continue
-          cleanedMessages[pid] = msgs
-            .filter((m) => {
-              // 丢弃空的乐观占位（断线期间未收到任何内容）：刷新后后端权威内容由
-              // initFromAPI 对账拉取，本地空占位只会变空气泡。保留有内容的占位。
-              if (m.status === 'streaming' && m.id.startsWith?.('placeholder_')) {
-                const hasContent = (m.content || '').length > 0
-                  || (m.parts || []).some((part) => part.type !== 'system')
-                return hasContent
-              }
-              return true
-            })
-            .map((m) => {
-              if (m.status === 'streaming') {
-                // 近期 streaming → 保留原样（后端可能还在输出，WS 重连会续流）
-                if (typeof m._lastUpdated === 'number' && (now - m._lastUpdated) < STREAMING_GRACE_MS) {
-                  return m
-                }
-                // 过期 orphan streaming → 标记 completed 兜底
-                const cleanedParts = (m.parts || []).map((part) => {
-                  const state = (part as { state?: string }).state
-                  if (state === 'streaming' || state === 'calling') {
-                    return { ...part, state: 'done' } as MessagePart
-                  }
-                  return part
-                })
-                return { ...m, status: 'completed' as const, parts: cleanedParts }
-              }
-              return m
-            })
+          cleanedMessages[pid] = msgs.filter((m) => m.status !== 'streaming')
         }
       }
       return {
@@ -1215,6 +1338,9 @@ export const usePipelineMessageStore = create<PipelineMessageState>()(
       } catch {
         // localStorage 不可用时忽略，不影响 rehydrate
       }
+      // 唤醒 waitForMessageHydration 的等待者（rehydrate 完成 = 缓存可见，
+      // loadPipelineMessages 的 auto 决策不再误判）
+      _markHydrated()
     },
   },
 ))

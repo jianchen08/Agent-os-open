@@ -20,18 +20,14 @@ vi.mock('@/stores/layoutModeStore', () => ({
   },
 }))
 
-// Mock useAuthStore：默认 token 未过期，让普通重连测试走指数退避路径
-// （1006+未连接过的兜底逻辑仅在 checkTokenExpiration()=true 时才触发）
-const mockCheckTokenExpiration = vi.fn(() => false)
-const mockRefreshToken = vi.fn(async () => {})
-vi.mock('@/stores/authStore', () => ({
-  useAuthStore: {
-    getState: () => ({
-      checkTokenExpiration: mockCheckTokenExpiration,
-      refreshToken: mockRefreshToken,
-      token: 'test-token',
-    }),
-  },
+// Mock tokenLifecycle（token 生命周期唯一源，2026-08-21 收口后 GlobalWebSocket 的认证依赖）：
+// 默认 token 未过期，让普通重连测试走指数退避路径（1006+未连接过的兜底逻辑仅在 isExpired()=true 时才触发）
+const mockIsExpired = vi.fn(() => false)
+const mockRefresh = vi.fn(async () => {})
+vi.mock('@/services/auth/tokenLifecycle', () => ({
+  isExpired: mockIsExpired,
+  refresh: mockRefresh,
+  getAccessToken: () => 'test-token',
   isAuthFailureFromError: () => false,
 }))
 vi.mock('@/services/authCallbacks', () => ({
@@ -261,7 +257,7 @@ describe('GlobalWebSocketService', () => {
 
       connect('test-token')
       vi.advanceTimersByTime(100)
-      let ws = getLatestWs()!
+      const ws = getLatestWs()!
       simulateSuccessfulOpen(ws)
 
       // 断开后进入 reconnecting，验证经过足够多次重连后服务仍持续尝试
@@ -346,6 +342,37 @@ describe('GlobalWebSocketService', () => {
 
       expect(service.status).toBe('disconnected')
       service.disconnect()
+    })
+
+    it('被 4000 踢旧应清空待发队列并广播 kicked_by_replacement（不再静默装死）', async () => {
+      const { service, connect, getLatestWs, disconnect } = await createService()
+      const onKicked = vi.fn()
+      service.subscribe('kicked_by_replacement', onKicked)
+
+      connect('test-token')
+      vi.advanceTimersByTime(100)
+      const ws = getLatestWs()!
+      simulateSuccessfulOpen(ws)
+
+      // 断线期间入队一条 user_input（占位超时计时同时挂上）
+      service.sendUserInput('thread-1', '滞留消息', { clientMessageId: 'cmid-k' })
+
+      // 被新连接替换
+      simulateClose(ws, 4000, 'replaced_by_new_connection')
+
+      expect(onKicked).toHaveBeenCalledTimes(1)
+      // 恢复连接（模拟）后队列已清空：connect 重建 + open 后 flush 无消息可发
+      service._kickedByReplacement = false // 测试直接复位以验证队列确实已空
+      service.connect('test-token')
+      vi.advanceTimersByTime(100)
+      const ws2 = getLatestWs()!
+      simulateSuccessfulOpen(ws2)
+      const sent = ws2.send.mock.calls.some((call: string[]) => {
+        try { return JSON.parse(call[0])?.client_message_id === 'cmid-k' } catch { return false }
+      })
+      expect(sent).toBe(false)
+
+      disconnect()
     })
 
     it('被 4000 踢旧后 connect() 不再新建连接（防 visibilitychange 互踢环）', async () => {
@@ -810,6 +837,84 @@ describe('GlobalWebSocketService', () => {
       )
 
       disconnect()
+    })
+  })
+
+  // ──────────────────────────────────────────────
+  // user_input 排队超时（错误透传，2026-08-21）
+  // ──────────────────────────────────────────────
+  describe('user_input 排队超时', () => {
+    it('断线时 sendUserInput 入队，超过 TTL(20s) 未发出应广播 user_input_send_timeout 并剔除消息', async () => {
+      const { service, disconnect } = await createService()
+      const onTimeout = vi.fn()
+      service.subscribe('user_input_send_timeout', onTimeout)
+
+      // 未 connect（disconnected）时发送：静默入队
+      service.sendUserInput('thread-1', '测试消息', {
+        pipelineId: 'pipe-1',
+        clientMessageId: 'cmid-1',
+      })
+      expect(onTimeout).not.toHaveBeenCalled()
+
+      // TTL 前一毫秒：仍无事件
+      vi.advanceTimersByTime(20000 - 1)
+      expect(onTimeout).not.toHaveBeenCalled()
+
+      // TTL 到点：广播 + 队列剔除
+      vi.advanceTimersByTime(1)
+      expect(onTimeout).toHaveBeenCalledTimes(1)
+      const payload = onTimeout.mock.calls[0][0]
+      expect(payload.data).toMatchObject({
+        thread_id: 'thread-1',
+        pipeline_id: 'pipe-1',
+        client_message_id: 'cmid-1',
+        content: '测试消息',
+      })
+
+      disconnect()
+    })
+
+    it('TTL 内重连成功并 flush 后，不应广播 send_timeout', async () => {
+      const { service, connect, getLatestWs, disconnect } = await createService()
+      const onTimeout = vi.fn()
+      service.subscribe('user_input_send_timeout', onTimeout)
+
+      service.sendUserInput('thread-1', 'hello', {
+        pipelineId: 'pipe-1',
+        clientMessageId: 'cmid-2',
+      })
+
+      // TTL 内恢复连接：connect → open → _flushQueue 发出
+      connect('test-token')
+      vi.advanceTimersByTime(100)
+      const ws = getLatestWs()!
+      simulateSuccessfulOpen(ws)
+
+      const sent = ws.send.mock.calls.some((call: string[]) => {
+        try {
+          return JSON.parse(call[0])?.client_message_id === 'cmid-2'
+        } catch {
+          return false
+        }
+      })
+      expect(sent).toBe(true)
+
+      // 推进远超 TTL：定时器已被 flush 撤销，无超时广播
+      vi.advanceTimersByTime(60000)
+      expect(onTimeout).not.toHaveBeenCalled()
+
+      disconnect()
+    })
+
+    it('disconnect 应清理所有排队超时计时器（不再广播）', async () => {
+      const { service, disconnect } = await createService()
+      const onTimeout = vi.fn()
+      service.subscribe('user_input_send_timeout', onTimeout)
+
+      service.sendUserInput('thread-1', 'x', { clientMessageId: 'cmid-3' })
+      disconnect()
+      vi.advanceTimersByTime(60000)
+      expect(onTimeout).not.toHaveBeenCalled()
     })
   })
 })

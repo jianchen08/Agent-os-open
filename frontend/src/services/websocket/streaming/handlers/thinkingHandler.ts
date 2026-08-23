@@ -9,8 +9,10 @@ import { ensureStreamingPlaceholder, extractMessageId, extractThreadId } from '.
 
 const _debugLogger = loggers.websocket
 
-/** thinking 专属超时（30秒）：超时后自动将 part 状态置为 done 并追加提示 */
-const THINKING_TIMEOUT_MS = 30_000
+/** thinking 专属超时（90秒）：超时后仅将 part 状态置为 done 并留痕——
+ * 不追加合成文案（2026-08-22 裁决：超时提示写进真实消息会污染内容且随
+ * IndexedDB 持久化，长思考/慢网被误伤；thinking_end 丢失由超时留痕暴露） */
+const THINKING_TIMEOUT_MS = 90_000
 
 /** 管理所有活跃的 thinking 超时计时器 */
 const _thinkingTimeoutMap: Map<string, ReturnType<typeof setTimeout>> = new Map()
@@ -61,10 +63,9 @@ export function handleThinkingStart(eventData: any) {
   const timer = setTimeout(() => {
     _thinkingTimeoutMap.delete(messageId)
     _debugLogger.warn('[thinkingHandler] thinking 超时，自动清理: messageId=%s', messageId)
-    // 超时后将 part 状态置为 done 并追加提示文本
+    // 仅收尾：part 置 done（保持可见可重试），不写合成文案
     const idx = pipelineStore.getState().findLastPartIndex(pipelineId, messageId, 'thinking')
     if (idx >= 0) {
-      pipelineStore.getState().appendToPart(pipelineId, messageId, idx, '\n\n⏱ 思考超时，请尝试重新发送')
       pipelineStore.getState().updatePart(pipelineId, messageId, idx, { state: 'done' })
     }
   }, THINKING_TIMEOUT_MS)

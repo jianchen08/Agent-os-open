@@ -67,7 +67,7 @@ describe('initFromAPI 飞行中乐观消息保留', () => {
     })
   })
 
-  it('核心场景：刷新后首条消息发出，迟到的 init 历史响应不得冲掉乐观 user 与新鲜占位', () => {
+  it('核心场景：迟到 init 全量替换，store 残影让位（发送保护由 pending 区承担，ADR 2026-08-21）', () => {
     const store = usePipelineMessageStore.getState()
 
     // 已有历史（rehydrate 恢复 + 首次 init 完成）
@@ -76,14 +76,14 @@ describe('initFromAPI 飞行中乐观消息保留', () => {
       msg('api-asst-1', 2, { content: '旧回答' }),
     ])
 
-    // 用户发送第一条消息（复刻 router.tsx handleSendMessage 乐观插入）
+    // 旧架构残影：乐观 user 与占位曾直接写入主 store（新架构分别由 pending 区
+    // 与 stream_start 的真实 message_id 占位承担，此处入 store 验证替换语义）
     store.addMessage(PIPELINE_ID, msg('client-uuid-ab', 3, {
       role: 'user',
       content: '刷新后的第一条消息',
       status: 'completed',
       clientMessageId: 'client-uuid-ab',
     }))
-    // 复刻 ensureStreamingPlaceholder 的"思考中"占位（带新鲜 _lastUpdated）
     store.startStreaming(PIPELINE_ID, 'placeholder_xyz')
     store.addMessage(PIPELINE_ID, msg('placeholder_xyz', 4, {
       status: 'streaming',
@@ -97,14 +97,12 @@ describe('initFromAPI 飞行中乐观消息保留', () => {
     ])
 
     const msgs = usePipelineMessageStore.getState().getMessages(PIPELINE_ID)
-    // 乐观 user 消息仍在（用户输入不凭空消失）
-    const keptUser = msgs.find((m) => m.clientMessageId === 'client-uuid-ab')
-    expect(keptUser).toBeDefined()
-    expect(keptUser!.content).toBe('刷新后的第一条消息')
-    // 新鲜 streaming 占位仍在（等待 stream_start 合并）
-    expect(msgs.find((m) => m.id === 'placeholder_xyz')).toBeDefined()
-    // 排序：乐观消息（sequence 3/4）排在 API 历史（1/2）之后
-    expect(msgs.map((m) => m.sequence)).toEqual([1, 2, 3, 4])
+    // 契约（2026-08-21 ADR）：API 权威全量替换——store 残影（乐观 user/占位）
+    // 一律让位，杜绝幽灵气泡复活。"用户输入不消失"由 pending 区承担：
+    // 真实发送时乐观消息不在 store，init 无从冲掉（pendingMessageLifecycle.test.ts）。
+    expect(msgs.find((m) => m.clientMessageId === 'client-uuid-ab')).toBeUndefined()
+    expect(msgs.find((m) => m.id === 'placeholder_xyz')).toBeUndefined()
+    expect(msgs.map((m) => m.sequence)).toEqual([1, 2])
   })
 
   it('stale streaming 残留（_lastUpdated 超过 90s）仍被丢弃——刷新去漂移语义不回退', () => {

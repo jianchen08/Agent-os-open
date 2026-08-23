@@ -1,5 +1,5 @@
 /**
- * 统一通用数据接口 API 客户端（/ext/db_admin/*）
+ * 统一通用数据接口 API 客户端（db_admin 插件，生成物投影）
  *
  * 表驱动、动态枚举：后端表清单/列信息由 sqlite_master + PRAGMA 运行时发现，
  * 本客户端不写死任何表名/列名——新增表/新增列自动可见、自动可查、自动可管。
@@ -9,6 +9,7 @@
  */
 
 import apiClient from '@/services/api/client'
+import { DB_ADMIN_ENDPOINTS } from './endpoints.generated'
 
 /** 列信息（PRAGMA table_info 行） */
 export interface ColumnInfo {
@@ -18,14 +19,14 @@ export interface ColumnInfo {
   notnull: boolean
 }
 
-/** 表信息（/ext/db_admin/tables 条目） */
+/** 表信息（db_admin tables 条目） */
 export interface DbTableInfo {
   name: string
   columns: ColumnInfo[]
   row_count: number
 }
 
-/** 行查询结果（/ext/db_admin/table/{table}） */
+/** 行查询结果（db_admin table/{table}） */
 export interface DbQueryResult {
   table: string
   total: number
@@ -70,7 +71,7 @@ export interface DbExecuteResult {
 
 /** 枚举全部表（名称/列/主键/行数） */
 export async function fetchDbTables(): Promise<DbTableInfo[]> {
-  const response = await apiClient.get<{ tables: DbTableInfo[] }>('/ext/db_admin/tables')
+  const response = await apiClient.get<{ tables: DbTableInfo[] }>(DB_ADMIN_ENDPOINTS.tables)
   return response.data.tables
 }
 
@@ -100,7 +101,7 @@ export async function fetchDbRows(
   table: string,
   params: DbQueryParams = {},
 ): Promise<DbQueryResult> {
-  const response = await apiClient.get<DbQueryResult>(`/ext/db_admin/table/${table}`, {
+  const response = await apiClient.get<DbQueryResult>(DB_ADMIN_ENDPOINTS.table_rows.replace('{table}', table), {
     params,
     paramsSerializer: {
       serialize: (p) => serializeDbQueryParams(p),
@@ -114,7 +115,7 @@ export async function insertDbRow(
   table: string,
   row: Record<string, unknown>,
 ): Promise<DbInsertResult> {
-  const response = await apiClient.post<DbInsertResult>(`/ext/db_admin/table/${table}`, {
+  const response = await apiClient.post<DbInsertResult>(DB_ADMIN_ENDPOINTS.table_insert.replace('{table}', table), {
     row,
   })
   return response.data
@@ -127,7 +128,7 @@ export async function updateDbRow(
   updates: Record<string, unknown>,
 ): Promise<DbUpdateResult> {
   const response = await apiClient.patch<DbUpdateResult>(
-    `/ext/db_admin/table/${table}/${pk}`,
+    DB_ADMIN_ENDPOINTS.table_row_update.replace('{table}', table).replace('{pk_value}', pk),
     { updates },
   )
   return response.data
@@ -135,13 +136,13 @@ export async function updateDbRow(
 
 /** 删除单行（写操作仅 admin；复合主键用 `,` 拼接 pk） */
 export async function deleteDbRow(table: string, pk: string): Promise<DbDeleteResult> {
-  const response = await apiClient.delete<DbDeleteResult>(`/ext/db_admin/table/${table}/${pk}`)
+  const response = await apiClient.delete<DbDeleteResult>(DB_ADMIN_ENDPOINTS.table_row_delete.replace('{table}', table).replace('{pk_value}', pk))
   return response.data
 }
 
 /** SQL 执行器（仅 admin；SELECT 直接执行，写语句需 confirm:true） */
 export async function executeDbSql(sql: string, confirm: boolean): Promise<DbExecuteResult> {
-  const response = await apiClient.post<DbExecuteResult>('/ext/db_admin/execute', {
+  const response = await apiClient.post<DbExecuteResult>(DB_ADMIN_ENDPOINTS.execute, {
     sql,
     confirm,
   })

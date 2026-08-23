@@ -10,6 +10,7 @@
  */
 
 import { useState, useEffect, useCallback } from 'react'
+import { useQuery } from '@tanstack/react-query'
 import { ChevronDown, Loader2, Plus, RefreshCw, Search, Trash2, X } from '@/assets/icons'
 import { PageShell } from '@/components/shared/PageShell'
 import { Button } from '@/components/ui/button'
@@ -25,6 +26,7 @@ import {
   SelectValue,
 } from '@/components/ui/select'
 import { toast } from '@/components/ui/sonner'
+import { queryKeys } from '@/services/query/queryKeys'
 import { Tabs, TabsList, TabsTrigger, TabsContent } from '@/components/ui/tabs'
 import {
   getLLMConfig,
@@ -139,41 +141,33 @@ export function LlmSettingsPage({ embedded = false }: { embedded?: boolean }) {
   // litellm 动态类型目录（展开自定义提供商表单时懒加载）
   const [providerTypes, setProviderTypes] = useState<string[]>(COMMON_PROVIDER_TYPES)
 
-  // 加载配置。
-  // apiClient 用绝对 baseURL 绕过 Vite 代理；生产环境前后端须同源或后端配置 CORS 头。
-  const loadConfig = useCallback(() => {
-    let cancelled = false
-    setIsLoading(true)
-    setLoadError(null)
-
-    getLLMConfig()
-      .then((llmConfig) => {
-        if (cancelled) return
-        setConfig(llmConfig)
-      })
-      .catch((err) => {
-        if (!cancelled) {
-          console.error('[LlmSettingsPage] Failed to load LLM config:', err)
-          setLoadError('无法连接服务器，请检查网络后重试')
-          setConfig({
-            models: {},
-            providers: {},
-            defaults: { chat: '', embedding: '', tiers: {} },
-          })
-        }
-      })
-      .finally(() => {
-        if (!cancelled) setIsLoading(false)
-      })
-    return () => {
-      cancelled = true
-    }
-  }, [])
+  // 加载配置（query 化）：重进设置页缓存秒开；apiClient 用绝对 baseURL 绕过
+  // Vite 代理；生产环境前后端须同源或后端配置 CORS 头。
+  const configQuery = useQuery({
+    queryKey: queryKeys.llmConfig,
+    queryFn: () => getLLMConfig(),
+    staleTime: 60_000,
+  })
 
   useEffect(() => {
-    const cleanup = loadConfig()
-    return cleanup
-  }, [loadConfig])
+    if (configQuery.data) {
+      setConfig(configQuery.data)
+    }
+  }, [configQuery.data])
+
+  useEffect(() => {
+    if (configQuery.isPending) return
+    setIsLoading(false)
+    if (configQuery.isError) {
+      console.error('[LlmSettingsPage] Failed to load LLM config:', configQuery.error)
+      setLoadError('无法连接服务器，请检查网络后重试')
+      setConfig({
+        models: {},
+        providers: {},
+        defaults: { chat: '', embedding: '', tiers: {} },
+      })
+    }
+  }, [configQuery.isPending, configQuery.isError, configQuery.error])
 
   const modelIds = config ? Object.keys(config.models ?? {}) : []
   const providerIds = config ? Object.keys(config.providers ?? {}) : []
@@ -352,7 +346,7 @@ export function LlmSettingsPage({ embedded = false }: { embedded?: boolean }) {
           <Button
             variant="outline"
             size="sm"
-            onClick={loadConfig}
+            onClick={() => void configQuery.refetch()}
             className="ml-4 shrink-0 border-destructive/30 text-destructive hover:bg-destructive/10"
           >
             <RefreshCw className="mr-1.5 h-3.5 w-3.5" />

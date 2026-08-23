@@ -1,15 +1,15 @@
 /**
- * 调试执行记录页面
+ * 调试执行记录页面（query 化：双 useQuery 缓存 SWR，重挂零请求）
  *
  * 展示执行记录列表，支持按会话过滤
  */
 
-import { useState, useEffect, useCallback, Fragment } from 'react'
+import { useState, Fragment } from 'react'
 import { ErrorState } from '@/components/shared/ErrorState'
 import { LoadingState } from '@/components/shared/LoadingState'
 import { PageShell } from '@/components/shared/PageShell'
-import { getExecutionRecords, getExecutionRecordsSessions } from '@/services/api/executionRecords'
-import type { ExecutionRecord, SessionInfo } from '@/services/api/executionRecords'
+import { useDebugSessionsQuery, useExecutionRecordsQuery } from '@/hooks/queries/useDebugQueries'
+import type { ExecutionRecord } from '@/services/api/executionRecords'
 
 /**
  * 获取记录状态样式
@@ -106,55 +106,26 @@ function MessageSnapshotDetail({ record }: { record: ExecutionRecord }) {
  * message_data 携带全文/tool_calls/reasoning——本页展开渲染拼装后的消息内容。
  */
 export function DebugExecutionRecordsPage({ embedded }: { embedded?: boolean } = {}) {
-  const [records, setRecords] = useState<ExecutionRecord[]>([])
-  const [sessions, setSessions] = useState<SessionInfo[]>([])
   const [selectedSession, setSelectedSession] = useState<string>('')
-  const [total, setTotal] = useState(0)
-  const [isLoading, setIsLoading] = useState(true)
-  const [error, setError] = useState<string | null>(null)
   const [expandedId, setExpandedId] = useState<string | null>(null)
 
-  /**
-   * 加载会话列表
-   */
-  const fetchSessions = useCallback(async () => {
-    try {
-      const res = await getExecutionRecordsSessions()
-      setSessions(res.sessions || [])
-    } catch {
-      // 会话列表加载失败不阻塞
-    }
-  }, [])
-
-  /**
-   * 加载执行记录
-   */
-  const fetchRecords = useCallback(async (sessionId?: string) => {
-    setIsLoading(true)
-    setError(null)
-    try {
-      const res = await getExecutionRecords({
-        session_id: sessionId || undefined,
-        limit: 50,
-      })
-      setRecords(res.records)
-      setTotal(res.total)
-    } catch (err: any) {
-      setError(err.message || '获取执行记录失败')
-    } finally {
-      setIsLoading(false)
-    }
-  }, [])
-
-  useEffect(() => {
-    fetchSessions()
-    fetchRecords()
-  }, [fetchSessions, fetchRecords])
+  // 会话列表 + 执行记录（query 化）：sessionId 进 key，切换过滤 = 换缓存条目
+  const sessionsQuery = useDebugSessionsQuery()
+  const sessions = sessionsQuery.data?.sessions ?? []
+  const recordsQuery = useExecutionRecordsQuery(selectedSession || undefined)
+  const records = recordsQuery.data?.records ?? []
+  const total = recordsQuery.data?.total ?? 0
+  // 无缓存数据时显示 loading（有缓存先渲染缓存不闪 loading）
+  const isLoading = recordsQuery.isPending && !recordsQuery.data
+  const error = recordsQuery.isError
+    ? recordsQuery.error instanceof Error
+      ? recordsQuery.error.message
+      : '获取执行记录失败'
+    : null
 
   /** 切换会话过滤 */
   const handleSessionChange = (sessionId: string) => {
     setSelectedSession(sessionId)
-    fetchRecords(sessionId || undefined)
   }
 
   return (

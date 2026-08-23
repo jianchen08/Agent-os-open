@@ -13,6 +13,7 @@
  */
 
 import { Menu, PanelRightIcon } from '@/assets/icons'
+import { useSessionsQuery } from '@/hooks/queries/useSessionsQuery'
 import { ensureDefaultTaskPanel } from '@/services/workspacePanelOpener'
 import { useLayoutModeStore } from '@/stores/layoutModeStore'
 import { useSessionStore } from '@/stores/sessionStore'
@@ -41,7 +42,7 @@ const CONNECTION_LABEL: Record<string, string> = {
  * 统一应用轻顶栏（设计稿 TitleBar 精简版）
  */
 export function AppHeader({ extraRight, onOpenWorkspaceView, isMobile = false }: AppHeaderProps) {
-  const sessions = useSessionStore((s) => s.sessions)
+  const { data: sessions = [] } = useSessionsQuery()
   const activeSessionId = useSessionStore((s) => s.activeSessionId)
   const activeSession = sessions.find((s) => s.id === activeSessionId)
   const sessionTitle = activeSession?.title

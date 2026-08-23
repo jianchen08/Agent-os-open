@@ -20,6 +20,17 @@
     'agent_manager_put_config': '/ext/agent_manager/agents/{id}/config',
   } as const
 
+  /** approval_service（Approval Service）：plugin.json 声明 7 端点 */
+  export const APPROVAL_SERVICE_ENDPOINTS = {
+    'interaction_pending': '/ext/approval_service/interaction/pending',
+    'interaction_response': '/ext/approval_service/interaction/response',
+    'interaction_get': '/ext/approval_service/interaction/{request_id}',
+    'interaction_approve': '/ext/approval_service/interaction/{request_id}/approve',
+    'interaction_cancel': '/ext/approval_service/interaction/{request_id}/cancel',
+    'interaction_deny': '/ext/approval_service/interaction/{request_id}/deny',
+    'interaction_viewed': '/ext/approval_service/interaction/{request_id}/viewed',
+  } as const
+
   /** artifacts（Artifacts Service）：plugin.json 声明 13 端点 */
   export const ARTIFACTS_ENDPOINTS = {
     'artifacts_create': '/ext/artifacts',
@@ -43,11 +54,13 @@
     'wecom_verify': '/ext/channel_wecom/callback',
   } as const
 
-  /** cost_control（Cost Control Service）：plugin.json 声明 5 端点 */
+  /** cost_control（Cost Control Service）：plugin.json 声明 7 端点 */
   export const COST_CONTROL_ENDPOINTS = {
     'cost_budget_reset': '/ext/cost_control/budget/reset',
     'cost_budget_status': '/ext/cost_control/budget/status',
     'cost_config': '/ext/cost_control/config',
+    'cost_config_file_get': '/ext/cost_control/config/cost-control',
+    'cost_config_file_put': '/ext/cost_control/config/cost-control',
     'cost_report': '/ext/cost_control/report',
     'cost_usage_statistics': '/ext/cost_control/usage/statistics',
   } as const
@@ -68,12 +81,11 @@
     'webview': '/ext/demo_widget_plugin/webview',
   } as const
 
-  /** dsh_adapter（DSH Plugin Adapter）：plugin.json 声明 4 端点 */
+  /** dsh_adapter（DSH Plugin Adapter）：plugin.json 声明 3 端点 */
   export const DSH_ADAPTER_ENDPOINTS = {
-    'dsh_skin_list': '/ext/dsh_adapter/skins',
-    'dsh_skin_select': '/ext/dsh_adapter/skins/current',
     'dsh_skin_assets': '/ext/dsh_adapter/styles/skin-assets/{skin}/{file:path}',
-    'dsh_skin_css': '/ext/dsh_adapter/styles/skin.css',
+    'dsh_skin_merged_css': '/ext/dsh_adapter/styles/skin/{skin}/merged.css',
+    'dsh_skin_hooks': '/ext/dsh_adapter/styles/skin/{skin}/hooks.mjs',
   } as const
 
   /** evaluation_service（Evaluation Service）：plugin.json 声明 3 端点 */
@@ -148,18 +160,40 @@
     'series': '/ext/metrics_admin/series',
   } as const
 
-  /** monitoring（Monitoring Service）：plugin.json 声明 10 端点 */
+  /** monitoring（Monitoring Service）：plugin.json 声明 25 端点 */
   export const MONITORING_ENDPOINTS = {
+    'mon_agent_calls_list': '/ext/monitoring/agent-calls',
+    'mon_agent_calls_statistics': '/ext/monitoring/agent-calls/statistics',
+    'mon_agent_call_get': '/ext/monitoring/agent-calls/{execution_id}',
     'mon_cache_stats': '/ext/monitoring/cache-stats',
+    'mon_execution_records_list': '/ext/monitoring/execution/records',
+    'mon_execution_records_clear_all': '/ext/monitoring/execution/records/clear-all',
+    'mon_execution_records_group_summary': '/ext/monitoring/execution/records/group-summary',
+    'mon_execution_records_delete_by_session': '/ext/monitoring/execution/records/session/{session_id}',
+    'mon_execution_records_sessions': '/ext/monitoring/execution/records/sessions',
+    'mon_execution_records_tree': '/ext/monitoring/execution/records/tree/{session_id}',
+    'mon_execution_record_delete': '/ext/monitoring/execution/records/{record_id}',
+    'mon_execution_record_get': '/ext/monitoring/execution/records/{record_id}',
+    'mon_execution_record_children': '/ext/monitoring/execution/records/{record_id}/children',
     'mon_payload_diag_page': '/ext/monitoring/page/payload-diag',
     'mon_tool_calls_page': '/ext/monitoring/page/tool-calls',
     'mon_payload_diag_list': '/ext/monitoring/payload-diag',
     'mon_payload_diag_get': '/ext/monitoring/payload-diag/file',
+    'mon_search_global': '/ext/monitoring/search',
+    'mon_sessions_context_token_usage': '/ext/monitoring/sessions/{session_id}/context-token-usage',
+    'mon_sessions_total_token_usage': '/ext/monitoring/sessions/{session_id}/total-token-usage',
     'mon_system_metrics': '/ext/monitoring/system/metrics',
     'mon_tasks': '/ext/monitoring/tasks',
     'mon_task_statistics': '/ext/monitoring/tasks/statistics',
     'mon_token_usage': '/ext/monitoring/token-usage',
     'mon_tool_calls': '/ext/monitoring/tool-calls',
+  } as const
+
+  /** multimodal_service（Multimodal Service）：plugin.json 声明 3 端点 */
+  export const MULTIMODAL_SERVICE_ENDPOINTS = {
+    'mm_asr_transcriptions': '/ext/multimodal_service/audio/transcriptions',
+    'mm_files_capabilities': '/ext/multimodal_service/files/capabilities',
+    'mm_files_supported_types': '/ext/multimodal_service/files/supported-types',
   } as const
 
   /** pipeline_godot_context（Godot Context）：plugin.json 声明 4 端点 */
@@ -174,6 +208,19 @@
   export const PIPELINE_SECURITY_CHECK_ENDPOINTS = {
     'permission_mode_get': '/ext/pipeline_security_check/permission_mode',
     'permission_mode_switch': '/ext/pipeline_security_check/permission_mode',
+  } as const
+
+  /** review_service（Review Service）：plugin.json 声明 9 端点 */
+  export const REVIEW_SERVICE_ENDPOINTS = {
+    'review_create': '/ext/review_service/reviews',
+    'review_list': '/ext/review_service/reviews',
+    'review_media_review': '/ext/review_service/reviews/media-review',
+    'review_get': '/ext/review_service/reviews/{review_id}',
+    'review_attachments': '/ext/review_service/reviews/{review_id}/attachments',
+    'review_cancel': '/ext/review_service/reviews/{review_id}/cancel',
+    'review_feedback': '/ext/review_service/reviews/{review_id}/feedback',
+    'review_media_metadata': '/ext/review_service/reviews/{review_id}/media-metadata',
+    'review_viewed': '/ext/review_service/reviews/{review_id}/viewed',
   } as const
 
   /** scene_service（Scene Service）：plugin.json 声明 7 端点 */
@@ -226,11 +273,30 @@
     'task_submit': '/ext/task_service/tasks/{task_id}/submit',
   } as const
 
-  /** user_admin（User Admin HTTP Face）：plugin.json 声明 4 端点 */
+  /** trigger_setup_tool（Trigger Setup Tool）：plugin.json 声明 9 端点 */
+  export const TRIGGER_SETUP_TOOL_ENDPOINTS = {
+    'trigger_create': '/ext/trigger_setup_tool/triggers',
+    'trigger_list': '/ext/trigger_setup_tool/triggers',
+    'trigger_stats': '/ext/trigger_setup_tool/triggers/stats',
+    'trigger_delete': '/ext/trigger_setup_tool/triggers/{trigger_id}',
+    'trigger_get': '/ext/trigger_setup_tool/triggers/{trigger_id}',
+    'trigger_update': '/ext/trigger_setup_tool/triggers/{trigger_id}',
+    'trigger_disable': '/ext/trigger_setup_tool/triggers/{trigger_id}/disable',
+    'trigger_enable': '/ext/trigger_setup_tool/triggers/{trigger_id}/enable',
+    'trigger_fire': '/ext/trigger_setup_tool/triggers/{trigger_id}/trigger',
+  } as const
+
+  /** user_admin（User Admin HTTP Face）：plugin.json 声明 10 端点 */
   export const USER_ADMIN_ENDPOINTS = {
     'users': '/ext/user_admin/users',
+    'user_settings_get': '/ext/user_admin/users/settings',
+    'user_settings_put': '/ext/user_admin/users/settings',
+    'users_stats': '/ext/user_admin/users/stats',
     'user_delete': '/ext/user_admin/users/{user_id}',
+    'user_active_update': '/ext/user_admin/users/{user_id}/active',
+    'user_active_update_patch': '/ext/user_admin/users/{user_id}/active',
     'user_role_update': '/ext/user_admin/users/{user_id}/role',
+    'user_role_update_put': '/ext/user_admin/users/{user_id}/role',
     'user_tenant_update': '/ext/user_admin/users/{user_id}/tenant',
   } as const
 

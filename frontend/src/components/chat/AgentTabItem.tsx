@@ -95,7 +95,7 @@ export const AgentTabItem: React.FC<AgentTabItemProps> = ({ tab, onClick, onClos
 
   return (
     <div
-      role="button"
+      role="tab"
       tabIndex={0}
       onClick={onClick}
       onKeyDown={(e) => {

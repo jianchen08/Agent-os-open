@@ -73,11 +73,13 @@ export const AgentTabBar: React.FC<AgentTabBarProps> = ({
   )
 
   return (
-    <div className="flex min-w-0 items-center justify-center gap-2 px-3 py-2">
-      {/* Tab 列表 */}
+    <div className="flex min-w-0 items-center justify-center gap-2 px-3 py-2" data-testid="agent-tab-bar">
+      {/* Tab 列表（role=tablist 为 ARIA 语义；DSH 皮肤的 session.header.actions
+          由适配器递送层转译到本组件锚点——位置映射，不贴 DSH 名字） */}
       <div
         ref={setScrollRef}
         className="scrollbar-hide flex items-center gap-1.5 overflow-x-auto"
+        role="tablist"
       >
         {tabs.map((tab) => (
           <AgentTabItem

@@ -1,10 +1,13 @@
 /**
- * 知识库管理页面
+ * 知识库管理页面（query 化：useKnowledgeBaseQuery 缓存 SWR，重挂零请求）
  *
+ * 4 个并发请求（列表/统计/分类/标签）合并为一个 queryFn：
+ * 同一 staleTime 窗口内重挂零请求；upload/delete/分类变更后
+ * invalidateKnowledgeBaseCache 整体失效。
  * 展示知识库列表，支持文件上传、分类管理、标签云和统计信息
  */
 
-import { useState, useEffect, useCallback, useRef } from 'react'
+import { useState, useRef } from 'react'
 import {
   BookOpen,
   Upload,
@@ -21,33 +24,10 @@ import { LoadingState } from '@/components/shared/LoadingState'
 import { PageShell } from '@/components/shared/PageShell'
 import { API_ENDPOINTS } from '@/constants/api'
 import apiClient from '@/services/api/client'
-
-/** 知识库条目 */
-interface KnowledgeItem {
-  id: string
-  name: string
-  size: number
-  categories: string[]
-  tags: string[]
-  created_at?: string
-  updated_at?: string
-  [key: string]: unknown
-}
-
-/** 知识库统计 */
-interface KnowledgeStats {
-  total: number
-  categories_count: number
-  tags_count: number
-  [key: string]: unknown
-}
-
-/** 分类信息 */
-interface CategoryItem {
-  name: string
-  count?: number
-  [key: string]: unknown
-}
+import {
+  invalidateKnowledgeBaseCache,
+  useKnowledgeBaseQuery,
+} from '@/hooks/queries/useKnowledgeBaseQuery'
 
 /**
  * 格式化文件大小
@@ -69,12 +49,6 @@ function formatFileSize(bytes: number): string {
  * 知识库管理页面组件
  */
 export function KnowledgeBasePage() {
-  const [items, setItems] = useState<KnowledgeItem[]>([])
-  const [stats, setStats] = useState<KnowledgeStats | null>(null)
-  const [categories, setCategories] = useState<CategoryItem[]>([])
-  const [tags, setTags] = useState<string[]>([])
-  const [isLoading, setIsLoading] = useState(true)
-  const [error, setError] = useState<string | null>(null)
   const [actionMessage, setActionMessage] = useState<string | null>(null)
 
   // 分类筛选
@@ -97,34 +71,19 @@ export function KnowledgeBasePage() {
   // 删除分类确认
   const [confirmDeleteCategory, setConfirmDeleteCategory] = useState<string | null>(null)
 
-  /**
-   * 加载所有数据
-   */
-  const fetchData = useCallback(async () => {
-    setIsLoading(true)
-    setError(null)
-    try {
-      const [itemsRes, statsRes, catRes, tagsRes] = await Promise.allSettled([
-        apiClient.get<KnowledgeItem[]>(API_ENDPOINTS.KNOWLEDGE_BASE.LIST),
-        apiClient.get<KnowledgeStats>(API_ENDPOINTS.KNOWLEDGE_BASE.STATS),
-        apiClient.get<CategoryItem[]>(API_ENDPOINTS.KNOWLEDGE_BASE.CATEGORIES),
-        apiClient.get<string[]>(API_ENDPOINTS.KNOWLEDGE_BASE.TAGS),
-      ])
-      if (itemsRes.status === 'fulfilled') setItems(Array.isArray(itemsRes.value.data) ? itemsRes.value.data : [])
-      if (statsRes.status === 'fulfilled') setStats(statsRes.value.data)
-      if (catRes.status === 'fulfilled') setCategories(Array.isArray(catRes.value.data) ? catRes.value.data : [])
-      if (tagsRes.status === 'fulfilled') setTags(Array.isArray(tagsRes.value.data) ? tagsRes.value.data : [])
-    } catch (err: unknown) {
-      const message = err instanceof Error ? err.message : '加载数据失败'
-      setError(message)
-    } finally {
-      setIsLoading(false)
-    }
-  }, [])
-
-  useEffect(() => {
-    fetchData()
-  }, [fetchData])
+  // 全部数据（query 化）：staleTime 窗口内重挂零请求；写操作后 invalidate
+  const kbQuery = useKnowledgeBaseQuery()
+  const items = kbQuery.data?.items ?? []
+  const stats = kbQuery.data?.stats ?? null
+  const categories = kbQuery.data?.categories ?? []
+  const tags = kbQuery.data?.tags ?? []
+  // 无缓存数据时显示 loading（有缓存先渲染缓存不闪 loading）
+  const isLoading = kbQuery.isPending && !kbQuery.data
+  const error = kbQuery.isError
+    ? kbQuery.error instanceof Error
+      ? kbQuery.error.message
+      : '加载数据失败'
+    : null
 
   /**
    * 处理文件上传
@@ -149,7 +108,7 @@ export function KnowledgeBasePage() {
           ? `文件 "${files[0].name}" 上传成功`
           : `${files.length} 个文件上传成功`,
       )
-      await fetchData()
+      invalidateKnowledgeBaseCache()
     } catch (err: unknown) {
       const message = err instanceof Error ? err.message : '上传失败'
       setActionMessage(message)
@@ -193,7 +152,7 @@ export function KnowledgeBasePage() {
       await apiClient.delete(API_ENDPOINTS.KNOWLEDGE_BASE.DELETE(id))
       setActionMessage(`"${name}" 已删除`)
       setConfirmDeleteId(null)
-      await fetchData()
+      invalidateKnowledgeBaseCache()
     } catch (err: unknown) {
       const message = err instanceof Error ? err.message : '删除失败'
       setActionMessage(message)
@@ -216,7 +175,7 @@ export function KnowledgeBasePage() {
       setActionMessage(`分类 "${newCategoryName.trim()}" 创建成功`)
       setNewCategoryName('')
       setShowCategoryModal(false)
-      await fetchData()
+      invalidateKnowledgeBaseCache()
     } catch (err: unknown) {
       const message = err instanceof Error ? err.message : '创建分类失败'
       setActionMessage(message)
@@ -240,7 +199,7 @@ export function KnowledgeBasePage() {
       if (selectedCategory === name) {
         setSelectedCategory(null)
       }
-      await fetchData()
+      invalidateKnowledgeBaseCache()
     } catch (err: unknown) {
       const message = err instanceof Error ? err.message : '删除分类失败'
       setActionMessage(message)

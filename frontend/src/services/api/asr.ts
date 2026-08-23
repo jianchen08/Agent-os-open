@@ -1,6 +1,7 @@
 /** 语音识别（ASR）API 服务 调用后端 /api/v1/audio/transcriptions 端点，将音频转写为文本。 */
 
 import apiClient from '@/services/api/client'
+import { MULTIMODAL_SERVICE_ENDPOINTS } from './endpoints.generated'
 
 /** 转写结果 */
 export interface TranscriptionResult {
@@ -21,7 +22,7 @@ export async function transcribeAudio(
 
   try {
     const response = await apiClient.post<TranscriptionResult>(
-      '/ext/channel_api/audio/transcriptions',
+      MULTIMODAL_SERVICE_ENDPOINTS.mm_asr_transcriptions,
       formData,
       {
         headers: { 'Content-Type': 'multipart/form-data' },

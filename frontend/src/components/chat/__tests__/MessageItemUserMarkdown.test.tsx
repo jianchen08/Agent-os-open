@@ -7,6 +7,7 @@
  * 历史回读（内核只存 content）刷新不丢。
  */
 import { render, screen } from '@testing-library/react'
+import { renderWithProviders } from '@/test/renderWithProviders'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { MessageItem } from '../MessageItem'
 import type { Message } from '@/types/models'
@@ -59,14 +60,14 @@ describe('用户消息 markdown 统一渲染', () => {
 
   it('用户 content 经 LobeChatMarkdown 渲染（含附件引用原文）', () => {
     const content = '看看这张\n\n![cat.png](/uploads/cat.png)'
-    render(<MessageItem message={makeUserMessage(content)} />)
+    renderWithProviders(<MessageItem message={makeUserMessage(content)} />)
     const md = screen.getByTestId('user-markdown')
     expect(md.textContent).toContain('看看这张')
     expect(md.textContent).toContain('![cat.png](/uploads/cat.png)')
   })
 
   it('纯文本用户消息同样走 markdown 渲染器（统一路径，无纯文本分支）', () => {
-    render(<MessageItem message={makeUserMessage('纯文本')} />)
+    renderWithProviders(<MessageItem message={makeUserMessage('纯文本')} />)
     expect(screen.getByTestId('user-markdown').textContent).toBe('纯文本')
   })
 })

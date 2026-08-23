@@ -119,7 +119,7 @@ describe('T12：endpoint 模式 extraBody', () => {
     render(
       <FormWidget
         fields={[{ name: 'title', type: 'input', label: '标题' }]}
-        endpoint="/ext/channel_api/tasks/root"
+        endpoint="/ext/task_service/tasks/root"
         extraBody={{ thread_id: 'sess-1' }}
         submitLabel="创建"
       />,

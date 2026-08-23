@@ -1110,19 +1110,20 @@ describe('MultiRoundInteractionFlow — AC-1j: 多轮交互流程', () => {
   //   原集成用例断言的是死接线，详见 useRealtimeEvents.ts 头部清理注释）
   // -----------------------------------------------------------------------
   describe('useRealtimeEvents 任务生命周期集成', () => {
-    it('task_status_update 事件应更新 longTermTaskStore 并 bump 工作区版本', async () => {
-      const { useLongTermTaskStore } = await import('@/stores/longTermTaskStore')
-      // 种子任务：事件到达时应走 updateTask 分支而非全量 fetchTasks
-      useLongTermTaskStore.setState({
-        tasks: [
-          {
-            id: 'task-1',
-            title: '长期任务',
-            status: 'running',
-            currentPhase: 'prepare',
-          },
-        ] as never,
-      })
+    it('task_status_update 事件应更新长期任务缓存并 bump 工作区版本', async () => {
+      // 批次 4 query 化：tasks 数据在 query cache（queryKeys.longTermTasks），
+      // 经全局 queryClient 单例播种/断言（WS handler 非组件路径不依赖 Provider）
+      const { queryClient } = await import('@/services/query/queryClient')
+      const { queryKeys } = await import('@/services/query/queryKeys')
+      // 种子任务：事件到达时应走增量更新分支而非 invalidate 重拉
+      queryClient.setQueryData(queryKeys.longTermTasks, [
+        {
+          id: 'task-1',
+          title: '长期任务',
+          status: 'running',
+          currentPhase: 'prepare',
+        },
+      ] as never)
 
       renderHook(() => useRealtimeEvents())
 
@@ -1135,26 +1136,24 @@ describe('MultiRoundInteractionFlow — AC-1j: 多轮交互流程', () => {
         })
       })
 
-      const taskState = useLongTermTaskStore.getState()
-      const task = taskState.tasks.find((t: { id: string }) => t.id === 'task-1') as {
-        status: string
-        currentPhase: string
-      }
+      const tasks = queryClient.getQueryData<{ id: string; status: string; currentPhase: string }[]>(
+        queryKeys.longTermTasks,
+      ) ?? []
+      const task = tasks.find((t) => t.id === 'task-1')
       expect(task).toBeDefined()
-      expect(task.status).toBe('completed')
-      expect(task.currentPhase).toBe('execute')
+      expect(task!.status).toBe('completed')
+      expect(task!.currentPhase).toBe('execute')
 
       // 工作区数据版本被 bump（触发工作区面板刷新）
       expect(useLayoutModeStore.getState().workspaceDataVersion).toBeGreaterThan(versionBefore)
     })
 
-    it('task_deleted 事件应从 store 删除任务', async () => {
-      const { useLongTermTaskStore } = await import('@/stores/longTermTaskStore')
-      useLongTermTaskStore.setState({
-        tasks: [
-          { id: 'task-del', title: '待删除', status: 'running' },
-        ] as never,
-      })
+    it('task_deleted 事件应从缓存删除任务', async () => {
+      const { queryClient } = await import('@/services/query/queryClient')
+      const { queryKeys } = await import('@/services/query/queryKeys')
+      queryClient.setQueryData(queryKeys.longTermTasks, [
+        { id: 'task-del', title: '待删除', status: 'running' },
+      ] as never)
 
       renderHook(() => useRealtimeEvents())
 
@@ -1162,9 +1161,8 @@ describe('MultiRoundInteractionFlow — AC-1j: 多轮交互流程', () => {
         emitEvent('task_deleted', { task_id: 'task-del' })
       })
 
-      expect(
-        useLongTermTaskStore.getState().tasks.some((t: { id: string }) => t.id === 'task-del'),
-      ).toBe(false)
+      const tasks = queryClient.getQueryData<{ id: string }[]>(queryKeys.longTermTasks) ?? []
+      expect(tasks.some((t) => t.id === 'task-del')).toBe(false)
     })
   })
 })

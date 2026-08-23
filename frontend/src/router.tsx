@@ -10,16 +10,17 @@ import { ROUTES } from './constants/routes'
 import { useConnectionStatus } from './hooks/useConnectionStatus'
 import { useRealtimeEvents } from './hooks/useRealtimeEvents'
 import { useWidgetEvents } from './hooks/useWidgetEvents'
-import { useTaskPolling } from './hooks/useTaskPolling'
+import { useSessionsQuery, readSessions } from './hooks/queries/useSessionsQuery'
+import { useAgentsQuery } from './hooks/queries/useAgentsQuery'
+import { useLongTermTasksQuery } from './hooks/queries/useLongTermTasksQuery'
 import { LoginPage } from './pages/auth/LoginPage'
 import { RegisterPage } from './pages/auth/RegisterPage'
 import { globalWS } from './services/websocket/GlobalWebSocket'
 import { openWorkspacePanelByPath } from './services/workspacePanelOpener'
 import { initStreamingEvents, destroyStreamingEvents } from './services/websocket/streamingEventService'
 import { flushStreamChunkBuffer } from './services/websocket/streaming/handlers/streamHandler'
-import { allocateNextSequence, ensureStreamingPlaceholder } from './services/websocket/streaming/handlers/utils'
 import { appendAttachmentRefs } from './utils/attachmentRefs'
-import { useAgentStore } from './stores/agentStore'
+import { mainPipelineIdOf } from './utils/mappers'
 import { useAgentTabStore } from './stores/agentTabStore'
 import { useAuthStore } from './stores/authStore'
 import { useInteractionStore } from './stores/interactionStore'
@@ -29,7 +30,6 @@ import { useSessionStore } from './stores/sessionStore'
 import { useUIStore } from './stores/uiStore'
 import { generateUUID } from './utils/uuid'
 import type { SendMessageParams } from './components/chat/types'
-import type { Message } from './types'
 import type { ReactNode } from 'react'
 
 const SettingsPage = lazy(() =>
@@ -172,25 +172,35 @@ function HomePage(): ReactNode {
   // widget_event 全局订阅（内核 PluginWidgetBroadcaster 推送 + 插件 widget 交互）
   useWidgetEvents()
 
-  // 轮询长期任务状态，作为 WebSocket 断连时的 fallback
-  useTaskPolling()
+  // 长期任务列表 query 化（批次 4）：5s 兜底轮询由 useLongTermTasksQuery 的
+  // refetchInterval 承担（页面隐藏自动暂停，等价旧 useTaskPolling 的 document.hidden
+  // 跳过）；WS 断连期间任务状态变化靠此兜底对账恢复
+  useLongTermTasksQuery()
 
   // 统一 VS Code 壳（无 classic / five-space 双模式）
 
   const activeSessionId = useSessionStore((s) => s.activeSessionId)
-  const isSessionLoading = useSessionStore((s) => s.isLoading)
   const connectWebSocket = useSessionStore((s) => s.connectWebSocket)
   const disconnectWebSocket = useSessionStore((s) => s.disconnectWebSocket)
   const createSession = useSessionListStore((s) => s.createSession)
   const setActiveSession = useSessionListStore((s) => s.setActiveSession)
-  const fetchSessions = useSessionListStore((s) => s.fetchSessions)
+  const restoreActiveSessionIfNeeded = useSessionListStore((s) => s.restoreActiveSessionIfNeeded)
 
-  /** 确保 Agent 配置列表已加载（ChatContainer 按 activeTab.agentId 解析当前管道模型） */
-  const fetchAgents = useAgentStore((s) => s.fetchAgents)
+  // 会话列表（query 化）：缓存秒开 + staleTime 到期后台静默刷新，刷新页面不再
+  // 全屏 loading；首次无缓存的 isPending 才驱动 ChatContainer 的加载态
+  const sessionsQuery = useSessionsQuery()
+  const isSessionLoading = sessionsQuery.isPending
 
+  // Agent 配置列表（query 化）：ChatContainer 按 activeTab.agentId 解析当前管道模型，
+  // 订阅即加载（缓存命中时零请求）
+  useAgentsQuery()
+
+  // query 数据到位后恢复上次选中会话（内部幂等：已有有效选中时不动作）
   useEffect(() => {
-    fetchAgents().catch(() => {})
-  }, [fetchAgents])
+    if (sessionsQuery.data) {
+      restoreActiveSessionIfNeeded(sessionsQuery.data).catch(console.error)
+    }
+  }, [sessionsQuery.data, restoreActiveSessionIfNeeded])
 
   /** 当前活跃会话的消息列表（从 pipelineMessageStore 响应式读取） */
   const activePipelineId = usePipelineMessageStore((s) => s.activePipelineId)
@@ -208,11 +218,6 @@ function HomePage(): ReactNode {
   const activeKey = activePipelineId
   const hasMoreMessages = usePipelineMessageStore((s) => activeKey ? (s.hasMoreOlderByPipeline[activeKey] ?? false) : false)
   const isLoadingMoreMessages = usePipelineMessageStore((s) => activeKey ? (s.isLoadingOlderByPipeline[activeKey] ?? false) : false)
-
-  // 初始化：加载会话列表
-  useEffect(() => {
-    fetchSessions().catch(console.error)
-  }, [fetchSessions])
 
   // 初始化全局流式事件处理器（不随组件卸载而销毁）
   useEffect(() => {
@@ -288,7 +293,7 @@ function HomePage(): ReactNode {
       }
 
       const listStore = useSessionListStore.getState()
-      const sessions = useSessionStore.getState().sessions || []
+      const sessions = readSessions()
       const session = sessions.find(s => s.id === sid)
       if (session && (session.title === '灵汐' || session.title === '新会话')) {
         const title = params.content.replace(/\n/g, ' ').trim().slice(0, 30)
@@ -299,14 +304,19 @@ function HomePage(): ReactNode {
 
       const pipelineStore = usePipelineMessageStore.getState()
 
-      // 管道 ID 是会话的唯一路由键。源头取值：直接从当前会话的真实 pipelineIds[0] 取，
-      // 而非依赖 ChatContainer 闭包传入的 params.pipelineId（它来自 activeTab.pipelineRunId，
-      // 新建/切换会话后 React 渲染时序可能导致闭包持有旧 tab → 串到旧会话的 pipeline）。
-      // sessionStore 是唯一真相源，这里实时读取，彻底杜绝 activePipelineId 滞留旧值。
+      // 管道 ID 是会话的唯一路由键。源头取值：以会话权威 activePipelineId 为准
+      // （2026-08-22 裁决，替代 pipelineIds[0] 位置猜测——排序不保证主管道在前时
+      // 会发进错误管道）；缺失且恰一个管道才取唯一元素；多管道解析失败即
+      // 终止发送（fail-closed，沿用下方"缺失终止"式样，不落 params 猜测值）。
+      // 不再依赖 ChatContainer 闭包传入的 params.pipelineId（它来自
+      // activeTab.pipelineRunId，新建/切换会话后渲染时序可能导致闭包持有旧 tab）。
       const sessionForPid = sessions.find((s) => s.id === sid)
-      const targetPipelineId = sessionForPid?.pipelineIds?.[0] || params.pipelineId
+      const targetPipelineId = sessionForPid ? mainPipelineIdOf(sessionForPid) : undefined
       if (!targetPipelineId) {
-        console.warn('[handleSendMessage] pipelineId 缺失，终止发送: sid=%s', sid)
+        console.warn(
+          '[handleSendMessage] 主管道解析失败（无 activePipelineId 且管道数≠1），终止发送: sid=%s',
+          sid,
+        )
         return
       }
       // 校验：params.pipelineId 与会话真实主管道不一致时，说明前端 tab 状态滞后，
@@ -327,21 +337,27 @@ function HomePage(): ReactNode {
       // 渲染图片/链接，历史回读天然带引用。不再挂 attachments 数组（避免与
       // markdown 图片双重显示）。
       const contentWithRefs = appendAttachmentRefs(params.content, params.attachments)
-      const userMessage: Message = {
+
+      // ADR 2026-08-22 单一消息数组：乐观 user 消息直接进主数组（status='sending'），
+      // 与流式 assistant 同数组，靠状态机区分生命周期。new_message 事件携带
+      // user_message 权威回传时按 cmid 认领（recordId 双字段范式，UI id 永不变）——
+      // 不再有独立 pending 区（旧 pending 驱逐 = 发送后用户消息消失的症状根因）。
+      pipelineStore.addMessage(targetPipelineId, {
         id: userMessageId,
         sessionId: sid,
         role: 'user',
         content: contentWithRefs,
         timestamp: new Date().toISOString(),
-        sequence: allocateNextSequence(targetPipelineId),
-        status: 'completed',
+        status: 'sending',
         clientMessageId: userMessageId,
-      }
-
-      pipelineStore.addMessage(targetPipelineId, userMessage)
+      })
+      // 发送瞬间启动流式态（驱动"思考中"指示）；stream_start 到达时会以
+      // 后端真实 message_id 重建流式态并建 assistant 占位气泡。
+      pipelineStore.startStreaming(targetPipelineId, userMessageId)
+      // 只按主管道探测一次（2026-08-22 裁决）：sid 是会话坐标不是管道坐标，
+      // 二次探测会把"另一个会话的 entered 交互"自动批准掉；歧义由 store 层 fail-closed。
       const enteredInteraction =
-        useInteractionStore.getState().getEnteredForPipeline(targetPipelineId) ||
-        useInteractionStore.getState().getEnteredForPipeline(sid)
+        useInteractionStore.getState().getEnteredForPipeline(targetPipelineId)
       if (enteredInteraction) {
         globalWS.sendInteractionResponse(sid, enteredInteraction.requestId, {
           response_type: 'approved',
@@ -350,20 +366,13 @@ function HomePage(): ReactNode {
         useInteractionStore.getState().markResponded(enteredInteraction.requestId)
       }
 
-      // 发送前立即创建"思考中"占位气泡，让用户点发送的瞬间就看到反馈，
-      // 而不是等到 stream_start（后端管道已接收并开始流式）才出现气泡。
-      // globalWS.sendUserInput 是同步入队（_send 永不抛异常：已连接则 ws.send，否则入队待重连），
-      // 因此占位气泡放在 send 之前同步创建即可，不存在"发送失败需回滚占位气泡"的情况。
-      // 使用临时 placeholder_ 前缀 ID，后续 stream_start 事件到达时，
-      // utils.ensureStreamingPlaceholder 会通过 updateMessage(prevMsg.id, { id: realMessageId })
-      // 将此占位气泡的 ID 改写为后端真实 messageId（utils.ts 合并分支）。
-      const placeholderMsgId = `placeholder_${generateUUID()}`
-      ensureStreamingPlaceholder(targetPipelineId, placeholderMsgId, sid)
-
+      // globalWS.sendUserInput 是同步入队（_send 永不抛异常：已连接则 ws.send，
+      // 否则入队待重连），发送失败由 user_input_send_timeout（20s TTL）显式
+      // 撤下 pending + 插入错误气泡 + 高优通知兜底（诚实状态机，无静默容忍）。
       globalWS.sendUserInput(sid, contentWithRefs, {
         enableThinking: params.enableThinking,
         pipelineId: targetPipelineId,
-        clientMessageId: userMessage.id,
+        clientMessageId: userMessageId,
       })
     },
     [],

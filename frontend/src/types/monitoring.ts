@@ -102,7 +102,7 @@ export interface TaskInfo {
   current_step?: string
   /** 进度 (0-100) */
   progress?: number
-  // ── pipeline_state 派生字段（/ext/monitoring/tasks，task = pipeline 单一真值）──
+  // ── pipeline_state 派生字段（monitoring 插件 tasks，task = pipeline 单一真值）──
   /** 任务标题（state 派生：task.goal 或 display_name） */
   title?: string
   /** 管道 state 当前阶段（state 真值，与 task.current_step 不同源） */
@@ -111,7 +111,7 @@ export interface TaskInfo {
   pipeline_id?: string
   /** 所属会话（thread）ID */
   thread_id?: string
-  /** 关联的任务管理条目 ID（存在时恢复操作走 channel_api） */
+  /** 关联的任务管理条目 ID（存在时恢复操作走 task_service 插件） */
   task_id?: string | null
   /** 管道消息条数（state.message_count） */
   message_count?: number

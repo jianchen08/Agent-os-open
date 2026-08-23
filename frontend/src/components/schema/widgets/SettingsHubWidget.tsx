@@ -16,9 +16,9 @@ import { PipelineSettingsPage } from '@/pages/settings/PipelineSettingsPage'
 import { PluginsSettingsPage } from '@/pages/settings/PluginsSettingsPage'
 import { ThemeSettingsPage } from '@/pages/settings/ThemeSettingsPage'
 import { FormWidget } from './FormWidget'
-import { getSchema } from '@/services/api/schema'
 import { API_ENDPOINTS } from '@/constants/api'
 import { contributionRegistry } from '@/services/schema/ContributionRegistry'
+import { useSchemaQuery } from '@/hooks/queries/useSchemaQuery'
 import { KERNEL_NAV_ITEMS } from '@/services/settingsKernelNav'
 import type { SettingsPanelEntry } from '@/services/schema/ContributionRegistry'
 
@@ -55,21 +55,14 @@ export function SettingsHubWidget(_props: Record<string, unknown>) {
   const [active, setActive] = useState<NavKey>('kernel-plugins')
   const [pluginPanels, setPluginPanels] = useState<SettingsPanelEntry[]>([])
 
+  // schema（query 化）：与 SettingsPage/GrowthLoop 共享同一缓存条目
+  const schemaQuery = useSchemaQuery()
+
   useEffect(() => {
-    let cancelled = false
-    getSchema()
-      .then((schema) => {
-        if (cancelled) return
-        contributionRegistry.loadFromSchema(schema as unknown as Record<string, unknown>)
-        setPluginPanels(contributionRegistry.getSettingsPanels())
-      })
-      .catch(() => {
-        /* 后端不可达时仅展示内核导航 */
-      })
-    return () => {
-      cancelled = true
-    }
-  }, [])
+    if (!schemaQuery.data) return
+    contributionRegistry.loadFromSchema(schemaQuery.data as unknown as Record<string, unknown>)
+    setPluginPanels(contributionRegistry.getSettingsPanels())
+  }, [schemaQuery.data])
 
   const pluginNav: NavItem[] = useMemo(
     () =>

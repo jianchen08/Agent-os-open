@@ -2,7 +2,7 @@
 
 import { buildGlobalWebSocketUrl } from '@/constants/websocket'
 import { triggerAuthExpired } from '@/services/authCallbacks'
-import { useAuthStore, isAuthFailureFromError } from '@/stores/authStore'
+import { isAuthFailureFromError, isExpired, refresh, getAccessToken } from '@/services/auth/tokenLifecycle'
 import { useLayoutModeStore } from '@/stores/layoutModeStore'
 import { loggers } from '@/utils/logger'
 
@@ -31,6 +31,14 @@ const CONNECTION_TIMEOUT = 15_000
 
 /** 发送缓冲区阈值：超过此值延迟发送（1MB） */
 const SEND_BUFFER_THRESHOLD = 1_000_000
+
+/**
+ * user_input 离线排队 TTL：入队后超过此时长仍未随重连发出，则从队列剔除并
+ * 广播 user_input_send_timeout（UI 层据此移除"思考中"占位气泡并向用户报错）。
+ * 2026-08-21 实测故障：token 过期致 WS 断连 7 分钟，期间发送的消息静默滞留
+ * 内存队列，气泡无限转、刷新后凭空消失、全程零提示——发送层必须有界失败。
+ */
+const USER_INPUT_QUEUE_TTL_MS = 20_000
 
 class GlobalWebSocketService {
   private ws: WebSocket | null = null
@@ -70,6 +78,9 @@ class GlobalWebSocketService {
   private _lastSequence: number = 0
 
   private _connectionTimeoutTimer: ReturnType<typeof setTimeout> | null = null
+
+  /** user_input 排队超时计时器（key = client_message_id） */
+  private _userInputTimers: Map<string, ReturnType<typeof setTimeout>> = new Map()
 
   /** 是否发起过至少一次连接（connect 被调用过）。刷新后 token 恢复期为 false：
    *  「从未连接」≠「断开」，连接状态映射据此区分首连中与真断开（不出误导横幅）。 */
@@ -224,7 +235,18 @@ class GlobalWebSocketService {
 
       if (event.code === 4000) {
         this._kickedByReplacement = true
+        // 被踢页面已永久失联：滞留队列的消息永远不会发出（连接不再重建），
+        // 立即清空并撤销其排队超时计时，再广播 kicked 让 UI 明示用户——
+        // 此前静默装死，用户以为页面在线，实际消息全部黑洞（2026-08-21 实测：
+        // 双页面互踢风暴中气泡无限转、回复丢失、渲染错乱）。
+        this._queue = []
+        this._userInputTimers.forEach((timer) => clearTimeout(timer))
+        this._userInputTimers.clear()
         console.info('[GlobalWS] 被新连接替换(code=4000)，跳过重连')
+        this._emit('kicked_by_replacement', {
+          type: 'kicked_by_replacement',
+          data: { reason: '本页连接已被同账号的其他页面替换' },
+        })
         return
       }
 
@@ -232,11 +254,11 @@ class GlobalWebSocketService {
         // 后端 token 无效/过期时以 code=4001 关闭连接，前端需先刷新 token 再重连。
         // 任何掉线（含 1006、心跳超时 2002、4001）都先检查 token 是否已过期：
         // 已建立连接掉了（wasConnected=true）也可能是 token 过期后才掉，旧逻辑的
-        // !wasConnected 门控会让此类掉线用过期 token 硬连 → 4001 → 崩溃。checkTokenExpiration
+        // !wasConnected 门控会让此类掉线用过期 token 硬连 → 4001 → 崩溃。isExpired
         // 只在真过期时返回 true，未过期时不触发刷新，安全。
         let authRejected = event.code === 4001
         if (!authRejected) {
-          authRejected = useAuthStore.getState().checkTokenExpiration()
+          authRejected = isExpired()
         }
         this._scheduleReconnect(authRejected)
       }
@@ -264,6 +286,8 @@ class GlobalWebSocketService {
     }
     this._status = 'disconnected'
     this._queue = []
+    this._userInputTimers.forEach((timer) => clearTimeout(timer))
+    this._userInputTimers.clear()
     this._handlers.clear()
   }
 
@@ -287,6 +311,51 @@ class GlobalWebSocketService {
     }
 
     this._send(msg)
+
+    // 错误透传（有界失败）：_send 对断线是静默入队（永不抛错），入队即挂 TTL——
+    // 超时仍未发出则剔除并广播，UI 层撤占位气泡并提示用户，杜绝"无限思考中"。
+    const cmid = (msg as { client_message_id?: string }).client_message_id
+    if (cmid && this._isQueuedUserInput(cmid)) {
+      this._armUserInputTimeout(cmid)
+    }
+  }
+
+  /** 队列中是否存在指定 client_message_id 的 user_input */
+  private _isQueuedUserInput(cmid: string): boolean {
+    return this._queue.some(
+      (m) => m.type === 'user_input' && (m as { client_message_id?: string }).client_message_id === cmid,
+    )
+  }
+
+  /** 为排队中的 user_input 挂超时：到点仍在队列 → 剔除 + 广播 user_input_send_timeout */
+  private _armUserInputTimeout(cmid: string): void {
+    if (this._userInputTimers.has(cmid)) return
+    const timer = setTimeout(() => {
+      this._userInputTimers.delete(cmid)
+      const idx = this._queue.findIndex(
+        (m) =>
+          m.type === 'user_input'
+          && (m as { client_message_id?: string }).client_message_id === cmid,
+      )
+      if (idx === -1) return // 已随重连成功发出（或被去重剔除），无需处理
+      const [dropped] = this._queue.splice(idx, 1)
+      _wsLogger.warn(
+        '[GlobalWS] user_input 排队 %dms 未发出（连接未恢复），丢弃并广播 send_timeout: cmid=%s',
+        USER_INPUT_QUEUE_TTL_MS,
+        cmid.slice(0, 8),
+      )
+      this._emit('user_input_send_timeout', {
+        type: 'user_input_send_timeout',
+        data: {
+          thread_id: dropped.thread_id,
+          pipeline_id: dropped.pipeline_id,
+          client_message_id: cmid,
+          content: dropped.content,
+          reason: `连接断开超过 ${USER_INPUT_QUEUE_TTL_MS / 1000}s，消息未送达已撤回`,
+        },
+      })
+    }, USER_INPUT_QUEUE_TTL_MS)
+    this._userInputTimers.set(cmid, timer)
   }
 
   /**
@@ -400,6 +469,15 @@ class GlobalWebSocketService {
       const msg = this._queue.shift()!
       try {
         this.ws.send(JSON.stringify(msg))
+        // 已成功送入连接：撤销其排队超时计时（若有）
+        if (msg.type === 'user_input') {
+          const cmid = (msg as { client_message_id?: string }).client_message_id
+          const timer = cmid ? this._userInputTimers.get(cmid) : undefined
+          if (cmid && timer) {
+            clearTimeout(timer)
+            this._userInputTimers.delete(cmid)
+          }
+        }
       } catch {
         this._queue.unshift(msg)
         break
@@ -508,13 +586,12 @@ class GlobalWebSocketService {
         return
       }
 
-      // 认证拒绝：必须先刷新 token 再连
-      const authStore = useAuthStore.getState()
+      // 认证拒绝：必须先刷新 token 再连（tokenLifecycle 唯一刷新源，2026-08-21 收口）
       _wsLogger.info('[GlobalWS] 连接被认证拒绝(4001)，刷新 token 后再重连')
       try {
-        await authStore.refreshToken()
-        // 刷新成功：用新 token 重连（refreshToken 已更新 store 与 localStorage）
-        const newToken = authStore.token
+        await refresh()
+        // 刷新成功：用新 token 重连（refresh 已更新 localStorage 并通知 authStore 同步）
+        const newToken = getAccessToken()
         if (newToken && newToken !== this._token) {
           this._token = newToken
           _wsLogger.info('[GlobalWS] Token 已刷新，用新 token 重连')

@@ -8,7 +8,11 @@
  */
 
 import { describe, it, expect, beforeEach } from 'vitest'
-import { applyPluginThemeVars, derivePluginThemePreview } from '@/services/themeService'
+import {
+  applyPluginThemeVars,
+  clearPluginThemeVars,
+  derivePluginThemePreview,
+} from '@/services/themeService'
 import type { PluginTheme } from '@/types/theme'
 
 function pluginTheme(overrides: Partial<PluginTheme> = {}): PluginTheme {
@@ -82,6 +86,32 @@ describe('applyPluginThemeVars — 变量与背景覆盖', () => {
     const value = document.documentElement.style.getPropertyValue('--bg-texture')
     expect(value).toContain('radial-gradient')
     expect(value).toContain('rgba(212,175,55,0.5)')
+  })
+
+  it('再次应用前清理上一插件主题变量（切主题漂移根因：皮肤→内置主题残留 --region-*）', () => {
+    applyPluginThemeVars(
+      pluginTheme({
+        variables: {
+          '--region-sidebar-bg': '#123456',
+          '--region-chat-bg': 'transparent',
+          '--bubble-ai-mode': 'flat',
+        },
+      }),
+    )
+    expect(document.documentElement.style.getPropertyValue('--region-sidebar-bg')).toBe('#123456')
+    // 切到内置主题：applyTheme 先清插件变量再应用 base（base 不发射 --region-*）
+    clearPluginThemeVars()
+    expect(document.documentElement.style.getPropertyValue('--region-sidebar-bg')).toBe('')
+    expect(document.documentElement.style.getPropertyValue('--region-chat-bg')).toBe('')
+    expect(document.documentElement.style.getPropertyValue('--bubble-ai-mode')).toBe('')
+  })
+
+  it('applyPluginThemeVars 内部先清再写（重复应用不叠加残留）', () => {
+    applyPluginThemeVars(pluginTheme({ variables: { '--region-sidebar-bg': '#111111' } }))
+    applyPluginThemeVars(pluginTheme({ variables: { '--region-sidebar-bg': '#222222' } }))
+    expect(document.documentElement.style.getPropertyValue('--region-sidebar-bg')).toBe('#222222')
+    // 第二次应用未声明的旧变量（如 --bubble-ai-mode）已被清理
+    expect(document.documentElement.style.getPropertyValue('--bubble-ai-mode')).toBe('')
   })
 })
 

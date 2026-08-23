@@ -6,7 +6,7 @@
  */
 
 import { test, expect } from '../fixtures';
-import { loginAndNavigateTo, navigateTo, ROUTES } from '../helpers/navigation';
+import { loginAndNavigateTo, ROUTES } from '../helpers/navigation';
 
 test.describe.configure({ timeout: 120_000 });
 

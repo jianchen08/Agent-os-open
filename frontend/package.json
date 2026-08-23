@@ -12,7 +12,7 @@
   "scripts": {
     "dev": "vite",
     "build": "vite build",
-    "typecheck": "tsc --noEmit",
+    "typecheck": "tsc -b",
     "test": "vitest --run",
     "test:coverage": "vitest --run --coverage",
     "test:watch": "vitest",
@@ -36,6 +36,9 @@
     "@rjsf/core": "6.7.1",
     "@rjsf/utils": "6.7.1",
     "@rjsf/validator-ajv8": "6.7.1",
+    "@tanstack/query-async-storage-persister": "^5.101.4",
+    "@tanstack/react-query": "^5.101.4",
+    "@tanstack/react-query-persist-client": "^5.101.4",
     "@types/react-syntax-highlighter": "^15.5.13",
     "antd": "^6.1.1",
     "axios": "^1.13.2",
@@ -59,6 +62,7 @@
     "zustand": "^5.0.9"
   },
   "devDependencies": {
+    "@eslint/js": "^9.39.5",
     "@playwright/test": "^1.60.0",
     "@tailwindcss/postcss": "^4.1.17",
     "@testing-library/jest-dom": "^6.9.1",
@@ -80,6 +84,7 @@
     "eslint-plugin-react-refresh": "^0.5.2",
     "extend": "3.0.2",
     "fake-indexeddb": "^6.2.5",
+    "globals": "^14.0.0",
     "hast-util-to-jsx-runtime": "2.3.6",
     "jsdom": "^29.1.1",
     "micromark": "4.0.0",

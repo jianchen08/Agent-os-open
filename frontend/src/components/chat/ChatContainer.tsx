@@ -5,9 +5,10 @@ import { Loader2 } from '@/assets/icons'
 import { useModelContextInfo } from '@/hooks/useModelContextInfo'
 import { getDefaults, getLLMConfig, type LLMDefaults } from '@/services/api/config'
 import { switchThinkingMode } from '@/services/api/thinkingMode'
-import { useAgentStore } from '@/stores/agentStore'
 import { useAgentTabStore } from '@/stores/agentTabStore'
+import { useAgentsQuery } from '@/hooks/queries/useAgentsQuery'
 import { useContextUsageStore } from '@/stores/contextUsageStore'
+import { useShallow } from 'zustand/react/shallow'
 import { usePipelineMessageStore } from '@/stores/pipelineMessageStore'
 import { useSessionStore } from '@/stores/sessionStore'
 import {
@@ -27,7 +28,6 @@ import { AgentTabBar } from './AgentTabBar'
 import { ChatInput } from './ChatInput'
 import { GodotSelectionRow } from './GodotSelectionRow'
 import { MessageList } from './MessageList'
-import { SubTabRouter } from './SubTabRouter'
 import { VotingPanel } from './VotingPanel'
 import type { ChatContainerProps } from './types'
 import type { Agent, Message } from '@/types/models'
@@ -118,7 +118,7 @@ export const ChatContainer = ({
   const activeTab = tabs.find((t) => t.id === activeTabId)
 
   /** 基于当前激活 Tab 解析模型名 所有管道（主/子）平权处理，统一按当前标签的 agent 配置获取模型。 */
-  const agents = useAgentStore((s) => s.agents)
+  const { data: agents = [] } = useAgentsQuery()
   /** 子管道对应的 agent config_id（来自 pipelineMeta.agentName，sub_agent_created 事件下发） */
   const pipelineAgentName = usePipelineMessageStore((s) => {
     const pid = activeTab?.pipelineRunId
@@ -127,7 +127,7 @@ export const ChatContainer = ({
 
   /**
    * P8 模型显示：LLM 默认配置中的模型分级映射（large/medium/small → 具体模型名）。
-   * 从 /ext/channel_api/config/llm/defaults 读取 tiers，失败时静默（tiers 为 undefined，
+   * 从 llm_service 的 config/llm/defaults 读取 tiers，失败时静默（tiers 为 undefined，
    * resolveModelDisplayName 会原样返回 model 值，不阻塞主流程）。
    */
   const [llmDefaults, setLlmDefaults] = useState<LLMDefaults | null>(null)
@@ -181,13 +181,18 @@ export const ChatContainer = ({
     [rawModelName, llmDefaults],
   )
 
-  /** 从 pipelineMessageStore 获取当前激活管道的消息 管道激活统一由 initSessionTabs（会话初始化）和 switchToTab（Tab切换）负责， */
+  /** 从 pipelineMessageStore 获取当前激活管道的消息 管道激活统一由 initSessionTabs（会话初始化）和 switchToTab（Tab切换）负责。
+   *  单一消息数组（ADR 2026-08-22）：乐观 user/流式 assistant/已确认消息全在
+   *  messagesByPipeline 同一数组，按 status 状态机区分生命周期——渲染层零拼接
+   *  （旧 `[...msgs, ...pending]` 双区拼接已删，pending 区已随认领替代驱逐退役）。 */
   const pipelineMessages = usePipelineMessageStore(
-    (s) => {
+    // useShallow：快照每次都是新引用（数组元素级稳定），zustand v5 useSyncExternalStore
+    // 会因引用不稳触发 forceStoreRerender 无限循环（e2e 实测 Maximum update
+    // depth exceeded）——浅比较元素级稳定即可。
+    useShallow((s) => {
       if (!s.activePipelineId) return EMPTY_MESSAGES
-      const msgs = s.messagesByPipeline[s.activePipelineId] ?? EMPTY_MESSAGES
-      return msgs
-    },
+      return s.messagesByPipeline[s.activePipelineId] ?? EMPTY_MESSAGES
+    }),
   )
 
   /** 会话切换由 setActiveSession 统一处理：fetchMessages + initSessionTabs */
@@ -206,14 +211,13 @@ export const ChatContainer = ({
   const isSubTabActive = activeTab != null && activeTab.agentLevel !== 1
   const isSubTabFinished = isSubTabActive && (activeTab?.status === 'completed' || activeTab?.status === 'failed')
 
-  /** 当前标签对应管道是否正在流式输出 逻辑：当前标签 → 标签的 pipelineRunId → streamingState[pipelineId].isStreaming */
-  const pipelineActiveId = usePipelineMessageStore((s) => s.activePipelineId)
-  const currentTabPipelineId = activeTab?.pipelineRunId || pipelineActiveId
+  /** 当前标签对应管道是否正在流式输出。
+   *  ADR 2026-08-21 双来源收紧：只用 activeTab.pipelineRunId 单一来源（与发送侧
+   *  ChatInput 同款正例）——不再 fallback store 级 activePipelineId，Tab 数据损坏
+   *  时宁可不显示生成态也不串到别的管道。 */
+  const currentTabPipelineId = activeTab?.pipelineRunId || ''
   const effectiveIsGenerating = usePipelineMessageStore(
-    (s) => {
-      const pid = activeTab?.pipelineRunId || s.activePipelineId
-      return pid ? (s.streamingState[pid]?.isStreaming ?? false) : false
-    }
+    (s) => (currentTabPipelineId ? (s.streamingState[currentTabPipelineId]?.isStreaming ?? false) : false),
   )
 
 
@@ -340,10 +344,16 @@ export const ChatContainer = ({
       className={`theme-chat-area flex h-full min-h-0 flex-col overflow-hidden ${className}`}
       data-testid="chat-container"
       data-session-id={sessionId}
+      // 聊天容器状态（我方词汇）：empty=空态欢迎页 / active=对话态。
+      // DSH 皮肤的 [data-phase=hero/active] 由适配器递送层转译到这里
+      // （位置映射，不给组件贴 DSH 名字——2026-08-22 用户裁决）
+      data-chat-state={filteredMessages.length > 0 ? 'active' : 'empty'}
     >
-      {/* Agent Tab 导航栏（多 Tab 时显示） */}
+      {/* Agent Tab 导航栏（多 Tab 时显示；单 Tab 也常驻——用户裁决 2026-08-21）。
+          顶部 40px 图标带行：与侧栏/工作区开关按钮同排（按钮钉页角、
+          标签行居中并在两侧留出 48px 避让角图标），带内无分割线 */}
       {showTabBar && (
-        <div className="flex shrink-0 justify-center">
+        <div className="flex h-10 shrink-0 items-center justify-center px-12" data-testid="chat-session-header">
           <AgentTabBar
             tabs={barTabs}
             onTabChange={handleTabChange}
@@ -369,9 +379,6 @@ export const ChatContainer = ({
         taskId={activeTab?.taskId}
       />
 
-      {/* 子Tab路由增强（无UI，逻辑层） */}
-      <SubTabRouter sessionId={sessionId} />
-
       {/* 活跃投票面板 */}
       <ActiveVotingPanels sessionId={sessionId} />
 
@@ -379,6 +386,7 @@ export const ChatContainer = ({
       <div
         className="relative shrink-0 border-t px-3 py-3"
         style={{ borderColor: 'var(--ds-border-subtle, rgba(148,163,184,0.12))' }}
+        data-testid="chat-composer"
       >
         {/* Godot 选中引用（实时镜像：选中出现 / 取消消失；选中非空发送时插件随消息注入引用） */}
         <GodotSelectionRow threadId={activeTabId || sessionId} />

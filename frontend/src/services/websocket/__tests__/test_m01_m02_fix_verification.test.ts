@@ -83,61 +83,11 @@ function resetAllMocks(): void {
 // ════════════════════════════════════════════════════════════════════
 // M-01: handleGlobalError —— 通用 ERROR 事件 handler
 // ════════════════════════════════════════════════════════════════════
-describe('M-01: handleGlobalError - 通用 ERROR 事件 handler', () => {
-  beforeEach(resetAllMocks)
+// M-01（handleGlobalError）已随 ADR 2026-08-21 死代码清理删除：
+// 后端（kernel ws_session/capability_router/插件 event-bus）无 'error' 事件发射源，
+// handler 与订阅均为零消费者死代码；缺 pipelineId 按 threadId 清管道的兜底属
+// 「清别人状态」反模式，一并废除。
 
-  it('收到带 error 字段的 ERROR 事件，应解析错误并通过 notificationStore 通知用户', () => {
-    handleGlobalError({ data: { pipeline_id: 'pipe-001' }, error: '数据库连接失败' })
-
-    expect(mocks.addNotification).toHaveBeenCalledTimes(1)
-    const arg = mocks.addNotification.mock.calls[0][0]
-    expect(arg.title).toBe('请求失败')
-    expect(arg.message).toBe('数据库连接失败')
-    expect(arg.priority).toBe('high')
-    expect(arg.category).toBe('error')
-  })
-
-  it('ERROR 事件错误信息在 data.error 时应正确解析', () => {
-    handleGlobalError({ data: { pipeline_id: 'pipe-001', error: '权限不足' } })
-
-    expect(mocks.addNotification.mock.calls[0][0].message).toBe('权限不足')
-  })
-
-  it('ERROR 事件 message 字段也应被解析为错误信息', () => {
-    handleGlobalError({ data: { pipeline_id: 'pipe-001' }, message: '会话已过期' })
-
-    expect(mocks.addNotification.mock.calls[0][0].message).toBe('会话已过期')
-  })
-
-  it('ERROR 事件应终止对应 pipelineId 的 streaming', () => {
-    handleGlobalError({ data: { pipeline_id: 'pipe-001' } })
-
-    expect(mocks.pipelineMethods.stopStreaming).toHaveBeenCalledWith('pipe-001')
-  })
-
-  it('ERROR 事件无明确错误信息时应显示默认兜底文案', () => {
-    handleGlobalError({ data: { pipeline_id: 'pipe-001' } })
-
-    expect(mocks.addNotification.mock.calls[0][0].message).toBe('服务器返回错误，请稍后重试')
-  })
-
-  it('ERROR 事件无 pipelineId 但有 threadId 时应通过 pipelineStore 终止并仍通知用户', () => {
-    handleGlobalError({ _threadId: 'thread-9' })
-
-    expect(mocks.pipelineMethods.stopStreaming).toHaveBeenCalledWith('thread-9')
-    expect(mocks.addNotification).toHaveBeenCalledTimes(1)
-  })
-
-  it('ERROR 事件 error 为空白字符串时应回退到默认文案（避免空通知）', () => {
-    handleGlobalError({ data: { pipeline_id: 'pipe-001' }, error: '   ' })
-
-    expect(mocks.addNotification.mock.calls[0][0].message).toBe('服务器返回错误，请稍后重试')
-  })
-})
-
-// ════════════════════════════════════════════════════════════════════
-// M-02: handleStreamEnd —— stream_end 空内容 fallback
-// ════════════════════════════════════════════════════════════════════
 describe('M-02: handleStreamEnd - stream_end 空内容 fallback', () => {
   beforeEach(() => {
     resetAllMocks()

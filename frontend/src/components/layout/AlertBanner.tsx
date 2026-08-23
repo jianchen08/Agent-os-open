@@ -178,7 +178,7 @@ function deriveBudgetAlert(status: BudgetStatusResponse | null): AlertBannerItem
  * 从 layoutModeStore + cost_control 派生系统告警：
  * - connection：断开/失败（重连中不打扰）
  * - approval：审批待处理
- * - budget：预算超限（真源 cost_control /ext/cost_control/budget/status 的
+ * - budget：预算超限（真源 cost_control 插件 budget/status 的
  *   alert_level；monitoring 插件 token 累计恒 0 不可用——勿接错源）
  */
 export function useLayoutAlerts(): AlertBannerItem[] {

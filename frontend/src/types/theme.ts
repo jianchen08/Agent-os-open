@@ -92,6 +92,13 @@ export interface PluginTheme {
     image?: Partial<BackgroundImageConfig> & { enabled?: boolean }
     texture?: Partial<TextureConfig> & { enabled?: boolean }
   }
+  /**
+   * 皮肤资产 ID（平台皮肤运行时声明）：声明即激活按择注入——
+   * 皮肤 CSS 经 /ext/{pluginId}/styles/skin/{skin}/merged.css 递送、
+   * hooks.mjs 同路径（六层装饰层 + ctx 契约）、资产 skin-assets/{skin}/。
+   * 任何插件的主题带此字段即获得全部皮肤能力（2026-08-22 平台化裁决）。
+   */
+  skin?: string
   /** 来源插件 ID */
   pluginId: string
 }
@@ -132,6 +139,8 @@ export interface StatusColors {
 
 /** 消息气泡色配置 */
 export interface BubbleColors {
+  /** AI 消息气泡形态（'flat'=平铺跟 DeepSeek/DSH 原生；'bubble'=气泡；缺省 bubble） */
+  ai_mode?: 'flat' | 'bubble'
   user_bg: string
   user_text: string
   user_radius?: string

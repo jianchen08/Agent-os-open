@@ -671,6 +671,7 @@ export class ContributionRegistry {
           raw.backgrounds && typeof raw.backgrounds === 'object'
             ? (raw.backgrounds as PluginTheme['backgrounds'])
             : undefined,
+        skin: typeof raw.skin === 'string' ? raw.skin : undefined,
         pluginId,
       }
       const idx = this.pluginThemes.findIndex((t) => t.pluginId === pluginId && t.id === theme.id)

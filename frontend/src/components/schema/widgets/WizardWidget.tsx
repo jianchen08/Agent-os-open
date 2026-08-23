@@ -9,7 +9,7 @@
  *         { "title": "执行环境", "fields": [ ... ] }
  *       ],
  *       "submitLabel": "创建",
- *       "endpoint": "/ext/tasks/root",   // 末步提交（POST {pipeline_id,...values}）
+ *       "endpoint": "/ext/task_service/tasks/root",   // 末步提交（POST {pipeline_id,...values}）
  *       "eventName": "task.created",     // 提交成功发事件（G3 联动）
  *       "successText": "任务已创建"
  *     } }

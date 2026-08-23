@@ -57,6 +57,29 @@
   .bg-destructive { background-color: hsl(var(--destructive)); }
   .bg-input { background-color: hsl(var(--input)); }
 
+  /* 区域表面统一（2026-08-21 用户要求：区域有背景设定时组件表面让位）——
+     区域背景关系（--region-*-bg）由主题/插件声明：区域背景透明时区域内
+     bg-background/bg-card 组件透明（透出立绘/统一背景层），实色时组件与
+     区域同色（无突兀卡片）。类级覆盖（非变量重绑定——bg-background 是
+     hsl(var(--background)) 包装，变量塞 hex/transparent 会让 hsl() 失效）。
+     选择器按区域容器自身锚定：聊天区用 .theme-chat-area（ChatContainer），
+     侧栏/工作区用 data-region（桌面布局面板；[data-region='chat'] 的 section
+     内嵌侧栏/工作区面板，不能作聊天区锚点） */
+  .theme-sidebar-area .bg-background,
+  .theme-sidebar-area .bg-card,
+  [data-region='sidebar'] .bg-background,
+  [data-region='sidebar'] .bg-card {
+    background-color: var(--region-sidebar-bg, hsl(var(--background)));
+  }
+  .theme-chat-area .bg-background,
+  .theme-chat-area .bg-card {
+    background-color: var(--region-chat-bg, hsl(var(--background)));
+  }
+  [data-region='workspace'] .bg-background,
+  [data-region='workspace'] .bg-card {
+    background-color: var(--region-workspace-bg, hsl(var(--background)));
+  }
+
   .border-border { border-color: hsl(var(--border)); }
   .border-input { border-color: hsl(var(--input)); }
   .border-primary { border-color: hsl(var(--primary)); }
@@ -170,16 +193,64 @@ body.has-bg-image #root > div:first-child {
   background: transparent;
 }
 
+/* 皮肤 hooks 装饰层可见性（2026-08-22 修：maid-atelier 等深度皮肤把背景图/
+   立绘 prepend 到 body（fixed z-index:0），#root 首层容器不透明背景 + 
+   has-bg-image 的 z-index:1 会把装饰层整个盖死——皮肤激活时主容器背景
+   让位（与 has-bg-image 同规则），装饰层从聊天区/工作区透明面透出 */
+html[data-skin] #root > div:first-child {
+  background: transparent;
+}
+
+/* 皮肤垂坠装饰上的可读性底衬（纯图形花边覆盖式零位移后，顶部标签行/
+   钉角按钮住在垂坠带内——原生由皮肤样式化其页头解决，我方统一给
+   半透明底衬保证任何花边/背景上文字可读；无皮肤不生效） */
+html[data-skin] [role='tablist'] {
+  background: color-mix(in srgb, var(--background) 72%, transparent);
+  backdrop-filter: blur(4px);
+  border-radius: 6px;
+}
+html[data-skin] [data-testid='sidebar-toggle-float']:not([class*='bg-accent']),
+html[data-skin] [data-testid='workspace-toggle-float']:not([class*='bg-accent']) {
+  background: color-mix(in srgb, var(--background) 72%, transparent);
+  backdrop-filter: blur(4px);
+}
+
+/* 皮肤背景图上的消息气泡收拢（2026-08-22 用户裁决：有背景图的皮肤聊天文本
+   必须框起来，但只框**气泡区域本身**——整行/整块模糊会把背景图盖死。
+   气泡底色由 MessageItem 内联样式按主题令牌渲染（内联高于 CSS，flat 平铺
+   的透明底必须在那里替换）；此处只把 AI 内容面收拢到文本宽度
+   （fit-content，与 DSH 原生气泡同形态）。通用信号 body.has-bg-image：
+   所有带背景图主题与皮肤走同一规则。 */
+body.has-bg-image [data-testid='message-item']:not([data-role='user']) .message-content-renderer {
+  align-self: flex-start;
+  width: fit-content;
+  max-width: 100%;
+}
+
 /* 背景图模式第三环（v4 让位式布局实测）：聊天区自己的 --chat-bg 实色
    （.theme-chat-area 双通道的颜色位）同样盖住装饰层——立绘在并排式下
    仅从边缘微漏。背景图模式聊天区颜色让位（scrim 可读性由装饰层 overlay
-   承担）*/
+   承担）；主题显式声明 --region-chat-bg 时以主题为准（区域背景关系
+   由主题/插件可配：一体=三区全 transparent 透出统一背景层，单独=各区
+   实色，两两=按区组合）*/
 body.has-bg-image .theme-chat-area {
-  background-color: transparent;
+  background-color: var(--region-chat-bg, transparent);
 }
 
-/* 主题区域纹理：侧边栏 / 聊天区（叠加在各自 --sidebar-bg / --chat-bg 之上） */
+/* 主题区域背景关系（2026-08-21，插件主题可配）：
+   --region-sidebar-bg / --region-chat-bg / --region-workspace-bg ——
+   区域背景取 transparent 时透出统一背景层（body 背景/立绘），
+   实色时单独成面；未声明回退各区域既有变量（侧栏 --sidebar-bg、
+   聊天 --chat-bg-color、工作区 --ds-bg-elevated）。三区关系（一体/
+   单独/两两组合）由此三变量自由表达，皮肤主题按皮肤原生布局声明。 */
 .theme-sidebar-area {
+  background-color: var(--region-sidebar-bg, var(--ds-bg-panel, var(--sidebar-bg, hsl(var(--card)))));
+  /* 区域前景（翻译器按侧栏面单独强制，2026-08-21）：侧栏面与画布亮度
+     对立时全局文本无法两全（xp 亮侧栏/黑画布…）——CSS 变量作用域重绑定，
+     侧栏内所有消费 text-muted-foreground 等的后代自动重算，零组件改动 */
+  color: var(--region-sidebar-fg, var(--foreground));
+  --muted-foreground: var(--region-sidebar-muted-fg, var(--muted-foreground));
+  --secondary-foreground: var(--region-sidebar-muted-fg, var(--secondary-foreground));
   background-image: var(--sidebar-texture, none);
   background-size: var(--sidebar-texture-size, 24px) var(--sidebar-texture-size, 24px);
 }
@@ -188,10 +259,30 @@ body.has-bg-image .theme-chat-area {
    会失效→聊天区透明→body 全屏纹理层穿透内容区，主题纹理只应作为页面背景装饰） */
 .theme-chat-area {
   background-image: var(--chat-texture, none), var(--chat-bg-image, none);
-  background-color: var(--chat-bg-color, transparent);
+  background-color: var(--region-chat-bg, var(--chat-bg-color, transparent));
   background-size: var(--chat-texture-size, 24px) var(--chat-texture-size, 24px), auto;
   background-repeat: repeat, no-repeat;
   background-position: center, center;
+  /* 区域前景（用户三裁 2026-08-21：所有文字/图标按所在区域背景翻转）——
+     聊天区文字/图标颜色与 muted 等随聊天面（对话主区）单独强制 */
+  color: var(--region-chat-fg, var(--foreground));
+  --muted-foreground: var(--region-chat-muted-fg, var(--muted-foreground));
+  --secondary-foreground: var(--region-chat-muted-fg, var(--secondary-foreground));
+}
+
+/* 工作区区域前景（与聊天区同面同值——原生对话主区一体，用户二裁） */
+[data-region='workspace'] {
+  color: var(--region-workspace-fg, var(--foreground));
+  --muted-foreground: var(--region-workspace-muted-fg, var(--muted-foreground));
+  --secondary-foreground: var(--region-workspace-muted-fg, var(--secondary-foreground));
+}
+
+/* 工作区区域背景（2026-08-22：类级而非内联——皮肤 CSS 位置路由把
+   [data-pane="details"] 重写为 [data-region="workspace"] 后，皮肤画的工作区
+   表面（maid-atelier 的 #f2f6fdd1 等）直接命中本容器；内联 background 会
+   盖掉皮肤表面（内联优先级最高），类级让皮肤规则可覆盖 */
+.theme-workspace-area {
+  background-color: var(--region-workspace-bg, var(--ds-bg-elevated, hsl(var(--card))));
 }
 
 @media (max-height: 700px) {

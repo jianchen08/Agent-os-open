@@ -152,64 +152,6 @@ class StorageService {
 export const storage = new StorageService()
 
 /**
- * 认证相关存储工具
- */
-export const authStorage = {
-  /**
-   * 保存认证令牌
-   * @param token - 访问令牌
-   * @param refreshToken - 刷新令牌（可选）
-   */
-  setTokens(token: string, refreshToken?: string): void {
-    storage.setItem(STORAGE_KEYS.ACCESS_TOKEN, token)
-    if (refreshToken) {
-      storage.setItem(STORAGE_KEYS.REFRESH_TOKEN, refreshToken)
-    }
-  },
-
-  /**
-   * 获取访问令牌
-   * @returns 访问令牌或null
-   */
-  getToken(): string | null {
-    return storage.getItem<string>(STORAGE_KEYS.ACCESS_TOKEN)
-  },
-
-  /**
-   * 获取刷新令牌
-   * @returns 刷新令牌或null
-   */
-  getRefreshToken(): string | null {
-    return storage.getItem<string>(STORAGE_KEYS.REFRESH_TOKEN)
-  },
-
-  /**
-   * 清除所有认证信息
-   */
-  clearAuth(): void {
-    storage.removeItem(STORAGE_KEYS.ACCESS_TOKEN)
-    storage.removeItem(STORAGE_KEYS.REFRESH_TOKEN)
-    storage.removeItem(STORAGE_KEYS.USER_INFO)
-  },
-
-  /**
-   * 保存用户信息
-   * @param user - 用户信息
-   */
-  setUser(user: any): void {
-    storage.setItem(STORAGE_KEYS.USER_INFO, user)
-  },
-
-  /**
-   * 获取用户信息
-   * @returns 用户信息或null
-   */
-  getUser<T>(): T | null {
-    return storage.getItem<T>(STORAGE_KEYS.USER_INFO)
-  },
-}
-
-/**
  * UI相关存储工具
  */
 export const uiStorage = {

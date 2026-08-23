@@ -1,15 +1,25 @@
 /** useRealtimeEvents Hook 订阅实时 WebSocket 事件并路由到 layout mode store 进行展示。 */
 
 import { useEffect } from 'react'
-import { useAuthStore } from '@/stores/authStore'
 import { WS_SERVER_EVENTS } from '@/constants/websocket'
 import { globalWS } from '@/services/websocket/GlobalWebSocket'
+import * as tokenLifecycle from '@/services/auth/tokenLifecycle'
 import { useLayoutModeStore } from '@/stores/layoutModeStore'
 import { useLongTermTaskStore } from '@/stores/longTermTaskStore'
 import { useNotificationStore } from '@/stores/notificationStore'
 import { usePipelineMessageStore } from '@/stores/pipelineMessageStore'
-import { usePipelineRegistryStore } from '@/stores/pipelineRegistryStore'
+import { mainPipelineIdOf } from '@/utils/mappers'
 import { useSessionStore } from '@/stores/sessionStore'
+import { readSessions } from '@/hooks/queries/useSessionsQuery'
+import {
+  readLongTermTasks,
+  updateLongTermTasksCache,
+  invalidateLongTermTasks,
+} from '@/hooks/queries/useLongTermTasksQuery'
+import {
+  invalidatePipelineRuns,
+  invalidatePipelineStates,
+} from '@/hooks/queries/usePipelineRunsQuery'
 
 /** Hook to subscribe to real-time WebSocket events and update the layout store. Call once in a top-level component (e.g. FiveSpaceHomePage). */
 export function useRealtimeEvents(): void {
@@ -21,8 +31,12 @@ export function useRealtimeEvents(): void {
 
     /** WS 重连后重新加载当前会话消息，1 秒防抖避免频繁调用。 流式事件（stream_start 等）由 streaming/index.ts 统一处理，此处不重复订阅。 */
     const handleWsReconnect = () => {
-      // 重连后补拉管道运行快照（断线期间的 stream_* 增量丢失，以快照对账）
-      usePipelineRegistryStore.getState().fetch()
+      // 重连后补拉管道运行快照（断线期间的 stream_* 增量丢失，以快照对账）。
+      // query 化：invalidate runs/states——活跃订阅自动重拉，替代原 store.fetch()。
+      // 事件路径「先 invalidate 再取」强制新鲜：staleTime 窗口内直接 fetchQuery
+      // 会拿旧缓存，必须失效后由订阅重拉。
+      invalidatePipelineRuns()
+      invalidatePipelineStates()
       // 防抖：1 秒内不重复调用 fetchMessages
       const now = Date.now()
       if (now - lastFetchTimeRef.current < 1000) {
@@ -30,19 +44,21 @@ export function useRealtimeEvents(): void {
       }
       lastFetchTimeRef.current = now
 
-      const { activeSessionId, sessions } = useSessionStore.getState()
+      const { activeSessionId } = useSessionStore.getState()
+      const sessions = readSessions()
       if (!activeSessionId) return
-      // 只补当前会话的【主管道】，不对 session.pipelineIds 全部扇出。
+      // 只补当前会话的【主管道】（权威 activePipelineId 解析，2026-08-22 裁决），
+      // 不对 session.pipelineIds 全部扇出。
       // 子管道的消息在用户切到对应 tab 时按需加载。
       const session = sessions.find((s) => s.id === activeSessionId)
-      const mainPipelineId = session?.pipelineIds?.[0]
+      const mainPipelineId = session ? mainPipelineIdOf(session) : undefined
       if (!mainPipelineId) return
 
-      // 走 backfill（增量补漏，走后端尾部读优化）而非 init（全量加载）。
-      // init 触发 initFromAPI → 后端 _list_by_pipeline_full 全量读大 YAML（4.3MB+，
-      // 单请求 10-40s），多个 pipeline 并发即雪崩。backfill 走 read_records_from_tail
-      // 尾部窗口读，秒级返回。流式占位的 id 对账问题由 ensureStreamingPlaceholder 的
-      // 状态守护保证安全，无需靠 init 全量覆盖。
+      // 走 backfill（after_sequence 尾部游标读）而非 init（全量替换）：
+      // 0.2 消息在 SQLite（message_slots+blobs），游标分页已下推 SQL——backfill
+      // 是 O(增量窗口) 的索引查询，重连补漏秒级；init 全量替换会丢弃刷新前
+      // 的一切本地状态，重连场景不需要。（注：旧注释"全量读大 YAML 10-40s"
+      // 是 0.1 遗留口径，0.2 已无 YAML 读路径。）
       usePipelineMessageStore
         .getState()
         .loadPipelineMessages(mainPipelineId, {
@@ -71,7 +87,9 @@ export function useRealtimeEvents(): void {
 
     // Task lifecycle handlers
 
-    // 订阅 task_status_update，触发工作区刷新并更新 longTermTaskStore 中的任务状态
+    // 订阅 task_status_update，触发工作区刷新并更新长期任务缓存中的任务状态
+    // （query 化：已存在 → updateLongTermTasksCache 单任务增量，零请求；
+    //   不存在 → invalidateLongTermTasks，活跃订阅自动重拉替代原 fetchTasks 全量）
     const handleTaskStatusUpdate = (rawData: Record<string, unknown>) => {
       const data = (rawData.data as Record<string, unknown>) || rawData
       const taskId = (data.task_id || data.taskId) as string | undefined
@@ -79,8 +97,7 @@ export function useRealtimeEvents(): void {
       const currentPhase = data.current_phase as string | undefined
 
       if (taskId && newStatus) {
-        const store = useLongTermTaskStore.getState()
-        const exists = store.tasks.some((t) => t.id === taskId)
+        const exists = readLongTermTasks().some((t) => t.id === taskId)
         if (exists) {
           const updates: Record<string, unknown> = { status: newStatus }
           if (currentPhase) {
@@ -90,9 +107,11 @@ export function useRealtimeEvents(): void {
           if (errorMsg) {
             updates.error = errorMsg
           }
-          store.updateTask(taskId, updates as never)
+          updateLongTermTasksCache((prev) =>
+            prev.map((t) => (t.id === taskId ? { ...t, ...updates } : t)),
+          )
         } else {
-          store.fetchTasks().catch(() => {})
+          invalidateLongTermTasks()
         }
       }
 
@@ -104,6 +123,7 @@ export function useRealtimeEvents(): void {
       const taskId = (data.task_id || data.taskId) as string | undefined
 
       if (taskId) {
+        // query 化：store.deleteTask 内部写 query cache（移除任务 + 清 activeTaskId）
         useLongTermTaskStore.getState().deleteTask(taskId)
       }
 
@@ -127,6 +147,75 @@ export function useRealtimeEvents(): void {
     globalWS.subscribe(WS_SERVER_EVENTS.TASK_STATUS_CHANGED, handleTaskStatusChanged as any)
     globalWS.subscribe(WS_SERVER_EVENTS.TASK_DELETED, handleTaskDeleted as any)
 
+    /**
+     * 发送失败透传（2026-08-21 用户裁决：任何错误都必须让用户看见）：
+     * user_input 断线排队超 TTL（连接迟迟未恢复）→ 撤"思考中"占位气泡、
+     * 停止流式态、在原位置插入 system 错误消息 + 通知中心高优告警。
+     * 此前行为：消息静默滞留内存队列，气泡无限转，刷新后凭空消失，零提示。
+     */
+    const handleUserInputSendTimeout = (eventData: {
+      data?: {
+        thread_id?: string
+        pipeline_id?: string
+        client_message_id?: string
+        reason?: string
+      }
+    }) => {
+      const info = eventData?.data || {}
+      const pipelineId = info.pipeline_id || ''
+      const cmid = info.client_message_id || ''
+      const reason = info.reason || '连接断开，消息未送达'
+
+      const ps = usePipelineMessageStore.getState()
+      if (pipelineId) {
+        if (cmid) {
+          // ADR 2026-08-22：乐观 user 在主数组（单一消息数组），发送失败标记 failed
+          // （可重试，复用 cmid 幂等重发）——消息不消失、位置不丢
+          ps.updateMessage(pipelineId, cmid, { status: 'failed' })
+        }
+        ps.stopStreaming(pipelineId)
+      }
+
+      // 原位置插入可见错误（system 消息有独立渲染分支），用户刷新后由后端权威内容对账
+      if (pipelineId && cmid) {
+        ps.addMessage(pipelineId, {
+          id: `send_failed_${cmid}`,
+          sessionId: info.thread_id || '',
+          role: 'system',
+          content: `⚠ ${reason}。这条消息没有发到服务器（后端无记录），请检查连接状态后重新发送。`,
+          timestamp: new Date().toISOString(),
+          status: 'error',
+        } as never)
+      }
+
+      useNotificationStore.getState().addNotification({
+        title: '消息发送失败',
+        message: `${reason}，请检查连接状态后重新发送。`,
+        priority: 'high',
+        category: 'error',
+        isBlocking: false,
+        autoDismissMs: 10000,
+      })
+    }
+    globalWS.subscribe('user_input_send_timeout', handleUserInputSendTimeout as any)
+
+    /**
+     * 被同账号新连接替换（B10 单连接踢旧，code=4000）：本页已永久失联且不再
+     * 自动重连——必须明示用户，否则页面静默装死、消息全黑洞。典型成因：
+     * 同一浏览器开了多个前端标签页互踢（2026-08-21 实测互踢风暴）。
+     */
+    const handleKickedByReplacement = () => {
+      useNotificationStore.getState().addNotification({
+        title: '本页连接已被其他页面替换',
+        message: '检测到同一账号在其他页面建立了新连接，本页已停止接收消息。请关闭多余页面，或刷新本页重新接管连接。',
+        priority: 'high',
+        category: 'error',
+        isBlocking: false,
+        autoDismissMs: 0, // 常驻：静默装死比打扰更糟
+      })
+    }
+    globalWS.subscribe('kicked_by_replacement', handleKickedByReplacement as any)
+
     // visibility 回前台主动重连：浏览器后台时节流 setInterval 心跳 + uvicorn ws_ping_timeout
     // 会掐断连接，但 onclose 可能在标签页冻结期间被延迟。回前台时主动检测：连接已断则重连，
     // 重连成功后 onopen 自动发 reconnected → 上方 handleWsReconnect 自动追新（fan-out 复用）。
@@ -140,20 +229,20 @@ export function useRealtimeEvents(): void {
         console.info('[useRealtimeEvents] 本页被新连接替换(code=4000)，回前台不自动重连（刷新页面可恢复）')
         return
       }
-      const { checkTokenExpiration, refreshToken, token } = useAuthStore.getState()
-      // token 过期：先刷新再连。必须用 .then()（成功才连），绝不能用 .finally()——
-      // refresh 失败时若仍用旧过期 token 硬连，会触发 4001 → 重连链 → 可能误登出。
-      // refresh 失败时不 connect，让 GlobalWebSocket 既有重连机制自行处理（它有
-      // isAuthFailureFromError 判断，瞬时故障不登出）。
-      if (checkTokenExpiration()) {
-        refreshToken()
-          .then(() => globalWS.connect(useAuthStore.getState().token || ''))
-          .catch(() => {
-            // refresh 失败：不主动连，不登出，交给 GlobalWebSocket 既有重连兜底
-          })
-      } else {
-        globalWS.connect(token || '')
-      }
+      // 「用前保证新鲜」（tokenLifecycle 唯一实现）：未过期直接返回当前 token；
+      // 已过期先刷新，刷新失败返回 null——绝不用过期 token 硬连（4001 → 重连风暴），
+      // 交由 GlobalWebSocket 既有重连机制退避处理（它有 isAuthFailureFromError
+      // 判断，瞬时故障不登出）。
+      void tokenLifecycle
+        .ensureFreshToken()
+        .then((token) => {
+          if (token) {
+            globalWS.connect(token)
+          }
+        })
+        .catch(() => {
+          // refresh 失败：不主动连，不登出，交给 GlobalWebSocket 既有重连兜底
+        })
     }
     document.addEventListener('visibilitychange', handleVisibilityChange)
 
@@ -166,6 +255,8 @@ export function useRealtimeEvents(): void {
       globalWS.unsubscribe(WS_SERVER_EVENTS.TASK_STATUS_UPDATE, handleTaskStatusUpdate as any)
       globalWS.unsubscribe(WS_SERVER_EVENTS.TASK_STATUS_CHANGED, handleTaskStatusChanged as any)
       globalWS.unsubscribe(WS_SERVER_EVENTS.TASK_DELETED, handleTaskDeleted as any)
+      globalWS.unsubscribe('user_input_send_timeout', handleUserInputSendTimeout as any)
+      globalWS.unsubscribe('kicked_by_replacement', handleKickedByReplacement as any)
     }
   }, [bumpWorkspaceDataVersion])
 }

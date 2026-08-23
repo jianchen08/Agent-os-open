@@ -35,7 +35,8 @@ interface ArtifactActions {
   clearCache: () => void
 }
 
-const API_BASE = '/ext/channel_api/artifacts'
+import { ARTIFACTS_ENDPOINTS as A } from '@/services/api/endpoints.generated'
+const API_BASE = A.artifacts_list
 
 export const useArtifactStore = create<ArtifactState & ArtifactActions>()((set) => ({
   artifacts: {},

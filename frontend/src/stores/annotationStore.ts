@@ -50,7 +50,8 @@ interface AnnotationActions {
   clearCache: () => void
 }
 
-const API_BASE = '/ext/channel_api/artifacts'
+import { ARTIFACTS_ENDPOINTS as A } from '@/services/api/endpoints.generated'
+const API_BASE = A.artifacts_list
 
 export const useAnnotationStore = create<AnnotationState & AnnotationActions>()((set, get) => ({
   annotations: {},
@@ -129,7 +130,7 @@ export const useAnnotationStore = create<AnnotationState & AnnotationActions>()(
       if (updates.content !== undefined) body.content = updates.content
       if (updates.targetData !== undefined) body.target_data = updates.targetData
 
-      const resp = await fetch(`/ext/channel_api/annotations/${annotationId}`, {
+      const resp = await fetch(A.annotations_update.replace('{annotation_id}', annotationId), {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(body),
@@ -157,7 +158,7 @@ export const useAnnotationStore = create<AnnotationState & AnnotationActions>()(
 
   deleteAnnotation: async (annotationId) => {
     try {
-      const resp = await fetch(`/ext/channel_api/annotations/${annotationId}`, { method: 'DELETE' })
+      const resp = await fetch(A.annotations_delete.replace('{annotation_id}', annotationId), { method: 'DELETE' })
       const data = await resp.json()
       if (!data.success) return false
 
@@ -183,7 +184,7 @@ export const useAnnotationStore = create<AnnotationState & AnnotationActions>()(
 
   resolveAnnotation: async (annotationId) => {
     try {
-      const resp = await fetch(`/ext/channel_api/annotations/${annotationId}/resolve`, { method: 'POST' })
+      const resp = await fetch(A.annotations_resolve.replace('{annotation_id}', annotationId), { method: 'POST' })
       const data = await resp.json()
       if (data.error) return false
 

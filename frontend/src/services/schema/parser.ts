@@ -6,6 +6,7 @@ import type {
   DataSourceRef,
   ResolvedDataSource,
 } from '@/types/schema'
+import { WORKSPACE_SERVICE_ENDPOINTS } from '@/services/api/endpoints.generated'
 
 /** 解析模块 UI Schema */
 export function parseSchema(schema: ModuleUISchema): ParsedSchema {
@@ -37,7 +38,7 @@ function computeSchemaHash(schema: ModuleUISchema): string {
 
 /** 解析数据源引用 格式：module://collection 或 module://collection?param=value */
 export function parseDataSourceRef(ref: string): DataSourceRef {
-  const match = ref.match(/^([\w-]+):\/\/([^\?]+)(?:\?(.+))?$/)
+  const match = ref.match(/^([\w-]+):\/\/([^?]+)(?:\?(.+))?$/)
   if (!match) {
     throw new Error(`无效的数据源引用格式: ${ref}`)
   }
@@ -66,7 +67,7 @@ export function resolveDataSource(ref: DataSourceRef): ResolvedDataSource {
  // workspace:// 协议特殊处理
   // 该端点不存在，返回 404。
   if (ref.moduleId === 'workspace') {
-    endpoint = `/ext/channel_api/workspaces/${ref.collection}/file-tree`
+    endpoint = WORKSPACE_SERVICE_ENDPOINTS.workspaces_file_tree.replace('{container_task_id}', ref.collection)
   } else {
     endpoint = `/api/v1/modules/${ref.moduleId}/data/${ref.collection}`
   }

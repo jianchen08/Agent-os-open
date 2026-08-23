@@ -12,8 +12,8 @@
  */
 
 import { render, screen } from '@testing-library/react'
+import { renderWithProviders } from '@/test/renderWithProviders'
 import React from 'react'
-import { MemoryRouter } from 'react-router-dom'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { Sidebar } from '@/components/layout/Sidebar'
 import { PluginStatusItems } from '@/components/layout/StatusItems'
@@ -42,7 +42,7 @@ describe('PageRenderer — 按 space 分发', () => {
     registerPage({ id: 'ws-1', title: '工作区页', space: 'workspace', slot: 'tab' })
     registerPage({ id: 'st-1', title: '设置页', space: 'settings', slot: 'nav' })
 
-    render(<PageRenderer space="workspace" />)
+    renderWithProviders(<PageRenderer space="workspace" />)
     expect(screen.getByTestId('page-ws-1')).toBeInTheDocument()
     expect(screen.queryByTestId('page-st-1')).not.toBeInTheDocument()
   })
@@ -52,7 +52,7 @@ describe('PageRenderer — 按 space 分发', () => {
       makePage({ id: 'ws-1', title: '工作区页', space: 'workspace' }),
       makePage({ id: 'st-1', title: '设置页', space: 'settings' }),
     ]
-    render(<PageRenderer pages={pages} space="settings" />)
+    renderWithProviders(<PageRenderer pages={pages} space="settings" />)
     expect(screen.getByTestId('page-st-1')).toBeInTheDocument()
     expect(screen.queryByTestId('page-ws-1')).not.toBeInTheDocument()
   })
@@ -64,14 +64,14 @@ describe('PageRenderer — 按 space 分发', () => {
       { name: 'test_widget', supportedSpaces: ['workspace'] },
     )
     const page = makePage({ id: 'w1', title: '组件页', widget: 'test_widget', props: { msg: '你好 widget' } })
-    render(<PageRenderer pages={[page]} />)
+    renderWithProviders(<PageRenderer pages={[page]} />)
     expect(screen.getByTestId('test-widget')).toBeInTheDocument()
     expect(screen.getByText('你好 widget')).toBeInTheDocument()
   })
 
   it('widget 未注册 → 渲染占位（不崩溃）', () => {
     const page = makePage({ id: 'u1', title: '未知组件页', widget: 'no_such_widget' })
-    render(<PageRenderer pages={[page]} />)
+    renderWithProviders(<PageRenderer pages={[page]} />)
     expect(screen.getByTestId('page-placeholder-u1')).toBeInTheDocument()
     expect(screen.getByText('未知组件页')).toBeInTheDocument()
   })
@@ -88,7 +88,7 @@ describe('PageRenderer — 按 space 分发', () => {
         ],
       },
     })
-    render(<PageRenderer pages={[page]} />)
+    renderWithProviders(<PageRenderer pages={[page]} />)
     // RjsfForm（antd 主题）渲染：label 即字段存在证明，保存按钮由 SchemaDriver 透传
     expect(screen.getByText('模型')).toBeInTheDocument()
     expect(screen.getByText('名称')).toBeInTheDocument()
@@ -97,20 +97,20 @@ describe('PageRenderer — 按 space 分发', () => {
 
   it('dock page（slot=status）→ 渲染状态条目', () => {
     const page = makePage({ id: 'd1', title: '磁盘用量', space: 'dock', slot: 'status' })
-    render(<PageRenderer pages={[page]} />)
+    renderWithProviders(<PageRenderer pages={[page]} />)
     expect(screen.getByTestId('dock-page-d1')).toBeInTheDocument()
     expect(screen.getByText('磁盘用量')).toBeInTheDocument()
   })
 
   it('无 widget 无 schema → 占位', () => {
     const page = makePage({ id: 'empty-1', title: '空页面' })
-    render(<PageRenderer pages={[page]} />)
+    renderWithProviders(<PageRenderer pages={[page]} />)
     expect(screen.getByTestId('page-placeholder-empty-1')).toBeInTheDocument()
   })
 
   it('renderPageContent 直接消费 PageDeclaration 返回 ReactNode', () => {
     const page = makePage({ id: 'direct-1', title: '直接调用', widget: '' })
-    render(<div>{renderPageContent(page)}</div>)
+    renderWithProviders(<div>{renderPageContent(page)}</div>)
     expect(screen.getByTestId('page-placeholder-direct-1')).toBeInTheDocument()
   })
 })
@@ -177,11 +177,7 @@ describe('Sidebar 迁移 — 消费 getPagesBySpace("workspace") + slot=activity
     registerPage({ id: 'plug-b', title: '插件B', space: 'workspace', slot: 'activity-bar', order: 2 })
     registerPage({ id: 'tab-x', title: '工作区Tab', space: 'workspace', slot: 'tab' })
 
-    render(
-      <MemoryRouter>
-        <Sidebar />
-      </MemoryRouter>,
-    )
+    renderWithProviders(<Sidebar />)
 
     expect(screen.getByTestId('sidebar-menu-plugin-plug-a')).toBeInTheDocument()
     expect(screen.getByTestId('sidebar-menu-plugin-plug-b')).toBeInTheDocument()
@@ -195,11 +191,7 @@ describe('Sidebar 迁移 — 消费 getPagesBySpace("workspace") + slot=activity
     registerPage({ id: 'dock-x', title: 'Dock项', space: 'dock', slot: 'status' })
     registerPage({ id: 'set-x', title: '设置页', space: 'settings', slot: 'nav' })
 
-    render(
-      <MemoryRouter>
-        <Sidebar />
-      </MemoryRouter>,
-    )
+    renderWithProviders(<Sidebar />)
 
     expect(screen.queryByTestId('sidebar-menu-plugin-dock-x')).not.toBeInTheDocument()
     expect(screen.queryByTestId('sidebar-menu-plugin-set-x')).not.toBeInTheDocument()
@@ -218,7 +210,7 @@ describe('StatusBar 迁移 — 插件状态项消费 getPagesBySpace("dock") + s
     registerPage({ id: 'st1', title: '我的状态', space: 'dock', slot: 'status' })
     registerPage({ id: 'it1', title: '普通条目', space: 'dock', slot: 'item' })
 
-    render(<PluginStatusItems />)
+    renderWithProviders(<PluginStatusItems />)
 
     expect(screen.getByText('我的状态')).toBeInTheDocument()
     expect(screen.queryByText('普通条目')).not.toBeInTheDocument()
@@ -228,7 +220,7 @@ describe('StatusBar 迁移 — 插件状态项消费 getPagesBySpace("dock") + s
   it('when 条件不满足的 status 页隐藏', () => {
     registerPage({ id: 'st2', title: '条件状态', space: 'dock', slot: 'status', when: 'no.such.key' })
 
-    render(<PluginStatusItems />)
+    renderWithProviders(<PluginStatusItems />)
 
     expect(screen.queryByText('条件状态')).not.toBeInTheDocument()
   })

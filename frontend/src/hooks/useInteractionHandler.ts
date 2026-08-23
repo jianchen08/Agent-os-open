@@ -1,6 +1,7 @@
 /** useInteractionHandler Hook 业务编排层：订阅 WebSocket 交互事件 → 解析数据写入 store → 提供 actions 给 UI。 */
 
 import { useCallback, useEffect, useMemo, useRef } from 'react'
+import { WORKSPACE_SERVICE_ENDPOINTS } from '@/services/api/endpoints.generated'
 import { useNavigate } from 'react-router-dom'
 import { API_ENDPOINTS } from '@/constants/api'
 import { ROUTES } from '@/constants/routes'
@@ -13,7 +14,6 @@ import { useInteractionStore } from '@/stores/interactionStore'
 import { useLayoutModeStore } from '@/stores/layoutModeStore'
 import { useNotificationStore } from '@/stores/notificationStore'
 import { usePipelineMessageStore } from '@/stores/pipelineMessageStore'
-import { useSessionStore } from '@/stores/sessionStore'
 import { useUIStore } from '@/stores/uiStore'
 import { playNotificationSound } from '@/utils/audioNotification'
 import type { PendingInteraction } from '@/stores/interactionStore'
@@ -93,7 +93,7 @@ async function parseInteractionEvent(
       filePaths.map(async (filePath) => {
         try {
           const resp = await apiClient.get(
-            `/ext/channel_api/workspaces/_local/file-content`,
+            WORKSPACE_SERVICE_ENDPOINTS.workspaces_file_content_get.replace('{container_task_id}', '_local'),
             { params: { path: filePath } },
           )
           if (resp.data?.success) {
@@ -384,14 +384,15 @@ export function useInteractionHandler(sessionId: string | undefined) {
 
   const respondChoice = useCallback(
     async (requestId: string, selectedOption?: string, feedback?: string) => {
-      // 优先用交互自身的 sessionId：触发器/后台管道触发的审批没有全局活跃会话，
-      // 依赖 activeSessionId 会让点击静默中止（"审批窗口没有作用"的根因之一）。
+      // 路由键只取交互自身坐标（2026-08-22 裁决）：sessionId → threadId，
+      // 换不到即中止发信（fail-closed，交互保持 pending 可见可重试）——
+      // 兜底 activeSessionId 会在用户切换会话后把审批发到错误 thread 通道。
       const interaction = useInteractionStore
         .getState()
         .pendingInteractions.find((i) => i.requestId === requestId)
-      const sid = interaction?.sessionId || useSessionStore.getState().activeSessionId
+      const sid = interaction?.sessionId || interaction?.threadId
       if (!sid) {
-        console.warn('[InteractionHandler] respondChoice 中止: 无可用 sessionId!', requestId)
+        console.warn('[InteractionHandler] respondChoice 中止: 交互无自身 sessionId/threadId!', requestId)
         return
       }
       await globalWS.sendInteractionResponse(sid, requestId, {
@@ -406,13 +407,13 @@ export function useInteractionHandler(sessionId: string | undefined) {
 
   const respondConversation = useCallback(
     async (requestId: string, feedback: string) => {
-      // 同 respondChoice：优先交互自身 sessionId（触发器/后台管道场景）
+      // 同 respondChoice：路由键只取交互自身坐标（sessionId → threadId）
       const interaction = useInteractionStore
         .getState()
         .pendingInteractions.find((i) => i.requestId === requestId)
-      const sid = interaction?.sessionId || useSessionStore.getState().activeSessionId
+      const sid = interaction?.sessionId || interaction?.threadId
       if (!sid) {
-        console.warn('[InteractionHandler] respondConversation 中止: 无可用 sessionId!', requestId)
+        console.warn('[InteractionHandler] respondConversation 中止: 交互无自身 sessionId/threadId!', requestId)
         return
       }
       await globalWS.sendInteractionResponse(sid, requestId, {
@@ -426,9 +427,14 @@ export function useInteractionHandler(sessionId: string | undefined) {
 
   const navigateToTab = useCallback(
     async (requestId: string, pipelineId: string, title?: string, agentLevelStr?: string) => {
-      const currentSid = useSessionStore.getState().activeSessionId
+      // 同 respondChoice/respondConversation：路由键只取交互自身坐标
+      // （sessionId → threadId），不兜底全局活跃会话（2026-08-22 裁决）
+      const interaction = useInteractionStore
+        .getState()
+        .pendingInteractions.find((i) => i.requestId === requestId)
+      const currentSid = interaction?.sessionId || interaction?.threadId
       if (!currentSid) {
-        console.error('[useInteractionHandler.navigateToTab] 无活跃会话，无法处理交互跳转', requestId)
+        console.error('[useInteractionHandler.navigateToTab] 交互无自身 sessionId/threadId，无法处理交互跳转', requestId)
         return
       }
 

@@ -5,22 +5,23 @@
  */
 
 import { apiClient } from './client'
+import { WORKSPACE_SERVICE_ENDPOINTS as W } from './endpoints.generated'
 
-const BASE = '/ext/channel_api/workspaces'
+const M = W.workspaces_get // '/ext/workspace_service/workspaces/{container_task_id}'（其余端点同前缀模板）
 
 /** 获取工作空间详情 */
 export async function getWorkspace(containerTaskId: string): Promise<any> {
-  return apiClient.get(`${BASE}/${containerTaskId}`)
+  return apiClient.get(M.replace('{container_task_id}', containerTaskId))
 }
 
 /** 获取工作空间下所有制品 */
 export async function getWorkspaceArtifacts(containerTaskId: string): Promise<any> {
-  return apiClient.get(`${BASE}/${containerTaskId}/artifacts`)
+  return apiClient.get(W.workspaces_artifacts.replace('{container_task_id}', containerTaskId))
 }
 
 /** 获取文件目录树 */
 export async function getFileTree(containerTaskId: string): Promise<any> {
-  return apiClient.get(`${BASE}/${containerTaskId}/file-tree`)
+  return apiClient.get(W.workspaces_file_tree.replace('{container_task_id}', containerTaskId))
 }
 
 /** 创建文件或目录 */
@@ -29,7 +30,7 @@ export async function createEntry(
   path: string,
   type: 'file' | 'directory',
 ): Promise<any> {
-  return apiClient.post(`${BASE}/${containerTaskId}/create-entry`, { path, type })
+  return apiClient.post(W.workspaces_create_entry.replace('{container_task_id}', containerTaskId), { path, type })
 }
 
 /** 删除文件或目录 */
@@ -37,7 +38,7 @@ export async function deleteEntry(
   containerTaskId: string,
   path: string,
 ): Promise<any> {
-  return apiClient.delete(`${BASE}/${containerTaskId}/entries`, { data: { path } })
+  return apiClient.delete(W.workspaces_delete_entry.replace('{container_task_id}', containerTaskId), { data: { path } })
 }
 
 /** 重命名文件或目录 */
@@ -46,7 +47,7 @@ export async function renameEntry(
   oldPath: string,
   newName: string,
 ): Promise<any> {
-  return apiClient.post(`${BASE}/${containerTaskId}/rename-entry`, {
+  return apiClient.post(W.workspaces_rename_entry.replace('{container_task_id}', containerTaskId), {
     old_path: oldPath,
     new_name: newName,
   })
@@ -58,7 +59,7 @@ export async function moveEntry(
   sourcePath: string,
   destinationDir: string,
 ): Promise<any> {
-  return apiClient.post(`${BASE}/${containerTaskId}/move-entry`, {
+  return apiClient.post(W.workspaces_move_entry.replace('{container_task_id}', containerTaskId), {
     source_path: sourcePath,
     destination_dir: destinationDir,
   })
@@ -82,7 +83,7 @@ export async function getWorkspaceFileContent(
   filePath: string,
 ): Promise<WorkspaceFileContentResponse> {
   const response = await apiClient.get<WorkspaceFileContentResponse>(
-    `${BASE}/${containerTaskId}/file-content`,
+    W.workspaces_file_content_get.replace('{container_task_id}', containerTaskId),
     { params: { path: filePath } },
   )
   return response.data

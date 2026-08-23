@@ -13,9 +13,7 @@ import { navigateTo, loginAndNavigateTo, ROUTES } from '../helpers/navigation';
 import {
   waitForAssistantMessage,
   waitForToolCard,
-  waitForToolCompleted,
   waitForInteractionCard,
-  expectVisible,
 } from '../helpers/assertions';
 
 test.describe.configure({ timeout: 120_000 });

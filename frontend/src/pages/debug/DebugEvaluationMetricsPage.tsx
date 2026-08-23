@@ -1,15 +1,14 @@
 /**
- * 调试评估指标页面
+ * 调试评估指标页面（query 化：useEvaluationMetricsQuery 缓存 SWR，重挂零请求）
  *
  * 展示系统评估指标列表
  */
 
-import { useState, useEffect, useCallback } from 'react'
+import { useState } from 'react'
 import { ErrorState } from '@/components/shared/ErrorState'
 import { LoadingState } from '@/components/shared/LoadingState'
 import { PageShell } from '@/components/shared/PageShell'
-import * as evaluationApi from '@/services/api/evaluationMetrics'
-import type { EvaluationMetric } from '@/services/api/evaluationMetrics'
+import { useEvaluationMetricsQuery } from '@/hooks/queries/useDebugQueries'
 
 /** 分类过滤选项 */
 const CATEGORY_OPTIONS = ['', 'quality', 'safety', 'performance', 'reliability']
@@ -18,41 +17,24 @@ const CATEGORY_OPTIONS = ['', 'quality', 'safety', 'performance', 'reliability']
  * 调试评估指标页面组件
  */
 export function DebugEvaluationMetricsPage({ embedded }: { embedded?: boolean } = {}) {
-  const [metrics, setMetrics] = useState<EvaluationMetric[]>([])
-  const [total, setTotal] = useState(0)
-  const [isLoading, setIsLoading] = useState(true)
-  const [error, setError] = useState<string | null>(null)
   const [categoryFilter, setCategoryFilter] = useState('')
   const [expandedId, setExpandedId] = useState<string | null>(null)
 
-  /**
-   * 加载评估指标
-   */
-  const fetchMetrics = useCallback(async (category?: string) => {
-    setIsLoading(true)
-    setError(null)
-    try {
-      const res = await evaluationApi.getEvaluationMetrics({
-        category: category || undefined,
-        limit: 100,
-      })
-      setMetrics(res.metrics)
-      setTotal(res.total)
-    } catch (err: any) {
-      setError(err.message || '获取评估指标失败')
-    } finally {
-      setIsLoading(false)
-    }
-  }, [])
-
-  useEffect(() => {
-    fetchMetrics()
-  }, [fetchMetrics])
+  // 评估指标（query 化）：分类过滤变化显式重拉；staleTime 窗口内重挂零请求
+  const metricsQuery = useEvaluationMetricsQuery(categoryFilter || undefined)
+  const metrics = metricsQuery.data?.metrics ?? []
+  const total = metricsQuery.data?.total ?? 0
+  // 无缓存数据时显示 loading（有缓存先渲染缓存不闪 loading）
+  const isLoading = metricsQuery.isPending && !metricsQuery.data
+  const error = metricsQuery.isError
+    ? metricsQuery.error instanceof Error
+      ? metricsQuery.error.message
+      : '获取评估指标失败'
+    : null
 
   /** 分类过滤变更 */
   const handleCategoryChange = (category: string) => {
     setCategoryFilter(category)
-    fetchMetrics(category || undefined)
   }
 
   return (

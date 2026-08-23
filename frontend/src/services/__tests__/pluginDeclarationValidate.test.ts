@@ -69,6 +69,36 @@ describe('validatePluginDeclaration 负例（校验器不空转）', () => {
     })
     expect(r.warnings.some((e) => e.includes('模板括号未配平'))).toBe(true)
   })
+
+  it('streaming 声明未知事件 → error（不在流式契约 10 事件内，发射即被前端丢弃）', () => {
+    const errs = errorsOf({ streaming: { events: ['stream_start', 'stream_teleport'] } })
+    expect(errs.some((e) => e.includes('未知事件'))).toBe(true)
+  })
+
+  it('streaming 声明 events 非数组 → error', () => {
+    const errs = errorsOf({ streaming: { events: 'stream_start' } })
+    expect(errs.some((e) => e.includes('应为数组'))).toBe(true)
+  })
+
+  it('streaming 声明 persist 非布尔 → error', () => {
+    const errs = errorsOf({ streaming: { persist: 'yes' } })
+    expect(errs.some((e) => e.includes('应为布尔'))).toBe(true)
+  })
+
+  it('streaming 声明 part_types 合法/非法形状', () => {
+    const errs = errorsOf({ streaming: { part_types: ['progress_card', 42] } })
+    expect(errs.some((e) => e.includes('非字符串'))).toBe(true)
+    const r = validatePluginDeclaration({ streaming: { part_types: ['Progress Card!'] } })
+    expect(r.warnings.some((e) => e.includes('非法字符'))).toBe(true)
+  })
+
+  it('streaming 合法声明零错误', () => {
+    const r = validatePluginDeclaration({
+      streaming: { events: ['stream_start', 'stream_chunk', 'stream_end'], part_types: ['progress_card'], persist: false },
+    })
+    expect(r.errors).toEqual([])
+    expect(r.warnings).toEqual([])
+  })
 })
 
 // ── 真实语料：仓库 plugins/shared 下真实声明全过，采集问题暴露 ──
@@ -118,7 +148,13 @@ describe('validatePluginDeclaration 真实语料（校验器在真实数据上�
         input.uiSchemaWidgets = widgets
         declKinds.set('ui_schema.widgets', (declKinds.get('ui_schema.widgets') ?? 0) + widgets.length)
       }
-      if (!input.pages && !input.tools && !input.uiSchemaWidgets) continue
+      const streaming = (d.capabilities?.streaming ?? undefined) as
+        Record<string, unknown> | undefined
+      if (streaming) {
+        input.streaming = streaming
+        declKinds.set('capabilities.streaming', (declKinds.get('capabilities.streaming') ?? 0) + 1)
+      }
+      if (!input.pages && !input.tools && !input.uiSchemaWidgets && !input.streaming) continue
       declared += 1
       const r = validatePluginDeclaration(input)
       for (const e of r.errors) allErrors.push(`${f}: ${e}`)

@@ -2,7 +2,7 @@
  * 记忆 API 服务测试
  *
  * 测试情景记忆和语义记忆的管理接口
- * 与后端 /ext/channel_api/memory/* 端点对齐（4c 迁移后的 dispatcher 路径）
+ * 与后端 /ext/hindsight_memory_service/memory/* 端点对齐（4c 迁移后的 dispatcher 路径）
  */
 
 /* eslint-disable import-x/order */
@@ -58,7 +58,7 @@ describe('记忆 API', () => {
       const result = await getEpisodes()
 
       expect(result).toEqual(mockResponse)
-      expect(apiClient.get).toHaveBeenCalledWith('/ext/channel_api/memory/episodes', {
+      expect(apiClient.get).toHaveBeenCalledWith('/ext/hindsight_memory_service/memory/episodes', {
         params: { page: 1, page_size: 20 },
       })
     })
@@ -69,7 +69,7 @@ describe('记忆 API', () => {
 
       await getEpisodes(2, 10)
 
-      expect(apiClient.get).toHaveBeenCalledWith('/ext/channel_api/memory/episodes', {
+      expect(apiClient.get).toHaveBeenCalledWith('/ext/hindsight_memory_service/memory/episodes', {
         params: { page: 2, page_size: 10 },
       })
     })
@@ -90,7 +90,7 @@ describe('记忆 API', () => {
       const result = await getEpisode('1')
 
       expect(result).toEqual(mockEpisode)
-      expect(apiClient.get).toHaveBeenCalledWith('/ext/channel_api/memory/episodes/1')
+      expect(apiClient.get).toHaveBeenCalledWith('/ext/hindsight_memory_service/memory/episodes/1')
     })
   })
 
@@ -106,7 +106,7 @@ describe('记忆 API', () => {
       const result = await searchMemory('代码重构')
 
       expect(result).toEqual(mockResponse)
-      expect(apiClient.post).toHaveBeenCalledWith('/ext/channel_api/memory/search', {
+      expect(apiClient.post).toHaveBeenCalledWith('/ext/hindsight_memory_service/memory/search', {
         query: '代码重构',
         top_k: 10,
         min_score: 0.5,
@@ -124,7 +124,7 @@ describe('记忆 API', () => {
         min_score: 0.7,
       })
 
-      expect(apiClient.post).toHaveBeenCalledWith('/ext/channel_api/memory/search', {
+      expect(apiClient.post).toHaveBeenCalledWith('/ext/hindsight_memory_service/memory/search', {
         query: 'test',
         memory_types: ['episode'],
         top_k: 5,
@@ -144,7 +144,7 @@ describe('记忆 API', () => {
       const result = await getSemanticMemory()
 
       expect(result).toEqual(mockResponse)
-      expect(apiClient.get).toHaveBeenCalledWith('/ext/channel_api/memory/semantic')
+      expect(apiClient.get).toHaveBeenCalledWith('/ext/hindsight_memory_service/memory/semantic')
     })
   })
 
@@ -161,7 +161,7 @@ describe('记忆 API', () => {
 
       expect(result).toEqual(mockResponse)
       expect(result.success).toBe(true)
-      expect(apiClient.post).toHaveBeenCalledWith('/ext/channel_api/memory/consolidate')
+      expect(apiClient.post).toHaveBeenCalledWith('/ext/hindsight_memory_service/memory/consolidate')
     })
   })
 
@@ -178,7 +178,7 @@ describe('记忆 API', () => {
       const result = await getMemoryStats()
 
       expect(result).toEqual(mockStats)
-      expect(apiClient.get).toHaveBeenCalledWith('/ext/channel_api/memory/stats')
+      expect(apiClient.get).toHaveBeenCalledWith('/ext/hindsight_memory_service/memory/stats')
     })
   })
 

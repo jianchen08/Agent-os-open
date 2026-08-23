@@ -8,6 +8,7 @@ import { getEditorForFile } from '@/config/fileEditors'
 // 按需引入 antd Splitter 子模块，避免加载 antd 全量入口（26+ 组件 → 全部 icons →
 // 触发 847 项 @ant-design/icons-svg/lib/asn/* 全量预构建，首屏 JS 与启动预构建时间双高）
 import apiClient from '@/services/api/client'
+import { WORKSPACE_SERVICE_ENDPOINTS as W } from '@/services/api/endpoints.generated'
 import { safeLoadLayout } from '@/services/layout/resolver'
 import { navigateToPipeline } from '@/services/pipelineNavigator'
 import { widgetRegistry } from '@/services/schema/WidgetRegistry'
@@ -68,7 +69,12 @@ export function FiveSpaceLayout({
   const setWorkspaceCollapsed = useUIStore((s) => s.setWorkspaceCollapsed)
   const workspaceMaximized = useUIStore((s) => s.workspaceMaximized)
   const setWorkspaceMaximized = useUIStore((s) => s.setWorkspaceMaximized)
-  // 本地拖动百分比（受控 size 必须在 onResize 中更新，否则会弹回导致“拖不动”）
+  // 面板宽度比例（0~1，相对主内容区；null = 默认宽度）——拖拽手柄写入，
+  // 持久化在 uiStorage（刷新后恢复）
+  const sidebarRatio = useUIStore((s) => s.sidebarRatio)
+  const workspacePanelRatio = useUIStore((s) => s.workspacePanelRatio)
+  const setSidebarRatio = useUIStore((s) => s.setSidebarRatio)
+  const setWorkspacePanelRatio = useUIStore((s) => s.setWorkspacePanelRatio)
 
   const activeSessionId = useSessionStore((s) => s.activeSessionId)
   const [workspaceFullscreen, setWorkspaceFullscreen] = useState(false)
@@ -119,7 +125,7 @@ export function FiveSpaceLayout({
 
         try {
           const resp = await apiClient.get(
-            `/ext/channel_api/workspaces/${editorData.containerTaskId}/file-content`,
+            W.workspaces_file_content_get.replace('{container_task_id}', editorData.containerTaskId),
             { params: { path: editorData.filePath } }
           )
           if (resp.data?.success && resp.data.content !== undefined) {
@@ -189,6 +195,68 @@ export function FiveSpaceLayout({
   }, [isMobile])
 
   const toggleWorkspaceFullscreen = useCallback(() => setWorkspaceFullscreen((prev) => !prev), [])
+
+  /** 面板拖拽调宽（2026-08-22 用户要求：左右侧边栏可拖动长短）。
+   * 手柄按下后监听 pointermove 计算新宽度比例（相对主内容区），
+   * 实时写入 uiStore（持久化）；抬起释放。
+   * clamp 作用于各自最终比例：侧栏=光标位置比；工作区=行宽减光标
+   * （右侧往左拖=增宽）。曾把 clamp 加在原始光标比上（侧栏语义），
+   * 工作区经 1-ratio 反转后手柄位置恒被钳在 0.5 → 拖不动（真机实锤）。 */
+  const startPanelDrag = useCallback(
+    (side: 'sidebar' | 'workspace') => (e: React.PointerEvent) => {
+      e.preventDefault()
+      const container = (e.currentTarget as HTMLElement).parentElement
+      if (!container) return
+      const rect = container.getBoundingClientRect()
+      const onMove = (ev: PointerEvent) => {
+        const raw = (ev.clientX - rect.left) / rect.width
+        if (side === 'sidebar') {
+          setSidebarRatio(Math.min(0.5, Math.max(0.12, raw)))
+        } else {
+          setWorkspacePanelRatio(Math.min(0.5, Math.max(0.15, 1 - raw)))
+        }
+      }
+      const onUp = () => {
+        window.removeEventListener('pointermove', onMove)
+        window.removeEventListener('pointerup', onUp)
+        document.body.style.cursor = ''
+        document.body.style.userSelect = ''
+      }
+      document.body.style.cursor = 'col-resize'
+      document.body.style.userSelect = 'none'
+      window.addEventListener('pointermove', onMove)
+      window.addEventListener('pointerup', onUp)
+    },
+    [setSidebarRatio, setWorkspacePanelRatio],
+  )
+
+  /** 面板宽度（px）：有持久化比例用比例 × 主内容区宽，否则默认宽度 */
+  const panelWidth = useCallback(
+    (side: 'sidebar' | 'workspace', defaultPx: number, minPx: number, maxPx: number) => {
+      const ratio = side === 'sidebar' ? sidebarRatio : workspacePanelRatio
+      if (ratio === null) return defaultPx
+      const container = document.querySelector('[data-region="chat"]')
+      const avail = container?.getBoundingClientRect().width ?? 1200
+      return Math.min(maxPx, Math.max(minPx, Math.round(avail * ratio)))
+    },
+    [sidebarRatio, workspacePanelRatio],
+  )
+
+  /** 工作区默认宽度：主内容区 42%（与旧 w-[42%] 一致；容器宽变化时跟随） */
+  const workspaceDefaultWidth = useMemo(() => {
+    if (typeof window === 'undefined') return 504
+    const container = document.querySelector('[data-region="chat"]')
+    const avail = container?.getBoundingClientRect().width ?? window.innerWidth
+    return Math.round(avail * 0.42)
+  }, [viewportWidth, sidebarRatio, workspacePanelRatio])
+
+  /** 工作区最大宽度：主内容区 50%（拖拽上限，防挤压聊天区） */
+  const workspaceMaxWidth = useMemo(() => {
+    if (typeof window === 'undefined') return 600
+    const container = document.querySelector('[data-region="chat"]')
+    const avail = container?.getBoundingClientRect().width ?? window.innerWidth
+    return Math.max(360, Math.round(avail * 0.5))
+  }, [viewportWidth, sidebarRatio, workspacePanelRatio])
 
 
   /** 异常提示条点击：连接 → 打开监控面板；预算 → 成本看板；审批 → 审批弹窗全局可见，无需跳转 */
@@ -260,7 +328,7 @@ export function FiveSpaceLayout({
           if (!containerId) return false
           try {
             const resp = await apiClient.put(
-              `/ext/channel_api/workspaces/${containerId}/file-content`,
+              W.workspaces_file_content_put.replace('{container_task_id}', containerId),
               { content },
               { params: { path: editorData.filePath } },
             )
@@ -370,7 +438,7 @@ export function FiveSpaceLayout({
             }
 
             try {
-              const resp = await apiClient.get(`/ext/channel_api/workspaces/${containerId}/file-content`, {
+              const resp = await apiClient.get(W.workspaces_file_content_get.replace('{container_task_id}', containerId), {
                 params: { path: filePath }
               })
               if (resp.data?.success) {
@@ -400,7 +468,7 @@ export function FiveSpaceLayout({
             const containerId = tab.dataSource?.replace('workspace://', '') || ''
             if (!containerId) return
             try {
-              await apiClient.post(`/ext/channel_api/workspaces/${containerId}/open`)
+              await apiClient.post(W.workspaces_open.replace('{container_task_id}', containerId))
             } catch {
               // 静默失败
             }
@@ -481,7 +549,15 @@ export function FiveSpaceLayout({
   return (
     <div
       className="bg-background text-foreground flex w-screen flex-col overflow-hidden"
-      style={{ fontFamily: 'var(--font-ui, var(--font-family))', height: '100dvh' }}
+      style={{
+        fontFamily: 'var(--font-ui, var(--font-family))',
+        // 皮肤装饰条槽位：仅"带文字的替代性条栏"（miku 标题栏/状态栏类，
+        // skinRuntime 按文字内容判定）让位——整根下移/高度扣减；纯图形
+        // 垂坠装饰（maid 花边）原生覆盖式零位移，变量恒 0 不占位
+        height: 'calc(100dvh - var(--skin-chrome-top, 0px) - var(--skin-chrome-bottom, 0px))',
+        paddingTop: 'var(--skin-chrome-top, 0px)',
+        paddingBottom: 'var(--skin-chrome-bottom, 0px)',
+      }}
     >
       {workspaceFullscreen ? (
         // 全屏模式：工作区 100% 占满视口，不渲染任何标题条。
@@ -548,7 +624,7 @@ export function FiveSpaceLayout({
                 />
                 <aside
                   className="absolute bottom-0 left-0 top-0 z-50 flex w-[78%] max-w-[320px] flex-col shadow-xl safe-area-pb"
-                  style={{ background: 'var(--ds-bg-panel, hsl(var(--card)))' }}
+                  style={{ background: 'var(--region-sidebar-bg, var(--ds-bg-panel, var(--sidebar-bg, hsl(var(--card)))))' }}
                 >
                   <div className="min-h-0 flex-1 overflow-hidden">{sidebarContent}</div>
                   <div className="flex items-center gap-1 px-2 py-1.5">
@@ -574,19 +650,20 @@ export function FiveSpaceLayout({
                 </section>
               </div>
             ) : (
-              /* 桌面（布局 v4，用户裁决 2026-08-21 二修）：并排让位式——侧栏/工作区
-                 展开时聊天区让位（不遮挡），收起时聊天全宽；图标各归其边
-                 （侧栏开关=左上角、工作区开关=右上角）；边界无边线。 */
+              /* 桌面（布局 v6，用户裁决 2026-08-21 三修）：并排让位式——侧栏/工作区
+                 展开时聊天区让位（不遮挡），收起时聊天全宽。图标钉在页面左/右上角
+                 （位置恒定，用户硬要求）；各面板自顶全高展开，顶部 40px 图标带
+                 归入各自展开的区域（图标落在所属区域边角内，从视觉上属于该区域），
+                 区域间距用位置计算让位而非移动图标；边界无边线。 */
               <section className="relative flex min-h-0 flex-1 overflow-hidden" data-region="chat">
-                {/* 图标钉在页面左/右上角（位置恒定，用户硬要求）；面板区顶部
-                    让出 40px 图标带——位置计算避开而非移动图标 */}
+                {/* 侧栏开关：钉在页面左上角；侧栏展开时落在侧栏区域顶角内 */}
                 <button
                   type="button"
                   onClick={() => useUIStore.getState().setSidebarCollapsed(!sidebarCollapsed)}
                   className={cn(
                     'absolute left-2 top-2 z-30 flex h-7 w-7 items-center justify-center rounded-md transition-colors',
                     !sidebarCollapsed && sidebarContent
-                      ? 'bg-accent text-foreground'
+                      ? 'bg-accent text-accent-foreground'
                       : 'text-muted-foreground hover:bg-accent hover:text-foreground',
                   )}
                   title={sidebarCollapsed ? '展开侧边栏' : '收起侧边栏'}
@@ -595,13 +672,14 @@ export function FiveSpaceLayout({
                 >
                   <Menu className="h-4 w-4" />
                 </button>
+                {/* 工作区开关：钉在页面右上角；工作区展开时落在工作区区域顶角内 */}
                 <button
                   type="button"
                   onClick={() => setWorkspaceCollapsed(!workspaceCollapsed)}
                   className={cn(
                     'absolute right-2 top-2 z-30 flex h-7 w-7 items-center justify-center rounded-md transition-colors',
                     !workspaceCollapsed
-                      ? 'bg-accent text-foreground'
+                      ? 'bg-accent text-accent-foreground'
                       : 'text-muted-foreground hover:bg-accent hover:text-foreground',
                   )}
                   title={workspaceCollapsed ? '展开工作区' : '收起工作区'}
@@ -611,42 +689,66 @@ export function FiveSpaceLayout({
                   <PanelRightIcon className="h-4 w-4" />
                 </button>
 
-                <div className="flex min-h-0 flex-1 flex-col overflow-hidden pt-10">
+                <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
                   <div className="flex min-h-0 flex-1 overflow-hidden">
-                    {/* 侧栏（让位式，主题面板样式，无边线） */}
+                    {/* 侧栏（让位式，主题面板样式，无边线；顶部让出图标带；
+                        背景链与 Sidebar.tsx 内层统一（--ds-bg-panel 优先），
+                        图标条与侧栏内容一色；宽度可拖拽调（2026-08-22）） */}
                     {sidebarContent && !sidebarCollapsed && (
                       <aside
-                        className="flex w-[248px] min-w-[200px] max-w-[320px] shrink-0 flex-col overflow-hidden"
-                        style={{ background: 'var(--ds-bg-panel, hsl(var(--card)))' }}
+                        className="flex shrink-0 flex-col overflow-hidden pt-10"
+                        style={{
+                          width: panelWidth('sidebar', 248, 200, 360),
+                          background: 'var(--region-sidebar-bg, var(--ds-bg-panel, var(--sidebar-bg, hsl(var(--card)))))',
+                        }}
                         data-testid="sidebar-panel"
                         data-region="sidebar"
                       >
                         <div className="min-h-0 flex-1 overflow-hidden">{sidebarContent}</div>
                       </aside>
                     )}
+                    {sidebarContent && !sidebarCollapsed && (
+                      <div
+                        className="w-1 shrink-0 cursor-col-resize self-stretch"
+                        data-testid="sidebar-resize-handle"
+                        onPointerDown={startPanelDrag('sidebar')}
+                        title="拖动调整侧边栏宽度"
+                      />
+                    )}
 
-                    {/* 聊天（弹性让位/全宽） */}
+                    {/* 聊天（弹性让位/全宽；顶部 40px 带由标签栏行自身占位，
+                        与两侧开关按钮同排） */}
                     <div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">
                       {chatContent}
                     </div>
 
-                    {/* 工作区（让位式，无边线） */}
+                    {/* 工作区（让位式，无边线；顶部让出图标带；宽度可拖拽调） */}
                     {!workspaceCollapsed && (
-                      <div
-                        className="flex w-[42%] min-w-[360px] shrink-0 flex-col overflow-hidden"
-                        style={{ background: 'var(--ds-bg-elevated, hsl(var(--card)))' }}
-                        data-region="workspace"
-                      >
-                        <WorkspaceHost
-                          tabs={workspaceTabs}
-                          onTabChange={setActiveTab}
-                          onTabClose={handleCloseTab}
-                          renderTabContent={renderTabContent}
-                          onFullscreen={toggleWorkspaceFullscreen}
-                          isFullscreen={false}
-                          visitedTabIds={visitedTabIds}
+                      <>
+                        <div
+                          className="w-1 shrink-0 cursor-col-resize self-stretch"
+                          data-testid="workspace-resize-handle"
+                          onPointerDown={startPanelDrag('workspace')}
+                          title="拖动调整工作区宽度"
                         />
-                      </div>
+                        <div
+                          className="theme-workspace-area flex shrink-0 flex-col overflow-hidden pt-10"
+                          style={{
+                            width: panelWidth('workspace', workspaceDefaultWidth, 360, workspaceMaxWidth),
+                          }}
+                          data-region="workspace"
+                        >
+                          <WorkspaceHost
+                            tabs={workspaceTabs}
+                            onTabChange={setActiveTab}
+                            onTabClose={handleCloseTab}
+                            renderTabContent={renderTabContent}
+                            onFullscreen={toggleWorkspaceFullscreen}
+                            isFullscreen={false}
+                            visitedTabIds={visitedTabIds}
+                          />
+                        </div>
+                      </>
                     )}
                   </div>
                 </div>

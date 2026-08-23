@@ -4,7 +4,6 @@ import { ConfigProvider, Markdown } from '@lobehub/ui'
 import { motion } from 'motion/react'
 import { useMemo, type FC, type ReactNode } from 'react'
 
-import { useThemeStore } from '@/stores/themeStore'
 import { preprocessSvgCodeBlocks } from '@/components/shared/markdown/shared'
 import './LobeChatMarkdown.css'
 
@@ -27,14 +26,17 @@ export const LobeChatMarkdown: FC<LobeChatMarkdownProps> = ({
     [content],
   )
 
-  // lobehub 的 Markdown 内部用 Shiki 高亮代码块，主题（github-light / github-dark）
-  // 由 appearance 决定。未传 appearance 时 lobehub 默认 "light"，导致深色主题下
-  // 代码块被渲染成白底深字，与深色页面冲突而看不清。这里把项目解析后的明暗同步过去，
-  // 让 Shiki 选用与当前主题匹配的深/浅高亮主题。
-  const resolvedTheme = useThemeStore((s) => s.resolvedTheme)
+  // 深色主题适配说明（@lobehub/ui 5.32.2）：
+  // Markdown 内部的 Shiki 高亮用内置 "lobe-theme"，其颜色全部引用 antd-style 的
+  // --ant-color-* CSS 变量（如 --ant-color-bg-container），随作用域内变量值自适应明暗。
+  // 本项目刻意不挂 lobehub 的 ThemeProvider（避免注入全局 antd 主题/样式），
+  // 明暗跟随由 LobeChatMarkdown.css 中 .lobe-chat-isolated 的 token 桥接实现——
+  // 把 lobehub 用到的 --ant-color-* 重映射到项目主题变量（深色时 --foreground 为亮色）。
+  // 注意：ConfigProvider 在该版本只负责 i18n/CDN/motion，类型与实现均无 appearance
+  // 通道（旧版的 appearance prop 已废弃，传入会被静默丢弃），不要再往上传主题明暗。
 
   return (
-    <ConfigProvider motion={motion} appearance={resolvedTheme}>
+    <ConfigProvider motion={motion}>
       <div className="lobe-chat-isolated" onDoubleClick={onDoubleClick}>
         {children ?? (
           <Markdown variant="chat" enableStream={false} enableMermaid={true}>

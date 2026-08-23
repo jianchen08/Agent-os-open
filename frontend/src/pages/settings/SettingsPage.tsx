@@ -13,8 +13,8 @@ import { LlmSettingsPage } from '@/pages/settings/LlmSettingsPage'
 import { PipelineSettingsPage } from '@/pages/settings/PipelineSettingsPage'
 import { PluginsSettingsPage } from '@/pages/settings/PluginsSettingsPage'
 import { ThemeSettingsPage } from '@/pages/settings/ThemeSettingsPage'
-import { getSchema } from '@/services/api/schema'
 import { contributionRegistry } from '@/services/schema/ContributionRegistry'
+import { useSchemaQuery } from '@/hooks/queries/useSchemaQuery'
 import { KERNEL_NAV_ITEMS } from '@/services/settingsKernelNav'
 import type { PageDeclaration, SettingsPanelEntry } from '@/services/schema/ContributionRegistry'
 
@@ -59,30 +59,17 @@ const BUILTIN_ITEMS: Extract<NavItem, { kind: 'builtin' }>[] = KERNEL_NAV_ITEMS.
 /** 设置页主组件：左导航右编辑 */
 export function SettingsPage() {
   const [settingsPanels, setSettingsPanels] = useState<SettingsPanelEntry[]>([])
-  const [isLoading, setIsLoading] = useState(true)
   const [selectedId, setSelectedId] = useState<string>(BUILTIN_ITEMS[0].id)
 
+  // schema（query 化）：缓存秒开，staleTime 窗口内重进设置页零请求
+  const schemaQuery = useSchemaQuery()
+  const isLoading = schemaQuery.isPending && settingsPanels.length === 0
+
   useEffect(() => {
-    let cancelled = false
-    setIsLoading(true)
-
-    getSchema()
-      .then((schema) => {
-        if (cancelled) return
-        contributionRegistry.loadFromSchema(schema as unknown as Record<string, unknown>)
-        setSettingsPanels(contributionRegistry.getSettingsPanels())
-      })
-      .catch(() => {
-        // schema 失败时仍展示内置项
-      })
-      .finally(() => {
-        if (!cancelled) setIsLoading(false)
-      })
-
-    return () => {
-      cancelled = true
-    }
-  }, [])
+    if (!schemaQuery.data) return
+    contributionRegistry.loadFromSchema(schemaQuery.data as unknown as Record<string, unknown>)
+    setSettingsPanels(contributionRegistry.getSettingsPanels())
+  }, [schemaQuery.data])
 
   const pluginItems: NavItem[] = useMemo(() => {
     const items: NavItem[] = []
@@ -136,7 +123,7 @@ export function SettingsPage() {
         <span className="text-muted-foreground font-mono text-[10px]">Deep Space v2</span>
       }
     >
-      <div className="flex h-full min-h-0 overflow-hidden">
+      <div className="flex h-full min-h-0 overflow-hidden" data-testid="settings-page">
         {/* 左侧模块列表 */}
         <aside
           className="w-64 shrink-0 overflow-y-auto border-r p-3 sm:w-72"

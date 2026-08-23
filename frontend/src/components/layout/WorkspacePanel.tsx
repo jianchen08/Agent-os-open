@@ -117,12 +117,15 @@ export function WorkspacePanel({
 
   return (
     <div className="flex h-full flex-col">
-      {/* Tab 栏 */}
+      {/* Tab 栏（role=tablist/tab/aria-selected 为 ARIA 语义；DSH 皮肤选择器
+          由适配器递送层按位置转译到 [data-region="workspace"] [role="tablist"]） */}
       <div className="border-border flex flex-shrink-0 items-center border-b">
-        <div ref={tabScrollRef} className="flex min-w-0 flex-1 items-center overflow-x-auto">
+        <div ref={tabScrollRef} className="flex min-w-0 flex-1 items-center overflow-x-auto" role="tablist">
         {tabs.map((tab) => (
           <div
             key={tab.id}
+            role="tab"
+            aria-selected={tab.isActive}
             className={`flex cursor-pointer items-center gap-1.5 border-b-2 px-3 py-2 text-sm whitespace-nowrap transition-colors ${
               tab.isActive
                 ? 'border-primary text-foreground font-medium'

@@ -2,7 +2,7 @@
  * 新建根任务表单（widget 化 T12：原 CreateTaskModal 311 行并入 FormWidget modal 壳）
  *
  * 字段声明后移：表单字段由 task_form 服务插件在 config/task_form.yaml 声明、
- * 经 fieldsUri=/ext/task_form/form 拉取渲染（FormWidget datasource 模式自取）；
+ * 经 fieldsUri=task_form 插件 form 拉取渲染（FormWidget datasource 模式自取）；
  * 动态选项（父容器/执行 Agent）由字段声明的 datasourceUri 指向内核数据源端点，
  * 前端按填写的值自行去内核取对应数据（dependsOn 值变化自动重拉）。
  *
@@ -10,6 +10,7 @@
  * 容器任务无 agent/拓扑/隔离——对齐 task_submit 参数矩阵派生）。
  */
 import { useMemo } from 'react'
+import { TASK_FORM_ENDPOINTS } from '@/services/api/endpoints.generated'
 import { toast } from '@/components/ui/sonner'
 import { FormWidget } from './FormWidget'
 import { createRootTask } from '@/services/api/tasks'
@@ -28,7 +29,7 @@ export function CreateTaskFormModal({
   /** 字段声明来自 task_form 服务（表单配置的唯一真相源）；session 内嵌以限定容器选项 */
   const fieldsUri = useMemo(
     () =>
-      `/ext/task_form/form${sessionId ? `?session_id=${encodeURIComponent(sessionId)}` : ''}`,
+      `${TASK_FORM_ENDPOINTS.task_form_get}${sessionId ? `?session_id=${encodeURIComponent(sessionId)}` : ''}`,
     [sessionId],
   )
 

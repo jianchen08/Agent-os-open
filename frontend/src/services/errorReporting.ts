@@ -5,6 +5,7 @@
  */
 
 import type { ApiError } from '../types/api'
+import { useNotificationStore } from '../stores/notificationStore'
 
 interface ErrorContext {
   component?: string
@@ -195,6 +196,23 @@ class ErrorReportingService {
         errorSeverity,
       },
     })
+
+    // 用户可见提示：默认开启（基础设施层统一收口，2026-08-22）。
+    // 调用方显式传 showToast: false（如重试进度、401 静默处理）时不打扰用户；
+    // 其余错误一律进通知中心，消除"HTTP 错误只见日志不见 UI"的静默缺口。
+    if (errorContext.showToast !== false) {
+      const isServerError = finalErrorType === ErrorType.SERVER
+      useNotificationStore.getState().addNotification({
+        title: isServerError ? '服务请求失败' : '操作失败',
+        message: errorMessage,
+        priority: isServerError ? 'high' : 'normal',
+        category: 'error',
+        isBlocking: false,
+        // 一律自动消失（SERVER 10s / 其余 6s）：瞬时失败（如内核重启窗口）
+        // 常驻挂屏会误导用户以为服务持续不可用，且无恢复机制清除。
+        autoDismissMs: isServerError ? 10000 : 6000,
+      })
+    }
   }
 
   /**

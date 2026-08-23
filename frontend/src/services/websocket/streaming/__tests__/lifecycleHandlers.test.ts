@@ -42,7 +42,6 @@ vi.mock('@/utils/logger', () => ({
 
 vi.mock('../handlers/utils', () => ({
   terminatePipeline: vi.fn(),
-  allocateNextSequence: vi.fn(),
 }))
 
 vi.mock('../router', () => ({

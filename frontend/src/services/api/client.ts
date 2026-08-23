@@ -6,11 +6,13 @@ import { STORAGE_KEYS } from '../../constants/storage'
 import { isRetryableError } from '../../utils/retry'
 import { triggerAuthExpired } from '../authCallbacks'
 import { reportError, ErrorType, ErrorSeverity } from '../errorReporting'
+import { refresh, getAccessToken, clearTokens, stopAutoRefresh } from '../auth/tokenLifecycle'
 import type { ApiError } from '../../types/api'
 
-// NOTE: useAuthStore 通过运行时动态 import 引入，避免与 authStore.ts → auth.ts → client.ts
-// 构成静态循环依赖（vitest/vite 在 transform 阶段解析静态 import 会失败）。
-// 互斥锁仍由 authStore.refreshToken 的模块级 refreshInFlight 提供，所有调用方共享。
+// NOTE: token 生命周期（互斥刷新/存取/续期调度）统一由 tokenLifecycle 提供
+// （2026-08-21 架构收口）。tokenLifecycle 对本文件的依赖是动态 import
+// （refresh → services/api/auth → 本文件），因此本文件可静态 import 它，
+// 不构成静态循环依赖。
 
 /** 清除认证信息并重定向到登录页 增加停止自生长闭环轮询 */
 async function clearAuthAndRedirect(): Promise<void> {
@@ -21,12 +23,11 @@ async function clearAuthAndRedirect(): Promise<void> {
     // 模块未加载过，忽略
   }
 
-  // 仅清除认证相关的 4 个 key，禁止清理任何工作区状态
+  // 仅清除令牌与用户信息，禁止清理任何工作区状态
   // （LAST_ACTIVE_SESSION / pipeline-messages / agent-tabs / layout-mode 等保留，供重登后恢复）
-  localStorage.removeItem(STORAGE_KEYS.ACCESS_TOKEN)
-  localStorage.removeItem(STORAGE_KEYS.REFRESH_TOKEN)
+  stopAutoRefresh()
+  clearTokens()
   localStorage.removeItem(STORAGE_KEYS.AUTH_USER)
-  localStorage.removeItem(STORAGE_KEYS.ACCESS_TOKEN_EXPIRY)
 
   // 通过回调机制通知 store 清除认证状态
   triggerAuthExpired()
@@ -67,8 +68,8 @@ const apiClient: AxiosInstance = axios.create({
 /** 请求拦截器 在请求发送前添加认证token */
 apiClient.interceptors.request.use(
   (config: InternalAxiosRequestConfig) => {
-    // 直接从 localStorage 获取 access_token
-    const token = localStorage.getItem(STORAGE_KEYS.ACCESS_TOKEN)
+    // token 读取走 tokenLifecycle 唯一入口
+    const token = getAccessToken()
 
     // 如果token存在，添加到请求头
     if (token && config.headers) {
@@ -135,15 +136,13 @@ apiClient.interceptors.response.use(
       originalRequest._retry = true
 
       try {
-        // 刷新统一委托 authStore.refreshToken（单一互斥源）。
+        // 刷新统一委托 tokenLifecycle.refresh（单一互斥源，2026-08-21 收口）。
         // 并发的 401 请求会共享同一个 in-flight refresh，后端只被调用一次，
         // 消除 refresh_token 单次轮换被并发击穿导致的 race。
-        // 动态 import 打破静态循环依赖（见文件顶部注释）。
-        const { useAuthStore } = await import('@/stores/authStore')
-        await useAuthStore.getState().refreshToken()
+        await refresh()
 
-        // 刷新成功后从 localStorage 读最新 access token 重放原请求
-        const newToken = localStorage.getItem(STORAGE_KEYS.ACCESS_TOKEN)
+        // 刷新成功后取最新 access token 重放原请求
+        const newToken = getAccessToken()
         if (newToken && originalRequest.headers) {
           originalRequest.headers.Authorization = `Bearer ${newToken}`
         }
@@ -179,6 +178,17 @@ apiClient.interceptors.response.use(
       } else {
         errorMessage = responseData
       }
+    } else if (typeof responseData?.error === 'object' && responseData?.error !== null) {
+      // 内核统一信封 {error: {code, message}}（kernel/crates/http/src/error.rs）
+      // code 为字符串 HTTP 状态（如 "400"）；message 为业务文案。
+      // 对象形态优先级最高——axios 的通用 message 无业务信息。
+      if (typeof responseData.error.message === 'string') {
+        errorMessage = responseData.error.message
+      } else if (typeof responseData.error.code === 'string') {
+        errorMessage = responseData.error.code
+      } else {
+        errorMessage = '请求失败'
+      }
     } else if (typeof responseData?.message === 'string') {
       errorMessage = responseData.message
     } else if (typeof responseData?.detail === 'string') {
@@ -193,7 +203,11 @@ apiClient.interceptors.response.use(
     }
 
     const apiError: ApiError = {
-      code: error.response?.status?.toString() || error.code || 'UNKNOWN_ERROR',
+      code:
+        (typeof responseData?.error?.code === 'string' ? responseData.error.code : undefined) ||
+        error.response?.status?.toString() ||
+        error.code ||
+        'UNKNOWN_ERROR',
       message: errorMessage,
       details: error.response?.data,
     }

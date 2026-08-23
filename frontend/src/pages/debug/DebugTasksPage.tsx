@@ -1,15 +1,16 @@
-/** 调试任务页面 展示任务列表，支持按状态过滤，支持暂停任务的恢复操作 */
+/** 调试任务页面（query 化：useDebugTasksQuery 缓存 SWR，重挂零请求） */
 
-import { useState, useEffect, useCallback } from 'react'
+import { useEffect, useState } from 'react'
 import { Play } from '@/assets/icons'
 import { ErrorState } from '@/components/shared/ErrorState'
 import { LoadingState } from '@/components/shared/LoadingState'
 import { PageShell } from '@/components/shared/PageShell'
 import { WS_SERVER_EVENTS } from '@/constants/websocket'
-import { getTaskList } from '@/services/api/monitoring'
 import { resumeTask } from '@/services/api/tasks'
+import { queryClient } from '@/services/query/queryClient'
+import { queryKeys } from '@/services/query/queryKeys'
 import { globalWS } from '@/services/websocket/GlobalWebSocket'
-import type { TaskInfo } from '@/types/monitoring'
+import { useDebugTasksQuery } from '@/hooks/queries/useDebugQueries'
 
 /** 任务状态选项 */
 const STATUS_OPTIONS = [
@@ -57,38 +58,29 @@ function getTaskStatusLabel(status: string): string {
 
 /** 调试任务页面组件 */
 export function DebugTasksPage({ embedded }: { embedded?: boolean } = {}) {
-  const [tasks, setTasks] = useState<TaskInfo[]>([])
-  const [total, setTotal] = useState(0)
-  const [isLoading, setIsLoading] = useState(true)
-  const [error, setError] = useState<string | null>(null)
   const [statusFilter, setStatusFilter] = useState('')
   const [page, setPage] = useState(1)
   const [resumingIds, setResumingIds] = useState<Set<string>>(new Set())
+  // 恢复操作错误（查询错误走 tasksQuery.error）
+  const [actionError, setActionError] = useState<string | null>(null)
   const pageSize = 20
 
-  /** 加载任务列表 */
-  const fetchTasks = useCallback(async (p: number, status?: string) => {
-    setIsLoading(true)
-    setError(null)
-    try {
-      const res = await getTaskList(p, pageSize, status || undefined)
-      setTasks(res.items)
-      setTotal(res.total)
-    } catch (err: any) {
-      setError(err.message || '获取任务列表失败')
-    } finally {
-      setIsLoading(false)
-    }
-  }, [])
-
-  useEffect(() => {
-    fetchTasks(page)
-  }, [page, fetchTasks])
+  // 任务列表（query 化）：staleTime 60s 窗口内重挂零请求；页码/状态变化显式重拉
+  const tasksQuery = useDebugTasksQuery({ page, pageSize, status: statusFilter })
+  const tasks = tasksQuery.data?.items ?? []
+  const total = tasksQuery.data?.total ?? 0
+  // 无缓存数据时显示 loading（有缓存先渲染缓存不闪 loading）
+  const isLoading = tasksQuery.isPending && !tasksQuery.data
+  const error = tasksQuery.isError
+    ? tasksQuery.error instanceof Error
+      ? tasksQuery.error.message
+      : '获取任务列表失败'
+    : actionError
 
   /** 监听任务状态变更 WS 事件，自动刷新当前列表 */
   useEffect(() => {
     const handleStatusChange = () => {
-      fetchTasks(page, statusFilter || undefined)
+      void queryClient.invalidateQueries({ queryKey: queryKeys.debugTasks })
     }
     globalWS.subscribe(WS_SERVER_EVENTS.TASK_STATUS_CHANGED, handleStatusChange as any)
     globalWS.subscribe(WS_SERVER_EVENTS.TASK_STATUS_UPDATE, handleStatusChange as any)
@@ -96,13 +88,13 @@ export function DebugTasksPage({ embedded }: { embedded?: boolean } = {}) {
       globalWS.unsubscribe(WS_SERVER_EVENTS.TASK_STATUS_CHANGED, handleStatusChange as any)
       globalWS.unsubscribe(WS_SERVER_EVENTS.TASK_STATUS_UPDATE, handleStatusChange as any)
     }
-  }, [fetchTasks, page, statusFilter])
+  }, [])
 
   /** 状态过滤变更 */
   const handleStatusChange = (status: string) => {
     setStatusFilter(status)
     setPage(1)
-    fetchTasks(1, status || undefined)
+    setActionError(null)
   }
 
   /** 恢复任务 */
@@ -110,9 +102,9 @@ export function DebugTasksPage({ embedded }: { embedded?: boolean } = {}) {
     setResumingIds((prev) => new Set(prev).add(taskId))
     try {
       await resumeTask(taskId)
-      fetchTasks(page, statusFilter || undefined)
+      void queryClient.invalidateQueries({ queryKey: queryKeys.debugTasks })
     } catch (err: any) {
-      setError(err.message || '恢复任务失败')
+      setActionError(err.message || '恢复任务失败')
     } finally {
       setResumingIds((prev) => {
         const next = new Set(prev)

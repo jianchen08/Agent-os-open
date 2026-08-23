@@ -1,44 +1,31 @@
 /**
- * 调试用户页面
+ * 调试用户页面（query 化：useDebugUsersQuery 缓存 SWR，重挂零请求）
  *
  * 展示用户调试信息
  */
 
-import { useState, useEffect, useCallback } from 'react'
+import { useState } from 'react'
 import { ErrorState } from '@/components/shared/ErrorState'
 import { LoadingState } from '@/components/shared/LoadingState'
 import { PageShell } from '@/components/shared/PageShell'
-import * as usersApi from '@/services/api/users'
-import type { User } from '@/services/api/users'
+import { useDebugUsersQuery } from '@/hooks/queries/useDebugQueries'
 
 /**
  * 调试用户页面组件
  */
 export function DebugUsersPage({ embedded }: { embedded?: boolean } = {}) {
-  const [users, setUsers] = useState<User[]>([])
-  const [isLoading, setIsLoading] = useState(true)
-  const [error, setError] = useState<string | null>(null)
   const [expandedId, setExpandedId] = useState<string | null>(null)
 
-  /**
-   * 加载用户列表
-   */
-  const fetchUsers = useCallback(async () => {
-    setIsLoading(true)
-    setError(null)
-    try {
-      const data = await usersApi.getUsers()
-      setUsers(data)
-    } catch (err: any) {
-      setError(err.message || '获取用户列表失败')
-    } finally {
-      setIsLoading(false)
-    }
-  }, [])
-
-  useEffect(() => {
-    fetchUsers()
-  }, [fetchUsers])
+  // 用户列表（query 化）：staleTime 窗口内重挂零请求
+  const usersQuery = useDebugUsersQuery()
+  const users = usersQuery.data ?? []
+  // 无缓存数据时显示 loading（有缓存先渲染缓存不闪 loading）
+  const isLoading = usersQuery.isPending && !usersQuery.data
+  const error = usersQuery.isError
+    ? usersQuery.error instanceof Error
+      ? usersQuery.error.message
+      : '获取用户列表失败'
+    : null
 
   return (
     <PageShell

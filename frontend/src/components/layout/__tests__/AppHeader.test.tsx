@@ -15,15 +15,20 @@
  */
 
 import { render, screen, fireEvent } from '@testing-library/react'
+import { QueryClientProvider } from '@tanstack/react-query'
 import { MemoryRouter } from 'react-router-dom'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { useLayoutModeStore } from '@/stores/layoutModeStore'
+import { queryClient as globalQueryClient } from '@/services/query/queryClient'
+import { queryKeys } from '@/services/query/queryKeys'
+import { createTestQueryClient } from '@/test/renderWithProviders'
 import { useSessionStore } from '@/stores/sessionStore'
 import { useUIStore } from '@/stores/uiStore'
 import { AppHeader } from '../AppHeader'
 
 function resetStores() {
-  useSessionStore.setState({ sessions: [], activeSessionId: null })
+  useSessionStore.setState({ activeSessionId: null })
+  globalQueryClient.clear()
   useLayoutModeStore.setState({
     connectionStatus: {
       state: 'connected',
@@ -36,11 +41,16 @@ function resetStores() {
   useUIStore.setState({ sidebarCollapsed: false, workspaceCollapsed: false })
 }
 
-function renderHeader(props?: { extraRight?: React.ReactNode; onOpenWorkspaceView?: () => void }) {
+function renderHeader(
+  props?: { extraRight?: React.ReactNode; onOpenWorkspaceView?: () => void },
+  client = createTestQueryClient(),
+) {
   return render(
-    <MemoryRouter>
-      <AppHeader {...props} />
-    </MemoryRouter>,
+    <QueryClientProvider client={client}>
+      <MemoryRouter>
+        <AppHeader {...props} />
+      </MemoryRouter>
+    </QueryClientProvider>,
   )
 }
 
@@ -50,20 +60,19 @@ describe('AppHeader 轻量化 — AI app 标准轻顶栏', () => {
   })
 
   it('三段式：左 ☰ + 中「灵汐 · 会话标题」+ 右工作区按钮', () => {
-    useSessionStore.setState({
-      sessions: [
-        {
-          id: 's1',
-          title: '需求评审',
-          createdAt: '2026-01-01T00:00:00Z',
-          updatedAt: '2026-01-01T00:00:00Z',
-          messageCount: 0,
-        },
-      ],
-      activeSessionId: 's1',
-    })
+    const client = createTestQueryClient()
+    client.setQueryData(queryKeys.sessions, [
+      {
+        id: 's1',
+        title: '需求评审',
+        createdAt: '2026-01-01T00:00:00Z',
+        updatedAt: '2026-01-01T00:00:00Z',
+        messageCount: 0,
+      },
+    ])
+    useSessionStore.setState({ activeSessionId: 's1' })
 
-    renderHeader()
+    renderHeader(undefined, client)
 
     expect(screen.getByTestId('titlebar-toggle-sidebar')).toBeInTheDocument()
     expect(screen.getByTestId('titlebar-title')).toHaveTextContent('灵汐 · 需求评审')
@@ -115,9 +124,11 @@ describe('AppHeader 轻量化 — AI app 标准轻顶栏', () => {
       },
     })
     rerender(
-      <MemoryRouter>
-        <AppHeader />
-      </MemoryRouter>,
+      <QueryClientProvider client={createTestQueryClient()}>
+        <MemoryRouter>
+          <AppHeader />
+        </MemoryRouter>
+      </QueryClientProvider>,
     )
     expect(screen.getByTestId('titlebar-connection-dot')).toHaveAttribute('title', '连接已断开')
   })

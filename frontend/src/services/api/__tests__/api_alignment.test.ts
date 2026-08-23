@@ -9,6 +9,44 @@
  */
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import fs from 'node:fs'
+import path from 'node:path'
+
+// ============================================================================
+// 收尾闸（channel_api 退役批次 5）：前端 /ext/channel_api 零命中 + 常量层不手写 /ext
+// ============================================================================
+
+const FRONTEND_SRC = path.resolve(__dirname, '../../..')
+
+describe('收尾闸 - channel_api 退役（批次 5）', () => {
+  it('frontend/src 生产代码零命中 "ext/channel_api"（排除生成物与测试）', () => {
+    const offenders: string[] = []
+    const walk = (dir: string) => {
+      for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+        const full = path.join(dir, entry.name)
+        if (entry.isDirectory()) {
+          if (entry.name === 'node_modules' || entry.name === '__tests__') continue
+          walk(full)
+        } else if (/\.(ts|tsx)$/.test(entry.name)) {
+          if (/\.(test|spec)\./.test(entry.name)) continue
+          if (full.endsWith('endpoints.generated.ts')) continue
+          const text = fs.readFileSync(full, 'utf-8')
+          if (text.includes('ext/channel_api')) {
+            offenders.push(path.relative(FRONTEND_SRC, full).replace(/\\/g, '/'))
+          }
+        }
+      }
+    }
+    walk(FRONTEND_SRC)
+    expect(offenders).toEqual([])
+  })
+
+  it('constants/api.ts 不再手写 /ext/ 字符串字面量（插件端点一律经生成物投影）', () => {
+    const text = fs.readFileSync(path.resolve(FRONTEND_SRC, 'constants/api.ts'), 'utf-8')
+    const extLiterals = [...text.matchAll(/['"`]\/ext\//g)]
+    expect(extLiterals.map((m) => m.index)).toEqual([])
+  })
+})
 
 // 用 vi.hoisted 创建 mock 函数，确保在 vi.mock 提升时可用
 const { mockGet, mockPost, mockPatch, mockPut, mockDelete } = vi.hoisted(() => ({
@@ -127,7 +165,7 @@ describe('F9 - getTasks 响应解包', () => {
 
     await taskApi.getTasks({ skip: 10, limit: 20, status: 'running' })
 
-    expect(mockGet).toHaveBeenCalledWith('/ext/channel_api/tasks', {
+    expect(mockGet).toHaveBeenCalledWith('/ext/task_service/tasks', {
       params: { skip: 10, limit: 20, status: 'running' },
     })
   })
@@ -167,7 +205,7 @@ describe('F10 - longTermTasks 使用 PATCH 方法', () => {
     await longTermTasksApi.pauseLongTermTask('task-1')
 
     // 验证使用的是 PATCH
-    expect(mockPatch).toHaveBeenCalledWith('/ext/channel_api/tasks/task-1', {
+    expect(mockPatch).toHaveBeenCalledWith('/ext/task_service/tasks/task-1', {
       status: 'blocked',
     })
     // 验证没有使用 PUT
@@ -195,7 +233,7 @@ describe('F10 - longTermTasks 使用 PATCH 方法', () => {
     await longTermTasksApi.resumeLongTermTask('task-1')
 
     // 验证使用的是 PATCH
-    expect(mockPatch).toHaveBeenCalledWith('/ext/channel_api/tasks/task-1', {
+    expect(mockPatch).toHaveBeenCalledWith('/ext/task_service/tasks/task-1', {
       status: 'running',
     })
     // 验证没有使用 PUT
@@ -241,7 +279,7 @@ describe('F10 - longTermTasks 使用 PATCH 方法', () => {
     await longTermTasksApi.toggleAutoExecute('task-1', true)
 
     // 验证使用 PATCH 更新标签
-    expect(mockPatch).toHaveBeenCalledWith('/ext/channel_api/tasks/task-1', {
+    expect(mockPatch).toHaveBeenCalledWith('/ext/task_service/tasks/task-1', {
       tags: ['long-term', 'auto-execute'],
     })
     // 验证没有使用 PUT
@@ -443,7 +481,7 @@ describe('前后端 Projects API 响应解包验证', () => {
     expect(result.items[0].id).toBe('project-1')
 
     // 验证调用端点（实际代码使用 { params } 对象格式）
-    expect(mockGet).toHaveBeenCalledWith('/ext/channel_api/projects', {
+    expect(mockGet).toHaveBeenCalledWith('/ext/task_service/projects', {
       params: { page: 1, limit: 20 },
     })
   })
@@ -482,7 +520,7 @@ describe('前后端 Projects API 响应解包验证', () => {
     expect(result.status).toBe('planning')
 
     // 验证调用端点
-    expect(mockPost).toHaveBeenCalledWith('/ext/channel_api/projects', {
+    expect(mockPost).toHaveBeenCalledWith('/ext/task_service/projects', {
       goal: '测试目标',
       session_id: 'session-1',
       auto_execute: true,
@@ -517,7 +555,7 @@ describe('前后端 Projects API 响应解包验证', () => {
     expect(result.status).toBe('suspended')
 
     // 验证调用端点（POST，而非 PATCH）
-    expect(mockPost).toHaveBeenCalledWith('/ext/channel_api/projects/proj-1/pause')
+    expect(mockPost).toHaveBeenCalledWith('/ext/task_service/projects/proj-1/pause')
   })
 
   it('resumeProject 应调用 POST 端点并解包 {project: {...}} 响应', async () => {
@@ -547,6 +585,6 @@ describe('前后端 Projects API 响应解包验证', () => {
     expect(result.status).toBe('running')
 
     // 验证调用端点（POST，而非 PATCH）
-    expect(mockPost).toHaveBeenCalledWith('/ext/channel_api/projects/proj-1/resume')
+    expect(mockPost).toHaveBeenCalledWith('/ext/task_service/projects/proj-1/resume')
   })
 })

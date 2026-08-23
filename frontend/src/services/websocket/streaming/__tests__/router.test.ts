@@ -4,6 +4,7 @@
  * 验证：pipeline_id 严格校验（空字符串视为无效）
  */
 import { describe, it, expect } from 'vitest'
+import { usePipelineMessageStore } from '@/stores/pipelineMessageStore'
 import { resolvePipelineId } from '../router'
 
 describe('resolvePipelineId', () => {
@@ -49,5 +50,21 @@ describe('resolvePipelineId', () => {
   it('不使用 thread_id 作为 fallback', () => {
     const result = resolvePipelineId({ data: { pipeline_id: '' }, _threadId: 'thread-1' })
     expect(result).toBeNull()
+  })
+
+  // ADR 2026-08-21：redirect（未注册管道重定向到活跃管道）已删除——
+  // spike 实证后端 resolve_pipeline_id_for_thread 保证回流事件 pipeline_id 恒为
+  // 前端注册值，重定向防御场景不存在；未注册管道事件由 isPipelineRelevant 门控丢弃。
+  it('未注册管道的 pipeline_id 原样返回（不重定向到活跃管道）', () => {
+    usePipelineMessageStore.setState({
+      activePipelineId: 'pipe-active',
+      streamingState: { 'pipe-active': { isStreaming: true, messageId: 'm1' } },
+      pipelineSessionMap: { 'pipe-active': 'thread-1' },
+      pipelines: {},
+    })
+    const result = resolvePipelineId({
+      data: { pipeline_id: 'pipe-unregistered', _threadId: 'thread-1' },
+    })
+    expect(result).toBe('pipe-unregistered')
   })
 })

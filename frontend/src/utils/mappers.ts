@@ -84,3 +84,20 @@ export function mapSessionToThread(session: Session): Thread {
     agent_id: session.agentId || null,
   }
 }
+
+/**
+ * 会话主管道的权威解析（2026-08-22 裁决，猜测型匹配反模式收口批次3）：
+ * - 优先后端权威 activePipelineId（session_routes 回显，内核 resolve 同源）；
+ * - 缺失（旧数据）且 pipelineIds 恰一个元素 → 取 [0]（无歧义）；
+ * - 缺失且多元素 → undefined（不猜位置序号，调用方 fail-closed 拒绝/中止）。
+ */
+export function mainPipelineIdOf(session: {
+  activePipelineId?: string | null
+  pipelineIds?: string[]
+}): string | undefined {
+  if (session.activePipelineId) return session.activePipelineId
+  if (session.pipelineIds && session.pipelineIds.length === 1) {
+    return session.pipelineIds[0]
+  }
+  return undefined
+}

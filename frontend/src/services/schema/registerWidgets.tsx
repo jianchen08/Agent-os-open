@@ -96,7 +96,7 @@ const WIDGETS: WidgetEntry[] = [
   { name: 'workspace_explorer', component: PipelineManagerPanel, spaces: ['workspace'] },
   // 调试中心面板（debug_center 插件 contributes.pages 声明，单入口：仅管理员可见；
   // 面板内部切换 6 个调试页面——数据库管理/执行记录/会话/任务/用户/评估指标，
-  // 页面数据经各数据源插件 HTTP 面获取：/ext/db_admin|channel_api|monitoring|evaluation_service/*）
+  // 页面数据经各数据源插件 HTTP 面获取（db_admin|monitoring|evaluation_service|task_service 等）
   { name: 'debug_center_hub', component: DebugCenterHubWidget, spaces: ['workspace'] },
   // 任务/管道管理（独立工作区标签，按需打开；workspace_explorer 旧注册名已清理）
   { name: 'pipeline_manager', component: PipelineManagerPanel, spaces: ['workspace'] },

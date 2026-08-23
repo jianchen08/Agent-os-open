@@ -8,7 +8,7 @@ import { usePipelineMessageStore } from '@/stores/pipelineMessageStore'
 import { useTerminationStore } from '@/stores/terminationStore'
 import { loggers } from '@/utils/logger'
 
-import { allocateNextSequence, terminatePipeline } from './handlers/utils'
+import { terminatePipeline } from './handlers/utils'
 import { resolvePipelineId } from './router'
 
 /** 处理 WS 重连补漏。重连时对每个 streaming 管道执行 backfill 增量补漏，
@@ -89,9 +89,8 @@ export async function handleReconnected(): Promise<void> {
         } as any)
       }
     }
-    // 清理 streamingState（同时处理 threadId）
-    const threadId = pipelineStore.pipelineSessionMap[pipelineId]
-    terminatePipeline(pipelineId, threadId !== pipelineId ? threadId : undefined)
+    // 清理 streamingState（只清本管道——ADR 2026-08-21 不再顺带清 threadId）
+    terminatePipeline(pipelineId)
     logger.info('[streaming] 终止残留流式管道 %s，清理 streamingState', pipelineId.slice(0, 12))
   }
 
@@ -163,7 +162,8 @@ export function handleSystemNotification(eventData: any): void {
     role: 'system',
     content,
     timestamp: new Date().toISOString(),
-    sequence: allocateNextSequence(pipelineId, data?.sequence),
+    // seq 只用事件携带的权威值（无则挂空排序末尾，对账纠正）——不本地拼 localMax+1
+    sequence: data?.sequence,
     parts: [
       {
         type: 'system',

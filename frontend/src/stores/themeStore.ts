@@ -12,10 +12,12 @@ import {
   getPresetTheme,
   applyTheme as applyThemeToDOM,
   applyPluginThemeVars,
+  clearPluginThemeVars,
   derivePluginThemePreview,
   fetchDynamicThemes,
 } from '@/services/themeService'
 import { ThemeStorageService, mergeTheme } from '@/services/themeStorage'
+import { applyPluginSkin, clearPluginSkin, isSkinTheme } from '@/services/skinRuntime'
 import { loggers } from '@/utils/logger'
 import { createTolerantStorage } from '@/utils/tolerantStorage'
 import type { PluginTheme, ThemeConfig, ThemeInfo, ThemeMode } from '@/types/theme'
@@ -39,6 +41,12 @@ export interface ThemeState {
   availableThemes: ThemeInfo[]
   /** 是否正在加载 */
   isLoading: boolean
+  /** AI 消息气泡形态（'flat'=平铺跟 DeepSeek/DSH 原生；'bubble'=气泡；主题声明可开关） */
+  bubbleAiMode: 'flat' | 'bubble'
+  /** 背景图激活信号（body.has-bg-image：背景图主题或皮肤激活）。平铺 AI 消息
+      在背景图上需气泡面（用户裁决：文字不许裸贴背景图，但只框气泡区域）——
+      React 内联样式无法被 CSS 覆盖，故由本状态驱动替换透明底 */
+  bgImageActive: boolean
 }
 
 export interface ThemeActions {
@@ -156,6 +164,8 @@ export const useThemeStore = create<ThemeState & ThemeActions>()(
       pendingThemeId: null,
       availableThemes: [],
       isLoading: false,
+      bubbleAiMode: 'bubble',
+      bgImageActive: false,
 
       // 设置主题模式
       setMode: (mode) => {
@@ -383,8 +393,11 @@ export const useThemeStore = create<ThemeState & ThemeActions>()(
         // enableGlassmorphism=false → 关闭毛玻璃（覆盖主题 card.style:'glass'）
         applyMotionPreferences(root)
 
-        // 背景图片
-        if (backgrounds.image?.enabled && backgrounds.image?.url) {
+        // 背景图片（通用信号 body.has-bg-image：皮肤激活时由 skinRuntime
+        // 挂同标记——hooks 画背景的皮肤与内置背景主题走同一"背景图上
+        // 需卡面"规则；互斥：皮肤激活期主题管线的 image 分支不覆盖标记）
+        const skinActive = get().activePluginTheme?.skin != null
+        if (backgrounds.image?.enabled && backgrounds.image?.url && !skinActive) {
           body.classList.add('has-bg-image')
           root.style.setProperty('--bg-image', `url(${backgrounds.image.url})`)
           root.style.setProperty('--bg-image-position', backgrounds.image.position)
@@ -424,8 +437,35 @@ export const useThemeStore = create<ThemeState & ThemeActions>()(
         // === 插件主题覆盖（contributes.themes）===
         // 在 base 主题（含其背景）全部应用之后执行：插件声明的变量 setProperty 后写者胜，
         // 背景按 enabled 开关覆盖。纯数据无 JS 执行（主题插件是"大众级定制"的正路）。
+        // 每次应用先清上一插件主题变量（皮肤切回内置主题时 --region-* 等残留
+        // 会让区域背景/气泡形态停留在旧皮肤，2026-08-21 漂移根因）。
+        clearPluginThemeVars()
         if (activePluginTheme) {
           applyPluginThemeVars(activePluginTheme)
+        }
+
+        // AI 消息气泡形态（主题声明开关：插件主题经 --bubble-ai-mode 变量，
+        // 内置主题经 colors.bubbles.ai_mode；默认 bubble 保既有行为）
+        const bubbleAiMode: 'flat' | 'bubble' =
+          activePluginTheme?.variables?.['--bubble-ai-mode'] === 'flat' ||
+          (themeConfig.colors?.bubble?.ai_mode === 'flat')
+            ? 'flat'
+            : 'bubble'
+        set({
+          bubbleAiMode,
+          // 背景图信号（与 body.has-bg-image 同源；皮肤激活时 applyPluginSkin
+          // 异步挂类，此处直接按声明判定不依赖 DOM 时序）
+          bgImageActive: skinActive || (backgrounds.image?.enabled && !!backgrounds.image?.url),
+        })
+
+        // === 皮肤运行时按择注入路由（2026-08-22 平台化：声明驱动）===
+        // 任何插件主题声明 skin 字段即获得全部皮肤能力：平台 scope 打标 +
+        // 皮肤 CSS 按择注入 + hooks 动态层（六层装饰/背景/装饰条槽位）；
+        // 其余主题 → 摘除。与主题变量同一选择源驱动。
+        if (isSkinTheme(activePluginTheme)) {
+          void applyPluginSkin(activePluginTheme)
+        } else {
+          clearPluginSkin()
         }
       },
     }),

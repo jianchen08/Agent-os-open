@@ -25,17 +25,17 @@ import {
   ExternalLink,
   MessageSquare,
 } from '@/assets/icons'
-import apiClient from '@/services/api/client'
 import { pauseTask, resumeTask, cancelTask } from '@/services/api/tasks'
 import { navigateToPipeline } from '@/services/pipelineNavigator'
-import { usePipelineRegistryStore } from '@/stores/pipelineRegistryStore'
 import { useContextUsageStore } from '@/stores/contextUsageStore'
-import { useLongTermTaskStore } from '@/stores/longTermTaskStore'
-import { useSessionStore } from '@/stores/sessionStore'
+import { useSessionsQuery, readSessions, ensureSessionsLoaded } from '@/hooks/queries/useSessionsQuery'
+import { usePipelineRunsQuery, usePipelineStatesQuery } from '@/hooks/queries/usePipelineRunsQuery'
+import { useAllTasksQuery } from '@/hooks/queries/useAllTasksQuery'
 import { useSessionListStore } from '@/stores/sessionListStore'
 import { useLayoutModeStore } from '@/stores/layoutModeStore'
 import { useNotificationStore } from '@/stores/notificationStore'
 import { useAgentTabStore } from '@/stores/agentTabStore'
+import { invalidateLongTermTasks } from '@/hooks/queries/useLongTermTasksQuery'
 import type { PipelineStatus, PipelineViewEntry } from '@/types/pipeline'
 import type { AgentTab } from '@/types/task'
 
@@ -124,57 +124,17 @@ function statusIcon(status: string): { icon: React.ReactNode; color: string; lab
 // ═════════════════════════════════════════════════════════════════
 
 export function PipelineManagerWidget(_rawProps: Record<string, unknown>) {
-  /** 管道运行快照注册表（内核快照 + 流式事件增量） */
-  const registryRuns = usePipelineRegistryStore((s) => s.runs)
-  /** 管道 state 摘要（内核 /pipelines/state：phase/迭代/上下文真值） */
-  const registryStates = usePipelineRegistryStore((s) => s.states)
-  /** states 侧拉取失败（runs 仍可用；null=正常）——UI 提示状态可能不全 */
-  const registryStatesError = usePipelineRegistryStore((s) => s.statesError)
+  /** 管道 runs 快照（query 化：queryKeys.pipelineRuns，30s 兜底轮询 + WS 流式事件增量） */
+  const { data: registryRuns = {} } = usePipelineRunsQuery()
+  /** 管道 state 摘要（query 化：queryKeys.pipelineStates；states 侧失败仅 runs 快照仍可用） */
+  const { data: registryStates = {}, error: registryStatesError } = usePipelineStatesQuery()
   /** 实时 token 用量（cost_update 事件驱动） */
   const usageByPipeline = useContextUsageStore((s) => s.usageByPipeline)
-  /** 全量任务（/ext/channel_api/tasks 不过滤 long-term；任务节点/任务管道判定权威源） */
-  const [allTasks, setAllTasks] = useState<Record<string, unknown>[]>([])
-  /** 任务列表拉取失败（管道列表仍可用；null=正常）。30s 轮询保留自愈 */
-  const [tasksError, setTasksError] = useState<string | null>(null)
-  useEffect(() => {
-    let cancelled = false
-    const load = async () => {
-      try {
-        const resp = await apiClient.get('/ext/channel_api/tasks', {
-          params: { skip: 0, limit: 100 },
-        })
-        if (!cancelled) {
-          setAllTasks(resp.data.items ?? [])
-          setTasksError(null)
-        }
-      } catch (e) {
-        // 任务列表不可用时降级（管道列表仍可用），但置位提示——
-        // 持久失败时用户不应把"服务故障"读成"没有任务"
-        if (!cancelled) {
-          setTasksError(e instanceof Error ? e.message : '任务列表不可用')
-        }
-      }
-    }
-    load()
-    // 30s 轻量轮询（与注册表同频；任务状态变化影响任务节点/条目显示）
-    const timer = setInterval(load, 30_000)
-    return () => {
-      cancelled = true
-      clearInterval(timer)
-    }
-  }, [])
+  /** 全量任务（task_service 插件端点，不过滤 long-term；任务节点/任务管道判定权威源）。
+   *  query 化：queryKeys.pipelineAllTasks，30s 轮询 + 窗口聚焦刷新替代原本地 interval */
+  const { data: allTasks = [], error: tasksError } = useAllTasksQuery()
   /** 会话列表（按 thread_id 取会话标题） */
-  const sessions = useSessionStore((s) => s.sessions)
-
-  /** 挂载时启动注册表自动刷新（30s 兜底 + 页面可见拉取），卸载停止 */
-  useEffect(() => {
-    const store = usePipelineRegistryStore.getState()
-    if (Object.keys(store.runs).length === 0) {
-      store.fetch()
-    }
-    store.startAutoRefresh()
-    return () => usePipelineRegistryStore.getState().stopAutoRefresh()
-  }, [])
+  const { data: sessions = [] } = useSessionsQuery()
 
   /** 管道条目派生：注册表快照 + 任务列表（含管道 ID 的任务）合并，按开始时间倒序 */
   const pipelineEntries: PipelineViewEntry[] = useMemo(() => {
@@ -388,11 +348,15 @@ export function PipelineManagerWidget(_rawProps: Record<string, unknown>) {
     // 任务索引（id → task；全量任务）
     const taskById = new Map(allTasks.map((t) => [String(t.id ?? ''), t]))
     const taskKey = (taskId: string) => `task:${taskId}`
-    // 任务父子映射：taskId → parentTaskId
+    // 任务父子映射：taskId → parentTaskId（父容器任务 = metadata.parent_project_id，
+    // 容器任务 = task.owned 声明、非管道——子任务据此挂到容器节点下）
     const parentTaskOf = new Map<string, string>()
     for (const t of allTasks) {
       const pid = String(t.parent_task_id ?? t.parentTaskId ?? '')
       if (pid) parentTaskOf.set(String(t.id), pid)
+      const meta = t.metadata as Record<string, unknown> | undefined
+      const proj = String(meta?.parent_project_id ?? '')
+      if (proj) parentTaskOf.set(String(t.id), proj)
     }
     // 会话主管道：threadId 组内 session.pipelineIds[0]（缺省取最早 started_at）
     const threadTop = new Map<string, string>()
@@ -465,12 +429,22 @@ export function PipelineManagerWidget(_rawProps: Record<string, unknown>) {
         roots.push(node)
       }
     }
-    // 3) 任务节点归属：父任务节点 → 会话主管道 → 顶层
+    // 3) 任务节点归属：父任务节点 → 父管道条目（主管道提交的子任务挂主管道下）→ 会话主管道 → 顶层
     for (const [taskId, node] of taskNodes) {
       const parentTaskId = parentTaskOf.get(taskId)
-      if (parentTaskId && taskNodes.has(parentTaskId)) {
-        taskNodes.get(parentTaskId)!.children.push(node)
-        continue
+      if (parentTaskId) {
+        if (taskNodes.has(parentTaskId)) {
+          taskNodes.get(parentTaskId)!.children.push(node)
+          continue
+        }
+        // 父 id 是管道条目（主管道/任意管道，kind=session）：子任务管道出生
+        // 即 lineage.parent_pipeline_id = 提交者管道 id——任务归属优先挂其下
+        // （容器任务父已在 taskNodes 分支处理；此处覆盖"父=管道"形态，杜绝
+        // 落到 threadTop 回退/顶层平铺）。
+        if (entryByKey.has(parentTaskId) || childrenMap.has(parentTaskId)) {
+          pushChild(parentTaskId, node)
+          continue
+        }
       }
       const t = taskById.get(taskId)
       const tmeta = t?.metadata as Record<string, unknown> | undefined
@@ -513,15 +487,12 @@ export function PipelineManagerWidget(_rawProps: Record<string, unknown>) {
   const handleEntryClick = useCallback(async (entry: PipelineViewEntry) => {
     const pipelineId = entry.pipelineId || entry.key
     // 会话列表未加载时先拉取（防止把有归属管道误判为孤儿而在当前会话建标签）
-    if (useSessionStore.getState().sessions.length === 0) {
-      await useSessionListStore
-        .getState()
-        .fetchSessions({ background: true })
-        .catch(() => {})
+    if (readSessions().length === 0) {
+      await ensureSessionsLoaded().catch(() => {})
     }
     const hasSession =
       !!entry.threadId
-      && useSessionStore.getState().sessions.some((s) => s.id === entry.threadId)
+      && readSessions().some((s) => s.id === entry.threadId)
     if (hasSession && entry.threadId) {
       const ok = await navigateToPipeline(pipelineId, {
         agentName: entry.name,
@@ -618,8 +589,9 @@ export function PipelineManagerWidget(_rawProps: Record<string, unknown>) {
         } else {
           await cancelTask(entry.taskId)
         }
-        // 操作后刷新任务列表（任务派生条目随之更新）
-        useLongTermTaskStore.getState().fetchTasks().catch(() => {})
+        // 操作后刷新任务列表（任务派生条目随之更新）——query 化：invalidate 由
+        // 活跃 useLongTermTasksQuery 订阅自动重拉
+        invalidateLongTermTasks()
       } catch (e) {
         console.error('[PipelineManager] 管道操作失败', action, e)
       }
@@ -717,10 +689,10 @@ export function PipelineManagerWidget(_rawProps: Record<string, unknown>) {
       {(registryStatesError || tasksError) && (
         <div className="border-b bg-status-warning/10 px-3 py-1.5 text-[11px] text-status-warning">
           {registryStatesError && (
-            <div>管道状态拉取失败（{registryStatesError}）——phase/任务状态可能不全，30s 后自动重试。</div>
+            <div>管道状态拉取失败（{registryStatesError.message}）——phase/任务状态可能不全，30s 后自动重试。</div>
           )}
           {tasksError && (
-            <div>任务列表不可用（{tasksError}）——管道列表仍可展示，30s 后自动重试。</div>
+            <div>任务列表不可用（{tasksError.message}）——管道列表仍可展示，30s 后自动重试。</div>
           )}
         </div>
       )}

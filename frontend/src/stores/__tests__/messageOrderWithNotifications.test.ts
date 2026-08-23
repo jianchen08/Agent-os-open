@@ -165,9 +165,9 @@ describe('系统通知 + 注入消息 + 刷新的消息顺序', () => {
       makeMsg('user-injected', { role: 'user', content: '[上级]继续', sequence: 3 }),
     ])
 
-    // 契约（2026-08-20）：API 三条按 sequence 排序；流式占位是飞行中消息（新鲜
-    // _lastUpdated，后端尚未落库）→ 保留并排在 API 数据之后，等续流/backfill 补正。
-    expect(ids()).toEqual(['user-1', 'ai-1', MSG, 'user-injected'])
+    // 契约（2026-08-21 ADR）：initFromAPI = API 权威全量替换。流式占位不保留
+    // （飞行内容由重连 replay 重建 / 完成后 backfill 权威补回），刷新即弃。
+    expect(ids()).toEqual(['user-1', 'ai-1', 'user-injected'])
   })
 
   it('场景2: 系统通知 + 流式占位 + 切 Tab 刷新，刷新后仅剩 API 数据（system + 占位都丢弃）', () => {
@@ -191,13 +191,14 @@ describe('系统通知 + 注入消息 + 刷新的消息顺序', () => {
     expect(beforeIds[beforeIds.length - 1]).toBe(sysId)
 
     // 切 Tab 触发 initFromAPI（全量替换语义）：API 只返回 user-1
-    // 契约（2026-08-20）：system 通知（非飞行中）丢弃；流式占位（新鲜）保留。
+    // 契约（2026-08-21 ADR）：system 通知与流式占位都不保留——API 权威全量替换，
+    // 占位由重连 replay / 完成后 backfill 恢复。
     pipelineStore.getState().initFromAPI(PIPELINE_ID, [
       makeMsg('user-1', { role: 'user', content: '问1', sequence: 1 }),
     ])
 
-    // 期望：API 的 user-1 + 飞行中保留的流式占位；system 通知被丢弃
-    expect(ids()).toEqual(['user-1', MSG])
+    // 期望：恰好 API 的 user-1（系统通知与占位全弃）
+    expect(ids()).toEqual(['user-1'])
     expect(systemIds(), '刷新后 system 通知应被丢弃（API 未返回）').toHaveLength(0)
   })
 
@@ -227,12 +228,12 @@ describe('系统通知 + 注入消息 + 刷新的消息顺序', () => {
       makeMsg('user-injected', { role: 'user', content: '[上级]补充', sequence: 4 }),
     ])
 
-    // 契约（2026-08-20）：API 四条按 sequence 排序（本地乐观 user-2 已被 API 版
-    // 对账覆盖让位）；流式占位（飞行中，后端 seq=5 未落库）保留在末尾。
-    expect(ids()).toEqual(['user-1', 'ai-1', 'user-2', MSG, 'user-injected'])
+    // 契约（2026-08-21 ADR）：API 四条按 sequence 排序（本地乐观 user-2 已被
+    // API 版对账覆盖让位）；流式占位刷新即弃（replay/backfill 恢复）。
+    expect(ids()).toEqual(['user-1', 'ai-1', 'user-2', 'user-injected'])
   })
 
-  it('场景4: 飞行中乐观 user + 流式占位，initFromAPI 后均保留（2026-08-20 回归修复）', () => {
+  it('场景4: 迟到 init 全量替换——store 内乐观残留不保留，发送中消息由 pending 区承担（ADR 2026-08-21）', () => {
     const MSG = 'msg_streaming_d000000'
 
     pipelineStore.getState().initFromAPI(PIPELINE_ID, [
@@ -240,7 +241,8 @@ describe('系统通知 + 注入消息 + 刷新的消息顺序', () => {
       makeMsg('ai-1', { role: 'assistant', content: '答1', sequence: 2 }),
     ])
 
-    // 刚发送的乐观 user-2（30s grace 窗口内，后端可能尚未持久化）
+    // 旧架构模拟：乐观 user-2 误入主 store（新架构下乐观消息只在 pending 区，
+    // 此处入 store 是为了断言「迟到 init 不得让 store 残影复活」的替换语义）
     pipelineStore.getState().addMessage(PIPELINE_ID, makeMsg('user-2', {
       role: 'user', content: '问2', sequence: 3, clientMessageId: 'user-2',
     }))
@@ -255,10 +257,11 @@ describe('系统通知 + 注入消息 + 刷新的消息顺序', () => {
       makeMsg('ai-1', { role: 'assistant', content: '答1', sequence: 2 }),
     ])
 
-    // 契约（2026-08-20）：飞行中乐观 user（clientMessageId 未对账、timestamp 新鲜）
-    // 与流式占位（_lastUpdated 新鲜）均保留——用户输入不得因历史加载而凭空消失。
-    // 这正是「刷新后第一条消息气泡消失、列表回退旧历史」bug 的回归保护。
-    expect(ids()).toEqual(['user-1', 'ai-1', 'user-2', MSG])
+    // 契约（2026-08-21 ADR）：initFromAPI = API 权威全量替换，store 内乐观
+    // 残影与流式占位一律让位。真实发送路径中"用户输入不消失"由 pending 区
+    // 承担（内存级、cmid 对账驱逐，见 pendingMessageLifecycle.test.ts）——
+    // pending 不进对账数据，结构性不可能重复或丢失。
+    expect(ids()).toEqual(['user-1', 'ai-1'])
   })
 
   it('场景5: 回归 — persist 残留的 completed 旧消息不复活 refresh_order 旧 bug', () => {

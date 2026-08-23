@@ -7,7 +7,6 @@
 
 import { test, expect } from '@playwright/test';
 import { loginAndNavigateTo, ROUTES } from '../helpers/navigation';
-import { expectPageTitle, expectVisible } from '../helpers/assertions';
 
 test.describe.configure({ timeout: 120_000 });
 

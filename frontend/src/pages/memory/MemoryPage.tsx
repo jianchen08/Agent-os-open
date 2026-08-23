@@ -1,16 +1,17 @@
 /**
- * 记忆管理页面
+ * 记忆管理页面（query 化：memoryStats/memoryEpisodes(page) 缓存 SWR，重挂零请求）
  *
  * 展示情景记忆、语义记忆和搜索功能，顶部显示统计卡片
  */
 
-import { useState, useEffect, useCallback } from 'react'
+import { useState } from 'react'
 import { Brain, Inbox, Search } from '@/assets/icons'
 import { ErrorState } from '@/components/shared/ErrorState'
 import { LoadingState } from '@/components/shared/LoadingState'
 import { PageShell } from '@/components/shared/PageShell'
-import { getEpisodes, searchHindsight, getMemoryStats, getSemanticMemory } from '@/services/api/memory'
-import type { Episode, SemanticKnowledge, MemoryStats, MemoryItem } from '@/services/api/memory'
+import { searchHindsight, getSemanticMemory } from '@/services/api/memory'
+import { MEMORY_EPISODES_PAGE_SIZE, useMemoryEpisodesQuery, useMemoryStatsQuery } from '@/hooks/queries/useMemoryQueries'
+import type { SemanticKnowledge, MemoryItem } from '@/services/api/memory'
 
 /** Tab 类型 */
 type TabType = 'episodes' | 'semantic' | 'search'
@@ -20,13 +21,9 @@ type TabType = 'episodes' | 'semantic' | 'search'
  */
 export function MemoryPage() {
   const [activeTab, setActiveTab] = useState<TabType>('episodes')
-  const [stats, setStats] = useState<MemoryStats | null>(null)
-  const [isLoading, setIsLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
 
-  // 情景记忆
-  const [episodes, setEpisodes] = useState<Episode[]>([])
-  const [episodesTotal, setEpisodesTotal] = useState(0)
+  // 情景记忆分页（页码进 queryKey：翻页 = 换缓存条目）
   const [episodesPage, setEpisodesPage] = useState(1)
 
   // 语义记忆
@@ -38,36 +35,26 @@ export function MemoryPage() {
   const [searchTotal, setSearchTotal] = useState(0)
   const [isSearching, setIsSearching] = useState(false)
 
-  /**
-   * 加载统计数据
-   */
-  const fetchStats = useCallback(async () => {
-    try {
-      const data = await getMemoryStats()
-      setStats(data)
-    } catch {
-      // 统计加载失败不阻塞页面
-    }
-  }, [])
+  // 统计 + 第一页情景记忆（query 化）：staleTime 窗口内重挂零请求
+  const statsQuery = useMemoryStatsQuery()
+  const stats = statsQuery.data ?? null
+  const episodesQuery = useMemoryEpisodesQuery(episodesPage)
+  const episodes = episodesQuery.data?.items ?? []
+  const episodesTotal = episodesQuery.data?.total ?? 0
+  // 无缓存数据时显示 loading（有缓存先渲染缓存不闪 loading）
+  const isLoading = statsQuery.isPending && !statsQuery.data && episodesQuery.isPending && !episodesQuery.data
+  // 查询错误并入页面错误展示（统计失败静默——原有语义「统计加载失败不阻塞页面」）
+  const queryError = episodesQuery.isError
+    ? episodesQuery.error instanceof Error
+      ? episodesQuery.error.message
+      : '获取情景记忆失败'
+    : null
 
   /**
-   * 加载情景记忆
+   * 加载语义记忆（tab 切换时才拉：沿用 length===0 判定，以 query 缓存命中
+   * 为前提——语义记忆非 query 化数据，保持显式拉取语义）
    */
-  const fetchEpisodes = useCallback(async (page: number) => {
-    try {
-      const res = await getEpisodes(page, 10)
-      setEpisodes(res.items)
-      setEpisodesTotal(res.total)
-    } catch (err: unknown) {
-      const message = err instanceof Error ? err.message : '获取情景记忆失败'
-      setError(message)
-    }
-  }, [])
-
-  /**
-   * 加载语义记忆
-   */
-  const fetchSemantics = useCallback(async () => {
+  const fetchSemantics = async () => {
     try {
       const res = await getSemanticMemory()
       setSemantics(res.items || [])
@@ -75,7 +62,7 @@ export function MemoryPage() {
       const message = err instanceof Error ? err.message : '获取语义记忆失败'
       setError(message)
     }
-  }, [])
+  }
 
   /**
    * 执行搜索
@@ -96,21 +83,13 @@ export function MemoryPage() {
     }
   }
 
-  useEffect(() => {
-    const init = async () => {
-      setIsLoading(true)
-      await Promise.allSettled([fetchStats(), fetchEpisodes(1)])
-      setIsLoading(false)
-    }
-    init()
-  }, [fetchStats, fetchEpisodes])
-
   /** Tab 切换时加载对应数据 */
-  useEffect(() => {
-    if (activeTab === 'semantic' && semantics.length === 0) {
-      fetchSemantics()
+  const handleTabChange = (tab: TabType) => {
+    setActiveTab(tab)
+    if (tab === 'semantic' && semantics.length === 0) {
+      void fetchSemantics()
     }
-  }, [activeTab, semantics.length, fetchSemantics])
+  }
 
   return (
     <PageShell title="记忆管理" backHref="/">
@@ -137,7 +116,7 @@ export function MemoryPage() {
           {(['episodes', 'semantic', 'search'] as TabType[]).map((tab) => (
             <button
               key={tab}
-              onClick={() => setActiveTab(tab)}
+              onClick={() => handleTabChange(tab)}
               className={`h-8 md:min-h-[44px] px-4 py-2 text-sm transition-colors ${
                 activeTab === tab
                   ? 'border-primary text-foreground border-b-2 font-medium'
@@ -150,7 +129,7 @@ export function MemoryPage() {
         </div>
 
         {/* 错误提示 */}
-        {error && <ErrorState message={error} />}
+        {(error || queryError) && <ErrorState message={error ?? queryError ?? ''} />}
 
         {/* 加载状态 */}
         {isLoading && <LoadingState />}
@@ -200,24 +179,18 @@ export function MemoryPage() {
             {episodesTotal > 10 && (
               <div className="flex items-center justify-center gap-2">
                 <button
-                  onClick={() => {
-                    setEpisodesPage((p) => p - 1)
-                    fetchEpisodes(episodesPage - 1)
-                  }}
+                  onClick={() => setEpisodesPage((p) => Math.max(1, p - 1))}
                   disabled={episodesPage <= 1}
                   className="hover:bg-accent/50 h-8 md:min-h-[44px] rounded-lg border px-3 py-1.5 text-sm disabled:opacity-50"
                 >
                   上一页
                 </button>
                 <span className="text-muted-foreground text-sm">
-                  {episodesPage} / {Math.ceil(episodesTotal / 10)}
+                  {episodesPage} / {Math.max(1, Math.ceil(episodesTotal / MEMORY_EPISODES_PAGE_SIZE))}
                 </span>
                 <button
-                  onClick={() => {
-                    setEpisodesPage((p) => p + 1)
-                    fetchEpisodes(episodesPage + 1)
-                  }}
-                  disabled={episodesPage >= Math.ceil(episodesTotal / 10)}
+                  onClick={() => setEpisodesPage((p) => p + 1)}
+                  disabled={episodesPage >= Math.ceil(episodesTotal / MEMORY_EPISODES_PAGE_SIZE)}
                   className="hover:bg-accent/50 h-8 md:min-h-[44px] rounded-lg border px-3 py-1.5 text-sm disabled:opacity-50"
                 >
                   下一页

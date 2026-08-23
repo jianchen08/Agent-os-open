@@ -171,27 +171,30 @@ async function handleMockRoute(
 
   // 匹配登录
   if (MOCK_ROUTES.login.test(url) && method === 'POST') {
-    await handlers.login?.(route) ?? route.continue();
+    // 注意括号：handler 存在则交给 handler，否则 route.continue()。
+    // （写成 `await h?.(r) ?? c` 会绑定为 `(await h?.(r)) ?? c`，导致
+    // handler 处理完后又对同一路由补发 continue——no-unused-expressions 抓的就是这个。）
+    await (handlers.login?.(route) ?? route.continue());
     return;
   }
   // 匹配注册
   if (MOCK_ROUTES.register.test(url) && method === 'POST') {
-    await handlers.register?.(route) ?? route.continue();
+    await (handlers.register?.(route) ?? route.continue());
     return;
   }
   // 匹配当前用户
   if (MOCK_ROUTES.currentUser.test(url) && method === 'GET') {
-    await handlers.currentUser?.(route) ?? route.continue();
+    await (handlers.currentUser?.(route) ?? route.continue());
     return;
   }
   // 匹配任务列表
   if (MOCK_ROUTES.taskList.test(url) && method === 'GET') {
-    await handlers.taskList?.(route) ?? route.continue();
+    await (handlers.taskList?.(route) ?? route.continue());
     return;
   }
   // 匹配工作空间文件
   if (MOCK_ROUTES.workspaceFiles.test(url) && method === 'GET') {
-    await handlers.workspaceFiles?.(route) ?? route.continue();
+    await (handlers.workspaceFiles?.(route) ?? route.continue());
     return;
   }
 

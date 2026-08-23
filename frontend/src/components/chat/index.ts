@@ -32,8 +32,6 @@ export { NotificationItemComponent } from './NotificationItem'
 export type { NotificationItemProps } from './NotificationItem'
 
 // 子 Tab 路由增强
-export { SubTabRouter, getSubTabRouterApi } from './SubTabRouter'
-export type { SubTabRouterProps } from './SubTabRouter'
 
 // 投票面板组件
 export { VotingPanel } from './VotingPanel'

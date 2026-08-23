@@ -6,8 +6,7 @@
  */
 
 import { test, expect } from '../fixtures';
-import { APP_URL, API_BASE, TEST_USER, VIEWER_USER, registerUser, loginViaAPI, logout } from '../helpers/auth';
-import { ROUTES } from '../helpers/navigation';
+import { API_BASE, TEST_USER, registerUser, loginViaAPI, logout } from '../helpers/auth';
 
 test.describe.configure({ timeout: 120_000 });
 

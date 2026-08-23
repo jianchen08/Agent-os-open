@@ -11,6 +11,7 @@
  */
 
 import apiClient from '@/services/api/client'
+import { MONITORING_ENDPOINTS } from './endpoints.generated'
 
 /**
  * 会话 Token 用量响应类型
@@ -50,7 +51,7 @@ export async function getSessionTotalTokenUsage(
   sessionId: string,
 ): Promise<SessionTokenUsageResponse> {
   const response = await apiClient.get<SessionTokenUsageResponse>(
-    `/ext/channel_api/sessions/${sessionId}/total-token-usage`,
+    MONITORING_ENDPOINTS.mon_sessions_total_token_usage.replace('{session_id}', sessionId),
   )
   return response.data
 }
@@ -60,7 +61,7 @@ export async function getContextTokenUsage(
   parentExecutionRecordId?: string,
 ): Promise<ContextTokenUsageResponse> {
   const response = await apiClient.get<ContextTokenUsageResponse>(
-    `/ext/channel_api/sessions/${sessionId}/context-token-usage`,
+    MONITORING_ENDPOINTS.mon_sessions_context_token_usage.replace('{session_id}', sessionId),
     {
       params: parentExecutionRecordId
         ? {

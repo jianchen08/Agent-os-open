@@ -3,7 +3,9 @@
 import { usePipelineMessageStore, type PipelineMeta } from '@/stores/pipelineMessageStore'
 import { useAgentTabStore } from '@/stores/agentTabStore'
 import { useSessionStore } from '@/stores/sessionStore'
+import { readSessions, ensureSessionsLoaded } from '@/hooks/queries/useSessionsQuery'
 import { useSessionListStore } from '@/stores/sessionListStore'
+import { mainPipelineIdOf } from '@/utils/mappers'
 import type { AgentTab } from '@/types/task'
 
 /** 查找结果 */
@@ -27,7 +29,7 @@ export async function findPipelineLocation(pipelineId: string): Promise<Pipeline
     || null
 
   // 第二级（提前执行）：遍历所有会话的 pipelineIds（后端权威数据）
-  const sessions = useSessionStore.getState().sessions
+  const sessions = readSessions()
   let authoritativeSessionId: string | null = null
   for (const session of sessions) {
     if (session.pipelineIds && session.pipelineIds.includes(pipelineId)) {
@@ -63,8 +65,8 @@ export async function findPipelineLocation(pipelineId: string): Promise<Pipeline
 
   // 第三级：重新拉取会话列表后再查找（兜底）
   try {
-    await useSessionListStore.getState().fetchSessions({ background: true })
-    const refreshedSessions = useSessionStore.getState().sessions
+    await ensureSessionsLoaded()
+    const refreshedSessions = readSessions()
     for (const session of refreshedSessions) {
       if (session.pipelineIds && session.pipelineIds.includes(pipelineId)) {
         return { sessionId: session.id, pipelineId, tabId: null }
@@ -111,7 +113,7 @@ export async function navigateToPipeline(
 
   // 如果在其他会话，先切换会话
   if (targetSessionId !== currentSid) {
-    const sessions = useSessionStore.getState().sessions
+    const sessions = readSessions()
     const sessionExists = sessions.some(s => s.id === targetSessionId)
     if (sessionExists) {
       useAgentTabStore.getState().saveCurrentTabs()
@@ -138,11 +140,12 @@ export async function navigateToPipeline(
   // 主管道特判：会话主标签（main-${sessionId}）不建子标签——主标签是会话创建时
   // 固定存在的不变量（initSessionTabs 保证），走到缺失分支即数据不一致 bug，
   // 显式报错暴露，不做静默兜底（静默激活会掩盖根因）。
-  const targetSession = useSessionStore.getState().sessions.find(
+  const targetSession = readSessions().find(
     (s) => s.id === targetSessionId,
   )
+  // 主管道判定（2026-08-22 裁决：权威 activePipelineId 解析替代 [0] 位置猜测）
   const isMainPipeline =
-    !!targetSession && targetSession.pipelineIds?.[0] === pipelineId
+    !!targetSession && mainPipelineIdOf(targetSession) === pipelineId
   if (isMainPipeline) {
     const mainTab = currentTabStore.tabs.find((t) => t.id === `main-${targetSessionId}`)
     if (mainTab) {

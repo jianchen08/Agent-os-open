@@ -1,5 +1,5 @@
 /**
- * 调试 LLM 请求页面
+ * 调试 LLM 请求页面（列表 query 化：useLlmPayloadDiagQuery 缓存 SWR，重挂零请求）
  *
  * 展示最近发送给大模型的真实请求体快照（payload_diag）：每次 LLM 调用前
  * 由 llm adapter 落盘的最终 HTTP body（含 model + 完整 messages）。
@@ -10,7 +10,8 @@ import { useState, useEffect, useCallback } from 'react'
 import { ErrorState } from '@/components/shared/ErrorState'
 import { LoadingState } from '@/components/shared/LoadingState'
 import { PageShell } from '@/components/shared/PageShell'
-import { getPayloadDiagFile, getPayloadDiagList } from '@/services/api/llmPayload'
+import { useLlmPayloadDiagQuery } from '@/hooks/queries/useDebugQueries'
+import { getPayloadDiagFile } from '@/services/api/llmPayload'
 import type { PayloadDiagItem } from '@/services/api/llmPayload'
 
 /** 从消息 content 提取纯文本（string 或分段数组） */
@@ -141,29 +142,19 @@ function PayloadDetail({ item }: { item: PayloadDiagItem }) {
 
 /** 调试 LLM 请求页面组件 */
 export function DebugLlmPayloadPage({ embedded }: { embedded?: boolean } = {}) {
-  const [items, setItems] = useState<PayloadDiagItem[]>([])
-  const [total, setTotal] = useState(0)
-  const [isLoading, setIsLoading] = useState(true)
-  const [error, setError] = useState<string | null>(null)
   const [selectedName, setSelectedName] = useState<string | null>(null)
 
-  const fetchList = useCallback(async () => {
-    setIsLoading(true)
-    setError(null)
-    try {
-      const res = await getPayloadDiagList()
-      setItems(res.items || [])
-      setTotal(res.total || 0)
-    } catch (err: any) {
-      setError(err.message || '获取快照列表失败')
-    } finally {
-      setIsLoading(false)
-    }
-  }, [])
-
-  useEffect(() => {
-    fetchList()
-  }, [fetchList])
+  // 快照列表（query 化）：staleTime 窗口内重挂零请求（UI 无分页，恒第 1 页）
+  const listQuery = useLlmPayloadDiagQuery(1)
+  const items = listQuery.data?.items ?? []
+  const total = listQuery.data?.total ?? 0
+  // 无缓存数据时显示 loading（有缓存先渲染缓存不闪 loading）
+  const isLoading = listQuery.isPending && !listQuery.data
+  const error = listQuery.isError
+    ? listQuery.error instanceof Error
+      ? listQuery.error.message
+      : '获取快照列表失败'
+    : null
 
   return (
     <PageShell

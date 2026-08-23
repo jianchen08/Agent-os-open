@@ -158,9 +158,10 @@ describe('AI 消息刷新对账（initFromAPI 全量权威）', () => {
     expect(store.getMessages(PIPELINE_ID).find((m) => m.id === 'no-lu-5')).toBeUndefined()
   })
 
-  it('场景6: 飞行中 user 乐观消息（新鲜 timestamp）在 initFromAPI 后保留（2026-08-20 回归修复）', () => {
+  it('场景6: store 内乐观 user 残留让位 API 权威（ADR 2026-08-21 废除飞行保留窗口）', () => {
     const store = usePipelineMessageStore.getState()
 
+    // 旧架构残影：乐观 user 曾直接写入主 store（新架构只在 pending 区）
     const optimisticUser = makeMsg('client-uuid-6', 1, {
       role: 'user',
       content: 'hello',
@@ -174,11 +175,12 @@ describe('AI 消息刷新对账（initFromAPI 全量权威）', () => {
       makeMsg('api-ai-6', 2, { role: 'assistant', content: 'reply' }),
     ])
 
-    // 契约（2026-08-20）：飞行中乐观 user（clientMessageId 未对账、timestamp ≤90s）
-    // 保留——用户输入不得因历史加载而凭空消失；后端落库后经 isCoveredByApi 让位 API 版。
+    // 契约（2026-08-21）：initFromAPI = API 权威全量替换，store 内乐观残留
+    // 不保留（不得复活成幽灵气泡）。「发送中消息不丢」由 pending 区承担
+    // （内存级 + cmid 三路驱逐，见 pendingMessageLifecycle.test.ts）。
     const userMsg = store.getMessages(PIPELINE_ID).find((m) => m.role === 'user')
-    expect(userMsg).toBeDefined()
-    expect(userMsg!.clientMessageId).toBe('client-uuid-6')
+    expect(userMsg).toBeUndefined()
+    expect(store.getMessages(PIPELINE_ID).map((m) => m.id)).toEqual(['api-ai-6'])
   })
 
   // ★ 回归保护：ensureStreamingPlaceholder 合并覆盖 id 后，

@@ -1,7 +1,7 @@
 /**
  * SchemaDriver 表单驱动组件（渲染/校验引擎已统一到 RjsfForm）
  *
- * 消费后端字段级 Schema（`UIInputFormField[]`，来源 GET /ext/agent_manager/agents/schema、
+ * 消费后端字段级 Schema（`UIInputFormField[]`，来源 GET agent_manager agents/schema、
  * contributes.pages[].schema）自动生成表单。组件签名保持不变，内部委托
  * RjsfForm（react-jsonschema-form + antd 主题）。
  *

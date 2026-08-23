@@ -705,6 +705,9 @@ export const ChatInput = ({
         className={cn(
           'relative rounded-xl transition-shadow duration-200',
           'bg-[var(--hover-overlay)]',
+          // 皮肤输入面（翻译器按皮肤 patches.css 提取 --chat-input-bg——
+          // 对话框颜色跟皮肤一样；无声明回退既有 hover-overlay）
+          'bg-[var(--chat-input-bg,var(--hover-overlay))]',
         )}
       >
         {/* 展开/收起编辑器按钮：固定在输入框右上角，悬浮于文本之上 */}

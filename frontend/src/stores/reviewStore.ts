@@ -6,7 +6,7 @@
 
 import { create } from 'zustand'
 import type { ReviewRequest, ReviewFeedback } from '@/types/review'
-import { tokenManager } from './tokenManager'
+import { getAccessToken } from '@/services/auth/tokenLifecycle'
 
 interface ReviewState {
   /** 以 review_id 为 key 的审批请求缓存 */
@@ -78,7 +78,7 @@ export const useReviewStore = create<ReviewState & ReviewActions>()((set, get) =
   fetchReview: async (reviewId) => {
     set({ loading: true, error: null })
     try {
-      const token = tokenManager.getToken()
+      const token = getAccessToken()
       const resp = await fetch(`${API_BASE}/${reviewId}`, {
         headers: { Authorization: `Bearer ${token}` },
       })
@@ -102,7 +102,7 @@ export const useReviewStore = create<ReviewState & ReviewActions>()((set, get) =
   fetchReviewsByTask: async (taskId) => {
     set({ loading: true, error: null })
     try {
-      const token = tokenManager.getToken()
+      const token = getAccessToken()
       const resp = await fetch(`${API_BASE}?task_id=${encodeURIComponent(taskId)}`, {
         headers: { Authorization: `Bearer ${token}` },
       })
@@ -144,7 +144,7 @@ export const useReviewStore = create<ReviewState & ReviewActions>()((set, get) =
       if (feedback.userId) {
         body.user_id = feedback.userId
       }
-      const token = tokenManager.getToken()
+      const token = getAccessToken()
       const resp = await fetch(`${API_BASE}/${reviewId}/feedback`, {
         method: 'POST',
         headers: {
@@ -185,7 +185,7 @@ export const useReviewStore = create<ReviewState & ReviewActions>()((set, get) =
 
   markAsViewed: async (reviewId) => {
     try {
-      const token = tokenManager.getToken()
+      const token = getAccessToken()
       const resp = await fetch(`${API_BASE}/${reviewId}/viewed`, {
         method: 'POST',
         headers: { Authorization: `Bearer ${token}` },
@@ -212,7 +212,7 @@ export const useReviewStore = create<ReviewState & ReviewActions>()((set, get) =
 
   cancelReview: async (reviewId, reason) => {
     try {
-      const token = tokenManager.getToken()
+      const token = getAccessToken()
       const resp = await fetch(`${API_BASE}/${reviewId}/cancel`, {
         method: 'POST',
         headers: {

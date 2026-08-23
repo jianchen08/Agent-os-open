@@ -2,14 +2,15 @@
 
 import { create } from 'zustand'
 import { usePipelineMessageStore } from '@/stores/pipelineMessageStore'
-import { useSessionStore } from '@/stores/sessionStore'
+import { readSessions } from '@/hooks/queries/useSessionsQuery'
+import { mainPipelineIdOf } from '@/utils/mappers'
 import type { AgentTab } from '@/types/task'
 
-/** 获取主管道 ID */
+/** 获取主管道 ID（2026-08-22 裁决：权威 activePipelineId 解析替代 [0] 位置猜测） */
 function getMainPipelineId(sessionId: string): string | null {
-  const sessions = useSessionStore.getState().sessions
+  const sessions = readSessions()
   const session = sessions.find((s) => s.id === sessionId)
-  const mainPid = session?.pipelineIds?.[0]
+  const mainPid = session ? mainPipelineIdOf(session) : undefined
   if (!mainPid) {
     console.warn('[getMainPipelineId] 主管道缺失: sessionId=%s pipelineIds=%o', sessionId, session?.pipelineIds)
   }
@@ -18,7 +19,7 @@ function getMainPipelineId(sessionId: string): string | null {
 
 /** 获取主管道对应的主 Agent ID 后端创建会话时默认回填 agent_id="agentos"（routes_threads.py）。 */
 function getMainAgentId(sessionId: string): string {
-  const sessions = useSessionStore.getState().sessions
+  const sessions = readSessions()
   const session = sessions.find((s) => s.id === sessionId)
   return session?.agentId || 'agentos'
 }
@@ -165,8 +166,6 @@ interface AgentTabState {
   updateTabStatus: (tabId: string, status: AgentTab['status']) => void
   /** 更新 Tab 未读状态 */
   updateTabUnread: (tabId: string, hasUnread: boolean) => void
-  /** 添加消息到指定 Tab */
-  addMessageToTab: (tabId: string, message: any) => void
   /** 获取当前活跃 Tab 的消息 */
   getActiveTabMessages: () => any[]
   /** 获取当前活跃 Tab */
@@ -187,8 +186,6 @@ interface AgentTabState {
   switchToTab: (tabId: string) => void
   /** 标记 Tab 完成 */
   markTabComplete: (tabId: string) => void
-  /** 合并到主 Tab（子 Tab 完成后） */
-  mergeToMainTab: (subTabId: string) => void
   /** 清除未读（别名） */
   clearUnread: (tabId: string) => void
   /** 更新 Tab 状态（别名） */
@@ -431,39 +428,6 @@ export const useAgentTabStore = create<AgentTabState>((set, get) => ({
     })
   },
 
-  /** 添加消息到指定 Tab（消息写入 pipelineMessageStore） */
-  addMessageToTab: (tabId, message) => {
-    const { tabs, pipelineTabMap, activeTabId } = get()
-    const tab = tabs.find((t) => t.id === tabId)
-
-    let pipelineId: string | null = null
-    if (tab?.pipelineRunId) {
-      pipelineId = tab.pipelineRunId
-    } else {
-      for (const [pid, tid] of Object.entries(pipelineTabMap)) {
-        if (tid === tabId) {
-          pipelineId = pid
-          break
-        }
-      }
-    }
-
-    if (pipelineId) {
-      usePipelineMessageStore.getState().addMessage(pipelineId, message)
-    }
-
-    // 非活跃 Tab 更新未读计数
-    if (activeTabId !== tabId) {
-      set((state) => ({
-        unreadCounts: {
-          ...state.unreadCounts,
-          [tabId]: (state.unreadCounts[tabId] || 0) + 1,
-        },
-        tabs: state.tabs.map((t) => (t.id === tabId ? { ...t, hasUnread: true } : t)),
-      }))
-    }
-  },
-
   /** 获取当前活跃 Tab 的消息 从 pipelineMessageStore 读取 */
   getActiveTabMessages: () => {
     const { activeTabId, tabs, currentSessionId } = get()
@@ -628,66 +592,6 @@ export const useAgentTabStore = create<AgentTabState>((set, get) => ({
     }))
   },
 
-  /** 合并到主 Tab（子 Tab 完成后） 从 pipelineMessageStore 读取消息并合并 */
-  mergeToMainTab: (subTabId) => {
-    set((state) => {
-      const subTab = state.tabs.find((t) => t.id === subTabId)
-      const mainTab = state.tabs.find((t) => t.agentLevel === 1)
-
-      if (!subTab || !mainTab || !state.currentSessionId) {
-        console.warn('[AgentTabStore] Cannot merge: subTab or mainTab not found')
-        return state
-      }
-
-      const pipelineStore = usePipelineMessageStore.getState()
-      // 主桶 key 是主管道 ID（session.pipelineIds[0]），不是 sessionId——
-      // 此前误用 currentSessionId 会把合并消息写进一个无人订阅的桶，主管道视图看不到。
-      const mainPipelineId = getMainPipelineId(state.currentSessionId)
-      if (!mainPipelineId) {
-        console.warn(
-          '[AgentTabStore] Cannot merge: main pipeline missing, sessionId=%s',
-          state.currentSessionId,
-        )
-        return state
-      }
-
-      // 从 pipelineMessageStore 读取子 Tab 消息并合并到主管道
-      if (subTab.pipelineRunId) {
-        const subMsgs = pipelineStore.getMessages(subTab.pipelineRunId)
-        const mainMsgs = pipelineStore.getMessages(mainPipelineId)
-        const merged = [
-          ...mainMsgs,
-          ...subMsgs.map((msg) => ({
-            ...msg,
-            metadata: {
-              ...msg.metadata,
-              mergedFrom: subTabId,
-              mergedAt: new Date().toISOString(),
-            },
-          })),
-        ]
-        pipelineStore.initFromAPI(mainPipelineId, merged)
-      }
-
-      // 清理 pipelineTabMap 中指向已合并子 Tab 的映射
-      const newPipelineTabMap = { ...state.pipelineTabMap }
-      for (const [pid, tid] of Object.entries(newPipelineTabMap)) {
-        if (tid === subTabId) delete newPipelineTabMap[pid]
-      }
-
-      const newTabs = state.tabs.filter((t) => t.id !== subTabId)
-      let newActiveTabId = state.activeTabId
-      if (state.activeTabId === subTabId) {
-        newActiveTabId = mainTab.id
-      }
-
-      return {
-        tabs: newTabs,
-        activeTabId: newActiveTabId,
-        pipelineTabMap: newPipelineTabMap,
-      }
-    })
-  },
 
   /** 清除未读（别名） */
   clearUnread: (tabId) => {
@@ -787,9 +691,12 @@ export const useAgentTabStore = create<AgentTabState>((set, get) => ({
     }
 
     if (setActive) {
-      const effectivePipelineId = pipelineId || tabId
-      const pipelineStore = usePipelineMessageStore.getState()
-      pipelineStore.activatePipeline(effectivePipelineId)
+      // ADR 2026-08-21：pipelineId 缺失时不再拿 tabId 顶替激活（幽灵管道键，
+      // 事件路由写进无人订阅的桶）。缺管道 ID 的 Tab 只切 activeTabId，
+      // 管道待 sub_agent_created 事件下发 pipeline_id 后再激活。
+      if (pipelineId) {
+        usePipelineMessageStore.getState().activatePipeline(pipelineId)
+      }
       set({ activeTabId: tabId })
     }
   },

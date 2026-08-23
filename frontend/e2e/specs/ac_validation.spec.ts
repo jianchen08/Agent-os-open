@@ -9,8 +9,6 @@
 import { test, expect } from '../fixtures';
 import {
   API_BASE,
-  TEST_USER,
-  VIEWER_USER,
   registerUser,
   loginViaAPI,
   loginAndWaitReady,
@@ -26,7 +24,6 @@ import {
   waitForAssistantMessage,
   waitForToolCard,
   waitForToolCompleted,
-  expectVisible,
 } from '../helpers/assertions';
 
 test.describe.configure({ timeout: 120_000 });
@@ -195,7 +192,6 @@ test.describe('AC 验证', () => {
     const hasInput = await input.isVisible().catch(() => false);
 
     if (hasInput) {
-      const originalValue = await input.inputValue().catch(() => '');
       const testValue = 'e2e-persist-' + Date.now();
 
       await input.fill(testValue);

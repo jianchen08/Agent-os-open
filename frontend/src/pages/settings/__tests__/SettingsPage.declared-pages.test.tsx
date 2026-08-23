@@ -13,7 +13,7 @@
  */
 
 import { render, screen, waitFor, fireEvent } from '@testing-library/react'
-import { MemoryRouter } from 'react-router-dom'
+import { renderWithProviders } from '@/test/renderWithProviders'
 import React from 'react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { contributionRegistry } from '@/services/schema/ContributionRegistry'
@@ -71,11 +71,7 @@ describe('功能点：SettingsPage 渲染插件直接声明的 settings 页', ()
   })
 
   it('插件 contributes.pages space=settings 的页面出现在设置导航', async () => {
-    render(
-      <MemoryRouter>
-        <SettingsPage />
-      </MemoryRouter>,
-    )
+    renderWithProviders(<SettingsPage />)
 
     await waitFor(() => {
       expect(screen.getByText('扩展设置页', { exact: true })).toBeInTheDocument()
@@ -83,11 +79,7 @@ describe('功能点：SettingsPage 渲染插件直接声明的 settings 页', ()
   })
 
   it('点击声明的 settings 页 → 右侧经 PageRenderer 分发渲染其 widget 内容', async () => {
-    render(
-      <MemoryRouter>
-        <SettingsPage />
-      </MemoryRouter>,
-    )
+    renderWithProviders(<SettingsPage />)
 
     await waitFor(() => {
       expect(screen.getByText('扩展设置页', { exact: true })).toBeInTheDocument()

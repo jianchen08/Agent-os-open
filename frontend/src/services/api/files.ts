@@ -1,6 +1,7 @@
 /** 文件上传 API 服务 提供文件上传和模型能力查询功能 */
 
 import apiClient from '@/services/api/client'
+import { ARTIFACTS_ENDPOINTS, MULTIMODAL_SERVICE_ENDPOINTS } from './endpoints.generated'
 import type { ModelCapabilities } from '@/types/capabilities'
 
 /** 文件上传响应 */
@@ -66,10 +67,9 @@ export async function uploadFile(file: File, modelName?: string): Promise<FileUp
     formData.append('model_name', modelName)
   }
 
-  // 4c 迁移：后端端点 /api/v1/artifacts/upload → /ext/channel_api/artifacts/upload
-  // （multipart/form-data 经内核 dispatcher 透传原始字节到 channel_api http.handle，
+  // artifacts 插件端点（生成物投影）：multipart/form-data 直传插件侧车，
   //   sidecar 解 multipart 落盘——与 :8988 路径落盘逻辑一致）
-  const response = await apiClient.post<FileUploadResponse>('/ext/channel_api/artifacts/upload', formData, {
+  const response = await apiClient.post<FileUploadResponse>(ARTIFACTS_ENDPOINTS.artifacts_upload, formData, {
     headers: {
       'Content-Type': 'multipart/form-data',
     },
@@ -82,7 +82,7 @@ export async function uploadFile(file: File, modelName?: string): Promise<FileUp
 /** 获取模型文件能力 静默处理 404，避免控制台报错 */
 export async function getModelCapabilities(modelName: string): Promise<FileCapabilityResponse> {
   try {
-    const response = await apiClient.get<FileCapabilityResponse>(`/ext/channel_api/files/capabilities`, {
+    const response = await apiClient.get<FileCapabilityResponse>(MULTIMODAL_SERVICE_ENDPOINTS.mm_files_capabilities, {
       params: { model_name: modelName },
     })
     return response.data
@@ -110,7 +110,7 @@ export async function getModelCapabilities(modelName: string): Promise<FileCapab
 
 /** 获取支持的文件类型 */
 export async function getSupportedTypes(): Promise<SupportedTypesResponse> {
-  const response = await apiClient.get<SupportedTypesResponse>('/ext/channel_api/files/supported-types')
+  const response = await apiClient.get<SupportedTypesResponse>(MULTIMODAL_SERVICE_ENDPOINTS.mm_files_supported_types)
   return response.data
 }
 

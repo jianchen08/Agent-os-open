@@ -212,14 +212,14 @@ describe('loadPipelineMessages 统一加载入口', () => {
     expect(callArg.params.after_sequence).toBeUndefined()
   })
 
-  it('rehydrate 后（reconciled 缺失）即使 isInitialized=true 也走全量 init', async () => {
+  it('rehydrate 后（reconciled 缺失）有本地缓存 → 缓存秒开 + 后台全量对账', async () => {
     const store = usePipelineMessageStore.getState()
     store.registerPipeline({
       pipelineId: PIPELINE_ID, sessionId: THREAD_ID, level: 1, tabId: 'tab-1',
       agentName: '', status: 'idle', parentId: null, unreadCount: 0,
     })
     // 模拟 rehydrate 后状态：本地有消息 + bottomCursor 已恢复，但 reconciledByPipeline 为空
-    // （merge 中重置为 {}）。此时 isInitialized=true，但未对账 → 必须走全量 init 而非增量补漏。
+    // （merge 中重置为 {}）。此时 isInitialized=true，但未对账。
     store.initFromAPI(PIPELINE_ID, [
       makeMsg('u1', 1, { role: 'user', content: 'q' }),
       makeMsg('a1', 2, { content: 'a' }),
@@ -236,12 +236,19 @@ describe('loadPipelineMessages 统一加载入口', () => {
     const result = await store.loadPipelineMessages(PIPELINE_ID, { threadId: THREAD_ID })
 
     expect(result.ok).toBe(true)
-    // 关键断言：未对账 → 全量请求，不传 after_sequence（增量补漏拉不到已加载区间内的空洞）
-    expect(mockGet).toHaveBeenCalledTimes(1)
+    // 本地有缓存：同步返回，页面立即用缓存渲染（不发请求、不等待对账）
+    expect(store.getMessages(PIPELINE_ID)).toHaveLength(2)
+    // 后台静默全量对账被触发（2026-08-22：刷新后缓存秒开 + 对账修正空洞/残影）
+    await vi.waitFor(() => {
+      expect(mockGet).toHaveBeenCalledTimes(1)
+    })
+    // 关键断言：对账走全量请求，不传 after_sequence（增量补漏拉不到已加载区间内的空洞）
     const callArg = mockGet.mock.calls[0][1]
     expect(callArg.params.after_sequence).toBeUndefined()
-    // 对账成功后标记
-    expect(usePipelineMessageStore.getState().reconciledByPipeline[PIPELINE_ID]).toBe(true)
+    // 对账完成后标记
+    await vi.waitFor(() => {
+      expect(usePipelineMessageStore.getState().reconciledByPipeline[PIPELINE_ID]).toBe(true)
+    })
   })
 
   it('首次 auto 全量对账后，后续 auto 走 after_sequence 增量补漏', async () => {
@@ -303,9 +310,19 @@ describe('loadPipelineMessages 统一加载入口', () => {
     const result = await store.loadPipelineMessages(PIPELINE_ID, { threadId: THREAD_ID })
 
     expect(result.ok).toBe(true)
-    // 必须走全量 init（无 after_sequence），否则补不到 seq2 的修正与 seq3-4 后续消息
+    // 本地有缓存：loadPipelineMessages 同步返回（不等对账），缓存立即渲染
+    expect(store.getMessages(PIPELINE_ID)).toHaveLength(2)
+    // 后台全量对账修正空洞（2026-08-22：initFromAPI 权威替换，不能只 after_sequence 增量）
+    await vi.waitFor(() => {
+      expect(mockGet).toHaveBeenCalledTimes(1)
+    })
+    // 关键断言：对账走全量请求，不传 after_sequence，否则补不到 seq2 的修正与 seq3-4 后续消息
     const callArg = mockGet.mock.calls[0][1]
     expect(callArg.params.after_sequence).toBeUndefined()
+    // 等待后台对账完成（initFromAPI 权威替换落地）
+    await vi.waitFor(() => {
+      expect(store.getMessages(PIPELINE_ID).length).toBe(4)
+    })
 
     const msgs = store.getMessages(PIPELINE_ID)
     const sequences = msgs.map((m) => m.sequence)

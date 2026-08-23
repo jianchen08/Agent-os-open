@@ -1,10 +1,17 @@
-/** 会话列表状态管理 Store */
+/** 会话列表状态管理 Store（服务端状态 query 化批次 1）
+ *
+ * 数据容器已换 TanStack Query 缓存（hooks/queries/useSessionsQuery）：
+ * sessions 的读写全部经 readSessions/updateSessionsCache/invalidateSessions，
+ * 本 store 只承载编排逻辑（乐观更新+回滚、跨 store 副作用、恢复链）。
+ * fetchSessions 已退役——列表拉取由 useSessionsQuery 承担（缓存秒开+后台刷新），
+ * 刷新后的 last_active_session 恢复改走 restoreActiveSessionIfNeeded（由
+ * HomePage 在 query 数据到位时调用一次）。
+ */
 
 import { create } from 'zustand'
 import {
   createSession as createSessionApi,
   deleteSession as deleteSessionApi,
-  getSessions,
   updateSessionAgent as updateSessionAgentApi,
   updateSession as updateSessionApi,
 } from '@/services/api/session'
@@ -16,6 +23,9 @@ import { useAgentTabStore } from './agentTabStore'
 import { useNotificationStore } from './notificationStore'
 import { usePipelineMessageStore } from './pipelineMessageStore'
 import { useSessionStore } from './sessionStore'
+import { readSessions, updateSessionsCache } from '@/hooks/queries/useSessionsQuery'
+import { readAgents } from '@/hooks/queries/useAgentsQuery'
+import { mainPipelineIdOf } from '@/utils/mappers'
 import type { Session } from '@/types/models'
 
 const logger = loggers.sessionStore
@@ -33,7 +43,8 @@ interface CreateSessionOptions {
 }
 
 interface SessionListState {
-  fetchSessions: (options?: { background?: boolean }) => Promise<void>
+  /** query 数据到位后恢复上次选中会话（幂等：已有有效选中时不动作） */
+  restoreActiveSessionIfNeeded: (sessions: Session[]) => Promise<void>
   createSession: (title?: string, options?: CreateSessionOptions) => Promise<Session>
   deleteSession: (id: string) => Promise<void>
   setActiveSession: (id: string, fetchData?: boolean) => Promise<void>
@@ -57,113 +68,61 @@ const generateSessionTitle = (): string => {
 }
 
 export const useSessionListStore = create<SessionListState>()((_, get) => ({
-  fetchSessions: async (options?: { background?: boolean }) => {
-      const sessionStore = useSessionStore.getState()
-      if (sessionStore.isLoading) {
-        return
-      }
-
-      const isBackground = options?.background ?? false
-      const hadNoActiveSession = !sessionStore.activeSessionId
-
-      if (!isBackground) {
-        useSessionStore.setState({ isLoading: true, error: null })
-      }
-
-      try {
-        const sessions = await getSessions()
-        const validSessionIds = new Set(sessions.map((s) => s.id))
-
-        useSessionStore.setState((state) => {
-          let newActiveSessionId: string | null = null
-
-          if (state.activeSessionId && validSessionIds.has(state.activeSessionId)) {
-            newActiveSessionId = state.activeSessionId
-          } else if (hadNoActiveSession) {
-            // 从 localStorage 恢复上次选中的会话
-            const savedSessionId = uiStorage.getLastActiveSession()
-            if (savedSessionId && validSessionIds.has(savedSessionId)) {
-              newActiveSessionId = savedSessionId
-            }
-          }
-
-          return {
-            sessions: sessions,
-            activeSessionId: newActiveSessionId,
-            isLoading: false,
-            error: null,
-          }
-        })
-
-        // 从 localStorage 恢复会话后触发完整的数据加载
-        if (hadNoActiveSession) {
-          const restoredId = useSessionStore.getState().activeSessionId
-          if (restoredId) {
-            await get().setActiveSession(restoredId)
-          }
-        }
-      } catch (error: any) {
-        const errorMessage = error.message || '获取会话列表失败'
-        useSessionStore.setState({ isLoading: false, error: errorMessage })
-        throw new Error(errorMessage)
-      }
+  restoreActiveSessionIfNeeded: async (sessions: Session[]) => {
+    const validSessionIds = new Set(sessions.map((s) => s.id))
+    const currentActive = useSessionStore.getState().activeSessionId
+    // 幂等保护：已有有效选中（含后台刷新重跑本函数）直接返回
+    if (currentActive && validSessionIds.has(currentActive)) {
+      return
+    }
+    const savedSessionId = uiStorage.getLastActiveSession()
+    if (savedSessionId && validSessionIds.has(savedSessionId)) {
+      await get().setActiveSession(savedSessionId)
+    }
   },
 
   createSession: async (title?: string, options?: CreateSessionOptions) => {
-    useSessionStore.setState({ isLoading: true, error: null })
+    const sessionTitle = title || generateSessionTitle()
 
-    try {
-      const sessionTitle = title || generateSessionTitle()
+    const newSession = await createSessionApi({
+      title: sessionTitle,
+      agentId: options?.agentId,
+      workspace: options?.workspace,
+      workspaceMode: options?.workspaceMode,
+      extra: options?.extra,
+      isolationMode: options?.isolationMode,
+    })
 
-      const newSession = await createSessionApi({
-        title: sessionTitle,
-        agentId: options?.agentId,
-        workspace: options?.workspace,
-        workspaceMode: options?.workspaceMode,
-        extra: options?.extra,
-        isolationMode: options?.isolationMode,
+    updateSessionsCache((prev) => [...prev, newSession])
+    useSessionStore.setState({ activeSessionId: newSession.id })
+
+    if (newSession.activePipelineId) {
+      const pipelineStore = usePipelineMessageStore.getState()
+      pipelineStore.registerPipeline({
+        pipelineId: newSession.activePipelineId,
+        sessionId: newSession.id,
+        level: 1,
+        tabId: null,
+        agentName: '',
+        status: 'idle',
+        parentId: null,
+        unreadCount: 0,
       })
-
-      useSessionStore.setState((state) => ({
-        sessions: [...state.sessions, newSession],
-        activeSessionId: newSession.id,
-        isLoading: false,
-        error: null,
-      }))
-
-      if (newSession.activePipelineId) {
-        const pipelineStore = usePipelineMessageStore.getState()
-        pipelineStore.registerPipeline({
-          pipelineId: newSession.activePipelineId,
-          sessionId: newSession.id,
-          level: 1,
-          tabId: null,
-          agentName: '',
-          status: 'idle',
-          parentId: null,
-          unreadCount: 0,
-        })
-        pipelineStore.activatePipeline(newSession.activePipelineId)
-        logger.info(
-          '[createSession] pipeline registered: sessionId=%s pipelineId=%s',
-          newSession.id.slice(0, 12),
-          newSession.activePipelineId.slice(0, 12),
-        )
-      }
-
-      return newSession
-    } catch (error: any) {
-      const errorMessage = error.message || '创建会话失败'
-      useSessionStore.setState({ isLoading: false, error: errorMessage })
-      throw new Error(errorMessage)
+      pipelineStore.activatePipeline(newSession.activePipelineId)
+      logger.info(
+        '[createSession] pipeline registered: sessionId=%s pipelineId=%s',
+        newSession.id.slice(0, 12),
+        newSession.activePipelineId.slice(0, 12),
+      )
     }
+
+    return newSession
   },
 
   /** 删除会话（含完整清理） */
   deleteSession: async (id: string) => {
     useSessionStore.setState((state) => ({
       deletingSessionIds: new Set(state.deletingSessionIds).add(id),
-      error: null,
     }))
 
     try {
@@ -196,7 +155,7 @@ export const useSessionListStore = create<SessionListState>()((_, get) => ({
         topCursorsByPipeline: curTopCursors,
         bottomCursorsByPipeline: curBottomCursors,
         hasMoreOlderByPipeline: curHasMore,
-        isLoadingOlderByPipeline: curLoadingOlder,
+        isLoadingOlderByPipeline: curLoadingMore,
       } = pipelineStore
 
       const removeSet = new Set(allPipelineIds)
@@ -218,7 +177,7 @@ export const useSessionListStore = create<SessionListState>()((_, get) => ({
         topCursorsByPipeline: filterByKey(curTopCursors),
         bottomCursorsByPipeline: filterByKey(curBottomCursors),
         hasMoreOlderByPipeline: filterByKey(curHasMore),
-        isLoadingOlderByPipeline: filterByKey(curLoadingOlder),
+        isLoadingOlderByPipeline: filterByKey(curLoadingMore),
       })
 
       // 5. 清理 agentTabStore（标签页、映射、localStorage）
@@ -235,16 +194,15 @@ export const useSessionListStore = create<SessionListState>()((_, get) => ({
       // 6. 调用后端删除 API
       await deleteSessionApi(id)
 
-      // 7. 更新 sessionStore 状态
+      // 7. 更新缓存与会话选中态
+      updateSessionsCache((prev) => prev.filter((session) => session.id !== id))
       useSessionStore.setState((state) => {
         const newDeletingIds = new Set(state.deletingSessionIds)
         newDeletingIds.delete(id)
 
         return {
-          sessions: state.sessions.filter((session) => session.id !== id),
           activeSessionId: state.activeSessionId === id ? null : state.activeSessionId,
           deletingSessionIds: newDeletingIds,
-          error: null,
         }
       })
 
@@ -257,7 +215,7 @@ export const useSessionListStore = create<SessionListState>()((_, get) => ({
       useSessionStore.setState((state) => {
         const newDeletingIds = new Set(state.deletingSessionIds)
         newDeletingIds.delete(id)
-        return { deletingSessionIds: newDeletingIds, error: errorMessage }
+        return { deletingSessionIds: newDeletingIds }
       })
       throw new Error(errorMessage)
     }
@@ -268,9 +226,9 @@ export const useSessionListStore = create<SessionListState>()((_, get) => ({
       return
     }
 
-    const sessions = useSessionStore.getState().sessions
-    const sessionExists = sessions.some((s) => s.id === id)
-    if (!sessionExists) {
+    const sessions = readSessions()
+    const session = sessions.find((s) => s.id === id)
+    if (!session) {
       return
     }
 
@@ -281,9 +239,8 @@ export const useSessionListStore = create<SessionListState>()((_, get) => ({
     // 持久化当前活跃会话ID，页面刷新后可恢复
     uiStorage.setLastActiveSession(id)
 
-    const session = sessions.find((s) => s.id === id)
-    if (session?.agentId) {
-      const agents = useAgentStore.getState().agents
+    if (session.agentId) {
+      const agents = readAgents()
       const matchedAgent = agents.find(
         (a) => a.id === session.agentId || a.configId === session.agentId,
       )
@@ -294,9 +251,10 @@ export const useSessionListStore = create<SessionListState>()((_, get) => ({
 
     if (fetchData) {
       try {
-        const pipelineId = session?.pipelineIds?.[0]
+        // 主管道权威解析（2026-08-22 裁决）：activePipelineId 优先，替代 [0] 位置猜测
+        const pipelineId = mainPipelineIdOf(session)
         if (!pipelineId) {
-          console.error('[setActiveSession] 会话缺少主管道: sessionId=%s pipelineIds=%o', id, session?.pipelineIds)
+          console.error('[setActiveSession] 会话缺少主管道: sessionId=%s pipelineIds=%o', id, session.pipelineIds)
         }
         if (pipelineId) {
           // 统一加载入口：流式保护 + 双游标决策（init/after_sequence）已收敛到
@@ -313,61 +271,51 @@ export const useSessionListStore = create<SessionListState>()((_, get) => ({
   },
 
   updateSession: (sessionId: string, updates: Partial<Session>) => {
-    useSessionStore.setState((state) => ({
-      sessions: state.sessions.map((session) =>
+    updateSessionsCache((prev) =>
+      prev.map((session) =>
         session.id === sessionId
           ? { ...session, ...updates, updatedAt: new Date().toISOString() }
           : session,
       ),
-    }))
+    )
   },
 
   updateSessionAgent: async (sessionId: string, agentId: string | null) => {
-    useSessionStore.setState({ isLoading: true, error: null })
+    const updatedSession = await updateSessionAgentApi(sessionId, agentId)
 
-    try {
-      const updatedSession = await updateSessionAgentApi(sessionId, agentId)
+    updateSessionsCache((prev) =>
+      prev.map((session) =>
+        session.id === sessionId
+          ? {
+              ...session,
+              agentId: updatedSession.agentId,
+              updatedAt: updatedSession.updatedAt,
+            }
+          : session,
+      ),
+    )
 
-      useSessionStore.setState((state) => ({
-        sessions: state.sessions.map((session) =>
-          session.id === sessionId
-            ? {
-                ...session,
-                agentId: updatedSession.agentId,
-                updatedAt: updatedSession.updatedAt,
-              }
-            : session,
-        ),
-        isLoading: false,
-        error: null,
-      }))
-
-      // 同步刷新当前活跃会话主 Tab 的 agentId，使编辑保存后主 Tab 按钮立即
-      // 显示新绑定的 Agent 名称（渲染层 ChatContainer 按 agentId 实时解析名称）。
-      // 非当前活跃会话无需处理——下次进入会话时 initSessionTabs 会用最新
-      // session.agentId 重建主 Tab。
-      const agentTabStore = useAgentTabStore.getState()
-      if (agentTabStore.currentSessionId === sessionId) {
-        const mainTab = agentTabStore.tabs.find((t) => t.agentLevel === 1)
-        if (mainTab) {
-          agentTabStore.updateTab(mainTab.id, { agentId: updatedSession.agentId || undefined })
-          agentTabStore.saveCurrentTabs()
-        }
+    // 同步刷新当前活跃会话主 Tab 的 agentId，使编辑保存后主 Tab 按钮立即
+    // 显示新绑定的 Agent 名称（渲染层 ChatContainer 按 agentId 实时解析名称）。
+    // 非当前活跃会话无需处理——下次进入会话时 initSessionTabs 会用最新
+    // session.agentId 重建主 Tab。
+    const agentTabStore = useAgentTabStore.getState()
+    if (agentTabStore.currentSessionId === sessionId) {
+      const mainTab = agentTabStore.tabs.find((t) => t.agentLevel === 1)
+      if (mainTab) {
+        agentTabStore.updateTab(mainTab.id, { agentId: updatedSession.agentId || undefined })
+        agentTabStore.saveCurrentTabs()
       }
-    } catch (error: any) {
-      const errorMessage = error.message || '更新会话 Agent 绑定失败'
-      useSessionStore.setState({ isLoading: false, error: errorMessage })
-      throw new Error(errorMessage)
     }
   },
 
   toggleSessionStar: (sessionId: string) => {
-    const session = useSessionStore.getState().sessions.find((s) => s.id === sessionId)
+    const session = readSessions().find((s) => s.id === sessionId)
     const newStarred = !session?.starred
     const prevStarred = session?.starred
 
-    useSessionStore.setState((state) => ({
-      sessions: state.sessions.map((session) =>
+    updateSessionsCache((prev) =>
+      prev.map((session) =>
         session.id === sessionId
           ? {
               ...session,
@@ -376,17 +324,15 @@ export const useSessionListStore = create<SessionListState>()((_, get) => ({
             }
           : session,
       ),
-    }))
+    )
 
     updateSessionApi(sessionId, {
       metadata: { starred: newStarred },
     }).catch((error) => {
       logger.error('星标同步失败:', error)
-      useSessionStore.setState((state) => ({
-        sessions: state.sessions.map((s) =>
-          s.id === sessionId ? { ...s, starred: prevStarred } : s,
-        ),
-      }))
+      updateSessionsCache((prev) =>
+        prev.map((s) => (s.id === sessionId ? { ...s, starred: prevStarred } : s)),
+      )
       useNotificationStore.getState().addNotification({
         title: '操作同步失败',
         message: '星标状态同步失败，已恢复原状态',
@@ -399,12 +345,12 @@ export const useSessionListStore = create<SessionListState>()((_, get) => ({
   },
 
   toggleSessionPin: (sessionId: string) => {
-    const session = useSessionStore.getState().sessions.find((s) => s.id === sessionId)
+    const session = readSessions().find((s) => s.id === sessionId)
     const newPinned = !session?.pinned
     const prevPinned = session?.pinned
 
-    useSessionStore.setState((state) => ({
-      sessions: state.sessions.map((session) =>
+    updateSessionsCache((prev) =>
+      prev.map((session) =>
         session.id === sessionId
           ? {
               ...session,
@@ -412,17 +358,15 @@ export const useSessionListStore = create<SessionListState>()((_, get) => ({
             }
           : session,
       ),
-    }))
+    )
 
     updateSessionApi(sessionId, {
       metadata: { pinned: newPinned },
     }).catch((error) => {
       logger.error('置顶同步失败:', error)
-      useSessionStore.setState((state) => ({
-        sessions: state.sessions.map((s) =>
-          s.id === sessionId ? { ...s, pinned: prevPinned } : s,
-        ),
-      }))
+      updateSessionsCache((prev) =>
+        prev.map((s) => (s.id === sessionId ? { ...s, pinned: prevPinned } : s)),
+      )
       useNotificationStore.getState().addNotification({
         title: '操作同步失败',
         message: '置顶状态同步失败，已恢复原状态',
@@ -439,12 +383,12 @@ export const useSessionListStore = create<SessionListState>()((_, get) => ({
       return
     }
     const trimmedTitle = newTitle.trim()
-    const session = useSessionStore.getState().sessions.find((s) => s.id === sessionId)
+    const session = readSessions().find((s) => s.id === sessionId)
     const prevTitle = session?.title
     const prevUpdatedAt = session?.updatedAt
 
-    useSessionStore.setState((state) => ({
-      sessions: state.sessions.map((session) =>
+    updateSessionsCache((prev) =>
+      prev.map((session) =>
         session.id === sessionId
           ? {
               ...session,
@@ -453,18 +397,16 @@ export const useSessionListStore = create<SessionListState>()((_, get) => ({
             }
           : session,
       ),
-    }))
+    )
     try {
       await updateSessionApi(sessionId, { title: trimmedTitle })
     } catch (error) {
       logger.error('重命名会话失败:', error)
-      useSessionStore.setState((state) => ({
-        sessions: state.sessions.map((s) =>
-          s.id === sessionId
-            ? { ...s, title: prevTitle ?? s.title, updatedAt: prevUpdatedAt ?? s.updatedAt }
-            : s,
+      updateSessionsCache((prev) =>
+        prev.map((s) =>
+          s.id === sessionId ? { ...s, title: prevTitle ?? s.title, updatedAt: prevUpdatedAt ?? s.updatedAt } : s,
         ),
-      }))
+      )
       useNotificationStore.getState().addNotification({
         title: '操作同步失败',
         message: '重命名同步失败，已恢复原标题',
@@ -477,7 +419,7 @@ export const useSessionListStore = create<SessionListState>()((_, get) => ({
   },
 
   searchSessions: (keyword: string) => {
-    const sessions = useSessionStore.getState().sessions
+    const sessions = readSessions()
 
     if (!keyword.trim()) {
       return sessions
@@ -498,7 +440,7 @@ export const useSessionListStore = create<SessionListState>()((_, get) => ({
   },
 
   copySession: async (sessionId: string) => {
-    const session = useSessionStore.getState().sessions.find((s) => s.id === sessionId)
+    const session = readSessions().find((s) => s.id === sessionId)
     if (!session) {
       throw new Error('会话不存在')
     }
@@ -513,7 +455,7 @@ export const useSessionListStore = create<SessionListState>()((_, get) => ({
 
   /** 首次 AI 回复完成后，根据首条用户消息自动重命名会话。 条件：会话标题仍为默认值（generateSessionTitle 返回的值）时才触发， */
   autoRenameSessionIfNeeded: (sessionId: string, pipelineId: string) => {
-    const session = useSessionStore.getState().sessions.find((s) => s.id === sessionId)
+    const session = readSessions().find((s) => s.id === sessionId)
     if (!session) return
 
     // 仅当标题仍为默认值时才自动重命名

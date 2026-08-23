@@ -14,6 +14,7 @@
 
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import { PageShell } from '@/components/shared/PageShell'
+import { useDbTablesQuery } from '@/hooks/queries/useDebugQueries'
 import * as authApi from '@/services/api/auth'
 import * as dbAdmin from '@/services/api/dbAdmin'
 import type { ColumnInfo, DbQueryResult, DbTableInfo } from '@/services/api/dbAdmin'
@@ -56,7 +57,6 @@ function rowPk(row: Record<string, unknown>, pkCols: ColumnInfo[]): string {
  */
 export function DbAdminPage({ embedded }: { embedded?: boolean } = {}) {
   const [isAdmin, setIsAdmin] = useState<boolean | null>(null)
-  const [tables, setTables] = useState<DbTableInfo[]>([])
   const [activeTable, setActiveTable] = useState<string>('')
   const [activeColumns, setActiveColumns] = useState<ColumnInfo[]>([])
   const [rows, setRows] = useState<Record<string, unknown>[]>([])
@@ -66,7 +66,6 @@ export function DbAdminPage({ embedded }: { embedded?: boolean } = {}) {
   const [filters, setFilters] = useState<{ col: string; op: string; value: string }[]>([])
   const [sortCol, setSortCol] = useState('')
   const [sortDir, setSortDir] = useState<'asc' | 'desc'>('asc')
-  const [isLoading, setIsLoading] = useState(true)
   const [isTableLoading, setIsTableLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [message, setMessage] = useState<string | null>(null)
@@ -77,7 +76,7 @@ export function DbAdminPage({ embedded }: { embedded?: boolean } = {}) {
   const [sqlError, setSqlError] = useState<string | null>(null)
   const [isSqlRunning, setIsSqlRunning] = useState(false)
 
-  /** admin 守卫：调 /api/v1/auth/me 判断角色（后端 403 兜底） */
+  /** admin 守卫：调 /api/v1/auth/me 判断角色（后端 403 兜底，auth 域不动） */
   useEffect(() => {
     let cancelled = false
     authApi
@@ -93,29 +92,28 @@ export function DbAdminPage({ embedded }: { embedded?: boolean } = {}) {
     }
   }, [])
 
-  /** 加载表列表 */
-  const fetchTables = useCallback(async () => {
-    setIsLoading(true)
-    setError(null)
-    try {
-      const list = await dbAdmin.fetchDbTables()
-      setTables(list)
-      // 默认选中第一张表
-      if (list.length > 0 && !activeTable) {
-        setActiveTable(list[0].name)
-        setActiveColumns(list[0].columns)
-      }
-    } catch (err) {
-      setError((err as Error)?.message || '获取表列表失败')
-    } finally {
-      setIsLoading(false)
-    }
-  }, [activeTable])
+  /** 表列表（query 化）：admin 守卫通过前不发请求；staleTime 窗口内重挂零请求 */
+  const tablesQuery = useDbTablesQuery({ enabled: isAdmin === true })
+  const tables = tablesQuery.data ?? []
+  const isLoading = tablesQuery.isPending && !tablesQuery.data
+  const tablesError = tablesQuery.isError
+    ? tablesQuery.error instanceof Error
+      ? tablesQuery.error.message
+      : '获取表列表失败'
+    : null
 
+  // 默认选中第一张表（query 数据首次到达时）
   useEffect(() => {
-    if (isAdmin !== true) return
-    fetchTables()
-  }, [fetchTables, isAdmin])
+    if (tables.length > 0 && !activeTable) {
+      setActiveTable(tables[0].name)
+      setActiveColumns(tables[0].columns)
+    }
+    // 表列表刷新后，当前选中表不存在（被删除）时回落到第一张
+    else if (tables.length > 0 && activeTable && !tables.some((t) => t.name === activeTable)) {
+      setActiveTable(tables[0].name)
+      setActiveColumns(tables[0].columns)
+    }
+  }, [tables, activeTable])
 
   /** 加载当前表数据 */
   const fetchRows = useCallback(async () => {
@@ -320,7 +318,7 @@ export function DbAdminPage({ embedded }: { embedded?: boolean } = {}) {
         {/* 左：表列表 */}
         <aside className="w-56 shrink-0 overflow-y-auto border-r p-2">
           {isLoading && <div className="text-muted-foreground p-3 text-xs">加载表...</div>}
-          {!isLoading && tables.length === 0 && !error && (
+          {!isLoading && tables.length === 0 && !error && !tablesError && (
             <div className="text-muted-foreground p-3 text-xs">暂无表</div>
           )}
           {!isLoading &&
@@ -343,9 +341,9 @@ export function DbAdminPage({ embedded }: { embedded?: boolean } = {}) {
         {/* 右：内容区 */}
         <section className="flex min-w-0 flex-1 flex-col">
           {/* 错误/消息提示 */}
-          {error && (
+          {(error || tablesError) && (
             <div className="bg-destructive/10 text-destructive m-2 rounded-lg px-3 py-2 text-xs">
-              {error}
+              {error ?? tablesError}
               <button onClick={() => setError(null)} className="ml-2 underline">关闭</button>
             </div>
           )}
@@ -431,7 +429,7 @@ export function DbAdminPage({ embedded }: { embedded?: boolean } = {}) {
           {/* 数据表格 */}
           <div className="min-h-0 flex-1 overflow-auto">
             {isTableLoading && <div className="text-muted-foreground p-4 text-xs">加载数据...</div>}
-            {!isTableLoading && !error && rows.length === 0 && (
+            {!isTableLoading && !error && !tablesError && rows.length === 0 && (
               <div className="text-muted-foreground p-6 text-center text-sm">暂无数据</div>
             )}
             {!isTableLoading && rows.length > 0 && (

@@ -13,27 +13,8 @@
 
 import { test, expect } from '@playwright/test';
 import { loginAndNavigateTo, navigateTo, ROUTES } from '../helpers/navigation';
-import { expectVisible } from '../helpers/assertions';
 
 test.describe.configure({ timeout: 120_000 });
-
-/** 所有设置页路径 */
-const SETTINGS_PATHS = [
-  { path: ROUTES.SETTINGS, label: '通用设置' },
-  { path: ROUTES.SETTINGS_LLM, label: 'LLM 配置' },
-  { path: ROUTES.SETTINGS_API, label: 'API 配置' },
-  { path: ROUTES.SETTINGS_CONTEXT, label: '上下文窗口' },
-  { path: ROUTES.SETTINGS_CONCURRENCY, label: '并发配置' },
-  { path: ROUTES.SETTINGS_COST, label: '成本控制' },
-  { path: ROUTES.SETTINGS_PLUGINS, label: '插件配置' },
-  { path: ROUTES.SETTINGS_MEMORY, label: '记忆配置' },
-  { path: ROUTES.SETTINGS_ISOLATION, label: '隔离配置' },
-  { path: ROUTES.SETTINGS_SECURITY, label: '安全配置' },
-  { path: ROUTES.SETTINGS_EVALUATION, label: '评估配置' },
-  { path: ROUTES.SETTINGS_EXTERNAL_TOOLS, label: '外部工具配置' },
-  { path: ROUTES.SETTINGS_PIPELINE, label: '管道配置' },
-  { path: ROUTES.SETTINGS_THEME, label: '主题设置' },
-] as const;
 
 test.describe('旅程04：配置修改', () => {
   test.beforeEach(async ({ page }) => {
@@ -153,7 +134,6 @@ test.describe('旅程04：配置修改', () => {
       const hasInput = await input.isVisible().catch(() => false);
 
       if (hasInput) {
-        const originalValue = await input.inputValue().catch(() => '');
         const testValue = 'e2e-test-' + Date.now();
         await input.fill(testValue);
         await saveBtn.click();

@@ -16,6 +16,7 @@
  */
 
 import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useQuery } from '@tanstack/react-query'
 import { Code, Eye, Loader2 } from '@/assets/icons'
 import { ConfigObject } from '@/components/config/PluginConfigEditor'
 import { PipelineFlowEditor } from '@/components/pipeline/PipelineFlowEditor'
@@ -27,6 +28,8 @@ import {
   savePipelineConfig,
 } from '@/services/api/pipelineConfig'
 import { fetchPipelinePluginCatalog } from '@/services/api/pipelines'
+import { queryClient } from '@/services/query/queryClient'
+import { queryKeys } from '@/services/query/queryKeys'
 import { shouldDisableConfigSave } from '@/utils/configEditorGuard'
 import {
   deleteAtPath,
@@ -61,33 +64,38 @@ export function PipelineSettingsPage({ embedded = false }: { embedded?: boolean 
   const [saveState, setSaveState] = useState<SaveState>('idle')
   const [viewMode, setViewMode] = useState<ViewMode>('visual')
 
-  // 加载配置 + 插件目录（目录失败不阻塞配置编辑）
+  // 加载配置（query 化）：重进设置页缓存秒开；编辑副本为本地 state，
+  // 后台刷新只换初始数据源，不打断进行中的编辑
+  const configQuery = useQuery({
+    queryKey: queryKeys.pipelineConfig(PIPELINE_NAME),
+    queryFn: () => getPipelineConfig(PIPELINE_NAME),
+    staleTime: 60_000,
+  })
+
+  useEffect(() => {
+    const result = configQuery.data
+    if (!result) return
+    const data = result.data ?? {}
+    setConfig(data)
+    // 非 0.2 格式（无 loop_bodies）时可视化无从渲染，自动落源码视图
+    if (!isPipelineV2Data(data)) setViewMode('raw')
+  }, [configQuery.data])
+
+  useEffect(() => {
+    if (configQuery.isPending) return
+    setIsLoading(false)
+    if (configQuery.isError) {
+      // 失败保持 config=null（编辑区不渲染、保存禁用）——落 {} 会使用户
+      // 点保存把空对象写进 autonomous.yaml（内核唯一执行的管道）
+      const msg = configQuery.error instanceof Error ? configQuery.error.message : '无法加载配置'
+      setLoadError('无法加载配置')
+      toast.error('配置加载失败', { description: msg })
+    }
+  }, [configQuery.isPending, configQuery.isError, configQuery.error])
+
+  // 插件目录（变化频率低，mount 拉取，目录失败不阻塞配置编辑）
   useEffect(() => {
     let cancelled = false
-    setIsLoading(true)
-    setLoadError(null)
-    setSaveState('idle')
-
-    getPipelineConfig(PIPELINE_NAME)
-      .then((result) => {
-        if (cancelled) return
-        const data = result.data ?? {}
-        setConfig(data)
-        // 非 0.2 格式（无 loop_bodies）时可视化无从渲染，自动落源码视图
-        if (!isPipelineV2Data(data)) setViewMode('raw')
-      })
-      .catch((error: unknown) => {
-        if (cancelled) return
-        const msg = error instanceof Error ? error.message : '无法加载配置'
-        // 失败保持 config=null（编辑区不渲染、保存禁用）——落 {} 会使用户
-        // 点保存把空对象写进 autonomous.yaml（内核唯一执行的管道）
-        setLoadError('无法加载配置')
-        toast.error('配置加载失败', { description: msg })
-      })
-      .finally(() => {
-        if (!cancelled) setIsLoading(false)
-      })
-
     fetchPipelinePluginCatalog()
       .then((entries) => {
         if (cancelled) return
@@ -137,6 +145,8 @@ export function PipelineSettingsPage({ embedded = false }: { embedded?: boolean 
     setSaveState('saving')
     try {
       await savePipelineConfig(PIPELINE_NAME, config)
+      // 已保存的编辑副本回填缓存，重进页面不重拉
+      queryClient.setQueryData(queryKeys.pipelineConfig(PIPELINE_NAME), { data: config })
       setSaveState('saved')
       toast.success('管道配置已保存', {
         description: '已写入 config/pipelines/autonomous.yaml，重启内核后生效（启动期加载，无热重载）',

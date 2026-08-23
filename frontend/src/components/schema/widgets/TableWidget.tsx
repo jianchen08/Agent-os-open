@@ -37,7 +37,7 @@ interface SortState {
 /**
  * 行操作声明（A1b：表格行内动作，Triggers/监控列表/健康度明细通用）。
  * 声明 JSON 可表达：method + url（支持 {列key} 模板，如
- * '/ext/channel_api/triggers/{id}/trigger'）+ confirm + variant。
+ * 插件声明 URL（如 trigger_setup_tool triggers/{id}/trigger））+ confirm + variant。
  */
 export interface RowActionDecl {
   key: string

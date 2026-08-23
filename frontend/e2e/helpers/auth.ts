@@ -11,7 +11,9 @@
 import { expect, type Page } from '@playwright/test';
 
 /** 后端 API 基础地址 */
-export const API_BASE = 'http://localhost:8988';
+// 内核 API 直连地址：默认对齐 vite proxy 目标 9100；E2E_API_BASE 可覆盖
+// （原硬编码 8988 与运行内核端口不符，注册/登录恒 ECONNREFUSED）。
+export const API_BASE = process.env.E2E_API_BASE ?? 'http://localhost:9100';
 /** 前端应用地址 */
 export const APP_URL = 'http://localhost:5188';
 
@@ -20,6 +22,14 @@ export const TEST_USER = {
   username: 'e2euser',
   password: 'Test123456!',
   email: 'e2e@test.com',
+} as const;
+
+/** 管理员用户：会话创建等写面端点要求 admin 角色（write_surface_auth），
+ *  普通测试用户 POST /api/v1/sessions 恒 403——登录就绪需建会话的旅程用此账号。 */
+export const ADMIN_USER = {
+  username: 'admin',
+  password: 'admin12345',
+  email: 'admin@agentos.local',
 } as const;
 
 /** 备用测试用户（用于权限验证） */
@@ -131,16 +141,39 @@ export async function loginAndWaitReady(
   // 注入并刷新
   await injectTokensAndReload(page, tokens, user.username, user.email);
 
-  // 点击新会话按钮
-  const newSessionBtn = page.locator('main button', { hasText: '新会话' }).first();
-  await expect(newSessionBtn, '新会话按钮应可见').toBeVisible({ timeout: 10_000 });
-  await newSessionBtn.click();
+  // 建会话优先走 API（快且稳）；普通角色 403（写面端点要求 admin）时回退
+  // UI 弹窗流程（Sidebar"新建会话"→填标题→"创建"），两类账号都能就绪。
+  const title = `e2e-${user.username}-${Date.now()}`;
+  const createResp = await page.request.post(`${API_BASE}/api/v1/sessions`, {
+    headers: {
+      Authorization: `Bearer ${tokens.access_token}`,
+      // 与前端 createSession 同款标记头（内核主代理请求鉴权）
+      'X-Main-Agent-Request': 'true',
+    },
+    data: { title },
+  });
+  if (!createResp.ok()) {
+    // 内核写面 RBAC：POST /api/v1/sessions 要求 admin 角色——普通测试用户
+    // UI 弹窗建会话同样 403（无回退路径）。需要登录就绪（建会话）的旅程
+    // 必须传 ADMIN_USER。
+    throw new Error(
+      `API 建会话失败: status=${createResp.status()}（写面端点要求 admin 角色，请传 ADMIN_USER）`,
+    );
+  }
+  const created = await createResp.json();
+  const sessionId = created.thread_id ?? created.id;
+  // StorageService.setItem 走 JSON 序列化——键值必须是 JSON 串（裸字符串
+  // 会被 getItem 的 JSON.parse 分支判为无效值而丢弃，恢复失效）。
+  await page.evaluate((sid) => {
+    localStorage.setItem('last_active_session', JSON.stringify(sid));
+  }, sessionId);
+  await page.reload();
 
   // 等待聊天输入框就绪
   await expect(
     page.locator('[data-testid="chat-input-textarea"]'),
     '聊天输入框应可见',
-  ).toBeVisible({ timeout: 15_000 });
+  ).toBeVisible({ timeout: 20_000 });
 
   console.log('✅ 聊天界面就绪');
 }

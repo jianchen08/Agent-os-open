@@ -21,7 +21,7 @@ import {
   DialogTitle,
 } from '@/components/ui/dialog'
 import { RjsfForm } from '@/services/schema/RjsfForm'
-import { useAgentStore } from '@/stores/agentStore'
+import { useAgentsQuery } from '@/hooks/queries/useAgentsQuery'
 import type { Session } from '@/types'
 import type { UIInputFormField } from '@/types/schema'
 import { getThreadSchema, type ThreadField } from '@/services/api/session'
@@ -77,7 +77,7 @@ export const SessionEditModal = memo<SessionEditModalProps>(
     // 插件贡献字段 schema（打开时拉取）与通用值
     const [pluginFields, setPluginFields] = useState<ThreadField[]>([])
     const [extraValues, setExtraValues] = useState<Record<string, string>>({})
-    const agents = useAgentStore((state) => state.agents)
+    const { data: agents = [] } = useAgentsQuery()
 
     const availableAgents = useMemo(() => {
       return agents.filter((a) => a.status === 'active')

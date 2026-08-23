@@ -13,7 +13,7 @@
  * - 新增: 移动端响应式支持
  */
 
-import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { memo, useCallback, useEffect, useMemo, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import {
   Bell,
@@ -48,7 +48,7 @@ import {
   openWorkspacePanel,
   openWorkspacePanelByPath,
 } from '@/services/workspacePanelOpener'
-import { useAgentStore } from '@/stores/agentStore'
+import { useSessionsQuery } from '@/hooks/queries/useSessionsQuery'
 import { useAgentTabStore } from '@/stores/agentTabStore'
 import { useAuthStore } from '@/stores/authStore'
 import { useNotificationStore } from '@/stores/notificationStore'
@@ -99,7 +99,7 @@ const SIDEBAR_STYLES = {
 export const Sidebar = memo<SidebarProps>(({ isMobile = false }) => {
   const navigate = useNavigate()
   const [searchKeyword, setSearchKeyword] = useState('')
-  /** 后端搜索结果（防抖调用 /ext/channel_api/search） */
+  /** 后端搜索结果（防抖调用 monitoring 插件 search） */
   const [searchResults, setSearchResults] = useState<{
     sessions: SessionSearchHit[]
     messages: MessageSearchHit[]
@@ -137,10 +137,11 @@ export const Sidebar = memo<SidebarProps>(({ isMobile = false }) => {
   // 弹窗式登录框状态（点菜单里的"登录"才打开）
   const [loginModalOpen, setLoginModalOpen] = useState(false)
 
-  const sessions = useSessionStore((state) => state.sessions)
+  // 会话列表（query 化）：缓存秒开 + 后台静默刷新；仅在无缓存冷加载时显示 loading
+  const { data: sessions = [], isPending: isSessionsPending } = useSessionsQuery()
   const activeSessionId = useSessionStore((state) => state.activeSessionId)
   const deletingSessionIds = useSessionStore((state) => state.deletingSessionIds)
-  const isLoading = useSessionStore((state) => state.isLoading)
+  const isLoading = isSessionsPending && sessions.length === 0
   const createSession = useSessionListStore((state) => state.createSession)
   const setActiveSession = useSessionListStore((state) => state.setActiveSession)
   const deleteSession = useSessionListStore((state) => state.deleteSession)
@@ -149,7 +150,6 @@ export const Sidebar = memo<SidebarProps>(({ isMobile = false }) => {
   const toggleSessionPin = useSessionListStore((state) => state.toggleSessionPin)
   const renameSession = useSessionListStore((state) => state.renameSession)
   const updateSessionAgent = useSessionListStore((state) => state.updateSessionAgent)
-  const fetchSessions = useSessionListStore((state) => state.fetchSessions)
   const sidebarCollapsed = useUIStore((state) => state.sidebarCollapsed)
   const setSidebarCollapsed = useUIStore((state) => state.setSidebarCollapsed)
   // P5：通知唯一入口——底栏 Bell 绑定 notificationStore（与 NotificationCenter 同一 store）
@@ -158,36 +158,11 @@ export const Sidebar = memo<SidebarProps>(({ isMobile = false }) => {
     (s) => s.notifications.filter((n) => !n.isRead).length,
   )
 
-  // Agent 数据统一在这里加载
-  const fetchAgents = useAgentStore((state) => state.fetchAgents)
-
-  // 等 auth token 就绪后加载数据，只加载一次
-  const authToken = useAuthStore((state) => state.token)
-  const hasLoadedRef = useRef(false)
-  useEffect(() => {
-    if (!authToken || hasLoadedRef.current) return
-    hasLoadedRef.current = true
-    fetchSessions().catch((error) => {
-      reportError(error instanceof Error ? error.message : String(error), {
-        type: 'server',
-        componentName: 'Sidebar',
-        operation: 'fetchSessions',
-      })
-    })
-    fetchAgents().catch((error) => {
-      reportError(error instanceof Error ? error.message : String(error), {
-        type: 'server',
-        componentName: 'Sidebar',
-        operation: 'fetchAgents',
-      })
-    })
-  }, [authToken])
-
   // 注：0.1 的 WS session_update 事件订阅已删除（0.2 内核无该事件发射源，
-  // 休眠路径；会话列表刷新由页面加载/操作触发，见 task_kernel_cleanup_and_split 任务 2）。
+  // 休眠路径；会话列表刷新由 query 挂载/操作触发，见 task_kernel_cleanup_and_split 任务 2）。
 
   /**
-   * 统一搜索：防抖调用后端搜索 API（/ext/channel_api/search）。
+   * 统一搜索：防抖调用后端搜索 API（monitoring 插件 search）。
    * 输入停止 350ms 后发起请求；q 为空时清空结果。
    */
   useEffect(() => {
@@ -443,9 +418,10 @@ export const Sidebar = memo<SidebarProps>(({ isMobile = false }) => {
         className={cn(
           // 必须 h-full：父级是 Splitter 内 full-height panel；否则 flex-1 无效，底部空白
           'border-border/50 flex h-full min-h-0 flex-col border-r transition-all duration-300 ease-in-out',
-          // 主题侧边栏背景（--sidebar-bg 由主题引擎输出，自带明暗，无需 dark: 变体）
+          // 主题侧边栏背景（--sidebar-bg 由主题引擎输出，自带明暗，无需 dark: 变体；
+          // 区域背景关系 --region-sidebar-bg 由 .theme-sidebar-area CSS 规则统一消费）
           // theme-sidebar-area 叠加主题区域纹理（--sidebar-texture）
-          'theme-sidebar-area bg-[var(--sidebar-bg,hsl(var(--card)))]',
+          'theme-sidebar-area',
           isMobile && !sidebarCollapsed && 'fixed top-0 left-0 z-50 shadow-2xl',
         )}
         style={
@@ -465,7 +441,7 @@ export const Sidebar = memo<SidebarProps>(({ isMobile = false }) => {
                   maxWidth: '100%',
                   minHeight: 0,
                   flexShrink: 0,
-                  backgroundColor: 'var(--sidebar-bg, hsl(var(--card)))',
+                  backgroundColor: 'var(--region-sidebar-bg, var(--ds-bg-panel, var(--sidebar-bg, hsl(var(--card)))))',
                 }
         }
       >

@@ -297,7 +297,7 @@ describe('Bug 复现：发送新消息后上一条 AI 回复重复', () => {
     expect(ai3).toBeDefined()
   })
 
-  it('场景F: updateMessage 指纹兜底 —— partial 带 sequence 时应找到已存在消息并更新', () => {
+  it('场景F: updateMessage 精确匹配 —— 失配即跳过，绝不按 sequence 模糊写旧消息（ADR 2026-08-21 废除指纹兜底）', () => {
     const store = pipelineStore.getState()
     store.registerPipeline({ pipelineId: PIPELINE_ID, sessionId: THREAD_ID } as any)
     store.activatePipeline(PIPELINE_ID)
@@ -313,25 +313,22 @@ describe('Bug 复现：发送新消息后上一条 AI 回复重复', () => {
 
     expect(store.getMessages(PIPELINE_ID)).toHaveLength(3)
 
-    // 模拟：updateMessage 用一个不同的 messageId 但携带相同 sequence=3
-    // 应通过指纹匹配找到 ai-2 并更新，而非创建新消息
+    // 模拟迟到事件：不同 messageId 但携带相同 sequence=3。
+    // 旧指纹兜底会把 ai-2（已完成的历史消息）改写——旧消息内容被劫持正是
+    // "旧消息冒泡/内容错乱"的病根。新契约：失配跳过等对账，不猜。
     store.updateMessage(PIPELINE_ID, 'ai-2-different-id-from-ws', {
       role: 'assistant',
-      content: 'ai2 reply updated',
+      content: 'should NOT be applied',
       sequence: 3,
       status: 'completed',
     } as any)
 
     const finalMsgs = store.getMessages(PIPELINE_ID)
-    console.log('场景F 最终消息:', finalMsgs.map(m => ({ id: m.id, role: m.role, content: m.content?.slice(0, 20), seq: m.sequence })))
-
-    // 期望：仍然 3 条消息（指纹匹配成功，更新而非创建）
+    // 仍 3 条；ai-2 保持原内容原 id（迟到的异 id 更新被拒绝）
     expect(finalMsgs).toHaveLength(3)
-
-    // ai-2 应被更新（content 变为 'ai2 reply updated'），且 id 保留为原 id
-    const ai2 = finalMsgs.find(m => m.sequence === 3)
+    const ai2 = finalMsgs.find(m => m.id === 'ai-2')
     expect(ai2).toBeDefined()
-    expect(ai2!.content).toBe('ai2 reply updated')
+    expect(ai2!.content).toBe('ai2 reply')
   })
 
   it('场景G: stream_end 携带 final_sequence 时占位符 sequence 必须被同步，避免 initFromAPI 去重失败导致重复', async () => {
@@ -370,7 +367,8 @@ describe('Bug 复现：发送新消息后上一条 AI 回复重复', () => {
 
     const AI3_ID = 'msg_ai3_streaming_id'
 
-    // stream_start【后端不携带 sequence】→ 占位符 sequence 走前端自算 localMax+1 = 5
+    // stream_start【后端不携带 sequence】→ ADR 2026-08-21：占位符 seq 挂空
+    //（不再本地拼 localMax+1 冒充权威值），stream_end 权威值到达后同步
     handleStreamStart({
       pipeline_id: PIPELINE_ID,
       message_id: AI3_ID,
@@ -381,8 +379,8 @@ describe('Bug 复现：发送新消息后上一条 AI 回复重复', () => {
     const afterStart = store.getMessages(PIPELINE_ID)
     const placeholder = afterStart.find((m: any) => m.id === AI3_ID)
     expect(placeholder).toBeDefined()
-    // 占位符 sequence 是前端自算值（5），与后端真实序号（4）不同
-    expect(placeholder!.sequence).toBe(5)
+    // 占位符 sequence 为空（等权威值），排序回落 timestamp 落末尾
+    expect(placeholder!.sequence).toBeUndefined()
 
     // stream_end 携带后端权威 final_sequence = 4
     handleStreamEnd({

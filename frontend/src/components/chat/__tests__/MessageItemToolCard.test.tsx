@@ -13,6 +13,7 @@
  * 5. 统一增强管线：声明 render 的工具拿到人性化标题/subtitle/打开文件入口
  */
 import { fireEvent, render, screen } from '@testing-library/react'
+import { renderWithProviders } from '@/test/renderWithProviders'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { MessageItem } from '../MessageItem'
 import { clearRenderIntents, loadRenderIntents } from '@/utils/dshRenderIntent'
@@ -102,7 +103,7 @@ describe('工具卡统一形态: 独立 tool 消息走 ActivityCard（2026-08-19
 
   describe('AC1: 宽度对齐气泡 + 卡片满宽', () => {
     it('容器含气泡同宽约束（max-w-[calc(100%-44px)]），卡片含满宽类（w-full max-w-full）', () => {
-      render(<MessageItem message={makeToolMessage({ toolResult: '结果' })} />)
+      renderWithProviders(<MessageItem message={makeToolMessage({ toolResult: '结果' })} />)
 
       const container = screen.getByTestId('message-item')
       expect(container.getAttribute('data-role')).toBe('tool')
@@ -119,7 +120,7 @@ describe('工具卡统一形态: 独立 tool 消息走 ActivityCard（2026-08-19
 
   describe('AC2+AC3: 长结果展开可读（统一滚动/换行样式）', () => {
     it('展开后超长对象结果入 json 块：max-h + overflow-y-auto + 语义换行，无 break-all', () => {
-      render(
+      renderWithProviders(
         <MessageItem
           message={makeToolMessage({
             toolResult: { data: { rows: 'x'.repeat(2000) } },
@@ -145,7 +146,7 @@ describe('工具卡统一形态: 独立 tool 消息走 ActivityCard（2026-08-19
 
   describe('AC4: 出错不自动展开（默认折叠）', () => {
     it('含错误的工具卡默认折叠，点击头部展开后错误可见，再点折叠', () => {
-      render(
+      renderWithProviders(
         <MessageItem
           message={makeToolMessage({
             status: 'failed',
@@ -167,7 +168,7 @@ describe('工具卡统一形态: 独立 tool 消息走 ActivityCard（2026-08-19
 
   describe('旧 UI 退役：状态药丸与裸时长不再出现', () => {
     it('无"已完成"药丸文本；时长经 formatDuration 格式化（浮点不再原样输出）', () => {
-      render(
+      renderWithProviders(
         <MessageItem
           message={makeToolMessage({ toolResult: 'ok', durationMs: 1234.5678 })}
         />,
@@ -183,7 +184,7 @@ describe('工具卡统一形态: 独立 tool 消息走 ActivityCard（2026-08-19
   describe('统一增强管线：声明 render 的工具与消息流同款渲染', () => {
     it('file_read（read 卡声明）→ 人性化标题 + subtitle + 打开文件入口', () => {
       loadRenderIntents([{ name: 'file_read', render: { card: 'read' } }])
-      render(
+      renderWithProviders(
         <MessageItem
           message={makeToolMessage({
             toolName: 'file_read',

@@ -9,7 +9,7 @@ import { test, expect } from '../fixtures';
 import { loginAndWaitReady } from '../helpers/auth';
 import { sendChatMessage } from '../utils/test-helpers';
 import { loginAndNavigateTo, ROUTES } from '../helpers/navigation';
-import { waitForToolCard, waitForToolCompleted, waitForAssistantMessage } from '../helpers/assertions';
+import { waitForToolCard, waitForToolCompleted } from '../helpers/assertions';
 
 test.describe.configure({ timeout: 120_000 });
 

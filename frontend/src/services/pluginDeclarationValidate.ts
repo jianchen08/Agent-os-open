@@ -25,7 +25,17 @@ export interface PluginDeclarationInput {
   tools?: Array<Record<string, unknown>>
   /** widget 声明（ui_schema.widgets[]） */
   uiSchemaWidgets?: Array<Record<string, unknown>>
+  /** 流式能力声明（capabilities.streaming，协议见 docs/streaming-protocol.md） */
+  streaming?: Record<string, unknown>
 }
+
+/** 流式协议事件清单（与 config/kernel_capabilities/streaming.json 的 10 个
+ * capability method 一致；单一真值源在 JSON，此处仅人读速览——机械一致性由
+ * 内核加载器结构校验兜底（事件不在契约内网关 fail-closed 拒收）） */
+const STREAMING_EVENTS = new Set([
+  'stream_start', 'stream_chunk', 'thinking_start', 'thinking_chunk', 'thinking_end',
+  'tool_start', 'tool_result', 'new_message', 'stream_end', 'stream_error',
+])
 
 export interface PluginValidationResult {
   errors: string[]
@@ -221,5 +231,52 @@ export function validatePluginDeclaration(
     validateFields(wProps?.fields, `${ctx}.props`, errors, warnings)
   }
 
+  validateStreaming(input.streaming, errors, warnings)
+
   return { errors, warnings, get valid() { return errors.length === 0 } }
+}
+
+/** 校验 capabilities.streaming 声明（流式协议，docs/streaming-protocol.md）。
+ * 错误 = 必然被内核网关拒绝/前端渲染失效的声明；warning = 能工作但应暴露的。 */
+function validateStreaming(
+  streaming: Record<string, unknown> | undefined,
+  errs: string[],
+  warns: string[],
+): void {
+  if (streaming === undefined || streaming === null) return
+  if (typeof streaming !== 'object') {
+    errs.push('capabilities.streaming 非对象')
+    return
+  }
+  const events = streaming.events
+  if (events !== undefined) {
+    if (!Array.isArray(events)) {
+      errs.push('capabilities.streaming.events 应为数组')
+    } else {
+      for (const [i, e] of events.entries()) {
+        if (typeof e !== 'string' || !STREAMING_EVENTS.has(e)) {
+          // 事件不在契约清单内 → 网关按 streaming.json 找不到 spec 会透传，
+          // 但前端无 handler 消费（事件静默丢弃）——声明失实，报 error
+          errs.push(`capabilities.streaming.events[${i}] 未知事件 ${String(e)}（不在流式契约 10 事件内，发射即被前端丢弃）`)
+        }
+      }
+    }
+  }
+  const partTypes = streaming.part_types
+  if (partTypes !== undefined) {
+    if (!Array.isArray(partTypes)) {
+      errs.push('capabilities.streaming.part_types 应为数组')
+    } else {
+      for (const [i, pt] of partTypes.entries()) {
+        if (!nonEmptyString(pt)) {
+          errs.push(`capabilities.streaming.part_types[${i}] 非字符串`)
+        } else if (!/^[0-9a-z_]{1,32}$/.test(String(pt))) {
+          warns.push(`capabilities.streaming.part_types[${i}] ${String(pt)} 含非法字符（前端注册键须与声明完全一致）`)
+        }
+      }
+    }
+  }
+  if (streaming.persist !== undefined && typeof streaming.persist !== 'boolean') {
+    errs.push('capabilities.streaming.persist 应为布尔')
+  }
 }

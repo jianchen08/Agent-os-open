@@ -232,9 +232,9 @@ describe('TableWidget 行操作（rowActions）', () => {
     })
     render(
       <TableWidget
-        datasourceUri="/ext/channel_api/triggers"
+        datasourceUri="/ext/trigger_setup_tool/triggers"
         rowActions={[
-          { key: 'trigger', label: '触发', url: '/ext/channel_api/triggers/{id}/trigger' },
+          { key: 'trigger', label: '触发', url: '/ext/trigger_setup_tool/triggers/{id}/trigger' },
         ]}
       />,
     )
@@ -245,7 +245,7 @@ describe('TableWidget 行操作（rowActions）', () => {
     await waitFor(() => expect(apiCall).toHaveBeenCalled())
     const [cfg] = apiCall.mock.calls[0]
     expect(cfg.method).toBe('POST')
-    expect(cfg.url).toBe('/ext/channel_api/triggers/t-1/trigger')
+    expect(cfg.url).toBe('/ext/trigger_setup_tool/triggers/t-1/trigger')
     // 成功后 reloadKey 重拉
     await waitFor(() => expect(apiGet.mock.calls.length).toBeGreaterThan(getsBefore))
   })

@@ -5,11 +5,15 @@
  * - 列表渲染快照元数据（模型/消息数/大小/时间）
  * - 点击条目 → 拉取 file 端点 → 展开渲染逐条消息（role/#序号/内容）+ 原始 JSON 折叠
  * - 快照内容含 tool_calls 时渲染工具调用行
+ *
+ * query 化后（批次 3）：列表经 useLlmPayloadDiagQuery 缓存 SWR；
+ * 渲染用 renderWithProviders（自带 QueryClientProvider + MemoryRouter，
+ * 外层不要再包 MemoryRouter 会炸 "Router inside Router"）。
  */
-import { fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { fireEvent, screen, waitFor } from '@testing-library/react'
 import { describe, expect, it, vi, beforeEach } from 'vitest'
-import { MemoryRouter } from 'react-router-dom'
 import { DebugLlmPayloadPage } from '@/pages/debug/DebugLlmPayloadPage'
+import { renderWithProviders } from '@/test/renderWithProviders'
 
 vi.mock('@/services/api/llmPayload', () => ({
   getPayloadDiagList: vi.fn(),
@@ -19,11 +23,7 @@ vi.mock('@/services/api/llmPayload', () => ({
 import { getPayloadDiagFile, getPayloadDiagList } from '@/services/api/llmPayload'
 
 function renderPage() {
-  return render(
-    <MemoryRouter>
-      <DebugLlmPayloadPage />
-    </MemoryRouter>,
-  )
+  return renderWithProviders(<DebugLlmPayloadPage />)
 }
 
 const FAKE_ITEMS = [

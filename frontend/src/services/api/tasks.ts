@@ -5,6 +5,7 @@
  */
 
 import { API_ENDPOINTS } from '@/constants/api'
+import { TASK_SERVICE_ENDPOINTS } from './endpoints.generated'
 import apiClient from '@/services/api/client'
 import type {
   AcceptanceCriterion,
@@ -166,7 +167,7 @@ export async function getTasksDebug(params?: {
   sort_order?: 'asc' | 'desc'
   status?: string
 }): Promise<TaskDebugListResponse> {
-  const response = await apiClient.get<TaskDebugListResponse>('/ext/channel_api/tasks/debug/all', { params })
+  const response = await apiClient.get<TaskDebugListResponse>(TASK_SERVICE_ENDPOINTS.tasks_debug_all, { params })
   return response.data
 }
 

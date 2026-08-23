@@ -11,8 +11,8 @@
  * 需用 MemoryRouter 包裹。
  */
 import { render, screen, waitFor, fireEvent } from '@testing-library/react'
+import { renderWithProviders } from '@/test/renderWithProviders'
 import React from 'react'
-import { MemoryRouter } from 'react-router-dom'
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 
 // ── Mock 外部依赖 ──
@@ -101,11 +101,7 @@ describe('SettingsPage — 管道配置入口与内联渲染（场景1/2/3）', 
   })
 
   it('场景1：左侧「内核设置」分组出现「管道配置」设置栏', async () => {
-    render(
-      <MemoryRouter>
-        <SettingsPage />
-      </MemoryRouter>,
-    )
+    renderWithProviders(<SettingsPage />)
 
     await waitFor(() => {
       expect(screen.getByText('内核设置', { exact: true })).toBeInTheDocument()
@@ -114,11 +110,7 @@ describe('SettingsPage — 管道配置入口与内联渲染（场景1/2/3）', 
   })
 
   it('场景1：点击「管道配置」→ 右侧内联显示标题「管道配置」', async () => {
-    render(
-      <MemoryRouter>
-        <SettingsPage />
-      </MemoryRouter>,
-    )
+    renderWithProviders(<SettingsPage />)
 
     await waitFor(() => {
       expect(screen.getByText('管道配置', { exact: true })).toBeInTheDocument()
@@ -131,11 +123,7 @@ describe('SettingsPage — 管道配置入口与内联渲染（场景1/2/3）', 
   })
 
   it('场景2：加载 autonomous → 可视化渲染循环体/step/插件组合', async () => {
-    render(
-      <MemoryRouter>
-        <SettingsPage />
-      </MemoryRouter>,
-    )
+    renderWithProviders(<SettingsPage />)
 
     await waitFor(() => {
       expect(screen.getByText('管道配置', { exact: true })).toBeInTheDocument()
@@ -160,11 +148,7 @@ describe('SettingsPage — 管道配置入口与内联渲染（场景1/2/3）', 
   })
 
   it('场景3：修改管道名 → 点击保存 → 调用 savePipelineConfig(\'autonomous\', config) → 显示「已保存」', async () => {
-    render(
-      <MemoryRouter>
-        <SettingsPage />
-      </MemoryRouter>,
-    )
+    renderWithProviders(<SettingsPage />)
 
     await waitFor(() => {
       expect(screen.getByText('管道配置', { exact: true })).toBeInTheDocument()

@@ -10,12 +10,15 @@
  *   搜索 + 展开 input_schema 摘要——2026-08-20 ADR）
  */
 
-import { useState, useEffect, useCallback } from 'react'
+import { useState, useEffect } from 'react'
+import { useQuery } from '@tanstack/react-query'
 import { RefreshCw, AlertCircle, Plug, ToggleLeft, Wrench } from '@/assets/icons'
 import { PageShell } from '@/components/shared/PageShell'
 import { toast } from '@/components/ui/sonner'
 import apiClient from '@/services/api/client'
 import { refreshPluginContributions } from '@/services/modules/GrowthLoop'
+import { queryClient } from '@/services/query/queryClient'
+import { queryKeys } from '@/services/query/queryKeys'
 
 /** 插件状态信息（对齐后端 plugins_status_handler 返回） */
 interface PluginStatus {
@@ -71,8 +74,6 @@ export function PluginsSettingsPage({
   onSelectPluginConfig?: (pluginId: string, fileId: string) => void
 }) {
   const [plugins, setPlugins] = useState<PluginStatus[]>([])
-  const [isLoading, setIsLoading] = useState(true)
-  const [error, setError] = useState<string | null>(null)
   const [togglingId, setTogglingId] = useState<string | null>(null)
   const [filter, setFilter] = useState<'all' | 'pipeline' | 'tool' | 'system' | 'disabled'>('all')
   // 工具能力浏览（ToolsPage 退役并入）：schema 聚合 tools 面 + 搜索/展开
@@ -80,29 +81,35 @@ export function PluginsSettingsPage({
   const [capSearch, setCapSearch] = useState('')
   const [expandedTool, setExpandedTool] = useState<string | null>(null)
 
-  const fetchPlugins = useCallback(async () => {
-    setIsLoading(true)
-    setError(null)
-    try {
+  // 插件状态 + 工具能力面（query 化）：插件启停后由 toggle 乐观更新缓存，
+  // 重进设置页缓存秒开
+  const pluginsQuery = useQuery({
+    queryKey: queryKeys.plugins,
+    queryFn: async () => {
       const res = await apiClient.get<PluginStatus[]>('/api/v1/plugins')
-      setPlugins(res.data)
       // 能力面与插件面同拉（读失败不阻断插件列表——能力区降级空）
+      let tools: ToolCapability[] = []
       try {
         const schema = await apiClient.get<{ tools?: ToolCapability[] }>('/api/v1/schema')
-        setCapabilities(Array.isArray(schema.data?.tools) ? schema.data.tools : [])
+        tools = Array.isArray(schema.data?.tools) ? schema.data.tools : []
       } catch {
-        setCapabilities([])
+        tools = []
       }
-    } catch (err: unknown) {
-      setError(err instanceof Error ? err.message : '获取插件状态失败')
-    } finally {
-      setIsLoading(false)
-    }
-  }, [])
+      return { plugins: res.data, capabilities: tools }
+    },
+    staleTime: 60_000,
+  })
+  const isLoading = pluginsQuery.isPending && plugins.length === 0
+  const error = pluginsQuery.isError
+    ? pluginsQuery.error instanceof Error ? pluginsQuery.error.message : '获取插件状态失败'
+    : null
 
   useEffect(() => {
-    fetchPlugins()
-  }, [fetchPlugins])
+    if (pluginsQuery.data) {
+      setPlugins(pluginsQuery.data.plugins)
+      setCapabilities(pluginsQuery.data.capabilities)
+    }
+  }, [pluginsQuery.data])
 
   /** 切换插件启用状态 */
   const handleToggleEnabled = async (pluginId: string, currentEnabled: boolean) => {
@@ -113,7 +120,21 @@ export function PluginsSettingsPage({
         { enabled: !currentEnabled },
       )
       if (res.data.success) {
-        // 本地更新状态（立即反映，重启后内核才真正生效）
+        // 缓存乐观更新（立即反映，重启后内核才真正生效）
+        queryClient.setQueryData<{ plugins: PluginStatus[]; capabilities: ToolCapability[] }>(
+          queryKeys.plugins,
+          (prev) =>
+            prev
+              ? {
+                  ...prev,
+                  plugins: prev.plugins.map((p) =>
+                    p.plugin_id === pluginId
+                      ? { ...p, enabled: !currentEnabled, status: !currentEnabled ? 'active' : 'disabled' }
+                      : p,
+                  ),
+                }
+              : prev,
+        )
         setPlugins((prev) =>
           prev.map((p) =>
             p.plugin_id === pluginId
@@ -165,7 +186,7 @@ export function PluginsSettingsPage({
       {/* 操作栏 */}
       <div className="flex flex-wrap items-center gap-3">
         <button
-          onClick={fetchPlugins}
+          onClick={() => void pluginsQuery.refetch()}
           disabled={isLoading}
           className="hover:bg-[var(--hover-overlay)] flex items-center gap-1.5 rounded-lg border px-3 py-1.5 text-sm disabled:opacity-50"
           style={{ borderColor: 'var(--ds-border-subtle, rgba(148,163,184,0.12))' }}

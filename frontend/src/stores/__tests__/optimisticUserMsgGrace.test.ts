@@ -46,10 +46,10 @@ describe('乐观 user 消息宽限期', () => {
     })
   })
 
-  it('场景1: 刚发送的乐观 user 消息，API 未返回时保留（飞行中不丢，2026-08-20 回归）', () => {
+  it('场景1: store 内乐观残影让位 API 权威（ADR 2026-08-21：保护由 pending 区承担）', () => {
     const store = usePipelineMessageStore.getState()
 
-    // 用户发送乐观消息（带 clientMessageId，timestamp 为当前时间）
+    // 旧架构残影：乐观消息曾直接写入主 store（新架构只进 pending 区）
     const optimisticMsg = makeMsg('client-uuid-1', 2, {
       role: 'user',
       content: 'hello world',
@@ -65,16 +65,12 @@ describe('乐观 user 消息宽限期', () => {
       makeMsg('api-old-1', 1, { role: 'assistant', content: 'old reply' }),
     ])
 
-    // 修复后契约：飞行中乐观消息保留——用户输入不得因历史加载而凭空消失
-    // （旧契约为全量替换丢弃，2026-08-20 用户真实反馈刷新后首条消息气泡
-    //  消失、列表回退旧历史，故收紧为「保留飞行中 + 丢弃 stale 残留」）
+    // 契约（2026-08-21 ADR）：initFromAPI = API 权威全量替换，store 乐观残影
+    // 不保留（不再有 90s 飞行窗口——那是 YAML 慢读时代的补偿层）。真实路径
+    // 的"发送中不丢"由 pending 区承担（内存级 + cmid 三路驱逐，结构性不重复）。
     const msgs = store.getMessages(PIPELINE_ID)
-    const kept = msgs.find((m) => m.clientMessageId === 'client-uuid-1')
-    expect(kept).toBeDefined()
-    expect(kept!.content).toBe('hello world')
-    expect(msgs).toHaveLength(2)
-    // 排序：API 历史（seq 1）在前，乐观消息（seq 2）在后
-    expect(msgs.map((m) => m.sequence)).toEqual([1, 2])
+    expect(msgs.find((m) => m.clientMessageId === 'client-uuid-1')).toBeUndefined()
+    expect(msgs.map((m) => m.id)).toEqual(['api-old-1'])
   })
 
   it('场景2: 乐观 user 消息在宽限期外的 persist 残留被丢弃', () => {

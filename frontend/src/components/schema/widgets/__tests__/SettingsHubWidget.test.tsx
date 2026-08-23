@@ -11,6 +11,7 @@
  */
 
 import { fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { renderWithProviders } from '@/test/renderWithProviders'
 import React from 'react'
 import { describe, expect, it, vi } from 'vitest'
 
@@ -39,7 +40,7 @@ import { SettingsHubWidget } from '../SettingsHubWidget'
 
 describe('SettingsHubWidget — 管道配置入口', () => {
   it('AC-1: 内核设置分组出现「管道配置」入口', async () => {
-    render(<SettingsHubWidget />)
+    renderWithProviders(<SettingsHubWidget />)
 
     await waitFor(() => {
       expect(screen.getByText('内核设置')).toBeInTheDocument()
@@ -48,7 +49,7 @@ describe('SettingsHubWidget — 管道配置入口', () => {
   })
 
   it('AC-2: 点击「管道配置」→ 渲染 PipelineSettingsPage（embedded）', async () => {
-    render(<SettingsHubWidget />)
+    renderWithProviders(<SettingsHubWidget />)
 
     await waitFor(() => {
       expect(screen.getByText('管道配置')).toBeInTheDocument()

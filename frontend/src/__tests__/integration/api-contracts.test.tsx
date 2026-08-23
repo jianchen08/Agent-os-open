@@ -213,9 +213,22 @@ describe('C5 契约: WebviewWidget action 上行 → POST /api/v1/actions/execut
     postSpy.mockResolvedValue({ data: { ok: true } })
   })
 
-  /** 模拟 iframe 上行：发合法 postMessage（origin='null' + 魔数）。 */
+  /** 从 iframe srcdoc 提取宿主注入的实例令牌（B-4：每次挂载随机生成，不能硬编码）。 */
+  function getIframeToken(): string {
+    const iframe = screen.getByTitle('Webview') as HTMLIFrameElement
+    const m = (iframe.getAttribute('srcdoc') ?? '').match(/TOKEN = "([^"]+)"/)
+    if (!m) throw new Error('iframe srcdoc 中未找到实例令牌 TOKEN')
+    return m[1]
+  }
+
+  /** 模拟 iframe 上行：发合法 postMessage（origin='null' + 魔数 + 实例令牌）。 */
   function postUp(method: string, params?: unknown, id = 'wv_1'): void {
-    const data: Record<string, unknown> = { __agentos_webview: true, id, method }
+    const data: Record<string, unknown> = {
+      __agentos_webview: true,
+      __wv_token: getIframeToken(),
+      id,
+      method,
+    }
     if (params !== undefined) data.params = params
     window.dispatchEvent(new MessageEvent('message', { origin: 'null', data }))
   }
@@ -238,10 +251,11 @@ describe('C5 契约: WebviewWidget action 上行 → POST /api/v1/actions/execut
     render(<WebviewWidget pluginId="demo" widgetId="w2" />)
     await waitFor(() => expect(screen.getByTitle('Webview')).toBeInTheDocument())
 
-    postUp('/api/v1/foo', { a: 1 })
+    // REST 路由白名单（B-4）：method 需在本插件 /ext/{pluginId}/ 前缀内才放行
+    postUp('/ext/demo/foo', { a: 1 })
 
     await waitFor(() => {
-      expect(postSpy).toHaveBeenCalledWith('/api/v1/foo', { a: 1 })
+      expect(postSpy).toHaveBeenCalledWith('/ext/demo/foo', { a: 1 })
       // 不应误进 actions/execute
       const actionCalls = postSpy.mock.calls.filter((c) => c[0] === '/api/v1/actions/execute')
       expect(actionCalls).toHaveLength(0)
@@ -252,10 +266,11 @@ describe('C5 契约: WebviewWidget action 上行 → POST /api/v1/actions/execut
     render(<WebviewWidget pluginId="demo" widgetId="w3" />)
     await waitFor(() => expect(screen.getByTitle('Webview')).toBeInTheDocument())
 
-    postUp('/api/v1/items')
+    // REST 路由白名单（B-4）：method 需在本插件 /ext/{pluginId}/ 前缀内才放行
+    postUp('/ext/demo/items')
 
     await waitFor(() => {
-      const itemCalls = getSpy.mock.calls.filter((c) => c[0] === '/api/v1/items')
+      const itemCalls = getSpy.mock.calls.filter((c) => c[0] === '/ext/demo/items')
       expect(itemCalls).toHaveLength(1)
     })
   })

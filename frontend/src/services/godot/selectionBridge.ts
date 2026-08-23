@@ -3,13 +3,14 @@
  *
  * 事件流向（全程由 Godot 侧发起推送，前端零轮询）：
  *   Godot EditorSelection.selection_changed
- *     → POST /ext/pipeline_godot_context/selection（宿主插件推送）
+ *     → POST pipeline_godot_context selection（宿主插件推送）
  *     → 插件 emit godot_selection_changed（按订阅 thread_id 单播）
  *     → 本服务经 globalWS 订阅更新状态 → 聊天输入框引用卡片实时镜像
  *
  * 初始化（initGodotSelection）：订阅 thread + 拉取当前快照 + 挂 WS 事件监听（幂等，仅首次挂）。
  */
 import apiClient from '@/services/api/client'
+import { PIPELINE_GODOT_CONTEXT_ENDPOINTS } from '@/services/api/endpoints.generated'
 import { globalWS } from '@/services/websocket/GlobalWebSocket'
 import { WS_SERVER_EVENTS } from '@/constants/websocket'
 
@@ -36,13 +37,13 @@ export interface GodotSelectionState {
 }
 
 const ENDPOINTS = {
-  selection: '/ext/pipeline_godot_context/selection',
-  subscribe: '/ext/pipeline_godot_context/subscribe',
+  selection: PIPELINE_GODOT_CONTEXT_ENDPOINTS.selection_push,
+  subscribe: PIPELINE_GODOT_CONTEXT_ENDPOINTS.selection_subscribe,
 }
 
 /** 预览图 URL（经插件代理 Godot 9600；v=签名，选中变化时刷新缓存） */
 export function godotPreviewUrl(index: number, signature: string): string {
-  return `/ext/pipeline_godot_context/preview?index=${index}&v=${encodeURIComponent(signature)}`
+  return `${PIPELINE_GODOT_CONTEXT_ENDPOINTS.selection_preview}?index=${index}&v=${encodeURIComponent(signature)}`
 }
 
 const EMPTY_STATE: GodotSelectionState = { connected: false, items: [], signature: '' }

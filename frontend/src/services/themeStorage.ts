@@ -221,7 +221,6 @@ export function mergeTheme(
   base: ThemeConfig,
   custom: UserThemeConfig['customizations'],
 ): ThemeConfig {
-  // @ts-ignore - HACK: ThemeConfig 嵌套层级与 Partial 深混并不兼容 — 迁移到 deepMerge<ThemeConfig> 工具时移除
   return {
     ...base,
     id: (custom.id as string) || base.id,

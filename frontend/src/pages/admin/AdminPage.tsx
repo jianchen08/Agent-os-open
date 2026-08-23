@@ -1,71 +1,45 @@
 /**
- * 管理员面板页面
+ * 管理员面板页面（query 化：adminUsers/adminUserStats 缓存 SWR，重挂零请求）
  *
  * 用户管理，包含用户列表表格和用户统计
  */
 
-import { useState, useEffect, useCallback } from 'react'
 import { Users } from '@/assets/icons'
 import { EmptyState } from '@/components/shared/EmptyState'
 import { ErrorState } from '@/components/shared/ErrorState'
 import { LoadingState } from '@/components/shared/LoadingState'
 import { PageShell } from '@/components/shared/PageShell'
 import * as usersApi from '@/services/api/users'
-import type { User } from '@/services/api/users'
+import {
+  invalidateAdminUsers,
+  useAdminUserStatsQuery,
+  useAdminUsersQuery,
+} from '@/hooks/queries/useAdminUsersQuery'
 
 /**
  * 管理员面板页面组件
  */
 export function AdminPage() {
-  const [users, setUsers] = useState<User[]>([])
-  const [isLoading, setIsLoading] = useState(true)
-  const [error, setError] = useState<string | null>(null)
-  const [stats, setStats] = useState<{
-    total_users: number
-    active_users: number
-    admin_count: number
-  } | null>(null)
+  // 用户列表 + 统计（query 化）：两个独立 key 互不阻塞（统计失败不阻断列表渲染）
+  const usersQuery = useAdminUsersQuery()
+  const statsQuery = useAdminUserStatsQuery()
+  const users = usersQuery.data ?? []
+  const stats = statsQuery.data ?? null
+  // 无缓存数据时显示 loading（有缓存先渲染缓存不闪 loading）
+  const isLoading = usersQuery.isPending && !usersQuery.data
+  const error = usersQuery.isError
+    ? usersQuery.error instanceof Error
+      ? usersQuery.error.message
+      : '获取用户列表失败'
+    : null
 
   /**
-   * 加载用户数据
-   */
-  const fetchData = useCallback(async () => {
-    setIsLoading(true)
-    setError(null)
-    try {
-      const [userList, userStats] = await Promise.allSettled([
-        usersApi.getUsers(),
-        usersApi.getUserStats(),
-      ])
-      if (userList.status === 'fulfilled') {
-        setUsers(userList.value)
-      } else {
-        setError('获取用户列表失败')
-      }
-      if (userStats.status === 'fulfilled') {
-        setStats(userStats.value)
-      }
-    } catch (err: unknown) {
-      const message = err instanceof Error ? err.message : '加载数据失败'
-      setError(message)
-    } finally {
-      setIsLoading(false)
-    }
-  }, [])
-
-  useEffect(() => {
-    fetchData()
-  }, [fetchData])
-
-  /**
-   * 切换用户激活状态
+   * 切换用户激活状态（乐观更新缓存 + 后台失效刷新统计）
    */
   const handleToggleActive = async (userId: string, currentActive: boolean) => {
     try {
       await usersApi.updateUserActiveStatus(userId, !currentActive)
-      setUsers((prev) =>
-        prev.map((u) => (u.id === userId ? { ...u, is_active: !currentActive } : u)),
-      )
+      invalidateAdminUsers()
     } catch {
       // 静默失败
     }

@@ -7,7 +7,7 @@
  * - 短期任务阶段管理
  * - 验收标准（AC）评估
  *
- * 注：0.2 迁移后 tasks/projects/phases/ac 域已切 /ext/channel_api/*；
+ * 注：0.2 迁移后 tasks/projects/phases/ac 域已切 task_service 插件（/ext/task_service/*）；
  *     completePreparePhase / evaluateAC / evaluateAllACs 三函数 0.2 已移除，其
  *     describe.skip 死骨架用例已删除（2026-08 清理）。
  *
@@ -97,8 +97,8 @@ describe('任务管理 API', () => {
       expect(result.items[0].status).toBe('running')
       expect(result.total).toBe(2)
 
-      // 验证 API 调用（0.2 迁移：/ext/channel_api/projects，params 走 axios params 对象）
-      expect(apiClient.get).toHaveBeenCalledWith('/ext/channel_api/projects', {
+      // 验证 API 调用（0.2 迁移：/ext/task_service/projects，params 走 axios params 对象）
+      expect(apiClient.get).toHaveBeenCalledWith('/ext/task_service/projects', {
         params: { page: 1, limit: 20 },
       })
       expect(apiClient.get).toHaveBeenCalledTimes(1)
@@ -134,8 +134,8 @@ describe('任务管理 API', () => {
       // 调用 API，过滤运行中的项目
       await taskApi.fetchProjects({ status: 'running' })
 
-      // 验证 API 调用包含状态过滤（0.2 迁移：/ext/channel_api/projects）
-      expect(apiClient.get).toHaveBeenCalledWith('/ext/channel_api/projects', {
+      // 验证 API 调用包含状态过滤（0.2 迁移：/ext/task_service/projects）
+      expect(apiClient.get).toHaveBeenCalledWith('/ext/task_service/projects', {
         params: { status: 'running' },
       })
     })
@@ -193,8 +193,8 @@ describe('任务管理 API', () => {
       expect(result.status).toBe('planning')
       expect(result.auto_execute).toBe(true)
 
-      // 验证 API 调用（0.2 迁移：/ext/channel_api/projects，body 用 snake_case）
-      expect(apiClient.post).toHaveBeenCalledWith('/ext/channel_api/projects', {
+      // 验证 API 调用（0.2 迁移：/ext/task_service/projects，body 用 snake_case）
+      expect(apiClient.post).toHaveBeenCalledWith('/ext/task_service/projects', {
         goal: '实现支付功能',
         session_id: 'session-1',
         auto_execute: true,
@@ -221,7 +221,7 @@ describe('任务管理 API', () => {
 
   describe('toggleProjectAutoExecute - 切换自动执行', () => {
     it('应该成功切换自动执行开关', async () => {
-      // 0.2 实现：POST /ext/channel_api/projects/{id}/auto-execute { enabled }，返回 { project }
+      // 0.2 实现：POST /ext/task_service/projects/{id}/auto-execute { enabled }，返回 { project }
       const mockPostResponse = {
         data: {
           project: {
@@ -251,7 +251,7 @@ describe('任务管理 API', () => {
 
       // 验证 API 调用（POST 而非 PATCH；0.2 迁移路径）
       expect(apiClient.post).toHaveBeenCalledWith(
-        '/ext/channel_api/projects/project-1/auto-execute',
+        '/ext/task_service/projects/project-1/auto-execute',
         { enabled: true },
       )
     })
@@ -301,8 +301,8 @@ describe('任务管理 API', () => {
       expect(result.phases.prepare?.status).toBe('completed')
       expect(result.phases.execute?.status).toBe('running')
 
-      // 验证 API 调用（0.2 迁移：/ext/channel_api/tasks/{id}/phase）
-      expect(apiClient.get).toHaveBeenCalledWith('/ext/channel_api/tasks/task-1/phase')
+      // 验证 API 调用（0.2 迁移：/ext/task_service/tasks/{id}/phase）
+      expect(apiClient.get).toHaveBeenCalledWith('/ext/task_service/tasks/task-1/phase')
     })
   })
 })

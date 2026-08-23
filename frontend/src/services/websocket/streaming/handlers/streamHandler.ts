@@ -139,9 +139,11 @@ export function handleStreamStart(eventData: any) {
     `[STREAM_START] pipelineId=${pipelineId.slice(0, 12)} threadId=${threadId?.slice(0, 12) || 'null'} msgId=${messageId.slice(0, 12)} activePipelineId=${currentActivePipelineId?.slice(0, 12) || 'null'}`,
   )
 
-  // 提取后端返回的真实 sequence
-  const backendSeq = eventData.sequence ?? eventData.data?.sequence
-  ensureStreamingPlaceholder(pipelineId, messageId, threadId, backendSeq)
+  // stream_start 事件不携带消息 seq（后端在引擎执行时才分配；事件信封顶层
+  // sequence 是全局事件计数器，非消息 seq——ADR 2026-08-21 显式化该语义，
+  // 严禁当消息序使用）。占位 seq 挂空，stream_end final_sequence / new_message
+  // 权威值到达后由对账纠正。
+  ensureStreamingPlaceholder(pipelineId, messageId, threadId)
 
   if (currentActivePipelineId === pipelineId) return
 
@@ -201,13 +203,9 @@ export function handleStreamEnd(eventData: any) {
   )
 
   if (pipelineId) {
-    terminatePipeline(pipelineId, threadId)
+    terminatePipeline(pipelineId)
     // 管道注册表实时同步：completed
     usePipelineRegistryStore.getState().applyStreamStatus(pipelineId, 'completed')
-    // 子管道 stream_end 携带的 threadId 与 pipelineId 不同时，单独终止该 threadId 的流。
-    if (threadId && threadId !== pipelineId) {
-      pipelineStore.getState().stopStreaming(threadId)
-    }
 
     if (messageId) {
       const msgs = pipelineStore.getState().getMessages(pipelineId)
@@ -215,12 +213,9 @@ export function handleStreamEnd(eventData: any) {
 
       if (msg) {
         // msg 存在：合并后端权威 parts/sequence，收尾占位。
-        // 同步后端权威 sequence（final_sequence）
-        // stream_start 不携带 sequence，占位消息的 sequence 是前端自算的 localMax+1，
-        // 与后端真实序号不一致。stream_end 携带 final_sequence，必须在此同步到占位消息，
-        // 否则后续 initFromAPI（刷新/切Tab/补漏）按 role::seq 指纹去重时会失败，
-        // 把同一逻辑消息识别为两条 → 末尾气泡重复渲染。
-        // 与 handleNewMessage 的 sequence 同步路径对齐，消除两条终止路径的不对称。
+        // 同步后端权威 sequence（final_sequence）：stream_start 不携带消息 seq，
+        // 占位 seq 挂空（ADR 2026-08-21），stream_end 携带 final_sequence 在此
+        // 同步权威值——对账（isCoveredByApi 按 id/cmid）与排序才正确。
         const finalSeq = eventData?.data?.final_sequence ?? eventData?.final_sequence
         if (finalSeq != null && finalSeq !== msg.sequence) {
           pipelineStore.getState().updateMessage(pipelineId, messageId, {
@@ -229,6 +224,9 @@ export function handleStreamEnd(eventData: any) {
         }
 
         // 合并而非覆盖：本地有实质内容就优先保留本地，serverParts 仅作兜底（详见 mergeStreamingParts）。
+        // stream_end 的 parts 是末轮快照（可能只有 tool_call 或只有 text，残缺），
+        // 本地已按真实时序累积了完整 parts（text→tool_call→text）时优先保留本地，
+        // server 快照只用于补充本地缺失的权威增量（如断线期间丢失的 chunk）。
         const serverParts = eventData?.data?.parts
         const localParts = msg.parts || []
         if (serverParts && Array.isArray(serverParts) && serverParts.length > 0) {
@@ -284,20 +282,14 @@ export function handleStreamEnd(eventData: any) {
     }
 
   } else {
-    _debugLogger.warn(
-      `[STREAM_END] pipeline_id missing, _threadId=${threadId?.slice(0, 12) || 'null'} msgId=${messageId?.slice(0, 12) || 'null'}`,
+    // ADR 2026-08-21「清别人状态」废除：缺 pipeline_id 的终止事件无法定位归属
+    // 管道——不拿 activePipelineId 顶替（可能误杀活跃管道的流式）、不拿
+    // threadId 当管道清。记 error 等对账补正（90s 单消息超时兜底仍在）。
+    _debugLogger.error(
+      `[STREAM_END] pipeline_id 缺失，跳过清理（不用 activePipelineId 顶替）: _threadId=%s msgId=%s`,
+      threadId?.slice(0, 12) || 'null',
+      messageId?.slice(0, 12) || 'null',
     )
-    // 如果 stream_end 的 pipelineId 缺失，streamingTabs[activePipelineId] 无法被清理。
-    const currentActivePipelineId = pipelineStore.getState().activePipelineId
-    if (currentActivePipelineId) {
-      _debugLogger.info(
-        `[STREAM_END] clearing via activePipelineId=${currentActivePipelineId.slice(0, 12)}`,
-      )
-      terminatePipeline(currentActivePipelineId, threadId)
-    }
-    if (threadId) {
-      pipelineStore.getState().stopStreaming(threadId)
-    }
     return
   }
 
@@ -318,15 +310,18 @@ export function handleStreamError(eventData: any) {
   flushStreamChunkBuffer()
 
   const pipelineId = resolvePipelineId(eventData)
-  const threadId = extractThreadId(eventData)
 
+  // ADR 2026-08-21：只清事件明确归属的管道；缺失即记 error 跳过（不拿 threadId 顶替）
   if (pipelineId) {
     // 标记管道已终止（错误），防止 ensureStreamingPlaceholder 重新启动
-    terminatePipeline(pipelineId, threadId)
+    terminatePipeline(pipelineId)
     // 管道注册表实时同步：failed
     usePipelineRegistryStore.getState().applyStreamStatus(pipelineId, 'failed')
-  } else if (threadId) {
-    pipelineStore.getState().stopStreaming(threadId)
+  } else {
+    _debugLogger.error(
+      '[STREAM_ERROR] pipeline_id 缺失，跳过清理: _threadId=%s',
+      extractThreadId(eventData)?.slice(0, 12) || 'null',
+    )
   }
 
   if (!pipelineId) return
@@ -357,45 +352,17 @@ export function handleStreamError(eventData: any) {
   }
 
   const errorMsg = eventData?.data?.error || eventData?.error || '流式响应异常'
+  // error 可能为对象（如 {code, message}）——提取 message 保留具体信息，
+  // 不再降级成通用文案（2026-08-22 错误透传收口）。
+  const errorText =
+    typeof errorMsg === 'string'
+      ? errorMsg
+      : typeof errorMsg?.message === 'string'
+        ? errorMsg.message
+        : '生成过程中发生错误，请重试'
   useNotificationStore.getState().addNotification({
     title: '流式响应错误',
-    message: typeof errorMsg === 'string' ? errorMsg : '生成过程中发生错误，请重试',
-    priority: 'high',
-    category: 'error',
-    isBlocking: false,
-  })
-}
-
-/** 处理通用 ERROR 事件（后端通过 WS error 类型发送的全局错误） 与 STREAM_ERROR 不同：通用 ERROR 不绑定特定流式管道， */
-export function handleGlobalError(eventData: any) {
-  // 先刷写缓冲区，确保错误前的内容不丢失
-  flushStreamChunkBuffer()
-
-  const pipelineId = resolvePipelineId(eventData)
-  const threadId = extractThreadId(eventData)
-
-  // 终止相关 streaming 状态，避免 UI 卡在生成中
-  if (pipelineId) {
-    terminatePipeline(pipelineId, threadId)
-  } else if (threadId) {
-    pipelineStore.getState().stopStreaming(threadId)
-  }
-
-  // 解析错误信息（兼容 error / message / data.error / data.message 多种字段）
-  const rawError =
-    eventData?.error
-    || eventData?.message
-    || eventData?.data?.error
-    || eventData?.data?.message
-    || ''
-  const errorMsg =
-    typeof rawError === 'string' && rawError.trim()
-      ? rawError.trim()
-      : '服务器返回错误，请稍后重试'
-
-  useNotificationStore.getState().addNotification({
-    title: '请求失败',
-    message: errorMsg,
+    message: errorText,
     priority: 'high',
     category: 'error',
     isBlocking: false,

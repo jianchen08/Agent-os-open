@@ -75,11 +75,11 @@ export function normalizeRows(payload: unknown): {
       return buildRowsFromArray(raw.data as unknown[])
     }
     if (Array.isArray(raw.items)) {
-      // {items, total} 信封（如 /ext/monitoring/tasks）
+      // {items, total} 信封（如 monitoring 插件 tasks）
       return buildRowsFromArray(raw.items as unknown[])
     }
     if (Array.isArray(raw.results)) {
-      // {results, total} 信封（如 /ext/hindsight_memory_service/recall）
+      // {results, total} 信封（如 hindsight_memory_service recall）
       return buildRowsFromArray(raw.results as unknown[])
     }
   }

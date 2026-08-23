@@ -282,11 +282,14 @@ describe('SubAgentFlow — AC-1k: 子Agent事件链正确显示', () => {
       expect(useLayoutModeStore.getState().activeExecutions).toHaveLength(0)
     })
 
-    it('task_deleted 事件经 globalWS 真实订阅链路更新 store', async () => {
-      const { useLongTermTaskStore } = await import('@/stores/longTermTaskStore')
-      useLongTermTaskStore.setState({
-        tasks: [{ id: 'task-sub', title: '子任务', status: 'running' }] as never,
-      })
+    it('task_deleted 事件经 globalWS 真实订阅链路更新缓存', async () => {
+      // 批次 4 query 化：tasks 数据在 query cache（queryKeys.longTermTasks），
+      // 经全局 queryClient 单例播种/断言（WS handler 非组件路径不依赖 Provider）
+      const { queryClient } = await import('@/services/query/queryClient')
+      const { queryKeys } = await import('@/services/query/queryKeys')
+      queryClient.setQueryData(queryKeys.longTermTasks, [
+        { id: 'task-sub', title: '子任务', status: 'running' },
+      ] as never)
 
       renderHook(() => useRealtimeEvents())
 
@@ -294,9 +297,8 @@ describe('SubAgentFlow — AC-1k: 子Agent事件链正确显示', () => {
         emitEvent('task_deleted', { task_id: 'task-sub' })
       })
 
-      expect(
-        useLongTermTaskStore.getState().tasks.some((t: { id: string }) => t.id === 'task-sub'),
-      ).toBe(false)
+      const tasks = queryClient.getQueryData<{ id: string }[]>(queryKeys.longTermTasks) ?? []
+      expect(tasks.some((t) => t.id === 'task-sub')).toBe(false)
     })
   })
 

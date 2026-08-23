@@ -2,7 +2,7 @@
  * AgentManagerPage 组件——agent_manager 插件的智能体管理页面（浏览+编辑一体）
  *
  * 2026-08-20 插件化：承接原 AgentsPage 内容（卡片列表 + 搜索 + 展开详情 +
- * AgentConfigModal 编辑），数据源切 /ext/agent_manager/agents（agent_manager
+ * AgentConfigModal 编辑），数据源切 agent_manager agents（agent_manager
  * 插件 http_endpoints，原内核 /api/v1/agents 已删——ADR 2026-08-20）。
  * 经 widgetRegistry 注册为 `agents_panel`，插件 contributes.pages（path=/agents）
  * 声明入口；亦可经 PanelHostWidget 内嵌工作区页签。
@@ -39,7 +39,7 @@ export function AgentManagerPage() {
   const [editingAgent, setEditingAgent] = useState<AgentResponse | null>(null)
 
   /**
-   * 加载 Agent 列表（/ext/agent_manager/agents）
+   * 加载 Agent 列表（agent_manager agents）
    */
   const fetchAgents = useCallback(async () => {
     setIsLoading(true)
@@ -201,7 +201,7 @@ export function AgentManagerPage() {
         </div>
       )}
 
-      {/* 编辑配置模态框（fieldsUri/dataUri 已切 /ext/agent_manager/*） */}
+      {/* 编辑配置模态框（fieldsUri/dataUri 已切 agent_manager 插件） */}
       <AgentConfigModal
         agent={editingAgent}
         isOpen={!!editingAgent}

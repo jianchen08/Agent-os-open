@@ -178,14 +178,31 @@ export const useInteractionStore = create<InteractionState>()((set, get) => ({
     )
   },
 
+  /** 按 pipelineId 获取已进入但未响应的交互（2026-08-22 裁决：精确归属，不跨命名空间撞键）
+   *
+   * 归属规则：
+   * - i.pipelineId === probe 精确命中（0.2 规范坐标）；
+   * - pipelineId 缺失时允许 threadId === probe（thread==pipeline 旧身份命名空间的
+   *   确定性兼容，非猜测）；
+   * - agentId 是 Agent 实体坐标，绝不参与管道归属匹配；
+   * - 多命中（同管道多条 entered）→ 不返回（不自动批准），记 warn 暴露歧义。
+   */
   getEnteredForPipeline: (pipelineId) => {
-    return get().pendingInteractions.find(
+    const matches = get().pendingInteractions.filter(
       (i) =>
         i.status === 'entered' &&
-        (i.pipelineId === pipelineId ||
-          i.threadId === pipelineId ||
-          i.agentId === pipelineId),
+        (i.pipelineId === pipelineId || (!i.pipelineId && i.threadId === pipelineId)),
     )
+    if (matches.length === 0) return undefined
+    if (matches.length > 1) {
+      console.warn(
+        '[interactionStore] getEnteredForPipeline 歧义：管道 %s 存在 %d 条 entered 交互，不自动批准',
+        pipelineId?.slice(0, 12),
+        matches.length,
+      )
+      return undefined
+    }
+    return matches[0]
   },
 
   setGlobalOpenRequestId: (id) => {

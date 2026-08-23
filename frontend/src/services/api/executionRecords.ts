@@ -5,6 +5,7 @@
  */
 
 import apiClient from '@/services/api/client'
+import { MONITORING_ENDPOINTS } from './endpoints.generated'
 
 /**
  * 执行记录类型
@@ -101,7 +102,7 @@ export async function getRecordGroupSummary(
   const params: Record<string, string> = {}
   if (sessionId) params.session_id = sessionId
   const response = await apiClient.get<RecordGroupSummaryResponse>(
-    '/ext/channel_api/execution/records/group-summary',
+    MONITORING_ENDPOINTS.mon_execution_records_group_summary,
     { params },
   )
   return response.data
@@ -116,7 +117,7 @@ export async function getRecordGroupSummary(
 export async function getExecutionRecords(
   params: ExecutionRecordQuery = {},
 ): Promise<ExecutionRecordListResponse> {
-  const response = await apiClient.get<ExecutionRecordListResponse>('/ext/channel_api/execution/records', {
+  const response = await apiClient.get<ExecutionRecordListResponse>(MONITORING_ENDPOINTS.mon_execution_records_list, {
     params,
   })
   return response.data
@@ -128,7 +129,7 @@ export async function getExecutionRecords(
  * @returns 会话列表
  */
 export async function getExecutionRecordsSessions(): Promise<SessionsListResponse> {
-  const response = await apiClient.get<SessionsListResponse>('/ext/channel_api/execution/records/sessions')
+  const response = await apiClient.get<SessionsListResponse>(MONITORING_ENDPOINTS.mon_execution_records_sessions)
   return response.data
 }
 
@@ -140,7 +141,7 @@ export async function getExecutionRecordsSessions(): Promise<SessionsListRespons
  */
 export async function getExecutionRecord(recordId: string): Promise<ExecutionRecord | null> {
   try {
-    const response = await apiClient.get<ExecutionRecord>(`/ext/channel_api/execution/records/${recordId}`)
+    const response = await apiClient.get<ExecutionRecord>(MONITORING_ENDPOINTS.mon_execution_record_get.replace('{record_id}', recordId))
     return response.data
   } catch (error) {
     console.error('[ExecutionRecordsAPI] 获取执行记录失败:', error)
@@ -160,7 +161,7 @@ export async function getExecutionTree(
   maxDepth: number = 5,
 ): Promise<ExecutionRecordTreeResponse> {
   const response = await apiClient.get<ExecutionRecordTreeResponse>(
-    `/ext/channel_api/execution/records/tree/${sessionId}`,
+    MONITORING_ENDPOINTS.mon_execution_records_tree.replace('{session_id}', sessionId),
     { params: { max_depth: maxDepth } },
   )
   return response.data
@@ -174,7 +175,7 @@ export async function getExecutionTree(
  */
 export async function getChildrenRecords(parentId: string): Promise<ExecutionRecord[]> {
   const response = await apiClient.get<ExecutionRecord[]>(
-    `/ext/channel_api/execution/records/${parentId}/children`,
+    MONITORING_ENDPOINTS.mon_execution_record_children.replace('{record_id}', parentId),
   )
   return response.data || []
 }
@@ -187,7 +188,7 @@ export async function getChildrenRecords(parentId: string): Promise<ExecutionRec
  */
 export async function deleteExecutionRecord(recordId: string): Promise<boolean> {
   try {
-    await apiClient.delete(`/ext/channel_api/execution/records/${recordId}`)
+    await apiClient.delete(MONITORING_ENDPOINTS.mon_execution_record_delete.replace('{record_id}', recordId))
     return true
   } catch (error) {
     console.error('[ExecutionRecordsAPI] 删除执行记录失败:', error)
@@ -204,7 +205,7 @@ export async function deleteExecutionRecord(recordId: string): Promise<boolean> 
 export async function deleteExecutionRecordsBySession(sessionId: string): Promise<number> {
   try {
     const response = await apiClient.delete<{ deleted_count: number }>(
-      `/ext/channel_api/execution/records/session/${sessionId}`,
+      MONITORING_ENDPOINTS.mon_execution_records_delete_by_session.replace('{session_id}', sessionId),
     )
     return response.data.deleted_count || 0
   } catch (error) {

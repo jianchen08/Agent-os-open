@@ -82,7 +82,17 @@ function resetStores() {
     sidebarCollapsed: false,
     workspaceCollapsed: false,
     workspaceMaximized: false,
+    sidebarRatio: null,
+    workspacePanelRatio: null,
   })
+}
+
+/** jsdom 无布局：给容器造一个非零 rect（拖拽比例计算的基准） */
+function mockRect(el: Element, left: number, width: number) {
+  el.getBoundingClientRect = () => ({
+    x: left, y: 0, left, top: 0, right: left + width, bottom: 600,
+    width, height: 600, toJSON: () => ({}),
+  }) as DOMRect
 }
 
 describe('FiveSpaceLayout — 响应式两档（768px 分界，平板=触屏桌面）', () => {
@@ -108,8 +118,67 @@ describe('FiveSpaceLayout — 响应式两档（768px 分界，平板=触屏桌�
     expect(screen.getByTestId('sidebar-content')).toBeInTheDocument()
     // 桌面形态：Sidebar 由调用方传入并以 Splitter 面板呈现
     expect(screen.getByTestId('sidebar-panel')).toBeInTheDocument()
+    // 布局 v6：图标带让位从行容器下移到各区域——展开的区域自顶全高，
+    // 顶角图标落在所属区域边角内（位置恒定、面板让位而非图标移动）
+    const rowWrapper = screen.getByTestId('chat-content').parentElement?.parentElement
+    expect(rowWrapper?.className).not.toContain('pt-10')
+    expect(screen.getByTestId('sidebar-panel').className).toContain('pt-10')
+    // 区域锚点（DSH 皮肤位置路由的转译落点=我方 data-region；DSH 词汇
+    // 锚点已废——适配器递送层做选择器转译，组件不贴 DSH 名字）
+    expect(screen.getByTestId('sidebar-panel').getAttribute('data-region')).toBe('sidebar')
+    expect(screen.getByTestId('sidebar-panel').getAttribute('data-dsh-surface')).toBeNull()
+    expect(screen.getByTestId('sidebar-panel').getAttribute('data-pane')).toBeNull()
     // 无常驻底栏（状态栏已删除，异常走 AlertBanner 浮现）
     expect(screen.queryByTestId('status-bar')).not.toBeInTheDocument()
+  })
+
+  it('面板拖拽调宽：手柄按下拖动写入比例，面板宽度实时跟随（clamp 200~360）', () => {
+    setViewportWidth(1280)
+    renderLayout()
+    const handle = screen.getByTestId('sidebar-resize-handle')
+    const aside = screen.getByTestId('sidebar-panel')
+    expect(aside.style.width).toBe('248px') // 无比例=默认宽
+    // jsdom 无布局：手柄父容器（行）与 [data-region=chat]（avail 来源）造非零 rect
+    mockRect(handle.parentElement as Element, 0, 1000)
+    mockRect(document.querySelector('[data-region="chat"]') as Element, 0, 1000)
+
+    fireEvent.pointerDown(handle, { clientX: 300 })
+    act(() => {
+      fireEvent.pointerMove(window, { clientX: 400 }) // 拖到 40%
+    })
+    expect(useUIStore.getState().sidebarRatio).toBeCloseTo(0.4)
+    expect(aside.style.width).toBe('360px') // 1000×0.4=400 → clamp 上限 360
+
+    fireEvent.pointerUp(window)
+    // 抬起后窗口监听摘除：后续 move 不再写比例
+    act(() => {
+      fireEvent.pointerMove(window, { clientX: 900 })
+    })
+    expect(useUIStore.getState().sidebarRatio).toBeCloseTo(0.4)
+  })
+
+  it('工作区拖拽调宽：向左拖增宽（比例取补），向右拖缩窄，clamp 作用于最终比例', () => {
+    setViewportWidth(1280)
+    renderLayout()
+    const handle = screen.getByTestId('workspace-resize-handle')
+    const panels = document.querySelectorAll('[data-region="workspace"]')
+    const panel = panels[panels.length - 1] as HTMLElement
+    mockRect(handle.parentElement as Element, 0, 1000)
+    mockRect(document.querySelector('[data-region="chat"]') as Element, 0, 1000)
+
+    fireEvent.pointerDown(handle, { clientX: 800 })
+    act(() => {
+      fireEvent.pointerMove(window, { clientX: 500 }) // 手柄向左移：工作区增宽
+    })
+    expect(useUIStore.getState().workspacePanelRatio).toBeCloseTo(0.5) // 1-0.5（上限）
+    expect(panel.style.width).toBe('500px')
+    act(() => {
+      fireEvent.pointerMove(window, { clientX: 700 }) // 向右拖回：缩窄到 30%
+    })
+    // 回归锁定：clamp 曾加在原始光标比上（≤0.5），右半区拖动恒 0.5=拖不动
+    expect(useUIStore.getState().workspacePanelRatio).toBeCloseTo(0.3)
+    expect(panel.style.width).toBe('360px') // 1000×0.3=300 → min 360 兜底
+    fireEvent.pointerUp(window)
   })
 
   it('768px 为分界：767 走移动形态（单屏，无 Splitter 侧栏面板）', () => {

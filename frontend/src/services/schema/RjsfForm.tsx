@@ -389,7 +389,7 @@ function extractUriDeps(uri: string): string[] {
   return deps
 }
 
-/** 用当前表单值渲染 datasourceUri 模板：/ext/opts?provider={{provider}} → 实值替换 */
+/** 用当前表单值渲染 datasourceUri 模板：{{provider}} 等占位符 → 实值替换 */
 function resolveTemplateUri(uri: string, formData: Record<string, unknown> | undefined): string {
   return uri.replace(TEMPLATE_RE, (_m, name: string) => {
     const v = formData?.[name]

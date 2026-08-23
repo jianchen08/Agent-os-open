@@ -6,7 +6,7 @@
  */
 
 import { test, expect } from '../fixtures';
-import { loginAndNavigateTo, navigateTo, ROUTES } from '../helpers/navigation';
+import { loginAndNavigateTo, ROUTES } from '../helpers/navigation';
 import { loginAndWaitReady } from '../helpers/auth';
 import { sendChatMessage } from '../utils/test-helpers';
 import { waitForAssistantMessage, waitForToolCard, waitForToolCompleted } from '../helpers/assertions';

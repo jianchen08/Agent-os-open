@@ -368,13 +368,14 @@ describe('ErrorRecoveryFlow — AC-1l: 错误恢复流程', () => {
   //   订阅已随 2026-08 死接线清理移除——原用例断言的是从未真实生效的链路）
   // -----------------------------------------------------------------------
   describe('useRealtimeEvents 任务事件集成', () => {
-    it('task_status_update 失败态应更新 longTermTaskStore 并 bump 工作区版本', async () => {
-      const { useLongTermTaskStore } = await import('@/stores/longTermTaskStore')
-      useLongTermTaskStore.setState({
-        tasks: [
-          { id: 'task-err', title: '失败恢复任务', status: 'running', currentPhase: 'execute' },
-        ] as never,
-      })
+    it('task_status_update 失败态应更新长期任务缓存并 bump 工作区版本', async () => {
+      // 批次 4 query 化：tasks 数据在 query cache（queryKeys.longTermTasks），
+      // 经全局 queryClient 单例播种/断言（WS handler 非组件路径不依赖 Provider）
+      const { queryClient } = await import('@/services/query/queryClient')
+      const { queryKeys } = await import('@/services/query/queryKeys')
+      queryClient.setQueryData(queryKeys.longTermTasks, [
+        { id: 'task-err', title: '失败恢复任务', status: 'running', currentPhase: 'execute' },
+      ] as never)
 
       renderHook(() => useRealtimeEvents())
 
@@ -387,15 +388,13 @@ describe('ErrorRecoveryFlow — AC-1l: 错误恢复流程', () => {
         })
       })
 
-      const task = useLongTermTaskStore
-        .getState()
-        .tasks.find((t: { id: string }) => t.id === 'task-err') as {
-        status: string
-        error?: string
-      }
+      const tasks = queryClient.getQueryData<{ id: string; status: string; error?: string }[]>(
+        queryKeys.longTermTasks,
+      ) ?? []
+      const task = tasks.find((t) => t.id === 'task-err')
       expect(task).toBeDefined()
-      expect(task.status).toBe('failed')
-      expect(task.error).toBe('连接超时')
+      expect(task!.status).toBe('failed')
+      expect(task!.error).toBe('连接超时')
       expect(useLayoutModeStore.getState().workspaceDataVersion).toBeGreaterThan(versionBefore)
     })
   })

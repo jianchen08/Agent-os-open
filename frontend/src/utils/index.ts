@@ -25,7 +25,7 @@ export {
 export type { LoginFormData, RegisterFormData } from './validation'
 
 // 导出存储工具
-export { storage, authStorage, uiStorage, STORAGE_KEYS } from './storage'
+export { storage, uiStorage, STORAGE_KEYS } from './storage'
 export type { StorageKey } from './storage'
 
 // 导出数据映射工具
