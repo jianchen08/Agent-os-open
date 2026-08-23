@@ -376,6 +376,8 @@ export function PipelineManagerWidget(_rawProps: Record<string, unknown>) {
       threadTop.set(tid, top.key)
     }
     const childrenMap = new Map<string, PipelineTreeNode[]>()
+    // 节点注册表（key → 节点；childrenMap 归属合并的目标查找）
+    const nodeByKey = new Map<string, PipelineTreeNode>()
     const roots: PipelineTreeNode[] = []
     const pushChild = (parentKey: string, node: PipelineTreeNode) => {
       const list = childrenMap.get(parentKey) ?? []
@@ -411,13 +413,16 @@ export function PipelineManagerWidget(_rawProps: Record<string, unknown>) {
         children: [],
       }
       taskNodes.set(taskId, node)
+      nodeByKey.set(node.key, node)
       return node
     }
     // 1) 任务管道 → 挂到所属任务节点下（任务节点展开显示管道）
     for (const e of filteredPipelineEntries) {
       if (e.kind === 'task' && e.taskId) {
         const parentNode = ensureTaskNode(e.taskId)
-        parentNode.children.push({ key: e.key, entry: e, depth: 0, children: [] })
+        const childNode: PipelineTreeNode = { key: e.key, entry: e, depth: 0, children: [] }
+        nodeByKey.set(e.key, childNode)
+        parentNode.children.push(childNode)
         continue
       }
       // 2) 非任务管道（会话主管道/直接子管道/孤儿）
@@ -430,6 +435,7 @@ export function PipelineManagerWidget(_rawProps: Record<string, unknown>) {
         parentKey = threadTop.get(e.threadId)
       }
       const node: PipelineTreeNode = { key: e.key, entry: e, depth: 0, children: [] }
+      nodeByKey.set(e.key, node)
       if (parentKey && (entryByKey.has(parentKey) || childrenMap.has(parentKey))) {
         pushChild(parentKey, node)
       } else {
@@ -463,6 +469,12 @@ export function PipelineManagerWidget(_rawProps: Record<string, unknown>) {
       } else {
         roots.push(node)
       }
+    }
+    // childrenMap 并入渲染树（pushChild 仅登记，未并入则子层级整体丢失）
+    for (const [parentKey, nodes] of childrenMap) {
+      const parent = nodeByKey.get(parentKey)
+      if (parent) parent.children.push(...nodes)
+      else roots.push(...nodes)
     }
     const sortByStart = (a: PipelineTreeNode, b: PipelineTreeNode) => {
       const sa = a.entry?.startedAt ?? a.task?.title ?? ''

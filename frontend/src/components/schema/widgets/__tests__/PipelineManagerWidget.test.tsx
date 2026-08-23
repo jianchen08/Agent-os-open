@@ -114,19 +114,51 @@ const seed = vi.hoisted(() => {
       metadata: { ws_meta: { path: 'D:/ws/copy_1', mode: 'worktree' } },
     },
   ]
+  /** 会话主管道条目场景：主管道有 runs 快照但任务列表无对应任务（kind=session 条目） */
+  const SESSION_MAIN_RUNS: Record<string, unknown> = {
+    mainRun: {
+      pipeline_id: 'mainpipe111',
+      run_id: 'run-main',
+      thread_id: 'th-1',
+      status: 'running',
+      started_at: '2026-08-22T00:00:00Z',
+    },
+    subRun: {
+      pipeline_id: 'subpipe222',
+      run_id: 'run-sub',
+      thread_id: 'th-1',
+      status: 'running',
+      started_at: '2026-08-22T00:01:00Z',
+    },
+  }
+  /** 子任务：parent_task_id = 主管道全 id（主管道是会话条目，非任务节点——"父=管道"分支） */
+  const SESSION_MAIN_TASKS: Record<string, unknown>[] = [
+    {
+      id: 'task-sub1',
+      title: '子任务A',
+      status: 'running',
+      pipeline_run_id: 'subpipe222',
+      parent_task_id: 'mainpipe111',
+      agent_name: 'general_agent',
+    },
+  ]
   const mockUseAllTasksQuery = vi.fn(() => ({ data: FAKE_ALL_TASKS }))
+  const mockUsePipelineRunsQuery = vi.fn(() => ({ data: FAKE_RUNS }))
   return {
     FAKE_RUNS,
     FAKE_STATES,
     FAKE_ALL_TASKS,
     SUBTASK_TASKS,
     WS_TASKS,
+    SESSION_MAIN_RUNS,
+    SESSION_MAIN_TASKS,
     mockUseAllTasksQuery,
+    mockUsePipelineRunsQuery,
   }
 })
 
 vi.mock('@/hooks/queries/usePipelineRunsQuery', () => ({
-  usePipelineRunsQuery: () => ({ data: seed.FAKE_RUNS }),
+  usePipelineRunsQuery: seed.mockUsePipelineRunsQuery,
   usePipelineStatesQuery: () => ({ data: seed.FAKE_STATES }),
 }))
 vi.mock('@/hooks/queries/useAllTasksQuery', () => ({
@@ -153,6 +185,7 @@ describe('PipelineManagerWidget', () => {
   beforeEach(() => {
     // 默认播种全量任务；子任务用例覆盖为 SUBTASK_TASKS
     seed.mockUseAllTasksQuery.mockReturnValue({ data: seed.FAKE_ALL_TASKS })
+    seed.mockUsePipelineRunsQuery.mockReturnValue({ data: seed.FAKE_RUNS })
   })
 
   it('未知状态任务保留且显示原始状态', async () => {
@@ -193,6 +226,34 @@ describe('PipelineManagerWidget', () => {
     // 子任务行带缩进（depth>0 的 paddingLeft），且出现在主管道行的同一子树容器内
     const padding = taskRow?.closest('div')?.getAttribute('style') ?? ''
     expect(padding).toMatch(/padding-left:\s*2[48]px/)
+  })
+
+  it('子任务（parent_task_id=会话主管道条目）渲染为该条目的子节点', async () => {
+    seed.mockUsePipelineRunsQuery.mockReturnValue({ data: seed.SESSION_MAIN_RUNS })
+    seed.mockUseAllTasksQuery.mockReturnValue({ data: seed.SESSION_MAIN_TASKS })
+    renderWithProviders(<PipelineManagerWidget />)
+    // 主管道条目（kind=session）+ 子任务条目行都渲染（此前子任务整体丢失）
+    expect((await screen.findAllByText('子任务A')).length).toBeGreaterThanOrEqual(1)
+    // 子任务条目行带缩进（depth>0，挂主管道条目下而非顶层平铺）
+    const subtaskRow = (await screen.findAllByText('子任务A')).find((el) =>
+      el.closest('div')?.className.includes('hover:bg-accent'),
+    )
+    expect(subtaskRow).toBeDefined()
+    const padding = subtaskRow?.closest('div')?.getAttribute('style') ?? ''
+    expect(padding).toMatch(/padding-left:\s*2[48]px/)
+  })
+
+  it('挂会话主管道下的非任务子管道仍渲染（防回归）', async () => {
+    seed.mockUsePipelineRunsQuery.mockReturnValue({ data: seed.SESSION_MAIN_RUNS })
+    renderWithProviders(<PipelineManagerWidget />)
+    // 会话列表 mock 为空 → 条目名回退"会话 th-1"（主管道 + 子管道同名）
+    const rows = await screen.findAllByText('会话 th-1')
+    expect(rows.length).toBeGreaterThanOrEqual(1)
+    // 至少一行带缩进（depth>0 = 挂主管道条目下的直接子管道；主管道本身 depth=0 无缩进）
+    const indented = rows.some(
+      (el) => el.closest('div')?.getAttribute('style')?.match(/padding-left:\s*2[48]px/),
+    )
+    expect(indented).toBe(true)
   })
 
   it('任务节点渲染打开工作空间按钮并开 workspace 文件树标签（0.1 对齐）', async () => {
