@@ -49,6 +49,7 @@ vi.mock('../router', () => ({
 }))
 
 import { handleReconnected } from '../lifecycleHandlers'
+import { terminatePipeline } from '../handlers/utils'
 
 const STREAMING_PIPELINE = 'pipe-streaming-001'
 const THREAD_ID = 'thread-001'
@@ -130,5 +131,98 @@ describe('handleReconnected - WS 重连断线补漏', () => {
     // Assert：没有正在流式的管道，无需补漏、无需警告
     expect(mockStore.loadPipelineMessages).not.toHaveBeenCalled()
     expect(mockAddNotification).not.toHaveBeenCalled()
+  })
+})
+
+describe('handleReconnected - interrupted 宽限重查（2026-08-23）', () => {
+  beforeEach(() => {
+    vi.useFakeTimers()
+    mockStore.streamingState = {}
+    mockStore.messagesByPipeline = {}
+    mockStore.pipelineSessionMap = {}
+    mockStore.loadPipelineMessages.mockReset()
+    mockStore.loadPipelineMessages.mockResolvedValue({ ok: true })
+    mockStore.updateMessage.mockClear()
+    mockStore.appendPart.mockClear()
+    mockAddNotification.mockClear()
+    vi.mocked(terminatePipeline).mockClear()
+  })
+
+  afterEach(() => {
+    vi.useRealTimers()
+  })
+
+  it('重连瞬间不立即标 interrupted（活流误判防护）', async () => {
+    setupStreamingPipeline()
+
+    await handleReconnected()
+
+    // 宽限期内绝不把 streaming 消息标成 interrupted（服务端可能仍在跑）
+    expect(mockStore.updateMessage).not.toHaveBeenCalledWith(
+      STREAMING_PIPELINE,
+      'msg-001',
+      expect.objectContaining({ status: 'interrupted' }),
+    )
+  })
+
+  it('宽限期 20s 后零活动 → 标 interrupted + terminate', async () => {
+    setupStreamingPipeline()
+
+    await handleReconnected()
+    await vi.advanceTimersByTimeAsync(20_000)
+
+    expect(mockStore.updateMessage).toHaveBeenCalledWith(
+      STREAMING_PIPELINE,
+      'msg-001',
+      { status: 'interrupted' },
+    )
+    expect(mockStore.appendPart).toHaveBeenCalledWith(
+      STREAMING_PIPELINE,
+      'msg-001',
+      expect.objectContaining({ notificationType: 'stream_interrupted' }),
+    )
+    expect(terminatePipeline).toHaveBeenCalledWith(STREAMING_PIPELINE)
+  })
+
+  it('宽限期内内容增长（活流恢复）→ 不标中断不 terminate', async () => {
+    setupStreamingPipeline()
+
+    await handleReconnected()
+    // 模拟断线恢复后 chunk 继续到达：内容签名变化
+    mockStore.messagesByPipeline[STREAMING_PIPELINE] = [
+      {
+        id: 'msg-001',
+        role: 'assistant',
+        status: 'streaming',
+        content: '',
+        parts: [{ type: 'text', content: '恢复的流式文本' }],
+      },
+    ]
+    await vi.advanceTimersByTimeAsync(20_000)
+
+    expect(mockStore.updateMessage).not.toHaveBeenCalledWith(
+      STREAMING_PIPELINE,
+      'msg-001',
+      expect.objectContaining({ status: 'interrupted' }),
+    )
+    expect(terminatePipeline).not.toHaveBeenCalledWith(STREAMING_PIPELINE)
+  })
+
+  it('宽限期内已收尾（new_message 到达）→ 仅清 streamingState 不打扰消息', async () => {
+    setupStreamingPipeline()
+
+    await handleReconnected()
+    // 模拟 new_message 已把占位收尾
+    mockStore.messagesByPipeline[STREAMING_PIPELINE] = [
+      { id: 'msg-001', role: 'assistant', status: 'completed', parts: [] },
+    ]
+    await vi.advanceTimersByTimeAsync(20_000)
+
+    expect(mockStore.updateMessage).not.toHaveBeenCalledWith(
+      STREAMING_PIPELINE,
+      'msg-001',
+      expect.objectContaining({ status: 'interrupted' }),
+    )
+    expect(terminatePipeline).toHaveBeenCalledWith(STREAMING_PIPELINE)
   })
 })

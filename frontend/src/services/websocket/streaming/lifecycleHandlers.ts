@@ -74,25 +74,61 @@ export async function handleReconnected(): Promise<void> {
   )
 
   // streamingState 中已有旧记录，占位创建/更新失败，AI 回复无法显示。
+  //
+  // F2 宽限重查（2026-08-23 修订）：重连≠引擎死亡——服务端管道可能仍在跑
+  // （长 LLM 轮），立即把「backfill 后仍 streaming」标成 interrupted 会把活流
+  // 误判为中断（真机复现：重连 1s 后标中断、20s 后 new_message 到达才自愈，
+  // 期间用户看到假「输出被中断」警告）。改为延迟复查：宽限窗口内内容签名
+  // 无任何变化（无 chunk 恢复、无 new_message/stream_end 收尾）且仍 streaming
+  // 才标真·丢失；有活动则留给流式收尾事件 / 90s 单消息兜底处理。
+  const INTERRUPTED_GRACE_MS = 20_000
+  const streamingSig = (msgs: any[]) =>
+    msgs
+      .filter((m: any) => m.role === 'assistant' && m.status === 'streaming')
+      .map((m: any) =>
+        `${m.id}:${(m.content || '').length}:${(m.parts || [])
+          .map((p: any) => `${p.type}${(p.content || '').length}`)
+          .join(',')}`)
+      .join('|')
+  const sigAtReconnect = new Map<string, string>()
   for (const pipelineId of streamingPipelineIds) {
-    // F2：backfill 后仍 streaming 的消息 = 未能从后端恢复（真·丢失，如服务端杀流）。
-    // 标记 interrupted + 追加 warning system part，让用户看到"输出被中断"而非误以为完成。
     const messages = pipelineStore.messagesByPipeline[pipelineId] || []
-    for (const msg of messages as any[]) {
-      if (msg.role === 'assistant' && msg.status === 'streaming') {
-        pipelineStore.updateMessage(pipelineId, msg.id, { status: 'interrupted' } as any)
-        pipelineStore.appendPart(pipelineId, msg.id, {
+    sigAtReconnect.set(pipelineId, streamingSig(messages as any[]))
+  }
+  setTimeout(() => {
+    const store = usePipelineMessageStore.getState()
+    for (const pipelineId of streamingPipelineIds) {
+      const messages = (store.messagesByPipeline[pipelineId] || []) as any[]
+      const stillStreaming = messages.filter(
+        (m: any) => m.role === 'assistant' && m.status === 'streaming',
+      )
+      if (stillStreaming.length === 0) {
+        // 宽限窗内已收尾（new_message/stream_end/backfill 任一路径）：
+        // 只清 streamingState 残留，不打扰。
+        terminatePipeline(pipelineId)
+        continue
+      }
+      if (streamingSig(messages) !== (sigAtReconnect.get(pipelineId) ?? '')) {
+        // 活流（chunk 恢复/内容增长）：不标中断，留给收尾事件/90s 兜底。
+        continue
+      }
+      // F2：宽限窗内零活动且仍 streaming = 未能从后端恢复（真·丢失，如服务端
+      // 杀流）。标记 interrupted + 追加 warning system part，让用户看到"输出
+      // 被中断"而非误以为完成。
+      for (const msg of stillStreaming) {
+        store.updateMessage(pipelineId, msg.id, { status: 'interrupted' } as any)
+        store.appendPart(pipelineId, msg.id, {
           type: 'system',
           content: '（输出被中断，内容可能不完整）',
           level: 'warning',
           notificationType: 'stream_interrupted',
         } as any)
       }
+      // 清理 streamingState（只清本管道——ADR 2026-08-21 不再顺带清 threadId）
+      terminatePipeline(pipelineId)
+      logger.info('[streaming] 宽限复查无活动，终止残留流式管道 %s', pipelineId.slice(0, 12))
     }
-    // 清理 streamingState（只清本管道——ADR 2026-08-21 不再顺带清 threadId）
-    terminatePipeline(pipelineId)
-    logger.info('[streaming] 终止残留流式管道 %s，清理 streamingState', pipelineId.slice(0, 12))
-  }
+  }, INTERRUPTED_GRACE_MS)
 
   // 仅补漏失败时提示（此时消息确实可能丢失，需用户手动刷新）
   if (failedPipelines.length > 0) {

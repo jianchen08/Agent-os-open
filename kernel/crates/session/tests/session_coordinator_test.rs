@@ -304,3 +304,100 @@ async fn metrics_connections_gauge_tracks_registry_size() {
     coord.register("user-B", sink2);
     assert_eq!(coord.metrics().snapshot().connections, 2);
 }
+
+/// 建连重放（FIX 2026-08-23）：replay_all_for_user 按 watermark 一次性重放
+/// 该 user 名下全部线程的缓冲事件——B3（首条入站 thread_id 触发）在前端重连
+/// 后永远等不到触发（前端不重发 active_thread_changed、心跳 thread 为空），
+/// 断连期间落缓冲的 new_message 无此方法则永不重放（真机：回复不显示直到刷新）。
+#[tokio::test]
+async fn replay_all_for_user_delivers_missed_events_for_all_user_threads() {
+    let coord = SessionCoordinator::default();
+
+    // user-A 有两条线程（主会话 + 子任务派发键），断连期间各落缓冲事件
+    let (sink1, _recv1) = MockSink::with_state(false);
+    coord.register("user-A", sink1);
+    coord.register_thread("thread-main", "user-A");
+    coord.register_thread("pipeline-sub", "user-A");
+    // user-B 的线程不应被 user-A 的重放波及
+    coord.register_thread("thread-b", "user-B");
+    coord
+        .emit_event("thread-main", "new_message", serde_json::json!({"m": 1}))
+        .await;
+    coord
+        .emit_event("pipeline-sub", "stream_chunk", serde_json::json!({"c": 1}))
+        .await;
+    coord
+        .emit_event("thread-b", "new_message", serde_json::json!({"m": "B"}))
+        .await;
+
+    // 重连：watermark=0（全部未见过），floor 取当前序（无并发新事件）
+    let (sink2, recv2) = MockSink::online();
+    let floor = coord.current_sequence().await;
+    let sink2_dyn: Arc<dyn EventSink> = sink2;
+    coord.replay_all_for_user("user-A", 0, floor, &sink2_dyn).await;
+
+    let (seq_main, seq_sub) = {
+        let msgs = recv2.lock().unwrap();
+        let types: Vec<&str> = msgs.iter().map(|m| m["type"].as_str().unwrap()).collect();
+        assert!(types.contains(&"new_message"), "主线程 new_message 应重放");
+        assert!(types.contains(&"stream_chunk"), "子任务线程 chunk 应重放");
+        assert!(
+            !msgs.iter().any(|m| m["data"]["m"] == "B"),
+            "别人的线程事件不得混入"
+        );
+        let seq_main = msgs
+            .iter()
+            .find(|m| m["type"] == "new_message")
+            .and_then(|m| m["sequence"].as_u64())
+            .expect("重放事件携带全局 sequence");
+        let seq_sub = msgs
+            .iter()
+            .find(|m| m["type"] == "stream_chunk")
+            .and_then(|m| m["sequence"].as_u64())
+            .expect("重放事件携带全局 sequence");
+        (seq_main, seq_sub)
+    };
+
+    // watermark 推进到主线程事件序后：只剩子任务事件重放
+    let (sink3, recv3) = MockSink::online();
+    let sink3_dyn: Arc<dyn EventSink> = sink3;
+    coord
+        .replay_all_for_user("user-A", seq_main, floor, &sink3_dyn)
+        .await;
+    let msgs = recv3.lock().unwrap();
+    assert_eq!(msgs.len(), 1, "只应重放 (watermark, floor] 内的子任务事件");
+    assert_eq!(msgs[0]["type"], "stream_chunk");
+    assert_eq!(
+        msgs[0]["sequence"].as_u64().unwrap(),
+        seq_sub,
+        "重放事件保持原 sequence"
+    );
+}
+
+/// floor 语义：floor 之后的 sequence 经活动连接实时送达，重放不得重复推送。
+#[tokio::test]
+async fn replay_all_for_user_respects_floor_to_avoid_duplicates() {
+    let coord = SessionCoordinator::default();
+    let (sink1, _recv1) = MockSink::online();
+    coord.register("user-A", sink1);
+    coord.register_thread("thread-1", "user-A");
+
+    coord
+        .emit_event("thread-1", "new_message", serde_json::json!({"m": 1}))
+        .await;
+    // floor 定格在 seq1 之后、seq2 之前——seq2 视为“已实时送达”，不重放
+    let floor = coord.current_sequence().await;
+    coord
+        .emit_event("thread-1", "stream_chunk", serde_json::json!({"c": 2}))
+        .await;
+    let seq2 = coord.current_sequence().await;
+
+    let (sink2, recv2) = MockSink::online();
+    let sink2_dyn: Arc<dyn EventSink> = sink2;
+    coord.replay_all_for_user("user-A", 0, floor, &sink2_dyn).await;
+    let msgs = recv2.lock().unwrap();
+    let seqs: Vec<u64> = msgs.iter().map(|m| m["sequence"].as_u64().unwrap()).collect();
+    assert!(!seqs.contains(&seq2), "floor 之后的事件不得重复重放");
+    assert_eq!(seqs.len(), 1, "只应重放 floor 之前的事件");
+    assert!(seqs[0] <= floor);
+}

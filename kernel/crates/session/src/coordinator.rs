@@ -247,6 +247,67 @@ impl SessionCoordinator {
             }
         }
     }
+
+    /// 当前全局 thread 序（重连重放的上界，见 [`EventBus::current_thread_sequence`]）。
+    pub async fn current_sequence(&self) -> u64 {
+        self.bus.current_thread_sequence().await
+    }
+
+    /// 断线重连：按 watermark 一次性重放该 user 名下全部线程的缓冲事件。
+    ///
+    /// B3（首条入站 thread_id 触发单线程重放）存在触发饥饿——前端重连后不重发
+    /// active_thread_changed、心跳的 thread_id 为空，断连期间落缓冲的事件永远
+    /// 等不到触发（2026-08-23 真机复现：new_message delivered=false 进缓冲，
+    /// 重连后 90s 前端零帧到达，回复不显示直到手动刷新）。本方法在连接建立时
+    /// 主动遍历 registry 中该 user 的全部线程补放；`floor` 之后的 sequence 由
+    /// 当前活动连接实时送达，重放只发 (last_sequence, floor] 防重复。
+    pub async fn replay_all_for_user(
+        &self,
+        user_id: &str,
+        last_sequence: u64,
+        floor: u64,
+        sink: &Arc<dyn crate::EventSink>,
+    ) {
+        let threads: Vec<String> = self
+            .registry
+            .list_threads()
+            .into_iter()
+            .filter(|(_t, uid)| uid == user_id)
+            .map(|(t, _u)| t)
+            .collect();
+        if threads.is_empty() {
+            return;
+        }
+        let mut replayed_any = false;
+        let mut resync_needed = false;
+        for thread_id in &threads {
+            match self.replay.replay(thread_id, last_sequence).await {
+                ReplayResult::Events { events, .. } => {
+                    for ev in events {
+                        // 同 thread 缓冲按 sequence 升序，越过 floor 即可停
+                        if ev.sequence > floor {
+                            break;
+                        }
+                        if !sink.send_text(&ev.payload).await {
+                            return;
+                        }
+                        replayed_any = true;
+                    }
+                }
+                ReplayResult::ResyncRequired => resync_needed = true,
+            }
+        }
+        if replayed_any {
+            self.metrics.inc_replay_hit();
+        }
+        if resync_needed {
+            let resync = json!({"type": "resync_required", "data": {"reason": "replay_buffer_overflow"}});
+            let _ = sink
+                .send_text(&serde_json::to_string(&resync).unwrap_or_default())
+                .await;
+            self.metrics.inc_replay_miss();
+        }
+    }
 }
 
 impl Default for SessionCoordinator {

@@ -233,6 +233,13 @@ impl FrontendEventBus {
             }
         }
     }
+
+    /// 当前全局 thread 序（只读，不递增）——重连重放上界用：register 时刻之后
+    /// 分配的 sequence 必然经当前活动连接实时送达，重放只需覆盖
+    /// (watermark, floor] 区间，避免与实时投递重复推送同一事件。
+    pub async fn current_thread_sequence(&self) -> u64 {
+        *self.global_sequence.lock().await
+    }
 }
 
 /// 构造 widget_event 信封（ADR §3.5 第2条 + §7.3 事件协议）。

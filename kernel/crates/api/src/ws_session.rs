@@ -153,6 +153,24 @@ async fn run_socket_loop(
         .await;
     info!(user = %user_id, "WS 会话已建立");
 
+    // 断线重连（last_sequence > 0）：连接建立即按 watermark 重放该 user 全部
+    // 线程的缓冲事件。不能依赖 B3（首条带 thread_id 的入站消息触发）——前端
+    // 重连后不重发 active_thread_changed、心跳 thread_id 为空，B3 触发饥饿，
+    // 断连期间落缓冲的 new_message 永远等不到重放（2026-08-23 真机复现：
+    // 回复落库但前端不显示，刷新才出现）。floor 之后的事件经当前连接实时
+    // 送达，重放只发 (last_sequence, floor] 防重复。
+    let replayed_for_task = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    if let Some(ls) = last_sequence.filter(|&l| l > 0) {
+        let floor = session.current_sequence().await;
+        let sink_for_replay: Arc<dyn agentos_session::EventSink> = sink.clone();
+        session
+            .replay_all_for_user(&user_id, ls, floor, &sink_for_replay)
+            .await;
+        // 建连重放已覆盖全部已知线程：预置标志防 B3 对首条入站消息二次重放
+        //（stream_chunk 重复推送会导致前端文本双写）。
+        replayed_for_task.store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+
     // 出站排空任务：从 channel 取消息写入 socket
     let mut send_task = tokio::spawn(async move {
         while let Some(text) = out_rx.recv().await {
@@ -181,8 +199,8 @@ async fn run_socket_loop(
     let session_for_unreg = session.clone();
     let sink_id = sink.id();
     let user_id_for_task = user_id.clone();
-    // B3：每连接一次的回放标志——首个带 thread_id 的入站消息触发 replay_missed。
-    let replayed_for_task = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    // B3：每连接一次的回放标志（建连重放已消费时为 true）——首个带 thread_id
+    // 的入站消息触发 replay_missed。
     let mut recv_task = tokio::spawn(async move {
         while let Some(Ok(msg)) = receiver.next().await {
             match msg {

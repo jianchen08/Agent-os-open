@@ -76,6 +76,8 @@ plugins:
     enabled: true
   memory_tool:
     enabled: true
+  omnisearch:
+    enabled: true
 defaults:
   enabled: true
   activation: lazy

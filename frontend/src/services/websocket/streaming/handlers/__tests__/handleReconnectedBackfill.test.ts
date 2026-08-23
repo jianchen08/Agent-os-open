@@ -103,15 +103,25 @@ describe('handleReconnected 刷新后 backfill 覆盖子管道 (F1)', () => {
     expect(loadCalls).not.toContain(MAIN_PID)
   })
 
-  it('F2: backfill 后仍 streaming 的消息标记 interrupted + warning part', async () => {
-    // loadPipelineMessages mock 不更新消息（模拟后端无记录、未能恢复）→ 仍 streaming
-    await handleReconnected()
-    const msg = usePipelineMessageStore.getState().messagesByPipeline[SUB_PID][0]
-    expect(msg.status).toBe('interrupted')
-    const sysPart = (msg.parts || []).find(
-      (p: any) => p.type === 'system' && p.notificationType === 'stream_interrupted',
-    )
-    expect(sysPart, '应追加 stream_interrupted warning part').toBeTruthy()
-    expect(sysPart.level).toBe('warning')
+  it('F2: backfill 后仍 streaming 的消息——宽限期零活动后标记 interrupted + warning part', async () => {
+    // loadPipelineMessages mock 不更新消息（模拟后端无记录、未能恢复）→ 仍 streaming。
+    // 2026-08-23 宽限重查：重连瞬间不标（活流误判防护），20s 零活动后才标真·丢失。
+    vi.useFakeTimers()
+    try {
+      await handleReconnected()
+      // 宽限期内不立即标中断
+      let msg = usePipelineMessageStore.getState().messagesByPipeline[SUB_PID][0]
+      expect(msg.status).toBe('streaming')
+      await vi.advanceTimersByTimeAsync(20_000)
+      msg = usePipelineMessageStore.getState().messagesByPipeline[SUB_PID][0]
+      expect(msg.status).toBe('interrupted')
+      const sysPart = (msg.parts || []).find(
+        (p: any) => p.type === 'system' && p.notificationType === 'stream_interrupted',
+      )
+      expect(sysPart, '应追加 stream_interrupted warning part').toBeTruthy()
+      expect(sysPart.level).toBe('warning')
+    } finally {
+      vi.useRealTimers()
+    }
   })
 })

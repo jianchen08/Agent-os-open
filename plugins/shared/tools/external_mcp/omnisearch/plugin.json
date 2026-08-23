@@ -32,35 +32,216 @@
     "tools": [
       {
         "name": "universal_search",
-        "description": "统一检索:index 模式向选定源并行广播(query 支持 site:/author:/since: 操作符,返回去重索引项+sources_used/failed);full 模式按 {source}_{id} 取全文(Markdown,带截断保护)"
+        "description": "统一检索:index 模式向选定源并行广播(query 支持 site:/author:/since: 操作符,返回去重索引项+sources_used/failed);full 模式按 {source}_{id} 取全文(Markdown,带截断保护)",
+        "input_schema": {
+          "properties": {
+            "mode": {
+              "title": "Mode",
+              "type": "string"
+            },
+            "query": {
+              "default": "",
+              "title": "Query",
+              "type": "string"
+            },
+            "target_id": {
+              "default": "",
+              "title": "Target Id",
+              "type": "string"
+            },
+            "sources": {
+              "default": "all",
+              "title": "Sources",
+              "type": "string"
+            },
+            "limit": {
+              "default": 10,
+              "title": "Limit",
+              "type": "integer"
+            },
+            "max_content_length": {
+              "default": 10000,
+              "title": "Max Content Length",
+              "type": "integer"
+            }
+          },
+          "required": [
+            "mode"
+          ],
+          "title": "universal_searchArguments",
+          "type": "object"
+        }
       },
       {
         "name": "search_papers",
-        "description": "多学术源聚合检索(arxiv/pubmed/crossref 等 25 源,返回逐源统计)"
+        "description": "多学术源聚合检索(arxiv/pubmed/crossref 等 25 源,返回逐源统计)",
+        "input_schema": {
+          "properties": {
+            "query": {
+              "title": "Query",
+              "type": "string"
+            },
+            "max_results_per_source": {
+              "default": 5,
+              "title": "Max Results Per Source",
+              "type": "integer"
+            },
+            "sources": {
+              "default": "all",
+              "title": "Sources",
+              "type": "string"
+            },
+            "year": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Year"
+            }
+          },
+          "required": [
+            "query"
+          ],
+          "title": "search_papersArguments",
+          "type": "object"
+        }
       },
       {
         "name": "search_stackoverflow",
-        "description": "StackOverflow 问题检索(score/answer_count/tags 元数据)"
+        "description": "StackOverflow 问题检索(score/answer_count/tags 元数据)",
+        "input_schema": {
+          "properties": {
+            "query": {
+              "title": "Query",
+              "type": "string"
+            },
+            "max_results": {
+              "default": 10,
+              "title": "Max Results",
+              "type": "integer"
+            }
+          },
+          "required": [
+            "query"
+          ],
+          "title": "search_stackoverflowArguments",
+          "type": "object"
+        }
       },
       {
         "name": "search_github_issues",
-        "description": "GitHub Issues 检索(repo/state/labels 元数据)"
+        "description": "GitHub Issues 检索(repo/state/labels 元数据)",
+        "input_schema": {
+          "properties": {
+            "query": {
+              "title": "Query",
+              "type": "string"
+            },
+            "max_results": {
+              "default": 10,
+              "title": "Max Results",
+              "type": "integer"
+            }
+          },
+          "required": [
+            "query"
+          ],
+          "title": "search_github_issuesArguments",
+          "type": "object"
+        }
       },
       {
         "name": "search_hackernews",
-        "description": "Hacker News 检索(points/评论数元数据)"
+        "description": "Hacker News 检索(points/评论数元数据)",
+        "input_schema": {
+          "properties": {
+            "query": {
+              "title": "Query",
+              "type": "string"
+            },
+            "max_results": {
+              "default": 10,
+              "title": "Max Results",
+              "type": "integer"
+            }
+          },
+          "required": [
+            "query"
+          ],
+          "title": "search_hackernewsArguments",
+          "type": "object"
+        }
       },
       {
         "name": "search_github_repos",
-        "description": "GitHub 仓库检索(stars/forks/language 元数据)"
+        "description": "GitHub 仓库检索(stars/forks/language 元数据)",
+        "input_schema": {
+          "properties": {
+            "query": {
+              "title": "Query",
+              "type": "string"
+            },
+            "max_results": {
+              "default": 10,
+              "title": "Max Results",
+              "type": "integer"
+            }
+          },
+          "required": [
+            "query"
+          ],
+          "title": "search_github_reposArguments",
+          "type": "object"
+        }
       },
       {
         "name": "search_wikipedia",
-        "description": "维基百科检索(中英文,中文查询优先 zh;受限网络需代理)"
+        "description": "维基百科检索(中英文,中文查询优先 zh;受限网络需代理)",
+        "input_schema": {
+          "properties": {
+            "query": {
+              "title": "Query",
+              "type": "string"
+            },
+            "max_results": {
+              "default": 10,
+              "title": "Max Results",
+              "type": "integer"
+            }
+          },
+          "required": [
+            "query"
+          ],
+          "title": "search_wikipediaArguments",
+          "type": "object"
+        }
       },
       {
         "name": "search_huggingface",
-        "description": "HuggingFace 模型/数据集检索(下载量/点赞元数据;受限网络需代理)"
+        "description": "HuggingFace 模型/数据集检索(下载量/点赞元数据;受限网络需代理)",
+        "input_schema": {
+          "properties": {
+            "query": {
+              "title": "Query",
+              "type": "string"
+            },
+            "max_results": {
+              "default": 10,
+              "title": "Max Results",
+              "type": "integer"
+            }
+          },
+          "required": [
+            "query"
+          ],
+          "title": "search_huggingfaceArguments",
+          "type": "object"
+        }
       }
     ]
   },
