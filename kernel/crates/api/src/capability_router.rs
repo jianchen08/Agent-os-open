@@ -1200,7 +1200,7 @@ impl CapabilityRouter for KernelCapabilityRouter {
                         let Some(merged) =
                             crate::routes::cold_state_row(store, &pid, &tenant_id).await
                         else {
-                            continue; // 无 checkpoint 的孤儿不出口（对齐 /pipelines/state）
+                            continue; // checkpoint 与表行双空的真孤儿不出口（2026-08-23 起表行可独立兜底）
                         };
                         let mut row = crate::routes::summarize_state(&merged);
                         if let Some(obj) = row.as_object_mut() {
@@ -2505,6 +2505,92 @@ mod tests {
         );
         assert_eq!(row["task.status"], "failed");
         assert_eq!(row["status"], "failed");
+    }
+
+    #[tokio::test]
+    async fn test_pipeline_state_list_state_rows_without_checkpoint() {
+        // 2026-08-23 任务归属链修复：running 中任务 interval 未到不会有 checkpoint，
+        // 修复前 cold_state_row 直接 None → 整行不出口 → 任务面板看不到刚提交的
+        // 任务。修复后 pipeline_state 表行（出生字段已创建即落表）可独立兜底，
+        // task.owned.<id>.* 前缀键也须出口（提交者管道的任务登记）。
+        let tenant = format!("tenant_nockpt_{}", uuid::Uuid::new_v4().simple());
+        let pid = format!("pipe_nockpt_{}", uuid::Uuid::new_v4().simple());
+        let parent_pid = format!("pipe_parent_{}", uuid::Uuid::new_v4().simple());
+        let router = router_with_store();
+        let store = router
+            .store
+            .as_ref()
+            .expect("router_with_store 已注 store")
+            .clone();
+        // 任务执行管道：无 checkpoint，只有出生字段 + track 行（表行独立兜底）
+        store
+            .upsert_state_field(&pid, &tenant, "task.id", &json!(pid))
+            .await
+            .unwrap();
+        store
+            .upsert_state_field(&pid, &tenant, "task.goal", &json!("AI行业近月发展调研"))
+            .await
+            .unwrap();
+        store
+            .upsert_state_field(&pid, &tenant, "task.status", &json!("running"))
+            .await
+            .unwrap();
+        store
+            .upsert_state_field(
+                &pid,
+                &tenant,
+                "lineage.parent_pipeline_id",
+                &json!(parent_pid),
+            )
+            .await
+            .unwrap();
+        // 提交者管道：task.owned 登记键（前缀出口）
+        store
+            .upsert_state_field(
+                &parent_pid,
+                &tenant,
+                &format!("task.owned.{pid}.title"),
+                &json!("AI行业近月发展调研"),
+            )
+            .await
+            .unwrap();
+        store
+            .upsert_state_field(
+                &parent_pid,
+                &tenant,
+                &format!("task.owned.{pid}.status"),
+                &json!("running"),
+            )
+            .await
+            .unwrap();
+
+        let rows = agentos_tenant::scope(
+            agentos_core::types::TenantContext::new(&tenant, "th_nockpt"),
+            router.handle("pipeline-state", "list", json!({})),
+        )
+        .await
+        .unwrap();
+        let arr = rows.as_array().expect("返回应为行数组");
+        let row = arr
+            .iter()
+            .find(|r| r.get("pipeline_id").and_then(|v| v.as_str()) == Some(pid.as_str()))
+            .unwrap_or_else(|| {
+                panic!("无 checkpoint 的表行管道应出口（整行丢弃 = 刚提交任务不可见）; rows={arr:?}")
+            });
+        assert_eq!(row["task.goal"], "AI行业近月发展调研");
+        assert_eq!(row["task.status"], "running");
+        assert_eq!(row["lineage.parent_pipeline_id"], parent_pid);
+        let parent_row = arr
+            .iter()
+            .find(|r| {
+                r.get("pipeline_id").and_then(|v| v.as_str()) == Some(parent_pid.as_str())
+            })
+            .unwrap_or_else(|| panic!("提交者管道行应出口; rows={arr:?}"));
+        assert_eq!(
+            parent_row[&format!("task.owned.{pid}.title")],
+            "AI行业近月发展调研",
+            "task.owned.* 前缀键必须出口（被白名单裁掉 = 登记任务整行不可见）"
+        );
     }
 
     #[tokio::test]

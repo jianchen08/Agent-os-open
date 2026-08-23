@@ -11,8 +11,10 @@
  * 播种数据，本地 30s 轮询/注册表自动刷新已退役。
  */
 import { fireEvent, screen, waitFor } from '@testing-library/react'
-import { renderWithProviders } from '@/test/renderWithProviders'
 import { describe, expect, it, vi, beforeEach } from 'vitest'
+import { PipelineManagerWidget } from '@/components/schema/widgets/PipelineManagerWidget'
+import { useLayoutModeStore } from '@/stores/layoutModeStore'
+import { renderWithProviders } from '@/test/renderWithProviders'
 
 vi.mock('@/services/api/tasks', () => ({
   pauseTask: vi.fn(),
@@ -93,8 +95,34 @@ const seed = vi.hoisted(() => {
       parent_task_id: 'mainPipe',
     },
   ]
+  /** 子任务带工作空间场景（0.1 对齐：任务节点"打开工作空间"按钮数据链） */
+  const WS_TASKS: Record<string, unknown>[] = [
+    {
+      id: 'mainPipe',
+      title: '主管道',
+      status: 'completed',
+      pipeline_run_id: 'mainPipe',
+      agent_name: 'general_agent',
+    },
+    {
+      id: 'subPipe',
+      title: '带空间的子任务',
+      status: 'running',
+      pipeline_run_id: 'subPipe',
+      agent_name: 'general_agent',
+      parent_task_id: 'mainPipe',
+      metadata: { ws_meta: { path: 'D:/ws/copy_1', mode: 'worktree' } },
+    },
+  ]
   const mockUseAllTasksQuery = vi.fn(() => ({ data: FAKE_ALL_TASKS }))
-  return { FAKE_RUNS, FAKE_STATES, FAKE_ALL_TASKS, SUBTASK_TASKS, mockUseAllTasksQuery }
+  return {
+    FAKE_RUNS,
+    FAKE_STATES,
+    FAKE_ALL_TASKS,
+    SUBTASK_TASKS,
+    WS_TASKS,
+    mockUseAllTasksQuery,
+  }
 })
 
 vi.mock('@/hooks/queries/usePipelineRunsQuery', () => ({
@@ -120,8 +148,6 @@ vi.mock('@/stores/contextUsageStore', () => ({
 vi.mock('@/stores/sessionStore', () => ({
   useSessionStore: (sel: (s: unknown) => unknown) => sel({ sessions: [] }),
 }))
-
-import { PipelineManagerWidget } from '@/components/schema/widgets/PipelineManagerWidget'
 
 describe('PipelineManagerWidget', () => {
   beforeEach(() => {
@@ -167,5 +193,19 @@ describe('PipelineManagerWidget', () => {
     // 子任务行带缩进（depth>0 的 paddingLeft），且出现在主管道行的同一子树容器内
     const padding = taskRow?.closest('div')?.getAttribute('style') ?? ''
     expect(padding).toMatch(/padding-left:\s*2[48]px/)
+  })
+
+  it('任务节点渲染打开工作空间按钮并开 workspace 文件树标签（0.1 对齐）', async () => {
+    seed.mockUseAllTasksQuery.mockReturnValue({ data: seed.WS_TASKS })
+    renderWithProviders(<PipelineManagerWidget />)
+    // workspacePath 取自 metadata.ws_meta.path；按钮 title 带完整路径
+    const btns = await screen.findAllByTitle('打开工作空间: D:/ws/copy_1')
+    expect(btns.length).toBeGreaterThanOrEqual(1)
+    fireEvent.click(btns[0])
+    const tabs = useLayoutModeStore.getState().workspaceTabs
+    const tab = tabs.find((t) => t.dataSource === 'workspace://subPipe')
+    expect(tab).toBeDefined()
+    expect(tab?.component).toBe('file_tree')
+    expect(tab?.title).toBe('带空间的子任务')
   })
 })

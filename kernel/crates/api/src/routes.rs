@@ -841,11 +841,29 @@ const STATE_SUMMARY_KEYS: &[&str] = &[
     "task.status",
     "task.id",
     "task.ended_at",
+    // 任务域补充（2026-08-23 任务归属链修复）：scope/提交人/容器父是任务行
+    // 元数据（面板徽标 + 容器挂树依据）；workspace/ws_meta 是
+    // workspace_lifecycle init 写入的工作空间坐标（任务面板"打开工作空间"
+    // 按钮的数据源），均为小标量/小对象，安全出口。
+    "task.scope",
+    "task.submitted_by",
+    "task.parent_project_id",
+    "workspace",
+    "ws_meta",
     // GAP-1 阶段 1：血缘字段（出生写入，任务树分组与溯源的出口依赖）
     "lineage.parent_pipeline_id",
     "lineage.origin_session_id",
     "lineage.root",
 ];
+
+/// 动态键前缀白名单（与 [`STATE_SUMMARY_KEYS`] 精确键并列出口）。
+///
+/// `task.owned.<pipeline_id>.<field>`：提交者管道自持的任务登记（容器任务
+/// 声明 + 普通任务回执），键中含动态管道 id 无法精确枚举——按前缀整段
+/// 出口（title/status/scope/created_at/submitted_by/workspace 小标量）。
+/// 任务面板 `_collect_owned_tasks` 据此聚合，缺失则登记任务整行不可见
+/// （2026-08-23 实测：task.owned.* 落库在表、聚合行被白名单剥掉）。
+const STATE_SUMMARY_KEY_PREFIXES: &[&str] = &["task.owned."];
 
 /// 从一份管道 state 提取摘要（白名单字段 + messages 条数）。
 pub(crate) fn summarize_state(state: &serde_json::Value) -> serde_json::Value {
@@ -854,6 +872,12 @@ pub(crate) fn summarize_state(state: &serde_json::Value) -> serde_json::Value {
         for k in STATE_SUMMARY_KEYS {
             if let Some(v) = obj.get(*k) {
                 out.insert(k.to_string(), v.clone());
+            }
+        }
+        // 动态前缀键（task.owned.<id>.<field>）整段出口
+        for (k, v) in obj {
+            if STATE_SUMMARY_KEY_PREFIXES.iter().any(|p| k.starts_with(p)) {
+                out.insert(k.clone(), v.clone());
             }
         }
         // messages 只出口条数（迭代/轮次规模），不出口全文
@@ -871,23 +895,33 @@ pub(crate) fn summarize_state(state: &serde_json::Value) -> serde_json::Value {
 /// completed）。registry 未命中（重启后未再轮）时 `/pipelines/state` 与
 /// `pipeline-state.list` 的 DB 兜底共用；无 checkpoint / 读取失败返回 None
 /// （读面降级不崩，调用方跳过该行）。
+///
+/// 无 checkpoint 但 `pipeline_state` 表有行时以表行为基线（2026-08-23 任务
+/// 归属链修复）：running 中任务 interval 未到不会有 checkpoint，此前整行
+/// 丢弃导致任务面板看不到刚提交的任务（出生字段现已创建即落表，见
+/// chat_send_handler 创建分支）。
 pub(crate) async fn cold_state_row(
     store: &std::sync::Arc<dyn agentos_core::traits::StorageBackend>,
     pipeline_id: &str,
     tenant_id: &str,
 ) -> Option<serde_json::Value> {
-    let (_step, mut ckpt) = store
-        .load_latest_checkpoint(pipeline_id, tenant_id)
-        .await
-        .ok()??;
-    if let Ok(fields) = store.load_pipeline_state(pipeline_id, tenant_id).await {
-        if let Some(obj) = ckpt.as_object_mut() {
-            for (k, v) in fields {
-                obj.insert(k, v);
-            }
+    let ckpt = match store.load_latest_checkpoint(pipeline_id, tenant_id).await {
+        Ok(Some((_step, c))) => Some(c),
+        Ok(None) => None,
+        Err(_) => None,
+    };
+    let fields = store.load_pipeline_state(pipeline_id, tenant_id).await.ok()?;
+    let mut merged = ckpt.unwrap_or_else(|| serde_json::json!({}));
+    if let Some(obj) = merged.as_object_mut() {
+        for (k, v) in fields {
+            obj.insert(k, v);
         }
     }
-    Some(ckpt)
+    // checkpoint 与表行双空 = 真孤儿（无任何持久痕迹），不出口
+    if merged.as_object().is_none_or(|o| o.is_empty()) {
+        return None;
+    }
+    Some(merged)
 }
 
 /// GET /api/v1/pipelines/state — 管道 state 摘要列表（前端任务树数据源）。
@@ -2110,6 +2144,34 @@ mod state_summary_tests {
         // messages 仍只出口条数（大字段不出口的既有契约不变）
         assert!(s.get("messages").is_none());
         assert_eq!(s["message_count"], 2);
+    }
+
+    #[test]
+    fn test_summarize_state_exports_task_owned_prefix_and_workspace() {
+        // 2026-08-23 任务归属链修复：task.owned.<id>.<field>（提交者管道自持的
+        // 任务登记，键含动态管道 id）按前缀整段出口；workspace/ws_meta/
+        // task.scope 等任务行元数据出口（面板徽标 + 打开工作空间按钮数据源）。
+        let state = json!({
+            "pipeline_id": "p3",
+            "task.owned.ae7b430f.title": "AI行业近月发展调研",
+            "task.owned.ae7b430f.status": "running",
+            "task.owned.ae7b430f.scope": "non_container",
+            "task.scope": "non_container",
+            "task.submitted_by": "u1",
+            "workspace": "D:/ws/copy_1",
+            "ws_meta": {"path": "D:/ws/copy_1", "mode": "worktree"},
+            "messages": [{"role": "user"}],
+        });
+        let s = summarize_state(&state);
+        assert_eq!(s["task.owned.ae7b430f.title"], "AI行业近月发展调研");
+        assert_eq!(s["task.owned.ae7b430f.status"], "running");
+        assert_eq!(s["task.owned.ae7b430f.scope"], "non_container");
+        assert_eq!(s["task.scope"], "non_container");
+        assert_eq!(s["task.submitted_by"], "u1");
+        assert_eq!(s["workspace"], "D:/ws/copy_1");
+        assert_eq!(s["ws_meta"]["mode"], "worktree");
+        // 杂键仍裁掉（白名单语义不变，防越权大字段出口）
+        assert!(s.get("secret_field").is_none());
     }
 
     #[test]

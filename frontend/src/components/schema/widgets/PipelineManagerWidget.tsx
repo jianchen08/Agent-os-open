@@ -25,17 +25,17 @@ import {
   ExternalLink,
   MessageSquare,
 } from '@/assets/icons'
+import { useAllTasksQuery } from '@/hooks/queries/useAllTasksQuery'
+import { invalidateLongTermTasks } from '@/hooks/queries/useLongTermTasksQuery'
+import { usePipelineRunsQuery, usePipelineStatesQuery } from '@/hooks/queries/usePipelineRunsQuery'
+import { useSessionsQuery, readSessions, ensureSessionsLoaded } from '@/hooks/queries/useSessionsQuery'
 import { pauseTask, resumeTask, cancelTask } from '@/services/api/tasks'
 import { navigateToPipeline } from '@/services/pipelineNavigator'
+import { useAgentTabStore } from '@/stores/agentTabStore'
 import { useContextUsageStore } from '@/stores/contextUsageStore'
-import { useSessionsQuery, readSessions, ensureSessionsLoaded } from '@/hooks/queries/useSessionsQuery'
-import { usePipelineRunsQuery, usePipelineStatesQuery } from '@/hooks/queries/usePipelineRunsQuery'
-import { useAllTasksQuery } from '@/hooks/queries/useAllTasksQuery'
-import { useSessionListStore } from '@/stores/sessionListStore'
 import { useLayoutModeStore } from '@/stores/layoutModeStore'
 import { useNotificationStore } from '@/stores/notificationStore'
-import { useAgentTabStore } from '@/stores/agentTabStore'
-import { invalidateLongTermTasks } from '@/hooks/queries/useLongTermTasksQuery'
+import { useSessionListStore } from '@/stores/sessionListStore'
 import type { PipelineStatus, PipelineViewEntry } from '@/types/pipeline'
 import type { AgentTab } from '@/types/task'
 
@@ -399,6 +399,13 @@ export function PipelineManagerWidget(_rawProps: Record<string, unknown>) {
           scope: String(
             t?.task_scope ?? t?.taskScope ?? meta?.task_scope ?? meta?.taskScope ?? '',
           ),
+          // 工作空间路径（任务节点"打开工作空间"按钮；取值链与管道条目一致）
+          workspacePath:
+            String(
+              (meta as { ws_meta?: { path?: string } } | undefined)?.ws_meta?.path
+              || t?.workspace
+              || '',
+            ) || undefined,
         },
         depth: 0,
         children: [],
@@ -544,6 +551,28 @@ export function PipelineManagerWidget(_rawProps: Record<string, unknown>) {
     tabStore.loadTabMessages(tabId, pipelineId)
   }, [sessions])
 
+  /** 打开工作空间文件树标签（0.1 任务树节点同款：workspace://<taskId> 数据源，
+   *  标签内 FiveSpaceLayout 另有"打开文件夹"按钮调后端 explorer.exe 打开目录） */
+  const openWorkspaceTab = useCallback((taskId: string, title: string) => {
+    const layoutStore = useLayoutModeStore.getState()
+    const tabId = `ws-tree-${taskId}`
+    const existingTab = layoutStore.workspaceTabs.find((t) => t.id === tabId)
+    if (existingTab) {
+      layoutStore.setActiveTab(tabId)
+      return
+    }
+    layoutStore.addWorkspaceTab({
+      id: tabId,
+      title: title || '工作空间',
+      icon: '📁',
+      moduleId: '__dynamic__',
+      component: 'file_tree',
+      dataSource: `workspace://${taskId}`,
+      isActive: true,
+      isPinned: false,
+    })
+  }, [])
+
   /** 操作：暂停/恢复/取消（任务管道）/复制 ID/打开工作空间 */
   const handleAction = useCallback(
     async (
@@ -561,23 +590,7 @@ export function PipelineManagerWidget(_rawProps: Record<string, unknown>) {
       }
       if (action === 'workspace') {
         if (!entry.taskId) return
-        const layoutStore = useLayoutModeStore.getState()
-        const tabId = `ws-tree-${entry.taskId}`
-        const existingTab = layoutStore.workspaceTabs.find((t) => t.id === tabId)
-        if (existingTab) {
-          layoutStore.setActiveTab(tabId)
-          return
-        }
-        layoutStore.addWorkspaceTab({
-          id: tabId,
-          title: entry.name || '工作空间',
-          icon: '📁',
-          moduleId: '__dynamic__',
-          component: 'file_tree',
-          dataSource: `workspace://${entry.taskId}`,
-          isActive: true,
-          isPinned: false,
-        })
+        openWorkspaceTab(entry.taskId, entry.name)
         return
       }
       if (!entry.taskId) return
@@ -596,7 +609,7 @@ export function PipelineManagerWidget(_rawProps: Record<string, unknown>) {
         console.error('[PipelineManager] 管道操作失败', action, e)
       }
     },
-    [],
+    [openWorkspaceTab],
   )
 
   /** 状态筛选选项（与任务状态词表对齐） */
@@ -716,6 +729,7 @@ export function PipelineManagerWidget(_rawProps: Record<string, unknown>) {
             onToggle={toggleEntry}
             onEntryClick={handleEntryClick}
             onAction={handleAction}
+            onOpenWorkspace={openWorkspaceTab}
           />
         )}
       </div>
@@ -735,7 +749,14 @@ interface PipelineTreeNode {
   /** 管道条目（任务节点无此字段） */
   entry?: PipelineViewEntry
   /** 任务节点信息（容器/普通任务；其 children 为管道或子任务节点） */
-  task?: { taskId: string; title: string; status: string; scope: string }
+  task?: {
+    taskId: string
+    title: string
+    status: string
+    scope: string
+    /** 工作空间路径（有值才渲染"打开工作空间"按钮） */
+    workspacePath?: string
+  }
   depth: number
   children: PipelineTreeNode[]
 }
@@ -747,6 +768,7 @@ function PipelineTree({
   onToggle,
   onEntryClick,
   onAction,
+  onOpenWorkspace,
 }: {
   tree: PipelineTreeNode[]
   nowMs: number
@@ -754,6 +776,7 @@ function PipelineTree({
   onToggle: (key: string) => void
   onEntryClick: (entry: PipelineViewEntry) => void
   onAction: (entry: PipelineViewEntry, action: 'pause' | 'resume' | 'cancel' | 'copy' | 'workspace') => void
+  onOpenWorkspace: (taskId: string, title: string) => void
 }) {
   // 主管道（顶层）与容器任务按状态分组：执行中 / 最近完成（子树跟随父级）
   const isActiveNode = (n: PipelineTreeNode): boolean => {
@@ -792,6 +815,7 @@ function PipelineTree({
           onToggle={onToggle}
           onEntryClick={onEntryClick}
           onAction={onAction}
+          onOpenWorkspace={onOpenWorkspace}
         />
       )}
       {done.length > 0 && (
@@ -804,6 +828,7 @@ function PipelineTree({
           onToggle={onToggle}
           onEntryClick={onEntryClick}
           onAction={onAction}
+          onOpenWorkspace={onOpenWorkspace}
         />
       )}
     </div>
@@ -841,6 +866,7 @@ function TreeGroup({
   onToggle,
   onEntryClick,
   onAction,
+  onOpenWorkspace,
 }: {
   title: string
   count: number
@@ -850,6 +876,7 @@ function TreeGroup({
   onToggle: (key: string) => void
   onEntryClick: (entry: PipelineViewEntry) => void
   onAction: (entry: PipelineViewEntry, action: 'pause' | 'resume' | 'cancel' | 'copy' | 'workspace') => void
+  onOpenWorkspace: (taskId: string, title: string) => void
 }) {
   const [collapsed, setCollapsed] = useState(false)
   return (
@@ -882,6 +909,7 @@ function TreeGroup({
                   node={node}
                   expanded={expandedKeys.has(node.key)}
                   onToggle={onToggle}
+                  onOpenWorkspace={onOpenWorkspace}
                 />
               )}
               {node.children.length > 0 && (
@@ -892,6 +920,7 @@ function TreeGroup({
                   onToggle={onToggle}
                   onEntryClick={onEntryClick}
                   onAction={onAction}
+                  onOpenWorkspace={onOpenWorkspace}
                 />
               )}
             </div>
@@ -910,6 +939,7 @@ function TreeChildren({
   onToggle,
   onEntryClick,
   onAction,
+  onOpenWorkspace,
 }: {
   nodes: PipelineTreeNode[]
   nowMs: number
@@ -917,6 +947,7 @@ function TreeChildren({
   onToggle: (key: string) => void
   onEntryClick: (entry: PipelineViewEntry) => void
   onAction: (entry: PipelineViewEntry, action: 'pause' | 'resume' | 'cancel' | 'copy' | 'workspace') => void
+  onOpenWorkspace: (taskId: string, title: string) => void
 }) {
   return (
     <div>
@@ -938,6 +969,7 @@ function TreeChildren({
               node={node}
               expanded={expandedKeys.has(node.key)}
               onToggle={onToggle}
+              onOpenWorkspace={onOpenWorkspace}
             />
           )}
           {node.children.length > 0 && (
@@ -948,6 +980,7 @@ function TreeChildren({
               onToggle={onToggle}
               onEntryClick={onEntryClick}
               onAction={onAction}
+              onOpenWorkspace={onOpenWorkspace}
             />
           )}
         </div>
@@ -961,10 +994,12 @@ function TaskRow({
   node,
   expanded,
   onToggle,
+  onOpenWorkspace,
 }: {
   node: PipelineTreeNode
   expanded: boolean
   onToggle: (key: string) => void
+  onOpenWorkspace?: (taskId: string, title: string) => void
 }) {
   const task = node.task!
   const status = containerStatusInfo(task.status)
@@ -972,7 +1007,7 @@ function TaskRow({
   const isContainer = task.scope === 'container'
   return (
     <div
-      className="hover:bg-accent flex cursor-pointer items-center gap-1.5 py-1.5 pr-2 transition-colors"
+      className="hover:bg-accent group flex cursor-pointer items-center gap-1.5 py-1.5 pr-2 transition-colors"
       style={{ paddingLeft: `${node.depth * 16 + 8}px` }}
       onClick={() => onToggle(node.key)}
       title={isContainer ? '容器任务（展开查看其下任务管道）' : '任务（展开查看其管道）'}
@@ -1007,6 +1042,20 @@ function TaskRow({
         >
           {String(task.status)}
         </span>
+      )}
+      {/* 打开工作空间（0.1 任务树节点同款）：开 workspace://<taskId> 文件树标签 */}
+      {task.workspacePath && onOpenWorkspace && (
+        <button
+          className="text-muted-foreground hover:text-foreground hidden h-5 w-5 shrink-0 items-center justify-center rounded group-hover:flex"
+          onClick={(e) => {
+            e.stopPropagation()
+            onOpenWorkspace(task.taskId, task.title)
+          }}
+          title={`打开工作空间: ${task.workspacePath}`}
+          tabIndex={-1}
+        >
+          <ExternalLink className="h-3.5 w-3.5" />
+        </button>
       )}
       <span className="text-muted-foreground/50 shrink-0 text-[10px]">
         [{childCount}]

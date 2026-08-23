@@ -261,6 +261,28 @@ impl ChatSendHandler {
                         "chat.send_message 创建分支 pipeline↔thread 映射落库失败（引擎路径将补写）"
                     );
                 }
+                // 出生字段持久化（2026-08-23 任务归属链修复）：lineage.* + task.*
+                // 出生即落 pipeline_state 表。引擎 persistent_fields 投影只覆盖
+                // 插件 manifest 声明键（track.* 等），任务域/血缘键不属于任何插件
+                // ——不在此落库则冷读（cold_state_row）无基线、registry 内存丢失后
+                // 任务面板归属链整行缺失（实测：任务 running 但 state 聚合不出口）。
+                // 与 no_dispatch 分支同款逐键 upsert（幂等），失败 warn 不阻断派发。
+                if let Some(overlay_obj) = overlay.as_ref().and_then(|o| o.as_object()) {
+                    for (k, v) in overlay_obj {
+                        if let Err(e) = store
+                            .upsert_state_field(&pipeline_id, &tenant_id, k, v)
+                            .await
+                        {
+                            tracing::warn!(
+                                target: "capability:chat",
+                                pipeline = %pipeline_id,
+                                key = %k,
+                                error = %e.to_string(),
+                                "chat.send_message 出生字段持久化失败（内存态仍生效）"
+                            );
+                        }
+                    }
+                }
             }
         }
 
@@ -845,6 +867,44 @@ mod tests {
     }
 
     // ── 创建分支：id 生成与响应 ──────────────────────────────────
+
+    #[tokio::test]
+    async fn create_branch_persists_birth_overlay_to_state_table() {
+        // 2026-08-23 任务归属链修复：出生字段（lineage.* + task.*）创建即落
+        // pipeline_state 表——引擎 persistent_fields 投影只覆盖插件声明键，
+        // 任务域键不属于任何插件；不落库则 registry 内存丢失后（重启）冷读
+        // 无基线，任务面板归属链整行缺失。未知 user 回退 default 租户。
+        let d = RecordingDispatcher::shared();
+        let store: Arc<dyn StorageBackend> =
+            Arc::new(agentos_engine::SqliteStore::open_memory().expect("open_memory"));
+        let h = ChatSendHandler::with_store(d.clone(), Some(store.clone()));
+        let res = h
+            .handle(
+                "send_message",
+                json!({
+                    "create": true,
+                    "background": true,
+                    "message": "执行任务「调研」。",
+                    "user_id": "user_birth_persist",
+                    "state": {"task.goal": "调研", "task.status": "pending", "task.scope": "non_container"},
+                    "lineage": {"parent_pipeline_id": "pipe_parent", "origin_session_id": "th_1"},
+                }),
+            )
+            .await
+            .unwrap();
+        let pid = res["pipeline_id"].as_str().unwrap().to_string();
+        let fields = store
+            .load_pipeline_state(&pid, "default")
+            .await
+            .expect("出生字段应已落 pipeline_state 表");
+        let get = |k: &str| fields.get(k).expect(k);
+        assert_eq!(get("task.goal"), "调研");
+        assert_eq!(get("task.status"), "pending");
+        assert_eq!(get("task.scope"), "non_container");
+        assert_eq!(get("task.id"), pid.as_str());
+        assert_eq!(get("lineage.parent_pipeline_id"), "pipe_parent");
+        assert_eq!(get("lineage.origin_session_id"), "th_1");
+    }
 
     #[tokio::test]
     async fn create_with_flag_generates_engine_pipeline_id() {

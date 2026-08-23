@@ -17,6 +17,10 @@
   },
   "permissions": {},
   "priority": 5,
+  "persistent_fields": [
+    "workspace",
+    "ws_meta"
+  ],
   "granted_capabilities": [
     "pipeline-state"
   ]
