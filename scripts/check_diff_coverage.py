@@ -84,11 +84,7 @@ def parse_coverage_xml(text: str) -> dict[str, LineMap]:
     """
     root = ET.fromstring(text)
     root_posix = str(ROOT).replace("\\", "/").rstrip("/")
-    sources = [
-        (s.text or "").replace("\\", "/").rstrip("/")
-        for s in root.iter("source")
-        if s.text
-    ]
+    sources = [(s.text or "").replace("\\", "/").rstrip("/") for s in root.iter("source") if s.text]
 
     def resolve(raw: str) -> str:
         p = raw.replace("\\", "/")
@@ -155,6 +151,7 @@ def load_coverage(path: Path, fmt: str) -> dict[str, LineMap]:
 
 # ── diff 解析 ─────────────────────────────────────────────────────
 
+
 def parse_unified_diff(text: str) -> dict[str, list[int]]:
     """从 git diff -U0 输出提取每个文件新增的行号（含新文件；删除行不含）。"""
     added: dict[str, list[int]] = {}
@@ -189,6 +186,7 @@ def parse_unified_diff(text: str) -> dict[str, list[int]]:
 
 # ── 范围解析与主流程 ──────────────────────────────────────────────
 
+
 def resolve_range(args: argparse.Namespace) -> tuple[str, str, str] | None:
     """返回 (diff_a, diff_b, 说明)；无可查范围返回 None。"""
     if args.range:
@@ -198,11 +196,14 @@ def resolve_range(args: argparse.Namespace) -> tuple[str, str, str] | None:
     base = args.base or os.environ.get("GITHUB_BASE_REF", "")
     if base:
         for cand in (f"origin/{base}", base):
-            if subprocess.run(
-                ["git", "-C", str(ROOT), "rev-parse", "--verify", "--quiet", cand],
-                capture_output=True,
-                check=False,
-            ).returncode == 0:
+            if (
+                subprocess.run(
+                    ["git", "-C", str(ROOT), "rev-parse", "--verify", "--quiet", cand],
+                    capture_output=True,
+                    check=False,
+                ).returncode
+                == 0
+            ):
                 try:
                     mb = _git(["merge-base", cand, "HEAD"]).strip()
                     return mb, "HEAD", f"merge-base({cand}, HEAD)"
@@ -258,9 +259,7 @@ def main() -> int:
         print(f"[diff-cov] ⚠️  {SKIP_MARKER} 已声明，放行（仅限纯重构/配置/文档变更，滥用必追责）")
         return 0
 
-    diff_text = _git(
-        ["diff", "-U0", "--no-color", "--no-ext-diff", "-M", "--no-prefix", a, b, "--", *args.scope]
-    )
+    diff_text = _git(["diff", "-U0", "--no-color", "--no-ext-diff", "-M", "--no-prefix", a, b, "--", *args.scope])
     added = parse_unified_diff(diff_text)
 
     omits = [re.compile(p) for p in args.omit]

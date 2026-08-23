@@ -25,14 +25,3 @@ plugins:
     enabled: true
   ui-theme:
     enabled: true
-
-# ── 皮肤 CSS 补充层（主题主体走 contributes.themes 主题管线） ──────────
-# 皮肤选择 = 前端主题列表选 dsh-skin-* 主题卡（原生渲染配色/背景图/基准）；
-# 本字段仅控制 CSS 补充注入（皮肤 :root 装饰令牌 + 字体）。
-# 可选值 = dsh_plugins/skin-center/skins/ 下的皮肤 id：
-#   matrix miku mint xp minecraft harbor trading whale-song whale-mom
-#   blue-fantasy dragon-heir maid-atelier(非商业许可) cyber-night furina
-#   summer-liquid-glass
-# 换肤 = 改此字段 → reenable dsh_adapter（或重启内核）→ 刷新前端页面。
-# none / 删除字段 = 关闭注入（返回空 CSS）。
-skin: dragon-heir

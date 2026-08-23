@@ -66,7 +66,35 @@ pub struct KernelCapabilityContract {
     pub description: String,
     /// 该 namespace 下的方法契约清单。
     pub capabilities: Vec<CapabilityMethodSpec>,
+    /// message_id 命名空间清单（streaming 协议真值源 `x-message-id-namespaces`；
+    /// 其他 namespace 无此字段 = 空表）。网关执法与本模块机械闸同源读它。
+    #[serde(default, rename = "x-message-id-namespaces")]
+    pub message_id_namespaces: Vec<MessageIdNamespace>,
 }
+
+/// message_id 命名空间条目（streaming.json 真值源，前缀隔离防 id 冲突）。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MessageIdNamespace {
+    /// id 前缀（"" = 无前缀/裸形态）。
+    #[serde(default)]
+    pub prefix: String,
+    /// 归属：kernel（内核 LLM 路径签发）/ engine（内容指纹）/ plugin（插件强制）/
+    /// frontend-optimistic（前端乐观 user 临时 id）。
+    pub owner: String,
+    /// 插件是否禁止使用本空间。
+    pub plugin_forbidden: bool,
+    /// id 形态（anchored regex，机器可读——网关/前端/机械闸同源）。
+    pub pattern: String,
+    /// 人读说明。
+    #[serde(default)]
+    pub description: String,
+}
+
+/// 引擎管道家族（LLM 路径的器官插件）：内核经引擎 state 把签发的 `a_` id 下发给
+/// 它们，故它们合法携带 a_ 命名空间（其余插件一律 p_）。清单与
+/// plugins/shared/pipeline/core/{llm_core,tool_core}/plugin.json 的 id 一致性由
+/// 本模块机械闸测试锁定（插件改名即红）。
+pub(crate) const ENGINE_CONDUIT_PLUGINS: &[&str] = &["pipeline_llm_core", "pipeline_tool_core"];
 
 /// 单个能力方法的契约。
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -169,6 +197,32 @@ fn validate_contract_structure(c: &KernelCapabilityContract, file_tag: &str) -> 
             ));
         }
     }
+    // message_id 命名空间清单结构校验（streaming）：pattern 必须可编译、owner 唯一性。
+    // 契约是校验器的眼睛——pattern 坏了执法会静默失效，必须加载即报。
+    let plugin_owners = c
+        .message_id_namespaces
+        .iter()
+        .filter(|n| n.owner == "plugin")
+        .count();
+    if plugin_owners > 1 {
+        return Err(format!(
+            "内核能力契约 {file_tag}: owner=plugin 的命名空间必须恰好一个（现 {plugin_owners}）"
+        ));
+    }
+    for n in &c.message_id_namespaces {
+        if n.owner.is_empty() {
+            return Err(format!(
+                "内核能力契约 {file_tag}: 命名空间 {} 的 owner 不得为空",
+                n.prefix
+            ));
+        }
+        if regex::Regex::new(&n.pattern).is_err() {
+            return Err(format!(
+                "内核能力契约 {file_tag}: 命名空间 {} 的 pattern 非法（{}）",
+                n.prefix, n.pattern
+            ));
+        }
+    }
     Ok(())
 }
 
@@ -184,6 +238,92 @@ pub fn find_spec<'a>(
         .capabilities
         .iter()
         .find(|s| s.method == method)
+}
+
+/// 流式事件网关执法（ADR 2026-08-22 流式协议）：event-bus.emit 收到 streaming
+/// 契约事件时按单一真值源 fail-closed 校验。三层：
+/// ① schema——payload 按事件 input_schema 校验（required/形态）；
+/// ② message_id 命名空间——按 x-message-id-namespaces 执法（引擎管道家族
+///    合法携带内核签发的 a_，其余插件强制 p_，内核内部调用放行）；
+/// ③ thread_id——emit_event 按 thread 单播，缺路由键无法投递。
+/// Err(原因) = 丢弃 + 告警（调用方保持 Ok(dropped) 语义，不炸 RPC）。
+pub fn validate_streaming_event(
+    contracts: &[KernelCapabilityContract],
+    event_name: &str,
+    payload: &Value,
+    plugin_id: Option<&str>,
+) -> Result<(), String> {
+    let Some(spec) = find_spec(contracts, "streaming", event_name) else {
+        return Ok(()); // 非契约事件（interaction_*/透传族）不归本闸
+    };
+    let path = format!("streaming.{event_name} payload");
+    validate_value(&spec.input_schema, payload, &path)?;
+
+    // ② 命名空间执法（plugin_id 为 invoker 注入信任锚点，插件不可伪造）。
+    // 空 message_id 由 schema required 抓红；此处只执法形态归属。
+    let message_id = payload
+        .get("message_id")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    enforce_message_id_namespace(contracts, message_id, plugin_id, event_name)?;
+
+    // ③ thread_id 投递路由键（契约 required 已声明，此处显式兜底——
+    // emit_event 按 thread 单播，无键必丢，与其发一个不可达事件不如显式拒绝）。
+    let thread_id = payload
+        .get("thread_id")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    if thread_id.is_empty() {
+        return Err("缺 thread_id（WS 投递路由键，emit_event 按 thread 单播）".to_string());
+    }
+    Ok(())
+}
+
+/// message_id 命名空间执法（按 streaming.json `x-message-id-namespaces` 真值源）：
+/// - 内核内部调用（plugin_id=None，如 ws_session dispatch）→ 放行（id 由内核签发）；
+/// - 引擎管道家族（llm_core/tool_core，内核经 state 下发 a_ id）→ 必须 a_ 命名空间；
+/// - 其余插件 → 必须 p_ 命名空间（结构性杜绝与 a_/mc_/乐观裸 uuid 冲突）。
+fn enforce_message_id_namespace(
+    contracts: &[KernelCapabilityContract],
+    message_id: &str,
+    plugin_id: Option<&str>,
+    event_name: &str,
+) -> Result<(), String> {
+    let Some(spaces) = contracts
+        .iter()
+        .find(|c| c.namespace == "streaming")
+        .map(|c| &c.message_id_namespaces)
+    else {
+        return Ok(()); // 契约未启用（目录无 streaming.json）→ 宽泛放行
+    };
+    let Some(pid) = plugin_id else {
+        return Ok(());
+    };
+    if message_id.is_empty() {
+        return Err("缺 message_id（精确寻址键）".to_string());
+    }
+    let (want_owner, why) = if ENGINE_CONDUIT_PLUGINS.contains(&pid) {
+        ("kernel", format!("引擎管道插件 {pid} 只能携带内核签发的 a_ id"))
+    } else {
+        ("plugin", format!("插件 {pid} 的 message_id 必须在 p_ 命名空间（x-message-id-namespaces）"))
+    };
+    let want = spaces.iter().find(|n| n.owner == want_owner);
+    match want {
+        Some(ns) => {
+            let re = regex::Regex::new(&ns.pattern)
+                .map_err(|e| format!("契约 pattern 非法（{}）: {e}", ns.pattern))?;
+            if !re.is_match(message_id) {
+                return Err(format!(
+                    "{why}，实际 {message_id:?} 不匹配 {}（事件 {event_name}）",
+                    ns.pattern
+                ));
+            }
+            Ok(())
+        }
+        None => Err(format!(
+            "streaming 契约缺 owner={want_owner} 命名空间条目，无法执法（事件 {event_name}）"
+        )),
+    }
 }
 
 /// 入口校验：按契约定义校验能力调用参数（定义驱动执行器）。
@@ -590,14 +730,22 @@ mod tests {
                 "state 保护前缀",
             ),
             (
-                json!({"pipeline_id": "a1b2c3d4e5f64789abcdef0123456789", "message": "m", "user_id": "u1", "thread_id": "thread-1"}),
-                "未知参数（additionalProperties 闭包）",
+                json!({"message": "m", "user_id": "u1", "thread_id": "no-prefix", "create": true}),
+                "thread_id 形态错（须 ^thread- 前缀）",
             ),
             (json!(["array", "params"]), "params 非对象"),
         ];
         for (params, why) in cases {
             validate_params(&contracts, "chat", "send_message", &params).expect_err(why);
         }
+        // thread_id 合法用例（创建分支归属会话）：不应被契约拒绝
+        validate_params(
+            &contracts,
+            "chat",
+            "send_message",
+            &json!({"message": "m", "user_id": "u1", "thread_id": "thread-abc", "create": true}),
+        )
+        .expect("thread_id 合法（创建分支归属会话）");
     }
 
     // ── 双轨漂移机械闸：真实契约文件 ↔ 代码清单 ─────────────────────
@@ -706,6 +854,7 @@ mod tests {
                 _ec: Option<&Value>,
                 _ov: Option<&Value>,
                 _a: &str,
+                _cmid: &str,
             ) -> Result<(), String> {
                 Ok(())
             }
@@ -798,5 +947,211 @@ mod tests {
             err.to_string().contains("形态"),
             "错误应指向形态违规，实际: {err}"
         );
+    }
+
+    // ── 流式协议机械闸（streaming.json ↔ 网关执法一致性） ──────────────
+    // 闸 4（配置↔代码）：真实 streaming.json 必须可装载、含 10 事件、命名空间
+    // 四条目（a_/mc_/p_/裸 uuid）、p_ 为唯一 owner=plugin 条目。插件改名即红
+    // （ENGINE_CONDUIT_PLUGINS 与 plugin.json 漂移）。
+
+    fn streaming_contracts() -> Vec<KernelCapabilityContract> {
+        let contracts =
+            load_contracts(&repo_contract_dir()).expect("仓库契约文件必须可加载（损坏即本测试红）");
+        assert!(
+            find_spec(&contracts, "streaming", "stream_chunk").is_some(),
+            "streaming.stream_chunk 契约必须存在"
+        );
+        contracts
+    }
+
+    #[test]
+    fn streaming_contract_loads_full_shape() {
+        let contracts = streaming_contracts();
+        let streaming = contracts
+            .iter()
+            .find(|c| c.namespace == "streaming")
+            .expect("streaming 契约必须存在");
+        assert_eq!(
+            streaming.capabilities.len(),
+            10,
+            "streaming 事件数漂移（stream_start/chunk/end + thinking_*3 + tool_*2 + new_message + stream_error）"
+        );
+        // 四命名空间条目（真值源 x-message-id-namespaces）
+        let owners: Vec<&str> = streaming
+            .message_id_namespaces
+            .iter()
+            .map(|n| n.owner.as_str())
+            .collect();
+        assert_eq!(
+            owners,
+            vec!["kernel", "engine", "plugin", "frontend-optimistic"],
+            "命名空间 owner 清单漂移（内核/引擎/插件/乐观前端）"
+        );
+        // 每个 pattern 必须可编译（契约是校验器的眼睛）
+        for n in &streaming.message_id_namespaces {
+            assert!(
+                regex::Regex::new(&n.pattern).is_ok(),
+                "命名空间 {} pattern 非法: {}",
+                n.prefix,
+                n.pattern
+            );
+        }
+        // 引擎管道家族 ↔ plugin.json 真值（插件改名即红）
+        let llm_manifest: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(
+                std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                    .join("../../../plugins/shared/pipeline/core/llm_core/plugin.json"),
+            )
+            .expect("llm_core/plugin.json 必须存在"),
+        )
+        .expect("llm_core/plugin.json 必须可解析");
+        let tool_manifest: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(
+                std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                    .join("../../../plugins/shared/pipeline/core/tool_core/plugin.json"),
+            )
+            .expect("tool_core/plugin.json 必须存在"),
+        )
+        .expect("tool_core/plugin.json 必须可解析");
+        assert!(
+            ENGINE_CONDUIT_PLUGINS.contains(&llm_manifest["id"].as_str().unwrap_or("")),
+            "ENGINE_CONDUIT_PLUGINS 与 llm_core 插件 id 漂移"
+        );
+        assert!(
+            ENGINE_CONDUIT_PLUGINS.contains(&tool_manifest["id"].as_str().unwrap_or("")),
+            "ENGINE_CONDUIT_PLUGINS 与 tool_core 插件 id 漂移"
+        );
+    }
+
+    #[test]
+    fn streaming_gate_rejects_plugin_bare_uuid_and_a_prefix() {
+        let contracts = streaming_contracts();
+        // 普通插件（非引擎管道）裸 uuid / a_ / mc_ / 非 p_ 一律拒绝
+        for (id, why) in [
+            ("9c8e051a-4a2f-4e8e-b2b1-1a2b3c4d5e6f", "乐观裸 uuid 撞车"),
+            ("a_0123456789abcdef0123456789abcdef", "冒用内核 a_ 空间"),
+            ("mc_0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef", "冒用引擎指纹空间"),
+            ("p_", "p_ 空后缀不合 pattern"),
+            ("P_UPPER_001", "p_ 不允许大写"),
+        ] {
+            let err = validate_streaming_event(
+                &contracts,
+                "stream_chunk",
+                &json!({
+                    "pipeline_id": "c1b2c3d4e5f64789abcdef0123456789",
+                    "message_id": id,
+                    "content": "x",
+                    "thread_id": "thread-1",
+                }),
+                Some("my_streamer"),
+            )
+            .expect_err(why);
+            assert!(err.contains("p_"), "实际: {err}");
+        }
+    }
+
+    #[test]
+    fn streaming_gate_accepts_plugin_p_namespace() {
+        let contracts = streaming_contracts();
+        validate_streaming_event(
+            &contracts,
+            "stream_start",
+            &json!({
+                "pipeline_id": "c1b2c3d4e5f64789abcdef0123456789",
+                "message_id": "p_my_progress_001",
+                "thread_id": "thread-1",
+                "persist": false,
+            }),
+            Some("my_streamer"),
+        )
+        .expect("插件 p_ 命名空间应放行");
+    }
+
+    #[test]
+    fn streaming_gate_engine_conduit_must_use_a_prefix() {
+        let contracts = streaming_contracts();
+        // 引擎管道家族携带内核签发的 a_ id 放行
+        validate_streaming_event(
+            &contracts,
+            "stream_chunk",
+            &json!({
+                "pipeline_id": "c1b2c3d4e5f64789abcdef0123456789",
+                "message_id": "a_0123456789abcdef0123456789abcdef",
+                "content": "hi",
+                "thread_id": "thread-1",
+            }),
+            Some("pipeline_llm_core"),
+        )
+        .expect("llm_core 携带内核签发的 a_ id 应放行");
+        // 但引擎管道家族用 p_ 也拒绝（a_ 是内核签发坐标，不得自造）
+        let err = validate_streaming_event(
+            &contracts,
+            "stream_chunk",
+            &json!({
+                "pipeline_id": "c1b2c3d4e5f64789abcdef0123456789",
+                "message_id": "p_llm_selfmade_001",
+                "content": "hi",
+                "thread_id": "thread-1",
+            }),
+            Some("pipeline_llm_core"),
+        )
+        .expect_err("llm_core 不得自造 p_ id");
+        assert!(err.contains("a_"), "实际: {err}");
+    }
+
+    #[test]
+    fn streaming_gate_kernel_internal_passthrough() {
+        let contracts = streaming_contracts();
+        // 内核内部（ws_session dispatch，无 _plugin_id）→ 放行（id 由内核签发）
+        validate_streaming_event(
+            &contracts,
+            "new_message",
+            &json!({
+                "pipeline_id": "c1b2c3d4e5f64789abcdef0123456789",
+                "message_id": "a_0123456789abcdef0123456789abcdef",
+                "thread_id": "thread-1",
+            }),
+            None,
+        )
+        .expect("内核内部调用应放行");
+    }
+
+    #[test]
+    fn streaming_gate_schema_rejects_missing_content() {
+        let contracts = streaming_contracts();
+        // schema 层：stream_chunk 必填 content
+        let err = validate_streaming_event(
+            &contracts,
+            "stream_chunk",
+            &json!({
+                "pipeline_id": "c1b2c3d4e5f64789abcdef0123456789",
+                "message_id": "p_ok_001",
+                "thread_id": "thread-1",
+            }),
+            Some("my_streamer"),
+        )
+        .expect_err("stream_chunk 缺 content 必须红");
+        assert!(err.contains("content"), "实际: {err}");
+        // 非契约事件（interaction_*）不归本闸（透传族）
+        validate_streaming_event(
+            &contracts,
+            "interaction_request",
+            &json!({"request_id": "r1"}),
+            Some("my_streamer"),
+        )
+        .expect("非契约事件应宽泛放行");
+    }
+
+    #[test]
+    fn streaming_gate_rejects_unknown_contract_event() {
+        let contracts = streaming_contracts();
+        // streaming.json 未声明的事件名 → 不归本闸（find_spec miss 放行）
+        validate_streaming_event(
+            &contracts,
+            "stream_unknown",
+            &json!({"pipeline_id": "x", "message_id": "p_x", "thread_id": "t"}),
+            Some("my_streamer"),
+        )
+        .expect("未声明事件应宽泛放行（契约没写就不查）");
     }
 }

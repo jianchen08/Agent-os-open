@@ -4,7 +4,7 @@
   "capabilities": [
     {
       "method": "send_message",
-      "description": "投递消息到会话管道并跑一轮。创建分支（create:true 或 pipeline_id 空）引擎生成新管道身份；注入分支（带 pipeline_id）内部反查 pipeline_sessions 解析真实会话 thread（黑盒，对外契约不含 thread 参数），解析失败即协议错误。thread_id（^thread- 前缀会话标签）与 pipeline_id（32hex 引擎身份）形态互斥，互填在入口即红。",
+      "description": "投递消息到会话管道并跑一轮。创建分支（create:true 或 pipeline_id 空）引擎生成新管道身份，可选 thread_id 声明归属会话（任务管道传用户会话随其路由/级联）；注入分支（带 pipeline_id）内部反查 pipeline_sessions 解析真实会话 thread（黑盒），解析失败即协议错误。thread_id（^thread- 前缀会话标签）与 pipeline_id（32hex 引擎身份）是不同域的坐标：thread 是会话标签、pipeline 是引擎身份。",
       "input_schema": {
         "type": "object",
         "properties": {
@@ -18,6 +18,11 @@
             "minLength": 1,
             "description": "发起用户 id（tenant 解析锚点；系统发起用 task_system/review_system 等）"
           },
+          "thread_id": {
+            "type": "string",
+            "pattern": "^thread-",
+            "description": "归属会话标签（仅创建分支可选）：新管道所属 thread（任务管道传用户会话，随其路由/级联删除）；缺省引擎以新 id 作派发坐标（管道保持独立）。与 pipeline_id 互斥（注入分支黑盒反查，不接受此参数）"
+          },
           "pipeline_id": {
             "type": "string",
             "pattern": "^[0-9a-f]{32}$",
@@ -30,6 +35,10 @@
           "background": {
             "type": "boolean",
             "description": "true = spawn 后台派发、响应立即返回（任务派发不阻塞等待管道跑完）"
+          },
+          "no_dispatch": {
+            "type": "boolean",
+            "description": "true = 只把 state overlay 并入目标管道 state（registry + pipeline_state 表），不派发执行、不产生消息。用于容器任务等'只登记不执行'的声明写入（提交者管道自持 task.owned.*）"
           },
           "agent_id": {
             "type": "string",

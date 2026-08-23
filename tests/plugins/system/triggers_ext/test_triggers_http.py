@@ -1,0 +1,230 @@
+"""triggers 域 REST 面测试（channel_api triggers stub 接真）。
+
+覆盖 http_api 9 端点：列表/创建（工具语义）/详情/更新/删除/
+enable/disable/手动触发/统计——进程内 TriggerManager 单例，
+fake 注入器验证 fire_manually 投递路径。
+"""
+from __future__ import annotations
+
+import asyncio
+import base64
+import json
+import sys
+from pathlib import Path
+from typing import Any
+
+import pytest
+
+_REPO = Path(__file__).resolve().parents[4]
+_PLUGIN_DIR = _REPO / "plugins" / "shared" / "tools" / "triggers_ext"
+_SDK = _REPO / "plugins" / "sdk" / "src"
+for _d in (str(_PLUGIN_DIR), str(_SDK)):
+    if _d not in sys.path:
+        sys.path.insert(0, _d)
+
+import http_api  # noqa: E402
+from triggers.manager import get_trigger_manager  # noqa: E402
+from triggers.types import TriggerConfig, TriggerType  # noqa: E402
+
+pytestmark = pytest.mark.unit  # 纯单测：进程内单例 + fake 注入器，零外部依赖
+
+
+def _unwrap(resp: dict[str, Any]) -> dict[str, Any]:
+    """http.handle 信封 → 业务 JSON。"""
+    assert resp.get("success") is True, resp
+    data = resp["data"]
+    body = base64.b64decode(data["body"]).decode("utf-8")
+    return json.loads(body)
+
+
+def _encode_body(payload: dict[str, Any]) -> str:
+    return base64.b64encode(json.dumps(payload).encode("utf-8")).decode("ascii")
+
+
+def _make_trigger(
+    trigger_id: str = "trigger_event_abc123def456",
+    *,
+    pipeline_id: str = "p1",
+    trigger_type: TriggerType = TriggerType.EVENT,
+) -> TriggerConfig:
+    return TriggerConfig(
+        trigger_id=trigger_id,
+        name="测试触发器",
+        trigger_type=trigger_type,
+        event_name="task_completed",
+        message="触发注入消息",
+        pipeline_id=pipeline_id,
+    )
+
+
+@pytest.fixture(autouse=True)
+def _clean_manager():
+    """每用例重置单例注册表与注入器。"""
+    mgr = get_trigger_manager()
+    for cfg in mgr.list_all():
+        mgr.unregister(cfg.trigger_id)
+    mgr.set_injector(None)
+    mgr.set_main_loop(None)
+    yield
+    for cfg in mgr.list_all():
+        mgr.unregister(cfg.trigger_id)
+
+
+# ── list / stats ────────────────────────────────────────────────────
+
+
+def test_list_empty() -> None:
+    body = _unwrap(asyncio.run(http_api.list_triggers(None)))
+    assert body == {"items": [], "total": 0}
+
+
+def test_list_with_status_filter() -> None:
+    mgr = get_trigger_manager()
+    # register 自动置 ACTIVE（既有语义）
+    mgr.register(_make_trigger("trigger_event_a1".ljust(24, "0")))
+    mgr.register(_make_trigger("trigger_event_b2".ljust(24, "0")))
+    body_active = _unwrap(asyncio.run(http_api.list_triggers({"status": "active"})))
+    assert body_active["total"] == 2
+    body_pending = _unwrap(asyncio.run(http_api.list_triggers({"status": "pending"})))
+    assert body_pending["total"] == 0
+
+
+def test_serialize_shape() -> None:
+    mgr = get_trigger_manager()
+    mgr.register(_make_trigger())
+    body = _unwrap(asyncio.run(http_api.list_triggers(None)))
+    item = body["items"][0]
+    assert item["trigger_id"] == "trigger_event_abc123def456"
+    assert item["trigger_type"] == "event"
+    assert item["status"] == "active"
+    assert item["message"] == "触发注入消息"
+    assert item["event_name"] == "task_completed"
+
+
+def test_stats() -> None:
+    mgr = get_trigger_manager()
+    mgr.register(_make_trigger("trigger_event_a1".ljust(24, "0")))
+    mgr.register(_make_trigger(
+        "trigger_delay_b2".ljust(24, "0"), trigger_type=TriggerType.DELAY))
+    mgr.register(_make_trigger("trigger_event_c3".ljust(24, "0")))
+    body = _unwrap(asyncio.run(http_api.trigger_stats()))
+    assert body["total"] == 3
+    assert body["by_type"]["event"] == 2
+    assert body["by_type"]["delay"] == 1
+    assert body["active"] == 3
+
+
+# ── get / update / delete ───────────────────────────────────────────
+
+
+def test_get_ok_and_404() -> None:
+    mgr = get_trigger_manager()
+    mgr.register(_make_trigger())
+    body = _unwrap(asyncio.run(http_api.get_trigger("trigger_event_abc123def456")))
+    assert body["trigger"]["trigger_id"] == "trigger_event_abc123def456"
+    resp = asyncio.run(http_api.get_trigger("trigger_event_zzz999zzz999"))
+    assert resp["success"] is False and resp["data"]["status"] == 404
+
+
+def test_update_404_when_missing() -> None:
+    resp = asyncio.run(http_api.update_trigger("trigger_event_zzz999zzz999", {}))
+    assert resp["success"] is False and resp["data"]["status"] == 404
+
+
+def test_delete_ok_and_404() -> None:
+    mgr = get_trigger_manager()
+    mgr.register(_make_trigger())
+    body = _unwrap(asyncio.run(http_api.delete_trigger("trigger_event_abc123def456")))
+    assert body == {"deleted": True, "trigger_id": "trigger_event_abc123def456"}
+    assert mgr.get("trigger_event_abc123def456").status.value == "cancelled"
+    resp = asyncio.run(http_api.delete_trigger("trigger_event_zzz999zzz999"))
+    assert resp["success"] is False and resp["data"]["status"] == 404
+
+
+# ── enable / disable ────────────────────────────────────────────────
+
+
+def test_enable_disable_cycle() -> None:
+    mgr = get_trigger_manager()
+    mgr.register(_make_trigger())
+    # 走端点路径：enable → ACTIVE
+    body = _unwrap(asyncio.run(http_api.handle_triggers_http(
+        "POST", "/ext/trigger_setup_tool/triggers/trigger_event_abc123def456/enable", None)))
+    assert body["trigger"]["status"] == "active"
+    body = _unwrap(asyncio.run(http_api.handle_triggers_http(
+        "POST", "/ext/trigger_setup_tool/triggers/trigger_event_abc123def456/disable", None)))
+    assert body["trigger"]["status"] == "pending"
+    resp = asyncio.run(http_api.handle_triggers_http(
+        "POST", "/ext/trigger_setup_tool/triggers/trigger_event_zzz999zzz999/enable", None))
+    assert resp["success"] is False and resp["data"]["status"] == 404
+
+
+# ── fire（手动触发经注入器投递）──────────────────────────────────────
+
+
+def test_fire_manually_injects() -> None:
+    delivered: list[tuple[str, str]] = []
+
+    async def _fake_injector(pipeline_id: str, message: str, user_id: str) -> Any:
+        delivered.append((pipeline_id, message))
+        return {"ok": True}
+
+    mgr = get_trigger_manager()
+    loop = asyncio.new_event_loop()
+    try:
+        mgr.set_main_loop(loop)
+        mgr.set_injector(_fake_injector)
+        cfg = _make_trigger(pipeline_id="p_fire")
+        mgr.register(cfg)
+        body = _unwrap(loop.run_until_complete(http_api.fire_trigger(cfg.trigger_id)))
+        assert body == {"fired": True, "trigger_id": cfg.trigger_id}
+        loop.run_until_complete(asyncio.sleep(0))  # 注入经 loop 调度
+        # 注入消息带通知前缀（与到期触发同语义，_format_fire_info 打包）
+        assert delivered == [("p_fire", "[触发器通知] 触发器 '测试触发器' 已触发 (第 1 次/共 1 次)\n触发注入消息")]
+        assert cfg.fire_count == 1
+    finally:
+        loop.close()
+
+
+def test_fire_404_when_missing() -> None:
+    resp = asyncio.run(http_api.fire_trigger("trigger_event_zzz999zzz999"))
+    assert resp["success"] is False and resp["data"]["status"] == 404
+
+
+# ── http.handle 分发（路径解析/body 解码/未知 404）────────────────────
+
+
+def test_dispatch_direct_handlers() -> None:
+    """handle_triggers_http 路由覆盖全部 9 端点语义。"""
+    mgr = get_trigger_manager()
+    mgr.register(_make_trigger("trigger_event_a1".ljust(24, "0")))
+    # GET 列表
+    body = _unwrap(asyncio.run(http_api.handle_triggers_http(
+        "GET", "/ext/trigger_setup_tool/triggers", None)))
+    assert body["total"] == 1
+    # GET stats
+    body = _unwrap(asyncio.run(http_api.handle_triggers_http(
+        "GET", "/ext/trigger_setup_tool/triggers/stats", None)))
+    assert body["total"] == 1
+    # GET 详情
+    tid = "trigger_event_a1".ljust(24, "0")
+    body = _unwrap(asyncio.run(http_api.handle_triggers_http(
+        "GET", f"/ext/trigger_setup_tool/triggers/{tid}", None)))
+    assert body["trigger"]["trigger_id"] == tid
+    # 未知路径 404
+    resp = asyncio.run(http_api.handle_triggers_http(
+        "GET", "/ext/trigger_setup_tool/triggers/xxx/yyy", None))
+    assert resp["success"] is False and resp["data"]["status"] == 404
+
+
+def test_dispatch_bad_json_body_400() -> None:
+    resp = asyncio.run(http_api.handle_triggers_http(
+        "POST", "/ext/trigger_setup_tool/triggers", None, raw_body="not-json"))
+    assert resp["success"] is False and resp["data"]["status"] == 400
+
+
+def test_server_dispatch_fallthrough() -> None:
+    """server 入口：非本插件前缀 → 404（fail-closed）。"""
+    resp = asyncio.run(http_api.handle_http_dispatch(
+        "/ext/other/triggers", "GET"))
+    assert resp["success"] is False and resp["data"]["status"] == 404

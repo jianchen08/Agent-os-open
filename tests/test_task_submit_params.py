@@ -108,9 +108,12 @@ def make_tool(tool_module, service: FakeTaskService):
     GAP-1 统一后：提交不再走 YAML/task_service 写路径，workspace/隔离语义经
     chat.send_message 的 execution_context 透传（执行管道 workspace_lifecycle
     消费）——测试注入假 chat sender 捕获派发 params，断言 execution_context。
+    2026-08-22：任务 id 统一写提交者管道 state（task.owned.*）——普通任务
+    创建后追加一次 no_dispatch 登记调用；captured["params"] 保留首次（创建）
+    调用，captured["calls"] 为全部调用。
     """
     tool = tool_module.TaskSubmitTool()
-    captured: dict = {}
+    captured: dict = {"calls": []}
 
     class _ProviderShim:
         def get(self, key: str):
@@ -129,7 +132,12 @@ def make_tool(tool_module, service: FakeTaskService):
     tool._check_parent_ownership = lambda level, pid: (True, None)
 
     async def fake_sender(params: dict) -> dict:
-        captured["params"] = params
+        captured["calls"].append(params)
+        if params.get("no_dispatch"):
+            # 登记调用：只写 state 不派发（容器任务/任务登记）
+            return {"status": "recorded", "pipeline_id": params.get("pipeline_id", "")}
+        if "params" not in captured:
+            captured["params"] = params
         # 模拟引擎创建分支响应（uuid v4 simple 32hex，形态见 chat 契约）
         return {"status": "created", "pipeline_id": "a1b2c3d4e5f64789abcdef0123456789"}
 
@@ -188,19 +196,26 @@ async def test_container_forbids_workspace_mode_and_isolation(tool_module):
 
 @pytest.mark.asyncio
 async def test_container_allows_workspace_source(tool_module, tmp_proj):
-    """容器任务：workspace 可填（作为容器空间源项目），恒 container_copy 复制。"""
+    """容器任务：workspace 可填（作为容器空间源项目），登记到提交者管道 state。"""
     tool, captured = make_tool(tool_module, FakeTaskService())
 
-    inputs = base_inputs(task_scope="container", parent_agent_level=1, workspace=tmp_proj)
+    inputs = base_inputs(
+        task_scope="container",
+        parent_agent_level=1,
+        workspace=tmp_proj,
+        pipeline_id="owner-pipe-1",
+    )
     result = await tool.execute(inputs)
     assert result.success, result.error
-    ec = captured["params"]["execution_context"]
-    # 容器空间拓扑恒复制（mode=container_copy），源空间透传给执行管道
-    assert ec["workspace"]["source_path"] == tmp_proj
-    assert ec["workspace"]["mode"] == "container_copy"
-    assert ec["workspace"]["explicit"] is True
-    # 容器任务不可选隔离 → execution_context 不携带 isolation（系统默认）
-    assert "isolation" not in ec
+    # 容器任务不建管道：唯一调用是 no_dispatch 登记（写提交者管道 state）
+    assert len(captured["calls"]) == 1, "容器任务不得创建执行管道"
+    reg = captured["calls"][0]
+    assert reg["no_dispatch"] is True
+    assert reg["pipeline_id"] == "owner-pipe-1"
+    assert reg["state"]["task.owned." + result.output["task_id"] + ".scope"] == "container"
+    assert reg["state"]["task.owned." + result.output["task_id"] + ".workspace"] == tmp_proj
+    assert result.output["task_scope"] == "container"
+    assert result.output["status"] == "active"
 
 
 # ── 容器直接子任务 ─────────────────────────────────────────────
@@ -420,6 +435,40 @@ async def test_ordinary_root_task_plain_mode(tool_module, tmp_proj):
     ec = captured["params"]["execution_context"]
     assert ec["workspace"]["mode"] == "plain"
     assert ec["isolation"]["level"] == "non_isolated"
+
+
+@pytest.mark.asyncio
+async def test_ordinary_task_registers_owned_to_owner_pipeline(tool_module):
+    """普通任务（有提交者管道）：创建执行管道后，任务 id 登记到提交者管道 state。
+
+    语义（2026-08-22 定案）：任务 id 统一写"自己的管道"（提交者管道）state——
+    task.owned.<id> 自持（本管道插件也能读它处理它）；执行管道 state 收
+    task.assigned（收到上级的任务 id，引擎注入 task.id 即管道身份）。
+    """
+    service = FakeTaskService()
+    tool, captured = make_tool(tool_module, service)
+
+    inputs = base_inputs(
+        parent_agent_level=2,
+        pipeline_id="owner-pipe-1",
+        session_id="sess-1",
+        task_id="parent-task-1",
+    )
+    result = await tool.execute(inputs)
+    assert result.success, result.error
+    # 两次调用：① 创建执行管道 ② no_dispatch 登记到提交者管道
+    assert len(captured["calls"]) == 2, captured["calls"]
+    create_call = captured["calls"][0]
+    assert create_call.get("create") is True
+    reg = captured["calls"][1]
+    assert reg["no_dispatch"] is True
+    assert reg["pipeline_id"] == "owner-pipe-1"
+    # state 键用全 id（内部权威 id 不动）；LLM 面返回短 id（12 位）
+    full_pid = "a1b2c3d4e5f64789abcdef0123456789"
+    assert result.output["pipeline_id"] == full_pid[:12]
+    assert reg["state"][f"task.owned.{full_pid}.title"] == "测试任务"
+    assert reg["state"][f"task.owned.{full_pid}.scope"] == "non_container"
+    assert reg["state"][f"task.owned.{full_pid}.status"] == "running"
 
 
 # ── schema ─────────────────────────────────────────────────────

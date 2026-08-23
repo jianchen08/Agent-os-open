@@ -17,6 +17,19 @@ from __future__ import annotations
 import sys
 
 # 已知的平铺模块名（跨插件可能冲突）。保守覆盖所有插件常见同名模块。
+# 2026-08-23 串扰簇修复扩容：workspace/adapter/tool/capabilities/mm_types/asr。
+# - adapter：7 个插件同名（multimodal vs llm/llm_core 等），multimodal 的
+#   capabilities.py ``from adapter import ClaudeVisionAdapter`` 曾命中
+#   llm_core/adapter.py 缓存而 ImportError；
+# - tool：12 个插件同名（bash vs task_evaluate 等）；
+# - workspace：特殊——system/workspace/ 是**无 __init__.py 的 namespace 包**，
+#   而 tasks/workspace.py、isolation/workspace.py 是裸模块。PathFinder 规则：
+#   命中 namespace portion 后仍继续扫描 sys.path，**后续普通模块优先**——
+#   只要 tasks/isolation 目录还在 sys.path 上，``from workspace.models import``
+#   就会把 'workspace' 槽位解析成 tasks/workspace.py（非包）→
+#   ``No module named 'workspace.models'``。故除逐出缓存外还需配对
+#   _PLUGIN_CONFLICT_DIRS 把含同名裸模块的目录从 sys.path 摘除
+#   （与 tests/channels/conftest.py use_channel 同款纪律）。
 _COLLIDING_NAMES = frozenset(
     {
         "plugin",
@@ -28,6 +41,12 @@ _COLLIDING_NAMES = frozenset(
         "integration",
         "artifact_service",
         "annotation_service",
+        "workspace",
+        "adapter",
+        "tool",
+        "capabilities",
+        "mm_types",
+        "asr",
         # pipeline 是 namespace 包，剔除后会被各 conftest 的 sys.path[0] 重新定位
         "pipeline",
     }
@@ -61,3 +80,16 @@ def promote_source_dirs(dirs: list[str]) -> None:
     # 按「最后一个应在最前」的顺序插入头部
     for d in reversed(dirs):
         sys.path.insert(0, d)
+
+
+def demote_conflict_dirs(dirs: list[str]) -> None:
+    """把与目标插件冲突的目录从 sys.path 摘除（全部出现位置）。
+
+    适用场景：目标插件目录是无 __init__.py 的 namespace 包（如
+    system/workspace/），而冲突目录内有同名裸模块（tasks/workspace.py）——
+    PathFinder 里普通模块优先于 namespace portion，只提升自身目录不够，
+    必须把冲突目录摘掉才能让包形态胜出（与 channels use_channel 同款）。
+    """
+    for d in dirs:
+        while d in sys.path:
+            sys.path.remove(d)

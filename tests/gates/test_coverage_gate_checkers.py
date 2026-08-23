@@ -411,6 +411,30 @@ class TestRustCoverageBaseline:
         assert "rust_line_coverage=50.0" in bf.read_text(encoding="utf-8")
 
 
+# ── check_frontend_baseline：vitest 失败数解析 ─────────────────────
+
+class TestFrontendVitestFailureParse:
+    def test_failed_summary(self) -> None:
+        out = " Test Files  1 failed (1)\n      Tests  3 failed | 2018 passed (2021)\n"
+        assert fe_base.parse_vitest_failures(out) == 3
+
+    def test_all_green_summary_is_zero(self) -> None:
+        # 全绿摘要无 failed 段（基线收紧到 0 后的常态）→ 0，而非误判度量链断裂
+        out = " Test Files  246 passed (246)\n      Tests  2021 passed (2021)\n"
+        assert fe_base.parse_vitest_failures(out) == 0
+
+    def test_ansi_colored_all_green_summary_is_zero(self) -> None:
+        out = (
+            "\x1b[32m\x1b[1m Test Files \x1b[22m\x1b[1m\x1b[32m246 passed\x1b[39m\x1b[22m\n"
+            "\x1b[32m\x1b[1m      Tests \x1b[22m\x1b[1m\x1b[32m2021 passed\x1b[39m\x1b[22m \x1b[2m(\x1b[22m\x1b[2m2021\x1b[22m\x1b[2m)\x1b[22m\n"
+        )
+        assert fe_base.parse_vitest_failures(out) == 0
+
+    def test_missing_summary_raises(self) -> None:
+        with pytest.raises(RuntimeError):
+            fe_base.parse_vitest_failures("some arbitrary output without summary")
+
+
 # ── check_frontend_baseline：覆盖率%解析 ───────────────────────────
 
 class TestFrontendCoverageParse:

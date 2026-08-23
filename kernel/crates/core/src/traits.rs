@@ -1144,6 +1144,27 @@ pub struct ManifestCapabilities {
     pub route_signals: Vec<RouteType>,
     #[serde(default)]
     pub lifecycle_hooks: Vec<LifecycleHook>,
+    /// 流式事件能力声明（ADR 2026-08-22 流式协议）：插件按
+    /// `config/kernel_capabilities/streaming.json` 发射流式事件（message_id 强制
+    /// p_ 命名空间，事件/part_types 声明供 G2 校验器对照实现）。未声明 = 网关
+    /// 拒绝其流式事件（fail-closed），与当年 resources 的「声明即接入」同构。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub streaming: Option<StreamingCapability>,
+}
+
+/// 流式能力声明（capabilities.streaming，文档见 docs/streaming-protocol.md）。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StreamingCapability {
+    /// 插件实际发射的事件类型清单（缺省 = 全部 10 个事件均可发射）。
+    /// G2 校验器对照插件实现实际发射的事件做一致性检查。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub events: Option<Vec<String>>,
+    /// 插件自定义渲染的 part 类型（前端按注册表分发，见协议 §8）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub part_types: Option<Vec<String>>,
+    /// 插件事件的默认持久化语义（缺省 false = 纯展示，只进 store 刷新弃）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub persist: Option<bool>,
 }
 
 /// 服务方法声明（D.6 槽位拆分）。结构是 ToolCapability 的子集（迁移期

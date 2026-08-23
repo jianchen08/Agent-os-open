@@ -34,13 +34,13 @@ FRONTEND_SRC = ROOT / "frontend" / "src"
 # 口径：grep -rno "/ext/" frontend/src --include=*.ts --include=*.tsx
 #       排除 endpoints.generated.ts 与 *.test.*（测试断言随所属域批次同步改，
 #       不计入本闸；批次 5 收尾闸再锁零命中）。
-# 实测 2026-08-21（生成器就位时点，grep 与 Python .count 双口径一致）：
-# 222 处（channel_api 相关占大头，随批次 1-5 逐域清零；baseline 变动走
-# commit 留归因，只减不增。注：批次 0 执行期间批次 1 的 memory/workspace
-# 域已并行迁移，实测从 247 降至 222）。
-# 批次 0-4 更新：删 config/generic + floating-chat + modules/ui + editorConfig
-# 前端引用 → 实测 215（222 - 本批删除 8 处 + 并行批次净增 1）。
-HANDWRITTEN_EXT_BASELINE = 215
+# 实测 2026-08-21（channel_api 退役收尾后）：
+# 9 处 = 3 处合法运行时动态拼接（WebviewWidget /ext/${pluginId}、
+#   pluginStyles /ext/{pluginId} 声明驱动消费——真值源不在前端）
+#   + 6 处注释/声明示例（WebviewWidget 白名单注释、ContributionRegistry
+#   CSS 拼接规则、workspaces 模板注释、WizardWidget 声明示例）。
+# 历史：222 → 215（批次 0）→ 70（channel_api 域驱逐）→ 9（终态收口）。
+HANDWRITTEN_EXT_BASELINE = 9
 
 TEST_FILE_RE = re.compile(r"\.(test|spec)\.")
 TS_FILE_SUFFIXES = (".ts", ".tsx")

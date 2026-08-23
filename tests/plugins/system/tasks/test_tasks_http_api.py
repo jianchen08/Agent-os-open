@@ -266,6 +266,165 @@ class TestTasksEndpoints:
         assert resp["payload"]["total"] == 1
         assert resp["payload"]["items"][0]["title"] == "S"
 
+    # ── GAP-1 统一：state 聚合行合并（0.2 任务真值所在，YAML 只读镜像无 0.2 任务）──
+
+    async def test_list_tasks_merges_state_rows(self, monkeypatch: pytest.MonkeyPatch,
+                                                service: Any, hub: _FakeCapabilityHub) -> None:
+        """0.2 任务（仅存在于 state 聚合）必须出现在任务列表，且字段映射完整。"""
+        hub._responses["pipeline-state"] = {
+            "list": {
+                "items": [
+                    {
+                        "pipeline_id": "pipe-0-2-task",
+                        "task.goal": "0.2 提交的任务",
+                        "task.status": "running",
+                        "task.scope": "non_container",
+                        "task.submitted_by": "u-1",
+                        "lineage.origin_session_id": "sess-real",
+                        "lineage.parent_pipeline_id": "",
+                        "thread_id": "pipe-0-2-task",
+                    },
+                    # 无 task.* 字段的普通会话管道 → 不是任务，跳过
+                    {"pipeline_id": "pipe-session", "status": "active", "ended": False},
+                ]
+            }
+        }
+        resp = await _http(monkeypatch, service, hub, "/ext/task_service/tasks")
+        assert resp["status"] == 200
+        items = resp["payload"]["items"]
+        assert resp["payload"]["total"] == 1
+        t = items[0]
+        assert t["id"] == "pipe-0-2-task"
+        assert t["title"] == "0.2 提交的任务"
+        assert t["status"] == "running"
+        assert t["pipeline_run_id"] == "pipe-0-2-task"
+        # 会话锚点：lineage.origin_session_id 为真 thread id（非自身 pipeline_id）
+        assert t["thread_id"] == "sess-real"
+        assert t["metadata"]["task_scope"] == "non_container"
+
+    async def test_list_tasks_state_row_dedup(self, monkeypatch: pytest.MonkeyPatch,
+                                              service: Any, hub: _FakeCapabilityHub) -> None:
+        """同一 pipeline_id 同时存在于 YAML 与 state 时只保留一条（state 优先）。"""
+        t = await service.create_task(title="双写任务")
+        t.pipeline_run_id = t.id
+        await service.save_task(t)
+        hub._responses["pipeline-state"] = {
+            "list": {
+                "items": [
+                    {
+                        "pipeline_id": t.id,
+                        "task.goal": "双写任务",
+                        "task.status": "completed",
+                        "task.scope": "non_container",
+                        "lineage.origin_session_id": "sess-x",
+                        "thread_id": t.id,
+                    }
+                ]
+            }
+        }
+        resp = await _http(monkeypatch, service, hub, "/ext/task_service/tasks")
+        assert resp["payload"]["total"] == 1
+        assert resp["payload"]["items"][0]["id"] == t.id
+
+    async def test_list_tasks_state_unavailable_degrades(self, monkeypatch: pytest.MonkeyPatch,
+                                                         service: Any, hub: _FakeCapabilityHub) -> None:
+        """pipeline-state 能力不可用（KeyError）→ 降级为 YAML 面，不崩。"""
+        await service.create_task(title="YAML 任务")
+        # hub 无 pipeline-state 预置 → _capability 抛 KeyError → 降级
+        resp = await _http(monkeypatch, service, hub, "/ext/task_service/tasks")
+        assert resp["status"] == 200
+        assert resp["payload"]["total"] == 1
+        assert resp["payload"]["items"][0]["title"] == "YAML 任务"
+
+    async def test_list_tasks_state_status_filter(self, monkeypatch: pytest.MonkeyPatch,
+                                                  service: Any, hub: _FakeCapabilityHub) -> None:
+        """state 行参与 status 筛选（pending_evaluation 等细态原样透传）。"""
+        hub._responses["pipeline-state"] = {
+            "list": {
+                "items": [
+                    {
+                        "pipeline_id": "pipe-eval",
+                        "task.goal": "待评估任务",
+                        "task.status": "pending_evaluation",
+                        "task.scope": "non_container",
+                        "lineage.origin_session_id": "sess-e",
+                        "thread_id": "pipe-eval",
+                    }
+                ]
+            }
+        }
+        resp = await _http(monkeypatch, service, hub, "/ext/task_service/tasks",
+                           query={"status": "pending_evaluation"})
+        assert resp["payload"]["total"] == 1
+        assert resp["payload"]["items"][0]["status"] == "pending_evaluation"
+
+    # ── 2026-08-22 定案：容器任务 = 提交者管道自持（task.owned.*）──
+
+    async def test_list_tasks_merges_owned_container_tasks(self, monkeypatch: pytest.MonkeyPatch,
+                                                           service: Any, hub: _FakeCapabilityHub) -> None:
+        """容器任务（task.owned.<id>.* 键）从提交者管道聚合行组装，不建管道。"""
+        hub._responses["pipeline-state"] = {
+            "list": {
+                "items": [
+                    {
+                        "pipeline_id": "owner-pipe-1",
+                        "task.owned.c1d2e3f4a5b64789abcdef0123456789.title": "容器项目",
+                        "task.owned.c1d2e3f4a5b64789abcdef0123456789.status": "active",
+                        "task.owned.c1d2e3f4a5b64789abcdef0123456789.scope": "container",
+                        "task.owned.c1d2e3f4a5b64789abcdef0123456789.workspace": "D:/proj/x",
+                        "task.owned.c1d2e3f4a5b64789abcdef0123456789.submitted_by": "u-1",
+                        "lineage.origin_session_id": "sess-owner",
+                        "thread_id": "owner-pipe-1",
+                    }
+                ]
+            }
+        }
+        resp = await _http(monkeypatch, service, hub, "/ext/task_service/tasks")
+        assert resp["status"] == 200
+        items = resp["payload"]["items"]
+        assert resp["payload"]["total"] == 1
+        t = items[0]
+        assert t["id"] == "c1d2e3f4a5b64789abcdef0123456789"
+        assert t["title"] == "容器项目"
+        assert t["status"] == "active"
+        assert t["metadata"]["task_scope"] == "container"
+        assert t["metadata"]["workspace"] == "D:/proj/x"
+        # 容器任务无执行管道：pipeline_run_id 指向提交者管道（归属定位用）
+        assert t["pipeline_run_id"] == "owner-pipe-1"
+        assert t["thread_id"] == "sess-owner"
+
+    async def test_list_container_tasks_from_state(self, monkeypatch: pytest.MonkeyPatch,
+                                                    service: Any, hub: _FakeCapabilityHub) -> None:
+        """前端父容器下拉：容器任务从 state 聚合组装（YAML 面退役）。"""
+        hub._responses["pipeline-state"] = {
+            "list": {
+                "items": [
+                    {
+                        "pipeline_id": "owner-pipe-1",
+                        "task.owned.c1d2e3f4a5b64789abcdef0123456789.title": "容器项目",
+                        "task.owned.c1d2e3f4a5b64789abcdef0123456789.status": "active",
+                        "task.owned.c1d2e3f4a5b64789abcdef0123456789.scope": "container",
+                        "lineage.origin_session_id": "sess-owner",
+                        "thread_id": "owner-pipe-1",
+                    },
+                    {
+                        "pipeline_id": "pipe-other",
+                        "task.goal": "普通任务",
+                        "task.status": "running",
+                        "task.scope": "non_container",
+                        "lineage.origin_session_id": "sess-owner",
+                        "thread_id": "pipe-other",
+                    },
+                ]
+            }
+        }
+        resp = await _http(monkeypatch, service, hub, "/ext/task_service/tasks/containers")
+        assert resp["status"] == 200
+        containers = resp["payload"]
+        assert len(containers) == 1
+        assert containers[0]["id"] == "c1d2e3f4a5b64789abcdef0123456789"
+        assert containers[0]["title"] == "容器项目"
+
     async def test_get_task_ok_and_404(self, monkeypatch: pytest.MonkeyPatch,
                                        service: Any, hub: _FakeCapabilityHub) -> None:
         t = await service.create_task(title="详情")

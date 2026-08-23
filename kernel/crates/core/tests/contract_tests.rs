@@ -387,6 +387,7 @@ fn test_message_record_serialization() {
         status: None,
         error: None,
         tool_result_json: None,
+        metadata: None,
     };
     let json_str = serde_json::to_string(&record).unwrap();
     assert!(json_str.contains("msg_001"));

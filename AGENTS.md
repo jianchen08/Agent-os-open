@@ -61,11 +61,11 @@ commit 前的调查/验证工作尽量用未跟踪文件（`??` 状态）或文�
   并如实区分"门禁绿"与"测试绿"。
 - **触碰即清（治理债随模块清，2026-08-19 用户要求）**：改动触碰某模块
   （plugins/shared / kernel/crates / frontend/src）时，同刀清该模块对应的治理债：
-  Python 模块 mypy 错误不增、清了就下调 `.github/mypy-baseline.txt`（现值 337，
+  Python 模块 mypy 错误不增、清了就下调 `.github/mypy-baseline.txt`（现值 0，
   只减不增）；修好基线内既有红测试就收紧 `.github/pytest-failure-baseline.txt`
-  （plugins-coverage 116 / plugins-heavy 11）；新代码带测试（覆盖率棘轮门禁
+  （plugins-coverage 19 / plugins-heavy 0）；新代码带测试（覆盖率棘轮门禁
   兜底，2026-08-20 ADR：整体覆盖率基线只升不降且**略高于实测留压力**——
-  Python 44.0/Rust 86.0/前端待校准，改动行覆盖率 100%（diff coverage，
+  Python 64.0/Rust 86.0/前端待校准，改动行覆盖率 100%（diff coverage，
   `[skip-diff-cov]` 逃生口），检查器 `scripts/check_*_coverage_baseline.py` +
   `scripts/check_diff_coverage.py`）。
   基线文件改动一律走 commit 留归因。细则与三问清单：

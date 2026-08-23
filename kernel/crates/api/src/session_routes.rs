@@ -39,12 +39,33 @@ pub async fn list_sessions_handler(
         let tenant_ctx =
             crate::server::request_tenant_ctx(state.store.as_ref(), &headers, "").await;
         let store_clone = store.clone();
+        let tenant_id = tenant_ctx.tenant_id.clone();
         let sessions_result = agentos_tenant::scope(tenant_ctx, async move {
             let filter = agentos_core::traits::SessionListFilter {
                 session_type: Some("main_pipeline".to_string()),
                 limit: Some(100),
             };
-            store_clone.list_sessions(filter).await
+            let sessions = store_clone.list_sessions(filter).await?;
+            // 读面补全（ADR 2026-08-21）：子管道/任务管道创建时已按归属会话 link
+            // 进 pipeline_sessions——把映射表 id 并入 pipeline_ids（保序、去重，
+            // 主管道仍在前）。前端 findPipelineLocation 第二级"枚举 sessions[].pipelineIds
+            // 找管道归属"对子管道至此也能命中，不再退化到当前会话误开标签。
+            let mut with_children: Vec<agentos_core::types::SessionRecord> =
+                Vec::with_capacity(sessions.len());
+            for mut s in sessions {
+                if let Ok(extras) = store_clone
+                    .list_pipeline_ids_by_thread(&s.thread_id, &tenant_id)
+                    .await
+                {
+                    for extra in extras {
+                        if !s.pipeline_ids.contains(&extra) {
+                            s.pipeline_ids.push(extra);
+                        }
+                    }
+                }
+                with_children.push(s);
+            }
+            Ok::<_, agentos_core::types::StorageError>(with_children)
         })
         .await;
         match sessions_result {
@@ -546,6 +567,15 @@ pub async fn list_session_messages_handler(
                     "reasoningContent".into(),
                     Value::String(reasoning.to_string()),
                 );
+            }
+        }
+        // 自定义元数据原样回显（ADR 2026-08-21 消息幂等契约）：user 消息的
+        // metadata.client_message_id 是前端乐观消息对账去重的唯一桥接键。
+        if let Some(meta) = rec.metadata.as_ref() {
+            if meta.is_object() {
+                msg.as_object_mut()
+                    .expect("msg is object")
+                    .insert("metadata".into(), meta.clone());
             }
         }
         messages.push(msg);

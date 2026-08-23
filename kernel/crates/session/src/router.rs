@@ -34,6 +34,10 @@ pub trait PipelineDispatcher: Send + Sync {
     /// agent_id 指定执行管道加载的 agent 配置（config/agents/**/<id>.yaml，
     /// 决定人格/tool_ids/技能）。任务派发按 target 选 agent；前端主会话
     /// 路径传默认主 agent。
+    ///
+    /// client_message_id 是前端幂等键（ADR 2026-08-21）：随 user 消息
+    /// metadata 落库并在 GET messages 回显，前端据此对账去重乐观消息。
+    /// 空串 = 无幂等键（触发器注入/旧客户端）。
     #[allow(clippy::too_many_arguments)]
     async fn dispatch_user_input(
         &self,
@@ -45,6 +49,7 @@ pub trait PipelineDispatcher: Send + Sync {
         execution_context: Option<&serde_json::Value>,
         state_overlay: Option<&serde_json::Value>,
         agent_id: &str,
+        client_message_id: &str,
     ) -> Result<(), String>;
 
     /// 转发人工交互响应（审批/选择）。
@@ -162,6 +167,20 @@ impl InboundRouter {
             })
             .unwrap_or("")
             .to_string();
+        // client_message_id：前端幂等键（ADR 2026-08-21 消息幂等契约）。
+        // 随 user 消息 metadata 落库并在 GET messages 回显，前端据此把乐观
+        // 消息与权威记录对账去重。顶层优先、data 信封兜底（与 pipeline_id
+        // 同法）。缺失为空串 = 无幂等键（触发器注入/旧客户端路径）。
+        let client_message_id = msg
+            .get("client_message_id")
+            .and_then(|v| v.as_str())
+            .or_else(|| {
+                msg.get("data")
+                    .and_then(|d| d.get("client_message_id"))
+                    .and_then(|v| v.as_str())
+            })
+            .unwrap_or("")
+            .to_string();
         match self
             .dispatcher
             .dispatch_user_input(
@@ -173,6 +192,7 @@ impl InboundRouter {
                 None,
                 None,
                 "agentos",
+                &client_message_id,
             )
             .await
         {

@@ -17,7 +17,6 @@ sys.path 最前并踢掉裸名缓存，使每个测试都解析到正确文件�
 from __future__ import annotations
 
 import os
-import sys
 
 import pytest
 
@@ -62,18 +61,50 @@ def _find_plugin_source_dirs(item: pytest.Item) -> list[str]:
     """沿测试文件目录向上找最近的、声明了 _PLUGIN_SOURCE_DIRS 的 conftest 模块。
 
     返回其声明的源目录列表（str 路径），未找到则返回空列表。
+
+    2026-08-23 修复：改从 pytest pluginmanager 注册表中按 __file__ 定位
+    conftest 模块。原先扫 sys.modules——但**无 __init__.py 的测试目录**下
+    pytest 会把 conftest 以裸名 ``conftest`` 导入，多个此类目录互相顶掉
+    sys.modules['conftest'] 槽位（仅最后一个存活），monitoring/multimodal/
+    isolation_guard 等目录的 conftest 因此查不到 → 钩子静默失效 →
+    裸名串扰复发。pluginmanager 对每个 conftest 模块都有独立注册，
+    不受 sys.modules 命名冲突影响。
     """
     test_dir = os.path.dirname(str(item.fspath))
     current = test_dir
     for _ in range(10):  # 最多向上查 10 层
         conftest_path = os.path.join(current, "conftest.py")
         if os.path.isfile(conftest_path):
-            # 读 conftest 模块的 _PLUGIN_SOURCE_DIRS 属性（已加载则直接取）
-            # 用文件路径定位已加载的 conftest 模块
-            rel = os.path.relpath(current)
-            for mod in list(sys.modules.values()):
-                if getattr(mod, "__file__", None) and os.path.abspath(mod.__file__) == os.path.abspath(conftest_path):
-                    dirs = getattr(mod, "_PLUGIN_SOURCE_DIRS", None)
+            for plug in item.config.pluginmanager.get_plugins():
+                plug_file = getattr(plug, "__file__", None)
+                if plug_file and os.path.abspath(plug_file) == os.path.abspath(conftest_path):
+                    dirs = getattr(plug, "_PLUGIN_SOURCE_DIRS", None)
+                    if dirs:
+                        return list(dirs)
+                    break
+        parent = os.path.dirname(current)
+        if parent == current:
+            break
+        current = parent
+    return []
+
+
+def _find_plugin_conflict_dirs(item: pytest.Item) -> list[str]:
+    """同 _find_plugin_source_dirs，但取可选声明 _PLUGIN_CONFLICT_DIRS。
+
+    冲突目录 = 含与目标插件 namespace 包同名的裸模块的目录（如
+    tasks/、isolation/ 之于 system/workspace/ 包），测试期需从 sys.path
+    摘除（PathFinder 普通模块优先于 namespace portion）。未声明返回空。
+    """
+    test_dir = os.path.dirname(str(item.fspath))
+    current = test_dir
+    for _ in range(10):
+        conftest_path = os.path.join(current, "conftest.py")
+        if os.path.isfile(conftest_path):
+            for plug in item.config.pluginmanager.get_plugins():
+                plug_file = getattr(plug, "__file__", None)
+                if plug_file and os.path.abspath(plug_file) == os.path.abspath(conftest_path):
+                    dirs = getattr(plug, "_PLUGIN_CONFLICT_DIRS", None)
                     if dirs:
                         return list(dirs)
                     break
@@ -90,6 +121,8 @@ def pytest_runtest_setup(item: pytest.Item) -> None:
     若测试所在目录的 conftest 声明了 _PLUGIN_SOURCE_DIRS，
     则把这些目录推到 sys.path 最前，并踢掉平铺 import 的裸名缓存，
     使 ``from plugin import ...`` 等按本插件目录重新解析。
+    若声明了 _PLUGIN_CONFLICT_DIRS（可选），另把冲突目录从 sys.path 摘除
+    （namespace 包被同名裸模块压制的场景，见 _bare_module_evict 注释）。
     """
     fspath = str(item.fspath).replace("\\", "/")
     if "/tests/plugins/" not in fspath:
@@ -98,7 +131,8 @@ def pytest_runtest_setup(item: pytest.Item) -> None:
     if not dirs:
         return
     # 延迟导入，避免在无插件源目录的测试中加载本模块
-    from tests.plugins._bare_module_evict import evict_bare_modules, promote_source_dirs
+    from tests.plugins._bare_module_evict import demote_conflict_dirs, evict_bare_modules, promote_source_dirs
 
     evict_bare_modules()
+    demote_conflict_dirs(_find_plugin_conflict_dirs(item))
     promote_source_dirs(dirs)

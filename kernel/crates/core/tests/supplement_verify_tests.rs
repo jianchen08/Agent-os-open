@@ -98,6 +98,7 @@ fn test_message_record_roundtrip() {
         status: None,
         error: None,
         tool_result_json: None,
+        metadata: None,
     };
     let json_str = serde_json::to_string(&original).unwrap();
     let deserialized: MessageRecord = serde_json::from_str(&json_str).unwrap();
@@ -130,6 +131,7 @@ fn test_message_record_roundtrip_no_optional() {
         status: None,
         error: None,
         tool_result_json: None,
+        metadata: None,
     };
     let json_str = serde_json::to_string(&original).unwrap();
     let deserialized: MessageRecord = serde_json::from_str(&json_str).unwrap();

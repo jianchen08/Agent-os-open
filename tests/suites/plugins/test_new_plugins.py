@@ -8,26 +8,35 @@
 
 import hashlib
 import os
+import sys
 
 import pytest
-from pipeline.plugin import PluginContext
-from pipeline.types import StateKeys
+
+# 0.2 布局：管道插件位于 plugins/shared/pipeline/{input,output}/<name>/plugin.py
+# （0.1 的 src/plugins/ 布局已物理删除）。pipeline.plugin / pipeline.types
+# 顶层 re-export 仍保留，import 需 plugins/shared 在 sys.path 上（自举，不依赖
+# 其它测试文件先把该目录推上 sys.path 的偶然顺序）。
+_REPO_ROOT = os.path.normpath(os.path.join(os.path.dirname(__file__), "..", "..", ".."))
+_SHARED_DIR = os.path.join(_REPO_ROOT, "plugins", "shared")
+if _SHARED_DIR not in sys.path:
+    sys.path.insert(0, _SHARED_DIR)
+
+from pipeline.plugin import PluginContext  # noqa: E402
+from pipeline.types import StateKeys  # noqa: E402
 
 # 直接加载模块，绕过 __init__.py 导入链
-from tests.suites.plugins.conftest import load_module_from_file
+from tests.suites.plugins.conftest import load_module_from_file  # noqa: E402
 
 pytestmark = pytest.mark.unit
 
-_SRC_DIR = os.path.normpath(os.path.join(
-    os.path.dirname(__file__), "..", "..", "..", "src"
-))
+_PIPELINE_DIR = os.path.join(_SHARED_DIR, "pipeline")
 
 
 def _import_tool_call_guard():
     """加载 tool_call_guard 模块。"""
     return load_module_from_file(
         "tool_call_guard",
-        os.path.join(_SRC_DIR, "plugins", "input", "tool_call_guard.py"),
+        os.path.join(_PIPELINE_DIR, "input", "tool_call_guard", "plugin.py"),
     )
 
 
@@ -35,7 +44,7 @@ def _import_output_repetition_guard():
     """加载 output_repetition_guard 模块。"""
     return load_module_from_file(
         "output_repetition_guard",
-        os.path.join(_SRC_DIR, "plugins", "output", "output_repetition_guard.py"),
+        os.path.join(_PIPELINE_DIR, "output", "output_repetition_guard", "plugin.py"),
     )
 
 
@@ -162,8 +171,12 @@ class TestToolCallGuard:
         assert "messages" in result.state_updates
 
     @pytest.mark.asyncio
-    async def test_exceeds_max_retries_produces_decision_route(self):
-        """超过阈值（默认3次）应产出 decision 路由信号。"""
+    async def test_exceeds_max_retries_routes_next_llm_with_agent_payload(self):
+        """超过阈值（默认3次）应产出 next_llm 信号并携带 agent 分析载荷。
+
+        0.2 路由收敛（ROADMAP）：ToolCallGuard 的 decision 信号已移除，
+        超限改由 next_llm 让 LLM 分析引导（payload 保留 decision_type=agent）。
+        """
         plugin = self._make_plugin()
         tc = [{"name": "read_file", "args": {"path": "/tmp/a.txt"}}]
         sig = plugin._generate_signature(tc)
@@ -176,9 +189,9 @@ class TestToolCallGuard:
 
         result = await plugin.execute(ctx)
 
-        # 应有 decision 路由信号
+        # 应有 next_llm 路由信号（decision 信号已随 0.2 路由收敛移除）
         assert result.route_signal is not None
-        assert result.route_signal.route_type == "decision"
+        assert result.route_signal.route_type == "next_llm"
         assert result.route_signal.payload is not None
         assert result.route_signal.payload["decision_type"] == "agent"
         assert result.route_signal.payload["repeat_count"] == 4
@@ -201,7 +214,8 @@ class TestToolCallGuard:
         assert result.route_signal is not None
         assert result.route_signal.route_type == "next_llm"
 
-        # repeat_count=5 超过 max_retries=5，应走 decision
+        # repeat_count=5 超过 max_retries=5，超限路径同样产出 next_llm
+        # （decision 信号已移除，见 0.2 路由收敛）
         ctx2 = self._make_ctx({
             StateKeys.RAW_TOOL_CALLS: tc,
             "tool_call.last_signature": sig,
@@ -210,7 +224,7 @@ class TestToolCallGuard:
 
         result2 = await plugin.execute(ctx2)
         assert result2.route_signal is not None
-        assert result2.route_signal.route_type == "decision"
+        assert result2.route_signal.route_type == "next_llm"
 
     def test_signature_reflects_tool_name_and_args(self):
         """签名生成应正确反映工具名和参数。"""

@@ -11,7 +11,7 @@ use std::sync::Arc;
 use serde_json::{json, Value};
 
 use crate::event_bus::{EmitScope, FrontendEventBus};
-use crate::replay::{EventFamily, ReplayBuffer, ReplayConfig, ReplayEvent, ReplayResult};
+use crate::replay::{ReplayBuffer, ReplayConfig, ReplayEvent, ReplayResult};
 use crate::ConnectionRegistry;
 
 /// 重连处理结果。
@@ -253,9 +253,4 @@ impl Default for SessionCoordinator {
     fn default() -> Self {
         Self::new()
     }
-}
-
-#[allow(dead_code)]
-fn _family_use() -> EventFamily {
-    EventFamily::Stream
 }

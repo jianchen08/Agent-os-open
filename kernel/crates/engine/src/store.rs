@@ -12,11 +12,18 @@
 /// 这些键属于"本轮运行"而非"管道累计状态"——残留会在恢复时覆盖下一轮的
 /// 新输入（重启后旧 user 消息被重放消费）。内核恢复侧（api server.rs）经
 /// lib.rs 再导出消费同一份，双侧语义单一来源。
+///
+/// `ended` 与 `suspended` 同属 per-run 终止标志：post 阶段每轮写
+/// `ended=true`（pipeline_track），若残留进下一轮 initial_state，引擎
+/// `execute_steps`/`execute_body` 见 ended 即短路——冷恢复（registry 丢失）
+/// 后 run 秒终 completed、LLM 一次请求都不发（2026-08-22 真机：主管道
+/// 38ms 秒终 + 两个任务管道 1-2s 秒终，仅 1 条 user_input trace）。
 pub const VOLATILE_RUN_KEYS: &[&str] = &[
     "message",
     "input",
     "message_id",
     "suspended",
+    "ended",
     "thinking_strength",
     "_assistant_id_assigned",
     "_pending_message_ops",
@@ -355,6 +362,9 @@ fn slot_row_to_record(
         tool_result_json: msg
             .get("tool_result")
             .map(|tr| serde_json::to_string(tr).unwrap_or_default()),
+        // 自定义元数据随 blob 全文持久化，读时原样提取（user 消息的
+        // client_message_id 幂等键契约，ADR 2026-08-21）
+        metadata: msg.get("metadata").filter(|m| m.is_object()).cloned(),
     }
 }
 
@@ -412,6 +422,28 @@ fn backup_corrupt_files(path: &str) {
                     "损坏的 SQLite 文件备份失败（继续尝试重建）"
                 ),
             }
+        }
+    }
+}
+
+/// 解析 traces.patch_type 字符串为 PatchType（2026-08-22 抽取）。
+///
+/// 未知值静默归 StateUpdate 是既有语义（新引擎写入方全部命中已知值），
+/// 但必须留痕——未知值 warn 暴露，避免冷恢复回放对新增类型静默降级。
+fn parse_patch_type(patch_type: &str, plugin_id: &str) -> PatchType {
+    match patch_type {
+        "state_update" => PatchType::StateUpdate,
+        "route_signal" => PatchType::RouteSignal,
+        "error" => PatchType::Error,
+        "lifecycle" => PatchType::Lifecycle,
+        "rollback" => PatchType::Rollback,
+        _ => {
+            warn!(
+                plugin_id = %plugin_id,
+                patch_type = %patch_type,
+                "traces 出现未知 patch_type，按 StateUpdate 处理（写入方新增类型需登记）",
+            );
+            PatchType::StateUpdate
         }
     }
 }
@@ -863,9 +895,14 @@ impl SqliteStore {
         Ok(())
     }
 
-    /// 读 `message_slots` 表（按 seq 升序；支持 before/after_sequence 游标与 limit）。
+    /// 读 `message_slots` 表（支持 before/after_sequence 游标与 limit，升序返回）。
     ///
-    /// 新模型的历史读路径：`ORDER BY seq ASC`（gap 不影响顺序与游标）。
+    /// 窗口锚定方向（ADR 2026-08-23 消息窗口分页语义）：
+    /// - `after_sequence` 锚定：游标之后**前** limit 条（ASC+LIMIT，断线补漏）；
+    /// - 无 after 游标（首屏 / before 游标翻页）：limit 取**最新** limit 条
+    ///   （尾锚定窗口：SQL DESC+LIMIT 取回后反转为 ASC）。
+    ///   曾实现成恒 ASC+LIMIT——首屏拿到最老 N 条，会话超 N 条时刷新回滚到
+    ///   早期窗口，其后消息全部"消失"；before 翻页则跳空中间段留永久空洞。
     /// 纯索引行 join blobs **读时重建** `MessageRecord`（role/preview/tool_calls 等
     /// 全部从消息 JSON 提取）——存储收敛，接口形状不变。
     pub fn get_slot_messages_by_pipeline(
@@ -889,8 +926,15 @@ impl SqliteStore {
             sql.push_str(&format!(" AND s.seq > ?{}", idx));
             idx += 1;
         }
-        // 确定性第二排序键：seq 升序为主，created_at / message_id 兜底（防理论上的同 seq 抖动）。
-        sql.push_str(" ORDER BY s.seq ASC, s.created_at ASC, s.message_id ASC");
+        // 尾锚定窗口：无 after 游标 + limit → DESC 取最新 N 条（结果统一反转为 ASC）；
+        // after 游标 → 头锚定（游标之后前 N 条，ASC+LIMIT 即正确）。
+        // 确定性第二排序键与锚定方向一致（DESC 时同样 DESC，反转后仍为 ASC 稳定序）。
+        let tail_anchored = opts.after_sequence.is_none() && opts.limit.is_some();
+        sql.push_str(if tail_anchored {
+            " ORDER BY s.seq DESC, s.created_at DESC, s.message_id DESC"
+        } else {
+            " ORDER BY s.seq ASC, s.created_at ASC, s.message_id ASC"
+        });
         if opts.limit.is_some() {
             sql.push_str(&format!(" LIMIT ?{}", idx));
         }
@@ -951,6 +995,11 @@ impl SqliteStore {
                     "message_slots 的消息 blob 损坏，受影响消息降级为空对象"
                 );
             }
+        }
+        // 尾锚定窗口取回后反转为 ASC（对外顺序契约不变）。
+        let mut msgs = msgs;
+        if tail_anchored {
+            msgs.reverse();
         }
         Ok(msgs)
     }
@@ -1730,6 +1779,7 @@ impl SqliteStore {
     /// 的 run_id → 对应 traces。只返回 step 级轨迹（plugin_id 为配置 step id，不以
     /// `pipeline_` 前缀的旧插件级轨迹被忽略），按 created_at 升序以便按序 merge 回放。
     /// tenant_id 由调用方在 spawn_blocking 前解析。
+
     fn get_step_traces_by_thread_inner(
         &self,
         thread_id: &str,
@@ -1816,6 +1866,7 @@ impl SqliteStore {
             run_ids.iter().map(|p| p as &dyn rusqlite::ToSql).collect();
         params.push(&tenant_id);
         let traces = stmt.query_map(params.as_slice(), |row| {
+            let plugin_id: String = row.get(4)?;
             let patch_type_str: String = row.get(5)?;
             let patch_data_str: String = row.get(6)?;
             Ok(TraceEntry {
@@ -1823,15 +1874,8 @@ impl SqliteStore {
                 run_id: row.get(1)?,
                 branch_id: row.get(2)?,
                 seq_in_branch: row.get(3)?,
-                plugin_id: row.get(4)?,
-                patch_type: match patch_type_str.as_str() {
-                    "state_update" => PatchType::StateUpdate,
-                    "route_signal" => PatchType::RouteSignal,
-                    "error" => PatchType::Error,
-                    "lifecycle" => PatchType::Lifecycle,
-                    "rollback" => PatchType::Rollback,
-                    _ => PatchType::StateUpdate,
-                },
+                plugin_id: plugin_id.clone(),
+                patch_type: parse_patch_type(&patch_type_str, &plugin_id),
                 patch_data: serde_json::from_str(&patch_data_str).map_err(|e| {
                     rusqlite::Error::FromSqlConversionFailure(
                         6,
@@ -2442,6 +2486,31 @@ mod tests {
     use super::*;
     use agentos_core::types::TenantContext;
     use serde_json::json;
+
+    #[test]
+    fn test_parse_patch_type_unknown_degrades_to_state_update() {
+        // 2026-08-22：未知 patch_type 静默归 StateUpdate 是既有语义（新引擎写入方
+        // 全部命中已知值），但必须留痕——抽取为独立函数后未知值 warn 可见；
+        // 行为契约不变：未知值仍落 StateUpdate（不透传错误破坏冷恢复）。
+        assert_eq!(
+            parse_patch_type("state_update", "tool_1"),
+            PatchType::StateUpdate
+        );
+        assert_eq!(
+            parse_patch_type("route_signal", "tool_1"),
+            PatchType::RouteSignal
+        );
+        assert_eq!(parse_patch_type("error", "tool_1"), PatchType::Error);
+        assert_eq!(
+            parse_patch_type("lifecycle", "tool_1"),
+            PatchType::Lifecycle
+        );
+        assert_eq!(parse_patch_type("rollback", "tool_1"), PatchType::Rollback);
+        assert_eq!(
+            parse_patch_type("unknown_future_type", "tool_1"),
+            PatchType::StateUpdate
+        );
+    }
 
     #[test]
     fn test_open_memory() {

@@ -1,0 +1,462 @@
+{
+  "namespace": "streaming",
+  "description": "流式事件协议（平台公共契约，单一真值源）——所有消息实时通道（LLM 流式、插件流式展示）发射的事件信封统一走本 schema，内核 event-bus 网关按定义校验（fail-closed：非法事件丢弃+告警），前端按同一协议消费。与 chat.json 同构：内核入口校验 + 前端消费 + 插件发射端均读本文件，不读代码副本。事件字段双端机械闸对齐（kernel_capabilities 测试）。",
+  "x-message-id-namespaces": [
+    {
+      "prefix": "a_",
+      "owner": "kernel",
+      "plugin_forbidden": true,
+      "pattern": "^a_[0-9a-f]{32}$",
+      "description": "内核 LLM 路径（ws_session dispatch 生成 a_+uuid.simple()，引擎优先作 record_id 落库）——保留前缀，插件禁止使用"
+    },
+    {
+      "prefix": "mc_",
+      "owner": "engine",
+      "plugin_forbidden": true,
+      "pattern": "^mc_[0-9a-f]{64}$",
+      "description": "引擎内容指纹 record_id（compute_message_id 规范化 SHA256）——保留前缀，插件禁止使用"
+    },
+    {
+      "prefix": "p_",
+      "owner": "plugin",
+      "plugin_forbidden": false,
+      "pattern": "^p_[0-9a-z_-]{1,63}$",
+      "description": "插件流式消息专用命名空间（强制：插件发射的 message_id 必须匹配本 pattern）——与 a_/mc_ 结构性不重叠，对账永不误合并"
+    },
+    {
+      "prefix": "",
+      "owner": "frontend-optimistic",
+      "plugin_forbidden": true,
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+      "description": "前端乐观 user 消息临时 id（client_message_id 兼作 id，uuid v4 带连字符）——不在后端 id 空间；认领时 UI id 保持不变，后端权威 record_id（mc_ 指纹）记入独立 recordId 字段；插件禁止使用裸 id"
+    }
+  ],
+  "capabilities": [
+    {
+      "method": "stream_start",
+      "description": "一条新消息开始流式输出。发射方（LLM 路径=内核 dispatch 生成 a_<uuid>；插件路径=插件自持 message_id）在首个 chunk 前发射。前端按 (pipeline_id, message_id) 建占位（status=streaming）。",
+      "input_schema": {
+        "type": "object",
+        "required": [
+          "pipeline_id",
+          "message_id",
+          "thread_id"
+        ],
+        "properties": {
+          "pipeline_id": {
+            "type": "string",
+            "minLength": 1,
+            "description": "管道坐标（前端消息路由键）。LLM 路径=引擎 route_id；插件路径=插件已注册管道 id"
+          },
+          "message_id": {
+            "type": "string",
+            "minLength": 1,
+            "description": "本条消息唯一标识（精确寻址键）。LLM 路径 a 前缀内核生成；插件路径插件自持。前端不假设前缀"
+          },
+          "persist": {
+            "type": "boolean",
+            "description": "持久化语义：true=正式消息（引擎落库，刷新保留，对账认领）；缺省/false=纯展示（只进 store 不落库，刷新弃，不进对账）。缺省统一 false 不分路径——内核 LLM 路径发射时显式携带 true"
+          },
+          "client_message_id": {
+            "type": "string",
+            "description": "触发本轮的 user 消息幂等键（ADR 2026-08-21），供前端关联流式消息与触发轮次（认领动作由 new_message 执行，不在本事件）"
+          },
+          "thread_id": {
+            "type": "string",
+            "minLength": 1,
+            "description": "WS 投递路由键 + 会话坐标（thread- 前缀）。内核转写为前端信封的 _threadId"
+          }
+        }
+      },
+      "output_schema": {
+        "type": "object"
+      }
+    },
+    {
+      "method": "stream_chunk",
+      "description": "正文流式增量块。逐字/逐段追加到 (pipeline_id, message_id) 的 text part。前端不做跨消息搜索——message_id 未命中即丢弃留痕等对账（事件乱序时）。",
+      "input_schema": {
+        "type": "object",
+        "required": [
+          "pipeline_id",
+          "message_id",
+          "content",
+          "thread_id"
+        ],
+        "properties": {
+          "pipeline_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "message_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "content": {
+            "type": "string",
+            "description": "增量文本（追加到目标消息最后一个 text part；目标消息不存在时按 stream_start 语义建占位）"
+          },
+          "sequence": {
+            "type": "integer",
+            "description": "事件序号（进程内单调递增，仅调试定位，非消息权威 seq）"
+          },
+          "persist": {
+            "type": "boolean"
+          },
+          "thread_id": {
+            "type": "string",
+            "minLength": 1,
+            "description": "WS 投递路由键 + 会话坐标（thread- 前缀）。内核转写为前端信封的 _threadId"
+          }
+        }
+      },
+      "output_schema": {
+        "type": "object"
+      }
+    },
+    {
+      "method": "thinking_start",
+      "description": "思考开始。在目标消息 parts 内 push 新 thinking part（state='streaming'）。",
+      "input_schema": {
+        "type": "object",
+        "required": [
+          "pipeline_id",
+          "message_id",
+          "thread_id"
+        ],
+        "properties": {
+          "pipeline_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "message_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "persist": {
+            "type": "boolean"
+          },
+          "thread_id": {
+            "type": "string",
+            "minLength": 1,
+            "description": "WS 投递路由键 + 会话坐标（thread- 前缀）。内核转写为前端信封的 _threadId"
+          }
+        }
+      },
+      "output_schema": {
+        "type": "object"
+      }
+    },
+    {
+      "method": "thinking_chunk",
+      "description": "思考增量块。追加到目标消息的最后一个 thinking part。",
+      "input_schema": {
+        "type": "object",
+        "required": [
+          "pipeline_id",
+          "message_id",
+          "content",
+          "thread_id"
+        ],
+        "properties": {
+          "pipeline_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "message_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "content": {
+            "type": "string",
+            "description": "思考增量文本"
+          },
+          "persist": {
+            "type": "boolean"
+          },
+          "thread_id": {
+            "type": "string",
+            "minLength": 1,
+            "description": "WS 投递路由键 + 会话坐标（thread- 前缀）。内核转写为前端信封的 _threadId"
+          }
+        }
+      },
+      "output_schema": {
+        "type": "object"
+      }
+    },
+    {
+      "method": "thinking_end",
+      "description": "思考结束。目标消息的最后一个 thinking part state 置 done。",
+      "input_schema": {
+        "type": "object",
+        "required": [
+          "pipeline_id",
+          "message_id",
+          "thread_id"
+        ],
+        "properties": {
+          "pipeline_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "message_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "duration_ms": {
+            "type": "number",
+            "description": "思考耗时（毫秒，可空）"
+          },
+          "persist": {
+            "type": "boolean"
+          },
+          "thread_id": {
+            "type": "string",
+            "minLength": 1,
+            "description": "WS 投递路由键 + 会话坐标（thread- 前缀）。内核转写为前端信封的 _threadId"
+          }
+        }
+      },
+      "output_schema": {
+        "type": "object"
+      }
+    },
+    {
+      "method": "tool_start",
+      "description": "工具调用开始。目标消息 parts 数组 push tool_call part（state='calling'）。",
+      "input_schema": {
+        "type": "object",
+        "required": [
+          "pipeline_id",
+          "message_id",
+          "call_id",
+          "thread_id"
+        ],
+        "properties": {
+          "pipeline_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "message_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "call_id": {
+            "type": "string",
+            "minLength": 1,
+            "description": "工具调用唯一 id（同一消息内按 call_id 更新）"
+          },
+          "name": {
+            "type": "string",
+            "description": "工具名"
+          },
+          "args": {
+            "type": "object",
+            "description": "工具参数"
+          },
+          "persist": {
+            "type": "boolean"
+          },
+          "thread_id": {
+            "type": "string",
+            "minLength": 1,
+            "description": "WS 投递路由键 + 会话坐标（thread- 前缀）。内核转写为前端信封的 _threadId"
+          }
+        }
+      },
+      "output_schema": {
+        "type": "object"
+      }
+    },
+    {
+      "method": "tool_result",
+      "description": "工具调用结果。按 call_id 更新目标消息的 tool_call part（state='done'/'error'）。",
+      "input_schema": {
+        "type": "object",
+        "required": [
+          "pipeline_id",
+          "message_id",
+          "call_id",
+          "thread_id"
+        ],
+        "properties": {
+          "pipeline_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "message_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "call_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "result": {
+            "type": "string",
+            "description": "执行结果（成功时）"
+          },
+          "error": {
+            "type": "string",
+            "description": "错误信息（失败时；与 success=false 二选一信号）"
+          },
+          "success": {
+            "type": "boolean",
+            "description": "结果信封 success 标记；false → part state='error'"
+          },
+          "result_data": {
+            "type": "object",
+            "description": "结构化结果 envelope（与后端 tool_result_json 投影同源）"
+          },
+          "duration_ms": {
+            "type": "number",
+            "description": "工具耗时（毫秒；tool_core 上报一位小数浮点）"
+          },
+          "persist": {
+            "type": "boolean"
+          },
+          "thread_id": {
+            "type": "string",
+            "minLength": 1,
+            "description": "WS 投递路由键 + 会话坐标（thread- 前缀）。内核转写为前端信封的 _threadId"
+          }
+        }
+      },
+      "output_schema": {
+        "type": "object"
+      }
+    },
+    {
+      "method": "new_message",
+      "description": "消息确认（权威终态）。LLM 路径在引擎执行完成后发射：携带 assistant 完整持久形态（content/reasoningContent/toolCalls/sequence）+ user_message 权威版（认领回传）+ client_message_id（cmid 认领键）。前端据此：① 按 cmid 认领乐观 user 消息（UI id 保持前端 uuid 不变，权威 record_id/sequence 记入独立 recordId 字段，status='completed'）；② 合并 assistant 权威 parts 收尾（status='completed'）。",
+      "input_schema": {
+        "type": "object",
+        "required": [
+          "pipeline_id",
+          "message_id",
+          "thread_id"
+        ],
+        "properties": {
+          "pipeline_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "message_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "client_message_id": {
+            "type": "string",
+            "description": "触发本轮的 user 消息幂等键（ADR 2026-08-21）；前端据此认领乐观 user 消息"
+          },
+          "user_message": {
+            "type": "object",
+            "description": "user 权威 record：id（record_id）/content/sequence/metadata.client_message_id。认领时取权威 seq 作排序键；字段缺失时前端回落 timestamp 排序（兼容旧后端）"
+          },
+          "message": {
+            "type": "object",
+            "description": "assistant 完整持久形态（与 DB 加载同构：id/role/content/sequence/reasoningContent/toolCalls/timestamp/status）"
+          },
+          "sequence": {
+            "type": "integer",
+            "description": "assistant 消息权威 seq（与 message.sequence 同值）"
+          },
+          "persist": {
+            "type": "boolean"
+          },
+          "thread_id": {
+            "type": "string",
+            "minLength": 1,
+            "description": "WS 投递路由键 + 会话坐标（thread- 前缀）。内核转写为前端信封的 _threadId"
+          }
+        }
+      },
+      "output_schema": {
+        "type": "object"
+      }
+    },
+    {
+      "method": "stream_end",
+      "description": "流式结束（成功路径终止信号）。携带 final_sequence 同步占位消息的权威 seq（流式期间占位 seq 挂空）。",
+      "input_schema": {
+        "type": "object",
+        "required": [
+          "pipeline_id",
+          "message_id",
+          "thread_id"
+        ],
+        "properties": {
+          "pipeline_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "message_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "final_sequence": {
+            "type": "integer",
+            "description": "消息权威 seq（占位挂空补正；新_message 携带 seq 时以 new_message 为准）"
+          },
+          "parts": {
+            "type": "array",
+            "description": "最终 parts 兜底（new_message 缺失时的收尾合并源）"
+          },
+          "full_content": {
+            "type": "string",
+            "description": "最终 content 兜底（本地逐 chunk 拼接可能不完整，后端全文更长时采用）"
+          },
+          "persist": {
+            "type": "boolean"
+          },
+          "thread_id": {
+            "type": "string",
+            "minLength": 1,
+            "description": "WS 投递路由键 + 会话坐标（thread- 前缀）。内核转写为前端信封的 _threadId"
+          }
+        }
+      },
+      "output_schema": {
+        "type": "object"
+      }
+    },
+    {
+      "method": "stream_error",
+      "description": "流式失败（终止信号）。前端只标记目标消息 status='failed' + error（不删除、不合成气泡、不启动重试）。",
+      "input_schema": {
+        "type": "object",
+        "required": [
+          "pipeline_id",
+          "message_id",
+          "thread_id"
+        ],
+        "properties": {
+          "pipeline_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "message_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "error": {
+            "type": "string",
+            "description": "错误描述"
+          },
+          "persist": {
+            "type": "boolean"
+          },
+          "thread_id": {
+            "type": "string",
+            "minLength": 1,
+            "description": "WS 投递路由键 + 会话坐标（thread- 前缀）。内核转写为前端信封的 _threadId"
+          }
+        }
+      },
+      "output_schema": {
+        "type": "object"
+      }
+    }
+  ]
+}

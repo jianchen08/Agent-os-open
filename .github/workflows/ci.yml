@@ -14,7 +14,8 @@
 # 流程：push/PR → Rust Lint → Rust Build → Rust Test / Rust Coverage
 #        → SDK Lint → SDK Test → Python Coverage（插桩）/ Python Heavy（免插桩）
 #        → Timing → Frontend Test/E2E → Electron Compile
-#        → Pre-commit / TDD / Traceability → Python E2E（内核+LLM）
+#        → Pre-commit / TDD / Traceability
+#        （真实 LLM E2E 已拆至 e2e.yml：nightly/手动/push main，密钥预检）
 #
 # 触发条件：
 #   - push 到 main / dev/* 分支（实际开发分支是 dev/0.2）
@@ -23,6 +24,11 @@
 # 缓存策略：
 #   - Swatinem/rust-cache 跨 job 共享（shared-key: agentos-0.2）
 #   - sccache 加速 Rust 编译（RUSTC_WRAPPER）
+#
+# 权限：PR 级流水线最小权限（contents: read），不持有任何写权限；
+#       发布链见 release.yml（Phase 3，暂未创建）。
+# 汇总门禁：all-checks-passed 是分支保护唯一入口（Phase 1，2026-08-23），
+#       新增/删除 PR job 时同步更新其 needs 列表。
 # ============================================================
 
 name: CI
@@ -32,6 +38,9 @@ on:
     branches: [main, "dev/*"]
   pull_request:
     branches: [main, "dev/*"]
+
+permissions:
+  contents: read
 
 concurrency:
   group: ci-${{ github.ref }}
@@ -215,32 +224,6 @@ jobs:
         with:
           workspaces: kernel
           shared-key: agentos-0.2
-
-  # ── E2E Manual（手动触发占位，不跑测试）─────────────────────────────────
-  # 注意：本 job 是 workflow_dispatch 占位——**不执行任何测试**，仅打印手动/本地
-  # 运行说明。真正的热加载/用户旅程脚本需 0.2 kernel + 0.1 服务 + 真实 LLM key，
-  # 不适合在 CI 自动跑。请用以下方式执行：
-  #   - 本地：python tests/manual/test_0_2_hot_reload.py        # 0.2 热加载
-  #           python tests/manual/test_0_1_hot_reload.py        # 0.1 热加载
-  #           python tests/manual/test_user_journey_compare.py  # 0.1 vs 0.2 对照
-  #   - 核心热加载逻辑（零 LLM 依赖）由 rust-test job 的单测覆盖。
-  # 若要让本 job 真正联网跑 manual 脚本，需把下方 echo 换成实际执行命令并配置
-  # kernel/LLM 环境与凭据；在此之前切勿将其列为合并必需门禁（否则等于假门禁）。
-  e2e-manual:
-    name: E2E Manual (占位/不跑测试, 手动触发)
-    runs-on: ubuntu-latest
-    if: github.event_name == 'workflow_dispatch'
-    steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-      - name: Print manual run instructions (此 job 不执行测试)
-        run: |
-          echo "本 job 是手动触发占位，不执行任何测试（已如实标注，非合并门禁）。"
-          echo "PR 级 e2e 门禁已由 frontend-e2e job 提供（零后端依赖冒烟子集 ci-smoke.spec.ts）。"
-          echo "热加载/用户旅程全流程需 kernel + LLM 环境，请本地运行："
-          echo "  - tests/manual/ 下脚本（0.2/0.1 热加载、用户旅程对照，见其文档头）"
-          echo "  - frontend/e2e/specs/journey_*.spec.ts（需启动 kernel + 前端）"
-          echo "核心热加载逻辑已由 rust-test job 的单测覆盖（零 LLM 依赖）。"
-
 
   # ── Python Lint（插件 SDK）─────────────────────────────────
   # 注：sdk-mypy 的路径参数由 run_gates.py 统一持有（cwd=plugins/sdk 下
@@ -516,7 +499,7 @@ jobs:
   # ── Frontend E2E 冒烟（零后端依赖）──────────────────────────────────────
   # PR 级 e2e 门禁：构建前端 → vite preview 服务于 5188 → 跑零外部依赖冒烟子集
   # (e2e/specs/ci-smoke.spec.ts，不依赖 kernel/LLM)。journey_* 全流程需后端，
-  # 仍归本地/手动（见 e2e-manual）。
+  # 仍归本地/手动（见 tests/manual/ 与 frontend/e2e/specs/journey_*.spec.ts）。
   frontend-e2e:
     name: Frontend E2E (冒烟子集, 零后端依赖)
     runs-on: ubuntu-latest
@@ -636,106 +619,39 @@ jobs:
       - name: Run gates (traceability-gate)
         run: python scripts/run_gates.py --filter traceability-gate
 
-  # ── Python 0.2 端到端（内核二进制 + 内存库 + 功能点 e2e）───────────────
-  # 覆盖 tests/e2e_02 的功能点级 e2e：审批闭环、管道 chat、WS 流式全链路。
-  # 依赖真实 LLM 的用例带 skipif 守卫：无 secrets.ZHIPU_API_KEY 时自动跳过。
-  # 归属说明：需内核二进制 + 进程管理 + LLM key，保持 CI 专用 job 车道，
-  # 不进 run_gates.py（与 pre-commit 同理，承诺由本 job 持有）。
-  python-e2e:
-    name: Python E2E (kernel + e2e_02)
+  # ── All Checks Passed（汇总门禁，分支保护唯一入口）───────────────────────
+  # Phase 1（2026-08-23）：分支保护规则只挂本 job 一个名字。
+  # Phase 2（2026-08-23）：python-e2e 迁入 e2e.yml（真实 LLM 车道）；
+  #   e2e-manual 占位删除。PR 必跑 job = 下方 needs 列表。
+  # 任何 job 失败（success/skipped 之外）→ 本 job 红。
+  # 新增/删除 PR job 时，必须同步更新本列表 + GitHub 分支保护无需改动。
+  all-checks-passed:
+    name: All checks passed
     runs-on: ubuntu-latest
-    needs: rust-build
+    if: always()
+    needs:
+      - rust-lint
+      - rust-build
+      - rust-test
+      - rust-coverage
+      - python-lint
+      - python-test
+      - python-coverage
+      - python-heavy-suites
+      - frontend-endpoints-sync
+      - timing
+      - frontend-test
+      - frontend-e2e
+      - electron-compile
+      - pre-commit
+      - tdd-gate
+      - traceability-gate
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-
-      - name: sccache best-effort (workflow 级 RUSTC_WRAPPER 兜底)
+      - name: Check all required jobs succeeded
         run: |
-          if ! command -v sccache >/dev/null 2>&1; then
-            echo "sccache unavailable, disable RUSTC_WRAPPER"
-            echo "RUSTC_WRAPPER=" >> "$GITHUB_ENV"
-          fi
-
-      - name: Set up Python
-        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
-        with:
-          python-version: "3.11"
-
-      - name: Install uv
-        uses: astral-sh/setup-uv@38f3f104447c67c051c4a08e39b64a148898af3a # v4
-        with:
-          enable-cache: true
-          cache-dependency-glob: "uv.lock"
-
-      - name: Sync dependencies + SDK
-        run: |
-          uv sync --frozen --extra dev
-          uv pip install -e ./plugins/sdk
-
-      # 批 D 单轨（2026-08-19）：invoker 已删 plain PATH python 回退（fail-closed），
-      # 内核 boot/任务链 spawn sidecar 依赖各插件 .venv——先按 uv.lock 批量建。
-      - name: Build plugin venvs (uv sync per locked plugin)
-        run: |
-          uv python install 3.12
-          failed=0
-          for lock in $(git ls-files 'plugins/**/uv.lock' | sort -u); do
-            d=$(dirname "$lock")
-            echo "::group::uv sync $d"
-            if ! uv sync --project "$d"; then
-              echo "::error::uv sync failed: $d"
-              failed=1
-            fi
-            echo "::endgroup::"
+          for j in ${{ join(needs.*.result, ' ') }}; do
+            [ "$j" = "success" ] || [ "$j" = "skipped" ] || {
+              echo "::error::job result not success: $j"; exit 1; }
           done
-          exit $failed
+          echo "All required jobs passed."
 
-      - name: Build native plugin artifacts (cdylib, Linux .so)
-        run: |
-          for mf in $(git ls-files 'plugins/**/plugin.json' | sort -u); do
-            d=$(dirname "$mf")
-            if grep -q '"native"' "$mf" && [ -f "$d/Cargo.toml" ]; then
-              echo "::group::native build $d"
-              (cd "$d" && cargo build --release)
-              art=$(python3 -c "import json;print(json.load(open('plugin.json'))['native']['artifact'])" 2>/dev/null)
-              stem="${art%.*}"
-              if [ -n "$stem" ]; then
-                for cand in "lib${stem}.so" "${stem}.so" "${stem}.dll"; do
-                  [ -f "target/release/$cand" ] && cp "target/release/$cand" . && break
-                done
-              fi
-              echo "::endgroup::"
-            fi
-          done
-          ls plugins/shared/pipeline/output/spill_guard/ || true
-
-      - name: Build kernel (release, sccache cached)
-        working-directory: kernel
-        run: |
-          cargo install sccache --locked || true
-          cargo +stable build --release --bin agentos-kernel
-
-      - name: Start kernel (in-memory DB, :9100)
-        env:
-          ZHIPU_API_KEY: ${{ secrets.ZHIPU_API_KEY }}
-        run: |
-          AGENTOS_DB_PATH=":memory:" AGENTOS_KERNEL_PORT=9100 \
-            ./kernel/target/release/agentos-kernel > /tmp/kernel.log 2>&1 &
-          for i in $(seq 1 150); do
-            curl -sf http://localhost:9100/health >/dev/null 2>&1 && break
-            sleep 2
-          done
-          curl -sf http://localhost:9100/health && echo " [kernel ready]" ||             { echo "===== kernel.log tail ====="; tail -60 /tmp/kernel.log; exit 1; }
-
-      - name: Run e2e_02 (功能点 e2e；LLM 用例无 key 自动 skip)
-        env:
-          ZHIPU_API_KEY: ${{ secrets.ZHIPU_API_KEY }}
-          # github.workspace 经 env 注入而非内插 run（安全审查：表达式内插 shell 的规范写法）
-          PYTHONPATH: ${{ github.workspace }}/plugins:${{ github.workspace }}/plugins/sdk/src
-        run: |
-          uv run --frozen python -m pytest -q \
-            tests/e2e_02/test_04_approval_flow.py \
-            tests/e2e_02/test_05_pipeline_chat.py \
-            tests/e2e_02/test_06_ws_stream.py
-
-      - name: Show kernel log on failure
-        if: failure()
-        run: tail -60 /tmp/kernel.log

@@ -97,6 +97,55 @@ async def test_workspace_init_no_context_noop(plugins):
 
 
 @pytest.mark.asyncio
+async def test_workspace_init_no_explicit_ws_degrades_to_plain(plugins, monkeypatch):
+    """init 降级（服务不可用）：无显式 workspace 时 ws_meta 不得标 worktree。
+
+    对齐服务层矫正（_start_root_task：无显式 workspace → 强制 plain 目录）——
+    服务不可用时没有 worktree 被创建，声明 worktree 会造成"没有 workspace
+    却 worktree 模式"的虚假标记（exit 会据此尝试 merge）。
+    """
+    ws = plugins["ws"]
+    monkeypatch.setattr(ws, "_get_manager", lambda base_path_hint=None: None)
+    result = await ws.execute(
+        plugins["ctx_factory"](
+            {
+                "current_phase": "init",
+                "task_id": "task_degrade_1",
+                "execution_context": {
+                    "workspace": {"source_path": "", "mode": "worktree"}
+                },
+            }
+        )
+    )
+    updates = result.state_updates
+    assert updates["ws_meta"]["mode"] == "plain", "无显式 workspace 不得标 worktree"
+    assert updates["ws_meta"]["path"]
+
+
+@pytest.mark.asyncio
+async def test_workspace_init_explicit_ws_keeps_mode_on_degrade(plugins, monkeypatch):
+    """init 降级（服务不可用）：有显式 workspace 时保留声明 mode。"""
+    ws = plugins["ws"]
+    monkeypatch.setattr(ws, "_get_manager", lambda base_path_hint=None: None)
+    result = await ws.execute(
+        plugins["ctx_factory"](
+            {
+                "current_phase": "init",
+                "execution_context": {
+                    "workspace": {
+                        "source_path": "D:/proj/x",
+                        "mode": "worktree",
+                        "explicit": True,
+                    }
+                },
+            }
+        )
+    )
+    updates = result.state_updates
+    assert updates["ws_meta"]["mode"] == "worktree", "显式 worktree 应保留声明"
+
+
+@pytest.mark.asyncio
 async def test_workspace_exit_finalizes(plugins):
     """exit：无任务/非 worktree 时 no-op（收尾仅对任务 worktree 生效）。"""
     result = await plugins["ws"].execute(

@@ -34,12 +34,16 @@ def parse_vitest_failures(output: str) -> int:
 
     匹配总结行 "Tests  109 failed | 737 passed (846)"。注意区分
     "Test Files  N failed" 和 "Tests  N failed"，取后者（最后一个匹配）。
-    解析不到 → 抛错（而非静默返回 0，避免基线锁误判"全部通过"）。
+    全绿时 vitest 摘要行无 failed 段（"Tests  2021 passed (2021)"）——
+    有 passed 摘要即 0 失败；两种摘要都不存在才抛错（而非静默返回 0，
+    避免基线锁误判"全部通过"）。
     """
     output = re.sub(r"\x1b\[[0-9;]*m", "", output)  # 去 ANSI 颜色码
     matches = re.findall(r"Tests\s+(\d+)\s+failed", output)
     if matches:
         return int(matches[-1])
+    if re.search(r"Tests\s+\d+\s+passed", output):
+        return 0
     print("⚠️ vitest 输出未匹配到 'Tests N failed' 总结行")
     print("原始输出尾部：")
     print(output[-1500:] if output.strip() else "(空输出)")

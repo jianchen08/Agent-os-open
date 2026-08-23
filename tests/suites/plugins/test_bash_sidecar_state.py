@@ -51,10 +51,24 @@ def bash_server_module():
 
     返回模块后，其 `_get_tool()` 单例与已注册的 `plugin._tools` handler
     可直接用于进程内测试（等价于 sidecar 进程内的多次 MCP 调用）。
+
+    2026-08-23 串扰修复：tests/suites/plugins/ 不在 tests/plugins/conftest.py
+    的裸名逐出钩子覆盖范围，先于本套件运行的 tests/plugins/tools/ 测试
+    （如 test_task_evaluate_server_import.py）加载 task_evaluate/server.py 时，
+    其模块级 ``sys.path.insert(0, 本目录)`` 会把 task_evaluate 目录永久压在
+    sys.path[0]，且 'tool' 槽位被缓存成 task_evaluate/tool.py——本套件
+    server.py ``from tool import BashTool`` 命中错误缓存 → 11 ERROR 簇。
+    加载前逐出平铺同名裸模块 + 把 bash 目录**提升**到 sys.path[0]
+    （仅「不存在才插入」不够，必须摘除后重插到首位；与
+    tests/plugins/system/tasks/test_tasks_http_api.py 的 fixture 同款纪律）。
     """
     for p in (str(_PLUGIN_DIR), str(_SDK_DIR)):
-        if p not in sys.path:
-            sys.path.insert(0, p)
+        while p in sys.path:
+            sys.path.remove(p)
+    sys.path.insert(0, str(_SDK_DIR))
+    sys.path.insert(0, str(_PLUGIN_DIR))
+    for m in ("tool", "server", "plugin", "process_manager"):
+        sys.modules.pop(m, None)
 
     import importlib.util  # noqa: PLC0415
 
@@ -388,8 +402,20 @@ def sidecar_proc():
         encoding="utf-8",
     )
     client = _JsonRpcClient(proc)
-    # 握手
-    client.send({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}})
+    # 握手（MCP SDK 要求 spec 形状的 initialize params——空 params 会被
+    # 校验拒绝：-32602 Invalid request parameters，2026-08-23 修复）
+    client.send(
+        {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {
+                "protocolVersion": "2025-06-18",
+                "capabilities": {},
+                "clientInfo": {"name": "pytest-bash-sidecar", "version": "0"},
+            },
+        }
+    )
     resp = client.recv()
     assert resp is not None and "result" in resp, "initialize 失败（sidecar 启动崩溃）"
     yield client

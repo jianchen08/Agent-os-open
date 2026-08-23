@@ -368,6 +368,103 @@ fn slot_cursor_paging_works_across_gaps() {
     );
 }
 
+/// 造 n 条消息（seq 0..n-1，user/assistant 交替）。
+fn seed_n_messages(store: &SqliteStore, pid: &str, n: u32) {
+    let ops: Vec<serde_json::Value> = (0..n)
+        .map(|i| {
+            if i % 2 == 0 {
+                set(i, user_msg(&format!("u{i}")))
+            } else {
+                set(i, assistant_msg(&format!("a{i}")))
+            }
+        })
+        .collect();
+    store
+        .apply_messages_ops_to_table(pid, "default", &ops)
+        .expect("seed 应成功");
+}
+
+fn query_seqs(store: &SqliteStore, pid: &str, opts: MessageQueryOpts) -> Vec<u32> {
+    store
+        .get_slot_messages_by_pipeline(pid, "default", opts)
+        .expect("查询应成功")
+        .iter()
+        .map(|r| r.seq_in_branch)
+        .collect()
+}
+
+#[test]
+fn slot_limit_without_cursor_returns_latest_window() {
+    // 刷新首屏契约：无游标 + limit = 「最新 N 条」（升序）。
+    // 回归：曾实现成 ASC+LIMIT 取最老 N 条——会话超 limit 条时刷新回滚到
+    // 早期窗口，其后消息全部"消失"（真机 78 条会话刷新只剩 seq 0..49）。
+    let store = SqliteStore::open_memory().unwrap();
+    let pid = "p_limit_tail";
+    seed_n_messages(&store, pid, 12);
+
+    let seqs = query_seqs(
+        &store,
+        pid,
+        MessageQueryOpts {
+            limit: Some(5),
+            ..Default::default()
+        },
+    );
+    assert_eq!(
+        seqs,
+        vec![7, 8, 9, 10, 11],
+        "无游标 + limit=5 应返回最新 5 条（seq 7..11），升序"
+    );
+}
+
+#[test]
+fn slot_limit_with_before_cursor_returns_window_adjacent_to_cursor() {
+    // 「加载更早」翻页契约：before_sequence + limit = 游标正下方紧邻的 N 条（升序）。
+    // 回归：曾实现成 ASC+LIMIT 取最老 N 条——下方超过 limit 条时中间段被跳空，
+    // 历史加载出现永久空洞。
+    let store = SqliteStore::open_memory().unwrap();
+    let pid = "p_limit_before";
+    seed_n_messages(&store, pid, 20);
+
+    let seqs = query_seqs(
+        &store,
+        pid,
+        MessageQueryOpts {
+            before_sequence: Some(15),
+            limit: Some(5),
+            ..Default::default()
+        },
+    );
+    assert_eq!(
+        seqs,
+        vec![10, 11, 12, 13, 14],
+        "before_sequence=15 + limit=5 应返回紧邻游标下方的 10..14，而非最老 5 条"
+    );
+}
+
+#[test]
+fn slot_limit_with_after_cursor_still_head_anchored() {
+    // 断线补漏契约（既有语义守护）：after_sequence + limit = 游标之后的前 N 条。
+    let store = SqliteStore::open_memory().unwrap();
+    let pid = "p_limit_after";
+    seed_n_messages(&store, pid, 20);
+
+    let seqs = query_seqs(
+        &store,
+        pid,
+        MessageQueryOpts {
+            after_sequence: Some(0),
+            limit: Some(5),
+            ..Default::default()
+        },
+    );
+    assert_eq!(
+        seqs,
+        vec![1, 2, 3, 4, 5],
+        "after_sequence=0 + limit=5 应返回游标之后的 1..5"
+    );
+}
+
 // ═══════════════════════════════════════════════════════════
 // GAP-3：写入批次原子性（G8 重启在途消息 blob NULL 的病根）
 // ═══════════════════════════════════════════════════════════

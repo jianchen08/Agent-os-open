@@ -14,10 +14,17 @@ from agentos_plugin_sdk import AgentOSPlugin
 from agentos_plugin_sdk.capability import STANDARD_CAPABILITIES as SDK_CAPS
 
 
-def test_standard_capabilities_matches_expected_seven():
-    """SDK 清单应包含全部 7 个标准能力（含 frontend，task_observability），且无重复。"""
+def test_standard_capabilities_matches_expected_eight():
+    """SDK 清单应包含全部 8 个标准能力，且无重复。
+
+    2026-08-19（fbf0a1316）pipeline-state 补入两端清单：router 静态路由存在
+    但不在声明面时，sidecar initialize 拿不到句柄，state 聚合读桥永远
+    KeyError（e2e 实测）——故 SDK/内核清单均为 8 项。
+    """
     expected = {
         "pipeline-executor",
+        # pipeline-state.list：state 聚合读桥（task_submit/task_manage 依赖）
+        "pipeline-state",
         "tenant-context",
         "event-bus",
         "metrics",
@@ -31,10 +38,10 @@ def test_standard_capabilities_matches_expected_seven():
 
 
 def test_sdk_injects_all_standard_caps_when_kernel_declares_them():
-    """当内核声明全部 7 项能力时，SDK 应能为每一项创建 CapabilityHandle。
+    """当内核声明全部 8 项能力时，SDK 应能为每一项创建 CapabilityHandle。
 
     模拟内核 initialize 的行为：build_declared_capabilities(true) 返回
-    全部 7 项。SDK 的 _on_initialize 必须全部注入，否则该能力对插件不可用。
+    全部 8 项。SDK 的 _on_initialize 必须全部注入，否则该能力对插件不可用。
     """
     plugin = AgentOSPlugin("test_alignment")
     declared = {name: {} for name in SDK_CAPS}

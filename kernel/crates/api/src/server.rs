@@ -657,10 +657,14 @@ fn empty_compiled() -> Arc<agentos_engine::compiler::CompiledPipeline> {
 /// - `final_assistant`：本轮最终 assistant 消息的完整持久形态（含
 ///   `tool_calls`/`reasoning_content`/`seq`），WS 路径 new_message 携带它，
 ///   前端用与 DB 加载相同的 mapper 生成 parts——流式事件与 DB 冷热同构；
+/// - `final_user`：本轮 user 消息的完整持久形态（含 `seq`/`metadata`，
+///   record_id=compute_message_id 指纹，与表侧一致），WS 路径 new_message 携带
+///   它做乐观 user 认领回传（ADR 2026-08-22 双字段范式）；
 /// - `failed`：executor.run 返回 Err（WS 路径据此推 stream_error 收尾）。
 pub(crate) struct EngineOutcome {
     pub content: String,
     pub final_assistant: Option<serde_json::Value>,
+    pub final_user: Option<serde_json::Value>,
     pub failed: bool,
 }
 
@@ -679,6 +683,7 @@ pub(crate) async fn process_via_engine(
     thinking_strength: &str,
     execution_context: Option<&serde_json::Value>,
     state_overlay: Option<&serde_json::Value>,
+    client_message_id: &str,
 ) -> EngineOutcome {
     // Box::pin 到堆上：回写段 + executor.run 的深 sidecar 调用链让 Future 状态机
     // 在 release 下也接近 tokio worker 2MB 栈极限，堆分配规避溢出。
@@ -694,6 +699,7 @@ pub(crate) async fn process_via_engine(
         thinking_strength,
         execution_context,
         state_overlay,
+        client_message_id,
     ))
     .await
 }
@@ -713,6 +719,7 @@ async fn process_via_engine_inner(
     thinking_strength: &str,
     execution_context: Option<&serde_json::Value>,
     state_overlay: Option<&serde_json::Value>,
+    client_message_id: &str,
 ) -> EngineOutcome {
     // ── 前置依赖：invoker / store / project_root 任一缺席 → echo 降级 ──
     let Some(invoker) = state.invoker.clone() else {
@@ -754,7 +761,8 @@ async fn process_via_engine_inner(
     .await;
 
     // 1b. 多轮上下文装配（热路径 registry / 冷路径 checkpoint+traces+state+messages）
-    //     + 本轮 user 消息入账。
+    //     + 本轮 user 消息入账（metadata 携带 client_message_id 幂等键，
+    //     ADR 2026-08-21：随消息落库回显，前端据此对账去重乐观消息）。
     let mut initial_state = stage_recover_history(
         initial_state,
         &store,
@@ -762,6 +770,7 @@ async fn process_via_engine_inner(
         thread_id,
         effective_pipeline_id,
         &tenant_id,
+        client_message_id,
     )
     .await;
 
@@ -1096,6 +1105,7 @@ fn echo_fallback(missing: &str, message: &str) -> EngineOutcome {
     EngineOutcome {
         content: format!("[echo-fallback: {missing}] {message}"),
         final_assistant: None,
+        final_user: None,
         failed: false,
     }
 }
@@ -1254,6 +1264,7 @@ fn apply_state_overlay(initial_state: &mut serde_json::Value, overlay: &serde_js
 ///   ③ 客户端传的 history 仅在①②均为空（真·首轮）时兜底，向后兼容老客户端。
 /// 恢复失败 = bug（内存丢 + DB 读不到）：显式 error 暴露，不静默吞掉。
 #[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments)]
 async fn stage_recover_history(
     mut initial_state: serde_json::Value,
     store: &Arc<dyn StorageBackend>,
@@ -1261,6 +1272,7 @@ async fn stage_recover_history(
     thread_id: &str,
     effective_pipeline_id: &str,
     tenant_id: &str,
+    client_message_id: &str,
 ) -> serde_json::Value {
     let mut history_prefix: Vec<serde_json::Value> = Vec::new();
     let mut history_loaded = false;
@@ -1376,25 +1388,43 @@ async fn stage_recover_history(
     }
     // GAP-3：中断重放幂等——上一次尝试若已把本轮 user 消息落槽（重启/崩溃
     // 截断 run，无 assistant 跟随），恢复出的 history 尾部就是它；再 append 会
-    // 重复落槽+重复消费（e2e 重复 run/陈旧回复病根②）。tail 为同文 user →
-    // 跳过 append，引擎基于既有历史继续执行并产出回复。
+    // 重复落槽+重复消费（e2e 重复 run/陈旧回复病根②）。判定按幂等键裁决
+    // （ADR 2026-08-21）：cmid 在场时只有「同 cmid」才算同一次发送的重派（吞）；
+    // cmid 不同 = 真发了两条（绝不吞，修复连发相同内容第二条被吞）。无 cmid
+    // 的路径（触发器注入/旧客户端）维持同文判定。
     let interrupted_tail = initial_state
         .get("messages")
         .and_then(|v| v.as_array())
         .and_then(|msgs| msgs.last())
         .is_some_and(|last| {
-            last.get("role").and_then(|r| r.as_str()) == Some("user")
-                && last.get("content").and_then(|c| c.as_str()) == Some(message)
+            let same_user_content = last.get("role").and_then(|r| r.as_str()) == Some("user")
+                && last.get("content").and_then(|c| c.as_str()) == Some(message);
+            if !same_user_content {
+                return false;
+            }
+            if client_message_id.is_empty() {
+                return true;
+            }
+            last.get("metadata")
+                .and_then(|m| m.get("client_message_id"))
+                .and_then(|v| v.as_str())
+                == Some(client_message_id)
         });
     // user 经 append op(无 seq → 引擎分配 next seq)+ 落 message_slots。
     // 指纹实录塞 _pending_message_ops（内部字段）：executor.persist_run_start 落一条
     // user_input 轨迹后移除——首轮 user 由此进入审计/回放范围（ops 即轨迹）。
+    // cmid 非空时随 metadata 落库（compute_message_id 纳入 metadata 参与 hash：
+    // 同内容多次发送 record_id 各自唯一，顺带消除重复内容同 id 碰撞）。
     if !interrupted_tail {
+        let mut user_msg = serde_json::json!({"role":"user","content":message});
+        if !client_message_id.is_empty() {
+            user_msg["metadata"] = serde_json::json!({"client_message_id": client_message_id});
+        }
         if let Ok(user_ledger) = agentos_engine::apply_messages_op_update(
             &mut initial_state,
             store.as_ref(),
             tenant_id,
-            &[serde_json::json!({"op":"set","msg":{"role":"user","content":message}})],
+            &[serde_json::json!({"op":"set","msg":user_msg})],
         )
         .await
         {
@@ -1556,6 +1586,7 @@ async fn stage_execute(
             Err(EngineOutcome {
                 content: format!("[engine-run-failed] {message}"),
                 final_assistant: None,
+                final_user: None,
                 failed: true,
             })
         }
@@ -1601,9 +1632,23 @@ fn stage_finalize(
                 .find(|m| m.get("role").and_then(|v| v.as_str()) == Some("assistant"))
                 .cloned()
         });
+    // A2：本轮 user 消息（完整持久形态，含引擎分配的 seq + metadata.client_message_id）。
+    // record_id 由 compute_message_id 对整条消息（剔除 seq/_ 内部字段）取指纹，
+    // 与表侧 write_slot_to_table_locked 落库 id 一致——认领回传的权威 id/seq
+    // 即 DB 真值，前端据此补 recordId + 排序键。
+    let final_user = final_state
+        .get("messages")
+        .and_then(|v| v.as_array())
+        .and_then(|msgs| {
+            msgs.iter()
+                .rev()
+                .find(|m| m.get("role").and_then(|v| v.as_str()) == Some("user"))
+                .cloned()
+        });
     EngineOutcome {
         content,
         final_assistant,
+        final_user,
         failed: false,
     }
 }
@@ -1864,6 +1909,7 @@ async fn handle_ws_connection(socket: WebSocket, state: AppState, headers: Heade
                         "",
                         None,
                         None,
+                        "",
                     ),
                 )
                 .await
@@ -1973,6 +2019,7 @@ async fn chat_handler(
                 "",
                 None,
                 None,
+                "",
             ),
         )
         .await
@@ -2873,6 +2920,7 @@ mod tests {
                 "",
                 None,
                 None,
+                "",
             ),
         )
         .await;
@@ -2893,6 +2941,7 @@ mod tests {
                 "",
                 None,
                 None,
+                "",
             ),
         )
         .await;
@@ -2943,6 +2992,7 @@ mod tests {
                 "",
                 None,
                 None,
+                "",
             ),
         )
         .await;
@@ -2962,6 +3012,7 @@ mod tests {
                 "",
                 None,
                 None,
+                "",
             ),
         )
         .await;
@@ -2985,8 +3036,7 @@ mod tests {
         // （零兼容重排：messages 持久真值 = slots 表，checkpoint/traces 只管标量）。
         // 模拟：直接向 slots 写入第一轮 user+assistant（pipeline_id=pipe_cold），
         // 再调用 process_via_engine，断言 LLM 收到历史 + 当前。
-        let (state, invoker, store, sqlite) = make_engine_state();
-        let tenant = TenantContext::new("tenant_cold", "thread_cold");
+        let (state, invoker, store, sqlite) = make_engine_state();        let tenant = TenantContext::new("tenant_cold", "thread_cold");
         let pipe = "pipe_cold";
         let thread = "thread_cold";
 
@@ -3029,6 +3079,7 @@ mod tests {
                 "",
                 None,
                 None,
+                "",
             ),
         )
         .await;
@@ -3044,6 +3095,73 @@ mod tests {
         );
         assert_eq!(msgs[0]["content"], "冷启动第一轮");
         assert_eq!(msgs[1]["role"], "assistant");
+        assert_eq!(msgs[2]["content"], "冷启动第二轮");
+    }
+
+    #[tokio::test]
+    async fn test_cold_recovery_ignores_stale_ended_flag() {
+        // 回归锚（2026-08-22 真机）：冷恢复（registry 丢失）时，旧 checkpoint 的
+        // `ended=true`（post 阶段 pipeline_track 每轮写入）若残留进本轮 initial_state，
+        // 引擎 execute_steps/execute_body 见 ended 即短路——run 秒终 completed、
+        // LLM 一次请求都不发（真机：主管道 38ms 秒终 + 两个任务管道 1-2s 秒终，
+        // 仅 1 条 user_input trace）。ended 属 per-run 易变键（VOLATILE_RUN_KEYS），
+        // 冷恢复必须跳过，本轮以 stage_build_initial_state 的 ended=false 起跑。
+        let (state, invoker, store, sqlite) = make_engine_state();
+        let tenant = TenantContext::new("tenant_ended", "thread_ended");
+        let pipe = "pipe_ended";
+        let thread = "thread_ended";
+
+        // 模拟上一轮已持久化（registry 无该管道 = 冷启动），且旧 checkpoint 带
+        // ended=true（修复前版本落档形态）。
+        let store_ref = store.clone();
+        agentos_tenant::scope(tenant.clone(), async {
+            store_ref.create_run("run_ended", "", "tenant_ended").await.unwrap();
+            store_ref.link_pipeline_session(pipe, thread, "tenant_ended").await.unwrap();
+            sqlite
+                .apply_messages_ops_to_table(pipe, "tenant_ended", &[
+                    serde_json::json!({"op": "set", "seq": 0, "msg": {"role": "user", "content": "上一轮"}}),
+                    serde_json::json!({"op": "set", "seq": 1, "msg": {"role": "assistant", "content": "上一轮回复"}}),
+                ])
+                .unwrap();
+            // 旧 checkpoint：ended=true + 其它标量（模拟修复前 save_checkpoint 落档）
+            let stale = serde_json::json!({
+                "ended": true,
+                "current_phase": "exit",
+                "core_plugin": "pipeline_llm_core",
+                "track.total_tokens": 130433,
+            });
+            store_ref
+                .save_checkpoint(pipe, "tenant_ended", 1, &stale)
+                .await
+                .unwrap();
+        })
+        .await;
+
+        let r = agentos_tenant::scope(
+            tenant,
+            process_via_engine(
+                &state,
+                "冷启动第二轮",
+                "agentos",
+                &[],
+                pipe,
+                thread,
+                "e2",
+                "",
+                "",
+                None,
+                None,
+                "",
+            ),
+        )
+        .await;
+        assert!(!r.content.is_empty(), "冷启动第二轮应返回 assistant 回复");
+
+        // ★ 回归锚：LLM 必须被调用（ended=true 残留时引擎短路，seen 为空）
+        let seen = invoker.seen.lock().unwrap();
+        assert_eq!(seen.len(), 1, "ended 残留不得让 run 秒终——LLM 应被调用");
+        let msgs = seen[0].as_array().unwrap();
+        assert_eq!(msgs.len(), 3, "应恢复上一轮 user+assistant + 当前 user");
         assert_eq!(msgs[2]["content"], "冷启动第二轮");
     }
 
@@ -3108,6 +3226,7 @@ mod tests {
                 "",
                 None,
                 None,
+                "",
             ),
         )
         .await;
@@ -3128,6 +3247,7 @@ mod tests {
                 "",
                 None,
                 None,
+                "",
             ),
         )
         .await;
@@ -3300,6 +3420,7 @@ mod tests {
                 "",
                 None,
                 None,
+                "",
             ),
         )
         .await;
@@ -3727,6 +3848,7 @@ mod tests {
                 "",
                 None,
                 Some(&overlay),
+                "",
             ),
         )
         .await;
@@ -3893,6 +4015,7 @@ mod tests {
                 "",
                 None,
                 Some(&overlay),
+                "",
             ),
         )
         .await;
@@ -4007,6 +4130,7 @@ mod tests {
                 "",
                 None,
                 Some(&overlay),
+                "",
             ),
         )
         .await;
@@ -4065,6 +4189,7 @@ mod tests {
                 "",
                 None,
                 Some(&overlay),
+                "",
             ),
         )
         .await;
@@ -4118,6 +4243,7 @@ mod tests {
                 "",
                 None,
                 None,
+                "",
             ),
         )
         .await;
@@ -4168,6 +4294,7 @@ mod tests {
                 "",
                 None,
                 None,
+                "",
             ),
         )
         .await;
@@ -4217,6 +4344,7 @@ mod tests {
                     "",
                     None,
                     None,
+                    "",
                 ),
             )
             .await;
@@ -4268,6 +4396,7 @@ mod tests {
                         "",
                         None,
                         None,
+                        "",
                     ),
                 )
                 .await
@@ -4345,6 +4474,7 @@ mod tests {
                 "",
                 None,
                 Some(&overlay),
+                "",
             ),
         )
         .await;
@@ -4383,6 +4513,7 @@ mod tests {
                 "",
                 None,
                 None,
+                "",
             ),
         )
         .await;
@@ -4421,6 +4552,7 @@ mod tests {
                 "",
                 None,
                 Some(&overlay),
+                "",
             ),
         )
         .await;
@@ -4482,6 +4614,7 @@ mod tests {
                 "",
                 None,
                 Some(&overlay),
+                "",
             ),
         )
         .await;
@@ -4563,6 +4696,7 @@ mod tests {
                 None,
                 None,
                 "agentos",
+                "",
             )
             .await;
         let got = sink.delivered.load(Ordering::SeqCst);
@@ -4570,5 +4704,142 @@ mod tests {
             got >= 1,
             "注入事件按管道唯一坐标必须直达 user 连接——LLM 日志有、前端收不到 = 该坐标缺注册"
         );
+    }
+
+    // ── ADR 2026-08-21 消息幂等契约：cmid 随 user 消息落库 + interrupted_tail 尊重 cmid ──
+
+    /// cmid 非空时 user 消息必须携带 metadata.client_message_id（对账去重桥接键）。
+    #[tokio::test]
+    async fn test_stage_recover_history_stamps_cmid_metadata() {
+        let sqlite = Arc::new(agentos_engine::SqliteStore::open_memory().unwrap());
+        let store: Arc<dyn StorageBackend> = sqlite;
+        let st = json!({"messages": []});
+        let out = stage_recover_history(
+            st,
+            &store,
+            "带键消息",
+            "thread_cmid1",
+            "pipe_cmid1",
+            "tenant_cmid1",
+            "0198-cmid-a",
+        )
+        .await;
+        let msgs = out["messages"].as_array().expect("messages 数组");
+        let user = msgs
+            .iter()
+            .find(|m| m["role"] == "user" && m["content"] == "带键消息")
+            .expect("user 消息应 append");
+        assert_eq!(
+            user["metadata"]["client_message_id"], "0198-cmid-a",
+            "cmid 非空时必须随 metadata 落库"
+        );
+        // 无 cmid 路径（触发器注入/旧客户端）不造空 metadata
+        let st2 = json!({"messages": []});
+        let out2 = stage_recover_history(
+            st2,
+            &store,
+            "无键消息",
+            "thread_cmid1",
+            "pipe_cmid1",
+            "tenant_cmid1",
+            "",
+        )
+        .await;
+        let user2 = out2["messages"]
+            .as_array()
+            .expect("messages 数组")
+            .iter()
+            .find(|m| m["role"] == "user")
+            .expect("user 消息应 append");
+        assert!(user2.get("metadata").is_none(), "无 cmid 不造空 metadata");
+    }
+
+    /// interrupted_tail 幂等判定按 cmid 裁决：同 cmid 重派吞；不同 cmid 绝不吞
+    /// （修复连发两条相同内容第二条被吞）；无 cmid 路径维持同文判定（GAP-3 兼容）。
+    /// 尾部消息须播进 store（stage_recover_history 冷路径以 message_slots 为真值重载）。
+    #[tokio::test]
+    async fn test_interrupted_tail_respects_client_message_id() {
+        async fn run_case(tail_cmid: Option<&str>, incoming_cmid: &str) -> usize {
+            let sqlite = Arc::new(agentos_engine::SqliteStore::open_memory().unwrap());
+            let store: Arc<dyn StorageBackend> = sqlite;
+            let msg = match tail_cmid {
+                Some(c) => json!({"role": "user", "content": "ok",
+                                  "metadata": {"client_message_id": c}}),
+                None => json!({"role": "user", "content": "ok"}),
+            };
+            store
+                .apply_messages_ops_to_table(
+                    "p_it",
+                    "tenant_it",
+                    &[json!({"op": "set", "seq": 7, "msg": msg})],
+                )
+                .await
+                .unwrap();
+            let st = json!({"pipeline_id": "p_it"});
+            let out =
+                stage_recover_history(st, &store, "ok", "t_it", "p_it", "tenant_it", incoming_cmid)
+                    .await;
+            out["messages"].as_array().unwrap().len()
+        }
+        // ① 同 cmid 重派 → 吞（真·断线重试幂等）
+        assert_eq!(
+            run_case(Some("0198-same"), "0198-same").await,
+            1,
+            "同 cmid 重派应吞"
+        );
+        // ② 同文不同 cmid → 不吞（用户真发了两条）
+        assert_eq!(
+            run_case(Some("0198-first"), "0198-second").await,
+            2,
+            "同文不同 cmid 绝不吞（连发两条相同内容是真实用户行为）"
+        );
+        // ③ tail 无 cmid + 来稿带 cmid → 以键裁决，不吞
+        assert_eq!(
+            run_case(None, "0198-third").await,
+            2,
+            "来稿带 cmid 而尾部无键：不是同一次发送，不吞"
+        );
+        // ④ 双方都无 cmid → 维持 GAP-3 同文判定（旧路径兼容）
+        assert_eq!(run_case(None, "").await, 1, "无键路径维持同文判定");
+    }
+
+    /// A2：stage_finalize 提取本轮 user 消息（含引擎分配的 seq + metadata.cmid），
+    /// WS 路径 new_message 认领回传的权威 id/seq 即 DB 真值。
+    #[test]
+    fn stage_finalize_extracts_this_round_user_record() {
+        let final_state = json!({
+            "raw_result": "hi",
+            "messages": [
+                {"role": "user", "content": "旧一轮", "seq": 1},
+                {"role": "assistant", "content": "旧回复", "seq": 2},
+                {"role": "user", "content": "本轮提问", "seq": 3,
+                 "metadata": {"client_message_id": "cmid-0198"}},
+                {"role": "assistant", "content": "本轮回复", "seq": 4},
+            ],
+        });
+        let out = stage_finalize(&final_state, "tenant-1", "pipe-1", "thread-1", "agent-1");
+        let u = out.final_user.clone().expect("必须提取到本轮 user 消息");
+        assert_eq!(u["content"], "本轮提问");
+        assert_eq!(u["seq"], 3, "权威 seq 必须来自引擎分配（非数组猜测）");
+        assert_eq!(u["metadata"]["client_message_id"], "cmid-0198");
+        assert_eq!(
+            u["role"], "user",
+            "提取的是 user 消息（尾随 assistant 不得误吞）"
+        );
+        // record_id 指纹与表侧落库一致（compute_message_id 规范化剔除 seq/_ 字段）
+        let canonical = json!({
+            "role": "user", "content": "本轮提问",
+            "metadata": {"client_message_id": "cmid-0198"},
+        });
+        assert_eq!(
+            agentos_core::ids::compute_message_id(&u),
+            agentos_core::ids::compute_message_id(&canonical),
+            "指纹必须对 seq/_ 字段免疫（与表侧 record_id 一致）"
+        );
+        assert!(out.final_user.unwrap().get("id").is_none(), "指纹 id 由 ws_session 计算");
+        // 无消息历史 → None（回退路径不炸）
+        let empty = stage_finalize(&json!({"raw_result": "x"}), "t", "p", "t", "a");
+        assert!(empty.final_user.is_none());
+        assert!(empty.final_assistant.is_none());
     }
 }

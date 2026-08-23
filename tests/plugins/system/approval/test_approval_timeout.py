@@ -72,7 +72,11 @@ def _install_caps(
     human_calls: list[tuple[str, dict[str, Any]]] = []
     pipeline_calls: list[tuple[str, dict[str, Any]]] = []
 
-    async def human_call_fn(method: str, params: dict[str, Any]) -> Any:
+    # SDK CapabilityHandle.call 透传三参 (method, params, timeout)
+    # （25681164c 起 timeout 为 call_fn 契约一部分），fake 对齐该签名。
+    async def human_call_fn(
+        method: str, params: dict[str, Any], timeout: float | None = None
+    ) -> Any:
         human_calls.append((method, params))
         if method == "create_choice":
             return create_res if create_res is not None else {"request_id": "req-test"}
@@ -82,7 +86,9 @@ def _install_caps(
             return wait_res
         return {}
 
-    async def pipeline_call_fn(method: str, params: dict[str, Any]) -> Any:
+    async def pipeline_call_fn(
+        method: str, params: dict[str, Any], timeout: float | None = None
+    ) -> Any:
         pipeline_calls.append((method, params))
         if method == "suspend":
             return {"run_id": "run-1", "branch_id": "b1", "seq": 1}

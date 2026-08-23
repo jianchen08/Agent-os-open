@@ -606,6 +606,11 @@ pub struct MessageRecord {
     /// camelCase 字段返回，前端据此还原 resultData/durationMs——冷热路径一致。
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tool_result_json: Option<String>,
+    /// 消息自定义元数据（blob 全文原样提取）。user 消息携带
+    /// `client_message_id`（前端幂等键，ADR 2026-08-21 消息幂等契约）——
+    /// GET messages 原样回显，前端据此把乐观消息与权威记录对账去重。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub metadata: Option<serde_json::Value>,
 }
 
 /// sessions 表记录——会话标签夹（域2，对齐 0.1 SessionModel）。

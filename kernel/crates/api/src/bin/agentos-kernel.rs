@@ -795,6 +795,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         )
     };
 
+    // 流式声明查询闭包（ADR 2026-08-22）：capability_router 收到流式事件时查
+    // 插件 capabilities.streaming 声明（未声明即拒，fail-closed）。manifests 用
+    // 共享 RwLock（与 domain_broadcaster 同源）——watcher 热发现同步可见。
+    let streaming_declaration_lookup: agentos_api::capability_router::StreamingDeclarationLookupFn = {
+        let manifests_for_streaming = manifests_shared.clone();
+        Arc::new(move |plugin_id: &str| {
+            let guard = manifests_for_streaming.try_read().ok()?;
+            guard
+                .iter()
+                .find(|m| m.id == plugin_id)
+                .and_then(|m| m.capabilities.streaming.clone())
+        })
+    };
+
     let router = Arc::new(
         KernelCapabilityRouter::with_metrics(metrics_aggregator.clone())
             .with_invoker(invoker.clone())
@@ -805,6 +819,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             .with_grants_lookup(grants_lookup)
             .with_dynamic_tool_registrar(dynamic_registrar.clone())
             .with_domain_broadcaster(domain_broadcaster)
+            .with_streaming_declaration_lookup(streaming_declaration_lookup)
             .with_capability_contracts(capability_contracts.clone()),
     );
     invoker.set_router(router);
@@ -836,10 +851,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // （config_root 已在上方 loader 创建前推导，此处复用）
 
     let pipeline_config = load_pipeline_config(&config_root).unwrap_or_else(|e| {
-        panic!("加载管道配置失败 ({}): {}", config_root.display(), e);
+        warn!(
+            "加载管道配置失败，以内置默认配置启动（chat 走降级路径，修复配置后热重载自动生效）: {}: {}",
+            config_root.display(),
+            e
+        );
+        agentos_core::types::PipelineConfig::default()
     });
     let step_library = load_step_library(&config_root).unwrap_or_else(|e| {
-        panic!("加载公共 step 库失败 ({}): {}", config_root.display(), e);
+        warn!(
+            "加载公共 step 库失败，以空库启动（修复配置后热重载自动生效）: {}: {}",
+            config_root.display(),
+            e
+        );
+        agentos_core::types::StepLibrary::default()
     });
 
     info!(
@@ -854,20 +879,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let plugin_ids: std::collections::HashSet<String> =
         manifests.iter().map(|m| m.id.clone()).collect();
 
-    // 启动期重名检测：冲突则 panic 退出（fail-fast，避免运行期歧义）
+    // 启动期重名检测：冲突不阻断启动（warn 留痕；运行时热重载每次请求重新
+    // 校验并在修复后自动生效——配置问题不应让内核整体不可用）。
     if let Err(conflict) = validate_no_name_conflicts(&pipeline_config, &step_library, &plugin_ids)
     {
-        panic!(
-            "命名冲突检测失败，拒绝启动内核（修复配置后重试）: {}",
-            conflict
-        );
+        warn!("命名冲突检测失败（内核继续启动，修复配置后热重载自动生效）: {conflict}");
     }
 
-    // G10：启动期加载期编译（fail-fast）。when 语法错误 / 引用不存在的 step 或
-    // 插件 / composite 引用环——启动即报错（消灭"静默 false 死路由"），
-    // 热重载路径的降级版在 server.rs maybe_reload_compiled_pipeline。
+    // G10：加载期编译。when 语法错误 / 引用不存在的 step 或插件 / composite
+    // 引用环——不阻断启动：warn 留痕，运行时热重载路径（server.rs
+    // maybe_reload_compiled_pipeline）在每次请求前重新加载+编译，配置修复后
+    // 自动生效；修复前 chat 走空管道降级（与"缺省配置下内核可启动"一致）。
     if let Err(compile_err) = agentos_api::server::load_and_compile(&config_root, &plugin_ids) {
-        panic!("管道加载期编译失败，拒绝启动内核（修复配置后重试）: {compile_err}");
+        warn!("管道加载期编译失败（内核继续启动，修复配置后热重载自动生效）: {compile_err}");
     }
 
     // 构建 AppState（注入 pipeline_config / step_library / invoker / store / plugin_ids / project_root）

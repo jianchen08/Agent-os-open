@@ -7,8 +7,8 @@ use async_trait::async_trait;
 use std::sync::Arc;
 use std::sync::Mutex;
 
-/// (thread_id, user_id, content, thinking_strength)
-type UserInputRecord = (String, String, String, String);
+/// (thread_id, user_id, content, thinking_strength, client_message_id)
+type UserInputRecord = (String, String, String, String, String);
 
 /// 记录型 mock dispatcher，捕获每次调用。
 #[derive(Default)]
@@ -30,12 +30,14 @@ impl PipelineDispatcher for MockDispatcher {
         _execution_context: Option<&serde_json::Value>,
         _state_overlay: Option<&serde_json::Value>,
         _agent_id: &str,
+        client_message_id: &str,
     ) -> Result<(), String> {
         self.user_inputs.lock().unwrap().push((
             thread_id.into(),
             user_id.into(),
             content.into(),
             thinking_strength.into(),
+            client_message_id.into(),
         ));
         Ok(())
     }
@@ -108,6 +110,57 @@ async fn user_input_carries_thinking_strength_via_data_envelope() {
     assert_eq!(outcome, RouteOutcome::Handled);
     let inputs = dispatcher.user_inputs.lock().unwrap();
     assert_eq!(inputs[0].3, "low", "data 信封 thinking_strength 应透传");
+}
+
+#[tokio::test]
+async fn user_input_carries_client_message_id_top_level() {
+    // ADR 2026-08-21 消息幂等契约：前端 GlobalWebSocket.sendUserInput 把
+    // client_message_id 放顶层，路由必须提取并透传给引擎（落库回显）。
+    let (router, dispatcher) = router();
+    let msg = serde_json::json!({
+        "type": "user_input",
+        "thread_id": "thread-1",
+        "content": "hi",
+        "client_message_id": "0198abcd-1111",
+    });
+    let outcome = router.route(&msg, "user-A").await;
+    assert_eq!(outcome, RouteOutcome::Handled);
+    let inputs = dispatcher.user_inputs.lock().unwrap();
+    assert_eq!(
+        inputs[0].4, "0198abcd-1111",
+        "顶层 client_message_id 应透传"
+    );
+}
+
+#[tokio::test]
+async fn user_input_carries_client_message_id_via_data_envelope() {
+    let (router, dispatcher) = router();
+    let msg = serde_json::json!({
+        "type": "user_input",
+        "thread_id": "thread-1",
+        "data": {"content": "hi", "client_message_id": "0198abcd-2222"},
+    });
+    let outcome = router.route(&msg, "user-A").await;
+    assert_eq!(outcome, RouteOutcome::Handled);
+    let inputs = dispatcher.user_inputs.lock().unwrap();
+    assert_eq!(
+        inputs[0].4, "0198abcd-2222",
+        "data 信封 client_message_id 应透传"
+    );
+}
+
+#[tokio::test]
+async fn user_input_without_client_message_id_defaults_empty() {
+    let (router, dispatcher) = router();
+    let msg = serde_json::json!({
+        "type": "user_input",
+        "thread_id": "thread-1",
+        "content": "hi",
+    });
+    let outcome = router.route(&msg, "user-A").await;
+    assert_eq!(outcome, RouteOutcome::Handled);
+    let inputs = dispatcher.user_inputs.lock().unwrap();
+    assert_eq!(inputs[0].4, "", "无幂等键 → 空串（触发器/旧客户端路径）");
 }
 
 #[tokio::test]
@@ -194,6 +247,7 @@ async fn dispatcher_failure_returns_error() {
             _: &str,
             _: Option<&serde_json::Value>,
             _: Option<&serde_json::Value>,
+            _: &str,
             _: &str,
         ) -> Result<(), String> {
             Err("boom".into())

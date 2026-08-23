@@ -25,9 +25,6 @@ use tracing::warn;
 
 use crate::metrics::{Labels, MetricType, MetricsAggregator};
 
-/// 管道执行能力错误码前缀。
-const ERR_PIPELINE: i64 = -32010;
-
 /// service-registry 能力错误码前缀（基础设施存储调用）。
 const ERR_SERVICE_REGISTRY: i64 = -32020;
 
@@ -70,13 +67,22 @@ pub struct KernelCapabilityRouter {
     /// *.json 声明的 input_schema（含 pattern 形态）在本路由入口逐条执行——
     /// G6 授权之后、派发之前。None = 未装配契约 → 宽泛放行（兼容旧装配/测试）。
     capability_contracts: Option<Arc<Vec<crate::kernel_capabilities::KernelCapabilityContract>>>,
+    /// 流式声明查询器（ADR 2026-08-22 流式协议）：(plugin_id) → capabilities.streaming
+    /// 声明。None = 未装配 → 声明闸放行（兼容旧装配/测试）。装配后未声明即拒。
+    streaming_declaration_lookup: Option<StreamingDeclarationLookupFn>,
 }
 
-/// 域事件广播闭包：(event_name, tags) → 点对点投递给声明 domain_event 的
-/// 启用插件（组件版 broadcast_domain_event_from；观察总线由调用方决定）。
-/// tags 键为静态字符串（调用处全部为字面量）。
-pub type DomainBroadcaster =
-    Arc<dyn Fn(&str, Vec<(&'static str, serde_json::Value)>) + Send + Sync>;
+    /// 域事件广播闭包：(event_name, tags) → 点对点投递给声明 domain_event 的
+    /// 启用插件（组件版 broadcast_domain_event_from；观察总线由调用方决定）。
+    /// tags 键为静态字符串（调用处全部为字面量）。
+    pub type DomainBroadcaster =
+        Arc<dyn Fn(&str, Vec<(&'static str, serde_json::Value)>) + Send + Sync>;
+
+    /// 流式声明查询闭包：(plugin_id) → 该插件的 capabilities.streaming 声明
+    /// （None = 未声明 → 网关拒绝其流式事件）。
+    pub type StreamingDeclarationLookupFn =
+        Arc<dyn Fn(&str) -> Option<agentos_core::traits::StreamingCapability> + Send + Sync>;
+
 
 /// G3：动态工具注册器闭包。
 ///
@@ -111,6 +117,7 @@ impl KernelCapabilityRouter {
             dynamic_tool_registrar: None,
             domain_broadcaster: None,
             capability_contracts: None,
+            streaming_declaration_lookup: None,
         }
     }
 
@@ -127,6 +134,7 @@ impl KernelCapabilityRouter {
             dynamic_tool_registrar: None,
             domain_broadcaster: None,
             capability_contracts: None,
+            streaming_declaration_lookup: None,
         }
     }
 
@@ -144,6 +152,18 @@ impl KernelCapabilityRouter {
     /// 注入域事件广播闭包（启用 event-bus 域事件名单同步广播：approval.created 等）。
     pub fn with_domain_broadcaster(mut self, broadcaster: DomainBroadcaster) -> Self {
         self.domain_broadcaster = Some(broadcaster);
+        self
+    }
+
+    /// 注入流式声明查询器（启用 event-bus.emit 的 streaming 声明闸）：
+    /// (plugin_id) → 该插件的 capabilities.streaming 声明（None = 未声明）。
+    /// 未声明即拒其流式事件（fail-closed，与当年 resources「声明即接入」同构）。
+    /// 闭包实现方共享 manifests RwLock——watcher 热发现同步可见。
+    pub fn with_streaming_declaration_lookup(
+        mut self,
+        lookup: StreamingDeclarationLookupFn,
+    ) -> Self {
+        self.streaming_declaration_lookup = Some(lookup);
         self
     }
 
@@ -447,6 +467,81 @@ impl CapabilityRouter for KernelCapabilityRouter {
                     .cloned()
                     .unwrap_or(serde_json::Value::Null);
                 tracing::debug!(target: "capability:event-bus", event = %event_name, "收到 event-bus.emit");
+
+                // ── 流式契约网关（ADR 2026-08-22，streaming.json 单一真值源）──
+                // 契约事件（10 个）统一执法：schema + message_id 命名空间 + thread_id
+                // 投递键。fail-closed：非法即丢弃 + 告警（Ok(dropped)，与信封不完整
+                // 同语义——插件发射侧拿到 dropped 状态而非 RPC 错误）。非契约事件
+                // （interaction_*/approval.* 等透传族）不归本闸，走下方既有分族。
+                if let Some(contracts) = self.capability_contracts.as_ref() {
+                    let plugin_id = params.get("_plugin_id").and_then(|v| v.as_str());
+                    if crate::kernel_capabilities::find_spec(contracts, "streaming", event_name)
+                        .is_some()
+                    {
+                        // 声明闸（ADR 2026-08-22）：插件须声明 capabilities.streaming
+                        // 才能发射流式事件；未声明即拒（fail-closed）。引擎管道家族
+                        // （llm_core/tool_core）是内核 LLM 路径的器官，豁免——它们
+                        // 携带内核签发的 a_ id，命名空间执法见下。
+                        if let Some(pid) = plugin_id {
+                            let is_conduit =
+                                crate::kernel_capabilities::ENGINE_CONDUIT_PLUGINS.contains(&pid);
+                            if !is_conduit {
+                                let declared = self
+                                    .streaming_declaration_lookup
+                                    .as_ref()
+                                    .and_then(|lookup| lookup(pid));
+                                let Some(decl) = declared else {
+                                    tracing::warn!(
+                                        target: "capability:event-bus",
+                                        plugin = pid,
+                                        event = %event_name,
+                                        "流式事件被拒：插件未声明 capabilities.streaming"
+                                    );
+                                    return Ok(json!({
+                                        "status": "dropped",
+                                        "reason": "capabilities.streaming not declared",
+                                        "event": event_name,
+                                    }));
+                                };
+                                // 声明了 events 清单 → 事件必须在其内（G2 声明↔实现对照）
+                                if let Some(allowed) = decl.events.as_deref() {
+                                    if !allowed.iter().any(|e| e == event_name) {
+                                        tracing::warn!(
+                                            target: "capability:event-bus",
+                                            plugin = pid,
+                                            event = %event_name,
+                                            "流式事件被拒：不在 capabilities.streaming.events 声明内"
+                                        );
+                                        return Ok(json!({
+                                            "status": "dropped",
+                                            "reason": "event not in declared events",
+                                            "event": event_name,
+                                        }));
+                                    }
+                                }
+                            }
+                        }
+                        if let Err(reason) = crate::kernel_capabilities::validate_streaming_event(
+                            contracts,
+                            event_name,
+                            &payload,
+                            plugin_id,
+                        ) {
+                            tracing::warn!(
+                                target: "capability:event-bus",
+                                event = %event_name,
+                                plugin = plugin_id.unwrap_or("<kernel>"),
+                                reason = %reason,
+                                "流式契约网关拒绝（fail-closed 丢弃）"
+                            );
+                            return Ok(json!({
+                                "status": "dropped",
+                                "reason": reason,
+                                "event": event_name,
+                            }));
+                        }
+                    }
+                }
 
                 // 流式事件族：stream_chunk / thinking_start / thinking_chunk / thinking_end
                 // 对齐 0.1 协议（bridge_events._make_event）：信封必须含 pipeline_id +
@@ -1304,12 +1399,6 @@ fn parse_labels_safe(raw: Option<&Value>) -> Result<Labels, McpError> {
     Ok(out)
 }
 
-/// 抑制未使用的错误码常量警告（后续 event-bus 错误码扩展时启用）。
-#[allow(dead_code)]
-fn _pipeline_error_code() -> i64 {
-    ERR_PIPELINE
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1503,6 +1592,191 @@ mod tests {
         coord.register_thread("thread-1", "user-test");
         let agg = MetricsAggregator::new();
         KernelCapabilityRouter::with_metrics(agg).with_session(coord)
+    }
+
+    /// 带契约 + 声明查询器 + session 的 router（streaming 声明闸测试）。
+    fn router_with_streaming_gate(
+        received: std::sync::Arc<std::sync::Mutex<Vec<Value>>>,
+        decl: Option<agentos_core::traits::StreamingCapability>,
+    ) -> KernelCapabilityRouter {
+        use agentos_session::SessionCoordinator;
+        let coord = Arc::new(SessionCoordinator::default());
+        let sink = Arc::new(CaptureSink { received }) as Arc<dyn agentos_session::EventSink>;
+        coord.register("user-test", sink);
+        coord.register_thread("thread-1", "user-test");
+        let contracts = Arc::new(
+            crate::kernel_capabilities::load_contracts(&std::path::Path::new(env!(
+                "CARGO_MANIFEST_DIR"
+            ))
+            .join("../../../config/kernel_capabilities"))
+            .expect("仓库契约必须可加载"),
+        );
+        let lookup: StreamingDeclarationLookupFn = Arc::new(move |_pid| decl.clone());
+        KernelCapabilityRouter::new()
+            .with_session(coord)
+            .with_capability_contracts(contracts)
+            .with_streaming_declaration_lookup(lookup)
+    }
+
+    #[tokio::test]
+    async fn streaming_gate_rejects_undeclared_plugin() {
+        // 插件未声明 capabilities.streaming → 事件被拒（fail-closed），sink 无事件。
+        let received = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let router = router_with_streaming_gate(received.clone(), None);
+        let res = router
+            .handle(
+                "event-bus",
+                "emit",
+                json!({
+                    "_plugin_id": "my_streamer",
+                    "event": "stream_chunk",
+                    "payload": {
+                        "thread_id": "thread-1",
+                        "pipeline_id": "c1b2c3d4e5f64789abcdef0123456789",
+                        "message_id": "p_chunk_001",
+                        "content": "hi",
+                    },
+                }),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res["status"], "dropped");
+        assert!(res["reason"].as_str().unwrap().contains("streaming"));
+        assert!(received.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn streaming_gate_declared_plugin_emits() {
+        let received = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let decl = agentos_core::traits::StreamingCapability {
+            events: Some(vec![
+                "stream_start".to_string(),
+                "stream_chunk".to_string(),
+                "stream_end".to_string(),
+            ]),
+            part_types: None,
+            persist: Some(false),
+        };
+        let router = router_with_streaming_gate(received.clone(), Some(decl.clone()));
+        // 声明内的事件 → 放行（p_ 命名空间 + thread_id 齐备）
+        let res = router
+            .handle(
+                "event-bus",
+                "emit",
+                json!({
+                    "_plugin_id": "my_streamer",
+                    "event": "stream_chunk",
+                    "payload": {
+                        "thread_id": "thread-1",
+                        "pipeline_id": "c1b2c3d4e5f64789abcdef0123456789",
+                        "message_id": "p_chunk_001",
+                        "content": "hi",
+                    },
+                }),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res["status"], "emitted");
+        assert_eq!(received.lock().unwrap().len(), 1);
+        // 声明外的 streaming 契约事件（tool_start 也在 10 事件内）→ 声明闸拒绝
+        let res2 = router
+            .handle(
+                "event-bus",
+                "emit",
+                json!({
+                    "_plugin_id": "my_streamer",
+                    "event": "tool_start",
+                    "payload": {
+                        "thread_id": "thread-1",
+                        "pipeline_id": "c1b2c3d4e5f64789abcdef0123456789",
+                        "message_id": "p_tool_001",
+                        "call_id": "c1",
+                        "tool_name": "f",
+                    },
+                }),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            res2["status"], "dropped",
+            "tool_start 未在 events 声明内应被声明闸拒绝（fail-closed）"
+        );
+    }
+
+    #[tokio::test]
+    async fn streaming_gate_rejects_event_outside_declaration() {
+        let received = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let decl = agentos_core::traits::StreamingCapability {
+            events: Some(vec!["stream_start".to_string()]),
+            part_types: None,
+            persist: None,
+        };
+        let router = router_with_streaming_gate(received.clone(), Some(decl));
+        // events 声明只含 stream_start → stream_chunk 被拒
+        let res = router
+            .handle(
+                "event-bus",
+                "emit",
+                json!({
+                    "_plugin_id": "my_streamer",
+                    "event": "stream_chunk",
+                    "payload": {
+                        "thread_id": "thread-1",
+                        "pipeline_id": "c1b2c3d4e5f64789abcdef0123456789",
+                        "message_id": "p_chunk_001",
+                        "content": "hi",
+                    },
+                }),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res["status"], "dropped");
+        assert!(res["reason"].as_str().unwrap().contains("declared events"));
+    }
+
+    #[tokio::test]
+    async fn streaming_gate_engine_conduit_bypasses_declaration() {
+        // 引擎管道家族（llm_core）不声明 streaming 也放行（内核 LLM 路径器官），
+        // 但命名空间必须 a_（内核签发）。
+        let received = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let router = router_with_streaming_gate(received.clone(), None);
+        let res = router
+            .handle(
+                "event-bus",
+                "emit",
+                json!({
+                    "_plugin_id": "pipeline_llm_core",
+                    "event": "stream_chunk",
+                    "payload": {
+                        "thread_id": "thread-1",
+                        "pipeline_id": "c1b2c3d4e5f64789abcdef0123456789",
+                        "message_id": "a_0123456789abcdef0123456789abcdef",
+                        "content": "hi",
+                    },
+                }),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res["status"], "emitted");
+        // 但 llm_core 自造 p_ id → 命名空间执法拒绝
+        let res2 = router
+            .handle(
+                "event-bus",
+                "emit",
+                json!({
+                    "_plugin_id": "pipeline_llm_core",
+                    "event": "stream_chunk",
+                    "payload": {
+                        "thread_id": "thread-1",
+                        "pipeline_id": "c1b2c3d4e5f64789abcdef0123456789",
+                        "message_id": "p_selfmade_001",
+                        "content": "hi",
+                    },
+                }),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res2["status"], "dropped");
     }
 
     #[tokio::test]

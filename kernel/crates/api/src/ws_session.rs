@@ -90,6 +90,18 @@ pub async fn run_ws_session(
     let (user_id, username) = match auth {
         HandshakeAuth::Ok { user_id, username } => (user_id, username),
         HandshakeAuth::Rejected { code, reason } => {
+            // 拒绝必须先发 Close 帧（code=4001）再返回：直接 drop socket 浏览器端
+            // 只会收到 1006（abnormal closure），前端 GlobalWebSocket 的
+            // 「4001 → refreshToken → 重连」自愈路径永远不触发，表现为掉线后
+            // 无限重连失败（“未连接”常驻、发消息无响应，2026-08-21 实测复现
+            // code=1006）。Close 帧发送失败也不影响语义（连接随 drop 关闭）。
+            let mut rejected_socket = socket;
+            let _ = rejected_socket
+                .send(Message::Close(Some(axum::extract::ws::CloseFrame {
+                    code,
+                    reason: reason.clone().into(),
+                })))
+                .await;
             return (code, reason);
         }
     };
@@ -265,6 +277,7 @@ impl PipelineDispatcher for EngineDispatcher {
         execution_context: Option<&serde_json::Value>,
         state_overlay: Option<&serde_json::Value>,
         agent_id: &str,
+        client_message_id: &str,
     ) -> Result<(), String> {
         use agentos_core::types::TenantContext;
         // tenant_id 必须用真正的租户 ID（与 HTTP 路径 resolve_request_tenant_id 同源），
@@ -339,8 +352,10 @@ impl PipelineDispatcher for EngineDispatcher {
         // 引擎写入的 lineage 扁平键）透传给引擎，并入 initial_state。
         let exec_overlay = state_overlay.cloned();
         // 执行 agent（任务派发按 target 选 agent；主会话路径默认 agentos）：
-        // 决定引擎加载的 agent 配置（人格/tool_ids）。
+        // 决定引擎加载的 agent 配置（人格/tool_ids/技能）。
         let exec_agent = agent_id.to_string();
+        // 前端幂等键（ADR 2026-08-21）：随 user 消息 metadata 落库回显。
+        let exec_cmid = client_message_id.to_string();
         // ADR-2026-08-15：后台执行必须经 RunChainRegistry 入链——裸 spawn 会让
         // 同会话两条消息并发跑（registry 回写 / msg_sequence 竞态）。链保证同
         // 管道严格 FIFO、跨管道并行；user_id+route_id 兼作排队优先级键（用户
@@ -366,6 +381,7 @@ impl PipelineDispatcher for EngineDispatcher {
                     &exec_thinking,
                     exec_ctx.as_ref(),
                     exec_overlay.as_ref(),
+                    &exec_cmid,
                 ),
             )
             .await;
@@ -405,6 +421,18 @@ impl PipelineDispatcher for EngineDispatcher {
             let fa = outcome.final_assistant.clone().unwrap_or_else(
                 || serde_json::json!({"role": "assistant", "content": outcome.content}),
             );
+            // 认领回传：user 权威 record（id=compute_message_id 指纹 mc_/seq/内容/cmid）。
+            // 表侧落库 id 与指纹一致（write_slot_to_table_locked 无 _message_id 注入时
+            // 回落 compute_message_id），前端按 cmid 认领后记入独立 recordId 字段，
+            // UI 寻址 id 保持前端 uuid 不变（ADR 2026-08-22 双字段范式）。
+            let user_record = outcome.final_user.as_ref().map(|u| {
+                serde_json::json!({
+                    "id": agentos_core::ids::compute_message_id(u),
+                    "content": u.get("content").cloned().unwrap_or(serde_json::Value::Null),
+                    "sequence": u.get("seq").and_then(|v| v.as_u64()).unwrap_or(0),
+                    "metadata": u.get("metadata").cloned().unwrap_or(serde_json::Value::Null),
+                })
+            });
             let delivered = session
                 .emit_event(
                     &exec_thread,
@@ -413,8 +441,12 @@ impl PipelineDispatcher for EngineDispatcher {
                         "pipeline_id": route_id,
                         "message_id": message_id,
                         "_threadId": exec_thread,
+                        // 触发本轮的 user 消息幂等键（ADR 2026-08-21）：前端据此
+                        // 精确认领对应乐观 user 消息（非 FIFO 猜测）。
+                        "client_message_id": exec_cmid,
                         "sequence": seq,
                         "content": outcome.content,
+                        "user_message": user_record,
                         "message": {
                             "id": message_id,
                             "role": fa["role"],
@@ -616,13 +648,17 @@ async fn resolve_pipeline_id_for_thread(
                 );
             }
             // 存储故障 ≠ 无关联：报错可见，不得兜成空列表误诊为"前端值不属于该 thread"。
+            // 且不再回落主管道改写 route_id（2026-08-22 裁决）——用户在子管道视图
+            // 发消息时路由落主管道 = 写错桶；校验不可用即透传前端值（前端已是
+            // 权威 activePipelineId 源头），让故障期间路由保持用户所见。
             Err(e) => {
                 warn!(
                     thread_id = %thread_id,
                     frontend_pid = %frontend_pipeline_id,
                     error = %e,
-                    "list_pipeline_ids_by_thread 查询失败，跳过前端值校验，改用 thread 真实主管道"
+                    "list_pipeline_ids_by_thread 查询失败，校验不可用，透传前端 pipeline_id（不回落主管道）"
                 );
+                return frontend_pipeline_id.to_string();
             }
         }
     }
@@ -644,4 +680,213 @@ async fn resolve_pipeline_id_for_thread(
 
     // ③ 回退 thread_id（兼容）
     thread_id.to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::resolve_pipeline_id_for_thread;
+    use agentos_core::traits::StorageBackend;
+    use agentos_core::traits::{MessageQueryOpts, SessionListFilter};
+    use agentos_core::types::{
+        Branch, MessageRecord, RunRecord, RunStatus, SessionRecord, StorageError, TraceEntry,
+    };
+    use async_trait::async_trait;
+    use std::sync::{Arc, Mutex};
+
+    /// resolve_pipeline_id_for_thread 行为测试专用 mock：
+    /// 只控制 list_pipeline_ids_by_thread（Err / 成员列表）与 get_session（活跃管道），
+    /// 其余走 stub（契约 mock 同款）。
+    struct ResolveMock {
+        list_result: Mutex<Result<Vec<String>, StorageError>>,
+        session: Mutex<Option<SessionRecord>>,
+    }
+
+    impl ResolveMock {
+        fn new(
+            list_result: Result<Vec<String>, StorageError>,
+            session: Option<SessionRecord>,
+        ) -> Self {
+            Self {
+                list_result: Mutex::new(list_result),
+                session: Mutex::new(session),
+            }
+        }
+    }
+
+    fn session_record(active_pipeline_id: Option<&str>) -> SessionRecord {
+        SessionRecord {
+            thread_id: "T1".to_string(),
+            title: None,
+            intent: None,
+            current_state: "active".to_string(),
+            agent_id: None,
+            active_pipeline_id: active_pipeline_id.map(|s| s.to_string()),
+            pipeline_ids: vec![],
+            metadata: None,
+            created_at: "2026-08-22T00:00:00Z".to_string(),
+            updated_at: "2026-08-22T00:00:00Z".to_string(),
+            last_active_at: None,
+        }
+    }
+
+    #[async_trait]
+    impl StorageBackend for ResolveMock {
+        async fn get_run(&self, _run_id: &str) -> Result<RunRecord, StorageError> {
+            Err(StorageError::NotFound("mock".to_string()))
+        }
+        async fn get_messages_by_pipeline(
+            &self,
+            _pipeline_id: &str,
+            _opts: MessageQueryOpts,
+        ) -> Result<Vec<MessageRecord>, StorageError> {
+            Ok(vec![])
+        }
+        async fn get_blob(&self, _blob_id: &str) -> Result<Vec<u8>, StorageError> {
+            Ok(vec![1, 2, 3])
+        }
+        async fn append_trace(&self, _entry: TraceEntry) -> Result<(), StorageError> {
+            Ok(())
+        }
+        async fn create_branch(&self, _branch: Branch) -> Result<(), StorageError> {
+            Ok(())
+        }
+        async fn update_run_status(
+            &self,
+            _run_id: &str,
+            _status: RunStatus,
+            _branch: Option<&str>,
+            _seq: Option<u32>,
+        ) -> Result<(), StorageError> {
+            Ok(())
+        }
+        async fn create_run(
+            &self,
+            _run_id: &str,
+            _config_hash: &str,
+            _tenant_id: &str,
+        ) -> Result<(), StorageError> {
+            Ok(())
+        }
+        async fn store_blob(&self, _data: &[u8], _mime_type: &str) -> Result<String, StorageError> {
+            Ok("mock_blob".to_string())
+        }
+        async fn create_session(&self, _session: &SessionRecord) -> Result<(), StorageError> {
+            Ok(())
+        }
+        async fn get_session(
+            &self,
+            _thread_id: &str,
+        ) -> Result<Option<SessionRecord>, StorageError> {
+            Ok(self.session.lock().unwrap().clone())
+        }
+        async fn list_sessions(
+            &self,
+            _filter: SessionListFilter,
+        ) -> Result<Vec<SessionRecord>, StorageError> {
+            Ok(vec![])
+        }
+        async fn update_session(&self, _session: &SessionRecord) -> Result<(), StorageError> {
+            Ok(())
+        }
+        async fn delete_session(&self, _thread_id: &str) -> Result<(), StorageError> {
+            Ok(())
+        }
+        async fn link_pipeline_session(
+            &self,
+            _pipeline_id: &str,
+            _thread_id: &str,
+            _tenant_id: &str,
+        ) -> Result<(), StorageError> {
+            Ok(())
+        }
+        async fn list_pipeline_ids_by_thread(
+            &self,
+            _thread_id: &str,
+            _tenant_id: &str,
+        ) -> Result<Vec<String>, StorageError> {
+            self.list_result.lock().unwrap().clone()
+        }
+        async fn get_step_traces_by_thread(
+            &self,
+            _thread_id: &str,
+            _tenant_id: &str,
+        ) -> Result<Vec<TraceEntry>, StorageError> {
+            Ok(vec![])
+        }
+        async fn create_user(
+            &self,
+            _user: &agentos_core::types::UserRecord,
+        ) -> Result<(), StorageError> {
+            Ok(())
+        }
+        async fn get_user_by_id(
+            &self,
+            _user_id: &str,
+        ) -> Result<Option<agentos_core::types::UserRecord>, StorageError> {
+            Ok(None)
+        }
+        async fn get_user_by_username(
+            &self,
+            _username: &str,
+        ) -> Result<Option<agentos_core::types::UserRecord>, StorageError> {
+            Ok(None)
+        }
+        async fn list_users(&self) -> Result<Vec<agentos_core::types::UserRecord>, StorageError> {
+            Ok(Vec::new())
+        }
+        async fn update_last_login(&self, _user_id: &str) -> Result<(), StorageError> {
+            Ok(())
+        }
+        async fn delete_user(&self, _user_id: &str) -> Result<bool, StorageError> {
+            Ok(false)
+        }
+    }
+
+    async fn resolve(mock: ResolveMock, thread_id: &str, frontend_pipeline_id: &str) -> String {
+        let store = Arc::new(mock) as Arc<dyn StorageBackend>;
+        resolve_pipeline_id_for_thread(Some(&store), thread_id, frontend_pipeline_id, "tenant-1")
+            .await
+    }
+
+    #[tokio::test]
+    async fn list_error_returns_frontend_value_not_main_pipeline() {
+        // 存储故障时不得把子管道 route_id 改写为主管道（2026-08-22 裁决）。
+        // 旧实现：Err 与"不属于"混流后回落 session.active_pipeline_id → P-main（写错桶）。
+        let mock = ResolveMock::new(
+            Err(StorageError::NotFound("mock query failure".to_string())),
+            Some(session_record(Some("P-main"))),
+        );
+        assert_eq!(resolve(mock, "T1", "P-sub").await, "P-sub");
+    }
+
+    #[tokio::test]
+    async fn frontend_not_member_falls_to_main_pipeline() {
+        // 前端值不属于该 thread（正常校验失败）→ 仍回落主管道（既有防御语义不变）
+        let mock = ResolveMock::new(
+            Ok(vec!["P-other".to_string()]),
+            Some(session_record(Some("P-main"))),
+        );
+        assert_eq!(resolve(mock, "T1", "P-sub").await, "P-main");
+    }
+
+    #[tokio::test]
+    async fn frontend_member_trusted() {
+        let mock = ResolveMock::new(
+            Ok(vec!["P-sub".to_string(), "P-main".to_string()]),
+            Some(session_record(Some("P-main"))),
+        );
+        assert_eq!(resolve(mock, "T1", "P-sub").await, "P-sub");
+    }
+
+    #[tokio::test]
+    async fn empty_frontend_uses_main_pipeline() {
+        let mock = ResolveMock::new(Ok(vec![]), Some(session_record(Some("P-main"))));
+        assert_eq!(resolve(mock, "T1", "").await, "P-main");
+    }
+
+    #[tokio::test]
+    async fn no_session_falls_back_to_thread_id() {
+        let mock = ResolveMock::new(Ok(vec![]), None);
+        assert_eq!(resolve(mock, "T1", "").await, "T1");
+    }
 }

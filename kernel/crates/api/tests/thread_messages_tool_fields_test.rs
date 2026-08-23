@@ -312,3 +312,58 @@ async fn failed_tool_message_returns_error_fields() {
     assert_eq!(tool_msg["toolName"], "bash_execute");
     assert_eq!(tool_msg["toolDurationMs"], 5.0);
 }
+
+/// ADR 2026-08-21 消息幂等契约：user 消息 metadata.client_message_id 必须经
+/// HTTP 原样回显——前端乐观消息对账去重的唯一桥接键，缺失即重复气泡复发。
+#[tokio::test]
+async fn user_message_metadata_client_message_id_echoed() {
+    let (_tmp, app, store) = app_with_deps().await;
+    store
+        .apply_messages_ops_to_table(
+            PID,
+            "default",
+            &[json!({
+                "op": "set", "seq": 0,
+                "msg": {
+                    "role": "user",
+                    "content": "幂等键回显",
+                    "metadata": { "client_message_id": "0198-cmid-echo-1" }
+                }
+            })],
+        )
+        .unwrap();
+    let token = admin_token(&app).await;
+
+    let body = get_messages_json(&app, &token).await;
+    let messages = body["messages"].as_array().expect("messages 数组");
+    let user_msg = messages
+        .iter()
+        .find(|m| m["role"] == "user")
+        .expect("user 消息");
+
+    assert_eq!(
+        user_msg["metadata"]["client_message_id"], "0198-cmid-echo-1",
+        "metadata.client_message_id 必须原样回显（前端对账去重桥接键）"
+    );
+    assert_eq!(user_msg["content"], "幂等键回显", "content 契约不回归");
+
+    // 无 metadata 的消息（历史数据/触发器注入）不携带 metadata 字段（不造空对象）
+    store
+        .apply_messages_ops_to_table(
+            PID,
+            "default",
+            &[json!({"op": "set", "seq": 1, "msg": {"role": "user", "content": "无键"}})],
+        )
+        .unwrap();
+    let body2 = get_messages_json(&app, &token).await;
+    let plain = body2["messages"]
+        .as_array()
+        .expect("messages 数组")
+        .iter()
+        .find(|m| m["content"] == "无键")
+        .expect("无键消息");
+    assert!(
+        plain.get("metadata").is_none(),
+        "无 metadata 的消息不得回显空对象"
+    );
+}

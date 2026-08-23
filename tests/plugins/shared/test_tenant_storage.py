@@ -7,7 +7,9 @@
 - memory/vector_retriever.SqliteVectorStore：tenant_id →
   ``data/{tid}/memory/memory.db``（sqlite 路径是文件非目录）；
 - channel_api/routes_artifacts._get_uploads_dir：tenant_id →
-  ``data/{tid}/uploads``。
+  ``data/{tid}/uploads``。channel-api 退役（d3b5e8028 物理删除插件目录）后，
+  上传目录解析迁至 ``plugins/shared/uploads_path.py::resolve_uploads_dir``
+  （ADR 2026-08-21 三方对齐单一解析点：上传落盘 / 内核静态服务 / 附件引用解析）。
 
 每个插件断言四类不变量（§8 意图：方案 B 每租户独立数据根，避免跨租户读写串扰）：
 1. 不同 tenant_id → 不同数据根；
@@ -32,7 +34,7 @@ pytestmark = pytest.mark.unit  # TDD 分层：纯单测，零外部依赖（test
 _REPO_ROOT = Path(__file__).resolve().parents[3]
 _SYSTEM_DIR = _REPO_ROOT / "plugins" / "shared" / "system"
 _TASKS_DIR = _SYSTEM_DIR / "tasks"
-_CHANNEL_API_DIR = _SYSTEM_DIR / "channel_api"
+_SHARED_DIR = _REPO_ROOT / "plugins" / "shared"
 
 
 # ── helpers ──────────────────────────────────────────────
@@ -66,9 +68,11 @@ def _import_from(module: str, src_dir: Path, pop: tuple[str, ...] = ()) -> Any:
 
 
 def _make_task_storage(**kwargs: Any) -> Any:
-    storage = _import_from(
-        "storage", _TASKS_DIR, pop=("storage", "task_types", "enum_utils", "agents_types")
-    )
+    # pop 仅限确有跨插件同名冲突的裸名（storage/enum_utils）。task_types /
+    # agents_types 全仓唯一（tasks 目录），逐出重导只会制造同源双模块——
+    # TaskStatus 枚举身份断裂会让 task_manage 等后置测试的状态相等判断失效
+    # （合并跑「单文件绿合并红」串扰根因之一），故不逐出。
+    storage = _import_from("storage", _TASKS_DIR, pop=("storage", "enum_utils"))
     return storage.TaskStorage(**kwargs)
 
 
@@ -126,9 +130,7 @@ class TestTaskStorageTenantAware:
         monkeypatch.setenv("AGENTOS_DATA_DIR", str(tmp_path))
         monkeypatch.delenv("TASKS_STORAGE_DIR", raising=False)
 
-        task_types = _import_from(
-            "task_types", _TASKS_DIR, pop=("task_types", "enum_utils", "agents_types")
-        )
+        task_types = _import_from("task_types", _TASKS_DIR, pop=("enum_utils",))
         task = task_types.TaskModel(id="task-a", title="tenant A 的任务")
 
         s_a = _make_task_storage(tenant_id="tenantA")
@@ -220,17 +222,17 @@ class TestScenePersistenceTenantAware:
 
 
 # ============================================================
-# channel_api/routes_artifacts._get_uploads_dir
+# shared/uploads_path.resolve_uploads_dir（channel_api 退役后的新家）
 # ============================================================
 
 
 def _get_uploads_dir(tenant_id: str | None = None) -> str:
-    routes_artifacts = _import_from(
-        "routes_artifacts",
-        _CHANNEL_API_DIR,
-        pop=("routes_artifacts", "deps", "auth", "auth_token", "models"),
+    uploads_path = _import_from(
+        "uploads_path",
+        _SHARED_DIR,
+        pop=("uploads_path", "tenant_data"),
     )
-    return routes_artifacts._get_uploads_dir(tenant_id=tenant_id)
+    return str(uploads_path.resolve_uploads_dir(tenant_id=tenant_id))
 
 
 class TestUploadsDirTenantAware:
