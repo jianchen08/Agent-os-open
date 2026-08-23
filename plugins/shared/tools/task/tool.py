@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import types
 from typing import TYPE_CHECKING, Any
 
 from state_machine import InvalidTransitionError
@@ -34,6 +33,11 @@ if TYPE_CHECKING:
     from service import TaskService
 
 logger = logging.getLogger(__name__)
+
+
+def _status_value(status: Any) -> str:
+    """状态 → 展示值（TaskStatus 取 .value；枚举漂移保留的原串直通）。"""
+    return status.value if hasattr(status, "value") else str(status)
 
 
 # ── GAP-1 统一：能力注入点（server.py on_load）──
@@ -181,8 +185,15 @@ class TaskTool(BuiltinTool):
             logger.warning("[TaskTool] state 聚合读取失败: %s", exc)
             return None
 
-    async def _get_task_from_state(self, task_id: str) -> Any:
-        """从 state 聚合行组装轻量任务对象（GAP-1 统一：task = pipeline）。"""
+    async def _get_task_from_state(self, task_id: str) -> TaskModel | None:
+        """从 state 聚合行组装任务对象（GAP-1 统一：task = pipeline）。
+
+        必须组装完整 TaskModel（缺省字段吃 dataclass 默认值），不得用只带
+        部分属性的 SimpleNamespace——消费面（get 详情 _calc_elapsed_seconds
+        的 started_at / 列表 priority 列 / L2 过滤 parent_pipeline_id）按
+        TaskModel 全形状访问，残缺对象会让 state 桥接下所有 get 必崩
+        （2026-08-23 真机：'types.SimpleNamespace' object has no attribute）。
+        """
         rows = await self._read_state_rows()
         if rows is None:
             return None
@@ -194,7 +205,7 @@ class TaskTool(BuiltinTool):
             return None
         status_str = str(row.get("task.status") or "pending")
         try:
-            status = TaskStatus(status_str)
+            status: Any = TaskStatus(status_str)
         except (ValueError, AttributeError):
             # 内核新增状态而本地枚举副本未同步 → 保留原串展示（不再静默变
             # PENDING 触发错误的可操作动作），warning 留痕提示同步枚举
@@ -210,48 +221,64 @@ class TaskTool(BuiltinTool):
         pid = str(row.get("pipeline_id") or "")
         origin_sess = str(row.get("lineage.origin_session_id") or "")
         row_thread = str(row.get("thread_id") or "")
-        anchor = origin_sess if origin_sess and origin_sess != pid else (row_thread if row_thread and row_thread != pid else origin_sess or row_thread)
+        anchor = (
+            origin_sess
+            if origin_sess and origin_sess != pid
+            else (row_thread if row_thread and row_thread != pid else origin_sess or row_thread)
+        )
         if not anchor or anchor == pid:
             # 三段式兜底命中 pid 充当 session_id：语义降级，debug 留痕
-            logger.debug(
-                "[TaskTool] 会话锚点兜底命中 pipeline_id 充当 session_id | task=%s", task_id
-            )
+            logger.debug("[TaskTool] 会话锚点兜底命中 pipeline_id 充当 session_id | task=%s", task_id)
         metadata: dict[str, Any] = {
             "session_id": anchor,
             "target_id": str(row.get("task.submitted_by") or ""),
             "retry_count": 0,
             "max_retries": 6,
         }
-        return types.SimpleNamespace(
+        if row.get("task.scope"):
+            metadata["task_scope"] = str(row["task.scope"])
+        if row.get("workspace"):
+            metadata["workspace"] = str(row["workspace"])
+        if isinstance(row.get("ws_meta"), dict):
+            metadata["ws_meta"] = row["ws_meta"]
+        # task = pipeline：父管道即父任务坐标（L2 归属过滤/权限校验消费）
+        parent_pipe = str(row.get("lineage.parent_pipeline_id") or "") or None
+        raw_error = row.get("raw_error")
+        return TaskModel(
             id=task_id,
             title=str(row.get("task.goal") or task_id),
             status=status,
             metadata=metadata,
-            pipeline_run_id=task_id,
+            pipeline_run_id=pid,
+            parent_pipeline_id=parent_pipe,
+            parent_task_id=parent_pipe,
+            completed_at=str(row.get("task.ended_at") or "") or None,
             agent_name="",
-            error=None,
+            error=str(raw_error) if raw_error else None,
         )
 
-    async def _list_tasks_from_state(self) -> list[Any] | None:
+    async def _list_tasks_from_state(self) -> list[TaskModel] | None:
         """从 state 聚合批量组装任务对象（GAP-1 单一真值的列表读面）。
 
         只含有 task.* 字段的行是任务管道（无该字段段的管道不是任务，跳过）；
         按 task.ended_at/创建序倒序近似——聚合行无稳定时间戳键时保序。
         None = 桥未就绪/无任务行（调用方回落旧 service）。
+        同 _get_task_from_state：组装完整 TaskModel，禁 SimpleNamespace
+        （列表消费面访问 priority/parent_task_id 等全形状字段）。
         """
         rows = await self._read_state_rows()
         if rows is None:
             return None
-        out: list[Any] = []
+        out: list[TaskModel] = []
         for row in rows:
-            if not any(str(k).startswith("task.") for k in row.keys()):
+            if not any(str(k).startswith("task.") for k in row):
                 continue
             pid = str(row.get("pipeline_id") or "")
             if not pid:
                 continue
             status_raw = str(row.get("task.status") or "pending")
             try:
-                status = TaskStatus(status_raw)
+                status: Any = TaskStatus(status_raw)
             except (ValueError, AttributeError):
                 # 同 _get_task_from_state：枚举漂移保留原串展示 + warning
                 logger.warning(
@@ -260,23 +287,37 @@ class TaskTool(BuiltinTool):
                     pid,
                 )
                 status = status_raw
+            origin_sess = str(row.get("lineage.origin_session_id") or "")
+            row_thread = str(row.get("thread_id") or "")
+            session_anchor = (
+                origin_sess
+                if origin_sess and origin_sess != pid
+                else (row_thread if row_thread and row_thread != pid else origin_sess or row_thread)
+            )
+            metadata: dict[str, Any] = {
+                "session_id": session_anchor,
+                "target_id": str(row.get("task.submitted_by") or ""),
+            }
+            if row.get("task.scope"):
+                metadata["task_scope"] = str(row["task.scope"])
+            if row.get("workspace"):
+                metadata["workspace"] = str(row["workspace"])
+            if isinstance(row.get("ws_meta"), dict):
+                metadata["ws_meta"] = row["ws_meta"]
+            parent_pipe = str(row.get("lineage.parent_pipeline_id") or "") or None
+            raw_error = row.get("raw_error")
             out.append(
-                types.SimpleNamespace(
+                TaskModel(
                     id=pid,
                     title=str(row.get("task.goal") or pid),
                     status=status,
-                    metadata={
-                        "session_id": (
-                            (lambda o, t: o if o and o != pid else (t if t and t != pid else o or t))(
-                                str(row.get("lineage.origin_session_id") or ""),
-                                str(row.get("thread_id") or ""),
-                            )
-                        ),
-                        "target_id": str(row.get("task.submitted_by") or ""),
-                    },
+                    metadata=metadata,
                     pipeline_run_id=pid,
+                    parent_pipeline_id=parent_pipe,
+                    parent_task_id=parent_pipe,
+                    completed_at=str(row.get("task.ended_at") or "") or None,
                     agent_name="",
-                    error=None,
+                    error=str(raw_error) if raw_error else None,
                 )
             )
         return out
@@ -633,7 +674,7 @@ class TaskTool(BuiltinTool):
         """
         from_state = await self._list_tasks_from_state()
         if from_state is not None:
-            return from_state  # type: ignore[return-value]
+            return from_state
 
         service = self._get_task_service()
 
@@ -649,7 +690,7 @@ class TaskTool(BuiltinTool):
             # 回传时工具入口经前缀解析恢复全 id）
             "task_id": self._short(task.id),
             "title": task.title,
-            "status": task.status.value,
+            "status": _status_value(task.status),
             "error": task.error,
         }
 
@@ -800,7 +841,7 @@ class TaskTool(BuiltinTool):
             filtered = []
 
             for task in tasks:
-                if status_filter and task.status.value != status_filter:
+                if status_filter and _status_value(task.status) != status_filter:
                     continue
 
                 if parent_agent_level == 1:
@@ -865,7 +906,7 @@ class TaskTool(BuiltinTool):
 
             titles = [t.title for t in filtered]
 
-            statuses = [t.status.value for t in filtered]
+            statuses = [_status_value(t.status) for t in filtered]
 
             priorities = [t.priority.value if hasattr(t.priority, "value") else t.priority for t in filtered]
 
@@ -963,7 +1004,7 @@ class TaskTool(BuiltinTool):
                 return await self._retry_from_terminal(task, message, service, parent_agent_level, inputs)
 
             return create_failure_result(
-                error=f"当前状态 {task.status.value} 不支持 continue 操作。"
+                error=f"当前状态 {_status_value(task.status)} 不支持 continue 操作。"
                 f"支持的状态：running（注入指令）、stopped（恢复）、failed/timeout（重试）",
                 error_code="INVALID_STATUS",
             )
@@ -1031,12 +1072,14 @@ class TaskTool(BuiltinTool):
                     data=inject_result,
                     metadata={"action": "continue_inject"},
                 )
-            await _chat_sender({
-                "pipeline_id": target_pipeline_id,
-                "message": message,
-                "user_id": "task_manage",
-                "background": True,
-            })
+            await _chat_sender(
+                {
+                    "pipeline_id": target_pipeline_id,
+                    "message": message,
+                    "user_id": "task_manage",
+                    "background": True,
+                }
+            )
             inject_result["trigger"] = "chat.send_message"
             logger.info(
                 "[TaskTool] 消息注入完成 | pipeline_id=%s | method=chat.send_message | preview=%s",
@@ -1072,7 +1115,7 @@ class TaskTool(BuiltinTool):
                 error_code="INSUFFICIENT_PERMISSION",
             )
 
-        old_status = task.status.value
+        old_status = _status_value(task.status)
 
         if message:
             if not task.metadata:
@@ -1089,10 +1132,12 @@ class TaskTool(BuiltinTool):
         # GAP-1 统一：恢复 = resume_pipeline（按管道恢复最新 suspended run）
         if _pipeline_executor is not None:
             try:
-                await _pipeline_executor({
-                    "method": "resume_pipeline",
-                    "params": {"pipeline_id": task.id},
-                })
+                await _pipeline_executor(
+                    {
+                        "method": "resume_pipeline",
+                        "params": {"pipeline_id": task.id},
+                    }
+                )
             except Exception as exc:  # noqa: BLE001
                 logger.warning("[TaskTool] resume_pipeline 失败: %s", exc)
         logger.info("[TaskTool] resume 完成（resume_pipeline）: task_id=%s", task.id)
@@ -1159,7 +1204,7 @@ class TaskTool(BuiltinTool):
                 error_code="MAX_RETRIES_EXCEEDED",
             )
 
-        old_status = task.status.value
+        old_status = _status_value(task.status)
 
         # 将纠正信息存入 metadata
 
@@ -1182,12 +1227,14 @@ class TaskTool(BuiltinTool):
                 _retry_msg = f"重新执行任务「{task.title}」。"
                 if message:
                     _retry_msg += "\n纠正信息：" + message
-                await _chat_sender({
-                    "pipeline_id": task.id,
-                    "message": _retry_msg,
-                    "user_id": "task_manage",
-                    "background": True,
-                })
+                await _chat_sender(
+                    {
+                        "pipeline_id": task.id,
+                        "message": _retry_msg,
+                        "user_id": "task_manage",
+                        "background": True,
+                    }
+                )
             except Exception as exc:  # noqa: BLE001
                 logger.warning("[TaskTool] retry 注入失败: %s", exc)
                 execution_warning = f"重试注入失败：{exc}"
@@ -1268,10 +1315,12 @@ class TaskTool(BuiltinTool):
                 )
 
             try:
-                await _pipeline_executor({
-                    "method": "suspend_pipeline",
-                    "params": {"pipeline_id": task_id},
-                })
+                await _pipeline_executor(
+                    {
+                        "method": "suspend_pipeline",
+                        "params": {"pipeline_id": task_id},
+                    }
+                )
             except Exception as exc:  # noqa: BLE001
                 logger.warning("[TaskTool] suspend_pipeline 失败（继续尝试级联）: %s", exc)
 
@@ -1284,10 +1333,12 @@ class TaskTool(BuiltinTool):
                         if not child_id:
                             continue
                         try:
-                            await _pipeline_executor({
-                                "method": "suspend_pipeline",
-                                "params": {"pipeline_id": child_id},
-                            })
+                            await _pipeline_executor(
+                                {
+                                    "method": "suspend_pipeline",
+                                    "params": {"pipeline_id": child_id},
+                                }
+                            )
                             cascaded += 1
                         except Exception as exc:  # noqa: BLE001
                             logger.warning(
@@ -1324,7 +1375,6 @@ class TaskTool(BuiltinTool):
                 error=f"stop 失败: {str(e)}",
                 error_code="STOP_FAILED",
             )
-
 
     async def _delete_task(self, inputs: dict[str, Any], parent_agent_level: int) -> ToolExecutionResult:
         """删除任务，根据任务类型执行不同策略。"""
@@ -1418,10 +1468,12 @@ class TaskTool(BuiltinTool):
                     error_code="CONTINUE_FAILED",
                 )
             try:
-                await _pipeline_executor({
-                    "method": "suspend_pipeline",
-                    "params": {"pipeline_id": task_id},
-                })
+                await _pipeline_executor(
+                    {
+                        "method": "suspend_pipeline",
+                        "params": {"pipeline_id": task_id},
+                    }
+                )
             except Exception as exc:  # noqa: BLE001
                 return create_failure_result(
                     error=f"挂起任务失败: {exc}",
@@ -1439,10 +1491,12 @@ class TaskTool(BuiltinTool):
                     error_code="CONTINUE_FAILED",
                 )
             try:
-                await _pipeline_executor({
-                    "method": "resume_pipeline",
-                    "params": {"pipeline_id": task_id},
-                })
+                await _pipeline_executor(
+                    {
+                        "method": "resume_pipeline",
+                        "params": {"pipeline_id": task_id},
+                    }
+                )
             except Exception as exc:  # noqa: BLE001
                 return create_failure_result(
                     error=f"恢复任务失败: {exc}",
@@ -1460,7 +1514,6 @@ class TaskTool(BuiltinTool):
             ),
             error_code="INVALID_STATUS",
         )
-
 
     async def _batch_tasks(self, inputs: dict[str, Any], parent_agent_level: int) -> ToolExecutionResult:
         """批量任务操作，每个任务独立返回结果。"""

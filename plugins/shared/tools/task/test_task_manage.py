@@ -109,9 +109,7 @@ async def test_continue_resume_restores_status() -> None:
     await svc.pause_task(task.id)
 
     tool = TaskTool()
-    result = await tool.execute(
-        {"action": "continue", "task_id": task.id, "parent_agent_level": 1}
-    )
+    result = await tool.execute({"action": "continue", "task_id": task.id, "parent_agent_level": 1})
     assert result.success, f"continue 失败: {result.error}"
     # 任务状态应已恢复（不被执行器缺失阻塞）
     after = svc.get_task(task.id)
@@ -167,6 +165,106 @@ async def test_list_unknown_status_preserved_with_warning(caplog) -> None:
     assert tasks is not None
     assert tasks[0].status == "quarantined"
     assert any("未知任务状态" in r.getMessage() for r in caplog.records)
+
+
+# ─────────────── state 桥读面全形状回归（2026-08-23：get 全挂 SimpleNamespace 属性崩） ───────────────
+
+
+def _state_row(**overrides: object) -> dict:
+    """典型任务管道聚合行（内核 STATE_SUMMARY_KEYS 白名单形状）。"""
+    row: dict = {
+        "pipeline_id": "pipe-shape",
+        "task.status": "running",
+        "task.goal": "全形状回归",
+        "task.submitted_by": "u1",
+        "task.scope": "non_container",
+        "task.ended_at": "2026-08-23T10:00:00",
+        "lineage.origin_session_id": "sess-shape",
+        "lineage.parent_pipeline_id": "pipe-parent",
+        "workspace": "workspace/pipe-shape",
+        "thread_id": "thread-shape",
+    }
+    row.update(overrides)
+    return row
+
+
+async def test_get_detail_from_state_full_shape() -> None:
+    """get 详情（include_details）在 state 桥读面下不得 AttributeError。
+
+    历史 bug：_get_task_from_state 组装 SimpleNamespace 缺 started_at →
+    _calc_elapsed_seconds 崩 → 「获取任务失败: 'types.SimpleNamespace'
+    object has no attribute 'started_at'」——隔离层形状测试全绿但系统层必崩。
+    """
+    tool = TaskTool()
+
+    async def fake_rows():
+        return [_state_row()]
+
+    tool._read_state_rows = fake_rows  # type: ignore[method-assign]
+    result = await tool.execute(
+        {
+            "action": "get",
+            "task_id": "pipe-shape",
+            "include_details": True,
+            "parent_agent_level": 1,
+        }
+    )
+    assert result.success, f"get 详情失败: {result.error}"
+    data = result.output
+    assert isinstance(data, dict)
+    assert data["task_id"] == "pipe-shape"
+    assert data["status"] == "running"
+    assert data["title"] == "全形状回归"
+    assert data["workspace"] == "workspace/pipe-shape"
+    assert "elapsed_seconds" in data, "include_details 应返回耗时字段（无 started_at 优雅降级 None）"
+
+
+async def test_get_list_from_state_full_shape() -> None:
+    """get 列表在 state 桥读面下不得 AttributeError（含 priority 列）。
+
+    历史 bug：_list_tasks_from_state 组装 SimpleNamespace 缺 priority →
+    「列出任务失败: 'types.SimpleNamespace' object has no attribute
+    'priority'」——state 桥接后所有列表调用必崩。
+    """
+    tool = TaskTool()
+
+    async def fake_rows():
+        return [_state_row()]
+
+    tool._read_state_rows = fake_rows  # type: ignore[method-assign]
+    result = await tool.execute({"action": "get", "parent_agent_level": 1})
+    assert result.success, f"get 列表失败: {result.error}"
+    rows = result.output["d"]
+    assert len(rows) == 1
+    # 简表行形状：[短id, 标题, 状态, 优先级, target_name, 最新动作, 耗时]
+    assert rows[0][1] == "全形状回归"
+    assert rows[0][2] == "running"
+    assert rows[0][6] == "-", "无 started_at → 耗时列优雅降级 '-'"
+
+
+async def test_get_list_l2_pipeline_filter_from_state() -> None:
+    """L2 带 pipeline_id 过滤在 state 桥读面下不得 AttributeError。
+
+    历史 bug：SimpleNamespace 缺 parent_pipeline_id/parent_task_id →
+    L2 过滤分支 task.parent_pipeline_id 崩（「列出任务失败」）。
+    """
+    tool = TaskTool()
+
+    async def fake_rows():
+        return [_state_row()]
+
+    tool._read_state_rows = fake_rows  # type: ignore[method-assign]
+    result = await tool.execute(
+        {
+            "action": "get",
+            "pipeline_id": "pipe-parent",
+            "parent_agent_level": 2,
+            "parent_task_id": "pipe-parent",
+        }
+    )
+    assert result.success, f"L2 列表失败: {result.error}"
+    rows = result.output["d"]
+    assert len(rows) == 1, "lineage.parent_pipeline_id=pipe-parent 的任务应命中 L2 过滤"
 
 
 async def test_anchor_fallback_hits_pid_logs_debug(caplog) -> None:
