@@ -712,6 +712,10 @@ async def _list_tasks_from_state() -> list[dict[str, Any]] | None:
                     # 父是容器任务（task.owned 声明）时：容器 project id（前端
                     # 任务树据此把子任务挂到容器节点下）
                     "parent_project_id": str(row.get("task.parent_project_id") or "") or None,
+                    # 工作空间坐标（任务面板"打开工作空间"按钮数据源；
+                    # workspace_lifecycle init 写入 + persistent_fields 落表）
+                    "ws_meta": row.get("ws_meta") or None,
+                    "workspace": str(row.get("workspace") or "") or None,
                 },
                 "created_at": str(row.get("task.created_at") or ""),
             }
