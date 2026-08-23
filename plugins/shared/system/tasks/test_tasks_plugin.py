@@ -17,6 +17,7 @@ import json
 import sys
 import tempfile
 from pathlib import Path
+from types import ModuleType
 
 import pytest
 
@@ -39,13 +40,23 @@ def _isolate_tasks_plugin_modules():
     逐出仅在收集时生效，而本文件的裸模块导入发生在测试运行期（函数体内），故在此
     每个测试前重新置本插件目录于 sys.path 最前，并逐出本插件用到的同名裸模块，
     强制按本目录重新解析。Windows/Ubuntu 通用。
+
+    http_api 亦逐出：triggers_ext/http_api.py 同名模块若先被其它测试缓存，
+    本插件测试运行期 `import http_api` 会命中错误副本（AttributeError:
+    no attribute '_task_to_response'/'_capability'）。
+
+    teardown 除恢复 sys.path 外**还原逐出前的模块代际**：本 fixture 的逐出+重导
+    会让 task_types 等"全仓唯一源"模块产生同源双份（新代际覆盖 sys.modules 缓存），
+    若不还原，后续文件的模块级绑定（如 tools/task/tool.py 收集期绑定的
+    TaskStatus）与新代际做枚举身份比较会失配——合并跑「单文件绿合并红」的
+    串扰根因之一。还原后进程回到本文件运行前的模块状态。
     """
     d = str(_PLUGIN_DIR)
     _was_present = d in sys.path
     if d in sys.path:
         sys.path.remove(d)
     sys.path.insert(0, d)
-    for m in (
+    _evict_names = (
         "task_types",
         "state_machine",
         "storage",
@@ -59,14 +70,24 @@ def _isolate_tasks_plugin_modules():
         "_task_crud",
         "_task_state",
         "server",
-    ):
-        sys.modules.pop(m, None)
+        "http_api",
+    )
+    _evicted: dict[str, ModuleType] = {}
+    for m in _evict_names:
+        if m in sys.modules:
+            _evicted[m] = sys.modules.pop(m)
     yield
     # teardown：恢复 sys.path（仅移除本 fixture 插入的项）
     if d in sys.path:
         sys.path.remove(d)
     if _was_present:
         sys.path.insert(0, d)
+    # 还原逐出前的模块代际（本测试期间重导的同名模块一并回滚）
+    for m in _evict_names:
+        if m in _evicted:
+            sys.modules[m] = _evicted[m]
+        else:
+            sys.modules.pop(m, None)
 
 
 # ═══════════════════════════════════════════════════════════
@@ -429,3 +450,156 @@ class TestStateMachine:
         expected_states = {"pending", "running", "evaluating", "stopped", "completed", "failed", "timeout"}
         defined = set(sm.transitions.keys())
         assert expected_states.issubset(defined), f"Missing states: {expected_states - defined}"
+
+
+# ── 归属会话透传（ADR 2026-08-21）────────────────────────────────
+# 手动创建任务把用户会话随 chat.send_message 创建参数透传：内核创建分支以真实
+# 会话 link pipeline_sessions（runs 快照/前端导航据此归属）；响应层 thread_id
+# 从 metadata.session_id 回退（任务记录只写 metadata.session_id）。
+class TestOwnershipSessionFlow:
+    def test_task_response_thread_id_falls_back_to_metadata_session(self) -> None:
+        from http_api import _task_to_response
+
+        resp = _task_to_response({"id": "t1", "title": "T", "metadata": {"session_id": "thread-s1"}})
+        assert resp.thread_id == "thread-s1"
+
+    def test_task_response_keeps_top_level_thread_id(self) -> None:
+        from http_api import _task_to_response
+
+        resp = _task_to_response(
+            {"id": "t1", "title": "T", "thread_id": "thread-s2", "metadata": {"session_id": "thread-s1"}}
+        )
+        assert resp.thread_id == "thread-s2"
+
+    async def test_submit_task_event_passes_ownership_thread(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        import http_api
+
+        calls: list[dict] = []
+
+        class FakeChat:
+            async def call(self, name: str, params: dict) -> dict:
+                calls.append(params)
+                return {"pipeline_id": "pid-1"}
+
+        monkeypatch.setattr(http_api, "_capability", lambda _name: FakeChat())
+
+        pid = await http_api._submit_task_event(title="任务", user_id="u1", thread_id="thread-s1")
+        assert pid == "pid-1"
+        assert calls[0]["thread_id"] == "thread-s1"
+
+        pid2 = await http_api._submit_task_event(
+            title="子任务",
+            user_id="u1",
+            thread_id="thread-s1",
+            parent_pipeline_id="pipe-parent",
+        )
+        assert pid2 == "pid-1"
+        # 子任务创建调用（最后一次 create 调用；前面还有根任务创建调用）
+        create_call = next(c for c in reversed(calls) if c.get("create") is True)
+        lineage = create_call["lineage"]
+        assert lineage["parent_pipeline_id"] == "pipe-parent"
+        # origin_session_id 用真实会话（不再错填父管道 id）
+        assert lineage["origin_session_id"] == "thread-s1"
+
+    async def test_submit_task_event_registers_child_to_parent_state(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """创建模式有父管道时，新管道 id 以 task.owned.<id>.* 登记回父管道 state。"""
+        import http_api
+
+        calls: list[dict] = []
+
+        class FakeChat:
+            async def call(self, name: str, params: dict) -> dict:
+                calls.append(params)
+                # 创建调用返回新管道 id；登记调用（no_dispatch）返回原 id
+                return {"pipeline_id": "child-pipe" if params.get("create") else params.get("pipeline_id", "")}
+
+        monkeypatch.setattr(http_api, "_capability", lambda _name: FakeChat())
+
+        pid = await http_api._submit_task_event(
+            title="子任务",
+            user_id="u1",
+            parent_pipeline_id="parent-pipe",
+        )
+        assert pid == "child-pipe"
+        assert len(calls) == 2
+        create_call, register_call = calls
+        assert create_call["create"] is True
+        assert register_call["pipeline_id"] == "parent-pipe"
+        assert register_call["no_dispatch"] is True
+        owned = {
+            k[len("task.owned.child-pipe."):]: v
+            for k, v in register_call["state"].items()
+            if k.startswith("task.owned.child-pipe.")
+        }
+        assert owned["title"] == "子任务"
+        assert owned["scope"] == "non_container"
+
+    async def test_submit_task_event_root_skips_registration(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """根任务（无父管道）只创建不登记。"""
+        import http_api
+
+        calls: list[dict] = []
+
+        class FakeChat:
+            async def call(self, name: str, params: dict) -> dict:
+                calls.append(params)
+                return {"pipeline_id": "root-pipe"}
+
+        monkeypatch.setattr(http_api, "_capability", lambda _name: FakeChat())
+
+        pid = await http_api._submit_task_event(title="根任务", user_id="u1")
+        assert pid == "root-pipe"
+        assert len(calls) == 1  # 无登记调用
+
+    async def test_submit_task_event_without_thread_keeps_old_shape(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        import http_api
+
+        captured: dict = {}
+
+        class FakeChat:
+            async def call(self, name: str, params: dict) -> dict:
+                captured["params"] = params
+                return {"pipeline_id": "pid-2"}
+
+    async def test_submit_task_event_without_thread_keeps_old_shape(self, monkeypatch: pytest.MonkeyPatch) -> None:  # type: ignore[no-redef]
+        import http_api
+
+        captured: dict = {}
+
+        class FakeChat:
+            async def call(self, name: str, params: dict) -> dict:
+                captured["params"] = params
+                return {"pipeline_id": "pid-2"}
+
+        monkeypatch.setattr(http_api, "_capability", lambda _name: FakeChat())
+
+        await http_api._submit_task_event(title="任务", user_id="u1")
+        assert "thread_id" not in captured["params"]
+
+    def test_capability_takes_handle_from_main_plugin(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """_capability 从 __main__.plugin 取句柄（sidecar 启动实例）。
+
+        import server 会重新执行 server.py 顶层、得到第二个空 AgentOSPlugin
+        （capabilities 永远为空）——回归防护：必须走 __main__。
+        """
+        import http_api
+
+        fake = object()
+
+        class FakeMain:
+            plugin = type(
+                "Plugin",
+                (),
+                {
+                    "get_capability": lambda self, n: (
+                        fake if n == "pipeline-state" else (_ for _ in ()).throw(KeyError(n))
+                    )
+                },
+            )()
+
+        monkeypatch.setitem(sys.modules, "__main__", FakeMain)
+        assert http_api._capability("pipeline-state") is fake
+        with pytest.raises(KeyError):
+            http_api._capability("chat")

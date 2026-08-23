@@ -25,7 +25,6 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import os
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -118,6 +117,9 @@ class _ExecutionContextTaskTree:
             # 当前管道行缺失时用本 state 的 lineage 扁平键兜底
             parent_id = str(state.get("lineage.parent_pipeline_id") or "")
             return SimpleNamespace(id=task_id, parent_task_id=parent_id or None, metadata={})
+        # 上方两分支已保证：row 为 None 时（无论 task_id 是否等于 current_id）均已
+        # return——此处 row 必非 None，assert 仅供类型收窄。
+        assert row is not None
         parent_id = str(row.get("lineage.parent_pipeline_id") or "")
         scope = str(row.get("task.scope") or "")
         if task_id == current_id or task_id == parent_id or scope:
@@ -331,11 +333,23 @@ class WorkspaceLifecyclePlugin(IInputPlugin):
                     task_id,
                     exc,
                 )
-        # 降级/主会话：直接使用源路径（plain 语义）
-        updates: dict[str, Any] = {
+        # 降级/主会话：直接使用源路径（plain 语义）。
+        # 无显式 workspace 时 mode 统一按 plain 落 ws_meta——服务不可用时没有
+        # worktree 被创建，声明 worktree 会造成"无 workspace 却 worktree"的
+        # 虚假标记（exit 会据此尝试 merge）。对齐服务层矫正
+        # （WorkspaceLifecycleManager._start_root_task：无显式 workspace → 强制
+        # plain 目录）。
+        _effective_mode = mode
+        if not ws_spec.get("explicit"):
+            _effective_mode = "plain"
+        updates = {
             "workspace": source_path,
             "project_root": source_path,
-            "ws_meta": {"mode": mode, "path": source_path, "project_root": source_path},
+            "ws_meta": {
+                "mode": _effective_mode,
+                "path": source_path,
+                "project_root": source_path,
+            },
         }
         logger.info(
             "[WorkspaceLifecycle] init 解析工作空间 | mode=%s | path=%s",

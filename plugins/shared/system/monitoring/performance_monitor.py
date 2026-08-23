@@ -17,16 +17,6 @@ from pydantic import BaseModel, Field
 logger = logging.getLogger(__name__)
 
 
-class PerformanceMetric(BaseModel):
-    """性能指标"""
-
-    name: str = Field(..., description="指标名称")
-    value: float = Field(..., description="指标值")
-    unit: str = Field(..., description="指标单位")
-    timestamp: float = Field(default_factory=time.time, description="时间戳")
-    tags: dict[str, str] = Field(default_factory=dict, description="标签")
-
-
 class SystemMetrics(BaseModel):
     """系统指标"""
 
@@ -531,36 +521,3 @@ class ResponseTimeContext:
         self.monitor._response_times.append(response_time)
         if len(self.monitor._response_times) > 1000:
             self.monitor._response_times = self.monitor._response_times[-1000:]
-
-
-# 全局性能监控器实例
-_performance_monitor: PerformanceMonitor | None = None
-
-
-def get_performance_monitor() -> PerformanceMonitor:
-    """
-    获取全局性能监控器实例
-
-    Returns:
-        PerformanceMonitor: 性能监控器实例
-    """
-    global _performance_monitor  # noqa: PLW0603
-    if _performance_monitor is None:
-        _performance_monitor = PerformanceMonitor()
-    return _performance_monitor
-
-
-async def start_performance_monitor() -> None:
-    """
-    启动性能监控器
-    """
-    monitor = get_performance_monitor()
-    await monitor.start()
-
-
-async def stop_performance_monitor() -> None:
-    """
-    停止性能监控器
-    """
-    monitor = get_performance_monitor()
-    await monitor.stop()

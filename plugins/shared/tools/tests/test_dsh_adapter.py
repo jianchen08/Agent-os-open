@@ -35,10 +35,8 @@ from translator import (  # noqa: E402
     list_available_skins,
     load_installed_plugins,
     load_plugin_config,
-    load_skin_selection,
     map_dsh_slot,
     resolve_skin_background,
-    resolve_skin_css,
     to_lingxi_tool_entry,
     translate_hooks_config,
     translate_package,
@@ -448,10 +446,9 @@ class TestInstalledDshPlugins:
         assert manifest["plugin_type"] == "system"
         # D.6 槽位拆分：声明即注册，无类型豁免字段
         assert "llm_tools" not in manifest
-        # 正式贡献面：renderers + 适配器元信息 + client_styles（DSH 视觉 CSS 通道）
-        assert set(manifest["contributes"].keys()) == {"renderers", "dsh_adapter", "client_styles", "themes"}
-        # dsh-bg 演示残留已撤（2026-08-21 与皮肤 body 打架）；皮肤 CSS 通道唯一
-        assert [c["id"] for c in manifest["contributes"]["client_styles"]] == ["dsh-skin"]
+        # 正式贡献面：renderers + 适配器元信息 + pages（皮肤中心页面）+ themes
+        # （client_styles 已随 43fcbcb4d 弯路清理退役——皮肤 CSS 走 merged.css 端点）
+        assert set(manifest["contributes"].keys()) == {"renderers", "dsh_adapter", "pages", "themes"}
         # 配置入口：DSH 插件装载管理（config/dsh_adapter.yaml）
         assert manifest["config_files"] == [
             {"id": "dsh_plugins", "path": "config/dsh_adapter.yaml", "label": "DSH 插件配置"}
@@ -642,70 +639,204 @@ class TestTranslateHooksConfig:
         assert r["triggers"][0]["event_type"] == "run.completed"
 
 
-# ── 皮肤中心令牌层注入（skin-center 通道，2026-08-21） ─────────────────
+# ── 皮肤：位置路由转译（CSS + hooks 同源映射表，2026-08-22） ────────────
 
 class TestSkinCenterResolution:
-    """translator 皮肤解析纯函数（对真实 skin-center 资产跑，仓库内自带 15 套）。"""
+    """translator 皮肤解析纯函数（对真实 skin-center 资产跑，仓库内自带 16 套）。"""
 
     def test_list_available_skins(self):
         skins = list_available_skins()
         assert "matrix" in skins and "miku" in skins
         assert len(skins) >= 15
 
-    def test_resolve_known_skin(self):
-        css = resolve_skin_css("matrix")
-        assert css is not None and css.is_file()
-        text = css.read_text(encoding="utf-8")
-        assert "--dsw-" in text  # 令牌层特征（CSS 变量）
 
-    def test_resolve_unknown_skin(self):
-        assert resolve_skin_css("no-such-skin") is None
+class TestSkinPositionRoutingCss:
+    """server._rewrite_dsh_positions：DSH 选择器 → 我方锚点（逐规则翻译）。
 
-    def test_path_traversal_guard(self):
-        assert resolve_skin_css("../ui-theme") is None
-        assert resolve_skin_css("a/b") is None
+    位置映射（2026-08-22 用户裁决）：DSH 词汇在递送层转译，灵汐 DOM 不贴
+    DSH 名字——target 一律 data-region / data-testid / data-chat-state。
+    """
 
-
-class TestSkinServeHandler:
-    """server._http_handle_style 的皮肤路由（dispatcher 契约 body base64）。"""
-
-    def _get_skin_css(self) -> tuple[int, str]:
+    def _rw(self, css: str) -> str:
         import server  # noqa: PLC0415
 
-        resp = asyncio.run(
-            server._http_handle_style(path="/ext/dsh_adapter/styles/skin.css", method="GET")
+        return server._rewrite_dsh_positions(css)
+
+    def test_pane_triple(self):
+        out = self._rw('[data-pane="sidebar"]{a:b}[data-pane="details"]{a:b}'
+                       '[data-pane="conversation"]{a:b}[data-pane="detail"]{a:b}')
+        assert '[data-region="sidebar"]{a:b}' in out
+        # workspace 容器裸规则经表面剥离路径（块重建补分号）
+        assert '[data-region="workspace"]{a:b;}' in out
+        assert '[data-region="chat"]{a:b}' in out
+        assert 'data-pane' not in out
+
+    def test_workspace_container_surface_stripped(self):
+        """工作区表面让位（用户裁决：工作区=对话区延伸，背景图透出）：
+        details 容器裸规则的实色纸面剥离，边框等位置装饰保留。"""
+        out = self._rw(':is([data-pane="details"], [class*="detailsCol"]){'
+                       'background:#f2f6fdd1;border-left-color:#c5a46885;padding:8px}')
+        assert 'background' not in out
+        assert 'border-left-color' in out and 'padding' in out
+        # 全是背景的规则整条剔除；descendant 规则不动
+        assert self._rw('[data-pane="details"]{background:#0b1737e6}') == ''
+        kept = self._rw('[data-pane="details"] .card{background:#111}')
+        assert 'background:#111' in kept
+
+    def test_chat_phase_and_flow(self):
+        out = self._rw('[data-phase="hero"]{a:b}[data-phase="active"]{a:b}'
+                       '[data-pane="conversation"] [data-chat-flow]{a:b}')
+        assert '[data-chat-state="empty"]{a:b}' in out
+        assert '[data-chat-state="active"]{a:b}' in out
+        assert '[data-region="chat"] [data-testid="message-list"]{a:b}' in out
+        assert 'data-phase' not in out and 'data-chat-flow' not in out
+
+    def test_slots_and_surfaces(self):
+        out = self._rw(
+            '[data-slot="sidebar.settings"]{a:b}'
+            '[data-slot="sidebar.settings"] > :is(button, [role="button"]){a:b}'
+            '[data-slot="sidebar.footer.action"]{a:b}'
+            '[data-slot="settings.trigger"]{a:b}'
+            '[data-slot="conversation.session.header.actions"]{a:b}'
+            '[data-slot="conversation.session.header"]{a:b}'
+            '[data-slot="conversation.composer.dock"]{a:b}'
+            '[data-slot="conversation.composer"]{a:b}'
+            '[data-slot="conversation.chat.node"]{a:b}'
+            '[data-dsh-surface="sidebar"]{a:b}'
+            '[data-dsh-surface="conversation"]{a:b}'
+            '[data-dsh-surface="settings"]{a:b}'
+            '[data-dsh-surface="composer"]{a:b}'
+            '[data-dsh-surface="session-header"]{a:b}'
         )
-        body = base64.b64decode(resp["body"]).decode("utf-8") if resp["body"] else ""
-        return resp["status"], body
+        # settings 复合形与裸形同指触发器（hooks footer 走查落标记用）
+        assert '[data-testid="sidebar-user-area"]{a:b}' in out
+        assert 'data-slot' not in out and 'data-dsh-surface' not in out
+        for target in ('[data-testid="agent-tab-bar"]', '[data-testid="chat-session-header"]',
+                       '[data-testid="chat-composer"]', '[data-testid="message-item"]',
+                       '[data-testid="settings-page"]', '[data-region="sidebar"]',
+                       '[data-region="chat"]'):
+            assert target in out
 
-    def test_serve_selected_skin(self, monkeypatch: pytest.MonkeyPatch):
+    def test_scope_and_dark_variant_translated(self):
+        """平台 scope：html[data-dsh-skin] 四形态 → data-skin="dsh_adapter:<id>"；
+        暗色开关 body[data-ds-dark-theme] → data-skin-dark（hooks 裸字符串同译）。"""
+        out = self._rw('html[data-dsh-skin="miku"]{a:b}body[data-ds-dark-theme]{a:b}')
+        assert 'html[data-skin="dsh_adapter:miku"]{a:b}' in out
+        assert 'body[data-skin-dark]{a:b}' in out
+        assert 'data-dsh-skin' not in out and 'data-ds-dark-theme' not in out
+        js = 'html[data-dsh-skin=\\"miku\\"]{a:b} html[data-dsh-skin="${ctx.scopeAttr}"]{} getAttribute(\'data-ds-dark-theme\')'
+        import server  # noqa: PLC0415
+        r = server._sub_position(js)
+        assert 'html[data-skin=\\"dsh_adapter:miku\\"]' in r  # JS 转义引号形（miku 44 处）
+        assert 'html[data-skin="${ctx.scopeAttr}"]' in r  # 运行时插值形
+        assert "'data-skin-dark'" in r  # 属性名字符串（观察器/读取）
+
+    def test_media_nested_rules_translated(self):
+        """@media 嵌套规则头同样翻译；@keyframes 体透传（重建会规整头部空格）。"""
+        out = self._rw('@media (min-width: 768px) { [data-pane="sidebar"] { a: b } }')
+        assert '[data-region="sidebar"]' in out
+        kf = self._rw('@keyframes spin { 0% { opacity: 0 } }')
+        assert '@keyframes spin' in kf and '0% { opacity: 0 }' in kf
+
+    def test_component_classes_position_mapped(self):
+        out = self._rw('[class*="newSession"]{a:b}[class*="searchButton"]{a:b}'
+                       '[class*="composerSeat"]{a:b}[class*="sidebarCol"]{a:b}'
+                       '[class*="centerCol"]{a:b}[class*="detailsCol"]{a:b}'
+                       '[class*="settingsRoot"]{a:b}[class*="navCell"]{a:b}'
+                       '[class*="userRow"]{a:b}')
+        assert '[data-testid="new-session-button"]' in out
+        assert '[data-testid="sidebar-search-section"]' in out
+        assert '[data-testid="chat-composer"]' in out
+        assert '[data-region="sidebar"]' in out
+        assert '[data-region="chat"]' in out
+        assert '[data-region="workspace"]' in out
+        assert '[data-testid="settings-page"]' in out
+        assert '[data-testid="sidebar-nav"] button' in out
+        assert '[data-testid="sidebar-user-area"]' in out
+
+    def test_generic_selectors_inert(self):
+        """单词泛型（item/menu/header…）与皮肤私有状态词无法按位置裁决 → 原样透传。"""
+        css = '[class*="item"]{a:b}[class*="menu"]{a:b}[data-phase="trading"]{a:b}'
+        assert self._rw(css) == css
+
+    def test_root_frame_stripped_background_kept(self):
+        out = self._rw('[id="root"]{background:#fff;border:1px solid #000;box-shadow:0 0 4px #000}')
+        assert 'background' in out and 'border' not in out and 'box-shadow' not in out
+        # 全是窗框装饰的规则整条剔除
+        assert self._rw('[id="root"]{outline:none}') == ''
+
+    def test_hooks_structural_full_form_first(self):
+        """结构全形优先：只换 pane 部分会把页脚装饰挂到整条侧栏；
+        输出镜像输入引号风格（JS 字符串安全）。"""
+        out = self._rw("[data-pane='sidebar'] > div > :last-child{a:b}")
+        assert out == "[data-testid='sidebar-footer']{a:b}"
+        assert self._rw('[data-pane="sidebar"] > div > :last-child{a:b}') == '[data-testid="sidebar-footer"]{a:b}'
+
+
+class TestSkinPositionRoutingDelivery:
+    """merged.css / hooks.mjs 递送端点：对真实 skin-center 资产跑位置转译。"""
+
+    def _serve(self, path: str) -> dict:
         import server  # noqa: PLC0415
 
-        monkeypatch.setattr("server.load_skin_selection", lambda: "miku")
-        status, body = self._get_skin_css()
-        assert status == 200
-        assert "--dsw-" in body  # miku 的 :root 令牌原文（皮肤间令牌有无不一，固定样例）
-        assert "!important" not in body  # 补充层无对抗 hack（主体走主题管线）
+        return asyncio.run(server._http_handle_style(path=path, method="GET"))
 
-    def test_disabled_skin_returns_empty_css(self, monkeypatch: pytest.MonkeyPatch):
-        import server  # noqa: PLC0415
-
-        monkeypatch.setattr("server.load_skin_selection", lambda: None)
-        resp = asyncio.run(
-            server._http_handle_style(path="/ext/dsh_adapter/styles/skin.css", method="GET")
-        )
+    def test_merged_css_translated(self):
+        resp = self._serve("/ext/dsh_adapter/styles/skin/maid-atelier/merged.css")
         assert resp["status"] == 200
-        assert base64.b64decode(resp["body"]).decode("utf-8").startswith("/*")
+        body = base64.b64decode(resp["body"]).decode("utf-8")
+        assert 'data-pane' not in body and 'data-dsh-surface' not in body
+        assert 'data-slot' not in body
+        assert '[data-region="sidebar"]' in body  # 深度耦合皮肤实测有 112 处 pane 引用
+        assert '[data-chat-state="empty"]' in body  # hero 空态
 
-    def test_unknown_skin_falls_back_empty(self, monkeypatch: pytest.MonkeyPatch):
+    def test_hooks_translated_same_map(self):
+        """hooks.mjs 的 JS 选择器与 CSS 同源转译（不转译则 querySelector 恒空）。"""
+        resp = self._serve("/ext/dsh_adapter/styles/skin/maid-atelier/hooks.mjs")
+        assert resp["status"] == 200
+        body = base64.b64decode(resp["body"]).decode("utf-8")
+        assert 'data-pane' not in body
+        assert "[data-chat-state='empty']" in body  # hooks 源用单引号 → 输出同风格
+        # settings 槽 → 触发器（footer 走查由此把装饰标记落到页脚容器）
+        assert "[data-testid='sidebar-user-area']" in body
+        # :is([data-pane='sidebar'], [class*='sidebarCol']) 两支同位转译到侧栏
+        assert ":is([data-region='sidebar'], [data-region='sidebar'])" in body
+
+    def test_hooks_translation_preserves_js_string_quotes(self):
+        """引号守恒（回归锁定）：值形替换必须复用原引号风格——双引号输出插进
+        hooks 的单引号字符串字面量 = SyntaxError → import 抛 → 整个动态层
+        静默死（maid-atelier/xp 实锤，2026-08-22 真机排查根因）。"""
         import server  # noqa: PLC0415
 
-        monkeypatch.setattr("server.load_skin_selection", lambda: "no-such-skin")
-        resp = asyncio.run(
-            server._http_handle_style(path="/ext/dsh_adapter/styles/skin.css", method="GET")
-        )
-        assert resp["status"] == 200
-        assert base64.b64decode(resp["body"]).decode("utf-8").startswith("/*")
+        src = ("const A = \":is([data-pane='sidebar'], [class*='sidebarCol'])\"\n"
+               "const B = '[data-pane=\"conversation\"]'\n")
+        out = server._sub_position(src)
+        assert '"[data-pane=' not in out.replace('="sidebar"', '')  # 无双引号泄漏进单引号串
+        assert "\":is([data-region='sidebar'], [data-region='sidebar'])\"" in out
+        assert "'[data-region=\"chat\"]'" in out  # 双引号输入保持双引号
+
+    def test_all_skin_hooks_remain_valid_js(self, tmp_path: Path):
+        """全部皮肤 hooks 转译后仍为合法 JS（node --check 冒烟；无 node 跳过）。"""
+        import shutil  # noqa: PLC0415
+        import subprocess  # noqa: PLC0415
+
+        import server  # noqa: PLC0415
+
+        node = shutil.which("node")
+        if node is None:
+            pytest.skip("node 不可用，跳过 JS 语法冒烟")
+        for hook in (PLUGIN_DIR / "dsh_plugins" / "skin-center" / "skins").glob("*/hooks.mjs"):
+            translated = server._sub_position(hook.read_text(encoding="utf-8"))
+            tmp_file = tmp_path / f"{hook.parent.name}-hooks.mjs"
+            tmp_file.write_text(translated, encoding="utf-8")
+            r = subprocess.run([node, "--check", str(tmp_file)],
+                               stdout=subprocess.PIPE,
+                               stderr=subprocess.PIPE, timeout=30)
+            assert r.returncode == 0, f"{hook.parent.name}: {r.stderr.decode()[:200]}"
+
+    def test_unknown_skin_404(self):
+        assert self._serve("/ext/dsh_adapter/styles/skin/no-such-skin/merged.css")["status"] == 404
+        assert self._serve("/ext/dsh_adapter/styles/skin/../skin-center/hooks.mjs")["status"] == 404
 
 
 class TestSkinPluginThemes:
@@ -721,6 +852,7 @@ class TestSkinPluginThemes:
         themes = skins_to_plugin_themes()
         miku = next(t for t in themes if t["id"] == "dsh-skin-miku")
         assert miku["base"] == "light"  # 画布 #eef5ff 亮度判定
+        assert miku["skin"] == "miku"  # 平台皮肤运行时声明（按择注入端点段）
         img = miku["backgrounds"]["image"]
         assert img["enabled"] is True and "miku-art" in img["url"]
         assert img["url"].startswith("/ext/dsh_adapter/styles/skin-assets/")
@@ -765,71 +897,16 @@ class TestSkinAssetRoute:
         resp = self._serve("/ext/dsh_adapter/styles/skin-assets/miku/../../skin.json")
         assert resp["status"] == 404
 
-    def test_skin_css_includes_background(self, monkeypatch: pytest.MonkeyPatch):
-        # 与真机状态隔离：固定 miku（有 backgroundMedia）验证注入组合三段
-        monkeypatch.setattr("server.load_skin_selection", lambda: "miku")
-        resp = self._serve("/ext/dsh_adapter/styles/skin.css")
-        assert resp["status"] == 200
-        body = base64.b64decode(resp["body"]).decode("utf-8")
-        assert "--dsw-" in body  # 令牌层仍在
-        assert "font-family" in body  # 补充层：字体注入
-        assert "lingxi adaptation" not in body  # hack 适配层已退役
 
-
-class TestSkinListAndSelect:
-    """动态皮肤清单端点 + 选择写回（PUT 用 tmp config，不污染仓库配置）。"""
-
-    def _call(self, path: str, method: str, raw_body: str = "") -> dict:
-        import server  # noqa: PLC0415
-
-        return asyncio.run(
-            server._http_handle_style(path=path, method=method, raw_body=raw_body, plugin_id="", headers=None, query=None)
-        )
-
-    def test_list_skins_dynamic(self):
-        resp = self._call("/ext/dsh_adapter/skins", "GET")
-        assert resp["status"] == 200
-        data = json.loads(base64.b64decode(resp["body"]).decode("utf-8"))
-        assert data["count"] == len(data["skins"]) >= 15
-        miku = next(s for s in data["skins"] if s["id"] == "miku")
-        assert miku["has_background_media"] is True
-        assert miku["accent"].startswith("#")
-        matrix = next(s for s in data["skins"] if s["id"] == "matrix")
-        assert matrix["has_background_media"] is False
-
-    def test_select_skin_writes_config(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
-        import server  # noqa: PLC0415
-
-        cfg_dir = tmp_path / "config"
-        cfg_dir.mkdir()
-        (cfg_dir / "dsh_adapter.yaml").write_text(
-            "# 注释保留验证\nplugins: {}\nskin: miku\n", encoding="utf-8"
-        )
-        monkeypatch.setattr("server._skin_config_path", lambda: str(cfg_dir))
-        body = base64.b64encode(json.dumps({"skin": "matrix"}).encode()).decode()
-        resp = self._call("/ext/dsh_adapter/skins/current", "PUT", raw_body=body)
-        assert resp["status"] == 200
-        text = (cfg_dir / "dsh_adapter.yaml").read_text(encoding="utf-8")
-        assert "skin: matrix" in text
-        assert text.startswith("# 注释保留验证")  # 注释未被破坏
-        assert "plugins: {}" in text
-
-    def test_select_skin_unknown_rejected(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
-        cfg_dir = tmp_path / "config"
-        cfg_dir.mkdir()
-        (cfg_dir / "dsh_adapter.yaml").write_text("skin: miku\n", encoding="utf-8")
-        monkeypatch.setattr("server._skin_config_path", lambda: str(cfg_dir))
-        body = base64.b64encode(json.dumps({"skin": "hack"}).encode()).decode()
-        resp = self._call("/ext/dsh_adapter/skins/current", "PUT", raw_body=body)
-        assert resp["status"] == 400
-        assert (cfg_dir / "dsh_adapter.yaml").read_text(encoding="utf-8") == "skin: miku\n"  # 未被改写
+class TestManifestSkinRoutes:
+    """plugin.json 皮肤路由声明 = 皮肤=主题一物终态（清单/选择走主题通道，
+    适配器只递送 merged.css / hooks.mjs / 资产三端点）。"""
 
     def test_manifest_http_endpoints_declared(self):
         manifest = json.loads((PLUGIN_DIR / "plugin.json").read_text(encoding="utf-8"))
         routes = {(e["method"], e["path"]) for e in manifest["http_endpoints"]}
-        assert ("GET", "/ext/dsh_adapter/skins") in routes
-        assert ("PUT", "/ext/dsh_adapter/skins/current") in routes
+        assert ("GET", "/ext/dsh_adapter/styles/skin/{skin}/merged.css") in routes
+        assert ("GET", "/ext/dsh_adapter/styles/skin/{skin}/hooks.mjs") in routes
         assert ("GET", "/ext/dsh_adapter/styles/skin-assets/{skin}/{file:path}") in routes
-        # 静态 themes 已撤：皮肤清单必须动态（用户裁决：加新皮肤插件零 manifest 改动）
-        # 终态：themes 必须存在（on_load 自动声明，静态禁令解除）
+        # themes 自动声明（on_load 幂等同步产物）
         assert len(manifest["contributes"].get("themes", [])) >= 15

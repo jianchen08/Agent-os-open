@@ -5,8 +5,10 @@ import { basename, dirname, extname, join, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { homedir } from "node:os";
 import { transform } from "lightningcss";
+import { readFile, stat } from "node:fs/promises";
 import { execFileSync } from "node:child_process";
 import { Buffer as Buffer$1 } from "node:buffer";
+import { decode } from "jpeg-js";
 import { deflateSync, inflateSync } from "node:zlib";
 //#region \0rolldown/runtime.js
 var __defProp = Object.defineProperty;
@@ -937,6 +939,10 @@ function deriveFallbackTokens(defined) {
 *    `:root` / `html` merge into the scope; `body` and bare official
 *    `[data-ds-*]` heads (the official dark-theme attribute lives on BODY)
 *    become descendants of the scope; everything else becomes a descendant.
+*  - ROOT THEME TOKENS: per-theme `--dsw-alias-*` and
+*    `--dsw-specific-*` declarations from bare `:root` / `html` are reset
+*    on the scope and cloned to body. Root-level shell variables therefore
+*    cannot capture a light token while its dark variant belongs on body (#646).
 *  - WHITELIST (fail-closed): no `@import`, no remote or protocol-relative
 *    URLs, no absolute paths escaping the skin directory; only relative
 *    in-directory assets (and `data:`, which warns — prefer assets/ files).
@@ -1065,6 +1071,39 @@ function scopeSelectorText(selector, skinId) {
 function scopeSelectorList(selectorText, skinId) {
 	return splitSelectors(selectorText).map((sel) => scopeSelectorText(sel, skinId)).join(",");
 }
+const ROOT_BODY_TOKEN = /^(?:--dsw-alias-|--dsw-specific-)/;
+/** A bare root selector owns custom properties evaluated on html itself. */
+function hasBareRootSelector(selectorText) {
+	return splitSelectors(selectorText).some((selector) => {
+		const trimmed = selector.trim();
+		return trimmed === ":root" || trimmed === "html";
+	});
+}
+function withoutCssComments(value) {
+	return value.replace(/\/\*[\s\S]*?\*\//g, "");
+}
+/** Per-theme root declarations that must instead take effect from body. */
+function rootBodyTokens(block) {
+	const tokens = /* @__PURE__ */ new Map();
+	const declarations = withoutCssComments(block);
+	for (const match of declarations.matchAll(/(?:^|[;{])\s*(--[\w-]+)\s*:\s*([^;}]*)/gm)) {
+		const name = match[1];
+		if (name !== void 0 && ROOT_BODY_TOKEN.test(name)) tokens.set(name, /!\s*important\s*$/i.test(match[2] ?? ""));
+	}
+	return [...tokens].map(([name, important]) => ({
+		name,
+		important
+	}));
+}
+/** Normalize cloned root tokens so dark body declarations can override them. */
+function bodyCloneProperty(line) {
+	const custom = line.match(/^(--[\w-]+)\s*:/);
+	if (custom !== null) {
+		const name = custom[1] ?? "";
+		return ROOT_BODY_TOKEN.test(name) ? line.replace(/\s*!important(?=\s*;?\s*$)/i, "") : line;
+	}
+	return /^background-(color|image)\s*:/.test(line) ? line : null;
+}
 /** Check one url() target against the whitelist. */
 function checkUrl(raw, context, violations, warnings) {
 	const url = raw.trim().replace(/^["']|["']$/g, "");
@@ -1154,8 +1193,12 @@ function transformSkinCss(css, options) {
 		const scoped = scopeSelectorList(selectorText, skinId);
 		const block = close === -1 ? css.slice(span.openBrace) : css.slice(span.openBrace, close + 1);
 		out += scoped + block;
-		if (/^:root\b/.test(selectorText.trim()) && close !== -1) {
-			const props = css.slice(span.openBrace + 1, close).split("\n").map((line) => line.trim()).filter((line) => /^--[\w-]+\s*:/.test(line) || /^background-(color|image)\s*:/.test(line));
+		if (close !== -1 && hasBareRootSelector(selectorText)) {
+			const tokens = rootBodyTokens(block);
+			if (tokens.length > 0) out += `\n${scope} {\n  ${tokens.map(({ name, important }) => `${name}: initial${important ? " !important" : ""};`).join("\n  ")}\n}\n`;
+		}
+		if (hasBareRootSelector(selectorText) && close !== -1) {
+			const props = withoutCssComments(css.slice(span.openBrace + 1, close)).split("\n").map((line) => bodyCloneProperty(line.trim())).filter((line) => line !== null);
 			if (props.length > 0) out += `\n${scope} body {\n  ${props.join("\n  ")}\n}\n`;
 		}
 		cursor = close === -1 ? span.openBrace : close + 1;
@@ -1563,11 +1606,13 @@ function makeSkinIndexTap(deps) {
 /**
 * Legacy bridge (issue #506, migration path): ONE-SHOT, THIN. On the first
 * v2 boot it reads the retired dsh-skin machinery's state — the
-* "dsh-skin managed" section of the active profile's cordis.patch.yml —
-* migrates the active skin id into the v2 selection store
-* (skin-center-active.json), and strips the managed/legacy skin rows so the
-* config watcher's next reload boots without the old bundle. No old runtime
-* is kept: after the migration the managed section is gone for good.
+* "dsh-skin managed" section of the harness home cordis.patch.yml (where the
+* v1 CLI wrote it; issue #788) with the active profile's cordis.patch.yml
+* probed as a secondary location — migrates the active skin id into the v2
+* selection store (skin-center-active.json), and strips the managed/legacy
+* skin rows so the config watcher's next reload boots without the old
+* bundle. No old runtime is kept: after the migration the managed section
+* is gone for good.
 *
 * Reading the active id without the retired registry:
 *  1. an insert row naming a dsh-client-ui-skin-<id> package → that id;
@@ -1711,6 +1756,16 @@ function readLegacyActiveId(patch, knownIds) {
 	return candidates.length === 1 ? candidates[0] : null;
 }
 /**
+* Candidate patch paths, harness home first (issue #788): the v1 dsh-skin
+* CLI wrote its managed section into the home cordis.patch.yml, not the
+* active profile's. An explicit override (test seam) stays single-path.
+*/
+function candidatePatchPaths(options) {
+	if (options.patchPath !== void 0) return [options.patchPath];
+	const paths = resolveHarnessPaths();
+	return [paths.legacyPatchPath, paths.patchPath];
+}
+/**
 * Run the one-shot migration. Idempotent: once the v2 selection file exists
 * and the patch carries no managed section, this is a no-op. Never throws —
 * a failed migration leaves the legacy state untouched (the old mechanism
@@ -1721,40 +1776,47 @@ function migrateLegacySelection(options) {
 	const result = {
 		migrated: null,
 		patchCleaned: false,
+		failed: false,
 		notes
 	};
 	try {
-		const patchPath = options.patchPath ?? resolveHarnessPaths().patchPath;
-		let patch;
-		try {
-			patch = readFileSync(patchPath, "utf8");
-		} catch {
-			notes.push("no readable cordis.patch.yml; nothing to migrate");
-			return result;
+		let sawLegacyState = false;
+		let readablePatch = false;
+		let idMigrationDone = false;
+		for (const patchPath of candidatePatchPaths(options)) {
+			let patch;
+			try {
+				patch = readFileSync(patchPath, "utf8");
+				readablePatch = true;
+			} catch {
+				continue;
+			}
+			if (!(patch.includes("# --- dsh-skin managed (auto-generated; do not edit) ---") || /name:\s*['"]?@linxin666\/dsh-client-ui-skin-/.test(patch))) continue;
+			sawLegacyState = true;
+			if (!idMigrationDone) {
+				if (readActiveSelection(options.activeStatePath) !== null) notes.push("v2 selection already present; skipped id migration");
+				else {
+					const active = readLegacyActiveId(patch, options.knownIds);
+					if (active !== null) {
+						writeActiveSelection(options.activeStatePath, active);
+						result.migrated = active;
+						notes.push(`migrated active skin "${active}" to the v2 selection store`);
+					} else notes.push("legacy state resolves to the stock look; selection store left unset");
+				}
+				idMigrationDone = true;
+			}
+			let cleaned = stripLegacySkinState(patch);
+			if (cleaned.split(/\r?\n/).every((line) => line.trim() === "" || line.trimStart().startsWith("#"))) cleaned = "[]\n";
+			if (cleaned !== patch) {
+				(options.writePatch ?? writePatchAtomic)(patchPath, cleaned);
+				result.patchCleaned = true;
+				notes.push("stripped the legacy managed skin rows from cordis.patch.yml");
+			}
 		}
-		const hasLegacyState = patch.includes("# --- dsh-skin managed (auto-generated; do not edit) ---") || /name:\s*['"]?@linxin666\/dsh-client-ui-skin-/.test(patch);
-		const alreadyMigrated = readActiveSelection(options.activeStatePath) !== null;
-		if (!hasLegacyState) {
-			notes.push("no legacy managed skin state; nothing to migrate");
-			return result;
-		}
-		if (!alreadyMigrated) {
-			const active = readLegacyActiveId(patch, options.knownIds);
-			if (active !== null) {
-				writeActiveSelection(options.activeStatePath, active);
-				result.migrated = active;
-				notes.push(`migrated active skin "${active}" to the v2 selection store`);
-			} else notes.push("legacy state resolves to the stock look; selection store left unset");
-		} else notes.push("v2 selection already present; skipped id migration");
-		let cleaned = stripLegacySkinState(patch);
-		if (cleaned.split(/\r?\n/).every((line) => line.trim() === "" || line.trimStart().startsWith("#"))) cleaned = "[]\n";
-		if (cleaned !== patch) {
-			(options.writePatch ?? writePatchAtomic)(patchPath, cleaned);
-			result.patchCleaned = true;
-			notes.push("stripped the legacy managed skin rows from cordis.patch.yml");
-		}
+		if (!sawLegacyState) notes.push(readablePatch ? "no legacy managed skin state; nothing to migrate" : "no readable cordis.patch.yml; nothing to migrate");
 		return result;
 	} catch (error) {
+		result.failed = true;
 		notes.push(`legacy migration failed closed: ${error?.message ?? error}`);
 		return result;
 	}
@@ -2184,15 +2246,16 @@ function buildInventory(opts = {}) {
 //#endregion
 //#region src/pkg-extract.ts
 /**
-* Wallpaper Engine scene.pkg / .tex resource extraction, dependency-free.
+* Wallpaper Engine scene.pkg / .tex resource extraction.
 *
 * This module is the core of the skin center's "scene wallpaper static frame
 * extraction" feature: it unpacks a Wallpaper Engine scene package (PKG
 * container, magic PKGVxxxx), parses the nested TEX texture containers
 * (TEXV0005 header -> TEXI0001 image info -> TEXB0001..4 mipmap data ->
 * TEXS0001..3 frame animation metadata), decodes the main mipmap to RGBA8888
-* (raw RGBA8888/R8/RG88 plus hand-rolled BC1/BC2/BC3 block decompression for
-* DXT1/DXT3/DXT5), and re-encodes the result as a PNG using only node:zlib.
+* (raw RGBA8888/R8/RG88, FreeImage-embedded JPEG via jpeg-js, plus hand-rolled
+* BC1/BC2/BC3 block decompression for DXT1/DXT3/DXT5), and re-encodes the
+* result as a PNG using only node:zlib.
 *
 * Format facts were cross-checked against the two reference implementations:
 * RePKG (github.com/notscuffed/repkg, PackageReader / TexReader and friends)
@@ -2215,7 +2278,8 @@ function buildInventory(opts = {}) {
 *   (bit 2) pull in a TEXS frame container exposed via TexInfo.frames.
 *
 * LZ4 block decoding follows the official lz4 block format specification;
-* BC1/BC2/BC3 follow the standard public algorithms. No npm dependencies.
+* BC1/BC2/BC3 follow the standard public algorithms. One npm dependency:
+* jpeg-js (pure JavaScript, no native builds) for FreeImage JPEG mipmaps.
 *
 * @module @linxin666/dsh-client-ui-skin-center/pkg-extract
 */
@@ -2879,11 +2943,36 @@ function decodeDxt5(src, width, height) {
 * 2048x2048 mip); the TEXI header's image rect is the real content, anchored
 * top-left, so the result is cropped to it before returning.
 */
+/** Crop the power-of-two padding: the TEXI image rect sits at the top-left of
+* the stored mip (verified by render probe), anything beyond it is filler. */
+function cropToImageRect(decoded, imageWidth, imageHeight) {
+	const cropW = Math.min(imageWidth, decoded.width);
+	const cropH = Math.min(imageHeight, decoded.height);
+	if (cropW > 0 && cropH > 0 && (cropW < decoded.width || cropH < decoded.height)) {
+		const cropped = new Uint8Array(cropW * cropH * 4);
+		for (let y = 0; y < cropH; y++) cropped.set(decoded.rgba.subarray(y * decoded.width * 4, (y * decoded.width + cropW) * 4), y * cropW * 4);
+		return {
+			width: cropW,
+			height: cropH,
+			rgba: cropped
+		};
+	}
+	return decoded;
+}
 function decodeTex(data) {
 	const parsed = parseTexInternal(data);
 	if (parsed.isVideoMp4) throw new Error("tex: video mp4 textures cannot be decoded to a static frame");
 	const mip = parsed.mipmaps[0];
 	if (isPngBuffer(mip.bytes)) return decodePngToRgba(mip.bytes);
+	if (mip.bytes[0] === 255 && mip.bytes[1] === 216) {
+		const jpeg = decode(Buffer$1.from(mip.bytes), { useTArray: true });
+		const rgba = jpeg.data;
+		return cropToImageRect({
+			width: jpeg.width,
+			height: jpeg.height,
+			rgba
+		}, parsed.width, parsed.height);
+	}
 	const { width, height, bytes } = mip;
 	let decoded;
 	switch (parsed.format) {
@@ -2959,18 +3048,7 @@ function decodeTex(data) {
 		}
 		default: throw new Error("tex: unsupported format " + parsed.format);
 	}
-	const cropW = Math.min(parsed.width, width);
-	const cropH = Math.min(parsed.height, height);
-	if (cropW > 0 && cropH > 0 && (cropW < width || cropH < height)) {
-		const cropped = new Uint8Array(cropW * cropH * 4);
-		for (let y = 0; y < cropH; y++) cropped.set(decoded.rgba.subarray(y * width * 4, (y * width + cropW) * 4), y * cropW * 4);
-		return {
-			width: cropW,
-			height: cropH,
-			rgba: cropped
-		};
-	}
-	return decoded;
+	return cropToImageRect(decoded, parsed.width, parsed.height);
 }
 const CRC_TABLE = (() => {
 	const table = /* @__PURE__ */ new Uint32Array(256);
@@ -6402,36 +6480,27 @@ const WE_SCENE_PLAYER_HTML = `<!DOCTYPE html>
 </body>
 </html>
 `;
-//#endregion
-//#region src/we-routes.ts
 /**
-* Wallpaper Engine HTTP routes for the skin center — the browser half talks
-* to the host through same-origin endpoints under /api/skin-center/we:
-*
-*   GET  /inventory           → JSON wallpaper list (library + import store)
-*   GET  /media/<token>       → video stream (Range supported)
-*   GET  /preview/<token>     → preview image
-*   GET  /web/<token>/<path>  → web-wallpaper project files (HTML is served
-*                               with the WE API shim injected)
-*   GET  /shim.js             → the WE API shim source (we-shim-source.ts)
-*   GET  /scene-frame/<token> → PNG of a scene wallpaper's main texture,
-*                               decoded in-process (pkg-extract.ts), cached
-*                               under the import store's .cache directory
-*   POST /import              → copy a library wallpaper into the import
-*                               store (<harnessHome>/skin-center/wallpapers)
-*   POST /reimport            → refresh an imported copy from its source
-*   POST /remove              → delete an imported copy
-*
-* Tokens are base64url of an absolute path, issued only by the inventory
-* handler, so a crafted token can never reach a path the library scan did
-* not already expose. Every route rides the skin-center same-origin fence
-* (routes.ts) — wallpaper imports must not be triggerable cross-site.
-*
-* Compliance note: this module only ever reads files already present on the
-* user's machine (their own Wallpaper Engine library) or copies them within
-* it. Nothing is downloaded, uploaded, or redistributed.
-* @module @linxin666/dsh-client-ui-skin-center/we-routes
+* Delete same-wallpaper cache files left by earlier extractor versions or
+* older mtimes, so a version bump does not leave stale debris growing the
+* cache directory forever. The stem comparison is exact: the trailing
+* `[_vN_]<mtime>.<ext>` suffix is stripped first, so one base64url path
+* never prunes another (base64url output can itself contain underscores).
 */
+function pruneStaleSceneCache(cacheDir, base, keep) {
+	let entries;
+	try {
+		entries = readdirSync(cacheDir);
+	} catch {
+		return;
+	}
+	for (const name of entries) {
+		if (name === keep) continue;
+		if (name.replace(/_(?:v\d+_)?\d+\.[a-z0-9]+$/i, "") === base) try {
+			rmSync(join(cacheDir, name), { force: true });
+		} catch {}
+	}
+}
 /**
 * Read a web wallpaper's project.json property defaults so the shim can
 * deliver them like WE does on startup. Values pass through raw: colors stay
@@ -6588,6 +6657,10 @@ function serveFile(absPath, req, res) {
 	res.setHeader("Content-Length", String(size));
 	createReadStream(absPath).pipe(res);
 }
+/** Shape-check an entry loaded from the persisted probe cache. */
+function isSceneProbe(value) {
+	return value !== null && typeof value === "object" && typeof value.hasVideo === "boolean" && typeof value.hasSceneWebGL === "boolean";
+}
 /** Build the route family. */
 function makeWeRoutes(deps) {
 	const tokenStorePath = join(deps.storeDir, ".cache", "we-tokens.json");
@@ -6612,46 +6685,23 @@ function makeWeRoutes(deps) {
 		storeDir: deps.storeDir,
 		autoDetect: deps.autoDetect
 	});
-	const sceneProbeCache = /* @__PURE__ */ new Map();
+	const probeCachePath = join(deps.storeDir, ".cache", "we-scene-probes.json");
+	let sceneProbeCache = /* @__PURE__ */ new Map();
+	try {
+		const saved = JSON.parse(readFileSync(probeCachePath, "utf8"));
+		if (saved !== null && typeof saved === "object") {
+			for (const [key, value] of Object.entries(saved)) if (isSceneProbe(value)) sceneProbeCache.set(key, value);
+		}
+	} catch {}
 	const MAX_PROBE_CACHE = 256;
+	const persistProbes = () => {
+		try {
+			mkdirSync(dirname(probeCachePath), { recursive: true });
+			writeFileSync(probeCachePath, JSON.stringify(Object.fromEntries(sceneProbeCache)), "utf8");
+		} catch {}
+	};
 	const entryToJson = (entry) => {
 		const hasFile = existsSync(entry.fileAbs);
-		let hasVideo = false;
-		let hasSceneWebGL = false;
-		if (entry.type === "scene" && hasFile) {
-			let mtimeMs = 0;
-			let size = 0;
-			try {
-				const st = statSync(entry.fileAbs);
-				mtimeMs = st.mtimeMs;
-				size = st.size;
-			} catch {}
-			const key = entry.fileAbs + ":" + mtimeMs + ":" + size;
-			let probe = mtimeMs > 0 ? sceneProbeCache.get(key) : void 0;
-			if (!probe) {
-				let hasVideoNow = false;
-				let hasSceneWebGLNow = false;
-				try {
-					hasVideoNow = entry.fileAbs.toLowerCase().endsWith(".json") ? hasSceneVideoFromDir(dirname(entry.fileAbs)) : hasSceneVideo(new Uint8Array(readFileSync(entry.fileAbs)));
-					if (!hasVideoNow) {
-						const manifest = entry.fileAbs.toLowerCase().endsWith(".json") ? buildSceneManifestFromDir(dirname(entry.fileAbs), "check") : buildSceneManifest(new Uint8Array(readFileSync(entry.fileAbs)), "check");
-						if (manifest && (manifest.layers && manifest.layers.length >= 1 || manifest.is3D && manifest.models && manifest.models.length > 0)) hasSceneWebGLNow = true;
-					}
-				} catch {
-					hasSceneWebGLNow = false;
-				}
-				probe = {
-					hasVideo: hasVideoNow,
-					hasSceneWebGL: hasSceneWebGLNow
-				};
-				if (mtimeMs > 0) {
-					if (sceneProbeCache.size >= MAX_PROBE_CACHE) sceneProbeCache.clear();
-					sceneProbeCache.set(key, probe);
-				}
-			}
-			hasVideo = probe.hasVideo;
-			hasSceneWebGL = probe.hasSceneWebGL;
-		}
 		return {
 			id: entry.id,
 			title: entry.title,
@@ -6659,10 +6709,10 @@ function makeWeRoutes(deps) {
 			source: entry.source,
 			playable: entry.playable,
 			updateAvailable: entry.updateAvailable,
-			videoUrl: entry.type === "video" && hasFile ? "/api/skin-center/we/media/" + tokenFor(entry.fileAbs) : hasVideo ? "/api/skin-center/we/scene-video/" + tokenFor(entry.fileAbs) : null,
+			videoUrl: entry.type === "video" && hasFile ? "/api/skin-center/we/media/" + tokenFor(entry.fileAbs) : null,
 			webUrl: entry.type === "web" && hasFile ? "/api/skin-center/we/web/" + tokenFor(entry.fileAbs) + "/" : null,
 			frameUrl: entry.type === "scene" && hasFile ? "/api/skin-center/we/scene-frame/" + tokenFor(entry.fileAbs) : null,
-			sceneUrl: hasSceneWebGL ? "/api/skin-center/we/scene-runtime/" + tokenFor(entry.fileAbs) : null,
+			sceneUrl: null,
 			previewUrl: entry.previewAbs ? "/api/skin-center/we/preview/" + tokenFor(entry.previewAbs) : null
 		};
 	};
@@ -6711,6 +6761,86 @@ function makeWeRoutes(deps) {
 					total: inventory.total,
 					portableCount: inventory.portableCount,
 					wallpapers
+				});
+			} catch (error) {
+				json(res, 500, {
+					ok: false,
+					error: error instanceof Error ? error.message : String(error)
+				});
+			}
+		}
+	});
+	routes.push({
+		kind: "exact",
+		path: "/api/skin-center/we/scene-probe",
+		handler: async (req, res) => {
+			if (req.method !== "GET") {
+				json(res, 405, {
+					ok: false,
+					error: "method-not-allowed"
+				});
+				return;
+			}
+			if (!requireSameOrigin(req, res)) return;
+			try {
+				const id = new URL(req.url ?? "", "http://localhost").searchParams.get("id");
+				if (!id) {
+					json(res, 400, {
+						ok: false,
+						error: "missing-id"
+					});
+					return;
+				}
+				const entry = freshInventory().wallpapers.find((w) => w.id === id && w.type === "scene");
+				if (!entry || !existsSync(entry.fileAbs)) {
+					json(res, 404, {
+						ok: false,
+						error: "not-found"
+					});
+					return;
+				}
+				let mtimeMs = 0;
+				let size = 0;
+				try {
+					const st = await stat(entry.fileAbs);
+					mtimeMs = st.mtimeMs;
+					size = st.size;
+				} catch {}
+				if (entry.fileAbs.toLowerCase().endsWith(".json")) mtimeMs = 0;
+				const key = entry.fileAbs + ":" + mtimeMs + ":" + size;
+				let probe = mtimeMs > 0 ? sceneProbeCache.get(key) : void 0;
+				if (!probe) {
+					let hasVideo = false;
+					let hasSceneWebGL = false;
+					try {
+						const pkgData = await readFile(entry.fileAbs);
+						hasVideo = entry.fileAbs.toLowerCase().endsWith(".json") ? hasSceneVideoFromDir(dirname(entry.fileAbs)) : hasSceneVideo(pkgData);
+						if (!hasVideo) {
+							const manifest = entry.fileAbs.toLowerCase().endsWith(".json") ? buildSceneManifestFromDir(dirname(entry.fileAbs), "check") : buildSceneManifest(pkgData, "check");
+							hasSceneWebGL = Boolean(manifest && (manifest.layers && manifest.layers.length >= 1 || manifest.is3D && manifest.models && manifest.models.length > 0));
+						}
+					} catch {}
+					probe = {
+						hasVideo,
+						hasSceneWebGL
+					};
+					if (mtimeMs > 0) {
+						sceneProbeCache.set(key, probe);
+						while (sceneProbeCache.size > MAX_PROBE_CACHE) {
+							const oldest = sceneProbeCache.keys().next().value;
+							if (oldest === void 0) break;
+							sceneProbeCache.delete(oldest);
+						}
+						persistProbes();
+					}
+				}
+				const videoToken = probe.hasVideo ? tokenFor(entry.fileAbs) : null;
+				const sceneToken = probe.hasSceneWebGL ? tokenFor(entry.fileAbs) : null;
+				persistTokens();
+				json(res, 200, {
+					ok: true,
+					videoUrl: videoToken !== null ? "/api/skin-center/we/scene-video/" + videoToken : null,
+					sceneUrl: sceneToken !== null ? "/api/skin-center/we/scene-runtime/" + sceneToken : null
 				});
 			} catch (error) {
 				json(res, 500, {
@@ -6794,7 +6924,9 @@ function makeWeRoutes(deps) {
 					mtime = statSync(abs).mtimeMs;
 				} catch {}
 				const cacheDir = join(deps.storeDir, ".cache", "videos");
-				const cachePath = join(cacheDir, Buffer.from(abs, "utf8").toString("base64url") + "_" + String(Math.round(mtime)) + ".mp4");
+				const base = Buffer.from(abs, "utf8").toString("base64url");
+				const key = base + "_v" + String(2) + "_" + String(Math.round(mtime)) + ".mp4";
+				const cachePath = join(cacheDir, key);
 				if (!existsSync(cachePath)) {
 					const { extractSceneVideo, extractSceneVideoFromDir } = await Promise.resolve().then(() => pkg_extract_exports);
 					const videoBytes = abs.toLowerCase().endsWith(".json") ? extractSceneVideoFromDir(dirname(abs)) : extractSceneVideo(new Uint8Array(readFileSync(abs)));
@@ -6807,6 +6939,7 @@ function makeWeRoutes(deps) {
 					}
 					mkdirSync(cacheDir, { recursive: true });
 					writeFileSync(cachePath, videoBytes);
+					pruneStaleSceneCache(cacheDir, base, key);
 				}
 				serveFile(cachePath, req, res);
 			})().catch((error) => {
@@ -6900,12 +7033,15 @@ function makeWeRoutes(deps) {
 					mtime = statSync(abs).mtimeMs;
 				} catch {}
 				const cacheDir = join(deps.storeDir, ".cache", "frames");
-				const cachePath = join(cacheDir, Buffer.from(abs, "utf8").toString("base64url") + "_" + String(Math.round(mtime)) + ".png");
+				const base = Buffer.from(abs, "utf8").toString("base64url");
+				const key = base + "_v" + String(2) + "_" + String(Math.round(mtime)) + ".png";
+				const cachePath = join(cacheDir, key);
 				if (!existsSync(cachePath)) {
 					const { extractSceneMainImage, extractSceneMainImageFromDir } = await Promise.resolve().then(() => pkg_extract_exports);
 					const frame = abs.toLowerCase().endsWith(".json") ? extractSceneMainImageFromDir(dirname(abs)) : extractSceneMainImage(new Uint8Array(readFileSync(abs)));
 					mkdirSync(cacheDir, { recursive: true });
 					writeFileSync(cachePath, frame.png);
+					pruneStaleSceneCache(cacheDir, base, key);
 				}
 				res.setHeader("Content-Type", "image/png");
 				res.setHeader("Cache-Control", "no-store");
@@ -7305,7 +7441,8 @@ function applyImpl(ctx) {
 			knownIds: loadSkinCatalog().skins.map((s) => s.manifest.id),
 			activeStatePath: statePath
 		});
-		for (const note of migration.notes) console.info(`[ui-skin-center] legacy bridge: ${note}`);
+		if (migration.failed) for (const note of migration.notes) console.error(`[ui-skin-center] legacy bridge: ${note}`);
+		else if (migration.migrated !== null || migration.patchCleaned) for (const note of migration.notes) console.info(`[ui-skin-center] legacy bridge: ${note}`);
 	} catch (error) {
 		console.error("[ui-skin-center] legacy bridge failed:", error);
 	}

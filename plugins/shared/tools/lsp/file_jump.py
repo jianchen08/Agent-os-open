@@ -9,6 +9,7 @@ import logging
 import os
 import subprocess
 from pathlib import Path
+from typing import Any
 from urllib.parse import unquote
 
 from detector import IDEDetector, IDEType
@@ -27,8 +28,8 @@ class FileJumpProtocol:
     - Nvim: nvim://file/path/to/file:line:col
     """
 
-    # IDE 命令行参数格式
-    COMMAND_FORMATS = {
+    # IDE 命令行参数格式（值字典混合 str 命令与 list[str] 参数模板，声明 Any 避免联合拆箱）
+    COMMAND_FORMATS: dict[IDEType, dict[str, Any]] = {
         IDEType.VSCODE: {
             "windows": "code",
             "linux": "code",

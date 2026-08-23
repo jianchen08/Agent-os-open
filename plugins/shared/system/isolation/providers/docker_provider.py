@@ -6,7 +6,7 @@ import logging
 import shlex
 import shutil
 from datetime import UTC, datetime
-from typing import Any, ClassVar
+from typing import Any, ClassVar, cast
 
 from isolation_types import (
     EnvironmentStatus,
@@ -191,6 +191,7 @@ class DockerProvider(IsolationProvider):
             run_env = None
             if env:
                 run_env = {**os.environ, **env}
+            proc: _sp.CompletedProcess[bytes] | _sp.Popen[bytes]
             if not stream_log:
                 proc = _sp.run(args, capture_output=True, timeout=timeout, env=run_env)  # noqa: PLW1510
                 return proc.returncode, proc.stdout, proc.stderr
@@ -776,7 +777,8 @@ class DockerProvider(IsolationProvider):
     ) -> ExecutionResult:
         """在容器中执行文件操作。"""
         op = operation.get("operation")
-        path = operation.get("path")
+        # 运行时 path 由操作方保证为 str；缺失时与既有行为一致（quote/容器读落 try-except）
+        path = cast(str, operation.get("path"))
 
         try:
             if op == "read":

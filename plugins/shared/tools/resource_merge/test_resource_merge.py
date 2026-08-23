@@ -17,7 +17,7 @@ import asyncio
 import importlib.util
 import sys
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import pytest
 
@@ -60,7 +60,10 @@ def _run(coro: Any) -> Any:
         loop.close()
 
 
-GitHelpers = _load_git_helpers().GitHelpers
+if TYPE_CHECKING:
+    from plugins.shared.tools.resource_merge.git_helpers import GitHelpers
+else:
+    GitHelpers = _load_git_helpers().GitHelpers
 
 
 async def _git(*args: str, cwd: Path, helpers: GitHelpers | None = None) -> tuple[int, str, str]:

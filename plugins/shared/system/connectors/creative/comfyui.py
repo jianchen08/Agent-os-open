@@ -247,6 +247,7 @@ class ComfyUIConnector(BaseConnector):
 
     async def _ws_listen_loop(self) -> None:
         """WebSocket 监听循环，持续接收并分发消息。"""
+        assert self._ws_session is not None, "start_ws_listener 必须先创建 ws session"
         try:
             self._ws = await self._ws_session.ws_connect(self.ws_url)
             async for msg in self._ws:
@@ -309,6 +310,7 @@ class ComfyUIConnector(BaseConnector):
         Returns:
             提交结果，包含 prompt_id
         """
+        assert self._session is not None
         workflow = params.get("workflow", {})
         prompt_data = {"prompt": workflow, "client_id": self._ws_client_id}
 
@@ -342,6 +344,7 @@ class ComfyUIConnector(BaseConnector):
         Returns:
             进度信息
         """
+        assert self._session is not None
         prompt_id = params.get("prompt_id", "")
         async with self._session.get(f"{self._endpoint}/history/{prompt_id}") as resp:
             history = await resp.json()
@@ -371,6 +374,7 @@ class ComfyUIConnector(BaseConnector):
         Returns:
             图片 URL 列表
         """
+        assert self._session is not None
         prompt_id = params.get("prompt_id", "")
         async with self._session.get(f"{self._endpoint}/history/{prompt_id}") as resp:
             history = await resp.json()
@@ -397,6 +401,7 @@ class ComfyUIConnector(BaseConnector):
         Returns:
             按节点类型和输入名分组的模型列表
         """
+        assert self._session is not None
         async with self._session.get(f"{self._endpoint}/object_info") as resp:
             object_info = await resp.json()
             models: dict[str, list[str]] = {}
@@ -410,6 +415,7 @@ class ComfyUIConnector(BaseConnector):
 
     async def _capture_screenshot(self) -> ActionResult:
         """截取当前画布截图（返回最后生成的图片）。"""
+        assert self._session is not None
         async with self._session.get(f"{self._endpoint}/history?max_items=1") as resp:
             history = await resp.json()
             if not history:
@@ -423,6 +429,7 @@ class ComfyUIConnector(BaseConnector):
         Returns:
             操作结果
         """
+        assert self._session is not None
         async with self._session.post(f"{self._endpoint}/interrupt") as resp:
             if resp.status in (200, 204):
                 return ActionResult(success=True, data={"message": "任务已中断"})
@@ -435,6 +442,7 @@ class ComfyUIConnector(BaseConnector):
         Returns:
             操作结果
         """
+        assert self._session is not None
         async with self._session.post(
             f"{self._endpoint}/queue",
             json={"delete": []},

@@ -84,37 +84,6 @@ def _get_service_provider() -> Any:
     return _ServiceProviderShim()
 
 
-def _simple_evaluate(task: Any, notes: str = "") -> tuple[bool, str]:
-    """简化评估逻辑：根据任务状态判断是否通过。
-
-    Args:
-        task: TaskModel 实例
-        notes: 评估备注
-
-    Returns:
-        (passed, detail) 元组
-    """
-
-    ac = (task.metadata or {}).get("acceptance_criteria", {})
-
-    if not ac:
-        detail = "无验收标准，默认通过"
-        if notes:
-            detail += f"；备注：{notes}"
-        return True, detail
-
-    if task.result is None and not task.result:
-        detail = "无执行结果，评估不通过"
-        if notes:
-            detail += f"；备注：{notes}"
-        return False, detail
-
-    detail = f"共 {len(ac)} 项验收标准，均有执行结果"
-    if notes:
-        detail += f"；备注：{notes}"
-    return True, detail
-
-
 async def task_evaluate_func(inputs: dict[str, Any]) -> dict[str, Any]:  # noqa: PLR0911
     """同步任务评估函数（供测试和简单场景使用）。
 
@@ -260,6 +229,15 @@ class TaskEvaluateTool(BuiltinTool):
         action = inputs.get("action", "auto_complete")
         task_id = inputs.get("task_id")
 
+        # 短 id 入参解析（2026-08-22 用户要求：LLM 工具面 id 短化）——LLM 回传的
+        # task_id 可能是 12 位短 id，经 state 聚合前缀唯一解析回全 id。
+        task_id = await self._resolve_task_id(task_id)
+        if isinstance(task_id, str) and task_id.startswith("AMBIGUOUS:"):
+            return create_failure_result(
+                error=f"任务 ID '{task_id[len('AMBIGUOUS:'):]}' 匹配到多个任务，请使用完整 ID 重试",
+                error_code="AMBIGUOUS_TASK_ID",
+            )
+
         logger.warning(
             "[TRACE-EVAL] execute() ENTRY | action=%s | task_id=%s | input_keys=%s",
             action,
@@ -272,15 +250,9 @@ class TaskEvaluateTool(BuiltinTool):
         task_service = self._get_task_service()
 
         if not task_id:
-            if task_service is not None:
-                task_id = self._infer_task_id(task_service)
-                if task_id:
-                    logger.warning(
-                        "[TaskEvaluate] task_id 为推断值: %s，注入链可能断裂",
-                        task_id,
-                    )
-
-        if not task_id:
+            # 零推断（2026-08-22 用户裁决）：task_id 缺失即注入链断裂
+            # （state 未取到 run 的 task_id，未变成工具参数注入），候选任务再多也不猜——
+            # 猜测活跃任务会把 A 任务的评估写到 B 任务上，且掩盖断裂本身。
             return create_failure_result(
                 error="系统错误：task_id 未注入，请联系管理员",
                 error_code="INJECTION_ERROR",
@@ -320,6 +292,26 @@ class TaskEvaluateTool(BuiltinTool):
         if action == "auto_complete":
             return await self._auto_complete(inputs, task_service, task)
         return create_failure_result(error=f"不支持的操作: {action}", error_code="INVALID_ACTION")
+
+    async def _resolve_task_id(self, task_id: Any) -> Any:
+        """LLM 入参 task_id 短 id → 全 id（state 聚合前缀唯一解析；歧义报错）。"""
+        if not isinstance(task_id, str) or not task_id:
+            return task_id
+        try:
+            rows = await self._read_state_rows()
+        except Exception:  # noqa: BLE001 — 解析降级：原样放行既有"任务不存在"路径
+            return task_id
+        if rows is None:
+            return task_id
+        try:
+            from id_utils import resolve_id  # noqa: PLC0415
+
+            resolved = await resolve_id(rows, task_id)
+        except Exception:  # noqa: BLE001 — 解析失败降级：原样放行
+            return task_id
+        if resolved.startswith("AMBIGUOUS:"):
+            return f"AMBIGUOUS:{task_id}"
+        return resolved
 
     async def _evaluate_single(  # noqa: PLR0911
         self,
@@ -480,7 +472,19 @@ class TaskEvaluateTool(BuiltinTool):
             self._get_metric_ids(task),
         )
         metric_ids = self._get_metric_ids(task)
-        input_params, criteria_fallback_ids = self._get_input_params(task)
+        try:
+            input_params, criteria_fallback_ids = self._get_input_params(task)
+        except ValueError as exc:
+            # 指标参数解析失败（如 {tool_id} 模板歧义）：显式失败，不带病评估
+            logger.error(
+                "[TaskEvaluate] 指标参数解析失败 | task_id=%s | %s",
+                task.id,
+                exc,
+            )
+            return create_failure_result(
+                error=f"指标参数解析失败：{exc}",
+                error_code="INVALID_INPUT_PARAMS",
+            )
 
         if not metric_ids:
             logger.warning(
@@ -1227,38 +1231,55 @@ class TaskEvaluateTool(BuiltinTool):
                     p[key] = val
             params[metric_id] = p
 
-        # Resolve {tool_id} template from workspace files
-        _tool_id_val = self._resolve_tool_id_from_workspace(task, workspace_abs)
-        if _tool_id_val:
-            for metric_id in all_metric_ids:
-                p = params.get(metric_id, {})
-                for key, val in list(p.items()):
-                    if isinstance(val, str) and "{tool_id}" in val:
-                        p[key] = val.replace("{tool_id}", _tool_id_val)
-                params[metric_id] = p
+        # Resolve {tool_id} template from workspace files（2026-08-22 裁决：
+        # 唯一候选可用，0/多候选拒绝——绝不"取第一个文件"猜测被评估工具，
+        # 猜测会把评估打到错误对象，错误放行或错误失败）
+        tool_id_candidates = self._resolve_tool_id_candidates(workspace_abs)
+        for metric_id in all_metric_ids:
+            p = params.get(metric_id, {})
+            uses_template = any(
+                isinstance(val, str) and "{tool_id}" in val for val in p.values()
+            )
+            if not uses_template:
+                continue
+            if len(tool_id_candidates) != 1:
+                raise ValueError(
+                    f"指标 {metric_id} 引用了 {{tool_id}} 模板，但工作区工具候选为 "
+                    f"{len(tool_id_candidates)} 个（{'、'.join(tool_id_candidates) or '无'}），"
+                    "无法确定被评估工具；请显式指定工具或清理工作区后重试"
+                )
+            for key, val in list(p.items()):
+                if isinstance(val, str):
+                    p[key] = val.replace("{tool_id}", tool_id_candidates[0])
+            params[metric_id] = p
 
         return params, criteria_fallback_ids
 
     @staticmethod
-    def _resolve_tool_id_from_workspace(task: Any, workspace_abs: str | None) -> str | None:  # noqa: ARG004
-        """从工作空间文件中推断 tool_id，用于替换 {tool_id} 模板变量。
+    def _resolve_tool_id_candidates(workspace_abs: str | None) -> list[str]:
+        """收集工作空间 src/tools/builtin/ 下的工具 id 候选（排除 test_/__ 前缀）。
 
-        在 src/tools/builtin/ 目录下查找 .py 文件（排除 test_ 前缀和 __init__.py），
-        返回第一个匹配的文件名（不含 .py 后缀）作为 tool_id。
+        返回全部候选（按文件名排序）由调用方做唯一性裁决——本函数不做"取第一个"
+        猜测，歧义交给调用方显式报错。
+
+        Args:
+            workspace_abs: 任务工作空间绝对路径（ws_meta.path），无则返回空列表。
+
+        Returns:
+            按文件名排序的工具 id 候选列表。
         """
         if not workspace_abs:
-            return None
+            return []
         from pathlib import Path  # noqa: PLC0415
 
         tools_dir = Path(workspace_abs) / "src" / "tools" / "builtin"
         if not tools_dir.exists():
-            return None
-        for py_file in tools_dir.glob("*.py"):
-            name = py_file.stem
-            if name.startswith("test_") or name.startswith("__"):
-                continue
-            return name
-        return None
+            return []
+        return sorted(
+            py_file.stem
+            for py_file in tools_dir.glob("*.py")
+            if not py_file.stem.startswith("test_") and not py_file.stem.startswith("__")
+        )
 
     def _build_result_data(self, result: Any) -> dict[str, Any]:
         """将评估结果构建为工具返回数据。
@@ -1316,42 +1337,3 @@ class TaskEvaluateTool(BuiltinTool):
             "summary": result.summary,
             "metrics": metrics,
         }
-
-    @staticmethod
-    def _infer_task_id(task_service: Any) -> str | None:
-        """从 TaskService 推断当前活跃的 task_id。
-
-        当 task_id 未通过注入获取时，尝试从 TaskService 中
-        查找当前处于 RUNNING 或 EVALUATING 状态的任务作为 fallback
-        （任务可能在评估期间从 RUNNING 转为 EVALUATING，需同时覆盖两种状态）。
-
-        Args:
-            task_service: TaskService 实例
-
-        Returns:
-            task_id 字符串，未找到返回 None
-        """
-        try:
-            for status in [TaskStatus.RUNNING, TaskStatus.EVALUATING]:
-                tasks = task_service.list_by_status(status)
-                if tasks:
-                    if len(tasks) > 1:
-                        logger.warning(
-                            "[TaskEvaluate] 有 %d 个 %s 任务，使用最新的",
-                            len(tasks),
-                            status.value,
-                        )
-                    latest = max(
-                        tasks,
-                        key=lambda t: t.created_at if hasattr(t, "created_at") else "",
-                    )
-                    tid = latest.id if hasattr(latest, "id") else latest.get("id")
-                    logger.info(
-                        "[TaskEvaluate] 推断 task_id=%s (从 %s 任务列表)",
-                        tid,
-                        status.value,
-                    )
-                    return tid
-        except Exception as exc:
-            logger.warning("[TaskEvaluate] 推断 task_id 失败: %s", exc)
-        return None

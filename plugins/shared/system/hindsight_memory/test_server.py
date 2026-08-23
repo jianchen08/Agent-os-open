@@ -671,6 +671,134 @@ def _http_ok(out):
     return json.loads(base64.b64decode(data["body"]).decode("utf-8"))
 
 
+# ═══════════════════════════════════════════════════════════
+# 8-22 真机记忆测试 5 症状回归（TDD 红灯）：
+#   S1 存取后即时检索空（async retain 后台抽取未完成）
+#   S2 delete 忽略 memory_id 删整库（无逐条删除通路）
+#   S3 import_document metadata 数字进 pydantic dict[str,str] 422
+#   S4 import_text 落库的 chunk_index/chunk_total 字符串化
+#   S5 recall 空 query 422（list 工具必经之路）
+# ═══════════════════════════════════════════════════════════
+
+
+class TestRetainSyncImmediatelyRecallable:
+    def test_retain_uses_sync_mode_by_default(
+        self, mod: Any, mock_client: MagicMock
+    ) -> None:
+        """S1 根因：store 必须同步确认（sync retain），否则刚存即搜是空。
+
+        retain_async=True 时服务端后台抽取需数秒完成，期间 recall 检索不到
+        （8-22 真机实证：sync 立即可召回，async 需 ~8s）——memory 工具层
+        store→retrieve 连续调用在 LLM 编排下间隔远小于抽取耗时。
+        """
+        mock_client.aretain.return_value = MagicMock(operation_id="mem_sync", accepted=True)
+
+        _call_tool(
+            mod, "hindsight.retain", bank_id="bank_A",
+            content="张三在北京召开会议", metadata={"tags": '["t1"]'},
+        )
+
+        call_kwargs = mock_client.aretain.call_args.kwargs
+        assert call_kwargs.get("retain_async") is False
+        assert "operation_id" not in call_kwargs
+
+    def test_retain_returns_document_id_when_supplied(
+        self, mod: Any, mock_client: MagicMock
+    ) -> None:
+        """S2 前提：调用方给定 document_id 时原样回传（真删除通路）。"""
+        mock_client.aretain.return_value = MagicMock(operation_id="op_doc", accepted=True)
+
+        result = _call_tool(
+            mod, "hindsight.retain", bank_id="bank_A",
+            content="hello", metadata={"tags": '["t1"]'}, document_id="mem-abc123",
+        )
+
+        call_kwargs = mock_client.aretain.call_args.kwargs
+        assert call_kwargs.get("document_id") == "mem-abc123"
+        assert result["id"] == "mem-abc123"
+
+
+class TestDeleteTargeted:
+    def test_delete_with_memory_id_uses_documents_api(
+        self, mod: Any, mock_client: MagicMock
+    ) -> None:
+        """S2 根因：带 memory_id 必须走 documents.delete_document 逐条删除，
+        不再忽略 memory_id 删整个 bank。"""
+        mock_client.documents = MagicMock()
+        mock_client.documents.delete_document = AsyncMock(
+            return_value=MagicMock(
+                model_dump=lambda: {"success": True, "document_id": "mem-abc123"},
+            )
+        )
+
+        result = _call_tool(
+            mod, "hindsight.delete", bank_id="bank_del", memory_id="mem-abc123",
+        )
+
+        mock_client.documents.delete_document.assert_awaited_once_with(
+            bank_id="bank_del", document_id="mem-abc123",
+        )
+        assert result["deleted"] is True
+        assert mock_client.adelete_bank.await_count == 0
+
+    def test_delete_without_memory_id_deletes_bank(
+        self, mod: Any, mock_client: MagicMock
+    ) -> None:
+        """无 memory_id 才允许删整个 bank（既有语义保留）。"""
+        result = _call_tool(mod, "hindsight.delete", bank_id="bank_del")
+
+        mock_client.adelete_bank.assert_awaited_once_with(bank_id="bank_del")
+        assert result["deleted"] is True
+
+    def test_delete_documents_error_returns_false(
+        self, mod: Any, mock_client: MagicMock
+    ) -> None:
+        """delete_document 抛错 → deleted:false（诚实失败）。"""
+        mock_client.documents = MagicMock()
+        mock_client.documents.delete_document = AsyncMock(
+            side_effect=RuntimeError("doc gone"),
+        )
+
+        result = _call_tool(
+            mod, "hindsight.delete", bank_id="bank_del", memory_id="mem-x",
+        )
+
+        assert result["deleted"] is False
+        assert "error" in result
+
+
+class TestImportDocMetaStr:
+    def test_import_document_metadata_values_are_str(
+        self, mod: Any, mock_client: MagicMock
+    ) -> None:
+        """S3/S4 根因：hindsight MemoryItem.metadata 是 dict[str,str] pydantic
+        校验面，chunk_index/chunk_total 以 int 传入必 422（8-22 实测）。"""
+        mock_client.aretain.return_value = MagicMock(operation_id="mem_x", accepted=True)
+
+        _call_tool(
+            mod, "hindsight.import_document",
+            bank_id="bank_A", text="abc", knowledge_name="kb1",
+        )
+
+        for call in mock_client.aretain.call_args_list:
+            meta = call.kwargs["metadata"]
+            assert all(isinstance(v, str) for v in meta.values())
+            assert meta["chunk_index"] == "0"
+            assert meta["chunk_total"] == "1"
+            assert meta["knowledge_name"] == "kb1"
+
+
+class TestRecallEmptyQuery:
+    def test_recall_rejects_empty_query(self, mod: Any, mock_client: MagicMock) -> None:
+        """S5 根因：hindsight 服务端拒绝空 query（'query must contain at least
+        one word character'，8-22 实测 422）——list 工具先于查询判空，不把空
+        查询打到后端。"""
+        result = _call_tool(mod, "hindsight.recall", bank_id="bank_A", query="")
+
+        assert result["error"]
+        mock_client.arecall.assert_not_called()
+
+
 def test_http_memory_episodes_dispatch():
     """memory 域：http.handle 分发到 routes_memory，注入的 mock 后端结果回传。
 

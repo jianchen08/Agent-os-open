@@ -109,5 +109,199 @@
   "granted_capabilities": [
     "chat",
     "pipeline-state"
-  ]
+  ],
+  "http_endpoints": [
+    {
+      "route_id": "trigger_list",
+      "method": "GET",
+      "path": "/ext/trigger_setup_tool/triggers",
+      "auth": "user",
+      "handler_capability": "http.handle",
+      "timeout_ms": 5000,
+      "description": "触发器列表（可选 status 过滤）"
+    },
+    {
+      "route_id": "trigger_create",
+      "method": "POST",
+      "path": "/ext/trigger_setup_tool/triggers",
+      "auth": "user",
+      "handler_capability": "http.handle",
+      "timeout_ms": 5000,
+      "description": "创建触发器（与 trigger_setup 工具 setup 同语义）"
+    },
+    {
+      "route_id": "trigger_get",
+      "method": "GET",
+      "path": "/ext/trigger_setup_tool/triggers/{trigger_id}",
+      "auth": "user",
+      "handler_capability": "http.handle",
+      "timeout_ms": 5000,
+      "description": "触发器详情"
+    },
+    {
+      "route_id": "trigger_update",
+      "method": "PUT",
+      "path": "/ext/trigger_setup_tool/triggers/{trigger_id}",
+      "auth": "user",
+      "handler_capability": "http.handle",
+      "timeout_ms": 5000,
+      "description": "更新触发器（与工具 update 同语义）"
+    },
+    {
+      "route_id": "trigger_delete",
+      "method": "DELETE",
+      "path": "/ext/trigger_setup_tool/triggers/{trigger_id}",
+      "auth": "user",
+      "handler_capability": "http.handle",
+      "timeout_ms": 5000,
+      "description": "取消触发器（状态置 CANCELLED）"
+    },
+    {
+      "route_id": "trigger_enable",
+      "method": "POST",
+      "path": "/ext/trigger_setup_tool/triggers/{trigger_id}/enable",
+      "auth": "user",
+      "handler_capability": "http.handle",
+      "timeout_ms": 5000,
+      "description": "激活触发器"
+    },
+    {
+      "route_id": "trigger_disable",
+      "method": "POST",
+      "path": "/ext/trigger_setup_tool/triggers/{trigger_id}/disable",
+      "auth": "user",
+      "handler_capability": "http.handle",
+      "timeout_ms": 5000,
+      "description": "停用触发器（回到 PENDING）"
+    },
+    {
+      "route_id": "trigger_fire",
+      "method": "POST",
+      "path": "/ext/trigger_setup_tool/triggers/{trigger_id}/trigger",
+      "auth": "user",
+      "handler_capability": "http.handle",
+      "timeout_ms": 5000,
+      "description": "手动触发一次"
+    },
+    {
+      "route_id": "trigger_stats",
+      "method": "GET",
+      "path": "/ext/trigger_setup_tool/triggers/stats",
+      "auth": "user",
+      "handler_capability": "http.handle",
+      "timeout_ms": 5000,
+      "description": "触发器统计（类型/状态计数）"
+    }
+  ],
+  "ui_schema": {
+    "widgets": [
+      {
+        "id": "triggers_table",
+        "type": "table",
+        "space": "triggers",
+        "order": 10,
+        "props": {
+          "title": "触发器列表",
+          "datasourceUri": "/ext/trigger_setup_tool/triggers",
+          "rowActions": [
+            {
+              "key": "trigger",
+              "label": "触发",
+              "url": "/ext/trigger_setup_tool/triggers/{id}/trigger",
+              "successText": "已触发"
+            },
+            {
+              "key": "enable",
+              "label": "启用",
+              "url": "/ext/trigger_setup_tool/triggers/{id}/enable",
+              "when": {
+                "key": "enabled",
+                "equals": false
+              }
+            },
+            {
+              "key": "disable",
+              "label": "禁用",
+              "url": "/ext/trigger_setup_tool/triggers/{id}/disable",
+              "when": {
+                "key": "enabled",
+                "equals": true
+              }
+            },
+            {
+              "key": "delete",
+              "label": "删除",
+              "variant": "destructive",
+              "method": "DELETE",
+              "url": "/ext/trigger_setup_tool/triggers/{id}",
+              "confirm": "确认删除该触发器？"
+            }
+          ]
+        }
+      },
+      {
+        "id": "triggers_create",
+        "type": "form",
+        "space": "triggers",
+        "order": 20,
+        "props": {
+          "title": "创建触发器",
+          "fields": [
+            {
+              "name": "name",
+              "type": "input",
+              "label": "名称",
+              "required": true
+            },
+            {
+              "name": "type",
+              "type": "select",
+              "label": "类型",
+              "required": true,
+              "options": [
+                {
+                  "label": "定时",
+                  "value": "schedule"
+                },
+                {
+                  "label": "事件",
+                  "value": "event"
+                },
+                {
+                  "label": "手动",
+                  "value": "manual"
+                }
+              ]
+            },
+            {
+              "name": "config",
+              "type": "textarea",
+              "label": "配置 JSON",
+              "placeholder": "{\"cron\": \"0 * * * *\"}"
+            }
+          ],
+          "endpoint": "/ext/trigger_setup_tool/triggers",
+          "successText": "触发器已创建"
+        }
+      }
+    ]
+  },
+  "contributes": {
+    "pages": [
+      {
+        "id": "triggers",
+        "title": "触发器",
+        "icon": "⚡",
+        "space": "workspace",
+        "slot": "activity-bar",
+        "order": 15,
+        "path": "/triggers",
+        "widget": "widget_stage",
+        "props": {
+          "space": "triggers"
+        },
+        "description": "触发器管理（widget 化声明页：列表+行操作+创建，channel_api 退役后随域迁入 trigger_setup_tool）"
+      }
+    ]
+  }
 }

@@ -320,6 +320,7 @@ async def human_interaction(**kwargs: Any) -> dict[str, Any]:
 
 async def _do_notification(kwargs: dict[str, Any], session_id: str) -> dict[str, Any]:
     """通知模式——非阻塞，创建 record + event-bus.notify 后立即返回。"""
+    assert _service is not None, "human_interaction 入口已保证 _service 初始化"
     rid = await _service.send_notification(
         session_id=session_id,
         thread_id=session_id,
@@ -335,6 +336,7 @@ async def _do_choice(
     kwargs: dict[str, Any], session_id: str, pipeline_id: str, timeout: int
 ) -> dict[str, Any]:
     """选择模式——创建请求 + 阻塞等待用户选择。"""
+    assert _service is not None, "human_interaction 入口已保证 _service 初始化"
     rid = await _service.create_choice_request(
         session_id=session_id,
         thread_id=session_id,
@@ -363,6 +365,7 @@ async def _do_conversation(
     kwargs: dict[str, Any], session_id: str, pipeline_id: str, timeout: int
 ) -> dict[str, Any]:
     """对话模式——创建请求 + 等待用户到达对话页。"""
+    assert _service is not None, "human_interaction 入口已保证 _service 初始化"
     rid = await _service.create_conversation_request(
         session_id=session_id,
         thread_id=session_id,

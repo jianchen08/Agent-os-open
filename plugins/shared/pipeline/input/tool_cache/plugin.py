@@ -40,9 +40,13 @@ if not hasattr(_pipeline_pkg, _GLOBAL_CACHE_ATTR):
 # _GLOBAL_CACHE 是 pipeline 包上那个字典的直接引用
 _GLOBAL_CACHE: dict[str, tuple[Any, float, float]] = getattr(_pipeline_pkg, _GLOBAL_CACHE_ATTR)
 
-# 默认不缓存的有副作用工具（写操作 / 外部副作用，结果不可复用）
+# 默认不缓存的工具：
+# - 有副作用工具（写操作 / 外部副作用，结果不可复用）；
+# - 路径型读工具 file_read（2026-08-22 裁决）：同内容合法两次独立读（读→改→
+#   再读）在 TTL 窗口内会被内容键误合并，第二次读返回改前内容。
 _DEFAULT_EXCLUDE_TOOLS: set[str] = {
     "bash_execute",
+    "file_read",
     "file_write",
     "file_delete",
     "file_move",

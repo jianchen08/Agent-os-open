@@ -23,9 +23,10 @@ import pytest
 _SPEC = importlib.util.spec_from_file_location(
     "calc_tools_under_test", Path(__file__).with_name("calc_tools.py")
 )
+assert _SPEC is not None and _SPEC.loader is not None
 calc = importlib.util.module_from_spec(_SPEC)
 sys.modules.setdefault("calc_tools_under_test", calc)
-_SPEC.loader.exec_module(calc)  # type: ignore[union-attr]
+_SPEC.loader.exec_module(calc)
 
 
 def _eval(expr: str) -> float:

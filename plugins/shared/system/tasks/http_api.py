@@ -333,7 +333,9 @@ def _task_to_response(t: dict[str, Any]) -> TaskResponse:
         agent_id=t.get("agent_id"),
         agent_name=t.get("agent_name"),
         agent_level=agent_level,
-        thread_id=t.get("thread_id"),
+        # 归属会话：顶层 thread_id 缺失时从 metadata.session_id 回退（手动创建
+        # 任务只写 metadata.session_id；前端任务条目据此定位归属，不依赖 runs 快照）
+        thread_id=t.get("thread_id") or meta.get("session_id"),
         created_by=t.get("created_by"),
         pipeline_run_id=t.get("pipeline_run_id"),
         execution_record_id=t.get("execution_record_id"),
@@ -354,16 +356,25 @@ def _task_to_response(t: dict[str, Any]) -> TaskResponse:
 _get_task_service = get_task_service
 
 
-def _capability(name: str) -> Any:
-    """取内核能力句柄（懒 import server.plugin；未注入时抛 KeyError）。
+def _now_iso() -> str:
+    """当前时间 ISO 串（子任务登记时间戳）。"""
+    from datetime import datetime, timezone  # noqa: PLC0415
 
-    channel_api 时期经 ``_channel_api_plugin().get_capability(name)`` 取句柄，
-    落户本插件后经 server.plugin 取（同一 AgentOSPlugin 实例）。
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _capability(name: str) -> Any:
+    """取内核能力句柄（走 __main__ 的 AgentOSPlugin 实例；未注入时抛 KeyError）。
+
+    本插件由 ``python server.py`` 启动，SDK 注入 capabilities 的实例是
+    ``__main__.plugin``；``import server`` 会重新执行 server.py 顶层并新建
+    第二个空 AgentOSPlugin（capabilities 永远为空），故直接取 ``__main__``。
+    测试可 monkeypatch 本函数（test_tasks_plugin 既有做法）。
     """
     try:
-        import server  # noqa: PLC0415
+        import __main__  # noqa: PLC0415
 
-        return server.plugin.get_capability(name)
+        return __main__.plugin.get_capability(name)  # type: ignore[attr-defined]
     except Exception as exc:  # noqa: BLE001
         raise KeyError(f"capability not injected: {name}") from exc
 
@@ -423,6 +434,7 @@ async def _submit_task_event(
     execution_context: dict | None = None,
     task_id: str = "",
     agent_id: str = "",
+    thread_id: str = "",
 ) -> str:
     """GAP-1 统一：经 chat.send_message 驱动任务执行管道，返回 pipeline_id（= task.id）。
 
@@ -466,7 +478,8 @@ async def _submit_task_event(
         if parent_pipeline_id:
             lineage: dict[str, Any] = {
                 "parent_pipeline_id": parent_pipeline_id,
-                "origin_session_id": parent_pipeline_id,
+                # 归属会话优先（任务创建时的真实会话），无会话调用维持父管道引用
+                "origin_session_id": thread_id or parent_pipeline_id,
             }
         else:
             lineage = {
@@ -483,6 +496,10 @@ async def _submit_task_event(
             "background": True,
             "message": kickoff,
             "user_id": user_id or "task_system",
+            # 归属会话（ADR 2026-08-21）：手动创建任务透传用户会话，内核创建分支
+            # 以真实会话 link pipeline_sessions（runs 快照/前端导航据此归属）；
+            # 缺省（LLM 派发无会话上下文）不传，管道保持独立。
+            **({"thread_id": thread_id} if thread_id else {}),
             # 目标执行 agent 传导（默认为主 agent）
             **({"agent_id": agent_id} if agent_id else {}),
             "state": {
@@ -513,6 +530,33 @@ async def _submit_task_event(
             pipeline_id,
             title,
         )
+        # 触发方登记（任务树数据链）：父管道提交的子任务，把新管道 id 记回
+        # 父管道 state（task.owned.<id>.*，与 task_submit 同款契约）——前端
+        # 任务树据此把子任务挂到主管道下；根任务（无父）无需登记。
+        if parent_pipeline_id:
+            try:
+                await chat.call(
+                    "send_message",
+                    {
+                        "pipeline_id": parent_pipeline_id,
+                        "message": f"登记任务「{title}」（{pipeline_id}）。",
+                        "user_id": user_id or "task_system",
+                        "no_dispatch": True,
+                        "state": {
+                            f"task.owned.{pipeline_id}.title": title,
+                            f"task.owned.{pipeline_id}.status": "pending",
+                            f"task.owned.{pipeline_id}.scope": scope,
+                            f"task.owned.{pipeline_id}.created_at": _now_iso(),
+                            f"task.owned.{pipeline_id}.submitted_by": user_id or "",
+                        },
+                    },
+                )
+            except Exception as exc:
+                logger.warning(
+                    "[tasks http] 任务登记到提交者管道失败（不影响执行）| task=%s | err=%s",
+                    pipeline_id,
+                    exc,
+                )
         return pipeline_id
 
     except Exception as exc:  # noqa: BLE001
@@ -557,6 +601,13 @@ async def list_tasks(
 
     [改造] 已删除 ``store.threads.get(session_id)`` 旧 0.1 管道树兜底块
     ——服务侧 list_all(session_id=...) 已按 metadata.session_id 过滤足够。
+
+    [GAP-1 统一 2026-08-22] 任务即管道（state 单一真值）：0.2 提交的任务
+    （task_submit / create_root_task 经 chat.send_message 创建）不再写 YAML，
+    只存在于管道 state 聚合（pipeline-state.list 的 task.* 行）。本端点合并
+    state 聚合行（组装逻辑对齐 task_manage 工具层 _list_tasks_from_state），
+    否则任务管理面板（前端 /ext/task_service/tasks 拉取）看不到 0.2 任务，
+    任务↔管道关系无从体现。state 行与 YAML 行按 pipeline_id 去重（state 优先）。
     """
     if skip is not None:
         offset = skip
@@ -577,6 +628,16 @@ async def list_tasks(
         except Exception as exc:
             logger.warning("从 TaskStorage 加载任务失败: %s", exc)
 
+    # GAP-1 统一：合并 state 聚合行（0.2 任务真值所在；YAML 只读镜像无 0.2 任务）
+    state_tasks = await _list_tasks_from_state()
+    if state_tasks:
+        seen_ids = {str(t.get("id") or "") for t in tasks}
+        for st in state_tasks:
+            if str(st.get("id") or "") in seen_ids:
+                continue
+            tasks.append(st)
+            seen_ids.add(str(st.get("id") or ""))
+
     if status:
         tasks = [t for t in tasks if t.get("status") == status]
 
@@ -592,6 +653,123 @@ async def list_tasks(
     items = [_task_to_response(t) for t in page]
 
     return TaskListResponse(items=items, total=total)
+
+
+async def _list_tasks_from_state() -> list[dict[str, Any]] | None:
+    """从管道 state 聚合组装任务字典（GAP-1 统一：task = pipeline）。
+
+    两类任务（2026-08-22 定案，语义区分）：
+    - **task.owned.\<id\>.\***：提交者管道自持的任务（容器任务等"只登记不执行"，
+      无下级管道——project id 只登记在提交者管道 state，本管道插件也能读它处理它）；
+    - **task.\* 行**：执行管道收到的任务（task.id 引擎注入 + task.assigned 上级
+      派发），普通任务（执行）创建新管道后在此。
+
+    字段映射对齐 _task_to_response 的消费键（id/title/status/thread_id/
+    pipeline_run_id/parent_task_id/metadata）。None = 桥未就绪/无任务行
+    （调用方保持既有行为）。
+    """
+    try:
+        handle = _capability("pipeline-state")
+        resp = await handle.call("list", {})
+    except Exception as exc:  # noqa: BLE001 — 读面降级不崩
+        logger.warning("[tasks http] state 聚合读取失败（任务列表降级为 YAML 面）| err=%s", exc)
+        return None
+    # 响应形状：内核 capability_router 的 pipeline-state.list 返回裸数组
+    # （workspace/task 工具层同此解析）；旧版 channel_api 时期是 {items:[...]}
+    # 信封——双形状兼容，避免一次误判把 state 任务全丢掉。
+    rows = resp if isinstance(resp, list) else (resp.get("items") if isinstance(resp, dict) else None)
+    if not isinstance(rows, list):
+        return None
+    out: list[dict[str, Any]] = []
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        # ── 容器任务（task.owned.<id>.* 键）──
+        owned = _collect_owned_tasks(row)
+        for pid, fields in owned.items():
+            out.append(
+                {
+                    "id": pid,
+                    "title": str(fields.get("title") or pid),
+                    "status": str(fields.get("status") or "active"),
+                    "thread_id": _session_anchor(row),
+                    "pipeline_run_id": str(row.get("pipeline_id") or ""),
+                    "parent_task_id": None,
+                    "metadata": {
+                        "session_id": _session_anchor(row),
+                        "task_scope": "container",
+                        "submitted_by": str(fields.get("submitted_by") or ""),
+                        "workspace": str(fields.get("workspace") or ""),
+                    },
+                    "created_at": str(fields.get("created_at") or ""),
+                }
+            )
+        # ── 普通任务（task.* 行；task.owned.* 是容器任务声明，排除）──
+        if not any(
+            str(k).startswith("task.") and not str(k).startswith("task.owned.")
+            for k in row.keys()
+        ):
+            continue
+        pid = str(row.get("pipeline_id") or "")
+        if not pid:
+            continue
+        out.append(
+            {
+                "id": pid,
+                "title": str(row.get("task.goal") or pid),
+                "status": str(row.get("task.status") or "pending"),
+                "thread_id": _session_anchor(row),
+                "pipeline_run_id": pid,
+                "parent_task_id": str(row.get("lineage.parent_pipeline_id") or "") or None,
+                "metadata": {
+                    "session_id": _session_anchor(row),
+                    "task_scope": str(row.get("task.scope") or "non_container"),
+                    "submitted_by": str(row.get("task.submitted_by") or ""),
+                    # 父是容器任务（task.owned 声明）时：容器 project id（前端
+                    # 任务树据此把子任务挂到容器节点下）
+                    "parent_project_id": str(row.get("task.parent_project_id") or "") or None,
+                },
+                "created_at": str(row.get("task.created_at") or ""),
+            }
+        )
+    return out
+
+
+def _session_anchor(row: dict[str, Any]) -> str | None:
+    """会话锚点：任务管道无 sessions 行，thread_id 恒等于自身 pipeline_id；
+    出生侧 lineage.origin_session_id 修正后为真 thread id（对齐 task_manage
+    工具层 _get_task_from_state 的取舍）。"""
+    pid = str(row.get("pipeline_id") or "")
+    origin_sess = str(row.get("lineage.origin_session_id") or "")
+    row_thread = str(row.get("thread_id") or "")
+    anchor = (
+        origin_sess
+        if origin_sess and origin_sess != pid
+        else (row_thread if row_thread and row_thread != pid else origin_sess or row_thread)
+    )
+    return anchor or None
+
+
+def _collect_owned_tasks(row: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    """从聚合行收集 task.owned.<id>.<field> 扁平键 → {id: {field: value}}。
+
+    容器任务等"只登记不执行"的声明（提交者管道自持），键形态：
+    task.owned.<project_id>.title / .status / .scope / .created_at / .workspace。
+    """
+    out: dict[str, dict[str, Any]] = {}
+    prefix = "task.owned."
+    for k, v in row.items():
+        if not (isinstance(k, str) and k.startswith(prefix)):
+            continue
+        rest = k[len(prefix):]
+        parts = rest.split(".", 1)
+        if len(parts) != 2:
+            continue
+        tid, field = parts
+        if not tid or not field:
+            continue
+        out.setdefault(tid, {})[field] = v
+    return out
 
 
 async def get_tasks_debug(
@@ -754,8 +932,6 @@ async def create_root_task(
     # ── 父容器校验（挂子任务时）：父任务必须存在且为 container ──
     parent_task_id = body.parent_task_id or None
 
-    is_child = False
-
     if parent_task_id:
         _parent = task_service.get_task(parent_task_id)
 
@@ -774,8 +950,6 @@ async def create_root_task(
                 error_code="PARENT_NOT_CONTAINER",
                 message=f"父任务必须是容器（container）任务，当前 scope: {_parent_scope}",
             )
-
-        is_child = True
 
     # ── 复用当前会话 ──
     thread_id = body.thread_id
@@ -819,6 +993,7 @@ async def create_root_task(
         scope=body.task_scope,
         execution_context=execution_context,
         agent_id=body.target_id,
+        thread_id=thread_id,
     )
     if not task_id:
         raise APIError(
@@ -842,14 +1017,29 @@ async def list_container_tasks(
     session_id: str = "",
     _user: dict[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
-    """返回当前会话下所有 task_scope=container 的任务，供前端下拉选父容器。"""
+    """返回当前会话下所有 task_scope=container 的任务，供前端下拉选父容器。
 
+    [GAP-1 统一 2026-08-22] 容器任务 = 提交者管道自持的声明（task.owned.*），
+    从 state 聚合组装；YAML 私有存储退役（0.2 容器任务不再写 YAML）。
+    """
+
+    containers: list[dict[str, Any]] = []
+
+    state_tasks = await _list_tasks_from_state()
+    if state_tasks:
+        for t in state_tasks:
+            if t.get("metadata", {}).get("task_scope") != "container":
+                continue
+            if session_id and t.get("thread_id") != session_id:
+                continue
+            containers.append({"id": t["id"], "title": t["title"]})
+        return containers
+
+    # 降级：state 聚合不可用 → YAML 面（0.1 遗留容器任务）
     task_service = _get_task_service()
 
     if task_service is None:
         return []
-
-    containers: list[dict[str, Any]] = []
 
     try:
         tasks = await task_service.list_all(limit=1000, session_id=session_id or None)
@@ -1222,8 +1412,6 @@ async def cancel_task(
             error_code="API_TIME_2005",
             message="TaskService 不可用，无法取消任务",
         )
-
-    reason = (body or {}).get("reason", "用户请求取消")
 
     # GAP-1 统一：取消 = 挂起任务管道 + lineage 级联
     pipeline_cancelled = await _suspend_task_pipeline(task_id)

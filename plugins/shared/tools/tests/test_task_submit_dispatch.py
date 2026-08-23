@@ -119,7 +119,10 @@ class TestTaskPipelineDispatch:
             mod._chat_sender = None
         assert r.success, r.error
 
-        assert len(sender.calls) == 1
+        # 语义统一（2026-08-22 定案）：有父管道时两次 chat.send_message——
+        # ① create 分支建执行管道；② no_dispatch 登记分支把新任务以
+        # task.owned.<id>.* 写回提交者管道 state（自持）。
+        assert len(sender.calls) == 2
         p = sender.calls[0]
         assert p["create"] is True
         assert "pipeline_id" not in p
@@ -137,14 +140,23 @@ class TestTaskPipelineDispatch:
         assert p["user_id"] == "user-1"
         assert p.get("background") is True
 
+        # 登记分支：只写提交者管道 state，不派发
+        reg = sender.calls[1]
+        assert reg["pipeline_id"] == "pipe_parent_9"
+        assert reg["no_dispatch"] is True
+        assert reg["state"][f"task.owned.pipe_engine_gen_1.status"] == "running"
+        assert reg["state"][f"task.owned.pipe_engine_gen_1.title"] == "喝水提醒"
+
         # YAML 写路径清零：create_task/start_task/bind_pipeline_run 全不触碰
         service.create_task.assert_not_called()
         service.start_task.assert_not_called()
         service.bind_pipeline_run.assert_not_called()
-        # 响应即身份：task_id == pipeline_id
-        assert r.output["task_id"] == "pipe_engine_gen_1"
-        assert r.output["pipeline_id"] == "pipe_engine_gen_1"
-        assert "pipe_engine_gen_1" in r.output["message"]
+        # 响应身份（2026-08-22 短化定案 8db4c6b16）：LLM 工具面回传 12 位短 id
+        # （内部权威 id 不动，登记分支的 task.owned 键仍用全 id）。
+        short_id = "pipe_engine_gen_1"[:12]
+        assert r.output["task_id"] == short_id
+        assert r.output["pipeline_id"] == short_id
+        assert short_id in r.output["message"]
 
     async def test_submit_root_lineage_without_parent_pipeline(self, mod: Any) -> None:
         """无调用方管道 → lineage 根形式（诚实声明）。"""
@@ -183,8 +195,12 @@ class TestTaskPipelineDispatch:
         mod.set_chat_sender(sender)
         tool = _make_tool(mod)
 
-        # 依赖存在（聚合行命中）
-        tool._read_state_rows = lambda: [{"pipeline_id": "dep_pipe_1", "task.status": "completed"}]  # type: ignore[method-assign]
+        # 依赖存在（聚合行命中）。_read_state_rows 已是 async 方法（await 调用），
+        # stub 需返回 coroutine。
+        async def _rows_hit() -> list[dict]:
+            return [{"pipeline_id": "dep_pipe_1", "task.status": "completed"}]
+
+        tool._read_state_rows = _rows_hit  # type: ignore[method-assign]
         try:
             r = await tool.execute(_base_inputs(dependencies=["dep_pipe_1"]))
         finally:
@@ -193,8 +209,11 @@ class TestTaskPipelineDispatch:
         assert sender.calls[0]["state"]["task.dependencies"] == ["dep_pipe_1"]
 
         # 依赖缺失 → DEPENDENCY_NOT_FOUND（不派发）
+        async def _rows_empty() -> list[dict]:
+            return []
+
         tool2 = _make_tool(mod)
-        tool2._read_state_rows = lambda: []  # type: ignore[method-assign]
+        tool2._read_state_rows = _rows_empty  # type: ignore[method-assign]
         mod.set_chat_sender(_FakeSender())
         try:
             r2 = await tool2.execute(_base_inputs(dependencies=["ghost_pipe"]))

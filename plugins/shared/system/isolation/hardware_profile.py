@@ -201,7 +201,7 @@ LOW_MEM_THRESHOLD = 12.0  # < 12GB 视为低配
 MID_MEM_THRESHOLD = 24.0  # 12-24GB 视为中配，>24GB 视为高配
 
 # 三档配置（纯数据，便于测试和调整）
-_PROFILES = {
+_PROFILES: dict[str, dict[str, Any]] = {
     "low": {  # 低配机（如 8GB 笔记本）
         "max_environments": 3,
         "container_memory": "256m",

@@ -34,17 +34,10 @@ def get_task_service() -> Any:
     if _task_service_instance is not None:
         return _task_service_instance
     try:
-        # 显式按 tasks 包限定，避免裸 `from service import` 在 channel_api 进程中被
-        # sys.path 上的 tools/human/service.py 误解析（后者 `from models import Priority`
-        # 会撞上 channel_api/models.py 无 Priority → ImportError → TaskService 永远为 None）。
-        # 另：tasks.service 及其 mixin 使用平铺兄弟导入（_task_cleanup/state_machine/...），
-        # 需 tasks/ 本身也在 sys.path 上；channel_api 仅把 system/ 入列，故此处补齐本目录。
-        import os
-        import sys
-        _tasks_dir = os.path.dirname(os.path.abspath(__file__))
-        if _tasks_dir not in sys.path:
-            sys.path.insert(0, _tasks_dir)
-        from tasks.service import TaskService  # noqa: PLC0415
+        # 平铺导入（与 server.py 同款）：tasks 插件代码已平铺到本目录
+        # （无 tasks/ 子包），`from service import TaskService` 直接命中。
+        # 进程内单例（cache 命中后不再触碰 import，重复调用零开销）。
+        from service import TaskService  # noqa: PLC0415
 
         _task_service_instance = TaskService()
         return _task_service_instance

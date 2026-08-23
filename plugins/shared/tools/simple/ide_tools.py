@@ -42,12 +42,6 @@ IDE_SHOW_DIFF_SCHEMA: dict[str, Any] = {
 _registry: Any = None
 
 
-def set_registry(registry: Any) -> None:
-    """设置连接器注册表（由 on_load 注入）。"""
-    global _registry
-    _registry = registry
-
-
 def _get_active_connector() -> Any:
     """获取活跃连接器。"""
     if _registry is None:

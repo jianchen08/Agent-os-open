@@ -71,6 +71,13 @@ _reports: dict[str, dict[str, Any]] = {}
 # review_id -> 子管道 run_id（供 get_report 查询状态/前端跳转）
 _run_ids: dict[str, str] = {}
 
+
+def _now_iso() -> str:
+    """当前时间 ISO 串（复盘管道登记时间戳）。"""
+    from datetime import datetime, timezone  # noqa: PLC0415
+
+    return datetime.now(timezone.utc).isoformat()
+
 # 长期记忆后端（IMemoryBackend），用于把复盘报告持久化到 Hindsight，供跨会话检索/注入。
 # 由插件宿主在加载时注入；未注入时 store_report 仅写内存 _reports（降级，不崩）。
 _memory_backend: Any = None
@@ -249,6 +256,33 @@ async def trigger_review(
             )
             pipeline_id = ""
         if pipeline_id:
+            # 触发方登记（管道树数据链）：复盘管道是任务管道的子管道——把新管道
+            # id 记回任务管道 state（task.owned.<id>.*，与 task_submit 同款契约），
+            # 前端任务树据此把复盘管道挂到被复盘任务下。
+            if task_id:
+                try:
+                    await chat.call(
+                        "send_message",
+                        {
+                            "pipeline_id": task_id,
+                            "message": f"登记复盘管道（{pipeline_id}）。",
+                            "user_id": "review_system",
+                            "no_dispatch": True,
+                            "state": {
+                                f"task.owned.{pipeline_id}.title": f"复盘 {task_id}",
+                                f"task.owned.{pipeline_id}.status": "running",
+                                f"task.owned.{pipeline_id}.scope": "non_container",
+                                f"task.owned.{pipeline_id}.created_at": _now_iso(),
+                                f"task.owned.{pipeline_id}.submitted_by": "review_system",
+                            },
+                        },
+                    )
+                except Exception as exc:  # noqa: BLE001 — 登记失败不影响复盘
+                    logger.warning(
+                        "[Review] 复盘管道登记到任务管道失败（不影响执行）| task=%s | err=%s",
+                        task_id,
+                        exc,
+                    )
             _reports[review_id] = {
                 "review_id": review_id,
                 "task_id": task_id,

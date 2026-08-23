@@ -351,12 +351,19 @@ class TestTriggerReviewDispatch:
         assert r["mode"] == "pipeline"
         assert r["pipeline_id"] == "pipe_review_gen_1"
 
-        assert len(calls) == 1
+        # 两次调用：创建复盘管道 + 登记复盘管道到任务管道 state（task.owned.*）
+        assert len(calls) == 2
         p = calls[0]
         assert p["create"] is True
         assert p["background"] is True
         # 血缘：根形式（系统组件，诚实声明复盘来源——不伪造父）
         assert p["lineage"] == {"root": True, "origin": {"kind": "plugin", "source": "review"}}
+        # 登记调用：复盘管道 id 写回被复盘任务管道（管道树数据链）
+        reg = calls[1]
+        assert reg["pipeline_id"] == "task-9"
+        assert reg["no_dispatch"] is True
+        assert reg["state"]["task.owned.pipe_review_gen_1.title"] == "复盘 task-9"
+        assert reg["state"]["task.owned.pipe_review_gen_1.scope"] == "non_container"
         # state：复盘对象 + 复盘输入出生即入
         assert p["state"]["task.id"] == "task-9"
         assert p["state"]["review.summary"] == "复盘周报任务"
@@ -375,6 +382,13 @@ class TestTriggerReviewDispatch:
         r = await mod.trigger_review(task_id="task-1", summary="s")
         assert r["status"] == "completed"
         assert r["mode"] == "local_degrade"
+
+    async def test_trigger_review_skips_registration_without_task(self, mod: Any) -> None:
+        """无 task_id（系统级复盘）只创建管道不登记（无归属任务可写回）。"""
+        calls = _inject_chat_capability(mod)
+        r = await mod.trigger_review(task_id="", summary="系统复盘")
+        assert r["status"] == "running"
+        assert len(calls) == 1  # 仅创建调用，无登记调用
 
     async def test_trigger_review_degrades_on_dispatch_error(self, mod: Any) -> None:
         """派发失败（内核错误）→ local_degrade 兜底（不崩）。"""

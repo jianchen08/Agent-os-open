@@ -67,6 +67,9 @@ class TriggerManager:
 
         self._main_loop: asyncio.AbstractEventLoop | None = None
 
+        # loop 内直接调度的注入任务（http REST 手动触发路径），持引用防 GC 取消。
+        self._loop_tasks: set[asyncio.Task[Any]] = set()
+
         # 0.2 sidecar 注入器：经内核 chat.send_message capability 投递触发消息并跑管道。
         # server.py on_load 时注入；为 None 时回退 0.1 进程内 pipeline.message_bus。
         self._injector: Callable[..., Any] | None = None
@@ -370,6 +373,10 @@ class TriggerManager:
 
         return self._triggers.get(trigger_id)
 
+    def list_all(self) -> list[TriggerConfig]:
+        """全量触发器（注册序）。"""
+        return list(self._triggers.values())
+
     def list_by_type(self, trigger_type: TriggerType) -> list[TriggerConfig]:
         """按类型列出触发器。
 
@@ -484,6 +491,19 @@ class TriggerManager:
 
         trigger.status = TriggerStatus.CANCELLED
 
+        return True
+
+    def fire_manually(self, trigger_id: str) -> bool:
+        """手动触发一次（REST /trigger 端点）。
+
+        与检查循环的到期触发互相独立：立即执行注入投递并累计
+        fire_count，不校验最大次数/时长等停止条件（语义为"现在就跑一次"）。
+        """
+        trigger = self._triggers.get(trigger_id)
+        if trigger is None:
+            return False
+        trigger.fire_count += 1
+        self._inject_trigger_message(trigger)
         return True
 
     def set_main_loop(self, loop: asyncio.AbstractEventLoop) -> None:
@@ -866,6 +886,17 @@ class TriggerManager:
 
         # ── 0.2 sidecar 路径：内核 chat.send_message capability（主路径） ──
         if self._injector is not None:
+            try:
+                running = asyncio.get_running_loop()
+            except RuntimeError:
+                running = None
+            if running is loop:
+                # 已在主循环内调用（http REST 手动触发等）：直接调度不阻塞等待；
+                # run_coroutine_threadsafe+future.result 会自我投递死锁满 60s 超时。
+                task = running.create_task(self._injector(trigger.pipeline_id, fire_info, user_id))
+                self._loop_tasks.add(task)
+                task.add_done_callback(self._loop_tasks.discard)
+                return
             future = asyncio.run_coroutine_threadsafe(
                 self._injector(trigger.pipeline_id, fire_info, user_id),
                 loop,

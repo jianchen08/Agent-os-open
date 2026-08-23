@@ -60,6 +60,10 @@
               },
               "description": "标签列表（强烈建议填写）。用于标记内容分类和主题，支持后续按标签精准检索。例如：['coding_standards', 'python']、['bug_pattern', 'timeout']。系统会自动追加当前 Agent 名称作为标签。"
             },
+            "document_id": {
+              "type": "string",
+              "description": "文档ID（store/update时使用，作为记忆的文档锚点，delete 时按此定向删除）"
+            },
             "filter": {
               "type": "object",
               "description": "筛选条件（第一层决策）",
@@ -87,6 +91,18 @@
                     "type": "string"
                   },
                   "description": "标签筛选"
+                },
+                "tags_match": {
+                  "type": "string",
+                  "enum": [
+                    "any",
+                    "all",
+                    "any_strict",
+                    "all_strict",
+                    "exact"
+                  ],
+                  "default": "any",
+                  "description": "标签匹配模式（any=OR 含无标签 / all=AND 含无标签 / any_strict=OR 排除无标签 / all_strict=AND 排除无标签 / exact=集合相等）"
                 },
                 "session_id": {
                   "type": "string",

@@ -91,8 +91,9 @@ async def test_writer_write_then_cache_hit() -> None:
     writer = ToolCacheWriter(config={})
     cache = ToolCache(config={})
 
-    # 模拟工具执行完成：raw_tool_calls + tool_results
-    raw_tool_calls = [{"name": "file_read", "args": {"path": "/tmp/a.txt"}}]
+    # 模拟工具执行完成：raw_tool_calls + tool_results（2026-08-22 起 file_read
+    # 按路径读类型排除出缓存，示例改用纯查询工具 web_search）
+    raw_tool_calls = [{"name": "web_search", "args": {"query": "agentos"}}]
     tool_results = [{"content": "hello world"}]
     ctx = make_ctx(raw_tool_calls, tool_results)
 
@@ -177,8 +178,8 @@ def test_global_cache_shared_across_instances() -> None:
     cache1 = ToolCache(config={})
     cache2 = ToolCache(config={})
 
-    # cache1 写入
-    cache1.put({"name": "file_read", "args": {"path": "x"}}, "data1")
+    # cache1 写入（file_read 已排除，用纯查询工具验证共享性）
+    cache1.put({"name": "web_search", "args": {"query": "agentos"}}, "data1")
 
     # cache2 应能读到（同一份全局缓存）
     g = get_global_cache()
@@ -282,3 +283,22 @@ async def test_disabled_cache_no_op() -> None:
 
     assert result.state_updates == {}
     assert not result.skip_remaining
+
+
+@pytest.mark.asyncio
+async def test_file_read_not_cached() -> None:
+    """file_read 不写缓存（2026-08-22 裁决）。
+
+    路径型读工具排除：同内容合法两次独立读（读→改→再读）在同一 pipeline 的
+    TTL 窗口内会被内容键误合并，第二次读返回改前内容——文件内容变了缓存不失效。
+    """
+    clear_cache()
+    writer = ToolCacheWriter(config={})
+
+    raw_tool_calls = [{"name": "file_read", "args": {"path": "src/a.py"}}]
+    tool_results = [{"output": "# 第一版内容"}]
+    ctx = make_ctx(raw_tool_calls, tool_results)
+
+    await writer.execute(ctx)
+
+    assert len(_GLOBAL_CACHE) == 0, "file_read 不应被缓存（读→写→再读会命中陈旧内容）"

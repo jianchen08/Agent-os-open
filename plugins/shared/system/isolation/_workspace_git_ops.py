@@ -14,6 +14,7 @@ import stat
 import subprocess
 import threading
 from pathlib import Path
+from typing import cast
 
 logger = logging.getLogger(__name__)
 
@@ -457,7 +458,7 @@ class _GitOpsMixin:
                         continue
                     if item.name in _WIN_RESERVED_NAMES:
                         continue
-                    rel = item.relative_to(src)
+                    rel = item.relative_to(cast(Path, src))
                     if any(p in skip for p in rel.parts):
                         continue
                     if item.suffix in _SKIP_EXTENSIONS:

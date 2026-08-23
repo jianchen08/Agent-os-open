@@ -77,7 +77,7 @@ def _resolve_project_root() -> Path | None:
     return None
 
 
-_resolve_project_root._cached: Path | None = None
+_resolve_project_root._cached: Path | None = None  # type: ignore[misc]
 
 
 class ParamInjectPlugin(IInputPlugin):

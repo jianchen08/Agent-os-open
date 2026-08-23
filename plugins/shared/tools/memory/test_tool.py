@@ -437,3 +437,117 @@ class TestServerIdorWiring:
         assert out["success"] is True
         kwargs = backend.search.await_args.kwargs
         assert kwargs["user_id"] == "legacy"
+
+
+# ═══════════════════════════════════════════════════════════
+# 12+. 8-22 真机测试修复回归：filter 全量接线 + list 非空查询
+# ═══════════════════════════════════════════════════════════
+
+
+class TestFilterWiring:
+    async def test_retrieve_passes_filter_tags(
+        self, mod: Any, backend: AsyncMock, tool_inst: Any
+    ) -> None:
+        """filter.tags/tags_match/session_id/knowledge_name 必须透传 backend.search
+        （修复前全部被丢弃，真机测试 filter 除 memory_type 外全失效）。"""
+        result = await tool_inst.execute(
+            {
+                "action": "retrieve",
+                "query": "红烧肉",
+                "filter": {
+                    "tags": ["食谱"],
+                    "tags_match": "any_strict",
+                    "session_id": "sess-1",
+                    "knowledge_name": "知识库A",
+                },
+            }
+        )
+
+        kwargs = backend.search.await_args.kwargs
+        assert kwargs["tags"] == ["食谱"]
+        assert kwargs["tags_match"] == "any_strict"
+        assert kwargs["session_id"] == "sess-1"
+        assert kwargs["knowledge_name"] == "知识库A"
+        assert result.success is True
+
+    async def test_store_passes_document_id(
+        self, mod: Any, backend: AsyncMock, tool_inst: Any
+    ) -> None:
+        """store 的 document_id 原样传给 backend.add——delete/update 定向通路。"""
+        result = await tool_inst.execute(
+            {
+                "action": "store",
+                "content": "内容",
+                "tags": ["t1"],
+                "document_id": "mem-doc-1",
+            }
+        )
+
+        kwargs = backend.add.await_args.kwargs
+        assert kwargs["document_id"] == "mem-doc-1"
+        assert result.success is True
+
+    async def test_update_keeps_memory_id_as_document_id(
+        self, mod: Any, backend: AsyncMock, tool_inst: Any
+    ) -> None:
+        """update 降级 add 时保留原 memory_id 作 document_id（定向覆盖锚点）。"""
+        result = await tool_inst.execute(
+            {
+                "action": "update",
+                "content": "新内容",
+                "memory_id": "mem-doc-2",
+                "tags": ["t2"],
+            }
+        )
+
+        kwargs = backend.add.await_args.kwargs
+        assert kwargs["document_id"] == "mem-doc-2"
+        assert result.output["degraded"] is True
+
+
+class TestListNonEmptyQuery:
+    async def test_list_uses_nonempty_query(
+        self, mod: Any, backend: AsyncMock, tool_inst: Any
+    ) -> None:
+        """list 不再用空 query 打后端（hindsight 服务端空 query 必 422）——
+        用宽泛查询 + 过滤，返回 count。"""
+        result = await tool_inst.execute(
+            {"action": "list", "filter": {"memory_type": "semantic"}}
+        )
+
+        assert result.success is True
+        kwargs = backend.search.await_args.kwargs
+        assert kwargs["query"].strip() != ""
+        assert kwargs["memory_type"] == "semantic"
+        assert "count" in result.output
+
+
+class TestStoreAutoDocumentId:
+    async def test_store_auto_generates_document_id(
+        self, mod: Any, backend: AsyncMock, tool_inst: Any
+    ) -> None:
+        """store 缺省 document_id 时自动生成（同步 retain 无 id 确认的锚点）。
+
+        2026-08-22 真机：store 无 document_id → sync retain 服务端不返回任何
+        id → 工具层误判"写入未确认"，LLM 被迫改用 import_text 绕过。"""
+        result = await tool_inst.execute(
+            {"action": "store", "content": "内容", "tags": ["t1"]}
+        )
+
+        kwargs = backend.add.await_args.kwargs
+        assert kwargs["document_id"].startswith("mem-")
+        assert result.success is True
+        # 真实链路：HindsightBackend.add 把 document_id 原样返回作 memory_id
+        backend.add.return_value = kwargs["document_id"]
+
+    async def test_store_keeps_explicit_document_id(
+        self, mod: Any, backend: AsyncMock, tool_inst: Any
+    ) -> None:
+        """显式 document_id 原样保留（不覆盖）。"""
+        result = await tool_inst.execute(
+            {"action": "store", "content": "内容", "document_id": "mem-explicit"}
+        )
+
+        kwargs = backend.add.await_args.kwargs
+        assert kwargs["document_id"] == "mem-explicit"
+        assert result.success is True

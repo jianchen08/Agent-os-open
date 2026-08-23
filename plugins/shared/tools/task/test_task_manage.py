@@ -11,6 +11,7 @@ get/stop/delete 全部不可用。修复后：
 
 from __future__ import annotations
 
+import importlib.util
 import sys
 from pathlib import Path
 
@@ -19,17 +20,56 @@ import pytest
 # 与 server.py 的 sys.path 注入保持一致：tasks 平铺目录 + system/（tasks 包限定导入用）
 _HERE = Path(__file__).resolve().parent
 _PROJECT_ROOT = _HERE.parent.parent.parent.parent
-for _d in (
-    str(_HERE),
-    str(_PROJECT_ROOT / "plugins" / "shared" / "system" / "tasks"),
-    str(_PROJECT_ROOT / "plugins" / "shared" / "system"),
-):
+_PLUGIN_PATHS = tuple(
+    str(_d)
+    for _d in (
+        _HERE,
+        _PROJECT_ROOT / "plugins" / "shared" / "system" / "tasks",
+        _PROJECT_ROOT / "plugins" / "shared" / "system",
+    )
+)
+for _d in _PLUGIN_PATHS:
     if _d not in sys.path:
         sys.path.insert(0, _d)
 
 from tool import TaskTool  # noqa: E402
 
 pytestmark = pytest.mark.unit
+
+
+@pytest.fixture(autouse=True)
+def _ensure_plugin_paths():
+    """平铺串扰自持：其它测试文件的 teardown 会把 tasks/system 目录从
+    sys.path 摘走，而 TaskTool 的 service_access 是运行期懒导入——
+    每个用例前重插（模块期插入只保证收集期）。
+    裸名 'service'/'http_api' 会被其它插件的同名文件占槽（continue 链中途
+    加载 tasks/server.py 时其顶层 from service import TaskService 拿错模块）：
+    用例前逐出并以正确路径序预热，teardown 快照还原，不向外污染。"""
+    for _d in _PLUGIN_PATHS:
+        # 无条件提到最前：其它测试会把各自插件目录插到 sys.path[0]（如
+        # human），仅"不存在才插入"会让 tasks 目录落在其后，重导入仍解析
+        # 到别人的同名裸模块。
+        if _d in sys.path:
+            sys.path.remove(_d)
+        sys.path.insert(0, _d)
+    _saved = {n: sys.modules.get(n) for n in ("service", "http_api")}
+    for n in _saved:
+        sys.modules.pop(n, None)
+    try:
+        # 预热 continue 执行链：tasks/server.py 顶层的裸名导入在干净槽位 +
+        # tasks 目录最前的环境下执行一遍，把正确的模块写进缓存。
+        _server_py = _PROJECT_ROOT / "plugins" / "shared" / "system" / "tasks" / "server.py"
+        _spec = importlib.util.spec_from_file_location("tasks_server_preheat", _server_py)
+        if _spec is not None and _spec.loader is not None:
+            _mod = importlib.util.module_from_spec(_spec)
+            _spec.loader.exec_module(_mod)
+    except Exception:  # noqa: BLE001 —— 预热失败不阻断用例（复由用例自身报错）
+        pass
+    yield
+    for n, m in _saved.items():
+        sys.modules.pop(n, None)
+        if m is not None:
+            sys.modules[n] = m
 
 
 def test_get_task_service_returns_0_2_service_without_infrastructure() -> None:

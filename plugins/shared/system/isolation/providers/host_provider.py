@@ -12,7 +12,7 @@ import os
 import platform
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 from isolation_types import (
     EnvironmentStatus,
@@ -211,7 +211,8 @@ class HostProvider(IsolationProvider):
     ) -> ExecutionResult:
         """执行文件操作"""
         op = operation.get("operation")
-        path = operation.get("path")
+        # 运行时 path 由操作方保证为 str；缺失时与既有行为一致（open 等 TypeError 落入 except）
+        path = cast(str, operation.get("path"))
 
         # workspace 权限检查（写入和删除操作）
         if op in ["write", "delete"] and context and context.workspace:
@@ -226,7 +227,7 @@ class HostProvider(IsolationProvider):
                 return ExecutionResult(success=True, output=content)
 
             if op == "write":
-                content = operation.get("content")
+                content = cast(str, operation.get("content"))
                 # 确保目录存在
                 Path(path).parent.mkdir(parents=True, exist_ok=True)
                 with open(path, "w", encoding="utf-8") as f:

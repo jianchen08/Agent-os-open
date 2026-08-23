@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import ipaddress
 import socket
+from typing import cast
 from urllib.parse import urlparse
 
 # RFC 1918 / loopback / link-local / CGNAT / 未指定地址 网段（SSRF 防护）
@@ -73,7 +74,8 @@ def resolve_hostname_ips(hostname: str) -> tuple[list[str] | None, str | None]:
         resolved_ips = socket.getaddrinfo(hostname, None)
     except socket.gaierror:
         return None, f"无法解析域名: {hostname}"
-    return [entry[4][0] for entry in resolved_ips], None
+    # sockaddr 首元素在各协议族下均为主机地址字符串
+    return [cast(str, entry[4][0]) for entry in resolved_ips], None
 
 
 def validate_url(url: str, allow_domains: list[str] | None = None) -> tuple[bool, str]:

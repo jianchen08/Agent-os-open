@@ -117,5 +117,34 @@ async def trigger_setup(**kwargs):
     return result.output if result.success else {"error": result.error}
 
 
+@plugin.tool(
+    name="http.handle",
+    schema={
+        "type": "object",
+        "properties": {
+            "path": {"type": "string"},
+            "method": {"type": "string"},
+            "plugin_id": {"type": "string"},
+            "raw_body": {"type": "string"},
+            "headers": {"type": "object"},
+            "query": {"type": "object"},
+        },
+    },
+    description="HTTP endpoint handler for /ext/trigger_setup_tool/** (trigger management REST)",
+)
+async def http_handle(
+    path: str = "",
+    method: str = "GET",
+    plugin_id: str = "",
+    raw_body: str = "",
+    headers: dict[str, str] | None = None,
+    query: dict[str, str] | None = None,
+) -> dict[str, Any]:
+    """REST 分发到 triggers 域 9 端点（channel_api triggers stub 接真）。"""
+    from http_api import handle_http_dispatch  # noqa: PLC0415
+
+    return await handle_http_dispatch(path, method, raw_body, query or {})
+
+
 if __name__ == "__main__":
     plugin.run()

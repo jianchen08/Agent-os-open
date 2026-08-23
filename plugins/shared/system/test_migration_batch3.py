@@ -80,7 +80,6 @@ class TestConnectorsMigration:
     def test_creative_subdir_copied(self) -> None:
         """creative/ 子目录已复制。"""
         assert (CONNECTORS_DIR / "creative" / "comfyui.py").exists()
-        assert (CONNECTORS_DIR / "creative" / "game_engine.py").exists()
         assert (CONNECTORS_DIR / "creative" / "generic.py").exists()
 
     def test_plugin_json_exists_and_valid(self) -> None:
@@ -297,17 +296,32 @@ class TestWorkspaceMigration:
         """WorkspaceService 可导入且可实例化。"""
         _purge_modules("models")
         _purge_modules("workspace_service")
+        _purge_modules("workspace")
+        # 平铺串扰：tasks/isolation 目录的 workspace.py 裸模块会压制本目录的
+        # workspace 命名空间包（PathFinder 普通模块优先于 namespace portion）；
+        # system/ 在路径上才能把 workspace/ 解析为命名空间包供 workspace.models 用。
+        _conflicts = [
+            d for d in (SYSTEM_DIR / "tasks", SYSTEM_DIR / "isolation")
+            if str(d) in sys.path
+        ]
+        for d in _conflicts:
+            sys.path.remove(str(d))
         sys.path.insert(0, str(WORKSPACE_DIR))
+        sys.path.insert(0, str(SYSTEM_DIR))
         try:
             from workspace_service import WorkspaceService  # noqa: F811
 
             svc = WorkspaceService()
             assert svc is not None
         finally:
-            if str(WORKSPACE_DIR) in sys.path:
-                sys.path.remove(str(WORKSPACE_DIR))
+            for p in (str(WORKSPACE_DIR), str(SYSTEM_DIR)):
+                if p in sys.path:
+                    sys.path.remove(p)
+            for d in _conflicts:
+                sys.path.insert(0, str(d))
             _purge_modules("models")
             _purge_modules("workspace_service")
+            _purge_modules("workspace")
 
 
 if __name__ == "__main__":

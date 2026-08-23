@@ -36,6 +36,23 @@
               "type": "object",
               "default": {},
               "description": "Optional extra metadata"
+            },
+            "document_id": {
+              "type": "string",
+              "description": "Optional document id (returned as-is for targeted delete/update)"
+            },
+            "retain_async": {
+              "type": "boolean",
+              "default": false,
+              "description": "Async background retain (slow; recall misses until extraction finishes)"
+            },
+            "update_mode": {
+              "type": "string",
+              "enum": [
+                "replace",
+                "append"
+              ],
+              "description": "Optional update semantics for same document_id (replace/append)"
             }
           },
           "required": [
@@ -66,6 +83,18 @@
             "memory_type": {
               "type": "string",
               "description": "Optional client-side filter by memory_type"
+            },
+            "tags": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "description": "Optional server-side tag filter"
+            },
+            "tags_match": {
+              "type": "string",
+              "default": "any",
+              "description": "Tag match mode: any/all/any_strict/all_strict/exact"
             }
           },
           "required": [

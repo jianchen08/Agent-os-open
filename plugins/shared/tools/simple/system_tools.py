@@ -9,7 +9,7 @@ import json
 import logging
 from collections.abc import Awaitable, Callable
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import yaml
 
@@ -173,7 +173,7 @@ async def read_execution_detail(
         messages = await _fetch_messages(pipeline_run_id)
         if isinstance(messages, dict) and "error" in messages:
             messages = []
-        return _render_skeleton(pipeline_run_id, traces, messages)
+        return _render_skeleton(pipeline_run_id, traces, cast(list[dict[str, Any]], messages))
 
     if level == "L1":
         # L1 = 压缩摘要(Hindsight 压缩块);无压缩块时降级用 messages 轮次摘要
@@ -184,7 +184,7 @@ async def read_execution_detail(
         messages = await _fetch_messages(pipeline_run_id)
         if isinstance(messages, dict) and "error" in messages:
             return messages
-        turns = _group_turns(messages)
+        turns = _group_turns(cast(list[dict[str, Any]], messages))
         if iteration is not None:
             if iteration < 1 or iteration > len(turns):
                 return {"error": f"未找到 iteration={iteration} 的对话轮次（共 {len(turns)} 轮）"}
@@ -196,10 +196,10 @@ async def read_execution_detail(
         messages = await _fetch_messages(pipeline_run_id)
         if isinstance(messages, dict) and "error" in messages:
             return messages
-        records = _select_l0_records(messages, iteration)
+        records = _select_l0_records(cast(list[dict[str, Any]], messages), iteration)
         if isinstance(records, dict) and "error" in records:
             return records
-        return _render_l0(pipeline_run_id, records)
+        return _render_l0(pipeline_run_id, cast(list[dict[str, Any]], records))
 
     return {"error": f"不支持的 level: {level}"}
 
@@ -449,7 +449,8 @@ def _render_l1(
     """
     rendered = []
     for idx, turn in enumerate(turns, start=1):
-        seqs = [m.get("seq_in_branch") for m in turn if m.get("seq_in_branch") is not None]
+        # 过滤条件与元素是两次独立 m.get 调用，类型上仍含 None；运行时 None 已被滤除。
+        seqs: list[Any] = [m.get("seq_in_branch") for m in turn if m.get("seq_in_branch") is not None]
         user_msgs = [m for m in turn if m.get("role") == "user"]
         ai_msgs = [m for m in turn if m.get("role") == "assistant"]
         tool_msgs = [m for m in turn if m.get("role") == "tool"]
@@ -564,11 +565,6 @@ REGISTER_RESOURCE_SCHEMA: dict[str, Any] = {
 }
 
 _service_cache: dict[str, Any] = {}
-
-
-def set_service(service_name: str, service: Any) -> None:
-    """设置服务实例到模块级缓存。"""
-    _service_cache[service_name] = service
 
 
 def _get_service(service_name: str) -> Any:

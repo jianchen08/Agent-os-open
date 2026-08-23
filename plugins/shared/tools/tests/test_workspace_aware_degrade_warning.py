@@ -51,6 +51,11 @@ class _Tool:
 def force_isolation_import_error(monkeypatch):
     """强制 isolation 包导入失败（sys.modules 占位 None → ImportError）。"""
     monkeypatch.setitem(sys.modules, "isolation", None)
+    # 平铺串扰：父包占位 None 拦不住已缓存的子模块——
+    # from isolation.x import Y 命中 sys.modules['isolation.x'] 缓存时不触发
+    # 父包导入，须连带逐出 isolation.*（monkeypatch 测试后自动还原）。
+    for _name in [k for k in sys.modules if k.startswith("isolation.")]:
+        monkeypatch.delitem(sys.modules, _name, raising=False)
 
 
 def test_degrade_warns_once(force_isolation_import_error, caplog):

@@ -414,3 +414,62 @@ class TestFactory:
         """capability_caller=None 时抛 ValueError。"""
         with pytest.raises(ValueError):
             mod.get_memory_backend(capability_caller=None)
+
+
+# ═══════════════════════════════════════════════════════════
+# 8-22 真机测试修复回归：search 过滤接线 + delete/add document_id
+# ═══════════════════════════════════════════════════════════
+
+
+class TestSearchFilters:
+    async def test_search_passes_tags_and_session(
+        self, mod: Any, caller: AsyncMock
+    ) -> None:
+        """search 的 tags/tags_match/session_id 必须投给 recall（修复前 filter
+        除 memory_type 外全被丢弃）；session_id 转为 session:<id> 标签过滤，
+        隔离键始终是 user_id 对应 bank。"""
+        caller.return_value = {"results": [], "total": 0}
+        backend = mod.HindsightBackend(caller)
+
+        await backend.search(
+            query="q", user_id="user-1", tags=["食谱"],
+            tags_match="any_strict", session_id="sess-9",
+        )
+
+        _, params = caller.call_args.args
+        args = params["args"]
+        assert args["bank_id"] == "user-1"
+        assert args["tags"] == ["食谱", "session:sess-9"]
+        assert args["tags_match"] == "any_strict"
+
+    async def test_search_filters_knowledge_name_client_side(
+        self, mod: Any, caller: AsyncMock
+    ) -> None:
+        """knowledge_name 客户端过滤：只保留 metadata.knowledge_name 匹配项。"""
+        caller.return_value = {
+            "results": [
+                {"id": "a", "content": "x", "score": 1.0,
+                 "metadata": {"memory_type": "semantic", "knowledge_name": "kb1"}},
+                {"id": "b", "content": "y", "score": 1.0,
+                 "metadata": {"memory_type": "semantic"}},
+            ],
+            "total": 2,
+        }
+        backend = mod.HindsightBackend(caller)
+
+        results = await backend.search(query="q", user_id="u", knowledge_name="kb1")
+
+        assert [r["id"] for r in results] == ["a"]
+
+    async def test_add_passes_document_id(
+        self, mod: Any, caller: AsyncMock
+    ) -> None:
+        """add 的 document_id 透传到 hindsight.retain args（定向删除通路）。"""
+        caller.return_value = {"id": "mem-doc-1", "stored": True}
+        backend = mod.HindsightBackend(caller)
+
+        mem_id = await backend.add(user_id="u", content="c", document_id="mem-doc-1")
+
+        _, params = caller.call_args.args
+        assert params["args"]["document_id"] == "mem-doc-1"
+        assert mem_id == "mem-doc-1"

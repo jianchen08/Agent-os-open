@@ -26,18 +26,6 @@ ALLOWED_BUILTINS: frozenset[str] = frozenset(
 )
 
 
-class SandboxError(Exception):
-    """沙箱错误基类"""
-
-
-class SandboxTimeoutError(SandboxError):
-    """沙箱超时错误"""
-
-
-class SandboxSecurityError(SandboxError):
-    """沙箱安全错误"""
-
-
 @dataclass
 class SandboxResult:
     """沙箱执行结果"""
@@ -329,7 +317,7 @@ class CodeSandbox:
             with suppress(AttributeError):
                 safe_builtins[name] = getattr(builtins, name)
 
-        globals_dict = {
+        globals_dict: dict[str, Any] = {
             "__builtins__": safe_builtins,
         }
 

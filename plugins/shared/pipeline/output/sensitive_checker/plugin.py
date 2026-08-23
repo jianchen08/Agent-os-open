@@ -152,14 +152,15 @@ class SensitiveChecker(IOutputPlugin):
                 sanitized[k] = new_v
             return sanitized if changed else value
         if isinstance(value, list):
-            sanitized = []
+            # 与上方 dict 分支复用变量名但形状不同；列表分支用独立名避免类型混流
+            sanitized_items: list[Any] = []
             changed = False
             for item in value:
                 new_item = self._sanitize_value(item)
                 if new_item is not item:
                     changed = True
-                sanitized.append(new_item)
-            return sanitized if changed else value
+                sanitized_items.append(new_item)
+            return sanitized_items if changed else value
         return value
 
     def _sanitize_string(self, text: str) -> str:

@@ -306,8 +306,9 @@ class TestTaskSubmitCoreSubmit:
         mod._chat_sender = None
         assert result.success is True
         output = result.output
-        assert output["task_id"] == "pipe_gen_abc123"
-        assert output["pipeline_id"] == "pipe_gen_abc123"
+        # 2026-08-22 短化定案（8db4c6b16）：LLM 工具面回传 12 位短 id
+        assert output["task_id"] == "pipe_gen_abc123"[:12]
+        assert output["pipeline_id"] == "pipe_gen_abc123"[:12]
         assert output["status"] == "running"
         assert output["workspace"] == "D:/proj"
         task_service.create_task.assert_not_called()

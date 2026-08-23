@@ -22,6 +22,10 @@ if _SHARED_DIR not in sys.path:
 
 import importlib.util  # noqa: E402
 import urllib.parse  # noqa: E402
+from typing import TYPE_CHECKING  # noqa: E402
+
+if TYPE_CHECKING:
+    from plugins.shared.pipeline.input.security_check.plugin import SecurityCheckPlugin
 
 _spec = importlib.util.spec_from_file_location(
     "security_check_plugin_p14", str(Path(_THIS_DIR) / "plugin.py")
@@ -29,7 +33,8 @@ _spec = importlib.util.spec_from_file_location(
 assert _spec is not None and _spec.loader is not None
 _sc_mod = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(_sc_mod)
-SecurityCheckPlugin = _sc_mod.SecurityCheckPlugin
+if not TYPE_CHECKING:
+    SecurityCheckPlugin = _sc_mod.SecurityCheckPlugin
 
 
 def _make_plugin() -> SecurityCheckPlugin:

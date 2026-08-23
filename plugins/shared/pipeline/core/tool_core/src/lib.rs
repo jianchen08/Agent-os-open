@@ -508,4 +508,78 @@ mod tests {
         assert!(!output_validate::validation_enabled(&json!({"tool_output_validation": "off"})));
         assert!(output_validate::validation_enabled(&json!({})));
     }
+
+    // ══ check_tool_blocked 契约（从 Python TestCheckToolBlocked 迁移，0.2 native 化）══
+
+    /// level_guard 拦截 → 失败结果含权限原因；同 blocked_tools 外的工具不拦截。
+    #[test]
+    fn test_level_guard_block_returns_failure() {
+        let state = json!({
+            "security.level_decision": {
+                "allowed": false,
+                "reason": "Agent level L1 not allowed to call: file_write",
+                "blocked_tools": ["file_write"],
+            },
+        });
+        let r = types::check_tool_blocked("file_write", &state);
+        assert!(r.is_some());
+        let r = r.unwrap();
+        assert!(!r.success);
+        assert!(r.error.unwrap_or_default().contains("权限"));
+        // 不在 blocked_tools 的工具不受影响。
+        assert!(types::check_tool_blocked("file_read", &state).is_none());
+    }
+
+    /// blocked_tools 缺失 = 全拦（fail-closed）。
+    #[test]
+    fn test_level_guard_missing_blocked_tools_blocks_all() {
+        let state = json!({
+            "security.level_decision": {"allowed": false, "reason": "deny all"},
+        });
+        let r = types::check_tool_blocked("file_write", &state);
+        assert!(r.is_some());
+        assert!(!r.unwrap().success);
+    }
+
+    /// isolation_guard 拦截 → 失败结果含隔离原因。
+    #[test]
+    fn test_isolation_block_returns_failure() {
+        let state = json!({
+            "execution_contexts": [
+                {"tool_name": "bash_execute", "provider": "denied",
+                 "blocked": true, "reason": "policy_fallback_denied"},
+            ],
+        });
+        let r = types::check_tool_blocked("bash_execute", &state);
+        assert!(r.is_some());
+        let r = r.unwrap();
+        assert!(!r.success);
+        assert!(r.error.unwrap_or_default().contains("隔离"));
+        // 同 context 内其它工具不受影响。
+        assert!(types::check_tool_blocked("file_read", &state).is_none());
+    }
+
+    /// security_check 拦截 → 失败结果含安全原因。
+    #[test]
+    fn test_security_check_block_returns_failure() {
+        let state = json!({
+            "security.decision": {"allowed": false, "reason": "危险操作 rm -rf /"},
+        });
+        let r = types::check_tool_blocked("bash_execute", &state);
+        assert!(r.is_some());
+        let r = r.unwrap();
+        assert!(!r.success);
+        assert!(r.error.unwrap_or_default().contains("安全"));
+    }
+
+    /// 无拦截决策 / allowed=true → None（正常执行）。
+    #[test]
+    fn test_no_block_decision_returns_none() {
+        assert!(types::check_tool_blocked("file_read", &json!({})).is_none());
+        let allowed = json!({
+            "security.level_decision": {"allowed": true, "reason": "ok"},
+            "security.decision": {"allowed": true, "reason": "ok"},
+        });
+        assert!(types::check_tool_blocked("file_write", &allowed).is_none());
+    }
 }

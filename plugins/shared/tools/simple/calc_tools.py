@@ -43,7 +43,9 @@ _CONSTANTS = {
     "inf": math.inf,
 }
 
-_OPERATIONS = {
+# 值混合了一元/二元 lambda 与 math 内置函数（调用处按函数名约定参数个数），
+# 声明为 Any 以避免 mypy 对异构可调用联合的 unknown-type 调用报错。
+_OPERATIONS: dict[str, Any] = {
     "sin": lambda x: math.sin(math.radians(x)),
     "cos": lambda x: math.cos(math.radians(x)),
     "tan": lambda x: math.tan(math.radians(x)),

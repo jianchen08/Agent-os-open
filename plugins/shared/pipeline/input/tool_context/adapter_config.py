@@ -18,7 +18,7 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 logger = logging.getLogger(__name__)
 
@@ -96,7 +96,7 @@ def load_adapter_configs(
             name=name,
             adapter_type=cfg.get("type", ""),
             priority=cfg.get("priority", 0),
-            display_name=cfg.get("display_name", name),
+            display_name=cast(str, cfg.get("display_name", name)),
             capabilities=tuple(cfg.get("capabilities") or []),
             available=cfg.get("available", True),
             has_mcp=mcp_config is not None,

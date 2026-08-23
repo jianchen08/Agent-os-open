@@ -65,7 +65,8 @@ def _apply_sampling(
 
 
 def _has_tool_calls(msg: dict[str, Any]) -> bool:
-    return msg.get("role") == "assistant" and msg.get("tool_calls")
+    # bool() 显式收敛 and 短路返回的 truthy 值（调用方均为布尔上下文）
+    return bool(msg.get("role") == "assistant" and msg.get("tool_calls"))
 
 
 def _ensure_rc(msg: dict[str, Any]) -> dict[str, Any]:

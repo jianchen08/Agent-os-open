@@ -26,9 +26,20 @@ import types
 from datetime import UTC, datetime
 from enum import Enum
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import pytest
+
+if TYPE_CHECKING:
+    from plugins.shared.system.isolation.isolation_types import (
+        EnvironmentStatus,
+        ExecutionResult,
+        IsolationContext,
+        IsolationEnvironment,
+        IsolationLevel,
+        OperationType,
+        TaskType,
+    )
 
 pytestmark = pytest.mark.unit
 
@@ -43,13 +54,15 @@ ISOLATION_TYPES = importlib.util.module_from_spec(_isolation_types_mod)
 sys.modules["isolation_types"] = ISOLATION_TYPES
 _isolation_types_mod.loader.exec_module(ISOLATION_TYPES)
 
-EnvironmentStatus = ISOLATION_TYPES.EnvironmentStatus
-ExecutionResult = ISOLATION_TYPES.ExecutionResult
-IsolationContext = ISOLATION_TYPES.IsolationContext
-IsolationEnvironment = ISOLATION_TYPES.IsolationEnvironment
-IsolationLevel = ISOLATION_TYPES.IsolationLevel
-OperationType = ISOLATION_TYPES.OperationType
-TaskType = ISOLATION_TYPES.TaskType
+if not TYPE_CHECKING:
+    # 运行期：仍从动态加载的 isolation_types 取真实类（mypy 走上方静态导入）。
+    EnvironmentStatus = ISOLATION_TYPES.EnvironmentStatus
+    ExecutionResult = ISOLATION_TYPES.ExecutionResult
+    IsolationContext = ISOLATION_TYPES.IsolationContext
+    IsolationEnvironment = ISOLATION_TYPES.IsolationEnvironment
+    IsolationLevel = ISOLATION_TYPES.IsolationLevel
+    OperationType = ISOLATION_TYPES.OperationType
+    TaskType = ISOLATION_TYPES.TaskType
 
 _STUB_KEYS = (
     "decider",

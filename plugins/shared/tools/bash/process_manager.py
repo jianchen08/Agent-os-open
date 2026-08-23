@@ -316,7 +316,7 @@ class ProcessManager:
                 metadata=metadata,
             )
             self._ensure_watchdog()
-            output_task.add_done_callback(lambda t, p=host_pid: self._on_output_task_done(p, t))
+            output_task.add_done_callback(lambda t, p=host_pid: self._on_output_task_done(p, t))  # type: ignore[misc]
             return host_pid, log_file
 
         # ===== 本地路径：原 WSL/Bash/CMD 分支 =====
@@ -430,7 +430,8 @@ class ProcessManager:
 
         # 保存进程信息。注入本地后端，使看门狗的单进程内存维度判据生效
         # （sample_unit_memory 用 psutil 查该进程及其后代 RSS，超阈值按 idle 杀）。
-        metadata: dict[str, Any] = {}
+        # 注：metadata 已在容器分支声明过 dict[str, Any]，此处无需重复注解。
+        metadata = {}
         if owner is not None:
             metadata["owner"] = owner
         self.active_processes[pid] = ProcessInfo(
@@ -449,7 +450,7 @@ class ProcessManager:
         self._ensure_watchdog()
 
         # 添加任务完成回调以清理引用
-        output_task.add_done_callback(lambda t, p=pid: self._on_output_task_done(p, t))
+        output_task.add_done_callback(lambda t, p=pid: self._on_output_task_done(p, t))  # type: ignore[misc]
 
         return pid, log_file
 
@@ -525,6 +526,8 @@ class ProcessManager:
         docker exec kill 会失败但不会误杀，调用方据返回码处理。
         """
         try:
+            # docker exec 子进程以 PIPE 创建，stdout 恒非 None；窄化供类型检查。
+            assert process.stdout is not None
             first_line = await asyncio.wait_for(process.stdout.readline(), timeout=5.0)
             text = first_line.decode(errors="replace").strip()
             return int(text)

@@ -218,7 +218,7 @@ def build_model_list(
                 )
         else:
             # 单 key：直接用模型级或 provider 级的凭证
-            lp: dict[str, Any] = {"model": litellm_model}
+            lp = {"model": litellm_model}
             if model_api_key:
                 lp["api_key"] = model_api_key
             if model_api_base:
@@ -376,14 +376,6 @@ def get_or_create_router(model_loader: Any) -> litellm.Router:
     if _router_instance is None:
         _router_instance = build_router(model_loader)
     return _router_instance
-
-
-def get_or_create_adapter(model_loader: Any) -> Any:
-    """获取或创建共享的 Adapter 单例。"""
-    global _adapter_instance  # noqa: PLW0603
-    if _adapter_instance is None:
-        _adapter_instance = build_adapter(model_loader)
-    return _adapter_instance
 
 
 def reset_router() -> None:

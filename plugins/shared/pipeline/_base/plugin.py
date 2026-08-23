@@ -75,7 +75,7 @@ class ICorePlugin(IPlugin):
     """
 
     @abstractmethod
-    async def execute(self, ctx: PluginContext) -> dict[str, Any]:
+    async def execute(self, ctx: PluginContext) -> dict[str, Any]:  # type: ignore[override]
         """执行核心插件逻辑。
 
         Args:

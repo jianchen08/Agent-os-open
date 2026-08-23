@@ -16,7 +16,7 @@ import importlib.util
 import json
 import sys
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import pytest
 
@@ -48,8 +48,12 @@ def _load_scene_package() -> Any:
 
 _MODS = _load_scene_package()
 Scene = _MODS["scene.models"].Scene
-ScenePersistence = _MODS["scene.persistence"].ScenePersistence
-SceneManager = _MODS["scene.manager"].SceneManager
+if TYPE_CHECKING:
+    from plugins.shared.system.scene.manager import SceneManager
+    from plugins.shared.system.scene.persistence import ScenePersistence
+else:
+    ScenePersistence = _MODS["scene.persistence"].ScenePersistence
+    SceneManager = _MODS["scene.manager"].SceneManager
 get_template = _MODS["scene.templates"].get_template
 list_templates = _MODS["scene.templates"].list_templates
 

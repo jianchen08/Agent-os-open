@@ -94,7 +94,7 @@ class FakeBackend:
 class ErrorBackend(FakeBackend):
     """search 必抛异常的后端，验证降级路径。"""
 
-    async def search(self, **kwargs: Any) -> list[dict[str, Any]]:
+    async def search(self, **kwargs: Any) -> list[dict[str, Any]]:  # type: ignore[override]
         self.search_calls.append(kwargs)
         raise RuntimeError("backend down")
 

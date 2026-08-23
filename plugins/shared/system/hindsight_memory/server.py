@@ -96,31 +96,6 @@ def _resolve_bank_id(bank_id: str | None) -> str:
     return fallback
 
 
-def _filter_by_memory_type(
-    results: list[dict[str, Any]], memory_type: str | None
-) -> list[dict[str, Any]]:
-    """按 memory_type 客户端过滤 recall 结果。
-
-    匹配字段：metadata.memory_type（写侧固定存放位置）。
-
-    Args:
-        results: hindsight recall 原始结果列表
-        memory_type: 过滤类型；None/空 表示不过滤
-
-    Returns:
-        过滤后列表
-    """
-    if not memory_type:
-        return results
-    out: list[dict[str, Any]] = []
-    for r in results:
-        meta = r.get("metadata") or {}
-        # 写侧固定存 metadata.memory_type（本模块 _store 的 setdefault）。
-        if meta.get("memory_type") == memory_type:
-            out.append(r)
-    return out
-
-
 def _chunk_text(text: str, chunk_size: int = _CHUNK_SIZE) -> list[str]:
     """按字符数切分文本（朴素滑窗，~chunk_size 字符/块）。
 
@@ -161,6 +136,20 @@ def _chunk_text(text: str, chunk_size: int = _CHUNK_SIZE) -> list[str]:
                 "default": {},
                 "description": "Optional extra metadata",
             },
+            "document_id": {
+                "type": "string",
+                "description": "Optional document id (returned as-is for targeted delete/update)",
+            },
+            "retain_async": {
+                "type": "boolean",
+                "default": False,
+                "description": "Async background retain (slow; recall misses until extraction finishes)",
+            },
+            "update_mode": {
+                "type": "string",
+                "enum": ["replace", "append"],
+                "description": "Optional update semantics for same document_id (replace/append)",
+            },
         },
         "required": ["content"],
     },
@@ -171,11 +160,27 @@ async def hindsight_retain(
     bank_id: str = "",
     memory_type: str = "semantic",
     metadata: dict[str, Any] | None = None,
+    document_id: str = "",
+    retain_async: bool = False,
+    operation_id: str | None = None,
+    update_mode: str | None = None,
 ) -> dict[str, Any]:
     """Store a memory entry via hindsight client.aretain.
 
     memory_type 同时写入 tags(服务端过滤)和 metadata(客户端读取)。
+
+    时序语义（2026-08-22 真机实证修正）：默认**同步 retain**——
+    retain_async=True 时服务端后台抽取需数秒完成，期间 recall 检索不到
+    刚写入的记忆（LLM 编排下 store→retrieve 间隔远小于抽取耗时，8-22
+    测试 4 连 store 后 4 连 retrieve 全空的根因之一）。同步 retain 写入后
+    立即可召回。
+
+    document_id：调用方给定时代入作为文档 id 并原样回传（memory 工具层
+    delete/update 的定向通路；真机实证 delete_document 级联删除该文档全部
+    记忆单元）。operation_id 仅保留给显式 retain_async 的幂等场景。
     """
+    import uuid  # noqa: PLC0415
+
     if _client is None:
         return _degrade_dict("retain")
 
@@ -204,25 +209,32 @@ async def hindsight_retain(
             if isinstance(parsed_tags, list):
                 tags.extend(str(t) for t in parsed_tags if t)
 
-        # 同步 retain 的 RetainResponse 不带单条 id（operation_id 恒 None）——
-        # memory 工具层要求 memory_id 确认写入，故用 retain_async + 调用方
-        # 生成 operation_id（幂等 id），服务器接受后原样回传即 memory_id
-        # （2026-08-19 e2e 实测：sync 模式取 id 恒空→诚变化误判"未确认"）。
-        import uuid  # noqa: PLC0415
-
-        operation_id = str(uuid.uuid4())  # 服务器校验标准 UUID（secrets.token_hex 24hex 被 422）
-        result = await _client.aretain(
-            bank_id=bank, content=content, metadata=meta, tags=tags,
-            retain_async=True, operation_id=operation_id,
-        )
-        # RetainResponse 对象:优先 operation_id(调用方幂等 id)，兜底旧字段
+        call_kwargs: dict[str, Any] = {
+            "bank_id": bank,
+            "content": content,
+            "metadata": meta,
+            "tags": tags,
+            "retain_async": retain_async,
+        }
+        if document_id:
+            call_kwargs["document_id"] = document_id
+            # update_mode 仅在同 document_id 写入时才有意义（文档级替换/追加）
+            if update_mode:
+                call_kwargs["update_mode"] = update_mode
+        if retain_async:
+            # 异步写入的幂等 id（同步 retain 下 operation_id 被客户端丢弃，
+            # 传了只会造成"原样回传假 id"——2026-08-19 e2e 取证路径）
+            call_kwargs["operation_id"] = operation_id or str(uuid.uuid4())
+        result = await _client.aretain(**call_kwargs)
+        # 同步 retain：文档 id（调用方给定/服务端生成）即真实落库锚点；
+        # 异步 retain：回传 operation_id（调用方幂等 id）。
         mem_id = ""
-        if hasattr(result, "accepted") or result is not None:
+        if document_id:
+            mem_id = document_id
+        elif retain_async:
             mem_id = str(getattr(result, "operation_id", "") or "")
-        elif isinstance(result, dict):
-            mem_id = result.get("id", result.get("operation_id", ""))
         if not mem_id and getattr(result, "success", False):
-            mem_id = operation_id
+            mem_id = operation_id or ""
         return {"id": mem_id, "stored": True, "metadata": meta}
     except Exception as e:
         logger.warning("[hindsight.retain] 调用失败 | error=%s", e)
@@ -249,6 +261,16 @@ async def hindsight_retain(
                 "type": "string",
                 "description": "Optional client-side filter by memory_type",
             },
+            "tags": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": "Optional server-side tag filter",
+            },
+            "tags_match": {
+                "type": "string",
+                "default": "any",
+                "description": "Tag match mode: any/all/any_strict/all_strict/exact",
+            },
         },
         "required": ["query"],
     },
@@ -259,13 +281,22 @@ async def hindsight_recall(
     bank_id: str = "",
     top_k: int = 5,
     memory_type: str | None = None,
+    tags: list[str] | None = None,
+    tags_match: str = "any",
 ) -> dict[str, Any]:
     """Recall memories via hindsight client.arecall.
 
-    memory_type 用作 tags 服务端过滤(type:<memory_type>)。
+    memory_type 用作 tags 服务端过滤(type:<memory_type>)；tags/tags_match
+    为调用方（memory 工具层 filter.tags）的显式标签过滤——服务端 tags 过滤
+    是精确匹配面，比语义召回可靠（2026-08-22 真机实证）。
+
+    空 query 直接拒绝（hindsight 服务端对空 query 必 422：
+    "query must contain at least one word character"——list 工具先于查询判空）。
     """
     if _client is None:
         return _degrade_dict("recall")
+    if not query or not query.strip():
+        return {"results": [], "total": 0, "error": "query is required (empty query rejected)"}
 
     try:
         bank = _resolve_bank_id(bank_id)
@@ -273,6 +304,9 @@ async def hindsight_recall(
         if memory_type:
             kwargs["tags"] = [f"type:{memory_type}"]
             kwargs["tags_match"] = "any"
+        if tags:
+            kwargs["tags"] = list(tags)
+            kwargs["tags_match"] = tags_match or "any"
 
         result = await _client.arecall(**kwargs)
         # RecallResponse (hindsight 0.9.0) 把所有召回结果放在 results 字段
@@ -437,13 +471,37 @@ async def hindsight_summarize(
     description="Delete memories from a hindsight bank",
 )
 async def hindsight_delete(bank_id: str = "", memory_id: str = "") -> dict[str, Any]:
-    """Delete a whole bank via adelete_bank (per-memory delete 见 hindsight API)。"""
+    """Delete memories from a hindsight bank.
+
+    - memory_id 给定：走 documents.delete_document 级联删除该文档及其全部
+      记忆单元（2026-08-22 真机实证：delete_document 级联删 document +
+      关联 memory units，是真删除通路）。
+    - memory_id 缺省：删整个 bank（adelete_bank，既有语义保留）。
+    """
     if _client is None:
         return _degrade_dict("delete")
 
     try:
         bank = _resolve_bank_id(bank_id)
-        # hindsight_client 暴露 adelete_bank(删整个 bank)
+        if memory_id:
+            # 逐条删除：documents API 级联删除（工具层 memory_id = store
+            # 时回传的 document_id）
+            documents_api = getattr(_client, "documents", None)
+            if documents_api is None or not hasattr(documents_api, "delete_document"):
+                return {"deleted": False, "error": "client has no documents.delete_document"}
+            resp = await documents_api.delete_document(
+                bank_id=bank, document_id=memory_id
+            )
+            # DeleteDocumentResponse → 语义值 success
+            if hasattr(resp, "model_dump"):
+                payload = resp.model_dump()
+                deleted = bool(payload.get("success", True))
+            elif isinstance(resp, dict):
+                deleted = bool(resp.get("success", True))
+            else:
+                deleted = True
+            return {"deleted": deleted, "memory_id": memory_id}
+        # 无 memory_id：删整个 bank
         deleter = getattr(_client, "adelete_bank", None) or getattr(_client, "adelete", None)
         if deleter is None:
             return {"deleted": False, "error": "client has no delete method"}
@@ -527,8 +585,11 @@ async def hindsight_import_document(
             meta = {
                 "memory_type": "semantic",
                 "knowledge_name": name,
-                "chunk_index": idx,
-                "chunk_total": len(chunks),
+                # MemoryItem.metadata 是 dict[str,str] pydantic 校验面——
+                # 数字/布尔值必 422（2026-08-22 真机实测 chunk_index/chunk_total
+                # int 传入报 validation error），全部字符串化
+                "chunk_index": str(idx),
+                "chunk_total": str(len(chunks)),
                 "source": "import_document",
             }
             await _client.aretain(bank_id=bank, content=chunk, metadata=meta, tags=["type:semantic"])

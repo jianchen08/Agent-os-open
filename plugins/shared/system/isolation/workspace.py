@@ -133,19 +133,6 @@ def get_isolation_level() -> str:
     return "isolated"
 
 
-def resolve_container_workspace_path(workspace: str | None, task_id: str, isolation_mode: str | None = None) -> str:
-    """纯路径计算：返回容器任务应使用的工作空间路径。
-
-    规则：
-    - 有 workspace + non_isolated 模式 → 返回 workspace（原空间）
-    - 其余所有情况 → 返回 ws_root/container_{task_id}（配置空间）
-    """
-    if workspace and (isolation_mode or get_isolation_level()) == "non_isolated":
-        return workspace
-    ws_root = get_workspace_config_root()
-    return f"{ws_root}/container_{task_id}"
-
-
 def _is_absolute_path(path_str: str) -> bool:
     """判断路径是否为绝对路径（兼容 Windows 和 Unix 风格）"""
     p = Path(path_str)

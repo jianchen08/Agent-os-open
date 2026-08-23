@@ -70,12 +70,6 @@ def _get_llm_data() -> dict[str, Any]:
         return yaml.safe_load(f) or {"models": {}, "defaults": {}}
 
 
-def _is_reasoning_model(model_id: str) -> bool:
-    data = _get_llm_data()
-    model = data.get("models", {}).get(model_id)
-    return bool(model and model.get("reasoning_model"))
-
-
 def health() -> dict[str, Any]:
     """思考模式服务健康检查。"""
     data = _get_llm_data()

@@ -21,7 +21,6 @@ from __future__ import annotations
 
 import json
 import logging
-import time
 from abc import ABC, abstractmethod
 from collections.abc import Awaitable, Callable
 from typing import Any
@@ -52,6 +51,8 @@ class IMemoryBackend(ABC):
         tags: list[str] | None = None,
         source: str = "",
         metadata: dict[str, str] | None = None,
+        document_id: str = "",
+        update_mode: str | None = None,
     ) -> str:
         """写入一条记忆，返回 memory id。
 
@@ -63,6 +64,10 @@ class IMemoryBackend(ABC):
             source: 可选来源标注
             metadata: 可选定向键值（如 review_id）——键值会被序列化为 str
                 合入 wire metadata（hindsight pydantic dict[str,str] 校验面）。
+            document_id: 可选文档 id（服务端原样落库为 document id，返回即
+                该 id——delete/update 的定向通路，2026-08-22 真机实证）
+            update_mode: 可选更新语义（'replace' 替换同 document_id 文档 /
+                'append' 追加），服务端文档级操作
 
         Returns:
             memory id；失败时返回空串（降级，不抛异常）。
@@ -76,6 +81,10 @@ class IMemoryBackend(ABC):
         user_id: str,
         top_k: int = 5,
         memory_type: str | None = None,
+        tags: list[str] | None = None,
+        tags_match: str = "any",
+        session_id: str | None = None,
+        knowledge_name: str | None = None,
     ) -> list[dict[str, Any]]:
         """检索相关记忆。
 
@@ -84,6 +93,10 @@ class IMemoryBackend(ABC):
             user_id: 租户/用户隔离 key
             top_k: 返回条数上限
             memory_type: 可选按类型过滤
+            tags: 可选标签过滤（hindsight 服务端 tags 精确过滤面）
+            tags_match: tag 匹配模式（any/all/any_strict/all_strict/exact）
+            session_id: 可选会话隔离（映射到 hindsight bank）
+            knowledge_name: 可选知识库过滤（服务端 metadata.knowledge_name 过滤）
 
         Returns:
             统一形态列表 [{id, content, score, memory_type, metadata}]；
@@ -154,6 +167,8 @@ class HindsightBackend(IMemoryBackend):
         tags: list[str] | None = None,
         source: str = "",
         metadata: dict[str, str] | None = None,
+        document_id: str = "",
+        update_mode: str | None = None,
     ) -> str:
         """写入记忆，经 tool-executor.invoke 调用 hindsight.retain。
 
@@ -179,15 +194,20 @@ class HindsightBackend(IMemoryBackend):
             wire_meta["tags"] = json.dumps(list(tags), ensure_ascii=False)
         if source:
             wire_meta["source"] = source
+        args: dict[str, Any] = {
+            "bank_id": user_id,
+            "content": content,
+            "memory_type": memory_type,
+            "metadata": wire_meta,
+        }
+        if document_id:
+            args["document_id"] = document_id
+        if update_mode:
+            args["update_mode"] = update_mode
         params = {
             "tool_name": "hindsight.retain",
             "plugin_id": "hindsight_memory_service",
-            "args": {
-                "bank_id": user_id,
-                "content": content,
-                "memory_type": memory_type,
-                "metadata": wire_meta,
-            },
+            "args": args,
         }
         try:
             result = await self._call("tool-executor.invoke", params)
@@ -221,9 +241,21 @@ class HindsightBackend(IMemoryBackend):
         user_id: str,
         top_k: int = 5,
         memory_type: str | None = None,
+        tags: list[str] | None = None,
+        tags_match: str = "any",
+        session_id: str | None = None,
+        knowledge_name: str | None = None,
     ) -> list[dict[str, Any]]:
         """检索记忆，经 tool-executor.invoke 调用 hindsight.recall，
-        结果映射为统一形态 {id, content, score, memory_type, metadata}。"""
+        结果映射为统一形态 {id, content, score, memory_type, metadata}。
+
+        - tags: 服务端 tags 精确过滤（hindsight tags 面，比语义召回可靠）
+        - session_id: 会话过滤——转换为 ``session:<id>`` 标签过滤（store 侧
+          同款注入，见 HindsightBackend.add；隔离键始终是 user_id 对应
+          bank，session 只是内容维度标签，2026-08-22 语义修正）
+        - knowledge_name: 客户端 metadata 过滤（recall 结果按
+          metadata.knowledge_name 精确匹配；不投给服务端——服务端无该字段面）
+        """
         args: dict[str, Any] = {
             "bank_id": user_id,
             "query": query,
@@ -231,6 +263,10 @@ class HindsightBackend(IMemoryBackend):
         }
         if memory_type:
             args["memory_type"] = memory_type
+        session_tags = [f"session:{session_id}"] if session_id else None
+        if session_tags or tags:
+            args["tags"] = list(tags or []) + list(session_tags or [])
+            args["tags_match"] = tags_match or "any"
         params = {"tool_name": "hindsight.recall", "plugin_id": "hindsight_memory_service", "args": args}
         try:
             result = await self._call("tool-executor.invoke", params)
@@ -246,7 +282,13 @@ class HindsightBackend(IMemoryBackend):
                 raise RuntimeError(
                     f"hindsight 后端降级: {result.get('error') or 'not initialized'}"
                 )
-        return self._map_hindsight_results(result)
+        mapped = self._map_hindsight_results(result)
+        if knowledge_name:
+            mapped = [
+                item for item in mapped
+                if (item.get("metadata") or {}).get("knowledge_name") == knowledge_name
+            ]
+        return mapped
 
     async def get_documents(
         self,
@@ -312,7 +354,12 @@ class HindsightBackend(IMemoryBackend):
         return []
 
     async def delete(self, user_id: str, memory_id: str | None = None) -> bool:
-        """删除记忆，经 tool-executor.invoke 调用 hindsight.delete。"""
+        """删除记忆，经 tool-executor.invoke 调用 hindsight.delete。
+
+        memory_id 是 store 回传的 document_id（真删除通路）；None 表示删除
+        整个 bank（2026-08-22 语义修正：旧实现把 memory_id 传成
+        hindsight.delete 不认识的参数，真机 "tool execution failed"）。
+        """
         args: dict[str, Any] = {"bank_id": user_id}
         if memory_id:
             args["memory_id"] = memory_id
@@ -350,6 +397,11 @@ class HindsightBackend(IMemoryBackend):
             )
             return {"chunks_imported": 0, "name": name, "error": str(e)}
         if isinstance(result, dict):
+            # 解 tool-executor.invoke 的 data 信封（import_document 返回纯业务
+            # dict {chunks_imported, knowledge_name}）
+            inner = result.get("data") if "data" in result else result
+            if isinstance(inner, dict):
+                result = inner
             out = dict(result)
             out.setdefault("name", name)
             return out

@@ -6,7 +6,7 @@ import json
 import logging
 import re
 import uuid
-from typing import Any
+from typing import Any, cast
 
 logger = logging.getLogger(__name__)
 
@@ -382,66 +382,38 @@ def _validate_tool_call_pairing(  # noqa: PLR0912,PLR0915
     # ── Phase A: 移除孤立的 tool result ──
     # 从 safety_start 到 scan_start 重放消息，仅追踪 expecting 状态
     expecting_tool_ids: set[str] = set()
-    expecting_tool_ids_ordered: list[str] = []
     for msg in messages[safety_start:scan_start]:
         if msg.get("role") == "assistant":
             if msg.get("tool_calls"):
                 expecting_tool_ids = {tc.get("id") for tc in msg["tool_calls"] if tc.get("id")}
-                expecting_tool_ids_ordered = [tc.get("id") for tc in msg["tool_calls"] if tc.get("id")]
             else:
                 expecting_tool_ids = set()
-                expecting_tool_ids_ordered = []
         elif msg.get("role") == "tool":
             if expecting_tool_ids:
                 tc_id = msg.get("tool_call_id")
                 if tc_id in expecting_tool_ids:
                     expecting_tool_ids.discard(tc_id)
-                    if tc_id in expecting_tool_ids_ordered:
-                        expecting_tool_ids_ordered.remove(tc_id)
-                elif expecting_tool_ids_ordered:
-                    matched_id = expecting_tool_ids_ordered.pop(0)
-                    expecting_tool_ids.discard(matched_id)
         else:
             expecting_tool_ids = set()
-            expecting_tool_ids_ordered = []
 
     # scan_start 之前的消息直接加入 validated（已验证，不做检查）
     validated: list[dict[str, Any]] = list(messages[:scan_start])
     dropped_count = 0
-    positional_match_count = 0
 
     # 对新增消息（scan_start 之后）执行 Phase A 检查
     for msg in messages[scan_start:]:
         if msg.get("role") == "assistant":
             if msg.get("tool_calls"):
                 expecting_tool_ids = {tc.get("id") for tc in msg["tool_calls"] if tc.get("id")}
-                expecting_tool_ids_ordered = [tc.get("id") for tc in msg["tool_calls"] if tc.get("id")]
             else:
                 expecting_tool_ids = set()
-                expecting_tool_ids_ordered = []
             validated.append(msg)
         elif msg.get("role") == "tool":
             if expecting_tool_ids:
                 tc_id = msg.get("tool_call_id")
                 if tc_id in expecting_tool_ids:
                     expecting_tool_ids.discard(tc_id)
-                    if tc_id in expecting_tool_ids_ordered:
-                        expecting_tool_ids_ordered.remove(tc_id)
                     validated.append(msg)
-                elif expecting_tool_ids_ordered:
-                    matched_id = expecting_tool_ids_ordered.pop(0)
-                    expecting_tool_ids.discard(matched_id)
-                    positional_match_count += 1
-                    logger.info(
-                        "[%s] %s tool_call pairing: positional match tool_call_id %s → %s",
-                        name,
-                        provider,
-                        tc_id,
-                        matched_id,
-                    )
-                    patched_msg = dict(msg)
-                    patched_msg["tool_call_id"] = matched_id
-                    validated.append(patched_msg)
                 else:
                     dropped_count += 1
                     logger.warning(
@@ -462,7 +434,6 @@ def _validate_tool_call_pairing(  # noqa: PLR0912,PLR0915
                 )
         else:
             expecting_tool_ids = set()
-            expecting_tool_ids_ordered = []
             validated.append(msg)
     if dropped_count:
         logger.warning(
@@ -471,14 +442,6 @@ def _validate_tool_call_pairing(  # noqa: PLR0912,PLR0915
             provider,
             dropped_count,
         )
-    if positional_match_count:
-        logger.info(
-            "[%s] %s tool_call pairing: positionally matched %d",
-            name,
-            provider,
-            positional_match_count,
-        )
-
     # ── Phase B: 清理不完整的 assistant(tool_calls) 消息 ──
     # 从 safety_start 开始检查（当 safety_start < scan_start 时，validated 区域内
     # 可能有 assistant(tool_calls) 在之前的扫描中被误判为完整或从未被 Phase B 检查过），
@@ -674,7 +637,12 @@ def normalize_messages_for_provider(  # noqa: PLR0912,PLR0915
 
         if msg.get("role") == "assistant" and msg.get("tool_calls"):
             # 收集此 assistant 期望的 tool_call_id 集合
-            expected_ids: set[str] = {tc.get("id") for tc in msg["tool_calls"] if isinstance(tc, dict) and tc.get("id")}
+            # （过滤条件与元素是两次独立 tc.get 调用，运行时 None 已被 if 滤除）
+            expected_ids: set[str] = {
+                cast(str, tc.get("id"))
+                for tc in msg["tool_calls"]
+                if isinstance(tc, dict) and tc.get("id")
+            }
             # 收集紧随其后且 tool_call_id 匹配的 tool 消息
             tool_group: list[dict[str, Any]] = []
             intruders: list[dict[str, Any]] = []

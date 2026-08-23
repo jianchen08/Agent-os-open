@@ -5,7 +5,7 @@ Token 计数工具
 从 0.1 src/core/tokenizer.py 直接复制，无导入适配需求（仅依赖 tiktoken）。
 """
 
-from typing import Any
+from typing import Any, cast
 
 import tiktoken
 
@@ -65,7 +65,7 @@ class TokenCounter:
                     encoding_name = enc
                     break
 
-            encoding = tiktoken.get_encoding(encoding_name)
+            encoding = tiktoken.get_encoding(cast(str, encoding_name))
             tokens = encoding.encode(text)
             return len(tokens)
         except Exception:
@@ -279,7 +279,7 @@ class TokenCounter:
                 middle_messages = messages[middle_start:middle_end]
 
                 # 反向截断中间部分（保留最新的）
-                truncated_middle = []
+                truncated_middle: list[dict[str, Any]] = []
                 tokens_used = 0
 
                 for msg in reversed(middle_messages):
@@ -314,7 +314,7 @@ class TokenCounter:
 
 
 # 全局单例
-_default_counter: TokenCounter = None
+_default_counter: TokenCounter | None = None
 
 
 def get_token_counter(encoding_name: str = "cl100k_base") -> TokenCounter:

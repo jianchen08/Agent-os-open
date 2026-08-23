@@ -166,7 +166,7 @@ class DangerChecker:
             匹配到的危险操作名称，未检测到返回 None
         """
         # 1. 从工具定义获取声明的危险操作
-        dangerous_ops = []
+        dangerous_ops: list[str] = []
         if tool_definition is not None:
             dangerous_ops = getattr(tool_definition, "dangerous_operations", []) or []
 

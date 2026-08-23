@@ -30,9 +30,20 @@ pytestmark = pytest.mark.unit
 _TE_DIR = Path(__file__).resolve().parent.parent / "task_evaluate"
 _SYSTEM_ROOT = Path(__file__).resolve().parents[2] / "system"
 
-for _d in [_TE_DIR, _SYSTEM_ROOT, _SYSTEM_ROOT / "tasks"]:
-    if str(_d) not in sys.path:
-        sys.path.insert(0, str(_d))
+_PLUGIN_PATHS = tuple(str(_d) for _d in [_TE_DIR, _SYSTEM_ROOT, _SYSTEM_ROOT / "tasks"])
+for _d in _PLUGIN_PATHS:
+    if _d not in sys.path:
+        sys.path.insert(0, _d)
+
+
+@pytest.fixture(autouse=True)
+def _ensure_plugin_paths():
+    """平铺串扰自持：其它测试文件的 teardown 会把 system/tasks 目录从
+    sys.path 摘走，而 tool.py 顶层 from task_types import 是随模块加载触发的
+    ——每个用例前重插（模块期插入只保证收集期）。"""
+    for _d in _PLUGIN_PATHS:
+        if _d not in sys.path:
+            sys.path.insert(0, _d)
 
 
 def _load_module() -> Any:
@@ -47,7 +58,13 @@ def _load_module() -> Any:
     assert spec.loader is not None, "cannot load task_evaluate tool.py"
     module = importlib.util.module_from_spec(spec)
     sys.modules[mod_name] = module
-    spec.loader.exec_module(module)
+    try:
+        spec.loader.exec_module(module)
+    except BaseException:
+        # exec 失败时清掉半初始化缓存，防毒化后续用例（AttributeError
+        # no TaskEvaluateTool 的根源）
+        sys.modules.pop(mod_name, None)
+        raise
     return module
 
 
@@ -129,7 +146,11 @@ class TestTaskEvaluateValidation:
 
     @pytest.mark.asyncio
     async def test_missing_task_id_rejected(self, mod, monkeypatch):
-        """task_id 未注入且无法推断 → INJECTION_ERROR（防 LLM 无意义重试）。"""
+        """task_id 未注入 → INJECTION_ERROR（零推断，2026-08-22 用户裁决）。
+
+        缺失即注入链断裂（state 未取到 run 的 task_id 未变成工具参数注入），
+        不做任何候选推断；防 LLM 无意义重试。
+        """
         service = _make_service(task=None)
         service.list_by_status.return_value = []
         monkeypatch.setattr(mod.TaskEvaluateTool, "_get_task_service", lambda self: service)
@@ -430,3 +451,95 @@ class TestCriteriaFallbackMarked:
             "质量闸门标准来源是任务描述兜底必须在评估结果可见"
         )
         assert "全部通过" in history[-1]["summary"], "原 summary 保留"
+
+
+# ── 猜测型匹配反模式收口（2026-08-22）───────────────────────
+
+
+class TestTaskIdInjectionFailsClosed:
+    """task_id 未注入时零推断：候选任务再多也不猜（用户裁决）。
+
+    猜测活跃任务会掩盖注入链断裂，并把 A 任务的评估结果写到 B 任务上。
+    """
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("candidate_count", [1, 2])
+    async def test_missing_task_id_rejected_regardless_of_running_candidates(self, mod, monkeypatch, candidate_count):
+        """未注入 + 有 RUNNING/EVALUATING 候选任务 → 依然 INJECTION_ERROR，推断路径零调用。"""
+        service = _make_service(task=None)
+        service.list_by_status.return_value = [_make_task(f"t-other-{i}") for i in range(candidate_count)]
+        monkeypatch.setattr(mod.TaskEvaluateTool, "_get_task_service", lambda self: service)
+        tool = mod.TaskEvaluateTool()
+        result = await tool.execute({"action": "auto_complete"})
+        assert result.success is False
+        assert result.error_code == "INJECTION_ERROR"
+        assert result.metadata.get("task_failed") is True
+        # 推断路径零调用：不 list_by_status 扫描、不写任何任务
+        assert service.list_by_status.call_count == 0
+        service.complete_evaluation.assert_not_awaited()
+
+
+class TestToolIdTemplateResolution:
+    """{tool_id} 模板解析：唯一候选可用，0/多候选拒绝，绝不取第一个（2026-08-22 同批裁决）。"""
+
+    @staticmethod
+    def _tool_with_workspace(mod: Any, tmp_path: Path, file_names: list[str]) -> tuple[Any, MagicMock]:
+        """构造带 src/tools/builtin 工作区与引用 {tool_id} 指标的任务。"""
+        tools_dir = tmp_path / "src" / "tools" / "builtin"
+        tools_dir.mkdir(parents=True)
+        for name in file_names:
+            (tools_dir / name).write_text("def run():\n    pass\n", encoding="utf-8")
+        metadata = {
+            "ws_meta": {"path": str(tmp_path)},
+            "acceptance_criteria": {
+                "m1": {"input_params": {"pattern": "{tool_id}", "desc": "检查 {tool_id} 实现", "criteria": "检查 {tool_id} 实现是否完整"}},
+            },
+        }
+        task = _make_task("t-1", metadata=metadata)
+        return mod.TaskEvaluateTool(), task
+
+    def test_single_candidate_substituted(self, mod, tmp_path):
+        """唯一候选 → 模板替换为该工具 id。"""
+        tool, task = self._tool_with_workspace(mod, tmp_path, ["my_tool.py"])
+        params, fallback_ids = tool._get_input_params(task)
+        assert params["m1"]["pattern"] == "my_tool"
+        assert params["m1"]["desc"] == "检查 my_tool 实现"
+        assert fallback_ids == []
+
+    def test_multiple_candidates_rejected(self, mod, tmp_path):
+        """多个候选 → 拒绝（不取第一个文件）。"""
+        tool, task = self._tool_with_workspace(mod, tmp_path, ["tool_a.py", "tool_b.py"])
+        with pytest.raises(ValueError, match="无法确定被评估工具"):
+            tool._get_input_params(task)
+
+    def test_zero_candidates_rejected(self, mod):
+        """模板被引用但工作区无候选 → 拒绝（不把 {tool_id} 字面量漏给评估器）。"""
+        task = _make_task(
+            "t-1",
+            metadata={"acceptance_criteria": {"m1": {"input_params": {"pattern": "{tool_id}"}}}},
+        )
+        tool = mod.TaskEvaluateTool()
+        with pytest.raises(ValueError, match="无法确定"):
+            tool._get_input_params(task)
+
+
+class TestTaskEvaluateParamResolutionFailure:
+    """指标参数解析失败（如 {tool_id} 歧义）→ 显式失败而非带病评估。"""
+
+    @pytest.mark.asyncio
+    async def test_auto_complete_param_resolution_error_returns_failure(self, mod, monkeypatch):
+        task = _make_task(metadata={"evaluation_metric_ids": ["m1"]})
+        service = _make_service(task=task)
+
+        def _raise(self: Any, _task: Any) -> tuple[dict, list]:
+            raise ValueError("指标 m1 引用了 {tool_id} 模板，但工作区工具候选为 0 个，无法确定被评估工具")
+
+        monkeypatch.setattr(mod.TaskEvaluateTool, "_get_task_service", lambda self: service)
+        monkeypatch.setattr(mod.TaskEvaluateTool, "_get_input_params", _raise)
+        tool = mod.TaskEvaluateTool()
+        result = await tool.execute({"action": "auto_complete", "task_id": task.id})
+        assert result.success is False
+        assert result.error_code == "INVALID_INPUT_PARAMS"
+        assert "无法确定被评估工具" in result.error
+        # 未到达完成/失败终态：不写任务
+        service.complete_evaluation.assert_not_awaited()

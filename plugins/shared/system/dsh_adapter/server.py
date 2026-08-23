@@ -271,122 +271,31 @@ async def _on_dsh_adapter_unload(params: dict) -> None:  # noqa: ARG001
     logger.info("dsh_adapter: node runtime bridge shut down")
 
 
-# ── client_styles 静态 CSS 服务（contributes.client_styles 的拉取目标） ──
-# 前端经 /ext/{pluginId}{path} 拉取 CSS（带 Bearer，仅 Enabled 插件可挂路由），
-# 本 handler 从适配器 styles/ 目录读取（http_endpoints 声明精确路径，dispatcher
-# 契约：body base64 原样回写）。
+# ── DSH 皮肤按择注入服务（contributes.themes 主题管线 + CSS 注入通道） ──
+# 皮肤主体（配色/背景图/基准）走 contributes.themes 主题管线原生渲染；
+# 本 handler 服务皮肤全量 CSS（merged.css = skin.css + patches.css 原样合并，
+# 圆角/阴影/动效/鼠标样式等以 CSS 形式生效）、hooks.mjs（DSH 原机制动态
+# 效果）与背景图资产。前端经 /ext/{pluginId}{path} 拉取（带 Bearer，仅
+# Enabled 插件可挂路由；dispatcher 契约：body base64 原样回写）。
 
 import base64  # noqa: E402
+import hashlib  # noqa: E402
 import json  # noqa: E402
 import re  # noqa: E402
 
 from translator import (  # noqa: E402
     SKIN_ASSET_EXTS,
     SKIN_CENTER_SKINS_DIR,
-    describe_available_skins,
     list_available_skins,
-    load_skin_selection,
-    resolve_skin_css,
 )
 
-_STYLES_DIR = Path(__file__).parent / "styles"
-# dsh-bg 演示残留已撤（与皮肤通道 body 背景打架，2026-08-21）；文件保留于 styles/
-_STYLE_ROUTES: dict[str, tuple[str, str]] = {}
-# 皮肤令牌层注入路由：实际文件由 config/dsh_adapter.yaml 的 skin 字段动态
-# 决定（skin-center 的 skin.css）；未选择时返回空 CSS（200，注入空 style
-# 无副作用，避免前端拉取 404 噪音）。DOM 补丁层（patches.css/hooks.mjs）
-# 不接入——选择器只对 DSH Web UI 的 DOM 有效。
-_SKIN_CSS_ROUTE = "/ext/dsh_adapter/styles/skin.css"
+# 皮肤全量 CSS 按择注入路由（2026-08-21 用户裁决：插件 CSS 注入通道 +
+# 主题路由——选到哪个皮肤注入哪个；皮肤 CSS 原样搬：圆角/阴影/动效/鼠标
+# 样式等全部以 CSS 形式生效，html[data-dsh-skin] 选择器由前端激活时打标）
+_SKIN_MERGED_PREFIX = "/ext/dsh_adapter/styles/skin/"
+_SKIN_MERGED_SUFFIX = "/merged.css"
+_SKIN_HOOKS_SUFFIX = "/hooks.mjs"
 _SKIN_ASSET_ROUTE_PREFIX = "/ext/dsh_adapter/styles/skin-assets/"
-_SKIN_DISABLED_CSS = "/* dsh skin not selected (config/dsh_adapter.yaml: skin: <id>|none) */\n"
-_SKIN_LIST_ROUTE = "/ext/dsh_adapter/skins"
-_SKIN_SELECT_ROUTE = "/ext/dsh_adapter/skins/current"
-
-
-def _resolve_skin_route() -> tuple[str, bytes] | None:
-    """按配置解析皮肤补充 CSS（None = 未选/无效 → 空注释 CSS）。
-
-    形态路由终态（2026-08-21）：主体（配色/背景图/基准）走 contributes.themes
-    主题管线原生渲染；本注入只保留主题表达不了的补充层——皮肤 :root 原文
-    令牌（--dsw-* 装饰变量）与字体。无 !important/无布局 hack。
-    """
-    skin = load_skin_selection()
-    if skin is None:
-        return None
-    css = resolve_skin_css(skin)
-    if css is None:
-        logger.warning(
-            "dsh_adapter: skin %r not found (available: %s); injecting empty css",
-            skin, ", ".join(list_available_skins()) or "<none>",
-        )
-        return None
-    try:
-        text = css.read_text(encoding="utf-8", errors="replace")
-    except OSError as e:
-        logger.warning("dsh_adapter: skin css read failed (%s): %s", skin, e)
-        return None
-    from translator import _DSW_FONT_RE, _ROOT_BLOCK_RE
-
-    parts: list[str] = []
-    root_block = _ROOT_BLOCK_RE.search(text)
-    if root_block:
-        parts.append("/* skin :root tokens (verbatim, decorative --dsw-*) */\n:root {" + root_block.group(1) + "}")
-    font_m = _DSW_FONT_RE.search(text)
-    if font_m:
-        parts.append(f"body {{ font-family: {font_m.group(1).strip()}; }}")
-    return skin, ("\n\n".join(parts) + "\n").encode("utf-8")
-
-
-def _skin_config_path() -> str:
-    """config 目录路径（复用 translator 的项目根解析）。"""
-    from translator import _project_root
-
-    return str(Path(_project_root()) / "config")
-
-
-def _skin_list_payload() -> dict[str, Any]:
-    """动态皮肤清单（运行时读 skin-center 装载现状——设置页数据源）。"""
-    from translator import describe_available_skins
-
-    skins = describe_available_skins()
-    return {
-        "current": load_skin_selection(),
-        "count": len(skins),
-        "skins": skins,
-    }
-
-
-def _select_skin(raw_body: str) -> dict[str, Any]:
-    """PUT /ext/dsh_adapter/skins/current——写回 config 的 skin 字段。
-
-    body: ``{"skin": "<id>"}``（id 必须 ∈ 当前装载皮肤；"none" = 关闭注入）。
-    写回用文本级替换（保住 yaml 注释与 plugins 段）；skin 行缺失则尾追加。
-    """
-    try:
-        body = json.loads(base64.b64decode(raw_body).decode("utf-8")) if raw_body else {}
-    except (ValueError, UnicodeDecodeError):
-        return {"status": 400, "headers": {}, "body": "bad json body", "body_encoding": "utf-8"}
-    skin = body.get("skin") if isinstance(body, dict) else None
-    if skin not in (*list_available_skins(), "none"):
-        return {"status": 400, "headers": {}, "body": f"unknown skin: {skin!r}", "body_encoding": "utf-8"}
-    cfg_path = Path(_skin_config_path()) / "dsh_adapter.yaml"
-    try:
-        text = cfg_path.read_text(encoding="utf-8")
-    except OSError as e:
-        logger.warning("dsh_adapter: skin select read config failed: %s", e)
-        return {"status": 500, "headers": {}, "body": "config read failed", "body_encoding": "utf-8"}
-    new_line = f"skin: {skin}\n"
-    if re.search(r"^skin:.*$", text, flags=re.MULTILINE):
-        text = re.sub(r"^skin:.*$", new_line.rstrip("\n"), text, flags=re.MULTILINE)
-    else:
-        text = text.rstrip("\n") + "\n" + new_line
-    try:
-        cfg_path.write_text(text, encoding="utf-8")
-    except OSError as e:
-        logger.warning("dsh_adapter: skin select write config failed: %s", e)
-        return {"status": 500, "headers": {}, "body": "config write failed", "body_encoding": "utf-8"}
-    logger.info("dsh_adapter: skin selected -> %s", skin)
-    return {"status": 200, "headers": {"content-type": "application/json"}, "body": "{}", "body_encoding": "utf-8"}
 
 
 _CONTENT_TYPES = {
@@ -395,11 +304,268 @@ _CONTENT_TYPES = {
 }
 
 
-def _serve_skin_asset(path: str) -> dict[str, Any]:
+def _etag_of(payload: bytes) -> str:
+    """弱 ETag（W/ 前缀）：内容协商键，命中即 304，无需字节级强校验。"""
+    return '"%s"' % hashlib.sha1(payload).hexdigest()[:24]
+
+
+def _revalidate(headers: dict[str, str] | None, payload: bytes) -> bool:
+    """If-None-Match 命中（浏览器带上次的 ETag 回源校验）→ True 应回 304。"""
+    if not headers:
+        return False
+    candidates: list[str] = []
+    for key in ("if-none-match", "If-None-Match"):
+        val = headers.get(key)
+        if val:
+            candidates.extend(part.strip() for part in val.split(","))
+    if not candidates:
+        return False
+    return _etag_of(payload) in candidates
+
+
+# DSH 位置词汇 → AgentOS 位置（2026-08-22 用户裁决：按位置映射转译——不给灵汐
+# 组件贴 DSH 名字，DSH 选择器在递送层统一翻译到我方锚点；CSS 与 hooks 同源映射表，
+# 任何皮肤按同一套映射注入，非逐皮肤对应）。
+# 顺序敏感：结构全形在前（部分替换会残留错位结构——如只换 data-pane 部分会把
+# 页脚装饰挂到整条侧栏）；target 一律我方词汇（data-region / data-testid /
+# data-chat-state / role），DSH 词汇不出现在灵汐 DOM。
+_DSH_POSITION_MAP: list[tuple[re.Pattern[str], str]] = [
+    # ⚠️ 值形规则一律用反向引用保留原引号风格（\1 复用捕获引号）：hooks.mjs 的
+    # 选择器活在 JS 字符串字面量里（ maid 实锤：双引号输出插进单引号串 =
+    # SyntaxError → import 抛 → 整个动态层静默死），CSS 双单引号等价无感。
+    # scope 属性翻译（平台词汇 data-skin="<plugin>:<skin>"；值形带插件前缀，
+    # 裸 token 兜底覆盖 CSS 括号形/JS attributeFilter 字符串/ctx 插值/存在性）
+    (re.compile(r'html\[data-dsh-skin=(["\'])([\w-]+)\1\]'), r'html[data-skin=\1dsh_adapter:\2\1]'),
+    (re.compile(r'html\[data-dsh-skin=\\"([\w-]+)\\"\]'), r'html[data-skin=\\"dsh_adapter:\1\\"]'),
+    (re.compile(r'data-dsh-skin'), 'data-skin'),
+    # 暗色变体开关（DSH body[data-ds-dark-theme] → 平台 body[data-skin-dark]；
+    # 裸 token 同时救活 hooks 对该属性名的 MutationObserver 监听=昼夜背景切换）
+    (re.compile(r'data-ds-dark-theme'), 'data-skin-dark'),
+    # hooks 结构全形
+    (re.compile(r"\[data-pane=(['\"])sidebar\1\] > div > :last-child"), r'[data-testid=\1sidebar-footer\1]'),
+    (re.compile(r"header \[role=(['\"])tablist\1\]"), r'[data-region=\1workspace\1] [role=\1tablist\1]'),
+    # 三栏（detail 为个别皮肤的拼写变体）
+    (re.compile(r'\[data-pane=(["\'])sidebar\1\]'), r'[data-region=\1sidebar\1]'),
+    (re.compile(r'\[data-pane=(["\'])details\1\]'), r'[data-region=\1workspace\1]'),
+    (re.compile(r'\[data-pane=(["\'])detail\1\]'), r'[data-region=\1workspace\1]'),
+    (re.compile(r'\[data-pane=(["\'])conversation\1\]'), r'[data-region=\1chat\1]'),
+    # 聊天容器状态（DSH hero 空态 / active 对话态 → 我方 data-chat-state）
+    (re.compile(r'\[data-phase=(["\'])hero\1\]'), r'[data-chat-state=\1empty\1]'),
+    (re.compile(r'\[data-phase=(["\'])active\1\]'), r'[data-chat-state=\1active\1]'),
+    # 消息流容器
+    (re.compile(r'\[data-chat-flow\]'), '[data-testid="message-list"]'),
+    # 输入卡片（DSH data-composer-card：hero/active 两态输入卡本体——画框
+    # border-image 等 65 处装饰的挂点，漏映射=输入框装饰全灭，真机实锤）
+    (re.compile(r'\[data-composer-card\]'), '[data-testid="chat-input"]'),
+    # DSH L2 槽位 → 同位组件。sidebar.settings 复合形在前（11 处 CSS 触发器样式
+    # + hooks aria-expanded 探测都是 "> button" 形）；裸 token 同指触发器，使
+    # hooks 的 footer 走查（settings 槽向上找含 footer.action 的祖先行）把
+    # data-maid-sidebar-footer 装饰标记落在我们真正的页脚容器上而非整条侧栏
+    (re.compile(r"\[data-slot=(['\"])sidebar\.settings\1\] > :is\(button, \[role=(['\"])button\2\]\)"),
+     r'[data-testid=\1sidebar-user-area\1]'),
+    (re.compile(r'\[data-slot=(["\'])sidebar\.settings\1\]'), r'[data-testid=\1sidebar-user-area\1]'),
+    (re.compile(r'\[data-slot=(["\'])sidebar\.footer\.action\1\]'), r'[data-testid=\1sidebar-user-area\1]'),
+    (re.compile(r'\[data-slot=(["\'])settings\.trigger\1\]'), r'[data-testid=\1sidebar-user-area\1]'),
+    (re.compile(r'\[data-slot=(["\'])conversation\.session\.header\.actions\1\]'), r'[data-testid=\1agent-tab-bar\1]'),
+    (re.compile(r'\[data-slot=(["\'])conversation\.session\.header\1\]'), r'[data-testid=\1chat-session-header\1]'),
+    (re.compile(r'\[data-slot=(["\'])conversation\.composer\.dock\1\]'), r'[data-testid=\1chat-composer\1]'),
+    (re.compile(r'\[data-slot=(["\'])conversation\.composer\1\]'), r'[data-testid=\1chat-composer\1]'),
+    (re.compile(r'\[data-slot=(["\'])conversation\.chat\.node\1\]'), r'[data-testid=\1message-item\1]'),
+    # DSH L1 表面（旧代表面词汇）→ 同位并入区域/组件锚点
+    (re.compile(r'\[data-dsh-surface=(["\'])sidebar\1\]'), r'[data-region=\1sidebar\1]'),
+    (re.compile(r'\[data-dsh-surface=(["\'])conversation\1\]'), r'[data-region=\1chat\1]'),
+    (re.compile(r'\[data-dsh-surface=(["\'])settings\1\]'), r'[data-testid=\1settings-page\1]'),
+    (re.compile(r'\[data-dsh-surface=(["\'])composer\1\]'), r'[data-testid=\1chat-composer\1]'),
+    (re.compile(r'\[data-dsh-surface=(["\'])session-header\1\]'), r'[data-testid=\1chat-session-header\1]'),
+    # DSH 组件类名：camelCase 复合词=DSH 组件身份、位置明确方映射；
+    # 单词泛型（item/menu/header/panel/seat/trigger/…）无法按位置裁决 → 原样透传惰性
+    (re.compile(r"input\[class\*=(['\"])searchInput\1\]"), r'[data-testid=\1sidebar-search-section\1] input'),
+    (re.compile(r'\[class\*=(["\'])searchInput\1\]'), r'[data-testid=\1sidebar-search-section\1] input'),
+    (re.compile(r'\[class\*=(["\'])searchButton\1\]'), r'[data-testid=\1sidebar-search-section\1]'),
+    (re.compile(r'\[class\*=(["\'])searchExpanded\1\]'), r'[data-testid=\1sidebar-search-section\1]'),
+    (re.compile(r'\[class\*=(["\'])newSession\1\]'), r'[data-testid=\1new-session-button\1]'),
+    (re.compile(r'\[class\*=(["\'])userRow\1\]'), r'[data-testid=\1sidebar-user-area\1]'),
+    (re.compile(r'\[class\*=(["\'])navCell\1\]'), r'[data-testid=\1sidebar-nav\1] button'),
+    (re.compile(r'\[class\*=(["\'])composerSeat\1\]'), r'[data-testid=\1chat-composer\1]'),
+    (re.compile(r'\[class\*=(["\'])composer\1\]'), r'[data-testid=\1chat-composer\1]'),
+    (re.compile(r'\[class\*=(["\'])sidebarCol\1\]'), r'[data-region=\1sidebar\1]'),
+    (re.compile(r'\[class\*=(["\'])centerCol\1\]'), r'[data-region=\1chat\1]'),
+    (re.compile(r'\[class\*=(["\'])detailsCol\1\]'), r'[data-region=\1workspace\1]'),
+    (re.compile(r'\[class\*=(["\'])settingsRoot\1\]'), r'[data-testid=\1settings-page\1]'),
+    # 空态欢迎页标题（DSH hero headline → 我方空态文案块；:has(fish) 等
+    # 子结构在我方 DOM 无命中则该规则自然惰性）
+    (re.compile(r'\[class\*=(["\'])headline\1\]'), r'[data-testid=\1message-list-empty\1] > div'),
+]
+# DSH 的 [id="root"] 是桌面壳窗框：背景位（透出立绘）保留，窗框装饰
+# （border/box-shadow/outline）在我们壳里无对应位置 → 剥离（"背景图被
+# 边框围一圈" = 窗框装饰错位打在全 app 根上）
+_ROOT_FRAME_DECL = re.compile(
+    r'^\s*(?:border(?:-[a-z0-9-]+)?|box-shadow|outline(?:-[a-z0-9-]+)?|border-radius)\s*:'
+)
+# 工作区容器裸选择器（翻译后形态：[data-region="workspace"] 单形或 :is 双支，
+# 可带 body 属性前缀如 body[data-skin-dark]）——只匹配容器自身，不含 descendant
+_WORKSPACE_CONTAINER_RE = re.compile(
+    r'^(?:body\[[^\]]+\] )?(?::is\(\[data-region="workspace"\], \[data-region="workspace"\]\)|\[data-region="workspace"\])$'
+)
+# 剥离声明：background / background-color（边框/内边距等位置装饰保留）
+_WORKSPACE_SURFACE_DECL = re.compile(r'^\s*background(?:-color)?\s*:')
+
+
+def _sub_position(text: str) -> str:
+    """DSH 位置词汇 → 我方锚点（CSS 选择器与 hooks.mjs JS 字符串同源转译）。"""
+    for pat, repl in _DSH_POSITION_MAP:
+        text = pat.sub(repl, text)
+    return text
+
+
+def _rewrite_dsh_positions(css: str) -> str:
+    """DSH 皮肤 CSS 位置路由（通用，逐规则翻译顶层选择器）。
+
+    - 三栏/状态/槽位/表面/组件类名按 _DSH_POSITION_MAP 翻译到我方锚点；
+    - [id="root"] 规则 → 剥窗框装饰属性（背景位保留）；块空则整条剔除；
+    - [id="root"] > div:has([data-pane])（内容主行）→ #root > div:first-child；
+    - 无法位置裁决的泛型选择器原样透传——不匹配即惰性（零副作用）。
+    """
+    out: list[str] = []
+    depth = 0
+    start = 0
+    for i, ch in enumerate(css):
+        if ch == '{':
+            depth += 1
+            if depth == 1:
+                header = css[start:i]
+                block_start = i + 1
+        elif ch == '}':
+            depth -= 1
+            if depth == 0:
+                header_stripped = header.strip()
+                block = css[block_start:i]
+                out.append(_rewrite_one_rule(header_stripped, block))
+                start = i + 1
+    if start < len(css):
+        out.append(css[start:])
+    if depth != 0:
+        # 括号不平衡视为异常输入：原样返回（fail-closed 不丢内容）
+        return css
+    return ''.join(out)
+
+
+def _rewrite_one_rule(header: str, block: str) -> str:
+    if header.startswith('@'):
+        # 条件组规则（@media/@supports/@layer/@container）内的规则同样翻译
+        # （嵌套规则头也是选择器）；@keyframes/@font-face 等原样透传
+        if re.match(r'@(media|supports|layer|container)\b', header):
+            return header + '{' + _rewrite_dsh_positions(block) + '}'
+        return header + '{' + block + '}'
+    new_header = _sub_position(header)
+    # 工作区表面让位（用户裁决：工作区=对话区延伸，背景图/立绘透出）：
+    # DSH details 容器裸规则画的实色纸面（maid #f2f6fdd1 等）剥离——
+    # 边框等位置装饰保留；descendant 规则不动（只剥容器自身的面）
+    if _WORKSPACE_CONTAINER_RE.fullmatch(new_header):
+        kept = [d for d in block.split(';') if not _WORKSPACE_SURFACE_DECL.match(d)]
+        if not [k for k in kept if k.strip()]:
+            return ''
+        block = ';'.join(kept).rstrip()
+        if block and not block.endswith(';'):
+            block += ';'
+    if '[id="root"]' in new_header:
+        if 'div:has' in new_header or ('> div' in new_header and 'data-pane' in header):
+            new_header = new_header.replace('[id="root"] > div:has([data-pane])', '#root > div:first-child')
+        kept = [d for d in block.split(';') if not _ROOT_FRAME_DECL.match(d)]
+        if not [k for k in kept if k.strip()]:
+            return ''
+        block = ';'.join(kept).rstrip() + ';'
+    return new_header + '{' + block + '}'
+
+
+def _serve_merged_skin_css(path: str, headers: dict[str, str] | None = None) -> dict[str, Any] | None:
+    """按择注入的皮肤全量 CSS（/ext/dsh_adapter/styles/skin/<skin>/merged.css）。
+
+    skin.css + patches.css 原样合并（皮肤作者的圆角/阴影/动效/鼠标样式等
+    全部以 CSS 形式生效，选择器由前端激活时打 html[data-dsh-skin] 标命中）；
+    相对 url(assets/...) 重写到皮肤资产路由（浏览器相对解析无法跨路由，
+    data:/https:/绝对路径原样保留）。None = 路由不匹配。
+
+    缓存（2026-08-22）：merged.css / hooks.mjs / 皮肤资产一律 ETag 协商缓存
+    （If-None-Match 命中 → 304 零传输）。skin 内容升级后 ETag 变化，浏览器
+    自动重拉——比裸 max-age 缓存安全（皮肤文件非内容寻址路径，升级后 URL
+    不变）。cache-control: no-cache 表示"必须回源校验"，配 ETag 命中即省 body。
+    """
+    if not (path.startswith(_SKIN_MERGED_PREFIX) and (path.endswith(_SKIN_MERGED_SUFFIX) or path.endswith(_SKIN_HOOKS_SUFFIX))):
+        return None
+    skin = path[len(_SKIN_MERGED_PREFIX):-len(_SKIN_MERGED_SUFFIX)] if path.endswith(_SKIN_MERGED_SUFFIX) else path[len(_SKIN_MERGED_PREFIX):-len(_SKIN_HOOKS_SUFFIX)]
+    if not skin or any(seg in ("", ".", "..") for seg in skin.split("/")):
+        return {"status": 404, "headers": {}, "body": "", "body_encoding": "utf-8"}
+    if skin not in list_available_skins():
+        return {"status": 404, "headers": {}, "body": "", "body_encoding": "utf-8"}
+    skin_dir = SKIN_CENTER_SKINS_DIR / skin
+    # 脚本递送（DSH 原机制 hooks：前端拉取后 blob 导入运行，契约
+    # x-org.linxin666.skin-center/v1alpha1；加载不得有顶层副作用）。
+    # hooks 里的 DSH 选择器与 CSS 同源转译（我方 DOM 无 DSH 词汇锚点，
+    # 不转译则 querySelector 恒空、装饰全落空——maid-atelier 深度皮肤实锤）
+    if path.endswith(_SKIN_HOOKS_SUFFIX):
+        hook_file = skin_dir / "hooks.mjs"
+        if not hook_file.is_file():
+            return {"status": 404, "headers": {}, "body": "", "body_encoding": "utf-8"}
+        try:
+            text = hook_file.read_text(encoding="utf-8", errors="replace")
+        except OSError as e:
+            logger.warning("dsh_adapter: skin hooks read failed (%s): %s", skin, e)
+            return {"status": 500, "headers": {}, "body": "", "body_encoding": "utf-8"}
+        body = _sub_position(text).encode("utf-8")
+        if _revalidate(headers, body):
+            return {"status": 304, "headers": {"etag": _etag_of(body)}, "body": "", "body_encoding": "utf-8"}
+        return {
+            "status": 200,
+            "headers": {
+                "content-type": "text/javascript; charset=utf-8",
+                "cache-control": "no-cache",
+                "etag": _etag_of(body),
+            },
+            "body": base64.b64encode(body).decode(),
+            "body_encoding": "base64",
+        }
+    parts: list[str] = []
+    for name in ("skin.css", "patches.css"):
+        f = skin_dir / name
+        if not f.is_file():
+            continue
+        try:
+            text = f.read_text(encoding="utf-8", errors="replace")
+        except OSError as e:
+            logger.warning("dsh_adapter: merged skin css read failed (%s): %s", name, e)
+            continue
+        parts.append(
+            _rewrite_dsh_positions(
+                re.sub(
+                    r'(url\(\s*[\'"]?)(?!data:|https?:|/)([^\'")]+)([\'"]?\s*\))',
+                    lambda m: f"{m.group(1)}{_SKIN_ASSET_ROUTE_PREFIX}{skin}/{m.group(2)}{m.group(3)}",
+                    text,
+                )
+            )
+        )
+    if not parts:
+        return {"status": 404, "headers": {}, "body": "", "body_encoding": "utf-8"}
+    body = ("/* dsh_adapter merged skin css: %s */\n" % skin + "\n\n".join(parts) + "\n").encode("utf-8")
+    if _revalidate(headers, body):
+        return {"status": 304, "headers": {"etag": _etag_of(body)}, "body": "", "body_encoding": "utf-8"}
+    return {
+        "status": 200,
+        "headers": {
+            "content-type": "text/css; charset=utf-8",
+            "cache-control": "no-cache",
+            "etag": _etag_of(body),
+        },
+        "body": base64.b64encode(body).decode(),
+        "body_encoding": "base64",
+    }
+
+
+def _serve_skin_asset(path: str, headers: dict[str, str] | None = None) -> dict[str, Any]:
     """serve 皮肤背景图资产（/ext/dsh_adapter/styles/skin-assets/<skin>/<file>）。
 
     白名单约束：皮肤 id 必须在装载的 skin-center 内、文件扩展名限图片、
-    resolve 后必须落在 skins 目录内（防穿越）。
+    resolve 后必须落在 skins 目录内（防穿越）。ETag 协商缓存（同 merged.css）。
     """
     rel = path[len(_SKIN_ASSET_ROUTE_PREFIX):]
     parts = rel.split("/")
@@ -420,9 +586,15 @@ def _serve_skin_asset(path: str) -> dict[str, Any]:
         logger.warning("dsh_adapter: skin asset read failed (%s): %s", rel, e)
         return {"status": 500, "headers": {}, "body": "", "body_encoding": "utf-8"}
     ct = _CONTENT_TYPES.get(Path(filename).suffix.lower(), "application/octet-stream")
+    if _revalidate(headers, data):
+        return {"status": 304, "headers": {"etag": _etag_of(data)}, "body": "", "body_encoding": "utf-8"}
     return {
         "status": 200,
-        "headers": {"content-type": ct},
+        "headers": {
+            "content-type": ct,
+            "cache-control": "no-cache",
+            "etag": _etag_of(data),
+        },
         "body": base64.b64encode(data).decode(),
         "body_encoding": "base64",
     }
@@ -451,47 +623,13 @@ async def _http_handle_style(
     headers: dict[str, str] | None = None,
     query: dict[str, str] | None = None,
 ) -> dict[str, Any]:
-    """serve client_styles 贡献的静态 CSS（dispatcher 契约：body base64 原样回写）。"""
-    if path == _SKIN_LIST_ROUTE and method == "GET":
-        payload = json.dumps(_skin_list_payload(), ensure_ascii=False)
-        return {
-            "status": 200,
-            "headers": {"content-type": "application/json"},
-            "body": base64.b64encode(payload.encode("utf-8")).decode(),
-            "body_encoding": "base64",
-        }
-    if path == _SKIN_SELECT_ROUTE and method == "PUT":
-        return _select_skin(raw_body)
-    if path == _SKIN_CSS_ROUTE:
-        resolved = _resolve_skin_route()
-        if resolved is None:
-            body = _SKIN_DISABLED_CSS.encode()
-        else:
-            body = resolved[1]
-        return {
-            "status": 200,
-            # 皮肤可经 PUT 热切换，禁缓存避免刷新后仍见旧皮肤（dispatcher 原样回写）
-            "headers": {"content-type": "text/css", "cache-control": "no-cache"},
-            "body": base64.b64encode(body).decode(),
-            "body_encoding": "base64",
-        }
+    """serve 皮肤合并 CSS / hooks.mjs / 背景资产（dispatcher 契约：body base64 原样回写）。"""
+    merged = _serve_merged_skin_css(path, headers)
+    if merged is not None:
+        return merged
     if path.startswith(_SKIN_ASSET_ROUTE_PREFIX):
-        return _serve_skin_asset(path)
-    route = _STYLE_ROUTES.get(path)
-    if route is None or method != "GET":
-        return {"status": 404, "headers": {}, "body": "", "body_encoding": "utf-8"}
-    content_type, filename = route
-    try:
-        body = (_STYLES_DIR / filename).read_bytes()
-    except OSError as e:
-        logger.warning("dsh_adapter: style css read failed: %s", e)
-        return {"status": 500, "headers": {}, "body": "", "body_encoding": "utf-8"}
-    return {
-        "status": 200,
-        "headers": {"content-type": content_type},
-        "body": base64.b64encode(body).decode(),
-        "body_encoding": "base64",
-    }
+        return _serve_skin_asset(path, headers)
+    return {"status": 404, "headers": {}, "body": "", "body_encoding": "utf-8"}
 
 
 if __name__ == "__main__":

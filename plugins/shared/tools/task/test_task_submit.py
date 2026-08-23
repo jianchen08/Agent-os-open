@@ -396,7 +396,8 @@ def test_submit_writes_submitted_by_user_id_into_initial_state():
             p.stop()
 
     assert result.error_code in (None, ""), f"应派发成功，实际 error_code={result.error_code}"
-    assert result.output.get("pipeline_id") == "child_pipe_001"
+    # 2026-08-22 短化定案（8db4c6b16）：LLM 工具面回传 12 位短 id
+    assert result.output.get("pipeline_id") == "child_pipe_001"[:12]
     assert captured.get("user_id") == "u_admin", "chat.send_message 的 user_id 应为提交者"
     assert (
         captured.get("state", {}).get("task.submitted_by") == "u_admin"

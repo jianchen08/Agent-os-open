@@ -277,7 +277,7 @@ class CheckpointManager:
 
     def list_checkpoints(self) -> list[dict[str, Any]]:
         """列出所有检查点"""
-        checkpoints = []
+        checkpoints: list[dict[str, Any]] = []
 
         if not self.checkpoint_dir.exists():
             return checkpoints

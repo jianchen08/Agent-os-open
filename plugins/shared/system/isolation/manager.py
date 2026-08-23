@@ -12,7 +12,7 @@ import contextlib
 import logging
 from datetime import UTC, datetime
 from pathlib import Path, PurePath  # noqa: F401
-from typing import Any
+from typing import Any, cast
 
 from decider import IsolationDecider, IsolationUnrecoverableError
 from providers.base import IsolationProvider
@@ -402,12 +402,18 @@ class IsolationManager:
                 )
 
             # 2. 清理过期构建缓存（保留近 72 小时）
-            rc2, _, stderr2 = await loop.run_in_executor(
-                None,
-                lambda: _sp.run(  # noqa: PLW1510
-                    ["docker", "builder", "prune", "-f", "--filter", "until=72h"],
-                    capture_output=True,
-                    timeout=60,
+            # 注：run_in_executor 实际返回 CompletedProcess（不可迭代），此 unpack
+            # 运行时抛 TypeError 落入下方 except Exception——保持既有行为不动，
+            # cast 仅向类型检查器声明形状，运行时为零开销恒等。
+            rc2, _, stderr2 = cast(
+                "tuple[int, bytes, bytes]",
+                await loop.run_in_executor(
+                    None,
+                    lambda: _sp.run(  # noqa: PLW1510
+                        ["docker", "builder", "prune", "-f", "--filter", "until=72h"],
+                        capture_output=True,
+                        timeout=60,
+                    ),
                 ),
             )
             if rc2 == 0:
@@ -1477,7 +1483,7 @@ class IsolationManager:
 
     def get_stats(self) -> dict[str, Any]:
         """获取统计信息"""
-        level_counts = {}
+        level_counts: dict[str, int] = {}
         for env in self._environments.values():
             level = env.level.value
             level_counts[level] = level_counts.get(level, 0) + 1

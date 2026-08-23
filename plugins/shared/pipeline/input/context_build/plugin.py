@@ -70,7 +70,6 @@ class ContextBuildPlugin(IInputPlugin):
             (path, mtime) 或 None。config_id 匹配覆盖执行 agent 文件名与
             config_id 不同的常态（code_writer.yaml / config_id=code_writer_agent）。
         """
-        import os
         from pathlib import Path
 
         target = f"{agent_id}.yaml"

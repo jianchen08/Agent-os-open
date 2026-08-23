@@ -28,6 +28,7 @@ from __future__ import annotations
 import logging
 import os
 from typing import Any
+from uuid import uuid4
 
 from agentos_plugin_sdk import (
     Tool,
@@ -156,19 +157,29 @@ class MemoryTool:
     def _inject_agent_tags(
         inputs: dict[str, Any], tags: list[str]
     ) -> list[str]:
-        """把 agent_config_id 自动注入为标签（与 0.1 行为对齐）。
+        """把 agent_config_id / session_id 自动注入为标签（与 0.1 行为对齐）。
+
+        - agent_config_id：内容归属 Agent 标签
+        - session_id：会话标签（``session:<id>``）——store 侧注入、search 侧
+          按同标签过滤（filter.session_id 定向会话，2026-08-22 语义修正：
+          会话是内容维度标签而非隔离键，隔离键始终是可信 caller 身份）
 
         Args:
-            inputs: 工具输入（含 agent_config_id）
+            inputs: 工具输入（含 agent_config_id / session_id）
             tags: 原始标签列表（会被拷贝）
 
         Returns:
-            注入 agent_config_id 后的标签列表
+            注入后的标签列表
         """
         out = list(tags)
         agent_config_id = inputs.get("agent_config_id", "")
         if agent_config_id and agent_config_id not in out:
             out.append(agent_config_id)
+        session_id = inputs.get("session_id") or ""
+        if session_id:
+            session_tag = f"session:{session_id}"
+            if session_tag not in out:
+                out.append(session_tag)
         return out
 
     @staticmethod
@@ -214,6 +225,10 @@ class MemoryTool:
                         "type": "string",
                         "description": "记忆ID（delete时使用，与 file_path 二选一）",
                     },
+                    "document_id": {
+                        "type": "string",
+                        "description": "文档ID（store/update时使用，作为记忆的文档锚点，delete 时按此定向删除）",
+                    },
                     "query": {
                         "type": "string",
                         "description": "检索查询（retrieve时使用）",
@@ -249,6 +264,12 @@ class MemoryTool:
                                 "type": "array",
                                 "items": {"type": "string"},
                                 "description": "标签筛选",
+                            },
+                            "tags_match": {
+                                "type": "string",
+                                "enum": ["any", "all", "any_strict", "all_strict", "exact"],
+                                "default": "any",
+                                "description": "标签匹配模式（any=OR 含无标签 / all=AND 含无标签 / any_strict=OR 排除无标签 / all_strict=AND 排除无标签 / exact=集合相等）",
                             },
                             "session_id": {
                                 "type": "string",
@@ -319,6 +340,8 @@ class MemoryTool:
     async def _store(self, inputs: dict[str, Any]) -> ToolExecutionResult:
         """存储记忆，自动将 agent_config_id 注入为标签。"""
         backend = self._memory_backend
+        if backend is None:
+            return create_failure_result("memory backend 未注入")
         content = inputs.get("content")
         memory_type = inputs.get("memory_type", "semantic")
         tags = self._inject_agent_tags(inputs, list(inputs.get("tags", [])))
@@ -328,12 +351,18 @@ class MemoryTool:
 
         try:
             user_id = self._resolve_user_id(inputs)
+            # 调用方自持 document_id 时原样落库并回传；缺省时自动生成——
+            # 同步 retain 下无 document_id 的写入服务端不返回任何 id（operation_id
+            # 恒 None），工具层会误判"写入未确认"（2026-08-22 真机：LLM 被迫改用
+            # import_text 绕过）。document_id 即 delete/update 的定向锚点。
+            doc_id = inputs.get("document_id") or f"mem-{uuid4().hex}"
             memory_id = await backend.add(
                 user_id=user_id,
                 content=content,
                 memory_type=memory_type,
                 tags=tags,
                 source="memory_tool",
+                document_id=doc_id,
             )
             if not memory_id:
                 # 空 id = 后端未确认写入（降级/静默失败），不得报成功
@@ -348,8 +377,17 @@ class MemoryTool:
             return create_failure_result(f"存储失败: {str(e)}")
 
     async def _retrieve(self, inputs: dict[str, Any]) -> ToolExecutionResult:
-        """检索记忆。"""
+        """检索记忆。
+
+        filter 接线（2026-08-22 修复——此前只有 filter.memory_type 生效，
+        filter.tags/knowledge_name/session_id 全部被丢弃，真机测试
+        "retrieve 带 knowledge_name filter 返回空"）：tags 投服务端精确过滤
+        （hindsight tags 面），session_id 决定隔离 bank，knowledge_name 客户端
+        过滤。
+        """
         backend = self._memory_backend
+        if backend is None:
+            return create_failure_result("memory backend 未注入")
         query = inputs.get("query")
         top_k = inputs.get("top_k", 5)
         filter_ = inputs.get("filter", {}) or {}
@@ -365,12 +403,17 @@ class MemoryTool:
                 user_id=user_id,
                 top_k=top_k,
                 memory_type=memory_type,
+                tags=filter_.get("tags") or None,
+                tags_match=filter_.get("tags_match") or "any",
+                session_id=filter_.get("session_id") or None,
+                knowledge_name=filter_.get("knowledge_name") or None,
             )
             return create_success_result(
                 {
                     "success": True,
                     "query": query,
                     "top_k": top_k,
+                    "filter": filter_,
                     "results": results or [],
                 }
             )
@@ -381,6 +424,8 @@ class MemoryTool:
     async def _import_text(self, inputs: dict[str, Any]) -> ToolExecutionResult:
         """导入文本知识（name 作为知识标签）。"""
         backend = self._memory_backend
+        if backend is None:
+            return create_failure_result("memory backend 未注入")
         content = inputs.get("content")
         name = inputs.get("name")
 
@@ -404,6 +449,8 @@ class MemoryTool:
     async def _import_file(self, inputs: dict[str, Any]) -> ToolExecutionResult:
         """导入文件知识（name 缺省取文件名）。"""
         backend = self._memory_backend
+        if backend is None:
+            return create_failure_result("memory backend 未注入")
         file_path = inputs.get("file_path")
 
         if not file_path:
@@ -425,12 +472,18 @@ class MemoryTool:
     async def _update(self, inputs: dict[str, Any]) -> ToolExecutionResult:
         """更新记忆；后端不支持 update 时降级为 add（同内容），永不崩溃。
 
-        降级逻辑：以相同 content/tags 调用 backend.add，返回新 memory_id，
+        降级逻辑：以相同 content/tags 调用 backend.add（memory_id 作为
+        document_id 原样保留——删除式更新/定向覆盖的锚点），返回新 memory_id，
         并标记 degraded=True。
         """
         backend = self._memory_backend
+        if backend is None:
+            return create_failure_result("memory backend 未注入")
         content = inputs.get("content")
         tags = self._inject_agent_tags(inputs, list(inputs.get("tags", [])))
+        target_id = self._extract_memory_id(
+            inputs.get("memory_id") or inputs.get("file_path")
+        )
 
         if not content:
             return create_failure_result("更新记忆需要提供 content 参数")
@@ -443,9 +496,7 @@ class MemoryTool:
                 result = await updater(
                     backend,
                     user_id=user_id,
-                    memory_id=self._extract_memory_id(
-                        inputs.get("memory_id") or inputs.get("file_path")
-                    ),
+                    memory_id=target_id,
                     content=content,
                     tags=tags,
                 )
@@ -453,13 +504,15 @@ class MemoryTool:
                     {"success": True, "memory_id": result, "updated": True}
                 )
 
-            # 降级：重新写入同内容记忆
+            # 降级：重新写入同内容记忆（保留原 memory_id 作 document_id——
+            # 同一 document 覆盖写入，旧记忆单元由服务端合并/替换语义处理）
             memory_id = await backend.add(
                 user_id=user_id,
                 content=content,
                 memory_type="semantic",
                 tags=tags,
                 source="memory_tool:update",
+                document_id=target_id or "",
             )
             logger.info(
                 "[MemoryTool] update 降级为 add | new_memory_id=%s", memory_id
@@ -479,6 +532,8 @@ class MemoryTool:
     async def _delete(self, inputs: dict[str, Any]) -> ToolExecutionResult:
         """删除记忆。"""
         backend = self._memory_backend
+        if backend is None:
+            return create_failure_result("memory backend 未注入")
         memory_id = self._extract_memory_id(
             inputs.get("memory_id") or inputs.get("file_path")
         )
@@ -499,6 +554,8 @@ class MemoryTool:
     async def _get_context(self, inputs: dict[str, Any]) -> ToolExecutionResult:
         """获取会话上下文：以更宽泛的查询（更大 top_k，不过滤类型）检索记忆。"""
         backend = self._memory_backend
+        if backend is None:
+            return create_failure_result("memory backend 未注入")
         query = inputs.get("query") or inputs.get("session_id") or ""
         top_k = inputs.get("top_k", 10)
 
@@ -521,19 +578,33 @@ class MemoryTool:
             return create_failure_result(f"获取上下文失败: {str(e)}")
 
     async def _list(self, inputs: dict[str, Any]) -> ToolExecutionResult:
-        """列举记忆：以空查询宽泛检索（更大 top_k，可选按类型过滤）。"""
+        """列举记忆。
+
+        2026-08-22 修复：list 的语义是「罗列」而非「语义检索」——旧实现用空
+        query 打 recall，hindsight 服务端对空 query 必 422（'query must contain
+        at least one word character'，真机实测）。现改为非空宽泛查询，并把
+        filter 接线（memory_type/tags/session_id 过滤）。
+        """
         backend = self._memory_backend
+        if backend is None:
+            return create_failure_result("memory backend 未注入")
         filter_ = inputs.get("filter", {}) or {}
         memory_type = inputs.get("memory_type") or filter_.get("memory_type")
+        tags = filter_.get("tags") or inputs.get("tags") or None
         limit = inputs.get("limit", inputs.get("top_k", 20))
+        # 宽泛列举查询：类型/标签过滤足以定向，query 用通用词（服务端拒绝空 query）
+        query = inputs.get("query") or "记忆"
 
         try:
             user_id = self._resolve_user_id(inputs)
             results = await backend.search(
-                query="",
+                query=query,
                 user_id=user_id,
                 top_k=limit,
                 memory_type=memory_type,
+                tags=tags,
+                tags_match=filter_.get("tags_match") or "any",
+                session_id=filter_.get("session_id") or None,
             )
             return create_success_result(
                 {

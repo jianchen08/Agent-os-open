@@ -330,18 +330,19 @@ class LSPClient:
             raise Exception("LSP 服务器未连接")
 
         # 读取 headers
-        headers = {}
+        headers: dict[str, str] = {}
         while True:
             line = await self.process.stdout.readline()
             if not line:
                 raise Exception("连接已关闭")
 
-            line = line.decode("utf-8").strip()
-            if not line:
+            # line 在此由 bytes 转为 str（拆出独立变量避免 bytes/str 复用同一名字）
+            text = line.decode("utf-8").strip()
+            if not text:
                 break
 
-            if ":" in line:
-                key, value = line.split(":", 1)
+            if ":" in text:
+                key, value = text.split(":", 1)
                 headers[key.strip()] = value.strip()
 
         # 读取 body

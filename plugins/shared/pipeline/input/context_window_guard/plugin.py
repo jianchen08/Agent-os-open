@@ -157,26 +157,6 @@ def _make_minimal_ctx(
 # 压缩配置（从 0.1 memory/context_compressor.py 移植）
 # ═══════════════════════════════════════════════════════════
 
-# 层级名称映射（向后兼容，DSL/CSL/KIL 等历史命名归一到 L1/L2）
-LAYER_NAME_MAP = {
-    "DSL": "L1",
-    "CSL": "L2",
-    "KIL": "L2",
-}
-
-
-def normalize_layer_name(layer: str) -> str:
-    """标准化层级名称（DSL→L1, CSL→L2, KIL→L2，其余大写化）。
-
-    Args:
-        layer: 层级名称
-
-    Returns:
-        标准化后的层级名称
-    """
-    return LAYER_NAME_MAP.get(layer.upper(), layer.upper())
-
-
 @dataclass
 class CompressionConfig:
     """压缩配置。
@@ -960,8 +940,8 @@ class CompressionService:
         供外层（插件 execute）据此生成 set(seq, null) ops。返回值仍为压缩后
         消息列表（或 None），保持 compress_messages 向后兼容。
         """
-        # 重置上一轮累计的被删 seq（每轮调用独立）
-        self._last_deleted_seqs: list[int] = []
+        # 重置上一轮累计的被删 seq（每轮调用独立；注解见 __init__）
+        self._last_deleted_seqs = []
 
         if not self._llm_call_fn:
             logger.warning("[CompressionService] 跳过压缩：未提供 LLM 调用函数")
@@ -1186,7 +1166,6 @@ class CompressionService:
 
         l1_content = comp_result.get("l1", "")
         l2_content = comp_result.get("l2", "")
-        keywords = comp_result.get("keywords", [])
         state_snapshot = comp_result.get("state_snapshot", {})
         memory_items = comp_result.get("memory_items", {})
 

@@ -34,6 +34,7 @@ def _load(name: str, path: Path):
     if str(_SDK_DIR) not in sys.path:
         sys.path.insert(0, str(_SDK_DIR))
     spec = importlib.util.spec_from_file_location(name, path)
+    assert spec is not None and spec.loader is not None
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
     return mod

@@ -436,7 +436,7 @@ class WebTool(BuiltinTool):
                 # 读取 HTML
                 html_text = response.content.decode("utf-8", errors="ignore")
 
-                result_data = {
+                result_data: dict[str, Any] = {
                     "status": response.status_code,
                 }
 

@@ -32,11 +32,8 @@ sys.path.insert(0, os.path.dirname(__file__))  # 让同目录老代码的导入�
 
 from budget_manager import (
     BudgetAlert,
-    BudgetAlertAction,
-    BudgetAlertLevel,
     BudgetManager,
     BudgetStatus,
-    get_budget_manager,
     reset_budget_manager,
 )
 from exceptions import BudgetExceededException, QuotaExhaustedException
@@ -73,7 +70,6 @@ def _serialize_status(status: BudgetStatus) -> dict[str, Any]:
 async def _on_load(params: dict[str, Any]) -> None:
     """插件加载时初始化预算管理器。"""
     global _budget_manager
-    config = plugin.get_config()
     cost_config = get_cost_control_config()
     _budget_manager = BudgetManager(config=cost_config)
     logger.info("cost_control service initialized")
@@ -113,6 +109,7 @@ async def cost_control_check_budget(
         BudgetExceededException: 预算超限（任务/会话级别）
         QuotaExhaustedException: 配额耗尽（全局级别）
     """
+    assert _budget_manager is not None, "on_load 已保证 _budget_manager 初始化"
     try:
         result = await _budget_manager.check_budget(
             estimated_tokens=estimated_tokens,
@@ -150,6 +147,7 @@ async def cost_control_record_usage(
     session_id: str | None = None,
 ) -> dict[str, Any]:
     """记录 Token 使用量，返回告警信息（如果有）。"""
+    assert _budget_manager is not None, "on_load 已保证 _budget_manager 初始化"
     alert = await _budget_manager.record_usage(
         tokens=tokens,
         model=model,
@@ -178,6 +176,7 @@ async def cost_control_get_status(
     session_id: str | None = None,
 ) -> dict[str, Any]:
     """获取预算状态。"""
+    assert _budget_manager is not None, "on_load 已保证 _budget_manager 初始化"
     status = _budget_manager.get_budget_status(
         user_id=user_id,
         task_id=task_id,
@@ -196,6 +195,7 @@ async def cost_control_get_status(
 )
 async def cost_control_get_statistics() -> dict[str, Any]:
     """获取全局使用统计。"""
+    assert _budget_manager is not None, "on_load 已保证 _budget_manager 初始化"
     return _budget_manager.get_usage_statistics()
 
 
@@ -212,6 +212,7 @@ async def cost_control_get_statistics() -> dict[str, Any]:
 )
 async def cost_control_reset_task_budget(task_id: str) -> dict[str, Any]:
     """重置任务预算。"""
+    assert _budget_manager is not None, "on_load 已保证 _budget_manager 初始化"
     await _budget_manager.reset_task_budget(task_id)
     return {"reset": True, "task_id": task_id}
 
@@ -229,6 +230,7 @@ async def cost_control_reset_task_budget(task_id: str) -> dict[str, Any]:
 )
 async def cost_control_reset_session_budget(session_id: str) -> dict[str, Any]:
     """重置会话预算。"""
+    assert _budget_manager is not None, "on_load 已保证 _budget_manager 初始化"
     await _budget_manager.reset_session_budget(session_id)
     return {"reset": True, "session_id": session_id}
 
@@ -459,7 +461,6 @@ async def http_handle(
         logger.info("cost-control YAML 配置已更新: %s", _COST_CONTROL_YAML)
         return _ok(_json_response(body))
 
-    global _budget_manager
     if _budget_manager is None:
         logger.warning("http.handle called but BudgetManager not initialized (on_load pending)")
         return _error("cost_control service not initialized (sidecar warming up)", 503)

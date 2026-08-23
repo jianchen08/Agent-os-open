@@ -137,9 +137,3 @@ def get_cost_control_config() -> CostControlConfig:
     if _config is None:
         _config = load_cost_control_config()
     return _config
-
-
-def reset_cost_control_config() -> None:
-    """重置配置（用于测试）"""
-    global _config  # noqa: PLW0603
-    _config = None

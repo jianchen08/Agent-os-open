@@ -497,14 +497,14 @@ def load_installed_plugins() -> dict[str, Any]:
     return out
 
 
-# ── DSH 皮肤中心资产解析（skin-center 令牌层注入通道） ──────────────────
+# ── DSH 皮肤中心资产解析（contributes.themes 主题发射素材） ─────────────
 #
 # 第三方 skin-center 包（dsh_plugins/skin-center/）的皮肤是分层资产：
 # skin.json manifest（v2）声明 contributes.stylesheet（skin.css = 令牌层，
-# :root 上的 CSS 变量 + 背景/字体/配色，不依赖 DSH DOM 结构，可注入任意
-# 宿主页面）与 contributes.patches（patches.css / hooks.mjs = DOM 补丁层，
-# 选择器/钩子只对 DSH Web UI 的 DOM 有效——**不接入**，对灵汐 DOM 无效且
-# 可能误伤）。本通道只消费令牌层。
+# :root 上的 CSS 变量 + 背景/字体/配色）与 contributes.patches（patches.css /
+# hooks.mjs = DOM 补丁层）。本模块把皮肤翻译成灵汐原生 ThemeConfig
+# （配色/背景图/基准走主题管线渲染）；DOM 补丁层由前端按择注入通道
+# 原样搬入（merged.css + hooks.mjs，见 server.py 与 dshSkinCss.ts）。
 
 SKIN_CENTER_SKINS_DIR = Path(__file__).parent / "dsh_plugins" / "skin-center" / "skins"
 
@@ -584,34 +584,6 @@ def describe_available_skins(base_dir: str | Path | None = None) -> list[dict[st
     return out
 
 
-def load_skin_selection() -> str | None:
-    """读适配器配置（config/dsh_adapter.yaml）顶层 ``skin`` 字段。
-
-    语义：皮肤 id（如 matrix）= 注入该皮肤令牌层；缺省/none/空 = 不注入。
-    """
-    cfg_path = Path(_project_root()) / "config" / "dsh_adapter.yaml"
-    try:
-        with open(cfg_path, encoding="utf-8") as f:
-            data = yaml.safe_load(f) or {}
-    except (OSError, yaml.YAMLError):
-        return None
-    if not isinstance(data, dict):
-        return None
-    skin = data.get("skin")
-    if not isinstance(skin, str) or skin.strip() == "" or skin.strip().lower() == "none":
-        return None
-    return skin.strip()
-
-
-def resolve_skin_css(skin_id: str, base_dir: str | Path | None = None) -> Path | None:
-    """皮肤 id → skin.css 路径（纯函数；皮肤不存在返回 None）。"""
-    if not skin_id or "/" in skin_id or "\\" in skin_id or ".." in skin_id:
-        return None
-    base = Path(base_dir) if base_dir is not None else SKIN_CENTER_SKINS_DIR
-    css = base / skin_id / "skin.css"
-    return css if css.is_file() else None
-
-
 # 背景图资产扩展名白名单（backgroundMedia src / favicon 类资产 serve 用）
 SKIN_ASSET_EXTS = {".webp", ".jpg", ".jpeg", ".png", ".svg", ".gif", ".avif"}
 
@@ -652,7 +624,6 @@ _ALIAS_RE = re.compile(r"--dsw-alias-bg-base:\s*([^;]+);")
 _ALIAS_L1_RE = re.compile(r"--dsw-alias-bg-layer-1:\s*([^;]+);")
 _ALIAS_PANEL_RE = re.compile(r"--dsw-alias-bg-panel:\s*([^;]+);")
 _DSW_FONT_RE = re.compile(r"--dsw-font-family:\s*([^;]+);")
-_ROOT_BLOCK_RE = re.compile(r":root\s*\{([^}]*)\}")
 _BG_RE = re.compile(r"background-color:\s*([^;]+);")
 _FG_RE = re.compile(r"(?<![-\w])color:\s*(#[0-9a-fA-F]{3,8}|rgba?\([^)]*\))\s*;")
 _ROOT_BGIMG_RE = re.compile(r"background-image:\s*(.+);")
@@ -708,6 +679,222 @@ def skin_base_of(canvas: str) -> str:
     return "light" if _luminance(canvas) > 0.35 else "dark"
 
 
+# === 区域背景 + 对比度强制（2026-08-21，对照原生 skin-center 0.2.6） ===
+# 原生三区关系真源：页面级背景（全页插画/画布）+ --dsw-specific-sidebar-fill
+# （侧栏唯一自带表面，含原生透明度）+ conversation/workspace 无自带表面
+# （透出页面背景）。翻译 = region 变量按原生值发射，透明即透出统一背景层。
+
+_CSS_COLOR_RE = re.compile(
+    r"^(?P<hex>#[0-9a-fA-F]{3,8})"
+    r"|^rgba?\(\s*(?P<r>\d+)\s*,\s*(?P<g>\d+)\s*,\s*(?P<b>\d+)"
+    r"(?:\s*,\s*(?P<a>[0-9.]+))?\s*\)$"
+)
+
+
+def _parse_css_color(value: str) -> tuple[int, int, int, float] | None:
+    """CSS 颜色串 → (r, g, b, a)。支持 #rgb/#rrggbb/#rrggbbaa/rgb()/rgba()。
+    其余（color-mix/calc 包裹/变量引用）无法静态解析 → None。"""
+    v = value.strip()
+    if v == "transparent":
+        return (0, 0, 0, 0.0)
+    m = _CSS_COLOR_RE.match(v)
+    if not m:
+        return None
+    if m.group("hex"):
+        h = m.group("hex")[1:]
+        if len(h) == 3:
+            h = "".join(c * 2 for c in h)
+        if len(h) == 6:
+            return (int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16), 1.0)
+        if len(h) == 8:
+            return (int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16), int(h[6:8], 16) / 255)
+        return None
+    a = float(m.group("a")) if m.group("a") is not None else 1.0
+    return (int(m.group("r")), int(m.group("g")), int(m.group("b")), a)
+
+
+def _composite_rgba(fg: tuple[int, int, int, float], bg: tuple[int, int, int]) -> tuple[int, int, int]:
+    """前景（含 alpha）合成到实底背景上 → 实色。"""
+    a = max(0.0, min(1.0, fg[3]))
+    return (round(fg[0] * a + bg[0] * (1 - a)),
+            round(fg[1] * a + bg[1] * (1 - a)),
+            round(fg[2] * a + bg[2] * (1 - a)))
+
+
+def _wcag_luminance(rgb: tuple[int, int, int]) -> float:
+    chan = []
+    for i in range(3):
+        c = rgb[i] / 255
+        chan.append(c / 12.92 if c <= 0.03928 else ((c + 0.055) / 1.055) ** 2.4)
+    return 0.2126 * chan[0] + 0.7152 * chan[1] + 0.0722 * chan[2]
+
+
+def _wcag_ratio(a: tuple[int, int, int], b: tuple[int, int, int]) -> float:
+    la, lb = _wcag_luminance(a), _wcag_luminance(b)
+    hi, lo = max(la, lb), min(la, lb)
+    return (hi + 0.05) / (lo + 0.05)
+
+
+def _mix_rgb(a: tuple[int, int, int], b: tuple[int, int, int], t: float) -> tuple[int, int, int]:
+    return (round(a[0] * (1 - t) + b[0] * t),
+            round(a[1] * (1 - t) + b[1] * t),
+            round(a[2] * (1 - t) + b[2] * t))
+
+
+def _rgb_to_hex(rgb: tuple[int, int, int]) -> str:
+    return "#" + "".join(f"{max(0, min(255, c)):02x}" for c in rgb)
+
+
+def _enforce_contrast(fg: tuple[int, int, int], bgs: list[tuple[int, int, int]],
+                      min_ratio: float = 4.5, max_iter: int = 10) -> str:
+    """把前景色向白/黑两个方向逐级混色，取对全部给定背景对比度更高的结果。
+    步距 22% × 10 步 ≈ 全域：中间调背景上单方向存在"跨过背景亮度时的
+    对比度凹陷"（白→黑方向前几步比值反而下降），小步数会被种子锁死在
+    劣势端——xp 蓝画布、miku 蓝强调色都是反例。返回 #rrggbb。"""
+    def run(target: tuple[int, int, int]) -> tuple[tuple[int, int, int], float]:
+        cur: tuple[int, int, int] = fg
+        best, best_r = cur, min(_wcag_ratio(cur, b) for b in bgs)
+        for _ in range(max_iter):
+            if best_r >= min_ratio:
+                break
+            cur = _mix_rgb(cur, target, 0.22)
+            r = min(_wcag_ratio(cur, b) for b in bgs)
+            if r > best_r:
+                best, best_r = cur, r
+        return best, best_r
+
+    light, lr = run((255, 255, 255))
+    dark, dr = run((0, 0, 0))
+    return _rgb_to_hex(light if lr >= dr else dark)
+
+
+_SIDEBAR_FILL_RE = re.compile(r"--dsw-specific-sidebar-fill:\s*([^;]+);")
+_SIDEBAR_ALPHA_CALC_RE = re.compile(
+    r"calc\(\s*([0-9.]+)\s*-\s*var\(--dsh-skin-scrim,\s*([0-9.]+)\)\s*\*\s*([0-9.]+)\s*\)"
+)
+
+
+_CONVERSATION_SURFACE_RE = re.compile(
+    r'\[data-dsh-surface="conversation"\][^{]*\{([^}]*)\}'
+)
+
+
+# ── 气泡/输入面令牌提取（2026-08-22 用户裁决：对话框和气泡区域颜色要跟
+# 皮肤一样——MessageItem 内联样式消费 --bubble-*-bg（CSS 覆盖不了内联），
+# 皮肤原生气泡规则在 patches.css，翻译器提取原样声明值发射令牌）──
+# 暗色分支前缀（body[data-ds-dark-theme] ...）
+_DARK_PREFIX = r'(?:body\[data-ds-dark-theme\]\s+)?'
+# 用户气泡（DSH [class*="userRow"] [class*="bubble"]）
+_USER_BUBBLE_RULE_RE = re.compile(
+    _DARK_PREFIX + r'\[class\*=["\']userRow["\']\]\s*\[class\*=["\']bubble["\']\]\s*\{([^}]*)\}'
+)
+# AI 气泡（DSH [data-chat-flow-kind="assistant-step"] 消息 markdown 面）
+_AI_BUBBLE_RULE_RE = re.compile(
+    _DARK_PREFIX + r'\[data-chat-flow-kind="assistant-step"\]\s*>\s*\*\s*>\s*\*\s*>\s*\*\s*>\s*'
+    r'div\[class\*="markdown"\]\s*\{([^}]*)\}'
+)
+# 输入卡（DSH [data-composer-card]：input 面 = 渐变 + base 色双层，
+# 底层 var(--dsw-specific-input-major) 更接近真实面）
+_INPUT_CARD_RULE_RE = re.compile(
+    _DARK_PREFIX + r'\[data-composer-card\]\s*\{([^}]*)\}'
+)
+_BG_DECL_RE = re.compile(r'background\s*:\s*([^;]+);')
+
+
+def _extract_bubble_tokens(css: str, dark: bool) -> dict[str, str]:
+    """皮肤 patches.css → 气泡/输入卡底色令牌（--bubble-user-bg / --bubble-ai-bg /
+    --chat-input-bg）。按基准态提取：dark=True 取 body[data-ds-dark-theme] 分支，
+    否则取非暗色分支（皮肤 base 由画布亮度判定，令牌随基准态；运行期昼夜切换
+    由皮肤 CSS 在 body[data-skin-dark] 下覆盖，内联 var() 保持基准态面）。"""
+    out: dict[str, str] = {}
+
+    def _pick(rule: re.Match[str]) -> str | None:
+        m = _BG_DECL_RE.search(rule.group(1))
+        if not m:
+            return None
+        val = m.group(1).strip()
+        if not val or val == "none":
+            return None
+        # 多层渐变合成面（composer 等）：取最后一段（渐变基底色/var 更接近真实面）
+        if "var(--dsw-specific-input-major)" in val:
+            last = "#fffdf8d1"  # maid 原生输入面 base（静态已知，避引 var 环）
+        else:
+            last = val.split(",")[-1].strip().rstrip(")").strip()
+        return last
+
+    for name, pat in (
+        ("--bubble-user-bg", _USER_BUBBLE_RULE_RE),
+        ("--bubble-ai-bg", _AI_BUBBLE_RULE_RE),
+        ("--chat-input-bg", _INPUT_CARD_RULE_RE),
+    ):
+        for m in pat.finditer(css):
+            if bool(_DARK_PREFIX.strip() and m.group(0).startswith("body[data-ds-dark-theme]")) != dark:
+                continue
+            val = _pick(m)
+            if val:
+                out[name] = val
+            break
+    return out
+
+
+def _resolve_conversation_bg(css: str) -> str:
+    """skin.css → 对话主区背景值（原生 conversation 表面规则）。
+
+    当前 16 款皮肤均无 conversation 表面规则（页面级背景即对话区）→
+    'transparent'（全页立绘/画布透出）。若未来皮肤给对话区画了表面
+    （含透明度），原样返回——聊天区与工作区同享此值。"""
+    m = _CONVERSATION_SURFACE_RE.search(css)
+    if not m:
+        return "transparent"
+    bg = _BG_RE.search(m.group(1))
+    if not bg:
+        return "transparent"
+    raw = bg.group(1).strip()
+    parsed = _parse_css_color(raw)
+    if parsed is None:
+        return "transparent"
+    r, g, b, a = parsed
+    if a <= 0.01:
+        return "transparent"
+    if a >= 0.99:
+        return _rgb_to_hex((r, g, b))
+    return f"rgba({r}, {g}, {b}, {a:g})"
+
+
+def _resolve_sidebar_fill(css: str) -> str | None:
+    """skin.css → 侧栏区域背景值（原生 --dsw-specific-sidebar-fill）。
+
+    - 值是 rgba/#rrggbbaa 时原样保留透明度（浏览器在背景层之上合成）——
+      正是原生"半透明面板透出插画"的语义；
+    - 已知透明度表达式（calc(1 - var(--dsh-skin-scrim, X) * Y)）按静态默认
+      （scrim=0，背景遮挡滑杆默认位）求值；
+    - 全透明 → 'transparent'（整栏透出统一背景层）；无法静态解析 → None
+      （不发射，回退链兜底 → 行为与原生一致：侧栏透出页面背景）。"""
+    m = _SIDEBAR_FILL_RE.search(css)
+    if not m:
+        return None
+    raw = m.group(1).strip()
+    if "calc(" in raw and "var(--dsh-skin-scrim" in raw:
+        am = _SIDEBAR_ALPHA_CALC_RE.search(raw)
+        if not am:
+            return None
+        alpha = float(am.group(1)) - float(am.group(2)) * float(am.group(3))
+        cm = re.search(r"rgba?\(\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)", raw)
+        if not cm:
+            return None
+        r, g, b = (int(cm.group(i)) for i in (1, 2, 3))
+        return "transparent" if alpha <= 0.01 else f"rgba({r}, {g}, {b}, {alpha:g})"
+    parsed = _parse_css_color(raw)
+    if parsed is None:
+        return None
+    r, g, b, a = parsed
+    if a <= 0.01:
+        return "transparent"
+    if a >= 0.99:
+        return _rgb_to_hex((r, g, b))
+    return f"rgba({r}, {g}, {b}, {a:g})"
+
+
 def _extract_skin_colors(css: str) -> tuple[str, str]:
     """skin.css → (canvas, text)：--dsw-alias-bg-base / :root background-color / color。"""
     bg_m = _BG_RE.search(css) or _ALIAS_RE.search(css)
@@ -728,8 +915,18 @@ def skins_to_plugin_themes(base_dir: str | Path | None = None) -> list[dict[str,
     条目形态（PluginTheme，types/theme.ts）：
     - id: dsh-skin-<skin>（contributionRegistry 全局键 dsh_adapter:dsh-skin-*）
     - base: 画布色亮度判定（基准回退：先 applyTheme(base) 再 variables 后写者胜）
-    - variables: --ds-* 令牌 + shadcn 桥（H S% L%，tailwind hsl() 消费）+ --font-ui
+    - variables: --ds-* 令牌 + shadcn 桥（对比度强制）+ --font-ui + --region-*
     - backgrounds.image: 立绘 → 灵汐原生背景图层（overlay 取 scrim 首 rgba）
+
+    三区背景关系（对照原生 0.2.6 语义，2026-08-21 用户二裁）：
+    - 原生只有两个区：sidebar（侧栏，唯一自带表面 --dsw-specific-sidebar-fill
+      含原生透明度）+ conversation（对话主区，页面级背景，无自带表面）。
+      原生没有工作区。
+    - 映射：原生 sidebar → --region-sidebar-bg；原生 conversation →
+      --region-chat-bg 与 --region-workspace-bg **同源同值**（我们的聊天区
+      + 工作区合计 = 原生的对话主区，若皮肤给对话区画了表面，两区同享）。
+    - 全页立绘 = 对话主区透出页面背景（transparent），侧栏按原生 fill
+      覆盖其上——"铺满整个页面"由此自然成立。
     """
     themes: list[dict[str, Any]] = []
     for skin in describe_available_skins(base_dir):
@@ -740,7 +937,32 @@ def skins_to_plugin_themes(base_dir: str | Path | None = None) -> list[dict[str,
         accent = c.get("accent", "")
         base = skin.get("base", "dark")
 
+        skin_css = SKIN_CENTER_SKINS_DIR / str(skin["id"]) / "skin.css"
+        if base_dir is not None:
+            skin_css = Path(base_dir) / str(skin["id"]) / "skin.css"
+        css = ""
+        if skin_css.is_file():
+            try:
+                css = skin_css.read_text(encoding="utf-8", errors="replace")
+            except OSError:
+                css = ""
+
         variables: dict[str, str] = {}
+
+        # 气泡/输入面令牌（2026-08-22 用户裁决：气泡与对话框颜色跟皮肤一样）。
+        # 原生气泡规则在 patches.css（skin.css 只有配色令牌）——两文件同目录
+        # 同加载；令牌按基准态发射（内联 var() 静态面，昼夜覆盖归皮肤 CSS）
+        patches_path = (Path(base_dir) if base_dir is not None else SKIN_CENTER_SKINS_DIR) / str(skin["id"]) / "patches.css"
+        patches_css = ""
+        if patches_path.is_file():
+            try:
+                patches_css = patches_path.read_text(encoding="utf-8", errors="replace")
+            except OSError:
+                patches_css = ""
+        if patches_css:
+            for k, v in _extract_bubble_tokens(patches_css, dark=(base == "dark")).items():
+                variables[k] = v
+
         if canvas:
             variables["--ds-bg-canvas"] = canvas
             variables["--ds-bg-elevated"] = f"color-mix(in srgb, {canvas} 82%, white)"
@@ -755,32 +977,100 @@ def skins_to_plugin_themes(base_dir: str | Path | None = None) -> list[dict[str,
             variables["--ds-text-secondary"] = f"color-mix(in srgb, {text} 78%, {canvas})"
             variables["--ds-text-muted"] = f"color-mix(in srgb, {text} 55%, {canvas})"
             variables["--ds-border-subtle"] = f"color-mix(in srgb, {text} 16%, transparent)"
-            # shadcn 桥（必须 H S% L% 纯串——hsl(var(--x)) 内 color-mix 非法）
-            if canvas.startswith("#") and text.startswith("#"):
-                variables["--background"] = _hex_to_hsl(canvas)
-                variables["--foreground"] = _hex_to_hsl(text)
-                variables["--card"] = _hex_to_hsl(canvas)
-            if accent.startswith("#"):
+
+        # 区域背景关系（原生语义发射）：侧栏取原生 fill；对话主区取一个值
+        # （conversation 表面规则或页面背景透明），同时喂给聊天区与工作区
+        # （两区合计 = 原生对话主区，用户二裁 2026-08-21）
+        sidebar_bg = _resolve_sidebar_fill(css)
+        if sidebar_bg is not None:
+            variables["--region-sidebar-bg"] = sidebar_bg
+        main_bg = _resolve_conversation_bg(css)
+        variables["--region-chat-bg"] = main_bg
+        variables["--region-workspace-bg"] = main_bg
+        # AI 消息平铺开关（用户裁决 2026-08-21：跟 DeepSeek/DSH 原生——
+        # 用户气泡 + AI 平铺；角色扮演类主题可声明 bubble 恢复气泡）
+        variables["--bubble-ai-mode"] = "flat"
+
+        # shadcn 桥（必须 H S% L% 纯串）+ 对比度强制：文本令牌对画布与
+        # 侧栏合成面达 WCAG 4.5（字体与背景无差别的根因 = 基准主题残留
+        # 令牌混在皮肤面上；强制后任何面色下都保证可读）
+        canvas_rgb = _parse_css_color(canvas) if canvas else None
+        text_rgb = _parse_css_color(text) if text else None
+        accent_rgb = _parse_css_color(accent) if accent else None
+        if canvas_rgb is not None and text_rgb is not None:
+            canvas_solid = (canvas_rgb[0], canvas_rgb[1], canvas_rgb[2])
+            sidebar_rgba = _parse_css_color(sidebar_bg) if sidebar_bg and sidebar_bg != "transparent" else None
+            sidebar_solid = (
+                _composite_rgba(sidebar_rgba, canvas_solid)
+                if sidebar_rgba is not None else canvas_solid
+            )
+            # 桥表面一律画布族（muted/secondary/popover/card 派生自画布，
+            # 前景只对画布强制 ≥4.5）——侧栏面是原生 fill（常为中间调合成，
+            # 无单色可达 4.5），由 --region-sidebar-fg 区域变量单独服务，
+            # 桥令牌不与之混用（中间混合面 = 双面皆输）
+            fg_hex = _enforce_contrast(text_rgb[:3], [canvas_solid])
+            canvas_shift = _mix_rgb(canvas_solid, (255, 255, 255) if _wcag_luminance(canvas_solid) < 0.5 else (0, 0, 0), 0.08)
+            # muted/secondary 前景对画布与派生面（8% 偏移）双面强制
+            sec_hex = _enforce_contrast(_mix_rgb(text_rgb[:3], canvas_solid, 0.20), [canvas_solid, canvas_shift])
+            mut_hex = _enforce_contrast(_mix_rgb(text_rgb[:3], canvas_solid, 0.42), [canvas_solid, canvas_shift])
+            border_hex = _enforce_contrast(_mix_rgb(text_rgb[:3], canvas_solid, 0.16), [canvas_solid], min_ratio=1.5)
+            variables["--background"] = _hex_to_hsl(canvas)
+            variables["--foreground"] = _hex_to_hsl(fg_hex)
+            variables["--card"] = _hex_to_hsl(canvas)
+            variables["--muted"] = _hex_to_hsl(_rgb_to_hex(canvas_shift))
+            variables["--muted-foreground"] = _hex_to_hsl(mut_hex)
+            variables["--secondary"] = _hex_to_hsl(_rgb_to_hex(canvas_shift))
+            variables["--secondary-foreground"] = _hex_to_hsl(sec_hex)
+            variables["--popover"] = _hex_to_hsl(canvas)
+            variables["--popover-foreground"] = _hex_to_hsl(fg_hex)
+            variables["--border"] = _hex_to_hsl(border_hex)
+            variables["--input"] = _hex_to_hsl(border_hex)
+            # 区域前景：侧栏面与画布亮度对立时（xp 亮侧栏/黑画布、cyber-night
+            # 亮侧栏/黑画布等）全局文本无法两全——按侧栏面单独强制一档前景，
+            # index.css 经 .theme-sidebar-area 作用域重绑定 --muted-foreground
+            # 等变量（CSS 变量继承重算，无需改任何组件）
+            if sidebar_solid != canvas_solid:
+                sb_fg = _enforce_contrast(text_rgb[:3], [sidebar_solid])
+                sb_muted = _enforce_contrast(_mix_rgb(text_rgb[:3], sidebar_solid, 0.30), [sidebar_solid])
+                variables["--region-sidebar-fg"] = sb_fg
+                variables["--region-sidebar-muted-fg"] = sb_muted
+            # 区域前景（对话主区）：聊天区+工作区同面同值（用户三裁：
+            # 所有文字/图标的颜色按所在区域背景翻转）——对话面 = conversation
+            # 表面规则或透出的画布；当前 16 皮均为透明（与全局一致，不发射，
+            # 回退全局），未来皮肤画了对话面则两区按该面单独强制
+            main_rgba = _parse_css_color(main_bg) if main_bg and main_bg != "transparent" else None
+            main_solid = _composite_rgba(main_rgba, canvas_solid) if main_rgba is not None else canvas_solid
+            if main_solid != canvas_solid:
+                ch_fg = _enforce_contrast(text_rgb[:3], [main_solid])
+                ch_muted = _enforce_contrast(_mix_rgb(text_rgb[:3], main_solid, 0.30), [main_solid])
+                variables["--region-chat-fg"] = ch_fg
+                variables["--region-chat-muted-fg"] = ch_muted
+                variables["--region-workspace-fg"] = ch_fg
+                variables["--region-workspace-muted-fg"] = ch_muted
+            if accent_rgb is not None:
+                accent_solid = (accent_rgb[0], accent_rgb[1], accent_rgb[2])
+                accent_fg_seed = (255, 255, 255) if _wcag_luminance(accent_solid) < 0.6 else (0, 0, 0)
+                accent_fg_hex = _enforce_contrast(accent_fg_seed, [accent_solid])
                 variables["--primary"] = _hex_to_hsl(accent)
+                variables["--primary-foreground"] = _hex_to_hsl(accent_fg_hex)
+                variables["--accent"] = _hex_to_hsl(accent)
+                variables["--accent-foreground"] = _hex_to_hsl(accent_fg_hex)
                 variables["--ring"] = _hex_to_hsl(accent)
 
         # 皮肤字体 → --font-ui（主题管线原生消费 main.tsx fontFamily）
-        skin_css = SKIN_CENTER_SKINS_DIR / str(skin["id"]) / "skin.css"
-        if base_dir is not None:
-            skin_css = Path(base_dir) / str(skin["id"]) / "skin.css"
-        if skin_css.is_file():
-            try:
-                m = _DSW_FONT_RE.search(skin_css.read_text(encoding="utf-8", errors="replace"))
-                if m:
-                    variables["--font-ui"] = m.group(1).strip()
-            except OSError:
-                pass
+        if css:
+            m = _DSW_FONT_RE.search(css)
+            if m:
+                variables["--font-ui"] = m.group(1).strip()
 
         entry: dict[str, Any] = {
             "id": f"dsh-skin-{skin['id']}",
             "name": skin.get("name") or skin["id"],
             "description": f"{skin.get('tagline') or skin['id']}（DSH 皮肤 · dsh_adapter）",
             "base": base,
+            # 平台皮肤运行时声明（2026-08-22 皮肤能力平台化）：声明 skin 字段
+            # 即激活按择注入（merged.css/hooks.mjs/资产三端点按标准路径递送）
+            "skin": str(skin["id"]),
         }
         if variables:
             entry["variables"] = variables

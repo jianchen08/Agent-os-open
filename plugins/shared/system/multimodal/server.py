@@ -25,7 +25,6 @@ sys.path.insert(0, os.path.dirname(__file__))
 # capabilities.py 的 get_capability() / get_adapter_for_model() 已改为可选导入：
 # 先尝试 from llm_config / from router_factory（本地未提供时 ImportError），
 # 找不到则走 fallback（返回默认空能力 / DefaultAdapter）。
-from adapter import DefaultAdapter, MultimodalAdapter  # noqa: E402
 from capabilities import ModelCapabilityRegistry  # noqa: E402
 from mm_types import AttachmentInfo, MediaType  # noqa: E402
 

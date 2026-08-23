@@ -44,7 +44,7 @@ def _restore_performance_monitor_module():
     had = "performance_monitor" in sys.modules
     saved = sys.modules.get("performance_monitor")
     yield
-    if had:
+    if had and saved is not None:
         sys.modules["performance_monitor"] = saved
     else:
         sys.modules.pop("performance_monitor", None)

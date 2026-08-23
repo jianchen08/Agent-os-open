@@ -480,6 +480,17 @@ class TaskTool(BuiltinTool):
 
         task_ids = inputs.get("task_ids")
 
+        # ── 短 id 入参解析（2026-08-22 用户要求：LLM 工具面 id 短化）──
+        # LLM 回传的 task_id / task_ids / parent_task_id 可能是短 id（12 位前缀），
+        # 统一经 state 聚合前缀唯一解析回全 id（精确命中原样；多命中歧义报错；
+        # 无命中原样让既有"任务不存在"路径处理）。解析在 action 分派前收口。
+        resolve_err = await self._resolve_input_ids(inputs)
+        if resolve_err:
+            return create_failure_result(
+                error=resolve_err,
+                error_code="AMBIGUOUS_TASK_ID",
+            )
+
         if task_ids and isinstance(task_ids, list) and action in ("continue", "stop", "delete"):
             return await self._batch_tasks(inputs, parent_agent_level)
 
@@ -502,6 +513,54 @@ class TaskTool(BuiltinTool):
             error=f"不支持的操作: {action}",
             error_code="INVALID_ACTION",
         )
+
+    async def _resolve_input_ids(self, inputs: dict[str, Any]) -> str | None:
+        """LLM 入参任务 id 前缀唯一解析（短 id → 全 id，就地改写 inputs）。
+
+        Returns:
+            None = 解析完成；str = 歧义错误信息（多命中短前缀）。
+        """
+        rows = await self._read_state_rows()
+        if rows is None:
+            return None  # 聚合不可用：原样放行，既有"任务不存在"路径处理
+
+        from id_utils import resolve_id  # noqa: PLC0415
+
+        tid = inputs.get("task_id")
+        if isinstance(tid, str) and tid:
+            resolved = await resolve_id(rows, tid)
+            if resolved.startswith("AMBIGUOUS:"):
+                return f"任务 ID '{tid}' 匹配到多个任务，请使用完整 ID 重试"
+            inputs["task_id"] = resolved
+
+        pids = inputs.get("task_ids")
+        if isinstance(pids, list):
+            resolved_ids: list[str] = []
+            for p in pids:
+                if isinstance(p, str):
+                    r = await resolve_id(rows, p)
+                    if r.startswith("AMBIGUOUS:"):
+                        return f"任务 ID '{p}' 匹配到多个任务，请使用完整 ID 重试"
+                    resolved_ids.append(r)
+                else:
+                    resolved_ids.append(p)
+            inputs["task_ids"] = resolved_ids
+
+        ptid = inputs.get("parent_task_id")
+        if isinstance(ptid, str) and ptid:
+            resolved = await resolve_id(rows, ptid)
+            if resolved.startswith("AMBIGUOUS:"):
+                return f"任务 ID '{ptid}' 匹配到多个任务，请使用完整 ID 重试"
+            inputs["parent_task_id"] = resolved
+
+        return None
+
+    @staticmethod
+    def _short(full_id: str) -> str:
+        """全 id → 短 id（LLM 展示用，12 位）。"""
+        from id_utils import short_id  # noqa: PLC0415
+
+        return short_id(full_id)
 
     @staticmethod
     def _check_permission(  # noqa: PLR0911
@@ -586,7 +645,9 @@ class TaskTool(BuiltinTool):
         """将 TaskModel 转换为工具返回的字典格式。"""
 
         result = {
-            "task_id": task.id,
+            # 短 id（2026-08-22 用户要求：LLM 工具面 id 短化；内部权威 id 不动，
+            # 回传时工具入口经前缀解析恢复全 id）
+            "task_id": self._short(task.id),
             "title": task.title,
             "status": task.status.value,
             "error": task.error,
@@ -798,9 +859,9 @@ class TaskTool(BuiltinTool):
             if limit and len(filtered) > limit:
                 filtered = filtered[:limit]
 
-            # 构建简表
+            # 构建简表（task_id 短化：LLM 展示/回传用短 id，入口前缀解析恢复全 id）
 
-            task_ids = [t.id for t in filtered]
+            task_ids = [self._short(t.id) for t in filtered]
 
             titles = [t.title for t in filtered]
 
@@ -1421,6 +1482,10 @@ class TaskTool(BuiltinTool):
             # 不委派子动作（即便未来新增无自身鉴权的批量动作也在此收口）。
             service = self._get_task_service()
             pre_task = service.get_task(task_id)
+            if pre_task is None:
+                # GAP-1 统一（2026-08-22）：state 任务（task.* 行 / task.owned 容器）
+                # 不在 YAML 存储——预检加 state 兜底，否则批量操作绕过权限收口
+                pre_task = await self._get_task_from_state(task_id)
             if pre_task is not None:
                 pre_ok, pre_err = self._check_permission(pre_task, parent_agent_level, file_inputs)
                 if not pre_ok:

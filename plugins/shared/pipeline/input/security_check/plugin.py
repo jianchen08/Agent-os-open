@@ -262,7 +262,7 @@ class SecurityCheckPlugin(IInputPlugin):
         },
     ]
 
-    def _load_rules(self) -> list[dict[str, Any]]:
+    def _load_rules(self) -> list[dict[str, Any]]:  # type: ignore[return]
         """从配置或 YAML 文件加载安全规则。
 
         优先使用 config 中直接提供的 rules 列表，
@@ -1074,7 +1074,6 @@ class SecurityCheckPlugin(IInputPlugin):
             if not self._tool_matches_rule(tool_name, tools):
                 continue
 
-            # 遍历规则关注的参数
             params = rule.get("params", [])
             for param_name in params:
                 value = args.get(param_name)
@@ -1082,7 +1081,6 @@ class SecurityCheckPlugin(IInputPlugin):
                     continue
                 value_str = str(value)
 
-                # 遍历规则的模式列表
                 patterns = rule.get("patterns", [])
                 for pattern_def in patterns:
                     pat_type = pattern_def.get("type", "keyword")

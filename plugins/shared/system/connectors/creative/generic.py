@@ -134,6 +134,7 @@ class GenericCreativeConnector(BaseConnector, ConfigSubscriberMixin):
 
     async def _capture_screenshot(self, params: dict[str, Any]) -> ActionResult:
         """截取屏幕截图。"""
+        assert self._session is not None
         async with self._session.post(
             f"{self._endpoint}/screenshot",
             json=params,
@@ -148,6 +149,7 @@ class GenericCreativeConnector(BaseConnector, ConfigSubscriberMixin):
 
     async def _execute_command(self, params: dict[str, Any]) -> ActionResult:
         """执行自定义命令。"""
+        assert self._session is not None
         async with self._session.post(
             f"{self._endpoint}/command",
             json=params,
@@ -157,6 +159,7 @@ class GenericCreativeConnector(BaseConnector, ConfigSubscriberMixin):
 
     async def _forward_action(self, action: ConnectorAction) -> ActionResult:
         """通用操作转发。"""
+        assert self._session is not None
         async with self._session.post(
             f"{self._endpoint}/action",
             json={

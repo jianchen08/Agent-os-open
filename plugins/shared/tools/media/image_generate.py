@@ -305,6 +305,7 @@ class ImageGenerateTool(BuiltinTool):
         kwargs: dict[str, Any],
     ) -> ToolExecutionResult:
         """注入式注册表路径：ProviderChain 链式执行（0.1 兼容语义）。"""
+        assert self._registry is not None, "调用方已按 _registry 非空分流"
         try:
             chain = self._registry.get_chain_for_type(
                 MediaType.IMAGE,

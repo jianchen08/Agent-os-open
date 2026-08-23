@@ -162,7 +162,7 @@ class LLMClient:
             messages = list(prompt)
 
         url = f"{self.chat_api_base.rstrip('/')}/chat/completions"
-        payload = {
+        payload: dict[str, Any] = {
             "model": self.chat_model,
             "messages": messages,
             "max_tokens": max_tokens,
