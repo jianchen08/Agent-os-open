@@ -103,6 +103,10 @@ async def test_workspace_init_no_explicit_ws_degrades_to_plain(plugins, monkeypa
     对齐服务层矫正（_start_root_task：无显式 workspace → 强制 plain 目录）——
     服务不可用时没有 worktree 被创建，声明 worktree 会造成"没有 workspace
     却 worktree 模式"的虚假标记（exit 会据此尝试 merge）。
+
+    2026-08-24 修正：source_path 已被解析为项目根（worktree 的源）——降级时
+    workspace 必须回退「工作区根/{task_id}」（.ai_workspaces/ 下），不得把
+    项目根直接当 workspace（任务会在项目根上直接读写）。
     """
     ws = plugins["ws"]
     monkeypatch.setattr(ws, "_get_manager", lambda base_path_hint=None: None)
@@ -119,7 +123,14 @@ async def test_workspace_init_no_explicit_ws_degrades_to_plain(plugins, monkeypa
     )
     updates = result.state_updates
     assert updates["ws_meta"]["mode"] == "plain", "无显式 workspace 不得标 worktree"
-    assert updates["ws_meta"]["path"]
+    # plugin.py 里 _root = Path(__file__).resolve().parents[5]；测试侧等价：
+    # _WORKSPACE_DIR 是目录（差一层），parents[4] = 项目根
+    project_root = Path(_WORKSPACE_DIR).resolve().parents[4]
+    ws_path = Path(updates["ws_meta"]["path"])
+    assert str(ws_path).endswith(
+        str(project_root / ".ai_workspaces" / "task_degrade_1")
+    ), f"降级 workspace 应为 .ai_workspaces 下占位目录，实际: {ws_path}"
+    assert not str(ws_path).endswith(str(project_root)), "不得把项目根直接当 workspace"
 
 
 @pytest.mark.asyncio

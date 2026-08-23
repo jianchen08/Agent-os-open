@@ -349,9 +349,15 @@ class WorkspaceLifecycleManager(_GitOpsMixin, _MergeOpsMixin):
             )
             return meta
 
-        # 无显式 workspace 且无容器 → plain 模式：只创建目录，不做 git 操作
+        # 无显式 workspace 且无容器：
+        # - 显式 plain → plain 空目录（只创建目录，不做 git 操作）
+        # - 默认/显式 worktree → 落到下方 worktree 建立分支，源 = 调用方传入的
+        #   workspace（plugin._bootstrap 已把无显式场景的 workspace 解析为项目根，
+        #   mode=worktree 即「在项目根上建 worktree」）。项目根非 git 仓库或
+        #   worktree 建不起来时由下方分支的 git 前置步骤 fail-honest 抛错，
+        #   上层（plugin._bootstrap）捕获后降级为 plain。
         has_explicit_workspace = task_data.get("_has_explicit_workspace", False)
-        if not has_explicit_workspace and not container_ws:
+        if _ws_mode == "plain" and not has_explicit_workspace and not container_ws:
             ws_base = self._get_workspace_root()
             plain_path = ws_base / task_id
             plain_path.mkdir(parents=True, exist_ok=True)
@@ -366,6 +372,29 @@ class WorkspaceLifecycleManager(_GitOpsMixin, _MergeOpsMixin):
 
         scenario, project_root = self._detect_scenario(workspace, task_data)
         root_path = Path(project_root)
+        # 无显式 workspace（源=项目根）的 worktree 前置守卫：项目根必须是已提交的
+        # git 仓库——不能在项目根上自动 git init / initial commit（会把普通目录
+        # 改写成仓库，污染用户态）。非 git 仓库或无提交 → warn 降级 plain 空目录
+        # （fail-honest 不 panic，保持既有降级风格）。
+        if not has_explicit_workspace:
+            rc_wt, out_wt, _ = self._run_git("rev-parse", "--is-inside-work-tree", cwd=root_path)
+            rc_head, _, _ = self._run_git("rev-parse", "HEAD", cwd=root_path)
+            if rc_wt != 0 or out_wt.strip().lower() != "true" or rc_head != 0:
+                ws_base = self._get_workspace_root()
+                plain_path = ws_base / task_id
+                plain_path.mkdir(parents=True, exist_ok=True)
+                meta = {"mode": "plain", "path": str(plain_path)}
+                self._ws_meta_store[task_id] = meta
+                logger.warning(
+                    "[WorkspaceLifecycle] 项目根非有效 git 仓库，worktree 无法建立，"
+                    "降级 plain 模式: task_id=%s, root=%s, rc_worktree=%d, rc_head=%d, path=%s",
+                    task_id,
+                    project_root,
+                    rc_wt,
+                    rc_head,
+                    plain_path,
+                )
+                return meta
         logger.debug(
             "[WorkspaceLifecycle] _start_root_task: task_id=%s, scenario=%s, workspace=%s, root_path=%s",
             task_id,

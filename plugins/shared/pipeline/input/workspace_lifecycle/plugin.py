@@ -256,7 +256,8 @@ class WorkspaceLifecyclePlugin(IInputPlugin):
             return PluginResult()
 
         source_path = ws_spec.get("source_path") or ""
-        mode = ws_spec.get("mode") or "plain"
+        # 2026-08-24 裁定：模式未指定 → 默认 worktree（不是 plain）。
+        mode = ws_spec.get("mode") or "worktree"
         # 0.2 统一：任务身份 = pipeline_id，引擎注入 state 的扁平键是 task.id
         # （点号键）；兼容顶层 task_id（0.1 遗留）。缺 task 上下文 = 主会话纯解析。
         task_id = state.get("task_id") or state.get("task.id") or ""
@@ -339,22 +340,40 @@ class WorkspaceLifecyclePlugin(IInputPlugin):
         # 虚假标记（exit 会据此尝试 merge）。对齐服务层矫正
         # （WorkspaceLifecycleManager._start_root_task：无显式 workspace → 强制
         # plain 目录）。
+        # 2026-08-24 修正：无显式 workspace + worktree 模式时 source_path 已被
+        # 解析为项目根（worktree 的源）——服务不可用降级时**不能把项目根直接当
+        # workspace**（任务会在项目根上直接读写），回退「工作区根/{task_id}」
+        # 占位目录（同 plain 默认位置，`.ai_workspaces/` 下）。
         _effective_mode = mode
+        _effective_path = source_path
         if not ws_spec.get("explicit"):
+            if mode == "worktree":
+                try:
+                    _ensure_isolation_path()
+                    from isolation.workspace import get_workspace_config_root  # noqa: PLC0415
+
+                    _root = Path(__file__).resolve().parents[5]
+                    _effective_path = str(_root / get_workspace_config_root() / task_id)
+                except Exception as _exc:  # noqa: BLE001
+                    # 配置读取失败：沿用 source_path（项目根）已是最坏兜底
+                    logger.warning(
+                        "[WorkspaceLifecycle] 降级路径配置根解析失败，沿用项目根 | error=%s",
+                        _exc,
+                    )
             _effective_mode = "plain"
         updates = {
-            "workspace": source_path,
-            "project_root": source_path,
+            "workspace": _effective_path,
+            "project_root": _effective_path,
             "ws_meta": {
                 "mode": _effective_mode,
-                "path": source_path,
-                "project_root": source_path,
+                "path": _effective_path,
+                "project_root": _effective_path,
             },
         }
         logger.info(
             "[WorkspaceLifecycle] init 解析工作空间 | mode=%s | path=%s",
             mode,
-            source_path,
+            _effective_path,
         )
         return PluginResult(state_updates=updates)
 
