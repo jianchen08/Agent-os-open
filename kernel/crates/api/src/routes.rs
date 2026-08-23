@@ -986,6 +986,9 @@ pub async fn pipelines_state_handler(
             if seen.contains(&pid) {
                 continue;
             }
+            // runs 清单每管道可有多个 run——首个命中后登记去重（此前漏 insert
+            // 导致同管道按 run 数重复出口，前端 Record 覆盖掩盖）。
+            seen.insert(pid.clone());
             // 冷兜底行 = 最新 checkpoint + pipeline_state 表最新标量覆盖（复用
             // cold_state_row：checkpoint 拍在终态回写前 → task.status 等完成态以
             // pipeline_state 表为准，重启后不再倒退回 pending）。

@@ -681,30 +681,13 @@ async def _list_tasks_from_state() -> list[dict[str, Any]] | None:
     if not isinstance(rows, list):
         return None
     out: list[dict[str, Any]] = []
+    # 第一趟：普通任务行（task.* 键）——这些任务有自己的执行管道 state，
+    # 归属（lineage 父）与状态以本管道行为准；收集 pid 供 owned 行去重。
+    state_pids: set[str] = set()
+    task_rows: list[dict[str, Any]] = []
     for row in rows:
         if not isinstance(row, dict):
             continue
-        # ── 容器任务（task.owned.<id>.* 键）──
-        owned = _collect_owned_tasks(row)
-        for pid, fields in owned.items():
-            out.append(
-                {
-                    "id": pid,
-                    "title": str(fields.get("title") or pid),
-                    "status": str(fields.get("status") or "active"),
-                    "thread_id": _session_anchor(row),
-                    "pipeline_run_id": str(row.get("pipeline_id") or ""),
-                    "parent_task_id": None,
-                    "metadata": {
-                        "session_id": _session_anchor(row),
-                        "task_scope": "container",
-                        "submitted_by": str(fields.get("submitted_by") or ""),
-                        "workspace": str(fields.get("workspace") or ""),
-                    },
-                    "created_at": str(fields.get("created_at") or ""),
-                }
-            )
-        # ── 普通任务（task.* 行；task.owned.* 是容器任务声明，排除）──
         if not any(
             str(k).startswith("task.") and not str(k).startswith("task.owned.")
             for k in row.keys()
@@ -713,7 +696,8 @@ async def _list_tasks_from_state() -> list[dict[str, Any]] | None:
         pid = str(row.get("pipeline_id") or "")
         if not pid:
             continue
-        out.append(
+        state_pids.add(pid)
+        task_rows.append(
             {
                 "id": pid,
                 "title": str(row.get("task.goal") or pid),
@@ -732,6 +716,36 @@ async def _list_tasks_from_state() -> list[dict[str, Any]] | None:
                 "created_at": str(row.get("task.created_at") or ""),
             }
         )
+    out.extend(task_rows)
+    # 第二趟：容器任务/登记声明（task.owned.<id>.* 键）——只在无独立 state 行时
+    # 出口（有 state 行的任务以 state 行为准：归属/状态更真；双行同 id 会让
+    # 前端 taskById 覆盖 + 面板重复节点）。
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        owned = _collect_owned_tasks(row)
+        for pid, fields in owned.items():
+            if pid in state_pids:
+                continue
+            out.append(
+                {
+                    "id": pid,
+                    "title": str(fields.get("title") or pid),
+                    "status": str(fields.get("status") or "active"),
+                    "thread_id": _session_anchor(row),
+                    "pipeline_run_id": str(row.get("pipeline_id") or ""),
+                    "parent_task_id": None,
+                    "metadata": {
+                        "session_id": _session_anchor(row),
+                        # 登记键带真实 scope（task_submit 写入）；缺省视为容器
+                        # （task.owned 通道的设计场景是容器任务登记）
+                        "task_scope": str(fields.get("scope") or "container"),
+                        "submitted_by": str(fields.get("submitted_by") or ""),
+                        "workspace": str(fields.get("workspace") or ""),
+                    },
+                    "created_at": str(fields.get("created_at") or ""),
+                }
+            )
     return out
 
 

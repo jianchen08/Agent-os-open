@@ -187,19 +187,21 @@ async def task_transition(
     """
     svc = _get_service()
     if action == "start":
-        task = await svc.start_task(task_id)
+        await svc.start_task(task_id)
     elif action == "pause":
-        task = await svc.pause_task(task_id)
+        await svc.pause_task(task_id)
     elif action == "resume":
-        task = await svc.resume_task(task_id)
+        await svc.resume_task(task_id)
     elif action == "fail":
-        task = await svc.fail_task(task_id, reason=reason)
-        if task is None:
-            return {"ok": False, "error": "Task not found"}
+        await svc.fail_task(task_id, reason=reason or "")
     elif action == "complete_evaluation":
-        task = await svc.complete_evaluation(task_id, passed=passed, result=result)
+        await svc.complete_evaluation(task_id, passed=passed, result=result)
     else:
         return {"ok": False, "error": f"Unknown action: {action}"}
+    # 状态转换方法多为 None 返回（副作用式）——转换后回读任务取终态
+    task = svc.get_task(task_id)
+    if task is None:
+        return {"ok": False, "error": "Task not found"}
     return {"ok": True, "status": task.status.value, "task_id": task.id}
 
 
@@ -232,7 +234,7 @@ async def task_list(
     elif status:
         tasks = svc.list_by_status(TaskStatus(status))
     else:
-        tasks = svc.list_all()
+        tasks = await svc.list_all()
 
     return {
         "tasks": [
@@ -273,7 +275,7 @@ async def task_cancel(
     """Cancel a task. If cascade=True, all subtasks are also cancelled."""
     svc = _get_service()
     if cascade:
-        count = await svc.cancel_task_cascade(task_id, reason=reason)
+        count = await svc.cancel_task_cascade(task_id, reason=reason or "")
         return {"cancelled": count, "task_id": task_id}
     await svc.pause_task(task_id)
     return {"cancelled": 0, "task_id": task_id}

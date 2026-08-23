@@ -452,6 +452,61 @@ class TestStateMachine:
         assert expected_states.issubset(defined), f"Missing states: {expected_states - defined}"
 
 
+# ── state 聚合出口：state 行优先、owned 行兜底（2026-08-23 归属链修复）────
+# 有父任务会同时有：自己管道的 state 行（task.* + lineage.parent_pipeline_id）
+# 和提交者管道的 task.owned.<id>.* 登记键。出口必须以 state 行为准（归属/状态
+# 更真），owned 行只兜底无 state 行的任务（容器任务/出生字段丢失的存量任务），
+# 否则同 id 双行 + 前端 taskById 覆盖 + 面板重复节点。
+class TestListTasksFromStateDedup:
+    def _rows(self) -> list[dict]:
+        return [
+            # 子任务自己的执行管道行（state 真值：父归属 + 真实 scope）
+            {
+                "pipeline_id": "child-pipe",
+                "lineage.parent_pipeline_id": "parent-pipe",
+                "task.goal": "子任务",
+                "task.status": "running",
+                "task.scope": "non_container",
+                "task.submitted_by": "u1",
+            },
+            # 提交者管道行（task.owned 登记：与 state 行同 id + 一个纯容器声明）
+            {
+                "pipeline_id": "parent-pipe",
+                "task.owned.child-pipe.title": "子任务",
+                "task.owned.child-pipe.status": "running",
+                "task.owned.child-pipe.scope": "non_container",
+                "task.owned.proj-1.title": "容器项目",
+                "task.owned.proj-1.status": "active",
+                # proj-1 无 scope 键 → 容器缺省
+            },
+        ]
+
+    async def test_state_row_wins_over_owned_registration(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import http_api
+
+        rows = self._rows()
+
+        class FakeState:
+            async def call(self, _name: str, _params: dict) -> list:
+                return rows
+
+        monkeypatch.setattr(http_api, "_capability", lambda _name: FakeState())
+        out = await http_api._list_tasks_from_state()
+        assert out is not None, "capability 可用时聚合不得降级为 None"
+        by_id = {str(t["id"]): t for t in out}
+        # 子任务只出一行（state 行），不与 owned 登记重复
+        assert len([t for t in out if str(t["id"]) == "child-pipe"]) == 1
+        child = by_id["child-pipe"]
+        assert child["parent_task_id"] == "parent-pipe"
+        assert child["metadata"]["task_scope"] == "non_container"
+        # 纯容器声明（无 state 行）仍出口，scope 缺省 container
+        proj = by_id["proj-1"]
+        assert proj["metadata"]["task_scope"] == "container"
+        assert proj["parent_task_id"] is None
+
+
 # ── 归属会话透传（ADR 2026-08-21）────────────────────────────────
 # 手动创建任务把用户会话随 chat.send_message 创建参数透传：内核创建分支以真实
 # 会话 link pipeline_sessions（runs 快照/前端导航据此归属）；响应层 thread_id
