@@ -242,6 +242,48 @@ async def test_get_list_from_state_full_shape() -> None:
     assert rows[0][6] == "-", "无 started_at → 耗时列优雅降级 '-'"
 
 
+async def test_list_excludes_owned_only_rows_keeps_real_tasks() -> None:
+    """任务行判定与内核收紧口径一致（has_task_marker：task.* 且非 task.owned.*）。
+
+    历史 bug：_list_tasks_from_state 只判 task. 前缀，只登记过容器子任务
+    （task.owned.*）的聊天管道被当成任务行返给 LLM。修复后：
+    - 只含 task.owned.* 的行（聊天管道登记了容器子任务）→ 不出现在列表；
+    - 含 task.status 的真任务行 → 正常出现在列表。
+    """
+    tool = TaskTool()
+
+    async def fake_rows():
+        return [
+            {
+                # 仅登记过容器子任务（task.owned.*），无 task.* 真任务字段
+                "pipeline_id": "pipe-owned-only",
+                "task.owned.abc123.title": "容器A",
+                "task.owned.abc123.status": "active",
+                "task.owned.abc123.scope": "container",
+            },
+            # 真任务行（含 task.status）——必须出现在列表
+            {
+                "pipeline_id": "pipe-real",
+                "task.status": "running",
+                "task.goal": "真任务",
+                "task.submitted_by": "u1",
+                "task.scope": "non_container",
+                "lineage.origin_session_id": "sess-real",
+                "thread_id": "thread-real",
+            },
+        ]
+
+    tool._read_state_rows = fake_rows  # type: ignore[method-assign]
+    result = await tool.execute({"action": "get", "parent_agent_level": 1})
+    assert result.success, f"get 列表失败: {result.error}"
+    assert result.output is not None
+    rows: list = result.output["d"]
+    titles = [row[1] for row in rows]
+    assert "真任务" in titles, "含 task.status 的真任务行必须出现在列表"
+    assert "容器A" not in titles, "仅 task.owned.* 的管道不得作为任务行返回"
+    assert all(not str(row[0]).startswith("pipe-owned-only") for row in rows)
+
+
 async def test_get_list_l2_pipeline_filter_from_state() -> None:
     """L2 带 pipeline_id 过滤在 state 桥读面下不得 AttributeError。
 

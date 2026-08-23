@@ -271,7 +271,14 @@ class TaskTool(BuiltinTool):
             return None
         out: list[TaskModel] = []
         for row in rows:
-            if not any(str(k).startswith("task.") for k in row):
+            # 任务行判定与内核收紧口径一致（kernel server.rs has_task_marker：
+            # k.startswith("task.") && !k.startswith("task.owned.")）——含
+            # task.* 但不含 task.owned.* 的行才是任务管道；只登记过容器子任务
+            # （task.owned.*）的聊天管道不算任务行，不返给 LLM。
+            if not any(
+                str(k).startswith("task.") and not str(k).startswith("task.owned.")
+                for k in row
+            ):
                 continue
             pid = str(row.get("pipeline_id") or "")
             if not pid:

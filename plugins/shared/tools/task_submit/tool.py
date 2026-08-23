@@ -1382,6 +1382,14 @@ class TaskSubmitTool(BuiltinTool):
             "lineage": lineage,
             "background": True,
         }
+        # 提交参数对账（2026-08-23）：priority/max_retries 仅在 LLM 显式传入时
+        # 落 state（task.priority/task.max_retries）——不传不写、不补默认值
+        # （默认值语义留在 schema 声明，state 不强行 fallback，与"验收标准铁律：
+        # 不 fallback、不默认"的既有风格一致），保证"提交参数 vs 实际参数"可对账。
+        if "priority" in inputs:
+            params["state"]["task.priority"] = inputs["priority"]
+        if "max_retries" in inputs:
+            params["state"]["task.max_retries"] = inputs["max_retries"]
         # 父是容器任务（task.owned 声明，非管道）：子任务管道 state 带
         # parent_project_id（容器 project id）——前端任务树据此挂容器节点下；
         # lineage 有父形式仍指向提交者管道（容器不是管道，不能当 lineage 父）。
@@ -1569,6 +1577,13 @@ class TaskSubmitTool(BuiltinTool):
                 f"task.owned.{project_id}.submitted_by": inputs.get("user_id", ""),
             },
         }
+        # 提交参数对账（2026-08-23）：priority/max_retries 仅在 LLM 显式传入时
+        # 落登记 state（task.owned.<id>.priority/max_retries）——不传不写、不补
+        # 默认值（默认值语义留在 schema 声明，与普通任务派发分支同语义）。
+        if "priority" in inputs:
+            params["state"][f"task.owned.{project_id}.priority"] = inputs["priority"]
+        if "max_retries" in inputs:
+            params["state"][f"task.owned.{project_id}.max_retries"] = inputs["max_retries"]
         try:
             resp = await sender(params)
         except Exception as exc:
