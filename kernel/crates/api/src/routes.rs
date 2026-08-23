@@ -848,6 +848,11 @@ const STATE_SUMMARY_KEYS: &[&str] = &[
     "task.scope",
     "task.submitted_by",
     "task.parent_project_id",
+    // 任务提交参数对账（2026-08-23）：task_submit 在 LLM 显式传入时落
+    // task.priority/task.max_retries——白名单出口保证 pipeline-state 聚合
+    // 可见"提交参数 vs 实际参数"对账依据。
+    "task.priority",
+    "task.max_retries",
     "workspace",
     "ws_meta",
     // GAP-1 阶段 1：血缘字段（出生写入，任务树分组与溯源的出口依赖）
@@ -2193,6 +2198,30 @@ mod state_summary_tests {
         ] {
             assert!(s.get(k).is_none(), "{k} 不应被伪造");
         }
+    }
+
+    #[test]
+    fn test_summarize_state_exports_task_submit_parity_keys() {
+        // 任务提交参数对账（2026-08-23）：task_submit 在 LLM 显式传入时落
+        // task.priority/task.max_retries（提交参数 vs 实际参数对账依据）——
+        // 白名单必须出口，否则 pipeline-state 聚合出口看不到。
+        let state = json!({
+            "pipeline_id": "p6",
+            "task.priority": "high",
+            "task.max_retries": 2,
+            "task.goal": "g",
+        });
+        let s = summarize_state(&state);
+        assert_eq!(s["task.priority"], "high");
+        assert_eq!(s["task.max_retries"], 2);
+        // task.owned.<id> 变体走既有前缀白名单出口（容器任务登记的对账字段）
+        let s2 = summarize_state(&json!({
+            "pipeline_id": "p7",
+            "task.owned.ae7b430f.priority": "high",
+            "task.owned.ae7b430f.max_retries": 2,
+        }));
+        assert_eq!(s2["task.owned.ae7b430f.priority"], "high");
+        assert_eq!(s2["task.owned.ae7b430f.max_retries"], 2);
     }
 
     #[test]

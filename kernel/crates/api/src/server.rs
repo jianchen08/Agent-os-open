@@ -837,10 +837,12 @@ async fn process_via_engine_inner(
 ///   无任务派生——收口把关是 child_task_guard 的结构性职责）
 /// - 否则 → `run.completed`（state 带 `task.*` 字段时追加 `task_completed`）
 ///
-/// 任务派生判据：state 存在任意 `task.` 前缀键（task = pipeline 单一真值，
-/// 任务管道的 state 出生即带 task.* 字段）。事件经 [`broadcast_domain_event`]
-/// 双通道投递：观察总线 + 点对点推给声明 domain_event hook 的订阅插件
-/// （triggers_ext → evaluate_event——EVENT 触发器的输入源）。
+/// 任务派生判据：state 存在 `task.` 前缀键（task = pipeline 单一真值，
+/// 任务管道的 state 出生即带 task.* 字段；`task.owned.*` 是父管道登记子任务的
+/// 扁平键，不算任务管道自身标记——仅登记过子任务的聊天管道不得派生任务事件）。
+/// 事件经 [`broadcast_domain_event`] 双通道投递：观察总线 + 点对点推给声明
+/// domain_event hook 的订阅插件（triggers_ext → evaluate_event——EVENT 触发器
+/// 的输入源）。
 ///
 /// 子任务通知（GAP-1）：task_completed/task_failed 事件额外携带
 /// `parent_pipeline_id` 标签（state 的 `lineage.parent_pipeline_id` 扁平键，
@@ -859,10 +861,7 @@ fn derive_run_terminal_events(
     };
     let pipeline_id = v("pipeline_id");
     let thread_id = v("session_id");
-    let has_task = final_state
-        .as_object()
-        .map(|o| o.keys().any(|k| k.starts_with("task.")))
-        .unwrap_or(false);
+    let has_task = has_task_marker(final_state);
     let task_id = v("task.id");
     // 子任务通知锚点：lineage.parent_pipeline_id 扁平键（有父形式出生写入）
     let parent_pipeline_id = v("lineage.parent_pipeline_id");
@@ -928,6 +927,23 @@ async fn emit_run_terminal_domain_events(
     }
 }
 
+/// 判定一份 state 是否属于任务管道（task = pipeline state 单一真值）。
+///
+/// 口径与插件侧聚合 `_list_tasks_from_state` 第一趟一致：含 `task.` 前缀键
+/// 且**不含** `task.owned.` 前缀键。`task.owned.*` 是父管道登记子任务的扁平键
+/// （任务声明在子管道自己的 `task.*` 上），仅登记过子任务的聊天主管道不得被
+/// 误判为任务管道——否则 run 终态会被回写 `task.status`/`task.ended_at`，
+/// 在任务聚合出口变成无标题无 task.id 的幽灵任务行（2026-08-23 修复）。
+fn has_task_marker(state: &serde_json::Value) -> bool {
+    state
+        .as_object()
+        .map(|o| {
+            o.keys()
+                .any(|k| k.starts_with("task.") && !k.starts_with("task.owned."))
+        })
+        .unwrap_or(false)
+}
+
 /// GAP-1 统一：run 终态即任务终态——state 带 `task.*` 字段的管道，把
 /// `task.status` / `task.ended_at` 回写 state 单一真值。
 ///
@@ -945,10 +961,7 @@ async fn finalize_task_status_in_state(
     tenant_id: &str,
     effective_pipeline_id: &str,
 ) {
-    let has_task = final_state
-        .as_object()
-        .map(|o| o.keys().any(|k| k.starts_with("task.")))
-        .unwrap_or(false);
+    let has_task = has_task_marker(final_state);
     if !has_task || effective_pipeline_id.is_empty() {
         return;
     }
@@ -1026,10 +1039,7 @@ fn derive_task_terminal_status(
     final_state: &serde_json::Value,
     failed: bool,
 ) -> Option<&'static str> {
-    let has_task = final_state
-        .as_object()
-        .map(|o| o.keys().any(|k| k.starts_with("task.")))
-        .unwrap_or(false);
+    let has_task = has_task_marker(final_state);
     if !has_task {
         return None;
     }
@@ -4524,6 +4534,101 @@ mod tests {
         assert!(
             !fields2.contains_key("task.status"),
             "非任务管道不写任务字段"
+        );
+    }
+
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn test_run_terminal_skips_writeback_for_owned_only_pipeline() {
+        // 幽灵任务行根因回归（2026-08-23）：仅登记过子任务的聊天主管道，state
+        // 只含 `task.owned.*` 扁平键（无自身 task.* 声明）——不得被误判为任务
+        // 管道，run 结束不得回写 task.status/task.ended_at（否则任务聚合出口
+        // 出现无标题无 task.id 的幽灵任务行）。判定口径与插件侧聚合
+        // `_list_tasks_from_state` 第一趟一致：含 `task.` 且不含 `task.owned.`。
+        let (state, _invoker, store, _sqlite) = make_engine_state();
+        let tenant = TenantContext::new("tenant_owned_only", "thread_owned_only");
+        let overlay = json!({
+            "task.owned.child_pipe_1.title": "AI行业近月发展调研",
+            "task.owned.child_pipe_1.status": "running",
+            "task.owned.child_pipe_1.scope": "non_container",
+        });
+        let r = agentos_tenant::scope(
+            tenant,
+            process_via_engine(
+                &state,
+                "帮我开个子任务",
+                "agentos",
+                &[],
+                "pipe_owned_only",
+                "thread_owned_only",
+                "o1",
+                "",
+                "",
+                None,
+                Some(&overlay),
+                "",
+            ),
+        )
+        .await;
+        assert!(!r.content.is_empty());
+
+        // registry 热路径：不得出现 task.status/task.ended_at
+        let reg = agentos_session::global_registry();
+        let entry = reg
+            .get("tenant_owned_only", "pipe_owned_only")
+            .expect("registry 应有该管道");
+        let st = entry.read();
+        assert!(
+            st.state.get("task.status").is_none(),
+            "owned-only 管道不得回写 task.status，实际 {:?}",
+            st.state.get("task.status")
+        );
+        assert!(
+            st.state.get("task.ended_at").is_none(),
+            "owned-only 管道不得回写 task.ended_at，实际 {:?}",
+            st.state.get("task.ended_at")
+        );
+        drop(st);
+
+        // 冷路径表：同样不得落任务终态键
+        let fields = store
+            .load_pipeline_state("pipe_owned_only", "tenant_owned_only")
+            .await
+            .unwrap();
+        assert!(
+            !fields.contains_key("task.status"),
+            "owned-only 管道不得落库 task.status，实际 {fields:?}"
+        );
+        assert!(
+            !fields.contains_key("task.ended_at"),
+            "owned-only 管道不得落库 task.ended_at，实际 {fields:?}"
+        );
+    }
+
+    #[test]
+    fn test_has_task_marker_owned_prefix_excluded() {
+        // 幽灵任务行根因单元级判定（2026-08-23）：`task.owned.*` 是父管道登记
+        // 子任务的扁平键，不算任务管道自身标记——仅登记过子任务的聊天管道
+        // 不得误判为任务管道（口径与插件侧 `_list_tasks_from_state` 第一趟一致）。
+        let owned_only = json!({
+            "task.owned.child_pipe_1.title": "调研",
+            "task.owned.child_pipe_1.status": "running",
+        });
+        assert!(!has_task_marker(&owned_only), "owned-only 不得判为任务管道");
+
+        // 真任务管道（自身 task.* 声明）仍判定为任务管道——防回归
+        let real_task = json!({
+            "task.id": "t1",
+            "task.goal": "真任务",
+            "task.owned.child_pipe_1.status": "running", // 父管道也可同时持有登记
+        });
+        assert!(has_task_marker(&real_task), "自身 task.* 仍应判为任务管道");
+
+        // 无任何 task. 前缀 → 非任务管道；精确前缀 "task."：taskx 不误判
+        assert!(!has_task_marker(&json!({"pipeline_id": "p1"})), "无 task.* 判非任务");
+        assert!(
+            !has_task_marker(&json!({"taskx": 1})),
+            "taskx 不得误判（前缀必须精确 task.）"
         );
     }
 
