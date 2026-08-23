@@ -820,7 +820,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             .with_dynamic_tool_registrar(dynamic_registrar.clone())
             .with_domain_broadcaster(domain_broadcaster)
             .with_streaming_declaration_lookup(streaming_declaration_lookup)
-            .with_capability_contracts(capability_contracts.clone()),
+            .with_capability_contracts(capability_contracts.clone())
+            // 工具连续失败告警器（2026-08-23）：挂默认实现，统一经 invoke 结果
+            // 归一化点计数（见 capability_router handle 的 tool-executor 分支）。
+            .with_tool_failure_tracker(Arc::new(
+                agentos_api::tools::ConsecutiveFailureTracker::default(),
+            )),
     );
     invoker.set_router(router);
 
@@ -1123,6 +1128,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .with_restart_hook(restart_hook)
         .with_manifests_store(state.manifests.clone())
         .with_enablement(enablement.clone())
+        // 2026-08-23：enablement 每次 sync 从盘上 profile 现读——boot 快照看不到
+        // 运行期 PUT enabled 的写盘结果，卸载→重装按旧快照会把已禁用插件重新
+        // 注册（运行期禁用被静默撤销，e2e test_07 实测）。
+        .with_profile_reload(config_root.clone())
         .spawn();
         info!(target: "agentos-kernel", "Plugin hot-discover watcher spawned (notify + polling fallback; cdylib change -> G8 auto-restart)");
     }

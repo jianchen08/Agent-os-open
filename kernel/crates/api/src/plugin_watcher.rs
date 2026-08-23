@@ -650,7 +650,15 @@ pub async fn sync_once_with_store(
     // apply_discovered_plugins 扩充，故在此先拍"先前已登记"快照再 diff。
     // InProcess(cdylib) 除外——其消失/重建归 A3 优雅重启路径（diff_cdylib_change），
     // 不在此处与它抢着摘除。
-    let pre_registered: HashSet<String> = known_ids.clone();
+    // 2026-08-23 修复：登记全集 = known_ids ∪ store 已有条目——store 里有而
+    // 未注册的（disabled/依赖被拒，见尾部合并块）插件目录消失时同样要走卸载
+    // 摘除，否则 store 残留幽灵条目、插件列表永远显示已删插件。
+    let mut pre_registered: HashSet<String> = known_ids.clone();
+    if let Some(store) = manifests_store {
+        for m in store.read().await.iter() {
+            pre_registered.insert(m.id.clone());
+        }
+    }
     let present_ids: HashSet<&str> = all.iter().map(|m| m.id.as_str()).collect();
     let is_known_inprocess = |id: &str| known_cdylib.as_ref().is_some_and(|s| s.contains(id));
     let mut uninstalled: Vec<String> = pre_registered
@@ -848,6 +856,25 @@ pub async fn sync_once_with_store(
                 guard.push(m.clone());
             }
         }
+        // 2026-08-23 修复：disabled/依赖被拒的运行期新发现插件 manifest 也进 store。
+        // 此前只合并 filtered（enablement 过滤后），disabled 新插件的 manifest 永不
+        // 进 store → PUT /plugins/{id}/enabled 查不到 manifest，静默不注册
+        // （routes.rs plugins_set_enabled_handler 的 "manifest not found" 分支）——
+        // 表现为"装了插件、点启用、功能不生效，须重启内核"。boot 路径是全量注入
+        // （含 disabled），watcher 对齐该语义：store = "磁盘上已发现"全集，enabled
+        // 与否由 enabled_plugin_ids/enablement 表达；注册面不变（仍只注册 filtered）。
+        // enabled 条目不覆盖（保留上方合并的 G2 净化版）；disabled 条目内容变更时
+        // 刷新（防后续启用拿到过期 manifest）。
+        let filtered_ids: HashSet<&str> = filtered.iter().map(|m| m.id.as_str()).collect();
+        for m in &all {
+            if filtered_ids.contains(m.id.as_str()) {
+                continue;
+            }
+            match guard.iter_mut().find(|x| x.id == m.id) {
+                Some(slot) => *slot = m.clone(),
+                None => guard.push(m.clone()),
+            }
+        }
     }
     Ok(report)
 }
@@ -877,6 +904,13 @@ pub struct PluginWatcher {
     /// 注册闸 L1：enablement profile。Some 时热发现路径过滤 disabled 插件
     /// （与启动期注册循环对齐）；None = 不过滤（旧行为/测试）。
     enablement: Option<PluginEnablement>,
+    /// enablement 重读根（bin 装配时传 config_root）。Some 时每次 sync 前从
+    /// `plugins/default_profile.yaml` 重读——2026-08-23 修复：PUT enabled 写
+    /// profile + 改 enabled_plugin_ids，但 `enablement` 是 boot 快照，卸载→
+    /// 重装的插件按旧快照判定，运行期禁用被静默撤销（e2e test_07 实测）。
+    /// sync 稀疏、文件小，重读成本可忽略；None（测试 with_enablement 注入）
+    /// 沿用快照。
+    profile_reload_root: Option<PathBuf>,
     /// 闸2·观测：热发现校验结果收口（boot 已收口全量；此处补热发现新插件的
     /// 契约状态）。None = 不记录（测试/旧行为）。
     contract_states: Option<Arc<crate::contract::ContractLedger>>,
@@ -902,6 +936,7 @@ impl PluginWatcher {
             restart_hook: None,
             manifests_store: None,
             enablement: None,
+            profile_reload_root: None,
             contract_states: None,
             debounce: DEFAULT_DEBOUNCE,
             poll_interval: DEFAULT_POLL_INTERVAL,
@@ -937,9 +972,18 @@ impl PluginWatcher {
     }
 
     /// 注入 enablement profile：热发现路径过滤 disabled 插件（注册闸 L1 对齐
-    /// 启动期注册循环）。None（缺省）= 不过滤，测试/旧语义。
+    /// 启动期注册循环）。生产装配请改用 [`Self::with_profile_reload`]——快照
+    /// 看不到运行期 PUT enabled 的写盘结果。
     pub fn with_enablement(mut self, enablement: PluginEnablement) -> Self {
         self.enablement = Some(enablement);
+        self
+    }
+
+    /// 注入 profile 重读根（生产装配）：每次 sync 前从
+    /// `<config_root>/plugins/default_profile.yaml` 重读 enablement，消除
+    /// boot 快照与运行期 PUT enabled 写盘的分歧（2026-08-23 修复，见字段注释）。
+    pub fn with_profile_reload(mut self, config_root: PathBuf) -> Self {
+        self.profile_reload_root = Some(config_root);
         self
     }
 
@@ -984,6 +1028,7 @@ impl PluginWatcher {
             restart_hook,
             manifests_store,
             enablement,
+            profile_reload_root,
             contract_states,
             debounce,
             poll_interval,
@@ -1034,6 +1079,13 @@ impl PluginWatcher {
                     // 匹配到事件即继续等（重置防抖窗口）；超时或 channel 关闭则结束。
                 }
                 // 执行一次同步（幂等：无新插件则 no-op）。
+                // enablement 取数（2026-08-23 修复）：配置了重读根 → 每次 sync
+                // 从盘上 profile 现读（运行期 PUT enabled 的写盘结果即时可见，
+                // 消除 boot 快照分歧）；否则用注入快照（测试路径）。
+                let effective_enablement: Option<PluginEnablement> = match &profile_reload_root {
+                    Some(root) => Some(PluginEnablement::load(root)),
+                    None => enablement.clone(),
+                };
                 let report = match sync_once_with_store(
                     invoker.as_ref(),
                     &registry,
@@ -1042,7 +1094,7 @@ impl PluginWatcher {
                     &mut known_cdylib,
                     manifests_store.as_ref(),
                     &mut known_hashes,
-                    enablement.as_ref(),
+                    effective_enablement.as_ref(),
                     contract_states.as_deref(),
                 )
                 .await
@@ -2015,6 +2067,121 @@ mod tests {
             .collect();
         assert!(!ids.contains(&"b".to_string()), "disabled 插件不进注册表");
         assert!(ids.contains(&"a".to_string()) && ids.contains(&"c".to_string()));
+    }
+
+    /// 2026-08-23 修复回归锚：disabled 插件不进注册表，但 manifest 必须进
+    /// manifests store——否则 PUT /plugins/{id}/enabled 查不到 manifest，
+    /// 启用静默不注册（"装了插件点启用功能不生效，须重启内核"）。store =
+    /// "磁盘上已发现"全集，与 boot 全量注入语义对齐（e2e 见
+    /// tests/e2e_02/test_07_plugin_lifecycle_e2e.py）。
+    #[tokio::test]
+    async fn sync_disabled_plugin_manifest_still_enters_store() {
+        use agentos_plugin_loader::{PluginEnablement, PluginProfile, ProfileEntry};
+        let mut plugins = std::collections::HashMap::new();
+        plugins.insert(
+            "b".to_string(),
+            ProfileEntry {
+                enabled: Some(false),
+                activation: None,
+            },
+        );
+        let enablement = PluginEnablement::with_profile(PluginProfile {
+            version: 1,
+            plugins,
+            defaults: Default::default(),
+        });
+        let invoker = MockInvoker::new(vec![
+            mk_manifest("a", "tool", &["t_a"], false),
+            mk_manifest("b", "tool", &["t_b"], false),
+        ]);
+        let registry_arc = Arc::new(CapabilityRegistryImpl::new());
+        let store: ManifestsStore = Arc::new(RwLock::new(Vec::new()));
+        let mut known = HashSet::new();
+        sync_once_with_store(
+            &invoker,
+            &registry_arc,
+            None,
+            &mut known,
+            &mut None,
+            Some(&store),
+            &mut HashMap::new(),
+            Some(&enablement),
+            None,
+        )
+        .await
+        .unwrap();
+
+        let store_ids: Vec<String> = store.read().await.iter().map(|m| m.id.clone()).collect();
+        assert!(
+            store_ids.contains(&"a".to_string()) && store_ids.contains(&"b".to_string()),
+            "disabled 插件 manifest 也须进 store（PUT enabled 的查找源），实际: {store_ids:?}"
+        );
+        assert!(
+            registry_arc.list_tools().iter().all(|t| t.plugin_id != "b"),
+            "disabled 插件不得注册进 LLM 面"
+        );
+    }
+
+    /// 2026-08-23 修复回归锚：store-only（disabled、从未注册）插件目录消失 →
+    /// store 条目同样摘除（此前卸载判定只看 known_ids，disabled 卸载留幽灵条目、
+    /// 插件列表永远显示已删插件）。
+    #[tokio::test]
+    async fn sync_uninstalls_store_only_disabled_plugin() {
+        use agentos_plugin_loader::{PluginEnablement, PluginProfile, ProfileEntry};
+        let mut plugins = std::collections::HashMap::new();
+        plugins.insert(
+            "b".to_string(),
+            ProfileEntry {
+                enabled: Some(false),
+                activation: None,
+            },
+        );
+        let enablement = PluginEnablement::with_profile(PluginProfile {
+            version: 1,
+            plugins,
+            defaults: Default::default(),
+        });
+        let invoker = MockInvoker::new(vec![mk_manifest("b", "tool", &["t_b"], false)]);
+        let registry_arc = Arc::new(CapabilityRegistryImpl::new());
+        let store: ManifestsStore = Arc::new(RwLock::new(Vec::new()));
+        let mut known = HashSet::new();
+        sync_once_with_store(
+            &invoker,
+            &registry_arc,
+            None,
+            &mut known,
+            &mut None,
+            Some(&store),
+            &mut HashMap::new(),
+            Some(&enablement),
+            None,
+        )
+        .await
+        .unwrap();
+        assert!(known.is_empty(), "disabled 插件不注册，known 应为空");
+        assert!(store.read().await.iter().any(|m| m.id == "b"));
+
+        // 目录消失（discover 集不再含 b）→ store 条目须摘除（修复点：
+        // pre_registered = known_ids ∪ store）。
+        let invoker2 = MockInvoker::new(vec![]);
+        let report = sync_once_with_store(
+            &invoker2,
+            &registry_arc,
+            None,
+            &mut known,
+            &mut None,
+            Some(&store),
+            &mut HashMap::new(),
+            Some(&enablement),
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(report.uninstalled, vec!["b".to_string()]);
+        assert!(
+            store.read().await.iter().all(|m| m.id != "b"),
+            "disabled store-only 插件卸载后不得残留幽灵条目"
+        );
     }
 
     /// 注册闸服务依赖（服务唯一轴）：新插件 requires_services 无人提供 → 整插件拒绝注册。

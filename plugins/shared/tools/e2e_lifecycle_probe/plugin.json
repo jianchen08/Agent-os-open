@@ -1,0 +1,60 @@
+{
+  "id": "e2e_lifecycle_probe",
+  "name": "E2E Lifecycle Probe",
+  "description": "插件装卸载生命周期 e2e 探针（tests/e2e_02/test_07）。默认禁用；启用后提供 e2e_probe_echo 工具与 /ext/e2e_lifecycle_probe/echo 端点，无副作用、无外部依赖。",
+  "version": "1.0.0",
+  "plugin_type": "tool",
+  "language": "python",
+  "host_type": "sidecar",
+  "entry": "python server.py",
+  "capabilities": {
+    "tools": [
+      {
+        "name": "e2e_probe_echo",
+        "description": "e2e 生命周期探针：原样回声 message 并附插件存活标记（装卸载 e2e 的功能生效判据）",
+        "render": {
+          "card": "form",
+          "title": "探针回声"
+        },
+        "input_schema": {
+          "type": "object",
+          "properties": {
+            "message": {
+              "type": "string",
+              "description": "任意消息（将原样回声）"
+            }
+          },
+          "required": ["message"]
+        }
+      },
+      {
+        "name": "http.handle",
+        "description": "HTTP endpoint handler for /ext/e2e_lifecycle_probe/echo（声明进 tools 消 G2 undeclared 漂移；探针默认禁用，不污染日常工具面）",
+        "input_schema": {
+          "type": "object",
+          "properties": {
+            "path": {"type": "string"},
+            "method": {"type": "string"},
+            "plugin_id": {"type": "string"},
+            "raw_body": {"type": "string"},
+            "headers": {"type": "object"},
+            "query": {"type": "object"}
+          }
+        }
+      }
+    ]
+  },
+  "http_endpoints": [
+    {
+      "route_id": "probe_echo",
+      "method": "POST",
+      "path": "/ext/e2e_lifecycle_probe/echo",
+      "auth": "none",
+      "handler_capability": "http.handle",
+      "timeout_ms": 10000,
+      "description": "e2e 探针回声端点（真 sidecar 执行判据；auth none——探针无敏感面）"
+    }
+  ],
+  "permissions": {},
+  "priority": 100
+}

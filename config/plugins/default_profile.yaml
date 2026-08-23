@@ -78,6 +78,11 @@ plugins:
     enabled: true
   omnisearch:
     enabled: true
+  # 装卸载生命周期 e2e 探针（tests/e2e_02/test_07_plugin_lifecycle_e2e.py）：
+  # 默认禁用，e2e 按需启停；非 e2e 场景永远保持 disabled。
+  e2e_lifecycle_probe:
+    enabled: false
+    activation: lazy
 defaults:
   enabled: true
   activation: lazy
