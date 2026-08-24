@@ -87,10 +87,12 @@ dependencies = [
  "agentos-engine",
  "agentos-http",
  "agentos-mcp",
+ "agentos-session",
  "async-trait",
  "axum",
  "rusqlite",
  "serde_json",
+ "tempfile",
  "tokio",
 ]
 

@@ -6,7 +6,7 @@
 //! `plugins/shared/db_admin`（Python sidecar 插件）承载：内核 `/ext/{*rest}`
 //! 通配分发 → 插件 `http.handle` → 反向调用 `db-admin.<method>` → 本 handler。
 //!
-//! ## method 清单（7 个，与原端点一一对应）
+//! ## method 清单（8 个；前 7 个与原端点一一对应）
 //!
 //! | method | 原端点 | 角色要求 |
 //! |---|---|---|
@@ -17,6 +17,7 @@
 //! | `table_update_row` | PATCH /api/v1/db/table/{table}/{pk} | admin |
 //! | `table_delete_row` | DELETE /api/v1/db/table/{table}/{pk} | admin |
 //! | `execute` | POST /api/v1/db/execute | admin |
+//! | `clear_execution_data` | （新设，无原端点） | admin |
 //!
 //! 注：任务书原文 method 写作 `tables/list_tables`、`table/query` 等（含 `/`），
 //! 但内核反向调用协议 [`parse_capability_method_with`] 拒绝含 `/` 的 method
@@ -353,6 +354,24 @@ impl DbAdminCapabilityHandler {
             })??;
         Ok((200, result))
     }
+
+    // ─── 端点 8：clear_execution_data（全量执行数据清理） ────────────────
+    // 调试中心"清空全部执行记录与轨迹"的内核侧落点：快照备份 + 事务清 9 表
+    //（users 保留）+ 内存 registry 同清。活跃管道防呆（409）在 inner 内。
+
+    async fn clear_execution_data(&self, params: &Value) -> Result<(u16, Value), ApiError> {
+        let headers = Self::auth_headers(params);
+        let _tenant_id = require_admin_role(&self.state, &headers).await?;
+        let db = get_db(&self.state)?;
+        let result = spawn_blocking(move || {
+            db.with_conn(crate::db_routes::clear_execution_data_inner)
+        })
+        .await
+        .map_err(|e| ApiError::Internal {
+            message: format!("数据库任务失败: {e}"),
+        })??;
+        Ok((200, result))
+    }
 }
 
 /// ApiError → (HTTP 状态码, 消息)。与拆分前 `ApiError::IntoResponse` 的映射一致。
@@ -384,11 +403,13 @@ impl CapabilityHandler for DbAdminCapabilityHandler {
             "table_update_row" => self.update_row(&params).await,
             "table_delete_row" => self.delete_row(&params).await,
             "execute" => self.execute_sql(&params).await,
+            "clear_execution_data" => self.clear_execution_data(&params).await,
             other => {
                 return Err(McpError::Protocol {
                     message: format!(
                         "{NAMESPACE}.{other} not implemented (known: list_tables, table_query, \
-                         table_insert, table_get_row, table_update_row, table_delete_row, execute)"
+                         table_insert, table_get_row, table_update_row, table_delete_row, execute, \
+                         clear_execution_data)"
                     ),
                 });
             }
@@ -632,5 +653,184 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(envelope["status"], 200);
+    }
+
+    // ─── clear_execution_data（第 8 method）────────────────────────────
+    // 涉及全局 pipeline_state_registry 的场景合并在单个串行测试里
+    // （全局单例 + cargo 并行测试 = 串扰源，见 clears_nine_tables 场景段）。
+
+    /// 播种全量执行数据（9 表）+ users 1 行；runs 状态与管道名可参数化。
+    fn seed_execution_data(store: &agentos_engine::SqliteStore, runs_status: &str, pid: &str) {
+        store
+            .with_conn(|conn| {
+                conn.execute_batch(&format!(
+                    "INSERT INTO runs (run_id, config_hash, status, tenant_id, pipeline_id, created_at, current_branch) VALUES
+                        ('run1','cfg','{runs_status}','default','{pid}','2026-01-01T00:00:00Z','b1'),
+                        ('run2','cfg','completed','default','pipe_done','2026-01-01T00:00:00Z','b1');
+                     INSERT INTO traces (trace_id, run_id, branch_id, seq_in_branch, plugin_id, patch_type, patch_data, created_at) VALUES
+                        ('t1','run1','b1',1,'p','StateUpdate','{{}}','2026-01-01T00:00:00Z'),
+                        ('t2','run2','b1',1,'p','StateUpdate','{{}}','2026-01-01T00:00:00Z');
+                     INSERT INTO blobs (blob_id, mime_type, size_bytes, data, created_at) VALUES
+                        ('bl1','application/json',2,x'7B7D','2026-01-01T00:00:00Z');
+                     INSERT INTO branches (branch_id, run_id, created_at) VALUES ('b1','run1','2026-01-01T00:00:00Z');
+                     INSERT INTO sessions (thread_id, created_at, updated_at) VALUES ('th1','2026-01-01T00:00:00Z','2026-01-01T00:00:00Z');
+                     INSERT INTO pipeline_sessions (pipeline_id, thread_id, created_at) VALUES ('{pid}','th1','2026-01-01T00:00:00Z');
+                     INSERT INTO pipeline_state (pipeline_id, field_key, field_value, updated_at) VALUES ('{pid}','track.total_tokens','10','2026-01-01T00:00:00Z');
+                     INSERT INTO pipeline_checkpoints (checkpoint_id, pipeline_id, step_no, state_json, created_at) VALUES ('cp1','{pid}',1,'{{}}','2026-01-01T00:00:00Z');
+                     INSERT INTO message_slots (tenant_id, pipeline_id, seq, message_id, blob_id, run_id, created_at) VALUES ('default','{pid}',1,'m1','bl1','run1','2026-01-01T00:00:00Z');
+                     INSERT INTO users (user_id, username, password, role, tenant_id, created_at) VALUES ('u_test','tester','x','user','default','2026-01-01T00:00:00Z');"
+                ))
+                .unwrap();
+                Ok::<(), String>(())
+            })
+            .unwrap();
+    }
+
+    fn count_table(store: &agentos_engine::SqliteStore, table: &str) -> i64 {
+        store
+            .with_conn(|conn| {
+                Ok::<i64, String>(
+                    conn.query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |r| r.get(0))
+                        .unwrap(),
+                )
+            })
+            .unwrap()
+    }
+
+    const NINE_TABLES: [&str; 9] = [
+        "runs",
+        "traces",
+        "blobs",
+        "branches",
+        "sessions",
+        "pipeline_sessions",
+        "pipeline_state",
+        "pipeline_checkpoints",
+        "message_slots",
+    ];
+
+    #[tokio::test]
+    async fn clear_execution_data_without_auth_returns_401() {
+        let (handler, _store) = handler_with_db();
+        let envelope = handler
+            .handle("clear_execution_data", json!({}))
+            .await
+            .unwrap();
+        assert_eq!(envelope["status"], 401, "无凭证应 401: {envelope}");
+    }
+
+    #[tokio::test]
+    async fn clear_execution_data_non_admin_returns_403() {
+        // 带真实 store（播种 user 角色用户）：token 可解析出 role=user → 403。
+        let store = Arc::new(agentos_engine::SqliteStore::open_memory().unwrap());
+        store
+            .with_conn(|conn| {
+                conn.execute(
+                    "INSERT INTO users (user_id, username, password, role, tenant_id, created_at)
+                     VALUES ('u_test','tester','x','user','default','2026-01-01T00:00:00Z')",
+                    [],
+                )
+                .unwrap();
+                Ok::<(), String>(())
+            })
+            .unwrap();
+        let handler = DbAdminCapabilityHandler::new(Some(store.clone()), Some(store));
+        let user = agentos_http::auth::BuiltInUser {
+            id: "u_test".to_string(),
+            username: "tester".to_string(),
+            password: "x".to_string(),
+            email: String::new(),
+            role: "user".to_string(),
+            tenant_id: "default".to_string(),
+            created_at: "2026-01-01T00:00:00Z".to_string(),
+        };
+        let mut params = json!({});
+        params["_authorization"] =
+            json!(format!("Bearer {}", encode_token(TokenType::Access, &user, 3600)));
+        let envelope = handler.handle("clear_execution_data", params).await.unwrap();
+        assert_eq!(envelope["status"], 403, "user 角色应 403: {envelope}");
+    }
+
+    #[tokio::test]
+    async fn clear_execution_data_scenarios_matrix() {
+        let registry = agentos_session::pipeline_state_registry::global_registry();
+
+        // 场景 1：真运行中（DB running + 内存 registry 命中）→ 409，数据不动。
+        let (handler, store) = handler_with_db();
+        seed_execution_data(&store, "running", "pipe_live");
+        registry.get_or_init(
+            "default",
+            "pipe_live",
+            "th1",
+            "agentos",
+            json!({"messages": []}),
+        );
+        let envelope = handler
+            .handle("clear_execution_data", authed(json!({})))
+            .await
+            .unwrap();
+        assert_eq!(envelope["status"], 409, "运行中管道应拒绝: {envelope}");
+        assert_eq!(count_table(&store, "runs"), 2, "拒绝时数据未动");
+        assert_eq!(count_table(&store, "message_slots"), 1);
+        assert_eq!(count_table(&store, "users"), 1);
+
+        // 场景 2：僵尸 running（DB 残留但内存无条目，重启后典型态）→ 放行；
+        // 同时验证 9 表清空、users 保留、内存 registry 同清、内存库无备份、幂等。
+        registry.remove("default", "pipe_live");
+        let envelope = handler
+            .handle("clear_execution_data", authed(json!({})))
+            .await
+            .unwrap();
+        assert_eq!(envelope["status"], 200, "僵尸 running 应放行: {envelope}");
+        let body = envelope["body"].clone();
+        // 播种行数：runs2+traces2+blobs1+branches1+sessions1+pipeline_sessions1
+        //           +pipeline_state1+checkpoints1+message_slots1 = 11
+        assert_eq!(body["cleared_count"], 11, "清除计数=播种总数: {body}");
+        for t in NINE_TABLES {
+            assert_eq!(count_table(&store, t), 0, "{t} 应清空");
+        }
+        assert_eq!(count_table(&store, "users"), 1, "users 必须保留");
+        assert!(
+            !registry.contains("default", "pipe_live"),
+            "内存 registry 应同步清空"
+        );
+        assert!(body["backup_path"].is_null(), "内存库不产备份: {body}");
+        // 幂等：再清一次仍 200，计数为 0
+        let envelope2 = handler
+            .handle("clear_execution_data", authed(json!({})))
+            .await
+            .unwrap();
+        assert_eq!(envelope2["status"], 200);
+        assert_eq!(envelope2["body"]["cleared_count"], 0, "空库再清=0: {}", envelope2);
+
+        // 场景 3：文件库 → 生成 .clear-backup-* 备份文件（含 users 快照）。
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("kernel.db");
+        let fstore = Arc::new(
+            agentos_engine::SqliteStore::open(db_path.to_str().unwrap()).unwrap(),
+        );
+        seed_execution_data(&fstore, "completed", "pipe_done");
+        let fhandler = DbAdminCapabilityHandler::new(None, Some(fstore.clone()));
+        let envelope = fhandler
+            .handle("clear_execution_data", authed(json!({})))
+            .await
+            .unwrap();
+        assert_eq!(envelope["status"], 200, "{envelope}");
+        let backup = envelope["body"]["backup_path"].as_str().unwrap().to_string();
+        assert!(backup.contains("clear-backup-"), "备份名带标记: {backup}");
+        let meta = std::fs::metadata(&backup).unwrap();
+        assert!(meta.len() > 0, "备份文件非空");
+        // 备份是清理前快照：恢复出的备份库仍含 9 表数据（VACUUM INTO 一致性）
+        let bconn = rusqlite::Connection::open(&backup).unwrap();
+        let runs: i64 = bconn
+            .query_row("SELECT COUNT(*) FROM runs", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(runs, 2, "备份保留清理前数据");
+        let users: i64 = bconn
+            .query_row("SELECT COUNT(*) FROM users", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(users, 1, "备份含 users");
+
+        registry.clear(); // 全局单例：测试收尾清场
     }
 }

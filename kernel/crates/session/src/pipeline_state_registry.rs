@@ -176,6 +176,16 @@ impl PipelineStateRegistry {
         self.entries.write().remove(&key);
     }
 
+    /// 清空全部常驻条目（跨租户；全量执行数据清理时使用）。
+    ///
+    /// 与 [`PipelineStateRegistry::remove`] 的单条注销不同，本方法语义即
+    /// "清掉全部执行数据"（DB 侧配套删除 runs/traces/… 九表），调用方为
+    /// db-admin 的 clear_execution_data——热路径常驻 state 全部作废，
+    /// 后续轮次走冷启动重建。
+    pub fn clear(&self) {
+        self.entries.write().clear();
+    }
+
     /// 列出全部常驻条目的定位信息（不含 state 本体——messages 可能很大，
     /// 调用方按需经 [`PipelineStateRegistry::get`] 取锁内快照或读 DB checkpoint）。
     ///
@@ -324,5 +334,17 @@ mod tests {
         // 租户 B 的 pipe_x 应独立（不存在）
         assert!(!reg.contains("tenant_b", "pipe_x"));
         assert!(reg.contains("tenant_a", "pipe_x"));
+    }
+
+    #[test]
+    fn test_clear_removes_all_entries_across_tenants() {
+        let reg = PipelineStateRegistry::new();
+        reg.get_or_init("tenant_a", "pipe_1", "t", "a", make_state(&[]));
+        reg.get_or_init("tenant_b", "pipe_2", "t", "a", make_state(&[]));
+        assert!(!reg.is_empty());
+        reg.clear();
+        assert!(reg.is_empty(), "clear 后注册表应为空");
+        assert!(!reg.contains("tenant_a", "pipe_1"));
+        assert!(!reg.contains("tenant_b", "pipe_2"));
     }
 }

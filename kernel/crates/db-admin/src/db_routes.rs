@@ -732,6 +732,128 @@ fn serde_json_to_sql(v: &Value) -> Box<dyn rusqlite::ToSql> {
     }
 }
 
+// ─── 全量执行数据清理（clear_execution_data） ────────────────────────
+
+/// 执行数据清理白名单（9 表；users 刻意保留——与 2026-08-22 手动清库同口径）。
+///
+/// 走专用方法而非 SQL 执行器：execute 的"全表 DELETE 一律 403"是泛化防线，
+/// 本方法以白名单常量显式声明"清什么"，与 engine store.rs 的 DDL 同仓演进。
+pub const EXECUTION_DATA_TABLES: [&str; 9] = [
+    "runs",
+    "traces",
+    "blobs",
+    "branches",
+    "sessions",
+    "pipeline_sessions",
+    "pipeline_state",
+    "pipeline_checkpoints",
+    "message_slots",
+];
+
+/// 清空前快照备份（`VACUUM INTO`，须在事务外执行）；内存库返回 None。
+///
+/// 备份失败按错误中止清理——不可撤销操作前的安全网，不静默降级。
+fn backup_before_clear(conn: &Connection) -> Result<Option<String>, ApiError> {
+    // PRAGMA database_list 首行 = main 库，第 3 列为文件路径（内存库为空串）
+    let main_path: String = conn
+        .query_row("PRAGMA database_list", [], |r| r.get::<_, String>(2))
+        .map_err(|e| ApiError::Internal {
+            message: format!("读取主库路径失败: {e}"),
+        })?;
+    if main_path.is_empty() {
+        return Ok(None);
+    }
+    static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or(0);
+    let seq = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    // VACUUM INTO 目标已存在会报错；毫秒时间戳 + 进程内自增序号保证唯一
+    let backup = format!("{main_path}.clear-backup-{ts}-{seq}");
+    conn.execute("VACUUM INTO ?1", rusqlite::params![backup])
+        .map_err(|e| ApiError::Internal {
+            message: format!("清理备份失败（已中止清理）: {e}"),
+        })?;
+    Ok(Some(backup))
+}
+
+/// 全量执行数据清理：活跃防呆 → 快照备份 → 事务内清 9 表 → 内存 registry 同清。
+///
+/// - **活跃防呆**（检查非锁，与删除之间的新启动竞态窗口毫秒级、可接受）：
+///   DB running 且内存 registry 命中 = 真运行中 → 409 拒绝；DB 残留 running
+///   但内存无条目（进程重启后的僵尸 run）放行清理——清库正是清僵尸的手段。
+/// - **users 保留**：清的是执行数据（记录/轨迹/消息/状态），账号体系不动。
+/// - **registry 清理**：DB 行删掉后热路径常驻 state 全部作废，后续轮次走
+///   冷启动重建（与重启后语义一致）。
+pub fn clear_execution_data_inner(conn: &Connection) -> Result<Value, ApiError> {
+    let registry = agentos_session::pipeline_state_registry::global_registry();
+    // 1) 活跃管道防呆
+    let running: Vec<(String, String)> = {
+        let mut stmt = conn
+            .prepare(
+                "SELECT pipeline_id, tenant_id FROM runs
+                 WHERE status = 'running' AND pipeline_id IS NOT NULL AND pipeline_id != ''",
+            )
+            .map_err(|e| ApiError::Internal {
+                message: format!("活跃管道检查失败: {e}"),
+            })?;
+        let rows = stmt
+            .query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })
+            .map_err(|e| ApiError::Internal {
+                message: format!("活跃管道检查失败: {e}"),
+            })?;
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(|e| ApiError::Internal {
+                message: format!("活跃管道检查失败: {e}"),
+            })?
+    };
+    for (pid, tenant) in &running {
+        if registry.contains(tenant, pid) {
+            return Err(ApiError::Conflict {
+                message: format!("管道 {pid} 正在运行，请等待任务结束后再清理"),
+            });
+        }
+    }
+    // 2) 快照备份（事务外；失败中止）
+    let backup_path = backup_before_clear(conn)?;
+    // 3) 事务内逐表清理（白名单常量，无用户输入拼接）
+    let mut cleared = serde_json::Map::new();
+    let mut total: i64 = 0;
+    conn.execute_batch("BEGIN")
+        .map_err(|e| ApiError::Internal {
+            message: format!("开启清理事务失败: {e}"),
+        })?;
+    for table in EXECUTION_DATA_TABLES {
+        match conn.execute(&format!("DELETE FROM {table}"), []) {
+            Ok(n) => {
+                cleared.insert(table.to_string(), Value::from(n as i64));
+                total += n as i64;
+            }
+            Err(e) => {
+                let _ = conn.execute_batch("ROLLBACK");
+                return Err(ApiError::Internal {
+                    message: format!("清理 {table} 失败（已回滚）: {e}"),
+                });
+            }
+        }
+    }
+    conn.execute_batch("COMMIT")
+        .map_err(|e| ApiError::Internal {
+            message: format!("提交清理事务失败: {e}"),
+        })?;
+    // 4) 内存 registry 同清（事务已提交，防呆拒绝路径不会走到这里）
+    registry.clear();
+    Ok(json!({
+        "cleared": Value::Object(cleared),
+        "cleared_count": total,
+        "backup_path": backup_path,
+    }))
+}
+
+
 // ─── 测试（纯逻辑单测） ──────────────────────────────────────────────
 
 #[cfg(test)]
