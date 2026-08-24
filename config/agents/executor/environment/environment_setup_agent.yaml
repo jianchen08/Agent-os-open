@@ -46,22 +46,11 @@ system_prompt: |-
      - 设置访问权限
 
   4. **Docker 镜像管理**
-     - 依赖持久化有两条路径，按场景选择：
-       - (a) **工作区持久化（推荐用于项目依赖）**：Python 依赖装进虚拟环境（`python -m venv /workspace/.venv` 后 `pip install`），Node 依赖在 /workspace 内 `npm install`。这些写入挂载的宿主目录，跨容器复用，轻量、不影响其它任务
-       - (b) **docker commit 固化进镜像（用于通用基础工具，如所有任务都需要的系统级依赖）**：在 host 模式下将运行中容器的可写层提交为新镜像
-     - **docker commit 仅在 host 模式有效**：本 agent 在 non_isolated 模式执行时，bash 命令走宿主机，docker daemon 可用；若处于容器内执行（isolated 模式），容器内无 docker daemon，`docker commit` 必然失败——此时改用路径 (a)
-     - commit 命令模板（覆盖 agentos:latest）：
-       ```
-       # 1. 容器名 = cua- + workspace 路径最后一段
-       # 2. 提交为镜像
-       docker commit cua-<workspace最后一段> agentos:latest
-       # 3. commit 后当前运行中的容器仍是旧镜像层，必须销毁重建才生效
-       ```
-     - **关键约束（必须遵守）**：
-       - 覆盖 agentos:latest 后，旧 latest 变为悬挂镜像会被系统启动时自动清理（docker image prune），**无法回滚**；commit 前务必清理容器内的临时文件、缓存、误装的包
-       - commit 的是容器整个可写层，包括非预期改动；确认容器状态干净后再提交
-       - commit 后新镜像只对**之后新建**的容器生效；已运行中的容器不会自动应用，需销毁重建（destroy + create）
-     - 构建期镜像变更仍通过 Dockerfile：编辑 docker/agentos/Dockerfile 后执行 docker build -t agentos:latest -f docker/agentos/Dockerfile docker/agentos/，适合可版本化、可审查的批量变更
+     - **先加载技能**：file_read `skills/skill-env-config-decision/SKILL.md`，按其依赖层级判定、隔离模式选择、三种安装方法决策树执行
+     - 要点速记：
+       - 项目级依赖 → 工作区持久化（装进 workspace，跨容器复用）
+       - 系统级依赖 → docker commit（快速但不可回滚）或 Dockerfile 构建（可追溯）
+       - docker commit 仅在 host 模式有效（容器内无 docker daemon）
 
   5. **状态报告**
      - 汇总准备状态
@@ -101,70 +90,6 @@ system_prompt: |-
   - 在 `/workspace` 内安装的依赖（pip install / npm install）写入宿主目录，容器销毁后仍保留，新容器立即可用
   - 容器镜像内的系统级工具（/usr/local/bin 等）独立于宿主，宿主安装的工具不会出现在容器内
   - 容器不继承宿主环境变量，需通过 docker commit/Dockerfile ENV/启动参数传递
-
-  ### 向容器环境添加依赖的三种方法
-
-  | 方法 | 适用场景 | 操作方式 | 生效范围 |
-  |------|---------|---------|----------|
-  | 工作区持久化 | 项目级依赖（pip/npm 包） | 在 workspace 目录内安装 | 写入挂载目录，所有容器立即可用，容器销毁后保留 |
-  | docker commit | 通用系统级工具（所有任务都需要） | `docker commit <容器名> agentos:latest` | 覆盖镜像，仅对新创建的容器生效 |
-  | Dockerfile 构建 | 可版本化、可审查的批量变更 | 编辑 docker/agentos/Dockerfile 后 `docker build` | 重建镜像，需销毁已有容器 |
-
-  #### 方法一：工作区持久化（推荐，最常用）
-
-  在宿主 workspace 目录内安装依赖，因为该目录挂载到容器 `/workspace`，容器内立即可用：
-
-  ```bash
-  # Python 依赖 — 装进虚拟环境（推荐）
-  python -m venv {workspace}/.venv
-  {workspace}/.venv/bin/pip install <package>
-
-  # 或直接装到 workspace
-  pip install --target {workspace}/.packages <package>
-
-  # Node 依赖 — 装到 workspace 内
-  cd {workspace} && npm install <package>
-  ```
-
-  优点：轻量、不影响其它任务、容器重建后依赖仍在（写在挂载目录里）。
-
-  #### 方法二：docker commit 固化进镜像
-
-  将运行中容器的可写层提交为新镜像，适合安装所有任务都需要的系统级依赖：
-
-  ```bash
-  # 1. 找到容器名（格式：cua-<workspace路径最后一段>）
-  docker ps --filter "name=cua-"
-
-  # 2. 在容器内安装依赖
-  docker exec <容器名> apt-get install -y <package>
-  # 或
-  docker exec <容器名> pip install <package>
-
-  # 3. 清理容器内临时文件和缓存（重要！commit 会保存整个可写层）
-  docker exec <容器名> sh -c "rm -rf /tmp/* /var/cache/* /root/.cache/*"
-
-  # 4. 提交为新镜像
-  docker commit <容器名> agentos:latest
-
-  # 5. 销毁旧容器（commit 后当前容器仍是旧镜像层，必须销毁重建才生效）
-  docker rm -f <容器名>
-  ```
-
-  关键约束：
-  - 覆盖 agentos:latest 后旧镜像不可回滚（被 docker image prune 清理）
-  - commit 保存容器整个可写层，包括非预期改动——提交前必须确认容器状态干净
-  - commit 后仅对之后新建的容器生效，已运行容器不会自动应用
-
-  #### 方法三：Dockerfile 构建
-
-  适合可版本化、可审查的批量变更：
-
-  ```bash
-  # 编辑 docker/agentos/Dockerfile 添加依赖
-  # 然后重建镜像
-  docker build -t agentos:latest -f docker/agentos/Dockerfile docker/agentos/
-  ```
 
   ### 本 agent 的执行模式
 
