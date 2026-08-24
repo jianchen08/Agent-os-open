@@ -223,8 +223,25 @@ async def get_workspace_artifacts(container_task_id: str) -> dict[str, Any]:
 
 
 async def get_file_tree(container_task_id: str) -> dict[str, Any]:
-    """获取工作空间的文件目录树。"""
+    """获取工作空间的文件目录树（无工作区/目录缺失如实报错，不折叠成空树）。
+
+    ``workspace_status`` 业务状态字段（200 信封内携带，前端据此渲染可读错误
+    而非"暂无数据"空态）：``no_workspace``（无坐标）/ ``dir_missing``（坐标在
+    目录不在）；正常时字段缺省。
+    """
     workspace_path = await _resolve_workspace_path(container_task_id)
+    if not workspace_path:
+        return {
+            "tree": [],
+            "workspace_status": "no_workspace",
+            "error": f"{container_task_id[:8]} 无工作区坐标（任务未分配工作区，或为主会话管道）",
+        }
+    if not Path(workspace_path).is_dir():
+        return {
+            "tree": [],
+            "workspace_status": "dir_missing",
+            "error": f"工作区目录不存在: {workspace_path}",
+        }
     service = get_workspace_service()
     return await service.get_file_tree(container_task_id, base_path=workspace_path)
 
@@ -590,18 +607,23 @@ def _container_to_host_path(container_path: str) -> str:
 
 
 async def _resolve_workspace_path(container_task_id: str) -> str | None:
-    """从任务 metadata 中解析工作空间路径。
+    """解析工作空间路径（三层通道，先 state 真值后 task_service 镜像）。
 
-    通过 TaskService 获取任务实例，从其 metadata.ws_meta.path 字段提取
-    工作空间路径（M3 自包含：改走 tasks.service_access，不再依赖 0.2 已
-    删除的 infrastructure.service_provider）。
-
-    特殊处理 _local: 返回项目根目录（本文件向上 4 级），
-    确保 fileOpener 发起的非任务文件读取能正确解析相对路径。
+    1. ``_local`` 特例 → 项目根；
+    2. state 聚合行（pipeline-state 读面）：按 pipeline_id 取 ``ws_meta.path``
+       / ``workspace``——会话管道等无任务记录的管道走此通道（2026-08-24
+       R3 裁定：所有有工作区的管道都可关联）；
+    3. TaskService 任务 metadata.ws_meta.path（镜像回退）。
     """
     # 特殊处理 _local 工作空间
     if container_task_id == "_local":
         return str(_get_project_root())
+
+    # state 聚合行通道（任务管道的 state 真值也覆盖——task = pipeline）
+    service = get_workspace_service()
+    state_path = await service.resolve_workspace_from_state(container_task_id)
+    if state_path:
+        return state_path
 
     try:
         import asyncio  # noqa: PLC0415
@@ -856,10 +878,20 @@ async def workspace_get_file_tree(
     if _service is None:
         return {"success": False, "error": "服务未初始化"}
 
-    result = await _service.get_file_tree(
-        container_task_id=container_task_id,
-        base_path=base_path,
-    )
+    if base_path is not None:
+        result = await _service.get_file_tree(
+            container_task_id=container_task_id,
+            base_path=base_path,
+        )
+        return {"success": True, "tree": result.get("tree", [])}
+    # 无显式 base_path：走解析通道（无工作区/目录缺失如实失败，不返回假空树）
+    result = await get_file_tree(container_task_id)
+    if result.get("workspace_status"):
+        return {
+            "success": False,
+            "error": result.get("error", ""),
+            "workspace_status": result["workspace_status"],
+        }
     return {"success": True, "tree": result.get("tree", [])}
 
 

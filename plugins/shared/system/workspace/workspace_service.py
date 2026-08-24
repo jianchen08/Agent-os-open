@@ -110,6 +110,43 @@ class WorkspaceService:
 
         return {"items": items, "total": len(items)}
 
+    async def resolve_workspace_from_state(self, pipeline_id: str) -> str | None:
+        """按 pipeline_id 从 state 聚合行解析工作区坐标（非任务管道关联通道）。
+
+        行为扁平键（内核 STATE_SUMMARY_KEYS 出口 ``workspace``/``ws_meta``）：
+        ``ws_meta`` 对象取 ``.path``（worktree 副本或 plain 目录，非 project_root），
+        回退 ``workspace`` 标量。读面未注入/无命中/命中行无工作区键 → None。
+        """
+        reader = _get_state_reader()
+        if reader is None:
+            return None
+        try:
+            rows = reader()
+            if asyncio.iscoroutine(rows):
+                rows = await rows
+            if not isinstance(rows, list):
+                return None
+            for row in rows:
+                if not isinstance(row, dict):
+                    continue
+                if str(row.get("pipeline_id") or "") != pipeline_id:
+                    continue
+                ws_meta = row.get("ws_meta")
+                if isinstance(ws_meta, dict) and ws_meta.get("path"):
+                    return str(ws_meta["path"])
+                ws = row.get("workspace")
+                if isinstance(ws, str) and ws:
+                    return ws
+                return None
+            return None
+        except Exception as exc:  # noqa: BLE001 — 解析失败回退 task_service 镜像
+            logger.warning(
+                "[WorkspaceService] state 行工作区解析失败 | pipeline=%s | err=%s",
+                pipeline_id,
+                exc,
+            )
+            return None
+
     async def get_file_tree(
         self,
         container_task_id: str,

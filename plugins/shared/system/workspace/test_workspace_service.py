@@ -292,6 +292,162 @@ class TestWorkspaceResolveContainerTask:
 
 
 # ═══════════════════════════════════════════════════════════
+# resolve_workspace_from_state：pipeline_id 工作区解析通道（R3 关联底座）
+# ═══════════════════════════════════════════════════════════
+
+
+def _reset_state_reader() -> None:
+    """清掉模块级 state reader（防跨测试串扰）。"""
+    _MODS["workspace_service"].set_state_reader(None)
+
+
+class TestResolveWorkspaceFromState:
+    def test_reader_not_injected_returns_none(self) -> None:
+        _reset_state_reader()
+        svc = WorkspaceService()
+        assert _run(svc.resolve_workspace_from_state("p1")) is None
+
+    def test_row_ws_meta_path_wins_over_project_root(self) -> None:
+        """命中行取 ws_meta.path（worktree 坐标），不取 project_root。"""
+        rows = [
+            {"pipeline_id": "other"},
+            {
+                "pipeline_id": "p1",
+                "ws_meta": {"path": "D:/ws/worktree-1", "project_root": "D:/proj"},
+            },
+        ]
+        _MODS["workspace_service"].set_state_reader(lambda: rows)
+        svc = WorkspaceService()
+        assert _run(svc.resolve_workspace_from_state("p1")) == "D:/ws/worktree-1"
+        _reset_state_reader()
+
+    def test_row_workspace_scalar_fallback(self) -> None:
+        rows = [{"pipeline_id": "p1", "workspace": "D:/ws/plain"}]
+        _MODS["workspace_service"].set_state_reader(lambda: rows)
+        svc = WorkspaceService()
+        assert _run(svc.resolve_workspace_from_state("p1")) == "D:/ws/plain"
+        _reset_state_reader()
+
+    def test_row_hit_without_workspace_keys_returns_none(self) -> None:
+        rows = [{"pipeline_id": "p1", "task.status": "running"}]
+        _MODS["workspace_service"].set_state_reader(lambda: rows)
+        svc = WorkspaceService()
+        assert _run(svc.resolve_workspace_from_state("p1")) is None
+        _reset_state_reader()
+
+    def test_no_matching_row_returns_none(self) -> None:
+        rows = [{"pipeline_id": "p2", "workspace": "D:/ws/p2"}]
+        _MODS["workspace_service"].set_state_reader(lambda: rows)
+        svc = WorkspaceService()
+        assert _run(svc.resolve_workspace_from_state("p1")) is None
+        _reset_state_reader()
+
+    def test_async_reader_supported(self) -> None:
+        """注入约定 sync/async 均可（生产为 async handle.call 包装）。"""
+
+        async def _read() -> list[dict]:
+            return [{"pipeline_id": "p1", "workspace": "D:/ws/async"}]
+
+        _MODS["workspace_service"].set_state_reader(_read)
+        svc = WorkspaceService()
+        assert _run(svc.resolve_workspace_from_state("p1")) == "D:/ws/async"
+        _reset_state_reader()
+
+    def test_reader_exception_returns_none(self) -> None:
+        def _boom() -> list[dict]:
+            raise RuntimeError("bridge down")
+
+        _MODS["workspace_service"].set_state_reader(_boom)
+        svc = WorkspaceService()
+        assert _run(svc.resolve_workspace_from_state("p1")) is None
+        _reset_state_reader()
+
+
+# ═══════════════════════════════════════════════════════════
+# server.get_file_tree：无工作区/目录缺失如实报错（不再折叠成空树）
+# ═══════════════════════════════════════════════════════════
+
+
+def _load_workspace_server() -> Any:
+    """动态加载 server.py（SDK 可导入；flat workspace_service 模块随之注册）。"""
+    plugin_dir = _PLUGIN_DIR
+    if str(plugin_dir) not in sys.path:
+        sys.path.insert(0, str(plugin_dir))
+    sdk_dir = Path(__file__).resolve().parents[4] / "sdk" / "src"
+    if str(sdk_dir) not in sys.path:
+        sys.path.insert(0, str(sdk_dir))
+    mod_name = "workspace_server_test"
+    if mod_name in sys.modules:
+        del sys.modules[mod_name]
+    spec = importlib.util.spec_from_file_location(mod_name, plugin_dir / "server.py")
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[mod_name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+def _server_state_mod(server_mod: Any) -> Any:
+    """server.py flat 导入的 workspace_service 模块（读面注入目标）。"""
+    mod = sys.modules.get("workspace_service")
+    assert mod is not None, "server.py 应已 flat 导入 workspace_service"
+    return mod
+
+
+class TestServerGetFileTreeStatus:
+    def test_no_workspace_returns_status(self) -> None:
+        """解析无果（无 reader、无任务记录）→ no_workspace 状态而非空树。"""
+        server_mod = _load_workspace_server()
+        state_mod = _server_state_mod(server_mod)
+        state_mod.set_state_reader(None)
+        _inject_task_service(_FakeTaskService())  # 任务查无 → None
+
+        result = _run(server_mod.get_file_tree("ghost-task"))
+        assert result["workspace_status"] == "no_workspace"
+        assert result["tree"] == []
+        assert "无工作区" in result["error"]
+
+    def test_dir_missing_returns_status(self) -> None:
+        """坐标在、目录不在 → dir_missing 且 error 携带路径。"""
+        server_mod = _load_workspace_server()
+        state_mod = _server_state_mod(server_mod)
+        missing = "D:/ws/definitely-missing-20260824"
+        state_mod.set_state_reader(lambda: [{"pipeline_id": "p1", "workspace": missing}])
+
+        result = _run(server_mod.get_file_tree("p1"))
+        assert result["workspace_status"] == "dir_missing"
+        assert missing in result["error"]
+        state_mod.set_state_reader(None)
+
+    def test_existing_dir_returns_tree(self, tmp_path: Path) -> None:
+        """目录存在 → 正常扫描，无 workspace_status 字段。"""
+        (tmp_path / "hello.txt").write_text("hi", encoding="utf-8")
+        server_mod = _load_workspace_server()
+        state_mod = _server_state_mod(server_mod)
+        state_mod.set_state_reader(lambda: [{"pipeline_id": "p1", "workspace": str(tmp_path)}])
+
+        result = _run(server_mod.get_file_tree("p1"))
+        assert "workspace_status" not in result
+        names = [n.get("name") for n in result["tree"]]
+        assert "hello.txt" in names
+        state_mod.set_state_reader(None)
+
+    def test_task_service_fallback_channel(self, tmp_path: Path) -> None:
+        """state 桥无命中时回退 task_service metadata.ws_meta.path（0.1 镜像）。"""
+        (tmp_path / "f.txt").write_text("x", encoding="utf-8")
+        server_mod = _load_workspace_server()
+        state_mod = _server_state_mod(server_mod)
+        state_mod.set_state_reader(None)
+        task_svc = _FakeTaskService()
+        task_svc.tasks["t1"] = _FakeTask("t1", metadata={"ws_meta": {"path": str(tmp_path)}})
+        _inject_task_service(task_svc)
+
+        result = _run(server_mod.get_file_tree("t1"))
+        assert "workspace_status" not in result
+        assert result["tree"], "应扫描到回退通道的工作区文件"
+
+
+# ═══════════════════════════════════════════════════════════
 # models：序列化往返
 # ═══════════════════════════════════════════════════════════
 
