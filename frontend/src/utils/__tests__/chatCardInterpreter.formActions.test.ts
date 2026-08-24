@@ -74,7 +74,7 @@ describe('T2：form 块翻译', () => {
 })
 
 describe('T3：actions on_click 协议接线', () => {
-  it('open_file：value 模板渲染 → 全局文件打开回调', () => {
+  it('open_file：value 模板渲染 → 全局文件打开回调（container_task_id 一并透传）', () => {
     const openFile = vi.fn()
     registerGlobalOpenFileCallback(openFile)
     const out = interpretChatCard(
@@ -83,7 +83,18 @@ describe('T3：actions on_click 协议接线', () => {
     )
     expect(out.actions[0].disabled).toBeFalsy()
     out.actions[0].onClick!()
-    expect(openFile).toHaveBeenCalledWith('/tmp/a.txt')
+    expect(openFile).toHaveBeenCalledWith('/tmp/a.txt', undefined)
+  })
+
+  it('open_file：ctx 带 container_task_id 时透传给回调（任务工作空间定位）', () => {
+    const openFile = vi.fn()
+    registerGlobalOpenFileCallback(openFile)
+    const out = interpretChatCard(
+      { actions: [{ id: 'a', label: '打开', onClick: { action: 'open_file', value: '{{args.path}}' } }] },
+      { ...ctx(), container_task_id: 'task-7' },
+    )
+    out.actions[0].onClick!()
+    expect(openFile).toHaveBeenCalledWith('/tmp/a.txt', 'task-7')
   })
 
   it('open_url：新标签打开', () => {

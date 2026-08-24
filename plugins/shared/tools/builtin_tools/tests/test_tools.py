@@ -12,6 +12,7 @@ from pathlib import Path
 import pytest
 
 from agentos_builtin_tools.fs_tools import (
+    FILE_WRITE_OUTPUT_SCHEMA,
     copy_file,
     create_directory,
     delete_file,
@@ -154,6 +155,76 @@ class TestFileWrite:
         result = await file_write(str(f), action="delete_lines", start_line=2, end_line=2, create_backup=False)
         assert result.success
         assert "L2" not in f.read_text()
+
+
+class TestFileWriteDiffOutput:
+    """file_write 输出 old_content/new_content（plugin.json ui.chat_card diff 块数据源）。
+
+    契约：每个 action 的成功输出必须带写前全文（old_content，新建为空串）与
+    写后全文（new_content）——前端 diff 卡与"完整文件"视图据此渲染。
+    """
+
+    @pytest.mark.asyncio
+    async def test_write_new_file_diff_output(self, tmp_path: Path) -> None:
+        f = tmp_path / "new.txt"
+        result = await file_write(str(f), action="write", content="hello")
+        assert result.success
+        assert result.output["old_content"] == ""
+        assert result.output["new_content"] == "hello"
+
+    @pytest.mark.asyncio
+    async def test_overwrite_diff_output(self, tmp_path: Path) -> None:
+        f = tmp_path / "exist.txt"
+        f.write_text("old text")
+        result = await file_write(str(f), action="write", content="new text", create_backup=False)
+        assert result.success
+        assert result.output["old_content"] == "old text"
+        assert result.output["new_content"] == "new text"
+
+    @pytest.mark.asyncio
+    async def test_append_diff_output(self, tmp_path: Path) -> None:
+        f = tmp_path / "append.txt"
+        f.write_text("line1\n")
+        result = await file_write(str(f), action="append", content="line2\n", create_backup=False)
+        assert result.success
+        assert result.output["old_content"] == "line1\n"
+        assert result.output["new_content"] == "line1\nline2\n"
+
+    @pytest.mark.asyncio
+    async def test_search_replace_diff_output(self, tmp_path: Path) -> None:
+        f = tmp_path / "replace.txt"
+        f.write_text("hello world")
+        result = await file_write(
+            str(f), action="search_replace", old_str="world", new_str="Rust", create_backup=False
+        )
+        assert result.success
+        assert result.output["old_content"] == "hello world"
+        assert result.output["new_content"] == "hello Rust"
+
+    @pytest.mark.asyncio
+    async def test_insert_diff_output(self, tmp_path: Path) -> None:
+        f = tmp_path / "insert.txt"
+        f.write_text("A\nC")
+        result = await file_write(str(f), action="insert", content="B", line=1, create_backup=False)
+        assert result.success
+        assert result.output["old_content"] == "A\nC"
+        assert result.output["new_content"] == "A\nB\nC"
+
+    @pytest.mark.asyncio
+    async def test_delete_lines_diff_output(self, tmp_path: Path) -> None:
+        f = tmp_path / "del.txt"
+        f.write_text("L1\nL2\nL3")
+        result = await file_write(str(f), action="delete_lines", start_line=2, end_line=2, create_backup=False)
+        assert result.success
+        assert result.output["old_content"] == "L1\nL2\nL3"
+        assert result.output["new_content"] == "L1\nL3"
+
+    def test_output_schema_declares_diff_fields(self) -> None:
+        """diff 数据源字段必须在 output_schema 声明（契约锁步，防再断链）。"""
+        schema = FILE_WRITE_OUTPUT_SCHEMA
+        props = schema["properties"]
+        assert "old_content" in props
+        assert "new_content" in props
 
 
 class TestListDirectory:

@@ -115,6 +115,8 @@ export interface ToolCallContext {
   error?: string
   duration_ms?: number
   partial_output?: unknown
+  /** 所属任务容器 ID（open_file 动作透传给文件打开回调，定位任务工作空间） */
+  container_task_id?: string
 }
 
 /** 模板过滤器（设计文档 §五最小集） */
@@ -399,7 +401,7 @@ function buildActionHandler(
     case 'open_file': {
       if (typeof value !== 'string' || value === '') return null
       return () => {
-        void getGlobalOpenFileCallback()(value)
+        void getGlobalOpenFileCallback()(value, ctx.container_task_id)
       }
     }
     case 'open_url': {

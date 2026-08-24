@@ -122,6 +122,70 @@ def test_chat_card_declaration_valid(path: Path) -> None:
                 ), f"{tool['name']}: diffStat.{key}={source!r} 必须以 args./result./output. 开头"
 
 
+# source 求值根（与 frontend/src/utils/chatCardInterpreter.ts 的 evalSinglePath 对齐）：
+# args./error./duration_ms./partial_output. 根的取值不在工具 output 里，
+# output_schema 一致性检查只对 output./result. 根生效（见 _referenced_output_fields）。
+def _chat_card_source_texts(chat_card: dict) -> list[str]:
+    """收集 chat_card 全部 source 表达式（blocks/fields/filePathSource/diffStat）。"""
+    texts: list[str] = []
+    for block in chat_card.get("blocks", []):
+        for key in ("source", "when", "unless", "diffOldSource", "diffNewSource"):
+            v = block.get(key)
+            if isinstance(v, str):
+                texts.append(v)
+        for field in block.get("fields") or []:
+            if isinstance(field.get("source"), str):
+                texts.append(field["source"])
+    if isinstance(chat_card.get("filePathSource"), str):
+        texts.append(chat_card["filePathSource"])
+    diff_stat = chat_card.get("diffStat") or {}
+    for key in ("addedSource", "removedSource"):
+        if isinstance(diff_stat.get(key), str):
+            texts.append(diff_stat[key])
+    return texts
+
+
+def _referenced_output_fields(texts: list[str]) -> set[str]:
+    """从 source 表达式提取引用的 output 一级字段名。
+
+    表达式语法：`output.X || result.Y | filter:arg`（|| 回退 + 过滤器管道），
+    仅取 output./result. 根的首段字段；args./error./duration_ms. 等非输出根跳过。
+    """
+    fields: set[str] = set()
+    for text in texts:
+        for alt in text.split("||"):
+            path = alt.split("|")[0].strip()
+            root, _, rest = path.partition(".")
+            if root in ("output", "result") and rest:
+                fields.add(rest.split(".")[0])
+    return fields
+
+
+@pytest.mark.parametrize("path", TOOL_PLUGIN_JSONS, ids=lambda p: str(p.relative_to(_TOOLS_ROOT.parent)))
+def test_chat_card_sources_in_output_schema(path: Path) -> None:
+    """chat_card 引用的 output/result 字段必须存在于该工具的 output_schema。
+
+    防声明与实现断链（前端解释器对缺失字段静默判空，坏声明=卡片块悄悄不渲染，
+    无任何报错）：diff 块/统计/内容块的 source 引用了 output_schema 未声明的
+    字段即视为契约漂移。
+    """
+    for tool in _tool_entries(path):
+        chat_card = (tool.get("ui") or {}).get("chat_card")
+        if not chat_card:
+            continue
+        output_schema = tool.get("output_schema") or {}
+        props = (output_schema.get("properties") or {})
+        referenced = _referenced_output_fields(_chat_card_source_texts(chat_card))
+        if not props:
+            # 未声明 output_schema 的工具无从对表（render 卡另有词汇校验兜底）
+            continue
+        missing = sorted(f for f in referenced if f not in props)
+        assert not missing, (
+            f"{path.name}/{tool['name']}: chat_card 引用了 output_schema 未声明的字段 {missing}——"
+            f"要么输出侧补字段，要么声明侧改引用（现状=前端对应块静默不渲染）"
+        )
+
+
 def test_all_tool_plugins_have_card_declaration() -> None:
     """全部 LLM 面工具插件都应声明渲染形式（render 或 ui.chat_card）。
 

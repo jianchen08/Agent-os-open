@@ -193,6 +193,11 @@ FILE_WRITE_OUTPUT_SCHEMA: dict[str, Any] = {
         "added": {"type": "integer"},
         "removed": {"type": "integer"},
         "backup": {"type": ["string", "null"]},
+        # 写前/写后全文：前端 diff 卡数据源（plugin.json ui.chat_card 的
+        # diffOldSource/diffNewSource）。大文件溢出由 pipeline 的 spill_guard
+        # 统一兜底（对齐 file_read 的全文返回口径）。
+        "old_content": {"type": ["string", "null"]},
+        "new_content": {"type": ["string", "null"]},
     },
 }
 
@@ -222,11 +227,12 @@ async def file_write(
 
     try:
         if action == "write":
+            existing = file_path.read_text("utf-8") if file_path.exists() else ""
             backup = _maybe_backup(file_path, create_backup)
             await asyncio.to_thread(file_path.write_text, content, "utf-8")
             added = content.count("\n") + 1 if content else 0
             return ToolResult.success_result(
-                {"added": added, "removed": 0, "backup": backup},
+                {"added": added, "removed": 0, "backup": backup, "old_content": existing, "new_content": content},
             )
 
         if action == "append":
@@ -234,7 +240,13 @@ async def file_write(
             existing = file_path.read_text("utf-8") if file_path.exists() else ""
             file_path.write_text(existing + content, "utf-8")
             return ToolResult.success_result(
-                {"added": content.count("\n") + 1 if content else 0, "removed": 0, "backup": backup},
+                {
+                    "added": content.count("\n") + 1 if content else 0,
+                    "removed": 0,
+                    "backup": backup,
+                    "old_content": existing,
+                    "new_content": existing + content,
+                },
             )
 
         if action == "search_replace":
@@ -253,7 +265,7 @@ async def file_write(
             new_content = existing.replace(old_str, replacement)
             file_path.write_text(new_content, "utf-8")
             return ToolResult.success_result(
-                {"added": 0, "removed": 0, "backup": backup},
+                {"added": 0, "removed": 0, "backup": backup, "old_content": existing, "new_content": new_content},
                 replacements=count_replace,
             )
 
@@ -267,7 +279,13 @@ async def file_write(
             lines.insert(insert_idx, content)
             file_path.write_text("\n".join(lines), "utf-8")
             return ToolResult.success_result(
-                {"added": content.count("\n") + 1 if content else 0, "removed": 0, "backup": backup},
+                {
+                    "added": content.count("\n") + 1 if content else 0,
+                    "removed": 0,
+                    "backup": backup,
+                    "old_content": existing,
+                    "new_content": "\n".join(lines),
+                },
             )
 
         if action == "delete_lines":
@@ -282,7 +300,13 @@ async def file_write(
             del lines[start_line - 1 : end]
             file_path.write_text("\n".join(lines), "utf-8")
             return ToolResult.success_result(
-                {"added": 0, "removed": end - start_line + 1, "backup": backup},
+                {
+                    "added": 0,
+                    "removed": end - start_line + 1,
+                    "backup": backup,
+                    "old_content": existing,
+                    "new_content": "\n".join(lines),
+                },
             )
 
         return ToolResult.failure_result(f"Unknown action: {action}")

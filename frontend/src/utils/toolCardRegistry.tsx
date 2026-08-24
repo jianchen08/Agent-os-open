@@ -163,6 +163,7 @@ export function enhanceActivityWithToolConfig(
       error: toolCall.error,
       duration_ms: toolCall.duration_ms,
       partial_output: toolCall.partialOutput,
+      container_task_id: toolCall.containerTaskId,
     }
     const interpreted = interpretChatCard(declared, ctx)
     const Icon = resolveChatCardIcon(interpreted.icon)

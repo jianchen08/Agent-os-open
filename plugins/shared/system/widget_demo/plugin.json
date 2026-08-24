@@ -28,7 +28,7 @@
                 "fields": [
                   {
                     "key": "耗时",
-                    "source": "result.duration_ms"
+                    "source": "duration_ms"
                   },
                   {
                     "key": "状态",

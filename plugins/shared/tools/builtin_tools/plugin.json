@@ -183,6 +183,14 @@
                 "string",
                 "null"
               ]
+            },
+            "old_content": {
+              "type": ["string", "null"],
+              "description": "写前全文（diff 卡数据源；文件新建时为空串）"
+            },
+            "new_content": {
+              "type": ["string", "null"],
+              "description": "写后全文（diff 卡数据源 + 完整文件视图）"
             }
           }
         }

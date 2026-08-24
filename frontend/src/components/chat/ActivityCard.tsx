@@ -512,6 +512,64 @@ const DshBlockView: FC<{ contentType: string; props: Record<string, unknown> }> 
 }
 
 /**
+ * diff 块双视图：差异对比（TextDiffView）↔ 完整文件（写后全文按行渲染）。
+ *
+ * 完整文件视图取 diffNew（写后全文，如 file_write 的 output.new_content）；
+ * 新内容为空（纯删除等场景）时不提供切换，保持差异视图。
+ */
+const DiffDetailView: FC<{ oldContent: string; newContent: string }> = ({
+  oldContent,
+  newContent,
+}) => {
+  const [mode, setMode] = useState<'diff' | 'full'>('diff')
+  const fullLines = newContent.split('\n')
+
+  return (
+    <div className="bg-muted/30 overflow-x-auto rounded" data-testid="diff-detail-view">
+      {newContent !== '' && (
+        <div
+          className="flex items-center gap-1 border-b border-border px-2 py-1"
+          role="tablist"
+          aria-label="差异视图切换"
+        >
+          {(['diff', 'full'] as const).map((m) => (
+            <button
+              key={m}
+              role="tab"
+              aria-selected={mode === m}
+              data-testid={`diff-view-${m}`}
+              onClick={() => setMode(m)}
+              className={cn(
+                'rounded px-2 py-0.5 text-xs transition-colors',
+                mode === m
+                  ? 'bg-[var(--hover-overlay)] font-medium text-foreground'
+                  : 'text-muted-foreground hover:text-foreground',
+              )}
+            >
+              {m === 'diff' ? '差异对比' : '完整文件'}
+            </button>
+          ))}
+        </div>
+      )}
+      {mode === 'diff' ? (
+        <TextDiffView oldContent={oldContent} newContent={newContent} />
+      ) : (
+        <div className="font-mono text-xs" data-testid="diff-full-content">
+          {fullLines.map((line, i) => (
+            <div key={i} className="flex" data-testid={`full-line-${i}`}>
+              <span className="text-muted-foreground/50 w-8 shrink-0 select-none border-r border-border px-1 text-right">
+                {i + 1}
+              </span>
+              <span className="flex-1 px-1 break-all whitespace-pre-wrap">{line}</span>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  )
+}
+
+/**
  * 详情区块组件
  */
 const DetailBlock: FC<{ block: ActivityDetailBlock }> = ({ block }) => {
@@ -609,12 +667,10 @@ const DetailBlock: FC<{ block: ActivityDetailBlock }> = ({ block }) => {
 
       case 'diff':
         return (
-          <div className="bg-muted/30 overflow-x-auto rounded">
-            <TextDiffView
-              oldContent={block.diffOld ?? ''}
-              newContent={block.diffNew ?? ''}
-            />
-          </div>
+          <DiffDetailView
+            oldContent={block.diffOld ?? ''}
+            newContent={block.diffNew ?? ''}
+          />
         )
 
       case 'markdown':
