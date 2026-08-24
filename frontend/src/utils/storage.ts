@@ -253,22 +253,6 @@ export const uiStorage = {
   },
 
   /**
-   * 保存工作区面板最大化状态
-   * @param maximized - 是否最大化（保留顶栏/状态栏，仅折叠侧栏+聊天）
-   */
-  setWorkspaceMaximized(maximized: boolean): void {
-    storage.setItem(STORAGE_KEYS.WORKSPACE_MAXIMIZED, maximized)
-  },
-
-  /**
-   * 获取工作区面板最大化状态
-   * @returns 是否最大化或null
-   */
-  getWorkspaceMaximized(): boolean | null {
-    return storage.getItem<boolean>(STORAGE_KEYS.WORKSPACE_MAXIMIZED)
-  },
-
-  /**
    * 保存工作区面板宽度比例（传 undefined 会清除记录）
    * @param ratio - 比例（0~1，相对 splitter 容器）
    */

@@ -37,8 +37,6 @@ export const STORAGE_KEYS = {
   TASK_PANEL_COLLAPSED: 'task_panel_collapsed',
   /** 工作区面板折叠状态 */
   WORKSPACE_COLLAPSED: 'workspace_collapsed',
-  /** 工作区面板最大化状态（保留顶栏/状态栏，仅折叠侧栏+聊天） */
-  WORKSPACE_MAXIMIZED: 'workspace_maximized',
   /** 工作区面板宽度比例（0~1，相对 chat+workspace） */
   WORKSPACE_PANEL_RATIO: 'workspace_panel_ratio',
   /** 侧边栏宽度比例（0~1，相对主内容区 sidebar+chat+workspace） */

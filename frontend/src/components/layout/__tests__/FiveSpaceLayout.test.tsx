@@ -81,7 +81,6 @@ function resetStores() {
   useUIStore.setState({
     sidebarCollapsed: false,
     workspaceCollapsed: false,
-    workspaceMaximized: false,
     sidebarRatio: null,
     workspacePanelRatio: null,
   })
@@ -287,5 +286,51 @@ describe('FiveSpaceLayout — 响应式两档（768px 分界，平板=触屏桌�
     })
     // 成本看板已声明化（cost_control contributes.pages path /cost）——直达工作区页签
     expect(openWorkspacePanelByPath).toHaveBeenCalledWith('/cost')
+  })
+})
+
+describe('FiveSpaceLayout — 工作区全屏组件恒定性（2026-08-24 单树重构）', () => {
+  beforeEach(() => {
+    globalThis.ResizeObserver = ResizeObserverStub as never
+    setViewportWidth(1280)
+    resetStores()
+  })
+  afterEach(() => {
+    vi.restoreAllMocks()
+  })
+
+  it('切工作区全屏：工作区/聊天 DOM 节点保活不重挂载（旧分支切换实现必换新节点），ESC 退出恢复', async () => {
+    useLayoutModeStore.setState({
+      workspaceTabs: [{ id: 't1', title: '任务管理', isActive: true, isPinned: false }],
+      visitedTabIds: ['t1'],
+    })
+    renderLayout()
+
+    const workspaceArea = document.querySelector('[data-region="workspace"]') as HTMLElement
+    const chatNode = screen.getByTestId('chat-content')
+    const tabNode = screen.getByTestId('workspace-tab-t1')
+    expect(workspaceArea).not.toBeNull()
+
+    // 进入全屏（工作区 Tab 栏的全屏按钮）
+    fireEvent.click(screen.getByTestId('workspace-toggle-fullscreen'))
+
+    // 组件恒定性：同一 DOM 节点（重挂载=数据全量重拉+状态全丢的根因）
+    expect(document.querySelector('[data-region="workspace"]')).toBe(workspaceArea)
+    expect(screen.getByTestId('chat-content')).toBe(chatNode)
+    expect(screen.getByTestId('workspace-tab-t1')).toBe(tabNode)
+    // 全屏形态：工作区 flex-1 铺满、无 pt-10 图标带；聊天区 CSS 隐藏保挂载
+    expect(workspaceArea.className).toContain('flex-1')
+    expect(workspaceArea.className).not.toContain('pt-10')
+    expect(chatNode.parentElement?.classList.contains('hidden')).toBe(true)
+
+    // ESC 退出全屏：同一节点、恢复让位式布局与图标带
+    await act(async () => {
+      fireEvent.keyDown(document, { key: 'Escape' })
+    })
+    expect(document.querySelector('[data-region="workspace"]')).toBe(workspaceArea)
+    expect(workspaceArea.className).not.toContain('flex-1')
+    expect(workspaceArea.className).toContain('pt-10')
+    expect(chatNode.parentElement?.classList.contains('hidden')).toBe(false)
+    expect(screen.getByTestId('workspace-tab-t1')).toBe(tabNode)
   })
 })

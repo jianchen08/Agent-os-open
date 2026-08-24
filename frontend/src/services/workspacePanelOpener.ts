@@ -79,10 +79,8 @@ export function openWorkspacePanel(spec: WorkspacePanelSpec): void {
   }
 
   // 打开面板时展开工作区（若用户已折叠）。
-  // 例外：工作区处于「最大化」时不展开——最大化模式下工作区本就独占主区域，
-  // 新 Tab 应在工作区内打开，而非退出最大化。
   const ui = useUIStore.getState()
-  if (!ui.workspaceMaximized && ui.workspaceCollapsed) {
+  if (ui.workspaceCollapsed) {
     ui.setWorkspaceCollapsed(false)
   }
 }

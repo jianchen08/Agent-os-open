@@ -67,8 +67,6 @@ export function FiveSpaceLayout({
   const sidebarCollapsed = useUIStore((s) => s.sidebarCollapsed)
   const workspaceCollapsed = useUIStore((s) => s.workspaceCollapsed)
   const setWorkspaceCollapsed = useUIStore((s) => s.setWorkspaceCollapsed)
-  const workspaceMaximized = useUIStore((s) => s.workspaceMaximized)
-  const setWorkspaceMaximized = useUIStore((s) => s.setWorkspaceMaximized)
   // 面板宽度比例（0~1，相对主内容区；null = 默认宽度）——拖拽手柄写入，
   // 持久化在 uiStorage（刷新后恢复）
   const sidebarRatio = useUIStore((s) => s.sidebarRatio)
@@ -535,8 +533,6 @@ export function FiveSpaceLayout({
           exitFullscreen()
         } else if (workspaceFullscreen) {
           setWorkspaceFullscreen(false)
-        } else if (workspaceMaximized) {
-          setWorkspaceMaximized(false)
         } else if (mobileWorkspaceOpen) {
           setMobileWorkspaceOpen(false)
         }
@@ -544,7 +540,7 @@ export function FiveSpaceLayout({
     }
     document.addEventListener('keydown', handleKeyDown)
     return () => document.removeEventListener('keydown', handleKeyDown)
-  }, [fullscreenActive, exitFullscreen, workspaceFullscreen, workspaceMaximized, setWorkspaceMaximized, mobileWorkspaceOpen])
+  }, [fullscreenActive, exitFullscreen, workspaceFullscreen, mobileWorkspaceOpen])
 
   return (
     <div
@@ -559,247 +555,247 @@ export function FiveSpaceLayout({
         paddingBottom: 'var(--skin-chrome-bottom, 0px)',
       }}
     >
-      {workspaceFullscreen ? (
-        // 全屏模式：工作区 100% 占满视口，不渲染任何标题条。
-        // 退出入口 = 工作区 Tab 栏的全屏按钮(isFullscreen 时显示退出图标)或 ESC 键。
-        <div className="min-h-0 flex-1 overflow-hidden">
-          <WorkspaceHost
-            tabs={workspaceTabs}
-            onTabChange={setActiveTab}
-            onTabClose={handleCloseTab}
-            renderTabContent={renderTabContent}
-            onFullscreen={toggleWorkspaceFullscreen}
-            isFullscreen={true}
-            visitedTabIds={visitedTabIds}
-          />
-        </div>
-      ) : workspaceMaximized ? (
-        <>
-          {/* 最大化模式：工作区 100% 占满（顶栏已移除，2026-08-21 布局简化） */}
-          <AlertBanner alerts={layoutAlerts} onAction={handleAlertAction} />
-          <div className="min-h-0 flex-1 overflow-hidden">
+      {/* 单树布局（2026-08-24）：工作区全屏不再切换 JSX 分支——分支切换会让
+          WorkspaceHost/ChatContainer 整棵 unmount+remount（全屏切换必重载数据、
+          组件状态全丢的根因）。全屏=常驻树内 CSS 隐藏侧栏/聊天 + 工作区 flex-1，
+          组件恒定性保住（React 同位置同类型即复用实例）。 */}
+      {/* 异常浮现提示条（无常驻底栏；连接断开/审批待处理时出现；工作区全屏时让位） */}
+      {!workspaceFullscreen && <AlertBanner alerts={layoutAlerts} onAction={handleAlertAction} />}
+
+      {/* ---- Main Content Area ---- */}
+      <div className="relative flex min-h-0 flex-1 overflow-hidden">
+        {(isMobile || sidebarCollapsed) && !workspaceFullscreen && (
+          <button
+            type="button"
+            onClick={() => useUIStore.getState().setSidebarCollapsed(false)}
+            className="text-muted-foreground hover:bg-accent hover:text-foreground absolute left-1 top-2 z-10 flex h-7 w-7 items-center justify-center rounded-md transition-colors"
+            title="展开侧边栏"
+            aria-label="展开侧边栏"
+            data-testid="sidebar-expand-float"
+          >
+            <Menu className="h-4 w-4" />
+          </button>
+        )}
+        {/* 移动端侧边栏：抽屉，隐藏时完全不占位 */}
+        {sidebarContent && isMobile && !sidebarCollapsed && (
+          <div
+            className="fixed inset-0 z-40"
+            style={{ top: 'var(--layout-titlebar-height, 32px)' }}
+            data-testid="mobile-sidebar-drawer"
+          >
+            <div
+              className="absolute inset-0 bg-[var(--overlay-bg)]"
+              onClick={() => useUIStore.getState().setSidebarCollapsed(true)}
+              data-testid="mobile-sidebar-backdrop"
+            />
+            <aside
+              className="absolute bottom-0 left-0 top-0 z-50 flex w-[78%] max-w-[320px] flex-col shadow-xl safe-area-pb"
+              style={{ background: 'var(--region-sidebar-bg, var(--ds-bg-panel, var(--sidebar-bg, hsl(var(--card)))))' }}
+            >
+              <div className="min-h-0 flex-1 overflow-hidden">{sidebarContent}</div>
+              <div className="flex items-center gap-1 px-2 py-1.5">
+                <button
+                  type="button"
+                  onClick={() => setMobileWorkspaceOpen(true)}
+                  className="text-muted-foreground hover:bg-accent hover:text-foreground flex h-7 w-7 items-center justify-center rounded-md transition-colors"
+                  title="工作区"
+                  aria-label="工作区"
+                  data-testid="mobile-workspace-btn"
+                >
+                  <PanelRightIcon className="h-4 w-4" />
+                </button>
+              </div>
+            </aside>
+          </div>
+        )}
+
+        {isMobile ? (
+          <div
+            className={cn(
+              'flex min-h-0 flex-1 overflow-hidden',
+              workspaceFullscreen && 'hidden',
+            )}
+          >
+            <section className="flex flex-1 flex-col overflow-hidden" data-region="chat">
+              {chatContent}
+            </section>
+          </div>
+        ) : (
+          /* 桌面（布局 v6，用户裁决 2026-08-21 三修）：并排让位式——侧栏/工作区
+             展开时聊天区让位（不遮挡），收起时聊天全宽。图标钉在页面左/右上角
+             （位置恒定，用户硬要求）；各面板自顶全高展开，顶部 40px 图标带
+             归入各自展开的区域（图标落在所属区域边角内，从视觉上属于该区域），
+             区域间距用位置计算让位而非移动图标；边界无边线。 */
+          <section className="relative flex min-h-0 flex-1 overflow-hidden" data-region="chat">
+            {/* 侧栏开关：钉在页面左上角；侧栏展开时落在侧栏区域顶角内（工作区全屏时隐藏） */}
+            <button
+              type="button"
+              onClick={() => useUIStore.getState().setSidebarCollapsed(!sidebarCollapsed)}
+              className={cn(
+                'absolute left-2 top-2 z-30 flex h-7 w-7 items-center justify-center rounded-md transition-colors',
+                !sidebarCollapsed && sidebarContent
+                  ? 'bg-accent text-accent-foreground'
+                  : 'text-muted-foreground hover:bg-accent hover:text-foreground',
+                workspaceFullscreen && 'hidden',
+              )}
+              title={sidebarCollapsed ? '展开侧边栏' : '收起侧边栏'}
+              aria-label="侧边栏"
+              data-testid="sidebar-toggle-float"
+            >
+              <Menu className="h-4 w-4" />
+            </button>
+            {/* 工作区开关：钉在页面右上角；工作区展开时落在工作区区域顶角内（工作区全屏时隐藏） */}
+            <button
+              type="button"
+              onClick={() => setWorkspaceCollapsed(!workspaceCollapsed)}
+              className={cn(
+                'absolute right-2 top-2 z-30 flex h-7 w-7 items-center justify-center rounded-md transition-colors',
+                !workspaceCollapsed
+                  ? 'bg-accent text-accent-foreground'
+                  : 'text-muted-foreground hover:bg-accent hover:text-foreground',
+                workspaceFullscreen && 'hidden',
+              )}
+              title={workspaceCollapsed ? '展开工作区' : '收起工作区'}
+              aria-label="工作区"
+              data-testid="workspace-toggle-float"
+            >
+              <PanelRightIcon className="h-4 w-4" />
+            </button>
+
+            <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
+              <div className="flex min-h-0 flex-1 overflow-hidden">
+                {/* 侧栏（让位式，主题面板样式，无边线；顶部让出图标带；
+                    背景链与 Sidebar.tsx 内层统一（--ds-bg-panel 优先），
+                    图标条与侧栏内容一色；宽度可拖拽调（2026-08-22）；
+                    工作区全屏时 CSS 隐藏保挂载） */}
+                {sidebarContent && !sidebarCollapsed && (
+                  <aside
+                    className={cn(
+                      'flex shrink-0 flex-col overflow-hidden pt-10',
+                      workspaceFullscreen && 'hidden',
+                    )}
+                    style={{
+                      width: panelWidth('sidebar', 248, 200, 360),
+                      background: 'var(--region-sidebar-bg, var(--ds-bg-panel, var(--sidebar-bg, hsl(var(--card)))))',
+                    }}
+                    data-testid="sidebar-panel"
+                    data-region="sidebar"
+                  >
+                    <div className="min-h-0 flex-1 overflow-hidden">{sidebarContent}</div>
+                  </aside>
+                )}
+                {sidebarContent && !sidebarCollapsed && (
+                  <div
+                    className={cn(
+                      'w-1 shrink-0 cursor-col-resize self-stretch',
+                      workspaceFullscreen && 'hidden',
+                    )}
+                    data-testid="sidebar-resize-handle"
+                    onPointerDown={startPanelDrag('sidebar')}
+                    title="拖动调整侧边栏宽度"
+                  />
+                )}
+
+                {/* 聊天（弹性让位/全宽；顶部 40px 带由标签栏行自身占位，
+                    与两侧开关按钮同排；工作区全屏时 CSS 隐藏保挂载——
+                    ChatContainer 实例与滚动位置跨全屏切换保留） */}
+                <div
+                  className={cn(
+                    'flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden',
+                    workspaceFullscreen && 'hidden',
+                  )}
+                >
+                  {chatContent}
+                </div>
+
+                {/* 工作区（让位式，无边线；顶部让出图标带；宽度可拖拽调）。
+                    全屏：隐藏手柄、宽 flex-1 占满；退出恢复让位式宽度。
+                    组件位置恒定——全屏切换不重挂载（重挂载=数据全量重拉） */}
+                {(!workspaceCollapsed || workspaceFullscreen) && (
+                  <>
+                    <div
+                      className={cn(
+                        'w-1 shrink-0 cursor-col-resize self-stretch',
+                        workspaceFullscreen && 'hidden',
+                      )}
+                      data-testid="workspace-resize-handle"
+                      onPointerDown={startPanelDrag('workspace')}
+                      title="拖动调整工作区宽度"
+                    />
+                    <div
+                      className={cn(
+                        'theme-workspace-area flex flex-col overflow-hidden',
+                        workspaceFullscreen ? 'min-h-0 min-w-0 flex-1' : 'shrink-0 pt-10',
+                      )}
+                      style={
+                        workspaceFullscreen
+                          ? undefined
+                          : {
+                              width: panelWidth('workspace', workspaceDefaultWidth, 360, workspaceMaxWidth),
+                            }
+                      }
+                      data-region="workspace"
+                    >
+                      <WorkspaceHost
+                        tabs={workspaceTabs}
+                        onTabChange={setActiveTab}
+                        onTabClose={handleCloseTab}
+                        renderTabContent={renderTabContent}
+                        onFullscreen={toggleWorkspaceFullscreen}
+                        isFullscreen={workspaceFullscreen}
+                        visitedTabIds={visitedTabIds}
+                      />
+                    </div>
+                  </>
+                )}
+              </div>
+            </div>
+          </section>
+        )}
+      </div>
+
+      {/* ---- StatusBar 已移除（task_layout_responsive 任务 2：无常驻底栏，
+           状态信息并入各区——连接小圆点在顶栏、成本在输入框、插件项在侧栏底部） ---- */}
+
+      {/* 移动端工作区全屏覆盖层（工作区全屏态下让位于全屏工作区本体） */}
+      {isMobile && mobileWorkspaceOpen && !workspaceFullscreen && (
+        <div
+          className="fixed inset-0 z-30 flex flex-col bg-background"
+          style={{ top: 'var(--layout-titlebar-height, 32px)' }}
+          data-testid="mobile-workspace-overlay"
+        >
+          {/* 工作区顶部操作栏 */}
+          <div className="border-border flex h-9 shrink-0 items-center justify-between border-b px-2">
+            <span className="text-foreground text-xs font-medium">面板</span>
+            <button
+              onClick={() => setMobileWorkspaceOpen(false)}
+              className="hover:bg-accent text-muted-foreground flex items-center gap-1 rounded-md px-2 py-1 text-xs transition-colors"
+              title="返回对话"
+              data-testid="mobile-workspace-back"
+            >
+              <Minimize2 className="h-3.5 w-3.5" />
+              <span>返回对话</span>
+            </button>
+          </div>
+          {/* 工作区内容 */}
+          <div className="safe-area-pb min-h-0 flex-1 overflow-hidden">
             <WorkspaceHost
               tabs={workspaceTabs}
               onTabChange={setActiveTab}
-              onTabClose={handleCloseTab}
+              onTabClose={(tabId) => {
+                handleCloseTab(tabId)
+                const remaining = useLayoutModeStore.getState().workspaceTabs.filter(t => t.id !== tabId)
+                if (remaining.length === 0) {
+                  setMobileWorkspaceOpen(false)
+                }
+              }}
               renderTabContent={renderTabContent}
               onFullscreen={toggleWorkspaceFullscreen}
               isFullscreen={false}
               visitedTabIds={visitedTabIds}
             />
           </div>
-        </>
-      ) : (
-        <>
-          {/* ---- Top Navigation Bar (shared AppHeader) ---- */}
-
-          {/* ---- 异常浮现提示条（无常驻底栏；连接断开/审批待处理时出现） ---- */}
-          <AlertBanner alerts={layoutAlerts} onAction={handleAlertAction} />
-
-          {/* ---- Main Content Area ---- */}
-          <div className="relative flex min-h-0 flex-1 overflow-hidden">
-            {(isMobile || sidebarCollapsed) && (
-              <button
-                type="button"
-                onClick={() => useUIStore.getState().setSidebarCollapsed(false)}
-                className="text-muted-foreground hover:bg-accent hover:text-foreground absolute left-1 top-2 z-10 flex h-7 w-7 items-center justify-center rounded-md transition-colors"
-                title="展开侧边栏"
-                aria-label="展开侧边栏"
-                data-testid="sidebar-expand-float"
-              >
-                <Menu className="h-4 w-4" />
-              </button>
-            )}
-            {/* 移动端侧边栏：抽屉，隐藏时完全不占位 */}
-            {sidebarContent && isMobile && !sidebarCollapsed && (
-              <div
-                className="fixed inset-0 z-40"
-                style={{ top: 'var(--layout-titlebar-height, 32px)' }}
-                data-testid="mobile-sidebar-drawer"
-              >
-                <div
-                  className="absolute inset-0 bg-[var(--overlay-bg)]"
-                  onClick={() => useUIStore.getState().setSidebarCollapsed(true)}
-                  data-testid="mobile-sidebar-backdrop"
-                />
-                <aside
-                  className="absolute bottom-0 left-0 top-0 z-50 flex w-[78%] max-w-[320px] flex-col shadow-xl safe-area-pb"
-                  style={{ background: 'var(--region-sidebar-bg, var(--ds-bg-panel, var(--sidebar-bg, hsl(var(--card)))))' }}
-                >
-                  <div className="min-h-0 flex-1 overflow-hidden">{sidebarContent}</div>
-                  <div className="flex items-center gap-1 px-2 py-1.5">
-                    <button
-                      type="button"
-                      onClick={() => setMobileWorkspaceOpen(true)}
-                      className="text-muted-foreground hover:bg-accent hover:text-foreground flex h-7 w-7 items-center justify-center rounded-md transition-colors"
-                      title="工作区"
-                      aria-label="工作区"
-                      data-testid="mobile-workspace-btn"
-                    >
-                      <PanelRightIcon className="h-4 w-4" />
-                    </button>
-                  </div>
-                </aside>
-              </div>
-            )}
-
-            {isMobile ? (
-              <div className="flex min-h-0 flex-1 overflow-hidden">
-                <section className="flex flex-1 flex-col overflow-hidden" data-region="chat">
-                  {chatContent}
-                </section>
-              </div>
-            ) : (
-              /* 桌面（布局 v6，用户裁决 2026-08-21 三修）：并排让位式——侧栏/工作区
-                 展开时聊天区让位（不遮挡），收起时聊天全宽。图标钉在页面左/右上角
-                 （位置恒定，用户硬要求）；各面板自顶全高展开，顶部 40px 图标带
-                 归入各自展开的区域（图标落在所属区域边角内，从视觉上属于该区域），
-                 区域间距用位置计算让位而非移动图标；边界无边线。 */
-              <section className="relative flex min-h-0 flex-1 overflow-hidden" data-region="chat">
-                {/* 侧栏开关：钉在页面左上角；侧栏展开时落在侧栏区域顶角内 */}
-                <button
-                  type="button"
-                  onClick={() => useUIStore.getState().setSidebarCollapsed(!sidebarCollapsed)}
-                  className={cn(
-                    'absolute left-2 top-2 z-30 flex h-7 w-7 items-center justify-center rounded-md transition-colors',
-                    !sidebarCollapsed && sidebarContent
-                      ? 'bg-accent text-accent-foreground'
-                      : 'text-muted-foreground hover:bg-accent hover:text-foreground',
-                  )}
-                  title={sidebarCollapsed ? '展开侧边栏' : '收起侧边栏'}
-                  aria-label="侧边栏"
-                  data-testid="sidebar-toggle-float"
-                >
-                  <Menu className="h-4 w-4" />
-                </button>
-                {/* 工作区开关：钉在页面右上角；工作区展开时落在工作区区域顶角内 */}
-                <button
-                  type="button"
-                  onClick={() => setWorkspaceCollapsed(!workspaceCollapsed)}
-                  className={cn(
-                    'absolute right-2 top-2 z-30 flex h-7 w-7 items-center justify-center rounded-md transition-colors',
-                    !workspaceCollapsed
-                      ? 'bg-accent text-accent-foreground'
-                      : 'text-muted-foreground hover:bg-accent hover:text-foreground',
-                  )}
-                  title={workspaceCollapsed ? '展开工作区' : '收起工作区'}
-                  aria-label="工作区"
-                  data-testid="workspace-toggle-float"
-                >
-                  <PanelRightIcon className="h-4 w-4" />
-                </button>
-
-                <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
-                  <div className="flex min-h-0 flex-1 overflow-hidden">
-                    {/* 侧栏（让位式，主题面板样式，无边线；顶部让出图标带；
-                        背景链与 Sidebar.tsx 内层统一（--ds-bg-panel 优先），
-                        图标条与侧栏内容一色；宽度可拖拽调（2026-08-22）） */}
-                    {sidebarContent && !sidebarCollapsed && (
-                      <aside
-                        className="flex shrink-0 flex-col overflow-hidden pt-10"
-                        style={{
-                          width: panelWidth('sidebar', 248, 200, 360),
-                          background: 'var(--region-sidebar-bg, var(--ds-bg-panel, var(--sidebar-bg, hsl(var(--card)))))',
-                        }}
-                        data-testid="sidebar-panel"
-                        data-region="sidebar"
-                      >
-                        <div className="min-h-0 flex-1 overflow-hidden">{sidebarContent}</div>
-                      </aside>
-                    )}
-                    {sidebarContent && !sidebarCollapsed && (
-                      <div
-                        className="w-1 shrink-0 cursor-col-resize self-stretch"
-                        data-testid="sidebar-resize-handle"
-                        onPointerDown={startPanelDrag('sidebar')}
-                        title="拖动调整侧边栏宽度"
-                      />
-                    )}
-
-                    {/* 聊天（弹性让位/全宽；顶部 40px 带由标签栏行自身占位，
-                        与两侧开关按钮同排） */}
-                    <div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">
-                      {chatContent}
-                    </div>
-
-                    {/* 工作区（让位式，无边线；顶部让出图标带；宽度可拖拽调） */}
-                    {!workspaceCollapsed && (
-                      <>
-                        <div
-                          className="w-1 shrink-0 cursor-col-resize self-stretch"
-                          data-testid="workspace-resize-handle"
-                          onPointerDown={startPanelDrag('workspace')}
-                          title="拖动调整工作区宽度"
-                        />
-                        <div
-                          className="theme-workspace-area flex shrink-0 flex-col overflow-hidden pt-10"
-                          style={{
-                            width: panelWidth('workspace', workspaceDefaultWidth, 360, workspaceMaxWidth),
-                          }}
-                          data-region="workspace"
-                        >
-                          <WorkspaceHost
-                            tabs={workspaceTabs}
-                            onTabChange={setActiveTab}
-                            onTabClose={handleCloseTab}
-                            renderTabContent={renderTabContent}
-                            onFullscreen={toggleWorkspaceFullscreen}
-                            isFullscreen={false}
-                            visitedTabIds={visitedTabIds}
-                          />
-                        </div>
-                      </>
-                    )}
-                  </div>
-                </div>
-              </section>
-            )}
-          </div>
-
-          {/* ---- StatusBar 已移除（task_layout_responsive 任务 2：无常驻底栏，
-               状态信息并入各区——连接小圆点在顶栏、成本在输入框、插件项在侧栏底部） ---- */}
-
-          {/* 移动端工作区全屏覆盖层 */}
-          {isMobile && mobileWorkspaceOpen && (
-            <div
-              className="fixed inset-0 z-30 flex flex-col bg-background"
-              style={{ top: 'var(--layout-titlebar-height, 32px)' }}
-              data-testid="mobile-workspace-overlay"
-            >
-              {/* 工作区顶部操作栏 */}
-              <div className="border-border flex h-9 shrink-0 items-center justify-between border-b px-2">
-                <span className="text-foreground text-xs font-medium">面板</span>
-                <button
-                  onClick={() => setMobileWorkspaceOpen(false)}
-                  className="hover:bg-accent text-muted-foreground flex items-center gap-1 rounded-md px-2 py-1 text-xs transition-colors"
-                  title="返回对话"
-                  data-testid="mobile-workspace-back"
-                >
-                  <Minimize2 className="h-3.5 w-3.5" />
-                  <span>返回对话</span>
-                </button>
-              </div>
-              {/* 工作区内容 */}
-              <div className="safe-area-pb min-h-0 flex-1 overflow-hidden">
-                <WorkspaceHost
-                  tabs={workspaceTabs}
-                  onTabChange={setActiveTab}
-                  onTabClose={(tabId) => {
-                    handleCloseTab(tabId)
-                    const remaining = useLayoutModeStore.getState().workspaceTabs.filter(t => t.id !== tabId)
-                    if (remaining.length === 0) {
-                      setMobileWorkspaceOpen(false)
-                    }
-                  }}
-                  renderTabContent={renderTabContent}
-                  onFullscreen={toggleWorkspaceFullscreen}
-                  isFullscreen={false}
-                  visitedTabIds={visitedTabIds}
-                />
-              </div>
-            </div>
-          )}
-        </>
+        </div>
       )}
 
       {/* ---- Floating Windows Container ---- */}

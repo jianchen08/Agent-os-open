@@ -17,7 +17,6 @@ function resetStore() {
     workspaceTabs: [],
     activeTabId: null,
     workspaceCollapsed: false,
-    workspaceMaximized: false,
   })
 }
 
