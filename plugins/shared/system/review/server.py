@@ -3,16 +3,11 @@
 
 trigger_review → review_agent 子管道（B 路径）链路。
 
-复盘不再做"metrics<0.5 拼字符串"模拟，而是通过 pipeline-executor 能力起
-review_agent 子管道，由 LLM 做深度复盘。报告回写通过 store_report 内部方法
-（由 memory 侧 / event-bus 完成事件触发）。
-
-0.2 收尾（旧引擎 AdrEngineImpl 已清理）：
-- 内核 pipeline-executor.start_run 占位能力随旧引擎移除——它只 create_run
-  返回 run_id，无 execute_step/end_run 驱动，子管道从不真正执行。
-- trigger_review 当前直接走本地降级（_local_degrade_report）；review_agent
-  深度复盘待接入 chat.send_message → PipelineExecutor 路径（与任务执行同构）。
-- get_report 的 get_run_status 惰性轮询能力保留（未来子管道接入后复用）。
+trigger_review 经 chat.send_message 创建分支派发 review_agent 子管道
+（与任务执行同构）：带血缘声明（root 根形式）、登记 task.owned.* 到被复盘
+任务管道（前端任务树挂载）、get_report 按复盘管道 state 聚合行轮询——真实
+完成才落 completed，不产出空 lessons 的假成功。chat 能力缺席或派发失败时
+local_degrade 兜底。
 
 agent_id/source 命名沿用 src/memory/maintenance/service.py 约定：
 - agent_id = "review_agent"（config/agents/system/review_agent.yaml）
@@ -202,13 +197,14 @@ async def trigger_review(
 ) -> dict[str, Any]:
     """Trigger a post-task review via review_agent sub-pipeline (B path).
 
-    0.2 收尾：旧引擎 start_run 占位能力已移除（子管道从不真正执行），
-    trigger 直接本地降级产出基础报告；review_agent 深度复盘待接入
-    chat.send_message → PipelineExecutor 路径（见模块头注释）。
+    深度复盘经 chat.send_message 创建分支派发 review_agent 管道；派发成功 →
+    报告 running，get_report 轮询复盘管道 state 聚合行，真实完成才落
+    completed。chat 能力缺席/派发失败 → 本地降级兜底（不产空 lessons 假成功）。
 
     Returns:
         review_id + status:
-        - completed (local_degrade): 本地降级产出基础报告
+        - running (pipeline): 复盘管道已派发
+        - completed (local_degrade): 降级产出基础报告
     """
     review_id = f"review_{uuid.uuid4().hex[:8]}"
     artifacts = artifacts or []
@@ -342,8 +338,7 @@ async def get_report(review_id: str) -> dict[str, Any]:
         report = await _cold_read_report(review_id)
         if report is None:
             return {"error": "review not found", "review_id": review_id}
-    # 子管道进行中：轮询复盘管道状态（GAP-1 chat.send_message 路径），
-    # 真实完成才落 completed。
+    # 子管道进行中：轮询复盘管道状态，真实完成才落 completed。
     if report.get("status") == "running" and report.get("pipeline_id"):
         await _maybe_finalize_on_pipeline_completion(report)
     return report
@@ -462,7 +457,7 @@ async def _cold_read_via_documents(review_id: str) -> dict[str, Any] | None:
 
 
 async def _maybe_finalize_on_pipeline_completion(report: dict[str, Any]) -> None:
-    """按复盘管道 state 聚合行终结报告状态（GAP-1 派发路径的轮询）。
+    """按复盘管道 state 聚合行终结报告状态（派发路径的轮询）。
 
     - 行 status=completed → 报告 completed（mode=pipeline，内容取 raw_result）
     - 行 status=failed → 报告 failed（诚实状态，不伪造完成）

@@ -10,7 +10,6 @@
 //! |------------|--------|------|
 //! | pipeline-executor | suspend | 挂起当前管道 |
 //! | pipeline-executor | resume | 恢复挂起的管道 |
-//! | pipeline-executor | start_run | 起一个新管道 |
 //! | event-bus | emit | 发事件/通知前端 |
 //! | metrics | record | 插件上报指标（record_metric，监控设计 §三 通道2） |
 //! | service-registry | <storage 域>.* | 插件访问内核共享基础设施（M2：execution-records/summaries/memory 存储，基础设施下沉内核） |
@@ -89,27 +88,10 @@ pub trait CapabilityRouter: Send + Sync {
     }
 }
 
-/// 解析 incoming message 的 capability + method。
-///
-/// sidecar 反向调用使用约定的 method 命名：`<capability>.<method>`
-/// （如 `pipeline-executor.resume`）。本函数拆分命名空间。
-///
-/// 使用编译期 [`STANDARD_CAPABILITIES`] 作为白名单。**新代码应优先使用
-/// [`parse_capability_method_with`]，它接受动态 namespace 列表，支持运行时
-/// 注册的能力（M2 注册表改造）**。本函数保留是为了向后兼容现有调用方，
-/// 内部委托给 `parse_capability_method_with(method, STANDARD_CAPABILITIES)`。
-///
-/// Returns:
-/// - Some((capability, method)): 解析成功
-/// - None: method 不含命名空间，非 capability 调用
-pub fn parse_capability_method(method: &str) -> Option<(&str, &str)> {
-    parse_capability_method_with(method, STANDARD_CAPABILITIES)
-}
-
 /// 解析 capability + method，白名单由调用方提供（动态 namespace）。
 ///
-/// 与 [`parse_capability_method`] 的区别：白名单不再是编译期常量，而是运行时
-/// 由调用方传入。这让 [`crate::handler_registry::CapabilityHandlerRegistry`]
+/// 白名单由调用方传入（动态 namespace），而非编译期常量。
+/// 这让 [`crate::handler_registry::CapabilityHandlerRegistry`]
 /// 里注册的任意 namespace 都能被识别为合法 capability 调用，新增能力不再
 /// 需要修改 `STANDARD_CAPABILITIES` 常量。
 ///
@@ -144,14 +126,14 @@ mod tests {
 
     #[test]
     fn test_parse_pipeline_executor_method() {
-        let (cap, method) = parse_capability_method("pipeline-executor.resume").unwrap();
+        let (cap, method) = parse_capability_method_with("pipeline-executor.resume", STANDARD_CAPABILITIES).unwrap();
         assert_eq!(cap, "pipeline-executor");
         assert_eq!(method, "resume");
     }
 
     #[test]
     fn test_parse_event_bus_method() {
-        let (cap, method) = parse_capability_method("event-bus.emit").unwrap();
+        let (cap, method) = parse_capability_method_with("event-bus.emit", STANDARD_CAPABILITIES).unwrap();
         assert_eq!(cap, "event-bus");
         assert_eq!(method, "emit");
     }
@@ -159,21 +141,21 @@ mod tests {
     #[test]
     fn test_reject_mcp_standard_methods() {
         // MCP 标准方法（含 /）不应被识别为 capability 调用
-        assert_eq!(parse_capability_method("notifications/initialized"), None);
-        assert_eq!(parse_capability_method("tools/list"), None);
-        assert_eq!(parse_capability_method("resources/read"), None);
+        assert_eq!(parse_capability_method_with("notifications/initialized", STANDARD_CAPABILITIES), None);
+        assert_eq!(parse_capability_method_with("tools/list", STANDARD_CAPABILITIES), None);
+        assert_eq!(parse_capability_method_with("resources/read", STANDARD_CAPABILITIES), None);
     }
 
     #[test]
     fn test_reject_initialize() {
         // initialize 是协议方法，非 capability
-        assert_eq!(parse_capability_method("initialize"), None);
+        assert_eq!(parse_capability_method_with("initialize", STANDARD_CAPABILITIES), None);
     }
 
     #[test]
     fn test_reject_unknown_capability() {
         // 不在标准清单里的命名空间
-        assert_eq!(parse_capability_method("unknown-capability.foo"), None);
+        assert_eq!(parse_capability_method_with("unknown-capability.foo", STANDARD_CAPABILITIES), None);
     }
 
     #[test]
@@ -199,14 +181,14 @@ mod tests {
     fn test_dead_capabilities_removed() {
         // W-A8+M：死能力删除后不得再被识别为合法 capability 调用
         // （logger 从未实现 method；config-reader 内核 handler 已删）。
-        assert_eq!(parse_capability_method("logger.log"), None);
-        assert_eq!(parse_capability_method("config-reader.get"), None);
+        assert_eq!(parse_capability_method_with("logger.log", STANDARD_CAPABILITIES), None);
+        assert_eq!(parse_capability_method_with("config-reader.get", STANDARD_CAPABILITIES), None);
     }
 
     #[test]
     fn test_parse_metrics_method() {
         // 监控设计 §三 通道2：metrics.record 反向调用
-        let (cap, method) = parse_capability_method("metrics.record").unwrap();
+        let (cap, method) = parse_capability_method_with("metrics.record", STANDARD_CAPABILITIES).unwrap();
         assert_eq!(cap, "metrics");
         assert_eq!(method, "record");
     }
@@ -216,7 +198,7 @@ mod tests {
         // tool-executor 是 SDK STANDARD_CAPABILITIES 之一，必须能被识别为 capability 调用。
         // 当前会失败：tool-executor 不在内核 STANDARD_CAPABILITIES 白名单，
         // parse_capability_method 第 77 行会返回 None，unwrap 触发 panic。
-        let (cap, method) = parse_capability_method("tool-executor.invoke").unwrap();
+        let (cap, method) = parse_capability_method_with("tool-executor.invoke", STANDARD_CAPABILITIES).unwrap();
         assert_eq!(cap, "tool-executor");
         assert_eq!(method, "invoke");
     }
