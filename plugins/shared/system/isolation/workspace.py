@@ -5,16 +5,24 @@
 - resolve_workspace()：统一解析任务的工作空间路径
 - resolve_workspace_chain()：递归解析任务工作空间（支持多层嵌套）
 - get_workspace_config_root()：从配置文件读取工作空间根目录
+- get_workspace_base_dir()：统一解析工作空间基目录（配置驱动，绝对路径）
+- find_project_root()：定位仓库根（不硬编码父目录层数）
 - validate_workspace_path()：工作空间路径安全性校验（任务/会话共用）
 """
 
 import logging
 import os
+import re
 from pathlib import Path
+
+import yaml
 
 logger = logging.getLogger(__name__)
 
 _DEFAULT_WORKSPACE_ROOT = ".ai_workspaces"
+
+# Windows 盘符绝对路径（Linux 上 Path.is_absolute() 不认盘符，需正则兜底）
+_WIN_ABS_PATH = re.compile(r"^[a-zA-Z]:[/\\]")
 
 # ── 危险目标空间目录列表 ──
 # 这些目录是操作系统关键目录，绝不允许作为任务/会话的目标工作空间。
@@ -102,26 +110,117 @@ def validate_workspace_path(workspace: str) -> str | None:  # noqa: PLR0911
     return None
 
 
+def _isolation_config_path() -> Path:
+    """定位 isolation_config.yaml（仓库根 config/isolation/ 下）。
+
+    优先 AGENTOS_CONFIG_ROOT（内核启动时写入 <project_root>/config 并发布到进程
+    环境，sidecar 继承，部署布局无关）；回退从本文件向上查找含
+    config/isolation/isolation_config.yaml 的祖先目录（不硬编码父目录层数）。
+    旧链 config.config_center 在 0.2 sidecar venv 不存在（P1-7 延后 P6，
+    见 docs/working/p1_7_config_center_migration_checklist.md #7）——直读永远
+    失败、get_workspace_config_root() 恒返回缺省 .ai_workspaces，配置
+    workspace.root 完全不生效（2026-08-24 工作空间基目录偏差根因）。
+    """
+    env_root = os.environ.get("AGENTOS_CONFIG_ROOT")
+    if env_root:
+        p = Path(env_root) / "isolation" / "isolation_config.yaml"
+        if p.exists():
+            return p
+    for ancestor in Path(__file__).resolve().parents:
+        candidate = ancestor / "config" / "isolation" / "isolation_config.yaml"
+        if candidate.exists():
+            return candidate
+    # 找不到时保持旧行为：返回推导路径（加载失败走缺省 .ai_workspaces，不 panic）
+    return Path(__file__).resolve().parent.parent.parent / "config" / "isolation" / "isolation_config.yaml"
+
+
 def _load_isolation_config() -> dict:
-    """通过 ConfigCenter 读取 isolation 配置（统一缓存）。"""
+    """读取 isolation 配置。
+
+    优先 ConfigCenter（统一缓存）；config_center 不可用时（P1-7 迁移前，
+    sidecar venv 无 config 包）文件回退直读 isolation_config.yaml，避免
+    配置空载导致 workspace.root 恒走缺省。
+    """
     try:
         from config.config_center import get_config_center  # noqa: PLC0415
         # P1-7 DEBT(task_11): 🔴 高危——workspace 隔离配置直读，迁移前提同 manager #2。
         # 见 docs/working/p1_7_config_center_migration_checklist.md #7，延后 P6。
 
-        return get_config_center().get("isolation/isolation_config.yaml") or {}
+        config = get_config_center().get("isolation/isolation_config.yaml") or {}
+        if config:
+            return config
     except Exception as e:
-        logger.warning(f"读取 isolation 配置失败 | error={e}")
-        return {}
+        logger.warning(f"读取 isolation 配置失败（config_center）| error={e}")
+    # 文件回退：config_center 不可用或返回空时直读磁盘真身配置
+    try:
+        path = _isolation_config_path()
+        with open(path, encoding="utf-8") as f:
+            data = yaml.safe_load(f) or {}
+        if data:
+            logger.warning(f"隔离配置经文件回退加载: {path}")
+            return data
+    except Exception as e:
+        logger.warning(f"读取 isolation 配置失败（文件回退）| error={e}")
+    return {}
 
 
 def get_workspace_config_root() -> str:
-    """从配置文件读取工作空间根目录，读取失败则返回默认值"""
+    """从配置文件读取工作空间根目录，读取失败则返回默认值
+
+    语义（对齐 _workspace_git_ops._get_workspace_root 与 0.1 契约）：返回的
+    workspace.root 是**基目录**——支持绝对路径（如 D:/myproject）与相对路径
+    （**相对项目根**，如 .ai_workspaces），不是项目根下的子目录名本身。
+    调用方（resolve_workspace / validate_workspace_path / _task_cleanup）以
+    字符串使用：绝对路径原样使用，相对路径需自行拼项目根（服务层经
+    get_workspace_base_dir() 统一完成）。读取失败返回缺省 ".ai_workspaces"
+    （配置缺失时的默认**相对**值，与历史行为一致）。
+    """
     config = _load_isolation_config()
     root = config.get("workspace", {}).get("root")
     if root:
         return str(root)
     return _DEFAULT_WORKSPACE_ROOT
+
+
+def find_project_root() -> Path:
+    """定位仓库根（config/isolation/ 所在祖先目录），不硬编码父目录层数。
+
+    对齐 policy._default_policy_path 的祖先查找模式：AGENTOS_CONFIG_ROOT 优先
+    （内核启动时把它发布到进程环境，指向 <project_root>/config——其父目录即
+    项目根）；回退从本文件向上找含 config/isolation/ 的祖先目录。找不到时
+    回退从本文件按旧 parents[3] 推导（调用方缺省兜底，不 panic）。
+    """
+    env_root = os.environ.get("AGENTOS_CONFIG_ROOT")
+    if env_root:
+        p = Path(env_root)
+        if (p / "isolation" / "isolation_config.yaml").is_file():
+            return p.parent
+    for ancestor in Path(__file__).resolve().parents:
+        if (ancestor / "config" / "isolation").is_dir():
+            return ancestor
+    return Path(__file__).resolve().parents[3]
+
+
+def get_workspace_base_dir() -> Path:
+    """统一解析工作空间基目录（配置驱动，返回绝对路径）。
+
+    所有工作空间（worktree/container/plain 占位）的父目录。语义：
+    - workspace.root 为**绝对路径** → 原样使用（如 "D:/myproject"）；
+    - 相对路径 → 相对**项目根**（find_project_root()，不是 cwd——sidecar 的
+      cwd 是插件目录，拼 cwd 会把工作空间建错位置）解析，缺省
+      ".ai_workspaces" 即项目根下隐藏目录。
+
+    服务层（_workspace_git_ops._get_workspace_root）与插件降级路径
+    （workspace_lifecycle/plugin.py）统一走本函数，杜绝各自硬编码推导。
+    """
+    config = _load_isolation_config()
+    raw = config.get("workspace", {}).get("root") or _DEFAULT_WORKSPACE_ROOT
+    raw_str = str(raw).strip()
+    if not raw_str:
+        raw_str = _DEFAULT_WORKSPACE_ROOT
+    if _WIN_ABS_PATH.match(raw_str) or Path(raw_str).is_absolute():
+        return Path(os.path.normpath(raw_str))
+    return Path(os.path.normpath(str(find_project_root() / raw_str)))
 
 
 def get_isolation_level() -> str:

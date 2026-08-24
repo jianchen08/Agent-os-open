@@ -111,18 +111,27 @@ class _GitOpsMixin:
         不是 cwd——sidecar 的 cwd 是插件目录，拼 cwd 会把工作空间建错位置）。
         返回的是所有工作空间（worktree/container）的父目录。
         例如配置 root: "D:/myproject" 则返回 Path("D:/myproject")。
-        """
-        from isolation.workspace import _DEFAULT_WORKSPACE_ROOT  # noqa: PLC0415
 
-        raw = self._config.get("workspace", {}).get("root", _DEFAULT_WORKSPACE_ROOT)
-        if self._WIN_ABS_PATH.match(raw):
-            return Path(raw)
-        p = Path(raw)
-        if not p.is_absolute():
-            # 相对路径基于 base_path（项目根），不能拼 cwd——sidecar cwd 是插件目录
-            base = getattr(self, "_base_path", None) or Path.cwd()
-            p = Path(base) / p
-        return p.resolve()
+        统一走 isolation.workspace.get_workspace_base_dir()（配置驱动：先
+        config_center 后文件回退；根目录经 find_project_root 祖先查找，不
+        硬编码）。唯一例外：调用方显式注入的 self._config.workspace.root
+        优先（内核 plugin.get_config() 注入链，2026-08-24 收口后仅测试
+        直构 manager 传 config 走此分支）。
+        """
+        injected = self._config.get("workspace", {}).get("root")
+        if injected:
+            if self._WIN_ABS_PATH.match(str(injected)):
+                return Path(str(injected))
+            p = Path(str(injected))
+            if not p.is_absolute():
+                # 相对路径基于 base_path（项目根），不能拼 cwd——sidecar cwd 是插件目录
+                base = getattr(self, "_base_path", None) or Path.cwd()
+                p = Path(base) / p
+            return p.resolve()
+
+        from isolation.workspace import get_workspace_base_dir  # noqa: PLC0415
+
+        return Path(get_workspace_base_dir())
 
     def _run_git(self, *args: str, cwd: Path, timeout: int = _GIT_TIMEOUT) -> tuple[int, str, str]:
         """执行 git 命令（同步，使用 subprocess）"""

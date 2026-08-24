@@ -97,7 +97,7 @@ async def test_workspace_init_no_context_noop(plugins):
 
 
 @pytest.mark.asyncio
-async def test_workspace_init_no_explicit_ws_degrades_to_plain(plugins, monkeypatch):
+async def test_workspace_init_no_explicit_ws_degrades_to_plain(plugins, monkeypatch, tmp_path):
     """init 降级（服务不可用）：无显式 workspace 时 ws_meta 不得标 worktree。
 
     对齐服务层矫正（_start_root_task：无显式 workspace → 强制 plain 目录）——
@@ -105,11 +105,21 @@ async def test_workspace_init_no_explicit_ws_degrades_to_plain(plugins, monkeypa
     却 worktree 模式"的虚假标记（exit 会据此尝试 merge）。
 
     2026-08-24 修正：source_path 已被解析为项目根（worktree 的源）——降级时
-    workspace 必须回退「工作区根/{task_id}」（.ai_workspaces/ 下），不得把
+    workspace 必须回退「工作区根/{task_id}」（配置驱动基目录下），不得把
     项目根直接当 workspace（任务会在项目根上直接读写）。
+
+    2026-08-24 收口：基目录解析统一走 get_workspace_base_dir()（配置驱动）——
+    真身配置可把基目录配到项目外（本仓现配 D:/myproject），断言只依赖解析
+    函数，测试内确定性覆盖其返回值。
     """
+    import tests._isolation_path  # noqa: F401  （system/isolation 目录入 sys.path）
+    import isolation.workspace as ws_mod
+
     ws = plugins["ws"]
     monkeypatch.setattr(ws, "_get_manager", lambda base_path_hint=None: None)
+    # 确定性覆盖基目录解析（真身配置可能把基目录配到项目外），断言只依赖解析函数
+    frozen_base = tmp_path / "ws_base"
+    monkeypatch.setattr(ws_mod, "get_workspace_base_dir", lambda: frozen_base)
     result = await ws.execute(
         plugins["ctx_factory"](
             {
@@ -123,14 +133,13 @@ async def test_workspace_init_no_explicit_ws_degrades_to_plain(plugins, monkeypa
     )
     updates = result.state_updates
     assert updates["ws_meta"]["mode"] == "plain", "无显式 workspace 不得标 worktree"
-    # plugin.py 里 _root = Path(__file__).resolve().parents[5]；测试侧等价：
-    # _WORKSPACE_DIR 是目录（差一层），parents[4] = 项目根
-    project_root = Path(_WORKSPACE_DIR).resolve().parents[4]
     ws_path = Path(updates["ws_meta"]["path"])
-    assert str(ws_path).endswith(
-        str(project_root / ".ai_workspaces" / "task_degrade_1")
-    ), f"降级 workspace 应为 .ai_workspaces 下占位目录，实际: {ws_path}"
-    assert not str(ws_path).endswith(str(project_root)), "不得把项目根直接当 workspace"
+    assert ws_path == frozen_base / "task_degrade_1", (
+        f"降级 workspace 应为配置基目录下占位目录，实际: {ws_path}"
+    )
+    assert not str(ws_path).endswith(str(Path(__file__).resolve().parent.parent)), (
+        "不得把项目根直接当 workspace"
+    )
 
 
 @pytest.mark.asyncio
@@ -164,6 +173,23 @@ async def test_workspace_exit_finalizes(plugins):
     )
     # 无 task_id + ws_meta.mode != worktree → 无产出（主会话/plain 空间不合并）
     assert result.state_updates == {}
+
+
+def test_workspace_degrade_path_no_parents_derivation(plugins):
+    """降级路径源码不含 parents[N] 硬编码推导（2026-08-24 收口）。
+
+    项目根必须由配置驱动的 find_project_root/get_workspace_base_dir 提供——
+    parents[5] 式推导在插件目录深度变化（部署布局迁移）时静默错位。
+    只允许 _ensure_isolation_path 的 parents[2]（定位 isolation 插件目录，
+    非项目根推导）。
+    """
+    src = Path(plugins["ws_mod"].__file__).read_text(encoding="utf-8")
+    # parents[5]（旧项目根推导）与 parents[4]+ 的 Path(...).resolve().parents 用法禁止
+    assert "parents[5]" not in src, "降级路径不得用 parents[5] 推导项目根"
+    assert "parents[4]" not in src
+    assert "parents[3]" not in src
+    # 项目根只允许经 find_project_root（祖先查找）获得
+    assert "find_project_root" in src
 
 
 @pytest.mark.asyncio

@@ -181,12 +181,13 @@ class WorkspaceLifecyclePlugin(IInputPlugin):
             return self._manager
         try:
             _ensure_isolation_path()
+            from isolation.workspace import find_project_root  # noqa: PLC0415
             from isolation.workspace_lifecycle import WorkspaceLifecycleManager  # noqa: PLC0415
 
             base_path = (
                 base_path_hint
                 or self._config.get("base_path")
-                or str(Path(__file__).resolve().parents[5])
+                or str(find_project_root())
             )
             manager = WorkspaceLifecycleManager(
                 resource_merge=None,
@@ -270,17 +271,18 @@ class WorkspaceLifecyclePlugin(IInputPlugin):
             # 执行的工作空间（容器挂载与 bash 执行均以此为锚）。
             try:
                 _ensure_isolation_path()
-                from isolation.workspace import get_workspace_config_root  # noqa: PLC0415
+                from isolation.workspace import (  # noqa: PLC0415
+                    find_project_root,
+                    get_workspace_base_dir,
+                )
 
-                # 项目根（sidecar cwd 是插件目录，只能从插件文件推导）
-                _root = Path(__file__).resolve().parents[5]
                 if mode == "worktree":
                     # worktree 拓扑：workspace 参数是**源项目**（服务自动在
                     # 工作区根下建隔离副本）；以项目根为源。
-                    source_path = str(_root)
+                    source_path = str(find_project_root())
                 else:
                     # plain 拓扑：直接在「工作区根/{task_id}」目录操作（默认隔离）
-                    source_path = str(_root / get_workspace_config_root() / task_id)
+                    source_path = str(get_workspace_base_dir() / task_id)
                 logger.info(
                     "[WorkspaceLifecycle] 无显式 workspace，按默认根创建 | task=%s | mode=%s | path=%s",
                     task_id,
@@ -350,10 +352,10 @@ class WorkspaceLifecyclePlugin(IInputPlugin):
             if mode == "worktree":
                 try:
                     _ensure_isolation_path()
-                    from isolation.workspace import get_workspace_config_root  # noqa: PLC0415
+                    from isolation.workspace import get_workspace_base_dir  # noqa: PLC0415
 
-                    _root = Path(__file__).resolve().parents[5]
-                    _effective_path = str(_root / get_workspace_config_root() / task_id)
+                    # 统一基目录解析（配置驱动：绝对路径原样，相对路径相对项目根）
+                    _effective_path = str(get_workspace_base_dir() / task_id)
                 except Exception as _exc:  # noqa: BLE001
                     # 配置读取失败：沿用 source_path（项目根）已是最坏兜底
                     logger.warning(

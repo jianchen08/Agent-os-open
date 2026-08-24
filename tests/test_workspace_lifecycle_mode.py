@@ -231,3 +231,35 @@ def test_root_task_no_explicit_ws_non_git_root_degrades_to_plain(manager_cls, tm
     assert meta["mode"] == "plain"
     assert meta["path"] == str(project_root / ".ai_workspaces" / "task_non_git_root")
     assert not (project_root / "task_non_git_root").exists(), "不得在项目根下建目录"
+
+
+# ── 2026-08-24 收口：_get_workspace_root 统一走配置驱动解析 ──
+
+def test_get_workspace_root_delegates_to_unified_resolver(manager_cls, monkeypatch, tmp_path):
+    """未注入 root 时 _get_workspace_root 委托统一解析函数（配置驱动，不硬编码）。"""
+    import tests._isolation_path  # noqa: F401  （system/isolation 目录入 sys.path）
+    import isolation.workspace as ws_mod
+
+    # 无注入配置 → 走统一 get_workspace_base_dir；monkeypatch 其返回值断言被消费
+    manager = make_manager(manager_cls, config={}, base_path=str(tmp_path))
+    frozen = tmp_path / "frozen_base"
+    monkeypatch.setattr(ws_mod, "get_workspace_base_dir", lambda: str(frozen))
+    assert manager._get_workspace_root() == frozen.resolve()
+
+
+def test_get_workspace_root_injected_config_wins(manager_cls, tmp_path):
+    """显式注入 self._config.workspace.root 优先（内核 plugin.get_config 注入链）。"""
+    base = tmp_path / "project"
+    manager = make_manager(
+        manager_cls,
+        config={"workspace": {"root": "my_ws"}},
+        base_path=str(base),
+    )
+    assert manager._get_workspace_root() == (base / "my_ws").resolve()
+
+    manager_abs = make_manager(
+        manager_cls,
+        config={"workspace": {"root": "D:/injected/abs"}},
+        base_path=str(base),
+    )
+    assert manager_abs._get_workspace_root() == Path("D:/injected/abs").resolve()
