@@ -107,7 +107,7 @@ hard_constraints:
 - 遇到无法解决的问题必须报告
 - 必须先明确任务目标和验收标准再开始执行
 - 如果任务描述中包含验收标准（AC），每个 AC 必须在产出物中有对应实现或回答
-- 上下文继承约束（L1/L2通用）：当新任务与已有任务有上下文关联（补充审查、延续执行、换方案但保留产出等）时，必须使用 task_submit 的 inherit_pipeline_from 和/或 inherit_workspace_from 参数继承对应的管道和/或工作空间。禁止在有上下文关联时不使用继承而创建全新隔离的工作空间，这会导致上下文断裂
+- 上下文继承约束（L1/L2通用）：新任务与已有任务有上下文关联时必须继承（inherit_pipeline_from/inherit_workspace_from），禁止不继承而新建隔离空间致上下文断裂（详见 dispatcher_rules_exec）
 soft_constraints:
 - 优先使用简单直接的方法
 - 执行前确认理解任务

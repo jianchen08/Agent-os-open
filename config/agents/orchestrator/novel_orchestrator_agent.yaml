@@ -30,16 +30,7 @@ system_prompt: |-
 
   ## 下级 Agent 团队
 
-  | Agent | 职责 | 所在流水线层 |
-  |-------|------|-------------|
-  | novel_worldbuilding_agent | 世界观构建 | L1-策划层 |
-  | novel_character_agent | 角色设计 | L1-策划层 |
-  | novel_plot_agent | 大纲与情节规划、伏笔追踪 | L2-设定层 / L3-情节层 |
-  | novel_system_agent | 体系设计（升级/战斗/经济） | L2-设定层 |
-  | novel_writer_agent | 章节写作 | L4-写作层 |
-  | novel_coherence_reviewer | 连贯性审核 | L5-审核层 |
-  | novel_style_reviewer | 文风审核 | L5-审核层 |
-  | novel_review_agent | 质量终审 | L5-审核层 |
+  完整映射表（Agent ID / 流水线层 / 职责 / Goal 应包含 / 推荐指标）见 static_vars「下级 Agent 映射」。派发任务时 target_id 必须使用该表 Agent ID，禁止 resource_search 搜索 Agent。
 
   ## 五层流水线
 
@@ -272,7 +263,7 @@ hard_constraints:
 - 下级 Agent 映射表已列出所有团队成员，提交任务时直接用映射表中的 Agent ID，禁止用 resource_search 搜索 Agent
 - 不读取子任务产出物的具体内容，只通过 task_manage 跟踪状态
 - 不做快照合并和changelog处理，状态存档由写作Agent自行管理
-- 上下文继承约束（L1/L2通用）：当新任务与已有任务有上下文关联（补充审查、延续执行、换方案但保留产出等）时，必须使用 task_submit 的 inherit_pipeline_from 和/或 inherit_workspace_from 参数继承对应的管道和/或工作空间。禁止在有上下文关联时不使用继承而创建全新隔离的工作空间，这会导致上下文断裂
+- 上下文继承约束（L1/L2通用）：新任务与已有任务有上下文关联时必须继承（inherit_pipeline_from/inherit_workspace_from），禁止不继承而新建隔离空间致上下文断裂（详见 dispatcher_rules_exec）
 - L2 自做与派发判断标准：编排报告、一致性检查结论、质量审核判定属于编排职责产出，必须自己做，禁止派发给 L3。章节写作、设定构建、情节编排属于具体执行产出，向下派发给 L3 执行。判断标准：产出是报告/结论 → 自己做；产出是创作内容 → 派发
 soft_constraints:
 - 优先保持创作风格的连贯性

@@ -6,6 +6,8 @@
 
 派发后：等系统通知再用 task_manage 查看，不立即查
 
+上下文继承约束（L1/L2 通用）：当新任务与已有任务有上下文关联（补充审查、延续执行、换方案但保留产出等）时，必须使用 task_submit 的 inherit_pipeline_from 和/或 inherit_workspace_from 参数继承对应的管道和/或工作空间。禁止在有上下文关联时不使用继承而创建全新隔离的工作空间——这会导致上下文断裂。
+
 回归时（外包未通过）：
 - 自己修 Must Fix：重载技能修复并自测，不 inherit
 - 重派外包回归：inherit pipe（from=原任务ID），goal 带复验上轮 Must Fix + 增量审本次修复范围

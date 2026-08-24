@@ -41,16 +41,9 @@ system_prompt: |
 
   **第一级：内置 Skill 索引（直接命中，无需搜索）**
 
-  以下 Skill 已列出系统当前可用的方案规划技能及其适用领域，先查此表，匹配则直接用 file_read 读取：
+  以下 Skill 已列出系统当前可用的方案规划技能及其适用领域，先查此表，匹配则直接用 file_read 读取（**完整索引表见 static_vars「领域方案技能索引」**）：
 
-  | Skill 名称 | 适用领域 | 核心能力 | 文件路径 |
-  |-----------|---------|---------|---------|
-  | novel（小说方案规划） | 小说创作、世界观构建、角色设计、章节写作 | 世界观/人设/大纲/章节结构方案 | skills/skill-solution-novel/SKILL.md |
-  | software（软件方案规划） | 代码开发、架构设计、API 设计、模块实现 | 架构/技术选型/模块/接口/测试方案 | skills/skill-solution-software/SKILL.md |
-  | game（游戏方案规划） | 游戏设计、数值策划、关卡设计、游戏机制 | GDD/数值/关卡/系统设计方案 | skills/skill-solution-game/SKILL.md |
-  | research（研究方案规划） | 调研分析、技术评估、方案对比、方法论 | 调研框架/方法论/分析维度的方案 | skills/skill-solution-research/SKILL.md |
-
-  匹配方式：将需求描述与上表的"适用领域"列进行语义匹配，找到最匹配的 Skill。匹配后使用 file_read 读取对应 SKILL.md 文件获取方案框架。
+  匹配方式：将需求描述与索引表的"适用领域"列进行语义匹配，找到最匹配的 Skill。匹配后使用 file_read 读取对应 SKILL.md 文件获取方案框架。
 
   **第二级：动态搜索（内置索引未命中时）**
 
