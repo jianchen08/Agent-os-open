@@ -27,14 +27,18 @@ plugin = AgentOSPlugin("task_evaluate_tool")
 
 @plugin.on_load
 async def _on_load(_params: dict[str, Any]) -> None:
-    """sidecar 启动：注入 state 聚合读取器 + 任务状态写面（GAP-1 统一）。
+    """sidecar 启动：注入 state 读写面 + 评估执行器（GAP-1 统一 + 批次B）。
 
     读：评估输入从 state 读（pipeline-state.list）。
     写：评估终态（task.status/task.ended_at）经 pipeline-state.update 落
     state 单一真值——2026-08-24 职责边界裁定：任务状态由任务域插件裁决，
     内核只管管道运行域（run 终态只广播事件，不再回写 task.status）。
+    执行器：PipelineEvaluationExecutor（0.2 生产版——tool 型本地跑，agent 型
+    派评估子管道继承任务工作区，R2）。能力句柄懒解析（协程内 get_capability），
+    on_load 早于 capability 注入完成也能在真正派发时拿到。
     """
     import tool as tool_mod  # noqa: PLC0415
+    from _executor import PipelineEvaluationExecutor  # noqa: PLC0415
 
     async def _read_state_rows() -> list[dict[str, Any]]:
         handle = plugin.get_capability("pipeline-state")
@@ -45,8 +49,17 @@ async def _on_load(_params: dict[str, Any]) -> None:
         handle = plugin.get_capability("pipeline-state")
         await handle.call("update", {"pipeline_id": pipeline_id, "fields": fields})
 
+    async def _chat_send(params: dict[str, Any]) -> dict[str, Any]:
+        handle = plugin.get_capability("chat")
+        return await handle.call("send_message", params)
+
     tool_mod.set_state_reader(_read_state_rows)
     tool_mod.set_state_writer(_write_task_state)
+    _executor_singleton = PipelineEvaluationExecutor(
+        chat_send=_chat_send,
+        state_rows=_read_state_rows,
+    )
+    tool_mod.set_default_executor(_executor_singleton)
 
 
 @plugin.tool(
@@ -79,6 +92,7 @@ async def _on_load(_params: dict[str, Any]) -> None:
 async def task_evaluate(**kwargs):
     """任务评估。"""
     from tool import TaskEvaluateTool  # noqa: PLC0415
+
     tool = TaskEvaluateTool()
     result = await tool.execute(kwargs)
     if result.success:

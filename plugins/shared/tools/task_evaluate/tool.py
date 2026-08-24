@@ -74,6 +74,19 @@ def _get_state_writer() -> Any:
     return _state_writer
 
 
+# ── 批次B（2026-08-24）：默认评估执行器（server.py on_load 装配）──
+# PipelineEvaluationExecutor（_executor.py）：tool 型本地跑，agent 型派评估
+# 子管道继承任务工作区。构造参数 ``executor=...`` 显式注入优先（测试），缺省
+# 回退本注入点；两处皆无 → EVAL_ENGINE_UNAVAILABLE（文档化降级，不静默空转）。
+_default_executor: Any = None
+
+
+def set_default_executor(executor: Any) -> None:
+    """注入默认评估执行器（server.py on_load 装配 _executor.PipelineEvaluationExecutor）。"""
+    global _default_executor  # noqa: PLW0603
+    _default_executor = executor
+
+
 def _now_iso() -> str:
     """当前 UTC 时间 ISO 串（task.ended_at 落 state 用，与内核 chrono 同格式）。"""
     return datetime.now(UTC).isoformat()
@@ -1100,20 +1113,20 @@ class TaskEvaluateTool(BuiltinTool):
         return get_task_service()
 
     def _create_executor(self, task_service: Any) -> Any:
-        """获取评估执行器（0.2 注入版，duck-typing）。
+        """获取评估执行器（显式构造注入优先，回退 server 装配的默认执行器）。
 
-        0.1 的 evaluation.executor.EvaluationExecutor 完整实现未迁移（src/ 已归档，
-        其依赖 0.1 评估引擎/指标加载器）；0.2 执行器由外部注入（宿主/测试），
-        经构造参数 ``executor=...`` 传入。未注入返回 None → 调用方返回
-        EVAL_ENGINE_UNAVAILABLE（文档化降级，不静默空转）。
+        0.2 生产执行器 = _executor.PipelineEvaluationExecutor（server.py on_load
+        经 set_default_executor 装配）：tool 型指标本地执行，agent 型指标派
+        评估子管道（R2：继承被评估任务的 workspace/执行环境）。两处皆未注入
+        返回 None → 调用方返回 EVAL_ENGINE_UNAVAILABLE（文档化降级，不静默空转）。
 
         Args:
-            task_service: TaskService 实例（0.2 执行器自管理，仅保留签名兼容）
+            task_service: TaskService 实例（签名兼容保留，执行器不再消费）
 
         Returns:
-            注入的评估执行器；未注入返回 None
+            评估执行器；未注入返回 None
         """
-        return self._executor
+        return self._executor or _default_executor
 
     @staticmethod
     def _all_metrics_passed(task: Any, metric_ids: list[str]) -> bool:

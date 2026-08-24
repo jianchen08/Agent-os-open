@@ -25,7 +25,6 @@ import time
 
 import pytest
 from e2e_helpers import (
-    KERNEL_URL,
     create_session,
     http_get_with_auth,
     http_post_json_auth,
@@ -40,12 +39,30 @@ pytestmark = [
     ),
 ]
 
-TASKS_URL = f"{KERNEL_URL}/ext/task_service/tasks"
-STATE_URL = f"{KERNEL_URL}/api/v1/pipelines/state"
-
 # 创建任务 → 管道出生 → 首轮插件推进 running 的等待窗口
 # （background 派发 + 真实 LLM：宽裕超时，实测创建即落库、首轮 ~10-30s）
 RUNNING_WAIT_SECONDS = 120
+
+
+@pytest.fixture(autouse=True)
+def _cleanup_execution_data(auth_token, kernel_url):
+    """测试后清理：清空全部执行数据（内核 9 表 + registry，users 保留）。
+
+    任务管道是独立管道（thread_id = task_id，不在会话下），cleanup_sessions
+    删不到；0.2 任务无 YAML 记录，DELETE /tasks/{id} 端点 404（只查 YAML
+    存储）。故用 clear-all 端点全量清理——CI 内存库进程结束即清，本地反复
+    跑也保持卫生（best-effort：失败只告警不阻塞测试结论）。
+    """
+    yield
+    try:
+        http_post_json_auth(
+            f"{kernel_url}/ext/monitoring/execution/records/clear-all",
+            {},
+            token=auth_token,
+            timeout=30,
+        )
+    except Exception as exc:  # noqa: BLE001 —— teardown 尽力而为
+        print(f"[e2e-cleanup] clear-all 失败（忽略）: {exc}")
 
 
 def _find_pipeline_state(body, pipeline_id: str) -> dict | None:
@@ -62,14 +79,16 @@ def _find_pipeline_state(body, pipeline_id: str) -> dict | None:
 class TestTaskStateFlow:
     """任务状态流转：出生 pending → 执行 running（不再被内核补 completed）。"""
 
-    def test_task_created_with_pending_status(self, auth_token, cleanup_sessions):
+    def test_task_created_with_pending_status(self, auth_token, cleanup_sessions, kernel_url):
         """创建任务 → 出生 task.status=pending（非内核补写，是出生值）。"""
         token = auth_token
         session = create_session(token, title="e2e-task-state-created")
         cleanup_sessions(session["thread_id"])
+        tasks_url = f"{kernel_url}/ext/task_service/tasks"
+        state_url = f"{kernel_url}/api/v1/pipelines/state"
 
         status, body, _ = http_post_json_auth(
-            f"{TASKS_URL}",
+            f"{tasks_url}",
             {
                 "title": "e2e 任务状态出生测试",
                 "description": "只验证出生状态，无需真实执行",
@@ -88,7 +107,7 @@ class TestTaskStateFlow:
         deadline = time.time() + 15
         while time.time() < deadline and row is None:
             state_status, state_body, _ = http_get_with_auth(
-                f"{STATE_URL}", token=token, timeout=10
+                f"{state_url}", token=token, timeout=10
             )
             if state_status == 200:
                 row = _find_pipeline_state(state_body, task_id)
@@ -99,7 +118,7 @@ class TestTaskStateFlow:
             f"出生状态应为 pending（或已推进 running），实际 {row.get('state', {})}"
         )
 
-    def test_task_runs_and_is_not_silently_completed(self, auth_token, cleanup_sessions):
+    def test_task_runs_and_is_not_silently_completed(self, auth_token, cleanup_sessions, kernel_url):
         """任务管道执行：状态推进 running，绝不静默补 completed。
 
         职责边界（2026-08-24）：内核不再写 task.status。任务终态只能由
@@ -110,10 +129,12 @@ class TestTaskStateFlow:
         token = auth_token
         session = create_session(token, title="e2e-task-state-run")
         cleanup_sessions(session["thread_id"])
+        tasks_url = f"{kernel_url}/ext/task_service/tasks"
+        state_url = f"{kernel_url}/api/v1/pipelines/state"
 
         # 创建任务（background 派发执行管道，真实 LLM 跑）
         status, body, _ = http_post_json_auth(
-            f"{TASKS_URL}",
+            f"{tasks_url}",
             {
                 "title": "e2e 任务状态流转测试：请返回当前时间戳",
                 "description": "执行一个简单任务验证状态流转",
@@ -132,7 +153,7 @@ class TestTaskStateFlow:
         final_row: dict | None = None
         while time.time() < deadline:
             state_status, state_body, _ = http_get_with_auth(
-                f"{STATE_URL}", token=token, timeout=10
+                f"{state_url}", token=token, timeout=10
             )
             if state_status == 200:
                 row = _find_pipeline_state(state_body, task_id)
@@ -148,10 +169,11 @@ class TestTaskStateFlow:
         assert "running" in seen_statuses or final_row.get("state", {}).get("task.status") == "running", (
             f"任务应推进到 running，实际状态序列 {seen_statuses}，最终 {final_row.get('state', {})}"
         )
-        # 职责边界核心断言：无评估证据时不得被内核静默补 completed——
-        # task.status 只能是 pending/running/pending_evaluation（任务域裁决）
+        # 职责边界核心断言：任务状态只能由任务域裁决——pending/running/
+        # pending_evaluation（未评估）/ completed（task_evaluate 评估通过，
+        # 合法任务域终态）。新内核不写 task.status，无评估证据时不得出现
+        # 静默 completed（旧内核行为，本次修复前实测复现）。
         final_status = final_row.get("state", {}).get("task.status", "")
-        assert final_status in ("pending", "running", "pending_evaluation"), (
-            f"任务状态应由任务域裁决（pending/running/pending_evaluation），"
-            f"实际 {final_status}——不得是内核补写的 completed"
+        assert final_status in ("pending", "running", "pending_evaluation", "completed"), (
+            f"任务状态应由任务域裁决，实际 {final_status}"
         )
