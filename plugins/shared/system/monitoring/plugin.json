@@ -304,11 +304,11 @@
       "route_id": "mon_execution_records_clear_all",
       "method": "POST",
       "path": "/ext/monitoring/execution/records/clear-all",
-      "auth": "user",
+      "auth": "admin",
       "handler_capability": "http.handle",
       "timeout_ms": 10000,
       "max_concurrency": 2,
-      "description": "execution 域：清理所有执行记录（读面无清理，成功形态由前端消费）"
+      "description": "execution 域：清空全部执行记录与轨迹（内核 9 表+registry+payload_diag 快照，users 保留；运行中管道 409；实际 admin 鉴权在 db-admin.clear_execution_data 内核侧执行）"
     },
     {
       "route_id": "mon_sessions_total_token_usage",
