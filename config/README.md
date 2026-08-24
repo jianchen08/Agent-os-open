@@ -10,7 +10,6 @@ config/
 ├── agents/                      # Agent 配置 (按层级分类)
 │   ├── main/                   # L1 主 Agent
 │   │   ├── agentos.yaml         # 灵汐主Agent (已优化)
-│   │   └── main_agent.yaml     # 主控Agent
 │   ├── orchestrator/               # L2 编排 Agent
 │   │   ├── general_agent.yaml            # 通用任务编排
 │   │   ├── solution_planning_agent.yaml   # 方案规划
