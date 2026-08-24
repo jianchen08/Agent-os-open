@@ -210,18 +210,22 @@ class TestTaskEvaluateValidation:
 class TestTaskEvaluateFlow:
     """未声明指标自动完成 / 全通过完成 / 失败重试 / 指标未找到。"""
 
-    def _inject(self, mod, monkeypatch, task: MagicMock, executor: Any) -> tuple[Any, MagicMock]:
+    def _inject(self, mod, monkeypatch, task: MagicMock, executor: Any) -> tuple[Any, MagicMock, Any]:
         service = _make_service(task=task)
         monkeypatch.setattr(mod.TaskEvaluateTool, "_get_task_service", lambda self: service)
         monkeypatch.setattr(mod, "_get_service_provider", _no_provider)
+        # 职责边界（2026-08-24）：评估终态经 pipeline-state.update 写 state——
+        # 测试注入写面记录调用，断言评估完成时任务状态落 state。
+        state_writer = AsyncMock()
+        monkeypatch.setattr(mod, "_state_writer", state_writer)
         tool = mod.TaskEvaluateTool(executor=executor)
-        return tool, service
+        return tool, service, state_writer
 
     @pytest.mark.asyncio
     async def test_no_metrics_auto_completes(self, mod, monkeypatch):
         """任务未声明评估指标 → 自动通过并完成（不误报）。"""
         task = _make_task()
-        tool, service = self._inject(mod, monkeypatch, task, executor=None)
+        tool, service, state_writer = self._inject(mod, monkeypatch, task, executor=None)
         result = await tool.execute({"action": "auto_complete", "task_id": task.id})
         assert result.success is True
         assert result.output["overall_passed"] is True
@@ -229,6 +233,11 @@ class TestTaskEvaluateFlow:
         # 完成时以 passed=True 回写任务状态
         assert service.complete_evaluation.await_count == 1
         assert service.complete_evaluation.await_args.kwargs["passed"] is True
+        # 职责边界（2026-08-24）：评估终态落 state 单一真值（pipeline-state.update）
+        assert state_writer.await_count == 1
+        assert state_writer.await_args.args[0] == task.id
+        assert state_writer.await_args.args[1]["task.status"] == "completed"
+        assert "task.ended_at" in state_writer.await_args.args[1]
 
     @pytest.mark.asyncio
     async def test_auto_complete_all_passed_completes_task(self, mod, monkeypatch):
@@ -251,12 +260,15 @@ class TestTaskEvaluateFlow:
                     summary="全部通过",
                 )
 
-        tool, service = self._inject(mod, monkeypatch, task, executor=FakeExecutor())
+        tool, service, state_writer = self._inject(mod, monkeypatch, task, executor=FakeExecutor())
         result = await tool.execute({"action": "auto_complete", "task_id": task.id})
         assert result.success is True
         assert result.metadata["result"] == "completed"
         assert service.complete_evaluation.await_count == 1
         assert service.complete_evaluation.await_args.kwargs["passed"] is True
+        # 职责边界（2026-08-24）：评估终态落 state 单一真值（pipeline-state.update）
+        assert state_writer.await_count == 1
+        assert state_writer.await_args.args[1]["task.status"] == "completed"
         # 评估历史应被记录（供后续增量评估/progress 判定）
         assert task.metadata.get("evaluation_history")
 
@@ -281,7 +293,7 @@ class TestTaskEvaluateFlow:
                     summary="未通过",
                 )
 
-        tool, service = self._inject(mod, monkeypatch, task, executor=FakeExecutor())
+        tool, service, state_writer = self._inject(mod, monkeypatch, task, executor=FakeExecutor())
         result = await tool.execute({"action": "auto_complete", "task_id": task.id})
         assert result.success is True
         assert result.metadata["result"] == "retry"
@@ -300,7 +312,7 @@ class TestTaskEvaluateFlow:
             async def run_evaluation(self, **kwargs):
                 return EvaluationResult(task_id=task.id, results=[], overall_passed=False, summary="")
 
-        tool, _ = self._inject(mod, monkeypatch, task, executor=FakeExecutor())
+        tool, _, _ = self._inject(mod, monkeypatch, task, executor=FakeExecutor())
         result = await tool.execute({"action": "auto_complete", "task_id": task.id})
         assert result.success is False
         assert result.error_code == "METRIC_NOT_FOUND"
@@ -384,12 +396,16 @@ class TestCriteriaFallbackMarked:
     依赖顶替行为——报配置错误会打断合法工具指标路径。
     """
 
-    def _inject(self, mod, monkeypatch, task: MagicMock, executor: Any) -> tuple[Any, MagicMock]:
+    def _inject(self, mod, monkeypatch, task: MagicMock, executor: Any) -> tuple[Any, MagicMock, Any]:
         service = _make_service(task=task)
         monkeypatch.setattr(mod.TaskEvaluateTool, "_get_task_service", lambda self: service)
         monkeypatch.setattr(mod, "_get_service_provider", _no_provider)
+        # 职责边界（2026-08-24）：评估终态经 pipeline-state.update 写 state——
+        # 测试注入写面记录调用，断言评估完成时任务状态落 state。
+        state_writer = AsyncMock()
+        monkeypatch.setattr(mod, "_state_writer", state_writer)
         tool = mod.TaskEvaluateTool(executor=executor)
-        return tool, service
+        return tool, service, state_writer
 
     @pytest.mark.asyncio
     async def test_fallback_ids_reported_by_get_input_params(self, mod, monkeypatch):
@@ -442,7 +458,7 @@ class TestCriteriaFallbackMarked:
                     summary="全部通过",
                 )
 
-        tool, service = self._inject(mod, monkeypatch, task, executor=FakeExecutor())
+        tool, service, state_writer = self._inject(mod, monkeypatch, task, executor=FakeExecutor())
         result = await tool.execute({"action": "auto_complete", "task_id": task.id})
         assert result.success is True
         history = task.metadata.get("evaluation_history") or []

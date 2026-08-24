@@ -27,7 +27,13 @@ plugin = AgentOSPlugin("task_evaluate_tool")
 
 @plugin.on_load
 async def _on_load(_params: dict[str, Any]) -> None:
-    """sidecar 启动：注入 state 聚合读取器（GAP-1 统一——评估输入从 state 读）。"""
+    """sidecar 启动：注入 state 聚合读取器 + 任务状态写面（GAP-1 统一）。
+
+    读：评估输入从 state 读（pipeline-state.list）。
+    写：评估终态（task.status/task.ended_at）经 pipeline-state.update 落
+    state 单一真值——2026-08-24 职责边界裁定：任务状态由任务域插件裁决，
+    内核只管管道运行域（run 终态只广播事件，不再回写 task.status）。
+    """
     import tool as tool_mod  # noqa: PLC0415
 
     async def _read_state_rows() -> list[dict[str, Any]]:
@@ -35,7 +41,12 @@ async def _on_load(_params: dict[str, Any]) -> None:
         rows = await handle.call("list", {})
         return rows if isinstance(rows, list) else []
 
+    async def _write_task_state(pipeline_id: str, fields: dict[str, Any]) -> None:
+        handle = plugin.get_capability("pipeline-state")
+        await handle.call("update", {"pipeline_id": pipeline_id, "fields": fields})
+
     tool_mod.set_state_reader(_read_state_rows)
+    tool_mod.set_state_writer(_write_task_state)
 
 
 @plugin.tool(

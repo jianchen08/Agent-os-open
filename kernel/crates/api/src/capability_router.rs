@@ -1256,6 +1256,60 @@ impl CapabilityRouter for KernelCapabilityRouter {
                 Ok(Value::Array(rows))
             }
 
+            // ── pipeline-state.update：任务域写面（2026-08-24 职责边界裁定）──
+            // 内核只管管道运行域，任务状态（task.status/task.ended_at 等 task.*
+            // 键）由任务域插件裁决写入：task_evaluate 评估终态、task_reminder
+            // pending_evaluation 等经此方法落 state 单一真值。双落点与 list 同源：
+            // ① 内存 registry（热路径）；② pipeline_state 表（冷路径，重启后
+            // checkpoint 之上的覆盖层）。仅允许写 task.* 前缀键——管道运行域
+            // 字段（iteration/status/suspended 等）仍归引擎，插件不得触碰。
+            ("pipeline-state", "update") => {
+                let pipeline_id = params
+                    .get("pipeline_id")
+                    .and_then(|v| v.as_str())
+                    .filter(|s| !s.is_empty())
+                    .ok_or_else(|| McpError::Protocol {
+                        message: "pipeline-state.update 缺少 pipeline_id 参数".to_string(),
+                    })?;
+                let fields = params.get("fields").and_then(|v| v.as_object()).ok_or_else(
+                    || McpError::Protocol {
+                        message: "pipeline-state.update 缺少 fields 对象参数".to_string(),
+                    },
+                )?;
+                for k in fields.keys() {
+                    if !k.starts_with("task.") {
+                        return Err(McpError::Protocol {
+                            message: format!(
+                                "pipeline-state.update 仅允许写 task.* 前缀键（任务域），收到: {k}"
+                            ),
+                        });
+                    }
+                }
+                let tenant_id = agentos_tenant::current_or_default("default").tenant_id;
+                // ① 热路径：内存 registry（未注册则跳过——冷管道由表行兜底）
+                let registry = agentos_session::pipeline_state_registry::global_registry();
+                if let Some(entry) = registry.get(&tenant_id, pipeline_id) {
+                    let mut e = entry.write();
+                    if let Some(obj) = e.state.as_object_mut() {
+                        for (k, v) in fields {
+                            obj.insert(k.clone(), v.clone());
+                        }
+                    }
+                }
+                // ② 冷路径：pipeline_state 表（重启后冷恢复读它）
+                if let Some(store) = &self.store {
+                    for (k, v) in fields {
+                        store
+                            .upsert_state_field(pipeline_id, &tenant_id, k, v)
+                            .await
+                            .map_err(|e| McpError::Protocol {
+                                message: format!("pipeline-state.update 持久化失败: {e}"),
+                            })?;
+                    }
+                }
+                Ok(json!({"status": "updated", "pipeline_id": pipeline_id}))
+            }
+
             // ── tenant-context：多租户上下文查询（F-TENANT-B-KERNEL）──
             // Python 侧 `plugins/shared/tenant_data.py` 经此能力取当前租户决定数据根；
             // 无活跃 task_local 时回退 "default"（与 Python 侧回退一致，永不报错）。
@@ -2708,6 +2762,100 @@ mod tests {
             "任务管道 thread_id 回退自身 pipeline_id"
         );
     }
+
+    // ── 职责边界（2026-08-24 裁定）：pipeline-state.update 任务域写面 ──────
+
+    #[tokio::test]
+    async fn test_pipeline_state_update_writes_task_fields_both_paths() {
+        // 任务域插件（task_evaluate 等）经 update 写 task.* 键：热路径 registry
+        // 常驻 state + 冷路径 pipeline_state 表双落点，list 聚合立即可见。
+        let tenant = format!("tenant_upd_{}", uuid::Uuid::new_v4().simple());
+        let pid = format!("pipe_upd_{}", uuid::Uuid::new_v4().simple());
+        let router = router_with_store();
+        let store = router
+            .store
+            .as_ref()
+            .expect("router_with_store 已注 store")
+            .clone();
+        // 先注册管道（模拟任务管道出生）
+        let reg = agentos_session::pipeline_state_registry::global_registry();
+        reg.get_or_init(
+            &tenant,
+            &pid,
+            "th_upd",
+            "agentos",
+            json!({"pipeline_id": pid, "task.id": pid, "task.status": "pending"}),
+        );
+
+        let r = agentos_tenant::scope(
+            agentos_core::types::TenantContext::new(&tenant, "th_upd"),
+            router.handle(
+                "pipeline-state",
+                "update",
+                json!({
+                    "pipeline_id": pid,
+                    "fields": {"task.status": "completed", "task.ended_at": "2026-08-24T00:00:00Z"},
+                }),
+            ),
+        )
+        .await;
+        assert!(r.is_ok(), "update 应成功: {r:?}");
+
+        // 热路径：registry 常驻 state 已更新
+        let entry = reg.get(&tenant, &pid).expect("registry 应有条目");
+        let st = entry.read();
+        assert_eq!(st.state["task.status"], "completed");
+        assert_eq!(st.state["task.ended_at"], "2026-08-24T00:00:00Z");
+        drop(st);
+
+        // 冷路径：pipeline_state 表已落（重启后冷恢复读它）
+        let fields = store.load_pipeline_state(&pid, &tenant).await.unwrap();
+        assert_eq!(fields.get("task.status"), Some(&json!("completed")));
+        assert_eq!(
+            fields.get("task.ended_at"),
+            Some(&json!("2026-08-24T00:00:00Z"))
+        );
+
+        // list 聚合立即可见（任务树数据源）
+        let rows = agentos_tenant::scope(
+            agentos_core::types::TenantContext::new(&tenant, "th_upd"),
+            router.handle("pipeline-state", "list", json!({})),
+        )
+        .await
+        .unwrap();
+        let row = rows
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|r| r.get("pipeline_id").and_then(|v| v.as_str()) == Some(pid.as_str()))
+            .unwrap();
+        assert_eq!(row["task.status"], "completed");
+    }
+
+    #[tokio::test]
+    async fn test_pipeline_state_update_rejects_non_task_keys() {
+        // 写面仅允许 task.* 前缀键——管道运行域字段（iteration/status/suspended）
+        // 归引擎，插件不得触碰。
+        let tenant = format!("tenant_upd2_{}", uuid::Uuid::new_v4().simple());
+        let router = router_with_store();
+        let r = agentos_tenant::scope(
+            agentos_core::types::TenantContext::new(&tenant, "th_upd2"),
+            router.handle(
+                "pipeline-state",
+                "update",
+                json!({
+                    "pipeline_id": "pipe_x",
+                    "fields": {"iteration": 5},
+                }),
+            ),
+        )
+        .await;
+        assert!(
+            r.is_err(),
+            "非 task.* 键必须拒绝（管道运行域归引擎）: {r:?}"
+        );
+    }
+
     #[tokio::test]
     async fn test_service_registry_disabled_without_store() {
         // 不注入 store → service-registry 应返回错误

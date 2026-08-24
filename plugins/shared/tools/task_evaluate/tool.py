@@ -21,6 +21,7 @@ import asyncio
 import contextlib
 import logging
 import types
+from datetime import UTC, datetime
 from typing import Any
 
 from _eval_core import sanitize_eval_paths
@@ -40,11 +41,15 @@ from agentos_plugin_sdk import (
 logger = logging.getLogger(__name__)
 
 
-# ── GAP-1 统一：state 聚合读取器（server.py on_load 注入，pipeline-state capability）──
-# 约定签名：``() -> list[dict]``（sync 或 async，管道 state 聚合行，行为扁平点号键
+# ── GAP-1 统一：state 聚合读取器 + 任务状态写面（server.py on_load 注入）──
+# 读：``() -> list[dict]``（sync 或 async，管道 state 聚合行，行为扁平点号键
 # 如 {"pipeline_id": ..., "task.status": ..., "task.goal": ...}）。None = 未注入
 # （读面回退 task_service YAML 只读镜像）。
+# 写：``(pipeline_id, fields) -> None``（async，经 pipeline-state.update 落
+# state 单一真值——2026-08-24 职责边界裁定：任务状态由任务域插件裁决写入，
+# 内核不再回写 task.status）。None = 未注入（写面降级：仅 YAML 镜像）。
 _state_reader: Any = None
+_state_writer: Any = None
 
 
 def set_state_reader(reader: Any) -> None:
@@ -56,6 +61,48 @@ def set_state_reader(reader: Any) -> None:
 def _get_state_reader() -> Any:
     """获取 state 聚合读取器（None = 未注入，测试可 monkeypatch）。"""
     return _state_reader
+
+
+def set_state_writer(writer: Any) -> None:
+    """注入任务状态写面（server.py on_load 经 pipeline-state.update capability）。"""
+    global _state_writer  # noqa: PLW0603
+    _state_writer = writer
+
+
+def _get_state_writer() -> Any:
+    """获取任务状态写面（None = 未注入，写面降级仅 YAML 镜像）。"""
+    return _state_writer
+
+
+def _now_iso() -> str:
+    """当前 UTC 时间 ISO 串（task.ended_at 落 state 用，与内核 chrono 同格式）。"""
+    return datetime.now(UTC).isoformat()
+
+
+async def _write_task_state(task_id: str, fields: dict[str, Any]) -> None:
+    """把任务域字段写入管道 state 单一真值（GAP-1：task.id == pipeline_id）。
+
+    2026-08-24 职责边界裁定：任务状态由任务域插件裁决写入（pipeline-state
+    update capability），内核不再回写 task.status。写面未注入（None）时静默
+    降级——YAML 镜像仍由 task_service 维护，state 保持出生值 pending。
+    """
+    writer = _get_state_writer()
+    if writer is None:
+        logger.debug(
+            "[TaskEvaluate] state 写面未注入，跳过 state 写入 | task=%s fields=%s",
+            task_id,
+            sorted(fields),
+        )
+        return
+    try:
+        await writer(task_id, fields)
+    except Exception as exc:  # noqa: BLE001 — 写面失败不阻断评估主流程
+        logger.warning(
+            "[TaskEvaluate] state 写入失败（评估结果仍有效）| task=%s fields=%s err=%s",
+            task_id,
+            sorted(fields),
+            exc,
+        )
 
 _DEFAULT_MAX_RETRIES = 3
 _DEFAULT_EVAL_TIMEOUT = 1200.0
@@ -125,6 +172,7 @@ async def task_evaluate_func(inputs: dict[str, Any]) -> dict[str, Any]:  # noqa:
     if task.status == TaskStatus.RUNNING:
         with contextlib.suppress(Exception):
             await task_service.move_to_evaluating(task_id)
+            await _write_task_state(task_id, {"task.status": "evaluating"})
 
     if task.status not in valid_statuses and task.status != TaskStatus.RUNNING:
         return {"success": False, "error_code": "INVALID_STATUS", "error": f"不支持的状态: {task.status}"}
@@ -134,6 +182,10 @@ async def task_evaluate_func(inputs: dict[str, Any]) -> dict[str, Any]:  # noqa:
             task.result = inputs["result"]
 
         await task_service.complete_evaluation(task_id, passed=True)
+        await _write_task_state(
+            task_id,
+            {"task.status": "completed", "task.ended_at": _now_iso()},
+        )
         return {"success": True, "status": "completed"}
     except Exception as e:
         return {"success": False, "error_code": "EVAL_FAILED", "error": str(e)}
@@ -745,6 +797,10 @@ class TaskEvaluateTool(BuiltinTool):
             try:
                 eval_data = self._build_result_data(eval_result)
                 await task_service.recover_to_completed(task.id, result=eval_data)
+                await _write_task_state(
+                    task.id,
+                    {"task.status": "completed", "task.ended_at": _now_iso()},
+                )
             except Exception as e:
                 logger.error("[TaskEvaluate] 恢复失败状态为完成失败: %s", e)
         else:
@@ -770,6 +826,10 @@ class TaskEvaluateTool(BuiltinTool):
                     eval_data["merge_failure"] = merge_error
                     eval_data["summary"] = f"评估指标已通过，但 worktree 合并失败: {merge_error}"
                     await task_service.complete_evaluation(task.id, passed=False, result=eval_data)
+                    await _write_task_state(
+                        task.id,
+                        {"task.status": "failed", "task.ended_at": _now_iso()},
+                    )
                 except Exception as e:
                     logger.error("[TaskEvaluate] complete_evaluation(passed=False) 失败: %s", e)
                 return create_failure_result(
@@ -779,6 +839,10 @@ class TaskEvaluateTool(BuiltinTool):
             try:
                 eval_data = self._build_result_data(eval_result)
                 await task_service.complete_evaluation(task.id, passed=True, result=eval_data)
+                await _write_task_state(
+                    task.id,
+                    {"task.status": "completed", "task.ended_at": _now_iso()},
+                )
             except Exception as e:
                 logger.error("[TaskEvaluate] complete_evaluation(passed=True) 失败: %s", e)
                 return create_failure_result(
@@ -839,6 +903,10 @@ class TaskEvaluateTool(BuiltinTool):
             if task.status not in (TaskStatus.COMPLETED, TaskStatus.FAILED):
                 eval_data = self._build_result_data(eval_result)
                 await task_service.complete_evaluation(task.id, passed=False, result=eval_data)
+                await _write_task_state(
+                    task.id,
+                    {"task.status": "failed", "task.ended_at": _now_iso()},
+                )
             else:
                 logger.info("[TaskEvaluate] 任务 %s 已是终态(%s)，跳过状态回写", task.id, task.status.value)
         except Exception as e:
