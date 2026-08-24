@@ -1,3 +1,4 @@
+/** @feature FP-T12 前端适配 | @ci frontend-test */
 /**
  * mainPipelineIdOf 主管道权威解析测试（2026-08-22 裁决）
  *

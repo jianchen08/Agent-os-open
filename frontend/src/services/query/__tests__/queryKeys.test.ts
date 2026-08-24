@@ -1,3 +1,4 @@
+/** @feature FP-T12 前端适配 | @ci frontend-test */
 /**
  * queryKeys 契约测试
  *

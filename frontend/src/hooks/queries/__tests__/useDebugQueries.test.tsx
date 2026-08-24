@@ -1,3 +1,4 @@
+/** @feature FP-T12 前端适配 | @ci frontend-test */
 /**
  * 调试中心 query 行为测试（query 化批次 3 核心验收）
  *

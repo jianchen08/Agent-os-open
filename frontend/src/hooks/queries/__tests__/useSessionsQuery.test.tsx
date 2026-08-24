@@ -1,3 +1,4 @@
+/** @feature FP-T12 前端适配 | @ci frontend-test */
 /**
  * useSessionsQuery 行为测试（query 化批次 1 核心验收）
  *

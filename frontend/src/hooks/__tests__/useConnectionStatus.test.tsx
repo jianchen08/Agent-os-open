@@ -1,3 +1,4 @@
+/** @feature FP-T12 前端适配 | @ci frontend-test */
 /**
  * useConnectionStatus 首连状态映射测试（回归：2026-08-20 用户真实反馈）。
  *

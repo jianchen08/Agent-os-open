@@ -1,3 +1,4 @@
+/** @feature FP-T12 前端适配 | @ci frontend-test */
 /**
  * new_message 认领回归测试（ADR 2026-08-22「认领替代驱逐」）。
  *

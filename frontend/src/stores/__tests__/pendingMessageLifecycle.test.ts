@@ -1,3 +1,4 @@
+/** @feature FP-T12 前端适配 | @ci frontend-test */
 /**
  * @feature 消息幂等契约 | @ci frontend-test
  *

@@ -1,3 +1,4 @@
+/** @feature FP-T12 前端适配 | @ci frontend-test */
 /**
  * thinking 超时不写合成文案测试（2026-08-22 裁决）
  *

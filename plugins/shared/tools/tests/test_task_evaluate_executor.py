@@ -1,4 +1,4 @@
-# @feature: FP-0.2 评估管道装配 | @vision: V2 自进化闭环 | @ci: python-coverage
+# @feature: FP-0.2.〇 评估管道装配 | @vision: V2 自进化闭环 | @ci: python-coverage
 """PipelineEvaluationExecutor（_executor.py，批次B 2026-08-24）单测。
 
 覆盖（方案 docs/working/管道工作区关联与评估管道装配方案_20260824.md 批次B）：

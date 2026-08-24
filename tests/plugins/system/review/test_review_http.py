@@ -1,4 +1,4 @@
-# @feature: FP-0.2.review P1-2 http 面 | @vision: V1 可进化 | @ci: python-coverage
+# @feature: FP-0.2.五 P1-2 http 面 | @vision: V1 可进化 | @ci: python-coverage
 """review 插件 http.handle 9 端点测试（channel_api 退役批次 5 P1-2 接真）。
 
 覆盖 /ext/review_service/reviews/** 全 9 路由：

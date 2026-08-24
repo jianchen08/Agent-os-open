@@ -1,3 +1,4 @@
+/** @feature FP-T12 前端适配 | @ci frontend-test */
 /**
  * useSchemaQuery 行为测试（query 化批次 2 核心验收）
  *

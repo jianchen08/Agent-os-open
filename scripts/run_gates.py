@@ -298,7 +298,6 @@ GATES: list[Gate] = [
             "-m",
             "timing",
             "tests/test_isolation_docker_timeout.py",
-            "tests/test_rate_limiter.py",
             "tests/suites/core/test_pipeline_stability.py",
         ),
         env=_PLUGINS_ENV,

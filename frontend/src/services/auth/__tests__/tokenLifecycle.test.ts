@@ -1,3 +1,4 @@
+/** @feature FP-T12 前端适配 | @ci frontend-test */
 /**
  * @feature 认证可靠性（token 生命周期单一职责模块） | @ci frontend-test
  *

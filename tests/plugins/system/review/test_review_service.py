@@ -1,4 +1,4 @@
-# @feature: FP-0.2.review P1-2 审批状态机 | @vision: V1 可进化 | @ci: python-coverage
+# @feature: FP-0.2.五 P1-2 审批状态机 | @vision: V1 可进化 | @ci: python-coverage
 """审批状态机单元测试（P1-2 sidecar 化承接，src/review 0.1 语义回归）。
 
 覆盖 ReviewService 全状态流转：

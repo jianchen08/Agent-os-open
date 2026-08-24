@@ -1,3 +1,4 @@
+/** @feature FP-T12 前端适配 | @ci frontend-test */
 /**
  * PipelineManagerWidget 组件测试（2026-08-19 调试中心批次；批次 4 query 化适配）
  *

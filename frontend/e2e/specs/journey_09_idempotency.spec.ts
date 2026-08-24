@@ -1,3 +1,4 @@
+/** @feature FP-0.2.四 前端Schema | @ci frontend-e2e */
 /**
  * 用户旅程 09：消息幂等契约（ADR 2026-08-21）
  *

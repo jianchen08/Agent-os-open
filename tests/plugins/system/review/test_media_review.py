@@ -1,4 +1,4 @@
-# @feature: FP-0.2.review 媒体审阅 | @vision: V1 可进化 | @ci: python-coverage
+# @feature: FP-0.2.五 媒体审阅 | @vision: V1 可进化 | @ci: python-coverage
 """媒体审阅单元测试（P1-2 sidecar 化承接；PIL/PyAV 全部 mock，零重依赖）。
 
 覆盖 MediaReviewService 与 ImageReviewer/VideoReviewer：

@@ -1,3 +1,4 @@
+/** @feature FP-0.2.四 前端Schema | @ci frontend-test */
 /**
  * DebugLlmPayloadPage 组件测试
  *

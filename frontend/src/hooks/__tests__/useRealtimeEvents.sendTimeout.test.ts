@@ -1,5 +1,5 @@
 /**
- * @feature 错误透传 | @ci frontend-test
+ * @feature FP-T12 前端适配 错误透传 | @ci frontend-test
  *
  * user_input_send_timeout 透传链（2026-08-21 用户裁决：任何错误都必须让用户看见）：
  * WS 断线期间发送的消息排队超 TTL 被撤回时，UI 层必须——撤除对应"思考中"占位

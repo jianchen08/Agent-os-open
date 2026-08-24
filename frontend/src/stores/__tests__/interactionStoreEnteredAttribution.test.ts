@@ -1,3 +1,4 @@
+/** @feature FP-T12 前端适配 | @ci frontend-test */
 /**
  * interactionStore.getEnteredForPipeline 精确归属测试（2026-08-22 裁决）
  *

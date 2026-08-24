@@ -1,3 +1,4 @@
+/** @feature FP-T12 前端适配 | @ci frontend-test */
 /**
  * errorReporting 用户可见提示测试（2026-08-22 错误透传收口）
  *
