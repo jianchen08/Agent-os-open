@@ -12,9 +12,11 @@ sessions token-usage 从 stub 接真：总 Token 数取 pipeline-state 摘要行
 track.total_tokens / cost_control.total_tokens，request_count 取该管道 run 次数
 （内核 MessageRecord 不携带 token 计数字段，prompt/completion 无独立计数源）。
 
-[交互] 仅读内核能力（service-registry→pipeline-runs.list/messages.list、
-pipeline-state→list）；DELETE/clear 端点维持原 stub 语义（read-only bridge 无
-删除能力，返回成功形态由前端消费）。
+[交互] 读面仅消费内核能力（service-registry→pipeline-runs.list/messages.list、
+pipeline-state→list）；clear-all 已做实（2026-08-24）——经 db-admin.
+clear_execution_data 真删 9 表 + 内存 registry（users 保留），内核信封
+非 200 时以 ClearExecutionDataError 原状态码透传；单条/按会话删除仍为
+stub（内核消息模型无单条删除面，维持成功形态由前端消费）。
 """
 
 from __future__ import annotations
@@ -220,9 +222,26 @@ async def delete_execution_records_by_session(session_id: str) -> dict[str, Any]
     return {"success": True, "deleted_count": 0, "session_id": session_id}
 
 
-async def clear_all_records() -> dict[str, Any]:
-    """清理所有记录（同上：读面无清理，维持原 stub 成功形态）。"""
-    return {"success": True, "message": "所有记录已清理", "cleared_count": 0}
+async def clear_all_records(authorization: str = "") -> dict[str, Any]:
+    """清理所有执行记录与轨迹（stub 做实 2026-08-24）。
+
+    经 db-admin.clear_execution_data 能力真删：内核 9 表（runs/traces/blobs/
+    branches/sessions/pipeline_sessions/pipeline_state/pipeline_checkpoints/
+    message_slots，users 保留）+ 内存常驻 registry；清理前自动产出数据库
+    快照备份（backup_path 回传）。有运行中管道时内核返回 409（detail 透传）。
+
+    Raises:
+        kernel_reads.ClearExecutionDataError: 原状态码透传（403/409/502/503/500），
+        写面不降级假成功。
+    """
+    result = await kernel_reads.clear_execution_data(authorization=authorization)
+    return {
+        "success": True,
+        "message": "所有执行记录与轨迹已清理（用户账号保留）",
+        "cleared_count": result.get("cleared_count", 0),
+        "tables": result.get("cleared"),
+        "backup_path": result.get("backup_path"),
+    }
 
 
 # ── sessions token-usage 域（2 端点，stub 接真）─────────────────────────

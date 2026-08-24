@@ -127,3 +127,53 @@ async def query_table(
     if isinstance(raw, dict) and isinstance(raw.get("rows"), list):
         return raw
     return {"table": table, "total": 0, "limit": limit, "offset": offset, "rows": []}
+
+
+class ClearExecutionDataError(Exception):
+    """全量执行数据清理失败（写面专用，绝不降级假成功）。
+
+    携带应透传给前端的 HTTP 状态码：内核信封原状态（403/409/500）、
+    能力缺失 503、能力通道异常 502。与读面"降级空数据"策略刻意相反——
+    清理是破坏性操作，静默失败比报错危险。
+    """
+
+    def __init__(self, status: int, message: str) -> None:
+        super().__init__(message)
+        self.status = status
+
+
+async def clear_execution_data(authorization: str = "") -> dict[str, Any]:
+    """db-admin.clear_execution_data：全量执行数据清理（9 表 + 内存 registry）。
+
+    Returns:
+        内核 body：``{cleared: {表: 行数}, cleared_count, backup_path}``。
+
+    Raises:
+        ClearExecutionDataError: 能力未注入（503）/通道异常（502）/内核
+            信封非 200（透传原状态码与 message）。
+    """
+    fn = _PROVIDERS.get("db-admin-clear")
+    if fn is None:
+        if "db-admin-clear" not in _warned:
+            _warned.add("db-admin-clear")
+            logger.warning("[kernel_reads] provider db-admin-clear 未注入（清理能力不可用）")
+        raise ClearExecutionDataError(503, "执行数据清理能力不可用（db-admin 能力未注入）")
+    params: dict[str, Any] = {}
+    if authorization:
+        params["_authorization"] = authorization
+    try:
+        envelope = await fn(authorization=authorization)
+    except Exception as exc:  # noqa: BLE001 —— 写面：通道异常上抛（不吞成假成功）
+        raise ClearExecutionDataError(502, f"清理能力调用失败: {exc}") from exc
+    if isinstance(envelope, dict) and envelope.get("status") == 200:
+        body = envelope.get("body")
+        return body if isinstance(body, dict) else {}
+    if isinstance(envelope, dict) and "error" in envelope:
+        err = envelope["error"]
+        message = err.get("message") if isinstance(err, dict) else str(err)
+        try:
+            status = int(envelope.get("status") or 500)
+        except (TypeError, ValueError):
+            status = 500
+        raise ClearExecutionDataError(status, str(message or "清理失败"))
+    raise ClearExecutionDataError(502, f"清理能力返回异常信封: {envelope!r}")

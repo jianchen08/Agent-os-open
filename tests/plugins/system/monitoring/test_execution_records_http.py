@@ -367,15 +367,110 @@ def test_records_delete_by_session(server: Any, kr: Any) -> None:
     assert body == {"success": True, "deleted_count": 0, "session_id": "p1"}
 
 
-def test_records_clear_all(server: Any, kr: Any) -> None:
-    """清空所有记录：POST clear-all → 成功形态。"""
+def test_records_clear_all_success(server: Any, kr: Any, tmp_path: Path, monkeypatch: Any) -> None:
+    """清空所有记录（stub 做实 2026-08-24）：内核清理信封 + payload_diag 文件清理。
+
+    成功形态透出内核计数/备份路径；headers.authorization 透传给能力调用。
+    """
     install_providers(kr)
+    captured: dict[str, Any] = {}
+
+    async def _clear(authorization: str = "") -> dict[str, Any]:
+        captured["authorization"] = authorization
+        return {"status": 200, "body": {
+            "cleared": {"runs": 2, "traces": 2},
+            "cleared_count": 4,
+            "backup_path": "/x/kernel.db.clear-backup-1-0",
+        }}
+
+    kr.set_provider("db-admin-clear", _clear)
+    monkeypatch.setattr(server, "_payload_diag_dir", lambda: str(tmp_path))
+    (tmp_path / "a.json").write_text("{}", encoding="utf-8")
+    (tmp_path / "b.json").write_text("{}", encoding="utf-8")
+    (tmp_path / "keep.txt").write_text("x", encoding="utf-8")
+
+    status, body = _decode_http(_call(
+        server, path="/ext/monitoring/execution/records/clear-all", method="POST",
+        headers={"authorization": "Bearer tok-clear"},
+    ))
+    assert status == 200
+    assert body["success"] is True
+    assert body["cleared_count"] == 4
+    assert body["tables"] == {"runs": 2, "traces": 2}
+    assert body["backup_path"] == "/x/kernel.db.clear-backup-1-0"
+    assert body["payload_files_deleted"] == 2
+    assert not (tmp_path / "a.json").exists() and not (tmp_path / "b.json").exists()
+    assert (tmp_path / "keep.txt").exists(), "非 json 文件不动（与列表范围一致）"
+    assert captured["authorization"] == "Bearer tok-clear", "鉴权头须透传内核"
+
+
+def test_records_clear_all_empty_dir_zero_files(server: Any, kr: Any, tmp_path: Path, monkeypatch: Any) -> None:
+    """payload_diag 目录不存在/为空：文件清理 0 不崩（幂等）。"""
+    install_providers(kr)
+
+    async def _clear(authorization: str = "") -> dict[str, Any]:
+        return {"status": 200, "body": {"cleared": {}, "cleared_count": 0, "backup_path": None}}
+
+    kr.set_provider("db-admin-clear", _clear)
+    monkeypatch.setattr(server, "_payload_diag_dir", lambda: str(tmp_path / "nonexistent"))
     status, body = _decode_http(_call(
         server, path="/ext/monitoring/execution/records/clear-all", method="POST",
     ))
     assert status == 200
-    assert body["success"] is True
     assert body["cleared_count"] == 0
+    assert body["payload_files_deleted"] == 0
+
+
+@pytest.mark.parametrize(
+    ("envelope", "want_status", "want_detail"),
+    [
+        # 内核活跃防呆 409 → 原状态码透传（不吞错为假成功）
+        ({"status": 409, "error": {"code": "409", "message": "管道 p1 正在运行，请等待任务结束后再清理"}}, 409, "正在运行"),
+        # 非 admin 403
+        ({"status": 403, "error": {"code": "403", "message": "写操作需要 admin 角色"}}, 403, "admin"),
+        # 内核 500
+        ({"status": 500, "error": {"code": "500", "message": "清理备份失败（已中止清理）"}}, 500, "备份失败"),
+    ],
+)
+def test_records_clear_all_kernel_error_passthrough(
+    server: Any, kr: Any, envelope: dict[str, Any], want_status: int, want_detail: str
+) -> None:
+    """内核信封非 200 → 原状态码透传（写面不降级假成功）。"""
+    install_providers(kr)
+
+    async def _clear(authorization: str = "") -> dict[str, Any]:
+        return envelope
+
+    kr.set_provider("db-admin-clear", _clear)
+    status, body = _decode_http(_call(
+        server, path="/ext/monitoring/execution/records/clear-all", method="POST",
+    ))
+    assert status == want_status
+    assert want_detail in body["detail"]
+
+
+def test_records_clear_all_provider_missing_503(server: Any, kr: Any) -> None:
+    """清理能力未注入（内核握手未完成）：503，绝不降级为假成功。"""
+    install_providers(kr)  # 未注册 db-admin-clear
+    status, body = _decode_http(_call(
+        server, path="/ext/monitoring/execution/records/clear-all", method="POST",
+    ))
+    assert status == 503
+    assert "不可用" in body["detail"]
+
+
+def test_records_clear_all_provider_crash_502(server: Any, kr: Any) -> None:
+    """能力调用抛异常 → 502（区别于能力缺失的 503）。"""
+    install_providers(kr)
+
+    async def _clear(authorization: str = "") -> dict[str, Any]:
+        raise RuntimeError("capability channel broken")
+
+    kr.set_provider("db-admin-clear", _clear)
+    status, _ = _decode_http(_call(
+        server, path="/ext/monitoring/execution/records/clear-all", method="POST",
+    ))
+    assert status == 502
 
 
 def test_execution_unknown_route_404(server: Any, kr: Any) -> None:
@@ -485,7 +580,9 @@ def test_on_load_injects_kernel_reads_providers(server: Any, kr: Any) -> None:
 
     _run(server._on_load({}))
 
-    assert sorted(kr._PROVIDERS) == ["db-admin", "messages", "pipeline-runs", "pipeline-state"]
+    assert sorted(kr._PROVIDERS) == [
+        "db-admin", "db-admin-clear", "messages", "pipeline-runs", "pipeline-state",
+    ]
     # 注入的 provider 可真实调用（service-registry 信封 → kernel_reads._rows 收敛）
     rows = _run(kr.list_pipeline_runs())
     assert rows == []

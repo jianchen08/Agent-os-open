@@ -93,10 +93,18 @@ async def _on_load(params: dict[str, Any]) -> None:
             handle = plugin.get_capability("db-admin")
             return await handle.call("table_query", params)
 
+        async def _kr_clear_execution_data(authorization: str = ""):
+            params: dict[str, Any] = {}
+            if authorization:
+                params["_authorization"] = authorization
+            handle = plugin.get_capability("db-admin")
+            return await handle.call("clear_execution_data", params)
+
         kernel_reads.set_provider("pipeline-runs", _kr_list_pipeline_runs)
         kernel_reads.set_provider("messages", _kr_list_messages)
         kernel_reads.set_provider("pipeline-state", _kr_list_state_rows)
         kernel_reads.set_provider("db-admin", _kr_query_table)
+        kernel_reads.set_provider("db-admin-clear", _kr_clear_execution_data)
     except Exception as exc:  # noqa: BLE001 — 注入失败降级（handler 返回空结构）
         logger.warning("[monitoring] kernel_reads provider 注入失败: %s", exc)
 
@@ -569,7 +577,7 @@ async def http_handle(
         # 数据 = 内核只读能力桥（kernel_reads：pipeline-runs.list/messages.list/
         # pipeline-state.list），能力不可用降级空结构（HTTP 200 空载荷）。
         if path.startswith("/ext/monitoring/execution"):
-            return await _handle_execution_domain(path, method, raw_body, query or {})
+            return await _handle_execution_domain(path, method, raw_body, query or {}, headers or {})
 
         # ── sessions token-usage 域（批次 2 随迁，stub 接真）──
         if path.startswith("/ext/monitoring/sessions"):
@@ -605,8 +613,20 @@ def _qint(query: dict[str, str], key: str, default: int) -> int:
         return default
 
 
+def _authorization(headers: dict[str, str] | None) -> str:
+    """取入站请求的原始 Authorization 头值（内核 header key 已小写，大小写防御）。
+
+    与 plugins/shared/db_admin/server.py 同一约定：插件只透传凭证，角色校验
+    在内核 db-admin handler 执行（信任锚点，插件无法伪造角色）。
+    """
+    for k, v in (headers or {}).items():
+        if isinstance(k, str) and k.lower() == "authorization" and v:
+            return v
+    return ""
+
+
 async def _handle_execution_domain(
-    path: str, method: str, raw_body: str, query: dict[str, str]
+    path: str, method: str, raw_body: str, query: dict[str, str], headers: dict[str, str]
 ) -> dict[str, Any]:
     """execution 域分发：/ext/monitoring/execution/** → execution_records 业务函数。
 
@@ -614,6 +634,7 @@ async def _handle_execution_domain(
     与 channel_api 原分发逐项同构（含 404/500 语义）。
     """
     import execution_records as er  # noqa: PLC0415
+    import kernel_reads  # noqa: PLC0415
 
     prefix = "/ext/monitoring/execution"
     if not path.startswith(prefix):
@@ -659,12 +680,17 @@ async def _handle_execution_domain(
         if sub.startswith("/records/session/") and method == "DELETE":
             session_id = sub[len("/records/session/"):]
             return _ok(_json_response(await er.delete_execution_records_by_session(session_id)))
-        # POST /records/clear-all
+        # POST /records/clear-all（全量清理：内核 9 表 + registry + payload_diag 快照文件）
         if sub == "/records/clear-all" and method == "POST":
-            return _ok(_json_response(await er.clear_all_records()))
+            result = await er.clear_all_records(authorization=_authorization(headers))
+            result["payload_files_deleted"] = _clear_payload_diag_files()
+            return _ok(_json_response(result))
 
         logger.warning("execution http.handle: no route for sub=%s method=%s", sub, method)
         return _ok(_json_response({"error": "not found", "path": path}, 404))
+    except kernel_reads.ClearExecutionDataError as exc:
+        # 写面错误透传：409（运行中管道）/403（非 admin）/502/503/500 原样上抛
+        return _ok(_json_response({"error": "clear failed", "detail": str(exc)}, exc.status))
     except Exception as exc:  # noqa: BLE001
         logger.error("execution http.handle 未预期错误: %s", exc, exc_info=True)
         return _ok(_json_response({"error": "internal server error", "detail": str(exc)}, 500))
@@ -827,6 +853,24 @@ def _list_payload_diag() -> list[dict[str, Any]]:
             continue
     items.sort(key=lambda x: x.get("ts", 0), reverse=True)
     return items
+
+
+def _clear_payload_diag_files() -> int:
+    """清空 payload_diag 快照目录（*.json，与 _list_payload_diag 同范围）。
+
+    配套 /records/clear-all：LLM 请求轨迹与执行记录同属"清理所有记录与轨迹"
+    语义。目录不存在/单文件删除失败不崩（容错计数返回）。
+    """
+    import glob
+
+    deleted = 0
+    for fpath in glob.glob(os.path.join(_payload_diag_dir(), "*.json")):
+        try:
+            os.remove(fpath)
+            deleted += 1
+        except OSError:
+            logger.warning("[monitoring] payload_diag 文件删除失败: %s", fpath)
+    return deleted
 
 
 def _parse_payload_diag_filename(fname: str) -> dict[str, Any] | None:
