@@ -183,11 +183,16 @@ pub async fn create_session_handler(
     };
 
     // 注册 thread → user 映射（WS 流式推送据此定位连接）+ thread → pipeline 映射
+    // + thread → agent 绑定（热路径解析；2026-08-24 阶段1：创建即绑定，
+    // PATCH 切换同步三写）
     if let Some(session) = &state.session {
         session.registry().register_thread(&thread_id, &user_id);
         session
             .registry()
             .register_thread_pipeline(&thread_id, &pipeline_id);
+        session
+            .registry()
+            .register_thread_agent(&thread_id, agent_id.as_str().unwrap_or("agentos"));
     }
 
     // 域2持久化：会话落 sessions 表（对齐 0.1 SessionModel）。
@@ -239,6 +244,13 @@ pub async fn create_session_handler(
             store_clone
                 .link_pipeline_session(&pid_clone, &tid_clone, &tenant_id)
                 .await?;
+            // 出生绑定落管道 state（2026-08-24 阶段1：agent.id 真值随会话出生
+            // 即落库，创建时指定 agent 或默认 agentos 都持久化）
+            if let Some(aid) = agent_id_str {
+                store_clone
+                    .upsert_state_field(&pid_clone, &tenant_id, "agent.id", &json!(aid))
+                    .await?;
+            }
             Ok::<(), agentos_core::types::StorageError>(())
         })
         .await;
@@ -278,9 +290,14 @@ pub async fn create_session_handler(
 ///
 /// 前端 SessionEditModal 编辑会话时调此端点。
 /// body: { "agent_id": "<id>" }。响应返回完整会话状态(含新 agent_id)。
-/// 域2持久化：更新 sessions 表 agent_id（DB 无记录则跳过 DB，仅写内存）。
+/// 域2持久化（2026-08-24 阶段1：三写）：
+/// ① registry 线程绑定（内存热路径消费）；
+/// ② sessions 表 agent_id（跨重启 DB 冷兜底，DB 无记录则跳过 DB）；
+/// ③ 主管道 state `agent.id`（绑定真值落管道 state，管道自足）。
+/// ③ 失败仅 warn 不阻断——registry/DB 已更新，执行面仍可解析。
 pub async fn update_session_agent_handler(
     State(state): State<AppState>,
+    headers: HeaderMap,
     Path(id): Path<String>,
     Json(body): Json<Value>,
 ) -> Json<Value> {
@@ -297,6 +314,30 @@ pub async fn update_session_agent_handler(
     }
 
     let now = chrono::Utc::now().to_rfc3339();
+
+    // ③ 主管道 state 持久化真值（2026-08-24 阶段1：绑定真值落管道 state，
+    // 管道自足——执行面冷恢复/未来动态管道消费 agent.id）。失败仅 warn
+    // 不阻断：registry/DB 已更新，执行面解析仍可命中。
+    if let Some(store) = state.store.as_ref() {
+        let tenant_id = crate::auth::resolve_request_tenant_id(Some(store), &headers).await;
+        let pipeline_id = state
+            .session
+            .as_ref()
+            .and_then(|s| s.registry().get_pipeline_for_thread(&id));
+        if let Some(pid) = pipeline_id {
+            if let Err(e) = store
+                .upsert_state_field(&pid, &tenant_id, "agent.id", &json!(agent_id))
+                .await
+            {
+                tracing::warn!(
+                    thread_id = %id,
+                    pipeline = %pid,
+                    error = %e,
+                    "会话 agent 绑定写入管道 state 失败（registry/DB 已更新）"
+                );
+            }
+        }
+    }
 
     // DB 更新：若存在会话记录则更新 agent_id + updated_at
     if let Some(store) = state.store.as_ref() {
@@ -657,6 +698,204 @@ pub async fn sessions_schema_handler(State(state): State<AppState>) -> Json<Valu
     }
 
     Json(json!({ "fields": fields }))
+}
+
+#[cfg(test)]
+mod agent_binding_tests {
+    //! 会话 agent 绑定三写集成测试（2026-08-24 阶段1：绑定真值落管道 state）。
+    //!
+    //! 设计依据：docs/working/管道配置输入契约与动态管道能力设计_20260824.md
+    //! §4.3——PATCH /sessions/{id}/agent 必须三写：registry 线程绑定（热路径
+    //! 消费）+ sessions 表 agent_id（冷路径 DB 兜底）+ 主管道 state `agent.id`
+    //! （持久化真值）。执行面解析（显式 → registry → DB → agentos）由
+    //! ws_session::resolve_dispatch_agent 单测覆盖，本模块验证写入面三方落齐。
+
+    use super::*;
+    use agentos_core::traits::StorageBackend;
+    use axum::body::Body;
+    use axum::http::Request;
+    use tower::ServiceExt;
+
+    const ADMIN_USER_ID: &str = "00000000-0000-0000-0000-000000000001";
+
+    async fn setup() -> (
+        axum::Router,
+        AppState,
+        std::sync::Arc<agentos_engine::SqliteStore>,
+    ) {
+        let store = std::sync::Arc::new(agentos_engine::SqliteStore::open_memory().unwrap());
+        store
+            .create_user(&agentos_core::types::UserRecord {
+                user_id: ADMIN_USER_ID.to_string(),
+                username: "admin".to_string(),
+                password: "admin12345".to_string(),
+                email: Some("admin@agentos.dev".to_string()),
+                role: "admin".to_string(),
+                tenant_id: "default".to_string(),
+                created_at: chrono::Utc::now().to_rfc3339(),
+                last_login_at: None,
+            })
+            .await
+            .unwrap();
+        let mut state = AppState::new();
+        state.store = Some(store.clone());
+        state.db = Some(store.clone());
+        state.session = Some(std::sync::Arc::new(
+            agentos_session::SessionCoordinator::new(),
+        ));
+        (crate::server::build_router(state.clone()), state, store)
+    }
+
+    async fn admin_token(router: &axum::Router) -> String {
+        let resp = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/auth/login")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        json!({"username": "admin", "password": "admin12345"}).to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let body = axum::body::to_bytes(resp.into_body(), 8192).await.unwrap();
+        let json: Value = serde_json::from_slice(&body).unwrap();
+        json["access_token"].as_str().unwrap().to_string()
+    }
+
+    async fn create_and_patch_agent(
+        router: &axum::Router,
+        state: &AppState,
+        store: &std::sync::Arc<agentos_engine::SqliteStore>,
+        token: &str,
+        create_agent: Option<&str>,
+        patch_agent: &str,
+    ) -> (String, String) {
+        let body = match create_agent {
+            Some(a) => json!({"agent_id": a, "intent": "t"}),
+            None => json!({"intent": "t"}),
+        };
+        let create = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/sessions")
+                    .header("content-type", "application/json")
+                    .header("authorization", format!("Bearer {token}"))
+                    .body(Body::from(body.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(create.status(), 200, "create_session 应成功");
+        let created: Value = serde_json::from_slice(
+            &axum::body::to_bytes(create.into_body(), 8192)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        let thread_id = created["thread_id"].as_str().unwrap().to_string();
+        let pipeline_id = created["active_pipeline_id"]
+            .as_str()
+            .unwrap_or_else(|| created["pipeline_ids"][0].as_str().unwrap())
+            .to_string();
+        // 补注册 pipeline↔thread 映射（生产路径 F8 link 已落，here 同步 registry）
+        let registry = state.session.as_ref().unwrap().registry().clone();
+        registry.register_thread(&thread_id, ADMIN_USER_ID);
+        registry.register_thread_pipeline(&thread_id, &pipeline_id);
+
+        let patch = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("PATCH")
+                    .uri(format!("/api/v1/sessions/{thread_id}/agent"))
+                    .header("content-type", "application/json")
+                    .header("authorization", format!("Bearer {token}"))
+                    .body(Body::from(json!({"agent_id": patch_agent}).to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(patch.status(), 200, "PATCH agent 应成功");
+        let patched: Value =
+            serde_json::from_slice(&axum::body::to_bytes(patch.into_body(), 8192).await.unwrap())
+                .unwrap();
+        assert_eq!(patched["agent_id"].as_str(), Some(patch_agent));
+        let _ = store;
+        (thread_id, pipeline_id)
+    }
+
+    #[tokio::test]
+    async fn create_then_patch_agent_writes_registry_db_and_pipeline_state() {
+        let (router, state, store) = setup().await;
+        let token = admin_token(&router).await;
+        let (thread_id, pipeline_id) =
+            create_and_patch_agent(&router, &state, &store, &token, None, "general_agent").await;
+
+        // ① registry 热绑定
+        let registry = state.session.as_ref().unwrap().registry();
+        assert_eq!(
+            registry.get_agent_for_thread(&thread_id).as_deref(),
+            Some("general_agent"),
+            "registry 线程绑定必须同步"
+        );
+
+        // ② sessions 表冷兜底
+        let session = store.get_session(&thread_id).await.unwrap().unwrap();
+        assert_eq!(
+            session.agent_id.as_deref(),
+            Some("general_agent"),
+            "sessions 表 agent_id 必须同步"
+        );
+
+        // ③ 主管道 state 持久化真值（阶段 1 核心断言）
+        let store_obj: std::sync::Arc<dyn StorageBackend> = store.clone();
+        let tenant_id =
+            crate::auth::resolve_tenant_id_by_user(Some(&store_obj), ADMIN_USER_ID).await;
+        let state_fields = store_obj
+            .load_pipeline_state(&pipeline_id, &tenant_id)
+            .await
+            .unwrap();
+        assert_eq!(
+            state_fields.get("agent.id").and_then(|v| v.as_str()),
+            Some("general_agent"),
+            "主管道 state agent.id 必须落库（绑定真值进管道 state）"
+        );
+    }
+
+    #[tokio::test]
+    async fn create_session_seeds_agent_id_into_pipeline_state() {
+        // 创建时即选 agent → 出生绑定直接落 state（不必等 PATCH）
+        let (router, state, store) = setup().await;
+        let token = admin_token(&router).await;
+        let (_, pipeline_id) = create_and_patch_agent(
+            &router,
+            &state,
+            &store,
+            &token,
+            Some("general_agent"),
+            "general_agent",
+        )
+        .await;
+
+        let store_obj: std::sync::Arc<dyn StorageBackend> = store.clone();
+        let tenant_id =
+            crate::auth::resolve_tenant_id_by_user(Some(&store_obj), ADMIN_USER_ID).await;
+        let state_fields = store_obj
+            .load_pipeline_state(&pipeline_id, &tenant_id)
+            .await
+            .unwrap();
+        assert_eq!(
+            state_fields.get("agent.id").and_then(|v| v.as_str()),
+            Some("general_agent"),
+            "出生绑定（创建时指定的 agent_id）必须落管道 state"
+        );
+    }
 }
 
 #[cfg(test)]

@@ -7,8 +7,8 @@ use async_trait::async_trait;
 use std::sync::Arc;
 use std::sync::Mutex;
 
-/// (thread_id, user_id, content, thinking_strength, client_message_id)
-type UserInputRecord = (String, String, String, String, String);
+/// (thread_id, user_id, content, thinking_strength, client_message_id, agent_id)
+type UserInputRecord = (String, String, String, String, String, String);
 
 /// 记录型 mock dispatcher，捕获每次调用。
 #[derive(Default)]
@@ -29,7 +29,7 @@ impl PipelineDispatcher for MockDispatcher {
         thinking_strength: &str,
         _execution_context: Option<&serde_json::Value>,
         _state_overlay: Option<&serde_json::Value>,
-        _agent_id: &str,
+        agent_id: &str,
         client_message_id: &str,
     ) -> Result<(), String> {
         self.user_inputs.lock().unwrap().push((
@@ -38,6 +38,7 @@ impl PipelineDispatcher for MockDispatcher {
             content.into(),
             thinking_strength.into(),
             client_message_id.into(),
+            agent_id.into(),
         ));
         Ok(())
     }
@@ -161,6 +162,27 @@ async fn user_input_without_client_message_id_defaults_empty() {
     assert_eq!(outcome, RouteOutcome::Handled);
     let inputs = dispatcher.user_inputs.lock().unwrap();
     assert_eq!(inputs[0].4, "", "无幂等键 → 空串（触发器/旧客户端路径）");
+}
+
+#[tokio::test]
+async fn user_input_dispatches_unspecified_agent_id() {
+    // 2026-08-24 阶段1：router 不再硬编码 "agentos"——agent 解析归
+    // dispatch_user_input 实现侧（线程绑定 registry → DB → agentos）。
+    // 空串 = 未指定，由 EngineDispatcher 按绑定解析；任务派发等显式路径
+    // 走 chat.send_message 的 agent_id 参数，不经此路由。
+    let (router, dispatcher) = router();
+    let msg = serde_json::json!({
+        "type": "user_input",
+        "thread_id": "thread-1",
+        "data": {"content": "hello"},
+    });
+    let outcome = router.route(&msg, "user-A").await;
+    assert_eq!(outcome, RouteOutcome::Handled);
+    let inputs = dispatcher.user_inputs.lock().unwrap();
+    assert_eq!(
+        inputs[0].5, "",
+        "WS 主会话路径 agent_id 应传空串（未指定，由 dispatcher 解析）"
+    );
 }
 
 #[tokio::test]

@@ -269,6 +269,40 @@ async fn handle_inbound(
     }
 }
 
+/// 执行 agent 解析（2026-08-24 阶段1：绑定真值进管道 state 的消费点）。
+///
+/// 优先级：显式传入（chat.send_message 任务派发按 target 选 agent，非空）
+/// → registry 线程绑定（热路径，会话编辑后即生效）
+/// → DB sessions.agent_id（冷路径，内核重启后 registry 丢失）
+/// → "agentos"（默认主 agent）。
+///
+/// WS 主会话路径（InboundRouter::route_user_input）传空串 = 未指定，
+/// 由本函数按绑定解析——此前硬编码 "agentos" 使会话 agent 切换
+/// 成为纯展示字段（docs/working/管道配置输入契约与动态管道能力设计_20260824.md §4.3）。
+async fn resolve_dispatch_agent(
+    registry: Option<&agentos_session::ConnectionRegistry>,
+    store: Option<&Arc<dyn StorageBackend>>,
+    thread_id: &str,
+    explicit_agent: &str,
+) -> String {
+    if !explicit_agent.is_empty() {
+        return explicit_agent.to_string();
+    }
+    if let Some(reg) = registry {
+        if let Some(aid) = reg.get_agent_for_thread(thread_id) {
+            return aid;
+        }
+    }
+    if let Some(store) = store {
+        if let Ok(Some(s)) = store.get_session(thread_id).await {
+            if let Some(aid) = s.agent_id.filter(|a| !a.is_empty()) {
+                return aid;
+            }
+        }
+    }
+    "agentos".to_string()
+}
+
 /// 基于管道引擎的入站分发器（P2-6：迁 0.1 inbound 分支）。
 ///
 /// user_input → process_via_engine（在租户上下文内执行管道）；
@@ -369,9 +403,16 @@ impl PipelineDispatcher for EngineDispatcher {
         // GAP-1 阶段 1：自由 state overlay（chat.send_message 的 state 参数 +
         // 引擎写入的 lineage 扁平键）透传给引擎，并入 initial_state。
         let exec_overlay = state_overlay.cloned();
-        // 执行 agent（任务派发按 target 选 agent；主会话路径默认 agentos）：
+        // 执行 agent（任务派发显式指定；主会话路径空串 → 按线程绑定解析，
+        // registry → DB sessions.agent_id → agentos，2026-08-24 阶段1）：
         // 决定引擎加载的 agent 配置（人格/tool_ids/技能）。
-        let exec_agent = agent_id.to_string();
+        let exec_agent = resolve_dispatch_agent(
+            state.session.as_ref().map(|s| s.registry().as_ref()),
+            state.store.as_ref(),
+            &exec_thread,
+            &agent_id,
+        )
+        .await;
         // 前端幂等键（ADR 2026-08-21）：随 user 消息 metadata 落库回显。
         let exec_cmid = client_message_id.to_string();
         // ADR-2026-08-15：后台执行必须经 RunChainRegistry 入链——裸 spawn 会让
@@ -702,6 +743,7 @@ async fn resolve_pipeline_id_for_thread(
 
 #[cfg(test)]
 mod tests {
+    use super::resolve_dispatch_agent;
     use super::resolve_pipeline_id_for_thread;
     use agentos_core::traits::StorageBackend;
     use agentos_core::traits::{MessageQueryOpts, SessionListFilter};
@@ -906,5 +948,80 @@ mod tests {
     async fn no_session_falls_back_to_thread_id() {
         let mock = ResolveMock::new(Ok(vec![]), None);
         assert_eq!(resolve(mock, "T1", "").await, "T1");
+    }
+
+    // ── resolve_dispatch_agent：执行 agent 解析（2026-08-24 阶段1）──
+    // 优先级：显式传入（任务派发）→ registry 线程绑定（热）→ DB sessions.agent_id（冷）→ agentos
+
+    fn session_with_agent(agent_id: Option<&str>) -> SessionRecord {
+        let mut s = session_record(None);
+        s.agent_id = agent_id.map(|a| a.to_string());
+        s
+    }
+
+    async fn resolve_agent(
+        registry: Option<&agentos_session::ConnectionRegistry>,
+        mock: Option<ResolveMock>,
+        explicit: &str,
+    ) -> String {
+        let store = mock.map(|m| Arc::new(m) as Arc<dyn StorageBackend>);
+        resolve_dispatch_agent(registry, store.as_ref(), "T1", explicit).await
+    }
+
+    #[tokio::test]
+    async fn dispatch_agent_explicit_wins_over_binding() {
+        // 任务派发显式传 agent（非空）→ 不被线程绑定覆盖（chat.send_message 路径语义）
+        let registry = agentos_session::ConnectionRegistry::new();
+        registry.register_thread_agent("T1", "general_agent");
+        let mock = ResolveMock::new(Ok(vec![]), Some(session_with_agent(Some("general_agent"))));
+        assert_eq!(
+            resolve_agent(Some(&registry), Some(mock), "code_writer_agent").await,
+            "code_writer_agent"
+        );
+    }
+
+    #[tokio::test]
+    async fn dispatch_agent_hot_registry_binding_used() {
+        // 热路径：registry 线程绑定优先于 DB（会话编辑后即生效）
+        let registry = agentos_session::ConnectionRegistry::new();
+        registry.register_thread_agent("T1", "general_agent");
+        let mock = ResolveMock::new(Ok(vec![]), Some(session_with_agent(Some("agentos"))));
+        assert_eq!(
+            resolve_agent(Some(&registry), Some(mock), "").await,
+            "general_agent"
+        );
+    }
+
+    #[tokio::test]
+    async fn dispatch_agent_cold_db_fallback_used() {
+        // 冷路径（registry 无绑定，如内核重启后）：DB sessions.agent_id 兜底
+        let registry = agentos_session::ConnectionRegistry::new();
+        let mock = ResolveMock::new(Ok(vec![]), Some(session_with_agent(Some("general_agent"))));
+        assert_eq!(
+            resolve_agent(Some(&registry), Some(mock), "").await,
+            "general_agent"
+        );
+    }
+
+    #[tokio::test]
+    async fn dispatch_agent_empty_or_missing_db_binding_falls_to_agentos() {
+        // DB 绑定为空串或 None → 兜底主 agent
+        let registry = agentos_session::ConnectionRegistry::new();
+        let mock = ResolveMock::new(Ok(vec![]), Some(session_with_agent(Some(""))));
+        assert_eq!(
+            resolve_agent(Some(&registry), Some(mock), "").await,
+            "agentos"
+        );
+        let mock2 = ResolveMock::new(Ok(vec![]), Some(session_with_agent(None)));
+        assert_eq!(
+            resolve_agent(Some(&registry), Some(mock2), "").await,
+            "agentos"
+        );
+    }
+
+    #[tokio::test]
+    async fn dispatch_agent_no_registry_no_db_defaults_agentos() {
+        let mock = ResolveMock::new(Ok(vec![]), None);
+        assert_eq!(resolve_agent(None, Some(mock), "").await, "agentos");
     }
 }

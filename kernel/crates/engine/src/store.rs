@@ -27,6 +27,9 @@ pub const VOLATILE_RUN_KEYS: &[&str] = &[
     "thinking_strength",
     "_assistant_id_assigned",
     "_pending_message_ops",
+    // 2026-08-24 阶段1：agent_id 是每轮派发注入键（dispatcher 按线程绑定解析），
+    // 不得被 checkpoint/轨迹恢复的历史值覆盖——绑定真值在 agent.id 持久键。
+    "agent_id",
 ];
 
 use std::sync::Arc;

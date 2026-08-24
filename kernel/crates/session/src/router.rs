@@ -32,8 +32,9 @@ pub trait PipelineDispatcher: Send + Sync {
     /// initial_state 顶层扁平键；WS 前端路径不携带（None）。
     ///
     /// agent_id 指定执行管道加载的 agent 配置（config/agents/**/<id>.yaml，
-    /// 决定人格/tool_ids/技能）。任务派发按 target 选 agent；前端主会话
-    /// 路径传默认主 agent。
+    /// 决定人格/tool_ids/技能）。任务派发按 target 选 agent；WS 主会话路径
+    /// 传空串 = 未指定，由 dispatcher 实现侧按线程绑定解析
+    /// （registry → DB sessions.agent_id → 默认 "agentos"，2026-08-24 阶段1）。
     ///
     /// client_message_id 是前端幂等键（ADR 2026-08-21）：随 user 消息
     /// metadata 落库并在 GET messages 回显，前端据此对账去重乐观消息。
@@ -191,7 +192,10 @@ impl InboundRouter {
                 &thinking_strength,
                 None,
                 None,
-                "agentos",
+                // 2026-08-24 阶段1：空串 = 未指定，agent 解析归 dispatcher
+                // 实现侧（线程绑定 registry → DB sessions.agent_id → agentos）。
+                // 此前硬编码 "agentos" 使会话编辑切换的绑定成为纯展示字段。
+                "",
                 &client_message_id,
             )
             .await
