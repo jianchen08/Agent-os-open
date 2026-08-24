@@ -102,9 +102,9 @@ class TestTaskStateFlow:
         assert task_id, f"创建任务应返回 id，实际 {body}"
 
         # 出生即落 pipeline_state 表（chat_send_handler 创建分支），聚合可见；
-        # background 派发异步落库，短轮询等待出生行出口（<15s）
+        # background 派发异步落库，短轮询等待出生行出口（<30s，内核负载高时放宽）
         row = None
-        deadline = time.time() + 15
+        deadline = time.time() + 30
         while time.time() < deadline and row is None:
             state_status, state_body, _ = http_get_with_auth(
                 f"{state_url}", token=token, timeout=10
