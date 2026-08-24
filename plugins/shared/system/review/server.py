@@ -68,8 +68,6 @@ _REVIEW_SOURCE = "tool_review"
 # report 含 status: pending(子管道已起,报告未回写) / running(子管道进行中) /
 # completed(子管道真实完成,报告已落) / failed(子管道失败)
 _reports: dict[str, dict[str, Any]] = {}
-# review_id -> 子管道 run_id（供 get_report 查询状态/前端跳转）
-_run_ids: dict[str, str] = {}
 
 
 def _now_iso() -> str:
@@ -344,13 +342,10 @@ async def get_report(review_id: str) -> dict[str, Any]:
         report = await _cold_read_report(review_id)
         if report is None:
             return {"error": "review not found", "review_id": review_id}
-    # 子管道进行中：先轮询复盘管道状态（GAP-1 chat.send_message 路径），
-    # 再回退既有 run_id 轮询（F-REVIEW-2 路径）。真实完成才落 completed。
-    if report.get("status") == "running":
-        if report.get("pipeline_id"):
-            await _maybe_finalize_on_pipeline_completion(report)
-        else:
-            await _maybe_finalize_on_run_completion(report)
+    # 子管道进行中：轮询复盘管道状态（GAP-1 chat.send_message 路径），
+    # 真实完成才落 completed。
+    if report.get("status") == "running" and report.get("pipeline_id"):
+        await _maybe_finalize_on_pipeline_completion(report)
     return report
 
 
@@ -512,67 +507,6 @@ async def _maybe_finalize_on_pipeline_completion(report: dict[str, Any]) -> None
             report.get("review_id"),
             pipeline_id,
         )
-
-
-async def _query_run_status(run_id: str) -> str | None:
-    """经 pipeline-executor.get_run_status 能力查询子管道 run 状态。
-
-    能力未注入 / 调用失败 / run 不存在时返回 None——调用方保持现状，绝不崩。
-    """
-    try:
-        pipeline = plugin.get_capability("pipeline-executor")
-    except KeyError:
-        logger.warning(
-            "[Review] pipeline-executor 能力未注入，无法查询子管道状态 run_id=%s", run_id
-        )
-        return None
-    try:
-        result = await pipeline.call("get_run_status", {"run_id": run_id})
-    except Exception as exc:  # noqa: BLE001 — 内核/管道层错误统一降级，不崩 get_report
-        logger.warning("[Review] 查询子管道状态失败 run_id=%s: %s", run_id, exc)
-        return None
-    if isinstance(result, dict) and isinstance(result.get("status"), str):
-        return result["status"]
-    logger.warning(
-        "[Review] get_run_status 返回异常 run_id=%s result=%s", run_id, result
-    )
-    return None
-
-
-async def _maybe_finalize_on_run_completion(report: dict[str, Any]) -> None:
-    """子管道真实完成时把 review 落为 completed（轮询语义，F-REVIEW-2）。
-
-    在 get_report 调用时惰性轮询（最小可行，无后台任务）：
-    - run 状态 completed → 落 report status=completed。报告正文（lessons 等）
-      仍待 store_report 回写（事件接线为后续 P1）；状态语义先行——completed
-      只由子管道真实完成触发，不再"启动即 completed（乐观，空 lessons）"。
-    - run 状态 failed → report status=failed（不再无限 running）。
-    - running/suspended/查询失败 → 保持 running（记录 run_status 供调用方）。
-    """
-    run_id = report.get("run_id")
-    if not run_id:
-        return
-    status = await _query_run_status(run_id)
-    if status == "completed":
-        report["status"] = "completed"
-        report["run_status"] = "completed"
-        report["completed_at"] = time.time()
-        logger.info(
-            "[Review] 子管道真实完成，落 completed review_id=%s run_id=%s",
-            report.get("review_id"),
-            run_id,
-        )
-    elif status == "failed":
-        report["status"] = "failed"
-        report["run_status"] = "failed"
-        report["failed_at"] = time.time()
-        logger.info(
-            "[Review] 子管道失败 review_id=%s run_id=%s",
-            report.get("review_id"),
-            run_id,
-        )
-    elif status:
-        report["run_status"] = status
 
 
 @plugin.on_load

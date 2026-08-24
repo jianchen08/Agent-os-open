@@ -1098,13 +1098,3 @@ class TestSingleton:
         assert mgr1 is mgr2
         assert mgr1._providers  # 默认提供者已创建
         _run(mod.stop_isolation_manager())
-
-    def test_get_isolation_manager_sync_and_stop(self) -> None:
-        mod = _load_manager()
-        mgr = mod.get_isolation_manager_sync()
-        assert mgr is _run(mod.get_isolation_manager())
-        _run(mod.stop_isolation_manager())
-        assert mod._global_manager is None
-        mgr2 = mod.get_isolation_manager_sync()
-        assert mgr2 is not mgr
-        _run(mod.stop_isolation_manager())

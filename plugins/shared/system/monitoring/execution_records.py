@@ -212,16 +212,6 @@ async def get_execution_record(record_id: str) -> dict[str, Any]:
     return {"id": record_id, "session_id": "", "message_data": {}, "created_at": ""}
 
 
-async def delete_execution_record(record_id: str) -> dict[str, Any]:
-    """删除执行记录（内核消息只读能力面无删除操作，维持成功形态由前端消费）。"""
-    return {"success": True, "message": "记录已删除", "id": record_id}
-
-
-async def delete_execution_records_by_session(session_id: str) -> dict[str, Any]:
-    """按会话删除执行记录（同上：读面无删除，维持原 stub 成功形态）。"""
-    return {"success": True, "deleted_count": 0, "session_id": session_id}
-
-
 async def clear_all_records(authorization: str = "") -> dict[str, Any]:
     """清理所有执行记录与轨迹（stub 做实 2026-08-24）。
 

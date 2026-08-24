@@ -19,7 +19,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import uuid
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
 from base_combo_adapter import BaseComboAdapter
 from helpers import _extract_qq_text
@@ -28,9 +28,6 @@ from onebot_client import OneBotClient
 from output_adapter import IOutputAdapter
 
 from agentos_plugin_sdk.pipeline_types import StateKeys
-
-if TYPE_CHECKING:
-    pass
 
 logger = logging.getLogger(__name__)
 

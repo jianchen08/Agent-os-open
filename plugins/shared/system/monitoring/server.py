@@ -84,15 +84,6 @@ async def _on_load(params: dict[str, Any]) -> None:
             rows = await handle.call("list", {})
             return rows if isinstance(rows, list) else []
 
-        async def _kr_query_table(
-            table: str, limit: int = 50, offset: int = 0, authorization: str = ""
-        ):
-            params: dict[str, Any] = {"table": table, "limit": int(limit), "offset": int(offset)}
-            if authorization:
-                params["_authorization"] = authorization
-            handle = plugin.get_capability("db-admin")
-            return await handle.call("table_query", params)
-
         async def _kr_clear_execution_data(authorization: str = ""):
             params: dict[str, Any] = {}
             if authorization:
@@ -103,7 +94,6 @@ async def _on_load(params: dict[str, Any]) -> None:
         kernel_reads.set_provider("pipeline-runs", _kr_list_pipeline_runs)
         kernel_reads.set_provider("messages", _kr_list_messages)
         kernel_reads.set_provider("pipeline-state", _kr_list_state_rows)
-        kernel_reads.set_provider("db-admin", _kr_query_table)
         kernel_reads.set_provider("db-admin-clear", _kr_clear_execution_data)
     except Exception as exc:  # noqa: BLE001 — 注入失败降级（handler 返回空结构）
         logger.warning("[monitoring] kernel_reads provider 注入失败: %s", exc)
@@ -672,14 +662,6 @@ async def _handle_execution_domain(
         if sub.startswith("/records/") and method == "GET" and "/" not in sub[len("/records/"):]:
             record_id = sub[len("/records/"):]
             return _ok(_json_response(await er.get_execution_record(record_id)))
-        # DELETE /records/{record_id}
-        if sub.startswith("/records/") and method == "DELETE" and "/" not in sub[len("/records/"):]:
-            record_id = sub[len("/records/"):]
-            return _ok(_json_response(await er.delete_execution_record(record_id)))
-        # DELETE /records/session/{session_id}
-        if sub.startswith("/records/session/") and method == "DELETE":
-            session_id = sub[len("/records/session/"):]
-            return _ok(_json_response(await er.delete_execution_records_by_session(session_id)))
         # POST /records/clear-all（全量清理：内核 9 表 + registry + payload_diag 快照文件）
         if sub == "/records/clear-all" and method == "POST":
             result = await er.clear_all_records(authorization=_authorization(headers))

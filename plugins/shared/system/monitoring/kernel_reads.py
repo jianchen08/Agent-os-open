@@ -111,24 +111,6 @@ async def list_state_rows() -> list[dict[str, Any]]:
     return _rows(await _call("pipeline-state"))
 
 
-async def query_table(
-    table: str,
-    limit: int = 50,
-    offset: int = 0,
-    authorization: str = "",
-) -> dict[str, Any]:
-    """db-admin.table_query：查内核 SQLite 表（带调用方 Authorization 做读角色校验）。
-
-    Returns:
-        ``{table, total, limit, offset, rows}``；能力不可用时 rows 为空、total 为 0。
-    """
-    raw = _unwrap(await _call("db-admin", table=table, limit=limit, offset=offset,
-                              authorization=authorization))
-    if isinstance(raw, dict) and isinstance(raw.get("rows"), list):
-        return raw
-    return {"table": table, "total": 0, "limit": limit, "offset": offset, "rows": []}
-
-
 class ClearExecutionDataError(Exception):
     """全量执行数据清理失败（写面专用，绝不降级假成功）。
 

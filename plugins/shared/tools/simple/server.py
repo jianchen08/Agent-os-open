@@ -65,7 +65,6 @@ def create_plugin() -> AgentOSPlugin:
     )
     plugin.register_tool("ide_open_file", IDE_OPEN_FILE_SCHEMA, ide_open_file, "IDE 打开文件")
     plugin.register_tool("ide_show_diff", IDE_SHOW_DIFF_SCHEMA, ide_show_diff, "IDE 差异展示")
-    plugin.register_tool("state_update", STATE_UPDATE_SCHEMA, state_update, "工作流状态更新")
     plugin.register_tool(
         "compatibility_checker", COMPATIBILITY_CHECKER_SCHEMA, compatibility_checker, "兼容性检查"
     )
@@ -124,7 +123,6 @@ TOOL_REGISTRY = {
     "ide_get_selection": (IDE_GET_SELECTION_SCHEMA, ide_get_selection),
     "ide_open_file": (IDE_OPEN_FILE_SCHEMA, ide_open_file),
     "ide_show_diff": (IDE_SHOW_DIFF_SCHEMA, ide_show_diff),
-    "state_update": (STATE_UPDATE_SCHEMA, state_update),
     "compatibility_checker": (COMPATIBILITY_CHECKER_SCHEMA, compatibility_checker),
     "read_execution_detail": (READ_EXECUTION_DETAIL_SCHEMA, read_execution_detail),
     "register_resource": (REGISTER_RESOURCE_SCHEMA, register_resource),

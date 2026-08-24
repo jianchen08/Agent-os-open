@@ -1,6 +1,6 @@
-"""工作流工具——状态更新 + 兼容性检查。
+"""工作流工具——兼容性检查。
 
-[来源: src/tools/builtin/state_update/tool.py, src/tools/builtin/compatibility_checker/tool.py]
+[来源: src/tools/builtin/compatibility_checker/tool.py]
 """
 
 from __future__ import annotations
@@ -9,18 +9,6 @@ import logging
 from typing import Any
 
 logger = logging.getLogger(__name__)
-
-STATE_UPDATE_SCHEMA: dict[str, Any] = {
-    "type": "object",
-    "properties": {
-        "updates": {
-            "type": "object",
-            "description": "要更新的状态变量键值对。支持 increment/append 操作模式",
-            "additionalProperties": True,
-        },
-    },
-    "required": ["updates"],
-}
 
 COMPATIBILITY_CHECKER_SCHEMA: dict[str, Any] = {
     "type": "object",
@@ -45,32 +33,6 @@ COMPATIBILITY_CHECKER_SCHEMA: dict[str, Any] = {
     },
     "required": ["original_resource", "modified_resource"],
 }
-
-
-async def state_update(updates: dict[str, Any], **kwargs: Any) -> dict[str, Any]:
-    """更新工作流共享状态变量。"""
-    try:
-        result_updates: dict[str, Any] = {}
-        for key, value in updates.items():
-            if isinstance(value, dict) and "operation" in value:
-                operation = value.get("operation")
-                operand = value.get("value", 0)
-                if operation == "increment":
-                    result_updates[key] = operand
-                elif operation == "append":
-                    result_updates[key] = [operand]
-                else:
-                    logger.warning("未知操作: %s", operation)
-                    result_updates[key] = value
-            else:
-                result_updates[key] = value
-
-        return {
-            "success": True,
-            "updates": result_updates,
-        }
-    except Exception as e:
-        return {"success": False, "error": f"状态更新失败: {e}"}
 
 
 def _check_config_compatibility(original: dict[str, Any], modified: dict[str, Any]) -> dict[str, Any]:

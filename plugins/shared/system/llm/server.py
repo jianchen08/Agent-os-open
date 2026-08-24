@@ -39,19 +39,6 @@ plugin = AgentOSPlugin("llm_service")
 _adapter: Any = None
 
 
-class _ConfigCenterShim:
-    """临时兼容层：模拟 0.1 ConfigCenter 接口，数据来自 plugin.get_config()。"""
-
-    def __init__(self, config: dict[str, Any]) -> None:
-        self._config = config
-
-    def get(self, key: str, default: Any = None) -> Any:
-        return self._config.get(key, default)
-
-    def get_section(self, section: str) -> dict[str, Any]:
-        return self._config.get(section, {})
-
-
 @plugin.on_load
 async def _on_load(params: dict[str, Any]) -> None:
     """Initialize LLM adapter on load."""

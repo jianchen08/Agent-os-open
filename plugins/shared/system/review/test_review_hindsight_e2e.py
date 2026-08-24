@@ -155,7 +155,6 @@ async def hindsight_stack(tmp_path_factory: Any) -> Any:
 
         rmod = _load_module(_PLUGIN_DIR / "server.py", "review_server_e2e")
         rmod._reports.clear()
-        rmod._run_ids.clear()
         rmod.set_memory_backend(HindsightBackend(caller))
 
         yield hmod, rmod

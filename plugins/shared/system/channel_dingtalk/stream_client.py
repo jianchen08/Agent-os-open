@@ -279,7 +279,7 @@ class DingTalkStreamClient:
                 try:
                     data = json.loads(msg.data)
                     await self._handle_event(data)
-                except (json.JSONDecodeError, Exception) as exc:
+                except Exception as exc:
                     logger.warning("Error handling stream message: %s", exc)
             elif msg.type in (
                 aiohttp.WSMsgType.CLOSED,

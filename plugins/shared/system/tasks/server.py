@@ -29,25 +29,6 @@ plugin = AgentOSPlugin("task_service")
 _service: TaskService | None = None
 
 
-class _ConfigCenterShim:
-    """临时兼容层：模拟 0.1 ConfigCenter 接口，数据来自 plugin.get_config()。
-
-    DEBT: 内核已实现按需注入（invoker.filter_config_by_refs 按 plugin.json
-    config_refs 过滤）。task_service 声明了 config_refs=["system"]，现在能收到
-    system 配置节（含 long_term_task 等）。本 shim 当前未被引用，待 task_service
-    实际消费 system 配置（如 long_term_task 超时）后删除，直接用 YAML 配置。
-    """
-
-    def __init__(self, config: dict) -> None:
-        self._config = config
-
-    def get(self, key: str, default: Any = None) -> Any:
-        return self._config.get(key, default)
-
-    def get_section(self, section: str) -> dict:
-        return self._config.get(section, {})
-
-
 def _get_service() -> TaskService:
     """获取全局 TaskService 实例，未初始化时抛出 RuntimeError。"""
     if _service is None:

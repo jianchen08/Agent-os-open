@@ -1509,25 +1509,6 @@ async def get_isolation_manager(config_path: str | None = None) -> IsolationMana
         return _global_manager
 
 
-def get_isolation_manager_sync(config_path: str | None = None) -> IsolationManager:
-    """同步获取全局隔离管理器单例。
-
-    供 build_services 等同步初始化上下文使用（asyncio.get_event_loop()
-    在 Python 3.12+ 同步上下文里会抛 RuntimeError）。
-    与 async 版本共享同一个 _global_manager 单例。
-    """
-    global _global_manager  # noqa: PLW0603
-    if _global_manager is None:
-        _global_manager = IsolationManager(config_path=config_path)
-    return _global_manager
-
-
-async def start_isolation_manager():
-    """启动全局隔离管理器"""
-    manager = await get_isolation_manager()
-    await manager.start()
-
-
 async def stop_isolation_manager():
     """停止全局隔离管理器"""
     global _global_manager  # noqa: PLW0603

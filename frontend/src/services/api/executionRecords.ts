@@ -181,40 +181,6 @@ export async function getChildrenRecords(parentId: string): Promise<ExecutionRec
 }
 
 /**
- * 删除执行记录
- *
- * @param recordId 记录ID
- * @returns 是否成功
- */
-export async function deleteExecutionRecord(recordId: string): Promise<boolean> {
-  try {
-    await apiClient.delete(MONITORING_ENDPOINTS.mon_execution_record_delete.replace('{record_id}', recordId))
-    return true
-  } catch (error) {
-    console.error('[ExecutionRecordsAPI] 删除执行记录失败:', error)
-    return false
-  }
-}
-
-/**
- * 按会话删除执行记录
- *
- * @param sessionId 会话ID
- * @returns 删除的记录数量
- */
-export async function deleteExecutionRecordsBySession(sessionId: string): Promise<number> {
-  try {
-    const response = await apiClient.delete<{ deleted_count: number }>(
-      MONITORING_ENDPOINTS.mon_execution_records_delete_by_session.replace('{session_id}', sessionId),
-    )
-    return response.data.deleted_count || 0
-  } catch (error) {
-    console.error('[ExecutionRecordsAPI] 删除会话执行记录失败:', error)
-    return 0
-  }
-}
-
-/**
  * 清空全部执行记录与轨迹响应（2026-08-24 做实：内核 9 表 + registry + payload_diag 文件）
  */
 export interface ClearAllExecutionRecordsResponse {

@@ -1,5 +1,5 @@
 # @feature: FP-0.2.六 记忆检索 | @vision: V1 可进化 | @ci: none-local
-"""复盘报告持久化 TDD 测试（Step 5b + F-REVIEW-2）。
+"""复盘报告持久化 TDD 测试（Step 5b + GAP-1 轮询）。
 
 验证内容（与任务规格 4 个用例对齐）：
 1. store_report 在 _memory_backend 注入时调用 backend.add，memory_type="review"
@@ -7,10 +7,10 @@
 3. _memory_backend=None 时只走内存路径，不崩溃
 4. store_report 后 get_report 返回 status=completed 的完整报告
 
-F-REVIEW-2 扩展（review 真实完成事件，轮询语义）：
-- get_report 经 pipeline-executor.get_run_status 能力查子管道 run 状态，
-  run 真实完成才落 completed（不再"启动即 completed（乐观，空 lessons）"）
-- run 失败落 failed；进行中/挂起/查询失败保持 running（不崩）
+GAP-1 轮询扩展（复盘管道经 chat.send_message 起 review_agent 管道）：
+- get_report 经 pipeline-state.list 能力查复盘管道状态，
+  管道真实完成才落 completed（不再"启动即 completed（乐观，空 lessons）"）
+- 管道失败落 failed；进行中/查询失败保持 running（不崩）
 
 唯一外部依赖是注入的 IMemoryBackend（用 AsyncMock 替身）与 fake pipeline
 能力（CapabilityHandle 注入），不接入真实 hindsight/内核。
@@ -62,7 +62,6 @@ def mod() -> Any:
     module = _load_module()
     # 清空模块级状态，避免跨测试污染
     module._reports.clear()
-    module._run_ids.clear()
     module._memory_backend = None
     return module
 
@@ -73,42 +72,6 @@ def mock_backend() -> AsyncMock:
     backend = AsyncMock()
     backend.add.return_value = "mem-review-1"
     return backend
-
-
-def _inject_pipeline_capability(
-    mod: Any, status: str = "running", run_id: str = "run-abc"
-) -> None:
-    """注入 fake pipeline-executor 能力（F-REVIEW-2 轮询链路）。
-
-    0.2 收尾：start_run 占位已随旧引擎移除（trigger_review 走本地降级），
-    此处仅 mock get_run_status（get_report 轮询链路）。
-    """
-
-    async def fake_call(
-        method: str, params: dict[str, Any], timeout: float | None = None
-    ) -> dict[str, Any]:
-        if method == "get_run_status":
-            return {"run_id": run_id, "status": status}
-        raise AssertionError(f"unexpected capability method: {method}")
-
-    mod.plugin._capabilities["pipeline-executor"] = CapabilityHandle(
-        "pipeline-executor", call_fn=fake_call
-    )
-
-
-def _seed_running_report(mod: Any, review_id: str, run_id: str = "run-abc") -> None:
-    """按 trigger_review 成功路径登记 running 报告 + run_id。"""
-    mod._run_ids[review_id] = run_id
-    mod._reports[review_id] = {
-        "review_id": review_id,
-        "task_id": "task-x",
-        "summary": "s",
-        "artifacts": [],
-        "metrics": {},
-        "status": "running",
-        "run_id": run_id,
-        "created_at": 1.0,
-    }
 
 
 # ═══════════════════════════════════════════════════════════
@@ -205,100 +168,6 @@ class TestGetReportAfterStore:
         assert got["status"] == "completed"
         assert got["task_id"] == "task-4"
         assert got["lessons"] == ["lesson-x"]
-
-
-# ═══════════════════════════════════════════════════════════
-# F-REVIEW-2: review 真实完成事件（轮询子管道 run 状态）
-# 语义：completed 只由子管道真实完成触发，不再"启动即 completed（乐观，空 lessons）"
-# ═══════════════════════════════════════════════════════════
-
-
-class TestGetReportRunStatusPolling:
-    """get_report 经 pipeline-executor.get_run_status 轮询子管道真实状态。"""
-
-    async def test_run_completed_finalizes_report(self, mod: Any) -> None:
-        """run 状态 completed → get_report 把 report 落为 completed。"""
-        _inject_pipeline_capability(mod, status="completed")
-        _seed_running_report(mod, "review-5")
-
-        got = await mod.get_report("review-5")
-        assert got["status"] == "completed"
-        assert got["run_status"] == "completed"
-        assert "completed_at" in got
-        assert got["run_id"] == "run-abc"
-
-    async def test_run_still_running_keeps_running(self, mod: Any) -> None:
-        """run 仍 running → report 保持 running，不提前 completed。"""
-        _inject_pipeline_capability(mod, status="running")
-        _seed_running_report(mod, "review-6")
-
-        got = await mod.get_report("review-6")
-        assert got["status"] == "running"
-        assert got.get("run_status") == "running"
-
-    async def test_run_suspended_keeps_running(self, mod: Any) -> None:
-        """run 挂起 → report 保持 running（记录 run_status 供调用方）。"""
-        _inject_pipeline_capability(mod, status="suspended")
-        _seed_running_report(mod, "review-6b")
-
-        got = await mod.get_report("review-6b")
-        assert got["status"] == "running"
-        assert got.get("run_status") == "suspended"
-
-    async def test_run_failed_marks_report_failed(self, mod: Any) -> None:
-        """run 失败 → report 落 failed（不再无限 running）。"""
-        _inject_pipeline_capability(mod, status="failed")
-        _seed_running_report(mod, "review-7")
-
-        got = await mod.get_report("review-7")
-        assert got["status"] == "failed"
-        assert got["run_status"] == "failed"
-        assert "failed_at" in got
-
-    async def test_no_capability_keeps_running_degrades(self, mod: Any) -> None:
-        """能力未注入（独立进程/降级）→ 查询失败，保持 running，不崩。"""
-        _seed_running_report(mod, "review-8")
-
-        got = await mod.get_report("review-8")
-        assert got["status"] == "running"
-        assert got.get("run_status") is None
-
-    async def test_run_status_call_failure_keeps_running(self, mod: Any) -> None:
-        """内核 get_run_status 报错 → 降级保持 running，不崩。"""
-
-        async def failing_call(
-            method: str, params: dict[str, Any], timeout: float | None = None
-        ) -> dict[str, Any]:
-            raise RuntimeError("kernel unreachable")
-
-        mod.plugin._capabilities["pipeline-executor"] = CapabilityHandle(
-            "pipeline-executor", call_fn=failing_call
-        )
-        _seed_running_report(mod, "review-8b")
-
-        got = await mod.get_report("review-8b")
-        assert got["status"] == "running"
-
-
-class TestTriggerReviewDegrade:
-    """trigger_review 行为（0.2 收尾：start_run 占位已移除，固定本地降级）。
-
-    review_agent 深度复盘待接入 chat.send_message → PipelineExecutor 路径
-    （见 server.py 模块头注释），届时恢复 running/轮询链路测试。
-    """
-
-    async def test_trigger_degrades_locally(self, mod: Any) -> None:
-        """trigger 直接本地降级报告（status=completed, mode=local_degrade）。"""
-        triggered = await mod.trigger_review(
-            task_id="task-11",
-            summary="无能力环境",
-            metrics={"accuracy": 0.3},
-        )
-        assert triggered["status"] == "completed"
-        assert triggered["mode"] == "local_degrade"
-        got = await mod.get_report(triggered["review_id"])
-        assert got["mode"] == "local_degrade"
-        assert got["status"] == "completed"
 
 
 # ═══════════════════════════════════════════════════════════

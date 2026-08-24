@@ -223,15 +223,6 @@ def get_workspace_base_dir() -> Path:
     return Path(os.path.normpath(str(find_project_root() / raw_str)))
 
 
-def get_isolation_level() -> str:
-    """从配置文件读取隔离级别，读取失败则返回默认值 isolated"""
-    config = _load_isolation_config()
-    level = config.get("coordinator", {}).get("default_level")
-    if level:
-        return str(level)
-    return "isolated"
-
-
 def _is_absolute_path(path_str: str) -> bool:
     """判断路径是否为绝对路径（兼容 Windows 和 Unix 风格）"""
     p = Path(path_str)

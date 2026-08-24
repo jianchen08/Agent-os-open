@@ -273,10 +273,6 @@ def _ok(data: Any) -> dict[str, Any]:
     return {"success": True, "data": data}
 
 
-def _error(message: str, status: int = 503) -> dict[str, Any]:
-    return {"success": False, "error": message, "data": _json_response({"error": message}, status)}
-
-
 def _decode_body(raw_body: str) -> dict[str, Any]:
     """解码 http.handle 的 raw_body（base64 或明文 JSON）为 dict。"""
     if not raw_body:

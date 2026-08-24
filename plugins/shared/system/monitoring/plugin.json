@@ -281,26 +281,6 @@
       "description": "execution 域：获取单条执行记录"
     },
     {
-      "route_id": "mon_execution_record_delete",
-      "method": "DELETE",
-      "path": "/ext/monitoring/execution/records/{record_id}",
-      "auth": "user",
-      "handler_capability": "http.handle",
-      "timeout_ms": 5000,
-      "max_concurrency": 4,
-      "description": "execution 域：删除执行记录（读面无删除，成功形态由前端消费）"
-    },
-    {
-      "route_id": "mon_execution_records_delete_by_session",
-      "method": "DELETE",
-      "path": "/ext/monitoring/execution/records/session/{session_id}",
-      "auth": "user",
-      "handler_capability": "http.handle",
-      "timeout_ms": 10000,
-      "max_concurrency": 4,
-      "description": "execution 域：按会话删除执行记录（读面无删除，成功形态由前端消费）"
-    },
-    {
       "route_id": "mon_execution_records_clear_all",
       "method": "POST",
       "path": "/ext/monitoring/execution/records/clear-all",

@@ -84,8 +84,13 @@
   /** dsh_adapter（DSH Plugin Adapter）：plugin.json 声明 3 端点 */
   export const DSH_ADAPTER_ENDPOINTS = {
     'dsh_skin_assets': '/ext/dsh_adapter/styles/skin-assets/{skin}/{file:path}',
-    'dsh_skin_merged_css': '/ext/dsh_adapter/styles/skin/{skin}/merged.css',
     'dsh_skin_hooks': '/ext/dsh_adapter/styles/skin/{skin}/hooks.mjs',
+    'dsh_skin_merged_css': '/ext/dsh_adapter/styles/skin/{skin}/merged.css',
+  } as const
+
+  /** e2e_lifecycle_probe（E2E Lifecycle Probe）：plugin.json 声明 1 端点 */
+  export const E2E_LIFECYCLE_PROBE_ENDPOINTS = {
+    'probe_echo': '/ext/e2e_lifecycle_probe/echo',
   } as const
 
   /** evaluation_service（Evaluation Service）：plugin.json 声明 3 端点 */
@@ -160,7 +165,7 @@
     'series': '/ext/metrics_admin/series',
   } as const
 
-  /** monitoring（Monitoring Service）：plugin.json 声明 25 端点 */
+  /** monitoring（Monitoring Service）：plugin.json 声明 23 端点 */
   export const MONITORING_ENDPOINTS = {
     'mon_agent_calls_list': '/ext/monitoring/agent-calls',
     'mon_agent_calls_statistics': '/ext/monitoring/agent-calls/statistics',
@@ -169,10 +174,8 @@
     'mon_execution_records_list': '/ext/monitoring/execution/records',
     'mon_execution_records_clear_all': '/ext/monitoring/execution/records/clear-all',
     'mon_execution_records_group_summary': '/ext/monitoring/execution/records/group-summary',
-    'mon_execution_records_delete_by_session': '/ext/monitoring/execution/records/session/{session_id}',
     'mon_execution_records_sessions': '/ext/monitoring/execution/records/sessions',
     'mon_execution_records_tree': '/ext/monitoring/execution/records/tree/{session_id}',
-    'mon_execution_record_delete': '/ext/monitoring/execution/records/{record_id}',
     'mon_execution_record_get': '/ext/monitoring/execution/records/{record_id}',
     'mon_execution_record_children': '/ext/monitoring/execution/records/{record_id}/children',
     'mon_payload_diag_page': '/ext/monitoring/page/payload-diag',

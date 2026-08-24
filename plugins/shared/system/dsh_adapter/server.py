@@ -109,6 +109,8 @@ def ensure_extra_tools_layout() -> str | None:
             try:
                 shutil.rmtree(link)
             except OSError:
+                # 清理是尽力而为：文件被占用/权限不足时保留残留，下次装载再试，
+                # 不影响插件启用主流程。
                 pass
     return str(_EXTRA_TOOLS_DIR)
 

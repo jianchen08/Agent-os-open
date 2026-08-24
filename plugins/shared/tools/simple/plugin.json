@@ -223,27 +223,6 @@
         }
       },
       {
-        "name": "state_update",
-        "description": "更新工作流共享状态变量",
-        "render": {
-          "card": "form",
-          "title": "状态更新"
-        },
-        "input_schema": {
-          "type": "object",
-          "properties": {
-            "updates": {
-              "type": "object",
-              "description": "要更新的状态变量键值对。支持 increment/append 操作模式",
-              "additionalProperties": true
-            }
-          },
-          "required": [
-            "updates"
-          ]
-        }
-      },
-      {
         "name": "compatibility_checker",
         "description": "检查资源修改兼容性，识别破坏性变更",
         "render": {

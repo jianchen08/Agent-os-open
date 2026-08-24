@@ -44,9 +44,6 @@ tools:
   memory:
     isolation: non_isolated
     execution: host_direct
-  state_update:
-    isolation: non_isolated
-    execution: host_direct
   resource_merge:
     isolation: non_isolated
     execution: host_direct
