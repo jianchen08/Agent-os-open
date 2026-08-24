@@ -12,55 +12,17 @@ export const ROUTES = {
   LOGIN: '/login',
   /** 注册页 */
   REGISTER: '/register',
-  /** 设置页面 */
-  SETTINGS: '/settings',
-  /** 设置子页面 */
-  SETTINGS_LLM: '/settings/llm',
-  /** 插件设置 */
-  SETTINGS_PLUGINS: '/settings/plugins',
-  // planned 未实现：无对应页面与路由，保留供后续扩展
-  /** 记忆配置 */
-  SETTINGS_MEMORY: '/settings/memory',
-  // planned 未实现：无对应页面与路由，保留供后续扩展
-  /** 隔离配置 */
-  SETTINGS_ISOLATION: '/settings/isolation',
-  // planned 未实现：无对应页面与路由，保留供后续扩展
-  /** 安全配置 */
-  SETTINGS_SECURITY: '/settings/security',
-  // planned 未实现：无对应页面与路由，保留供后续扩展
-  /** 评估配置 */
-  SETTINGS_EVALUATION: '/settings/evaluation',
-  // planned 未实现：无对应页面与路由，保留供后续扩展
-  /** 外部工具配置 */
-  SETTINGS_EXTERNAL_TOOLS: '/settings/external-tools',
-  /** 管道配置 */
-  SETTINGS_PIPELINE: '/settings/pipeline',
-  /** 主题设置 */
-  SETTINGS_THEME: '/settings/theme',
-  // planned 未实现：无对应页面与路由，保留供后续扩展
-  /** 通用配置页（动态路径，需拼 configPath 参数） */
-  SETTINGS_GENERIC: '/settings/generic',
+  // /settings 路由族已退役（2026-08-24 设置工作区页签化）：设置唯一入口 =
+  // openWorkspacePanelByPath('/settings')（SettingsHubWidget），无独立路由页。
   // /tools、/agents 路由已退役（2026-08-20 agent_manager 插件化）：
   // 智能体页面由 agent_manager 插件 contributes.pages 声明（path=/agents，
-  // 经 openWorkspacePanelByPath 解析）；能力浏览并入 /settings/plugins。
-  /** 监控页面 */
+  // 经 openWorkspacePanelByPath 解析）；能力浏览并入设置中枢「插件注册表」。
   /** 管理员页面 */
   ADMIN: '/admin',
   /** 记忆页面 */
   MEMORY: '/memory',
-  /** 触发器页面 */
   /** 知识库页面 */
   KNOWLEDGE_BASE: '/knowledge-base',
-  /** 会话页面 */
-  SESSION: (id: string) => `/session/${id}`,
-  /** 演示页面 */
-  DEMO: {
-    DEEP_SPACE: '/demo/deep-space',
-  },
-  /** 测试页面 */
-  TEST: {
-    TOOL_CARDS: '/test/tool-cards',
-  },
   /** 调试页面 */
   DEBUG: {
     /** 调试中心入口 */

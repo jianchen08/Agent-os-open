@@ -1,6 +1,5 @@
 /** 自生长闭环集成 连接模块管理器、Schema 注册表、WebSocket 推送和组件注册 */
 
-import { syncNavItemsFromContributes } from '@/constants/navItems'
 import apiClient from '@/services/api/client'
 import { fetchSchemaCached, invalidateSchemaCache } from '@/hooks/queries/useSchemaQuery'
 import { syncPluginStyles, removeAllPluginStyles } from '@/services/pluginStyles'
@@ -124,7 +123,6 @@ async function reloadContributionRegistry(): Promise<void> {
     } catch (err) {
       loggers.websocket.warn('插件声明校验异常:', err)
     }
-    syncNavItemsFromContributes()
     shortcutRegistry.refresh()
 
     // DSH 适配器贡献（task_dsh_plugin_adapter 任务 2）：renderers 兜底注册 +

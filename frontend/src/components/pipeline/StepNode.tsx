@@ -9,7 +9,6 @@
  */
 
 import { useMemo, useState } from 'react'
-import { useNavigate } from 'react-router-dom'
 import {
   ChevronDown,
   ChevronUp,
@@ -22,6 +21,7 @@ import {
 import { Badge } from '@/components/ui/badge'
 import { Input } from '@/components/ui/input'
 import { resolveRef } from '@/services/pipeline/model'
+import { openWorkspacePanel } from '@/services/workspacePanelOpener'
 import { KeyValueEditor } from './KeyValueEditor'
 import { PluginPickerDialog } from './PluginPickerDialog'
 import { RouteRulesEditor } from './RouteRulesEditor'
@@ -231,14 +231,22 @@ export function StepNode({
 }) {
   const [detailOpen, setDetailOpen] = useState(true)
   const [pickerOpen, setPickerOpen] = useState(false)
-  const navigate = useNavigate()
 
   const knownStepIdSet = useMemo(() => new Set(knownStepIds), [knownStepIds])
   const stepsPath: Path = [...stepPath, 'steps']
   const refs = Array.isArray(step?.steps) ? step.steps : []
 
+  // 插件配置深链：设置中枢工作区页签（独立路由页已退役）。
+  // 每个插件配置文件一个稳定 tab id，重复点击激活已有页签（initialActive 只在首开生效）
   const openPluginConfig = (pluginId: string, fileId: string) => {
-    navigate(`/settings/plugin/${encodeURIComponent(pluginId)}/${encodeURIComponent(fileId)}`)
+    openWorkspacePanel({
+      id: `ws-plugin-config-${pluginId}-${fileId}`,
+      title: `配置 ${fileId}`,
+      component: 'settings_hub',
+      icon: 'settings',
+      moduleId: '__panel_settings__',
+      props: { initialActive: `plugin:${pluginId}:${fileId}` },
+    })
   }
 
   return (

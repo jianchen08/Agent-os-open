@@ -1,19 +1,16 @@
 /**
  * 内核设置导航项共享数据源
  *
- * SettingsPage（全屏路由页 /settings）与 SettingsHubWidget（工作区设置面板
- * settings_hub）都需要展示「内核设置」导航（主题 / 插件 / 管道）。
- *
- * 统一收拢到此处单一数据源，两处消费同一数据源——避免同一业务概念两处定义
- * （各自维护清单时新增内核项需双修）。
+ * SettingsHubWidget（工作区设置面板 settings_hub，设置唯一 UI）的「内核设置」
+ * 导航（模型 / 主题 / 插件 / 管道）。独立路由页 /settings 已退役（2026-08-24）。
  */
 
 export interface KernelNavItem {
-  /** 稳定 id（SettingsPage 的 builtin item id 使用） */
+  /** 稳定 id（设置中枢 nav key 前缀 kernel-{id}） */
   id: string
-  /** 完整标题（SettingsPage 全屏页左侧导航展示） */
+  /** 完整标题 */
   title: string
-  /** 短标签（SettingsHubWidget 工作区面板展示） */
+  /** 短标签（设置中枢左侧导航展示） */
   label: string
   /** 描述文案 */
   description: string

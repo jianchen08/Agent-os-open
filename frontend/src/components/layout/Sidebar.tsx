@@ -543,7 +543,7 @@ export const Sidebar = memo<SidebarProps>(({ isMobile = false }) => {
                       <DropdownMenuSeparator />
                     </>
                   )}
-                  <DropdownMenuItem onClick={() => navigate('/settings')}>设置</DropdownMenuItem>
+                  <DropdownMenuItem onClick={() => openWorkspacePanelByPath('/settings')}>设置</DropdownMenuItem>
                   <DropdownMenuItem onClick={() => navigate('/monitoring')}>监控</DropdownMenuItem>
                   <DropdownMenuItem
                     onClick={() => openWorkspacePanelByPath('/tasks')}
@@ -781,7 +781,7 @@ export const Sidebar = memo<SidebarProps>(({ isMobile = false }) => {
                       <DropdownMenuSeparator />
                     </>
                   )}
-                  <DropdownMenuItem onClick={() => navigate('/settings')} data-testid="sidebar-user-menu-settings">
+                  <DropdownMenuItem onClick={() => openWorkspacePanelByPath('/settings')} data-testid="sidebar-user-menu-settings">
                     设置
                   </DropdownMenuItem>
                   <DropdownMenuItem onClick={() => navigate('/monitoring')} data-testid="sidebar-user-menu-monitoring">

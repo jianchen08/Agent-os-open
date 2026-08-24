@@ -32,9 +32,8 @@ import { generateUUID } from './utils/uuid'
 import type { SendMessageParams } from './components/chat/types'
 import type { ReactNode } from 'react'
 
-const SettingsPage = lazy(() =>
-  import('@/pages/settings/SettingsPage').then((m) => ({ default: m.SettingsPage })),
-)
+// 设置已工作区页签化（2026-08-24）：唯一 UI = SettingsHubWidget（settings_hub），
+// 独立路由页 SettingsPage/PluginConfigRoute 及 /settings/* 路由全部退役删除。
 // 聊天容器懒加载：ChatContainer 依赖链包含 @lobehub/ui 全量入口（EmojiPicker→
 // @emoji-mart/data 3.2MB、Markdown→highlight.js 197 语言）与 react-syntax-highlighter
 // 全量 Prism（300 语言）、mermaid，静态导入会让 /login 等公共页也必须加载整个聊天
@@ -42,9 +41,6 @@ const SettingsPage = lazy(() =>
 // 懒加载后仅进入聊天界面时才拉取该 chunk，登录/注册页首屏只加载轻量依赖。
 const ChatContainer = lazy(() =>
   import('./components/chat/ChatContainer').then((m) => ({ default: m.ChatContainer })),
-)
-const LlmSettingsPage = lazy(() =>
-  import('@/pages/settings/LlmSettingsPage').then((m) => ({ default: m.LlmSettingsPage })),
 )
 const AdminPage = lazy(() =>
   import('@/pages/admin/AdminPage').then((m) => ({ default: m.AdminPage })),
@@ -82,30 +78,9 @@ const DebugLlmPayloadPage = lazy(() =>
     default: m.DebugLlmPayloadPage,
   })),
 )
-const PluginsSettingsPage = lazy(() =>
-  import('@/pages/settings/PluginsSettingsPage').then((m) => ({
-    default: m.PluginsSettingsPage,
-  })),
-)
-
-const ThemeSettingsPage = lazy(() =>
-  import('@/pages/settings/ThemeSettingsPage').then((m) => ({
-    default: m.ThemeSettingsPage,
-  })),
-)
-const PipelineSettingsPage = lazy(() =>
-  import('@/pages/settings/PipelineSettingsPage').then((m) => ({
-    default: m.PipelineSettingsPage,
-  })),
-)
 const KnowledgeBasePage = lazy(() =>
   import('@/pages/knowledge-base/KnowledgeBasePage').then((m) => ({
     default: m.KnowledgeBasePage,
-  })),
-)
-const PluginConfigRoute = lazy(() =>
-  import('@/pages/settings/PluginConfigRoute').then((m) => ({
-    default: m.PluginConfigRoute,
   })),
 )
 // 插件 page 独立路由渲染器：通配 /p/:pageId → contributionRegistry.getPage → renderPageContent
@@ -511,66 +486,6 @@ export function createRouter() {
       element: (
         <ProtectedRoute>
           <HomePage />
-        </ProtectedRoute>
-      ),
-    },
-    {
-      path: ROUTES.SETTINGS,
-      element: (
-        <ProtectedRoute>
-          <Suspense fallback={LazyFallback}>
-            <SettingsPage />
-          </Suspense>
-        </ProtectedRoute>
-      ),
-    },
-    {
-      path: ROUTES.SETTINGS_LLM,
-      element: (
-        <ProtectedRoute>
-          <Suspense fallback={LazyFallback}>
-            <LlmSettingsPage />
-          </Suspense>
-        </ProtectedRoute>
-      ),
-    },
-    {
-      path: ROUTES.SETTINGS_PLUGINS,
-      element: (
-        <ProtectedRoute>
-          <Suspense fallback={LazyFallback}>
-            <PluginsSettingsPage />
-          </Suspense>
-        </ProtectedRoute>
-      ),
-    },
-    {
-      path: ROUTES.SETTINGS_THEME,
-      element: (
-        <ProtectedRoute>
-          <Suspense fallback={LazyFallback}>
-            <ThemeSettingsPage />
-          </Suspense>
-        </ProtectedRoute>
-      ),
-    },
-    {
-      path: ROUTES.SETTINGS_PIPELINE,
-      element: (
-        <ProtectedRoute>
-          <Suspense fallback={LazyFallback}>
-            <PipelineSettingsPage />
-          </Suspense>
-        </ProtectedRoute>
-      ),
-    },
-    {
-      path: '/settings/plugin/:pluginId/:fileId',
-      element: (
-        <ProtectedRoute>
-          <Suspense fallback={LazyFallback}>
-            <PluginConfigRoute />
-          </Suspense>
         </ProtectedRoute>
       ),
     },
