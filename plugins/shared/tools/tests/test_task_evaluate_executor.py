@@ -76,7 +76,11 @@ def metrics_path(tmp_path: Path) -> str:
 
 @pytest.fixture
 def mod_exec() -> Any:
-    return _load_executor_mod()
+    m = _load_executor_mod()
+    # 测试时限压回收轮询（默认 600s 生产上限会让无结论用例空转十分钟）
+    m._POLL_INTERVAL_S = 0.01
+    m._AGENT_RECOVER_TIMEOUT_S = 0.2
+    return m
 
 
 def _make_executor(
@@ -240,7 +244,7 @@ class TestAgentMetricPipeline:
         assert r.results[0].pipeline_run_id == "evalPipe1"
 
     def test_recover_detected_result(
-        self, mod_exec: Any, metrics_path: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+        self, mod_exec: Any, metrics_path: str, tmp_path: Path
     ) -> None:
         """回收：evaluation.detected_result → passed/score/feedback/pipeline_run_id。"""
         ws = tmp_path / "ws-task"
@@ -279,7 +283,7 @@ class TestAgentMetricPipeline:
         assert m.evaluator_output["passed"] is True
 
     def test_recover_failed_terminal(
-        self, mod_exec: Any, metrics_path: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+        self, mod_exec: Any, metrics_path: str, tmp_path: Path
     ) -> None:
         """回收：评估子管道 failed 终态 → 指标诚实失败。"""
         mod_exec._POLL_INTERVAL_S = 0.01
