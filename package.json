@@ -19,13 +19,10 @@
     "test:coverage": "python scripts/run_gates.py --mode all"
   },
   "devDependencies": {
-    "@types/jest": "^30.0.0",
     "@types/node": "^24.10.1",
     "concurrently": "^9.1.0",
     "electron": "^39.2.0",
     "electron-builder": "^26.0.12",
-    "jest": "^30.4.2",
-    "ts-jest": "^29.4.9",
     "typescript": "~5.9.3",
     "wait-on": "^8.0.3"
   },
