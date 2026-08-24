@@ -7,8 +7,8 @@
  *   无归属（孤儿）管道单独平铺；树视图/列表视图切换；树子级点击展开/收起
  *   （默认收起），条目详情走独立「详细信息」按钮、与树展开解耦（树操作不关
  *   详情，详情停留显示）；操作按钮（打开对话/暂停/恢复/取消/复制 ID/打开工作空间）
- * - 任务信息并入管道条目（任务标题/状态/进度在条目与展开详情中显示），
- *   不再单独挂任务树区块
+ * - 任务与执行管道一对一绑定（2026-08-24 裁定）：条目行即任务行，不包
+ *   任务节点层——子任务/子管道直挂该条目行下，只一个层级
  */
 
 import React, { useCallback, useEffect, useMemo, useState } from 'react'
@@ -348,17 +348,16 @@ export function PipelineManagerWidget(_rawProps: Record<string, unknown>) {
     [pipelineEntries, kindFilter, statusFilter],
   )
 
-  /** 管道树：会话主管道顶层 → 任务节点（容器/普通任务，展开显示其下管道）→ 管道。
-   *  任务作为父节点展开显示其管道（任务 → 任务管道层级）；
+  /** 管道树：会话主管道顶层 → 任务条目行（一对一绑定：条目行即任务行，
+   *  2026-08-24 裁定不再包任务节点层）→ 子任务/子管道直挂该条目行下；
    *  无任务归属的管道直接挂主管道下；孤儿（无会话归属）顶层平铺。
    *  状态分组按顶层节点状态划分，子树跟随父级不拆散层级。 */
   const pipelineTree = useMemo(() => {
     const entryByKey = new Map(filteredPipelineEntries.map((e) => [e.key, e]))
     // 任务索引（id → task；全量任务）
     const taskById = new Map(allTasks.map((t) => [String(t.id ?? ''), t]))
-    const taskKey = (taskId: string) => `task:${taskId}`
     // 任务父子映射：taskId → parentTaskId（父容器任务 = metadata.parent_project_id，
-    // 容器任务 = task.owned 声明、非管道——子任务据此挂到容器节点下）
+    // 容器任务 = task.owned 声明、非管道——子任务据此挂到父任务条目行下）
     const parentTaskOf = new Map<string, string>()
     for (const t of allTasks) {
       const pid = String(t.parent_task_id ?? t.parentTaskId ?? '')
@@ -393,45 +392,17 @@ export function PipelineManagerWidget(_rawProps: Record<string, unknown>) {
       list.push(node)
       childrenMap.set(parentKey, list)
     }
-    // 任务节点注册表（含容器任务；普通任务只要有管道/父子关系也建节点）
-    const taskNodes = new Map<string, PipelineTreeNode>()
-    const ensureTaskNode = (taskId: string): PipelineTreeNode => {
-      const existing = taskNodes.get(taskId)
-      if (existing) return existing
-      const t = taskById.get(taskId)
-      const meta = t?.metadata as Record<string, unknown> | undefined
-      const node: PipelineTreeNode = {
-        key: taskKey(taskId),
-        task: {
-          taskId,
-          title: String(t?.title ?? taskId),
-          status: String(t?.status ?? ''),
-          // task_scope 在 TaskModel.metadata 中（API 顶层无此字段）
-          scope: String(
-            t?.task_scope ?? t?.taskScope ?? meta?.task_scope ?? meta?.taskScope ?? '',
-          ),
-          // 工作空间路径（任务节点"打开工作空间"按钮；取值链与管道条目一致）
-          workspacePath:
-            String(
-              (meta as { ws_meta?: { path?: string } } | undefined)?.ws_meta?.path
-              || t?.workspace
-              || '',
-            ) || undefined,
-        },
-        depth: 0,
-        children: [],
-      }
-      taskNodes.set(taskId, node)
-      nodeByKey.set(node.key, node)
-      return node
-    }
-    // 1) 任务管道 → 挂到所属任务节点下（任务节点展开显示管道）
+    // 任务 id → 其条目行 key（一对一绑定的条目行即任务行；子任务据此直挂）
+    const taskEntryKeyOf = new Map<string, string>()
+    // 任务条目行（归属在循环 3 统一判定：父任务行 → 父管道条目 → 会话主管道 → 顶层）
+    const taskRowNodes = new Map<string, PipelineTreeNode>()
+    // 1) 任务管道条目：直接成行（不包任务节点层——一对一绑定一个层级）
     for (const e of filteredPipelineEntries) {
       if (e.kind === 'task' && e.taskId) {
-        const parentNode = ensureTaskNode(e.taskId)
-        const childNode: PipelineTreeNode = { key: e.key, entry: e, depth: 0, children: [] }
-        nodeByKey.set(e.key, childNode)
-        parentNode.children.push(childNode)
+        const node: PipelineTreeNode = { key: e.key, entry: e, depth: 0, children: [] }
+        nodeByKey.set(e.key, node)
+        if (!taskEntryKeyOf.has(e.taskId)) taskEntryKeyOf.set(e.taskId, e.key)
+        taskRowNodes.set(e.taskId, node)
         continue
       }
       // 2) 非任务管道（会话主管道/直接子管道/孤儿）
@@ -451,18 +422,20 @@ export function PipelineManagerWidget(_rawProps: Record<string, unknown>) {
         roots.push(node)
       }
     }
-    // 3) 任务节点归属：父任务节点 → 父管道条目（主管道提交的子任务挂主管道下）→ 会话主管道 → 顶层
-    for (const [taskId, node] of taskNodes) {
+    // 3) 任务条目行归属：父任务条目行（parent_task_id=父任务 id）→ 父管道条目
+    //    （子任务管道出生即 lineage.parent_pipeline_id = 提交者管道 id）→ 会话
+    //    主管道 → 顶层
+    for (const [taskId, node] of taskRowNodes) {
       const parentTaskId = parentTaskOf.get(taskId)
       if (parentTaskId) {
-        if (taskNodes.has(parentTaskId)) {
-          taskNodes.get(parentTaskId)!.children.push(node)
+        const parentEntryKey = taskEntryKeyOf.get(parentTaskId)
+        if (
+          parentEntryKey
+          && (entryByKey.has(parentEntryKey) || childrenMap.has(parentEntryKey))
+        ) {
+          pushChild(parentEntryKey, node)
           continue
         }
-        // 父 id 是管道条目（主管道/任意管道，kind=session）：子任务管道出生
-        // 即 lineage.parent_pipeline_id = 提交者管道 id——任务归属优先挂其下
-        // （容器任务父已在 taskNodes 分支处理；此处覆盖"父=管道"形态，杜绝
-        // 落到 threadTop 回退/顶层平铺）。
         if (entryByKey.has(parentTaskId) || childrenMap.has(parentTaskId)) {
           pushChild(parentTaskId, node)
           continue
@@ -485,11 +458,8 @@ export function PipelineManagerWidget(_rawProps: Record<string, unknown>) {
       if (parent) parent.children.push(...nodes)
       else roots.push(...nodes)
     }
-    const sortByStart = (a: PipelineTreeNode, b: PipelineTreeNode) => {
-      const sa = a.entry?.startedAt ?? a.task?.title ?? ''
-      const sb = b.entry?.startedAt ?? b.task?.title ?? ''
-      return String(sb).localeCompare(String(sa))
-    }
+    const sortByStart = (a: PipelineTreeNode, b: PipelineTreeNode) =>
+      String(b.entry.startedAt).localeCompare(String(a.entry.startedAt))
     const build = (list: PipelineTreeNode[], depth: number): PipelineTreeNode[] =>
       [...list].sort(sortByStart).map((n) => ({
         ...n,
@@ -762,7 +732,6 @@ export function PipelineManagerWidget(_rawProps: Record<string, unknown>) {
             onToggleDetail={toggleDetail}
             onEntryClick={handleEntryClick}
             onAction={handleAction}
-            onOpenWorkspace={openWorkspaceTab}
           />
         )}
       </div>
@@ -775,21 +744,12 @@ export function PipelineManagerWidget(_rawProps: Record<string, unknown>) {
 // 树视图：执行中/最近完成两组，组内按会话分组，孤儿平铺
 // ═════════════════════════════════════════════════════════════════
 
-/** 管道树节点：任务节点（容器/普通任务，展开显示其管道）或 管道条目 */
+/** 管道树节点：管道条目（任务一对一绑定时条目行即任务行，子级直挂其下） */
 interface PipelineTreeNode {
-  /** 节点 key（条目 key 或 task:taskId） */
+  /** 节点 key（条目 key） */
   key: string
-  /** 管道条目（任务节点无此字段） */
-  entry?: PipelineViewEntry
-  /** 任务节点信息（容器/普通任务；其 children 为管道或子任务节点） */
-  task?: {
-    taskId: string
-    title: string
-    status: string
-    scope: string
-    /** 工作空间路径（有值才渲染"打开工作空间"按钮） */
-    workspacePath?: string
-  }
+  /** 管道条目 */
+  entry: PipelineViewEntry
   depth: number
   children: PipelineTreeNode[]
 }
@@ -803,7 +763,6 @@ function PipelineTree({
   onToggleDetail,
   onEntryClick,
   onAction,
-  onOpenWorkspace,
 }: {
   tree: PipelineTreeNode[]
   nowMs: number
@@ -813,16 +772,10 @@ function PipelineTree({
   onToggleDetail: (key: string) => void
   onEntryClick: (entry: PipelineViewEntry) => void
   onAction: (entry: PipelineViewEntry, action: 'pause' | 'resume' | 'cancel' | 'copy' | 'workspace') => void
-  onOpenWorkspace: (taskId: string, title: string) => void
 }) {
   // 主管道（顶层）与容器任务按状态分组：执行中 / 最近完成（子树跟随父级）
-  const isActiveNode = (n: PipelineTreeNode): boolean => {
-    if (n.entry) {
-      return n.entry.status === 'running' || n.entry.status === 'suspended'
-    }
-    const mapped = taskStatusToPipelineStatus(n.task?.status)
-    return mapped === 'running' || mapped === 'suspended'
-  }
+  const isActiveNode = (n: PipelineTreeNode): boolean =>
+    n.entry.status === 'running' || n.entry.status === 'suspended'
   const split = (nodes: PipelineTreeNode[]) => {
     const active: PipelineTreeNode[] = []
     const done: PipelineTreeNode[] = []
@@ -854,7 +807,6 @@ function PipelineTree({
           onToggleDetail={onToggleDetail}
           onEntryClick={onEntryClick}
           onAction={onAction}
-          onOpenWorkspace={onOpenWorkspace}
         />
       )}
       {done.length > 0 && (
@@ -869,7 +821,6 @@ function PipelineTree({
           onToggleDetail={onToggleDetail}
           onEntryClick={onEntryClick}
           onAction={onAction}
-          onOpenWorkspace={onOpenWorkspace}
         />
       )}
     </div>
@@ -885,18 +836,6 @@ function countNodes(nodes: PipelineTreeNode[]): number {
   return n
 }
 
-/** 任务状态 → 展示文案/颜色 */
-function containerStatusInfo(status: string): { label: string; color: string } {
-  const mapped = taskStatusToPipelineStatus(status)
-  if (mapped) {
-    const info = statusIcon(mapped)
-    return { label: info.label, color: info.color }
-  }
-  // 未知状态：原样展示（此前兜底 'completed' 会把未知态误标为"已完成"）
-  const info = statusIcon('running')
-  return { label: status || '未知', color: info.color }
-}
-
 /** 分组：主管道顶层（对应会话层级），子任务管道直接嵌套其下；孤儿顶层平铺 */
 function TreeGroup({
   title,
@@ -909,7 +848,6 @@ function TreeGroup({
   onToggleDetail,
   onEntryClick,
   onAction,
-  onOpenWorkspace,
 }: {
   title: string
   count: number
@@ -921,7 +859,6 @@ function TreeGroup({
   onToggleDetail: (key: string) => void
   onEntryClick: (entry: PipelineViewEntry) => void
   onAction: (entry: PipelineViewEntry, action: 'pause' | 'resume' | 'cancel' | 'copy' | 'workspace') => void
-  onOpenWorkspace: (taskId: string, title: string) => void
 }) {
   const [collapsed, setCollapsed] = useState(false)
   return (
@@ -938,28 +875,19 @@ function TreeGroup({
         <div>
           {nodes.map((node) => (
             <div key={node.key}>
-              {node.entry ? (
-                <EntryRow
-                  entry={node.entry}
-                  depth={node.depth}
-                  nowMs={nowMs}
-                  detailOpen={detailOpenKeys.has(node.key)}
-                  treeOpen={treeOpenKeys.has(node.key)}
-                  hasChildren={node.children.length > 0}
-                  onTreeToggle={onTreeToggle}
-                  onToggleDetail={onToggleDetail}
-                  onEntryClick={onEntryClick}
-                  onAction={onAction}
-                  orphan={!node.entry.threadId}
-                />
-              ) : (
-                <TaskRow
-                  node={node}
-                  open={treeOpenKeys.has(node.key)}
-                  onToggle={onTreeToggle}
-                  onOpenWorkspace={onOpenWorkspace}
-                />
-              )}
+              <EntryRow
+                entry={node.entry}
+                depth={node.depth}
+                nowMs={nowMs}
+                detailOpen={detailOpenKeys.has(node.key)}
+                treeOpen={treeOpenKeys.has(node.key)}
+                hasChildren={node.children.length > 0}
+                onTreeToggle={onTreeToggle}
+                onToggleDetail={onToggleDetail}
+                onEntryClick={onEntryClick}
+                onAction={onAction}
+                orphan={!node.entry.threadId}
+              />
               {node.children.length > 0 && treeOpenKeys.has(node.key) && (
                 <TreeChildren
                   nodes={node.children}
@@ -970,7 +898,6 @@ function TreeGroup({
                   onToggleDetail={onToggleDetail}
                   onEntryClick={onEntryClick}
                   onAction={onAction}
-                  onOpenWorkspace={onOpenWorkspace}
                 />
               )}
             </div>
@@ -981,7 +908,7 @@ function TreeGroup({
   )
 }
 
-/** 递归渲染子树（主管道 → 任务/容器 → 管道嵌套；仅在父节点树展开时挂载） */
+/** 递归渲染子树（主管道 → 任务条目行 → 子任务/子管道嵌套；仅在父节点树展开时挂载） */
 function TreeChildren({
   nodes,
   nowMs,
@@ -991,7 +918,6 @@ function TreeChildren({
   onToggleDetail,
   onEntryClick,
   onAction,
-  onOpenWorkspace,
 }: {
   nodes: PipelineTreeNode[]
   nowMs: number
@@ -1001,34 +927,24 @@ function TreeChildren({
   onToggleDetail: (key: string) => void
   onEntryClick: (entry: PipelineViewEntry) => void
   onAction: (entry: PipelineViewEntry, action: 'pause' | 'resume' | 'cancel' | 'copy' | 'workspace') => void
-  onOpenWorkspace: (taskId: string, title: string) => void
 }) {
   return (
     <div>
       {nodes.map((node) => (
         <div key={node.key}>
-          {node.entry ? (
-            <EntryRow
-              entry={node.entry}
-              depth={node.depth}
-              nowMs={nowMs}
-              detailOpen={detailOpenKeys.has(node.key)}
-              treeOpen={treeOpenKeys.has(node.key)}
-              hasChildren={node.children.length > 0}
-              onTreeToggle={onTreeToggle}
-              onToggleDetail={onToggleDetail}
-              onEntryClick={onEntryClick}
-              onAction={onAction}
-              orphan={!node.entry.threadId}
-            />
-          ) : (
-            <TaskRow
-              node={node}
-              open={treeOpenKeys.has(node.key)}
-              onToggle={onTreeToggle}
-              onOpenWorkspace={onOpenWorkspace}
-            />
-          )}
+          <EntryRow
+            entry={node.entry}
+            depth={node.depth}
+            nowMs={nowMs}
+            detailOpen={detailOpenKeys.has(node.key)}
+            treeOpen={treeOpenKeys.has(node.key)}
+            hasChildren={node.children.length > 0}
+            onTreeToggle={onTreeToggle}
+            onToggleDetail={onToggleDetail}
+            onEntryClick={onEntryClick}
+            onAction={onAction}
+            orphan={!node.entry.threadId}
+          />
           {node.children.length > 0 && treeOpenKeys.has(node.key) && (
             <TreeChildren
               nodes={node.children}
@@ -1039,7 +955,6 @@ function TreeChildren({
               onToggleDetail={onToggleDetail}
               onEntryClick={onEntryClick}
               onAction={onAction}
-              onOpenWorkspace={onOpenWorkspace}
             />
           )}
         </div>
@@ -1048,83 +963,9 @@ function TreeChildren({
   )
 }
 
-/** 任务节点行（容器/普通任务）：行点击/chevron 展开-收起其下管道与子任务（树） */
-function TaskRow({
-  node,
-  open,
-  onToggle,
-  onOpenWorkspace,
-}: {
-  node: PipelineTreeNode
-  open: boolean
-  onToggle: (key: string) => void
-  onOpenWorkspace?: (taskId: string, title: string) => void
-}) {
-  const task = node.task!
-  const status = containerStatusInfo(task.status)
-  const childCount = countNodes(node.children)
-  const isContainer = task.scope === 'container'
-  return (
-    <div
-      className="hover:bg-accent group flex cursor-pointer items-center gap-1.5 py-1.5 pr-2 transition-colors"
-      style={{ paddingLeft: `${node.depth * 16 + 8}px` }}
-      onClick={() => onToggle(node.key)}
-      title={isContainer ? '容器任务（点击展开/收起其下任务管道）' : '任务（点击展开/收起其管道）'}
-    >
-      <button
-        className="text-muted-foreground hover:text-foreground flex h-5 w-5 shrink-0 items-center justify-center rounded transition-transform"
-        onClick={(e) => {
-          e.stopPropagation()
-          onToggle(node.key)
-        }}
-        tabIndex={-1}
-      >
-        <ChevronRight className={`h-3.5 w-3.5 transition-transform ${open ? 'rotate-90' : ''}`} />
-      </button>
-      <span
-        className={`shrink-0 rounded px-1 py-0 text-[10px] font-medium ${
-          isContainer
-            ? 'bg-status-info/15 text-status-info'
-            : 'bg-status-warning/15 text-status-warning'
-        }`}
-      >
-        {isContainer ? '容器' : '任务'}
-      </span>
-      <span className="text-foreground/90 min-w-0 flex-1 truncate text-sm">{task.title}</span>
-      <span className={`shrink-0 rounded px-1 text-[10px] font-medium ${status.color}`}>
-        {status.label}
-      </span>
-      {task.status && status.label !== task.status && (
-        <span
-          className="text-muted-foreground/70 shrink-0 text-[10px] font-mono"
-          title="任务原始状态"
-        >
-          {String(task.status)}
-        </span>
-      )}
-      {/* 打开工作空间（0.1 任务树节点同款）：开 workspace://<taskId> 文件树标签 */}
-      {task.workspacePath && onOpenWorkspace && (
-        <button
-          className="text-muted-foreground hover:text-foreground hidden h-5 w-5 shrink-0 items-center justify-center rounded group-hover:flex"
-          onClick={(e) => {
-            e.stopPropagation()
-            onOpenWorkspace(task.taskId, task.title)
-          }}
-          title={`打开工作空间: ${task.workspacePath}`}
-          tabIndex={-1}
-        >
-          <ExternalLink className="h-3.5 w-3.5" />
-        </button>
-      )}
-      <span className="text-muted-foreground/50 shrink-0 text-[10px]">
-        [{childCount}]
-      </span>
-    </div>
-  )
-}
-
 /** 管道条目行（常态：类型/状态/名称/agent/耗时/token；行首 chevron=树子级展开，
- *  操作区「详细信息」按钮=详情展开——两者解耦，树收起不会关详情） */
+ *  操作区「详细信息」按钮=详情展开——两者解耦，树收起不会关详情；
+ *  任务一对一绑定时此行即任务行，子任务/子管道直挂其下） */
 function EntryRow({
   entry,
   depth,

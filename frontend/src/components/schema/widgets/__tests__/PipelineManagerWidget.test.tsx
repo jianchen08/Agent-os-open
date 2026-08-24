@@ -142,8 +142,39 @@ const seed = vi.hoisted(() => {
       agent_name: 'general_agent',
     },
   ]
+  /** 一对一层级 + 树/详情解耦场景：父任务条目行 ← 子任务条目行（childPipe 有 state 真值） */
+  const DECOUPLE_TASKS: Record<string, unknown>[] = [
+    {
+      id: 'parentTask',
+      title: '父任务行',
+      status: 'completed',
+      pipeline_run_id: 'parentPipe',
+    },
+    {
+      id: 'childTask',
+      title: '子任务详情行',
+      status: 'completed',
+      pipeline_run_id: 'childPipe',
+      parent_task_id: 'parentTask',
+    },
+  ]
+  const DECOUPLE_STATES: Record<string, unknown> = {
+    childPipe: {
+      pipeline_id: 'childPipe',
+      thread_id: 'th-c',
+      state: {
+        current_phase: 'exit',
+        ended: true,
+        status: 'active',
+        'task.status': 'completed',
+        message_count: 3,
+        raw_error: null,
+      },
+    },
+  }
   const mockUseAllTasksQuery = vi.fn(() => ({ data: FAKE_ALL_TASKS }))
   const mockUsePipelineRunsQuery = vi.fn(() => ({ data: FAKE_RUNS }))
+  const mockUsePipelineStatesQuery = vi.fn(() => ({ data: FAKE_STATES }))
   return {
     FAKE_RUNS,
     FAKE_STATES,
@@ -152,14 +183,17 @@ const seed = vi.hoisted(() => {
     WS_TASKS,
     SESSION_MAIN_RUNS,
     SESSION_MAIN_TASKS,
+    DECOUPLE_TASKS,
+    DECOUPLE_STATES,
     mockUseAllTasksQuery,
     mockUsePipelineRunsQuery,
+    mockUsePipelineStatesQuery,
   }
 })
 
 vi.mock('@/hooks/queries/usePipelineRunsQuery', () => ({
   usePipelineRunsQuery: seed.mockUsePipelineRunsQuery,
-  usePipelineStatesQuery: () => ({ data: seed.FAKE_STATES }),
+  usePipelineStatesQuery: seed.mockUsePipelineStatesQuery,
 }))
 vi.mock('@/hooks/queries/useAllTasksQuery', () => ({
   useAllTasksQuery: seed.mockUseAllTasksQuery,
@@ -186,6 +220,7 @@ describe('PipelineManagerWidget', () => {
     // 默认播种全量任务；子任务用例覆盖为 SUBTASK_TASKS
     seed.mockUseAllTasksQuery.mockReturnValue({ data: seed.FAKE_ALL_TASKS })
     seed.mockUsePipelineRunsQuery.mockReturnValue({ data: seed.FAKE_RUNS })
+    seed.mockUsePipelineStatesQuery.mockReturnValue({ data: seed.FAKE_STATES })
   })
 
   it('未知状态任务保留且显示原始状态', async () => {
@@ -200,9 +235,7 @@ describe('PipelineManagerWidget', () => {
 
   it('展开详情含 state 真值行', async () => {
     renderWithProviders(<PipelineManagerWidget />)
-    // 树默认收起：先点任务节点行展开树（树=点击展开），再点条目操作区「详细信息」按钮
-    // （重渲染会使先前查询到的元素脱挂——点击必须用当次新查询的元素）
-    fireEvent.click((await screen.findAllByText('评估中任务'))[0])
+    // 一对一合并：任务条目行即任务行（无任务节点层），行内「详细信息」按钮直接可用
     const detailBtn = (await screen.findAllByTitle(/详细信息/))[0]
     fireEvent.click(detailBtn)
     await waitFor(() => expect(screen.getAllByText('State 状态').length).toBeGreaterThanOrEqual(1))
@@ -214,23 +247,35 @@ describe('PipelineManagerWidget', () => {
   })
 
   it('树收起不关详情：详情与树展开解耦（信息停留显示）', async () => {
+    seed.mockUsePipelineRunsQuery.mockReturnValue({ data: {} })
+    seed.mockUseAllTasksQuery.mockReturnValue({ data: seed.DECOUPLE_TASKS })
+    seed.mockUsePipelineStatesQuery.mockReturnValue({ data: seed.DECOUPLE_STATES })
     renderWithProviders(<PipelineManagerWidget />)
-    // 1) 点击任务节点行展开树
-    fireEvent.click((await screen.findAllByText('评估中任务'))[0])
-    // 2) 展开条目详情
-    fireEvent.click((await screen.findAllByTitle(/详细信息/))[0])
+    // 父任务条目行首 chevron（树=点击展开/收起，默认收起）
+    const parentRowChevron = () => {
+      const btn = screen.getAllByText('父任务行')[0].closest('div')?.querySelector('button')
+      expect(btn).toBeInstanceOf(HTMLElement)
+      return btn as HTMLElement
+    }
+    // 1) 展开树
+    fireEvent.click(parentRowChevron())
+    // 2) 展开子任务条目行详情（子行直挂父行下——一对一只有一个层级）
+    const childRow = (await screen.findAllByText('子任务详情行'))[0].closest('div')
+    const childInfoBtn = childRow?.querySelector('button[title*="详细信息"]')
+    expect(childInfoBtn).toBeInstanceOf(HTMLElement)
+    fireEvent.click(childInfoBtn as HTMLElement)
     await waitFor(() => expect(screen.getAllByText('State 状态').length).toBeGreaterThanOrEqual(1))
     // 3) 收起树：子树整体卸载（详情面板随之不可见），但详情状态不被树操作清除
-    fireEvent.click(screen.getAllByText('评估中任务')[0])
+    fireEvent.click(parentRowChevron())
     await waitFor(() => expect(screen.queryByText('State 状态')).toBeNull())
     // 4) 再展开树：详情仍在（停留显示，没有被树收起关掉）
-    fireEvent.click(screen.getAllByText('评估中任务')[0])
+    fireEvent.click(parentRowChevron())
     await waitFor(() => expect(screen.getAllByText('State 状态').length).toBeGreaterThanOrEqual(1))
   })
 
   it('任务派生条目落 seen：同管道不再被 states 循环重复建行', async () => {
     renderWithProviders(<PipelineManagerWidget />)
-    // pipeA 既有任务派生条目（挂 task-eval 节点下）也有 state 摘要——去重后不得
+    // pipeA 既有任务派生条目（一对一合并为条目行）也有 state 摘要——去重后不得
     // 再出现 state 回退名"会话 th-a"的重复行（同 key 双行会让展开/详情状态串扰）
     await screen.findAllByText('评估中任务')
     expect(screen.queryByText('会话 th-a')).toBeNull()
@@ -241,15 +286,15 @@ describe('PipelineManagerWidget', () => {
     renderWithProviders(<PipelineManagerWidget />)
     // 树默认收起：子任务未展开时不可见（树=点击展开）
     expect(screen.queryByText('子任务')).toBeNull()
-    // 点任务节点行首 chevron 展开（行主体点击同效，此处覆盖 chevron 分支）
+    // 点父任务条目行首 chevron 展开（一对一：条目行即任务行）
     const chevron = (await screen.findAllByText('主管道'))[0].closest('div')?.querySelector('button')
     fireEvent.click(chevron!)
-    // 任务节点行（TaskRow）至少一个
-    const subtaskRows = await screen.findAllByText('子任务')
-    const taskRow = subtaskRows.find((el) => el.closest('div')?.className.includes('hover:bg-accent'))
-    expect(taskRow).toBeDefined()
-    // 子任务行带缩进（depth>0 的 paddingLeft），且出现在主管道行的同一子树容器内
-    const padding = taskRow?.closest('div')?.getAttribute('style') ?? ''
+    // 单层：一对一绑定不出现"任务节点行+管道条目行"双层（各恰好一行）
+    expect((await screen.findAllByText('主管道')).length).toBe(1)
+    expect((await screen.findAllByText('子任务')).length).toBe(1)
+    // 子任务条目行带缩进（depth>0 的 paddingLeft），直挂父任务条目行下
+    const subtaskRow = (await screen.findAllByText('子任务'))[0].closest('div')
+    const padding = subtaskRow?.getAttribute('style') ?? ''
     expect(padding).toMatch(/padding-left:\s*2[48]px/)
   })
 
@@ -299,11 +344,12 @@ describe('PipelineManagerWidget', () => {
     expect(indented).toBe(true)
   })
 
-  it('任务节点渲染打开工作空间按钮并开 workspace 文件树标签（0.1 对齐）', async () => {
+  it('任务条目行渲染打开工作空间按钮并开 workspace 文件树标签（0.1 对齐）', async () => {
     seed.mockUseAllTasksQuery.mockReturnValue({ data: seed.WS_TASKS })
     renderWithProviders(<PipelineManagerWidget />)
-    // 树默认收起：先展开父任务节点，子任务节点行才渲染
-    fireEvent.click((await screen.findAllByText('主管道'))[0])
+    // 树默认收起：先点父任务条目行首 chevron 展开，子任务条目行才渲染
+    const chevron = (await screen.findAllByText('主管道'))[0].closest('div')?.querySelector('button')
+    fireEvent.click(chevron!)
     // workspacePath 取自 metadata.ws_meta.path；按钮 title 带完整路径
     const btns = await screen.findAllByTitle('打开工作空间: D:/ws/copy_1')
     expect(btns.length).toBeGreaterThanOrEqual(1)
