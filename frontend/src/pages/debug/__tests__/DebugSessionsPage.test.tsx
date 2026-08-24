@@ -5,19 +5,20 @@
  * 背景：后端 /execution/records* 端点从 stub 接到真实 storage 后，
  * 需确认前端组件的数据获取→状态更新→表格渲染链路完整。
  */
-import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { screen, waitFor } from '@testing-library/react'
 import React from 'react'
+import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { renderWithProviders } from '@/test/renderWithProviders'
 
 // mock 整个 executionRecords API 模块
 vi.mock('@/services/api/executionRecords', () => ({
   getExecutionRecordsSessions: vi.fn(),
   getExecutionRecords: vi.fn(),
+  clearAllExecutionRecords: vi.fn(),
 }))
 
-import { DebugSessionsPage } from '../DebugSessionsPage'
 import { DebugExecutionRecordsPage } from '../DebugExecutionRecordsPage'
+import { DebugSessionsPage } from '../DebugSessionsPage'
 import * as api from '@/services/api/executionRecords'
 
 const mockGetSessions = vi.mocked(api.getExecutionRecordsSessions)

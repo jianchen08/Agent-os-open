@@ -1,15 +1,21 @@
 /**
  * 调试执行记录页面（query 化：双 useQuery 缓存 SWR，重挂零请求）
  *
- * 展示执行记录列表，支持按会话过滤
+ * 展示执行记录列表，支持按会话过滤；「清空全部」一键清理所有执行记录与
+ * 轨迹（2026-08-24：内核 9 表 + LLM 请求快照文件，users 保留，自动备份）。
  */
 
-import { useState, Fragment } from 'react'
+import { useQueryClient } from '@tanstack/react-query'
+import { useState, useCallback, Fragment } from 'react'
 import { ErrorState } from '@/components/shared/ErrorState'
 import { LoadingState } from '@/components/shared/LoadingState'
 import { PageShell } from '@/components/shared/PageShell'
 import { useDebugSessionsQuery, useExecutionRecordsQuery } from '@/hooks/queries/useDebugQueries'
-import type { ExecutionRecord } from '@/services/api/executionRecords'
+import {
+  clearAllExecutionRecords,
+  type ExecutionRecord,
+} from '@/services/api/executionRecords'
+import { queryKeys } from '@/services/query/queryKeys'
 
 /**
  * 获取记录状态样式
@@ -99,6 +105,17 @@ function MessageSnapshotDetail({ record }: { record: ExecutionRecord }) {
   )
 }
 
+/** 从清理错误中提取可展示消息（axios 信封 detail 优先，409 运行中提示等） */
+function extractClearError(e: unknown): string {
+  if (e && typeof e === 'object' && 'response' in e) {
+    const data = (e as { response?: { data?: { detail?: unknown; error?: unknown } } }).response
+      ?.data
+    const detail = data?.detail ?? data?.error
+    if (detail) return String(detail)
+  }
+  return e instanceof Error ? e.message : '清理失败'
+}
+
 /**
  * 调试执行记录页面组件
  *
@@ -108,6 +125,10 @@ function MessageSnapshotDetail({ record }: { record: ExecutionRecord }) {
 export function DebugExecutionRecordsPage({ embedded }: { embedded?: boolean } = {}) {
   const [selectedSession, setSelectedSession] = useState<string>('')
   const [expandedId, setExpandedId] = useState<string | null>(null)
+  const [clearing, setClearing] = useState(false)
+  const [clearMessage, setClearMessage] = useState<string | null>(null)
+  const [clearError, setClearError] = useState<string | null>(null)
+  const queryClient = useQueryClient()
 
   // 会话列表 + 执行记录（query 化）：sessionId 进 key，切换过滤 = 换缓存条目
   const sessionsQuery = useDebugSessionsQuery()
@@ -128,12 +149,66 @@ export function DebugExecutionRecordsPage({ embedded }: { embedded?: boolean } =
     setSelectedSession(sessionId)
   }
 
+  /** 清空全部执行记录与轨迹（confirm 二次确认；成功后失效受影响缓存） */
+  const handleClearAll = useCallback(async () => {
+    if (
+      !window.confirm(
+        '确定清空全部执行记录与轨迹？\n\n' +
+          '将删除：执行记录、消息、任务轨迹、管道状态与 LLM 请求快照（用户账号保留）。\n' +
+          '数据库会自动生成清理前备份。此操作不可撤销。',
+      )
+    ) {
+      return
+    }
+    setClearing(true)
+    setClearError(null)
+    setClearMessage(null)
+    try {
+      const result = await clearAllExecutionRecords()
+      setClearMessage(
+        `已清理 ${result.cleared_count} 条记录` +
+          (result.payload_files_deleted ? `、${result.payload_files_deleted} 个 LLM 请求快照` : '') +
+          (result.backup_path ? '（已自动备份）' : ''),
+      )
+      setSelectedSession('')
+      // 失效所有数据源为执行数据的缓存（前缀失效覆盖分条 key）
+      for (const key of [
+        queryKeys.executionRecordsPrefix,
+        queryKeys.debugSessions,
+        queryKeys.debugTasks,
+        queryKeys.llmPayloadDiagPrefix,
+        queryKeys.sessions,
+        queryKeys.pipelineAllTasks,
+        queryKeys.longTermTasks,
+        queryKeys.pipelineRuns,
+        queryKeys.pipelineStates,
+      ]) {
+        void queryClient.invalidateQueries({ queryKey: key })
+      }
+    } catch (e) {
+      setClearError(extractClearError(e))
+    } finally {
+      setClearing(false)
+    }
+  }, [queryClient])
+
   return (
     <PageShell
       title="执行记录"
       backHref="/debug"
       embedded={embedded}
-      actions={<span className="text-muted-foreground text-xs">共 {total} 条</span>}
+      actions={
+        <span className="flex items-center gap-3">
+          <span className="text-muted-foreground text-xs">共 {total} 条</span>
+          <button
+            onClick={handleClearAll}
+            disabled={clearing}
+            className="rounded-lg bg-status-error/10 px-3 py-1.5 text-xs text-status-error hover:bg-status-error/20 disabled:opacity-50"
+          >
+            {clearing ? '清理中…' : '清空全部'}
+          </button>
+        </span>
+      }
     >
       {/* 会话过滤 */}
       <select
@@ -149,6 +224,14 @@ export function DebugExecutionRecordsPage({ embedded }: { embedded?: boolean } =
           </option>
         ))}
       </select>
+
+      {/* 清理结果反馈 */}
+      {clearMessage && (
+        <div className="bg-status-success/10 rounded-lg p-2 text-xs text-status-success">
+          {clearMessage}
+        </div>
+      )}
+      {clearError && <ErrorState message={clearError} />}
 
       {/* 加载状态 */}
       {isLoading && <LoadingState />}

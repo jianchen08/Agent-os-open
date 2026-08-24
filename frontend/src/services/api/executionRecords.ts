@@ -213,3 +213,29 @@ export async function deleteExecutionRecordsBySession(sessionId: string): Promis
     return 0
   }
 }
+
+/**
+ * 清空全部执行记录与轨迹响应（2026-08-24 做实：内核 9 表 + registry + payload_diag 文件）
+ */
+export interface ClearAllExecutionRecordsResponse {
+  success: boolean
+  message: string
+  cleared_count: number
+  tables?: Record<string, number>
+  backup_path?: string | null
+  payload_files_deleted?: number
+}
+
+/**
+ * 清空全部执行记录与轨迹（破坏性操作，需二次确认）
+ *
+ * 内核侧：VACUUM INTO 自动备份 → 事务清 9 表（users 保留）→ 内存 registry 同清；
+ * 插件侧附带清理 logs/payload_diag 快照文件。有运行中管道时后端返回 409
+ * （detail 携带提示）。错误不吞——调用方负责展示。
+ */
+export async function clearAllExecutionRecords(): Promise<ClearAllExecutionRecordsResponse> {
+  const response = await apiClient.post<ClearAllExecutionRecordsResponse>(
+    MONITORING_ENDPOINTS.mon_execution_records_clear_all,
+  )
+  return response.data
+}

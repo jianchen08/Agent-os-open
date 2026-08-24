@@ -25,12 +25,16 @@ export const queryKeys = {
   debugSessions: ['debug', 'sessions'] as const,
   /** 调试中心：执行记录（按会话分条） */
   executionRecords: (sessionId?: string) => ['debug', 'execution-records', sessionId ?? 'all'] as const,
+  /** 调试中心：执行记录全部分条的前缀（清空全部后批量失效用） */
+  executionRecordsPrefix: ['debug', 'execution-records'] as const,
+  /** 调试中心：LLM 请求诊断列表（按页分条） */
+  llmPayloadDiag: (page: number) => ['debug', 'llm-payload', page] as const,
+  /** 调试中心：LLM 请求诊断全部分条的前缀（清空全部后批量失效用） */
+  llmPayloadDiagPrefix: ['debug', 'llm-payload'] as const,
   /** 调试中心：评估指标 */
   evaluationMetrics: ['debug', 'evaluation-metrics'] as const,
   /** 调试中心：用户列表 */
   debugUsers: ['debug', 'users'] as const,
-  /** 调试中心：LLM 请求诊断列表（按页分条） */
-  llmPayloadDiag: (page: number) => ['debug', 'llm-payload', page] as const,
   /** 管理端：数据库表列表 */
   dbTables: ['debug', 'db-tables'] as const,
   /** 记忆：episodes 分页（页码进 key） */
