@@ -470,6 +470,33 @@ impl CapabilityRouter for KernelCapabilityRouter {
                     message: format!("get_run_status 编码失败: {e}"),
                 })
             }
+            ("pipeline-executor", "delete_pipeline") => {
+                // 任务删除语义（2026-08-24）：0.2 任务 = 管道，删除任务即删除
+                // 其管道全部执行数据（runs/traces/branches/message_slots/
+                // pipeline_state/pipeline_checkpoints/pipeline_sessions）。
+                // 内存 registry 条目同清（热路径常驻 state 作废，后续轮次冷启动
+                // 重建——与 clear-all 语义一致）。幂等：无记录返回 ok。
+                let pipeline_id = params
+                    .get("pipeline_id")
+                    .and_then(|v| v.as_str())
+                    .filter(|s| !s.is_empty())
+                    .ok_or_else(|| McpError::Protocol {
+                        message: "delete_pipeline 缺少 pipeline_id 参数".to_string(),
+                    })?;
+                let store = self.store.as_ref().ok_or_else(|| McpError::Protocol {
+                    message: "delete_pipeline disabled: kernel store not injected".to_string(),
+                })?;
+                let tenant_id = agentos_tenant::current_or_default("default").tenant_id;
+                store
+                    .delete_pipeline(pipeline_id)
+                    .await
+                    .map_err(|e| McpError::Protocol {
+                        message: format!("delete_pipeline 失败: {e}"),
+                    })?;
+                let registry = agentos_session::pipeline_state_registry::global_registry();
+                registry.remove(&tenant_id, pipeline_id);
+                Ok(json!({"status": "deleted", "pipeline_id": pipeline_id}))
+            }
 
             // ── event-bus：发事件/通知。流式 chunk 推送的核心出口 ──
             // sidecar（如 llm_core）每生成一个 chunk 就 notify 一次 event-bus.emit，

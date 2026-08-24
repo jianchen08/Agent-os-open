@@ -1430,6 +1430,91 @@ impl SqliteStore {
             .map_err(|e| StorageError::Database(format!("commit: {e}")))
     }
 
+    /// 按 pipeline_id 删除单条管道的全部执行数据（任务删除语义，2026-08-24）。
+    ///
+    /// 0.2 任务 = 管道（GAP-1）：删除任务即删除其管道数据。清理范围对齐
+    /// `delete_session_inner` 的级联（runs/traces/branches/message_slots/
+    /// pipeline_sessions），另补 `pipeline_state`/`pipeline_checkpoints`
+    /// 两张 state 表（会话删除按 thread 级联时这两张表由 clear-all 兜底，
+    /// 单管道删除必须自清，否则冷读兜底会从残留 checkpoint 重建幽灵任务）。
+    /// 单次事务包裹，失败回滚；无记录时返回 Ok(())（幂等）。
+    fn delete_pipeline_inner(
+        &self,
+        pipeline_id: &str,
+        tenant_id: &str,
+    ) -> Result<(), StorageError> {
+        let mut conn = self.conn.lock();
+        let tx = conn
+            .transaction()
+            .map_err(|e| StorageError::Database(format!("begin tx: {e}")))?;
+
+        // 1. 收集该管道产生的 run_id（traces/branches/runs 按 run_id 删）
+        let run_ids: Vec<String> = {
+            let mut stmt = tx.prepare(
+                "SELECT DISTINCT run_id FROM message_slots WHERE pipeline_id = ?1 AND tenant_id = ?2",
+            )?;
+            let rows = stmt.query_map(rusqlite::params![pipeline_id, tenant_id], |row| {
+                row.get::<_, Option<String>>(0)
+            })?;
+            let mut out = Vec::new();
+            for r in rows {
+                // message_slots.run_id 可 NULL（流式占位消息等）：跳过 NULL 防抛错
+                if let Some(rid) = r? {
+                    if !out.contains(&rid) {
+                        out.push(rid);
+                    }
+                }
+            }
+            out
+        };
+
+        if !run_ids.is_empty() {
+            Self::delete_in_clause(
+                &tx,
+                "DELETE FROM traces WHERE run_id IN ({placeholders})",
+                &run_ids,
+                "",
+            )?;
+            Self::delete_in_clause(
+                &tx,
+                "DELETE FROM branches WHERE run_id IN ({placeholders})",
+                &run_ids,
+                "",
+            )?;
+            Self::delete_in_clause(
+                &tx,
+                "DELETE FROM runs WHERE run_id IN ({placeholders})",
+                &run_ids,
+                "",
+            )?;
+        }
+
+        // 2. messages 按 pipeline_id 删
+        tx.execute(
+            "DELETE FROM message_slots WHERE pipeline_id = ?1 AND tenant_id = ?2",
+            rusqlite::params![pipeline_id, tenant_id],
+        )?;
+
+        // 3. state 表（pipeline_state 标量 + checkpoint 快照）——冷读兜底数据源
+        tx.execute(
+            "DELETE FROM pipeline_state WHERE pipeline_id = ?1 AND tenant_id = ?2",
+            rusqlite::params![pipeline_id, tenant_id],
+        )?;
+        tx.execute(
+            "DELETE FROM pipeline_checkpoints WHERE pipeline_id = ?1 AND tenant_id = ?2",
+            rusqlite::params![pipeline_id, tenant_id],
+        )?;
+
+        // 4. 清映射表（任务管道 thread_id = pipeline_id 自持映射）
+        tx.execute(
+            "DELETE FROM pipeline_sessions WHERE pipeline_id = ?1 AND tenant_id = ?2",
+            rusqlite::params![pipeline_id, tenant_id],
+        )?;
+
+        tx.commit()
+            .map_err(|e| StorageError::Database(format!("commit: {e}")))
+    }
+
     /// 辅助：按 IN (?, ?, ...) 占位符执行 DELETE。
     /// `sql_template` 中用 `{placeholders}` 标记占位符位置；`extra` 为可选的额外参数（如 tenant_id）。
     fn delete_in_clause(
@@ -2369,6 +2454,15 @@ impl StorageBackend for SqliteStore {
             .map_err(join_err)?
     }
 
+    async fn delete_pipeline(&self, pipeline_id: &str) -> Result<(), StorageError> {
+        let tenant_id = agentos_tenant::current_or_default("default").tenant_id;
+        let this = self.clone();
+        let pipeline_id = pipeline_id.to_string();
+        tokio::task::spawn_blocking(move || this.delete_pipeline_inner(&pipeline_id, &tenant_id))
+            .await
+            .map_err(join_err)?
+    }
+
     async fn link_pipeline_session(
         &self,
         pipeline_id: &str,
@@ -2650,6 +2744,99 @@ mod tests {
             "健康库不应产生备份: {:?}",
             corrupt_files
         );
+    }
+
+    /// 任务删除语义（2026-08-24）：delete_pipeline 按 pipeline_id 级联清空
+    /// runs/traces/branches/message_slots/pipeline_state/pipeline_checkpoints/
+    /// pipeline_sessions，单事务；无记录时幂等返回 Ok。
+    #[tokio::test]
+    async fn test_delete_pipeline_cascades_all_data() {
+        let store = SqliteStore::open_memory().unwrap();
+        let pid = "pipeline-del-test";
+        let now = chrono::Utc::now().to_rfc3339();
+
+        {
+            let conn = store.conn.lock();
+            conn.execute(
+                "INSERT INTO pipeline_sessions (pipeline_id, thread_id, tenant_id, created_at)                  VALUES (?1, ?2, 'default', ?3)",
+                rusqlite::params![pid, "thread-del", now],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO message_slots (tenant_id, pipeline_id, seq, message_id, run_id, created_at)                  VALUES ('default', ?1, 1, 'm-del-1', 'run-del-1', ?2)",
+                rusqlite::params![pid, now],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO runs (run_id, config_hash, status, tenant_id, created_at, current_branch)                  VALUES ('run-del-1', 'h', 'completed', 'default', ?1, 'main')",
+                rusqlite::params![now],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO traces (trace_id, run_id, branch_id, seq_in_branch, plugin_id, patch_type, patch_data, created_at)                  VALUES ('t-del-1', 'run-del-1', 'main', 0, 'p', 'state', '{}', ?1)",
+                rusqlite::params![now],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO branches (branch_id, run_id, parent_branch, parent_seq, tenant_id, created_at)                  VALUES ('main', 'run-del-1', NULL, NULL, 'default', ?1)",
+                rusqlite::params![now],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO pipeline_state (tenant_id, pipeline_id, field_key, field_value, updated_at)                  VALUES ('default', ?1, 'task.status', 'running', ?2)",
+                rusqlite::params![pid, now],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO pipeline_checkpoints (tenant_id, pipeline_id, checkpoint_id, step_no, state_json, created_at)                  VALUES ('default', ?1, 'cp-1', 0, '{}', ?2)",
+                rusqlite::params![pid, now],
+            )
+            .unwrap();
+        }
+
+        store.delete_pipeline(pid).await.unwrap();
+
+        let conn = store.conn.lock();
+        let count = |sql: &str| -> i64 { conn.query_row(sql, [], |r| r.get::<_, i64>(0)).unwrap() };
+        assert_eq!(count("SELECT COUNT(*) FROM pipeline_sessions"), 0, "映射应删除");
+        assert_eq!(count("SELECT COUNT(*) FROM message_slots"), 0, "消息应删除");
+        assert_eq!(count("SELECT COUNT(*) FROM runs"), 0, "runs 应删除");
+        assert_eq!(count("SELECT COUNT(*) FROM traces"), 0, "traces 应删除");
+        assert_eq!(count("SELECT COUNT(*) FROM branches"), 0, "branches 应删除");
+        assert_eq!(count("SELECT COUNT(*) FROM pipeline_state"), 0, "state 应删除");
+        assert_eq!(
+            count("SELECT COUNT(*) FROM pipeline_checkpoints"),
+            0,
+            "checkpoints 应删除"
+        );
+    }
+
+    /// 幂等：删除不存在的管道返回 Ok，且不影响其它管道数据。
+    #[tokio::test]
+    async fn test_delete_pipeline_idempotent_keeps_others() {
+        let store = SqliteStore::open_memory().unwrap();
+        let now = chrono::Utc::now().to_rfc3339();
+
+        {
+            let conn = store.conn.lock();
+            conn.execute(
+                "INSERT INTO pipeline_state (tenant_id, pipeline_id, field_key, field_value, updated_at)                  VALUES ('default', 'other-pipeline', 'task.status', 'running', ?1)",
+                rusqlite::params![now],
+            )
+            .unwrap();
+        }
+
+        store.delete_pipeline("no-such-pipeline").await.unwrap();
+
+        let conn = store.conn.lock();
+        let count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM pipeline_state WHERE pipeline_id = 'other-pipeline'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 1, "其它管道数据不应受影响");
     }
 
     #[tokio::test]

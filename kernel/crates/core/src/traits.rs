@@ -1654,6 +1654,14 @@ pub trait StorageBackend: Send + Sync {
     /// 无记录时返回 Ok(())（幂等，对齐 REST 删除语义）。
     async fn delete_session(&self, thread_id: &str) -> Result<(), StorageError>;
 
+    /// 按 pipeline_id 删除单条管道的全部执行数据（任务删除语义，2026-08-24）。
+    /// 0.2 任务 = 管道：删除任务即删除其管道数据（runs/traces/branches/
+    /// message_slots/pipeline_state/pipeline_checkpoints/pipeline_sessions）。
+    /// 无记录时返回 Ok(())（幂等）。
+    async fn delete_pipeline(&self, _pipeline_id: &str) -> Result<(), StorageError> {
+        Ok(())
+    }
+
     /// 写入 pipeline↔session 映射（幂等）。每次管道开跑（persist_run_start）时记录，
     /// 含子任务管道。删除会话时据此按 thread_id 找到全部 pipeline_id 级联清理。
     async fn link_pipeline_session(

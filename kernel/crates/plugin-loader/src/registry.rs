@@ -560,6 +560,7 @@ const KERNEL_PROVIDED_SERVICES: &[(&str, &[&str])] = &[
             "suspend_pipeline",
             "resume_pipeline",
             "get_run_status",
+            "delete_pipeline",
         ],
     ),
     ("event-bus", &["emit"]),
