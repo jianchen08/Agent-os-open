@@ -569,6 +569,17 @@ export function FileTreeWidget(rawProps: Record<string, unknown>) {
         const response = await apiClient.get(resolved.endpoint, { params })
         if (cancelled) return
         const raw = response.data
+        // 工作区数据源的业务级错误（批次A：无工作区坐标/目录缺失）——后端
+        // 200 信封携带 workspace_status，如实进错误态而非伪装空树
+        const wsStatus = (raw as { workspace_status?: string })?.workspace_status
+        if (wsStatus) {
+          setRemoteTreeData([])
+          setRemoteError(
+            (raw as { error?: string })?.error || '工作区不可用（无坐标或目录不存在）',
+          )
+          hasLoadedRef.current = true
+          return
+        }
         const tree = raw?.children ?? raw?.tree ?? []
         const flat = raw?.items ?? []
         const filteredData = tree.length > 0 ? tree : flat

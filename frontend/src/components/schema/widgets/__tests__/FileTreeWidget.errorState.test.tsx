@@ -82,4 +82,35 @@ describe('FileTreeWidget 远程加载失败错误态（FE8）', () => {
       debugSpy.mockRestore()
     }
   })
+
+  it('工作区目录缺失（200 + workspace_status）渲染错误态而非空树（批次A）', async () => {
+    mockGet.mockResolvedValueOnce({
+      data: {
+        tree: [],
+        workspace_status: 'dir_missing',
+        error: '工作区目录不存在: D:/ws/gone',
+      },
+    })
+
+    render(<FileTreeWidget dataSource="workspace://taskX" nodeTitleField="name" />)
+    expect(await screen.findByTestId('file-tree-error')).toBeInTheDocument()
+    expect(screen.getByText('工作区目录不存在: D:/ws/gone')).toBeInTheDocument()
+    // 后端声明业务错误 → 不触发会话宽域回退、不伪装空态
+    expect(mockGet).toHaveBeenCalledTimes(1)
+    expect(screen.queryByText('暂无树形数据')).not.toBeInTheDocument()
+  })
+
+  it('无工作区坐标（no_workspace）同样进错误态', async () => {
+    mockGet.mockResolvedValueOnce({
+      data: {
+        tree: [],
+        workspace_status: 'no_workspace',
+        error: 'taskX 无工作区坐标（任务未分配工作区，或为主会话管道）',
+      },
+    })
+
+    render(<FileTreeWidget dataSource="workspace://taskX" nodeTitleField="name" />)
+    expect(await screen.findByTestId('file-tree-error')).toBeInTheDocument()
+    expect(screen.getByText(/无工作区坐标/)).toBeInTheDocument()
+  })
 })

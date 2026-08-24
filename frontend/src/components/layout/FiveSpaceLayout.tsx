@@ -15,6 +15,7 @@ import { widgetRegistry } from '@/services/schema/WidgetRegistry'
 import { openWorkspacePanelByPath } from '@/services/workspacePanelOpener'
 import { getFileEditorData, registerFileEditor, removeFileEditorData, updateFileEditorData, emitFileChange } from '@/stores/fileEditorRegistry'
 import { useLayoutModeStore } from '@/stores/layoutModeStore'
+import { useNotificationStore } from '@/stores/notificationStore'
 import { useSessionStore } from '@/stores/sessionStore'
 import { useThemeStore } from '@/stores/themeStore'
 import { cn } from '@/lib/utils'
@@ -466,9 +467,24 @@ export function FiveSpaceLayout({
             const containerId = tab.dataSource?.replace('workspace://', '') || ''
             if (!containerId) return
             try {
-              await apiClient.post(W.workspaces_open.replace('{container_task_id}', containerId))
+              const resp = await apiClient.post(
+                W.workspaces_open.replace('{container_task_id}', containerId),
+              )
+              // 业务级失败如实透传（目录缺失/无连接器等）——后端 200 信封
+              // 携带 success:false + message，静默会让用户以为打开了
+              const data = resp?.data as { success?: boolean; message?: string } | undefined
+              if (data && data.success === false) {
+                useNotificationStore.getState().addNotification({
+                  title: '打开文件夹失败',
+                  message: data.message || '后端未能打开工作区目录',
+                  priority: 'normal',
+                  category: 'alert',
+                  isBlocking: false,
+                  autoDismissMs: 6000,
+                })
+              }
             } catch {
-              // 静默失败
+              // 传输层失败：与面板操作一致的静默降级
             }
           }
 

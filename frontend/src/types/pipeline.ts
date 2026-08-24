@@ -55,7 +55,8 @@ export interface PipelineViewEntry {
   taskId?: string
   /** 归属会话标题（threadId 命中会话列表时有值；无则视为无归属孤儿管道） */
   sessionTitle?: string
-  /** 任务工作空间路径（kind=task 且任务带 workspace 时有值，供"打开工作空间"） */
+  /** 工作区坐标（R3：state 真值 ws_meta.path/workspace 优先，任务 metadata
+   *  回退；任意 kind 有坐标即可"打开工作空间"，主会话无坐标则无按钮） */
   workspacePath?: string
   /** 任务进度（0-100，kind=task 且任务带进度时有值） */
   progress?: number

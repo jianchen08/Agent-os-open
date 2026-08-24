@@ -78,6 +78,16 @@ function taskPipelineId(task: Record<string, unknown>): string | undefined {
   return typeof metaRaw === 'string' && metaRaw ? metaRaw : undefined
 }
 
+/** 从 state 摘要提取工作区坐标（R3：ws_meta.path 优先——worktree 副本或
+ *  plain 目录；workspace 标量回退。project_root 是源根，不用于关联） */
+function stateWorkspacePath(
+  s: { ws_meta?: { path?: string }; workspace?: string } | undefined,
+): string | undefined {
+  if (!s) return undefined
+  const p = s.ws_meta?.path ?? s.workspace
+  return typeof p === 'string' && p ? p : undefined
+}
+
 /** 格式化耗时（ms → "3m 20s" / "1h 2m" / "45s"） */
 export function formatDuration(ms: number | null | undefined): string {
   if (ms === null || ms === undefined || isNaN(ms) || ms < 0) return '--'
@@ -183,14 +193,17 @@ export function PipelineManagerWidget(_rawProps: Record<string, unknown>) {
         taskId: task ? String(task.id) : undefined,
         // 归属会话标题（threadId 未命中会话列表 = 无归属孤儿管道）
         sessionTitle: session ? session.title : undefined,
-        // 任务工作空间路径（供"打开工作空间"；取 metadata.ws_meta.path / workspace）
-        workspacePath: task
-          ? String(
-              (task.metadata as { ws_meta?: { path?: string } } | undefined)?.ws_meta?.path
-              || task.workspace
-              || '',
-            ) || undefined
-          : undefined,
+        // 任务工作空间路径（R3：state 真值优先 ws_meta.path/workspace，任务
+        // metadata 镜像回退；非任务条目也走 state 通道）
+        workspacePath:
+          stateWorkspacePath(st?.state)
+          ?? (task
+            ? String(
+                (task.metadata as { ws_meta?: { path?: string } } | undefined)?.ws_meta?.path
+                || task.workspace
+                || '',
+              ) || undefined
+            : undefined),
         progress:
           typeof (task?.progress as Record<string, unknown> | undefined)?.progressPercent === 'number'
             ? Number((task?.progress as Record<string, unknown>).progressPercent)
@@ -244,11 +257,13 @@ export function PipelineManagerWidget(_rawProps: Record<string, unknown>) {
         agentName: String(task.agentName ?? task.agent_name ?? '') || undefined,
         taskId: String(task.id),
         sessionTitle: undefined,
-        workspacePath: String(
-          (task.metadata as { ws_meta?: { path?: string } } | undefined)?.ws_meta?.path
-          || task.workspace
-          || '',
-        ) || undefined,
+        workspacePath:
+          stateWorkspacePath(st?.state)
+          ?? (String(
+            (task.metadata as { ws_meta?: { path?: string } } | undefined)?.ws_meta?.path
+            || task.workspace
+            || '',
+          ) || undefined),
         progress:
           typeof (task.progress as Record<string, unknown> | undefined)?.progressPercent === 'number'
             ? Number((task.progress as Record<string, unknown>).progressPercent)
@@ -274,8 +289,6 @@ export function PipelineManagerWidget(_rawProps: Record<string, unknown>) {
       const session = st.thread_id ? sessionById.get(st.thread_id) : undefined
       // ended=true → completed；status=active 但未 ended → running
       const mapped: PipelineStatus = s.raw_error ? 'failed' : s.ended ? 'completed' : 'running'
-      const meta = s.metadata as Record<string, unknown> | undefined
-      const executionCtx = meta?.execution_context as Record<string, unknown> | undefined
       entries.push({
         key: st.pipeline_id,
         pipelineId: st.pipeline_id,
@@ -295,12 +308,9 @@ export function PipelineManagerWidget(_rawProps: Record<string, unknown>) {
         stateStatus: String(s['task.status'] ?? s.status ?? '') || undefined,
         stateEnded: s.ended === true ? true : undefined,
         rawError: s.raw_error ?? undefined,
-        workspacePath: executionCtx
-          ? String(
-              (executionCtx.workspace as Record<string, unknown> | undefined)?.source_path
-              || '',
-            ) || undefined
-          : undefined,
+        // 工作区坐标（state 真值：ws_meta.path/workspace；替代旧
+        // metadata.execution_context.source_path 推断）
+        workspacePath: stateWorkspacePath(s),
         totalTokens: null,
       })
     }
@@ -590,8 +600,11 @@ export function PipelineManagerWidget(_rawProps: Record<string, unknown>) {
         return
       }
       if (action === 'workspace') {
-        if (!entry.taskId) return
-        openWorkspaceTab(entry.taskId, entry.name)
+        // R3：所有有工作区坐标的管道都可打开——任务条目用 taskId（任务镜像
+        // 解析），非任务条目用 pipelineId（state 行解析通道）
+        const wsId = entry.taskId || entry.pipelineId || entry.key
+        if (!wsId) return
+        openWorkspaceTab(wsId, entry.name)
         return
       }
       if (!entry.taskId) return
@@ -1164,7 +1177,7 @@ function EntryRow({
               <PlayCircle className="h-3.5 w-3.5" />
             </button>
           )}
-          {entry.kind === 'task' && entry.workspacePath && (
+          {entry.workspacePath && (
             <button
               className="text-muted-foreground hover:bg-accent hover:text-foreground flex h-6 w-6 items-center justify-center rounded transition-colors"
               onClick={(e) => {
@@ -1416,14 +1429,14 @@ function PipelineTable({
                           <PlayCircle className="h-3.5 w-3.5" />
                         </button>
                       )}
-                      {entry.kind === 'task' && entry.workspacePath && (
+                      {entry.workspacePath && (
                         <button
                           className="text-muted-foreground hover:bg-accent hover:text-foreground flex h-6 w-6 items-center justify-center rounded"
                           onClick={(e) => {
                             e.stopPropagation()
                             onAction(entry, 'workspace')
                           }}
-                          title="打开工作空间"
+                          title={`打开工作空间: ${entry.workspacePath}`}
                           tabIndex={-1}
                         >
                           <ExternalLink className="h-3.5 w-3.5" />

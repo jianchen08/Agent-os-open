@@ -360,4 +360,64 @@ describe('PipelineManagerWidget', () => {
     expect(tab?.component).toBe('file_tree')
     expect(tab?.title).toBe('带空间的子任务')
   })
+
+  it('会话管道 state 带工作区也渲染按钮（R3：state.workspace 驱动，非任务条目）', async () => {
+    // 会话管道：runs 快照有、任务列表无对应任务 → kind=session；工作区坐标
+    // 只在 state 真值（ws_meta.path），任务 metadata 通道不适用
+    seed.mockUsePipelineRunsQuery.mockReturnValue({
+      data: {
+        mainRun: {
+          pipeline_id: 'sessPipe',
+          run_id: 'run-sess',
+          thread_id: 'th-sess',
+          status: 'running',
+          started_at: '2026-08-24T00:00:00Z',
+        },
+      },
+    })
+    seed.mockUseAllTasksQuery.mockReturnValue({ data: [] })
+    seed.mockUsePipelineStatesQuery.mockReturnValue({
+      data: {
+        sessPipe: {
+          pipeline_id: 'sessPipe',
+          thread_id: 'th-sess',
+          source: 'memory',
+          state: {
+            status: 'active',
+            ws_meta: { path: 'D:/ws/session-ws', mode: 'plain', project_root: 'D:/proj' },
+          },
+        },
+      },
+    })
+    renderWithProviders(<PipelineManagerWidget />)
+    // 树默认收起：先展开会话分组节点（会话列表 mock 空 → 条目名回退"会话 th-sess"）
+    const chevron = (await screen.findAllByText('会话 th-sess'))[0].closest('div')?.querySelector('button')
+    fireEvent.click(chevron!)
+    // state.ws_meta.path 驱动按钮（project_root 不用于关联）
+    const btns = await screen.findAllByTitle('打开工作空间: D:/ws/session-ws')
+    expect(btns.length).toBeGreaterThanOrEqual(1)
+    fireEvent.click(btns[0])
+    // 非任务条目无 taskId → dataSource 用 pipeline_id（state 行解析通道）
+    const tabs = useLayoutModeStore.getState().workspaceTabs
+    expect(tabs.some((t) => t.dataSource === 'workspace://sessPipe')).toBe(true)
+  })
+
+  it('无工作区坐标的条目不渲染打开工作空间按钮（主会话 R1 自然推论）', async () => {
+    seed.mockUsePipelineRunsQuery.mockReturnValue({
+      data: {
+        mainRun: {
+          pipeline_id: 'plainSess',
+          run_id: 'run-plain',
+          thread_id: 'th-plain',
+          status: 'running',
+          started_at: '2026-08-24T00:00:00Z',
+        },
+      },
+    })
+    seed.mockUseAllTasksQuery.mockReturnValue({ data: [] })
+    seed.mockUsePipelineStatesQuery.mockReturnValue({ data: {} })
+    renderWithProviders(<PipelineManagerWidget />)
+    await screen.findAllByText('会话 th-plain')
+    expect(screen.queryByTitle(/打开工作空间/)).toBeNull()
+  })
 })

@@ -50,6 +50,10 @@ export interface PipelineStateSummary {
   'task.id'?: string
   'task.ended_at'?: string
   'lineage.parent_pipeline_id'?: string
+  // 工作区坐标（workspace_lifecycle init 写入；R3 裁定：所有管道类型的工作区
+  // 关联底座——path=worktree 副本或 plain 目录，project_root 是源根不用于关联）
+  workspace?: string
+  ws_meta?: { path?: string; project_root?: string; mode?: string }
 }
 
 /** GET /api/v1/pipelines/state 条目（会话/任务/迭代的运行时真值，任务树数据源） */
