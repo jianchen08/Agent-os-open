@@ -138,6 +138,43 @@ description: 调试工作流：确认需要 → 先写失败测试复现 → 定
 **小例子**：
 > 医生只找支持"感冒"诊断的症状，会漏诊肺炎；好医生会专门找能推翻"感冒"的证据——发烧到几度？持续几天了？有没有胸痛？
 
+### 规则 6：插件/工厂系统的常见陷阱清单
+
+**使用条件**：bug 表现为"功能在简单场景正常，但在完整流程失败"时。
+
+**怎么使用**：按以下清单逐项检查：
+
+| 检查项 | 常见问题 |
+|--------|---------|
+| **fork/clone** | 是否只复制了 config 而丢失了 adapter/router 等运行时依赖？ |
+| **工厂重建** | `type(obj)(config=...)` 是否漏传了构造函数参数？ |
+| **单例 vs 多实例** | 以为是同一个对象，实际被重建了？ |
+| **依赖注入** | 依赖是通过构造函数注入还是运行时获取？注入的是引用还是值？ |
+| **缓存/全局状态** | `__pycache__`、模块级单例是否过期？ |
+| **注册表同步** | 替换插件后，core_plugins 和 plugins 两个映射是否都更新了？ |
+
+**小例子**：
+> 你给每个房间都配了钥匙，但管家换班时只交接了 config（房间号），没交接钥匙本身——新管家拿着房间号却开不了门。
+
+**实例（本仓 2026-08 插件注册表 fork 丢 adapter）**：
+```
+build_plugin_registry → LLMCore(adapter=AdaptiveRouterAdapter)  ✓
+    ↓ registry.fork()
+PipelineEngine.__init__ → LLMCore(config=...) → LiteLLMAdapter  ✗  ← adapter 丢失！
+    ↓ _apply_agent_model_override
+engine.run → 把 LiteLLMAdapter 当作 existing_adapter 传递      ✗
+
+bug 不在 LLM 调用层，而在插件注册表的 fork 机制。
+```
+构造追踪手段：在构造函数加调用栈 + 打印关键参数：
+```python
+class LLMCore:
+    def __init__(self, **kwargs):
+        import traceback
+        traceback.print_stack(limit=4)
+        print(f"[DIAG] LLMCore created with adapter={type(kwargs.get('adapter')).__name__}")
+```
+
 ### 规则 7：根因分析 — 逐层追问（5 Whys）
 
 **使用条件**：每次修复后 bug 仍在时；或发现自己开始在同一方向打转时。
