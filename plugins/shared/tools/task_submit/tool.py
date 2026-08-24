@@ -320,6 +320,39 @@ def _normalize_description(value: Any) -> str:
     return str(value)
 
 
+# 数值边界（2026-08-24）：input_schema 的 min/max 声明不在运行时强制
+# （tool_core 只 fail-closed 校验 output_schema），越界值原样落 state 会
+# 打爆下游消费方（TaskPriority 枚举 int 转换、前端展示）——提交期统一拦截。
+_PRIORITY_BOUNDS = (1, 10)
+_MAX_RETRIES_BOUNDS = (0, 10)
+
+
+def _validate_int_bounds(name: str, value: Any, bounds: tuple[int, int]) -> str | None:
+    """schema 数值约束的运行时兜底校验。"""
+    lo, hi = bounds
+    if isinstance(value, bool) or not isinstance(value, int):
+        return f"{name} 必须为 {lo}-{hi} 的整数，当前值: {value!r}"
+    if not lo <= value <= hi:
+        return f"{name} 超出范围（{lo}-{hi}），当前值: {value}"
+    return None
+
+
+def _validate_submission_bounds(inputs: dict[str, Any]) -> tuple[str, str] | None:
+    """priority/max_retries 边界校验（普通/容器两条路径共用）。
+
+    仅校验显式传入的键——不传不写不补默认（对账语义，2026-08-23 定案）。
+    """
+    if "priority" in inputs:
+        err = _validate_int_bounds("priority", inputs["priority"], _PRIORITY_BOUNDS)
+        if err:
+            return (err, "INVALID_PRIORITY")
+    if "max_retries" in inputs:
+        err = _validate_int_bounds("max_retries", inputs["max_retries"], _MAX_RETRIES_BOUNDS)
+        if err:
+            return (err, "INVALID_MAX_RETRIES")
+    return None
+
+
 class TaskSubmitTool(BuiltinTool):
     """任务提交工具。"""
 
@@ -364,9 +397,10 @@ class TaskSubmitTool(BuiltinTool):
                     },
                     "goal_description": {
                         "type": "string",
+                        "minLength": 1,
                         "maxLength": 2000,
                         "description": (
-                            "任务描述（上限 2000 字符）。只写目标和背景，"
+                            "任务描述（必填，1-2000 字符）。只写目标和背景，"
                             "禁止写执行步骤/工具选择/流程顺序；引用文件只写路径（如 docs/report.md），"
                             "让下级 Agent 自行读取，不要复制文件内容。"
                         ),
@@ -422,8 +456,9 @@ class TaskSubmitTool(BuiltinTool):
                     "max_retries": {
                         "type": "integer",
                         "minimum": 0,
+                        "maximum": 10,
                         "default": 3,
-                        "description": "任务失败时的最大重试次数",
+                        "description": "任务失败时的最大重试次数（0-10，0 表示不重试）",
                     },
                     "task_scope": {
                         "type": "string",
@@ -505,7 +540,7 @@ class TaskSubmitTool(BuiltinTool):
                         ],
                     },
                 },
-                "required": ["goal_title"],
+                "required": ["goal_title", "goal_description"],
                 "allOf": [
                     {
                         "if": {
@@ -630,6 +665,23 @@ class TaskSubmitTool(BuiltinTool):
             return create_failure_result(
                 error="必须提供 goal（含 title 字段）",
                 error_code="MISSING_GOAL",
+            )
+
+        # ── 1.2 数值边界校验（2026-08-24）──
+        # 位于容器分支之前：普通/容器两条路径共用同一闸门。
+        _bounds = _validate_submission_bounds(inputs)
+        if _bounds is not None:
+            logger.warning("[TaskSubmit] 数值参数越界 | %s", _bounds[0])
+            return create_failure_result(error=_bounds[0], error_code=_bounds[1])
+
+        # ── 1.4 任务描述非空（2026-08-24）──
+        # 派发给下级 Agent 的任务只有标题没有描述 = 下级无目标上下文，
+        # 标题承载不了执行语义，一律拒绝。
+        if not _normalize_description(goal.get("description", "")).strip():
+            logger.warning("[TaskSubmit] goal.description 缺失或空白 | title=%s", goal.get("title"))
+            return create_failure_result(
+                error="必须提供任务描述（goal_description，1-2000 字符）",
+                error_code="MISSING_DESCRIPTION",
             )
 
         # 容器任务走独立分支（_execute_long_term 内部也有层级校验，

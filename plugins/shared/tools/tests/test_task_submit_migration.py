@@ -133,7 +133,7 @@ class TestTaskSubmitValidation:
             {
                 "parent_agent_level": 2,
                 "task_scope": "container",
-                "goal": {"title": "容器任务"},
+                "goal": {"title": "容器任务", "description": "测试容器任务描述"},
             }
         )
         assert result.success is False
@@ -146,7 +146,7 @@ class TestTaskSubmitValidation:
         result = await tool.execute(
             {
                 "parent_agent_level": 1,
-                "goal": {"title": "任务"},
+                "goal": {"title": "任务", "description": "测试任务描述"},
                 "workspace": r"C:\Windows",
             }
         )
@@ -160,7 +160,7 @@ class TestTaskSubmitValidation:
         result = await tool.execute(
             {
                 "parent_agent_level": 2,
-                "goal": {"title": "子任务"},
+                "goal": {"title": "子任务", "description": "测试子任务描述"},
                 "target_type": "agent",
                 "target_id": "general_agent",
             }
@@ -175,7 +175,7 @@ class TestTaskSubmitValidation:
         result = await tool.execute(
             {
                 "parent_agent_level": 1,
-                "goal": {"title": "任务"},
+                "goal": {"title": "任务", "description": "测试任务描述"},
                 "target_type": "agent",
                 "target_id": "general_agent",
                 "acceptance_criteria": {"definitely_not_a_metric_xyz": {}},
@@ -203,7 +203,7 @@ class TestTaskSubmitInheritParams:
 
     def _build_inputs(self, mode, inherit_from: str = "src-task-001") -> dict:
         return {
-            "goal": {"title": "继承任务测试"},
+            "goal": {"title": "继承任务测试", "description": "测试继承任务描述"},
             "target_type": "agent",
             "target_id": "general_agent",
             "task_scope": "non_container",
@@ -327,6 +327,7 @@ class TestTaskSubmitCoreSubmit:
             {
                 "parent_agent_level": 1,
                 "goal_title": "写测试",
+                "goal_description": "为 task_submit 写迁移测试",
                 "target_type": "agent",
                 "target_id": "general_agent",
             }
@@ -383,7 +384,7 @@ class TestScopeQueryFailureConservative:
         result = await tool.execute(
             {
                 "parent_agent_level": 1,
-                "goal": {"title": "子任务"},
+                "goal": {"title": "子任务", "description": "测试子任务描述"},
                 "parent_task_id": "parent-001",
                 "workspace": "D:/proj",
             }
@@ -400,7 +401,7 @@ class TestScopeQueryFailureConservative:
         result = await tool.execute(
             {
                 "parent_agent_level": 1,
-                "goal": {"title": "子任务"},
+                "goal": {"title": "子任务", "description": "测试子任务描述"},
                 "parent_task_id": "parent-001",
                 "isolation_level": "high",
             }
@@ -416,7 +417,7 @@ class TestScopeQueryFailureConservative:
         result = await tool.execute(
             {
                 "parent_agent_level": 1,
-                "goal": {"title": "子任务"},
+                "goal": {"title": "子任务", "description": "测试子任务描述"},
                 "parent_task_id": "parent-001",
                 "inherit": {"from": "src-001", "mode": ["workspace"]},
             }
@@ -432,7 +433,7 @@ class TestScopeQueryFailureConservative:
         result = await tool.execute(
             {
                 "parent_agent_level": 1,
-                "goal": {"title": "子任务"},
+                "goal": {"title": "子任务", "description": "测试子任务描述"},
                 "parent_task_id": "parent-001",
             }
         )
@@ -456,7 +457,7 @@ class TestScopeQueryFailureConservative:
         result = await tool.execute(
             {
                 "parent_agent_level": 1,
-                "goal": {"title": "容器子任务"},
+                "goal": {"title": "容器子任务", "description": "测试容器子任务描述"},
                 "parent_task_id": "parent-001",
                 "inherit": {"from": "src-001", "mode": ["workspace"]},
             }

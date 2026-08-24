@@ -38,8 +38,9 @@
             },
             "goal_description": {
               "type": "string",
+              "minLength": 1,
               "maxLength": 2000,
-              "description": "任务描述（上限 2000 字符）。只写目标和背景，禁止写执行步骤/工具选择/流程顺序；引用文件只写路径（如 docs/report.md），让下级 Agent 自行读取，不要复制文件内容。"
+              "description": "任务描述（必填，1-2000 字符）。只写目标和背景，禁止写执行步骤/工具选择/流程顺序；引用文件只写路径（如 docs/report.md），让下级 Agent 自行读取，不要复制文件内容。"
             },
             "acceptance_criteria": {
               "type": "object",
@@ -76,8 +77,9 @@
             "max_retries": {
               "type": "integer",
               "minimum": 0,
+              "maximum": 10,
               "default": 3,
-              "description": "任务失败时的最大重试次数"
+              "description": "任务失败时的最大重试次数（0-10，0 表示不重试）"
             },
             "task_scope": {
               "type": "string",
@@ -141,7 +143,8 @@
             }
           },
           "required": [
-            "goal_title"
+            "goal_title",
+            "goal_description"
           ],
           "allOf": [
             {

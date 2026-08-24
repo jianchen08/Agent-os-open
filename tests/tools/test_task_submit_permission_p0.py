@@ -145,7 +145,7 @@ async def test_execute_rejects_forged_parent_task_id() -> None:
 
     result = await tool.execute(
         {
-            "goal": {"title": "子任务"},
+            "goal": {"title": "子任务", "description": "测试子任务描述"},
             "parent_agent_level": 2,
             "parent_task_id": "victim-l2-task",  # 伪造：指向另一 L2 的任务
             "task_scope": "non_container",
