@@ -24,17 +24,21 @@ test.describe.configure({ timeout: 180_000 });
 /** 注入 WebSocket 包装：记录所有实例，供测试强制关闭 /ws/chat 连接。 */
 async function installWsTracker(page: import('@playwright/test').Page): Promise<void> {
   await page.addInitScript(() => {
-    const OrigWS = (window as any).WebSocket;
-    (window as any).__wsInstances = [];
-    (window as any).WebSocket = function (url: string, protocols?: string | string[]) {
-      const ws = protocols !== undefined ? new OrigWS(url, protocols) : new OrigWS(url);
+    const w = window as unknown as {
+      WebSocket: new (url: string, protocols?: string | string[]) => WebSocket
+      __wsInstances: Array<{ url: string; ws: WebSocket; readyState: () => number }>
+    }
+    const OrigWS = w.WebSocket
+    w.__wsInstances = []
+    w.WebSocket = function (url: string, protocols?: string | string[]) {
+      const ws = protocols !== undefined ? new OrigWS(url, protocols) : new OrigWS(url)
       try {
-        (window as any).__wsInstances.push({ url: String(url), ws, readyState: () => ws.readyState });
+        w.__wsInstances.push({ url: String(url), ws, readyState: () => ws.readyState })
       } catch { /* 忽略 */ }
-      return ws;
-    };
-    (window as any).WebSocket.prototype = OrigWS.prototype;
-  });
+      return ws
+    }
+    ;(w.WebSocket as unknown as { prototype: unknown }).prototype = OrigWS.prototype
+  })
 }
 
 /**
@@ -76,12 +80,15 @@ async function loginAndCreateSession(page: import('@playwright/test').Page): Pro
 /** 强制关闭当前打开的 /ws/chat 连接（复刻服务端 idle 踢产生的 onclose）。 */
 async function forceCloseChatWs(page: import('@playwright/test').Page): Promise<number> {
   return page.evaluate(() => {
-    const inst = ((window as any).__wsInstances || []).filter(
-      (x: any) => x.url.includes('/ws/chat') && x.readyState() === 1,
-    );
-    inst.forEach((x: any) => x.ws.close());
-    return inst.length;
-  });
+    const w = window as unknown as {
+      __wsInstances?: Array<{ url: string; ws: WebSocket; readyState: () => number }>
+    }
+    const inst = (w.__wsInstances || []).filter(
+      (x) => x.url.includes('/ws/chat') && x.readyState() === 1,
+    )
+    inst.forEach((x) => x.ws.close())
+    return inst.length
+  })
 }
 
 /** 读取页面最后一个 assistant 气泡的正文（去除思考区等噪声）。 */

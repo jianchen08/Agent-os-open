@@ -65,24 +65,28 @@ test.describe('旅程09：消息幂等契约（发送→刷新/重连→无重�
     expect(assistantCount, 'assistant 回复不得重复渲染').toBeLessThanOrEqual(2);
   });
 
-  test('9.2 发送→流式中模拟断线重连：无重复 user 气泡、流式内容不中断丢失', async ({ page, context }) => {
+  test('9.2 发送→流式中模拟断线重连：无重复 user 气泡、流式内容不中断丢失', async ({ page }) => {
     // WebSocket 包装必须先于任何导航注册（addInitScript 只对后续页面生效，
     // 放在 login 之后会导致 __wsInstances 为空、断连注入落空——2026-08-23 实测）。
     // 2026-08-23 修正：context.setOffline 对 localhost WS 无效（浏览器不切断
     // 同源连接），旧实现是假绿，重放饥饿 bug 因此漏网。ws.close() 产生与后端
     // 踢断一致的 onclose → 4s 退避重连 → 内核 replay_all_for_user 建连重放。
     await page.addInitScript(() => {
-      const OrigWS = (window as any).WebSocket;
-      (window as any).__wsInstances = [];
-      (window as any).WebSocket = function (url: string, protocols?: string | string[]) {
-        const ws = protocols !== undefined ? new OrigWS(url, protocols) : new OrigWS(url);
+      const w = window as unknown as {
+        WebSocket: new (url: string, protocols?: string | string[]) => WebSocket
+        __wsInstances: Array<{ url: string; ws: WebSocket; readyState: () => number }>
+      }
+      const OrigWS = w.WebSocket
+      w.__wsInstances = []
+      w.WebSocket = function (url: string, protocols?: string | string[]) {
+        const ws = protocols !== undefined ? new OrigWS(url, protocols) : new OrigWS(url)
         try {
-          (window as any).__wsInstances.push({ url: String(url), ws, readyState: () => ws.readyState });
+          w.__wsInstances.push({ url: String(url), ws, readyState: () => ws.readyState })
         } catch { /* 忽略 */ }
-        return ws;
-      };
-      (window as any).WebSocket.prototype = OrigWS.prototype;
-    });
+        return ws
+      }
+      ;(w.WebSocket as unknown as { prototype: unknown }).prototype = OrigWS.prototype
+    })
 
     await loginAndWaitReady(page, ADMIN_USER);
     await waitForReconcile(page);
@@ -97,12 +101,15 @@ test.describe('旅程09：消息幂等契约（发送→刷新/重连→无重�
 
     // 真断连：关闭 chat WS → 前端 onclose → 自动重连（replay/backfill 补漏）
     const closed = await page.evaluate(() => {
-      const inst = ((window as any).__wsInstances || []).filter(
-        (x: any) => x.url.includes('/ws/chat') && x.readyState() === 1,
-      );
-      inst.forEach((x: any) => x.ws.close());
-      return inst.length;
-    });
+      const w = window as unknown as {
+        __wsInstances?: Array<{ url: string; ws: WebSocket; readyState: () => number }>
+      }
+      const inst = (w.__wsInstances || []).filter(
+        (x) => x.url.includes('/ws/chat') && x.readyState() === 1,
+      )
+      inst.forEach((x) => x.ws.close())
+      return inst.length
+    })
     expect(closed, '应强制关闭至少一个 chat WS').toBeGreaterThanOrEqual(1);
     await page.waitForTimeout(3_000);
 
