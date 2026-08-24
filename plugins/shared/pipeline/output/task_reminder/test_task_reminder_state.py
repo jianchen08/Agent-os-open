@@ -58,6 +58,17 @@ def _base_task_state(**over: Any) -> dict[str, Any]:
 
 
 class TestTaskIdFromState:
+    async def test_pending_task_advances_to_running(self) -> None:
+        """职责边界（2026-08-24）：任务提交后出生值 pending 由任务域插件推进
+        running（内核不再回写任务状态）——任何轮次都推进，幂等。"""
+        reminder = TaskReminder(config={})
+        ctx = _ctx(_base_task_state(**{"task.status": "pending"}))
+        result = await reminder.execute(ctx)
+        assert result.state_updates == {"task.status": "running"}, (
+            "pending 应推进为 running，实际 %r" % (result.state_updates,)
+        )
+        assert result.route_signal is None, "推进不改变路由"
+
     async def test_reads_dotted_task_id(self) -> None:
         """0.2 新契约：task_id 从扁平键 task.id 读取（不再读顶层 task_id）。"""
         reminder = TaskReminder(config={})

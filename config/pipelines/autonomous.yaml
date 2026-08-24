@@ -84,6 +84,7 @@ loop_bodies:
       - id: post
         steps:
           - pipeline_track             # token/耗时统计 + cache 可观测 + cost_update 推送（首位：提前 end 也不丢统计）
+          - pipeline_task_reminder    # 任务域：pending→running 推进 + 评估闸门（无评估证据不 end，提醒耗尽标 pending_evaluation）
           - pipeline_stop_check
           - pipeline_duplicate_check
           - pipeline_stuck_detector

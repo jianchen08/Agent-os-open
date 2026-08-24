@@ -40,6 +40,17 @@ class TaskReminder(IOutputPlugin):
         state = ctx.state
         iteration = state.get("iteration", -1)
 
+        # ── 任务状态推进：pending → running（2026-08-24 职责边界）──
+        # 任务提交后出生值 pending 只应停留极短时间：管道走完第一轮插件即视为
+        # 已开始执行。内核不再回写任务状态（run 终态只广播事件），此处由任务域
+        # 插件把 pending 推进为 running——任何轮次都推进（幂等：非 pending 不动）。
+        if state.get("task.status") == "pending":
+            logger.info(
+                "TaskReminder[iter=%s]: task.status pending -> running（任务已开始执行）",
+                iteration,
+            )
+            return OutputResult(state_updates={"task.status": "running"})
+
         core_type = state.get("core_type", "")
         if core_type != "llm_call":
             logger.debug(
