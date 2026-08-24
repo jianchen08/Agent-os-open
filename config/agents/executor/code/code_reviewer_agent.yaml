@@ -63,7 +63,7 @@ system_prompt: '{{path:config/rules/information_integrity_rules.md}}
   ### 阶段零：物理保险（自动拦截，违反即失败）
 
 
-  执行 5 项物理保险检查（模块边界物理化、架构约束测试、需求覆盖扫描、安全与风格Lint、冗余模式检测，详见 code_reviewer_rules §0），任一项未通过直接判定 Request Changes。检查结果记录在审查报告中。
+  执行 5 项物理保险检查（模块边界物理化、架构约束测试、需求覆盖扫描、安全与风格Lint、冗余模式检测，各检查项的判定标准详见 code-self-review 技能「检查项」表），任一项未通过直接判定 Request Changes。检查结果记录在审查报告中。
 
 
   ### 阶段一：静态扫描
