@@ -82,12 +82,18 @@ class TestTaskStateFlow:
         task_id = body.get("id") or body.get("task_id")
         assert task_id, f"创建任务应返回 id，实际 {body}"
 
-        # 出生即落 pipeline_state 表（chat_send_handler 创建分支），聚合立即可见
-        state_status, state_body, _ = http_get_with_auth(
-            f"{STATE_URL}", token=token, timeout=10
-        )
-        assert state_status == 200, f"state 查询应 200，实际 {state_status}"
-        row = _find_pipeline_state(state_body, task_id)
+        # 出生即落 pipeline_state 表（chat_send_handler 创建分支），聚合可见；
+        # background 派发异步落库，短轮询等待出生行出口（<15s）
+        row = None
+        deadline = time.time() + 15
+        while time.time() < deadline and row is None:
+            state_status, state_body, _ = http_get_with_auth(
+                f"{STATE_URL}", token=token, timeout=10
+            )
+            if state_status == 200:
+                row = _find_pipeline_state(state_body, task_id)
+            if row is None:
+                time.sleep(2)
         assert row is not None, f"刚创建的任务应出现在 state 聚合，task_id={task_id}"
         assert row.get("state", {}).get("task.status") in ("pending", "running"), (
             f"出生状态应为 pending（或已推进 running），实际 {row.get('state', {})}"
