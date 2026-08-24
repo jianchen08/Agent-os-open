@@ -118,7 +118,6 @@ mod tests {
             capabilities: ManifestCapabilities::default(),
             requires_services: vec![],
             permissions: ManifestPermissions::default(),
-            error_policy: Default::default(),
             priority: 50,
             mcp: None,
             lifecycle: None,

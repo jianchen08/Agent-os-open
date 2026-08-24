@@ -14,6 +14,7 @@ use std::sync::{Arc, Mutex};
 use agentos_core::traits::{PluginInvoker, StorageBackend};
 use agentos_core::types::PluginContext;
 use agentos_core::types::{PluginError, PluginResult, ToolExecutionResult};
+use agentos_engine::compiler::compile_pipeline;
 use agentos_engine::{PipelineExecutor, SqliteStore};
 use async_trait::async_trait;
 use serde_json::json;
@@ -157,8 +158,10 @@ async fn test_run_dispatches_on_pipeline_end() {
     let invoker = Arc::new(HookRecordingInvoker::new());
     let executor = make_executor(invoker.clone(), &["spill_retrieve_tool"], store);
     let state = json!({"pipeline_id": "pipe-xyz", "message": "hi"});
+    let compiled = compile_pipeline(&minimal_config(), &Default::default(), &executor.plugin_ids())
+        .expect("compile ok");
     let final_state = executor
-        .run(&minimal_config(), &Default::default(), state)
+        .run_compiled(&compiled, state)
         .await
         .expect("run ok");
     assert!(final_state.get("pipeline_id").is_some());
@@ -178,12 +181,10 @@ async fn test_run_without_hook_plugins_skips_dispatch() {
     let store = Arc::new(SqliteStore::open_memory().unwrap());
     let invoker = Arc::new(HookRecordingInvoker::new());
     let executor = make_executor(invoker.clone(), &[], store);
+    let compiled = compile_pipeline(&minimal_config(), &Default::default(), &executor.plugin_ids())
+        .expect("compile ok");
     executor
-        .run(
-            &minimal_config(),
-            &Default::default(),
-            json!({"pipeline_id": "p"}),
-        )
+        .run_compiled(&compiled, json!({"pipeline_id": "p"}))
         .await
         .expect("run ok");
     assert!(invoker.hooks.lock().unwrap().is_empty(), "未注册 → 不分发");
@@ -197,12 +198,10 @@ async fn test_dispatch_is_best_effort() {
     let invoker = Arc::new(HookRecordingInvoker::new());
     invoker.fail_on("spill_retrieve_tool");
     let executor = make_executor(invoker.clone(), &["spill_retrieve_tool"], store);
+    let compiled = compile_pipeline(&minimal_config(), &Default::default(), &executor.plugin_ids())
+        .expect("compile ok");
     let result = executor
-        .run(
-            &minimal_config(),
-            &Default::default(),
-            json!({"pipeline_id": "p"}),
-        )
+        .run_compiled(&compiled, json!({"pipeline_id": "p"}))
         .await;
     assert!(result.is_ok(), "钩子分发失败不得让 run 失败");
     assert_eq!(invoker.hook_calls("spill_retrieve_tool").len(), 1);

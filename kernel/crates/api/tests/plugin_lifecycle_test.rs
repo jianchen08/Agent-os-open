@@ -9,8 +9,7 @@
 use std::collections::HashSet;
 
 use agentos_api::plugin_lifecycle::{
-    has_http_endpoints, reenable_plugin_capabilities, register_new_plugins,
-    register_plugin_capabilities,
+    reenable_plugin_capabilities, register_new_plugins, register_plugin_capabilities,
 };
 use agentos_core::traits::{
     CapabilityRegistry, HostType, HttpEndpoint, ManifestCapabilities, PluginManifest, PluginType,
@@ -33,7 +32,6 @@ fn manifest(plugin_id: &str, plugin_type: PluginType, host_type: HostType) -> Pl
         capabilities: ManifestCapabilities::default(),
         requires_services: vec![],
         permissions: Default::default(),
-        error_policy: Default::default(),
         priority: 100,
         mcp: None,
         lifecycle: None,
@@ -152,25 +150,6 @@ fn register_new_plugins_skips_existing_ids() {
     assert_eq!(ids, vec!["new-tool".to_string()]);
     assert_eq!(tools, 1, "只注册了 new-tool 的 1 个工具");
     assert!(reg.get_tool("t1").is_some());
-}
-
-#[test]
-fn has_http_endpoints_detects_declaration() {
-    let empty = manifest("p1", PluginType::System, HostType::InProcess);
-    assert!(!has_http_endpoints(&empty));
-
-    let mut with_ep = manifest("p2", PluginType::System, HostType::Sidecar);
-    with_ep.http_endpoints = vec![HttpEndpoint {
-        route_id: "webhook".to_string(),
-        method: "POST".to_string(),
-        path: "/ext/p2/webhook".to_string(),
-        auth: "none".to_string(),
-        handler_capability: "http.handle".to_string(),
-        timeout_ms: None,
-        max_concurrency: None,
-        description: None,
-    }];
-    assert!(has_http_endpoints(&with_ep));
 }
 
 // ── G1 enable 对称化：disable 清四维 → re-enable 全部回来 ──

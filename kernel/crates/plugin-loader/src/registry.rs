@@ -34,10 +34,6 @@ struct RouteKey {
 pub struct CapabilityRegistryImpl {
     tools: RwLock<HashMap<String, ToolDescriptor>>,
     tools_by_plugin: RwLock<HashMap<String, Vec<String>>>,
-    /// 路由信号并集（写入侧维持；查询面 has_route_signal 已随死代码删除）。
-    /// TODO(R2)：api 侧注册写入点清理后，此存储一并退役。
-    #[allow(dead_code)]
-    route_signals: RwLock<HashSet<RouteType>>,
     route_signals_by_plugin: RwLock<HashMap<String, Vec<RouteType>>>,
     /// HTTP 端点维度（ADR §3.3）：RouteKey → 已注册描述符。
     http_routes: RwLock<HashMap<RouteKey, HttpRouteDescriptor>>,
@@ -50,7 +46,6 @@ impl CapabilityRegistryImpl {
         Self {
             tools: RwLock::new(HashMap::new()),
             tools_by_plugin: RwLock::new(HashMap::new()),
-            route_signals: RwLock::new(HashSet::new()),
             route_signals_by_plugin: RwLock::new(HashMap::new()),
             http_routes: RwLock::new(HashMap::new()),
             http_routes_by_plugin: RwLock::new(HashMap::new()),
@@ -179,17 +174,9 @@ impl CapabilityRegistryImpl {
         }
     }
 
-    /// 移除该插件的路由信号声明并重建全局并集。
+    /// 移除该插件的路由信号声明。
     fn remove_route_signals_entry(&self, plugin_id: &str) {
-        let mut by_plugin = self.route_signals_by_plugin.write();
-        by_plugin.remove(plugin_id);
-        let mut sig_set = self.route_signals.write();
-        sig_set.clear();
-        for sigs in by_plugin.values() {
-            for sig in sigs {
-                sig_set.insert(sig.clone());
-            }
-        }
+        self.route_signals_by_plugin.write().remove(plugin_id);
     }
 
     /// 移除单条 HTTP 路由注册。
@@ -306,18 +293,9 @@ impl CapabilityRegistry for CapabilityRegistryImpl {
     }
 
     fn register_route_signals(&self, plugin_id: &str, signals: Vec<RouteType>) {
-        let mut sig_set = self.route_signals.write();
-        let mut by_plugin = self.route_signals_by_plugin.write();
-        by_plugin.insert(plugin_id.to_string(), signals);
-        // 重建全局集合为「所有 plugin 当前 signals 的并集」，保证重注册或
-        // 部分卸载后不残留旧 signal；多 plugin 共享同一 signal 时
-        // 只要还有任一 plugin 持有即保留。
-        sig_set.clear();
-        for sigs in by_plugin.values() {
-            for sig in sigs {
-                sig_set.insert(sig.clone());
-            }
-        }
+        self.route_signals_by_plugin
+            .write()
+            .insert(plugin_id.to_string(), signals);
     }
 
     fn register_http_route(
@@ -391,13 +369,7 @@ impl CapabilityRegistry for CapabilityRegistryImpl {
 
     fn clear_plugin(&self, plugin_id: &str) {
         self.unregister_tools(plugin_id);
-        let mut by_plugin = self.route_signals_by_plugin.write();
-        if let Some(signals) = by_plugin.remove(plugin_id) {
-            let mut sig_set = self.route_signals.write();
-            for sig in &signals {
-                sig_set.remove(sig);
-            }
-        }
+        self.route_signals_by_plugin.write().remove(plugin_id);
         // 清除 HTTP 路由
         let mut http_by_plugin = self.http_routes_by_plugin.write();
         if let Some(keys) = http_by_plugin.remove(plugin_id) {
@@ -1438,7 +1410,6 @@ mod tests {
             capabilities: Default::default(),
             requires_services: vec![],
             permissions: Default::default(),
-            error_policy: Default::default(),
             priority: 100,
             granted_capabilities: vec![],
             mcp: None,

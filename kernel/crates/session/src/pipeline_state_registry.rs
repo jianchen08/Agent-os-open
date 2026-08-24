@@ -209,11 +209,6 @@ impl PipelineStateRegistry {
             .collect()
     }
 
-    /// 当前注册的管道数（监控用）。
-    pub fn len(&self) -> usize {
-        self.entries.read().len()
-    }
-
     /// 是否为空。
     pub fn is_empty(&self) -> bool {
         self.entries.read().is_empty()

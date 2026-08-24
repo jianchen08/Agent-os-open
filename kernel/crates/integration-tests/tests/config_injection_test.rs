@@ -209,7 +209,6 @@ fn make_sidecar_manifest(id: &str, entry: &str) -> PluginManifest {
         capabilities: Default::default(),
         requires_services: vec![],
         permissions: Default::default(),
-        error_policy: Default::default(),
         priority: 100,
         mcp: None,
         lifecycle: None,
@@ -508,43 +507,6 @@ async fn fp4_invoker_works_with_empty_config() {
         "config should be empty object {{}}, got: {}",
         config
     );
-}
-
-// ═══ FP5: 配置热重载通知 ═══
-
-#[tokio::test]
-#[cfg_attr(
-    windows,
-    ignore = "mock server 依赖 Unix bash+stdio,Windows 本地不可靠;CI(Ubuntu)覆盖"
-)]
-async fn fp5_send_config_change_notification() {
-    let result_file = tmp_result_file("fp5_verify_result.json");
-    clear_result_file(&result_file);
-
-    let _script_dir = create_mock_server_script(&result_file);
-    let script_path = _script_dir.path().join("mock_server.sh");
-
-    let mut client = McpClient::new_stdio("bash", vec![script_path.to_string_lossy().to_string()]);
-    client.connect().await.unwrap();
-    client.initialize(&json!({})).await.unwrap();
-
-    clear_result_file(&result_file);
-
-    let new_config = json!({
-        "memory_storage": {"storage_backend": "redis"},
-        "feature_flags": {"new_feature": true}
-    });
-    let result = client.send_config_change(&new_config).await;
-    assert!(result.is_ok(), "send_config_change should succeed");
-
-    tokio::time::sleep(Duration::from_millis(300)).await;
-    client.kill().await.unwrap();
-
-    let received = read_result_file(&result_file);
-    assert_eq!(received["event"], "config_change");
-    let received_config = &received["received_config"];
-    assert!(received_config["memory_storage"]["storage_backend"] == "redis");
-    assert!(received_config["feature_flags"]["new_feature"] == true);
 }
 
 // ═══ E2E: YAML → load_config → initialize params ═══

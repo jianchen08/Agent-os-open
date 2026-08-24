@@ -22,9 +22,9 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
 use crate::types::{
-    Branch, ErrorPolicy, MessageRecord, PipelineRunInfo, PluginContext, PluginError, PluginResult,
-    RouteType, RunRecord, RunStatus, SessionRecord, StorageError, ToolCategory,
-    ToolExecutionResult, ToolSource, TraceEntry, UserRecord,
+    Branch, MessageRecord, PipelineRunInfo, PluginContext, PluginError, PluginResult, RouteType,
+    RunRecord, RunStatus, SessionRecord, StorageError, ToolCategory, ToolExecutionResult,
+    ToolSource, TraceEntry, UserRecord,
 };
 
 // ── 1. 插件基础 Trait ───────────────────────────────────────────
@@ -44,14 +44,6 @@ pub trait PluginMeta: Send + Sync {
 
     /// 插件类型（对应 manifest.type）
     fn plugin_type(&self) -> PluginType;
-
-    /// 插件错误处理策略（对应 manifest.error_policy，可选字段）。
-    ///
-    /// ADR 2026-08-18 收敛后为唯一值 `ErrorPolicy::Retry`——引擎不再按它分发行为，
-    /// 相关内容仅作 struct 兼容保留。
-    fn error_policy(&self) -> ErrorPolicy {
-        ErrorPolicy::default()
-    }
 
     /// 插件执行优先级，数值越小越先执行（对应 manifest.priority）
     fn priority(&self) -> u32 {
@@ -161,11 +153,6 @@ pub trait CorePipelinePlugin: PipelinePlugin {
     /// Core 插件固定返回 Core 角色。
     fn role(&self) -> PipelineRole {
         PipelineRole::Core
-    }
-
-    /// 错误策略为 Fallback 时使用的默认状态更新。
-    fn fallback_state(&self) -> HashMap<String, serde_json::Value> {
-        HashMap::new()
     }
 }
 
@@ -473,190 +460,6 @@ pub struct ToolDescriptor {
 // Resource 描述符与 resources 能力维度已删除（全链无消费方）。
 // 旧 manifest 的 `capabilities.resources` 条目由 serde 默认忽略未知字段兜底。
 
-// ── 6. LlmProvider（LLM 抽象层） ──────────────────────────────
-
-/// LLM 服务提供者抽象（抽象层 + 可替换实现模式）。
-///
-/// 设计原则（[来源: docs/0.2_rust_plugin_solution.md §3.5]）：
-/// - LLM Provider 实现会变（新增厂商、切换 API），但"调用 LLM 返回文本"这个动作不变
-/// - 抽象层长期保留，具体实现藏在各自模块内部
-/// - 外部（管道引擎 Core 插件）只看到统一的调用接口
-#[async_trait]
-pub trait LlmProvider: Send + Sync {
-    /// 非流式补全调用。
-    ///
-    /// # Arguments
-    /// * `model` - 模型标识
-    /// * `messages` - 消息列表
-    /// * `options` - 调用选项（temperature、max_tokens 等）
-    async fn complete(
-        &self,
-        model: &str,
-        messages: &[LlmMessage],
-        options: &LlmOptions,
-    ) -> Result<LlmResponse, LlmError>;
-
-    /// 流式补全调用。
-    ///
-    /// 通过 channel 推送流式 chunk，调用方从 channel 接收。
-    /// 对应 0.1 的流式响应机制（管道引擎通过 stream bridge 推送到前端）。
-    async fn complete_stream(
-        &self,
-        model: &str,
-        messages: &[LlmMessage],
-        options: &LlmOptions,
-    ) -> Result<tokio::sync::mpsc::Receiver<LlmStreamChunk>, LlmError>;
-
-    /// 获取可用模型列表。
-    async fn list_models(&self) -> Result<Vec<ModelInfo>, LlmError>;
-}
-
-/// LLM 消息。
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct LlmMessage {
-    pub role: MessageRole,
-    pub content: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub tool_calls: Option<Vec<ToolCallRequest>>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub tool_call_id: Option<String>,
-}
-
-/// 消息角色。
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum MessageRole {
-    System,
-    User,
-    Assistant,
-    Tool,
-}
-
-/// 工具调用请求（LLM 返回的 function_call）。
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ToolCallRequest {
-    pub id: String,
-    pub name: String,
-    pub arguments: serde_json::Value,
-}
-
-/// LLM 调用选项。
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct LlmOptions {
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub temperature: Option<f64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub max_tokens: Option<u32>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub top_p: Option<f64>,
-    /// 允许 LLM 调用的工具列表（function calling）
-    #[serde(skip_serializing_if = "Vec::is_empty", default)]
-    pub tools: Vec<ToolCallDefinition>,
-}
-
-/// 工具调用定义（传给 LLM 的 function schema）。
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ToolCallDefinition {
-    pub name: String,
-    pub description: String,
-    pub input_schema: serde_json::Value,
-}
-
-/// LLM 非流式响应。
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct LlmResponse {
-    pub content: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub tool_calls: Option<Vec<ToolCallRequest>>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub thinking: Option<String>,
-    pub usage: TokenUsage,
-    pub model: String,
-    pub finish_reason: FinishReason,
-}
-
-/// Token 用量统计。
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct TokenUsage {
-    pub prompt_tokens: u64,
-    pub completion_tokens: u64,
-    pub total_tokens: u64,
-}
-
-/// 完成原因。
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum FinishReason {
-    Stop,
-    Length,
-    ToolCalls,
-    ContentFilter,
-    Error,
-}
-
-/// LLM 流式 chunk。
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct LlmStreamChunk {
-    /// 文本增量
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub delta: Option<String>,
-    /// 工具调用增量
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub tool_call_delta: Option<ToolCallRequest>,
-    /// 思考过程增量
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub thinking_delta: Option<String>,
-    /// 是否结束
-    pub done: bool,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub finish_reason: Option<FinishReason>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub usage: Option<TokenUsage>,
-}
-
-/// 模型信息。
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ModelInfo {
-    pub id: String,
-    pub name: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub context_window: Option<u32>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub max_output_tokens: Option<u32>,
-}
-
-/// LLM 调用错误。
-#[derive(Debug, Clone, thiserror::Error)]
-pub enum LlmError {
-    /// 网络错误
-    #[error("network error: {message}")]
-    Network { message: String },
-
-    /// 认证失败
-    #[error("authentication failed: {message}")]
-    Auth { message: String },
-
-    /// 速率限制
-    #[error("rate limited, retry after {retry_after_secs:?}s")]
-    RateLimited { retry_after_secs: Option<u64> },
-
-    /// 模型不可用
-    #[error("model '{model}' not available: {reason}")]
-    ModelUnavailable { model: String, reason: String },
-
-    /// 上下文超长
-    #[error("context length exceeded: prompt {prompt_tokens} > limit {max_tokens}")]
-    ContextLength { prompt_tokens: u64, max_tokens: u64 },
-
-    /// 内容过滤
-    #[error("content filtered: {reason}")]
-    ContentFiltered { reason: String },
-
-    /// 其他错误
-    #[error("LLM error: {message}")]
-    Other { message: String },
-}
-
 // ── 7. PluginLoader（插件加载器） ──────────────────────────────
 
 /// 插件加载器：负责从文件系统发现、解析 manifest、加载插件实例。
@@ -762,10 +565,6 @@ pub struct PluginManifest {
     pub requires_services: Vec<String>,
     #[serde(default)]
     pub permissions: ManifestPermissions,
-    /// 错误处理策略——ADR 2026-08-18 收敛后为唯一值 `Retry`（serde default，manifest
-    /// 可选字段，缺省即 retry）。保留字段仅为 struct 兼容，引擎不再按它分发行为。
-    #[serde(default)]
-    pub error_policy: ErrorPolicy,
     #[serde(default = "default_priority")]
     pub priority: u32,
     /// 分层持久化：插件声明需持久化的 state 标量字段（累计型，如 track.total_tokens）。

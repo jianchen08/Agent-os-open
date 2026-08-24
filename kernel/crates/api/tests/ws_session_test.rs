@@ -70,30 +70,3 @@ async fn handshake_auth_passes_with_verifier() {
         }
     );
 }
-
-#[tokio::test]
-async fn reconnect_replay_after_emit() {
-    // 验证 api 侧 SessionCoordinator 重连回放全链路
-    let coord = SessionCoordinator::default();
-    let (sink1, _, _) = make_sink();
-    coord.register("user-A", sink1);
-    coord.register_thread("thread-1", "user-A");
-
-    for i in 1..=3 {
-        coord
-            .emit_event("thread-1", "widget_event", serde_json::json!({"i": i}))
-            .await;
-    }
-    // 重连：新 sink，last_sequence=1 → 回放 seq 2,3
-    let (sink2, _, recv2) = make_sink();
-    let outcome = coord.handle_reconnect("thread-1", "user-A", sink2, 1).await;
-    assert!(outcome.replayed);
-    assert!(!outcome.resync_required);
-    let msgs = recv2.lock().unwrap();
-    // 应含 connection_confirmation + seq2 widget + seq3 widget
-    let widget_count = msgs
-        .iter()
-        .filter(|m| m.contains("\"widget_event\""))
-        .count();
-    assert_eq!(widget_count, 2, "应回放 seq 2,3 两个 widget 事件");
-}

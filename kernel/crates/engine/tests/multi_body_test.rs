@@ -20,6 +20,7 @@ use agentos_core::types::{
     PluginError, PluginResult, Route, RouteAction, RouteNext, RunRecord, RunStatus, StepLibrary,
     TenantContext, ToolExecutionResult, TraceEntry,
 };
+use agentos_engine::compiler::compile_pipeline;
 use agentos_engine::PipelineExecutor;
 use async_trait::async_trait;
 use serde_json::json;
@@ -333,8 +334,10 @@ async fn test_init_main_exit_sequential() {
     let config = make_three_body_config(vec![]);
     let executor = make_executor(Arc::clone(&invoker));
 
+    let compiled = compile_pipeline(&config, &StepLibrary::default(), &executor.plugin_ids())
+        .expect("compile ok");
     let final_state = executor
-        .run(&config, &StepLibrary::default(), json!({}))
+        .run_compiled(&compiled, json!({}))
         .await
         .expect("run ok");
 
@@ -371,8 +374,10 @@ async fn test_exit_routes_phase_transition_skips_main() {
     let config = make_three_body_config(exit_routes);
     let executor = make_executor(Arc::clone(&invoker));
 
+    let compiled = compile_pipeline(&config, &StepLibrary::default(), &executor.plugin_ids())
+        .expect("compile ok");
     let final_state = executor
-        .run(&config, &StepLibrary::default(), json!({"skip_main": true}))
+        .run_compiled(&compiled, json!({"skip_main": true}))
         .await
         .expect("run ok");
 
@@ -394,8 +399,10 @@ async fn test_run_on_error_runs_exit_when_ended_at_start() {
     let config = make_three_body_config(vec![]);
     let executor = make_executor(Arc::clone(&invoker));
 
+    let compiled = compile_pipeline(&config, &StepLibrary::default(), &executor.plugin_ids())
+        .expect("compile ok");
     let final_state = executor
-        .run(&config, &StepLibrary::default(), json!({"ended": true}))
+        .run_compiled(&compiled, json!({"ended": true}))
         .await
         .expect("run ok");
 
@@ -442,8 +449,10 @@ async fn test_phase_loop_guard_errors() {
     }];
     let executor = make_executor(Arc::clone(&invoker));
 
+    let compiled = compile_pipeline(&config, &StepLibrary::default(), &executor.plugin_ids())
+        .expect("compile ok");
     let result = executor
-        .run(&config, &StepLibrary::default(), json!({}))
+        .run_compiled(&compiled, json!({}))
         .await;
     assert!(
         result.is_err(),
@@ -452,7 +461,7 @@ async fn test_phase_loop_guard_errors() {
     );
 }
 
-/// 转移目标不存在（Phase 指向未知 body）→ 显式错误。
+/// 转移目标不存在（Phase 指向未知 body）→ 编译期显式错误（G10 语义升级）。
 #[tokio::test]
 async fn test_phase_target_missing_errors() {
     let invoker = Arc::new(PhaseRecordingInvoker::new());
@@ -466,8 +475,7 @@ async fn test_phase_target_missing_errors() {
     let config = make_three_body_config(exit_routes);
     let executor = make_executor(Arc::clone(&invoker));
 
-    let result = executor
-        .run(&config, &StepLibrary::default(), json!({}))
-        .await;
-    assert!(result.is_err(), "Phase 目标不存在应报错：{:?}", result);
+    let err = compile_pipeline(&config, &StepLibrary::default(), &executor.plugin_ids())
+        .expect_err("Phase 目标不存在应在编译期报错");
+    assert!(err.to_string().contains("ghost"), "err: {err}");
 }

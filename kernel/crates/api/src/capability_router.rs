@@ -75,20 +75,20 @@ pub struct KernelCapabilityRouter {
     /// omnisearch universal_search 缺 mode 导致 100% 校验失败，日志里每轮
     /// 一条 pydantic 错误，但没有闸门把"同一工具连续 N 次失败"这个信号
     /// 汇总成一条可操作的告警，调研 agent 空转 45 万 token 无人察觉。
-    tool_failure_tracker: Option<std::sync::Arc<dyn crate::tools::ToolFailureTracker + Send + Sync>>,
+    tool_failure_tracker:
+        Option<std::sync::Arc<dyn crate::tools::ToolFailureTracker + Send + Sync>>,
 }
 
-    /// 域事件广播闭包：(event_name, tags) → 点对点投递给声明 domain_event 的
-    /// 启用插件（组件版 broadcast_domain_event_from；观察总线由调用方决定）。
-    /// tags 键为静态字符串（调用处全部为字面量）。
-    pub type DomainBroadcaster =
-        Arc<dyn Fn(&str, Vec<(&'static str, serde_json::Value)>) + Send + Sync>;
+/// 域事件广播闭包：(event_name, tags) → 点对点投递给声明 domain_event 的
+/// 启用插件（组件版 broadcast_domain_event_from；观察总线由调用方决定）。
+/// tags 键为静态字符串（调用处全部为字面量）。
+pub type DomainBroadcaster =
+    Arc<dyn Fn(&str, Vec<(&'static str, serde_json::Value)>) + Send + Sync>;
 
-    /// 流式声明查询闭包：(plugin_id) → 该插件的 capabilities.streaming 声明
-    /// （None = 未声明 → 网关拒绝其流式事件）。
-    pub type StreamingDeclarationLookupFn =
-        Arc<dyn Fn(&str) -> Option<agentos_core::traits::StreamingCapability> + Send + Sync>;
-
+/// 流式声明查询闭包：(plugin_id) → 该插件的 capabilities.streaming 声明
+/// （None = 未声明 → 网关拒绝其流式事件）。
+pub type StreamingDeclarationLookupFn =
+    Arc<dyn Fn(&str) -> Option<agentos_core::traits::StreamingCapability> + Send + Sync>;
 
 /// G3：动态工具注册器闭包。
 ///
@@ -566,10 +566,7 @@ impl CapabilityRouter for KernelCapabilityRouter {
                             }
                         }
                         if let Err(reason) = crate::kernel_capabilities::validate_streaming_event(
-                            contracts,
-                            event_name,
-                            &payload,
-                            plugin_id,
+                            contracts, event_name, &payload, plugin_id,
                         ) {
                             tracing::warn!(
                                 target: "capability:event-bus",
@@ -1298,11 +1295,12 @@ impl CapabilityRouter for KernelCapabilityRouter {
                     .ok_or_else(|| McpError::Protocol {
                         message: "pipeline-state.update 缺少 pipeline_id 参数".to_string(),
                     })?;
-                let fields = params.get("fields").and_then(|v| v.as_object()).ok_or_else(
-                    || McpError::Protocol {
+                let fields = params
+                    .get("fields")
+                    .and_then(|v| v.as_object())
+                    .ok_or_else(|| McpError::Protocol {
                         message: "pipeline-state.update 缺少 fields 对象参数".to_string(),
-                    },
-                )?;
+                    })?;
                 for k in fields.keys() {
                     if !k.starts_with("task.") {
                         return Err(McpError::Protocol {
@@ -1728,10 +1726,10 @@ mod tests {
         coord.register("user-test", sink);
         coord.register_thread("thread-1", "user-test");
         let contracts = Arc::new(
-            crate::kernel_capabilities::load_contracts(&std::path::Path::new(env!(
-                "CARGO_MANIFEST_DIR"
-            ))
-            .join("../../../config/kernel_capabilities"))
+            crate::kernel_capabilities::load_contracts(
+                &std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                    .join("../../../config/kernel_capabilities"),
+            )
             .expect("仓库契约必须可加载"),
         );
         let lookup: StreamingDeclarationLookupFn = Arc::new(move |_pid| decl.clone());
@@ -2698,16 +2696,16 @@ mod tests {
             .iter()
             .find(|r| r.get("pipeline_id").and_then(|v| v.as_str()) == Some(pid.as_str()))
             .unwrap_or_else(|| {
-                panic!("无 checkpoint 的表行管道应出口（整行丢弃 = 刚提交任务不可见）; rows={arr:?}")
+                panic!(
+                    "无 checkpoint 的表行管道应出口（整行丢弃 = 刚提交任务不可见）; rows={arr:?}"
+                )
             });
         assert_eq!(row["task.goal"], "AI行业近月发展调研");
         assert_eq!(row["task.status"], "running");
         assert_eq!(row["lineage.parent_pipeline_id"], parent_pid);
         let parent_row = arr
             .iter()
-            .find(|r| {
-                r.get("pipeline_id").and_then(|v| v.as_str()) == Some(parent_pid.as_str())
-            })
+            .find(|r| r.get("pipeline_id").and_then(|v| v.as_str()) == Some(parent_pid.as_str()))
             .unwrap_or_else(|| panic!("提交者管道行应出口; rows={arr:?}"));
         assert_eq!(
             parent_row[&format!("task.owned.{pid}.title")],
@@ -3252,7 +3250,7 @@ mod tests {
 /// 从流水日志淹没中捞出来（omnisearch universal_search 空转 45 万 token 教训）。
 mod tool_failure_alert_tests {
     use super::*;
-    use crate::tools::{FAILURE_ALERT_THRESHOLD, ToolFailureAlert, ToolFailureTracker};
+    use crate::tools::{ToolFailureAlert, ToolFailureTracker, FAILURE_ALERT_THRESHOLD};
     use std::sync::Mutex;
 
     /// 返回 success=false 的 invoker（模拟参数校验失败）。
@@ -3264,7 +3262,11 @@ mod tool_failure_alert_tests {
             _plugin_id: &str,
             _ctx: &agentos_core::types::PluginContext,
         ) -> Result<agentos_core::types::PluginResult, agentos_core::types::PluginError> {
-            Err(agentos_core::types::PluginError { message: "n/a".into(), code: None, source: None })
+            Err(agentos_core::types::PluginError {
+                message: "n/a".into(),
+                code: None,
+                source: None,
+            })
         }
         async fn send_lifecycle_hook(
             &self,
@@ -3279,7 +3281,8 @@ mod tool_failure_alert_tests {
             _plugin_id: &str,
             _tool_name: &str,
             _inputs: &Value,
-        ) -> Result<agentos_core::types::ToolExecutionResult, agentos_core::types::PluginError> {
+        ) -> Result<agentos_core::types::ToolExecutionResult, agentos_core::types::PluginError>
+        {
             Ok(agentos_core::types::ToolExecutionResult {
                 success: false,
                 data: json!({}),
@@ -3295,9 +3298,23 @@ mod tool_failure_alert_tests {
         records: Arc<Mutex<Vec<(String, bool)>>>,
     }
     impl ToolFailureTracker for RecordingTracker {
-        fn record(&self, tool_name: &str, success: bool, _sample: &str) -> Option<ToolFailureAlert> {
-            self.records.lock().unwrap().push((tool_name.to_string(), success));
-            let n = self.records.lock().unwrap().iter().filter(|(n, s)| n == tool_name && !s).count();
+        fn record(
+            &self,
+            tool_name: &str,
+            success: bool,
+            _sample: &str,
+        ) -> Option<ToolFailureAlert> {
+            self.records
+                .lock()
+                .unwrap()
+                .push((tool_name.to_string(), success));
+            let n = self
+                .records
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|(n, s)| n == tool_name && !s)
+                .count();
             if n as u32 >= FAILURE_ALERT_THRESHOLD {
                 let a = ToolFailureAlert {
                     tool_name: tool_name.to_string(),
@@ -3330,10 +3347,16 @@ mod tool_failure_alert_tests {
         });
         // 阈值前（4 次）：无告警，record 计数 4
         for _ in 0..(FAILURE_ALERT_THRESHOLD - 1) {
-            let resp = router.handle("tool-executor", "invoke", params.clone()).await.unwrap();
+            let resp = router
+                .handle("tool-executor", "invoke", params.clone())
+                .await
+                .unwrap();
             assert_eq!(resp["success"], false, "失败结果按信封返回");
             assert!(
-                resp["error"].as_str().unwrap_or("").contains("Field required"),
+                resp["error"]
+                    .as_str()
+                    .unwrap_or("")
+                    .contains("Field required"),
                 "错误详情透传"
             );
         }
@@ -3352,7 +3375,10 @@ mod tool_failure_alert_tests {
         // RecordingTracker 只验证「路由把 success=false 送进 tracker 并透传告警」），
         // 此处补一轮确认记录计数与失败次数一致。
         for _ in 0..3 {
-            let _ = router.handle("tool-executor", "invoke", params.clone()).await.unwrap();
+            let _ = router
+                .handle("tool-executor", "invoke", params.clone())
+                .await
+                .unwrap();
         }
         assert_eq!(records.lock().unwrap().len(), 8, "8 次失败全部送进 tracker");
     }

@@ -15,6 +15,7 @@ use agentos_core::types::{
     PluginError, PluginResult, Route, RouteAction, RouteNext, RunRecord, RunStatus, StepItem,
     StepLibrary, ToolExecutionResult, TraceEntry,
 };
+use agentos_engine::compiler::compile_pipeline;
 use agentos_engine::{PipelineExecutor, SqliteStore};
 use async_trait::async_trait;
 use serde_json::json;
@@ -404,7 +405,7 @@ async fn test_pipeline_executes_steps() {
         "suspended": false,
     });
     let final_state = executor
-        .run(&engine_cfg, &StepLibrary::default(), initial_state)
+        .run_compiled(&compile_pipeline(&engine_cfg, &StepLibrary::default(), &executor.plugin_ids()).expect("compile ok"), initial_state)
         .await
         .expect("executor run should succeed");
 
@@ -518,7 +519,7 @@ async fn test_pipeline_routes_tool_calls_to_loop() {
         "suspended": false,
     });
     let final_state = executor
-        .run(&engine_cfg, &StepLibrary::default(), initial_state)
+        .run_compiled(&compile_pipeline(&engine_cfg, &StepLibrary::default(), &executor.plugin_ids()).expect("compile ok"), initial_state)
         .await
         .expect("executor run should succeed");
 
@@ -593,7 +594,7 @@ async fn wiring_messages_ops_applied_to_state_and_table() {
     });
 
     let final_state = executor
-        .run(&engine_cfg, &StepLibrary::default(), initial_state)
+        .run_compiled(&compile_pipeline(&engine_cfg, &StepLibrary::default(), &executor.plugin_ids()).expect("compile ok"), initial_state)
         .await
         .expect("run should succeed");
 
@@ -656,7 +657,7 @@ async fn test_while_cond_drives_body_loop() {
     };
     let executor = make_executor(Arc::clone(&invoker), &["counter"]);
     let final_state = executor
-        .run(&config, &StepLibrary::default(), json!({}))
+        .run_compiled(&compile_pipeline(&config, &StepLibrary::default(), &executor.plugin_ids()).expect("compile ok"), json!({}))
         .await
         .expect("run should succeed");
     assert_eq!(
@@ -700,7 +701,7 @@ async fn test_while_cond_false_after_state_change_exits() {
     };
     let executor = make_executor(Arc::clone(&invoker), &["flipper"]);
     let final_state = executor
-        .run(&config, &StepLibrary::default(), json!({}))
+        .run_compiled(&compile_pipeline(&config, &StepLibrary::default(), &executor.plugin_ids()).expect("compile ok"), json!({}))
         .await
         .expect("run should succeed");
     // 第一轮执行（done 缺失 → 条件真）；插件置 done=true；第二轮条件假退出

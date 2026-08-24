@@ -307,26 +307,14 @@ fn build_wildcard_handler(
     use axum::http::{HeaderMap, Method};
 
     // axum::routing::any 注册——任何 method 都走同一 handler。
-    // query 多值解析用 form_urlencoded 手动收集（A1）：serde_urlencoded 的
-    // Query 提取器对重复 key 直接报错（duplicate field → 400），不支持
-    // HashMap<String, Vec<String>> 多值收集；form_urlencoded 逐对解析天然
-    // 保序全量（filter=a&filter=b → filter: [a, b]，不塌缩）。
+    // query 多值解析统一走 [`parse_query_multi`]（重复 key 不塌缩，A1）。
     let handler =
         move |method: Method, uri: axum::http::Uri, headers: HeaderMap, body: axum::body::Bytes| {
             let dispatcher = dispatcher.clone();
             let plugin_dirs = plugin_dirs.clone();
             async move {
                 let path = uri.path().to_string();
-                let query_multi: HashMap<String, Vec<String>> = uri
-                    .query()
-                    .map(|q| {
-                        let mut m: HashMap<String, Vec<String>> = HashMap::new();
-                        for (k, v) in form_urlencoded::parse(q.as_bytes()) {
-                            m.entry(k.to_string()).or_default().push(v.to_string());
-                        }
-                        m
-                    })
-                    .unwrap_or_default();
+                let query_multi = parse_query_multi(&uri);
                 exec_ext_request(
                     dispatcher,
                     plugin_dirs,
@@ -341,6 +329,24 @@ fn build_wildcard_handler(
         };
 
     axum::routing::any(handler)
+}
+
+/// 解析 URI query 为多值形态（重复 key 不塌缩）。
+///
+/// serde_urlencoded 的 Query 提取器对重复 key 直接报错（duplicate field → 400），
+/// 不支持 `HashMap<String, Vec<String>>` 多值收集；form_urlencoded 逐对解析天然
+/// 保序全量（filter=a&filter=b → filter: [a, b]，不塌缩）。单值 `query`（last-wins）
+/// 由此派生，保证 `query[k] == query_multi[k].last()`。
+fn parse_query_multi(uri: &axum::http::Uri) -> HashMap<String, Vec<String>> {
+    uri.query()
+        .map(|q| {
+            let mut m: HashMap<String, Vec<String>> = HashMap::new();
+            for (k, v) in form_urlencoded::parse(q.as_bytes()) {
+                m.entry(k.to_string()).or_default().push(v.to_string());
+            }
+            m
+        })
+        .unwrap_or_default()
 }
 
 /// 构造 `/api/v1/datasource/{*rest}` 数据源代理（G6-a：datasource 占位转真实路由）。
@@ -367,17 +373,7 @@ fn build_datasource_handler(
             } else {
                 format!("/ext/{rest}")
             };
-            let query_multi: std::collections::HashMap<String, Vec<String>> = uri
-                .query()
-                .map(|q| {
-                    let mut m: std::collections::HashMap<String, Vec<String>> =
-                        std::collections::HashMap::new();
-                    for (k, v) in form_urlencoded::parse(q.as_bytes()) {
-                        m.entry(k.to_string()).or_default().push(v.to_string());
-                    }
-                    m
-                })
-                .unwrap_or_default();
+            let query_multi = parse_query_multi(&uri);
             exec_ext_request(
                 dispatcher,
                 plugin_dirs,
@@ -492,19 +488,22 @@ fn try_serve_static_asset(
 ///
 /// 未命中扩展名统一回退到 `application/octet-stream`（浏览器嗅探可识别大部分文本）。
 /// 不引入 mime crate —— 任务范围控制依赖膨胀，常见 web 类型手写映射足够。
-fn mime_for_extension(ext: &str) -> &'static str {
+/// 单一来源（2026-08-24 合并）：`/uploads`（routes.rs）与 `/ext/{plugin}/assets`
+/// 两处静态资源出口共用本映射，扩展名集合取两处并集。
+pub(crate) fn mime_for_extension(ext: &str) -> &'static str {
     match ext.to_ascii_lowercase().as_str() {
         "html" | "htm" => "text/html; charset=utf-8",
         "js" | "mjs" => "application/javascript; charset=utf-8",
         "css" => "text/css; charset=utf-8",
         "json" => "application/json; charset=utf-8",
         "map" => "application/json",
-        "txt" => "text/plain; charset=utf-8",
+        "txt" | "md" => "text/plain; charset=utf-8",
         "svg" => "image/svg+xml",
         "png" => "image/png",
         "jpg" | "jpeg" => "image/jpeg",
         "gif" => "image/gif",
         "webp" => "image/webp",
+        "avif" => "image/avif",
         "ico" => "image/x-icon",
         "woff" => "font/woff",
         "woff2" => "font/woff2",
@@ -517,6 +516,8 @@ fn mime_for_extension(ext: &str) -> &'static str {
         "mp4" => "video/mp4",
         "webm" => "video/webm",
         "mp3" => "audio/mpeg",
+        "wav" => "audio/wav",
+        "m4a" => "audio/mp4",
         "ogg" => "audio/ogg",
         _ => "application/octet-stream",
     }

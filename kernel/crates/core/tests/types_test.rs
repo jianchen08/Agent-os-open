@@ -43,16 +43,6 @@ fn route_signal_builder_and_skip_none() {
 }
 
 #[test]
-fn error_policy_default_is_retry_and_lowercase() {
-    // ADR 2026-08-18：收敛为唯一值 Retry；rename_all = "lowercase"
-    assert_eq!(ErrorPolicy::default(), ErrorPolicy::Retry);
-    assert_eq!(
-        serde_json::to_string(&ErrorPolicy::Retry).unwrap(),
-        "\"retry\""
-    );
-}
-
-#[test]
 fn plugin_result_default_and_state_updates_round_trip() {
     let default = PluginResult::default();
     assert!(default.state_updates.is_empty());
@@ -163,11 +153,8 @@ fn patch_type_snake_case_serde() {
 }
 
 #[test]
-fn target_type_tool_category_tool_source_round_trip() {
+fn tool_category_tool_source_round_trip() {
     // 这些枚举参与多租户/工具路由契约，确保稳定 round-trip
-    let tt: TargetType =
-        serde_json::from_str(&serde_json::to_string(&TargetType::LlmCall).unwrap()).unwrap();
-    assert_eq!(tt, TargetType::LlmCall);
     let tc = serde_json::to_string(&ToolCategory::File).unwrap();
     let back: ToolCategory = serde_json::from_str(&tc).unwrap();
     assert_eq!(back, ToolCategory::File);

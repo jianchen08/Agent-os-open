@@ -193,7 +193,7 @@ fn trigger_cdylib_restart_if_enabled(
 /// L0 纯函数：给定全量 manifests + 已知 id 集 + registry，注册新增插件的 tools/route_signals。
 ///
 /// 幂等：注册后把新 id 并入 `known_ids`，重复调用不再注册。
-/// 无 IO、无时序，可同步单测。复用 [`register_new_plugins`] 与 [`has_http_endpoints`]，
+/// 无 IO、无时序，可同步单测。复用 [`register_new_plugins`]，
 /// 行为对齐 `reload-all` 端点的新插件序列。
 /// M1：`scopes` 为 Some 时经 guarded 注册入 scope（disable 时结构性收回）。
 pub fn apply_discovered_plugins(
@@ -536,36 +536,6 @@ where
     (kept, skipped)
 }
 
-/// L1 async 编排：拉取全量 manifests → 调 L0 注册新增 + cdylib 集合 diff。
-///
-/// `invoker.discover_new_plugins()` 内部重扫插件目录（幂等），故本函数可被任意触发源
-/// （notify / 轮询 / 手动）反复调用，无新插件时 no-op。
-///
-/// `known_cdylib`：InProcess 插件 id 已知集合（`None` = 基线未建立，本轮只建基线）。
-pub async fn sync_once(
-    invoker: &dyn PluginInvoker,
-    registry: &Arc<CapabilityRegistryImpl>,
-    scopes: Option<&PluginScopeRegistry>,
-    known_ids: &mut HashSet<String>,
-    known_cdylib: &mut Option<HashSet<String>>,
-) -> Result<SyncReport, PluginError> {
-    // GAP-6：变更检测需跨调用持久基线；本便捷入口一次性 map（首轮建基线），
-    // 生产路径走 consumer 循环的常驻 map（sync_once_with_store 直用）。
-    let mut throwaway = HashMap::new();
-    sync_once_with_store(
-        invoker,
-        registry,
-        scopes,
-        known_ids,
-        known_cdylib,
-        None,
-        &mut throwaway,
-        None,
-        None,
-    )
-    .await
-}
-
 /// manifest 内容指纹（GAP-6 变更检测）：确定性序列化全文哈希。
 ///
 /// 与 mtime/源码指纹（invoker 的 respawn 判定）不同——这里只关心 manifest
@@ -610,12 +580,12 @@ fn deterministic_json(v: &serde_json::Value) -> String {
     }
 }
 
-/// [`sync_once`] 的 store 感知变体：`manifests_store` 传入 `AppState.manifests`
+/// store 感知的同步入口：`manifests_store` 传入 `AppState.manifests`
 /// 共享句柄时，本轮新注册插件的 manifest 会增量合并进 store（按 id 去重），
 /// 修复热发现后状态列表/重启用等 manifest 消费面看不到新插件的不一致。
 /// 只增不删：目录删除的卸载语义由下方 P1 卸载块处理。
 // 多依赖注入的编排泵（invoker/registry/scopes/known 集/账本/报告），参数分组
-// 收构成本超出收益，保留为内部函数（调用面收敛于 sync_once 与测试）。
+// 收构成本超出收益，保留为内部函数（调用面收敛于 consumer 循环与测试）。
 #[allow(clippy::too_many_arguments)]
 pub async fn sync_once_with_store(
     invoker: &dyn PluginInvoker,
@@ -883,7 +853,7 @@ pub async fn sync_once_with_store(
 ///
 /// `spawn` 后返回 [`WatcherHandle`]：`trigger` 可手动注入同步信号（测试 / 外部 API 用），
 /// `sync_count` 观察已执行同步次数（断言防抖用）。consumer 任务串行消费触发信号，
-/// 独占 `known_ids`（无需锁），故 [`sync_once`] 调用天然无并发竞态。
+/// 独占 `known_ids`（无需锁），故同步调用天然无并发竞态。
 pub struct PluginWatcher {
     plugins_dir: PathBuf,
     invoker: Arc<dyn PluginInvoker>,
@@ -1011,7 +981,7 @@ impl PluginWatcher {
     /// 启动后台 consumer 任务，返回可注入触发源的 handle。
     ///
     /// consumer 逻辑：收到触发信号 → 防抖（窗口内持续有事件就重置，静默 `debounce` 后执行）
-    /// → [`sync_once`]。两个自动触发源都只往同一个 mpsc 发 `()`，由 consumer 串行处理，
+    /// → [`sync_once_with_store`]。两个自动触发源都只往同一个 mpsc 发 `()`，由 consumer 串行处理，
     /// 避免并发 reload 竞态：
     /// - **notify 文件监听**（低延迟主路径）：plugins_dir 下 Create/Modify 即唤醒；
     /// - **轮询兜底**（可靠性主体）：notify 在 Docker volume / WSL / 网络盘上常丢事件，
@@ -1259,7 +1229,7 @@ mod tests {
             _plugin_id: &str,
             _ctx: &PluginContext,
         ) -> Result<PluginResult, PluginError> {
-            unimplemented!("sync_once 不走 invoke 路径")
+            unimplemented!("sync 不走 invoke 路径")
         }
         async fn invoke_tool(
             &self,
@@ -1284,7 +1254,7 @@ mod tests {
             _hook: LifecycleHook,
             _context: &HookContext,
         ) -> Result<(), PluginError> {
-            unimplemented!("sync_once 不走 hook 路径")
+            unimplemented!("sync 不走 hook 路径")
         }
         async fn discover_new_plugins(&self) -> Result<Vec<PluginManifest>, PluginError> {
             if self.fail {
@@ -1353,7 +1323,7 @@ mod tests {
         ]);
         let registry_arc = std::sync::Arc::new(CapabilityRegistryImpl::new());
         let mut known = HashSet::new();
-        let report = sync_once(&invoker, &registry_arc, None, &mut known, &mut None)
+        let report = sync_once_with_store(&invoker, &registry_arc, None, &mut known, &mut None, None, &mut HashMap::new(), None, None)
             .await
             .unwrap();
         assert_eq!(report.new_plugin_ids.len(), 2);
@@ -1367,11 +1337,11 @@ mod tests {
         let invoker = MockInvoker::new(vec![mk_manifest("a", "tool", &["ta"], false)]);
         let registry_arc = std::sync::Arc::new(CapabilityRegistryImpl::new());
         let mut known = HashSet::new();
-        let first = sync_once(&invoker, &registry_arc, None, &mut known, &mut None)
+        let first = sync_once_with_store(&invoker, &registry_arc, None, &mut known, &mut None, None, &mut HashMap::new(), None, None)
             .await
             .unwrap();
         assert_eq!(first.tools_registered, 1);
-        let second = sync_once(&invoker, &registry_arc, None, &mut known, &mut None)
+        let second = sync_once_with_store(&invoker, &registry_arc, None, &mut known, &mut None, None, &mut HashMap::new(), None, None)
             .await
             .unwrap();
         assert!(second.is_empty());
@@ -1391,7 +1361,7 @@ mod tests {
         };
         let registry_arc = std::sync::Arc::new(CapabilityRegistryImpl::new());
         let mut known = HashSet::new();
-        let err = sync_once(&invoker, &registry_arc, None, &mut known, &mut None)
+        let err = sync_once_with_store(&invoker, &registry_arc, None, &mut known, &mut None, None, &mut HashMap::new(), None, None)
             .await
             .unwrap_err();
         assert!(err.message.contains("boom"));
@@ -1477,7 +1447,7 @@ mod tests {
         let invoker = MockInvoker::new(vec![mk_manifest("p1", "tool", &["t1", "t2"], false)]);
         let registry_arc = std::sync::Arc::new(CapabilityRegistryImpl::new());
         let mut known = HashSet::new();
-        let report = sync_once(&invoker, &registry_arc, None, &mut known, &mut None)
+        let report = sync_once_with_store(&invoker, &registry_arc, None, &mut known, &mut None, None, &mut HashMap::new(), None, None)
             .await
             .unwrap();
         assert_eq!(report.tools_registered, 2);
@@ -1497,7 +1467,7 @@ mod tests {
         );
         let registry_arc = std::sync::Arc::new(CapabilityRegistryImpl::new());
         let mut known = HashSet::new();
-        let report = sync_once(&invoker, &registry_arc, None, &mut known, &mut None)
+        let report = sync_once_with_store(&invoker, &registry_arc, None, &mut known, &mut None, None, &mut HashMap::new(), None, None)
             .await
             .unwrap();
         assert_eq!(
@@ -1526,7 +1496,7 @@ mod tests {
         invoker.list_tools_fail = true;
         let registry_arc = std::sync::Arc::new(CapabilityRegistryImpl::new());
         let mut known = HashSet::new();
-        let report = sync_once(&invoker, &registry_arc, None, &mut known, &mut None)
+        let report = sync_once_with_store(&invoker, &registry_arc, None, &mut known, &mut None, None, &mut HashMap::new(), None, None)
             .await
             .unwrap();
         assert!(
@@ -1615,7 +1585,7 @@ mod tests {
         let registry_arc = std::sync::Arc::new(CapabilityRegistryImpl::new());
         let mut known = HashSet::new();
         let mut known_cdylib = Some(HashSet::new()); // boot 期无 cdylib
-        let report = sync_once(&invoker, &registry_arc, None, &mut known, &mut known_cdylib)
+        let report = sync_once_with_store(&invoker, &registry_arc, None, &mut known, &mut known_cdylib, None, &mut HashMap::new(), None, None)
             .await
             .unwrap();
         assert_eq!(

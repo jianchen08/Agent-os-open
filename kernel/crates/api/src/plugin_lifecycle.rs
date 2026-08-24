@@ -127,11 +127,6 @@ pub fn register_new_plugins(
     (new_ids, total_tools)
 }
 
-/// 判断插件是否声明了 http_endpoints（用于 reload-all 的诚实降级提示）。
-pub fn has_http_endpoints(manifest: &PluginManifest) -> bool {
-    !manifest.http_endpoints.is_empty()
-}
-
 /// 插件重新启用后立即重注册其能力（G1 enable 对称化）。
 ///
 /// 禁用路径 `clear_plugin` 按插件清四维；启用侧无需重启——`/ext/{*rest}`
@@ -327,7 +322,6 @@ mod domain_event_tests {
             },
             requires_services: vec![],
             permissions: Default::default(),
-            error_policy: Default::default(),
             priority: 100,
             mcp: None,
             lifecycle: None,
@@ -419,7 +413,6 @@ mod external_mcp_schema_gate_tests {
             },
             requires_services: vec![],
             permissions: Default::default(),
-            error_policy: Default::default(),
             priority: 100,
             mcp: None,
             lifecycle: None,

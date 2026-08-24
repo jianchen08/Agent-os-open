@@ -86,12 +86,6 @@ impl RunChainRegistry {
             .insert(user_id.to_string(), pipeline_id.to_string());
     }
 
-    /// 该组管道是否有在跑或排队的 run（删会话保护用）。
-    pub fn has_pending_any(&self, pipelines: &[String]) -> bool {
-        let map = self.chains.lock();
-        pipelines.iter().any(|p| map.contains_key(p))
-    }
-
     /// 当前有在跑/排队任务的管道数（观测/测试）。
     pub fn active_chain_count(&self) -> usize {
         self.chains.lock().len()
@@ -347,22 +341,6 @@ mod tests {
         reg.enqueue("", "", async {});
         tokio::time::sleep(Duration::from_millis(50)).await;
         assert_eq!(reg.active_chain_count(), 0, "空 key 不入链");
-    }
-
-    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-    async fn has_pending_any_reflects_chain_state() {
-        let reg = RunChainRegistry::new(0);
-        let release = Arc::new(tokio::sync::Notify::new());
-        let wait = Arc::clone(&release);
-        reg.enqueue("p1", "", async move {
-            let _ = wait.notified().await;
-        });
-        tokio::time::sleep(Duration::from_millis(20)).await;
-        assert!(reg.has_pending_any(&["p1".to_string(), "p2".to_string()]));
-        assert!(!reg.has_pending_any(&["p3".to_string()]));
-        release.notify_one();
-        wait_drained(&reg).await;
-        assert!(!reg.has_pending_any(&["p1".to_string()]));
     }
 
     async fn wait_gate_running(reg: &Arc<RunChainRegistry>, expect: usize) {

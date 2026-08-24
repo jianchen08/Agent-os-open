@@ -16,8 +16,9 @@ use std::time::{Duration, SystemTime};
 
 use parking_lot::RwLock as ParkingRwLock;
 
-#[allow(unused_imports)]
-use agentos_core::traits::{CapabilityRegistry, MessageQueryOpts, StorageBackend};
+use agentos_core::traits::{CapabilityRegistry, StorageBackend};
+#[cfg(test)]
+use agentos_core::traits::MessageQueryOpts;
 use agentos_core::types::{PipelineConfig, StepLibrary, TenantContext};
 use axum::{
     body::Body,
@@ -36,11 +37,9 @@ use crate::pipeline_loader::{load_pipeline_config, load_step_library, validate_n
 use serde::{Deserialize, Serialize};
 use tracing::{debug, error, info, warn};
 
-use crate::auth::{
-    login_handler, logout_handler, me_handler, refresh_handler, register_handler,
-    resolve_request_tenant_id,
-};
-use crate::error::ApiError;
+use crate::auth::{login_handler, logout_handler, me_handler, refresh_handler, register_handler};
+use agentos_http::auth::resolve_request_tenant_id;
+use agentos_http::error::ApiError;
 use crate::routes::{
     actions_execute_handler, get_pipeline_config_with_etag, get_plugin_config_with_etag,
     health_handler, metrics_prometheus_handler, pipelines_handler, pipelines_runs_handler,
@@ -250,7 +249,7 @@ async fn require_surface_role(
     headers: &HeaderMap,
     write: bool,
 ) -> Result<(), ApiError> {
-    let (_, _, role, _) = crate::auth::resolve_request_user(state.store.as_ref(), headers).await?;
+    let (_, _, role, _) = agentos_http::auth::resolve_request_user(state.store.as_ref(), headers).await?;
     let ok = if write {
         role == "admin"
     } else {
@@ -1803,7 +1802,7 @@ async fn chat_handler(
     };
     // 解析请求用户 user_id（从 Authorization token），供 process_via_engine 写入 state；
     // 触发器等工具据此捕获 user_id，触发时回派发（chat.send_message）解析 tenant。
-    let user_id = crate::auth::resolve_request_user(state.store.as_ref(), &headers)
+    let user_id = agentos_http::auth::resolve_request_user(state.store.as_ref(), &headers)
         .await
         .map(|(uid, _, _, _)| uid)
         .unwrap_or_default();
@@ -3799,7 +3798,6 @@ mod tests {
                 },
                 requires_services: vec![],
                 permissions: Default::default(),
-                error_policy: Default::default(),
                 priority: 100,
                 mcp: None,
                 lifecycle: None,

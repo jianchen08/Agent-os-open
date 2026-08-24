@@ -2266,7 +2266,6 @@ mod tests {
             capabilities: Default::default(),
             requires_services: vec![],
             permissions: Default::default(),
-            error_policy: Default::default(),
             priority: 100,
             mcp: None,
             lifecycle: None,
@@ -2299,7 +2298,6 @@ mod tests {
             capabilities: Default::default(),
             requires_services: vec![],
             permissions: Default::default(),
-            error_policy: Default::default(),
             priority: 100,
             mcp: None,
             lifecycle: None,
@@ -2362,8 +2360,7 @@ mod tests {
                 std::sync::Arc::new(MockStorage),
                 "run1".to_string(),
                 "main".to_string(),
-                0,
-            ),
+                            ),
         );
 
         let result = invoker.invoke_pipeline_plugin("rust_plugin", &ctx).await;
@@ -2413,8 +2410,7 @@ mod tests {
                 std::sync::Arc::new(MockStorage),
                 "run1".to_string(),
                 "main".to_string(),
-                0,
-            ),
+                            ),
         )
     }
 
@@ -2504,8 +2500,7 @@ mod tests {
                 std::sync::Arc::new(MockStorage),
                 "run1".to_string(),
                 "main".to_string(),
-                0,
-            ),
+                            ),
         );
         let result = invoker
             .invoke_pipeline_plugin("pipeline_tool_core", &ctx_tool)
@@ -2643,8 +2638,7 @@ mod tests {
                 std::sync::Arc::new(MockStorage),
                 "run1".to_string(),
                 "main".to_string(),
-                0,
-            ),
+                            ),
         );
 
         let result = invoker.invoke_pipeline_plugin("nonexistent", &ctx).await;
@@ -2684,7 +2678,6 @@ mod tests {
             capabilities: Default::default(),
             requires_services: vec![],
             permissions: Default::default(),
-            error_policy: Default::default(),
             priority: 100,
             mcp: None,
             lifecycle: None,
@@ -3306,7 +3299,6 @@ mod tests {
             capabilities: Default::default(),
             requires_services: vec![],
             permissions: Default::default(),
-            error_policy: Default::default(),
             priority: 100,
             mcp: None,
             lifecycle: None,
@@ -3344,8 +3336,7 @@ mod tests {
                 std::sync::Arc::new(MockStorage),
                 "run1".to_string(),
                 "main".to_string(),
-                0,
-            ),
+                            ),
         );
 
         let result = invoker.invoke_pipeline_plugin("bad_pipeline", &ctx).await;
@@ -3945,8 +3936,7 @@ mod tests {
                 Arc::new(MockStorage),
                 "run1".to_string(),
                 "main".to_string(),
-                0,
-            ),
+                            ),
         );
         let err = invoker
             .invoke_pipeline_plugin("pipe_spawn_fail", &ctx)

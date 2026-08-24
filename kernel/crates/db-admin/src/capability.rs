@@ -105,7 +105,7 @@ fn get_db(state: &DbAdminState) -> Result<Arc<agentos_engine::SqliteStore>, ApiE
     })
 }
 
-/// `db-admin` namespace 的 capability handler（7 method，逻辑与拆分前端点一致）。
+/// `db-admin` namespace 的 capability handler（8 method，逻辑与拆分前端点一致）。
 pub struct DbAdminCapabilityHandler {
     state: DbAdminState,
 }

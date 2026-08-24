@@ -29,7 +29,6 @@ fn manifest_with_ui(
         capabilities: Default::default(),
         requires_services: vec![],
         permissions: Default::default(),
-        error_policy: Default::default(),
         priority: 100,
         mcp: None,
         lifecycle: None,

@@ -927,10 +927,11 @@ mod tests {
         let router = crate::capability_router::KernelCapabilityRouter::new()
             .with_capability_contracts(contracts.clone());
         let registry = Arc::new(CapabilityHandlerRegistry::new());
-        registry.register(Arc::new(crate::chat_send_handler::ChatSendHandler::new(
+        registry.register(Arc::new(crate::chat_send_handler::ChatSendHandler::with_store(
             Arc::new(crate::ws_session::EngineDispatcher::new(
                 crate::routes::AppState::new(),
             )),
+            None,
         )));
         let router = router.with_handler_registry(registry);
 

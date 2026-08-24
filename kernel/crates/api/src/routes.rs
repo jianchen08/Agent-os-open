@@ -24,7 +24,7 @@ use serde_json::json;
 use crate::config_service::{
     apply_put_masked_sentinels, atomic_write_yaml, compute_etag, mask_secrets, validate_config_path,
 };
-use crate::error::ApiError;
+use agentos_http::error::ApiError;
 use crate::metrics::plugin_widget_broadcast::{remove_plugin_bindings, WidgetBinding};
 use crate::metrics::{export_prometheus, MetricsAggregator};
 
@@ -304,35 +304,11 @@ impl AppState {
         self
     }
 
-    /// P2：启用会话内核（连接注册表 / 事件总线 / 重放缓冲 + 入站路由）。
+    /// 启用会话内核（连接注册表 / 事件总线 / 重放缓冲 + 入站路由）。
     ///
     /// 在 `with_plugins` 后调用，注入 SessionCoordinator 与基于引擎的
     /// 入站分发器。ws_handler 据此承载真实 WS 会话；未调用时 ws_handler
     /// 降级为旧 echo/engine 路径（兼容）。
-    pub fn enable_session(self) -> Self {
-        let session = Arc::new(agentos_session::SessionCoordinator::new());
-        // 管道 state 常驻注册表（与 session 同生命期，一起启用）。
-        // 关键：先把 session 注入 self，再 clone 给 dispatcher。
-        // 否则 dispatcher 持有的 state.session 永远是 None，引擎结果无法推回前端。
-        let self_with_session = Self {
-            session: Some(session.clone()),
-            inbound_router: None,
-            ..self
-        };
-        let dispatcher = Arc::new(crate::ws_session::EngineDispatcher::new(
-            self_with_session.clone(),
-        ));
-        let inbound_router = Arc::new(agentos_session::router::InboundRouter::new(dispatcher));
-        Self {
-            inbound_router: Some(inbound_router),
-            ..self_with_session
-        }
-    }
-
-    /// 与 enable_session 相同，但接受外部已创建的 SessionCoordinator。
-    ///
-    /// 用于需要提前创建 session（如注入 capability router 的流式推送）的场景，
-    /// 避免重复创建。enable_session = 自建 session 的便捷封装。
     pub fn enable_session_with(self, session: Arc<agentos_session::SessionCoordinator>) -> Self {
         // 管道 state 常驻注册表（与 session 同生命期，一起启用）。
         let self_with_session = Self {
@@ -442,30 +418,11 @@ pub async fn serve_upload_handler(
     let Ok(bytes) = tokio::fs::read(&file_path).await else {
         return (StatusCode::NOT_FOUND, "not found").into_response();
     };
-    // 常见媒体扩展名 → content-type（未知回退 octet-stream）
-    let content_type = match file_path
-        .extension()
-        .and_then(|e| e.to_str())
-        .unwrap_or("")
-        .to_ascii_lowercase()
-        .as_str()
-    {
-        "png" => "image/png",
-        "jpg" | "jpeg" => "image/jpeg",
-        "webp" => "image/webp",
-        "gif" => "image/gif",
-        "svg" => "image/svg+xml",
-        "avif" => "image/avif",
-        "mp3" => "audio/mpeg",
-        "wav" => "audio/wav",
-        "m4a" => "audio/mp4",
-        "mp4" => "video/mp4",
-        "webm" => "video/webm",
-        "pdf" => "application/pdf",
-        "json" => "application/json",
-        "txt" | "md" => "text/plain",
-        _ => "application/octet-stream",
-    };
+    // 常见媒体扩展名 → content-type（未知回退 octet-stream）。
+    // 单一来源：http_dispatcher::mime_for_extension（/ext 静态资源共用）。
+    let content_type = crate::http_dispatcher::mime_for_extension(
+        file_path.extension().and_then(|e| e.to_str()).unwrap_or(""),
+    );
     let mut response = axum::response::Response::new(Body::from(bytes));
     response.headers_mut().insert(
         axum::http::header::CONTENT_TYPE,

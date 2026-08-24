@@ -68,7 +68,6 @@ fn manifest_base(plugin_id: &str) -> PluginManifest {
         capabilities: Default::default(),
         requires_services: vec![],
         permissions: Default::default(),
-        error_policy: Default::default(),
         priority: 100,
         mcp: None,
         lifecycle: None,

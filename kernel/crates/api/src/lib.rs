@@ -6,7 +6,6 @@
 //!
 //! - `server`: Axum HTTP/WebSocket 服务器——路由树、WebSocket 连接处理
 //! - `routes`: HTTP 路由处理器——健康检查、Schema 聚合、能力清单
-//! - `error`: API 错误类型（统一实现见 agentos-http，此处再导出）
 //!
 //! [来源: docs/0.2_rust_plugin_solution.md §2.2 Web 框架映射]
 //! [来源: docs/tasks/task_07_llm_api.md]
@@ -16,7 +15,6 @@ pub mod capability_router;
 pub mod chat_send_handler;
 pub mod config_service;
 pub mod contract;
-pub mod error;
 pub mod http_dispatcher;
 pub mod kernel_capabilities;
 pub mod metrics;
@@ -30,14 +28,8 @@ pub mod session_routes;
 pub mod tools;
 pub mod ws_session;
 
-pub use auth::{
-    login_handler, logout_handler, me_handler, refresh_handler, register_handler, RefreshResponse,
-    RegisterRequest,
-};
 pub use capability_router::KernelCapabilityRouter;
-pub use error::ApiError;
 pub use pipeline_loader::{
-    load_pipeline_config, load_step_library, validate_no_name_conflicts, PipelineLoadError,
+    load_pipeline_config, load_step_library, validate_no_name_conflicts,
 };
-pub use routes::{AppState, HealthResponse, SchemaResponse};
-pub use server::{build_router, start_server, WsRequest, WsResponse};
+pub use server::start_server;

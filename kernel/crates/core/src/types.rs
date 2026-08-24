@@ -6,8 +6,7 @@
 //! ADR 修订新增（v2.0）：
 //! - SQLite 四表模型类型（ADR ④）：RunRecord / MessageRecord / TraceEntry / BlobRecord
 //! - 多分支模型类型（ADR ⑤）：Branch / RunStatus / PatchType
-//! - 内容懒加载（ADR ⑦）：ContentLoader / Message
-//! - 组合插件配置类型（ADR ⑥）：CompositeStep / CompositePluginConfig
+//! - 内容懒加载（ADR ⑦）：ContentLoader
 //! - 引擎结果类型（ADR ①）：StepResult / SuspendHandle / WakeEvent / EngineError
 
 use std::collections::HashMap;
@@ -76,25 +75,6 @@ impl RouteSignal {
         self.target = Some(target);
         self
     }
-}
-
-// ── 错误策略 ──────────────────────────────────────────────────
-
-/// 0.2 运行时唯一错误策略：瞬态错误重试（见 invoker
-/// `with_transparent_recovery`——sidecar 崩溃时 force_unload + respawn + 重试一次）；
-/// 其余错误决策上抛编排层（引擎统一 warn + 继续，跳过/终止由路由表/step 决定）。
-///
-/// 收敛自 0.1 的 ABORT/SKIP/RETRY/FALLBACK 四值（ADR 2026-08-18）：仅 retry 有
-/// 真实需求，其余值已随 manifest 清理移除。manifest 的 `error_policy` 字段可选
-/// （serde default），缺省即 RETRY。
-///
-/// [来源: pipeline/types.py ErrorPolicy]
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
-#[serde(rename_all = "lowercase")]
-pub enum ErrorPolicy {
-    /// 瞬态错误重试一次（invoker with_transparent_recovery）；其余决策上抛编排层
-    #[default]
-    Retry,
 }
 
 // ── 插件结果 ──────────────────────────────────────────────────
@@ -232,9 +212,6 @@ impl PluginContext {
 /// 引擎在构造 PluginContext 时注入此对象。插件通过它按需从 SQLite blobs 表
 /// 加载消息完整内容，避免全量加载到内存。
 ///
-/// `requires_content: N` 从 manifest 读取，声明插件需要多少条最近消息的完整内容。
-/// 引擎可据此预加载，也可由插件在运行时自行调用 `load_recent_messages`。
-///
 /// [来源: docs/working/adr_engine_design.md §5.3]
 pub struct ContentLoader {
     /// SQLite 存储句柄（四表：runs/messages/traces/blobs）
@@ -243,8 +220,6 @@ pub struct ContentLoader {
     run_id: String,
     /// 当前分支 ID（ADR ⑤）
     branch_id: String,
-    /// 插件声明需要的最近消息条数（从 manifest requires_content 读取）
-    pub requires_content: usize,
 }
 
 impl ContentLoader {
@@ -254,24 +229,12 @@ impl ContentLoader {
     /// * `store` - SQLite 存储后端
     /// * `run_id` - 运行实例 ID
     /// * `branch_id` - 当前分支 ID
-    /// * `requires_content` - 需要预加载的最近消息条数
-    pub fn new(
-        store: Arc<dyn StorageBackend>,
-        run_id: String,
-        branch_id: String,
-        requires_content: usize,
-    ) -> Self {
+    pub fn new(store: Arc<dyn StorageBackend>, run_id: String, branch_id: String) -> Self {
         Self {
             store,
             run_id,
             branch_id,
-            requires_content,
         }
-    }
-
-    /// 按需加载指定 blob_id 的内容。
-    pub async fn load_blob(&self, blob_id: &str) -> Result<Vec<u8>, StorageError> {
-        self.store.get_blob(blob_id).await
     }
 }
 
@@ -280,7 +243,6 @@ impl std::fmt::Debug for ContentLoader {
         f.debug_struct("ContentLoader")
             .field("run_id", &self.run_id)
             .field("branch_id", &self.branch_id)
-            .field("requires_content", &self.requires_content)
             .finish()
     }
 }
@@ -291,26 +253,8 @@ impl Clone for ContentLoader {
             store: Arc::clone(&self.store),
             run_id: self.run_id.clone(),
             branch_id: self.branch_id.clone(),
-            requires_content: self.requires_content,
         }
     }
-}
-
-/// 消息完整内容（ContentLoader 返回）。
-///
-/// 包含消息 ID、角色和完整内容文本。
-/// 对应 messages 表 + blobs 表联查的结果。
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Message {
-    /// 消息唯一 ID
-    pub message_id: String,
-    /// 消息角色（system / user / assistant / tool）
-    pub role: String,
-    /// 完整内容文本（从 blobs 表加载）
-    pub content: String,
-    /// 对应的 blob_id（内容寻址）
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub blob_id: Option<String>,
 }
 
 // ── 租户上下文 ──────────────────────────────────────────────────
@@ -370,26 +314,6 @@ impl TenantContext {
     pub fn with_credential_handle(mut self, handle: impl Into<String>) -> Self {
         self.credential_handle = Some(handle.into());
         self
-    }
-}
-
-// ── 执行目标类型 ──────────────────────────────────────────────────
-
-/// 核心执行目标类型。
-///
-/// 对应 0.1 的 `pipeline/types.py TargetType`。
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum TargetType {
-    /// LLM 调用
-    LlmCall,
-    /// 工具执行
-    ToolExecute,
-}
-
-impl Default for TargetType {
-    fn default() -> Self {
-        Self::LlmCall
     }
 }
 
@@ -794,39 +718,6 @@ pub struct Branch {
     pub created_at: String,
 }
 
-// ── ADR ⑥：组合插件配置类型 ───────────────────────────────────
-
-/// 组合插件步骤配置（ADR ⑥）。
-///
-/// 每个步骤引用一个原子插件，走统一的 `execute(ctx) -> Result<PluginResult>` 接口。
-/// 引擎解释执行时按步骤顺序调用原子插件，将输出写入 state。
-///
-/// [来源: docs/tasks/task_02_contract_definition.md §组合插件 YAML 配置示例]
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct CompositeStep {
-    /// 步骤名称
-    pub name: String,
-    /// 引用的原子插件 ID
-    pub plugin: String,
-    /// 输入参数（支持变量插值 {{state.xxx}}）
-    pub inputs: serde_json::Value,
-    /// 输出映射（key → state 字段名, value → 模板表达式）
-    #[serde(default)]
-    pub outputs: HashMap<String, String>,
-}
-
-/// 组合插件配置（ADR ⑥）。
-///
-/// 组合插件由 YAML 配置编排步骤，引擎解释执行。
-/// 组合插件不是新的 Rust trait——它是引擎层的"解释执行器"职责。
-///
-/// [来源: docs/tasks/task_02_contract_definition.md §组合插件 YAML 配置示例]
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct CompositePluginConfig {
-    /// 步骤序列
-    pub steps: Vec<CompositeStep>,
-}
-
 // ── ADR ①：引擎结果类型 ──────────────────────────────────────
 
 /// 挂起句柄（旧引擎 AdrEngine::suspend 返回；审批闭环 resume 协议沿用）。
@@ -1174,11 +1065,6 @@ impl PipelineConfig {
             .flat_map(|b| b.steps.iter())
             .map(|s| s.id.as_str())
             .collect()
-    }
-
-    /// 按 id 查找循环体。
-    pub fn find_body(&self, id: &str) -> Option<&LoopBody> {
-        self.loop_bodies.iter().find(|b| b.id == id)
     }
 
     /// 按 id 定位循环体下标（供转移跳转用）。

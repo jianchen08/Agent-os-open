@@ -848,21 +848,6 @@ impl McpClient {
         })
     }
 
-    /// MCP initialize 握手（无配置参数）。
-    ///
-    /// 向后兼容包装：等价于 `initialize(&Value::Null)`。
-    ///
-    /// # Deprecated
-    ///
-    /// 请使用 `initialize(&config)` 传递插件配置。
-    #[deprecated(
-        since = "0.2.1",
-        note = "use initialize(&config) to pass plugin config"
-    )]
-    pub async fn initialize_without_config(&self) -> Result<Value, McpError> {
-        self.initialize(&Value::Null).await
-    }
-
     /// MCP initialize 握手
     ///
     /// 发送 initialize 请求完成 MCP 协议握手。
@@ -959,22 +944,6 @@ impl McpClient {
         }
 
         Ok(())
-    }
-
-    /// 通过 notifications/on_config_change 通知插件配置变更。
-    ///
-    /// 配置热重载后调用此方法，将新配置推送给已连接的插件进程。
-    ///
-    /// # Errors
-    ///
-    /// 当前仅支持 stdio transport。HTTP transport 模式下会返回
-    /// `McpError::Transport`（HTTP notification 尚未实现）。
-    pub async fn send_config_change(&self, config: &Value) -> Result<(), McpError> {
-        self.send_notification(
-            "notifications/on_config_change",
-            Some(serde_json::json!({ "config": config })),
-        )
-        .await
     }
 
     /// 调用 tools/list 获取可用工具列表

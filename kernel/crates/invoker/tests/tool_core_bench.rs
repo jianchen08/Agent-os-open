@@ -263,7 +263,7 @@ fn make_ctx(state: Value) -> PluginContext {
         json!({}),
         TenantContext::new("bench-tenant", "bench-session"),
         uuid::Uuid::new_v4(),
-        ContentLoader::new(Arc::new(NullStorage), "bench-run".into(), "main".into(), 0),
+        ContentLoader::new(Arc::new(NullStorage), "bench-run".into(), "main".into()),
     )
 }
 

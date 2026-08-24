@@ -10,9 +10,6 @@ pub enum McpError {
     #[error("process spawn failed: {command}: {message}")]
     SpawnFailed { command: String, message: String },
 
-    #[error("process crashed: {plugin_id}: {reason}")]
-    ProcessCrashed { plugin_id: String, reason: String },
-
     #[error("MCP protocol error: {message}")]
     Protocol { message: String },
 
@@ -24,7 +21,4 @@ pub enum McpError {
 
     #[error("transport error: {message}")]
     Transport { message: String },
-
-    #[error("initialize handshake failed: {message}")]
-    InitFailed { message: String },
 }

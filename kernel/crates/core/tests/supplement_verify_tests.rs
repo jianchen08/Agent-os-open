@@ -6,8 +6,6 @@
 //! - 场景5：MessageRecord/TraceEntry/BlobRecord 序列化往返（serialize → deserialize → 比较）
 //! - 场景10：CompositeStep 序列化需验证 outputs 字段存在
 
-use std::collections::HashMap;
-
 use serde_json::json;
 
 use agentos_core::traits::*;
@@ -59,7 +57,6 @@ fn make_test_manifest(
         capabilities: ManifestCapabilities::default(),
         requires_services: vec![],
         permissions: ManifestPermissions::default(),
-        error_policy: ErrorPolicy::default(),
         priority: 100,
         mcp: None,
         lifecycle: None,
@@ -206,72 +203,6 @@ fn test_blob_record_roundtrip() {
     assert_eq!(deserialized.created_at, original.created_at);
 }
 
-// ── 场景10补充：CompositeStep 序列化验证 outputs 字段 ──────────
-
-#[test]
-fn test_composite_step_serialization_has_outputs() {
-    let mut outputs = HashMap::new();
-    outputs.insert("context".to_string(), "{{result.data}}".to_string());
-    outputs.insert("answer".to_string(), "{{result.content}}".to_string());
-
-    let step = CompositeStep {
-        name: "retrieve".to_string(),
-        plugin: "knowledge_search".to_string(),
-        inputs: json!({"query": "{{state.user_query}}"}),
-        outputs,
-    };
-    let json_str = serde_json::to_string(&step).unwrap();
-    // 验证所有四个字段都出现在序列化结果中
-    assert!(json_str.contains("name"));
-    assert!(json_str.contains("plugin"));
-    assert!(json_str.contains("inputs"));
-    assert!(json_str.contains("outputs"));
-    assert!(json_str.contains("context"));
-    assert!(json_str.contains("{{result.data}}"));
-    // 往返一致
-    let deserialized: CompositeStep = serde_json::from_str(&json_str).unwrap();
-    assert_eq!(deserialized.name, "retrieve");
-    assert_eq!(deserialized.plugin, "knowledge_search");
-    assert_eq!(deserialized.outputs.len(), 2);
-    assert_eq!(
-        deserialized.outputs.get("context"),
-        Some(&"{{result.data}}".to_string())
-    );
-}
-
-#[test]
-fn test_composite_plugin_config_roundtrip() {
-    let mut outputs = HashMap::new();
-    outputs.insert("answer".to_string(), "{{result.content}}".to_string());
-
-    let config = CompositePluginConfig {
-        steps: vec![
-            CompositeStep {
-                name: "retrieve".to_string(),
-                plugin: "knowledge_search".to_string(),
-                inputs: json!({"query": "{{state.user_query}}"}),
-                outputs: HashMap::new(),
-            },
-            CompositeStep {
-                name: "generate".to_string(),
-                plugin: "llm_call".to_string(),
-                inputs: json!({"messages": []}),
-                outputs,
-            },
-        ],
-    };
-    let json_str = serde_json::to_string(&config).unwrap();
-    assert!(json_str.contains("steps"));
-    assert!(json_str.contains("retrieve"));
-    assert!(json_str.contains("generate"));
-    // 往返一致
-    let deserialized: CompositePluginConfig = serde_json::from_str(&json_str).unwrap();
-    assert_eq!(deserialized.steps.len(), 2);
-    assert_eq!(deserialized.steps[0].name, "retrieve");
-    assert_eq!(deserialized.steps[1].name, "generate");
-    assert_eq!(deserialized.steps[1].outputs.len(), 1);
-}
-
 // ── 场景1补充：HookContext 完整用户旅程（串联验证） ──────────────
 
 #[test]
@@ -310,28 +241,6 @@ fn test_hook_context_full_journey() {
     assert_eq!(deserialized.tags().len(), 3);
 }
 
-// ── 场景9补充：PluginManifest requires_content 有值时反序列化 ──
-
-#[test]
-fn test_manifest_requires_content_with_value() {
-    let json_str = r#"{
-        "id": "memory_read",
-        "name": "Memory Read",
-        "version": "1.0.0",
-        "plugin_type": "pipeline",
-        "language": "rust",
-        "host_type": "in_process",
-        "entry": "memory_read",
-        "capabilities": {},
-        "requires_services": [],
-        "permissions": {},
-        "priority": 100,
-        "requires_content": 5
-    }"#;
-    let manifest: PluginManifest = serde_json::from_str(json_str).unwrap();
-    assert_eq!(manifest.requires_content, Some(5));
-}
-
 // ── 补充场景：错误输入验证 ──────────────────────────────────
 
 #[test]
@@ -347,17 +256,4 @@ fn test_hook_context_get_as_type_mismatch_returns_none() {
     // 类型匹配：u32 → u32 (JSON number → u32)
     let num: u32 = ctx.get_as("num_val").unwrap();
     assert_eq!(num, 42);
-}
-
-#[test]
-fn test_composite_step_empty_outputs_default() {
-    let json_str = r#"{
-        "name": "step1",
-        "plugin": "plugin1",
-        "inputs": {}
-    }"#;
-    // outputs 字段缺失时应该用 default
-    let step: CompositeStep = serde_json::from_str(json_str).unwrap();
-    assert_eq!(step.name, "step1");
-    assert!(step.outputs.is_empty());
 }

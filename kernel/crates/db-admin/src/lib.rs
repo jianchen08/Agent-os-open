@@ -8,7 +8,7 @@
 //!
 //! - [`db_routes`]：纯 SQL 构建与校验逻辑（白名单枚举/参数绑定/租户隔离/BLOB 安全/
 //!   SQL 执行器防线——check_dangerous/classify_sql 等全部保留）；
-//! - [`capability`]：capability handler（7 method）+ 鉴权（`_authorization` 转发，
+//! - [`capability`]：capability handler（8 method）+ 鉴权（`_authorization` 转发，
 //!   内核侧 resolve_request_user 复用 api 管理面同一实现）。
 //!
 //! 设计来源：docs/working/unified_db_admin_plan.md（表驱动动态枚举 + 安全约束）、

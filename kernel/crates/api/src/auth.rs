@@ -17,7 +17,7 @@ use axum::http::HeaderMap;
 use axum::Json;
 use serde::{Deserialize, Serialize};
 
-use crate::error::ApiError;
+use agentos_http::error::ApiError;
 use crate::routes::AppState;
 
 // ─── 常量 ────────────────────────────────────────────────────────────
@@ -35,12 +35,15 @@ const REFRESH_TOKEN_TTL_SECS: u64 = 7 * 24 * 60 * 60; // 7 days
 // upgrade: 接入正式认证后替换为 JWT/HMAC 签名 + 密钥轮换。
 // 前端 client.ts 仅注入 Bearer 头，不解析 token 内容（已验证 NEED-1），
 // 因此该方案在开发阶段安全。
-pub use agentos_http::auth::{
+// 再导出面（2026-08-24 清理）：外部 crate 零消费，仅保留 ws_session.rs（并发 WIP
+// 不可触碰）仍经 `crate::auth::` 引用的两个符号；其余符号本文件内私有 use。
+pub use agentos_http::auth::{resolve_tenant_id_by_user, verify_access_token};
+use agentos_http::auth::{
     decode_token, default_users, encode_token, extract_bearer_token, find_user_by_credentials,
-    find_user_by_id, find_user_by_username, is_access_token, is_token_expired,
-    resolve_request_tenant_id, resolve_request_user, resolve_tenant_id_by_user,
-    verify_access_token, BuiltInUser, TokenType, VerifiedUser, DEFAULT_TENANT_ID,
+    find_user_by_username, is_token_expired, BuiltInUser, TokenType,
 };
+#[cfg(test)]
+use agentos_http::auth::DEFAULT_TENANT_ID;
 
 // ─── 请求 / 响应类型（与前端 types/api.ts 对齐）─────────────────────
 
@@ -691,7 +694,7 @@ mod tests {
             .await
             .unwrap_err();
         assert!(
-            matches!(err, crate::error::ApiError::Unauthorized { .. }),
+            matches!(err, agentos_http::error::ApiError::Unauthorized { .. }),
             "store 在而用户不存在应 401，实际 {err:?}"
         );
     }

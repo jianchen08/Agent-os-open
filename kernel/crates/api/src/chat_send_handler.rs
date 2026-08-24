@@ -71,17 +71,9 @@ pub struct ChatSendHandler {
 }
 
 impl ChatSendHandler {
-    /// 用内核 WS 派发器构造（无存储）：注入分支回退 pipeline 兼作 thread 派发键。
-    /// 生产注册点请用 [`ChatSendHandler::with_store`]（坐标解析 + 未命中拒绝）。
-    pub fn new(dispatcher: Arc<dyn PipelineDispatcher>) -> Self {
-        Self {
-            dispatcher,
-            store: None,
-        }
-    }
-
     /// 生产构造：带存储，注入分支用 pipeline_id 反查所属会话的真实 thread
     /// （坐标解析封装在接口内部黑盒，对外契约不含 thread 参数）。
+    /// 测试无存储场景传 `None`（等价旧 `new` 路径）。
     pub fn with_store(
         dispatcher: Arc<dyn PipelineDispatcher>,
         store: Option<Arc<dyn StorageBackend>>,
@@ -248,7 +240,7 @@ impl ChatSendHandler {
         // （引擎路径仍会补写——此处只是消除误告警 + 提前可见性）。
         if created {
             if let Some(store) = self.store.as_ref() {
-                let tenant_id = crate::auth::resolve_tenant_id_by_user(Some(store), user_id).await;
+                let tenant_id = agentos_http::auth::resolve_tenant_id_by_user(Some(store), user_id).await;
                 if let Err(e) = store
                     .link_pipeline_session(&pipeline_id, &thread_id, &tenant_id)
                     .await
@@ -316,7 +308,7 @@ impl ChatSendHandler {
                         .to_string(),
                 });
             };
-            let tenant_id = crate::auth::resolve_tenant_id_by_user(self.store.as_ref(), user_id).await;
+            let tenant_id = agentos_http::auth::resolve_tenant_id_by_user(self.store.as_ref(), user_id).await;
             let registry = agentos_session::pipeline_state_registry::global_registry();
             let entry = registry.get(&tenant_id, &pipeline_id);
             if let Some(entry) = entry {
@@ -679,7 +671,7 @@ mod tests {
 
     fn handler() -> (ChatSendHandler, Arc<RecordingDispatcher>) {
         let d = RecordingDispatcher::shared();
-        (ChatSendHandler::new(d.clone()), d)
+        (ChatSendHandler::with_store(d.clone(), None), d)
     }
 
     fn calls(d: &RecordingDispatcher) -> Vec<DispatchRecord> {
@@ -1310,7 +1302,7 @@ mod tests {
             calls: Mutex::new(Vec::new()),
             gate: tokio::sync::Notify::new(),
         });
-        let h = ChatSendHandler::new(d.clone());
+        let h = ChatSendHandler::with_store(d.clone(), None);
         let res = tokio::time::timeout(
             std::time::Duration::from_millis(300),
             h.handle(
@@ -1352,7 +1344,7 @@ mod tests {
             calls: Mutex::new(Vec::new()),
             gate: tokio::sync::Notify::new(),
         });
-        let h = ChatSendHandler::new(d.clone());
+        let h = ChatSendHandler::with_store(d.clone(), None);
         let outcome = tokio::time::timeout(
             std::time::Duration::from_millis(200),
             h.handle(
@@ -1408,7 +1400,7 @@ mod tests {
             calls: Mutex::new(Vec::new()),
             gate: tokio::sync::Notify::new(),
         });
-        let h = ChatSendHandler::new(d.clone());
+        let h = ChatSendHandler::with_store(d.clone(), None);
         let res = tokio::time::timeout(
             std::time::Duration::from_millis(300),
             h.handle(

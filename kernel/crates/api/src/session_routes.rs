@@ -16,7 +16,7 @@ use axum::Json;
 use serde::Deserialize;
 use serde_json::{json, Value};
 
-use crate::error::ApiError;
+use agentos_http::error::ApiError;
 use crate::routes::AppState;
 
 // ─── Sessions ─────────────────────────────────────────────────────────────
@@ -153,7 +153,7 @@ pub async fn create_session_handler(
     // A14：user_id 以 token（resolve_request_user）解析为准——body 里的 user_id
     // 是客户端可伪造字段，不得作为事件路由（WS 推送定位）的信任源；仅在无 token
     // 用户时作显式降级（warn 标记，供审计区分）。
-    let token_user = crate::auth::resolve_request_user(state.store.as_ref(), &headers)
+    let token_user = agentos_http::auth::resolve_request_user(state.store.as_ref(), &headers)
         .await
         .map(|(uid, _, _, _)| uid)
         .ok();
@@ -319,7 +319,7 @@ pub async fn update_session_agent_handler(
     // 管道自足——执行面冷恢复/未来动态管道消费 agent.id）。失败仅 warn
     // 不阻断：registry/DB 已更新，执行面解析仍可命中。
     if let Some(store) = state.store.as_ref() {
-        let tenant_id = crate::auth::resolve_request_tenant_id(Some(store), &headers).await;
+        let tenant_id = agentos_http::auth::resolve_request_tenant_id(Some(store), &headers).await;
         let pipeline_id = state
             .session
             .as_ref()
@@ -856,7 +856,7 @@ mod agent_binding_tests {
         // ③ 主管道 state 持久化真值（阶段 1 核心断言）
         let store_obj: std::sync::Arc<dyn StorageBackend> = store.clone();
         let tenant_id =
-            crate::auth::resolve_tenant_id_by_user(Some(&store_obj), ADMIN_USER_ID).await;
+            agentos_http::auth::resolve_tenant_id_by_user(Some(&store_obj), ADMIN_USER_ID).await;
         let state_fields = store_obj
             .load_pipeline_state(&pipeline_id, &tenant_id)
             .await
@@ -885,7 +885,7 @@ mod agent_binding_tests {
 
         let store_obj: std::sync::Arc<dyn StorageBackend> = store.clone();
         let tenant_id =
-            crate::auth::resolve_tenant_id_by_user(Some(&store_obj), ADMIN_USER_ID).await;
+            agentos_http::auth::resolve_tenant_id_by_user(Some(&store_obj), ADMIN_USER_ID).await;
         let state_fields = store_obj
             .load_pipeline_state(&pipeline_id, &tenant_id)
             .await

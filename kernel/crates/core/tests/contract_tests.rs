@@ -4,7 +4,6 @@
 //! 验证 ADR 修订后的契约类型可编译且字段/方法符合预期。
 //! 对应 AC-01 ~ AC-11。
 
-use std::collections::HashMap;
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -126,7 +125,6 @@ fn make_test_manifest(
         capabilities: ManifestCapabilities::default(),
         requires_services: vec![],
         permissions: ManifestPermissions::default(),
-        error_policy: ErrorPolicy::default(),
         priority: 100,
         mcp: None,
         lifecycle: None,
@@ -291,20 +289,7 @@ impl StorageBackend for MockStorageBackend {
 
 fn make_test_content_loader() -> ContentLoader {
     let store = Arc::new(MockStorageBackend) as Arc<dyn StorageBackend>;
-    ContentLoader::new(store, "run_001".to_string(), "main".to_string(), 2)
-}
-
-#[tokio::test]
-async fn test_content_loader_creation() {
-    let loader = make_test_content_loader();
-    assert_eq!(loader.requires_content, 2);
-}
-
-#[tokio::test]
-async fn test_content_loader_load_blob() {
-    let loader = make_test_content_loader();
-    let blob = loader.load_blob("blob_001").await.unwrap();
-    assert_eq!(blob, vec![1, 2, 3]);
+    ContentLoader::new(store, "run_001".to_string(), "main".to_string())
 }
 
 #[test]
@@ -507,42 +492,6 @@ fn test_tool_plugin_sidecar() {
 fn test_composite_plugin_in_process() {
     let manifest = make_test_manifest(HostType::InProcess, PluginType::Composite, None);
     assert_eq!(manifest.host_type, HostType::InProcess);
-}
-
-// ═══════════════════════════════════════════════════════════════════
-// ADR ⑥: 组合插件 YAML 配置类型
-// ═══════════════════════════════════════════════════════════════════
-
-#[test]
-fn test_composite_step_serialization() {
-    let step = CompositeStep {
-        name: "retrieve".to_string(),
-        plugin: "knowledge_search".to_string(),
-        inputs: json!({"query": "{{state.user_query}}"}),
-        outputs: {
-            let mut m = HashMap::new();
-            m.insert("context".to_string(), "{{result.data}}".to_string());
-            m
-        },
-    };
-    let json_str = serde_json::to_string(&step).unwrap();
-    assert!(json_str.contains("retrieve"));
-    assert!(json_str.contains("knowledge_search"));
-}
-
-#[test]
-fn test_composite_plugin_config_serialization() {
-    let config = CompositePluginConfig {
-        steps: vec![CompositeStep {
-            name: "llm_call".to_string(),
-            plugin: "llm_call".to_string(),
-            inputs: json!({"messages": []}),
-            outputs: HashMap::new(),
-        }],
-    };
-    let json_str = serde_json::to_string(&config).unwrap();
-    assert!(json_str.contains("llm_call"));
-    assert!(json_str.contains("steps"));
 }
 
 // ═══════════════════════════════════════════════════════════════════

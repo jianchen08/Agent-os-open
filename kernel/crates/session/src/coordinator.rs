@@ -2,7 +2,7 @@
 //!
 //! 整合 ConnectionRegistry + FrontendEventBus + ReplayBuffer，提供：
 //! - emit_widget / emit_stream：投递 + 同步记录到 per-thread 重放缓冲；
-//! - handle_reconnect：断线重连时踢旧连接、回放缓冲、发连接确认。
+//! - replay_all_for_user：建连时按 watermark 一次性重放该 user 全部线程（FIX 2026-08-23）。
 //!
 //! 参考 0.1 `ws_handler.py:204`（_resume_pipeline_for_thread）。
 
@@ -13,17 +13,6 @@ use serde_json::{json, Value};
 use crate::event_bus::{EmitScope, FrontendEventBus};
 use crate::replay::{ReplayBuffer, ReplayConfig, ReplayEvent, ReplayResult};
 use crate::ConnectionRegistry;
-
-/// 重连处理结果。
-#[derive(Debug, Clone)]
-pub struct ReconnectOutcome {
-    /// 是否成功回放（false = resync_required）。
-    pub replayed: bool,
-    /// 缓冲溢出，前端需整树刷新。
-    pub resync_required: bool,
-    /// 被踢出的旧连接 sink id（None = 无旧连接）。
-    pub kicked_old_sink_id: Option<u64>,
-}
 
 /// 会话协调器——聚合连接注册表 / 事件总线 / 重放缓冲。
 pub struct SessionCoordinator {
@@ -162,65 +151,6 @@ impl SessionCoordinator {
             self.metrics.inc_event_bus_push(delivered as u64);
         }
         delivered
-    }
-
-    /// 处理断线重连：踢旧连接 + 回放缓冲 + 发连接确认。
-    pub async fn handle_reconnect(
-        &self,
-        thread_id: &str,
-        user_id: &str,
-        sink: Arc<dyn crate::EventSink>,
-        last_sequence: u64,
-    ) -> ReconnectOutcome {
-        // 1. 注册新连接（踢旧）—— register() 内部已对踢旧计数 inc_kick_old()，
-        //    此处不再重复计数，否则 kick_old_total 会被双计入。
-        let kicked_old_sink_id = self.register(user_id, sink.clone());
-
-        // 2. 发连接确认
-        let confirmation = json!({
-            "type": "connection_confirmation",
-            "data": {"status": "connected", "mode": "global", "user_id": user_id},
-        });
-        let confirmation_str = serde_json::to_string(&confirmation).unwrap_or_default();
-        if !sink.send_text(&confirmation_str).await {
-            tracing::warn!("Failed to send connection confirmation to user {user_id}");
-        }
-
-        // 3. 回放缓冲
-        match self.replay.replay(thread_id, last_sequence).await {
-            ReplayResult::Events { events, .. } => {
-                for ev in events {
-                    if !sink.send_text(&ev.payload).await {
-                        tracing::warn!("Failed to replay event to user {user_id}");
-                    }
-                }
-                self.metrics.inc_replay_hit();
-                ReconnectOutcome {
-                    replayed: true,
-                    resync_required: false,
-                    kicked_old_sink_id,
-                }
-            }
-            ReplayResult::ResyncRequired => {
-                // 通知前端整树刷新
-                let resync = json!({
-                    "type": "resync_required",
-                    "data": {"thread_id": thread_id},
-                });
-                if !sink
-                    .send_text(&serde_json::to_string(&resync).unwrap_or_default())
-                    .await
-                {
-                    tracing::warn!("Failed to send resync_required to user {user_id}");
-                }
-                self.metrics.inc_replay_miss();
-                ReconnectOutcome {
-                    replayed: false,
-                    resync_required: true,
-                    kicked_old_sink_id,
-                }
-            }
-        }
     }
 
     /// B3：仅回放（不重注册连接、不发连接确认）——连接已建立、确认已发，

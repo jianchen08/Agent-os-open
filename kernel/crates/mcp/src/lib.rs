@@ -17,9 +17,7 @@ pub mod env_file;
 pub mod error;
 pub mod handler_registry;
 
-pub use capability::{
-    parse_capability_method, parse_capability_method_with, CapabilityRouter, STANDARD_CAPABILITIES,
-};
+pub use capability::{parse_capability_method_with, CapabilityRouter, STANDARD_CAPABILITIES};
 pub use client::{
     build_declared_capabilities, build_declared_capabilities_from_namespaces,
     resolve_env_placeholders, McpClient, McpTransport,

@@ -38,21 +38,6 @@ impl SessionMetrics {
         Self::default()
     }
 
-    /// 连接数 +1。
-    pub fn inc_connection(&self) {
-        self.connections.fetch_add(1, Ordering::Relaxed);
-    }
-
-    /// 连接数 -1（不低于 0）。
-    pub fn dec_connection(&self) {
-        // 用 fetch_sub + saturating，避免下溢
-        let _ = self
-            .connections
-            .fetch_update(SeqCst::Relaxed, SeqCst::Relaxed, |v| {
-                Some(v.saturating_sub(1))
-            });
-    }
-
     /// 直接设置活跃连接数（registry 调，反映真实连接表大小）。
     pub fn set_connections(&self, n: u64) {
         self.connections.store(n, Ordering::Relaxed);
@@ -96,9 +81,6 @@ impl SessionMetrics {
     }
 }
 
-/// 计数器用的 Ordering 别名（fetch_update 签名需要）。
-type SeqCst = Ordering;
-
 /// 一次快照（值拷贝，便于跨线程）。
 #[derive(Debug, Clone, Default)]
 pub struct SessionMetricsSnapshot {
@@ -118,8 +100,6 @@ mod tests {
     #[test]
     fn test_inc_and_snapshot() {
         let m = SessionMetrics::new();
-        m.inc_connection();
-        m.inc_connection();
         m.inc_kick_old();
         m.inc_event_bus_push(2);
         m.inc_event_bus_dropped();
@@ -127,24 +107,13 @@ mod tests {
         m.inc_replay_hit();
         m.inc_replay_miss();
         let s = m.snapshot();
-        assert_eq!(s.connections, 2);
+        assert_eq!(s.connections, 0);
         assert_eq!(s.kick_old_total, 1);
         assert_eq!(s.event_bus_push_total, 2);
         assert_eq!(s.event_bus_dropped_total, 1);
         assert_eq!(s.broadcast_total, 1);
         assert_eq!(s.replay_hits_total, 1);
         assert_eq!(s.replay_misses_total, 1);
-    }
-
-    #[test]
-    fn test_dec_connection_saturating() {
-        let m = SessionMetrics::new();
-        m.dec_connection(); // 0 → 不下溢
-        assert_eq!(m.snapshot().connections, 0);
-        m.inc_connection();
-        m.inc_connection();
-        m.dec_connection();
-        assert_eq!(m.snapshot().connections, 1);
     }
 
     #[test]

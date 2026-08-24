@@ -35,12 +35,11 @@ use agentos_config::ConfigCenter;
 
 use agentos_core::traits::{PluginInvoker, StorageBackend};
 use agentos_core::types::{
-    ContentLoader, EngineError, PipelineConfig, PluginContext, PluginError, PluginResult,
-    RouteNext, StepLibrary, TenantContext,
+    ContentLoader, EngineError, PluginContext, PluginError, PluginResult, RouteNext, TenantContext,
 };
 
 use crate::compiler::{
-    compile_pipeline, CompiledBody, CompiledItem, CompiledPipeline, CompiledRoute, CompiledStep,
+    CompiledBody, CompiledItem, CompiledPipeline, CompiledRoute, CompiledStep,
 };
 use crate::condition::eval_expr;
 use crate::template::{render_template, render_value};
@@ -172,44 +171,18 @@ impl PipelineExecutor {
         &self.metrics
     }
 
-    /// 执行管道。
-    ///
-    /// `initial_state` 是初始状态（含 `message` / `agent_id` 等）。
-    /// 返回最终 state。
-    ///
-    /// 流程（多循环体模型，[来源: 任务 §run 逻辑]）：
-    /// 1. state 默认设 `"ended" = false`（如未设）
-    /// 2. 按 `config.loop_bodies` 顺序执行每个循环体：
-    ///    - 每个体按自身 `loop_config` 单次或循环执行 steps（循环受 `max_iterations`
-    ///      安全阀约束，>0 时生效；-1=无限）；
-    ///    - `"ended"` 只结束当前循环体的循环，之后仍顺序推进（exit 体照常执行）；
-    ///    - `"suspended"` 终止整个管道（等待恢复，不推进后续体）；
-    ///    - `run_on_error` 的循环体在管道已 ended / 出错时仍执行（收尾语义）；
-    ///    - 转移：step 级路由设置的 `state.next_phase` > 循环体 `exit_routes` 命中
-    ///      （`RouteNext::Phase`）> 默认顺序进入下一循环体。
-    /// 3. 最后一个循环体结束 = run 结束。
-    pub async fn run(
-        &self,
-        config: &PipelineConfig,
-        step_library: &StepLibrary,
-        initial_state: serde_json::Value,
-    ) -> Result<serde_json::Value, EngineError> {
-        // G10 兼容路径：现场编译后执行（测试 / 旧调用方）。编译失败 = 加载期
-        // 校验失败（when 语法错误 / 未知引用 / 引用环），如实报错不静默——
-        // 与"非法 when 静默 false"的旧行为不同，这是 G10 的既定语义升级。
-        let compiled = compile_pipeline(config, step_library, &self.plugin_ids).map_err(|e| {
-            EngineError::Other {
-                message: format!("管道编译失败: {e}"),
-            }
-        })?;
-        self.run_compiled(&compiled, initial_state).await
+    /// 已知插件 id 集合（测试/诊断用：`compile_pipeline` 需要 plugin_ids 做
+    /// 未知引用校验；生产路径在启动期编译，不经过此访问器）。
+    pub fn plugin_ids(&self) -> &HashSet<String> {
+        &self.plugin_ids
     }
 
     /// 执行已编译管道（G10 生产路径：运行时零解析、零三级命中重算）。
     ///
-    /// 语义与 [`PipelineExecutor::run`] 完全一致（`run` 内部即编译后转此）；
     /// 差异仅在编译时机——生产路径在启动期 / 热重载时编译一次，`Arc` 原子换入，
     /// 在途 run 持旧计划跑完（快照语义），此处直接消费 [`CompiledPipeline`]。
+    /// （旧 `run` 兼容路径已随死代码清理删除：生产零调用，测试改走
+    /// `compile_pipeline` + 本方法。）
     pub async fn run_compiled(
         &self,
         compiled: &CompiledPipeline,
@@ -832,7 +805,6 @@ impl PipelineExecutor {
             Arc::clone(&self.store),
             self.run_id.clone(),
             self.branch_id.clone(),
-            0,
         );
         let config = if inputs.is_empty() {
             serde_json::Value::Object(Default::default())
@@ -1490,7 +1462,8 @@ pub(crate) fn op_ledger_entry(op: &serde_json::Value) -> Option<serde_json::Valu
 #[cfg(test)]
 mod tests {
     use super::*;
-    use agentos_core::types::{LoopBody, PipelineStep, Route, StepItem};
+    use agentos_core::types::{LoopBody, PipelineConfig, PipelineStep, Route, StepItem, StepLibrary};
+    use crate::compiler::compile_pipeline;
     use async_trait::async_trait;
     use serde_json::json;
     use std::collections::HashMap;
@@ -1825,8 +1798,12 @@ mod tests {
             library: &StepLibrary,
             initial: serde_json::Value,
         ) -> serde_json::Value {
+            // 旧 PipelineExecutor::run 兼容路径已删除（生产零调用）；测试显式
+            // 编译后走 run_compiled（G10 生产路径，语义一致）。
+            let compiled = compile_pipeline(config, library, &self.executor.plugin_ids)
+                .expect("compile should succeed");
             self.executor
-                .run(config, library, initial)
+                .run_compiled(&compiled, initial)
                 .await
                 .expect("run should succeed")
         }
@@ -1931,14 +1908,9 @@ mod tests {
             when: Some("this is ((( invalid".into()),
             inputs: HashMap::new(),
         }]);
-        let err = fixture
-            .executor
-            .run(&config, &StepLibrary::default(), json!({}))
-            .await
-            .unwrap_err();
-        let msg = err.to_string();
-        assert!(msg.contains("编译失败"), "err: {msg}");
-        assert!(msg.contains("when"), "err: {msg}");
+        let err = compile_pipeline(&config, &StepLibrary::default(), &fixture.executor.plugin_ids)
+            .expect_err("invalid when 应在编译期报错");
+        assert!(err.to_string().contains("when"), "err: {err}");
     }
 
     #[tokio::test]
@@ -2104,9 +2076,9 @@ mod tests {
             },
         };
         executor
-            .run(
-                &config,
-                &StepLibrary::default(),
+            .run_compiled(
+                &compile_pipeline(&config, &StepLibrary::default(), &executor.plugin_ids)
+                    .expect("compile should succeed"),
                 json!({ "pipeline_id": "p1" }),
             )
             .await
@@ -2420,7 +2392,11 @@ mod tests {
             checkpoint: Default::default(),
         };
         let state = executor
-            .run(&config, &StepLibrary::default(), json!({}))
+            .run_compiled(
+                &compile_pipeline(&config, &StepLibrary::default(), &executor.plugin_ids)
+                    .expect("compile should succeed"),
+                json!({}),
+            )
             .await
             .unwrap();
         // 验证循环到第 3 次因 ended 停止
@@ -2457,7 +2433,11 @@ mod tests {
             checkpoint: Default::default(),
         };
         let _ = executor
-            .run(&config, &StepLibrary::default(), json!({}))
+            .run_compiled(
+                &compile_pipeline(&config, &StepLibrary::default(), &executor.plugin_ids)
+                    .expect("compile should succeed"),
+                json!({}),
+            )
             .await
             .unwrap();
         assert_eq!(counter.load(Ordering::SeqCst), 2);
@@ -2555,13 +2535,9 @@ mod tests {
             }],
             checkpoint: Default::default(),
         };
-        let err = fixture
-            .executor
-            .run(&config, &StepLibrary::default(), json!({}))
-            .await
-            .unwrap_err();
-        let msg = err.to_string();
-        assert!(msg.contains("ghost_step"), "err: {msg}");
+        let err = compile_pipeline(&config, &StepLibrary::default(), &fixture.executor.plugin_ids)
+            .expect_err("未知引用应在编译期报错");
+        assert!(err.to_string().contains("ghost_step"), "err: {err}");
     }
 
     #[tokio::test]
@@ -2747,7 +2723,11 @@ mod tests {
             checkpoint: Default::default(),
         };
         let state = executor
-            .run(&config, &StepLibrary::default(), json!({}))
+            .run_compiled(
+                &compile_pipeline(&config, &StepLibrary::default(), &executor.plugin_ids)
+                    .expect("compile should succeed"),
+                json!({}),
+            )
             .await
             .unwrap();
         // 跑了 2 轮就停
@@ -2922,7 +2902,11 @@ mod tests {
             checkpoint: Default::default(),
         };
         let result = executor
-            .run(&config, &StepLibrary::default(), json!({}))
+            .run_compiled(
+                &compile_pipeline(&config, &StepLibrary::default(), &executor.plugin_ids)
+                    .expect("compile should succeed"),
+                json!({}),
+            )
             .await;
         let err = result.expect_err("恒自跳路由应被护栏截断为 Err");
         let msg = err.to_string();
@@ -2973,7 +2957,11 @@ mod tests {
             checkpoint: Default::default(),
         };
         let state = executor
-            .run(&config, &StepLibrary::default(), json!({}))
+            .run_compiled(
+                &compile_pipeline(&config, &StepLibrary::default(), &executor.plugin_ids)
+                    .expect("compile should succeed"),
+                json!({}),
+            )
             .await
             .unwrap();
         // step 自带循环跑了 3 轮（第 3 次 set ended）
@@ -3032,7 +3020,11 @@ mod tests {
         let initial = json!({"agent_id": "reload_test"});
 
         let final_state = executor
-            .run(&config, &StepLibrary::default(), initial)
+            .run_compiled(
+                &compile_pipeline(&config, &StepLibrary::default(), &executor.plugin_ids)
+                    .expect("compile should succeed"),
+                initial,
+            )
             .await
             .unwrap();
 
@@ -3079,7 +3071,11 @@ mod tests {
         let initial = json!({"agent_id": "ghost_agent"});
 
         let final_state = executor
-            .run(&config, &StepLibrary::default(), initial)
+            .run_compiled(
+                &compile_pipeline(&config, &StepLibrary::default(), &executor.plugin_ids)
+                    .expect("compile should succeed"),
+                initial,
+            )
             .await
             .unwrap();
 

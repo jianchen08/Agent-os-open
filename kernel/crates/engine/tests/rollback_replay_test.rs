@@ -45,6 +45,7 @@ use agentos_core::types::{
     LoopBody, LoopConfig, PipelineConfig, PipelineStep, PluginContext, PluginError, PluginResult,
     Route, RouteAction, RouteNext, StepItem, TenantContext, ToolExecutionResult,
 };
+use agentos_engine::compiler::compile_pipeline;
 use agentos_engine::{replay, PipelineExecutor, SqliteStore};
 use async_trait::async_trait;
 use serde_json::{json, Value};
@@ -251,12 +252,14 @@ async fn run_round(
         "ended": false,
         "suspended": false,
     });
+    let compiled = compile_pipeline(
+        &engine_cfg,
+        &agentos_core::types::StepLibrary::default(),
+        &executor.plugin_ids(),
+    )
+    .expect("compile ok");
     executor
-        .run(
-            &engine_cfg,
-            &agentos_core::types::StepLibrary::default(),
-            initial_state,
-        )
+        .run_compiled(&compiled, initial_state)
         .await
         .expect("run should succeed")
 }

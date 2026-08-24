@@ -49,7 +49,7 @@ pub trait CapabilityHandler: Send + Sync {
 
 /// Capability handler 注册表——动态路由 sidecar 反向调用到各 handler。
 ///
-/// 线程安全（内部 `parking_lot::RwLock<HashMap>`）。`register`/`unregister` 拿写锁，
+/// 线程安全（内部 `parking_lot::RwLock<HashMap>`）。`register` 拿写锁，
 /// `route`/`has_namespace`/`namespaces` 拿读锁。
 pub struct CapabilityHandlerRegistry {
     handlers: RwLock<std::collections::HashMap<String, Arc<dyn CapabilityHandler>>>,
@@ -67,15 +67,6 @@ impl CapabilityHandlerRegistry {
     pub fn register(&self, handler: Arc<dyn CapabilityHandler>) {
         let ns = handler.namespace().to_string();
         self.handlers.write().insert(ns, handler);
-    }
-
-    /// 注销指定 namespace 的 handler（插件卸载时调用）。
-    ///
-    /// Returns:
-    /// - `true`: 注销成功；
-    /// - `false`: 该 namespace 本来就没注册。
-    pub fn unregister(&self, namespace: &str) -> bool {
-        self.handlers.write().remove(namespace).is_some()
     }
 
     /// 是否注册了指定 namespace。
@@ -202,19 +193,6 @@ mod tests {
             msg.contains("not registered"),
             "错误信息应说明 namespace 未注册，实际: {msg}"
         );
-    }
-
-    #[tokio::test]
-    async fn test_unregister_removes_handler() {
-        let registry = CapabilityHandlerRegistry::new();
-        registry.register(Arc::new(EchoHandler {
-            ns: "temp-cap".into(),
-        }));
-        assert!(registry.has_namespace("temp-cap"));
-
-        assert!(registry.unregister("temp-cap"));
-        assert!(!registry.has_namespace("temp-cap"));
-        assert!(!registry.unregister("temp-cap")); // 二次注销返回 false
     }
 
     #[tokio::test]
