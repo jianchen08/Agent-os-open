@@ -1,22 +1,22 @@
 /**
  * 设置中枢 Widget · Deep Space v2
  *
- * 常驻「设置」工作区页签内容：
- * - 左：设置导航树（内核设置 + 插件配置）
+ * 「设置」唯一 UI（2026-08-24 独立路由页 /settings 退役，设置一律在工作区页签打开）：
+ * - 左：设置导航树（内核设置 + 插件配置 + 插件声明的 settings 页）
  * - 右：对应配置页内嵌区域
  *
- * 设计来源：D 插件配置 / E 内核设置（Workspace 区打开，而非跳路由）
+ * 深链：props.initialActive（如 `plugin:{pluginId}:{fileId}`）——外部入口
+ * （管道编辑器 step 节点等）打开设置页签时直接定位到指定配置页。
  */
 
 import { useEffect, useMemo, useState } from 'react'
 import { PluginConfigEditor } from '@/components/config/PluginConfigEditor'
+import { renderPageContent } from '@/components/schema/PageRenderer'
 import { cn } from '@/lib/utils'
 import { LlmSettingsPage } from '@/pages/settings/LlmSettingsPage'
 import { PipelineSettingsPage } from '@/pages/settings/PipelineSettingsPage'
 import { PluginsSettingsPage } from '@/pages/settings/PluginsSettingsPage'
 import { ThemeSettingsPage } from '@/pages/settings/ThemeSettingsPage'
-import { FormWidget } from './FormWidget'
-import { API_ENDPOINTS } from '@/constants/api'
 import { contributionRegistry } from '@/services/schema/ContributionRegistry'
 import { useSchemaQuery } from '@/hooks/queries/useSchemaQuery'
 import { KERNEL_NAV_ITEMS } from '@/services/settingsKernelNav'
@@ -26,12 +26,9 @@ type NavKey =
   | 'kernel-theme'
   | 'kernel-plugins'
   | 'kernel-pipeline'
-  | 'kernel-api'
   | 'kernel-llm'
-  | 'kernel-context'
-  | 'kernel-cost'
   | `plugin:${string}`
-  | `schema:${string}`
+  | `declared:${string}`
 
 interface NavItem {
   key: NavKey
@@ -40,7 +37,7 @@ interface NavItem {
   description?: string
 }
 
-// 内核设置导航项统一来自共享数据源（与 SettingsPage.BUILTIN_ITEMS 同源，避免散点双修）
+// 内核设置导航项统一来自共享数据源（与所有设置入口同源，避免散点双修）
 const KERNEL_NAV: NavItem[] = KERNEL_NAV_ITEMS.map((item) => ({
   key: `kernel-${item.id}` as NavKey,
   label: item.label,
@@ -48,14 +45,19 @@ const KERNEL_NAV: NavItem[] = KERNEL_NAV_ITEMS.map((item) => ({
   description: item.description,
 }))
 
+/** 设置中枢 props：widgetRegistry 透传 tab.props，外部入口可带深链初始选中项 */
+export interface SettingsHubWidgetProps {
+  initialActive?: NavKey
+}
+
 /**
  * 设置中枢 — 内嵌设置导航 + 内容区
  */
-export function SettingsHubWidget(_props: Record<string, unknown>) {
-  const [active, setActive] = useState<NavKey>('kernel-plugins')
+export function SettingsHubWidget({ initialActive = 'kernel-plugins' }: SettingsHubWidgetProps) {
+  const [active, setActive] = useState<NavKey>(initialActive)
   const [pluginPanels, setPluginPanels] = useState<SettingsPanelEntry[]>([])
 
-  // schema（query 化）：与 SettingsPage/GrowthLoop 共享同一缓存条目
+  // schema（query 化）：设置中枢唯一 schema 消费端，共享缓存条目
   const schemaQuery = useSchemaQuery()
 
   useEffect(() => {
@@ -76,6 +78,25 @@ export function SettingsHubWidget(_props: Record<string, unknown>) {
       ),
     [pluginPanels],
   )
+
+  // 插件直接声明的 settings 页（contributes.pages space=settings，非 config_files）
+  const declaredPages = useMemo(
+    () => contributionRegistry.getPagesBySpace('settings').filter((p) => !p.legacyFrom),
+    // pluginPanels 在 loadFromSchema 后设置，作为「声明已加载」的触发器
+    [pluginPanels],
+  )
+  const declaredNav: NavItem[] = useMemo(
+    () =>
+      declaredPages.map((p) => ({
+        key: `declared:${p.id}` as NavKey,
+        label: p.title ?? p.id,
+        group: '插件' as const,
+        description: '插件声明页',
+      })),
+    [declaredPages],
+  )
+
+  const activeDeclared = declaredPages.find((p) => `declared:${p.id}` === active)
 
   return (
     <div
@@ -115,6 +136,18 @@ export function SettingsHubWidget(_props: Record<string, unknown>) {
               ))}
             </NavGroup>
           )}
+          {declaredNav.length > 0 && (
+            <NavGroup label="插件页面">
+              {declaredNav.map((item) => (
+                <NavButton
+                  key={item.key}
+                  item={item}
+                  active={active === item.key}
+                  onClick={() => setActive(item.key)}
+                />
+              ))}
+            </NavGroup>
+          )}
         </nav>
       </aside>
 
@@ -130,16 +163,12 @@ export function SettingsHubWidget(_props: Record<string, unknown>) {
             }}
           />
         )}
-        {String(active).startsWith('schema:') && (
-          <FormWidget
-            fieldsUri={API_ENDPOINTS.AGENTS.SCHEMA}
-            dataUri={API_ENDPOINTS.AGENTS.CONFIG(String(active).slice('schema:'.length))}
-            dataFormat="yaml"
-            submitLabel="保存配置"
-          />
-        )}
         {String(active).startsWith('plugin:') && (
           <PluginConfigEmbed pathKey={String(active).slice('plugin:'.length)} />
+        )}
+        {activeDeclared && (
+          // 声明的 settings 页：经 PageRenderer 分发（widget/schema），声明驱动渲染
+          <div className="h-full min-h-0">{renderPageContent(activeDeclared)}</div>
         )}
       </main>
     </div>
