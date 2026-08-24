@@ -2,15 +2,17 @@
 
 0.1 的 ``evaluation.types`` / ``evaluation.executor``（归档于
 reference/0.1_src/evaluation/，src/ 已删）在 0.2 未迁移为可平铺导入模块——
-0.2 的评估能力由 evaluation_service 插件（evaluation.run 工具）独立承载。
+执行面由本目录 ``_executor.py`` 的 ``PipelineEvaluationExecutor`` 真实承载
+（2026-08-24 批次B：tool 型本地执行 + agent 型派评估子管道继承任务工作区）；
+evaluation_service 插件保留指标注册表/HTTP 读面（执行面已收编，不再双头）。
 本模块就地重建 task_evaluate 工具所需的最小类型面（仿 media/_media_core.py
 的「0.2 自包含 + 类型面 + 注入 duck-typing」模式）：
 
 - ``MetricResult`` / ``EvaluationResult``：评估结果数据类（字段与 0.1 对齐）
 - ``sanitize_eval_paths``：递归脱敏绝对路径（语义与 0.1 对齐，防止服务器
   内部路径信息泄漏）
-- ``EvaluationExecutor``：执行器类型面（0.1 完整实现未迁移；运行时实例由
-  外部注入，duck-typing，本类仅用于类型注解与空默认行为）
+- ``EvaluationExecutor``：执行器类型面（生产实现见 ``_executor.py``；本类
+  仅保留 duck-typing 契约与空默认行为）
 
 本模块自包含（仅标准库），由 task_evaluate 插件目录以平铺模块方式导入。
 """

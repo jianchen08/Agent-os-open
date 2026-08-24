@@ -202,8 +202,12 @@ async def evaluation_run(
             all_passed = False
             continue
 
-        # DEBT: 评估逻辑为简化实现。ceiling: 当前仅 file_check 真正读文件。
-        # upgrade: 集成 bash_check（subprocess）/semantic_check（LLM）/human_review 后完善。
+        # 收编（2026-08-24 批次B）：本端点**不再是执行面权威**——评估执行已由
+        # task_evaluate 插件的 PipelineEvaluationExecutor 真实装配（tool 型本地
+        # 执行 + agent 型派评估子管道继承任务工作区，见
+        # plugins/shared/tools/task_evaluate/_executor.py）。本插件保留指标
+        # 注册表 + metrics HTTP 读面；evaluation.run 维持诚实 stub 语义（未实现
+        # 类型一律判失败），调用方应改走 task_evaluate 工具。
         if metric_type == "file_check":
             import os
             file_path = params.get("path", "")
@@ -211,9 +215,9 @@ async def evaluation_run(
             message = f"file exists: {file_path}" if passed else f"file not found: {file_path}"
             error = None
         else:
-            # 显式 stub（诚实语义）：bash_check/semantic_check/human_review 未实现，
-            # 一律判失败并说明原因——不再以"提供了参数"假通过（会放行未评估任务）。
-            # upgrade: 后续批次补充其他 metric 类型。
+            # 显式 stub（诚实语义）：bash_check/semantic_check/human_review 在本
+            # 端点未实现，一律判失败并说明原因——执行面走 task_evaluate 的
+            # PipelineEvaluationExecutor（2026-08-24 批次B 收编，见上）。
             passed = False
             message = None
             error = f"metric type not implemented: {metric_type}"
