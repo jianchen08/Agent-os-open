@@ -857,6 +857,14 @@ const STATE_SUMMARY_KEYS: &[&str] = &[
     "lineage.parent_pipeline_id",
     "lineage.origin_session_id",
     "lineage.root",
+    // 评估域登记/结论（2026-08-24 批次B 评估管道装配）：评估子管道出生登记
+    // evaluation.of_task/metric_id（面板识别 + 执行器回收锚点）；task_reminder
+    // 评估模式写入 evaluation.detected_result。pipeline-state.list 能力与
+    // GET /pipelines/state 同数据源共用本白名单——不出口则评估执行器永远
+    // 轮询不到评估结论（ADR 2026-08-24-eval-pipeline-state-keys）。
+    "evaluation.of_task",
+    "evaluation.metric_id",
+    "evaluation.detected_result",
 ];
 
 /// 动态键前缀白名单（与 [`STATE_SUMMARY_KEYS`] 精确键并列出口）。
@@ -2196,6 +2204,27 @@ mod state_summary_tests {
         ] {
             assert!(s.get(k).is_none(), "{k} 不应被伪造");
         }
+    }
+
+    #[test]
+    fn test_summarize_state_exports_evaluation_fields() {
+        // 2026-08-24 批次B：评估子管道登记键（of_task/metric_id）与评估模式
+        // 结论（detected_result）出口——pipeline-state.list 同数据源，评估
+        // 执行器据此轮询回收评估结论。
+        let state = json!({
+            "pipeline_id": "evalPipe",
+            "evaluation.of_task": "taskPipe1",
+            "evaluation.metric_id": "semantic_check",
+            "evaluation.detected_result": {"passed": true, "score": 88, "feedback": "结构完整"},
+            "secret_field": "must-not-leak",
+        });
+        let s = summarize_state(&state);
+        assert_eq!(s["evaluation.of_task"], "taskPipe1");
+        assert_eq!(s["evaluation.metric_id"], "semantic_check");
+        assert_eq!(s["evaluation.detected_result"]["passed"], true);
+        assert_eq!(s["evaluation.detected_result"]["score"], 88);
+        // 白名单语义不变：杂键仍裁掉
+        assert!(s.get("secret_field").is_none());
     }
 
     #[test]
