@@ -174,6 +174,38 @@ class TestParsers:
         entry = m.get("frontend/src/a.ts") or m.get("D:/repo/frontend/src/a.ts")
         assert entry == {1: True, 2: False}
 
+    def test_load_coverage_lcov_relative_sf_prefixed_by_project_root(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Windows 本地 vitest lcov：SF 相对 frontend/（反斜杠）——按覆盖率文件
+        # 所在项目根回拼仓库前缀，与 git diff 的仓库相对路径对齐
+        monkeypatch.setattr(diff_cov, "ROOT", tmp_path)
+        (tmp_path / "frontend" / "coverage").mkdir(parents=True)
+        lcov = tmp_path / "frontend" / "coverage" / "lcov.info"
+        lcov.write_text(
+            "SF:src\\components\\a.tsx\nDA:3,1\nDA:4,0\nend_of_record\n",
+            encoding="utf-8",
+        )
+        m = diff_cov.load_coverage(lcov, "lcov")
+        assert m["frontend/src/components/a.tsx"] == {3: True, 4: False}
+
+    def test_load_coverage_lcov_repo_relative_sf_not_prefixed(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # SF 已是仓库相对且文件真实存在 → 不回拼（防双前缀）
+        monkeypatch.setattr(diff_cov, "ROOT", tmp_path)
+        real = tmp_path / "plugins" / "shared"
+        real.mkdir(parents=True)
+        (real / "x.py").write_text("x = 1\n", encoding="utf-8")
+        lcov = tmp_path / "frontend" / "coverage" / "lcov.info"
+        lcov.parent.mkdir(parents=True)
+        lcov.write_text(
+            "SF:plugins/shared/x.py\nDA:1,1\nend_of_record\n",
+            encoding="utf-8",
+        )
+        m = diff_cov.load_coverage(lcov, "lcov")
+        assert m["plugins/shared/x.py"] == {1: True}
+
     def test_parse_coverage_xml_source_relative(self, monkeypatch: pytest.MonkeyPatch) -> None:
         # 真实 coverage.py 7.x 格式：filename 相对 <source> 根（如 plugins）
         monkeypatch.setattr(diff_cov, "ROOT", Path("D:/repo"))

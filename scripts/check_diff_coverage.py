@@ -146,7 +146,25 @@ def parse_lcov(text: str) -> dict[str, LineMap]:
 
 def load_coverage(path: Path, fmt: str) -> dict[str, LineMap]:
     text = path.read_text(encoding="utf-8", errors="replace")
-    return parse_coverage_xml(text) if fmt == "xml" else parse_lcov(text)
+    if fmt == "xml":
+        return parse_coverage_xml(text)
+    files = parse_lcov(text)
+    # vitest lcov 的 SF 在部分环境（Windows 本地）是相对其项目根（frontend/）的
+    # 相对路径，与 git diff 的仓库相对路径错位（度量面漂移 fail-loud）——按覆盖
+    # 率文件所在项目根回拼仓库前缀；CI/Linux 写绝对路径、norm_path 已剥 ROOT，
+    # 不走此分支。仓库相对路径真实存在的键不回拼（防双前缀）。
+    cov_project_root = path.resolve().parent.parent
+    prefix = cov_project_root.relative_to(ROOT.resolve()).as_posix()
+    resolved: dict[str, LineMap] = {}
+    if prefix and prefix != ".":
+        for key, line_map in files.items():
+            repo_key = key if (ROOT / key).exists() else f"{prefix}/{key}"
+            if repo_key in resolved:
+                resolved[repo_key].update(line_map)
+            else:
+                resolved[repo_key] = line_map
+        return resolved
+    return files
 
 
 # ── diff 解析 ─────────────────────────────────────────────────────
