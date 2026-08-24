@@ -4,8 +4,9 @@
  * - 管道数据：内核 `GET /api/v1/pipelines/runs` 快照（pipelineRegistryStore）
  *   + WS 流式/任务事件实时增量 + 任务列表（longTermTaskStore 权威）
  * - 展示：执行中/最近完成两组，组内按归属会话分组（会话 → 管道 包含关系），
- *   无归属（孤儿）管道单独平铺；树视图/列表视图切换；条目展开显示详情；
- *   操作按钮（打开对话/暂停/恢复/取消/复制 ID/打开工作空间）
+ *   无归属（孤儿）管道单独平铺；树视图/列表视图切换；树子级点击展开/收起
+ *   （默认收起），条目详情走独立「详细信息」按钮、与树展开解耦（树操作不关
+ *   详情，详情停留显示）；操作按钮（打开对话/暂停/恢复/取消/复制 ID/打开工作空间）
  * - 任务信息并入管道条目（任务标题/状态/进度在条目与展开详情中显示），
  *   不再单独挂任务树区块
  */
@@ -23,6 +24,7 @@ import {
   FolderTree,
   CopyIcon,
   ExternalLink,
+  InfoIcon,
   MessageSquare,
 } from '@/assets/icons'
 import { useAllTasksQuery } from '@/hooks/queries/useAllTasksQuery'
@@ -213,9 +215,12 @@ export function PipelineManagerWidget(_rawProps: Record<string, unknown>) {
       })
     }
 
-    // 2) 任务派生条目：有管道 ID 但未进 runs 的任务（旧引擎占位 run / 未落槽窗口）
+    // 2) 任务派生条目：有管道 ID 但未进 runs 的任务（旧引擎占位 run / 未落槽窗口）。
+    //    落 seen——否则下方 states 独立条目循环会为同一管道再建一行（同 key 双行，
+    //    展开/详情状态互相串扰）
     for (const [pid, task] of taskByPipeline) {
       if (seen.has(pid)) continue
+      seen.add(pid)
       const taskStatus = String(task.status ?? '')
       // 未知状态不再丢弃（2026-08-19）：保留条目，4 态映射兜底 running，原始状态在行内展示
       const mapped = taskStatusToPipelineStatus(taskStatus) ?? 'running'
@@ -250,6 +255,8 @@ export function PipelineManagerWidget(_rawProps: Record<string, unknown>) {
             : undefined,
         totalTokens: null,
         taskStatus: taskStatus || undefined,
+        currentPhase: st?.state.current_phase,
+        messageCount: st?.state.message_count,
         stateStatus: st
           ? String(st.state['task.status'] ?? st.state.status ?? '') || undefined
           : undefined,
@@ -307,8 +314,10 @@ export function PipelineManagerWidget(_rawProps: Record<string, unknown>) {
   const [kindFilter, setKindFilter] = useState<'all' | 'task' | 'session'>('all')
   /** 状态筛选（空串 = 全部；默认全部——任务管理面板打开即见所有管道状态） */
   const [statusFilter, setStatusFilter] = useState('')
-  /** 展开的管道条目 key 集合（详情面板） */
-  const [expandedKeys, setExpandedKeys] = useState<Set<string>>(new Set())
+  /** 树子级展开 key 集合（点击展开/收起，默认收起——树是点击展开） */
+  const [treeOpenKeys, setTreeOpenKeys] = useState<Set<string>>(new Set())
+  /** 展开详情的条目 key 集合（与树展开解耦：树收起不关详情，信息停留显示） */
+  const [detailOpenKeys, setDetailOpenKeys] = useState<Set<string>>(new Set())
   /** 秒级 ticker（执行中条目耗时实时刷新） */
   const [nowMs, setNowMs] = useState(() => Date.now())
   useEffect(() => {
@@ -490,9 +499,19 @@ export function PipelineManagerWidget(_rawProps: Record<string, unknown>) {
     return build(roots, 0)
   }, [filteredPipelineEntries, allTasks, sessions])
 
-  /** 展开/折叠详情 */
-  const toggleEntry = useCallback((key: string) => {
-    setExpandedKeys((prev) => {
+  /** 展开/折叠树子级（行首 chevron / 任务节点行点击） */
+  const toggleTreeNode = useCallback((key: string) => {
+    setTreeOpenKeys((prev) => {
+      const next = new Set(prev)
+      if (next.has(key)) next.delete(key)
+      else next.add(key)
+      return next
+    })
+  }, [])
+
+  /** 展开/收起详情（独立于树展开——树操作不会动这份状态） */
+  const toggleDetail = useCallback((key: string) => {
+    setDetailOpenKeys((prev) => {
       const next = new Set(prev)
       if (next.has(key)) next.delete(key)
       else next.add(key)
@@ -728,8 +747,8 @@ export function PipelineManagerWidget(_rawProps: Record<string, unknown>) {
           <PipelineTable
             entries={filteredPipelineEntries}
             nowMs={nowMs}
-            expandedKeys={expandedKeys}
-            onToggle={toggleEntry}
+            expandedKeys={detailOpenKeys}
+            onToggle={toggleDetail}
             onEntryClick={handleEntryClick}
             onAction={handleAction}
           />
@@ -737,8 +756,10 @@ export function PipelineManagerWidget(_rawProps: Record<string, unknown>) {
           <PipelineTree
             tree={pipelineTree}
             nowMs={nowMs}
-            expandedKeys={expandedKeys}
-            onToggle={toggleEntry}
+            treeOpenKeys={treeOpenKeys}
+            detailOpenKeys={detailOpenKeys}
+            onTreeToggle={toggleTreeNode}
+            onToggleDetail={toggleDetail}
             onEntryClick={handleEntryClick}
             onAction={handleAction}
             onOpenWorkspace={openWorkspaceTab}
@@ -776,16 +797,20 @@ interface PipelineTreeNode {
 function PipelineTree({
   tree,
   nowMs,
-  expandedKeys,
-  onToggle,
+  treeOpenKeys,
+  detailOpenKeys,
+  onTreeToggle,
+  onToggleDetail,
   onEntryClick,
   onAction,
   onOpenWorkspace,
 }: {
   tree: PipelineTreeNode[]
   nowMs: number
-  expandedKeys: Set<string>
-  onToggle: (key: string) => void
+  treeOpenKeys: Set<string>
+  detailOpenKeys: Set<string>
+  onTreeToggle: (key: string) => void
+  onToggleDetail: (key: string) => void
   onEntryClick: (entry: PipelineViewEntry) => void
   onAction: (entry: PipelineViewEntry, action: 'pause' | 'resume' | 'cancel' | 'copy' | 'workspace') => void
   onOpenWorkspace: (taskId: string, title: string) => void
@@ -823,8 +848,10 @@ function PipelineTree({
           count={activeCount}
           nodes={active}
           nowMs={nowMs}
-          expandedKeys={expandedKeys}
-          onToggle={onToggle}
+          treeOpenKeys={treeOpenKeys}
+          detailOpenKeys={detailOpenKeys}
+          onTreeToggle={onTreeToggle}
+          onToggleDetail={onToggleDetail}
           onEntryClick={onEntryClick}
           onAction={onAction}
           onOpenWorkspace={onOpenWorkspace}
@@ -836,8 +863,10 @@ function PipelineTree({
           count={doneCount}
           nodes={done}
           nowMs={nowMs}
-          expandedKeys={expandedKeys}
-          onToggle={onToggle}
+          treeOpenKeys={treeOpenKeys}
+          detailOpenKeys={detailOpenKeys}
+          onTreeToggle={onTreeToggle}
+          onToggleDetail={onToggleDetail}
           onEntryClick={onEntryClick}
           onAction={onAction}
           onOpenWorkspace={onOpenWorkspace}
@@ -874,8 +903,10 @@ function TreeGroup({
   count,
   nodes,
   nowMs,
-  expandedKeys,
-  onToggle,
+  treeOpenKeys,
+  detailOpenKeys,
+  onTreeToggle,
+  onToggleDetail,
   onEntryClick,
   onAction,
   onOpenWorkspace,
@@ -884,8 +915,10 @@ function TreeGroup({
   count: number
   nodes: PipelineTreeNode[]
   nowMs: number
-  expandedKeys: Set<string>
-  onToggle: (key: string) => void
+  treeOpenKeys: Set<string>
+  detailOpenKeys: Set<string>
+  onTreeToggle: (key: string) => void
+  onToggleDetail: (key: string) => void
   onEntryClick: (entry: PipelineViewEntry) => void
   onAction: (entry: PipelineViewEntry, action: 'pause' | 'resume' | 'cancel' | 'copy' | 'workspace') => void
   onOpenWorkspace: (taskId: string, title: string) => void
@@ -910,8 +943,11 @@ function TreeGroup({
                   entry={node.entry}
                   depth={node.depth}
                   nowMs={nowMs}
-                  expanded={expandedKeys.has(node.key)}
-                  onToggle={onToggle}
+                  detailOpen={detailOpenKeys.has(node.key)}
+                  treeOpen={treeOpenKeys.has(node.key)}
+                  hasChildren={node.children.length > 0}
+                  onTreeToggle={onTreeToggle}
+                  onToggleDetail={onToggleDetail}
                   onEntryClick={onEntryClick}
                   onAction={onAction}
                   orphan={!node.entry.threadId}
@@ -919,17 +955,19 @@ function TreeGroup({
               ) : (
                 <TaskRow
                   node={node}
-                  expanded={expandedKeys.has(node.key)}
-                  onToggle={onToggle}
+                  open={treeOpenKeys.has(node.key)}
+                  onToggle={onTreeToggle}
                   onOpenWorkspace={onOpenWorkspace}
                 />
               )}
-              {node.children.length > 0 && (
+              {node.children.length > 0 && treeOpenKeys.has(node.key) && (
                 <TreeChildren
                   nodes={node.children}
                   nowMs={nowMs}
-                  expandedKeys={expandedKeys}
-                  onToggle={onToggle}
+                  treeOpenKeys={treeOpenKeys}
+                  detailOpenKeys={detailOpenKeys}
+                  onTreeToggle={onTreeToggle}
+                  onToggleDetail={onToggleDetail}
                   onEntryClick={onEntryClick}
                   onAction={onAction}
                   onOpenWorkspace={onOpenWorkspace}
@@ -943,20 +981,24 @@ function TreeGroup({
   )
 }
 
-/** 递归渲染子树（主管道 → 任务/容器 → 管道嵌套） */
+/** 递归渲染子树（主管道 → 任务/容器 → 管道嵌套；仅在父节点树展开时挂载） */
 function TreeChildren({
   nodes,
   nowMs,
-  expandedKeys,
-  onToggle,
+  treeOpenKeys,
+  detailOpenKeys,
+  onTreeToggle,
+  onToggleDetail,
   onEntryClick,
   onAction,
   onOpenWorkspace,
 }: {
   nodes: PipelineTreeNode[]
   nowMs: number
-  expandedKeys: Set<string>
-  onToggle: (key: string) => void
+  treeOpenKeys: Set<string>
+  detailOpenKeys: Set<string>
+  onTreeToggle: (key: string) => void
+  onToggleDetail: (key: string) => void
   onEntryClick: (entry: PipelineViewEntry) => void
   onAction: (entry: PipelineViewEntry, action: 'pause' | 'resume' | 'cancel' | 'copy' | 'workspace') => void
   onOpenWorkspace: (taskId: string, title: string) => void
@@ -970,8 +1012,11 @@ function TreeChildren({
               entry={node.entry}
               depth={node.depth}
               nowMs={nowMs}
-              expanded={expandedKeys.has(node.key)}
-              onToggle={onToggle}
+              detailOpen={detailOpenKeys.has(node.key)}
+              treeOpen={treeOpenKeys.has(node.key)}
+              hasChildren={node.children.length > 0}
+              onTreeToggle={onTreeToggle}
+              onToggleDetail={onToggleDetail}
               onEntryClick={onEntryClick}
               onAction={onAction}
               orphan={!node.entry.threadId}
@@ -979,17 +1024,19 @@ function TreeChildren({
           ) : (
             <TaskRow
               node={node}
-              expanded={expandedKeys.has(node.key)}
-              onToggle={onToggle}
+              open={treeOpenKeys.has(node.key)}
+              onToggle={onTreeToggle}
               onOpenWorkspace={onOpenWorkspace}
             />
           )}
-          {node.children.length > 0 && (
+          {node.children.length > 0 && treeOpenKeys.has(node.key) && (
             <TreeChildren
               nodes={node.children}
               nowMs={nowMs}
-              expandedKeys={expandedKeys}
-              onToggle={onToggle}
+              treeOpenKeys={treeOpenKeys}
+              detailOpenKeys={detailOpenKeys}
+              onTreeToggle={onTreeToggle}
+              onToggleDetail={onToggleDetail}
               onEntryClick={onEntryClick}
               onAction={onAction}
               onOpenWorkspace={onOpenWorkspace}
@@ -1001,15 +1048,15 @@ function TreeChildren({
   )
 }
 
-/** 任务节点行（容器/普通任务）：父节点展开显示其下管道/子任务（任务 → 管道层级） */
+/** 任务节点行（容器/普通任务）：行点击/chevron 展开-收起其下管道与子任务（树） */
 function TaskRow({
   node,
-  expanded,
+  open,
   onToggle,
   onOpenWorkspace,
 }: {
   node: PipelineTreeNode
-  expanded: boolean
+  open: boolean
   onToggle: (key: string) => void
   onOpenWorkspace?: (taskId: string, title: string) => void
 }) {
@@ -1022,7 +1069,7 @@ function TaskRow({
       className="hover:bg-accent group flex cursor-pointer items-center gap-1.5 py-1.5 pr-2 transition-colors"
       style={{ paddingLeft: `${node.depth * 16 + 8}px` }}
       onClick={() => onToggle(node.key)}
-      title={isContainer ? '容器任务（展开查看其下任务管道）' : '任务（展开查看其管道）'}
+      title={isContainer ? '容器任务（点击展开/收起其下任务管道）' : '任务（点击展开/收起其管道）'}
     >
       <button
         className="text-muted-foreground hover:text-foreground flex h-5 w-5 shrink-0 items-center justify-center rounded transition-transform"
@@ -1032,7 +1079,7 @@ function TaskRow({
         }}
         tabIndex={-1}
       >
-        <ChevronRight className={`h-3.5 w-3.5 transition-transform ${expanded ? 'rotate-90' : ''}`} />
+        <ChevronRight className={`h-3.5 w-3.5 transition-transform ${open ? 'rotate-90' : ''}`} />
       </button>
       <span
         className={`shrink-0 rounded px-1 py-0 text-[10px] font-medium ${
@@ -1076,23 +1123,30 @@ function TaskRow({
   )
 }
 
-/** 管道条目行（常态：类型/状态/名称/agent/耗时/token；展开：详情） */
+/** 管道条目行（常态：类型/状态/名称/agent/耗时/token；行首 chevron=树子级展开，
+ *  操作区「详细信息」按钮=详情展开——两者解耦，树收起不会关详情） */
 function EntryRow({
   entry,
   depth,
   nowMs,
-  expanded,
+  detailOpen,
+  treeOpen,
+  hasChildren,
   orphan,
-  onToggle,
+  onTreeToggle,
+  onToggleDetail,
   onEntryClick,
   onAction,
 }: {
   entry: PipelineViewEntry
   depth: number
   nowMs: number
-  expanded: boolean
+  detailOpen: boolean
+  treeOpen: boolean
+  hasChildren: boolean
   orphan?: boolean
-  onToggle: (key: string) => void
+  onTreeToggle: (key: string) => void
+  onToggleDetail: (key: string) => void
   onEntryClick: (entry: PipelineViewEntry) => void
   onAction: (entry: PipelineViewEntry, action: 'pause' | 'resume' | 'cancel' | 'copy' | 'workspace') => void
 }) {
@@ -1110,17 +1164,23 @@ function EntryRow({
         onClick={() => onEntryClick(entry)}
         title="打开对话标签"
       >
-        {/* 展开详情 chevron */}
-        <button
-          className="text-muted-foreground hover:text-foreground flex h-5 w-5 shrink-0 items-center justify-center rounded transition-transform"
-          onClick={(e) => {
-            e.stopPropagation()
-            onToggle(entry.key)
-          }}
-          tabIndex={-1}
-        >
-          <ChevronRight className={`h-3.5 w-3.5 transition-transform ${expanded ? 'rotate-90' : ''}`} />
-        </button>
+        {/* 树子级展开 chevron（仅有子级时渲染；叶子行占位对齐） */}
+        {hasChildren ? (
+          <button
+            className="text-muted-foreground hover:text-foreground flex h-5 w-5 shrink-0 items-center justify-center rounded transition-transform"
+            onClick={(e) => {
+              e.stopPropagation()
+              onTreeToggle(entry.key)
+            }}
+            title="展开/收起子管道"
+            aria-label="展开或收起子管道"
+            tabIndex={-1}
+          >
+            <ChevronRight className={`h-3.5 w-3.5 transition-transform ${treeOpen ? 'rotate-90' : ''}`} />
+          </button>
+        ) : (
+          <span className="h-5 w-5 shrink-0" />
+        )}
         {/* 类型徽标 */}
         <span
           className={`shrink-0 rounded px-1 py-0 text-[10px] font-medium ${
@@ -1183,6 +1243,23 @@ function EntryRow({
         </span>
         {/* 操作按钮 */}
         <div className="flex shrink-0 items-center gap-0.5">
+          {/* 详细信息（独立于树展开：树收起不关详情，信息停留显示） */}
+          <button
+            className={`${
+              detailOpen
+                ? 'bg-primary/20 text-primary'
+                : 'text-muted-foreground hover:bg-accent hover:text-foreground'
+            } flex h-6 w-6 items-center justify-center rounded transition-colors`}
+            onClick={(e) => {
+              e.stopPropagation()
+              onToggleDetail(entry.key)
+            }}
+            title="详细信息（展开/收起详情，不受树展开影响）"
+            aria-label="切换详细信息"
+            tabIndex={-1}
+          >
+            <InfoIcon className="h-3.5 w-3.5" />
+          </button>
           <button
             className="bg-primary/15 text-primary hover:bg-primary/25 flex h-6 w-6 items-center justify-center rounded transition-colors"
             onClick={(e) => {
@@ -1261,7 +1338,7 @@ function EntryRow({
           )}
         </div>
       </div>
-      {expanded && <EntryDetail entry={entry} depth={depth} />}
+      {detailOpen && <EntryDetail entry={entry} depth={depth} />}
     </div>
   )
 }
