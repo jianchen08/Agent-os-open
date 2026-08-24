@@ -94,29 +94,9 @@ test_cases:
         should_catch: true
 
   # ============================================================
-  # 场景4: 输入验证 - 无效优先级
+  # 场景4 已移除（TC004_invalid_priority）：priority 参数随 2026-08-24
+  # 参数瘦身退役（执行层零消费者，ADR 2026-08-24-task-submit-param-diet）
   # ============================================================
-  - case_id: TC004_invalid_priority
-    name: "输入验证-无效优先级"
-    description: "验证当优先级超出范围时系统正确报错"
-    enabled: true
-
-    input:
-      prompt: |
-        请使用 task_submit 工具提交一个任务：
-        - 目标类型: agent
-        - 目标ID: test_agent
-        - 任务标题: 测试任务
-        - 任务描述: 测试任务
-        - 优先级: 999
-
-    expected:
-      error_handled: true
-      validation_message: true
-
-    validation:
-      - check: error_handling
-        should_catch: true
 
   # ============================================================
   # 场景5: 输入验证 - 无效任务范围

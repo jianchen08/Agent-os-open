@@ -193,7 +193,7 @@ hard_constraints:
 - 任务完成后必须审查子任务产出中有价值的领域知识（技术陷阱、模块设计要点、项目约定），使用 memory 工具存储到知识库
 soft_constraints:
 - 编码类任务评估失败时优先尝试自动格式化工具修复后重新评估
-- 派发审查/验证任务时合理分配 priority，关键路径优先
+- 关键路径任务优先派发（task_submit 无 priority 参数——靠派发顺序表达优先级）
 input_schema:
   type: object
   properties:

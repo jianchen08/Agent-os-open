@@ -320,39 +320,6 @@ def _normalize_description(value: Any) -> str:
     return str(value)
 
 
-# 数值边界（2026-08-24）：input_schema 的 min/max 声明不在运行时强制
-# （tool_core 只 fail-closed 校验 output_schema），越界值原样落 state 会
-# 打爆下游消费方（TaskPriority 枚举 int 转换、前端展示）——提交期统一拦截。
-_PRIORITY_BOUNDS = (1, 10)
-_MAX_RETRIES_BOUNDS = (0, 10)
-
-
-def _validate_int_bounds(name: str, value: Any, bounds: tuple[int, int]) -> str | None:
-    """schema 数值约束的运行时兜底校验。"""
-    lo, hi = bounds
-    if isinstance(value, bool) or not isinstance(value, int):
-        return f"{name} 必须为 {lo}-{hi} 的整数，当前值: {value!r}"
-    if not lo <= value <= hi:
-        return f"{name} 超出范围（{lo}-{hi}），当前值: {value}"
-    return None
-
-
-def _validate_submission_bounds(inputs: dict[str, Any]) -> tuple[str, str] | None:
-    """priority/max_retries 边界校验（普通/容器两条路径共用）。
-
-    仅校验显式传入的键——不传不写不补默认（对账语义，2026-08-23 定案）。
-    """
-    if "priority" in inputs:
-        err = _validate_int_bounds("priority", inputs["priority"], _PRIORITY_BOUNDS)
-        if err:
-            return (err, "INVALID_PRIORITY")
-    if "max_retries" in inputs:
-        err = _validate_int_bounds("max_retries", inputs["max_retries"], _MAX_RETRIES_BOUNDS)
-        if err:
-            return (err, "INVALID_MAX_RETRIES")
-    return None
-
-
 class TaskSubmitTool(BuiltinTool):
     """任务提交工具。"""
 
@@ -445,20 +412,6 @@ class TaskSubmitTool(BuiltinTool):
                             },
                             "required": [],
                         },
-                    },
-                    "priority": {
-                        "type": "integer",
-                        "minimum": 1,
-                        "maximum": 10,
-                        "default": 5,
-                        "description": "任务优先级，1-10，数值越大优先级越高",
-                    },
-                    "max_retries": {
-                        "type": "integer",
-                        "minimum": 0,
-                        "maximum": 10,
-                        "default": 3,
-                        "description": "任务失败时的最大重试次数（0-10，0 表示不重试）",
                     },
                     "task_scope": {
                         "type": "string",
@@ -667,16 +620,11 @@ class TaskSubmitTool(BuiltinTool):
                 error_code="MISSING_GOAL",
             )
 
-        # ── 1.2 数值边界校验（2026-08-24）──
-        # 位于容器分支之前：普通/容器两条路径共用同一闸门。
-        _bounds = _validate_submission_bounds(inputs)
-        if _bounds is not None:
-            logger.warning("[TaskSubmit] 数值参数越界 | %s", _bounds[0])
-            return create_failure_result(error=_bounds[0], error_code=_bounds[1])
-
-        # ── 1.4 任务描述非空（2026-08-24）──
+        # ── 1.2 任务描述非空（2026-08-24）──
         # 派发给下级 Agent 的任务只有标题没有描述 = 下级无目标上下文，
         # 标题承载不了执行语义，一律拒绝。
+        # （priority/max_retries 参数已退役——执行层零消费者，见 ADR
+        # 2026-08-24-task-submit-param-diet；显式传入按未知参数忽略。）
         if not _normalize_description(goal.get("description", "")).strip():
             logger.warning("[TaskSubmit] goal.description 缺失或空白 | title=%s", goal.get("title"))
             return create_failure_result(
@@ -1434,14 +1382,6 @@ class TaskSubmitTool(BuiltinTool):
             "lineage": lineage,
             "background": True,
         }
-        # 提交参数对账（2026-08-23）：priority/max_retries 仅在 LLM 显式传入时
-        # 落 state（task.priority/task.max_retries）——不传不写、不补默认值
-        # （默认值语义留在 schema 声明，state 不强行 fallback，与"验收标准铁律：
-        # 不 fallback、不默认"的既有风格一致），保证"提交参数 vs 实际参数"可对账。
-        if "priority" in inputs:
-            params["state"]["task.priority"] = inputs["priority"]
-        if "max_retries" in inputs:
-            params["state"]["task.max_retries"] = inputs["max_retries"]
         # 父是容器任务（task.owned 声明，非管道）：子任务管道 state 带
         # parent_project_id（容器 project id）——前端任务树据此挂容器节点下；
         # lineage 有父形式仍指向提交者管道（容器不是管道，不能当 lineage 父）。
@@ -1629,13 +1569,6 @@ class TaskSubmitTool(BuiltinTool):
                 f"task.owned.{project_id}.submitted_by": inputs.get("user_id", ""),
             },
         }
-        # 提交参数对账（2026-08-23）：priority/max_retries 仅在 LLM 显式传入时
-        # 落登记 state（task.owned.<id>.priority/max_retries）——不传不写、不补
-        # 默认值（默认值语义留在 schema 声明，与普通任务派发分支同语义）。
-        if "priority" in inputs:
-            params["state"][f"task.owned.{project_id}.priority"] = inputs["priority"]
-        if "max_retries" in inputs:
-            params["state"][f"task.owned.{project_id}.max_retries"] = inputs["max_retries"]
         try:
             resp = await sender(params)
         except Exception as exc:

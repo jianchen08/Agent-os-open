@@ -848,11 +848,9 @@ const STATE_SUMMARY_KEYS: &[&str] = &[
     "task.scope",
     "task.submitted_by",
     "task.parent_project_id",
-    // 任务提交参数对账（2026-08-23）：task_submit 在 LLM 显式传入时落
-    // task.priority/task.max_retries——白名单出口保证 pipeline-state 聚合
-    // 可见"提交参数 vs 实际参数"对账依据。
-    "task.priority",
-    "task.max_retries",
+    // task.priority/task.max_retries 出口随参数退役移除（2026-08-24
+    // 消费链审计：执行层零消费者——无调度队列按优先级排序，三套真实重试
+    // 机制均读各自插件配置，见 ADR 2026-08-24-task-submit-param-diet）。
     "workspace",
     "ws_meta",
     // GAP-1 阶段 1：血缘字段（出生写入，任务树分组与溯源的出口依赖）
@@ -2201,27 +2199,20 @@ mod state_summary_tests {
     }
 
     #[test]
-    fn test_summarize_state_exports_task_submit_parity_keys() {
-        // 任务提交参数对账（2026-08-23）：task_submit 在 LLM 显式传入时落
-        // task.priority/task.max_retries（提交参数 vs 实际参数对账依据）——
-        // 白名单必须出口，否则 pipeline-state 聚合出口看不到。
-        let state = json!({
+    fn test_summarize_state_cuts_retired_task_submit_params() {
+        // 参数退役守卫（2026-08-24）：task.priority/task.max_retries 随
+        // task_submit 参数瘦身移除（执行层零消费者，ADR
+        // 2026-08-24-task-submit-param-diet）——精确键出口已删，白名单
+        // 应裁剪；将来重开须先接真实消费者再回填白名单与写入方。
+        let s = summarize_state(&json!({
             "pipeline_id": "p6",
             "task.priority": "high",
             "task.max_retries": 2,
             "task.goal": "g",
-        });
-        let s = summarize_state(&state);
-        assert_eq!(s["task.priority"], "high");
-        assert_eq!(s["task.max_retries"], 2);
-        // task.owned.<id> 变体走既有前缀白名单出口（容器任务登记的对账字段）
-        let s2 = summarize_state(&json!({
-            "pipeline_id": "p7",
-            "task.owned.ae7b430f.priority": "high",
-            "task.owned.ae7b430f.max_retries": 2,
         }));
-        assert_eq!(s2["task.owned.ae7b430f.priority"], "high");
-        assert_eq!(s2["task.owned.ae7b430f.max_retries"], 2);
+        assert!(s.get("task.priority").is_none(), "退役参数不应出口");
+        assert!(s.get("task.max_retries").is_none(), "退役参数不应出口");
+        assert_eq!(s["task.goal"], "g");
     }
 
     #[test]

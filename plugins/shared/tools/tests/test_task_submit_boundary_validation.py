@@ -1,18 +1,21 @@
 # @feature: FP-0.2.〇 任务执行驱动 | @ci: python-coverage
-"""task_submit 入参边界校验测试（2026-08-24 工具能力测试暴露的漏洞）。
+"""task_submit 入参校验测试（2026-08-24 工具能力测试 → 参数瘦身两阶段）。
 
-背景：plugin.json / get_tool_definition 的 input_schema 声明了
-priority(1-10)/max_retries(min=0)，但 input_schema 声明不在运行时强制
-（tool_core 只 fail-closed 校验 output_schema），LLM 传越界值原样落
-state——下游 TaskPriority 枚举、前端展示全部裸奔。
+阶段 1（边界闸门）：input_schema 声明不在运行时强制（tool_core 只
+fail-closed 校验 output_schema），越界值原样落 state——goal_description
+必填闸门（MISSING_DESCRIPTION）本阶段落地并保留（描述有真实消费者：
+kickoff 消息/task.goal state/面板展示）。
 
-覆盖（普通 + 容器两条路径共用同一闸门）：
-1. priority 越界（0/11/-5）与非整数（"8"/5.5/True）→ INVALID_PRIORITY
-2. max_retries 越界（-1/999）与非整数 → INVALID_MAX_RETRIES；
-   0 = 显式无重试，合法放行
-3. goal_description 缺失/空/纯空白 → MISSING_DESCRIPTION
-   （派发给下级 Agent 的任务只有标题没有描述 = 下级无目标上下文）
-4. 缺 goal_title 但有 description → MISSING_GOAL（既有行为回归护栏）
+阶段 2（参数退役，同日）：priority/max_retries 经消费链审计确认执行层
+零消费者（无调度队列读优先级、三套真实重试机制均读各自插件配置）——
+两参数连 schema 带写路径整体删除，本文件的数值校验随之退役
+（ADR 2026-08-24-task-submit-param-diet）。
+
+现覆盖：
+1. 退役守卫：schema 不再声明两参数；显式传入按未知参数忽略（不落
+   普通派发 state、不落容器登记 state）
+2. goal_description 缺失/空/纯空白 → MISSING_DESCRIPTION
+3. 缺 goal_title 但有 description → MISSING_GOAL（既有行为回归护栏）
 """
 
 from __future__ import annotations
@@ -104,91 +107,38 @@ async def _run(mod: Any, inputs: dict) -> Any:
         mod._chat_sender = None
 
 
-# ── priority 边界 ──────────────────────────────────────────────
+# ── 参数退役守卫（2026-08-24 阶段 2）─────────────────────────
 
 
-class TestPriorityBounds:
-    async def test_out_of_range_rejected(self, mod: Any) -> None:
-        """越界（0/11/-5）拒绝——用户测试实测三项全部派发成功。"""
-        for bad in (0, 11, -5):
-            r, _ = await _run(mod, _base_inputs(priority=bad))
-            assert not r.success, f"priority={bad} 应被拒绝"
-            assert r.error_code == "INVALID_PRIORITY", r.error
-            assert "1-10" in r.error
+class TestRetiredParams:
+    async def test_schema_no_longer_declares_params(self, mod: Any) -> None:
+        """schema 不再声明 priority/max_retries（LLM 工具面不可见）。"""
+        definition = mod.TaskSubmitTool.get_tool_definition()
+        props = definition.input_schema["properties"]
+        assert "priority" not in props
+        assert "max_retries" not in props
 
-    async def test_non_integer_rejected(self, mod: Any) -> None:
-        """非整数（"8"/5.5/True）拒绝——bool 是 int 子类须显式排除。"""
-        for bad in ("8", 5.5, True):
-            r, _ = await _run(mod, _base_inputs(priority=bad))
-            assert not r.success, f"priority={bad!r} 应被拒绝"
-            assert r.error_code == "INVALID_PRIORITY", r.error
+    async def test_passed_params_dropped_not_written(self, mod: Any) -> None:
+        """显式传入（含越界值）按未知参数忽略：提交成功但不落派发 state——
+        退役参数既不报错也不产生数据。"""
+        for over in ({"priority": 8}, {"priority": 999}, {"max_retries": -1}, {"max_retries": 3}):
+            r, sender = await _run(mod, _base_inputs(**over))
+            assert r.success, f"{over} 应按未知参数忽略并正常派发: {r.error}"
+            state = sender.calls[0]["state"]
+            assert "task.priority" not in state, over
+            assert "task.max_retries" not in state, over
 
-    async def test_boundary_values_accepted(self, mod: Any) -> None:
-        """边界值 1/10 合法，显式传入落 state（对账语义不变）。"""
-        for good in (1, 10):
-            r, sender = await _run(mod, _base_inputs(priority=good))
-            assert r.success, r.error
-            assert sender.calls[0]["state"]["task.priority"] == good
-
-
-# ── max_retries 边界 ───────────────────────────────────────────
-
-
-class TestMaxRetriesBounds:
-    async def test_out_of_range_rejected(self, mod: Any) -> None:
-        """越界（-1/999/11）拒绝——无上限会放大失败任务的重试风暴。"""
-        for bad in (-1, 999, 11):
-            r, _ = await _run(mod, _base_inputs(max_retries=bad))
-            assert not r.success, f"max_retries={bad} 应被拒绝"
-            assert r.error_code == "INVALID_MAX_RETRIES", r.error
-            assert "0-10" in r.error
-
-    async def test_non_integer_rejected(self, mod: Any) -> None:
-        for bad in ("3", 1.5, False):
-            r, _ = await _run(mod, _base_inputs(max_retries=bad))
-            assert not r.success, f"max_retries={bad!r} 应被拒绝"
-            assert r.error_code == "INVALID_MAX_RETRIES", r.error
-
-    async def test_zero_means_no_retry_allowed(self, mod: Any) -> None:
-        """0 = 显式无重试，合法（schema min=0 语义），落 state 对账。"""
-        r, sender = await _run(mod, _base_inputs(max_retries=0))
-        assert r.success, r.error
-        assert sender.calls[0]["state"]["task.max_retries"] == 0
-
-    async def test_upper_boundary_accepted(self, mod: Any) -> None:
-        r, sender = await _run(mod, _base_inputs(max_retries=10))
-        assert r.success, r.error
-        assert sender.calls[0]["state"]["task.max_retries"] == 10
-
-
-# ── 容器路径同一闸门 ───────────────────────────────────────────
-
-
-class TestContainerPathBounds:
-    async def test_container_rejects_bad_priority_and_retries(self, mod: Any) -> None:
-        """容器登记分支同受边界闸门（校验在分支前的公共段）。"""
-        for over in ({"priority": 11}, {"max_retries": -1}):
-            r, _ = await _run(
-                mod, _base_inputs(task_scope="container", parent_agent_level=1, **over)
-            )
-            assert not r.success, f"容器任务 {over} 应被拒绝"
-            assert r.error_code in ("INVALID_PRIORITY", "INVALID_MAX_RETRIES"), r.error
-
-    async def test_container_accepts_valid_values(self, mod: Any) -> None:
-        """容器任务合法值照常登记（不因新闸门误伤正常流）。"""
+    async def test_container_registration_drops_params(self, mod: Any) -> None:
+        """容器登记分支同语义：传入不落 task.owned.<id>.* state。"""
         r, sender = await _run(
-            mod,
-            _base_inputs(
-                task_scope="container", parent_agent_level=1, priority=8, max_retries=2
-            ),
+            mod, _base_inputs(task_scope="container", parent_agent_level=1, priority=8, max_retries=2)
         )
         assert r.success, r.error
         reg = sender.calls[0]
-        assert any(k.endswith(".priority") and v == 8 for k, v in reg["state"].items())
-        assert any(k.endswith(".max_retries") and v == 2 for k, v in reg["state"].items())
+        assert not any(k.endswith(".priority") or k.endswith(".max_retries") for k in reg["state"])
 
 
-# ── goal 内容校验 ──────────────────────────────────────────────
+# ── goal 内容校验（阶段 1 落地，保留）─────────────────────────
 
 
 class TestGoalContentValidation:
@@ -231,9 +181,8 @@ class TestGoalContentValidation:
         assert r.error_code == "MISSING_GOAL", r.error
 
     async def test_valid_submission_still_dispatches(self, mod: Any) -> None:
-        """正常入参（标题+描述+合法数值）不受影响——完整链路回归。"""
-        r, sender = await _run(mod, _base_inputs(priority=5, max_retries=3))
+        """正常入参（标题+描述）不受影响——完整链路回归。"""
+        r, sender = await _run(mod, _base_inputs())
         assert r.success, r.error
         assert len(sender.calls) == 2  # 创建执行管道 + no_dispatch 登记
-        assert sender.calls[0]["state"]["task.priority"] == 5
-        assert sender.calls[0]["state"]["task.max_retries"] == 3
+        assert sender.calls[0]["state"]["task.goal"] == "喝水提醒"

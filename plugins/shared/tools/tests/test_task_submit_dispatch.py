@@ -222,9 +222,9 @@ class TestTaskPipelineDispatch:
         assert not r2.success
         assert r2.error_code == "DEPENDENCY_NOT_FOUND"
 
-    async def test_submit_explicit_priority_max_retries_in_state(self, mod: Any) -> None:
-        """提交参数对账：LLM 显式传 priority/max_retries → 派发 state 落账
-        （task.priority/task.max_retries），不静默丢弃。"""
+    async def test_submit_drops_retired_priority_max_retries(self, mod: Any) -> None:
+        """参数退役（2026-08-24）：priority/max_retries 执行层零消费者，
+        schema 与写路径整体删除——显式传入按未知参数忽略，不落派发 state。"""
         sender = _FakeSender()
         mod.set_chat_sender(sender)
         tool = _make_tool(mod)
@@ -234,12 +234,11 @@ class TestTaskPipelineDispatch:
             mod._chat_sender = None
         assert r.success, r.error
         p = sender.calls[0]
-        assert p["state"]["task.priority"] == 8
-        assert p["state"]["task.max_retries"] == 1
+        assert "task.priority" not in p["state"]
+        assert "task.max_retries" not in p["state"]
 
     async def test_submit_without_priority_max_retries_no_state_keys(self, mod: Any) -> None:
-        """提交参数对账：不传 priority/max_retries → state 不写、不补默认值
-        （默认值语义留在 schema 声明，state 不强行 fallback）。"""
+        """不传退役参数 → state 无两键（不写不补默认，语义不变）。"""
         sender = _FakeSender()
         mod.set_chat_sender(sender)
         tool = _make_tool(mod)
@@ -252,10 +251,8 @@ class TestTaskPipelineDispatch:
         assert "task.priority" not in p["state"]
         assert "task.max_retries" not in p["state"]
 
-    async def test_container_registration_records_priority_max_retries(self, mod: Any) -> None:
-        """容器分支登记 state 同语义：显式传 → task.owned.<id>.priority/max_retries
-        落账；不传 → 不写不补默认。"""
-        # 显式传：登记 state 含两键
+    async def test_container_registration_drops_retired_params(self, mod: Any) -> None:
+        """容器登记分支同语义：退役参数不落 task.owned.<id>.* state。"""
         sender = _FakeSender(result={"status": "recorded"})
         mod.set_chat_sender(sender)
         tool = _make_tool(mod)
@@ -268,23 +265,7 @@ class TestTaskPipelineDispatch:
         assert r.success, r.error
         reg = sender.calls[0]
         assert reg["no_dispatch"] is True
-        # 从登记 state 反推 project id（task.owned.<id>.title 键）
-        owned_key = next(k for k in reg["state"] if k.endswith(".title"))
-        project_id = owned_key.split(".")[2]
-        assert reg["state"][f"task.owned.{project_id}.priority"] == 8
-        assert reg["state"][f"task.owned.{project_id}.max_retries"] == 1
-
-        # 不传：登记 state 无两键
-        sender2 = _FakeSender(result={"status": "recorded"})
-        mod.set_chat_sender(sender2)
-        tool2 = _make_tool(mod)
-        try:
-            r2 = await tool2.execute(_base_inputs(task_scope="container"))
-        finally:
-            mod._chat_sender = None
-        assert r2.success, r2.error
-        reg2 = sender2.calls[0]
-        assert not any(k.endswith(".priority") or k.endswith(".max_retries") for k in reg2["state"])
+        assert not any(k.endswith(".priority") or k.endswith(".max_retries") for k in reg["state"])
 
     async def test_submit_without_sender_warns_not_lies(self, mod: Any) -> None:
         """派发器不可用 → 不得声称执行中，携带 warning。"""

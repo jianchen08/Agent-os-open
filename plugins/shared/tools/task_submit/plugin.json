@@ -67,20 +67,6 @@
                 "required": []
               }
             },
-            "priority": {
-              "type": "integer",
-              "minimum": 1,
-              "maximum": 10,
-              "default": 5,
-              "description": "任务优先级，1-10，数值越大优先级越高"
-            },
-            "max_retries": {
-              "type": "integer",
-              "minimum": 0,
-              "maximum": 10,
-              "default": 3,
-              "description": "任务失败时的最大重试次数（0-10，0 表示不重试）"
-            },
             "task_scope": {
               "type": "string",
               "enum": [
