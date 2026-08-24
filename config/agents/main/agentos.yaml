@@ -143,7 +143,7 @@ static_vars:
     content: '## 可扩展工具（需 resource_search 加载后使用）
 
 
-      file_write, bash_execute, enhanced_search, universal_search, task_evaluate, yaml_validate, fetch, playwright_test, design_review, resource_merge
+      file_write, bash_execute, enhanced_search, universal_search, task_evaluate, yaml_validate, design_review, resource_merge
 
       '
   - '{{path:config/users/default/profile.md}}'

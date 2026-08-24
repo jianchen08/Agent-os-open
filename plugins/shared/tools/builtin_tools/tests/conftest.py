@@ -27,12 +27,3 @@ _TOOLS_ROOT = os.path.dirname(
 )
 if os.path.isdir(_TOOLS_ROOT) and _TOOLS_ROOT not in sys.path:
     sys.path.insert(0, _TOOLS_ROOT)
-
-# bash 插件目录（C17，与 server.py 同步注入）：bash_tool 从 bash.tool 导入
-# DANGEROUS_PATTERNS（单一事实源），其平铺依赖（bash_types 等）需本目录在
-# sys.path。**append 而非 insert(0)**：bash/ 内旧版 workspace_aware.py
-# （无 check_path_allowed）不得遮蔽共享层根目录的 canonical 副本，
-# 否则同进程后续加载的 download 等插件会拿到错误 Mixin（pytest 合并运行）。
-_BASH_DIR = os.path.join(_TOOLS_ROOT, "bash")
-if os.path.isdir(_BASH_DIR) and _BASH_DIR not in sys.path:
-    sys.path.append(_BASH_DIR)

@@ -160,14 +160,14 @@ tool_ids:
 - list_directory
 - enhanced_search
 - bash_execute
-- fetch
+- web_operate
 - memory
 - human_interaction
 - resource_search
-- lsp_definition
-- lsp_references
-- lsp_diagnostics
-- file_jump
+- lsp.definition
+- lsp.references
+- lsp.diagnostics
+- lsp.jump_to_file
 hard_constraints:
 - 必须先执行需求结构化，再进入执行流程
 - 门禁通过 task_submit 附带评估指标实现，禁止自行判定门禁结果

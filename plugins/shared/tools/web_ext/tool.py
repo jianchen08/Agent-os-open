@@ -116,7 +116,7 @@ class WebTool(BuiltinTool):
     def get_tool_definition() -> Tool:
         """获取工具定义"""
         return Tool(
-            name="fetch",
+            name="web_operate",
             description="Web 操作工具：执行 HTTP 请求和网页抓取。支持 GET/POST 请求和网页内容抓取。使用场景：调用外部 API；抓取网页内容；发送 HTTP 请求获取远程数据。限制：请求默认 30 秒超时；响应大小限制为 10MB；某些域名可能被安全策略阻止。",
             input_schema={
                 "type": "object",

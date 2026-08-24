@@ -188,66 +188,6 @@
         }
       },
       {
-        "name": "bash_execute",
-        "description": "执行 Shell 命令",
-        "render": {
-          "card": "terminal"
-        },
-        "input_schema": {
-          "type": "object",
-          "properties": {
-            "command": {
-              "type": "string",
-              "description": "要执行的 Shell 命令"
-            },
-            "timeout": {
-              "type": "integer",
-              "description": "超时时间（秒），默认 30",
-              "default": 30
-            },
-            "working_dir": {
-              "type": "string",
-              "description": "工作目录（可选）"
-            },
-            "action": {
-              "type": "string",
-              "enum": [
-                "execute",
-                "continue",
-                "terminate",
-                "input",
-                "read_log"
-              ],
-              "description": "操作类型",
-              "default": "execute"
-            }
-          },
-          "required": [
-            "command"
-          ]
-        },
-        "output_schema": {
-          "type": "object",
-          "properties": {
-            "stdout": {
-              "type": "string"
-            },
-            "stderr": {
-              "type": "string"
-            },
-            "exit_code": {
-              "type": "integer"
-            },
-            "pid": {
-              "type": [
-                "integer",
-                "null"
-              ]
-            }
-          }
-        }
-      },
-      {
         "name": "enhanced_search",
         "description": "代码/文件搜索",
         "render": {
@@ -532,57 +472,6 @@
             }
           },
           "required": []
-        }
-      },
-      {
-        "name": "web_operate",
-        "description": "Web 操作",
-        "render": {
-          "card": "web"
-        },
-        "input_schema": {
-          "type": "object",
-          "properties": {
-            "action": {
-              "type": "string",
-              "enum": [
-                "get",
-                "post",
-                "fetch"
-              ],
-              "description": "操作类型：get=HTTP GET，post=HTTP POST，fetch=网页抓取"
-            },
-            "url": {
-              "type": "string",
-              "description": "目标 URL"
-            },
-            "headers": {
-              "type": "object",
-              "description": "请求头（可选）"
-            },
-            "data": {
-              "type": "object",
-              "description": "POST 请求体（可选）"
-            },
-            "params": {
-              "type": "object",
-              "description": "URL 查询参数（可选）"
-            },
-            "timeout": {
-              "type": "integer",
-              "description": "超时时间（秒），默认 30",
-              "default": 30
-            },
-            "extract_text": {
-              "type": "boolean",
-              "description": "fetch 模式是否提取纯文本",
-              "default": true
-            }
-          },
-          "required": [
-            "action",
-            "url"
-          ]
         }
       }
     ],

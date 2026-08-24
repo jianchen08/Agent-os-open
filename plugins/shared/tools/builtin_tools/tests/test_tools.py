@@ -1,5 +1,5 @@
 # @feature: FP-0.2.二 内部模块 manifest | @vision: V3 可嵌入 | @ci: python-coverage
-"""集成测试——覆盖 10 个工具的核心场景。
+"""集成测试——覆盖 8 个内置工具的核心场景（bash_execute/web_operate 双轨已收敛到 bash/ 与 web_ext/ 插件）。
 
 通过直接调用工具函数验证行为等价性（AC-08-3/4）。
 """
@@ -11,7 +11,6 @@ from pathlib import Path
 
 import pytest
 
-from agentos_builtin_tools.bash_tool import bash_execute
 from agentos_builtin_tools.fs_tools import (
     copy_file,
     create_directory,
@@ -23,7 +22,6 @@ from agentos_builtin_tools.fs_tools import (
 )
 from agentos_builtin_tools.search_tool import enhanced_search
 from agentos_builtin_tools.server import TOOL_REGISTRY
-from agentos_builtin_tools.web_tool import WEB_OPERATE_SCHEMA, web_operate
 
 pytestmark = pytest.mark.unit
 
@@ -34,11 +32,11 @@ pytestmark = pytest.mark.unit
 # ═════════════════════════════════════════════════════════════
 
 class TestToolRegistration:
-    def test_all_10_tools_registered(self) -> None:
+    def test_all_8_tools_registered(self) -> None:
         expected = {
-            "file_read", "file_write", "bash_execute", "enhanced_search",
+            "file_read", "file_write", "enhanced_search",
             "list_directory", "create_directory", "copy_file", "move_file",
-            "delete_file", "web_operate",
+            "delete_file",
         }
         assert set(TOOL_REGISTRY.keys()) == expected
 
@@ -65,10 +63,6 @@ class TestSchemaConsistency:
         schema = TOOL_REGISTRY["file_write"][0]
         assert "path" in schema.get("required", [])
 
-    def test_bash_execute_schema_has_required_command(self) -> None:
-        schema = TOOL_REGISTRY["bash_execute"][0]
-        assert "command" in schema.get("required", [])
-
     def test_search_schema_has_required_query(self) -> None:
         schema = TOOL_REGISTRY["enhanced_search"][0]
         assert "query" in schema.get("required", [])
@@ -76,11 +70,6 @@ class TestSchemaConsistency:
     def test_list_directory_schema_has_required_path(self) -> None:
         schema = TOOL_REGISTRY["list_directory"][0]
         assert "path" in schema.get("required", [])
-
-    def test_web_operate_schema_has_required_fields(self) -> None:
-        schema = TOOL_REGISTRY["web_operate"][0]
-        assert "action" in schema.get("required", [])
-        assert "url" in schema.get("required", [])
 
 
 # ═════════════════════════════════════════════════════════════
@@ -165,66 +154,6 @@ class TestFileWrite:
         result = await file_write(str(f), action="delete_lines", start_line=2, end_line=2, create_backup=False)
         assert result.success
         assert "L2" not in f.read_text()
-
-
-class TestBashExecute:
-    @pytest.mark.asyncio
-    async def test_echo(self) -> None:
-        result = await bash_execute("echo hello_world")
-        assert result.success
-        assert "hello_world" in result.output["stdout"]
-
-    @pytest.mark.asyncio
-    async def test_dangerous_command_blocked(self) -> None:
-        result = await bash_execute("rm -rf /")
-        assert not result.success
-        assert "dangerous" in result.error.lower()
-
-    @pytest.mark.asyncio
-    async def test_dangerous_patterns_case_insensitive(self) -> None:
-        """黑名单匹配大小写不敏感（与 SecurityChecker.check 的 IGNORECASE 语义对齐）。"""
-        result = await bash_execute("MKFS /dev/sda1")
-        assert not result.success
-        assert "dangerous" in result.error.lower()
-
-    @pytest.mark.asyncio
-    async def test_pipe_to_bash_not_hard_blocked(self) -> None:
-        """C17 语义统一：| bash 属 CAUTION（降级审批）而非硬拦——不返回 dangerous。
-
-        builtin 路径无审批管道，故此处放行执行（执行结果成败与安全拦截无关）。
-        """
-        result = await bash_execute("echo hi | bash")
-        assert "dangerous" not in (result.error or "").lower()
-
-    def test_dangerous_patterns_single_source(self) -> None:
-        """黑名单单一事实源：本包与共享层 bash.tool 引用同一份 DANGEROUS_PATTERNS。"""
-        from bash.tool import CAUTION_PATTERNS
-        from bash.tool import DANGEROUS_PATTERNS as CANONICAL
-
-        from agentos_builtin_tools import bash_tool
-
-        assert bash_tool.DANGEROUS_PATTERNS is CANONICAL
-        # 语义统一锚点：管道到 shell（| bash 等）不在硬拦清单，属共享层 CAUTION
-        assert r"| bash" in CAUTION_PATTERNS
-        assert not any(p.startswith(r"\|\s*") for p in CANONICAL)
-
-    @pytest.mark.asyncio
-    async def test_exit_code(self) -> None:
-        result = await bash_execute("exit 42")
-        assert not result.success
-        assert result.output["exit_code"] == 42
-
-    @pytest.mark.asyncio
-    async def test_stderr_capture(self) -> None:
-        result = await bash_execute("echo err >&2")
-        assert result.success
-        assert "err" in result.output["stderr"]
-
-    @pytest.mark.asyncio
-    async def test_timeout(self) -> None:
-        result = await bash_execute("sleep 10", timeout=1)
-        assert not result.success
-        assert "timed out" in result.error.lower()
 
 
 class TestListDirectory:
@@ -447,20 +376,6 @@ class TestEnhancedSearch:
         assert "L1" not in body
 
 
-class TestWebOperate:
-    @pytest.mark.asyncio
-    async def test_web_schema_valid(self) -> None:
-        assert WEB_OPERATE_SCHEMA["properties"]["action"]["enum"] == ["get", "post", "fetch"]
-        assert "url" in WEB_OPERATE_SCHEMA["properties"]
-
-    @pytest.mark.asyncio
-    async def test_web_invalid_action(self) -> None:
-        # 无效 action 底层会返回 failure
-        result = await web_operate(action="invalid", url="http://localhost:1")
-        # aiohttp 可能尝试连接但失败，或返回 unknown action
-        assert not result.success
-
-
 # ═════════════════════════════════════════════════════════════
 # AC-08-4: MCP 服务端封装验证
 # ═════════════════════════════════════════════════════════════
@@ -470,7 +385,7 @@ class TestMcpServerWrapper:
         from agentos_builtin_tools.server import create_plugin
 
         plugin = create_plugin()
-        assert len(plugin._tools) == 10
+        assert len(plugin._tools) == 8
 
     def test_plugin_tool_names(self) -> None:
         from agentos_builtin_tools.server import create_plugin
@@ -478,9 +393,9 @@ class TestMcpServerWrapper:
         plugin = create_plugin()
         names = set(plugin._tools.keys())
         expected = {
-            "file_read", "file_write", "bash_execute", "enhanced_search",
+            "file_read", "file_write", "enhanced_search",
             "list_directory", "create_directory", "copy_file", "move_file",
-            "delete_file", "web_operate",
+            "delete_file",
         }
         assert names == expected
 
@@ -500,7 +415,7 @@ class TestMcpServerWrapper:
 
         # 模拟 tools/list
         result = await server._on_list_tools(None, None)
-        assert len(result.tools) == 10
+        assert len(result.tools) == 8
 
         # 模拟 tools/call (file_read on temp file)
         f = tmp_path / "mcp_test.txt"

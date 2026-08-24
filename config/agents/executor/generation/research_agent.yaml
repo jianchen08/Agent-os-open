@@ -47,7 +47,7 @@ dynamic_vars:
   - '{{path:config/rules/execution_review_rules.md}}'
 tool_ids:
 - universal_search
-- fetch
+- web_operate
 - memory
 - task_evaluate
 - file_read

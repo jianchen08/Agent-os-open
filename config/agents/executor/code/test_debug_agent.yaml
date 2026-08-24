@@ -80,10 +80,10 @@ system_prompt: |-
   - 单元测试：单个函数/方法，隔离外部依赖
   - 集成测试：多组件协作，验证模块间交互
   - E2E 测试：完整业务流程，模拟真实用户操作
-    - **前端 E2E 测试**：使用 playwright_test 工具，启动浏览器验证页面渲染、交互响应、console 错误
-    - playwright_test 操作链：browser_launch → navigate → interact(click/type/select) → capture_console → screenshot_compare → close
+    - **前端 E2E 测试**：使用 bash_execute 运行 playwright CLI（npx playwright test）验证页面渲染、交互响应、console 错误
+    - playwright CLI 操作链：npx playwright test 脚本（page.goto → click/type → page.on('console') → toHaveScreenshot）
     - 后端 E2E 测试：使用 bash_execute 运行测试脚本
-  - **API 端点测试**：使用 fetch 工具逐端点验证
+  - **API 端点测试**：使用 web_operate 工具逐端点验证
     - 每个端点必须覆盖：2xx 成功响应、4xx 客户端错误（缺失参数/无效输入/权限不足）、5xx 服务端错误（如可模拟）
     - 验证响应 Schema（字段名、类型、必填项）
     - 验证错误响应包含清晰的错误码和消息
@@ -161,12 +161,12 @@ tool_ids:
 - list_directory
 - enhanced_search
 - bash_execute
-- fetch
+- web_operate
 - task_evaluate
-- lsp_definition
-- lsp_references
-- lsp_diagnostics
-- file_jump
+- lsp.definition
+- lsp.references
+- lsp.diagnostics
+- lsp.jump_to_file
 hard_constraints:
 - 任务执行完成后必须调用 task_evaluate 工具进行评估
 - 评估通过才能结束任务

@@ -1,5 +1,0 @@
-Hello, this is a test file created at 2026-08-16 13:28:13.
-Random number: 6294
-这是一行中文测试内容，验证多语言写入。
-The quick brown fox jumps over the lazy dog.
-Task ID: 5c8f305978dd — execution link verification complete.

@@ -156,7 +156,7 @@ tool_ids:
 - create_directory
 - list_directory
 - bash_execute
-- fetch
+- web_operate
 - enhanced_search
 - memory
 - task_evaluate

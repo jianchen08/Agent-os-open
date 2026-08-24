@@ -65,7 +65,7 @@ class TestWebExtMigration:
 
         tool = mod.WebTool.get_tool_definition()
         assert isinstance(tool, SdkTool)
-        assert tool.name == "fetch"
+        assert tool.name == "web_operate"
 
     def test_web_tool_constructs(self, mod):
         assert isinstance(mod.WebTool(), mod.BuiltinTool)

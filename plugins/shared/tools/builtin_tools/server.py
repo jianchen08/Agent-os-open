@@ -22,15 +22,6 @@ _TOOLS_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if _TOOLS_ROOT not in sys.path:
     sys.path.insert(0, _TOOLS_ROOT)
 
-# bash 插件目录（C17）：bash_tool.py 以命名空间包导入 bash.tool 的
-# DANGEROUS_PATTERNS（单一事实源）；bash.tool 的平铺依赖（bash_types 等）
-# 需要本目录在 sys.path。**append 而非 insert(0)**：bash/ 内有旧版
-# workspace_aware.py（无 check_path_allowed），若置于 tools 共享层根目录之前，
-# 会遮蔽 canonical 副本并污染同进程其它插件的导入。
-_BASH_DIR = os.path.join(_TOOLS_ROOT, "bash")
-if os.path.isdir(_BASH_DIR) and _BASH_DIR not in sys.path:
-    sys.path.append(_BASH_DIR)
-
 from agentos_builtin_tools.server import run  # noqa: E402
 
 if __name__ == "__main__":

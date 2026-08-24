@@ -138,7 +138,7 @@ tool_ids:
 - create_directory
 - list_directory
 - bash_execute
-- fetch
+- web_operate
 - task_evaluate
 hard_constraints:
 - 必须检查所有必需资源

@@ -113,10 +113,10 @@ tool_ids:
 - bash_execute
 - task_evaluate
 - code-self-review
-- lsp_definition
-- lsp_references
-- lsp_diagnostics
-- file_jump
+- lsp.definition
+- lsp.references
+- lsp.diagnostics
+- lsp.jump_to_file
 hard_constraints:
 - 任务执行完成后必须调用 task_evaluate 工具进行评估
 - 必须输出规定的产出物
