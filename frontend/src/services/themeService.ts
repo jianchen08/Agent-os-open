@@ -7,7 +7,7 @@
  */
 
 import { presetThemes } from '@/config/themes'
-import { ThemeStorageService, mergeTheme as mergeUserTheme } from '@/services/themeStorage'
+import { ThemeStorageService } from '@/services/themeStorage'
 import type { PluginTheme, ThemeConfig, ThemeInfo } from '@/types/theme'
 
 /**
@@ -693,30 +693,6 @@ function generateTextureCSS(texture: { type?: string; color?: string; size?: str
     default:
       return 'none'
   }
-}
-
-/**
- * 清除主题样式
- *
- * 移除所有主题相关的 CSS 变量和类名
- */
-export function clearTheme(): void {
-  const root = document.documentElement
-  root.classList.remove('light', 'dark')
-  root.style.cssText = ''
-}
-
-/**
- * 主题合并工具
- *
- * 合并基础主题和用户自定义配置
- *
- * @param base - 基础主题配置
- * @param custom - 用户自定义配置
- * @returns 合并后的主题配置
- */
-export function mergeTheme(base: ThemeConfig, custom: Partial<ThemeConfig>): ThemeConfig {
-  return mergeUserTheme(base, custom)
 }
 
 /**

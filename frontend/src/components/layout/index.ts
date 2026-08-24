@@ -16,7 +16,5 @@ export { FullscreenOverlay } from './FullscreenOverlay'
 
 // 适配的旧布局组件
 export { Sidebar } from './Sidebar'
-export { SplitPane } from './SplitPane'
-export type { SplitPaneProps } from './SplitPane'
 export { ThemeButton } from './ThemeButton'
 export { ThemePanel } from './ThemePanel'

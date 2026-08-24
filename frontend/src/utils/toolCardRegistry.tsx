@@ -7,11 +7,8 @@
  * @module toolCardRegistry
  */
 
-import type { ActivityAction, ActivityData, ActivityDetailBlock } from '@/types/activity'
-import type { MessageToolCall } from '@/types/models'
-import type { ReactNode } from 'react'
-import { interpretChatCard } from './chatCardInterpreter'
-import { getChatCardDeclaration } from './chatCardInterpreter'
+import { resolveChatCardIcon } from './chatCardIconRegistry'
+import { interpretChatCard, getChatCardDeclaration, type ToolCallContext } from './chatCardInterpreter'
 import {
   applyDataDrivenIntent,
   applyRenderIntent,
@@ -20,40 +17,16 @@ import {
   getRenderIntent,
   inferRenderIntent,
 } from './dshRenderIntent'
-import { resolveChatCardIcon } from './chatCardIconRegistry'
 import { buildOutputSchemaView, getOutputSchema } from './outputSchemaView'
-import type { ToolCallContext } from './chatCardInterpreter'
+import type { ActivityData, ActivityDetailBlock } from '@/types/activity'
+import type { MessageToolCall } from '@/types/models'
 
 /**
- * 工具卡片渲染配置
+ * 注入文件打开能力（filePath + onOpenFile）。
+ *
+ * onOpenFile 第二参为 record 上的 containerTaskId；调用方可通过 options.onOpenFile
+ * 接管并改用当前 Tab 的 taskId（优先于 record 值）。
  */
-export interface ToolCardConfig {
-  /** 工具名称 */
-  name: string
-  /** 自定义图标 */
-  icon?: ReactNode
-  /** 自定义标题（传入 toolCall 参数，返回显示标题） */
-  formatTitle?: (toolCall: MessageToolCall) => string
-  /** 构建详情区块（传入 toolCall，返回详情区块列表） */
-  buildDetails?: (toolCall: MessageToolCall) => ActivityDetailBlock[]
-  /** 构建操作按钮（传入 toolCall，返回操作按钮列表） */
-  buildActions?: (toolCall: MessageToolCall) => ActivityAction[]
-  /** 构建头部增删行数徽标（如 file_write 的 +X -Y），返回 undefined 则不展示 */
-  buildDiffStat?: (toolCall: MessageToolCall) => { added: number; removed: number } | undefined
-  /** 自定义样式类名 */
-  className?: string
-  /** 运行状态的自定义颜色（CSS 色值），用于区分阻塞等待用户的工具 */
-  runningColor?: string
-  /** 是否关联文件（为 true 时自动从参数中提取文件路径） */
-  hasFilePath?: boolean
-}
-
-/**
- * 注册表：工具名 → 渲染配置
- */
-const registry = new Map<string, ToolCardConfig>()
-
-/** 全局文件打开回调（支持 containerTaskId） */
 let globalOnOpenFile: ((filePath: string, containerTaskId?: string) => void | Promise<void>) | null = null
 
 /**
@@ -98,20 +71,6 @@ export function getGlobalImagePreviewCallback(): (src: string) => void {
       window.open(src, '_blank', 'noopener,noreferrer')
     })
   )
-}
-
-/**
- * 注册工具卡片配置
- */
-export function registerToolCard(config: ToolCardConfig): void {
-  registry.set(config.name, config)
-}
-
-/**
- * 获取工具卡片配置
- */
-export function getToolCardConfig(toolName: string): ToolCardConfig | undefined {
-  return registry.get(toolName)
 }
 
 /**
@@ -253,61 +212,18 @@ export function enhanceActivityWithToolConfig(
 
   // 数据路由：无任何插件声明（render/chat_card）时按数据形状自动匹配渲染组件
   // （diff 形状 → diff 组件、stdout+exit_code → terminal 组件等）。插件显式声明
-  // 永远优先；未命中落下方手写 registry / L0 通用数据渲染。
+  // 永远优先；未命中落 L0 通用数据渲染。
   const dataDriven = applyDataDrivenIntent(activity, toolCall)
   if (dataDriven) {
     return applyCardMeta(dataDriven, activity, toolCall, options)
   }
 
-  const config = getToolCardConfig(activity.toolName)
-  if (!config) {
-    // L0：无声明时的自动推断渲染——标题人性化 + 参数/结果按数据类型推断成内容块
-    return {
-      ...activity,
-      title: humanizeToolName(activity.toolName),
-      details: inferDefaultDetails(toolCall),
-    }
+  // L0：无声明时的自动推断渲染——标题人性化 + 参数/结果按数据类型推断成内容块
+  return {
+    ...activity,
+    title: humanizeToolName(activity.toolName),
+    details: inferDefaultDetails(toolCall),
   }
-
-  const enhanced = { ...activity }
-
-  if (config.formatTitle) {
-    enhanced.title = config.formatTitle(toolCall)
-  }
-
-  if (config.buildDetails) {
-    enhanced.details = config.buildDetails(toolCall)
-  }
-
-  if (config.buildDiffStat) {
-    enhanced.diffStat = config.buildDiffStat(toolCall)
-  }
-
-  if (config.buildActions) {
-    enhanced.actions = config.buildActions(toolCall)
-  }
-
-  if (config.icon) {
-    enhanced.customIcon = config.icon
-  }
-
-  if (config.className) {
-    enhanced.customClassName = config.className
-  }
-
-  if (config.runningColor) {
-    enhanced.customColor = config.runningColor
-  }
-
-  // 自动提取文件路径并注入打开文件回调
-  if (config.hasFilePath) {
-    const filePath = extractFilePath(toolCall)
-    if (filePath) {
-      Object.assign(enhanced, injectFileOpen(enhanced, filePath, toolCall, options))
-    }
-  }
-
-  return enhanced
 }
 
 /** ========== L0 自动推断（无声明配置时，让默认卡片也"按数据渲染"）========== */
@@ -490,14 +406,6 @@ function inferDefaultDetails(toolCall: MessageToolCall): ActivityDetailBlock[] {
   return details
 }
 
-function extractFilePath(toolCall: MessageToolCall): string {
-  const args = toolCall.tool_args as Record<string, unknown> | null
-  if (!args) return ''
-  // 不同工具使用不同参数名（read_file 用 file_path，其他用 path），
-  // 此处兼容多种工具定义，非 API 格式兼容
-  return (args.file_path as string) || (args.path as string) || ''
-}
-
 /**
  * 安全解析可能是 Python dict 字符串的结果
  *
@@ -553,15 +461,3 @@ export function safeParseResult(result: unknown): Record<string, unknown> | null
 
   return null
 }
-
-/**
- * human_interaction 工具卡片配置
- *
- * 运行状态使用主色（primary），视觉上区分阻塞等待用户的交互工具与普通执行工具
- */
-registerToolCard({
-  name: 'human_interaction',
-  runningColor: 'hsl(var(--primary))',
-})
-
-export default registry

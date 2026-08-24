@@ -4,7 +4,6 @@
 import { beforeEach, describe, expect, it } from 'vitest'
 import {
   buildOutputSchemaView,
-  clearOutputSchemas,
   getOutputSchema,
   loadOutputSchemas,
   outputSchemaToFormFields,
@@ -31,7 +30,6 @@ const bashSchema = {
 }
 
 beforeEach(() => {
-  clearOutputSchemas()
   clearChatCardDeclarations()
 })
 

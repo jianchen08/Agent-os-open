@@ -94,33 +94,3 @@ export interface ToolListResponse {
   /** 每页数量 */
   page_size: number
 }
-
-/** 工具详情（包含完整描述） */
-export interface ToolDetail extends Tool {
-  /** 完整描述（包含使用边界） */
-  full_description?: string
-  /** 使用统计 */
-  usage_stats?: {
-    success_count: number
-    failure_count: number
-    last_used_at?: string
-  }
-}
-
-/** 工具表单数据 */
-export interface ToolFormData {
-  name: string
-  description: string
-  category?: ToolCategory
-  when_to_use?: string[]
-  when_not_to_use?: string[]
-  caveats?: string[]
-  input_schema?: Record<string, unknown>
-}
-
-/** 代码条目 */
-export interface CodeEntry {
-  path: string
-  content: string
-  language: string
-}

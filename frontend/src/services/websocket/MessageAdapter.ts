@@ -33,16 +33,6 @@ export interface AdaptedWidgetEvent {
 // 提供专用 adaptWidgetEvent 显式提取 widget_id / event / payload / sequence。
 
 /**
- * 判断消息是否为 widget_event 族。
- *
- * @param msg - 原始消息
- * @returns 是否为 widget_event
- */
-export function isWidgetEvent(msg: Record<string, unknown>): boolean {
-  return msg?.type === 'widget_event'
-}
-
-/**
  * 适配 widget_event 消息，提取 widget_id / event / payload / sequence。
  *
  * @param raw - 原始 WebSocket 消息

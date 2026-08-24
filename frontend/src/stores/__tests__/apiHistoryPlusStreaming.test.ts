@@ -30,7 +30,6 @@ vi.mock('@/utils/activityConverter', () => ({
 }))
 vi.mock('@/utils/toolCardRegistry', () => ({
   enhanceActivityWithToolConfig: (b: any) => b,
-  getToolCardConfig: () => null,
 }))
 vi.mock('@/utils/logger', () => ({
   loggers: {

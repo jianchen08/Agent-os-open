@@ -31,8 +31,6 @@ export const STORAGE_KEYS = {
   SIDEBAR_COLLAPSED: 'sidebar_collapsed',
   /** 最后活跃会话ID */
   LAST_ACTIVE_SESSION: 'last_active_session',
-  /** Agent 偏好设置 - Requirements: 13.2, 13.4, 13.5 */
-  AGENT_PREFERENCES: 'agent_preferences',
   /** 任务状态面板折叠状态 */
   TASK_PANEL_COLLAPSED: 'task_panel_collapsed',
   /** 工作区面板折叠状态 */
@@ -49,17 +47,3 @@ export const STORAGE_KEYS = {
  * 存储键名类型
  */
 export type StorageKey = (typeof STORAGE_KEYS)[keyof typeof STORAGE_KEYS]
-
-/**
- * Agent 偏好设置接口
- * Requirements: 13.2, 13.4, 13.5
- */
-export interface AgentPreferences {
-  /** 默认 Agent ID */
-  defaultAgentId: string | null
-  /** 常用 Agent ID 列表（最多 10 个） */
-  favoriteAgentIds: string[]
-}
-
-/** 常用 Agent 最大数量 - Requirements: 13.5 */
-export const MAX_FAVORITE_AGENTS = 10

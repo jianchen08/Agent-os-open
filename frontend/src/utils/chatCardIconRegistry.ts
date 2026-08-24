@@ -69,8 +69,3 @@ export function resolveChatCardIcon(name?: string): LucideIcon {
   if (!name) return DEFAULT_ICON
   return ICON_MAP[name.toLowerCase()] ?? DEFAULT_ICON
 }
-
-/** 注册自定义图标别名（插件运行期扩展用，当前无消费者，预留） */
-export function registerChatCardIcon(name: string, icon: LucideIcon): void {
-  ICON_MAP[name.toLowerCase()] = icon
-}

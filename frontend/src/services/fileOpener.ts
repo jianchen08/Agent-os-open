@@ -1,22 +1,12 @@
 /** 文件打开服务 提供统一的文件打开入口，根据文件后缀从后端配置解析编辑器类型， */
 
-import { apiClient } from './api/client'
 import { WORKSPACE_SERVICE_ENDPOINTS } from '@/services/api/endpoints.generated'
 import { registerFileEditor } from '@/stores/fileEditorRegistry'
 import { useLayoutModeStore } from '@/stores/layoutModeStore'
+import { apiClient } from './api/client'
 
 /** 编辑器类型 */
 export type EditorType = 'ide' | 'builtin' | 'external'
-
-/** 内置编辑器打开处理器 */
-let builtinOpenHandler: ((filePath: string, containerTaskId?: string) => Promise<void>) | null = null
-
-/** 设置内置编辑器打开处理器 */
-export function setBuiltinOpenHandler(
-  handler: (filePath: string, containerTaskId?: string) => Promise<void>,
-): void {
-  builtinOpenHandler = handler
-}
 
 /** 打开文件的统一入口 根据文件后缀从后端配置解析编辑器类型，然后路由到对应的打开方式： */
 export async function openFile(
@@ -28,15 +18,11 @@ export async function openFile(
   try {
     // 404:
     const containerTaskId = options?.containerTaskId
-    if (builtinOpenHandler) {
-      await builtinOpenHandler(filePath, containerTaskId)
-    }
+    await defaultBuiltinOpenHandler(filePath, containerTaskId)
     return { success: true, editor: 'builtin' }
   } catch {
     // 解析失败，降级到内置编辑器
-    if (builtinOpenHandler) {
-      await builtinOpenHandler(filePath, options?.containerTaskId)
-    }
+    await defaultBuiltinOpenHandler(filePath, options?.containerTaskId)
     return { success: true, editor: 'builtin', message: '解析失败，已使用内置编辑器' }
   }
 }
@@ -94,6 +80,3 @@ async function defaultBuiltinOpenHandler(
     console.error('[fileOpener] 打开文件失败:', error)
   }
 }
-
-// 初始化时设置默认处理器
-setBuiltinOpenHandler(defaultBuiltinOpenHandler)

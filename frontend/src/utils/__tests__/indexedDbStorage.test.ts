@@ -6,7 +6,7 @@
  *
  * 注意：indexedDbStorage 是 createJSONStorage 返回的 PersistStorage，
  * 其 setItem/getItem/removeItem 即 zustand 适配器接口（name, value 两参）。
- * setItem 走节流（trailing 合并），需用 flushIndexedDbPersist 强制落盘或推进定时器后读取。
+ * setItem 走节流（trailing 合并），需推进定时器（PERSIST_THROTTLE_MS=1000）后读取。
  */
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import fakeIndexedDB from 'fake-indexeddb'
@@ -16,13 +16,11 @@ import fakeIndexedDB from 'fake-indexeddb'
 
 describe('indexedDbStorage', () => {
   let indexedDbStorage: NonNullable<ReturnType<typeof import('@/utils/indexedDbStorage')['indexedDbStorage']>>
-  let flushIndexedDbPersist: typeof import('@/utils/indexedDbStorage')['flushIndexedDbPersist']
 
   beforeEach(async () => {
     vi.resetModules()
     const mod = await import('@/utils/indexedDbStorage')
     indexedDbStorage = mod.indexedDbStorage!
-    flushIndexedDbPersist = mod.flushIndexedDbPersist
   })
 
   afterEach(() => {
@@ -31,13 +29,11 @@ describe('indexedDbStorage', () => {
 
   it('setItem 后 getItem 应返回相同值（基础读写）', async () => {
     indexedDbStorage.setItem('test-key', '{"a":1}')
-    // setItem 经节流，强制落盘
-    flushIndexedDbPersist()
-    // flush 内部 void write(...)（异步 safeSet），等微任务 + IndexedDB 写入完成
+    // setItem 经节流，等待节流窗口（1000ms）+ IndexedDB 写入完成
     await vi.waitFor(async () => {
       const val = await indexedDbStorage.getItem('test-key')
       expect(val).toBe('{"a":1}')
-    })
+    }, { timeout: 3000 })
   })
 
   it('getItem 读不存在的 key 应返回 null', async () => {
@@ -47,10 +43,9 @@ describe('indexedDbStorage', () => {
 
   it('removeItem 后再读应返回 null', async () => {
     indexedDbStorage.setItem('to-remove', 'data')
-    flushIndexedDbPersist()
     await vi.waitFor(async () => {
       expect(await indexedDbStorage.getItem('to-remove')).toBe('data')
-    })
+    }, { timeout: 3000 })
 
     indexedDbStorage.removeItem('to-remove')
     // removeItem 内部 void safeDel（异步），等待完成
@@ -100,9 +95,8 @@ describe('indexedDbStorage', () => {
 
     // setItem 不应抛（走内存降级）
     expect(() => degraded.setItem('mem-key', 'mem-val')).not.toThrow()
-    // 节流后内存降级写入（内存模式 safeSet 同步完成）
-    mod.flushIndexedDbPersist()
-    await new Promise((r) => setTimeout(r, 0))
+    // 内存降级写入经节流，等待节流窗口落盘
+    await new Promise((r) => setTimeout(r, 1200))
 
     const val = await degraded.getItem('mem-key')
     expect(val).toBe('mem-val')

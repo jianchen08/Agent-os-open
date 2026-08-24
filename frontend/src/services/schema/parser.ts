@@ -1,40 +1,10 @@
 /** UI Schema 解析器 解析后端模块的 UI Schema，输出类型安全的解析结果 */
 
+import { WORKSPACE_SERVICE_ENDPOINTS } from '@/services/api/endpoints.generated'
 import type {
-  ModuleUISchema,
-  ParsedSchema,
   DataSourceRef,
   ResolvedDataSource,
 } from '@/types/schema'
-import { WORKSPACE_SERVICE_ENDPOINTS } from '@/services/api/endpoints.generated'
-
-/** 解析模块 UI Schema */
-export function parseSchema(schema: ModuleUISchema): ParsedSchema {
-  return {
-    raw: schema,
-    identity: schema.identity,
-    actions: schema.actions,
-    rendering: schema.rendering,
-    clients: schema.clients,
-    // 0.2 新增字段透传
-    ui: schema.ui,
-    ui_contributions: schema.ui_contributions,
-    parsedAt: Date.now(),
-    versionHash: computeSchemaHash(schema),
-  }
-}
-
-/** 计算 Schema 版本哈希 */
-function computeSchemaHash(schema: ModuleUISchema): string {
-  const raw = JSON.stringify(schema)
-  let hash = 0
-  for (let i = 0; i < raw.length; i++) {
-    const char = raw.charCodeAt(i)
-    hash = (hash << 5) - hash + char
-    hash |= 0
-  }
-  return hash.toString(36)
-}
 
 /** 解析数据源引用 格式：module://collection 或 module://collection?param=value */
 export function parseDataSourceRef(ref: string): DataSourceRef {
@@ -87,20 +57,4 @@ export function resolveDataSource(ref: DataSourceRef): ResolvedDataSource {
     supportsPolling: true,
     pollInterval: ref.query?.pollInterval as number | undefined,
   }
-}
-
-/** 验证 Schema 格式 */
-export function validateSchema(schema: unknown): schema is ModuleUISchema {
-  if (!schema || typeof schema !== 'object') return false
-  const s = schema as Record<string, unknown>
-
-  if (!s.identity || typeof s.identity !== 'object') return false
-  if (!Array.isArray(s.actions)) return false
-  if (!s.rendering || typeof s.rendering !== 'object') return false
-  if (!s.clients || typeof s.clients !== 'object') return false
-
-  const identity = s.identity as Record<string, unknown>
-  if (!identity.id || !identity.name || !identity.version) return false
-
-  return true
 }

@@ -131,28 +131,10 @@ export const API_ENDPOINTS = {
     PIPELINE_GET: (name: string) => `/api/v1/config/pipelines/${name}`,
     PIPELINE_UPDATE: (name: string) => `/api/v1/config/pipelines/${name}`,
   },
-  /** 工具相关 - 对应后端 /api/v1/tools/* */
+  /** 工具相关 - 对应后端 GET /api/v1/tools 列表端点（其余 {id} CRUD 端点后端不存在，2026-08 已连同服务层函数清理） */
   TOOLS: {
-    /** 生成工具 */
-    GENERATE: '/api/v1/tools/generate',
-    /** 获取工具详情 */
-    GET: (id: string) => `/api/v1/tools/${id}`,
     /** 获取工具列表 */
     LIST: '/api/v1/tools',
-    /** 更新工具 */
-    UPDATE: (id: string) => `/api/v1/tools/${id}`,
-    /** 回滚工具版本 */
-    ROLLBACK: (id: string) => `/api/v1/tools/${id}/rollback`,
-    /** 删除工具 */
-    DELETE: (id: string) => `/api/v1/tools/${id}`,
-    /** 获取代码条目 */
-    CODE: (id: string) => `/api/v1/tools/code/${id}`,
-    /** 搜索代码 */
-    CODE_SEARCH: '/api/v1/tools/code',
-    /** 获取Agent配置 */
-    AGENT_CONFIG: (id: string) => `/api/v1/tools/agent-config/${id}`,
-    /** 执行Agent */
-    AGENT_EXECUTE: '/api/v1/tools/agent/execute',
   },
   /** 评估指标 - evaluation_service 插件端点（生成物投影，已从内核 compat_routes 迁出）。
    *  指标定义读 evaluation 插件 config_files（config/evaluation/evaluation_metrics.yaml 唯一真相源）。 */
@@ -161,15 +143,6 @@ export const API_ENDPOINTS = {
     METRICS: EVALUATION_SERVICE_ENDPOINTS.metrics_list,
     /** 获取单个评估指标 */
     METRIC: (id: string) => EVALUATION_SERVICE_ENDPOINTS.metric_detail.replace('{metric_id}', id),
-  },
-  /** 健康检查相关 */
-  HEALTH: {
-    /** 健康检查 */
-    CHECK: '/health',
-    /** 存活检查 */
-    LIVE: '/health/live',
-    /** 就绪检查 */
-    READY: '/health/ready',
   },
   /** 用户管理相关 - user_admin 插件端点（生成物投影，原 channel_api users 域，管理员专用） */
   USERS: {

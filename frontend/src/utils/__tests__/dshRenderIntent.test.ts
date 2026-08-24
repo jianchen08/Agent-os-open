@@ -11,7 +11,6 @@ import {
   addRenderIntent,
   applyDataDrivenIntent,
   applyRenderIntent,
-  clearRenderIntents,
   deriveCardMeta,
   diffPayload,
   filePayload,
@@ -41,7 +40,7 @@ const ctx = (args: Record<string, unknown>, result: Record<string, unknown>): Re
 const intent = (card: string, bindings?: Record<string, string>) => ({ card, bindings }) as never
 
 describe('loadRenderIntents / 注册表', () => {
-  beforeEach(() => clearRenderIntents())
+  beforeEach(() => loadRenderIntents([]))
 
   it('装载合法声明，忽略缺 card / 坏 card', () => {
     loadRenderIntents([
@@ -335,7 +334,7 @@ describe('renderIntentToBlocks：新卡产出块形态', () => {
 })
 
 describe('applyDataDrivenIntent（数据路由增强入口）', () => {
-  beforeEach(() => clearRenderIntents())
+  beforeEach(() => loadRenderIntents([]))
 
   it('无声明 + 数据有形状 → 按形状路由（diff 数据 → dsh:diff 块）', () => {
     const activity = { type: 'tool_call', toolName: 'w', details: [] } as ActivityData
@@ -360,7 +359,7 @@ describe('applyDataDrivenIntent（数据路由增强入口）', () => {
 })
 
 describe('renderIntentToBlocks / applyRenderIntent（级联集成）', () => {
-  beforeEach(() => clearRenderIntents())
+  beforeEach(() => loadRenderIntents([]))
 
   it('产出 dsh:* 区块，dshProps 携带组件 props', () => {
     const blocks = renderIntentToBlocks(

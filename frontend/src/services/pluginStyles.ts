@@ -179,15 +179,6 @@ export async function injectPluginStyle(style: ClientStyleDeclaration): Promise<
 }
 
 /**
- * 移除指定插件的全部注入样式
- *
- * @param pluginId - 插件 id
- */
-export function removePluginStyles(pluginId: string): void {
-  document.querySelectorAll(`style[${PLUGIN_ATTR}="${pluginId}"]`).forEach((el) => el.remove())
-}
-
-/**
  * 移除全部插件注入样式（登出/销毁闭环时清理，防止跨会话残留）
  */
 export function removeAllPluginStyles(): void {

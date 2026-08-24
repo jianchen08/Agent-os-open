@@ -62,30 +62,6 @@ export function mapThreadToSession(thread: Thread | ThreadStateResponse): Sessio
 }
 
 /**
- * 批量映射 Thread 到 Session
- */
-export function mapThreadsToSessions(threads: Thread[]): Session[] {
-  return threads.map(mapThreadToSession)
-}
-
-/**
- * 将 Session 映射为 API Thread 格式
- */
-export function mapSessionToThread(session: Session): Thread {
-  return {
-    thread_id: session.id,
-    intent: session.title,
-    current_state: session.status || 'active',
-    created_at: session.createdAt,
-    updated_at: session.updatedAt,
-    message_count: session.messageCount,
-    status: session.status,
-    metadata: session.metadata,
-    agent_id: session.agentId || null,
-  }
-}
-
-/**
  * 会话主管道的权威解析（2026-08-22 裁决，猜测型匹配反模式收口批次3）：
  * - 优先后端权威 activePipelineId（session_routes 回显，内核 resolve 同源）；
  * - 缺失（旧数据）且 pipelineIds 恰一个元素 → 取 [0]（无歧义）；

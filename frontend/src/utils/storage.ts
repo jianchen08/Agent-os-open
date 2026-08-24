@@ -2,9 +2,9 @@
  * 本地存储工具函数（localStorage封装）
  */
 
-import { MAX_FAVORITE_AGENTS, STORAGE_KEYS, type AgentPreferences } from '../constants/storage'
+import { STORAGE_KEYS } from '../constants/storage'
 
-export { MAX_FAVORITE_AGENTS, STORAGE_KEYS, type AgentPreferences }
+export { STORAGE_KEYS }
 export type StorageKey = (typeof STORAGE_KEYS)[keyof typeof STORAGE_KEYS]
 
 /**
@@ -286,121 +286,5 @@ export const uiStorage = {
    */
   getThinkingModeEnabled(): boolean | null {
     return storage.getItem<boolean>(STORAGE_KEYS.THINKING_MODE_ENABLED)
-  },
-}
-
-/**
- * Agent 偏好设置存储工具
- * Requirements: 13.2, 13.4, 13.5
- */
-export const agentStorage = {
-  /**
-   * 获取 Agent 偏好设置
-   * @returns Agent 偏好设置或默认值
-   */
-  getPreferences(): AgentPreferences {
-    const stored = storage.getItem<AgentPreferences>(STORAGE_KEYS.AGENT_PREFERENCES)
-    if (stored === null) {
-      return {
-        defaultAgentId: null,
-        favoriteAgentIds: [],
-      }
-    }
-    return stored
-  },
-
-  /**
-   * 保存 Agent 偏好设置
-   * @param preferences - Agent 偏好设置
-   */
-  setPreferences(preferences: AgentPreferences): void {
-    // 确保常用 Agent 列表不超过最大数量
-    const limitedPreferences: AgentPreferences = {
-      ...preferences,
-      favoriteAgentIds: preferences.favoriteAgentIds.slice(0, MAX_FAVORITE_AGENTS),
-    }
-    storage.setItem(STORAGE_KEYS.AGENT_PREFERENCES, limitedPreferences)
-  },
-
-  /**
-   * 获取默认 Agent ID
-   * @returns 默认 Agent ID 或 null
-   */
-  getDefaultAgentId(): string | null {
-    return this.getPreferences().defaultAgentId
-  },
-
-  /**
-   * 设置默认 Agent ID
-   * @param agentId - Agent ID
-   */
-  setDefaultAgentId(agentId: string | null): void {
-    const preferences = this.getPreferences()
-    this.setPreferences({
-      ...preferences,
-      defaultAgentId: agentId,
-    })
-  },
-
-  /**
-   * 获取常用 Agent ID 列表
-   * @returns 常用 Agent ID 列表
-   */
-  getFavoriteAgentIds(): string[] {
-    return this.getPreferences().favoriteAgentIds
-  },
-
-  /**
-   * 添加常用 Agent
-   * Requirements: 13.5 - 最多 10 个
-   * @param agentId - Agent ID
-   * @returns 是否添加成功
-   */
-  addFavoriteAgent(agentId: string): boolean {
-    const preferences = this.getPreferences()
-
-    // 检查是否已存在
-    if (preferences.favoriteAgentIds.includes(agentId)) {
-      return false
-    }
-
-    // 检查是否超过最大数量
-    if (preferences.favoriteAgentIds.length >= MAX_FAVORITE_AGENTS) {
-      return false
-    }
-
-    this.setPreferences({
-      ...preferences,
-      favoriteAgentIds: [...preferences.favoriteAgentIds, agentId],
-    })
-    return true
-  },
-
-  /**
-   * 移除常用 Agent
-   * @param agentId - Agent ID
-   */
-  removeFavoriteAgent(agentId: string): void {
-    const preferences = this.getPreferences()
-    this.setPreferences({
-      ...preferences,
-      favoriteAgentIds: preferences.favoriteAgentIds.filter((id) => id !== agentId),
-    })
-  },
-
-  /**
-   * 检查是否为常用 Agent
-   * @param agentId - Agent ID
-   * @returns 是否为常用 Agent
-   */
-  isFavoriteAgent(agentId: string): boolean {
-    return this.getPreferences().favoriteAgentIds.includes(agentId)
-  },
-
-  /**
-   * 清除 Agent 偏好设置
-   */
-  clearPreferences(): void {
-    storage.removeItem(STORAGE_KEYS.AGENT_PREFERENCES)
   },
 }

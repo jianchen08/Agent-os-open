@@ -15,8 +15,8 @@
  */
 
 import { getSchema } from '@/services/api/schema'
-import { loggers } from '@/utils/logger'
 import { addRenderIntent, type ToolRenderIntent } from '@/utils/dshRenderIntent'
+import { loggers } from '@/utils/logger'
 
 /** dsh_adapter 插件 contributes.dsh_adapter 块（plugin.json 同构）。 */
 export interface DshAdapterInfo {
@@ -96,19 +96,4 @@ export async function loadDshAdapterContributions(): Promise<DshAdapterLoadResul
     loggers.websocket.warn('dshAdapter: 部分贡献装载失败（已隔离）', result.failures)
   }
   return result
-}
-
-/** 当前适配器信息（未装载时 null）。 */
-let cachedInfo: DshAdapterInfo | null = null
-
-/** 装载并缓存适配器信息（应用启动时一次）。 */
-export async function initializeDshAdapter(): Promise<DshAdapterInfo | null> {
-  const result = await loadDshAdapterContributions()
-  cachedInfo = result.info
-  return cachedInfo
-}
-
-/** 取缓存的适配器信息（同步，供 UI 展示来源版本）。 */
-export function getDshAdapterInfo(): DshAdapterInfo | null {
-  return cachedInfo
 }

@@ -12,9 +12,9 @@
  * 优先级：插件显式声明（render/chat_card）永远优先——本视图只兜
  * 「有契约、无声明」的工具（见 enhanceActivityWithToolConfig）。
  */
+import { safeParseResult } from '@/utils/toolCardRegistry'
 import type { ActivityDetailBlock } from '@/types/activity'
 import type { UIInputFormField } from '@/types/schema'
-import { safeParseResult } from '@/utils/toolCardRegistry'
 
 // ── 契约注册表：toolName → output_schema（从 /api/v1/schema 的 tools[] 装载）──
 const outputSchemas = new Map<string, Record<string, unknown>>()
@@ -34,11 +34,6 @@ export function loadOutputSchemas(
 /** 按 toolName 查 output_schema */
 export function getOutputSchema(toolName: string): Record<string, unknown> | undefined {
   return outputSchemas.get(toolName)
-}
-
-/** 清空注册表（测试用） */
-export function clearOutputSchemas(): void {
-  outputSchemas.clear()
 }
 
 // ── schema → 表单字段词汇 ──

@@ -153,17 +153,6 @@ async function reloadContributionRegistry(): Promise<void> {
   }
 }
 
-/** 处理 WebSocket 推送的 Schema 更新事件（含插件热重载后的 contributes 变更） */
-export function handleSchemaUpdate(_event: {
-  module_id: string
-  schema_version: string
-  changes: string[]
-}): void {
-  // 重新拉取 schema 刷新 ContributionRegistry（contributes 可能已变）：
-  // 先失效缓存再装载，fetchSchemaCached 必发新请求（事件驱动强制新鲜）
-  void invalidateSchemaCache().then(() => reloadContributionRegistry())
-}
-
 /**
  * 主动刷新插件贡献（插件启用/禁用切换后调用，无需 WS 事件）
  *

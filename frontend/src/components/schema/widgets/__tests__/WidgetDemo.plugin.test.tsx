@@ -17,7 +17,7 @@ import { contributionRegistry } from '@/services/schema/ContributionRegistry'
 import { initializeWidgets } from '@/services/schema/registerWidgets'
 import { toFormFields } from '@/utils/configFormFields'
 import { clearChatCardDeclarations, interpretChatCard, loadChatCardDeclarations } from '@/utils/chatCardInterpreter'
-import { buildOutputSchemaView, clearOutputSchemas, loadOutputSchemas } from '@/utils/outputSchemaView'
+import { buildOutputSchemaView, loadOutputSchemas } from '@/utils/outputSchemaView'
 
 const PLUGIN_JSON = JSON.parse(
   fs.readFileSync(
@@ -69,7 +69,6 @@ beforeEach(() => {
   vi.clearAllMocks()
   vi.unstubAllGlobals()
   clearChatCardDeclarations()
-  clearOutputSchemas()
   apiGet.mockReset()
   apiRequest.mockReset()
   // 默认 mock：datasource/fieldsUri/dataUri 的 GET 返回空形状，防渲染树崩

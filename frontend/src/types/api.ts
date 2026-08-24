@@ -5,7 +5,6 @@
  * Requirements: 1.1, 2.1, 2.5, 2.6
  */
 
-import type { GraphData } from './graph'
 import type { User, Session, Message } from './models'
 
 /**
@@ -198,14 +197,6 @@ export interface GetMessagesResponse {
 export interface SendMessageResponse {
   /** 消息信息 */
   message: Message
-}
-
-/**
- * 获取执行图响应
- */
-export interface GetGraphResponse {
-  /** 执行图数据 */
-  graph: GraphData
 }
 
 /**

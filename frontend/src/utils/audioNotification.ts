@@ -175,29 +175,3 @@ export async function playNotificationSound(): Promise<boolean> {
     return false
   }
 }
-
-/**
- * 设置通知音静音状态
- *
- * @param muted - 是否静音
- */
-export function setNotificationSoundMuted(muted: boolean): void {
-  try {
-    localStorage.setItem('notification_sound_muted', String(muted))
-  } catch {
-    // localStorage 不可用时静默处理
-  }
-}
-
-/**
- * 获取通知音静音状态
- *
- * @returns 是否静音
- */
-export function isNotificationSoundMuted(): boolean {
-  try {
-    return localStorage.getItem('notification_sound_muted') === 'true'
-  } catch {
-    return false
-  }
-}

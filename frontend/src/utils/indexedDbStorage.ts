@@ -91,8 +91,3 @@ export const indexedDbStorage = createJSONStorage(() => ({
     void safeDel(name)
   },
 }))
-
-/** 供测试 / 显式清理使用：强制落盘当前缓冲的挂起写入 */
-export function flushIndexedDbPersist(): void {
-  throttle.flush()
-}

@@ -6,7 +6,7 @@
  * - sanitizeCss：危险构造整段拒绝（expression()/javascript:/外部 @import/behavior:）
  * - scopeCss：scoped 前缀 / global 原样 / at-rule 不动
  * - injectPluginStyle：fetch → 消毒 → <style> 注入（带 nonce + data-plugin 标识）
- * - removePluginStyles / removeAllPluginStyles / syncPluginStyles：以注册表为权威清理
+ * - removeAllPluginStyles / syncPluginStyles：以注册表为权威清理
  */
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
@@ -23,7 +23,6 @@ import {
   sanitizeCss,
   scopeCss,
   injectPluginStyle,
-  removePluginStyles,
   removeAllPluginStyles,
   syncPluginStyles,
 } from '@/services/pluginStyles'
@@ -146,13 +145,6 @@ describe('remove / sync — 清理与同步', () => {
   async function injectAll(styles: ClientStyleDeclaration[]): Promise<void> {
     for (const s of styles) await injectPluginStyle(s)
   }
-
-  it('removePluginStyles 移除指定插件的全部样式', async () => {
-    await injectAll([styleDecl({ id: 'a' }), styleDecl({ id: 'b' }), styleDecl({ id: 'c', pluginId: 'other' })])
-    removePluginStyles('demo_plugin')
-    expect(document.querySelectorAll('style[data-plugin-style]')).toHaveLength(1)
-    expect(document.querySelector('style[data-plugin-style]')?.getAttribute('data-plugin-style')).toBe('other:c')
-  })
 
   it('removeAllPluginStyles 清空全部插件样式', async () => {
     await injectAll([styleDecl({ id: 'a' }), styleDecl({ id: 'b', pluginId: 'other' })])

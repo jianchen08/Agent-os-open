@@ -6,14 +6,9 @@
  * InteractionCard 特性驱动渲染（声明新模式零前端改动可渲染）。
  */
 import { fireEvent, render, screen } from '@testing-library/react'
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { InteractionCard } from '../InteractionCard'
-import {
-  clearInteractionModes,
-  getInteractionModeDecl,
-  loadInteractionModes,
-  resolveInteractionFeatures,
-} from '@/utils/interactionModes'
+import { loadInteractionModes, resolveInteractionFeatures } from '@/utils/interactionModes'
 import type { PendingInteraction } from '@/stores/interactionStore'
 
 vi.mock('@/components/shared/markdown/MarkdownRenderer', () => ({
@@ -46,11 +41,11 @@ const cardProps = (interaction: PendingInteraction) => ({
   isSubmitting: false,
 })
 
-beforeEach(() => clearInteractionModes())
-afterEach(() => clearInteractionModes())
+// 注册表清理（clearInteractionModes 已随死代码删除，loadInteractionModes 幂等清空重装）
+beforeEach(() => loadInteractionModes([]))
 
 describe('声明注册表', () => {
-  it('tools[].ui.interaction_modes 装载与查询（未知条目/词汇外 features 过滤）', () => {
+  it('tools[].ui.interaction_modes 装载（未知条目/词汇外 features 过滤），声明覆盖内置默认件', () => {
     loadInteractionModes([
       {
         ui: {
@@ -64,9 +59,12 @@ describe('声明注册表', () => {
       { ui: {} },
       {},
     ])
-    const decl = getInteractionModeDecl('approval_v2')
-    expect(decl?.features).toEqual(['options', 'text_input'])
-    expect(getInteractionModeDecl('unknown')).toBeUndefined()
+    const decl = resolveInteractionFeatures(makeInteraction({ mode: 'approval_v2' }))
+    expect([...decl].sort()).toEqual(['options', 'text_input'].sort())
+    // 未声明的未知模式 → 通用兜底（message + text_input）
+    expect([...resolveInteractionFeatures(makeInteraction({ mode: 'unknown' }))].sort()).toEqual(
+      ['message', 'text_input'].sort(),
+    )
   })
 
   it('内置默认件兜底（声明缺席时三模式布局不变）', () => {

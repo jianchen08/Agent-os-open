@@ -6,21 +6,12 @@
  */
 
 import { describe, it, expect } from 'vitest'
-import {
-  adaptWidgetEvent,
-  isWidgetEvent,
-} from '@/services/websocket/MessageAdapter'
+import { adaptWidgetEvent } from '@/services/websocket/MessageAdapter'
 import type { RawWSMessage } from '@/services/websocket/MessageAdapter'
 
 describe('MessageAdapter — widget_event 族解析（P2 协议）', () => {
   // P2 后端将下发：{ type: 'widget_event', data: { widget_id, event, data }, sequence }
   // 数据 data 包装层是 Rust 0.2 格式，但顶层多了一个 sequence 字段需要保留。
-
-  it('isWidgetEvent 识别 widget_event 类型消息', () => {
-    expect(isWidgetEvent({ type: 'widget_event', data: {}, sequence: 1 })).toBe(true)
-    expect(isWidgetEvent({ type: 'pipeline_chunk', data: {} })).toBe(false)
-    expect(isWidgetEvent({})).toBe(false)
-  })
 
   it('adaptWidgetEvent 解析 widget_id / event / payload / sequence', () => {
     const raw: RawWSMessage = {

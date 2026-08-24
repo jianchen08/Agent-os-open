@@ -8,7 +8,7 @@
  * 读文件卡片无法打开文件、条目只显示原始工具名。
  */
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { clearRenderIntents, loadRenderIntents } from '@/utils/dshRenderIntent'
+import { loadRenderIntents } from '@/utils/dshRenderIntent'
 import {
   enhanceActivityWithToolConfig,
   registerGlobalOpenFileCallback,
@@ -19,7 +19,7 @@ import type { MessageToolCall } from '@/types/models'
 let openFileSpy: ReturnType<typeof vi.fn> | null = null
 
 afterEach(() => {
-  clearRenderIntents()
+  loadRenderIntents([])
   if (openFileSpy) {
     registerGlobalOpenFileCallback(() => {})
     openFileSpy = null

@@ -8,39 +8,8 @@
 /* === 布局尺寸规范 === */
 
 :root {
-  /* 顶层容器 */
+  /* 顶层容器（其余布局尺寸变量已全站零消费，2026-08 清理，详见 docs/working/全仓冗余代码与规范扫描报告） */
   --layout-titlebar-height: 32px;
-  --layout-statusbar-height: 22px;
-
-  /* ActivityBar */
-  --layout-activitybar-width: 56px;
-
-  /* SideBar */
-  --layout-sidebar-width: 288px;
-  --layout-sidebar-padding: 12px;
-  --layout-sidebar-search-height: 32px;
-  --layout-sidebar-item-height: 55px;
-  --layout-sidebar-group-gap: 59px; /* 分组标题到上一项的距离 */
-
-  /* ChatPanel */
-  --layout-chatpanel-width: 520px;
-  --layout-chatpanel-message-gap: 20px;
-  --layout-chatpanel-input-height: 111px;
-
-  /* WorkspacePanel */
-  --layout-workspacepanel-tab-height: 36px;
-  --layout-workspacepanel-content-gap: 20px;
-
-  /* 通用间距 */
-  --layout-gap-sm: 4px;
-  --layout-gap-md: 8px;
-  --layout-gap-lg: 12px;
-  --layout-gap-xl: 20px;
-
-  /* 圆角 */
-  --layout-radius-sm: 6px;
-  --layout-radius-md: 8px;
-  --layout-radius-lg: 10px;
 }
 
 /* === TitleBar === */

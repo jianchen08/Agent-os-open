@@ -6,16 +6,16 @@
  * 根因：后端 conversation 模式下 thread_id（会话 id）≠ pipeline_id（管道 run id），
  * 而管道标签映射（pipelineTabMap / tabs.pipelineRunId / session.pipelineIds）的 key
  * 全是 pipeline_id。若误传 thread_id，findPipelineLocation 查不到 → 跳转失败。
+ *
+ * 被测对象：InteractionPanel 已由 GlobalInteractionOverlay 取代（同逻辑：
+ * pipelineId || threadId 优先取 pipelineId），回归测试随之迁移到 Overlay。
  */
 
 import { act, fireEvent, render, screen } from '@testing-library/react'
 import React from 'react'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
-import { InteractionPanel } from '@/components/chat/InteractionPanel'
+import { GlobalInteractionOverlay } from '@/components/chat/GlobalInteractionOverlay'
 import type { PendingInteraction } from '@/stores/interactionStore'
-
-// jsdom 不实现 scrollIntoView，InteractionPanel 的滚动 effect 需要它
-Element.prototype.scrollIntoView = () => {}
 
 // ---------------------------------------------------------------------------
 //  可变 mock 状态：用 vi.hoisted 保证在 vi.mock 提升后仍可引用同一对象
@@ -45,9 +45,26 @@ vi.mock('@/components/chat/InteractionCard', () => ({
 }))
 
 vi.mock('@/stores/interactionStore', () => ({
-  useInteractionStore: (selector: (s: { dismissInteraction: typeof mocks.dismissInteraction }) => unknown) =>
-    selector({ dismissInteraction: mocks.dismissInteraction }),
+  useInteractionStore: (selector: (s: {
+    pendingInteractions: PendingInteraction[]
+    isMinimized: boolean
+    toggleMinimized: () => void
+    dismissInteraction: typeof mocks.dismissInteraction
+  }) => unknown) =>
+    selector({
+      pendingInteractions: mocks.pendingInteractions,
+      isMinimized: false,
+      toggleMinimized: vi.fn(),
+      dismissInteraction: mocks.dismissInteraction,
+    }),
 }))
+
+vi.mock('@/stores/sessionStore', () => ({
+  useSessionStore: () => ({ activeSessionId: 'sess-1' }),
+}))
+
+// jsdom 不实现 scrollIntoView，Overlay 内部滚动 effect 需要它
+Element.prototype.scrollIntoView = () => {}
 
 /** 构造 conversation 模式交互 */
 function makeConversation(overrides: Partial<PendingInteraction> = {}): PendingInteraction {
@@ -78,7 +95,7 @@ describe('对话模式跳转标识符回归', () => {
       makeConversation({ threadId: 'thread-abc', pipelineId: 'pipe-xyz' }),
     ]
 
-    render(<InteractionPanel sessionId="sess-1" />)
+    render(<GlobalInteractionOverlay />)
 
     await act(async () => {
       fireEvent.click(screen.getByTestId('navigate-btn'))
@@ -101,7 +118,7 @@ describe('对话模式跳转标识符回归', () => {
       makeConversation({ threadId: 'thread-only', pipelineId: undefined }),
     ]
 
-    render(<InteractionPanel sessionId="sess-1" />)
+    render(<GlobalInteractionOverlay />)
 
     await act(async () => {
       fireEvent.click(screen.getByTestId('navigate-btn'))

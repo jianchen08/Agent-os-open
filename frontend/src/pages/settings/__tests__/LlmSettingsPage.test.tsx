@@ -32,7 +32,6 @@ vi.mock('@/services/api/config', () => ({
   getDefaults: (...args: unknown[]) => mockGetDefaults(...args),
   getProviderTypes: (...args: unknown[]) => mockGetProviderTypes(...args),
   getRemoteModels: (...args: unknown[]) => mockGetRemoteModels(...args),
-  saveLLMDefaults: vi.fn(),
   addModel: (...args: unknown[]) => mockAddModel(...args),
   updateModel: (...args: unknown[]) => mockUpdateModel(...args),
   deleteModel: vi.fn(),

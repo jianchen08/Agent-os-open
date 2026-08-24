@@ -299,16 +299,6 @@ export interface Message {
 }
 
 /**
- * 消息重试范围
- */
-export type RetryScope = 'all' | 'failed_tools' | 'specific_tool'
-
-/**
- * 消息删除范围
- */
-export type DeleteScope = 'single' | 'subsequent' | 'related' | 'custom'
-
-/**
  * 审批风险等级
  */
 export type RiskLevel = 'low' | 'medium' | 'high'

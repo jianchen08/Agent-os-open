@@ -51,16 +51,6 @@ export function subscribeFormEvent(name: string, handler: Handler): () => void {
   }
 }
 
-/** 订阅次数（测试/诊断用） */
-export function listenerCount(name: string): number {
-  return listeners.get(name)?.size ?? 0
-}
-
-/** 清空全部订阅（测试用） */
-export function clearFormEvents(): void {
-  listeners.clear()
-}
-
 /** watch 声明：事件触发后对组件执行的动作（目前支持 reload=重挂载重拉） */
 export interface FormEventWatch {
   event: string

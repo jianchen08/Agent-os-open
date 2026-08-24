@@ -164,32 +164,3 @@ function extractExtension(fileName: string): string {
 
   return baseName.substring(dotIndex).toLowerCase()
 }
-
-/**
- * 判断文件是否为文本类型
- *
- * @param fileName - 文件名
- * @returns 是否为文本类型文件
- */
-export function isTextFile(fileName: string): boolean {
-  return getEditorForFile(fileName).id === 'text_editor'
-}
-
-/**
- * 注册新的编辑器类型
- *
- * @param definition - 编辑器定义
- */
-export function registerEditor(definition: EditorDefinition): void {
-  editors[definition.id] = definition
-}
-
-/**
- * 注册文件类型映射
- *
- * @param extension - 文件扩展名（如 ".py"）
- * @param editorId - 编辑器 ID
- */
-export function registerFileTypeMapping(extension: string, editorId: string): void {
-  fileTypeMap[extension.toLowerCase()] = editorId
-}

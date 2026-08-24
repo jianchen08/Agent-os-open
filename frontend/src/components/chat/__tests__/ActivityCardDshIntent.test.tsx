@@ -15,7 +15,7 @@
  */
 import { fireEvent, render, screen } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { addRenderIntent, applyRenderIntent, clearRenderIntents } from '@/utils/dshRenderIntent'
+import { addRenderIntent, applyRenderIntent, loadRenderIntents } from '@/utils/dshRenderIntent'
 import ActivityCard from '../ActivityCard'
 import type { ActivityData } from '@/types/activity'
 import type { MessageToolCall } from '@/types/models'
@@ -71,10 +71,10 @@ function makeActivity(toolName: string): ActivityData {
 
 describe('DSH 下载插件生效链路：翻译产物 → render 意图 → vendor 组件渲染', () => {
   beforeEach(() => {
-    clearRenderIntents()
+    loadRenderIntents([])
   })
   afterEach(() => {
-    clearRenderIntents()
+    loadRenderIntents([])
   })
 
   it('read 卡：翻译产物注册后，工具结果渲染 vendor ReadBlock（行号 + 窗口计数）', () => {

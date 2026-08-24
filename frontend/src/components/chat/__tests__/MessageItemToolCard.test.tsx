@@ -16,7 +16,7 @@ import { fireEvent, render, screen } from '@testing-library/react'
 import { renderWithProviders } from '@/test/renderWithProviders'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { MessageItem } from '../MessageItem'
-import { clearRenderIntents, loadRenderIntents } from '@/utils/dshRenderIntent'
+import { loadRenderIntents } from '@/utils/dshRenderIntent'
 import type { Message } from '@/types/models'
 
 // ============================================================
@@ -99,7 +99,7 @@ describe('工具卡统一形态: 独立 tool 消息走 ActivityCard（2026-08-19
   beforeEach(() => {
     vi.clearAllMocks()
   })
-  afterEach(() => clearRenderIntents())
+  afterEach(() => loadRenderIntents([]))
 
   describe('AC1: 宽度对齐气泡 + 卡片满宽', () => {
     it('容器含气泡同宽约束（max-w-[calc(100%-44px)]），卡片含满宽类（w-full max-w-full）', () => {

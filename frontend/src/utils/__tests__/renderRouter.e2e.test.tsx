@@ -13,7 +13,7 @@
 import { render, screen } from '@testing-library/react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import ActivityCard from '@/components/chat/ActivityCard'
-import { loadRenderIntents, clearRenderIntents } from '@/utils/dshRenderIntent'
+import { loadRenderIntents } from '@/utils/dshRenderIntent'
 import { enhanceActivityWithToolConfig } from '@/utils/toolCardRegistry'
 import type { ActivityData } from '@/types/activity'
 import type { MessageToolCall } from '@/types/models'
@@ -26,7 +26,7 @@ vi.mock('@/utils/toolCardRegistry', async (importOriginal) => {
   return { ...actual, getGlobalOpenFileCallback: () => () => {} }
 })
 
-afterEach(() => clearRenderIntents())
+afterEach(() => loadRenderIntents([]))
 
 function makeToolCall(tool: string, args: Record<string, unknown>, resultData: Record<string, unknown>): MessageToolCall {
   return {

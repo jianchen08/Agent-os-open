@@ -10,9 +10,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 import React from 'react'
 
 import {
-  clearFormEvents,
   emitFormEvent,
-  listenerCount,
   subscribeFormEvent,
 } from '@/services/schema/formEventBus'
 import { EventWatchBox } from '@/components/schema/EventWatchBox'
@@ -36,7 +34,6 @@ vi.mock('@/components/ui/sonner', () => ({
 const submitForm = () => fireEvent.submit(document.querySelector('form')!)
 
 beforeEach(() => {
-  clearFormEvents()
   apiGet.mockReset()
   apiRequest.mockReset()
   // 声明 type='form' 需 FormWidget 已注册（生产链路由 initializeWidgets 提供）
@@ -50,16 +47,14 @@ describe('formEventBus', () => {
     const unsub1 = subscribeFormEvent('task.created', h1)
     subscribeFormEvent('task.created', h2)
     subscribeFormEvent('task.created', h1) // 同 handler 重复订阅去重
-    expect(listenerCount('task.created')).toBe(2)
     emitFormEvent('task.created', { id: 1 })
     expect(h1).toHaveBeenCalledTimes(1)
     expect(h2).toHaveBeenCalledTimes(1)
     expect(h1).toHaveBeenCalledWith({ id: 1 })
     unsub1()
-    expect(listenerCount('task.created')).toBe(1)
-    unsub1() // 幂等
     emitFormEvent('task.created', { id: 2 })
     expect(h1).toHaveBeenCalledTimes(1) // 已退订不再收到
+    expect(h2).toHaveBeenCalledTimes(2) // 另一订阅者仍收到
   })
 
   it('订阅者抛错不阻断其他订阅者', () => {

@@ -79,16 +79,6 @@ export function loadInteractionModes(
   }
 }
 
-/** 按 mode 查声明（内置默认件兜底） */
-export function getInteractionModeDecl(mode: string): InteractionModeDecl | undefined {
-  return modeDeclarations.get(mode) ?? DEFAULT_MODE_FEATURES[mode]
-}
-
-/** 清空声明注册表（测试用） */
-export function clearInteractionModes(): void {
-  modeDeclarations.clear()
-}
-
 export interface InteractionLayout {
   features: Set<InteractionFeature>
   textInputPlaceholder: string

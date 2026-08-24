@@ -71,11 +71,6 @@ export function getRenderIntent(toolName: string): ToolRenderIntent | undefined 
   return renderIntents.get(toolName)
 }
 
-/** 清空（测试用）。 */
-export function clearRenderIntents(): void {
-  renderIntents.clear()
-}
-
 /** 宽松 JSON → ToolRenderIntent（card 非法即弃，防止坏声明崩渲染）。 */
 function normalizeRenderIntent(raw: Record<string, unknown> | undefined): ToolRenderIntent | undefined {
   if (!raw || typeof raw !== 'object') return undefined

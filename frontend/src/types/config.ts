@@ -26,12 +26,6 @@ export interface LLMConfigResponse {
   default_model: string
 }
 
-/** API Key 配置 */
-export interface APIKeyConfig {
-  provider: string
-  api_key: string
-}
-
 /** 模型默认参数 */
 export interface ModelDefaultParams {
   temperature: number
@@ -39,13 +33,4 @@ export interface ModelDefaultParams {
   top_p?: number
   frequency_penalty?: number
   presence_penalty?: number
-}
-
-/** LLM 模型表单数据 */
-export interface LLMModelFormData {
-  name: string
-  provider: string
-  api_base: string
-  max_tokens: number
-  temperature: number
 }

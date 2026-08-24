@@ -131,21 +131,6 @@ export async function getLLMConfig(options: RetryOptions = {}): Promise<LLMConfi
 }
 
 /**
- * 获取提供商列表
- *
- * @param options 重试选项
- * @returns 提供商列表
- */
-export async function getProviders(options: RetryOptions = {}): Promise<{
-  providers: Record<string, { api_base?: string; has_key: boolean; env_var?: string | null }>
-}> {
-  return requestWithRetry(async () => {
-    const response = await apiClient.get(API_ENDPOINTS.CONFIG.LLM_PROVIDERS)
-    return response.data
-  }, options)
-}
-
-/**
  * 获取 litellm 支持的提供者类型清单
  *
  * 后端运行时读取已安装 litellm 的 provider_list——litellm pip 升级后
@@ -191,16 +176,6 @@ export async function getModels(
 export async function getDefaults(options: RetryOptions = {}): Promise<LLMDefaults> {
   return requestWithRetry(async () => {
     const response = await apiClient.get<LLMDefaults>(API_ENDPOINTS.CONFIG.LLM_DEFAULTS)
-    return response.data
-  }, options)
-}
-
-export async function saveLLMDefaults(
-  defaults: LLMDefaults,
-  options: RetryOptions = {},
-): Promise<LLMDefaults> {
-  return requestWithRetry(async () => {
-    const response = await apiClient.put<LLMDefaults>(API_ENDPOINTS.CONFIG.LLM_DEFAULTS, defaults)
     return response.data
   }, options)
 }
@@ -302,118 +277,3 @@ export async function deleteProvider(
   }, options)
 }
 
-/**
- * API 端点配置类型
- */
-export interface EndpointConfig {
-  /** 基础 URL */
-  base_url: string
-  /** API 版本 */
-  version: string
-  /** 超时时间（秒） */
-  timeout: number
-}
-
-/**
- * 限流配置类型
- */
-export interface RateLimitConfig {
-  /** 全局限流 */
-  global_limit: string
-  /** 认证限流 */
-  auth: string
-  /** 任务限流 */
-  tasks: string
-  /** WebSocket 限流 */
-  websocket: string
-}
-
-/**
- * API 配置类型
- */
-/**
- * 探测外部 API 端点健康状态
- *
- * 直连用户配置的 base_url（第三方主机），不走 apiClient——
- * 携带本站 Authorization 头发往任意用户可填的外部地址会泄漏凭证。
- * 5s 超时，任意异常（网络/CORS/非 2xx）一律视为不可达。
- *
- * @param baseUrl 外部端点基础 URL
- * @returns 端点是否健康
- */
-export async function testAPIEndpointHealth(baseUrl: string): Promise<boolean> {
-  try {
-    const res = await fetch(`${baseUrl.replace(/\/+$/, '')}/health`, {
-      method: 'GET',
-      signal: AbortSignal.timeout(5000),
-    })
-    return res.ok
-  } catch {
-    return false
-  }
-}
-
-/**
- * 任务并发配置类型
- */
-/**
- * Agent 层级并发配置类型
- */
-/**
- * 工作流并发配置类型
- */
-/**
- * LLM 并发配置类型
- */
-/**
- * 并发配置响应类型
- */
-export interface CostControlGlobalConfig {
-  daily_token_limit: number
-  monthly_token_limit: number
-  per_task_token_limit: number
-  per_session_token_limit: number
-}
-
-export interface CostControlAlertsConfig {
-  warning_threshold: number
-  critical_threshold: number
-  exhausted_threshold: number
-}
-
-export interface CostControlProtectionConfig {
-  auto_save_at_warning: boolean
-  auto_pause_at_critical: boolean
-  auto_stop_at_exhausted: boolean
-}
-
-export interface CostControlConfigResponse {
-  global_config: CostControlGlobalConfig
-  alerts: CostControlAlertsConfig
-  protection: CostControlProtectionConfig
-  enabled: boolean
-}
-
-export async function getCostControlConfig(
-  options: RetryOptions = {},
-): Promise<CostControlConfigResponse> {
-  return requestWithRetry(async () => {
-    const response = await apiClient.get<CostControlConfigResponse>(
-      API_ENDPOINTS.CONFIG.COST_CONTROL_GET,
-    )
-    return response.data
-  }, options)
-}
-
-export async function saveCostControlConfig(
-  config: CostControlConfigResponse,
-  options: RetryOptions = {},
-): Promise<CostControlConfigResponse> {
-  return requestWithRetry(async () => {
-    const response = await apiClient.put<CostControlConfigResponse>(
-      API_ENDPOINTS.CONFIG.COST_CONTROL_UPDATE,
-      config,
-    )
-    return response.data
-  }, options)
-}

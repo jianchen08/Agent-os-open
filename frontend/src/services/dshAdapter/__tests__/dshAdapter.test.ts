@@ -5,7 +5,7 @@
  * dshRenderIntent 注册表。
  */
 import { beforeEach, describe, expect, it, vi } from 'vitest'
-import { clearRenderIntents, getRenderIntent } from '@/utils/dshRenderIntent'
+import { getRenderIntent, loadRenderIntents } from '@/utils/dshRenderIntent'
 import { loadDshAdapterContributions } from '../index'
 
 vi.mock('@/services/api/schema', () => ({
@@ -17,7 +17,7 @@ const { getSchema } = await import('@/services/api/schema')
 describe('loadDshAdapterContributions', () => {
   beforeEach(() => {
     vi.clearAllMocks()
-    clearRenderIntents()
+    loadRenderIntents([])
   })
 
   it('装载 dsh_adapter 贡献：版本记录 + renderers 兜底注册', async () => {
