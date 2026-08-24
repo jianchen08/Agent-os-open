@@ -19,13 +19,13 @@ description: 后端技术栈编码技能（规范+流程）。含 API 设计、�
 
 ### HTTP 方法
 
-| 方法 | 用途 | 幂等性 | 示例 |
-|------|------|--------|------|
-| GET | 查询资源 | 幂等 | `GET /users/123` |
-| POST | 创建资源 | 非幂等 | `POST /users` |
-| PUT | 更新资源（全量） | 幂等 | `PUT /users/123` |
-| PATCH | 更新资源（部分） | 非幂等 | `PATCH /users/123` |
-| DELETE | 删除资源 | 幂等 | `DELETE /users/123` |
+| 方法 | 用途 | 幂等性 | 安全性 | 示例 |
+|------|------|--------|--------|------|
+| GET | 查询资源 | 幂等 | 安全 | `GET /users/123` |
+| POST | 创建资源 | 非幂等 | 不安全 | `POST /users` |
+| PUT | 更新资源（全量） | 幂等 | 不安全 | `PUT /users/123` |
+| PATCH | 更新资源（部分） | 非幂等 | 不安全 | `PATCH /users/123` |
+| DELETE | 删除资源 | 幂等 | 不安全 | `DELETE /users/123` |
 
 ### URL 设计
 
@@ -39,6 +39,57 @@ description: 后端技术栈编码技能（规范+流程）。含 API 设计、�
 
 ### 版本控制
 URL 路径版本（推荐）：`/v1/users`, `/v2/users`
+
+| 方式 | 示例 | 适用场景 |
+|------|------|---------|
+| URL 路径 | `/v1/users`, `/v2/users` | 简单直观，推荐 |
+| Header | `API-Version: v1` | 资源导向 |
+| Query 参数 | `/users?version=v1` | 不推荐 |
+
+### FastAPI 最佳实践（本仓后端技术栈）
+
+```python
+from fastapi import FastAPI, HTTPException, status, Query
+from pydantic import BaseModel, EmailStr, Field
+from typing import Optional, List
+
+app = FastAPI(title="My API", version="1.0.0")
+
+# 请求模型
+class UserCreate(BaseModel):
+    name: str = Field(..., min_length=1, max_length=100)
+    email: EmailStr
+    role: str = Field(default="user")
+
+# 响应模型
+class UserResponse(BaseModel):
+    id: int
+    name: str
+    email: EmailStr
+    role: str
+
+@app.get("/users/{user_id}", response_model=UserResponse)
+async def get_user(user_id: int = Path(..., gt=0)) -> UserResponse:
+    user = await db.get_user(user_id)
+    if not user:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"User with id {user_id} not found")
+    return user
+
+@app.get("/users", response_model=List[UserResponse])
+async def list_users(
+    skip: int = Query(0, ge=0),
+    limit: int = Query(10, ge=1, le=100),
+    role: Optional[str] = None
+) -> List[UserResponse]:
+    return await db.list_users(skip=skip, limit=limit, role=role)
+
+@app.post("/users", response_model=UserResponse, status_code=status.HTTP_201_CREATED)
+async def create_user(user: UserCreate) -> UserResponse:
+    existing = await db.get_user_by_email(user.email)
+    if existing:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="User with this email already exists")
+    return await db.create_user(user)
+```
 
 ## 数据库规范
 
@@ -58,6 +109,53 @@ URL 路径版本（推荐）：`/v1/users`, `/v2/users`
 | 外键 | `{table_singular}_id` | `user_id`, `order_id` |
 | 索引 | `ix_{table}_{column}` | `ix_users_email` |
 | 唯一约束 | `uq_{table}_{column}` | `uq_users_email` |
+
+### SQLAlchemy 模型定义（本仓技术栈）
+
+```python
+from sqlalchemy import Column, Integer, String, DateTime, ForeignKey, Index
+from sqlalchemy.orm import relationship, declarative_base
+from datetime import datetime
+
+Base = declarative_base()
+
+class User(Base):
+    __tablename__ = "users"
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    name = Column(String(100), nullable=False, index=True)
+    email = Column(String(255), unique=True, nullable=False, index=True)
+    role = Column(String(50), default="user", nullable=False)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    orders = relationship("Order", back_populates="user", cascade="all, delete-orphan")
+    __table_args__ = (Index("ix_users_name_email", "name", "email"),)
+```
+
+### Alembic 迁移规范
+
+```python
+from alembic import op
+import sqlalchemy as sa
+
+revision = '001'
+down_revision = None
+
+def upgrade() -> None:
+    op.create_table(
+        'users',
+        sa.Column('id', sa.Integer(), autoincrement=True, nullable=False),
+        sa.Column('name', sa.String(100), nullable=False),
+        sa.Column('email', sa.String(255), nullable=False),
+        sa.Column('created_at', sa.DateTime(), server_default=sa.text('CURRENT_TIMESTAMP'), nullable=False),
+        sa.PrimaryKeyConstraint('id'),
+        sa.UniqueConstraint('email')
+    )
+    op.create_index('ix_users_name', 'users', ['name'])
+
+def downgrade() -> None:
+    op.drop_index('ix_users_name', table_name='users')
+    op.drop_table('users')
+```
 
 ## 错误处理
 
@@ -104,6 +202,35 @@ URL 路径版本（推荐）：`/v1/users`, `/v2/users`
 - 敏感信息脱敏（不记录密码、Token）
 - 异常日志使用 `exc_info=True` 保留完整堆栈
 - 日志包含业务上下文（如 order_id、user_id）
+
+```python
+# 正确
+logger.info("Order created", extra={"order_id": order.id, "user_id": user.id, "amount": order.total_amount})
+
+# 错误
+logger.info("Order created")
+```
+
+### FastAPI 异常处理
+
+```python
+from fastapi import FastAPI, HTTPException, Request, status
+from fastapi.responses import JSONResponse
+
+app = FastAPI()
+
+class UserNotFoundError(Exception):
+    def __init__(self, user_id: int):
+        self.user_id = user_id
+        super().__init__(f"User with id {user_id} not found")
+
+@app.exception_handler(UserNotFoundError)
+async def user_not_found_handler(request: Request, exc: UserNotFoundError):
+    return JSONResponse(
+        status_code=status.HTTP_404_NOT_FOUND,
+        content={"success": False, "error": {"code": "USER_NOT_FOUND", "message": str(exc)}}
+    )
+```
 
 ## API 端点测试要求
 

@@ -38,14 +38,17 @@ dynamic_vars:
   - '{{timestamp:%Y-%m-%d %H:%M:%S}}'
   - '{{path:config/rules/execution_review_rules.md}}'
 system_prompt: |-
+system_prompt: |-
   {{path:config/rules/information_integrity_rules.md}}
   {{path:config/rules/document_context_rules.md}}
   {{path:config/rules/per_domain/coding_domain_rules.md}}
-  {{path:config/rules/frontend_rules.md}}
-  {{path:config/rules/backend_rules.md}}
   {{path:config/rules/testing_rules.md}}
   {{path:config/rules/isolation_network_rules.md}}
   {{path:.project/}}
+
+  涉及前端/后端代码时，按技术栈 file_read 加载对应领域技能后工作：
+  - **前端**：`skills/code-frontend/SKILL.md`（组件/样式/状态管理/API 调用规范、前端测试要求）
+  - **后端**：`skills/code-backend/SKILL.md`（API 设计/数据库/错误处理/日志规范、API 端点测试要求）
 
   你是测试与调试专家。
 

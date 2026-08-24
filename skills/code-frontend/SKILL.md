@@ -26,6 +26,55 @@ description: 前端技术栈编码技能（规范+流程）。含组件规范、
 | Props 校验 | 使用 TypeScript 或 PropTypes | 高 |
 | 组件拆分阈值 | 超过 150 行考虑拆分 | 中 |
 
+### React 组件结构
+
+```tsx
+// 1. 类型定义 → 2. 组件定义 → 3. Hooks → 4. 业务逻辑 → 5. 渲染 → 6. 导出
+interface UserCardProps {
+  userId: number;
+  userName: string;
+  avatar?: string;
+}
+
+function UserCard({ userId, userName, avatar }: UserCardProps) {
+  const [isEditing, setIsEditing] = useState(false);
+  const handleEdit = () => setIsEditing(true);
+
+  return (
+    <div className={styles.card}>
+      <img src={avatar} alt={userName} />
+      <span>{userName}</span>
+      <button onClick={handleEdit}>编辑</button>
+    </div>
+  );
+}
+
+export default UserCard;
+```
+
+### Vue 组件结构
+
+```vue
+<template>
+  <div class="user-card">
+    <img :src="avatar" :alt="userName" />
+    <span>{{ userName }}</span>
+    <button @click="handleEdit">编辑</button>
+  </div>
+</template>
+
+<script setup lang="ts">
+interface Props { userId: number; userName: string; avatar?: string; }
+const props = defineProps<Props>();
+const emit = defineEmits<{ (e: 'edit', userId: number): void; }>();
+const handleEdit = () => emit('edit', props.userId);
+</script>
+
+<style scoped>
+.user-card { display: flex; align-items: center; }
+</style>
+```
+
 ## 设计系统一致性（编码前必做）
 
 编写前端代码前必须先执行发现步骤，不能跳过：
@@ -63,6 +112,7 @@ description: 前端技术栈编码技能（规范+流程）。含组件规范、
 ### 样式要点
 - 使用 CSS Modules，避免全局样式污染
 - 避免内联样式（除动态计算值外禁止）
+- 使用语义化类名（BEM）
 - 嵌套最多 3 层
 - 提取公共样式使用 CSS 变量或 mixins
 
@@ -77,18 +127,58 @@ description: 前端技术栈编码技能（规范+流程）。含组件规范、
 | 应用级 | Redux/Zustand/Pinia | 用户登录态、主题设置 |
 | 服务级 | React Query/SWR | 接口数据缓存 |
 
+### Redux Slice 定义
+
+```typescript
+import { createSlice, PayloadAction } from '@reduxjs/toolkit';
+
+const userSlice = createSlice({
+  name: 'user',
+  initialState: { id: null, name: '', isLoading: false },
+  reducers: {
+    setUser: (state, action: PayloadAction<User>) => { state.id = action.payload.id; },
+    clearUser: (state) => { state.id = null; },
+  },
+});
+export const { setUser, clearUser } = userSlice.actions;
+```
+
+### Zustand Store
+
+```typescript
+import { create } from 'zustand';
+
+const useUserStore = create<UserState>((set) => ({
+  id: null, name: '',
+  setUser: (user) => set({ id: user.id, name: user.name }),
+  clearUser: () => set({ id: null, name: '' }),
+}));
+```
+
 ## API 调用约定
 
 - 通过封装层调用（API 模块封装），不直接在组件里 fetch
-- 统一响应格式：成功 `{"success": true, "data": {}, "message": "..."}`，错误 `{"success": false, "error": {"code": "...", "message": "..."}}`
 
-| 错误类型 | 处理方式 |
-|---------|---------|
-| 401 未认证 | 跳转登录页 |
-| 403 无权限 | 显示无权限提示 |
-| 404 未找到 | 显示 404 页面 |
-| 500 服务器错误 | 显示错误页 |
-| 网络错误 | 显示重试提示 |
+```typescript
+// API 模块封装
+export const userApi = {
+  list: (params: ListParams) => apiClient.get<User[]>('/users', { params }),
+  get: (id: number) => apiClient.get<User>(`/users/${id}`),
+  create: (data: CreateUserData) => apiClient.post<User>('/users', data),
+  update: (id: number, data: UpdateUserData) => apiClient.patch<User>(`/users/${id}`, data),
+  delete: (id: number) => apiClient.delete(`/users/${id}`),
+};
+```
+
+- 统一响应格式：成功 `{"success": true, "data": {}, "message": "操作成功"}`，错误 `{"success": false, "error": {"code": "USER_NOT_FOUND", "message": "用户不存在"}}`
+
+| 错误类型 | 处理方式 | 用户提示 |
+|---------|---------|---------|
+| 401 未认证 | 跳转登录页 | "请先登录" |
+| 403 无权限 | 显示无权限提示 | "您没有权限执行此操作" |
+| 404 未找到 | 显示 404 页面 | "资源不存在" |
+| 500 服务器错误 | 显示错误页 | "服务器错误，请稍后重试" |
+| 网络错误 | 显示重试提示 | "网络连接失败，点击重试" |
 
 ## 前端测试要求
 
@@ -116,7 +206,9 @@ description: 前端技术栈编码技能（规范+流程）。含组件规范、
 ### 样式
 - `!important` → 使用更高优先级选择器
 - ID 选择器 → class 选择器
+- 标签选择器滥用 → class 选择器
 - 固定宽度（响应式场景）→ 相对单位或 Flex/Grid
 
 ### UI/UX 质量
-- 语义化标记：`<button>` 而非 `<div onclick>`，`<nav>`/`<main>`/`<article>`/`<section>`/`<aside>` 划分结构，`<form>`/`<label>`/`<input>` 语义标签
+- 语义化标记：`<button>` 而非 `<div onclick>`，`<nav>` 定义导航，`<main>` 定义主内容，`<article>`/`<section>`/`<aside>` 划分内容结构，`<form>`/`<label>`/`<input>` 语义标签
+- 可访问性、性能优化、XSS 防护的审查维度见「审查清单七大维度」

@@ -18,13 +18,13 @@ system_prompt: '{{path:config/rules/information_integrity_rules.md}}
 
   {{path:config/rules/per_domain/coding_domain_rules.md}}
 
-  {{path:config/rules/frontend_rules.md}}
-
-  {{path:config/rules/backend_rules.md}}
-
   {{path:config/rules/per_agent/design_system_constraints.md}}
 
   {{path:.project/}}
+
+  被审查代码含前端/后端时，按技术栈 file_read 加载对应领域技能后审查：
+  - 前端：`skills/code-frontend/SKILL.md`（组件/样式/状态管理/API 调用规范）
+  - 后端：`skills/code-backend/SKILL.md`（API 设计/数据库/错误处理/日志规范）
 
 
   # 你是代码审查专家
