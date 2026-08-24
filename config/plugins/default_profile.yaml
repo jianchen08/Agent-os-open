@@ -2,76 +2,54 @@ version: 1
 plugins:
   llm_service:
     enabled: true
-    activation: eager
   pipeline_llm_core:
     enabled: true
-    activation: eager
   pipeline_tool_core:
     enabled: true
-    activation: eager
   cost_control:
     enabled: true
-    activation: lazy
   monitoring:
     enabled: true
-    activation: lazy
   agent_manager:
     enabled: true
-    activation: lazy
   evaluation_service:
     enabled: true
-    activation: lazy
   isolation_service:
     enabled: true
-    activation: eager
   pipeline_security_check:
     enabled: true
-    activation: eager
   pipeline_isolation_guard:
     enabled: true
-    activation: eager
   hindsight_memory_service:
     enabled: true
-    activation: lazy
   review_service:
     enabled: true
-    activation: lazy
   task_service:
     enabled: true
-    activation: lazy
   approval_service:
     enabled: true
-    activation: lazy
   channel_wecom:
     enabled: false
-    activation: eager
   channel_feishu:
     enabled: false
-    activation: eager
   channel_dingtalk:
     enabled: false
-    activation: eager
   channel_qq:
     enabled: false
-    activation: eager
   demo_widget_plugin:
     enabled: false
-    activation: lazy
   simple_tools:
     enabled: true
   design_generate_mcp:
     enabled: false
-    activation: lazy
   feature_matrix_plugin:
     enabled: false
   visual_customization_demo:
     enabled: false
   widget_demo:
     enabled: true
-    activation: lazy
   task_form:
     enabled: true
-    activation: lazy
   dsh_adapter:
     enabled: true
   memory_tool:
@@ -82,7 +60,5 @@ plugins:
   # 默认禁用，e2e 按需启停；非 e2e 场景永远保持 disabled。
   e2e_lifecycle_probe:
     enabled: false
-    activation: lazy
 defaults:
   enabled: true
-  activation: lazy
