@@ -5,6 +5,8 @@ description: 将 docs/tasks/ 下的任务文件和 .project/ 下的项目文档�
 
 # 任务链可视化
 
+> **本技能是流程指引，不是逐条打勾清单**：按场景判断使用，遇不适用情况保持裁量，不机械执行。
+
 ## 描述
 
 读取方案规划阶段产出的任务文件（`docs/tasks/task_XX_*.md`，含 YAML frontmatter）

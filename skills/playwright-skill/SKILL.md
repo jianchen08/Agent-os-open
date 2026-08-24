@@ -24,6 +24,8 @@ metadata:
 
 # Playwright Test Automation
 
+> **本技能是流程指引，不是逐条打勾清单**：按场景判断使用，遇不适用情况保持裁量，不机械执行。
+
 > chromium 与 playwright 库**已预装**，直接 `chromium.launch(headless=True, args=["--no-sandbox"])` 使用，**不要运行 `playwright install`**（会清空已预装的浏览器）。
 
 ## Step 1 — Determine Execution Target
