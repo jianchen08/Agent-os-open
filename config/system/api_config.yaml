@@ -1,6 +1,7 @@
 endpoint:
-  # M5 退役（2026-08-01）：channel_api :8988 已退役，业务 HTTP 经内核 :9100 dispatcher
-  # 走 /ext/channel_api/**。base_url 保留为内核地址。
+  # M5 退役（2026-08-01）：channel_api :8988 已退役；2026-08-21 channel_api 插件
+  # 物理删除（ADR），业务 HTTP 经内核 :9100 dispatcher 走各插件 /ext/<plugin>/**。
+  # base_url 保留为内核地址。
   base_url: http://localhost:9100
   version: v1
   timeout: 30
