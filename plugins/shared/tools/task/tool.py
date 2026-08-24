@@ -1384,7 +1384,12 @@ class TaskTool(BuiltinTool):
             )
 
     async def _delete_task(self, inputs: dict[str, Any], parent_agent_level: int) -> ToolExecutionResult:
-        """删除任务，根据任务类型执行不同策略。"""
+        """删除任务，根据任务类型执行不同策略。
+
+        GAP-1 统一（2026-08-24 修复）：0.2 任务 = 管道（state 单一真值，无
+        YAML 记录）——YAML 存储查不到时回退 state 聚合判定存在性，删除 =
+        调内核 pipeline-executor.delete_pipeline 清管道全部执行数据。
+        """
 
         try:
             task_id = inputs.get("task_id")
@@ -1400,9 +1405,32 @@ class TaskTool(BuiltinTool):
             task = service.get_task(task_id)
 
             if not task:
-                return create_failure_result(
-                    error=f"任务不存在: {task_id}",
-                    error_code="TASK_NOT_FOUND",
+                # 0.2 任务：state 聚合回退（task = pipeline，无 YAML 记录）
+                task = await self._get_task_from_state(task_id)
+                if task is None:
+                    return create_failure_result(
+                        error=f"任务不存在: {task_id}",
+                        error_code="TASK_NOT_FOUND",
+                    )
+                # 0.2 任务删除 = 内核删管道数据（runs/traces/messages/state/checkpoints）
+                if _pipeline_executor is None:
+                    return create_failure_result(
+                        error="pipeline-executor capability 未注入（sidecar 未接线），无法删除任务",
+                        error_code="SERVICE_UNAVAILABLE",
+                    )
+                try:
+                    await _pipeline_executor(
+                        {"method": "delete_pipeline", "params": {"pipeline_id": task_id}}
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    logger.error("[TaskTool] delete_pipeline 失败: %s", exc)
+                    return create_failure_result(
+                        error=f"任务管道删除失败: {exc}",
+                        error_code="DELETE_FAILED",
+                    )
+                return create_success_result(
+                    data={"task_id": task_id, "deleted": True},
+                    metadata={"action": "delete_task"},
                 )
 
             has_permission, error_msg = self._check_permission(task, parent_agent_level, inputs)

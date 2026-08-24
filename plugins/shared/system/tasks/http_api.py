@@ -1166,6 +1166,11 @@ async def delete_task(
     - 容器任务: 软删除（标记取消，保留数据）
     - 非容器任务(容器的子任务): 取消自己及下级管道 + 删除数据（不清理工作空间）
     - 非容器任务(根任务): 取消管道 + 清理工作空间 + 删除数据
+
+    GAP-1 统一（2026-08-24 修复）：0.2 任务 = 管道（state 单一真值，无 YAML
+    记录）——YAML 存储查不到时回退 state 聚合判定存在性，删除 = 调内核
+    pipeline-executor.delete_pipeline 清管道全部执行数据（runs/traces/
+    messages/state/checkpoints + registry 条目）。
     """
 
     task_service = _get_task_service()
@@ -1177,14 +1182,48 @@ async def delete_task(
             message="TaskService 不可用，无法删除任务",
         )
 
+    # ① YAML 面（旧任务/容器任务）：task_service.delete_task 级联清理
     deleted = await task_service.delete_task(task_id)
 
     if not deleted:
-        raise APIError(
-            status_code=404,
-            error_code="API_NOTF_2004",
-            message="任务不存在或已被删除",
+        # ② state 面（0.2 任务）：state 聚合存在性判定 + 内核删管道数据
+        try:
+            handle = _capability("pipeline-state")
+            rows = await handle.call("list", {})
+        except Exception:
+            rows = None
+        row = None
+        if isinstance(rows, list):
+            row = next(
+                (r for r in rows if str(r.get("pipeline_id") or "") == task_id),
+                None,
+            )
+        if row is None:
+            raise APIError(
+                status_code=404,
+                error_code="API_NOTF_2004",
+                message="任务不存在或已被删除",
+            )
+        try:
+            exec_handle = _capability("pipeline-executor")
+            await exec_handle.call("delete_pipeline", {"pipeline_id": task_id})
+        except Exception as exc:  # noqa: BLE001 — 删除失败透传
+            logger.warning(
+                "[tasks http] delete_pipeline 失败 | task_id=%s | err=%s",
+                task_id,
+                exc,
+            )
+            raise APIError(
+                status_code=500,
+                error_code="TASK_DELETE_FAILED",
+                message=f"任务管道删除失败: {exc}",
+            ) from exc
+        logger.info(
+            "用户 %s 删除 0.2 任务（state 面）: %s",
+            _current_user(_user).get("username", "system"),
+            task_id,
         )
+        return {"message": "任务已删除"}
 
     task = task_service.get_task(task_id)
 
