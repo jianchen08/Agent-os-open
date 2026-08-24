@@ -5,11 +5,10 @@
  * - queryKeys.pipelineRuns（GET /api/v1/pipelines/runs，同管道多条 run 去重取最新）
  * - queryKeys.pipelineStates（GET /api/v1/pipelines/state，pipeline_id → 摘要）
  *
- * 轮询语义（替代原 pipelineRegistryStore.startAutoRefresh 的 30s setInterval +
- * visibilitychange 拉取）：
+ * 轮询语义（替代原 pipelineRegistryStore.startAutoRefresh 的 30s setInterval）：
  * - refetchInterval: 30_000 —— 兜底对账频率与旧实现一致
- * - refetchOnWindowFocus: true（queryClient 全局默认已开）——等价旧
- *   visibilitychange 回前台拉取
+ * - refetchOnWindowFocus 全局关闭（2026-08-24）：焦点/可见性事件噪声大
+ *   （最大化、切全屏均触发），新鲜度由 30s 轮询 + WS 事件 invalidate 承担
  * - 页面隐藏自动暂停轮询（refetchIntervalInBackground 默认 false）
  *
  * 组件消费走 usePipelineRunsQuery / usePipelineStatesQuery；非组件代码
@@ -72,7 +71,7 @@ async function fetchStatesForQuery(): Promise<Record<string, PipelineStateInfo>>
   return mapStatesToRecord(items)
 }
 
-/** 管道 runs 快照 query：挂载即拉取 + 30s 兜底轮询 + 窗口聚焦刷新 */
+/** 管道 runs 快照 query：挂载即拉取 + 30s 兜底轮询 */
 export function usePipelineRunsQuery() {
   return useQuery({
     queryKey: queryKeys.pipelineRuns,
@@ -81,7 +80,7 @@ export function usePipelineRunsQuery() {
   })
 }
 
-/** 管道 states 摘要 query：挂载即拉取 + 30s 兜底轮询 + 窗口聚焦刷新 */
+/** 管道 states 摘要 query：挂载即拉取 + 30s 兜底轮询 */
 export function usePipelineStatesQuery() {
   return useQuery({
     queryKey: queryKeys.pipelineStates,

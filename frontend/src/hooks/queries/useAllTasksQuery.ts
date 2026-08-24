@@ -7,8 +7,8 @@
  * 而本 query 保留全量任务（任务节点/任务管道判定权威源），故独立 key
  * （queryKeys.pipelineAllTasks），不与长期任务列表合流。
  *
- * 轮询语义：refetchInterval 30s（与管道注册表同频，等价原本地 interval）+
- * refetchOnWindowFocus（全局默认）替代原 interval 无条件拉取。
+ * 轮询语义：refetchInterval 30s（与管道注册表同频，等价原本地 interval）。
+ * refetchOnWindowFocus 全局关闭（2026-08-24），新鲜度由轮询 + WS 任务事件承担。
  */
 
 import { useQuery } from '@tanstack/react-query'
