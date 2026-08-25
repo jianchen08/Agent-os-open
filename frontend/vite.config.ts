@@ -142,7 +142,6 @@ export default defineConfig(({ mode }) => {
       // react-syntax-highlighter/dist/*）单独列出，noDiscovery 不会自动发现它们。
       noDiscovery: true,
       include: [
-        '@ant-design/colors',
         // —— RJSF 表单引擎依赖链（@rjsf/utils → fast-uri 为 CJS）——
         // noDiscovery 下不进白名单则浏览器逐文件加载原始源码，fast-uri 的
         // CJS export 命中 "does not provide an export named 'default'"，

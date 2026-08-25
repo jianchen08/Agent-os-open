@@ -194,6 +194,49 @@ describe('ChatInput 底部工具栏 — 发送按钮不被挤出', () => {
     )
   })
 
+  it('回车发送：Enter（无 Shift）触发发送并清空输入', () => {
+    const onSendMessage = vi.fn()
+    render(
+      <ChatInput
+        mode="full"
+        onSendMessage={onSendMessage}
+        modelName="deepseek-v3"
+        enableThinkingMode
+        thinkingStrength="medium"
+      />,
+    )
+
+    const textarea = screen.getByTestId('chat-input-textarea')
+    fireEvent.change(textarea, { target: { value: '回车发送' } })
+    fireEvent.keyDown(textarea, { key: 'Enter' })
+
+    expect(onSendMessage).toHaveBeenCalledWith(
+      expect.objectContaining({ content: '回车发送', enableThinking: true }),
+    )
+    // 发送成功后清空输入（发送语义：消息已交出发送，输入框不留残文）
+    expect((textarea as HTMLTextAreaElement).value).toBe('')
+  })
+
+  it('Shift+Enter 不发送（仅换行，onSendMessage 不被调用）', () => {
+    const onSendMessage = vi.fn()
+    render(
+      <ChatInput
+        mode="full"
+        onSendMessage={onSendMessage}
+        modelName="deepseek-v3"
+        enableThinkingMode
+        thinkingStrength="medium"
+      />,
+    )
+
+    const textarea = screen.getByTestId('chat-input-textarea')
+    fireEvent.change(textarea, { target: { value: '多行' } })
+    fireEvent.keyDown(textarea, { key: 'Enter', shiftKey: true })
+
+    expect(onSendMessage).not.toHaveBeenCalled()
+    expect((textarea as HTMLTextAreaElement).value).toBe('多行')
+  })
+
   it('思考强度选择器收到当前强度；点击回调 onThinkingStrengthChange', () => {
     const onThinkingStrengthChange = vi.fn()
     render(
