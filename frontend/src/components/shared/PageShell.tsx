@@ -97,7 +97,7 @@ export function PageShell({
 
   return (
     <div className="bg-background text-foreground flex h-screen flex-col overflow-hidden">
-      {!embedded && (
+      {!embedded ? (
         <header
           className={`flex ${DENSITY_HEADER[density]} shrink-0 items-center gap-3 border-b`}
         >
@@ -113,6 +113,16 @@ export function PageShell({
           )}
           {actions && <div className="ml-auto flex items-center gap-2">{actions}</div>}
         </header>
+      ) : (
+        // embedded 无自身 header，但 actions（如清空/刷新等页面级操作）不能随
+        // header 一起消失——有 actions 时渲染轻量右对齐工具行，无 actions 零渲染
+        actions && (
+          <div
+            className={`flex ${DENSITY_HEADER[density]} shrink-0 items-center justify-end gap-2 border-b px-4`}
+          >
+            {actions}
+          </div>
+        )
       )}
       <main
         aria-label={mainLabel}

@@ -43,6 +43,12 @@ describe('DebugExecutionRecordsPage 清空全部', () => {
     await waitFor(() => expect(mockGetRecords).toHaveBeenCalled())
   })
 
+  it('embedded 面板模式同样渲染清空按钮（PageShell embedded 下 actions 工具行）', async () => {
+    renderWithProviders(<DebugExecutionRecordsPage embedded />)
+    expect(screen.getByRole('button', { name: /清空全部/ })).toBeInTheDocument()
+    await waitFor(() => expect(mockGetRecords).toHaveBeenCalled())
+  })
+
   it('confirm 取消时不调用清理 API', async () => {
     mockConfirm(false)
     const user = userEvent.setup()
