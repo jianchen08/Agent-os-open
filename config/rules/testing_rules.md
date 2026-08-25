@@ -362,7 +362,7 @@ export class LoginPage {
 | `@feature` | **是** | 该测试服务的功能点 ID | 见 `docs/test_traceability.md` 表 A/B（如 `FP-0.2.〇`、`FP-DB`、`FP-MIGR`） |
 | `@vision` | 建议 | 该功能点服务的愿景主线 | `V1 可进化` / `V2 全能闭环` / `V3 可嵌入` / `V4 多用户` / `V5 可扮演` / `V6 可即用` |
 | `@audit` | 按需 | 回应的审查问题编号 | `T5#<n>`（对应 `reports/audit_round3/T5_tests.md` §⑨ 问题清单） |
-| `@ci` | 按需 | 该测试实际进入的 CI job | ci.yml job 名（如 `rust-test` / `python-plugins-test` / `frontend-test` / `timing`） |
+| `@ci` | 按需 | 该测试实际进入的 CI job | ci.yml job 名（如 `rust-test` / `python-coverage` / `frontend-test` / `timing`） |
 
 ### 9.2 文件头格式（按语言）
 
@@ -371,7 +371,7 @@ export class LoginPage {
 **Python**（注释行，多标记用 `|` 分隔在同一行，或拆多行）：
 
 ```python
-# @feature: FP-0.2.〇 管道引擎 | @vision: V3 可嵌入 | @audit: T5#3 | @ci: python-plugins-test
+# @feature: FP-0.2.〇 管道引擎 | @vision: V3 可嵌入 | @audit: T5#3 | @ci: python-coverage
 """模块 docstring（可选）。"""
 ```
 

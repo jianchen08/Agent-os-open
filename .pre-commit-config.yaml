@@ -111,9 +111,6 @@ repos:
               hosts/.*|
               config/templates/.*|
               scripts/agent_prompt_viewer\.py|
-              scripts/diag_create_session\.py|
-              scripts/check_theme_contrast\.py|
-              scripts/browser_tool_call_evidence\.py
           )$
 
       # Format 格式化（在 lint 之后）
@@ -135,9 +132,6 @@ repos:
               hosts/.*|
               config/templates/.*|
               scripts/agent_prompt_viewer\.py|
-              scripts/diag_create_session\.py|
-              scripts/check_theme_contrast\.py|
-              scripts/browser_tool_call_evidence\.py|
               mcp-servers/.*|
               node_modules/.*
           )$
@@ -153,9 +147,9 @@ repos:
         # 允许现有警告（不强制 0 错误），工具本身正常运行即可
         args: [--config-file=pyproject.toml, --no-incremental]
         files: \.py$
-        # 仅检查 src/ 下的 Python 文件;plugins/ 排除——插件 server.py 同名模块
-        # 冲突(mypy duplicate module),且插件域已由 plugins-mypy-baseline 门禁
-        # (run_gates)单独治理,pre-commit 不重复管辖
+        # 实际检查范围：根目录 .py 脚本 + scripts/（src/ 已迁移至 plugins/）。
+        # plugins/ 排除——插件 server.py 同名模块冲突(mypy duplicate module)，
+        # 且插件域已由 plugins-mypy-baseline 门禁(run_gates)单独治理,pre-commit 不重复管辖
         exclude: |
           (?x)^(
               tests/.*|
@@ -169,9 +163,6 @@ repos:
               docs/.*|
               config/templates/.*|
               scripts/agent_prompt_viewer\.py|
-              scripts/diag_create_session\.py|
-              scripts/check_theme_contrast\.py|
-              scripts/browser_tool_call_evidence\.py|
               .*tests/.*|
               .*test_.*\.py$
           )$

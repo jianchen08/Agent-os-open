@@ -37,7 +37,8 @@ taiki-e/install-action）。
 
 门禁归属（非本入口持有、但同为非零退出命令的承诺）：
     pre-commit   → .github/workflows/ci.yml pre-commit job（pre-commit/action）
-    python-e2e   → ci.yml python-e2e job（需内核二进制 + LLM key，CI 专用车道）
+    python-e2e   → .github/workflows/e2e.yml Python E2E job（需内核二进制 + LLM key，
+                   nightly/手动/push main 触发，CI 专用车道）
 """
 
 from __future__ import annotations

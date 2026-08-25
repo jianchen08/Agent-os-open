@@ -26,16 +26,6 @@ import pytest
 #   （均为无断言或命中真实外部 API 的手动脚本，已移入）。
 collect_ignore: list[str] = ["manual"]
 
-# 0.2 架构：src/ 已删除，下列仍依赖旧结构的测试文件跳过收集。
-#   - test_multimodal_capabilities：依赖 llm_config 配置注入链路（未接通，
-#     见 module_migration_plan §2.1 配置注入断链）。待链路修复后迁移。
-#   - test_monitoring_validation：跨多模块（monitoring + agents + channels.cli），
-#     0.2 结构差异大；monitoring 核心已由 test_plugin_smoke_matrix 覆盖加载链路。
-collect_ignore_glob = [
-    "suites/tools/test_multimodal_capabilities.py",
-    "test_monitoring_validation.py",
-]
-
 # ── 报告输出目录 ──────────────────────────────────────────
 REPORT_DIR = os.path.join(os.path.dirname(__file__), "..", "reports")
 

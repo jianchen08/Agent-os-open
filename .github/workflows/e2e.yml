@@ -129,7 +129,6 @@ jobs:
               echo "::endgroup::"
             fi
           done
-          ls plugins/shared/pipeline/output/spill_guard/ || true
 
       - name: Build kernel (release, sccache cached)
         working-directory: kernel

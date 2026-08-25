@@ -64,7 +64,7 @@ RUN ln -sf /usr/local/bin/python3 /usr/local/bin/python
 # 镜像链回退：阿里云 → 清华 tuna → 官方 PyPI
 #
 # 包构成：
-# 1. 原有基础包：pyyaml/pytest/ruff/pip/jsonschema/pydantic/rich/httpx
+# 1. 原有基础包：pyyaml/pytest/ruff/pip/pydantic/rich/httpx
 # 2. 项目运行时依赖(system-issue #1)：pyproject.toml 声明 + 项目实际 import。
 #    agent 在容器里跑项目代码/起 server 时，这些依赖必须就位，否则每次
 #    都要 pip install 重装。补：aiohttp/watchdog/litellm/simpleeval/python-lsp-server
@@ -92,7 +92,7 @@ RUN \
     && pip install --no-cache-dir \
         -i ${PY_MIRROR} --trusted-host ${PY_TRUSTED} \
         "pyyaml>=6.0" "pytest>=8.0" "pytest-asyncio>=0.21" "ruff>=0.4.0" \
-        "jsonschema>=4.0" "pydantic>=2.0" "rich>=13.0" "httpx>=0.27.0" \
+        "pydantic>=2.0" "rich>=13.0" "httpx>=0.27.0" \
         "aiohttp>=3.9" "watchdog>=3.0" "litellm>=1.0" "simpleeval>=1.0" \
         "python-lsp-server>=1.14.0" \
         "fastapi>=0.110" "uvicorn>=0.27" "starlette>=0.36" \
@@ -101,14 +101,14 @@ RUN \
         -i https://pypi.tuna.tsinghua.edu.cn/simple/ \
         --trusted-host pypi.tuna.tsinghua.edu.cn \
         "pyyaml>=6.0" "pytest>=8.0" "pytest-asyncio>=0.21" "ruff>=0.4.0" \
-        "jsonschema>=4.0" "pydantic>=2.0" "rich>=13.0" "httpx>=0.27.0" \
+        "pydantic>=2.0" "rich>=13.0" "httpx>=0.27.0" \
         "aiohttp>=3.9" "watchdog>=3.0" "litellm>=1.0" "simpleeval>=1.0" \
         "python-lsp-server>=1.14.0" \
         "fastapi>=0.110" "uvicorn>=0.27" "starlette>=0.36" \
         "playwright>=1.40" \
     || pip install --no-cache-dir \
         "pyyaml>=6.0" "pytest>=8.0" "pytest-asyncio>=0.21" "ruff>=0.4.0" \
-        "jsonschema>=4.0" "pydantic>=2.0" "rich>=13.0" "httpx>=0.27.0" \
+        "pydantic>=2.0" "rich>=13.0" "httpx>=0.27.0" \
         "aiohttp>=3.9" "watchdog>=3.0" "litellm>=1.0" "simpleeval>=1.0" \
         "python-lsp-server>=1.14.0" \
         "fastapi>=0.110" "uvicorn>=0.27" "starlette>=0.36" \

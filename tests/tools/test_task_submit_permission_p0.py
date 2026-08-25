@@ -1,3 +1,4 @@
+# @feature: FP-0.2.二 权限校验 | @ci: python-coverage
 """P0-3 task_submit 权限面修复测试（TDD）。
 
 回归安全缺口：``task_submit`` 完全无 ``_check_permission``——``_validate_parent_task_id``

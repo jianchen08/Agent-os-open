@@ -19,8 +19,3 @@ for _d in (_CONNECTORS_DIR, _SYSTEM_DIR):
     _s = str(_d)
     if _s not in sys.path:
         sys.path.insert(0, _s)
-
-
-# test_integration.py 依赖 0.1 的 channels.input_adapter/output_adapter 通用接口
-#（0.2 各通道各自定义，无统一抽象），需重构测试逻辑，属 Phase 1d。
-collect_ignore = ["test_integration.py"]

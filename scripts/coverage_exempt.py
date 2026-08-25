@@ -85,8 +85,10 @@ BASE_TEST_PATHS: list[str] = [
     "plugins/shared/tools/test_workspace_aware.py",
 ]
 
-# 外部依赖 marker 过滤（与原 ci.yml 一致：排除需真实 API/Redis/DB/bwrap 的用例）。
-MARKER_FILTER = "not requires_api and not requires_redis and not requires_db and not requires_bwrap"
+# 外部依赖 marker 过滤（requires_api/requires_redis/requires_db/requires_bwrap
+# 标记已于 2026-08-25 清理——全仓零使用；原过滤表达式随之清空，两侧 gate
+# 的 -m 参数与无过滤等价，保留该参数形态以防未来新增外部依赖标记时单点加回）。
+MARKER_FILTER = ""
 
 
 @dataclass(frozen=True)

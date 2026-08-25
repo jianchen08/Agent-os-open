@@ -1,12 +1,12 @@
 # @feature: FP-0.2.二 可观测性 | @vision: V3 可嵌入 | @ci: python-coverage
-"""monitoring 插件 execution/records + sessions token-usage 域测试（channel_api 退役批次 2 自持承接）。
+"""monitoring 插件 execution/records + sessions token-usage 域测试。
 
 覆盖（对齐原 tests 语义 + 新 http.handle 分发层）：
 1. GET /execution/records —— 单会话模式（seq 升序读入 → 最新在前）+ 全会话模式
    （最近 N 个去重管道消息拼装全局倒序，同管道多 run 去重）
 2. GET /execution/records/sessions —— pipeline-runs + pipeline-state 聚合（标题/消息数）
 3. GET group-summary / tree/{sid} / {rid}/children / {rid} —— 空结构与单条查找
-4. DELETE {rid} / DELETE session/{sid} / POST clear-all —— 读面无删除，成功形态
+4. POST clear-all —— 全量清理（内核 9 表 + registry + payload_diag 快照文件）
 5. GET /sessions/{sid}/total-token-usage —— state 行 token 累计 + run 请求数
 6. GET /sessions/{sid}/context-token-usage —— 估算形态（is_estimated）
 7. 降级路径：provider 未注入 → HTTP 200 空载荷（前端契约不破坏）
@@ -347,26 +347,6 @@ def test_record_get_not_found(server: Any, kr: Any) -> None:
     assert body == {"id": "ghost", "session_id": "", "message_data": {}, "created_at": ""}
 
 
-def test_record_delete(server: Any, kr: Any) -> None:
-    """删除单条：读面无删除 → 成功形态（前端消费）。"""
-    install_providers(kr)
-    status, body = _decode_http(_call(
-        server, path="/ext/monitoring/execution/records/m1", method="DELETE",
-    ))
-    assert status == 200
-    assert body == {"success": True, "message": "记录已删除", "id": "m1"}
-
-
-def test_records_delete_by_session(server: Any, kr: Any) -> None:
-    """按会话删除：成功形态 + deleted_count 0。"""
-    install_providers(kr)
-    status, body = _decode_http(_call(
-        server, path="/ext/monitoring/execution/records/session/p1", method="DELETE",
-    ))
-    assert status == 200
-    assert body == {"success": True, "deleted_count": 0, "session_id": "p1"}
-
-
 def test_records_clear_all_success(server: Any, kr: Any, tmp_path: Path, monkeypatch: Any) -> None:
     """清空所有记录（stub 做实 2026-08-24）：内核清理信封 + payload_diag 文件清理。
 
@@ -581,7 +561,7 @@ def test_on_load_injects_kernel_reads_providers(server: Any, kr: Any) -> None:
     _run(server._on_load({}))
 
     assert sorted(kr._PROVIDERS) == [
-        "db-admin", "db-admin-clear", "messages", "pipeline-runs", "pipeline-state",
+        "db-admin-clear", "messages", "pipeline-runs", "pipeline-state",
     ]
     # 注入的 provider 可真实调用（service-registry 信封 → kernel_reads._rows 收敛）
     rows = _run(kr.list_pipeline_runs())

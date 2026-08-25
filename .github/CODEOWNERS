@@ -51,7 +51,6 @@
 /pyproject.toml @jianchen08
 /package.json @jianchen08
 /docker-compose.yml @jianchen08
-/Dockerfile @jianchen08
 /.pre-commit-config.yaml @jianchen08
 
 # ============================================================

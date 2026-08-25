@@ -26,7 +26,7 @@
 #   - sccache 加速 Rust 编译（RUSTC_WRAPPER）
 #
 # 权限：PR 级流水线最小权限（contents: read），不持有任何写权限；
-#       发布链见 release.yml（Phase 3，暂未创建）。
+#       发布链见 release.yml（Phase 3，2026-08-23 已创建，tag v* 触发，持 contents: write）。
 # 汇总门禁：all-checks-passed 是分支保护唯一入口（Phase 1，2026-08-23），
 #       新增/删除 PR job 时同步更新其 needs 列表。
 # ============================================================
@@ -432,7 +432,8 @@ jobs:
   # 专门运行标记了 @pytest.mark.timing 的用例（事件顺序 / 间隔 / 超时边界）。
   # 与单元测试 stage 隔离运行（避免真实延迟影响主套件稳定性）；
   # 失败**直接拦截合并**，与单测同级，禁止降级为 warning 或 `|| true`。
-  # 当前覆盖：isolation docker 超时边界（3）+ rate_limiter 窗口过期边界（2）。
+  # 当前覆盖：test_isolation_docker_timeout.py 超时边界（3 个 @pytest.mark.timing）
+  #   + test_pipeline_stability.py 事件循环时序（1 个），见 run_gates.py timing-gate。
   timing:
     name: Timing Gate (时序不变量, 独立阻塞)
     runs-on: ubuntu-latest

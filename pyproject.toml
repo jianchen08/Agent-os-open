@@ -19,14 +19,9 @@ dependencies = [
     "litellm>=1.96.2",
     "pydantic>=2.0",
     "pydantic-settings>=2.0",
-    "jsonschema>=4.0",
     "python-lsp-server>=1.14.0",
-    "fastapi>=0.110",
-    "python-multipart>=0.0.31",
-    "redis>=5.0",
     "cryptography>=42.0",
     "psutil>=5.9",
-    "watchfiles>=0.21",
     "httpx>=0.27",
     "sqlalchemy>=2.0",
     "python-dotenv>=1.2.2",
@@ -45,6 +40,9 @@ dev = [
     "pytest-cov>=4.0",
     "mypy>=1.10",
     "ruff>=0.5",
+    # fastapi：仅 tests/test_config_management.py、tests/test_new_project_e2e.py
+    # 两个测试文件 import（TestClient/声明式 schema），运行测试才需要
+    "fastapi>=0.110",
     # e2e（tests/e2e_02）：WS 流式链路测试需要
     "websockets>=13.0",
 ]
@@ -67,22 +65,14 @@ asyncio_mode = "auto"
 log_cli = false
 log_cli_level = "WARNING"
 # --strict-markers：未在下方注册的 marker 直接报错，防止动态未登记的标记再出现。
-# 不在此处设全局 -m 排除：各 CI job 已按需调度外部依赖测试
-#（llm-e2e 用 -m requires_api，e2e 靠 RUN_LLM_E2E 门控），全局排除会改变现有语义。
+# 不在此处设全局 -m 排除：各 CI job 已按需调度测试（e2e 由 e2e.yml 车道单独执行），
+# 全局排除会改变现有语义。
 addopts = ["--strict-markers"]
 markers = [
     "unit: 单元测试",
     "integration: 集成测试",
     "e2e: 端到端测试",
-    "slow: 慢速测试",
-    "requires_api: 需要真实 API 的测试",
-    "requires_redis: 需要 Redis 的测试",
-    "requires_db: 需要数据库的测试",
-    "requires_bwrap: 需要真实 bubblewrap (bwrap) 的集成测试",
-    "offline: 可离线运行的测试",
-    # ── 时序/稳定性门禁（§9.4/§6.4）──
     "timing: 关键时序不变量（事件顺序/间隔/超时边界），独立 stage 阻塞门禁",
-    "soak: 长时间渗漏与稳定性回归（资源回收/RSS斜率/任务累积）",
     # ── tests/suites/__init__.py 动态注册的标记（此处静态登记以配合 --strict-markers）──
     "core: 核心单元测试",
     "m6: M6插件测试",
@@ -270,11 +260,12 @@ module = [
 ignore_missing_imports = true
 
 # ============================================================
-# 覆盖率配置（阶段 2.1，对照 testing_rules §3 / 表 D）
+# 覆盖率配置（对照 testing_rules §3 / 表 D）
 # ============================================================
 # source 限定 plugins（0.2 架构的 Python 代码主体）；omit 排除测试自身与 SDK 桩。
 # 分级目标见 docs/test_traceability.md 表 D（core/tools P1、其余 P2）。
-# CI 门禁：python-plugins-test job 的 --cov-fail-under（起手下限，只升不降）。
+# CI 门禁：python-coverage job 的整体覆盖率基线锁
+#   （.github/python-coverage-baseline.txt，只升不降，取代旧 fail-under 静态地板）。
 [tool.coverage.run]
 source = ["plugins"]
 omit = [

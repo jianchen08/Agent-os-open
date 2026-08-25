@@ -41,8 +41,6 @@ tool_cache:
     resource_merge:
       enabled: true
       ttl: 300
-    state_update:
-      enabled: false
     task_submit:
       enabled: false
     task_manage:
@@ -209,18 +207,7 @@ tools:
   - merge
   - rollback
   - resource
-- name: state_update
-  description: '在工作流执行过程中更新共享状态变量。适用场景：更新重试计数器、在工作流节点间传递累计结果、更新工作流级状态变量。不适用场景：仅需在节点内部使用临时变量时、需要更新数据库记录时（使用持久化工具）。注意事项：更新的变量会被添加到shared_variables中；支持increment(增量)和append(追加)操作；context参数用于获取当前状态值。示例：{"updates":
-    {"retry_count": {"operation": "increment", "value": 1}}} 表示将retry_count增加1'
-  category: system
-  level: system
-  requires_approval: false
-  dangerous_operations: []
-  tags:
-  - workflow
-  - state
-  - system
-- name: todo_write
+  - name: todo_write
   description: TODO 清单管理：write(创建清单，传入字符串列表)、read(读取清单)、update(更新状态)、clear(清空)。
   category: task
   level: system

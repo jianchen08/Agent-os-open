@@ -176,6 +176,15 @@ kernel/schema_tmp.json
 *.dll
 *.so
 
+# ─── 运行时 PID/端口状态文件（启动/自检脚本临时写盘，不入库）───
+.kernel_pid
+.kernel_pid_now
+.e2e_child
+.e2e_final_thread
+.ports_02
+.ports_02.lock
+.ports_0*
+
 # uv（python 包装载插件 python_packager）sidecar venv 不入库
 .venv/
 # hindsight_memory 第二 venv（API 服务器栈，mcp 1.x 与 SDK 的 mcp 2.x 互斥故独立）
