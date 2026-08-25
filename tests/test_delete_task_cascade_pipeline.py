@@ -27,18 +27,27 @@ from tasks.service import TaskService
 
 @pytest.fixture(autouse=True)
 def _tasks_path_guard():
-    """每个测试执行前锁定 tasks 插件目录为 sys.path[0] 并摘除 storage 槽位。
+    """每个测试执行前锁定 tasks 插件目录为 sys.path[0]，结束后恢复。
 
     同 suites/core 的守卫：其他插件测试的 autouse fixture（如 multimodal）
     会把各自目录推到 sys.path[0] 且不恢复，tasks 测试运行期懒加载
     `from storage import TaskStorage` 依赖 sys.path 首位是本插件目录。
-    task_types 必须保留——测试模块收集期绑定的 TaskStatus 实例依赖其驻留。
+    用例结束后恢复原路径序——tasks 目录驻留会压制 system/workspace/ 的
+    namespace 包（tasks/workspace.py 裸模块优先于包）。task_types 必须
+    保留——测试模块收集期绑定的 TaskStatus 实例依赖其驻留。
     """
+    _saved = sys.path[:]
     _s = str(_TASKS_DIR)
     if sys.path[0] != _s:
+        # 先去重再插到最前：重复副本会让"移除一个副本"的测试（如
+        # test_migration_batch3 的 workspace 包解压）残留另一副本，继续
+        # 压制 namespace 包解析。
+        sys.path[:] = [p for p in sys.path if p != _s]
         sys.path.insert(0, _s)
     sys.modules.pop("storage", None)
     yield
+    sys.path[:] = _saved
+    sys.modules.pop("storage", None)
 
 
 def _make_service() -> TaskService:

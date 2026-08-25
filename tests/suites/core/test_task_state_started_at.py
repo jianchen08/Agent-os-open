@@ -7,12 +7,43 @@ start_task / resume_task / reset_to_pending 对 started_at 有设/留/清语义�
 
 from __future__ import annotations
 
+import sys
 import tempfile
 from datetime import datetime
+from pathlib import Path
 
 import pytest
-from service import TaskService
-from task_types import TaskStatus
+
+# 收集期路径自持：pytest 收集 tests/plugins/ 等包内测试目录时会把它 prepend
+# 到 sys.path[0] 且驻留（如 tests/plugins/system/tasks/、human 的 service.py
+# 同名劫持），本文件模块级 `from service import TaskService` 必须解析到
+# plugins/shared/system/tasks/——无条件前置本插件目录（先去重）。
+_TASKS_DIR = Path(__file__).resolve().parents[3] / "plugins" / "shared" / "system" / "tasks"
+_SHARED_DIR = _TASKS_DIR.parent.parent
+for _d in (_SHARED_DIR, _TASKS_DIR):
+    _s = str(_d)
+    if _s in sys.path:
+        sys.path.remove(_s)
+    sys.path.insert(0, _s)
+sys.modules.pop("service", None)
+sys.modules.pop("storage", None)
+
+import task_types as _task_types_module  # noqa: E402
+from service import TaskService  # noqa: E402
+from task_types import TaskStatus  # noqa: E402
+
+
+@pytest.fixture(autouse=True)
+def _pin_task_types():
+    """固定 task_types 槽位为收集期绑定的实例。
+
+    tests/plugins 等套件的 fixture 运行期会 pop/重导 task_types（制造新代际），
+    使 `_task_crud`/`_task_state` 内懒加载的 TaskStatus 与测试模块绑定的
+    枚举实例分叉（== 比较失败）。本 fixture 在每个用例前把本文件收集期
+    绑定的版本写回 sys.modules，保证执行链内枚举同源。
+    """
+    sys.modules["task_types"] = _task_types_module
+    yield
 
 
 def _make_service() -> TaskService:

@@ -43,5 +43,10 @@ def add_plugin_dir(category: str, name: str) -> None:
     _added.add(d)
     # 同名裸模块逐出：pytest 收集时各文件模块级代码按顺序执行，
     # 后收集的测试可能命中先导入的 plugin 模块缓存，必须每次逐出。
-    for m in ("plugin", "tool", "types", "models"):
+    # service/storage/policy/sensitive_paths 等平铺兄弟模块同理——同进程
+    # 其他插件测试（如 tasks/suites）收集时已把各自的 service.py 驻留进
+    # sys.modules，本插件 plugin.py 的 `from service import` 需重解析到
+    # 本目录（含 service.py 的插件：security_check 等）。
+    for m in ("plugin", "tool", "types", "models", "service", "storage", "policy",
+              "sensitive_paths", "interfaces", "isolation_level", "workspace"):
         sys.modules.pop(m, None)

@@ -83,6 +83,20 @@ BASE_TEST_PATHS: list[str] = [
     "plugins/shared/tools/download/",
     "plugins/shared/tools/triggers_ext/",
     "plugins/shared/tools/test_workspace_aware.py",
+    # 2026-08-25 批次E：散落测试全绿接入插桩车道（本地全车道共跑 2371 全绿后纳入）。
+    # tests/suites（含 core/task 等平铺 import 套件，task_types 独占模块双实例
+    # 根因已修：根 conftest 逐出名单去独占名 + 运行期路径守卫）、connectors（0.2
+    # 连接器平铺 import）、unit（含 channel_migration 六通道插件契约）、monitoring
+    # （0.2 监控模块）、multimodal（storage 槽位收敛）、顶层任务契约与权限测试。
+    "tests/suites/",
+    "tests/connectors/",
+    "tests/unit/",
+    "tests/monitoring/",
+    "tests/multimodal/",
+    "tests/test_delete_task_cascade_pipeline.py",
+    "tests/tools/test_task_submit_permission_p0.py",
+    "tests/tools/test_task_permission_p0.py",
+    "tests/tools/test_memory_idor_p0.py",
 ]
 
 # 外部依赖 marker 过滤（requires_api/requires_redis/requires_db/requires_bwrap

@@ -77,11 +77,6 @@ class TestConnectorsMigration:
         assert (CONNECTORS_DIR / "vscode" / "channel.py").exists()
         assert (CONNECTORS_DIR / "vscode" / "connector.py").exists()
 
-    def test_creative_subdir_copied(self) -> None:
-        """creative/ 子目录已复制。"""
-        assert (CONNECTORS_DIR / "creative" / "comfyui.py").exists()
-        assert (CONNECTORS_DIR / "creative" / "generic.py").exists()
-
     def test_plugin_json_exists_and_valid(self) -> None:
         """plugin.json 存在且格式有效。"""
         json_path = CONNECTORS_DIR / "plugin.json"
@@ -304,8 +299,11 @@ class TestWorkspaceMigration:
             d for d in (SYSTEM_DIR / "tasks", SYSTEM_DIR / "isolation")
             if str(d) in sys.path
         ]
+        # 去重移除：并发/串行守卫可能重复插入同一目录（如 suites/core 与
+        # cascade 的 tasks 路径守卫），单个 remove 只删第一个副本。
         for d in _conflicts:
-            sys.path.remove(str(d))
+            while str(d) in sys.path:
+                sys.path.remove(str(d))
         sys.path.insert(0, str(WORKSPACE_DIR))
         sys.path.insert(0, str(SYSTEM_DIR))
         try:

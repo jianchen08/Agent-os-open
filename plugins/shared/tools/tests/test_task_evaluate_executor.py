@@ -40,7 +40,17 @@ for _d in _PLUGIN_PATHS:
 
 @pytest.fixture(autouse=True)
 def _ensure_plugin_paths():
-    """平铺串扰自持：每用例前重插目录（对齐 test_task_evaluate_migration）。"""
+    """平铺串扰自持：每用例前把 task_evaluate 目录提到 sys.path[0]。
+
+    其他插件目录（如 task/）先收集时会占住 sys.path[0]，server.py 的
+    ``import tool`` 会劫持到 task 插件的 tool（无 set_state_writer →
+    AttributeError）。无条件前置 + 逐出 tool 槽位，保证解析到本插件。
+    """
+    _te = str(_TE_DIR)
+    if _te in sys.path:
+        sys.path.remove(_te)
+    sys.path.insert(0, _te)
+    sys.modules.pop("tool", None)
     for _d in _PLUGIN_PATHS:
         if _d not in sys.path:
             sys.path.insert(0, _d)

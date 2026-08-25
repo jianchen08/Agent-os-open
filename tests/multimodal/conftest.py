@@ -19,8 +19,9 @@ _REPO_ROOT = Path(__file__).resolve().parents[2]
 _MULTIMODAL_DIR = _REPO_ROOT / "plugins" / "shared" / "system" / "multimodal"
 
 _s = str(_MULTIMODAL_DIR)
-if _s not in sys.path:
-    sys.path.insert(0, _s)
+# 不做模块级 insert：驻留会污染同进程后续文件收集的 sys.path[0]（tasks/
+# security 等插件测试的懒加载解析错位）。本目录测试文件各自文件级锁定
+# （test_disk_storage.py），运行期由下方 autouse fixture 锁定。
 
 import pytest
 

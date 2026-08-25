@@ -27,8 +27,9 @@ import pytest
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 _TS_DIR = _REPO_ROOT / "plugins" / "shared" / "tools" / "task_submit"
 for _p in (str(_TS_DIR),):
-    if _p not in sys.path:
-        sys.path.insert(0, _p)
+    if _p in sys.path:
+        sys.path.remove(_p)
+    sys.path.insert(0, _p)
 # 弹出可能被先前测试缓存为别的 tool.py 的同名模块，确保本次拿到 task_submit 的 tool。
 for _m in ("tool",):
     sys.modules.pop(_m, None)

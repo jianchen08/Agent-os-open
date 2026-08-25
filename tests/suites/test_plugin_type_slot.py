@@ -17,7 +17,22 @@ _SHARED = Path(__file__).resolve().parents[2] / "plugins" / "shared"
 if str(_SHARED) not in sys.path:
     sys.path.insert(0, str(_SHARED))
 
-from pipeline.plugin_types import PluginTypeSlot
+import pipeline.plugin_types as _plugin_types_module  # noqa: E402
+from pipeline.plugin_types import PluginTypeSlot  # noqa: E402
+
+
+@pytest.fixture(autouse=True)
+def _pin_pipeline_types():
+    """固定 pipeline.plugin_types 槽位为收集期绑定的实例。
+
+    tests/plugins 的裸名治理 hook 运行期会逐出 `pipeline.*` 子树
+    （_COLLIDING_NAMES 含 pipeline），PluginContext.__post_init__ 懒加载
+    会生成新代际 PluginTypeSlot 类，与测试模块绑定的类实例分叉
+    （isinstance 失败）。本 fixture 在每个用例前把收集期绑定的版本
+    写回 sys.modules 子树，保证执行链内类同源。
+    """
+    sys.modules["pipeline.plugin_types"] = _plugin_types_module
+    yield
 
 # ────────────────────────────────────────────────────────
 # 注册 API 测试

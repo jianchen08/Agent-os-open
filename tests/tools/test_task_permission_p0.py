@@ -29,8 +29,9 @@ _REPO_ROOT = Path(__file__).resolve().parents[2]
 _TASK_DIR = _REPO_ROOT / "plugins" / "shared" / "tools" / "task"
 _TASKS_DIR = _REPO_ROOT / "plugins" / "shared" / "system" / "tasks"
 for _p in (str(_TASK_DIR), str(_TASKS_DIR)):
-    if _p not in sys.path:
-        sys.path.insert(0, _p)
+    if _p in sys.path:
+        sys.path.remove(_p)
+    sys.path.insert(0, _p)
 # 整 suite 收集时弹出先前测试缓存的可能同名平铺模块，避免 tool.py 的
 # `from service import …` / `from task_types import …` 命中错误缓存。
 # task_types/agents_types 是 tasks 插件独占模块（全仓无同名竞争者），
