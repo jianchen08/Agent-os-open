@@ -1,4 +1,4 @@
-# @feature: FP-0.2.二 工具面加载期漂移检测 | @ci: none-local
+# @feature: FP-0.2.二 工具面加载期漂移检测 | @ci: python-coverage
 """tool_schema 加载期漂移检测测试（2026-08-20 F5）。
 
 锁一件事：agent tool_ids 引用了注册表不存在的工具时，组装期必须报警暴露

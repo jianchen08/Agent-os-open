@@ -1,4 +1,4 @@
-# @feature: FP-0.2.一 插件协议（生命周期插件） | @ci: none-local（不在任何 CI 车道：python-coverage 的 BASE_TEST_PATHS 未收集本文件）
+# @feature: FP-0.2.一 插件协议（生命周期插件） | @ci: python-coverage
 """workspace_lifecycle / environment_lifecycle 插件测试。
 
 验证（多循环体 init/exit 分发）：

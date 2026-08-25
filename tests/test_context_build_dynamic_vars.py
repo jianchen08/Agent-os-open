@@ -1,4 +1,4 @@
-# @feature: FP-0.2.二 dynamic_vars 配置装载与零兜底 | @ci: none-local
+# @feature: FP-0.2.二 dynamic_vars 配置装载与零兜底 | @ci: python-coverage
 """context_build / prompt_build 的 dynamic_vars 三层契约（F9）。
 
 锁三件事：

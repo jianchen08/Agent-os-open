@@ -1,4 +1,4 @@
-# @feature: FP-0.2.二 模型适配插件（model_prompt_adapter） | @ci: none-local
+# @feature: FP-0.2.二 模型适配插件（model_prompt_adapter） | @ci: python-coverage
 """pipeline_model_prompt_adapter 插件单元测试。
 
 覆盖：首轮窗口判据（len(messages) <= 1）、规则命中与通配路由、

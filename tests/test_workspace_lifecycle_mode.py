@@ -1,4 +1,4 @@
-# @feature: FP-MIGR 工作空间拓扑解耦 | @ci: none-local
+# @feature: FP-MIGR 工作空间拓扑解耦 | @ci: python-coverage
 """workspace_lifecycle 拓扑决策测试：workspace_mode 驱动（与隔离解耦）。
 
 验证：

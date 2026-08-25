@@ -1,4 +1,4 @@
-# @feature: FP-0.2.二 agent yaml 加载可观测（兜底反模式审查 P3） | @ci: none-local
+# @feature: FP-0.2.二 agent yaml 加载可观测（兜底反模式审查 P3） | @ci: python-coverage
 """context_build agent yaml 加载失败的可观测性契约（P3）。
 
 锁两件事：

@@ -1,4 +1,4 @@
-# @feature: FP-0.2.二 tool_schema_validator 解析失败不吞错 | @ci: none-local
+# @feature: FP-0.2.二 tool_schema_validator 解析失败不吞错 | @ci: python-coverage
 """tool_schema_validator 拦截契约 — 单元测试。
 
 验证核心契约：缺 required 参数 / 无法自动修复的类型不匹配时，
