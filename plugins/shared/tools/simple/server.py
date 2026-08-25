@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""简单工具 MCP 服务端——将 11 个简单工具封装为 MCP 服务。
+"""简单工具 MCP 服务端——将 10 个简单工具封装为 MCP 服务。
 
 从 0.1 src/tools/builtin/ 迁移，提取核心逻辑为纯函数注册。
 """
@@ -42,14 +42,12 @@ from system_tools import (
 )
 from workflow_tools import (
     COMPATIBILITY_CHECKER_SCHEMA,
-    STATE_UPDATE_SCHEMA,
     compatibility_checker,
-    state_update,
 )
 
 
 def create_plugin() -> AgentOSPlugin:
-    """创建包含全部 11 个简单工具的 AgentOSPlugin 实例。"""
+    """创建包含全部 10 个简单工具的 AgentOSPlugin 实例。"""
     plugin = AgentOSPlugin("simple_tools")
 
     plugin.register_tool("unit_converter", UNIT_CONVERTER_SCHEMA, unit_converter, "单位换算工具")

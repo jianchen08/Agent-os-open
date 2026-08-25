@@ -47,15 +47,15 @@ class TestSimplePluginJson:
         assert data["host_type"] == "sidecar"
         assert "entry" in data
 
-    def test_plugin_json_has_11_tools(self):
+    def test_plugin_json_has_10_tools(self):
         data = json.loads((SIMPLE_DIR / "plugin.json").read_text(encoding="utf-8"))
         tools = data["capabilities"]["tools"]
-        assert len(tools) == 11
+        assert len(tools) == 10
         tool_names = {t["name"] for t in tools}
         expected = {
             "unit_converter", "scientific_calculator", "yaml_validate",
             "binary_converter", "ide_get_selection", "ide_open_file",
-            "ide_show_diff", "state_update", "compatibility_checker",
+            "ide_show_diff", "compatibility_checker",
             "read_execution_detail", "register_resource",
         }
         assert tool_names == expected
@@ -94,8 +94,8 @@ class TestSimpleServerImport:
         assert isinstance(plugin, AgentOSPlugin)
         assert plugin.name == "simple_tools"
 
-    def test_tool_registry_has_11_tools(self):
-        assert len(_load_simple_server().TOOL_REGISTRY) == 11
+    def test_tool_registry_has_10_tools(self):
+        assert len(_load_simple_server().TOOL_REGISTRY) == 10
 
     def test_all_tools_registered(self):
         plugin = _load_simple_server().create_plugin()
@@ -103,7 +103,7 @@ class TestSimpleServerImport:
         expected = {
             "unit_converter", "scientific_calculator", "yaml_validate",
             "binary_converter", "ide_get_selection", "ide_open_file",
-            "ide_show_diff", "state_update", "compatibility_checker",
+            "ide_show_diff", "compatibility_checker",
             "read_execution_detail", "register_resource",
         }
         assert registered == expected
@@ -199,29 +199,6 @@ class TestYamlValidate:
         )
         assert result["valid"] is False
         assert any("version" in e for e in result["errors"])
-
-
-class TestStateUpdate:
-    """工作流状态更新测试。"""
-
-    @pytest.mark.asyncio
-    async def test_direct_assignment(self):
-        from workflow_tools import state_update
-
-        result = await state_update(updates={"key1": "value1", "count": 42})
-        assert result["success"] is True
-        assert result["updates"]["key1"] == "value1"
-        assert result["updates"]["count"] == 42
-
-    @pytest.mark.asyncio
-    async def test_increment_operation(self):
-        from workflow_tools import state_update
-
-        result = await state_update(
-            updates={"retry_count": {"operation": "increment", "value": 1}}
-        )
-        assert result["success"] is True
-        assert result["updates"]["retry_count"] == 1
 
 
 class TestCompatibilityChecker:
