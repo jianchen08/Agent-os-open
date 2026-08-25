@@ -37,9 +37,12 @@ commit 前的调查/验证工作尽量用未跟踪文件（`??` 状态）或文�
   LLM 工具**声明即注册**（无需类型豁免）；`capabilities.services` = 内部服务方法元数据。
   工具声明要带 `output_schema` + `render`（工具契约，tool_core 校验 fail-closed，
   前端按 render 意图路由）。插件放 `plugins/shared/{system,tools,pipeline}/<name>/`。
-- **内核只落库**：评估闸门判定已出内核——插件裁决（`evaluation/`），内核只记录结果。
-  任务完成必须过评估（无证据 → `pending_evaluation`）。agent 配置也出内核
-  （`context_build` 自持加载）。
+- **评估闸门：插件判定，内核只落库**：判定逻辑已从内核**移出**归插件——评估裁决
+  在 `plugins/shared/system/evaluation/`（task_evaluate 工具），放行检测在管道
+  output 步骤 task_reminder（提醒耗尽仍无评估证据 → `task.status =
+  pending_evaluation`，不落 completed；有证据内核才补落默认 completed）；内核不
+  做判定，只经 pipeline-state 写面记录结果。agent 配置加载同样已移出内核，由
+  管道输入插件 `context_build` 自持（`plugins/shared/pipeline/input/context_build/`）。
 - **任务默认隔离执行**：默认工作空间 `workspace/{task_id}` + isolated。
 - **工具面过滤**：LLM 可见工具由 `config/agents/main/agentos.yaml`（及
   `executor/general_agent.yaml`）的 `tool_ids` 白名单控制，新工具记得加入。
