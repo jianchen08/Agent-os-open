@@ -35,5 +35,5 @@
 # 归因：串扰中央修复（conftest 钩子按 pluginmanager 定位 + 裸名逐出扩容）、
 # 孤儿测试删除（task_event_receiver）、API 漂移对齐 9 文件、task_submit
 # 漏 await 真 bug 修复。CI（Linux）实测高于本地则以 CI 为准回调。
-plugins-coverage_failed=19
 plugins-heavy_failed=0
+plugins-coverage_failed=0
