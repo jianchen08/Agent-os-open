@@ -294,14 +294,17 @@ class MediaReviewService:
             fmt = img.format or ""
             aspect_ratio = round(width / height, 4) if height > 0 else 0.0
 
-            # 提取 EXIF（异常上抛由外层统一记录：元数据提取失败不阻断审查）
+            # 提取 EXIF：未知 tag 名映射失败/bytes 值跳过该条，不阻断其余元数据
             exif: dict[str, Any] = {}
             raw_exif = img.getexif()
             if raw_exif:
                 for tag_id, value in raw_exif.items():
                     from PIL.ExifTags import Base as ExifBase  # noqa: PLC0415
 
-                    tag_name = ExifBase(tag_id).name
+                    try:
+                        tag_name = ExifBase(tag_id).name
+                    except (ValueError, TypeError):
+                        continue
                     if isinstance(value, bytes):
                         continue
                     exif[tag_name] = value
