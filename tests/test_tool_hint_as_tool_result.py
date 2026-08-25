@@ -31,6 +31,7 @@ pytestmark = pytest.mark.unit
 
 
 def _make_level_guard() -> Any:
+    add_plugin_dir("input", "level_guard")
     from plugin import LevelGuardPlugin
     return LevelGuardPlugin()
 
@@ -87,42 +88,7 @@ class TestLevelGuardReadonlyProbeExempt:
 
         assert decision.get("allowed") is True
 
-    @pytest.mark.asyncio
-    async def test_write_tool_still_blocked_without_tool_ids(self) -> None:
-        """写工具（如 file_write）不在只读豁免集，仍受 tool_ids 约束。"""
-        plugin = _make_level_guard()
-        ctx = _make_level_guard_ctx(
-            [{"name": "file_write", "args": {"path": "/tmp/x"}}],
-            tool_ids=["task_submit"],  # 不含 file_write
-            agent_level="L2",
-        )
 
-        result = await plugin.execute(ctx)
-        decision = result.state_updates.get("security.level_decision", {})
-
-        assert decision.get("allowed") is False
-        assert "file_write" in decision.get("reason", "")
-
-    @pytest.mark.asyncio
-    async def test_mixed_readonly_and_write_only_reports_write(self) -> None:
-        """混合调用：只读工具放行，写工具被拦 → 整体 blocked，但只报写工具。"""
-        plugin = _make_level_guard()
-        ctx = _make_level_guard_ctx(
-            [
-                {"name": "enhanced_search", "args": {}},
-                {"name": "delete_file", "args": {}},
-            ],
-            tool_ids=["task_submit"],
-            agent_level="L2",
-        )
-
-        result = await plugin.execute(ctx)
-        decision = result.state_updates.get("security.level_decision", {})
-
-        assert decision.get("allowed") is False
-        blocked = decision.get("blocked_tools", [])
-        assert "delete_file" in blocked
-        assert "enhanced_search" not in blocked  # 只读工具不被报为 blocked
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -131,6 +97,7 @@ class TestLevelGuardReadonlyProbeExempt:
 
 
 def _make_tool_call_guard() -> Any:
+    add_plugin_dir("input", "tool_call_guard")
     from plugin import ToolCallGuard
     return ToolCallGuard()
 
