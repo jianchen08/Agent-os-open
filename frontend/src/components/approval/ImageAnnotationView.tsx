@@ -91,7 +91,7 @@ export function ImageAnnotationView({
               >
                 {/* 编号标记 */}
                 <div
-                  className="absolute -top-3 -left-1 flex h-5 w-5 items-center justify-center rounded-full text-[10px] font-bold text-white"
+                  className="absolute -top-3 -left-1 flex h-5 w-5 items-center justify-center rounded-full text-[10px] font-bold text-[var(--on-image-text)]"
                   style={{ backgroundColor: AREA_BORDERS[colorIdx] }}
                   data-testid={`annotation-badge-${idx}`}
                 >
@@ -99,7 +99,7 @@ export function ImageAnnotationView({
                 </div>
 
                 {/* 悬停显示建议 */}
-                <div className="absolute bottom-0 left-0 right-0 block md:hidden md:group-hover:block bg-black/70 p-1 text-[10px] text-white">
+                <div className="absolute bottom-0 left-0 right-0 block md:hidden md:group-hover:block bg-[var(--on-image-caption)] p-1 text-[10px] text-[var(--on-image-text)]">
                   {annotation.suggestion}
                 </div>
               </div>

@@ -513,8 +513,8 @@ export function DecisionFormAdapter(props: Record<string, unknown>) {
 }
 
 function statusClass(status: SubmitStatus): string {
-  if (status === 'success') return 'text-emerald-600'
-  if (status === 'error') return 'text-red-600'
+  if (status === 'success') return 'text-status-success'
+  if (status === 'error') return 'text-status-error'
   return 'text-muted-foreground'
 }
 

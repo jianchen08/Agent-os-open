@@ -172,7 +172,7 @@ export function GalleryWidget(props: Record<string, unknown>) {
             {/* 关闭按钮 */}
             <button
               onClick={handleClosePreview}
-              className="absolute -right-2 -top-2 z-10 flex h-8 w-8 items-center justify-center rounded-full bg-black/60 text-white transition-colors hover:bg-black/80"
+              className="absolute -right-2 -top-2 z-10 flex h-8 w-8 items-center justify-center rounded-full bg-[var(--on-image-chrome-dark)] text-[var(--on-image-text)] transition-colors hover:bg-[var(--on-image-chrome-dark-strong)]"
             >
               ✕
             </button>
@@ -181,7 +181,7 @@ export function GalleryWidget(props: Record<string, unknown>) {
             {previewIndex > 0 && (
               <button
                 onClick={handlePrev}
-                className="absolute -left-10 top-1/2 z-10 flex h-8 w-8 -translate-y-1/2 items-center justify-center rounded-full bg-black/60 text-white transition-colors hover:bg-black/80"
+                className="absolute -left-10 top-1/2 z-10 flex h-8 w-8 -translate-y-1/2 items-center justify-center rounded-full bg-[var(--on-image-chrome-dark)] text-[var(--on-image-text)] transition-colors hover:bg-[var(--on-image-chrome-dark-strong)]"
               >
                 ‹
               </button>
@@ -191,7 +191,7 @@ export function GalleryWidget(props: Record<string, unknown>) {
             {previewIndex < items.length - 1 && (
               <button
                 onClick={handleNext}
-                className="absolute -right-10 top-1/2 z-10 flex h-8 w-8 -translate-y-1/2 items-center justify-center rounded-full bg-black/60 text-white transition-colors hover:bg-black/80"
+                className="absolute -right-10 top-1/2 z-10 flex h-8 w-8 -translate-y-1/2 items-center justify-center rounded-full bg-[var(--on-image-chrome-dark)] text-[var(--on-image-text)] transition-colors hover:bg-[var(--on-image-chrome-dark-strong)]"
               >
                 ›
               </button>
@@ -205,14 +205,14 @@ export function GalleryWidget(props: Record<string, unknown>) {
 
             {/* 图片信息 */}
             {(items[previewIndex].title || items[previewIndex].description) && (
-              <div className="absolute bottom-0 left-0 right-0 rounded-b-lg bg-gradient-to-t from-black/60 to-transparent p-4">
+              <div className="absolute bottom-0 left-0 right-0 rounded-b-lg bg-gradient-to-t from-[var(--on-image-caption)] to-transparent p-4">
                 {items[previewIndex].title && (
-                  <p className="text-white text-sm font-medium">
+                  <p className="text-[var(--on-image-text)] text-sm font-medium">
                     {items[previewIndex].title}
                   </p>
                 )}
                 {items[previewIndex].description && (
-                  <p className="text-white/80 text-xs">
+                  <p className="text-[var(--on-image-text-soft)] text-xs">
                     {items[previewIndex].description}
                   </p>
                 )}
@@ -220,7 +220,7 @@ export function GalleryWidget(props: Record<string, unknown>) {
             )}
 
             {/* 计数 */}
-            <div className="absolute bottom-4 right-4 rounded-full bg-black/50 px-2 py-1 text-xs text-white">
+            <div className="absolute bottom-4 right-4 rounded-full bg-[var(--on-image-chrome-dark)] px-2 py-1 text-xs text-[var(--on-image-text)]">
               {previewIndex + 1} / {items.length}
             </div>
           </div>

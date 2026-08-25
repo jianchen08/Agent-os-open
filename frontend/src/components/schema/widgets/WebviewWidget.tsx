@@ -225,7 +225,7 @@ export function WebviewWidget({
         title={title ?? 'Webview'}
         // 关键安全：不开 allow-same-origin → iframe 独立 opaque origin，无法访问宿主 token
         sandbox="allow-scripts allow-forms allow-popups allow-modals"
-        className="absolute inset-0 border-0 bg-white"
+        className="absolute inset-0 border-0 bg-[var(--web-canvas)]"
         style={{ width: '100%', height: '100%' }}
       />
     </div>

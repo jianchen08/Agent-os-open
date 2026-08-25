@@ -115,7 +115,7 @@ function FileCategoryIcon({ category, className }: { category: FileCategory; cla
     case 'document':
       return <FileText className={cn('text-status-warning', className)} />
     case 'audio':
-      return <Headphones className={cn('text-purple-500', className)} />
+      return <Headphones className={cn('text-status-pending', className)} />
     case 'video':
       return <Video className={cn('text-status-error', className)} />
     case 'code':

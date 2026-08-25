@@ -291,9 +291,9 @@ export const ImageGallery = memo<ImageGalleryProps>(
                 />
 
                 {/* 悬停遮罩 */}
-                <div className="absolute inset-0 flex items-end bg-gradient-to-t from-black/60 via-transparent to-transparent opacity-100 md:opacity-0 md:group-hover:opacity-100 transition-opacity">
+                <div className="absolute inset-0 flex items-end bg-gradient-to-t from-[var(--on-image-caption)] via-transparent to-transparent opacity-100 md:opacity-0 md:group-hover:opacity-100 transition-opacity">
                   <div className="flex w-full items-center justify-between p-3">
-                    <span className="truncate text-sm text-white">
+                    <span className="truncate text-sm text-[var(--on-image-text)]">
                       {image.title}
                     </span>
                     <button
@@ -301,7 +301,7 @@ export const ImageGallery = memo<ImageGalleryProps>(
                         e.stopPropagation()
                         handleDownload(image)
                       }}
-                      className="flex h-8 w-8 flex-shrink-0 items-center justify-center rounded-lg bg-white/20 text-white backdrop-blur-sm transition-colors hover:bg-white/30"
+                      className="flex h-8 w-8 flex-shrink-0 items-center justify-center rounded-lg bg-[var(--on-image-chrome)] text-[var(--on-image-text)] backdrop-blur-sm transition-colors hover:bg-[var(--on-image-chrome-strong)]"
                       aria-label="下载"
                     >
                       <Download className="h-4 w-4" />
@@ -347,7 +347,7 @@ export const ImageGallery = memo<ImageGalleryProps>(
             {/* 关闭按钮 */}
             <button
               onClick={closeLightbox}
-              className="absolute right-4 top-4 z-10 flex h-10 w-10 items-center justify-center rounded-full bg-white/10 text-white backdrop-blur-sm transition-colors hover:bg-white/20"
+              className="absolute right-4 top-4 z-10 flex h-10 w-10 items-center justify-center rounded-full bg-[var(--on-image-chrome)] text-[var(--on-image-text)] backdrop-blur-sm transition-colors hover:bg-[var(--on-image-chrome-strong)]"
               aria-label="关闭"
             >
               <X className="h-5 w-5" />
@@ -360,7 +360,7 @@ export const ImageGallery = memo<ImageGalleryProps>(
                   e.stopPropagation()
                   goToPrev()
                 }}
-                className="absolute left-4 z-10 flex h-10 w-10 items-center justify-center rounded-full bg-white/10 text-white backdrop-blur-sm transition-colors hover:bg-white/20"
+                className="absolute left-4 z-10 flex h-10 w-10 items-center justify-center rounded-full bg-[var(--on-image-chrome)] text-[var(--on-image-text)] backdrop-blur-sm transition-colors hover:bg-[var(--on-image-chrome-strong)]"
                 aria-label="上一张"
               >
                 <ChevronLeft className="h-6 w-6" />
@@ -374,7 +374,7 @@ export const ImageGallery = memo<ImageGalleryProps>(
                   e.stopPropagation()
                   goToNext()
                 }}
-                className="absolute right-4 z-10 flex h-10 w-10 items-center justify-center rounded-full bg-white/10 text-white backdrop-blur-sm transition-colors hover:bg-white/20"
+                className="absolute right-4 z-10 flex h-10 w-10 items-center justify-center rounded-full bg-[var(--on-image-chrome)] text-[var(--on-image-text)] backdrop-blur-sm transition-colors hover:bg-[var(--on-image-chrome-strong)]"
                 aria-label="下一张"
               >
                 <ChevronRight className="h-6 w-6" />
@@ -411,12 +411,12 @@ export const ImageGallery = memo<ImageGalleryProps>(
               />
 
               {/* 底部信息栏 */}
-              <div className="mt-4 flex w-full items-center justify-between rounded-lg bg-white/10 px-4 py-3 backdrop-blur-sm">
+              <div className="mt-4 flex w-full items-center justify-between rounded-lg bg-[var(--on-image-chrome)] px-4 py-3 backdrop-blur-sm">
                 <div className="min-w-0 flex-1">
-                  <h3 className="truncate text-sm font-medium text-white">
+                  <h3 className="truncate text-sm font-medium text-[var(--on-image-text)]">
                     {currentImage.title}
                   </h3>
-                  <div className="mt-1 flex flex-wrap items-center gap-3 text-xs text-white/70">
+                  <div className="mt-1 flex flex-wrap items-center gap-3 text-xs text-[var(--on-image-text-soft)]">
                     {currentImage.size && <span>{currentImage.size}</span>}
                     {currentImage.seed !== undefined && (
                       <span>种子: {currentImage.seed}</span>
@@ -438,7 +438,7 @@ export const ImageGallery = memo<ImageGalleryProps>(
                   {currentImage.prompt && (
                     <button
                       onClick={() => setShowInfo(!showInfo)}
-                      className="flex h-8 w-8 items-center justify-center rounded-lg bg-white/10 text-white transition-colors hover:bg-white/20"
+                      className="flex h-8 w-8 items-center justify-center rounded-lg bg-[var(--on-image-chrome)] text-[var(--on-image-text)] transition-colors hover:bg-[var(--on-image-chrome-strong)]"
                       aria-label="查看参数"
                     >
                       <Info className="h-4 w-4" />
@@ -448,7 +448,7 @@ export const ImageGallery = memo<ImageGalleryProps>(
                   {/* 下载按钮 */}
                   <button
                     onClick={() => handleDownload(currentImage)}
-                    className="flex h-8 w-8 items-center justify-center rounded-lg bg-white/10 text-white transition-colors hover:bg-white/20"
+                    className="flex h-8 w-8 items-center justify-center rounded-lg bg-[var(--on-image-chrome)] text-[var(--on-image-text)] transition-colors hover:bg-[var(--on-image-chrome-strong)]"
                     aria-label="下载"
                   >
                     <Download className="h-4 w-4" />
@@ -458,24 +458,24 @@ export const ImageGallery = memo<ImageGalleryProps>(
 
               {/* 生成参数面板 */}
               {showInfo && currentImage.prompt && (
-                <div className="mt-2 w-full rounded-lg bg-white/10 p-4 backdrop-blur-sm">
-                  <h4 className="mb-2 text-xs font-medium text-white/90">
+                <div className="mt-2 w-full rounded-lg bg-[var(--on-image-chrome)] p-4 backdrop-blur-sm">
+                  <h4 className="mb-2 text-xs font-medium text-[var(--on-image-text)]">
                     生成参数
                   </h4>
-                  <div className="space-y-1.5 text-xs text-white/70">
+                  <div className="space-y-1.5 text-xs text-[var(--on-image-text-soft)]">
                     <div>
-                      <span className="text-white/50">Prompt: </span>
+                      <span className="text-[var(--on-image-text-faint)]">Prompt: </span>
                       {currentImage.prompt}
                     </div>
                     {currentImage.size && (
                       <div>
-                        <span className="text-white/50">尺寸: </span>
+                        <span className="text-[var(--on-image-text-faint)]">尺寸: </span>
                         {currentImage.size}
                       </div>
                     )}
                     {currentImage.seed !== undefined && (
                       <div>
-                        <span className="text-white/50">种子: </span>
+                        <span className="text-[var(--on-image-text-faint)]">种子: </span>
                         {currentImage.seed}
                       </div>
                     )}
@@ -483,7 +483,7 @@ export const ImageGallery = memo<ImageGalleryProps>(
                       Object.entries(currentImage.metadata).map(
                         ([key, value]) => (
                           <div key={key}>
-                            <span className="text-white/50">{key}: </span>
+                            <span className="text-[var(--on-image-text-faint)]">{key}: </span>
                             {value}
                           </div>
                         )

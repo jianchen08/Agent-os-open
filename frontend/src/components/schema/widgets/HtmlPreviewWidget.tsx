@@ -89,7 +89,7 @@ export function HtmlPreviewWidget({
         srcDoc={content}
         title={title ?? 'HTML Preview'}
         sandbox="allow-scripts allow-forms allow-popups allow-modals"
-        className="absolute inset-0 border-0 bg-white"
+        className="absolute inset-0 border-0 bg-[var(--web-canvas)]"
         style={{ width: '100%', height: '100%' }}
       />
     </div>

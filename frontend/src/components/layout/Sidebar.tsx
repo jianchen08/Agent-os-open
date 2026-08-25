@@ -564,7 +564,7 @@ export const Sidebar = memo<SidebarProps>(({ isMobile = false }) => {
               >
                 <Bell className="h-4 w-4" />
                 {notificationUnreadCount > 0 && (
-                  <span className="absolute -top-0.5 -right-0.5 flex h-3.5 min-w-3.5 items-center justify-center rounded-full bg-status-error/100 px-0.5 text-[9px] font-bold text-white">
+                  <span className="absolute -top-0.5 -right-0.5 flex h-3.5 min-w-3.5 items-center justify-center rounded-full bg-status-error px-0.5 text-[9px] font-bold text-status-error-foreground">
                     {notificationUnreadCount > 99 ? '99+' : notificationUnreadCount}
                   </span>
                 )}
@@ -806,7 +806,7 @@ export const Sidebar = memo<SidebarProps>(({ isMobile = false }) => {
               >
                 <Bell className="h-3.5 w-3.5" />
                 {notificationUnreadCount > 0 && (
-                  <span className="absolute -top-1 -right-1 flex h-3.5 min-w-3.5 items-center justify-center rounded-full bg-status-error/100 px-0.5 text-[9px] font-bold text-white">
+                  <span className="absolute -top-1 -right-1 flex h-3.5 min-w-3.5 items-center justify-center rounded-full bg-status-error px-0.5 text-[9px] font-bold text-status-error-foreground">
                     {notificationUnreadCount > 99 ? '99+' : notificationUnreadCount}
                   </span>
                 )}

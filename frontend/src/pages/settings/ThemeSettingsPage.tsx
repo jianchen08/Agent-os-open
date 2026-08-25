@@ -150,10 +150,10 @@ function ThemeCard({
       <span
         className={`mt-2 inline-block rounded px-1.5 py-0.5 text-xs ${
           theme.category === 'light'
-            ? 'bg-status-warning/100/10 text-status-warning'
+            ? 'bg-status-warning/10 text-status-warning'
             : theme.category === 'dark'
-              ? 'bg-status-info/100/10 text-status-info'
-              : 'bg-purple-500/10 text-purple-400'
+              ? 'bg-status-info/10 text-status-info'
+              : 'bg-status-pending/10 text-status-pending'
         }`}
       >
         {theme.category === 'light' ? '浅色' : theme.category === 'dark' ? '深色' : '特殊'}

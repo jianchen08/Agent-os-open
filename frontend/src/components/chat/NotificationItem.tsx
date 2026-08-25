@@ -164,7 +164,7 @@ export function NotificationItemComponent({
       {/* 阻塞模式遮罩提示 */}
       {isBlocking && (
         <div className="absolute -top-6 left-0 right-0 flex items-center justify-center">
-          <span className="bg-status-error/100 text-white text-xs px-3 py-0.5 rounded-full font-medium">
+          <span className="bg-status-error text-status-error-foreground text-xs px-3 py-0.5 rounded-full font-medium">
             ⚠️ 需要确认
           </span>
         </div>

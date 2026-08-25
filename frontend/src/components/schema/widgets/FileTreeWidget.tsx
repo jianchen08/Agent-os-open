@@ -1276,8 +1276,8 @@ function TreeNode({
             title={isEnabled ? '点击禁用（将级联禁用所有子任务）' : '点击启用'}
             tabIndex={-1}
           >
-            <div className={`h-3 w-3 rounded-full bg-white shadow-sm transition-transform ${
-              isEnabled ? '' : ''
+            <div className={`h-3 w-3 rounded-full shadow-sm transition-transform ${
+              isEnabled ? 'bg-status-info-foreground' : 'bg-muted-foreground'
             }`} />
           </button>
           )}

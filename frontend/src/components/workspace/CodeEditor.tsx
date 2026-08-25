@@ -649,7 +649,7 @@ export function CodeEditor({
           <div className="flex items-center gap-2">
             <button
               onClick={handleAcceptExternalChange}
-              className="flex items-center gap-1 rounded-md bg-status-warning px-2.5 py-1 text-xs font-medium text-white transition-colors hover:bg-status-warning/80"
+              className="flex items-center gap-1 rounded-md bg-status-warning px-2.5 py-1 text-xs font-medium text-status-warning-foreground transition-colors hover:bg-status-warning/80"
               title="用外部修改覆盖当前内容"
             >
               <RefreshCw className="h-3 w-3" />
@@ -703,7 +703,7 @@ export function CodeEditor({
             className={cn(
               'flex items-center gap-1.5 rounded-md px-2.5 py-1 text-xs font-medium transition-colors',
               !isPreview
-                ? 'bg-status-info text-white hover:bg-status-info'
+                ? 'bg-status-info text-status-info-foreground'
                 : 'bg-muted text-muted-foreground hover:bg-accent hover:text-foreground',
             )}
             title={isPreview ? '切换到编辑模式' : '切换到预览模式'}

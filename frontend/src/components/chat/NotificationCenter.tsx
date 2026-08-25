@@ -245,7 +245,7 @@ export function NotificationCenter({ className, hideTrigger = false }: Notificat
     >
       {unreadCount > 0 ? <Bell className="h-icon-md w-icon-md" /> : <BellOff className="h-icon-md w-icon-md opacity-50" />}
       {unreadCount > 0 && (
-        <span className="absolute -top-1 -right-1 flex h-icon-md min-w-icon-md items-center justify-center rounded-full bg-status-error/100 px-1 text-[10px] font-bold text-white">
+        <span className="absolute -top-1 -right-1 flex h-icon-md min-w-icon-md items-center justify-center rounded-full bg-status-error px-1 text-[10px] font-bold text-status-error-foreground">
           {unreadCount > 99 ? '99+' : unreadCount}
         </span>
       )}
@@ -342,7 +342,7 @@ export function NotificationCenter({ className, hideTrigger = false }: Notificat
       {isPanelOpen && createPortal(
         <>
           <div
-            className="fixed inset-0 bg-black/10"
+            className="fixed inset-0 bg-[var(--overlay-subtle)]"
             style={{ zIndex: 9998 }}
             onClick={closePanel}
             data-testid="notification-overlay"
@@ -369,7 +369,7 @@ export function NotificationCenter({ className, hideTrigger = false }: Notificat
                 <Bell className="h-icon-md w-icon-md" />
                 <span className="text-sm font-semibold">通知中心</span>
                 {unreadCount > 0 && (
-                  <span className="bg-status-error/100 text-white text-[10px] px-1.5 py-0.5 rounded-full">
+                  <span className="bg-status-error text-status-error-foreground text-[10px] px-1.5 py-0.5 rounded-full">
                     {unreadCount}
                   </span>
                 )}

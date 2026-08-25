@@ -271,7 +271,7 @@ export function PluginsSettingsPage({
                     title={plugin.enabled ? '点击禁用（重启生效）' : '点击启用（重启生效）'}
                   >
                     <span
-                      className={`inline-block h-3.5 w-3.5 transform rounded-full bg-white transition duration-200 ${
+                      className={`inline-block h-3.5 w-3.5 transform rounded-full bg-primary-foreground transition duration-200 ${
                         plugin.enabled ? 'translate-x-3.5' : 'translate-x-0'
                       }`}
                     />
