@@ -272,8 +272,7 @@ class TestTasksEndpoints:
                                                 service: Any, hub: _FakeCapabilityHub) -> None:
         """0.2 任务（仅存在于 state 聚合）必须出现在任务列表，且字段映射完整。"""
         hub._responses["pipeline-state"] = {
-            "list": {
-                "items": [
+            "list": [
                     {
                         "pipeline_id": "pipe-0-2-task",
                         "task.goal": "0.2 提交的任务",
@@ -287,7 +286,6 @@ class TestTasksEndpoints:
                     # 无 task.* 字段的普通会话管道 → 不是任务，跳过
                     {"pipeline_id": "pipe-session", "status": "active", "ended": False},
                 ]
-            }
         }
         resp = await _http(monkeypatch, service, hub, "/ext/task_service/tasks")
         assert resp["status"] == 200
@@ -309,8 +307,7 @@ class TestTasksEndpoints:
         t.pipeline_run_id = t.id
         await service.save_task(t)
         hub._responses["pipeline-state"] = {
-            "list": {
-                "items": [
+            "list": [
                     {
                         "pipeline_id": t.id,
                         "task.goal": "双写任务",
@@ -320,7 +317,6 @@ class TestTasksEndpoints:
                         "thread_id": t.id,
                     }
                 ]
-            }
         }
         resp = await _http(monkeypatch, service, hub, "/ext/task_service/tasks")
         assert resp["payload"]["total"] == 1
@@ -340,8 +336,7 @@ class TestTasksEndpoints:
                                                   service: Any, hub: _FakeCapabilityHub) -> None:
         """state 行参与 status 筛选（pending_evaluation 等细态原样透传）。"""
         hub._responses["pipeline-state"] = {
-            "list": {
-                "items": [
+            "list": [
                     {
                         "pipeline_id": "pipe-eval",
                         "task.goal": "待评估任务",
@@ -351,7 +346,6 @@ class TestTasksEndpoints:
                         "thread_id": "pipe-eval",
                     }
                 ]
-            }
         }
         resp = await _http(monkeypatch, service, hub, "/ext/task_service/tasks",
                            query={"status": "pending_evaluation"})
@@ -364,8 +358,7 @@ class TestTasksEndpoints:
                                                            service: Any, hub: _FakeCapabilityHub) -> None:
         """容器任务（task.owned.<id>.* 键）从提交者管道聚合行组装，不建管道。"""
         hub._responses["pipeline-state"] = {
-            "list": {
-                "items": [
+            "list": [
                     {
                         "pipeline_id": "owner-pipe-1",
                         "task.owned.c1d2e3f4a5b64789abcdef0123456789.title": "容器项目",
@@ -377,7 +370,6 @@ class TestTasksEndpoints:
                         "thread_id": "owner-pipe-1",
                     }
                 ]
-            }
         }
         resp = await _http(monkeypatch, service, hub, "/ext/task_service/tasks")
         assert resp["status"] == 200
@@ -397,8 +389,7 @@ class TestTasksEndpoints:
                                                     service: Any, hub: _FakeCapabilityHub) -> None:
         """前端父容器下拉：容器任务从 state 聚合组装（YAML 面退役）。"""
         hub._responses["pipeline-state"] = {
-            "list": {
-                "items": [
+            "list": [
                     {
                         "pipeline_id": "owner-pipe-1",
                         "task.owned.c1d2e3f4a5b64789abcdef0123456789.title": "容器项目",
@@ -416,7 +407,6 @@ class TestTasksEndpoints:
                         "thread_id": "pipe-other",
                     },
                 ]
-            }
         }
         resp = await _http(monkeypatch, service, hub, "/ext/task_service/tasks/containers")
         assert resp["status"] == 200
