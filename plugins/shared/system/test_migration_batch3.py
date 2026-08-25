@@ -68,9 +68,11 @@ class TestConnectorsMigration:
         """config_mixin.py 已复制。"""
         assert (CONNECTORS_DIR / "config_mixin.py").exists()
 
-    def test_adapter_config_copied(self) -> None:
-        """adapter_config.py 已复制。"""
-        assert (CONNECTORS_DIR / "adapter_config.py").exists()
+    def test_adapter_config_available(self) -> None:
+        """adapter_config 走 SDK 共享模块（2026-08-25 批5 下沉，插件副本删除）。"""
+        from agentos_plugin_sdk.adapter_config import get_adapter_status_summary
+
+        assert callable(get_adapter_status_summary)
 
     def test_vscode_subdir_copied(self) -> None:
         """vscode/ 子目录已复制。"""

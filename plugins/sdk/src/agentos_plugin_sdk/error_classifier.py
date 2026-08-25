@@ -137,7 +137,7 @@ def _extract_retry_after(exc: BaseException) -> float | None:
             ra = body.get("retry_after") or body.get("retry-after")
             if isinstance(ra, (int, float)) and ra > 0:
                 return float(ra)
-    except Exception:
+    except Exception:  # noqa: S110 — 尽力提取，任何失败都视为无 retry_after
         pass
 
     return None
@@ -180,7 +180,7 @@ def _is_quota_from_body(exc: BaseException) -> bool:
         return False
 
 
-def _search_json_for_keywords(obj: object, keywords: tuple, depth: int = 0) -> bool:
+def _search_json_for_keywords(obj: object, keywords: tuple[str, ...], depth: int = 0) -> bool:
     """递归搜索 JSON 结构里是否有任意字符串值命中关键词。"""
     if depth > 6:
         return False

@@ -52,3 +52,10 @@ select = ["E", "F", "W", "I", "N", "UP", "B", "S", "C4"]
 [tool.mypy]
 python_version = "3.11"
 strict = true
+
+# adapter_config（2026-08-25 批5 从插件下沉）运行期惰性读仓库 config 包的
+# config_center：消费方（connectors/tool_context sidecar）进程 sys.path 含仓库
+# 根，运行无依赖问题；SDK 静态检查看不到该包，按 Any 放行。
+[[tool.mypy.overrides]]
+module = "config.config_center"
+ignore_missing_imports = true
