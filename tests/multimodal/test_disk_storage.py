@@ -30,13 +30,12 @@ from pathlib import Path
 # 任何收集顺序下 `from storage import` 都命中本插件。
 _MM_DIR = Path(__file__).resolve().parents[2] / "plugins" / "shared" / "system" / "multimodal"
 _SYS_DIR = _MM_DIR.parent
+_OLD_PATH = sys.path[:]  # 收集期锁定后恢复：不污染后续文件的 sys.path[0]
 for _d in (_MM_DIR, _SYS_DIR):
     _s = str(_d)
     if _s in sys.path:
         sys.path.remove(_s)
     sys.path.insert(0, str(_d))
-for _m in ("storage", "mm_types", "asr", "adapter", "capabilities"):
-    sys.modules.pop(_m, None)
 
 
 @pytest.fixture(autouse=True)
@@ -66,10 +65,14 @@ def _mm_path_guard():
 
 
 from mm_types import AttachmentInfo, MediaType
-from storage import DiskFileStorage, LocalFileStorage, StorageError
-# 类已绑定，摘除 storage 槽位：同进程 tasks 插件懒加载 `from storage import
-# TaskStorage` 需解析到 tasks 自己的 storage，槽位驻留本插件版本会致 ImportError。
+# storage 槽位逐出：收集期可能驻留 tasks 插件的 storage（其目录在 sys.path
+# 更前）——先 pop 再 import 让本插件版本进入槽位；类绑定后摘除槽位并恢复
+# sys.path（同进程 tasks 懒加载 `from storage import TaskStorage` 需解析到
+# tasks 自己的 storage，槽位驻留本插件版本会致 ImportError）。
 sys.modules.pop("storage", None)
+from storage import DiskFileStorage, LocalFileStorage, StorageError
+sys.modules.pop("storage", None)
+sys.path[:] = _OLD_PATH
 
 # ── helpers ──────────────────────────────────────────────
 

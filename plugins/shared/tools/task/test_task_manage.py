@@ -31,6 +31,10 @@ _PLUGIN_PATHS = tuple(
 for _d in _PLUGIN_PATHS:
     if _d not in sys.path:
         sys.path.insert(0, _d)
+# 收集期 tool 槽位保护：同批其他测试文件（如 task_submit 权限测试）收集时
+# 会把自己的 tool.py 驻留进 sys.modules，本文件模块级 `from tool import` 会
+# 命中错误插件——先逐出再导入，确保解析到本目录的 tool.py。
+sys.modules.pop("tool", None)
 
 from tool import TaskTool  # noqa: E402
 

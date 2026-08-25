@@ -63,9 +63,13 @@ def _make_source_task(pipeline_run_id: str = "pipe-12345") -> MagicMock:
 
 
 def _build_inputs(mode, inherit_from: str = "src-task-001", user_id: str = "") -> dict:
-    """构造一组用于 task_submit.execute() 的最小输入。"""
+    """构造一组用于 task_submit.execute() 的最小输入。
+
+    goal 字段已按工具契约平铺为 goal_title/goal_description（均必填）。
+    """
     return {
-        "goal": {"title": "继承任务测试"},
+        "goal_title": "继承任务测试",
+        "goal_description": "继承任务测试描述",
         "target_type": "agent",
         "target_id": "general_agent",
         "task_scope": "non_container",
@@ -274,7 +278,7 @@ def test_build_metadata_handles_list_mode_for_pipe():
     """
     tool = TaskSubmitTool()
     inputs = _build_inputs(mode=["pipe", "workspace"])
-    goal = inputs["goal"]
+    goal = inputs
     criteria = inputs["acceptance_criteria"]
 
     metadata = tool._build_metadata(inputs, goal, criteria)
@@ -292,7 +296,7 @@ def test_build_metadata_handles_string_mode_for_pipe():
     """_build_metadata 应正确处理 mode 为 'pipe' 字符串。"""
     tool = TaskSubmitTool()
     inputs = _build_inputs(mode="pipe")
-    goal = inputs["goal"]
+    goal = inputs
     criteria = inputs["acceptance_criteria"]
 
     metadata = tool._build_metadata(inputs, goal, criteria)
@@ -306,7 +310,7 @@ def test_build_metadata_no_pipe_mark_for_workspace_only_list():
     """_build_metadata 当 mode=['workspace'] 时不应设置 inherit_pipe_from。"""
     tool = TaskSubmitTool()
     inputs = _build_inputs(mode=["workspace"])
-    goal = inputs["goal"]
+    goal = inputs
     criteria = inputs["acceptance_criteria"]
 
     metadata = tool._build_metadata(inputs, goal, criteria)

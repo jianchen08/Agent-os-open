@@ -33,12 +33,24 @@ _DL_DIR = Path(__file__).resolve().parent.parent / "download"
 
 
 def _load_module() -> Any:
-    """加载 download/tool.py（唯一模块名，进程内缓存）。"""
+    """加载 download/tool.py（唯一模块名，进程内缓存）。
+
+    加载前把 download 目录提到 sys.path[0] 并逐出裸名缓存：同进程批跑时
+    （如 tests/plugins 先收集）其他插件目录会占住 sys.path[0]，tool.py 的
+    ``from workspace_aware import WorkspaceAwareMixin`` 会解析到 bash 等
+    其他插件的同名模块（无 check_path_allowed → 运行期 AttributeError）。
+    """
     mod_name = "download_tool_under_test"
     if mod_name in sys.modules:
         return sys.modules[mod_name]
     module_path = _DL_DIR / "tool.py"
     assert module_path.exists(), f"tool.py missing at {module_path}"
+    _s = str(_DL_DIR)
+    if _s in sys.path:
+        sys.path.remove(_s)
+    sys.path.insert(0, _s)
+    for _m in ("workspace_aware", "tool", "url_security"):
+        sys.modules.pop(_m, None)
     spec = importlib.util.spec_from_file_location(mod_name, module_path)
     assert spec is not None, "cannot load download tool.py"
     assert spec.loader is not None, "cannot load download tool.py"

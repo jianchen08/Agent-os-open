@@ -657,10 +657,23 @@ class TestSkinPositionRoutingCss:
     DSH 名字——target 一律 data-region / data-testid / data-chat-state。
     """
 
-    def _rw(self, css: str) -> str:
-        import server  # noqa: PLC0415
+    def _server(self):
+        # 显式文件级加载（唯一模块名）：裸 `import server` 会被同 pytest
+        # 进程里其它插件目录（先收集的测试把各自目录插到 sys.path[0]）的
+        # server.py 劫持。约定同 test_server_registry_matches_manifest。
+        import importlib.util as _ilu
 
-        return server._rewrite_dsh_positions(css)
+        mod_name = "dsh_adapter_server_pos_test"
+        if mod_name not in sys.modules:
+            spec = _ilu.spec_from_file_location(mod_name, PLUGIN_DIR / "server.py")
+            assert spec is not None and spec.loader is not None, "cannot load dsh_adapter server.py"
+            module = _ilu.module_from_spec(spec)
+            sys.modules[mod_name] = module
+            spec.loader.exec_module(module)
+        return sys.modules[mod_name]
+
+    def _rw(self, css: str) -> str:
+        return self._server()._rewrite_dsh_positions(css)
 
     def test_pane_triple(self):
         out = self._rw('[data-pane="sidebar"]{a:b}[data-pane="details"]{a:b}'
@@ -725,8 +738,7 @@ class TestSkinPositionRoutingCss:
         assert 'body[data-skin-dark]{a:b}' in out
         assert 'data-dsh-skin' not in out and 'data-ds-dark-theme' not in out
         js = 'html[data-dsh-skin=\\"miku\\"]{a:b} html[data-dsh-skin="${ctx.scopeAttr}"]{} getAttribute(\'data-ds-dark-theme\')'
-        import server  # noqa: PLC0415
-        r = server._sub_position(js)
+        r = self._server()._sub_position(js)
         assert 'html[data-skin=\\"dsh_adapter:miku\\"]' in r  # JS 转义引号形（miku 44 处）
         assert 'html[data-skin="${ctx.scopeAttr}"]' in r  # 运行时插值形
         assert "'data-skin-dark'" in r  # 属性名字符串（观察器/读取）
@@ -776,10 +788,21 @@ class TestSkinPositionRoutingCss:
 class TestSkinPositionRoutingDelivery:
     """merged.css / hooks.mjs 递送端点：对真实 skin-center 资产跑位置转译。"""
 
-    def _serve(self, path: str) -> dict:
-        import server  # noqa: PLC0415
+    def _server(self):
+        # 同 TestSkinPositionRoutingCss._server：显式文件级加载防裸名劫持。
+        import importlib.util as _ilu
 
-        return asyncio.run(server._http_handle_style(path=path, method="GET"))
+        mod_name = "dsh_adapter_server_delivery_test"
+        if mod_name not in sys.modules:
+            spec = _ilu.spec_from_file_location(mod_name, PLUGIN_DIR / "server.py")
+            assert spec is not None and spec.loader is not None, "cannot load dsh_adapter server.py"
+            module = _ilu.module_from_spec(spec)
+            sys.modules[mod_name] = module
+            spec.loader.exec_module(module)
+        return sys.modules[mod_name]
+
+    def _serve(self, path: str) -> dict:
+        return asyncio.run(self._server()._http_handle_style(path=path, method="GET"))
 
     def test_merged_css_translated(self):
         resp = self._serve("/ext/dsh_adapter/styles/skin/maid-atelier/merged.css")
@@ -806,11 +829,9 @@ class TestSkinPositionRoutingDelivery:
         """引号守恒（回归锁定）：值形替换必须复用原引号风格——双引号输出插进
         hooks 的单引号字符串字面量 = SyntaxError → import 抛 → 整个动态层
         静默死（maid-atelier/xp 实锤，2026-08-22 真机排查根因）。"""
-        import server  # noqa: PLC0415
-
         src = ("const A = \":is([data-pane='sidebar'], [class*='sidebarCol'])\"\n"
                "const B = '[data-pane=\"conversation\"]'\n")
-        out = server._sub_position(src)
+        out = self._server()._sub_position(src)
         assert '"[data-pane=' not in out.replace('="sidebar"', '')  # 无双引号泄漏进单引号串
         assert "\":is([data-region='sidebar'], [data-region='sidebar'])\"" in out
         assert "'[data-region=\"chat\"]'" in out  # 双引号输入保持双引号
@@ -826,7 +847,7 @@ class TestSkinPositionRoutingDelivery:
         if node is None:
             pytest.skip("node 不可用，跳过 JS 语法冒烟")
         for hook in (PLUGIN_DIR / "dsh_plugins" / "skin-center" / "skins").glob("*/hooks.mjs"):
-            translated = server._sub_position(hook.read_text(encoding="utf-8"))
+            translated = self._server()._sub_position(hook.read_text(encoding="utf-8"))
             tmp_file = tmp_path / f"{hook.parent.name}-hooks.mjs"
             tmp_file.write_text(translated, encoding="utf-8")
             r = subprocess.run([node, "--check", str(tmp_file)],
@@ -878,10 +899,21 @@ class TestSkinPluginThemes:
 class TestSkinAssetRoute:
     """背景图资产路由（白名单 + 防穿越）。"""
 
-    def _serve(self, path: str) -> dict:
-        import server  # noqa: PLC0415
+    def _server(self):
+        # 同 TestSkinPositionRoutingCss._server：显式文件级加载防裸名劫持。
+        import importlib.util as _ilu
 
-        return asyncio.run(server._http_handle_style(path=path, method="GET"))
+        mod_name = "dsh_adapter_server_asset_test"
+        if mod_name not in sys.modules:
+            spec = _ilu.spec_from_file_location(mod_name, PLUGIN_DIR / "server.py")
+            assert spec is not None and spec.loader is not None, "cannot load dsh_adapter server.py"
+            module = _ilu.module_from_spec(spec)
+            sys.modules[mod_name] = module
+            spec.loader.exec_module(module)
+        return sys.modules[mod_name]
+
+    def _serve(self, path: str) -> dict:
+        return asyncio.run(self._server()._http_handle_style(path=path, method="GET"))
 
     def test_serve_image_asset(self):
         resp = self._serve("/ext/dsh_adapter/styles/skin-assets/miku/assets/miku-art.webp")

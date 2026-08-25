@@ -300,10 +300,18 @@ class TestTenantConfigDir:
 _REPO_ROOT = Path(__file__).resolve().parents[3]
 _MULTIMODAL_DIR = _REPO_ROOT / "plugins" / "shared" / "system" / "multimodal"
 _mm = str(_MULTIMODAL_DIR)
-if _mm not in sys.path:
-    sys.path.insert(0, _mm)
-
+# storage 槽位逐出：收集期可能驻留 tasks 插件的 storage（同进程批跑时其目录
+# 在 sys.path 更前）——把 multimodal 推到最前再 pop+import 让本插件版本进入
+# 槽位；类绑定后摘除槽位并恢复 sys.path（tasks 测试懒加载 `from storage
+# import TaskStorage` 需解析到 tasks 版）。
+_OLD_PATH = sys.path[:]
+if _mm in sys.path:
+    sys.path.remove(_mm)
+sys.path.insert(0, _mm)
+sys.modules.pop("storage", None)
 from storage import DiskFileStorage  # noqa: E402
+sys.modules.pop("storage", None)
+sys.path[:] = _OLD_PATH
 
 
 class TestMultimodalStorageTenantAware:
