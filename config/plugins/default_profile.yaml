@@ -60,5 +60,10 @@ plugins:
   # 默认禁用，e2e 按需启停；非 e2e 场景永远保持 disabled。
   e2e_lifecycle_probe:
     enabled: false
+  # 任务失败自动回滚能力（create_checkpoint/record_operation/execute 三服务，
+  # 实现与测试完整）：当前全仓零消费者（无管道步骤/工具调用其服务），不随
+  # 内核启动加载（省 sidecar 开销）；出现消费者时 re-enable 重注册即可。
+  rollback_service:
+    enabled: false
 defaults:
   enabled: true
