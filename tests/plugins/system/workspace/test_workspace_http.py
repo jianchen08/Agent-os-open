@@ -209,12 +209,18 @@ class TestWorkspaceDetail:
         assert body == {"items": [], "total": 0}
 
     def test_get_workspace_artifacts_aggregates(self, server: Any, monkeypatch: pytest.MonkeyPatch) -> None:
-        """有工作空间：聚合容器任务 + 子任务制品（state 读面未注入 → legacy 路径）。"""
+        """有工作空间：聚合容器任务 + 子任务制品（子链来自 state 聚合行）。"""
         _decode_http(_call(server, path="/ext/workspace_service/workspaces/root", method="GET"))
-        task_svc = _FakeTaskService()
-        task_svc.tasks["root"] = _FakeTask("root")
-        task_svc.subtasks["root"] = [_FakeTask("child-1")]
-        _inject_task_service(task_svc)
+        ws_mod = sys.modules["workspace_service"]
+        svc = ws_mod.get_workspace_service()
+
+        async def read_rows() -> list[dict[str, Any]]:
+            return [
+                {"pipeline_id": "root"},
+                {"pipeline_id": "child-1", "lineage.parent_pipeline_id": "root"},
+            ]
+
+        monkeypatch.setattr(svc, "_read_state_rows", read_rows, raising=False)
         fake_art = types.ModuleType("artifacts.artifact_service")
 
         async def list_artifacts(task_id: str, limit: int = 100) -> dict:  # noqa: ARG001

@@ -162,13 +162,19 @@ class TestWorkspaceArtifacts:
         result = _run(svc.list_artifacts_by_workspace("missing"))
         assert result == {"items": [], "total": 0}
 
-    def test_list_artifacts_aggregates_tasks(self) -> None:
-        """聚合容器任务自身 + 子任务的制品。"""
+    def test_list_artifacts_aggregates_tasks(self, monkeypatch) -> None:
+        """聚合容器任务自身 + 子任务的制品（子链来自 state 聚合行）。"""
         svc = WorkspaceService()
         _run(svc.get_or_create_workspace("root-task"))
-        task_svc = _FakeTaskService()
-        task_svc.subtasks["root-task"] = [_FakeTask("child-1"), _FakeTask("child-2")]
-        _inject_task_service(task_svc)
+
+        async def read_rows():
+            return [
+                {"pipeline_id": "root-task"},
+                {"pipeline_id": "child-1", "lineage.parent_pipeline_id": "root-task"},
+                {"pipeline_id": "child-2", "lineage.parent_pipeline_id": "root-task"},
+            ]
+
+        monkeypatch.setattr(svc, "_read_state_rows", read_rows, raising=False)
         art = _FakeArtifactService()
         _inject_artifact_service(art)
 
@@ -177,11 +183,11 @@ class TestWorkspaceArtifacts:
         assert result["total"] == 3
         assert set(art.calls) == {"root-task", "child-1", "child-2"}
 
-    def test_list_artifacts_service_unavailable(self) -> None:
-        """task_service 为 None → 仅容器任务自身。"""
+    def test_list_artifacts_state_reader_missing_fails_closed(self) -> None:
+        """state 读面未注入 → 仅容器任务自身（legacy 镜像回退已退役）。"""
         svc = WorkspaceService()
         _run(svc.get_or_create_workspace("root-task"))
-        _inject_task_service(None)  # type: ignore[arg-type]
+        _reset_state_reader()
         _inject_artifact_service(_FakeArtifactService())
         result = _run(svc.list_artifacts_by_workspace("root-task"))
         assert result["total"] == 1
@@ -242,50 +248,61 @@ class TestWorkspaceFileTree:
 
 
 class TestWorkspaceResolveContainerTask:
-    def test_resolve_no_service(self) -> None:
-        """task_service 不可用 → 原样返回 task_id。"""
-        svc = WorkspaceService()
-        _inject_task_service(None)  # type: ignore[arg-type]
-        assert _run(svc.resolve_container_task("t1")) == "t1"
+    def test_resolve_state_reader_missing_fails_closed(self, caplog) -> None:
+        """state 读面未注入 → fail-closed 返回自身（0.1 镜像回退已退役）。"""
+        import logging
 
-    def test_resolve_no_task(self) -> None:
+        _reset_state_reader()
         svc = WorkspaceService()
-        task_svc = _FakeTaskService()
-        _inject_task_service(task_svc)
-        assert _run(svc.resolve_container_task("ghost")) == "ghost"
+        with caplog.at_level(logging.WARNING):
+            assert _run(svc.resolve_container_task("t1")) == "t1"
+        assert any("读面未注入" in r.getMessage() for r in caplog.records)
 
-    def test_resolve_root_task(self) -> None:
+    def test_resolve_walks_lineage_to_root(self, monkeypatch) -> None:
+        """state 聚合行：沿 lineage.parent_pipeline_id 爬到根形式任务。"""
         svc = WorkspaceService()
-        task_svc = _FakeTaskService()
-        task_svc.tasks["root"] = _FakeTask("root")
-        _inject_task_service(task_svc)
-        assert _run(svc.resolve_container_task("root")) == "root"
+        rows = [
+            {"pipeline_id": "root"},
+            {"pipeline_id": "mid", "lineage.parent_pipeline_id": "root"},
+            {"pipeline_id": "leaf", "lineage.parent_pipeline_id": "mid"},
+        ]
 
-    def test_resolve_container_marked_task(self) -> None:
-        svc = WorkspaceService()
-        task_svc = _FakeTaskService()
-        task_svc.tasks["sub"] = _FakeTask("sub", parent_task_id="root", metadata={"is_container": True})
-        _inject_task_service(task_svc)
-        assert _run(svc.resolve_container_task("sub")) == "sub"
+        async def read_rows():
+            return rows
 
-    def test_resolve_walks_up_parent_chain(self) -> None:
-        """沿 parent_task_id 链向上找到根任务。"""
-        svc = WorkspaceService()
-        task_svc = _FakeTaskService()
-        task_svc.tasks["root"] = _FakeTask("root")
-        task_svc.tasks["mid"] = _FakeTask("mid", parent_task_id="root")
-        task_svc.tasks["leaf"] = _FakeTask("leaf", parent_task_id="mid")
-        _inject_task_service(task_svc)
+        monkeypatch.setattr(svc, "_read_state_rows", read_rows, raising=False)
         assert _run(svc.resolve_container_task("leaf")) == "root"
 
-    def test_resolve_broken_chain(self) -> None:
-        """父任务缺失 → 返回链上最后一个已知任务。"""
+    def test_resolve_stops_at_container_scope(self, monkeypatch) -> None:
+        """链上最近的 task.scope=container 任务即容器任务。"""
         svc = WorkspaceService()
-        task_svc = _FakeTaskService()
-        task_svc.tasks["mid"] = _FakeTask("mid", parent_task_id="ghost-parent")
-        task_svc.tasks["leaf"] = _FakeTask("leaf", parent_task_id="mid")
-        _inject_task_service(task_svc)
+        rows = [
+            {"pipeline_id": "root"},
+            {"pipeline_id": "mid", "lineage.parent_pipeline_id": "root", "task.scope": "container"},
+            {"pipeline_id": "leaf", "lineage.parent_pipeline_id": "mid"},
+        ]
+
+        async def read_rows():
+            return rows
+
+        monkeypatch.setattr(svc, "_read_state_rows", read_rows, raising=False)
         assert _run(svc.resolve_container_task("leaf")) == "mid"
+
+    def test_child_ids_aggregate_descendants_from_state(self, monkeypatch) -> None:
+        """子链聚合：lineage 分组 BFS 全量后代。"""
+        svc = WorkspaceService()
+        rows = [
+            {"pipeline_id": "root"},
+            {"pipeline_id": "mid", "lineage.parent_pipeline_id": "root"},
+            {"pipeline_id": "leaf", "lineage.parent_pipeline_id": "mid"},
+            {"pipeline_id": "other", "lineage.parent_pipeline_id": "elsewhere"},
+        ]
+
+        async def read_rows():
+            return rows
+
+        monkeypatch.setattr(svc, "_read_state_rows", read_rows, raising=False)
+        assert _run(svc._get_child_task_ids("root")) == {"mid", "leaf"}
 
 
 # ═══════════════════════════════════════════════════════════
@@ -512,29 +529,18 @@ class TestChildTaskAggregationFailureWarns:
         assert result == set(), "降级语义保持（空集）"
         assert any("子任务聚合失败" in r.getMessage() for r in caplog.records)
 
-    def test_legacy_path_failure_warns_and_empty_set(self, caplog, monkeypatch) -> None:
-        """P15：legacy 路径同款留痕。"""
+    def test_reader_missing_fails_closed_warns_and_empty_set(self, caplog, monkeypatch) -> None:
+        """P15：读面未注入 fail-closed 同款留痕（legacy 镜像回退已退役）。"""
         import asyncio
         import logging
-        import sys as _sys
-        import types as _types
 
         svc = WorkspaceService()
 
         async def rows_none():
-            return None  # 触发 legacy 回退路径
+            return None  # state 读面未注入
 
-        # legacy 方法内部 from tasks.service_access import get_task_service →
-        # 用抛错桩顶替该模块，让 legacy 自身 except 分支命中
-        stub = _types.ModuleType("tasks.service_access_stub_p15")
-
-        def gts():
-            raise RuntimeError("task service broke")
-
-        stub.get_task_service = gts  # type: ignore[attr-defined]
-        monkeypatch.setitem(_sys.modules, "tasks.service_access", stub)
         monkeypatch.setattr(svc, "_read_state_rows", rows_none, raising=False)
         with caplog.at_level(logging.WARNING):
             result = asyncio.run(svc._get_child_task_ids("container-2"))
         assert result == set()
-        assert any("legacy" in r.getMessage() and "子任务聚合失败" in r.getMessage() for r in caplog.records)
+        assert any("读面未注入" in r.getMessage() and "子任务聚合失败" in r.getMessage() for r in caplog.records)

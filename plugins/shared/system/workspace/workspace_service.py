@@ -173,12 +173,17 @@ class WorkspaceService:
 
         读 state 聚合行（task = pipeline）：无父（根形式）→ 自身；task.scope ==
         container → 自身；否则沿 lineage.parent_pipeline_id 向上找最近的容器
-        任务。读面未注入回退 task_service 只读镜像。
+        任务。读面未注入 → fail-closed 返回自身（0.1 task_service 镜像回退已随
+        2026-08-22 全库管道数据清空退役）。
         """
         try:
             rows = await self._read_state_rows()
             if rows is None:
-                return await self._resolve_container_task_legacy(task_id)
+                logger.warning(
+                    "[WorkspaceService] state 读面未注入，容器任务解析 fail-closed 返回自身 | task_id=%s",
+                    task_id,
+                )
+                return task_id
 
             by_id = {str(r.get("pipeline_id") or ""): r for r in rows}
             current_id = task_id
@@ -198,39 +203,18 @@ class WorkspaceService:
             logger.warning("[WorkspaceService] 解析容器任务失败 | task_id=%s", task_id)
             return task_id
 
-    async def _resolve_container_task_legacy(self, task_id: str) -> str:
-        """回退：task_service 只读镜像路径（读面未注入时的存量兼容）。"""
-        try:
-            from tasks.service_access import get_task_service  # noqa: PLC0415
-
-            task_service = get_task_service()
-            if task_service is None:
-                return task_id
-            task = await asyncio.to_thread(task_service.get_task, task_id)
-            if not task:
-                return task_id
-            if not task.parent_task_id:
-                return task_id
-            if task.metadata.get("is_container"):
-                return task_id
-            current = task
-            visited = {task_id}
-            while current.parent_task_id and current.parent_task_id not in visited:
-                visited.add(current.parent_task_id)
-                parent = await asyncio.to_thread(task_service.get_task, current.parent_task_id)
-                if not parent:
-                    break
-                current = parent
-            return current.id
-        except Exception:
-            return task_id
-
     async def _get_child_task_ids(self, container_task_id: str) -> set[str]:
         """获取容器任务下所有子任务 ID（GAP-1 统一：子链 = lineage 分组）。"""
         try:
             rows = await self._read_state_rows()
             if rows is None:
-                return await self._get_child_task_ids_legacy(container_task_id)
+                # 读面未注入 → fail-closed 空集并留痕（0.1 task_service 镜像回退
+                # 已退役；静默空集会让容器制品列表只剩自身条目，须可观测）
+                logger.warning(
+                    "[workspace] 子任务聚合失败（state 读面未注入，返回空集，制品列表可能不完整）| container_task_id=%s",
+                    container_task_id,
+                )
+                return set()
 
             children_of: dict[str, list[str]] = {}
             for r in rows:
@@ -255,36 +239,6 @@ class WorkspaceService:
             # 子任务聚合失败静默空集会让容器制品列表只剩自身条目——留痕可观测
             logger.warning(
                 "[workspace] 子任务聚合失败（返回空集，制品列表可能不完整）| container_task_id=%s | error=%s",
-                container_task_id,
-                e,
-            )
-            return set()
-
-    async def _get_child_task_ids_legacy(self, container_task_id: str) -> set[str]:
-        """回退：task_service 只读镜像路径。"""
-        try:
-            from tasks.service_access import get_task_service  # noqa: PLC0415
-
-            task_service = get_task_service()
-            if task_service is None:
-                return {container_task_id}
-            child_ids: set[str] = set()
-            visited: set[str] = set()
-            queue = [container_task_id]
-            while queue:
-                parent_id = queue.pop(0)
-                if parent_id in visited:
-                    continue
-                visited.add(parent_id)
-                subtasks = task_service.list_subtasks(parent_id)
-                for t in subtasks:
-                    child_ids.add(t.id)
-                    queue.append(t.id)
-            return child_ids
-        except Exception as e:
-            # legacy 路径同款留痕（218/241 两条聚合路径口径一致）
-            logger.warning(
-                "[workspace] 子任务聚合失败 legacy（返回空集，制品列表可能不完整）| container_task_id=%s | error=%s",
                 container_task_id,
                 e,
             )
