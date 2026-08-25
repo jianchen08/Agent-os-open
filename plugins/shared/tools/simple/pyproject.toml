@@ -6,7 +6,6 @@ requires-python = ">=3.11"
 dependencies = [
     "agentos-plugin-sdk>=0.2.0",
     "pyyaml",
-    "markitdown",
 ]
 
 # 本地 SDK 源映射（uv lock 解析必需——agentos-plugin-sdk 不在任何 registry）：

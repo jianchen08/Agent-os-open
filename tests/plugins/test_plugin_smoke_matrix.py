@@ -198,8 +198,6 @@ def _safe_invocations(plugin_dir: Path, tmp_path: Path) -> dict:
         "shared/system/review": {"review.get_report": {"review_id": "smoke_nonexistent"}},
         "shared/tools/triggers": {"trigger.list": {}},
         "shared/tools/simple": {
-            "unit_converter": {"value": 1, "from_unit": "m", "to_unit": "km", "category": "length"},
-            "scientific_calculator": {"operation": "calculate", "expression": "1+1"},
             "yaml_validate": {"content": "a: 1\nb: 2\n"},
         },
     }

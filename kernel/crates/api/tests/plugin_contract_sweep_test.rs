@@ -234,9 +234,13 @@ fn all_plugin_contracts_are_executor_consumable() {
     // 2 空参声明 / 2 带形态 pattern / 88 服务）
     // 2026-08-25 收紧：hot_swap 整目录下线（-1）+ lsp.completion/supported_languages
     // 死工具删声明（-2）→ 带参数面 53→50。
+    // 2026-08-25 批5：simple 8 死工具下线（unit_converter/scientific_calculator/
+    // binary_converter/ide 三件/compatibility_checker/register_resource；其中
+    // ide_get_selection 空参面）→ 带参数面 50→43，插件 tool 面收敛到 yaml_validate +
+    // read_execution_detail 两件活工具。
     assert!(
-        tools_props >= 50,
-        "带参数面工具数退化: {tools_props} < 50（L2 补齐基线，2026-08-25 收紧）"
+        tools_props >= 43,
+        "带参数面工具数退化: {tools_props} < 43（L2 补齐基线，2026-08-25 批5 收紧）"
     );
     assert!(
         tools_pattern >= 2,
