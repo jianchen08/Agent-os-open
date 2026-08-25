@@ -74,6 +74,14 @@ export function compileThemeVariables(config: ThemeConfig): string {
   // === 状态色 ===
   Object.entries(config.colors.status).forEach(([key, value]) => {
     vars.push(`--status-${kebabCase(key)}: ${value}`)
+    // rgb 三元组：tailwind 状态 token 以 rgb(var(--status-*-rgb)/<alpha>) 消费，
+    // 支持 /10 /80 等透明度修饰（裸 hex token 的 alpha 修饰会被静默丢弃）
+    const statusRgb = colorToRgb(value)
+    if (statusRgb) {
+      vars.push(`--status-${kebabCase(key)}-rgb: ${statusRgb.r} ${statusRgb.g} ${statusRgb.b}`)
+    }
+    // 状态章前景（bg-status-* 底上的文字）：黑白择优，保证任何主题状态色上可读
+    vars.push(`--status-${kebabCase(key)}-foreground: ${contrastPick(value)}`)
   })
 
   // === 消息气泡 ===
@@ -503,13 +511,18 @@ export function compileThemeVariables(config: ThemeConfig): string {
   vars.push(`--popover-foreground: ${colorToHsl(c.text.primary)}`)
   vars.push(`--panel-solid: ${colorToHslSolid(c.background.elevated)}`)
   vars.push(`--primary: ${colorToHsl(c.primary)}`)
-  vars.push(`--primary-foreground: ${colorToHsl(c.bubble.user_text)}`)
+  // 主色/次色/强调色的前景（其底上的文字）：黑白择优计算。
+  // 曾经取 bubble.user_text / text.primary 等声明值——那些值是对着气泡底/正文底
+  // 调的，压在 primary/secondary/accent 上在多个主题撞色（deep-space 2.34 /
+  // pixel-art 2.23 / moe-soft 2.36），且无任何校验兜底；成对声明交给主题作者
+  // 并由对比度门禁测试把关，前景配对在此单点计算保证恒可读。
+  vars.push(`--primary-foreground: ${colorToHsl(contrastPick(c.primary))}`)
   vars.push(`--secondary: ${colorToHsl(c.secondary)}`)
-  vars.push(`--secondary-foreground: ${colorToHsl(c.text.primary)}`)
+  vars.push(`--secondary-foreground: ${colorToHsl(contrastPick(c.secondary))}`)
   vars.push(`--muted: ${colorToHsl(c.background.input)}`)
   vars.push(`--muted-foreground: ${colorToHsl(c.text.secondary)}`)
   vars.push(`--accent: ${colorToHsl(c.accent)}`)
-  vars.push(`--accent-foreground: ${colorToHsl(c.text.primary)}`)
+  vars.push(`--accent-foreground: ${colorToHsl(contrastPick(c.accent))}`)
   vars.push(`--border: ${colorToHsl(c.border.default)}`)
   vars.push(`--input: ${colorToHsl(c.background.input)}`)
   vars.push(`--ring: ${colorToHsl(c.primary)}`)
@@ -804,6 +817,46 @@ function hexToRgb(hex: string): { r: number; g: number; b: number } | null {
     g: parseInt(match[2], 16),
     b: parseInt(match[3], 16),
   }
+}
+
+/**
+ * 将任意颜色值解析为 RGB（HEX / rgb(a) / 渐变取色标中位近似）
+ *
+ * @param color - 颜色值字符串
+ * @returns RGB 对象（不含 alpha），无法解析时返回 null
+ */
+function colorToRgb(color: string): { r: number; g: number; b: number } | null {
+  if (!color || typeof color !== 'string') return null
+  if (color.startsWith('#')) return hexToRgb(color)
+
+  const rgbaMatch = color.match(/rgba?\(\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*(?:,\s*([\d.]+))?\s*\)/)
+  if (rgbaMatch) {
+    return { r: parseInt(rgbaMatch[1]), g: parseInt(rgbaMatch[2]), b: parseInt(rgbaMatch[3]) }
+  }
+
+  const solidFromGradient = extractSolidFromGradient(color)
+  return solidFromGradient ? hexToRgb(solidFromGradient) : null
+}
+
+/**
+ * 为给定底色择优前景色（纯白或纯黑，取对比度更高者）
+ *
+ * 语义前景（primary/secondary/accent/status 前景）的单点计算：声明值面向
+ * 各自背景 authored，跨槽位复用必撞色，这里按底色亮度择黑/白保证恒可读。
+ * 亮度分界 L≈0.179（黑白对比度相等点），偏亮取黑、偏暗取白。
+ *
+ * @param bg - 底色值字符串（HEX/rgba/渐变）
+ * @returns '#000000' 或 '#ffffff'，无法解析时回退白色（深色底为主）
+ */
+function contrastPick(bg: string): string {
+  const rgb = colorToRgb(bg)
+  if (!rgb) return '#ffffff'
+  const channels = [rgb.r, rgb.g, rgb.b].map((v) => {
+    const n = v / 255
+    return n <= 0.03928 ? n / 12.92 : ((n + 0.055) / 1.055) ** 2.4
+  })
+  const luminance = 0.2126 * channels[0] + 0.7152 * channels[1] + 0.0722 * channels[2]
+  return luminance > 0.179 ? '#000000' : '#ffffff'
 }
 
 /**

@@ -205,6 +205,38 @@
   --status-info: #3b82f6;
   --status-pending: var(--status-pending-color);
 
+  /* 状态 rgb 三元组（tailwind alpha 修饰消费）与状态章前景（黑白择优，主题引擎运行时覆写） */
+  --status-running-rgb: 8 145 178;
+  --status-warning-rgb: 217 119 6;
+  --status-success-rgb: 5 150 105;
+  --status-error-rgb: 220 38 38;
+  --status-info-rgb: 59 130 246;
+  --status-pending-rgb: 100 116 139;
+  --status-running-foreground: #ffffff;
+  --status-warning-foreground: #ffffff;
+  --status-success-foreground: #ffffff;
+  --status-error-foreground: #ffffff;
+  --status-info-foreground: #ffffff;
+  --status-pending-foreground: #ffffff;
+
+  /* 媒体覆盖层配色（图片查看器/画廊恒深底幕上的铬件；不随主题明暗翻转，
+     组件零字面量的收敛位，主题/插件可覆写） */
+  --on-image-text: #ffffff;
+  --on-image-text-soft: rgba(255, 255, 255, 0.72);
+  --on-image-text-faint: rgba(255, 255, 255, 0.5);
+  --on-image-chrome: rgba(255, 255, 255, 0.12);
+  --on-image-chrome-strong: rgba(255, 255, 255, 0.28);
+  --on-image-chrome-dark: rgba(0, 0, 0, 0.6);
+  --on-image-chrome-dark-strong: rgba(0, 0, 0, 0.8);
+  --on-image-caption: rgba(0, 0, 0, 0.7);
+
+  /* 内容画布（不随主题：视频黑边与网页 iframe 白底是媒体自身属性） */
+  --media-canvas: #000000;
+  --web-canvas: #ffffff;
+
+  /* 轻遮罩（通知面板点击层，比 dialog 遮罩浅一档） */
+  --overlay-subtle: rgba(0, 0, 0, 0.1);
+
   /* 思考过程样式 */
   --thinking-text-color: rgba(100, 100, 115, 0.7);
   --thinking-border-color: rgba(59, 130, 246, 0.3);

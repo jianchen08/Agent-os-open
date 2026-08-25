@@ -75,14 +75,21 @@ export default {
           "5": "hsl(var(--chart-5))",
         },
         // === Deep Space 主题色 ===
-        // 状态色
+        // 状态色：rgb 三元组 + <alpha-value>，使 /10 /80 等透明度修饰真实生效
+        // （裸 hex var 的 alpha 修饰会被编译成非法值被浏览器静默丢弃）
         status: {
-          success: 'var(--status-success)',
-          error: 'var(--status-error)',
-          warning: 'var(--status-warning)',
-          info: 'var(--status-info)',
-          running: 'var(--status-running)',
-          pending: 'var(--status-pending)',
+          success: 'rgb(var(--status-success-rgb) / <alpha-value>)',
+          'success-foreground': 'var(--status-success-foreground)',
+          error: 'rgb(var(--status-error-rgb) / <alpha-value>)',
+          'error-foreground': 'var(--status-error-foreground)',
+          warning: 'rgb(var(--status-warning-rgb) / <alpha-value>)',
+          'warning-foreground': 'var(--status-warning-foreground)',
+          info: 'rgb(var(--status-info-rgb) / <alpha-value>)',
+          'info-foreground': 'var(--status-info-foreground)',
+          running: 'rgb(var(--status-running-rgb) / <alpha-value>)',
+          'running-foreground': 'var(--status-running-foreground)',
+          pending: 'rgb(var(--status-pending-rgb) / <alpha-value>)',
+          'pending-foreground': 'var(--status-pending-foreground)',
         },
         // 背景色
         surface: {
