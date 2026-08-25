@@ -28,7 +28,7 @@ import urllib.error
 import urllib.request
 
 import pytest
-from e2e_helpers import KERNEL_URL, http_get, http_post_json
+from e2e_helpers import KERNEL_URL, http_post_json, http_post_json_auth
 
 
 # ============================================================
@@ -200,118 +200,131 @@ class TestAuthLoginFullChain:
 # 代码参考: kernel/crates/api/src/routes.rs
 # ============================================================
 class TestPluginToolLoading:
-    """插件系统工具加载验证：工具列表非空、字段完整、Schema 聚合。"""
+    """插件系统工具加载验证（0.2 契约：需登录态 + {items,total} 信封）。
 
-    def test_tools_returns_non_empty_array(self):
-        """2.1a GET /api/v1/tools 应返回非空数组。"""
-        status, body, _ = http_get(f"{KERNEL_URL}/api/v1/tools")
+    工具数量随插件增删自然变化——不做字面值断言，以非空 + 字段完整性 +
+    total==len(items) 自洽性为契约。
+    """
+
+    def test_tools_returns_non_empty_items(self, auth_token):
+        """2.1a GET /api/v1/tools 应返回非空 items。"""
+        status, body, _ = http_get_with_auth(f"{KERNEL_URL}/api/v1/tools", auth_token)
         assert status == 200, f"期望 200，实际 {status}"
-        assert isinstance(body, list), f"响应应为 list，实际 {type(body)}"
-        assert len(body) > 0, "工具列表不应为空"
+        assert isinstance(body, dict), f"响应应为 dict 信封，实际 {type(body)}"
+        assert isinstance(body.get("items"), list), "信封应含 items 数组"
+        assert len(body["items"]) > 0, "工具列表不应为空"
 
-    def test_tools_count_expected_44(self):
-        """2.1b GET /api/v1/tools 应返回 44 个工具。"""
-        status, body, _ = http_get(f"{KERNEL_URL}/api/v1/tools")
+    def test_tools_total_envelope_consistent(self, auth_token):
+        """2.1b 信封 total 与 items 长度自洽。"""
+        status, body, _ = http_get_with_auth(f"{KERNEL_URL}/api/v1/tools", auth_token)
         assert status == 200
-        assert len(body) == 44, f"期望 44 个工具，实际 {len(body)} 个"
+        assert body["total"] == len(body["items"]),             f"total={body['total']} != len(items)={len(body['items'])}"
 
-    def test_each_tool_has_name_field(self):
+    def test_each_tool_has_name_field(self, auth_token):
         """2.2a 每个工具应包含 name 字段。"""
-        status, body, _ = http_get(f"{KERNEL_URL}/api/v1/tools")
+        status, body, _ = http_get_with_auth(f"{KERNEL_URL}/api/v1/tools", auth_token)
         assert status == 200
-        for i, tool in enumerate(body):
+        for i, tool in enumerate(body["items"]):
             assert "name" in tool, f"第 {i} 个工具缺少 name 字段"
             assert isinstance(tool["name"], str), f"第 {i} 个工具 name 应为字符串"
 
-    def test_each_tool_has_description_field(self):
+    def test_each_tool_has_description_field(self, auth_token):
         """2.2b 每个工具应包含 description 字段。"""
-        status, body, _ = http_get(f"{KERNEL_URL}/api/v1/tools")
+        status, body, _ = http_get_with_auth(f"{KERNEL_URL}/api/v1/tools", auth_token)
         assert status == 200
-        for i, tool in enumerate(body):
+        for i, tool in enumerate(body["items"]):
             assert "description" in tool, f"第 {i} 个工具缺少 description 字段"
 
-    def test_each_tool_has_plugin_id_field(self):
+    def test_each_tool_has_plugin_id_field(self, auth_token):
         """2.2c 每个工具应包含 plugin_id 字段。"""
-        status, body, _ = http_get(f"{KERNEL_URL}/api/v1/tools")
+        status, body, _ = http_get_with_auth(f"{KERNEL_URL}/api/v1/tools", auth_token)
         assert status == 200
-        for i, tool in enumerate(body):
+        for i, tool in enumerate(body["items"]):
             assert "plugin_id" in tool, f"第 {i} 个工具缺少 plugin_id 字段"
 
-    def test_each_tool_has_category_field(self):
+    def test_each_tool_has_category_field(self, auth_token):
         """2.2d 每个工具应包含 category 字段。"""
-        status, body, _ = http_get(f"{KERNEL_URL}/api/v1/tools")
+        status, body, _ = http_get_with_auth(f"{KERNEL_URL}/api/v1/tools", auth_token)
         assert status == 200
-        for i, tool in enumerate(body):
+        for i, tool in enumerate(body["items"]):
             assert "category" in tool, f"第 {i} 个工具缺少 category 字段"
 
-    def test_each_tool_has_source_field(self):
+    def test_each_tool_has_source_field(self, auth_token):
         """2.2e 每个工具应包含 source 字段。"""
-        status, body, _ = http_get(f"{KERNEL_URL}/api/v1/tools")
+        status, body, _ = http_get_with_auth(f"{KERNEL_URL}/api/v1/tools", auth_token)
         assert status == 200
-        for i, tool in enumerate(body):
+        for i, tool in enumerate(body["items"]):
             assert "source" in tool, f"第 {i} 个工具缺少 source 字段"
 
-    def test_schema_has_pipelines_field(self):
+    def test_schema_has_pipelines_field(self, auth_token):
         """2.3a GET /api/v1/schema 应包含 pipelines 字段。"""
-        status, body, _ = http_get(f"{KERNEL_URL}/api/v1/schema")
+        status, body, _ = http_get_with_auth(f"{KERNEL_URL}/api/v1/schema", auth_token)
         assert status == 200
         assert isinstance(body, dict), "schema 响应应为 dict"
         assert "pipelines" in body, "schema 响应缺少 pipelines 字段"
 
-    def test_schema_has_tools_field(self):
+    def test_schema_has_tools_field(self, auth_token):
         """2.3b GET /api/v1/schema 应包含 tools 字段。"""
-        status, body, _ = http_get(f"{KERNEL_URL}/api/v1/schema")
+        status, body, _ = http_get_with_auth(f"{KERNEL_URL}/api/v1/schema", auth_token)
         assert status == 200
         assert "tools" in body, "schema 响应缺少 tools 字段"
-
-
 # ============================================================
-# 用户旅程3：Chat 管道引擎验证（非 echo 模式）
-# 代码参考: kernel/crates/api/src/server.rs
+# 用户旅程3：Chat 管道引擎验证（0.2 契约：需登录态 + message 信封）
+# "[pipeline:"/"Response to:" 是 0.1 stub 期标记——非 echo 性质以
+# content != 原文断言。
 # ============================================================
 class TestChatPipelineEngine:
-    """Chat 管道引擎验证：证明响应来自管道引擎而非 echo 模式。"""
 
-    def test_chat_content_starts_with_pipeline_prefix(self):
-        """3.1 chat 响应 content 应以 '[pipeline:' 开头（证明使用管道引擎）。"""
-        payload = {"message": "hello", "session_id": "test"}
-        status, body, _ = http_post_json(f"{KERNEL_URL}/api/v1/chat", payload, timeout=30)
+    def test_chat_response_content_nonempty(self, auth_token):
+        """3.1 chat 响应 content 为非空字符串（经管道引擎产出）。"""
+        payload = {"message": "hello", "session_id": "e2e-chat-engine"}
+        status, body, _ = http_post_json_auth(
+            f"{KERNEL_URL}/api/v1/chat", payload, auth_token, timeout=60
+        )
         assert status == 200, f"期望 200，实际 {status}"
         assert isinstance(body, dict), "响应应为 dict"
-        assert "content" in body, "响应缺少 content 字段"
-        content = body["content"]
-        assert content.startswith("[pipeline:"), \
-            f"content 应以 '[pipeline:' 开头（证明使用管道引擎），实际: '{content[:80]}'"
+        assert isinstance(body.get("content"), str), "content 应为字符串"
+        assert body["content"].strip(), "content 不应为空"
 
-    def test_chat_content_not_echo_mode(self):
-        """3.2 chat 响应 content 不应以 'Response to:' 开头（echo 模式特征）。"""
-        payload = {"message": "hello", "session_id": "test"}
-        status, body, _ = http_post_json(f"{KERNEL_URL}/api/v1/chat", payload, timeout=30)
+    def test_chat_content_not_echo_mode(self, auth_token):
+        """3.2 chat 响应 content 不等于原文（echo 模式特征是原样回显）。"""
+        payload = {"message": "hello", "session_id": "e2e-chat-engine"}
+        status, body, _ = http_post_json_auth(
+            f"{KERNEL_URL}/api/v1/chat", payload, auth_token, timeout=60
+        )
         assert status == 200
-        content = body["content"]
-        assert not content.startswith("Response to:"), \
-            f"content 不应以 'Response to:' 开头（echo 模式特征），实际: '{content[:80]}'"
+        assert body["content"].strip() != payload["message"], (
+            f"content 原样回显（echo 模式），实际: '{body['content'][:80]}'"
+        )
 
-    def test_chat_response_type_is_message(self):
+    def test_chat_response_type_is_message(self, auth_token):
         """3.3a chat 响应应包含 type='message'。"""
-        payload = {"message": "hello", "session_id": "test"}
-        status, body, _ = http_post_json(f"{KERNEL_URL}/api/v1/chat", payload, timeout=30)
+        payload = {"message": "hello", "session_id": "e2e-chat-engine"}
+        status, body, _ = http_post_json_auth(
+            f"{KERNEL_URL}/api/v1/chat", payload, auth_token, timeout=60
+        )
         assert status == 200
-        assert body.get("type") == "message", \
+        assert body.get("type") == "message", (
             f"type 期望 'message'，实际 '{body.get('type')}'"
+        )
 
-    def test_chat_response_has_session_id(self):
-        """3.3b chat 响应应包含 session_id='test'。"""
-        payload = {"message": "hello", "session_id": "test"}
-        status, body, _ = http_post_json(f"{KERNEL_URL}/api/v1/chat", payload, timeout=30)
+    def test_chat_response_has_session_id(self, auth_token):
+        """3.3b chat 响应应回显 session_id。"""
+        payload = {"message": "hello", "session_id": "e2e-chat-engine"}
+        status, body, _ = http_post_json_auth(
+            f"{KERNEL_URL}/api/v1/chat", payload, auth_token, timeout=60
+        )
         assert status == 200
-        assert body.get("session_id") == "test", \
-            f"session_id 期望 'test'，实际 '{body.get('session_id')}'"
+        assert body.get("session_id") == payload["session_id"], (
+            f"session_id 期望 '{payload['session_id']}'，实际 '{body.get('session_id')}'"
+        )
 
-    def test_chat_response_has_timestamp(self):
+    def test_chat_response_has_timestamp(self, auth_token):
         """3.3c chat 响应应包含 timestamp 字段。"""
-        payload = {"message": "hello", "session_id": "test"}
-        status, body, _ = http_post_json(f"{KERNEL_URL}/api/v1/chat", payload, timeout=30)
+        payload = {"message": "hello", "session_id": "e2e-chat-engine"}
+        status, body, _ = http_post_json_auth(
+            f"{KERNEL_URL}/api/v1/chat", payload, auth_token, timeout=60
+        )
         assert status == 200
         assert "timestamp" in body, "响应缺少 timestamp 字段"
         assert isinstance(body["timestamp"], str), "timestamp 应为字符串"

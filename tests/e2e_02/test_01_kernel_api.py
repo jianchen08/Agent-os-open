@@ -78,9 +78,15 @@ class TestKernelApiSchema:
 class TestKernelApiAgents:
     """1.3 Agents 列表端点。"""
 
-    def test_agents_returns_200(self, kernel_url):
-        """测试: GET /api/v1/agents 应返回 200。"""
-        status, body, _ = http_get(f"{kernel_url}/api/v1/agents")
+    def test_agents_returns_200(self, kernel_url, auth_token):
+        """测试: GET /ext/agent_manager/agents 应返回 200。
+
+        /api/v1/agents* 4 路由已迁至 agent_manager 插件（2026-08-20 ADR，
+        server.rs 注释明示），本用例跟随现行插件路由（需登录态）。
+        """
+        status, body, _ = http_get_with_auth(
+            f"{kernel_url}/ext/agent_manager/agents", auth_token
+        )
         assert status == 200, f"期望 200，实际 {status}"
 
     @pytest.mark.skip(reason="0.2 /api/v1/agents 返回对象形态（含 agents 列表包装），非裸数组——见 schema 聚合端点")
