@@ -16,7 +16,15 @@
 # 留归因；CI job 内的写入随 job 丢弃，以仓库提交为准。
 # 不得定在实测之下保绿——首定 46.50（实测 47.48-1）违背该规则，同日纠正
 # 为 48.00（= floor(47.48)+1）。
-python_line_coverage=64.91
+python_line_coverage=70.00
+
+# 收紧（2026-08-25，批次F 存量绿灯测试接线）：本地实测 69.64%（全车道
+# 2870→3461 测试，+591）。来源：plugins/shared 23 个目录/文件的进程内存量
+# 测试接入插桩车道（context_window_guard/security_check/isolation/
+# hindsight_memory/prompt_build/workspace 等——此前虽有测试但车道不收集，
+# 对应模块覆盖率长期失真），另修 tzdata 缺失（Windows zoneinfo 回退 UTC）
+# 与 6 处裸名/双实例串扰。基线 70.00 = floor(69.64)+1（自动棘轮写入）；
+# CI（Linux）首跑实测后按本地-CI 历史差（约 -0.5pp）以 CI 实测按同公式重定。
 
 # 收紧（2026-08-23，CI 治理批）：本地实测 63.17%（16994/26902 行，全车道
 # coverage.xml 产出）。来源：串扰修复使 200+ 既有测试转绿进入插桩执行 +

@@ -97,6 +97,33 @@ BASE_TEST_PATHS: list[str] = [
     "tests/tools/test_task_submit_permission_p0.py",
     "tests/tools/test_task_permission_p0.py",
     "tests/tools/test_memory_idor_p0.py",
+    # 2026-08-25 批次F：plugins/shared 存量绿灯测试接线（逐文件单跑绿 +
+    # security_check 系八文件共跑绿后纳入）。此前 pipeline/** 与 system/tools
+    # 散目录不在车道 → context_window_guard/security_check/isolation/
+    # hindsight_memory 等模块虽有进程内测试但车道不收集，覆盖率长期失真。
+    "plugins/shared/pipeline/input/context_window_guard/",
+    "plugins/shared/pipeline/input/knowledge_inject/",
+    "plugins/shared/pipeline/input/memory_read/",
+    "plugins/shared/pipeline/input/prompt_build/",
+    "plugins/shared/pipeline/input/security_check/",
+    "plugins/shared/pipeline/output/child_task_guard/tests/",
+    "plugins/shared/pipeline/output/experience_consolidator/",
+    "plugins/shared/pipeline/output/task_reminder/",
+    "plugins/shared/pipeline/output/tool_cache_writer/",
+    "plugins/shared/system/agent_manager/",
+    "plugins/shared/system/approval/",
+    "plugins/shared/system/connectors/",
+    "plugins/shared/system/isolation/",
+    "plugins/shared/system/scene/",
+    "plugins/shared/system/task_form/",
+    "plugins/shared/system/widget_demo/",
+    "plugins/shared/system/workspace/",
+    "plugins/shared/system/hindsight_memory/",
+    "plugins/shared/system/review/test_review_persistence.py",
+    "plugins/shared/tools/memory/",
+    "plugins/shared/tools/resource_merge/",
+    "plugins/shared/tools/simple/",
+    "plugins/shared/tools/spill_retrieve/",
 ]
 
 # 外部依赖 marker 过滤（requires_api/requires_redis/requires_db/requires_bwrap

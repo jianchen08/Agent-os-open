@@ -26,6 +26,9 @@ dependencies = [
     "sqlalchemy>=2.0",
     "python-dotenv>=1.2.2",
     "Pillow>=10.0",
+    # Windows 无系统 IANA 时区库，zoneinfo（prompt_build 动态变量时间注入等）
+    # 缺 tzdata 会静默回退 UTC；Linux 走系统库不受影响。
+    "tzdata>=2024.1; sys_platform == 'win32'",
 ]
 
 # [project.scripts]

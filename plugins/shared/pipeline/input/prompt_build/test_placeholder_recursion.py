@@ -19,8 +19,10 @@
 from __future__ import annotations
 
 import asyncio
+import importlib.util
 import sys
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -34,7 +36,17 @@ if _SHARED_DIR not in sys.path:
     sys.path.insert(0, _SHARED_DIR)
 
 from pipeline.plugin import PluginContext  # noqa: E402
-from plugin import PromptBuildPlugin  # noqa: E402
+
+# 全车道共跑时裸名 `plugin` 会被先收集目录的同名模块劫持，
+# 按 _THIS_DIR 显式路径加载（与 test_prompt_build.py 的 _load_plugin_module 同范式）。
+_spec = importlib.util.spec_from_file_location(
+    "prompt_build_plugin_rec_test", str(Path(_THIS_DIR) / "plugin.py")
+)
+assert _spec is not None and _spec.loader is not None
+_mod = importlib.util.module_from_spec(_spec)
+sys.modules["prompt_build_plugin_rec_test"] = _mod
+_spec.loader.exec_module(_mod)
+PromptBuildPlugin: Any = _mod.PromptBuildPlugin  # noqa: E402
 
 # ── 测试辅助 ──
 

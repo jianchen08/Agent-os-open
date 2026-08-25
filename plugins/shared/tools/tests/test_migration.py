@@ -47,17 +47,13 @@ class TestSimplePluginJson:
         assert data["host_type"] == "sidecar"
         assert "entry" in data
 
-    def test_plugin_json_has_10_tools(self):
+    def test_plugin_json_declares_live_tools(self):
         data = json.loads((SIMPLE_DIR / "plugin.json").read_text(encoding="utf-8"))
         tools = data["capabilities"]["tools"]
-        assert len(tools) == 10
+        # 8 个 0.1 内置小工具已随 bash/文件工具面收编退役，现役 2 个
+        assert len(tools) == 2
         tool_names = {t["name"] for t in tools}
-        expected = {
-            "unit_converter", "scientific_calculator", "yaml_validate",
-            "binary_converter", "ide_get_selection", "ide_open_file",
-            "ide_show_diff", "compatibility_checker",
-            "read_execution_detail", "register_resource",
-        }
+        expected = {"yaml_validate", "read_execution_detail"}
         assert tool_names == expected
 
 
@@ -94,83 +90,21 @@ class TestSimpleServerImport:
         assert isinstance(plugin, AgentOSPlugin)
         assert plugin.name == "simple_tools"
 
-    def test_tool_registry_has_10_tools(self):
-        assert len(_load_simple_server().TOOL_REGISTRY) == 10
+    def test_tool_registry_has_live_tools(self):
+        assert len(_load_simple_server().TOOL_REGISTRY) == 2
 
     def test_all_tools_registered(self):
         plugin = _load_simple_server().create_plugin()
         registered = set(plugin._tools.keys())
-        expected = {
-            "unit_converter", "scientific_calculator", "yaml_validate",
-            "binary_converter", "ide_get_selection", "ide_open_file",
-            "ide_show_diff", "compatibility_checker",
-            "read_execution_detail", "register_resource",
-        }
+        expected = {"yaml_validate", "read_execution_detail"}
         assert registered == expected
 
 
 # ── 工具函数功能校验 ──────────────────────────────────
 
 
-class TestUnitConverter:
-    """单位换算工具测试。"""
-
-    @pytest.mark.asyncio
-    async def test_length_conversion(self):
-        from converter_tools import unit_converter
-
-        result = await unit_converter(100, "m", "km", "length")
-        assert "result" in result
-        assert result["result"] == pytest.approx(0.1)
-
-    @pytest.mark.asyncio
-    async def test_weight_conversion(self):
-        from converter_tools import unit_converter
-
-        result = await unit_converter(1, "kg", "g", "weight")
-        assert result["result"] == pytest.approx(1000.0)
-
-    @pytest.mark.asyncio
-    async def test_temperature_conversion(self):
-        from converter_tools import unit_converter
-
-        result = await unit_converter(0, "C", "F", "temperature")
-        assert result["result"] == pytest.approx(32.0)
-
-    @pytest.mark.asyncio
-    async def test_unsupported_unit(self):
-        from converter_tools import unit_converter
-
-        result = await unit_converter(1, "foo", "bar", "length")
-        assert "error" in result
-
-
-class TestScientificCalculator:
-    """科学计算器测试。"""
-
-    @pytest.mark.asyncio
-    async def test_evaluate_sin(self):
-        from calc_tools import scientific_calculator
-
-        result = await scientific_calculator(operation="evaluate", func="sin", value=30)
-        assert "result" in result
-        assert result["result"] == pytest.approx(0.5, abs=1e-6)
-
-    @pytest.mark.asyncio
-    async def test_calculate_expression(self):
-        from calc_tools import scientific_calculator
-
-        result = await scientific_calculator(operation="calculate", expression="2 + 3 * 4")
-        assert result["result"] == 14
-
-    @pytest.mark.asyncio
-    async def test_evaluate_sqrt(self):
-        from calc_tools import scientific_calculator
-
-        result = await scientific_calculator(operation="evaluate", func="sqrt", value=16)
-        assert result["result"] == 4
-
-
+# converter_tools/calc_tools/workflow_tools 已随 simple 死工具下线删除，
+# 对应测试类随之退役——现役工具面由 simple/test_system_tools.py 覆盖。
 class TestYamlValidate:
     """YAML 校验工具测试。"""
 
@@ -199,33 +133,6 @@ class TestYamlValidate:
         )
         assert result["valid"] is False
         assert any("version" in e for e in result["errors"])
-
-
-class TestCompatibilityChecker:
-    """兼容性检查工具测试。"""
-
-    @pytest.mark.asyncio
-    async def test_compatible_resources(self):
-        from workflow_tools import compatibility_checker
-
-        result = await compatibility_checker(
-            original_resource={"resource_info": {"name": "test"}},
-            modified_resource={"resource_info": {"name": "test"}},
-        )
-        assert result["compatible"] is True
-
-    @pytest.mark.asyncio
-    async def test_breaking_change_field_removed(self):
-        from workflow_tools import compatibility_checker
-
-        result = await compatibility_checker(
-            original_resource={"resource_info": {"name": "test", "id": "123"}},
-            modified_resource={"resource_info": {"name": "test"}},
-        )
-        assert result["compatible"] is False
-        assert any(
-            bc["type"] == "field_removed" for bc in result["breaking_changes"]
-        )
 
 
 # ── 外部 MCP plugin.json 校验 ──────────────────────────

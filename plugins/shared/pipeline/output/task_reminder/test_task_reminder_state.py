@@ -15,6 +15,7 @@ state，不再依赖跨进程 task_service / 0.1 infrastructure service_provider
 """
 from __future__ import annotations
 
+import importlib.util
 import sys
 from pathlib import Path
 from typing import Any
@@ -31,7 +32,17 @@ for _d in [_DIR, _SHARED]:
         sys.path.insert(0, str(_d))
 
 from pipeline.plugin import PluginContext  # noqa: E402
-from plugin import TaskReminder  # noqa: E402
+
+# 全车道共跑时裸名 `plugin` 会被先收集目录的同名模块劫持，
+# 按 _DIR 显式路径加载（与 security_check 系测试同范式）。
+_spec = importlib.util.spec_from_file_location(
+    "task_reminder_plugin_state_test", str(_DIR / "plugin.py")
+)
+assert _spec is not None and _spec.loader is not None
+_mod = importlib.util.module_from_spec(_spec)
+sys.modules["task_reminder_plugin_state_test"] = _mod
+_spec.loader.exec_module(_mod)
+TaskReminder = _mod.TaskReminder  # noqa: E402
 
 
 def _ctx(state: dict[str, Any]) -> PluginContext:

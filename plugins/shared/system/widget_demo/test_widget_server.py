@@ -6,22 +6,33 @@
 
 import asyncio
 import base64
+import importlib.util
 import json
+import sys
+from pathlib import Path
 
 import pytest
+
+# 全车道共跑时裸名 `server` 会被其他插件目录的同名模块劫持（各插件
+# server.py 均把自身目录插到 sys.path[0]），按显式路径加载本目录 server.py。
+_spec = importlib.util.spec_from_file_location(
+    "widget_demo_server_test", str(Path(__file__).resolve().parent / "server.py")
+)
+assert _spec is not None and _spec.loader is not None
+_mod = importlib.util.module_from_spec(_spec)
+sys.modules["widget_demo_server_test"] = _mod
+_spec.loader.exec_module(_mod)
+_state = _mod._state
+http_handle = _mod.http_handle
 
 
 @pytest.fixture(autouse=True)
 def _reset_counter():
-    from server import _state
-
     _state.update({"fetch_count": 0, "submit_count": 0, "toggle_count": 0})
     yield
 
 
 def _call(path, method="GET", query=None, raw_body=""):
-    from server import http_handle
-
     return asyncio.run(
         http_handle(path=path, method=method, plugin_id="widget_demo", query=query or {}, raw_body=raw_body)
     )

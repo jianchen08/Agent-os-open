@@ -312,11 +312,14 @@ class TestBankIdDefault:
 # HTTP 展示面（前端接成熟 Hindsight 数据）
 # ═══════════════════════════════════════════════════════════
 
-def _http_call(path, method="GET", query=None):
+def _http_call(path, method="GET", query=None, srv=None):
     import asyncio
 
-    from server import http_handle
-    return asyncio.run(http_handle(path=path, method=method, plugin_id="hindsight_memory", query=query or {}))
+    # 全车道共跑时裸名 `server` 会被其他插件目录的同名模块劫持，
+    # 走本文件 _load_module 的显式路径加载；已注入 mock 的测试传 srv
+    # 复用同一实例（每次新建的模块态互不污染）。
+    module = srv if srv is not None else _load_module()
+    return asyncio.run(module.http_handle(path=path, method=method, plugin_id="hindsight_memory", query=query or {}))
 
 
 def _decode(data):
@@ -807,8 +810,9 @@ def test_http_memory_episodes_dispatch():
     """
     from unittest.mock import AsyncMock, MagicMock
 
-    import server as srv
     from routes_memory import set_memory_backend
+
+    srv = _load_module()
 
     backend = MagicMock()
     backend.search = AsyncMock(return_value=[
@@ -819,7 +823,7 @@ def test_http_memory_episodes_dispatch():
     srv._memory_backend_attempted = True
     try:
         out = _http_call("/ext/hindsight_memory_service/memory/episodes",
-                         query={"page": "1", "page_size": "10"})
+                         query={"page": "1", "page_size": "10"}, srv=srv)
         payload = _http_ok(out)
         assert payload["total"] == 1
         assert payload["items"][0]["id"] == "e1"
@@ -834,8 +838,9 @@ def test_http_memory_episodes_dispatch():
 def test_http_memory_search_get_dispatch():
     from unittest.mock import AsyncMock, MagicMock
 
-    import server as srv
     from routes_memory import set_memory_backend
+
+    srv = _load_module()
 
     backend = MagicMock()
     backend.search = AsyncMock(return_value=[
@@ -845,7 +850,7 @@ def test_http_memory_search_get_dispatch():
     srv._memory_backend_attempted = True
     try:
         out = _http_call("/ext/hindsight_memory_service/memory/search",
-                         query={"query": "q", "top_k": "5"})
+                         query={"query": "q", "top_k": "5"}, srv=srv)
         payload = _http_ok(out)
         assert payload["total"] == 1
         assert payload["items"][0]["content"] == "hit"
@@ -860,8 +865,9 @@ def test_http_memory_delete_missing_404():
     """memory 域 DELETE 未命中 → HTTP 404（body {"detail": ...}，与旧版一致）。"""
     from unittest.mock import AsyncMock, MagicMock
 
-    import server as srv
     from routes_memory import set_memory_backend
+
+    srv = _load_module()
 
     backend = MagicMock()
     backend.search = AsyncMock(return_value=[])
@@ -869,7 +875,7 @@ def test_http_memory_delete_missing_404():
     srv._memory_backend = backend
     srv._memory_backend_attempted = True
     try:
-        out = _http_call("/ext/hindsight_memory_service/memory/nope", method="DELETE")
+        out = _http_call("/ext/hindsight_memory_service/memory/nope", method="DELETE", srv=srv)
         assert out["success"] is True
         assert out["data"]["status"] == 404
         payload = json.loads(__import__("base64").b64decode(out["data"]["body"]).decode("utf-8"))
@@ -897,9 +903,8 @@ def test_http_kb_list_and_stats_dispatch():
 
 def test_http_kb_check_degrades_without_client():
     """knowledge-base check：client 未初始化如实报告 unavailable（HTTP 200）。"""
-    import server as srv
-
-    srv._client = None  # 显式复位（防其它测试泄漏注入的 client）
+    # _http_call 走 _load_module 每次新建 server 模块，_client 恒为初始 None，
+    # 无跨测试泄漏注入问题（原裸模块共享态才需要显式复位）。
     out = _http_call("/ext/hindsight_memory_service/knowledge-base/check")
     payload = _http_ok(out)
     assert payload["available"] is False
@@ -909,12 +914,15 @@ def test_http_kb_check_degrades_without_client():
 def test_http_kb_upload_dispatch_multipart():
     """knowledge-base 上传：multipart 解析 → mock client 入库 → 注册条目。
 
-    分发时 kb.set_client(server._client)——注入路径经 server 模块级 _client。
+    分发时 kb.set_client(server._client)——注入路径经 server 模块级 _client；
+    srv 用 _load_module 显式加载，mock 注入与 http_handle 调用同一实例
+    （裸名 `server` 全车道共跑会被其他插件目录劫持）。
     """
     from unittest.mock import AsyncMock, MagicMock
 
     import knowledge_base as kb
-    import server as srv
+
+    srv = _load_module()
 
     kb.set_data_dir(__import__("tempfile").mkdtemp(prefix="kb_test_"))
     client = MagicMock()
@@ -932,12 +940,11 @@ def test_http_kb_upload_dispatch_multipart():
             f"{'hello 知识库 ' * 500}\r\n"
             f"--{boundary}--\r\n"
         ).encode()
-        # 手工构造完整 http_handle 调用（含 headers）
+        # 手工构造完整 http_handle 调用（含 headers），用注入了 mock client 的
+        # 同一 srv 实例（另开 _load_module 会丢失注入）。
         import asyncio
 
-        from server import http_handle
-
-        result = asyncio.run(http_handle(
+        result = asyncio.run(srv.http_handle(
             path="/ext/hindsight_memory_service/knowledge-base/upload",
             method="POST",
             plugin_id="hindsight_memory_service",

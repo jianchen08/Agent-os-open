@@ -40,15 +40,9 @@ if _SHARED_DIR not in sys.path:
 
 import importlib.util  # noqa: E402
 
-_spec = importlib.util.spec_from_file_location(
-    "tool_cache_plugin", str(Path(_INPUT_TOOL_CACHE_DIR) / "plugin.py")
-)
-assert _spec is not None and _spec.loader is not None
-_tool_cache_mod = importlib.util.module_from_spec(_spec)
-_spec.loader.exec_module(_tool_cache_mod)
-ToolCache = _tool_cache_mod.ToolCache
-_GLOBAL_CACHE = _tool_cache_mod._GLOBAL_CACHE
-get_global_cache = _tool_cache_mod.get_global_cache
+# input 端 plugin.py 由 _fresh_tool_cache 在测试执行时点 fresh 加载
+# （见下方测试辅助段注释——收集期绑定会随 pipeline 包实例更替失效）。
+_INPUT_TOOL_CACHE_PLUGIN = str(Path(_INPUT_TOOL_CACHE_DIR) / "plugin.py")
 
 # 本目录 plugin.py 也用 importlib 加载（避免 'plugin' 名字污染）
 _writer_spec = importlib.util.spec_from_file_location(
@@ -62,11 +56,41 @@ from pipeline.plugin import PluginContext  # noqa: E402
 from pipeline.types import StateKeys  # noqa: E402
 
 # ── 测试辅助 ──
+# 车道中央裸名逐出机制（tests/plugins conftest）会在会话中重建 `pipeline`
+# 包实例，而 tool_cache 的全局缓存挂在 pipeline 包属性上、writer.execute
+# 每次执行都 fresh 加载 input 端并绑定【当时】的实例。因此涉及缓存的
+# 断言/清空一律按运行期当前实例解析（收集期模块级绑定会指向被换掉的
+# 旧实例，造成 len==0 假失败或"不缓存"断言恒过的假绿）。
+
+
+def _pkg_now():
+    """运行期当前的 pipeline 包实例。"""
+    import pipeline
+
+    if not hasattr(pipeline, "_tool_result_cache"):
+        pipeline._tool_result_cache = {}
+    return pipeline
+
+
+def _cache_now() -> dict:
+    return _pkg_now()._tool_result_cache
+
+
+def _fresh_tool_cache(config: dict):
+    """fresh 加载 input 端 ToolCache（绑定运行期当前 pipeline 实例）。"""
+    spec = importlib.util.spec_from_file_location(
+        "tool_cache_fresh_test", _INPUT_TOOL_CACHE_PLUGIN
+    )
+    assert spec is not None and spec.loader is not None
+    mod = importlib.util.module_from_spec(spec)
+    sys.modules["tool_cache_fresh_test"] = mod
+    spec.loader.exec_module(mod)
+    return mod.ToolCache(config=config)
 
 
 def clear_cache() -> None:
     """每个测试前清空全局缓存，保证隔离。"""
-    _GLOBAL_CACHE.clear()
+    _cache_now().clear()
 
 
 def make_ctx(raw_tool_calls: list[dict], tool_results: list) -> PluginContext:
@@ -89,7 +113,7 @@ async def test_writer_write_then_cache_hit() -> None:
     """writer 写入工具结果后，下一轮 tool_cache 应命中跳过执行。"""
     clear_cache()
     writer = ToolCacheWriter(config={})
-    cache = ToolCache(config={})
+    cache = _fresh_tool_cache(config={})
 
     # 模拟工具执行完成：raw_tool_calls + tool_results（2026-08-22 起 file_read
     # 按路径读类型排除出缓存，示例改用纯查询工具 web_search）
@@ -99,7 +123,7 @@ async def test_writer_write_then_cache_hit() -> None:
 
     # writer 写缓存
     await writer.execute(ctx)
-    assert len(_GLOBAL_CACHE) == 1
+    assert len(_cache_now()) == 1
 
     # 下一轮：tool_cache 查同样调用，应命中
     ctx2 = PluginContext(
@@ -129,7 +153,7 @@ async def test_exclude_tools_not_cached() -> None:
 
     await writer.execute(ctx)
 
-    assert len(_GLOBAL_CACHE) == 0, "bash_execute 不应被缓存"
+    assert len(_cache_now()) == 0, "bash_execute 不应被缓存"
 
 
 @pytest.mark.asyncio
@@ -144,7 +168,7 @@ async def test_custom_exclude_tools() -> None:
 
     await writer.execute(ctx)
 
-    assert len(_GLOBAL_CACHE) == 0, "自定义排除工具不应被缓存"
+    assert len(_cache_now()) == 0, "自定义排除工具不应被缓存"
 
 
 # ══════════════════════════════════════════════════
@@ -164,7 +188,7 @@ async def test_failed_tool_call_not_cached() -> None:
 
     await writer.execute(ctx)
 
-    assert len(_GLOBAL_CACHE) == 0, "失败的工具调用不应被缓存"
+    assert len(_cache_now()) == 0, "失败的工具调用不应被缓存"
 
 
 # ══════════════════════════════════════════════════
@@ -175,14 +199,14 @@ async def test_failed_tool_call_not_cached() -> None:
 def test_global_cache_shared_across_instances() -> None:
     """多个 ToolCache 实例共享同一份全局缓存。"""
     clear_cache()
-    cache1 = ToolCache(config={})
-    cache2 = ToolCache(config={})
+    cache1 = _fresh_tool_cache(config={})
+    cache2 = _fresh_tool_cache(config={})
 
     # cache1 写入（file_read 已排除，用纯查询工具验证共享性）
     cache1.put({"name": "web_search", "args": {"query": "agentos"}}, "data1")
 
     # cache2 应能读到（同一份全局缓存）
-    g = get_global_cache()
+    g = _cache_now()
     assert len(g) == 1
     # 验证 cache2 实例也能通过 _is_excluded 等方法访问共享状态
     assert cache2._is_excluded("bash_execute") is True
@@ -198,7 +222,7 @@ async def test_ttl_expiry() -> None:
     """TTL 过期后 cache 不命中。"""
     clear_cache()
     # 用极短 TTL 构造
-    cache = ToolCache(config={"default_ttl": 0})  # 立即过期
+    cache = _fresh_tool_cache(config={"default_ttl": 0})  # 立即过期
     writer = ToolCacheWriter(config={"default_ttl": 0})
 
     raw_tool_calls = [{"name": "file_read", "args": {"path": "x"}}]
@@ -235,7 +259,7 @@ async def test_max_size_eviction() -> None:
         await writer.execute(make_ctx(raw, res))
 
     # 全局缓存不应超过 max_size（可能因 LRU 淘汰到 2 条）
-    assert len(_GLOBAL_CACHE) <= 2
+    assert len(_cache_now()) <= 2
 
 
 # ══════════════════════════════════════════════════
@@ -251,11 +275,11 @@ async def test_empty_inputs_no_op() -> None:
 
     # 空 tool_results
     await writer.execute(make_ctx([{"name": "file_read", "args": {}}], []))
-    assert len(_GLOBAL_CACHE) == 0
+    assert len(_cache_now()) == 0
 
     # 空 raw_tool_calls
     await writer.execute(make_ctx([], ["data"]))
-    assert len(_GLOBAL_CACHE) == 0
+    assert len(_cache_now()) == 0
 
 
 @pytest.mark.asyncio
@@ -268,14 +292,14 @@ async def test_disabled_writer_no_op() -> None:
     res = ["data"]
     await writer.execute(make_ctx(raw, res))
 
-    assert len(_GLOBAL_CACHE) == 0
+    assert len(_cache_now()) == 0
 
 
 @pytest.mark.asyncio
 async def test_disabled_cache_no_op() -> None:
     """enabled=False 时 cache 不查缓存。"""
     clear_cache()
-    cache = ToolCache(config={"enabled": False})
+    cache = _fresh_tool_cache(config={"enabled": False})
 
     ctx = PluginContext(state={StateKeys.RAW_TOOL_CALLS: [{"name": "file_read", "args": {}}]})
     result = await cache.execute(ctx)
@@ -300,4 +324,4 @@ async def test_file_read_not_cached() -> None:
 
     await writer.execute(ctx)
 
-    assert len(_GLOBAL_CACHE) == 0, "file_read 不应被缓存（读→写→再读会命中陈旧内容）"
+    assert len(_cache_now()) == 0, "file_read 不应被缓存（读→写→再读会命中陈旧内容）"

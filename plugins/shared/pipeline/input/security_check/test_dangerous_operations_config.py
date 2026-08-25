@@ -79,12 +79,25 @@ def host_direct_policy(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 class TestDangerousOperationsFromInjectedConfig:
-    def test_config_declared_tool_is_dangerous(self, host_direct_policy) -> None:
-        """注入配置中声明 dangerous_operations 的工具 → _is_dangerous_tool 判危险（轨道 2 生效）。"""
+    def test_config_declared_tool_args_hit_is_dangerous(self, host_direct_policy) -> None:
+        """注入配置声明 + 参数命中 dangerous_operations → 判危险（轨道 2 参数级判定）。
+
+        GAP 修复后的契约是参数级判定：声明本身不触发危险，参数命中声明模式
+        才判危险（消除常规操作 100% 弹审批的过度打扰）。
+        """
         plugin = SecurityCheckPlugin(config=_config_with_dangerous_ops())
         ctx = _ctx_without_services()
-        assert plugin._is_dangerous_tool(ctx, "task_submit") is True
-        assert plugin._is_dangerous_tool(ctx, "state_update") is True
+        # submit:arbitrary → 路径前缀模式，path 参数命中
+        assert plugin._is_dangerous_tool(ctx, "task_submit", {"path": "arbitrary/zone"}) is True
+        # delete: → 空模式操作匹配，operation 参数值命中
+        assert plugin._is_dangerous_tool(ctx, "state_update", {"operation": "delete"}) is True
+
+    def test_declared_but_args_not_hit_not_dangerous(self, host_direct_policy) -> None:
+        """声明了 dangerous_operations 但参数未命中 / 无参数 → 不判危险。"""
+        plugin = SecurityCheckPlugin(config=_config_with_dangerous_ops())
+        ctx = _ctx_without_services()
+        assert plugin._is_dangerous_tool(ctx, "task_submit", {"path": "workspace/x"}) is False
+        assert plugin._is_dangerous_tool(ctx, "task_submit") is False
 
     def test_empty_or_missing_ops_not_dangerous_via_track2(self, host_direct_policy) -> None:
         """空 dangerous_operations / 未声明 / 未注入的工具 → 轨道 2 不判危险。"""
