@@ -204,7 +204,15 @@ class ParamInjectPlugin(IInputPlugin):
             # L2_REQUIRES_PARENT_TASK。注入参数是系统权威值，
             # 只要 args 中没有有效值就注入。
             if not args.get("task_id"):
-                task_id = ctx.state.get(StateKeys.TASK_ID, "")
+                # 0.2 统一后任务身份权威键是 task.id（点号键，内核
+                # chat_send_handler 创建管道时注入）；task_id 是 0.1 遗留键
+                # （任务管道 state 无此键，只读它会恒空导致 task_evaluate 等
+                # 报「task_id 未注入」）。task.id 优先（引擎注入不可伪造），
+                # task_id 兜底 0.1 存量会话。
+                task_id = (
+                    ctx.state.get("task.id", "")
+                    or ctx.state.get(StateKeys.TASK_ID, "")
+                )
                 if task_id:
                     args["task_id"] = task_id
                 else:
