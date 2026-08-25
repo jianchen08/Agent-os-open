@@ -306,7 +306,7 @@ async fn run_pipeline_emit_ops(
     let compiled = compile_pipeline(
         &engine_cfg,
         &agentos_core::types::StepLibrary::default(),
-        &executor.plugin_ids(),
+        executor.plugin_ids(),
     )
     .expect("compile ok");
     executor

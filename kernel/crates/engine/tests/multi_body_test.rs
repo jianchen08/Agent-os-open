@@ -328,7 +328,7 @@ async fn test_init_main_exit_sequential() {
     let config = make_three_body_config(vec![]);
     let executor = make_executor(Arc::clone(&invoker));
 
-    let compiled = compile_pipeline(&config, &StepLibrary::default(), &executor.plugin_ids())
+    let compiled = compile_pipeline(&config, &StepLibrary::default(), executor.plugin_ids())
         .expect("compile ok");
     let final_state = executor
         .run_compiled(&compiled, json!({}))
@@ -368,7 +368,7 @@ async fn test_exit_routes_phase_transition_skips_main() {
     let config = make_three_body_config(exit_routes);
     let executor = make_executor(Arc::clone(&invoker));
 
-    let compiled = compile_pipeline(&config, &StepLibrary::default(), &executor.plugin_ids())
+    let compiled = compile_pipeline(&config, &StepLibrary::default(), executor.plugin_ids())
         .expect("compile ok");
     let final_state = executor
         .run_compiled(&compiled, json!({"skip_main": true}))
@@ -393,7 +393,7 @@ async fn test_run_on_error_runs_exit_when_ended_at_start() {
     let config = make_three_body_config(vec![]);
     let executor = make_executor(Arc::clone(&invoker));
 
-    let compiled = compile_pipeline(&config, &StepLibrary::default(), &executor.plugin_ids())
+    let compiled = compile_pipeline(&config, &StepLibrary::default(), executor.plugin_ids())
         .expect("compile ok");
     let final_state = executor
         .run_compiled(&compiled, json!({"ended": true}))
@@ -443,7 +443,7 @@ async fn test_phase_loop_guard_errors() {
     }];
     let executor = make_executor(Arc::clone(&invoker));
 
-    let compiled = compile_pipeline(&config, &StepLibrary::default(), &executor.plugin_ids())
+    let compiled = compile_pipeline(&config, &StepLibrary::default(), executor.plugin_ids())
         .expect("compile ok");
     let result = executor.run_compiled(&compiled, json!({})).await;
     assert!(
@@ -467,7 +467,7 @@ async fn test_phase_target_missing_errors() {
     let config = make_three_body_config(exit_routes);
     let executor = make_executor(Arc::clone(&invoker));
 
-    let err = compile_pipeline(&config, &StepLibrary::default(), &executor.plugin_ids())
+    let err = compile_pipeline(&config, &StepLibrary::default(), executor.plugin_ids())
         .expect_err("Phase 目标不存在应在编译期报错");
     assert!(err.to_string().contains("ghost"), "err: {err}");
 }

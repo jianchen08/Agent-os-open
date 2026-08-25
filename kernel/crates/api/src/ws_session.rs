@@ -420,7 +420,7 @@ impl PipelineDispatcher for EngineDispatcher {
             state.session.as_ref().map(|s| s.registry().as_ref()),
             state.store.as_ref(),
             &exec_thread,
-            &agent_id,
+            agent_id,
         )
         .await;
         // 前端幂等键（ADR 2026-08-21）：随 user 消息 metadata 落库回显。

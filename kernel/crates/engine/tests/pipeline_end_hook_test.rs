@@ -160,7 +160,7 @@ async fn test_run_dispatches_on_pipeline_end() {
     let compiled = compile_pipeline(
         &minimal_config(),
         &Default::default(),
-        &executor.plugin_ids(),
+        executor.plugin_ids(),
     )
     .expect("compile ok");
     let final_state = executor
@@ -187,7 +187,7 @@ async fn test_run_without_hook_plugins_skips_dispatch() {
     let compiled = compile_pipeline(
         &minimal_config(),
         &Default::default(),
-        &executor.plugin_ids(),
+        executor.plugin_ids(),
     )
     .expect("compile ok");
     executor
@@ -208,7 +208,7 @@ async fn test_dispatch_is_best_effort() {
     let compiled = compile_pipeline(
         &minimal_config(),
         &Default::default(),
-        &executor.plugin_ids(),
+        executor.plugin_ids(),
     )
     .expect("compile ok");
     let result = executor

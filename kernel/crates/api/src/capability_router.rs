@@ -2782,13 +2782,6 @@ mod tests {
         .await;
         assert!(r.is_ok(), "update 应成功: {r:?}");
 
-        // 热路径：registry 常驻 state 已更新
-        let entry = reg.get(&tenant, &pid).expect("registry 应有条目");
-        let st = entry.read();
-        assert_eq!(st.state["task.status"], "completed");
-        assert_eq!(st.state["task.ended_at"], "2026-08-24T00:00:00Z");
-        drop(st);
-
         // 冷路径：pipeline_state 表已落（重启后冷恢复读它）
         let fields = store.load_pipeline_state(&pid, &tenant).await.unwrap();
         assert_eq!(fields.get("task.status"), Some(&json!("completed")));
@@ -2811,6 +2804,13 @@ mod tests {
             .find(|r| r.get("pipeline_id").and_then(|v| v.as_str()) == Some(pid.as_str()))
             .unwrap();
         assert_eq!(row["task.status"], "completed");
+
+        // 热路径：registry 常驻 state 已更新（守卫在全部 await 之后获取，
+        // 避免跨 await 持锁形态）
+        let entry = reg.get(&tenant, &pid).expect("registry 应有条目");
+        let st = entry.read();
+        assert_eq!(st.state["task.status"], "completed");
+        assert_eq!(st.state["task.ended_at"], "2026-08-24T00:00:00Z");
     }
 
     #[tokio::test]
@@ -3212,6 +3212,7 @@ mod tests {
 /// 工具连续失败告警集成：tool-executor.invoke 结果 success=false
 /// 计入同工具连续失败计数，达到阈值产出告警——把「同一工具 100% 校验失败」
 /// 从流水日志淹没中捞出来。
+#[cfg(test)]
 mod tool_failure_alert_tests {
     use super::*;
     use crate::tools::{ToolFailureAlert, ToolFailureTracker, FAILURE_ALERT_THRESHOLD};

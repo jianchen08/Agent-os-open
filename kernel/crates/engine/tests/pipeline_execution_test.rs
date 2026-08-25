@@ -399,7 +399,7 @@ async fn test_pipeline_executes_steps() {
     });
     let final_state = executor
         .run_compiled(
-            &compile_pipeline(&engine_cfg, &StepLibrary::default(), &executor.plugin_ids())
+            &compile_pipeline(&engine_cfg, &StepLibrary::default(), executor.plugin_ids())
                 .expect("compile ok"),
             initial_state,
         )
@@ -517,7 +517,7 @@ async fn test_pipeline_routes_tool_calls_to_loop() {
     });
     let final_state = executor
         .run_compiled(
-            &compile_pipeline(&engine_cfg, &StepLibrary::default(), &executor.plugin_ids())
+            &compile_pipeline(&engine_cfg, &StepLibrary::default(), executor.plugin_ids())
                 .expect("compile ok"),
             initial_state,
         )
@@ -596,7 +596,7 @@ async fn wiring_messages_ops_applied_to_state_and_table() {
 
     let final_state = executor
         .run_compiled(
-            &compile_pipeline(&engine_cfg, &StepLibrary::default(), &executor.plugin_ids())
+            &compile_pipeline(&engine_cfg, &StepLibrary::default(), executor.plugin_ids())
                 .expect("compile ok"),
             initial_state,
         )
@@ -662,7 +662,7 @@ async fn test_while_cond_drives_body_loop() {
     let executor = make_executor(Arc::clone(&invoker), &["counter"]);
     let final_state = executor
         .run_compiled(
-            &compile_pipeline(&config, &StepLibrary::default(), &executor.plugin_ids())
+            &compile_pipeline(&config, &StepLibrary::default(), executor.plugin_ids())
                 .expect("compile ok"),
             json!({}),
         )
@@ -709,7 +709,7 @@ async fn test_while_cond_false_after_state_change_exits() {
     let executor = make_executor(Arc::clone(&invoker), &["flipper"]);
     let final_state = executor
         .run_compiled(
-            &compile_pipeline(&config, &StepLibrary::default(), &executor.plugin_ids())
+            &compile_pipeline(&config, &StepLibrary::default(), executor.plugin_ids())
                 .expect("compile ok"),
             json!({}),
         )
