@@ -31,12 +31,28 @@ _AMBIGUOUS_MODULES = {
 }
 
 
+def _is_bash_module(mod: object) -> bool:
+    """缓存的裸名模块是否解析到 bash 插件目录。"""
+    f = getattr(mod, "__file__", None)
+    if not f:
+        return False
+    try:
+        return Path(f).resolve().is_relative_to(_BASH_DIR.resolve())
+    except (OSError, ValueError):
+        return False
+
+
 def _ensure_bash_on_path() -> None:
     d = str(_BASH_DIR)
     if not sys.path or sys.path[0] != d:
         sys.path.insert(0, d)
     for m in _AMBIGUOUS_MODULES:
-        sys.modules.pop(m, None)
+        mod = sys.modules.get(m)
+        # 仅逐出指向 bash 目录之外的缓存（其他插件的同名模块）——bash 自己的
+        # 模块必须保留：无条件逐出会让测试文件的模块级绑定与函数内/被测代码
+        # 的再次 import 分裂成两个模块实例，isinstance 恒 False。
+        if mod is not None and not _is_bash_module(mod):
+            sys.modules.pop(m, None)
 
 
 _ensure_bash_on_path()

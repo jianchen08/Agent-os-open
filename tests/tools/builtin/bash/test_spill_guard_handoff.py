@@ -1,4 +1,4 @@
-# @feature: FP-0.2.spill_guard 任务 2 | @vision: V1 可进化 | @ci: none-local
+# @feature: FP-0.2.spill_guard 任务 2 | @vision: V1 可进化 | @ci: python-coverage
 """bash 工具截断清理（spill_guard 兜底就绪后）——TDD 规格。
 
 设计原则（task_spill_guard.md 任务 2）：工具只负责"执行 + 语义提取"，
@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import pytest
 from tool import BashTool
+import tool as tool_mod  # noqa: E402  平铺导入（与 BashTool 同模块身份，车道共跑防分裂）
 
 pytestmark = pytest.mark.unit
 
@@ -85,7 +86,6 @@ def test_truncation_helpers_removed():
     """截断辅助函数/常量全部删除（职责移交 spill_guard）。"""
     assert not hasattr(BashTool, "tail_output")
     assert not hasattr(BashTool, "TAIL_CHARS_ON_FAILURE")
-    import tool as tool_mod
 
     assert not hasattr(tool_mod, "tail_output")
     assert not hasattr(tool_mod, "clip_read_log_output")
@@ -97,8 +97,6 @@ def test_read_log_no_clip():
     """read_log 路径不再 clip：辅助函数已删（调用点回归由 clip_read_log_output
     缺失 + 单元层覆盖保证；真实进程路径依赖 WSL 环境，与本改动解耦）。"""
     import inspect
-
-    import tool as tool_mod
 
     source = inspect.getsource(tool_mod)
     assert "clip_read_log_output" not in source

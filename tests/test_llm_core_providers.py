@@ -1,4 +1,4 @@
-# @feature: FP-T07 llm api | @ci: none-local（不在任何 CI 车道：python-coverage 的 BASE_TEST_PATHS 未收集本文件）
+# @feature: FP-T07 llm api | @ci: python-coverage
 """llm_core 提供者拆分回归测试（task_kernel_cleanup_and_split 3a/3b）。
 
 结构断言：`adapter.py` 不再包含任何具体提供者 hack 与诊断机制——已迁至
@@ -61,6 +61,13 @@ def test_adapter_no_longer_contains_provider_hacks() -> None:
 
 def test_provider_plugins_are_standalone_packages() -> None:
     """三个 provider 插件各自独立可导入。"""
+    # 执行期防线：车道内其他插件测试（multimodal 等）可能把裸名 "adapter"
+    # 缓存换成自己的模块，provider 插件平铺 `from adapter import` 会命中
+    # 错误缓存 ImportError——非 llm_core 的 adapter 缓存逐出后按 sys.path[0] 重解析。
+    _cached = sys.modules.get("adapter")
+    _cached_src = str(getattr(_cached, "__file__", "") or "")
+    if _cached is not None and not _cached_src.startswith(str(_LLM_CORE_DIR)):
+        sys.modules.pop("adapter", None)
     import llm_provider_keypool  # noqa: PLC0415
 
     assert callable(ensure_role_safety)

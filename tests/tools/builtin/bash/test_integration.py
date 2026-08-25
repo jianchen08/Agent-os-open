@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import asyncio
+from types import SimpleNamespace
 
 import pytest
 from bash_types import ProcessInfo
@@ -38,11 +39,21 @@ def _stdout_only(output: str) -> str:
 async def _wait_for_process(
     pm: ProcessManager, pid: int, timeout: float = 15,
 ) -> ProcessInfo:
-    """等待进程完成，返回 ProcessInfo。"""
+    """等待进程完成，返回 ProcessInfo。
+
+    进程结束会被即时清理（_on_output_task_done 直接 pop active_processes），
+    轮询错过窗口时 get_process_info 返回 None——此时降级走 get_summary 的
+    磁盘路径（与生产 execute/continue 轮询同一条降级链）拿 exit_code/status。
+    """
     start = asyncio.get_event_loop().time()
     while True:
         info = pm.get_process_info(pid)
         if info is None:
+            summary = pm.get_summary(pid)
+            if summary is not None and summary["status"] in ("completed", "error", "terminated"):
+                return SimpleNamespace(
+                    exit_code=summary.get("exit_code"), status=summary["status"]
+                )
             raise RuntimeError(f"Process {pid} not found")
         if info.status in ("completed", "error", "terminated"):
             return info

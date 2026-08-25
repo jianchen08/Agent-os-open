@@ -24,9 +24,11 @@ import pytest
 from bash_types import WorkUnit
 from process_manager import (
     ContainerProcessBackend,
+    LocalProcessBackend,
     ProcessManager,
     _get_container_backend,
 )
+from tool import BashTool
 
 pytestmark = pytest.mark.unit
 
@@ -416,8 +418,6 @@ async def test_start_process_container_assigns_container_backend(tmp_path):
 @pytest.mark.asyncio
 async def test_start_process_local_assigns_local_backend(tmp_path):
     """不传 container_id → ProcessInfo.backend 应是 LocalProcessBackend（回归）。"""
-    from process_manager import LocalProcessBackend
-
     pm = ProcessManager(log_dir=tmp_path / "logs")
     fake_proc = _make_fake_process(host_pid=8)
 
@@ -492,8 +492,6 @@ async def test_bashtool_execute_passes_container_id_to_start_process(tmp_path):
     0.2 契约（tool.py _handle_execute）：inputs._container_id 透传到
     ProcessManager.start_process 的 container_id 形参。
     """
-    from tool import BashTool
-
     tool = BashTool()
     captured: dict = {}
 
@@ -527,8 +525,6 @@ async def test_bashtool_execute_passes_container_id_to_start_process(tmp_path):
 @pytest.mark.asyncio
 async def test_bashtool_execute_without_container_id_passes_none(tmp_path):
     """BashTool.execute 无 _container_id → start_process 的 container_id 应为 None（回归）。"""
-    from tool import BashTool
-
     tool = BashTool()
     captured: dict = {}
 
@@ -561,8 +557,6 @@ async def test_bashtool_execute_with_container_id_skips_security_check(tmp_path)
     0.2 契约（tool.py _handle_execute 的 is_isolated 分支）：容器隔离
     模式跳过内部 SecurityChecker。
     """
-    from tool import BashTool
-
     dangerous_cmd = "rm -rf /"
 
     # 1) 无 container_id：应被 SecurityChecker 拦截
@@ -609,8 +603,6 @@ async def test_container_execute_running_continue_completed_cycle(tmp_path):
     用真实 ProcessManager + 真实 BashTool.execute，mock 的只有 docker exec
     （返回"还活着"的 fake process）。验证容器路径的轮询行为和本地路径一致。
     """
-    from tool import BashTool
-
     tool = BashTool()
     # 容器内 pid=100，host pid=42；进程"还活着"（stream 阻塞，wait 立即返回 0）
     fake_proc = _make_fake_process(host_pid=42, container_pid=100, keep_open=True)
@@ -663,8 +655,6 @@ async def test_container_execute_timeout_does_not_kill_process(tmp_path):
     验证：mock backend._run_cmd 记录所有调用，execute 超时返回 running 期间
     不应有 kill 命令；只有显式 terminate 才触发 kill。
     """
-    from tool import BashTool
-
     tool = BashTool()
     fake_proc = _make_fake_process(host_pid=42, container_pid=100, keep_open=True)
 

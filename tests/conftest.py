@@ -13,10 +13,11 @@
 import logging
 import os
 import sys
-import sysconfig
 from pathlib import Path
 
 import pytest
+
+from tests import _stdlib_guard
 
 # 注意："suites" 已从 collect_ignore 移除，使 pytest tests/channels/ tests/suites/ 能正确收集集成测试。
 # 0.2 清理：原 collect_ignore 中的 test_cross_domain_discovery / test_directory_generator /
@@ -64,6 +65,9 @@ _BARE_MODULE_NAMES = {
     "degradation",
 }
 
+# 名单内与 stdlib 同名的裸名：被插件同名模块劫持时重装 stdlib 本体而非逐出。
+_STDLIB_NAMES = {"types"}
+
 
 def _is_stdlib_module(mod: object) -> bool:
     """是否 stdlib 模块（名单内 "types" 与 stdlib 同名）。
@@ -71,15 +75,7 @@ def _is_stdlib_module(mod: object) -> bool:
     stdlib 同名模块不逐出：逐出后 ``from types import`` 会按 sys.path 重新
     解析，车道内其他测试残留的插件目录（含 pipeline/types.py）会劫持该名。
     """
-    f = getattr(mod, "__file__", None)
-    if not f:
-        return True
-    try:
-        return Path(f).resolve().is_relative_to(
-            Path(sysconfig.get_path("stdlib")).resolve()
-        )
-    except (OSError, ValueError):
-        return False
+    return _stdlib_guard.is_stdlib_module(mod)
 
 
 @pytest.hookimpl(trylast=True)
@@ -91,13 +87,20 @@ def pytest_collect_file(file_path: Path, parent: pytest.Collector) -> pytest.Col
     sys.modules 缓存——后收集的测试 ``from plugin import X`` 会命中
     先导入的其它插件模块。本钩子在文件收集（含模块导入）前调用，
     保证每个测试文件的模块级导入都能按自己的 sys.path 解析。
+
+    与 stdlib 同名的裸名（"types"）被劫持时不逐出（逐出 = 下一个
+    ``from types import`` 按 sys.path 重解析再炸一次），改为重装 stdlib
+    本体——后续导入永远命中 stdlib。
     """
     if file_path.suffix == ".py":
         for name in _BARE_MODULE_NAMES:
             mod = sys.modules.get(name)
-            if mod is not None and _is_stdlib_module(mod):
+            if mod is not None and _stdlib_guard.is_stdlib_module(mod):
                 continue
-            sys.modules.pop(name, None)
+            if name in _STDLIB_NAMES:
+                _stdlib_guard.ensure_stdlib_module(name)
+            else:
+                sys.modules.pop(name, None)
     return None
 
 
