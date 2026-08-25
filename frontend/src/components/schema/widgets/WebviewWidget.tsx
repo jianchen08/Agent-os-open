@@ -28,6 +28,7 @@ import { apiClient } from '@/services/api/client'
 import { useWidgetEventStore } from '@/stores/widgetEventStore'
 import { buildWebviewMessage, validateWebviewEvent } from '@/utils/postMessageSecurity'
 import { loggers } from '@/utils/logger'
+import { EXT_ROUTE, extUrl } from '@/services/api/extRoute'
 
 /** Webview widget 渲染指令 props（由 RenderingEngine 从 contributes.widgets 注入） */
 export interface WebviewWidgetProps {
@@ -110,7 +111,7 @@ export function WebviewWidget({
   const endpoint = useMemo(() => {
     if (!pluginId) return null
     const path = htmlPath ?? '/webview'
-    return `/ext/${pluginId}${path.startsWith('/') ? '' : '/'}${path}`
+    return extUrl(pluginId, path)
   }, [pluginId, htmlPath])
 
   // fetch 插件 HTML（带 Bearer token，token 不进 iframe URL）
@@ -161,7 +162,7 @@ export function WebviewWidget({
           // REST 路径约定：以 '/' 开头视为插件自定义 HTTP 端点。
           // 路由白名单（安全审查 B-4）：只允许本插件的 /ext/{pluginId}/ 前缀，
           // 防 iframe 内容（或被注入的第三方帧）借 host 的 Bearer 直呼内核 API / 他插件端点。
-          const extPrefix = `/ext/${pluginId ?? ''}/`
+          const extPrefix = `${EXT_ROUTE}/${pluginId ?? ''}/`
           if (!msg.method.startsWith(extPrefix)) {
             sendDown('error', { message: `method 不在本插件路由白名单: ${msg.method}` })
             return

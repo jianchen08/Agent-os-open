@@ -20,6 +20,7 @@
 
 import { apiClient } from '@/services/api/client'
 import { loggers } from '@/utils/logger'
+import { extUrl } from '@/services/api/extRoute'
 import type { ClientStyleDeclaration } from '@/services/schema/ContributionRegistry'
 
 /** <style> 唯一标识属性（值形如 "{pluginId}:{styleId}"，同步时比对用） */
@@ -152,7 +153,7 @@ export async function injectPluginStyle(style: ClientStyleDeclaration): Promise<
   inflight.add(key)
   try {
     const path = style.path
-    const url = `/ext/${style.pluginId}${path.startsWith('/') ? '' : '/'}${path}`
+    const url = extUrl(style.pluginId, path)
     const res = await apiClient.get<string>(url, {
       responseType: 'text',
       transformResponse: [(d) => d],

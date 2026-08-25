@@ -7,7 +7,7 @@
 import { apiClient } from './client'
 import { WORKSPACE_SERVICE_ENDPOINTS as W } from './endpoints.generated'
 
-const M = W.workspaces_get // '/ext/workspace_service/workspaces/{container_task_id}'（其余端点同前缀模板）
+const M = W.workspaces_get // 模板：替换 {container_task_id}（其余端点同前缀模板）
 
 /** 获取工作空间详情 */
 export async function getWorkspace(containerTaskId: string): Promise<any> {

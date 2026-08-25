@@ -6,4 +6,4 @@
 # floor(实测)+1——下一个整数百分比（85.49→86 式、恰为整数→再 +1），只替换
 # 数值行保留归因注释；随本批 commit 留归因，CI job 内的写入随 job 丢弃，
 # 以仓库提交为准。只许升不许降。
-rust_line_coverage=86.0
+rust_line_coverage=88.0

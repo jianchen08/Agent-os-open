@@ -34,15 +34,23 @@ FRONTEND_SRC = ROOT / "frontend" / "src"
 # 口径：grep -rno "/ext/" frontend/src --include=*.ts --include=*.tsx
 #       排除 endpoints.generated.ts 与 *.test.*（测试断言随所属域批次同步改，
 #       不计入本闸；批次 5 收尾闸再锁零命中）。
-# 实测 2026-08-21（channel_api 退役收尾后）：
-# 9 处 = 3 处合法运行时动态拼接（WebviewWidget /ext/${pluginId}、
-#   pluginStyles /ext/{pluginId} 声明驱动消费——真值源不在前端）
-#   + 6 处注释/声明示例（WebviewWidget 白名单注释、ContributionRegistry
-#   CSS 拼接规则、workspaces 模板注释、WizardWidget 声明示例）。
-HANDWRITTEN_EXT_BASELINE = 9
+HANDWRITTEN_EXT_BASELINE = 0
 
 TEST_FILE_RE = re.compile(r"\.(test|spec)\.")
 TS_FILE_SUFFIXES = (".ts", ".tsx")
+# 整行注释行首（//、*、/*、*/）——注释/文档示例里的端点字面量不是手写回潮
+COMMENT_LINE_PREFIXES = ("//", "*", "/*", "*/")
+
+
+def _count_code_ext(text: str) -> int:
+    """统计代码（剥整行注释后）中 /ext/ 字面量出现次数。"""
+    n = 0
+    for line in text.splitlines():
+        stripped = line.lstrip()
+        if stripped.startswith(COMMENT_LINE_PREFIXES):
+            continue
+        n += line.count("/ext/")
+    return n
 
 
 def count_handwritten_ext(frontend_src: Path) -> tuple[int, list[str]]:
@@ -58,7 +66,7 @@ def count_handwritten_ext(frontend_src: Path) -> tuple[int, list[str]]:
         if TEST_FILE_RE.search(rel):
             continue
         text = path.read_text(encoding="utf-8", errors="replace")
-        n = text.count("/ext/")
+        n = _count_code_ext(text)
         if n:
             total += n
             per_file.append(f"    {rel}: {n}")

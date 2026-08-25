@@ -22,6 +22,7 @@
 import { apiClient } from '@/services/api/client'
 import { loggers } from '@/utils/logger'
 import { sanitizeCss, getStyleNonce } from '@/services/pluginStyles'
+import { EXT_ROUTE } from '@/services/api/extRoute'
 import type { PluginTheme } from '@/types/theme'
 
 // 独立属性命名空间：主题按择注入的 <style> 不带 data-plugin-style 属性，
@@ -84,7 +85,7 @@ export async function applyPluginSkin(theme: PluginTheme & { skin: string }): Pr
   document.body.classList.add('has-bg-image')
 
   try {
-    const url = `/ext/${theme.pluginId}/styles/skin/${theme.skin}/merged.css`
+    const url = `${EXT_ROUTE}/${theme.pluginId}/styles/skin/${theme.skin}/merged.css`
     const res = await apiClient.get<string>(url, {
       responseType: 'text',
       transformResponse: [(d) => d],
@@ -205,7 +206,7 @@ let activeHookBlobUrl: string | null = null
 async function runSkinHooks(theme: PluginTheme & { skin: string }, scope: string, gen: number): Promise<void> {
   try {
     const res = await apiClient.get<string>(
-      `/ext/${theme.pluginId}/styles/skin/${theme.skin}/hooks.mjs`,
+      `${EXT_ROUTE}/${theme.pluginId}/styles/skin/${theme.skin}/hooks.mjs`,
       {
         responseType: 'text',
         transformResponse: [(d) => d],
@@ -244,7 +245,7 @@ async function runSkinHooks(theme: PluginTheme & { skin: string }, scope: string
       scopeAttr: scope,
       // 契约：同源资产前缀，皮肤自拼 `${assetBase}/assets/<file>`——不带尾斜杠
       // （带尾斜杠拼出 // 路径，内核路由 404=背景图/立绘静默全灭）
-      assetBase: `/ext/${theme.pluginId}/styles/skin-assets/${theme.skin}`,
+      assetBase: `${EXT_ROUTE}/${theme.pluginId}/styles/skin-assets/${theme.skin}`,
       layers,
       theme: {
         get: () => (theme.base === 'light' ? 'light' : 'dark'),
