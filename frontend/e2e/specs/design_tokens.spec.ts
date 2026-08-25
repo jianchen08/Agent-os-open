@@ -57,4 +57,39 @@ test.describe('设计 token 真实浏览器解析', () => {
     expect(defined.caption).not.toBe('')
     expect(defined.iconMd).not.toBe('')
   })
+
+  test('全局滚动条可见（8px 自定义样式 + thumb 中灰高不透明度）', async ({ page }) => {
+    const sb = await page.evaluate(() => {
+      const outer = document.createElement('div')
+      outer.style.cssText = 'width:100px;height:100px;overflow:auto'
+      const inner = document.createElement('div')
+      inner.style.cssText = 'width:400px;height:400px'
+      outer.appendChild(inner)
+      document.body.appendChild(outer)
+      const result = {
+        // 内容确实溢出（滚动情境成立）；headless Chromium 为 overlay 滚动条，
+        // 不占布局空间，故宽高断言走伪元素计算样式而非 offsetWidth 差值
+        overflowX: outer.scrollWidth > outer.clientWidth,
+        overflowY: outer.scrollHeight > outer.clientHeight,
+        sbWidth: getComputedStyle(outer, '::-webkit-scrollbar').width,
+        sbHeight: getComputedStyle(outer, '::-webkit-scrollbar').height,
+        thumbBg: getComputedStyle(outer, '::-webkit-scrollbar-thumb').backgroundColor,
+      }
+      outer.remove()
+      return result
+    })
+    expect(sb.overflowX && sb.overflowY).toBeTruthy()
+    expect(sb.sbWidth).toBe('8px')
+    expect(sb.sbHeight).toBe('8px')
+    // 性质断言：thumb 处于中灰域（80~180/255）且 alpha ≥ 0.5，
+    // 保证在浅/深背景上均可见；曾因主题变量色 + 0.3 alpha 全站隐形
+    const m = sb.thumbBg.match(/rgba?\(\s*(\d+)[,\s]+(\d+)[,\s]+(\d+)(?:[,\s/]+([\d.]+))?\s*\)/)
+    expect(m, `thumbBg=${sb.thumbBg}`).not.toBeNull()
+    const [r, g, b, a] = [Number(m![1]), Number(m![2]), Number(m![3]), Number(m![4] ?? 1)]
+    for (const ch of [r, g, b]) {
+      expect(ch).toBeGreaterThanOrEqual(80)
+      expect(ch).toBeLessThanOrEqual(180)
+    }
+    expect(a).toBeGreaterThanOrEqual(0.5)
+  })
 })

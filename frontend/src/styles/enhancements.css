@@ -4,25 +4,25 @@
  * 提供额外的视觉增强效果
  */
 
-/* 滚动条美化 */
+/* 滚动条：系统级可见性 affordance，颜色不接主题变量——皮肤注入的 --muted-foreground
+ * 可能与所在区域背景近同色（如近白 thumb 落在米色侧栏），叠加低 alpha 后全站隐形；
+ * 中灰半透明在浅/深背景上都有对比度。 */
 ::-webkit-scrollbar {
   width: 8px;
   height: 8px;
 }
 
 ::-webkit-scrollbar-track {
-  background: hsl(var(--muted) / 0.3);
-  border-radius: var(--radius-full);
+  background: transparent;
 }
 
 ::-webkit-scrollbar-thumb {
-  background: hsl(var(--muted-foreground) / 0.3);
+  background: hsl(215 16% 47% / 0.6);
   border-radius: var(--radius-full);
-  transition: background var(--transition-base);
 }
 
 ::-webkit-scrollbar-thumb:hover {
-  background: hsl(var(--muted-foreground) / 0.5);
+  background: hsl(215 16% 47% / 0.85);
 }
 
 /* 选择文本样式 - 使用主题变量 */
