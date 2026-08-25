@@ -25,7 +25,7 @@ from typing import Any
 
 import pytest
 
-from error_classifier import ErrorInfo, ErrorKind, classify_error
+from agentos_plugin_sdk.error_classifier import ErrorInfo, ErrorKind, classify_error
 
 pytestmark = pytest.mark.unit
 

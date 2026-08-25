@@ -32,6 +32,10 @@ LLM 流式调用的 ``aiter.__anext__()`` 在上游半死连接（TCP 建连成�
 
 可复用范式来源：``src/triggers/manager.py:680-1017``（同样以"脱离事件循环"
 为目的设计的独立线程巡检器，有 bug 复盘佐证）。
+
+
+共享模块（2026-08-25 批5 下沉）：插件自包含约束下禁止跨插件 import，
+多插件复用的公共逻辑统一沉到 SDK（各插件 editable 依赖本包）。
 """
 
 from __future__ import annotations

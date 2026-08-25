@@ -7,6 +7,10 @@ apigo/yichengc）报错格式千差万别，本模块负责把它们统一翻译
 设计原则：
 - 这里是唯一嗅探异常字符串的地方。新增中转站/错误消息只改这里。
 - 上层只看 ErrorKind，不依赖 litellm 异常类型。
+
+
+共享模块（2026-08-25 批5 下沉）：插件自包含约束下禁止跨插件 import，
+多插件复用的公共逻辑统一沉到 SDK（各插件 editable 依赖本包）。
 """
 
 from __future__ import annotations

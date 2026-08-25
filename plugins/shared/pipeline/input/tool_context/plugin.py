@@ -28,7 +28,7 @@ import logging
 import time
 from typing import Any
 
-from adapter_config import get_adapter_status_summary
+from agentos_plugin_sdk.adapter_config import get_adapter_status_summary
 from pipeline.plugin import IInputPlugin, PluginContext, PluginResult
 from window_info import normalize_window_info
 

@@ -11,6 +11,10 @@
 - AdapterConfig：单个适配器配置数据类
 - load_adapter_configs：加载所有适配器配置
 - get_adapter_status：获取适配器在线状态摘要
+
+
+共享模块（2026-08-25 批5 下沉）：插件自包含约束下禁止跨插件 import，
+多插件复用的公共逻辑统一沉到 SDK（各插件 editable 依赖本包）。
 """
 
 from __future__ import annotations

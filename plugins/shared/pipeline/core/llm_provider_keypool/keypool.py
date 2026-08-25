@@ -25,7 +25,7 @@ from adapter import (  # noqa: F401 - 复用 llm_core 基类与流式基础设�
     _BaseLiteLLMAdapter,
     _ThreadedStreamBridge,
 )
-from error_classifier import ErrorKind, classify_error
+from agentos_plugin_sdk.error_classifier import ErrorKind, classify_error
 
 logger = logging.getLogger(__name__)
 

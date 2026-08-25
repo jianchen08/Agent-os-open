@@ -33,7 +33,7 @@ from _diagnostics import (
 # 提供者适配插件注册表（3a：MiniMax 角色修正 / DeepSeek extra_body 透传 /
 # <think/> 提取均按模型名分发到 llm_provider_* 插件，llm_core 不绑定提供者）。
 from _provider_registry import apply_pre_send, extract_thinking_from_content
-from stream_watchdog import StreamHardTimeout
+from agentos_plugin_sdk.stream_watchdog import StreamHardTimeout
 
 litellm.suppress_debug_info = True
 litellm.set_verbose = False

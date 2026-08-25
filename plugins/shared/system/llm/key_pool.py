@@ -13,7 +13,7 @@ from typing import TYPE_CHECKING
 from exceptions import KeyPoolExhaustedError
 
 if TYPE_CHECKING:
-    from error_classifier import ErrorInfo
+    from agentos_plugin_sdk.error_classifier import ErrorInfo
 
 logger = logging.getLogger(__name__)
 
@@ -273,7 +273,7 @@ class KeySlot:
 
     def handle_error(self, info: ErrorInfo) -> None:
         """按统一错误类型应用策略（取代旧的 on_rate_limit 万能方法）。"""
-        from error_classifier import ErrorKind  # noqa: PLC0415
+        from agentos_plugin_sdk.error_classifier import ErrorKind  # noqa: PLC0415
 
         kind = info.kind
         retry_after = info.retry_after

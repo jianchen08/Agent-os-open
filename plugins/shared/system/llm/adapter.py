@@ -24,8 +24,8 @@ from logging.handlers import RotatingFileHandler
 from typing import Any, Protocol, runtime_checkable
 
 import litellm
-from error_classifier import ErrorKind, classify_error
-from stream_watchdog import StreamHardTimeout
+from agentos_plugin_sdk.error_classifier import ErrorKind, classify_error
+from agentos_plugin_sdk.stream_watchdog import StreamHardTimeout
 
 litellm.suppress_debug_info = True
 litellm.set_verbose = False

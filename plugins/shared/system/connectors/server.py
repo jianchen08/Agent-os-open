@@ -16,7 +16,7 @@ from typing import Any
 sys.path.insert(0, os.path.dirname(__file__))
 
 # 直接导入同目录老代码（文件就在旁边，通过 sys.path 可见）
-from adapter_config import get_adapter_status_summary
+from agentos_plugin_sdk.adapter_config import get_adapter_status_summary
 from degradation import DegradationManager
 from registry import ConnectorRegistry
 
