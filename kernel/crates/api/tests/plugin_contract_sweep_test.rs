@@ -232,9 +232,11 @@ fn all_plugin_contracts_are_executor_consumable() {
     // 棘轮（2026-08-20 L2 补齐后基线：47 插件 / 58 工具，56/58 声明 input_schema
     // （唯二缺 = widget_demo 死演示工具，无 Python 实现不造伪），53 带参数面 /
     // 2 空参声明 / 2 带形态 pattern / 88 服务）
+    // 2026-08-25 收紧：hot_swap 整目录下线（-1）+ lsp.completion/supported_languages
+    // 死工具删声明（-2）→ 带参数面 53→50。
     assert!(
-        tools_props >= 53,
-        "带参数面工具数退化: {tools_props} < 53（L2 补齐基线）"
+        tools_props >= 50,
+        "带参数面工具数退化: {tools_props} < 50（L2 补齐基线，2026-08-25 收紧）"
     );
     assert!(
         tools_pattern >= 2,
@@ -247,9 +249,10 @@ fn all_plugin_contracts_are_executor_consumable() {
     // output_schema 棘轮：builtin×4（常量接线）+ tts_generate + 既有 bash/
     // enhanced_search/spill_retrieve/demo = 11。剩余 ~47 个的补齐是 2026-08-15
     // "存量 output_schema 缓补"挂账债的延续，需按各工具返回形状 AUTHOR（非同步）。
+    // 2026-08-25 收紧：hot_swap 下线（-1）→ 11→10。
     assert!(
-        tools_output >= 11,
-        "带 output_schema 的工具数退化: {tools_output} < 11"
+        tools_output >= 10,
+        "带 output_schema 的工具数退化: {tools_output} < 10"
     );
 
     eprintln!(

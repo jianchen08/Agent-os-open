@@ -158,8 +158,12 @@ async fn test_run_dispatches_on_pipeline_end() {
     let invoker = Arc::new(HookRecordingInvoker::new());
     let executor = make_executor(invoker.clone(), &["spill_retrieve_tool"], store);
     let state = json!({"pipeline_id": "pipe-xyz", "message": "hi"});
-    let compiled = compile_pipeline(&minimal_config(), &Default::default(), &executor.plugin_ids())
-        .expect("compile ok");
+    let compiled = compile_pipeline(
+        &minimal_config(),
+        &Default::default(),
+        &executor.plugin_ids(),
+    )
+    .expect("compile ok");
     let final_state = executor
         .run_compiled(&compiled, state)
         .await
@@ -181,8 +185,12 @@ async fn test_run_without_hook_plugins_skips_dispatch() {
     let store = Arc::new(SqliteStore::open_memory().unwrap());
     let invoker = Arc::new(HookRecordingInvoker::new());
     let executor = make_executor(invoker.clone(), &[], store);
-    let compiled = compile_pipeline(&minimal_config(), &Default::default(), &executor.plugin_ids())
-        .expect("compile ok");
+    let compiled = compile_pipeline(
+        &minimal_config(),
+        &Default::default(),
+        &executor.plugin_ids(),
+    )
+    .expect("compile ok");
     executor
         .run_compiled(&compiled, json!({"pipeline_id": "p"}))
         .await
@@ -198,8 +206,12 @@ async fn test_dispatch_is_best_effort() {
     let invoker = Arc::new(HookRecordingInvoker::new());
     invoker.fail_on("spill_retrieve_tool");
     let executor = make_executor(invoker.clone(), &["spill_retrieve_tool"], store);
-    let compiled = compile_pipeline(&minimal_config(), &Default::default(), &executor.plugin_ids())
-        .expect("compile ok");
+    let compiled = compile_pipeline(
+        &minimal_config(),
+        &Default::default(),
+        &executor.plugin_ids(),
+    )
+    .expect("compile ok");
     let result = executor
         .run_compiled(&compiled, json!({"pipeline_id": "p"}))
         .await;

@@ -12,7 +12,7 @@
 //! - AGENTOS_KERNEL_PORT：监听端口（默认 9100）
 //! - AGENTOS_KERNEL_HOST：监听地址（默认 0.0.0.0）
 //! - AGENTOS_PLUGINS_DIR：内置插件根目录（默认 plugins/shared）
-//! - LINGXI_USER_PLUGINS_DIR / AGENTOS_USER_PLUGINS_DIR：用户插件根目录（默认 OS 标准目录 agentos/plugins）
+//! - AGENTOS_USER_PLUGINS_DIR：用户插件根目录（默认 OS 标准目录 agentos/plugins）
 
 use std::net::SocketAddr;
 use std::path::PathBuf;
@@ -537,7 +537,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let (tools, http_routes) = agentos_api::plugin_lifecycle::reenable_plugin_capabilities(
                 &outcome.manifest,
                 &registry,
-                Some(&plugin_scopes),
+                &plugin_scopes,
             );
             // §3.4（0.2 收尾批次 1）：拒注是"声明与实现不一致已实际收口"的异常
             // 事件，从 info 提升为 warn——消除"被拒数日无人知晓"（e2e G5；清单
@@ -588,7 +588,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             agentos_api::plugin_lifecycle::reenable_plugin_capabilities(
                                 &outcome.manifest,
                                 &reg2,
-                                Some(&scopes2),
+                                &scopes2,
                             );
                         warn!(
                             target: "plugin-g2-boot",
@@ -1144,22 +1144,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 /// 解析用户插件根目录（可写，第三方插件安装位置）。
 ///
 /// 解析优先级：
-/// 1. 环境变量 `LINGXI_USER_PLUGINS_DIR`（与 `LINGXI_PLUGINS_DIR` 命名风格一致）
-/// 2. 环境变量 `AGENTOS_USER_PLUGINS_DIR`（与 `AGENTOS_PLUGINS_DIR` 命名风格一致）
-/// 3. `dirs::data_dir().join("agentos").join("plugins")`
+/// 1. 环境变量 `AGENTOS_USER_PLUGINS_DIR`（与 `AGENTOS_PLUGINS_DIR` 命名风格一致）
+/// 2. `dirs::data_dir().join("agentos").join("plugins")`
 ///    （Win=`%APPDATA%/agentos/plugins`，macOS=`~/Library/Application Support/agentos/plugins`，
 ///    Linux=`~/.local/share/agentos/plugins`）
-/// 4. 均不可用则返回 `None`（保持原行为：不启用 user_root）
+/// 3. 均不可用则返回 `None`（保持原行为：不启用 user_root）
 ///
 /// 注意使用 `dirs::data_dir()` 而非 `data_local_dir()`（后者是 `%LOCALAPPDATA%`，
 /// 不随用户漫游，不适合作为第三方插件安装位置）。
 fn resolve_user_plugins_dir() -> Option<PathBuf> {
-    // 1. 环境变量（LINGXI_ 前缀优先，回退 AGENTOS_ 前缀）
-    if let Ok(val) = std::env::var("LINGXI_USER_PLUGINS_DIR") {
-        if !val.trim().is_empty() {
-            return Some(PathBuf::from(val));
-        }
-    }
+    // 1. 环境变量
     if let Ok(val) = std::env::var("AGENTOS_USER_PLUGINS_DIR") {
         if !val.trim().is_empty() {
             return Some(PathBuf::from(val));

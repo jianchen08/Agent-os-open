@@ -363,13 +363,12 @@ impl DbAdminCapabilityHandler {
         let headers = Self::auth_headers(params);
         let _tenant_id = require_admin_role(&self.state, &headers).await?;
         let db = get_db(&self.state)?;
-        let result = spawn_blocking(move || {
-            db.with_conn(crate::db_routes::clear_execution_data_inner)
-        })
-        .await
-        .map_err(|e| ApiError::Internal {
-            message: format!("数据库任务失败: {e}"),
-        })??;
+        let result =
+            spawn_blocking(move || db.with_conn(crate::db_routes::clear_execution_data_inner))
+                .await
+                .map_err(|e| ApiError::Internal {
+                    message: format!("数据库任务失败: {e}"),
+                })??;
         Ok((200, result))
     }
 }
@@ -745,9 +744,14 @@ mod tests {
             created_at: "2026-01-01T00:00:00Z".to_string(),
         };
         let mut params = json!({});
-        params["_authorization"] =
-            json!(format!("Bearer {}", encode_token(TokenType::Access, &user, 3600)));
-        let envelope = handler.handle("clear_execution_data", params).await.unwrap();
+        params["_authorization"] = json!(format!(
+            "Bearer {}",
+            encode_token(TokenType::Access, &user, 3600)
+        ));
+        let envelope = handler
+            .handle("clear_execution_data", params)
+            .await
+            .unwrap();
         assert_eq!(envelope["status"], 403, "user 角色应 403: {envelope}");
     }
 
@@ -801,14 +805,17 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(envelope2["status"], 200);
-        assert_eq!(envelope2["body"]["cleared_count"], 0, "空库再清=0: {}", envelope2);
+        assert_eq!(
+            envelope2["body"]["cleared_count"], 0,
+            "空库再清=0: {}",
+            envelope2
+        );
 
         // 场景 3：文件库 → 生成 .clear-backup-* 备份文件（含 users 快照）。
         let dir = tempfile::tempdir().unwrap();
         let db_path = dir.path().join("kernel.db");
-        let fstore = Arc::new(
-            agentos_engine::SqliteStore::open(db_path.to_str().unwrap()).unwrap(),
-        );
+        let fstore =
+            Arc::new(agentos_engine::SqliteStore::open(db_path.to_str().unwrap()).unwrap());
         seed_execution_data(&fstore, "completed", "pipe_done");
         let fhandler = DbAdminCapabilityHandler::new(None, Some(fstore.clone()));
         let envelope = fhandler
@@ -816,7 +823,10 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(envelope["status"], 200, "{envelope}");
-        let backup = envelope["body"]["backup_path"].as_str().unwrap().to_string();
+        let backup = envelope["body"]["backup_path"]
+            .as_str()
+            .unwrap()
+            .to_string();
         assert!(backup.contains("clear-backup-"), "备份名带标记: {backup}");
         let meta = std::fs::metadata(&backup).unwrap();
         assert!(meta.len() > 0, "备份文件非空");

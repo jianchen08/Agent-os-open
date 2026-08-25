@@ -24,9 +24,9 @@ use serde_json::json;
 use crate::config_service::{
     apply_put_masked_sentinels, atomic_write_yaml, compute_etag, mask_secrets, validate_config_path,
 };
-use agentos_http::error::ApiError;
 use crate::metrics::plugin_widget_broadcast::{remove_plugin_bindings, WidgetBinding};
 use crate::metrics::{export_prometheus, MetricsAggregator};
+use agentos_http::error::ApiError;
 
 /// 健康检查响应。
 #[derive(Debug, Serialize)]
@@ -878,7 +878,10 @@ pub(crate) async fn cold_state_row(
         Ok(None) => None,
         Err(_) => None,
     };
-    let fields = store.load_pipeline_state(pipeline_id, tenant_id).await.ok()?;
+    let fields = store
+        .load_pipeline_state(pipeline_id, tenant_id)
+        .await
+        .ok()?;
     let mut merged = ckpt.unwrap_or_else(|| serde_json::json!({}));
     if let Some(obj) = merged.as_object_mut() {
         for (k, v) in fields {
@@ -1767,7 +1770,7 @@ pub async fn plugins_set_enabled_handler(
                                 crate::plugin_lifecycle::reenable_plugin_capabilities(
                                     &manifest_for_register,
                                     registry,
-                                    Some(&state.plugin_scopes),
+                                    &state.plugin_scopes,
                                 );
                             tracing::info!(
                                 target: "plugin-enablement",

@@ -16,8 +16,8 @@ use axum::Json;
 use serde::Deserialize;
 use serde_json::{json, Value};
 
-use agentos_http::error::ApiError;
 use crate::routes::AppState;
+use agentos_http::error::ApiError;
 
 // ─── Sessions ─────────────────────────────────────────────────────────────
 
@@ -53,14 +53,23 @@ pub async fn list_sessions_handler(
             let mut with_children: Vec<agentos_core::types::SessionRecord> =
                 Vec::with_capacity(sessions.len());
             for mut s in sessions {
-                if let Ok(extras) = store_clone
+                match store_clone
                     .list_pipeline_ids_by_thread(&s.thread_id, &tenant_id)
                     .await
                 {
-                    for extra in extras {
-                        if !s.pipeline_ids.contains(&extra) {
-                            s.pipeline_ids.push(extra);
+                    Ok(extras) => {
+                        for extra in extras {
+                            if !s.pipeline_ids.contains(&extra) {
+                                s.pipeline_ids.push(extra);
+                            }
                         }
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            thread_id = %s.thread_id,
+                            error = %e,
+                            "list_pipeline_ids_by_thread 读映射表失败，pipeline_ids 不完整"
+                        );
                     }
                 }
                 with_children.push(s);
@@ -379,19 +388,17 @@ pub async fn update_session_agent_handler(
 /// PATCH /api/v1/sessions/{id} — 重命名/更新会话（title/intent/metadata）。
 ///
 /// 前端 `updateSession()` 调此端点（session.ts 用 PATCH）。
-/// body: { "intent": "<title>" }（前端把 title 映射成 intent），
-/// 也兼容旧字段名 "title"。响应返回完整会话状态。
+/// body: { "intent": "<title>" }（前端把 title 映射成 intent）。响应返回完整会话状态。
 /// 域2持久化：更新 sessions 表 title/intent + updated_at（DB 无记录则仅回退内存响应）。
 pub async fn update_session_handler(
     State(state): State<AppState>,
     Path(id): Path<String>,
     Json(body): Json<Value>,
 ) -> Json<Value> {
-    // 前端 updateSession 把 title 放进 intent 字段；同时兼容直传 title。
+    // 前端 updateSession 把 title 放进 intent 字段。
     let new_intent = body
         .get("intent")
         .and_then(|v| v.as_str())
-        .or_else(|| body.get("title").and_then(|v| v.as_str()))
         .map(|s| s.to_string());
 
     let now = chrono::Utc::now().to_rfc3339();

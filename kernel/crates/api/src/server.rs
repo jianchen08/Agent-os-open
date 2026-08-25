@@ -16,14 +16,14 @@ use std::time::{Duration, SystemTime};
 
 use parking_lot::RwLock as ParkingRwLock;
 
-use agentos_core::traits::{CapabilityRegistry, StorageBackend};
 #[cfg(test)]
 use agentos_core::traits::MessageQueryOpts;
+use agentos_core::traits::{CapabilityRegistry, StorageBackend};
 use agentos_core::types::{PipelineConfig, StepLibrary, TenantContext};
 use axum::{
     body::Body,
     extract::{
-        ws::{Message, WebSocket, WebSocketUpgrade},
+        ws::{WebSocket, WebSocketUpgrade},
         Request, State,
     },
     http::{header, HeaderMap, HeaderValue, Method, StatusCode},
@@ -38,8 +38,6 @@ use serde::{Deserialize, Serialize};
 use tracing::{debug, error, info, warn};
 
 use crate::auth::{login_handler, logout_handler, me_handler, refresh_handler, register_handler};
-use agentos_http::auth::resolve_request_tenant_id;
-use agentos_http::error::ApiError;
 use crate::routes::{
     actions_execute_handler, get_pipeline_config_with_etag, get_plugin_config_with_etag,
     health_handler, metrics_prometheus_handler, pipelines_handler, pipelines_runs_handler,
@@ -53,6 +51,8 @@ use crate::session_routes::{
     list_sessions_handler, sessions_schema_handler, update_session_agent_handler,
     update_session_handler,
 };
+use agentos_http::auth::resolve_request_tenant_id;
+use agentos_http::error::ApiError;
 
 /// WebSocket 消息请求体。
 #[derive(Debug, Deserialize, Serialize)]
@@ -160,10 +160,7 @@ pub fn build_router(state: AppState) -> Router {
         // （/ext/metrics_admin/query），能力层 metrics-admin handler 在
         // metrics/capability.rs（agentos-kernel.rs 启动期注册）。
         .route("/metrics", get(metrics_prometheus_handler))
-        // AC-06-4: WebSocket 端点
-        .route("/ws", get(ws_handler))
-        // task_11 A2：前端写死连 /ws/chat（0.1 路径格式），加别名指向同一 handler，
-        // 保证 0.2 模式下前端直连内核可用；/ws 保留给新客户端。
+        // AC-06-4: WebSocket 端点（前端写死连 /ws/chat，0.1 路径格式）。
         .route("/ws/chat", get(ws_handler))
         // 消息发送端点（REST fallback for WS）
         .route("/api/v1/chat", post(chat_handler))
@@ -249,7 +246,8 @@ async fn require_surface_role(
     headers: &HeaderMap,
     write: bool,
 ) -> Result<(), ApiError> {
-    let (_, _, role, _) = agentos_http::auth::resolve_request_user(state.store.as_ref(), headers).await?;
+    let (_, _, role, _) =
+        agentos_http::auth::resolve_request_user(state.store.as_ref(), headers).await?;
     let ok = if write {
         role == "admin"
     } else {
@@ -374,27 +372,27 @@ fn apply_cors_headers(headers: &mut HeaderMap, origin: Option<&str>) {
 
 /// WebSocket 连接处理器（AC-06-4）。
 ///
-/// P2：若 AppState 启用了 session（`enable_session`），走内核化会话路径
-/// （握手鉴权 + 连接注册 + 入站路由）；否则降级为旧 echo/engine 路径（兼容）。
+/// 生产恒走 P2 内核化会话路径（握手鉴权 + 连接注册 + 入站路由）；
+/// session/路由未装配（仅测试构造场景）时显式 503，不静默降级 echo。
 async fn ws_handler(
     ws: WebSocketUpgrade,
-    headers: HeaderMap,
     axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
     State(state): State<AppState>,
 ) -> impl IntoResponse {
-    // P2 内核化路径
-    if let (Some(session), Some(router)) = (state.session.clone(), state.inbound_router.clone()) {
-        let token = params.get("token").cloned();
-        // B3：前端重连时上报 last_sequence（全局 watermark），用于首个 thread 注册时回放断线期间事件。
-        let last_sequence = params
-            .get("last_sequence")
-            .and_then(|s| s.parse::<u64>().ok());
-        return ws.on_upgrade(move |socket| {
-            run_p2_ws_session(socket, session, router, token, last_sequence)
-        });
-    }
-    // 降级路径（旧 echo/engine，未启用 session 时）
-    ws.on_upgrade(move |socket| handle_ws_connection(socket, state, headers))
+    let Some(session) = state.session else {
+        warn!("WS 连接被拒：AppState 未装配 session（仅测试构造会走到）");
+        return StatusCode::SERVICE_UNAVAILABLE.into_response();
+    };
+    let Some(router) = state.inbound_router else {
+        warn!("WS 连接被拒：AppState 未装配 inbound_router（仅测试构造会走到）");
+        return StatusCode::SERVICE_UNAVAILABLE.into_response();
+    };
+    let token = params.get("token").cloned();
+    // B3：前端重连时上报 last_sequence（全局 watermark），用于首个 thread 注册时回放断线期间事件。
+    let last_sequence = params
+        .get("last_sequence")
+        .and_then(|s| s.parse::<u64>().ok());
+    ws.on_upgrade(move |socket| run_p2_ws_session(socket, session, router, token, last_sequence))
 }
 
 /// P2 内核化 WS 会话包装：握手鉴权 + 会话运行 + 拒绝时 accept+close。
@@ -994,41 +992,51 @@ async fn stage_build_initial_state(
     // 任务级 execution_context（task_submit 提交的 workspace_mode/isolation_level）
     // 经任务管道执行入口透传（chat.send_message params），优先级高于此会话级来源；
     // 两者结构一致：{"workspace": {source_path, mode}, "isolation": {level}}。
-    if let Ok(Some(sess)) = store.get_session(thread_id).await {
-        if let Some(meta) = sess.metadata {
-            let mut ec = serde_json::Map::new();
-            let ws_path = meta
-                .get("workspace")
-                .and_then(|v| v.as_str())
-                .filter(|s| !s.is_empty());
-            let ws_mode = meta
-                .get("workspace_mode")
-                .and_then(|v| v.as_str())
-                .filter(|s| !s.is_empty())
-                .unwrap_or("worktree");
-            if ws_path.is_some() || meta.get("workspace_mode").is_some() {
-                let mut ws_obj = serde_json::Map::new();
-                if let Some(p) = ws_path {
-                    ws_obj.insert("source_path".to_string(), serde_json::json!(p));
+    match store.get_session(thread_id).await {
+        Ok(Some(sess)) => {
+            if let Some(meta) = sess.metadata {
+                let mut ec = serde_json::Map::new();
+                let ws_path = meta
+                    .get("workspace")
+                    .and_then(|v| v.as_str())
+                    .filter(|s| !s.is_empty());
+                let ws_mode = meta
+                    .get("workspace_mode")
+                    .and_then(|v| v.as_str())
+                    .filter(|s| !s.is_empty())
+                    .unwrap_or("worktree");
+                if ws_path.is_some() || meta.get("workspace_mode").is_some() {
+                    let mut ws_obj = serde_json::Map::new();
+                    if let Some(p) = ws_path {
+                        ws_obj.insert("source_path".to_string(), serde_json::json!(p));
+                    }
+                    ws_obj.insert("mode".to_string(), serde_json::json!(ws_mode));
+                    ec.insert("workspace".to_string(), serde_json::Value::Object(ws_obj));
                 }
-                ws_obj.insert("mode".to_string(), serde_json::json!(ws_mode));
-                ec.insert("workspace".to_string(), serde_json::Value::Object(ws_obj));
-            }
-            if let Some(iso) = meta
-                .get("isolation_mode")
-                .and_then(|v| v.as_str())
-                .filter(|s| !s.is_empty())
-            {
-                ec.insert("isolation".to_string(), serde_json::json!({"level": iso}));
-            }
-            if !ec.is_empty() {
-                if let Some(obj) = initial_state.as_object_mut() {
-                    obj.insert(
-                        "execution_context".to_string(),
-                        serde_json::Value::Object(ec),
-                    );
+                if let Some(iso) = meta
+                    .get("isolation_mode")
+                    .and_then(|v| v.as_str())
+                    .filter(|s| !s.is_empty())
+                {
+                    ec.insert("isolation".to_string(), serde_json::json!({"level": iso}));
+                }
+                if !ec.is_empty() {
+                    if let Some(obj) = initial_state.as_object_mut() {
+                        obj.insert(
+                            "execution_context".to_string(),
+                            serde_json::Value::Object(ec),
+                        );
+                    }
                 }
             }
+        }
+        Ok(None) => {}
+        Err(e) => {
+            warn!(
+                thread_id = %thread_id,
+                error = %e,
+                "execution_context 会话级注入失败：get_session 读不到会话（沿用默认）"
+            );
         }
     }
 
@@ -1124,20 +1132,34 @@ async fn stage_recover_history(
         let mut recovered: serde_json::Value = serde_json::json!({});
         let mut ckpt_hit = false;
         if !effective_pipeline_id.is_empty() {
-            if let Ok(Some((_step_no, ckpt_state))) = store
+            match store
                 .load_latest_checkpoint(effective_pipeline_id, tenant_id)
                 .await
             {
-                recovered = ckpt_state;
-                // 队列真值在表：checkpoint 的 messages 剥离丢弃（新旧格式一律）
-                if let Some(rec_obj) = recovered.as_object_mut() {
-                    rec_obj.remove("messages");
+                Ok(Some((_step_no, ckpt_state))) => {
+                    recovered = ckpt_state;
+                    // 队列真值在表：checkpoint 的 messages 剥离丢弃（新旧格式一律）
+                    if let Some(rec_obj) = recovered.as_object_mut() {
+                        rec_obj.remove("messages");
+                    }
+                    ckpt_hit = true;
+                    debug!(
+                        pipeline_id = %effective_pipeline_id,
+                        "冷启动从 checkpoint 恢复标量基线（messages 走表读）"
+                    );
                 }
-                ckpt_hit = true;
-                debug!(
-                    pipeline_id = %effective_pipeline_id,
-                    "冷启动从 checkpoint 恢复标量基线（messages 走表读）"
-                );
+                Ok(None) => {
+                    // 无 checkpoint：正常冷启动路径，走 traces 回放
+                }
+                Err(e) => {
+                    // checkpoint 读失败不等同无 checkpoint：降级走 traces 回放时留痕，
+                    // 避免静默丢标量基线（错误是数据读失败，不是记录不存在）。
+                    error!(
+                        pipeline_id = %effective_pipeline_id,
+                        error = %e,
+                        "load_latest_checkpoint 冷恢复失败，降级 traces 回放"
+                    );
+                }
             }
         }
         if !ckpt_hit {
@@ -1160,24 +1182,40 @@ async fn stage_recover_history(
         // 累计标量字段以 pipeline_state 为准（每 step upsert 最新值），
         // 重建后插件能在正确基线上自然累加，不归零。
         if !effective_pipeline_id.is_empty() {
-            if let Ok(state_fields) = store
+            match store
                 .load_pipeline_state(effective_pipeline_id, tenant_id)
                 .await
             {
-                if let Some(rec_obj) = recovered.as_object_mut() {
-                    for (k, v) in &state_fields {
-                        rec_obj.insert(k.clone(), v.clone());
+                Ok(state_fields) => {
+                    if let Some(rec_obj) = recovered.as_object_mut() {
+                        for (k, v) in &state_fields {
+                            rec_obj.insert(k.clone(), v.clone());
+                        }
                     }
+                }
+                Err(e) => {
+                    error!(
+                        pipeline_id = %effective_pipeline_id,
+                        error = %e,
+                        "load_pipeline_state 冷恢复失败（标量基线可能不完整）"
+                    );
                 }
             }
         }
         // messages 直读 message_slots（零回放；元素自带稳定 seq）
         if !effective_pipeline_id.is_empty() {
-            if let Ok(msgs) = store
+            match store
                 .load_message_history(effective_pipeline_id, tenant_id)
                 .await
             {
-                history_prefix = msgs;
+                Ok(msgs) => history_prefix = msgs,
+                Err(e) => {
+                    error!(
+                        pipeline_id = %effective_pipeline_id,
+                        error = %e,
+                        "load_message_history 冷恢复失败（对话历史可能不完整）"
+                    );
+                }
             }
         }
         // 标量字段注入 state（GAP-3：跳过易变 per-run 键——修复前已写的旧
@@ -1683,92 +1721,6 @@ fn inject_tool_schemas(state: &mut serde_json::Value, app_state: &AppState) {
     }
 }
 
-/// 处理 WebSocket 连接——收发消息循环。
-async fn handle_ws_connection(socket: WebSocket, state: AppState, headers: HeaderMap) {
-    let (mut sender, mut receiver) = socket.split();
-
-    // 发送欢迎消息
-    let welcome = WsResponse {
-        r#type: "connected".to_string(),
-        content: "WebSocket connected to Lingxi AgentOS 0.2".to_string(),
-        session_id: Uuid::new_v4().to_string(),
-        timestamp: chrono::Utc::now().to_rfc3339(),
-    };
-    let welcome_json = serde_json::to_string(&welcome).unwrap_or_default();
-    if let Err(e) = sender.send(Message::Text(welcome_json.into())).await {
-        warn!("Failed to send WS welcome message: {e}");
-    }
-
-    info!("WebSocket connection established");
-
-    // 收发循环
-    while let Some(Ok(msg)) = receiver.next().await {
-        match msg {
-            Message::Text(text) => {
-                // 解析客户端消息
-                let req: WsRequest = serde_json::from_str(&text).unwrap_or(WsRequest {
-                    message: text.to_string(),
-                    session_id: String::new(),
-                    history: Vec::new(),
-                    agent_id: String::new(),
-                });
-
-                // 在租户上下文内通过管道引擎处理消息（多租户 P0-4）
-                let tenant_ctx =
-                    request_tenant_ctx(state.store.as_ref(), &headers, &req.session_id).await;
-                let content = agentos_tenant::scope(
-                    tenant_ctx,
-                    process_via_engine(
-                        &state,
-                        &req.message,
-                        if req.agent_id.is_empty() {
-                            "agentos"
-                        } else {
-                            req.agent_id.as_str()
-                        },
-                        &req.history,
-                        "",
-                        "",
-                        "",
-                        "",
-                        "",
-                        None,
-                        None,
-                        "",
-                    ),
-                )
-                .await
-                .content;
-
-                // 构造响应
-                let response = WsResponse {
-                    r#type: "message".to_string(),
-                    content,
-                    session_id: req.session_id,
-                    timestamp: chrono::Utc::now().to_rfc3339(),
-                };
-
-                let response_json = serde_json::to_string(&response).unwrap_or_default();
-                if sender
-                    .send(Message::Text(response_json.into()))
-                    .await
-                    .is_err()
-                {
-                    break;
-                }
-            }
-            Message::Binary(_) => {
-                // 忽略二进制消息
-            }
-            Message::Close(_) => {
-                info!("WebSocket connection closed");
-                break;
-            }
-            _ => {}
-        }
-    }
-}
-
 /// /api/v1/chat POST 端点——通过管道引擎处理消息。
 async fn chat_handler(
     State(state): State<AppState>,
@@ -1968,9 +1920,6 @@ async fn shutdown_signal(invoker: Option<Arc<dyn agentos_core::traits::PluginInv
         let _ = tokio::time::timeout(Duration::from_secs(2), invoker.shutdown_all()).await;
     }
 }
-
-use futures_util::{SinkExt, StreamExt};
-use uuid::Uuid;
 
 #[cfg(test)]
 mod tests {
@@ -2861,7 +2810,8 @@ mod tests {
         // （零兼容重排：messages 持久真值 = slots 表，checkpoint/traces 只管标量）。
         // 模拟：直接向 slots 写入第一轮 user+assistant（pipeline_id=pipe_cold），
         // 再调用 process_via_engine，断言 LLM 收到历史 + 当前。
-        let (state, invoker, store, sqlite) = make_engine_state();        let tenant = TenantContext::new("tenant_cold", "thread_cold");
+        let (state, invoker, store, sqlite) = make_engine_state();
+        let tenant = TenantContext::new("tenant_cold", "thread_cold");
         let pipe = "pipe_cold";
         let thread = "thread_cold";
 
@@ -4113,7 +4063,8 @@ mod tests {
             .expect("registry 应有该管道");
         let st = entry.read();
         assert_eq!(
-            st.state["task.status"], json!("pending"),
+            st.state["task.status"],
+            json!("pending"),
             "run 终态不得回写 task.status（任务域插件裁决）"
         );
         assert!(
@@ -4251,7 +4202,10 @@ mod tests {
         assert!(has_task_marker(&real_task), "自身 task.* 仍应判为任务管道");
 
         // 无任何 task. 前缀 → 非任务管道；精确前缀 "task."：taskx 不误判
-        assert!(!has_task_marker(&json!({"pipeline_id": "p1"})), "无 task.* 判非任务");
+        assert!(
+            !has_task_marker(&json!({"pipeline_id": "p1"})),
+            "无 task.* 判非任务"
+        );
         assert!(
             !has_task_marker(&json!({"taskx": 1})),
             "taskx 不得误判（前缀必须精确 task.）"
@@ -4528,7 +4482,10 @@ mod tests {
             agentos_core::ids::compute_message_id(&canonical),
             "指纹必须对 seq/_ 字段免疫（与表侧 record_id 一致）"
         );
-        assert!(out.final_user.unwrap().get("id").is_none(), "指纹 id 由 ws_session 计算");
+        assert!(
+            out.final_user.unwrap().get("id").is_none(),
+            "指纹 id 由 ws_session 计算"
+        );
         // 无消息历史 → None（回退路径不炸）
         let empty = stage_finalize(&json!({"raw_result": "x"}), "t", "p", "t", "a");
         assert!(empty.final_user.is_none());

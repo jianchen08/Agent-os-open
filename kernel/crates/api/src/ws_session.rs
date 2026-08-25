@@ -294,9 +294,19 @@ async fn resolve_dispatch_agent(
         }
     }
     if let Some(store) = store {
-        if let Ok(Some(s)) = store.get_session(thread_id).await {
-            if let Some(aid) = s.agent_id.filter(|a| !a.is_empty()) {
-                return aid;
+        match store.get_session(thread_id).await {
+            Ok(Some(s)) => {
+                if let Some(aid) = s.agent_id.filter(|a| !a.is_empty()) {
+                    return aid;
+                }
+            }
+            Ok(None) => {}
+            Err(e) => {
+                warn!(
+                    thread_id = %thread_id,
+                    error = %e,
+                    "get_session 读取失败，agent 绑定解析回退默认 agentos"
+                );
             }
         }
     }
@@ -727,10 +737,20 @@ async fn resolve_pipeline_id_for_thread(
         agentos_core::types::TenantContext::new(tenant_id.to_string(), thread_id.to_string());
     let tid = thread_id.to_string();
     let store_clone = store.clone();
-    let session = agentos_tenant::scope(tenant, async move { store_clone.get_session(&tid).await })
-        .await
-        .ok()
-        .flatten();
+    let session =
+        match agentos_tenant::scope(tenant, async move { store_clone.get_session(&tid).await })
+            .await
+        {
+            Ok(s) => s,
+            Err(e) => {
+                warn!(
+                    thread_id = %thread_id,
+                    error = %e,
+                    "get_session 读取失败，active_pipeline_id 解析不可用"
+                );
+                None
+            }
+        };
     if let Some(active) = session.and_then(|s| s.active_pipeline_id) {
         if !active.is_empty() {
             return active;

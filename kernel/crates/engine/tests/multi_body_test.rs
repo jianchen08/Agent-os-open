@@ -451,9 +451,7 @@ async fn test_phase_loop_guard_errors() {
 
     let compiled = compile_pipeline(&config, &StepLibrary::default(), &executor.plugin_ids())
         .expect("compile ok");
-    let result = executor
-        .run_compiled(&compiled, json!({}))
-        .await;
+    let result = executor.run_compiled(&compiled, json!({})).await;
     assert!(
         result.is_err(),
         "Phase 互跳应被转移防护截断为错误：{:?}",

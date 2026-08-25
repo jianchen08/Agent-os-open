@@ -10,11 +10,12 @@
 //! 锁定「Python 侧多租户通路真实可用」这一目标。
 
 use agentos_api::capability_router::KernelCapabilityRouter;
+use agentos_api::metrics::MetricsAggregator;
 use agentos_mcp::CapabilityRouter;
 use serde_json::json;
 
 fn router() -> KernelCapabilityRouter {
-    KernelCapabilityRouter::new()
+    KernelCapabilityRouter::with_metrics(MetricsAggregator::new())
 }
 
 #[tokio::test]

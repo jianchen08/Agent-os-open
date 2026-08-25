@@ -103,31 +103,7 @@ pub type DynamicToolRegistrar =
 /// `None` = 未声明（默认全授予，向后兼容存量插件）。
 pub type GrantsLookupFn = Arc<dyn Fn(&str) -> Option<Vec<String>> + Send + Sync>;
 
-impl Default for KernelCapabilityRouter {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
 impl KernelCapabilityRouter {
-    /// 创建路由器（不带指标聚合器，兼容旧调用方）。
-    pub fn new() -> Self {
-        Self {
-            metrics: None,
-            invoker: None,
-            registry: None,
-            session: None,
-            store: None,
-            handler_registry: None,
-            grants_lookup: None,
-            dynamic_tool_registrar: None,
-            domain_broadcaster: None,
-            capability_contracts: None,
-            streaming_declaration_lookup: None,
-            tool_failure_tracker: None,
-        }
-    }
-
     /// 创建带指标聚合器的路由器（生产用，启用 metrics.record 反向调用）。
     pub fn with_metrics(metrics: MetricsAggregator) -> Self {
         Self {
@@ -1619,20 +1595,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_metrics_record_without_aggregator_errors() {
-        // 不带 metrics 的 router → metrics.record 报错
-        let router = KernelCapabilityRouter::new();
-        let res = router
-            .handle(
-                "metrics",
-                "record",
-                json!({"_plugin_id":"p1","name":"m","value":1.0}),
-            )
-            .await;
-        assert!(res.is_err());
-    }
-
-    #[tokio::test]
     async fn test_metrics_record_rejects_too_many_labels() {
         let (router, _agg) = router_with_metrics();
         let mut labels = serde_json::Map::new();
@@ -1733,7 +1695,7 @@ mod tests {
             .expect("仓库契约必须可加载"),
         );
         let lookup: StreamingDeclarationLookupFn = Arc::new(move |_pid| decl.clone());
-        KernelCapabilityRouter::new()
+        KernelCapabilityRouter::with_metrics(MetricsAggregator::new())
             .with_session(coord)
             .with_capability_contracts(contracts)
             .with_streaming_declaration_lookup(lookup)
@@ -2524,7 +2486,7 @@ mod tests {
     fn router_with_store() -> KernelCapabilityRouter {
         let store: Arc<dyn StorageBackend> =
             Arc::new(agentos_engine::SqliteStore::open_memory().expect("open_memory"));
-        KernelCapabilityRouter::new().with_store(store)
+        KernelCapabilityRouter::with_metrics(MetricsAggregator::new()).with_store(store)
     } // ── GAP-2：pipeline-state 域（CONDITION 触发器的求值上下文源） ──────
 
     #[tokio::test]
@@ -2884,7 +2846,7 @@ mod tests {
     #[tokio::test]
     async fn test_service_registry_disabled_without_store() {
         // 不注入 store → service-registry 应返回错误
-        let router = KernelCapabilityRouter::new();
+        let router = KernelCapabilityRouter::with_metrics(MetricsAggregator::new());
         let res = router
             .handle("service-registry", "memory.get", json!({"id": "x"}))
             .await;
@@ -2913,7 +2875,8 @@ mod tests {
         // 建 run（模拟 start_run 后的 runs 表记录）→ get_run_status 返回状态
         let store: Arc<dyn StorageBackend> =
             Arc::new(agentos_engine::SqliteStore::open_memory().unwrap());
-        let router = KernelCapabilityRouter::new().with_store(store.clone());
+        let router = KernelCapabilityRouter::with_metrics(MetricsAggregator::new())
+            .with_store(store.clone());
         store
             .create_run("run_status_1", "hash", "default")
             .await
@@ -2956,7 +2919,7 @@ mod tests {
     #[tokio::test]
     async fn test_pipeline_executor_get_run_status_errors() {
         // 无 store 注入 → 报错（与服务注册一致，不静默）
-        let router = KernelCapabilityRouter::new();
+        let router = KernelCapabilityRouter::with_metrics(MetricsAggregator::new());
         let res = router
             .handle(
                 "pipeline-executor",
@@ -2969,7 +2932,8 @@ mod tests {
         // 缺 run_id 参数 → 报错
         let store: Arc<dyn StorageBackend> =
             Arc::new(agentos_engine::SqliteStore::open_memory().unwrap());
-        let router2 = KernelCapabilityRouter::new().with_store(store.clone());
+        let router2 = KernelCapabilityRouter::with_metrics(MetricsAggregator::new())
+            .with_store(store.clone());
         let res2 = router2
             .handle("pipeline-executor", "get_run_status", json!({}))
             .await;
@@ -2994,7 +2958,8 @@ mod tests {
             assert_eq!(pid, "p1");
             Some(vec!["event-bus".to_string()])
         });
-        let router = KernelCapabilityRouter::new().with_grants_lookup(lookup);
+        let router = KernelCapabilityRouter::with_metrics(MetricsAggregator::new())
+            .with_grants_lookup(lookup);
         let out = router
             .handle(
                 "event-bus",
@@ -3010,7 +2975,8 @@ mod tests {
     #[tokio::test]
     async fn g6_ungranted_capability_denied() {
         let lookup: GrantsLookupFn = Arc::new(|_| Some(vec!["config-reader".to_string()]));
-        let router = KernelCapabilityRouter::new().with_grants_lookup(lookup);
+        let router = KernelCapabilityRouter::with_metrics(MetricsAggregator::new())
+            .with_grants_lookup(lookup);
         let err = router
             .handle(
                 "event-bus",
@@ -3030,7 +2996,8 @@ mod tests {
     async fn g6_undeclared_grants_default_allow() {
         // 未声明 granted_capabilities（None）→ 默认全授予（存量兼容）。
         let lookup: GrantsLookupFn = Arc::new(|_| None);
-        let router = KernelCapabilityRouter::new().with_grants_lookup(lookup);
+        let router = KernelCapabilityRouter::with_metrics(MetricsAggregator::new())
+            .with_grants_lookup(lookup);
         let out = router
             .handle(
                 "event-bus",
@@ -3045,7 +3012,7 @@ mod tests {
     #[tokio::test]
     async fn g6_no_lookup_no_check() {
         // 未装配授权查询器 → 不校验（旧装配兼容）。
-        let router = KernelCapabilityRouter::new();
+        let router = KernelCapabilityRouter::with_metrics(MetricsAggregator::new());
         let out = router
             .handle(
                 "event-bus",
@@ -3068,7 +3035,8 @@ mod tests {
             cap2.lock().unwrap().push((pid.to_string(), tool.name));
             Ok(())
         });
-        let router = KernelCapabilityRouter::new().with_dynamic_tool_registrar(registrar);
+        let router = KernelCapabilityRouter::with_metrics(MetricsAggregator::new())
+            .with_dynamic_tool_registrar(registrar);
         let out = router
             .handle(
                 "registry",
@@ -3093,7 +3061,7 @@ mod tests {
 
     #[tokio::test]
     async fn g3_register_tool_requires_plugin_context() {
-        let router = KernelCapabilityRouter::new();
+        let router = KernelCapabilityRouter::with_metrics(MetricsAggregator::new());
         let err = router
             .handle("registry", "register_tool", json!({"name": "x"}))
             .await
@@ -3104,7 +3072,8 @@ mod tests {
     #[tokio::test]
     async fn g3_register_tool_requires_name() {
         let registrar: DynamicToolRegistrar = Arc::new(|_, _| Ok(()));
-        let router = KernelCapabilityRouter::new().with_dynamic_tool_registrar(registrar);
+        let router = KernelCapabilityRouter::with_metrics(MetricsAggregator::new())
+            .with_dynamic_tool_registrar(registrar);
         let err = router
             .handle("registry", "register_tool", json!({"_plugin_id": "p"}))
             .await
@@ -3114,7 +3083,7 @@ mod tests {
 
     #[tokio::test]
     async fn g3_register_tool_without_registrar_errors() {
-        let router = KernelCapabilityRouter::new();
+        let router = KernelCapabilityRouter::with_metrics(MetricsAggregator::new());
         let err = router
             .handle(
                 "registry",
@@ -3131,7 +3100,7 @@ mod tests {
         // 信封闸（G6 单点）：声明了白名单但不含 "registry" → 拒绝（信封二道闸验证）。
         let registrar: DynamicToolRegistrar = Arc::new(|_, _| Ok(()));
         let lookup: GrantsLookupFn = Arc::new(|_| Some(vec!["config-reader".to_string()]));
-        let router = KernelCapabilityRouter::new()
+        let router = KernelCapabilityRouter::with_metrics(MetricsAggregator::new())
             .with_dynamic_tool_registrar(registrar)
             .with_grants_lookup(lookup);
         let err = router
@@ -3154,7 +3123,7 @@ mod tests {
         // granted 含 "registry" → 信封闸放行,注册成功。
         let registrar: DynamicToolRegistrar = Arc::new(|_, _| Ok(()));
         let lookup: GrantsLookupFn = Arc::new(|_| Some(vec!["registry".to_string()]));
-        let router = KernelCapabilityRouter::new()
+        let router = KernelCapabilityRouter::with_metrics(MetricsAggregator::new())
             .with_dynamic_tool_registrar(registrar)
             .with_grants_lookup(lookup);
         let out = router
@@ -3174,7 +3143,8 @@ mod tests {
         // 先建 run 并记录管道归属（SqliteStore 的 set_run_pipeline 真实写）。
         let sqlite = Arc::new(agentos_engine::SqliteStore::open_memory().unwrap());
         let store: Arc<dyn StorageBackend> = sqlite.clone();
-        let router = KernelCapabilityRouter::new().with_store(store.clone());
+        let router = KernelCapabilityRouter::with_metrics(MetricsAggregator::new())
+            .with_store(store.clone());
 
         agentos_tenant::scope(
             agentos_core::types::TenantContext::new("tenant_sr", "thread_sr"),
@@ -3334,7 +3304,7 @@ mod tool_failure_alert_tests {
     async fn consecutive_tool_failures_produce_alert_through_router() {
         let alerts: Arc<Mutex<Vec<ToolFailureAlert>>> = Arc::new(Mutex::new(Vec::new()));
         let records: Arc<Mutex<Vec<(String, bool)>>> = Arc::new(Mutex::new(Vec::new()));
-        let router = KernelCapabilityRouter::new()
+        let router = KernelCapabilityRouter::with_metrics(MetricsAggregator::new())
             .with_invoker(Arc::new(FailingInvoker))
             .with_tool_failure_tracker(Arc::new(RecordingTracker {
                 alerts: alerts.clone(),

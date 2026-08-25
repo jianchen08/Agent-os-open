@@ -99,9 +99,6 @@ pub enum PipelineRole {
 /// 对应 0.1 的 `pipeline/plugin.py IPlugin`。
 #[async_trait]
 pub trait PipelinePlugin: PluginMeta + Any {
-    /// 管道角色（Input / Core / Output）。
-    fn role(&self) -> PipelineRole;
-
     /// 执行插件逻辑。
     ///
     /// # Arguments
@@ -126,47 +123,6 @@ pub trait PipelinePlugin: PluginMeta + Any {
     /// 生命周期钩子：插件卸载时调用。
     async fn on_unload(&self) -> Result<(), PluginError> {
         Ok(())
-    }
-}
-
-/// 输入管道插件（Input 阶段）。
-///
-/// 负责在管道循环的输入阶段对状态进行预处理：
-/// 参数校验、上下文注入、权限检查等。
-///
-/// 对应 0.1 的 `pipeline/plugin.py IInputPlugin`。
-#[async_trait]
-pub trait InputPipelinePlugin: PipelinePlugin {
-    /// Input 插件固定返回 Input 角色。
-    fn role(&self) -> PipelineRole {
-        PipelineRole::Input
-    }
-}
-
-/// 核心管道插件（Core 阶段）。
-///
-/// 负责执行核心逻辑（LLM 调用或工具执行）。
-///
-/// 对应 0.1 的 `pipeline/plugin.py ICorePlugin`。
-#[async_trait]
-pub trait CorePipelinePlugin: PipelinePlugin {
-    /// Core 插件固定返回 Core 角色。
-    fn role(&self) -> PipelineRole {
-        PipelineRole::Core
-    }
-}
-
-/// 输出管道插件（Output 阶段）。
-///
-/// 负责在管道循环的输出阶段处理核心结果：
-/// 结果格式化、后处理、路由信号生成等。
-///
-/// 对应 0.1 的 `pipeline/plugin.py IOutputPlugin`。
-#[async_trait]
-pub trait OutputPipelinePlugin: PipelinePlugin {
-    /// Output 插件固定返回 Output 角色。
-    fn role(&self) -> PipelineRole {
-        PipelineRole::Output
     }
 }
 

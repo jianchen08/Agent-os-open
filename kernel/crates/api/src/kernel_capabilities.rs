@@ -303,9 +303,15 @@ fn enforce_message_id_namespace(
         return Err("缺 message_id（精确寻址键）".to_string());
     }
     let (want_owner, why) = if ENGINE_CONDUIT_PLUGINS.contains(&pid) {
-        ("kernel", format!("引擎管道插件 {pid} 只能携带内核签发的 a_ id"))
+        (
+            "kernel",
+            format!("引擎管道插件 {pid} 只能携带内核签发的 a_ id"),
+        )
     } else {
-        ("plugin", format!("插件 {pid} 的 message_id 必须在 p_ 命名空间（x-message-id-namespaces）"))
+        (
+            "plugin",
+            format!("插件 {pid} 的 message_id 必须在 p_ 命名空间（x-message-id-namespaces）"),
+        )
     };
     let want = spaces.iter().find(|n| n.owner == want_owner);
     match want {
@@ -924,15 +930,19 @@ mod tests {
         use std::sync::Arc;
 
         let contracts = Arc::new(chat_contracts());
-        let router = crate::capability_router::KernelCapabilityRouter::new()
-            .with_capability_contracts(contracts.clone());
+        let router = crate::capability_router::KernelCapabilityRouter::with_metrics(
+            crate::metrics::MetricsAggregator::new(),
+        )
+        .with_capability_contracts(contracts.clone());
         let registry = Arc::new(CapabilityHandlerRegistry::new());
-        registry.register(Arc::new(crate::chat_send_handler::ChatSendHandler::with_store(
-            Arc::new(crate::ws_session::EngineDispatcher::new(
-                crate::routes::AppState::new(),
-            )),
-            None,
-        )));
+        registry.register(Arc::new(
+            crate::chat_send_handler::ChatSendHandler::with_store(
+                Arc::new(crate::ws_session::EngineDispatcher::new(
+                    crate::routes::AppState::new(),
+                )),
+                None,
+            ),
+        ));
         let router = router.with_handler_registry(registry);
 
         let err = router
@@ -1031,7 +1041,10 @@ mod tests {
         for (id, why) in [
             ("9c8e051a-4a2f-4e8e-b2b1-1a2b3c4d5e6f", "乐观裸 uuid 撞车"),
             ("a_0123456789abcdef0123456789abcdef", "冒用内核 a_ 空间"),
-            ("mc_0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef", "冒用引擎指纹空间"),
+            (
+                "mc_0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+                "冒用引擎指纹空间",
+            ),
             ("p_", "p_ 空后缀不合 pattern"),
             ("P_UPPER_001", "p_ 不允许大写"),
         ] {

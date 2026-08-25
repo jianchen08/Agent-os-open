@@ -17,8 +17,8 @@ use axum::http::HeaderMap;
 use axum::Json;
 use serde::{Deserialize, Serialize};
 
-use agentos_http::error::ApiError;
 use crate::routes::AppState;
+use agentos_http::error::ApiError;
 
 // ─── 常量 ────────────────────────────────────────────────────────────
 
@@ -37,13 +37,13 @@ const REFRESH_TOKEN_TTL_SECS: u64 = 7 * 24 * 60 * 60; // 7 days
 // 因此该方案在开发阶段安全。
 // 再导出面（2026-08-24 清理）：外部 crate 零消费，仅保留 ws_session.rs（并发 WIP
 // 不可触碰）仍经 `crate::auth::` 引用的两个符号；其余符号本文件内私有 use。
-pub use agentos_http::auth::{resolve_tenant_id_by_user, verify_access_token};
+#[cfg(test)]
+use agentos_http::auth::DEFAULT_TENANT_ID;
 use agentos_http::auth::{
     decode_token, default_users, encode_token, extract_bearer_token, find_user_by_credentials,
     find_user_by_username, is_token_expired, BuiltInUser, TokenType,
 };
-#[cfg(test)]
-use agentos_http::auth::DEFAULT_TENANT_ID;
+pub use agentos_http::auth::{resolve_tenant_id_by_user, verify_access_token};
 
 // ─── 请求 / 响应类型（与前端 types/api.ts 对齐）─────────────────────
 

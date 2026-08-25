@@ -23,8 +23,6 @@
 //! - [`parse_condition`]：把表达式字符串 tokenize + parse 成 [`Expr`] AST，
 //!   加载期一次性完成（管道编译时）；语法错误在加载期暴露，不静默。
 //! - [`eval_expr`]：对已编译 AST 求值，运行时零解析。
-//! - [`eval_condition`]：兼容入口（字符串直求值，内部 parse+eval）；
-//!   解析失败返回 false（安全兜底，语义与 0.1 一致）。
 
 use serde_json::Value;
 
@@ -130,18 +128,6 @@ fn eval_value(expr: &Expr, state: &Value) -> Value {
             let r = eval_value(right, state);
             Value::Bool(compare(&l, op, &r))
         }
-    }
-}
-
-/// 安全求值条件表达式（兼容入口，字符串直求值）。
-///
-/// 输入: `condition`（条件字符串，如 `"core_type == 'llm_call'"`），`state`（当前状态 serde_json::Value）
-/// 输出: 求值结果 bool；解析/求值异常返回 `false`（与 0.1 行为一致的安全兜底）。
-pub fn eval_condition(condition: &str, state: &Value) -> bool {
-    match parse_condition(condition) {
-        Ok(None) => true,
-        Ok(Some(expr)) => eval_expr(&expr, state),
-        Err(_) => false,
     }
 }
 
@@ -711,6 +697,15 @@ fn json_cmp(a: &Value, b: &Value) -> Option<std::cmp::Ordering> {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    /// 测试辅助：字符串 → 求值（走生产路径 parse_condition + eval_expr）。
+    fn eval_condition(condition: &str, state: &Value) -> bool {
+        match parse_condition(condition) {
+            Ok(None) => true,
+            Ok(Some(expr)) => eval_expr(&expr, state),
+            Err(_) => false,
+        }
+    }
 
     // ---- 实际配置（default.yaml）用到的最小集 ----
 

@@ -38,9 +38,7 @@ use agentos_core::types::{
     ContentLoader, EngineError, PluginContext, PluginError, PluginResult, RouteNext, TenantContext,
 };
 
-use crate::compiler::{
-    CompiledBody, CompiledItem, CompiledPipeline, CompiledRoute, CompiledStep,
-};
+use crate::compiler::{CompiledBody, CompiledItem, CompiledPipeline, CompiledRoute, CompiledStep};
 use crate::condition::eval_expr;
 use crate::template::{render_template, render_value};
 
@@ -1462,8 +1460,10 @@ pub(crate) fn op_ledger_entry(op: &serde_json::Value) -> Option<serde_json::Valu
 #[cfg(test)]
 mod tests {
     use super::*;
-    use agentos_core::types::{LoopBody, PipelineConfig, PipelineStep, Route, StepItem, StepLibrary};
     use crate::compiler::compile_pipeline;
+    use agentos_core::types::{
+        LoopBody, PipelineConfig, PipelineStep, Route, StepItem, StepLibrary,
+    };
     use async_trait::async_trait;
     use serde_json::json;
     use std::collections::HashMap;
@@ -1908,8 +1908,12 @@ mod tests {
             when: Some("this is ((( invalid".into()),
             inputs: HashMap::new(),
         }]);
-        let err = compile_pipeline(&config, &StepLibrary::default(), &fixture.executor.plugin_ids)
-            .expect_err("invalid when 应在编译期报错");
+        let err = compile_pipeline(
+            &config,
+            &StepLibrary::default(),
+            &fixture.executor.plugin_ids,
+        )
+        .expect_err("invalid when 应在编译期报错");
         assert!(err.to_string().contains("when"), "err: {err}");
     }
 
@@ -2535,8 +2539,12 @@ mod tests {
             }],
             checkpoint: Default::default(),
         };
-        let err = compile_pipeline(&config, &StepLibrary::default(), &fixture.executor.plugin_ids)
-            .expect_err("未知引用应在编译期报错");
+        let err = compile_pipeline(
+            &config,
+            &StepLibrary::default(),
+            &fixture.executor.plugin_ids,
+        )
+        .expect_err("未知引用应在编译期报错");
         assert!(err.to_string().contains("ghost_step"), "err: {err}");
     }
 

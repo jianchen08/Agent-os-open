@@ -38,10 +38,6 @@ struct JsonRpcRequest {
 /// JSON-RPC 2.0 响应
 #[derive(Debug, Deserialize)]
 struct JsonRpcResponse {
-    #[allow(dead_code)]
-    jsonrpc: Option<String>,
-    #[allow(dead_code)]
-    id: Option<String>,
     result: Option<Value>,
     error: Option<JsonRpcError>,
 }
@@ -51,8 +47,6 @@ struct JsonRpcResponse {
 struct JsonRpcError {
     code: i64,
     message: String,
-    #[allow(dead_code)]
-    data: Option<Value>,
 }
 
 /// MCP transport 类型

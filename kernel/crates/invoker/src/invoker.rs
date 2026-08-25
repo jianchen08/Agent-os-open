@@ -2360,7 +2360,7 @@ mod tests {
                 std::sync::Arc::new(MockStorage),
                 "run1".to_string(),
                 "main".to_string(),
-                            ),
+            ),
         );
 
         let result = invoker.invoke_pipeline_plugin("rust_plugin", &ctx).await;
@@ -2410,7 +2410,7 @@ mod tests {
                 std::sync::Arc::new(MockStorage),
                 "run1".to_string(),
                 "main".to_string(),
-                            ),
+            ),
         )
     }
 
@@ -2500,7 +2500,7 @@ mod tests {
                 std::sync::Arc::new(MockStorage),
                 "run1".to_string(),
                 "main".to_string(),
-                            ),
+            ),
         );
         let result = invoker
             .invoke_pipeline_plugin("pipeline_tool_core", &ctx_tool)
@@ -2638,7 +2638,7 @@ mod tests {
                 std::sync::Arc::new(MockStorage),
                 "run1".to_string(),
                 "main".to_string(),
-                            ),
+            ),
         );
 
         let result = invoker.invoke_pipeline_plugin("nonexistent", &ctx).await;
@@ -3336,7 +3336,7 @@ mod tests {
                 std::sync::Arc::new(MockStorage),
                 "run1".to_string(),
                 "main".to_string(),
-                            ),
+            ),
         );
 
         let result = invoker.invoke_pipeline_plugin("bad_pipeline", &ctx).await;
@@ -3936,7 +3936,7 @@ mod tests {
                 Arc::new(MockStorage),
                 "run1".to_string(),
                 "main".to_string(),
-                            ),
+            ),
         );
         let err = invoker
             .invoke_pipeline_plugin("pipe_spawn_fail", &ctx)

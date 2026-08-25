@@ -7,7 +7,7 @@
 //!
 //! 复用，避免逻辑重复。
 
-use agentos_core::traits::{CapabilityRegistry, PluginManifest, ToolDescriptor};
+use agentos_core::traits::{PluginManifest, ToolDescriptor};
 use agentos_core::types::{ToolCategory, ToolSource};
 use agentos_plugin_loader::{CapabilityRegistryImpl, PluginScopeRegistry};
 use std::sync::Arc;
@@ -20,16 +20,16 @@ use std::sync::Arc;
 /// 内部服务方法声明在 `capabilities.services`，不进本注册（调用走
 /// invoke_entry / http_endpoints / 显式 plugin_id / provides 通道）。
 ///
-/// M1：`scopes` 为 Some 时经 guarded 注册并把撤销 guard 登记进该插件的 PluginScope
-/// （disable/unload 时结构性收回）；None 时走旧路径（行为不变，测试/兼容用）。
+/// M1：经 guarded 注册并把撤销 guard 登记进该插件的 PluginScope
+/// （disable/unload 时结构性收回）。
 /// 返回注册的 tool 数量。
 pub fn register_plugin_capabilities(
     manifest: &PluginManifest,
     registry: &Arc<CapabilityRegistryImpl>,
-    scopes: Option<&PluginScopeRegistry>,
+    scopes: &PluginScopeRegistry,
 ) -> usize {
     let mut count = 0usize;
-    let scope = scopes.map(|s| s.scope_of(&manifest.id));
+    let scope = scopes.scope_of(&manifest.id);
     {
         for tool_cap in &manifest.capabilities.tools {
             let category = tool_cap.category.clone().unwrap_or(ToolCategory::System);
@@ -82,24 +82,17 @@ pub fn register_plugin_capabilities(
                 ui: tool_cap.ui.clone(),
                 render: tool_cap.render.clone(),
             };
-            match &scope {
-                Some(s) => s.track(registry.register_tool_guarded(&manifest.id, descriptor)),
-                None => registry.register_tool(&manifest.id, descriptor),
-            }
+            scope.track(registry.register_tool_guarded(&manifest.id, descriptor));
             count += 1;
         }
     }
 
     // 注册路由信号
     if !manifest.capabilities.route_signals.is_empty() {
-        match &scope {
-            Some(s) => s.track(registry.register_route_signals_guarded(
-                &manifest.id,
-                manifest.capabilities.route_signals.clone(),
-            )),
-            None => registry
-                .register_route_signals(&manifest.id, manifest.capabilities.route_signals.clone()),
-        }
+        scope.track(registry.register_route_signals_guarded(
+            &manifest.id,
+            manifest.capabilities.route_signals.clone(),
+        ));
     }
 
     count
@@ -113,7 +106,7 @@ pub fn register_new_plugins(
     all_manifests: &[PluginManifest],
     existing_ids: &std::collections::HashSet<String>,
     registry: &Arc<CapabilityRegistryImpl>,
-    scopes: Option<&PluginScopeRegistry>,
+    scopes: &PluginScopeRegistry,
 ) -> (Vec<String>, usize) {
     let mut new_ids = Vec::new();
     let mut total_tools = 0usize;
@@ -135,31 +128,24 @@ pub fn register_new_plugins(
 /// http_endpoints（对齐 watcher `apply_discovered_plugins` 的补注册段）。
 ///
 /// 幂等：对已启用插件重复调用，tools 覆盖同名、http 路由同 path+method 冲突时忽略。
-/// M1：`scopes` 为 Some 时先 revoke 该插件旧 scope（清残留 guard）再 guarded 重注册。
+/// M1：先 revoke 该插件旧 scope（清残留 guard）再 guarded 重注册。
 /// 返回 (注册的 tool 数, 注册的 http 路由数)。
 pub fn reenable_plugin_capabilities(
     manifest: &PluginManifest,
     registry: &Arc<CapabilityRegistryImpl>,
-    scopes: Option<&PluginScopeRegistry>,
+    scopes: &PluginScopeRegistry,
 ) -> (usize, usize) {
-    if let Some(s) = scopes {
-        // 幂等基线：先收回旧 scope 的全部登记（禁用遗留或重复启用），
-        // 再重注册拿全新 guard——避免 by_plugin 索引重复条目。
-        s.revoke(&manifest.id);
-    }
+    // 幂等基线：先收回旧 scope 的全部登记（禁用遗留或重复启用），
+    // 再重注册拿全新 guard——避免 by_plugin 索引重复条目。
+    scopes.revoke(&manifest.id);
     let tools = register_plugin_capabilities(manifest, registry, scopes);
-    let scope = scopes.map(|s| s.scope_of(&manifest.id));
+    let scope = scopes.scope_of(&manifest.id);
     let mut http_routes = 0usize;
     for ep in &manifest.http_endpoints {
-        let ok = match &scope {
-            Some(s) => registry
-                .register_http_route_guarded(&manifest.id, ep.clone())
-                .map(|(_d, guard)| s.track(guard))
-                .is_ok(),
-            None => registry
-                .register_http_route(&manifest.id, ep.clone())
-                .is_ok(),
-        };
+        let ok = registry
+            .register_http_route_guarded(&manifest.id, ep.clone())
+            .map(|(_d, guard)| scope.track(guard))
+            .is_ok();
         if ok {
             http_routes += 1;
         }
@@ -384,7 +370,10 @@ mod domain_event_tests {
 #[cfg(test)]
 mod external_mcp_schema_gate_tests {
     use super::*;
-    use agentos_core::traits::{HostType, ManifestCapabilities, PluginManifest, PluginType, ToolCapability};
+    use agentos_core::traits::{
+        CapabilityRegistry, HostType, ManifestCapabilities, PluginManifest, PluginType,
+        ToolCapability,
+    };
     use agentos_core::types::ToolCategory;
 
     fn manifest_with(entry: &str, tool_input_schema: Option<serde_json::Value>) -> PluginManifest {
@@ -439,7 +428,8 @@ mod external_mcp_schema_gate_tests {
         // omnisearch universal_search 缺 mode 100% 失败、调研 agent 空转 45 万 token）。
         let m = manifest_with("mcp:external", None);
         let registry = Arc::new(CapabilityRegistryImpl::new());
-        let n = register_plugin_capabilities(&m, &registry, None);
+        let scopes = agentos_plugin_loader::PluginScopeRegistry::new();
+        let n = register_plugin_capabilities(&m, &registry, &scopes);
         assert_eq!(n, 0, "external MCP 缺 schema 必须拒注册");
         assert!(
             registry.list_tools().iter().all(|t| t.plugin_id != m.id),
@@ -458,7 +448,8 @@ mod external_mcp_schema_gate_tests {
             })),
         );
         let registry = Arc::new(CapabilityRegistryImpl::new());
-        let n = register_plugin_capabilities(&m, &registry, None);
+        let scopes = agentos_plugin_loader::PluginScopeRegistry::new();
+        let n = register_plugin_capabilities(&m, &registry, &scopes);
         assert_eq!(n, 1, "带 schema 的 external MCP 工具正常注册");
         let tools = registry.list_tools();
         let t = tools.iter().find(|t| t.plugin_id == m.id).expect("应注册");
@@ -474,7 +465,8 @@ mod external_mcp_schema_gate_tests {
         m2.language = "python".to_string();
         m2.capabilities.tools[0].name = "http.handle".to_string();
         let registry = Arc::new(CapabilityRegistryImpl::new());
-        let n = register_plugin_capabilities(&m2, &registry, None);
+        let scopes = agentos_plugin_loader::PluginScopeRegistry::new();
+        let n = register_plugin_capabilities(&m2, &registry, &scopes);
         assert_eq!(n, 1, "内置工具缺 schema 仍补注册");
         let tools = registry.list_tools();
         let t = tools.iter().find(|t| t.plugin_id == m2.id).expect("应注册");

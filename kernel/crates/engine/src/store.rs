@@ -41,7 +41,7 @@ use agentos_core::types::{
 };
 use async_trait::async_trait;
 use parking_lot::Mutex;
-use rusqlite::Connection;
+use rusqlite::{Connection, OptionalExtension};
 use tracing::{info, warn};
 
 /// SQLite 四表 DDL（建表脚本）
@@ -906,8 +906,8 @@ impl SqliteStore {
     ///   （尾锚定窗口：SQL DESC+LIMIT 取回后反转为 ASC）。
     ///   曾实现成恒 ASC+LIMIT——首屏拿到最老 N 条，会话超 N 条时刷新回滚到
     ///   早期窗口，其后消息全部"消失"；before 翻页则跳空中间段留永久空洞。
-    /// 纯索引行 join blobs **读时重建** `MessageRecord`（role/preview/tool_calls 等
-    /// 全部从消息 JSON 提取）——存储收敛，接口形状不变。
+    ///   纯索引行 join blobs **读时重建** `MessageRecord`（role/preview/tool_calls 等
+    ///   全部从消息 JSON 提取）——存储收敛，接口形状不变。
     pub fn get_slot_messages_by_pipeline(
         &self,
         pipeline_id: &str,
@@ -1179,11 +1179,15 @@ impl SqliteStore {
                 rusqlite::params![pipeline_id, tenant_id],
                 |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?)),
             )
-            .ok();
+            .optional()?;
         match row {
             Some((step_no, state_json)) => {
-                let mut state = serde_json::from_str(&state_json)
-                    .unwrap_or(serde_json::Value::Object(Default::default()));
+                let mut state: serde_json::Value =
+                    serde_json::from_str(&state_json).map_err(|e| {
+                        StorageError::Serialization(format!(
+                            "checkpoint state for pipeline {pipeline_id}: {e}"
+                        ))
+                    })?;
                 // 零兼容：messages 一律剥离（队列真值在 message_slots，旧全量 checkpoint 亦不消费）
                 if let Some(obj) = state.as_object_mut() {
                     obj.remove("messages");
@@ -1335,13 +1339,14 @@ impl SqliteStore {
                 rusqlite::params![thread_id, tenant_id],
                 |row| Ok((row.get::<_, Option<String>>(0)?,)),
             )
-            .ok();
+            .optional()?;
         if let Some((Some(json),)) = session_row {
-            if let Ok(list) = serde_json::from_str::<Vec<String>>(&json) {
-                for pid in list {
-                    if !pid.is_empty() && !pipeline_ids.contains(&pid) {
-                        pipeline_ids.push(pid);
-                    }
+            let list = serde_json::from_str::<Vec<String>>(&json).map_err(|e| {
+                StorageError::Serialization(format!("session {thread_id} pipeline_ids: {e}"))
+            })?;
+            for pid in list {
+                if !pid.is_empty() && !pipeline_ids.contains(&pid) {
+                    pipeline_ids.push(pid);
                 }
             }
         }
@@ -1867,7 +1872,6 @@ impl SqliteStore {
     /// 的 run_id → 对应 traces。只返回 step 级轨迹（plugin_id 为配置 step id，不以
     /// `pipeline_` 前缀的旧插件级轨迹被忽略），按 created_at 升序以便按序 merge 回放。
     /// tenant_id 由调用方在 spawn_blocking 前解析。
-
     fn get_step_traces_by_thread_inner(
         &self,
         thread_id: &str,
@@ -1896,13 +1900,14 @@ impl SqliteStore {
                 rusqlite::params![thread_id, tenant_id],
                 |row| Ok((row.get::<_, Option<String>>(0)?,)),
             )
-            .ok();
+            .optional()?;
         if let Some((Some(json),)) = session_row {
-            if let Ok(list) = serde_json::from_str::<Vec<String>>(&json) {
-                for pid in list {
-                    if !pid.is_empty() && !pipeline_ids.contains(&pid) {
-                        pipeline_ids.push(pid);
-                    }
+            let list = serde_json::from_str::<Vec<String>>(&json).map_err(|e| {
+                StorageError::Serialization(format!("session {thread_id} pipeline_ids: {e}"))
+            })?;
+            for pid in list {
+                if !pid.is_empty() && !pipeline_ids.contains(&pid) {
+                    pipeline_ids.push(pid);
                 }
             }
         }
@@ -2798,12 +2803,20 @@ mod tests {
 
         let conn = store.conn.lock();
         let count = |sql: &str| -> i64 { conn.query_row(sql, [], |r| r.get::<_, i64>(0)).unwrap() };
-        assert_eq!(count("SELECT COUNT(*) FROM pipeline_sessions"), 0, "映射应删除");
+        assert_eq!(
+            count("SELECT COUNT(*) FROM pipeline_sessions"),
+            0,
+            "映射应删除"
+        );
         assert_eq!(count("SELECT COUNT(*) FROM message_slots"), 0, "消息应删除");
         assert_eq!(count("SELECT COUNT(*) FROM runs"), 0, "runs 应删除");
         assert_eq!(count("SELECT COUNT(*) FROM traces"), 0, "traces 应删除");
         assert_eq!(count("SELECT COUNT(*) FROM branches"), 0, "branches 应删除");
-        assert_eq!(count("SELECT COUNT(*) FROM pipeline_state"), 0, "state 应删除");
+        assert_eq!(
+            count("SELECT COUNT(*) FROM pipeline_state"),
+            0,
+            "state 应删除"
+        );
         assert_eq!(
             count("SELECT COUNT(*) FROM pipeline_checkpoints"),
             0,

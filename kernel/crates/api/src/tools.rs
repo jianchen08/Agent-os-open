@@ -44,7 +44,12 @@ pub struct ToolFailureAlert {
 pub trait ToolFailureTracker: Send + Sync {
     /// 记录一次调用结果。`success=false` 计为失败；true 清零。
     /// 达到阈值且出冷却窗口时返回告警载荷（否则 None）。
-    fn record(&self, tool_name: &str, success: bool, error_sample: &str) -> Option<ToolFailureAlert>;
+    fn record(
+        &self,
+        tool_name: &str,
+        success: bool,
+        error_sample: &str,
+    ) -> Option<ToolFailureAlert>;
 }
 
 /// 默认实现：进程内 HashMap 计数。
@@ -54,7 +59,12 @@ pub struct ConsecutiveFailureTracker {
 }
 
 impl ToolFailureTracker for ConsecutiveFailureTracker {
-    fn record(&self, tool_name: &str, success: bool, error_sample: &str) -> Option<ToolFailureAlert> {
+    fn record(
+        &self,
+        tool_name: &str,
+        success: bool,
+        error_sample: &str,
+    ) -> Option<ToolFailureAlert> {
         let mut map = self.inner.lock().unwrap();
         if success {
             map.remove(tool_name);
@@ -66,12 +76,14 @@ impl ToolFailureTracker for ConsecutiveFailureTracker {
         } else {
             error_sample.chars().take(160).collect()
         };
-        let entry = map.entry(tool_name.to_string()).or_insert_with(|| FailureState {
-            consecutive: 0,
-            first_failure_at: now,
-            last_alert_at: None,
-            last_error_sample: sample.clone(),
-        });
+        let entry = map
+            .entry(tool_name.to_string())
+            .or_insert_with(|| FailureState {
+                consecutive: 0,
+                first_failure_at: now,
+                last_alert_at: None,
+                last_error_sample: sample.clone(),
+            });
         entry.consecutive += 1;
         entry.last_error_sample = sample;
         if entry.consecutive < FAILURE_ALERT_THRESHOLD {
@@ -101,7 +113,8 @@ mod tests {
         let t = ConsecutiveFailureTracker::default();
         for i in 1..FAILURE_ALERT_THRESHOLD {
             assert!(
-                t.record("universal_search", false, "mode Field required").is_none(),
+                t.record("universal_search", false, "mode Field required")
+                    .is_none(),
                 "阈值前不告警（第 {i} 次）"
             );
         }
@@ -124,7 +137,9 @@ mod tests {
         for _ in 0..4 {
             assert!(t.record("bash_execute", false, "boom").is_none());
         }
-        let alert = t.record("bash_execute", false, "boom").expect("清零后重新累计达标");
+        let alert = t
+            .record("bash_execute", false, "boom")
+            .expect("清零后重新累计达标");
         assert_eq!(alert.consecutive, 5);
     }
 
@@ -134,10 +149,16 @@ mod tests {
         for _ in 0..4 {
             t.record("bad_tool", false, "x");
         }
-        assert!(t.record("bad_tool", false, "x").is_some(), "第 5 次连续失败应告警");
+        assert!(
+            t.record("bad_tool", false, "x").is_some(),
+            "第 5 次连续失败应告警"
+        );
         // 冷却窗口内再失败不重复告警
         for _ in 0..5 {
-            assert!(t.record("bad_tool", false, "x").is_none(), "冷却期内不重复告警");
+            assert!(
+                t.record("bad_tool", false, "x").is_none(),
+                "冷却期内不重复告警"
+            );
         }
     }
 

@@ -26,7 +26,7 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
-use agentos_core::traits::{CapabilityRegistry, HostType, PluginInvoker, PluginManifest};
+use agentos_core::traits::{HostType, PluginInvoker, PluginManifest};
 use agentos_core::types::PluginError;
 use agentos_invoker::verify::{
     compare_tools, declared_with_services, parse_actual_tools, rejected_tool_names,
@@ -195,12 +195,12 @@ fn trigger_cdylib_restart_if_enabled(
 /// 幂等：注册后把新 id 并入 `known_ids`，重复调用不再注册。
 /// 无 IO、无时序，可同步单测。复用 [`register_new_plugins`]，
 /// 行为对齐 `reload-all` 端点的新插件序列。
-/// M1：`scopes` 为 Some 时经 guarded 注册入 scope（disable 时结构性收回）。
+/// M1：经 guarded 注册入 scope（disable 时结构性收回）。
 pub fn apply_discovered_plugins(
     all_manifests: &[PluginManifest],
     known_ids: &mut HashSet<String>,
     registry: &Arc<CapabilityRegistryImpl>,
-    scopes: Option<&PluginScopeRegistry>,
+    scopes: &PluginScopeRegistry,
 ) -> SyncReport {
     // 复用 reload-all 的新插件序列：跳过已知 id，注册 tools/route_signals。
     let (new_ids, tools_registered) =
@@ -215,16 +215,13 @@ pub fn apply_discovered_plugins(
         if !new_id_set.contains(&m.id) {
             continue;
         }
-        let scope = scopes.map(|s| s.scope_of(&m.id));
+        let scope = scopes.scope_of(&m.id);
         for ep in &m.http_endpoints {
             // 冲突（同 path+method 已存在）忽略：新插件 id 唯一，正常不冲突。
-            let ok = match &scope {
-                Some(s) => registry
-                    .register_http_route_guarded(&m.id, ep.clone())
-                    .map(|(_d, guard)| s.track(guard))
-                    .is_ok(),
-                None => registry.register_http_route(&m.id, ep.clone()).is_ok(),
-            };
+            let ok = registry
+                .register_http_route_guarded(&m.id, ep.clone())
+                .map(|(_d, guard)| scope.track(guard))
+                .is_ok();
             if ok {
                 http_routes_registered += 1;
             }
@@ -590,7 +587,7 @@ fn deterministic_json(v: &serde_json::Value) -> String {
 pub async fn sync_once_with_store(
     invoker: &dyn PluginInvoker,
     registry: &Arc<CapabilityRegistryImpl>,
-    scopes: Option<&PluginScopeRegistry>,
+    scopes: &PluginScopeRegistry,
     known_ids: &mut HashSet<String>,
     known_cdylib: &mut Option<HashSet<String>>,
     manifests_store: Option<&ManifestsStore>,
@@ -714,11 +711,7 @@ pub async fn sync_once_with_store(
     // ── 卸载语义（P1）执行：目录消失 → 摘除能力 + 依赖者连带（fail-closed） ──
     if !uninstalled.is_empty() {
         for id in &uninstalled {
-            if let Some(s) = scopes {
-                s.revoke(id);
-            } else {
-                registry.clear_plugin(id);
-            }
+            scopes.revoke(id);
         }
         // 依赖者连带：**先前已登记**插件中，requires_services 因提供者被卸载而不满足
         // → 一并摘下（fail-closed：目录仍在，服务提供者回归后下轮自动重注册）。
@@ -740,11 +733,7 @@ pub async fn sync_once_with_store(
                     error = %err.to_string(),
                     "卸载连带：依赖的服务已无提供者，摘下该插件能力（fail-closed，服务回归自动重注册）"
                 );
-                if let Some(s) = scopes {
-                    s.revoke(&m.id);
-                } else {
-                    registry.clear_plugin(&m.id);
-                }
+                scopes.revoke(&m.id);
                 cascade_uninstalled.push(m.id.clone());
             }
         }
@@ -858,8 +847,9 @@ pub struct PluginWatcher {
     plugins_dir: PathBuf,
     invoker: Arc<dyn PluginInvoker>,
     registry: Arc<CapabilityRegistryImpl>,
-    /// M1：guard 化注册的 scope 表（None = 旧路径不入账本）。
-    scopes: Option<Arc<PluginScopeRegistry>>,
+    /// M1：guard 化注册的 scope 表（disable 时结构性收回；默认空表，测试/无注入场景
+    /// 退化为 clear_plugin 等价语义——guarded 注册内部仍走 register_tool）。
+    scopes: Arc<PluginScopeRegistry>,
     known_ids: HashSet<String>,
     /// GAP-6：plugin_id → manifest 内容指纹（变更检测基线，consumer 独占）。
     known_manifest_hashes: HashMap<String, u64>,
@@ -899,7 +889,7 @@ impl PluginWatcher {
             plugins_dir,
             invoker,
             registry,
-            scopes: None,
+            scopes: Arc::new(PluginScopeRegistry::new()),
             known_ids: initial_ids,
             known_manifest_hashes: HashMap::new(),
             known_cdylib: None,
@@ -913,9 +903,10 @@ impl PluginWatcher {
         }
     }
 
-    /// M1：注入 scope 表（guarded 注册入账本，disable 时结构性收回）。
+    /// M1：注入共享 scope 表（guarded 注册入账本，disable 时结构性收回；
+    /// 默认空表时 guarded 注册等效于普通注册）。
     pub fn with_scopes(mut self, scopes: Arc<PluginScopeRegistry>) -> Self {
-        self.scopes = Some(scopes);
+        self.scopes = scopes;
         self
     }
 
@@ -1059,7 +1050,7 @@ impl PluginWatcher {
                 let report = match sync_once_with_store(
                     invoker.as_ref(),
                     &registry,
-                    scopes.as_deref(),
+                    &scopes,
                     &mut known,
                     &mut known_cdylib,
                     manifests_store.as_ref(),
@@ -1322,10 +1313,21 @@ mod tests {
             mk_manifest("b", "tool", &["tb"], false),
         ]);
         let registry_arc = std::sync::Arc::new(CapabilityRegistryImpl::new());
+        let scopes = PluginScopeRegistry::new();
         let mut known = HashSet::new();
-        let report = sync_once_with_store(&invoker, &registry_arc, None, &mut known, &mut None, None, &mut HashMap::new(), None, None)
-            .await
-            .unwrap();
+        let report = sync_once_with_store(
+            &invoker,
+            &registry_arc,
+            &scopes,
+            &mut known,
+            &mut None,
+            None,
+            &mut HashMap::new(),
+            None,
+            None,
+        )
+        .await
+        .unwrap();
         assert_eq!(report.new_plugin_ids.len(), 2);
         assert_eq!(report.tools_registered, 2);
         assert_eq!(known.len(), 2);
@@ -1335,15 +1337,36 @@ mod tests {
     #[tokio::test]
     async fn sync_once_idempotent_across_calls() {
         let invoker = MockInvoker::new(vec![mk_manifest("a", "tool", &["ta"], false)]);
+        let scopes = PluginScopeRegistry::new();
         let registry_arc = std::sync::Arc::new(CapabilityRegistryImpl::new());
         let mut known = HashSet::new();
-        let first = sync_once_with_store(&invoker, &registry_arc, None, &mut known, &mut None, None, &mut HashMap::new(), None, None)
-            .await
-            .unwrap();
+        let first = sync_once_with_store(
+            &invoker,
+            &registry_arc,
+            &scopes,
+            &mut known,
+            &mut None,
+            None,
+            &mut HashMap::new(),
+            None,
+            None,
+        )
+        .await
+        .unwrap();
         assert_eq!(first.tools_registered, 1);
-        let second = sync_once_with_store(&invoker, &registry_arc, None, &mut known, &mut None, None, &mut HashMap::new(), None, None)
-            .await
-            .unwrap();
+        let second = sync_once_with_store(
+            &invoker,
+            &registry_arc,
+            &scopes,
+            &mut known,
+            &mut None,
+            None,
+            &mut HashMap::new(),
+            None,
+            None,
+        )
+        .await
+        .unwrap();
         assert!(second.is_empty());
     }
 
@@ -1360,10 +1383,21 @@ mod tests {
             invoke_calls: std::sync::atomic::AtomicUsize::new(0),
         };
         let registry_arc = std::sync::Arc::new(CapabilityRegistryImpl::new());
+        let scopes = PluginScopeRegistry::new();
         let mut known = HashSet::new();
-        let err = sync_once_with_store(&invoker, &registry_arc, None, &mut known, &mut None, None, &mut HashMap::new(), None, None)
-            .await
-            .unwrap_err();
+        let err = sync_once_with_store(
+            &invoker,
+            &registry_arc,
+            &scopes,
+            &mut known,
+            &mut None,
+            None,
+            &mut HashMap::new(),
+            None,
+            None,
+        )
+        .await
+        .unwrap_err();
         assert!(err.message.contains("boom"));
         assert!(known.is_empty());
         assert!(registry_arc.list_tools().is_empty());
@@ -1372,8 +1406,9 @@ mod tests {
     #[test]
     fn apply_empty_manifests_noop() {
         let registry_arc = std::sync::Arc::new(CapabilityRegistryImpl::new());
+        let scopes = PluginScopeRegistry::new();
         let mut known = HashSet::new();
-        let report = apply_discovered_plugins(&[], &mut known, &registry_arc, None);
+        let report = apply_discovered_plugins(&[], &mut known, &registry_arc, &scopes);
         assert!(report.new_plugin_ids.is_empty());
         assert_eq!(report.tools_registered, 0);
         assert_eq!(report.http_routes_registered, 0);
@@ -1384,10 +1419,11 @@ mod tests {
     #[test]
     fn apply_registers_new_tool_plugin_and_updates_known() {
         let registry_arc = std::sync::Arc::new(CapabilityRegistryImpl::new());
+        let scopes = PluginScopeRegistry::new();
         let mut known = HashSet::new();
         let m = mk_manifest("p1", "tool", &["t1", "t2"], false);
         let report =
-            apply_discovered_plugins(std::slice::from_ref(&m), &mut known, &registry_arc, None);
+            apply_discovered_plugins(std::slice::from_ref(&m), &mut known, &registry_arc, &scopes);
         assert_eq!(report.new_plugin_ids, vec!["p1".to_string()]);
         assert_eq!(report.tools_registered, 2);
         assert!(known.contains("p1"));
@@ -1402,14 +1438,15 @@ mod tests {
     #[test]
     fn apply_is_idempotent() {
         let registry_arc = std::sync::Arc::new(CapabilityRegistryImpl::new());
+        let scopes = PluginScopeRegistry::new();
         let mut known = HashSet::new();
         let m = mk_manifest("p1", "tool", &["t1"], false);
         let first =
-            apply_discovered_plugins(std::slice::from_ref(&m), &mut known, &registry_arc, None);
+            apply_discovered_plugins(std::slice::from_ref(&m), &mut known, &registry_arc, &scopes);
         assert_eq!(first.tools_registered, 1);
         // 第二次：p1 已知，应跳过。
         let second =
-            apply_discovered_plugins(std::slice::from_ref(&m), &mut known, &registry_arc, None);
+            apply_discovered_plugins(std::slice::from_ref(&m), &mut known, &registry_arc, &scopes);
         assert!(second.new_plugin_ids.is_empty());
         assert_eq!(second.tools_registered, 0);
     }
@@ -1417,10 +1454,11 @@ mod tests {
     #[test]
     fn apply_skips_known_plugin() {
         let registry_arc = std::sync::Arc::new(CapabilityRegistryImpl::new());
+        let scopes = PluginScopeRegistry::new();
         let mut known = HashSet::from(["p1".to_string()]);
         let m = mk_manifest("p1", "tool", &["t1"], false);
         let report =
-            apply_discovered_plugins(std::slice::from_ref(&m), &mut known, &registry_arc, None);
+            apply_discovered_plugins(std::slice::from_ref(&m), &mut known, &registry_arc, &scopes);
         assert!(report.new_plugin_ids.is_empty());
         assert_eq!(report.tools_registered, 0);
         assert!(registry_arc.list_tools().is_empty());
@@ -1429,10 +1467,11 @@ mod tests {
     #[test]
     fn apply_registers_http_endpoints_for_new_plugin() {
         let registry_arc = std::sync::Arc::new(CapabilityRegistryImpl::new());
+        let scopes = PluginScopeRegistry::new();
         let mut known = HashSet::new();
         let m = mk_manifest("p1", "tool", &["t1"], true); // 带 /ext/p1/foo GET
         let report =
-            apply_discovered_plugins(std::slice::from_ref(&m), &mut known, &registry_arc, None);
+            apply_discovered_plugins(std::slice::from_ref(&m), &mut known, &registry_arc, &scopes);
         assert_eq!(report.new_plugin_ids, vec!["p1".to_string()]);
         // http_endpoints 写进 registry → /ext/* catch-all 的 find_http_route 能查到（无需重启）。
         assert!(registry_arc.find_http_route("/ext/p1/foo", "GET").is_some());
@@ -1445,11 +1484,22 @@ mod tests {
     #[tokio::test]
     async fn sync_once_consistent_plugin_registers_all_tools() {
         let invoker = MockInvoker::new(vec![mk_manifest("p1", "tool", &["t1", "t2"], false)]);
+        let scopes = PluginScopeRegistry::new();
         let registry_arc = std::sync::Arc::new(CapabilityRegistryImpl::new());
         let mut known = HashSet::new();
-        let report = sync_once_with_store(&invoker, &registry_arc, None, &mut known, &mut None, None, &mut HashMap::new(), None, None)
-            .await
-            .unwrap();
+        let report = sync_once_with_store(
+            &invoker,
+            &registry_arc,
+            &scopes,
+            &mut known,
+            &mut None,
+            None,
+            &mut HashMap::new(),
+            None,
+            None,
+        )
+        .await
+        .unwrap();
         assert_eq!(report.tools_registered, 2);
         assert!(report.drifted_plugins.is_empty());
         assert_eq!(registry_arc.list_tools().len(), 2);
@@ -1460,6 +1510,7 @@ mod tests {
     async fn sync_once_drifted_tool_is_rejected_from_registration() {
         let mut invoker =
             MockInvoker::new(vec![mk_manifest("p1", "tool", &["t1", "ghost"], false)]);
+        let scopes = PluginScopeRegistry::new();
         // 覆盖上报：只报 t1（ghost 声明有实际无 → missing 漂移）
         invoker.list_tools.insert(
             "p1".into(),
@@ -1467,9 +1518,19 @@ mod tests {
         );
         let registry_arc = std::sync::Arc::new(CapabilityRegistryImpl::new());
         let mut known = HashSet::new();
-        let report = sync_once_with_store(&invoker, &registry_arc, None, &mut known, &mut None, None, &mut HashMap::new(), None, None)
-            .await
-            .unwrap();
+        let report = sync_once_with_store(
+            &invoker,
+            &registry_arc,
+            &scopes,
+            &mut known,
+            &mut None,
+            None,
+            &mut HashMap::new(),
+            None,
+            None,
+        )
+        .await
+        .unwrap();
         assert_eq!(
             report.drifted_plugins,
             vec!["p1".to_string()],
@@ -1493,12 +1554,23 @@ mod tests {
     #[tokio::test]
     async fn sync_once_verify_failure_does_not_block_install() {
         let mut invoker = MockInvoker::new(vec![mk_manifest("p1", "tool", &["t1"], false)]);
+        let scopes = PluginScopeRegistry::new();
         invoker.list_tools_fail = true;
         let registry_arc = std::sync::Arc::new(CapabilityRegistryImpl::new());
         let mut known = HashSet::new();
-        let report = sync_once_with_store(&invoker, &registry_arc, None, &mut known, &mut None, None, &mut HashMap::new(), None, None)
-            .await
-            .unwrap();
+        let report = sync_once_with_store(
+            &invoker,
+            &registry_arc,
+            &scopes,
+            &mut known,
+            &mut None,
+            None,
+            &mut HashMap::new(),
+            None,
+            None,
+        )
+        .await
+        .unwrap();
         assert!(
             !report.drifted_plugins.contains(&"p1".to_string()),
             "观测失败不是漂移：不进 drift 报告（账本标记 verify_incomplete）"
@@ -1514,13 +1586,14 @@ mod tests {
     #[tokio::test]
     async fn sync_once_verify_failure_lenient_keeps_tools() {
         let mut invoker = MockInvoker::new(vec![mk_manifest("p1", "tool", &["t1"], false)]);
+        let scopes = PluginScopeRegistry::new();
         invoker.list_tools_fail = true;
         let registry_arc = std::sync::Arc::new(CapabilityRegistryImpl::new());
         let mut known = HashSet::new();
         let report = sync_once_with_store(
             &invoker,
             &registry_arc,
-            None,
+            &scopes,
             &mut known,
             &mut None,
             None,
@@ -1541,12 +1614,13 @@ mod tests {
     #[test]
     fn apply_multiple_new_mixed() {
         let registry_arc = std::sync::Arc::new(CapabilityRegistryImpl::new());
+        let scopes = PluginScopeRegistry::new();
         let mut known = HashSet::new();
         let m1 = mk_manifest("p1", "tool", &["t1"], false);
         let m2 = mk_manifest("p2", "tool", &["t2"], true);
         let m3 = mk_manifest("p3", "pipeline", &[], false);
         let all = vec![m1, m2, m3];
-        let report = apply_discovered_plugins(&all, &mut known, &registry_arc, None);
+        let report = apply_discovered_plugins(&all, &mut known, &registry_arc, &scopes);
         assert_eq!(report.new_plugin_ids.len(), 3);
         // p1/p2 各 1 tool；p3 是 pipeline，其 capabilities.tools 不注册 → 共 2。
         assert_eq!(report.tools_registered, 2);
@@ -1583,11 +1657,22 @@ mod tests {
     async fn sync_once_with_explicit_baseline_detects_addition() {
         let invoker = MockInvoker::new(vec![mk_manifest_host("native_a", "in_process")]);
         let registry_arc = std::sync::Arc::new(CapabilityRegistryImpl::new());
+        let scopes = PluginScopeRegistry::new();
         let mut known = HashSet::new();
         let mut known_cdylib = Some(HashSet::new()); // boot 期无 cdylib
-        let report = sync_once_with_store(&invoker, &registry_arc, None, &mut known, &mut known_cdylib, None, &mut HashMap::new(), None, None)
-            .await
-            .unwrap();
+        let report = sync_once_with_store(
+            &invoker,
+            &registry_arc,
+            &scopes,
+            &mut known,
+            &mut known_cdylib,
+            None,
+            &mut HashMap::new(),
+            None,
+            None,
+        )
+        .await
+        .unwrap();
         assert_eq!(
             report.cdylib_change,
             Some(CdylibChange {
@@ -1688,7 +1773,7 @@ mod tests {
         sync_once_with_store(
             &inv1,
             &registry_arc,
-            Some(&scopes),
+            &scopes,
             &mut known,
             &mut None,
             Some(&store),
@@ -1705,7 +1790,7 @@ mod tests {
         let report = sync_once_with_store(
             &inv2,
             &registry_arc,
-            Some(&scopes),
+            &scopes,
             &mut known,
             &mut None,
             Some(&store),
@@ -1736,7 +1821,7 @@ mod tests {
         let report3 = sync_once_with_store(
             &inv2,
             &registry_arc,
-            Some(&scopes),
+            &scopes,
             &mut known,
             &mut None,
             Some(&store),
@@ -1762,7 +1847,7 @@ mod tests {
         sync_once_with_store(
             &inv1,
             &registry_arc,
-            Some(&scopes),
+            &scopes,
             &mut known,
             &mut None,
             None,
@@ -1781,7 +1866,7 @@ mod tests {
         sync_once_with_store(
             &inv2,
             &registry_arc,
-            Some(&scopes),
+            &scopes,
             &mut known,
             &mut None,
             None,
@@ -2015,11 +2100,12 @@ mod tests {
             mk_manifest("c", "tool", &["t_c"], false),
         ]);
         let registry_arc = std::sync::Arc::new(CapabilityRegistryImpl::new());
+        let scopes = PluginScopeRegistry::new();
         let mut known = HashSet::new();
         let report = sync_once_with_store(
             &invoker,
             &registry_arc,
-            None,
+            &scopes,
             &mut known,
             &mut None,
             None,
@@ -2048,6 +2134,7 @@ mod tests {
     async fn sync_disabled_plugin_manifest_still_enters_store() {
         use agentos_plugin_loader::{PluginEnablement, PluginProfile, ProfileEntry};
         let mut plugins = std::collections::HashMap::new();
+        let scopes = PluginScopeRegistry::new();
         plugins.insert(
             "b".to_string(),
             ProfileEntry {
@@ -2070,7 +2157,7 @@ mod tests {
         sync_once_with_store(
             &invoker,
             &registry_arc,
-            None,
+            &scopes,
             &mut known,
             &mut None,
             Some(&store),
@@ -2099,6 +2186,7 @@ mod tests {
     async fn sync_uninstalls_store_only_disabled_plugin() {
         use agentos_plugin_loader::{PluginEnablement, PluginProfile, ProfileEntry};
         let mut plugins = std::collections::HashMap::new();
+        let scopes = PluginScopeRegistry::new();
         plugins.insert(
             "b".to_string(),
             ProfileEntry {
@@ -2118,7 +2206,7 @@ mod tests {
         sync_once_with_store(
             &invoker,
             &registry_arc,
-            None,
+            &scopes,
             &mut known,
             &mut None,
             Some(&store),
@@ -2137,7 +2225,7 @@ mod tests {
         let report = sync_once_with_store(
             &invoker2,
             &registry_arc,
-            None,
+            &scopes,
             &mut known,
             &mut None,
             Some(&store),
@@ -2158,6 +2246,7 @@ mod tests {
     #[tokio::test]
     async fn sync_rejects_new_plugin_with_missing_required_dep() {
         let mut m = mk_manifest("dep_app", "tool", &["t_a"], false);
+        let scopes = PluginScopeRegistry::new();
         m.requires_services = vec!["ghost.read".to_string()];
         let invoker = MockInvoker::new(vec![m]);
         let registry_arc = std::sync::Arc::new(CapabilityRegistryImpl::new());
@@ -2165,7 +2254,7 @@ mod tests {
         let report = sync_once_with_store(
             &invoker,
             &registry_arc,
-            None,
+            &scopes,
             &mut known,
             &mut None,
             None,
@@ -2186,6 +2275,7 @@ mod tests {
     #[tokio::test]
     async fn sync_uninstalls_removed_plugin_and_cascades_dependents() {
         // 提供者 p 提供 x.m；消费者 c 依赖 x.m（round1 双双注册）。
+        let scopes = PluginScopeRegistry::new();
         let p: PluginManifest = serde_json::from_value(json!({
             "id": "p", "name": "p", "version": "1.0.0",
             "plugin_type": "tool", "language": "python", "host_type": "sidecar",
@@ -2203,7 +2293,7 @@ mod tests {
             let report = sync_once_with_store(
                 &inv,
                 &registry_arc,
-                None,
+                &scopes,
                 &mut known,
                 &mut None,
                 None,
@@ -2224,7 +2314,7 @@ mod tests {
         let r2 = sync_once_with_store(
             &inv2,
             &registry_arc,
-            None,
+            &scopes,
             &mut known,
             &mut None,
             None,
@@ -2247,7 +2337,7 @@ mod tests {
         let r3 = sync_once_with_store(
             &inv3,
             &registry_arc,
-            None,
+            &scopes,
             &mut known,
             &mut None,
             None,
@@ -2268,12 +2358,13 @@ mod tests {
             mk_manifest("a", "tool", &["ta"], false),
             mk_manifest("b", "tool", &["tb"], false),
         ]);
+        let scopes = PluginScopeRegistry::new();
         let registry_arc = std::sync::Arc::new(CapabilityRegistryImpl::new());
         let mut known = HashSet::new();
         let r1 = sync_once_with_store(
             &inv1,
             &registry_arc,
-            None,
+            &scopes,
             &mut known,
             &mut None,
             None,
@@ -2290,7 +2381,7 @@ mod tests {
         let r2 = sync_once_with_store(
             &inv2,
             &registry_arc,
-            None,
+            &scopes,
             &mut known,
             &mut None,
             None,

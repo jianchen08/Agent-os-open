@@ -149,7 +149,9 @@ async fn replay_all_for_user_delivers_missed_events_for_all_user_threads() {
     let (sink2, recv2) = MockSink::online();
     let floor = coord.current_sequence().await;
     let sink2_dyn: Arc<dyn EventSink> = sink2;
-    coord.replay_all_for_user("user-A", 0, floor, &sink2_dyn).await;
+    coord
+        .replay_all_for_user("user-A", 0, floor, &sink2_dyn)
+        .await;
 
     let (seq_main, seq_sub) = {
         let msgs = recv2.lock().unwrap();
@@ -209,9 +211,14 @@ async fn replay_all_for_user_respects_floor_to_avoid_duplicates() {
 
     let (sink2, recv2) = MockSink::online();
     let sink2_dyn: Arc<dyn EventSink> = sink2;
-    coord.replay_all_for_user("user-A", 0, floor, &sink2_dyn).await;
+    coord
+        .replay_all_for_user("user-A", 0, floor, &sink2_dyn)
+        .await;
     let msgs = recv2.lock().unwrap();
-    let seqs: Vec<u64> = msgs.iter().map(|m| m["sequence"].as_u64().unwrap()).collect();
+    let seqs: Vec<u64> = msgs
+        .iter()
+        .map(|m| m["sequence"].as_u64().unwrap())
+        .collect();
     assert!(!seqs.contains(&seq2), "floor 之后的事件不得重复重放");
     assert_eq!(seqs.len(), 1, "只应重放 floor 之前的事件");
     assert!(seqs[0] <= floor);

@@ -240,7 +240,8 @@ impl ChatSendHandler {
         // （引擎路径仍会补写——此处只是消除误告警 + 提前可见性）。
         if created {
             if let Some(store) = self.store.as_ref() {
-                let tenant_id = agentos_http::auth::resolve_tenant_id_by_user(Some(store), user_id).await;
+                let tenant_id =
+                    agentos_http::auth::resolve_tenant_id_by_user(Some(store), user_id).await;
                 if let Err(e) = store
                     .link_pipeline_session(&pipeline_id, &thread_id, &tenant_id)
                     .await
@@ -298,8 +299,9 @@ impl ChatSendHandler {
         if no_dispatch {
             if background {
                 return Err(McpError::Protocol {
-                    message: "chat.send_message no_dispatch 与 background 互斥（no_dispatch 不派发）"
-                        .to_string(),
+                    message:
+                        "chat.send_message no_dispatch 与 background 互斥（no_dispatch 不派发）"
+                            .to_string(),
                 });
             }
             let Some(overlay) = overlay.as_ref() else {
@@ -308,7 +310,8 @@ impl ChatSendHandler {
                         .to_string(),
                 });
             };
-            let tenant_id = agentos_http::auth::resolve_tenant_id_by_user(self.store.as_ref(), user_id).await;
+            let tenant_id =
+                agentos_http::auth::resolve_tenant_id_by_user(self.store.as_ref(), user_id).await;
             let registry = agentos_session::pipeline_state_registry::global_registry();
             let entry = registry.get(&tenant_id, &pipeline_id);
             if let Some(entry) = entry {

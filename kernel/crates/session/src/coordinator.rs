@@ -231,7 +231,8 @@ impl SessionCoordinator {
             self.metrics.inc_replay_hit();
         }
         if resync_needed {
-            let resync = json!({"type": "resync_required", "data": {"reason": "replay_buffer_overflow"}});
+            let resync =
+                json!({"type": "resync_required", "data": {"reason": "replay_buffer_overflow"}});
             let _ = sink
                 .send_text(&serde_json::to_string(&resync).unwrap_or_default())
                 .await;

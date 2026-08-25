@@ -16,7 +16,7 @@ use agentos_core::traits::{
     ToolCapability,
 };
 use agentos_core::types::{ToolCategory, ToolSource};
-use agentos_plugin_loader::CapabilityRegistryImpl;
+use agentos_plugin_loader::{CapabilityRegistryImpl, PluginScopeRegistry};
 
 fn manifest(plugin_id: &str, plugin_type: PluginType, host_type: HostType) -> PluginManifest {
     PluginManifest {
@@ -66,9 +66,10 @@ fn tool_cap(name: &str) -> ToolCapability {
 #[test]
 fn tool_plugin_registers_its_tools() {
     let mut m = manifest("tool-a", PluginType::Tool, HostType::InProcess);
+    let scopes = PluginScopeRegistry::new();
     m.capabilities.tools = vec![tool_cap("read_file"), tool_cap("write_file")];
     let reg = std::sync::Arc::new(CapabilityRegistryImpl::new());
-    let n = register_plugin_capabilities(&m, &reg, None);
+    let n = register_plugin_capabilities(&m, &reg, &scopes);
     assert_eq!(n, 2, "应注册 2 个工具");
     assert!(reg.get_tool("read_file").is_some());
     assert!(reg.get_tool("write_file").is_some());
@@ -79,11 +80,12 @@ fn tool_plugin_registers_its_tools() {
 #[test]
 fn declaration_based_registration_tools_any_type_services_not_registered() {
     let reg = std::sync::Arc::new(CapabilityRegistryImpl::new());
+    let scopes = PluginScopeRegistry::new();
 
     // system 适配器声明 tools（多职能插件）→ 注册（原附录D① 会挡掉）
     let mut adapter = manifest("dsh_adapter", PluginType::System, HostType::Sidecar);
     adapter.capabilities.tools = vec![tool_cap("dsh_read"), tool_cap("dsh_glob")];
-    assert_eq!(register_plugin_capabilities(&adapter, &reg, None), 2);
+    assert_eq!(register_plugin_capabilities(&adapter, &reg, &scopes), 2);
     assert!(reg.get_tool("dsh_read").is_some());
     assert!(reg.get_tool("dsh_glob").is_some());
 
@@ -95,7 +97,10 @@ fn declaration_based_registration_tools_any_type_services_not_registered() {
         input_schema: None,
         output_schema: None,
     }];
-    assert_eq!(register_plugin_capabilities(&service_host, &reg, None), 0);
+    assert_eq!(
+        register_plugin_capabilities(&service_host, &reg, &scopes),
+        0
+    );
     assert!(
         reg.get_tool("monitoring.get_metrics").is_none(),
         "services 槽是内部服务入口，不注册进 LLM 面"
@@ -108,6 +113,7 @@ fn non_tool_plugin_does_not_register_tools() {
     // capabilities.tools 即注册（不分类型）；内部入口应声明在 services 槽。
     // 本测试保留反向锚点：services 槽的条目不注册（语义唯一化的另一半）。
     let mut m = manifest("pipeline-a", PluginType::Pipeline, HostType::InProcess);
+    let scopes = PluginScopeRegistry::new();
     m.capabilities.services = vec![agentos_core::traits::ServiceCapability {
         name: "internal_only".to_string(),
         description: None,
@@ -115,7 +121,7 @@ fn non_tool_plugin_does_not_register_tools() {
         output_schema: None,
     }];
     let reg = std::sync::Arc::new(CapabilityRegistryImpl::new());
-    let n = register_plugin_capabilities(&m, &reg, None);
+    let n = register_plugin_capabilities(&m, &reg, &scopes);
     assert_eq!(n, 0, "services 槽是内部服务声明，不注册进 LLM 面");
     assert!(reg.get_tool("internal_only").is_none());
 }
@@ -123,15 +129,16 @@ fn non_tool_plugin_does_not_register_tools() {
 #[test]
 fn sidecar_source_is_mcp_inprocess_is_builtin() {
     let mut sidecar = manifest("tool-sidecar", PluginType::Tool, HostType::Sidecar);
+    let scopes = PluginScopeRegistry::new();
     sidecar.capabilities.tools = vec![tool_cap("mcp_tool")];
     let reg = std::sync::Arc::new(CapabilityRegistryImpl::new());
-    register_plugin_capabilities(&sidecar, &reg, None);
+    register_plugin_capabilities(&sidecar, &reg, &scopes);
     assert_eq!(reg.get_tool("mcp_tool").unwrap().source, ToolSource::Mcp);
 
     let mut native = manifest("tool-native", PluginType::Tool, HostType::InProcess);
     native.capabilities.tools = vec![tool_cap("builtin_tool")];
     let reg2 = std::sync::Arc::new(CapabilityRegistryImpl::new());
-    register_plugin_capabilities(&native, &reg2, None);
+    register_plugin_capabilities(&native, &reg2, &scopes);
     assert_eq!(
         reg2.get_tool("builtin_tool").unwrap().source,
         ToolSource::Builtin
@@ -141,12 +148,13 @@ fn sidecar_source_is_mcp_inprocess_is_builtin() {
 #[test]
 fn register_new_plugins_skips_existing_ids() {
     let mut a = manifest("new-tool", PluginType::Tool, HostType::InProcess);
+    let scopes = PluginScopeRegistry::new();
     a.capabilities.tools = vec![tool_cap("t1")];
     let b = manifest("existing-tool", PluginType::Tool, HostType::InProcess);
 
     let existing: HashSet<String> = ["existing-tool".to_string()].into_iter().collect();
     let reg = std::sync::Arc::new(CapabilityRegistryImpl::new());
-    let (ids, tools) = register_new_plugins(&[a, b], &existing, &reg, None);
+    let (ids, tools) = register_new_plugins(&[a, b], &existing, &reg, &scopes);
     assert_eq!(ids, vec!["new-tool".to_string()]);
     assert_eq!(tools, 1, "只注册了 new-tool 的 1 个工具");
     assert!(reg.get_tool("t1").is_some());
@@ -170,11 +178,12 @@ fn webhook_ep(plugin_id: &str) -> HttpEndpoint {
 #[test]
 fn disable_then_reenable_restores_capabilities() {
     let mut m = manifest("re-tool", PluginType::Tool, HostType::Sidecar);
+    let scopes = PluginScopeRegistry::new();
     m.capabilities.tools = vec![tool_cap("rt1")];
     m.http_endpoints = vec![webhook_ep("re-tool")];
 
     let reg = std::sync::Arc::new(CapabilityRegistryImpl::new());
-    let (tools, routes) = reenable_plugin_capabilities(&m, &reg, None);
+    let (tools, routes) = reenable_plugin_capabilities(&m, &reg, &scopes);
     assert_eq!((tools, routes), (1, 1));
     assert!(reg.get_tool("rt1").is_some());
     assert!(reg
@@ -189,7 +198,7 @@ fn disable_then_reenable_restores_capabilities() {
         .is_none());
 
     // 重新启用：立即全部回来（对称，无需重启）
-    let (tools2, routes2) = reenable_plugin_capabilities(&m, &reg, None);
+    let (tools2, routes2) = reenable_plugin_capabilities(&m, &reg, &scopes);
     assert_eq!((tools2, routes2), (1, 1));
     assert!(reg.get_tool("rt1").is_some());
     assert!(reg
@@ -201,12 +210,13 @@ fn disable_then_reenable_restores_capabilities() {
 fn reenable_on_already_enabled_is_idempotent() {
     // 启用已启用插件：tools 覆盖同名，http 路由同 path+method 冲突忽略——注册表不膨胀
     let mut m = manifest("dup-tool", PluginType::Tool, HostType::Sidecar);
+    let scopes = PluginScopeRegistry::new();
     m.capabilities.tools = vec![tool_cap("dt1")];
     m.http_endpoints = vec![webhook_ep("dup-tool")];
 
     let reg = std::sync::Arc::new(CapabilityRegistryImpl::new());
-    reenable_plugin_capabilities(&m, &reg, None);
-    reenable_plugin_capabilities(&m, &reg, None);
+    reenable_plugin_capabilities(&m, &reg, &scopes);
+    reenable_plugin_capabilities(&m, &reg, &scopes);
     assert_eq!(reg.list_http_routes().len(), 1, "同 path+method 只留一条");
     assert!(reg.get_tool("dt1").is_some());
 }
@@ -227,7 +237,7 @@ fn m1_scope_revoke_cleans_registry_and_widget_bindings() {
     let scopes = Arc::new(PluginScopeRegistry::new());
 
     // 启用 = guarded 注册（入 scope）
-    let (tools, routes) = reenable_plugin_capabilities(&m, &reg, Some(&scopes));
+    let (tools, routes) = reenable_plugin_capabilities(&m, &reg, &scopes);
     assert_eq!((tools, routes), (1, 1));
 
     // broadcaster 绑定维度：模拟启动装配挂 scope guard（与 agentos-kernel 同构）。
@@ -279,8 +289,8 @@ fn m1_scoped_reenable_is_idempotent_no_index_bloat() {
 
     let reg = Arc::new(CapabilityRegistryImpl::new());
     let scopes = PluginScopeRegistry::new();
-    reenable_plugin_capabilities(&m, &reg, Some(&scopes));
-    reenable_plugin_capabilities(&m, &reg, Some(&scopes));
+    reenable_plugin_capabilities(&m, &reg, &scopes);
+    reenable_plugin_capabilities(&m, &reg, &scopes);
 
     assert_eq!(reg.list_tools().len(), 1, "同名工具只留一条");
     assert_eq!(reg.list_http_routes().len(), 1, "同 path+method 只留一条");
