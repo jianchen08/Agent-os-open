@@ -59,6 +59,7 @@ _REGISTRY = _FakeRegistry([_FakeTool("file_write", _FILE_WRITE_SCHEMA)])
 
 
 def _make_plugin() -> Any:
+    add_plugin_dir("input", "tool_schema_validator")
     from plugin import ToolSchemaValidator
     return ToolSchemaValidator()
 

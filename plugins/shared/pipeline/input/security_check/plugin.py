@@ -500,23 +500,23 @@ class SecurityCheckPlugin(IInputPlugin):
                 )
                 return self._soft_block(ctx, tool_name, f"安全规则自动拒绝: {rule_name or 'block'}")
 
-            # default / auto(ask) / accept_edits(命令类) / plan(命令类) 且**无安全规则兜底**
-            # → 弹审批。有规则（黑名单模式已加载）：未命中任何规则 = 参数安全 → 直接放行，
-            # 危险命令关键词（rm -rf 等）已在规则评估阶段命中 block/needs_approval 拦截。
+            # default / auto(ask) / accept_edits(命令类) / plan(命令类) 且**未命中任何规则**
+            # → 参数安全，直接放行。命中 needs_approval/block 规则的参数（rm -rf 等关键词）
+            # 已在 _match_rules 返回对应 action，只有 action 为空（未命中）才走到这里。
             # 规则缺失/为空（安全闸门失效风险）→ 兜底弹审批（安全优先）。
-            if self._rules:
+            if not rule_name:
                 logger.info(
                     "[%s] 黑名单规则未命中，放行 | tool=%s",
                     self.name,
                     tool_name,
                 )
                 continue
-            reason = "参数未命中安全白名单" + (f"（匹配规则: {rule_name}）" if rule_name else "")
+            reason = "参数命中安全规则: " + rule_name
             logger.warning(
-                "[%s] 危险工具参数未命中白名单且无规则兜底，弹审批 | tool=%s | rule=%s",
+                "[%s] 危险工具参数命中规则，弹审批 | tool=%s | rule=%s",
                 self.name,
                 tool_name,
-                rule_name or "none",
+                rule_name,
             )
             return await self._await_approval(
                 ctx,

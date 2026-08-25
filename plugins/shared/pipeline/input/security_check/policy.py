@@ -20,7 +20,7 @@ from isolation_types import IsolationLevel
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_POLICY_PATH = Path(__file__).parent.parent.parent / "config" / "isolation" / "isolation_policy.yaml"
+DEFAULT_POLICY_PATH = Path(__file__).resolve().parents[5] / "config" / "isolation" / "isolation_policy.yaml"
 
 
 @dataclass
