@@ -113,6 +113,8 @@ BASE_TEST_PATHS: list[str] = [
     "plugins/shared/system/agent_manager/",
     "plugins/shared/system/approval/",
     "plugins/shared/system/connectors/",
+    # evaluation 读面/执行面行为测试（2026-08-26 A5.3 P0 批：server.py 50%→93%）
+    "plugins/shared/system/evaluation/",
     "plugins/shared/system/isolation/",
     "plugins/shared/system/scene/",
     "plugins/shared/system/task_form/",
