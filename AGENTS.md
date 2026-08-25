@@ -74,13 +74,7 @@ commit 前的调查/验证工作尽量用未跟踪文件（`??` 状态）或文�
   基线文件改动一律走 commit 留归因。细则与三问清单：
   docs/working/长期治理债清理方案_20260819.md。
 
-## 编码纪律（吸收自 config/rules，编码任务常驻）
-
-> AI 协作者（ZCode 等）没有系统内的规则注入通道（agent yaml `{{path:}}` 只注入
-> 系统 LLM），故把代码规则铁律摘录进本提示词常驻。完整规则见
-> `config/rules/per_domain/coding_domain_rules.md`（领域规则）、
-> `config/rules/testing_rules.md`、`config/rules/python_type_hints.md`
-> （Python 注解：现代语法 `str | None` 非 `Optional[str]`，签名完整注解）。
+## 编码纪律（编码任务常驻）
 
 - **需求第一，一字不增**：只实现需求明确描述的功能；区分"不言自明的系统需求"
   （操作连贯性/状态反馈/安全底线）与"有争议的体验假设"（用户没说的一律不做），
