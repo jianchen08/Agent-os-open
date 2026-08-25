@@ -125,3 +125,91 @@ class TestPolicyLoaderFileFallback:
         loader = IsolationPolicyLoader(config_path=str(_PLUGIN_DIR / "no_such_policy.yaml"))
         policy = loader.resolve("bash_execute")
         assert policy.isolation.value == "isolated"
+
+
+class TestParseAndPriority:
+    """_parse_policy 字段解析与 tools > categories > default 决策优先级。"""
+
+    @pytest.fixture()
+    def tmp_yaml(self, tmp_path: Path) -> Path:
+        cfg = tmp_path / "policy.yaml"
+        cfg.write_text(
+            """
+default:
+  isolation: non_isolated
+  execution: host_direct
+tools:
+  exact_tool:
+    isolation: isolated
+    network: disabled
+    checkpoint: true
+    approval: true
+    disk_quota: 512m
+categories:
+  risky_cat:
+    isolation: isolated
+    execution: command_in_container
+""",
+            encoding="utf-8",
+        )
+        return cfg
+
+    def test_full_field_parse(self, tmp_yaml: Path) -> None:
+        loader = IsolationPolicyLoader(config_path=str(tmp_yaml))
+        p = loader.resolve("exact_tool")
+        assert p.isolation.value == "isolated"
+        assert p.network == "disabled"
+        assert p.checkpoint is True
+        assert p.approval is True
+        assert p.disk_quota == "512m"
+
+    def test_priority_tool_over_category_and_default(self, tmp_yaml: Path) -> None:
+        loader = IsolationPolicyLoader(config_path=str(tmp_yaml))
+        # 工具名优先于分类
+        assert loader.resolve("exact_tool").isolation.value == "isolated"
+        # 分类命中优先于默认
+        cat = loader.resolve("other_tool", category="risky_cat")
+        assert cat.isolation.value == "isolated"
+        assert cat.execution == "command_in_container"
+        # 都不命中走默认；未知分类不误伤
+        assert loader.resolve("other_tool").isolation.value == "non_isolated"
+        assert loader.resolve("other_tool", category="unknown_cat").execution == "host_direct"
+
+    def test_empty_entry_gets_defaults(self, tmp_path: Path) -> None:
+        cfg = tmp_path / "policy.yaml"
+        cfg.write_text("tools:\n  blank_tool:\ndefault:\n", encoding="utf-8")
+        loader = IsolationPolicyLoader(config_path=str(cfg))
+        p = loader.resolve("blank_tool")
+        assert p.isolation.value == "isolated"
+        assert p.execution == "command_in_container"
+        assert p.checkpoint is False and p.approval is False
+
+    def test_name_lists(self, tmp_yaml: Path) -> None:
+        loader = IsolationPolicyLoader(config_path=str(tmp_yaml))
+        assert loader.get_tool_names() == ["exact_tool"]
+        assert loader.get_category_names() == ["risky_cat"]
+
+
+class TestHotReload:
+    def test_reload_with_new_path(self, tmp_path: Path) -> None:
+        v1 = tmp_path / "v1.yaml"
+        v2 = tmp_path / "v2.yaml"
+        v1.write_text("default: {isolation: non_isolated}\n", encoding="utf-8")
+        v2.write_text("default: {isolation: isolated}\n", encoding="utf-8")
+        loader = IsolationPolicyLoader(config_path=str(v1))
+        assert loader.resolve("x").isolation.value == "non_isolated"
+        loader.reload(config_path=str(v2))
+        assert loader.resolve("x").isolation.value == "isolated"
+
+    def test_on_config_changed_reloads_matching_file(self, tmp_path: Path) -> None:
+        cfg = tmp_path / "isolation_policy.yaml"
+        cfg.write_text("default: {isolation: non_isolated}\n", encoding="utf-8")
+        loader = IsolationPolicyLoader(config_path=str(cfg))
+        assert loader.resolve("x").isolation.value == "non_isolated"
+        cfg.write_text("default: {isolation: isolated}\n", encoding="utf-8")
+        # 与 isolation_policy 无关的文件不触发
+        loader._on_config_changed("modified", "other_file.yaml")
+        assert loader.resolve("x").isolation.value == "non_isolated"
+        # 命中 isolation_policy 的变更触发 reload
+        loader._on_config_changed("modified", "isolation/isolation_policy.yaml")
+        assert loader.resolve("x").isolation.value == "isolated"
