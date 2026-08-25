@@ -22,7 +22,7 @@ from e2e_helpers import (
     KERNEL_URL,
     create_session,
     http_get_with_auth,
-    http_post_json,
+    http_post_json_auth,
 )
 
 pytestmark = [
@@ -46,9 +46,10 @@ def chat_flow(auth_token, cleanup_sessions):
     token = auth_token
     session = create_session(token, title="e2e-pipeline-chat")
     cleanup_sessions(session["thread_id"])
-    status, body, _ = http_post_json(
+    status, body, _ = http_post_json_auth(
         f"{KERNEL_URL}/api/v1/chat",
         {"message": CHAT_PROMPT, "session_id": session["thread_id"]},
+        token=token,
         timeout=150,  # LLM 生成宽松超时
     )
     return {
