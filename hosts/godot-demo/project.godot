@@ -20,6 +20,4 @@ enabled=PackedStringArray("res://addons/agentos/plugin.cfg", "res://addons/godot
 
 [godot_mcp]
 
-; addon 编辑器直连 HTTP 默认扫 9100-9115 起端口，会撞 AgentOS 内核(9100)——
-; Windows 特定绑定(127.0.0.1)可越过内核的 0.0.0.0 绑定抢走本机流量，钉死 9180
 network/http_port=9180
