@@ -24,6 +24,11 @@
 #     同批修复 check_frontend_baseline 解析器全绿崩溃（Tests N passed 无
 #     failed 段返回 0 而非抛错）——收紧到 0 后全绿输出成为常态，旧解析器
 #     会让 CI 在全绿时误红。
+# 2026-08-26 校准（占位 token 兑现）：
+#   - vitest_coverage_pct 1.00 → 59.00：本地 Windows Node25 全量实测 Lines 59.0%
+#     （statements 57.6 / functions 53.6 / branches 51.1，frontend/coverage/
+#     coverage-summary.json）。写 floor(实测) 不虚压——CI（Ubuntu+Node22）首跑
+#     后按 Linux 实测按同公式重定（参照 python 侧 -0.55pp 历史差重定先例）。
 vitest_failures=0
 eslint_errors=0
-vitest_coverage_pct=1.00
+vitest_coverage_pct=59.00
