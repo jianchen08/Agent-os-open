@@ -6,6 +6,8 @@
  * - 剥离 shiki 高亮（markdown/highlight.ts，懒加载语法引擎重依赖）——这是原组件
  *   对未知/缺失语言的合法降级路径（plain monospace），保留 lang 横幅提示；
  *   高亮接入点留在 highlightLines() 单处，后续如引 shiki 只改这一个函数；
+ * - 去掉原组件"展开其余 N 行"的卡片内全量展开：工具卡片是简略预览（head/tail
+ *   窗口 + 静态省略行），完整内容走卡片头部的"打开文件"入口进工作区编辑器；
  * - 行号 gutter/窗口计数/head-tail 折叠逻辑保持原样。
  */
 
@@ -72,7 +74,6 @@ export function ReadBlock({
   // without the file numbers or any chrome.
   const raw = useMemo(() => lines.map(line => line.text).join('\n'), [lines])
   const highlighted = useMemo(() => highlightLines(raw, lang), [raw, lang])
-  const [expanded, setExpanded] = useState(false)
   const [copied, setCopied] = useState(false)
 
   const onCopy = useCallback(() => {
@@ -84,10 +85,8 @@ export function ReadBlock({
     })
   }, [copied, raw])
 
-  const onToggle = useCallback(() => { setExpanded(value => !value) }, [])
-
   const hidden = lines.length - maxLines
-  const capped = hidden > 0 && !expanded
+  const capped = hidden > 0
   const headLines = Math.ceil(maxLines / 2)
   const tailLines = maxLines - headLines
   // A read is a window when its returned lines are fewer than the file's total.
@@ -129,16 +128,10 @@ export function ReadBlock({
       </div>
       <div className={css.body}>
         {rows(capped ? paired.slice(0, headLines) : paired)}
-        {hidden > 0 && (
-          <button
-            type="button"
-            className={css.expand}
-            aria-expanded={expanded}
-            aria-label={expanded ? '收起内容' : `展开其余 ${hidden} 行`}
-            onClick={onToggle}
-          >
-            {expanded ? '收起' : `… 其余 ${hidden} 行`}
-          </button>
+        {capped && (
+          <div className={css.ellipsis} aria-label={`其余 ${hidden} 行未展示，打开文件查看完整内容`}>
+            {`… 其余 ${hidden} 行`}
+          </div>
         )}
         {capped && rows(paired.slice(paired.length - tailLines))}
       </div>

@@ -117,9 +117,15 @@ async def file_read(
     """读取文件内容。
 
     支持行范围读取和尾部读取。workspace 外路径允许读取但记录 warning（B5）。
+    注入 workspace/project_root 时读取与返回的 file 字段均用重映射+锚定后的
+    宿主侧绝对路径（容器挂载路径 /workspace/* → 宿主工作空间、相对路径 →
+    根锚定；对齐 file_write 消费 _check_workspace_path 返回值的模式）——前端
+    工具卡片按 file 字段直读宿主文件系统，原样回传 agent 视角路径将打不开。
     """
     # 工作空间约束（读路径：放行但记录，保持只读向后兼容）
-    _check_workspace_path(path, workspace, project_root, operation="read")
+    _, _, resolved = _check_workspace_path(path, workspace, project_root, operation="read")
+    if resolved is not None:
+        path = resolved
 
     file_path = Path(path)
     if not file_path.exists():

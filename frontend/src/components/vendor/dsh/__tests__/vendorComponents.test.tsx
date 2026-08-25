@@ -47,6 +47,22 @@ describe('ReadBlock', () => {
     expect(screen.getByText('显示 2 / 100 行')).toBeTruthy()
     expect(screen.getByText('ts')).toBeTruthy()
   })
+
+  it('超长内容截断为 head/tail 窗口，不提供卡片内展开全量', () => {
+    const lines = Array.from({ length: 40 }, (_, i) => ({ number: i + 1, text: `line-${i + 1}` }))
+    render(<ReadBlock label="big.txt" lines={lines} totalLines={40} />)
+
+    // head/tail 窗口行可见
+    expect(screen.getByText('line-1')).toBeTruthy()
+    expect(screen.getByText('line-40')).toBeTruthy()
+    // 中间行被截断
+    expect(screen.queryByText('line-20')).toBeNull()
+    // 静态省略行提示截断量
+    expect(screen.getByText('… 其余 24 行')).toBeTruthy()
+    // 完整内容走工具卡片头部的"打开文件"入口，卡片内无展开/收起按钮
+    expect(screen.queryByRole('button', { name: /展开其余/ })).toBeNull()
+    expect(screen.queryByRole('button', { name: '收起' })).toBeNull()
+  })
 })
 
 describe('TerminalBlock', () => {

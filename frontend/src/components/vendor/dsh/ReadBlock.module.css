@@ -100,18 +100,13 @@
   color: var(--dsw-alias-label-primary);
 }
 
-.expand {
+/* Static ellipsis row where the collapsed middle would be: the card is a
+   preview, the full file opens in the workspace editor via the card header. */
+.ellipsis {
   display: block;
   width: 100%;
   padding: 0 0 0 var(--dsl-read-gutter);
-  border: none;
-  background-color: transparent;
   color: var(--dsw-alias-label-tertiary);
-  cursor: pointer;
   font: inherit;
   text-align: left;
-}
-
-.expand:hover {
-  color: var(--dsw-alias-label-secondary);
 }

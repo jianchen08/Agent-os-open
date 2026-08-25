@@ -152,6 +152,64 @@ class TestDeleteFileWorkspaceConstraint:
         assert outside.exists()
 
 
+class TestFileReadReturnsResolvedPath:
+    """file_read 的 file 字段返回宿主侧绝对路径（工具卡片打开文件的坐标契约）。
+
+    隔离任务下 agent 以容器挂载点 /workspace 为 cwd（isolation_guard 固定挂载），
+    传相对路径或 /workspace/* 容器路径；前端工具卡片按 file 字段到宿主文件系统
+    读取（get_file_content 绝对路径直读），原样回传将打不开。
+    _check_workspace_path 已完成容器路径重映射 + 根锚定（file_write 同款消费其
+    返回值），file_read 的读取与回传都必须使用该结果。
+    """
+
+    async def test_container_mount_path_reads_and_returns_host_path(self, tmp_path: Path) -> None:
+        """容器挂载路径 /workspace/* 重映射到宿主工作区：读取成功且 file 为宿主路径。"""
+        ws = tmp_path / "ws"
+        ws.mkdir()
+        (ws / "report.md").write_text("hello\n", encoding="utf-8")
+
+        result = await file_read(path="/workspace/report.md", workspace=str(ws))
+
+        assert result.success is True
+        assert Path(result.output["file"]) == ws / "report.md"
+        assert result.output["content"] == "hello\n"
+
+    async def test_relative_path_resolved_to_workspace_root(self, tmp_path: Path) -> None:
+        """相对路径锚定工作区根：file 返回宿主绝对路径（性质：绝对且落在根内）。"""
+        ws = tmp_path / "ws"
+        ws.mkdir()
+        (ws / "doc.txt").write_text("line\n", encoding="utf-8")
+
+        result = await file_read(path="doc.txt", workspace=str(ws))
+
+        assert result.success is True
+        resolved = Path(result.output["file"])
+        assert resolved.is_absolute()
+        assert resolved == ws / "doc.txt"
+
+    async def test_without_injection_path_passthrough(self, tmp_path: Path) -> None:
+        """未注入 workspace/project_root（L1 主会话）：路径原样回传（前端按项目根解析）。"""
+        target = tmp_path / "free.txt"
+        target.write_text("x\n", encoding="utf-8")
+
+        result = await file_read(path=str(target))
+
+        assert result.success is True
+        assert result.output["file"] == str(target)
+
+    async def test_absolute_outside_path_readable_and_normalized(self, tmp_path: Path) -> None:
+        """根外绝对路径读取放行（只读兼容），file 回传 resolve 归一后的宿主路径。"""
+        ws = tmp_path / "ws"
+        ws.mkdir()
+        outside = tmp_path / "cfg.ini"
+        outside.write_text("[a]\n", encoding="utf-8")
+
+        result = await file_read(path=str(outside), workspace=str(ws))
+
+        assert result.success is True
+        assert Path(result.output["file"]) == outside.resolve()
+
+
 class TestFileReadWorkspaceLogging:
     async def test_read_outside_workspace_allowed_but_logged(
         self, tmp_path: Path, caplog: logging.Logger

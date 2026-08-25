@@ -23,6 +23,7 @@ import asyncio
 import logging
 import os
 import sys
+from pathlib import Path
 from typing import Any
 
 sys.path.insert(0, os.path.dirname(__file__))
@@ -184,6 +185,31 @@ def _normalize_options(raw: Any) -> list[dict[str, Any]] | None:
             if item.get("description"):
                 entry["description"] = item["description"]
             out.append(entry)
+    return out or None
+
+
+def _resolved_file_paths(kwargs: dict[str, Any]) -> list[str] | None:
+    """file_paths 归一化为宿主侧绝对路径（交互面板按绝对路径直读宿主文件系统）。
+
+    param_inject 注入 workspace/project_root（宿主绝对路径）：容器挂载路径
+    ``/workspace/*`` 重映射到宿主工作空间、相对路径锚定根——与 fs_tools 的
+    ``_check_workspace_path`` 同款语义。未注入（L1 主会话）时原样透传，由前端
+    ``_local`` 通道按项目根解析。非字符串/空列表归一为 None（缺省语义）。
+    """
+    raw = kwargs.get("file_paths")
+    if not isinstance(raw, list) or not raw:
+        return None
+    root = kwargs.get("project_root") or kwargs.get("workspace")
+    out: list[str] = []
+    for p in raw:
+        if not isinstance(p, str) or not p:
+            continue
+        if root and (p == "/workspace" or p.startswith("/workspace/")):
+            out.append(str(Path(root) / p[len("/workspace/"):]))
+        elif root and not Path(p).is_absolute():
+            out.append(str(Path(root) / p))
+        else:
+            out.append(p)
     return out or None
 
 @plugin.tool(
@@ -357,6 +383,7 @@ async def _do_choice(
         priority=Priority(kwargs.get("priority", "normal")),
         agent_id=pipeline_id,
         pipeline_id=pipeline_id,
+        file_paths=_resolved_file_paths(kwargs),
     )
     response = await _service.wait_for_choice(rid, timeout=timeout)
     result: dict[str, Any] = {"status": "completed", "response_type": response.get("response_type")}
@@ -384,6 +411,7 @@ async def _do_conversation(
         suggestions=kwargs.get("suggestions"),
         agent_id=pipeline_id,
         pipeline_id=pipeline_id,
+        file_paths=_resolved_file_paths(kwargs),
     )
     response = await _service.wait_for_choice(rid, timeout=timeout)
     resp_type = response.get("response_type", "")
