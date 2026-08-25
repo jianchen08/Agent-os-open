@@ -46,7 +46,7 @@ export const deepSpaceTheme: ThemeConfig = {
       error: '#ff6b6b',
       info: '#4ccce6',
       running: '#4ccce6',
-      pending: '#5472e4',
+      pending: '#7590ee',
     },
 
     bubble: {

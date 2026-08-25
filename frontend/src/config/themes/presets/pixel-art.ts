@@ -35,7 +35,7 @@ export const pixelArtTheme: ThemeConfig = {
       primary: '#1d2b53',
       secondary: 'rgba(29, 43, 83, 0.72)',
       muted: '#5f574f',
-      disabled: '#c2c3c7',
+      disabled: '#7d7a82',
     },
 
     border: {
@@ -46,11 +46,11 @@ export const pixelArtTheme: ThemeConfig = {
 
     status: {
       // PICO-8 亮色组:Green/Orange/Red/Blue
-      success: '#00e436',
-      warning: '#ffa300',
-      error: '#ff004d',
-      info: '#29adff',
-      running: '#29adff',
+      success: '#007545',
+      warning: '#8a6300',
+      error: '#c81e4a',
+      info: '#175fb0',
+      running: '#175fb0',
       pending: '#5f574f',
     },
 
@@ -153,7 +153,7 @@ export const pixelArtTheme: ThemeConfig = {
           hoverBg: 'rgba(41, 173, 255, 0.15)',
         },
         destructive: {
-          bg: '#ff004d',
+          bg: '#d1204f',
           text: '#ffffff',
           border: '#1d2b53',
           hoverBg: '#ff3071',
@@ -180,7 +180,7 @@ export const pixelArtTheme: ThemeConfig = {
         secondary: { bg: '#ffec27', text: '#1d2b53', border: '#1d2b53' },
         success: { bg: '#00e436', text: '#1d2b53', border: '#1d2b53' },
         warning: { bg: '#ffa300', text: '#1d2b53', border: '#1d2b53' },
-        error: { bg: '#ff004d', text: '#ffffff', border: '#1d2b53' },
+        error: { bg: '#d1204f', text: '#ffffff', border: '#1d2b53' },
         info: { bg: '#29adff', text: '#1d2b53', border: '#1d2b53' },
       },
     },
@@ -207,7 +207,7 @@ export const pixelArtTheme: ThemeConfig = {
       variants: {
         default: { bg: '#ffffff', text: '#1d2b53', border: '2px solid #1d2b53' },
         success: { bg: '#00e436', text: '#1d2b53', border: '2px solid #1d2b53' },
-        error: { bg: '#ff004d', text: '#ffffff', border: '2px solid #1d2b53' },
+        error: { bg: '#d1204f', text: '#ffffff', border: '2px solid #1d2b53' },
         warning: { bg: '#ffa300', text: '#1d2b53', border: '2px solid #1d2b53' },
         info: { bg: '#29adff', text: '#1d2b53', border: '2px solid #1d2b53' },
       },

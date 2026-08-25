@@ -34,7 +34,7 @@ export const lightTheme: ThemeConfig = {
       primary: '#0B1220',
       secondary: '#334155',
       muted: '#64748B',
-      disabled: '#94A3B8',
+      disabled: '#6E7C91',
     },
 
     border: {
@@ -44,16 +44,16 @@ export const lightTheme: ThemeConfig = {
     },
 
     status: {
-      success: '#059669',
-      warning: '#D97706',
-      error: '#DC2626',
+      success: '#047857',
+      warning: '#B45309',
+      error: '#B91C1C',
       info: '#2563EB',
-      running: '#0891B2',
-      pending: '#64748B',
+      running: '#0E7490',
+      pending: '#475569',
     },
 
     bubble: {
-      user_bg: '#0891B2',
+      user_bg: '#0E7490',
       user_text: '#F8FAFC',
       user_radius: '1rem 1rem 1rem 0.25rem',
       user_shadow: '0 2px 8px rgba(8, 145, 178, 0.18)',
@@ -128,14 +128,14 @@ export const lightTheme: ThemeConfig = {
       textureOpacity: 0,
       variants: {
         primary: {
-          bg: '#0891B2',
+          bg: '#0E7490',
           text: '#F8FAFC',
           border: 'transparent',
-          hoverBg: '#0E7490',
+          hoverBg: '#155E75',
         },
         secondary: {
           bg: 'rgba(8, 145, 178, 0.10)',
-          text: '#0E7490',
+          text: '#0B637C',
           border: 'rgba(8, 145, 178, 0.28)',
           hoverBg: 'rgba(8, 145, 178, 0.16)',
         },
@@ -170,7 +170,7 @@ export const lightTheme: ThemeConfig = {
       borderRadius: '9999px',
       variants: {
         default: {
-          bg: '#0891B2',
+          bg: '#0E7490',
           text: '#F8FAFC',
           border: 'transparent',
         },
@@ -181,12 +181,12 @@ export const lightTheme: ThemeConfig = {
         },
         success: {
           bg: 'rgba(5, 150, 105, 0.12)',
-          text: '#047857',
+          text: '#02604A',
           border: 'rgba(5, 150, 105, 0.28)',
         },
         warning: {
           bg: 'rgba(217, 119, 6, 0.12)',
-          text: '#B45309',
+          text: '#9A4507',
           border: 'rgba(217, 119, 6, 0.28)',
         },
         error: {
@@ -214,8 +214,8 @@ export const lightTheme: ThemeConfig = {
       borderRadius: '0.5rem',
       listBg: 'rgba(15, 23, 42, 0.05)',
       activeBg: '#FFFFFF',
-      activeText: '#0891B2',
-      inactiveText: '#64748B',
+      activeText: '#0E7490',
+      inactiveText: '#475569',
     },
 
     toast: {
@@ -239,7 +239,7 @@ export const lightTheme: ThemeConfig = {
         },
         warning: {
           bg: 'rgba(217, 119, 6, 0.1)',
-          text: '#B45309',
+          text: '#9A4507',
           border: 'rgba(217, 119, 6, 0.28)',
         },
         info: {

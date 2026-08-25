@@ -45,7 +45,7 @@ export const oceanBreezeTheme: ThemeConfig = {
       warning: '#8a5408',
       error: '#c0392b',
       info: '#00749e',
-      running: '#0eb39e',
+      running: '#0a7a6c',
       pending: '#3d7585',
     },
 
@@ -212,7 +212,7 @@ export const oceanBreezeTheme: ThemeConfig = {
       listBg: 'rgba(8, 145, 178, 0.1)',
       activeBg: '#ffffff',
       activeText: '#0f766e',
-      inactiveText: '#0d9488',
+      inactiveText: '#0b6b62',
     },
 
     toast: {

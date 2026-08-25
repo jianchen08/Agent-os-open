@@ -33,9 +33,9 @@ export const moeSoftTheme: ThemeConfig = {
     text: {
       // 奶咖棕系文字,整体加深一档:温柔但要读得清
       primary: '#5d4a41',
-      secondary: '#877068',
-      muted: '#ab968e',
-      disabled: '#d6ccc5',
+      secondary: '#6f5a51',
+      muted: '#8a7568',
+      disabled: '#93806f',
     },
 
     border: {
@@ -46,17 +46,17 @@ export const moeSoftTheme: ThemeConfig = {
 
     status: {
       // 降饱和但拉开明度与色相:状态一眼可分
-      success: '#7fb07f',
-      warning: '#e0a45f',
-      error: '#dd5468',
-      info: '#8aa5d1',
-      running: '#d9738f',
-      pending: '#ab968e',
+      success: '#47784d',
+      warning: '#8f6229',
+      error: '#bb3a50',
+      info: '#4c6a9e',
+      running: '#ab4a66',
+      pending: '#77645a',
     },
 
     bubble: {
       user_bg: 'linear-gradient(150deg, #f3c4d3 0%, #e9a9bf 100%)',
-      user_text: '#7e4557',
+      user_text: '#6d3a4a',
       user_radius: '1.25rem 1.25rem 1.25rem 0.375rem',
       user_shadow: '0 6px 18px rgba(220, 150, 170, 0.25)',
       user_border: '1px solid rgba(217, 115, 143, 0.45)',
@@ -135,16 +135,16 @@ export const moeSoftTheme: ThemeConfig = {
       textureOpacity: 0.15,
       variants: {
         primary: {
-          bg: 'linear-gradient(140deg, #e590ac 0%, #d9738f 100%)',
+          bg: 'linear-gradient(140deg, #aa4d68 0%, #9c4460 100%)',
           text: '#ffffff',
           border: 'rgba(176, 74, 102, 0.45)',
-          hoverBg: 'linear-gradient(140deg, #eda2b9 0%, #e0829b 100%)',
+          hoverBg: 'linear-gradient(140deg, #9c4460 0%, #8d3c55 100%)',
         },
         secondary: {
-          bg: 'linear-gradient(140deg, #bda8d6 0%, #a68ec6 100%)',
+          bg: 'linear-gradient(140deg, #7e6aa2 0%, #6f5c94 100%)',
           text: '#ffffff',
           border: 'rgba(124, 98, 163, 0.4)',
-          hoverBg: 'linear-gradient(140deg, #c9b6de 0%, #b39bd0 100%)',
+          hoverBg: 'linear-gradient(140deg, #6f5c94 0%, #614f83 100%)',
         },
         ghost: {
           bg: 'transparent',
@@ -176,12 +176,12 @@ export const moeSoftTheme: ThemeConfig = {
     badge: {
       borderRadius: '9999px',
       variants: {
-        default: { bg: '#f7dce5', text: '#b04a66', border: 'rgba(217, 115, 143, 0.4)' },
-        secondary: { bg: '#ece5f6', text: '#7560a0', border: 'rgba(166, 142, 198, 0.45)' },
-        success: { bg: '#e2efe2', text: '#4e7d52', border: 'rgba(127, 176, 127, 0.45)' },
-        warning: { bg: '#f8ecd9', text: '#99682a', border: 'rgba(224, 164, 95, 0.45)' },
+        default: { bg: '#f7dce5', text: '#a03e58', border: 'rgba(217, 115, 143, 0.4)' },
+        secondary: { bg: '#ece5f6', text: '#685296', border: 'rgba(166, 142, 198, 0.45)' },
+        success: { bg: '#e2efe2', text: '#446f48', border: 'rgba(127, 176, 127, 0.45)' },
+        warning: { bg: '#f8ecd9', text: '#8b5c23', border: 'rgba(224, 164, 95, 0.45)' },
         error: { bg: '#fadfe2', text: '#b03a4c', border: 'rgba(221, 84, 104, 0.4)' },
-        info: { bg: '#e3eaf6', text: '#5a76a6', border: 'rgba(138, 165, 209, 0.45)' },
+        info: { bg: '#e3eaf6', text: '#4d6799', border: 'rgba(138, 165, 209, 0.45)' },
       },
     },
 
@@ -198,7 +198,7 @@ export const moeSoftTheme: ThemeConfig = {
       listBg: 'rgba(217, 115, 143, 0.1)',
       activeBg: '#ffffff',
       activeText: '#bf4a68',
-      inactiveText: '#ab968e',
+      inactiveText: '#6b5a50',
     },
 
     toast: {
@@ -206,10 +206,10 @@ export const moeSoftTheme: ThemeConfig = {
       shadow: '0 12px 28px rgba(214, 170, 160, 0.26)',
       variants: {
         default: { bg: '#ffffff', text: '#5d4a41', border: '1px solid rgba(217, 115, 143, 0.3)' },
-        success: { bg: '#e2efe2', text: '#4e7d52', border: '1px solid rgba(127, 176, 127, 0.4)' },
+        success: { bg: '#e2efe2', text: '#446f48', border: '1px solid rgba(127, 176, 127, 0.4)' },
         error: { bg: '#fadfe2', text: '#b03a4c', border: '1px solid rgba(221, 84, 104, 0.35)' },
-        warning: { bg: '#f8ecd9', text: '#99682a', border: '1px solid rgba(224, 164, 95, 0.4)' },
-        info: { bg: '#e3eaf6', text: '#5a76a6', border: '1px solid rgba(138, 165, 209, 0.4)' },
+        warning: { bg: '#f8ecd9', text: '#8b5c23', border: '1px solid rgba(224, 164, 95, 0.4)' },
+        info: { bg: '#e3eaf6', text: '#4d6799', border: '1px solid rgba(138, 165, 209, 0.4)' },
       },
     },
 

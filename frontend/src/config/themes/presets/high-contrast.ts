@@ -176,7 +176,7 @@ export const highContrastTheme: ThemeConfig = {
         },
         error: {
           bg: '#ff0000',
-          text: '#ffffff',
+          text: '#000000',
           border: '2px solid #ff0000',
         },
         info: {
@@ -219,7 +219,7 @@ export const highContrastTheme: ThemeConfig = {
         },
         error: {
           bg: '#ff0000',
-          text: '#ffffff',
+          text: '#000000',
           border: '2px solid #ff0000',
         },
         warning: {
