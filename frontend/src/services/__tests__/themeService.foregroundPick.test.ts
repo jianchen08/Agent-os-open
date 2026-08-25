@@ -113,4 +113,19 @@ describe('语义前景黑白择优计算', () => {
     expect(vars['--status-error-rgb']).toBe(`${rgb!.r} ${rgb!.g} ${rgb!.b}`)
     expect(vars['--status-error-rgb']).toMatch(/^\d+ \d+ \d+$/)
   })
+
+  it('性质：底色为 rgba / 渐变 / 不可解析时，状态前景仍取黑白且亮暗方向正确', () => {
+    const base = presetThemes['dark']
+    const mk = (info: string) => ({
+      ...base,
+      colors: { ...base.colors, status: { ...base.colors.status, info } },
+    })
+    // rgba 亮底 → 黑；渐变取色标中位（深）→ 白；垃圾值 → 回退白
+    const varsRgba = parseVars(compileThemeVariables(mk('rgba(240, 240, 240, 0.9)')))
+    expect(varsRgba['--status-info-foreground']).toBe('#000000')
+    const varsGradient = parseVars(compileThemeVariables(mk('linear-gradient(90deg, #111827 0%, #050a0c 100%)')))
+    expect(varsGradient['--status-info-foreground']).toBe('#ffffff')
+    const varsJunk = parseVars(compileThemeVariables(mk('not-a-color')))
+    expect(varsJunk['--status-info-foreground']).toBe('#ffffff')
+  })
 })
