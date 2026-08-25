@@ -8,7 +8,7 @@
 
 /* eslint-disable import-x/order */
 import { describe, expect, it } from 'vitest'
-import { getFileCategory, isTextLikeFile, validateFile } from '@/services/api/files'
+import { getFileCategory, validateFile } from '@/services/api/files'
 import type { ModelCapabilities } from '@/types/capabilities'
 
 /** 构造 File 对象的辅助函数 */
@@ -33,43 +33,6 @@ const imageCap: ModelCapabilities = {
   maxVideoSize: 0,
   isMultimodal: true,
 }
-
-describe('isTextLikeFile - 文本类判定', () => {
-  it('纯文本 MIME 判定为文本类', () => {
-    expect(isTextLikeFile(makeFile('a.txt', 'text/plain'))).toBe(true)
-    expect(isTextLikeFile(makeFile('a.md', 'text/markdown'))).toBe(true)
-    expect(isTextLikeFile(makeFile('a.py', 'text/x-python'))).toBe(true)
-  })
-
-  it('结构化文本 MIME 判定为文本类', () => {
-    expect(isTextLikeFile(makeFile('a.json', 'application/json'))).toBe(true)
-    expect(isTextLikeFile(makeFile('a.xml', 'application/xml'))).toBe(true)
-    expect(isTextLikeFile(makeFile('a.yaml', 'application/x-yaml'))).toBe(true)
-  })
-
-  it('非标准文本 MIME（application/text 等）判定为文本类', () => {
-    expect(isTextLikeFile(makeFile('a.txt', 'application/text'))).toBe(true)
-    expect(isTextLikeFile(makeFile('a.log', 'application/octet-stream'))).toBe(true)
-  })
-
-  it('MIME 未知但扩展名为文本/代码时按扩展名兜底放行', () => {
-    expect(isTextLikeFile(makeFile('app.py', 'application/octet-stream'))).toBe(true)
-    expect(isTextLikeFile(makeFile('conf.cfg', 'application/octet-stream'))).toBe(true)
-    expect(isTextLikeFile(makeFile('data.csv', ''))).toBe(true)
-  })
-
-  it('markitdown 文档扩展名判定为文本类（即使 MIME 未知）', () => {
-    expect(isTextLikeFile(makeFile('a.pdf', 'application/pdf'))).toBe(true)
-    expect(isTextLikeFile(makeFile('a.docx', 'application/octet-stream'))).toBe(true)
-    expect(isTextLikeFile(makeFile('a.xlsx', 'application/vnd.openxmlformats'))).toBe(true)
-  })
-
-  it('图片/音频/视频不判定为文本类', () => {
-    expect(isTextLikeFile(makeFile('a.png', 'image/png'))).toBe(false)
-    expect(isTextLikeFile(makeFile('a.mp3', 'audio/mpeg'))).toBe(false)
-    expect(isTextLikeFile(makeFile('a.mp4', 'video/mp4'))).toBe(false)
-  })
-})
 
 describe('validateFile - 文本类宽规则放行', () => {
   it('text/plain 放行（无需 capabilities）', () => {

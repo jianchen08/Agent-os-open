@@ -22,6 +22,8 @@ const { mockGet } = vi.hoisted(() => ({ mockGet: vi.fn() }))
 vi.mock('@/services/api/client', () => ({ default: { get: mockGet } }))
 
 vi.mock('@/utils/activityConverter', () => ({
+  buildDefaultActions: (tc: any) => [{ id: 'copy_args', icon: null, label: '复制参数', type: 'copy', onClick: () => {} }],
+
   toolCallToActivity: (tc: any) => ({
     type: 'tool_call', id: tc.callId ?? tc.call_id,
     title: tc.name ?? tc.tool_name, toolName: tc.name ?? tc.tool_name,

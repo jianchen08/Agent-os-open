@@ -30,14 +30,8 @@ import {
 import { ChatInputActions } from './ChatInputActions'
 import { ContextUsageIndicator } from './ContextUsageIndicator'
 import { VoiceInputButton } from './VoiceInputButton'
+import { formatFileSize } from '@/utils/format'
 import type { Attachment, ChatInputProps, PendingFile, SendMessageParams } from './types'
-
-/** 格式化文件大小 */
-const formatFileSize = (bytes: number): string => {
-  if (bytes < 1024) return `${bytes} B`
-  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`
-  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`
-}
 
 /** 格式化录音时长为 mm:ss */
 const formatDuration = (seconds: number): string => {

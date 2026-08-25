@@ -343,13 +343,3 @@ export const API_ENDPOINTS = {
  * API请求超时时间（毫秒）
  */
 export const API_TIMEOUT = 30000
-
-/**
- * API重试次数
- */
-export const API_RETRY_COUNT = 3
-
-/**
- * API重试延迟（毫秒）
- */
-export const API_RETRY_DELAY = 1000

@@ -11,9 +11,11 @@
 import { useCallback, useEffect, useState } from 'react'
 import { createPortal } from 'react-dom'
 import { X, Minimize2, ChevronLeft, ChevronRight } from '@/assets/icons'
+import { toast } from '@/components/ui/sonner'
 import { useInteractionHandler } from '@/hooks/useInteractionHandler'
 import { useInteractionStore } from '@/stores/interactionStore'
 import { useSessionStore } from '@/stores/sessionStore'
+import { logger } from '@/utils/logger'
 import { InteractionCard } from './InteractionCard'
 
 export function GlobalInteractionOverlay() {
@@ -60,6 +62,9 @@ export function GlobalInteractionOverlay() {
       setSubmittingId(currentInteraction.requestId)
       try {
         await respondChoice(currentInteraction.requestId, optionLabel || optionId)
+      } catch (error) {
+        logger.module('InteractionOverlay').error('交互选项响应发送失败', { error })
+        toast.error('交互响应发送失败，请重试')
       } finally {
         setSubmittingId(null)
       }
@@ -74,6 +79,9 @@ export function GlobalInteractionOverlay() {
       setSubmittingId(currentInteraction.requestId)
       try {
         await respondConversation(currentInteraction.requestId, text)
+      } catch (error) {
+        logger.module('InteractionOverlay').error('交互文字响应发送失败', { error })
+        toast.error('交互响应发送失败，请重试')
       } finally {
         setSubmittingId(null)
       }
@@ -93,6 +101,9 @@ export function GlobalInteractionOverlay() {
           currentInteraction.title,
           currentInteraction.agentLevel,
         )
+      } catch (error) {
+        logger.module('InteractionOverlay').error('交互跳转响应发送失败', { error })
+        toast.error('交互响应发送失败，请重试')
       } finally {
         setSubmittingId(null)
       }

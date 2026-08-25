@@ -319,7 +319,7 @@ export function useInteractionHandler(sessionId: string | undefined) {
     }
 
     const handleWsStatusChange = (data: Record<string, unknown>) => {
-      if ((data as any).status === 'disconnected') {
+      if (data.status === 'disconnected') {
         _isSubscribed = false
       }
     }
@@ -352,19 +352,19 @@ export function useInteractionHandler(sessionId: string | undefined) {
       }
     }
 
-    globalWS.subscribe('_status', handleWsStatusChange as any)
+    globalWS.subscribe('_status', handleWsStatusChange)
 
     globalWS.subscribe(
       WS_SERVER_EVENTS.INTERACTION_REQUEST,
-      handleInteractionRequest as any,
+      handleInteractionRequest,
     )
     globalWS.subscribe(
       'interaction_cancelled',
-      handleInteractionCancelled as any,
+      handleInteractionCancelled,
     )
     globalWS.subscribe(
       'interaction_timeout',
-      handleInteractionTimeout as any,
+      handleInteractionTimeout,
     )
     // WS 重连后恢复 pending 交互（断线期间可能错过推送，或刷新后内存已清空）
     globalWS.subscribe('reconnected', restorePendingInteractions)
@@ -373,10 +373,10 @@ export function useInteractionHandler(sessionId: string | undefined) {
     restorePendingInteractions()
 
     return () => {
-      globalWS.unsubscribe('_status', handleWsStatusChange as any)
-      globalWS.unsubscribe(WS_SERVER_EVENTS.INTERACTION_REQUEST, handleInteractionRequest as any)
-      globalWS.unsubscribe('interaction_cancelled', handleInteractionCancelled as any)
-      globalWS.unsubscribe('interaction_timeout', handleInteractionTimeout as any)
+      globalWS.unsubscribe('_status', handleWsStatusChange)
+      globalWS.unsubscribe(WS_SERVER_EVENTS.INTERACTION_REQUEST, handleInteractionRequest)
+      globalWS.unsubscribe('interaction_cancelled', handleInteractionCancelled)
+      globalWS.unsubscribe('interaction_timeout', handleInteractionTimeout)
       globalWS.unsubscribe('reconnected', restorePendingInteractions)
       _isSubscribed = false
     }

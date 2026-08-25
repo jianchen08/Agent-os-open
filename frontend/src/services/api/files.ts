@@ -47,18 +47,6 @@ export interface FileCapabilityResponse {
   is_multimodal?: boolean
 }
 
-/** 支持的文件类型响应 */
-export interface SupportedTypesResponse {
-  /** 支持的图片类型 */
-  image_types: Record<string, string[]>
-  /** 支持的文档类型 */
-  document_types: Record<string, string[]>
-  /** 最大图片大小（字节） */
-  max_image_size: number
-  /** 最大文档大小（字节） */
-  max_document_size: number
-}
-
 /** 上传文件 */
 export async function uploadFile(file: File, modelName?: string): Promise<FileUploadResponse> {
   const formData = new FormData()
@@ -106,12 +94,6 @@ export async function getModelCapabilities(modelName: string): Promise<FileCapab
     }
     throw error
   }
-}
-
-/** 获取支持的文件类型 */
-export async function getSupportedTypes(): Promise<SupportedTypesResponse> {
-  const response = await apiClient.get<SupportedTypesResponse>(MULTIMODAL_SERVICE_ENDPOINTS.mm_files_supported_types)
-  return response.data
 }
 
 /**
@@ -189,7 +171,7 @@ function isTextFileByExtension(file: File): boolean {
 }
 
 /** 判断文件是否为文本类附件（纯文本或 markitdown 文档或文本扩展名） */
-export function isTextLikeFile(file: File): boolean {
+function isTextLikeFile(file: File): boolean {
   return isPlainTextMime(file.type) || isMarkitdownDocument(file) || isTextFileByExtension(file)
 }
 

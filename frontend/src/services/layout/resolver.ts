@@ -5,7 +5,7 @@
  * 实现四层保障机制
  */
 
-import type { LayoutConfig, ResolvedLayout } from '@/types/layout'
+import type { LayoutConfig } from '@/types/layout'
 
 /** 默认布局配置 */
 export const DEFAULT_LAYOUT_CONFIG: LayoutConfig = {
@@ -92,72 +92,5 @@ export function safeLoadLayout(themeLayout: LayoutConfig | undefined): LayoutCon
     return merged
   } catch {
     return DEFAULT_LAYOUT_CONFIG
-  }
-}
-
-/**
- * 从主题配置解析出安全的布局值
- *
- * 根据视口宽度计算各面板的实际尺寸
- * 当空间不足时，优先保证聊天面板
- *
- * @param config - 布局配置
- * @param viewportWidth - 视口宽度
- * @param persistedWorkspaceRatio - 已记忆的工作区宽度比例（0~1），传入则覆盖默认比例
- */
-export function resolveLayout(
-  config: LayoutConfig,
-  viewportWidth: number,
-  persistedWorkspaceRatio?: number,
-): ResolvedLayout {
-  const dockWidth = config.dockBar.position !== 'bottom' ? config.dockBar.height : 0
-  const availableWidth =
-    viewportWidth - config.sidebar.defaultWidth - dockWidth - config.gaps.betweenSpaces * 2
-
-  // 持久化比例合法时覆盖默认比例；chat 与 workspace 比例之和为 1
-  const usePersistedRatio =
-    typeof persistedWorkspaceRatio === 'number' &&
-    Number.isFinite(persistedWorkspaceRatio) &&
-    persistedWorkspaceRatio > 0 &&
-    persistedWorkspaceRatio < 1
-  const workspaceRatio = usePersistedRatio ? persistedWorkspaceRatio : config.panelSplit.workspaceRatio
-  const chatRatio = usePersistedRatio ? 1 - workspaceRatio : config.panelSplit.chatRatio
-
-  const desiredChat = availableWidth * chatRatio
-  const desiredWorkspace = availableWidth * workspaceRatio
-
-  const minChat = config.chatPanel.minWidth
-  const minWorkspace = config.workspacePanel.minWidth
-
-  let chatWidth: number
-  let workspaceWidth: number
-
-  if (desiredChat >= minChat && desiredWorkspace >= minWorkspace) {
-    chatWidth = desiredChat
-    workspaceWidth = desiredWorkspace
-  } else if (availableWidth >= minChat + minWorkspace) {
-    chatWidth = minChat
-    workspaceWidth = availableWidth - minChat
-  } else {
-    chatWidth = availableWidth
-    workspaceWidth = 0
-  }
-
-  const maxFloatingW = viewportWidth * 0.9
-  const maxFloatingH = typeof window !== 'undefined' ? window.innerHeight * 0.9 : 600
-
-  return {
-    sidebar: {
-      width: Math.min(config.sidebar.defaultWidth, config.sidebar.maxWidth),
-      minWidth: config.sidebar.minWidth,
-      maxWidth: config.sidebar.maxWidth,
-    },
-    chatPanel: { width: chatWidth, minWidth: minChat },
-    workspacePanel: { width: workspaceWidth, minWidth: minWorkspace },
-    floatingWindow: {
-      width: Math.min(config.floatingWindow.defaultWidth, maxFloatingW),
-      height: Math.min(config.floatingWindow.defaultHeight, maxFloatingH),
-    },
-    dockBar: { height: config.dockBar.height },
   }
 }

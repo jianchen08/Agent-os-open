@@ -9,7 +9,9 @@ import { EmptyState } from '@/components/shared/EmptyState'
 import { ErrorState } from '@/components/shared/ErrorState'
 import { LoadingState } from '@/components/shared/LoadingState'
 import { PageShell } from '@/components/shared/PageShell'
+import { toast } from '@/components/ui/sonner'
 import * as usersApi from '@/services/api/users'
+import { logger } from '@/utils/logger'
 import {
   invalidateAdminUsers,
   useAdminUserStatsQuery,
@@ -34,14 +36,17 @@ export function AdminPage() {
     : null
 
   /**
-   * 切换用户激活状态（乐观更新缓存 + 后台失效刷新统计）
+   * 切换用户激活状态（成功后失效缓存刷新统计）
    */
   const handleToggleActive = async (userId: string, currentActive: boolean) => {
     try {
       await usersApi.updateUserActiveStatus(userId, !currentActive)
       invalidateAdminUsers()
-    } catch {
-      // 静默失败
+    } catch (error) {
+      logger.module('AdminPage').error('更新用户激活状态失败', { userId, error })
+      toast.error(
+        error instanceof Error ? error.message : `更新用户${currentActive ? '禁用' : '启用'}状态失败`,
+      )
     }
   }
 

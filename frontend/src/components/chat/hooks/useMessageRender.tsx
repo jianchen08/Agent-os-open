@@ -1,9 +1,9 @@
 /** 消息渲染 Hook 统一处理消息的渲染上下文 */
 
-import { Copy } from '@/assets/icons'
 import { useMemo } from 'react'
+import { buildDefaultActions } from '@/utils/activityConverter'
 import { enhanceActivityWithToolConfig, getGlobalOpenFileCallback } from '@/utils/toolCardRegistry'
-import type { ActivityAction, ActivityData, ActivityDetailBlock } from '@/types/activity'
+import type { ActivityData, ActivityDetailBlock } from '@/types/activity'
 import type { Message, MessageToolCall, ThinkingContent } from '@/types/models'
 import type { MessagePart, SystemLevel, ToolCallPart } from '@/types/messageParts'
 /** 渲染片段类型 */
@@ -84,39 +84,6 @@ function buildDefaultDetails(toolCall: MessageToolCall): ActivityDetailBlock[] {
   }
 
   return details
-}
-
-/** 构建默认的操作按钮 */
-function buildDefaultActions(toolCall: MessageToolCall): ActivityAction[] {
-  const actions: ActivityAction[] = [
-    {
-      id: 'copy_args',
-      icon: <Copy className="h-icon-sm w-icon-sm" />,
-      label: '复制参数',
-      type: 'copy',
-      onClick: () => {
-        navigator.clipboard.writeText(JSON.stringify(toolCall.tool_args, null, 2))
-      },
-    },
-  ]
-
-  if (toolCall.result !== undefined) {
-    actions.push({
-      id: 'copy_result',
-      icon: <Copy className="h-icon-sm w-icon-sm" />,
-      label: '复制结果',
-      type: 'copy',
-      onClick: () => {
-        navigator.clipboard.writeText(
-          typeof toolCall.result === 'string'
-            ? toolCall.result
-            : JSON.stringify(toolCall.result, null, 2),
-        )
-      },
-    })
-  }
-
-  return actions
 }
 
 /** 从 ToolCallPart 构建 ActivityData（parts[] 路径专用） */

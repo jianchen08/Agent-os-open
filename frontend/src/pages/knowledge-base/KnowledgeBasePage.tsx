@@ -28,22 +28,7 @@ import {
   invalidateKnowledgeBaseCache,
   useKnowledgeBaseQuery,
 } from '@/hooks/queries/useKnowledgeBaseQuery'
-
-/**
- * 格式化文件大小
- *
- * Args:
- *   bytes: 文件字节数
- *
- * Returns:
- *   格式化后的文件大小字符串
- */
-function formatFileSize(bytes: number): string {
-  if (bytes === 0) return '0 B'
-  const units = ['B', 'KB', 'MB', 'GB']
-  const i = Math.floor(Math.log(bytes) / Math.log(1024))
-  return `${(bytes / Math.pow(1024, i)).toFixed(1)} ${units[i]}`
-}
+import { formatFileSize } from '@/utils/format'
 
 /**
  * 知识库管理页面组件

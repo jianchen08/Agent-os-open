@@ -15,6 +15,7 @@ interface PendingMessage {
   [key: string]: unknown
 }
 
+/** 内部事件处理器存储类型（消息体运行时为任意 JSON，具体类型由订阅方泛型声明） */
 type EventHandler = (data: any) => void
 
 const RECONNECT_BASE_DELAY = 4_000
@@ -390,17 +391,17 @@ class GlobalWebSocketService {
     this._send({ type: 'interaction_response', thread_id: threadId, data: { request_id: requestId, response } })
   }
 
-  /** 订阅事件 */
-  subscribe(event: string, handler: EventHandler): void {
+  /** 订阅事件（handler 入参类型由调用方按事件契约声明） */
+  subscribe<T = any>(event: string, handler: (data: T) => void): void {
     if (!this._handlers.has(event)) {
       this._handlers.set(event, new Set())
     }
-    this._handlers.get(event)!.add(handler)
+    this._handlers.get(event)!.add(handler as EventHandler)
   }
 
   /** 取消订阅 */
-  unsubscribe(event: string, handler: EventHandler): void {
-    this._handlers.get(event)?.delete(handler)
+  unsubscribe<T = any>(event: string, handler: (data: T) => void): void {
+    this._handlers.get(event)?.delete(handler as EventHandler)
   }
 
   /** 获取当前连接状态 */

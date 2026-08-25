@@ -32,6 +32,7 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import { Button } from '@/components/ui/button'
 import { cn } from '@/lib/utils'
 import { uploadFile, validateFile } from '@/services/api/files'
+import { formatFileSize } from '@/utils/format'
 import type { Attachment } from './types'
 
 /** 文件类型分类 */
@@ -124,13 +125,6 @@ function FileCategoryIcon({ category, className }: { category: FileCategory; cla
     default:
       return <FileIcon className={cn('text-muted-foreground', className)} />
   }
-}
-
-/** 格式化文件大小 */
-function formatFileSize(bytes: number): string {
-  if (bytes < 1024) return `${bytes} B`
-  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`
-  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`
 }
 
 /** 单个文件预览卡片 */

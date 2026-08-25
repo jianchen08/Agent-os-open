@@ -25,7 +25,7 @@ export function parseUTCTimestamp(timestamp: string): Date {
  * @param date - 日期对象
  * @returns 相对时间字符串
  */
-export function formatRelativeTime(date: Date): string {
+function formatRelativeTime(date: Date): string {
   const now = new Date()
   const diffMs = now.getTime() - date.getTime()
   const diffSeconds = Math.floor(diffMs / 1000)
@@ -65,7 +65,7 @@ function formatDateString(date: Date): string {
  * @param format - 格式类型
  * @returns 格式化后的日期字符串
  */
-export function formatDate(
+function formatDate(
   dateString: string,
   format: 'full' | 'date' | 'time' | 'relative' = 'full',
 ): string {
@@ -105,7 +105,7 @@ export function formatDate(
 }
 
 /**
- * 格式化文件大小
+ * 格式化文件大小（唯一活实现；KB 到 GB 全覆盖，四舍五入保留两位小数）
  * @param bytes - 字节数
  * @returns 格式化后的文件大小字符串
  */

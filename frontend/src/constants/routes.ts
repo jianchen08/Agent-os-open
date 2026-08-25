@@ -43,8 +43,3 @@ export const ROUTES = {
     LLM_PAYLOAD: '/debug/llm-payload',
   },
 } as const
-
-/**
- * 路由路径类型
- */
-export type RoutePath = (typeof ROUTES)[keyof typeof ROUTES]

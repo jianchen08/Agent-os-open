@@ -143,9 +143,9 @@ export function useRealtimeEvents(): void {
     // Task lifecycle events
     // （task_status_update / task_status_changed 当前后端推送路径静默跳过、
     //   待 SDK frontend.emit capability 落地后恢复——见 tasks/service.py，故保留订阅）
-    globalWS.subscribe(WS_SERVER_EVENTS.TASK_STATUS_UPDATE, handleTaskStatusUpdate as any)
-    globalWS.subscribe(WS_SERVER_EVENTS.TASK_STATUS_CHANGED, handleTaskStatusChanged as any)
-    globalWS.subscribe(WS_SERVER_EVENTS.TASK_DELETED, handleTaskDeleted as any)
+    globalWS.subscribe(WS_SERVER_EVENTS.TASK_STATUS_UPDATE, handleTaskStatusUpdate)
+    globalWS.subscribe(WS_SERVER_EVENTS.TASK_STATUS_CHANGED, handleTaskStatusChanged)
+    globalWS.subscribe(WS_SERVER_EVENTS.TASK_DELETED, handleTaskDeleted)
 
     /**
      * 发送失败透传（2026-08-21 用户裁决：任何错误都必须让用户看见）：
@@ -197,7 +197,7 @@ export function useRealtimeEvents(): void {
         autoDismissMs: 10000,
       })
     }
-    globalWS.subscribe('user_input_send_timeout', handleUserInputSendTimeout as any)
+    globalWS.subscribe('user_input_send_timeout', handleUserInputSendTimeout)
 
     /**
      * 被同账号新连接替换（B10 单连接踢旧，code=4000）：本页已永久失联且不再
@@ -214,7 +214,7 @@ export function useRealtimeEvents(): void {
         autoDismissMs: 0, // 常驻：静默装死比打扰更糟
       })
     }
-    globalWS.subscribe('kicked_by_replacement', handleKickedByReplacement as any)
+    globalWS.subscribe('kicked_by_replacement', handleKickedByReplacement)
 
     // visibility 回前台主动重连：浏览器后台时节流 setInterval 心跳 + uvicorn ws_ping_timeout
     // 会掐断连接，但 onclose 可能在标签页冻结期间被延迟。回前台时主动检测：连接已断则重连，
@@ -252,11 +252,11 @@ export function useRealtimeEvents(): void {
       document.removeEventListener('visibilitychange', handleVisibilityChange)
 
       // Task lifecycle events
-      globalWS.unsubscribe(WS_SERVER_EVENTS.TASK_STATUS_UPDATE, handleTaskStatusUpdate as any)
-      globalWS.unsubscribe(WS_SERVER_EVENTS.TASK_STATUS_CHANGED, handleTaskStatusChanged as any)
-      globalWS.unsubscribe(WS_SERVER_EVENTS.TASK_DELETED, handleTaskDeleted as any)
-      globalWS.unsubscribe('user_input_send_timeout', handleUserInputSendTimeout as any)
-      globalWS.unsubscribe('kicked_by_replacement', handleKickedByReplacement as any)
+      globalWS.unsubscribe(WS_SERVER_EVENTS.TASK_STATUS_UPDATE, handleTaskStatusUpdate)
+      globalWS.unsubscribe(WS_SERVER_EVENTS.TASK_STATUS_CHANGED, handleTaskStatusChanged)
+      globalWS.unsubscribe(WS_SERVER_EVENTS.TASK_DELETED, handleTaskDeleted)
+      globalWS.unsubscribe('user_input_send_timeout', handleUserInputSendTimeout)
+      globalWS.unsubscribe('kicked_by_replacement', handleKickedByReplacement)
     }
   }, [bumpWorkspaceDataVersion])
 }

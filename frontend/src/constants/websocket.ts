@@ -32,7 +32,7 @@ function deriveWsUrl(apiUrl: string): string {
 /**
  * WebSocket服务器URL（从 API_BASE_URL 派生，或从环境变量读取）
  */
-export const WS_BASE_URL = import.meta.env.VITE_WS_BASE_URL || deriveWsUrl(API_BASE_URL)
+const WS_BASE_URL = import.meta.env.VITE_WS_BASE_URL || deriveWsUrl(API_BASE_URL)
 
 // ---- 协议版本 ----
 
@@ -215,7 +215,7 @@ export const WS_SERVER_EVENTS = {
  *
  * 对应前端发送给后端的消息类型
  */
-export const WS_CLIENT_MESSAGES = {
+const WS_CLIENT_MESSAGES = {
   /** 用户输入 */
   USER_INPUT: 'user_input',
   /** 审批决策 */
@@ -252,17 +252,8 @@ export type WebSocketServerEventType = (typeof WS_SERVER_EVENTS)[keyof typeof WS
 export type WebSocketClientMessageType =
   (typeof WS_CLIENT_MESSAGES)[keyof typeof WS_CLIENT_MESSAGES]
 
-export type ApprovalDecisionType = (typeof APPROVAL_DECISIONS)[keyof typeof APPROVAL_DECISIONS]
-
-/**
- * WebSocket心跳配置
- */
-export const WS_HEARTBEAT_CONFIG = {
-  /** 心跳间隔（毫秒） */
-  INTERVAL: 30000,
-  /** 心跳超时（毫秒）- 必须大于 INTERVAL，给 ack 留容错，否则 ack 稍慢就误断连 */
-  TIMEOUT: 45000,
-} as const
+/** 审批决策类型（仅 ApprovalMessage 内部使用） */
+type ApprovalDecisionType = 'approve' | 'reject' | 'modify'
 
 /**
  * WebSocket错误码枚举

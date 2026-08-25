@@ -24,6 +24,8 @@ import type { MessagePart } from '@/types/messageParts'
 //  Mock: activityConverter（useMessageRender 内部依赖）
 // ---------------------------------------------------------------------------
 vi.mock('@/utils/activityConverter', () => ({
+  buildDefaultActions: (tc: any) => [{ id: 'copy_args', icon: null, label: '复制参数', type: 'copy', onClick: () => {} }],
+
   toolCallToActivity: (toolCall: MessageToolCall) => ({
     type: 'tool_call',
     id: toolCall.call_id,

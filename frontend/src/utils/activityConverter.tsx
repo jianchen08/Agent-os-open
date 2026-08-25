@@ -36,6 +36,44 @@ export interface ConversionOptions {
 }
 
 /**
+ * 构建默认的操作按钮（复制参数/复制结果）
+ *
+ * toolCallToActivity 与 useMessageRender 共用（原 useMessageRender 内
+ * 复制实现已收敛至此，icon 统一用设计系统 icon-sm 令牌）。
+ */
+export function buildDefaultActions(toolCall: MessageToolCall): ActivityAction[] {
+  const actions: ActivityAction[] = [
+    {
+      id: 'copy_args',
+      icon: <Copy className="h-icon-sm w-icon-sm" />,
+      label: '复制参数',
+      type: 'copy',
+      onClick: () => {
+        navigator.clipboard.writeText(JSON.stringify(toolCall.tool_args, null, 2))
+      },
+    },
+  ]
+
+  if (toolCall.result !== undefined) {
+    actions.push({
+      id: 'copy_result',
+      icon: <Copy className="h-icon-sm w-icon-sm" />,
+      label: '复制结果',
+      type: 'copy',
+      onClick: () => {
+        navigator.clipboard.writeText(
+          typeof toolCall.result === 'string'
+            ? toolCall.result
+            : JSON.stringify(toolCall.result, null, 2),
+        )
+      },
+    })
+  }
+
+  return actions
+}
+
+/**
  * 从 MessageToolCall 转换为 ActivityData
  */
 export function toolCallToActivity(
@@ -79,35 +117,6 @@ export function toolCallToActivity(
     }
   }
 
-  // 默认操作
-  const defaultActions: ActivityAction[] = [
-    {
-      id: 'copy_args',
-      icon: <Copy className="h-3.5 w-3.5" />,
-      label: '复制参数',
-      type: 'copy',
-      onClick: () => {
-        navigator.clipboard.writeText(JSON.stringify(toolCall.tool_args, null, 2))
-      },
-    },
-  ]
-
-  if (toolCall.result !== undefined) {
-    defaultActions.push({
-      id: 'copy_result',
-      icon: <Copy className="h-3.5 w-3.5" />,
-      label: '复制结果',
-      type: 'copy',
-      onClick: () => {
-        navigator.clipboard.writeText(
-          typeof toolCall.result === 'string'
-            ? toolCall.result
-            : JSON.stringify(toolCall.result, null, 2),
-        )
-      },
-    })
-  }
-
   const base: ActivityData = {
     type: 'tool_call',
     id: toolCall.call_id,
@@ -121,7 +130,7 @@ export function toolCallToActivity(
     details,
     error: toolCall.error,
     timestamp: toolCall.started_at,
-    actions: options?.actions || defaultActions,
+    actions: options?.actions || buildDefaultActions(toolCall),
     customIcon: options?.customIcon,
     customColor: options?.customColor,
     customClassName: options?.customClassName,

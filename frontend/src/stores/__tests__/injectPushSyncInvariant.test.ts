@@ -22,6 +22,8 @@ import type { Message } from '@/types/models'
 
 // ── mock 外部依赖（与 messageOrderWithNotifications 对齐）──
 vi.mock('@/utils/activityConverter', () => ({
+  buildDefaultActions: (tc: any) => [{ id: 'copy_args', icon: null, label: '复制参数', type: 'copy', onClick: () => {} }],
+
   toolCallToActivity: (toolCall: any) => ({
     type: 'tool_call',
     id: toolCall.callId ?? toolCall.call_id,

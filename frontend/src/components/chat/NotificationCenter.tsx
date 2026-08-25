@@ -92,7 +92,7 @@ export function NotificationCenter({ className, hideTrigger = false }: Notificat
       if (!notification.isRead) {
         markAsRead(notification.id)
       }
-      const sourceId = (notification as any).sourceId as string | undefined
+      const sourceId = notification.sourceId
       if (sourceId) {
         const interaction = useInteractionStore
           .getState()
@@ -299,7 +299,7 @@ export function NotificationCenter({ className, hideTrigger = false }: Notificat
                 onClick={handleNotificationClick}
                 onDismiss={dismissNotification}
                 onAction={handleAction}
-                hasInteraction={!!(notification as any).sourceId}
+                hasInteraction={!!notification.sourceId}
                 className="group"
               />
             ))}
@@ -315,7 +315,7 @@ export function NotificationCenter({ className, hideTrigger = false }: Notificat
                   onClick={handleNotificationClick}
                   onDismiss={dismissNotification}
                   onAction={handleAction}
-                  hasInteraction={!!(notification as any).sourceId}
+                  hasInteraction={!!notification.sourceId}
                 />
               ))}
               {items.length > 2 && (

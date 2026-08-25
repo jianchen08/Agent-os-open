@@ -4,8 +4,6 @@
  * 提供系统监控、任务统计等 API 接口
  *
  * 暴露接口：
- * - getSystemMetrics(options): SystemMetrics - 获取系统性能指标
- * - getTaskStatistics(options): TaskStatistics - 获取任务执行统计
  * - getTaskList(page, pageSize, status, options): 任务列表 - 获取任务列表
  * - getAllMonitoringData(options): 所有监控数据 - 获取所有监控数据（汇总接口）
  */
@@ -26,24 +24,6 @@ import type {
   TokenUsageResponse,
 } from '@/types/monitoring'
 import type { RetryOptions } from '@/utils/retry'
-
-export async function getSystemMetrics(options: RetryOptions = {}): Promise<SystemMetrics> {
-  return requestWithRetry(async () => {
-    const response = await apiClient.get<SystemMetricsResponse>(
-      API_ENDPOINTS.MONITORING.SYSTEM_METRICS,
-    )
-    return response.data.metrics
-  }, options)
-}
-
-export async function getTaskStatistics(options: RetryOptions = {}): Promise<TaskStatistics> {
-  return requestWithRetry(async () => {
-    const response = await apiClient.get<TaskStatisticsResponse>(
-      API_ENDPOINTS.MONITORING.TASK_STATISTICS,
-    )
-    return response.data.statistics
-  }, options)
-}
 
 export async function getTaskList(
   page: number = 1,
@@ -98,8 +78,18 @@ export async function getAllMonitoringData(options: RetryOptions = {}): Promise<
   try {
     // 并行请求所有数据
     const [metrics, statistics, tasksResult, tokenUsageResult, cacheStatsResult] = await Promise.allSettled([
-      getSystemMetrics(options),
-      getTaskStatistics(options),
+      requestWithRetry(async () => {
+        const response = await apiClient.get<SystemMetricsResponse>(
+          API_ENDPOINTS.MONITORING.SYSTEM_METRICS,
+        )
+        return response.data.metrics
+      }, options),
+      requestWithRetry(async () => {
+        const response = await apiClient.get<TaskStatisticsResponse>(
+          API_ENDPOINTS.MONITORING.TASK_STATISTICS,
+        )
+        return response.data.statistics
+      }, options),
       getTaskList(1, 10, undefined, options),
       getTokenUsage(options),
       getCacheStats(options),

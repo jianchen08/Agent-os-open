@@ -82,11 +82,11 @@ export function DebugTasksPage({ embedded }: { embedded?: boolean } = {}) {
     const handleStatusChange = () => {
       void queryClient.invalidateQueries({ queryKey: queryKeys.debugTasks })
     }
-    globalWS.subscribe(WS_SERVER_EVENTS.TASK_STATUS_CHANGED, handleStatusChange as any)
-    globalWS.subscribe(WS_SERVER_EVENTS.TASK_STATUS_UPDATE, handleStatusChange as any)
+    globalWS.subscribe(WS_SERVER_EVENTS.TASK_STATUS_CHANGED, handleStatusChange)
+    globalWS.subscribe(WS_SERVER_EVENTS.TASK_STATUS_UPDATE, handleStatusChange)
     return () => {
-      globalWS.unsubscribe(WS_SERVER_EVENTS.TASK_STATUS_CHANGED, handleStatusChange as any)
-      globalWS.unsubscribe(WS_SERVER_EVENTS.TASK_STATUS_UPDATE, handleStatusChange as any)
+      globalWS.unsubscribe(WS_SERVER_EVENTS.TASK_STATUS_CHANGED, handleStatusChange)
+      globalWS.unsubscribe(WS_SERVER_EVENTS.TASK_STATUS_UPDATE, handleStatusChange)
     }
   }, [])
 

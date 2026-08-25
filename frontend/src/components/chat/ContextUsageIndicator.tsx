@@ -11,6 +11,7 @@
 
 import { AlertCircle, Database } from '@/assets/icons'
 import { cn } from '@/lib/utils'
+import { formatNumber } from '@/utils/format'
 
 export interface ContextUsageIndicatorProps {
   /** 模型名；空则显示「模型无效」 */
@@ -28,10 +29,6 @@ export interface ContextUsageIndicatorProps {
   /** 紧凑模式（小尺寸，侧栏/旧 StatusBar 场景） */
   compact?: boolean
   className?: string
-}
-
-function formatNumber(num: number): string {
-  return num.toLocaleString('en-US')
 }
 
 /** 圆环尺寸（compact 12 / 常规 16） */

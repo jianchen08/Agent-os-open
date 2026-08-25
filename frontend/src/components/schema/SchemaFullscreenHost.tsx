@@ -137,11 +137,11 @@ export function SchemaFullscreenHost({
         })
       }
       handlers.set(eventName, handler)
-      globalWS.subscribe(eventName, handler as never)
+      globalWS.subscribe(eventName, handler)
     }
     return () => {
       for (const [eventName, handler] of handlers) {
-        globalWS.unsubscribe(eventName, handler as never)
+        globalWS.unsubscribe(eventName, handler)
       }
     }
   }, [eventDecls])
