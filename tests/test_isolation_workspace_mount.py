@@ -44,10 +44,17 @@ class TestWorkspaceMountGuard:
         assert "工作空间为空" in env.provider_info["error"]
 
     @pytest.mark.asyncio
-    async def test_nonexistent_workspace_rejected(self):
-        """工作空间路径不存在 → 拒绝创建容器，返回 ERROR 环境。"""
+    async def test_nonexistent_workspace_rejected(self, monkeypatch, tmp_path):
+        """工作空间路径不存在 → 拒绝创建容器，返回 ERROR 环境。
+
+        workspace 用 tmp_path 下确定未创建的子路径：POSIX 字面路径在 Windows
+        会解析到当前盘根（且 docker daemon 挂载时会自动创建源目录污染盘根）。
+        另清 DOCKER_HOST 使 _is_wsl_docker() 为 False——远程 WSL daemon 场景
+        会跳过宿主校验把校验交给 daemon 挂载，本用例专测宿主校验分支。
+        """
+        monkeypatch.delenv("DOCKER_HOST", raising=False)
         provider = DockerProvider()
-        ctx = _make_context(workspace="/definitely/not/exist/xyz_224042d3b925")
+        ctx = _make_context(workspace=str(tmp_path / "definitely_not_exist_ws"))
 
         env = await provider.create_environment(ctx, "cua-mount-test")
 

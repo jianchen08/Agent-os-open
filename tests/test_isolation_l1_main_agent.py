@@ -20,14 +20,21 @@ from unittest.mock import MagicMock, patch
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "plugins" / "shared"))
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "plugins" / "shared" / "pipeline" / "input" / "isolation_guard"))
 
-import pytest
-from isolation_types import IsolationLevel
+# 收集期防线：此前收集的平铺套件可能把 pipeline/types.py 装进裸名 "types"
+# 缓存（其顶层相对导入必炸），导入 SimpleNamespace 前恢复 stdlib 绑定。
+from tests._stdlib_guard import ensure_stdlib_module
+
+ensure_stdlib_module("types")
+from types import SimpleNamespace  # noqa: E402
+
+import pytest  # noqa: E402
+from isolation_types import IsolationLevel  # noqa: E402
 
 import tests._isolation_path  # noqa: F401
 
-from pipeline.plugin import PluginContext
-from pipeline.types import StateKeys
-from plugin import IsolationGuard
+from pipeline.plugin import PluginContext  # noqa: E402
+from pipeline.types import StateKeys  # noqa: E402
+from plugin import IsolationGuard  # noqa: E402
 
 
 def _make_guard(docker_available: bool = True) -> IsolationGuard:
@@ -39,7 +46,6 @@ def _make_guard(docker_available: bool = True) -> IsolationGuard:
     guard._decider.resolve = MagicMock(return_value=mock_policy)
     guard._get_task_metadata = MagicMock(return_value={"isolation_level": "isolated"})
     # 容器落地注入 fake manager：docker 决策后直接返回容器 id，不触真实 IsolationManager
-    from types import SimpleNamespace
 
     async def _goc(**kwargs):
         return SimpleNamespace(env_id="container-test")

@@ -26,12 +26,27 @@ pytestmark = pytest.mark.unit
 _REPO_ROOT = Path(__file__).resolve().parent.parent
 _CORE_DIR = _REPO_ROOT / "plugins" / "shared" / "pipeline" / "core"
 _LLM_CORE_DIR = _CORE_DIR / "llm_core"
-# 去重插入到 [0]：车道共跑时其他插件目录可能残留于 sys.path 前部，
-# 平铺裸名导入会命中他插件同名模块。
-for _d in (_LLM_CORE_DIR, _CORE_DIR):
-    if str(_d) in sys.path:
-        sys.path.remove(str(_d))
-    sys.path.insert(0, str(_d))
+
+
+def _reclaim_llm_core_path() -> None:
+    """llm_core 目录去重插回 sys.path[0]，并逐出非 llm_core 的 adapter 缓存。
+
+    车道共跑时其他插件测试（multimodal 等）会把自身目录残留于 sys.path 前部、
+    把裸名 "adapter" 缓存换成自己的模块——provider 插件平铺
+    ``from adapter import ...`` 只认 llm_core 目录解析。收集期（模块级）与
+    执行期（导入 provider 插件前）都需调用，幂等。
+    """
+    for d in (str(_LLM_CORE_DIR), str(_CORE_DIR)):
+        while d in sys.path:
+            sys.path.remove(d)
+        sys.path.insert(0, d)
+    cached = sys.modules.get("adapter")
+    cached_src = str(getattr(cached, "__file__", "") or "")
+    if cached is not None and not cached_src.startswith(str(_LLM_CORE_DIR)):
+        sys.modules.pop("adapter", None)
+
+
+_reclaim_llm_core_path()
 
 from _provider_registry import apply_pre_send, extract_thinking_from_content  # noqa: E402
 from llm_provider_deepseek import (  # noqa: E402
@@ -61,13 +76,8 @@ def test_adapter_no_longer_contains_provider_hacks() -> None:
 
 def test_provider_plugins_are_standalone_packages() -> None:
     """三个 provider 插件各自独立可导入。"""
-    # 执行期防线：车道内其他插件测试（multimodal 等）可能把裸名 "adapter"
-    # 缓存换成自己的模块，provider 插件平铺 `from adapter import` 会命中
-    # 错误缓存 ImportError——非 llm_core 的 adapter 缓存逐出后按 sys.path[0] 重解析。
-    _cached = sys.modules.get("adapter")
-    _cached_src = str(getattr(_cached, "__file__", "") or "")
-    if _cached is not None and not _cached_src.startswith(str(_LLM_CORE_DIR)):
-        sys.modules.pop("adapter", None)
+    # 执行期再恢复一次 sys.path/adapter 缓存（收集期之后车道内其他测试可能再次改写）。
+    _reclaim_llm_core_path()
     import llm_provider_keypool  # noqa: PLC0415
 
     assert callable(ensure_role_safety)
