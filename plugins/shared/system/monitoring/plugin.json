@@ -117,7 +117,8 @@
   "granted_capabilities": [
     "pipeline-state",
     "service-registry",
-    "db-admin"
+    "db-admin",
+    "metrics"
   ],
   "http_endpoints": [
     {
