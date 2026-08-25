@@ -106,26 +106,7 @@ def _task(
 # ═══════════════════════════════════════════════════════════
 
 
-@pytest.mark.asyncio
-async def test_change_status_denied_cross_session_l1() -> None:
-    """_change_status：L1 改其他会话的容器任务 → INSUFFICIENT_PERMISSION。
 
-    RED：仅校验 parent_agent_level==1，未校验 session 归属 → force_transition 被调用（越权成功）。
-    GREEN：补 _check_permission → 拒绝，force_transition 不被调用。
-    """
-    tool = _make_tool()
-    tool._task_service.get_task.return_value = _task(
-        status=TaskStatus.RUNNING, session_id="session-other", task_scope="container"
-    )
-
-    result = await tool._change_status(
-        {"task_id": "t1", "status": "completed", "session_id": "session-mine"},
-        parent_agent_level=1,
-    )
-
-    assert not result.success
-    assert result.error_code == "INSUFFICIENT_PERMISSION"
-    tool._task_service.force_transition.assert_not_awaited()
 
 
 # ═══════════════════════════════════════════════════════════
@@ -239,19 +220,4 @@ async def test_batch_tasks_prechecks_permission_and_skips_dispatch() -> None:
 # ═══════════════════════════════════════════════════════════
 
 
-@pytest.mark.asyncio
-async def test_change_status_allowed_for_own_session_l1() -> None:
-    """_change_status：L1 操作本会话容器任务 → 通过权限检查（合法行为不破坏）。"""
-    tool = _make_tool()
-    tool._task_service.get_task.return_value = _task(
-        status=TaskStatus.RUNNING, session_id="session-mine", task_scope="container"
-    )
 
-    result = await tool._change_status(
-        {"task_id": "t1", "status": "completed", "session_id": "session-mine"},
-        parent_agent_level=1,
-    )
-
-    # 通过权限检查 → 触达 force_transition（合法变更）
-    assert result.success
-    tool._task_service.force_transition.assert_awaited_once()

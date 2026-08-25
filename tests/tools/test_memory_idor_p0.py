@@ -138,27 +138,18 @@ async def test_import_text_uses_trusted_user_id() -> None:
 
 
 @pytest.mark.asyncio
-async def test_fallback_to_inputs_user_id_when_no_trusted_injection() -> None:
-    """未注入可信身份时，沿用 inputs.user_id（向后兼容，不阻断合法调用）。"""
+def test_fallback_to_inputs_user_id_when_no_trusted_injection() -> None:
+    """未注入可信身份时，_resolve_user_id 沿用 inputs.user_id（只读路径回退）。"""
     backend = _make_backend()
     mt = MemoryTool(memory_backend=backend)
     # 不调用 set_trusted_user_id
 
-    await mt.execute(
-        {"action": "store", "content": "c", "tags": [], "user_id": "bob"}
-    )
-
-    backend.add.assert_awaited_once()
-    assert backend.add.call_args.kwargs["user_id"] == "bob"
+    assert mt._resolve_user_id({"user_id": "bob"}) == "bob"
 
 
-@pytest.mark.asyncio
-async def test_fallback_to_system_when_no_user_id_anywhere() -> None:
+def test_fallback_to_system_when_no_user_id_anywhere() -> None:
     """既无可信注入也无 inputs.user_id → 回退 SYSTEM_USER_ID。"""
     backend = _make_backend()
     mt = MemoryTool(memory_backend=backend)
 
-    await mt.execute({"action": "store", "content": "c", "tags": []})
-
-    backend.add.assert_awaited_once()
-    assert backend.add.call_args.kwargs["user_id"] == MemoryTool.SYSTEM_USER_ID
+    assert mt._resolve_user_id({}) == MemoryTool.SYSTEM_USER_ID

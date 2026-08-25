@@ -41,19 +41,19 @@ class TestIsolationDecider:
         return IsolationDecider(policy_loader=loader), loader
 
     @pytest.mark.asyncio
-    async def test_default_policy_is_container(self):
-        """0.2 默认策略为容器隔离（isolation_policy.yaml 缺失/config_center 不可用时回退 container）。"""
+    async def test_default_policy_is_non_isolated(self):
+        """默认策略为 non_isolated（isolation_policy.yaml default 段，未匹配工具走宿主机）。"""
         decider = IsolationDecider()
         policy = decider.resolve("unknown_tool")
-        assert policy.isolation == IsolationLevel.CONTAINER
+        assert policy.isolation == IsolationLevel.HOST
 
     @pytest.mark.asyncio
     async def test_decide_without_availability_check(self):
         """不做可用性检查时直接返回策略。"""
         decider = IsolationDecider()
         policy = await decider.decide("some_tool")
-        # 默认无可用性检查，返回默认策略（container）
-        assert policy.isolation == IsolationLevel.CONTAINER
+        # 默认无可用性检查，返回默认策略（non_isolated）
+        assert policy.isolation == IsolationLevel.HOST
 
     @pytest.mark.asyncio
     async def test_container_unavailable_host_available_raises(self):

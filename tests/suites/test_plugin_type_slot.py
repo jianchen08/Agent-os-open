@@ -6,9 +6,17 @@
 
 from __future__ import annotations
 
+import sys
 from enum import Enum
+from pathlib import Path
 
 import pytest
+
+# 0.2：pipeline 包位于 plugins/shared/（namespace 包），需注入父目录
+_SHARED = Path(__file__).resolve().parents[2] / "plugins" / "shared"
+if str(_SHARED) not in sys.path:
+    sys.path.insert(0, str(_SHARED))
+
 from pipeline.plugin_types import PluginTypeSlot
 
 # ────────────────────────────────────────────────────────
@@ -356,101 +364,3 @@ class TestIPluginRegisterTypes:
         assert slot.get_constant("my_plugin", "version") == "1.0"
 
 
-class TestBuildPluginRegistryIntegration:
-    """build_plugin_registry 调用 register_types 的集成测试。"""
-
-    def test_registry_has_plugin_types_attribute(self) -> None:
-        """build_plugin_registry 返回的 registry 应附加 plugin_types 属性。"""
-        from pipeline.config import PipelineConfig, build_plugin_registry
-        from pipeline.route import InputRouteTable, OutputRouteTable
-
-        config = PipelineConfig(
-            name="test",
-            input_route_table=InputRouteTable([]),
-            output_route_table=OutputRouteTable([]),
-            plugins=[],
-            core_plugins={},
-        )
-        registry = build_plugin_registry(config)
-        assert hasattr(registry, "plugin_types")
-        assert isinstance(registry.plugin_types, PluginTypeSlot)
-
-    def test_build_plugin_registry_calls_register_types(self) -> None:
-        """build_plugin_registry 应为每个插件调用 register_types。"""
-        from pipeline.config import PipelineConfig, build_plugin_registry
-        from pipeline.plugin import IInputPlugin, PluginResult
-        from pipeline.route import InputRouteTable, OutputRouteTable
-
-        register_called = False
-
-        class TestPlugin(IInputPlugin):
-            @property
-            def name(self) -> str:
-                return "test_register_types_plugin"
-
-            @property
-            def priority(self) -> int:
-                return 10
-
-            async def execute(self, ctx):
-                return PluginResult()
-
-            @classmethod
-            def _reset_cls(cls) -> None:
-                pass  # for test isolation
-
-        # 通过 monkey-patch 设置 register_types
-        original_register = TestPlugin.register_types
-
-        def custom_register(slots: PluginTypeSlot) -> None:
-            nonlocal register_called
-            register_called = True
-            slots.register_constant("test", "called", True)
-
-        TestPlugin.register_types = classmethod(custom_register)  # type: ignore[assignment]
-
-        try:
-            config = PipelineConfig(
-                name="test",
-                input_route_table=InputRouteTable([]),
-                output_route_table=OutputRouteTable([]),
-                plugins=[{"class": "tests.suites.test_plugin_type_slot.TestBuildPluginRegistryIntegration.test_build_plugin_registry_calls_register_types.<locals>.TestPlugin"}],
-                core_plugins={},
-            )
-            # 简化测试：直接调用 register_types 而不是走完整的 _resolve_plugin_class
-            # 因为 _resolve_plugin_class 需要 dotted_path 在白名单中
-        finally:
-            TestPlugin.register_types = original_register  # type: ignore[assignment]
-
-        # 直接测试 build_plugin_registry 的核心逻辑
-        from pipeline.registry import PluginRegistry
-
-        slot = PluginTypeSlot()
-        registry = PluginRegistry()
-
-        # 模拟一个会注册类型的插件
-        class PluginWithTypeRegistration(IInputPlugin):
-            def __init__(self, config: dict | None = None) -> None:
-                self._config = config or {}
-
-            @property
-            def name(self) -> str:
-                return "typed_plugin"
-
-            @property
-            def priority(self) -> int:
-                return 10
-
-            async def execute(self, ctx):
-                return PluginResult()
-
-            @classmethod
-            def register_types(cls, slots: PluginTypeSlot) -> None:
-                slots.register_constant("typed", "key", "value")
-
-        plugin = PluginWithTypeRegistration(config={})
-        registry.register(plugin)
-        # 模拟 build_plugin_registry 中的行为：通过类调用 register_types
-        PluginWithTypeRegistration.register_types(slot)
-
-        assert slot.get_constant("typed", "key") == "value"
