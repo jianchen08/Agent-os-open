@@ -1,7 +1,7 @@
 # 通用自主循环管道配置（多循环体模型）
 #
 # 引擎作为配置解释执行器：读此配置，按 loop_bodies 顺序执行每个循环体
-# （各自独立的 steps 与循环配置），据 next（统一 DSL）/exit_routes 决定循环、
+# （各自独立的 steps 与循环配置），据 next（统一 DSL）决定循环、
 # 分支与循环体间转移。所有 Agent 共用此管道，差异由 Agent 配置
 # （system_prompt/tool_ids/model_tier）体现。
 #
@@ -41,10 +41,9 @@ loop_bodies:
 
   # ── main：agent 自主循环（LLM ↔ 工具执行）──
   - id: main
-    loop_config:
-      enabled: true
-      max_iterations: -1          # -1=无限循环（由 Agent 配置的 max_iterations 覆盖）
-
+    while: "True"                 # 恒真循环（ended/suspended 退出）；迭代上限由
+                                  # post 链 pipeline_stop_check 按 Agent 配置
+                                  # max_iterations（默认 20）强制 ended 兜底
     steps:
       # ── 上下文准备（input 插件链）──
       - id: prepare

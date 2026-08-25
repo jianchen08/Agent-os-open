@@ -11,9 +11,9 @@ use std::sync::{Arc, Mutex};
 
 use agentos_core::traits::{MessageQueryOpts, PluginInvoker, StorageBackend};
 use agentos_core::types::{
-    Branch, LoopBody, LoopConfig, MessageRecord, PipelineConfig, PipelineStep, PluginContext,
-    PluginError, PluginResult, Route, RouteAction, RouteNext, RunRecord, RunStatus, StepItem,
-    StepLibrary, ToolExecutionResult, TraceEntry,
+    Branch, LoopBody, MessageRecord, PipelineConfig, PipelineStep, PluginContext, PluginError,
+    PluginResult, Route, RouteAction, RouteNext, RunRecord, RunStatus, StepItem, StepLibrary,
+    ToolExecutionResult, TraceEntry,
 };
 use agentos_engine::compiler::compile_pipeline;
 use agentos_engine::{PipelineExecutor, SqliteStore};
@@ -230,7 +230,7 @@ impl StorageBackend for NullStorage {
 
 /// 构造新格式（多循环体）管道配置：main 体 = prepare/core/post，语义对齐
 /// 原 0.1 平铺 default.yaml 的转换产物（插件链 + 路由仲裁）。
-fn make_engine_config(max_iterations: i32) -> PipelineConfig {
+fn make_engine_config() -> PipelineConfig {
     let prepare_plugins = [
         "pipeline_tool_schema",
         "pipeline_param_inject",
@@ -300,11 +300,7 @@ fn make_engine_config(max_iterations: i32) -> PipelineConfig {
                     loop_config: None,
                 },
             ],
-            loop_config: Some(LoopConfig {
-                enabled: true,
-                max_iterations,
-            }),
-            while_cond: None,
+            while_cond: Some("True".into()),
             exit_routes: vec![],
             run_on_error: false,
         }],
@@ -371,15 +367,12 @@ const DEFAULT_PLUGIN_IDS: [&str; 10] = [
 /// 5. state["current_phase"] 记录当前循环体 id
 #[tokio::test]
 async fn test_pipeline_executes_steps() {
-    let engine_cfg = make_engine_config(-1);
+    let engine_cfg = make_engine_config();
     assert_eq!(engine_cfg.name, "agentos_agent");
     assert_eq!(engine_cfg.loop_bodies.len(), 1);
-    assert!(
-        engine_cfg.loop_bodies[0]
-            .loop_config
-            .as_ref()
-            .unwrap()
-            .enabled
+    assert_eq!(
+        engine_cfg.loop_bodies[0].while_cond.as_deref(),
+        Some("True")
     );
 
     let invoker = Arc::new(MockInvoker::new());
@@ -470,7 +463,7 @@ async fn test_pipeline_executes_steps() {
 #[tokio::test]
 async fn test_pipeline_routes_tool_calls_to_loop() {
     // 安全阀：测试防挂死（路由 bug 时第 10 轮截断暴露断言失败）
-    let engine_cfg = make_engine_config(10);
+    let engine_cfg = make_engine_config();
 
     let plugin_ids = [
         "pipeline_tool_schema",
@@ -559,7 +552,7 @@ async fn test_pipeline_routes_tool_calls_to_loop() {
 // 详见 docs/message_persistence_design.md。
 #[tokio::test]
 async fn wiring_messages_ops_applied_to_state_and_table() {
-    let engine_cfg = make_engine_config(-1);
+    let engine_cfg = make_engine_config();
 
     let invoker = Arc::new(MockInvoker::new());
     // llm_core emit messages op（新模型）+ 纯文本回复（→ end 路由终止）
@@ -658,9 +651,8 @@ async fn test_while_cond_drives_body_loop() {
                 routes: vec![],
                 loop_config: None,
             }],
-            // 无 loop_config；while 恒假 → 一次都不执行（循环模式由 while 开启，
+            // while 恒假 → 一次都不执行（循环模式由 while 开启，
             // 第一轮开头求值为假即退出）
-            loop_config: None,
             while_cond: Some("False".into()),
             exit_routes: vec![],
             run_on_error: false,
@@ -708,7 +700,6 @@ async fn test_while_cond_false_after_state_change_exits() {
                 routes: vec![],
                 loop_config: None,
             }],
-            loop_config: None,
             while_cond: Some("done != True".into()),
             exit_routes: vec![],
             run_on_error: false,

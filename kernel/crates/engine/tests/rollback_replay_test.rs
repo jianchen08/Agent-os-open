@@ -42,8 +42,8 @@ use std::time::Duration;
 
 use agentos_core::traits::{MessageQueryOpts, PluginInvoker, StorageBackend};
 use agentos_core::types::{
-    LoopBody, LoopConfig, PipelineConfig, PipelineStep, PluginContext, PluginError, PluginResult,
-    Route, RouteAction, RouteNext, StepItem, TenantContext, ToolExecutionResult,
+    LoopBody, PipelineConfig, PipelineStep, PluginContext, PluginError, PluginResult, Route,
+    RouteAction, RouteNext, StepItem, TenantContext, ToolExecutionResult,
 };
 use agentos_engine::compiler::compile_pipeline;
 use agentos_engine::{replay, PipelineExecutor, SqliteStore};
@@ -185,11 +185,7 @@ fn make_engine_config() -> PipelineConfig {
                     loop_config: None,
                 },
             ],
-            loop_config: Some(LoopConfig {
-                enabled: true,
-                max_iterations: -1,
-            }),
-            while_cond: None,
+            while_cond: Some("True".into()),
             exit_routes: vec![],
             run_on_error: false,
         }],

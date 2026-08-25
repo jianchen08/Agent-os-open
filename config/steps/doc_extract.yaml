@@ -17,9 +17,8 @@ steps:
 context:
   task: "提取文档关键信息"
   temperature: 0.3
-routes:
+next:
   - when: "extract_result == ''"
-    then:
-      next: end
-      set:
-        status: failed
+    then: end
+    set:
+      status: failed

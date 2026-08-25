@@ -833,7 +833,7 @@ pub struct Route {
     pub then: RouteAction,
 }
 
-/// 循环配置。
+/// 循环配置（step 级：组合节点自带循环，如批量处理；循环体级循环用 `while`）。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LoopConfig {
     /// 是否启用循环
@@ -995,19 +995,15 @@ pub struct PipelineStep {
 
 /// 管道循环体：管道由多个循环体顺序组成（如 init → main → exit）。
 ///
-/// 每个循环体拥有独立的 steps 与循环配置：
-/// - `loop_config` 缺省/disabled 且无 `while_cond` → 单次执行（前处理/后处理体，如 init/exit）；
-/// - `loop_config` enabled 或 `while_cond` 存在 → 循环执行直至 `ended` / `suspended` /
-///   `while_cond` 为假 / `max_iterations`；
-/// - 循环体结束后的转移：`exit_routes` 命中（`RouteNext::Phase`）→ 跳转到指定循环体；
+/// 每个循环体拥有独立的 steps 与循环条件（G10 统一 DSL 单轨）：
+/// - `while_cond` 缺省 → 单次执行（前处理/后处理体，如 init/exit）；
+/// - `while_cond` 存在 → 循环执行，每轮开头求值（同一 `eval_condition` 求值器），
+///   假则退出循环；`ended` / `suspended` 亦可终止。迭代上限不在管道 DSL 表达——
+///   生产阀门是 post 链 `pipeline_stop_check` 按 Agent 配置 `max_iterations` 兜底；
+/// - 循环体结束后的转移：`next` 命中（`RouteNext::Phase`）→ 跳转到指定循环体；
 ///   未命中/未声明 → 默认顺序进入下一个循环体；最后一个循环体结束 = run 结束。
 /// - `run_on_error`：管道提前终止（`ended` / 出错）时仍执行本循环体（收尾语义，
 ///   如 exit 体的 workspace 合并与环境释放）。挂起（`suspended`）不触发。
-///
-/// `while_cond` 与 `loop_config` 的关系（G10 统一 DSL）：`while: "expr"` 是循环体
-/// 循环继续条件的表达式形态（条件永远 `when`/`while`、目标永远 `then`、缺省顺序
-/// 推进的单一风格），与 `loop_config.enabled` 兼容并存——任一开启即循环模式，
-/// 每轮循环开头对 `while_cond` 求值（同一 `eval_condition` 求值器），假则退出循环。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LoopBody {
     /// 循环体标识（执行期间写入 `state["current_phase"]`，插件据此分发）
@@ -1015,14 +1011,11 @@ pub struct LoopBody {
     /// 循环体内的步骤（三级命中：当前管道 step id / 公共 step 库 / 插件名）
     #[serde(default)]
     pub steps: Vec<PipelineStep>,
-    /// 本循环体的循环配置；None/disabled 且无 while_cond = 单次执行
-    #[serde(default)]
-    pub loop_config: Option<LoopConfig>,
-    /// 循环继续条件表达式（G10 新 DSL `while: "expr"`）；None = 无条件。
+    /// 循环继续条件表达式（G10 DSL `while: "expr"`）；None = 单次执行。
     /// YAML 书写键为 `while`（Rust 关键字规避，serde rename）。
     #[serde(default, skip_serializing_if = "Option::is_none", rename = "while")]
     pub while_cond: Option<String>,
-    /// 循环体结束后的转移路由（默认顺序进入下一个循环体）
+    /// 循环体结束后的转移路由（YAML `next` 归一；默认顺序进入下一个循环体）
     #[serde(default)]
     pub exit_routes: Vec<Route>,
     /// 提前终止后仍执行本循环体（收尾语义）
@@ -1033,8 +1026,8 @@ pub struct LoopBody {
 /// 管道配置（配置驱动的执行流程定义）。
 ///
 /// 引擎作为配置解释执行器：读 PipelineConfig，按 `loop_bodies` 顺序执行每个
-/// 循环体（各自独立的 steps 与循环配置），据 exit_routes/routes 决定循环、
-/// 分支与循环体间转移。一套引擎 + 不同 YAML = 不同行为。
+/// 循环体（各自独立的 steps 与循环条件），据 next 转移（归一为内部
+/// exit_routes/routes）决定循环、分支与循环体间转移。一套引擎 + 不同 YAML = 不同行为。
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct PipelineConfig {
     /// 管道名
@@ -1075,7 +1068,7 @@ impl PipelineConfig {
     /// 单循环体便捷构造（测试用）：一个 main 体承载全部 steps。
     pub fn single_body(
         name: impl Into<String>,
-        loop_config: LoopConfig,
+        while_cond: Option<String>,
         steps: Vec<PipelineStep>,
     ) -> Self {
         Self {
@@ -1083,8 +1076,7 @@ impl PipelineConfig {
             loop_bodies: vec![LoopBody {
                 id: "main".to_string(),
                 steps,
-                loop_config: Some(loop_config),
-                while_cond: None,
+                while_cond,
                 exit_routes: vec![],
                 run_on_error: false,
             }],

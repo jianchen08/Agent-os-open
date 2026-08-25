@@ -15,15 +15,17 @@
 //! - 文件存在但解析失败：返回 `Err`（带上下文，方便定位）。
 //! - 重名检测在 [`bin/agentos-kernel.rs`] 调用，冲突则 panic 退出。
 //!
-//! ## G10 统一 DSL（2026-08-15）
+//! ## G10 统一 DSL（2026-08-15 定型，2026-08-25 单轨化）
 //!
-//! YAML 侧新增新 DSL 形态（条件永远 `when`、目标永远 `then`、缺省顺序推进）：
+//! DSL 唯一形态（条件永远 `when`、目标永远 `then`、缺省顺序推进）：
 //! - 转移写在 `next:` 列表：`- when: "expr"` + `then: <目标>`，目标为
 //!   `end` / `loop` / step id（step 级）/ 循环体 id；`set:` 可附带 state 写入。
-//! - 循环体循环条件：`while: "expr"`（与 `loop_config` 兼容并存，任一开启即循环）。
-//! - 旧形态（`routes:` / `exit_routes:` 的 `{when, then:{next,set}}` 对象）兼容解析。
+//! - 循环体循环条件：`while: "expr"`（存在即循环模式；迭代上限由 stop_check
+//!   按 Agent 配置 max_iterations 兜底，不在管道 DSL 表达）。
+//! - 旧形态（`loop_config:` / `routes:` / `exit_routes:` / `then: {next,set}`
+//!   对象）已退役：`*File` 结构 deny_unknown_fields，旧键加载即报错。
 //!
-//! 解析分两层：`*File` 结构（YAML 直译，承载两种形态）→ 归一为内部
+//! 解析分两层：`*File` 结构（YAML 直译，deny 未知键）→ 归一为内部
 //! [`PipelineConfig`]（[`PipelineFile::to_internal`]：`next` 的 `then` 字符串在
 //! 归一阶段解析为 [`RouteNext`]——body/step 目标全集在本文件内即可判定，未知目标
 //! 在加载期报错，不静默）。
@@ -58,8 +60,6 @@ enum TransitionFile {
         #[serde(default)]
         set: HashMap<String, serde_json::Value>,
     },
-    /// 旧形态：`then` 为 `{next, set}` 对象（0.2 早期 routes/exit_routes 写法）。
-    Legacy(Route),
 }
 
 impl TransitionFile {
@@ -111,7 +111,6 @@ impl TransitionFile {
                 };
                 (when.unwrap_or_else(|| "True".to_string()), next, set)
             }
-            TransitionFile::Legacy(route) => return Ok(route),
         };
         Ok(Route {
             when,
@@ -122,6 +121,7 @@ impl TransitionFile {
 
 /// 管道 YAML 文件形态（`*File` 结构直接对应 YAML 书写，归一后才进引擎类型）。
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct PipelineFile {
     name: String,
     #[serde(default)]
@@ -149,21 +149,17 @@ impl PipelineFile {
 
 /// 循环体 YAML 形态。
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct LoopBodyFile {
     id: String,
     #[serde(default)]
     steps: Vec<StepFile>,
-    #[serde(default)]
-    loop_config: Option<LoopConfig>,
-    /// 新 DSL：循环体循环继续条件（YAML 键 `while`）。
+    /// DSL：循环体循环继续条件（YAML 键 `while`）。
     #[serde(default, rename = "while")]
     while_cond: Option<String>,
-    /// 新 DSL：循环体出口转移（目标 = end / 循环体 id）。
+    /// DSL：循环体出口转移（目标 = end / 循环体 id）。
     #[serde(default)]
     next: Vec<TransitionFile>,
-    /// 旧形态兼容：循环体出口转移对象形态。
-    #[serde(default)]
-    exit_routes: Vec<Route>,
     #[serde(default)]
     run_on_error: bool,
 }
@@ -175,19 +171,10 @@ impl LoopBodyFile {
         let local_step_ids: HashSet<String> = self.steps.iter().map(|s| s.id.clone()).collect();
         let location = format!("循环体 '{}'", self.id);
 
-        let mut next_routes: Vec<Route> =
-            Vec::with_capacity(self.next.len() + self.exit_routes.len());
         // 循环体级转移：目标只接受 end / 循环体 id（step 级转移才接受 step id）
+        let mut next_routes = Vec::with_capacity(self.next.len());
         for t in self.next {
             next_routes.push(t.into_route(body_ids, None, &location)?);
-        }
-        // 旧形态 exit_routes 与新形态 next 并存时以 next 为准（warn 提示）
-        if !self.exit_routes.is_empty() {
-            if !next_routes.is_empty() {
-                tracing::warn!("{location}: 同时声明 next 与 exit_routes，以 next 为准");
-            } else {
-                next_routes = self.exit_routes;
-            }
         }
 
         let mut steps = Vec::with_capacity(self.steps.len());
@@ -197,7 +184,6 @@ impl LoopBodyFile {
         Ok(LoopBody {
             id: self.id,
             steps,
-            loop_config: self.loop_config,
             while_cond: self.while_cond,
             exit_routes: next_routes,
             run_on_error: self.run_on_error,
@@ -207,6 +193,7 @@ impl LoopBodyFile {
 
 /// step YAML 形态。
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct StepFile {
     id: String,
     #[serde(default)]
@@ -215,12 +202,10 @@ struct StepFile {
     when: Option<String>,
     #[serde(default)]
     context: HashMap<String, serde_json::Value>,
-    /// 新 DSL：出口转移（目标 = end / loop / 本循环体内 step id / 循环体 id）。
+    /// DSL：出口转移（目标 = end / loop / 本循环体内 step id / 循环体 id）。
     #[serde(default)]
     next: Vec<TransitionFile>,
-    /// 旧形态兼容：出口转移对象形态。
-    #[serde(default)]
-    routes: Vec<Route>,
+    /// step 级循环（组合节点自带循环，如批量处理）。
     #[serde(default)]
     loop_config: Option<LoopConfig>,
 }
@@ -234,16 +219,9 @@ impl StepFile {
         body_location: &str,
     ) -> Result<PipelineStep, PipelineLoadError> {
         let location = format!("{body_location} / step '{}'", self.id);
-        let mut next_routes: Vec<Route> = Vec::with_capacity(self.next.len() + self.routes.len());
+        let mut next_routes: Vec<Route> = Vec::with_capacity(self.next.len());
         for t in self.next {
             next_routes.push(t.into_route(body_ids, Some(local_step_ids), &location)?);
-        }
-        if !self.routes.is_empty() {
-            if !next_routes.is_empty() {
-                tracing::warn!("{location}: 同时声明 next 与 routes，以 next 为准");
-            } else {
-                next_routes = self.routes;
-            }
         }
         Ok(PipelineStep {
             id: self.id,
@@ -333,13 +311,21 @@ pub fn load_step_library(config_root: &Path) -> Result<StepLibrary, PipelineLoad
                 continue;
             }
         };
-        let step: PipelineStep = match serde_yaml::from_str(&raw) {
+        // 库文件走与管道 step 同源的 File 形态（DSL `next:` 才能解析）；库的
+        // 消费方上下文未知，转移目标只接受 end/loop（step/循环体 id 目标无法
+        // 在库加载期校验，fail-closed 报错，需要跨体转移请写在管道配置里）
+        let file: StepFile = match serde_yaml::from_str(&raw) {
             Ok(s) => s,
             Err(e) => {
                 // 解析失败：归并到 Err 列表（致命，让启动期暴露坏配置）
                 return Err(PipelineLoadError::ParseYaml(path, e.to_string()));
             }
         };
+        let empty: HashSet<String> = HashSet::new();
+        let location = format!("公共 step 库 '{}'", file.id);
+        let step: PipelineStep = file
+            .to_internal(&empty, &empty, &location)
+            .map_err(|e| e.with_path(path.clone()))?;
         if library.steps.contains_key(&step.id) {
             tracing::warn!(
                 "Step id '{}' in {} already exists in library, overwriting (deduplication recommended)",
@@ -501,9 +487,7 @@ loop_bodies:
         steps:
           - env_resolver
   - id: main
-    loop_config:
-      enabled: true
-      max_iterations: 5
+    while: "True"
     steps:
       - id: prepare
         steps:
@@ -518,15 +502,10 @@ loop_bodies:
         assert_eq!(cfg.name, "test_pipeline");
         assert_eq!(cfg.loop_bodies.len(), 2);
         assert_eq!(cfg.loop_bodies[0].id, "init");
-        assert!(!cfg.loop_bodies[0]
-            .loop_config
-            .as_ref()
-            .map(|c| c.enabled)
-            .unwrap_or(false));
+        assert!(cfg.loop_bodies[0].while_cond.is_none());
         let main = &cfg.loop_bodies[1];
         assert_eq!(main.id, "main");
-        assert!(main.loop_config.as_ref().unwrap().enabled);
-        assert_eq!(main.loop_config.as_ref().unwrap().max_iterations, 5);
+        assert_eq!(main.while_cond.as_deref(), Some("True"));
         assert_eq!(main.steps.len(), 1);
         assert_eq!(main.steps[0].id, "prepare");
         assert_eq!(
@@ -626,7 +605,6 @@ loop_bodies:
             loop_bodies: vec![LoopBody {
                 id: "main".into(),
                 steps,
-                loop_config: None,
                 while_cond: None,
                 exit_routes: vec![],
                 run_on_error: false,
@@ -666,7 +644,6 @@ loop_bodies:
                 LoopBody {
                     id: "main".into(),
                     steps: vec![],
-                    loop_config: None,
                     while_cond: None,
                     exit_routes: vec![],
                     run_on_error: false,
@@ -674,7 +651,6 @@ loop_bodies:
                 LoopBody {
                     id: "main".into(),
                     steps: vec![],
-                    loop_config: None,
                     while_cond: None,
                     exit_routes: vec![],
                     run_on_error: false,
@@ -740,7 +716,6 @@ loop_bodies:
             loop_bodies: vec![LoopBody {
                 id: "init".into(),
                 steps: vec![],
-                loop_config: None,
                 while_cond: None,
                 exit_routes: vec![Route {
                     when: "True".into(),
@@ -923,12 +898,14 @@ loop_bodies:
             "bodies: {:?}",
             cfg.loop_bodies.iter().map(|b| &b.id).collect::<Vec<_>>()
         );
-        // main / post：新 DSL next 归一为 routes（3 条：loop + loop + end）
+        // main / post：DSL next 归一为 routes（3 条：loop + loop + end）
         let main = cfg
             .loop_bodies
             .iter()
             .find(|b| b.id == "main")
             .expect("main");
+        // 单轨化后 main 循环模式唯一入口 = while
+        assert_eq!(main.while_cond.as_deref(), Some("True"));
         let post = main
             .steps
             .iter()
@@ -957,32 +934,40 @@ loop_bodies:
         );
     }
 
-    /// G10 统一 DSL：新旧形态共存——next 优先，routes/exit_routes 兼容。
+    /// 单轨化后旧形态 fail-closed：loop_config / exit_routes / routes /
+    /// then 对象形态一律加载报错（deny_unknown_fields + then 只收字符串）。
     #[test]
-    fn test_g10_legacy_routes_still_parse() {
-        let yaml = r#"
-name: legacy
-loop_bodies:
-  - id: main
-    exit_routes:
-      - when: "True"
-        then:
-          next: end
-    steps:
-      - id: core
-        steps: []
-        routes:
-          - when: "True"
-            then:
-              next: loop
-"#;
-        let config: PipelineConfig = serde_yaml::from_str(yaml).unwrap();
-        assert_eq!(config.loop_bodies[0].exit_routes.len(), 1);
-        assert_eq!(config.loop_bodies[0].steps[0].routes.len(), 1);
-        assert_eq!(
-            config.loop_bodies[0].steps[0].routes[0].then.next,
-            RouteNext::Loop
-        );
+    fn test_g10_legacy_forms_rejected() {
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path();
+        fs::create_dir_all(root.join("pipelines")).unwrap();
+        for (name, bad) in [
+            (
+                "loop_config",
+                "name: p\nloop_bodies:\n  - id: main\n    loop_config:\n      enabled: true\n    steps: []\n",
+            ),
+            (
+                "exit_routes",
+                "name: p\nloop_bodies:\n  - id: main\n    exit_routes:\n      - when: \"True\"\n        then:\n          next: end\n    steps: []\n",
+            ),
+            (
+                "routes",
+                "name: p\nloop_bodies:\n  - id: main\n    steps:\n      - id: core\n        steps: []\n        routes:\n          - when: \"True\"\n            then:\n              next: loop\n",
+            ),
+            (
+                "then_object",
+                "name: p\nloop_bodies:\n  - id: main\n    steps:\n      - id: core\n        steps: []\n        next:\n          - when: \"True\"\n            then:\n              next: end\n",
+            ),
+        ] {
+            fs::write(root.join("pipelines/autonomous.yaml"), bad).unwrap();
+            let err = load_pipeline_config(root)
+                .err()
+                .unwrap_or_else(|| panic!("{name} 旧形态应加载报错"));
+            assert!(
+                matches!(err, PipelineLoadError::ParseYaml(_, _)),
+                "{name}: 期望 ParseYaml，实际 {err:?}"
+            );
+        }
     }
 
     /// 端到端：用真实 autonomous.yaml + doc_extract.yaml 形态构造配置，
@@ -1000,9 +985,7 @@ loop_bodies:
 name: autonomous
 loop_bodies:
   - id: main
-    loop_config:
-      enabled: true
-      max_iterations: -1
+    while: "True"
     steps:
       - id: prepare
         steps:
@@ -1022,12 +1005,11 @@ steps:
   - llm_core
 context:
   task: "提取文档关键信息"
-routes:
+next:
   - when: "extract_result == ''"
-    then:
-      next: end
-      set:
-        status: failed
+    then: end
+    set:
+      status: failed
 "#,
         )
         .unwrap();
@@ -1036,8 +1018,17 @@ routes:
         assert_eq!(cfg.name, "autonomous");
         assert_eq!(cfg.loop_bodies.len(), 1);
         assert_eq!(cfg.loop_bodies[0].id, "main");
+        assert_eq!(cfg.loop_bodies[0].while_cond.as_deref(), Some("True"));
         assert_eq!(cfg.loop_bodies[0].steps.len(), 1);
         assert_eq!(cfg.loop_bodies[0].steps[0].id, "prepare");
+
+        let lib = load_step_library(root).expect("step library");
+        let doc = lib
+            .steps
+            .get("doc_extract")
+            .expect("库条目应加载（next: 形态）");
+        assert_eq!(doc.routes.len(), 1);
+        assert_eq!(doc.routes[0].then.next, RouteNext::End);
 
         let lib = load_step_library(root).expect("step library");
         assert!(lib.steps.contains_key("doc_extract"));

@@ -310,9 +310,9 @@ impl PipelineExecutor {
         ignore_ended: bool,
     ) -> Result<i32, EngineError> {
         let mut iteration: i32 = 0;
-        // G10：循环模式 = loop_config.enabled 或 while_cond 任一开启（编译期已归一）
+        // G10 单轨：循环模式 = while_cond 存在（编译期已归一）；迭代上限不在
+        // 引擎层表达——生产阀门是 stop_check 按 Agent 配置 max_iterations 兜底
         let looping = body.looping;
-        let max_iters = body.max_iterations;
         if looping {
             loop {
                 if truthy_flag(state, "suspended") {
@@ -321,7 +321,7 @@ impl PipelineExecutor {
                 if !ignore_ended && truthy_flag(state, "ended") {
                     break;
                 }
-                // G10 新 DSL：while 循环继续条件（同一 eval_condition 求值器，
+                // G10 DSL：while 循环继续条件（同一 eval_condition 求值器，
                 // 已编译 AST 零解析）；假则退出循环（正常推进后续循环体）。
                 if let Some(cond) = &body.while_cond {
                     if !eval_expr(cond, state) {
@@ -330,9 +330,6 @@ impl PipelineExecutor {
                     }
                 }
                 iteration += 1;
-                if max_iters > 0 && iteration > max_iters {
-                    break;
-                }
                 // 统一配置加载方案 TDD-7：每轮迭代开头重读 agent 配置（per-iteration 热加载）。
                 // 改 config/agents/<id>.yaml 后，正在跑的任务下一轮迭代立即用新配置——
                 // 实现"边跑边调"（如纠正走偏的 agent / 补漏工具 / 调 max_iterations）。
@@ -1472,8 +1469,8 @@ mod tests {
 
     use agentos_core::traits::StorageBackend;
     use agentos_core::types::{
-        Branch, CheckpointConfig, LoopConfig, MessageRecord, RunRecord, RunStatus,
-        ToolExecutionResult, TraceEntry,
+        Branch, CheckpointConfig, MessageRecord, RunRecord, RunStatus, ToolExecutionResult,
+        TraceEntry,
     };
 
     // ── 测试基础设施 ──────────────────────────────────────────
@@ -1844,7 +1841,6 @@ mod tests {
                     routes: vec![],
                     loop_config: None,
                 }],
-                loop_config: None,
                 while_cond: None,
                 exit_routes: vec![],
                 run_on_error: false,
@@ -2008,7 +2004,6 @@ mod tests {
                     atomic_step("s3", "c"),
                     atomic_step("s4", "d"),
                 ],
-                loop_config: None,
                 while_cond: None,
                 exit_routes: vec![],
                 run_on_error: false,
@@ -2066,11 +2061,7 @@ mod tests {
                     atomic_step("s2", "b"),
                     atomic_step("s3", "c"),
                 ],
-                loop_config: Some(LoopConfig {
-                    enabled: true,
-                    max_iterations: -1,
-                }),
-                while_cond: None,
+                while_cond: Some("True".into()),
                 exit_routes: vec![],
                 run_on_error: false,
             }],
@@ -2207,8 +2198,6 @@ mod tests {
 
                 steps: vec![atomic_step("s1", "echo")],
 
-                loop_config: None,
-
                 while_cond: None,
                 exit_routes: vec![],
 
@@ -2262,8 +2251,6 @@ mod tests {
                     loop_config: None,
                 }],
 
-                loop_config: None,
-
                 while_cond: None,
                 exit_routes: vec![],
 
@@ -2315,8 +2302,6 @@ mod tests {
                     atomic_step("child", "a"),
                 ],
 
-                loop_config: None,
-
                 while_cond: None,
                 exit_routes: vec![],
 
@@ -2348,8 +2333,6 @@ mod tests {
                 id: "main".into(),
 
                 steps: vec![atomic_step("caller", "shared_step")],
-
-                loop_config: None,
 
                 while_cond: None,
                 exit_routes: vec![],
@@ -2385,11 +2368,7 @@ mod tests {
             loop_bodies: vec![LoopBody {
                 id: "main".into(),
                 steps: vec![atomic_step("body", "counter_plugin")],
-                loop_config: Some(agentos_core::types::LoopConfig {
-                    enabled: true,
-                    max_iterations: -1, // 无限，靠 ended 退出
-                }),
-                while_cond: None,
+                while_cond: Some("True".into()), // 恒真循环，靠 ended 退出
                 exit_routes: vec![],
                 run_on_error: false,
             }],
@@ -2410,50 +2389,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_loop_max_iterations_safety() {
-        // max_iterations=2 安全阀生效；插件从不设 ended，应跑满 2 轮就停
-        let counter = Arc::new(AtomicUsize::new(0));
-        let executor = make_executor(
-            Arc::new(CountingInvoker {
-                counter: counter.clone(),
-                stop_after: 0, // 永不 set ended
-                set_suspended_after: 0,
-            }) as Arc<dyn PluginInvoker>,
-            &["p"],
-        );
-        let config = PipelineConfig {
-            name: "loop_cap".into(),
-            loop_bodies: vec![LoopBody {
-                id: "main".into(),
-                steps: vec![atomic_step("body", "p")],
-                loop_config: Some(agentos_core::types::LoopConfig {
-                    enabled: true,
-                    max_iterations: 2,
-                }),
-                while_cond: None,
-                exit_routes: vec![],
-                run_on_error: false,
-            }],
-            checkpoint: Default::default(),
-        };
-        let _ = executor
-            .run_compiled(
-                &compile_pipeline(&config, &StepLibrary::default(), &executor.plugin_ids)
-                    .expect("compile should succeed"),
-                json!({}),
-            )
-            .await
-            .unwrap();
-        assert_eq!(counter.load(Ordering::SeqCst), 2);
-    }
-
-    #[tokio::test]
     async fn test_routes() {
         // routes when 条件匹配后 set 字段 + ended
         let fixture = Fixture::build(&[]);
         let config = PipelineConfig::single_body(
             "routes",
-            LoopConfig::default(),
+            None,
             vec![PipelineStep {
                 id: "router".into(),
                 steps: vec![], // 不调任何插件
@@ -2501,8 +2442,6 @@ mod tests {
                     loop_config: None,
                 }],
 
-                loop_config: None,
-
                 while_cond: None,
                 exit_routes: vec![],
 
@@ -2529,8 +2468,6 @@ mod tests {
                     atomic_step("s1", "ghost_step"), // 既不是 step 也不是已知插件
                     atomic_step("s2", "ghost_plugin"),
                 ],
-
-                loop_config: None,
 
                 while_cond: None,
                 exit_routes: vec![],
@@ -2569,7 +2506,7 @@ mod tests {
         context.insert("injected".to_string(), json!("agent={{state.agent_id}}"));
         let config = PipelineConfig::single_body(
             "ctx",
-            LoopConfig::default(),
+            None,
             vec![PipelineStep {
                 id: "ctx_step".into(),
                 steps: vec![],
@@ -2632,8 +2569,6 @@ mod tests {
                     loop_config: None,
                 }],
 
-                loop_config: None,
-
                 while_cond: None,
                 exit_routes: vec![],
 
@@ -2686,8 +2621,6 @@ mod tests {
                     loop_config: None,
                 }],
 
-                loop_config: None,
-
                 while_cond: None,
                 exit_routes: vec![],
 
@@ -2720,11 +2653,7 @@ mod tests {
             loop_bodies: vec![LoopBody {
                 id: "main".into(),
                 steps: vec![atomic_step("body", "p")],
-                loop_config: Some(agentos_core::types::LoopConfig {
-                    enabled: true,
-                    max_iterations: 10,
-                }),
-                while_cond: None,
+                while_cond: Some("True".into()),
                 exit_routes: vec![],
                 run_on_error: false,
             }],
@@ -2770,8 +2699,6 @@ mod tests {
                     loop_config: None,
                 }],
 
-                loop_config: None,
-
                 while_cond: None,
                 exit_routes: vec![],
 
@@ -2800,8 +2727,6 @@ mod tests {
                 id: "main".into(),
 
                 steps: vec![],
-
-                loop_config: None,
 
                 while_cond: None,
                 exit_routes: vec![],
@@ -2852,8 +2777,6 @@ mod tests {
                     },
                 ],
 
-                loop_config: None,
-
                 while_cond: None,
                 exit_routes: vec![],
 
@@ -2902,7 +2825,6 @@ mod tests {
             loop_bodies: vec![LoopBody {
                 id: "main".into(),
                 steps: vec![jumping],
-                loop_config: None,
                 while_cond: None,
                 exit_routes: vec![],
                 run_on_error: false,
@@ -2957,7 +2879,6 @@ mod tests {
                         max_iterations: -1,
                     }),
                 }],
-                loop_config: None,
                 while_cond: None,
                 exit_routes: vec![],
                 run_on_error: false,
@@ -3013,11 +2934,7 @@ mod tests {
             loop_bodies: vec![LoopBody {
                 id: "main".into(),
                 steps: vec![atomic_step("s1", "noop")],
-                loop_config: Some(agentos_core::types::LoopConfig {
-                    enabled: true,
-                    max_iterations: 5,
-                }),
-                while_cond: None,
+                while_cond: Some("True".into()),
                 exit_routes: vec![],
                 run_on_error: false,
             }],
@@ -3065,11 +2982,7 @@ mod tests {
             loop_bodies: vec![LoopBody {
                 id: "main".into(),
                 steps: vec![atomic_step("s1", "noop")],
-                loop_config: Some(agentos_core::types::LoopConfig {
-                    enabled: true,
-                    max_iterations: 5,
-                }),
-                while_cond: None,
+                while_cond: Some("True".into()),
                 exit_routes: vec![],
                 run_on_error: false,
             }],

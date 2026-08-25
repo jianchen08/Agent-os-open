@@ -16,9 +16,9 @@ use std::sync::{Arc, Mutex};
 
 use agentos_core::traits::{PluginInvoker, StorageBackend};
 use agentos_core::types::{
-    Branch, LoopBody, LoopConfig, MessageRecord, PipelineConfig, PipelineStep, PluginContext,
-    PluginError, PluginResult, Route, RouteAction, RouteNext, RunRecord, RunStatus, StepLibrary,
-    TenantContext, ToolExecutionResult, TraceEntry,
+    Branch, LoopBody, MessageRecord, PipelineConfig, PipelineStep, PluginContext, PluginError,
+    PluginResult, Route, RouteAction, RouteNext, RunRecord, RunStatus, StepLibrary, TenantContext,
+    ToolExecutionResult, TraceEntry,
 };
 use agentos_engine::compiler::compile_pipeline;
 use agentos_engine::PipelineExecutor;
@@ -261,7 +261,6 @@ fn make_three_body_config(exit_routes: Vec<Route>) -> PipelineConfig {
                     routes: vec![],
                     loop_config: None,
                 }],
-                loop_config: None,
                 while_cond: None,
                 exit_routes,
                 run_on_error: false,
@@ -276,11 +275,7 @@ fn make_three_body_config(exit_routes: Vec<Route>) -> PipelineConfig {
                     routes: vec![],
                     loop_config: None,
                 }],
-                loop_config: Some(LoopConfig {
-                    enabled: true,
-                    max_iterations: 5,
-                }),
-                while_cond: None,
+                while_cond: Some("True".into()),
                 exit_routes: vec![],
                 run_on_error: false,
             },
@@ -294,7 +289,6 @@ fn make_three_body_config(exit_routes: Vec<Route>) -> PipelineConfig {
                     routes: vec![],
                     loop_config: None,
                 }],
-                loop_config: None,
                 while_cond: None,
                 exit_routes: vec![],
                 run_on_error: true,

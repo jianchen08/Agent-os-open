@@ -123,7 +123,6 @@ fn minimal_config() -> agentos_core::types::PipelineConfig {
                 routes: vec![],
                 loop_config: None,
             }],
-            loop_config: None,
             while_cond: None,
             exit_routes: vec![],
             run_on_error: false,

@@ -81,11 +81,9 @@ impl CompiledPipeline {
 #[derive(Debug, Clone)]
 pub struct CompiledBody {
     pub id: String,
-    /// 是否循环（`loop_config.enabled` 或 `while_cond` 任一开启）。
+    /// 是否循环（`while_cond` 存在即循环模式）。
     pub looping: bool,
-    /// 迭代安全阀（-1 = 无限）。
-    pub max_iterations: i32,
-    /// 循环继续条件（G10 新 DSL `while`；None = 无条件）。
+    /// 循环继续条件（G10 DSL `while`；None = 无条件）。
     pub while_cond: Option<Expr>,
     /// 本循环体直接定义的步骤（已编译）。
     pub steps: Vec<CompiledStep>,
@@ -371,18 +369,28 @@ impl Compiler<'_> {
         pool_map: &HashMap<&str, usize>,
     ) -> Result<CompiledBody, CompileError> {
         let location = format!("循环体 '{}'", body.id);
-        let while_cond = compile_when(body.while_cond.as_deref(), &location)?;
-        let looping = body
-            .loop_config
-            .as_ref()
-            .map(|c| c.enabled)
-            .unwrap_or(false)
-            || while_cond.is_some();
-        let max_iterations = body
-            .loop_config
-            .as_ref()
-            .map(|c| c.max_iterations)
-            .unwrap_or(-1);
+        // while 条件不能走 compile_when 的 True→None 归一：while 语义里
+        // None = 未声明循环（单次执行），恒真循环必须保留字面量使 looping 成立。
+        // 空串/字面量 True → Literal(true)（恒真循环，靠 ended/suspended 退出）。
+        let while_cond = match body.while_cond.as_deref() {
+            None => None,
+            Some(c) => match parse_condition(c) {
+                Ok(Some(Expr::Literal(v))) if v.as_bool() == Some(true) => {
+                    Some(Expr::Literal(serde_json::Value::Bool(true)))
+                }
+                Ok(Some(other)) => Some(other),
+                Ok(None) => Some(Expr::Literal(serde_json::Value::Bool(true))),
+                Err(msg) => {
+                    return Err(CompileError {
+                        location,
+                        message: format!("while 表达式语法错误: {msg}"),
+                    })
+                }
+            },
+        };
+        // G10 单轨：循环模式唯一入口 = while 条件存在（迭代上限由 stop_check 按
+        // Agent 配置 max_iterations 兜底，不在管道 DSL 表达）
+        let looping = while_cond.is_some();
         let mut steps = Vec::with_capacity(body.steps.len());
         let mut step_index = HashMap::new();
         for step in &body.steps {
@@ -393,7 +401,6 @@ impl Compiler<'_> {
         Ok(CompiledBody {
             id: body.id.clone(),
             looping,
-            max_iterations,
             while_cond,
             steps,
             step_index,
@@ -556,7 +563,6 @@ mod tests {
             loop_bodies: vec![LoopBody {
                 id: "main".into(),
                 steps,
-                loop_config: None,
                 while_cond: None,
                 exit_routes: vec![],
                 run_on_error: false,
@@ -744,7 +750,6 @@ mod tests {
         let mut body = LoopBody {
             id: "main".into(),
             steps: vec![make_step("s", vec![StepItem::Bare("alpha".into())])],
-            loop_config: None,
             while_cond: Some("state.n < 3".into()),
             exit_routes: vec![],
             run_on_error: false,
@@ -847,7 +852,6 @@ mod tests {
         let mut body = LoopBody {
             id: "main".into(),
             steps: vec![make_step("s", vec![StepItem::Bare("alpha".into())])],
-            loop_config: None,
             while_cond: None,
             exit_routes: vec![Route {
                 when: "True".into(),
@@ -920,7 +924,6 @@ mod tests {
                 LoopBody {
                     id: "main".into(),
                     steps: vec![jumper, make_step("t", vec![])],
-                    loop_config: None,
                     while_cond: None,
                     exit_routes: vec![],
                     run_on_error: false,
@@ -928,7 +931,6 @@ mod tests {
                 LoopBody {
                     id: "fallback".into(),
                     steps: vec![],
-                    loop_config: None,
                     while_cond: None,
                     exit_routes: vec![],
                     run_on_error: false,
