@@ -17,6 +17,7 @@ boot 时净化 memory 工具，LLM 报"工具未注册"。单测/插件侧直连
 
 退出码：0=全部一致，1=有漂移。
 """
+
 from __future__ import annotations
 
 import argparse
@@ -42,9 +43,7 @@ def _load_impl_schema(plugin_dir: Path, entry: str) -> dict:
     # 尝试 server.py：SDK 注册面
     server_py = plugin_dir / "server.py"
     if server_py.exists():
-        spec = importlib.util.spec_from_file_location(
-            f"check_reg_{plugin_dir.name}_server", server_py
-        )
+        spec = importlib.util.spec_from_file_location(f"check_reg_{plugin_dir.name}_server", server_py)
         if spec and spec.loader:
             mod = importlib.util.module_from_spec(spec)
             sys.modules[spec.name] = mod
@@ -61,9 +60,7 @@ def _load_impl_schema(plugin_dir: Path, entry: str) -> dict:
     # 回退 tool.py：get_tool_definition()
     tool_py = plugin_dir / "tool.py"
     if tool_py.exists():
-        spec = importlib.util.spec_from_file_location(
-            f"check_{plugin_dir.stem}_tool", tool_py
-        )
+        spec = importlib.util.spec_from_file_location(f"check_{plugin_dir.stem}_tool", tool_py)
         if spec and spec.loader:
             mod = importlib.util.module_from_spec(spec)
             sys.modules[spec.name] = mod
@@ -123,13 +120,17 @@ def main() -> int:
         ]
 
     if args.validate_all:
-        import os, urllib.request  # noqa: PLC0415
+        import os
+        import urllib.request  # noqa: PLC0415
+
         base = os.environ.get("AGENTOS_KERNEL_URL", "http://127.0.0.1:9100")
         token = os.environ.get("AGENTOS_TOKEN", "")
         if not token:
             req = urllib.request.Request(
                 f"{base}/api/v1/auth/login",
-                data=json.dumps({"username": "admin", "password": os.environ.get("AGENTOS_ADMIN_PASS", "admin12345")}).encode(),
+                data=json.dumps(
+                    {"username": "admin", "password": os.environ.get("AGENTOS_ADMIN_PASS", "admin12345")}
+                ).encode(),
                 headers={"Content-Type": "application/json"},
             )
             with urllib.request.urlopen(req) as resp:

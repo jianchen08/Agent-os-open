@@ -1093,4 +1093,3 @@ def skins_to_plugin_themes(base_dir: str | Path | None = None) -> list[dict[str,
             }
         themes.append(entry)
     return themes
-

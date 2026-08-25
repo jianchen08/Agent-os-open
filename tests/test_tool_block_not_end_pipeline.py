@@ -53,4 +53,3 @@ class TestNoEndRouteForToolBlock:
         cfg = yaml.safe_load(active.read_text(encoding="utf-8"))
         assert "loop_bodies" in cfg, "autonomous.yaml 必须是 G10 loop_bodies 格式"
         assert "input_routes" not in cfg, "autonomous.yaml 不得含 0.1 input_routes"
-

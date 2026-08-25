@@ -144,8 +144,7 @@ def main() -> int:
     )
     if failed < baseline:
         print(
-            "[rust-baseline] 💡 失败数已低于基线，可运行 "
-            "`python scripts/check_rust_test_baseline.py --init` 收紧门禁",
+            "[rust-baseline] 💡 失败数已低于基线，可运行 `python scripts/check_rust_test_baseline.py --init` 收紧门禁",
         )
     return 0
 

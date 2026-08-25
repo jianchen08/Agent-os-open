@@ -45,9 +45,7 @@ def _make_watchdog(timeout: float) -> tuple[StreamHardTimeout, list[str]]:
             fired.append("aclose")
 
     loop = asyncio.new_event_loop()
-    wd = StreamHardTimeout(
-        FakeStream(), loop, timeout, on_fire=lambda: fired.append("on_fire")
-    )
+    wd = StreamHardTimeout(FakeStream(), loop, timeout, on_fire=lambda: fired.append("on_fire"))
     return wd, fired
 
 

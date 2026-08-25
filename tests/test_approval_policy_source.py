@@ -229,4 +229,3 @@ def _make_guard_with_policy(docker_available=False, force_host=False, tools=None
         loader = IsolationPolicyLoader()
     guard._decider = IsolationDecider(policy_loader=loader)
     return guard
-

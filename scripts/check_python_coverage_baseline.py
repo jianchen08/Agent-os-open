@@ -128,10 +128,7 @@ def main() -> int:
         f"[python-cov] 🔧 基线自动棘轮: {baseline:.2f}% → {ratchet_to:.2f}%"
         f"（实测 {pct:.2f} 向上取整到下一整数；下轮需 ≥ {ratchet_to:.2f} 才绿）。"
     )
-    print(
-        "[python-cov] 基线文件已就地更新，随本批改动 commit 留归因"
-        "（CI job 内的写入随 job 丢弃，以仓库提交为准）。"
-    )
+    print("[python-cov] 基线文件已就地更新，随本批改动 commit 留归因（CI job 内的写入随 job 丢弃，以仓库提交为准）。")
     return 0
 
 

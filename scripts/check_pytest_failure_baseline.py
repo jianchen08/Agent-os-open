@@ -102,7 +102,7 @@ def main() -> int:
     baseline = read_baseline(ns.lane)
     if baseline is None:
         print(
-            f"❌ 基线文件缺少 {ns.lane}_failed 条目（{BASELINE_FILE}）。" f"首次接入请用 --init 写入实测值。",
+            f"❌ 基线文件缺少 {ns.lane}_failed 条目（{BASELINE_FILE}）。首次接入请用 --init 写入实测值。",
             file=sys.stderr,
         )
         return 1

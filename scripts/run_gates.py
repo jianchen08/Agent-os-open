@@ -585,7 +585,7 @@ def run_selected(gates: list[Gate], max_active: int) -> int:
         for gate, (_, exit_code, _, seconds) in blocking:
             disposition = "" if not gate.allow_failure else "（观察型）"
             print(
-                f"  - {gate.id}{disposition}: {gate.label} " f"(exit={exit_code}, {seconds:.1f}s)",
+                f"  - {gate.id}{disposition}: {gate.label} (exit={exit_code}, {seconds:.1f}s)",
                 file=sys.stderr,
             )
         return 1

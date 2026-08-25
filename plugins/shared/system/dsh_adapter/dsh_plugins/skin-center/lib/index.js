@@ -5578,7 +5578,7 @@ const WE_SCENE_PLAYER_HTML = `<!DOCTYPE html>
   const modelGpuCache = new Map();
   function getGpuMesh(mesh) {
     if (modelGpuCache.has(mesh)) return modelGpuCache.get(mesh);
-    
+
     function b64ToF32(b64) {
       const bin = atob(b64);
       const bytes = new Uint8Array(bin.length);
@@ -5638,7 +5638,7 @@ const WE_SCENE_PLAYER_HTML = `<!DOCTYPE html>
     const lifeMin = system.lifeMin || 3;
     const lifeMax = system.lifeMax || 5;
     const lifetime = lifeMin + Math.random() * (lifeMax - lifeMin);
-    
+
     // Position
     let x = 0, y = 0, vx = 0, vy = 0;
     if (system.type === 'meteor') {
@@ -5653,7 +5653,7 @@ const WE_SCENE_PLAYER_HTML = `<!DOCTYPE html>
       vx = (Math.random() - 0.5) * 25;
       vy = 10 + Math.random() * 20;
     }
-    
+
     const size = system.size || (15 + Math.random() * 20);
     activeParticles.push({
       system,

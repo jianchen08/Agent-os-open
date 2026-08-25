@@ -327,8 +327,7 @@ def main() -> int:
     for line in report:
         print(line)
     print(
-        f"[diff-cov] 改动行覆盖率 {pct:.2f}%"
-        f"（{measured - uncovered_total}/{measured} 行，阈值 {args.fail_under:g}%）"
+        f"[diff-cov] 改动行覆盖率 {pct:.2f}%（{measured - uncovered_total}/{measured} 行，阈值 {args.fail_under:g}%）"
     )
     if pct < args.fail_under:
         print(

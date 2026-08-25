@@ -576,6 +576,11 @@ jobs:
         with:
           python-version: "3.11"
 
+      # ruff/mypy hooks 是 language: system（hook 仓库 github 拉取在部分
+      # 开发机不可达），本 job 钉版本装齐工具后再跑
+      - name: Install pinned lint tools
+        run: pip install ruff==0.15.20 mypy==2.1.0
+
       - name: Run pre-commit
         uses: pre-commit/action@2c7b3805fd2a0fd8c1884dcaebf91fc102a13ecd # v3.0.1
 
@@ -654,4 +659,3 @@ jobs:
               echo "::error::job result not success: $j"; exit 1; }
           done
           echo "All required jobs passed."
-

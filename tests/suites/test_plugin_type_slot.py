@@ -377,5 +377,3 @@ class TestIPluginRegisterTypes:
         slot = PluginTypeSlot()
         MyPlugin.register_types(slot)
         assert slot.get_constant("my_plugin", "version") == "1.0"
-
-

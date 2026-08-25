@@ -37,18 +37,14 @@ SKIP_PLUGIN_IDS = {"channel_api"}
 
 # 遍历时排除的目录（.venv 等重型目录不可进）
 EXCLUDE_DIRS = {"__pycache__", "node_modules"}
-EXCLUDE_DIR_PREFIXES = (".")
+EXCLUDE_DIR_PREFIXES = "."
 
 
 def iter_plugin_manifests() -> list[tuple[Path, dict]]:
     """返回 [(manifest_path, plugin_dict)]，按 manifest 路径排序保证确定性。"""
     manifests: list[tuple[Path, dict]] = []
     for root, dirs, files in os.walk(PLUGINS_DIR):
-        dirs[:] = [
-            d
-            for d in dirs
-            if d not in EXCLUDE_DIRS and not d.startswith(EXCLUDE_DIR_PREFIXES)
-        ]
+        dirs[:] = [d for d in dirs if d not in EXCLUDE_DIRS and not d.startswith(EXCLUDE_DIR_PREFIXES)]
         if "plugin.json" in files:
             p = Path(root) / "plugin.json"
             parsed = json.loads(p.read_text(encoding="utf-8"))
@@ -119,10 +115,7 @@ def collect() -> list[tuple[str, str, list[dict]]]:
         if not endpoints:
             continue
         groups[plugin_id] = (manifest.get("name") or "", list(endpoints))
-    return [
-        (plugin_id, name, eps)
-        for plugin_id, (name, eps) in sorted(groups.items(), key=lambda kv: kv[0])
-    ]
+    return [(plugin_id, name, eps) for plugin_id, (name, eps) in sorted(groups.items(), key=lambda kv: kv[0])]
 
 
 def main() -> int:

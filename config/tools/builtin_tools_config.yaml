@@ -207,7 +207,7 @@ tools:
   - merge
   - rollback
   - resource
-  - name: todo_write
+- name: todo_write
   description: TODO 清单管理：write(创建清单，传入字符串列表)、read(读取清单)、update(更新状态)、clear(清空)。
   category: task
   level: system

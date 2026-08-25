@@ -113,9 +113,7 @@ def drift_check() -> int:
         " diff 预览（+ 为新生成）：",
         file=sys.stderr,
     )
-    for line in difflib.unified_diff(
-        current.splitlines(), fresh.splitlines(), "repo", "regenerated", lineterm=""
-    ):
+    for line in difflib.unified_diff(current.splitlines(), fresh.splitlines(), "repo", "regenerated", lineterm=""):
         print(f"    {line}", file=sys.stderr)
     return 1
 

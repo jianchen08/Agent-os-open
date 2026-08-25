@@ -166,7 +166,7 @@ def main() -> int:
         return 0
 
     if test_changes:
-        print(f"[tdd-gate] ✅ 源码变更 {len(source_changes)} 个 + 测试变更 {len(test_changes)} 个，" "TDD 合规")
+        print(f"[tdd-gate] ✅ 源码变更 {len(source_changes)} 个 + 测试变更 {len(test_changes)} 个，TDD 合规")
         return 0
 
     # 有源码变更但零测试变更 → 检查是否声明 skip

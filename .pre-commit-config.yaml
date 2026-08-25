@@ -84,15 +84,20 @@ repos:
         name: 防止意外提交私钥
 
   # ============================================================
-  # 2. Ruff（lint + format）— Astral 官方
+  # 2. Ruff（lint + format）+ 3. mypy —— repo: local + language: system
+  # 工具取 PATH 上的 ruff/mypy（本机全局 ruff 0.15.20 与项目 uv 工具链
+  # 同版；mypy 本机/CI 均 2.1.0，插件域 2.2.0 由 plugins-mypy-baseline
+  # 门禁单独治理，此差一档为既定现状）。不依赖 github.com 拉取 hook
+  # 仓库——本机 git https 到 github 不通是既有环境约束；CI job 已补
+  # pip install 同版本。升级项目 ruff 时须同步 CI 安装版本与本机全局。
   # ============================================================
-  - repo: https://github.com/astral-sh/ruff-pre-commit
-    rev: v0.6.9
+  - repo: local
     hooks:
       # Lint 检查（先于 format）
       - id: ruff
         name: Ruff Lint
-        args: [--fix, --exit-non-zero-on-fix]
+        entry: ruff check --fix --exit-non-zero-on-fix
+        language: system
         types_or: [python, pyi]
         # 排除不需要 lint 的目录;tests/skills/agent-research 等老域是 0.1 遗留
         # (1273 个 N802/PLC2401/E402 风格项,治理归 plugins 域门禁与 baseline,
@@ -111,11 +116,14 @@ repos:
               hosts/.*|
               config/templates/.*|
               scripts/agent_prompt_viewer\.py|
+              docs/.*|
           )$
 
       # Format 格式化（在 lint 之后）
       - id: ruff-format
         name: Ruff Format
+        entry: ruff format
+        language: system
         types_or: [python, pyi]
         # 范围对齐 Ruff Lint(老域排除,见上)
         exclude: |
@@ -132,20 +140,14 @@ repos:
               hosts/.*|
               config/templates/.*|
               scripts/agent_prompt_viewer\.py|
-              mcp-servers/.*|
-              node_modules/.*
+              docs/.*|
           )$
 
-  # ============================================================
-  # 3. mypy（类型检查）
-  # ============================================================
-  - repo: https://github.com/pre-commit/mirrors-mypy
-    rev: v1.11.2
-    hooks:
       - id: mypy
         name: mypy 类型检查
         # 允许现有警告（不强制 0 错误），工具本身正常运行即可
-        args: [--config-file=pyproject.toml, --no-incremental]
+        entry: mypy --config-file=pyproject.toml --no-incremental
+        language: system
         files: \.py$
         # 实际检查范围：根目录 .py 脚本 + scripts/（src/ 已迁移至 plugins/）。
         # plugins/ 排除——插件 server.py 同名模块冲突(mypy duplicate module)，
@@ -166,6 +168,5 @@ repos:
               .*tests/.*|
               .*test_.*\.py$
           )$
-        additional_dependencies: []
         # 单个文件失败不影响其他
         require_serial: false
