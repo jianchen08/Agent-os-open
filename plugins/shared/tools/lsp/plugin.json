@@ -37,6 +37,34 @@
             "file_path",
             "line"
           ]
+        },
+        "output_schema": {
+          "type": "object",
+          "required": [
+            "locations",
+            "count"
+          ],
+          "properties": {
+            "locations": {
+              "type": "array",
+              "description": "定义位置列表（client 缺失时为空数组）",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "uri": {
+                    "type": "string"
+                  },
+                  "range": {
+                    "type": "object",
+                    "description": "LSP Range（start/end 行列）"
+                  }
+                }
+              }
+            },
+            "count": {
+              "type": "integer"
+            }
+          }
         }
       },
       {
@@ -67,6 +95,34 @@
             "file_path",
             "line"
           ]
+        },
+        "output_schema": {
+          "type": "object",
+          "required": [
+            "references",
+            "count"
+          ],
+          "properties": {
+            "references": {
+              "type": "array",
+              "description": "引用位置列表（client 缺失时为空数组）",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "uri": {
+                    "type": "string"
+                  },
+                  "range": {
+                    "type": "object",
+                    "description": "LSP Range（start/end 行列）"
+                  }
+                }
+              }
+            },
+            "count": {
+              "type": "integer"
+            }
+          }
         }
       },
       {
@@ -87,6 +143,47 @@
           "required": [
             "file_path"
           ]
+        },
+        "output_schema": {
+          "type": "object",
+          "required": [
+            "diagnostics",
+            "count"
+          ],
+          "properties": {
+            "diagnostics": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "range": {
+                    "type": "object"
+                  },
+                  "severity": {
+                    "type": "integer"
+                  },
+                  "code": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "source": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "message": {
+                    "type": "string"
+                  }
+                }
+              }
+            },
+            "count": {
+              "type": "integer"
+            }
+          }
         }
       },
       {
@@ -113,6 +210,30 @@
           "required": [
             "file_path"
           ]
+        },
+        "output_schema": {
+          "type": "object",
+          "required": [
+            "success",
+            "file_path",
+            "line",
+            "character"
+          ],
+          "properties": {
+            "success": {
+              "type": "boolean",
+              "description": "跳转是否成立（失败也走同形状）"
+            },
+            "file_path": {
+              "type": "string"
+            },
+            "line": {
+              "type": "integer"
+            },
+            "character": {
+              "type": "integer"
+            }
+          }
         }
       }
     ],

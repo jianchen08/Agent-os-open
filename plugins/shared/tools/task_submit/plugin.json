@@ -187,6 +187,47 @@
               }
             }
           ]
+        },
+        "output_schema": {
+          "type": "object",
+          "required": [
+            "task_id",
+            "title",
+            "status",
+            "message"
+          ],
+          "properties": {
+            "task_id": {
+              "type": "string"
+            },
+            "title": {
+              "type": "string"
+            },
+            "status": {
+              "type": "string",
+              "description": "running/submitted/active"
+            },
+            "message": {
+              "type": "string"
+            },
+            "target_id": {
+              "type": "string"
+            },
+            "pipeline_id": {
+              "type": "string"
+            },
+            "workspace": {
+              "type": "string"
+            },
+            "warning": {
+              "type": "string",
+              "description": "管道未创建降级"
+            },
+            "task_scope": {
+              "type": "string",
+              "description": "容器任务恒 container"
+            }
+          }
         }
       }
     ],

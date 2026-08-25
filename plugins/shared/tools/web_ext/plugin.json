@@ -52,6 +52,29 @@
             "action",
             "url"
           ]
+        },
+        "output_schema": {
+          "type": "object",
+          "required": [
+            "status"
+          ],
+          "properties": {
+            "status": {
+              "type": "integer",
+              "description": "HTTP 状态码（<400 才走成功通道）"
+            },
+            "data": {
+              "description": "get/post：响应体（JSON 任意型或抽取正文串）"
+            },
+            "text": {
+              "type": "string",
+              "description": "fetch+extract_text"
+            },
+            "html": {
+              "type": "string",
+              "description": "fetch 未抽取正文"
+            }
+          }
         }
       }
     ],

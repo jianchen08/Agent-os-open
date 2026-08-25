@@ -123,6 +123,70 @@
           "required": [
             "action"
           ]
+        },
+        "output_schema": {
+          "type": "object",
+          "required": [
+            "success"
+          ],
+          "properties": {
+            "success": {
+              "type": "boolean"
+            },
+            "memory_id": {
+              "type": "string",
+              "description": "store/update/delete：目标记忆 id"
+            },
+            "results": {
+              "type": "array",
+              "description": "retrieve/get_context/list：结果列表",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "id": {
+                    "type": "string"
+                  },
+                  "content": {
+                    "type": "string"
+                  },
+                  "score": {
+                    "type": "number"
+                  },
+                  "memory_type": {
+                    "type": "string"
+                  },
+                  "metadata": {
+                    "type": "object"
+                  }
+                }
+              }
+            },
+            "query": {
+              "type": "string"
+            },
+            "top_k": {
+              "type": "integer"
+            },
+            "limit": {
+              "type": "integer"
+            },
+            "count": {
+              "type": "integer"
+            },
+            "chunks_imported": {
+              "type": "integer",
+              "description": "import_text/import_file"
+            },
+            "name": {
+              "type": "string"
+            },
+            "updated": {
+              "type": "boolean"
+            },
+            "deleted": {
+              "type": "boolean"
+            }
+          }
         }
       }
     ],

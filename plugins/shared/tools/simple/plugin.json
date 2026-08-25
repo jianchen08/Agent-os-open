@@ -44,6 +44,35 @@
               }
             }
           }
+        },
+        "output_schema": {
+          "type": "object",
+          "required": [
+            "valid",
+            "errors",
+            "warnings"
+          ],
+          "properties": {
+            "valid": {
+              "type": "boolean"
+            },
+            "errors": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "warnings": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "parsed": {
+              "type": "object",
+              "description": "校验通过时的解析结果"
+            }
+          }
         }
       },
       {
@@ -85,6 +114,62 @@
             "pipeline_run_id",
             "level"
           ]
+        },
+        "output_schema": {
+          "type": "object",
+          "required": [
+            "pipeline_run_id",
+            "level"
+          ],
+          "properties": {
+            "pipeline_run_id": {
+              "type": "string"
+            },
+            "level": {
+              "type": "string",
+              "description": "skeleton/L1/L0"
+            },
+            "trace_steps": {
+              "type": "array"
+            },
+            "trace_count": {
+              "type": "integer"
+            },
+            "message_lines": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "message_count": {
+              "type": "integer"
+            },
+            "hint": {
+              "type": "string"
+            },
+            "source": {
+              "type": "string",
+              "description": "L1 压缩块分支"
+            },
+            "chunk_count": {
+              "type": "integer"
+            },
+            "chunks": {
+              "type": "array"
+            },
+            "turn_count": {
+              "type": "integer"
+            },
+            "turns": {
+              "type": "array"
+            },
+            "record_count": {
+              "type": "integer"
+            },
+            "records": {
+              "type": "array"
+            }
+          }
         }
       }
     ],

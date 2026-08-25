@@ -38,6 +38,71 @@
             }
           },
           "required": []
+        },
+        "output_schema": {
+          "type": "object",
+          "required": [
+            "task_id",
+            "overall_passed",
+            "summary",
+            "metrics"
+          ],
+          "properties": {
+            "task_id": {
+              "type": "string"
+            },
+            "overall_passed": {
+              "type": "boolean"
+            },
+            "summary": {
+              "type": "string"
+            },
+            "metrics": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "required": [
+                  "metric_id",
+                  "passed"
+                ],
+                "properties": {
+                  "metric_id": {
+                    "type": "string"
+                  },
+                  "passed": {
+                    "type": "boolean"
+                  },
+                  "score": {
+                    "type": [
+                      "number",
+                      "null"
+                    ]
+                  },
+                  "message": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "error": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "issues": {
+                    "type": "array"
+                  },
+                  "suggestions": {
+                    "type": "array"
+                  },
+                  "report_path": {
+                    "type": "string"
+                  }
+                }
+              }
+            }
+          }
         }
       }
     ],

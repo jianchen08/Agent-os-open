@@ -70,6 +70,43 @@
           ],
           "title": "universal_searchArguments",
           "type": "object"
+        },
+        "output_schema": {
+          "type": "object",
+          "required": [
+            "results",
+            "sources_used",
+            "sources_failed",
+            "total_found",
+            "truncated"
+          ],
+          "properties": {
+            "results": {
+              "type": "array",
+              "description": "index 项（id/title/snippet/url/source/metadata）或 full 项（id/content/truncated/source_info/metadata）",
+              "items": {
+                "type": "object"
+              }
+            },
+            "sources_used": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "sources_failed": {
+              "type": "array",
+              "items": {
+                "type": "object"
+              }
+            },
+            "total_found": {
+              "type": "integer"
+            },
+            "truncated": {
+              "type": "boolean"
+            }
+          }
         }
       },
       {

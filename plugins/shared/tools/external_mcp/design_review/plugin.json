@@ -28,6 +28,32 @@
           "type": "object",
           "properties": {},
           "required": []
+        },
+        "output_schema": {
+          "type": "object",
+          "required": [
+            "content"
+          ],
+          "description": "external MCP 代理：MCP CallToolResult 信封原样（text 非 JSON 时）",
+          "properties": {
+            "content": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "type": {
+                    "type": "string"
+                  },
+                  "text": {
+                    "type": "string"
+                  }
+                }
+              }
+            },
+            "isError": {
+              "type": "boolean"
+            }
+          }
         }
       }
     ]

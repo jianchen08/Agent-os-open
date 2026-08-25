@@ -52,6 +52,35 @@
             "task_id",
             "summary"
           ]
+        },
+        "output_schema": {
+          "type": "object",
+          "required": [
+            "review_id",
+            "status",
+            "mode"
+          ],
+          "properties": {
+            "review_id": {
+              "type": "string"
+            },
+            "status": {
+              "type": "string",
+              "description": "running（派发）/completed（本地降级）"
+            },
+            "mode": {
+              "type": "string",
+              "description": "pipeline/local_degrade"
+            },
+            "pipeline_id": {
+              "type": "string",
+              "description": "派发分支"
+            },
+            "lessons_count": {
+              "type": "integer",
+              "description": "降级分支"
+            }
+          }
         }
       },
       {
@@ -67,6 +96,67 @@
           "required": [
             "review_id"
           ]
+        },
+        "output_schema": {
+          "type": "object",
+          "required": [
+            "review_id",
+            "task_id",
+            "summary",
+            "status",
+            "mode",
+            "created_at"
+          ],
+          "properties": {
+            "review_id": {
+              "type": "string"
+            },
+            "task_id": {
+              "type": "string"
+            },
+            "summary": {
+              "type": "string"
+            },
+            "status": {
+              "type": "string",
+              "description": "running/completed/failed"
+            },
+            "mode": {
+              "type": "string",
+              "description": "pipeline/local_degrade"
+            },
+            "created_at": {
+              "type": "number",
+              "description": "unix 秒"
+            },
+            "pipeline_id": {
+              "type": "string"
+            },
+            "artifacts": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "metrics": {
+              "type": "object"
+            },
+            "lessons": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "recommendations": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "updated_at": {
+              "type": "number"
+            }
+          }
         }
       }
     ],

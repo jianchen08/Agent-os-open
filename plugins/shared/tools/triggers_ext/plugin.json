@@ -95,6 +95,63 @@
             "trigger_type",
             "message"
           ]
+        },
+        "output_schema": {
+          "type": "object",
+          "required": [
+            "success",
+            "trigger_id",
+            "message"
+          ],
+          "properties": {
+            "success": {
+              "type": "boolean"
+            },
+            "trigger_id": {
+              "type": "string"
+            },
+            "message": {
+              "type": "string"
+            },
+            "trigger_type": {
+              "type": "string",
+              "description": "setup 分支"
+            },
+            "action": {
+              "type": "string",
+              "description": "cancel/update 分支"
+            },
+            "interval": {
+              "type": "string"
+            },
+            "interval_seconds": {
+              "type": "number"
+            },
+            "max_count": {
+              "type": "integer"
+            },
+            "max_time_seconds": {
+              "type": "number"
+            },
+            "old_max_fires": {
+              "type": "integer"
+            },
+            "new_max_fires": {
+              "type": "integer"
+            },
+            "old_max_time_seconds": {
+              "type": "number"
+            },
+            "new_max_time_seconds": {
+              "type": "number"
+            },
+            "current_fire_count": {
+              "type": "integer"
+            },
+            "warning": {
+              "type": "string"
+            }
+          }
         }
       }
     ],

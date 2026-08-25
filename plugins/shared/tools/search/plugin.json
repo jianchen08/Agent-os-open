@@ -36,6 +36,59 @@
           "required": [
             "resource_type"
           ]
+        },
+        "output_schema": {
+          "type": "object",
+          "description": "三类资源（agent/tool/skill）表格式结果；全部键条件出现（无命中即缺席）",
+          "properties": {
+            "agent_h": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "description": "agent 表头"
+            },
+            "agent_d": {
+              "type": "array",
+              "items": {
+                "type": "array"
+              },
+              "description": "agent 行"
+            },
+            "agent_c": {
+              "type": "integer"
+            },
+            "tool_h": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "tool_d": {
+              "type": "array",
+              "items": {
+                "type": "array"
+              }
+            },
+            "tool_c": {
+              "type": "integer"
+            },
+            "skill_h": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "skill_d": {
+              "type": "array",
+              "items": {
+                "type": "array"
+              }
+            },
+            "skill_c": {
+              "type": "integer"
+            }
+          }
         }
       }
     ],

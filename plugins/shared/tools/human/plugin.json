@@ -181,6 +181,48 @@
             "mode",
             "title"
           ]
+        },
+        "output_schema": {
+          "type": "object",
+          "required": [
+            "status"
+          ],
+          "properties": {
+            "status": {
+              "type": "string",
+              "description": "sent/completed/user_arrived/denied"
+            },
+            "request_id": {
+              "type": "string",
+              "description": "notification"
+            },
+            "response_type": {
+              "type": "string",
+              "description": "choice/conversation"
+            },
+            "selected_option": {
+              "type": "string"
+            },
+            "answers": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "feedback": {
+              "type": "string"
+            },
+            "conversation_mode": {
+              "type": "boolean"
+            },
+            "message": {
+              "type": "string"
+            },
+            "reason": {
+              "type": "string",
+              "description": "denied 分支"
+            }
+          }
         }
       },
       {

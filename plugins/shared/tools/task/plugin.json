@@ -112,6 +112,113 @@
           "required": [
             "action"
           ]
+        },
+        "output_schema": {
+          "type": "object",
+          "description": "多操作工具：形状随操作分支（get 列表/详情、continue/stop/delete/change、批量），无全分支共有键",
+          "properties": {
+            "task_id": {
+              "type": "string",
+              "description": "除 get-列表外全有"
+            },
+            "hint": {
+              "type": "string",
+              "description": "get 分支操作提示"
+            },
+            "d": {
+              "type": "array",
+              "description": "get-列表：行数组（id/标题/状态/优先级/目标/动作/耗时）",
+              "items": {
+                "type": "array"
+              }
+            },
+            "error": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "get-详情恒有；注入失败分支附 error 键"
+            },
+            "workspace": {
+              "type": "string"
+            },
+            "resolved_workspace": {
+              "type": "string"
+            },
+            "evaluation_summary": {
+              "type": "object"
+            },
+            "injected": {
+              "type": "boolean"
+            },
+            "resumed": {
+              "type": "boolean"
+            },
+            "retried": {
+              "type": "boolean"
+            },
+            "changed": {
+              "type": "boolean"
+            },
+            "deleted": {
+              "type": "boolean"
+            },
+            "soft_deleted": {
+              "type": "boolean"
+            },
+            "stopped": {
+              "type": "boolean"
+            },
+            "old_status": {
+              "type": "string"
+            },
+            "new_status": {
+              "type": "string"
+            },
+            "reason": {
+              "type": "string"
+            },
+            "retry_count": {
+              "type": "integer"
+            },
+            "max_retries": {
+              "type": "integer"
+            },
+            "cascaded_subtasks": {
+              "type": "integer"
+            },
+            "results": {
+              "type": "array",
+              "description": "批量操作逐条结果",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "task_id": {
+                    "type": "string"
+                  },
+                  "success": {
+                    "type": "boolean"
+                  },
+                  "data": {
+                    "type": "object"
+                  },
+                  "error": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  }
+                }
+              }
+            },
+            "summary": {
+              "type": "object",
+              "description": "批量统计 total/success/failed"
+            },
+            "recent_activities": {
+              "type": "array"
+            }
+          }
         }
       }
     ],

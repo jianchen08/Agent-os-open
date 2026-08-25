@@ -72,6 +72,109 @@
             "action",
             "workspace"
           ]
+        },
+        "output_schema": {
+          "type": "object",
+          "required": [
+            "action",
+            "workspace"
+          ],
+          "properties": {
+            "action": {
+              "type": "string",
+              "description": "回显操作（prepare/merge/rollback/git_*/cleanup）"
+            },
+            "workspace": {
+              "type": "string"
+            },
+            "branch_name": {
+              "type": "string"
+            },
+            "message": {
+              "type": "string"
+            },
+            "base_commit": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "target_dir": {
+              "type": "string"
+            },
+            "merged_files": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "change_report": {
+              "type": "object",
+              "description": "added/modified/deleted 文件清单"
+            },
+            "mode": {
+              "type": "string"
+            },
+            "merge_strategy": {
+              "type": "string"
+            },
+            "merge_commit": {
+              "type": "string"
+            },
+            "staged": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "untracked": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "unstaged": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "total_changes": {
+              "type": "integer"
+            },
+            "commit_hash": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "diff": {
+              "type": "string"
+            },
+            "commits": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "hash": {
+                    "type": "string"
+                  },
+                  "message": {
+                    "type": "string"
+                  },
+                  "time": {
+                    "type": "string"
+                  }
+                }
+              }
+            },
+            "cleanup_failed": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          }
         }
       }
     ],
