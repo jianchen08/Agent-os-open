@@ -78,9 +78,10 @@ def load_adapter_configs(
         if "config/" in rel:
             rel = rel[rel.index("config/") + len("config/") :]
         data = get_config_center().get(rel) or {}
-    except Exception as exc:
-        logger.error("[AdapterConfig] 配置加载失败: %s", exc)
-        return {}
+    except Exception:
+        # 配置加载失败向上传播：调用方（connectors/server.py:199、
+        # tool_context/plugin.py:208）均有 except 兜底降级，不在加载器内吞错。
+        raise
 
     adapters_raw = data.get("adapters", {})
     if not isinstance(adapters_raw, dict):

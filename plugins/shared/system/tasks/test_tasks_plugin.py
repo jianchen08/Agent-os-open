@@ -184,10 +184,6 @@ class TestImports:
         """task_types.py 可正常导入。"""
         from task_types import TaskModel, TaskPriority, TaskStatus, create_task  # noqa: F401
 
-    def test_import_state_machine(self) -> None:
-        """state_machine.py 可正常导入。"""
-        from state_machine import SimpleStateMachine, get_task_state_machine  # noqa: F401
-
     def test_import_storage(self) -> None:
         """storage.py 可正常导入。"""
         from storage import TaskStorage  # noqa: F401
@@ -419,36 +415,23 @@ class TestTimerManager:
 
 
 # ═══════════════════════════════════════════════════════════
-# 6. State Machine 验证
+# 6. State Machine 验证（SimpleStateMachine 已删除，仅保留异常与转换表）
 # ═══════════════════════════════════════════════════════════
 
 class TestStateMachine:
-    """状态机测试。"""
+    """状态机异常与转换表定义（SimpleStateMachine 类已随死代码清理移除）。"""
 
-    def test_valid_transition(self) -> None:
-        """合法转换。"""
-        from state_machine import get_task_state_machine
-        sm = get_task_state_machine()
-        assert sm.can_transition("running")
-        sm.transition("running")
-        assert sm.current_state == "running"
-
-    def test_invalid_transition(self) -> None:
-        """非法转换抛出异常。"""
-        from state_machine import InvalidTransitionError, get_task_state_machine
-        sm = get_task_state_machine()
-        # pending → evaluating 是非法的
-        assert not sm.can_transition("evaluating")
-        with pytest.raises(InvalidTransitionError):
-            sm.transition("evaluating")
+    def test_invalid_transition_error_importable(self) -> None:
+        """InvalidTransitionError 仍可导入（service 层依赖）。"""
+        from state_machine import InvalidTransitionError
+        assert issubclass(InvalidTransitionError, Exception)
 
     def test_all_status_transitions_defined(self) -> None:
-        """7 种状态全部在转换表中有定义。"""
-        from state_machine import get_task_state_machine
+        """7 种状态全部在 _TASK_TRANSITIONS 转换表中有定义。"""
+        from state_machine import _TASK_TRANSITIONS
 
-        sm = get_task_state_machine()
         expected_states = {"pending", "running", "evaluating", "stopped", "completed", "failed", "timeout"}
-        defined = set(sm.transitions.keys())
+        defined = set(_TASK_TRANSITIONS.keys())
         assert expected_states.issubset(defined), f"Missing states: {expected_states - defined}"
 
 

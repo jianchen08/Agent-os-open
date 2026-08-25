@@ -268,7 +268,7 @@ class TestComplexToolsStructure:
         "task", "task_submit", "task_evaluate",
         "search", "triggers_ext",
         "media", "lsp", "memory",
-        "human", "web_ext", "hot_swap",
+        "human", "web_ext",
     ])
     def test_complex_tool_has_plugin_json(self, tool_dir):
         assert (self.TOOLS_DIR / tool_dir / "plugin.json").exists(), \
@@ -279,7 +279,7 @@ class TestComplexToolsStructure:
         "task", "task_submit", "task_evaluate",
         "search", "triggers_ext",
         "media", "lsp", "memory",
-        "human", "web_ext", "hot_swap",
+        "human", "web_ext",
     ])
     def test_complex_tool_has_server_py(self, tool_dir):
         assert (self.TOOLS_DIR / tool_dir / "server.py").exists(), \
@@ -290,7 +290,7 @@ class TestComplexToolsStructure:
         "task", "task_submit", "task_evaluate",
         "search", "triggers_ext",
         "media", "lsp", "memory",
-        "human", "web_ext", "hot_swap",
+        "human", "web_ext",
     ])
     def test_complex_tool_has_source_code(self, tool_dir):
         """验证复杂工具目录下至少有一个 .py 源代码文件（tool.py 或类似）。"""

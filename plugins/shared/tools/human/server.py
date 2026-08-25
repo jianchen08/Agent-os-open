@@ -117,9 +117,17 @@ class _EventBusNotifier(IInteractionNotifier):
         title: str = "", mode: str = "",
         options: list[dict] | None = None, questions: list[str] | None = None,
     ) -> bool:
-        logger.info("[HumanInteraction] timeout reminder | request_id=%s | remaining=%ss",
-                    request_id, remaining_seconds)
-        return True
+        payload: dict[str, Any] = {
+            "request_id": request_id,
+            "remaining_seconds": remaining_seconds,
+            "title": title,
+            "mode": mode,
+        }
+        if options is not None:
+            payload["options"] = options
+        if questions is not None:
+            payload["questions"] = questions
+        return await self._emit("interaction_timeout_reminder", payload, thread_id)
 
     async def notify_conversation_start(
         self, thread_id: str, tab_id: str, title: str, request_id: str = "",

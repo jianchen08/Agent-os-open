@@ -226,7 +226,6 @@ async def test_ttl_expiry() -> None:
 async def test_max_size_eviction() -> None:
     """缓存条目超过 max_size 时淘汰最老的。"""
     clear_cache()
-    cache = ToolCache(config={"max_size": 2, "default_ttl": 300})
     writer = ToolCacheWriter(config={"max_size": 2, "default_ttl": 300})
 
     # 写 3 个不同工具调用，max_size=2 应淘汰最老的

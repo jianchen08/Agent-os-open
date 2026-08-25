@@ -66,15 +66,8 @@ class ResourceSearchTool:
     缺失的兜底链路被省略，遇到 query 时直接走本地扫描。
     """
 
-    def __init__(self, *args: Any, **kwargs: Any) -> None:
-        """接受原版构造签名里的所有位置/关键字参数并忽略。
-
-        原版 ``__init__`` 接受 ``agent_registry`` / ``tool_registry`` /
-        ``skill_registry`` / ``search_engine`` / ``dynamic_tool_injector`` /
-        ``external_search`` 等运行时注入参数；这些在 sidecar 模式下都不
-        存在。接受并忽略以保持向上兼容（server.py / 调用方仍可原样构造）。
-        """
-        self._desc_cache: dict[str, str] = {}
+    def __init__(self) -> None:
+        """初始化搜索工具（无运行时依赖，直接扫描本地清单）。"""
 
     # ── 工具定义（与原版 schema 完全一致） ──────────────────────────────
 
@@ -374,12 +367,8 @@ class ResourceSearchTool:
             if data.get("plugin_type") != "tool":
                 continue
 
-            # category 过滤：原版 category 是 ToolCategory 枚举字符串，
-            # plugin.json 没有 category 字段，但 plugin_type="tool" 可作为弱近似。
-            if category and data.get("plugin_type", "") != category:
-                # 允许 "tool" 通过（最常见的 ToolCategory.SEARCH 等不在清单里，跳过强匹配）
-                pass
-
+            # category 过滤：plugin.json 无 category 字段（plugin_type="tool"
+            # 是最接近的近似），故 category 过滤对 tool 清单无实际效果。
             capabilities = data.get("capabilities", {}) or {}
             tools_decl = capabilities.get("tools", []) or []
             if not tools_decl:
@@ -551,7 +540,7 @@ class ResourceSearchTool:
         return False
 
     @staticmethod
-    def _slim_results(results: dict[str, Any], detailed: bool = False) -> dict[str, Any]:
+    def _slim_results(results: dict[str, Any]) -> dict[str, Any]:
         """精简搜索结果，仅保留 _h/_d/_c/message 字段（与原版一致）。"""
         slim: dict[str, Any] = {}
         for key, value in results.items():

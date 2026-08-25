@@ -674,6 +674,14 @@ class ResourceMergeTool(BuiltinTool):
                 cwd=workspace,
             )
 
+            if return_code != 0:
+                # 已恢复已跟踪文件，但未跟踪文件清理失败——"恢复分支初始状态"的
+                # 承诺未完整达成，如实失败而非静默吞掉。
+                return create_failure_result(
+                    error=f"git checkout 已恢复已跟踪文件，但清理未跟踪文件失败: {stderr}",
+                    error_code="GIT_CLEAN_FAILED",
+                )
+
             return create_success_result(
                 data={
                     "action": "rollback",
@@ -698,6 +706,7 @@ class ResourceMergeTool(BuiltinTool):
         try:
             branch_name = self._get_branch_name(workspace)
             is_worktree = await self._git_helpers.is_worktree(workspace)
+            cleanup_failed: list[str] = []
 
             if is_worktree:
                 return_code, _, stderr = await self._git_helpers.run_git(
@@ -713,6 +722,7 @@ class ResourceMergeTool(BuiltinTool):
                         shutil.rmtree(str(workspace), onerror=_remove_readonly_func)
                     except Exception as e:
                         logger.warning("[resource_merge] 手动删除 workspace 失败: %s", e)
+                        cleanup_failed.append(f"worktree 删除失败: {e}")
 
                 return_code, _, stderr = await self._git_helpers.run_git(
                     "branch",
@@ -722,19 +732,23 @@ class ResourceMergeTool(BuiltinTool):
                 )
                 if return_code != 0:
                     logger.warning("[resource_merge] branch delete 失败: %s", stderr)
+                    cleanup_failed.append(f"分支 {branch_name} 删除失败: {stderr}")
             elif workspace.exists():
                 git_dir = workspace / ".git"
                 if git_dir.exists():
                     shutil.rmtree(str(git_dir), onerror=_remove_readonly_func)
 
-            return create_success_result(
-                data={
-                    "action": "cleanup",
-                    "workspace": str(workspace),
-                    "branch_name": branch_name,
-                    "message": "已清理 worktree 和分支" if is_worktree else "无需清理",
-                },
-            )
+            data: dict[str, Any] = {
+                "action": "cleanup",
+                "workspace": str(workspace),
+                "branch_name": branch_name,
+                "message": "已清理 worktree 和分支" if is_worktree else "无需清理",
+            }
+            if cleanup_failed:
+                # 主操作不阻塞，但清理失败信息如实标注（不谎报"已清理"）
+                data["cleanup_failed"] = cleanup_failed
+                data["message"] = "清理部分失败: " + "; ".join(cleanup_failed)
+            return create_success_result(data=data)
 
         except Exception as e:
             return create_failure_result(

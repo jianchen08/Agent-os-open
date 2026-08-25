@@ -2,8 +2,8 @@
 
 [来源: src/tools/builtin/ide_get_selection/tool.py, ide_open_file/tool.py, ide_show_diff/tool.py]
 
-DEBT: IDE 连接器降级逻辑需要 connectors 模块，当前返回降级提示。ceiling: 无连接器场景。
-upgrade: connectors 迁移后恢复完整功能。
+0.2 无 connectors 运行时注入（_registry 无 setter 恒 None），IDE 连接器分支
+已删除；三个工具均返回降级提示/文本 diff 语义。
 """
 
 from __future__ import annotations
@@ -39,36 +39,9 @@ IDE_SHOW_DIFF_SCHEMA: dict[str, Any] = {
     "required": ["file_path", "original_content", "new_content"],
 }
 
-_registry: Any = None
-
-
-def _get_active_connector() -> Any:
-    """获取活跃连接器。"""
-    if _registry is None:
-        return None
-    return _registry.get_active_connector()
-
 
 async def ide_get_selection(**kwargs: Any) -> dict[str, Any]:
-    """获取当前 IDE 中的上下文信息。"""
-    connector = _get_active_connector()
-    if connector is not None:
-        try:
-            context = await connector.get_context()
-            return {
-                "active_file": context.active_file,
-                "selected_text": context.selected_text,
-                "cursor_position": (
-                    {"line": context.cursor_position.line, "column": context.cursor_position.column}
-                    if context.cursor_position
-                    else None
-                ),
-                "open_files": context.open_files,
-                "connector": connector.connector_type,
-            }
-        except Exception as e:
-            logger.warning("连接器获取上下文失败: %s", e)
-
+    """获取当前 IDE 中的上下文信息（无活跃连接器时返回降级提示）。"""
     return {
         "message": "无活跃连接器，请手动提供上下文信息",
         "active_file": None,
@@ -78,29 +51,10 @@ async def ide_get_selection(**kwargs: Any) -> dict[str, Any]:
 
 
 async def ide_open_file(file_path: str, line: int | None = None, column: int | None = None, **kwargs: Any) -> dict[str, Any]:
-    """在 IDE 中打开指定文件。"""
+    """在 IDE 中打开指定文件（无活跃连接器时返回降级提示）。"""
     if not file_path:
         return {"error": "file_path 参数不能为空"}
 
-    connector = _get_active_connector()
-    if connector is not None:
-        try:
-            from connectors.types import ConnectorAction  # noqa: PLC0415
-
-            action = ConnectorAction(
-                action_type="open_file",
-                parameters={"file_path": file_path, "line": line, "column": column},
-            )
-            result = await connector.execute_action(action)
-            if result.success:
-                return {
-                    "message": f"已在 IDE 中打开文件: {file_path}",
-                    "file_path": file_path,
-                }
-        except Exception as e:
-            logger.warning("连接器执行失败: %s", e)
-
-    # DEBT: 降级——无连接器时只返回提示。ceiling: 无连接器。upgrade: connectors 迁移后恢复。
     return {
         "message": f"无活跃连接器，请手动打开文件: {file_path}",
         "file_path": file_path,
@@ -114,34 +68,10 @@ async def ide_show_diff(
     title: str = "",
     **kwargs: Any,
 ) -> dict[str, Any]:
-    """在 IDE 中显示文件差异。"""
+    """在 IDE 中显示文件差异（无活跃连接器时降级为文本 diff）。"""
     if not file_path:
         return {"error": "file_path 参数不能为空"}
 
-    connector = _get_active_connector()
-    if connector is not None:
-        try:
-            from connectors.types import ConnectorAction  # noqa: PLC0415
-
-            action = ConnectorAction(
-                action_type="show_diff",
-                parameters={
-                    "file_path": file_path,
-                    "original_content": original_content,
-                    "new_content": new_content,
-                    "title": title,
-                },
-            )
-            result = await connector.execute_action(action)
-            if result.success:
-                return {
-                    "message": f"已在 IDE 中显示差异: {file_path}",
-                    "file_path": file_path,
-                }
-        except Exception as e:
-            logger.warning("连接器执行失败: %s", e)
-
-    # 降级：生成 unified diff 文本
     import difflib  # noqa: PLC0415
 
     diff_lines = list(

@@ -309,22 +309,18 @@ async def hindsight_recall(
             kwargs["tags_match"] = tags_match or "any"
 
         result = await _client.arecall(**kwargs)
-        # RecallResponse (hindsight 0.9.0) 把所有召回结果放在 results 字段
-        # (每条含 id/text/type/score 等)。results 是主字段。
-        # chunks/source_facts 是可选的辅助字段(需 include_chunks=True 等)。
+        # RecallResponse (hindsight 0.9.1) 召回结果主字段是 results
+        # (每条含 id/text/type/score 等)；旧版 memories/facts 字段已不存在。
         items: list[dict[str, Any]] = []
-        # 优先取 results(0.9.0 主字段);兼容旧版 memories/facts
-        for attr in ("results", "memories", "facts"):
-            collection = getattr(result, attr, None)
-            if collection:
-                for item in collection:
-                    if hasattr(item, "model_dump"):
-                        items.append(item.model_dump())
-                    elif isinstance(item, dict):
-                        items.append(item)
-                    else:
-                        items.append({"content": str(item)})
-                break
+        collection = getattr(result, "results", None)
+        if collection:
+            for item in collection:
+                if hasattr(item, "model_dump"):
+                    items.append(item.model_dump())
+                elif isinstance(item, dict):
+                    items.append(item)
+                else:
+                    items.append({"content": str(item)})
         # 统一字段名:results 里的 text → content(上层期望 content 字段)
         for item in items:
             if "text" in item and "content" not in item:

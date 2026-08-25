@@ -27,7 +27,7 @@ def _load_module():
     mod_name = "workspace_aware_under_test"
     if mod_name in sys.modules:
         del sys.modules[mod_name]
-    spec = importlib.util.spec_from_file_location(mod_name, _TOOLS_DIR / "workspace_aware.py")
+    spec = importlib.util.spec_from_file_location(mod_name, _TOOLS_DIR / "download" / "workspace_aware.py")
     assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)
     sys.modules[mod_name] = module

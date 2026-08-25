@@ -599,8 +599,8 @@ class _TaskStateMixin:
                 "input_tokens": _input_tokens,
                 "context_window": _cw,
             }
-        except Exception:
-            pass
+        except Exception as exc:  # noqa: BLE001 — 遥测失败不阻断主流程，仅留痕
+            logger.debug("[TaskService] context_usage 遥测注入失败: %s", exc)
 
     async def recover_to_completed(
         self,

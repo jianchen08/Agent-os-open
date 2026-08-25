@@ -136,35 +136,6 @@ async def lsp_diagnostics(file_path: str, language: str | None = None) -> dict[s
 
 
 @plugin.tool(
-    name="lsp.completion",
-    schema={
-        "type": "object",
-        "properties": {
-            "file_path": {"type": "string", "description": "文件路径"},
-            "line": {"type": "integer", "description": "行号（从0开始）"},
-            "character": {"type": "integer", "description": "列号（从0开始）", "default": 0},
-            "language": {"type": "string", "description": "编程语言（不传则自动检测）"},
-        },
-        "required": ["file_path", "line"],
-    },
-    description="获取代码补全建议",
-)
-async def lsp_completion(file_path: str, line: int, character: int = 0, language: str | None = None) -> dict[str, Any]:
-    """Get code completion suggestions at given position."""
-    if _gateway is None:
-        return {"error": "LSP gateway not initialized"}
-    position = Position(line=line, character=character)
-    items = await _gateway.get_completion(file_path, position, language)
-    return {
-        "completions": [
-            {"label": item.label, "kind": item.kind, "detail": item.detail, "documentation": item.documentation}
-            for item in items
-        ],
-        "count": len(items),
-    }
-
-
-@plugin.tool(
     name="lsp.jump_to_file",
     schema={
         "type": "object",
@@ -183,19 +154,6 @@ async def lsp_jump_to_file(file_path: str, line: int = 0, character: int = 0) ->
     position = Position(line=line, character=character) if line or character else None
     success = await FileJumpProtocol.jump_to_file(file_path, position)
     return {"success": success, "file_path": file_path, "line": line, "character": character}
-
-
-@plugin.tool(
-    name="lsp.supported_languages",
-    schema={"type": "object", "properties": {}, "required": []},
-    description="获取支持的编程语言列表",
-)
-async def lsp_supported_languages() -> dict[str, Any]:
-    """Get list of supported programming languages."""
-    if _gateway is None:
-        return {"error": "LSP gateway not initialized"}
-    languages = _gateway.get_supported_languages()
-    return {"languages": languages, "count": len(languages)}
 
 
 if __name__ == "__main__":

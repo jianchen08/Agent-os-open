@@ -4,18 +4,20 @@
 迁移（FP-MIGR）：
 1. 四个模块可加载——0.1 的 tools.builtin.base / tools.types / tools.media.*
    已删除，类型与结果工厂改用 agentos_plugin_sdk + 就地 _media_core。
-2. ProviderChain 已从正确来源（media/_media_core.py）真实 import，
-   `# noqa: F821` 消音已删除——用户显式指定 provider 时不再 NameError。
-3. F-MEDIA-2（provider 依赖迁移）：0.1 的 infrastructure.service_provider
+2. F-MEDIA-2（provider 依赖迁移）：0.1 的 infrastructure.service_provider
    （全局服务注册表）已删，media 的 provider 调用改为**经 tool-executor
    capability 调用后端服务**（与 hindsight_memory/memory_backend.py 同款
    模式）——服务契约：tool-executor.invoke → media.generate，args 含
    media_type / prompt|text / provider。调用方未注入或服务不可达时返回
    **显式错误**（error_code=PROVIDER_UNAVAILABLE），**不降级空转**
    （旧的「Provider 未配置」提示与 video/music 的 not_configured 成功态已废除）。
-4. server.py 入口注册：media/server.py 的 tts_generate 引用 TtsGenerateTool
+3. server.py 入口注册：media/server.py 的 tts_generate 引用 TtsGenerateTool
    （0.1 残留的 TTSTool 名称已修正），并把内核注入的 tool-executor 能力
    调用方传入工具构造。
+
+2026-08-25 兼容层清理：MediaProviderRegistry 注入路径 / ProviderChain /
+_enrich_*_schema / 工厂函数已随 0.1 ProviderChain 兼容残留一并删除，相关
+FakeRegistry 测试同步移除；主路径（capability 调用）测试保留。
 
 装配：conftest.py 注入 sdk / media 目录到 sys.path；模块经 importlib 以唯一名加载。
 """
@@ -83,11 +85,11 @@ def caller() -> AsyncMock:
     return AsyncMock()
 
 
-# ── 迁移验证：可加载 + ProviderChain 真实定义 ───────────────
+# ── 迁移验证：可加载 + 共享类型面 ─────────────────────────
 
 
 class TestMediaMigration:
-    """迁移成功：模块可 import、ProviderChain 来自 _media_core。"""
+    """迁移成功：模块可 import、共享类型来自 _media_core。"""
 
     def test_all_modules_import_ok(self, image_mod, tts_mod, video_mod, music_mod):
         assert image_mod.ImageGenerateTool is not None
@@ -95,15 +97,14 @@ class TestMediaMigration:
         assert video_mod.VideoGenerateTool is not None
         assert music_mod.MusicGenerateTool is not None
 
-    @pytest.mark.parametrize("attr", ["MediaType", "FallbackStrategy", "ProviderChain"])
-    def test_media_core_defines_shared_types(self, image_mod, attr):
-        assert getattr(image_mod, attr) is not None
+    @pytest.mark.parametrize("attr", ["MediaType", "FallbackStrategy"])
+    def test_media_core_defines_shared_types(self, core_mod, attr):
+        assert getattr(core_mod, attr) is not None
 
-    def test_provider_chain_same_origin_across_tools(self, image_mod, tts_mod, video_mod, music_mod):
-        """四工具引用的 ProviderChain 同源（media/_media_core.py）。"""
-        assert image_mod.ProviderChain is tts_mod.ProviderChain
-        assert video_mod.ProviderChain is music_mod.ProviderChain
-        assert image_mod.ProviderChain is video_mod.ProviderChain
+    def test_media_core_registry_path_removed(self, image_mod):
+        """0.1 ProviderChain 兼容残留已删：模块不再引用 registry/chain 注入面。"""
+        assert not hasattr(image_mod, "ProviderChain")
+        assert not hasattr(image_mod, "MediaProviderRegistry")
 
     def test_definitions_are_sdk_tools(self, image_mod, tts_mod, video_mod, music_mod):
         from agentos_plugin_sdk import Tool as SdkTool
@@ -125,97 +126,6 @@ class TestMediaMigration:
         assert "capability_caller" in server_src
         assert "_make_capability_caller" in server_src
         assert "tool-executor" in server_src
-
-
-# ── 安全/健壮随迁：传 provider 不 NameError；注册表注入路径可用 ──
-
-
-class _FakeResult:
-    """Provider 返回结果替身（与 0.1 MediaResult 字段对齐）。"""
-
-    def __init__(self, media_type: Any):
-        self.file_path = "out.bin"
-        self.media_type = media_type
-        self.duration_seconds = 1.0
-        self.provider_name = "fake_provider"
-        self.metadata = {}
-
-
-class _FakeProvider:
-    """异步 Provider 替身（is_available + execute_generate/execute_synthesize）。"""
-
-    provider_name = "fake_provider"
-
-    def __init__(self, media_type: Any):
-        self._media_type = media_type
-
-    async def is_available(self) -> bool:
-        return True
-
-    async def execute_generate(self, prompt: str, **kwargs: Any) -> _FakeResult:
-        return _FakeResult(self._media_type)
-
-    async def execute_synthesize(self, text: str, **kwargs: Any) -> _FakeResult:
-        return _FakeResult(self._media_type)
-
-
-class _FakeRegistry:
-    """MediaProviderRegistry 替身（get / get_chain_for_type）。"""
-
-    def __init__(self, provider: _FakeProvider):
-        self._provider = provider
-
-    def get(self, provider_name: str) -> _FakeProvider:
-        return self._provider
-
-    def get_chain_for_type(self, media_type: Any, strategy: Any = None) -> Any:
-        from _media_core import ProviderChain
-
-        return ProviderChain(providers=[self._provider], strategy=strategy)
-
-
-class TestProviderSpecifiedNoNameError:
-    """用户显式指定 provider 时执行不 NameError（原 F821 消音缺陷）。
-
-    注入式注册表路径保留（0.1 ProviderChain 语义）——测试注入 FakeRegistry
-    时仍走链式执行，与 capability 路径并行不悖。
-    """
-
-    @pytest.mark.asyncio
-    async def test_image_with_provider_succeeds(self, image_mod):
-        tool = image_mod.ImageGenerateTool(
-            registry=_FakeRegistry(_FakeProvider(image_mod.MediaType.IMAGE))
-        )
-        result = await tool.execute({"prompt": "a cat", "provider": "fake_provider"})
-        assert result.success is True
-        assert result.output["provider"] == "fake_provider"
-
-    @pytest.mark.asyncio
-    async def test_tts_with_provider_succeeds(self, tts_mod):
-        tool = tts_mod.TtsGenerateTool(
-            registry=_FakeRegistry(_FakeProvider(tts_mod.MediaType.TTS))
-        )
-        result = await tool.execute({"text": "hello", "provider": "fake_provider"})
-        assert result.success is True
-        assert result.output["provider"] == "fake_provider"
-
-    @pytest.mark.asyncio
-    async def test_video_with_provider_succeeds(self, video_mod):
-        tool = video_mod.VideoGenerateTool(
-            provider_registry=_FakeRegistry(_FakeProvider(video_mod.MediaType.VIDEO))
-        )
-        result = await tool.execute({"prompt": "a dog", "provider": "fake_provider"})
-        assert result.success is True
-        assert result.output["provider_name"] == "fake_provider"
-
-    @pytest.mark.asyncio
-    async def test_music_with_provider_succeeds(self, music_mod):
-        tool = music_mod.MusicGenerateTool(
-            provider_registry=_FakeRegistry(_FakeProvider(music_mod.MediaType.MUSIC))
-        )
-        result = await tool.execute({"prompt": "lofi beat", "provider": "fake_provider"})
-        assert result.success is True
-        assert result.output["provider_name"] == "fake_provider"
 
 
 # ── F-MEDIA-2：provider 依赖经 capability 调用（不降级空转）──

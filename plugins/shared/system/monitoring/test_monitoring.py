@@ -60,7 +60,6 @@ class FakePerformanceMonitor:
         self._task_stats = {"completed_tasks": 2, "running_tasks": 1, "pending_tasks": 0}
         self._llm_stats = {"request_count": 3, "active_requests": 1, "error_count": 0, "total_response_time": 1.5}
         self._tool_stats = {"cache_hits": 4, "cache_misses": 6}
-        self.llm_starts = 0
         self.llm_requests: list[tuple[float, bool]] = []
         self.tool_executions: list[tuple[float, bool, bool]] = []
         self.task_updates: list[tuple] = []
@@ -86,9 +85,6 @@ class FakePerformanceMonitor:
 
     def get_health_status(self) -> dict[str, Any]:
         return {"status": "healthy", "issues": [], "metrics": {}}
-
-    def record_llm_request_start(self) -> None:
-        self.llm_starts += 1
 
     def record_llm_request(self, response_time: float, error: bool = False) -> None:
         self.llm_requests.append((response_time, error))
@@ -154,12 +150,6 @@ class TestMonitoringTools:
         mod, _ = _make_module_with_monitor()
         result = _run(mod.monitoring_get_health())
         assert result["status"] == "healthy"
-
-    def test_record_llm_request_start(self) -> None:
-        mod, monitor = _make_module_with_monitor()
-        result = _run(mod.monitoring_record_llm_request_start())
-        assert result == {"recorded": True}
-        assert monitor.llm_starts == 1
 
     def test_record_llm_request(self) -> None:
         mod, monitor = _make_module_with_monitor()

@@ -1,7 +1,7 @@
 # @feature: FP-0.2.〇 管道引擎 | @vision: V3 可嵌入 | @ci: python-coverage
 """workspace_aware 插件（工作空间感知 Mixin）单元测试。
 
-覆盖（对齐 plugins/shared/tools/workspace_aware.py）：
+覆盖（对齐 plugins/shared/tools/download/workspace_aware.py——tools 根版本已随自包含约定删除）：
 1. _init_workspace：workspace / project_root / base_path / cwd 四种来源
 2. resolve_path：绝对路径 / Git Bash 风格 / 前缀去重 / 后缀去重
 3. _format_output_path / get_working_dir / _infer_project_root
@@ -34,7 +34,7 @@ def _load_mixin() -> Any:
     mod_name = "workspace_aware_test"
     if mod_name in sys.modules:
         del sys.modules[mod_name]
-    spec = importlib.util.spec_from_file_location(mod_name, _TOOLS_DIR / "workspace_aware.py")
+    spec = importlib.util.spec_from_file_location(mod_name, _TOOLS_DIR / "download" / "workspace_aware.py")
     assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)
     sys.modules[mod_name] = module

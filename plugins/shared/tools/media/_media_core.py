@@ -70,8 +70,6 @@ class FallbackStrategy(str, Enum):
     """Fallback 策略枚举（与 0.1 tools.media.fallback.FallbackStrategy 对齐）。"""
 
     SEQUENTIAL = "sequential"  # 按优先级顺序
-    RANDOM = "random"  # 随机选择
-    WEIGHTED = "weighted"  # 按权重选择
 
 
 @dataclass
@@ -223,84 +221,17 @@ def _to_media_type(media_type: MediaType | str) -> MediaType:
     return MediaType(str(media_type))
 
 
-class ProviderChain:
-    """按优先级顺序尝试 Provider 的 Fallback 链（0.2 最小实现）。
-
-    语义与 0.1 tools.media.fallback.ProviderChain 对齐：
-    依次尝试每个 Provider（先 ``is_available()`` 探测，异常视为不可用跳过），
-    全部失败抛 ``RuntimeError``。
-
-    Attributes:
-        providers: Provider 列表（保持传入顺序）
-        strategy: Fallback 策略
-    """
-
-    def __init__(
-        self,
-        providers: list[Any] | None = None,
-        strategy: FallbackStrategy = FallbackStrategy.SEQUENTIAL,
-    ) -> None:
-        """初始化 Fallback 链。
-
-        Args:
-            providers: Provider 列表（duck-typing，需提供 is_available /
-                execute_generate 或 execute_synthesize 方法）
-            strategy: Fallback 策略
-        """
-        self._providers: list[Any] = list(providers or [])
-        self._strategy = strategy
-
-    @property
-    def providers(self) -> list[Any]:
-        """获取 Provider 列表。"""
-        return self._providers
-
-    @property
-    def strategy(self) -> FallbackStrategy:
-        """获取 Fallback 策略。"""
-        return self._strategy
-
-    async def execute_generate(self, prompt: str, **kwargs: Any) -> Any:
-        """按 Fallback 策略执行生成（image/video/music）。"""
-        return await self._execute("execute_generate", prompt, **kwargs)
-
-    async def execute_synthesize(self, text: str, **kwargs: Any) -> Any:
-        """按 Fallback 策略执行合成（tts）。"""
-        return await self._execute("execute_synthesize", text, **kwargs)
-
-    async def _execute(self, method_name: str, primary: str, **kwargs: Any) -> Any:
-        """依次尝试每个 Provider，直到成功或全部失败。"""
-        if not self._providers:
-            raise RuntimeError("没有可用的 Provider")
-
-        errors: list[str] = []
-        for provider in self._providers:
-            # 可用性探测（异常视为不可用，跳过——与 0.1 语义一致）
-            try:
-                available = await provider.is_available()
-            except Exception as e:  # noqa: BLE001
-                logger.warning(
-                    "[ProviderChain] Provider '%s' 可用性检查异常: %s",
-                    getattr(provider, "provider_name", "?"),
-                    e,
-                )
-                available = False
-            if not available:
-                continue
-
-            # 执行（失败则记录并尝试下一个）
-            try:
-                method = getattr(provider, method_name)
-                return await method(primary, **kwargs)
-            except Exception as e:  # noqa: BLE001
-                errors.append(f"{getattr(provider, 'provider_name', '?')}: {e}")
-                logger.warning("[ProviderChain] Provider 执行失败: %s", errors[-1])
-
-        detail = "; ".join(errors) if errors else "所有 Provider 不可用"
-        raise RuntimeError(f"所有 Provider 均失败: {detail}")
-
-
 class MediaProviderRegistry:
+    """媒体 Provider 注册表（0.2 类型面）。
+
+    0.1 tools.media.provider_registry.MediaProviderRegistry 完整实现未迁移；
+    本类仅提供类型面与空默认行为（供类型注解 / duck-typing 参考）。
+    运行时注册表实例由外部注入（工具构造参数，或未来 0.2 媒体插件），
+    工具直接调用注入实例的同名方法（get / list_by_type / get_chain_for_type）。
+
+    注（F-MEDIA-2）：0.2 主路径已改为经 capability 调用后端服务
+    （MediaProviderClient）；本类型面保留用于注入式兼容与 schema 丰富。
+    """
     """媒体 Provider 注册表（0.2 类型面）。
 
     0.1 tools.media.provider_registry.MediaProviderRegistry 完整实现未迁移；
@@ -324,7 +255,7 @@ class MediaProviderRegistry:
         self,
         media_type: MediaType,
         strategy: FallbackStrategy = FallbackStrategy.SEQUENTIAL,
-    ) -> ProviderChain | None:
+    ) -> Any | None:
         """获取指定媒体类型的 ProviderChain（无注入时恒 None）。"""
         return None
 
@@ -336,6 +267,5 @@ __all__ = [
     "MediaProviderRegistry",
     "MediaResult",
     "MediaType",
-    "ProviderChain",
     "ProviderUnavailable",
 ]

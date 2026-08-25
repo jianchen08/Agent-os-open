@@ -216,7 +216,7 @@ class TestSceneManagerSwitch:
     def test_switch_scene_activates_target(self, tmp_path: Path) -> None:
         """切换后目标场景 is_active=True，旧场景取消活跃。"""
         mgr = _make_manager(tmp_path)
-        a = mgr.create_scene(name="a")
+        mgr.create_scene(name="a")
         b = mgr.create_scene(name="b")
         switched = mgr.switch_scene(b.id)
         assert switched.is_active is True

@@ -11,8 +11,6 @@ evaluation_service 插件保留指标注册表/HTTP 读面（执行面已收编�
 - ``MetricResult`` / ``EvaluationResult``：评估结果数据类（字段与 0.1 对齐）
 - ``sanitize_eval_paths``：递归脱敏绝对路径（语义与 0.1 对齐，防止服务器
   内部路径信息泄漏）
-- ``EvaluationExecutor``：执行器类型面（生产实现见 ``_executor.py``；本类
-  仅保留 duck-typing 契约与空默认行为）
 
 本模块自包含（仅标准库），由 task_evaluate 插件目录以平铺模块方式导入。
 """
@@ -25,7 +23,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-__all__ = ["EvaluationExecutor", "EvaluationResult", "MetricResult", "sanitize_eval_paths"]
+__all__ = ["EvaluationResult", "MetricResult", "sanitize_eval_paths"]
 
 _CWD_ABS = str(Path.cwd()).replace("\\", "/") + "/"
 _CWD_ABS_WIN = str(Path.cwd()) + "\\" if os.name == "nt" else None
@@ -135,36 +133,3 @@ class EvaluationResult:
             self.summary = f"全部 {total} 项指标通过"
         else:
             self.summary = f"{passed_count}/{total} 项指标通过"
-
-
-class EvaluationExecutor:
-    """评估执行器类型面（0.2 注入版，duck-typing）。
-
-    0.1 ``evaluation.executor.EvaluationExecutor`` 完整实现未迁移（其依赖 0.1
-    评估引擎 EvaluationEngine / MetricLoader / ResultMapper）；本类仅提供类型面
-    与空默认行为。运行时实例由外部注入（宿主或测试），需实现：
-
-    .. code-block:: python
-
-        async def run_evaluation(
-            task_id: str,
-            metric_ids: list[str] | None = None,
-            input_params: dict[str, dict[str, Any]] | None = None,
-            fail_fast: bool = True,
-            skip_state_update: bool = False,
-        ) -> EvaluationResult
-    """
-
-    def __init__(self, *args: Any, **kwargs: Any) -> None:
-        """类型面占位（无注入时为空实现）。"""
-
-    async def run_evaluation(
-        self,
-        task_id: str,
-        metric_ids: list[str] | None = None,
-        input_params: dict[str, dict[str, Any]] | None = None,
-        fail_fast: bool = True,
-        skip_state_update: bool = False,
-    ) -> EvaluationResult:
-        """空默认行为：未注入时抛 RuntimeError（由调用方转为明确错误）。"""
-        raise RuntimeError("评估执行器未注入（0.2 评估引擎不可用）")

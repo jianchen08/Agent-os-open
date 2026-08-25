@@ -675,9 +675,8 @@ async def _list_tasks_from_state() -> list[dict[str, Any]] | None:
         logger.warning("[tasks http] state 聚合读取失败（任务列表降级为 YAML 面）| err=%s", exc)
         return None
     # 响应形状：内核 capability_router 的 pipeline-state.list 返回裸数组
-    # （workspace/task 工具层同此解析）；旧版 channel_api 时期是 {items:[...]}
-    # 信封——双形状兼容，避免一次误判把 state 任务全丢掉。
-    rows = resp if isinstance(resp, list) else (resp.get("items") if isinstance(resp, dict) else None)
+    # （workspace/task 工具层同此解析）。
+    rows = resp if isinstance(resp, list) else None
     if not isinstance(rows, list):
         return None
     out: list[dict[str, Any]] = []

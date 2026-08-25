@@ -90,36 +90,6 @@
         }
       },
       {
-        "name": "lsp.completion",
-        "description": "获取代码补全建议",
-        "input_schema": {
-          "type": "object",
-          "properties": {
-            "file_path": {
-              "type": "string",
-              "description": "文件路径"
-            },
-            "line": {
-              "type": "integer",
-              "description": "行号（从0开始）"
-            },
-            "character": {
-              "type": "integer",
-              "description": "列号（从0开始）",
-              "default": 0
-            },
-            "language": {
-              "type": "string",
-              "description": "编程语言（不传则自动检测）"
-            }
-          },
-          "required": [
-            "file_path",
-            "line"
-          ]
-        }
-      },
-      {
         "name": "lsp.jump_to_file",
         "description": "在 IDE 中打开文件并跳转到指定位置",
         "input_schema": {
@@ -143,15 +113,6 @@
           "required": [
             "file_path"
           ]
-        }
-      },
-      {
-        "name": "lsp.supported_languages",
-        "description": "获取支持的编程语言列表",
-        "input_schema": {
-          "type": "object",
-          "properties": {},
-          "required": []
         }
       }
     ],

@@ -228,9 +228,6 @@ class TestWorkspaceFileTree:
 
     def test_scan_directory_permission_error_degrades(self, tmp_path: Path, monkeypatch) -> None:
         """os.listdir 抛 OSError → 返回空列表。"""
-        import builtins
-
-        real_listdir = os_listdir = None  # noqa: F841
         import os
 
         real_listdir = os.listdir

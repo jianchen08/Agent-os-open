@@ -64,11 +64,6 @@
   "priority": 30,
   "config_files": [
     {
-      "id": "web_fetch",
-      "path": "config/tools/web/fetch.yaml",
-      "label": "网页抓取配置"
-    },
-    {
       "id": "web_operate",
       "path": "config/tools/web/web_operate.yaml",
       "label": "网页操作配置"

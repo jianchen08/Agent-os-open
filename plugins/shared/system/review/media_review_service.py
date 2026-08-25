@@ -294,20 +294,17 @@ class MediaReviewService:
             fmt = img.format or ""
             aspect_ratio = round(width / height, 4) if height > 0 else 0.0
 
-            # 提取 EXIF
+            # 提取 EXIF（异常上抛由外层统一记录：元数据提取失败不阻断审查）
             exif: dict[str, Any] = {}
-            try:
-                raw_exif = img.getexif()
-                if raw_exif:
-                    for tag_id, value in raw_exif.items():
-                        from PIL.ExifTags import Base as ExifBase  # noqa: PLC0415
+            raw_exif = img.getexif()
+            if raw_exif:
+                for tag_id, value in raw_exif.items():
+                    from PIL.ExifTags import Base as ExifBase  # noqa: PLC0415
 
-                        tag_name = ExifBase(tag_id).name
-                        if isinstance(value, bytes):
-                            continue
-                        exif[tag_name] = value
-            except Exception:
-                pass
+                    tag_name = ExifBase(tag_id).name
+                    if isinstance(value, bytes):
+                        continue
+                    exif[tag_name] = value
 
             base.update(
                 {

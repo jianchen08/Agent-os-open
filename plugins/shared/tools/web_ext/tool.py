@@ -31,7 +31,7 @@ for _traf_logger in ("trafilatura", "trafilatura.utils", "trafilatura.core"):
     logging.getLogger(_traf_logger).setLevel(logging.CRITICAL)
 
 # 默认请求头：注入浏览器 UA，避免 httpx 默认的 python-httpx UA 被反爬网站 403 拒绝。
-# 合并优先级：模块默认头 < 构造期 default_headers（fetch.yaml/调用方）< 单次请求 headers。
+# 合并优先级：模块默认头 < 构造期 default_headers（调用方）< 单次请求 headers。
 _DEFAULT_HEADERS: dict[str, str] = {
     "User-Agent": (
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
@@ -51,8 +51,6 @@ class WebTool(BuiltinTool):
     - 网页内容抓取
     - 下载文件
     """
-
-    DEFAULT_CONFIG_PATH = "config/tools/web/fetch.yaml"
 
     def __init__(
         self,
@@ -81,36 +79,6 @@ class WebTool(BuiltinTool):
             if proxy:
                 self._proxy_url = proxy
                 break
-
-    @classmethod
-    def from_config(cls, config_path: str | None = None) -> "WebTool":
-        """从配置文件创建 WebTool 实例（通过 ConfigCenter 统一缓存）"""
-        from config.config_center import get_config_center  # noqa: PLC0415
-        # P1-7 DEBT(task_11): 🟢 低危——WebTool 配置直读（缺失走默认配置 cls()）。
-        # 迁移需 manifest 加 config_files + web_ext server 加 _on_load 注入。
-        # 见 docs/working/p1_7_config_center_migration_checklist.md #12，延后 P6。
-
-        rel = (config_path or cls.DEFAULT_CONFIG_PATH).replace("config/", "", 1)
-        try:
-            config = get_config_center().get(rel) or {}
-            if not config:
-                logger.warning(f"[WebTool] 配置不存在: {rel}，使用默认配置")
-                return cls()
-
-            instance = cls(
-                timeout=config.get("timeout", 30),
-                allowed_domains=config.get("allowed_domains"),
-                blocked_domains=config.get("blocked_domains"),
-                verify_ssl=config.get("verify_ssl", True),
-                default_headers=config.get("default_headers"),
-            )
-
-            logger.info(f"[WebTool] 从配置文件加载成功 | blocked_domains={len(instance.blocked_domains)}")
-            return instance
-
-        except Exception as e:
-            logger.error(f"[WebTool] 加载配置文件失败: {e}，使用默认配置")
-            return cls()
 
     @staticmethod
     def get_tool_definition() -> Tool:

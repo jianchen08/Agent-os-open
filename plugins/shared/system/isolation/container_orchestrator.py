@@ -177,8 +177,8 @@ def pull_image_with_fallback(image: str, wsl_ip: str | None = None) -> bool:
         if result.returncode == 0:
             logger.info("[container_orchestrator] Image exists locally: %s", image)
             return True
-    except Exception:
-        pass
+    except Exception as exc:  # noqa: BLE001 — 降级链第一级失败，记录原因后走拉取
+        logger.warning("[container_orchestrator] docker image inspect 失败（降级走拉取）: %s", exc)
 
     # 尝试从 Docker Hub 拉取
     try:
@@ -191,8 +191,8 @@ def pull_image_with_fallback(image: str, wsl_ip: str | None = None) -> bool:
         if result.returncode == 0:
             logger.info("[container_orchestrator] Pull success from Docker Hub: %s", image)
             return True
-    except Exception:
-        pass
+    except Exception as exc:  # noqa: BLE001 — 降级链第二级：记录原因后走 daocloud
+        logger.warning("[container_orchestrator] docker pull (Hub) 异常，降级 daocloud: %s", exc)
 
     # 尝试 daocloud 镜像
     daocloud_image = f"docker.m.daocloud.io/library/{image}"
@@ -213,8 +213,8 @@ def pull_image_with_fallback(image: str, wsl_ip: str | None = None) -> bool:
             )
             logger.info("[container_orchestrator] Pull success from daocloud: %s", image)
             return True
-    except Exception:
-        pass
+    except Exception as exc:  # noqa: BLE001 — 降级链末级失败，最终兜底警告
+        logger.warning("[container_orchestrator] daocloud 拉取异常: %s", exc)
 
     logger.warning("[container_orchestrator] Image pull failed (Docker Hub + daocloud): %s", image)
     return False

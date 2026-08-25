@@ -148,4 +148,13 @@ async def compatibility_checker(
         results["migration_required"] = len(results["breaking_changes"]) > 0
         return results
     except Exception as e:
-        return {"error": f"兼容性检查失败: {e}"}
+        logger.exception("兼容性检查执行失败")
+        return {
+            "success": False,
+            "error_code": "COMPATIBILITY_CHECK_FAILED",
+            "error": f"兼容性检查失败: {e}",
+            "compatible": False,
+            "breaking_changes": [],
+            "warnings": [],
+            "migration_required": True,
+        }
