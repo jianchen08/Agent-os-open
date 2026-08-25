@@ -14,23 +14,22 @@
   调用通道（plugin.get_capability(...)）调内核 handler，把返回的信封组回
   HTTP 响应（status/headers/body base64）。
 
-channel_api 退役批次 2（users 域 10 端点 → user_admin 插件）：
-- 列表/统计/角色/激活/删除/设置 六组端点迁入本插件 http.handle（源
+users 域（10 端点 → user_admin 插件）：
+- 列表/统计/角色/激活/删除/设置 六组端点在插件 http.handle（源
   routes_missing.py users_router）。数据经 db-admin capability（table_query /
   table_update_row / table_delete_row）查/写内核 users 表。
 - **鉴权切凭证透传**：入站请求 Authorization 头原样放进 params 的
   `_authorization`，内核 db-admin handler 侧 resolve_request_user 做真实角色
-  校验（table_query 需 admin/viewer、写操作为 admin）——替代 channel_api 侧
-  _resolve_caller（token 载荷无 role 段、admin 端点默认拒绝的错误语义），
-  恢复"管理员端点只有真 admin 可用"。
+  校验（table_query 需 admin/viewer、写操作为 admin）——恢复"管理员端点
+  只有真 admin 可用"。
 - create_user（POST /users）：**删除**——空存根无消费方（前端 users.ts 定义
   但零页面调用），用户创建属内核 register（自注册）与 user-admin capability
   扩展的职责面，插件侧 db-admin 裸 INSERT 无法承载 username 唯一性友好报错/
   一用户一租户（tenant_id=user_id）等业务约束（报告说明）。
 - update_user_active（PUT/PATCH /users/{id}/active）：保留存根语义——users 表
   **无 is_active 列**（engine store.rs：user_id/username/password/email/role/
-  tenant_id/created_at/last_login_at），前端管理面板的激活开关此前即无实际
-  落点；schema 演进属内核侧课题，不在本插件刀口。
+  tenant_id/created_at/last_login_at），前端管理面板的激活开关无实际落点；
+  schema 演进属内核侧课题，不在本插件刀口。
 - PATCH /users/{id}/role 与 PATCH /users/{id}/tenant 维持 user-admin capability
   面（内核自保护：不能降自己角色/改自己租户）；PUT /users/{id}/role 走
   db-admin（源 users.ts 消费形态）。
@@ -114,7 +113,7 @@ def _authorization(headers: dict[str, str] | None) -> str:
 
 
 def _qint(query: dict[str, str] | None, key: str, default: int) -> int:
-    """query 参数安全取整（非法值回退默认，对齐 channel_api _qint 语义）。"""
+    """query 参数安全取整（非法值回退默认）。"""
     q = query or {}
     try:
         return int(q[key]) if key in q else default
@@ -133,9 +132,8 @@ def _user_row_to_api(row: dict[str, Any]) -> dict[str, Any]:
 def _route(path: str, method: str) -> tuple[str, dict[str, Any], tuple[str, ...]] | None:
     """按 path/method 决定 user-admin capability 方法（PATCH role/tenant 保留面）。
 
-    channel_api users 域迁入后，GET /users 与 DELETE /users/{id} 改走 db-admin
-    凭证透传（见 _handle_users_domain），此处只保留 user-admin capability 的
-    PATCH 变更面。
+    GET /users 与 DELETE /users/{id} 走 db-admin 凭证透传（见
+    _handle_users_domain），此处只保留 user-admin capability 的 PATCH 变更面。
 
     Returns:
         (method, 路径参数 dict, 需从 body 提取的字段名元组)；无匹配返回 None（404）。
@@ -161,7 +159,7 @@ async def _handle_users_domain(
     headers: dict[str, str] | None,
     query: dict[str, str] | None,
 ) -> tuple[bool, dict[str, Any]]:
-    """users 域分发（channel_api 批次2 迁入，db-admin 凭证透传）。
+    """users 域分发（db-admin 凭证透传）。
 
     返回 (handled, response)：handled=False 表示不属本域（交回 _route 面）。
     """
@@ -354,7 +352,7 @@ async def http_handle(
     """
     del plugin_id
 
-    # ── users 域（channel_api 批次2 迁入）──
+    # ── users 域 ──
     handled, response = await _handle_users_domain(path, method, raw_body, headers, query)
     if handled:
         return response

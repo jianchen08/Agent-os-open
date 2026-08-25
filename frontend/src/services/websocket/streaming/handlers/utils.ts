@@ -4,7 +4,7 @@ import { loggers } from '@/utils/logger'
 
 /** 合并本地流式累积的 parts 与后端 stream_end/new_message 下发的 serverParts。
  *
- * 两个调用方语义不同（2026-08-22 修正）：
+ * 两个调用方语义不同：
  * - `new_message`（preferServer=true）：data.message 是**落库权威完整形态**
  *   （经共享 mapper 还原，含全部轮次的 thinking/text/tool_call）。以 server
  *   为基底，本地只补充 server 缺失的增量（tool_result 结果注入、本地独有
@@ -194,7 +194,7 @@ export function startPipelineStreaming(
   pipelineStore.getState().startStreaming(pipelineId, messageId)
 
   // 轮次级安全兜底：单个消息的流式若超过 90s 仍未结束（说明 stream_end/new_message
-  // 事件漏接或与 pipeline 未对齐——实测工具调用轮偶发），强制收尾，避免 UI 永久卡在
+  // 事件漏接或与 pipeline 未对齐），强制收尾，避免 UI 永久卡在
   // "思考中"。**按 messageId 命中**：仅当当前 streamingState 仍是本条消息时才清理，
   // 因此不会误杀后续新轮次（新轮次 messageId 不同）。后端数据已持久化，强制收尾后
   // 内容仍可正常渲染/刷新恢复。
@@ -213,18 +213,18 @@ export function startPipelineStreaming(
 }
 
 /** 停止管道流式传输——只清事件明确归属的管道。
- *  ADR 2026-08-21「清别人状态」废除：不再顺带 stopStreaming(threadId)——
+ *  「清别人状态」已废除：不再顺带 stopStreaming(threadId)——
  *  threadId 是会话坐标非管道 ID，拿它当管道清是"主管道 ID == sessionId"
  *  隐性等式的猜测，等式不成立时清不到任何东西、成立时纯属重复。 */
 export function stopPipelineStreaming(pipelineId: string): void {
   pipelineStore.getState().stopStreaming(pipelineId)
 }
 
-// allocateNextSequence（本地拼 localMax+1）已按 ADR 2026-08-21 废除：客户端
+// allocateNextSequence（本地拼 localMax+1）已废除：客户端
 // 不再为 store 消息伪造 sequence——事件未携带权威 seq 时挂空（compareMessages
 // 回落 timestamp 排序），权威值到达后由对账纠正。
 
-/** 确保流式占位符消息存在 精确 ID 生命周期（ADR 2026-08-21）：占位气泡以后端
+/** 确保流式占位符消息存在 精确 ID 生命周期：占位气泡以后端
  * 真实 message_id 为键（stream_start 事件携带；发送瞬间的反馈由 pending 区承担，
  * 不再在主 store 建 placeholder_ 前缀气泡）。同 id 已存在（chunk 先于 start 自动
  * 建占位 / 事件重放）→ 原地保留，绝不改写别的消息的 id（旧"并入前一条改写 ID"
@@ -304,7 +304,7 @@ export function extractThreadId(eventData: any): string | undefined {
 }
 
 /** 终止管道：清理 streamingState 仅在 stream_end / stream_error 等终止事件到达时调用。
- *  只清事件明确归属的管道（ADR 2026-08-21）。 */
+ *  只清事件明确归属的管道。 */
 export function terminatePipeline(pipelineId: string): void {
   stopPipelineStreaming(pipelineId)
 }

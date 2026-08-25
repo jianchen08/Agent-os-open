@@ -72,8 +72,8 @@ type PreviewType = 'image' | 'pdf' | 'code' | 'binary'
 /**
  * SyntaxHighlighter 行级样式
  *
- * 修复 react-syntax-highlighter@16 在同时开启 showLineNumbers + wrapLongLines 时的
- * "竖排/每行只剩几个字"问题：库会在每行 span 上强制注入 `display: flex`（见其
+ * react-syntax-highlighter@16 在同时开启 showLineNumbers + wrapLongLines 时，
+ * 会在每行 span 上强制注入 `display: flex`（见其
  * highlight.js 的 `wrapLongLines & showLineNumbers` 分支），flex 容器打破 inline 文本
  * 流并折叠前导空格（缩进），导致 yaml 等缩进敏感语言被挤压成竖条、无法阅读。
  * 这里用 `display: block` 覆盖库注入的 `display: flex`（库内部

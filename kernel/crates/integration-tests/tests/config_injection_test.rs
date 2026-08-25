@@ -9,8 +9,6 @@
 //! 4. 无配置时降级为空 {}，不报错
 //! 5. 配置热重载通知
 //!
-//! [来源: 配置注入链路修复验证]
-//!
 //! @feature: FP-0.2.CFG 配置系统与插件配置注入 | @vision: V3 可嵌入 | @ci: rust-test
 
 use std::collections::HashMap;

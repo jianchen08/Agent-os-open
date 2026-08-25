@@ -147,7 +147,7 @@ class TestApprovalTimeoutReject:
         assert "req-test" not in server._suspended
         assert len(server._suspended) == 0
 
-        # 关键护栏：超时绝不恢复管道（旧实现"超时即恢复"= 绕过审批）
+        # 关键护栏：超时绝不恢复管道（"超时即恢复"= 绕过审批）
         assert _resume_calls(pipeline_calls) == []
 
         # 拒绝状态可查

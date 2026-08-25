@@ -1,7 +1,7 @@
 /**
- * 聚合 schema query（服务端状态 query 化批次 2）
+ * 聚合 schema query（服务端状态 query 化）
  *
- * schema 是全站核心数据源（agents/pipelines/tools/contributes），此前各消费端
+ * schema 是全站核心数据源（agents/pipelines/tools/contributes），各消费端
  * 独立调 getSchema 无共享缓存（设置中枢/GrowthLoop 等各自裸拉）。
  * 本 query 收敛为单一缓存：进入设置页签秒开、staleTime 窗口内跨页零请求。
  * schema_updated / resync_required 事件路径走 invalidateSchemaCache 强制新鲜。

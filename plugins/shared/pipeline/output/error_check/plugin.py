@@ -648,7 +648,7 @@ class ErrorCheckPlugin(IOutputPlugin):
         memory.retrieved / knowledge.context 是否为空是确定性状态（由配置和
         记忆库内容决定），重试时输入阶段拿到的还是同样的空值，根因不会自愈。
         因此标记为不可重试，直接 failed —— 与 strategy_error 的"不可重试"语义一致，
-        避免无效重试空耗配额（历史：子任务曾因 retryable=True 反复重试 6 次仍失败）。
+        避免无效重试空耗配额（retryable=True 的无效重试不会自愈）。
 
         Args:
             ctx: 插件执行上下文

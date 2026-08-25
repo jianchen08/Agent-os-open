@@ -1,10 +1,6 @@
-"""delete_task 级联清理管道 — 回归测试。
+"""delete_task 级联清理管道 — 契约测试。
 
-锁定 BUG-FIX-delete_task_pipeline_cascade 修复的根因：
-原 delete_task 仅删除任务记录，不清理 task.pipeline_run_id 对应的
-管道执行文件、不取消运行中管道、容器任务也不级联清理子任务管道。
-
-修复后 delete_task 统一委托 soft_delete_container / hard_delete_task，
+契约：delete_task 统一委托 soft_delete_container / hard_delete_task，
 完整覆盖：取消运行中管道 + 清理管道执行文件 + 级联清理子任务。
 """
 from __future__ import annotations
@@ -12,7 +8,16 @@ from __future__ import annotations
 import tempfile
 from unittest.mock import AsyncMock, patch
 
+import sys
+from pathlib import Path
+
 import pytest
+
+# 0.2：tasks 插件位于 plugins/shared/system/tasks/，from tasks.service 需 system/ 父目录
+_TASKS_DIR = Path(__file__).resolve().parent.parent / "plugins" / "shared" / "system"
+if str(_TASKS_DIR) not in sys.path:
+    sys.path.insert(0, str(_TASKS_DIR))
+
 from tasks.service import TaskService
 
 

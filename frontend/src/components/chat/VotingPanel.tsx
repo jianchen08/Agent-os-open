@@ -244,7 +244,6 @@ export function VotingPanel({ voting, className }: VotingPanelProps) {
       })
     : null
 
-  // 获取获胜方案
   const winnerOption = useMemo(() => {
     if (!voting.result?.winnerId) return null
     return voting.options.find((o) => o.id === voting.result!.winnerId) ?? null

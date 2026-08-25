@@ -8,8 +8,6 @@
 //! - `client`: MCP 客户端——子进程管理、JSON-RPC 通信、initialize 握手、tools/call
 //! - `error`: MCP 错误类型
 //!
-//! [来源: docs/0.2_rust_plugin_solution.md §3.1.1]
-//! [来源: docs/tasks/task_05_plugin_system.md AC-04-4]
 
 pub mod capability;
 pub mod client;

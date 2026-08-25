@@ -2,14 +2,7 @@
 
 钉死 _check_cache_anomaly 的单轮命中率语义：
 
-背景：原实现把「累计未命中」（total_input - total_cached）和「末轮单轮 input」
-（last_input）直接相减，再除以累计总量。这是量纲错配——
-- total_uncached 是整个 pipeline 累计值
-- last_input 是末轮单轮值
-两者相减无物理意义。结果：只要整个 pipeline 累计未命中占比 >5%（哪怕累计命中率
-高达 94.9%），末轮 summary（last_input 常为 0，因为 tool_execute 轮）必报异常。
-
-正确语义：判断「本轮缓存有没有异常掉」，应基于本轮单轮量：
+判定应基于本轮单轮量（不得把累计量与单轮量混算）：
   本轮未命中 = last_input - last_cached
   本轮命中率 = last_cached / last_input   （last_input > 0 时）
 当 last_input == 0（tool_execute 轮、或无 LLM 调用）时无法判定，应跳过，不报异常。
@@ -17,8 +10,8 @@
 本测试覆盖：
 - 单轮高命中率不报异常
 - 单轮低命中率（< 阈值）报异常
-- last_input == 0 时静默跳过（回归：原实现会误报）
-- 累计未命中高、但单轮命中率正常时不报异常（回归：原实现的核心误报场景）
+- last_input == 0 时静默跳过（无法判定不得误报）
+- 累计未命中高、但单轮命中率正常时不报异常（不得基于累计量误报）
 """
 
 import logging
@@ -82,8 +75,7 @@ def test_low_cache_hit_rate_warns(caplog: Any) -> None:
 def test_zero_last_input_skipped(caplog: Any) -> None:
     """last_input == 0 时无法判定本轮命中率，应静默跳过，不报异常。
 
-    回归：原实现对 last_input=0 计算 gap=|累计未命中 - 0|=累计未命中，
-    再除以累计总量 → 必误报。这是最核心的误报场景。
+    契约：last_input=0 不得拿累计未命中当分子计算（会必误报）。
     """
     plugin = _make_plugin()
     usage = {
@@ -100,12 +92,9 @@ def test_zero_last_input_skipped(caplog: Any) -> None:
 def test_high_cumulative_uncached_but_per_round_ok_no_warning(caplog: Any) -> None:
     """累计未命中占比高、但本轮命中率正常时不报异常。
 
-    回归场景（取自生产日志 12:31:27）：
-      总input=2458025, 总cached=2331456, 末轮input=60632, 末轮cached=60000
-    累计命中率 94.9%（累计未命中 126569，占比 5.1%）。
-    原实现：gap=|126569 - 60632|=65937，ratio=2.7% 刚好不报（边界抖动）；
-    但若末轮 input=0（tool_execute 轮调用 summary）则误报 5.1%。
-    新实现只看本轮：本轮命中率 = 60000/60632 ≈ 99.0%，不报。
+    生产形态：总input=2458025, 总cached=2331456, 末轮input=60632,
+    末轮cached=60000，累计命中率 94.9%（累计未命中占比 5.1%）。
+    契约：只看本轮命中率 = 60000/60632 ≈ 99.0% → 不报（累计占比不得触发）。
     """
     plugin = _make_plugin()
     usage = {

@@ -6,17 +6,13 @@
 
 [来源: docs/working/module_migration_plan.md §六 P2 workspace]
 
-channel_api 拆迁批次 1（2026-08-21）：workspaces 域 11 端点侧车化——
-原 channel_api/routes_workspaces.py 的 handler 搬入本插件，经
-``http.handle`` 按 path 分发（协议与 agent_manager/monitoring 同款），
-plugin.json ``http_endpoints`` 声明（/ext/workspace_service/workspaces/**）。
-- ``_resolve_workspace_path`` 改走 tasks.service_access（M3 自包含；
-  原 infrastructure.service_provider 在 0.2 已不存在，属死 import）。
+workspaces 域 11 端点经 ``http.handle`` 按 path 分发（协议与
+agent_manager/monitoring 同款），plugin.json ``http_endpoints`` 声明
+（/ext/workspace_service/workspaces/**）。
+- ``_resolve_workspace_path`` 走 tasks.service_access（自包含）。
 - ``_get_connector_registry`` 进程内直接实例化 ConnectorRegistry 单例。
 - pipeline-state state 聚合读取器在 ``_on_load`` 经 granted_capabilities
-  注入（与 channel_api 原注入同一 set_state_reader 缝，回退 task_service
-  只读镜像语义不变）。
-[来源: docs/working/channel_api插件拆迁方案_20260821.md 批次 1]
+  注入（回退 task_service 只读镜像语义）。
 """
 
 from __future__ import annotations
@@ -51,8 +47,8 @@ async def _on_load(params: dict[str, Any]) -> None:
     """初始化工作空间服务 + 注入 state 聚合读取器。"""
     global _service
     _service = get_workspace_service()
-    # GAP-1 统一：注入 state 聚合读取器（父链/子链读面，channel_api on_load
-    # 原注入同缝；能力未授予/未就绪时降级回退 task_service 只读镜像）。
+    # GAP-1 统一：注入 state 聚合读取器（父链/子链读面；能力未授予/未就绪时
+    # 降级回退 task_service 只读镜像）。
     try:
         handle = plugin.get_capability("pipeline-state")
 
@@ -115,16 +111,15 @@ def _decode_body(raw_body: str) -> dict[str, Any]:
     return parsed if isinstance(parsed, dict) else {}
 
 
-# ══ workspaces 域（channel_api 拆迁批次 1：routes_workspaces.py handler 迁入）══
+# ══ workspaces 域 ══
 
 
 def _get_project_root() -> Path:
     """获取项目根目录（本文件向上 5 级 = 仓库根）。
 
-    channel_api 原实现按 0.1 布局（src/channels/api/）数 4 级；迁入
-    plugins/shared/system/{plugin}/ 后 4 级只到 plugins/，属搬迁算术漂移
-    （_local/相对路径 fallback 的解析基准错位）。前端 _local 场景传绝对路径，
-    修正到仓库根不影响现网行为。
+    按本文件相对仓库根的固定深度数 5 级（plugins/shared/system/{plugin}/
+    在仓库根下 5 层）；前端 _local 场景传绝对路径，修正到仓库根不影响
+    现网行为。
     """
     return Path(__file__).resolve().parent.parent.parent.parent.parent
 
@@ -135,11 +130,11 @@ _connector_registry: Any = None
 def _get_connector_registry() -> Any:
     """获取全局 ConnectorRegistry 进程内单例。
 
-    M3 自包含：直接实例化（原 ``infrastructure.service_provider`` 在 0.2 已
-    删除，属死 import——channel_api 原实现每次调用必 ImportError 而走降级）。
-    connectors 包内部用平铺兄弟导入（``from connector_types import ...``），
-    需 connectors/ 目录本身在 sys.path 上——这里自举补入（与
-    tasks/service_access 把 tasks/ 补入 sys.path 同款模式）。
+    自包含：直接实例化（infrastructure.service_provider 在 0.2 已不存在，
+    属死 import）。connectors 包内部用平铺兄弟导入
+    （``from connector_types import ...``），需 connectors/ 目录本身在
+    sys.path 上——这里自举补入（与 tasks/service_access 把 tasks/ 补入
+    sys.path 同款模式）。
     """
     global _connector_registry  # noqa: PLW0603
     if _connector_registry is None:
@@ -450,7 +445,7 @@ async def rename_entry(container_task_id: str, body: dict[str, Any]) -> dict[str
     # 计算新路径：在同一个目录下替换文件/目录名
     full_new_path = (full_old_path.parent / new_name).resolve()
     # 确保新路径也在工作空间范围内（resolve 后再比较——new_name 为 `..` 等
-    # 单段特殊名时字符串前缀比较会漏判，原 channel_api 实现此处为死检查）
+    # 单段特殊名时字符串前缀比较会漏判）
     if not str(full_new_path).startswith(str(workspace_path)):
         return {"success": False, "message": "目标路径超出工作空间范围"}
 
@@ -611,8 +606,8 @@ async def _resolve_workspace_path(container_task_id: str) -> str | None:
 
     1. ``_local`` 特例 → 项目根；
     2. state 聚合行（pipeline-state 读面）：按 pipeline_id 取 ``ws_meta.path``
-       / ``workspace``——会话管道等无任务记录的管道走此通道（2026-08-24
-       R3 裁定：所有有工作区的管道都可关联）；
+       / ``workspace``——会话管道等无任务记录的管道走此通道（所有有工作区的
+       管道都可关联）；
     3. TaskService 任务 metadata.ws_meta.path（镜像回退）。
     """
     # 特殊处理 _local 工作空间
@@ -695,7 +690,7 @@ _PREFIX = "/ext/workspace_service/workspaces"
             "query": {"type": "object"},
         },
     },
-    description="HTTP endpoint handler for /ext/workspace_service/** (workspaces domain, channel_api 拆迁批次 1)",
+    description="HTTP endpoint handler for /ext/workspace_service/** (workspaces domain)",
 )
 async def http_handle(
     path: str = "",

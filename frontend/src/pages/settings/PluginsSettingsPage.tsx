@@ -7,7 +7,7 @@
  * - 配置入口（有 config_files 的插件可跳 PluginConfigEditor）
  * - 类型徽标 + host_type + version + 能力标记（contributes/http_endpoints）
  * - 工具能力浏览（ToolsPage 退役后并入：/api/v1/schema 聚合的 tools 面，
- *   搜索 + 展开 input_schema 摘要——2026-08-20 ADR）
+ *   搜索 + 展开 input_schema 摘要）
  */
 
 import { useState, useEffect } from 'react'
@@ -316,7 +316,7 @@ export function PluginsSettingsPage({
           })}
         </div>
       )}
-      {/* ── 工具能力浏览（ToolsPage 退役并入，2026-08-20 ADR）── */}
+      {/* ── 工具能力浏览（ToolsPage 退役并入）── */}
       {!isLoading && !error && capabilities.length > 0 && (
         <section className="mt-6" aria-label="工具能力浏览">
           <div className="mb-2 flex flex-wrap items-center gap-3">

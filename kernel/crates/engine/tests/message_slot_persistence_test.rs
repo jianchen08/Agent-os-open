@@ -396,8 +396,8 @@ fn query_seqs(store: &SqliteStore, pid: &str, opts: MessageQueryOpts) -> Vec<u32
 #[test]
 fn slot_limit_without_cursor_returns_latest_window() {
     // 刷新首屏契约：无游标 + limit = 「最新 N 条」（升序）。
-    // 回归：曾实现成 ASC+LIMIT 取最老 N 条——会话超 limit 条时刷新回滚到
-    // 早期窗口，其后消息全部"消失"（真机 78 条会话刷新只剩 seq 0..49）。
+    // 回归：ASC+LIMIT 取最老 N 条会让会话超 limit 条时刷新回滚到
+    // 早期窗口，其后消息全部"消失"。
     let store = SqliteStore::open_memory().unwrap();
     let pid = "p_limit_tail";
     seed_n_messages(&store, pid, 12);
@@ -420,7 +420,7 @@ fn slot_limit_without_cursor_returns_latest_window() {
 #[test]
 fn slot_limit_with_before_cursor_returns_window_adjacent_to_cursor() {
     // 「加载更早」翻页契约：before_sequence + limit = 游标正下方紧邻的 N 条（升序）。
-    // 回归：曾实现成 ASC+LIMIT 取最老 N 条——下方超过 limit 条时中间段被跳空，
+    // 回归：ASC+LIMIT 取最老 N 条会让下方超过 limit 条时中间段被跳空，
     // 历史加载出现永久空洞。
     let store = SqliteStore::open_memory().unwrap();
     let pid = "p_limit_before";
@@ -470,8 +470,8 @@ fn slot_limit_with_after_cursor_still_head_anchored() {
 // ═══════════════════════════════════════════════════════════
 
 /// GAP-3 不变量：任何批次的写入落库后，message_slots 行的 blob_id 恒非空。
-/// （此前 blob/slot 各自 autocommit，G8 exit(75) 可在两条语句间截断——
-/// 事务包裹后 slot 可见 ⟹ blob 已提交，消息正文不再丢失。）
+/// （blob/slot 各自 autocommit 时，进程在两条语句间被截断会留下 blob_id NULL
+/// 的半态——事务包裹后 slot 可见 ⟹ blob 已提交，消息正文不再丢失。）
 #[test]
 fn test_apply_ops_all_slots_have_blob() {
     let store = agentos_engine::SqliteStore::open_memory().unwrap();

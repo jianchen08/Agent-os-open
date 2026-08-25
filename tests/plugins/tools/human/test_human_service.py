@@ -77,8 +77,7 @@ class _RecorderNotifier:
 async def human_factory():
     """构造服务实例，并在测试结束时取消残留的后台超时任务。
 
-    修复前 wait_for_choice 超时不会取消后台任务，任务会悬挂到 +remind 秒；
-    若不在 teardown 取消，pytest-asyncio 关 loop 时会报
+    残留任务须在 teardown 取消，否则 pytest-asyncio 关 loop 时会报
     "Task was destroyed but it is pending" 噪音并拖慢测试。
     """
     services: list[Any] = []
@@ -146,9 +145,8 @@ async def test_short_timeout_wait_raises_promptly_without_hang(human_factory):
 async def test_short_timeout_background_handles_without_early_reminder(human_factory):
     """短超时（timeout < remind）时后台任务直接按时处理，不发提前提醒。
 
-    为什么重要：修复前 timeout_handler 先 sleep(0) 再 sleep(remind)，短超时请求
-    会在创建瞬间收到一条"即将超时"的误提醒，且真正的超时处理被推迟到 +remind 秒。
-    用户收到错误提醒、审批状态又迟迟不收敛——两者都会破坏审批闭环。
+    契约：短超时请求不得在创建瞬间收到"即将超时"误提醒，超时处理须在
+    timeout 秒内收敛（用户不得收到错误提醒、审批状态不得迟迟不收敛）。
     """
     svc, notifier = human_factory(remind_before_seconds=_REMIND)
     request_id = await svc.create_choice_request(
@@ -175,9 +173,8 @@ async def test_short_timeout_background_handles_without_early_reminder(human_fac
 async def test_wait_timeout_cancels_background_task_and_no_late_notify(human_factory):
     """wait_for_choice 超时后必须取消后台 timeout 任务，之后不再触发任何通知。
 
-    为什么重要：修复前 wait_for_choice 超时抛错后，后台任务仍在 sleep(remind)，
-    悬挂到 +remind 秒才醒来——期间任务一直占着事件循环，且若时序竞争还可能再发
-    一次超时通知。审批闭环要求超时"一锤定音"。
+    契约：超时"一锤定音"——后台任务不得悬挂占用事件循环，也不得再发
+    一次超时通知（时序竞争下不得重复通知）。
     """
     svc, notifier = human_factory(remind_before_seconds=_REMIND)
     request_id = await svc.create_choice_request(

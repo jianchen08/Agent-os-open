@@ -58,7 +58,7 @@ export interface ThemeActions {
   loadTheme: (themeId: string) => Promise<void>
   /** 加载用户自定义主题 */
   loadUserThemes: () => void
-  /** schema 注册完成后重放挂起的插件主题（会话恢复时序修复） */
+  /** schema 注册完成后重放挂起的插件主题（会话恢复时序） */
   retryPendingTheme: () => Promise<void>
   /** 应用主题到 DOM */
   applyTheme: () => void
@@ -199,10 +199,10 @@ export const useThemeStore = create<ThemeState & ThemeActions>()(
           if (!config) {
             const userTheme = ThemeStorageService.getUserTheme(themeId)
             if (userTheme && themeId.startsWith('dsh-skin-')) {
-              // 已退役方案的 localStorage 残留（dshSkinTheme.ts 曾把 DSH 皮肤写成
-              // 用户主题；该文件已删，皮肤现走 contributes.themes 插件主题通道）。
-              // 用户主题分支优先于插件主题，残留会把皮肤选择截胡成无立绘的
-              // 旧配置——清残留后落到下方 pluginTheme 分支。
+              // dsh-skin-* 前缀的用户主题为无效残留数据（皮肤走
+              // contributes.themes 插件主题通道，不落用户主题分支）——
+              // 用户主题分支优先于插件主题，残留会截胡皮肤选择，清除后
+              // 落到下方 pluginTheme 分支。
               ThemeStorageService.deleteUserTheme(themeId)
             } else if (userTheme) {
               // 加载基础主题
@@ -244,8 +244,8 @@ export const useThemeStore = create<ThemeState & ThemeActions>()(
             // 插件主题（如 DSH 皮肤）在会话恢复时序里早于 growthLoop 的 schema
             // 注册——registry 未就绪时查不到≠主题不存在：挂起等待（不回退
             // dark、不覆盖持久化选择；retryPendingTheme 在注册完成后重放）。
-            // 回退+persist 会把用户选择永久改写成 dark（2026-08-21 实锤：
-            // 点皮肤卡生效→刷新→被打回 dark 且 themeId 被覆盖）。
+            // 回退+persist 会把用户选择永久改写成 dark（点皮肤卡生效→刷新→
+            // 被打回 dark 且 themeId 被覆盖）。
             set({ pendingThemeId: themeId, isLoading: false })
             return
           } else {
@@ -438,7 +438,7 @@ export const useThemeStore = create<ThemeState & ThemeActions>()(
         // 在 base 主题（含其背景）全部应用之后执行：插件声明的变量 setProperty 后写者胜，
         // 背景按 enabled 开关覆盖。纯数据无 JS 执行（主题插件是"大众级定制"的正路）。
         // 每次应用先清上一插件主题变量（皮肤切回内置主题时 --region-* 等残留
-        // 会让区域背景/气泡形态停留在旧皮肤，2026-08-21 漂移根因）。
+        // 会让区域背景/气泡形态停留在旧皮肤）。
         clearPluginThemeVars()
         if (activePluginTheme) {
           applyPluginThemeVars(activePluginTheme)
@@ -458,7 +458,7 @@ export const useThemeStore = create<ThemeState & ThemeActions>()(
           bgImageActive: skinActive || (backgrounds.image?.enabled && !!backgrounds.image?.url),
         })
 
-        // === 皮肤运行时按择注入路由（2026-08-22 平台化：声明驱动）===
+        // === 皮肤运行时按择注入路由（声明驱动）===
         // 任何插件主题声明 skin 字段即获得全部皮肤能力：平台 scope 打标 +
         // 皮肤 CSS 按择注入 + hooks 动态层（六层装饰/背景/装饰条槽位）；
         // 其余主题 → 摘除。与主题变量同一选择源驱动。

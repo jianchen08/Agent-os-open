@@ -57,7 +57,7 @@ export interface UploadableFile {
     file_id: string
     filename: string
     mime_type: string
-    /** 文件访问 URL（/uploads/xxx，ADR 2026-08-21：附件索引随消息 content 携带） */
+    /** 文件访问 URL（/uploads/xxx，附件索引随消息 content 携带） */
     url: string
   }
   /** 错误信息 */
@@ -332,8 +332,8 @@ export function FileUploadZone({
           name: u.result!.filename,
           type: u.result!.mime_type,
           size: u.file.size,
-          // url 用上传响应的 /uploads/... 访问 URL（原误填 file_id——
-          // 消息 content 引用与前端渲染都依赖真实 URL，ADR 2026-08-21）
+          // url 用上传响应的 /uploads/... 访问 URL（不能填 file_id——
+          // 消息 content 引用与前端渲染都依赖真实 URL）
           url: u.result!.url,
           status: 'completed' as const,
         }))

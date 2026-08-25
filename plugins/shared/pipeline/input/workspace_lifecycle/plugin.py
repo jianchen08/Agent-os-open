@@ -257,7 +257,7 @@ class WorkspaceLifecyclePlugin(IInputPlugin):
             return PluginResult()
 
         source_path = ws_spec.get("source_path") or ""
-        # 2026-08-24 裁定：模式未指定 → 默认 worktree（不是 plain）。
+        # 模式未指定 → 默认 worktree（不是 plain）。
         mode = ws_spec.get("mode") or "worktree"
         # 0.2 统一：任务身份 = pipeline_id，引擎注入 state 的扁平键是 task.id
         # （点号键）；兼容顶层 task_id（0.1 遗留）。缺 task 上下文 = 主会话纯解析。
@@ -342,10 +342,10 @@ class WorkspaceLifecyclePlugin(IInputPlugin):
         # 虚假标记（exit 会据此尝试 merge）。对齐服务层矫正
         # （WorkspaceLifecycleManager._start_root_task：无显式 workspace → 强制
         # plain 目录）。
-        # 2026-08-24 修正：无显式 workspace + worktree 模式时 source_path 已被
-        # 解析为项目根（worktree 的源）——服务不可用降级时**不能把项目根直接当
-        # workspace**（任务会在项目根上直接读写），回退「工作区根/{task_id}」
-        # 占位目录（同 plain 默认位置，`.ai_workspaces/` 下）。
+        # 无显式 workspace + worktree 模式时 source_path 已被解析为项目根
+        # （worktree 的源）——服务不可用降级时**不能把项目根直接当 workspace**
+        # （任务会在项目根上直接读写），回退「工作区根/{task_id}」占位目录
+        # （同 plain 默认位置，`.ai_workspaces/` 下）。
         _effective_mode = mode
         _effective_path = source_path
         if not ws_spec.get("explicit"):

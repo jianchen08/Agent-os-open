@@ -1,22 +1,19 @@
-"""execution/records + sessions token-usage 域 handler（channel_api 退役批次 2 随迁）。
+"""execution/records + sessions token-usage 域 handler。
 
-[来源] 本模块由 channel_api/routes_missing.py 的 execution_router（约 822-954 行）
-与 sessions_router（约 1027-1037 行）搬迁而来：剥离 FastAPI 装饰器与 require_auth
-依赖，纯 dict 返回；数据经内核只读能力桥 kernel_reads 组装（2026-08-19 调试中心
-数据链修复的同一消费链），能力不可用时降级空结构（HTTP 200 空载荷，前端契约
-不破坏）。
+剥离 FastAPI 装饰器与 require_auth 依赖，纯 dict 返回；数据经内核只读能力桥
+kernel_reads 组装，能力不可用时降级空结构（HTTP 200 空载荷，前端契约不破坏）。
 
 领域语义与原实现逐项对齐（前端 executionRecords.ts / sessions.ts 直接消费：
 records/sessions/group-summary/tree/children/get/delete 形态不变）；
-sessions token-usage 从 stub 接真：总 Token 数取 pipeline-state 摘要行的
+sessions token-usage：总 Token 数取 pipeline-state 摘要行的
 track.total_tokens / cost_control.total_tokens，request_count 取该管道 run 次数
 （内核 MessageRecord 不携带 token 计数字段，prompt/completion 无独立计数源）。
 
 [交互] 读面仅消费内核能力（service-registry→pipeline-runs.list/messages.list、
-pipeline-state→list）；clear-all 已做实（2026-08-24）——经 db-admin.
-clear_execution_data 真删 9 表 + 内存 registry（users 保留），内核信封
-非 200 时以 ClearExecutionDataError 原状态码透传；单条/按会话删除仍为
-stub（内核消息模型无单条删除面，维持成功形态由前端消费）。
+pipeline-state→list）；clear-all 经 db-admin.clear_execution_data 真删 9 表 +
+内存 registry（users 保留），内核信封非 200 时以 ClearExecutionDataError
+原状态码透传；单条/按会话删除为 stub（内核消息模型无单条删除面，维持
+成功形态由前端消费）。
 """
 
 from __future__ import annotations
@@ -213,7 +210,7 @@ async def get_execution_record(record_id: str) -> dict[str, Any]:
 
 
 async def clear_all_records(authorization: str = "") -> dict[str, Any]:
-    """清理所有执行记录与轨迹（stub 做实 2026-08-24）。
+    """清理所有执行记录与轨迹。
 
     经 db-admin.clear_execution_data 能力真删：内核 9 表（runs/traces/blobs/
     branches/sessions/pipeline_sessions/pipeline_state/pipeline_checkpoints/
@@ -234,7 +231,7 @@ async def clear_all_records(authorization: str = "") -> dict[str, Any]:
     }
 
 
-# ── sessions token-usage 域（2 端点，stub 接真）─────────────────────────
+# ── sessions token-usage 域（2 端点）────────────────────────────────────
 
 
 def _state_total_tokens(state: dict[str, Any]) -> int:

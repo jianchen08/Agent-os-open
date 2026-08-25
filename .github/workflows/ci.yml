@@ -227,8 +227,7 @@ jobs:
 
   # ── Python Lint（插件 SDK）─────────────────────────────────
   # 注：sdk-mypy 的路径参数由 run_gates.py 统一持有（cwd=plugins/sdk 下
-  # mypy src/agentos_plugin_sdk）；此前 ci.yml 在 plugins/sdk 目录下误写
-  # 相对路径 plugins/sdk/src/...（解析到不存在的嵌套路径），本次重构修正。
+  # mypy src/agentos_plugin_sdk）。
   python-lint:
     name: Python Lint (SDK ruff + mypy)
     runs-on: ubuntu-latest
@@ -247,8 +246,8 @@ jobs:
           cache-dependency-glob: "uv.lock"
 
       - name: Install dependencies
-        # 锁定安装（安全审查 2026-08-19：原浮动 pip 在线解析绕开 uv.lock，
-        # 改与其它 Python job 同口径——uv sync --frozen + SDK editable）
+        # 锁定安装（安全审查 2026-08-19）：uv sync --frozen + SDK editable，
+        # 不得用浮动 pip 在线解析绕开 uv.lock
         run: |
           uv sync --frozen --extra dev
           uv pip install -e ./plugins/sdk
@@ -533,8 +532,8 @@ jobs:
         run: python scripts/run_gates.py --filter frontend-e2e-smoke
 
   # ── Electron 主进程编译门禁 ─────────────────────────────────────────────
-  # electron/ 桌面壳（main/preload/tray/window-info）此前无任何 CI 覆盖。
-  # tsc 编译门禁（electron:compile，与 electron:build 共用同一命令）；
+  # electron/ 桌面壳（main/preload/tray/window-info）tsc 编译门禁
+  # （electron:compile，与 electron:build 共用同一命令）；
   # ELECTRON_SKIP_BINARY_DOWNLOAD=1 跳过 100MB+ 二进制下载，类型检查无需它。
   electron-compile:
     name: Electron Compile (主进程 tsc)

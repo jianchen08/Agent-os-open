@@ -20,7 +20,13 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
+# 0.2：multimodal 插件位于 plugins/shared/system/multimodal/，
+# from multimodal.asr import 需要 system/ 父目录（包命名空间）；
+# asr.py 内部平铺导入 mm_types 等，需要 multimodal 目录自身。
+_SYSTEM = Path(__file__).resolve().parent.parent / "plugins" / "shared" / "system"
+_MULTIMODAL = _SYSTEM / "multimodal"
+sys.path.insert(0, str(_SYSTEM))
+sys.path.insert(0, str(_MULTIMODAL))
 
 from multimodal.asr import (  # noqa: E402
     ASRConfig,

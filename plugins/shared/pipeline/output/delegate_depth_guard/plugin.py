@@ -1,15 +1,13 @@
 """委派深度守卫 Output 插件。
 
-**0.2 状态（路由方式收敛）**：delegate 路由信号已从引擎协议移除
-（Rust `RouteType` 仅 next_llm/next_tool/end/wait 四种；跨管道路由统一经
-任务系统/复盘系统等专门服务的工具调用显式发起）。本插件保留为 0.1 兼容
-透传——无 delegate 信号输入时纯透传（SKIP），深度字段初始化逻辑保留；
-不再声明 delegate 路由信号（`route_signals` 返回空）。
+delegate 路由信号已从引擎协议移除（Rust `RouteType` 仅 next_llm/next_tool/
+end/wait 四种；跨管道路由统一经任务系统/复盘系统等专门服务的工具调用显式
+发起）。本插件保留为兼容透传——无 delegate 信号输入时纯透传（SKIP），
+深度字段初始化逻辑保留；不再声明 delegate 路由信号（`route_signals` 返回空）。
 
-历史职责（0.1）：在跨管道路由（delegate）时检查嵌套深度，防止无限递归。
+职责：在跨管道路由（delegate）时检查嵌套深度，防止无限递归。
 深度计数存储在 state 的自定义字段 `delegate_depth` 中，
 由本插件维护递增，无需修改 StateKeys 或管道基础设施。
-
 当深度超过配置的 max_depth 时，拦截 delegate 路由信号，
 改为 end 信号并记录错误。
 
@@ -103,12 +101,10 @@ class DelegateDepthGuardPlugin(IOutputPlugin):
         if self._max_depth_key not in ctx.state:
             state_updates[self._max_depth_key] = self._max_depth
 
-        # 读取当前深度和最大深度
         current_depth = ctx.state.get(self._depth_key, 0)
         max_depth = ctx.state.get(self._max_depth_key, self._max_depth)
 
-        # 检查是否有 delegate 路由信号
-        # 本插件只在有 delegate 信号时触发深度检查
+        # 本插件只在有 delegate 路由信号时触发深度检查
         ctx.state.get(StateKeys.CORE_TYPE, "llm_call")
         routed_to = ctx.state.get(StateKeys.ROUTED_TO, None)
 
@@ -124,7 +120,6 @@ class DelegateDepthGuardPlugin(IOutputPlugin):
                 max_depth,
             )
 
-            # 检查是否超限
             if new_depth > max_depth:
                 logger.warning(
                     "[%s] Delegate depth exceeded! depth=%d, max=%d. Blocking delegation.",

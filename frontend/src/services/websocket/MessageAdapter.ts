@@ -4,8 +4,6 @@
  * 仅保留 widget_event 族（P2 协议）的适配：插件向 UI 推送的 widget 交互事件。
  * 0.1 Python 内核的双向消息格式适配（adaptIncomingMessage / adaptOutgoingMessage /
  * isRustKernelMessage）已随 0.1 内核退役移除——0.2 Rust 内核消息格式不再需要适配层。
- *
- * @module MessageAdapter
  */
 
 /** 原始 WebSocket 消息 */

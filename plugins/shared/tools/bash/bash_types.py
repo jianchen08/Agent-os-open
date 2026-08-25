@@ -116,7 +116,7 @@ class WorkUnit:
 
     pid: int  # 主进程 pid（本地=OS pid；容器=容器内 pid，配 metadata['container_id']）
     command: str
-    pgid: int | None = None  # 进程组号（保留字段，当前容器后端不用——整组杀已废弃）
+    pgid: int | None = None  # 进程组号（容器后端不用，本地后端整树杀走 psutil）
     metadata: dict[str, Any] = field(default_factory=dict)
 
 

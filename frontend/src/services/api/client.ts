@@ -10,7 +10,7 @@ import { refresh, getAccessToken, clearTokens, stopAutoRefresh } from '../auth/t
 import type { ApiError } from '../../types/api'
 
 // NOTE: token 生命周期（互斥刷新/存取/续期调度）统一由 tokenLifecycle 提供
-// （2026-08-21 架构收口）。tokenLifecycle 对本文件的依赖是动态 import
+// （架构收口）。tokenLifecycle 对本文件的依赖是动态 import
 // （refresh → services/api/auth → 本文件），因此本文件可静态 import 它，
 // 不构成静态循环依赖。
 
@@ -136,7 +136,7 @@ apiClient.interceptors.response.use(
       originalRequest._retry = true
 
       try {
-        // 刷新统一委托 tokenLifecycle.refresh（单一互斥源，2026-08-21 收口）。
+        // 刷新统一委托 tokenLifecycle.refresh（单一互斥源）。
         // 并发的 401 请求会共享同一个 in-flight refresh，后端只被调用一次，
         // 消除 refresh_token 单次轮换被并发击穿导致的 race。
         await refresh()
@@ -268,7 +268,7 @@ apiClient.interceptors.response.use(
 
     // 可选端点：前端会调但后端可能尚未实现/非核心路径，404 不上报刷屏
     // 真实业务失败仍通过 Promise.reject 交给调用方处理
-    // （floating-chat 已随批次 0-4 退役——前端改本地实现，无后端调用）
+    // （floating-chat 已退役——前端改本地实现，无后端调用）
     const isOptionalEndpoint =
       requestUrl.includes('/evaluation-metrics') ||
       requestUrl.includes('/agent-calls') ||

@@ -321,14 +321,11 @@ class KeyPoolAdapter(_BaseLiteLLMAdapter):
             sorted(input_kwargs.keys()), _dc_t0,
         )
         # ★ 把首 token 超时"包括在" litellm.acompletion 调用本身（HTTP 层）。
-        # 生产故障（2026-08-05 17:05:34 卡死 36 分钟）：litellm 内部存在事件循环
-        # 线程内同步阻塞路径（如 get_llm_provider 的同步网络调用），冻结主事件
-        # 循环 → 全进程 0 日志 36 分钟。事件循环冻结时 asyncio 层超时
-        # （wait_for/asyncio.wait/shield）全部失效（17:08:34 只有 threading.Timer
-        # 独立线程诊断触发，asyncio.wait 从未超时）。httpx 层 timeout 在线程池
-        # 线程内由 socket 定时生效，不依赖事件循环调度——传 180s 后卡死的 HTTP
-        # 请求必然到点抛异常透传。用户明确指示："将首token超时包括在里面就行，
-        # 把超时时间设到180"。
+        # litellm 内部存在事件循环线程内同步阻塞路径（如 get_llm_provider 的
+        # 同步网络调用），冻结主事件循环时 asyncio 层超时（wait_for/
+        # asyncio.wait/shield）全部失效。httpx 层 timeout 在线程池线程内由
+        # socket 定时生效，不依赖事件循环调度——传 180s 后卡死的 HTTP
+        # 请求必然到点抛异常透传。"将首 token 超时包括在调用本身"。
         _acompletion_timeout = float(kwargs.pop("first_chunk_timeout", 0)) or 180.0
         # 调用方已显式传 HTTP timeout（流式 _call_streaming 会把 first_chunk_timeout
         # pop 掉并转成 timeout 传入）→ 以调用方为准，避免默认 180 覆盖自定义值。

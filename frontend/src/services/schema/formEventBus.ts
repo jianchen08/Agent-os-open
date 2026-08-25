@@ -9,7 +9,7 @@
  * - 提交成功 emit `{eventName}`，payload = 表单值；
  * - 提交失败 emit `{eventName}:failed`，payload = { error, values }。
  *
- * 被否方案（ADR 2026-08-17-widget-event-linkage）：
+ * 被否方案（[来源: docs/decisions/2026-08-17-widget-event-linkage.md]）：
  * - DOM CustomEvent 全局广播：需序列化 payload、与 React 生命周期割裂、难测；
  * - context 广播：只能父→子，声明组件跨空间（chat-input 槽 vs workspace 槽）不可达。
  * 模块级发布订阅是最小可行：同构声明、可测、组件卸载自动退订。

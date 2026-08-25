@@ -178,7 +178,7 @@ export const useInteractionStore = create<InteractionState>()((set, get) => ({
     )
   },
 
-  /** 按 pipelineId 获取已进入但未响应的交互（2026-08-22 裁决：精确归属，不跨命名空间撞键）
+  /** 按 pipelineId 获取已进入但未响应的交互（精确归属，不跨命名空间撞键）
    *
    * 归属规则：
    * - i.pipelineId === probe 精确命中（0.2 规范坐标）；

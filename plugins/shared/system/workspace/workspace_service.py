@@ -11,7 +11,7 @@ from workspace.models import FileTreeNode, Workspace
 
 logger = logging.getLogger(__name__)
 
-# ── GAP-1 统一：state 聚合读取器（channel_api server on_load 注入）──
+# ── GAP-1 统一：state 聚合读取器（on_load 注入）──
 # 约定签名：``() -> list[dict]``（sync 或 async，管道 state 聚合行，行为扁平点号键
 # 如 {"pipeline_id": ..., "task.scope": ..., "lineage.parent_pipeline_id": ...}）。
 # None = 未注入（回退 task_service 只读镜像）。
@@ -19,7 +19,7 @@ _state_reader: Any = None
 
 
 def set_state_reader(reader: Any) -> None:
-    """注入 state 聚合读取器（channel_api server on_load 经 pipeline-state capability）。"""
+    """注入 state 聚合读取器（on_load 经 pipeline-state capability）。"""
     global _state_reader  # noqa: PLW0603
     _state_reader = reader
 

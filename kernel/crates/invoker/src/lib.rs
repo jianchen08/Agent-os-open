@@ -12,8 +12,6 @@
 //! - `invoker`: PluginInvoker 实现——结构体、分发入口、sidecar 调用、空闲 GC
 //! - `shared`: 两种 host_type 共用的逻辑（config 注入、PluginInput 构造）
 //!
-//! [来源: docs/0.2_rust_plugin_solution.md §3.2]
-//! [来源: docs/tasks/task_05_plugin_system.md AC-04-5/AC-04-6]
 
 pub mod invoker;
 pub mod shared;

@@ -6,7 +6,7 @@
  *
  * 插件端点唯一真值源 = plugin.json http_endpoints 声明（生成物投影），
  * 本文件只 import 生成物投影（endpoints.generated.ts），不手写 /ext 字面量
- * （ADR 2026-08-21 channel_api 退役：前端端点供给模型改生成式）。
+ * （[来源: docs/decisions/2026-08-21-channel-api-retire-plugin-owned-http.md]）。
  */
 
 import {
@@ -99,7 +99,7 @@ export const API_ENDPOINTS = {
     /** 获取记忆统计 */
     STATS: HINDSIGHT_MEMORY_SERVICE_ENDPOINTS.memory_stats,
   },
-  /** Agent配置相关 - agent_manager 插件端点（生成物投影；2026-08-20 插件化，原内核 /api/v1/agents* 已删） */
+  /** Agent配置相关 - agent_manager 插件端点（生成物投影） */
   AGENTS: {
     /** 获取Agent配置列表 */
     LIST: AGENT_MANAGER_ENDPOINTS.agent_manager_list,
@@ -332,7 +332,7 @@ export const API_ENDPOINTS = {
     /** 获取标签列表 */
     TAGS: HINDSIGHT_MEMORY_SERVICE_ENDPOINTS.kb_tags,
   },
-  /** 全局搜索相关 - monitoring 插件端点（原 channel_api search 假数据，接真搜内核 messages/pipeline-state） */
+  /** 全局搜索相关 - monitoring 插件端点（搜内核 messages/pipeline-state） */
   SEARCH: {
     /** 统一搜索（会话 + 消息），参数 q/type/limit */
     GLOBAL: MONITORING_ENDPOINTS.mon_search_global,

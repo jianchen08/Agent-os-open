@@ -2,7 +2,7 @@
  * 生成物：插件 http_endpoints 声明的投影 —— 勿手改！
  *
  * 唯一真值源 = 各插件 plugin.json 的 http_endpoints 声明
- * （ADR 2026-08-21 channel_api 退役：前端端点供给模型改生成式）。
+ * （[来源: docs/decisions/2026-08-21-channel-api-retire-plugin-owned-http.md]）。
  * 路径模板 {param} 原样保留，消费方自行替换参数。
  * 改动插件 manifest 后执行再生成：
  *     python scripts/gen_frontend_endpoints.py

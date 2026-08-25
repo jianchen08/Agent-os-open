@@ -2,7 +2,7 @@
  * 调试执行记录页面（query 化：双 useQuery 缓存 SWR，重挂零请求）
  *
  * 展示执行记录列表，支持按会话过滤；「清空全部」一键清理所有执行记录与
- * 轨迹（2026-08-24：内核 9 表 + LLM 请求快照文件，users 保留，自动备份）。
+ * 轨迹（内核 9 表 + LLM 请求快照文件，users 保留，自动备份）。
  */
 
 import { useQueryClient } from '@tanstack/react-query'
@@ -119,7 +119,7 @@ function extractClearError(e: unknown): string {
 /**
  * 调试执行记录页面组件
  *
- * 2026-08-19：后端已接内核消息快照（message_slots⨝blobs 读时重建），
+ * 后端已接内核消息快照（message_slots⨝blobs 读时重建），
  * message_data 携带全文/tool_calls/reasoning——本页展开渲染拼装后的消息内容。
  */
 export function DebugExecutionRecordsPage({ embedded }: { embedded?: boolean } = {}) {

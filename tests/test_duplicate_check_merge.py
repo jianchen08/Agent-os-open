@@ -1,11 +1,8 @@
-"""duplicate_check 消息注入修复 — 不打断 assistant(tool_calls)→tool 序列。
+"""duplicate_check 消息注入契约 — 不打断 assistant(tool_calls)→tool 序列。
 
-验证改动：_inject_hint / _inject_warning 不再追加独立 system 消息，
-而是合并进末尾消息 content（参照 llm_error_recovery 范本）。
-
-修复前：往 messages 追加 role=system，在 llm_call 阶段会插到
-assistant(tool_calls) 之后、tool 之前 → 断序列 → 引擎中断。
-修复后：合并进末尾 tool/assistant content，序列保持完整。
+_inject_hint / _inject_warning 不追加独立 system 消息，而是合并进末尾
+消息 content（参照 llm_error_recovery 范本）：合并进末尾 tool/assistant
+content，assistant(tool_calls)→tool 序列保持完整。
 """
 
 from __future__ import annotations
@@ -58,8 +55,8 @@ class TestMergeDoesNotBreakSequence:
     def test_merge_into_assistant_with_tool_calls(self) -> None:
         """末尾是 assistant(tool_calls) 时，提示合并进 assistant content。
 
-        关键：这是改动前会断序列的场景（system 插在 assistant(tool_calls)
-        之后）。修复后合并进 assistant，不新增消息。
+        契约：不新增独立 system 消息（system 插在 assistant(tool_calls) 与
+        tool 之间会断序列），提示须并入 assistant content。
         """
         plugin = _make_plugin()
         ctx = _make_ctx([

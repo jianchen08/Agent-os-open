@@ -1,4 +1,4 @@
-"""触发器管理 REST 面（channel_api triggers 域接真，2026-08-21 收尾）。
+"""触发器管理 REST 面。
 
 channel_api 的 /ext/channel_api/triggers/* 原为纯 stub（创建返回硬编码存根）。
 本模块把管理面落到 trigger_setup_tool 插件自身：与 LLM 工具 trigger_setup

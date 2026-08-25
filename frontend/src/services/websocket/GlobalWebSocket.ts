@@ -36,8 +36,8 @@ const SEND_BUFFER_THRESHOLD = 1_000_000
 /**
  * user_input 离线排队 TTL：入队后超过此时长仍未随重连发出，则从队列剔除并
  * 广播 user_input_send_timeout（UI 层据此移除"思考中"占位气泡并向用户报错）。
- * 2026-08-21 实测故障：token 过期致 WS 断连 7 分钟，期间发送的消息静默滞留
- * 内存队列，气泡无限转、刷新后凭空消失、全程零提示——发送层必须有界失败。
+ * 发送层必须有界失败：token 过期致 WS 断连期间，消息不得静默滞留内存队列
+ * （气泡无限转、刷新后凭空消失、全程零提示）。
  */
 const USER_INPUT_QUEUE_TTL_MS = 20_000
 
@@ -71,7 +71,7 @@ class GlobalWebSocketService {
    *
    * 内核踢旧会发带 4000 状态码的 Close 帧；onclose(4000) 置位后，任何自动
    * 重连路径（visibilitychange 回前台、router token 变化等）都不得再 connect
-   * ——否则 A/B 两页互相踢旧重连形成互踢环（2026-08-17 双客户端风暴的残余
+   * ——否则 A/B 两页互相踢旧重连形成互踢环（双客户端风暴的残余
    * 触发源）。刷新页面（新模块实例）或登出（disconnect 复位）后恢复。
    */
   private _kickedByReplacement: boolean = false
@@ -238,8 +238,7 @@ class GlobalWebSocketService {
         this._kickedByReplacement = true
         // 被踢页面已永久失联：滞留队列的消息永远不会发出（连接不再重建），
         // 立即清空并撤销其排队超时计时，再广播 kicked 让 UI 明示用户——
-        // 此前静默装死，用户以为页面在线，实际消息全部黑洞（2026-08-21 实测：
-        // 双页面互踢风暴中气泡无限转、回复丢失、渲染错乱）。
+        // 否则静默装死，用户以为页面在线，实际消息全部黑洞。
         this._queue = []
         this._userInputTimers.forEach((timer) => clearTimeout(timer))
         this._userInputTimers.clear()
@@ -360,7 +359,7 @@ class GlobalWebSocketService {
   }
 
   /**
-   * 上报当前选中的会话切换（排队优先级键，ADR-2026-08-15）。
+   * 上报当前选中的会话切换（排队优先级键，[来源: docs/decisions/2026-08-15-pipeline-run-chain-serialization.md]）。
    * 内核据此把该用户的活跃管道更新为当前选中管道——全局并发闸门有排队时，
    * 活跃管道的 run 优先获得槽位。通知性消息：离线时直接丢弃（后端以最近
    * user_input 派发兜底），不进离线队列。
@@ -587,7 +586,7 @@ class GlobalWebSocketService {
         return
       }
 
-      // 认证拒绝：必须先刷新 token 再连（tokenLifecycle 唯一刷新源，2026-08-21 收口）
+      // 认证拒绝：必须先刷新 token 再连（tokenLifecycle 唯一刷新源）
       _wsLogger.info('[GlobalWS] 连接被认证拒绝(4001)，刷新 token 后再重连')
       try {
         await refresh()

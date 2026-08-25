@@ -168,7 +168,7 @@ def test_root_task_no_explicit_ws_default_mode_builds_worktree(manager_cls, tmp_
 
     source_path 由 plugin._bootstrap 解析为项目根；_start_root_task 必须走
     worktree 建立分支（mode=worktree，path 落在 ws_base 下含 __wt_ 的目录），
-    而不是旧行为 plain 空目录。
+    而不是 plain 空目录。
     """
     project_root = tmp_path / "project"
     project_root.mkdir()

@@ -216,8 +216,7 @@ pub fn build_router_with_http_routes(
     let wildcard_handler = build_wildcard_handler(dispatcher.clone(), plugin_dirs.clone());
     router = router.route("/ext/{*rest}", wildcard_handler);
     // G6-a：/api/v1/datasource/{*rest} 数据源代理——改写 /ext/{rest} 复用同一分发。
-    // 前端 fetchDatasourceOptions 对非绝对 URI 走此前缀（旧占位护栏在 frontend
-    // client.ts isOptionalEndpoint，本路由接管后移除该护栏）。
+    // 前端 fetchDatasourceOptions 对非绝对 URI 走此前缀。
     let datasource_handler = build_datasource_handler(dispatcher, plugin_dirs);
     router = router.route("/api/v1/datasource/{*rest}", datasource_handler);
     router

@@ -1,12 +1,10 @@
-"""记忆管理 API 路由（memory 域）——自持版，由 hindsight_memory_service http.handle 分发。
+"""记忆管理 API 路由（memory 域），由 hindsight_memory_service http.handle 分发。
 
-迁移自 channel_api/routes_memory.py（channel_api 退役方案批次 1：memory 域 → 本插件）：
-
-- 业务函数原样保留，响应形态逐项对齐（前端 services/api/memory.ts 直接消费）；
+- 业务函数响应形态逐项对齐（前端 services/api/memory.ts 直接消费）；
 - 剥离 FastAPI 依赖：无 APIRouter/Depends/Query/pydantic 模型，返回纯 dict；
 - 出错抛 :class:`MemoryAPIError`（status_code/error_code/message），由 server.py
   http.handle 统一捕获转对应 HTTP 状态（404 形态与旧版一致：body `{"detail": ...}`）；
-- 后端注入机制不变：模块级 ``set_memory_backend`` / ``_get_memory_backend``，
+- 后端注入机制：模块级 ``set_memory_backend`` / ``_get_memory_backend``，
   server.py 分发时懒构建注入（幂等；能力缺失保持 None → 空结果降级），测试直接传 mock；
 - user_id 恒 "default"——与 channel_api 分发时省略 ``_user``（Depends 缺省 → "default"）
   的行为逐位对齐；鉴权由内核 dispatcher 按 http_endpoints.auth=user 完成，handler 不读身份。
@@ -21,7 +19,7 @@ from typing import Any
 
 logger = logging.getLogger(__name__)
 
-# ── 模块级依赖注入（与 channel_api 同款模式）───────────────────────────────
+# ── 模块级依赖注入 ──────────────────────────────────────────────────────────
 # 长期记忆后端（IMemoryBackend：search/delete 等），None 时所有端点空结果降级。
 # 由 server.py http.handle 懒构建注入，测试直接赋值。
 _memory_backend: Any | None = None
@@ -30,7 +28,7 @@ _memory_backend: Any | None = None
 _STATS_TOP_K = 1000
 _FETCH_TOP_K = 1000
 
-# 后端缺省 user_id（channel_api 分发时不传 _user → FastAPI Depends 缺省 → "default"）
+# 后端缺省 user_id（分发时不传 _user → Depends 缺省 → "default"）
 _DEFAULT_USER_ID = "default"
 
 

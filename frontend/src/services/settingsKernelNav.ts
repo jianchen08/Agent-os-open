@@ -2,7 +2,7 @@
  * 内核设置导航项共享数据源
  *
  * SettingsHubWidget（工作区设置面板 settings_hub，设置唯一 UI）的「内核设置」
- * 导航（模型 / 主题 / 插件 / 管道）。独立路由页 /settings 已退役（2026-08-24）。
+ * 导航（模型 / 主题 / 插件 / 管道）。无独立路由页 /settings。
  */
 
 export interface KernelNavItem {

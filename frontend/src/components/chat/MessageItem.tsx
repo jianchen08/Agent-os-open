@@ -203,7 +203,7 @@ export const MessageItem = memo(function MessageItem({
     taskId,
   })
 
-  /** 工具消息独立渲染：统一走 ActivityCard（与消息流 parts 吸收路径同款满宽卡，2026-08-19 统一） */
+  /** 工具消息独立渲染：统一走 ActivityCard（与消息流 parts 吸收路径同款满宽卡） */
   if (isTool) {
     const toolName: string = message.toolName || (message.metadata?.name as string | undefined) || '工具'
     const toolStatus: string = message.status || 'completed'
@@ -368,7 +368,7 @@ export const MessageItem = memo(function MessageItem({
               // 无圆角/阴影/边框，文字随对话区区域前景（--region-chat-fg）
               if (!isUser && !isSystemMessage && bubbleAiMode === 'flat') {
                 if (bgImageActive) {
-                  // 背景图上平铺文本不许裸贴（用户裁决 2026-08-22）：换成
+                  // 背景图上平铺文本不许裸贴：换成
                   // 半透明气泡面——面用皮肤原生气泡令牌（翻译器按皮肤
                   // patches.css 提取 --bubble-ai-bg，跟皮肤颜色一样），
                   // 无皮肤气泡声明的主题回退 --card；局部仅内容区（收拢由
@@ -436,7 +436,7 @@ export const MessageItem = memo(function MessageItem({
                 return (
                   <div className={bubbleCls} style={bubbleStyle}>
                     {userContent && (
-                      // 用户消息统一 markdown 渲染（ADR 2026-08-21，与 assistant 同款）：
+                      // 用户消息统一 markdown 渲染（与 assistant 同款）：
                       // 附件索引以 markdown 引用并入 content（![f](/uploads/x.png)），
                       // 图片/链接由此直接渲染，历史回读天然带引用。
                       <div className="text-sm">
@@ -498,7 +498,7 @@ export const MessageItem = memo(function MessageItem({
               // 否则只剩头像/时间戳的空气泡，用户看不到"agent 正在等我审批"。
               const _waitingInteraction = isAssistant && hasPendingInteraction
               // 失败/中断消息不能隐藏：stream_error 标记 error 且无内容时，
-              // 隐藏会导致消息凭空消失（2026-08-22 错误透传收口）。
+              // 隐藏会导致消息凭空消失（错误透传收口）。
               const _isFailedMessage = message.status === 'error' || message.status === 'failed'
 
               if (

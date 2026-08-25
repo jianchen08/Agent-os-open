@@ -74,8 +74,8 @@ BASE_TEST_PATHS: list[str] = [
     "tests/test_isolation_prune_throttle.py",
     "tests/test_isolation_sandbox.py",
     "tests/test_isolation_skills_copy.py",
-    # 2026-08-21 覆盖率批次：既有绿灯测试接线进插桩车道（此前 @ci: none-local
-    # 未接车道，目标模块整体不进覆盖面：python_packager/server.py（sidecar-only
+    # 2026-08-21 覆盖率批次：既有绿灯测试接线进插桩车道（@ci: none-local
+    # 未接车道时目标模块整体不进覆盖面：python_packager/server.py（sidecar-only
     # 缺进程内导入）、download/tool.py、triggers_ext、monitoring 等）。
     # 全部目录 2026-08-21 本地单跑绿后接入。
     "plugins/shared/system/python_packager/",
@@ -86,8 +86,8 @@ BASE_TEST_PATHS: list[str] = [
 ]
 
 # 外部依赖 marker 过滤（requires_api/requires_redis/requires_db/requires_bwrap
-# 标记已于 2026-08-25 清理——全仓零使用；原过滤表达式随之清空，两侧 gate
-# 的 -m 参数与无过滤等价，保留该参数形态以防未来新增外部依赖标记时单点加回）。
+# 标记已清理——全仓零使用；过滤表达式为空，两侧 gate 的 -m 参数与无过滤
+# 等价，保留该参数形态以防未来新增外部依赖标记时单点加回）。
 MARKER_FILTER = ""
 
 

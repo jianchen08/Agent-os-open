@@ -7,7 +7,6 @@
 //! 两种 host_type 共用 PluginInput / PluginResult JSON 契约，invoker 透明分发。
 //! （原 Wasm 轨已按两轨终局决策关闭摘除，见 core::traits::HostType 文档。）
 //!
-//! [来源: docs/tasks/task_05_plugin_system.md AC-04-5/AC-04-6]
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -435,7 +434,7 @@ pub struct PluginInvokerImpl {
     /// sidecar 最后调用时刻 {plugin_id: Instant}——空闲软卸载依据。
     /// 每次 get_or_create_mcp_client 命中/创建时刷新；后台 GC 据此判定是否空闲超时。
     last_used: RwLock<HashMap<String, Instant>>,
-    // （原 PYTHONPATH 注入状态字段 `pythonpath_src` 已随批 D 翻转退役——SDK 由
+    // （原 PYTHONPATH 注入状态字段 `pythonpath_src` 已退役——SDK 由
     // per-plugin venv 的 editable install 解析，`resolve_pythonpath_src` 已删除，
     // `set_pythonpath_src` 保留为兼容 no-op。）
 }
@@ -456,12 +455,9 @@ impl PluginInvokerImpl {
         }
     }
 
-    /// 兼容 no-op（批 D 翻转后 PYTHONPATH 注入已整体退役，2026-08-19）。
-    ///
-    /// 历史用途：内核构造期注入 project_root，invoker 据此拼 PYTHONPATH 给 sidecar
-    /// 子进程（解 SDK + src.*/config.* import）。批 A-D 全量 venv 化后 SDK 由
-    /// per-plugin venv 的 editable install 解析（清 env 实证），两套解析路径并存
-    /// 是版本不同步事故温床（方案 §八），故注入链路整体删除。
+    /// 兼容 no-op：PYTHONPATH 注入已整体退役——SDK 由 per-plugin venv 的
+    /// editable install 解析，注入链路已删除（两套解析路径并存是版本不同步
+    /// 事故温床）。
     ///
     /// **保留本方法签名仅为内核 main（crates/api）装配代码兼容**——调用是无害的：
     /// 只打一条诊断日志（运维据此发现旧装配残留），不再影响任何 sidecar 环境。
@@ -1034,8 +1030,7 @@ impl PluginInvokerImpl {
     /// 旧实例，router 前 spawn 的 sidecar（如 boot 期 G2 存量校验窗口，
     /// 见 agentos-kernel.rs 注册闸 G2 块与 set_router 的顺序）将以空
     /// capabilities initialize 长存，插件反向调用（tool-executor/
-    /// service-registry）永远 KeyError（2026-08-19 e2e 实测 memory
-    /// 后端"未注入"根因）。
+    /// service-registry）永远 KeyError。
     pub fn set_router(&self, router: Arc<dyn CapabilityRouter>) {
         // sidecar：存 router，新建 MCP client 时带上（PluginScopedRouter）。
         // native：router 存此，execute 时包成 NativeHostServices 注入 ExecContext
@@ -1372,10 +1367,8 @@ impl PluginInvokerImpl {
                     c = c.with_working_dir(plugin_dir);
                 }
 
-                // PYTHONPATH 注入已整体退役（批 D 翻转，2026-08-19）：SDK 由 per-plugin
-                // venv 的 editable install 解析（批 A 清 env 实证 8/8、批 B 45/45、批 C
-                // 32/32、批 D 11/11 + builtin_tools），两套解析路径并存是版本不同步
-                // 事故温床（方案 §八被否方案表"保留 PYTHONPATH 作 SDK 兜底"行）。
+                // PYTHONPATH 注入已整体退役：SDK 由 per-plugin venv 的 editable
+                // install 解析，两套解析路径并存是版本不同步事故温床。
                 // 这里只透传日志配置 env（进程级常量，适合走 env；per-request 上下文
                 // 走 JSON-RPC）。仅当父进程已设置时透传，否则让 sidecar SDK 用其默认
                 // （INFO + stderr）。SDK 启动时读这些 env 调用 setup_logging，使 sidecar
@@ -1397,8 +1390,8 @@ impl PluginInvokerImpl {
 
         // 插件级调用超时（manifest.mcp.request_timeout_secs）：长等待业务
         // （human-interaction.wait_for_choice 的 24h 审批等）必须显式声明，
-        // 否则内核 MCP client 300s 默认兜底先于用户操作掐断调用（2026-08-17
-        // 审批 5 分钟窗口实锤：-32001 超时 → 审批作废 → 引擎重试弹窗循环）。
+        // 否则内核 MCP client 300s 默认兜底先于用户操作掐断调用（-32001 超时
+        // → 审批作废 → 引擎重试弹窗循环）。
         if let Some(secs) = manifest.mcp.as_ref().and_then(|m| m.request_timeout_secs) {
             client = client.with_request_timeout(std::time::Duration::from_secs(secs));
         }
@@ -1501,14 +1494,14 @@ impl PluginInvokerImpl {
         Ok((command, args))
     }
 
-    /// 解析 sidecar 启动命令（uv 迁移批 D，**单轨 fail-closed**，2026-08-19 裁定）。
+    /// 解析 sidecar 启动命令（uv 迁移，**单轨 fail-closed**）。
     ///
     /// entry 首词是 PATH 裸 python/python3（含 `.exe`/`.bat`/`.cmd` 扩展）的 Python
     /// sidecar **必须**命中插件目录的 venv 解释器：uv 迁移契约双标志
     /// （**pyproject.toml + `.venv`**）缺任一、或 loader 查不到插件目录 → 直接返回
-    /// Err（带可读修复指引），**不再回退 PATH 裸 python**（plain 轨已删——兜底会
+    /// Err（带可读修复指引），**不再回退 PATH 裸 python**——兜底会
     /// 把"venv 未建"静默糊弄成"裸解释器缺依赖启动即崩/行为漂移"，单轨契约下
-    /// 早失败比晚卡死好）。
+    /// 早失败比晚卡死好。
     ///
     /// 不受影响的形态：
     /// - entry 首词非 python（如 `node server.js`）→ 原样（本函数只管 Python sidecar）；
@@ -1516,7 +1509,7 @@ impl PluginInvokerImpl {
     /// - external MCP（streamable_http / 外部 stdio command）/ native dll → 不走本函数。
     ///
     /// venv 解释器以**绝对路径**替代裸命令——SDK/第三方依赖由 venv 内 editable
-    /// install 解析（PYTHONPATH 注入已随批 D 整体退役）。绝对路径含路径分隔符与
+    /// install 解析（PYTHONPATH 注入已整体退役）。绝对路径含路径分隔符与
     /// `.`，天然绕过 mcp 侧 `resolve_windows_command` 的 PATHEXT 探测（该函数对
     /// 带分隔符/扩展名的命令原样返回），不会被误解析。
     fn resolve_sidecar_command(
@@ -1528,7 +1521,7 @@ impl PluginInvokerImpl {
             return Ok((command, args));
         }
 
-        // fail-closed：Python sidecar 必须有 venv（批 D 单轨，plain 回退已删）。
+        // fail-closed：Python sidecar 必须有 venv（单轨，plain 回退已删）。
         let dir = self.loader.get_plugin_dir(&manifest.id).ok_or_else(|| {
             PluginError {
                 message: format!(
@@ -2903,7 +2896,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_get_or_create_http_cached_client_not_misjudged_dead() {
-        // §3.2（0.2 收尾批次 1）：HTTP transport 客户端（pid 恒 None、is_alive 恒
+        // §3.2：HTTP transport 客户端（pid 恒 None、is_alive 恒
         // false——无子进程）进入缓存后，get_or_create_mcp_client 的 fast path
         // 必须判「存活」：返回同一缓存实例，不触发 notify_crash、不逐出重建。
         // 旧实现裸用 is_alive() 判死，HTTP 插件每次调用都误报 "Plugin process
@@ -2956,7 +2949,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_get_or_create_dead_stdio_sidecar_still_detected_and_rebuilt() {
-        // §3.2（0.2 收尾批次 1）回归护栏：stdio sidecar 真死（pid=Some 且进程
+        // §3.2 回归护栏：stdio sidecar 真死（pid=Some 且进程
         // 已退出）仍必须判死——notify_crash + 缓存逐出 + 走 respawn 路径。
         // fast path 接入 is_dead_sidecar 门控后该既有语义不得回归。
         //
@@ -3035,7 +3028,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_shutdown_all_drains_and_kills_cached_sidecars() {
-        // §3.3a（0.2 收尾批次 1）：内核停机口——mcp_clients 必须**全量 drain**
+        // §3.3a：内核停机口——mcp_clients 必须**全量 drain**
         // 且每个缓存 sidecar 进程被真实 kill（Ctrl-C / exit 75 后零孤儿）。
         // 覆盖两类有区分度的缓存条目：
         // - stdio sidecar（有子进程）：kill 后进程必须死（性质断言，防假实现只清缓存）；
@@ -3081,7 +3074,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_kill_sidecar_if_any_kills_cached_and_noop_when_absent() {
-        // §3.3b（0.2 收尾批次 1）：disable 窄口——
+        // §3.3b：disable 窄口——
         // - 有缓存条目：kill 进程 + 移除缓存（reenable 后按调用懒 spawn 重生）；
         // - 无缓存条目（从未 spawn / HTTP 无子进程）：no-op 不抛。
         // 两组输入一次覆盖（有/无是同一行为的有区分度两分支）。
@@ -3619,7 +3612,7 @@ mod tests {
 
     #[test]
     fn test_set_pythonpath_src_is_compatible_noop() {
-        // 批 D 翻转：PYTHONPATH 注入整体退役，set_pythonpath_src 降级为兼容 no-op
+        // PYTHONPATH 注入整体退役，set_pythonpath_src 降级为兼容 no-op
         // （内核 main 装配代码仍调用，签名保留；resolve_pythonpath_src 已删除）。
         // 这里固化"调用无害"：不 panic、不 panic 之外无可见行为可断言（仅诊断日志）。
         let loader = Arc::new(MockLoader::new());
@@ -3627,7 +3620,7 @@ mod tests {
         invoker.set_pythonpath_src(repo_root());
     }
 
-    // ── venv 单轨（uv 迁移批 D 翻转）：路径选择逻辑单元层 ──
+    // ── venv 单轨（uv 迁移翻转）：路径选择逻辑单元层 ──
 
     /// 造一个假 .venv：只放空文件占位解释器路径（find_venv_interpreter 只做
     /// is_file 探测，不执行——真实解释器由 boot 冒烟验证）。
@@ -3673,7 +3666,7 @@ mod tests {
 
     #[test]
     fn test_find_venv_interpreter_missing_venv_returns_none() {
-        // 无 .venv → None（resolve_sidecar_command 层据此 fail-closed，批 D 单轨）。
+        // 无 .venv → None（resolve_sidecar_command 层据此 fail-closed，单轨）。
         let tmp = tempfile::tempdir().unwrap();
         assert_eq!(find_venv_interpreter(tmp.path()), None);
         // .venv 目录存在但解释器缺失（半成品）同样 None，不误切。
@@ -3732,9 +3725,9 @@ mod tests {
 
     #[test]
     fn test_resolve_sidecar_command_venv_without_pyproject_fails_closed() {
-        // 批 D 翻转回归闸（原批 A 双轨版为 keeps_plain）：仅 .venv 无 pyproject
+        // 回归闸：仅 .venv 无 pyproject
         // → Err（PYPROJECT_MISSING）而非回退裸 python——plain 轨已删，半契约状态
-        // 必须早失败并给出修复指引（fail-closed，2026-08-19 裁定）。
+        // 必须早失败并给出修复指引（fail-closed）。
         let tmp = tempfile::tempdir().unwrap();
         let interp = if cfg!(windows) {
             tmp.path().join(".venv").join("Scripts").join("python.exe")
@@ -3767,7 +3760,7 @@ mod tests {
     #[test]
     fn test_resolve_sidecar_command_no_venv_fails_closed() {
         // 有 pyproject 无 .venv → Err（VENV_INTERPRETER_MISSING），错误含
-        // `uv venv`/`uv sync` 重建指引——不再回退 PATH 裸 python（批 D 翻转）。
+        // `uv venv`/`uv sync` 重建指引——不再回退 PATH 裸 python。
         let tmp = tempfile::tempdir().unwrap();
         std::fs::write(tmp.path().join("pyproject.toml"), b"[project]\n").unwrap();
 
@@ -3798,8 +3791,8 @@ mod tests {
 
     #[test]
     fn test_resolve_sidecar_command_unknown_dir_fails_closed() {
-        // loader 查不到插件目录（get_plugin_dir None）→ Err（批 D 翻转：
-        // 原 keeps_plain 双轨语义删除——查不到目录就无法定位 venv，fail-closed）。
+        // loader 查不到插件目录（get_plugin_dir None）→ Err（
+        // 原 keeps_plain 双轨语义已删——查不到目录就无法定位 venv，fail-closed）。
         let loader = Arc::new(MockLoader::new());
         let invoker = PluginInvokerImpl::new(loader);
         let manifest = make_sidecar_manifest("ghost", "python server.py");

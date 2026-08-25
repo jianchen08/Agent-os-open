@@ -1,7 +1,7 @@
 /**
- * Token 生命周期单一职责模块（2026-08-21 架构收口，用户裁决：同一职责必须内聚）。
+ * Token 生命周期单一职责模块（同一职责必须内聚）。
  *
- * 此前 token 生命周期散落五处——authStore 主动续期定时器 / HTTP 401 拦截 /
+ * token 生命周期散落五处——authStore 主动续期定时器 / HTTP 401 拦截 /
  * WS 4001 重连刷新 / initializeAuth 恢复 / visibilitychange 检查——外加 token
  * 存取三入口（tokenManager / authStorage / 直接 localStorage）。每处失败都是
  * 静默的，每次故障都在离故障最近处打补丁，是「token 过期修 N 次还在复发」的
@@ -20,7 +20,7 @@ export function isAuthFailureFromError(error: unknown): boolean {
   if (!error) return false
   // 无刷新凭据（refresh 的确定性失败）：重试永远无意义，按认证失败处理，
   // 让 WS 重连流程走 triggerAuthExpired 跳登录——否则被当瞬时故障无限重试，
-  // 表现为「未连接」常驻且永不弹登录（2026-08-21 实测）。
+  // 表现为「未连接」常驻且永不弹登录。
   if ((error as { authNoCredentials?: boolean })?.authNoCredentials === true) return true
   // 直接的 axios 错误
   const directStatus = (error as { response?: { status?: number } })?.response?.status
@@ -163,7 +163,7 @@ export async function ensureFreshToken(): Promise<string | null> {
 }
 
 // ──────────────────────────────────────────────
-// 主动续期调度（唯一持有；失败退避不断链，2026-08-21 修复）
+// 主动续期调度（唯一持有；失败退避不断链）
 // ──────────────────────────────────────────────
 
 /** 提前刷新的最大余量（毫秒），避免 TTL 很大时刷新过于提前 */

@@ -87,15 +87,14 @@ def _ctx_for(tool_name: str, command: str, *, provider: str = "host") -> PluginC
 
 
 class TestPerRoundApproval:
-    """bug 修复核心契约：同一插件实例跨轮调用，每轮危险命令都要审批。"""
+    """契约：同一插件实例跨轮调用，每轮危险命令都要审批。"""
 
     @pytest.mark.asyncio
     async def test_second_round_still_triggers_approval(self, monkeypatch):
         """第一轮审批通过后，第二轮换不同危险命令 → 必须再次审批。
 
-        修复前：第一轮写入 security.decision 后永久驻留 state，
-        第二轮 execute() 开头幂等检查命中 → 跳过 → 审批只发起 1 次。
-        修复后：每轮独立检查 → 审批发起 2 次。
+        契约：审批状态不得跨轮驻留 state 使第二轮跳过（每轮独立检查 →
+        审批发起 2 次）。
         """
         from plugin import SecurityCheckPlugin
 

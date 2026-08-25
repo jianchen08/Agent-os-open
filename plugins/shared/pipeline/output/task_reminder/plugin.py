@@ -40,7 +40,7 @@ class TaskReminder(IOutputPlugin):
         state = ctx.state
         iteration = state.get("iteration", -1)
 
-        # ── 任务状态推进：pending → running（2026-08-24 职责边界）──
+        # ── 任务状态推进：pending → running ──
         # 任务提交后出生值 pending 只应停留极短时间：管道走完第一轮插件即视为
         # 已开始执行。内核不再回写任务状态（run 终态只广播事件），此处由任务域
         # 插件把 pending 推进为 running——任何轮次都推进（幂等：非 pending 不动）。
@@ -197,7 +197,7 @@ class TaskReminder(IOutputPlugin):
         # GAP-1 统一：task_evaluation_completed 为 0.1 孤儿标志（无写者），已移除——
         # 任务完成（run 终态）后管道自然结束，提醒随之停止。
 
-        # 评估闸门放行（2026-08-17 裁决）：任务完成必须经评估——已成功调用
+        # 评估闸门放行：任务完成必须经评估——已成功调用
         # task_evaluate（或评估模式已检测 evaluation_result JSON）即放行结束；
         # 未评估则继续走提醒，文案要求先提交评估。
         if self._has_successful_task_evaluate(state.get("messages", [])):

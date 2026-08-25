@@ -1,5 +1,5 @@
 /**
- * 管道运行注册表 query（服务端状态 query 化批次 4）
+ * 管道运行注册表 query（服务端状态 query 化）
  *
  * runs/states 数据唯一真值源 = TanStack Query 缓存：
  * - queryKeys.pipelineRuns（GET /api/v1/pipelines/runs，同管道多条 run 去重取最新）
@@ -7,7 +7,7 @@
  *
  * 轮询语义（替代原 pipelineRegistryStore.startAutoRefresh 的 30s setInterval）：
  * - refetchInterval: 30_000 —— 兜底对账频率与旧实现一致
- * - refetchOnWindowFocus 全局关闭（2026-08-24）：焦点/可见性事件噪声大
+ * - refetchOnWindowFocus 全局关闭：焦点/可见性事件噪声大
  *   （最大化、切全屏均触发），新鲜度由 30s 轮询 + WS 事件 invalidate 承担
  * - 页面隐藏自动暂停轮询（refetchIntervalInBackground 默认 false）
  *

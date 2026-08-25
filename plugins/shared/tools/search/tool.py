@@ -345,8 +345,7 @@ class ResourceSearchTool:
         # 收集 plugin.json：os.walk 原位剪枝 node_modules（必须改写 dirnames，
         # 生成器才不会深入）。Path.rglob 在 Python 3.12 会跟入符号链接/junction
         # 目录——plugins 下 dsh_adapter runtime 的 node_modules 是 pnpm 循环
-        # 链接结构，rglob/未剪枝的 walk 都会无限遍历（2026-08-17 e2e 实测
-        # resource_search 卡死根因）。剪枝后 0.06s / 105 个 manifest。
+        # 链接结构，rglob/未剪枝的 walk 都会无限遍历。剪枝后 0.06s / 105 个 manifest。
         import os as _os  # noqa: PLC0415
 
         plugin_jsons: list[Path] = []

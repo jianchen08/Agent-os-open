@@ -13,16 +13,13 @@ agent_id/source 命名沿用 src/memory/maintenance/service.py 约定：
 - agent_id = "review_agent"（config/agents/system/review_agent.yaml）
 - source = "tool_review"（触发来源溯源）
 
-channel_api 退役批次 5（2026-08-21，review P1-2 sidecar 化）：
-- src/review/ 的审批状态机（review_service/models）与媒体审阅
-  （media_review_service/media_reviewer）已迁入本插件包，http.handle 按
-  path 分发 9 端点（/ext/review_service/reviews/**，语义对齐原
-  /ext/channel_api/reviews/**——routes_reviews.py handler 迁入）。
-- media-review multipart 经内核透传 raw_body base64 + _parse_multipart
-  （email 标准库，与 multimodal/channel_api 同构）。
+HTTP 面：审批状态机（review_service/models）与媒体审阅
+（media_review_service/media_reviewer）在本插件包内，http.handle 按 path
+分发 9 端点（/ext/review_service/reviews/**，语义对齐原
+/ext/channel_api/reviews/**）；media-review multipart 经内核透传
+raw_body base64 + _parse_multipart（email 标准库）。
 
 [来源: docs/tasks/task_10_system_plugins.md AC-09-4]
-[来源: docs/working/channel_api插件拆迁方案_20260821.md 批次 5]
 """
 
 from __future__ import annotations
@@ -44,8 +41,8 @@ _HINDSIGHT_MEMORY_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), 
 if _HINDSIGHT_MEMORY_DIR not in sys.path:
     sys.path.insert(0, _HINDSIGHT_MEMORY_DIR)
 
-# 审批域（P1-2 接真，channel_api 退役批次 5）：状态机 + 媒体审阅迁入本插件包后
-# 平铺导入（server.py 运行目录即插件目录，与 workspace_service 同款惯例）。
+# 审批域（状态机 + 媒体审阅在本插件包内）：server.py 运行目录即插件目录，
+# 平铺导入（与 workspace_service 同款惯例）。
 import media_review_service  # noqa: E402
 from review_service import get_review_service  # noqa: E402
 from wiring import build_memory_backend  # noqa: E402
@@ -115,9 +112,9 @@ async def store_report(review_id: str, report: dict[str, Any]) -> None:
     # 无法定向查 task_id bank——bank 固定后 get_report 冷读才能定向检索
     # （task_id 保留在 content JSON 内不丢；存量 task_id bank 报告接受召回不全）。
     # metadata 携带 review_id 定向键：hindsight-client 0.9.x aretain 的
-    # metadata 是 dict[str,str] pydantic 校验，tags 以 list 塞入曾致写入
-    # 必炸（报告从未真正持久化，2026-08-19 批 C 取证）——tags 序列化与
-    # 定向键组装由 HindsightBackend.add 装配处负责（键值全 str）。
+    # metadata 是 dict[str,str] pydantic 校验，tags 必须序列化后经
+    # HindsightBackend.add 装配（键值全 str，否则写入失败）——tags 序列化与
+    # 定向键组装由 HindsightBackend.add 装配处负责。
     if _memory_backend is not None:
         try:
             await _memory_backend.add(
@@ -347,12 +344,11 @@ async def get_report(review_id: str) -> dict[str, Any]:
 async def _cold_read_report(review_id: str) -> dict[str, Any] | None:
     """冷读兜底：sidecar 重启后从 Hindsight 取回已持久化报告（G3）。
 
-    主路径（缺陷②修复）：走 HindsightBackend.get_documents（hindsight
+    主路径：走 HindsightBackend.get_documents（hindsight
     documents API）按 ``review_id:<id>`` tag 服务端精确过滤取回文档**原文**
     ``original_text``。recall 返回的是抽取后事实（world/observation/
     experience），原文 JSON 永不命中、``types=['memory']`` 原文召回模式
-    不存在（422）——旧相似度 search 路径对 hindsight 后端恒 miss
-    （2026-08-19 批 C 真实 API 取证）。
+    不存在（422）——相似度 search 路径对 hindsight 后端恒 miss。
 
     回落路径：后端无 get_documents（旧形态/非 hindsight）→ 既有相似度
     ``search(query, user_id, top_k, memory_type)`` 路径——以 review_id 为
@@ -478,8 +474,7 @@ async def _maybe_finalize_on_pipeline_completion(report: dict[str, Any]) -> None
     )
     if row is None:
         return
-    # 聚合行无独立 "status" 键（此前读它恒 None → 报告永久卡 running，
-    # 2026-08-19 e2e 实测）：终态判定 = task.status（任务域）或
+    # 聚合行无独立 "status" 键：终态判定 = task.status（任务域）或
     # ended/current_phase（执行域），两者任一信号到位即可。
     status = row.get("task.status") or row.get("status")
     ended = row.get("ended") is True or row.get("current_phase") == "exit"
@@ -515,7 +510,7 @@ async def _on_load(params: dict[str, Any]) -> None:
         logger.warning("[Review] 记忆后端未注入，复盘报告仅存内存（降级）")
 
 
-# ══ reviews 域 HTTP 面（channel_api 退役批次 5：P1-2 接真）═══════════════════
+# ══ reviews 域 HTTP 面 ═══════════════════════════════════════════════════════
 # 返回契约与既有 17 插件 http.handle 一致：ToolExecutionResult{success,data}，
 # data 为 HttpHandleResponse{status,headers,body,body_encoding}（body base64）。
 # 业务错误沿 routes_reviews 源语义：NOT_FOUND/INVALID/INTERNAL 以 200 +
@@ -573,7 +568,7 @@ def _parse_multipart(content_type: str, body_bytes: bytes) -> dict[str, Any]:
 
     返回 {字段名: 值}；文件字段值为 {filename, content_type, data(bytes)}，
     普通字段为 str。用 email.parser 解析（标准库，无外部依赖）——
-    与 multimodal/channel_api server._parse_multipart 同构随迁。
+    与 multimodal/channel_api server._parse_multipart 同构。
     """
     import email  # noqa: PLC0415
     from email.policy import default as default_policy  # noqa: PLC0415
@@ -938,8 +933,7 @@ async def _reviews_add_attachments(review_id: str, body: dict[str, Any]) -> dict
         },
     },
     description=(
-        "HTTP endpoint handler for /ext/review_service/** (reviews domain 9 endpoints, "
-        "channel_api 退役批次 5 P1-2 接真)"
+        "HTTP endpoint handler for /ext/review_service/** (reviews domain 9 endpoints)"
     ),
 )
 async def http_handle(

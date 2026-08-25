@@ -68,9 +68,8 @@ _memory_backend: Any | None = None
 def _make_capability_caller() -> Any | None:
     """从内核注入的 tool-executor 句柄构造 capability_caller（async fn `(method, params)`）。
 
-    唯一后端 = hindsight（retain/recall 经 tool-executor.invoke）。0.1 的内核
-    记忆表后端（memory.* 经 service-registry）已随内核 memory 表 DROP 退役
-    （2026-08-19），service-registry 路由分支随之删除。句柄未注入返回 None。
+    唯一后端 = hindsight（retain/recall 经 tool-executor.invoke）。句柄未注入
+    返回 None。
     """
     try:
         handle = plugin.get_capability("tool-executor")

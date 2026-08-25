@@ -233,8 +233,8 @@ async fn tool_message_returns_structured_envelope_fields() {
     );
 
     // ── content 契约：必须返回纯文本，而非整条消息 envelope JSON ──
-    // （回归保护：blob 存的是整条消息 JSON，HTTP 读路径曾误把裸 blob 当 content，
-    //   导致前端气泡显示 {"content":"...","role":"..."} 原始字段。）
+    // （回归保护：blob 存的是整条消息 JSON，HTTP 读路径不得把裸 blob 当 content，
+    //   否则前端气泡显示 {"content":"...","role":"..."} 原始字段。）
     let user_msg = messages
         .iter()
         .find(|m| m["role"] == "user")

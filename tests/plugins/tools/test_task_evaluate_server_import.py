@@ -2,9 +2,8 @@
 """task_evaluate server.py 进程内导入冒烟（mypy 收紧批配套）。
 
 意图（WHY）：
-- 2026-08-21 治理批次为 server.py 补 `from typing import Any`（原 Name not defined）
-  后该行进入 diff-coverage 度量面；server.py 为 sidecar-only 文件，此前无任何
-  进程内测试 → 覆盖面缺失（diff 门禁 fail-loud 的压力点即指此）。
+- server.py 为 sidecar-only 文件，需进程内测试覆盖（diff 门禁 fail-loud
+  的压力点）。
 - 本测试以 importlib 进程内装载 server.py：锁 import 期回归（sys.path 注入、
   AgentOSPlugin 实例化、@plugin.tool 注册）。
 """

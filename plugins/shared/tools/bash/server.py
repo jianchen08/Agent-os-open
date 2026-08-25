@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Bash 工具 MCP 服务端（0.2 sidecar 接口适配层）。
 
-生命周期治理（修复：每次 MCP 调用新建 BashTool 导致进程状态丢失）：
+生命周期治理：
 - `_tool` 为模块级惰性单例：所有 MCP 调用复用同一个 BashTool/ProcessManager，
   active_processes 跨调用保留（execute → input → continue → terminate 全链路可用）。
 - `on_unload` + `atexit`：sidecar 卸载/退出时调用 ProcessManager.shutdown_all()

@@ -342,7 +342,7 @@ export interface InterpretedChatCard {
 
 // ── 声明注册表：toolName → chat_card 声明（从 /api/v1/schema 的 tools[].ui.chat_card 装载） ──
 // 声明是静态的（每个工具一份），按名查比塞进每个 tool 事件更合理；后端只需在 ToolDescriptor
-// 透传 ui 字段（已落地），前端在 schema 加载时填充本表。
+// 透传 ui 字段，前端在 schema 加载时填充本表。
 const chatCardDeclarations = new Map<string, ChatCardDeclaration>()
 
 /**

@@ -184,7 +184,7 @@ class IsolationGuard(IInputPlugin):
 
         # 纯 LLM 回复（无工具调用）根本不需要 docker 隔离决策——提前返回，
         # 避免 execute 入口为普通聊天也触发 docker 探测（daemon 不可达时会卡满
-        # subprocess timeout，实测每条消息延迟 +15s）。docker 复检下移到确认
+        # subprocess timeout，每条消息延迟 +15s）。docker 复检下移到确认
         # 有 tool_calls 之后再做。
         if core_type != "tool_execute":
             return PluginResult()

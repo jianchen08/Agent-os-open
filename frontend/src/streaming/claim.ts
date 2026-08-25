@@ -1,5 +1,5 @@
 /**
- * 流式协议认领（claim）模块 —— ADR 2026-08-22「认领替代驱逐 + UI 寻址 id 永不迁移」。
+ * 流式协议认领（claim）模块 —— [来源: docs/decisions/2026-08-22-streaming-protocol-rewrite.md]。
  *
  * 症状根因①③（用户真机：发送后用户消息消失，刷新恢复）：new_message 事件
  * 到达时前端只做了「驱逐」——把 pending 乐观消息撤下，却没有任何路径把后端

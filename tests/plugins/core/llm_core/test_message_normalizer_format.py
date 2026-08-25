@@ -369,7 +369,7 @@ class TestNormalizeMessagesForProvider:
         assert json.loads(fixed) == {"a": 1}
 
     def test_minimax_arguments_truncated_json_repaired(self, mod) -> None:
-        # 流式截断的 arguments：修复后必须可解析且保留完整字段
+        # 契约：流式截断的 arguments 必须可解析且保留完整字段
         msg = _assistant("call_abc123", arguments='{"path": "/tmp/f')
         out = mod.normalize_messages_for_provider(
             [msg, _tool_result("call_abc123")],

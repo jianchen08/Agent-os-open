@@ -12,7 +12,7 @@
 7. VideoReviewer（fake av：格式/时长校验、_resolve_format、_extract_metadata、
    关键帧提取）
 
-媒体审阅为确定性规则校验（原实现无 LLM 依赖），mock 对象即"真"判据。
+媒体审阅为确定性规则校验（无 LLM 依赖），mock 对象即"真"判据。
 
 [来源: docs/working/channel_api插件拆迁方案_20260821.md 批次 5（review P1-2）]
 """

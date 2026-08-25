@@ -27,9 +27,9 @@ def _default_policy_path() -> Path:
 
     优先 AGENTOS_CONFIG_ROOT（内核启动设置、sidecar 继承，部署布局无关）；
     回退项目根相对推导（policy.py 在 <root>/plugins/shared/pipeline/input/
-    isolation_guard/ 下，parents[5] = 项目根）。旧锚 parents[2] 指向
-    plugins/shared/pipeline/config/——目录不存在，导致加载永远失败、
-    默认策略 = command_in_container 全员判危险（2026-08-17 审批风暴根因）。
+    isolation_guard/ 下，parents[5] = 项目根）。parents[2] 指向
+    plugins/shared/pipeline/config/——目录不存在，加载永远失败、
+    默认策略 = command_in_container 全员判危险。
     """
     env_root = os.environ.get("AGENTOS_CONFIG_ROOT")
     if env_root:

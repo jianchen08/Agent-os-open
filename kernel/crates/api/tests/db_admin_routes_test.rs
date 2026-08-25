@@ -169,7 +169,7 @@ async fn test_tables_lists_all_tables_dynamic() {
             "缺少表 {expect}: {names:?}"
         );
     }
-    // 退役 0.1 投影表不得再出现在表清单（2026-08-19 DROP 裁定）
+    // 退役 0.1 投影表不得再出现在表清单（DROP 语义：表清单与后端实际读写一一对应）
     for retired in [
         "memory",
         "execution_records",

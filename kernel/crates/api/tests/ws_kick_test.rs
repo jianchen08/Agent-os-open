@@ -2,10 +2,9 @@
 //! WS 单连接踢旧（B10）关闭码测试：同一 user 第二连接注册时，第一连接必须
 //! 收到带`CLOSE_CODE_KICKED`（4000）状态码的 Close 帧。
 //!
-//! 背景（2026-08-17 风暴复盘）：旧实现踢旧走空串哨兵 → `sender.close()` 发空
-//! Close（浏览器 onclose=1000/1005）→ 前端 GlobalWebSocket 按普通掉线 4s 退避
-//! 重连 → 双客户端（ZCode webview + Edge 标签页）互踢无限循环，实测每 ~4.5s
-//! 一踢、发送按钮随连接闪烁、消息完全发不出去。前端对 4000 已有"被新连接替换
+//! 背景：踢旧若走空串哨兵 → `sender.close()` 发空 Close（浏览器 onclose=1000/1005）
+//! → 前端 GlobalWebSocket 按普通掉线 4s 退避重连 → 双客户端（ZCode webview +
+//! Edge 标签页）互踢无限循环。前端对 4000 已有"被新连接替换
 //! 跳过重连"分支（GlobalWebSocket.ts onclose），内核补齐带码关闭即可断根。
 
 use std::sync::Arc;

@@ -1343,8 +1343,8 @@ class TaskSubmitTool(BuiltinTool):
         parent_pipeline_id = inputs.get("pipeline_id") or ""
         if parent_pipeline_id:
             # origin_session_id = 根人类会话锚点：内核 param_inject 注入的
-            # session_id/thread_id（此前误填发起管道 id——那是 pipeline id 非
-            # 会话 id，task_manage 会话归属校验永远失配，2026-08-19 e2e 实测）。
+            # session_id/thread_id（pipeline id 非会话 id，会话归属校验按
+            # 会话 id 匹配）。
             origin_session = (
                 inputs.get("session_id")
                 or inputs.get("thread_id")

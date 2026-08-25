@@ -27,7 +27,7 @@ _system_llm_dir = os.path.join(_shared_dir, "system", "llm")
 sys.path.insert(0, _system_llm_dir)
 
 # litellm 首次 import 时会同步 fetch GitHub 的 model cost map，在离线/受限网络
-# 下 SSL 握手超时（实测 30s）拖垮 MCP initialize 握手。改用本地 backup 跳过远程
+# 下 SSL 握手超时（30s）拖垮 MCP initialize 握手。改用本地 backup 跳过远程
 # fetch（litellm 官方开关，get_model_cost_map 顶部判断此环境变量）。
 os.environ.setdefault("LITELLM_LOCAL_MODEL_COST_MAP", "true")
 

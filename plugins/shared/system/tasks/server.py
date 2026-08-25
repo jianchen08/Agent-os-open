@@ -15,7 +15,7 @@ from typing import Any
 
 sys.path.insert(0, os.path.dirname(__file__))
 
-# channel_api tasks/projects 域拆迁落户（2026-08-21）：HTTP 面自持。
+# tasks/projects 域 HTTP 面自持。
 # http_api 内部懒 import server.plugin 取能力句柄，此处顶层 import 无环。
 import http_api  # noqa: E402,PLC0415
 from service import TaskService  # noqa: E402
@@ -299,7 +299,7 @@ async def task_get_transitions(task_id: str) -> dict[str, Any]:
 
 
 # ──────────────────────────────────────────────
-# HTTP 面（/ext/task_service/**，channel_api tasks/projects 域拆迁落户）
+# HTTP 面（/ext/task_service/**）
 # ──────────────────────────────────────────────
 
 

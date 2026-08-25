@@ -1,18 +1,18 @@
 # @feature: FP-MIGR 0.1→0.2迁移 | @ci: python-coverage
 """allow 白名单优先单元测试 — _match_rules 的 allow 规则优先于 block/needs_approval。
 
-验证卡死根因修复：`wc -l ... 2>/dev/null` 这类安全命令被 dangerous_commands
-误伤（命中 2>/dev/null 关键词）时，因 safe_commands(allow) 优先而正确放行。
+验证契约：`wc -l ... 2>/dev/null` 这类安全命令命中 dangerous_commands
+（含 2>/dev/null 关键词）时，因 safe_commands(allow) 优先而正确放行。
 
 1. allow 规则命中时立即放行，即使前面有 needs_approval/block 规则也匹配
 2. 无 allow 命中时返回首个拦截/审批规则
 3. 无任何规则匹配返回空
 
-0.2 迁移说明：被测插件的 _load_rules 通过 config.config_center 加载规则，
-而 config_center 是 0.1 已删模块（仅 reference/0.1_src 留存），规则加载失败
-导致 _match_rules 恒返回空。本测试改为直接从仓库根的
+0.2 加载方式：被测插件的 _load_rules 通过 config.config_center 加载规则，
+config_center 已不在 0.2 装配中（仅 reference/0.1_src 留存），规则加载失败
+会导致 _match_rules 恒返回空。本测试改为直接从仓库根的
 config/isolation/security_rules.yaml 读取规则列表，经 config={"rules": ...}
-注入插件，绕开已删除的 config_center，使 _match_rules 有真实规则可匹配。
+注入插件，使 _match_rules 有真实规则可匹配。
 """
 
 from __future__ import annotations

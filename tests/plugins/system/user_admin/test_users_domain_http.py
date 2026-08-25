@@ -1,5 +1,5 @@
 # @feature: FP-0.2.二 可观测性 | @vision: V3 可嵌入 | @ci: python-coverage
-"""user_admin 插件 users 域（channel_api 退役批次 2 自持承接）HTTP 测试。
+"""user_admin 插件 users 域（channel_api 自持承接）HTTP 测试。
 
 覆盖 /ext/user_admin/users* 六组端点（源 routes_missing.py users_router）：
 1. GET /users —— db-admin.table_query 凭证透传查 users 表（脱敏/映射/id/is_active），

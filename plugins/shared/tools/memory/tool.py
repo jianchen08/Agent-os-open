@@ -161,8 +161,8 @@ class MemoryTool:
 
         - agent_config_id：内容归属 Agent 标签
         - session_id：会话标签（``session:<id>``）——store 侧注入、search 侧
-          按同标签过滤（filter.session_id 定向会话，2026-08-22 语义修正：
-          会话是内容维度标签而非隔离键，隔离键始终是可信 caller 身份）
+          按同标签过滤（filter.session_id 定向会话：会话是内容维度标签而非
+          隔离键，隔离键始终是可信 caller 身份）
 
         Args:
             inputs: 工具输入（含 agent_config_id / session_id）
@@ -353,8 +353,8 @@ class MemoryTool:
             user_id = self._resolve_user_id(inputs)
             # 调用方自持 document_id 时原样落库并回传；缺省时自动生成——
             # 同步 retain 下无 document_id 的写入服务端不返回任何 id（operation_id
-            # 恒 None），工具层会误判"写入未确认"（2026-08-22 真机：LLM 被迫改用
-            # import_text 绕过）。document_id 即 delete/update 的定向锚点。
+            # 恒 None），工具层会误判"写入未确认"。document_id 即 delete/update
+            # 的定向锚点。
             doc_id = inputs.get("document_id") or f"mem-{uuid4().hex}"
             memory_id = await backend.add(
                 user_id=user_id,
@@ -379,11 +379,8 @@ class MemoryTool:
     async def _retrieve(self, inputs: dict[str, Any]) -> ToolExecutionResult:
         """检索记忆。
 
-        filter 接线（2026-08-22 修复——此前只有 filter.memory_type 生效，
-        filter.tags/knowledge_name/session_id 全部被丢弃，真机测试
-        "retrieve 带 knowledge_name filter 返回空"）：tags 投服务端精确过滤
-        （hindsight tags 面），session_id 决定隔离 bank，knowledge_name 客户端
-        过滤。
+        filter 接线：tags 投服务端精确过滤（hindsight tags 面），session_id
+        决定隔离 bank，knowledge_name 客户端过滤。
         """
         backend = self._memory_backend
         if backend is None:
@@ -580,10 +577,8 @@ class MemoryTool:
     async def _list(self, inputs: dict[str, Any]) -> ToolExecutionResult:
         """列举记忆。
 
-        2026-08-22 修复：list 的语义是「罗列」而非「语义检索」——旧实现用空
-        query 打 recall，hindsight 服务端对空 query 必 422（'query must contain
-        at least one word character'，真机实测）。现改为非空宽泛查询，并把
-        filter 接线（memory_type/tags/session_id 过滤）。
+        list 的语义是「罗列」而非「语义检索」：用非空宽泛查询（服务端拒绝
+        空 query），filter 接线（memory_type/tags/session_id 过滤）。
         """
         backend = self._memory_backend
         if backend is None:

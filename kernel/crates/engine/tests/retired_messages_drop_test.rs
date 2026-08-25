@@ -1,5 +1,5 @@
 // @feature: FP-0.2.〇 存储清理 | @vision: V3 可嵌入 | @ci: rust-test
-//! 退役 messages 表清理验证（2026-08-19 调试中心数据库管理页审查）。
+//! 退役 messages 表清理验证（db-admin 表清单与后端实际读写一一对应）。
 //!
 //! 0.2 消息真值 = message_slots ⨝ blobs（读时重建），旧 messages 投影表已退役。
 //! 存量库会残留该表（现行 DDL 不再创建也不删除），导致 db_admin 表清单出现

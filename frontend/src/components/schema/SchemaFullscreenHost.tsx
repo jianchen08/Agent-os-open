@@ -11,7 +11,7 @@
  * 4. 通用底部操作栏按 payload.mode 提供交互，提交走既有真实通道：
  *    - choice / conversation / review → globalWS.sendInteractionResponse
  *      （内核 ws 路由白名单只收 interaction_response，不收 type:'approval'——
- *      review 曾走 sendApproval，消息会被内核 RouteOutcome::Ignored 静默丢弃）
+ *      review 走 sendApproval 会被内核 RouteOutcome::Ignored 静默丢弃）
  *
  * 扩展点语义：任何插件声明 fullscreen + on_event 的 widget，无需手写前端即可
  * 长出全屏面板。approval/plugin.json 的 approval_panel（review_document，

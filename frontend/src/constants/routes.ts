@@ -12,9 +12,9 @@ export const ROUTES = {
   LOGIN: '/login',
   /** 注册页 */
   REGISTER: '/register',
-  // /settings 路由族已退役（2026-08-24 设置工作区页签化）：设置唯一入口 =
-  // openWorkspacePanelByPath('/settings')（SettingsHubWidget），无独立路由页。
-  // /tools、/agents 路由已退役（2026-08-20 agent_manager 插件化）：
+  // /settings 路由族无独立路由页（设置工作区页签化）：设置唯一入口 =
+  // openWorkspacePanelByPath('/settings')（SettingsHubWidget）。
+  // /tools、/agents 无独立路由页（agent_manager 插件化）：
   // 智能体页面由 agent_manager 插件 contributes.pages 声明（path=/agents，
   // 经 openWorkspacePanelByPath 解析）；能力浏览并入设置中枢「插件注册表」。
   /** 管理员页面 */

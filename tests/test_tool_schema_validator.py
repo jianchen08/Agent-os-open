@@ -154,7 +154,7 @@ class TestSchemaValidationBlock:
         """类型不匹配且无法自动修复 → 拦截。
 
         action 期望 string，传入 dict（_try_convert 不处理 dict→string），
-        修复后仍失败 → 拦截。
+        修复仍失败 → 拦截。
         """
         plugin = _make_plugin()
         tc = {
@@ -215,7 +215,7 @@ class TestSchemaValidationPass:
 
         remaining = updates.get(StateKeys.RAW_TOOL_CALLS, [])
         assert len(remaining) == 1
-        # 修复后的 action 应为字符串 "123"
+        # 归一契约：action 应为字符串 "123"
         assert remaining[0]["args"]["action"] == "123"
 
 

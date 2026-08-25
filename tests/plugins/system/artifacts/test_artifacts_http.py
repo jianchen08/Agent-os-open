@@ -1,5 +1,5 @@
 # @feature: FP-0.2.二 artifacts 插件 http 面 | @vision: V3 可嵌入 | @ci: python-coverage
-"""artifacts 插件 artifacts + annotations 域 13 端点测试（channel_api 拆迁批次 1 侧车化承接）。
+"""artifacts 插件 artifacts + annotations 域 13 端点测试（channel_api 侧车化承接）。
 
 覆盖（对齐原 channel_api artifacts 分发语义 + 新 http.handle 分发层）：
 1. POST /upload —— multipart 上传（成功/非 multipart/缺 file 字段/非法 base64）

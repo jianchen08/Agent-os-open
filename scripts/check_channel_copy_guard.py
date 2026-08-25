@@ -1,15 +1,13 @@
 #!/usr/bin/env python
 """渠道共享拷贝守卫（channel copy guard）——channel_common 模块名黑名单比对。
 
-背景（C1 合流防复发，2026-08-20）：渠道公共代码曾以字节级复制散布在
-channel_* 目录（pipeline_types ×7 / input_adapter ×5 / output_adapter ×5 /
-base_combo_adapter ×4，~1300 行），合流后单一事实源为：
+单一事实源（C1 合流）：
 
   - plugins/shared/system/channel_common/   —— 适配器三件
   - agentos_plugin_sdk.pipeline_types       —— 管道类型（SDK 子集归并）
 
-复制模式回潮的典型路径：新渠道开发时"顺手"从老渠道目录拷一份基础模块
-（就像 0.1→0.2 迁移时发生的那样）。本守卫做机械化拦截：
+复制模式回潮的典型路径：新渠道开发时"顺手"从老渠道目录拷一份基础模块。
+本守卫做机械化拦截：
 
   1. 黑名单 = channel_common/ 下全部模块名 ∪ 四个历史拷贝名
      （pipeline_types / input_adapter / output_adapter / base_combo_adapter）；

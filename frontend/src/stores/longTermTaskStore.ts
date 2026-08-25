@@ -1,6 +1,6 @@
 /** 长期任务状态管理 Store 基于 Task API 实现，替代废弃的 projectStore
  *
- * 服务端状态 query 化批次 4：tasks 数据容器已换 TanStack Query 缓存
+ * 服务端状态 query 化：tasks 数据容器已换 TanStack Query 缓存
  * （hooks/queries/useLongTermTasksQuery，queryKeys.longTermTasks）——
  * 列表拉取/5s 兜底轮询由 useLongTermTasksQuery（refetchInterval）承担，
  * WS 事件增量走 updateLongTermTasksCache / invalidateLongTermTasks。

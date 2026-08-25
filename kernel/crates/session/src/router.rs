@@ -192,9 +192,9 @@ impl InboundRouter {
                 &thinking_strength,
                 None,
                 None,
-                // 2026-08-24 阶段1：空串 = 未指定，agent 解析归 dispatcher
+                // 空串 = 未指定，agent 解析归 dispatcher
                 // 实现侧（线程绑定 registry → DB sessions.agent_id → agentos）。
-                // 此前硬编码 "agentos" 使会话编辑切换的绑定成为纯展示字段。
+                // 硬编码 "agentos" 会使会话编辑切换的绑定成为纯展示字段。
                 "",
                 &client_message_id,
             )

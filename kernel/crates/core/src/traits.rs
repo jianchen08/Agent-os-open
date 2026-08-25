@@ -499,8 +499,7 @@ pub struct PluginLifecycle {
 pub struct PluginManifest {
     pub id: String,
     pub name: String,
-    /// 插件人读描述。2026-08-18 契约定型：此前 38 个真实插件声明的顶层
-    /// `description` 因 struct 无此字段被 serde 静默丢弃——现成为真字段。
+    /// 插件人读描述。顶层 `description` 是 manifest 真字段（serde 不静默丢弃）。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
     pub version: String,
@@ -512,11 +511,11 @@ pub struct PluginManifest {
     pub host_type: HostType,
     pub entry: String,
     pub capabilities: ManifestCapabilities,
-    /// 服务依赖（2026-08-18 契约定型：插件↔插件唯一耦合轴）。
+    /// 服务依赖（插件↔插件唯一耦合轴）。
     /// 条目 `ns`（需要该能力角色任意方法已注册）或 `ns.method`（需要该具体服务端点
-    /// 已注册）；注册表把条目映射到提供者插件，消费者**不点名插件 id**。旧
-    /// `dependencies[].plugin_id` 实现级依赖已移除（106 插件全空死字段，详见
-    /// docs/decisions/2026-08-18-plugin-dependency-package.md）。
+    /// 已注册）；注册表把条目映射到提供者插件，消费者**不点名插件 id**。依赖只按
+    /// 服务能力角色声明，详见
+    /// docs/decisions/2026-08-18-plugin-dependency-package.md。
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub requires_services: Vec<String>,
     #[serde(default)]
@@ -1080,8 +1079,8 @@ pub struct McpConfig {
     ///
     /// 长等待业务（human-interaction.wait_for_choice 等用户响应，业务超时可达
     /// 24h）必须显式声明，否则内核 MCP client 300s 兜底会先于用户操作掐断调用
-    /// （2026-08-17 审批 5 分钟窗口实锤：审批请求被 -32001 超时作废后引擎重试
-    /// 弹窗循环）。security_check 的 SDK 侧 timeout 参数仅作提示，内核不读。
+    /// （审批请求被 -32001 超时作废后引擎重试弹窗循环）。security_check 的 SDK
+    /// 侧 timeout 参数仅作提示，内核不读。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub request_timeout_secs: Option<u64>,
 }

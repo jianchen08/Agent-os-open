@@ -213,7 +213,7 @@ export interface ClientStyleDeclaration {
 const NON_PAGE_CONTRIBUTE_KEYS: ReadonlySet<string> = new Set(['themes', 'client_styles'])
 
 /**
- * 已弃用的旧贡献 key（ADR 2026-08-17 widget-migration-t8-t13-t14）：
+ * 已弃用的旧贡献 key（[来源: docs/decisions/2026-08-17-widget-migration-t8-t13-t14-rulings.md]）：
  * 声明这些 key 的插件数据被忽略（不进 pages 归一化）。
  * - workspaceTabs：薄视图零调用方，工作区标签统一走 contributes.pages
  * - chatMessages/chatInteractions/chatActions：chat/inline 槽无渲染方，
@@ -244,7 +244,7 @@ const LEGACY_PAGE_MAP: Record<string, { space: PageSpace; slot: PageSlot }> = {
   shortcuts: { space: 'chat', slot: 'input-action' },
   settingsPanels: { space: 'settings', slot: 'nav' },
   widgets: { space: 'workspace', slot: 'tab' },
-  // [弃用 2026-08-17，ADR widget-migration-t8-t13-t14] workspaceTabs /
+  // [弃用，ADR widget-migration-t8-t13-t14] workspaceTabs /
   // chatMessages / chatInteractions / chatActions 四个旧贡献 key 归一化已移除：
   // - workspaceTabs 薄视图（getWorkspaceTabs）零调用方——工作区标签统一走
   //   contributes.pages + openWorkspacePanelByPath（插件声明 path 直达）

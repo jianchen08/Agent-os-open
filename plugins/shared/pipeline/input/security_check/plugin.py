@@ -242,8 +242,7 @@ class SecurityCheckPlugin(IInputPlugin):
         self._dangerous_ops_by_tool = self._parse_dangerous_ops_config()
 
     # P1-7 task_11 债务兜底：ConfigCenter 不可达时内联默认规则（黑名单模式 +
-    # 危险命令关键词），避免"规则空 = 安全闸门失效 = 所有工具都弹审批"——
-    # 2026-08-17 实测 rules 加载失败后 bash_execute/file_write 等全弹审批，
+    # 危险命令关键词），避免"规则空 = 安全闸门失效 = 所有工具都弹审批"、
     # 任务链路被审批阻塞。与 config/isolation/security_rules.yaml 保持同构。
     _DEFAULT_RULES: list[dict[str, Any]] = [
         {
@@ -504,7 +503,7 @@ class SecurityCheckPlugin(IInputPlugin):
             # default / auto(ask) / accept_edits(命令类) / plan(命令类) 且**无安全规则兜底**
             # → 弹审批。有规则（黑名单模式已加载）：未命中任何规则 = 参数安全 → 直接放行，
             # 危险命令关键词（rm -rf 等）已在规则评估阶段命中 block/needs_approval 拦截。
-            # 规则缺失/为空（安全闸门失效风险）→ 兜底弹审批（安全优先，2026-08-17 前的行为）。
+            # 规则缺失/为空（安全闸门失效风险）→ 兜底弹审批（安全优先）。
             if self._rules:
                 logger.info(
                     "[%s] 黑名单规则未命中，放行 | tool=%s",
@@ -617,11 +616,10 @@ class SecurityCheckPlugin(IInputPlugin):
                     "request_id": request_id,
                     "timeout": 86400,
                 },
-                # 等待用户审批是长等待语义：默认 30s 会先于用户点击掐断（2026-08-16
-                # 卡死根因）。业务超时 86400 由 human 服务 enforce；本参数仅作 SDK
+                # 等待用户审批是长等待语义：默认 30s 会先于用户点击掐断。
+                # 业务超时 86400 由 human 服务 enforce；本参数仅作 SDK
                 # 侧提示（内核不读 meta.timeout）——内核按 human 插件声明的
-                # mcp.request_timeout_secs=90000（plugin.json）等待响应，不再被
-                # 300s 默认兜底掐断（2026-08-17 审批 5 分钟窗口实锤修复）。
+                # mcp.request_timeout_secs=90000（plugin.json）等待响应。
                 timeout=86500.0,
             )
             # capability 返回 error dict 时转换成对应异常（与原 service 行为对齐）

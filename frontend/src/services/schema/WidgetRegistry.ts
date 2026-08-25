@@ -192,7 +192,7 @@ class WidgetRegistry {
    * 按优先级查找：精确匹配 → 降级映射表内显式条目。
    * 映射表外的未知 type 不再默认回退 status_card——未知 widget 被静默替换成
    * 无关组件（props 还不匹配）会让"声明 ↔ 注册表断链"永不暴露；表外返回
-   * undefined 交由调用方渲染显式占位（FE3 兜底反模式修复），并 warn 一次。
+   * undefined 交由调用方渲染显式占位（FE3 兜底反模式），并 warn 一次。
    *
    * @param type - 目标组件类型
    * @returns 可用的 React 组件或 undefined（表外 / 候选全缺）

@@ -77,7 +77,7 @@ def config_client(
     """创建隔离的 TestClient（最小 FastAPI 应用，仅挂载 config 路由）。
 
     - 跳过认证（patch _legacy_get_current_user 让任意 token 通过；
-      0.1 遗留 require_auth 的取用户函数已随批次 0-3 迁为同名桩）
+      取用户函数为同名桩，兼容旧 require_auth 调用面）
     - llm.yaml 指向临时文件，含预置测试数据
     - .env 指向临时文件
 
@@ -182,7 +182,8 @@ class TestProviderCRUD:
     ) -> None:
         """PUT 不存在的 provider_id 必须返回 404，不能隐式创建。
 
-        这是 Must Fix 回归测试：修复前会隐式创建空 provider 并返回 200。
+        契约：仅当 provider 存在时才可更新，不存在必须显式 404（不得隐式
+        创建空 provider 并返回 200）。
         """
         resp = config_client.put(
             "/api/v1/config/llm/providers/nonexistent-provider",

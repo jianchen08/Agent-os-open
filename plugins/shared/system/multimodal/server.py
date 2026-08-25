@@ -4,7 +4,7 @@
 老代码从 0.1 src/multimodal/ 原封不动复制到本目录（平铺），
 本文件只做接口适配：调用老代码逻辑，通过 MCP SDK 暴露为工具。
 
-channel_api 退役批次 1（audio + files 域 → multimodal_service 插件）：
+HTTP 面（audio + files 域）：
 - POST /ext/multimodal_service/audio/transcriptions（源 routes_asr.py，multipart
   file+language，config/models/asr.yaml 驱动；503 未配置/400 空文件/502 转写失败）
 - GET /ext/multimodal_service/files/capabilities（源 routes_missing.py files 域，
@@ -168,7 +168,7 @@ async def multimodal_transcribe(audio_base64: str, mime_type: str = "audio/webm"
 
 
 # ── HTTP 端点（http.handle）—— 前端 /ext/multimodal_service/** 入口 ────────
-# channel_api 退役批次 1：audio 1 + files 2 端点自持。返回
+# audio 1 + files 2 端点自持。返回
 # ToolExecutionResult{success,data}，data 为 HttpHandleResponse{status,headers,
 # body,body_encoding}（body base64）——与既有 17 插件 http.handle 契约一致。
 
@@ -200,7 +200,7 @@ def _parse_multipart(content_type: str, body_bytes: bytes) -> dict[str, Any]:
 
     返回 {字段名: 值}；文件字段值为 {filename, content_type, data(bytes)}，
     普通字段为 str。用 email.parser 解析（标准库，无外部依赖）——
-    与 channel_api server._parse_multipart 同构随迁。
+    与 channel_api server._parse_multipart 同构。
     """
     import email  # noqa: PLC0415
     from email.policy import default as default_policy  # noqa: PLC0415
@@ -266,7 +266,7 @@ def _files_capabilities_payload(model_name: str) -> dict[str, Any]:
             "query": {"type": "object"},
         },
     },
-    description="HTTP endpoint handler for /ext/multimodal_service/** (ASR + files capability, channel_api batch 1)",
+    description="HTTP endpoint handler for /ext/multimodal_service/** (ASR + files capability)",
 )
 async def http_handle(
     path: str = "",
@@ -315,7 +315,7 @@ async def http_handle(
         audio_bytes: bytes = file_field["data"]
         mime_type = file_field.get("content_type") or "audio/webm"
         language = fields.get("language") or None
-        # 注：空串已由上方 `or None` 归一（防御性分支不可达——随迁自源 handler）
+        # 注：空串已由上方 `or None` 归一（防御性分支不可达）
         if isinstance(language, str) and language.strip() == "":  # pragma: no cover
             language = None  # pragma: no cover
         try:

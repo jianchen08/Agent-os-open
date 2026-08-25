@@ -33,7 +33,7 @@ export const LobeChatMarkdown: FC<LobeChatMarkdownProps> = ({
   // 明暗跟随由 LobeChatMarkdown.css 中 .lobe-chat-isolated 的 token 桥接实现——
   // 把 lobehub 用到的 --ant-color-* 重映射到项目主题变量（深色时 --foreground 为亮色）。
   // 注意：ConfigProvider 在该版本只负责 i18n/CDN/motion，类型与实现均无 appearance
-  // 通道（旧版的 appearance prop 已废弃，传入会被静默丢弃），不要再往上传主题明暗。
+  // 通道（appearance prop 已废弃，传入会被静默丢弃），不要再往上传主题明暗。
 
   return (
     <ConfigProvider motion={motion}>

@@ -88,10 +88,9 @@ def _install_payload_diag_hook() -> None:
                 # 写入原始 body（litellm 真实发送的结构），供逐字节 diff
                 # 文件名携带元数据：{ts}_{model}_{msgs_hash}_{msg_count}msg.json
                 # 这样前端列目录后无需读文件即可展示列表（时间/模型/消息数）。
-                # 目录锚定（2026-08-19 修复）：AGENTOS_LOG_DIR 优先，否则从本文件
-                # 向上探测项目根（含 config/models 的目录）。sidecar cwd 会漂移到
-                # 各插件目录，用 cwd 曾导致 200 个快照散落在 llm_core 插件目录下、
-                # 与 monitoring 读取端（同样锚定项目根）错位。
+                # 目录锚定：AGENTOS_LOG_DIR 优先，否则从本文件向上探测项目根
+                # （含 config/models 的目录）——sidecar cwd 会漂移到各插件目录，
+                # 不能依赖 cwd 落盘（否则与 monitoring 读取端错位）。
                 _diag_base = _os.environ.get("AGENTOS_LOG_DIR", "")
                 if not _diag_base:
                     _cand = _os.path.dirname(_os.path.abspath(__file__))
@@ -1769,14 +1768,11 @@ class KeyPoolAdapter(_BaseLiteLLMAdapter):
             sorted(input_kwargs.keys()), _dc_t0,
         )
         # ★ 把首 token 超时"包括在" litellm.acompletion 调用本身（HTTP 层）。
-        # 生产故障（2026-08-05 17:05:34 卡死 36 分钟）：litellm 内部存在事件循环
-        # 线程内同步阻塞路径（如 get_llm_provider 的同步网络调用），冻结主事件
-        # 循环 → 全进程 0 日志 36 分钟。事件循环冻结时 asyncio 层超时
-        # （wait_for/asyncio.wait/shield）全部失效（17:08:34 只有 threading.Timer
-        # 独立线程诊断触发，asyncio.wait 从未超时）。httpx 层 timeout 在线程池
-        # 线程内由 socket 定时生效，不依赖事件循环调度——传 180s 后卡死的 HTTP
-        # 请求必然到点抛异常透传。用户明确指示："将首token超时包括在里面就行，
-        # 把超时时间设到180"。
+        # litellm 内部存在事件循环线程内同步阻塞路径（如 get_llm_provider 的
+        # 同步网络调用），冻结主事件循环时 asyncio 层超时（wait_for/
+        # asyncio.wait/shield）全部失效。httpx 层 timeout 在线程池线程内由
+        # socket 定时生效，不依赖事件循环调度——传 180s 后卡死的 HTTP
+        # 请求必然到点抛异常透传。"将首 token 超时包括在调用本身"。
         _acompletion_timeout = float(kwargs.pop("first_chunk_timeout", 0)) or 180.0
         # 调用方已显式传 HTTP timeout（流式 _call_streaming 会把 first_chunk_timeout
         # pop 掉并转成 timeout 传入）→ 以调用方为准，避免默认 180 覆盖自定义值。

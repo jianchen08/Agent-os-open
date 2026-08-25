@@ -116,13 +116,12 @@ async def _await_with_escape(
 class _ThreadedStreamBridge:
     """跨线程流桥接：worker 线程迭代 litellm 流，主循环从线程安全队列取 chunk。
 
-    背景（生产 2026-08-05）：
-    - 17:05:34 litellm.acompletion 卡死 36 分钟：litellm 内部事件循环线程同步
-      阻塞冻结主事件循环，asyncio 层超时全部失效 → litellm 移入独立线程。
-    - 20:08/20:33:59 首 token 超时修复后出现 "attached to a different loop" /
-      "Event loop is closed"：CustomStreamWrapper 绑定 worker 线程的 loop，主循环
-      await 它的 __anext__ 会跨 loop 报错 → 流式迭代也留在 worker 线程，
-      chunk 经 queue.Queue（线程安全）送回主循环。
+    线程划分依据（litellm 运行时约束）：
+    - litellm.acompletion 内部存在事件循环线程同步阻塞路径，会冻结主事件
+      循环 → litellm 调用移入独立线程，asyncio 层超时对主循环不受其阻塞。
+    - CustomStreamWrapper 绑定 worker 线程的 loop，主循环 await 它的
+      __anext__ 会跨 loop 报错 → 流式迭代也留在 worker 线程，chunk 经
+      queue.Queue（线程安全）送回主循环。
 
     主循环侧接口与 CustomStreamWrapper 对齐：
     - __aiter__/__anext__：从队列取 chunk（StopAsyncIteration 表示流结束）
@@ -264,7 +263,7 @@ class _StreamState:
 
     ``_call_streaming`` 按职责拆分为多个私有辅助方法后，原闭包/局部可变状态统一由本
     dataclass 持有并在方法间传递（对象属性原地修改），使各方法无需 ``nonlocal`` 即可
-    读写同一份状态——行为与历史单体实现的闭包完全等价。
+    读写同一份状态——行为与拆分前单体实现的闭包完全等价。
 
     Attributes:
         result_parts: 正文文本片段（按 chunk 顺序累积）。
@@ -471,7 +470,7 @@ class _BaseLiteLLMAdapter:
         编排：构造参数 → 建连读首 chunk（首字节超时统一覆盖建连→响应头→首字节）
         → 消费流（inter-chunk 静默超时 + 心跳/硬超时兜底 + usage/chunk 处理）
         → 收尾汇总返回 ``LLMResponse``。各阶段委托给私有辅助方法，跨方法状态经
-        ``_StreamState`` 传递，行为与历史单体实现完全等价。
+        ``_StreamState`` 传递，行为与拆分前单体实现完全等价。
 
         流式超时语义：
         - ``first_chunk_timeout``：首个 chunk 检测连接是否建立（建连/响应头/首字节全程）。
@@ -900,9 +899,9 @@ class _BaseLiteLLMAdapter:
         # 心跳探针任务句柄（首 chunk 后启动，finally 中取消）。
         _heartbeat_task: asyncio.Task[None] | None = None
         # 独立线程硬超时句柄（首 chunk 后 arm，finally 中 disarm）。asyncio 心跳 /
-        # inter_chunk wait_for 在 loop 被 socket 阻塞冻住时全部失效（实测：僵死管道零
-        # HEARTBEAT 日志）。watchdog 用 threading 线程倒计时，到点强制 stream.aclose()
-        # 打破死锁，是 loop 冻住也能生效的兜底。
+        # inter_chunk wait_for 在 loop 被 socket 阻塞冻住时全部失效。watchdog 用
+        # threading 线程倒计时，到点强制 stream.aclose() 打破死锁，是 loop 冻住
+        # 也能生效的兜底。
         _hard_timeout: StreamHardTimeout | None = None
 
         aiter = response.__aiter__()

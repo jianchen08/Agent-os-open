@@ -711,10 +711,9 @@ class HumanInteractionService(IHumanInteractionService):
 
         两种时间尺度：
         - 长超时（timeout >= remind）：``sleep(timeout - remind)`` → 提醒 →
-          ``sleep(remind)`` → 超时处理（原语义保留）；
+          ``sleep(remind)`` → 超时处理；
         - 短超时（timeout < remind）：**不提醒**，直接 ``sleep(timeout)`` →
-          超时处理。修复前 ``sleep(max(0, timeout - remind))`` 对短超时退化为
-          sleep(0) → 创建瞬间误发"即将超时"提醒，且真正收敛被推迟到 +remind 秒。
+          超时处理（短超时按时收敛，不误发"即将超时"提醒）。
         """
         short_timeout = timeout_seconds < self._remind_before_seconds
 

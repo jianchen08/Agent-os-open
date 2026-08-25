@@ -90,7 +90,7 @@ const WIDGETS: WidgetEntry[] = [
   { name: 'settings_hub', component: SettingsHubPanel, spaces: ['workspace', 'floating'] },
   { name: 'plugins_panel', component: PluginsPanel, spaces: ['workspace'] },
   // agents_panel = agent_manager 插件页面承载（原 AgentsPage 内容迁移；
-  // tools_panel 已随 ToolsPage 退役——能力浏览并入 plugins_panel，2026-08-20 ADR）
+  // tools_panel 已随 ToolsPage 退役——能力浏览并入 plugins_panel）
   { name: 'agents_panel', component: AgentsPanel, spaces: ['workspace'] },
   { name: 'memory_panel', component: MemoryPanel, spaces: ['workspace'] },
   { name: 'workspace_explorer', component: PipelineManagerPanel, spaces: ['workspace'] },

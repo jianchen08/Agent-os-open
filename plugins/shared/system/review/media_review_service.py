@@ -6,12 +6,9 @@
 公共接口：
     - MediaReviewService: 媒体审阅服务类
 
-[来源: src/review/media_review_service.py（0.1）——channel_api 退役批次 5
-（review P1-2 sidecar 化）迁入 plugins/shared/system/review/。
 重依赖承接：图片走 Pillow（media_reviewer），视频走 PyAV（media_reviewer）；
 两者经插件 pyproject 声明进 venv，缺失时降级 invalid。
-原实现无 LLM 依赖（"media_review_service 依赖 PIL/LLM" 的 TODO 描述不实——
-审阅为本地确定性规则校验）。]
+审阅为本地确定性规则校验，无 LLM 依赖。
 """
 
 from __future__ import annotations

@@ -49,10 +49,9 @@ async def _on_load(_params: dict[str, Any]) -> None:
 
 
 
-# 注意：@plugin.tool 装饰器必须落在真正的 handler（task_manage）上。
-# 此前误装在 _make_pipeline_caller 上，导致 SDK 把 _make_pipeline_caller 注册为
-# task_manage 的 handler——调用时它忽略 kwargs、直接返回内部 _call 闭包，
-# 工具结果序列化成 "<function _make_pipeline_caller.<locals>._call at 0x...>"。
+# 注意：@plugin.tool 装饰器必须落在真正的 handler（task_manage）上——
+# 若装在工厂函数上，SDK 会把工厂注册为 handler，调用时它忽略 kwargs、
+# 直接返回内部闭包，工具结果序列化成 "<function ...>"。
 @plugin.tool(
     name="task_manage",
     schema={

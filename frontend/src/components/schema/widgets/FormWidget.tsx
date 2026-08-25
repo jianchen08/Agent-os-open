@@ -463,7 +463,7 @@ function extractDecisionOptions(options: unknown): DecisionOption[] {
  * 决策选择 = 单字段表单（decision 注册名的实现，原 DecisionWidget 已删）
  *
  * options 映射为 radio（单选）/ checkbox（多选）字段，走 RjsfForm 字段模式
- * （无提交按钮），点选即经 onChange 回调——保持旧版「即点即回调」语义。
+ * （无提交按钮），点选即经 onChange 回调——「即点即回调」语义。
  *
  * @param props - options/multiple/onDecision/title（与旧 DecisionWidget 同构）
  */

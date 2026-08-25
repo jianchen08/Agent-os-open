@@ -8,14 +8,13 @@
 - llm.complete: 统一 LLM 调用（非流式），支持 messages + tools
 - llm.health_check: 检查模型是否可用
 
-channel_api 退役批次 1 起同时承载 thinking-mode 域与 config/llm 段 HTTP 面：
+同时承载 thinking-mode 域与 config/llm 段 HTTP 面：
 ``http.handle`` 按 path 分发（协议与 agent_manager/monitoring 同款），
 plugin.json ``http_endpoints`` 声明（/ext/llm_service/thinking-mode/** 与
 /ext/llm_service/config/llm/**）；业务函数在 ``routes_thinking_mode.py``
-与 ``routes_llm_config.py``（原 channel_api 同名路由自持迁移）。
+与 ``routes_llm_config.py``。
 
-[来源: docs/working/module_migration_plan.md §六 P2 迁移；
-docs/working/channel_api插件拆迁方案_20260821.md 批次 1]
+[来源: docs/working/module_migration_plan.md §六 P2 迁移]
 """
 from __future__ import annotations
 
@@ -222,7 +221,7 @@ def _decode_body(raw_body: str) -> dict[str, Any]:
         raise ValueError(f"invalid JSON body: {exc}") from exc
 
 
-# ══ 域分发（channel_api 退役批次 1：thinking-mode + config/llm 迁入）══
+# ══ 域分发（thinking-mode + config/llm）══
 
 _THINKING_MODE_PREFIX = "/ext/llm_service/thinking-mode"
 _CONFIG_LLM_PREFIX = "/ext/llm_service/config/llm"
@@ -248,7 +247,7 @@ def _api_error_response(exc: Exception) -> dict[str, Any]:
             "query": {"type": "object"},
         },
     },
-    description="HTTP endpoint handler for /ext/llm_service/** (thinking-mode + config/llm domains, channel_api 拆迁批次 1)",
+    description="HTTP endpoint handler for /ext/llm_service/** (thinking-mode + config/llm domains)",
 )
 async def http_handle(
     path: str = "",

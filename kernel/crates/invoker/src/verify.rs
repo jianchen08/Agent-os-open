@@ -13,7 +13,6 @@
 //! 回收，不破坏懒加载），漂移工具的贡献**拒绝注册** + 启动报告可见，不静默；
 //! `POST /api/v1/plugins/validate-all` 全量巡检；lazy 插件首次激活复核（warn）。
 //!
-//! [来源: docs/working/重要设计/插件三轨一致性与Cordis机制迁移计划.md §G2]
 
 use agentos_core::traits::{PluginManifest, ToolCapability};
 

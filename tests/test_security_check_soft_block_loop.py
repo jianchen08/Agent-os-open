@@ -68,8 +68,7 @@ def _ctx_with_traversal_path(
 class TestSoftBlockWritesPairedToolMessage:
     """P0 契约：_soft_block 必须把拒绝结果 append 成配对的 role=tool 消息。
 
-    修复前 TOOL_RESULTS 写了但没人读，messages 里留下孤儿 assistant →
-    被 normalize 删除 → 模型收不到反馈 → 死循环。
+    契约：拒绝反馈必须配对写回 messages（否则模型收不到反馈）。
     """
 
     @pytest.mark.asyncio
@@ -133,7 +132,7 @@ class TestSoftBlockWritesPairedToolMessage:
 class TestSoftBlockRepeatThreshold:
     """P2 契约：同一工具签名连续被拦超阈值 → 设 ENDED 终止管道。
 
-    修复前没有任何上限，模型可无限重试同一被拦请求（实际 87 轮空转）。
+    契约：连续被拦必须有上限（不得无限重试同一被拦请求）。
     """
 
     @pytest.mark.asyncio

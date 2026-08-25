@@ -1,9 +1,9 @@
 """输入适配器基类模块（channel_common 渠道共享包）。
 
-[0.2 C1 合流 2026-08-20] 单一事实源：原 channel_{cli,dingtalk,feishu,qq,wecom}/
-input_adapter.py 五份逐字节一致拷贝（md5 e208dc81…）收敛为本文件。
-消费方经 server.py 把本目录 sys.path.**append** 注入（绝不 insert(0)——
-三起模块名抢占事故纪律，见 docs/working/渠道合流C1C2与CLI插件化方案_20260819.md §三）。
+单一事实源：channel_{cli,dingtalk,feishu,qq,wecom}/input_adapter.py 的
+一致拷贝收敛为本文件。
+消费方经 server.py 把本目录 sys.path.**append** 注入（绝不 insert(0)——模块名
+抢占事故纪律，见 docs/working/渠道合流C1C2与CLI插件化方案_20260819.md §三）。
 防复发守卫：scripts/check_channel_copy_guard.py 禁止本模块名重回 channel_* 目录。
 
 定义所有输入适配器的抽象接口，负责从外部系统接收请求

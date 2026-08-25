@@ -1,9 +1,8 @@
 /**
- * 会话会话级 UI 状态 store（服务端状态 query 化批次 1 瘦身）
+ * 会话会话级 UI 状态 store（服务端状态 query 化瘦身）
  *
  * sessions 列表数据已迁 TanStack Query（hooks/queries/useSessionsQuery），
  * 本 store 只保留纯客户端状态：当前选中会话、删除中标记、WS 连接状态。
- * 历史字段 sessions/isLoading/error/clearError 已随迁移退役。
  */
 
 import { create } from 'zustand'

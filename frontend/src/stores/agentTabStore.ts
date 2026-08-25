@@ -6,7 +6,7 @@ import { readSessions } from '@/hooks/queries/useSessionsQuery'
 import { mainPipelineIdOf } from '@/utils/mappers'
 import type { AgentTab } from '@/types/task'
 
-/** 获取主管道 ID（2026-08-22 裁决：权威 activePipelineId 解析替代 [0] 位置猜测） */
+/** 获取主管道 ID（权威 activePipelineId 解析，不按 [0] 位置猜测） */
 function getMainPipelineId(sessionId: string): string | null {
   const sessions = readSessions()
   const session = sessions.find((s) => s.id === sessionId)
@@ -40,7 +40,7 @@ function getStorageKey(sessionId: string): string {
  *
  * 两步：
  * 1. 清理其他会话的过期 agent-tabs-* 数据（保留当前会话，按 savedAt 优先清最旧）；
- * 2. 删除旧版残留的 pipeline-messages key（消息缓存已迁 IndexedDB，
+ * 2. 删除残留的 pipeline-messages key（消息缓存已迁 IndexedDB，
  *    localStorage 里这份是历史遗留，删掉可释放可观空间）。
  *
  * 注意：迁移后正常情况 pipeline-messages 已由 onRehydrateStorage 一次性清理，
@@ -67,7 +67,7 @@ function cleanupExpiredSessionData(currentSessionId: string): void {
     localStorage.removeItem(key)
   }
 
-  // 清理旧版消息缓存残留（消息存储已迁至 IndexedDB）。
+  // LEGACY key 存在即清除（消息存储已迁至 IndexedDB，localStorage 不再写入）。
   try {
     if (localStorage.getItem(LEGACY_PIPELINE_MESSAGES_KEY) !== null) {
       localStorage.removeItem(LEGACY_PIPELINE_MESSAGES_KEY)
@@ -117,7 +117,7 @@ function saveTabsToStorage(
   console.warn('[AgentTabStore] 保存标签状态失败：localStorage 配额不足，已清理旧数据仍无法写入')
 }
 
-/** 从 localStorage 加载标签状态（标签 + pipeline 映射）。 旧版本写入的 tabMessages 字段会被自然忽略（不再读取）。 */
+/** 从 localStorage 加载标签状态（标签 + pipeline 映射）。 tabMessages 字段不再读取（消息已迁 IndexedDB）。 */
 function loadTabsFromStorage(
   sessionId: string,
 ): { tabs: AgentTab[]; activeTabId: string | null; pipelineTabMap: Record<string, string> } | null {
@@ -691,7 +691,8 @@ export const useAgentTabStore = create<AgentTabState>((set, get) => ({
     }
 
     if (setActive) {
-      // ADR 2026-08-21：pipelineId 缺失时不再拿 tabId 顶替激活（幽灵管道键，
+      // [来源: docs/decisions/2026-08-21-message-idempotency-contract.md]：
+      // pipelineId 缺失时不再拿 tabId 顶替激活（幽灵管道键，
       // 事件路由写进无人订阅的桶）。缺管道 ID 的 Tab 只切 activeTabId，
       // 管道待 sub_agent_created 事件下发 pipeline_id 后再激活。
       if (pipelineId) {

@@ -10,7 +10,7 @@ import { ensureStreamingPlaceholder, extractMessageId, extractThreadId } from '.
 const _debugLogger = loggers.websocket
 
 /** thinking 专属超时（90秒）：超时后仅将 part 状态置为 done 并留痕——
- * 不追加合成文案（2026-08-22 裁决：超时提示写进真实消息会污染内容且随
+ * 不追加合成文案（超时提示写进真实消息会污染内容且随
  * IndexedDB 持久化，长思考/慢网被误伤；thinking_end 丢失由超时留痕暴露） */
 const THINKING_TIMEOUT_MS = 90_000
 

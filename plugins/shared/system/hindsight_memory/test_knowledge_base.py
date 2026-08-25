@@ -1,4 +1,4 @@
-# @feature: channel_api 退役批次 4 knowledge-base | @ci: none-local
+# @feature: knowledge-base 域路由 | @ci: none-local
 """知识库（knowledge-base 域）测试。
 
 验证内容：

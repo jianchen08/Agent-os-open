@@ -1,10 +1,8 @@
-"""llm_core tool_call 配对测试——猜测型匹配反模式收口（2026-08-22）。
+"""llm_core tool_call 配对测试——猜测型匹配反模式收口（ADR 2026-08-21 同族裁决）。
 
-背景（ADR 2026-08-21 同族裁决）：tool result 的 tool_call_id 精确匹配失败时，
-旧实现"positional match"把结果改写为第一个待配对 id 再发给 LLM——B 调用的
-产出被冠上 A 的 id，模型据错误配对决策；且补丁只改发送副本，state 仍持坏 id，
-下一轮重复触发。本批废除该猜测：失配一律丢弃并 warn（fail-closed），
-期望集合不被坏 id 消耗（重放区静默吞错配同步清除）。
+契约：tool result 的 tool_call_id 精确匹配失败时一律丢弃并 warn（fail-closed），
+绝不 positional 改写（把 B 调用的产出冠上 A 的 id）；期望集合不被坏 id 消耗
+（重放区静默吞错配同步清除）。
 
 加载：_message_normalizer.py 经 importlib 唯一模块名加载（同
 test_llm_core_multimodal_resolve.py 的 0.2 装配语义），配对缓存按
@@ -68,7 +66,7 @@ class TestToolCallPairingFailsClosed:
     """tool_call_id 失配一律丢弃，绝不 positional 改写（2026-08-22 裁决）。"""
 
     def test_unknown_id_dropped_not_rewritten(self, mod) -> None:
-        """未知 id 的结果被丢弃且不被改写为待配对 id（旧实现会改写并入）。"""
+        """未知 id 的结果被丢弃且不被改写为待配对 id。"""
         messages = [
             _assistant("call_aaa"),
             _tool_result("call_aaa"),
@@ -100,7 +98,7 @@ class TestToolCallPairingFailsClosed:
         final = mod._validate_tool_call_pairing(
             second, "deepseek", "pairing-fails-closed-2", pipeline_id="t-pending-others"
         )
-        # 旧实现：把 call_zzz 改写为 call_c 并入 → 5 条；新实现：整轮丢弃 → 4 条
+        # 契约：失配结果整轮丢弃（不改写为 call_c 并入），期望集合不被消耗
         assert len(final) == 4, f"失配结果应被丢弃且不消耗期望集合，实际: {final}"
         assert all(
             m.get("role") != "tool" or m.get("tool_call_id") != "call_zzz" for m in final

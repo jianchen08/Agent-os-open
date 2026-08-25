@@ -1,5 +1,5 @@
 /**
- * 调试中心 query 集（服务端状态 query 化批次 3）
+ * 调试中心 query 集（服务端状态 query 化）
  *
  * 调试中心 6 个低频页面的「mount 即拉、零缓存」改为 stale-while-revalidate：
  * - 静态 key（debugTasks/debugSessions/evaluationMetrics/debugUsers/dbTables）

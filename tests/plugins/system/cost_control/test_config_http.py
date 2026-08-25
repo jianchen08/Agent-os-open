@@ -1,5 +1,5 @@
 # @feature: FP-0.2.可观测性 | @ci: python-coverage
-"""cost_control 插件 YAML 配置读写端点测试（channel_api 退役批次 1 自持承接）。
+"""cost_control 插件 YAML 配置读写端点测试（channel_api 自持承接）。
 
 覆盖 /ext/cost_control/config/cost-control GET/PUT（原 /ext/channel_api/config/
 cost-control，源 routes_config.py cost-control 段）：

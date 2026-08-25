@@ -267,7 +267,7 @@ export function mapBackendMessageToMessage(
         error: tc.error,
         durationMs: tc.duration_ms,
         sequence: seq++,
-        // 从后端 API 恢复 containerTaskId（tc 上是 camelCase 字段——历史 bug 误读
+        // 从后端 API 恢复 containerTaskId（tc 上是 camelCase 字段——误读
         // snake_case 恒 undefined），确保历史消息加载后工具卡片的"打开文件"
         // 能正确解析工作空间路径。
         containerTaskId: tc.containerTaskId || undefined,
@@ -330,7 +330,7 @@ function dedupePartSequences(partsByMessage: any[][]): any[] {
  * 本函数将这些"真正连续"（中间无 tool 消息分隔）的 assistant 合并回一个气泡，并把
  * tool 结果注入对应 tool_call part。
  *
- * 重要边界（修复多轮工具调用渲染异常）：
+ * 重要边界（多轮工具调用渲染）：
  *   - **tool 消息必须保留**：tool 角色消息是独立渲染的（MessageItem 有 isTool 分支），
  *     不能被合并逻辑吸收丢弃。原实现在第一遍用 `i++` 消费 tool 消息却不 push，
  *     导致工具结果消息全部丢失。
@@ -344,7 +344,7 @@ function dedupePartSequences(partsByMessage: any[][]): any[] {
 export function mergeConsecutiveAssistantMessages(messages: Message[]): Message[] {
   if (messages.length <= 1) return messages
   // 第一遍：将 tool 消息的结果注入前一个 assistant 的 tool_call part，
-  //         同时保留 tool 消息本身（修复：原实现消费 tool 却不 push，导致 tool 丢失）
+  //         同时保留 tool 消息本身（消费 tool 必须 push，否则 tool 丢失）
   const absorbed: Message[] = []
   let i = 0
   while (i < messages.length) {
@@ -359,9 +359,9 @@ export function mergeConsecutiveAssistantMessages(messages: Message[]): Message[
       (p): p is ToolCallPart => p.type === 'tool_call',
     )
     i++
-    // ★ 修复：收集 tool 消息（注入结果到 tool_call part 后保留 tool 消息本身），
+    // 收集 tool 消息（注入结果到 tool_call part 后保留 tool 消息本身），
     //   并在 assistant 之后入列，保持「assistant 声明 → tool 结果」的原始顺序。
-    //   原实现只 i++ 消费 tool 却不 push，导致 tool 消息全部丢失；
+    //   只 i++ 消费 tool 却不 push 会导致 tool 消息全部丢失；
     //   若在 assistant 之前 push 则顺序错乱，tool 无法分隔多轮 assistant。
     const toolMessages: Message[] = []
     while (i < messages.length && messages[i].role === 'tool') {
@@ -376,7 +376,7 @@ export function mergeConsecutiveAssistantMessages(messages: Message[]): Message[
           // success === false → 'error'，否则 'done'）。后端把工具执行结果持久化为
           // tool-role 消息的 status（completed/failed）+ error；此处 tm.toolError
           // 承载后端 error（见 mapBackendMessageToMessage），tm.status 承载后端 status。
-          // 任一信号表明失败 → 'error'，修复刷新后失败工具一律显示 completed 的 BUG。
+          // 任一信号表明失败 → 'error'（刷新后失败工具不得显示 completed）。
           // 备注：tm.status 运行时可为 'failed'（后端真实值），用 as string 比较规避
           // Message.status 联合类型未列 'failed' 的编译期告警。
           const failed = !!tm.toolError || (tm.status as string) === 'failed'

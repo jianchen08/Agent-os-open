@@ -1,5 +1,5 @@
 # @feature: FP-0.2.五 审批闭环 | @ci: python-coverage
-"""approval 插件 interaction 域 7 端点测试（channel_api 退役批次 2 自持承接）。
+"""approval 插件 interaction 域 7 端点测试（channel_api 自持承接）。
 
 覆盖 /ext/approval_service/interaction/**（源 routes_missing.py interaction_router）：
 1. GET pending —— 代理 get_pending_requests → {items, total}

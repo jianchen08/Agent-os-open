@@ -70,7 +70,6 @@ class SessionBridge:
             logger.debug("Session found for user %s: %s", unified_user_id, session_id)
             return session_id
 
-        # 创建新会话
         session_id = uuid.uuid4().hex[:12]
         self._user_sessions[unified_user_id] = session_id
 

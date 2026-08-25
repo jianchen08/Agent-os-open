@@ -167,7 +167,6 @@ class QQOutputAdapter(IOutputAdapter):
 
         msg_type = state.get("_message_type", self._message_type)
 
-        # 处理错误
         error = state.get(StateKeys.RAW_ERROR)
         if error:
             await self._onebot_client.send_message(

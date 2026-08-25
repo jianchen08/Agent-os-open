@@ -1,13 +1,10 @@
-"""启动脚本修复回归测试（start_web_cn.bat / start_web_02.bat / start_web_02.sh）。
+"""启动脚本契约回归测试（start_web_cn.bat / start_web_02.bat / start_web_02.sh）。
 
 背景（为什么这些测试重要）：
-- 乱码问题：start_web_02.bat 曾以 UTF-8 编码保存含中文注释（"弹出"、"卡满 30s 超时"），
-  在 GBK 终端（中文 Windows 默认 936 代码页）下 cmd 按 GBK 解码 UTF-8 字节流，
-  导致 REM 注释被破坏、乱码文本被当作命令执行（'�出' is not recognized）。
-  修复要求：脚本内容必须为纯 ASCII（或 GBK 编码），任何代码页下都不会乱码。
-- kernel 等待机制：曾固定等 15s 就"continuing anyway"，kernel 未就绪即启动前端，
-  导致 vite 代理请求 ECONNREFUSED。修复要求：轮询 /health 直到就绪（最多 60s），
-  未就绪则报错退出、不启动前端。
+- 乱码问题：脚本内容必须为纯 ASCII（或 GBK 编码），任何代码页下都不会乱码
+  （中文注释在 GBK 终端按错误代码页解码会破坏 REM 注释、把乱码当命令执行）。
+- kernel 等待机制：轮询 /health 直到就绪（最多 60s），未就绪则报错退出、
+  不启动前端（不得在 kernel 未就绪时启动前端导致 vite 代理 ECONNREFUSED）。
 
 本测试为静态行为测试：验证脚本文件的可观察契约（无乱码字节、等待循环、未就绪退出路径）。
 """
@@ -65,8 +62,8 @@ def test_ac1_bat_scripts_are_pure_ascii():
 def test_ac2_kernel_wait_loop_is_60_seconds():
     """start_web_02.bat / start_web_02.sh 的 kernel 等待循环必须为 60 次（最多 60s）。
 
-    原实现为 15 次（15s）超时后"continuing anyway"，kernel 未就绪就启动前端，
-    导致后续 /api/v1/* 请求全部 ECONNREFUSED。修复要求最多等 60s。
+    契约：kernel 未就绪时最多等 60s（不得 15s 就 "continuing anyway" 启动前端，
+    导致后续 /api/v1/* 请求全部 ECONNREFUSED）。
     """
     bat = _read_text("start_web_02.bat")
     # 等待循环：for /l %%i in (1,1,60) do
@@ -84,12 +81,12 @@ def test_ac2_kernel_wait_loop_is_60_seconds():
 def test_ac3_kernel_not_ready_aborts_before_frontend():
     """kernel 未就绪时必须报错退出，不得继续启动前端。
 
-    原实现 15s 未就绪输出 [WARN] ... continuing anyway 后继续启动前端，
-    前端 vite 代理请求 kernel 时 ECONNREFUSED。修复要求：未就绪 → 报错 → 退出。
+    契约：未就绪 → 输出 [ERROR] → 退出（不得 "continuing anyway" 后启动
+    前端，否则 vite 代理请求 kernel 时 ECONNREFUSED）。
     """
     bat = _read_text("start_web_02.bat")
-    # 不允许再出现 "continuing anyway" 的旧行为
-    assert "continuing anyway" not in bat, "旧行为 'continuing anyway' 必须移除"
+    # 契约：不得存在 "continuing anyway" 放行路径
+    assert "continuing anyway" not in bat, "'continuing anyway' 放行路径必须不存在"
     # 未就绪分支必须报错并退出
     assert re.search(r"\[ERROR\].*not ready", bat, re.IGNORECASE), (
         "kernel 未就绪时必须输出 [ERROR] 信息"

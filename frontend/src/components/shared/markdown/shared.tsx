@@ -63,7 +63,7 @@ export function preprocessMarkdownContent(content: string): string {
 }
 
 /**
- * 修复流式输出时不完整的 Markdown 结构
+ * 补全流式输出时不完整的 Markdown 结构
  *
  * 自动补全未闭合的结构，避免渲染错乱
  */

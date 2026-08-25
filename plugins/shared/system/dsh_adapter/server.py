@@ -291,9 +291,9 @@ from translator import (  # noqa: E402
     list_available_skins,
 )
 
-# 皮肤全量 CSS 按择注入路由（2026-08-21 用户裁决：插件 CSS 注入通道 +
-# 主题路由——选到哪个皮肤注入哪个；皮肤 CSS 原样搬：圆角/阴影/动效/鼠标
-# 样式等全部以 CSS 形式生效，html[data-dsh-skin] 选择器由前端激活时打标）
+# 皮肤全量 CSS 按择注入路由：插件 CSS 注入通道 + 主题路由——
+# 选到哪个皮肤注入哪个；皮肤 CSS 原样搬：圆角/阴影/动效/鼠标
+# 样式等全部以 CSS 形式生效，html[data-dsh-skin] 选择器由前端激活时打标
 _SKIN_MERGED_PREFIX = "/ext/dsh_adapter/styles/skin/"
 _SKIN_MERGED_SUFFIX = "/merged.css"
 _SKIN_HOOKS_SUFFIX = "/hooks.mjs"
@@ -325,15 +325,15 @@ def _revalidate(headers: dict[str, str] | None, payload: bytes) -> bool:
     return _etag_of(payload) in candidates
 
 
-# DSH 位置词汇 → AgentOS 位置（2026-08-22 用户裁决：按位置映射转译——不给灵汐
+# DSH 位置词汇 → AgentOS 位置：按位置映射转译——不给灵汐
 # 组件贴 DSH 名字，DSH 选择器在递送层统一翻译到我方锚点；CSS 与 hooks 同源映射表，
-# 任何皮肤按同一套映射注入，非逐皮肤对应）。
+# 任何皮肤按同一套映射注入，非逐皮肤对应。
 # 顺序敏感：结构全形在前（部分替换会残留错位结构——如只换 data-pane 部分会把
 # 页脚装饰挂到整条侧栏）；target 一律我方词汇（data-region / data-testid /
 # data-chat-state / role），DSH 词汇不出现在灵汐 DOM。
 _DSH_POSITION_MAP: list[tuple[re.Pattern[str], str]] = [
     # ⚠️ 值形规则一律用反向引用保留原引号风格（\1 复用捕获引号）：hooks.mjs 的
-    # 选择器活在 JS 字符串字面量里（ maid 实锤：双引号输出插进单引号串 =
+    # 选择器活在 JS 字符串字面量里（双引号输出插进单引号串 =
     # SyntaxError → import 抛 → 整个动态层静默死），CSS 双单引号等价无感。
     # scope 属性翻译（平台词汇 data-skin="<plugin>:<skin>"；值形带插件前缀，
     # 裸 token 兜底覆盖 CSS 括号形/JS attributeFilter 字符串/ctx 插值/存在性）
@@ -357,7 +357,7 @@ _DSH_POSITION_MAP: list[tuple[re.Pattern[str], str]] = [
     # 消息流容器
     (re.compile(r'\[data-chat-flow\]'), '[data-testid="message-list"]'),
     # 输入卡片（DSH data-composer-card：hero/active 两态输入卡本体——画框
-    # border-image 等 65 处装饰的挂点，漏映射=输入框装饰全灭，真机实锤）
+    # border-image 等 65 处装饰的挂点，漏映射=输入框装饰全灭）
     (re.compile(r'\[data-composer-card\]'), '[data-testid="chat-input"]'),
     # DSH L2 槽位 → 同位组件。sidebar.settings 复合形在前（11 处 CSS 触发器样式
     # + hooks aria-expanded 探测都是 "> button" 形）；裸 token 同指触发器，使
@@ -488,7 +488,7 @@ def _serve_merged_skin_css(path: str, headers: dict[str, str] | None = None) -> 
     相对 url(assets/...) 重写到皮肤资产路由（浏览器相对解析无法跨路由，
     data:/https:/绝对路径原样保留）。None = 路由不匹配。
 
-    缓存（2026-08-22）：merged.css / hooks.mjs / 皮肤资产一律 ETag 协商缓存
+    缓存：merged.css / hooks.mjs / 皮肤资产一律 ETag 协商缓存
     （If-None-Match 命中 → 304 零传输）。skin 内容升级后 ETag 变化，浏览器
     自动重拉——比裸 max-age 缓存安全（皮肤文件非内容寻址路径，升级后 URL
     不变）。cache-control: no-cache 表示"必须回源校验"，配 ETag 命中即省 body。
@@ -504,7 +504,7 @@ def _serve_merged_skin_css(path: str, headers: dict[str, str] | None = None) -> 
     # 脚本递送（DSH 原机制 hooks：前端拉取后 blob 导入运行，契约
     # x-org.linxin666.skin-center/v1alpha1；加载不得有顶层副作用）。
     # hooks 里的 DSH 选择器与 CSS 同源转译（我方 DOM 无 DSH 词汇锚点，
-    # 不转译则 querySelector 恒空、装饰全落空——maid-atelier 深度皮肤实锤）
+    # 不转译则 querySelector 恒空、装饰全落空）
     if path.endswith(_SKIN_HOOKS_SUFFIX):
         hook_file = skin_dir / "hooks.mjs"
         if not hook_file.is_file():

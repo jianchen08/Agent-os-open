@@ -195,12 +195,12 @@ export function FiveSpaceLayout({
 
   const toggleWorkspaceFullscreen = useCallback(() => setWorkspaceFullscreen((prev) => !prev), [])
 
-  /** 面板拖拽调宽（2026-08-22 用户要求：左右侧边栏可拖动长短）。
+  /** 面板拖拽调宽（左右侧边栏可拖动长短）。
    * 手柄按下后监听 pointermove 计算新宽度比例（相对主内容区），
    * 实时写入 uiStore（持久化）；抬起释放。
    * clamp 作用于各自最终比例：侧栏=光标位置比；工作区=行宽减光标
-   * （右侧往左拖=增宽）。曾把 clamp 加在原始光标比上（侧栏语义），
-   * 工作区经 1-ratio 反转后手柄位置恒被钳在 0.5 → 拖不动（真机实锤）。 */
+   * （右侧往左拖=增宽）。clamp 必须作用于最终比例而非原始光标比——
+   * 工作区经 1-ratio 反转后，clamp 原始比会把手柄位置恒钳在 0.5 → 拖不动。 */
   const startPanelDrag = useCallback(
     (side: 'sidebar' | 'workspace') => (e: React.PointerEvent) => {
       e.preventDefault()
@@ -571,7 +571,7 @@ export function FiveSpaceLayout({
         paddingBottom: 'var(--skin-chrome-bottom, 0px)',
       }}
     >
-      {/* 单树布局（2026-08-24）：工作区全屏不再切换 JSX 分支——分支切换会让
+      {/* 单树布局：工作区全屏不再切换 JSX 分支——分支切换会让
           WorkspaceHost/ChatContainer 整棵 unmount+remount（全屏切换必重载数据、
           组件状态全丢的根因）。全屏=常驻树内 CSS 隐藏侧栏/聊天 + 工作区 flex-1，
           组件恒定性保住（React 同位置同类型即复用实例）。 */}
@@ -637,9 +637,9 @@ export function FiveSpaceLayout({
             </section>
           </div>
         ) : (
-          /* 桌面（布局 v6，用户裁决 2026-08-21 三修）：并排让位式——侧栏/工作区
+          /* 桌面（布局 v6）：并排让位式——侧栏/工作区
              展开时聊天区让位（不遮挡），收起时聊天全宽。图标钉在页面左/右上角
-             （位置恒定，用户硬要求）；各面板自顶全高展开，顶部 40px 图标带
+             （位置恒定）；各面板自顶全高展开，顶部 40px 图标带
              归入各自展开的区域（图标落在所属区域边角内，从视觉上属于该区域），
              区域间距用位置计算让位而非移动图标；边界无边线。 */
           <section className="relative flex min-h-0 flex-1 overflow-hidden" data-region="chat">
@@ -682,7 +682,7 @@ export function FiveSpaceLayout({
               <div className="flex min-h-0 flex-1 overflow-hidden">
                 {/* 侧栏（让位式，主题面板样式，无边线；顶部让出图标带；
                     背景链与 Sidebar.tsx 内层统一（--ds-bg-panel 优先），
-                    图标条与侧栏内容一色；宽度可拖拽调（2026-08-22）；
+                    图标条与侧栏内容一色；宽度可拖拽调；
                     工作区全屏时 CSS 隐藏保挂载） */}
                 {sidebarContent && !sidebarCollapsed && (
                   <aside

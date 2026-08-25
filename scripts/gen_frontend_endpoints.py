@@ -9,8 +9,8 @@
   scripts/check_frontend_endpoints_sync.py（CI 两道闸：重新生成 diff 空 +
   手写 /ext/ 字面量只减不增）。
 
-跳过说明：channel_api 插件本身整体待退役（批次 0-5 逐域拆除，最终整插件
-删除），其 166 个端点**不生成**——它们不存在于终态，前端消费方随各批次
+跳过说明：channel_api 插件本身整体待退役（逐域拆除，最终整插件删除），
+其 166 个端点**不生成**——它们不存在于终态，前端消费方随各批次
 迁移/删除。
 
 用法：
@@ -32,7 +32,7 @@ PLUGINS_DIR = ROOT / "plugins"
 DEFAULT_OUTPUT = ROOT / "frontend" / "src" / "services" / "api" / "endpoints.generated.ts"
 
 # channel_api 整体退役中（见 docs/working/channel_api插件拆迁方案_20260821.md），
-# 其端点不投影进生成物；批次 5 整插件删除后本名单自然失效。
+# 其端点不投影进生成物；整插件删除后本名单自然失效。
 SKIP_PLUGIN_IDS = {"channel_api"}
 
 # 遍历时排除的目录（.venv 等重型目录不可进）

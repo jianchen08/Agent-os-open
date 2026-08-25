@@ -22,7 +22,7 @@ import pytest
 
 pytestmark = pytest.mark.unit
 
-# 预算与调用规模：8×300=2400 > task/session 限制 1000 → 修复前并发可突破预算
+# 预算与调用规模：8×300=2400 > task/session 限制 1000，并发必然触及上限
 TASK_LIMIT = 1000
 SESSION_LIMIT = 1000
 DAILY_LIMIT = 10000
@@ -50,14 +50,13 @@ def _make_manager():
 
 
 # ─────────────────────────────────────────────
-# 并发突破（修复前红：8 个全过，used=2400 > 1000）
+# 并发突破（8 并发：最多 3 个放行，总用量 ≤ 1000）
 # ─────────────────────────────────────────────
 
 async def _run_concurrent_workers(bm, *, scope: str, scope_id: str) -> tuple[int, int]:
     """并发 check→record；屏障保证全部 check 先完成、再统一 record。
 
-    复现 TOCTOU 窗口：修复前所有 check 看到 used=0 全部放行，随后 record
-    依次累加突破预算；修复后第 4 个 check 因预留超限被拒，前 3 个等待屏障
+    前 3 个 check 通过（预留累积 ≤ 上限），其余因预留超限被拒，在屏障
     超时（1s）后照常 record——最终用量仍 ≤ 上限。
     """
     go = asyncio.Event()
@@ -83,10 +82,9 @@ async def _run_concurrent_workers(bm, *, scope: str, scope_id: str) -> tuple[int
 
 @pytest.mark.asyncio
 async def test_concurrent_task_workers_never_exceed_task_budget() -> None:
-    """并发任务调用：总用量不得超过 per_task 预算。
+    """并发任务调用：总用量不得超过 per_task 预算（check→record TOCTOU 场景）。
 
-    审计 P1-1（check→record TOCTOU）核心断言——修复前 8 个调用全部放行、
-    used=2400；修复后最多 3 个成功、used ≤ 1000。
+    8 个并发调用中最多 3 个放行、used ≤ 1000。
     """
     bm = _make_manager()
     checked, succeeded = await _run_concurrent_workers(bm, scope="task_id", scope_id="task_cc_1")
@@ -112,15 +110,14 @@ async def test_concurrent_session_workers_never_exceed_session_budget() -> None:
 
 
 # ─────────────────────────────────────────────
-# 超额拦截（修复前红：record 静默累加不 raise）
+# 超额拦截（record 超限必须 raise，不静默累加）
 # ─────────────────────────────────────────────
 
 @pytest.mark.asyncio
 async def test_record_usage_rejects_usage_above_task_limit() -> None:
     """record_usage 超过任务上限必须拒绝（raise），而非静默累加。
 
-    审计 P1-2：修复前第二次 record 静默累加到 1100；修复后抛
-    BudgetExceededException 且被拒用量不写入。
+    审计 P1-2：第二次 record 触发 BudgetExceededException 且被拒用量不写入。
     """
     from exceptions import BudgetExceededException
 
@@ -162,7 +159,7 @@ async def test_record_usage_without_check_still_enforces_limit() -> None:
 
 
 # ─────────────────────────────────────────────
-# 正常路径（修复前后都应绿）
+# 正常路径（check→record 累计 / reset 清零）
 # ─────────────────────────────────────────────
 
 @pytest.mark.asyncio
@@ -282,7 +279,7 @@ async def test_decorator_releases_reservation_on_call_failure() -> None:
 # 而非 F-CC-1 现状的「check 全过、record 才拒（token 已花）」。
 # ─────────────────────────────────────────────
 
-# 全局限额测试规模：8×300=2400 > 全局日限 1000 → 修复前并发可突破全局预算
+# 全局限额测试规模：8×300=2400 > 全局日限 1000，并发必然触及上限
 GLOBAL_DAILY_LIMIT = 1000
 GLOBAL_MONTHLY_LIMIT_TIGHT = 1000
 G_WORKERS = 8
@@ -315,9 +312,8 @@ async def _run_concurrent_global_workers(
 ) -> tuple[int, int]:
     """并发 check→record（无 task/session，仅全局限额生效）；屏障保证全部 check 先完成。
 
-    复现全局 TOCTOU：修复前所有 check 看到 usage=0 全部放行（reserved 不计入），
-    随后 record 才被硬上限拒绝——但此时 token 已花；修复后第 4 个 check 因
-    全局预留累积超限被拒，从源头中断使用。
+    前 3 个 check 通过（reserved 累积计入占用），第 4 个因全局预留超限
+    被拒，从源头中断使用（而非等 record 阶段才拒）。
     """
     go = asyncio.Event()
     checked = 0
@@ -344,8 +340,8 @@ async def _run_concurrent_global_workers(
 async def test_concurrent_global_workers_never_exceed_daily_budget() -> None:
     """并发全局调用：总用量不得超过全局日限，且超限在 check 阶段即拒。
 
-    F-COST-2 核心断言——修复前 8 个 check 全部放行（全局 reserved 不计入），
-    record 阶段才拒（token 已花）；修复后最多 3 个 check 放行、第 4 个即拒。
+    F-COST-2 核心断言：8 个并发 check 中最多 3 个放行、第 4 个即拒
+    （全局 reserved 计入占用），超限在 check 阶段拦截。
     """
     from exceptions import QuotaExhaustedException
 

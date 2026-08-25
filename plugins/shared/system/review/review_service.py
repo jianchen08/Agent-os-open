@@ -1,13 +1,8 @@
 """审批服务。
 
 管理审批请求（ReviewRequest）的创建、状态流转、反馈提交和超时处理。
-纯内存存储，复用 HumanInteractionService 的 asyncio.Event 等待模式。
-
-[来源: src/review/review_service.py（0.1）——channel_api 退役批次 5
-（review P1-2 sidecar 化）迁入 plugins/shared/system/review/。
-与 0.1 保持同构：状态机为纯内存（进程内单例 + asyncio.Event 等待模式），
-不引入内核存储依赖（源实现的 TODO 注释中 "DB 交互" 描述与源码不符——
-源码无任何 DB 调用，迁移如实保留内存形态）。]
+纯内存存储（进程内单例 + asyncio.Event 等待模式），不引入内核存储依赖；
+状态机源码无任何 DB 调用。
 """
 
 from __future__ import annotations

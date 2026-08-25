@@ -23,9 +23,10 @@ test_isolation_container_self_heal.py）。
 from __future__ import annotations
 
 import pytest
-from providers.docker_provider import DockerProvider
 
 import tests._isolation_path  # noqa: F401
+
+from providers.docker_provider import DockerProvider
 
 # ---------------------------------------------------------------------------
 # 真实事故样本（取自 agent 任务报错原样输出）→ 应识别为 True

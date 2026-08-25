@@ -32,8 +32,8 @@ import { generateUUID } from './utils/uuid'
 import type { SendMessageParams } from './components/chat/types'
 import type { ReactNode } from 'react'
 
-// 设置已工作区页签化（2026-08-24）：唯一 UI = SettingsHubWidget（settings_hub），
-// 独立路由页 SettingsPage/PluginConfigRoute 及 /settings/* 路由全部退役删除。
+// 设置已工作区页签化：唯一 UI = SettingsHubWidget（settings_hub），
+// 无独立路由页（SettingsPage/PluginConfigRoute 及 /settings/* 路由已删除）。
 // 聊天容器懒加载：ChatContainer 依赖链包含 @lobehub/ui 全量入口（EmojiPicker→
 // @emoji-mart/data 3.2MB、Markdown→highlight.js 197 语言）与 react-syntax-highlighter
 // 全量 Prism（300 语言）、mermaid，静态导入会让 /login 等公共页也必须加载整个聊天
@@ -147,7 +147,7 @@ function HomePage(): ReactNode {
   // widget_event 全局订阅（内核 PluginWidgetBroadcaster 推送 + 插件 widget 交互）
   useWidgetEvents()
 
-  // 长期任务列表 query 化（批次 4）：5s 兜底轮询由 useLongTermTasksQuery 的
+  // 长期任务列表 query 化：5s 兜底轮询由 useLongTermTasksQuery 的
   // refetchInterval 承担（页面隐藏自动暂停，等价旧 useTaskPolling 的 document.hidden
   // 跳过）；WS 断连期间任务状态变化靠此兜底对账恢复
   useLongTermTasksQuery()
@@ -180,7 +180,8 @@ function HomePage(): ReactNode {
   /** 当前活跃会话的消息列表（从 pipelineMessageStore 响应式读取） */
   const activePipelineId = usePipelineMessageStore((s) => s.activePipelineId)
 
-  /** 排队优先级（ADR-2026-08-15）：切换选中会话时上报内核——全局并发闸门
+  /** 排队优先级（[来源: docs/decisions/2026-08-15-pipeline-run-chain-serialization.md]）：
+   * 切换选中会话时上报内核——全局并发闸门
    * 有排队时，当前选中管道的 run 优先获得槽位（其他管道的排队不饿死，
    * 空槽时照常执行）。 */
   useEffect(() => {
@@ -280,7 +281,7 @@ function HomePage(): ReactNode {
       const pipelineStore = usePipelineMessageStore.getState()
 
       // 管道 ID 是会话的唯一路由键。源头取值：以会话权威 activePipelineId 为准
-      // （2026-08-22 裁决，替代 pipelineIds[0] 位置猜测——排序不保证主管道在前时
+      // （不按 pipelineIds[0] 位置猜测——排序不保证主管道在前时
       // 会发进错误管道）；缺失且恰一个管道才取唯一元素；多管道解析失败即
       // 终止发送（fail-closed，沿用下方"缺失终止"式样，不落 params 猜测值）。
       // 不再依赖 ChatContainer 闭包传入的 params.pipelineId（它来自
@@ -306,14 +307,16 @@ function HomePage(): ReactNode {
       }
 
       const userMessageId = generateUUID()
-      // 附件索引随 content 携带（ADR 2026-08-21）：markdown 引用并入正文——
+      // 附件索引随 content 携带（[来源: docs/decisions/2026-08-21-multimodal-attachments-chain.md]）：
+      // markdown 引用并入正文——
       // 内核零改动（照旧只存文本 content），multimodal_preprocessor 识别
       // /uploads/ 引用、llm_core 发送前读文件转 base64；用户消息气泡 markdown
       // 渲染图片/链接，历史回读天然带引用。不再挂 attachments 数组（避免与
       // markdown 图片双重显示）。
       const contentWithRefs = appendAttachmentRefs(params.content, params.attachments)
 
-      // ADR 2026-08-22 单一消息数组：乐观 user 消息直接进主数组（status='sending'），
+      // [来源: docs/decisions/2026-08-22-streaming-protocol-rewrite.md] 单一消息数组：
+      // 乐观 user 消息直接进主数组（status='sending'），
       // 与流式 assistant 同数组，靠状态机区分生命周期。new_message 事件携带
       // user_message 权威回传时按 cmid 认领（recordId 双字段范式，UI id 永不变）——
       // 不再有独立 pending 区（旧 pending 驱逐 = 发送后用户消息消失的症状根因）。
@@ -329,7 +332,7 @@ function HomePage(): ReactNode {
       // 发送瞬间启动流式态（驱动"思考中"指示）；stream_start 到达时会以
       // 后端真实 message_id 重建流式态并建 assistant 占位气泡。
       pipelineStore.startStreaming(targetPipelineId, userMessageId)
-      // 只按主管道探测一次（2026-08-22 裁决）：sid 是会话坐标不是管道坐标，
+      // 只按主管道探测一次：sid 是会话坐标不是管道坐标，
       // 二次探测会把"另一个会话的 entered 交互"自动批准掉；歧义由 store 层 fail-closed。
       const enteredInteraction =
         useInteractionStore.getState().getEnteredForPipeline(targetPipelineId)

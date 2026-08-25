@@ -2,8 +2,7 @@
 //!
 //! 实现 StorageBackend trait，使用 rusqlite 作为 SQLite 后端。
 //! 消息层为 op 模型单格式：`message_slots`（纯索引槽位表）+ `blobs`（整条消息
-//! 全文，内容寻址去重）——旧 `messages` 表与投影链路已按零兼容原则退役
-//! （docs/tasks/task_messages_op_trace_unification.md）。
+//! 全文，内容寻址去重）——消息持久化走单一真值，无投影链路。
 //!
 //! [来源: docs/working/adr_engine_design.md §4.2]
 
@@ -16,8 +15,7 @@
 /// `ended` 与 `suspended` 同属 per-run 终止标志：post 阶段每轮写
 /// `ended=true`（pipeline_track），若残留进下一轮 initial_state，引擎
 /// `execute_steps`/`execute_body` 见 ended 即短路——冷恢复（registry 丢失）
-/// 后 run 秒终 completed、LLM 一次请求都不发（2026-08-22 真机：主管道
-/// 38ms 秒终 + 两个任务管道 1-2s 秒终，仅 1 条 user_input trace）。
+/// 后 run 秒终 completed、LLM 一次请求都不发。
 pub const VOLATILE_RUN_KEYS: &[&str] = &[
     "message",
     "input",
@@ -27,7 +25,7 @@ pub const VOLATILE_RUN_KEYS: &[&str] = &[
     "thinking_strength",
     "_assistant_id_assigned",
     "_pending_message_ops",
-    // 2026-08-24 阶段1：agent_id 是每轮派发注入键（dispatcher 按线程绑定解析），
+    // agent_id 是每轮派发注入键（dispatcher 按线程绑定解析），
     // 不得被 checkpoint/轨迹恢复的历史值覆盖——绑定真值在 agent.id 持久键。
     "agent_id",
 ];
@@ -429,7 +427,7 @@ fn backup_corrupt_files(path: &str) {
     }
 }
 
-/// 解析 traces.patch_type 字符串为 PatchType（2026-08-22 抽取）。
+/// 解析 traces.patch_type 字符串为 PatchType。
 ///
 /// 未知值静默归 StateUpdate 是既有语义（新引擎写入方全部命中已知值），
 /// 但必须留痕——未知值 warn 暴露，避免冷恢复回放对新增类型静默降级。
@@ -494,10 +492,10 @@ impl SqliteStore {
 
     fn init(conn: &Connection) -> Result<(), StorageError> {
         conn.execute_batch("PRAGMA journal_mode=WAL;")?;
-        // 退役 0.1 投影表（2026-08-19 用户裁定：不留两套真值）：执行记录/会话消耗账本
+        // 0.1 投影表退役（不留两套真值）：执行记录/会话消耗账本
         // 由 messages 真值派生读路径替代（调试中心执行记录/LLM 请求页），记忆面归
-        // hindsight 自持存储。2026-08-19 追加：dynamic_tools 表同样退役——动态注册
-        // 的工具是 state 域数据不落内核（跨重启由插件自持 state/config 重建）。
+        // hindsight 自持存储；dynamic_tools 同样退役——动态注册的工具是 state 域
+        // 数据不落内核（跨重启由插件自持 state/config 重建）。
         // 四表零生产者；必须在 DDL 之前 DROP——存量残留表结构与现行 DDL 的
         // CREATE INDEX 不兼容会直接炸 init。
         for retired in [
@@ -512,7 +510,7 @@ impl SqliteStore {
         migrate_drop_legacy_message_slots(conn)?;
         // 零兼容：0.2 消息真值 = message_slots ⨝ blobs（见文件头注释），旧 messages
         // 投影表已退役。存量库会残留建不建都不管的空表，DROP 掉以保证 db_admin
-        // 表清单与后端实际读写一一对应（调试中心数据库管理页审查结论 2026-08-19）。
+        // 表清单与后端实际读写一一对应。
         conn.execute("DROP TABLE IF EXISTS messages", [])?;
         migrate_add_tenant_id(conn)?;
         migrate_add_run_pipeline_id(conn)?;
@@ -658,8 +656,8 @@ impl SqliteStore {
     ///
     /// runs × message_slots × pipeline_sessions 三表联结：
     /// run → pipeline 映射经 message_slots.run_id（op-based 落槽时写入），pipeline → 会话
-    /// 经 pipeline_sessions。0.1 的 pipeline_run_summaries 消耗账本投影已退役
-    /// （2026-08-19），消耗真值在 state 的 track.total_tokens。
+    /// 经 pipeline_sessions。消耗账本真值在 state 的 track.total_tokens
+    /// （0.1 的 pipeline_run_summaries 投影已退役）。
     /// 无消息槽的 run（旧引擎 start_run 占位/孤儿）被过滤——只呈现真实执行的管道。
     /// 按 started_at（created_at）倒序；`status` 传 None 返回全部状态；limit 由调用方给。
     pub fn list_pipelines_inner(
@@ -759,8 +757,8 @@ impl SqliteStore {
         let now = chrono::Utc::now().to_rfc3339();
 
         // GAP-3：整批一个显式事务——blob 与 slot 两条写入要么都提交要么都回滚。
-        // （此前各自 autocommit：G8 exit(75) 可在两语句之间截断进程，留下
-        // 「slot 落了、blob_id NULL」的半态——e2e 消息正文丢失的病根。）
+        // 各自 autocommit 时，进程在两条语句之间被截断会留下「slot 落了、
+        // blob_id NULL」的半态（e2e 消息正文丢失）。
         // 语义等价 rusqlite 事务：出错回滚整批，不残留部分写入。
         if let Err(e) = conn.execute_batch("BEGIN") {
             return Err(StorageError::Database(format!("begin tx: {e}")));
@@ -863,7 +861,7 @@ impl SqliteStore {
     /// 纯索引行（任务 7）：整条消息序列化成一个 blob（内容寻址去重），行上只存
     /// (seq, message_id, blob_id)——零内容列。读路径 join blobs 读时重建。
     // 技术债（同 ROADMAP 已知技术债表 PLR091x 治理方式）：8 参内部函数，
-    // 拆分参数结构体的改造留待 engine 收尾时统一做（2026-08-15 门禁接入记录）。
+    // 拆分参数结构体的改造留待 engine 收尾时统一做。
     #[allow(clippy::too_many_arguments)]
     fn write_slot_to_table_locked(
         &self,
@@ -904,7 +902,7 @@ impl SqliteStore {
     /// - `after_sequence` 锚定：游标之后**前** limit 条（ASC+LIMIT，断线补漏）；
     /// - 无 after 游标（首屏 / before 游标翻页）：limit 取**最新** limit 条
     ///   （尾锚定窗口：SQL DESC+LIMIT 取回后反转为 ASC）。
-    ///   曾实现成恒 ASC+LIMIT——首屏拿到最老 N 条，会话超 N 条时刷新回滚到
+    ///   恒 ASC+LIMIT 会让首屏拿到最老 N 条，会话超 N 条时刷新回滚到
     ///   早期窗口，其后消息全部"消失"；before 翻页则跳空中间段留永久空洞。
     ///   纯索引行 join blobs **读时重建** `MessageRecord`（role/preview/tool_calls 等
     ///   全部从消息 JSON 提取）——存储收敛，接口形状不变。
@@ -1435,7 +1433,7 @@ impl SqliteStore {
             .map_err(|e| StorageError::Database(format!("commit: {e}")))
     }
 
-    /// 按 pipeline_id 删除单条管道的全部执行数据（任务删除语义，2026-08-24）。
+    /// 按 pipeline_id 删除单条管道的全部执行数据（任务删除语义）。
     ///
     /// 0.2 任务 = 管道（GAP-1）：删除任务即删除其管道数据。清理范围对齐
     /// `delete_session_inner` 的级联（runs/traces/branches/message_slots/
@@ -2160,7 +2158,7 @@ impl StorageBackend for SqliteStore {
         opts: MessageQueryOpts,
     ) -> Result<Vec<MessageRecord>, StorageError> {
         // 零兼容：历史读路径统一走 message_slots（纯索引 join blobs 读时重建），
-        // 旧 messages 表投影已退役。接口形状（MessageRecord）不变，前端零改动。
+        // 无 messages 投影表。接口形状（MessageRecord）不变，前端零改动。
         let tenant_id = agentos_tenant::current_or_default("default").tenant_id;
         self.get_slot_messages_by_pipeline(pipeline_id, &tenant_id, opts)
     }
@@ -2591,7 +2589,7 @@ mod tests {
 
     #[test]
     fn test_parse_patch_type_unknown_degrades_to_state_update() {
-        // 2026-08-22：未知 patch_type 静默归 StateUpdate 是既有语义（新引擎写入方
+        // 未知 patch_type 静默归 StateUpdate 是既有语义（新引擎写入方
         // 全部命中已知值），但必须留痕——抽取为独立函数后未知值 warn 可见；
         // 行为契约不变：未知值仍落 StateUpdate（不透传错误破坏冷恢复）。
         assert_eq!(
@@ -2626,7 +2624,7 @@ mod tests {
     /// 回归测试：delete_session 遇到 run_id 为 NULL 的 message_slots 行不抛错、
     /// 级联删除完整生效。
     ///
-    /// 根因：收集 run_ids 时 `row.get::<_, String>(0)` 遇 NULL 抛
+    /// 收集 run_ids 时 `row.get::<_, String>(0)` 遇 NULL 抛
     /// "Invalid column type Null" → 事务回滚 → 会话/消息/执行记录全部残留
     /// （DELETE /api/v1/sessions 返回 200 但啥也没删）。
     #[tokio::test]
@@ -2672,7 +2670,7 @@ mod tests {
             .unwrap();
         }
 
-        // 此前在此抛 Invalid column type Null，事务回滚，全部残留
+        // run_id 为 NULL 时不得抛 Invalid column type Null 导致事务回滚、全部残留
         store.delete_session(tid).await.unwrap();
 
         let conn = store.conn.lock();
@@ -2751,7 +2749,7 @@ mod tests {
         );
     }
 
-    /// 任务删除语义（2026-08-24）：delete_pipeline 按 pipeline_id 级联清空
+    /// 任务删除语义：delete_pipeline 按 pipeline_id 级联清空
     /// runs/traces/branches/message_slots/pipeline_state/pipeline_checkpoints/
     /// pipeline_sessions，单事务；无记录时幂等返回 Ok。
     #[tokio::test]

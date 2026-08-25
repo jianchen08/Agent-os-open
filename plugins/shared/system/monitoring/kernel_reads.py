@@ -1,16 +1,9 @@
 """内核只读能力桥：execution/sessions/agent-calls/search 域 handler 的真实数据入口。
 
-背景（2026-08-19 调试中心数据链修复）：execution/users 域 handler 原为
-routes_missing 的空 stub——内核 0.2 已具备消息/pipeline 快照/表查询能力
-（messages.list / pipeline-runs.list / db-admin.table_query），但 channel_api
-没有消费链，导致调试中心「执行记录/会话/用户」页恒空。
-
-[搬迁] channel_api 退役（2026-08-21 批次 2/3）：本模块随 execution/sessions/
-agent-calls/search 域一并迁入 monitoring 插件（channel_api/kernel_reads.py →
-plugins/shared/system/monitoring/kernel_reads.py，逻辑零改动）。provider 闭包的
-注入方改为 monitoring server.py 的 _on_load（同一 get_capability 写法）；
-未注入（单测环境/内核握手未完成）时各读函数 warn 一次并返回空
-结构，handler 侧保持 HTTP 200 空载荷的前端契约不破坏。
+数据源 = 内核能力（messages.list / pipeline-runs.list / db-admin.table_query），
+不消费 stub 数据。provider 闭包由 monitoring server.py 的 _on_load 注入
+（get_capability 写法）；未注入（单测环境/内核握手未完成）时各读函数
+warn 一次并返回空结构，handler 侧保持 HTTP 200 空载荷的前端契约不破坏。
 
 信封解包（_unwrap）：capability 返回形态随提供方而异——db-admin 返回
 ``{status, body}`` 信封、tool-executor 归一 ``{success, data}``、

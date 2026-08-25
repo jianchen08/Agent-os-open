@@ -93,8 +93,8 @@ pub async fn run_ws_session(
             // 拒绝必须先发 Close 帧（code=4001）再返回：直接 drop socket 浏览器端
             // 只会收到 1006（abnormal closure），前端 GlobalWebSocket 的
             // 「4001 → refreshToken → 重连」自愈路径永远不触发，表现为掉线后
-            // 无限重连失败（“未连接”常驻、发消息无响应，2026-08-21 实测复现
-            // code=1006）。Close 帧发送失败也不影响语义（连接随 drop 关闭）。
+            // 无限重连失败（“未连接”常驻、发消息无响应）。Close 帧发送失败也不
+            // 影响语义（连接随 drop 关闭）。
             let mut rejected_socket = socket;
             let _ = rejected_socket
                 .send(Message::Close(Some(axum::extract::ws::CloseFrame {
@@ -269,7 +269,7 @@ async fn handle_inbound(
     }
 }
 
-/// 执行 agent 解析（2026-08-24 阶段1：绑定真值进管道 state 的消费点）。
+/// 执行 agent 解析（绑定真值进管道 state 的消费点）。
 ///
 /// 优先级：显式传入（chat.send_message 任务派发按 target 选 agent，非空）
 /// → registry 线程绑定（热路径，会话编辑后即生效）
@@ -277,7 +277,7 @@ async fn handle_inbound(
 /// → "agentos"（默认主 agent）。
 ///
 /// WS 主会话路径（InboundRouter::route_user_input）传空串 = 未指定，
-/// 由本函数按绑定解析——此前硬编码 "agentos" 使会话 agent 切换
+/// 由本函数按绑定解析——硬编码 "agentos" 会使会话 agent 切换
 /// 成为纯展示字段（docs/working/管道配置输入契约与动态管道能力设计_20260824.md §4.3）。
 async fn resolve_dispatch_agent(
     registry: Option<&agentos_session::ConnectionRegistry>,

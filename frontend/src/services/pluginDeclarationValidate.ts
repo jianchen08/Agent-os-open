@@ -7,7 +7,7 @@
  * 对页面 / 工具渲染 / chat_card / ui_schema.widgets 声明做合法性与可渲染性检查，
  * 把问题收集上报（不再是静默降级）。
  *
- * 契约（校准自真实语料，2026-08-18）：
+ * 契约（校准自真实语料）：
  * - **error**：确定性会坏/丢内容的结构错误（缺 id、page.space 不在封闭空间集、
  *   字段缺 name、字段 type 不在词汇表、widget 缺 id/type、chat_card 块 type 非法）；
  * - **warning**：能优雅降级但应暴露的（未知 widget space → 已落回默认空间、
@@ -59,7 +59,7 @@ const FIELD_TYPES = new Set([
 ])
 
 /** chat_card 块类型（与 utils/chatCardInterpreter.ts ChatCardBlockDecl.type 一致，
- * 2026-08-18 经真实语料校准——首版只写了 text/kv/form，在 builtin_tools 的
+ * 经真实语料校准——首版只写了 text/kv/form，在 builtin_tools 的
  * code/diff 块上误报，修正为完整集合） */
 const CHAT_CARD_BLOCK_TYPES = new Set([
   'text', 'code', 'json', 'markdown', 'diff', 'kv', 'file', 'image', 'link', 'log', 'form',
@@ -218,7 +218,7 @@ export function validatePluginDeclaration(
   for (const tool of input.tools ?? []) {
     if (tool && typeof tool === 'object') {
       const rec = tool as Record<string, unknown>
-      // 2026-08-23 强制规则：external MCP 工具必须声明 input_schema。
+      // 强制规则：external MCP 工具必须声明 input_schema。
       // manifest 声明是 LLM 工具面参数 schema 的唯一真值源（G2 只比对不回填
       // 握手 schema），缺声明 = 内核补注册 {} = LLM 收到零参数工具 → 调用必因
       // 缺参被服务端校验拒绝（omnisearch universal_search 缺 mode 100% 失败、

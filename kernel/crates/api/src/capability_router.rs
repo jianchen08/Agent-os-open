@@ -2,18 +2,16 @@
 //!
 //! 把 sidecar 的 `<capability>.<method>` 反向调用路由到内核实现：
 //! - pipeline-executor.{suspend, resume, get_run_status} → 直接操作 runs 表
-//!   （0.2 收尾：旧引擎 AdrEngineImpl 已清理，审批挂起/恢复与复盘轮询
-//!   改走 StorageBackend；start_run 占位能力随旧引擎移除，任务执行
-//!   统一走 chat.send_message → PipelineExecutor）
+//!   （审批挂起/恢复与复盘轮询走 StorageBackend；任务执行统一走
+//!   chat.send_message → PipelineExecutor）
 //! - event-bus.emit → 广播事件（当前记录日志，前端推送留 P1）
 //! - metrics.record → 写入指标聚合器（监控设计 §三 通道2，第 6 个 capability）
-//! - service-registry.<域>.<op> → 插件访问内核共享基础设施存储（M2：execution-records/
+//! - service-registry.<域>.<op> → 插件访问内核共享基础设施存储（execution-records/
 //!   pipeline-summaries/memory 三域，对应 M1 内核存储层）。基础设施下沉内核后，
 //!   插件不再各自持有进程内 ServiceProvider/store，统一经此 capability 调内核。
 //!
 //! [来源: ROADMAP.md 审批暂停/恢复、复盘调管道的前置地基]
 //! [来源: docs/working/重要设计/插件监控与指标机制设计.md §三 通道2]
-//! [来源: docs/working/channel_api_migration_plan.md §七 M2]
 
 use std::sync::Arc;
 
@@ -63,18 +61,16 @@ pub struct KernelCapabilityRouter {
     /// 域事件广播闭包（DSH hook 翻译：event-bus.emit 的域事件名单事件同步
     /// 广播，使 approval.created 等触达触发器订阅者）。None = 不广播。
     domain_broadcaster: Option<DomainBroadcaster>,
-    /// 内核能力契约（定义驱动入口校验，2026-08-20 Part B）：config/kernel_capabilities/
+    /// 内核能力契约（定义驱动入口校验）：config/kernel_capabilities/
     /// *.json 声明的 input_schema（含 pattern 形态）在本路由入口逐条执行——
     /// G6 授权之后、派发之前。None = 未装配契约 → 宽泛放行（兼容旧装配/测试）。
     capability_contracts: Option<Arc<Vec<crate::kernel_capabilities::KernelCapabilityContract>>>,
     /// 流式声明查询器（ADR 2026-08-22 流式协议）：(plugin_id) → capabilities.streaming
     /// 声明。None = 未装配 → 声明闸放行（兼容旧装配/测试）。装配后未声明即拒。
     streaming_declaration_lookup: Option<StreamingDeclarationLookupFn>,
-    /// 工具连续失败告警器（2026-08-23）：同一工具名在调用侧连续返回
-    /// success=false（参数校验失败/执行错误）达到阈值即告警——真机教训：
-    /// omnisearch universal_search 缺 mode 导致 100% 校验失败，日志里每轮
-    /// 一条 pydantic 错误，但没有闸门把"同一工具连续 N 次失败"这个信号
-    /// 汇总成一条可操作的告警，调研 agent 空转 45 万 token 无人察觉。
+    /// 工具连续失败告警器：同一工具名在调用侧连续返回
+    /// success=false（参数校验失败/执行错误）达到阈值即告警——把"同一工具
+    /// 连续 N 次失败"这个信号汇总成一条可操作的告警，避免空转无人察觉。
     tool_failure_tracker:
         Option<std::sync::Arc<dyn crate::tools::ToolFailureTracker + Send + Sync>>,
 }
@@ -151,7 +147,7 @@ impl KernelCapabilityRouter {
         self
     }
 
-    /// 注入工具失败追踪器（启用「同一工具连续失败」告警，2026-08-23）。
+    /// 注入工具失败追踪器（启用「同一工具连续失败」告警）。
     pub fn with_tool_failure_tracker(
         mut self,
         tracker: std::sync::Arc<dyn crate::tools::ToolFailureTracker + Send + Sync>,
@@ -246,7 +242,7 @@ impl CapabilityRouter for KernelCapabilityRouter {
                 }
             }
         }
-        // 定义驱动入口校验（2026-08-20 Part B）：契约声明了 (capability, method)
+        // 定义驱动入口校验：契约声明了 (capability, method)
         // 时按 input_schema 逐条执行（required/类型/pattern 形态/enum/闭包参数面），
         // 未声明即宽泛放行——定义详细到什么程度，就校验到什么程度。这是"相同
         // 类型、不同语义"错误（如 thread 坐标填进 pipeline_id 槽）的暴露点：
@@ -447,7 +443,7 @@ impl CapabilityRouter for KernelCapabilityRouter {
                 })
             }
             ("pipeline-executor", "delete_pipeline") => {
-                // 任务删除语义（2026-08-24）：0.2 任务 = 管道，删除任务即删除
+                // 任务删除语义：0.2 任务 = 管道，删除任务即删除
                 // 其管道全部执行数据（runs/traces/branches/message_slots/
                 // pipeline_state/pipeline_checkpoints/pipeline_sessions）。
                 // 内存 registry 条目同清（热路径常驻 state 作废，后续轮次冷启动
@@ -1117,10 +1113,9 @@ impl CapabilityRouter for KernelCapabilityRouter {
                 // hindsight.recall 不在 CapabilityRegistry——ADR 附录D① 只注册
                 // tool 类插件工具给 LLM，反查必然失败）；缺省时从注册表反查
                 // tool_name → plugin_id（tool_core 走 LLM 工具链的既有路径）。
-                // 反查失败 = 工具未注册，fail-closed 直接报错（2026-08-20 裁定，
-                // 删旧"工具名当插件 ID"兜底——隐式契约"工具名==插件名才碰巧
-                // 能用"掩盖配置错误，实测 task_manage≠task_manage_tool 报出
-                // 误导性的 plugin not found）。
+                // 反查失败 = 工具未注册，fail-closed 直接报错（不得用
+                // "工具名当插件 ID"兜底——隐式契约"工具名==插件名才碰巧
+                // 能用"会掩盖配置错误，报出误导性的 plugin not found）。
                 let explicit_plugin_id = params
                     .get("plugin_id")
                     .and_then(|v| v.as_str())
@@ -1145,10 +1140,9 @@ impl CapabilityRouter for KernelCapabilityRouter {
                 })?;
                 match invoker.invoke_tool(&plugin_id, tool_name, &tool_args).await {
                     Ok(result) => {
-                        // 工具连续失败告警（2026-08-23）：结果 success=false（参数校验
+                        // 工具连续失败告警：结果 success=false（参数校验
                         // 失败/执行错误，非网络 Err）计入同工具连续失败计数，达到阈值
-                        // 即告警——防止「同一工具 100% 失败」在流水日志里被淹没
-                        // （omnisearch universal_search 缺 mode 空转 45 万 token 的教训）。
+                        // 即告警——防止「同一工具 100% 失败」在流水日志里被淹没。
                         if !result.success {
                             if let Some(tracker) = &self.tool_failure_tracker {
                                 let sample = result
@@ -1242,7 +1236,7 @@ impl CapabilityRouter for KernelCapabilityRouter {
                         let Some(merged) =
                             crate::routes::cold_state_row(store, &pid, &tenant_id).await
                         else {
-                            continue; // checkpoint 与表行双空的真孤儿不出口（2026-08-23 起表行可独立兜底）
+                            continue; // checkpoint 与表行双空的真孤儿不出口（表行可独立兜底）
                         };
                         let mut row = crate::routes::summarize_state(&merged);
                         if let Some(obj) = row.as_object_mut() {
@@ -1256,7 +1250,7 @@ impl CapabilityRouter for KernelCapabilityRouter {
                 Ok(Value::Array(rows))
             }
 
-            // ── pipeline-state.update：任务域写面（2026-08-24 职责边界裁定）──
+            // ── pipeline-state.update：任务域写面 ──
             // 内核只管管道运行域，任务状态（task.status/task.ended_at 等 task.*
             // 键）由任务域插件裁决写入：task_evaluate 评估终态、task_reminder
             // pending_evaluation 等经此方法落 state 单一真值。双落点与 list 同源：
@@ -2336,7 +2330,7 @@ mod tests {
     #[tokio::test]
     async fn test_tool_executor_unregistered_tool_fails_closed() {
         // 反查失败（无注册表/工具未注册）+ 无显式 plugin_id → fail-closed 报
-        // "工具未注册"，不落 invoker（2026-08-20 裁定：删"工具名当插件 ID"兜底）。
+        // "工具未注册"，不落 invoker（无"工具名当插件 ID"兜底）。
         let captured = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
         let router = KernelCapabilityRouter::with_metrics(MetricsAggregator::new()).with_invoker(
             Arc::new(CaptureInvoker {
@@ -2592,9 +2586,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_pipeline_state_list_state_rows_without_checkpoint() {
-        // 2026-08-23 任务归属链修复：running 中任务 interval 未到不会有 checkpoint，
-        // 修复前 cold_state_row 直接 None → 整行不出口 → 任务面板看不到刚提交的
-        // 任务。修复后 pipeline_state 表行（出生字段已创建即落表）可独立兜底，
+        // 任务归属链语义：running 中任务 interval 未到不会有 checkpoint，
+        // cold_state_row 返回 None 时 pipeline_state 表行（出生字段创建即落表）
+        // 可独立兜底——整行不出口会让任务面板看不到刚提交的任务。
         // task.owned.<id>.* 前缀键也须出口（提交者管道的任务登记）。
         let tenant = format!("tenant_nockpt_{}", uuid::Uuid::new_v4().simple());
         let pid = format!("pipe_nockpt_{}", uuid::Uuid::new_v4().simple());
@@ -2750,7 +2744,7 @@ mod tests {
         );
     }
 
-    // ── 职责边界（2026-08-24 裁定）：pipeline-state.update 任务域写面 ──────
+    // ── 职责边界：pipeline-state.update 任务域写面 ──────────────────────
 
     #[tokio::test]
     async fn test_pipeline_state_update_writes_task_fields_both_paths() {
@@ -3215,9 +3209,9 @@ mod tests {
     }
 }
 
-/// 工具连续失败告警集成（2026-08-23）：tool-executor.invoke 结果 success=false
+/// 工具连续失败告警集成：tool-executor.invoke 结果 success=false
 /// 计入同工具连续失败计数，达到阈值产出告警——把「同一工具 100% 校验失败」
-/// 从流水日志淹没中捞出来（omnisearch universal_search 空转 45 万 token 教训）。
+/// 从流水日志淹没中捞出来。
 mod tool_failure_alert_tests {
     use super::*;
     use crate::tools::{ToolFailureAlert, ToolFailureTracker, FAILURE_ALERT_THRESHOLD};

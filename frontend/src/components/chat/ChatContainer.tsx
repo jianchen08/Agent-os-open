@@ -182,9 +182,8 @@ export const ChatContainer = ({
   )
 
   /** 从 pipelineMessageStore 获取当前激活管道的消息 管道激活统一由 initSessionTabs（会话初始化）和 switchToTab（Tab切换）负责。
-   *  单一消息数组（ADR 2026-08-22）：乐观 user/流式 assistant/已确认消息全在
-   *  messagesByPipeline 同一数组，按 status 状态机区分生命周期——渲染层零拼接
-   *  （旧 `[...msgs, ...pending]` 双区拼接已删，pending 区已随认领替代驱逐退役）。 */
+   *  单一消息数组：乐观 user/流式 assistant/已确认消息全在
+   *  messagesByPipeline 同一数组，按 status 状态机区分生命周期——渲染层零拼接。 */
   const pipelineMessages = usePipelineMessageStore(
     // useShallow：快照每次都是新引用（数组元素级稳定），zustand v5 useSyncExternalStore
     // 会因引用不稳触发 forceStoreRerender 无限循环（e2e 实测 Maximum update
@@ -212,7 +211,7 @@ export const ChatContainer = ({
   const isSubTabFinished = isSubTabActive && (activeTab?.status === 'completed' || activeTab?.status === 'failed')
 
   /** 当前标签对应管道是否正在流式输出。
-   *  ADR 2026-08-21 双来源收紧：只用 activeTab.pipelineRunId 单一来源（与发送侧
+   *  双来源收紧：只用 activeTab.pipelineRunId 单一来源（与发送侧
    *  ChatInput 同款正例）——不再 fallback store 级 activePipelineId，Tab 数据损坏
    *  时宁可不显示生成态也不串到别的管道。 */
   const currentTabPipelineId = activeTab?.pipelineRunId || ''
@@ -284,7 +283,7 @@ export const ChatContainer = ({
   )
 
   /** 是否显示 AgentTabBar（至少存在一个 Tab 时显示） */
-  // 单主对话标签也显示（用户裁决 2026-08-21：顶部中间恒有标签条）
+  // 单主对话标签也显示（顶部中间恒有标签条）
   const showTabBar = tabs.length >= 1
 
   /** 处理 Tab 切换 */
@@ -346,10 +345,10 @@ export const ChatContainer = ({
       data-session-id={sessionId}
       // 聊天容器状态（我方词汇）：empty=空态欢迎页 / active=对话态。
       // DSH 皮肤的 [data-phase=hero/active] 由适配器递送层转译到这里
-      // （位置映射，不给组件贴 DSH 名字——2026-08-22 用户裁决）
+      // （位置映射，不给组件贴 DSH 名字）
       data-chat-state={filteredMessages.length > 0 ? 'active' : 'empty'}
     >
-      {/* Agent Tab 导航栏（多 Tab 时显示；单 Tab 也常驻——用户裁决 2026-08-21）。
+      {/* Agent Tab 导航栏（多 Tab 时显示；单 Tab 也常驻）。
           顶部 40px 图标带行：与侧栏/工作区开关按钮同排（按钮钉页角、
           标签行居中并在两侧留出 48px 避让角图标），带内无分割线 */}
       {showTabBar && (

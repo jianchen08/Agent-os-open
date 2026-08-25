@@ -964,7 +964,7 @@ impl PipelineExecutor {
     /// merge 插件 state_updates 进 state（纯内存合并）。
     ///
     /// messages **只接受 op 声明**（`{_ops:[set/insert]}`）→ "一次 apply" 到内存、
-    /// 表、实录三落点。全量数组形式已退役（零兼容）：收到即 warn 丢弃——改队列
+    /// 表、实录三落点。全量数组形式零兼容：收到即 warn 丢弃——改队列
     /// 必须走 ops，声明式契约由所有插件（llm_core/tool_core/context_window_guard）履行。
     async fn merge_and_project(
         &self,
@@ -1084,7 +1084,7 @@ fn apply_routes(routes: &[CompiledRoute], state: &mut serde_json::Value) -> Opti
                     set_key(state, "suspended", serde_json::Value::Bool(true));
                 }
                 // Step 真跳转由 execute_steps 消费返回值完成（G10 新 DSL "回头"语义）；
-                // 此处不再写 state.next_step（旧"记号"语义退役）
+                // 此处不写 state.next_step。
                 RouteNext::Step(_id) => {}
                 RouteNext::Phase(id) => {
                     // 转移到指定循环体：记到 state.next_phase（run() 在循环体
@@ -1138,7 +1138,7 @@ fn truthy_flag(state: &serde_json::Value, key: &str) -> bool {
 ///
 /// 非顶层（深层）变更按整体替换（不递归细粒度 diff），对齐 step 级快照语义。
 /// messages **不参与 diff**——它走 ops 实录（ops_ledger，插件声明、指纹降级），
-/// 旧的全量数组 diff 推断（messages_diff_ops）已退役（零兼容）。
+/// 全量数组 diff 推断不适用（零兼容）。
 fn state_diff(before: &serde_json::Value, after: &serde_json::Value) -> serde_json::Value {
     let before_obj = before.as_object();
     let after_obj = match after.as_object() {

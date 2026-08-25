@@ -200,9 +200,9 @@ async def evaluation_run(
             all_passed = False
             continue
 
-        # 收编（2026-08-24 批次B）：本端点**不再是执行面权威**——评估执行已由
-        # task_evaluate 插件的 PipelineEvaluationExecutor 真实装配（tool 型本地
-        # 执行 + agent 型派评估子管道继承任务工作区，见
+        # 本端点**不是执行面权威**：评估执行由 task_evaluate 插件的
+        # PipelineEvaluationExecutor 真实装配（tool 型本地执行 + agent 型派
+        # 评估子管道继承任务工作区，见
         # plugins/shared/tools/task_evaluate/_executor.py）。本插件保留指标
         # 注册表 + metrics HTTP 读面；evaluation.run 维持诚实 stub 语义（未实现
         # 类型一律判失败），调用方应改走 task_evaluate 工具。
@@ -215,7 +215,7 @@ async def evaluation_run(
         else:
             # 显式 stub（诚实语义）：bash_check/semantic_check/human_review 在本
             # 端点未实现，一律判失败并说明原因——执行面走 task_evaluate 的
-            # PipelineEvaluationExecutor（2026-08-24 批次B 收编，见上）。
+            # PipelineEvaluationExecutor。
             passed = False
             message = None
             error = f"metric type not implemented: {metric_type}"

@@ -1,10 +1,9 @@
 # @feature: FP-0.2.〇 管道引擎 | @vision: V3 可嵌入 | @ci: python-coverage
 """security_check 危险工具参数级判定测试（GAP 修复）。
 
-背景：原 `_is_dangerous_tool` 轨道 2 按"声明了 dangerous_operations 即危险"
-的工具级判定，导致 file_read/file_write 常规读写（workspace 内）也 100% 弹审批。
-修复后改为参数级判定：`read:/etc/`（路径前缀）、`delete_lines:`（操作参数）、
-`rm -rf`（命令子串）命中才判危险。
+契约：危险判定按参数级——`read:/etc/`（路径前缀）、`delete_lines:`（操作参数）、
+`rm -rf`（命令子串）命中才判危险（不得按"声明了 dangerous_operations 即危险"
+的工具级判定，导致 file_read/file_write 常规读写也 100% 弹审批）。
 
 本测试 mock 轨道 1（policy.execution）与轨道 2 数据源（builtin_tools_config），
 独立验证参数级判定逻辑。

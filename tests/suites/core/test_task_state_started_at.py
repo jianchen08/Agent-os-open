@@ -1,9 +1,8 @@
 """started_at 字段赋值与返回值契约测试。
 
-背景：started_at 此前是死字段（仅有定义 types.py，无任何赋值点），
-导致任务级耗时观测失效、僵尸任务无时间戳依据。
-本测试覆盖 start_task / resume_task / reset_to_pending 对 started_at
-的设/留/清语义，以及三者返回 task 的统一契约。
+契约：started_at 是任务级耗时观测与僵尸任务判定的时间戳依据，
+start_task / resume_task / reset_to_pending 对 started_at 有设/留/清语义，
+三者返回 task 保持统一契约。
 """
 
 from __future__ import annotations

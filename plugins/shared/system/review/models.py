@@ -1,10 +1,7 @@
 """审批数据模型。
 
 定义 ReviewStatus、ReviewRequest、ReviewFeedback 等核心数据结构。
-
-[来源: src/review/models.py（0.1）——channel_api 退役批次 5（review P1-2
-sidecar 化）随 review_service/media_review_service 一并迁入本插件。
-纯数据模型，零外部依赖。]
+纯数据模型，零外部依赖。
 """
 
 from __future__ import annotations

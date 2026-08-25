@@ -1,5 +1,5 @@
 # @feature: FP-0.2.二 scene 插件 http 面 | @vision: V3 可嵌入 | @ci: python-coverage
-"""scene 插件 scenes 域 7 端点测试（channel_api 拆迁批次 1 侧车化承接）。
+"""scene 插件 scenes 域 7 端点测试（channel_api 侧车化承接）。
 
 覆盖（对齐原 routes_scene.py 语义 + 新 http.handle 分发层）：
 1. POST/GET /scenes —— 创建/列表

@@ -1,22 +1,20 @@
 // @feature: FP-0.2.一 插件协议 | @vision: V3 可嵌入 | @ci: rust-test
-//! stderr 非 UTF-8 字节回归测试——sidecar 阻塞（120s 超时）根因验证。
+//! stderr 非 UTF-8 字节回归测试——sidecar 阻塞（120s 超时）验证。
 //!
-//! 背景（llm_core.execute 120s 超时根因）：Windows 宿主上 Python sidecar 的
-//! stderr 输出（如 traceback 含 GBK 编码中文路径）可能含非 UTF-8 字节。原实现
-//! 用 `BufRead::read_line`（严格 UTF-8 解码），遇到非法字节返回 `InvalidData`
-//! 错误 → break 退出 stderr 消费循环 → sidecar 继续写 stderr，管道缓冲（64KB）
-//! 填满后 `write` 阻塞 → sidecar 进程卡死 → 无法响应 MCP 请求 → 内核 120s 超时
-//! （用户感知"工具调用卡死"）。
+//! 背景：Windows 宿主上 Python sidecar 的 stderr 输出（如 traceback 含 GBK
+//! 编码中文路径）可能含非 UTF-8 字节。stderr 消费必须用 lossy 解码继续读——
+//! 严格 UTF-8 解码遇到非法字节即 break 退出消费循环后，sidecar 继续写 stderr，
+//! 管道缓冲（64KB）填满后 `write` 阻塞 → sidecar 进程卡死 → 无法响应 MCP
+//! 请求 → 内核 120s 超时（用户感知"工具调用卡死"）。
 //!
 //! 本测试用一个 Python 替身 sidecar：
-//! 1. 先向 stderr 写非 UTF-8 字节（触发原实现 reader break）；
+//! 1. 先向 stderr 写非 UTF-8 字节（触发 strict reader break）；
 //! 2. 再向 stderr 写远超 64KB 管道缓冲的内容（若 reader 已 break，这里会阻塞）；
 //! 3. 最后响应 MCP initialize 请求。
 //!
 //! 断言（用户可观察行为）：initialize 在 5s 内成功返回（Ok(Ok)），而非 5s 超时
 //! （Err）——后者等于复现"sidecar 被 stderr 阻塞 → 120s 卡死"。
 //!
-//! [来源: docs/working/llm_core_timeout_fix_report.md]
 
 use std::time::Duration;
 

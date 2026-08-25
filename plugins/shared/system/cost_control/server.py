@@ -4,11 +4,11 @@
 老代码从 0.1 src/cost_control/ 原封不动复制到本目录（平铺），
 本文件只做接口适配：调用老代码逻辑，通过 MCP SDK 暴露为工具。
 
-channel_api 退役批次 1（config/cost-control 域 → cost_control 插件）：
+config/cost-control 域：
 新增 /ext/cost_control/config/cost-control GET/PUT —— 成本控制 **YAML 配置
 全文**读写（config/system/cost_control.yaml，前端 services/api/config.ts 的
 CostControlConfigResponse 嵌套形态消费），与既有 /ext/cost_control/config
-（展平形态，前端 costControl.ts 消费）并存，语义逐项对齐 channel_api
+（展平形态，前端 costControl.ts 消费）并存，语义对齐 channel_api
 routes_config.py 的 cost-control 段（_DEFAULT_COST_CONTROL 兜底 + 全文覆写）。
 
 [来源: docs/working/module_migration_plan.md §5.1]
@@ -243,23 +243,22 @@ async def cost_control_reset_session_budget(session_id: str) -> dict[str, Any]:
 # 字段形状严格对齐 frontend/src/services/api/costControl.ts 的 TS 类型。
 
 
-# ── 成本控制 YAML 配置全文读写（批次1 迁入，源 channel_api routes_config.py）──
+# ── 成本控制 YAML 配置全文读写（源 channel_api routes_config.py）──
 # 注意与插件内 CostControlConfig（config/cost_control.yaml via config_center，
 # global_budget 字段）不同：本组端点读写 **config/system/cost_control.yaml**
-# （channel_api 原路径不变，global_config 字段），是前端 settings 页的配置编辑面。
+# （原路径不变，global_config 字段），是前端 settings 页的配置编辑面。
 
 
 def _resolve_project_root() -> Path:
     """向上查找项目根（含 config/ + config/models/ 的目录）。
 
-    与 channel_api routes_config._resolve_project_root 同构：按目录特征探测，
-    不硬编码 parent×N（模块相对项目根的深度随布局变化不可靠）。
+    按目录特征探测，不硬编码 parent×N（模块相对项目根的深度随布局变化不可靠）。
     """
     here = Path(__file__).resolve().parent
     for candidate in [here, *here.parents]:
         if (candidate / "config").is_dir() and (candidate / "config" / "models").is_dir():
             return candidate
-    # 兜底：仓库布局内必有 config/ 探测命中（与 channel_api 同构）
+    # 兜底：仓库布局内必有 config/ 探测命中
     return Path(__file__).resolve().parent.parent.parent.parent  # pragma: no cover
 
 
@@ -287,7 +286,7 @@ _DEFAULT_COST_CONTROL: dict[str, Any] = {
 
 
 def _read_cost_control_yaml() -> dict[str, Any]:
-    """读成本控制 YAML；文件不存在时返回默认值（对齐 channel_api 语义）。"""
+    """读成本控制 YAML；文件不存在时返回默认值。"""
     if _COST_CONTROL_YAML.exists():
         with open(_COST_CONTROL_YAML, encoding="utf-8") as f:
             data = yaml.safe_load(f) or {}
@@ -297,7 +296,7 @@ def _read_cost_control_yaml() -> dict[str, Any]:
 
 
 def _write_cost_control_yaml(data: dict[str, Any]) -> None:
-    """全文覆写成本控制 YAML（通道与 channel_api 原 _write_yaml 一致）。"""
+    """全文覆写成本控制 YAML（写整文件）。"""
     _COST_CONTROL_YAML.parent.mkdir(parents=True, exist_ok=True)
     with open(_COST_CONTROL_YAML, "w", encoding="utf-8") as f:
         yaml.dump(data, f, allow_unicode=True, sort_keys=False, default_flow_style=False)
@@ -440,13 +439,13 @@ async def http_handle(
     headers: dict[str, str] | None = None,
     query: dict[str, str] | None = None,
 ) -> dict[str, Any]:
-    """按 path 分发到 7 个子端点（5 既有 + 2 批次1 迁入的 YAML 配置读写）。
+    """按 path 分发到 7 个子端点（5 既有 + 2 YAML 配置读写）。
 
     签名覆盖 HttpHandleRequest 全部字段（SDK 的 td.handler(**arguments) 展开）。
     BudgetManager 未初始化时返回 503（不崩，前端 axios 会重试/降级）——
     但 YAML 配置读写不依赖 BudgetManager，先于初始化守卫分发。
     """
-    # ── 成本控制 YAML 配置全文读写（批次1 迁入；不依赖 BudgetManager）──
+    # ── 成本控制 YAML 配置全文读写（不依赖 BudgetManager）──
     if path == "/ext/cost_control/config/cost-control" and method == "GET":
         return _ok(_json_response(_read_cost_control_yaml()))
 

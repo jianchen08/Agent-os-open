@@ -201,7 +201,7 @@ export interface Message {
   /** 所属会话ID */
   sessionId: string
   /** 消息序号（服务端权威值，用于排序；pending 乐观消息与待对账的流式占位
-   *  可无 seq——排序回落 timestamp，权威值到达后由对账纠正。ADR 2026-08-21） */
+   *  可无 seq——排序回落 timestamp，权威值到达后由对账纠正） */
   sequence?: number
   /** 消息角色 */
   role: MessageRole
@@ -281,7 +281,7 @@ export interface Message {
   status?: 'idle' | 'sending' | 'streaming' | 'completed' | 'error' | 'failed' | 'interrupted'
   /** 前端乐观消息 ID，用于与服务端持久化消息对账（消除重复/丢失） */
   clientMessageId?: string
-  /** 后端权威 record_id（ADR 2026-08-22 双字段范式：UI 寻址 id 永不变，
+  /** 后端权威 record_id（双字段范式：UI 寻址 id 永不变，
    *  权威持久化主键记入本字段——user 消息认领时 = compute_message_id 指纹
    *  mc_ 前缀；对账按 (id ∪ clientMessageId) 双键匹配） */
   recordId?: string

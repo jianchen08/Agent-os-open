@@ -1,5 +1,5 @@
 /**
- * 附件引用并入消息正文（ADR 2026-08-21：索引随 content 携带，内核零改动）。
+ * 附件引用并入消息正文（[来源: docs/decisions/2026-08-21-multimodal-attachments-chain.md]）。
  *
  * 前端发送时把已上传附件以 markdown 引用追加到消息 content——
  * 图片 `![filename](/uploads/x.png)`（消息气泡 markdown 渲染成图），

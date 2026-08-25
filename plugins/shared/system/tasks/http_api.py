@@ -1,20 +1,15 @@
-"""tasks 插件自持 HTTP 面——channel_api tasks/projects 域拆迁落户（2026-08-21）。
+"""tasks 插件自持 HTTP 面——tasks/projects 域。
 
 来源：plugins/shared/system/channel_api/（只读参考，本文件为搬迁改造产物）：
 - routes_tasks.py（21 端点：/tasks 域）
 - routes_missing.py task_phase_router（task_phase/ac 9 端点）
-- routes_missing.py projects_router（7 端点，原 stub → 接真为容器任务）
+- routes_missing.py projects_router（7 端点）
 
-改造点（对照源文件）：
-1. ``from tasks.service_access import get_task_service`` → 插件内部引用
-   ``from service_access import get_task_service``（import 方向反转，无跨包借用）。
-2. 清除两处 memory_store 残留依赖（旧 0.1 数据兜底，直接去掉）：
-   - list_tasks 中 ``store.threads.get(session_id)`` 管道树扩展块；
-   - create_root_task 中 ``store.get_session(thread_id)`` 主管道读取块
-     （active_pipeline_id 恒为空串，根任务出生即 root）。
-3. task_phase/ac 端点随迁（行为原样保留：phase 由任务状态映射，AC 保持
-   未评估占位语义）。
-4. projects 域接真：projects = 容器任务（container task）。创建 project =
+端点职责：
+1. 插件内部经 ``from service_access import get_task_service`` 引用（无跨包借用）。
+2. 任务列表/创建不再依赖 memory_store 数据兜底。
+3. task_phase/ac 端点：phase 由任务状态映射，AC 保持未评估占位语义。
+4. projects 域：projects = 容器任务（container task）。创建 project =
    建容器任务（task_scope=container，含 workspace 关联元数据 ws_meta），
    list/get/pause/resume/auto-execute/delete = 容器任务生命周期操作。
 5. 能力访问（chat / pipeline-state / pipeline-executor 内核能力）经
@@ -24,8 +19,6 @@
 dispatcher 调度的标准插件 HTTP 面模式，与 agent_manager/task_form 同款）。
 返回 ToolExecutionResult{success, data}，data 为 HttpHandleResponse
 {status, headers, body(base64)}。
-
-[来源: docs/working/channel_api插件拆迁方案_20260821.md 批次1+批次3]
 """
 from __future__ import annotations
 
@@ -44,7 +37,7 @@ logger = logging.getLogger(__name__)
 
 
 # ════════════════════════════════════════════════════════════
-# 请求/响应模型（channel_api/models.py Task* 子集原样搬入）
+# 请求/响应模型（channel_api/models.py Task* 子集搬入）
 # ════════════════════════════════════════════════════════════
 
 
@@ -140,7 +133,7 @@ class TaskEvaluateResponse(BaseModel):
 
 
 # ════════════════════════════════════════════════════════════
-# 业务异常与请求校验（channel_api/deps.py 子集原样搬入）
+# 业务异常与请求校验（channel_api/deps.py 子集搬入）
 # ════════════════════════════════════════════════════════════
 
 
@@ -438,7 +431,7 @@ async def _submit_task_event(
 ) -> str:
     """GAP-1 统一：经 chat.send_message 驱动任务执行管道，返回 pipeline_id（= task.id）。
 
-    双模式（与内核 chat_send_handler 契约对齐，channel_api 原样搬入）：
+    双模式（与内核 chat_send_handler 契约对齐）：
     - 创建模式（task_id 空）：create 分支，引擎生成 pipeline_id；state 出生
       即带 task.* 字段、lineage 有父/根二选一、background 派发不阻塞请求。
       YAML 无写路径——返回的 id 即任务身份。
@@ -496,7 +489,7 @@ async def _submit_task_event(
             "background": True,
             "message": kickoff,
             "user_id": user_id or "task_system",
-            # 归属会话（ADR 2026-08-21）：手动创建任务透传用户会话，内核创建分支
+            # 归属会话：手动创建任务透传用户会话，内核创建分支
             # 以真实会话 link pipeline_sessions（runs 快照/前端导航据此归属）；
             # 缺省（LLM 派发无会话上下文）不传，管道保持独立。
             **({"thread_id": thread_id} if thread_id else {}),
@@ -599,10 +592,7 @@ async def list_tasks(
     task.metadata["session_id"] 字段匹配。同时支持 skip 和 offset 参数
     （skip 优先）。
 
-    [改造] 已删除 ``store.threads.get(session_id)`` 旧 0.1 管道树兜底块
-    ——服务侧 list_all(session_id=...) 已按 metadata.session_id 过滤足够。
-
-    [GAP-1 统一 2026-08-22] 任务即管道（state 单一真值）：0.2 提交的任务
+    GAP-1 统一：任务即管道（state 单一真值）：0.2 提交的任务
     （task_submit / create_root_task 经 chat.send_message 创建）不再写 YAML，
     只存在于管道 state 聚合（pipeline-state.list 的 task.* 行）。本端点合并
     state 聚合行（组装逻辑对齐 task_manage 工具层 _list_tasks_from_state），
@@ -658,7 +648,7 @@ async def list_tasks(
 async def _list_tasks_from_state() -> list[dict[str, Any]] | None:
     """从管道 state 聚合组装任务字典（GAP-1 统一：task = pipeline）。
 
-    两类任务（2026-08-22 定案，语义区分）：
+    两类任务（语义区分）：
     - **task.owned.\<id\>.\***：提交者管道自持的任务（容器任务等"只登记不执行"，
       无下级管道——project id 只登记在提交者管道 state，本管道插件也能读它处理它）；
     - **task.\* 行**：执行管道收到的任务（task.id 引擎注入 + task.assigned 上级
@@ -1036,8 +1026,8 @@ async def list_container_tasks(
 ) -> list[dict[str, Any]]:
     """返回当前会话下所有 task_scope=container 的任务，供前端下拉选父容器。
 
-    [GAP-1 统一 2026-08-22] 容器任务 = 提交者管道自持的声明（task.owned.*），
-    从 state 聚合组装；YAML 私有存储退役（0.2 容器任务不再写 YAML）。
+    容器任务 = 提交者管道自持的声明（task.owned.*），
+    从 state 聚合组装；YAML 私有存储已退役（0.2 容器任务不写 YAML）。
     """
 
     containers: list[dict[str, Any]] = []
@@ -1166,7 +1156,7 @@ async def delete_task(
     - 非容器任务(容器的子任务): 取消自己及下级管道 + 删除数据（不清理工作空间）
     - 非容器任务(根任务): 取消管道 + 清理工作空间 + 删除数据
 
-    GAP-1 统一（2026-08-24 修复）：0.2 任务 = 管道（state 单一真值，无 YAML
+    GAP-1 统一：0.2 任务 = 管道（state 单一真值，无 YAML
     记录）——YAML 存储查不到时回退 state 聚合判定存在性，删除 = 调内核
     pipeline-executor.delete_pipeline 清管道全部执行数据（runs/traces/
     messages/state/checkpoints + registry 条目）。
@@ -1303,8 +1293,7 @@ def evaluate_task(
 ) -> TaskEvaluateResponse:
     """对指定任务执行评估。
 
-    评估引擎未随迁（0.2 evaluation 插件无 loader 面），保持"评估引擎未连接"
-    降级语义（与 channel_api 现状一致）。
+    0.2 evaluation 插件无 loader 面，保持"评估引擎未连接"降级语义。
     """
 
     task = None
@@ -1642,10 +1631,10 @@ async def get_ac_result(
 
 
 # ════════════════════════════════════════════════════════════
-# projects 域 handler（原 channel_api stub → 接真：projects = 容器任务）
+# projects 域 handler（projects = 容器任务）
 # ════════════════════════════════════════════════════════════
 #
-# 语义（用户裁决 + ADR 2026-08-21）：项目容器就是任务系统的容器任务。
+# 语义：项目容器就是任务系统的容器任务。
 # - 创建 project = 创建容器任务（task_scope=container，含 workspace 关联元数据）
 # - list/get/pause/resume/auto-execute/delete = 容器任务生命周期操作
 # - project_id 即 container_task_id（task.id），workspace 插件按此索引工作空间

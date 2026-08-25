@@ -317,7 +317,6 @@ class BudgetManager:
             )
             self._usage_records.append(record)
 
-            # 检查告警
             return await self._check_alerts()
 
     async def release_reservation(
@@ -399,7 +398,6 @@ class BudgetManager:
             action_taken=action,
         )
 
-        # 调用回调
         if self.alert_callback and alert_level != BudgetAlertLevel.INFO:
             try:
                 if asyncio.iscoroutinefunction(self.alert_callback):

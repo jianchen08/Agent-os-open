@@ -38,7 +38,7 @@ function renderPanel(kind: PanelKind | string, props: Record<string, unknown>) {
       return <SettingsHubWidget {...props} />
     case 'plugins_panel':
       return <PluginsSettingsPage />
-    // agent_manager 插件页面承载（2026-08-20：原 AgentsPage 退役，能力浏览
+    // agent_manager 插件页面承载（原 AgentsPage 退役，能力浏览
     // 并入 plugins_panel——ToolsPage/tools_panel 同批摘除）
     case 'agents_panel':
       return <AgentManagerPage />

@@ -1,15 +1,14 @@
-"""LSPGateway 事件循环生命周期回归测试。
+"""LSPGateway 事件循环生命周期契约测试。
 
-回归场景：
-    工具执行框架（tool_core）会为每次异步工具调用新建并关闭一个事件循环，
-    每个 task 管道也各自 asyncio.run 一个新循环。LSPClient 的子进程 transport
-    绑定在某个循环上，循环关闭后 transport 失效，下一次复用该 client 时在
-    Windows ProactorEventLoop 上抛
-    ``AttributeError: 'NoneType' object has no attribute 'send'``
-    （``self._loop._proactor`` 随循环关闭被置 None）。
+场景：工具执行框架（tool_core）会为每次异步工具调用新建并关闭一个事件
+循环，每个 task 管道也各自 asyncio.run 一个新循环。LSPClient 的子进程
+transport 绑定在某个循环上，循环关闭后 transport 失效，下一次复用该
+client 时在 Windows ProactorEventLoop 上抛
+``AttributeError: 'NoneType' object has no attribute 'send'``
+（``self._loop._proactor`` 随循环关闭被置 None）。
 
-修复后：LSPGateway 自管常驻专用事件循环，所有 LSP 调用 marshal 进专用循环，
-client 缓存绑定在永不关闭的循环上，跨调用方循环复用不再崩溃。
+契约：LSPGateway 自管常驻专用事件循环，所有 LSP 调用 marshal 进专用循环，
+client 缓存绑定在永不关闭的循环上，跨调用方循环复用不崩溃。
 
 本测试不依赖真实 LSP 服务器（pylsp 等），通过注入 FakeLSPClient 验证：
 - 调用方循环关闭后，gateway 仍能复用同一 client 实例；

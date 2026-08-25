@@ -1,21 +1,19 @@
 // @feature: FP-0.2.一 插件协议 | @vision: V3 可嵌入 | @ci: rust-test
 //! sidecar 进程崩溃（stdout EOF）时，进行中的 send_request 必须快速失败。
 //!
-//! 背景（工具调用"调用前卡死"根因之二）：reader loop 读到 sidecar stdout EOF
-//! （进程退出/崩溃，如 `ModuleNotFoundError` import 失败）时，原实现只 warn +
-//! break，**不 resolve pending**。进行中的 send_request（initialize / tools/call）
-//! 只能等满 120s 超时（client.rs send_request 超时配置），用户感知为"工具调用
-//! 在调用前卡死"。
+//! 背景：reader loop 读到 sidecar stdout EOF（进程退出/崩溃，如
+//! `ModuleNotFoundError` import 失败）时，必须 resolve 全部 pending——
+//! 否则进行中的 send_request（initialize / tools/call）只能等满 120s 超时，
+//! 用户感知为"工具调用在调用前卡死"。
 //!
 //! 复现要点：sidecar 必须先**阻塞读一行 stdin**（保证内核请求已成功写入管道），
 //! 收到请求后再崩溃退出——这模拟真实场景"请求已发出、进程随后崩溃、响应永远
 //! 不来"。若 sidecar 在请求发出前就退出，写入 stdin 会 EPIPE 快速失败，走不到
-//! EOF 不 resolve pending 的卡死路径（初版测试即因此误通过）。
+//! EOF 不 resolve pending 的卡死路径。
 //!
 //! 断言（用户可观察行为）：initialize 在 5s 内快速失败（Ok(Err)），而非超时
 //! （Err）——后者等于复现 120s 卡死。
 //!
-//! [来源: docs/working/tool_call_hang_debug_report.md 根因2]
 
 use std::time::Duration;
 

@@ -1,8 +1,4 @@
-"""search 域 handler（channel_api 退役批次 3 接真改造）。
-
-[来源] channel_api/routes_search.py 原数据源是 memory_store 进程态 JSON（死链假
-数据：0.1 遗留，0.2 已被内核 SQLite 取代）。本模块接真：统一搜索会话与消息，
-数据源切到内核能力桥——
+"""search 域 handler：统一搜索会话与消息，数据源为内核能力桥——
 
 - 会话（type=session）：pipeline-state 摘要行标题（display_name/name/task.goal/
   thread_id）子串匹配（大小写不敏感）；

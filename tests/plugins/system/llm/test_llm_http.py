@@ -1,7 +1,7 @@
 # @feature: FP-0.2.二 llm 插件 http 面 | @vision: V3 可嵌入 | @ci: python-coverage
 """llm_service 插件 thinking-mode 域 6 端点 + config/llm 段 13 端点测试。
 
-（channel_api 拆迁批次 1 侧车化承接；对齐原 routes_thinking_mode.py /
+（channel_api 侧车化承接；对齐原 routes_thinking_mode.py /
 routes_config.py llm 段语义 + 新 http.handle 分发层）
 
 覆盖：

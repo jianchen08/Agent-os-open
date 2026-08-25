@@ -1,7 +1,4 @@
-"""思考模式 API 路由（thinking-mode 域）——自持版，由 llm_service http.handle 分发。
-
-迁移自 channel_api/routes_thinking_mode.py（channel_api 退役方案批次 1：
-thinking-mode 域 → llm_service 插件）：
+"""思考模式 API 路由（thinking-mode 域），由 llm_service http.handle 分发。
 
 - 基于 config/models/llm.yaml 中标记 ``reasoning_model: true`` 的模型，
   提供思考模式切换、模型支持检查等接口；响应形态与
@@ -9,8 +6,8 @@ thinking-mode 域 → llm_service 插件）：
 - 剥离 FastAPI 依赖：无 APIRouter/Depends/require_auth，返回纯 dict，
   请求体由 server.py http.handle 解码为 dict 传入（switch/recommendations）；
 - 数据读取：本模块只以 sidecar（http.handle）形态运行，故恒走「直接读
-  llm.yaml」路径（原主进程 FastAPI 的 config.models loader 内存缓存路径
-  随插件自持化而消失；直接读 YAML 保证配置写入后立即生效）；
+  llm.yaml」路径（sidecar 无 config.models loader 内存缓存；直接读 YAML
+  保证配置写入后立即生效）；
 - 出错抛 :class:`ThinkingModeAPIError`（status_code/error_code/message），
   由 server.py http.handle 统一捕获转对应 HTTP 状态；
 - 鉴权由内核 dispatcher 按 http_endpoints.auth=user 完成，handler 不读身份。
@@ -42,9 +39,8 @@ class ThinkingModeAPIError(Exception):
 def _resolve_project_root() -> Path:
     """向上查找项目根（含 config/ + config/models/ 的目录）。
 
-    与 channel_api/routes_thinking_mode.py 同源逻辑：按 config/ 特征探测，
-    避免硬编码 parent×N 差一层（本模块在 plugins/shared/system/llm/，
-    深度与 channel_api 不同）。
+    按 config/ 特征探测，避免硬编码 parent×N（本模块在
+    plugins/shared/system/llm/）。
     """
     here = Path(__file__).resolve().parent
     for candidate in [here, *here.parents]:
@@ -59,9 +55,9 @@ _LLM_YAML = _resolve_project_root() / "config" / "models" / "llm.yaml"
 def _get_llm_data() -> dict[str, Any]:
     """读取 llm.yaml 数据（models + defaults）。
 
-    自持化后本模块只走 sidecar（http.handle）形态，恒直接读 YAML（无内存
-    缓存，思考模式接口调用频率低，且保证配置写入后立即生效）。返回结构与
-    channel_api 侧车路径逐位对齐：{models: {...}, defaults: {...}, ...}。
+    本模块只走 sidecar（http.handle）形态，恒直接读 YAML（无内存缓存，
+    思考模式接口调用频率低，且保证配置写入后立即生效）。返回结构：
+    {models: {...}, defaults: {...}, ...}。
     """
     if not _LLM_YAML.exists():
         logger.warning("llm.yaml 不存在: %s", _LLM_YAML)

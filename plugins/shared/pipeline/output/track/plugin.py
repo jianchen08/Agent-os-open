@@ -1,8 +1,7 @@
 """追踪统计 Output 插件 — 仅保留 token / 耗时统计。
 
-历史版本还承担逐动作执行记录的 YAML 持久化（ExecutionRecordStorage），
-0.2 架构下该职责已由内核 pipeline_loop 下沉到 SQLite（messages / traces /
-pipeline_checkpoints 表）。YAML 写入路径无新数据产出，已整体移除。
+逐动作执行记录的 YAML 持久化（ExecutionRecordStorage）职责已由内核
+pipeline_loop 下沉到 SQLite（messages / traces / pipeline_checkpoints 表）。
 
 保留下来的职责：
 - 收集每轮 LLM 调用的 token 用量（累计 + 单轮），写入 state["track.llm_usage"]
@@ -161,7 +160,7 @@ class TrackPlugin(IOutputPlugin):
     def _check_cache_anomaly(self, usage: dict[str, Any], pipeline_id: str) -> None:
         """检测本轮 cache 命中率异常下降并告警（语义由测试钉死）。
 
-        只看本轮单轮量，不混用累计值（历史教训：累计未命中与末轮单轮
+        只看本轮单轮量，不混用累计值（累计未命中与末轮单轮
         input 量纲错配，累计命中率 94.9% 也会误报）：
 
         - 本轮未命中 = last_input - last_cached

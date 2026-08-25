@@ -61,7 +61,7 @@ def _run(cmd: list[str], cwd: Path, timeout: int = 300) -> dict[str, Any]:
     return {"ok": True, "rc": 0, "stdout": (proc.stdout or "").strip()[:4000]}
 
 
-# ── 包目录边界（安全审查 2026-08-19 A-5）──────────────────────────────
+# ── 包目录边界（安全约束）─────────────────────────────────────────────
 # packaging.python.* 四个工具都能让 uv 按任意目录下的 pyproject.toml 安装
 # 依赖到该目录（等价于执行任意声明依赖的安装脚本）。包目录只允许：
 #   1. 本项目 plugins/**（语言域装载插件的语义边界——本插件即"Python 包装载"）；

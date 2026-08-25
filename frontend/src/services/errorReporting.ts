@@ -163,7 +163,7 @@ class ErrorReportingService {
       },
     })
 
-    // 用户可见提示：默认开启（基础设施层统一收口，2026-08-22）。
+    // 用户可见提示：默认开启（基础设施层统一收口）。
     // 调用方显式传 showToast: false（如重试进度、401 静默处理）时不打扰用户；
     // 其余错误一律进通知中心，消除"HTTP 错误只见日志不见 UI"的静默缺口。
     if (errorContext.showToast !== false) {

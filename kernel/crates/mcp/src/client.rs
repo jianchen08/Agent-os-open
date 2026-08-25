@@ -3,7 +3,6 @@
 //! 实现基于 JSON-RPC 2.0 的 MCP 协议客户端，支持 stdio 和 HTTP 两种 transport。
 //! 通过 stdin/stdout 与 Python 边车进程通信，完成 initialize 握手和 tools/call 调用。
 //!
-//! [来源: docs/tasks/task_05_plugin_system.md AC-04-4]
 
 use std::collections::HashMap;
 use std::process::Stdio;
@@ -112,7 +111,7 @@ pub struct McpClient {
     http_client: Option<reqwest::Client>,
 }
 
-/// 出网 URL 边界守卫（安全审查 2026-08-20 B-2 摘出修复）。
+/// 出网 URL 边界守卫（安全审查摘出）。
 ///
 /// 默认禁止 MCP HTTP 对私网/特殊段发包（RFC1918、ULA、链路本地=云元数据
 /// 169.254.169.254、CGNAT、组播、未指定地址）；环回（127.0.0.0/8、::1）默认
@@ -1131,7 +1130,7 @@ async fn handle_incoming_request(
         Ok(value) => {
             // MCP 官方 SDK 的 JSONRPCResponse.result 契约是 object（dict[str, Any]）：
             // 数组/标量/Null 会让对端 pydantic 校验失败、响应被静默丢弃 → 发起方
-            // pending 永不 resolve → 超时（2026-08-19 e2e 实测 service-registry.
+            // pending 永不 resolve → 超时（如 service-registry.
             // memory.search 返回 Vec 即中招）。非 object 一律包 {"__raw__": value}，
             // SDK KernelChannel.send_request 对称解包；object 原样（零迁移成本）。
             let result_value = if value.is_object() {
@@ -1891,7 +1890,7 @@ mod tests {
     #[test]
     fn test_manifest_auth_required_false_deserialize() {
         // langchain_hub 风格：auth.required=false 必须能经反序列化到达内核
-        // 逻辑（GAP-4b——此前该声明被 serde 静默丢弃）
+        // 逻辑（GAP-4b：该声明不得被 serde 静默丢弃）
         let json = r#"{
             "id": "langchain_like",
             "name": "LangChain Like",

@@ -22,7 +22,7 @@ use tracing::warn;
 /// - `core_plugin`：`insert` 直接覆盖（agent 能切换核心插件）
 ///
 /// 失败可见性（K5）：文件不存在 / 解析失败 / 顶层非对象 → warn +
-/// state 标记 `_agent_config_missing = true`（诊断出口可见——此前静默跳过，
+/// state 标记 `_agent_config_missing = true`（诊断出口可见——不得静默跳过，
 /// agent_id 打错字/yaml 写坏会被下游默认提示词 + 全量工具面放大成"照跑"）。
 /// 加载成功时移除该标记（per-iteration 热加载自愈：跑图中修好 yaml，
 /// 下一轮迭代标记消失）。

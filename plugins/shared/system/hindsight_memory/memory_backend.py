@@ -173,10 +173,10 @@ class HindsightBackend(IMemoryBackend):
         """写入记忆，经 tool-executor.invoke 调用 hindsight.retain。
 
         wire metadata 键值必须全 str：hindsight-client 0.9.x aretain 的
-        metadata 是 ``dict[str, str]`` pydantic 校验——tags 以 list 塞入曾致
-        所有带 tags 的写入必炸（复盘报告从未真正持久化，2026-08-19 批 C
-        真实 API A/B 取证）。tags 序列化为 JSON 串；sidecar retain 会解析并
-        提升为 hindsight 真实 tags（供 list_documents/recall 服务端 tag 过滤）。
+        metadata 是 ``dict[str, str]`` pydantic 校验——tags 不能以 list
+        塞入（否则所有带 tags 的写入失败）。tags 序列化为 JSON 串；
+        sidecar retain 会解析并提升为 hindsight 真实 tags（供
+        list_documents/recall 服务端 tag 过滤）。
         """
         wire_meta: dict[str, str] = {}
         if metadata:
@@ -213,7 +213,7 @@ class HindsightBackend(IMemoryBackend):
             result = await self._call("tool-executor.invoke", params)
         except Exception as e:
             # 诚实上抛：吞错降级会让 memory 工具层把失败包装成 success:true
-            # 的假成功（2026-08-19 e2e 实测）。降级决策归工具层。
+            # 的假成功。降级决策归工具层。
             raise RuntimeError(f"hindsight.retain 调用失败: {e}") from e
         if isinstance(result, dict):
             # tool-executor.invoke 经内核 invoker 归一：纯业务 dict（无

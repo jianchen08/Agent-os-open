@@ -181,7 +181,7 @@ export async function getChildrenRecords(parentId: string): Promise<ExecutionRec
 }
 
 /**
- * 清空全部执行记录与轨迹响应（2026-08-24 做实：内核 9 表 + registry + payload_diag 文件）
+ * 清空全部执行记录与轨迹响应（内核 9 表 + registry + payload_diag 文件）
  */
 export interface ClearAllExecutionRecordsResponse {
   success: boolean

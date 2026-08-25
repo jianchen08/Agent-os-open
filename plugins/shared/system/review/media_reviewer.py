@@ -4,12 +4,9 @@
 包括格式验证、尺寸/时长检查、EXIF/元数据提取及关键帧提取。
 
 所有方法均为同步方法，在 IO 密集场景下由调用方决定异步包装。
-
-[来源: src/review/media_reviewer.py（0.1）——channel_api 退役批次 5
-（review P1-2 sidecar 化）迁入 plugins/shared/system/review/。
-重依赖（Pillow/PyAV）随 pyproject 声明进插件 venv；两者任一缺失时
+重依赖（Pillow/PyAV）经 pyproject 声明进插件 venv；两者任一缺失时
 模块导入不崩（置 None），审阅时降级返回 invalid 结果。
-原实现无 LLM 依赖（媒体审阅为确定性规则校验，非 LLM 判定）。]
+媒体审阅为确定性规则校验，无 LLM 依赖。
 """
 
 from __future__ import annotations

@@ -14,12 +14,14 @@ import sys
 from pathlib import Path
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent
-_SYSTEM_DIR = _REPO_ROOT / "plugins" / "shared" / "system"
+_SHARED_DIR = _REPO_ROOT / "plugins" / "shared"
+_SYSTEM_DIR = _SHARED_DIR / "system"
 _ISOLATION_DIR = _SYSTEM_DIR / "isolation"
 
-# 先加 system/（isolation 命名空间包父目录，patch("isolation.decider.*") 需要），
-# 再加 isolation/ 子目录（平铺模块 import 需要）。
-for _d in (_SYSTEM_DIR, _ISOLATION_DIR):
+# 先加 plugins/shared/（pipeline namespace 包父目录，from pipeline.plugin 需要），
+# 再加 system/（isolation 命名空间包父目录，patch("isolation.decider.*") 需要），
+# 最后加 isolation/ 子目录（平铺模块 import 需要）。
+for _d in (_SHARED_DIR, _SYSTEM_DIR, _ISOLATION_DIR):
     _s = str(_d)
     if _s not in sys.path:
         sys.path.insert(0, _s)

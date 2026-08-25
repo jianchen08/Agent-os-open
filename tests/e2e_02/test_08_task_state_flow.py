@@ -172,7 +172,7 @@ class TestTaskStateFlow:
         # 职责边界核心断言：任务状态只能由任务域裁决——pending/running/
         # pending_evaluation（未评估）/ completed（task_evaluate 评估通过，
         # 合法任务域终态）。新内核不写 task.status，无评估证据时不得出现
-        # 静默 completed（旧内核行为，本次修复前实测复现）。
+        # 静默 completed。
         final_status = final_row.get("state", {}).get("task.status", "")
         assert final_status in ("pending", "running", "pending_evaluation", "completed"), (
             f"任务状态应由任务域裁决，实际 {final_status}"

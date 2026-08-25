@@ -1,5 +1,5 @@
 /**
- * 会话列表 query（服务端状态 query 化批次 1）
+ * 会话列表 query（服务端状态 query 化）
  *
  * sessions 数据唯一真值源 = TanStack Query 缓存（queryKeys.sessions）：
  * - 组件消费走 useSessionsQuery（缓存秒开 + staleTime 到期后台静默刷新）

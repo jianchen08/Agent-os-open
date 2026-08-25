@@ -22,7 +22,7 @@
 import sys
 import time
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import tests._isolation_path  # noqa: F401  # 注入 isolation 插件目录到 sys.path
 
@@ -56,6 +56,9 @@ def _container_policy(plugin):
     mock_policy = MagicMock()
     mock_policy.isolation = IsolationLevel.CONTAINER
     plugin._decider.resolve = MagicMock(return_value=mock_policy)
+    # 0.2 容器落地：provider=docker 后还需幂等获取/创建容器，失败会改标 denied。
+    # 本文件测复检契约，容器创建一律 stub 成功（容器语义由 test_container_landing 覆盖）。
+    plugin._get_or_create_container = AsyncMock(return_value="mock-container-1")
 
 
 def _make_auto_plugin(detected=False):

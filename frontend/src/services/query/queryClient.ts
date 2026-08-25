@@ -13,7 +13,6 @@
  * - refetchOnWindowFocus: false —— 窗口 focus/visibilitychange（最大化、切全屏、
  *   alt-tab 都会触发）不该当成数据过期信号：数据新鲜度由 WS 事件推送
  *   （精准 invalidate）+ 各 query 自声明的 refetchInterval 兜底轮询承担。
- *   （2026-08-24 前全局开启，放大窗口即全量重拉的来源之一）
  */
 
 import { QueryClient } from '@tanstack/react-query'

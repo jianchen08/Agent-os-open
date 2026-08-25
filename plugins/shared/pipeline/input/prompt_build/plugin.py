@@ -758,7 +758,7 @@ class PromptBuildPlugin(IInputPlugin):
             替换后的文本
         """
         max_depth = self._placeholder_max_depth
-        # max_depth=0 退化为单趟扁平替换（与旧版行为一致）
+        # max_depth=0 退化为单趟扁平替换
         effective_depth = 1 if max_depth <= 0 else max_depth
 
         from datetime import datetime as _depth_t  # noqa: PLC0415
@@ -781,7 +781,7 @@ class PromptBuildPlugin(IInputPlugin):
 
             for idx, match in enumerate(matches):
                 # 逐步日志 + 超时保护：卡死时定位到具体哪个占位符，并 fail 而非永久挂起
-                # （历史多次出现 prompt_build 协程永久挂起拖垮整个进程的僵尸引擎问题）
+                # （prompt_build 协程永久挂起会拖垮整个进程）
                 _ph_s = _depth_t.now()
                 logger.debug(
                     "[%s] resolve_placeholder BEGIN | depth=%d idx=%d/%d | %s",
@@ -868,7 +868,7 @@ class PromptBuildPlugin(IInputPlugin):
                     parts.append(content)
                 continue
 
-            # dict 形式：旧版配置语法（向后兼容）
+            # dict 形式：配置语法（向后兼容）
             if not isinstance(item, dict):
                 continue
             var_def = item
@@ -1409,7 +1409,7 @@ class PromptBuildPlugin(IInputPlugin):
         now, suffix = self._now_in_configured_tz()
         parts: list[str] = []
 
-        # 优先级（F9，2026-08-20 裁定"零兜底"）：agent 配置（context.dynamic_vars，
+        # 优先级：agent 配置（context.dynamic_vars，
         # context_build 装载）> 插件配置默认（config 的 dynamic_vars，全局变量
         # 声明口子）。两者皆无 → 不注入任何动态变量（返回 None）——硬编码
         # 兜底块（日期/时间/Agent/会话）已删：配置没声明的变量一律不注入，
@@ -1429,7 +1429,7 @@ class PromptBuildPlugin(IInputPlugin):
                         parts.append(content)
                     continue
 
-                # dict 形式：旧版配置语法（向后兼容）
+                # dict 形式：配置语法（向后兼容）
                 if not isinstance(item, dict):
                     continue
                 var_def = item
@@ -1466,7 +1466,6 @@ class PromptBuildPlugin(IInputPlugin):
                     if content:
                         parts.append(f"- {var_name}: {content}")
         # 零兜底：未声明（agent 配置与插件默认皆无）→ 无动态变量。
-        # 旧硬编码兜底块（日期/时间/Agent/会话）已删（2026-08-20 裁定）——
         # 需要环境事实由配置声明（类型系统已支持 timestamp/session/agent/
         # model/placeholder）；身份信息属 system prompt（persona）职责，
         # dynamic_vars 不注入第二个真值源。

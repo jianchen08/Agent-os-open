@@ -1,7 +1,6 @@
 """日志文件名 pid 派生测试。
 
-历史：文件名是 bash_<timestamp>_<cmd>_<hash>.log，LLM 算不出 hash，
-进程结束后无法回看日志。改成 bash_<pid>.log 后，read_log 凭 pid 即可定位。
+文件名固定为 bash_<pid>.log：进程结束后 read_log 凭 pid 即可定位日志。
 """
 
 from __future__ import annotations

@@ -1,4 +1,4 @@
-/** 会话列表状态管理 Store（服务端状态 query 化批次 1）
+/** 会话列表状态管理 Store（服务端状态 query 化）
  *
  * 数据容器已换 TanStack Query 缓存（hooks/queries/useSessionsQuery）：
  * sessions 的读写全部经 readSessions/updateSessionsCache/invalidateSessions，
@@ -251,7 +251,7 @@ export const useSessionListStore = create<SessionListState>()((_, get) => ({
 
     if (fetchData) {
       try {
-        // 主管道权威解析（2026-08-22 裁决）：activePipelineId 优先，替代 [0] 位置猜测
+        // 主管道权威解析：activePipelineId 优先，不按 [0] 位置猜测
         const pipelineId = mainPipelineIdOf(session)
         if (!pipelineId) {
           console.error('[setActiveSession] 会话缺少主管道: sessionId=%s pipelineIds=%o', id, session.pipelineIds)

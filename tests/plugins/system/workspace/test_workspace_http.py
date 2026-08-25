@@ -1,5 +1,5 @@
 # @feature: FP-0.2.二 workspace 插件 http 面 | @vision: V3 可嵌入 | @ci: python-coverage
-"""workspace 插件 workspaces 域 11 端点测试（channel_api 拆迁批次 1 侧车化承接）。
+"""workspace 插件 workspaces 域 11 端点测试（channel_api 侧车化承接）。
 
 覆盖（对齐原 tests/channels/test_routes_workspaces.py 语义 + 新 http.handle 分发层）：
 1. GET /{id} /{id}/artifacts /{id}/file-tree —— 工作空间详情/制品聚合/文件树

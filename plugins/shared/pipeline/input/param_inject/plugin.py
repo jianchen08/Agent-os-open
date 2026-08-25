@@ -128,8 +128,8 @@ class ParamInjectPlugin(IInputPlugin):
                     raw_args = json.loads(raw_args)
                 except (json.JSONDecodeError, TypeError):
                     tool_name = injected_tc.get("name", "?")
-                    # 诚实分类失败原因：不再一律归因为 max_tokens 截断。
-                    # 生产误报：283 字符的 arguments 也曾被标「疑似截断」。
+                    # 诚实分类失败原因：不一律归因为 max_tokens 截断
+                    # （短 arguments 也可能解析失败，如 markdown 包裹）。
                     reason = classify_args_parse_failure(raw_args)
                     logger.warning(
                         "[%s] 工具 %s 的 arguments JSON 解析失败 | reason=%s | 长度=%d | 前200字符: %s",
@@ -173,14 +173,14 @@ class ParamInjectPlugin(IInputPlugin):
                 raw_args = {}
             args = dict(raw_args)
 
-            # 剥离 LLM 夹带的 `_` 前缀内部键（安全审查 2026-08-19 系统性根因）：
+            # 剥离 LLM 夹带的 `_` 前缀内部键（安全边界）：
             # `_owner/_call_context/_container_id/_isolation_provider` 等下划线键是
             # 内核（dispatch 期）与管道插件（isolation_guard，位于本插件之后的
             # 服务端注入通道——isolation_guard 无条件覆盖注入 _container_id，故
             # 此处先剥不影响合法注入；内核注入的 _owner/_log_ctx 发生在管道之后，
             # 亦不受影响）。任何工具 schema 均未声明下划线参数，出现即视为
-            # 提示注入伪造（如 bash 工具曾据 _isolation_provider 跳过危险命令
-            # 黑名单），先剥后注入，服务端值权威。
+            # 提示注入伪造（下划线参数可被用于绕过危险命令黑名单），先剥后
+            # 注入，服务端值权威。
             for forged_key in [k for k in args if k.startswith("_")]:
                 del args[forged_key]
 
@@ -227,9 +227,9 @@ class ParamInjectPlugin(IInputPlugin):
 
             # 注入 workspace / isolation_level / project_root：服务端权威值
             # **无条件覆盖**（仅 task_submit 例外——其 workspace/isolation 是
-            # agent 显式选择项）。历史上"参数不存在才注入"允许 LLM 在工具
+            # agent 显式选择项）。"参数不存在才注入"会允许 LLM 在工具
             # 参数里夹带伪造 workspace/project_root，使 fs_tools 等把校验锚点
-            # 定到任意路径（安全审查 2026-08-19 系统性根因），故改为覆盖式。
+            # 定到任意路径（安全边界），故必须覆盖式注入。
             _tool_name = injected_tc.get("name", "")
             _skip_task_ctx = _tool_name == "task_submit"
 

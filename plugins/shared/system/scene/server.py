@@ -4,13 +4,12 @@
 老代码从 0.1 src/scene/ 原封不动复制到本目录（平铺），
 本文件只做接口适配：调用老代码逻辑，通过 MCP SDK 暴露为工具。
 
-channel_api 退役批次 1 起同时承载 scenes 域 HTTP 面：
+同时承载 scenes 域 HTTP 面：
 ``http.handle`` 按 path 分发（协议与 agent_manager/monitoring 同款），
 plugin.json ``http_endpoints`` 声明（/ext/scene_service/scenes/**）；
-业务函数在 ``routes_scene.py``（原 channel_api/routes_scene.py 自持迁移）。
+业务函数在 ``routes_scene.py``。
 
-[来源: docs/working/module_migration_plan.md §六 P2 scene；
-docs/working/channel_api插件拆迁方案_20260821.md 批次 1]
+[来源: docs/working/module_migration_plan.md §六 P2 scene]
 """
 from __future__ import annotations
 
@@ -289,7 +288,7 @@ def _decode_body(raw_body: str) -> dict[str, Any]:
         raise ValueError(f"invalid JSON body: {exc}") from exc
 
 
-# ══ scenes 域（channel_api 退役批次 1：routes_scene.py handler 迁入）══
+# ══ scenes 域 ══
 
 _PREFIX = "/ext/scene_service/scenes"
 
@@ -307,7 +306,7 @@ _PREFIX = "/ext/scene_service/scenes"
             "query": {"type": "object"},
         },
     },
-    description="HTTP endpoint handler for /ext/scene_service/** (scenes domain, channel_api 拆迁批次 1)",
+    description="HTTP endpoint handler for /ext/scene_service/** (scenes domain)",
 )
 async def http_handle(
     path: str = "",

@@ -3,20 +3,12 @@ import tests._isolation_path  # noqa: F401
 
 """容器自愈回归测试。
 
-背景 BUG：容器反复 "container is not running" 卡死，由三处缺陷叠加导致：
-1. DockerProvider.create_environment 丢弃 docker start 返回值，start 失败
-   （WSL2 挂载脏路径 mkdir: file exists）后容器卡在 created(exit 128)，却被
-   标记 READY → 后续 docker exec 报 "is not running"。
-2. IsolationManager._find_existing_container 对 created 状态不处理，无条件
-   标 READY，使卡死容器被反复误信复用。
-3. execute_in_isolation 执行前无健康检查，从不自愈。
-
-修复（见 src/isolation/providers/docker_provider.py、src/isolation/manager.py）：
+锁定核心契约（见 src/isolation/providers/docker_provider.py、src/isolation/manager.py）：
 - _create_and_start：start 失败删除卡死容器并重建重试一次；仍失败标记 ERROR。
 - _find_existing_container：created/exited 启动失败 → 删容器返回 None 触发新建。
 - execute_in_isolation：执行前 inspect 复核状态，非 READY 透明重建一次。
 
-本测试锁定核心契约：start 失败可自愈、误信异常态被纠正、执行前健康兜底。
+本测试验证：start 失败可自愈、误信异常态被纠正、执行前健康兜底。
 """
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -229,10 +221,8 @@ async def test_find_existing_container_running_reused_directly():
 async def test_find_existing_container_running_desync_returns_none():
     """running 但 runc 命名空间脱节的容器 → 探针 exec 失败 → 删容器返回 None 触发新建。
 
-    背景（第三层根因）：setns 脱节时 docker inspect 仍报 running，
-    _find_existing_container 信任该 status 直接复用坏容器 → setns 自愈的重建
-    实际捡回同一个坏容器 → 重试仍失败 → 自愈循环空转。修复：running 容器
-    加 exec 探针，setns 脱节则当坏容器删掉返回 None。
+    契约：running 容器须经 exec 探针复核，setns 脱节则当坏容器删掉返回 None，
+    重建不会捡回同一个坏容器（避免自愈循环空转）。
     """
     from docker.errors import DockerException
 
@@ -371,9 +361,9 @@ _SETNS_DESYNC_ERR = (
 async def test_execute_rebuilds_on_setns_namespace_desync():
     """exec 命中 setns 脱节 → destroy + 重建 + 单次重试 → 在新环境执行成功。
 
-    背景：setns 脱节时 docker inspect 仍报 running，pre-exec 健康检查放行，
-    错误只在 exec 时冒泡。本用例锁定 post-exec 自愈：检测到 setns 标记后
-    透明重建容器并重试一次。
+    契约：inspect 对 setns 脱节误报 running（pre-exec 健康检查放行），错误只在
+    exec 时冒泡——本用例锁定 post-exec 自愈：检测到 setns 标记后透明重建
+    容器并重试一次。
     """
     manager = IsolationManager(providers={})
     provider = MagicMock()
@@ -454,11 +444,8 @@ async def test_no_rebuild_on_normal_command_failure():
 async def test_setns_no_rebuild_loop_when_destroy_fails():
     """setns 脱节但坏容器删不掉（runc 卡死 rm -f 失败）→ 不空转重建，明确报错。
 
-    背景（第三层根因闭环）：runc 卡死的容器 docker rm -f 会失败，且同名新容器
-    create 必冲突（容器名唯一）。旧实现 destroy 不检查返回码、谎报"已销毁"，
-    重建走 get_or_create_environment 又被 _find_existing_container 捡回坏容器
-    （信任假 running）→ 自愈循环空转 10 次仍失败。修复后：destroy 返回 False 时
-    不进重建（重建注定失败），直接返回明确错误提示需重启 docker，避免空转。
+    契约：destroy 返回 False 时不进重建（重建注定失败——同名容器 create 必冲突），
+    直接返回明确错误提示需重启 docker，避免自愈循环空转。
     """
     manager = IsolationManager(providers={})
     provider = MagicMock()
@@ -489,7 +476,7 @@ async def test_setns_no_rebuild_loop_when_destroy_fails():
 
 
 # ---------------------------------------------------------------------------
-# 6. DockerProvider.destroy_environment：rm 失败不谎报（第三层根因诚实性修复）
+# 6. DockerProvider.destroy_environment：rm 失败不谎报
 # ---------------------------------------------------------------------------
 
 
@@ -497,11 +484,7 @@ async def test_setns_no_rebuild_loop_when_destroy_fails():
 async def test_destroy_environment_honest_on_rm_failure():
     """docker rm -f 失败（runc 卡死删不掉）→ destroy 不谎报成功、保留 env 记录。
 
-    背景（第三层根因）：runc 命名空间脱节的容器 docker rm -f 会失败
-    （could not kill container ... did not receive an exit event），
-    但旧实现不检查 rm 返回码，照样 log "容器已销毁" 并 pop 掉 env 记录，
-    造成"内存里以为删了、docker 里还在"的状态脱节。修复：rm 非零时
-    不谎报、不 pop env（保留记录供排查），返回 False。
+    契约：rm 返回非零时不谎报、不 pop env（保留记录供排查），返回 False。
     """
     provider = DockerProvider()
     # rm -f 返回非零（runc 卡死的真实 stderr）

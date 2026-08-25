@@ -4,7 +4,7 @@
 //! 复用前端同一条 WS 派发路径（`dispatch_user_input` → `process_via_engine`）：
 //! 以触发消息为新一轮用户消息投给该会话 agent，agent 处理后流式回复前端。
 //!
-//! 坐标语义（2026-08-19 定案）：对外契约只含 `pipeline_id + message + user_id`，
+//! 坐标语义：对外契约只含 `pipeline_id + message + user_id`，
 //! thread 是由坐标推导的派生物——注入分支在接口内部用 `pipeline_id` 反查
 //! `pipeline_sessions` 解析真实会话 thread（黑盒），解析失败即协议错误；
 //! 两个 id 形态不同（32hex vs `thread-` 前缀），绝不互填、不做参数搬运。
@@ -233,11 +233,11 @@ impl ChatSendHandler {
             unreachable!("supplied_pid 为 None 时已在创建分支 return/自生成 pipeline_id")
         };
 
-        // 创建分支先落 pipeline↔thread 映射（F8，2026-08-20）：此前映射由
-        // 引擎 persist 路径稍后补写，dispatch 内 resolve_pipeline_id_for_thread
-        // 校验必失败 → 每次任务派发刷一条“前端传来的 pipeline_id 不属于该
-        // thread”误告警。映射幂等（INSERT OR IGNORE），落库失败不阻断派发
-        // （引擎路径仍会补写——此处只是消除误告警 + 提前可见性）。
+        // 创建分支先落 pipeline↔thread 映射（F8）：映射须先于派发写入，
+        // 否则 dispatch 内 resolve_pipeline_id_for_thread 校验必失败——每次
+        // 任务派发刷一条“前端传来的 pipeline_id 不属于该 thread”误告警。
+        // 映射幂等（INSERT OR IGNORE），落库失败不阻断派发（引擎路径仍会
+        // 补写——此处只是消除误告警 + 提前可见性）。
         if created {
             if let Some(store) = self.store.as_ref() {
                 let tenant_id =
@@ -254,11 +254,11 @@ impl ChatSendHandler {
                         "chat.send_message 创建分支 pipeline↔thread 映射落库失败（引擎路径将补写）"
                     );
                 }
-                // 出生字段持久化（2026-08-23 任务归属链修复）：lineage.* + task.*
+                // 出生字段持久化：lineage.* + task.*
                 // 出生即落 pipeline_state 表。引擎 persistent_fields 投影只覆盖
                 // 插件 manifest 声明键（track.* 等），任务域/血缘键不属于任何插件
                 // ——不在此落库则冷读（cold_state_row）无基线、registry 内存丢失后
-                // 任务面板归属链整行缺失（实测：任务 running 但 state 聚合不出口）。
+                // 任务面板归属链整行缺失（任务 running 但 state 聚合不出口）。
                 // 与 no_dispatch 分支同款逐键 upsert（幂等），失败 warn 不阻断派发。
                 if let Some(overlay_obj) = overlay.as_ref().and_then(|o| o.as_object()) {
                     for (k, v) in overlay_obj {
@@ -757,11 +757,11 @@ mod tests {
         );
     }
 
-    // ── 注入分支坐标解析（2026-08-19 触发器空回复修复）──────────────
-    // 修复前：chat_send_handler 把同一个 pipeline_id 复制填进 dispatch 的
-    // thread_id 与 pipeline_id 两个槽位——事件发到无人订阅的频道（32hex 键
+    // ── 注入分支坐标解析 ──────────────────────────────────────
+    // chat_send_handler 不得把同一个 pipeline_id 复制填进 dispatch 的
+    // thread_id 与 pipeline_id 两个槽位——事件会发到无人订阅的频道（32hex 键
     // 在 registry 只注册 thread-xxx），表现为「LLM 日志有、前端收不到回复」。
-    // 修复后：坐标解析封装在接口黑盒内（pipeline_sessions 反查真实 thread），
+    // 坐标解析封装在接口黑盒内（pipeline_sessions 反查真实 thread），
     // 解析失败即协议错误。三连负样本 = A.3 验收口径。
 
     /// 生产构造（with_store）+ 会话映射命中：派发的 thread_id 必须是解析出的
@@ -865,7 +865,7 @@ mod tests {
 
     #[tokio::test]
     async fn create_branch_persists_birth_overlay_to_state_table() {
-        // 2026-08-23 任务归属链修复：出生字段（lineage.* + task.*）创建即落
+        // 任务归属链语义：出生字段（lineage.* + task.*）创建即落
         // pipeline_state 表——引擎 persistent_fields 投影只覆盖插件声明键，
         // 任务域键不属于任何插件；不落库则 registry 内存丢失后（重启）冷读
         // 无基线，任务面板归属链整行缺失。未知 user 回退 default 租户。

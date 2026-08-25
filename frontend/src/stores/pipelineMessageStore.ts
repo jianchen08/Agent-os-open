@@ -14,8 +14,7 @@ import { decideClaim } from '@/streaming/claim'
 const logger = loggers.sessionStore
 
 /**
- * 每个管道持久化的最大消息条数。
- * 迁移到 IndexedDB（GB 级容量）后从 50 提升至 250，给单会话充足历史缓存。
+ * 每个管道持久化的最大消息条数（IndexedDB 容量充裕，250 给单会话充足历史缓存）。
  * 内存上限 MAX_MESSAGES_PER_PIPELINE_IN_MEMORY=300 始终 ≥ 此值，避免「内存裁掉但还想落盘」的矛盾。
  */
 const PERSIST_MAX_MESSAGES_PER_PIPELINE = 250
@@ -140,7 +139,7 @@ const _fetchingPipelines = new Map<string, Promise<void>>()
 const _reconcilingPipelines = new Set<string>()
 
 /**
- * 刷新后后台静默全量对账（2026-08-22）：auto 首次进入且本地有 IndexedDB 缓存时，
+ * 刷新后后台静默全量对账（auto 首次进入且本地有 IndexedDB 缓存时，
  * 页面立即用缓存渲染（秒开），全量 API 对账放后台执行——initFromAPI 权威替换
  * 能修正刷新前流式断线留下的空洞/残影（增量补漏 after_sequence 拉不到已加载
  * 区间内的缺失消息）。对账无变化时对 UI 零影响；失败静默（缓存已渲染，下次
@@ -165,7 +164,7 @@ async function reconcileFromAPI(pipelineId: string, threadId: string): Promise<v
 
 /** IndexedDB rehydrate 完成信号（persist onFinishHydration 设置；刷新后首屏
  *  loadPipelineMessages 在 rehydrate 前到达时等待，否则本地缓存不可见 →
- *  auto 判定"未对账"全量 init，IndexedDB 缓存形同虚设，2026-08-22 实锤） */
+ *  auto 判定"未对账"全量 init，IndexedDB 缓存形同虚设） */
 let _hydrated = false
 const _hydrationWaiters: Array<() => void> = []
 const _markHydrated = () => {
@@ -252,7 +251,8 @@ interface PipelineMessageState {
   /** 获取指定管道的消息列表 */
   getMessages: (pipelineId: string) => Message[]
 
-  /** 认领 user 消息（ADR 2026-08-22「认领替代驱逐」）：按 cmid 找到乐观 user
+  /** 认领 user 消息（[来源: docs/decisions/2026-08-22-streaming-protocol-rewrite.md]）：
+   *  按 cmid 找到乐观 user
    *  消息 → 权威 record_id/seq 记入独立 recordId 字段（UI 寻址 id 永不变），
    *  status='completed'。候选缺失（断线期间确认到达/刷新窗口）→ 以
    *  cmid 为 id 插入权威 user 版——「发送后用户消息消失」结构性不可能。 */
@@ -384,12 +384,14 @@ function mergeSorted(a: Message[], b: Message[]): Message[] {
  * - id 相同 → 同一条（后端 record_id == WS message_id，正常路径）
  * - clientMessageId 相同 → 同一条（user 乐观版 id=前端 UUID，API 版 id=后端
  *   record_id，id 不同但后端从乐观消息回传了相同 clientMessageId）
- * - recordId 相同 → 同一条（ADR 2026-08-22 双字段范式：本地已认领的 user 消息
+ * - recordId 相同 → 同一条（双字段范式：本地已认领的 user 消息
  *   UI id 是前端 uuid、API 权威版 id 是后端 record_id，按 recordId 收敛）
  *
  * 命中时本地版让位 API 版（丢弃本地、保留 API），保证全量与增量两条路径的
  * 渲染终态一致 —— 切会话回来（增量）与刷新（全量）不会产生不同的消息列表。
- * （ADR 2026-08-21/2026-08-22：仅精确键裁决，不做 role::seq 指纹等模糊匹配——
+ * （[来源: docs/decisions/2026-08-21-message-idempotency-contract.md] /
+ *  [来源: docs/decisions/2026-08-22-streaming-protocol-rewrite.md]：
+ *  仅精确键裁决，不做 role::seq 指纹等模糊匹配——
  * 非唯一键，撞号时写错目标/误删，业界流式系统一律事件携带权威 ID 精确匹配。）
  */
 function isCoveredByApi(
@@ -400,7 +402,8 @@ function isCoveredByApi(
 ): boolean {
   if (apiIds.has(m.id)) return true
   if (m.clientMessageId && apiByClientId.has(m.clientMessageId)) return true
-  // ADR 2026-08-22 双字段范式：本地已认领 user（UI id=uuid, recordId=mc_ 指纹）
+  // [来源: docs/decisions/2026-08-22-streaming-protocol-rewrite.md] 双字段范式：
+  // 本地已认领 user（UI id=uuid, recordId=mc_ 指纹）
   // 与 API 权威版（id=后端 record_id，与 recordId 同值）收敛——按 recordId 命中
   // API id 集即同一条，刷新/补漏后不产生重复气泡
   if (m.recordId && apiIds.has(m.recordId)) return true
@@ -537,7 +540,7 @@ export const usePipelineMessageStore = create<PipelineMessageState>()(
       // bottomCursor 只由 API 权威路径（initFromAPI / appendMessages / prependMessages）维护。
       // addMessage 是乐观/流式/通知消息的入口（pending 乐观 user、ensureStreamingPlaceholder
       // 流式占位、handleSystemNotification 系统通知、send_failed 错误气泡），其
-      // sequence 非后端权威值（无权威 seq 时挂空，ADR 2026-08-21 已废除本地拼号）。
+      // sequence 非后端权威值（无权威 seq 时挂空，本地不再拼号）。
       // 若让它推进 bottomCursor，会污染双游标：
       //   - 系统通知 sequence 被抬到 localMax+1，initFromAPI 重排时被 mergeSorted 排到末尾，
       //     导致「通知跑到 AI 回复后面」（排序错乱）。
@@ -557,13 +560,13 @@ export const usePipelineMessageStore = create<PipelineMessageState>()(
     })
   },
 
-  /** 认领 user 消息（ADR 2026-08-22「认领替代驱逐 + UI 寻址 id 永不迁移」）。
+  /** 认领 user 消息（[来源: docs/decisions/2026-08-22-streaming-protocol-rewrite.md]）。
    *  裁决规则（纯逻辑见 src/streaming/claim.ts）：
    *  - 主数组候选命中 → upgrade：权威 record_id/seq 记入独立 recordId 字段，
    *    UI id 不变（React key 稳定），status='completed'
    *  - 候选缺失 → insert：以 cmid 为 id 补插权威 user 版（后端已持久化，不能丢）
    *  - 已认领/不匹配 → skip（幂等）
-   *  乐观 user 消息自发送瞬间就在主数组（单一消息数组，ADR 2026-08-22）——
+   *  乐观 user 消息自发送瞬间就在主数组（单一消息数组）——
    *  认领即原地升级，无 pending 区。 */
   claimUserMessage: (pipelineId, cmid, userRecord) => {
     const state = get()
@@ -656,7 +659,7 @@ export const usePipelineMessageStore = create<PipelineMessageState>()(
     return hit
   },
 
-  /** 更新指定管道中的消息（部分更新）。精确 ID 匹配（ADR 2026-08-21）：失配即
+  /** 更新指定管道中的消息（部分更新）。精确 ID 匹配：失配即
    * 记 error 并跳过——不做 role+sequence/指纹等模糊匹配（非唯一键，迟到事件
    * 会写错旧消息）。找不到目标说明事件与本地状态脱节，正确处置是等对账补正，
    * 而不是猜一条相近的写。 */
@@ -746,7 +749,7 @@ export const usePipelineMessageStore = create<PipelineMessageState>()(
           const stoppedMsg = updatedMessages[messageIndex]
           // 只收尾「流式 assistant」：sending/failed 的 user 乐观消息不归本方法管
           // （发送失败标 failed 后 stopStreaming 不得把它覆盖成 completed——
-          // 2026-08-22 单一消息数组：失败语义由调用方显式设置）。
+          // 单一消息数组：失败语义由调用方显式设置）。
           if (stoppedMsg.role === 'assistant') {
             // 收尾 part 状态：仅设置 message.status='completed' 会让 isStreamingMessage
             // 仍因残留的 'streaming'/'calling' part 返回 true（数据不一致，Stop 后再发新
@@ -804,9 +807,9 @@ export const usePipelineMessageStore = create<PipelineMessageState>()(
       logger.info('[initFromAPI] pipelineId=%s apiMsgs=%d existingMsgs=%d',
         pipelineId?.slice(0, 12), sorted.length, existing?.length || 0)
 
-      // ★ 刷新语义（ADR 2026-08-21 纯化）：API 权威全量替换本地缓存——不合并、
-      // 不宽限、不保留飞行中消息。旧 90s「飞行保留」窗口（2026-08-20 为 YAML 慢读
-      // 竞态引入）已废除：乐观 user 由 pending 区承担保护（cmid 对账驱逐），
+      // ★ 刷新语义（[来源: docs/decisions/2026-08-21-message-idempotency-contract.md]）：
+      // API 权威全量替换本地缓存——不合并、
+      // 不宽限、不保留飞行中消息。乐观 user 由 pending 区承担保护（cmid 对账驱逐），
       // streaming 占位刷新即弃（重连 replay 按 last_sequence watermark 重建、
       // 完成后由 backfill 按权威记录补回——内容不丢，只是中途回显等完成）。
       const apiByClientId = new Map<string, Message>()
@@ -816,7 +819,7 @@ export const usePipelineMessageStore = create<PipelineMessageState>()(
         if (m.recordId) apiByRecordId.set(m.recordId, m)
       }
       // 本地乐观/流式消息让位 API 权威版（isCoveredByApi 按 id/cmid/recordId
-      // 双键收敛，ADR 2026-08-21/2026-08-22）；乐观 user 在主数组内，被 API
+      // 双键收敛）；乐观 user 在主数组内，被 API
       // 权威版覆盖即让位（不并存、不重复），认领后的 recordId 匹配同值收敛。
       let finalMessages = sorted
       // 过滤空白 assistant 消息（无 content 无 parts），避免空气泡
@@ -907,13 +910,13 @@ export const usePipelineMessageStore = create<PipelineMessageState>()(
       if (messages.length === 0) return state
       const sorted = [...messages].sort(compareMessages)
       const existing = state.messagesByPipeline[pipelineId] || []
-      // 含 clientMessageId/recordId 双键对账（ADR 2026-08-21/2026-08-22）：
+      // 含 clientMessageId/recordId 双键对账：
       // user 乐观版（UUID id）与 API 权威版（record_id）同键时丢弃本地乐观版，
       // 避免切会话回来两条 user 并存。
       const merged = mergeIncrementalApiWithLocal(sorted, existing)
       // 内存封顶：超量时丢弃最老消息，防止长会话撑爆内存（OOM）
       const finalMerged = capMessagesForMemory(merged)
-      // 游标只按 API 权威消息计算（ADR 2026-08-21 对齐 initFromAPI 口径）：
+      // 游标只按 API 权威消息计算（对齐 initFromAPI 口径）：
       // 本地乐观/流式占位的 seq 不进游标，after_sequence 补漏不跳空。
       const apiFinal = capMessagesForMemory(filterBlankMessages(sorted))
       const bottomCursor = calculateBottomCursor(apiFinal, state.bottomCursorsByPipeline[pipelineId])
@@ -1059,7 +1062,7 @@ export const usePipelineMessageStore = create<PipelineMessageState>()(
   loadPipelineMessages: async (pipelineId, options) => {
     const { threadId, mode = 'auto', skipStreamingCheck = false } = options
     // 刷新后首屏：等 IndexedDB rehydrate 完成再决策——不等待时本地缓存不可见，
-    // auto 会误判"未对账"走全量 init，缓存恢复路径被跳过（2026-08-22）。
+    // auto 会误判"未对账"走全量 init，缓存恢复路径被跳过。
     // init（显式强制全量）不需要缓存，跳过等待直接请求。
     if (mode !== 'init') await waitForMessageHydration()
     const state = get()
@@ -1075,7 +1078,7 @@ export const usePipelineMessageStore = create<PipelineMessageState>()(
     // - mode='auto'：切换会话 → 该管道尚未对账（刷新后首次进入 / 无缓存）：全量对账一次；
     //   已对账：不做任何 API 调用，直接用缓存
     // - mode='backfill'：WS 重连补漏 → 增量追加
-    // 对账标记的信任条件（2026-08-22）：rehydrate 后 reconciledByPipeline 被重置为 {}，
+    // 对账标记的信任条件：rehydrate 后 reconciledByPipeline 被重置为 {}，
     // 但 IndexedDB 缓存里的消息本体仍有效（persist 快照只含已确认消息）。刷新后首次
     // auto 进入：本地有缓存 → 页面立即用缓存渲染（秒开），同时后台静默全量对账
     // （修正断线空洞/残影，见 reconcileFromAPI）；仅缓存缺失/为空时才同步全量重建。
@@ -1305,7 +1308,7 @@ export const usePipelineMessageStore = create<PipelineMessageState>()(
     // 恢复时合并默认状态（运行时状态用默认值）
     merge: (persisted, current) => {
       const p = (persisted as Partial<PipelineMessageState>) || {}
-      // ADR 2026-08-21 复活链废除：rehydrate 一律丢弃 streaming/占位消息——
+      // 复活链已废除：rehydrate 一律丢弃 streaming/占位消息——
       // 刷新后的飞行中内容由两条成熟机制恢复：WS 重连 replay（last_sequence
       // watermark 回放事件流，前端按精确 ID 重建）+ 完成后 backfill（API 权威
       // 记录）。持久化快照只保留已确认消息，杜绝「刷新后本地残影复活」通道。

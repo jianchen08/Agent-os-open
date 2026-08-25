@@ -592,7 +592,7 @@ export function applyTheme(config: ThemeConfig, debug = false): void {
  * （后写者胜，覆盖 base 主题对应值）；背景（image/texture）按 enabled 开关
  * 覆盖宿主背景。纯数据无 JS 执行，零 eval 风险（任务文档「第 1 层」）。
  *
- * 变量生命周期统一管理（2026-08-21 修：切主题漂移根因）：插件发射的变量
+ * 变量生命周期统一管理（切主题漂移根因）：插件发射的变量
  * 记录在 lastPluginVars，下次应用前先清理——皮肤切回内置主题时 base 主题
  * 不发射 --region-* 等插件专属变量，不清理则区域背景/气泡形态继续命中
  * 旧皮肤值（侧边栏停留在上一主题配置）。

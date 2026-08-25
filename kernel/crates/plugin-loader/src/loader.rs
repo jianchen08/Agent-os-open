@@ -2,7 +2,6 @@
 //!
 //! 实现双根扫描、manifest 解析校验、按需加载。
 //!
-//! [来源: docs/tasks/task_05_plugin_system.md AC-04-1/AC-04-2]
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -528,7 +527,7 @@ impl PluginLoader for PluginLoaderImpl {
         // ADR 附录 D③/D.5（P6 命名治理）：启动期聚合校验 invoke_entry。
         // pipeline 类型插件的 MCP 入口名必须显式声明（不再隐式回退 capabilities.tools）。
         // 收集所有缺失项一次性报错——不逐个 panic，避免"修一个崩一个"的迁移体验。
-        // D.6 槽位拆分（2026-08-15 落地）：capabilities.tools = LLM 工具（声明即
+        // D.6 槽位拆分：capabilities.tools = LLM 工具（声明即
         // 注册，不分类型）；capabilities.services = 内部服务方法。两者都不要求
         // invoke_entry（那是管道入口的声明）。
         let mut missing_invoke_entry: Vec<String> = all_manifests
@@ -913,7 +912,7 @@ mod tests {
         fs::write(dir.join("plugin.json"), manifest_json).unwrap();
     }
 
-    /// Phase 1 契约定型（2026-08-18）：manifest 未知字段从"静默忽略"改为
+    /// Phase 1 契约定型：manifest 未知字段从"静默忽略"改为
     /// `deny_unknown_fields` 拒绝——历史遗留 `capabilities.resources`（结构已删）
     /// 是 82 个真实插件曾携带的死声明，扫描后已全量清除；本测试断言未知字段
     /// 现在**拒绝**（fail-closed），不再容忍"声明了却不生效"。

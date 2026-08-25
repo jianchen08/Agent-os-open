@@ -58,7 +58,7 @@ class ContextBuildPlugin(IInputPlugin):
         self._agent_name = self._config.get("agent_name", "")
         self._agent_level = self._config.get("agent_level", "L1")
         self._extra_context = self._config.get("extra_context", {})
-        # agent 配置自持（解耦裁决 2026-08-17）：内核只把 agent_id 放进 state，
+        # agent 配置自持：内核只把 agent_id 放进 state，
         # 加载 config/agents/**/<agent_id>.yaml 是本插件（sidecar）的职责。
         # 缓存：yaml 路径 → 解析结果（mtime 失效），进程内复用。
         self._agent_yaml_cache: dict[str, tuple[float, dict[str, Any]]] = {}
@@ -174,29 +174,26 @@ class ContextBuildPlugin(IInputPlugin):
             or str(agent_cfg.get("system_prompt", "") or "")
             or self._system_prompt
         )
-        # agent 名称每次执行按当前管道 agent 重新解析（F9，2026-08-20）：此前
-        # 写回 self._agent_name 实例属性——L1 会话先跑把"灵汐"写进实例，同
-        # sidecar 进程内子任务管道复用本插件实例时 `if not self._agent_name`
-        # 恒 False，"代码审查专家"永远写不进 → context.agent_name 跨管道污染
-        # （子任务自称"灵汐"根因）。实例属性只作配置默认值，不缓存解析结果。
+        # agent 名称每次执行按当前管道 agent 重新解析（不缓存到实例属性——
+        # 同 sidecar 进程内多个管道复用本插件实例，缓存会造成 agent_name
+        # 跨管道污染）。实例属性只作配置默认值，不缓存解析结果。
         agent_name = self._agent_name or str(agent_cfg.get("display_name") or "")
         # tool_ids 随 agent 配置注入（内核 inject_tool_schemas 读 state.tool_ids
         # 过滤；agent 配置加载归本插件后由这里供给）。
         _tool_ids = agent_cfg.get("tool_ids")
         if isinstance(_tool_ids, list) and _tool_ids:
             updates["tool_ids"] = _tool_ids
-        # dynamic_vars 随 agent 配置装载（F9，2026-08-20）：agent yaml 的
+        # dynamic_vars 随 agent 配置装载：agent yaml 的
         # dynamic_vars.items → context.dynamic_vars，prompt_build 据此走配置
-        # 驱动路径。此前无人装载 → 恒空 → prompt_build 恒走硬编码兜底块，
-        # 配置声明的 {{timestamp}}/{{path:}} 从未生效（含主 agent）。
+        # 驱动路径（配置声明的 {{timestamp}}/{{path:}} 依赖此装载）。
         _dv = agent_cfg.get("dynamic_vars")
         if isinstance(_dv, dict) and _dv.get("enabled", True):
             _items = _dv.get("items")
             if isinstance(_items, list) and _items:
                 updates["context.dynamic_vars"] = _items
         # agent 层级：yaml level（如 code_writer L3）覆盖插件默认 L1——子任务
-        # 管道按目标 agent 定层级（L1 豁免会让 task_reminder 评估闸门旁路，
-        # 2026-08-18 实测踩坑）。插件配置显式 agent_level 仍最高优先。
+        # 管道按目标 agent 定层级（L1 豁免会让 task_reminder 评估闸门旁路）。
+        # 插件配置显式 agent_level 仍最高优先。
         if agent_cfg.get("level") and self._config.get("agent_level") is None:
             lvl = str(agent_cfg["level"]).strip().upper()
             if lvl.startswith("L"):

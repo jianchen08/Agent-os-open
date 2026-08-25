@@ -114,10 +114,9 @@ class ToolSchemaPlugin(IInputPlugin):
                         if isinstance(s, dict)
                         and (s.get("function") or {}).get("name") in keep
                     ]
-                    # F5（2026-08-20）：加载期工具面漂移检测——agent tool_ids
+                    # 加载期工具面漂移检测：agent tool_ids
                     # 引用了注册表不存在的工具 = 配置错误/注册异常（被 G2 净化、
-                    # 插件未启用、名字写错），报警暴露而非静默缩面（实测：
-                    # task_manage 被 G2 净化后 LLM 工具面 11→9 无人知晓）。
+                    # 插件未启用、名字写错），报警暴露而非静默缩面。
                     available = {
                         (s.get("function") or {}).get("name")
                         for s in schemas
@@ -139,9 +138,9 @@ class ToolSchemaPlugin(IInputPlugin):
                         )
                         return {"tool_schemas": filtered}
                 else:
-                    # K10 配套（2026-08-20）：agent/state 完全无 tool_ids =
-                    # agent 配置加载断链的信号（context_build 应按 agent yaml
-                    # 注入 state.tool_ids；内核侧无 tool_ids 已不再全量注入）。
+                    # agent/state 完全无 tool_ids = agent 配置加载断链的信号
+                    # （context_build 应按 agent yaml 注入 state.tool_ids；
+                    # 内核侧无 tool_ids 已不再全量注入）。
                     # 报警暴露而非静默全量/空面。
                     logger.warning(
                         "[%s] agent 未声明 tool_ids，工具面为空——检查 agent 配置"

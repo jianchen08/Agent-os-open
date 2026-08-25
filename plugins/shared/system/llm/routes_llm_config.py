@@ -1,13 +1,12 @@
-"""LLM 配置管理 API 路由（config/llm 段）——自持版，由 llm_service http.handle 分发。
+"""LLM 配置管理 API 路由（config/llm 段），由 llm_service http.handle 分发。
 
-迁移自 channel_api/routes_config.py 的 LLM 配置段（channel_api 退役方案
-批次 1：config/llm → llm_service 插件）。api/concurrency/context-window/
-generic/cost-control 段不在此处（分别随批次 0 删除 / 归 cost_control 插件）。
+api/concurrency/context-window/generic/cost-control 段不在此处
+（分别删除 / 归 cost_control 插件）。
 
 - 读写 config/models/llm.yaml（含 .env 的 ${VAR} 占位符解析与明文 key 落库
-  语义），写入后按源语义清除内存缓存（invalidate_all_llm_caches /
+  语义），写入后清除内存缓存（invalidate_all_llm_caches /
   ConfigCenter.reload，best-effort null-guard——sidecar 进程内相关模块不可
-  导入时跳过，与 channel_api 侧车路径行为一致）；
+  导入时跳过）；
 - 剥离 FastAPI 依赖：无 APIRouter/Depends/HTTPException，请求体由 server.py
   http.handle 解码为 dict 传入，出错抛 :class:`ConfigAPIError`（status_code/
   detail），由 server.py 统一捕获转对应 HTTP 状态（404/409/400/502 形态与
@@ -29,8 +28,7 @@ from typing import Any
 import yaml
 
 # DEBT: config 子模块未复制到插件目录。llm_service 是独立 sidecar 进程，
-# config.config_center / config.models 不可导入时为 None，调用处已 null-guard
-# （与 channel_api 侧车路径同款处理）。
+# config.config_center / config.models 不可导入时为 None，调用处已 null-guard。
 try:
     from config.config_center import get_config_center
 except ImportError:
@@ -53,9 +51,8 @@ class ConfigAPIError(Exception):
 
 
 def _invalidate_llm_caches() -> None:
-    """4c 迁移：sidecar 模式下 config.models 不可导入（None），调用需 null-guard。
+    """sidecar 模式下 config.models 不可导入（None），调用需 null-guard。
 
-    channel_api 侧车路径行为不变：config.models 不可导入时跳过即可——
     sidecar 不持有 LLM 内存缓存；配置写入的即时生效由「下次直接读 YAML」
     保证（本模块所有读端点均直读磁盘）。
     """

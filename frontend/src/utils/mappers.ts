@@ -62,7 +62,7 @@ export function mapThreadToSession(thread: Thread | ThreadStateResponse): Sessio
 }
 
 /**
- * 会话主管道的权威解析（2026-08-22 裁决，猜测型匹配反模式收口批次3）：
+ * 会话主管道的权威解析（activePipelineId 优先，不按 [0] 位置猜测）：
  * - 优先后端权威 activePipelineId（session_routes 回显，内核 resolve 同源）；
  * - 缺失（旧数据）且 pipelineIds 恰一个元素 → 取 [0]（无歧义）；
  * - 缺失且多元素 → undefined（不猜位置序号，调用方 fail-closed 拒绝/中止）。

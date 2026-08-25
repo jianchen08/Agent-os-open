@@ -1,4 +1,4 @@
-# @feature: channel_api 退役批次 1 memory 域 | @ci: none-local
+# @feature: memory 域路由 | @ci: none-local
 """memory 域端点测试（自持迁移版 routes_memory.py）。
 
 验证内容：

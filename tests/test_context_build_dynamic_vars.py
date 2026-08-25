@@ -1,15 +1,12 @@
 # @feature: FP-0.2.二 dynamic_vars 配置装载与零兜底 | @ci: none-local
-"""context_build / prompt_build 的 dynamic_vars 三层修复回归（2026-08-20 F9）。
+"""context_build / prompt_build 的 dynamic_vars 三层契约（F9）。
 
 锁三件事：
-1. **装载**：agent yaml 的 dynamic_vars.items → state["context.dynamic_vars"]
-   （此前无人装载 → prompt_build 恒走硬编码兜底块，配置从未生效——
-   含主 agent，历史遗留"{{path:}} 占位符空渲染"的真相即此断链）；
-2. **零兜底**：无 agent 配置且无插件默认 → 不注入任何动态变量消息
-   （硬编码兜底块含日期/时间/Agent/会话已删，一行不留——2026-08-20 裁定）；
+1. **装载**：agent yaml 的 dynamic_vars.items → state["context.dynamic_vars"]，
+   prompt_build 据此渲染动态变量（含 {{path:}} 占位符）；
+2. **零兜底**：无 agent 配置且无插件默认 → 不注入任何动态变量消息；
 3. **无实例缓存污染**：同一插件实例先跑 L1 再跑子 agent，
-   context.agent_name 各次正确（旧 bug：self._agent_name 实例缓存导致
-   子任务自称"灵汐"）。
+   context.agent_name 各次正确（不得由实例缓存串味）。
 
 [来源: docs/working/管道执行bug修复方案_20260820.md F9]
 """

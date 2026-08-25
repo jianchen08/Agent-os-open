@@ -2,7 +2,8 @@
  *  同构），前端经共享 mapper（mapBackendMessageToMessage）生成 parts——流式事件与
  *  历史加载冷热同构，不再依赖 [{type:'text'}] 硬编码形态。
  *
- *  ADR 2026-08-22「认领替代驱逐」：new_message 同时携带 user_message 权威回传
+ *  「认领替代驱逐」（[来源: docs/decisions/2026-08-22-streaming-protocol-rewrite.md]）：
+ *  new_message 同时携带 user_message 权威回传
  *  （user 权威 record：id/sequence/content，引擎落库后提取）——前端据此按
  *  client_message_id 认领乐观 user 消息（recordId 双字段范式，UI 寻址 id 永不变），
  *  **不再驱逐**（旧驱逐路径 = 发送后用户消息消失的症状根因）。 */
@@ -19,7 +20,7 @@ export function handleNewMessage(eventData: any) {
   const pipelineId = resolvePipelineId(eventData)
   const threadId = extractThreadId(eventData)
 
-  // ADR 2026-08-21「清别人状态」废除：缺 pipeline_id 的事件无法定位归属管道——
+  // 「清别人状态」已废除：缺 pipeline_id 的事件无法定位归属管道——
   // 记 error 等重连对账，绝不按 threadId 反查清全会话 streaming、不拿 threadId
   // 顶替管道 ID（误杀其他管道流式 = 别人的气泡被掐断）。
   if (!pipelineId) {
@@ -35,7 +36,7 @@ export function handleNewMessage(eventData: any) {
 
   const data = eventData?.data || eventData
 
-  // ── 认领（echo）而非驱逐（ADR 2026-08-22）──
+  // ── 认领（echo）而非驱逐（[来源: docs/decisions/2026-08-22-streaming-protocol-rewrite.md]）──
   // ① 按 client_message_id 认领乐观 user 消息：权威 record_id/sequence 记入
   //    独立 recordId 字段（UI 寻址 id 保持前端 uuid 不变），status='completed'。
   //    候选缺失（pending 已撤下/刷新后确认到达）→ 以 cmid 为 id 补插权威 user 版

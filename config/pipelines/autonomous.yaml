@@ -50,7 +50,7 @@ loop_bodies:
       - id: prepare
         steps:                    # 插件 id（manifest 里的 id，带 pipeline_ 前缀）
           - pipeline_pause_guard       # 任务暂停检查（迭代起点，priority=5 最早；task_service 未接线时降级 paused=False + warning 留痕，写 state["pause_guard.checked"]）
-          - pipeline_context_build     # agent 配置自持加载（AGENTOS_CONFIG_ROOT/agents/**/<agent_id>.yaml → context.system_prompt/tool_ids/AGENT_LEVEL；须先于 tool_schema 与 prompt_build——它们的供给键由本步写入，2026-08-19 前漏接线致 LLM 请求 system 消息为空）
+          - pipeline_context_build     # agent 配置自持加载（AGENTOS_CONFIG_ROOT/agents/**/<agent_id>.yaml → context.system_prompt/tool_ids/AGENT_LEVEL；须先于 tool_schema 与 prompt_build——它们的供给键由本步写入，漏接线会致 LLM 请求 system 消息为空）
           - pipeline_tool_schema
           - pipeline_param_inject
           - pipeline_memory_read

@@ -1,5 +1,5 @@
 /**
- * Agent 列表 query（服务端状态 query 化批次 1）
+ * Agent 列表 query（服务端状态 query 化）
  *
  * agents 数据唯一真值源 = TanStack Query 缓存（queryKeys.agents）。
  * 原实现走 agentStore 裸 fetch（手写 Authorization 头、无缓存、isLoading 防重），
@@ -23,8 +23,7 @@ const AGENTS_STALE_TIME = 5 * 60_000
  *  如 main/agentos.yaml 与 main_agent.yaml 的 config_id 均为 agentos，
  *  相同 config_id 只保留第一个，避免 SessionEditModal 渲染 option 时 key 重复） */
 function mapAndDedupeAgents(data: AgentListResponse): Agent[] {
-  // 宽松视图：后端历史响应含类型未声明的 config_id 字段（agentStore 裸 fetch 时代
-  // 即按 Record 消费），映射保持同等宽容度
+  // 宽松视图：后端响应含类型未声明的 config_id 字段，按 Record 宽容消费
   const rawItems = (data.items ?? []) as unknown as Array<Record<string, unknown>>
   const mapped = rawItems.map(
     (agent): Agent => ({

@@ -6,8 +6,8 @@
 //! - 无活跃 task_local scope → 返回 `tenant_id: "default"`（与 Python 侧回退一致，永不报错）；
 //! - 在 `agentos_tenant::scope` 内 → 返回 scope 的 tenant_id/session_id。
 //!
-//! 此前 capability_router 对 tenant-context 落在 catch-all（"未实现"）——本测试
-//! 锁定「Python 侧多租户通路真实可用」这一目标。
+//! 本测试锁定「Python 侧多租户通路真实可用」这一目标：tenant-context 必须
+//! 由 capability_router 显式路由（不得落在 catch-all"未实现"）。
 
 use agentos_api::capability_router::KernelCapabilityRouter;
 use agentos_api::metrics::MetricsAggregator;

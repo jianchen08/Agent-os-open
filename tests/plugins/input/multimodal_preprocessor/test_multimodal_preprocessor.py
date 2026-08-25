@@ -12,7 +12,7 @@
 - 本地路径：文件存在 → 引用块（不再是裸路径直传 API 的坏形态……注：引用
   语义下 url 仍是路径，由 llm_core 读文件转 data URL）；文件缺失 → 文本占位；
 - 上传目录解析：经 uploads_path 统一（UPLOADS_DIR env > data/{tenant}/uploads），
-  修复前默认 ./data/uploads 与落盘目录不一致导致"文件不存在"误判。
+  默认目录与落盘目录一致，不得误判"文件不存在"。
 """
 
 from __future__ import annotations

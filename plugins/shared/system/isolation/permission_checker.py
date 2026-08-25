@@ -52,26 +52,22 @@ class PermissionChecker:
         """检查读取权限"""
         read_perm = policy.read
 
-        # 检查权限范围
         if read_perm.scope == PermissionScope.NONE:
             return False, "当前策略禁止所有读取操作"
 
         if read_perm.scope == PermissionScope.PROJECT:
-            # 允许读取整个项目
             return True, ""
 
         if read_perm.scope == PermissionScope.WORKSPACE:
             if not workspace:
                 return False, "未指定工作目录，无法执行读取操作"
 
-            # 检查路径是否在工作目录内
             is_inside, error = self.is_path_in_workspace(path, workspace)
             if not is_inside:
                 return False, f"权限拒绝：路径 '{path}' 不在工作目录 '{workspace}' 内"
             return True, ""
 
         if read_perm.scope == PermissionScope.CUSTOM:
-            # 检查自定义路径
             if read_perm.custom_paths:
                 normalized_path = self._normalize_path(path)
                 for custom_path in read_perm.custom_paths:
@@ -92,12 +88,10 @@ class PermissionChecker:
         """检查写入权限"""
         write_perm = policy.write
 
-        # 1. 检查权限范围
         if write_perm.scope == PermissionScope.NONE:
             return False, "当前策略禁止所有写入操作"
 
         if write_perm.scope == PermissionScope.PROJECT:
-            # 允许写入整个项目
             if write_perm.require_confirmation:
                 logger.info(f"[PermissionChecker] 写入操作需要用户确认 | path={path}")
             return True, ""
@@ -106,11 +100,9 @@ class PermissionChecker:
             if not workspace:
                 return False, "未指定工作目录，无法执行写入操作"
 
-            # 2. 标准化路径
             normalized_path = self._normalize_path(path)
             workspace_path = self._normalize_workspace(workspace)
 
-            # 3. 检查是否在 workspace 内
             is_inside = self._is_path_inside(normalized_path, workspace_path)
 
             if not is_inside and not write_perm.allow_outside:
@@ -118,18 +110,15 @@ class PermissionChecker:
                 logger.warning(f"[PermissionChecker] 写入权限检查失败 | path={path} | workspace={workspace}")
                 return False, error_msg
 
-            # 4. 检查是否需要检查点
             if write_perm.require_checkpoint:
                 logger.info(f"[PermissionChecker] 写入操作需要创建检查点 | path={path} | workspace={workspace}")
 
-            # 5. 检查允许的操作类型
             if write_perm.allowed_operations and operation not in write_perm.allowed_operations:
                 return False, f"当前策略不允许执行 '{operation}' 操作"
 
             return True, ""
 
         if write_perm.scope == PermissionScope.CUSTOM:
-            # 检查自定义路径
             if write_perm.custom_paths:
                 normalized_path = self._normalize_path(path)
                 for custom_path in write_perm.custom_paths:

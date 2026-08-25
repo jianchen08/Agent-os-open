@@ -569,7 +569,7 @@ export function FileTreeWidget(rawProps: Record<string, unknown>) {
         const response = await apiClient.get(resolved.endpoint, { params })
         if (cancelled) return
         const raw = response.data
-        // 工作区数据源的业务级错误（批次A：无工作区坐标/目录缺失）——后端
+        // 工作区数据源的业务级错误（无工作区坐标/目录缺失）——后端
         // 200 信封携带 workspace_status，如实进错误态而非伪装空树
         const wsStatus = (raw as { workspace_status?: string })?.workspace_status
         if (wsStatus) {
@@ -649,7 +649,7 @@ export function FileTreeWidget(rawProps: Record<string, unknown>) {
   const prevDataRef = useRef<TreeNodeData[]>([])
   const hasInitializedRef = useRef(false)
 
-  /** treeKey 变更时重新从 localStorage 恢复展开状态 修复场景：sessionId 在组件挂载后才从 sessionStore 异步加载完成， */
+  /** treeKey 变更时重新从 localStorage 恢复展开状态（sessionId 在组件挂载后才从 sessionStore 异步加载完成） */
   const prevTreeKeyRef = useRef(treeKey)
   const skipNextSaveRef = useRef(false)
   useEffect(() => {

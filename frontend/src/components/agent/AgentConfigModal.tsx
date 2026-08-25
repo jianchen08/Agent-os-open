@@ -5,7 +5,7 @@
  * （widget 化 T12，原 SchemaFormEmbed 已并入 FormWidget）——
  * fieldsUri 拉 agent_manager agents/schema 字段声明，dataUri 拉/写回
  * agent_manager agents/{id}/config yaml，保存成功自动关闭并回调刷新。
- * （2026-08-20 插件化：URI 经 API_ENDPOINTS.AGENTS 切 agent_manager，壳零改动）
+ * （URI 经 API_ENDPOINTS.AGENTS 切 agent_manager，壳零改动）
  */
 
 import { FormWidget } from '@/components/schema/widgets/FormWidget'

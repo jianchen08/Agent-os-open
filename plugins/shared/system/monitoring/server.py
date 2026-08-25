@@ -57,11 +57,10 @@ async def _on_load(params: dict[str, Any]) -> None:
     _reporter_task = asyncio.create_task(_report_metrics_loop())
     logger.info("Monitoring service started (record_metric reporter enabled)")
 
-    # 调试中心数据链（channel_api 退役批次 2/3 随迁）：execution/sessions/
-    # agent-calls/search 域真实数据 = 内核只读能力（messages.list /
-    # pipeline-runs.list / pipeline-state.list / db-admin.table_query），经
-    # kernel_reads 桥接注入（逻辑随迁自 channel_api server._on_load，零改动）；
-    # 能力未就绪时 handler 降级空载荷（前端契约不破坏）。
+    # 调试中心数据链：execution/sessions/agent-calls/search 域真实数据 =
+    # 内核只读能力（messages.list / pipeline-runs.list / pipeline-state.list /
+    # db-admin.table_query），经 kernel_reads 桥接注入；能力未就绪时
+    # handler 降级空载荷（前端契约不破坏）。
     try:
         import kernel_reads  # noqa: PLC0415
 
@@ -551,21 +550,21 @@ async def http_handle(
         if path == "/ext/monitoring/page/tool-calls" and method == "GET":
             return _ok(_html_response(_TOOL_CALLS_HTML))
 
-        # ── execution/records 域（channel_api 退役批次 2 自持迁移）──
-        # 数据 = 内核只读能力桥（kernel_reads：pipeline-runs.list/messages.list/
-        # pipeline-state.list），能力不可用降级空结构（HTTP 200 空载荷）。
+        # ── execution/records 域：数据 = 内核只读能力桥（kernel_reads：
+        # pipeline-runs.list/messages.list/pipeline-state.list），能力不可用
+        # 降级空结构（HTTP 200 空载荷）。
         if path.startswith("/ext/monitoring/execution"):
             return await _handle_execution_domain(path, method, raw_body, query or {}, headers or {})
 
-        # ── sessions token-usage 域（批次 2 随迁，stub 接真）──
+        # ── sessions token-usage 域 ──
         if path.startswith("/ext/monitoring/sessions"):
             return await _handle_sessions_domain(path, method, raw_body, query or {})
 
-        # ── agent-calls 域（批次 3 接真：pipeline-runs/messages 组装调用视图）──
+        # ── agent-calls 域：pipeline-runs/messages 组装调用视图 ──
         if path.startswith("/ext/monitoring/agent-calls"):
             return await _handle_agent_calls_domain(path, method, raw_body, query or {})
 
-        # ── search 域（批次 3 接真：pipeline-state/messages 全局搜索）──
+        # ── search 域：pipeline-state/messages 全局搜索 ──
         if path.startswith("/ext/monitoring/search"):
             return await _handle_search_domain(path, method, raw_body, query or {})
 
@@ -577,9 +576,9 @@ async def http_handle(
 
 
 # ════════════════════════════════════════════════════════════════════════════
-# channel_api 退役批次 2/3 自持域分发（execution/records + sessions +
-# agent-calls + search）——路径语义与 /ext/channel_api/** 原值逐项对齐，
-# 数据统一经 kernel_reads 能力桥（provider 由 _on_load 注入）。
+# execution/records + sessions + agent-calls + search 域分发——路径语义与
+# /ext/channel_api/** 原值逐项对齐，数据统一经 kernel_reads 能力桥
+# （provider 由 _on_load 注入）。
 # ════════════════════════════════════════════════════════════════════════════
 
 
@@ -669,7 +668,7 @@ async def _handle_execution_domain(
 async def _handle_sessions_domain(
     path: str, method: str, raw_body: str, query: dict[str, str]
 ) -> dict[str, Any]:
-    """sessions 域分发：/ext/monitoring/sessions/** → token-usage 接真业务函数。"""
+    """sessions 域分发：/ext/monitoring/sessions/** → token-usage 业务函数。"""
     import execution_records as er  # noqa: PLC0415
 
     prefix = "/ext/monitoring/sessions"

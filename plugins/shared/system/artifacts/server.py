@@ -1,9 +1,8 @@
 #!/usr/bin/env python3
-"""artifacts 插件 MCP 服务端——制品 + 批注域 HTTP 面（channel_api 拆迁批次 1）。
+"""artifacts 插件 MCP 服务端——制品 + 批注域 HTTP 面。
 
-原 channel_api/routes_artifacts.py（制品/批注 CRUD + 版本 + diff + 多模态上传）
-与 channel_api server._handle_artifact_upload（multipart 解包 + 落盘 + 元数据）
-迁入本插件，经 ``http.handle`` 按 path 分发（协议与 agent_manager/monitoring 同款）；
+制品/批注 CRUD + 版本 + diff + 多模态上传（multipart 解包 + 落盘 + 元数据），
+经 ``http.handle`` 按 path 分发（协议与 agent_manager/monitoring 同款）；
 plugin.json ``http_endpoints`` 声明（/ext/artifacts/**，auth:user）。
 
 - 服务面 = 本目录 artifact_service / annotation_service（纯内存单例，单一事实源）。
@@ -141,8 +140,7 @@ _file_storage: Any = None
 def get_file_storage() -> Any:
     """获取全局文件存储单例（DiskFileStorage）。
 
-    存储目录由环境变量 ``MULTIMODAL_STORAGE_DIR`` 控制（多租户根回退），
-    与 channel_api 原实现语义一致。
+    存储目录由环境变量 ``MULTIMODAL_STORAGE_DIR`` 控制（多租户根回退）。
     """
     global _file_storage  # noqa: PLW0603
     if _file_storage is None:
@@ -409,7 +407,7 @@ def _qint(query: dict[str, str], key: str, default: int) -> int:
             "query": {"type": "object"},
         },
     },
-    description="HTTP endpoint handler for /ext/artifacts/** (artifacts + annotations domain, channel_api 拆迁批次 1)",
+    description="HTTP endpoint handler for /ext/artifacts/** (artifacts + annotations domain)",
 )
 async def http_handle(
     path: str = "",
@@ -421,8 +419,8 @@ async def http_handle(
 ) -> dict[str, Any]:
     """按 path 分发到 artifacts + annotations 域 13 端点。
 
-    语义对齐原 /ext/channel_api/{artifacts,annotations}/**；业务函数全 async、
-    全 dict body；认证由 http_endpoints auth=user 声明（dispatcher 层）。
+    路径语义对齐原 /ext/channel_api/{artifacts,annotations}/**；业务函数全
+    async、全 dict body；认证由 http_endpoints auth=user 声明（dispatcher 层）。
     """
     try:
         q = query or {}

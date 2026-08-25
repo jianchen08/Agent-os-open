@@ -80,7 +80,7 @@ function DefaultToolCallRenderer(
           )}
         />
       )}
-      {/* ActivityCard 默认即满宽（w-full max-w-full，工具卡统一形态 2026-08-19）：
+      {/* ActivityCard 默认即满宽（w-full max-w-full，工具卡统一形态）：
           早期默认 w-fit max-w-[85%] 需调用方覆盖，现默认满宽与 assistant 气泡对齐。 */}
       <ActivityCard activity={fragment.activity} />
     </div>

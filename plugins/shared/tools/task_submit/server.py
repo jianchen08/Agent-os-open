@@ -76,10 +76,8 @@ async def _on_load(_params: dict[str, Any]) -> None:
 
 
 # schema/description 单一事实源：tool.TaskSubmitTool.get_tool_definition()——
-# 与 manifest 声明同源同形（平铺 goal_title + allOf 容器约束）。此前此处是
-# 手抄简陋嵌套版（goal.title），与声明漂移被 boot G2 严格模式拒绝注册
-# （2026-08-19 e2e 实测 task_submit 从工具面消失）。tool.py 模块级仅依赖
-# SDK（领域模块均函数内懒加载），模块级 import 安全。
+# 与 manifest 声明同源同形（平铺 goal_title + allOf 容器约束）。tool.py 模块级
+# 仅依赖 SDK（领域模块均函数内懒加载），模块级 import 安全。
 from tool import TaskSubmitTool  # noqa: E402
 
 _TASK_SUBMIT_DEF = TaskSubmitTool.get_tool_definition()

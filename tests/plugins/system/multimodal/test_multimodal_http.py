@@ -1,5 +1,5 @@
 # @feature: FP-0.2.二 可观测性 | @ci: python-coverage
-"""multimodal_service 插件 audio + files 域测试（channel_api 退役批次 1 自持承接）。
+"""multimodal_service 插件 audio + files 域测试（channel_api 自持承接）。
 
 覆盖 /ext/multimodal_service/ 3 端点：
 1. GET files/capabilities —— ModelCapabilityRegistry 真实能力（前端 files.ts 消费形态）

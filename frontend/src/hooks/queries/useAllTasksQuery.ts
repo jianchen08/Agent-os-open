@@ -1,5 +1,5 @@
 /**
- * 管道管理面板全量任务列表 query（服务端状态 query 化批次 4）
+ * 管道管理面板全量任务列表 query（服务端状态 query 化）
  *
  * PipelineManagerWidget 原先自拉 `GET /ext/task_service/tasks`（skip=0, limit=100，
  * 不过滤 long-term）并用本地 30s setInterval 轮询。端点与 fetchLongTermTasks
@@ -8,7 +8,7 @@
  * （queryKeys.pipelineAllTasks），不与长期任务列表合流。
  *
  * 轮询语义：refetchInterval 30s（与管道注册表同频，等价原本地 interval）。
- * refetchOnWindowFocus 全局关闭（2026-08-24），新鲜度由轮询 + WS 任务事件承担。
+ * refetchOnWindowFocus 全局关闭，新鲜度由轮询 + WS 任务事件承担。
  */
 
 import { useQuery } from '@tanstack/react-query'

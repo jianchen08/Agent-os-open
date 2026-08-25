@@ -190,8 +190,8 @@ pub async fn resolve_tenant_id_by_user(
         None => {
             if store.is_some() {
                 // K8 审计标记：store 在而用户解析不出（get_user_by_id 按 task_local
-                // tenant 隔离，跨租户/已删除用户在此不可见）。降级值与旧版一致
-                // （default），但从无痕变为有 warn 可审计。
+                // tenant 隔离，跨租户/已删除用户在此不可见）。降级为 default，
+                // 但必须留 warn 可审计。
                 tracing::warn!(
                     target: "auth-tenant-degrade",
                     user_id = %user_id,

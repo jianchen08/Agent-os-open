@@ -1,9 +1,7 @@
 """
 任务状态机模块 - 提供通用的简单状态机实现。
 
-重构说明：
-- 统一为 SimpleStateMachine，移除旧版 TaskStateMachine
-- 所有状态转换逻辑集中在此模块
+- 统一为 SimpleStateMachine（所有状态转换逻辑集中在此模块）
 """
 
 from __future__ import annotations

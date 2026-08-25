@@ -15,7 +15,7 @@ logger = logging.getLogger(__name__)
 # 值 = (count, fingerprint)：仅靠数量判断增量是否成立不可靠——重启恢复
 # （StateBuilder 全量恢复 + context_window_guard 裁剪重建）后消息数量可能
 # 恰好接近缓存值，但内容已整体替换，增量扫描会跳过带病消息直发上游 400
-# （实测 DeepSeek: insufficient tool messages following tool_calls）。
+# （DeepSeek: insufficient tool messages following tool_calls）。
 _pairing_validated_len: dict[str, tuple[int, str]] = {}
 
 
@@ -517,7 +517,7 @@ def reset_pairing_cache(
             del _pairing_validated_len[k]
         return
     if not pipeline_id:
-        # pipeline_id 为空：清空该 provider:name 下所有管道（含历史无 pipeline_id 的 key）
+        # pipeline_id 为空：清空该 provider:name 下所有管道（含无 pipeline_id 的 key）
         prefix = f"{provider}:{name}:"
         to_remove = [k for k in _pairing_validated_len if k.startswith(prefix)]
         for k in to_remove:

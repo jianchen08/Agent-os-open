@@ -56,7 +56,7 @@
   .bg-destructive { background-color: hsl(var(--destructive)); }
   .bg-input { background-color: hsl(var(--input)); }
 
-  /* 区域表面统一（2026-08-21 用户要求：区域有背景设定时组件表面让位）——
+  /* 区域表面统一（区域有背景设定时组件表面让位）——
      区域背景关系（--region-*-bg）由主题/插件声明：区域背景透明时区域内
      bg-background/bg-card 组件透明（透出立绘/统一背景层），实色时组件与
      区域同色（无突兀卡片）。类级覆盖（非变量重绑定——bg-background 是
@@ -177,8 +177,7 @@ body.has-bg-image::after {
 
 /* 背景图模式下内容必须浮到装饰层之上：fixed + z-index:0 的 ::after 画在
    全部 static 内容之上（CSS 定位元素 vs 非定位元素），无本规则时背景图
-   会盖住整个 UI——原生背景图功能的层叠 bug（内置预设从未启用背景图，
-   坏了未被发现；DSH 皮肤立绘走同机制时暴露，2026-08-21）*/
+   会盖住整个 UI（原生背景图功能与 DSH 皮肤立绘走同一机制）*/
 body.has-bg-image #root {
   position: relative;
   z-index: 1;
@@ -192,7 +191,7 @@ body.has-bg-image #root > div:first-child {
   background: transparent;
 }
 
-/* 皮肤 hooks 装饰层可见性（2026-08-22 修：maid-atelier 等深度皮肤把背景图/
+/* 皮肤 hooks 装饰层可见性：maid-atelier 等深度皮肤把背景图/
    立绘 prepend 到 body（fixed z-index:0），#root 首层容器不透明背景 + 
    has-bg-image 的 z-index:1 会把装饰层整个盖死——皮肤激活时主容器背景
    让位（与 has-bg-image 同规则），装饰层从聊天区/工作区透明面透出 */
@@ -214,7 +213,7 @@ html[data-skin] [data-testid='workspace-toggle-float']:not([class*='bg-accent'])
   backdrop-filter: blur(4px);
 }
 
-/* 皮肤背景图上的消息气泡收拢（2026-08-22 用户裁决：有背景图的皮肤聊天文本
+/* 皮肤背景图上的消息气泡收拢（有背景图的皮肤聊天文本
    必须框起来，但只框**气泡区域本身**——整行/整块模糊会把背景图盖死。
    气泡底色由 MessageItem 内联样式按主题令牌渲染（内联高于 CSS，flat 平铺
    的透明底必须在那里替换）；此处只把 AI 内容面收拢到文本宽度
@@ -226,7 +225,7 @@ body.has-bg-image [data-testid='message-item']:not([data-role='user']) .message-
   max-width: 100%;
 }
 
-/* 背景图模式第三环（v4 让位式布局实测）：聊天区自己的 --chat-bg 实色
+/* 背景图模式第三环：聊天区自己的 --chat-bg 实色
    （.theme-chat-area 双通道的颜色位）同样盖住装饰层——立绘在并排式下
    仅从边缘微漏。背景图模式聊天区颜色让位（scrim 可读性由装饰层 overlay
    承担）；主题显式声明 --region-chat-bg 时以主题为准（区域背景关系
@@ -236,7 +235,7 @@ body.has-bg-image .theme-chat-area {
   background-color: var(--region-chat-bg, transparent);
 }
 
-/* 主题区域背景关系（2026-08-21，插件主题可配）：
+/* 主题区域背景关系（插件主题可配）：
    --region-sidebar-bg / --region-chat-bg / --region-workspace-bg ——
    区域背景取 transparent 时透出统一背景层（body 背景/立绘），
    实色时单独成面；未声明回退各区域既有变量（侧栏 --sidebar-bg、
@@ -244,9 +243,9 @@ body.has-bg-image .theme-chat-area {
    单独/两两组合）由此三变量自由表达，皮肤主题按皮肤原生布局声明。 */
 .theme-sidebar-area {
   background-color: var(--region-sidebar-bg, var(--ds-bg-panel, var(--sidebar-bg, hsl(var(--card)))));
-  /* 区域前景（翻译器按侧栏面单独强制，2026-08-21）：侧栏面与画布亮度
-     对立时全局文本无法两全（xp 亮侧栏/黑画布…）——CSS 变量作用域重绑定，
-     侧栏内所有消费 text-muted-foreground 等的后代自动重算，零组件改动 */
+  /* 区域前景（侧栏面与画布亮度对立时全局文本无法两全——CSS 变量作用域
+     重绑定，侧栏内所有消费 text-muted-foreground 等的后代自动重算，
+     零组件改动） */
   color: var(--region-sidebar-fg, var(--foreground));
   --muted-foreground: var(--region-sidebar-muted-fg, var(--muted-foreground));
   --secondary-foreground: var(--region-sidebar-muted-fg, var(--secondary-foreground));
@@ -262,7 +261,7 @@ body.has-bg-image .theme-chat-area {
   background-size: var(--chat-texture-size, 24px) var(--chat-texture-size, 24px), auto;
   background-repeat: repeat, no-repeat;
   background-position: center, center;
-  /* 区域前景（用户三裁 2026-08-21：所有文字/图标按所在区域背景翻转）——
+  /* 区域前景（所有文字/图标按所在区域背景翻转）——
      聊天区文字/图标颜色与 muted 等随聊天面（对话主区）单独强制 */
   color: var(--region-chat-fg, var(--foreground));
   --muted-foreground: var(--region-chat-muted-fg, var(--muted-foreground));
@@ -276,7 +275,7 @@ body.has-bg-image .theme-chat-area {
   --secondary-foreground: var(--region-workspace-muted-fg, var(--secondary-foreground));
 }
 
-/* 工作区区域背景（2026-08-22：类级而非内联——皮肤 CSS 位置路由把
+/* 工作区区域背景（类级而非内联——皮肤 CSS 位置路由把
    [data-pane="details"] 重写为 [data-region="workspace"] 后，皮肤画的工作区
    表面（maid-atelier 的 #f2f6fdd1 等）直接命中本容器；内联 background 会
    盖掉皮肤表面（内联优先级最高），类级让皮肤规则可覆盖 */

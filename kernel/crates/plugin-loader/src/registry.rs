@@ -1,6 +1,5 @@
 //! 能力注册表 + 服务依赖解析（服务唯一轴）
 //!
-//! [来源: docs/tasks/task_05_plugin_system.md AC-04-3]
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -574,7 +573,7 @@ impl ServiceSurface {
                 for cap in &provides.capabilities {
                     // 契约键 = namespace（D1：服务→插件的映射按
                     // provides.capabilities[].namespace 做）；`tool_prefix` 是 wire 形态
-                    // （McpBridge 路由用），不是契约命名空间——previously 曾误用。
+                    // （McpBridge 路由用），不是契约命名空间——不得当契约键用。
                     for method in &cap.methods {
                         register_method(&mut surface, m, &cap.namespace, method);
                     }

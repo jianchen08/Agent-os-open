@@ -53,7 +53,7 @@ impl PluginContractState {
         let (g2_consistency, smoke_result, last_error) = match g2 {
             None => ("not_covered".to_string(), "not_covered".to_string(), None),
             Some(o) => {
-                // 观测失败 ≠ 判定失败（2026-08-20 裁定）：spawn/list 失败时声明
+                // 观测失败 ≠ 判定失败：spawn/list 失败时声明
                 // 注册保留——账本标记"校验未完成"（区别于未覆盖/漂移），
                 // 前端/契约状态页可见"待复验"。
                 let g2_consistency = if o.spawn_failed {

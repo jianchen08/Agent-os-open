@@ -520,7 +520,7 @@ def list_available_skins(base_dir: str | Path | None = None) -> list[str]:
 def describe_available_skins(base_dir: str | Path | None = None) -> list[dict[str, Any]]:
     """动态皮肤清单（运行时读当前装载的皮肤插件，供设置页/清单端点消费）。
 
-    每条含 ThemeConfig 转换素材（2026-08-21 形态路由定案）：colors
+    每条含 ThemeConfig 转换素材：colors
     (canvas/text/panel/accent hex) + base（亮度判定）+ background_media
     （src/scrim/asset_url）——前端据此克隆基准主题生成灵汐原生
     ThemeConfig（立绘→backgrounds.image、配色→colors，全走主题管线）。
@@ -679,7 +679,7 @@ def skin_base_of(canvas: str) -> str:
     return "light" if _luminance(canvas) > 0.35 else "dark"
 
 
-# === 区域背景 + 对比度强制（2026-08-21，对照原生 skin-center 0.2.6） ===
+# === 区域背景 + 对比度强制（对照原生 skin-center 0.2.6） ===
 # 原生三区关系真源：页面级背景（全页插画/画布）+ --dsw-specific-sidebar-fill
 # （侧栏唯一自带表面，含原生透明度）+ conversation/workspace 无自带表面
 # （透出页面背景）。翻译 = region 变量按原生值发射，透明即透出统一背景层。
@@ -779,9 +779,9 @@ _CONVERSATION_SURFACE_RE = re.compile(
 )
 
 
-# ── 气泡/输入面令牌提取（2026-08-22 用户裁决：对话框和气泡区域颜色要跟
-# 皮肤一样——MessageItem 内联样式消费 --bubble-*-bg（CSS 覆盖不了内联），
-# 皮肤原生气泡规则在 patches.css，翻译器提取原样声明值发射令牌）──
+# ── 气泡/输入面令牌提取：对话框和气泡区域颜色要跟皮肤一样——
+# MessageItem 内联样式消费 --bubble-*-bg（CSS 覆盖不了内联），
+# 皮肤原生气泡规则在 patches.css，翻译器提取原样声明值发射令牌 ──
 # 暗色分支前缀（body[data-ds-dark-theme] ...）
 _DARK_PREFIX = r'(?:body\[data-ds-dark-theme\]\s+)?'
 # 用户气泡（DSH [class*="userRow"] [class*="bubble"]）
@@ -905,12 +905,11 @@ def _extract_skin_colors(css: str) -> tuple[str, str]:
 
 
 def skins_to_plugin_themes(base_dir: str | Path | None = None) -> list[dict[str, Any]]:
-    """DSH 皮肤 → 灵汐 PluginTheme 声明（contributes.themes 条目，形态路由终态）。
+    """DSH 皮肤 → 灵汐 PluginTheme 声明（contributes.themes 条目）。
 
-    用户裁决（2026-08-21）：dsh_adapter = 特殊皮肤插件——装载的每套皮肤以
-    contributes.themes 声明，前端既有插件主题通道自动发现/渲染/选择，
-    零前端改动；添加皮肤 = 放包进 dsh_plugins（适配器 on_load 自动同步
-    本声明，无需手工翻译或改 manifest）。
+    dsh_adapter = 特殊皮肤插件：装载的每套皮肤以 contributes.themes 声明，
+    前端既有插件主题通道自动发现/渲染/选择，零前端改动；添加皮肤 = 放包进
+    dsh_plugins（适配器 on_load 自动同步本声明，无需手工翻译或改 manifest）。
 
     条目形态（PluginTheme，types/theme.ts）：
     - id: dsh-skin-<skin>（contributionRegistry 全局键 dsh_adapter:dsh-skin-*）
@@ -918,7 +917,7 @@ def skins_to_plugin_themes(base_dir: str | Path | None = None) -> list[dict[str,
     - variables: --ds-* 令牌 + shadcn 桥（对比度强制）+ --font-ui + --region-*
     - backgrounds.image: 立绘 → 灵汐原生背景图层（overlay 取 scrim 首 rgba）
 
-    三区背景关系（对照原生 0.2.6 语义，2026-08-21 用户二裁）：
+    三区背景关系（对照原生 0.2.6 语义）：
     - 原生只有两个区：sidebar（侧栏，唯一自带表面 --dsw-specific-sidebar-fill
       含原生透明度）+ conversation（对话主区，页面级背景，无自带表面）。
       原生没有工作区。
@@ -949,7 +948,7 @@ def skins_to_plugin_themes(base_dir: str | Path | None = None) -> list[dict[str,
 
         variables: dict[str, str] = {}
 
-        # 气泡/输入面令牌（2026-08-22 用户裁决：气泡与对话框颜色跟皮肤一样）。
+        # 气泡/输入面令牌：气泡与对话框颜色跟皮肤一样。
         # 原生气泡规则在 patches.css（skin.css 只有配色令牌）——两文件同目录
         # 同加载；令牌按基准态发射（内联 var() 静态面，昼夜覆盖归皮肤 CSS）
         patches_path = (Path(base_dir) if base_dir is not None else SKIN_CENTER_SKINS_DIR) / str(skin["id"]) / "patches.css"
@@ -980,15 +979,15 @@ def skins_to_plugin_themes(base_dir: str | Path | None = None) -> list[dict[str,
 
         # 区域背景关系（原生语义发射）：侧栏取原生 fill；对话主区取一个值
         # （conversation 表面规则或页面背景透明），同时喂给聊天区与工作区
-        # （两区合计 = 原生对话主区，用户二裁 2026-08-21）
+        # （两区合计 = 原生对话主区）
         sidebar_bg = _resolve_sidebar_fill(css)
         if sidebar_bg is not None:
             variables["--region-sidebar-bg"] = sidebar_bg
         main_bg = _resolve_conversation_bg(css)
         variables["--region-chat-bg"] = main_bg
         variables["--region-workspace-bg"] = main_bg
-        # AI 消息平铺开关（用户裁决 2026-08-21：跟 DeepSeek/DSH 原生——
-        # 用户气泡 + AI 平铺；角色扮演类主题可声明 bubble 恢复气泡）
+        # AI 消息平铺开关：跟 DeepSeek/DSH 原生——
+        # 用户气泡 + AI 平铺；角色扮演类主题可声明 bubble 恢复气泡
         variables["--bubble-ai-mode"] = "flat"
 
         # shadcn 桥（必须 H S% L% 纯串）+ 对比度强制：文本令牌对画布与
@@ -1068,7 +1067,7 @@ def skins_to_plugin_themes(base_dir: str | Path | None = None) -> list[dict[str,
             "name": skin.get("name") or skin["id"],
             "description": f"{skin.get('tagline') or skin['id']}（DSH 皮肤 · dsh_adapter）",
             "base": base,
-            # 平台皮肤运行时声明（2026-08-22 皮肤能力平台化）：声明 skin 字段
+            # 平台皮肤运行时声明：声明 skin 字段
             # 即激活按择注入（merged.css/hooks.mjs/资产三端点按标准路径递送）
             "skin": str(skin["id"]),
         }

@@ -9,7 +9,7 @@
  * 当用户在不同会话/Tab之间切换时，输入框中的未发送文本通过 drafts 状态保留，
  * 切回来时恢复之前输入的内容。
  *
- * 草稿持久化（2026-08-22）：drafts 走 localStorage persist——刷新页面后输入框
+ * 草稿持久化：drafts 走 localStorage persist——刷新页面后输入框
  * 未发送内容不丢（用户"刷新后输入框应该还在"）。发送成功后的 clearDraft 会
  * 同步清掉持久化项。
  */

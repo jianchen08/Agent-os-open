@@ -12,11 +12,11 @@ approval 不自建 request 结构；仅在创建审批后发一条 ``approval.cr
 - event-bus: emit approval.created——通知前端全屏审批浮层
 - logger: 结构化日志
 
-channel_api 退役批次 2（interaction 域 7 端点 → approval 插件）：
-- 源 routes_missing.py interaction_router 迁入本插件 http.handle 的
+HTTP 面（interaction 域 7 端点）：
+- 源 routes_missing.py interaction_router 的端点在本插件 http.handle 的
   /ext/approval_service/interaction/**，经 tool-executor 能力代理
   human_interaction_tool（granted_capabilities 声明 tool-executor）——
-  代理逻辑随迁（_HumanInteractionCapabilityProxy），直达 human sidecar
+  代理（_HumanInteractionCapabilityProxy）直达 human sidecar
   真实单例的 interaction.get_pending / interaction.respond 工具。
 - 鉴权：http_endpoints 声明 auth=user（声明性；内核 dispatcher 鉴权面与
   其余插件一致）。
@@ -344,7 +344,7 @@ async def _on_unload(params: dict[str, Any]) -> None:
     logger.info("approval_service unloaded | suspended=%d", len(_suspended))
 
 
-# ── HTTP 端点（http.handle）：interaction 域（channel_api 批次2 迁入）──────
+# ── HTTP 端点（http.handle）：interaction 域 ─────────────────────────────
 # 前端 /ext/approval_service/interaction/**（原 /ext/channel_api/interaction/**，
 # 源 routes_missing.py interaction_router 7 路由）。经 tool-executor 代理
 # human_interaction_tool 真实单例。
@@ -353,9 +353,9 @@ async def _on_unload(params: dict[str, Any]) -> None:
 class _HumanInteractionCapabilityProxy:
     """经内核 tool-executor 调 human_interaction_tool sidecar 的真实服务实例。
 
-    随迁自 routes_missing.py：sidecar 进程隔离下 import human.service 拿到的是
-    本进程全新空实例（_requests 恒空、Event 表为空）——真实交互数据在
-    human_interaction_tool 进程。经标准能力 tool-executor.invoke 调用该插件的
+    sidecar 进程隔离下 import human.service 拿到的是本进程全新空实例
+    （_requests 恒空、Event 表为空）——真实交互数据在 human_interaction_tool
+    进程。经标准能力 tool-executor.invoke 调用该插件的
     interaction.* 工具（作用于真实单例）。
     """
 
@@ -453,8 +453,8 @@ class _HumanInteractionCapabilityProxy:
     async def mark_as_viewed(self, request_id: str) -> bool:
         """标记请求已查看——human sidecar 目前无 interaction.mark_viewed 工具
         （工具面仅 send_notification/create_choice/wait_for_choice/respond/cancel/
-        get_pending），本端点保留为前端确认标记：成功应答、不落库（channel_api
-        代理路径亦无真实落点；回退本地实例路径才有）——与提交类端点语义区分。
+        get_pending），本端点保留为前端确认标记：成功应答、不落库——与提交类
+        端点语义区分。
         """
         logger.warning(
             "[approval] viewed 端点确认应答（human sidecar 无 viewed 工具）| request_id=%s",
@@ -535,7 +535,7 @@ def _decode_body(raw_body: str) -> dict[str, Any]:
             "query": {"type": "object"},
         },
     },
-    description="HTTP endpoint handler for /ext/approval_service/interaction/** (channel_api batch 2)",
+    description="HTTP endpoint handler for /ext/approval_service/interaction/**",
 )
 async def http_handle(
     path: str = "",

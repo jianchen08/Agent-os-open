@@ -3,8 +3,8 @@
 //! §9.6 精确拆分：auth **执行门**（登录验签/JWT 校验/路由准入——
 //! `/api/v1/auth/login|logout|me|register|refresh`，前端与 WS 握手在用）
 //! **永留内核**（api/src/auth.rs，不动）；本 crate 承载的是**管理性质**的
-//! 用户管理策略面（用户列表/改角色/改租户/删用户——内核此前没有这些端点，
-//! 本刀以插件形态新建，不再往内核路由树加管理面）。
+//! 用户管理策略面（用户列表/改角色/改租户/删用户——内核以插件形态提供这些
+//! 端点，不再往内核路由树加管理面）。
 //!
 //! - [`capability`]：`user-admin` namespace 的 CapabilityHandler（4 method，
 //!   注册进内核 handler_registry，agentos-kernel.rs 启动期，先于任何 sidecar

@@ -1,9 +1,9 @@
-//! 工具执行失败告警器（2026-08-23）。
+//! 工具执行失败告警器。
 //!
-//! 真机教训：omnisearch `universal_search` 因 manifest 缺 input_schema 被注册成
-//! 零参数工具，LLM 每轮调用都被服务端 pydantic 校验拒绝（`mode Field required`），
+//! omnisearch `universal_search` 这类工具若因 manifest 缺 input_schema 被注册成
+//! 零参数工具，LLM 每轮调用都会被服务端 pydantic 校验拒绝（`mode Field required`），
 //! 日志里逐条 pydantic 错误淹没在流水里，没有闸门把「同一工具连续 N 次失败」
-//! 汇总成一条可操作的告警——调研 agent 空转 45 万 token、42 分钟无人察觉。
+//! 汇总成一条可操作的告警——工具持续空转失败无人察觉。
 //!
 //! 本器挂在 tool-executor.invoke 结果归一化处：工具返回 `success=false`（参数
 //! 校验失败/执行错误）时计数，同工具连续失败达到阈值输出一条 `tracing::error`

@@ -236,7 +236,7 @@ export function StepNode({
   const stepsPath: Path = [...stepPath, 'steps']
   const refs = Array.isArray(step?.steps) ? step.steps : []
 
-  // 插件配置深链：设置中枢工作区页签（独立路由页已退役）。
+  // 插件配置深链：设置中枢工作区页签（无独立路由页）。
   // 每个插件配置文件一个稳定 tab id，重复点击激活已有页签（initialActive 只在首开生效）
   const openPluginConfig = (pluginId: string, fileId: string) => {
     openWorkspacePanel({

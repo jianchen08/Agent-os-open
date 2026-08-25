@@ -489,11 +489,8 @@ async def test_get_container_backend_caches_by_container_id():
 async def test_bashtool_execute_passes_container_id_to_start_process(tmp_path):
     """BashTool.execute 收到 _container_id → start_process 被调用时带 container_id。
 
-    0.2 契约已定形（tool.py _handle_execute）：inputs._container_id 透传到
-    ProcessManager.start_process 的 container_id 形参。原 xfail 原因（"0.2 重构
-    后不再透传"）已不成立——此前测试红是 fake_start_process 签名未跟上
-    start_process 新增的 owner / on_output 形参，TypeError 被 execute 的
-    兜底 except 吞掉所致；本用例已对齐当前签名并去 xfail。
+    0.2 契约（tool.py _handle_execute）：inputs._container_id 透传到
+    ProcessManager.start_process 的 container_id 形参。
     """
     from tool import BashTool
 
@@ -561,9 +558,8 @@ async def test_bashtool_execute_with_container_id_skips_security_check(tmp_path)
     用 `rm -rf /`（SecurityChecker 判 safe=False 直接拦截）验证：
     无 container_id 时被拦返回 failure，有 container_id 时放行走到 start_process。
 
-    0.2 契约已定形（tool.py _handle_execute 的 is_isolated 分支）：容器隔离
-    模式跳过内部 SecurityChecker。原 xfail 已去——此前测试红同样是
-    fake_start_process 签名缺 owner / on_output 形参所致（见上一用例注释）。
+    0.2 契约（tool.py _handle_execute 的 is_isolated 分支）：容器隔离
+    模式跳过内部 SecurityChecker。
     """
     from tool import BashTool
 

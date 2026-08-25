@@ -43,7 +43,7 @@ function normalizeRecord(record: Record<string, unknown>): Record<string, unknow
  * options 归一化：后端/LLM 可能把选项发成字符串数组（["批准","拒绝"]），
  * 而 InteractionCard 渲染的是 opt.label（InteractionOption 对象数组）。
  * 字符串元素会导致按钮文字为空——表现为"审批卡片只有输入框、没有选项按钮"。
- * 另一类实测形态是对象包裹（{"item":["批准","拒绝"]}，MiniMax 传参畸形）：
+ * 另一类形态是对象包裹（{"item":["批准","拒绝"]}，MiniMax 传参畸形）：
  * 取其第一个数组值继续归一化。
  */
 function normalizeOptions(raw: unknown): PendingInteraction['options'] {
@@ -384,7 +384,7 @@ export function useInteractionHandler(sessionId: string | undefined) {
 
   const respondChoice = useCallback(
     async (requestId: string, selectedOption?: string, feedback?: string) => {
-      // 路由键只取交互自身坐标（2026-08-22 裁决）：sessionId → threadId，
+      // 路由键只取交互自身坐标：sessionId → threadId，
       // 换不到即中止发信（fail-closed，交互保持 pending 可见可重试）——
       // 兜底 activeSessionId 会在用户切换会话后把审批发到错误 thread 通道。
       const interaction = useInteractionStore
@@ -428,7 +428,7 @@ export function useInteractionHandler(sessionId: string | undefined) {
   const navigateToTab = useCallback(
     async (requestId: string, pipelineId: string, title?: string, agentLevelStr?: string) => {
       // 同 respondChoice/respondConversation：路由键只取交互自身坐标
-      // （sessionId → threadId），不兜底全局活跃会话（2026-08-22 裁决）
+      // （sessionId → threadId），不兜底全局活跃会话
       const interaction = useInteractionStore
         .getState()
         .pendingInteractions.find((i) => i.requestId === requestId)

@@ -208,11 +208,10 @@ class LLMCore(ICorePlugin):
         # 配置层(models.py)与 resolver 均不覆盖空 dict，漏配模型最终落此。
         self._default_params: dict[str, Any] = self._config.get("default_params", {})
         self._call_timeout: float = float(self._config.get("call_timeout", 300))
-        # 首 token 超时：首 chunk 不来时强制超时的秒数（默认 120s）。
+        # 首 token 超时：首 chunk 不来时强制超时的秒数（默认 180s）。
         # 与 call_timeout（后续 chunk 超时）分离，因首字节卡死是高发场景。
-        # 用 180s：覆盖 litellm.acompletion 内部建连 + 上游首字节全过程。
-        # 实测 120s 偶发误判（上游慢节点），且 litellm 内部卡死时外层超时
-        # 未必生效——adapter._direct_call_with_slot 就地再包一层 _await_with_escape
+        # 180s 覆盖 litellm.acompletion 内部建连 + 上游首字节全过程；
+        # adapter._direct_call_with_slot 就地再包一层 _await_with_escape
         # 兜底，此处 180s 作为该层的默认值，确保 litellm 这一行必然超时退出。
         self._first_token_timeout: float = float(self._config.get("first_token_timeout", 180))
         # 流式静默超时：连续 N 秒收不到任何 chunk 即中断死等（默认 600s）。
@@ -747,7 +746,7 @@ class LLMCore(ICorePlugin):
         #    作为独立 user 消息追加在末尾，绝不合并进 messages[0]（system_message）。
         #    system_message 必须保持纯 prompt、永不变化（prompt cache 命中依赖此不变性），
         #    而 dynamic_vars 含时间戳等每轮变化的内容，合并进去会破坏 cache 并污染系统提示词。
-        #    role 必须用 user：实测末尾的 role=system 且每轮变化的消息会让 DeepSeek prompt
+        #    role 必须用 user：末尾的 role=system 且每轮变化的消息会让 DeepSeek prompt
         #    cache 缓存单元边界错位（命中率从 ~97% 崩到 ~5%），role=user 则正常（~99%）。
         #    内容用 <dynamic_vars> XML 包裹并标注"系统注入"，模型仍能识别为背景信息。
         dynamic_vars_msg = state.get("prompt.dynamic_vars")

@@ -2,7 +2,6 @@
 //!
 //! 提供健康检查、Schema 聚合、能力清单等 RESTful 端点。
 //!
-//! [来源: docs/tasks/task_07_llm_api.md AC-06-3/AC-06-5]
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -53,7 +52,7 @@ pub struct SchemaResponse {
     pub plugin_contributes: Vec<serde_json::Value>,
     /// 内核基础设施能力契约聚合（config/kernel_capabilities/*.json 透出）。
     /// 与插件侧 plugin.json 契约同构：前端/调用方/入口校验消费同一份定义，
-    /// 不读代码副本（2026-08-20 Part B：单一真值源消除双轨漂移）。
+    /// 不读代码副本（单一真值源，消除双轨漂移）。
     pub kernel_capabilities: Vec<serde_json::Value>,
 }
 
@@ -798,23 +797,23 @@ const STATE_SUMMARY_KEYS: &[&str] = &[
     "task.status",
     "task.id",
     "task.ended_at",
-    // 任务域补充（2026-08-23 任务归属链修复）：scope/提交人/容器父是任务行
+    // 任务域补充：scope/提交人/容器父是任务行
     // 元数据（面板徽标 + 容器挂树依据）；workspace/ws_meta 是
     // workspace_lifecycle init 写入的工作空间坐标（任务面板"打开工作空间"
     // 按钮的数据源），均为小标量/小对象，安全出口。
     "task.scope",
     "task.submitted_by",
     "task.parent_project_id",
-    // task.priority/task.max_retries 出口随参数退役移除（2026-08-24
-    // 消费链审计：执行层零消费者——无调度队列按优先级排序，三套真实重试
-    // 机制均读各自插件配置，见 ADR 2026-08-24-task-submit-param-diet）。
+    // task.priority/task.max_retries 不再出口：执行层零消费者——无调度队列
+    // 按优先级排序，三套真实重试机制均读各自插件配置，见
+    // ADR 2026-08-24-task-submit-param-diet。
     "workspace",
     "ws_meta",
     // GAP-1 阶段 1：血缘字段（出生写入，任务树分组与溯源的出口依赖）
     "lineage.parent_pipeline_id",
     "lineage.origin_session_id",
     "lineage.root",
-    // 评估域登记/结论（2026-08-24 批次B 评估管道装配）：评估子管道出生登记
+    // 评估域登记/结论：评估子管道出生登记
     // evaluation.of_task/metric_id（面板识别 + 执行器回收锚点）；task_reminder
     // 评估模式写入 evaluation.detected_result。pipeline-state.list 能力与
     // GET /pipelines/state 同数据源共用本白名单——不出口则评估执行器永远
@@ -830,7 +829,7 @@ const STATE_SUMMARY_KEYS: &[&str] = &[
 /// 声明 + 普通任务回执），键中含动态管道 id 无法精确枚举——按前缀整段
 /// 出口（title/status/scope/created_at/submitted_by/workspace 小标量）。
 /// 任务面板 `_collect_owned_tasks` 据此聚合，缺失则登记任务整行不可见
-/// （2026-08-23 实测：task.owned.* 落库在表、聚合行被白名单剥掉）。
+/// （task.owned.* 落库在表、聚合行被白名单剥掉）。
 const STATE_SUMMARY_KEY_PREFIXES: &[&str] = &["task.owned."];
 
 /// 从一份管道 state 提取摘要（白名单字段 + messages 条数）。
@@ -864,10 +863,9 @@ pub(crate) fn summarize_state(state: &serde_json::Value) -> serde_json::Value {
 /// `pipeline-state.list` 的 DB 兜底共用；无 checkpoint / 读取失败返回 None
 /// （读面降级不崩，调用方跳过该行）。
 ///
-/// 无 checkpoint 但 `pipeline_state` 表有行时以表行为基线（2026-08-23 任务
-/// 归属链修复）：running 中任务 interval 未到不会有 checkpoint，此前整行
-/// 丢弃导致任务面板看不到刚提交的任务（出生字段现已创建即落表，见
-/// chat_send_handler 创建分支）。
+/// 无 checkpoint 但 `pipeline_state` 表有行时以表行为基线：running 中任务
+/// interval 未到不会有 checkpoint，整行丢弃会看不到刚提交的任务（出生字段
+/// 创建即落表，见 chat_send_handler 创建分支）。
 pub(crate) async fn cold_state_row(
     store: &std::sync::Arc<dyn agentos_core::traits::StorageBackend>,
     pipeline_id: &str,
@@ -957,8 +955,8 @@ pub async fn pipelines_state_handler(
             if seen.contains(&pid) {
                 continue;
             }
-            // runs 清单每管道可有多个 run——首个命中后登记去重（此前漏 insert
-            // 导致同管道按 run 数重复出口，前端 Record 覆盖掩盖）。
+            // runs 清单每管道可有多个 run——首个命中后登记去重（防止同管道按
+            // run 数重复出口）。
             seen.insert(pid.clone());
             // 冷兜底行 = 最新 checkpoint + pipeline_state 表最新标量覆盖（复用
             // cold_state_row：checkpoint 拍在终态回写前 → task.status 等完成态以
@@ -986,7 +984,7 @@ pub async fn pipelines_state_handler(
 ///
 /// 从 CapabilityRegistry 返回已注册的工具列表；registry 未装配时回退
 /// state.config 的 tools 数组。响应信封统一为 `{ "items": [...], "total": n }`
-/// （ToolsPage 已退役，消费方为插件管理页能力浏览/调试数据面）。
+/// （消费方为插件管理页能力浏览/调试数据面）。
 pub async fn tools_handler(
     axum::extract::State(state): axum::extract::State<AppState>,
 ) -> axum::Json<serde_json::Value> {
@@ -1307,8 +1305,7 @@ pub async fn get_plugin_config_with_etag(
 // PUT /api/v1/plugins/{id}/enabled（启停，写 default_profile.yaml + 热更新）。
 
 /// G8 排空 + 自退出共享实现（`system_restart_handler` 与 plugin_watcher 的
-/// cdylib 变更自动重启共用——剩余项清仓批次 A3 抽取，watcher 经注入的回调调用，
-/// 不 import axum handler）。
+/// cdylib 变更自动重启共用，watcher 经注入的回调调用，不 import axum handler）。
 ///
 /// 流程：排空（在途 `running` runs → `suspended`，重启后 resume 续跑）→ 记日志
 /// → 延迟 200ms 退出（让触发方的响应/日志先送达）→ **exit 前 best-effort 调
@@ -1626,8 +1623,8 @@ pub async fn plugins_set_enabled_handler(
         .join("default_profile.yaml");
 
     // 读现有 profile：文件缺失/空白 → 全新 Mapping（首次落盘，无存量可破坏）；
-    // 文件存在但解析失败/非 Mapping → 422 拒绝写入（K1：此前会用硬编码模板顶替
-    // 并覆写，profile 里其他插件的启停设置被物理清空；损坏现场必须保留给运维
+    // 文件存在但解析失败/非 Mapping → 422 拒绝写入（K1：不得用硬编码模板顶替
+    // 并覆写，profile 里其他插件的启停设置会被物理清空；损坏现场必须保留给运维
     // 排查，不得静默重建）。其余读失败（权限等）→ 500，同样不写。
     let mut doc: serde_yaml::Value = match std::fs::read_to_string(&profile_path) {
         Ok(raw) if raw.trim().is_empty() => serde_yaml::Value::Mapping(serde_yaml::Mapping::new()),
@@ -1691,7 +1688,7 @@ pub async fn plugins_set_enabled_handler(
         }
     }
 
-    // 写回：序列化失败直接报错（K1：此前 unwrap_or_default() 会把空串写盘，
+    // 写回：序列化失败直接报错（K1：不得 unwrap_or_default() 把空串写盘，
     // 物理清空整个 profile——序列化对 Mapping 几乎不会失败，但兜底不得是破坏性写）。
     let new_raw = serde_yaml::to_string(&doc).map_err(|e| ApiError::Internal {
         message: format!("序列化 default_profile.yaml 失败：{e}"),
@@ -1730,7 +1727,7 @@ pub async fn plugins_set_enabled_handler(
                             // sidecar tool 插件先 spawn 校验。判定失败（漂移）→ 用净化后
                             // manifest 重注册，禁止把"声明与实现不服"的能力在启用时带
                             // 进来；观测失败（重试后仍 spawn/list 失败）≠ 判定失败
-                            //（2026-08-20 裁定）→ 按声明注册，账本标记校验未完成。
+                            // → 按声明注册，账本标记校验未完成。
                             let mut manifest_for_register = m.clone();
                             let mut g2_outcome: Option<crate::plugin_watcher::G2VerifyOutcome> =
                                 None;
@@ -1809,10 +1806,9 @@ pub async fn plugins_set_enabled_handler(
                         remove_plugin_bindings(bindings, &plugin_id);
                     }
                     registry.clear_plugin(&plugin_id);
-                    // G3：动态注册随 scope/clear_plugin 结构性收回（dynamic_tools 表
-                    // 已于 2026-08-19 退役——动态注册是 state 域数据不落内核，
-                    // re-enable 后插件经 on_load/运行时自行重建）。
-                    // §3.3b（0.2 收尾批次 1）：禁用即杀该插件缓存 sidecar——窄口
+                    // G3：动态注册随 scope/clear_plugin 结构性收回（动态注册是
+                    // state 域数据不落内核，re-enable 后插件经 on_load/运行时自行重建）。
+                    // 禁用即杀该插件缓存 sidecar——窄口
                     // kill_sidecar_if_any（只 kill 进程 + 移除缓存，不走 force_unload
                     // 的 OnUnload 广播/loader.unload/指纹清理，"仅禁用"语义下插件
                     // 仍在 loader 内、热发现不失效）；sidecar 按调用懒 spawn，reenable
@@ -2122,7 +2118,7 @@ mod state_summary_tests {
 
     #[test]
     fn test_summarize_state_exports_task_owned_prefix_and_workspace() {
-        // 2026-08-23 任务归属链修复：task.owned.<id>.<field>（提交者管道自持的
+        // task.owned.<id>.<field>（提交者管道自持的
         // 任务登记，键含动态管道 id）按前缀整段出口；workspace/ws_meta/
         // task.scope 等任务行元数据出口（面板徽标 + 打开工作空间按钮数据源）。
         let state = json!({
@@ -2168,7 +2164,7 @@ mod state_summary_tests {
 
     #[test]
     fn test_summarize_state_exports_evaluation_fields() {
-        // 2026-08-24 批次B：评估子管道登记键（of_task/metric_id）与评估模式
+        // 评估子管道登记键（of_task/metric_id）与评估模式
         // 结论（detected_result）出口——pipeline-state.list 同数据源，评估
         // 执行器据此轮询回收评估结论。
         let state = json!({
@@ -2189,7 +2185,7 @@ mod state_summary_tests {
 
     #[test]
     fn test_summarize_state_cuts_retired_task_submit_params() {
-        // 参数退役守卫（2026-08-24）：task.priority/task.max_retries 随
+        // 参数退役守卫：task.priority/task.max_retries 已随
         // task_submit 参数瘦身移除（执行层零消费者，ADR
         // 2026-08-24-task-submit-param-diet）——精确键出口已删，白名单
         // 应裁剪；将来重开须先接真实消费者再回填白名单与写入方。
@@ -2273,7 +2269,7 @@ mod plugin_profile_write_tests {
 
     #[tokio::test]
     async fn scalar_top_level_profile_refuses_overwrite_with_422() {
-        // 解析成功但顶层非 Mapping（标量）：此前 if-let Mapping 静默跳过补丁、
+        // 解析成功但顶层非 Mapping（标量）：if-let Mapping 不命中则静默跳过补丁、
         // 写回仍会覆盖原文——同样按损坏拒写。
         let tmp = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(profile_path(&tmp).parent().unwrap()).unwrap();

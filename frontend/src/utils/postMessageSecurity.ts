@@ -11,7 +11,7 @@
 export interface WebviewMessage {
   /** 协议魔数，校验用 */
   __agentos_webview: true
-  /** 实例级令牌（安全审查 2026-08-20 B-4）：宿主注入 iframe 的一次性随机串，
+  /** 实例级令牌（安全审查 B-4）：宿主注入 iframe 的一次性随机串，
    *  上行消息必须携带——origin='null' 可被任意页面伪造，魔数也不是密码学凭据，
    *  令牌才是身份。 */
   __wv_token?: string

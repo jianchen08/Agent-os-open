@@ -136,7 +136,6 @@ class FeishuOutputAdapter(IOutputAdapter):
             logger.warning("No user_id for feishu output, skipping")
             return
 
-        # 处理错误
         error = state.get(StateKeys.RAW_ERROR)
         if error:
             await self._stream_client.send_message(user_id, f"❌ 错误: {error}")

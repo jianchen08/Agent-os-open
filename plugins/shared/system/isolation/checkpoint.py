@@ -120,10 +120,8 @@ class CheckpointManager:
         checkpoint_path = self.checkpoint_dir / task_id
         backup_path = checkpoint_path / "files"
 
-        # 创建备份目录
         backup_path.mkdir(parents=True, exist_ok=True)
 
-        # 创建检查点对象
         checkpoint = Checkpoint(
             task_id=task_id,
             workspace=workspace,
@@ -188,7 +186,6 @@ class CheckpointManager:
             except Exception as e:
                 logger.error(f"[CheckpointManager] 备份文件失败 | file={file_rel_path} | error={e}")
 
-        # 保存清单
         self._save_manifest(checkpoint_path, checkpoint)
 
         logger.info(

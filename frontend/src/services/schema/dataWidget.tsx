@@ -1,5 +1,5 @@
 /**
- * dataWidget —— 数据 widget 数据获取（全面 widget 化计划 A1a，2026-08-18）
+ * dataWidget —— 数据 widget 数据获取（全面 widget 化计划 A1a）
  *
  * - `datasourceUri` 语义与 fetchDatasourceOptions 一致：以 `/` 开头=绝对 URI
  *   直连；否则走 `/api/v1/datasource/{*}` 代理（G6-a 真实路由已通）。

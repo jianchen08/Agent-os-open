@@ -11,9 +11,8 @@ plugins/shared/tools/e2e_lifecycle_probe（默认 disabled）：
   7.4 卸载失效：插件目录摘除（watcher P1）→ 工具消失 + 插件从
       GET /api/v1/plugins 列表消失（store 摘除，无幽灵条目）
   7.5 重装启用：目录放回（热发现，disabled 入 store）→ PUT enabled=true
-      → 双面恢复。该流程回归保护 2026-08-23 watcher 修复：修复前
-      运行期发现的 disabled 插件 manifest 不进 store，PUT 启用静默不注册
-      （"装了插件点启用功能不生效，须重启内核"）。
+      → 双面恢复。契约：运行期热发现的 disabled 插件 manifest 必须进 store，
+      PUT 启用后真实注册（"装了插件点启用功能不生效，须重启内核"属失效态）。
 
 依赖：
   - Kernel 运行在 http://localhost:9100（e2e 车道标准环境）
@@ -256,8 +255,8 @@ def test_plugin_install_enable_disable_uninstall_lifecycle(kernel_url, auth_toke
         _wait_until(
             lambda: _tool_in_face(kernel),
             60,
-            "7.5 重装启用：PUT enabled=true 应真注册（回归锚：修复前 disabled "
-            "热发现 manifest 不进 store，此处静默不注册）",
+            "7.5 重装启用：PUT enabled=true 应真注册（热发现的 disabled manifest "
+            "必须入 store 并被启用）",
         )
         status, body, _ = _echo(kernel, "probe-reinstall-live")
         assert status == 200, f"7.5 /ext 期望 200: {status} {body}"

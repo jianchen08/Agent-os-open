@@ -1,6 +1,4 @@
-"""场景管理 API 路由（scenes 域）——自持版，由 scene_service http.handle 分发。
-
-迁移自 channel_api/routes_scene.py（channel_api 退役方案批次 1：scenes 域 → scene 插件）：
+"""场景管理 API 路由（scenes 域），由 scene_service http.handle 分发。
 
 - 业务函数原样保留（SceneManager 实例化/JSON 持久化路径不变），响应形态与
   /ext/channel_api/scenes/** 逐项对齐（前端直接消费）；
@@ -37,7 +35,7 @@ class SceneHTTPError(Exception):
         super().__init__(message)
 
 
-# 全局 SceneManager 实例（与 channel_api 同款模块级单例；测试可直接替换）
+# 全局 SceneManager 实例（模块级单例；测试可直接替换）
 _scene_manager: SceneManager | None = None
 
 

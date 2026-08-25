@@ -73,7 +73,7 @@ async def test_concurrent_same_workspace_creates_once():
 
     若无 per-workspace 锁，两个任务会各自调 create_environment，第二个报 Conflict。
     create_fn 内含 await 模拟 docker create 的耗时（让出事件循环），
-    放大竞态窗口——这是修复前必然触发冲突的场景。
+    放大竞态窗口——两个任务都会进入「检查」阶段再调用本函数。
     """
     call_count = 0
 

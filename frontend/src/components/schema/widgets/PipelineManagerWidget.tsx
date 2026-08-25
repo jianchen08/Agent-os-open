@@ -7,7 +7,7 @@
  *   无归属（孤儿）管道单独平铺；树视图/列表视图切换；树子级点击展开/收起
  *   （默认收起），条目详情走独立「详细信息」按钮、与树展开解耦（树操作不关
  *   详情，详情停留显示）；操作按钮（打开对话/暂停/恢复/取消/复制 ID/打开工作空间）
- * - 任务与执行管道一对一绑定（2026-08-24 裁定）：条目行即任务行，不包
+ * - 任务与执行管道一对一绑定：条目行即任务行，不包
  *   任务节点层——子任务/子管道直挂该条目行下，只一个层级
  */
 
@@ -235,7 +235,7 @@ export function PipelineManagerWidget(_rawProps: Record<string, unknown>) {
       if (seen.has(pid)) continue
       seen.add(pid)
       const taskStatus = String(task.status ?? '')
-      // 未知状态不再丢弃（2026-08-19）：保留条目，4 态映射兜底 running，原始状态在行内展示
+      // 未知状态不再丢弃：保留条目，4 态映射兜底 running，原始状态在行内展示
       const mapped = taskStatusToPipelineStatus(taskStatus) ?? 'running'
       const st = registryStates[pid]
       const timestamps = task.timestamps as Record<string, unknown> | undefined
@@ -359,7 +359,7 @@ export function PipelineManagerWidget(_rawProps: Record<string, unknown>) {
   )
 
   /** 管道树：会话主管道顶层 → 任务条目行（一对一绑定：条目行即任务行，
-   *  2026-08-24 裁定不再包任务节点层）→ 子任务/子管道直挂该条目行下；
+   *  不再包任务节点层）→ 子任务/子管道直挂该条目行下；
    *  无任务归属的管道直接挂主管道下；孤儿（无会话归属）顶层平铺。
    *  状态分组按顶层节点状态划分，子树跟随父级不拆散层级。 */
   const pipelineTree = useMemo(() => {
@@ -1208,7 +1208,7 @@ function EntryDetail({ entry, depth }: { entry: PipelineViewEntry; depth: number
   ]
   if (entry.endedAt) rows.push(['结束', entry.endedAt])
   if (entry.agentName) rows.push(['Agent', entry.agentName])
-  // state 真值关键数据（2026-08-19：任务条目上的关键信息不缺位）
+  // state 真值关键数据（任务条目上的关键信息不缺位）
   if (entry.taskStatus) rows.push(['任务状态', entry.taskStatus])
   if (entry.stateStatus) rows.push(['State 状态', entry.stateStatus])
   if (entry.stateEnded !== undefined) rows.push(['已结束', entry.stateEnded ? '是' : '否'])

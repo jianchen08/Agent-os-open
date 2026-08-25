@@ -1,8 +1,8 @@
 /** 认证状态管理 Store：UI 态（user/isAuthenticated/error）与登录编排。
  *
  * token 生命周期（存取/过期判定/互斥刷新/主动续期调度/认证失效分类）已收口到
- * services/auth/tokenLifecycle 唯一实现（2026-08-21 架构收口，用户裁决：同一
- * 职责必须内聚——此前散落五处且每处失败都静默）。本 store 不再直接读写
+ * services/auth/tokenLifecycle 唯一实现（同一职责必须内聚——散落五处且
+ * 每处失败都静默）。本 store 不再直接读写
  * localStorage 令牌键，一律经 tokenLifecycle。
  */
 

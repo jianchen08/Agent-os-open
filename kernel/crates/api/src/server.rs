@@ -94,9 +94,9 @@ pub fn build_router(state: AppState) -> Router {
         .route("/uploads/{filename}", get(serve_upload_handler))
         // AC-06-5: Schema 聚合端点
         .route("/api/v1/schema", get(schema_handler))
-        // agent 管理面已插件化（2026-08-20 ADR）：/api/v1/agents* 4 路由迁至
+        // agent 管理面已插件化：/api/v1/agents* 4 路由迁至
         // agent_manager 插件 /ext/agent_manager/agents*（http_endpoints 承载，
-        // 掩码/etag/乐观锁/.bak 语义一项不丢）。
+        // 掩码/etag/乐观锁/.bak 语义一项不丢，见 2026-08-20 ADR）。
         // 阶段3:命令执行统一出口(前端 GrowthLoop.ts commandDispatcher transport 注入此端点)
         // 命令面板/快捷键/菜单触发 → 查找声明该 command 的插件 → 执行或占位
         .route("/api/v1/actions/execute", post(actions_execute_handler))
@@ -804,7 +804,7 @@ async fn process_via_engine_inner(
     // task_completed（EVENT 触发器输入源）。fire-and-forget，不影响响应。
     // 注：任务状态（task.status/ended_at）由任务域插件裁决写入（task_evaluate
     // 评估终态经 pipeline-state.update 落 state），内核只广播 run 终态事件，
-    // 不写任务状态（2026-08-24 职责边界裁定：内核只管管道运行域）。
+    // 不写任务状态（职责边界：内核只管管道运行域，任务状态由任务域插件裁决）。
     emit_run_terminal_domain_events(state, &final_state, outcome.failed).await;
     outcome
 }
@@ -846,8 +846,7 @@ fn derive_run_terminal_events(
     let parent_pipeline_id = v("lineage.parent_pipeline_id");
     // 子任务完成通知注入 chat.send_message 需要 user_id：task_submit 创建子任务
     // 时把提交者写进初始 state（task.submitted_by），随 final_state 带出给
-    // triggers_ext 注入器——否则注入器传空串被内核拒绝（-32603 缺少 user_id，
-    // 2026-08-17 子任务结果回传断点）。
+    // triggers_ext 注入器——否则注入器传空串被内核拒绝（-32603 缺少 user_id）。
     let task_user_id = v("task.submitted_by");
 
     let mut events: Vec<(&'static str, Vec<(&'static str, serde_json::Value)>)> = Vec::new();
@@ -912,7 +911,7 @@ async fn emit_run_terminal_domain_events(
 /// 且**不含** `task.owned.` 前缀键。`task.owned.*` 是父管道登记子任务的扁平键
 /// （任务声明在子管道自己的 `task.*` 上），仅登记过子任务的聊天主管道不得被
 /// 误判为任务管道——否则 run 终态会被回写 `task.status`/`task.ended_at`，
-/// 在任务聚合出口变成无标题无 task.id 的幽灵任务行（2026-08-23 修复）。
+/// 在任务聚合出口变成无标题无 task.id 的幽灵任务行。
 fn has_task_marker(state: &serde_json::Value) -> bool {
     state
         .as_object()
@@ -1251,9 +1250,9 @@ async fn stage_recover_history(
     }
     // GAP-3：中断重放幂等——上一次尝试若已把本轮 user 消息落槽（重启/崩溃
     // 截断 run，无 assistant 跟随），恢复出的 history 尾部就是它；再 append 会
-    // 重复落槽+重复消费（e2e 重复 run/陈旧回复病根②）。判定按幂等键裁决
+    // 重复落槽+重复消费。判定按幂等键裁决
     // （ADR 2026-08-21）：cmid 在场时只有「同 cmid」才算同一次发送的重派（吞）；
-    // cmid 不同 = 真发了两条（绝不吞，修复连发相同内容第二条被吞）。无 cmid
+    // cmid 不同 = 真发了两条（绝不吞）。无 cmid
     // 的路径（触发器注入/旧客户端）维持同文判定。
     let interrupted_tail = initial_state
         .get("messages")
@@ -1306,9 +1305,9 @@ async fn stage_recover_history(
 
 /// 阶段 2b：注入工具 schema。
 ///
-/// agent 配置（system_prompt/persona 等 yaml 字段）已从内核解耦（2026-08-17
-/// 裁决）：内核只负责把 agent_id 放进 initial_state（stage_build_initial_state），
-/// yaml 加载归 sidecar 的 context_build 插件（按 state.agent_id 读
+/// agent 配置（system_prompt/persona 等 yaml 字段）已从内核解耦：内核只负责
+/// 把 agent_id 放进 initial_state（stage_build_initial_state），yaml 加载归
+/// sidecar 的 context_build 插件（按 state.agent_id 读
 /// AGENTOS_CONFIG_ROOT/agents/**）。工具 schema 注入留在内核——ToolRegistry
 /// 在内核，这是工具面契约（按 agent tool_ids 过滤下发）而非 agent 配置。
 fn stage_inject_agent_and_tools(
@@ -1671,8 +1670,8 @@ fn inject_tool_schemas(state: &mut serde_json::Value, app_state: &AppState) {
             // LLM 严格校验工具 schema:parameters 必须是 type:object 的 JSON Schema。
             // 注意（K9 勘误）：注册路径（plugin_lifecycle / agentos-kernel 启动循环）
             // 对缺 input_schema 的 manifest 工具按 {} 补注册，{} 是 object——本过滤
-            // 对这些工具**恒不触发**（2026-08-20 统计：plugins/ 下 84 个 manifest
-            // 工具中 28 个缺声明，external_mcp/admin http.handle 与 status 对等），
+            // 对这些工具**恒不触发**（注册路径对缺 input_schema 的 manifest
+            // 工具按 {} 补注册，{} 是 object），
             // 真正的防线在注册期的 warn + 启动报告计数，此处过滤只拦"注册后 schema
             // 被改写成非 object"的极端形态。
             t.input_schema.is_object()
@@ -1758,8 +1757,9 @@ async fn chat_handler(
         .await
         .map(|(uid, _, _, _)| uid)
         .unwrap_or_default();
-    // ADR-2026-08-15：HTTP 路径同步返回 outcome，但执行必须入管道链——与 WS /
-    // chat.send_message 共用同一条 FIFO，消除 HTTP 与 WS 同会话并发 run 的竞态。
+    // HTTP 路径同步返回 outcome，但执行必须入管道链——与 WS /
+    // chat.send_message 共用同一条 FIFO，消除 HTTP 与 WS 同会话并发 run 的竞态
+    // （ADR-2026-08-15）。
     // key 与 process_via_engine_inner 的 effective_pipeline_id 同式（空则回退
     // thread_id），保证跨入口落到同一条链。
     let chain_key = if pipeline_id.is_empty() {
@@ -1871,10 +1871,10 @@ async fn interaction_response_handler(
 
 /// 启动 API 服务器。
 ///
-/// 0.2 收尾 §3.3a：`with_graceful_shutdown` 接线——Ctrl-C（Unix 另含 SIGTERM）
+/// `with_graceful_shutdown` 接线——Ctrl-C（Unix 另含 SIGTERM）
 /// 触发后先 best-effort 杀掉全部缓存 sidecar（`shutdown_all`，防孤儿进程），
-/// 再让 axum 收尾退出。此前是裸 `axum::serve`，内核进程死了 sidecar 子进程
-/// 全部变孤儿（e2e G4）。
+/// 再让 axum 收尾退出（裸 `axum::serve` 会让内核进程死后 sidecar 子进程
+/// 全部变孤儿）。
 pub async fn start_server(addr: SocketAddr, state: AppState) -> Result<(), ApiError> {
     // invoker 句柄先 clone 进 shutdown future（build_router 消费 state）。
     let shutdown_invoker = state.invoker.clone();
@@ -2875,7 +2875,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_cold_recovery_ignores_stale_ended_flag() {
-        // 回归锚（2026-08-22 真机）：冷恢复（registry 丢失）时，旧 checkpoint 的
+        // 回归锚：冷恢复（registry 丢失）时，旧 checkpoint 的
         // `ended=true`（post 阶段 pipeline_track 每轮写入）若残留进本轮 initial_state，
         // 引擎 execute_steps/execute_body 见 ended 即短路——run 秒终 completed、
         // LLM 一次请求都不发（真机：主管道 38ms 秒终 + 两个任务管道 1-2s 秒终，
@@ -3667,7 +3667,7 @@ mod tests {
         assert_eq!(tag("parent_pipeline_id"), json!("parent_p1"));
         // 子任务完成通知注入 chat.send_message 需要 user_id（task_submit 创建时
         // 写入 task.submitted_by）——事件必须带出，否则触发器注入器传空串被内核
-        // 拒绝（-32603 缺少 user_id，2026-08-17 子任务结果回传断点）
+        // 拒绝（-32603 缺少 user_id）
         assert_eq!(tag("user_id"), json!("admin"));
     }
 
@@ -4020,7 +4020,7 @@ mod tests {
         }
     }
 
-    // ── 职责边界（2026-08-24 裁定）：run 终态不写任务状态 ────────────────
+    // ── 职责边界：run 终态不写任务状态 ────────────────────────────────
     // 内核只管管道运行域：run 结束只广播域事件（run.completed/task_completed），
     // task.status/task.ended_at 由任务域插件（task_evaluate 经 pipeline-state
     // update）裁决写入。此处断言：引擎跑完任务管道后 state 保持出生值 pending，
@@ -4117,7 +4117,7 @@ mod tests {
     #[tokio::test]
     #[allow(clippy::await_holding_lock)]
     async fn test_run_terminal_skips_writeback_for_owned_only_pipeline() {
-        // 幽灵任务行根因回归（2026-08-23）：仅登记过子任务的聊天主管道，state
+        // 幽灵任务行根因回归：仅登记过子任务的聊天主管道，state
         // 只含 `task.owned.*` 扁平键（无自身 task.* 声明）——不得被误判为任务
         // 管道，run 结束不得回写 task.status/task.ended_at（否则任务聚合出口
         // 出现无标题无 task.id 的幽灵任务行）。判定口径与插件侧聚合
@@ -4184,7 +4184,7 @@ mod tests {
 
     #[test]
     fn test_has_task_marker_owned_prefix_excluded() {
-        // 幽灵任务行根因单元级判定（2026-08-23）：`task.owned.*` 是父管道登记
+        // 幽灵任务行根因单元级判定：`task.owned.*` 是父管道登记
         // 子任务的扁平键，不算任务管道自身标记——仅登记过子任务的聊天管道
         // 不得误判为任务管道（口径与插件侧 `_list_tasks_from_state` 第一趟一致）。
         let owned_only = json!({
@@ -4220,7 +4220,7 @@ mod tests {
         // 组合验证（各环节单测已绿，此处串全链）：
         // ① chat.send_message create 分支生成 pipeline_id（task.id 引擎注入）
         // ② 同一 overlay 派发 → run 完成
-        // ③ 任务状态保持出生值 pending（2026-08-24 职责边界：run 终态不写
+        // ③ 任务状态保持出生值 pending（职责边界：run 终态不写
         //    task.status，终态由任务域插件经 pipeline-state.update 裁决）
         // ④ pipeline-state.list 聚合行完整（task.* + lineage.* + status）
         let (state, _invoker, store, _sqlite) = make_engine_state();
@@ -4296,7 +4296,7 @@ mod tests {
         );
     }
 
-    /// 2026-08-19 触发器注入回归：chat.send_message 注入只持有管道唯一坐标
+    /// 触发器注入回归：chat.send_message 注入只持有管道唯一坐标
     /// （32hex pipeline_id），事件按该坐标 emit 后必须能经 registry 反查直达
     /// 在线 user 的 WS 连接——否则出现「LLM 日志有、前端收不到回复」。
     #[tokio::test]
@@ -4352,7 +4352,7 @@ mod tests {
         );
     }
 
-    // ── ADR 2026-08-21 消息幂等契约：cmid 随 user 消息落库 + interrupted_tail 尊重 cmid ──
+    // ── 消息幂等契约（ADR 2026-08-21）：cmid 随 user 消息落库 + interrupted_tail 尊重 cmid ──
 
     /// cmid 非空时 user 消息必须携带 metadata.client_message_id（对账去重桥接键）。
     #[tokio::test]

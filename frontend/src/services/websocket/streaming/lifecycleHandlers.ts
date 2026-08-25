@@ -75,7 +75,7 @@ export async function handleReconnected(): Promise<void> {
 
   // streamingState 中已有旧记录，占位创建/更新失败，AI 回复无法显示。
   //
-  // F2 宽限重查（2026-08-23 修订）：重连≠引擎死亡——服务端管道可能仍在跑
+  // F2 宽限重查：重连≠引擎死亡——服务端管道可能仍在跑
   // （长 LLM 轮），立即把「backfill 后仍 streaming」标成 interrupted 会把活流
   // 误判为中断（真机复现：重连 1s 后标中断、20s 后 new_message 到达才自愈，
   // 期间用户看到假「输出被中断」警告）。改为延迟复查：宽限窗口内内容签名
@@ -124,7 +124,7 @@ export async function handleReconnected(): Promise<void> {
           notificationType: 'stream_interrupted',
         } as any)
       }
-      // 清理 streamingState（只清本管道——ADR 2026-08-21 不再顺带清 threadId）
+      // 清理 streamingState（只清本管道，不再顺带清 threadId）
       terminatePipeline(pipelineId)
       logger.info('[streaming] 宽限复查无活动，终止残留流式管道 %s', pipelineId.slice(0, 12))
     }

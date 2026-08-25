@@ -13,6 +13,9 @@ from __future__ import annotations
 import os
 
 import pytest
+
+import tests._isolation_path  # noqa: F401  # 注入 isolation 插件目录到 sys.path
+
 from isolation.sensitive_paths import is_sensitive_path
 
 

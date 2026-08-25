@@ -6,7 +6,7 @@
 //! 两条路径，经防抖后串行调用既有 `discover_new_plugins()` + `register_new_plugins()`，
 //! 让丢进 `plugins/` 的新插件 tools/route_signals 立即生效，无需重启内核。
 //!
-//! cdylib 集合变更自动重启（剩余项清仓批次 A3）：sidecar 插件可热注册，但
+//! cdylib 集合变更自动重启（A3）：sidecar 插件可热注册，但
 //! InProcess(cdylib) 插件的装/卸/换受 dlclose 死结限制无法热更新（invoker 侧只
 //! warn "restart kernel"）。watcher 在每轮 sync 时对比 InProcess 插件 id 集合，
 //! 新增或消失都视为变更 → 经注入的 restart hook 触发 G8 优雅重启（排空 + exit 75，
@@ -51,7 +51,7 @@ pub const DEFAULT_DEBOUNCE: std::time::Duration = std::time::Duration::from_mill
 
 /// 默认轮询兜底间隔：notify 不可靠环境（Docker/WSL）下保底发现新插件。
 /// 1 分钟 = notify 失效时的低频兜底；正常环境变更全由 notify 事件驱动，
-/// 轮询只兜底不抢跑（曾 5s 固定全量重扫 60+ manifest，无变更也在空转）。
+/// 轮询只兜底不抢跑。
 pub const DEFAULT_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_secs(60);
 
 /// cdylib（InProcess）插件集合变更（A3：触发 G8 优雅重启的判据）。
@@ -79,10 +79,9 @@ pub struct SyncReport {
     /// 实际暴露不一致的贡献被拒绝，其余能力照常注册；报告可见不静默）。
     pub drifted_plugins: Vec<String>,
     /// Phase 0（注册闸 L1）：本轮被 enablement profile 过滤（disabled）而未注册的
-    /// 插件数——热发现路径此前不过滤 disabled（`agentos-kernel.rs` 原注释自认），
-    /// 现与启动期注册循环对齐。
+    /// 插件数——热发现路径与启动期注册循环对齐，按 enablement profile 过滤。
     pub skipped_disabled: usize,
-    /// Phase 0（注册闸服务依赖，2026-08-18 服务唯一轴）：本轮因 `requires_services`
+    /// Phase 0（注册闸服务依赖）：本轮因 `requires_services`
     /// 无人提供（能力角色/服务端点未注册）而被拒绝注册的**新**插件 id。
     pub dependency_rejected: Vec<String>,
     /// GAP-6：本轮检测到 manifest 变更并**已重注册**的插件 id（指纹对比）。
@@ -377,19 +376,17 @@ async fn run_smoke(
 }
 
 /// 观测失败重试退避序列（300ms / 1s）：启动期 sidecar 冷启动竞态下探测进程
-/// 瞬态死亡（2026-08-20 实测单次启动 45 例 stderr EOF）——重试即过；真漂移
-/// 走"比对出不一致"路径不受影响。
+/// 可能瞬态死亡——重试即过；真漂移走"比对出不一致"路径不受影响。
 const G2_OBSERVE_RETRY_BACKOFF_MS: [u64; 2] = [300, 1000];
 
 /// G2：单插件"声明 ↔ 实际暴露"一致性校验 + 冒烟 + 处置（公共化，供注册/启动/重启用复用）。
 ///
 /// - 无 tools 且无 services（route 仅插件 / InProcess / native）→ 跳过，原样返回；
 /// - 比对出可拒绝漂移（missing / schema_mismatch）→ 剔除漂移工具，其余照常；
-/// - spawn/list_tools 失败 = **观测失败 ≠ 判定失败**（2026-08-20 裁定，推翻旧
-///   strict 净化定案）：重试 2 次（退避见 [`G2_OBSERVE_RETRY_BACKOFF_MS`]）后仍
-///   失败 → 保留声明注册不动（spawn_failed=true 供账本标记"校验未完成"，调用方
-///   择机复验）。观测通道故障永远无权处置被校验对象——把好插件工具砍掉的
-///   "strict 拒绝全部"旧路径已删除（AGENTOS_G2_STRICT_SPAWN_FAIL 开关随之退役）；
+/// - spawn/list_tools 失败 = **观测失败 ≠ 判定失败**：重试 2 次（退避见
+///   [`G2_OBSERVE_RETRY_BACKOFF_MS`]）后仍失败 → 保留声明注册不动
+///   （spawn_failed=true 供账本标记"校验未完成"，调用方择机复验）。观测通道
+///   故障永远无权处置被校验对象——不得把好插件工具砍掉；
 /// - 声明了 `smoke: true` 的工具 → 样例输入真调一次，失败拒绝（fail-closed）。
 ///
 /// 纯校验+净化，无注册副作用；调用方决定后续注册行为。
@@ -600,9 +597,8 @@ pub async fn sync_once_with_store(
     // 首轮建基线，之后新增/消失都报变更；用全量 `all`（enablement/G2 过滤
     // 只动注册对象，不动 host_type 归属）。
     let cdylib_change = diff_cdylib_change(&all, known_cdylib);
-    // 注册闸 L1：enablement 过滤（热发现路径此前不过滤 disabled，与启动期
-    // 注册循环对齐）；依赖完整性参照"将注册集合"（disabled 不在集合 → 依赖它
-    // 视为缺失，fail-closed）。
+    // 注册闸 L1：enablement 过滤（与启动期注册循环对齐）；依赖完整性参照
+    // "将注册集合"（disabled 不在集合 → 依赖它视为缺失，fail-closed）。
     let (kept_refs, skipped_disabled) = filter_enabled_manifests(&all, |id, def| {
         enablement.is_none_or(|e| e.is_enabled(id, def))
     });
@@ -617,8 +613,8 @@ pub async fn sync_once_with_store(
     // apply_discovered_plugins 扩充，故在此先拍"先前已登记"快照再 diff。
     // InProcess(cdylib) 除外——其消失/重建归 A3 优雅重启路径（diff_cdylib_change），
     // 不在此处与它抢着摘除。
-    // 2026-08-23 修复：登记全集 = known_ids ∪ store 已有条目——store 里有而
-    // 未注册的（disabled/依赖被拒，见尾部合并块）插件目录消失时同样要走卸载
+    // 登记全集 = known_ids ∪ store 已有条目：store 里有而未注册的
+    // （disabled/依赖被拒，见尾部合并块）插件目录消失时同样要走卸载
     // 摘除，否则 store 残留幽灵条目、插件列表永远显示已删插件。
     let mut pre_registered: HashSet<String> = known_ids.clone();
     if let Some(store) = manifests_store {
@@ -637,7 +633,7 @@ pub async fn sync_once_with_store(
 
     // G2 安装期一致性校验（公共化 g2_verify_and_sanitize）：对新发现的 tool 插件
     // spawn → tools/list → 对照声明。漂移工具的贡献拒绝注册，其余能力照常；
-    // 观测失败（重试后仍 spawn/list 失败）保留声明注册（2026-08-20 裁定）。
+    // 观测失败（重试后仍 spawn/list 失败）保留声明注册。
     let mut filtered: Vec<PluginManifest> = Vec::with_capacity(kept_refs.len());
     let mut drifted_plugins = Vec::new();
     let mut dependency_rejected = Vec::new();
@@ -757,9 +753,6 @@ pub async fn sync_once_with_store(
     }
 
     // ── GAP-6：既有插件 manifest 变更 → 重注册 ──────────────────────────
-    // watcher 此前只处理"新目录"（known_ids 之外），既有插件的 plugin.json
-    // 变更（工具清单/entry/args）既不重建注册数据也不刷新 manifests store——
-    // e2e 实测改 manifest 后 validate-all 仍用旧条目，须重启内核。
     // 指纹 = manifest 序列化内容哈希（纯内容比对，与 mtime 无关）。
     // 变更动作复用 re-enable 路径：revoke 旧 scope（guard drop 真撤销）→
     // 按新 manifest 重注册 tools/route_signals/http_endpoints + 替换 store 条目。
@@ -815,13 +808,11 @@ pub async fn sync_once_with_store(
                 guard.push(m.clone());
             }
         }
-        // 2026-08-23 修复：disabled/依赖被拒的运行期新发现插件 manifest 也进 store。
-        // 此前只合并 filtered（enablement 过滤后），disabled 新插件的 manifest 永不
-        // 进 store → PUT /plugins/{id}/enabled 查不到 manifest，静默不注册
-        // （routes.rs plugins_set_enabled_handler 的 "manifest not found" 分支）——
-        // 表现为"装了插件、点启用、功能不生效，须重启内核"。boot 路径是全量注入
-        // （含 disabled），watcher 对齐该语义：store = "磁盘上已发现"全集，enabled
-        // 与否由 enabled_plugin_ids/enablement 表达；注册面不变（仍只注册 filtered）。
+        // disabled/依赖被拒的运行期新发现插件 manifest 也进 store：boot 路径是
+        // 全量注入（含 disabled），watcher 对齐该语义——store = "磁盘上已发现"
+        // 全集，enabled 与否由 enabled_plugin_ids/enablement 表达；注册面不变
+        // （仍只注册 filtered）。否则 PUT /plugins/{id}/enabled 查不到 manifest，
+        // 启用静默不注册。
         // enabled 条目不覆盖（保留上方合并的 G2 净化版）；disabled 条目内容变更时
         // 刷新（防后续启用拿到过期 manifest）。
         let filtered_ids: HashSet<&str> = filtered.iter().map(|m| m.id.as_str()).collect();
@@ -865,9 +856,9 @@ pub struct PluginWatcher {
     /// （与启动期注册循环对齐）；None = 不过滤（旧行为/测试）。
     enablement: Option<PluginEnablement>,
     /// enablement 重读根（bin 装配时传 config_root）。Some 时每次 sync 前从
-    /// `plugins/default_profile.yaml` 重读——2026-08-23 修复：PUT enabled 写
-    /// profile + 改 enabled_plugin_ids，但 `enablement` 是 boot 快照，卸载→
-    /// 重装的插件按旧快照判定，运行期禁用被静默撤销（e2e test_07 实测）。
+    /// `plugins/default_profile.yaml` 重读：PUT enabled 写 profile + 改
+    /// enabled_plugin_ids，而注入的 `enablement` 是 boot 快照，卸载→重装的
+    /// 插件按旧快照判定会静默撤销运行期禁用——每次 sync 现读消除快照分歧。
     /// sync 稀疏、文件小，重读成本可忽略；None（测试 with_enablement 注入）
     /// 沿用快照。
     profile_reload_root: Option<PathBuf>,
@@ -942,7 +933,7 @@ impl PluginWatcher {
 
     /// 注入 profile 重读根（生产装配）：每次 sync 前从
     /// `<config_root>/plugins/default_profile.yaml` 重读 enablement，消除
-    /// boot 快照与运行期 PUT enabled 写盘的分歧（2026-08-23 修复，见字段注释）。
+    /// boot 快照与运行期 PUT enabled 写盘的分歧（见字段注释）。
     pub fn with_profile_reload(mut self, config_root: PathBuf) -> Self {
         self.profile_reload_root = Some(config_root);
         self
@@ -1040,9 +1031,9 @@ impl PluginWatcher {
                     // 匹配到事件即继续等（重置防抖窗口）；超时或 channel 关闭则结束。
                 }
                 // 执行一次同步（幂等：无新插件则 no-op）。
-                // enablement 取数（2026-08-23 修复）：配置了重读根 → 每次 sync
-                // 从盘上 profile 现读（运行期 PUT enabled 的写盘结果即时可见，
-                // 消除 boot 快照分歧）；否则用注入快照（测试路径）。
+                // enablement 取数：配置了重读根 → 每次 sync 从盘上 profile 现读
+                // （运行期 PUT enabled 的写盘结果即时可见，消除 boot 快照分歧）；
+                // 否则用注入快照（测试路径）。
                 let effective_enablement: Option<PluginEnablement> = match &profile_reload_root {
                     Some(root) => Some(PluginEnablement::load(root)),
                     None => enablement.clone(),
@@ -1548,8 +1539,8 @@ mod tests {
         assert_eq!(names, vec!["t1".to_string()]);
     }
 
-    /// G2：观测失败（list_tools 报错）≠ 判定失败（2026-08-20 裁定）——按声明注册
-    /// 不净化，注册流程继续不阻断（drifted_plugins 不含该插件，账本另标记
+    /// G2：观测失败（list_tools 报错）≠ 判定失败——按声明注册不净化，
+    /// 注册流程继续不阻断（drifted_plugins 不含该插件，账本另标记
     /// verify_incomplete 待复验）。
     #[tokio::test]
     async fn sync_once_verify_failure_does_not_block_install() {
@@ -1967,9 +1958,6 @@ mod tests {
     // ── Phase 0：注册闸——G2 公共化 / disabled 过滤 / 依赖拒绝 ──────────────
 
     /// G2 spawn 失败处置开关：默认严格（fail-closed），仅 "0" 置 lenient。
-    // g2_strict_env_switch_parsing 测试已随 AGENTOS_G2_STRICT_SPAWN_FAIL 开关
-    // 一并退役（2026-08-20 裁定：观测失败≠判定失败，永远保留声明注册——
-    // 开关失去存在意义，函数与解析测试同步删除，不留死开关）。
     /// enablement 过滤纯函数：disabled 跳过并计数，保留序不变。
     #[test]
     fn filter_enabled_skips_disabled_and_counts() {
@@ -2024,8 +2012,8 @@ mod tests {
 
     #[tokio::test]
     async fn g2_verify_spawn_fail_keeps_declared_tools() {
-        // 观测失败≠判定失败（2026-08-20 裁定）：重试后仍 spawn/list 失败 →
-        // 保留声明注册（spawn_failed 供账本标记校验未完成），不再净化工具。
+        // 观测失败≠判定失败：重试后仍 spawn/list 失败 → 保留声明注册
+        // （spawn_failed 供账本标记校验未完成），不再净化工具。
         let mut invoker = MockInvoker::new(vec![mk_manifest("p1", "tool", &["t1", "t2"], false)]);
         invoker.list_tools_fail = true;
         let m = mk_manifest("p1", "tool", &["t1", "t2"], false);
@@ -2077,7 +2065,7 @@ mod tests {
         assert!(!out.spawn_failed && !out.drift);
     }
 
-    /// 注册闸 L1：disabled 插件在热发现路径不进注册表（此前不过滤）。
+    /// 注册闸 L1：disabled 插件在热发现路径不进注册表。
     #[tokio::test]
     async fn sync_skips_disabled_plugin_in_hot_discovery() {
         use agentos_plugin_loader::{PluginEnablement, PluginProfile, ProfileEntry};
@@ -2125,9 +2113,8 @@ mod tests {
         assert!(ids.contains(&"a".to_string()) && ids.contains(&"c".to_string()));
     }
 
-    /// 2026-08-23 修复回归锚：disabled 插件不进注册表，但 manifest 必须进
-    /// manifests store——否则 PUT /plugins/{id}/enabled 查不到 manifest，
-    /// 启用静默不注册（"装了插件点启用功能不生效，须重启内核"）。store =
+    /// 回归锚：disabled 插件不进注册表，但 manifest 必须进 manifests store——
+    /// 否则 PUT /plugins/{id}/enabled 查不到 manifest，启用静默不注册。store =
     /// "磁盘上已发现"全集，与 boot 全量注入语义对齐（e2e 见
     /// tests/e2e_02/test_07_plugin_lifecycle_e2e.py）。
     #[tokio::test]
@@ -2179,9 +2166,9 @@ mod tests {
         );
     }
 
-    /// 2026-08-23 修复回归锚：store-only（disabled、从未注册）插件目录消失 →
-    /// store 条目同样摘除（此前卸载判定只看 known_ids，disabled 卸载留幽灵条目、
-    /// 插件列表永远显示已删插件）。
+    /// 回归锚：store-only（disabled、从未注册）插件目录消失 → store 条目
+    /// 同样摘除——否则卸载判定只看 known_ids，disabled 卸载留幽灵条目、
+    /// 插件列表永远显示已删插件。
     #[tokio::test]
     async fn sync_uninstalls_store_only_disabled_plugin() {
         use agentos_plugin_loader::{PluginEnablement, PluginProfile, ProfileEntry};

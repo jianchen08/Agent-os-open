@@ -122,8 +122,8 @@ def _guarded_factorial(x: Any) -> int:
     return math.factorial(n)
 
 
-# 表达式上下文函数白名单（与旧字符串替换实现行为对齐：三角函数角度制、
-# log 支持单/双参、factorial 收敛 int——旧实现 "))"→")" 误替换使 factorial 语法错误，此处修复）
+# 表达式上下文函数白名单（与字符串替换实现行为对齐：三角函数角度制、
+# log 支持单/双参、factorial 收敛 int）
 _EXPR_FUNCS: dict[str, Any] = {
     "sin": lambda x: math.sin(math.radians(x)),
     "cos": lambda x: math.cos(math.radians(x)),

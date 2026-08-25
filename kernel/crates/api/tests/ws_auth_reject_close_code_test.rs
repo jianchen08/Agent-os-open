@@ -2,8 +2,8 @@
 //! WS 握手认证拒绝关闭码测试：无效/缺失 token 的握手必须收到带 4001 状态码的
 //! Close 帧，而不是被直接 drop（浏览器 onclose 只能看到 1006）。
 //!
-//! 背景（2026-08-21 实测复现）：旧实现 `run_ws_session` 拒绝分支直接 return，
-//! socket 被 drop 且无 Close 帧 → 浏览器 `event.code === 1006` → 前端
+//! 背景：`run_ws_session` 拒绝分支直接 return 时 socket 被 drop 且无 Close 帧
+//! → 浏览器 `event.code === 1006` → 前端
 //! GlobalWebSocket 的「4001 → refreshToken → 重连」自愈路径永远不触发；
 //! 叠加 localStorage 缺 refresh_token 时被当瞬时故障无限重试，表现为
 //! 「未连接」常驻、发消息无响应、永不弹登录。

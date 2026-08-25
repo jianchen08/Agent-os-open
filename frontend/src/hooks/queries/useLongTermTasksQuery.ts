@@ -1,5 +1,5 @@
 /**
- * 长期任务列表 query（服务端状态 query 化批次 4）
+ * 长期任务列表 query（服务端状态 query 化）
  *
  * longTermTasks 数据唯一真值源 = TanStack Query 缓存（queryKeys.longTermTasks）：
  * - 组件消费走 useLongTermTasksQuery（缓存秒开 + refetchInterval 兜底轮询 +

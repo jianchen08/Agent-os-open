@@ -1,5 +1,5 @@
 /**
- * 管理员面板 query 集（服务端状态 query 化批次 3）
+ * 管理员面板 query 集（服务端状态 query 化）
  *
  * - adminUsers / adminUserStats 两个独立 key：用户列表与统计分开缓存，
  *   互不阻塞（原有 Promise.allSettled 语义——统计失败不阻断列表渲染）

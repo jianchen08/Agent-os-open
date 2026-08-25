@@ -1,11 +1,8 @@
 """输出适配器基类模块（channel_common 渠道共享包）。
 
-[0.2 C1 合流 2026-08-20] 单一事实源：取基准全集版（93 行 5 成员版，md5 05db0742…，
-原 channel_{cli,dingtalk,feishu} 三份一致拷贝；qq/wecom 内联瘦身版经甄别记录
-docs/working/qq_wecom_output_adapter甄别记录_20260819.md D2b 裁定归并到全集，
-零行为变化——全仓无 is_connected/get_status 调用方）。
-消费方经 server.py 把本目录 sys.path.**append** 注入（绝不 insert(0)——
-三起模块名抢占事故纪律，见 docs/working/渠道合流C1C2与CLI插件化方案_20260819.md §三）。
+单一事实源（channel_{cli,dingtalk,feishu,qq,wecom} 各渠道共用一份全集版）。
+消费方经 server.py 把本目录 sys.path.**append** 注入（绝不 insert(0)——模块名
+抢占事故纪律，见 docs/working/渠道合流C1C2与CLI插件化方案_20260819.md §三）。
 防复发守卫：scripts/check_channel_copy_guard.py 禁止本模块名重回 channel_* 目录。
 
 定义所有输出适配器的抽象接口，负责将管道最终 state

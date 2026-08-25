@@ -140,8 +140,8 @@ export function handleStreamStart(eventData: any) {
   )
 
   // stream_start 事件不携带消息 seq（后端在引擎执行时才分配；事件信封顶层
-  // sequence 是全局事件计数器，非消息 seq——ADR 2026-08-21 显式化该语义，
-  // 严禁当消息序使用）。占位 seq 挂空，stream_end final_sequence / new_message
+  // sequence 是全局事件计数器，非消息 seq——严禁当消息序使用）。占位 seq 挂空，
+  // stream_end final_sequence / new_message
   // 权威值到达后由对账纠正。
   ensureStreamingPlaceholder(pipelineId, messageId, threadId)
 
@@ -214,7 +214,7 @@ export function handleStreamEnd(eventData: any) {
       if (msg) {
         // msg 存在：合并后端权威 parts/sequence，收尾占位。
         // 同步后端权威 sequence（final_sequence）：stream_start 不携带消息 seq，
-        // 占位 seq 挂空（ADR 2026-08-21），stream_end 携带 final_sequence 在此
+        // 占位 seq 挂空，stream_end 携带 final_sequence 在此
         // 同步权威值——对账（isCoveredByApi 按 id/cmid）与排序才正确。
         const finalSeq = eventData?.data?.final_sequence ?? eventData?.final_sequence
         if (finalSeq != null && finalSeq !== msg.sequence) {
@@ -282,7 +282,7 @@ export function handleStreamEnd(eventData: any) {
     }
 
   } else {
-    // ADR 2026-08-21「清别人状态」废除：缺 pipeline_id 的终止事件无法定位归属
+    // 「清别人状态」已废除：缺 pipeline_id 的终止事件无法定位归属
     // 管道——不拿 activePipelineId 顶替（可能误杀活跃管道的流式）、不拿
     // threadId 当管道清。记 error 等对账补正（90s 单消息超时兜底仍在）。
     _debugLogger.error(
@@ -311,7 +311,7 @@ export function handleStreamError(eventData: any) {
 
   const pipelineId = resolvePipelineId(eventData)
 
-  // ADR 2026-08-21：只清事件明确归属的管道；缺失即记 error 跳过（不拿 threadId 顶替）
+  // 只清事件明确归属的管道；缺失即记 error 跳过（不拿 threadId 顶替）
   if (pipelineId) {
     // 标记管道已终止（错误），防止 ensureStreamingPlaceholder 重新启动
     terminatePipeline(pipelineId)
@@ -353,7 +353,7 @@ export function handleStreamError(eventData: any) {
 
   const errorMsg = eventData?.data?.error || eventData?.error || '流式响应异常'
   // error 可能为对象（如 {code, message}）——提取 message 保留具体信息，
-  // 不再降级成通用文案（2026-08-22 错误透传收口）。
+  // 不再降级成通用文案（错误透传收口）。
   const errorText =
     typeof errorMsg === 'string'
       ? errorMsg

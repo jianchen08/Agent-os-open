@@ -88,8 +88,8 @@ updates:
 
   # ============================================================
   # Rust 依赖（kernel/Cargo.toml，Cargo.lock 锁定）
-  # 安全审查 2026-08-19：此前无 cargo 生态条目，内核依赖不在自动更新
-  # 与漏洞告警范围（OSV 扫描发现的 idna/instant 类公告无人跟进）
+  # cargo 生态纳入自动更新与漏洞告警范围（OSV 扫描发现的 idna/instant
+  # 类公告须有人跟进）
   # ============================================================
   - package-ecosystem: "cargo"
     directory: "/kernel"

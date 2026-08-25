@@ -191,8 +191,8 @@ async def hindsight_retain(
         # tags：type tag（recall/reflect 服务端过滤）+ 调用方 tags 提升。
         # HindsightBackend.add 把 IMemoryBackend.add 的 tags 序列化进
         # metadata["tags"]（hindsight aretain 的 metadata 是 dict[str,str]
-        # pydantic 校验，list 值必炸——2026-08-19 批 C 取证）；此处还原为
-        # hindsight 真实 tags，供 list_documents/recall 服务端精确过滤
+        # pydantic 校验，list 值必炸）；此处还原为 hindsight 真实 tags，
+        # 供 list_documents/recall 服务端精确过滤
         # （review 冷读按 review_id:<id> tag 定向的前提）。
         tags = [f"type:{memory_type}"]
         raw_tags = meta.get("tags")
@@ -223,7 +223,7 @@ async def hindsight_retain(
                 call_kwargs["update_mode"] = update_mode
         if retain_async:
             # 异步写入的幂等 id（同步 retain 下 operation_id 被客户端丢弃，
-            # 传了只会造成"原样回传假 id"——2026-08-19 e2e 取证路径）
+            # 传了只会造成"原样回传假 id"）
             call_kwargs["operation_id"] = operation_id or str(uuid.uuid4())
         result = await _client.aretain(**call_kwargs)
         # 同步 retain：文档 id（调用方给定/服务端生成）即真实落库锚点；
@@ -310,7 +310,7 @@ async def hindsight_recall(
 
         result = await _client.arecall(**kwargs)
         # RecallResponse (hindsight 0.9.1) 召回结果主字段是 results
-        # (每条含 id/text/type/score 等)；旧版 memories/facts 字段已不存在。
+        # （每条含 id/text/type/score 等）。
         items: list[dict[str, Any]] = []
         collection = getattr(result, "results", None)
         if collection:
@@ -417,9 +417,9 @@ async def hindsight_summarize(
 
     try:
         bank = _resolve_bank_id(bank_id)
-        # arecall 无 top_k/memory_type 形参（透传曾致 TypeError 被 except 降级
-        # 吞掉——2026-08-19 批 C 取证）：memory_type 走 tags 服务端过滤（与
-        # hindsight_recall 同款）；检索量由 arecall 的 token 预算驱动，top_k
+        # arecall 无 top_k/memory_type 形参（透传会 TypeError 被 except 降级
+        # 吞掉）：memory_type 走 tags 服务端过滤（与 hindsight_recall 同款）；
+        # 检索量由 arecall 的 token 预算驱动，top_k
         # 仅作召回计数的上报上限，不再透传。
         recall_kwargs: dict[str, Any] = {"bank_id": bank, "query": query or ""}
         if memory_type:
@@ -502,9 +502,8 @@ async def hindsight_delete(bank_id: str = "", memory_id: str = "") -> dict[str, 
         if deleter is None:
             return {"deleted": False, "error": "client has no delete method"}
         result = deleter(bank_id=bank)
-        # async 方法调用返回协程——必须 await（callable(coro) 恒 False 的旧
-        # 守卫从不 await，删库假成功 + "coroutine never awaited"，2026-08-19
-        # 批 C 取证）
+        # async 方法调用返回协程——必须 await（callable(coro) 恒 False 的
+        # 守卫不会 await，删库会假成功）
         if asyncio.iscoroutine(result):
             result = await result
         return {"deleted": True}
@@ -582,8 +581,7 @@ async def hindsight_import_document(
                 "memory_type": "semantic",
                 "knowledge_name": name,
                 # MemoryItem.metadata 是 dict[str,str] pydantic 校验面——
-                # 数字/布尔值必 422（2026-08-22 真机实测 chunk_index/chunk_total
-                # int 传入报 validation error），全部字符串化
+                # 数字/布尔值必 422，全部字符串化
                 "chunk_index": str(idx),
                 "chunk_total": str(len(chunks)),
                 "source": "import_document",
@@ -836,8 +834,8 @@ async def _on_load(params: dict[str, Any]) -> None:
         import urllib.request as _ur  # noqa: PLC0415
 
         # 幂等连接既有服务：插件重载/重启时 8420 可能已有健康 hindsight-api
-        # （外部/上次实例常驻），直接复用而非再 spawn（端口冲突 + 首启 pg0 建库
-        # 慢导致 on_load 轮询 60s 超时判死——2026-08-19 e2e 实测）。
+        # （外部/上次实例常驻），直接复用而非再 spawn（端口冲突 + 首启 pg0
+        # 建库慢会拖垮 on_load 轮询超时）。
         _already_up = False
         try:
             with _ur.urlopen(f"{base_url}/health", timeout=2) as _resp:
@@ -851,8 +849,7 @@ async def _on_load(params: dict[str, Any]) -> None:
             # 用 hindsight 专用 venv（.venv-hindsight）的 python 起子进程：venv 内
             # fastmcp 解析到其匹配的 mcp 1.x（request_ctx 等），与宿主 sidecar 的
             # AgentOS SDK（mcp>=2.0,<3）完全隔离——mcp 1.x/2.0 生态互斥问题正解
-            # 在此，而非切内核记忆表保底或 shim 系统环境（2026-08-19 用户纠正）。
-            # 2026-08-19 批 C 后为「双 venv」：.venv=SDK 轨（invoker 启动 server.py
+            # 在此。当前为「双 venv」布局：.venv=SDK 轨（invoker 启动 server.py
             # 用），.venv-hindsight=API 服务器栈（requirements.txt 锁版本）。
             _venv_python = os.path.join(_THIS_DIR, ".venv-hindsight", "Scripts", "python.exe")
             if not os.path.isfile(_venv_python):
@@ -868,10 +865,8 @@ async def _on_load(params: dict[str, Any]) -> None:
                     _venv_python,
                 )
                 raise RuntimeError("hindsight venv 未初始化")
-            # 子进程 stderr 落盘不 DEVNULL（F6，2026-08-20）：今晚 hindsight-api
-            # 连续 exit code=1（13:19/13:27/13:41/13:59 四次全灭），stderr 进
-            # DEVNULL 导致崩溃原因完全不可诊断（手动复现才知是 env/pg0 锁类
-            # 问题）。追加写 data 目录，崩溃时带 tail 进错误消息。
+            # 子进程 stderr 落盘不 DEVNULL：stderr 进 DEVNULL 会令崩溃原因
+            # 完全不可诊断。追加写 data 目录，崩溃时带 tail 进错误消息。
             _stderr_path = os.path.join(data_dir, "hindsight_api_stderr.log")
             _stderr_file = open(_stderr_path, "ab")  # noqa: SIM115
             _api_process = subprocess.Popen(
@@ -1012,8 +1007,7 @@ def _parse_multipart(content_type: str, body_bytes: bytes) -> dict[str, Any]:
     """解析 multipart/form-data（内核透传的 raw_body base64 解码后的字节）。
 
     返回 {字段名: 值}；文件字段值为 {filename, content_type, data(bytes)}，
-    普通字段为 str。用 email.parser 解析（标准库，无需外部依赖）——
-    与 channel_api 同款实现。
+    普通字段为 str。用 email.parser 解析（标准库，无需外部依赖）。
     """
     import email  # noqa: PLC0415
     from email.policy import default as default_policy  # noqa: PLC0415
@@ -1048,7 +1042,7 @@ def _parse_multipart(content_type: str, body_bytes: bytes) -> dict[str, Any]:
     return fields
 
 
-# ── memory 域：IMemoryBackend 懒构建注入（channel_api 退役批次 1 随迁）────────
+# ── memory 域：IMemoryBackend 懒构建注入 ────────────────────────────────────
 
 _memory_backend: Any | None = None
 _memory_backend_attempted = False
@@ -1057,8 +1051,7 @@ _memory_backend_attempted = False
 def _ensure_memory_backend() -> Any | None:
     """构建并缓存 IMemoryBackend（幂等）；能力缺失/构建失败时返回 None。
 
-    与 channel_api server.py 同款懒注入：tool-executor 能力注入经
-    wiring.build_memory_backend 构造 HindsightBackend（唯一后端），
+    与 channel_api server.py 同款懒注入：tool-executor 能力注入经    wiring.build_memory_backend 构造 HindsightBackend（唯一后端），
     None 时 memory 域端点空结果降级。
     """
     global _memory_backend, _memory_backend_attempted
@@ -1083,9 +1076,9 @@ def _kberr_response(exc: Exception) -> dict[str, Any]:
 async def _handle_memory_domain(path: str, method: str, raw_body: str, query: dict[str, str]) -> dict[str, Any]:
     """memory 域分发：/ext/hindsight_memory_service/memory/** → routes_memory 业务函数。
 
-    自持迁移（channel_api 退役批次 1）：分发前懒注入记忆后端（幂等；无能力时
-    保持 None → 路由空结果降级）。路径语义与原 /ext/channel_api/memory/** 逐项
-    对齐（前端 memory.ts 消费同一响应形态）。
+    分发前懒注入记忆后端（幂等；无能力时保持 None → 路由空结果降级）。
+    路径语义与原 /ext/channel_api/memory/** 逐项对齐（前端 memory.ts
+    消费同一响应形态）。
     """
     import routes_memory as rmm  # noqa: PLC0415
 
@@ -1162,9 +1155,9 @@ async def _handle_kb_domain(
 ) -> dict[str, Any]:
     """knowledge-base 域分发：/ext/hindsight_memory_service/knowledge-base/**。
 
-    channel_api 退役批次 4 功能扩展：stub → 真实现（上传/分块/向量化/分类/
-    标签/统计/check/条目/检索）。分发前注入 hindsight client（_client）——
-    knowledge_base 模块直接复用本 sidecar 的客户端（同进程同事件循环）。
+    真实现（上传/分块/向量化/分类/标签/统计/check/条目/检索）。分发前注入
+    hindsight client（_client）——knowledge_base 模块直接复用本 sidecar 的
+    客户端（同进程同事件循环）。
     """
     import base64 as _b64  # noqa: PLC0415
 
@@ -1305,11 +1298,11 @@ async def http_handle(
                 )
             )
 
-        # memory 域（channel_api 退役批次 1 自持迁移）
+        # memory 域（懒注入记忆后端后分发）
         if path.startswith("/ext/hindsight_memory_service/memory"):
             return await _handle_memory_domain(path, method, raw_body, q)
 
-        # knowledge-base 域（channel_api 退役批次 4 功能扩展）
+        # knowledge-base 域（注入 hindsight client 后分发）
         if path.startswith("/ext/hindsight_memory_service/knowledge-base"):
             return await _handle_kb_domain(path, method, raw_body, q, headers)
 

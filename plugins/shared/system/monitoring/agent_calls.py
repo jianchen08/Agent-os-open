@@ -1,8 +1,5 @@
-"""agent-calls 域 handler（channel_api 退役批次 3 接真改造）。
-
-[来源] channel_api/routes_missing.py 的 agent_calls_router（约 730-748 行）原为
-空 stub（list/statistics/{execution_id} 恒空）。本模块接真：以「管道运行快照 =
-一次 agent 调用」为视角，从内核能力桥组装调用记录——
+"""agent-calls 域 handler：以「管道运行快照 = 一次 agent 调用」为视角，
+从内核能力桥组装调用记录——
 
 - 一次 run（pipeline-runs.list）即一次 agent 调用：run_id/pipeline_id/thread_id/
   status/started_at/ended_at/total_tokens/total_seconds；

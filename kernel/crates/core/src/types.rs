@@ -351,7 +351,7 @@ pub enum ToolSource {
     Database,
     /// 运行时动态注册（G3：插件经 registry.register_tool capability 注册，
     /// 非 manifest 静态声明；进程内注册表 + scope 收回，不落内核存储——
-    /// dynamic_tools 表已于 2026-08-19 退役，跨重启由插件自持 state/config 重建）。
+    /// 跨重启由插件自持 state/config 重建）。
     Dynamic,
 }
 
@@ -445,7 +445,7 @@ pub struct RunRecord {
 /// - run → pipeline 映射经 message_slots.run_id（op-based 落槽时写入）；
 /// - pipeline → 会话映射经 pipeline_sessions；
 /// - 消耗账本真值在 state 的 track.total_tokens（0.1 的 pipeline_run_summaries
-///   投影表已退役，2026-08-19）。
+///   投影表已退役）。
 ///
 /// 无消息槽的 run（旧引擎 start_run 占位）在查询层被过滤，只呈现真实执行的管道。
 #[derive(Debug, Clone, Serialize, Deserialize)]

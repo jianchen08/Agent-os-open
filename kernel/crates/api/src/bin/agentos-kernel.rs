@@ -152,7 +152,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         config_root.display()
     );
 
-    // 内核能力契约加载（2026-08-20 Part B：定义驱动入口校验 + schema 聚合的
+    // 内核能力契约加载（定义驱动入口校验 + schema 聚合的
     // 单一真值源）。目录缺失 = 未启用（宽泛放行）；文件损坏 = fail-fast 拒启
     // ——契约是校验器的眼睛，坏契约静默跳过等于校验器装瞎。
     let capability_contracts: Arc<Vec<agentos_api::kernel_capabilities::KernelCapabilityContract>> =
@@ -303,8 +303,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // 将 manifest 中声明的工具注册到 CapabilityRegistry
     let mut tool_count = 0usize;
     let mut skipped_disabled = 0usize;
-    // K9：缺 input_schema 而以 {} 补注册的工具计数（进启动报告；2026-08-20
-    // 全量统计 plugins/ 下 84 个 manifest 工具中 28 个缺声明）。
+    // K9：缺 input_schema 而以 {} 补注册的工具计数（进启动报告）。
     let mut missing_input_schema = 0usize;
     for manifest in &manifests {
         // L1 Enabled 过滤：disabled 插件不进出口（安装触发模型 §1.1）
@@ -312,7 +311,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             skipped_disabled += 1;
             continue;
         }
-        // D.6 槽位拆分（2026-08-15，废止原附录D① 类型门控）：
+        // D.6 槽位拆分：
         // capabilities.tools 语义唯一 = 给 LLM 的工具，声明即注册（不看类型）；
         // 内部服务方法在 capabilities.services（不注册，走 invoke_entry/
         // http_endpoints/显式 plugin_id/provides 通道）。
@@ -489,7 +488,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // 注册闸 G2 启动期存量校验（与热发现同源公共函数）：对 enabled 的 sidecar
     // tool 插件 spawn → tools/list → 对照声明。判定失败（tools/list 成功但声明
     // 工具缺失）→ 剔除漂移工具并按净化后 manifest 重注册（前端经契约状态页可见）。
-    // 观测失败（spawn/list 重试后仍失败）≠ 判定失败（2026-08-20 裁定）：保留
+    // 观测失败（spawn/list 重试后仍失败）≠ 判定失败：保留
     // 声明注册 + 账本标记"校验未完成"，30s 后后台复验——复验出真漂移才净化。
     // 只验 tools 非空的 sidecar（services 方向 schema 契约在 Phase 1 补）。
     {
@@ -539,7 +538,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 &registry,
                 &plugin_scopes,
             );
-            // §3.4（0.2 收尾批次 1）：拒注是"声明与实现不一致已实际收口"的异常
+            // 拒注是"声明与实现不一致已实际收口"的异常
             // 事件，从 info 提升为 warn——消除"被拒数日无人知晓"（e2e G5；清单
             // 明细另经 GET /api/v1/plugins/contract-status 暴露）。下方汇总日志
             // 保持 info。
@@ -679,7 +678,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // HTTP 面在 plugins/shared/user_admin 插件）。§9.6 精确拆分：auth 执行门
     // （login/logout/me/register/refresh 的验签与路由准入）永留内核（auth.rs
     // 一行不动）；本 handler 只承载管理性质操作（list_users/update_role/
-    // update_tenant/delete_user——内核此前无这些端点，直接以插件化形态新建）。
+    // update_tenant/delete_user——内核直接以插件化形态提供这些端点）。
     // 鉴权与 self-service 防护（admin 不能删自己/降自己角色/改自己租户）在
     // handler 内核侧执行（插件仅转发 Authorization 头，见
     // user-admin/src/capability.rs 模块文档）。注册先于任何 sidecar spawn——
@@ -732,9 +731,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         });
 
     // G3：动态工具注册器——enablement 闸 + 写入注册表（M1 guarded 入 scope，
-    // disable 即结构性收回）。2026-08-19 用户裁定：dynamic_tools 表退役——
-    // 动态注册的工具是 state 域数据不落内核存储，跨重启重建由插件自持
-    // state/config 承担（registry 内存注册机制与 capability 面不变）。
+    // disable 即结构性收回）。动态注册的工具是 state 域数据不落内核存储，
+    // 跨重启重建由插件自持 state/config 承担（registry 内存注册机制与
+    // capability 面不变）。
     // 信封闸（granted 须含 "registry"）已由 router 入口的 G6 单点校验覆盖。
     // enabled 集合提前构造（后续 AppState 复用同一 Arc）。
     let enabled_plugin_ids: Arc<tokio::sync::RwLock<std::collections::HashSet<String>>> =
@@ -821,7 +820,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             .with_domain_broadcaster(domain_broadcaster)
             .with_streaming_declaration_lookup(streaming_declaration_lookup)
             .with_capability_contracts(capability_contracts.clone())
-            // 工具连续失败告警器（2026-08-23）：挂默认实现，统一经 invoke 结果
+            // 工具连续失败告警器：挂默认实现，统一经 invoke 结果
             // 归一化点计数（见 capability_router handle 的 tool-executor 分支）。
             .with_tool_failure_tracker(Arc::new(
                 agentos_api::tools::ConsecutiveFailureTracker::default(),
@@ -994,8 +993,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // chat namespace capability：把"向会话投递消息并跑管道"暴露给 sidecar。
     // 触发器（trigger_setup_tool）到期触发时经 chat.send_message 复用前端同一条
-    // WS 派发（dispatch_user_input → process_via_engine）。0.1 的 pipeline.message_bus
-    // 在 0.2 已删，sidecar 此前只能推展示事件、不能唤醒 agent；本 handler 补上注入通道。
+    // WS 派发（dispatch_user_input → process_via_engine）。本 handler 补上注入通道。
     // AppState 在 router 之后构造，故在此（启动末期）注册到既有 handler_registry。
     {
         let dispatcher: std::sync::Arc<dyn agentos_session::router::PipelineDispatcher> =
@@ -1128,9 +1126,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .with_restart_hook(restart_hook)
         .with_manifests_store(state.manifests.clone())
         .with_enablement(enablement.clone())
-        // 2026-08-23：enablement 每次 sync 从盘上 profile 现读——boot 快照看不到
+        // enablement 每次 sync 从盘上 profile 现读——boot 快照看不到
         // 运行期 PUT enabled 的写盘结果，卸载→重装按旧快照会把已禁用插件重新
-        // 注册（运行期禁用被静默撤销，e2e test_07 实测）。
+        // 注册（运行期禁用被静默撤销）。
         .with_profile_reload(config_root.clone())
         .spawn();
         info!(target: "agentos-kernel", "Plugin hot-discover watcher spawned (notify + polling fallback; cdylib change -> G8 auto-restart)");

@@ -117,8 +117,8 @@ class TestStateLifecycle:
         """跨调用全链路：execute(长任务) → input → continue → terminate。
 
         每次调用都走 handler（等价独立的 MCP tools/call），进程必须
-        由共享单例的 ProcessManager 命中——原实现每次新建 BashTool 会
-        在 input/continue 报"进程不存在"。
+        由共享单例的 ProcessManager 命中——否则 input/continue 会报
+        "进程不存在"。
         """
         result = await bash_handler(
             action="execute",

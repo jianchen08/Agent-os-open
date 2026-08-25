@@ -22,7 +22,7 @@
 //! API 形状假设（若主线实现为 `Result<Vec<Value>, _>` 或 trait 方法，仅需在调用点
 //! 补 `.unwrap()` / 改经 `&dyn StorageBackend` 调用，断言不变）：
 //! `SqliteStore::load_message_history(&self, pipeline_id: &str, tenant_id: &str)
-//! -> Result<Vec<serde_json::Value>, StorageError>`（主线已落地为 Result 包装形态）
+//! -> Result<Vec<serde_json::Value>, StorageError>`（主线为 Result 包装形态）
 
 use agentos_core::traits::MessageQueryOpts;
 use agentos_engine::SqliteStore;

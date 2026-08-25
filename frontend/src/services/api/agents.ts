@@ -1,9 +1,6 @@
 /** Agent 管理 API 服务 与 agent_manager 插件 agents/* 端点对齐（生成物投影）
  *
- * 2026-08-19 清理：getAgent/createAgent/updateAgent/deleteAgent/getDefaultAgent 指向
- * 后端不存在的端点，已连同其用例删除。
- * 2026-08-20 插件化：原内核 /api/v1/agents* 4 路由迁至 agent_manager 插件
- * （agent_manager 插件 agents*，ADR 2026-08-20），本服务经 API_ENDPOINTS.AGENTS 随切。
+ * 端点经 API_ENDPOINTS.AGENTS 指向 agent_manager 插件 agents*（[来源: docs/decisions/2026-08-20-agent-manager-plugin.md]）。
  */
 
 import { API_ENDPOINTS } from '@/constants/api'

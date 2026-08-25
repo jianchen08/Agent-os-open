@@ -98,9 +98,8 @@ function injectFileOpen(
  * render 意图分支（声明/数据路由）的条目增强：标题人性化 + 摘要行 +
  * 文件打开入口注入。
  *
- * 双路由落地后全量工具走 render 分支早退，此前该分支只设置 details——
- * filePath/onOpenFile 注入与标题人性化被跳过（读文件卡片无法打开文件、
- * 条目显示原始工具名），此处统一补齐。
+ * 双路由落地后全量工具走 render 分支早退——filePath/onOpenFile 注入与
+ * 标题人性化必须在此分支补齐（读文件卡片可打开文件、条目显示人性化标题）。
  */
 function applyCardMeta(
   enhanced: ActivityData,
@@ -157,8 +156,6 @@ export function enhanceActivityWithToolConfig(
     const ctx: ToolCallContext = {
       args: toolCall.tool_args,
       // resultData 优先（流式结构化完整数据，未截断）；缺失时回退 result（历史/兜底）。
-      // 优先级为 resultData ?? result（resultData 优先）——对齐 file_write diff 数据来源
-      // 语义；已迁工具 sample 仅设 result 不设 resultData，故翻转不影响其等价测试。
       result: toolCall.resultData ?? toolCall.result,
       error: toolCall.error,
       duration_ms: toolCall.duration_ms,

@@ -106,7 +106,7 @@ def find_test_files() -> list[Path]:
 
     def iter_pruned(root: Path):
         """带剪枝的递归文件枚举——`rglob` 会钻进 dsh_adapter 的递归 node_modules
-        无限卡死（与此前迁移脚本同根因）；此处遍历时即剪枝 EXCLUDE_DIRS。"""
+        无限卡死；此处遍历时即剪枝 EXCLUDE_DIRS。"""
         for dirpath, dirnames, filenames in os.walk(root):
             dirnames[:] = [d for d in dirnames if d not in EXCLUDE_DIRS]
             for fn in filenames:

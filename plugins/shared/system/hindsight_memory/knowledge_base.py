@@ -1,7 +1,6 @@
-"""知识库服务（knowledge-base 域）——channel_api 退役方案批次 4 功能扩展。
+"""知识库服务（knowledge-base 域）。
 
-原 channel_api 的 knowledge-base 10 端点是纯 stub（routes_missing.py:1037-1092，
-恒空列表/假成功）。本模块实现真实链路：
+本模块实现真实链路（上传/切块/向量化入库/检索/删除）：
 
     上传（multipart）→ 原文落盘（uploads/kb/，三方对齐 plugins/shared/uploads_path.py）
     → 切块（~2000 字符/块，与 hindsight.import_document 同款朴素滑窗）
@@ -496,8 +495,8 @@ async def search(
 
     meta = _load_meta()
     items_by_id = {str(it.get("id", "")): it for it in meta.get("items", [])}
-    # chunk 归属索引：chunk_id（aretain operation_id = memory unit id，2026-08-19
-    # e2e 实测）→ item_id。召回条目 id 命中索引即带可靠出处；未命中的 chunk
+    # chunk 归属索引：chunk_id（aretain operation_id = memory unit id）→ item_id。
+    # 召回条目 id 命中索引即带可靠出处；未命中的 chunk
     # （异源 / 已删条目残留）一律不回显。
     chunk_owner: dict[str, str] = {}
     for it in meta.get("items", []):

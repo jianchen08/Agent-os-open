@@ -139,8 +139,7 @@ async def read_execution_detail(
 ) -> dict[str, Any]:
     """查看管道执行的详细记录（从内核 trace/message 表读取）。
 
-    Step 5b 改造：不再依赖已删除的 ExecutionRecordStorage（YAML），改为经
-    service-registry 能力调用内核 ``messages.list`` / ``traces.list`` 读取
+    经 service-registry 能力调用内核 ``messages.list`` / ``traces.list`` 读取
     真实对话消息与插件轨迹。
 
     Args:

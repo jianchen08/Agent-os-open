@@ -60,7 +60,7 @@ async function reloadContributionRegistry(): Promise<void> {
     const schema = await fetchSchemaCached()
     contributionRegistry.loadFromSchema(schema as unknown as Record<string, unknown>)
     // 插件主题（如 DSH 皮肤）的会话恢复重放：主题初始化早于本注册，
-    // 挂起的 pendingThemeId 现在能查到了（时序修复配套，2026-08-21）
+    // 挂起的 pendingThemeId 现在能查到了（时序配套）
     void useThemeStore.getState().retryPendingTheme()
     // 工具卡片声明（chat_card）从 tools[].ui.chat_card 装载到解释器注册表
     loadChatCardDeclarations(

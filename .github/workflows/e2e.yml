@@ -95,7 +95,7 @@ jobs:
           uv sync --frozen --extra dev
           uv pip install -e ./plugins/sdk
 
-      # 批 D 单轨（2026-08-19）：invoker 已删 plain PATH python 回退（fail-closed），
+      # 批 D 单轨（2026-08-19）：invoker 无 plain PATH python 回退（fail-closed），
       # 内核 boot/任务链 spawn sidecar 依赖各插件 .venv——先按 uv.lock 批量建。
       - name: Build plugin venvs (uv sync per locked plugin)
         run: |

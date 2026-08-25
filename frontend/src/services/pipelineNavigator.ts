@@ -143,7 +143,7 @@ export async function navigateToPipeline(
   const targetSession = readSessions().find(
     (s) => s.id === targetSessionId,
   )
-  // 主管道判定（2026-08-22 裁决：权威 activePipelineId 解析替代 [0] 位置猜测）
+  // 主管道判定（权威 activePipelineId 解析，不按 [0] 位置猜测）
   const isMainPipeline =
     !!targetSession && mainPipelineIdOf(targetSession) === pipelineId
   if (isMainPipeline) {

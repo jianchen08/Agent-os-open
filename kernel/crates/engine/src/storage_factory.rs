@@ -36,8 +36,6 @@
 //! [`resolve_storage_config`] 返回 `Err` 拒绝启动——数据正确性优先，
 //! 不静默落到默认库。
 //!
-//! [来源: docs/working/重要设计/插件三轨一致性与Cordis机制迁移计划.md §9.6
-//!  "换存储后端 → StorageBackend driver 化（内核内 driver 接口，不是插件轨）"]
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;

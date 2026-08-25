@@ -47,7 +47,7 @@ export function useRealtimeEvents(): void {
       const { activeSessionId } = useSessionStore.getState()
       const sessions = readSessions()
       if (!activeSessionId) return
-      // 只补当前会话的【主管道】（权威 activePipelineId 解析，2026-08-22 裁决），
+      // 只补当前会话的【主管道】（权威 activePipelineId 解析），
       // 不对 session.pipelineIds 全部扇出。
       // 子管道的消息在用户切到对应 tab 时按需加载。
       const session = sessions.find((s) => s.id === activeSessionId)
@@ -57,8 +57,7 @@ export function useRealtimeEvents(): void {
       // 走 backfill（after_sequence 尾部游标读）而非 init（全量替换）：
       // 0.2 消息在 SQLite（message_slots+blobs），游标分页已下推 SQL——backfill
       // 是 O(增量窗口) 的索引查询，重连补漏秒级；init 全量替换会丢弃刷新前
-      // 的一切本地状态，重连场景不需要。（注：旧注释"全量读大 YAML 10-40s"
-      // 是 0.1 遗留口径，0.2 已无 YAML 读路径。）
+      // 的一切本地状态，重连场景不需要。
       usePipelineMessageStore
         .getState()
         .loadPipelineMessages(mainPipelineId, {
@@ -148,10 +147,9 @@ export function useRealtimeEvents(): void {
     globalWS.subscribe(WS_SERVER_EVENTS.TASK_DELETED, handleTaskDeleted)
 
     /**
-     * 发送失败透传（2026-08-21 用户裁决：任何错误都必须让用户看见）：
+     * 发送失败透传（任何错误都必须让用户看见）：
      * user_input 断线排队超 TTL（连接迟迟未恢复）→ 撤"思考中"占位气泡、
      * 停止流式态、在原位置插入 system 错误消息 + 通知中心高优告警。
-     * 此前行为：消息静默滞留内存队列，气泡无限转，刷新后凭空消失，零提示。
      */
     const handleUserInputSendTimeout = (eventData: {
       data?: {
@@ -169,7 +167,8 @@ export function useRealtimeEvents(): void {
       const ps = usePipelineMessageStore.getState()
       if (pipelineId) {
         if (cmid) {
-          // ADR 2026-08-22：乐观 user 在主数组（单一消息数组），发送失败标记 failed
+          // [来源: docs/decisions/2026-08-22-streaming-protocol-rewrite.md]：
+          // 乐观 user 在主数组（单一消息数组），发送失败标记 failed
           // （可重试，复用 cmid 幂等重发）——消息不消失、位置不丢
           ps.updateMessage(pipelineId, cmid, { status: 'failed' })
         }
@@ -202,7 +201,7 @@ export function useRealtimeEvents(): void {
     /**
      * 被同账号新连接替换（B10 单连接踢旧，code=4000）：本页已永久失联且不再
      * 自动重连——必须明示用户，否则页面静默装死、消息全黑洞。典型成因：
-     * 同一浏览器开了多个前端标签页互踢（2026-08-21 实测互踢风暴）。
+     * 同一浏览器开了多个前端标签页互踢。
      */
     const handleKickedByReplacement = () => {
       useNotificationStore.getState().addNotification({

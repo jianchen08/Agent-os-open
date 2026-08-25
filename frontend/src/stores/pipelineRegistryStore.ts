@@ -1,7 +1,7 @@
 /**
  * 管道运行注册表 Store（统一管道管理）
  *
- * 服务端状态 query 化批次 4：runs/states 数据容器已换 TanStack Query 缓存
+ * 服务端状态 query 化：runs/states 数据容器已换 TanStack Query 缓存
  * （hooks/queries/usePipelineRunsQuery，queryKeys.pipelineRuns/pipelineStates）——
  * 快照拉取/30s 兜底轮询/窗口聚焦刷新由 usePipelineRunsQuery/usePipelineStatesQuery
  * 承担。本 store 保留 applyStreamStatus 编排层（签名不变，streaming handler

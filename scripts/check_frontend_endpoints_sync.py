@@ -39,7 +39,6 @@ FRONTEND_SRC = ROOT / "frontend" / "src"
 #   pluginStyles /ext/{pluginId} 声明驱动消费——真值源不在前端）
 #   + 6 处注释/声明示例（WebviewWidget 白名单注释、ContributionRegistry
 #   CSS 拼接规则、workspaces 模板注释、WizardWidget 声明示例）。
-# 历史：222 → 215（批次 0）→ 70（channel_api 域驱逐）→ 9（终态收口）。
 HANDWRITTEN_EXT_BASELINE = 9
 
 TEST_FILE_RE = re.compile(r"\.(test|spec)\.")

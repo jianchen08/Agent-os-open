@@ -21,7 +21,7 @@ export interface WorkspacePanelProps {
   onFullscreen?: () => void
   /** 是否处于全屏状态 */
   isFullscreen?: boolean
- /** 已访问过（至少激活过一次）的 Tab ID 集合，用于懒挂载策略 PERF 只有当前激活 Tab 或曾访问过的 Tab */
+ /** 已访问过（至少激活过一次）的 Tab ID 集合，用于懒挂载策略：只有当前激活 Tab 或曾访问过的 Tab 才挂载 */
   visitedTabIds?: string[]
 }
 

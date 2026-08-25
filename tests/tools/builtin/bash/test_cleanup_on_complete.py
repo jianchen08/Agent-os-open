@@ -1,10 +1,7 @@
 """completed 进程即时清理测试。
 
 _on_output_task_done 在进程输出读完（=进程已退出）时，应立即从 active_processes
-清理内存记录。日志文件保留磁盘（read_log 按 pid 算路径读）。
-
-历史：原靠惰性 >100 触发 cleanup_finished 才清，completed 进程赖着不走，
-白占内存，且把"赖着不走"误当成 read_log 能用的"特性"。
+清理内存记录；日志文件保留磁盘（read_log 按 pid 算路径读）。
 """
 
 from __future__ import annotations

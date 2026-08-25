@@ -1,5 +1,5 @@
 // @feature: FP-0.2.〇 存储清理 | @vision: V3 可嵌入 | @ci: rust-test
-//! 退役 0.1 投影表 DROP 迁移回归（2026-08-19 用户裁定：不留两套真值）。
+//! 退役 0.1 投影表 DROP 迁移回归（不留两套真值）。
 //!
 //! execution_records / pipeline_run_summaries / memory 三张 0.1 投影表已退役：
 //! - 执行记录/会话消耗账本由 messages 真值派生读路径替代（调试中心执行记录页
@@ -9,7 +9,7 @@
 //! 三表运行时零生产者、全库零行。存量库残留空表会让 db_admin 表清单出现
 //! "页面有条目、后端无读写"的死表——init 迁移负责 DROP，保证表清单一一对应。
 //!
-//! 2026-08-19 追加裁定：dynamic_tools 表同样退役——动态注册的工具是 state 域
+//! dynamic_tools 表同样退役——动态注册的工具是 state 域
 //! 数据，不应耦合在内核存储（跨重启重建由插件自持 state/config 承担；
 //! registry 内存注册机制与 (registry, register_tool) capability 不受影响）。
 //!

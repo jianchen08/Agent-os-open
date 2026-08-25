@@ -96,7 +96,7 @@ export interface PluginTheme {
    * 皮肤资产 ID（平台皮肤运行时声明）：声明即激活按择注入——
    * 皮肤 CSS 经 /ext/{pluginId}/styles/skin/{skin}/merged.css 递送、
    * hooks.mjs 同路径（六层装饰层 + ctx 契约）、资产 skin-assets/{skin}/。
-   * 任何插件的主题带此字段即获得全部皮肤能力（2026-08-22 平台化裁决）。
+   * 任何插件的主题带此字段即获得全部皮肤能力（平台化裁决）。
    */
   skin?: string
   /** 来源插件 ID */

@@ -17,7 +17,7 @@
 //!
 //! [来源: ROADMAP.md 审批闭环/复盘调管道/event-bus 三项业务的前置地基]
 //! [来源: docs/working/重要设计/插件监控与指标机制设计.md §三 通道2]
-//! [来源: docs/working/channel_api_migration_plan.md §七 M2]
+//!
 
 use async_trait::async_trait;
 use serde_json::Value;
@@ -31,9 +31,9 @@ use crate::error::McpError;
 /// `/api/v1/plugins/{id}/config` 配置面）。
 pub const STANDARD_CAPABILITIES: &[&str] = &[
     "pipeline-executor",
-    // pipeline-state.list：router 静态路由（capability_router.rs）但此前
-    // 不在声明面——sidecar initialize 拿不到句柄，task_manage 的 state
-    // 聚合读桥永远 KeyError（2026-08-19 e2e 实测）。
+    // pipeline-state.list：router 静态路由（capability_router.rs）但不在声明面
+    // ——sidecar initialize 拿不到句柄，task_manage 的 state
+    // 聚合读桥永远 KeyError。
     "pipeline-state",
     "tenant-context",
     "event-bus",

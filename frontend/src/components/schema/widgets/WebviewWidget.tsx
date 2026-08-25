@@ -12,7 +12,7 @@
  * 与 HtmlPreviewWidget 的区别：HtmlPreviewWidget 是受信内容预览（开 allow-same-origin），
  * WebviewWidget 是**不可信插件代码**执行沙箱（绝不开 allow-same-origin）。
  *
- * 性能边界（实测，写进插件开发文档的契约）：
+ * 性能边界（写进插件开发文档的契约）：
  * - 创建 50-200ms（新 browsing context，每实例付一次）；单次通信 0.5-2ms
  *   （postMessage 序列化）；每实例 ~1-5MB 独立 JS 堆。
  * - 适合：低频交互（按钮/表单）、中频更新（进度条/状态刷新）、整页内容（编辑器/画板）。
@@ -93,7 +93,7 @@ export function WebviewWidget({
   const [error, setError] = useState<string | null>(null)
   const iframeRef = useRef<HTMLIFrameElement>(null)
 
-  // 实例级令牌（安全审查 2026-08-20 B-4）：每次挂载生成，注入 iframe bootstrap，
+  // 实例级令牌（安全审查 B-4）：每次挂载生成，注入 iframe bootstrap，
   // 上行消息必须携带 — 封死"任意 null-origin 页面伪造消息调用宿主 REST"面
   const instanceTokenRef = useRef<string | null>(null)
   if (instanceTokenRef.current === null) {
@@ -159,7 +159,7 @@ export function WebviewWidget({
         let res: unknown
         if (msg.method.startsWith('/')) {
           // REST 路径约定：以 '/' 开头视为插件自定义 HTTP 端点。
-          // 路由白名单（安全审查 2026-08-20 B-4）：只允许本插件的 /ext/{pluginId}/ 前缀，
+          // 路由白名单（安全审查 B-4）：只允许本插件的 /ext/{pluginId}/ 前缀，
           // 防 iframe 内容（或被注入的第三方帧）借 host 的 Bearer 直呼内核 API / 他插件端点。
           const extPrefix = `/ext/${pluginId ?? ''}/`
           if (!msg.method.startsWith(extPrefix)) {

@@ -1,12 +1,10 @@
-"""P0-1 回归测试：tool_calls 标准化 / JSON 修复链路必须真正执行。
+"""P0-1 契约测试：tool_calls 标准化 / JSON 修复链路必须真正执行。
 
-背景：四处 ``from plugins.core.llm_core._message_normalizer import ...`` 引用了
-不存在的 ``plugins.core`` 包（``import plugins.core`` → ModuleNotFoundError）。
-其中 ``context_window_guard._standardize_tool_calls`` 还把该 ImportError 包在
-空泛 ``except Exception`` 里吞掉，导致标准化静默跳过——三轮审查未发现。
+契约：这些代码路径不得因 import 失败而静默跳过——
+``context_window_guard._standardize_tool_calls`` 的 ImportError 若被空泛
+``except Exception`` 吞掉，标准化会永不执行。
 
-本测试验证修复后这些代码路径**实际执行**（修复前：ImportError 被吞或上抛 → 红；
-修复后：标准化/修复真正生效 → 绿）。测试断言行为（WHY），而非 import 语句本身。
+本测试断言行为（WHY）：标准化/修复必须真正生效，而非 import 语句本身。
 """
 
 from __future__ import annotations
@@ -60,15 +58,14 @@ def _load_plugin_module(category: str, name: str, mod_name: str) -> Any:
 
 
 # ---------------------------------------------------------------------------
-# Site 1: context_window_guard._standardize_tool_calls（ImportError 被空泛 except 吞）
+# Site 1: context_window_guard._standardize_tool_calls（标准化必须真实执行）
 # ---------------------------------------------------------------------------
 def test_context_window_guard_standardize_tool_calls_actually_runs() -> None:
     """压缩写回前 tool_calls 必须被标准化为 OpenAI 结构。
 
-    WHY：修复前 ``_standardize_tool_calls`` 内的
-    ``from plugins.core.llm_core._message_normalizer import ...`` 抛 ImportError，
-    被外层 ``except Exception`` 吞成一条 warning，标准化**永不执行**——
-    畸形 tool_calls 原样写回，破坏后续 provider 调用。修复后应真正归一化。
+    WHY：``_standardize_tool_calls`` 的 import 失败不得被外层 ``except
+    Exception`` 吞成 warning 后静默跳过——畸形 tool_calls 须被真正归一化，
+    否则原样写回会破坏后续 provider 调用。
     """
     mod = _load_plugin_module("input", "context_window_guard", "cwg_plugin_p0_test")
     plugin = mod.ContextWindowGuardPlugin()
@@ -85,7 +82,7 @@ def test_context_window_guard_standardize_tool_calls_actually_runs() -> None:
     plugin._standardize_tool_calls(messages)
 
     tc = messages[0]["tool_calls"][0]
-    # 修复前 messages 不变 → 下行 KeyError；修复后归一为 OpenAI 结构。
+    # 归一契约：扁平 {name, args} → OpenAI 结构 {type, function:{...}}
     assert tc["type"] == "function"
     assert isinstance(tc["function"], dict)
     assert tc["function"]["name"] == "search"
@@ -95,15 +92,13 @@ def test_context_window_guard_standardize_tool_calls_actually_runs() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Site 2: tool_schema_validator._detect_truncation（repair_json_string 上抛 ImportError）
+# Site 2: tool_schema_validator._detect_truncation（截断检测必须可用）
 # ---------------------------------------------------------------------------
 def test_tool_schema_validator_detect_truncation_runs() -> None:
     """截断检测必须能调用 repair_json_string 并返回丢失字段。
 
-    WHY：修复前 ``_check_args_truncation`` 内的
-    ``from plugins.core.llm_core._message_normalizer import repair_json_string``
-    抛 ImportError（此路径不在 try 内，直接上抛），整个截断检测不可用。
-    修复后应正常修复并报告丢失的顶层字段。
+    WHY：``_check_args_truncation`` 依赖 repair_json_string；该依赖不可用时
+    整个截断检测不可用。契约：截断必须被修复并报告丢失的顶层字段。
     """
     mod = _load_plugin_module("input", "tool_schema_validator", "tsv_plugin_p0_test")
     validator = mod.ToolSchemaValidator()
@@ -118,15 +113,13 @@ def test_tool_schema_validator_detect_truncation_runs() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Site 3: param_inject._do_work 兜底修复路径（repair_json_string 上抛 ImportError）
+# Site 3: param_inject._do_work 兜底修复路径（兜底修复必须保住可用字段）
 # ---------------------------------------------------------------------------
 def test_param_inject_repair_path_runs() -> None:
     """参数注入对畸形 arguments 的兜底修复必须真正执行。
 
-    WHY：修复前 ``_do_work`` 在 json.loads 失败的兜底分支里
-    ``from plugins.core.llm_core._message_normalizer import repair_json_string``
-    抛 ImportError，使原本可修复的半截 arguments 直接变成 {}，下游拿不到内容。
-    修复后兜底修复应成功保住可用字段。
+    WHY：json.loads 失败的兜底分支必须能调用 repair_json_string——可修复的
+    半截 arguments 不得直接变成 {} 使下游拿不到内容。
     """
     from pipeline.plugin import PluginContext  # noqa: PLC0415
 
@@ -163,13 +156,13 @@ def test_core_llm_core_reset_pairing_cache_import_resolves() -> None:
 
     WHY：``core/llm_core/plugin.py`` 在 LLM 调用失败的 error-recovery 分支用
     ``from plugins.core.llm_core._message_normalizer import reset_pairing_cache``
-    （断裂），修复为同目录平铺 import（与该文件 line 27 既有写法一致）。
-    本测试用修复后的平铺形态断言符号可达——与生产代码使用的 import 形态一致。
+    （断裂），须为同目录平铺 import（与该文件 line 27 既有写法一致）。
+    本测试用平铺形态断言符号可达——与生产代码使用的 import 形态一致。
     """
     core_dir = str(_PIPELINE_DIR / "core" / "llm_core")
     if core_dir not in sys.path:
         sys.path.insert(0, core_dir)
-    # 与 core/llm_core/plugin.py 修复后一致的平铺 import
+    # 与 core/llm_core/plugin.py 一致的平铺 import
     from _message_normalizer import reset_pairing_cache  # noqa: PLC0415
 
     assert callable(reset_pairing_cache)

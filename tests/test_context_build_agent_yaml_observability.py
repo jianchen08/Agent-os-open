@@ -1,12 +1,11 @@
 # @feature: FP-0.2.二 agent yaml 加载可观测（兜底反模式审查 P3） | @ci: none-local
-"""context_build agent yaml 加载失败的可观测性回归（2026-08-20 P3）。
+"""context_build agent yaml 加载失败的可观测性契约（P3）。
 
 锁两件事：
 1. **归因区分**：未找到 agent yaml（合法，debug 日志）与找到但解析失败
-   （配置错误，error 日志含 path + 异常）必须分开——此前两者都静默返回
-   空 dict，agent 人格整体丢失但管道照跑，零日志。
-2. **行为不变**：两种情况仍返回空 dict 按默认配置降级运行（可观测修复，
-   不是行为收紧）。
+   （配置错误，error 日志含 path + 异常）必须分开，不得静默返回空 dict；
+2. **行为不变**：两种情况仍返回空 dict 按默认配置降级运行（只加可观测性，
+   不收紧行为）。
 
 [来源: docs/working/兜底反模式全库审查_20260820.md 三节 P3]
 """
