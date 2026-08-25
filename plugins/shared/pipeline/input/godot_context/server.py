@@ -109,6 +109,29 @@ def _json_response(payload: dict, status: int = 200) -> dict:
     }
 
 
+def _decode_body(raw_body: str) -> dict:
+    """解码 http.handle 的 raw_body（内核 dispatcher 恒 base64 编码；兼容明文）为 dict。
+
+    非法 JSON 抛 ValueError（调用方转 400）。
+    """
+    if not raw_body:
+        return {}
+    decoded = raw_body
+    try:
+        attempt = base64.b64decode(raw_body).decode("utf-8")
+        if attempt.lstrip().startswith(("{", "[")):
+            decoded = attempt
+    except (ValueError, UnicodeDecodeError):
+        pass
+    try:
+        parsed = json.loads(decoded) if decoded.strip() else {}
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"invalid JSON body: {exc}") from exc
+    if not isinstance(parsed, dict):
+        raise ValueError("JSON body must be an object")
+    return parsed
+
+
 async def _fetch_preview(index: int) -> bytes | None:
     """代理 Godot 9600 /selection/preview，返回 PNG 字节；失败/非 PNG 返回 None。"""
     try:
@@ -162,10 +185,10 @@ async def http_handle(
 
     if method == "POST" and path.endswith("/selection"):
         try:
-            payload = json.loads(raw_body) if raw_body else {}
-        except json.JSONDecodeError:
+            payload = _decode_body(raw_body)
+        except ValueError:
             return _json_response({"error": "invalid json"}, status=400)
-        result = await inst.handle_push(payload if isinstance(payload, dict) else {})
+        result = await inst.handle_push(payload)
         return _json_response(result)
 
     if method == "GET" and path.endswith("/selection"):
@@ -173,10 +196,10 @@ async def http_handle(
 
     if method == "POST" and path.endswith("/subscribe"):
         try:
-            body = json.loads(raw_body) if raw_body else {}
-        except json.JSONDecodeError:
+            body = _decode_body(raw_body)
+        except ValueError:
             body = {}
-        return _json_response(inst.subscribe(str(body.get("thread_id", "") if isinstance(body, dict) else "")))
+        return _json_response(inst.subscribe(str(body.get("thread_id", ""))))
 
     if method == "GET" and path.endswith("/preview"):
         try:

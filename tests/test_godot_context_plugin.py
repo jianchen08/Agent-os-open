@@ -9,7 +9,6 @@ from tests._pipeline_plugin_path import add_plugin_dir
 add_plugin_dir("input", "godot_context")
 
 import asyncio  # noqa: E402
-import time  # noqa: E402
 
 import plugin as gc_plugin  # noqa: E402
 
@@ -192,3 +191,103 @@ def test_no_emit_without_subscribers():
 
     assert emitter.calls == []
     assert p.snapshot()["connected"] is True
+
+
+# ═══════════════════════════════════════════════════════════
+# http.handle 层回归：内核 dispatcher 恒把 raw_body base64 编码后
+# 传入插件（kernel/crates/api/src/http_dispatcher.rs dispatch_http），
+# 服务端解码须兼容 base64（真机形态）与明文。
+# ═══════════════════════════════════════════════════════════
+
+import base64  # noqa: E402
+import importlib.util  # noqa: E402
+import json  # noqa: E402
+from pathlib import Path  # noqa: E402
+
+_PUSH_PATH = "/ext/pipeline_godot_context/selection"
+_SUB_PATH = "/ext/pipeline_godot_context/subscribe"
+
+
+def _load_server_module():
+    # 裸名 server 会与其他插件测试的 sys.modules 串扰（如 security_check），
+    # 以独立模块名从文件加载；add_plugin_dir 保证 server.py 内 `from plugin import`
+    # 解析到本插件目录。
+    add_plugin_dir("input", "godot_context")
+    server_py = Path(gc_plugin.__file__).parent / "server.py"
+    spec = importlib.util.spec_from_file_location("godot_context_server", server_py)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+server_mod = _load_server_module()
+
+
+def _fresh_instance():
+    """重置 server 单例（插件内快照状态测试间隔离）。"""
+    server_mod._instance = None
+    return server_mod.get_instance()
+
+
+def _b64_body(payload) -> str:
+    return base64.b64encode(json.dumps(payload).encode("utf-8")).decode("ascii")
+
+
+def _decode_http(resp: dict) -> dict:
+    return json.loads(base64.b64decode(resp["data"]["body"]).decode("utf-8"))
+
+
+def _http(method: str, path: str, raw_body: str = "", query: dict | None = None) -> dict:
+    kw = {"path": path, "method": method, "plugin_id": "pipeline_godot_context", "raw_body": raw_body}
+    if query is not None:
+        kw["query"] = query
+    return asyncio.run(server_mod.http_handle(**kw))
+
+
+def test_http_push_base64_body_accepted():
+    """内核真机形态（raw_body=base64(JSON)）的选中推送被接受，快照可见——回归：曾直接 json.loads(base64 串) 恒 400。"""
+    server_mod.set_emitter(None)
+    _fresh_instance()
+
+    resp = _http("POST", _PUSH_PATH, raw_body=_b64_body(_selection_payload()))
+
+    assert resp["data"]["status"] == 200
+    assert _decode_http(resp) == {"status": "ok"}
+    snap = _decode_http(_http("GET", _PUSH_PATH))
+    assert snap["connected"] is True
+    assert snap["items"][0]["name"] == "Player"
+
+
+def test_http_push_plaintext_body_tolerated():
+    """明文 JSON 体同样被接受（解码兼容两种形态）。"""
+    server_mod.set_emitter(None)
+    _fresh_instance()
+
+    resp = _http("POST", _PUSH_PATH, raw_body=json.dumps(_selection_payload()))
+
+    assert resp["data"]["status"] == 200
+    assert _decode_http(_http("GET", _PUSH_PATH))["items"][0]["name"] == "Player"
+
+
+def test_http_push_invalid_or_non_object_body_400():
+    """非法 JSON / 非对象 JSON → 400（fail-fast，不静默吞）。"""
+    server_mod.set_emitter(None)
+    _fresh_instance()
+
+    assert _http("POST", _PUSH_PATH, raw_body="not-json")["data"]["status"] == 400
+    assert _http("POST", _PUSH_PATH, raw_body=_b64_body([1, 2]))["data"]["status"] == 400
+
+
+def test_http_subscribe_base64_then_push_broadcasts():
+    """订阅（base64 体）→ 推送 → 订阅线程收到 emit（http 层端到端）。"""
+    emitter = FakeEmitter()
+    server_mod.set_emitter(emitter)
+    _fresh_instance()
+
+    r1 = _http("POST", _SUB_PATH, raw_body=_b64_body({"thread_id": "t9"}))
+    assert _decode_http(r1)["threads"] == 1
+
+    r2 = _http("POST", _PUSH_PATH, raw_body=_b64_body(_selection_payload()))
+    assert _decode_http(r2) == {"status": "ok"}
+    assert emitter.calls[-1][0] == "godot_selection_changed"
+    assert emitter.calls[-1][1]["thread_id"] == "t9"
