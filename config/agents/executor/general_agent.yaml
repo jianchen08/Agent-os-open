@@ -94,6 +94,7 @@ tool_ids:
 - bash_execute
 - enhanced_search
 - universal_search
+- godot_run
 - web_operate
 - memory
 - task_evaluate

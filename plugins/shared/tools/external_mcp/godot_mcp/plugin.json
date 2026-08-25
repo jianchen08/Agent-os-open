@@ -1,0 +1,57 @@
+{
+  "id": "godot_mcp",
+  "name": "Godot MCP (godot-mcp-go)",
+  "description": "Godot 4 编辑器执行面 MCP：对运行中的 Godot 编辑器执行命令(建场景/写脚本/运行/调试/导出)，godot-mcp-go(Go) 经 addon WebSocket 通道驱动。本地开发接线: 二进制取自 github.com/regiellis/godot-mcp-go v0.9.0 release，装在 D:/myproject/godot-mcp-go/bin；addon 已装在 hosts/godot-demo/addons/godot_mcp。与 pipeline_godot_context(选中引用注入)配合：引用给出用户所指对象，本工具执行操作。",
+  "version": "0.9.0",
+  "plugin_type": "tool",
+  "language": "external",
+  "host_type": "sidecar",
+  "entry": "mcp:external",
+  "mcp": {
+    "transport": "stdio",
+    "endpoint": {
+      "command": "D:/myproject/godot-mcp-go/bin/godot-mcp.exe",
+      "args": [
+        "serve",
+        "--typed=false",
+        "--project",
+        "D:/myproject/container_e17cc5927dfd/hosts/godot-demo"
+      ]
+    }
+  },
+  "capabilities": {
+    "tools": [
+      {
+        "name": "godot_run",
+        "description": "对运行中的 Godot 编辑器执行任意命令并返回 JSON 结果。method 为 '<group>.<command>'（如 node.add / engine.search），params 为该命令的参数。命令组：project scene node script csharp editor runtime engine input animation anim_tree tilemap theme shader particles scene3d physics navigation audio input_map resource analysis batch profiling export test android 等。API 发现：engine.search {query} 模糊搜索、engine.class_info {class} 类详情、engine.commands {group?} 列本服务命令；调未知 method 也返回命令清单。编辑器改动走 UndoRedo 可撤销；runtime.*/input.* 需先 scene.play（或 game:true 直连独立调试构建）。编辑器未开时结果带 editor_unreachable/verdict 与恢复指引（可启动一次编辑器，禁止启动第二个）。3D 放置：锚定实测 bounds（node.get global_position / get_aabb）回读校验，不要只信截图。与 godot 选中引用配合：消息中 <reference source=\"godot\"> 标出用户所选节点，操作应锚定这些节点路径。",
+        "input_schema": {
+          "properties": {
+            "method": {
+              "description": "<group>.<command>, e.g. node.add or engine.search",
+              "type": "string"
+            },
+            "params": {
+              "additionalProperties": true,
+              "description": "command parameters",
+              "type": "object"
+            },
+            "game": {
+              "description": "Route to a standalone debug-build game's direct server instead of the editor (requires godot_mcp/runtime/direct_server).",
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "method"
+          ],
+          "type": "object"
+        },
+        "output_schema": {
+          "type": "object",
+          "description": "命令结果对象：成功时含命令各自的数据字段；编辑器不可达时含 editor_unreachable/verdict/status.message 恢复指引"
+        }
+      }
+    ]
+  },
+  "permissions": {},
+  "priority": 30
+}

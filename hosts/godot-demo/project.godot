@@ -16,4 +16,4 @@ config/features=PackedStringArray("4.7", "GL Compatibility")
 
 [editor_plugins]
 
-enabled=PackedStringArray("res://addons/agentos/plugin.cfg")
+enabled=PackedStringArray("res://addons/agentos/plugin.cfg", "res://addons/godot_mcp/plugin.cfg")
