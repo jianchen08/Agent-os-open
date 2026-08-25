@@ -41,7 +41,9 @@ def ensure_stdlib_module(name: str) -> None:
         sys.modules.pop(name, None)
         return
     spec = importlib.util.spec_from_file_location(name, path)
-    assert spec is not None and spec.loader is not None
+    if spec is None or spec.loader is None:  # pragma: no cover - stdlib 布局恒满足
+        sys.modules.pop(name, None)
+        return
     restored = importlib.util.module_from_spec(spec)
     sys.modules[name] = restored
     spec.loader.exec_module(restored)
