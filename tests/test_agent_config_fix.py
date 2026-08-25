@@ -127,9 +127,10 @@ class TestEnvironmentSetupAgentConfig:
         )
 
     def test_environment_setup_rules_in_reference_section(self):
-        """验证 environment_setup_rules.md 在参考规则部分出现"""
-        assert "{{path:config/rules/per_agent/environment_setup_rules.md}}" in self.system_prompt, (
-            "environment_setup_rules.md 应在参考规则部分以 {{path:}} 形式出现"
+        """验证 environment_setup_rules.md 以 {{path:}} 形式注入（dynamic_vars 槽位）。"""
+        dv_items = self.config.get("dynamic_vars", {}).get("items", [])
+        assert "{{path:config/rules/per_agent/environment_setup_rules.md}}" in dv_items, (
+            "environment_setup_rules.md 应在 dynamic_vars.items 以 {{path:}} 占位符形式注入"
         )
 
     def test_core_rules_at_top_only(self):
@@ -202,9 +203,9 @@ class TestAllAgentYamlParseable:
 class TestAgentPromptViewerScript:
     """验证 scripts/agent_prompt_viewer.py 的正确性"""
 
-    @pytest.fixture(autouse=True)
+    @pytest.fixture(scope="class", autouse=True)
     def run_script(self):
-        """运行提示词拼接脚本（每个测试方法只运行一次）"""
+        """运行提示词拼接脚本（每个测试类只运行一次）。"""
         # 先删除旧输出，确保测试的是新生成的文件
         if OUTPUT_HTML.exists():
             OUTPUT_HTML.unlink()
@@ -216,9 +217,9 @@ class TestAgentPromptViewerScript:
             timeout=120,
             cwd=str(PROJECT_ROOT),
         )
-        self.returncode = result.returncode
-        self.stdout = result.stdout
-        self.stderr = result.stderr
+        type(self).returncode = result.returncode
+        type(self).stdout = result.stdout
+        type(self).stderr = result.stderr
 
     def test_script_runs_without_error(self):
         """验证脚本能无报错运行"""

@@ -183,9 +183,9 @@ class TestWorkspacesApi:
         assert "type" in params, "createEntry 缺少 type 参数"
 
     def test_create_entry_calls_correct_endpoint(self):
-        """createEntry 应调用 /create-entry 端点。"""
+        """createEntry 应调用 /create-entry 端点（经 endpoints.generated 常量）。"""
         content = _read_ts_file("services/api/workspaces.ts")
-        assert "create-entry" in content, "createEntry 未调用 create-entry 端点"
+        assert "workspaces_create_entry" in content, "createEntry 未调用 create-entry 端点"
 
     def test_has_delete_entry_function(self):
         """应包含 deleteEntry 函数。"""
@@ -193,9 +193,9 @@ class TestWorkspacesApi:
         assert "export async function deleteEntry" in content, "缺少 deleteEntry 函数"
 
     def test_delete_entry_calls_correct_endpoint(self):
-        """deleteEntry 应调用 DELETE /entries 端点。"""
+        """deleteEntry 应调用 DELETE /entries 端点（经 endpoints.generated 常量）。"""
         content = _read_ts_file("services/api/workspaces.ts")
-        assert "/entries" in content, "deleteEntry 未调用 entries 端点"
+        assert "workspaces_delete_entry" in content, "deleteEntry 未调用 entries 端点"
 
     def test_has_rename_entry_function(self):
         """应包含 renameEntry 函数。"""
@@ -203,9 +203,9 @@ class TestWorkspacesApi:
         assert "export async function renameEntry" in content, "缺少 renameEntry 函数"
 
     def test_rename_entry_calls_correct_endpoint(self):
-        """renameEntry 应调用 /rename-entry 端点。"""
+        """renameEntry 应调用 /rename-entry 端点（经 endpoints.generated 常量）。"""
         content = _read_ts_file("services/api/workspaces.ts")
-        assert "rename-entry" in content, "renameEntry 未调用 rename-entry 端点"
+        assert "workspaces_rename_entry" in content, "renameEntry 未调用 rename-entry 端点"
 
     def test_has_move_entry_function(self):
         """应包含 moveEntry 函数。"""
@@ -213,9 +213,9 @@ class TestWorkspacesApi:
         assert "export async function moveEntry" in content, "缺少 moveEntry 函数"
 
     def test_move_entry_calls_correct_endpoint(self):
-        """moveEntry 应调用 /move-entry 端点。"""
+        """moveEntry 应调用 /move-entry 端点（经 endpoints.generated 常量）。"""
         content = _read_ts_file("services/api/workspaces.ts")
-        assert "move-entry" in content, "moveEntry 未调用 move-entry 端点"
+        assert "workspaces_move_entry" in content, "moveEntry 未调用 move-entry 端点"
 
     def test_all_functions_use_api_client(self):
         """所有 API 函数应使用 apiClient。"""
