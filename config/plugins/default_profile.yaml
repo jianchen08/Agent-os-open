@@ -65,5 +65,11 @@ plugins:
   # 内核启动加载（省 sidecar 开销）；出现消费者时 re-enable 重注册即可。
   rollback_service:
     enabled: false
+  # Godot 选中引用桥（推送接收/前端转发/管道 <reference> 注入）
+  pipeline_godot_context:
+    enabled: true
+  # Godot 编辑器执行面（godot-mcp-go 单 godot_run 工具，与选中引用配合）
+  godot_mcp:
+    enabled: true
 defaults:
   enabled: true
