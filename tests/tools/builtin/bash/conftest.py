@@ -40,3 +40,19 @@ def _ensure_bash_on_path() -> None:
 
 
 _ensure_bash_on_path()
+
+
+import pytest
+
+
+@pytest.fixture(autouse=True)
+def _bash_path_guard():
+    """每个测试前确保 bash 插件目录在 sys.path[0] 并逐出裸名缓存。
+
+    模块级 _ensure_bash_on_path 只在 conftest 加载时生效——pytest 收集
+    其他测试文件（test_lsp_gateway_loop 等）的模块级 import 会改写
+    sys.path[0]，函数内的 `from tool import BashTool` 因此命中错误插件
+    （task_submit/tool.py 等）。本 fixture 在每个测试前重置。
+    """
+    _ensure_bash_on_path()
+    yield

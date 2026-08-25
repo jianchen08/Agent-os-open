@@ -22,13 +22,13 @@ import pytest
 
 PLUGINS_BASE = Path(__file__).resolve().parent.parent.parent / "plugins" / "shared" / "system"
 
+# channel_api 已随退役方案物理删除（2026-08-21 六批次落地），不再列入
 CHANNELS = [
     "channel_dingtalk",
     "channel_feishu",
     "channel_wecom",
     "channel_cli",
     "channel_qq",
-    "channel_api",
     "channel_gateway",
 ]
 

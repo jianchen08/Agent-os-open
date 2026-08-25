@@ -25,6 +25,22 @@ for _d in (_SYSTEM_DIR, _TASKS_DIR):
 from tasks.service import TaskService
 
 
+@pytest.fixture(autouse=True)
+def _tasks_path_guard():
+    """每个测试执行前锁定 tasks 插件目录为 sys.path[0] 并摘除 storage 槽位。
+
+    同 suites/core 的守卫：其他插件测试的 autouse fixture（如 multimodal）
+    会把各自目录推到 sys.path[0] 且不恢复，tasks 测试运行期懒加载
+    `from storage import TaskStorage` 依赖 sys.path 首位是本插件目录。
+    task_types 必须保留——测试模块收集期绑定的 TaskStatus 实例依赖其驻留。
+    """
+    _s = str(_TASKS_DIR)
+    if sys.path[0] != _s:
+        sys.path.insert(0, _s)
+    sys.modules.pop("storage", None)
+    yield
+
+
 def _make_service() -> TaskService:
     """创建使用临时目录的 TaskService 实例。"""
     tmp_dir = tempfile.mkdtemp(prefix="test_delete_pipeline_")

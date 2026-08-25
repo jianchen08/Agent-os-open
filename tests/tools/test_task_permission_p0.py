@@ -33,12 +33,12 @@ for _p in (str(_TASK_DIR), str(_TASKS_DIR)):
         sys.path.insert(0, _p)
 # 整 suite 收集时弹出先前测试缓存的可能同名平铺模块，避免 tool.py 的
 # `from service import …` / `from task_types import …` 命中错误缓存。
+# task_types/agents_types 是 tasks 插件独占模块（全仓无同名竞争者），
+# 不得弹出——收集期已绑定的 TaskStatus 实例依赖其驻留，重载会复制枚举类。
 for _m in (
     "tool",
     "service",
     "state_machine",
-    "task_types",
-    "agents_types",
 ):
     sys.modules.pop(_m, None)
 

@@ -58,8 +58,6 @@ _BARE_MODULE_NAMES = {
     "interfaces",
     "connector_types",
     "isolation_types",
-    "mm_types",
-    "task_types",
     "base",
     "config_mixin",
     "degradation",

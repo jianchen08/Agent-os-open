@@ -22,8 +22,54 @@ import pytest
 
 pytestmark = pytest.mark.unit  # 0.2 TDD 分层：单元测试
 
+import sys
+from pathlib import Path
+
+# 0.2 自包含路径注入：multimodal 插件目录 + system 父目录（mm_types/storage 平铺导入）。
+# 不依赖目录 conftest（批量收集时 conftest 加载时机不稳定），文件级注入保证
+# 任何收集顺序下 `from storage import` 都命中本插件。
+_MM_DIR = Path(__file__).resolve().parents[2] / "plugins" / "shared" / "system" / "multimodal"
+_SYS_DIR = _MM_DIR.parent
+for _d in (_MM_DIR, _SYS_DIR):
+    _s = str(_d)
+    if _s in sys.path:
+        sys.path.remove(_s)
+    sys.path.insert(0, str(_d))
+for _m in ("storage", "mm_types", "asr", "adapter", "capabilities"):
+    sys.modules.pop(_m, None)
+
+
+@pytest.fixture(autouse=True)
+def _mm_path_guard():
+    """每个测试执行前锁定 multimodal 目录为 sys.path[0] 并重载本插件模块。
+
+    storage.py 的 `from mm_types import` 是懒加载——批量收集时其他测试
+    文件的模块级 import 会改写 sys.path[0]/sys.modules，懒加载因此命中
+    错误插件的同名模块（isinstance 失配）。本 fixture 在测试执行前：
+    1. 把 multimodal + system 目录推到 sys.path[0:2]；
+    2. 重载 storage/mm_types 为本插件版本；
+    3. 把测试模块级绑定的类引用替换为新类（懒加载与新断言同源）。
+    """
+    for _d in (str(_MM_DIR), str(_SYS_DIR)):
+        if _d in sys.path:
+            sys.path.remove(_d)
+        sys.path.insert(0, _d)
+    # 只重载 mm_types：storage 模块自身身份稳定（懒加载引用 mm_types），
+    # 重载 storage 会把同进程 tasks 插件已缓存的 storage 模块打掉
+    # （tasks/service.py `from storage import TaskStorage` 会解析到
+    # multimodal 的 storage → ImportError）。
+    sys.modules.pop("mm_types", None)
+    import mm_types as _mm
+    globals()["AttachmentInfo"] = _mm.AttachmentInfo
+    globals()["MediaType"] = _mm.MediaType
+    yield
+
+
 from mm_types import AttachmentInfo, MediaType
 from storage import DiskFileStorage, LocalFileStorage, StorageError
+# 类已绑定，摘除 storage 槽位：同进程 tasks 插件懒加载 `from storage import
+# TaskStorage` 需解析到 tasks 自己的 storage，槽位驻留本插件版本会致 ImportError。
+sys.modules.pop("storage", None)
 
 # ── helpers ──────────────────────────────────────────────
 
