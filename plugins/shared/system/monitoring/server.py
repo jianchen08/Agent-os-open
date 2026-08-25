@@ -937,8 +937,15 @@ def _read_payload_diag(name: str) -> dict[str, Any]:
 
 
 def _kernel_db_path() -> str:
-    """返回 kernel SQLite 路径（与 agentos-kernel.rs 的 AGENTOS_DB_PATH 一致）。"""
-    return os.environ.get("AGENTOS_DB_PATH", os.path.join(os.getcwd(), "agentos_kernel.db"))
+    """返回 kernel SQLite 路径（与 agentos-kernel.rs 的 AGENTOS_DB_PATH 一致）。
+
+    sidecar cwd 会漂移到插件目录（2026-08-19 payload_diag 同源问题），
+    与 _resolve_project_root 同策略：AGENTOS_DB_PATH 优先 + 文件位置向上探测。
+    """
+    env_path = os.environ.get("AGENTOS_DB_PATH")
+    if env_path:
+        return env_path
+    return os.path.join(_resolve_project_root(), "agentos_kernel.db")
 
 
 def _query_tool_calls(q: dict[str, str]) -> dict[str, Any]:
