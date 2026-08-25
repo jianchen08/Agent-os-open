@@ -168,3 +168,69 @@ class FrontendEmitter:
             await self._handle.notify("emit", {"event": event, "payload": payload})
         except Exception:  # noqa: S110 —— 观测推送失败不影响插件主流程（有注释说明意图）
             pass
+
+
+class MetricsReporter:
+    """metrics capability 桥接——插件上报业务指标到内核聚合器。
+
+    与 FrontendEmitter 同构：句柄缺失（旧内核未注入 metrics）时优雅降级，
+    上报失败不阻断插件主流程。指标由内核聚合器统一承接，供 /metrics
+    （Prometheus）与 metrics-admin 查询面消费（监控设计 §三 通道2）。
+    """
+
+    def __init__(self, handle: CapabilityHandle | None) -> None:
+        self._handle = handle
+
+    @classmethod
+    def from_plugin(cls, plugin: Any) -> MetricsReporter | None:
+        """从 AgentOSPlugin 实例解析 metrics capability。
+
+        内核未声明 metrics（旧内核）时 get_capability 抛 KeyError，
+        返回 None 由调用方优雅降级（不上报）。
+        """
+        try:
+            return cls(plugin.get_capability("metrics"))
+        except Exception:
+            return None
+
+    @property
+    def available(self) -> bool:
+        """metrics capability 是否可用。"""
+        return self._handle is not None
+
+    async def record(
+        self,
+        name: str,
+        value: float,
+        metric_type: str = "counter",
+        labels: dict[str, str] | None = None,
+        unit: str | None = None,
+        help_text: str | None = None,
+    ) -> None:
+        """上报一个指标到内核聚合器（fire-and-forget，异常静默）。
+
+        Args:
+            name: 指标短名（如 "tokens_used"）。
+            value: 指标值。
+            metric_type: "counter"（单调累加）/ "gauge"（覆盖）。
+            labels: 维度标签（如 {"model": "deepseek"}）。
+            unit: 单位（可选，如 "tokens"）。
+            help_text: HELP 文本（可选，Prometheus 导出用）。
+        """
+        if self._handle is None:
+            return
+        try:
+            params: dict[str, Any] = {
+                "name": name,
+                "value": value,
+                "metric_type": metric_type,
+            }
+            if labels is not None:
+                params["labels"] = {str(k): str(v) for k, v in labels.items()}
+            if unit is not None:
+                params["unit"] = unit
+            if help_text is not None:
+                params["help"] = help_text
+            await self._handle.call("record", params)
+        except Exception:  # noqa: S110 —— 观测上报失败不影响插件主流程（有注释说明意图）
+            pass

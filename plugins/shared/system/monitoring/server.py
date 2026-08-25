@@ -436,13 +436,47 @@ async def _collect_state_tasks(status: str | None = None) -> list[dict[str, Any]
 
 
 def _collect_token_usage() -> dict[str, Any]:
-    """读 PerformanceMonitor._llm_stats，对齐前端 TokenUsage。"""
+    """从 traces 表聚合 LLM token 用量（真数据源，G4）。
+
+    traces.patch_data 的 llm_usage 字段由 llm_core 每轮写入（单轮
+    input/output/total/cached token），逐行累加即跨运行累计。请求数
+    （request_count/active_requests/error_count/total_response_time）保持读
+    PerformanceMonitor 本地计数（record_llm_request 的 response_time 口径）。
+    DB 不可用时降级本地计数 + token 为 0（与 _query_tool_calls 同策略）。
+    """
     monitor = _ensure_monitor()
     ls = monitor._llm_stats
+
+    import sqlite3
+
+    prompt = 0
+    completion = 0
+    total = 0
+    db_path = _kernel_db_path()
+    if os.path.isfile(db_path):
+        conn = None
+        try:
+            conn = sqlite3.connect(db_path)
+            cur = conn.cursor()
+            cur.execute(
+                "SELECT COALESCE(SUM(json_extract(patch_data, '$.llm_usage.input_tokens')), 0),"
+                "       COALESCE(SUM(json_extract(patch_data, '$.llm_usage.output_tokens')), 0),"
+                "       COALESCE(SUM(json_extract(patch_data, '$.llm_usage.total_tokens')), 0)"
+                " FROM traces WHERE json_extract(patch_data, '$.llm_usage') IS NOT NULL"
+            )
+            row = cur.fetchone()
+            if row:
+                prompt, completion, total = float(row[0]), float(row[1]), float(row[2])
+        except sqlite3.Error as exc:  # noqa: BLE001 — 查询失败降级本地计数
+            logger.warning("[monitoring] traces token 聚合失败（降级本地计数）: %s", exc)
+        finally:
+            if conn is not None:
+                conn.close()
+
     return {
-        "total_tokens": 0,  # 本地累计不含 token 计数（record_llm_request 未传 tokens）
-        "prompt_tokens": 0,
-        "completion_tokens": 0,
+        "total_tokens": total,
+        "prompt_tokens": prompt,
+        "completion_tokens": completion,
         "request_count": ls.get("request_count", 0),
         "active_requests": ls.get("active_requests", 0),
         "error_count": ls.get("error_count", 0),

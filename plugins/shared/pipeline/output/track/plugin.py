@@ -75,6 +75,8 @@ class TrackPlugin(IOutputPlugin):
             updates["track.total_tokens"] = usage.get("total_tokens", 0)
             # cache 命中异常检测（本轮单轮语义，详见 _check_cache_anomaly）
             self._check_cache_anomaly(usage, ctx.state.get(StateKeys.PIPELINE_ID, "") or "")
+            # 业务指标经 record_metric 上报内核聚合器（监控设计 §三 通道2）
+            await self._try_report_metrics(ctx, usage)
             # 推送本轮单轮 token 用量到前端（输入框进度条实时显示）
             await self._try_notify_cost_update(ctx, usage)
 
@@ -92,6 +94,51 @@ class TrackPlugin(IOutputPlugin):
             updates["track.execution_stats"] = stats
 
         return updates
+
+    async def _try_report_metrics(self, ctx: PluginContext, usage: dict[str, Any]) -> None:
+        """上报本轮 token 业务指标到内核聚合器（record_metric，G1）。
+
+        与 cost_update 同点分支：同一批 usage 数字一份走 WS 实时推送（前端
+        本次运行态），一份走 record_metric 累计（/metrics 与监控页历史统计），
+        同源同量。tool_execute 轮 llm_usage 为上一轮残留，跳过上报。
+
+        出口：ctx.get_service("metrics")（MetricsReporter，由 track/server.py
+        从 metrics capability 桥接注入）。服务未注入（旧内核 / 单测环境）
+        静默跳过；上报失败不阻断统计主流程。
+        """
+        if ctx.state.get(StateKeys.CORE_TYPE, "") != "llm_call":
+            return
+        if not ctx.state.get("llm_usage"):
+            return
+        try:
+            metrics = ctx.get_service("metrics")
+        except KeyError:
+            return
+        if metrics is None:
+            return
+
+        current = ctx.state.get("llm_usage", {})
+        labels: dict[str, str] = {}
+        model = ctx.state.get("llm_model") or ctx.state.get("model") or ""
+        provider = ctx.state.get("llm_provider") or ""
+        if model:
+            labels["model"] = str(model)
+        if provider:
+            labels["provider"] = str(provider)
+
+        await metrics.record("total_tokens", current.get("total_tokens", 0), "counter", labels, "tokens")
+        await metrics.record("cached_tokens", current.get("cached_tokens", 0), "counter", labels, "tokens")
+        missed = max(
+            current.get("input_tokens", 0) - current.get("cached_tokens", 0), 0
+        )
+        await metrics.record("missed_tokens", missed, "counter", labels, "tokens")
+        last_input = current.get("input_tokens", 0)
+        await metrics.record(
+            "cache_ratio",
+            (current.get("cached_tokens", 0) / last_input) if last_input > 0 else 0.0,
+            "gauge",
+            labels,
+        )
 
     async def _try_notify_cost_update(self, ctx: PluginContext, usage: dict[str, Any]) -> None:
         """推送本轮 LLM 调用的 token 用量到前端（frontend.emit，ADR §3.5）。

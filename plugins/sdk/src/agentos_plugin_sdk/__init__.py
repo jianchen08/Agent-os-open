@@ -13,6 +13,7 @@ from agentos_plugin_sdk.capability import (
     STANDARD_CAPABILITIES,
     CapabilityHandle,
     FrontendEmitter,
+    MetricsReporter,
 )
 from agentos_plugin_sdk.enum_utils import safe_enum_value
 from agentos_plugin_sdk.logging import (
@@ -77,6 +78,7 @@ __all__ = [
     "LogContext",
     "LoggingConfig",
     "McpServer",
+    "MetricsReporter",
     "ResourceDef",
     "STANDARD_CAPABILITIES",
     "Settings",

@@ -80,6 +80,14 @@ async def execute(state: dict, config: dict | None = None) -> dict:
     if _emitter is not None:
         ctx._services["frontend"] = _emitter
 
+    # record_metric 桥接（G1）：业务指标经 metrics capability 上报内核聚合器。
+    # 与 frontend 同构——旧内核未声明 metrics 时返回 None，插件静默跳过上报。
+    from agentos_plugin_sdk import MetricsReporter  # noqa: PLC0415
+
+    _metrics = MetricsReporter.from_plugin(plugin)
+    if _metrics is not None:
+        ctx._services["metrics"] = _metrics
+
     result = await get_instance().execute(ctx)
 
     # Core 插件返回 dict，Input/Output 返回 PluginResult/OutputResult
