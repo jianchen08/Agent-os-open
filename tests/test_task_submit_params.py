@@ -18,11 +18,35 @@ from __future__ import annotations
 import importlib.util
 import os
 import sys
+import sysconfig
 import tempfile
 from pathlib import Path
-from types import SimpleNamespace
 
-import pytest
+
+def _ensure_stdlib_types() -> None:
+    """车道共跑防线：强制 sys.modules["types"] 绑定 stdlib 本体。
+
+    车道内某条导入链会逐出裸名 "types"（逐出名单治插件同名缓存时误伤
+    stdlib），此后 `from types import` 按 sys.path 重解析会命中
+    plugins/shared/pipeline/types.py（包内相对导入，顶层加载即炸）。
+    本文件在导入 SimpleNamespace 前恢复 stdlib 绑定，与被测代码无关。
+    """
+    mod = sys.modules.get("types")
+    stdlib = Path(sysconfig.get_path("stdlib"))
+    src = Path(getattr(mod, "__file__", "") or "nonexistent")
+    if mod is None or not src.is_relative_to(stdlib):
+        path = stdlib / "types.py"
+        spec = importlib.util.spec_from_file_location("types", path)
+        assert spec is not None and spec.loader is not None
+        restored = importlib.util.module_from_spec(spec)
+        sys.modules["types"] = restored
+        spec.loader.exec_module(restored)
+
+
+_ensure_stdlib_types()
+from types import SimpleNamespace  # noqa: E402
+
+import pytest  # noqa: E402
 
 pytestmark = pytest.mark.unit
 

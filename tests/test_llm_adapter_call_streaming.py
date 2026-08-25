@@ -25,8 +25,11 @@ pytestmark = pytest.mark.unit
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent
 _LLM_CORE_DIR = _REPO_ROOT / "plugins" / "shared" / "pipeline" / "core" / "llm_core"
-if str(_LLM_CORE_DIR) not in sys.path:
-    sys.path.insert(0, str(_LLM_CORE_DIR))
+# 去重插入到 [0]：车道共跑时其他插件目录（如 channel_feishu）可能残留于
+# sys.path 前部，平铺 `import adapter` 会命中他插件同名模块。
+if str(_LLM_CORE_DIR) in sys.path:
+    sys.path.remove(str(_LLM_CORE_DIR))
+sys.path.insert(0, str(_LLM_CORE_DIR))
 
 import adapter as _adapter  # noqa: E402  平铺 import，与生产代码一致
 import litellm  # noqa: E402

@@ -124,6 +124,21 @@ BASE_TEST_PATHS: list[str] = [
     "plugins/shared/tools/resource_merge/",
     "plugins/shared/tools/simple/",
     "plugins/shared/tools/spill_retrieve/",
+    # 2026-08-26 批次G：LLM/隔离/任务链孤儿测试接线（12 文件单跑 107 绿
+    # 10.2s 后接入；此前在车道名单外 → llm_core adapter 16.6%/system.llm
+    # adapter 17.8%/isolation workspace 三件 7.6-17.9% 的覆盖率失真）。
+    "tests/test_llm_core_thinking_strength.py",
+    "tests/test_llm_adapter_call_streaming.py",
+    "tests/test_model_prompt_adapter_plugin.py",
+    "tests/test_pipeline_llm_core_payload_diag.py",
+    "tests/test_llm_core_providers.py",
+    "tests/test_pipeline_tool_calls_standardization_imports.py",
+    "tests/test_track_missed_tokens.py",
+    "tests/test_merge_verify_fix.py",
+    "tests/test_workspace_lifecycle_mode.py",
+    "tests/test_lifecycle_plugins.py",
+    "tests/test_task_submit_params.py",
+    "tests/test_bug_fixes.py",
 ]
 
 # 外部依赖 marker 过滤（requires_api/requires_redis/requires_db/requires_bwrap

@@ -26,9 +26,12 @@ pytestmark = pytest.mark.unit
 _REPO_ROOT = Path(__file__).resolve().parent.parent
 _CORE_DIR = _REPO_ROOT / "plugins" / "shared" / "pipeline" / "core"
 _LLM_CORE_DIR = _CORE_DIR / "llm_core"
+# 去重插入到 [0]：车道共跑时其他插件目录可能残留于 sys.path 前部，
+# 平铺裸名导入会命中他插件同名模块。
 for _d in (_LLM_CORE_DIR, _CORE_DIR):
-    if str(_d) not in sys.path:
-        sys.path.insert(0, str(_d))
+    if str(_d) in sys.path:
+        sys.path.remove(str(_d))
+    sys.path.insert(0, str(_d))
 
 from _provider_registry import apply_pre_send, extract_thinking_from_content  # noqa: E402
 from llm_provider_deepseek import (  # noqa: E402
@@ -152,8 +155,15 @@ def _load_llm_core_plugin():
     import importlib.util
 
     _shared_dir = _REPO_ROOT / "plugins" / "shared"
-    if str(_shared_dir) not in sys.path:
-        sys.path.insert(0, str(_shared_dir))  # pipeline 包（ICorePlugin 基类）
+    # 执行期自持（前序测试的 fixture 可能已改写 sys.path[0]/裸名缓存）：
+    # 去重插 [0] + 弹 plugin.py 平铺依赖的裸名，保证 from adapter import
+    # 解析到 llm_core 本体而非车道内其他插件的同名模块。
+    for _d in (str(_LLM_CORE_DIR), str(_CORE_DIR), str(_shared_dir)):
+        while _d in sys.path:
+            sys.path.remove(_d)
+        sys.path.insert(0, _d)
+    for _m in ("adapter", "_message_normalizer", "_stream_repeat_monitor"):
+        sys.modules.pop(_m, None)
     mod_name = "llm_core_plugin_prefix_test"
     if mod_name in sys.modules:
         del sys.modules[mod_name]

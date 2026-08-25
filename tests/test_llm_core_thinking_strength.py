@@ -24,9 +24,12 @@ _REPO_ROOT = Path(__file__).resolve().parent.parent
 _CORE_DIR = _REPO_ROOT / "plugins" / "shared" / "pipeline" / "core"
 _LLM_CORE_DIR = _CORE_DIR / "llm_core"
 _SHARED_DIR = _REPO_ROOT / "plugins" / "shared"
+# 去重插入到 [0]：车道共跑时其他插件目录（如 channel_feishu）可能残留于
+# sys.path 前部，幂等跳过会让 plugin.py 的 `from adapter import` 命中他插件。
 for _d in (_LLM_CORE_DIR, _CORE_DIR, _SHARED_DIR):
-    if str(_d) not in sys.path:
-        sys.path.insert(0, str(_d))
+    if str(_d) in sys.path:
+        sys.path.remove(str(_d))
+    sys.path.insert(0, str(_d))
 
 import llm_core.plugin as plugin_mod  # noqa: E402
 from llm_core.plugin import LLMCore, resolve_thinking_strength_params  # noqa: E402

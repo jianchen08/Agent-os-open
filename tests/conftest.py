@@ -13,6 +13,7 @@
 import logging
 import os
 import sys
+import sysconfig
 from pathlib import Path
 
 import pytest
@@ -64,6 +65,23 @@ _BARE_MODULE_NAMES = {
 }
 
 
+def _is_stdlib_module(mod: object) -> bool:
+    """是否 stdlib 模块（名单内 "types" 与 stdlib 同名）。
+
+    stdlib 同名模块不逐出：逐出后 ``from types import`` 会按 sys.path 重新
+    解析，车道内其他测试残留的插件目录（含 pipeline/types.py）会劫持该名。
+    """
+    f = getattr(mod, "__file__", None)
+    if not f:
+        return True
+    try:
+        return Path(f).resolve().is_relative_to(
+            Path(sysconfig.get_path("stdlib")).resolve()
+        )
+    except (OSError, ValueError):
+        return False
+
+
 @pytest.hookimpl(trylast=True)
 def pytest_collect_file(file_path: Path, parent: pytest.Collector) -> pytest.Collector | None:
     """每个测试文件收集**前**逐出共享裸模块缓存，防止跨插件同名模块互相污染。
@@ -76,6 +94,9 @@ def pytest_collect_file(file_path: Path, parent: pytest.Collector) -> pytest.Col
     """
     if file_path.suffix == ".py":
         for name in _BARE_MODULE_NAMES:
+            mod = sys.modules.get(name)
+            if mod is not None and _is_stdlib_module(mod):
+                continue
             sys.modules.pop(name, None)
     return None
 
