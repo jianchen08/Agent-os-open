@@ -29,6 +29,14 @@
       "description": "当前选中快照（前端初始化）"
     },
     {
+      "route_id": "selection_clear",
+      "method": "DELETE",
+      "path": "/ext/pipeline_godot_context/selection",
+      "auth": "user",
+      "handler_capability": "http.handle",
+      "description": "清除当前引用（点击清理；清空 items 并抑制同签名心跳，改选/重新点选恢复）"
+    },
+    {
       "route_id": "selection_subscribe",
       "method": "POST",
       "path": "/ext/pipeline_godot_context/subscribe",

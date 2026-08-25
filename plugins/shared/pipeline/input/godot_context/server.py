@@ -176,10 +176,11 @@ async def http_handle(
     """Godot 选中引用桥 HTTP 端点。
 
     路由（签名覆盖 HttpHandleRequest 全部字段，SDK 展开为关键字参数）：
-    - POST /selection：Godot 宿主推送（type=selection/heartbeat/offline）
-    - GET  /selection：当前选中快照（前端初始化）
-    - POST /subscribe：前端订阅 {thread_id}
-    - GET  /preview?index=N：代理 Godot 9600 预览 PNG
+    - POST   /selection：Godot 宿主推送（type=selection/heartbeat/offline）
+    - GET    /selection：当前选中快照（前端初始化）
+    - DELETE /selection：清除当前引用（前端点击清理；抑制同签名心跳）
+    - POST   /subscribe：前端订阅 {thread_id}
+    - GET    /preview?index=N：代理 Godot 9600 预览 PNG
     """
     inst = get_instance()
 
@@ -193,6 +194,10 @@ async def http_handle(
 
     if method == "GET" and path.endswith("/selection"):
         return _json_response(inst.snapshot())
+
+    if method == "DELETE" and path.endswith("/selection"):
+        result = await inst.dismiss()
+        return _json_response(result)
 
     if method == "POST" and path.endswith("/subscribe"):
         try:

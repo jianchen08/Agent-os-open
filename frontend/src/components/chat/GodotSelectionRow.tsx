@@ -1,9 +1,12 @@
 /**
  * Godot 实时选中引用行——聊天输入框上方的选中状态实时镜像：
- * Godot 选中节点即出现，取消选中即消失（全程事件驱动，无手动操作）。
+ * Godot 选中节点即出现，取消选中即消失（事件驱动）；点击清除可主动移除
+ * 当前引用（不随消息注入，Godot 改选/重新点选即恢复）。
  */
+import { X } from '@/assets/icons'
 import { useGodotSelection } from '@/hooks/useGodotSelection'
-import { godotPreviewUrl } from '@/services/godot/selectionBridge'
+import { cn } from '@/lib/utils'
+import { clearGodotSelection, godotPreviewUrl } from '@/services/godot/selectionBridge'
 import { ReferenceChip, type ReferenceChipData } from './ReferenceChip'
 
 export function GodotSelectionRow({ threadId }: { threadId?: string }) {
@@ -30,6 +33,21 @@ export function GodotSelectionRow({ threadId }: { threadId?: string }) {
       {chips.map((chip) => (
         <ReferenceChip key={`${chip.title}-${chip.subtitle}`} data={chip} />
       ))}
+      <button
+        type="button"
+        onClick={() => {
+          void clearGodotSelection()
+        }}
+        className={cn(
+          'flex h-icon-md w-icon-md items-center justify-center rounded',
+          'hover:bg-destructive/20 text-muted-foreground hover:text-destructive',
+        )}
+        title="清除 Godot 引用"
+        aria-label="清除 Godot 引用"
+        data-testid="godot-selection-clear"
+      >
+        <X className="h-icon-xs w-icon-xs" />
+      </button>
     </div>
   )
 }

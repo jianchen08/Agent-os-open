@@ -199,9 +199,10 @@
     'mm_files_supported_types': '/ext/multimodal_service/files/supported-types',
   } as const
 
-  /** pipeline_godot_context（Godot Context）：plugin.json 声明 4 端点 */
+  /** pipeline_godot_context（Godot Context）：plugin.json 声明 5 端点 */
   export const PIPELINE_GODOT_CONTEXT_ENDPOINTS = {
     'selection_preview': '/ext/pipeline_godot_context/preview',
+    'selection_clear': '/ext/pipeline_godot_context/selection',
     'selection_push': '/ext/pipeline_godot_context/selection',
     'selection_snapshot': '/ext/pipeline_godot_context/selection',
     'selection_subscribe': '/ext/pipeline_godot_context/subscribe',

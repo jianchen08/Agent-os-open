@@ -39,6 +39,7 @@ export interface GodotSelectionState {
 const ENDPOINTS = {
   selection: PIPELINE_GODOT_CONTEXT_ENDPOINTS.selection_push,
   subscribe: PIPELINE_GODOT_CONTEXT_ENDPOINTS.selection_subscribe,
+  clear: PIPELINE_GODOT_CONTEXT_ENDPOINTS.selection_clear,
 }
 
 /** 预览图 URL（经插件代理 Godot 9600；v=签名，选中变化时刷新缓存） */
@@ -86,6 +87,21 @@ function hookWsEvents(): void {
       engine_version: data.engine_version,
     })
   })
+}
+
+/**
+ * 清除当前引用（点击清理）：插件清空快照并抑制同签名心跳（改选/重新点选恢复）。
+ * 失败不本地假清——卡片与插件真实状态保持一致（下次消息仍会注入，诚实可见）。
+ */
+export async function clearGodotSelection(): Promise<boolean> {
+  try {
+    await apiClient.delete(ENDPOINTS.clear)
+  } catch {
+    return false
+  }
+  // 服务端已清并广播空 items；本地同步置空（WS 事件到达时同值幂等）
+  setState({ ...state, items: [], signature: '' })
+  return true
 }
 
 /**

@@ -1,4 +1,4 @@
-# @feature: FP-0.2.三 宿主接入 | @ci: none-local（不在任何 CI 车道：python-coverage 的 BASE_TEST_PATHS 未收集本文件）
+# @feature: FP-0.2.三 宿主接入 | @ci: python-coverage
 """pipeline_godot_context 插件单元测试。
 
 覆盖：推送接收→前端转发、心跳/清空/离线语义、管道注入 op 构造与幂等去重。
@@ -291,3 +291,113 @@ def test_http_subscribe_base64_then_push_broadcasts():
     assert _decode_http(r2) == {"status": "ok"}
     assert emitter.calls[-1][0] == "godot_selection_changed"
     assert emitter.calls[-1][1]["thread_id"] == "t9"
+
+
+# ═══════════════════════════════════════════════════════════
+# 引用清理（dismiss）：清空 items + 抑制同签名心跳 + 主动恢复语义
+# ═══════════════════════════════════════════════════════════
+
+def test_dismiss_clears_items_and_broadcasts():
+    """dismiss → items 清空、cleared=True、订阅线程收到空 items 事件（卡片消失）。"""
+    emitter = FakeEmitter()
+    gc_plugin.set_emitter(emitter)
+    p = gc_plugin.GodotContextPlugin()
+    p.subscribe("t1")
+    asyncio.run(p.handle_push(_selection_payload()))
+
+    result = asyncio.run(p.dismiss())
+
+    assert result == {"status": "ok", "cleared": True}
+    assert p.snapshot()["items"] == []
+    assert emitter.calls[-1][1]["items"] == []
+
+
+def test_dismiss_suppresses_same_signature_heartbeat():
+    """dismiss 后同签名心跳只保活：不恢复 items、不广播、connected 保持。"""
+    emitter = FakeEmitter()
+    gc_plugin.set_emitter(emitter)
+    p = gc_plugin.GodotContextPlugin()
+    p.subscribe("t1")
+    asyncio.run(p.handle_push(_selection_payload()))
+    asyncio.run(p.dismiss())
+    emits_before = len(emitter.calls)
+
+    asyncio.run(p.handle_push({**_selection_payload(), "type": "heartbeat"}))
+
+    assert p.snapshot()["items"] == []
+    assert p.snapshot()["connected"] is True
+    assert len(emitter.calls) == emits_before
+
+
+def test_dismiss_recovers_on_reselect_same_signature():
+    """dismiss 后用户在 Godot 重新点选同节点（type=selection 同签名）→ 引用恢复并广播。"""
+    emitter = FakeEmitter()
+    gc_plugin.set_emitter(emitter)
+    p = gc_plugin.GodotContextPlugin()
+    p.subscribe("t1")
+    asyncio.run(p.handle_push(_selection_payload()))
+    asyncio.run(p.dismiss())
+
+    asyncio.run(p.handle_push(_selection_payload()))
+
+    assert p.snapshot()["items"][0]["name"] == "Player"
+    assert emitter.calls[-1][1]["items"][0]["name"] == "Player"
+
+
+def test_dismiss_recovers_on_new_selection():
+    """dismiss 后改选（新签名）→ 正常恢复。"""
+    gc_plugin.set_emitter(None)
+    p = gc_plugin.GodotContextPlugin()
+    asyncio.run(p.handle_push(_selection_payload()))
+    asyncio.run(p.dismiss())
+
+    asyncio.run(p.handle_push(_selection_payload(
+        signature="Enemy@Node2D/Enemy",
+        items=[{"name": "Enemy", "type": "Node2D", "path": "Node2D/Enemy"}],
+    )))
+
+    assert p.snapshot()["items"][0]["name"] == "Enemy"
+
+
+def test_dismiss_empty_selection_is_noop():
+    """空引用时 dismiss 幂等 no-op（cleared=False，不广播）。"""
+    emitter = FakeEmitter()
+    gc_plugin.set_emitter(emitter)
+    p = gc_plugin.GodotContextPlugin()
+
+    result = asyncio.run(p.dismiss())
+
+    assert result == {"status": "ok", "cleared": False}
+    assert emitter.calls == []
+
+
+def test_execute_skips_injection_after_dismiss():
+    """dismiss 后管道注入停止（清了卡片，消息不再带 <reference>）。"""
+    gc_plugin.set_emitter(None)
+    p = gc_plugin.GodotContextPlugin()
+    asyncio.run(p.handle_push(_selection_payload()))
+    asyncio.run(p.dismiss())
+
+    class _Ctx:
+        state = {"message_id": "m1", "messages": [{"role": "user", "content": "hi"}]}
+        config = {}
+
+    assert asyncio.run(p.execute(_Ctx())).state_updates == {}
+
+
+def test_http_delete_clears_selection():
+    """http 层：DELETE /selection 清除引用，快照立即可见空 items。"""
+    server_mod.set_emitter(None)
+    _fresh_instance()
+
+    _http("POST", _PUSH_PATH, raw_body=_b64_body(_selection_payload()))
+    resp = _http("DELETE", _PUSH_PATH)
+    assert resp["data"]["status"] == 200
+    assert _decode_http(resp) == {"status": "ok", "cleared": True}
+
+    snap = _decode_http(_http("GET", _PUSH_PATH))
+    assert snap["items"] == []
+
+    # 同签名心跳不恢复（抑制生效，经 http 层全链路）
+    _http("POST", _PUSH_PATH, raw_body=_b64_body({**_selection_payload(), "type": "heartbeat"}))
+    assert _decode_http(_http("GET", _PUSH_PATH))["items"] == []

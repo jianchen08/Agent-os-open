@@ -9,10 +9,15 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 const postMock = vi.fn()
 const getMock = vi.fn()
+const deleteMock = vi.fn()
 const subscribeMock = vi.fn()
 
 vi.mock('@/services/api/client', () => ({
-  default: { post: (...a: unknown[]) => postMock(...a), get: (...a: unknown[]) => getMock(...a) },
+  default: {
+    post: (...a: unknown[]) => postMock(...a),
+    get: (...a: unknown[]) => getMock(...a),
+    delete: (...a: unknown[]) => deleteMock(...a),
+  },
 }))
 
 vi.mock('@/services/websocket/GlobalWebSocket', () => ({
@@ -29,6 +34,7 @@ let bridge: Bridge
 beforeEach(async () => {
   vi.resetModules()
   postMock.mockReset().mockResolvedValue({})
+  deleteMock.mockReset().mockResolvedValue({})
   getMock.mockReset().mockResolvedValue({
     data: { connected: false, items: [], signature: '' },
   })
@@ -114,5 +120,35 @@ describe('selectionBridge 事件驱动状态更新', () => {
     })
 
     expect(bridge.getGodotSelection().items).toHaveLength(0)
+  })
+})
+
+describe('selectionBridge 清除引用', () => {
+  beforeEach(async () => {
+    await bridge.initGodotSelection('t1')
+    emitSelectionEvent({
+      thread_id: 't1',
+      connected: true,
+      items: [{ name: 'Player', type: 'Sprite2D', path: 'Node2D/Player' }],
+      signature: 'Player@Node2D/Player',
+    })
+  })
+
+  it('clearGodotSelection 成功 → DELETE 端点 + 本地 items 置空', async () => {
+    const ok = await bridge.clearGodotSelection()
+
+    expect(ok).toBe(true)
+    expect(deleteMock).toHaveBeenCalledWith('/ext/pipeline_godot_context/selection')
+    expect(bridge.getGodotSelection().items).toHaveLength(0)
+    expect(bridge.getGodotSelection().signature).toBe('')
+  })
+
+  it('清除失败 → 返回 false 且状态不变（不本地假清）', async () => {
+    deleteMock.mockRejectedValue(new Error('down'))
+
+    const ok = await bridge.clearGodotSelection()
+
+    expect(ok).toBe(false)
+    expect(bridge.getGodotSelection().items).toHaveLength(1)
   })
 })

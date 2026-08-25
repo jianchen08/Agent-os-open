@@ -12,6 +12,7 @@ json.loads(raw_body)，导致 Godot 宿主插件的一切推送恒 400
      内核内部转 base64 给插件）→ 200 {"status": "ok"}
   2. GET 快照（user 认证）→ connected=true 且 items 可见
   3. 非法 JSON 体 → 400（fail-fast 不静默）
+  4. 引用清理流：DELETE 清除 → 同签名心跳不恢复 → 重新点选恢复
 
 运行前提：内核 9100 已启动（pipeline_godot_context 默认启用）、
 Godot 编辑器无需运行（推送由测试直接模拟）。
@@ -24,7 +25,7 @@ import urllib.error
 import urllib.request
 
 import pytest
-from e2e_helpers import http_get_with_auth, http_post_json
+from e2e_helpers import http_delete_auth, http_get_with_auth, http_post_json
 
 pytestmark = [pytest.mark.e2e]
 
@@ -78,3 +79,31 @@ def test_invalid_json_body_rejected_400(restore_offline):
         body = json.loads(e.read().decode("utf-8"))
         assert body == {"error": "invalid json"}
     assert status == 400
+
+
+def test_selection_clear_dismiss_flow(auth_token, restore_offline):
+    """引用清理流：DELETE 清除 → 同签名心跳不恢复 → 重新点选（selection）恢复。"""
+    status, body, _ = http_post_json(_SELECTION_URL, _selection_payload())
+    assert status == 200
+    assert body == {"status": "ok"}
+
+    # 清除（前端点击清理入口）
+    status, body, _ = http_delete_auth(_SELECTION_URL, auth_token)
+    assert status == 200, f"DELETE 失败: {body}"
+    assert body == {"status": "ok", "cleared": True}
+    _, snap, _ = http_get_with_auth(_SELECTION_URL, auth_token)
+    assert snap["items"] == []
+    assert snap["signature"] == ""
+
+    # Godot 节点仍选中：5s 心跳（同签名）不把引用带回来
+    status, _, _ = http_post_json(_SELECTION_URL, {**_selection_payload(), "type": "heartbeat"})
+    assert status == 200
+    _, snap, _ = http_get_with_auth(_SELECTION_URL, auth_token)
+    assert snap["items"] == []
+    assert snap["connected"] is True
+
+    # 用户重新点选同节点（type=selection）→ 引用恢复
+    status, _, _ = http_post_json(_SELECTION_URL, _selection_payload())
+    assert status == 200
+    _, snap, _ = http_get_with_auth(_SELECTION_URL, auth_token)
+    assert snap["items"][0]["name"] == "E2EPlayer"

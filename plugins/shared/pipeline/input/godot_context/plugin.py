@@ -14,6 +14,11 @@ Godot 宿主插件（hosts/godot-addon）在 EditorSelection.selection_changed
 
 State 命名空间：
     - godot.injected_for : 已注入引用的 message_id（幂等去重）。
+
+引用清理（dismiss）：前端可请求清除当前引用（用户不想让这条选中随消息注入）。
+清理后被清理签名的**心跳**被抑制——Godot 里节点仍选中时 5s 心跳不会把引用带
+回来；type=selection 的同签名推送（用户重新点选）或签名变化即恢复推送。
+    - _dismissed_signature : 被清理且仍在抑制的签名；None = 无抑制。
 """
 
 from __future__ import annotations
@@ -64,6 +69,7 @@ class GodotContextPlugin(IInputPlugin):
         self._last_push_ms: float = 0.0
         self._subscribed_threads: set[str] = set()
         self._last_signature: str | None = None
+        self._dismissed_signature: str | None = None
 
     # ── 推送接收与快照（http.handle 调用） ──
 
@@ -71,6 +77,7 @@ class GodotContextPlugin(IInputPlugin):
         """处理 Godot 宿主推送（type: selection/heartbeat/offline）。
 
         selection 且签名变化时转发订阅线程；heartbeat 仅刷新在线时间戳。
+        被清理（dismiss）的签名：刷新在线时间戳但不恢复引用，签名变化才恢复。
         """
         ptype = str(payload.get("type", "selection"))
         if ptype == "offline":
@@ -82,11 +89,28 @@ class GodotContextPlugin(IInputPlugin):
             }
             self._last_push_ms = 0.0
             self._last_signature = ""
+            self._dismissed_signature = None
             await self._broadcast()
             return {"status": "ok"}
 
         items = payload.get("items") or []
         signature = str(payload.get("signature", ""))
+
+        # 清理抑制：心跳携带被清理的签名时只保活，不恢复引用、不广播；
+        # type=selection 的同签名推送是用户重新选中（新引用意图），走恢复路径
+        if (
+            ptype == "heartbeat"
+            and signature
+            and self._dismissed_signature == signature
+        ):
+            self._last_push_ms = time.monotonic() * 1000.0
+            self._snapshot["scene"] = payload.get("scene") or self._snapshot.get("scene", {})
+            self._snapshot["engine_version"] = payload.get("engine_version", "")
+            self._snapshot["project"] = payload.get("project", "")
+            self._snapshot["ts"] = payload.get("ts", 0)
+            return {"status": "ok"}
+
+        self._dismissed_signature = None
         self._snapshot = {
             "connected": True,
             "items": items,
@@ -115,6 +139,22 @@ class GodotContextPlugin(IInputPlugin):
         if thread_id:
             self._subscribed_threads.add(thread_id)
         return {"status": "ok", "threads": len(self._subscribed_threads)}
+
+    async def dismiss(self) -> dict[str, Any]:
+        """清除当前引用（用户点击清理）：清空 items 并抑制同签名重复推送。
+
+        connected/scene 保留（Godot 仍在线）；签名变化（改选/取消选中）恢复。
+        空引用时 no-op（幂等）。
+        """
+        if not self._snapshot.get("items"):
+            return {"status": "ok", "cleared": False}
+        self._dismissed_signature = str(self._snapshot.get("signature", ""))
+        self._snapshot["items"] = []
+        self._snapshot["signature"] = ""
+        # 重置广播去重键：恢复同签名选中（重新点选）时 items 从空到非空须广播
+        self._last_signature = ""
+        await self._broadcast()
+        return {"status": "ok", "cleared": True}
 
     async def _broadcast(self) -> None:
         """把选中变化推给所有订阅线程（失败静默，不影响推送接收）。"""
