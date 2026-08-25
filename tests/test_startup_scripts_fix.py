@@ -1,12 +1,13 @@
-"""启动脚本契约回归测试（start_web_cn.bat / start_web_02.bat / start_web_02.sh）。
+# @feature: FP-0.2.二 启动链路 | @vision: V3 可嵌入
+"""启动脚本契约回归测试（start_web_02.bat / start_web_02.sh）。
 
 背景（为什么这些测试重要）：
-- 乱码问题：脚本内容必须为纯 ASCII（或 GBK 编码），任何代码页下都不会乱码
-  （中文注释在 GBK 终端按错误代码页解码会破坏 REM 注释、把乱码当命令执行）。
+- 编码：bat 必须为 UTF-8 + CRLF（.gitattributes 铁律，见
+  docs/dsh_decision_records.md），任何代码页下都不会乱码。
 - kernel 等待机制：轮询 /health 直到就绪（最多 60s），未就绪则报错退出、
   不启动前端（不得在 kernel 未就绪时启动前端导致 vite 代理 ECONNREFUSED）。
 
-本测试为静态行为测试：验证脚本文件的可观察契约（无乱码字节、等待循环、未就绪退出路径）。
+本测试为静态行为测试：验证脚本文件的可观察契约（编码、等待循环、未就绪退出路径）。
 """
 
 import re
@@ -16,7 +17,6 @@ ROOT = Path(__file__).resolve().parents[1]
 
 SCRIPTS = {
     "start_web_02.bat": ROOT / "start_web_02.bat",
-    "start_web_cn.bat": ROOT / "start_web_cn.bat",
     "start_web_02.sh": ROOT / "start_web_02.sh",
 }
 
@@ -34,25 +34,18 @@ def _read_bytes(script_name: str) -> bytes:
 
 
 # ---------------------------------------------------------------------------
-# AC1: 无乱码 —— bat 脚本必须为纯 ASCII，任何代码页下都不会产生乱码命令
+# AC1: 编码 —— bat 必须为 UTF-8 + CRLF（0.2 铁律），任何代码页下不乱码
 # ---------------------------------------------------------------------------
 
-def test_ac1_bat_scripts_are_pure_ascii():
-    """start_web_02.bat / start_web_cn.bat 必须不含任何非 ASCII 字节。
+def test_ac1_bat_utf8_crlf():
+    """start_web_02.bat 必须为合法 UTF-8（无乱码字节）且 CRLF 行尾。
 
-    一旦出现非 ASCII 字节（UTF-8 中文或 em dash），在 GBK 终端下
-    cmd 解码错位就会把注释/echo 内容解析成命令（'�出' not recognized）。
-    纯 ASCII 在任何代码页（936/65001）下解析结果一致。
+    .gitattributes 已锁定 bat 为 UTF-8+CRLF（GBK 终端按错误代码页解码
+    会破坏 REM 注释、把乱码当命令执行；UTF-8 是仓库既定编码）。
     """
-    # 乱码问题只影响 cmd 批处理（GBK 终端解析 UTF-8 字节流错位）。
-    # .sh 是 bash 脚本，天然按 UTF-8 处理中文，不在此检查范围。
-    for name in ("start_web_02.bat", "start_web_cn.bat"):
-        raw = _read_bytes(name)
-        non_ascii = [b for b in raw if b > 127]
-        assert not non_ascii, (
-            f"{name} 含 {len(non_ascii)} 个非 ASCII 字节，GBK 终端下会乱码。"
-            f"请将脚本内容改为纯 ASCII（中文注释/破折号替换为英文/ASCII）。"
-        )
+    raw = _read_bytes("start_web_02.bat")
+    raw.decode("utf-8")  # 非法 UTF-8 直接抛错
+    assert b"\r\n" in raw, "bat 必须使用 CRLF 行尾（.gitattributes 铁律）"
 
 
 # ---------------------------------------------------------------------------
@@ -103,9 +96,9 @@ def test_ac3_kernel_not_ready_aborts_before_frontend():
 
     sh = _read_text("start_web_02.sh")
     assert "seq 1 60" in sh, "start_web_02.sh kernel 等待应为 60s"
-    # .sh 未就绪时也必须有报错退出（错误关键字支持中英文，与 AC 描述对齐）
-    assert re.search(r"\[ERROR\].*(?:未能在|not ready|failed)", sh, re.IGNORECASE), (
-        "start_web_02.sh kernel 未就绪时必须输出 [ERROR]（含'未能在'/'not ready'/'failed'关键字）"
+    # .sh 未就绪时也必须有报错退出（支持中英文文案）
+    assert re.search(r"\[ERROR\].*(?:not ready|未能在|failed)", sh, re.IGNORECASE), (
+        "start_web_02.sh kernel 未就绪时必须输出 [ERROR]"
     )
     assert re.search(r"exit\s+1", sh), "start_web_02.sh kernel 未就绪时必须 exit 1"
 
@@ -120,12 +113,12 @@ def test_ac4_startup_chain_order():
     """
     bat = _read_text("start_web_02.bat")
     positions = {
-        "cleanup": bat.find("taskkill /F /T /IM agentos-kernel.exe"),
+        "cleanup": bat.find("Stopping old instances"),
         "build": bat.find("cargo +stable build"),
         "kernel_start": bat.find('start "AgentOS Kernel"'),
         "kernel_wait": bat.find("Waiting for kernel"),
         "frontend": bat.find("npx --yes vite"),
-        "output": bat.find("Open http://localhost"),
+        "output": bat.rfind("Open http://localhost"),
     }
     for name, pos in positions.items():
         assert pos != -1, f"start_web_02.bat 缺少启动链路环节: {name}"

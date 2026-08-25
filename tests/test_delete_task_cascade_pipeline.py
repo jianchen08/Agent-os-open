@@ -13,10 +13,14 @@ from pathlib import Path
 
 import pytest
 
-# 0.2：tasks 插件位于 plugins/shared/system/tasks/，from tasks.service 需 system/ 父目录
-_TASKS_DIR = Path(__file__).resolve().parent.parent / "plugins" / "shared" / "system"
-if str(_TASKS_DIR) not in sys.path:
-    sys.path.insert(0, str(_TASKS_DIR))
+# 0.2：tasks 插件位于 plugins/shared/system/tasks/，from tasks.service 需 system/ 父目录；
+# service.py 内部平铺导入 _task_* 兄弟模块，需 tasks 目录自身。
+_SYSTEM_DIR = Path(__file__).resolve().parent.parent / "plugins" / "shared" / "system"
+_TASKS_DIR = _SYSTEM_DIR / "tasks"
+for _d in (_SYSTEM_DIR, _TASKS_DIR):
+    _s = str(_d)
+    if _s not in sys.path:
+        sys.path.insert(0, _s)
 
 from tasks.service import TaskService
 

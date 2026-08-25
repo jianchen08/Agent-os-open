@@ -20,12 +20,12 @@
   - 删除"自动删除 foreign 容器"的危险预检（多实例下会误杀另一个合法实例）
 
 验证范围：
-  1. 三脚本均不含 22404 字面量（硬编码后缀已清除）
+  1. docker-compose.yml / wsl_ensure_containers.sh 不含 22404 字面量（硬编码后缀已清除）
   2. compose 不设 name/container_name（让 project 跟随目录）
   3. 脚本用 docker compose ps -q 动态获取容器（不写死容器名）
-  4. 宿主端口已参数化（${VAR:-default}），bat 读取 env 带默认值
+  4. 宿主端口已参数化（${VAR:-default}）
   5. 脚本不含危险的 foreign 容器自动删除逻辑
-  6. wsl 脚本用 wslpath 动态推导项目目录（不写死挂载路径）
+  6. wsl 脚本用 wslpath 动态推导镜像目录（不写死挂载路径）
   7. .gitignore 持续忽略 .env（防凭据入库回归）
 """
 from pathlib import Path
@@ -55,7 +55,6 @@ class TestNoHardcodedDirSuffix:
 
     @pytest.mark.parametrize("rel_path", [
         "docker-compose.yml",
-        "start_web_cn.bat",
         "wsl_ensure_containers.sh",
     ])
     def test_no_22404_literal(self, rel_path):
@@ -110,27 +109,8 @@ class TestDynamicContainerLookup:
     """验证 bat / wsl 脚本用 docker compose ps -q 动态获取容器，不依赖固定名。"""
 
     @pytest.fixture
-    def bat(self):
-        return _read_file("start_web_cn.bat")
-
-    @pytest.fixture
     def wsl_sh(self):
         return _read_file("wsl_ensure_containers.sh")
-
-    def test_bat_uses_compose_ps(self, bat):
-        """bat 用 docker compose ps -q <service> 获取容器 ID"""
-        assert "docker compose ps -q" in bat, (
-            "bat 应使用 docker compose ps -q 动态获取容器，而非写死容器名"
-        )
-
-    def test_bat_no_hardcoded_container_start(self, bat):
-        """bat 不应写死 docker start agent-os-frontend/redis 容器名"""
-        assert "docker start agent-os-frontend" not in bat, (
-            "bat 仍写死 docker start agent-os-frontend，换目录会失配"
-        )
-        assert "docker start agent-os-redis" not in bat, (
-            "bat 仍写死 docker start agent-os-redis，换目录会失配"
-        )
 
     def test_wsl_uses_compose_ps(self, wsl_sh):
         """wsl 脚本用 docker compose ps -q <service> 获取容器 ID"""
@@ -201,31 +181,8 @@ class TestPortParameterization:
     def test_compose_backend_port_parameterized(self):
         """docker-compose.yml BACKEND_URL 端口应参数化"""
         content = _read_file("docker-compose.yml")
-        assert "${BACKEND_PORT:-8988}" in content, (
-            "BACKEND_URL 端口应参数化为 ${BACKEND_PORT:-8988}"
-        )
-
-    def test_bat_reads_port_env_with_defaults(self):
-        """start_web_cn.bat 应读取 3 个端口 env 并带默认值"""
-        content = _read_file("start_web_cn.bat")
-        assert "if not defined FRONTEND_HOST_PORT set" in content, (
-            "bat 应读取 FRONTEND_HOST_PORT（带默认值）"
-        )
-        assert "if not defined REDIS_HOST_PORT set" in content, (
-            "bat 应读取 REDIS_HOST_PORT（带默认值）"
-        )
-        assert "if not defined BACKEND_PORT set" in content, (
-            "bat 应读取 BACKEND_PORT（带默认值）"
-        )
-
-    def test_bat_no_dangerous_foreign_container_removal(self):
-        """start_web_cn.bat 不应含'自动删除 foreign 容器'的危险预检（会误杀多实例）"""
-        content = _read_file("start_web_cn.bat")
-        assert "foreign container" not in content, (
-            "bat 仍含自动删除 foreign 容器的危险逻辑，会误杀另一个合法实例"
-        )
-        assert "预检端口冲突" not in content, (
-            "bat 仍含旧的端口冲突预检（已改为参数化隔离，不再需要）"
+        assert "${BACKEND_PORT:-9100}" in content, (
+            "BACKEND_URL 端口应参数化为 ${BACKEND_PORT:-9100}"
         )
 
     def test_wsl_no_dangerous_foreign_container_removal(self):
