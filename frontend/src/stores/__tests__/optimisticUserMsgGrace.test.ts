@@ -46,31 +46,31 @@ describe('乐观 user 消息宽限期', () => {
     })
   })
 
-  it('场景1: store 内乐观残影让位 API 权威（ADR 2026-08-21：保护由 pending 区承担）', () => {
+  it('场景1: 乐观 user（cmid 新鲜）在迟到 init 后保留——快照未含不抹掉', () => {
     const store = usePipelineMessageStore.getState()
 
-    // 旧架构残影：乐观消息曾直接写入主 store（新架构只进 pending 区）
+    // 乐观消息：发送瞬间直写主数组（单一消息数组协议，无独立 pending 区）
     const optimisticMsg = makeMsg('client-uuid-1', 2, {
       role: 'user',
       content: 'hello world',
-      status: 'completed',
+      status: 'sending',
       clientMessageId: 'client-uuid-1',
       timestamp: new Date().toISOString(),
     })
     store.addMessage(PIPELINE_ID, optimisticMsg)
     expect(store.getMessages(PIPELINE_ID)).toHaveLength(1)
 
-    // initFromAPI（迟到的历史响应）：API 未含该消息（后端尚未落库）
+    // initFromAPI（迟到的历史响应）：API 未含该消息（快照查询发生在落库前）
     store.initFromAPI(PIPELINE_ID, [
       makeMsg('api-old-1', 1, { role: 'assistant', content: 'old reply' }),
     ])
 
-    // 契约（2026-08-21 ADR）：initFromAPI = API 权威全量替换，store 乐观残影
-    // 不保留（不再有 90s 飞行窗口——那是 YAML 慢读时代的补偿层）。真实路径
-    // 的"发送中不丢"由 pending 区承担（内存级 + cmid 三路驱逐，结构性不重复）。
+    // 契约：快照发起早于发送时，乐观 user 保留（「发送后用户消息消失」回归锚）；
+    // 落库后的快照会带同 cmid 记录，isCoveredByApi 让位权威版（见场景3，不并存）。
     const msgs = store.getMessages(PIPELINE_ID)
-    expect(msgs.find((m) => m.clientMessageId === 'client-uuid-1')).toBeUndefined()
-    expect(msgs.map((m) => m.id)).toEqual(['api-old-1'])
+    const kept = msgs.find((m) => m.clientMessageId === 'client-uuid-1')
+    expect(kept?.content).toBe('hello world')
+    expect(msgs.find((m) => m.id === 'api-old-1')).toBeDefined()
   })
 
   it('场景2: 乐观 user 消息在宽限期外的 persist 残留被丢弃', () => {

@@ -80,7 +80,8 @@ describe('initFromAPI 吃掉 streaming 消息', () => {
     ])
 
     const afterInit = store.getMessages(PIPELINE_ID)
-    // 新语义：initFromAPI 完全丢弃本地消息（含 streaming 占位符），只用 API 权威数据
+    // 新语义：无 _lastUpdated 戳的占位视为残影丢弃（真实协议占位必打新鲜戳，
+    // 带新鲜戳的保留——见 initFromAPIInflightPreservation.test.ts）
     expect(afterInit.find(m => m.id === MESSAGE_ID)).toBeUndefined()
     expect(afterInit).toHaveLength(2)
     expect(afterInit.map(m => m.id)).toEqual(['user-1', 'user-2'])

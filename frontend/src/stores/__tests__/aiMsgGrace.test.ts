@@ -45,11 +45,11 @@ describe('AI 消息刷新对账（initFromAPI 全量权威）', () => {
     })
   })
 
-  it('场景1: 已完成的 AI 消息，API 未返回时信任 API 丢弃（全量对账权威）', () => {
+  it('场景1: 刚完成的 AI 回复（新鲜 _lastUpdated）在迟到 init 后保留——快照未含不抹掉', () => {
     const store = usePipelineMessageStore.getState()
 
-    // 已完成 AI 消息：非 streaming，API 不含它 → initFromAPI 全量对账应丢弃
-    const freshAiMsg = makeMsg('ai-uuid-1', 2, {
+    // 本页刚收尾的 AI 回复（stream_end/new_message 收尾：status=completed + 新鲜 _lastUpdated 戳）
+    const freshAiMsg = makeMsg('a_38c5e8cbe88f49fda3cd1974c7347c83', 2, {
       role: 'assistant',
       content: 'hello, this is the AI reply',
       status: 'completed',
@@ -59,15 +59,16 @@ describe('AI 消息刷新对账（initFromAPI 全量权威）', () => {
     store.addMessage(PIPELINE_ID, freshAiMsg)
     expect(store.getMessages(PIPELINE_ID)).toHaveLength(1)
 
-    // initFromAPI 不含该消息（后端尚未持久化）
+    // initFromAPI 不含该消息（快照查询发生在落库前——迟到响应竞态）
     store.initFromAPI(PIPELINE_ID, [
       makeMsg('api-user-1', 1, { role: 'user', content: 'question' }),
     ])
 
-    // assistant 不走乐观宽限期：全量对账信任 API 权威，本地消息被丢弃。
-    // 后端持久化后，下一次增量 API 调用（append/prepend）会拉回该消息。
-    const msgs = store.getMessages(PIPELINE_ID)
-    expect(msgs.find((m) => m.id === 'ai-uuid-1')).toBeUndefined()
+    // 契约：快照发起早于本页收尾活动时，刚出现的回复不得被全量替换抹掉；
+    // 后续更晚的快照会带同 id 记录，isCoveredByApi 让位权威版（不并存）。
+    const kept = store.getMessages(PIPELINE_ID).find((m) => m.id === 'a_38c5e8cbe88f49fda3cd1974c7347c83')
+    expect(kept?.content).toBe('hello, this is the AI reply')
+    expect(store.getMessages(PIPELINE_ID).filter((m) => m.role === 'assistant')).toHaveLength(1)
   })
 
   it('场景2: AI 消息在宽限期外的 persist 残留被丢弃（不变）', () => {
@@ -90,10 +91,11 @@ describe('AI 消息刷新对账（initFromAPI 全量权威）', () => {
     expect(store.getMessages(PIPELINE_ID).find((m) => m.id === 'stale-ai-2')).toBeUndefined()
   })
 
-  it('场景3: AI 消息被后端持久化后通过 role::seq 指纹去重（不重复渲染）', () => {
+  it('场景3: AI 消息落库后 API 返回同 id 记录 → 让位权威版，只留一条（不重复渲染）', () => {
     const store = usePipelineMessageStore.getState()
 
-    const localAiMsg = makeMsg('ws-uuid-3', 5, {
+    // 流式占位 id = 后端落库 record_id（a_ id 契约：stream_start 与落库同 id）
+    const localAiMsg = makeMsg('a_ws_same_id_3', 5, {
       role: 'assistant',
       content: 'AI reply via WS',
       status: 'completed',
@@ -101,10 +103,10 @@ describe('AI 消息刷新对账（initFromAPI 全量权威）', () => {
     })
     store.addMessage(PIPELINE_ID, localAiMsg)
 
-    // API 返回同 seq 的记录 → 指纹匹配，去重
+    // API 返回同 id 的权威记录
     store.initFromAPI(PIPELINE_ID, [
       makeMsg('api-user-3', 4, { role: 'user', content: 'q' }),
-      makeMsg('api-hex-3', 5, {
+      makeMsg('a_ws_same_id_3', 5, {
         role: 'assistant',
         content: 'AI reply via WS',
       }),
@@ -118,7 +120,7 @@ describe('AI 消息刷新对账（initFromAPI 全量权威）', () => {
     expect(aiMsgs[0].content).toBe('AI reply via WS')
   })
 
-  it('场景4: streaming 中的 AI 消息也被 initFromAPI 丢弃（靠 WS backfill 恢复）', () => {
+  it('场景4: 无 _lastUpdated 戳的 streaming 消息不享受保留（真实占位必打戳，无戳=残影）', () => {
     const store = usePipelineMessageStore.getState()
 
     const streamingMsg = makeMsg('streaming-4', 2, {
@@ -133,9 +135,8 @@ describe('AI 消息刷新对账（initFromAPI 全量权威）', () => {
       makeMsg('api-user-4', 1, { role: 'user', content: 'hi' }),
     ])
 
-    // 新语义：initFromAPI 完全丢弃本地（含 streaming），只保留 API 权威数据。
-    // 正在输出的内容不靠刷新兜底，而是由 WS 重连的 backfill（appendMessages）
-    // + 续流补回，避免刷新瞬间用陈旧本地缓存与后端权威数据并存造成重复渲染。
+    // 契约：保留判定以 _lastUpdated 戳为准（ensureStreamingPlaceholder 必打戳）；
+    // 无戳的 streaming 视为残影丢弃，避免刷新后幽灵气泡复活。
     const streaming = store.getMessages(PIPELINE_ID).find((m) => m.id === 'streaming-4')
     expect(streaming).toBeUndefined()
   })
@@ -158,14 +159,14 @@ describe('AI 消息刷新对账（initFromAPI 全量权威）', () => {
     expect(store.getMessages(PIPELINE_ID).find((m) => m.id === 'no-lu-5')).toBeUndefined()
   })
 
-  it('场景6: store 内乐观 user 残留让位 API 权威（ADR 2026-08-21 废除飞行保留窗口）', () => {
+  it('场景6: 乐观 user（cmid 新鲜）在迟到 init 后保留——快照未含不抹掉', () => {
     const store = usePipelineMessageStore.getState()
 
-    // 旧架构残影：乐观 user 曾直接写入主 store（新架构只在 pending 区）
+    // 乐观 user：发送瞬间直写主数组（单一消息数组协议，无独立 pending 区）
     const optimisticUser = makeMsg('client-uuid-6', 1, {
       role: 'user',
       content: 'hello',
-      status: 'completed',
+      status: 'sending',
       clientMessageId: 'client-uuid-6',
       timestamp: new Date().toISOString(),
     })
@@ -175,43 +176,40 @@ describe('AI 消息刷新对账（initFromAPI 全量权威）', () => {
       makeMsg('api-ai-6', 2, { role: 'assistant', content: 'reply' }),
     ])
 
-    // 契约（2026-08-21）：initFromAPI = API 权威全量替换，store 内乐观残留
-    // 不保留（不得复活成幽灵气泡）。「发送中消息不丢」由 pending 区承担
-    // （内存级 + cmid 三路驱逐，见 pendingMessageLifecycle.test.ts）。
-    const userMsg = store.getMessages(PIPELINE_ID).find((m) => m.role === 'user')
-    expect(userMsg).toBeUndefined()
-    expect(store.getMessages(PIPELINE_ID).map((m) => m.id)).toEqual(['api-ai-6'])
+    // 契约：快照发起早于发送时，乐观 user 保留（「发送后用户消息消失」回归锚）；
+    // 落库后的快照会带同 cmid 记录，isCoveredByApi 让位权威版（不并存）。
+    const userMsg = store.getMessages(PIPELINE_ID).find((m) => m.clientMessageId === 'client-uuid-6')
+    expect(userMsg).toBeDefined()
+    expect(userMsg?.content).toBe('hello')
   })
 
-  // ★ 回归保护：ensureStreamingPlaceholder 合并覆盖 id 后，
-  // 本地气泡 id ≠ API record_id → 不应通过宽限期保留，防止 AI 回复重复渲染。
-  it('场景7: 本地 assistant id 与 API record_id 不同时，不走宽限期保留，只留 API 版', () => {
+  // ★ 回归保护：同一逻辑消息的本地气泡与 API 记录必须按 id 收敛为一条，
+  // 保留机制不得造成双气泡重复渲染。
+  it('场景7: 本地 assistant 与 API 记录同 id → 让位 API 权威版，只留一条', () => {
     const store = usePipelineMessageStore.getState()
 
-    // 模拟 ensureStreamingPlaceholder 合并：本地气泡 id 是合并后的 id（hex_222...），
-    // 但 API record_id 是第一次 emit_start 的 id（hex_111...）
-    const mergedLocalMsg = makeMsg('hex_222222222222', 2, {
+    // 本页流式收尾的气泡（id 即后端 record_id）
+    const localMsg = makeMsg('a_same_id_777', 2, {
       role: 'assistant',
-      content: '合并后的 AI 回复',
+      content: 'AI 回复',
       status: 'completed',
       _lastUpdated: Date.now(),
     })
-    store.addMessage(PIPELINE_ID, mergedLocalMsg)
+    store.addMessage(PIPELINE_ID, localMsg)
 
-    // API 返回同 content 但不同 id 的记录（第一次 emit_start 的 record_id）
+    // API 返回同 id 的权威记录
     store.initFromAPI(PIPELINE_ID, [
       makeMsg('api-user-7', 1, { role: 'user', content: '问' }),
-      makeMsg('hex_111111111111', 3, {
+      makeMsg('a_same_id_777', 3, {
         role: 'assistant',
-        content: '合并后的 AI 回复',
+        content: 'AI 回复',
         status: 'completed',
       }),
     ])
 
-    // ★ 核心断言：assistant 不走宽限期 → 本地 id 不同的消息被丢弃，
-    // 只剩 API 版 1 条，不重复渲染
+    // ★ 核心断言：同 id 收敛——只剩 API 权威版 1 条，不重复渲染
     const aiMsgs = store.getMessages(PIPELINE_ID).filter((m) => m.role === 'assistant')
     expect(aiMsgs).toHaveLength(1)
-    expect(aiMsgs[0].id).toBe('hex_111111111111')
+    expect(aiMsgs[0].id).toBe('a_same_id_777')
   })
 })

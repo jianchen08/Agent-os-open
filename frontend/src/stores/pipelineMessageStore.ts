@@ -126,6 +126,12 @@ export function trimMessagesForPersistence(
 /** 单个管道在「内存」中保留的最大消息条数 与 PERSIST_MAX_MESSAGES_PER_PIPELINE（仅持久化裁剪）不同：内存里的 */
 const MAX_MESSAGES_PER_PIPELINE_IN_MEMORY = 2000
 
+/** initFromAPI 保留「飞行中」本地消息的新鲜度窗口（ms）：乐观 user 以 timestamp、
+ *  assistant（流式/刚完成）以 _lastUpdated 判定；超窗的视为 persist 残留/断线
+ *  残影，按刷新去漂移语义丢弃。窗口需覆盖后端 init 慢读（大会话全量读可达
+ *  数十秒），迟到快照才不会抹掉窗口内的本页活动。 */
+const INFLIGHT_FRESH_MS = 90_000
+
 /** 限制单管道内存消息数，防止无限增长导致浏览器 OOM。 仅在超量时裁剪：按 sequence 排序后保留最新的 N 条。未超限时只做一次 */
 function capMessagesForMemory(msgs: Message[]): Message[] {
   if (msgs.length <= MAX_MESSAGES_PER_PIPELINE_IN_MEMORY) return msgs
@@ -798,7 +804,7 @@ export const usePipelineMessageStore = create<PipelineMessageState>()(
     return get().streamingState[pipelineId]?.isStreaming ?? false
   },
 
-  /** 冷启动：从 API 写入最新消息并设置双游标 合并策略 — streaming 消息仅在 API 未返回同 ID 时保留，其余以 API 数据为准。 */
+  /** 冷启动：从 API 写入最新消息并设置双游标 合并策略 — API 权威替换本地缓存；未被 API 覆盖的「飞行中」本页消息（乐观 user / 流式占位 / 刚完成回复）在新鲜度窗口内保留。 */
   initFromAPI: (pipelineId: string, messages: Message[], hasMoreOlder?: boolean) => {
     set((state) => {
       const sorted = [...messages].sort(compareMessages)
@@ -807,32 +813,50 @@ export const usePipelineMessageStore = create<PipelineMessageState>()(
       logger.info('[initFromAPI] pipelineId=%s apiMsgs=%d existingMsgs=%d',
         pipelineId?.slice(0, 12), sorted.length, existing?.length || 0)
 
-      // ★ 刷新语义（[来源: docs/decisions/2026-08-21-message-idempotency-contract.md]）：
-      // API 权威全量替换本地缓存——不合并、
-      // 不宽限、不保留飞行中消息。乐观 user 由 pending 区承担保护（cmid 对账驱逐），
-      // streaming 占位刷新即弃（重连 replay 按 last_sequence watermark 重建、
-      // 完成后由 backfill 按权威记录补回——内容不丢，只是中途回显等完成）。
+      // 刷新语义：API 权威替换本地缓存。例外——快照发起早于本页消息活动时
+      // （后台对账 fetch 与发送/流式收尾竞态：快照查询在消息落库前执行、响应
+      // 在气泡出现后到达），快照天然不含这些消息，直接替换会把刚出现的气泡
+      // 抹掉且无后续拉取补回（reconciled 已置 true、增量补漏仅重连触发）。
+      // 乐观 user 与流式占位/刚完成回复都在主数组（单一消息数组协议），
+      // 由本处新鲜度窗口统一保护：
+      //   - 乐观 user：带 cmid 未被覆盖 + timestamp 在窗口内
+      //   - assistant：_lastUpdated 在窗口内（流式占位与刚完成回复，流式路径必打戳）
+      // 被 isCoveredByApi 命中（id/cmid/recordId）的让位 API 权威版——不并存、
+      // 不重复；空白占位（无内容无 parts 且非流式）与超窗残留照丢，保持刷新
+      // 去漂移语义。
+      const apiIds = new Set(sorted.map((m) => m.id))
       const apiByClientId = new Map<string, Message>()
       const apiByRecordId = new Map<string, Message>()
       for (const m of sorted) {
         if (m.clientMessageId) apiByClientId.set(m.clientMessageId, m)
         if (m.recordId) apiByRecordId.set(m.recordId, m)
       }
-      // 本地乐观/流式消息让位 API 权威版（isCoveredByApi 按 id/cmid/recordId
-      // 双键收敛）；乐观 user 在主数组内，被 API
-      // 权威版覆盖即让位（不并存、不重复），认领后的 recordId 匹配同值收敛。
-      let finalMessages = sorted
-      // 过滤空白 assistant 消息（无 content 无 parts），避免空气泡
-      finalMessages = filterBlankMessages(finalMessages)
-      // 内存封顶：超量时丢弃最老消息，防止长会话撑爆内存（OOM）
-      finalMessages = capMessagesForMemory(finalMessages)
+      const now = Date.now()
+      const isFresh = (ts: number | undefined) =>
+        typeof ts === 'number' && now - ts <= INFLIGHT_FRESH_MS
+      const inflight = filterBlankMessages(
+        (existing || []).filter((m) => {
+          if (isCoveredByApi(m, apiIds, apiByClientId, apiByRecordId)) return false
+          if (m.role === 'user' && m.clientMessageId && isFresh(new Date(m.timestamp).getTime())) {
+            return true
+          }
+          return m.role === 'assistant' && isFresh(m._lastUpdated)
+        }),
+      )
 
-      // 游标只按 API 权威消息计算（appendMessages 已对齐同口径）。
-      const topCursor = finalMessages.length > 0 ? (finalMessages[0].sequence ?? 0) : 0
-      const bottomCursor = calculateBottomCursor(finalMessages, state.bottomCursorsByPipeline[pipelineId])
+      // API 权威基底（空白过滤 + 内存封顶；游标只按它计算）
+      const apiFinal = capMessagesForMemory(filterBlankMessages(sorted))
+      const finalMessages = inflight.length > 0
+        ? capMessagesForMemory(mergeSorted(apiFinal, [...inflight].sort(compareMessages)))
+        : apiFinal
 
-      logger.info('[initFromAPI] done: pipelineId=%s finalMsgs=%d (API 权威全量替换)',
-        pipelineId?.slice(0, 12), finalMessages.length)
+      // 游标只按 API 权威消息计算（appendMessages 已对齐同口径）：飞行消息的
+      // 本地 seq/timestamp 不可信，不得污染 after_sequence 补漏窗口。
+      const topCursor = apiFinal.length > 0 ? (apiFinal[0].sequence ?? 0) : 0
+      const bottomCursor = calculateBottomCursor(apiFinal, state.bottomCursorsByPipeline[pipelineId])
+
+      logger.info('[initFromAPI] done: pipelineId=%s finalMsgs=%d inflightKept=%d (API 权威替换，保留飞行中)',
+        pipelineId?.slice(0, 12), finalMessages.length, inflight.length)
 
       return {
         messagesByPipeline: {

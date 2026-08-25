@@ -143,7 +143,7 @@ beforeEach(async () => {
 })
 
 describe('系统通知 + 注入消息 + 刷新的消息顺序', () => {
-  it('场景1: 流式占位在 initFromAPI 后被丢弃，store 恰好等于 API 数据', () => {
+  it('场景1: 流式占位在 initFromAPI 后保留，store = API 权威 + 飞行占位', () => {
     const MSG = 'msg_streaming_a000000'
 
     // 历史消息（API 风格）：user1(seq=1) → ai1(seq=2)
@@ -157,7 +157,7 @@ describe('系统通知 + 注入消息 + 刷新的消息顺序', () => {
     handlers.handleStreamStart(evt('stream_start', { message_id: MSG, _threadId: THREAD_ID }))
     expect(ids()).toContain(MSG) // 流式期间占位存在
 
-    // 此时刷新（initFromAPI，全量替换语义）
+    // 此时刷新（initFromAPI，API 权威 + 飞行中保留语义）
     // 后端真实时序：ai1 之后注入了一条「上级」user 消息（seq=3），流式占位后端还没落库
     // → API 返回 user-injected(seq=3)，占位不在 API 列表里
     pipelineStore.getState().initFromAPI(PIPELINE_ID, [
@@ -166,12 +166,12 @@ describe('系统通知 + 注入消息 + 刷新的消息顺序', () => {
       makeMsg('user-injected', { role: 'user', content: '[上级]继续', sequence: 3 }),
     ])
 
-    // 契约（2026-08-21 ADR）：initFromAPI = API 权威全量替换。流式占位不保留
-    // （飞行内容由重连 replay 重建 / 完成后 backfill 权威补回），刷新即弃。
-    expect(ids()).toEqual(['user-1', 'ai-1', 'user-injected'])
+    // 契约：API 权威消息按 seq 排序；流式占位（新鲜 _lastUpdated、无权威 seq）
+    // 保留且排末尾——快照发起早于本页流式活动，全量替换不得抹掉正在输出的气泡
+    expect(ids()).toEqual(['user-1', 'ai-1', 'user-injected', MSG])
   })
 
-  it('场景2: 系统通知 + 流式占位 + 切 Tab 刷新，刷新后仅剩 API 数据（system + 占位都丢弃）', () => {
+  it('场景2: 系统通知 + 流式占位 + 切 Tab 刷新，system 丢弃、占位保留', () => {
     const MSG = 'msg_streaming_b000000'
 
     pipelineStore.getState().initFromAPI(PIPELINE_ID, [
@@ -191,19 +191,19 @@ describe('系统通知 + 注入消息 + 刷新的消息顺序', () => {
     const sysId = systemIds()[0]
     expect(beforeIds[beforeIds.length - 1]).toBe(sysId)
 
-    // 切 Tab 触发 initFromAPI（全量替换语义）：API 只返回 user-1
-    // 契约（2026-08-21 ADR）：system 通知与流式占位都不保留——API 权威全量替换，
-    // 占位由重连 replay / 完成后 backfill 恢复。
+    // 切 Tab 触发 initFromAPI：API 只返回 user-1
+    // 契约：system 通知（role=system）不在飞行中保护范围，API 未返回即丢弃；
+    // 流式占位（新鲜 _lastUpdated）保留。
     pipelineStore.getState().initFromAPI(PIPELINE_ID, [
       makeMsg('user-1', { role: 'user', content: '问1', sequence: 1 }),
     ])
 
-    // 期望：恰好 API 的 user-1（系统通知与占位全弃）
-    expect(ids()).toEqual(['user-1'])
+    // 期望：API 的 user-1 + 保留的占位；系统通知丢弃
+    expect(ids()).toEqual(['user-1', MSG])
     expect(systemIds(), '刷新后 system 通知应被丢弃（API 未返回）').toHaveLength(0)
   })
 
-  it('场景3: 上级注入 user 消息占 sequence + 流式占位，刷新后仅 API 数据保留', () => {
+  it('场景3: 上级注入 user 消息占 sequence + 流式占位，刷新后 API 权威 + 占位保留', () => {
     const MSG = 'msg_streaming_c000000'
 
     // store 已有 user-1(seq=1) ai-1(seq=2)
@@ -229,12 +229,12 @@ describe('系统通知 + 注入消息 + 刷新的消息顺序', () => {
       makeMsg('user-injected', { role: 'user', content: '[上级]补充', sequence: 4 }),
     ])
 
-    // 契约（2026-08-21 ADR）：API 四条按 sequence 排序（本地乐观 user-2 已被
-    // API 版对账覆盖让位）；流式占位刷新即弃（replay/backfill 恢复）。
-    expect(ids()).toEqual(['user-1', 'ai-1', 'user-2', 'user-injected'])
+    // 契约：API 四条按 sequence 排序；乐观 user-2 被 API 版对账覆盖让位（cmid
+    // 命中不并存）；流式占位保留（新鲜 _lastUpdated、无权威 seq → 排末尾）
+    expect(ids()).toEqual(['user-1', 'ai-1', 'user-2', 'user-injected', MSG])
   })
 
-  it('场景4: 迟到 init 全量替换——store 内乐观残留不保留，发送中消息由 pending 区承担（ADR 2026-08-21）', () => {
+  it('场景4: 迟到 init 快照不含本页活动——乐观 user 与流式占位保留（不消失不重复）', () => {
     const MSG = 'msg_streaming_d000000'
 
     pipelineStore.getState().initFromAPI(PIPELINE_ID, [
@@ -242,8 +242,7 @@ describe('系统通知 + 注入消息 + 刷新的消息顺序', () => {
       makeMsg('ai-1', { role: 'assistant', content: '答1', sequence: 2 }),
     ])
 
-    // 旧架构模拟：乐观 user-2 误入主 store（新架构下乐观消息只在 pending 区，
-    // 此处入 store 是为了断言「迟到 init 不得让 store 残影复活」的替换语义）
+    // 乐观 user-2 直写主数组（单一消息数组协议：发送瞬间进 store，status=sending）
     pipelineStore.getState().addMessage(PIPELINE_ID, makeMsg('user-2', {
       role: 'user', content: '问2', sequence: 3, clientMessageId: 'user-2',
     }))
@@ -258,11 +257,9 @@ describe('系统通知 + 注入消息 + 刷新的消息顺序', () => {
       makeMsg('ai-1', { role: 'assistant', content: '答1', sequence: 2 }),
     ])
 
-    // 契约（2026-08-21 ADR）：initFromAPI = API 权威全量替换，store 内乐观
-    // 残影与流式占位一律让位。真实发送路径中"用户输入不消失"由 pending 区
-    // 承担（内存级、cmid 对账驱逐，见 pendingMessageLifecycle.test.ts）——
-    // pending 不进对账数据，结构性不可能重复或丢失。
-    expect(ids()).toEqual(['user-1', 'ai-1'])
+    // 契约：快照发起早于本页发送/流式活动时，全量替换不得抹掉飞行中消息——
+    // 乐观 user（cmid 新鲜）与流式占位（新鲜 _lastUpdated）保留，无重复
+    expect(ids()).toEqual(['user-1', 'ai-1', 'user-2', MSG])
   })
 
   it('场景5: 回归 — persist 残留的 completed 旧消息不复活 refresh_order 旧 bug', () => {

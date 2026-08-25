@@ -403,14 +403,15 @@ describe('Bug 复现：发送新消息后上一条 AI 回复重复', () => {
     expect(finalizedAi3!.sequence).toBe(4)
     expect(finalizedAi3!.status).toBe('completed')
 
-    // 回归断言：随后 initFromAPI（刷新/切Tab）用 API 真实数据（ai3 seq=4, hex id）合并时，
-    // 因占位符 sequence 已同步为 4，role::seq 指纹去重成功，不会产生重复消息
+    // 回归断言：随后 initFromAPI（刷新/切Tab）用 API 真实数据合并。a_ id 契约：
+    // 落库 record_id == stream_start 的 message_id（占位 id），isCoveredByApi 按
+    // id 精确收敛让位权威版，不会产生重复消息
     store.initFromAPI(PIPELINE_ID, [
       makeMsg('ai-1', { role: 'assistant', content: 'ai1 reply', sequence: 1, status: 'completed' }),
       makeMsg('user-1', { role: 'user', content: 'user1 msg', sequence: 2 }),
       makeMsg('ai-2', { role: 'assistant', content: 'ai2 reply', sequence: 3, status: 'completed' }),
       makeMsg('user-2', { role: 'user', content: 'user2 msg', sequence: 4, clientMessageId: 'user-2' }),
-      makeMsg('api-ai3', { role: 'assistant', content: 'ai3 response', sequence: 4, status: 'completed' }),
+      makeMsg(AI3_ID, { role: 'assistant', content: 'ai3 response', sequence: 5, status: 'completed' }),
     ])
 
     const finalMsgs = store.getMessages(PIPELINE_ID)
