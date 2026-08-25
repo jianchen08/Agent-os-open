@@ -74,6 +74,7 @@ class TestSoftBlockWritesPairedToolMessage:
     @pytest.mark.asyncio
     async def test_soft_block_appends_tool_message_with_call_id(self):
         """路径遍历被拦 → messages 末尾必须有 role=tool 且 tool_call_id 配对。"""
+        add_plugin_dir("input", "security_check")
         from plugin import SecurityCheckPlugin
 
         plugin = SecurityCheckPlugin(config={"enabled": True, "rules": []})
@@ -94,6 +95,7 @@ class TestSoftBlockWritesPairedToolMessage:
     @pytest.mark.asyncio
     async def test_soft_block_preserves_existing_messages(self):
         """_soft_block 在已有 messages 基础上追加，不破坏历史。"""
+        add_plugin_dir("input", "security_check")
         from plugin import SecurityCheckPlugin
 
         plugin = SecurityCheckPlugin(config={"enabled": True, "rules": []})
@@ -115,6 +117,7 @@ class TestSoftBlockWritesPairedToolMessage:
     @pytest.mark.asyncio
     async def test_soft_block_clears_raw_tool_calls(self):
         """软拦截后 raw_tool_calls 必须清空（防止 tool_core 重复执行）。"""
+        add_plugin_dir("input", "security_check")
         from plugin import SecurityCheckPlugin
 
         plugin = SecurityCheckPlugin(config={"enabled": True, "rules": []})
@@ -138,6 +141,7 @@ class TestSoftBlockRepeatThreshold:
     @pytest.mark.asyncio
     async def test_below_threshold_does_not_end(self):
         """连续被拦 < 阈值（3）→ 不终止，仍走 soft_block 反馈（让模型改正）。"""
+        add_plugin_dir("input", "security_check")
         from plugin import SecurityCheckPlugin
 
         plugin = SecurityCheckPlugin(config={"enabled": True, "rules": []})
@@ -152,6 +156,7 @@ class TestSoftBlockRepeatThreshold:
     @pytest.mark.asyncio
     async def test_at_threshold_ends_pipeline(self):
         """同一签名连续被拦达阈值（3）→ 设 ENDED 终止管道并上报。"""
+        add_plugin_dir("input", "security_check")
         from plugin import SecurityCheckPlugin
 
         plugin = SecurityCheckPlugin(config={"enabled": True, "rules": []})
@@ -174,6 +179,7 @@ class TestSoftBlockRepeatThreshold:
         模型从路径遍历 A 改成路径遍历 B（不同路径）是"在尝试改正"，
         不应被上限误杀。
         """
+        add_plugin_dir("input", "security_check")
         from plugin import SecurityCheckPlugin
 
         plugin = SecurityCheckPlugin(config={"enabled": True, "rules": []})
@@ -192,6 +198,7 @@ class TestSoftBlockRepeatThreshold:
     @pytest.mark.asyncio
     async def test_threshold_configurable(self):
         """reject_threshold 可通过 config 配置。"""
+        add_plugin_dir("input", "security_check")
         from plugin import SecurityCheckPlugin
 
         plugin = SecurityCheckPlugin(

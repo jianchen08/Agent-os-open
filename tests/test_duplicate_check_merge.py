@@ -21,6 +21,7 @@ pytestmark = pytest.mark.unit
 
 
 def _make_plugin() -> Any:
+    add_plugin_dir("output", "duplicate_check")
     from plugin import DuplicateCheckPlugin
     return DuplicateCheckPlugin()
 

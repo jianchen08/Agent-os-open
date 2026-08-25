@@ -772,6 +772,13 @@ class SecurityCheckPlugin(IInputPlugin):
             if isinstance(val, str) and val.strip():
                 parts.append(f"{path_key}={val.strip()}")
 
+        # 批量参数（delete_file 的 paths 数组）：归一化后计入指纹，顺序无关。
+        paths = args.get("paths")
+        if isinstance(paths, (list, tuple)):
+            normalized = sorted(p.strip() for p in paths if isinstance(p, str) and p.strip())
+            if normalized:
+                parts.append("paths=" + "|".join(normalized))
+
         # 只有工具名、无任何关键参数 → 无法稳定记忆，返回 None
         if len(parts) == 1:
             return None

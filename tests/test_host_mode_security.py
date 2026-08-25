@@ -28,6 +28,7 @@ pytestmark = pytest.mark.unit
 
 def _make_plugin(rules: list[dict[str, Any]] | None = None) -> Any:
     """构建 SecurityCheckPlugin 实例。"""
+    add_plugin_dir("input", "security_check")
     from plugin import SecurityCheckPlugin
     config: dict[str, Any] = {"enabled": True}
     if rules is not None:
@@ -138,14 +139,14 @@ class TestDangerousToolDualTrack:
         plugin = _make_plugin(rules=[])
         # 构造 mock tool_registry，delete_file 声明了 dangerous_operations
         mock_tool = MagicMock()
-        mock_tool.dangerous_operations = ["delete:recursive"]
+        mock_tool.dangerous_operations = ["write:/tmp/"]
         mock_registry = MagicMock()
         mock_registry.get = MagicMock(return_value=mock_tool)
         ctx = _make_ctx(
             [{"name": "delete_file", "args": {"path": "/tmp/x"}}],
             services={"tool_registry": mock_registry},
         )
-        assert plugin._is_dangerous_tool(ctx, "delete_file") is True
+        assert plugin._is_dangerous_tool(ctx, "delete_file", {"path": "/tmp/x"}) is True
 
     @pytest.mark.asyncio
     async def test_dangerous_tool_no_registry_falls_back_to_policy(self) -> None:
