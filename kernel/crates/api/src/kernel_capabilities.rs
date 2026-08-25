@@ -651,7 +651,7 @@ mod tests {
             "chat",
             "send_message",
             &json!({
-                "pipeline_id": "a1b2c3d4e5f64789abcdef0123456789",
+                "pipeline_id": "a1b2c3d4e5f6",
                 "message": "触发提醒", "user_id": "u1"
             }),
         )
@@ -676,7 +676,7 @@ mod tests {
             "chat",
             "send_message",
             &json!({
-                "pipeline_id": "a1b2c3d4e5f64789abcdef0123456789",
+                "pipeline_id": "a1b2c3d4e5f6",
                 "message": "m", "user_id": "u1", "_plugin_id": "trigger_setup_tool"
             }),
         )
@@ -716,7 +716,7 @@ mod tests {
                 "create 非 boolean",
             ),
             (
-                json!({"pipeline_id": "a1b2c3d4e5f64789abcdef0123456789", "message": "", "user_id": "u1"}),
+                json!({"pipeline_id": "a1b2c3d4e5f6", "message": "", "user_id": "u1"}),
                 "message 空串（minLength）",
             ),
             (
@@ -728,11 +728,11 @@ mod tests {
                 "parent_pipeline_id 形态错",
             ),
             (
-                json!({"pipeline_id": "a1b2c3d4e5f64789abcdef0123456789", "message": "m", "user_id": "u1", "state": {"pipeline_id": "evil"}}),
+                json!({"pipeline_id": "a1b2c3d4e5f6", "message": "m", "user_id": "u1", "state": {"pipeline_id": "evil"}}),
                 "state 保留字",
             ),
             (
-                json!({"pipeline_id": "a1b2c3d4e5f64789abcdef0123456789", "message": "m", "user_id": "u1", "state": {"lineage.root": true}}),
+                json!({"pipeline_id": "a1b2c3d4e5f6", "message": "m", "user_id": "u1", "state": {"lineage.root": true}}),
                 "state 保护前缀",
             ),
             (
@@ -829,10 +829,10 @@ mod tests {
                 .collect();
         assert_eq!(kinds, code_kinds, "origin.kind 枚举配置↔代码漂移");
 
-        // 形态核心：pipeline_id 的 32hex pattern 必须声明（本方案的立身之本）
+        // 形态核心：pipeline_id 的 12hex pattern 必须声明（本方案的立身之本）
         assert_eq!(
             spec.input_schema["properties"]["pipeline_id"]["pattern"],
-            json!("^[0-9a-f]{32}$"),
+            json!("^[0-9a-f]{12}$"),
             "pipeline_id 形态 pattern 漂移"
         );
     }
@@ -882,7 +882,7 @@ mod tests {
         let spec = find_spec(&contracts, "chat", "send_message").unwrap();
         let store = Arc::new(agentos_engine::SqliteStore::open_memory().unwrap());
         store
-            .link_pipeline_session("c1b2c3d4e5f64789abcdef0123456789", "thread-gate", "default")
+            .link_pipeline_session("c1b2c3d4e5f6", "thread-gate", "default")
             .await
             .unwrap();
         let h = crate::chat_send_handler::ChatSendHandler::with_store(
@@ -904,7 +904,7 @@ mod tests {
         let dispatched = h
             .handle(
                 "send_message",
-                json!({"pipeline_id": "c1b2c3d4e5f64789abcdef0123456789",
+                json!({"pipeline_id": "c1b2c3d4e5f6",
                        "message": "m", "user_id": "u1"}),
             )
             .await
@@ -915,7 +915,7 @@ mod tests {
         // 负样本：越枚举的 status 必须红（出口闸的牙齿）
         let err = validate_value(
             &spec.output_schema,
-            &json!({"status": "bogus", "pipeline_id": "c1b2c3d4e5f64789abcdef0123456789"}),
+            &json!({"status": "bogus", "pipeline_id": "c1b2c3d4e5f6"}),
             "坏响应",
         )
         .expect_err("越枚举 status 必须红");
@@ -1052,7 +1052,7 @@ mod tests {
                 &contracts,
                 "stream_chunk",
                 &json!({
-                    "pipeline_id": "c1b2c3d4e5f64789abcdef0123456789",
+                    "pipeline_id": "c1b2c3d4e5f6",
                     "message_id": id,
                     "content": "x",
                     "thread_id": "thread-1",
@@ -1071,7 +1071,7 @@ mod tests {
             &contracts,
             "stream_start",
             &json!({
-                "pipeline_id": "c1b2c3d4e5f64789abcdef0123456789",
+                "pipeline_id": "c1b2c3d4e5f6",
                 "message_id": "p_my_progress_001",
                 "thread_id": "thread-1",
                 "persist": false,
@@ -1089,7 +1089,7 @@ mod tests {
             &contracts,
             "stream_chunk",
             &json!({
-                "pipeline_id": "c1b2c3d4e5f64789abcdef0123456789",
+                "pipeline_id": "c1b2c3d4e5f6",
                 "message_id": "a_0123456789abcdef0123456789abcdef",
                 "content": "hi",
                 "thread_id": "thread-1",
@@ -1102,7 +1102,7 @@ mod tests {
             &contracts,
             "stream_chunk",
             &json!({
-                "pipeline_id": "c1b2c3d4e5f64789abcdef0123456789",
+                "pipeline_id": "c1b2c3d4e5f6",
                 "message_id": "p_llm_selfmade_001",
                 "content": "hi",
                 "thread_id": "thread-1",
@@ -1121,7 +1121,7 @@ mod tests {
             &contracts,
             "new_message",
             &json!({
-                "pipeline_id": "c1b2c3d4e5f64789abcdef0123456789",
+                "pipeline_id": "c1b2c3d4e5f6",
                 "message_id": "a_0123456789abcdef0123456789abcdef",
                 "thread_id": "thread-1",
             }),
@@ -1138,7 +1138,7 @@ mod tests {
             &contracts,
             "stream_chunk",
             &json!({
-                "pipeline_id": "c1b2c3d4e5f64789abcdef0123456789",
+                "pipeline_id": "c1b2c3d4e5f6",
                 "message_id": "p_ok_001",
                 "thread_id": "thread-1",
             }),

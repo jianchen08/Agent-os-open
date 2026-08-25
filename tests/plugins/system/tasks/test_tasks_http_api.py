@@ -361,11 +361,11 @@ class TestTasksEndpoints:
             "list": [
                     {
                         "pipeline_id": "owner-pipe-1",
-                        "task.owned.c1d2e3f4a5b64789abcdef0123456789.title": "容器项目",
-                        "task.owned.c1d2e3f4a5b64789abcdef0123456789.status": "active",
-                        "task.owned.c1d2e3f4a5b64789abcdef0123456789.scope": "container",
-                        "task.owned.c1d2e3f4a5b64789abcdef0123456789.workspace": "D:/proj/x",
-                        "task.owned.c1d2e3f4a5b64789abcdef0123456789.submitted_by": "u-1",
+                        "task.owned.c1d2e3f4a5b6.title": "容器项目",
+                        "task.owned.c1d2e3f4a5b6.status": "active",
+                        "task.owned.c1d2e3f4a5b6.scope": "container",
+                        "task.owned.c1d2e3f4a5b6.workspace": "D:/proj/x",
+                        "task.owned.c1d2e3f4a5b6.submitted_by": "u-1",
                         "lineage.origin_session_id": "sess-owner",
                         "thread_id": "owner-pipe-1",
                     }
@@ -376,7 +376,7 @@ class TestTasksEndpoints:
         items = resp["payload"]["items"]
         assert resp["payload"]["total"] == 1
         t = items[0]
-        assert t["id"] == "c1d2e3f4a5b64789abcdef0123456789"
+        assert t["id"] == "c1d2e3f4a5b6"
         assert t["title"] == "容器项目"
         assert t["status"] == "active"
         assert t["metadata"]["task_scope"] == "container"
@@ -392,9 +392,9 @@ class TestTasksEndpoints:
             "list": [
                     {
                         "pipeline_id": "owner-pipe-1",
-                        "task.owned.c1d2e3f4a5b64789abcdef0123456789.title": "容器项目",
-                        "task.owned.c1d2e3f4a5b64789abcdef0123456789.status": "active",
-                        "task.owned.c1d2e3f4a5b64789abcdef0123456789.scope": "container",
+                        "task.owned.c1d2e3f4a5b6.title": "容器项目",
+                        "task.owned.c1d2e3f4a5b6.status": "active",
+                        "task.owned.c1d2e3f4a5b6.scope": "container",
                         "lineage.origin_session_id": "sess-owner",
                         "thread_id": "owner-pipe-1",
                     },
@@ -412,7 +412,7 @@ class TestTasksEndpoints:
         assert resp["status"] == 200
         containers = resp["payload"]
         assert len(containers) == 1
-        assert containers[0]["id"] == "c1d2e3f4a5b64789abcdef0123456789"
+        assert containers[0]["id"] == "c1d2e3f4a5b6"
         assert containers[0]["title"] == "容器项目"
 
     async def test_get_task_ok_and_404(self, monkeypatch: pytest.MonkeyPatch,

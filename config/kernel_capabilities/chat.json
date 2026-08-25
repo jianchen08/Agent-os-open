@@ -4,7 +4,7 @@
   "capabilities": [
     {
       "method": "send_message",
-      "description": "投递消息到会话管道并跑一轮。创建分支（create:true 或 pipeline_id 空）引擎生成新管道身份，可选 thread_id 声明归属会话（任务管道传用户会话随其路由/级联）；注入分支（带 pipeline_id）内部反查 pipeline_sessions 解析真实会话 thread（黑盒），解析失败即协议错误。thread_id（^thread- 前缀会话标签）与 pipeline_id（32hex 引擎身份）是不同域的坐标：thread 是会话标签、pipeline 是引擎身份。",
+      "description": "投递消息到会话管道并跑一轮。创建分支（create:true 或 pipeline_id 空）引擎生成新管道身份，可选 thread_id 声明归属会话（任务管道传用户会话随其路由/级联）；注入分支（带 pipeline_id）内部反查 pipeline_sessions 解析真实会话 thread（黑盒），解析失败即协议错误。thread_id（^thread- 前缀会话标签）与 pipeline_id（12hex 引擎身份）是不同域的坐标：thread 是会话标签、pipeline 是引擎身份。",
       "input_schema": {
         "type": "object",
         "properties": {
@@ -25,8 +25,8 @@
           },
           "pipeline_id": {
             "type": "string",
-            "pattern": "^[0-9a-f]{32}$",
-            "description": "注入目标管道（32hex 引擎身份，uuid v4 simple 小写）。与 thread_id（^thread- 前缀）是不同域的坐标：thread 是会话标签、pipeline 是引擎身份，互填即协议错误"
+            "pattern": "^[0-9a-f]{12}$",
+            "description": "注入目标管道（12hex 引擎身份，uuid v4 simple 前 12 位小写）。与 thread_id（^thread- 前缀）是不同域的坐标：thread 是会话标签、pipeline 是引擎身份，互填即协议错误"
           },
           "create": {
             "type": "boolean",
@@ -77,7 +77,7 @@
             "properties": {
               "parent_pipeline_id": {
                 "type": "string",
-                "pattern": "^[0-9a-f]{32}$",
+                "pattern": "^[0-9a-f]{12}$",
                 "description": "直接创建者管道（有父形式必填）"
               },
               "origin_session_id": {
@@ -121,7 +121,7 @@
           },
           "pipeline_id": {
             "type": "string",
-            "pattern": "^[0-9a-f]{32}$",
+            "pattern": "^[0-9a-f]{12}$",
             "description": "管道身份（创建分支为引擎新生成 id；注入分支为原值）"
           }
         },

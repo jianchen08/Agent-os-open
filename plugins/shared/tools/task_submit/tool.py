@@ -426,9 +426,9 @@ class TaskSubmitTool(BuiltinTool):
                     },
                     "parent_task_id": {
                         "type": "string",
-                        "pattern": "^[0-9a-f]{32}$",
+                        "pattern": "^[0-9a-f]{12}$",
                         "description": (
-                            "父任务 ID（task=pipeline 统一后即引擎管道身份，32 位 hex）。"
+                            "父任务 ID（task=pipeline 统一后即引擎管道身份，12 位 hex）。"
                             "为容器任务创建子任务时需要指定此参数，将子任务关联到对应的容器。"
                         ),
                     },
@@ -1261,8 +1261,8 @@ class TaskSubmitTool(BuiltinTool):
         )
         if dispatch.get("pipeline_id"):
             task_id = dispatch["pipeline_id"]
-            # 短 id（2026-08-22 用户要求：LLM 工具面 id 短化；内部权威 id 不动，
-            # 回传时工具入口（task_manage/task_evaluate）经前缀解析恢复全 id）
+            # 引擎生成即 12 位短 id（uuid v4 simple 前 12 位，全链路统一）；
+            # _short_id 幂等（短 id 原样返回），工具入口前缀解析兼容。
             short_task_id = _short_id(task_id)
             result_data: dict[str, Any] = {
                 "task_id": short_task_id,
@@ -1545,7 +1545,7 @@ class TaskSubmitTool(BuiltinTool):
         import uuid  # noqa: PLC0415
 
         # 容器 project id 生成即短（12 位 hex，48bit 熵；LLM 引用/记忆友好——
-        # 2026-08-22 用户要求：给大模型看的 id 不宜过长）。无 32hex 契约约束。
+        # 2026-08-22 用户要求：给大模型看的 id 不宜过长）。无 12hex 契约约束。
         project_id = uuid.uuid4().hex[:12]
         owner_pipeline = inputs.get("pipeline_id") or ""
         if not owner_pipeline:

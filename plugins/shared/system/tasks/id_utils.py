@@ -1,11 +1,12 @@
 """任务 id 短形式工具（LLM 工具面短 id ↔ 内部全 id 解析）。
 
-给大模型看的 id 不宜过长——32 位 hex 的 pipeline_id 抄写/引用/记忆都容易错。
+给大模型看的 id 不宜过长——12 位 hex 的 pipeline_id 抄写/引用/记忆都容易错。
 规则：
-- **内部权威 id 不动**：state 键（task.id / task.owned.<id>）、前端 API、
-  内核契约全部保持全 id；
+- **引擎生成即短**：pipeline_id 由内核生成（uuid v4 simple 前 12 位），
+  state 键（task.id / task.owned.<id>）、前端 API、内核契约全部是短 id；
 - **LLM 工具面短化**：task_submit / task_manage / task_evaluate 的返回
-  （task_id / pipeline_id / 列表 / 文本引用）用 `short_id()`（前 12 位）；
+  （task_id / pipeline_id / 列表 / 文本引用）用 `short_id()`（前 12 位，
+  对已是短 id 的输入幂等）；
 - **入参前缀解析**：LLM 回传的短 id 经 `resolve_id()` 在 state 聚合行里
   前缀唯一匹配解析回全 id（精确命中优先；多命中报歧义；无命中原样返回
   让既有"任务不存在"路径处理）。

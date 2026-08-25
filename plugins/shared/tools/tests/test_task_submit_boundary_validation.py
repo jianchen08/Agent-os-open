@@ -69,7 +69,7 @@ class _FakeSender:
         self.calls.append(params)
         if params.get("no_dispatch"):
             return {"status": "recorded", "pipeline_id": params.get("pipeline_id", "")}
-        return {"status": "created", "pipeline_id": "a1b2c3d4e5f64789abcdef0123456789"}
+        return {"status": "created", "pipeline_id": "a1b2c3d4e5f6"}
 
 
 def _base_inputs(**over: Any) -> dict:

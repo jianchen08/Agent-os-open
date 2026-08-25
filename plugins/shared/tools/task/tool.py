@@ -693,8 +693,7 @@ class TaskTool(BuiltinTool):
         """将 TaskModel 转换为工具返回的字典格式。"""
 
         result = {
-            # 短 id（2026-08-22 用户要求：LLM 工具面 id 短化；内部权威 id 不动，
-            # 回传时工具入口经前缀解析恢复全 id）
+            # 短 id（引擎生成即 12 位短 id；_short 幂等，工具入口前缀解析兼容）
             "task_id": self._short(task.id),
             "title": task.title,
             "status": _status_value(task.status),

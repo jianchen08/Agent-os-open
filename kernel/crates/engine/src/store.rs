@@ -3311,22 +3311,22 @@ mod tests {
     async fn test_get_thread_id_by_pipeline() {
         let store = SqliteStore::open_memory().unwrap();
         store
-            .link_pipeline_session("32hex_main", "thread-abc", "default")
+            .link_pipeline_session("12hex_main", "thread-abc", "default")
             .await
             .unwrap();
         store
-            .link_pipeline_session("32hex_sub", "thread-abc", "default")
+            .link_pipeline_session("12hex_sub", "thread-abc", "default")
             .await
             .unwrap();
 
         // 命中：主管道 / 子任务管道均解析回所属会话 thread
         assert_eq!(
-            store.get_thread_id_by_pipeline("32hex_main").await.unwrap(),
+            store.get_thread_id_by_pipeline("12hex_main").await.unwrap(),
             Some("thread-abc".to_string()),
             "主管道应解析出所属 thread"
         );
         assert_eq!(
-            store.get_thread_id_by_pipeline("32hex_sub").await.unwrap(),
+            store.get_thread_id_by_pipeline("12hex_sub").await.unwrap(),
             Some("thread-abc".to_string()),
             "子任务管道应解析出所属 thread"
         );

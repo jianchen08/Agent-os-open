@@ -151,7 +151,8 @@ pub async fn create_session_handler(
     // 生成主管道 ID（对照 0.1 routes_threads.py:267 的 uuid4().hex[:12]）。
     // 前端发消息时用它作 WS 路由键（前端 activeTab.pipelineRunId ← session.pipelineIds[0]），
     // stream_start/stream_chunk/new_message 也用它匹配占位气泡。不生成则前端发消息被静默拦截。
-    let pipeline_id = uuid::Uuid::new_v4().simple().to_string();
+    // 取前 12 位 hex：与任务管道（chat_send_handler）同格式，全链路短 id 统一。
+    let pipeline_id = uuid::Uuid::new_v4().simple().to_string()[..12].to_string();
     let title = body.get("title").and_then(|v| v.as_str()).unwrap_or("");
     let intent = body
         .get("intent")

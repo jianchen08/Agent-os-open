@@ -7,7 +7,7 @@
 //! 坐标语义：对外契约只含 `pipeline_id + message + user_id`，
 //! thread 是由坐标推导的派生物——注入分支在接口内部用 `pipeline_id` 反查
 //! `pipeline_sessions` 解析真实会话 thread（黑盒），解析失败即协议错误；
-//! 两个 id 形态不同（32hex vs `thread-` 前缀），绝不互填、不做参数搬运。
+//! 两个 id 形态不同（12hex vs `thread-` 前缀），绝不互填、不做参数搬运。
 //!
 //! GAP-1 阶段 1（管道创建契约）：`send_message` 额外支持——
 //! - 可选 `state` 对象：自由注入 initial_state 顶层扁平键（任务域 `task.*`），
@@ -202,8 +202,9 @@ impl ChatSendHandler {
                 }
             }
             // 三次定案：pipeline_id 由引擎生成（身份权威统一），uuid v4 simple
-            // （32 位 hex 无连字符，与 sessions 表 active_pipeline_id 同格式）。
-            let pipeline_id = uuid::Uuid::new_v4().simple().to_string();
+            // 取前 12 位 hex（与 0.1 uuid4().hex[:12]、插件侧短 id 截断同长，
+            // 前端展示 slice(0,12) 原样透出）。
+            let pipeline_id = uuid::Uuid::new_v4().simple().to_string()[..12].to_string();
             // GAP-1 统一（task = pipeline）：task.id 即管道 id——调用方派发时
             // 尚不知道引擎身份，此处引擎强制注入（与 lineage 同级保护字段），
             // 调用方预传的 task.id 一律覆盖为引擎 id（堵身份冒占）。
@@ -657,18 +658,12 @@ mod tests {
         }
     }
 
-    /// uuid v4 simple 格式性质断言：32 位 hex 无连字符、version=4、variant∈[8,b]。
+    /// 短 id 格式性质断言：12 位 hex 无连字符（uuid v4 simple 前 12 位）。
     fn assert_simple_uuid_v4(s: &str) {
-        assert_eq!(s.len(), 32, "simple uuid 应为 32 位 hex 无连字符: {s}");
+        assert_eq!(s.len(), 12, "短 id 应为 12 位 hex 无连字符: {s}");
         assert!(
             s.chars().all(|c| c.is_ascii_hexdigit()),
             "应全为 hex 字符: {s}"
-        );
-        assert_eq!(&s[12..13], "4", "version nibble 应为 4: {s}");
-        let variant = s.as_bytes()[16] as char;
-        assert!(
-            ['8', '9', 'a', 'b'].contains(&variant),
-            "variant nibble 应 ∈ [8,b]: {s}"
         );
     }
 
@@ -759,7 +754,7 @@ mod tests {
 
     // ── 注入分支坐标解析 ──────────────────────────────────────
     // chat_send_handler 不得把同一个 pipeline_id 复制填进 dispatch 的
-    // thread_id 与 pipeline_id 两个槽位——事件会发到无人订阅的频道（32hex 键
+    // thread_id 与 pipeline_id 两个槽位——事件会发到无人订阅的频道（12hex 键
     // 在 registry 只注册 thread-xxx），表现为「LLM 日志有、前端收不到回复」。
     // 坐标解析封装在接口黑盒内（pipeline_sessions 反查真实 thread），
     // 解析失败即协议错误。三连负样本 = A.3 验收口径。

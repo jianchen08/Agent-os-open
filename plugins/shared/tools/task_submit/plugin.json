@@ -78,8 +78,8 @@
             },
             "parent_task_id": {
               "type": "string",
-              "pattern": "^[0-9a-f]{32}$",
-              "description": "父任务 ID（task=pipeline 统一后即引擎管道身份，32 位 hex）。为容器任务创建子任务时需要指定此参数，将子任务关联到对应的容器。"
+              "pattern": "^[0-9a-f]{12}$",
+              "description": "父任务 ID（task=pipeline 统一后即引擎管道身份，12 位 hex）。为容器任务创建子任务时需要指定此参数，将子任务关联到对应的容器。"
             },
             "workspace": {
               "type": "string",

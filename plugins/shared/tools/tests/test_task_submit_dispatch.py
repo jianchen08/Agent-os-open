@@ -152,7 +152,7 @@ class TestTaskPipelineDispatch:
         service.start_task.assert_not_called()
         service.bind_pipeline_run.assert_not_called()
         # 响应身份（2026-08-22 短化定案 8db4c6b16）：LLM 工具面回传 12 位短 id
-        # （内部权威 id 不动，登记分支的 task.owned 键仍用全 id）。
+        # （引擎生成即短 id，登记分支的 task.owned 键同值）。
         short_id = "pipe_engine_gen_1"[:12]
         assert r.output["task_id"] == short_id
         assert r.output["pipeline_id"] == short_id

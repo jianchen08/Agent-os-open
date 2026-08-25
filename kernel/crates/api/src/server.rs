@@ -4295,7 +4295,7 @@ mod tests {
     }
 
     /// 触发器注入回归：chat.send_message 注入只持有管道唯一坐标
-    /// （32hex pipeline_id），事件按该坐标 emit 后必须能经 registry 反查直达
+    /// （12hex pipeline_id），事件按该坐标 emit 后必须能经 registry 反查直达
     /// 在线 user 的 WS 连接——否则出现「LLM 日志有、前端收不到回复」。
     #[tokio::test]
     async fn inject_dispatch_events_reach_user_connection_via_pipeline_coordinate() {
@@ -4332,10 +4332,10 @@ mod tests {
         use agentos_session::router::PipelineDispatcher;
         let _ = dispatcher
             .dispatch_user_input(
-                "pid-32hex-inject",
+                "pid-12hex-inject",
                 "u1",
                 "嗨",
-                "pid-32hex-inject",
+                "pid-12hex-inject",
                 "",
                 None,
                 None,

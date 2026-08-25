@@ -144,8 +144,8 @@ def make_tool(tool_module, service: FakeTaskService):
             return {"status": "recorded", "pipeline_id": params.get("pipeline_id", "")}
         if "params" not in captured:
             captured["params"] = params
-        # 模拟引擎创建分支响应（uuid v4 simple 32hex，形态见 chat 契约）
-        return {"status": "created", "pipeline_id": "a1b2c3d4e5f64789abcdef0123456789"}
+        # 模拟引擎创建分支响应（uuid v4 simple 前 12 位 hex，形态见 chat 契约）
+        return {"status": "created", "pipeline_id": "a1b2c3d4e5f6"}
 
     tool_module.set_chat_sender(fake_sender)
     return tool, captured
@@ -469,9 +469,9 @@ async def test_ordinary_task_registers_owned_to_owner_pipeline(tool_module):
     reg = captured["calls"][1]
     assert reg["no_dispatch"] is True
     assert reg["pipeline_id"] == "owner-pipe-1"
-    # state 键用全 id（内部权威 id 不动）；LLM 面返回短 id（12 位）
-    full_pid = "a1b2c3d4e5f64789abcdef0123456789"
-    assert result.output["pipeline_id"] == full_pid[:12]
+    # state 键用全 id（引擎生成即 12 位短 id）；LLM 面返回同值（不再截断）
+    full_pid = "a1b2c3d4e5f6"
+    assert result.output["pipeline_id"] == full_pid
     assert reg["state"][f"task.owned.{full_pid}.title"] == "测试任务"
     assert reg["state"][f"task.owned.{full_pid}.scope"] == "non_container"
     assert reg["state"][f"task.owned.{full_pid}.status"] == "running"
