@@ -1,21 +1,21 @@
 /**
- * 流式渲染时序端到端复现测试
+ * 流式渲染时序端到端复现测试（LLM 流式 8 事件协议，方案 2026-08-26 定稿）
  *
  * 复现用户报告："转圈4-5秒，然后一下子全部弹出来"。
  *
- * 测试驱动真实 WS handler（handleStreamStart/Chunk/End + handleThinkingStart/Chunk/End）
- * + 真实 pipelineMessageStore + 真实 RAF 批处理（_flushChunks / _scheduleFlush），
+ * 测试驱动真实 WS handler（handleStreamStart + block 协议 handler + stream_end）
+ * + 真实 pipelineMessageStore + 真实 RAF 批处理（_scheduleFlush / flush），
  * 不 mock 任何流式状态管理逻辑。
  *
  * 三个递进场景：
- *  1. 基线：每 chunk 后推进 RAF → store 应逐帧累积内容（"正确路径"长什么样）
- *  2. 复现：连续发 chunk 但不推进 RAF（镜像"主线程被阻塞/RAF 被推迟"），
+ *  1. 基线：每 delta 后推进 RAF → store 应逐帧累积内容（"正确路径"长什么样）
+ *  2. 复现：连续发 delta 但不推进 RAF（镜像"主线程被阻塞/RAF 被推迟"），
  *          直接发 stream_end → store 表现为"前面一直空，结束时一次性填满"
  *  3. 状态清理：stream_end 后残留 state='streaming' 的 thinking part 是否被兜底清理
  *
  * 判据：
  *  - 场景1 能逐帧累积 → 说明 RAF 批处理本身正确，"一次弹出"不是它的问题
- *  - 场景2 能复现"一次弹出" → 定位到"chunk 缓冲未被逐帧 flush"，根因是 RAF 被推迟
+ *  - 场景2 能复现"一次弹出" → 定位到"delta 缓冲未被逐帧 flush"，根因是 RAF 被推迟
  *  - 场景3 残留 streaming part → 确认 stream_end 清理路径不闭环（独立 bug）
  */
 import { describe, it, expect, beforeEach, vi, afterEach } from 'vitest'
@@ -44,7 +44,7 @@ const PIPELINE_ID = 'pipe-stream-timing-001'
 const MESSAGE_ID = 'msg_stream_timing_01'
 const THREAD_ID = 'thread-stream-timing-001'
 
-/** 构造后端 WS 事件信封（与 bridge_core._make_event 一致：业务字段在 data 下） */
+/** 构造后端 WS 事件信封（与内核透传一致：业务字段在 data 下） */
 function makeEvent(eventType: string, data: Record<string, any>) {
   return {
     type: eventType,
@@ -80,11 +80,10 @@ function snapshotMessage() {
 describe('流式渲染时序：复现"转圈后一次性全部弹出"', () => {
   let usePipelineMessageStore: any
   let handleStreamStart: any
-  let handleStreamChunk: any
+  let handleTextDelta: any
   let handleStreamEnd: any
-  let handleThinkingStart: any
-  let handleThinkingChunk: any
-  let handleThinkingEnd: any
+  let handleBlockStart: any
+  let handleReasoningDelta: any
 
   beforeEach(async () => {
     vi.useFakeTimers()
@@ -106,11 +105,10 @@ describe('流式渲染时序：复现"转圈后一次性全部弹出"', () => {
 
     const handlerMod = await import('@/services/websocket/streaming/handlers')
     handleStreamStart = handlerMod.handleStreamStart
-    handleStreamChunk = handlerMod.handleStreamChunk
+    handleTextDelta = handlerMod.handleTextDelta
     handleStreamEnd = handlerMod.handleStreamEnd
-    handleThinkingStart = handlerMod.handleThinkingStart
-    handleThinkingChunk = handlerMod.handleThinkingChunk
-    handleThinkingEnd = handlerMod.handleThinkingEnd
+    handleBlockStart = handlerMod.handleBlockStart
+    handleReasoningDelta = handlerMod.handleReasoningDelta
   })
 
   afterEach(() => {
@@ -118,20 +116,21 @@ describe('流式渲染时序：复现"转圈后一次性全部弹出"', () => {
     delete (window as any).__pipelineStore
   })
 
-  it('场景1（基线）：每收到一个 chunk 就推进 RAF，store 应逐帧累积内容', async () => {
+  it('场景1（基线）：每收到一个 text_delta 就推进 RAF，store 应逐帧累积内容', async () => {
     handleStreamStart(makeEvent('stream_start', { sequence: 1 }))
+    handleBlockStart(makeEvent('block_start', { index: 0, block_type: 'text' }))
 
     const chunks = ['你', '好', '世', '界']
     const seenAtEachChunk: any[] = []
 
     for (const chunk of chunks) {
-      handleStreamChunk(makeEvent('stream_chunk', { content: chunk, sequence: 2 }))
-      // 每收到一个 chunk，推进一帧（16ms），让 _flushChunks 执行
+      handleTextDelta(makeEvent('text_delta', { index: 0, text: chunk, sequence: 2 }))
+      // 每收到一个 delta，推进一帧（16ms），让 RAF flush 执行
       await vi.advanceTimersByTimeAsync(16)
       seenAtEachChunk.push(snapshotMessage())
     }
 
-    console.log('[场景1] 每个 chunk 后的 store 快照:', JSON.stringify(seenAtEachChunk, null, 2))
+    console.log('[场景1] 每个 delta 后的 store 快照:', JSON.stringify(seenAtEachChunk, null, 2))
 
     // 断言：内容逐帧累积，每帧比前一帧长 1 个字
     expect(seenAtEachChunk[0].textContent).toBe('你')
@@ -140,22 +139,23 @@ describe('流式渲染时序：复现"转圈后一次性全部弹出"', () => {
     expect(seenAtEachChunk[3].textContent).toBe('你好世界')
   })
 
-  it('场景2（复现）：连续发 chunk 但不推进 RAF，stream_end 前 store 一直为空占位符', async () => {
+  it('场景2（复现）：连续发 delta 但不推进 RAF，stream_end 前 store 一直为空占位符', async () => {
     handleStreamStart(makeEvent('stream_start', { sequence: 1 }))
+    handleBlockStart(makeEvent('block_start', { index: 0, block_type: 'text' }))
 
-    // 记录 stream_start 后、任何 chunk flush 前的状态
+    // 记录 stream_start 后、任何 delta flush 前的状态
     const beforeAnyChunk = snapshotMessage()
     console.log('[场景2] stream_start 后状态:', JSON.stringify(beforeAnyChunk))
 
-    // 连续发 4 个 chunk，但【不推进 RAF】（镜像主线程被阻塞/RAF 被推迟）
+    // 连续发 4 个 delta，但【不推进 RAF】（镜像主线程被阻塞/RAF 被推迟）
     for (const chunk of ['你', '好', '世', '界']) {
-      handleStreamChunk(makeEvent('stream_chunk', { content: chunk, sequence: 2 }))
+      handleTextDelta(makeEvent('text_delta', { index: 0, text: chunk, sequence: 2 }))
     }
-    // 不推进 timer，检查 store —— 此时 chunk 应仍在 RAF buffer 里，未写入
+    // 不推进 timer，检查 store —— 此时 delta 应仍在 RAF buffer 里，未写入
     const afterChunksNoFlush = snapshotMessage()
-    console.log('[场景2] 4 chunk 后（未推进 RAF）状态:', JSON.stringify(afterChunksNoFlush, null, 2))
+    console.log('[场景2] 4 delta 后（未推进 RAF）状态:', JSON.stringify(afterChunksNoFlush, null, 2))
 
-    // 关键断言 A：未推进 RAF 时，store 里文本 part 内容为空（chunk 还在 buffer）
+    // 关键断言 A：未推进 RAF 时，store 里文本 part 内容为空（delta 还在 buffer）
     expect(afterChunksNoFlush.textContent).toBe('')
 
     // 现在发 stream_end（其内部会同步调 flushStreamChunkBuffer 一次性吐出全部）
@@ -177,19 +177,20 @@ describe('流式渲染时序：复现"转圈后一次性全部弹出"', () => {
     expect(wentFromEmptyToFull).toBe(true)
   })
 
-  it('场景3（状态清理）：thinking part 残留 state=streaming 时，stream_end 是否兜底清理', async () => {
+  it('场景3（状态清理）：reasoning 块未闭合（block_end 丢失）时 stream_end 兜底清理', async () => {
     handleStreamStart(makeEvent('stream_start', { sequence: 1 }))
 
-    // 思考开始 + chunk（state 被设为 'streaming'）
-    handleThinkingStart(makeEvent('thinking_start', { sequence: 1 }))
-    handleThinkingChunk(makeEvent('thinking_chunk', { content: '我在思考...', sequence: 1 }))
-    // 【故意不发 thinking_end】模拟 thinking_end 丢失/乱序，part 残留 state='streaming'
+    // 思考块开始 + delta（state 被设为 'streaming'）
+    handleBlockStart(makeEvent('block_start', { index: 0, block_type: 'reasoning' }))
+    handleReasoningDelta(makeEvent('reasoning_delta', { index: 0, text: '我在思考...', sequence: 1 }))
+    // 【故意不发 block_end】模拟 block_end 丢失/乱序，part 残留 state='streaming'
 
     const beforeStreamEnd = snapshotMessage()
     console.log('[场景3] stream_end 前 thinking part 状态:', JSON.stringify(beforeStreamEnd.thinkingPartStates))
 
-    // 正文 chunk
-    handleStreamChunk(makeEvent('stream_chunk', { content: '回复', sequence: 3 }))
+    // 正文块
+    handleBlockStart(makeEvent('block_start', { index: 1, block_type: 'text' }))
+    handleTextDelta(makeEvent('text_delta', { index: 1, text: '回复', sequence: 3 }))
     await vi.advanceTimersByTimeAsync(16)
 
     // 发 stream_end
@@ -208,8 +209,6 @@ describe('流式渲染时序：复现"转圈后一次性全部弹出"', () => {
     // 关键断言 D：stream_end 后所有 thinking part 的 state 应为 'done'（不再转圈）
     const hasStreamingThinking = afterStreamEnd.thinkingPartStates.some((p: any) => p.state === 'streaming')
     console.log('[场景3] stream_end 后是否仍有 state=streaming 的 thinking part:', hasStreamingThinking)
-    // 如果这个断言【失败】，说明 stream_end 不清理 thinking part state ——
-    // 即"思考图标一直转"的根因，需要修复。
     expect(hasStreamingThinking).toBe(false)
   })
 })

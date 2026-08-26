@@ -116,7 +116,7 @@ describe('validatePluginDeclaration 负例（校验器不空转）', () => {
 
   it('streaming 合法声明零错误', () => {
     const r = validatePluginDeclaration({
-      streaming: { events: ['stream_start', 'stream_chunk', 'stream_end'], part_types: ['progress_card'], persist: false },
+      streaming: { events: ['stream_start', 'text_delta', 'stream_end'], part_types: ['progress_card'], persist: false },
     })
     expect(r.errors).toEqual([])
     expect(r.warnings).toEqual([])

@@ -30,7 +30,7 @@ describe('stream 端到端：handleStreamStart → handleStreamEnd', () => {
   let pipelineStore: typeof import('@/stores/pipelineMessageStore').usePipelineMessageStore
   let handleStreamStart: typeof import('@/services/websocket/streaming/handlers').handleStreamStart
   let handleStreamEnd: typeof import('@/services/websocket/streaming/handlers').handleStreamEnd
-  let handleStreamChunk: typeof import('@/services/websocket/streaming/handlers').handleStreamChunk
+  let handleTextDelta: typeof import('@/services/websocket/streaming/handlers').handleTextDelta
 
   const PIPELINE_ID = '39ef1314a7b9000000000000'
   const MESSAGE_ID = 'msg_a37d345d00000000'
@@ -55,7 +55,7 @@ describe('stream 端到端：handleStreamStart → handleStreamEnd', () => {
     const handlerMod = await import('@/services/websocket/streaming/handlers')
     handleStreamStart = handlerMod.handleStreamStart
     handleStreamEnd = handlerMod.handleStreamEnd
-    handleStreamChunk = handlerMod.handleStreamChunk
+    handleTextDelta = handlerMod.handleTextDelta
   })
 
   it('场景A: stream_start → stream_end 完整流程', () => {
@@ -99,19 +99,18 @@ describe('stream 端到端：handleStreamStart → handleStreamEnd', () => {
     expect(endedMsg!.status).toBe('completed')
   })
 
-  it('场景B: stream_start 没到，stream_chunk 先到（自动创建占位符）', () => {
+  it('场景B: stream_start 没到，text_delta 先到（自动创建占位符）', () => {
     pipelineStore.getState().registerPipeline({
       pipelineId: PIPELINE_ID,
       sessionId: THREAD_ID,
     })
 
-    // chunk 先到，没有 stream_start
-    handleStreamChunk({
+    // delta 先到，没有 stream_start
+    handleTextDelta({
       pipeline_id: PIPELINE_ID,
       message_id: MESSAGE_ID,
-      content: 'partial text',
       _threadId: THREAD_ID,
-      data: { content: 'partial text' },
+      data: { pipeline_id: PIPELINE_ID, message_id: MESSAGE_ID, index: 0, text: 'partial text' },
     })
 
     // 等一帧让 RAF flush
@@ -123,7 +122,7 @@ describe('stream 端到端：handleStreamStart → handleStreamEnd', () => {
     expect(placeholder).toBeDefined()
   })
 
-  it('场景C: 只有 stream_end（无 stream_start 无 stream_chunk）', () => {
+  it('场景C: 只有 stream_end（无 stream_start 无 text_delta）', () => {
     pipelineStore.getState().registerPipeline({
       pipelineId: PIPELINE_ID,
       sessionId: THREAD_ID,
@@ -162,7 +161,7 @@ describe('stream 端到端：handleStreamStart → handleStreamEnd', () => {
     })
 
     // 2. 文本 chunk
-    handleStreamChunk({
+    handleTextDelta({
       pipeline_id: PIPELINE_ID,
       message_id: MESSAGE_ID,
       content: 'thinking...',
@@ -183,7 +182,7 @@ describe('stream 端到端：handleStreamStart → handleStreamEnd', () => {
     expect(midMsg!.status).toBe('completed')
 
     // 4. 更多 chunk（tool_result 后不再发多余的 stream_start，消息已存在）
-    handleStreamChunk({
+    handleTextDelta({
       pipeline_id: PIPELINE_ID,
       message_id: MESSAGE_ID,
       content: 'final answer',

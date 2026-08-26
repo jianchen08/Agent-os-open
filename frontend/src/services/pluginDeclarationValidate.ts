@@ -35,12 +35,14 @@ export interface PluginDeclarationInput {
   externalMcp?: boolean
 }
 
-/** 流式协议事件清单（与 config/kernel_capabilities/streaming.json 的 10 个
- * capability method 一致；单一真值源在 JSON，此处仅人读速览——机械一致性由
- * 内核加载器结构校验兜底（事件不在契约内网关 fail-closed 拒收）） */
+/** 流式协议事件清单（LLM 流式 8 事件 + 生命周期事件，方案 2026-08-26 定稿；
+ * 旧 stream_chunk/thinking_* 已退役）。单一真值源在 config/kernel_capabilities/
+ * streaming.json，此处仅人读速览——机械一致性由内核加载器结构校验兜底（事件
+ * 不在契约内网关 fail-closed 拒收；前端按本清单确认有 handler 消费）。 */
 const STREAMING_EVENTS = new Set([
-  'stream_start', 'stream_chunk', 'thinking_start', 'thinking_chunk', 'thinking_end',
-  'tool_start', 'tool_result', 'new_message', 'stream_end', 'stream_error',
+  'block_start', 'text_delta', 'reasoning_delta', 'tool_call_delta',
+  'block_end', 'usage', 'finish', 'keepalive',
+  'stream_start', 'tool_start', 'tool_result', 'new_message', 'stream_end', 'stream_error',
 ])
 
 export interface PluginValidationResult {
@@ -277,7 +279,7 @@ function validateStreaming(
         if (typeof e !== 'string' || !STREAMING_EVENTS.has(e)) {
           // 事件不在契约清单内 → 网关按 streaming.json 找不到 spec 会透传，
           // 但前端无 handler 消费（事件静默丢弃）——声明失实，报 error
-          errs.push(`capabilities.streaming.events[${i}] 未知事件 ${String(e)}（不在流式契约 10 事件内，发射即被前端丢弃）`)
+          errs.push(`capabilities.streaming.events[${i}] 未知事件 ${String(e)}（不在流式契约事件内，发射即被前端丢弃）`)
         }
       }
     }

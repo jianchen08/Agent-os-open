@@ -186,7 +186,7 @@ describe('Bug 2: 发送消息瞬间应立即出现"思考中"占位气泡', () =
       status: 'completed', // 关键：已完成，id 必须冻结
     } as Message)
 
-    // 断线期间 stream_start 丢失，迟到的 thinking_chunk 触发 auto-create
+    // 断线期间 stream_start 丢失，迟到的流式增量触发 auto-create
     // 传入新的 hex messageId（后端本轮新 turn 的）
     const LATE_MSG_ID = 'msg-late-turn2-1122'
     ensureStreamingPlaceholder(PIPELINE_ID, LATE_MSG_ID, SESSION_ID)

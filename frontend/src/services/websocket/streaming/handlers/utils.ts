@@ -29,7 +29,7 @@ export function mergeStreamingParts(
   const preferServer = opts?.preferServer ?? false
 
   // 收敛残留 state='streaming' 的 text/thinking part 为 'done'：stream_end 已标志
-  // 流终止，残留的 streaming 状态通常来自 thinking_end 丢失/乱序，不收尾会让卡片
+  // 流终止，残留的 streaming 状态通常来自 block_end 丢失/乱序，不收尾会让卡片
   // 图标一直转圈（参见 streamTimingRepro 场景3）。
   const finalize = (p: any) =>
     (p.type === 'text' || p.type === 'thinking') && p.state === 'streaming'

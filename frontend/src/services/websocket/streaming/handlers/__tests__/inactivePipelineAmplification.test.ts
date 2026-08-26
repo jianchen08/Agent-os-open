@@ -60,7 +60,7 @@ function makeEvent(eventType: string, pipelineId: string, data: Record<string, a
 
 describe('非活跃 pipeline 事件放大效应', () => {
   let usePipelineMessageStore: any
-  let handleStreamChunk: any
+  let handleTextDelta: any
   let handleStreamStart: any
 
   beforeEach(async () => {
@@ -82,7 +82,7 @@ describe('非活跃 pipeline 事件放大效应', () => {
     })
 
     const handlerMod = await import('@/services/websocket/streaming/handlers')
-    handleStreamChunk = handlerMod.handleStreamChunk
+    handleTextDelta = handlerMod.handleTextDelta
     handleStreamStart = handlerMod.handleStreamStart
   })
 
@@ -107,13 +107,13 @@ describe('非活跃 pipeline 事件放大效应', () => {
   }
 
   it('过滤生效：别人 pipeline 的 chunk/start 不创建 store 条目', async () => {
-    // 模拟 e2e 实测场景：2 个别人管道各发 500 个 chunk + stream_start
+    // 模拟 e2e 实测场景：2 个别人管道各发 500 个 text_delta + stream_start
     handleStreamStart(makeEvent('stream_start', OTHER_PIPELINE_1, {}))
     handleStreamStart(makeEvent('stream_start', OTHER_PIPELINE_2, {}))
 
     for (let i = 0; i < 500; i++) {
-      handleStreamChunk(makeEvent('stream_chunk', OTHER_PIPELINE_1, { content: '甲', sequence: 1 }))
-      handleStreamChunk(makeEvent('stream_chunk', OTHER_PIPELINE_2, { content: '乙', sequence: 1 }))
+      handleTextDelta(makeEvent('text_delta', OTHER_PIPELINE_1, { index: 0, text: '甲', sequence: 1 }))
+      handleTextDelta(makeEvent('text_delta', OTHER_PIPELINE_2, { index: 0, text: '乙', sequence: 1 }))
     }
     await vi.advanceTimersByTimeAsync(16)
 
@@ -132,7 +132,7 @@ describe('非活跃 pipeline 事件放大效应', () => {
   it('对照：我自己的活跃 pipeline 事件正常处理', async () => {
     handleStreamStart(makeEvent('stream_start', MY_PIPELINE, {}))
     for (let i = 0; i < 10; i++) {
-      handleStreamChunk(makeEvent('stream_chunk', MY_PIPELINE, { content: '我', sequence: 1 }))
+      handleTextDelta(makeEvent('text_delta', MY_PIPELINE, { index: 0, text: '我', sequence: 1 }))
     }
     await vi.advanceTimersByTimeAsync(16)
 
@@ -152,7 +152,7 @@ describe('非活跃 pipeline 事件放大效应', () => {
       agentName: '', status: 'idle', parentId: null, unreadCount: 0,
     })
     handleStreamStart(makeEvent('stream_start', REGISTERED_OTHER, {}))
-    handleStreamChunk(makeEvent('stream_chunk', REGISTERED_OTHER, { content: 'x', sequence: 1 }))
+    handleTextDelta(makeEvent('text_delta', REGISTERED_OTHER, { index: 0, text: 'x', sequence: 1 }))
     await vi.advanceTimersByTimeAsync(16)
 
     const msgs = usePipelineMessageStore.getState().messagesByPipeline[REGISTERED_OTHER]?.length || 0

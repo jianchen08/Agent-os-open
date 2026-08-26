@@ -1,9 +1,11 @@
 /**
- * 回归测试：thinking_chunk 走 RAF 批处理（与 stream_chunk 一致）
+ * 回归测试：reasoning_delta 走 RAF 批处理（LLM 流式 8 事件协议，方案 2026-08-26）
  *
- * 修复前：handleThinkingChunk 同步调 appendToPart，每个 chunk 立即触发 store 更新 →
- * React 重渲染阻塞主线程 → 思考"匀速逐字慢"且正文 chunk 积压等主线程空闲才一次性 flush。
- * 修复后：thinking_chunk 进 bufferChunk('thinking')，由 RAF 统一刷写。
+ * 旧 thinking_chunk 语义迁移：思考增量由 reasoning_delta{index, text} 表达，
+ * 思考块起止由 block_start/block_end 表达（thinking_start/chunk/end 三事件退役）。
+ * reasoning_delta 与 text_delta 共用块索引缓冲 + RAF 批处理：
+ *  - 未推进 RAF 时 delta 留在缓冲，不立即写 store（防每增量一次重渲染阻塞主线程）
+ *  - block_end / finish 前 flush，保证末尾增量不丢
  */
 import { describe, it, expect, beforeEach, vi, afterEach } from 'vitest'
 
@@ -27,9 +29,9 @@ vi.mock('@/utils/retry', () => ({
   isRetryableError: vi.fn().mockReturnValue(false),
 }))
 
-const PIPELINE_ID = 'pipe-thinking-raf-001'
-const MESSAGE_ID = 'msg_thinking_raf_01'
-const THREAD_ID = 'thread-thinking-raf-001'
+const PIPELINE_ID = 'pipe-reasoning-raf-001'
+const MESSAGE_ID = 'msg_reasoning_raf_01'
+const THREAD_ID = 'thread-reasoning-raf-001'
 
 function makeEvent(eventType: string, data: Record<string, any>) {
   return {
@@ -50,12 +52,12 @@ function snapshotThinking() {
   return { found: true, content: tp?.content || '', state: tp?.state || '' }
 }
 
-describe('thinking_chunk RAF 批处理', () => {
+describe('reasoning_delta RAF 批处理', () => {
   let usePipelineMessageStore: any
   let handleStreamStart: any
-  let handleThinkingStart: any
-  let handleThinkingChunk: any
-  let handleThinkingEnd: any
+  let handleReasoningDelta: any
+  let handleBlockStart: any
+  let handleBlockEnd: any
 
   beforeEach(async () => {
     vi.useFakeTimers()
@@ -77,9 +79,9 @@ describe('thinking_chunk RAF 批处理', () => {
 
     const handlerMod = await import('@/services/websocket/streaming/handlers')
     handleStreamStart = handlerMod.handleStreamStart
-    handleThinkingStart = handlerMod.handleThinkingStart
-    handleThinkingChunk = handlerMod.handleThinkingChunk
-    handleThinkingEnd = handlerMod.handleThinkingEnd
+    handleReasoningDelta = handlerMod.handleReasoningDelta
+    handleBlockStart = handlerMod.handleBlockStart
+    handleBlockEnd = handlerMod.handleBlockEnd
 
     handleStreamStart(makeEvent('stream_start', { sequence: 1 }))
   })
@@ -89,48 +91,48 @@ describe('thinking_chunk RAF 批处理', () => {
     delete (window as any).__pipelineStore
   })
 
-  it('场景1：thinking_chunk 逐帧累积（RAF 批处理生效）', async () => {
-    handleThinkingStart(makeEvent('thinking_start', {}))
+  it('场景1：reasoning_delta 逐帧累积（RAF 批处理生效）', async () => {
+    handleBlockStart(makeEvent('block_start', { index: 0, block_type: 'reasoning' }))
 
     const chunks = ['让', '我', '想', '想']
     const seen: any[] = []
-    for (const chunk of chunks) {
-      handleThinkingChunk(makeEvent('thinking_chunk', { content: chunk }))
+    for (let i = 0; i < chunks.length; i++) {
+      handleReasoningDelta(makeEvent('reasoning_delta', { index: 0, text: chunks[i] }))
       await vi.advanceTimersByTimeAsync(16)
       seen.push(snapshotThinking())
     }
 
-    // 每个 chunk 后推进一帧，thinking content 应逐帧累积
+    // 每个 delta 后推进一帧，thinking content 应逐帧累积
     expect(seen[0].content).toBe('让')
     expect(seen[1].content).toBe('让我')
     expect(seen[2].content).toBe('让我想')
     expect(seen[3].content).toBe('让我想想')
   })
 
-  it('场景2：未推进 RAF 时 thinking chunk 在 buffer，不立即写入', () => {
-    handleThinkingStart(makeEvent('thinking_start', {}))
+  it('场景2：未推进 RAF 时 reasoning delta 在 buffer，不立即写入', () => {
+    handleBlockStart(makeEvent('block_start', { index: 0, block_type: 'reasoning' }))
 
-    // 连续发 chunk 不推进 RAF
+    // 连续发 delta 不推进 RAF
     for (const chunk of ['让', '我', '想', '想']) {
-      handleThinkingChunk(makeEvent('thinking_chunk', { content: chunk }))
+      handleReasoningDelta(makeEvent('reasoning_delta', { index: 0, text: chunk }))
     }
     const beforeFlush = snapshotThinking()
-    // chunk 还在 buffer，thinking part 内容为空（start 创建的空 part）
+    // delta 还在 buffer，thinking part 内容为空
     expect(beforeFlush.content).toBe('')
 
-    // thinking_end 会 flush buffer
-    handleThinkingEnd(makeEvent('thinking_end', {}))
+    // block_end 会 flush 缓冲
+    handleBlockEnd(makeEvent('block_end', { index: 0, block: { block_type: 'reasoning', text: '让我想想' } }))
     const afterEnd = snapshotThinking()
-    // flush 后内容一次性出现（end 触发 flushStreamChunkBuffer）
+    // flush 后内容一次性出现（block_end 触发 flush）+ part 置 done
     expect(afterEnd.content).toBe('让我想想')
     expect(afterEnd.state).toBe('done')
   })
 
-  it('场景3：thinking_end 前 flush 不丢末尾内容', async () => {
-    handleThinkingStart(makeEvent('thinking_start', {}))
-    handleThinkingChunk(makeEvent('thinking_chunk', { content: '思考内容' }))
-    // 不推进 RAF，直接 end
-    handleThinkingEnd(makeEvent('thinking_end', {}))
+  it('场景3：block_end 前 flush 不丢末尾内容', async () => {
+    handleBlockStart(makeEvent('block_start', { index: 0, block_type: 'reasoning' }))
+    handleReasoningDelta(makeEvent('reasoning_delta', { index: 0, text: '思考内容' }))
+    // 不推进 RAF，直接 block_end
+    handleBlockEnd(makeEvent('block_end', { index: 0, block: { block_type: 'reasoning' } }))
 
     const snap = snapshotThinking()
     expect(snap.content).toBe('思考内容')

@@ -130,10 +130,10 @@ export function createStreamStartEvent(messageId: string, threadId: string) {
  */
 export function createStreamChunkEvent(messageId: string, threadId: string, chunk: string) {
   return {
-    type: 'stream_chunk' as const,
+    type: 'text_delta' as const,
     message_id: messageId,
     thread_id: threadId,
-    content: chunk,
+    data: { text: chunk, index: 0 },
   }
 }
 
@@ -162,40 +162,6 @@ export function createStreamErrorEvent(
     message_id: messageId,
     thread_id: threadId,
     error,
-  }
-}
-
-/**
- * 创建思考开始事件
- */
-export function createThinkingStartEvent(messageId: string, threadId: string) {
-  return {
-    type: 'thinking_start' as const,
-    message_id: messageId,
-    thread_id: threadId,
-  }
-}
-
-/**
- * 创建思考内容片段事件
- */
-export function createThinkingChunkEvent(messageId: string, threadId: string, chunk: string) {
-  return {
-    type: 'thinking_chunk' as const,
-    message_id: messageId,
-    thread_id: threadId,
-    content: chunk,
-  }
-}
-
-/**
- * 创建思考结束事件
- */
-export function createThinkingEndEvent(messageId: string, threadId: string) {
-  return {
-    type: 'thinking_end' as const,
-    message_id: messageId,
-    thread_id: threadId,
   }
 }
 

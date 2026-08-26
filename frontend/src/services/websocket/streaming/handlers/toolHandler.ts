@@ -46,10 +46,10 @@ export function handleToolStart(eventData: any) {
   const messageId = extractMessageId(eventData)
   if (!messageId) return
 
-  // 先冲刷缓冲的 chunk：tool_start 是 part 结构边界变更点（与 thinking_end / stream_end 同类），
-  // 必须在变更前把 RAF 缓冲里的正文 chunk 落到当前 text part。否则本函数会把当前
+  // 先冲刷缓冲的增量：tool_start 是 part 结构边界变更点（与 block_end / stream_end 同类），
+  // 必须在变更前把 RAF 缓冲里的正文 delta 落到当前 text part。否则本函数会把当前
   // streaming text part 置为 done，随后 RAF flush 时 findStreamingPartIndex 找不到
-  // streaming text part，会新建 text part 追加到 tool_call 之后 → 正文被劈到工具后面，
+  // streaming text part，会新建 text part 追加到 tool_call 之后 → 文本被劈到工具后面，
   // 多轮交错时表现为「思考-工具-文本-文本-思考」错乱。
   flushStreamChunkBuffer()
 
@@ -80,7 +80,7 @@ export function handleToolStart(eventData: any) {
   const msg = msgs.find((m: any) => m.id === messageId)
   if (!msg) {
     // tool_start 到达时消息占位可能不存在（stream_start 断线丢失/乱序/合并改名未命中），
-    // 自动创建占位符——对齐 handleStreamChunk / handleThinkingStart 的
+    // 自动创建占位符——对齐 blockHandler 各 delta handler 的
     // "有消息就有占位符" 语义：占位缺失时自动补建，任何 tool 事件自愈。
     _debugLogger.warn(
       `[TOOL_START] msg not found, auto-creating placeholder: pipeline=%s msgId=%s tool=%s`,

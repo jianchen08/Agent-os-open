@@ -219,7 +219,7 @@ describe('Bug 复现：发送新消息后上一条 AI 回复重复', () => {
     expect(ai2ReplyMsgs.length).toBeLessThanOrEqual(2)
   })
 
-  it('场景E: 完整 handler 流程 —— handleStreamStart → handleStreamChunk → handleStreamEnd', async () => {
+  it('场景E: 完整 handler 流程 —— handleStreamStart → handleTextDelta → handleStreamEnd', async () => {
     vi.resetModules()
     const storeMod = await import('@/stores/pipelineMessageStore')
     pipelineStore = storeMod.usePipelineMessageStore
@@ -237,7 +237,7 @@ describe('Bug 复现：发送新消息后上一条 AI 回复重复', () => {
 
     const handlerMod = await import('@/services/websocket/streaming/handlers')
     const handleStreamStart = handlerMod.handleStreamStart
-    const handleStreamChunk = handlerMod.handleStreamChunk
+    const handleTextDelta = handlerMod.handleTextDelta
     const handleStreamEnd = handlerMod.handleStreamEnd
 
     const store = pipelineStore.getState()
@@ -264,12 +264,12 @@ describe('Bug 复现：发送新消息后上一条 AI 回复重复', () => {
       data: { pipeline_id: PIPELINE_ID, message_id: AI3_ID, _threadId: THREAD_ID },
     })
 
-    // stream_chunk
-    handleStreamChunk({
+    // text_delta
+    handleTextDelta({
       pipeline_id: PIPELINE_ID,
       message_id: AI3_ID,
       _threadId: THREAD_ID,
-      data: { pipeline_id: PIPELINE_ID, message_id: AI3_ID, content: 'ai3 response' },
+      data: { pipeline_id: PIPELINE_ID, message_id: AI3_ID, index: 0, text: 'ai3 response' },
     })
 
     // stream_end

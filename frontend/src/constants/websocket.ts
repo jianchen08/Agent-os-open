@@ -93,9 +93,12 @@ export const WS_SERVER_EVENTS = {
   // state_change / error / execution_start / execution_progress / execution_done /
   // execution_cancelled / execution_output / sub_agent_created /
   // sub_agent_waiting_input / sub_agent_completed / system_notification /
-  // schema_updated / stream_keepalive。
-  // 另：task_status_update / task_status_changed 当前后端推送路径静默跳过
+  // schema_updated。
+  // 另：task_status_update / task_status_changed 当前后端推送路径静默忽略
   // （tasks/service.py 待 SDK frontend.emit 落地后恢复），订阅暂保留。
+  // 旧流式事件名已退役（LLM 流式服务契约 2026-08-26 定稿，DSH 8 事件协议）：
+  // stream_chunk / thinking_start / thinking_chunk / thinking_end / stream_keepalive
+  // 后端 llm_service 不再发射；前端 handler 对应删除（不留兼容层）。
   /** 连接确认 */
   CONNECTION_CONFIRMATION: 'connection_confirmation',
   /** 状态变更 */
@@ -130,18 +133,26 @@ export const WS_SERVER_EVENTS = {
   EXECUTION_EVENT: 'execution_event',
   /** 流式输出开始 */
   STREAM_START: 'stream_start',
-  /** 流式输出片段 */
-  STREAM_CHUNK: 'stream_chunk',
+  /** 流式块开始（LLM 流式 8 事件协议：index=块索引，block_type=text/reasoning/tool-call） */
+  BLOCK_START: 'block_start',
+  /** 正文增量（LLM 流式 8 事件协议：按块索引归组追加） */
+  TEXT_DELTA: 'text_delta',
+  /** 思考增量（LLM 流式 8 事件协议：取代 thinking_start/chunk/end，思考块起止由 block_start/block_end 表达） */
+  REASONING_DELTA: 'reasoning_delta',
+  /** 工具调用增量（LLM 流式 8 事件协议：arguments_delta 原始 JSON 串按块索引累积） */
+  TOOL_CALL_DELTA: 'tool_call_delta',
+  /** 块闭合（LLM 流式 8 事件协议：block 携带该块累积完整内容） */
+  BLOCK_END: 'block_end',
+  /** 用量（LLM 流式 8 事件协议：finish 前发出） */
+  USAGE_EVENT: 'usage',
+  /** 流式终结（LLM 流式 8 事件协议：reason=stop/length/tool_calls/error；断流由调用方补发 error） */
+  FINISH: 'finish',
+  /** 流式保活（LLM 流式 8 事件协议：超时探活，无业务载荷） */
+  KEEPALIVE: 'keepalive',
   /** 流式输出结束 */
   STREAM_END: 'stream_end',
   /** 流式输出错误（LLM 调用失败等） */
   STREAM_ERROR: 'stream_error',
-  /** 思考开始 */
-  THINKING_START: 'thinking_start',
-  /** 思考内容片段 */
-  THINKING_CHUNK: 'thinking_chunk',
-  /** 思考结束 */
-  THINKING_END: 'thinking_end',
   /** 工具调用开始（管道流式事件） */
   TOOL_START: 'tool_start',
   /** 工具调用结果（管道流式事件） */
@@ -196,8 +207,6 @@ export const WS_SERVER_EVENTS = {
   TERMINATION_STATUS: 'termination_status',
   /** 工具执行进度（bash 等长任务执行中的 stdout 增量，task_observability 任务 2） */
   TOOL_PROGRESS: 'tool_progress',
-  /** 流式保活（长时间操作期间由后端发送，防止 chunk 超时） */
-  STREAM_KEEPALIVE: 'stream_keepalive',
   /** 管道已接收到消息 */
   PIPELINE_RECEIVED: 'pipeline_received',
   /** 迭代事件（管道引擎迭代开始/结束） */

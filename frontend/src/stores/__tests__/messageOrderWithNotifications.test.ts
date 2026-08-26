@@ -318,7 +318,7 @@ describe('系统通知 + 注入消息 + 刷新的消息顺序', () => {
       sequence: 12,
     }))
     // 流式期间补一条文字内容并结束，让占位落定为 completed assistant
-    handlers.handleStreamChunk(evt('stream_chunk', { message_id: AI_MSG, content: '查报告' }))
+    handlers.handleTextDelta(evt('text_delta', { message_id: AI_MSG, index: 0, text: '查报告' }))
     flush()
     handlers.handleStreamEnd(evt('stream_end', {
       message_id: AI_MSG,
@@ -364,7 +364,7 @@ describe('系统通知 + 注入消息 + 刷新的消息顺序', () => {
 
     // AI 主回复流式落定（seq=12，后端权威）
     handlers.handleStreamStart(evt('stream_start', { message_id: AI_MAIN, _threadId: THREAD_ID, sequence: 12 }))
-    handlers.handleStreamChunk(evt('stream_chunk', { message_id: AI_MAIN, content: '先看报告' }))
+    handlers.handleTextDelta(evt('text_delta', { message_id: AI_MAIN, index: 0, text: '先看报告' }))
     flush()
     handlers.handleStreamEnd(evt('stream_end', {
       message_id: AI_MAIN,
@@ -411,7 +411,7 @@ describe('系统通知 + 注入消息 + 刷新的消息顺序', () => {
 
     // AI_A 流式开始（还在 streaming，未结束）
     handlers.handleStreamStart(evt('stream_start', { message_id: AI_A, _threadId: THREAD_ID, sequence: 10 }))
-    handlers.handleStreamChunk(evt('stream_chunk', { message_id: AI_A, content: 'AI_A 内容' }))
+    handlers.handleTextDelta(evt('text_delta', { message_id: AI_A, index: 0, text: 'AI_A 内容' }))
     flush()
     // ★ 注意：AI_A 还在 streaming，没有发 stream_end
 
@@ -432,7 +432,7 @@ describe('系统通知 + 注入消息 + 刷新的消息顺序', () => {
 
     // AI_B 新一轮流式开始
     handlers.handleStreamStart(evt('stream_start', { message_id: AI_B, _threadId: THREAD_ID, sequence: 12 }))
-    handlers.handleStreamChunk(evt('stream_chunk', { message_id: AI_B, content: 'AI_B 内容' }))
+    handlers.handleTextDelta(evt('text_delta', { message_id: AI_B, index: 0, text: 'AI_B 内容' }))
     flush()
     handlers.handleStreamEnd(evt('stream_end', {
       message_id: AI_B,
@@ -480,7 +480,7 @@ describe('系统通知 + 注入消息 + 刷新的消息顺序', () => {
 
     // 1. AI_old 流式开始（未结束）
     handlers.handleStreamStart(evt('stream_start', { message_id: AI_OLD, _threadId: THREAD_ID, sequence: 10 }))
-    handlers.handleStreamChunk(evt('stream_chunk', { message_id: AI_OLD, content: 'AI_old 部分内容' }))
+    handlers.handleTextDelta(evt('text_delta', { message_id: AI_OLD, index: 0, text: 'AI_old 部分内容' }))
     flush()
 
     // 2. ★ 通知先到（AI_old 仍在 streaming）
@@ -494,7 +494,7 @@ describe('系统通知 + 注入消息 + 刷新的消息顺序', () => {
 
     // 3. ★ AI_new 的 stream_start 后到
     handlers.handleStreamStart(evt('stream_start', { message_id: AI_NEW, _threadId: THREAD_ID, sequence: 12 }))
-    handlers.handleStreamChunk(evt('stream_chunk', { message_id: AI_NEW, content: 'AI_new 内容' }))
+    handlers.handleTextDelta(evt('text_delta', { message_id: AI_NEW, index: 0, text: 'AI_new 内容' }))
     flush()
     handlers.handleStreamEnd(evt('stream_end', {
       message_id: AI_NEW,
@@ -540,7 +540,7 @@ describe('系统通知 + 注入消息 + 刷新的消息顺序', () => {
     // 然后 ai(69) 流式到达
     const AI69 = 'msg_ai_69'
     handlers.handleStreamStart(evt('stream_start', { message_id: AI69, _threadId: THREAD_ID, sequence: 69 }))
-    handlers.handleStreamChunk(evt('stream_chunk', { message_id: AI69, content: '任务完成啦' }))
+    handlers.handleTextDelta(evt('text_delta', { message_id: AI69, index: 0, text: '任务完成啦' }))
     flush()
     handlers.handleStreamEnd(evt('stream_end', {
       message_id: AI69,

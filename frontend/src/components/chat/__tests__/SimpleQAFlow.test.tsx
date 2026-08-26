@@ -4,10 +4,10 @@
  * 验证 AC-1g: 简单问答流程完整跑通
  *
  * 测试覆盖：
- * 1. 流式文本渲染：stream_start → stream_chunk × N → stream_end
- * 2. 思考+文本混合：thinking_start → thinking_chunk → thinking_end → stream_start → stream_chunk → stream_end
- * 3. 空消息处理：stream_start → stream_end（无 chunk）
- * 4. 流式中断：stream_start → stream_chunk → stream_error
+ * 1. 流式文本渲染：block_start(text) → text_delta × N → block_end
+ * 2. 思考+文本混合：block_start(reasoning) → reasoning_delta → block_end → block_start(text) → text_delta
+ * 3. 空消息处理：stream_start → stream_end（无 delta）
+ * 4. 流式中断：stream_start → text_delta → stream_error
  *
  * 所有测试通过构造 Message 对象（含 parts[]），
  * 使用 renderHook 测试 useMessageRender hook 的输出。
@@ -140,8 +140,8 @@ describe('AC-1g: 简单问答流程', () => {
     it('thinking 片段应在 text 片段之前', async () => {
       const messageId = 'msg-think-1'
 
-      // 模拟: thinking_start → thinking_chunk('分析中') → thinking_end →
-      //       stream_start → stream_chunk('回答') → stream_end
+      // 模拟: block_start(reasoning) → reasoning_delta('分析中') → block_end →
+      //       block_start(text) → text_delta('回答') → block_end
       const message = createMockMessage({
         id: messageId,
         content: '回答',

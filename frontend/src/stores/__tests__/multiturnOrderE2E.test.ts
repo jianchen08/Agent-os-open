@@ -61,7 +61,7 @@ let flushStreamChunkBuffer: typeof import('@/services/websocket/streaming/handle
 /**
  * 单调递增的 part sequence 计数器，模拟后端 _next_part_seq()。
  *
- * 真实后端 bridge_events 给每个流式事件（stream_chunk/tool_start/...）分配递增
+ * 真实后端给每个流式事件（text_delta/tool_start/...）分配递增
  * sequence，前端 useMessageRender 据此对 parts 排序。若 mock 事件不带 sequence，
  * 文本 part 会落到 sequence=Date.now()（巨数），与 tool_call 的小 sequence 冲突，
  * 导致渲染顺序错乱——这是测试保真度问题，不是产品 bug。
@@ -137,8 +137,8 @@ describe('多轮顺序 E2E：推送序 → 接收序 → 渲染序', () => {
 
     // 后端事件序列：stream_start → chunk(前文本) → tool_start → tool_result → chunk(后文本) → stream_end(parts)
     handlers.handleStreamStart(evt('stream_start', { message_id: MSG, _threadId: THREAD_ID, sequence: 2 }))
-    handlers.handleStreamChunk(evt('stream_chunk', { message_id: MSG, content: '好的，' }))
-    handlers.handleStreamChunk(evt('stream_chunk', { message_id: MSG, content: '我来读取。' }))
+    handlers.handleTextDelta(evt('text_delta', { message_id: MSG, index: 0, text: '好的，' }))
+    handlers.handleTextDelta(evt('text_delta', { message_id: MSG, index: 0, text: '我来读取。' }))
     flush() // 模拟一帧 RAF：前文本 chunk 落盘为 text part（否则 tool_start 前无文本片段）
     handlers.handleToolStart(evt('tool_start', {
       message_id: MSG, tool_name: 'file_read', call_id: CALL, args: { path: '/tmp/x' },
@@ -146,8 +146,8 @@ describe('多轮顺序 E2E：推送序 → 接收序 → 渲染序', () => {
     handlers.handleToolResult(evt('tool_result', {
       message_id: MSG, tool_name: 'file_read', call_id: CALL, success: true, result: '内容', duration_ms: 5,
     }))
-    handlers.handleStreamChunk(evt('stream_chunk', { message_id: MSG, content: '读取完成。' }))
-    flush() // 后文本 chunk 落盘为新 text part（被 tool_start 关闭后另起一段）
+    handlers.handleTextDelta(evt('text_delta', { message_id: MSG, index: 1, text: '读取完成。' }))
+    flush() // 后文本 chunk 落盘为新 text part（tool_start 后另起新块，块索引递增）
 
     // stream_end 携带后端权威 parts（camelCase 子项，来自 _build_parts_from_state）
     handlers.handleStreamEnd(evt('stream_end', {
@@ -182,7 +182,7 @@ describe('多轮顺序 E2E：推送序 → 接收序 → 渲染序', () => {
 
     // ── 第1轮 ──（store 渲染顺序=插入顺序，非 sequence 排序，故按真实对话时序插入）
     handlers.handleStreamStart(evt('stream_start', { message_id: MSG1, _threadId: THREAD_ID, sequence: 2 }))
-    handlers.handleStreamChunk(evt('stream_chunk', { message_id: MSG1, content: '第一轮回答' }))
+    handlers.handleTextDelta(evt('text_delta', { message_id: MSG1, index: 0, text: '第一轮回答' }))
     flush()
     handlers.handleStreamEnd(evt('stream_end', { message_id: MSG1, _threadId: THREAD_ID, final_sequence: 2, full_content: '第一轮回答', parts: [{ type: 'text', content: '第一轮回答', state: 'done' }] }))
 
@@ -194,7 +194,7 @@ describe('多轮顺序 E2E：推送序 → 接收序 → 渲染序', () => {
 
     // ── 第2轮 ──
     handlers.handleStreamStart(evt('stream_start', { message_id: MSG2, _threadId: THREAD_ID, sequence: 4 }))
-    handlers.handleStreamChunk(evt('stream_chunk', { message_id: MSG2, content: '第二轮回答' }))
+    handlers.handleTextDelta(evt('text_delta', { message_id: MSG2, index: 0, text: '第二轮回答' }))
     flush()
     handlers.handleStreamEnd(evt('stream_end', { message_id: MSG2, _threadId: THREAD_ID, final_sequence: 4, full_content: '第二轮回答', parts: [{ type: 'text', content: '第二轮回答', state: 'done' }] }))
 
@@ -223,7 +223,7 @@ describe('多轮顺序 E2E：推送序 → 接收序 → 渲染序', () => {
 
     // 第1轮：start + chunk（此时 MSG1 仍 streaming，stream_end 尚未到）
     handlers.handleStreamStart(evt('stream_start', { message_id: MSG1, _threadId: THREAD_ID, sequence: 2 }))
-    handlers.handleStreamChunk(evt('stream_chunk', { message_id: MSG1, content: '第一轮回答' }))
+    handlers.handleTextDelta(evt('text_delta', { message_id: MSG1, index: 0, text: '第一轮回答' }))
     flush() // 让 MSG1 有内容，第2轮 stream_start 的旧占位清理才会"保留(completed)"而非"删除"
 
     // user-2 在第1轮结束后才发（真实对话时序，state_change=suspended 后用户发新消息）
@@ -234,7 +234,7 @@ describe('多轮顺序 E2E：推送序 → 接收序 → 渲染序', () => {
 
     // 第2轮：start + chunk（MSG2 开始，MSG1 尚未 stream_end）
     handlers.handleStreamStart(evt('stream_start', { message_id: MSG2, _threadId: THREAD_ID, sequence: 4 }))
-    handlers.handleStreamChunk(evt('stream_chunk', { message_id: MSG2, content: '第二轮回答' }))
+    handlers.handleTextDelta(evt('text_delta', { message_id: MSG2, index: 0, text: '第二轮回答' }))
     flush()
 
     // 第1轮的延迟 stream_end 才补到（真实后端会带 parts + full_content，来自 _build_parts_from_state）
@@ -263,7 +263,7 @@ describe('多轮顺序 E2E：推送序 → 接收序 → 渲染序', () => {
 
     const runRound = (msg: string, callId: string, text1: string, text2: string, msgSeq: number) => {
       handlers.handleStreamStart(evt('stream_start', { message_id: msg, _threadId: THREAD_ID, sequence: msgSeq }))
-      handlers.handleStreamChunk(evt('stream_chunk', { message_id: msg, content: text1 }))
+      handlers.handleTextDelta(evt('text_delta', { message_id: msg, index: 0, text: text1 }))
       flush() // 前文本落盘
       handlers.handleToolStart(evt('tool_start', {
         message_id: msg, tool_name: 'file_read', call_id: callId, args: { path: '/tmp/a' },
@@ -271,8 +271,8 @@ describe('多轮顺序 E2E：推送序 → 接收序 → 渲染序', () => {
       handlers.handleToolResult(evt('tool_result', {
         message_id: msg, tool_name: 'file_read', call_id: callId, success: true, result: 'ok', duration_ms: 3,
       }))
-      handlers.handleStreamChunk(evt('stream_chunk', { message_id: msg, content: text2 }))
-      flush() // 后文本落盘（tool_start 已关闭前 text part，此 chunk 另起一段）
+      handlers.handleTextDelta(evt('text_delta', { message_id: msg, index: 1, text: text2 }))
+      flush() // 后文本落盘（tool_start 已关闭前 text part，此 delta 另起一块）
       handlers.handleStreamEnd(evt('stream_end', {
         message_id: msg, _threadId: THREAD_ID, final_sequence: msgSeq,
         full_content: `${text1}${text2}`,

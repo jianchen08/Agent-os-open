@@ -163,7 +163,7 @@ describe('注入-推送同步不变量', () => {
 
     // 3. emit_start（新 AI 流开始）
     handlers.handleStreamStart(evt('stream_start', { message_id: AI_NEW, _threadId: THREAD_ID, sequence: 4 }))
-    handlers.handleStreamChunk(evt('stream_chunk', { message_id: AI_NEW, content: 'AI_new 回复' }))
+    handlers.handleTextDelta(evt('text_delta', { message_id: AI_NEW, index: 0, text: 'AI_new 回复' }))
     flush()
     handlers.handleStreamEnd(evt('stream_end', {
       message_id: AI_NEW,
@@ -195,7 +195,7 @@ describe('注入-推送同步不变量', () => {
     // 第1轮
     handleSystemNotification(notificationEvent('[系统通知] 通知1', { sequence: 2 }))
     handlers.handleStreamStart(evt('stream_start', { message_id: AI_1, _threadId: THREAD_ID, sequence: 3 }))
-    handlers.handleStreamChunk(evt('stream_chunk', { message_id: AI_1, content: '回复1' }))
+    handlers.handleTextDelta(evt('text_delta', { message_id: AI_1, index: 0, text: '回复1' }))
     flush()
     handlers.handleStreamEnd(evt('stream_end', {
       message_id: AI_1, _threadId: THREAD_ID, final_sequence: 3,
@@ -205,7 +205,7 @@ describe('注入-推送同步不变量', () => {
     // 第2轮
     handleSystemNotification(notificationEvent('[系统通知] 通知2', { sequence: 4 }))
     handlers.handleStreamStart(evt('stream_start', { message_id: AI_2, _threadId: THREAD_ID, sequence: 5 }))
-    handlers.handleStreamChunk(evt('stream_chunk', { message_id: AI_2, content: '回复2' }))
+    handlers.handleTextDelta(evt('text_delta', { message_id: AI_2, index: 0, text: '回复2' }))
     flush()
     handlers.handleStreamEnd(evt('stream_end', {
       message_id: AI_2, _threadId: THREAD_ID, final_sequence: 5,
@@ -215,7 +215,7 @@ describe('注入-推送同步不变量', () => {
     // 第3轮
     handleSystemNotification(notificationEvent('[系统通知] 通知3', { sequence: 6 }))
     handlers.handleStreamStart(evt('stream_start', { message_id: AI_3, _threadId: THREAD_ID, sequence: 7 }))
-    handlers.handleStreamChunk(evt('stream_chunk', { message_id: AI_3, content: '回复3' }))
+    handlers.handleTextDelta(evt('text_delta', { message_id: AI_3, index: 0, text: '回复3' }))
     flush()
     handlers.handleStreamEnd(evt('stream_end', {
       message_id: AI_3, _threadId: THREAD_ID, final_sequence: 7,
@@ -267,7 +267,7 @@ describe('注入-推送同步不变量', () => {
 
     // AI_old 还在 streaming
     handlers.handleStreamStart(evt('stream_start', { message_id: AI_OLD, _threadId: THREAD_ID, sequence: 2 }))
-    handlers.handleStreamChunk(evt('stream_chunk', { message_id: AI_OLD, content: 'AI_old 输出' }))
+    handlers.handleTextDelta(evt('text_delta', { message_id: AI_OLD, index: 0, text: 'AI_old 输出' }))
     flush()
 
     // 通知到达（AI_old 还在 streaming）

@@ -1,4 +1,7 @@
-/** 流式事件处理器（start / chunk / end / error / keepalive） 性能优化：stream_chunk 事件通过 RAF 批处理合并同一帧内的多个 chunk， */
+/** 流式事件处理器（start / end / error） 正文/思考/工具增量已迁移到 8 事件
+ * 协议（blockHandler.ts，方案 2026-08-26 定稿）：stream_chunk / thinking_*
+ * 旧事件退役，本模块只保留内核生命周期事件（stream_start / stream_end /
+ * stream_error）与收尾清理。 */
 import { useAgentTabStore } from '@/stores/agentTabStore'
 import { useContextUsageStore } from '@/stores/contextUsageStore'
 import { useNotificationStore } from '@/stores/notificationStore'
@@ -9,98 +12,15 @@ import { loggers } from '@/utils/logger'
 
 import { isPipelineRelevant, resolvePipelineId } from '../router'
 
+import { clearBlockStateForMessage, flushBlockBuffers } from './blockHandler'
 import { ensureStreamingPlaceholder, extractMessageId, extractThreadId, mergeStreamingParts, terminatePipeline } from './utils'
 
 const _debugLogger = loggers.websocket
 
-// ── RAF 批处理：合并同一帧内的多个 chunk 为单次 store 更新 ──
-// stream_chunk（正文）和 thinking_chunk（思考）共用同一套缓冲 + RAF，
-// 避免每个 chunk 同步触发 store 更新 → React 重渲染阻塞主线程。
-// 思考 chunk 若同步写入，每个都阻塞一帧，导致思考"匀速逐字慢"且正文
-// chunk 积压在 buffer 中等主线程空闲才一次性 flush（"一股脑全渲染"）。
-
-type ChunkPartType = 'text' | 'thinking'
-
-/** 每个 (pipelineId, messageId, partType) 对应的待刷写 chunk 缓冲 */
-const _chunkBuffer = new Map<string, {
-  chunks: string[]
-  pipelineId: string
-  messageId: string
-  partType: ChunkPartType
-}>()
-let _flushRafId: number | null = null
-
-/** 将缓冲区的 chunk 合并后一次性写入 store。 按 partType 路由到 text/thinking part。 */
-function _flushChunks(): void {
-  _flushRafId = null
-  if (_chunkBuffer.size === 0) return
-
-  const entries = [..._chunkBuffer.values()]
-  _chunkBuffer.clear()
-
-  for (const entry of entries) {
-    const combinedContent = entry.chunks.join('')
-    if (!combinedContent) continue
-
-    if (entry.partType === 'thinking') {
-      // thinking part 用 findLastPartIndex 精确路由（与 thinkingHandler 一致）
-      let partIndex = pipelineStore.getState().findLastPartIndex(entry.pipelineId, entry.messageId, 'thinking')
-      if (partIndex < 0) {
-        pipelineStore.getState().appendPart(entry.pipelineId, entry.messageId, {
-          type: 'thinking',
-          content: '',
-          state: 'streaming',
-        })
-        partIndex = pipelineStore.getState().findLastPartIndex(entry.pipelineId, entry.messageId, 'thinking')
-      }
-      if (partIndex >= 0) {
-        pipelineStore.getState().appendToPart(entry.pipelineId, entry.messageId, partIndex, combinedContent)
-      }
-    } else {
-      // text part 用 findStreamingPartIndex（仅匹配 text，避免误入 thinking part）
-      let partIndex = pipelineStore.getState().findStreamingPartIndex(entry.pipelineId, entry.messageId)
-      if (partIndex < 0) {
-        pipelineStore.getState().appendPart(entry.pipelineId, entry.messageId, {
-          type: 'text',
-          content: '',
-          state: 'streaming',
-          // part 渲染按数组顺序（= 追加顺序 = 接收顺序），不分配 sequence。
-        })
-        partIndex = pipelineStore.getState().findStreamingPartIndex(entry.pipelineId, entry.messageId)
-      }
-      if (partIndex >= 0) {
-        pipelineStore.getState().appendToPart(entry.pipelineId, entry.messageId, partIndex, combinedContent)
-      }
-    }
-  }
-}
-
-/** 调度 RAF 刷写（幂等，同一帧内多次调用只触发一次） */
-function _scheduleFlush(): void {
-  if (_flushRafId === null) {
-    _flushRafId = requestAnimationFrame(_flushChunks)
-  }
-}
-
-/** 缓冲一个 chunk，等待 RAF 批量刷写。 stream_chunk 和 thinking_chunk 共用。 */
-export function bufferChunk(pipelineId: string, messageId: string, content: string, partType: ChunkPartType): void {
-  const bufferKey = `${pipelineId}::${messageId}::${partType}`
-  const existing = _chunkBuffer.get(bufferKey)
-  if (existing) {
-    existing.chunks.push(content)
-  } else {
-    _chunkBuffer.set(bufferKey, { chunks: [content], pipelineId, messageId, partType })
-  }
-  _scheduleFlush()
-}
-
-/** 立即刷写缓冲区。 streamEnd / streamError / thinkingEnd 必须在 reconcile 之前调用此方法， */
+/** 立即刷写块协议残留缓冲（正文/思考 delta）。streamEnd / streamError /
+ * 手动 Stop（router.tsx）必须在收尾前调用，保证末尾 delta 不丢。 */
 export function flushStreamChunkBuffer(): void {
-  if (_flushRafId !== null) {
-    cancelAnimationFrame(_flushRafId)
-    _flushRafId = null
-  }
-  _flushChunks()
+  flushBlockBuffers()
 }
 
 /** 处理流式开始事件 */
@@ -154,41 +74,6 @@ export function handleStreamStart(eventData: any) {
   }
 }
 
-/** 处理流式块事件 */
-export function handleStreamChunk(eventData: any) {
-  const pipelineId = resolvePipelineId(eventData)
-  if (!pipelineId) {
-    // pipeline_id 为空时 warn 并 return，不使用 _threadId fallback
-    _debugLogger.warn(
-      `[STREAM_CHUNK] pipeline_id missing, discarding event: _threadId=%s`,
-      eventData._threadId?.slice(0, 12),
-    )
-    return
-  }
-  const messageId = extractMessageId(eventData)
-  const content = eventData.content || eventData.data?.content || eventData.data?.chunk || ''
-  if (!messageId) return
-
-  // 相关性门控：非关注 pipeline 的 chunk 直接丢弃，不创建占位、不写 store。
-  if (!isPipelineRelevant(pipelineId)) {
-    return
-  }
-
-  // 确保目标消息存在（chunk 先于 start 到达时自动创建占位符）
-  const msgs = pipelineStore.getState().getMessages(pipelineId)
-  const existingMsg = msgs.find((m: any) => m.id === messageId)
-  if (!existingMsg) {
-    _debugLogger.warn(
-      `[STREAM_CHUNK] msg not found, auto-creating placeholder: pipeline=%s msgId=%s totalMsgs=%d`,
-      pipelineId?.slice(0, 12), messageId?.slice(0, 12), msgs.length,
-    )
-    ensureStreamingPlaceholder(pipelineId, messageId, extractThreadId(eventData))
-  }
-
-  // 缓冲 chunk，由 RAF 统一刷写到 store（合并同帧多个 chunk 为单次更新）
-  bufferChunk(pipelineId, messageId, content, 'text')
-}
-
 /** 处理流式结束事件 */
 export function handleStreamEnd(eventData: any) {
   // 先刷写缓冲区中的残留 chunk，再进行最终合并，避免数据丢失
@@ -208,6 +93,9 @@ export function handleStreamEnd(eventData: any) {
     usePipelineRegistryStore.getState().applyStreamStatus(pipelineId, 'completed')
 
     if (messageId) {
+      // 清理块协议累积状态（正文/思考 delta 已 flush，残留缓冲丢弃——权威内容由
+      // 下方 mergeStreamingParts / 对账兜底）
+      clearBlockStateForMessage(pipelineId, messageId)
       const msgs = pipelineStore.getState().getMessages(pipelineId)
       const msg = msgs.find((m: any) => m.id === messageId)
 
@@ -339,6 +227,8 @@ export function handleStreamError(eventData: any) {
 
   const messageId = extractMessageId(eventData)
   if (messageId) {
+    // 清理块协议累积状态（错误终止：残留缓冲丢弃，内容由对账/重试补回）
+    clearBlockStateForMessage(pipelineId, messageId)
     // error 为对象时落消息顶层 error 字段（source 渲染来源标签、retryable
     // 驱动重试）；旧形态字符串不落（渲染端已按 status='error' 展示文案）。
     const errorEnvelope =
@@ -387,6 +277,3 @@ export function handleStreamError(eventData: any) {
         : undefined,
   })
 }
-
-// 2026-08 清理：handleStreamKeepalive（stream_keepalive 事件）已删除——
-// 后端（kernel ws_session / capability_router / 插件 event-bus）无该事件发射源。

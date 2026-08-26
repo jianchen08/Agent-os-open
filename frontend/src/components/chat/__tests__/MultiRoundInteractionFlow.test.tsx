@@ -23,9 +23,6 @@ import {
   createExecutionStartEvent,
   createExecutionDoneEvent,
   createInteractionRequestEvent,
-  createStreamStartEvent,
-  createStreamChunkEvent,
-  createStreamEndEvent,
   createMockMessage,
   createTextPart,
   createToolCallPart,
@@ -338,13 +335,14 @@ describe('MultiRoundInteractionFlow — AC-1j: 多轮交互流程', () => {
         })
       })
 
-      recorder.record('stream_chunk')
+      recorder.record('text_delta')
       act(() => {
-        emitEvent('stream_chunk', {
-          type: 'stream_chunk',
+        emitEvent('text_delta', {
+          type: 'text_delta',
           message_id: 'msg-after-interaction',
           thread_id: 'thread-1',
-          content: '操作已确认，继续执行...',
+          index: 0,
+          text: '操作已确认，继续执行...',
         })
       })
 
@@ -362,7 +360,7 @@ describe('MultiRoundInteractionFlow — AC-1j: 多轮交互流程', () => {
         'execution_start',
         'user_respond',
         'stream_start',
-        'stream_chunk',
+        'text_delta',
         'stream_end',
       ])
     })

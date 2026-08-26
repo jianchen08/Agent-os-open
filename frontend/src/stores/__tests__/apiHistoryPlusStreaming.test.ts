@@ -137,8 +137,8 @@ describe('API 历史 + 实时流式 合并：顺序 / 渲染 / 气泡', () => {
     const STREAM_MSG = 'msg_stream_a0000000'
     const STREAM_CALL = 'call_stream_01'
     handlers.handleStreamStart(evt('stream_start', { message_id: STREAM_MSG, _threadId: THREAD_ID, sequence: 5 }))
-    handlers.handleStreamChunk(evt('stream_chunk', { message_id: STREAM_MSG, content: '好的，' }))
-    handlers.handleStreamChunk(evt('stream_chunk', { message_id: STREAM_MSG, content: '我来查。' }))
+    handlers.handleTextDelta(evt('text_delta', { message_id: STREAM_MSG, index: 0, text: '好的，' }))
+    handlers.handleTextDelta(evt('text_delta', { message_id: STREAM_MSG, index: 0, text: '我来查。' }))
     flush()
     handlers.handleToolStart(evt('tool_start', {
       message_id: STREAM_MSG, tool_name: 'file_read', call_id: STREAM_CALL, args: { path: '/n' },
@@ -146,7 +146,7 @@ describe('API 历史 + 实时流式 合并：顺序 / 渲染 / 气泡', () => {
     handlers.handleToolResult(evt('tool_result', {
       message_id: STREAM_MSG, tool_name: 'file_read', call_id: STREAM_CALL, success: true, result: '新结果', duration_ms: 4,
     }))
-    handlers.handleStreamChunk(evt('stream_chunk', { message_id: STREAM_MSG, content: '查询完成。' }))
+    handlers.handleTextDelta(evt('text_delta', { message_id: STREAM_MSG, index: 1, text: '查询完成。' }))
     flush()
     handlers.handleStreamEnd(evt('stream_end', {
       message_id: STREAM_MSG, _threadId: THREAD_ID, final_sequence: 5,
@@ -206,7 +206,7 @@ describe('API 历史 + 实时流式 合并：顺序 / 渲染 / 气泡', () => {
     // ── 流式一轮（切走期间发生）──
     const STREAM_MSG = 'msg_backfill_stream'
     handlers.handleStreamStart(evt('stream_start', { message_id: STREAM_MSG, _threadId: THREAD_ID, sequence: 4 }))
-    handlers.handleStreamChunk(evt('stream_chunk', { message_id: STREAM_MSG, content: '流式回复' }))
+    handlers.handleTextDelta(evt('text_delta', { message_id: STREAM_MSG, index: 0, text: '流式回复' }))
     flush()
     handlers.handleStreamEnd(evt('stream_end', {
       message_id: STREAM_MSG, _threadId: THREAD_ID, final_sequence: 4,
@@ -247,7 +247,7 @@ describe('API 历史 + 实时流式 合并：顺序 / 渲染 / 气泡', () => {
     // 流式一轮
     const STREAM_MSG = 'msg_reload_stream'
     handlers.handleStreamStart(evt('stream_start', { message_id: STREAM_MSG, _threadId: THREAD_ID, sequence: 2 }))
-    handlers.handleStreamChunk(evt('stream_chunk', { message_id: STREAM_MSG, content: '刷新前回复' }))
+    handlers.handleTextDelta(evt('text_delta', { message_id: STREAM_MSG, index: 0, text: '刷新前回复' }))
     flush()
     handlers.handleStreamEnd(evt('stream_end', {
       message_id: STREAM_MSG, _threadId: THREAD_ID, final_sequence: 2,

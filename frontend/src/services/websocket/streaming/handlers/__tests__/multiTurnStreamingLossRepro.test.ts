@@ -1,5 +1,5 @@
 /**
- * 流式多轮工具调用消息丢失复现测试
+ * 流式多轮工具调用消息丢失复现测试（LLM 流式 8 事件协议，方案 2026-08-26）
  *
  * 对应用户反馈 bug：多轮工具调用流式对话中，第一次流式输出时有消息，
  * 之后的工具调用轮次消息丢失（工具卡片不显示 / 后续 assistant 内容丢失）。
@@ -9,8 +9,11 @@
  *   用户实测问题仍在 → 丢失发生在流式输出路径（WS handler 增量追加消息时）。
  *
  * 被测链路（真实 handler + 真实 pipelineMessageStore + 真实 RAF 批处理）：
- *   stream_start → thinking/text chunk → tool_start → tool_result
- *   → 第二轮 text chunk → new_message（后端收尾，携带权威 parts）
+ *   stream_start → reasoning/text delta → tool delta → tool_result
+ *   → 第二轮 text delta → new_message（后端收尾，携带权威 parts）
+ *
+ * 正文增量由 text_delta{index, text} 表达（旧 stream_chunk 退役）；
+ * 工具调用仍由 tool_start/tool_result 事件承载（tool_core 引擎路径未迁移）。
  *
  * 核心回归断言（对应"流式多轮工具调用完整显示"）：
  *   1. 多轮工具调用的所有轮次内容（thinking/text/tool_call）必须完整保留
@@ -96,14 +99,13 @@ function snapshotMessage() {
 describe('流式多轮工具调用消息丢失复现', () => {
   let usePipelineMessageStore: any
   let handleStreamStart: any
-  let handleStreamChunk: any
-  let handleStreamEnd: any
+  let handleTextDelta: any
+  let handleBlockStart: any
+  let handleBlockEnd: any
+  let handleReasoningDelta: any
   let handleNewMessage: any
   let handleToolStart: any
   let handleToolResult: any
-  let handleThinkingStart: any
-  let handleThinkingChunk: any
-  let handleThinkingEnd: any
 
   beforeEach(async () => {
     vi.useFakeTimers()
@@ -125,14 +127,13 @@ describe('流式多轮工具调用消息丢失复现', () => {
 
     const handlerMod = await import('@/services/websocket/streaming/handlers')
     handleStreamStart = handlerMod.handleStreamStart
-    handleStreamChunk = handlerMod.handleStreamChunk
-    handleStreamEnd = handlerMod.handleStreamEnd
+    handleTextDelta = handlerMod.handleTextDelta
+    handleBlockStart = handlerMod.handleBlockStart
+    handleBlockEnd = handlerMod.handleBlockEnd
+    handleReasoningDelta = handlerMod.handleReasoningDelta
     handleNewMessage = handlerMod.handleNewMessage
     handleToolStart = handlerMod.handleToolStart
     handleToolResult = handlerMod.handleToolResult
-    handleThinkingStart = handlerMod.handleThinkingStart
-    handleThinkingChunk = handlerMod.handleThinkingChunk
-    handleThinkingEnd = handlerMod.handleThinkingEnd
   })
 
   afterEach(() => {
@@ -144,13 +145,14 @@ describe('流式多轮工具调用消息丢失复现', () => {
     handleStreamStart(makeEvent('stream_start', { sequence: 1 }))
 
     // 第一轮：思考 + 正文
-    handleThinkingStart(makeEvent('thinking_start', { sequence: 1 }))
-    handleThinkingChunk(makeEvent('thinking_chunk', { content: '第一轮思考', sequence: 1 }))
-    handleThinkingEnd(makeEvent('thinking_end', { duration_ms: 100 }))
-    handleStreamChunk(makeEvent('stream_chunk', { content: '第一轮正文', sequence: 2 }))
+    handleBlockStart(makeEvent('block_start', { index: 0, block_type: 'reasoning' }))
+    handleReasoningDelta(makeEvent('reasoning_delta', { index: 0, text: '第一轮思考' }))
+    handleBlockEnd(makeEvent('block_end', { index: 0, block: { block_type: 'reasoning', text: '第一轮思考' } }))
+    handleBlockStart(makeEvent('block_start', { index: 1, block_type: 'text' }))
+    handleTextDelta(makeEvent('text_delta', { index: 1, text: '第一轮正文' }))
     await vi.advanceTimersByTimeAsync(16)
 
-    // 工具调用
+    // 工具调用（tool_core 事件路径未迁移）
     handleToolStart(makeEvent('tool_start', {
       call_id: 'tc-1', tool_name: 'search', args: { q: 'test' }, sequence: 3,
     }))
@@ -158,8 +160,9 @@ describe('流式多轮工具调用消息丢失复现', () => {
       call_id: 'tc-1', tool_name: 'search', result: '搜索结果1', success: true,
     }))
 
-    // 第二轮正文（工具调用后）
-    handleStreamChunk(makeEvent('stream_chunk', { content: '基于工具结果的回答', sequence: 4 }))
+    // 第二轮正文（工具调用后，新块索引）
+    handleBlockStart(makeEvent('block_start', { index: 2, block_type: 'text' }))
+    handleTextDelta(makeEvent('text_delta', { index: 2, text: '基于工具结果的回答' }))
     await vi.advanceTimersByTimeAsync(16)
 
     // 后端 new_message 收尾（Rust 内核 ws_session.rs 的 serverParts 只有 text）
@@ -198,8 +201,9 @@ describe('流式多轮工具调用消息丢失复现', () => {
   it('场景2（RAF 未 flush 时 new_message 到达）：本地累积的 tool_call 不被 serverParts 覆盖', async () => {
     handleStreamStart(makeEvent('stream_start', { sequence: 1 }))
 
-    // 正文 chunk 缓冲（不推进 RAF）
-    handleStreamChunk(makeEvent('stream_chunk', { content: '正文', sequence: 2 }))
+    // 正文 delta 缓冲（不推进 RAF）
+    handleBlockStart(makeEvent('block_start', { index: 0, block_type: 'text' }))
+    handleTextDelta(makeEvent('text_delta', { index: 0, text: '正文', sequence: 2 }))
 
     // 工具调用（同步 handler，不依赖 RAF）
     handleToolStart(makeEvent('tool_start', {
@@ -227,9 +231,7 @@ describe('流式多轮工具调用消息丢失复现', () => {
   })
 
   it('场景3（tool_start 乱序/占位丢失）：tool_start 到达时消息不存在，工具调用不静默丢弃', async () => {
-    // 关键复现：模拟 stream_start 占位丢失（WS 断线/乱序），tool_start 先到
-    // handleStreamChunk/handleThinkingStart 有 auto-creating placeholder，
-    // handleToolStart 直接 return —— 工具调用静默丢失。
+    // 模拟 stream_start 占位丢失（WS 断线/乱序），tool_start 先到
     handleToolStart(makeEvent('tool_start', {
       call_id: 'tc-1', tool_name: 'search', args: {}, sequence: 1,
     }))
@@ -238,7 +240,6 @@ describe('流式多轮工具调用消息丢失复现', () => {
     console.log('[场景3] tool_start 后快照:', JSON.stringify(snap, null, 2))
 
     // ★ 断言：工具调用不静默丢弃（消息占位存在，含 tool_call part）
-    // 当前实现：toolHandler.ts `if (!msg) return` → 断言失败 → 确认 bug
     expect(snap.found).toBe(true)
     const toolParts = snap.parts.filter((p: any) => p.type === 'tool_call')
     expect(toolParts.length).toBe(1)
