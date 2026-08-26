@@ -1,0 +1,22 @@
+"""dsh_adapter 插件测试 conftest——把插件目录注入 sys.path。
+
+插件位于 plugins/shared/system/dsh_adapter/，内部平铺 import
+（from translator import ...）。本 conftest 同时暴露 _PLUGIN_SOURCE_DIRS 给
+tests/plugins/conftest.py 的 pytest_runtest_setup，治理同进程多插件裸名串扰。
+"""
+
+from __future__ import annotations
+
+import sys
+from pathlib import Path
+
+_PLUGIN_DIR = (
+    Path(__file__).resolve().parents[4]
+    / "plugins" / "shared" / "system" / "dsh_adapter"
+)
+
+_PLUGIN_SOURCE_DIRS = [str(_PLUGIN_DIR)]
+
+_s = str(_PLUGIN_DIR)
+if _s not in sys.path:
+    sys.path.insert(0, _s)

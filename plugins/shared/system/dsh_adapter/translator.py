@@ -761,6 +761,12 @@ def _enforce_contrast(fg: tuple[int, int, int], bgs: list[tuple[int, int, int]],
             r = min(_wcag_ratio(cur, b) for b in bgs)
             if r > best_r:
                 best, best_r = cur, r
+        if best_r < min_ratio:
+            # 步进网格停在端点前（高饱和面白字上限 4.86、红面黑字上限
+            # 4.63）：网格点够不到 4.5 时以纯端点兜底，不静默返回次优
+            t_r = min(_wcag_ratio(target, b) for b in bgs)
+            if t_r > best_r:
+                best, best_r = target, t_r
         return best, best_r
 
     light, lr = run((255, 255, 255))
@@ -834,6 +840,112 @@ def _extract_bubble_tokens(css: str, dark: bool) -> dict[str, str]:
             if val:
                 out[name] = val
             break
+    return out
+
+
+# ── 品牌面提取：DSH 用户气泡的涂料源 ──
+# 用户气泡在 DSH 原生由 --dsw-alias-brand-primary/-text 上色；皮肤按
+# :root（基准态）/ body[data-ds-dark-theme] 两段重涂。文件头部状态切换
+# 小块会先于别名定义出现（首个暗色选择器位置不能当分界），段归属按
+# 「声明所在块的 selector」判定。
+_CSS_BLOCK_RE = re.compile(r"([^{}]+)\{([^{}]*)\}")
+
+
+def _pick_skin_alias(css: str, name: str, dark: bool) -> str | None:
+    """skin.css 别名变量取值：目标态有值取之，单值皮肤回退另一段。"""
+    light: list[str] = []
+    darks: list[str] = []
+    for selector, body in _CSS_BLOCK_RE.findall(css):
+        m = re.search(re.escape(name) + r":\s*([^;]+);", body)
+        if m:
+            (darks if "[data-ds-dark-theme]" in selector else light).append(m.group(1).strip())
+    candidates = darks if (dark and darks) else (light or darks)
+    return candidates[0] if candidates else None
+
+
+def _resolve_var_ref(css: str, value: str) -> str:
+    """var(--x) 单跳解引用（--x 定义于同一 skin.css，如 whale-mom 的
+    var(--dsw-static-blue-500)）；非 var 引用或无法解析原样返回。"""
+    m = re.fullmatch(r"var\(\s*(--[\w-]+)\s*\)", value.strip())
+    if not m:
+        return value.strip()
+    dm = re.search(re.escape(m.group(1)) + r":\s*([^;]+);", css)
+    return dm.group(1).strip() if dm else value.strip()
+
+
+def _face_solid_rgb(
+    face_raw: str, canvas_rgb: tuple[int, int, int] | None
+) -> tuple[int, int, int] | None:
+    """气泡面 → 静态可判定的实色：不透明面直取；半透明面合成到画布上
+    （同侧栏 fill 的近似口径——真实渲染面是立绘，画布是其静态最佳近似）。
+    无法解析（渐变/未解引用/半透明且无画布）返回 None，调用方整对跳过。"""
+    parsed = _parse_css_color(face_raw)
+    if parsed is None:
+        return None
+    if parsed[3] >= 0.99:
+        return parsed[:3]
+    if canvas_rgb is None:
+        return None
+    return _composite_rgba(parsed, canvas_rgb)
+
+
+def _brand_text_seed(
+    css: str, dark: bool, face_solid: tuple[int, int, int]
+) -> tuple[int, int, int]:
+    """配对文字起点：皮肤品牌文字色优先；无效（部分皮肤该值等于面值，
+    即装饰色非文字色）回退按面亮度黑白择优。"""
+    raw = _resolve_var_ref(css, _pick_skin_alias(css, "--dsw-alias-brand-text", dark) or "")
+    parsed = _parse_css_color(raw) if raw else None
+    if parsed and parsed[3] >= 0.99:
+        return parsed[:3]
+    return (255, 255, 255) if _wcag_luminance(face_solid) < 0.6 else (0, 0, 0)
+
+
+def _resolve_bubble_variables(
+    extracted: dict[str, str],
+    css: str,
+    dark: bool,
+    canvas_str: str,
+    canvas_rgb: tuple[int, int, int] | None,
+) -> dict[str, str]:
+    """皮肤气泡令牌定稿：底色 + 配对文字成对发射。
+
+    两类撞色根因都在此收口：
+    - 只发底色不发文字 → 文字回落基准预设值（浅玻璃面上白字不可读）；
+    - 无原生气泡规则的皮肤连底色也不发 → 回落内置主题涂料（亮青/深青
+      气泡与皮肤脱节）。
+
+    面的来源（优先级）：
+    - patches.css 原样提取（原生真值，如女仆工坊含透明度玻璃面）；
+    - 缺省时用户面取 --dsw-alias-brand-primary（原生用户气泡涂料源，
+      var 引用单跳解），AI 面取画布玻璃 color-mix(canvas 80%, transparent)
+      —— 与 MessageItem 平铺态文档化回退 color-mix(var(--card) 80%)
+      同配方（皮肤下 --card 即画布；玻璃面叠在自身色彩族上，对比度按
+      画布判定）。
+
+    配对文字 = 面实色上强制 ≥4.5。任一侧无法静态判定时该侧整对跳过
+    （保留内置成对值透传），不做拆对发射。
+    """
+    out: dict[str, str] = {}
+
+    def _emit(role: str, bg_out: str | None, solid: tuple[int, int, int] | None) -> None:
+        if not bg_out or solid is None:
+            return
+        out[f"--bubble-{role}-bg"] = bg_out
+        out[f"--bubble-{role}-text"] = _enforce_contrast(_brand_text_seed(css, dark, solid), [solid])
+
+    user_face = extracted.get("--bubble-user-bg")
+    if user_face is None:
+        brand_raw = _pick_skin_alias(css, "--dsw-alias-brand-primary", dark)
+        user_face = _resolve_var_ref(css, brand_raw) if brand_raw else None
+    _emit("user", user_face, _face_solid_rgb(user_face, canvas_rgb) if user_face else None)
+
+    ai_face = extracted.get("--bubble-ai-bg")
+    if ai_face is None and canvas_str and canvas_rgb is not None:
+        _emit("ai", f"color-mix(in srgb, {canvas_str} 80%, transparent)", canvas_rgb)
+    else:
+        _emit("ai", ai_face, _face_solid_rgb(ai_face, canvas_rgb) if ai_face else None)
+
     return out
 
 
@@ -958,9 +1070,9 @@ def skins_to_plugin_themes(base_dir: str | Path | None = None) -> list[dict[str,
                 patches_css = patches_path.read_text(encoding="utf-8", errors="replace")
             except OSError:
                 patches_css = ""
+        bubble_extracts: dict[str, str] = {}
         if patches_css:
-            for k, v in _extract_bubble_tokens(patches_css, dark=(base == "dark")).items():
-                variables[k] = v
+            bubble_extracts = _extract_bubble_tokens(patches_css, dark=(base == "dark"))
 
         if canvas:
             variables["--ds-bg-canvas"] = canvas
@@ -1055,6 +1167,21 @@ def skins_to_plugin_themes(base_dir: str | Path | None = None) -> list[dict[str,
                 variables["--accent"] = _hex_to_hsl(accent)
                 variables["--accent-foreground"] = _hex_to_hsl(accent_fg_hex)
                 variables["--ring"] = _hex_to_hsl(accent)
+
+        # 气泡令牌成对定稿（底色+配对文字，跟皮收口）——见
+        # _resolve_bubble_variables；置于 shadcn 桥之后（画布实色已解析）
+        variables.update(
+            _resolve_bubble_variables(
+                bubble_extracts, css, dark=(base == "dark"),
+                canvas_str=canvas,
+                canvas_rgb=canvas_rgb[:3] if canvas_rgb is not None else None,
+            )
+        )
+        # 非气泡类提取令牌（--chat-input-bg 等）原样透传：成对定稿只管
+        # --bubble-* 四键，其余消费端自持前景
+        for k, v in bubble_extracts.items():
+            if not k.startswith("--bubble-"):
+                variables[k] = v
 
         # 皮肤字体 → --font-ui（主题管线原生消费 main.tsx fontFamily）
         if css:
