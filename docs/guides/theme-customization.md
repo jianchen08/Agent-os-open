@@ -2,7 +2,7 @@
 
 本指南介绍系统真实提供的主题功能：**预设主题切换**与**显示模式切换**。
 
-主题系统完全前端化，无后端依赖，配置存储在浏览器 localStorage 中。
+主题分两条轨：**前端预设/动态 JSON 主题**（纯前端，配置存储在浏览器 localStorage）与**插件主题**（插件经 manifest `contributes.themes` 下发的 CSS 变量包，含皮肤）。用户视角两者都出现在主题选择里；开发侧差异见 [theme-development.md](theme-development.md)。
 
 ---
 
@@ -26,7 +26,7 @@
 
 ## 2. 预设主题
 
-系统内置 5 套预设主题：
+系统内置 7 套预设主题（另有 3 套动态 JSON 主题与插件主题，见第 6 节）：
 
 | 主题 ID | 名称 | 类别 | 说明 |
 |---------|------|------|------|
@@ -34,7 +34,9 @@
 | `light` | 浅色主题 | 浅色 | 默认浅色主题，适合日间使用 |
 | `deep-space` | 深空指挥台 | 深色 | 模拟太空指挥中心的科技感界面 |
 | `ocean-breeze` | 海洋微风 | 浅色 | 清新海洋风配色 |
-| `high-contrast` | 高对比度 | 特殊 | 无障碍高对比度主题 |
+| `pixel-art` | 像素糖果 | 浅色 | PICO-8 复古色板，暖白画布+积木硬阴影 |
+| `moe-soft` | 奶油甜心 | 浅色 | 奶油软萌系：奶白底+玫瑰粉，柔光圆角 |
+| `high-contrast` | 高对比度 | 特殊 | 无障碍高对比度主题（WCAG 2.1 AAA 基准） |
 
 **操作方式**：
 
@@ -72,15 +74,22 @@
 
 ## 6. 开发者参考
 
-若需要修改预设主题配色或新增预设主题，相关代码与配置：
+主题分两条开发轨（详见 [theme-development.md](theme-development.md)）：
+- **前端预设**：`frontend/src/config/themes/presets/*.ts` 写 `ThemeConfig` + `index.ts` 注册（下表）；
+- **插件主题**：插件 manifest `contributes.themes` 声明 CSS 变量包（可带 `skin` 皮肤），随插件启用自动出现在主题列表。
+
+相关代码与配置：
 
 | 资源 | 路径 | 用途 |
 |------|------|------|
 | 主题设置页面 | `frontend/src/pages/settings/ThemeSettingsPage.tsx` | 主题选择 UI |
 | 预设主题定义 | `frontend/src/config/themes/presets/*.ts` | 各主题的颜色/组件样式配置 |
 | 预设主题注册 | `frontend/src/config/themes/index.ts` | `presetThemes` 映射表与 `themeList` 列表 |
+| 动态 JSON 主题 | `frontend/public/themes/*.json` | 构建期扫描的动态主题（forest-mist / lavender-field / sunset-glow） |
+| 插件主题注册 | `frontend/src/services/schema/ContributionRegistry.ts` | 经内核 `plugin_contributes` 出口发现插件主题 |
+| 皮肤运行时 | `frontend/src/services/skinRuntime.ts` | 插件皮肤 CSS 注入 + hooks.mjs 装饰层 |
 | 主题状态管理 | `frontend/src/stores/themeStore.ts` | `useThemeStore`（setTheme/setMode/currentThemeId/resolvedTheme） |
-| 主题类型定义 | `frontend/src/types/theme.ts` | `ThemeConfig`/`ThemeInfo`/`ThemeMode` 等类型 |
+| 主题类型定义 | `frontend/src/types/theme.ts` | `ThemeConfig`/`ThemeInfo`/`ThemeMode`/`PluginTheme` 等类型 |
 | 主题服务 | `frontend/src/services/themeService.ts` | 主题编译（`compileThemeVariables` 将配置转为 CSS 变量） |
 | 主题按钮/面板 | `frontend/src/components/layout/ThemeButton.tsx`、`ThemePanel.tsx` | 顶部快捷切换组件 |
 

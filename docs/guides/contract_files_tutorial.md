@@ -3,6 +3,13 @@
 > **目标读者**：刚加入灵汐 AgentOS 0.2 项目的开发者、插件作者、想理解"内核和插件到底是怎么约定合作的"的好奇者
 > **读完你能懂**：项目里有哪些"契约文件"、它们各自规定了什么、为什么这么规定、在真实开发场景里怎么用
 
+> **📍 现状勘误（相对 2026-07-13 调研时点的路径变更）**：
+> - `docs/0.2_rust_plugin_solution.md` → 已归档至 `docs/working/_archive_0.2_migration/0.2_rust_plugin_solution.md`
+> - `src/pipeline/plugin.py` / `src/pipeline/types.py` → 已随 0.1 `src/` 整体删除；0.2 等价契约：管道插件 Python 基类在 `plugins/shared/pipeline/_base/plugin.py`，类型定义在 `plugins/sdk/src/agentos_plugin_sdk/pipeline_types.py`
+> - `.project/manifest_v2_schema.json` / `.project/mcp_extension_protocol.md` → 始终未作为独立文件产出；manifest 真值源 = `kernel/crates/core/src/traits.rs::PluginManifest`，协议文档 = `docs/plugin-protocol.md`
+> - `docs/guides/plugin_development_guide.md` / `plugin_development_standard.md`（0.1）→ 已删除；现行开发指南 = `docs/guides/` 分篇（见 [README.md](README.md)）
+> - `docs/ARCHITECTURE.md` → 已更新为 0.2 架构口径
+
 ---
 
 ## 〇、什么是"契约文件"？
@@ -22,8 +29,8 @@
 | JSON Schema | `manifest_v2_schema.json` | 一份"填表说明"，规定插件 manifest 字段必须长啥样 |
 | Markdown 协议文档 | `mcp_extension_protocol.md` | 一份"对话手册"，规定两边怎么说话 |
 | Rust trait 定义 | `kernel/crates/core/src/traits.rs` | 一份"接口合同"，Rust 编译器照此校验代码 |
-| Python 抽象基类 | `src/pipeline/plugin.py` | 一份"基类合同"，Python 解释器照此实例化插件 |
-| 教程/规范文档 | `plugin_development_guide.md` | 一份"开发者手册"，告诉你怎么写代码 |
+| Python 抽象基类 | `plugins/shared/pipeline/_base/plugin.py` | 一份"基类合同"，Python 解释器照此实例化插件 |
+| 教程/规范文档 | `docs/guides/`（分篇指南） | 一份"开发者手册"，告诉你怎么写代码 |
 
 **关键原则**：契约一旦定下来，**所有实现方都必须遵守**。这就是为什么灵汐把它们叫做"宪法"——后续所有插件、内核代码、Python SDK 都是围绕这些契约构建的。
 
@@ -40,7 +47,7 @@
 
 | # | 文件路径 | 形式 | 角色 | 状态 |
 |---|---------|------|------|------|
-| 1 | `docs/0.2_rust_plugin_solution.md` | 方案总纲 | 0.2 整体方案的设计决策与 AC 总表 | ✅ 已存在 |
+| 1 | `docs/working/_archive_0.2_migration/0.2_rust_plugin_solution.md` | 方案总纲 | 0.2 整体方案的设计决策与 AC 总表（已归档） | ✅ 已存在 |
 | 2 | `docs/working/0.2插件体系核心决策.md` | 决策文档 | 9+1 条插件体系核心决策（统一 trait / 状态隔离 / 路由信号精简等） | ✅ 已存在 |
 | 3 | `docs/0.2_rust_plugin_checkpoints.md` | 检查点设计 | 13 个检查点 + 里程碑门控 | ✅ 已存在 |
 | 4 | `.project/manifest_v2_schema.json` | JSON Schema | 插件 manifest V2.0 字段校验规范 | ⏳ task_02 待产出 |
@@ -48,22 +55,22 @@
 | 6 | `kernel/crates/core/src/lib.rs` | Rust 模块入口 | 0.2 内核 core crate 的模块组织入口 | ✅ 已存在 |
 | 7 | `kernel/crates/core/src/traits.rs` | Rust Trait 定义 | 内核核心契约——PipelinePlugin / PluginInvoker / CapabilityRegistry / DependencyResolver / LlmProvider / PluginLoader | ✅ 已存在 |
 | 8 | `kernel/crates/core/src/types.rs` | Rust 数据类型 | 核心共享类型——RouteType / ErrorPolicy / PluginResult / PluginContext / TenantContext / ToolCategory 等 | ✅ 已存在 |
-| 9 | `src/pipeline/plugin.py` | Python 抽象基类 | 0.1 旧版插件契约（IPlugin / IInputPlugin / ICorePlugin / IOutputPlugin / PluginContext / PluginResult / OutputResult） | ✅ 已存在（0.1 对照基线） |
-| 10 | `src/pipeline/types.py` | Python 类型定义 | 0.1 旧版类型——StateKeys / ErrorPolicy / RouteSignal / TargetType | ✅ 已存在（0.1 对照基线） |
+| 9 | `plugins/shared/pipeline/_base/plugin.py` | Python 抽象基类 | 管道插件 Python 基类（IPlugin / IInputPlugin / ICorePlugin / IOutputPlugin / PluginContext / PluginResult / OutputResult），0.2 sidecar 管道插件业务层继承它 | ✅ 已存在 |
+| 10 | `plugins/sdk/src/agentos_plugin_sdk/pipeline_types.py` | Python 类型定义 | StateKeys / RouteSignal / TargetType / create_initial_state 等 SDK 侧类型 | ✅ 已存在 |
 | 11 | `config/templates/plugin_scaffold/core_plugin.py` | 脚手架模板 | Core 插件模板（含 `ICorePlugin` 继承） | ✅ 已存在 |
 | 12 | `config/templates/plugin_scaffold/input_plugin.py` | 脚手架模板 | Input 插件模板（含 `IInputPlugin`、enabled 默认 True） | ✅ 已存在 |
 | 13 | `config/templates/plugin_scaffold/output_plugin.py` | 脚手架模板 | Output 插件模板（含 `IOutputPlugin`、route_signals 声明） | ✅ 已存在 |
-| 14 | `docs/guides/plugin_development_guide.md` | 完整教程 | 47 个现有插件的工作机制 + 端到端示例（从设计到测试） | ✅ 已存在 |
-| 15 | `docs/guides/plugin_development_standard.md` | 标准规范 | 命名规范 / 目录结构 / 接口约束 / 错误策略 / State 命名空间 / 类型插槽 | ✅ 已存在 |
-| 16 | `docs/ARCHITECTURE.md` | 架构总览 | 0.1 当前架构总览（设计哲学 / 子系统 / 数据流 / 扩展点） | ✅ 已存在 |
+| 14 | `docs/guides/`（分篇指南） | 完整教程 | 插件开发总览 / sidecar / native / 外部 MCP / 主题 / Agent 配置 / 管道配置 / 排障 | ✅ 已存在 |
+| 15 | `docs/plugin-protocol.md` | 协议权威 | plugin.json manifest 全字段 + echo_tool 从零走查 + SDK 速查 | ✅ 已存在 |
+| 16 | `docs/ARCHITECTURE.md` | 架构总览 | 0.2 架构总览（设计哲学 / 子系统 / 数据流 / 扩展点） | ✅ 已存在 |
 
-> **教程侧注**：表里 4 号和 5 号文件（`.project/` 下的 JSON Schema 和 MCP 扩展协议文档）目前还没在仓库里——它们是 task_02 的待产出文件。下面讲解这两份文件的内容时，会基于 [来源: docs/0.2_rust_plugin_solution.md]、[来源: docs/working/0.2插件体系核心决策.md]、[来源: kernel/crates/core/src/traits.rs] 中已固化的字段名和决策，反向推断它们的预期内容。读者实测请以 task_02 实际产出版本为准。
+> **教程侧注**：表里 4 号和 5 号文件（`.project/` 下的 JSON Schema 和 MCP 扩展协议文档）未作为独立文件产出——manifest 真值源是 `kernel/crates/core/src/traits.rs::PluginManifest`（配 `docs/plugin-protocol.md` 说明）。下面讲解这两份"虚拟文件"的内容时，基于 [来源: docs/working/_archive_0.2_migration/0.2_rust_plugin_solution.md]、[来源: docs/working/0.2插件体系核心决策.md]、[来源: kernel/crates/core/src/traits.rs] 中已固化的字段名和决策反向推导，仅供理解。
 
 ---
 
 ## 二、逐个契约文件详解
 
-### 2.1 方案总纲：`docs/0.2_rust_plugin_solution.md`
+### 2.1 方案总纲：`docs/working/_archive_0.2_migration/0.2_rust_plugin_solution.md`（已归档）
 
 #### 这是什么？
 
@@ -96,7 +103,7 @@
 - **产品经理/架构师**：拿 §3 的决策作为讨论基线，知道每条决策的"否决项"和来由
 - **QA 工程师**：直接照 §4 的 verify_hint 写验收测试
 
-> **来源**：[来源: docs/0.2_rust_plugin_solution.md, §1-4]
+> **来源**：[来源: docs/working/_archive_0.2_migration/0.2_rust_plugin_solution.md, §1-4]
 
 ---
 
@@ -241,7 +248,7 @@
 
 ### 2.5 MCP 灵汐扩展协议：`.project/mcp_extension_protocol.md`
 
-> ⚠️ **状态说明**：此文件同样是 task_02 的产出目标，当前仓库尚未生成。以下基于 [来源: kernel/crates/core/src/traits.rs LifecycleHook 枚举]、[来源: docs/0.2_rust_plugin_solution.md §3.1（MCP 选型）]、[来源: docs/working/0.2插件体系核心决策.md] 反向推导预期内容。
+> ⚠️ **状态说明**：此文件未作为独立文件产出（协议以官方 MCP 标准为准）。以下基于 [来源: kernel/crates/core/src/traits.rs LifecycleHook 枚举]、[来源: docs/working/_archive_0.2_migration/0.2_rust_plugin_solution.md §3.1（MCP 选型）]、[来源: docs/working/0.2插件体系核心决策.md] 反向推导预期内容。
 
 #### 这是什么？
 
@@ -291,7 +298,7 @@ async fn send_lifecycle_hook(
 - **插件作者**：用 SDK 注册扩展消息的处理函数（一般 SDK 会封装成装饰器，不必手写协议）
 - **内核开发者**：照 `PluginInvoker` trait 的方法名调用扩展消息
 
-> **来源（反向推导）**：[来源: kernel/crates/core/src/traits.rs §3 LifecycleHook / HookContext]、[来源: docs/0.2_rust_plugin_solution.md §3.1 MCP 选型]
+> **来源（反向推导）**：[来源: kernel/crates/core/src/traits.rs §3 LifecycleHook / HookContext]、[来源: docs/working/_archive_0.2_migration/0.2_rust_plugin_solution.md §3.1 MCP 选型]
 
 ---
 
@@ -513,25 +520,25 @@ pub struct PluginContext {
 
 ---
 
-### 2.9 Python 旧版插件契约：`src/pipeline/plugin.py`（0.1 对照基线）
+### 2.9 Python 插件基类：`plugins/shared/pipeline/_base/plugin.py`
 
 #### 这是什么？
 
-0.1 项目的插件抽象基类（ABC），是 0.2 Rust trait 的"对照参考"。0.2 在保留心智模型的基础上做了精简（删除 fork/delegate）和 Rust 化。
+sidecar 管道插件业务层的 Python 抽象基类（ABC）——`server.py` MCP 适配层之下的业务实现继承它。（0.1 的 `src/pipeline/plugin.py` 已随 src/ 删除，本文件是它的 0.2 承接者，心智模型一致。）
 
 #### 关键类
 
-| 类 | 角色 | 与 0.2 的对应 |
+| 类 | 角色 | 与内核 Rust 侧的对应 |
 |-----|------|---------------|
-| `IPlugin` | 插件抽象基类，所有插件的统一接口 | 对应 `PipelinePlugin` trait |
+| `IPlugin` | 插件抽象基类，所有管道插件的统一接口 | 对应 `PipelinePlugin` trait |
 | `IInputPlugin(IPlugin)` | Input 插件基类 | 对应 `InputPipelinePlugin` trait |
 | `ICorePlugin(IPlugin)` | Core 插件基类，返回 dict | 对应 `CorePipelinePlugin` trait |
 | `IOutputPlugin(IPlugin)` | Output 插件基类，返回 OutputResult | 对应 `OutputPipelinePlugin` trait |
-| `PluginContext` | Python 版插件上下文（带 `_services`） | 对应 `PluginContext` struct |
-| `PluginResult` | Python 版插件结果 | 对应 `PluginResult` struct |
+| `PluginContext` | 插件上下文（state / config / `_services`） | 对应 `PluginContext` struct |
+| `PluginResult` | 插件结果（state_updates / route_signal / skip_remaining / error） | 对应 `PluginResult` struct |
 | `OutputResult(PluginResult)` | Output 插件专用结果 | 对应 `PluginResult` + `route_signal` |
 
-#### 0.1 vs 0.2 对比
+#### Python 业务层 vs 内核 Rust 契约对比
 
 | 维度 | 0.1 Python | 0.2 Rust |
 |------|-----------|----------|
@@ -544,38 +551,31 @@ pub struct PluginContext {
 
 #### 实际场景
 
-- **0.1 插件作者**：继承 `IInputPlugin` / `ICorePlugin` / `IOutputPlugin`，实现 `execute()`
-- **0.2 迁移者**：照 0.1 的 IPlugin 心智，在 0.2 实现对应 Rust trait，保留相同的 state 读写语义
-- **历史背景理解者**：看 0.1 vs 0.2 对比，能感受到"决策怎么从 Python 时代的宽松演进到 Rust 时代的强类型"
+- **sidecar 管道插件作者**：继承 `IInputPlugin` / `ICorePlugin` / `IOutputPlugin`，实现 `execute()`（`server.py` 适配层负责 MCP 协议，业务类只管 state 读写）
+- **native 插件作者**：按同样的 state 读写语义实现内核侧 `PipelinePlugin` trait（见 [guides/plugin-native-rust.md](plugin-native-rust.md)）
+- **对照理解者**：看 Python 业务层 vs Rust trait 对比，理解"同一契约在两种语言里的形态"
 
-> **来源**：[来源: src/pipeline/plugin.py, 全文 217 行]
+> **来源**：[来源: plugins/shared/pipeline/_base/plugin.py]
 
 ---
 
-### 2.10 Python 旧版类型定义：`src/pipeline/types.py`（0.1 对照基线）
+### 2.10 Python 类型定义：`plugins/sdk/src/agentos_plugin_sdk/pipeline_types.py`
 
 #### 这是什么？
 
-0.1 项目的管道核心类型：StateKeys（state 字段名常量）、ErrorPolicy（错误策略枚举）、RouteSignal（路由信号数据类）、TargetType（执行目标枚举）、`create_initial_state` 工厂函数。
+SDK 侧管道类型：StateKeys（state 字段名常量）、RouteSignal（路由信号数据类）、TargetType（执行目标枚举）、`create_initial_state` 工厂函数——sidecar 管道插件的 server.py 适配层用它构造 `PluginContext`。
 
 #### 关键内容
 
-- **StateKeys**——25 个 state 字段名常量（ITERATION / CORE_TYPE / ENDED / SESSION_ID / RAW_RESULT / RAW_TOOL_CALLS / RAW_THINKING ...）
-- **ErrorPolicy**——4 个枚举值保留仅为兼容已冻结 manifest 的校验，运行时不再按它分发行为（ADR 2026-08-18）
-- **RouteSignal**——`@dataclass`，字段：`route_type: str` + `target` + `reason` + `payload`
-
-> **0.1 → 0.2 演进**：
-> - `route_type` 从 `str`（无类型约束）升级为 `RouteType` 枚举（强类型，4 种）
-> - `target` 字段统一为 `Vec<String>`（0.1 是 `str | list[str] | None`）
-> - 新增 `TenantContext` 多租户上下文（0.1 无）
+- **StateKeys**——state 字段名常量（ITERATION / CORE_TYPE / ENDED / SESSION_ID / RAW_RESULT / RAW_TOOL_CALLS / RAW_THINKING ...）
+- **RouteSignal**——`@dataclass`，字段：`route_type: str` + `target` + `reason` + `payload`（内核侧对应强类型 `RouteType` 枚举，4 种）
 
 #### 实际场景
 
-- **0.1 插件作者**：`from pipeline.types import ErrorPolicy, StateKeys` 直接用
-- **0.2 迁移者**：把 0.1 的 `route_type="next_llm"` 字符串改成 0.2 的 `RouteType::NextLlm` 枚举
-- **state 字段约定**：StateKeys 是项目级约定，0.2 沿用同样字段名（README 标注 0.1→0.2 配置兼容）
+- **sidecar 管道插件作者**：server.py 适配层用 `create_initial_state(**state)` + `PluginContext` 组装执行上下文（见 [guides/plugin-sidecar-python.md](plugin-sidecar-python.md) 示例 C）
+- **state 字段约定**：StateKeys 是项目级约定，内核与插件两侧字段名一致
 
-> **来源**：[来源: src/pipeline/types.py, 全文 114 行]
+> **来源**：[来源: plugins/sdk/src/agentos_plugin_sdk/pipeline_types.py]
 
 ---
 
@@ -622,61 +622,28 @@ class {PluginClass}(IOutputPlugin):
 
 ---
 
-### 2.14 插件开发完整教程：`docs/guides/plugin_development_guide.md`
+### 2.14 插件开发分篇指南：`docs/guides/`
 
 #### 这是什么？
 
-47 个现有插件的"工作机制 + 端到端示例"。从概念到实现，配合真实代码示例讲解，分 5 章。
-
-#### 关键章节
-
-**第一章"理解插件体系"**——解释管道循环、3 种插件类型、插件间通信（通过 state，不直接调用）、47 个现有插件一览。
-
-**第二章"快速开始 — 创建一个插件"**——目录结构（`src/plugins/{input|output|core}/{plugin_name}/`）、注册到管道配置（`config/pipelines/default.yaml`）、运行测试。
-
-**第三章"从零开发 — 完整教程"**——以 `result_length_guard` 为例，6 步完整演示：需求场景 → 设计 state 交互 → 创建文件 → 实现逻辑 → 写测试 → 注册配置 → 运行测试。
-
-**第四章"高级主题"**——类型插槽使用（register_types）、插件间协作模式（直接检测 vs 检测执行解耦）、路由信号详解、配置覆盖（Agent 级别）。
-
-**第五章"常见问题"**——错误策略决策树、state 共享、生命周期、性能、调试。
+按任务组织的开发指南分篇（索引见 [README.md](README.md)）：[plugin-development.md](plugin-development.md)（总览/目录/注册/命名与 State 约定）、[plugin-sidecar-python.md](plugin-sidecar-python.md)（Python 边车，含工具/服务/管道三示例与测试规范）、[plugin-native-rust.md](plugin-native-rust.md)（Rust cdylib）、[plugin-external-mcp.md](plugin-external-mcp.md)、[theme-development.md](theme-development.md)、[agent-configuration.md](agent-configuration.md)、[pipeline-configuration.md](pipeline-configuration.md)、[troubleshooting.md](troubleshooting.md)。
 
 #### 实际场景
 
-- **新手**：照第三章"result_length_guard"完整示例，30 分钟写完第一个插件
-- **老手**：遇到边缘问题时翻第五章 FAQ
-- **code review**：照第四章检查协作模式是否合理
+- **新手**：总览 → sidecar 分篇 → 配置两篇，30 分钟写完第一个插件
+- **排障**：troubleshooting.md 的"为什么不生效"对照表
 
-> **来源**：[来源: docs/guides/plugin_development_guide.md, 全文 600+ 行]
+> **来源**：[来源: docs/guides/README.md]
 
 ---
 
-### 2.15 插件开发标准规范：`docs/guides/plugin_development_standard.md`
+### 2.15 插件协议权威文档：`docs/plugin-protocol.md`
 
 #### 这是什么？
 
-"硬规则"清单：命名规范、目录结构、配置格式、接口约束、错误策略、State 命名空间、类型插槽——所有插件必须遵守的标准化要求。
+plugin.json manifest 全字段规范（字段总表 / capabilities / requires_services / 外部 MCP 接入 / 双根发现 / config_refs / ui_schema）+ 从零开发 echo_tool 完整走查 + SDK 用法速查 + 调试 FAQ。命名规范与 State 命名空间约定的现行版本在 [guides/plugin-development.md §8](plugin-development.md#8-命名与-state-约定)。
 
-#### 关键章节
-
-**1. 命名规范**——插件名 `snake_case`、目录名与插件名一致、主文件名固定 `plugin.py`、类名 `{CamelCase}Plugin`。
-
-**2. 目录结构**——标准两级结构 `src/plugins/{type}/{name}/{__init__.py, plugin.py}`，测试放项目级 `tests/`。
-
-**3. 配置格式**——`plugins:` 列表下 `{name, config: {enabled, ...}}`，布尔用 `true/false`，字符串不带引号。
-
-**4. 接口约束**——必须继承对应基类、必须实现 `name` / `priority` / `execute`、构造函数接受 `config: dict | None = None`、`execute` 必须是 async。
-
-**5. State 命名空间**——Input 写 `context.*` / `knowledge.*` / `prompt.*` / `tool.*` / `security.*`；Core 写 `raw_result` / `raw_tool_calls` / `raw_thinking`；Output 写 `router.*` / `track.*` / `memory.*` / `evaluation.*`。
-
-**6. 类型插槽**——通过 `register_types(slots)` 注册自定义枚举 / 常量 / state key / handler，命名空间用插件标识名。
-
-#### 实际场景
-
-- **新插件作者**：写代码前先通读这份，所有"硬规则"心里有数
-- **code review**：照这份规范逐条 check
-- **plugin validator**（未来工具）：按这份规范实现自动校验脚本
-
-> **来源**：[来源: docs/guides/plugin_development_standard.md, 全文 300+ 行]
+> **来源**：[来源: docs/plugin-protocol.md]
 
 ---
 
@@ -684,7 +651,7 @@ class {PluginClass}(IOutputPlugin):
 
 #### 这是什么？
 
-0.1 当前架构总览（435 行）。面向"希望深入了解灵汐内部机制、进行二次开发或参与核心贡献"的开发者。
+0.2 架构总览。面向"希望深入了解灵汐内部机制、进行二次开发或参与核心贡献"的开发者。
 
 #### 关键章节
 
@@ -716,36 +683,31 @@ class {PluginClass}(IOutputPlugin):
 
 ```
 方案层（决策依据）
-└─ docs/0.2_rust_plugin_solution.md        ◄── 总路线图
+└─ docs/working/_archive_0.2_migration/0.2_rust_plugin_solution.md  ◄── 总路线图（已归档）
    └─ docs/working/0.2插件体系核心决策.md    ◄── 插件体系决策
       └─ docs/0.2_rust_plugin_checkpoints.md ◄── 里程碑检查
 
-契约层（不可变接口）── 0.2 待产出
-├─ .project/manifest_v2_schema.json         ◄── manifest 校验规范
-├─ .project/mcp_extension_protocol.md       ◄── MCP 扩展消息
-├─ kernel/crates/core/src/traits.rs          ◄── Rust trait
+契约层（不可变接口）
+├─ kernel/crates/core/src/traits.rs          ◄── Rust trait（manifest 真值源）
 ├─ kernel/crates/core/src/types.rs           ◄── Rust 类型
-└─ kernel/crates/core/src/lib.rs             ◄── 模块入口
-
-对照层（0.1 基线）
-├─ src/pipeline/plugin.py                   ◄── 0.1 Python 基类
-└─ src/pipeline/types.py                    ◄── 0.1 Python 类型
+├─ kernel/crates/core/src/lib.rs             ◄── 模块入口
+├─ plugins/shared/pipeline/_base/plugin.py   ◄── Python 管道插件基类
+└─ plugins/sdk/src/agentos_plugin_sdk/       ◄── Python SDK（pipeline_types 等）
 
 模板层（脚手架）
 └─ config/templates/plugin_scaffold/*.py    ◄── 3 种插件模板
 
 规范层（开发者手册）
-├─ docs/guides/plugin_development_guide.md  ◄── 完整教程
-├─ docs/guides/plugin_development_standard.md ◄── 标准规范
+├─ docs/plugin-protocol.md                  ◄── 协议权威
+├─ docs/guides/（分篇指南）                  ◄── 上手教程 + 排障
 └─ docs/ARCHITECTURE.md                     ◄── 架构总览
 ```
 
 **关键依赖**：
 
-- `manifest_v2_schema.json` ⇄ `traits.rs::PluginManifest`：字段必须一一对应
-- `mcp_extension_protocol.md` ⇄ `traits.rs::LifecycleHook` / `HookContext`：扩展消息字段与 Rust 类型对齐
-- `plugin_development_guide.md` ⇄ `plugin_development_standard.md`：教程和规范的引用必须一致
-- `plugin_scaffold/*.py` ⇄ `src/pipeline/plugin.py`：模板必须继承 0.1 基类
+- `docs/plugin-protocol.md` ⇄ `traits.rs::PluginManifest`：字段必须一一对应
+- `plugin_scaffold/*.py` ⇄ `plugins/shared/pipeline/_base/plugin.py`：模板必须继承该基类
+- SDK `pipeline_types.py` ⇄ 内核 `types.rs`：state 字段名两侧一致
 
 ---
 
@@ -754,22 +716,22 @@ class {PluginClass}(IOutputPlugin):
 如果你刚加入项目，建议按以下顺序阅读契约文件，每一步都建立在前一步的基础上：
 
 1. **第一周（建立全局心智）**：
-   - `docs/ARCHITECTURE.md` —— 看 0.1 现状
-   - `docs/0.2_rust_plugin_solution.md §1-3` —— 看 0.2 要做什么、为什么
+   - `docs/ARCHITECTURE.md` —— 看 0.2 现状
+   - `docs/working/_archive_0.2_migration/0.2_rust_plugin_solution.md §1-3` —— 看 0.2 要做什么、为什么（已归档）
    - `docs/working/0.2插件体系核心决策.md` —— 看 9+1 条决策
 
 2. **第二周（理解接口）**：
    - `kernel/crates/core/src/lib.rs` + `traits.rs` + `types.rs` —— Rust 契约全貌
-   - `src/pipeline/plugin.py` + `types.py` —— 0.1 Python 基线（对比看）
+   - `plugins/shared/pipeline/_base/plugin.py` + SDK `pipeline_types.py` —— Python 侧契约
 
 3. **第三周（动手写第一个插件）**：
-   - `docs/guides/plugin_development_guide.md` —— 照 `result_length_guard` 完整示例走一遍
-   - `docs/guides/plugin_development_standard.md` —— 边写边查规范
+   - `docs/guides/`（总览 + sidecar 分篇）—— 照示例走一遍
+   - `docs/plugin-protocol.md` §8 —— echo_tool 从零走查
    - `config/templates/plugin_scaffold/*.py` —— 复制模板开始写
 
 4. **第四周（理解 MCP 协议）**：
-   - `docs/0.2_rust_plugin_solution.md §3.1` —— 为什么选 MCP
-   - `.project/mcp_extension_protocol.md`（待产出）—— 灵汐扩展消息
+   - `docs/working/_archive_0.2_migration/0.2_rust_plugin_solution.md §3.1` —— 为什么选 MCP
+   - `docs/plugin-protocol.md` —— 统一协议与加载链路
 
 5. **里程碑门控**：
    - `docs/0.2_rust_plugin_checkpoints.md CP-02` —— 理解"协议冻结"为什么是极高优先级
@@ -787,7 +749,7 @@ class {PluginClass}(IOutputPlugin):
 
 **最重要的一点**：**契约 = 宪法**。一旦在 CP-02 协议冻结里程碑敲定，所有后续开发必须严格遵守。任何想"灵活变通"的代码都会在静态检查或运行时校验时被拦住。这正是 0.2 全面插件化能落地的基石。
 
-> **最后提醒**：本教程中标记为"⏳ task_02 待产出"的契约文件（`.project/manifest_v2_schema.json`、`.project/mcp_extension_protocol.md`），目前尚未在仓库中。教程基于现有决策文档反向推导其预期内容，等 task_02 完成后请以实际产出版本为准。
+> **最后提醒**：本教程中标记为"⏳ task_02 待产出"的契约文件（`.project/manifest_v2_schema.json`、`.project/mcp_extension_protocol.md`），始终未作为独立文件产出——manifest 真值源是 `kernel/crates/core/src/traits.rs::PluginManifest`（配 `docs/plugin-protocol.md` 说明），MCP 协议以官方 MCP 标准为准。教程中相关章节按决策文档反向推导，仅供理解。
 
 ---
 
