@@ -651,10 +651,12 @@ export const ChatInput = ({
   const isUploading = pendingFiles.some((pf) => pf.status === 'uploading')
   const isCompactMode = mode === 'compact'
 
-  const canSend =
-    (text.trim() || attachments.length > 0 || pendingFiles.some((pf) => pf.status === 'success')) &&
-    !disabled &&
-    !isUploading
+  const hasInputContent =
+    text.trim().length > 0 ||
+    attachments.length > 0 ||
+    pendingFiles.some((pf) => pf.status === 'success')
+
+  const canSend = hasInputContent && !disabled && !isUploading
 
   return (
     <div
@@ -881,9 +883,11 @@ export const ChatInput = ({
             <ChatInputActions />
           </div>
 
-          {/* 发送/停止按钮（shrink-0：不被压缩，也不被左组挤出） */}
+          {/* 发送/停止按钮（shrink-0：不被压缩，也不被左组挤出）。
+              双态：输入框有内容 → 发送；无内容且执行中 → 停止生成
+              （停止不依赖输入框内容，空输入时也能随时打断） */}
           <div className="flex shrink-0 items-center">
-            {isExecuting && onStopGenerate ? (
+            {isExecuting && !hasInputContent && onStopGenerate ? (
               <Button
                 variant="destructive"
                 size="icon"
@@ -891,6 +895,7 @@ export const ChatInput = ({
                 onClick={onStopGenerate}
                 title="停止生成"
                 aria-label="停止生成"
+                data-testid="chat-stop-button"
               >
                 <Square className="h-icon-md w-icon-md" />
               </Button>

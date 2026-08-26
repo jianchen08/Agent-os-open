@@ -255,4 +255,82 @@ describe('ChatInput 底部工具栏 — 发送按钮不被挤出', () => {
     fireEvent.click(toggle)
     expect(onThinkingStrengthChange).toHaveBeenCalledWith('high')
   })
+
+  it('双态按钮：执行中且输入框有文字 → 发送按钮（可继续排队输入）', () => {
+    const onSendMessage = vi.fn()
+    const onStopGenerate = vi.fn()
+    render(
+      <ChatInput
+        mode="full"
+        isGenerating
+        onSendMessage={onSendMessage}
+        onStopGenerate={onStopGenerate}
+        modelName="deepseek-v3"
+      />,
+    )
+
+    const textarea = screen.getByTestId('chat-input-textarea')
+    fireEvent.change(textarea, { target: { value: '排队消息' } })
+
+    // 执行中 + 有文字：仍是发送按钮，点击入队发送
+    expect(screen.queryByTestId('chat-stop-button')).toBeNull()
+    const sendButton = screen.getByTestId('chat-send-button')
+    expect(sendButton).not.toBeDisabled()
+    fireEvent.click(sendButton)
+    expect(onSendMessage).toHaveBeenCalledWith(expect.objectContaining({ content: '排队消息' }))
+    expect(onStopGenerate).not.toHaveBeenCalled()
+  })
+
+  it('双态按钮：执行中且输入框为空 → 停止按钮（点击停止生成）', () => {
+    const onSendMessage = vi.fn()
+    const onStopGenerate = vi.fn()
+    render(
+      <ChatInput
+        mode="full"
+        isGenerating
+        onSendMessage={onSendMessage}
+        onStopGenerate={onStopGenerate}
+        modelName="deepseek-v3"
+      />,
+    )
+
+    // 执行中 + 无文字：停止按钮接管
+    expect(screen.queryByTestId('chat-send-button')).toBeNull()
+    const stopButton = screen.getByTestId('chat-stop-button')
+    fireEvent.click(stopButton)
+    expect(onStopGenerate).toHaveBeenCalledTimes(1)
+    expect(onSendMessage).not.toHaveBeenCalled()
+  })
+
+  it('双态按钮：执行中无文字时输入文字 → 切回发送按钮', () => {
+    const onStopGenerate = vi.fn()
+    render(
+      <ChatInput
+        mode="full"
+        isGenerating
+        onSendMessage={() => {}}
+        onStopGenerate={onStopGenerate}
+        modelName="deepseek-v3"
+      />,
+    )
+
+    expect(screen.getByTestId('chat-stop-button')).toBeInTheDocument()
+    fireEvent.change(screen.getByTestId('chat-input-textarea'), { target: { value: 'x' } })
+    expect(screen.queryByTestId('chat-stop-button')).toBeNull()
+    expect(screen.getByTestId('chat-send-button')).toBeInTheDocument()
+  })
+
+  it('双态按钮：非执行中空输入 → 发送按钮禁用（不显示停止）', () => {
+    render(
+      <ChatInput
+        mode="full"
+        onSendMessage={() => {}}
+        onStopGenerate={() => {}}
+        modelName="deepseek-v3"
+      />,
+    )
+
+    expect(screen.queryByTestId('chat-stop-button')).toBeNull()
+    expect(screen.getByTestId('chat-send-button')).toBeDisabled()
+  })
 })
