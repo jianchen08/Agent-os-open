@@ -81,12 +81,17 @@ def _load_all() -> types.SimpleNamespace:
 
 @pytest.fixture(scope="module")
 def env() -> Any:
+    # 快照裸名原值：_load_all 会替换它们；teardown 还原到原值（而非逐出到空）——
+    # 逐出到空会让后续测试运行时 `from exceptions/router_factory import` 重解析
+    # 出新实例，与它们收集期绑定的类/模块身份分裂（raises 失配/补丁不生效）。
+    saved = {name: sys.modules.get(name) for name in _BARE_DEPS}
     loaded = _load_all()
     yield loaded
-    # 清理：本模块加载的裸名（llm_core 的 adapter 与 system/llm 的 adapter 是
-    # 同名不同文件）不得残留 sys.modules 劫持同会话内其他测试文件的裸名 import。
     for name in _BARE_DEPS:
         sys.modules.pop(name, None)
+        original = saved.get(name)
+        if original is not None:
+            sys.modules[name] = original
     sys.modules.pop("keypool_agentd_test", None)
 
 

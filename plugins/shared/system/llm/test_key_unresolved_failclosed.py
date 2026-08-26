@@ -32,11 +32,31 @@ if str(_PLUGIN_DIR) in sys.path:
 sys.path.insert(0, str(_PLUGIN_DIR))
 
 import adapter as llm_adapter  # noqa: E402  平铺 import，与生产代码一致
+import exceptions as _exceptions_mod  # noqa: E402
 import router_factory  # noqa: E402
 from exceptions import LLMKeyUnresolvedError  # noqa: E402
 from key_pool import KeyPool, KeySlot  # noqa: E402
 
 _MESSAGES = [{"role": "user", "content": "hi"}]
+
+
+@pytest.fixture(autouse=True)
+def _pin_exceptions_module():
+    """重绑 exceptions 裸名槽位到本插件实例。
+
+    生产代码（adapter/keypool）在调用路径内运行时 `from exceptions import
+    LLMKeyUnresolvedError`——共跑车道里 sys.modules["exceptions"] 可能被
+    其他目录的同名模块占位，抛出的异常类与断言类身份分裂、raises 失配。
+    重绑（非逐出）保证运行时导入命中收集期已验证的同一实例。
+    """
+    saved = sys.modules.get("exceptions")
+    sys.modules["exceptions"] = _exceptions_mod
+    try:
+        yield
+    finally:
+        sys.modules.pop("exceptions", None)
+        if saved is not None:
+            sys.modules["exceptions"] = saved
 
 
 def _make_pool(api_key: str) -> KeyPool:
