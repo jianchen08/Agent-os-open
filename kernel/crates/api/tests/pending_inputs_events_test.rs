@@ -125,6 +125,37 @@ impl agentos_core::traits::PluginInvoker for OkInvoker {
     }
 }
 
+/// 静默 invoker：Ok 但零产出（无 raw_result / 不 append assistant）——
+/// 复刻 llm_core 异常被引擎 error_policy warn+继续吞掉后的真实形态
+/// （run completed、state.messages 只有 user 消息）。
+struct SilentInvoker;
+#[async_trait::async_trait]
+impl agentos_core::traits::PluginInvoker for SilentInvoker {
+    async fn invoke_pipeline_plugin(
+        &self,
+        _plugin_id: &str,
+        _ctx: &PluginContext,
+    ) -> Result<PluginResult, agentos_core::types::PluginError> {
+        Ok(PluginResult::default())
+    }
+    async fn invoke_tool(
+        &self,
+        _plugin_id: &str,
+        _tool_name: &str,
+        _inputs: &serde_json::Value,
+    ) -> Result<agentos_core::types::ToolExecutionResult, agentos_core::types::PluginError> {
+        Ok(agentos_core::types::ToolExecutionResult::success(json!({})))
+    }
+    async fn send_lifecycle_hook(
+        &self,
+        _plugin_id: &str,
+        _hook: agentos_core::traits::LifecycleHook,
+        _context: &agentos_core::traits::HookContext,
+    ) -> Result<(), agentos_core::types::PluginError> {
+        Ok(())
+    }
+}
+
 /// 构造带完整引擎装配的 AppState（store + invoker + session + mock 管道配置）。
 ///
 /// 临时项目根含 `config/pipelines/autonomous.yaml`（引用 mock_llm_core 插件），
@@ -236,6 +267,63 @@ async fn dispatch_success_pushes_new_message_and_stream_end() {
     let all = frames.lock().unwrap();
     let has_start = all.iter().any(|f| f.contains("\"type\":\"stream_start\""));
     assert!(has_start, "应先 stream_start");
+}
+
+/// 无回复轮次（LLM 失败被 error_policy 吞掉）不得伪造 new_message 回显用户消息：
+/// 旧路径把 state.message（用户原文）当 assistant 内容回发 = 前端收到与用户消息
+/// 一模一样的"回复"。修复后应 stream_error（NO_ASSISTANT_REPLY）且零 new_message。
+#[tokio::test]
+async fn dispatch_silent_core_pushes_no_assistant_reply_error_not_echo() {
+    let store = Arc::new(agentos_engine::SqliteStore::open_memory().unwrap());
+    let coord = Arc::new(SessionCoordinator::new());
+    let frames = Arc::new(Mutex::new(Vec::<String>::new()));
+    coord.register(
+        "u1",
+        Arc::new(FrameSink {
+            frames: frames.clone(),
+        }),
+    );
+    coord.register_thread("thread-silent-1", "u1");
+    let state = make_engine_state(store, Arc::new(SilentInvoker), coord, false);
+
+    let dispatcher = agentos_api::ws_session::EngineDispatcher::new(state);
+    use agentos_session::router::PipelineDispatcher;
+    dispatcher
+        .dispatch_user_input(
+            "thread-silent-1",
+            "u1",
+            "回显探针-用户原文",
+            "",
+            "",
+            None,
+            None,
+            "agentos",
+            "",
+            PendingInputSource::User,
+        )
+        .await
+        .unwrap();
+
+    wait_for_frame(&frames, "\"type\":\"stream_error\"").await;
+    let all = frames.lock().unwrap();
+    let err = all
+        .iter()
+        .find(|f| f.contains("\"type\":\"stream_error\""))
+        .unwrap();
+    let parsed: serde_json::Value = serde_json::from_str(err).unwrap();
+    assert_eq!(parsed["data"]["error"]["code"], "NO_ASSISTANT_REPLY");
+    assert_eq!(parsed["data"]["error"]["source"], "kernel");
+    // 模拟回复清理：绝不发 new_message（旧路径会把用户原文当 assistant 回复发回）
+    assert!(
+        !all.iter().any(|f| f.contains("\"type\":\"new_message\"")),
+        "无 assistant 产出时不得发 new_message（回显源）"
+    );
+    // 错误消息是显式报错文案，不是用户输入原文
+    let msg = parsed["data"]["error"]["message"].as_str().unwrap();
+    assert!(
+        !msg.contains("回显探针"),
+        "错误消息不得回显用户输入原文: {msg}"
+    );
 }
 
 #[tokio::test]

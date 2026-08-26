@@ -3090,3 +3090,22 @@ use agentos_core::traits::MessageQueryOpts;
         // 二次同 cmid：已移除，miss 不 panic
         crate::ws_session::notify_outcome_waiter("http_waiter_t1", outcome("again"));
     }
+
+    #[test]
+    fn test_extract_response_content_prefers_raw_result() {
+        let state = json!({"raw_result": "LLM 真实回复", "message": "用户输入原文"});
+        assert_eq!(extract_response_content(&state), "LLM 真实回复");
+    }
+
+    #[test]
+    fn test_extract_response_content_never_falls_back_to_user_message() {
+        // 回归（08-27 前端回显根因）：无 raw_result 时不得回退 state.message
+        // ——那是用户输入原文，回退即把用户消息当回复回发（assistant 气泡回显）。
+        let state = json!({"raw_result": "", "message": "用户输入原文"});
+        assert_eq!(extract_response_content(&state), "pipeline finished");
+    }
+
+    #[test]
+    fn test_extract_response_content_no_keys_returns_fixed_text() {
+        assert_eq!(extract_response_content(&json!({})), "pipeline finished");
+    }

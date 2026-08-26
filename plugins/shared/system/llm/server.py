@@ -32,7 +32,11 @@ from typing import Any
 
 sys.path.insert(0, os.path.dirname(__file__))
 
-from _config_models import ModelConfigLoaderShim, set_config  # noqa: E402
+from _config_models import (  # noqa: E402
+    ModelConfigLoaderShim,
+    get_config,
+    set_config,
+)
 from streaming import StreamTranslator, map_finish_reason  # noqa: E402
 
 from agentos_plugin_sdk import AgentOSPlugin  # noqa: E402
@@ -62,8 +66,11 @@ async def _on_load(params: dict[str, Any]) -> None:
     # 注入配置到 _config_models shim（供 router_factory/adapter 的懒加载路径复用）
     set_config(config)
 
-    # 延迟构建 adapter：需要 model_loader（由配置注入）
-    # 如果配置链路未修复，adapter 保持 None，工具调用时再延迟初始化
+    # 重置 router_factory 模块级单例：on_load 在配置重注入时会重复触发，
+    # 不重置则旧单例（旧 key/旧模型表）一直存活，新配置永不生效。
+    from router_factory import reset_router  # noqa: PLC0415
+
+    reset_router()
     _adapter = None
 
 
@@ -82,9 +89,13 @@ def _ensure_adapter() -> Any:
 
     from router_factory import build_adapter  # noqa: PLC0415
 
-    # 构建 model_loader shim：从 plugin 配置中读取 LLM 配置
-    config = plugin.get_config()
-    model_loader = _ModelLoaderShim(config)
+    # 构建前幂等重注入并读已解析副本：内核下发的配置含 ``${VAR}`` 占位符，
+    # 解析（进程环境 → 项目根 .env 兜底）只发生在 ``set_config``。直接用
+    # ``plugin.get_config()`` 原文构建会把字面量 ``${DEEPSEEK_API_KEY}`` 灌进
+    # KeySlot/Router 单例，上游恒 401。on_load 之后配置也可能更新（重注入），
+    # 重注入保证懒构建拿到的一定是最新已解析值。
+    set_config(plugin.get_config())
+    model_loader = _ModelLoaderShim(get_config())
     _adapter = build_adapter(model_loader)
     logger.info("LLM adapter initialized: %s", type(_adapter).__name__)
     return _adapter

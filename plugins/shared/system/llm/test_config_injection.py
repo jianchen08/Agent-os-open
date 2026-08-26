@@ -220,5 +220,103 @@ class TestConfigModelsModule:
             importlib.reload(_config_models)
 
 
+class TestEnsureAdapterUsesResolvedConfig:
+    """回归（08-27 回显根因）：_ensure_adapter 必须从已解析副本构建 adapter。
+
+    内核下发的 llm.yaml 含 ``${VAR}`` 占位符，解析只发生在 set_config
+    （进程环境 → .env 兜底）。旧实现直接用 ``plugin.get_config()`` 原文
+    构建 router/key 池，KeySlot 持字面量 ``${DEEPSEEK_API_KEY}``，上游恒
+    401 → LLM 轮次无产出 → 内核把用户消息原文当回复回发（前端回显）。
+    """
+
+    def test_ensure_adapter_builds_from_resolved_config(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """key 占位符在进入 model_loader 前必须已被解析为真实值。"""
+        server_mod = _load_llm_server()
+        monkeypatch.setenv("AGENTOS_TEST_LLM_KEY", "sk-resolved-real-key")
+
+        raw_config = {
+            "llm": {
+                "providers": {
+                    "deepseek": {
+                        "type": "openai",
+                        "api_base": "https://api.deepseek.com/v1",
+                        "keys": [{"id": "deepseek_main", "api_key": "${AGENTOS_TEST_LLM_KEY}"}],
+                    }
+                },
+                "models": {},
+                "defaults": {},
+            }
+        }
+        monkeypatch.setattr(server_mod.plugin, "get_config", lambda: raw_config)
+        server_mod._adapter = None
+
+        import router_factory as rf
+
+        captured: dict[str, Any] = {}
+
+        def fake_build_adapter(model_loader: Any) -> str:
+            captured["llm_data"] = model_loader._load_llm_data()
+            return "adapter-sentinel"
+
+        monkeypatch.setattr(rf, "build_adapter", fake_build_adapter)
+
+        adapter = server_mod._ensure_adapter()
+
+        assert adapter == "adapter-sentinel"
+        api_key = captured["llm_data"]["providers"]["deepseek"]["keys"][0]["api_key"]
+        assert api_key == "sk-resolved-real-key", (
+            "key 未解析即进入 router/key 池（字面量 ${VAR} 会被上游 401）"
+        )
+        server_mod._adapter = None
+
+    def test_ensure_adapter_mixed_keys_partial_resolution(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """第二组有区分度输入：多 key 混合（env 可解 + 示例值不可解）。
+
+        可解 key 解析为真实值；``your-`` 开头的 .env.example 示例值视为
+        未配置、保留占位符——两者都必须发生在进入 model_loader 之前。
+        """
+        server_mod = _load_llm_server()
+        monkeypatch.setenv("AGENTOS_TEST_LLM_KEY", "sk-resolved-real-key")
+
+        raw_config = {
+            "llm": {
+                "providers": {
+                    "deepseek": {
+                        "type": "openai",
+                        "api_base": "https://api.deepseek.com/v1",
+                        "keys": [
+                            {"id": "deepseek_main", "api_key": "${AGENTOS_TEST_LLM_KEY}"},
+                            {"id": "deepseek_demo", "api_key": "your-example-key"},
+                        ],
+                    }
+                },
+                "models": {},
+                "defaults": {},
+            }
+        }
+        monkeypatch.setattr(server_mod.plugin, "get_config", lambda: raw_config)
+        server_mod._adapter = None
+
+        import router_factory as rf
+
+        captured: dict[str, Any] = {}
+
+        def fake_build_adapter(model_loader: Any) -> str:
+            captured["llm_data"] = model_loader._load_llm_data()
+            return "adapter-sentinel"
+
+        monkeypatch.setattr(rf, "build_adapter", fake_build_adapter)
+
+        server_mod._ensure_adapter()
+
+        keys = captured["llm_data"]["providers"]["deepseek"]["keys"]
+        by_id = {k["id"]: k["api_key"] for k in keys}
+        assert by_id["deepseek_main"] == "sk-resolved-real-key"
+        assert by_id["deepseek_demo"] == "your-example-key", "示例值不经占位符路径，原样保留"
+        server_mod._adapter = None
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

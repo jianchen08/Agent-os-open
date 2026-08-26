@@ -1575,20 +1575,25 @@ fn stage_finalize(
     }
 }
 
-/// 响应内容提取：优先 raw_result，回退 state.message，再回退固定文案。
+/// 响应内容提取：只认 raw_result（LLM 本轮产出）。
 ///
 /// A12：兜底不再把整份内部 state pretty-print 给客户端（内部结构/工具细节泄漏），
 /// 固定返回 "pipeline finished"；完整 state 保留在服务端 tracing（debug 级）。
+/// 不回退 state.message——那是用户输入原文，回退即把用户消息当回复回发
+/// （前端表现为 assistant 气泡回显用户消息）。无回复轮次由调用方
+/// （ws_session run_pipeline_round）按 final_assistant 缺失走 stream_error。
 fn extract_response_content(final_state: &serde_json::Value) -> String {
-    if let Some(raw) = final_state.get("raw_result").and_then(|v| v.as_str()) {
+    if let Some(raw) = final_state
+        .get("raw_result")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+    {
         raw.to_string()
-    } else if let Some(msg) = final_state.get("message").and_then(|v| v.as_str()) {
-        msg.to_string()
     } else {
         debug!(
             target: "chat-response",
             state = ?final_state,
-            "pipeline finished without raw_result/message（完整 state 仅留服务端日志）"
+            "pipeline finished without raw_result（完整 state 仅留服务端日志）"
         );
         "pipeline finished".to_string()
     }
@@ -1969,5 +1974,4 @@ async fn shutdown_signal(invoker: Option<Arc<dyn agentos_core::traits::PluginInv
 }
 
 #[cfg(test)]
-#[path = "tests/server_tests.rs"]
 mod tests;

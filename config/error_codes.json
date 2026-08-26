@@ -103,6 +103,14 @@
       "description": "ws_session stream_error 事件（引擎 outcome.failed）"
     },
     {
+      "code": "NO_ASSISTANT_REPLY",
+      "http_status": 200,
+      "source": "kernel",
+      "retryable": true,
+      "message": "本轮管道结束但未产生任何回复",
+      "description": "ws_session stream_error 事件（run 完成但 final_assistant 缺失——LLM 调用失败被 error_policy 吞掉或 core 无产出；fail-closed 不伪造 new_message）"
+    },
+    {
       "code": "FRONTEND_RUNTIME_ERROR",
       "http_status": 0,
       "source": "frontend",

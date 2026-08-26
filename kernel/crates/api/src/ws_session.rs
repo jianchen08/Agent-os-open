@@ -483,6 +483,37 @@ impl EngineDispatcher {
             return outcome;
         }
 
+        // 空回复防线：run 结束但没有任何 assistant 消息（LLM 调用失败被引擎
+        // error_policy warn+继续吞掉、或 core 轮次无产出）→ 不发 new_message
+        // （旧路径把 outcome.content 兜底当 assistant 内容回发；content 无
+        // raw_result 时是用户输入原文，前端表现为 assistant 气泡回显用户消息
+        // ——模拟回复）。fail-closed：stream_error 显式报错，前端标记失败。
+        if outcome.final_assistant.is_none() {
+            let mut failed_outcome = outcome;
+            failed_outcome.failed = true;
+            failed_outcome.content = "本轮管道结束但未产生任何回复（LLM 调用失败或未执行），请检查 LLM 配置与密钥".to_string();
+            let _ = session
+                .emit_event(
+                    &exec_thread,
+                    "stream_error",
+                    serde_json::json!({
+                        "pipeline_id": rec.route_id,
+                        "message_id": message_id,
+                        "_threadId": exec_thread,
+                        "error": {
+                            "code": "NO_ASSISTANT_REPLY",
+                            "message": failed_outcome.content,
+                            "source": "kernel",
+                            "retryable": true,
+                            "details": null,
+                            "request_id": null,
+                        },
+                    }),
+                )
+                .await;
+            return failed_outcome;
+        }
+
         // 成功路径：new_message 携带本轮最终 assistant 消息的完整持久形态
         // （content/reasoningContent/toolCalls/sequence），前端与 DB 加载共用
         // 同一个 mapper 生成 parts——流式事件与历史加载冷热同构。
@@ -491,9 +522,7 @@ impl EngineDispatcher {
             .as_ref()
             .and_then(|m| m.get("seq").and_then(|v| v.as_u64()))
             .unwrap_or(1);
-        let fa = outcome.final_assistant.clone().unwrap_or_else(
-            || serde_json::json!({"role": "assistant", "content": outcome.content}),
-        );
+        let fa = outcome.final_assistant.clone().expect("final_assistant gated above");
         // 认领回传：user 权威 record（id=compute_message_id 指纹 mc_/seq/内容/cmid）。
         // 表侧落库 id 与指纹一致（write_slot_to_table_locked 无 _message_id 注入时
         // 回落 compute_message_id），前端按 cmid 认领后记入独立 recordId 字段，
