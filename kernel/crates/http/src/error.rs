@@ -1,10 +1,36 @@
 //! 统一错误类型（api 与 db-admin 共用）
+//!
+//! 对外信封：`{"error": {"code", "message", "source", "retryable", "details", "request_id"}}`。
+//! code 为稳定机器码（单一真值源 `config/error_codes.json`，机械闸测试锁一致）；
+//! HTTP 状态码由变体决定，不是 code 的一部分。
 
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::Json;
 use serde_json::json;
 use thiserror::Error;
+
+/// 错误来源枚举（与 `config/error_codes.json` 的 sources.enum 一致，机械闸测试锁一致）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ErrorSource {
+    Kernel,
+    Plugin,
+    Llm,
+    Infra,
+    Frontend,
+}
+
+impl ErrorSource {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ErrorSource::Kernel => "kernel",
+            ErrorSource::Plugin => "plugin",
+            ErrorSource::Llm => "llm",
+            ErrorSource::Infra => "infra",
+            ErrorSource::Frontend => "frontend",
+        }
+    }
+}
 
 #[derive(Debug, Clone, Error)]
 pub enum ApiError {
@@ -40,42 +66,82 @@ pub enum ApiError {
     WebSocket { message: String },
 }
 
+impl ApiError {
+    /// 稳定机器码（单一真值源 `config/error_codes.json`）。
+    pub fn error_code(&self) -> &'static str {
+        match self {
+            ApiError::BadRequest { .. } => "BAD_REQUEST",
+            ApiError::Unauthorized { .. } => "UNAUTHORIZED",
+            ApiError::Forbidden { .. } => "FORBIDDEN",
+            ApiError::NotFound { .. } => "RESOURCE_NOT_FOUND",
+            ApiError::Conflict { .. } => "CONFLICT",
+            ApiError::UnprocessableEntity { .. } => "UNPROCESSABLE_ENTITY",
+            ApiError::Internal { .. } => "INTERNAL_ERROR",
+            ApiError::ServiceUnavailable { .. } => "SERVICE_UNAVAILABLE",
+            ApiError::WebSocket { .. } => "WEBSOCKET_ERROR",
+        }
+    }
+
+    pub fn source(&self) -> ErrorSource {
+        ErrorSource::Kernel
+    }
+
+    /// 是否可重试（网络/瞬时故障类为 true，语义错误为 false）。
+    pub fn retryable(&self) -> bool {
+        matches!(
+            self,
+            ApiError::Internal { .. } | ApiError::ServiceUnavailable { .. }
+        )
+    }
+
+    pub fn message(&self) -> &str {
+        match self {
+            ApiError::BadRequest { message }
+            | ApiError::Unauthorized { message }
+            | ApiError::Forbidden { message }
+            | ApiError::NotFound { message }
+            | ApiError::Conflict { message }
+            | ApiError::UnprocessableEntity { message }
+            | ApiError::Internal { message }
+            | ApiError::ServiceUnavailable { message }
+            | ApiError::WebSocket { message } => message,
+        }
+    }
+}
+
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
-        let (status, message) = match &self {
-            ApiError::BadRequest { message } => (StatusCode::BAD_REQUEST, message.clone()),
-            ApiError::Unauthorized { message } => (StatusCode::UNAUTHORIZED, message.clone()),
-            ApiError::Forbidden { message } => (StatusCode::FORBIDDEN, message.clone()),
-            ApiError::NotFound { message } => (StatusCode::NOT_FOUND, message.clone()),
-            ApiError::Conflict { message } => (StatusCode::CONFLICT, message.clone()),
-            ApiError::UnprocessableEntity { message } => {
-                (StatusCode::UNPROCESSABLE_ENTITY, message.clone())
-            }
-            // A12：内部错误细节（IO 报错含路径、底层库错误串等）不透传给客户端，
-            // 避免泄漏服务端内部结构；细节完整保留在服务端 tracing（无 request_id
-            // 基础设施，以 error 字段 + target 定位）。对外固定通用文案。
-            ApiError::Internal { message } => {
-                tracing::error!(
-                    target: "api-error",
-                    status = StatusCode::INTERNAL_SERVER_ERROR.as_u16(),
-                    error = %message,
-                    "internal error"
-                );
-                (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    "internal server error".to_string(),
-                )
-            }
-            ApiError::ServiceUnavailable { message } => {
-                (StatusCode::SERVICE_UNAVAILABLE, message.clone())
-            }
-            ApiError::WebSocket { message } => (StatusCode::INTERNAL_SERVER_ERROR, message.clone()),
+        let status = match &self {
+            ApiError::BadRequest { .. } => StatusCode::BAD_REQUEST,
+            ApiError::Unauthorized { .. } => StatusCode::UNAUTHORIZED,
+            ApiError::Forbidden { .. } => StatusCode::FORBIDDEN,
+            ApiError::NotFound { .. } => StatusCode::NOT_FOUND,
+            ApiError::Conflict { .. } => StatusCode::CONFLICT,
+            ApiError::UnprocessableEntity { .. } => StatusCode::UNPROCESSABLE_ENTITY,
+            ApiError::Internal { .. } => StatusCode::INTERNAL_SERVER_ERROR,
+            ApiError::ServiceUnavailable { .. } => StatusCode::SERVICE_UNAVAILABLE,
+            ApiError::WebSocket { .. } => StatusCode::INTERNAL_SERVER_ERROR,
         };
+
+        // 内部错误细节（IO 报错含路径、底层库错误串等）原文透传不脱敏，
+        // 同时完整保留在服务端 tracing（target: "api-error"）供定位。
+        if let ApiError::Internal { message } = &self {
+            tracing::error!(
+                target: "api-error",
+                status = status.as_u16(),
+                error = %message,
+                "internal error"
+            );
+        }
 
         let body = Json(json!({
             "error": {
-                "code": status.as_u16().to_string(),
-                "message": message,
+                "code": self.error_code(),
+                "message": self.message(),
+                "source": self.source().as_str(),
+                "retryable": self.retryable(),
+                "details": null,
+                "request_id": null,
             }
         }));
 

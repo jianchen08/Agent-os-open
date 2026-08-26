@@ -607,8 +607,8 @@ async fn path_f_sessions_schema_aggregates_plugin_thread_fields() {
 
 /// G1:PUT /api/v1/plugins/{id}/enabled 写 profile 失败 → 500 统一信封。
 ///
-/// profile 路径被同名目录占位 → fs::write 必败。契约(A12):HTTP 500 +
-/// 通用文案 "internal server error"(ApiError::Internal 不透传 IO 细节),
+/// profile 路径被同名目录占位 → fs::write 必败。契约(统一错误模型):HTTP 500 +
+/// 稳定机器码 INTERNAL_ERROR + message 原文透传(不脱敏,用户裁定),
 /// 不再 200 + success:false 混装——前端据状态码即可区分"已生效"与"没写进去"。
 #[tokio::test]
 async fn path_g_plugin_enabled_write_failure_returns_500() {
@@ -648,11 +648,17 @@ async fn path_g_plugin_enabled_write_failure_returns_500() {
         .unwrap();
     let json: Value = serde_json::from_slice(&body).unwrap();
     assert_eq!(
-        json["error"]["code"], "500",
-        "统一错误信封应含 error.code: {json}"
+        json["error"]["code"], "INTERNAL_ERROR",
+        "统一错误信封应含稳定机器码: {json}"
     );
     assert_eq!(
-        json["error"]["message"], "internal server error",
-        "内部错误细节(IO 报错含路径)不透传客户端: {json}"
+        json["error"]["source"], "kernel",
+        "统一错误信封应含来源标识: {json}"
+    );
+    assert!(
+        json["error"]["message"]
+            .as_str()
+            .is_some_and(|m| !m.is_empty() && m != "internal server error"),
+        "内部错误原文透传不脱敏: {json}"
     );
 }

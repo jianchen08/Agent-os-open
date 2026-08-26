@@ -1,0 +1,122 @@
+{
+  "namespace": "error",
+  "description": "统一错误码表——单一真值源：内核错误信封（kernel/crates/http/src/error.rs）、WS 错误出口（stream_error/tool_result）、前端错误归一化均消费本文件语义，代码副本由机械闸测试锁一致（kernel/crates/http/tests/error_codes_contract_test.rs），不读代码副本。code 为稳定机器码（非 HTTP 状态码）；HTTP 状态码由错误变体决定。",
+  "sources": {
+    "description": "错误来源枚举——前端据此渲染来源标签（kernel=红/plugin=橙/llm=紫/infra=灰/frontend=蓝）",
+    "enum": ["kernel", "plugin", "llm", "infra", "frontend"]
+  },
+  "codes": [
+    {
+      "code": "BAD_REQUEST",
+      "http_status": 400,
+      "source": "kernel",
+      "retryable": false,
+      "message": "请求参数错误",
+      "description": "ApiError::BadRequest——请求语义不可解"
+    },
+    {
+      "code": "UNAUTHORIZED",
+      "http_status": 401,
+      "source": "kernel",
+      "retryable": false,
+      "message": "未认证或认证已失效",
+      "description": "ApiError::Unauthorized"
+    },
+    {
+      "code": "FORBIDDEN",
+      "http_status": 403,
+      "source": "kernel",
+      "retryable": false,
+      "message": "无权限执行该操作",
+      "description": "ApiError::Forbidden"
+    },
+    {
+      "code": "RESOURCE_NOT_FOUND",
+      "http_status": 404,
+      "source": "kernel",
+      "retryable": false,
+      "message": "资源不存在",
+      "description": "ApiError::NotFound"
+    },
+    {
+      "code": "CONFLICT",
+      "http_status": 409,
+      "source": "kernel",
+      "retryable": false,
+      "message": "资源状态冲突",
+      "description": "ApiError::Conflict——配置写冲突（ETag/If-Match 不匹配）"
+    },
+    {
+      "code": "UNPROCESSABLE_ENTITY",
+      "http_status": 422,
+      "source": "kernel",
+      "retryable": false,
+      "message": "请求语义可解但目标状态不允许该操作",
+      "description": "ApiError::UnprocessableEntity"
+    },
+    {
+      "code": "INTERNAL_ERROR",
+      "http_status": 500,
+      "source": "kernel",
+      "retryable": true,
+      "message": "内核内部错误",
+      "description": "ApiError::Internal——message 原文透传不脱敏"
+    },
+    {
+      "code": "SERVICE_UNAVAILABLE",
+      "http_status": 503,
+      "source": "kernel",
+      "retryable": true,
+      "message": "服务暂不可用",
+      "description": "ApiError::ServiceUnavailable——所需依赖（如存储后端）未就绪"
+    },
+    {
+      "code": "WEBSOCKET_ERROR",
+      "http_status": 500,
+      "source": "kernel",
+      "retryable": false,
+      "message": "WebSocket 错误",
+      "description": "ApiError::WebSocket"
+    },
+    {
+      "code": "TOOL_EXEC_FAILED",
+      "http_status": 200,
+      "source": "plugin",
+      "retryable": false,
+      "message": "工具执行失败",
+      "description": "tool_core 构造的 tool_result 失败信封（success=false 时 error 字段）"
+    },
+    {
+      "code": "TOOL_NOT_REGISTERED",
+      "http_status": 200,
+      "source": "plugin",
+      "retryable": false,
+      "message": "工具未注册",
+      "description": "capability_router tool-executor.invoke 未注册工具"
+    },
+    {
+      "code": "ENGINE_RUN_FAILED",
+      "http_status": 200,
+      "source": "kernel",
+      "retryable": true,
+      "message": "管道执行失败",
+      "description": "ws_session stream_error 事件（引擎 outcome.failed）"
+    },
+    {
+      "code": "FRONTEND_RUNTIME_ERROR",
+      "http_status": 0,
+      "source": "frontend",
+      "retryable": false,
+      "message": "前端运行时错误",
+      "description": "window.onerror / unhandledrejection / ErrorBoundary 上报"
+    },
+    {
+      "code": "NETWORK_ERROR",
+      "http_status": 0,
+      "source": "infra",
+      "retryable": true,
+      "message": "网络错误",
+      "description": "前端 axios 无响应/超时/连接失败"
+    }
+  ]
+}
