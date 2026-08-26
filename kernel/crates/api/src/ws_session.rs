@@ -1487,6 +1487,12 @@ mod tests {
             .await
             .unwrap();
 
+        // 注销连接走 id() 比对路径（ConnectionRegistry::unregister）——补齐
+        // sink 身份方法覆盖（非核心断言，注册表清理语义由 session crate 保证）
+        coordinator
+            .registry()
+            .unregister("u1", coordinator.registry().get_by_user("u1").unwrap().id());
+
         // 表侧截断：seq 0 保留，1/2 成洞
         let rows = sqlite
             .get_slot_messages_by_pipeline("reg1", "default", MessageQueryOpts::default())

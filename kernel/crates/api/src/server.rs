@@ -3956,6 +3956,52 @@ mod tests {
 
     // ── GAP-3 后半：resume 幂等（重启后 user 消息不重复消费） ────────────
 
+    /// 引擎防御网（B2）：run_compiled 返回 Err 时把 run 置 failed + ended_at
+    /// （避免永远卡 running），并以 failed outcome 出口。
+    /// 触发路径：state.next_phase 指向不存在的循环体（引擎转移决策 Err）。
+    #[tokio::test]
+    async fn test_engine_run_failure_marks_run_failed() {
+        let (state, _invoker, _store, sqlite) = make_engine_state();
+        let tenant = TenantContext::new("tenant_gap2_err", "thread_gap2_err");
+        let overlay = json!({"next_phase": "ghost_body"});
+        let r = agentos_tenant::scope(
+            tenant,
+            process_via_engine(
+                &state,
+                "触发失败",
+                "agentos",
+                &[],
+                "pipe_fail_evt",
+                "thread_fail_evt",
+                "o1",
+                "",
+                "",
+                None,
+                Some(&overlay),
+                "",
+            ),
+        )
+        .await;
+        assert!(r.failed, "引擎失败必须以 failed outcome 出口");
+        assert!(
+            r.content.contains("[engine-run-failed]"),
+            "outcome 内容应携带失败标识: {}",
+            r.content
+        );
+        // 防御网落库：该管道最新 run 置 failed（不悬空 running）
+        let status: String = sqlite
+            .with_conn(|c| {
+                c.query_row(
+                    "SELECT status FROM runs WHERE pipeline_id = 'pipe_fail_evt' \
+                     ORDER BY created_at DESC LIMIT 1",
+                    [],
+                    |row| row.get(0),
+                )
+            })
+            .unwrap();
+        assert_eq!(status, "failed", "run 应标记 failed（B2 防御网）");
+    }
+
     /// 中断签名：user 消息已落槽（上一次尝试被重启截断）且无 assistant 跟随
     /// → 冷启动重放同一消息时**不得再次落槽**（修复前无条件 append 导致
     /// 重复 run / 同消息双份 / 陈旧回复——e2e GAP-3 现象②）。
