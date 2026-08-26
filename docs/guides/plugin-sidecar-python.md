@@ -155,7 +155,7 @@ manifest 关键差异：`plugin_type: "pipeline"` + `pipeline_role` + **`invoke_
 - `IInputPlugin` / `IOutputPlugin`：`async def execute(self, ctx: PluginContext) -> PluginResult | OutputResult`
 - `ICorePlugin`：`async def execute(self, ctx: PluginContext) -> dict`（返回值直接合并 state）
 - `PluginContext`：`state` / `config` / `get_service(name)`
-- `PluginResult`：`{state_updates, route_signal, skip_remaining, error}`；OutputResult 同构
+- `PluginResult`：`{state_updates, route_signal, skip_remaining, error}`；OutputResult 同构（`route_signal` 为遗留字段，执行链不消费——出口裁决走管道路由 DSL）
 
 server.py 适配层骨架（`plugins/shared/pipeline/input/context_build/server.py`）：
 
@@ -186,7 +186,7 @@ if __name__ == "__main__":
     plugin.run()
 ```
 
-output 角色插件要产路由信号时，manifest `capabilities.route_signals` 声明可能产出的类型（`next_llm` / `next_tool` / `end` / `wait`），实现里返回 `OutputResult(route_signal=RouteSignal(...))`。完整 output 示例见 `plugins/shared/pipeline/output/task_reminder/`。
+出口转移（下一轮跑什么、何时结束）写在管道 YAML 的 `next:` 路由 DSL（见 [pipeline-configuration.md](pipeline-configuration.md) §3）——output 插件经 `state_updates` 写入 DSL 条件依赖的字段参与裁决（如 task_reminder 写任务状态供评估闸门判定）。manifest 的 `capabilities.route_signals` 与 `OutputResult.route_signal` 是历史声明位/字段，执行链不消费，新插件无需声明。完整 output 示例见 `plugins/shared/pipeline/output/task_reminder/`。
 
 ## 6. 测试怎么写
 

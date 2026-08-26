@@ -37,7 +37,7 @@
 几乎所有运行时行为都通过 YAML / 配置文件定义。新增一个 Agent、调整一条管道、修改一个工具的可见面，都不应该需要改内核代码——Agent 是 YAML 数据，管道是 YAML 编排，工具面是白名单交集。
 
 ### 2. 状态可观测（Observable State）
-管道的每一步决策都被显式建模（state 字段、路由信号、执行轨迹），分层可查（骨架 / L1 压缩块 / L0 原始记录，`read_execution_detail` 工具）。任意时刻可以回答："现在卡在哪一步？为什么？下一步会往哪走？"
+管道的每一步决策都被显式建模（state 字段、路由转移、执行轨迹），分层可查（骨架 / L1 压缩块 / L0 原始记录，`read_execution_detail` 工具）。任意时刻可以回答："现在卡在哪一步？为什么？下一步会往哪走？"
 
 ### 3. 可回滚、可热替换（Rollback & Hot Swap）
 Agent 配置 mtime 缓存热生效；插件目录与 manifest 变更热发现自动注册/重注册；Python 插件进程空闲回收、代码改动热重载、崩溃自动拉起；内核不因单个配置加载失败而启动失败（降级 warn + 空配置）。
@@ -97,7 +97,7 @@ exit 循环体（单次）  workspace 收尾 + 环境释放（run_on_error，提
 - **G10 路由 DSL**（冻结）：条件永远 `when`、目标永远 `then`（`end` / `loop` / step id / 循环体 id）、附带写入 `set:`。配置在**加载期编译**（when 预编译 AST、引用静态解析、命名冲突启动即报），运行时零解析。
 - **Pull 热加载**：每次 chat 执行前检测 autonomous.yaml + `config/steps/` 的 mtime 指纹（1s TTL 门），变化即重新加载编译，改配置无需重启内核；热重载失败保留旧配置 + warn，在途 run 按快照跑完。
 - **step 三级命中**：管道 step id → 公共 step 库（`config/steps/`）→ 插件 id。
-- **4 种路由信号**：`next_llm` / `next_tool` / `end` / `wait`（仅 output 阶段插件产出，挂起支持审批后恢复）。
+- **声明式路由**：出口转移全部写在管道 YAML 的 `next:` DSL（`when`/`then`/`set`，目标 `end` / `loop` / step id / 循环体 id），加载期编译。插件只读写 state 参与（输出 DSL 条件依赖的字段），不产路由信号——manifest 的 `capabilities.route_signals` 与 `PluginResult.route_signal` 为历史声明位/字段，执行链零消费。
 - **并发模型**：RunChainRegistry 按 effective_pipeline_id 串行（同管道 FIFO、异管道并行、全局并发上限）。
 - **task = pipeline state 单一真值**：`task.id = pipeline_id`；任务状态由任务域插件裁决（评估闸门），内核不回写任务状态。
 
@@ -110,7 +110,7 @@ exit 循环体（单次）  workspace 收尾 + 环境释放（run_on_error，提
 - **三类目录**：`plugins/shared/pipeline/{input,core,output}/`（管道步骤）、`plugins/shared/tools/`（LLM 工具）、`plugins/shared/system/`（系统服务）。
 - **双根发现**：内置根 `plugins/shared/` + 用户根（`AGENTOS_USER_PLUGINS_DIR`），同 id 用户根覆盖内置根。
 - **宿主三轨**：Python sidecar（默认；独立进程、MCP over stdio、uv venv 单轨、懒启动/空闲回收/崩溃自愈/热重载）、Rust cdylib 原生（`in_process`；高频管道步骤晋升轨、永不 dlclose）、外部 MCP（`entry: "mcp:external"`；零代码直连第三方 MCP 服务）。
-- **能力声明**：`capabilities.tools`（进 LLM 面）/ `services`（内部服务，不进 LLM 面）/ `route_signals` / `lifecycle_hooks` / `streaming`（流式事件声明，fail-closed）。
+- **能力声明**：`capabilities.tools`（进 LLM 面）/ `services`（内部服务，不进 LLM 面）/ `lifecycle_hooks` / `streaming`（流式事件声明，fail-closed）；`route_signals` 为历史声明位，执行面零消费。
 - **插件间耦合唯一轴**：`requires_services`（能力角色名，boot 期闸校验）。
 - **LLM 可见工具三层过滤**：启用档案（`config/plugins/default_profile.yaml`，watcher 每轮 sync 重读）→ 能力注册（缺 schema 的 external MCP 工具拒注册）→ Agent `tool_ids` 白名单（解析不出 = 空工具面，禁止静默全量）。
 - **全链路热生效**：新插件自动发现注册、manifest 变更自动 revoke + 重注册（G2 漂移校验）、Python 代码改动 respawn、cdylib 集合变更 G8 优雅重启——插件改动无需 re-enable 或重启内核。
@@ -189,7 +189,7 @@ plugins:
 人机协同的质量闸，"生成 → 审批 → 反馈 → 迭代"闭环：
 
 - **双审批模式**：`choice`（预设选项）/ `conversation`（多轮讨论），经 human-interaction 能力（`tools/human` + `system/approval` 插件群协作）。
-- **管道挂起/恢复**：`wait` 路由信号挂起管道并保存 state，外部事件恢复执行。
+- **审批等待**：human-interaction 工具调用阻塞等待用户响应（choice / conversation）；长等待业务须在 manifest `mcp.request_timeout_secs` 显式声明，否则内核 MCP client 默认 300s 兜底先掐断。
 - **反馈注入**：审批结果（通过/驳回/批注）注入管道 state，驱动 Agent 返工。
 
 ### 复盘系统（Review）

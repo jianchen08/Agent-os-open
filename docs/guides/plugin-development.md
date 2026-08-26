@@ -9,11 +9,11 @@
 | plugin_type | 职责 | 目录 |
 |---|---|---|
 | `tool` | 暴露 LLM 工具（`capabilities.tools` 进 LLM 面） | `plugins/shared/tools/` |
-| `system` | 内核级服务：记忆/审批/评估/LLM/页面插件等，通常 tools + services 混合，可产路由信号 | `plugins/shared/system/` |
+| `system` | 内核级服务：记忆/审批/评估/LLM/页面插件等，通常 tools + services 混合 | `plugins/shared/system/` |
 | `pipeline` | 管道步骤（必须声明 `invoke_entry`，可选 `pipeline_role: input/core/output`） | `plugins/shared/pipeline/{input,core,output}/` |
 | `composite` | 组合插件（entry 可空，聚合子插件） | 少用 |
 
-管道三角色职责：**input** = 预处理（校验/上下文注入/权限），**core** = LLM 调用或工具执行（返回 dict 直接合并 state），**output** = 后处理与路由信号（返回 OutputResult）。插件间经管道 `state` 字典通信，不直接互调。
+管道三角色职责：**input** = 预处理（校验/上下文注入/权限），**core** = LLM 调用或工具执行（返回 dict 直接合并 state），**output** = 后处理与出口裁决（返回 OutputResult；出口转移本身写在管道 YAML 的路由 DSL，插件经 `state_updates` 写入 DSL 条件依赖的字段参与裁决）。插件间经管道 `state` 字典通信，不直接互调。
 
 ## 2. 宿主形态（host_type）
 
@@ -66,7 +66,7 @@ plugins/shared/pipeline/<role>/<name>/
 
 ## 6. LLM 能看到哪些工具：三层过滤链
 
-1. **启用档案**：按 `manifest.enabled > config/plugins/default_profile.yaml > 默认 true` 判定启用；禁用的插件整个不进注册表（工具/路由信号/HTTP 路由全不暴露）。watcher 每轮 sync 从盘上**重读** profile（运行期改 default_profile.yaml 或前端开关即生效）。`default_profile.yaml` 形如：
+1. **启用档案**：按 `manifest.enabled > config/plugins/default_profile.yaml > 默认 true` 判定启用；禁用的插件整个不进注册表（工具/HTTP 路由全不暴露）。watcher 每轮 sync 从盘上**重读** profile（运行期改 default_profile.yaml 或前端开关即生效）。`default_profile.yaml` 形如：
    ```yaml
    plugins:
      simple_tools:

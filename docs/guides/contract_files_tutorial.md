@@ -8,6 +8,7 @@
 > - `src/pipeline/plugin.py` / `src/pipeline/types.py` → 已随 0.1 `src/` 整体删除；0.2 等价契约：管道插件 Python 基类在 `plugins/shared/pipeline/_base/plugin.py`，类型定义在 `plugins/sdk/src/agentos_plugin_sdk/pipeline_types.py`
 > - `.project/manifest_v2_schema.json` / `.project/mcp_extension_protocol.md` → 始终未作为独立文件产出；manifest 真值源 = `kernel/crates/core/src/traits.rs::PluginManifest`，协议文档 = `docs/plugin-protocol.md`
 > - `docs/guides/plugin_development_guide.md` / `plugin_development_standard.md`（0.1）→ 已删除；现行开发指南 = `docs/guides/` 分篇（见 [README.md](README.md)）
+> - 路由信号（`next_llm` / `next_tool` / `end` / `wait`）**已不驱动路由**：0.2 路由由管道 YAML 的 G10 DSL（`when`/`then`）按 state 条件裁决；`RouteType` / `PluginResult.route_signal` 为遗留类型（native 恒 None、引擎不读），manifest `route_signals` 声明位保留但执行面零消费
 > - `docs/ARCHITECTURE.md` → 已更新为 0.2 架构口径
 
 ---

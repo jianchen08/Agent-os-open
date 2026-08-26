@@ -31,7 +31,7 @@
 
 - 🔧 **Highly Configurable** — Agents are YAML data + loaders, not hardcoded classes. Dynamic prompt loading supports cache-hit-friendly patterns: volatile content (timestamps, session rules) is injected as a separate trailing message so the leading system prompt stays byte-stable and preserves prompt-cache hits. Injected fragments can be arranged by usage frequency at config time to maximize cache-hit rate. Change a prompt without restarting (`hot_swap` supports hot replacement, with rollback on failure).
 - 🔄 **Self-Evolving Closed Loop** — Task execution → review (deep LLM review of finished pipelines, sedimenting experience reports into the knowledge base) → modify/add configuration and add plugins to enhance the system, forming a closed loop that gets smarter with use. A companion memory cleanup mechanism decides retention along three dimensions (review-status × age × capacity), ensuring reviews are sedimented before raw memories are reclaimed.
-- 🔌 **Plugin-based Pipeline Architecture** — The kernel engine just interprets a pipeline YAML, holding a shared `state` and scheduling loop bodies; **you can freely write plugins to control every state during Agent execution** (plugins are interceptors, `state` is the bus): a plugin can end the pipeline, suspend it, decide whether the next round calls the LLM or a tool, or read/write any state field — all without touching kernel code. Combined with 4 routing signals (`next_llm` / `next_tool` / `end` / `wait`) and the dual hosting tracks (Python sidecar / Rust native cdylib), every decision is observable, intervenable, and rollback-able. See [Key Highlight 14](#14-plugin-based-pipeline-architecture-every-state-of-agent-execution-is-yours-to-control) below.
+- 🔌 **Plugin-based Pipeline Architecture** — The kernel engine just interprets a pipeline YAML, holding a shared `state` and scheduling loop bodies; **you can freely write plugins to control every state during Agent execution** (plugins are interceptors, `state` is the bus): plugins read/write any state field, while exit transfers (whether the next round calls the LLM or a tool, when to end) are decided by the declarative routing DSL (`when`/`then`/`set`) in the pipeline YAML based on state conditions — no kernel code changes at all. Combined with the dual hosting tracks (Python sidecar / Rust native cdylib), every decision is observable, intervenable, and rollback-able. See [Key Highlight 14](#14-plugin-based-pipeline-architecture-every-state-of-agent-execution-is-yours-to-control) below.
 - 🧠 **Multi-layer Memory** — Episodic (EPISODE, compressed memory of conversations) + Semantic (SEMANTIC, sedimenting user preferences / project decisions / external knowledge base imports, etc.), retrieved on demand and injected as needed. Currently shipped: keyword retrieval, tag retrieval, and full injection. Richer retrieval modes (e.g. vector semantic retrieval) and injection modes (on-demand / summary injection) are planned for a later release — see [ROADMAP.md](ROADMAP.md).
 
 ### Tech Stack
@@ -125,24 +125,17 @@ User message → Web frontend → Rust kernel engine ┌─ init body (workspace
                                                       ↑ all plugins read/write the same shared state ↑
 ```
 
-**How a plugin controls state**:
+**Division of labor**: plugins only read/write state (returning `state_updates` merged on the fly); "what the next round does" is decided by the pipeline YAML's routing DSL on state conditions — compiled at load time, zero parsing at runtime.
 
-| Control | What the plugin does | Effect |
-|---------|----------------------|--------|
-| Read/write fields | Returns `state_updates`, merged into `state` on the fly | Downstream plugins, the routing DSL, and Core all see it |
-| End / suspend | Output plugins emit `end` / `wait` routing signals | Ends the pipeline now, or suspends until an external event (e.g. approval) then resumes |
-| Routing DSL picks next round | Pipeline `next:` transfers by `when` condition with `set:` writes | Dynamic `llm_call` ↔ `tool_execute` switching, branching across steps/loop bodies |
-
-**The 4 routing signals** clearly define "what the next round does":
-
-| Signal | Meaning |
+| `then` transfer target | Meaning |
 |--------|---------|
-| `next_llm` | Next round calls the LLM |
-| `next_tool` | Execute a tool |
+| `loop` | Continue the loop (with `set:` to switch round type, e.g. `core_type=tool_execute` enters tool execution) |
 | `end` | End the pipeline |
-| `wait` | Suspend, wait for external input/approval |
+| step id / loop-body id | Jump between steps / transfer across loop bodies |
 
-**Plugins-as-declarations**: a plugin = a directory + a `plugin.json` manifest (declaring tools / services / routing signals / lifecycle hooks / HTTP endpoints), uniformly discovered, validated, and registered by the kernel. Choose your hosting track freely — Python sidecar (separate process, MCP over stdio, uv venv isolation) or Rust native (cdylib, zero-IPC in-process); third-party MCP services plug in with zero code. Plugin errors are handled uniformly by the engine: crashed sidecars auto-restart with one retry; failed tool results are fed back to the LLM for self-correction.
+Exit-transfer conditions and side-effect writes are fully declared in the pipeline config (e.g. "tool calls pending → loop into tool execution; tools just executed → back to LLM; otherwise → end") — observable, intervenable, and rollback-able.
+
+**Plugins-as-declarations**: a plugin = a directory + a `plugin.json` manifest (declaring tools / services / lifecycle hooks / HTTP endpoints), uniformly discovered, validated, and registered by the kernel. Choose your hosting track freely — Python sidecar (separate process, MCP over stdio, uv venv isolation) or Rust native (cdylib, zero-IPC in-process); third-party MCP services plug in with zero code. Plugin errors are handled uniformly by the engine: crashed sidecars auto-restart with one retry; failed tool results are fed back to the LLM for self-correction.
 
 Dev docs: [docs/plugin-protocol.md](docs/plugin-protocol.md) (protocol authority) · [docs/guides/README.md](docs/guides/README.md) (step-by-step guides).
 
