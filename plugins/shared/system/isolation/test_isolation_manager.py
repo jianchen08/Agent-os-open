@@ -124,7 +124,8 @@ def _install_stubs() -> None:
         _IO_ERROR_MARKERS = ("input/output error",)
 
         def __init__(self, *args: Any, **kwargs: Any) -> None:
-            pass
+            # 记录构造参数,供顶层 _create_providers_from_config 测试断言
+            self._config = kwargs.get("config", {})
 
         @classmethod
         def _is_namespace_desync_error(cls, err: str | bytes | None) -> bool:
@@ -1097,3 +1098,85 @@ class TestSingleton:
         assert mgr1 is mgr2
         assert mgr1._providers  # 默认提供者已创建
         _run(mod.stop_isolation_manager())
+
+
+# ═══════════════════════════════════════════════════════════
+# 顶层配置加载 / 提供者创建
+# ═══════════════════════════════════════════════════════════
+
+
+class TestProviderConfig:
+    def test_load_provider_config_fallback_empty(self) -> None:
+        """config_center 不可用 → 返回空配置（不 panic）。"""
+        mod = _load_manager()
+        assert mod._load_provider_config() == {}
+
+    def test_load_provider_config_from_center(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """config_center 返回 providers 段 → 透传。"""
+        fake_center = types.ModuleType("config")
+        fake_center.config_center = types.ModuleType("config.config_center")
+
+        class _FakeConfigCenter:
+            def get(self, _key: str) -> dict[str, Any]:
+                return {"providers": {"host": {"enabled": False}}}
+
+        fake_center.config_center.get_config_center = lambda: _FakeConfigCenter()
+        monkeypatch.setitem(sys.modules, "config", fake_center)
+        monkeypatch.setitem(sys.modules, "config.config_center", fake_center.config_center)
+        mod = _load_manager()
+        assert mod._load_provider_config() == {"host": {"enabled": False}}
+
+    def test_create_providers_default_host_and_docker(self) -> None:
+        mod = _load_manager()
+        providers = mod._create_providers_from_config({})
+        assert IsolationLevel.HOST in providers
+        assert IsolationLevel.CONTAINER in providers
+
+    def test_create_providers_all_disabled(self) -> None:
+        mod = _load_manager()
+        providers = mod._create_providers_from_config(
+            {"host": {"enabled": False}, "docker": {"enabled": False}}
+        )
+        assert providers == {}
+
+    def test_create_providers_host_only(self) -> None:
+        mod = _load_manager()
+        providers = mod._create_providers_from_config({"docker": {"enabled": False}})
+        assert list(providers) == [IsolationLevel.HOST]
+
+    def test_create_providers_cua_fallback(self) -> None:
+        """docker 键缺失时回退 cua 键（老配置兼容）。"""
+        mod = _load_manager()
+        providers = mod._create_providers_from_config(
+            {"host": {"enabled": False}, "cua": {"enabled": True}}
+        )
+        assert IsolationLevel.CONTAINER in providers
+
+    def test_create_providers_profile_overrides_limits(self) -> None:
+        """hardware profile 优先于配置文件 limits。"""
+        mod = _load_manager()
+        profile = {
+            "container_memory": "256m",
+            "container_cpus": "0.5",
+            "memory_swap": "256m",
+            "pids_limit": 64,
+        }
+        providers = mod._create_providers_from_config(
+            {"host": {"enabled": False}, "docker": {"limits": {"memory": "1g", "cpus": "2.0"}}},
+            profile=profile,
+        )
+        docker = providers[IsolationLevel.CONTAINER]
+        assert docker._config["memory_limit"] == "256m"
+        assert docker._config["cpu_limit"] == "0.5"
+        assert docker._config["pids_limit"] == 64
+
+    def test_create_providers_profile_partial_keeps_defaults(self) -> None:
+        """profile 只给部分键时其余用配置/默认值。"""
+        mod = _load_manager()
+        providers = mod._create_providers_from_config(
+            {"host": {"enabled": False}, "docker": {"limits": {"memory": "1g"}}},
+            profile={"container_memory": "384m"},
+        )
+        docker = providers[IsolationLevel.CONTAINER]
+        assert docker._config["memory_limit"] == "384m"
+        assert docker._config["cpu_limit"] == "1.0"  # 配置默认

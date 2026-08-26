@@ -65,11 +65,11 @@ class _FakeTree:
 
 def _make_manager(
     tmp_path: Path,
-    ws_root: str,
+    ws_root: str | Path,
     tasks: dict[str, _FakeTask] | None = None,
     meta_store: dict | None = None,
     config: dict | None = None,
-) -> WorkspaceLifecycleManager:
+) -> WorkspaceLifecycleManager:  # type: ignore[valid-type]  # importlib 动态加载的类别名不可作注解
     cfg = {"workspace": {"default_mode": "worktree", "root": str(ws_root)}}
     if config:
         cfg["workspace"].update(config)

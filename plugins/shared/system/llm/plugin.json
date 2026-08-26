@@ -105,6 +105,10 @@
   "permissions": {},
   "priority": 30,
   "requires_content": 3,
+  "granted_capabilities": [
+    "event-bus",
+    "pipeline-executor"
+  ],
   "config_files": [
     {
       "id": "llm",

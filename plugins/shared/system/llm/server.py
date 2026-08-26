@@ -47,6 +47,10 @@ _adapter: Any = None
 # 消费端以 keepalive 区分"上游活着但慢"与"连接死了"。
 KEEPALIVE_INTERVAL_SECONDS: float = 30.0
 
+# 取消轮询间隔：llm_core 侧会话停止（dispatch_stop 置 run suspended）后，
+# 本服务最迟在该间隔内感知并中断流（方案 §四.1 的 ~500ms 轮询）。
+CANCEL_POLL_INTERVAL_SECONDS: float = 0.5
+
 
 @plugin.on_load
 async def _on_load(params: dict[str, Any]) -> None:
