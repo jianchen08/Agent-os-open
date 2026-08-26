@@ -32,7 +32,7 @@
 - 🔌 **Everything is a Plugin** — The kernel is just an execution substrate (pipeline interpretation, capability registry, plugin loading, storage); LLM, memory, evaluation, approval, triggers, channels, themes — every capability is a plugin. Changing any business behavior = adding/modifying plugins or config, hot-effective across the chain, never touching the kernel.
 - ⚙️ **Highly Configurable (a direct consequence)** — Agents are YAML data: persona, prompts, tool whitelist, constraints — all configurable; dynamic prompts inject as trailing messages without breaking prompt cache; changes apply without restart.
 - 🔄 **Self-Evolving Loop** — Execute → review & sediment experience → generate new plugins and hot-load them: the system modifies itself by adding plugins, never touching the kernel.
-- 🔀 **Plugin-based Pipeline** — The engine just interprets one pipeline YAML: plugins read/write a shared `state`, and a declarative routing DSL decides every transition (see [Key Highlight 14](#14-plugin-based-pipeline-architecture-every-state-of-agent-execution-is-yours-to-control)).
+- 🔀 **Plugin-based Pipeline** — The engine just interprets one pipeline YAML: plugins read/write a shared `state`, and a declarative routing DSL decides every transition (see [Key Highlight 1](#1-plugin-based-pipeline-architecture--everything-is-a-plugin-every-state-of-agent-execution-is-yours-to-control)).
 - 🧠 **Memory System** — Carried by the hindsight memory plugin: automatic retention, on-demand recall, and document import; read/written by the LLM via the memory tool.
 
 ### Tech Stack
@@ -71,50 +71,11 @@
 
 ## ✨ Key Highlights
 
-### 1. Freedom — You Define, Lingxi Executes
-Almost every behavior can be customized via YAML/config files without changing code. Agent identity, prompts, toolset, model selection, hard/soft constraints, I/O schemas — all configurable.
+> Every highlight below stands on "everything is a plugin": apart from the engine and the frontend shell, each capability is carried by plugins (capability→plugin mapping in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)).
 
-### 2. Refined Tool Engineering
-All tools follow a unified contract (`input_schema` + `output_schema` + `render` intent): the kernel validates results against `output_schema` (fail-closed), the frontend renders result cards by `render`, and the LLM-visible toolset is precisely controlled by each Agent's `tool_ids` whitelist. **26 built-in tool plugins**, plus zero-code integration of any MCP external tools.
+### 1. Plugin-based Pipeline Architecture — Everything Is a Plugin, Every State of Agent Execution Is Yours to Control
 
-### 3. Intelligent Conversation — Not Just Chatting, but "Thinking Dialog"
-Streaming response + real-time thinking display with mode toggle + proactive clarification + (document) approval interaction.
-
-> **Planned (0.2.0+)**: Voting panels, media timelines and other interaction enhancements are not yet implemented. See [ROADMAP.md](ROADMAP.md).
-
-### 4. Frontend Excellence — Beautiful, Usable, Customizable
-7 compile-time preset themes (Dark / Light / Deep Space Command Center / Ocean Breeze / Pixel Candy / Moe Soft / High Contrast) + 3 dynamic JSON themes + plugin-delivered themes/skins (`contributes.themes`), full configuration visualization, YAML-to-form auto-mapping.
-
-### 5. Container Tasks — Engine for Complex Long-term Projects
-For multi-stage tasks with deliverables ("develop an App", "write a novel", "make a game"), container tasks provide a complete solution planning → phase execution → human review → final acceptance loop.
-
-### 6. Trigger System — Unattended Operation
-Scheduled triggers (Cron), event triggers, interval triggers let Lingxi run itself.
-
-### 7. Workspace Isolation & Worktree Mechanism
-Each task runs in its own **isolated workspace**: folder-level isolation by default, with Docker container isolation for higher-risk execution paths. In multi-task scenarios the **git worktree** mechanism forks a dedicated working directory per task, so concurrent tasks never collide on the filesystem and any side-effect can be reviewed or rolled back at the worktree boundary.
-
-### 8. Approval Closed Loop — Quality Gate for Human-AI Collaboration
-Human approval (choice / conversation dual modes; the human-interaction tool blocks awaiting the user's response) + feedback injection + task rework, forming a "generate → approve → feedback → iterate" quality-gate loop.
-
-### 9. Mandatory Evaluation System — Hard Constraint on Task Quality
-Task submission must include acceptance criteria (evaluation metrics); after pipeline exit, a mandatory gate transitions the task into evaluation and reviews it against the metrics. Only when all metrics pass is the task marked complete; exhausted retries mean failure. Even if the Agent doesn't actively evaluate, the system forces a re-run — quality is never skipped.
-
-### 10. 26 Tool Plugins — Out-of-the-box Toolbox
-Files, Shell, code search, browser, network, memory, media generation, IDE integration (26 tool plugins), with zero-code integration of any third-party MCP service.
-
-### 11. Multi-client Access — One Kernel, Everywhere Reachable
-The Web frontend talks straight to the Rust kernel (HTTP / WebSocket); plugins communicate with the kernel over MCP, and third-party MCP services plug in with zero code.
-
-### 12. Skill Integration — Extend Domain Capabilities on Demand
-Reusable skill packages (SKILL.md) under `skills/`: Agents lazy-load them via prompt guidance (file_read on demand, then follow the instructions) — new domain capabilities without code changes; skills, rules and prompts are three decoupled layers, added/removed independently.
-
-### 13. Hot Configuration — Evolve Without Downtime
-Agent configs (YAML) hot-apply via mtime caching — change prompts or tool whitelists without restarting; plugin directories and manifest changes are hot-discovered and auto-(re)registered (file-watch + polling fallback, seconds-level); Python plugin processes are idle-collected, hot-reloaded on code change, and auto-revived after crashes. Pipeline configs hot-reload too — file changes are detected before each run and recompiled automatically; a broken config falls back to the last good one with a warning.
-
-### 14. Plugin-based Pipeline Architecture — Every State of Agent Execution Is Yours to Control
-
-**Everything is a plugin**: the kernel is just an execution substrate (pipeline interpretation, capability registry, plugin loading, storage) — LLM calls, memory, evaluation, approval, triggers, channels, themes and every other capability live in plugins. This is how "an evolvable Agent OS" materializes: the system modifies itself by generating new plugins that hot-load in seconds, without ever touching the kernel; plugin crashes are isolated from each other, the Python ecosystem plugs in directly, and third-party services integrate with zero code via MCP.
+**Everything is a plugin**: the kernel is just an execution substrate (pipeline interpretation, capability registry, plugin loading, storage) — LLM calls, memory, evaluation, approval, triggers, channels, themes and every other capability live in plugins. This is how "an evolvable Agent OS" materializes: the system modifies itself by generating new plugins that hot-load in seconds, without ever touching the kernel; plugin crashes are isolated from each other, the Python ecosystem plugs in directly, and third-party services integrate with zero code via MCP; the Web frontend talks straight to the kernel (HTTP / WebSocket) while plugins communicate over MCP.
 
 The kernel engine does only one thing: interpret `config/pipelines/autonomous.yaml`, holding a shared `state` dict and scheduling loop bodies. **"What each round does" is entirely up to plugins** — wherever you want to intervene in Agent execution, whatever you want to rewrite, skip, or terminate, you implement it as a plugin. No kernel code changes needed.
 
@@ -141,6 +102,41 @@ Exit-transfer conditions and side-effect writes are fully declared in the pipeli
 **Plugins-as-declarations**: a plugin = a directory + a `plugin.json` manifest (declaring tools / services / lifecycle hooks / HTTP endpoints), uniformly discovered, validated, and registered by the kernel. Choose your hosting track freely — Python sidecar (separate process, MCP over stdio, uv venv isolation) or Rust native (cdylib, zero-IPC in-process); third-party MCP services plug in with zero code. Plugin errors are handled uniformly by the engine: crashed sidecars auto-restart with one retry; failed tool results are fed back to the LLM for self-correction.
 
 Dev docs: [docs/plugin-protocol.md](docs/plugin-protocol.md) (protocol authority) · [docs/guides/README.md](docs/guides/README.md) (step-by-step guides).
+
+### 2. Hot Configuration — Evolve Without Downtime
+Agent configs (YAML) hot-apply via mtime caching — change prompts or tool whitelists without restarting; plugin directories and manifest changes are hot-discovered and auto-(re)registered (file-watch + polling fallback, seconds-level); Python plugin processes are idle-collected, hot-reloaded on code change, and auto-revived after crashes. Pipeline configs hot-reload too — file changes are detected before each run and recompiled automatically; a broken config falls back to the last good one with a warning.
+
+### 3. Freedom — You Define, Lingxi Executes
+Almost every behavior is customizable via YAML: agent identity, prompts, tool whitelist, constraints, model selection — a direct consequence of everything-is-a-plugin + configuration; changes apply instantly (see Highlight 2).
+
+### 4. Tool System — Contract-based Design, Out of the Box
+Unified contract (`input_schema` + `output_schema` + `render` intent): the kernel validates results against `output_schema` (fail-closed), the frontend renders result cards by `render`, and `tool_ids` whitelists precisely control the LLM-visible surface. 26 built-in tool plugins (files, shell, code search, browser, network, memory, media generation, IDE integration), plus zero-code integration of any third-party MCP service.
+
+### 5. Mandatory Evaluation System — Hard Constraint on Task Quality
+Task submission must include acceptance criteria (evaluation metrics); after pipeline exit, a mandatory gate transitions the task into evaluation and reviews it against the metrics. Only when all metrics pass is the task marked complete; exhausted retries mean failure. Even if the Agent doesn't actively evaluate, the system forces a re-run — quality is never skipped.
+
+### 6. Approval Closed Loop — Quality Gate for Human-AI Collaboration
+Human approval (choice / conversation dual modes; the human-interaction tool blocks awaiting the user's response) + feedback injection + task rework, forming a "generate → approve → feedback → iterate" quality-gate loop.
+
+### 7. Container Tasks — Engine for Complex Long-term Projects
+For multi-stage tasks with deliverables ("develop an App", "write a novel", "make a game"), container tasks provide a complete solution planning → phase execution → human review → final acceptance loop.
+
+### 8. Workspace Isolation & Worktree Mechanism
+Each task runs in its own **isolated workspace**: folder-level isolation by default, with Docker container isolation for higher-risk execution paths. In multi-task scenarios the **git worktree** mechanism forks a dedicated working directory per task, so concurrent tasks never collide on the filesystem and any side-effect can be reviewed or rolled back at the worktree boundary.
+
+### 9. Trigger System — Unattended Operation
+Scheduled triggers (Cron), event triggers, interval triggers let Lingxi run itself.
+
+### 10. Intelligent Conversation — Not Just Chatting, but "Thinking Dialog"
+Streaming response + real-time thinking display with mode toggle + proactive clarification + (document) approval interaction.
+
+> **Planned (0.2.0+)**: Voting panels, media timelines and other interaction enhancements are not yet implemented. See [ROADMAP.md](ROADMAP.md).
+
+### 11. Frontend Excellence — Beautiful, Usable, Customizable
+7 compile-time preset themes (Dark / Light / Deep Space Command Center / Ocean Breeze / Pixel Candy / Moe Soft / High Contrast) + 3 dynamic JSON themes + plugin-delivered themes/skins (`contributes.themes`), full configuration visualization, YAML-to-form auto-mapping.
+
+### 12. Skill Integration — Extend Domain Capabilities on Demand
+Reusable skill packages (SKILL.md) under `skills/`: Agents lazy-load them via prompt guidance (file_read on demand, then follow the instructions) — new domain capabilities without code changes; skills, rules and prompts are three decoupled layers, added/removed independently.
 
 ---
 
