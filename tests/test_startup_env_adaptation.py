@@ -1,3 +1,4 @@
+# @feature: FP-T01 docker环境 | @ci: python-coverage
 """
 启动脚本与配置的环境适配测试
 
@@ -55,7 +56,7 @@ class TestNoHardcodedDirSuffix:
 
     @pytest.mark.parametrize("rel_path", [
         "docker-compose.yml",
-        "wsl_ensure_containers.sh",
+        "plugins/shared/system/isolation/scripts/wsl_ensure_containers.sh",
     ])
     def test_no_22404_literal(self, rel_path):
         """三脚本均不应含 22404 字面量"""
@@ -110,7 +111,7 @@ class TestDynamicContainerLookup:
 
     @pytest.fixture
     def wsl_sh(self):
-        return _read_file("wsl_ensure_containers.sh")
+        return _read_file("plugins/shared/system/isolation/scripts/wsl_ensure_containers.sh")
 
     def test_wsl_uses_compose_ps(self, wsl_sh):
         """wsl 脚本用 docker compose ps -q <service> 获取容器 ID"""
@@ -139,7 +140,7 @@ class TestWslProjectDirDynamic:
 
     @pytest.fixture
     def content(self):
-        return _read_file("wsl_ensure_containers.sh")
+        return _read_file("plugins/shared/system/isolation/scripts/wsl_ensure_containers.sh")
 
     def test_uses_wslpath(self, content):
         """脚本应使用 wslpath 动态推导当前目录的 WSL 路径"""
@@ -187,7 +188,7 @@ class TestPortParameterization:
 
     def test_wsl_no_dangerous_foreign_container_removal(self):
         """wsl_ensure_containers.sh 不应含'自动删除 foreign 容器'的危险预检"""
-        content = _read_file("wsl_ensure_containers.sh")
+        content = _read_file("plugins/shared/system/isolation/scripts/wsl_ensure_containers.sh")
         assert "foreign" not in content, (
             "wsl 脚本仍含自动删除 foreign 容器的危险逻辑"
         )
@@ -213,16 +214,8 @@ class TestInstallScriptsPortability:
             "install_wsl_docker.sh 挂载测试应动态推导项目路径（dirname/pwd）"
         )
 
-    def test_install_sh_uses_compose_for_redis_check(self):
-        """install.sh 健康检查应用 docker compose ps 查 service，而非旧容器名前缀"""
-        content = _read_file("install.sh")
-        # 旧写法 grep agent-os-redis 与 compose 标准命名（{project}-redis）不匹配
-        assert "grep -q agent-os-redis" not in content, (
-            "install.sh 仍用 grep agent-os-redis 检查容器，与 compose 标准命名不匹配"
-        )
-        assert "docker compose ps -q redis" in content, (
-            "install.sh 应改用 docker compose ps -q redis 检查 service"
-        )
+    # install.sh 已随 0.1 废弃脚本清理批删除（89eaa72a），
+    # 其 redis 健康检查用例随之退役；install_wsl_docker.sh 用例保留。
 
 
 # ---------------------------------------------------------------------------
