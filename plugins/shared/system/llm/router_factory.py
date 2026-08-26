@@ -71,12 +71,25 @@ _provider_type_map: dict[str, str] = {}
 
 
 def get_litellm_prefix(provider_name: str) -> str:
-    """获取 provider 对应的 litellm 前缀（从配置动态读取）。"""
+    """获取 provider 对应的 litellm 前缀（从配置动态读取）。
+
+    fail-closed（兜底反模式审查 P8）：未在 llm.yaml providers.<name>.type
+    配置的 provider 显式抛配置错误——provider 名本身不是合法 litellm 前缀，
+    静默回退会把配置错误推迟成上游 API 的隐蔽 404/路由失败。
+    """
     if provider_name in _provider_type_map:
         return _provider_type_map[provider_name]
-    # 映射为空或缺失：懒加载重建，绝不回退到 provider_name 本身（非法前缀）
+    if not provider_name:
+        # 调用方（adapter/keypool 直连）以空 provider 表示"无前缀直连模型"
+        return ""
+    # 映射缺失：懒加载重建一次，仍未命中即配置错误
     _ensure_provider_type_map_loaded()
-    return _provider_type_map.get(provider_name, provider_name)
+    if provider_name not in _provider_type_map:
+        raise ValueError(
+            f"前缀映射缺失: provider '{provider_name}' 未在 llm.yaml "
+            "providers.<name>.type 配置（不回退 provider 名充当 litellm 前缀）"
+        )
+    return _provider_type_map[provider_name]
 
 
 def _ensure_provider_type_map_loaded() -> None:

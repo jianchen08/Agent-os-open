@@ -488,6 +488,10 @@ class _Req:
 
 
 def _load_server_module() -> Any:
+    # 先逐出陈旧裸名 `plugin`：server.py 顶层 `from plugin import` 走
+    # sys.modules 缓存，共跑车道里其他插件测试（收集期导入）会把自身
+    # plugin.py 装进裸名缓存，不逐出则劫持到错误实现。
+    sys.modules.pop("plugin", None)
     mod_name = "prompt_build_server_test"
     module_path = Path(_THIS_DIR) / "server.py"
     if mod_name in sys.modules:

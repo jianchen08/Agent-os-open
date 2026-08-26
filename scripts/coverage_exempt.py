@@ -44,6 +44,7 @@ BASE_TEST_PATHS: list[str] = [
     "plugins/shared/system/tasks/",
     "plugins/shared/system/test_migration_batch3.py",
     "plugins/shared/tools/task/",
+    "plugins/shared/tools/task_evaluate/",
     "plugins/shared/tools/tests/",
     "plugins/shared/tools/builtin_tools/tests/",
     "tests/plugins/",

@@ -30,7 +30,13 @@ for _d in [_DIR, _SHARED]:
 
 
 def _load_server() -> Any:
-    """按显式路径加载 server.py（裸名 server 全车道共跑会被劫持）。"""
+    """按显式路径加载 server.py（裸名 server 全车道共跑会被劫持）。
+
+    先逐出陈旧裸名 `plugin`：server.py 顶层 `from plugin import TaskReminder`
+    走 sys.modules 缓存——共跑车道里其他插件的测试（如 prompt_build）会把
+    自身 plugin.py 装进裸名缓存，不逐出则劫持到错误实现上 ImportError。
+    """
+    sys.modules.pop("plugin", None)
     mod_name = "task_reminder_server_test"
     spec = importlib.util.spec_from_file_location(mod_name, str(_DIR / "server.py"))
     assert spec is not None and spec.loader is not None
