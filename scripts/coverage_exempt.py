@@ -45,6 +45,7 @@ BASE_TEST_PATHS: list[str] = [
     "plugins/shared/system/test_migration_batch3.py",
     "plugins/shared/pipeline/core/llm_provider_keypool/",
     "plugins/shared/pipeline/input/multimodal_preprocessor/",
+    "plugins/shared/pipeline/input/tool_schema/",
     "plugins/shared/pipeline/output/duplicate_check/",
     "plugins/shared/tools/task/",
     "plugins/shared/tools/task_evaluate/",
