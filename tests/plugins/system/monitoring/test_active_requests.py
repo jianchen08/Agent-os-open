@@ -52,6 +52,51 @@ def _active(monitor) -> int:
 
 
 # ============================================================
+# _collect_token_usage：traces 聚合与降级
+# ============================================================
+
+
+class TestCollectTokenUsage:
+    """/ext/monitoring/token-usage 数据源：traces 聚合真值 + 无 DB 降级 0。"""
+
+    def test_no_db_degrades_to_zero(self, server_module, monkeypatch, tmp_path) -> None:
+        """AGENTOS_DB_PATH 指向不存在文件 → token 三项降级 0（不抛错）。"""
+        monkeypatch.setenv("AGENTOS_DB_PATH", str(tmp_path / "absent.db"))
+        result = server_module._collect_token_usage()
+        assert result["total_tokens"] == 0
+        assert result["prompt_tokens"] == 0
+        assert result["completion_tokens"] == 0
+
+    def test_aggregates_llm_usage_from_traces(
+        self, server_module, monkeypatch, tmp_path
+    ) -> None:
+        """traces 含多条 llm_usage → SUM 聚合（区分度：非零且逐项对应）。"""
+        import json
+        import sqlite3
+
+        db_path = tmp_path / "kernel.db"
+        conn = sqlite3.connect(db_path)
+        conn.execute("CREATE TABLE traces (patch_data TEXT)")
+        rows = [
+            {"llm_usage": {"input_tokens": 7, "output_tokens": 3, "total_tokens": 10}},
+            {"llm_usage": {"input_tokens": 5, "output_tokens": 5, "total_tokens": 10}},
+            {"other": "非 llm_usage 行不计入"},
+        ]
+        conn.executemany(
+            "INSERT INTO traces (patch_data) VALUES (?)",
+            [(json.dumps(r),) for r in rows],
+        )
+        conn.commit()
+        conn.close()
+        monkeypatch.setenv("AGENTOS_DB_PATH", str(db_path))
+
+        result = server_module._collect_token_usage()
+        assert result["prompt_tokens"] == 12
+        assert result["completion_tokens"] == 8
+        assert result["total_tokens"] == 20
+
+
+# ============================================================
 # 兼容性：只调 end 不调 start（存量调用方）
 # ============================================================
 

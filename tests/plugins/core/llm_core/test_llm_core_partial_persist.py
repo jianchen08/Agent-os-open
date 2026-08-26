@@ -317,6 +317,44 @@ async def test_invalid_tool_call_id_normalized() -> None:
     assert ops[1]["msg"]["tool_call_id"] == tc_id
 
 
+# ─────────────────── plugin：成功路径 id 标准化（重构回归） ───────────────────
+
+
+class _SuccessAdapter:
+    """completion 返回预设成功响应（模拟正常流完成）。"""
+
+    def __init__(self, response: Any) -> None:
+        self._response = response
+
+    async def completion(
+        self, *, model: str, messages: list[dict[str, Any]], **kwargs: Any
+    ) -> Any:
+        return self._response
+
+
+async def test_success_tool_calls_ids_normalized_inplace() -> None:
+    """成功路径 tool_calls → 非标准 id 标准化并回写 raw_tool_calls 与 assistant 消息。"""
+    resp = _adapter.LLMResponse(
+        text="calling tool",
+        tool_calls=[
+            {"id": "call_function_xxx_9", "name": "bash", "args": '{"cmd":"ls"}'}
+        ],
+    )
+    plugin = LLMCore(
+        {"provider": "openai", "model_name": "deepseek-v3", "default_params": {}},
+        adapter=_SuccessAdapter(resp),  # type: ignore[arg-type]
+    )
+    result = await plugin.execute(_make_ctx(_base_state()))
+
+    raw_tc = result["raw_tool_calls"][0]
+    assert raw_tc["id"].startswith("call_")
+    assert raw_tc["id"] != "call_function_xxx_9"
+    # assistant 消息与 raw_tool_calls 共用同一解析 id（tool_core 配对一致性）
+    assistant = result["messages"]["_ops"][0]["msg"]
+    assert assistant["tool_calls"][0]["id"] == raw_tc["id"]
+    assert assistant["tool_calls"][0]["function"]["arguments"] == '{"cmd":"ls"}'
+
+
 async def test_no_snapshot_still_raises() -> None:
     """无快照异常（流未开始/零内容）→ 维持 raise（现状不变）。"""
     exc = ValueError("hard fail")
