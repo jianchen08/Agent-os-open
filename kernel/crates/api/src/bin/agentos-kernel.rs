@@ -715,9 +715,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
 
     // G6：granted_capabilities 白名单查询器——声明非空即白名单制，未声明默认
-    // 全授予（存量插件零迁移）。执行点在 KernelCapabilityRouter::handle 单点，
-    // sidecar（PluginScopedRouter 注 _plugin_id）与 native（NativeHostServices 注
-    // _plugin_id）同判。
+    // 全授予（存量插件零迁移）。AGENTOS_GRANTS_STRICT=1 时经 with_grants_strict
+    // 置位，未声明一律拒绝（fail-closed，新插件必须显式声明）。执行点在
+    // KernelCapabilityRouter::handle 单点，sidecar（PluginScopedRouter 注
+    // _plugin_id）与 native（NativeHostServices 注 _plugin_id）同判。
     let loader_for_grants = loader_arc.clone();
     let grants_lookup: agentos_api::capability_router::GrantsLookupFn =
         Arc::new(move |plugin_id| {
@@ -808,18 +809,28 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         })
     };
 
+    let mut router_builder = KernelCapabilityRouter::with_metrics(metrics_aggregator.clone())
+        .with_invoker(invoker.clone())
+        .with_registry(registry.clone())
+        .with_session(session_coord.clone())
+        .with_store(store.clone())
+        .with_handler_registry(handler_registry.clone())
+        .with_grants_lookup(grants_lookup)
+        .with_dynamic_tool_registrar(dynamic_registrar.clone())
+        .with_domain_broadcaster(domain_broadcaster)
+        .with_streaming_declaration_lookup(streaming_declaration_lookup)
+        .with_capability_contracts(capability_contracts.clone());
+    // AGENTOS_GRANTS_STRICT=1：未声明 granted_capabilities 的插件反向调用一律
+    // 拒绝（fail-closed）。启动期读取——开关随进程生效，不随插件热发现翻转。
+    if std::env::var("AGENTOS_GRANTS_STRICT").as_deref() == Ok("1") {
+        info!(
+            target: "agentos-kernel",
+            "AGENTOS_GRANTS_STRICT=1：插件未声明 granted_capabilities 时反向调用一律拒绝（fail-closed）"
+        );
+        router_builder = router_builder.with_grants_strict();
+    }
     let router = Arc::new(
-        KernelCapabilityRouter::with_metrics(metrics_aggregator.clone())
-            .with_invoker(invoker.clone())
-            .with_registry(registry.clone())
-            .with_session(session_coord.clone())
-            .with_store(store.clone())
-            .with_handler_registry(handler_registry.clone())
-            .with_grants_lookup(grants_lookup)
-            .with_dynamic_tool_registrar(dynamic_registrar.clone())
-            .with_domain_broadcaster(domain_broadcaster)
-            .with_streaming_declaration_lookup(streaming_declaration_lookup)
-            .with_capability_contracts(capability_contracts.clone())
+        router_builder
             // 工具连续失败告警器：挂默认实现，统一经 invoke 结果
             // 归一化点计数（见 capability_router handle 的 tool-executor 分支）。
             .with_tool_failure_tracker(Arc::new(

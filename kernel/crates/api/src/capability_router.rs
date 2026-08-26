@@ -49,9 +49,14 @@ pub struct KernelCapabilityRouter {
     handler_registry: Option<Arc<agentos_mcp::CapabilityHandlerRegistry>>,
     /// 授权查询器（G6：granted_capabilities 白名单的查找通道）。
     /// 闭包签名 (plugin_id) → Some(白名单) 当且仅当该插件声明了非空
-    /// granted_capabilities；None = 未声明（默认全授予，存量插件零迁移）。
+    /// granted_capabilities；None = 未声明。
     /// None（字段）= 未装配授权查询 → 不做校验（兼容旧装配/测试）。
     grants_lookup: Option<GrantsLookupFn>,
+    /// G6 strict 开关（AGENTOS_GRANTS_STRICT=1 时由装配方置位）：
+    /// strict = 未声明 granted_capabilities 的插件一律拒绝反向调用（fail-closed，
+    /// 新插件必须显式声明）；非 strict = 未声明默认全授予（存量插件零迁移）。
+    /// 判定语义见 [`Self::grants_lookup`] 与 handle() 的 G6 单点。
+    grants_strict: bool,
     /// 动态工具注册器（G3：registry.register_tool 的执行通道）。
     /// 闭包负责三道闸的后两道——enablement 校验（插件须 Enabled）+
     /// 写入注册表（经 M1 guarded 注册入 scope）+ 持久化（可重建性闸，写 DB）。
@@ -96,7 +101,8 @@ pub type DynamicToolRegistrar =
 /// G6：granted_capabilities 白名单查询闭包。
 ///
 /// (plugin_id) → `Some(grants)` = 该插件声明了非空白名单（白名单制）；
-/// `None` = 未声明（默认全授予，向后兼容存量插件）。
+/// `None` = 未声明。未声明是否放行由 strict 开关决定（默认放行，存量零迁移；
+/// `AGENTOS_GRANTS_STRICT=1` 时拒绝）。
 pub type GrantsLookupFn = Arc<dyn Fn(&str) -> Option<Vec<String>> + Send + Sync>;
 
 impl KernelCapabilityRouter {
@@ -110,6 +116,7 @@ impl KernelCapabilityRouter {
             store: None,
             handler_registry: None,
             grants_lookup: None,
+            grants_strict: false,
             dynamic_tool_registrar: None,
             domain_broadcaster: None,
             capability_contracts: None,
@@ -168,6 +175,14 @@ impl KernelCapabilityRouter {
         self
     }
 
+    /// 启用 G6 strict 模式（AGENTOS_GRANTS_STRICT=1 语义）：未声明
+    /// granted_capabilities 的插件反向调用一律拒绝（fail-closed，新插件必须
+    /// 显式声明）；不调用保持默认——未声明 = 全授予（存量插件零迁移）。
+    pub fn with_grants_strict(mut self) -> Self {
+        self.grants_strict = true;
+        self
+    }
+
     /// 注入动态工具注册器（G3：启用 registry.register_tool 运行时注册）。
     pub fn with_dynamic_tool_registrar(mut self, registrar: DynamicToolRegistrar) -> Self {
         self.dynamic_tool_registrar = Some(registrar);
@@ -218,28 +233,49 @@ impl CapabilityRouter for KernelCapabilityRouter {
         // G6 授权单点校验：所有反向 capability 调用（sidecar JSON-RPC / native
         // HostServices）都经过本方法——在此一处校验 granted_capabilities 白名单，
         // 两轨同判同一拒绝语义。_plugin_id 是 invoker 注入的信任锚点（插件不可伪造）。
-        // 语义：未声明白名单 = 默认全授予（存量插件零迁移）；声明非空 = 白名单制，
-        // capability namespace 不在名单内即拒绝。粒度 = namespace（§八.2 待评审项，
-        // 现取粗粒度，capability.method 级细化留 G3 信封评审一并定）。
+        // 判定：声明非空 = 白名单制，namespace 不在名单内即拒绝；未声明走开关——
+        // 默认全授予（存量插件零迁移），AGENTOS_GRANTS_STRICT=1（装配方经
+        // with_grants_strict 置位）时未声明 = 拒绝（fail-closed，新插件必须显式
+        // 声明）。粒度 = namespace（§八.2 待评审项，现取粗粒度，
+        // capability.method 级细化留 G3 信封评审一并定）。
         if let (Some(lookup), Some(pid)) = (
             self.grants_lookup.as_ref(),
             params.get("_plugin_id").and_then(|v| v.as_str()),
         ) {
-            if let Some(grants) = lookup(pid) {
-                if !grants.iter().any(|g| g == capability) {
+            match lookup(pid) {
+                Some(grants) => {
+                    if !grants.iter().any(|g| g == capability) {
+                        warn!(
+                            target: "capability_router",
+                            plugin = pid,
+                            capability = capability,
+                            "G6 授权拒绝：capability 不在 granted_capabilities 白名单"
+                        );
+                        return Err(McpError::Protocol {
+                            message: format!(
+                                "capability '{}' not granted to plugin '{}' (granted_capabilities)",
+                                capability, pid
+                            ),
+                        });
+                    }
+                }
+                // 未声明 granted_capabilities：strict = 拒绝（fail-closed），
+                // 非 strict = 默认全授予（存量兼容）
+                None if self.grants_strict => {
                     warn!(
                         target: "capability_router",
                         plugin = pid,
                         capability = capability,
-                        "G6 授权拒绝：capability 不在 granted_capabilities 白名单"
+                        "G6 授权拒绝（strict）：插件未声明 granted_capabilities"
                     );
                     return Err(McpError::Protocol {
                         message: format!(
-                            "capability '{}' not granted to plugin '{}' (granted_capabilities)",
+                            "capability '{}' not granted to plugin '{}': no granted_capabilities declared (AGENTOS_GRANTS_STRICT=1)",
                             capability, pid
                         ),
                     });
                 }
+                None => {}
             }
         }
         // 定义驱动入口校验：契约声明了 (capability, method)
@@ -3001,6 +3037,75 @@ mod tests {
             .await
             .unwrap();
         assert!(out.get("status").is_some() || !out.is_null());
+    }
+
+    // ── G6 strict 开关（AGENTOS_GRANTS_STRICT=1，审计变更#3）──
+
+    #[tokio::test]
+    async fn g6_strict_denies_undeclared_grants() {
+        // 契约（strict fail-closed）：开启 strict 后，未声明 granted_capabilities
+        // 的插件反向调用一律拒绝，错误信息标明未声明。
+        let lookup: GrantsLookupFn = Arc::new(|_| None);
+        let router = KernelCapabilityRouter::with_metrics(MetricsAggregator::new())
+            .with_grants_lookup(lookup)
+            .with_grants_strict();
+        let err = router
+            .handle(
+                "event-bus",
+                "emit",
+                json!({"_plugin_id": "p1", "type": "x"}),
+            )
+            .await
+            .unwrap_err();
+        let msg = format!("{}", err);
+        assert!(
+            msg.contains("not granted") && msg.contains("no granted_capabilities declared"),
+            "strict 拒绝未声明者，且信息指向未声明: {msg}"
+        );
+    }
+
+    #[tokio::test]
+    async fn g6_strict_allows_declared_grants() {
+        // 契约（strict 只收紧未声明者）：已声明白名单且命中的调用照常放行。
+        let lookup: GrantsLookupFn = Arc::new(|pid| {
+            assert_eq!(pid, "p1");
+            Some(vec!["event-bus".to_string()])
+        });
+        let router = KernelCapabilityRouter::with_metrics(MetricsAggregator::new())
+            .with_grants_lookup(lookup)
+            .with_grants_strict();
+        let out = router
+            .handle(
+                "event-bus",
+                "emit",
+                json!({"_plugin_id": "p1", "type": "x"}),
+            )
+            .await
+            .unwrap();
+        assert!(out.get("status").is_some() || !out.is_null());
+    }
+
+    #[tokio::test]
+    async fn g6_strict_still_denies_ungranted_capability() {
+        // 契约（strict 叠加白名单语义）：声明了白名单但 namespace 不在名单内，
+        // strict 下照旧拒绝——白名单制语义不因开关改变。
+        let lookup: GrantsLookupFn = Arc::new(|_| Some(vec!["config-reader".to_string()]));
+        let router = KernelCapabilityRouter::with_metrics(MetricsAggregator::new())
+            .with_grants_lookup(lookup)
+            .with_grants_strict();
+        let err = router
+            .handle(
+                "event-bus",
+                "emit",
+                json!({"_plugin_id": "p1", "type": "x"}),
+            )
+            .await
+            .unwrap_err();
+        assert!(
+            format!("{}", err).contains("not granted"),
+            "白名单不命中时 strict 照常拒绝: {}",
+            err
+        );
     }
 
     #[tokio::test]
