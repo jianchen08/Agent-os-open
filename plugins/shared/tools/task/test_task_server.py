@@ -48,11 +48,12 @@ pytestmark = pytest.mark.unit
 
 @pytest.fixture(autouse=True)
 def _restore_paths_and_slots():
-    """平铺串扰自持：用例前重插路径 + 还原 service/http_api 槽位。
+    """平铺串扰自持：用例前重插路径 + 还原 service/http_api/tool 槽位。
 
-    注意：不逐出 "tool"——模块期已绑定本目录 tool.py（sys.modules 缓存），
-    _on_load 内部 `import tool` 必须命中同一模块对象，逐出会触发重导入
-    造成新对象（setter 写到的全局与断言读取的 _task_mod 不同）。
+    "tool" 槽位重绑（非逐出）：共跑车里前序测试会把 sys.modules["tool"]
+    换成其目录的 tool.py，_on_load 内部 `import tool` 即命中错误模块——
+    重绑回 _task_mod 保证接线与断言读同一对象；逐出会触发重导入造成
+    新对象（setter 写到的全局与断言读取的 _task_mod 不同）。
     """
     for _d in (str(_HERE), str(_TASKS_DIR), str(_SYSTEM_DIR)):
         if _d in sys.path:
@@ -61,6 +62,8 @@ def _restore_paths_and_slots():
     saved = {n: sys.modules.get(n) for n in ("service", "http_api")}
     for n in saved:
         sys.modules.pop(n, None)
+    saved_tool = sys.modules.get("tool")
+    sys.modules["tool"] = _task_mod
     try:
         yield
     finally:
@@ -68,6 +71,9 @@ def _restore_paths_and_slots():
             sys.modules.pop(n, None)
             if m is not None:
                 sys.modules[n] = m
+        sys.modules.pop("tool", None)
+        if saved_tool is not None:
+            sys.modules["tool"] = saved_tool
 
 
 @pytest.fixture(autouse=True)
