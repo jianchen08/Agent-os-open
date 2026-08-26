@@ -394,6 +394,55 @@ impl ToolExecutionResult {
 // ADR ④⑤：SQLite 四表模型 + 多分支模型
 // ═════════════════════════════════════════════════════════════════
 
+/// pending 输入来源（等待队列条目前端标注用，四入口统一）。
+///
+/// 前端发送 = user；触发器注入 = trigger；任务/工具派发 = task；HTTP 直连 = http；
+/// 内核/系统内部 = system。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum PendingInputSource {
+    /// 前端聊天发送
+    User,
+    /// 触发器（trigger_setup_tool 到期）注入
+    Trigger,
+    /// 任务系统派发（task_submit / create_root_task / resume 等）
+    Task,
+    /// HTTP /api/v1/chat 直连
+    Http,
+    /// 内核/系统内部
+    System,
+}
+
+/// pending 输入条目（pipeline_pending_inputs 表行）。
+///
+/// 消息在"入队→激活"之间停留在表中，等待窗口内可修改/删除/清空
+/// （ADR-2026-08-26）；激活时消费任务从表取参数执行——内容不再被闭包捕获。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PendingInputRecord {
+    /// 队列条目 ID（12hex，uuid v4 simple 前 12 位，与管道 id 同式）
+    pub id: String,
+    /// 所属管道 ID（FIFO 键）
+    pub pipeline_id: String,
+    /// 租户（隔离键）
+    pub tenant_id: String,
+    /// 发送者
+    pub user_id: String,
+    /// 消息正文（等待窗口内可经 PUT 修改）
+    pub content: String,
+    /// 派发坐标（注入 = 真实会话 thread；创建 = 管道自身）
+    pub thread: String,
+    /// 来源标注
+    pub source: PendingInputSource,
+    /// 执行 agent（任务派发显式指定；主会话路径按线程绑定解析）
+    pub agent_id: String,
+    /// 任务级 execution_context（workspace_mode/isolation_level 等）
+    pub execution_context: Option<serde_json::Value>,
+    /// 出生注入 overlay（lineage.* / task.* 等扁平键）
+    pub state_overlay: Option<serde_json::Value>,
+    /// 创建时间（RFC3339；FIFO 序 = created_at, id 升序）
+    pub created_at: String,
+}
+
 /// 运行实例状态（runs 表 status 字段）。
 ///
 /// [来源: docs/working/adr_engine_design.md §4.2 表1]

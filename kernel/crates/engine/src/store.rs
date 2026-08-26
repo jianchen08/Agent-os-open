@@ -34,8 +34,8 @@ use std::sync::Arc;
 
 use agentos_core::traits::{MessageQueryOpts, SessionListFilter, StorageBackend};
 use agentos_core::types::{
-    BlobRecord, Branch, MessageRecord, PatchType, PipelineRunInfo, RunRecord, RunStatus,
-    SessionRecord, StorageError, TraceEntry, UserRecord,
+    BlobRecord, Branch, MessageRecord, PatchType, PendingInputRecord, PendingInputSource,
+    PipelineRunInfo, RunRecord, RunStatus, SessionRecord, StorageError, TraceEntry, UserRecord,
 };
 use async_trait::async_trait;
 use parking_lot::Mutex;
@@ -174,6 +174,25 @@ CREATE TABLE IF NOT EXISTS message_slots (
 );
 CREATE INDEX IF NOT EXISTS idx_message_slots_pipeline_seq
     ON message_slots(pipeline_id, tenant_id, seq);
+-- 域11：pipeline_pending_inputs（pending 输入队列，ADR-2026-08-26）。
+-- 消息在入队→激活之间停留在此表：等待窗口内可修改/删除/清空，
+-- 消费任务从表取参数执行（内容不被闭包捕获），重启后队列仍在（续跑）。
+-- FIFO 序 = (created_at, id) 升序；消费瞬态 = 取出行并物理删除（无 status 列）。
+CREATE TABLE IF NOT EXISTS pipeline_pending_inputs (
+    id                TEXT PRIMARY KEY,
+    pipeline_id       TEXT NOT NULL,
+    tenant_id         TEXT NOT NULL,
+    user_id           TEXT NOT NULL,
+    content           TEXT NOT NULL,
+    thread            TEXT NOT NULL,
+    source            TEXT NOT NULL,
+    agent_id          TEXT NOT NULL DEFAULT 'agentos',
+    execution_context TEXT,
+    state_overlay     TEXT,
+    created_at        TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_pending_pipeline
+    ON pipeline_pending_inputs(tenant_id, pipeline_id, created_at, id);
 ";
 
 /// 零兼容：检测 message_slots 旧 schema（含内容列，如 content_preview）并 DROP 重建。
@@ -1105,6 +1124,206 @@ impl SqliteStore {
             }
         }
         Ok(map)
+    }
+
+    // ── 域11：pending 输入队列（ADR-2026-08-26）──────────────────────
+
+    /// 入队一条 pending 输入（created_at 即 FIFO 序）。幂等：同 id 重复入队忽略
+    /// （INSERT OR IGNORE——重复派发事件不产生重复条目）。
+    pub fn enqueue_pending_input(
+        &self,
+        tenant_id: &str,
+        pipeline_id: &str,
+        input: &PendingInputRecord,
+    ) -> Result<(), StorageError> {
+        let conn = self.conn.lock();
+        let ec = input
+            .execution_context
+            .as_ref()
+            .map(serde_json::to_string)
+            .transpose()
+            .map_err(|e| StorageError::Database(e.to_string()))?;
+        let ov = input
+            .state_overlay
+            .as_ref()
+            .map(serde_json::to_string)
+            .transpose()
+            .map_err(|e| StorageError::Database(e.to_string()))?;
+        conn.execute(
+            "INSERT OR IGNORE INTO pipeline_pending_inputs \
+             (id, pipeline_id, tenant_id, user_id, content, thread, source, agent_id, \
+              execution_context, state_overlay, created_at) \
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11)",
+            rusqlite::params![
+                input.id,
+                pipeline_id,
+                tenant_id,
+                input.user_id,
+                input.content,
+                input.thread,
+                serde_json::to_string(&input.source).unwrap_or_else(|_| "\"user\"".into()),
+                input.agent_id,
+                ec,
+                ov,
+                input.created_at,
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// 取队首（FIFO：created_at, id 升序）第一条 pending 输入并删除（消费瞬态）。
+    /// None = 队列空。删除即激活——激活后不可回退（物理边界）。
+    pub fn pop_pending_input(
+        &self,
+        tenant_id: &str,
+        pipeline_id: &str,
+    ) -> Result<Option<PendingInputRecord>, StorageError> {
+        let conn = self.conn.lock();
+        let row = conn
+            .query_row(
+                "SELECT id, pipeline_id, tenant_id, user_id, content, thread, source, \
+                        agent_id, execution_context, state_overlay, created_at \
+                 FROM pipeline_pending_inputs \
+                 WHERE tenant_id=?1 AND pipeline_id=?2 \
+                 ORDER BY created_at, id LIMIT 1",
+                rusqlite::params![tenant_id, pipeline_id],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, String>(3)?,
+                        row.get::<_, String>(4)?,
+                        row.get::<_, String>(5)?,
+                        row.get::<_, String>(6)?,
+                        row.get::<_, String>(7)?,
+                        row.get::<_, Option<String>>(8)?,
+                        row.get::<_, Option<String>>(9)?,
+                        row.get::<_, String>(10)?,
+                    ))
+                },
+            )
+            .optional()?;
+        let Some((id, pid, tnt, uid, content, thread, source, agent, ec, ov, created)) = row else {
+            return Ok(None);
+        };
+        conn.execute(
+            "DELETE FROM pipeline_pending_inputs WHERE id=?1 AND tenant_id=?2",
+            rusqlite::params![id, tenant_id],
+        )?;
+        Ok(Some(PendingInputRecord {
+            id,
+            pipeline_id: pid,
+            tenant_id: tnt,
+            user_id: uid,
+            content,
+            thread,
+            source: serde_json::from_str(&source).unwrap_or(PendingInputSource::User),
+            agent_id: agent,
+            execution_context: ec.and_then(|s| serde_json::from_str(&s).ok()),
+            state_overlay: ov.and_then(|s| serde_json::from_str(&s).ok()),
+            created_at: created,
+        }))
+    }
+
+    /// 列出某管道全部 pending 条目（FIFO 序）。
+    pub fn list_pending_inputs(
+        &self,
+        tenant_id: &str,
+        pipeline_id: &str,
+    ) -> Result<Vec<PendingInputRecord>, StorageError> {
+        let conn = self.conn.lock();
+        let rows = conn
+            .prepare(
+                "SELECT id, pipeline_id, tenant_id, user_id, content, thread, source, \
+                        agent_id, execution_context, state_overlay, created_at \
+                 FROM pipeline_pending_inputs \
+                 WHERE tenant_id=?1 AND pipeline_id=?2 \
+                 ORDER BY created_at, id",
+            )?
+            .query_map(rusqlite::params![tenant_id, pipeline_id], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, String>(4)?,
+                    row.get::<_, String>(5)?,
+                    row.get::<_, String>(6)?,
+                    row.get::<_, String>(7)?,
+                    row.get::<_, Option<String>>(8)?,
+                    row.get::<_, Option<String>>(9)?,
+                    row.get::<_, String>(10)?,
+                ))
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(rows
+            .into_iter()
+            .map(
+                |(id, rid, t, uid, content, thread, source, agent, ec, ov, created)| {
+                    PendingInputRecord {
+                        id,
+                        pipeline_id: rid,
+                        tenant_id: t,
+                        user_id: uid,
+                        content,
+                        thread,
+                        source: serde_json::from_str(&source).unwrap_or(PendingInputSource::User),
+                        agent_id: agent,
+                        execution_context: ec.and_then(|s| serde_json::from_str(&s).ok()),
+                        state_overlay: ov.and_then(|s| serde_json::from_str(&s).ok()),
+                        created_at: created,
+                    }
+                },
+            )
+            .collect())
+    }
+
+    /// 修改 pending 条目 content（不存在 → Ok(false)）。
+    pub fn update_pending_input_content(
+        &self,
+        tenant_id: &str,
+        pipeline_id: &str,
+        input_id: &str,
+        new_content: &str,
+    ) -> Result<bool, StorageError> {
+        let conn = self.conn.lock();
+        let n = conn.execute(
+            "UPDATE pipeline_pending_inputs SET content=?1 \
+             WHERE id=?2 AND tenant_id=?3 AND pipeline_id=?4",
+            rusqlite::params![new_content, input_id, tenant_id, pipeline_id],
+        )?;
+        Ok(n > 0)
+    }
+
+    /// 删除单条 pending 输入（不存在 → Ok(false)）。
+    pub fn delete_pending_input(
+        &self,
+        tenant_id: &str,
+        pipeline_id: &str,
+        input_id: &str,
+    ) -> Result<bool, StorageError> {
+        let conn = self.conn.lock();
+        let n = conn.execute(
+            "DELETE FROM pipeline_pending_inputs \
+             WHERE id=?1 AND tenant_id=?2 AND pipeline_id=?3",
+            rusqlite::params![input_id, tenant_id, pipeline_id],
+        )?;
+        Ok(n > 0)
+    }
+
+    /// 清空管道全部 pending 输入，返回删除条数。
+    pub fn clear_pending_inputs(
+        &self,
+        tenant_id: &str,
+        pipeline_id: &str,
+    ) -> Result<usize, StorageError> {
+        let conn = self.conn.lock();
+        let n = conn.execute(
+            "DELETE FROM pipeline_pending_inputs WHERE tenant_id=?1 AND pipeline_id=?2",
+            rusqlite::params![tenant_id, pipeline_id],
+        )?;
+        Ok(n)
     }
 
     /// 保存**标量基线** checkpoint（每 N 步 / run 结束调用，留档用）。
@@ -2408,6 +2627,100 @@ impl StorageBackend for SqliteStore {
             .map_err(join_err)?
     }
 
+    // ── 域11：pending 输入队列（ADR-2026-08-26）──────────────────────
+
+    async fn enqueue_pending_input(
+        &self,
+        tenant_id: &str,
+        pipeline_id: &str,
+        input: &PendingInputRecord,
+    ) -> Result<(), StorageError> {
+        let this = self.clone();
+        let tenant_id = tenant_id.to_string();
+        let pipeline_id = pipeline_id.to_string();
+        let input = input.clone();
+        tokio::task::spawn_blocking(move || {
+            this.enqueue_pending_input(&tenant_id, &pipeline_id, &input)
+        })
+        .await
+        .map_err(join_err)?
+    }
+
+    async fn pop_pending_input(
+        &self,
+        tenant_id: &str,
+        pipeline_id: &str,
+    ) -> Result<Option<PendingInputRecord>, StorageError> {
+        let this = self.clone();
+        let tenant_id = tenant_id.to_string();
+        let pipeline_id = pipeline_id.to_string();
+        tokio::task::spawn_blocking(move || this.pop_pending_input(&tenant_id, &pipeline_id))
+            .await
+            .map_err(join_err)?
+    }
+
+    async fn list_pending_inputs(
+        &self,
+        tenant_id: &str,
+        pipeline_id: &str,
+    ) -> Result<Vec<PendingInputRecord>, StorageError> {
+        let this = self.clone();
+        let tenant_id = tenant_id.to_string();
+        let pipeline_id = pipeline_id.to_string();
+        tokio::task::spawn_blocking(move || this.list_pending_inputs(&tenant_id, &pipeline_id))
+            .await
+            .map_err(join_err)?
+    }
+
+    async fn update_pending_input_content(
+        &self,
+        tenant_id: &str,
+        pipeline_id: &str,
+        input_id: &str,
+        new_content: &str,
+    ) -> Result<bool, StorageError> {
+        let this = self.clone();
+        let tenant_id = tenant_id.to_string();
+        let pipeline_id = pipeline_id.to_string();
+        let input_id = input_id.to_string();
+        let new_content = new_content.to_string();
+        tokio::task::spawn_blocking(move || {
+            this.update_pending_input_content(&tenant_id, &pipeline_id, &input_id, &new_content)
+        })
+        .await
+        .map_err(join_err)?
+    }
+
+    async fn delete_pending_input(
+        &self,
+        tenant_id: &str,
+        pipeline_id: &str,
+        input_id: &str,
+    ) -> Result<bool, StorageError> {
+        let this = self.clone();
+        let tenant_id = tenant_id.to_string();
+        let pipeline_id = pipeline_id.to_string();
+        let input_id = input_id.to_string();
+        tokio::task::spawn_blocking(move || {
+            this.delete_pending_input(&tenant_id, &pipeline_id, &input_id)
+        })
+        .await
+        .map_err(join_err)?
+    }
+
+    async fn clear_pending_inputs(
+        &self,
+        tenant_id: &str,
+        pipeline_id: &str,
+    ) -> Result<usize, StorageError> {
+        let this = self.clone();
+        let tenant_id = tenant_id.to_string();
+        let pipeline_id = pipeline_id.to_string();
+        tokio::task::spawn_blocking(move || this.clear_pending_inputs(&tenant_id, &pipeline_id))
+            .await
+            .map_err(join_err)?
+    }
+
     // ── 域2：session 标签夹 CRUD（对齐 0.1 SessionModel）──────────────
     // 注意：tenant_id 必须在 spawn_blocking 之前解析——tokio::task_local 不跨 spawn_blocking。
     async fn create_session(&self, session: &SessionRecord) -> Result<(), StorageError> {
@@ -3557,6 +3870,200 @@ mod tests {
         );
         assert_eq!(loaded.get("track.llm_usage"), Some(&json!({"prompt": 10})));
         assert_eq!(loaded.len(), 2, "应有 2 个字段");
+    }
+
+    // ── 域11：pending 输入队列（ADR-2026-08-26）──────────────────────
+
+    /// 构造一条 pending 输入（测试辅助）。
+    fn pending_input(id: &str, pid: &str, content: &str, created: &str) -> PendingInputRecord {
+        PendingInputRecord {
+            id: id.to_string(),
+            pipeline_id: pid.to_string(),
+            tenant_id: "default".to_string(),
+            user_id: "u1".to_string(),
+            content: content.to_string(),
+            thread: format!("thread-{pid}"),
+            source: PendingInputSource::User,
+            agent_id: "agentos".to_string(),
+            execution_context: None,
+            state_overlay: Some(json!({"task.goal": content})),
+            created_at: created.to_string(),
+        }
+    }
+
+    /// 入队/列出/弹出往返 + FIFO 序（created_at, id 升序）。
+    #[tokio::test]
+    async fn test_pending_inputs_enqueue_list_pop_fifo() {
+        let store = SqliteStore::open_memory().unwrap();
+        let pid = "pipe_pending_1";
+        // 逆序入队（created_at 升序时队首应为 p1）
+        store
+            .enqueue_pending_input(
+                "default",
+                pid,
+                &pending_input("in_3", pid, "第三条", "2026-08-26T03:00:00Z"),
+            )
+            
+            .unwrap();
+        store
+            .enqueue_pending_input(
+                "default",
+                pid,
+                &pending_input("in_1", pid, "第一条", "2026-08-26T01:00:00Z"),
+            )
+            
+            .unwrap();
+        store
+            .enqueue_pending_input(
+                "default",
+                pid,
+                &pending_input("in_2", pid, "第二条", "2026-08-26T02:00:00Z"),
+            )
+            
+            .unwrap();
+
+        let listed = store.list_pending_inputs("default", pid).unwrap();
+        let ids: Vec<&str> = listed.iter().map(|i| i.id.as_str()).collect();
+        assert_eq!(ids, vec!["in_1", "in_2", "in_3"], "FIFO 序 = created_at 升序");
+        assert_eq!(listed[0].content, "第一条");
+        assert_eq!(listed[0].source, PendingInputSource::User);
+        assert_eq!(
+            listed[0].state_overlay,
+            Some(json!({"task.goal": "第一条"})),
+            "overlay 往返保真"
+        );
+
+        // pop 取队首并删除（消费瞬态）
+        let popped = store.pop_pending_input("default", pid).unwrap();
+        assert_eq!(popped.unwrap().id, "in_1", "pop 取 FIFO 队首");
+        let remaining = store.list_pending_inputs("default", pid).unwrap();
+        assert_eq!(
+            remaining.iter().map(|i| i.id.as_str()).collect::<Vec<_>>(),
+            vec!["in_2", "in_3"],
+            "pop 后剩余两条"
+        );
+    }
+
+    /// 空队列 pop 返回 None；不同租户/管道隔离。
+    #[tokio::test]
+    async fn test_pending_inputs_empty_and_isolation() {
+        let store = SqliteStore::open_memory().unwrap();
+        assert!(
+            store
+                .pop_pending_input("default", "pipe_empty")
+                
+                .unwrap()
+                .is_none(),
+            "空队列 pop 返回 None"
+        );
+        store
+            .enqueue_pending_input(
+                "default",
+                "pipe_a",
+                &pending_input("a1", "pipe_a", "A", "2026-08-26T01:00:00Z"),
+            )
+            
+            .unwrap();
+        assert!(
+            store
+                .pop_pending_input("other_tenant", "pipe_a")
+                
+                .unwrap()
+                .is_none(),
+            "跨租户不可见"
+        );
+        assert!(
+            store
+                .pop_pending_input("default", "pipe_b")
+                
+                .unwrap()
+                .is_none(),
+            "跨管道不可见"
+        );
+    }
+
+    /// 同 id 重复入队幂等（INSERT OR IGNORE）。
+    #[tokio::test]
+    async fn test_pending_inputs_enqueue_idempotent() {
+        let store = SqliteStore::open_memory().unwrap();
+        let pid = "pipe_pending_idem";
+        let rec = pending_input("dup1", pid, "原始", "2026-08-26T01:00:00Z");
+        store.enqueue_pending_input("default", pid, &rec).unwrap();
+        store
+            .enqueue_pending_input("default", pid, &rec)
+            
+            .unwrap();
+        let listed = store.list_pending_inputs("default", pid).unwrap();
+        assert_eq!(listed.len(), 1, "同 id 重复入队不产生重复条目");
+    }
+
+    /// update/delete/clear 语义：存在→生效；不存在→Ok(false)/Ok(0)。
+    #[tokio::test]
+    async fn test_pending_inputs_update_delete_clear() {
+        let store = SqliteStore::open_memory().unwrap();
+        let pid = "pipe_pending_mut";
+        store
+            .enqueue_pending_input(
+                "default",
+                pid,
+                &pending_input("m1", pid, "旧内容", "2026-08-26T01:00:00Z"),
+            )
+            
+            .unwrap();
+        store
+            .enqueue_pending_input(
+                "default",
+                pid,
+                &pending_input("m2", pid, "另一条", "2026-08-26T02:00:00Z"),
+            )
+            
+            .unwrap();
+
+        // 修改
+        assert!(
+            store
+                .update_pending_input_content("default", pid, "m1", "新内容")
+                
+                .unwrap(),
+            "存在的条目更新返回 true"
+        );
+        let listed = store.list_pending_inputs("default", pid).unwrap();
+        assert_eq!(listed[0].content, "新内容", "update 覆盖 content");
+        assert_eq!(listed[0].id, "m1", "update 不改变 FIFO 位置");
+        assert!(
+            !store
+                .update_pending_input_content("default", pid, "ghost", "x")
+                
+                .unwrap(),
+            "不存在条目 update 返回 false"
+        );
+
+        // 删除
+        assert!(
+            store
+                .delete_pending_input("default", pid, "m2")
+                
+                .unwrap(),
+            "删除存在条目返回 true"
+        );
+        assert!(
+            !store
+                .delete_pending_input("default", pid, "m2")
+                
+                .unwrap(),
+            "删除不存在条目返回 false"
+        );
+
+        // 清空
+        assert_eq!(
+            store.clear_pending_inputs("default", pid).unwrap(),
+            1,
+            "清空返回删除条数"
+        );
+        assert!(
+            store.list_pending_inputs("default", pid).unwrap().is_empty(),
+            "清空后队列空"
+        );
     }
 
     /// save_checkpoint / load_latest_checkpoint 往返 + 取最新。

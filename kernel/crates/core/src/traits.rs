@@ -22,9 +22,9 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
 use crate::types::{
-    Branch, MessageRecord, PipelineRunInfo, PluginContext, PluginError, PluginResult, RouteType,
-    RunRecord, RunStatus, SessionRecord, StorageError, ToolCategory, ToolExecutionResult,
-    ToolSource, TraceEntry, UserRecord,
+    Branch, MessageRecord, PendingInputRecord, PipelineRunInfo, PluginContext, PluginError,
+    PluginResult, RouteType, RunRecord, RunStatus, SessionRecord, StorageError, ToolCategory,
+    ToolExecutionResult, ToolSource, TraceEntry, UserRecord,
 };
 
 // ── 1. 插件基础 Trait ───────────────────────────────────────────
@@ -1384,7 +1384,70 @@ pub trait StorageBackend: Send + Sync {
         Ok(vec![])
     }
 
-    // ── 域2：session 标签夹（对齐 0.1 SessionModel）─────────────────────
+    // ── 域11：pending 输入队列（ADR-2026-08-26）─────────────────────
+    // 消息在"入队→激活"之间停留在表中，等待窗口内可修改/删除/清空；
+    // 消费任务从表取参数执行（内容不被闭包捕获）。默认 no-op（mock/null store），
+    // SqliteStore 覆盖为真实实现。
+
+    /// 入队一条 pending 输入（created_at 即 FIFO 序）。幂等：同 id 重复入队忽略。
+    async fn enqueue_pending_input(
+        &self,
+        _tenant_id: &str,
+        _pipeline_id: &str,
+        _input: &PendingInputRecord,
+    ) -> Result<(), StorageError> {
+        Ok(())
+    }
+
+    /// 取队首（FIFO：created_at, id 升序）第一条 pending 输入。None = 队列空。
+    async fn pop_pending_input(
+        &self,
+        _tenant_id: &str,
+        _pipeline_id: &str,
+    ) -> Result<Option<PendingInputRecord>, StorageError> {
+        Ok(None)
+    }
+
+    /// 列出某管道全部 pending 条目（按 FIFO 序）。
+    async fn list_pending_inputs(
+        &self,
+        _tenant_id: &str,
+        _pipeline_id: &str,
+    ) -> Result<Vec<PendingInputRecord>, StorageError> {
+        Ok(Vec::new())
+    }
+
+    /// 修改 pending 条目 content（不存在 → Ok(false)）。
+    async fn update_pending_input_content(
+        &self,
+        _tenant_id: &str,
+        _pipeline_id: &str,
+        _input_id: &str,
+        _new_content: &str,
+    ) -> Result<bool, StorageError> {
+        Ok(false)
+    }
+
+    /// 删除单条 pending 输入（不存在 → Ok(false)）。
+    async fn delete_pending_input(
+        &self,
+        _tenant_id: &str,
+        _pipeline_id: &str,
+        _input_id: &str,
+    ) -> Result<bool, StorageError> {
+        Ok(false)
+    }
+
+    /// 清空管道全部 pending 输入，返回删除条数。
+    async fn clear_pending_inputs(
+        &self,
+        _tenant_id: &str,
+        _pipeline_id: &str,
+    ) -> Result<usize, StorageError> {
+        Ok(0)
+    }
+
+    /// 域2：session 标签夹（对齐 0.1 SessionModel）─────────────────────
     // 解耦：session 只持 pipeline_ids 引用列表，不反向 join messages。
 
     /// 创建会话（对齐 0.1 SessionModel + MemoryStore.set_session）。
