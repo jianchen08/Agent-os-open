@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # WSL native docker 模式：启动项目容器并做真实状态校验。
-# 由 start_web_cn.bat 调用。
+# 容器编排（container_orchestrator.py）与手动运维共用。
 #
 # 退出码约定：
 #   0  redis + frontend 均已 running
@@ -8,7 +8,8 @@
 #   1  其它 docker / compose 失败
 set -uo pipefail
 
-# 项目目录由 start_web_cn.bat 通过 $1 传入（wslpath 转换后的路径）。
+# 项目目录由调用方通过 $1 传入（wslpath 转换后的 Windows 项目路径）。
+# 手动运行示例：bash wsl_ensure_containers.sh /mnt/d/myproject/xxx
 # 未传参时用 wslpath 从当前 Windows 工作目录动态推导，保证直接运行脚本也能工作
 # 且不依赖写死的挂载路径；wslpath 不可用时回退到脚本所在目录。
 if [ -z "${1:-}" ]; then
@@ -44,7 +45,8 @@ fi
 # 清理上轮残留的任务容器（cua- 前缀），只保留 frontend + redis。
 # 这些容器由 agent 任务运行时（IsolationManager）按需创建，重启时丢弃安全，系统会重建。
 # 注意：若容器内进程处于 D 状态（WSL2 内核死锁），docker rm -f 会卡住/失败，
-# 此时返回 7，由上层 start_web_cn.bat 自动 wsl --shutdown 重启内核后重试。
+# 此时返回 7，上层调用方应 wsl --shutdown 重启 WSL 内核后重试
+# （wsl_shutdown.ps1 提供带超时的 wsl --shutdown 实现）。
 echo "[INFO] 清理上轮任务容器（cua- 前缀，仅保留 frontend + redis）..."
 stuck=0
 # 先把 docker ps -a 跑出来（带 timeout），再 grep；分开做才能正确捕获 timeout 退出码 124
@@ -121,7 +123,10 @@ fi
 # 构建与启动分两步: build 用"无输出超时"监控(只要持续有输出就不杀,
 # 连续 300s 无输出才判定卡死); up 启动已构建镜像,60s 无输出超时。
 export COMPOSE_PROGRESS=plain
+# compose build/up 的完整输出落地文件：成功时删除；失败时保留供下游分类 grep
+# （run_with_idle_timeout 内用 tee -a 追加）。
 COMPOSE_OUT="${TMPDIR:-/tmp}/compose_up_$$.out"
+: > "${COMPOSE_OUT:-/dev/null}"
 
 # run_with_idle_timeout: 后台运行命令,监控其 stdout 输出,
 # 连续 IDLE_TIMEOUT 秒无新输出(卡死)才杀掉;只要在持续下载/构建就不中断。
@@ -142,7 +147,8 @@ run_with_idle_timeout() {
         cur_size=$(wc -c < "$out_file" 2>/dev/null || echo 0)
         if [ "$cur_size" -gt "$last_size" ]; then
             # 有新输出,重置计时器,把增量打出来
-            tail -c +$((last_size + 1)) "$out_file" 2>/dev/null
+            # 同时落地到 $COMPOSE_OUT （下游失败分类 grep 要读它；未设置时丢弃）
+            tail -c +$((last_size + 1)) "$out_file" 2>/dev/null | tee -a "${COMPOSE_OUT:-/dev/null}"
             last_size="$cur_size"
             stable_secs=0
         else
@@ -160,7 +166,7 @@ run_with_idle_timeout() {
     done
 
     # 进程已结束,输出剩余内容
-    tail -c +$((last_size + 1)) "$out_file" 2>/dev/null
+    tail -c +$((last_size + 1)) "$out_file" 2>/dev/null | tee -a "${COMPOSE_OUT:-/dev/null}"
     wait "$cmd_pid" 2>/dev/null
     local rc=$?
     rm -f "$out_file"
@@ -184,10 +190,10 @@ fi
 echo "[INFO] docker compose up -d..."
 run_with_idle_timeout 60 docker compose up -d
 rc=$?
-rm -f "$COMPOSE_OUT"
 
 if [ "$rc" -eq 124 ]; then
     echo "[WARN] compose up hung (no output for 60s). wsl --shutdown and retry."
+    rm -f "${COMPOSE_OUT:-/dev/null}"
     exit 7
 fi
 
@@ -196,19 +202,26 @@ if [ "$rc" -ne 0 ]; then
     # 命中以下任一特征，均说明 docker/containerd/runc 三方状态不一致，
     # 根源是上次容器停止时有线程以 D 状态卡在内核，旧 cgroup/task/state 永远清不掉。
     # 用户态无法自愈，必须 wsl --shutdown 重启内核。
-    if echo "$out" | grep -qiE 'cgroup is not empty|failed to create (task|shim task|shim)|container with given ID already exists|task .* already exists'; then
+    # 分类 grep 读落地的 $COMPOSE_OUT（历史版本这里读的是从未赋值的 $out，分类永远不命中）
+    if grep -qiE 'cgroup is not empty|failed to create (task|shim task|shim)|container with given ID already exists|task .* already exists' "${COMPOSE_OUT:-/dev/null}" 2>/dev/null; then
         echo ""
         echo "[FATAL] Docker/containerd/runc 状态不一致：无法为容器创建任务。"
         echo "[FATAL] 通常是上次容器停止时，redis 等进程以 D 状态（不可中断磁盘睡眠）"
         echo "[FATAL] 卡在内核里，旧 cgroup/task/state 永远清不掉，脚本无法自愈。"
         echo "[FATAL] 请在 Windows 执行：  wsl --shutdown"
-        echo "[FATAL] 等待约 10 秒后重新双击 start_web_cn.bat。"
+        echo "[FATAL] 等待约 10 秒后重新运行本脚本（或先执行 wsl_shutdown.ps1 重启 WSL）。"
         echo "[FATAL] （已关闭 redis AOF 持久化以降低复发概率）"
         exit 7
     fi
     echo "[ERROR] docker compose 失败 (rc=$rc)"
+    echo "[ERROR] 输出尾部: tail -50 ${COMPOSE_OUT:-/dev/null}"
+    tail -50 "${COMPOSE_OUT:-/dev/null}" 2>/dev/null
+    rm -f "${COMPOSE_OUT:-/dev/null}"
     exit "$rc"
 fi
+
+# 成功：删除落地日志
+rm -f "${COMPOSE_OUT:-/dev/null}"
 
 # 真正等待容器进入 running，而非盲目 sleep 后报 OK
 # 容器名跟随 compose project（目录名），用 `docker compose ps` 按服务名查询，

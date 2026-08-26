@@ -181,7 +181,7 @@ cp .env.example .env
 # 编辑 .env，填入 LLM API Key
 
 # 2. 启动（编译 Rust 内核 + 启动内核 :9100 / 前端 :6390 / Redis）
-#    注意：0.1 的 install.sh / start_web.sh / stop_web.sh 已废弃，勿用
+#    注意：0.1 的 start_web.sh 已删除；0.2 启动/停止请用 start_web_02.sh / stop_web_02.sh
 chmod +x start_web_02.sh
 ./start_web_02.sh            # 完整启动（编译 + 内核 + 前端）
 # 或 ./start_web_02.sh --no-build   # 跳过编译直接启动

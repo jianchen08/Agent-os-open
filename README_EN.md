@@ -182,7 +182,7 @@ cp .env.example .env
 # Edit .env and fill in your LLM API keys
 
 # 2. Start (builds the Rust kernel + starts kernel :9100 / frontend :6390 / Redis)
-#    NOTE: the 0.1 install.sh / start_web.sh / stop_web.sh are deprecated, do not use
+#    NOTE: the 0.1 start_web.sh was removed; use start_web_02.sh / stop_web_02.sh for 0.2
 chmod +x start_web_02.sh
 ./start_web_02.sh            # full start (build + kernel + frontend)
 # or ./start_web_02.sh --no-build   # skip the build step
