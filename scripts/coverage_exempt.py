@@ -48,6 +48,8 @@ BASE_TEST_PATHS: list[str] = [
     "plugins/shared/pipeline/input/tool_schema/",
     "plugins/shared/pipeline/output/duplicate_check/",
     "plugins/shared/tools/task/",
+    "plugins/shared/tools/human/",
+    "plugins/shared/tools/lsp/",
     "plugins/shared/tools/task_evaluate/",
     "plugins/shared/tools/web_ext/",
     "plugins/shared/tools/tests/",

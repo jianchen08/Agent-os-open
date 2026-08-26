@@ -30,11 +30,16 @@ if str(_PLUGIN_DIR) not in sys.path:
 
 
 def _load_server() -> Any:
-    """动态加载 server.py（先逐出裸名 plugin，防跨测试劫持）。"""
+    """动态加载 server.py（先逐出裸名 plugin/tool，防跨测试劫持）。
+
+    server.py 顶层 `from tool import WebTool` 走 sys.modules 缓存——共跑车
+    道里其他插件目录的 tool.py 会占住裸名，不逐出则加载到错误实现。
+    """
     mod_name = "web_ext_server_test"
     if mod_name in sys.modules:
         del sys.modules[mod_name]
     sys.modules.pop("plugin", None)
+    sys.modules.pop("tool", None)
     spec = importlib.util.spec_from_file_location(mod_name, _PLUGIN_DIR / "server.py")
     assert spec is not None and spec.loader is not None, "Cannot load server.py"
     module = importlib.util.module_from_spec(spec)
