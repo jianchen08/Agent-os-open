@@ -237,7 +237,7 @@ plugins:
 - **主题双轨**：前端预设（`frontend/src/config/themes/presets/`，7 套）+ 插件主题（manifest `contributes.themes` CSS 变量包，可带 skin 皮肤），另有动态 JSON 主题与用户自定义。
 - **前端贡献通道**：`ui_schema`（页面/表单 schema 驱动）、`contributes`（主题/样式/页面）、`http_endpoints`（`/ext/{plugin_id}/**` 前端可达的 HTTP 面）。
 
-见 [guides/theme-development.md](guides/theme-development.md) 与 [guides/skin-plugin.md](guides/skin-plugin.md)。
+见 [guides/theme-development.md](guides/theme-development.md) 与 [guides/theme-development.md](guides/theme-development.md)。
 
 ---
 

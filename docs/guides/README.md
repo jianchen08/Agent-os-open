@@ -1,32 +1,49 @@
 # 开发指南索引
 
-> 面向要在本仓库开发插件、配置 Agent 与管道的贡献者。按"要做什么"选择分篇阅读；
-> 所有示例均指向仓库内真实插件，可直接对照源码。
->
-> **字段级权威**：`plugin.json` 全字段规范见 [docs/guides/plugin-protocol.md](guides/plugin-protocol.md)。
+> 面向要在本仓库开发插件、配置 Agent 与管道的贡献者。
+> **分工原则**：协议权威管字段与契约，分篇教程管具体怎么做，参考篇管排障与手册——同类内容只住一处，篇间用指针互链。
+
+## 上手路径（新手从这里开始）
+
+| 步骤 | 读哪篇 |
+|---|---|
+| 1. 建立全景：一切皆插件 / 插件类型与宿主 / 目录与注册机制 / 命名约定 | [plugin-development.md](plugin-development.md)（总览） |
+| 2. 按需求进分篇（具体怎么做） | 见下表 |
+| 3. 卡住了查对照表 | [troubleshooting.md](troubleshooting.md) |
+
+## 分篇教程（具体怎么做）
 
 | 我想… | 读哪篇 |
 |---|---|
-| 了解插件体系全景 / 选宿主形态 / 目录与注册机制 / 命名约定 | [plugin-development.md](plugin-development.md) |
-| 想懂内核契约文件怎么来的（traits.rs / 决策文档 / manifest 演进 / 契约间依赖） | [contract_files_tutorial.md](contract_files_tutorial.md) |
-| 用 Python 写一个插件（工具 / 服务 / 管道步骤） | [plugin-sidecar-python.md](plugin-sidecar-python.md) |
+| 用 Python 写插件（工具 / 服务 / 管道步骤） | [plugin-sidecar-python.md](plugin-sidecar-python.md) |
 | 用 Rust 写高性能原生插件（cdylib） | [plugin-native-rust.md](plugin-native-rust.md) |
-| 不写代码，接入第三方 MCP 工具 | [plugin-external-mcp.md](plugin-external-mcp.md) |
+| 零代码接入第三方 MCP 工具 | [plugin-external-mcp.md](plugin-external-mcp.md) |
 | 开发主题 / 皮肤 | [theme-development.md](theme-development.md) |
-| 配置一个 Agent（提示词 / 工具面 / 约束） | [agent-configuration.md](agent-configuration.md) |
+| 配置 Agent（提示词 / 工具面 / 约束） | [agent-configuration.md](agent-configuration.md) |
 | 配置管道（步骤 / 路由 DSL） | [pipeline-configuration.md](pipeline-configuration.md) |
-| 排查"为什么不生效" | [troubleshooting.md](troubleshooting.md) |
 
-**推荐阅读顺序**：新手从 plugin-development.md 总览入手 → 按需求进 sidecar 或 native 分篇 →
-用 agent-configuration.md / pipeline-configuration.md 完成接线 → 遇到问题查 troubleshooting.md。
+## 协议权威（字段与契约）
 
-## 规范与协议文档
+| 文档 | 定位 |
+|---|---|
+| [plugin-protocol.md](plugin-protocol.md) | `plugin.json` 全字段权威 + echo_tool 从零走查 + SDK 速查 |
+| [streaming-protocol.md](streaming-protocol.md) | 流式事件协议（`capabilities.streaming` 声明规范） |
 
-- `docs/guides/plugin-protocol.md` — plugin.json manifest 全字段权威 + 从零开发 echo_tool 完整走查 + SDK 速查
-- `docs/guides/streaming-protocol.md` — 流式事件协议与 `capabilities.streaming` 声明
-- `skin-plugin.md`（本目录）— 皮肤插件（CSS 注入 + hooks.mjs + 递送端点）
-- `docs/guides/theme-customization.md` — 主题使用侧说明（用户视角）
-- `config/pipelines/README.md` — 管道配置现状与修改须知
+## 背景与进阶
+
+| 文档 | 定位 |
+|---|---|
+| [contract-files-tutorial.md](contract-files-tutorial.md) | 内核契约文件怎么来的（traits.rs / 决策文档 / manifest 演进 / 契约间依赖） |
+| [logging.md](logging.md) | 日志体系（双语言运行时日志汇聚与追踪字段） |
+
+## 参考手册
+
+| 文档 | 定位 |
+|---|---|
+| [troubleshooting.md](troubleshooting.md) | 排障对照表（为什么不生效） |
+| [theme-customization.md](theme-customization.md) | 主题使用侧（怎么切换主题，用户视角） |
+| [ci-cd-guide.md](ci-cd-guide.md) | 测试与 CI 手册 |
+| [ai-coding-spec.md](ai-coding-spec.md) | AI 辅助编程总纲（编码纪律） |
 
 ## 关键 ADR
 
@@ -43,11 +60,12 @@
 |---|---|
 | 最小工具插件（sidecar） | `plugins/shared/tools/simple/` |
 | services + http_endpoints + config_files | `plugins/shared/system/llm/` |
-| requires_services + route_signals | `plugins/shared/system/approval/` |
+| requires_services + 审批闭环 | `plugins/shared/system/approval/` |
 | 管道 input 插件 / agent 配置自持加载 | `plugins/shared/pipeline/input/context_build/` |
 | 管道 output 插件 / 评估闸门 | `plugins/shared/pipeline/output/task_reminder/` |
 | native 插件（cdylib） | `plugins/shared/pipeline/output/sensitive_checker/`、`plugins/shared/pipeline/core/tool_core/` |
 | native 契约与测试插件 | `kernel/crates/native-sdk/`、`kernel/crates/native-sdk-test-plugin/` |
 | 外部 MCP（HTTP 远程 / 本地命令） | `plugins/shared/tools/external_mcp/mcp_registry/`、`.../omnisearch/` |
-| 插件主题（contributes.themes） | `plugins/shared/system/visual_customization_demo/`、`plugins/shared/system/dsh_adapter/` |
+| 插件主题（contributes.themes） | `plugins/shared/system/visual_customization_demo/` |
+| 插件皮肤（skin + hooks + 三端点） | `plugins/shared/system/dsh_adapter/`（含递送层参考实现） |
 | 前端预设主题 | `frontend/src/config/themes/presets/moe-soft.ts` + `frontend/src/config/themes/index.ts` |
