@@ -183,13 +183,15 @@ describe('发送消息没有输出 bug 复现', () => {
 
     store.stopStreaming(PIPELINE_ID)
 
+    // 停止语义：assistant 消息标记 interrupted（半截内容保留，非 completed 终态）
     const afterStop = store.getMessages(PIPELINE_ID)
     expect(afterStop).toHaveLength(1)
-    expect(afterStop[0].status).toBe('completed')
+    expect(afterStop[0].status).toBe('interrupted')
 
     store.updateMessage(PIPELINE_ID, streamMsgId, { status: 'completed' } as any)
     const afterUpdate = store.getMessages(PIPELINE_ID).find(m => m.id === streamMsgId)
     expect(afterUpdate).toBeDefined()
+    expect(afterUpdate!.status).toBe('completed')
     expect(logCalls.some(w => w.includes('message not found'))).toBe(false)
   })
 

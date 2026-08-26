@@ -789,7 +789,8 @@ export const usePipelineMessageStore = create<PipelineMessageState>()(
     useContextKeys.getState().setPipelineRunning(true)
   },
 
-  /** 停止流式传输，同时将消息状态标记为 completed */
+  /** 停止流式传输，同时将 assistant 消息状态标记为 interrupted（与 DB 一致：
+   *  内核停止后半截消息落库 status="interrupted"，前端不显示"已完成"终态） */
   stopStreaming: (pipelineId: string) => {
     set((state) => {
       const streamStatus = state.streamingState[pipelineId]
@@ -809,7 +810,7 @@ export const usePipelineMessageStore = create<PipelineMessageState>()(
           // （发送失败标 failed 后 stopStreaming 不得把它覆盖成 completed——
           // 单一消息数组：失败语义由调用方显式设置）。
           if (stoppedMsg.role === 'assistant') {
-            // 收尾 part 状态：仅设置 message.status='completed' 会让 isStreamingMessage
+            // 收尾 part 状态：仅设置 message.status='interrupted' 会让 isStreamingMessage
             // 仍因残留的 'streaming'/'calling' part 返回 true（数据不一致，Stop 后再发新
             // 消息会卡在"思考中"）。与 handleStreamError 对齐：
             //   text/thinking 'streaming' -> 'done'
@@ -827,7 +828,7 @@ export const usePipelineMessageStore = create<PipelineMessageState>()(
             updatedMessages[messageIndex] = {
               ...stoppedMsg,
               parts: finalizedParts,
-              status: 'completed',
+              status: 'interrupted',
               _lastUpdated: Date.now(),
             }
 
