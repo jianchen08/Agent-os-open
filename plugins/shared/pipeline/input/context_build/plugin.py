@@ -191,6 +191,14 @@ class ContextBuildPlugin(IInputPlugin):
             _items = _dv.get("items")
             if isinstance(_items, list) and _items:
                 updates["context.dynamic_vars"] = _items
+        # 运行时参数随 agent 配置装载（与 tool_ids 同装配点）：yaml 声明值
+        # 注入顶层 state 键，stop_check（max_iterations/timeout_seconds）、
+        # task_reminder（max_reminders）、llm_core（model_tier）读 state 消费；
+        # state 已有显式值（overlay/上游注入）优先，不覆盖。-1 = 无限制，
+        # 原值透传（stop_check 对 -1 有显式语义）。
+        for _key in ("model_tier", "max_iterations", "max_reminders", "timeout_seconds"):
+            if _key not in ctx.state and agent_cfg.get(_key) is not None:
+                updates[_key] = agent_cfg[_key]
         # agent 层级：yaml level（如 code_writer L3）覆盖插件默认 L1——子任务
         # 管道按目标 agent 定层级（L1 豁免会让 task_reminder 评估闸门旁路）。
         # 插件配置显式 agent_level 仍最高优先。

@@ -443,7 +443,8 @@ pub(crate) async fn request_tenant_ctx(
 //
 // 流程：
 // 1. 构造初始 state（含 `message` / 默认 `agent_id` / `core_type` 等）
-// 2. 加载 Agent 配置注入 state（system_prompt / tool_ids / model_tier / max_iterations）
+// 2. 注入工具 schema（按 state.tool_ids 或 agent yaml 的 tool_ids 过滤；
+//    agent 全量配置由 context_build 插件在管道内自持加载）
 // 3. 构造 PipelineExecutor 并执行 `run`
 // 4. 从最终 state 提取响应（优先 `raw_result`，回退 `message`，再回退原消息）
 //
