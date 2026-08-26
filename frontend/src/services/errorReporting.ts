@@ -237,4 +237,37 @@ export function getErrorLogs(): ErrorLog[] {
   return errorReportingService.getErrorLogs()
 }
 
+/**
+ * 全局异常监听（统一错误模型：source=frontend）。
+ * 补 ErrorBoundary 之外的异步异常盲区——组件崩溃由根 ErrorBoundary 兜底，
+ * 但 window.onerror / unhandledrejection 覆盖的异步异常（事件回调/定时器/
+ * 未 await 的 Promise 链）不经过组件树，此前只落 console 无用户提示。
+ * 统一走 reportError：通知中心可见 + 来源标签「前端」。
+ */
+export function installGlobalErrorListeners(): void {
+  window.addEventListener('error', (event) => {
+    reportError(
+      event.message || '前端运行时错误',
+      ErrorType.CLIENT,
+      ErrorSeverity.ERROR,
+      { component: 'window.onerror', code: 'FRONTEND_RUNTIME_ERROR', source: 'frontend' },
+    )
+  })
+  window.addEventListener('unhandledrejection', (event) => {
+    const reason = event.reason
+    const message =
+      reason instanceof Error
+        ? reason.message
+        : typeof reason === 'string'
+          ? reason
+          : '未处理的 Promise 拒绝'
+    reportError(
+      message,
+      ErrorType.CLIENT,
+      ErrorSeverity.ERROR,
+      { component: 'unhandledrejection', code: 'FRONTEND_RUNTIME_ERROR', source: 'frontend' },
+    )
+  })
+}
+
 export type { ErrorContext, ErrorLog }

@@ -78,6 +78,9 @@ pub struct WsResponse {
     pub content: String,
     pub session_id: String,
     pub timestamp: String,
+    /// 降级应答标记（echo_fallback；统一错误模型：假成功显式化）
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub degraded: Option<bool>,
 }
 
 /// 构建 API 路由树。
@@ -663,6 +666,9 @@ pub(crate) struct EngineOutcome {
     pub final_assistant: Option<serde_json::Value>,
     pub final_user: Option<serde_json::Value>,
     pub failed: bool,
+    /// 降级应答标记（前置依赖缺失 echo_fallback）：调用方据此与正常回复区分，
+    /// 不再把降级应答当成功处理（2026-08-26 统一错误模型：假成功显式化）。
+    pub degraded: bool,
 }
 
 // 技术债（同 ROADMAP 已知技术债表 PLR091x 治理方式）：多参转发函数，
@@ -923,12 +929,15 @@ fn has_task_marker(state: &serde_json::Value) -> bool {
 }
 
 /// 前置依赖缺失时的 echo 降级应答（invoker/store/project_root 任一缺席）。
+/// degraded 标记供调用方（REST chat / 插件 send_message）识别降级应答，
+/// 与正常回复区分（2026-08-26 统一错误模型：假成功显式化）。
 fn echo_fallback(missing: &str, message: &str) -> EngineOutcome {
     EngineOutcome {
         content: format!("[echo-fallback: {missing}] {message}"),
         final_assistant: None,
         final_user: None,
         failed: false,
+        degraded: true,
     }
 }
 
@@ -1450,6 +1459,7 @@ async fn stage_execute(
                 final_assistant: None,
                 final_user: None,
                 failed: true,
+                degraded: false,
             })
         }
     }
@@ -1512,6 +1522,7 @@ fn stage_finalize(
         final_assistant,
         final_user,
         failed: false,
+        degraded: false,
     }
 }
 
@@ -1769,7 +1780,7 @@ async fn chat_handler(
     };
     let registry = crate::run_chain::RunChainRegistry::global();
     registry.note_user_pipeline(&user_id, &chain_key);
-    let (tx, rx) = tokio::sync::oneshot::channel::<String>();
+    let (tx, rx) = tokio::sync::oneshot::channel::<EngineOutcome>();
     let exec_state = state.clone();
     let exec_message = req.message.clone();
     let exec_agent = if req.agent_id.is_empty() {
@@ -1782,7 +1793,7 @@ async fn chat_handler(
     let exec_session = req.session_id.clone();
     let exec_user = user_id.clone();
     registry.enqueue(&chain_key, &user_id, async move {
-        let content = agentos_tenant::scope(
+        let outcome = agentos_tenant::scope(
             tenant_ctx,
             process_via_engine(
                 &exec_state,
@@ -1799,20 +1810,28 @@ async fn chat_handler(
                 "",
             ),
         )
-        .await
-        .content;
-        let _ = tx.send(content);
+        .await;
+        let _ = tx.send(outcome);
     });
     // 任务 panic（rx 关闭）时给出明确错误而非挂死等待。
-    let content = rx
+    let outcome = rx
         .await
-        .unwrap_or_else(|_| "[engine task terminated unexpectedly]".to_string());
+        .unwrap_or_else(|_| EngineOutcome {
+            content: "[engine task terminated unexpectedly]".to_string(),
+            final_assistant: None,
+            final_user: None,
+            failed: true,
+            degraded: false,
+        });
 
     let response = WsResponse {
         r#type: "message".to_string(),
-        content,
+        content: outcome.content,
         session_id: req.session_id,
         timestamp: chrono::Utc::now().to_rfc3339(),
+        // 降级应答显式化（2026-08-26 统一错误模型）：echo_fallback 时标记，
+        // 调用方（插件 send_message 等）据此与正常回复区分，不把降级当成功。
+        degraded: Some(outcome.degraded),
     };
     Ok(axum::Json(response))
 }

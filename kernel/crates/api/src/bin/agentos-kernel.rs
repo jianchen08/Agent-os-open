@@ -1001,9 +1001,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 state.clone(),
             ));
         handler_registry.register(std::sync::Arc::new(
-            agentos_api::chat_send_handler::ChatSendHandler::with_store(
+            agentos_api::chat_send_handler::ChatSendHandler::with_session(
                 dispatcher,
                 state.store.clone(),
+                state
+                    .session
+                    .clone()
+                    .expect("session 必须在 chat handler 注册前装配"),
             ),
         ));
         info!(target: "agentos-kernel", "Registered chat.send_message capability (trigger fire path)");

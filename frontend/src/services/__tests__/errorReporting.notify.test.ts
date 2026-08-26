@@ -20,6 +20,7 @@ vi.mock('../../stores/notificationStore', () => ({
 
 // 重新导入模块（mock 提升生效）
 import { reportError, ErrorType, ErrorSeverity, getErrorLogs } from '../errorReporting'
+import * as errorReportingModule from '../errorReporting'
 
 describe('errorReporting 通知中心提示（2026-08-22）', () => {
   beforeEach(() => {
@@ -79,5 +80,45 @@ describe('errorReporting 通知中心提示（2026-08-22）', () => {
     reportError('会话加载失败', ErrorType.SERVER, ErrorSeverity.ERROR)
     const n = addNotificationMock.mock.calls[0][0]
     expect(n.errorSource).toBeUndefined()
+  })
+})
+
+describe('installGlobalErrorListeners 全局异常监听（2026-08-26）', () => {
+  let errorHandler: ((event: ErrorEvent) => void) | null = null
+  let rejectionHandler: ((event: PromiseRejectionEvent) => void) | null = null
+
+  beforeEach(() => {
+    addNotificationMock.mockClear()
+    // 捕获 addEventListener 注册的监听器（jsdom window）
+    const orig = window.addEventListener.bind(window)
+    window.addEventListener = vi.fn((type: string, handler: any) => {
+      if (type === 'error') errorHandler = handler
+      if (type === 'unhandledrejection') rejectionHandler = handler
+      orig(type, handler)
+    }) as any
+  })
+
+  afterEach(() => {
+    ;(window.addEventListener as any).mockRestore?.()
+    errorHandler = null
+    rejectionHandler = null
+  })
+
+  it('window error 事件上报（通知带来源标签「前端」）', () => {
+    const { installGlobalErrorListeners } = errorReportingModule
+    installGlobalErrorListeners()
+    errorHandler?.({ message: 'oops: 组件异步崩溃' } as ErrorEvent)
+    const n = addNotificationMock.mock.calls[0][0]
+    expect(n.message).toBe('oops: 组件异步崩溃')
+    expect(n.errorSource).toBe('frontend')
+  })
+
+  it('unhandledrejection 以 Error 原因 message 上报', () => {
+    const { installGlobalErrorListeners } = errorReportingModule
+    installGlobalErrorListeners()
+    rejectionHandler?.({ reason: new Error('fetch 失败') } as PromiseRejectionEvent)
+    const n = addNotificationMock.mock.calls[0][0]
+    expect(n.message).toBe('fetch 失败')
+    expect(n.errorSource).toBe('frontend')
   })
 })

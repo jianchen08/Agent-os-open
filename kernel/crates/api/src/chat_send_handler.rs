@@ -68,6 +68,9 @@ pub struct ChatSendHandler {
     /// 注入分支坐标解析用（pipeline_id → 所属会话 thread）。
     /// None = 无存储构造（单测/兼容路径），注入坐标回退 pipeline 兼作派发键。
     store: Option<Arc<dyn StorageBackend>>,
+    /// 会话协调器（WS 事件投递）。None = 未接线（单测/兼容路径），
+    /// 后台派发失败仅告警不推通知。
+    session: Option<Arc<agentos_session::SessionCoordinator>>,
 }
 
 impl ChatSendHandler {
@@ -78,7 +81,26 @@ impl ChatSendHandler {
         dispatcher: Arc<dyn PipelineDispatcher>,
         store: Option<Arc<dyn StorageBackend>>,
     ) -> Self {
-        Self { dispatcher, store }
+        Self {
+            dispatcher,
+            store,
+            session: None,
+        }
+    }
+
+    /// 生产构造（会话协调器接线版）：后台派发失败推 system_notification
+    /// （统一错误模型：假成功显式化——调用方已拿到 dispatched，失败经 WS
+    /// 事件补报，前端实时可见"任务未启动"）。
+    pub fn with_session(
+        dispatcher: Arc<dyn PipelineDispatcher>,
+        store: Option<Arc<dyn StorageBackend>>,
+        session: Arc<agentos_session::SessionCoordinator>,
+    ) -> Self {
+        Self {
+            dispatcher,
+            store,
+            session: Some(session),
+        }
     }
 }
 
@@ -380,6 +402,11 @@ impl ChatSendHandler {
             let ec = execution_context.cloned();
             let ov = overlay.clone();
             let aid = agent_id.clone();
+            // 会话协调器：派发失败推 system_notification 补报（统一错误模型
+            // 假成功显式化）。record_id 为前端 system 气泡唯一 id 来源
+            // （lifecycleHandlers 拒绝缺失）；未落库——实时可见，刷新后
+            // 由全量对账清理（无对应 API 记录即消失）。
+            let session = self.session.clone();
             tokio::spawn(async move {
                 if let Err(e) = dispatcher
                     .dispatch_user_input(
@@ -401,6 +428,24 @@ impl ChatSendHandler {
                         error = %e,
                         "chat.send_message 后台派发失败（任务管道未启动）"
                     );
+                    if let Some(session) = session {
+                        let _ = session
+                            .emit_event(
+                                &tid,
+                                "system_notification",
+                                serde_json::json!({
+                                    "pipeline_id": pid,
+                                    "thread_id": tid,
+                                    "record_id": format!("n_{pid}_dispatch_failed"),
+                                    "notification_id": "dispatch_failed",
+                                    "notificationType": "dispatch_failed",
+                                    "level": "error",
+                                    "content": format!("任务派发失败，管道未启动：{e}"),
+                                    "sequence": null,
+                                }),
+                            )
+                            .await;
+                    }
                 }
             });
             return Ok(json!({
@@ -1518,5 +1563,145 @@ mod tests {
             "no_dispatch 必须携带 state",
         )
         .await;
+    }
+
+    // ── 统一错误模型：background 派发失败补报 system_notification（P1a）──
+
+    /// 恒失败派发器（模拟任务管道未启动）。
+    struct FailingDispatcher {
+        err: String,
+    }
+
+    #[async_trait]
+    impl PipelineDispatcher for FailingDispatcher {
+        async fn dispatch_user_input(
+            &self,
+            _t: &str,
+            _u: &str,
+            _c: &str,
+            _p: &str,
+            _ts: &str,
+            _ec: Option<&Value>,
+            _ov: Option<&Value>,
+            _a: &str,
+            _cmid: &str,
+        ) -> Result<(), String> {
+            Err(self.err.clone())
+        }
+        async fn dispatch_interaction_response(
+            &self,
+            _t: &str,
+            _r: &str,
+            _resp: &Value,
+        ) -> Result<(), String> {
+            Ok(())
+        }
+        async fn dispatch_stop(&self, _t: &str) -> Result<(), String> {
+            Ok(())
+        }
+    }
+
+    /// 捕获型 EventSink：记录收到的全部文本帧。
+    struct CapturingSink {
+        frames: Arc<Mutex<Vec<String>>>,
+    }
+
+    #[async_trait]
+    impl agentos_session::EventSink for CapturingSink {
+        async fn send_text(&self, text: &str) -> bool {
+            self.frames.lock().unwrap().push(text.to_string());
+            true
+        }
+        fn id(&self) -> u64 {
+            42
+        }
+    }
+
+    /// background 派发失败：调用方仍拿 dispatched（响应后失败无法携带），
+    /// 但经 WS system_notification 补报——前端实时可见"任务未启动"
+    /// （统一错误模型：假成功显式化）。
+    #[tokio::test]
+    async fn background_dispatch_failure_emits_system_notification() {
+        let store = Arc::new(agentos_engine::SqliteStore::open_memory().unwrap());
+        let session = Arc::new(agentos_session::SessionCoordinator::new());
+        let frames = Arc::new(Mutex::new(Vec::<String>::new()));
+        session.register_thread("thread-fail-1", "u1");
+        session.register("u1", Arc::new(CapturingSink { frames: frames.clone() }));
+
+        let dispatcher: Arc<dyn PipelineDispatcher> = Arc::new(FailingDispatcher {
+            err: "pipeline init failed: engine not available".into(),
+        });
+        let h = ChatSendHandler::with_session(dispatcher, Some(store), session);
+
+        let res = h
+            .handle(
+                "send_message",
+                json!({"create": true, "message": "m", "user_id": "u1",
+                       "thread_id": "thread-fail-1",
+                       "background": true,
+                       "lineage": {"root": true, "origin": {"kind": "system", "source": "gate"}}}),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res["status"], "created", "后台派发响应立即返回: {res}");
+        // 等 spawn 的派发失败补报完成（真实异步：轮询帧到达）
+        let frames_arc = frames.clone();
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                if !frames_arc.lock().unwrap().is_empty() {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("5s 内应收到 system_notification 帧");
+
+        let frames = frames.lock().unwrap();
+        let last = frames.last().unwrap();
+        let frame: Value = serde_json::from_str(last).unwrap();
+        assert_eq!(frame["type"], "system_notification");
+        let data = &frame["data"];
+        assert_eq!(data["level"], "error");
+        assert_eq!(data["notificationType"], "dispatch_failed");
+        assert!(
+            data["content"]
+                .as_str()
+                .unwrap()
+                .contains("管道未启动"),
+            "content 应含失败原因: {data}"
+        );
+    }
+
+    /// 成功派发不产生 system_notification（补报只对失败路径）。
+    #[tokio::test]
+    async fn background_dispatch_success_no_notification() {
+        let session = Arc::new(agentos_session::SessionCoordinator::new());
+        let frames = Arc::new(Mutex::new(Vec::<String>::new()));
+        session.register_thread("thread-ok-1", "u1");
+        session.register("u1", Arc::new(CapturingSink { frames: frames.clone() }));
+
+        let d = RecordingDispatcher::shared();
+        let dispatcher: Arc<dyn PipelineDispatcher> = d.clone();
+        let h = ChatSendHandler::with_session(dispatcher, None, session);
+
+        let res = h
+            .handle(
+                "send_message",
+                json!({"create": true, "message": "m", "user_id": "u1",
+                       "thread_id": "thread-ok-1",
+                       "background": true,
+                       "lineage": {"root": true, "origin": {"kind": "system", "source": "gate"}}}),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res["status"], "created");
+        // 给 spawn 留出执行窗口（成功路径无帧）
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        assert!(
+            frames.lock().unwrap().is_empty(),
+            "成功派发不应产生通知: {:?}",
+            frames.lock().unwrap()
+        );
     }
 }

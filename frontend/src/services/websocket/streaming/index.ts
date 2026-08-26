@@ -17,7 +17,12 @@ import {
   handleToolStart,
   handleIteration,
 } from './handlers'
-import { handleCostUpdate, handleReconnected, handleTerminationStatus } from './lifecycleHandlers'
+import {
+  handleCostUpdate,
+  handleReconnected,
+  handleSystemNotification,
+  handleTerminationStatus,
+} from './lifecycleHandlers'
 import { isPipelineRelevant, resolvePipelineId } from './router'
 
 let _initialized = false
@@ -67,10 +72,16 @@ export function initStreamingEvents(): void {
 
   _handlers[WS_SERVER_EVENTS.COST_UPDATE] = _logWrap(WS_SERVER_EVENTS.COST_UPDATE, handleCostUpdate)
   _handlers[WS_SERVER_EVENTS.TERMINATION_STATUS] = _logWrap(WS_SERVER_EVENTS.TERMINATION_STATUS, handleTerminationStatus)
+  // 2026-08-26 接线：后端 chat.send_message 后台派发失败经此补报
+  // （统一错误模型：假成功显式化），前端渲染 system 错误气泡。
+  _handlers[WS_SERVER_EVENTS.SYSTEM_NOTIFICATION] = _logWrap(
+    WS_SERVER_EVENTS.SYSTEM_NOTIFICATION,
+    handleSystemNotification,
+  )
 
   // 2026-08 清理：以下事件在后端（kernel ws_session.rs / capability_router.rs
   // 事件族 + 插件 event-bus.emit 全集）无任何发射源，订阅已删除：
-  // error / sub_agent_created / stream_keepalive / state_change / system_notification。
+  // error / sub_agent_created / stream_keepalive / state_change。
   // 对应 handler 函数保留在 handlers/lifecycleHandlers（有直接单测或供后续接线）。
 
   for (const [event, handler] of Object.entries(_handlers)) {

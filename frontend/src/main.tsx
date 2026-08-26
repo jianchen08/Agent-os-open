@@ -8,6 +8,7 @@
 import { StrictMode } from 'react'
 import { createRoot } from 'react-dom/client'
 import { ImagePreviewHost } from '@/components/chat/ImagePreviewHost'
+import { installGlobalErrorListeners } from '@/services/errorReporting'
 import { openFile } from '@/services/fileOpener'
 import { registerGlobalOpenFileCallback } from '@/utils/toolCardRegistry'
 import { App } from './App'
@@ -44,6 +45,9 @@ async function bootstrap() {
   if (!root) {
     throw new Error('找不到根元素 #root')
   }
+
+  // 全局异常监听早于渲染安装（首屏异步异常也不漏）
+  installGlobalErrorListeners()
 
   // 先渲染 React 应用，用户立刻看到加载状态而非空白页
   // ProtectedRoute 在 isInitializing=true 时显示加载动画
