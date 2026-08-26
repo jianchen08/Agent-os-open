@@ -12,6 +12,12 @@ import { Bell, Check, Clock, Send, Trash2, X } from 'lucide-react'
 import { useState } from 'react'
 import { Button } from '@/components/ui/button'
 import { usePendingInputStore } from '@/stores/pendingInputStore'
+import type { PendingInputItem } from '@/services/api/pipelines'
+
+/** 空队列快照必须是模块级常量：zustand v5 裸 useSyncExternalStore 只做 Object.is
+ * 比较，selector 内联 `?? []` 每次产生新数组引用 → forceStoreRerender 无限循环
+ * （同 ChatContainer EMPTY_MESSAGES 范式）。 */
+const EMPTY_ITEMS: PendingInputItem[] = []
 
 const SOURCE_LABELS: Record<string, string> = {
   user: '人',
@@ -27,7 +33,7 @@ export interface PendingInputQueueBarProps {
 }
 
 export function PendingInputQueueBar({ pipelineId }: PendingInputQueueBarProps) {
-  const items = usePendingInputStore((s) => s.byPipeline[pipelineId] ?? [])
+  const items = usePendingInputStore((s) => s.byPipeline[pipelineId] ?? EMPTY_ITEMS)
   const editingId = usePendingInputStore((s) => s.editingId[pipelineId] ?? null)
   const remove = usePendingInputStore((s) => s.remove)
   const clear = usePendingInputStore((s) => s.clear)
