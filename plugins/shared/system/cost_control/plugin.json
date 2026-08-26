@@ -305,8 +305,8 @@
       {
         "id": "budget_card",
         "type": "status_card",
-        "space": "cost",
-        "order": 10,
+        "space": "monitoring",
+        "order": 60,
         "props": {
           "title": "全局预算",
           "label": "预算用量",
@@ -315,14 +315,15 @@
           "refresh": {
             "type": "poll",
             "intervalSeconds": 60
-          }
+          },
+          "variant": "metric"
         }
       },
       {
         "id": "usage_daily_card",
         "type": "status_card",
-        "space": "cost",
-        "order": 20,
+        "space": "monitoring",
+        "order": 70,
         "props": {
           "title": "今日用量",
           "label": "今日 Tokens",
@@ -331,14 +332,15 @@
           "refresh": {
             "type": "poll",
             "intervalSeconds": 60
-          }
+          },
+          "variant": "metric"
         }
       },
       {
         "id": "usage_monthly_card",
         "type": "status_card",
-        "space": "cost",
-        "order": 30,
+        "space": "monitoring",
+        "order": 80,
         "props": {
           "title": "本月用量",
           "label": "本月 Tokens",
@@ -347,27 +349,13 @@
           "refresh": {
             "type": "poll",
             "intervalSeconds": 60
-          }
+          },
+          "variant": "metric"
         }
       }
     ]
   },
   "contributes": {
-    "pages": [
-      {
-        "id": "cost_dashboard",
-        "title": "成本",
-        "icon": "💰",
-        "space": "workspace",
-        "slot": "activity-bar",
-        "order": 40,
-        "path": "/cost",
-        "widget": "widget_stage",
-        "props": {
-          "space": "cost"
-        },
-        "description": "成本看板（widget 化：预算/用量卡声明组合，替代硬编码 CostDashboardWidget）"
-      }
-    ]
+    "pages": []
   }
 }

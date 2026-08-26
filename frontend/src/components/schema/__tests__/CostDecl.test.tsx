@@ -1,4 +1,4 @@
-/** cost_control 成本看板声明契约测试（B1：预算/用量卡替代 CostDashboardWidget） */
+/** cost_control 成本卡声明契约测试（B1：预算/用量卡并入监控页，2026-08-18 合并） */
 import { render, screen, waitFor } from '@testing-library/react'
 import fs from 'node:fs'
 import path from 'node:path'
@@ -38,35 +38,40 @@ beforeEach(() => {
   })
 })
 
-describe('cost 看板声明（B1）', () => {
-  it('声明存在：三张卡 + /cost 页指向 widget_stage', () => {
-    const ids = contributionRegistry.getAllWidgets().map((w) => w.id)
-    expect(ids).toContain('budget_card')
-    expect(ids).toContain('usage_daily_card')
-    expect(ids).toContain('usage_monthly_card')
-    const page = contributionRegistry.getPages().find((p) => p.id === 'cost_dashboard')
-    expect(page?.widget).toBe('widget_stage')
+describe('cost 卡声明（B1 合并后）', () => {
+  it('三张卡存在且并入 monitoring 空间；不独占侧边栏页面（pages 为空）', () => {
+    const widgets = contributionRegistry.getAllWidgets().map((w) => w.id)
+    expect(widgets).toContain('budget_card')
+    expect(widgets).toContain('usage_daily_card')
+    expect(widgets).toContain('usage_monthly_card')
+    // 合并拍板：成本卡并入监控页（space=monitoring），不再声明独立 activity-bar 页
+    const costWidgets = contributionRegistry
+      .getAllWidgets()
+      .filter((w) => ['budget_card', 'usage_daily_card', 'usage_monthly_card'].includes(w.id))
+    expect(costWidgets.every((w) => w.space === 'monitoring')).toBe(true)
+    const pages = contributionRegistry.getPages()
+    expect(pages.find((p) => p.id === 'cost_dashboard')).toBeUndefined()
   })
 
-  it('预算卡：datasourceUri + valueKey=usage_percent 渲染百分比', async () => {
+  it('预算卡：datasourceUri + valueKey=usage_percent 渲染百分比（monitoring 空间）', async () => {
     apiGet.mockImplementation((url: string) => {
       if (url === '/ext/cost_control/budget/status') {
         return Promise.resolve({ data: { scope: 'global', usage_percent: 70, used: 700, limit: 1000 } })
       }
       if (url === '/ext/cost_control/usage/statistics') {
-        return Promise.resolve({ data: { global_stats: { daily_usage_percent: 62, monthly_usage_percent: 41 } } })
+        return Promise.resolve({ data: { global_stats: { daily_tokens: 13513, monthly_tokens: 25117 } } })
       }
       return Promise.resolve({ data: {} })
     })
-    render(<WidgetStage space="cost" />)
-    await waitFor(() => expect(screen.getByText('70%')).toBeInTheDocument())
-    await waitFor(() => expect(screen.getByText('62%')).toBeInTheDocument())
-    await waitFor(() => expect(screen.getByText('41%')).toBeInTheDocument())
+    render(<WidgetStage space="monitoring" />)
+    await waitFor(() => expect(screen.getByText('70')).toBeInTheDocument())
+    await waitFor(() => expect(screen.getByText('13513')).toBeInTheDocument())
+    await waitFor(() => expect(screen.getByText('25117')).toBeInTheDocument())
   })
 
   it('端点不可用 → 降级不崩（后端 budget/status 未上线时）', async () => {
     apiGet.mockRejectedValue(new Error('404'))
-    render(<WidgetStage space="cost" />)
+    render(<WidgetStage space="monitoring" />)
     await waitFor(() =>
       expect(screen.queryByText('暂无图表数据')).not.toBeInTheDocument(),
     )

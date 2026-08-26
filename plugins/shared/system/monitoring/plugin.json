@@ -367,7 +367,8 @@
           "refresh": {
             "type": "poll",
             "intervalSeconds": 10
-          }
+          },
+          "variant": "metric"
         }
       },
       {
@@ -382,7 +383,8 @@
           "refresh": {
             "type": "poll",
             "intervalSeconds": 10
-          }
+          },
+          "variant": "metric"
         }
       },
       {
@@ -397,7 +399,8 @@
           "refresh": {
             "type": "poll",
             "intervalSeconds": 10
-          }
+          },
+          "variant": "metric"
         }
       },
       {
@@ -413,7 +416,8 @@
           "refresh": {
             "type": "poll",
             "intervalSeconds": 30
-          }
+          },
+          "variant": "metric"
         }
       },
       {
