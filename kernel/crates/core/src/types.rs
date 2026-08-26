@@ -435,6 +435,13 @@ pub struct PendingInputRecord {
     pub source: PendingInputSource,
     /// 执行 agent（任务派发显式指定；主会话路径按线程绑定解析）
     pub agent_id: String,
+    /// 消费时派发的路由键（resolve_pipeline_id_for_thread 结果——入队时解析，
+    /// 消费时直接用；与链 key 同值）
+    pub route_id: String,
+    /// 思考强度（off/low/medium/high；引擎透传 llm_core）
+    pub thinking_strength: String,
+    /// 前端幂等键（ADR-2026-08-21：随 user 消息 metadata 落库回显，认领用）
+    pub client_message_id: String,
     /// 任务级 execution_context（workspace_mode/isolation_level 等）
     pub execution_context: Option<serde_json::Value>,
     /// 出生注入 overlay（lineage.* / task.* 等扁平键）

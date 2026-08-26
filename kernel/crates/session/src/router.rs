@@ -10,6 +10,7 @@
 
 use std::sync::Arc;
 
+use agentos_core::types::PendingInputSource;
 use async_trait::async_trait;
 use serde_json::Value;
 
@@ -39,6 +40,10 @@ pub trait PipelineDispatcher: Send + Sync {
     /// client_message_id 是前端幂等键（ADR 2026-08-21）：随 user 消息
     /// metadata 落库并在 GET messages 回显，前端据此对账去重乐观消息。
     /// 空串 = 无幂等键（触发器注入/旧客户端）。
+    ///
+    /// source 是 pending 输入来源标注（ADR-2026-08-26）：前端=User、
+    /// 触发器=Trigger、任务派发=Task、HTTP=Http、系统=System。入队持久化，
+    /// 前端队列条据此标注来源。
     #[allow(clippy::too_many_arguments)]
     async fn dispatch_user_input(
         &self,
@@ -51,6 +56,7 @@ pub trait PipelineDispatcher: Send + Sync {
         state_overlay: Option<&serde_json::Value>,
         agent_id: &str,
         client_message_id: &str,
+        source: PendingInputSource,
     ) -> Result<(), String>;
 
     /// 转发人工交互响应（审批/选择）。
@@ -197,6 +203,8 @@ impl InboundRouter {
                 // 硬编码 "agentos" 会使会话编辑切换的绑定成为纯展示字段。
                 "",
                 &client_message_id,
+                // WS 入口即前端发送（ADR-2026-08-26 来源标注）。
+                agentos_core::types::PendingInputSource::User,
             )
             .await
         {

@@ -11,6 +11,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use agentos_core::types::PendingInputSource;
 use agentos_api::routes::AppState;
 use agentos_api::server::build_router;
 use agentos_session::auth::{REJECT_CODE_INVALID_TOKEN, REJECT_CODE_NO_TOKEN};
@@ -34,6 +35,7 @@ impl PipelineDispatcher for NoopDispatcher {
         _state_overlay: Option<&serde_json::Value>,
         _agent_id: &str,
         _cmid: &str,
+        _source: PendingInputSource,
     ) -> Result<(), String> {
         Ok(())
     }

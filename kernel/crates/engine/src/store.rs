@@ -187,6 +187,9 @@ CREATE TABLE IF NOT EXISTS pipeline_pending_inputs (
     thread            TEXT NOT NULL,
     source            TEXT NOT NULL,
     agent_id          TEXT NOT NULL DEFAULT 'agentos',
+    route_id          TEXT NOT NULL DEFAULT '',
+    thinking_strength TEXT NOT NULL DEFAULT '',
+    client_message_id TEXT NOT NULL DEFAULT '',
     execution_context TEXT,
     state_overlay     TEXT,
     created_at        TEXT NOT NULL
@@ -1152,8 +1155,9 @@ impl SqliteStore {
         conn.execute(
             "INSERT OR IGNORE INTO pipeline_pending_inputs \
              (id, pipeline_id, tenant_id, user_id, content, thread, source, agent_id, \
-              execution_context, state_overlay, created_at) \
-             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11)",
+              route_id, thinking_strength, client_message_id, execution_context, \
+              state_overlay, created_at) \
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14)",
             rusqlite::params![
                 input.id,
                 pipeline_id,
@@ -1163,6 +1167,9 @@ impl SqliteStore {
                 input.thread,
                 serde_json::to_string(&input.source).unwrap_or_else(|_| "\"user\"".into()),
                 input.agent_id,
+                input.route_id,
+                input.thinking_strength,
+                input.client_message_id,
                 ec,
                 ov,
                 input.created_at,
@@ -1182,7 +1189,8 @@ impl SqliteStore {
         let row = conn
             .query_row(
                 "SELECT id, pipeline_id, tenant_id, user_id, content, thread, source, \
-                        agent_id, execution_context, state_overlay, created_at \
+                        agent_id, route_id, thinking_strength, client_message_id, \
+                        execution_context, state_overlay, created_at \
                  FROM pipeline_pending_inputs \
                  WHERE tenant_id=?1 AND pipeline_id=?2 \
                  ORDER BY created_at, id LIMIT 1",
@@ -1197,14 +1205,33 @@ impl SqliteStore {
                         row.get::<_, String>(5)?,
                         row.get::<_, String>(6)?,
                         row.get::<_, String>(7)?,
-                        row.get::<_, Option<String>>(8)?,
-                        row.get::<_, Option<String>>(9)?,
+                        row.get::<_, String>(8)?,
+                        row.get::<_, String>(9)?,
                         row.get::<_, String>(10)?,
+                        row.get::<_, Option<String>>(11)?,
+                        row.get::<_, Option<String>>(12)?,
+                        row.get::<_, String>(13)?,
                     ))
                 },
             )
             .optional()?;
-        let Some((id, pid, tnt, uid, content, thread, source, agent, ec, ov, created)) = row else {
+        let Some((
+            id,
+            pid,
+            tnt,
+            uid,
+            content,
+            thread,
+            source,
+            agent,
+            route_id,
+            thinking,
+            cmid,
+            ec,
+            ov,
+            created,
+        )) = row
+        else {
             return Ok(None);
         };
         conn.execute(
@@ -1220,6 +1247,9 @@ impl SqliteStore {
             thread,
             source: serde_json::from_str(&source).unwrap_or(PendingInputSource::User),
             agent_id: agent,
+            route_id,
+            thinking_strength: thinking,
+            client_message_id: cmid,
             execution_context: ec.and_then(|s| serde_json::from_str(&s).ok()),
             state_overlay: ov.and_then(|s| serde_json::from_str(&s).ok()),
             created_at: created,
@@ -1236,7 +1266,8 @@ impl SqliteStore {
         let rows = conn
             .prepare(
                 "SELECT id, pipeline_id, tenant_id, user_id, content, thread, source, \
-                        agent_id, execution_context, state_overlay, created_at \
+                        agent_id, route_id, thinking_strength, client_message_id, \
+                        execution_context, state_overlay, created_at \
                  FROM pipeline_pending_inputs \
                  WHERE tenant_id=?1 AND pipeline_id=?2 \
                  ORDER BY created_at, id",
@@ -1251,16 +1282,34 @@ impl SqliteStore {
                     row.get::<_, String>(5)?,
                     row.get::<_, String>(6)?,
                     row.get::<_, String>(7)?,
-                    row.get::<_, Option<String>>(8)?,
-                    row.get::<_, Option<String>>(9)?,
+                    row.get::<_, String>(8)?,
+                    row.get::<_, String>(9)?,
                     row.get::<_, String>(10)?,
+                    row.get::<_, Option<String>>(11)?,
+                    row.get::<_, Option<String>>(12)?,
+                    row.get::<_, String>(13)?,
                 ))
             })?
             .collect::<Result<Vec<_>, _>>()?;
         Ok(rows
             .into_iter()
             .map(
-                |(id, rid, t, uid, content, thread, source, agent, ec, ov, created)| {
+                |(
+                    id,
+                    rid,
+                    t,
+                    uid,
+                    content,
+                    thread,
+                    source,
+                    agent,
+                    route_id,
+                    thinking,
+                    cmid,
+                    ec,
+                    ov,
+                    created,
+                )| {
                     PendingInputRecord {
                         id,
                         pipeline_id: rid,
@@ -1270,6 +1319,9 @@ impl SqliteStore {
                         thread,
                         source: serde_json::from_str(&source).unwrap_or(PendingInputSource::User),
                         agent_id: agent,
+                        route_id,
+                        thinking_strength: thinking,
+                        client_message_id: cmid,
                         execution_context: ec.and_then(|s| serde_json::from_str(&s).ok()),
                         state_overlay: ov.and_then(|s| serde_json::from_str(&s).ok()),
                         created_at: created,
@@ -3885,6 +3937,9 @@ mod tests {
             thread: format!("thread-{pid}"),
             source: PendingInputSource::User,
             agent_id: "agentos".to_string(),
+            route_id: pid.to_string(),
+            thinking_strength: String::new(),
+            client_message_id: String::new(),
             execution_context: None,
             state_overlay: Some(json!({"task.goal": content})),
             created_at: created.to_string(),

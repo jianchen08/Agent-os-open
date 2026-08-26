@@ -2,6 +2,7 @@
 
 //! 入站路由测试——user_input/interaction_response/stop_generation/heartbeat 分发（ADR §7.2）。
 
+use agentos_core::types::PendingInputSource;
 use agentos_session::router::{InboundRouter, PipelineDispatcher, RouteOutcome};
 use async_trait::async_trait;
 use std::sync::Arc;
@@ -31,6 +32,7 @@ impl PipelineDispatcher for MockDispatcher {
         _state_overlay: Option<&serde_json::Value>,
         agent_id: &str,
         client_message_id: &str,
+        _source: PendingInputSource,
     ) -> Result<(), String> {
         self.user_inputs.lock().unwrap().push((
             thread_id.into(),
@@ -271,6 +273,7 @@ async fn dispatcher_failure_returns_error() {
             _: Option<&serde_json::Value>,
             _: &str,
             _: &str,
+            _: PendingInputSource,
         ) -> Result<(), String> {
             Err("boom".into())
         }

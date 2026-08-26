@@ -842,6 +842,7 @@ mod tests {
     #[tokio::test]
     async fn chat_contract_output_schema_gates_handler_responses() {
         use agentos_core::traits::StorageBackend;
+        use agentos_core::types::PendingInputSource;
         use agentos_mcp::CapabilityHandler;
         use agentos_session::router::PipelineDispatcher;
         use std::sync::{Arc, Mutex};
@@ -861,6 +862,7 @@ mod tests {
                 _ov: Option<&Value>,
                 _a: &str,
                 _cmid: &str,
+                _source: PendingInputSource,
             ) -> Result<(), String> {
                 Ok(())
             }

@@ -26,6 +26,7 @@
 use std::sync::Arc;
 
 use agentos_core::traits::StorageBackend;
+use agentos_core::types::PendingInputSource;
 use async_trait::async_trait;
 use serde_json::{json, Map, Value};
 
@@ -419,6 +420,7 @@ impl ChatSendHandler {
                         ov.as_ref(),
                         &aid,
                         "",
+                        PendingInputSource::Trigger,
                     )
                     .await
                 {
@@ -464,6 +466,7 @@ impl ChatSendHandler {
                 overlay.as_ref(),
                 &agent_id,
                 "",
+                PendingInputSource::Trigger,
             )
             .await
             .map(|_| {
@@ -676,6 +679,7 @@ mod tests {
             state_overlay: Option<&Value>,
             _agent_id: &str,
             _cmid: &str,
+            _source: PendingInputSource,
         ) -> Result<(), String> {
             self.calls.lock().unwrap().push((
                 thread_id.to_string(),
@@ -1316,6 +1320,7 @@ mod tests {
             state_overlay: Option<&Value>,
             _agent_id: &str,
             _cmid: &str,
+            _source: PendingInputSource,
         ) -> Result<(), String> {
             self.gate.notified().await;
             self.calls
@@ -1585,6 +1590,7 @@ mod tests {
             _ov: Option<&Value>,
             _a: &str,
             _cmid: &str,
+            _source: PendingInputSource,
         ) -> Result<(), String> {
             Err(self.err.clone())
         }

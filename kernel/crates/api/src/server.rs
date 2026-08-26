@@ -19,7 +19,7 @@ use parking_lot::RwLock as ParkingRwLock;
 #[cfg(test)]
 use agentos_core::traits::MessageQueryOpts;
 use agentos_core::traits::{CapabilityRegistry, StorageBackend};
-use agentos_core::types::{PipelineConfig, StepLibrary, TenantContext};
+use agentos_core::types::{PendingInputSource, PipelineConfig, StepLibrary, TenantContext};
 use axum::{
     body::Body,
     extract::{
@@ -4410,6 +4410,7 @@ mod tests {
 
         let dispatcher = crate::ws_session::EngineDispatcher::new(state);
         // 注入派发：thread_id 与 pipeline_id 同取管道唯一坐标（chat.send_message 现状）
+        // stream_start 在链任务激活时才发（ADR-2026-08-26 等待窗口不占位），轮询等待。
         use agentos_session::router::PipelineDispatcher;
         let _ = dispatcher
             .dispatch_user_input(
@@ -4422,13 +4423,103 @@ mod tests {
                 None,
                 "agentos",
                 "",
+                PendingInputSource::Trigger,
             )
             .await;
-        let got = sink.delivered.load(Ordering::SeqCst);
-        assert!(
-            got >= 1,
-            "注入事件按管道唯一坐标必须直达 user 连接——LLM 日志有、前端收不到 = 该坐标缺注册"
-        );
+        let delivered = sink.delivered.clone();
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                if delivered.load(Ordering::SeqCst) >= 1 {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("5s 内应收到注入派发事件——LLM 日志有、前端收不到 = 该坐标缺注册");
+    }
+
+    // ── pending 输入队列（ADR-2026-08-26）：入队/排队/删除/消费 ──
+
+    /// dispatch_user_input 在链空闲时消费：消息落表后立即激活执行，
+    /// 消费即删行（队列清空），等待窗口不存在（空闲管道行为与旧 dispatch 一致）。
+    #[tokio::test]
+    async fn test_pending_input_idle_consumed_immediately() {
+        let (state, _invoker, store, _sqlite) = make_engine_state();
+        let dispatcher = crate::ws_session::EngineDispatcher::new(state);
+        use agentos_session::router::PipelineDispatcher;
+        dispatcher
+            .dispatch_user_input(
+                "thread-idle-1",
+                "u1",
+                "空闲直发",
+                "",
+                "",
+                None,
+                None,
+                "",
+                "cmid-1",
+                PendingInputSource::User,
+            )
+            .await
+            .unwrap();
+        // 消费任务在链空闲时 pop → 立即执行；轮询等待队列清空（消费瞬态 = 删行）。
+        let store2 = store.clone();
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                let rows = store2
+                    .list_pending_inputs("default", "thread-idle-1")
+                    .await
+                    .unwrap();
+                if rows.is_empty() {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("空闲管道消息应被消费（队列清空）");
+    }
+
+    /// 等待窗口内删除：删除语义由存储层单测覆盖（store.rs）；此处验证 dispatch
+    /// 入队后不产生队列残留——空闲管道消息被消费即删行，删除语义（PUT/DELETE
+    /// 端点）在 T2 联测覆盖。
+    #[tokio::test]
+    async fn test_pending_input_dispatch_leaves_no_residue() {
+        let (state, _invoker, store, _sqlite) = make_engine_state();
+        let dispatcher = crate::ws_session::EngineDispatcher::new(state);
+        use agentos_session::router::PipelineDispatcher;
+        dispatcher
+            .dispatch_user_input(
+                "thread-del-1",
+                "u1",
+                "将被消费",
+                "",
+                "",
+                None,
+                None,
+                "",
+                "",
+                PendingInputSource::User,
+            )
+            .await
+            .unwrap();
+        // 空闲管道消息应被消费（异步链任务），轮询等待队列清空（消费瞬态 = 删行）。
+        let store2 = store.clone();
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                let rows = store2
+                    .list_pending_inputs("default", "thread-del-1")
+                    .await
+                    .unwrap();
+                if rows.is_empty() {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("dispatch 后队列应被消费清空，不留残留");
     }
 
     // ── 消息幂等契约（ADR 2026-08-21）：cmid 随 user 消息落库 + interrupted_tail 尊重 cmid ──
