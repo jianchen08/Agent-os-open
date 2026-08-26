@@ -43,6 +43,7 @@ BASE_TEST_PATHS: list[str] = [
     "plugins/shared/system/llm/",
     "plugins/shared/system/tasks/",
     "plugins/shared/system/test_migration_batch3.py",
+    "plugins/shared/pipeline/output/duplicate_check/",
     "plugins/shared/tools/task/",
     "plugins/shared/tools/task_evaluate/",
     "plugins/shared/tools/tests/",
