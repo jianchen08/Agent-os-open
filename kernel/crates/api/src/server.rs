@@ -3832,6 +3832,7 @@ mod tests {
                 pipeline_role: None,
                 language: "python".to_string(),
                 host_type: agentos_core::traits::HostType::Sidecar,
+                host_group: None,
                 entry: String::new(),
                 capabilities: agentos_core::traits::ManifestCapabilities {
                     lifecycle_hooks: vec![agentos_core::traits::LifecycleHook::DomainEvent],
@@ -4817,5 +4818,38 @@ mod tests {
                 .is_empty(),
             "clear 后队列空"
         );
+    }
+
+    /// 端点守卫分支：无 store → 404；PUT 空 content → 400；不存在的端点路径 404。
+    #[tokio::test]
+    async fn test_pending_inputs_endpoints_guards() {
+        // 无 store（AppState::new()）：GET → 404（store not injected）
+        let app = build_router(AppState::new());
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/pipelines/pipe-x/pending-inputs")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+
+        // 有 store：PUT 空 content → 400
+        let (state, _invoker, _store, _sqlite) = make_engine_state();
+        let app = build_router(state);
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri("/api/v1/pipelines/pipe-x/pending-inputs/abc")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"content":""}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
     }
 }
