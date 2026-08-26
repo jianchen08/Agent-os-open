@@ -9,7 +9,7 @@
 > - `.project/manifest_v2_schema.json` / `.project/mcp_extension_protocol.md` → 始终未作为独立文件产出；manifest 真值源 = `kernel/crates/core/src/traits.rs::PluginManifest`，协议文档 = `docs/plugin-protocol.md`
 > - `docs/guides/plugin_development_guide.md` / `plugin_development_standard.md`（0.1）→ 已删除；现行开发指南 = `docs/guides/` 分篇（见 [README.md](README.md)）
 > - 路由信号（`next_llm` / `next_tool` / `end` / `wait`）**已不驱动路由**：0.2 路由由管道 YAML 的 G10 DSL（`when`/`then`）按 state 条件裁决；`RouteType` / `PluginResult.route_signal` 为遗留类型（native 恒 None、引擎不读），manifest `route_signals` 声明位保留但执行面零消费
-> - `docs/guides/contract_qa.md`（契约设计 Q&A）→ 已删除：其回答基于旧版 traits.rs（755 行时期），`dependencies`/`DependencyResolver`/`LlmProvider`/三子 trait 等前提在当前代码中不存在；现行口径见本文"契约常见问答"与 [plugin-protocol.md](../plugin-protocol.md)
+> - `docs/guides/contract_qa.md`（契约设计 Q&A）→ 已删除：其回答基于旧版 traits.rs（755 行时期），`dependencies`/`DependencyResolver`/`LlmProvider`/三子 trait 等前提在当前代码中不存在；具体做法见各分篇指南（依赖→[plugin-sidecar-python.md](plugin-sidecar-python.md) §4、宿主选型→[plugin-development.md](plugin-development.md) §2、字段→[plugin-protocol.md](../plugin-protocol.md)）
 > - `docs/ARCHITECTURE.md` → 已更新为 0.2 架构口径
 
 ---
@@ -601,16 +601,6 @@ plugin.json manifest 全字段规范（字段总表 / capabilities / requires_se
 - `docs/plugin-protocol.md` ⇄ `traits.rs::PluginManifest`：字段必须一一对应
 - `plugin_scaffold/*.py` ⇄ `plugins/shared/pipeline/_base/plugin.py`：模板必须继承该基类
 - SDK `pipeline_types.py` ⇄ 内核 `types.rs`：state 字段名两侧一致
-
----
-
-## 契约常见问答（现行口径）
-
-- **插件之间怎么依赖？** 加载期不解析依赖图——manifest 声明 `requires_services`（能力角色名），boot 期闸校验无人提供即拒启；运行期插件不互调，数据经管道 state 传递、能力经服务调用（见 [plugin-protocol.md §2.3](../plugin-protocol.md)）。
-- **为什么有 input / core / output 三角色？** 管道三阶段语义的分工（预处理 / 核心执行 / 后处理）：manifest `pipeline_role` 声明、Python 基类层承载，内核不拆 trait。
-- **生命周期钩子有哪些？** `on_load` / `on_unload` / `on_pipeline_start` / `on_pipeline_end` / `on_error` / `domain_event`（manifest `capabilities.lifecycle_hooks` 声明）。
-- **InProcess 和 Sidecar 谁能选？** 所有插件类型双轨自选（ADR 2026-07-13）：低频/第三方用 sidecar，高频管道步骤基准后晋升 cdylib。
-- **内核为什么不直接集成 LiteLLM？** 一切皆插件——LLM 调用归 `llm_service` 插件（内部经 LiteLLM 做多模型路由），内核零 LLM 依赖。
 
 ---
 
