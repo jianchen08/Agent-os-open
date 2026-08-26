@@ -10,7 +10,6 @@
 
 from __future__ import annotations
 
-import asyncio
 import base64
 import json
 import logging
@@ -31,17 +30,51 @@ from _message_normalizer import (  # noqa: E402
     _is_valid_tool_call_id,
     normalize_messages_for_provider,
 )
-from _stream_repeat_monitor import StreamRepetitionMonitor  # noqa: E402
-from adapter import (  # noqa: E402
-    LiteLLMAdapter,
-    LLMAdapter,
-    LLMResponse,
-)
+
+# LLMResponse/LLMAdapter：响应类型与测试注入适配器协议定义（adapter 模块保留
+# 为类型/响应结构归属地；llm_core 不再直连 LLM API，调用走 llm_service）。
+from adapter import LLMAdapter, LLMResponse  # noqa: E402
 from pipeline.plugin import ICorePlugin, PluginContext  # noqa: E402
 from pipeline.types import StateKeys  # noqa: E402
 from uploads_path import resolve_uploads_url  # noqa: E402
 
 logger = logging.getLogger(__name__)
+
+# ── 能力调用器（LLM 面唯一事实源 = llm_service）────────────────────────
+# llm_core 的 LLM 调用经内核 tool-executor 能力跨进程调 llm.complete_stream
+# （与 approval/hindsight 经 capability 的既有用法同构）。server.py 在 on_load
+# 注入本函数；测试注入伪实现。未注入时调用抛明确错误（接线 bug 早暴露）。
+CapabilityCaller = Callable[[str, dict[str, Any]], Any]
+
+_capability_caller: CapabilityCaller | None = None
+
+
+def set_capability_caller(caller: CapabilityCaller | None) -> None:
+    """注入能力调用句柄（async fn `(method, params) -> Any`）。
+
+    server.py 在 on_load 时调用：
+    ``set_capability_caller(lambda m, p: plugin.get_capability("tool-executor").call(m, p))``
+    LLM 调用（llm.complete_stream）据此经内核 tool-executor 转发到 llm_service。
+
+    Args:
+        caller: 能力调用 async 函数（method 形如 "tool-executor.invoke"）；
+            传 None 清空
+    """
+    global _capability_caller
+    _capability_caller = caller
+
+
+class PartialStreamOutcome:
+    """流中断/取消的部分结果——``_call_llm`` 的半截返回形态。
+
+    与成功路径（``LLMResponse``）区分：携带已组装好的 state_updates 结果字典
+    （半截消息落库 ops + status/ended 标记），execute 直接返回，不再走
+    ``LLMResponse`` 的组装逻辑。错误信息（``llm_error_info``）来自
+    llm_service 返回值（已跨进程传输），不再从异常对象读取。
+    """
+
+    def __init__(self, result: dict[str, Any]) -> None:
+        self.result = result
 
 # ── 思考强度 → 模型参数（思考强度全链路）────────────────────────────
 # 前端 user_input 携带 thinking_strength（off/low/medium/high），内核透传注入
@@ -96,52 +129,15 @@ def resolve_thinking_strength_params(
     return {k: v for k, v in merged.items() if k in _THINKING_STRENGTH_ALLOWED}
 
 
-def _is_retryable_error(exc: Exception) -> bool:
-    """判断异常是否可重试。
-
-    检查异常是否为 LiteLLM 可重试类型（Timeout/ServiceUnavailable/
-    RateLimit/APIConnection），同时兼容 Mock 场景。
-
-    基于异常类名判断，不依赖 litellm 模块。
-
-    Args:
-        exc: 待检查的异常
-
-    Returns:
-        是否可重试
-    """
-    retryable_names = {
-        "Timeout",
-        "ServiceUnavailableError",
-        "RateLimitError",
-        "APIConnectionError",
-    }
-    # 检查异常类名是否匹配（兼容 Mock 场景）
-    exc_type_name = type(exc).__name__
-    if exc_type_name in retryable_names:
-        return True
-
-    # 检查异常链中是否包含可重试异常
-    cause = exc.__cause__
-    while cause:
-        if type(cause).__name__ in retryable_names:
-            return True
-        cause = cause.__cause__
-
-    return False
-
-
 class LLMCore(ICorePlugin):
-    """LLM Core -- LLM Adapter 调用，流式回调。
+    """LLM Core -- 经 llm_service 调用大模型，流式回调。
 
     通过 LLM Adapter 中间层调用大模型，支持多模型 fallback。
     成功时输出 raw_result 和 raw_tool_calls，并将 assistant 回复写入 messages。
     失败时直接抛出异常，由引擎/编排层按错误类型处理：瞬态 sidecar 崩溃由
     invoker with_transparent_recovery 重试一次；非瞬态错误上抛（ADR 2026-08-18）。
-
-    Class Attributes:
-        max_retries: 最大重试次数（透传给 LLM Adapter）
-        retry_delay: 首次重试延迟（秒）（透传给 LLM Adapter）
+    LLM 面唯一事实源 = llm_service（经 tool-executor 能力调用
+    llm.complete_stream，见 ``_call_llm``）。
 
     Attributes:
         _config: 插件配置字典，包含 provider/model/api_base/api_key 等
@@ -150,12 +146,8 @@ class LLMCore(ICorePlugin):
         _api_base: API 端点 URL
         _api_key: API 密钥
         _default_params: 默认调用参数（temperature、max_tokens 等）
-        _adapter: LLM 调用适配器实例
+        _adapter: 测试注入的进程内适配器（None = 走 llm_service 通道）
     """
-
-    max_retries: int = 1  # Router 已有 num_retries + fallback，Engine 层不重复重试
-    retry_delay: float = 5.0
-    overload_retry_delay: float = 60.0
 
     def __init__(
         self,
@@ -173,16 +165,14 @@ class LLMCore(ICorePlugin):
                 - api_base: API 端点 URL
                 - api_key: API 密钥
                 - default_params: 默认调用参数（temperature、max_tokens 等）
-                - max_retries: 最大重试次数（覆盖类属性）
-                - retry_delay: 首次重试延迟秒数（覆盖类属性）
-            adapter: 外部注入的适配器实例（如 KeyPoolAdapter），若未提供则创建 LiteLLMAdapter
+            adapter: 测试注入的进程内适配器实例；None = 生产走 llm_service
+                能力通道（server.py on_load 注入 capability caller）
         """
         self._config = config or {}
         self._provider: str = self._config.get("provider", "openai")
         # model_id（yaml key，如 deepseek-v4-pro-apigo）：路由标识，
-        # 传给 Router/KeyPool 做 deployment 匹配，保证不同 provider 的同名模型隔离。
-        # model_name（yaml 的 model_name，如 deepseek-v4-pro）：发给上游的真实模型名，
-        # 直连模式拼 litellm model 字符串用。
+        # 传给 llm_service 做 deployment 匹配，保证不同 provider 的同名模型隔离。
+        # model_name（yaml 的 model_name，如 deepseek-v4-pro）：发给上游的真实模型名。
         # 两者必须分开：model_name 重名时（官方与 apigo 同底模），靠 model_id 区分路由。
         self._model_id: str = self._config.get("model_id", "")
         self._model: str = self._config.get("model_name", "gpt-4")
@@ -207,36 +197,14 @@ class LLMCore(ICorePlugin):
         # 避免 reasoning model 被人为限 token。本字段是全链路唯一兜底点——
         # 配置层(models.py)与 resolver 均不覆盖空 dict，漏配模型最终落此。
         self._default_params: dict[str, Any] = self._config.get("default_params", {})
-        self._call_timeout: float = float(self._config.get("call_timeout", 300))
-        # 首 token 超时：首 chunk 不来时强制超时的秒数（默认 180s）。
-        # 与 call_timeout（后续 chunk 超时）分离，因首字节卡死是高发场景。
-        # 180s 覆盖 litellm.acompletion 内部建连 + 上游首字节全过程；
-        # adapter._direct_call_with_slot 就地再包一层 _await_with_escape
-        # 兜底，此处 180s 作为该层的默认值，确保 litellm 这一行必然超时退出。
-        self._first_token_timeout: float = float(self._config.get("first_token_timeout", 180))
-        # 流式静默超时：连续 N 秒收不到任何 chunk 即中断死等（默认 600s）。
-        # 与 call_timeout 分离：call_timeout 用于非流式整体超时，此处用于流式
-        # inter-chunk 静默（每个 chunk 到达即重置，活跃推理不误触发）。
-        self._stream_idle_timeout: float = float(self._config.get("stream_idle_timeout", 600))
-        # 允许配置覆盖类属性
-        if "max_retries" in self._config:
-            self.max_retries = self._config["max_retries"]
-        if "retry_delay" in self._config:
-            self.retry_delay = self._config["retry_delay"]
-        if "overload_retry_delay" in self._config:
-            self.overload_retry_delay = self._config["overload_retry_delay"]
 
-        # litellm 内置重试参数（透传给 litellm.acompletion，Router 模式下由 Router 管理）
-        self._num_retries: int = self._config.get("num_retries", 3)
-        self._retry_delay: float = self._config.get("retry_delay", 60.0)
-
-        # 构建适配器
+        # 构建适配器：llm_core 的 LLM 面唯一事实源 = llm_service 的
+        # llm.complete_stream（经 tool-executor 跨进程调用）；adapter 参数仅
+        # 测试注入用（进程内假实现），None = 走 llm_service 通道。
         if adapter is not None:
             self._adapter = adapter
-            self._use_router = hasattr(adapter, "_router")
         else:
-            self._adapter = LiteLLMAdapter()
-            self._use_router = False
+            self._adapter = None
 
     @property
     def name(self) -> str:
@@ -353,19 +321,17 @@ class LLMCore(ICorePlugin):
 
         messages = self._build_messages(ctx.state)
         streaming = ctx.state.get("streaming", True)
-        on_chunk: Callable[[dict[str, Any]], Any] | None = ctx.state.get("on_chunk")
-
-        # 流式模式下包装 on_chunk，注入重复检测
-        if streaming and on_chunk:
-            on_chunk = StreamRepetitionMonitor(on_chunk)
 
         try:
-            from key_pool import set_agent_priority  # noqa: PLC0415
+            response: LLMResponse | PartialStreamOutcome = await self._call_llm(
+                messages, ctx, stream=streaming
+            )
 
-            agent_level = ctx.state.get("agent_level", "L3")
-            set_agent_priority(agent_level)
-
-            response: LLMResponse = await self._call_llm(messages, ctx, stream=streaming, on_chunk=on_chunk)
+            # 流中断/取消（llm.complete_stream 返回 partial）：半截消息
+            # 已组装好落库 ops + status/ended 标记，直接返回（不再走
+            # LLMResponse 成功组装路径）。
+            if isinstance(response, PartialStreamOutcome):
+                return response.result
 
             result_text = response.text
             tool_calls = response.tool_calls
@@ -374,64 +340,6 @@ class LLMCore(ICorePlugin):
             # tool_call 的 arguments JSON 可能不完整。供下游识别截断、
             # 在写入结果中提示模型续写，避免留下半截文件。
             output_truncated = response.finish_reason == "length"
-
-            # 流式重复检测：模型在流式输出中陷入重复循环
-            if response.stream_repetition:
-                logger.warning(
-                    "[%s] 流式输出重复检测触发，丢弃重复内容并添加提醒",
-                    self.name,
-                )
-                history = list(ctx.state.get("messages", []))
-                history.append(
-                    {
-                        "role": "system",
-                        "content": (
-                            "[StreamRepetitionGuard] 检测到流式输出中出现重复内容，已截断。请重新组织输出，避免重复。"
-                        ),
-                    }
-                )
-                return {
-                    StateKeys.RAW_RESULT: None,
-                    StateKeys.RAW_ERROR: None,
-                    StateKeys.RAW_TOOL_CALLS: [],
-                    StateKeys.RAW_THINKING: None,
-                    "messages": history,
-                    "llm_usage": {},
-                    "context_window": self._context_window,
-                }
-
-            # 思考内容过长检测：截断思考，丢弃本次输出，注入提示重新触发
-            if response.thinking_truncated:
-                retry_count = ctx.state.get("thinking_retry_count", 0) + 1
-                max_retries = 3
-                logger.warning(
-                    "[%s] 思考内容过长已截断，丢弃本次输出，retry=%d/%d",
-                    self.name,
-                    retry_count,
-                    max_retries,
-                )
-                history = list(ctx.state.get("messages", []))
-                history.append(
-                    {
-                        "role": "system",
-                        "content": (
-                            "[ThinkingTruncationGuard] "
-                            "上一轮思考内容过长已截断，本次输出已丢弃。"
-                            "请直接给出结论或工具调用，不要冗长思考。"
-                        ),
-                    }
-                )
-                return {
-                    StateKeys.RAW_RESULT: None,
-                    StateKeys.RAW_ERROR: None,
-                    StateKeys.RAW_TOOL_CALLS: [],
-                    StateKeys.RAW_THINKING: None,
-                    "messages": history,
-                    "llm_usage": {},
-                    "context_window": self._context_window,
-                    "thinking_retry_needed": retry_count <= max_retries,
-                    "thinking_retry_count": retry_count,
-                }
 
             llm_usage = None
             if response.usage:
@@ -569,12 +477,9 @@ class LLMCore(ICorePlugin):
                     self.name,
                     _pipeline_id or "?",
                 )
-            # 流已开始后的中途失败：adapter 已把累积内容快照挂到异常对象，
-            # 半截内容走正常 ops 返回值落库（status:"error"），不再上抛。
-            # 流未开始（建连/首 chunk 阶段）或零累积内容时无快照 → 维持 raise。
-            partial = getattr(exc, "llm_partial_snapshot", None)
-            if partial is not None:
-                return self._build_partial_failure_result(partial, exc)
+            # 流中断/取消的半截落库已由 _call_llm 在返回值路径处理
+            # （llm_service partial → PartialStreamOutcome → execute 直接返回）；
+            # 此处仅传播未预期异常（建连失败/零累积内容/通道故障）。
             raise
 
     def _resolve_tool_call_ids(self, tool_calls: list[dict[str, Any]]) -> list[str]:
@@ -612,28 +517,38 @@ class LLMCore(ICorePlugin):
     def _build_partial_failure_result(
         self,
         partial: dict[str, Any],
-        exc: Exception,
+        *,
+        status: str,
+        error_info: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
-        """流式中途失败 → 半截 assistant 消息落库（``status:"error"``）。
+        """流中断/取消 → 半截 assistant 消息落库（``status: error|interrupted``）。
 
         tool_calls 处理（硬约束：tool_calls/tool 配对完整性）：
         - arguments JSON 未闭合（解析失败/空串）→ 从半截消息剥离该 tool_call；
         - 已闭合 → 保留，并同步追加占位 tool 结果消息（工具未执行，
           ``status:"interrupted"``），保证 history 永远配对完整。
-        ``raw_tool_calls`` 恒为空——错误中断的工具调用绝不交由 tool_core 执行；
+        ``raw_tool_calls`` 恒为空——中断的工具调用绝不交由 tool_core 执行；
         ``raw_error`` 为 None——半截返回是正常落库（非错误轮次），错误信息
         经 ``llm_error_info`` 随消息 blob 持久化。
 
+        中断（interrupted）：置 ``ended=true``——引擎既有 ended 边界检查让
+        run 优雅收尾（post 链跳过、exit 体照跑、persist_run_end 正常），
+        dispatch_stop 已把 run 置 suspended 的信号由 persist_run_end 覆写为
+        Completed + 消息带 interrupted 状态（方案 §四.1）。
+
         Args:
-            partial: adapter 挂到异常对象的部分内容快照
+            partial: llm_service 返回的半截内容快照
                 （text / thinking_text / tool_calls / usage）
-            exc: 流消费期间抛出的原始异常
+            status: "error"（流中途异常）/ "interrupted"（调用方停止）
+            error_info: llm_service 随返回交付的 llm_error_info
+                （error_type/error_message；中断路径为 None）
 
         Returns:
             合并到管道状态的部分结果字典
         """
         text = partial.get("text")
         thinking_text = partial.get("thinking_text")
+        is_interrupted = status == "interrupted"
 
         # 未闭合 tool_call 剥离：arguments 必须是完整 JSON 才保留
         kept_calls: list[dict[str, Any]] = []
@@ -650,12 +565,10 @@ class LLMCore(ICorePlugin):
         partial_msg: dict[str, Any] = {
             "role": "assistant",
             "content": text or "",
-            "status": "error",
-            "llm_error_info": {
-                "error_type": type(exc).__name__,
-                "error_message": str(exc),
-            },
+            "status": status,
         }
+        if error_info:
+            partial_msg["llm_error_info"] = error_info
         if thinking_text:
             partial_msg["reasoning_content"] = thinking_text
         if kept_calls:
@@ -698,15 +611,16 @@ class LLMCore(ICorePlugin):
             }
 
         logger.warning(
-            "[%s] 流式中途失败，半截内容落库 status=error text=%d chars "
+            "[%s] 流式中断，半截内容落库 status=%s text=%d chars "
             "thinking=%d chars tool_calls=%d 保留/%d 剥离",
             self.name,
+            status,
             len(text or ""),
             len(thinking_text or ""),
             len(kept_calls),
             stripped,
         )
-        return {
+        result: dict[str, Any] = {
             StateKeys.RAW_RESULT: text,
             StateKeys.RAW_ERROR: None,
             StateKeys.RAW_TOOL_CALLS: [],
@@ -718,6 +632,9 @@ class LLMCore(ICorePlugin):
             "llm_provider": self._provider,
             "llm_api_base": self._api_base,
         }
+        if is_interrupted:
+            result[StateKeys.ENDED] = True
+        return result
 
     # 多模态引用→二进制的解析上限（与 preprocessor max_file_size 默认对齐，20MB）
     _MAX_IMAGE_BYTES = 20 * 1024 * 1024
@@ -932,92 +849,28 @@ class LLMCore(ICorePlugin):
             cleaned_history_len,
         )
 
-    def _get_model_string(self) -> str:
-        """获取 LiteLLM 格式的模型标识字符串。
-
-        LiteLLM 使用 "provider/model" 格式路由到不同的 LLM 提供商。
-
-        优先用 router_factory 的动态映射（读 llm.yaml 的 providers.type 字段），
-        命中自定义 provider（如 apigo → openai）。未命中（router 未初始化的测试
-        场景）回退到内置常见提供商映射，保持兼容。
-
-        Returns:
-            LiteLLM 模型标识字符串
-        """
-        provider_prefix = ""
-        try:
-            from router_factory import get_litellm_prefix  # noqa: PLC0415
-
-            provider_prefix = get_litellm_prefix(self._provider)
-        except Exception:  # noqa: BLE001
-            logger.warning(
-                "[%s] router_factory 前缀映射加载失败，回退内置映射 | provider=%s",
-                self.name,
-                self._provider,
-                exc_info=True,
-            )
-            provider_prefix = ""
-
-        # 动态映射未命中（空或返回原名）→ 回退到内置映射。
-        # 注意：恒等映射 provider（如 openai）动态命中与未命中不可区分，
-        # 回退结果与动态结果相同，仅 debug 留痕避免噪声；
-        # 真正改变结果的回退（zhipu→zai 类）warning；自定义 provider
-        # 回退 provider_name 自身 = 非法 litellm 前缀，显式报配置错误不吞
-        # （对齐 router_factory "绝不回退到 provider_name 本身" 的设计原则）。
-        if not provider_prefix or provider_prefix == self._provider:
-            provider_map = {
-                "openai": "openai",
-                "minimax": "minimax",
-                "anthropic": "anthropic",
-                "azure": "azure",
-                "zhipu_coding": "zai",
-                "zhipu": "zai",
-            }
-            mapped = provider_map.get(self._provider)
-            if mapped is None:
-                raise ValueError(
-                    f"provider '{self._provider}' 的 litellm 前缀映射缺失"
-                    f"（llm.yaml providers.type 未配置或未加载），拒绝用 provider_name"
-                    f" 自身充当前缀（非法前缀，会在调用侧报 unknown provider 掩盖根因），"
-                    f"请检查 LLM 配置注入链路"
-                )
-            if mapped != self._provider:
-                logger.warning(
-                    "[%s] provider 动态映射未命中，回退内置映射表 | provider=%s | prefix=%s",
-                    self.name,
-                    self._provider,
-                    mapped,
-                )
-            else:
-                logger.debug(
-                    "[%s] provider 动态映射未命中（恒等前缀，结果不受回退影响）| provider=%s",
-                    self.name,
-                    self._provider,
-                )
-            provider_prefix = mapped
-        return f"{provider_prefix}/{self._model}"
-
     async def _call_llm(  # noqa: PLR0912
         self,
         messages: list[dict[str, Any]],
         ctx: PluginContext,
         *,
         stream: bool = False,
-        on_chunk: Callable[[dict[str, Any]], Any] | None = None,
-    ) -> LLMResponse:
-        """通过 adapter 调用 LLM。
+    ) -> LLMResponse | PartialStreamOutcome:
+        """经 llm_service（llm.complete_stream）调用 LLM。
 
-        Router 模式：用模型 ID 作为路由别名，不传 api_key/api_base/num_retries。
-        直连模式：用完整的 "provider/model" 字符串，透传所有参数。
+        LLM 面唯一事实源 = llm_service：经内核 tool-executor 能力跨进程调用
+        （调用形态与 approval/hindsight 一致）。返回值是聚合响应 dict（与
+        adapter 的 LLMResponse 同构）；``partial`` 字段非 None（流中断/取消）
+        时组装半截结果（``PartialStreamOutcome``），由 execute 直接落库。
 
         Args:
             messages: 对话消息列表
             ctx: 插件执行上下文，用于读取 tool_schemas
-            stream: 是否使用流式模式
-            on_chunk: 流式回调函数
+            stream: 是否使用流式模式（llm.complete_stream 恒流式，此参数
+                保留调用面不变，透传场景由 llm_service 统一处理）
 
         Returns:
-            统一的 LLMResponse 响应结构
+            成功：LLMResponse；流中断/取消：PartialStreamOutcome
         """
         normalized_messages = normalize_messages_for_provider(
             messages,
@@ -1082,29 +935,19 @@ class LLMCore(ICorePlugin):
                     str(content) or "",
                 )
 
-        if self._use_router:
-            # Router 路径：model 用 yaml key（model_id）做 deployment 匹配，
-            # 保证 model_name 重名时（官方与 apigo 同底模）能路由到正确 provider。
-            # _model_id 为空（旧 config）时回退到 _model，保持兼容。
-            kwargs: dict[str, Any] = {
-                "model": self._model_id or self._model,
-                "messages": normalized_messages,
-                **self._default_params,
-            }
-        else:
-            # 直连路径：用完整 litellm 模型字符串，透传凭证和重试
-            kwargs = {
-                "model": self._get_model_string(),
-                "messages": normalized_messages,
-                **self._default_params,
-            }
-            if self._api_base:
-                kwargs["api_base"] = self._api_base
-            if self._api_key:
-                kwargs["api_key"] = self._api_key
-            if self._num_retries:
-                kwargs["num_retries"] = self._num_retries
-                kwargs["retry_delay"] = self._retry_delay
+        # 服务调用参数：model 用 yaml key（model_id）做 deployment 匹配，
+        # 保证 model_name 重名时（官方与 apigo 同底模）能路由到正确 provider。
+        # _model_id 为空（旧 config）时回退到 _model，保持兼容。
+        kwargs: dict[str, Any] = {
+            "model": self._model_id or self._model,
+            "messages": normalized_messages,
+            **self._default_params,
+        }
+
+        # agent 层级优先级透传：本进程（llm_core）的 contextvar 不跨进程共享，
+        # llm_service 的 KeyPool 优先级排队读的是它自己的 contextvar——经
+        # kwargs 显式接收落位（llm_service complete_stream 侧配套）。
+        kwargs["agent_level"] = ctx.state.get("agent_level", "L3")
 
         # 思考强度 → 模型参数覆盖：state.thinking_strength 非空（low/medium/high）
         # 时覆盖采样参数（与 default_params 合并）；off/缺失不覆盖（现状不变）。
@@ -1133,31 +976,53 @@ class LLMCore(ICorePlugin):
 
         # 调用前记录模型/API 信息
         model_str = self._model
-        api_base = kwargs.get("api_base") or self._api_base or "default"
         logger.info(
-            "[%s] Calling LLM: model=%s, provider=%s, api_base=%s, streaming=%s",
+            "[%s] Calling LLM: model=%s, provider=%s, streaming=%s",
             self.name,
             model_str,
             self._provider,
-            api_base,
             stream,
         )
 
-        try:
-            return await self._adapter.completion(
-                model=kwargs.pop("model"),
-                messages=kwargs.pop("messages"),
-                tools=tool_schemas or None,
-                stream=stream,
-                on_chunk=on_chunk,
-                inter_chunk_timeout=self._stream_idle_timeout,
-                first_chunk_timeout=self._first_token_timeout,
-                **kwargs,
+        caller = _capability_caller
+        if caller is None:
+            raise RuntimeError(
+                "[llm_core] capability caller 未注入：llm_service 调用通道未接线"
+                "（server.py on_load 应调用 set_capability_caller）"
             )
-        except asyncio.TimeoutError:
-            logger.error(
-                "[%s] LLM call timed out (model=%s)",
-                self.name,
-                self._model if self._use_router else self._get_model_string(),
+
+        # run_id 取消轮询锚：会话轮次（state.run_id 由内核注入 initial_state）
+        # 透传给 llm_service 启用取消轮询；任务管道（task_id 非空）不传——
+        # 任务域暂停走任务既有机制（pause_guard/suspend_pipeline），不被
+        # 聊天停止误伤。
+        run_id = ctx.state.get("run_id", "") or ""
+        if run_id and not ctx.state.get("task_id"):
+            kwargs["run_id"] = run_id
+
+        # 调用 llm.complete_stream：流式事件经 llm_service 内部 event-bus
+        # 推送，返回 dict 携带完整聚合响应；partial 非 None 表示流中断/取消。
+        params = {
+            "tool_name": "llm.complete_stream",
+            "args": kwargs,
+        }
+        result = await caller("tool-executor.invoke", params)
+        if not isinstance(result, dict):
+            raise RuntimeError(f"llm.complete_stream 返回形状异常: {type(result).__name__}")
+
+        partial = result.get("partial")
+        if partial is not None:
+            return PartialStreamOutcome(
+                self._build_partial_failure_result(
+                    partial,
+                    status=result.get("status", "error"),
+                    error_info=result.get("llm_error_info"),
+                )
             )
-            raise
+
+        return LLMResponse(
+            text=result.get("text"),
+            tool_calls=result.get("tool_calls") or [],
+            thinking_text=result.get("thinking_text"),
+            usage=result.get("usage") or None,
+            finish_reason=result.get("finish_reason"),
+        )

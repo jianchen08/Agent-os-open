@@ -3,12 +3,15 @@
 
 老代码从 src/plugins/shared/core/llm_core/plugin.py 原封不动复制到本目录，
 本文件只做接口适配：通过 MCP SDK 暴露为工具。
+
+LLM 调用通道（统一路径）：on_load 时向 plugin.py 注入 capability caller
+（``set_capability_caller``），execute 经内核 tool-executor 能力跨进程调用
+llm_service 的 llm.complete_stream；逐字流式由 llm_service 内部 event-bus
+推送（本插件不再维护 chunk 桥接/消费者队列）。
 """
 from __future__ import annotations
 
-import asyncio
 import logging
-from typing import Any
 import os
 import sys
 from functools import lru_cache
@@ -55,13 +58,26 @@ def get_instance() -> LLMCore:
 
 @plugin.on_load
 async def _on_load(params: dict) -> None:
-    """Initialize llm_core plugin."""
+    """Initialize llm_core plugin.
+
+    注入 capability caller：LLM 调用（llm.complete_stream）经内核
+    tool-executor 能力跨进程转发到 llm_service（统一路径唯一调用通道；
+    llm_core 不再直连 LLM API）。随后预热构建 LLMCore 单例。
+    """
+    from plugin import set_capability_caller  # noqa: PLC0415
+
+    set_capability_caller(
+        lambda method, params_: plugin.get_capability("tool-executor").call(method, params_)
+    )
     get_instance()  # 预热：注入配置 shim + 构建 LLMCore（保持原 on_load 构造时机）
 
 
 @plugin.on_unload
 async def _on_unload(params: dict) -> None:
     """Cleanup llm_core plugin."""
+    from plugin import set_capability_caller  # noqa: PLC0415
+
+    set_capability_caller(None)
     get_instance.cache_clear()
 
 
@@ -92,96 +108,7 @@ async def execute(state: dict, config: dict | None = None) -> dict:
     merged_state = create_initial_state(**state)
     ctx = PluginContext(state=merged_state, config=config or {})
 
-    # 流式 chunk 桥接：注入 on_chunk 闭包，把 LLM 逐字输出经 event-bus.emit notify 推到内核。
-    # 闭包是同步的（litellm 流式循环同步调用），内部用 create_task 把 async notify
-    # 安排到当前事件循环（execute 正在 await，循环在跑，task 会执行）。
-    # 逐字流式由此打通：sidecar 边生成边 notify → 内核 event-bus handler → session.emit_stream → 前端。
-    _thread_id = merged_state.get("session_id", "")
-    _pipeline_id = merged_state.get("pipeline_id", "")
-    _message_id = merged_state.get("message_id", "")
-    try:
-        _event_bus = plugin.get_capability("event-bus")
-        _loop = asyncio.get_event_loop()
-    except Exception:
-        _event_bus = None
-        _loop = None
-
-    if _event_bus is not None and _thread_id and _loop is not None:
-        # thinking 状态机：跟踪是否已发 thinking_start（对照 0.1 bridge_events.py）
-        _thinking_active = {"value": False}
-        _seq = {"value": 0}
-
-        # Queue + 独立消费者：对照 0.1 engine_streaming 的 chunk 队列模式。
-        # litellm 流式循环密集同步调 on_chunk，若用 create_task 推送，
-        # task 会被堆积到 LLM 循环结束才一起执行（事件循环没机会切换），
-        # 导致所有 chunk 最后一次性到达（前端「一起渲染」非逐字）。
-        # Queue.put_nowait 是 O(1) 不阻塞，消费者协程 await get() 异步取出推送，
-        # 与 LLM 流式循环并发，实现真正的逐字实时推送。
-        _chunk_queue: asyncio.Queue[tuple[str, str] | None] = asyncio.Queue()
-
-        async def _consumer() -> None:
-            """独立消费者：从队列取 (event, content) 推送到内核。"""
-            while True:
-                item = await _chunk_queue.get()
-                if item is None:
-                    break  # 哨兵，LLM 结束后发 None 终止消费者
-                event, content = item
-                payload: dict[str, Any] = {
-                    "thread_id": _thread_id,
-                    "pipeline_id": _pipeline_id,
-                    "message_id": _message_id,
-                    "sequence": _seq["value"],
-                }
-                if content:
-                    payload["content"] = content
-                _seq["value"] += 1
-                try:
-                    await _event_bus.notify("emit", {"event": event, "payload": payload})
-                except Exception:
-                    pass
-
-        _consumer_task = _loop.create_task(_consumer())
-
-        def _put(event: str, content: str = "") -> None:
-            """同步入队（O(1) 不阻塞，litellm 流式循环安全调用）。"""
-            _chunk_queue.put_nowait((event, content))
-
-        def _on_chunk(chunk_data: dict) -> None:
-            # chunk 契约：system/llm adapter 的 on_chunk 只传 {"type", "content"}。
-            chunk_type = chunk_data.get("type", "text")
-            content = chunk_data.get("content", "")
-
-            if chunk_type == "thinking":
-                if content:
-                    if not _thinking_active["value"]:
-                        _thinking_active["value"] = True
-                        _put("thinking_start")
-                    _put("thinking_chunk", content)
-            elif chunk_type == "thinking_end":
-                if _thinking_active["value"]:
-                    _thinking_active["value"] = False
-                    _put("thinking_end")
-            elif chunk_type == "text":
-                if _thinking_active["value"]:
-                    _thinking_active["value"] = False
-                    _put("thinking_end")
-                if content:
-                    _put("stream_chunk", content)
-
-        merged_state["on_chunk"] = _on_chunk
-        # 注入清理钩子：LLM 结束后发哨兵终止消费者，防止协程泄漏
-        merged_state["_stream_consumer"] = _consumer_task
-        merged_state["_stream_queue"] = _chunk_queue
-
     result = await get_instance().execute(ctx)
-
-    # LLM 结束：发哨兵 None 终止消费者协程，等待其排空剩余 chunk（保证不丢末尾）
-    if "_stream_queue" in merged_state:
-        merged_state["_stream_queue"].put_nowait(None)
-        try:
-            await merged_state["_stream_consumer"]
-        except Exception:
-            pass
 
     # Core 插件（LLMCore）返回 state_updates dict（含 raw_result 等），
     # 需包成 {"state_updates": <dict>} 供内核反序列化为 PluginResult。

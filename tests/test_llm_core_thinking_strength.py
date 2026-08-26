@@ -10,11 +10,10 @@
 
 from __future__ import annotations
 
-import asyncio
 import sys
 from pathlib import Path
 from typing import Any
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -100,14 +99,34 @@ def test_strength_params_partial_model_config_falls_back() -> None:
 
 # ─────────────────── 集成：_call_llm 覆盖 kwargs ───────────────────
 
-def _make_plugin(adapter: Any) -> LLMCore:
+class _CapturingCaller:
+    """伪 capability caller：记录 tool-executor.invoke 的 args，返回正常完成。"""
+
+    def __init__(self) -> None:
+        self.captured_args: dict[str, Any] = {}
+
+    async def __call__(self, method: str, params: dict[str, Any]) -> Any:
+        self.captured_args = dict(params["args"])
+        return {
+            "status": "streamed",
+            "stream_id": "stream_test",
+            "partial": None,
+            "text": "ok",
+            "tool_calls": [],
+            "thinking_text": None,
+            "usage": {},
+            "finish_reason": "stop",
+        }
+
+
+def _make_plugin(caller: Any) -> LLMCore:
+    plugin_mod.set_capability_caller(caller)
     return LLMCore(
         {
             "provider": "openai",
             "model_name": "deepseek-v3",
             "default_params": {"temperature": 0.7, "max_tokens": 4096},
-        },
-        adapter=adapter,
+        }
     )
 
 
@@ -121,11 +140,8 @@ def _make_ctx(state: dict[str, Any]) -> Any:
 async def test_call_llm_applies_thinking_strength_params() -> None:
     """state.thinking_strength=high → 仅覆盖思考参数（reasoning_effort），
     temperature/max_tokens 保持 default_params 不变。"""
-    adapter = MagicMock()
-    adapter.completion = AsyncMock(
-        return_value=MagicMock(choices=[], usage=None, content="ok"),
-    )
-    plugin = _make_plugin(adapter)
+    caller = _CapturingCaller()
+    plugin = _make_plugin(caller)
     ctx = _make_ctx(
         {
             "thinking_strength": "high",
@@ -140,20 +156,18 @@ async def test_call_llm_applies_thinking_strength_params() -> None:
         stream=False,
     )
 
-    kwargs = adapter.completion.call_args.kwargs
-    assert kwargs["reasoning_effort"] == "high"
+    args = caller.captured_args
+    assert args["reasoning_effort"] == "high"
     # 采样参数不随强度覆盖（保持 default_params）
-    assert kwargs["temperature"] == 0.7
-    assert kwargs["max_tokens"] == 4096
+    assert args["temperature"] == 0.7
+    assert args["max_tokens"] == 4096
 
 
 @pytest.mark.asyncio
 async def test_call_llm_applies_model_config_strength_params() -> None:
     """模型级 thinking_strength_params（llm.yaml）优先于内置表；只覆盖思考参数。"""
-    adapter = MagicMock()
-    adapter.completion = AsyncMock(
-        return_value=MagicMock(choices=[], usage=None, content="ok"),
-    )
+    caller = _CapturingCaller()
+    plugin_mod.set_capability_caller(caller)
     plugin = LLMCore(
         {
             "provider": "deepseek",
@@ -164,8 +178,7 @@ async def test_call_llm_applies_model_config_strength_params() -> None:
                 "medium": {"reasoning_effort": "medium"},
                 "high": {"reasoning_effort": "max"},
             },
-        },
-        adapter=adapter,
+        }
     )
     ctx = _make_ctx(
         {
@@ -181,22 +194,19 @@ async def test_call_llm_applies_model_config_strength_params() -> None:
         stream=False,
     )
 
-    kwargs = adapter.completion.call_args.kwargs
+    args = caller.captured_args
     # 模型级配置生效：reasoning_effort=max（非内置 high 的 high）
-    assert kwargs["reasoning_effort"] == "max"
+    assert args["reasoning_effort"] == "max"
     # temperature/max_tokens 不随强度覆盖
-    assert kwargs["temperature"] == 0.7
-    assert kwargs["max_tokens"] == 100000
+    assert args["temperature"] == 0.7
+    assert args["max_tokens"] == 100000
 
 
 @pytest.mark.asyncio
 async def test_call_llm_keeps_defaults_when_strength_missing() -> None:
     """无 thinking_strength → 保持 default_params（现状不变）。"""
-    adapter = MagicMock()
-    adapter.completion = AsyncMock(
-        return_value=MagicMock(choices=[], usage=None, content="ok"),
-    )
-    plugin = _make_plugin(adapter)
+    caller = _CapturingCaller()
+    plugin = _make_plugin(caller)
     ctx = _make_ctx(
         {
             "pipeline_id": "p1",
@@ -210,20 +220,17 @@ async def test_call_llm_keeps_defaults_when_strength_missing() -> None:
         stream=False,
     )
 
-    kwargs = adapter.completion.call_args.kwargs
-    assert kwargs["temperature"] == 0.7
-    assert kwargs["max_tokens"] == 4096
-    assert "reasoning_effort" not in kwargs
+    args = caller.captured_args
+    assert args["temperature"] == 0.7
+    assert args["max_tokens"] == 4096
+    assert "reasoning_effort" not in args
 
 
 @pytest.mark.asyncio
 async def test_call_llm_off_keeps_defaults() -> None:
     """thinking_strength=off → 不覆盖（显式关闭 = 普通模式，保持默认参数）。"""
-    adapter = MagicMock()
-    adapter.completion = AsyncMock(
-        return_value=MagicMock(choices=[], usage=None, content="ok"),
-    )
-    plugin = _make_plugin(adapter)
+    caller = _CapturingCaller()
+    plugin = _make_plugin(caller)
     ctx = _make_ctx(
         {
             "thinking_strength": "off",
@@ -238,6 +245,6 @@ async def test_call_llm_off_keeps_defaults() -> None:
         stream=False,
     )
 
-    kwargs = adapter.completion.call_args.kwargs
-    assert kwargs["temperature"] == 0.7
-    assert "reasoning_effort" not in kwargs
+    args = caller.captured_args
+    assert args["temperature"] == 0.7
+    assert "reasoning_effort" not in args

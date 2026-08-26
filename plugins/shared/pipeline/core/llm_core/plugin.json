@@ -17,6 +17,9 @@
   },
   "permissions": {},
   "priority": 50,
+  "granted_capabilities": [
+    "tool-executor"
+  ],
   "config_files": [
     {
       "id": "llm",

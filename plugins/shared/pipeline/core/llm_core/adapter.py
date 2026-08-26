@@ -489,24 +489,9 @@ class _BaseLiteLLMAdapter:
         state.last_chunk_monotonic = state.stream_start
         try:
             await self._consume_stream(response, first_chunk, state, model, inter_chunk_timeout)
-        except Exception as exc:
-            # 流已开始（首 chunk 已到达）后的中途失败：把已累积内容快照挂到异常
-            # 对象上，由上层（llm_core plugin）组装部分消息落库。不改异常类型
-            # （错误分类器按类型判瞬态/永久，保持兼容）；快照随异常实例走，无
-            # 共享可变状态。零累积内容时不挂——上层凭属性缺失维持原 raise 路径。
-            if state.result_parts or state.thinking_parts or state.tool_calls_map:
-                snapshot = {
-                    "text": "".join(state.result_parts) if state.result_parts else None,
-                    "thinking_text": (
-                        "".join(state.thinking_parts) if state.thinking_parts else None
-                    ),
-                    "tool_calls": self._normalize_tool_calls(state.tool_calls_map),
-                    "usage": state.stream_usage,
-                }
-                # 极少数异常实例（如某些 C 扩展异常）不允许 setattr，快照是尽力
-                # 附加的诊断信息，挂不上不影响原始异常透传。
-                with contextlib.suppress(AttributeError):
-                    exc.llm_partial_snapshot = snapshot  # type: ignore[attr-defined]
+        except Exception:
+            # 半截内容落库已上移到 llm_service（complete_stream 返回 partial
+            # 快照，跨进程经返回值交付）；异常在此不再附加快照，原样透传。
             raise
         return self._build_streaming_response(state)
 
