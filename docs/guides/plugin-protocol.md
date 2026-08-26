@@ -2,7 +2,7 @@
 
 > 面向**想给灵汐 AgentOS 0.2 开发一个新插件**的开发者。读完本文，你应能在 1 小时内发布第一个可被内核加载的插件。
 >
-> 本文是 0.2 架构（Rust 内核 + Python sidecar + YAML 配置）的统一插件协议说明。历史方案记录见 [working/_archive_0.2_migration/0.2_rust_plugin_solution.md](working/_archive_0.2_migration/0.2_rust_plugin_solution.md)，整体架构见 [ARCHITECTURE.md](ARCHITECTURE.md)，分篇上手教程见 [开发指南索引](guides/README.md)。
+> 本文是 0.2 架构（Rust 内核 + Python sidecar + YAML 配置）的统一插件协议说明。历史方案记录见 [working/_archive_0.2_migration/0.2_rust_plugin_solution.md](working/_archive_0.2_migration/0.2_rust_plugin_solution.md)，整体架构见 [ARCHITECTURE.md](ARCHITECTURE.md)，分篇上手教程见 [开发指南索引](README.md)。
 
 ---
 
@@ -108,9 +108,9 @@ manifest 字段对应内核 `PluginManifest`（见 `kernel/crates/core/src/trait
 - `tools[]`：必填 `name`；建议带全 `input_schema` + `output_schema` + `render`（工具契约 fail-closed：tool_core 执行后按 `output_schema` 校验结果，前端按 `render` 意图路由渲染）。
 - `tools[].category` 取值见 `ToolCategory`（`file` / `file_system` / `search` / `web` / `memory` / `task` / `system` / `execution` / `analysis` / `evaluation` / `agent` / `monitoring`），省略时默认 `system`。
 - `services[]`：内部服务方法元数据，经 capability 调用（调用方声明 `requires_services`），**不进 LLM 面**。
-- `route_signals`：历史声明位（`next_llm` / `next_tool` / `end` / `wait`），加载时仍会校验并注册进能力注册表，但**执行面零消费**——0.2 路由由管道 YAML 的 G10 DSL（`when`/`then`/`set`）驱动，见 [guides/pipeline-configuration.md](guides/pipeline-configuration.md)。新插件无需声明。
+- `route_signals`：历史声明位（`next_llm` / `next_tool` / `end` / `wait`），加载时仍会校验并注册进能力注册表，但**执行面零消费**——0.2 路由由管道 YAML 的 G10 DSL（`when`/`then`/`set`）驱动，见 [pipeline-configuration.md](pipeline-configuration.md)。新插件无需声明。
 - `lifecycle_hooks` 取值（`LifecycleHook`）：`on_load` / `on_unload` / `on_pipeline_start` / `on_pipeline_end` / `on_error` / `domain_event`。
-- 发流式事件的插件必须声明 `capabilities.streaming`（`{events, part_types, persist}`），未声明网关拒绝（fail-closed），见 [streaming-protocol.md](guides/streaming-protocol.md)。
+- 发流式事件的插件必须声明 `capabilities.streaming`（`{events, part_types, persist}`），未声明网关拒绝（fail-closed），见 [streaming-protocol.md](streaming-protocol.md)。
 
 ### 2.3 requires_services（插件间依赖）
 
@@ -122,7 +122,7 @@ manifest 字段对应内核 `PluginManifest`（见 `kernel/crates/core/src/trait
 
 - 条目是**能力角色名**（`ns` 或 `ns.method`），注册表映射到提供该角色的插件，**不点名插件 id**；boot 期依赖闸校验，无人提供该角色则内核启动被拒（ADR 2026-08-18 插件依赖包）。
 - 声明了依赖的插件握手后经 `CapabilityHandle` 反向调用提供方（详见 SDK `capability.py` 与 `plugins/shared/system/approval/` 实现）。
-- 历史文档中的 `dependencies` / `capabilities_required` **不是 manifest 字段**（`deny_unknown_fields` 下声明即加载失败）：Python 依赖写在插件 `pyproject.toml`（uv venv 单轨，见 [guides/plugin-sidecar-python.md](guides/plugin-sidecar-python.md)），插件间耦合只走本字段。
+- 历史文档中的 `dependencies` / `capabilities_required` **不是 manifest 字段**（`deny_unknown_fields` 下声明即加载失败）：Python 依赖写在插件 `pyproject.toml`（uv venv 单轨，见 [plugin-sidecar-python.md](plugin-sidecar-python.md)），插件间耦合只走本字段。
 
 ### 2.4 error_policy（已收敛，不再声明）
 
@@ -144,104 +144,31 @@ manifest 字段对应内核 `PluginManifest`（见 `kernel/crates/core/src/trait
 
 ### 2.6 接入外部 MCP 服务
 
-当你想直接复用一个**已存在的第三方 MCP 服务**（如 Playwright、smithery、MCP Registry），而不是自己写 `server.py`，约定 `language: "external"` + `entry: "mcp:external"` + `host_type: "sidecar"`，用 `mcp` 描述如何连接它，并把它的工具纳入能力注册：
+复用**已存在的第三方 MCP 服务**（Playwright、smithery、MCP Registry 等）而不写 `server.py`：约定 `language: "external"` + `entry: "mcp:external"` + `host_type: "sidecar"`，用 `mcp` 声明连接——`transport: "streamable_http"` 用 `endpoint.url` / `headers` / `auth`（HTTP 直连，不 spawn）；`transport: "stdio"` 用 `endpoint.command` / `args` / `env`（spawn 第三方命令）。
 
-```jsonc
-// HTTP 远程（不 spawn 任何进程，走 HTTP 客户端直连）
-{
-  "mcp": {
-    "transport": "streamable_http",
-    "endpoint": {
-      "url": "https://registry.modelcontextprotocol.io",
-      "headers": { "Accept": "application/json" },
-      "auth": { "type": "api_key", "header_name": "Authorization", "value": "${MCP_REGISTRY_API_KEY}" }
-    }
-  }
-}
-
-// 本地第三方命令（spawn 该命令，不经插件 venv）
-{
-  "mcp": {
-    "transport": "stdio",
-    "endpoint": {
-      "command": "npx",
-      "args": ["@anthropic-ai/mcp-playwright", "--headless"],
-      "env": {}
-    }
-  }
-}
-```
-
-- `transport: "streamable_http"` 用 `endpoint.url` / `headers` / `auth`；`transport: "stdio"` 用 `endpoint.command` / `args` / `env`。
-- `auth.value` 与 `env` 值支持 `${VAR}` 占位（构造时从环境变量替换，缺失早暴露）。
-- `request_timeout_secs`：长等待业务（如等用户审批）必须显式声明，否则内核 MCP client 默认 300s 先行掐断。
+- `auth.value` 与 `env` 值支持 `${VAR}` 占位（构造时解析，缺失早暴露）。
+- `request_timeout_secs`：长等待业务（如等审批）必须显式声明，否则内核 MCP client 默认 300s 先行掐断。
 - external MCP 工具**缺 `input_schema` 拒注册**（fail-closed）。
 
-完整示例见 `plugins/shared/tools/external_mcp/`（mcp_registry = HTTP 远程，omnisearch = 本地命令）；上手见 [guides/plugin-external-mcp.md](guides/plugin-external-mcp.md)。
+完整 manifest 示例与上手步骤见 [plugin-external-mcp.md](plugin-external-mcp.md)；真实插件在 `plugins/shared/tools/external_mcp/`。
 
 ---
 
 ## 3. 插件类型分类
 
-`plugin_type` 决定插件在系统中的角色：
-
-| 类型 | 职责 | 典型位置 |
-|------|------|----------|
-| `pipeline` | 管道处理单元。配合 `pipeline_role` 指定阶段：**input**（预处理：校验/注入/权限）、**core**（核心逻辑：LLM 调用/工具执行）、**output**（后处理：格式化/出口裁决/统计） | `plugins/shared/pipeline/{input,core,output}/` |
-| `tool` | 提供 MCP 工具给 LLM 调用 | `plugins/shared/tools/` |
-| `system` | 内核级服务（记忆/审批/评估/连接器/通道等） | `plugins/shared/system/` |
-| `composite` | 组合插件：由 YAML 配置编排步骤，引擎解释执行（`entry` 可空） | — |
-
-### 各类型职责详解
-
-**pipeline（管道插件）** —— AI Agent 处理流程的可插拔处理单元：
-
-```
-输入路由 → Input 插件链 → Core 插件 → Output 插件链 → 输出路由仲裁
-```
-
-插件间通过管道 `state` 字典通信，**不直接互调**。返回 `PluginResult`（`state_updates` Patch；`route_signal` 为遗留字段，执行链不消费——路由由管道 G10 DSL 驱动）。优先级 `priority` 决定同一阶段内的执行顺序。
-
-**tool（工具插件）** —— 暴露一组 MCP 工具，LLM 在生成 tool_call 时按 `capabilities.tools[].name` + `description` 选择调用。
-
-**system（系统插件）** —— 内核级横向服务，如 `memory_service` / `approval_service` / `connectors_service` / `tasks_service`。它们通常既提供工具，也监听生命周期事件（审批经 human-interaction 工具调用阻塞等待用户响应）。
-
-**composite（组合插件）** —— 把多个已存在的步骤用 YAML 编排成一个新插件，无需写代码。适合"把 A 工具 + B 校验 + C 格式化"打包成原子能力。
+`plugin_type`（`pipeline` / `tool` / `system` / `composite`）的职责、三角色分工与目录位置见 [plugin-development.md](plugin-development.md) §1。契约语义补充：插件间通过管道 `state` 通信、**不直接互调**；返回 `PluginResult`（`state_updates` Patch；`route_signal` 为遗留字段，执行链不消费——路由由管道 G10 DSL 驱动）；`priority` 决定同一阶段内的执行顺序。
 
 ---
 
 ## 4. host_type：sidecar vs in-process
 
-**ADR ⑧**：所有插件类型都支持两种执行路径，开发者按性能需求自选，**不因插件类型被限制**。
-
-| host_type | 模型 | 适用场景 |
-|-----------|------|----------|
-| `sidecar` | 独立进程，通过 MCP 协议（JSON-RPC over stdio）与内核通信 | 默认。低频插件、第三方插件、Python 实现。进程隔离，崩溃不影响内核。 |
-| `in_process` | Rust 原生进程内调用，零 IPC 开销 | 高频热路径、性能敏感。需要用 Rust 实现并编译进内核。 |
-
-> 内置插件以 `sidecar` 为主；`in_process`（Rust cdylib）用于从边车轨基准晋升的高频管道步骤（如 `pipeline_tool_core` / `pipeline_sensitive_checker` / `pipeline_spill_guard`）。晋升路径与开发方式见 [guides/plugin-native-rust.md](guides/plugin-native-rust.md)。
+所有插件类型双轨自选（ADR ⑧，不因插件类型受限）：`sidecar`（独立进程，MCP over stdio，默认——进程隔离，崩溃不影响内核）/ `in_process`（Rust cdylib 进程内零 IPC——高频热路径晋升轨）。选型依据与晋升路径见 [plugin-development.md](plugin-development.md) §2 与 [plugin-native-rust.md](plugin-native-rust.md)。
 
 ---
 
 ## 5. 双插件根约定
 
-内核扫描**两个根目录**发现插件：
-
-| 根 | 路径 | 性质 |
-|----|------|------|
-| **内置根**（只读） | 仓库内 `plugins/shared/` | 随发行版分发，只读。结构是二级嵌套：`tools/simple/plugin.json`。 |
-| **用户根**（可写） | 环境变量 `AGENTOS_USER_PLUGINS_DIR`，或 OS 标准目录（如 `%APPDATA%/agentos/plugins`、`~/.local/share/agentos/plugins`） | 第三方 / 自研插件落地处，可写。 |
-
-**同 ID 覆盖语义**：用户根与内置根出现同 `id` 时，**用户根优先**（覆盖内置）。这让你能不修改仓库就替换/魔改内置插件。
-
-**发现算法**（见 `kernel/crates/api/src/bin/agentos-kernel.rs::discover_plugin_roots` + `plugin-loader/src/loader.rs::scan_root`）：
-
-1. 递归遍历根目录，收集所有直接包含 `plugin.json`（或 `plugin.yaml`）的目录；
-2. 取这些目录的**父目录**作为扫描根（因为 `scan_root` 只看一级子目录）；
-3. 解析每个 manifest、校验 schema、注册能力；
-4. 同 ID 去重：用户根覆盖内置根。
-
-> 子目录（不含 manifest）不会被当作独立插件——它们只是父插件 import 的普通 Python 模块。详见[附录 B](#附录-b哪些目录不需要-manifest)。
+内置根 `plugins/shared/`（只读）+ 用户根（环境变量 `AGENTOS_USER_PLUGINS_DIR` 或 OS 标准目录，可写）；**同 ID 时用户根覆盖内置根**（不修改仓库即可替换/魔改内置插件）。发现算法与"哪些目录不需要 manifest"见 [plugin-development.md](plugin-development.md) §3 与[附录 B](#附录-b哪些目录不需要-manifest)。
 
 ---
 
@@ -558,36 +485,10 @@ if __name__ == "__main__":
 
 ## 10. 调试与常见问题
 
-### Q: 启动后日志没出现我的插件？
+排障对照表见 [troubleshooting.md](troubleshooting.md)。协议侧两条高频问题：
 
-检查：
-
-1. 目录下确实有 `plugin.json`（文件名拼写、扩展名）。
-2. `id` / `name` / `version` / `plugin_type` / `host_type` / `entry` / `language` 都非空（必填校验）。
-3. 目录在双根之一下（内置根 `plugins/shared/` 或 `AGENTOS_USER_PLUGINS_DIR`）。
-4. manifest JSON 合法（`python -c "import json;json.load(open('plugin.json'))"`）。
-
-### Q: sidecar 启动后立即崩溃？
-
-- 确认 `entry` 命令在插件目录的 working dir 下能跑通（内核以插件目录为 CWD 启动 sidecar）。
-- 确认 SDK 已安装（`pip install -e plugins/sdk`）。
-- 手动 `cd <插件目录> && python3 server.py` 跑一下，看报错。
-- 单个 sidecar 崩溃会被隔离，不影响内核和其他插件（ADR 崩溃隔离）。
-
-### Q: 工具没被 LLM 调用？
-
-- `capabilities.tools[].name` 与 server.py 注册的 name 完全一致（含大小写）。
-- `description` 写清楚用途——LLM 据此判断是否调用。
-- `input_schema` 越准，调用成功率越高。
-
-### Q: 配置注入没生效？
-
-- `config_refs` 里的节名要和 `config/` 下 YAML 文件名一致（不含扩展名）。
-- 留空或省略会注入全量配置（向后兼容），先确认全量是否含你期望的节。
-
-### Q: 用户根怎么覆盖内置插件？
-
-在用户根建一个**同 `id`** 的插件目录。内核发现时用户根优先，内置的被覆盖。适合魔改内置插件而不动仓库。
+- **工具注册了但 LLM 不调用**：`capabilities.tools[].name` 与 server.py 注册名完全一致（含大小写）；`description` 写清用途（LLM 据此选择）；`input_schema` 越准成功率越高。另见三层可见性过滤（troubleshooting 首条）。
+- **`config_refs` 配置注入没生效**：节名须与 `config/` 下 YAML 文件名一致（不含扩展名）；省略/留空 = 注入全量配置。
 
 ---
 
@@ -657,4 +558,4 @@ if __name__ == "__main__":
 
 ---
 
-*分篇上手教程见 [开发指南索引](guides/README.md)（sidecar / native / 外部 MCP / 主题 / Agent 配置 / 管道配置 / 排障）——0.2 统一以本文 `plugin.json` 协议为准。*
+*分篇上手教程见 [开发指南索引](README.md)（sidecar / native / 外部 MCP / 主题 / Agent 配置 / 管道配置 / 排障）——0.2 统一以本文 `plugin.json` 协议为准。*
