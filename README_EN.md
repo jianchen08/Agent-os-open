@@ -4,8 +4,8 @@
 
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
 [![CI](https://github.com/jianchen08/Agent-os-open/actions/workflows/ci.yml/badge.svg)](https://github.com/jianchen08/Agent-os-open/actions/workflows/ci.yml)
+[![Rust](https://img.shields.io/badge/Rust-kernel-orange.svg)](https://www.rust-lang.org)
 [![Python](https://img.shields.io/badge/python-3.11%2B-blue.svg)](https://www.python.org)
-[![FastAPI](https://img.shields.io/badge/FastAPI-0.110%2B-009688.svg)](https://fastapi.tiangolo.com)
 [![React](https://img.shields.io/badge/React-19-61dafb.svg)](https://react.dev)
 [![MCP](https://img.shields.io/badge/MCP-Compatible-purple.svg)](https://modelcontextprotocol.io)
 [![Gitee Mirror](https://img.shields.io/badge/Gitee-Mirror-red.svg)](https://gitee.com/jc27/Agent-os-open)
@@ -31,28 +31,30 @@
 
 - 🔧 **Highly Configurable** — Agents are YAML data + loaders, not hardcoded classes. Dynamic prompt loading supports cache-hit-friendly patterns: volatile content (timestamps, session rules) is injected as a separate trailing message so the leading system prompt stays byte-stable and preserves prompt-cache hits. Injected fragments can be arranged by usage frequency at config time to maximize cache-hit rate. Change a prompt without restarting (`hot_swap` supports hot replacement, with rollback on failure).
 - 🔄 **Self-Evolving Closed Loop** — Task execution → review (deep LLM review of finished pipelines, sedimenting experience reports into the knowledge base) → modify/add configuration and add plugins to enhance the system, forming a closed loop that gets smarter with use. A companion memory cleanup mechanism decides retention along three dimensions (review-status × age × capacity), ensuring reviews are sedimented before raw memories are reclaimed.
-- 🔌 **Plugin-based Pipeline Architecture** — The engine just holds a shared `state` and runs a `while not ended` loop; **you can freely write or configure plugins to control every state during Agent execution** (plugins are interceptors, `state` is the bus): a plugin can end the pipeline, suspend it, decide whether the next round calls the LLM or a tool, or read/write any state field — all without touching engine code. Combined with 4 routing signals (`next_llm` / `next_tool` / `end` / `wait`) and `ABORT` / `SKIP` / `RETRY` / `FALLBACK` error strategies, every decision is observable, intervenable, and rollback-able. See [Key Highlight 14](#14-plugin-based-pipeline-architecture-every-state-of-agent-execution-is-yours-to-control) below.
+- 🔌 **Plugin-based Pipeline Architecture** — The kernel engine just interprets a pipeline YAML, holding a shared `state` and scheduling loop bodies; **you can freely write plugins to control every state during Agent execution** (plugins are interceptors, `state` is the bus): a plugin can end the pipeline, suspend it, decide whether the next round calls the LLM or a tool, or read/write any state field — all without touching kernel code. Combined with 4 routing signals (`next_llm` / `next_tool` / `end` / `wait`) and the dual hosting tracks (Python sidecar / Rust native cdylib), every decision is observable, intervenable, and rollback-able. See [Key Highlight 14](#14-plugin-based-pipeline-architecture-every-state-of-agent-execution-is-yours-to-control) below.
 - 🧠 **Multi-layer Memory** — Episodic (EPISODE, compressed memory of conversations) + Semantic (SEMANTIC, sedimenting user preferences / project decisions / external knowledge base imports, etc.), retrieved on demand and injected as needed. Currently shipped: keyword retrieval, tag retrieval, and full injection. Richer retrieval modes (e.g. vector semantic retrieval) and injection modes (on-demand / summary injection) are planned for a later release — see [ROADMAP.md](ROADMAP.md).
 
 ### Tech Stack
 
 | Layer | Technology |
 |-------|-----------|
-| Backend | Python 3.11 / FastAPI 0.110+ / aiohttp / Redis / Pydantic / LiteLLM |
+| Kernel | Rust (axum / tokio / SQLite), single-process micro-kernel on :9100 |
+| Plugins | Python 3.11 sidecars (MCP over stdio, isolated uv venvs) + Rust cdylib native track |
 | Frontend | React 19 / TypeScript / Vite / Zustand / Antd / @lobehub/ui / Tailwind CSS |
-| AI | OpenAI / Anthropic / DeepSeek / GLM / Ollama / multi-model routing |
+| AI | OpenAI / Anthropic / DeepSeek / GLM / Ollama / multi-model routing (LiteLLM) |
 | Protocol | MCP (Model Context Protocol) |
-| Deployment | Docker / Docker Compose |
+| Deployment | Docker / Docker Compose (on-demand Redis container) |
 
-> **Dependencies**: `pyproject.toml` declares 24 core runtime dependencies (including fastapi, redis, PyJWT, bcrypt, cryptography, httpx, sqlalchemy, etc.), mirrored in `requirements.txt` for the launch scripts. Run `pip install -e .` or `pip install -r requirements.txt` directly — no manual supplement needed.
+> **Build**: kernel via `cd kernel && cargo build --release --bin agentos-kernel`; every Python plugin directory carries its own `pyproject.toml` — create its isolated venv with `uv sync --project <plugin-dir>`; frontend via `npm install`. The `start_web_02.*` launch scripts do all of this in one step.
 
 ### 📊 Project Scale
 
-- **Python code**: ~308K lines (`src/` ~166K + `tests/` ~142K)
-- **Frontend code**: ~96K lines (`frontend/src/`)
-- **Built-in tools**: 41 (`src/tools/builtin/` with `tool.py`)
-- **Live channels**: 2 (Web / CLI)
-- **Modules**: 35 (subdirectories under `src/`)
+- **Rust kernel**: ~81K lines (`kernel/`, ~18K of which are Rust tests)
+- **Python plugins**: ~60K lines (`plugins/`, 110 `plugin.json` manifests)
+- **Frontend code**: ~45K lines (`frontend/src/`)
+- **Python tests**: ~54K lines (`tests/` + in-plugin tests)
+- **Tool plugins**: 26 (plus zero-code MCP external tool integration)
+- **Client**: Web frontend (talking straight to the kernel)
 
 ---
 
@@ -72,7 +74,7 @@
 Almost every behavior can be customized via YAML/config files without changing code. Agent identity, prompts, toolset, model selection, hard/soft constraints, I/O schemas — all configurable.
 
 ### 2. Refined Tool Engineering
-All tools follow a unified interface contract (`name` / `when_to_use` / `when_not_to_use` / `input_schema` / `examples` / `caveats`), supporting ABORT / SKIP / FALLBACK / RETRY error strategies. **Currently 41 built-in tools** (including MCP external tool integration).
+All tools follow a unified contract (`input_schema` + `output_schema` + `render` intent): the kernel validates results against `output_schema` (fail-closed), the frontend renders result cards by `render`, and the LLM-visible toolset is precisely controlled by each Agent's `tool_ids` whitelist. **26 built-in tool plugins**, plus zero-code integration of any MCP external tools.
 
 ### 3. Intelligent Conversation — Not Just Chatting, but "Thinking Dialog"
 Streaming response + real-time thinking display + proactive clarification + approval interaction.
@@ -80,7 +82,7 @@ Streaming response + real-time thinking display + proactive clarification + appr
 > **Planned (0.2.0+)**: Voting panels, media timelines, thinking-mode toggle and other interaction enhancements are not yet implemented in this version. See [ROADMAP.md](ROADMAP.md).
 
 ### 4. Frontend Excellence — Beautiful, Usable, Customizable
-8 themes (5 built-in presets: Dark / Light / Deep Space Command Center / Ocean Breeze / High Contrast; plus 3 dynamic themes: Forest Mist / Lavender Field / Sunset Glow, discovered via a stateless backend manifest at `frontend/public/themes/*.json`), full configuration visualization, YAML-to-form auto-mapping.
+7 compile-time preset themes (Dark / Light / Deep Space Command Center / Ocean Breeze / Pixel Candy / Moe Soft / High Contrast) + 3 dynamic JSON themes + plugin-delivered themes/skins (`contributes.themes`), full configuration visualization, YAML-to-form auto-mapping.
 
 ### 5. Container Tasks — Engine for Complex Long-term Projects
 For multi-stage tasks with deliverables ("develop an App", "write a novel", "make a game"), container tasks provide a complete solution planning → phase execution → human review → final acceptance loop.
@@ -97,37 +99,39 @@ Human approval (choice / conversation dual modes) + pipeline pause/resume + feed
 ### 9. Mandatory Evaluation System — Hard Constraint on Task Quality
 Task submission must include acceptance criteria (evaluation metrics); after pipeline exit, a mandatory gate transitions the task into evaluation and reviews it against the metrics. Only when all metrics pass is the task marked complete; exhausted retries mean failure. Even if the Agent doesn't actively evaluate, the system forces a re-run — quality is never skipped.
 
-### 10. 40+ Built-in Tools — Out-of-the-box Toolbox
-Files, Shell, code search, browser, network, memory, media generation, IDE integration (41 actual tool.py implementations), including MCP external tool integration.
+### 10. 26 Tool Plugins — Out-of-the-box Toolbox
+Files, Shell, code search, browser, network, memory, media generation, IDE integration (26 tool plugins), with zero-code integration of any third-party MCP service.
 
-### 11. Dual-channel Access — One Kernel, Everywhere Reachable
-Web and CLI share the same kernel; full MCP protocol support to integrate any MCP service.
+### 11. Multi-client Access — One Kernel, Everywhere Reachable
+The Web frontend talks straight to the Rust kernel (HTTP / WebSocket); plugins communicate with the kernel over MCP, and third-party MCP services plug in with zero code.
 
 ### 12. Skill Integration — Extend Domain Capabilities on Demand
 Loadable, reusable skill packages that can be injected into Agents on demand to gain new domain capabilities (document processing, PDF generation, etc.) without writing code.
 
-### 13. Hot Swap — Evolve Without Downtime
-`hot_swap` (snapshot → replace → health-check → rollback-on-failure) supports runtime hot replacement of plugins/Agents, while `hot_reload` watches config files and auto-reloads on change — debug and iterate without restarting the service.
+### 13. Hot Configuration — Evolve Without Downtime
+Agent configs (YAML) hot-apply via mtime caching — change prompts or tool whitelists without restarting; plugin directories are hot-discovered (5-8s) and re-registered instantly via the plugin settings page toggle; Python plugin processes are idle-collected, hot-reloaded on code change, and auto-revived after crashes. Pipeline configs are compiled at kernel startup (restart the kernel after editing).
 
 ### 14. Plugin-based Pipeline Architecture — Every State of Agent Execution Is Yours to Control
 
-The engine does only one thing: hold a shared `state` dict and run a `while not state["ended"]` loop. **"What each round does" is entirely up to plugins** — wherever you want to intervene in Agent execution, whatever you want to rewrite, skip, or terminate, you implement it as a plugin. No engine code changes needed.
+The kernel engine does only one thing: interpret `config/pipelines/autonomous.yaml`, holding a shared `state` dict and scheduling loop bodies. **"What each round does" is entirely up to plugins** — wherever you want to intervene in Agent execution, whatever you want to rewrite, skip, or terminate, you implement it as a plugin. No kernel code changes needed.
 
 ```
-User message → Channel layer → Pipeline engine ┌─ Input plugins (preprocess, security, context…)
-                                               ├─ Core plugin (LLM call / tool execution)
-                                               └─ Output plugins (result shaping, routing…)
-                                                   ↑ all plugins read/write the same shared state ↑
+User message → Web frontend → Rust kernel engine ┌─ init body (workspace/env resolution)
+                                                  ├─ main body (while loop)
+                                                  │    ├─ prepare: Input plugin chain (context build / tool surface / prompts / security guards…)
+                                                  │    ├─ core: LLM call ↔ tool execution (switched by routing)
+                                                  │    └─ post: Output plugin chain (stats / evaluation gate / stuck detection…) + routing arbitration
+                                                  └─ exit body (workspace finalize, runs even on error)
+                                                      ↑ all plugins read/write the same shared state ↑
 ```
 
-**Four ways a plugin controls state**:
+**How a plugin controls state**:
 
 | Control | What the plugin does | Effect |
 |---------|----------------------|--------|
-| Read/write fields | Returns `state_updates`, merged into `state` on the fly | Downstream plugins, routing table, and Core all see it |
-| End / suspend | Sets `state["ended"]=True`, or a field that makes routing pick `wait` | Ends the pipeline now, or suspends until an external event (e.g. approval) then `wake()` resumes |
-| Routing table picks plugins by state | Input route table re-evaluates `condition` every round | Different rounds of the same pipeline run different plugin sets — no hardcoded branching |
-| Output signal picks next round | Output plugins emit a routing signal | Next round runs LLM, a tool, ends, or suspends |
+| Read/write fields | Returns `state_updates`, merged into `state` on the fly | Downstream plugins, the routing DSL, and Core all see it |
+| End / suspend | Output plugins emit `end` / `wait` routing signals | Ends the pipeline now, or suspends until an external event (e.g. approval) then resumes |
+| Routing DSL picks next round | Pipeline `next:` transfers by `when` condition with `set:` writes | Dynamic `llm_call` ↔ `tool_execute` switching, branching across steps/loop bodies |
 
 **The 4 routing signals** clearly define "what the next round does":
 
@@ -138,9 +142,9 @@ User message → Channel layer → Pipeline engine ┌─ Input plugins (preproc
 | `end` | End the pipeline |
 | `wait` | Suspend, wait for external input/approval |
 
-**4 error strategies** let you declare what a plugin does on failure: `ABORT` (stop), `SKIP` (skip and continue), `RETRY` (retry), `FALLBACK` (use a fallback result) — security checks use `ABORT` (uncertain → must not continue), context building uses `FALLBACK` (degraded still works), stats plugins use `SKIP` (failure must not break the round).
+**Plugins-as-declarations**: a plugin = a directory + a `plugin.json` manifest (declaring tools / services / routing signals / lifecycle hooks / HTTP endpoints), uniformly discovered, validated, and registered by the kernel. Choose your hosting track freely — Python sidecar (separate process, MCP over stdio, uv venv isolation) or Rust native (cdylib, zero-IPC in-process); third-party MCP services plug in with zero code. Plugin errors are handled uniformly by the engine: crashed sidecars auto-restart with one retry; failed tool results are fed back to the LLM for self-correction.
 
-**Config-driven onboarding**: write a Python class implementing `IInputPlugin` / `ICorePlugin` / `IOutputPlugin`, declare it via `name:` or `class:` in YAML, and the engine auto-discovers and instantiates it at startup. Adding a plugin touches no engine code; existing plugins support hot swap and rollback.
+Dev docs: [docs/plugin-protocol.md](docs/plugin-protocol.md) (protocol authority) · [docs/guides/README.md](docs/guides/README.md) (step-by-step guides).
 
 ---
 
@@ -256,6 +260,8 @@ npm run dev    # frontend dev server at http://localhost:6390 (proxies to kernel
 |----------|-------------|
 | [README.md](README.md) | Chinese README |
 | [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | System architecture deep-dive |
+| [docs/plugin-protocol.md](docs/plugin-protocol.md) | Plugin protocol (authoritative plugin.json reference) |
+| [docs/guides/README.md](docs/guides/README.md) | Dev guides index (plugins / themes / Agent / pipeline config / troubleshooting) |
 | [ROADMAP.md](ROADMAP.md) | Version roadmap |
 | [CONTRIBUTING.md](CONTRIBUTING.md) | Contribution guide |
 | [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md) | Code of conduct |

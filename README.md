@@ -4,8 +4,8 @@
 
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
 [![CI](https://github.com/jianchen08/Agent-os-open/actions/workflows/ci.yml/badge.svg)](https://github.com/jianchen08/Agent-os-open/actions/workflows/ci.yml)
+[![Rust](https://img.shields.io/badge/Rust-内核-orange.svg)](https://www.rust-lang.org)
 [![Python](https://img.shields.io/badge/python-3.11%2B-blue.svg)](https://www.python.org)
-[![FastAPI](https://img.shields.io/badge/FastAPI-0.110%2B-009688.svg)](https://fastapi.tiangolo.com)
 [![React](https://img.shields.io/badge/React-19-61dafb.svg)](https://react.dev)
 [![MCP](https://img.shields.io/badge/MCP-Compatible-purple.svg)](https://modelcontextprotocol.io)
 [![Gitee](https://img.shields.io/badge/Gitee-镜像-red.svg)](https://gitee.com/jc27/Agent-os-open)
@@ -31,28 +31,30 @@
 
 - 🔧 **高度可配置化** —— Agent 不是写死的代码，而是 YAML 数据 + 加载器。支持加载动态提示词（如当前时间/会话规则）并以独立尾部消息注入，系统提示词头部保持稳定，不破坏 prompt cache 命中；注入片段可在配置阶段按使用频率排布，以最大化缓存命中。改一个提示词不用重启服务（`hot_swap` 支持热替换，失败可回滚）。
 - 🔄 **自进化闭环** —— 任务执行 → 复盘（对已结束管道做 LLM 深度复盘，产出经验报告沉淀到知识库）→ 通过修改/添加配置、添加插件对系统进行改造与增强，形成闭环，系统越用越聪明。配套记忆清理机制按「复盘状态 × 年龄 × 容量」三维决策，确保复盘产出被沉淀后再回收原始记忆。
-- 🔌 **插件化管道架构** —— 引擎只维护一个共享 `state` 与 `while not ended` 循环，**你可以自由编写或配置插件，控制 Agent 执行过程中的每一个状态**（插件即拦截器、`state` 即总线）：插件能终止管道、挂起等待、决定下一轮跑 LLM 还是工具、读写并改写任意状态字段，且无需改动引擎代码；配合 4 种路由信号（`next_llm` / `next_tool` / `end` / `wait`）与 `ABORT` / `SKIP` / `RETRY` / `FALLBACK` 四种错误策略，让每一步决策都可观测、可干预、可回滚。详见下方 [核心亮点 14](#14-插件化管道架构agent-执行的每一处状态都可由你控制)。
+- 🔌 **插件化管道架构** —— 引擎只解释执行一份管道 YAML，维护共享 `state` 与循环体调度，**你可以自由编写插件，控制 Agent 执行过程中的每一个状态**（插件即拦截器、`state` 即总线）：插件能终止管道、挂起等待、决定下一轮跑 LLM 还是工具、读写并改写任意状态字段，且无需改动内核代码；配合 4 种路由信号（`next_llm` / `next_tool` / `end` / `wait`）与 Python 边车 / Rust 原生双宿主轨，让每一步决策都可观测、可干预、可回滚。详见下方 [核心亮点 14](#14-插件化管道架构agent-执行的每一处状态都可由你控制)。
 - 🧠 **多层记忆系统** —— 情景记忆（EPISODE，对话压缩后的记忆）+ 语义记忆（SEMANTIC，沉淀用户偏好/项目决策/外部知识库导入等），按需检索注入。当前已上线关键词检索、标签检索与全量注入；更丰富的检索方式（如向量语义检索）与注入方式（按需/摘要注入）规划在后续版本上线，详见 [ROADMAP.md](ROADMAP.md)。
 
 ### 技术栈
 
 | 层级 | 技术 |
 |------|------|
-| 后端 | Python 3.11 / FastAPI 0.110+ / aiohttp / Redis / Pydantic / LiteLLM |
+| 内核 | Rust（axum / tokio / SQLite），单进程微内核 :9100 |
+| 插件 | Python 3.11 sidecar（MCP over stdio，uv venv 独立环境）+ Rust cdylib 原生轨 |
 | 前端 | React 19 / TypeScript / Vite / Zustand / Antd / @lobehub/ui / Tailwind CSS |
-| AI | OpenAI / Anthropic / DeepSeek / 智谱 GLM / Ollama / 多模型路由 |
+| AI | OpenAI / Anthropic / DeepSeek / 智谱 GLM / Ollama / 多模型路由（LiteLLM） |
 | 协议 | MCP（Model Context Protocol）|
-| 部署 | Docker / Docker Compose |
+| 部署 | Docker / Docker Compose（按需 Redis 容器） |
 
-> **依赖说明**：`pyproject.toml` 声明 24 个核心运行时依赖（含 fastapi、redis、PyJWT、bcrypt、cryptography、httpx、sqlalchemy 等），并通过 `requirements.txt` 镜像供启动脚本使用。直接 `pip install -e .` 或 `pip install -r requirements.txt` 即可，无需手动补装。
+> **构建说明**：内核 `cd kernel && cargo build --release --bin agentos-kernel`；每个 Python 插件目录自带 `pyproject.toml`，用 `uv sync --project <插件目录>` 建独立 venv；前端 `npm install`。启动脚本 `start_web_02.*` 一键完成上述步骤。
 
 ### 📊 项目规模
 
-- **Python 代码**：约 30.8 万行（`src/` ~16.6 万 + `tests/` ~14.2 万）
-- **前端代码**：约 9.6 万行（`frontend/src/`）
-- **内置工具**：41 个（`src/tools/builtin/` 下含 `tool.py` 实现）
-- **真实通道**：2 个（Web / CLI）
-- **模块数**：35 个（`src/` 下子目录）
+- **Rust 内核**：约 8.1 万行（`kernel/`，其中约 1.8 万行为 Rust 测试）
+- **Python 插件**：约 6.0 万行（`plugins/`，110 份 `plugin.json` 清单）
+- **前端代码**：约 4.5 万行（`frontend/src/`）
+- **Python 测试**：约 5.4 万行（`tests/` + 插件目录就地测试）
+- **工具插件**：26 个（另可零代码接入任意 MCP 外部工具）
+- **接入端**：Web 前端（直连内核）
 
 ---
 
@@ -72,7 +74,7 @@
 几乎所有行为都可以通过 YAML / 配置文件定制，不需要改代码。Agent 身份、提示词、工具集、模型选择、硬约束/软约束、输入输出 Schema 全部可配置。
 
 ### 2. 工具的精细化工程设计
-所有工具遵循统一接口契约（`name` / `when_to_use` / `when_not_to_use` / `input_schema` / `examples` / `caveats`），预留了 `ABORT` / `SKIP` / `RETRY` / `FALLBACK` 四种错误策略框架（当前 ToolCore 默认 `RETRY`，可按工具维度扩展）。**当前实现 41 个内置工具**（含 MCP 外部工具接入）。
+所有工具遵循统一契约（`input_schema` + `output_schema` + `render` 渲染意图）：内核按 `output_schema` fail-closed 校验结果，前端按 `render` 路由渲染结果卡片；LLM 可见工具由 Agent 配置的 `tool_ids` 白名单精确控制。**内置 26 个工具插件**，另可零代码接入任意 MCP 外部工具。
 
 ### 3. 智能会话——不只聊天，更是"会思考的对话"
 
@@ -81,7 +83,7 @@
 > **规划中（0.2.0+）**：投票面板、媒体时间线、思考模式开关等交互增强功能尚未在当前版本实现，详见 [ROADMAP.md](ROADMAP.md)。
 
 ### 4. 前端亮点——好看、好用、好定制
-8 套主题（5 套编译期预设：深色 / 浅色 / 深空指挥台 / 海洋微风 / 高对比度；3 套动态主题：林间薄雾 / 薰衣草田 / 日落晚霞）、全量配置可视化、YAML 字段自动映射表单控件。
+7 套编译期预设主题（深色 / 浅色 / 深空指挥台 / 海洋微风 / 像素糖果 / 奶油甜心 / 高对比度）+ 3 套动态 JSON 主题 + 插件下发的主题/皮肤（`contributes.themes`）、全量配置可视化、YAML 字段自动映射表单控件。
 
 ### 5. 容器任务——复杂长期项目的引擎
 对于"开发一个 App""写一部网络小说""做一个游戏"这类多阶段、有交付物的大任务，容器任务提供完整的方案规划→阶段执行→人类审查→完成验收闭环。
@@ -98,37 +100,39 @@
 ### 9. 强制评估系统——任务质量的硬约束
 任务提交时必须同时提交评估指标（acceptance criteria），管道退出后强制门控转入评估、按指标审查；指标全过才标记完成，失败重试耗尽则失败。即使 Agent 不主动评估，系统也会强制重跑——质量不被跳过。
 
-### 10. 40+ 内置工具——开箱即用的工具箱
-文件、Shell、代码搜索、浏览器、网络、记忆、媒体生成、IDE 集成（实际 41 个 tool.py 实现），含 MCP 外部工具接入。
+### 10. 26 个工具插件——开箱即用的工具箱
+文件、Shell、代码搜索、浏览器、网络、记忆、媒体生成、IDE 集成（26 个工具插件），且任意第三方 MCP 服务零代码接入。
 
-### 11. 双通道接入——同一内核，处处可达
-Web、CLI 共享同一套内核；完整支持 MCP 协议，可接入任何 MCP 服务。
+### 11. 多端接入——同一内核，处处可达
+Web 前端直连 Rust 内核（HTTP / WebSocket）；插件与内核之间走 MCP 协议，第三方 MCP 服务可零代码接入。
 
 ### 12. Skill 能力集成——按需扩展领域能力
 可加载可复用的技能（skill）包，按需注入 Agent，无需改代码即可获得新的领域能力（如文档处理、PDF 生成等）。
 
-### 13. 配置热替换——不停机演进
-`hot_swap`（快照-替换-健康检查-失败回滚）支持运行时热替换插件/Agent，`hot_reload` 监听配置文件变更自动重载，调试与迭代无需重启服务。
+### 13. 配置热生效——不停机演进
+Agent 配置（YAML）mtime 缓存热生效，改提示词/工具白名单无需重启；插件目录热发现（5-8s）+ 前端插件设置页开关即时重注册能力；Python 插件进程空闲自动回收、代码改动热重载、崩溃自动拉起。管道配置在启动期编译（修改后需重启内核）。
 
 ### 14. 插件化管道架构——Agent 执行的每一处状态都可由你控制
 
-引擎本身只做一件事：维护一个共享的 `state` 字典，并跑一个 `while not state["ended"]` 循环。**每一轮循环里"做什么"全部交给插件决定**——你想在 Agent 执行的哪一步介入、改写什么、跳过什么、终止什么，都可以用插件实现，无需改动引擎代码。
+内核引擎只做一件事：解释执行 `config/pipelines/autonomous.yaml`，维护一个共享的 `state` 字典与循环体调度。**每一轮循环里"做什么"全部交给插件决定**——你想在 Agent 执行的哪一步介入、改写什么、跳过什么、终止什么，都可以用插件实现，无需改动内核代码。
 
 ```
-用户消息 → 通道层 → 管道引擎 ┌─ Input 插件链（预处理、安全检查、上下文装配…）
-                             ├─ Core 插件（LLM 调用 / 工具执行）
-                             └─ Output 插件链（结果加工、路由决策…）
-                                 ↑ 所有插件读写同一个共享 state ↑
+用户消息 → Web 前端 → Rust 内核引擎 ┌─ init 循环体（工作空间/环境解析）
+                                    ├─ main 循环体（while 循环）
+                                    │    ├─ prepare：Input 插件链（上下文构建/工具面/提示词/安全守卫…）
+                                    │    ├─ core：LLM 调用 ↔ 工具执行（按路由动态切换）
+                                    │    └─ post：Output 插件链（统计/评估闸门/卡死检测…）+ 路由仲裁
+                                    └─ exit 循环体（工作空间收尾，出错也必经）
+                                        ↑ 所有插件读写同一个共享 state ↑
 ```
 
-**插件如何控制 state 的四种手段**：
+**插件控制 state 的手段**：
 
 | 控制手段 | 插件做的事 | 效果 |
 |---------|-----------|------|
-| 读写状态字段 | 返回 `state_updates`，引擎即时合并进 `state` | 下游插件、路由表、Core 都能读到 |
-| 终止 / 挂起 | 写 `state["ended"]=True` / 写字段让路由选 `wait` | 立即结束管道，或挂起等外部事件（如审批）后再 `wake()` 继续 |
-| 路由表按 state 选插件 | Input 路由表每轮按 `condition` 重新匹配 | 同一管道不同轮次跑不同插件组合，分支无需写死 |
-| Output 信号决定下一轮 | Output 插件返回路由信号 | 下一轮跑 LLM、跑工具、结束、还是挂起 |
+| 读写状态字段 | 返回 `state_updates`，引擎即时合并进 `state` | 下游插件、路由 DSL、Core 都能读到 |
+| 终止 / 挂起 | Output 插件产 `end` / `wait` 路由信号 | 立即结束管道，或挂起等外部事件（如审批）后恢复 |
+| 路由 DSL 决定下一轮 | 管道 `next:` 按 `when` 条件转移并 `set:` 变量 | `llm_call` ↔ `tool_execute` 动态切换、跨步骤/循环体分支 |
 
 **4 种路由信号**清晰定义了"下一轮做什么"：
 
@@ -139,9 +143,9 @@ Web、CLI 共享同一套内核；完整支持 MCP 协议，可接入任何 MCP 
 | `end` | 结束管道 |
 | `wait` | 挂起，等外部输入/审批 |
 
-**4 种错误策略**让你声明插件出错时怎么办：`ABORT`（终止）、`SKIP`（跳过继续）、`RETRY`（重试）、`FALLBACK`（用兜底结果）——安全检查用 `ABORT`（不确定不能继续），上下文构建用 `FALLBACK`（降级也能跑），统计类插件用 `SKIP`（失败不影响当轮）。
+**插件即声明**：一个插件 = 一个目录 + 一份 `plugin.json` 清单（声明工具 / 服务 / 路由信号 / 生命周期钩子 / HTTP 端点），内核统一发现、校验、注册。宿主双轨自选——Python 边车（独立进程，MCP over stdio，uv venv 隔离）或 Rust 原生（cdylib，进程内零 IPC）；还可零代码接入任意第三方 MCP 服务。插件错误由引擎统一兜底：sidecar 崩溃自动重启并重试一次，工具失败结果回喂 LLM 自我修正。
 
-**配置驱动接入**：写一个继承 `IInputPlugin` / `ICorePlugin` / `IOutputPlugin` 的 Python 类，在 YAML 里用 `name:` 或 `class:` 声明，引擎启动时自动发现并实例化。新增插件不动核心引擎，已有插件支持热替换与回滚。
+开发文档：[docs/plugin-protocol.md](docs/plugin-protocol.md)（插件协议权威）· [docs/guides/README.md](docs/guides/README.md)（分篇上手教程）。
 
 ---
 ## 🚀 快速开始
@@ -254,6 +258,8 @@ npm run dev    # 前端开发服务器运行在 http://localhost:6390（反代�
 |------|------|
 | [README_EN.md](README_EN.md) | English README |
 | [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | 系统架构详解 |
+| [docs/plugin-protocol.md](docs/plugin-protocol.md) | 插件协议开发者文档（plugin.json 全字段权威） |
+| [docs/guides/README.md](docs/guides/README.md) | 开发指南索引（插件 / 主题 / Agent / 管道配置 / 排障） |
 | [ROADMAP.md](ROADMAP.md) | 版本路线图 |
 | [CONTRIBUTING.md](CONTRIBUTING.md) | 贡献指南 |
 | [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md) | 贡献者行为准则 |
@@ -298,4 +304,3 @@ npm run dev    # 前端开发服务器运行在 http://localhost:6390（反代�
 ---
 
 > **灵汐，取自"灵气如潮汐般生生不息"** —— 我们希望 AI Agent 也能像潮汐一样，具备自我调节、自我进化的生命力。
-- **测试文件**：376 个（`tests/` 下 `test_*.py`）
