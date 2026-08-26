@@ -858,6 +858,17 @@ impl PipelineDispatcher for EngineDispatcher {
         let target_seq = find_target_user_seq(&messages, user_message_id)
             .ok_or_else(|| format!("regenerate 未找到目标 user 消息: {user_message_id}"))?;
 
+        // 1b. 审计锚预检：目标消息无有效 run_id 即拒绝整操作（审计不可见 = 操作
+        //     不可执行，不合成占位 id）——先于任何截断落库。
+        let trace_run_id = messages
+            .iter()
+            .find(|m| m.seq_in_branch == target_seq)
+            .map(|m| m.run_id.clone())
+            .filter(|r| !r.is_empty())
+            .ok_or_else(|| {
+                "regenerate 拒绝: 目标 user 消息无有效 run_id(审计不可见)".to_string()
+            })?;
+
         // 2. 构造截断 ops：目标 user 之后的全部槽位 set(seq,null)（删槽留洞，
         //    context_window_guard 先例；后段 seq/id 不变）+（可选）改写目标内容。
         let mut ops: Vec<serde_json::Value> = Vec::new();
@@ -885,14 +896,7 @@ impl PipelineDispatcher for EngineDispatcher {
         }
 
         // 4. rollback trace（append-only 审计痕：回退目标 + 补偿 ops 实录）。
-        // run_id 复用目标消息所在 run——get_step_traces_by_thread 经 message_slots
-        // 反查 run_id 集合，合成 id（rb_ 前缀）不在集合内会审计不可见。
-        let trace_run_id = messages
-            .iter()
-            .find(|m| m.seq_in_branch == target_seq)
-            .map(|m| m.run_id.clone())
-            .filter(|r| !r.is_empty())
-            .unwrap_or_else(|| format!("rb_{}", uuid::Uuid::new_v4().simple()));
+        // run_id 已由 1b 预检锚定（目标消息所在 run，审计反查可见）。
         let now = chrono::Utc::now().to_rfc3339();
         let entry = TraceEntry {
             trace_id: format!("t_{}", uuid::Uuid::new_v4().simple()),
@@ -1532,6 +1536,50 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn regenerate_rejects_when_target_message_has_no_run_id() {
+        // 目标 user 消息无有效 run_id（历史数据场景）：审计不可见即拒绝截断，
+        // 不合成占位 id；消息槽位保持原样。
+        let store = Arc::new(agentos_engine::SqliteStore::open_memory().unwrap())
+            as Arc<dyn StorageBackend>;
+        store
+            .apply_messages_ops_to_table(
+                "reg3",
+                "default",
+                &[
+                    json!({"op": "set", "seq": 0, "msg": {"role": "user", "content": "第一问"}}),
+                    json!({"op": "set", "seq": 1, "msg": {"role": "assistant", "content": "旧回复"}}),
+                ],
+            )
+            .await
+            .unwrap();
+        store.create_run("reg3", "cfg", "default").await.unwrap();
+        store.set_run_pipeline("reg3", "reg3").await.unwrap();
+        store
+            .create_session(&session_record(Some("reg3")))
+            .await
+            .unwrap();
+
+        let mut state = crate::routes::AppState::new();
+        state.store = Some(store.clone());
+        let dispatcher = EngineDispatcher::new(state);
+        let err = dispatcher
+            .dispatch_regenerate("u1", "T1", "reg3", "", None)
+            .await
+            .unwrap_err();
+        assert!(
+            err.contains("无有效 run_id"),
+            "拒绝原因应说明审计不可见: {err}"
+        );
+
+        // 截断未发生：两条槽位原样保留。
+        let rows = store
+            .get_messages_by_pipeline("reg3", MessageQueryOpts::default())
+            .await
+            .unwrap();
+        assert_eq!(rows.len(), 2, "无 run_id 时不得截断");
+    }
+
+    #[tokio::test]
     async fn regenerate_default_target_is_last_user_message() {
         // 缺省 user_message_id：定位最后一条 user（seq 2 场景：user/assistant/user）
         let store = Arc::new(agentos_engine::SqliteStore::open_memory().unwrap())
@@ -1541,10 +1589,10 @@ mod tests {
                 "reg2",
                 "default",
                 &[
-                    json!({"op": "set", "seq": 0, "msg": {"role": "user", "content": "第一问"}}),
-                    json!({"op": "set", "seq": 1, "msg": {"role": "assistant", "content": "旧回复"}}),
-                    json!({"op": "set", "seq": 2, "msg": {"role": "user", "content": "第二问"}}),
-                    json!({"op": "set", "seq": 3, "msg": {"role": "assistant", "content": "旧回复2"}}),
+                    json!({"op": "set", "seq": 0, "msg": {"role": "user", "content": "第一问"}, "_run_id": "run-reg2"}),
+                    json!({"op": "set", "seq": 1, "msg": {"role": "assistant", "content": "旧回复"}, "_run_id": "run-reg2"}),
+                    json!({"op": "set", "seq": 2, "msg": {"role": "user", "content": "第二问"}, "_run_id": "run-reg2"}),
+                    json!({"op": "set", "seq": 3, "msg": {"role": "assistant", "content": "旧回复2"}, "_run_id": "run-reg2"}),
                 ],
             )
             .await
@@ -1581,20 +1629,20 @@ mod tests {
             as Arc<dyn StorageBackend>;
         store
             .apply_messages_ops_to_table(
-                "reg3",
+                "reg4",
                 "default",
                 &[
                     json!({"op": "set", "seq": 0, "msg": {"role": "user", "content": "旧问题",
-                                                           "metadata": {"client_message_id": "cmid-1"}}}),
-                    json!({"op": "set", "seq": 1, "msg": {"role": "assistant", "content": "旧回复"}}),
+                                                           "metadata": {"client_message_id": "cmid-1"}}, "_run_id": "run-reg4"}),
+                    json!({"op": "set", "seq": 1, "msg": {"role": "assistant", "content": "旧回复"}, "_run_id": "run-reg4"}),
                 ],
             )
             .await
             .unwrap();
-        store.create_run("reg3", "cfg", "default").await.unwrap();
-        store.set_run_pipeline("reg3", "reg3").await.unwrap();
+        store.create_run("reg4", "cfg", "default").await.unwrap();
+        store.set_run_pipeline("reg4", "reg4").await.unwrap();
         store
-            .create_session(&session_record(Some("reg3")))
+            .create_session(&session_record(Some("reg4")))
             .await
             .unwrap();
 
@@ -1607,7 +1655,7 @@ mod tests {
             .unwrap();
 
         let rows = store
-            .get_messages_by_pipeline("reg3", MessageQueryOpts::default())
+            .get_messages_by_pipeline("reg4", MessageQueryOpts::default())
             .await
             .unwrap();
         assert_eq!(rows.len(), 1, "assistant 槽位被截断");
