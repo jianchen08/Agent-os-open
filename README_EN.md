@@ -1,6 +1,6 @@
 # Lingxi AgentOS
 
-> **An Evolvable Agent Operating System** — A highly configurable, self-evolving AI Agent platform
+> **An Evolvable Agent Operating System** — Everything is a plugin: a highly configurable, self-evolving AI Agent platform
 
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
 [![CI](https://github.com/jianchen08/Agent-os-open/actions/workflows/ci.yml/badge.svg)](https://github.com/jianchen08/Agent-os-open/actions/workflows/ci.yml)
@@ -29,10 +29,10 @@
 
 ### Core Innovations
 
-- 🔧 **Highly Configurable** — Agents are YAML data + loaders, not hardcoded classes. Dynamic prompt loading supports cache-hit-friendly patterns: volatile content (timestamps, session rules) is injected as a separate trailing message so the leading system prompt stays byte-stable and preserves prompt-cache hits. Injected fragments can be arranged by usage frequency at config time to maximize cache-hit rate. Change a prompt without restarting (`hot_swap` supports hot replacement, with rollback on failure).
-- 🔄 **Self-Evolving Closed Loop** — Task execution → review (deep LLM review of finished pipelines, sedimenting experience reports into the knowledge base) → modify/add configuration and add plugins to enhance the system, forming a closed loop that gets smarter with use. A companion memory cleanup mechanism decides retention along three dimensions (review-status × age × capacity), ensuring reviews are sedimented before raw memories are reclaimed.
+- 🔧 **Highly Configurable** — Agents are YAML data + loaders, not hardcoded classes. Dynamic prompts (timestamps, session rules) are injected as a separate trailing message so the leading system prompt stays byte-stable and preserves prompt-cache hits; change prompts or tool whitelists without restarting — configs hot-apply via mtime caching, and a broken config falls back to the last good one.
+- 🔄 **Self-Evolving Closed Loop** — Task execution → review (deep LLM review sedimenting experience reports into the knowledge base) → generate new plugins/configs via the resource-preparation flow and hot-load them into the system, forming a loop that gets smarter with use. Everything-is-a-plugin plus full-chain hot reload (Highlights 13/14) is the foundation: the system modifies itself by adding plugins, never touching the kernel.
 - 🔌 **Plugin-based Pipeline Architecture** — The kernel engine just interprets a pipeline YAML, holding a shared `state` and scheduling loop bodies; **you can freely write plugins to control every state during Agent execution** (plugins are interceptors, `state` is the bus): plugins read/write any state field, while exit transfers (whether the next round calls the LLM or a tool, when to end) are decided by the declarative routing DSL (`when`/`then`/`set`) in the pipeline YAML based on state conditions — no kernel code changes at all. Combined with the dual hosting tracks (Python sidecar / Rust native cdylib), every decision is observable, intervenable, and rollback-able. See [Key Highlight 14](#14-plugin-based-pipeline-architecture-every-state-of-agent-execution-is-yours-to-control) below.
-- 🧠 **Multi-layer Memory** — Episodic (EPISODE, compressed memory of conversations) + Semantic (SEMANTIC, sedimenting user preferences / project decisions / external knowledge base imports, etc.), retrieved on demand and injected as needed. Currently shipped: keyword retrieval, tag retrieval, and full injection. Richer retrieval modes (e.g. vector semantic retrieval) and injection modes (on-demand / summary injection) are planned for a later release — see [ROADMAP.md](ROADMAP.md).
+- 🧠 **Multi-layer Memory** — Episodic (EPISODE, compressed memory of conversations) + Semantic (SEMANTIC, sedimenting user preferences / project decisions / external knowledge), retrieved and injected on demand — carried by the hindsight memory plugin and read/written via the memory tool; richer retrieval and injection modes are planned — see [ROADMAP.md](ROADMAP.md).
 
 ### Tech Stack
 
@@ -77,9 +77,9 @@ Almost every behavior can be customized via YAML/config files without changing c
 All tools follow a unified contract (`input_schema` + `output_schema` + `render` intent): the kernel validates results against `output_schema` (fail-closed), the frontend renders result cards by `render`, and the LLM-visible toolset is precisely controlled by each Agent's `tool_ids` whitelist. **26 built-in tool plugins**, plus zero-code integration of any MCP external tools.
 
 ### 3. Intelligent Conversation — Not Just Chatting, but "Thinking Dialog"
-Streaming response + real-time thinking display + proactive clarification + approval interaction.
+Streaming response + real-time thinking display with mode toggle + proactive clarification + (document) approval interaction.
 
-> **Planned (0.2.0+)**: Voting panels, media timelines, thinking-mode toggle and other interaction enhancements are not yet implemented in this version. See [ROADMAP.md](ROADMAP.md).
+> **Planned (0.2.0+)**: Voting panels, media timelines and other interaction enhancements are not yet implemented. See [ROADMAP.md](ROADMAP.md).
 
 ### 4. Frontend Excellence — Beautiful, Usable, Customizable
 7 compile-time preset themes (Dark / Light / Deep Space Command Center / Ocean Breeze / Pixel Candy / Moe Soft / High Contrast) + 3 dynamic JSON themes + plugin-delivered themes/skins (`contributes.themes`), full configuration visualization, YAML-to-form auto-mapping.
@@ -94,7 +94,7 @@ Scheduled triggers (Cron), event triggers, interval triggers let Lingxi run itse
 Each task runs in its own **isolated workspace**: folder-level isolation by default, with Docker container isolation for higher-risk execution paths. In multi-task scenarios the **git worktree** mechanism forks a dedicated working directory per task, so concurrent tasks never collide on the filesystem and any side-effect can be reviewed or rolled back at the worktree boundary.
 
 ### 8. Approval Closed Loop — Quality Gate for Human-AI Collaboration
-Human approval (choice / conversation dual modes) + pipeline pause/resume + feedback injection + task rework, forming a "generate → approve → feedback → iterate" loop. Text approval is live; diff rendering components and version-comparison APIs are already in place (see [ROADMAP.md](ROADMAP.md)).
+Human approval (choice / conversation dual modes; the human-interaction tool blocks awaiting the user's response) + feedback injection + task rework, forming a "generate → approve → feedback → iterate" quality-gate loop.
 
 ### 9. Mandatory Evaluation System — Hard Constraint on Task Quality
 Task submission must include acceptance criteria (evaluation metrics); after pipeline exit, a mandatory gate transitions the task into evaluation and reviews it against the metrics. Only when all metrics pass is the task marked complete; exhausted retries mean failure. Even if the Agent doesn't actively evaluate, the system forces a re-run — quality is never skipped.
@@ -106,7 +106,7 @@ Files, Shell, code search, browser, network, memory, media generation, IDE integ
 The Web frontend talks straight to the Rust kernel (HTTP / WebSocket); plugins communicate with the kernel over MCP, and third-party MCP services plug in with zero code.
 
 ### 12. Skill Integration — Extend Domain Capabilities on Demand
-Loadable, reusable skill packages that can be injected into Agents on demand to gain new domain capabilities (document processing, PDF generation, etc.) without writing code.
+Reusable skill packages (SKILL.md) under `skills/`: Agents lazy-load them via prompt guidance (file_read on demand, then follow the instructions) — new domain capabilities without code changes; skills, rules and prompts are three decoupled layers, added/removed independently.
 
 ### 13. Hot Configuration — Evolve Without Downtime
 Agent configs (YAML) hot-apply via mtime caching — change prompts or tool whitelists without restarting; plugin directories and manifest changes are hot-discovered and auto-(re)registered (file-watch + polling fallback, seconds-level); Python plugin processes are idle-collected, hot-reloaded on code change, and auto-revived after crashes. Pipeline configs hot-reload too — file changes are detected before each run and recompiled automatically; a broken config falls back to the last good one with a warning.
