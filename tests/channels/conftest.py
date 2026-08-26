@@ -90,4 +90,4 @@ def use_channel(channel: str) -> None:
 
 # channel_api 于 2026-08-21 整体退役；channels.api 命名空间兼容注册
 # 与 routes_* 懒加载跳过清单（collect_ignore_glob）随其删除。
-collect_ignore_glob = []
+collect_ignore_glob: list[str] = []
