@@ -1,4 +1,4 @@
-# @ci: python-coverage
+# @feature: FP-0.2.二 内部模块 manifest | @ci: python-coverage
 """url_security 共享层 SSRF 防护测试（punch B2）。
 
 覆盖：
