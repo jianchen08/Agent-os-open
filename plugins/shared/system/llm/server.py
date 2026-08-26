@@ -250,6 +250,15 @@ async def llm_complete_stream(
     stream_id = f"stream_{uuid.uuid4().hex}"
     envelope = _resolve_envelope(kwargs)
 
+    # agent 层级优先级透传：llm_core 调用方进程的 contextvar 不跨进程共享，
+    # KeyPool 信号量的优先级排队读的是本进程 contextvar——显式接收并落位。
+    # 弹出后不再进 kwargs（避免透传给 litellm 触发 UnsupportedParamsError）。
+    agent_level = kwargs.pop("agent_level", None)
+    if agent_level:
+        from key_pool import set_agent_priority  # noqa: PLC0415
+
+        set_agent_priority(str(agent_level))
+
     # event-bus 未注入时流式推送降级：chunk 仍经翻译器消费，仅不推送
     # （返回值与信封语义不变，调用方不感知通道差异）。
     try:

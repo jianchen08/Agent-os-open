@@ -411,6 +411,37 @@ class TestCompleteStream:
         assert result["finish_reason"] == "stop"
         assert result["usage"] == {}
 
+    def test_agent_level_passthrough_sets_priority(self) -> None:
+        """agent_level 经 kwargs 透传 → 本进程 KeyPool 优先级落位（跨进程透传契约）。"""
+        mod = _load_server()
+        bus = FakeBus()
+
+        from key_pool import get_agent_priority
+
+        # 在 adapter 调用时（与 complete_stream 同一协程上下文）读优先级：
+        # contextvar 只在任务上下文内可见，测试侧读不到跨任务写入。
+        captured: dict[str, int] = {}
+
+        class _RecordingAdapter(FakeAdapter):
+            async def completion(self, **kwargs: Any) -> Any:
+                captured["priority"] = get_agent_priority()
+                return await super().completion(**kwargs)
+
+        _inject(mod, "event-bus", bus)
+        mod._adapter = _RecordingAdapter(chunks=[_text("hi")], text="hi")
+
+        result = _run(
+            mod.llm_complete_stream(
+                model="glm-5.2",
+                messages=[{"role": "user", "content": "hi"}],
+                agent_level="L1",
+            )
+        )
+        assert result["status"] == "streamed"
+        assert captured["priority"] == 1  # L1 → 1
+        # 透传键不得泄漏给 adapter（litellm 不认 agent_level）
+        assert "agent_level" not in mod._adapter.calls[0]
+
 
 class TestCompleteRetired:
     """llm.complete 退役：注册表无该工具、模块无处理器。"""
