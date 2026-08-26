@@ -54,6 +54,11 @@ def _load_server() -> Any:
     mod_name = "triggers_ext_server_test"
     if mod_name in sys.modules:
         del sys.modules[mod_name]
+    # 逐出与本插件同名、可能被其他插件测试运行期缓存的裸模块，强制本目录
+    # server.py 的 `from tool/http_api import ...` 按本目录 sys.path 解析
+    # （tasks 系测试运行期会把 tasks 版 http_api/server 残留 sys.modules）。
+    for _bare in ("tool", "http_api", "server"):
+        sys.modules.pop(_bare, None)
     spec = importlib.util.spec_from_file_location(mod_name, _PLUGIN_DIR / "server.py")
     assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)

@@ -13,6 +13,7 @@ sys.path.insert(0, os.path.dirname(__file__))
 # 触发器领域代码（triggers/）为本工具自有子包，位于本工具目录下，由上方
 # sys.path 注入解析。不再依赖 0.1 兼容 shim。
 
+from http_api import handle_http_dispatch  # noqa: E402
 from tool import TriggerSetupTool  # noqa: E402
 from triggers.manager import get_trigger_manager  # noqa: E402
 
@@ -135,8 +136,6 @@ async def http_handle(
     query: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     """REST 分发到 triggers 域端点（含 /pipelines 选项）。"""
-    from http_api import handle_http_dispatch  # noqa: PLC0415
-
     return await handle_http_dispatch(path, method, raw_body, query or {}, headers or {})
 
 

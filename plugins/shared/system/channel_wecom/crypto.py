@@ -125,12 +125,16 @@ class WecomCrypto:
         # 解析加密 XML，提取 Encrypt 字段
         encrypt_content = self._extract_encrypt(encrypted_xml)
 
-        # AES 解密
+        # AES 解密（_aes_decrypt 把失败统一包装为 ValueError，直接传播）
         decrypted = self._aes_decrypt(encrypt_content)
 
         # 解析解密后的内容：random(16) + msg_len(4) + msg + corp_id
-        # 前 16 字节为随机字符串
-        msg_len = struct.unpack("!I", decrypted[16:20])[0]
+        # 前 16 字节为随机字符串；密文长度不足时按消息格式错误抛 ValueError
+        #（handle_callback 的 except ValueError 依赖此契约吞掉畸形回调）。
+        try:
+            msg_len = struct.unpack("!I", decrypted[16:20])[0]
+        except struct.error as exc:
+            raise ValueError(f"Invalid encrypted message: {exc}") from exc
         msg = decrypted[20 : 20 + msg_len]
         received_corp_id = decrypted[20 + msg_len :]
 

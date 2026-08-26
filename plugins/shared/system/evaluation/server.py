@@ -316,7 +316,7 @@ async def http_handle(
             metrics = [m for m in metrics if m["status"] == status_f]
         metric_type = q.get("metric_type")
         if metric_type:
-            metrics = [m for m in metrics if m["metric_type"] == metric_type]
+            metrics = [m for m in metrics if m["evaluator_type"] == metric_type]
         # 分页
         total = len(metrics)
         try:

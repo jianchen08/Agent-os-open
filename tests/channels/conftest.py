@@ -48,6 +48,8 @@ _AMBIGUOUS_MODULES = {
     "message_normalizer",
     "session_bridge",
     "unified_types",
+    # helpers：wecom/qq 两通道目录各有 helpers.py，跨通道先入缓存会互相命中
+    "helpers",
     # workspace：跨目录同名（tasks/workspace.py、isolation/workspace.py 模块
     # vs system/workspace/ 包）——逐出确保重新解析到 system/workspace/ 包
     "workspace",

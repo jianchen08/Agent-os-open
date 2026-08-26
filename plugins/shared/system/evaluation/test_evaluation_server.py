@@ -188,6 +188,46 @@ class TestHttpHandleMetricsList:
         )
         assert [m["id"] for m in body2["metrics"]] == ["m_bash"]
 
+    def test_filter_by_metric_type(self, metrics_root: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        """metric_type 过滤与任意过滤组合（前端的可选查询参数）。"""
+        srv = _load_server_module(monkeypatch, metrics_root)
+        _, body = _decode_body(
+            asyncio.run(
+                srv.http_handle(
+                    path="/ext/evaluation_service/metrics",
+                    method="GET",
+                    query={"metric_type": "builtin"},
+                )
+            )
+        )
+        # yaml 中仅有 m_file 声明 evaluator_type=builtin；未命中则空
+        assert {m["id"] for m in body["metrics"]} == {"m_file"}
+
+        _, none = _decode_body(
+            asyncio.run(
+                srv.http_handle(
+                    path="/ext/evaluation_service/metrics",
+                    method="GET",
+                    query={"metric_type": "no-such-type"},
+                )
+            )
+        )
+        assert none["metrics"] == [] and none["total"] == 0
+
+    def test_pagination_zero_limit_and_bad_limit(self, metrics_root: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        """limit=0 → 回退全量（0 表示未指定，等价不传）。"""
+        srv = _load_server_module(monkeypatch, metrics_root)
+        _, page = _decode_body(
+            asyncio.run(
+                srv.http_handle(
+                    path="/ext/evaluation_service/metrics",
+                    method="GET",
+                    query={"skip": "0", "limit": "0"},
+                )
+            )
+        )
+        assert len(page["metrics"]) == 3 and page["total"] == 3
+
     def test_pagination_and_invalid_params_fallback(self, metrics_root: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         srv = _load_server_module(monkeypatch, metrics_root)
         _, page = _decode_body(
@@ -250,6 +290,13 @@ class TestHttpHandleSingleAndErrors:
         assert status == 404
         assert body["error"] == "not found"
 
+    def test_on_load_and_registry_resource(self, metrics_root: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        """on_load 钩子 + 指标注册表资源暴露（manifest 声明面）。"""
+        srv = _load_server_module(monkeypatch, metrics_root)
+        assert asyncio.run(srv._on_load({})) is None
+        reg = srv._metric_registry_resource()
+        assert {"file_check", "bash_check", "semantic_check", "human_review"} == set(reg["metrics"])
+
 
 class TestReadFaceHelpers:
     def test_load_metrics_missing_file_and_bad_yaml(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -274,6 +321,19 @@ class TestReadFaceHelpers:
         import os
 
         assert srv._project_root() == os.getcwd()
+
+    def test_project_root_upward_walk_and_unreachable(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        """env 未设且 cwd 不可达 → 上溯 6 层仍无 config/ → 返回 cwd。"""
+        import os
+
+        srv = _load_server_module(monkeypatch, tmp_path)
+        monkeypatch.delenv("AGENTOS_PROJECT_ROOT", raising=False)
+        prev = os.getcwd()
+        try:
+            os.chdir(tmp_path)  # 临时目录无 config/ 且上溯 6 层到盘根仍无
+            assert srv._project_root() == os.getcwd()
+        finally:
+            os.chdir(prev)
     def test_metric_to_response_defaults(self, metrics_root: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         srv = _load_server_module(monkeypatch, metrics_root)
         got = srv._metric_to_response({"name": "n1"})

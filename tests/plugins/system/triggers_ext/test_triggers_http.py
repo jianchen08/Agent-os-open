@@ -24,6 +24,7 @@ for _d in (str(_PLUGIN_DIR), str(_SDK)):
         sys.path.insert(0, _d)
 
 import http_api  # noqa: E402
+import server as trigger_server  # noqa: E402
 from triggers.manager import get_trigger_manager  # noqa: E402
 from triggers.types import TriggerConfig, TriggerType  # noqa: E402
 
@@ -315,14 +316,29 @@ def test_create_without_credentials_401() -> None:
 
 def test_server_http_handle_forwards_headers_to_create() -> None:
     """server.http.handle 入口 → 分发：headers 透传到 create 的 Bearer 解析。"""
-    import server as trigger_server  # noqa: PLC0415
-
-    resp = asyncio.run(trigger_server.http_handle(
-        path="/ext/trigger_setup_tool/triggers",
-        method="POST",
-        raw_body=_encode_body(_CREATE_BODY),
-        headers={"Authorization": f"Bearer {_token('u9', 'carol')}"},
-    ))
+    # server.py 的 http_handle 内惰性 `from http_api import ...` 在**调用期**
+    # 按 sys.modules 解析——tasks 系测试运行期可能残留 tasks 版 http_api
+    # 且其目录仍在 sys.path 更前位；逐出裸名并置顶本插件目录，保证命中
+    # 本插件副本（conftest 逐出只覆盖收集期）。
+    _was = sys.modules.pop("http_api", None)
+    _plugin_dir = str(_PLUGIN_DIR)
+    _was_first = sys.path[0] == _plugin_dir
+    if _plugin_dir in sys.path:
+        sys.path.remove(_plugin_dir)
+    sys.path.insert(0, _plugin_dir)
+    try:
+        resp = asyncio.run(trigger_server.http_handle(
+            path="/ext/trigger_setup_tool/triggers",
+            method="POST",
+            raw_body=_encode_body(_CREATE_BODY),
+            headers={"Authorization": f"Bearer {_token('u9', 'carol')}"},
+        ))
+    finally:
+        sys.path.remove(_plugin_dir)
+        if _was_first:
+            sys.path.insert(0, _plugin_dir)
+        if _was is not None:
+            sys.modules["http_api"] = _was
     body = _unwrap(resp)
     cfg = get_trigger_manager().get(body["trigger"]["trigger_id"])
     assert cfg is not None

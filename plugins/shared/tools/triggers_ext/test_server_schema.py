@@ -25,7 +25,10 @@ def _load_plugin():
     # 其他测试文件（如 tools/task/test_task_manage.py）先被收集时会把其 tool 模块
     # 缓存在 sys.modules['tool']——不清除会让 server.py 的 `from tool import ...`
     # 命中错误缓存。这里先弹出旧缓存，再确保本目录优先，保证解析到本插件 tool。
-    sys.modules.pop("tool", None)
+    # http_api 一并逐出：tasks 系测试运行期会把 tasks 版 http_api 残留
+    # sys.modules，server.py 惰性 `from http_api import ...` 会命中它。
+    for _bare in ("tool", "http_api", "server"):
+        sys.modules.pop(_bare, None)
     sys.path.insert(0, _HERE)
     import server  # noqa: PLC0415  由上方 sys.path 注入解析
 

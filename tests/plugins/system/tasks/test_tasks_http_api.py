@@ -44,13 +44,19 @@ def _isolate_tasks_plugin_modules():
 
     http_api 模块级 import pydantic/服务模块；server 仅在懒路径被触达，
     仍一并逐出防跨插件污染。
+
+    teardown 还原逐出前的模块代际（与 test_tasks_plugin.py 同款）：本插件
+    运行期 import 的 http_api/server 等模块若不还原，会以本插件版本残留
+    sys.modules，污染后续测试文件的运行期惰性导入（triggers_ext/server.py
+    的 ``from http_api import handle_http_dispatch`` 曾命中 tasks 版
+    http_api 而 ImportError）。
     """
     d = str(_PLUGIN_DIR)
     _was_present = d in sys.path
     if d in sys.path:
         sys.path.remove(d)
     sys.path.insert(0, d)
-    for m in (
+    _evict_names = (
         "task_types",
         "state_machine",
         "storage",
@@ -65,13 +71,21 @@ def _isolate_tasks_plugin_modules():
         "_task_state",
         "http_api",
         "server",
-    ):
-        sys.modules.pop(m, None)
+    )
+    _evicted: dict[str, object] = {}
+    for m in _evict_names:
+        if m in sys.modules:
+            _evicted[m] = sys.modules.pop(m)
     yield
     if d in sys.path:
         sys.path.remove(d)
     if _was_present:
         sys.path.insert(0, d)
+    for m in _evict_names:
+        if m in _evicted:
+            sys.modules[m] = _evicted[m]
+        else:
+            sys.modules.pop(m, None)
 
 
 # ═══════════════════════════════════════════════════════════
