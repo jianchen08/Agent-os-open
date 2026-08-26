@@ -3,6 +3,12 @@
 > 灵汐系统（Agent OS）测试与持续集成完整手册
 > 适用对象：人类开发者、AI Agent、新成员
 
+> **现状说明（2026-08）**：0.2 架构（Rust 内核 + Python 插件）下，lint/type 车道由
+> `scripts/run_gates.py` 统一持有（如 `python scripts/run_gates.py --filter sdk-lint,sdk-mypy`），
+> 全量格式化为 `ruff format .` / `ruff check .`——本文速查命令与流水线图已按此对齐。
+> 第 4 章 API curl 示例为 0.1 时代编写（端口 8988 与 `src/` 路径已退役；现为内核 :9100，
+> 代码在 `kernel/` + `plugins/`），接口语义可参照，路径与端口以内核实际路由为准。
+
 ---
 
 ## 目录
@@ -33,9 +39,9 @@
 | 运行全部测试 | `python -m pytest tests/ -q` |
 | 运行单个测试文件 | `python -m pytest tests/test_bug_fixes.py -v` |
 | 运行带日志收集的测试 | `python -m pytest tests/ --tb=long -q` |
-| 只跑 Lint | `ruff check src/ --config pyproject.toml` |
-| 只跑格式检查 | `ruff format --check src/ --config pyproject.toml` |
-| 只跑类型检查 | `mypy src/ --config-file pyproject.toml` |
+| 只跑 Lint | `ruff check . --config pyproject.toml` |
+| 只跑格式检查 | `ruff format --check . --config pyproject.toml` |
+| 只跑类型检查 | `python scripts/run_gates.py --filter sdk-mypy`（mypy 车道经 run_gates 统一持有） |
 | 查看测试报告 | 打开 `reports/test_report.html` 或读取 `reports/test_report.json` |
 | 查看 Lint 报告 | 读取 `reports/ruff_results.json` |
 
@@ -71,7 +77,7 @@ pip install ruff mypy
 │  阶段 1: Lint & Format（lint job）                                     │
 │  ┌──────────────────────┐    ┌───────────────────────────┐              │
 │  │ Ruff Lint            │───▶│ reports/ruff_results.json  │              │
-│  │ ruff check src/      │    └───────────────────────────┘              │
+│  │ ruff check .         │    └───────────────────────────┘              │
 │  └──────────────────────┘                                               │
 │  ┌──────────────────────┐                                               │
 │  │ Ruff Format Check    │                                               │
@@ -84,7 +90,7 @@ pip install ruff mypy
 ┌─────────────────────────────────────────────────────────────────────────┐
 │  阶段 2: Type Check（typecheck job）                                   │
 │  ┌──────────────────────┐                                               │
-│  │ mypy src/            │                                               │
+│  │ mypy（run_gates 车道）│                                               │
 │  └──────────────────────┘                                               │
 └─────────────────────────┬───────────────────────────────────────────────┘
                           │
