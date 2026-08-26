@@ -1578,6 +1578,7 @@ pub async fn plugins_status_handler(
             json!({
                 "plugin_id": m.id,
                 "name": m.name,
+                "description": m.description,
                 "config_type": config_type,
                 "host_type": host_type,
                 "version": m.version,

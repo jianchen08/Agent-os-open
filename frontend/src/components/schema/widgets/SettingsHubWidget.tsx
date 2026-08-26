@@ -156,13 +156,7 @@ export function SettingsHubWidget({ initialActive = 'kernel-plugins' }: Settings
         {active === 'kernel-theme' && <ThemeSettingsPage />}
         {active === 'kernel-pipeline' && <PipelineSettingsPage embedded />}
         {active === 'kernel-llm' && <LlmSettingsPage embedded />}
-        {active === 'kernel-plugins' && (
-          <PluginsSettingsPage
-            onSelectPluginConfig={(pluginId, fileId) => {
-              setActive(`plugin:${pluginId}:${fileId}`)
-            }}
-          />
-        )}
+        {active === 'kernel-plugins' && <PluginsSettingsPage />}
         {String(active).startsWith('plugin:') && (
           <PluginConfigEmbed pathKey={String(active).slice('plugin:'.length)} />
         )}
