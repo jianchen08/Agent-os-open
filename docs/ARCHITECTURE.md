@@ -1,13 +1,8 @@
 # 灵汐 AgentOS 架构文档
 
 > 本文档面向**希望深入了解灵汐内部机制、进行二次开发或参与核心贡献**的开发者。
-
-> **数据准确性说明**：本架构文档基于实际代码核对
-> - Python 版本：3.11+（`pyproject.toml` `requires-python = ">=3.11"`）
-> - FastAPI / Redis：在 25+ 文件中实际 import，均已声明于 `pyproject.toml` 的 24 个核心运行时依赖中
-> - React 版本：19.2（`frontend/package.json` `"react": "^19.2.0"`）
-> - 工具数量：41 个 tool.py 实现（实际），下文用"40+ 内置工具"表述
-> - 通道数量：2 个真实通道（Web / CLI），HTTP API 走 `src/channels/api/` 作为 REST 端点
+> 0.2 架构：**Rust 微内核 + Python 插件 + React 前端**。插件开发协议见
+> [plugin-protocol.md](plugin-protocol.md)，上手教程见 [guides/README.md](guides/README.md)。
 
 ---
 
@@ -17,18 +12,17 @@
 - [总体架构](#总体架构)
 - [核心子系统](#核心子系统)
   - [管道引擎（Pipeline Engine）](#管道引擎pipeline-engine)
+  - [插件系统（Plugin System）](#插件系统plugin-system)
   - [Agent 系统](#agent-系统)
   - [工具系统](#工具系统)
   - [记忆系统](#记忆系统)
   - [配置系统](#配置系统)
-  - [通道层（Channels）](#通道层channels)
-  - [容器任务系统](#容器任务系统)
+  - [任务系统与评估闸门](#任务系统与评估闸门)
   - [隔离与工作区（Isolation & Workspace）](#隔离与工作区isolation--workspace)
-  - [复盘与记忆维护（Review & Memory Maintenance）](#复盘与记忆维护review--memory-maintenance)
   - [触发器系统（Triggers）](#触发器系统triggers)
   - [审批交互闭环（Approval Loop）](#审批交互闭环approval-loop)
-  - [强制评估系统（Mandatory Evaluation）](#强制评估系统mandatory-evaluation)
-  - [Skill 能力集成](#skill-能力集成)
+  - [复盘系统（Review）](#复盘系统review)
+  - [主题与前端定制](#主题与前端定制)
 - [数据流示例](#数据流示例)
 - [扩展点](#扩展点)
 - [架构设计四问](#架构设计四问)
@@ -40,13 +34,13 @@
 灵汐的设计建立在三个核心原则之上：
 
 ### 1. 配置优于代码（Configuration over Code）
-几乎所有运行时行为都通过 YAML / 配置文件定义。新增一个 Agent、调整一条管道、修改一个工具的 Schema，都不应该需要改 Python 代码。
+几乎所有运行时行为都通过 YAML / 配置文件定义。新增一个 Agent、调整一条管道、修改一个工具的可见面，都不应该需要改内核代码——Agent 是 YAML 数据，管道是 YAML 编排，工具面是白名单交集。
 
 ### 2. 状态可观测（Observable State）
-管道的每一步决策都被显式建模为"路由信号"（Routing Signal），并写入事件流。任意时刻可以回答："现在卡在哪一步？为什么？下一步会往哪走？"
+管道的每一步决策都被显式建模（state 字段、路由信号、执行轨迹），分层可查（骨架 / L1 压缩块 / L0 原始记录，`read_execution_detail` 工具）。任意时刻可以回答："现在卡在哪一步？为什么？下一步会往哪走？"
 
 ### 3. 可回滚、可热替换（Rollback & Hot Swap）
-所有运行时配置和插件都支持 `hot_swap`（运行时替换）和 `rollback`（状态回滚）。调试一个新提示词不需要重启服务；回退到一个不稳定的版本只需要一行命令。
+Agent 配置 mtime 缓存热生效；插件目录热发现 + re-enable 即时重注册；Python 插件进程空闲回收、代码改动热重载、崩溃自动拉起；内核不因单个配置加载失败而启动失败（降级 warn + 空配置）。
 
 ---
 
@@ -54,47 +48,35 @@
 
 ```
 ┌──────────────────────────────────────────────────────────────────┐
-│                         Channels (多通道)                        │
-│            Web UI   │   CLI   │   HTTP API   │   ...            │
+│                 前端 React 19 + Vite（:6390，反代内核）            │
+│     聊天 / 任务面板 / 配置可视化 / 插件设置 / 主题与皮肤运行时       │
 └────────────────────────────┬─────────────────────────────────────┘
-                             │
+                             │ HTTP / WebSocket
                              ▼
 ┌──────────────────────────────────────────────────────────────────┐
-│                      Gateway (网关层)                            │
-│  协议解析 │ 鉴权 │ 限流 │ 消息标准化 │ 会话路由                  │
+│                Rust 微内核 agentos-kernel（:9100）                │
+│  api（REST/WS 路由）│ engine（管道解释执行）│ session（会话域）      │
+│  config（ConfigCenter）│ plugin-loader │ invoker │ mcp（客户端）    │
+│  hooks │ http │ core（契约 trait）│ db-admin │ tenant │ user-admin │
+│                存储：SQLite（默认 agentos_kernel.db，driver 化）   │
 └────────────────────────────┬─────────────────────────────────────┘
-                             │
+                             │ MCP over stdio（sidecar）/ C-ABI（原生）
                              ▼
 ┌──────────────────────────────────────────────────────────────────┐
-│                    Pipeline Engine (管道引擎)                     │
-│  ┌────────────────────────────────────────────────────────────┐  │
-│  │  Input Plugins   →   LLM Call   →   Output Plugins        │  │
-│  │  (上下文注入)        (推理)         (后处理/路由)          │  │
-│  └────────────────────────────────────────────────────────────┘  │
-│                              │                                   │
-│                              ▼                                   │
-│                  4 种路由信号仲裁                                  │
-│           (next_llm / next_tool / end / wait / ...)              │
-└────────┬──────────────┬──────────────┬──────────────┬───────────┘
-         │              │              │              │
-         ▼              ▼              ▼              ▼
-   ┌──────────┐  ┌──────────┐  ┌──────────┐  ┌──────────┐
-   │  Tools   │  │  Memory  │  │  Agents  │  │ Triggers │
-   │ (工具)   │  │  (记忆)  │  │ (角色)   │  │ (触发器) │
-   └──────────┘  └──────────┘  └──────────┘  └──────────┘
-         │              │              │              │
-         └──────────────┴──────────────┴──────────────┘
-                             │
+│                          插件（110 个 manifest）                   │
+│  pipeline/{input,core,output}  管道步骤（Python 边车 + Rust cdylib）│
+│  tools/                        LLM 工具（26 个，含外部 MCP 接入）   │
+│  system/                       系统服务（LLM/记忆/审批/评估/通道…）  │
+└────────────────────────────┬─────────────────────────────────────┘
                              ▼
 ┌──────────────────────────────────────────────────────────────────┐
-│                  Infrastructure (基础设施)                       │
-│      Redis │ LLM Providers │ MCP Servers │ File System          │
+│                  基础设施：LLM Providers │ 文件系统 │ Docker        │
 └──────────────────────────────────────────────────────────────────┘
 ```
 
 ### 关键路径
 
-**用户消息 → 通道层 → 网关层 → 管道引擎 → [Input 插件链] → LLM 调用 → [Output 插件链] → 流式响应 → 前端渲染**
+**用户消息 → 前端 → 内核 chat 入口 → 管道引擎（init → main 循环体[prepare → core → post] → exit）→ 流式响应（block 协议八事件）→ 前端渲染**
 
 ---
 
@@ -102,245 +84,123 @@
 
 ### 管道引擎（Pipeline Engine）
 
-管道引擎是灵汐的"心脏"。它采用**路由表 + 插件链**的双层结构。
+内核引擎是配置解释执行器：读 `config/pipelines/autonomous.yaml`（唯一现役管道，所有 Agent 共用，差异由 Agent 配置体现），按 `loop_bodies` 顺序执行，据统一路由 DSL 决定循环、分支与循环体间转移。
 
-#### 路由表机制
+```
+init 循环体（单次）  workspace/environment 解析
+main 循环体（while） prepare：Input 插件链（context_build → tool_schema → … → prompt_build → 守卫链）
+                     core：  pipeline_llm_core ↔ pipeline_tool_core（动态切换）
+                     post：  Output 插件链（track → task_reminder → stop_check → …）+ 出口路由
+exit 循环体（单次）  workspace 收尾 + 环境释放（run_on_error，提前终止必经）
+```
 
-- **输入路由表**（可叠加）：根据上下文决定执行哪些 Input 插件
-- **输出路由表**（互斥优先级）：仲裁 Output 插件产生的路由信号
+- **G10 路由 DSL**（冻结）：条件永远 `when`、目标永远 `then`（`end` / `loop` / step id / 循环体 id）、附带写入 `set:`。配置在**加载期编译**（when 预编译 AST、引用静态解析、五类命名冲突启动即报），运行时零解析。
+- **step 三级命中**：管道 step id → 公共 step 库（`config/steps/`）→ 插件 id。
+- **4 种路由信号**：`next_llm` / `next_tool` / `end` / `wait`（仅 output 阶段插件产出，挂起支持审批后恢复）。
+- **并发模型**：RunChainRegistry 按 effective_pipeline_id 串行（同管道 FIFO、异管道并行、全局并发上限）。
+- **task = pipeline state 单一真值**：`task.id = pipeline_id`；任务状态由任务域插件裁决（评估闸门），内核不回写任务状态。
 
-#### 4 种路由信号
+配置方法见 [guides/pipeline-configuration.md](guides/pipeline-configuration.md)。
 
-| 信号 | 含义 | 典型场景 |
-|------|------|----------|
-| `next_llm` | 下一轮调用 LLM | 工具调用完成后 |
-| `next_tool` | 执行工具 | LLM 决定调用工具 |
-| `end` | 结束管道 | LLM 完成回复 |
-| `wait` | 挂起等待 | 等用户审批 / 外部事件 |
+### 插件系统（Plugin System）
 
-#### 暂停/恢复机制
+所有可扩展模块收敛到**同一个插件协议**：一个插件 = 一个目录 + 一份 `plugin.json` manifest（+ 实现代码）。内核统一发现、校验（`deny_unknown_fields`）、注册、按需加载，不区分内部还是第三方。
 
-管道可通过 `wait` 信号挂起并保存 `state` 快照；外部事件触发后 `wake()` 继续。典型场景是"等用户审批"——挂起 → 用户在 UI 上点击"同意" → 恢复执行。
+- **三类目录**：`plugins/shared/pipeline/{input,core,output}/`（管道步骤）、`plugins/shared/tools/`（LLM 工具）、`plugins/shared/system/`（系统服务）。
+- **双根发现**：内置根 `plugins/shared/` + 用户根（`AGENTOS_USER_PLUGINS_DIR`），同 id 用户根覆盖内置根。
+- **宿主三轨**：Python sidecar（默认；独立进程、MCP over stdio、uv venv 单轨、懒启动/空闲回收/崩溃自愈/热重载）、Rust cdylib 原生（`in_process`；高频管道步骤晋升轨、永不 dlclose）、外部 MCP（`entry: "mcp:external"`；零代码直连第三方 MCP 服务）。
+- **能力声明**：`capabilities.tools`（进 LLM 面）/ `services`（内部服务，不进 LLM 面）/ `route_signals` / `lifecycle_hooks` / `streaming`（流式事件声明，fail-closed）。
+- **插件间耦合唯一轴**：`requires_services`（能力角色名，boot 期闸校验）。
+- **LLM 可见工具三层过滤**：启用快照（`config/plugins/default_profile.yaml`）→ 能力注册（缺 schema 的 external MCP 工具拒注册）→ Agent `tool_ids` 白名单（解析不出 = 空工具面，禁止静默全量）。
+- **G2 复核**：re-enable 时 spawn sidecar 校验 manifest 声明与实现一致，漂移按净化后 manifest 注册。
 
-#### 跨管道路由
-
-`PipelineRegistry` 维护所有活跃管道实例的注册表。子任务完成后能精确地把结果回传给父管道，支持复杂的层级任务编排。
-
-#### 热替换
-
-`hot_swap.py` 允许运行时替换管道配置或插件实现，无需重启服务。回退通过 `rollback.py` 实现。
+协议全字段见 [plugin-protocol.md](plugin-protocol.md)；开发见 [guides/plugin-development.md](guides/plugin-development.md)。
 
 ### Agent 系统
 
-每个 Agent 是一份 YAML 文件（位于 `config/agents/`），描述：
+每个 Agent 是一份 YAML（`config/agents/{main,orchestrator,executor,system,task}/**/*.yaml`），定位按文件名优先、`config_id` 回退。
 
 ```yaml
-id: code_writer_agent
+config_id: code_writer_agent
 name: 代码编写专家
-type: executor  # supervisor / orchestrator / executor
-
-system_prompt: "{{path:prompts/code_writer.md}}"  # 引用外部文件
-
-tools:
-  - file_read
-  - file_write
-  - bash_execute
-  - enhanced_search
-
-model:
-  tier: medium  # large / medium / small
-  # 或直接指定 model_name
-
-constraints:
-  hard:
-    - must_validate_syntax_before_save
-  soft:
-    - prefer_functional_style
-
-input_schema:  # JSON Schema
-  type: object
-  required: [goal, acceptance_criteria]
-  properties: { ... }
-
-output_schema:  # JSON Schema
-  type: object
-  properties: { ... }
+agent_type: executor          # main / orchestrator / executor / system
+level: L3                     # L1 沟通调度 → L2 编排 → L3 执行，委托深度上限 3 层
+model_tier: medium            # 或 model_name 直接指定
+system_prompt: |              # 支持 {{path:...}} 文件注入与 {{project_root}} 占位
+  ...
+tool_ids: [file_read, file_write, bash_execute, enhanced_search]   # LLM 可见工具白名单
+hard_constraints: [...]
+soft_constraints: [...]
+deliverables: [...]           # executor 特有：产出物声明
+plugins:
+  enabled:
+    task_reminder: { max_reminders: 3, cooldown_seconds: 180 }     # per-plugin inputs
 ```
 
-#### 多层 Agent 协作
+- **消费分权**：内核只读 `tool_ids`（窄接口，注入工具 schema）；全量配置由管道 prepare 步的 `pipeline_context_build` 插件自持加载，注入 `context.system_prompt` / `tool_ids` / `context.agent_level` 等。
+- **agent_id 全链传导**：会话创建时写入 state，后续每轮按它取配置；切换会话 Agent 即整体切换人设/工具/约束。
+- **多层协作**：主管（灵汐，L1）面向用户负责任务分类与派发；编排（L2）做多步骤编排与审查节点；执行（L3）是具体执行单元。
 
-- **主管**（灵汐）：面向用户的统一入口，负责任务分类与初步规划
-- **编排**（方案规划 / 编程编排）：复杂任务的多步骤编排、依赖管理、审查节点
-- **执行**（写代码 / 调研 / 调试 / 验证）：具体的执行单元
-
-#### 智能切换主 Agent
-
-同一个会话内可动态切换主 Agent——聊到一半想换成"代码专家"风格？一行指令切换，整套人设、工具、约束一并生效。
+配置方法见 [guides/agent-configuration.md](guides/agent-configuration.md)。
 
 ### 工具系统
 
-所有工具遵循统一接口契约：
-
-```python
-class Tool(Protocol):
-    name: str
-    description: str
-    when_to_use: str
-    when_not_to_use: str
-    input_schema: dict  # JSON Schema
-    output_schema: dict  # JSON Schema
-    examples: list[Example]
-    caveats: list[str]
-    category: str
-    level: int
-    tags: list[str]
-    source: str  # builtin / mcp / custom
-
-    async def execute(self, **kwargs) -> ToolResult: ...
-```
-
-#### 4 种错误策略
-
-| 策略 | 行为 | 适用场景 |
-|------|------|----------|
-| `ABORT` | 立即终止后续插件 | 数据一致性敏感 |
-| `SKIP` | 记录警告继续 | 辅助性工具 |
-| `FALLBACK` | 用兜底结果替代 | 有可用降级方案 |
-| `RETRY` | 调用方实现重试循环 | 临时性故障 |
-
-#### 动态 Schema 增强
-
-`image_generate` 工具的 Schema 会在运行时**动态注入当前可用的图像 Provider 列表**到 `enum` 字段——LLM 看到的总是"现在能用的服务"，而不是过期的配置。
-
-#### 工具分类
-
-- **内置工具**（builtin）：`file_read` / `file_write` / `bash_execute` / `enhanced_search` / `image_generate` / ...
-- **MCP 工具**：通过 Model Context Protocol 接入的外部服务
-- **自定义工具**：用户/开发者编写的领域工具
+- **统一契约**：每个工具声明 `input_schema` + `output_schema` + `render`（前端渲染意图）。工具执行后按 `output_schema` fail-closed 校验；前端按 `render` 路由渲染结果卡片；MCP 对外下发同一契约。
+- **执行**：工具调用由管道 core 步的 `pipeline_tool_core`（Rust 原生插件）执行，大输出经 `pipeline_spill_guard` 落盘兜底（`spill_retrieve` 为框架强制工具）。
+- **分类来源**：内置工具插件（26 个）／外部 MCP 工具（零代码接入）／用户根自研插件。
+- **工具面控制**：Agent 的 `tool_ids` 白名单 + 层级守卫（level_guard 拦截越级任务类工具）+ 安全守卫（security_check 判定路径/危险工具审批/隔离放行）。
 
 ### 记忆系统
 
-#### 两种记忆类型
-
-- **情景记忆（EPISODE）**：对话压缩后的记忆，保留对话要点而非逐轮原文，会话切换不丢失
-- **语义记忆（SEMANTIC）**：沉淀用户偏好、项目关键决策、外部知识库导入等，下次开新会话也能调用
-
-#### 检索 × 注入（设计能力与上线状态）
-
-设计上支持**三种检索方式** × **三种注入方式**的灵活组合，当前上线状态如下（✅ 已上线 / 🚧 规划中，后续版本发布）：
-
-| 注入\检索 | VECTOR（向量语义） | KEYWORD（关键词） | TAGWAVE（标签联想） |
-|-----------|--------|---------|---------|
-| FULL（全量注入） | 🚧 | ✅ 全量关键词匹配 | ✅ 全量标签联想 |
-| RETRIEVAL（按需检索） | 🚧 | 🚧 | 🚧 |
-| SUMMARY（摘要注入） | 🚧 | 🚧 | 🚧 |
-
-> **当前实现**：关键词检索、标签检索 + 全量注入。向量语义检索、按需/摘要注入尚未上线。
+- **情景记忆（EPISODE）**：对话压缩后的记忆，保留要点而非逐轮原文，会话切换不丢失。
+- **语义记忆（SEMANTIC）**：沉淀用户偏好、项目决策、外部知识导入，跨会话可用。
+- **0.2 落位**：记忆服务由 `hindsight_memory` 系统插件承载，LLM 侧经 `memory` 工具读写；管道侧 `pipeline_memory_read` 在 prepare 步按需注入。检索与注入策略由 hindsight 插件自持配置。
 
 ### 配置系统
 
-- **静态变量**（`static_vars`）：会话级不变，比如项目根路径、Agent 速查表
-- **动态变量**（`dynamic_vars`）：每轮变化，比如当前时间戳、用户偏好
-- **外部文件引用**：`{{path:...}}` 语法引用外部 Markdown / JSON，避免大段文本塞进 YAML
-- **环境变量插值**：`${ENV_VAR}` 在加载时替换
+- **ConfigCenter 单一真相源**（内核 `config` crate）：优先级 remote > env > yaml > manifest > hardcode；mtime 缓存热更新；具体配置加载失败不阻断内核启动（panic 降级 warn + 空配置），管道级配置失败才阻塞。
+- **配置目录**（`config/`）：agents（Agent 定义）、pipelines（管道编排）、plugins（启用档案 `default_profile.yaml`）、models（LLM/向量模型）、isolation（工作空间/隔离）、evaluation（评估指标）、rules / skills / templates 等。
+- **按需注入**：插件经 manifest `config_files` / `config_refs` 声明要哪些配置节，握手时注入，未声明收空配置。
 
-### 通道层（Channels）
+### 任务系统与评估闸门
 
-所有通道走同一个**网关层**。接一个新的 IM 平台，只需在 `src/channels/` 下加一个适配器，业务逻辑零改动。
+任务质量的硬约束，确保质量不被跳过：
 
-```
-src/channels/
-├── websocket/    # WebSocket 后端（Web UI 后端，主入口 app_factory.py）
-├── cli/          # CLI
-├── api/          # HTTP API（FastAPI，21 个 routes_*.py）
-├── gateway/      # 网关层（鉴权 / 消息标准化 / 会话路由）
-├── dingtalk/     # 钉钉适配器（实验性，未充分测试）
-├── feishu/       # 飞书适配器（实验性，未充分测试）
-├── wecom/        # 企微适配器（实验性，未充分测试）
-└── qq/           # QQ 适配器（实验性，未充分测试）
-```
-
-### 容器任务系统
-
-对于"开发一个 App""写一部网络小说""做一个游戏"这类**多阶段、有交付物**的大任务，容器任务提供完整闭环：
-
-```
-创建容器
-  → solution_planning_agent 制定方案
-  → 人类审查（human_review）确认方案
-  → 按任务链执行（code_writer / test / verify ...）
-  → 每个里程碑都有人类审查
-  → trigger_setup 周期性巡检
-  → container_verification_agent 逐条核验 AC
-  → 通知用户确认
-  → 关闭容器
-```
+- **提交即带指标**：`task_submit` 提交任务须带评估指标（acceptance criteria）；可从 Agent 的 `recommended_metrics` 自动补全。
+- **评估裁决在插件**：`task_evaluate` 工具（`plugins/shared/system/evaluation/`）执行评估；管道 output 步 `pipeline_task_reminder` 是放行闸门——提醒耗尽仍无评估证据 → 任务标 `pending_evaluation`，不落 completed；有证据内核才补落默认 completed。
+- **容器任务**：对"开发一个 App""写一部小说"这类多阶段大任务，提供方案规划 → 阶段执行 → 人类审查 → 完成验收闭环；容器只组织子任务链（`parent_task_id` 传递），不直接执行。
+- **任务状态**：task = pipeline state 单一真值，状态由任务域插件经 pipeline-state 写面裁决。
 
 ### 隔离与工作区（Isolation & Workspace）
 
-容器任务的每一步都运行在**隔离环境**中，由 `src/isolation/` 提供统一抽象：
+每个任务默认运行在**独立隔离工作区**（`workspace/{task_id}`）：
 
-- **隔离级别**：`IsolationLevel`（CONTAINER / HOST）。`IsolationDecider` 按工具维度决策，**默认 CONTAINER**；当配置要求的级别在当前环境不可用时**拒绝降级**（抛 `IsolationError`），避免跨容器污染。
-- **Provider**：`DockerProvider`（真实 Docker CLI 集成，`docker create` 带 `--init`/`--cpus`/`--memory`/`--pids-limit`/网络/端口/-v 挂载，按任务复用容器、任务结束销毁）与 `HostProvider`（宿主直接执行，需显式配置 + 人工批准）。
-- **工作区生命周期**：`WorkspaceLifecycleManager` 为每个任务准备独立工作目录，支持 `worktree` / `shared` / `plain` / `project_root` / `container` 等模式。
-
-**Git Worktree 分叉**：多任务场景下，每个任务在 `task/{task_id}` 分支上分叉出独立 worktree（`_worktree_add_with_repair` 含 prune-and-retry），大仓走 sparse-checkout；worktree 创建前对项目根做 auto-save 提交以避免带入脏改动；任务完成前 `merge_worktree_before_complete` 合并回主工作区，清理时移除 worktree 与分支。并发任务因此互不抢占文件系统，副作用可在 worktree 边界审查与回滚。
-
-### 复盘与记忆维护（Review & Memory Maintenance）
-
-系统内置「**复盘 → 沉淀 → 回收**」闭环，位于 `src/memory/maintenance/`：
-
-- **触发**：`trigger_review` 工具（`src/tools/builtin/trigger_review/tool.py`）解析父 `pipeline_id` 后调用 `MemoryMaintenanceService.trigger_llm_review()`；另有 REST 入口 `POST /api/v1/maintenance/review`。带自环保护（复盘管道内不再触发）与单运行守卫。
-- **执行**：服务收集所有 `review_status=pending` 的已结束管道，按 Agent/状态分组，按 token 预算（模型上下文窗口 × `skeleton_budget_percent`，默认 15%，上限 `review_batch_limit`=10）分批，每批注册并启动子 `review_agent` 管道，注入目标清单 + 被复盘 Agent 的硬/软约束。
-- **产出**：拉取报告（轮询上限 ~600s）→ 持久化到 KnowledgeService **并**写入运行时工作区的复盘报告（`review_report_{id}.md`）→ 标记管道已复盘 → 回调通知父管道。
-- **记忆清理**：周期性触发器 `memory_maintenance_check`（间隔 `cleanup_check_interval`，默认 86400s）驱动 `CleanupEngine.cleanup_by_age_and_capacity()`，按**复盘状态 × 年龄 × 容量**三维矩阵决策：
-
-  | 复盘状态 | 年龄 | 容量 | 动作 |
-  |---------|------|------|------|
-  | 已复盘 | > 30 天（`cleanup_min_age_days`） | — | 删除 L0 + L1 |
-  | 已复盘 | > 7 天（`cleanup_early_age_days`） | > 80%（`cleanup_capacity_threshold`） | 仅删除 L0 |
-  | 未复盘 | > 30 天 | — | 直接删除 L0 + L1 |
-  | 其他 | — | — | 保留 |
-
-  清理按体积分层（先 L0 大 YAML，条件性 L1 压缩块，再关联 Episode；**Knowledge 永不删除**），删除后重建向量索引。容量压力按数据目录 YAML 总大小 / 1 GB 上限估算。
+- **决策链**：prepare 步 `pipeline_isolation_guard` 按工具/路径决策隔离级别并写 `execution_contexts`；`pipeline_security_check` 复核（路径遍历/敏感目录/危险工具审批）；init/exit 步 `pipeline_workspace_lifecycle` / `pipeline_environment_lifecycle` 管工作区与环境生命周期。
+- **隔离级别**：默认文件夹隔离，高风险路径走 Docker 容器隔离（isolation 系统插件提供 Provider 抽象）。
+- **Git worktree**：多任务场景可为任务分叉独立 worktree，副作用在 worktree 边界审查与回滚；无 workspace 语义则无 worktree 模式。
 
 ### 触发器系统（Triggers）
 
-让灵汐无人值守自动运行。位于 `src/triggers/`：
-
-- **触发器类型**：Cron 定时触发、事件触发（订阅 EventBus）、间隔触发
-- **注册与调度**：`TriggerRegistry` 从 `config/triggers/` 加载，`TriggerManager` 经 ServiceProvider 拿到管道引擎执行
-- **自动订阅**：触发器启动时自动订阅事件总线，事件命中即派发任务到管道
+无人值守自动运行：定时（Cron）、事件、间隔触发。LLM 侧经 `trigger_setup` / `trigger_review` 工具注册管理（工具插件承载），可绑定特定管道；触发后按任务复杂度直接执行或派发。
 
 ### 审批交互闭环（Approval Loop）
 
-人机协同的质量闸，构成"生成→审批→反馈→迭代"闭环：
+人机协同的质量闸，"生成 → 审批 → 反馈 → 迭代"闭环：
 
-- **双审批模式**：`choice`（预设选项快速决策）/ `conversation`（多轮自由讨论），均支持自由文本输入
-- **管道暂停/恢复**：`wait` 路由信号挂起管道并保存 state 快照，外部事件 `wake()` 恢复
-- **反馈注入**：审批结果（通过/驳回/批注）注入管道 state，驱动 AI 返工
-- **任务打回重做**：任务状态机支持打回，重新进入执行
-- **版本对比**：`ReviewDiff` 组件（LCS 算法 side-by-side/unified）+ 后端 `get_version_diff` API + `annotation_service` 批注 CRUD 已具备
+- **双审批模式**：`choice`（预设选项）/ `conversation`（多轮讨论），经 human-interaction 能力（`tools/human` + `system/approval` 插件群协作）。
+- **管道挂起/恢复**：`wait` 路由信号挂起管道并保存 state，外部事件恢复执行。
+- **反馈注入**：审批结果（通过/驳回/批注）注入管道 state，驱动 Agent 返工。
 
-> 文本审批闭环已上线。审批请求携带制品（artifacts）的协议增强与工作区自动联动待补全（详见 [ROADMAP.md](../ROADMAP.md)）。
+### 复盘系统（Review）
 
-### 强制评估系统（Mandatory Evaluation）
+任务执行后的 LLM 深度复盘：`trigger_review` 工具触发，`review` 系统插件编排复盘管道，产出经验报告沉淀到知识库；配套记忆清理按「复盘状态 × 年龄 × 容量」决策，确保复盘产出沉淀后再回收原始记忆——系统越用越聪明的自进化闭环一环。
 
-任务质量的硬约束，确保质量不被跳过。位于 `src/evaluation/` + `src/infrastructure/task_post_pipeline.py`：
+### 主题与前端定制
 
-- **提交即带指标**：`task_submit` 提交任务时须同时提交评估指标（acceptance criteria），校验指标 ID 合法性；支持从 Agent 的 `recommended_metrics` 自动补全
-- **强制门控**：管道退出后若任务仍 RUNNING 且有产出，`task_post_pipeline.py` 强制 `move_to_evaluating` 并重跑评估——即使 Agent 不主动调 `task_evaluate` 也会被强制审查
-- **按指标审查**：`EvaluationEngine` 分发 tool / agent / human 三类评估（`evaluator_agent` 执行单指标评估）；指标定义在 `config/evaluation_metrics/`（file_check / bash_check / human_review / semantic_check）
-- **结果约束**：指标全过 → COMPLETED；失败未耗尽 → 反馈重试；失败耗尽 → FAILED
-- **容器级验证**：`container_verification_agent` 做端到端验证-修复闭环（最多 3 轮）
+- **主题双轨**：前端预设（`frontend/src/config/themes/presets/`，7 套）+ 插件主题（manifest `contributes.themes` CSS 变量包，可带 skin 皮肤），另有动态 JSON 主题与用户自定义。
+- **前端贡献通道**：`ui_schema`（页面/表单 schema 驱动）、`contributes`（主题/样式/页面）、`http_endpoints`（`/ext/{plugin_id}/**` 前端可达的 HTTP 面）。
 
-### Skill 能力集成
-
-可加载、可复用的技能（skill）包，按需注入 Agent 扩展领域能力。位于 `src/skills/`：
-
-- **发现**：`SkillRegistry` 扫描 `skills/` 根目录（`DEFAULT_SKILL_ROOTS`）发现技能
-- **按需注入**：技能可在 Agent 配置中声明引用，运行时注入对应能力
-- **领域扩展**：无需改代码即可获得新领域能力（如文档处理 docx、PDF 生成 pdf 等）
+见 [guides/theme-development.md](guides/theme-development.md) 与 [skin-plugin.md](skin-plugin.md)。
 
 ---
 
@@ -349,55 +209,49 @@ src/channels/
 ### 场景：用户问"项目里昨天那个 bug 改了吗？"
 
 ```
-1. 通道层（Web UI）
-   └─ 用户发送消息 → WebSocket 推送到后端
+1. 前端（Web UI）
+   └─ 用户发送消息 → WebSocket/HTTP → 内核 chat 入口
 
-2. 网关层
-   ├─ 鉴权 / 限流
-   ├─ 标准化消息格式
-   └─ 路由到目标会话
+2. 管道出生（init 循环体）
+   └─ workspace/environment 插件解析执行上下文 → state.workspace / state.environment_basis
 
-3. 管道引擎
-   ├─ 加载对话历史（情景记忆 EPISODE）
-   └─ Input 插件链
-       ├─ 动态变量注入（当前时间戳、项目路径、用户偏好）
-       ├─ 提示词构建
-       └─ 语义记忆检索（关键词/标签检索）
-   └─ LLM 调用（流式）
-       ├─ 推理：决定调用 enhanced_search + file_read
-       └─ Output 插件：路由信号 = next_tool
+3. main 循环体 · prepare（Input 插件链）
+   ├─ context_build：按 state.agent_id 加载 Agent yaml → context.system_prompt / tool_ids
+   ├─ tool_schema：按 tool_ids 白名单注入工具 schema
+   ├─ memory_read：检索情景/语义记忆（关键词/标签）
+   └─ prompt_build：分层组装提示词（system_prompt / tools / static_vars / 记忆 / 历史 / dynamic_vars）
 
-4. 工具执行
-   ├─ enhanced_search("昨天那个 bug")
-   ├─ 命中：src/auth/login.py:42 的修复
-   └─ file_read 验证 → 结果回传
+4. main 循环体 · core（pipeline_llm_core，流式）
+   ├─ LLM 推理：决定调用 enhanced_search + file_read
+   └─ post：出口路由命中 raw_tool_calls != [] → set core_type=tool_execute → loop
 
-5. 管道引擎（第二轮）
-   ├─ LLM 收到工具结果
-   └─ Output 插件：路由信号 = end
+5. 工具轮（pipeline_tool_core）
+   ├─ security_check / isolation_guard 放行
+   ├─ enhanced_search("昨天那个 bug") → 命中修复提交
+   └─ file_read 验证 → tool_results 回写 state
 
-6. 流式响应
-   └─ 推送到前端 → "已修复，在 src/auth/login.py:42。"
+6. 回到 LLM 轮 → LLM 收到工具结果生成文本回复 → 路由 end
+
+7. exit 循环体：workspace 收尾；流式响应（block 协议）推送前端渲染
 ```
 
 ---
 
 ## 扩展点
 
-> ℹ️ **0.2 更新**：在 0.2 架构中，工具 / 连接器 / Agent / 通道等扩展点已**统一收敛到 `plugin.json` 插件协议**之下（双根发现、按需加载、能力注册）。开发新插件请直接阅读 [插件协议开发者文档](plugin-protocol.md)。下表保留 0.1 的扩展点清单作为概念对照。
+所有扩展统一收敛到 `plugin.json` 插件协议与 YAML 配置：
 
-| 扩展点 | 怎么做 | 涉及文件 |
-|--------|--------|----------|
-| 新增 Agent | 写 YAML | `config/agents/*.yaml` |
-| 新增内置工具 | 实现 Tool 协议 + 注册 | `src/tools/builtin/` |
-| 新增 MCP 服务 | 启动 MCP Server + 配置 | `mcp-servers/` |
-| 新增 IM 通道 | 继承 `BaseComboAdapter` 实现 `adapter.py` | `src/channels/<platform>/` |
-| 新增前端主题 | 写 TS 主题对象（预设）或 JSON（动态） | `frontend/src/config/themes/presets/` 或 `frontend/public/themes/` |
-| 新增 Schema 表单 | 写 JSON Schema | 任何 `ui_schema` 字段 |
-| 新增 Skill | 写技能包（含 SKILL.md + 实现）放到 skill 根目录 | `skills/` |
-| 新增触发器类型 | 继承 `src/triggers/triggers/base.py` 基类 | `src/triggers/triggers/` |
-| 新增审批视图 | 注册 review Widget + ui_schema 路由 | `frontend/src/components/review/`、`config/ui/modules/` |
-| 自定义路由信号 | 扩展 `engine_route.py` 的路由分支 | `src/pipeline/engine_route.py` |
+| 扩展点 | 怎么做 | 参考 |
+|--------|--------|------|
+| 新增 LLM 工具 | 写 tool 插件（manifest + server.py + uv venv），启用并加进 Agent `tool_ids` | [guides/plugin-sidecar-python.md](guides/plugin-sidecar-python.md) |
+| 零代码接第三方工具 | external MCP manifest（HTTP 远程 / 本地命令） | [guides/plugin-external-mcp.md](guides/plugin-external-mcp.md) |
+| 高性能管道步骤 | Rust cdylib 原生插件（in_process） | [guides/plugin-native-rust.md](guides/plugin-native-rust.md) |
+| 新增 Agent | `config/agents/` 对应层级写 yaml | [guides/agent-configuration.md](guides/agent-configuration.md) |
+| 调整管道编排 | 改 `config/pipelines/autonomous.yaml`（重启内核） | [guides/pipeline-configuration.md](guides/pipeline-configuration.md) |
+| 新增前端预设主题 | `frontend/src/config/themes/presets/` + index.ts 注册 | [guides/theme-development.md](guides/theme-development.md) |
+| 随插件分发主题/皮肤 | manifest `contributes.themes` | [guides/theme-development.md](guides/theme-development.md) |
+| 新增前端页面/表单 | manifest `ui_schema` / `http_endpoints` | [plugin-protocol.md](plugin-protocol.md) |
+| 插件间服务依赖 | manifest `requires_services`（能力角色名） | [plugin-protocol.md](plugin-protocol.md) |
 
 ---
 
@@ -408,30 +262,32 @@ src/channels/
 ### 1. 找"散"——同一个概念在代码里出现了几次？
 > 多次出现 → 抽象缺失，需要统一封装。
 
-**例**：原本工具的 `when_to_use` 在 5 个地方各自实现，统一抽象到 `Tool` 基类后由子类覆写。
+**例**：工具输出契约（schema/render）从工具实现、内核校验、前端渲染、MCP 下发四处各自为政，收敛为 manifest 单点声明、四端共消费。
 
 ### 2. 找"分叉点"——调用方为了同一个操作需要判断几种情况？
 > 调用方有分叉 → 抽象边界错误，应封装在模块内部。
 
-**例**：原本各通道自己判断消息类型，封装到 `ChannelAdapter` 后调用方只需 `await adapter.send_message(msg)`。
+**例**：管道引擎不感知插件是 Python 边车还是 Rust 原生——invoker 按 host_type 透明分发，引擎只面对统一的能力协议。
 
 ### 3. 找"谁该知道"——每个概念，谁需要知道它？
 > 不该知道的人知道了 → 边界泄漏，需收回。
 
-**例**：路由信号的细节原本对工具层可见，重构后工具只关心 `execute()` 的输入输出。
+**例**：Agent 全量配置只有 context_build 插件消费，内核只留 `tool_ids` 窄接口——内核不需要知道提示词骨架与静态变量。
 
 ### 4. 找"变化方向"——什么会变，什么不会变？
 > 把"会变的"封装在内部，"不变的"暴露为接口。
 
-**例**：LLM Provider 实现会变（新增厂商、切换 API），但"调用 LLM 返回文本"这个动作不变。所以 Provider 实现藏在 `src/llm/`（及 `provider_adapters/`）内部，外部只看到 `llm.complete(messages)`。
+**例**：LLM Provider 会变（新增厂商、切换 API），但"调用 LLM 返回流式结果"这个动作不变——Provider 实现藏在 llm_service 插件内部，外部只看到 `llm.complete_stream`。
 
 ---
 
 ## 进一步阅读
 
-- [ROADMAP.md](../ROADMAP.md) —— 版本路线图与未来方向
+- [plugin-protocol.md](plugin-protocol.md) —— 插件协议权威文档
+- [guides/README.md](guides/README.md) —— 开发指南索引
+- [ROADMAP.md](../ROADMAP.md) —— 版本路线图与被否方案索引
 - [CONTRIBUTING.md](../CONTRIBUTING.md) —— 贡献流程
-- [CHANGELOG.md](../CHANGELOG.md) —— 版本变更记录
+- [decisions/](decisions/) —— ADR 决策记录（任何非平凡决策的背景/决策/被否方案/影响）
 
 ---
 
