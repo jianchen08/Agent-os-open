@@ -108,7 +108,10 @@
  * 链接样式
  * ======================================== */
 .markdown-content .md-link {
-  color: hsl(var(--primary));
+  /* --bubble-link：主题编译期按用户气泡面算出的可读链接色（多数主题的
+     气泡面即主色或其反转，hsl(--primary) 在面上同色/低对比不可读）；
+     引擎未运行时回退页面主色 */
+  color: var(--bubble-link, hsl(var(--primary)));
   text-decoration: underline;
   text-underline-offset: 2px;
   transition: opacity 0.15s;

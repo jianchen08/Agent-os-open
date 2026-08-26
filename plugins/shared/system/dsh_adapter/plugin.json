@@ -256,6 +256,7 @@
           "--ring": "227 39% 47%",
           "--bubble-user-bg": "#4a5fa8",
           "--bubble-user-text": "#e1e2e7",
+          "--bubble-link": "#ffffff",
           "--bubble-ai-bg": "color-mix(in srgb, #e8ecf5 80%, transparent)",
           "--bubble-ai-text": "#222b4d"
         },
@@ -312,6 +313,7 @@
           "--ring": "186 100% 50%",
           "--bubble-user-bg": "#00e5ff",
           "--bubble-user-text": "#465a5e",
+          "--bubble-link": "#000000",
           "--bubble-ai-bg": "color-mix(in srgb, #04060d 80%, transparent)",
           "--bubble-ai-text": "#bdf3ff"
         },
@@ -368,6 +370,7 @@
           "--ring": "219 74% 53%",
           "--bubble-user-bg": "#2d6cdf",
           "--bubble-user-text": "#ffffff",
+          "--bubble-link": "#ffffff",
           "--bubble-ai-bg": "color-mix(in srgb, #f4f8f7 80%, transparent)",
           "--bubble-ai-text": "#2058bd",
           "--font-ui": "-apple-system, BlinkMacSystemFont, \"Segoe UI\", \"PingFang SC\", \"Microsoft YaHei\", sans-serif"
@@ -414,6 +417,7 @@
           "--ring": "358 67% 46%",
           "--bubble-user-bg": "#c3272b",
           "--bubble-user-text": "#ece7e7",
+          "--bubble-link": "#ffffff",
           "--bubble-ai-bg": "color-mix(in srgb, #f4efe4 80%, transparent)",
           "--bubble-ai-text": "#4a1f1a"
         },
@@ -470,6 +474,7 @@
           "--ring": "228 42% 50%",
           "--bubble-user-bg": "#4a5fa8",
           "--bubble-user-text": "#e1e2e7",
+          "--bubble-link": "#ffffff",
           "--bubble-ai-bg": "color-mix(in srgb, #e8ecf5 80%, transparent)",
           "--bubble-ai-text": "#222b4d"
         },
@@ -526,6 +531,7 @@
           "--ring": "24 100% 68%",
           "--bubble-user-bg": "#ff9d5c",
           "--bubble-user-text": "#494642",
+          "--bubble-link": "#000000",
           "--bubble-ai-bg": "color-mix(in srgb, #141a2e 80%, transparent)",
           "--bubble-ai-text": "#fff3e6"
         },
@@ -582,6 +588,7 @@
           "--ring": "39 44% 59%",
           "--bubble-user-bg": "#e8edf9f2",
           "--bubble-user-text": "#172347",
+          "--bubble-link": "#000000",
           "--bubble-ai-bg": "#f8fafff0",
           "--bubble-ai-text": "#172347",
           "--chat-input-bg": "#fffdf8d1"
@@ -628,6 +635,7 @@
           "--ring": "151 100% 45%",
           "--bubble-user-bg": "#00e676",
           "--bubble-user-text": "#00552c",
+          "--bubble-link": "#000000",
           "--bubble-ai-bg": "color-mix(in srgb, #040805 80%, transparent)",
           "--bubble-ai-text": "#00e676",
           "--font-ui": "\"Menlo\",\"Consolas\",\"JetBrains Mono\",\"Source Code Pro\",\"PingFang SC\",\"Microsoft YaHei\",monospace"
@@ -674,6 +682,7 @@
           "--ring": "209 100% 59%",
           "--bubble-user-bg": "#2e9bff",
           "--bubble-user-text": "#0b2d57",
+          "--bubble-link": "#000000",
           "--bubble-ai-bg": "color-mix(in srgb, #eef5ff 80%, transparent)",
           "--bubble-ai-text": "#124a8f",
           "--font-ui": "\"PingFang SC\", \"Microsoft YaHei\", \"Hiragino Sans GB\", \"Helvetica Neue\", \"Segoe UI\", sans-serif"
@@ -731,6 +740,7 @@
           "--ring": "94 46% 52%",
           "--bubble-user-bg": "#83c94e",
           "--bubble-user-text": "#304a1d",
+          "--bubble-link": "#000000",
           "--bubble-ai-bg": "color-mix(in srgb, #18221b 80%, transparent)",
           "--bubble-ai-text": "#83c94e",
           "--font-ui": "\"Courier New\", \"PingFang SC\", \"Microsoft YaHei\", \"SimSun\", monospace"
@@ -777,6 +787,7 @@
           "--ring": "160 61% 47%",
           "--bubble-user-bg": "#2fbf8f",
           "--bubble-user-text": "#0d3b2a",
+          "--bubble-link": "#000000",
           "--bubble-ai-bg": "color-mix(in srgb, #f4faf7 80%, transparent)",
           "--bubble-ai-text": "#0d3b2a"
         }
@@ -822,6 +833,7 @@
           "--ring": "185 73% 65%",
           "--bubble-user-bg": "#67DCE7",
           "--bubble-user-text": "#404849",
+          "--bubble-link": "#000000",
           "--bubble-ai-bg": "color-mix(in srgb, #071321 80%, transparent)",
           "--bubble-ai-text": "#dcf8fa"
         },
@@ -878,6 +890,7 @@
           "--ring": "355 88% 58%",
           "--bubble-user-bg": "#e02e3d",
           "--bubble-user-text": "#000000",
+          "--bubble-link": "#000000",
           "--bubble-ai-bg": "color-mix(in srgb, #eef1f5 80%, transparent)",
           "--bubble-ai-text": "#af2430",
           "--font-ui": "\"PingFang SC\", \"Hiragino Sans GB\", \"Microsoft YaHei\", \"WenQuanYi Micro Hei\", \"Segoe UI\", sans-serif"
@@ -924,6 +937,7 @@
           "--ring": "40 67% 54%",
           "--bubble-user-bg": "#4ca2e0",
           "--bubble-user-text": "#2c2e35",
+          "--bubble-link": "#000000",
           "--bubble-ai-bg": "color-mix(in srgb, #16244a 80%, transparent)",
           "--bubble-ai-text": "#c3ceea"
         },
@@ -980,6 +994,7 @@
           "--ring": "211 61% 57%",
           "--bubble-user-bg": "#4d8fd4",
           "--bubble-user-text": "#0e2242",
+          "--bubble-link": "#000000",
           "--bubble-ai-bg": "color-mix(in srgb, #d0e8f8 80%, transparent)",
           "--bubble-ai-text": "#122b54"
         },
@@ -1036,6 +1051,7 @@
           "--ring": "217 60% 48%",
           "--bubble-user-bg": "#6da8e8",
           "--bubble-user-text": "#1f3043",
+          "--bubble-link": "#000000",
           "--bubble-ai-bg": "color-mix(in srgb, #2c66b8 80%, transparent)",
           "--bubble-ai-text": "#deecfa",
           "--font-ui": "Tahoma, \"Microsoft YaHei\", \"PingFang SC\", \"SimSun\", \"宋体\", sans-serif"

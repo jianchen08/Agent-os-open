@@ -49,8 +49,11 @@ export const highContrastTheme: ThemeConfig = {
     },
 
     bubble: {
-      user_bg: '#ffffff',
-      user_text: '#000000',
+      // 用户气泡黑底白字白描边（AAA 21:1）：主色即白色，白色链接
+      // hsl(--primary) 在白面上不可见——反转为黑面后恒可读；
+      // AI 面维持深灰底白字族
+      user_bg: '#000000',
+      user_text: '#ffffff',
       user_radius: '0.25rem',
       user_shadow: 'none',
       user_border: '2px solid #ffffff',

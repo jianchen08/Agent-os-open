@@ -50,10 +50,13 @@ export const oceanBreezeTheme: ThemeConfig = {
     },
 
     bubble: {
-      user_bg: 'linear-gradient(135deg, #045468 0%, #023b37 50%, #084843 100%)',
-      user_text: '#ffffff',
+      // 用户气泡与聊天区同族浅青渐变 + 深海绿文字：清新浅底主题里气泡内
+      // 的页面级内容色（链接 hsl(--primary)/行内码 hsl(--muted)）保持可读，
+      // 不再压近黑重面（曾自深空复制暗渐变，链接近不可读且与主题脱节）
+      user_bg: 'linear-gradient(135deg, #d8f4ec 0%, #c6ede3 55%, #bceadd 100%)',
+      user_text: '#0d3d38',
       user_radius: '1.25rem 1.25rem 1.25rem 0.25rem',
-      user_shadow: '0 4px 14px rgba(13, 155, 154, 0.25)',
+      user_shadow: '0 3px 10px rgba(13, 155, 154, 0.18)',
       ai_bg: '#e1f6fd',
       ai_text: '#0d3d38',
       ai_radius: '1.125rem 1.125rem 1.125rem 0.25rem',

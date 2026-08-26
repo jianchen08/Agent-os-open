@@ -55,8 +55,11 @@ export const pixelArtTheme: ThemeConfig = {
     },
 
     bubble: {
-      user_bg: '#1d2b53',
-      user_text: '#fff1e8',
+      // 用户气泡走像素正统"实线描边泡"：暖白面 + 藏青描边 + 硬阴影，
+      // 不用藏青大面积铺色（亮色点睛、中性打底）；气泡内页面级内容色
+      // （链接 hsl(--primary)/行内码 hsl(--muted)）与全站同底同读
+      user_bg: '#ffead8',
+      user_text: '#1d2b53',
       user_radius: '2px',
       user_shadow: '3px 3px 0 rgba(29, 43, 83, 0.35)',
       user_border: '2px solid #1d2b53',

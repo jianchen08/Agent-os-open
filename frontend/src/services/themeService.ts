@@ -89,6 +89,25 @@ export function compileThemeVariables(config: ThemeConfig): string {
   vars.push(`--bubble-user-text: ${config.colors.bubble.user_text}`)
   vars.push(`--bubble-ai-bg: ${config.colors.bubble.ai_bg}`)
   vars.push(`--bubble-ai-text: ${config.colors.bubble.ai_text}`)
+  // 气泡内链接色：多数主题的用户气泡面就是主色或其反转，markdown 链接
+  // 若取页面主色在面上同色/低对比不可读。主色对面 ≥3.0 保用主色（保品
+  // 牌识别），否则黑白择优兜底；未发射时 CSS 回退 hsl(--primary)。
+  const userFaceSolid =
+    colorToRgb(config.colors.bubble.user_bg) ??
+    (() => {
+      const solid = extractSolidFromGradient(config.colors.bubble.user_bg)
+      return solid ? hexToRgb(solid) : null
+    })()
+  if (userFaceSolid) {
+    const primaryRgb = colorToRgb(config.colors.primary)
+    vars.push(
+      `--bubble-link: ${
+        primaryRgb && wcagRatio(primaryRgb, userFaceSolid) >= 3
+          ? config.colors.primary
+          : contrastPick(config.colors.bubble.user_bg)
+      }`,
+    )
+  }
   if (config.colors.bubble.user_radius) {
     vars.push(`--bubble-user-radius: ${config.colors.bubble.user_radius}`)
   }
@@ -836,6 +855,23 @@ function colorToRgb(color: string): { r: number; g: number; b: number } | null {
 
   const solidFromGradient = extractSolidFromGradient(color)
   return solidFromGradient ? hexToRgb(solidFromGradient) : null
+}
+
+/**
+ * 两实色的 WCAG 对比度（2.2:1..21:1），气泡内链接保底判据用
+ */
+function wcagRatio(a: { r: number; g: number; b: number }, b: { r: number; g: number; b: number }): number {
+  const lum = (c: { r: number; g: number; b: number }) => {
+    const ch = [c.r, c.g, c.b].map((v) => {
+      const n = v / 255
+      return n <= 0.03928 ? n / 12.92 : ((n + 0.055) / 1.055) ** 2.4
+    })
+    return 0.2126 * ch[0] + 0.7152 * ch[1] + 0.0722 * ch[2]
+  }
+  const la = lum(a)
+  const lb = lum(b)
+  const [hi, lo] = la >= lb ? [la, lb] : [lb, la]
+  return (hi + 0.05) / (lo + 0.05)
 }
 
 /**

@@ -907,6 +907,7 @@ def _resolve_bubble_variables(
     dark: bool,
     canvas_str: str,
     canvas_rgb: tuple[int, int, int] | None,
+    accent_rgb: tuple[int, int, int] | None = None,
 ) -> dict[str, str]:
     """皮肤气泡令牌定稿：底色 + 配对文字成对发射。
 
@@ -925,6 +926,10 @@ def _resolve_bubble_variables(
 
     配对文字 = 面实色上强制 ≥4.5。任一侧无法静态判定时该侧整对跳过
     （保留内置成对值透传），不做拆对发射。
+
+    另发 --bubble-link（气泡内 markdown 链接专用）：用户面常为品牌面，
+    页面主色/品牌装饰色在面上同族低对比——强调色对面 ≥3.0 保用原值，
+    否则按面亮度黑白择优。
     """
     out: dict[str, str] = {}
 
@@ -938,7 +943,15 @@ def _resolve_bubble_variables(
     if user_face is None:
         brand_raw = _pick_skin_alias(css, "--dsw-alias-brand-primary", dark)
         user_face = _resolve_var_ref(css, brand_raw) if brand_raw else None
-    _emit("user", user_face, _face_solid_rgb(user_face, canvas_rgb) if user_face else None)
+    user_solid = _face_solid_rgb(user_face, canvas_rgb) if user_face else None
+    _emit("user", user_face, user_solid)
+    if user_solid is not None:
+        # 气泡内链接色：强调色对面 ≥3.0 保用原值（保品牌识别），否则黑白择优
+        if accent_rgb is not None and _wcag_ratio(accent_rgb[:3], user_solid) >= 3.0:
+            out["--bubble-link"] = _rgb_to_hex(accent_rgb[:3])
+        else:
+            black_or_white = (255, 255, 255) if _wcag_luminance(user_solid) < 0.179 else (0, 0, 0)
+            out["--bubble-link"] = _rgb_to_hex(black_or_white)
 
     ai_face = extracted.get("--bubble-ai-bg")
     if ai_face is None and canvas_str and canvas_rgb is not None:
@@ -1175,6 +1188,7 @@ def skins_to_plugin_themes(base_dir: str | Path | None = None) -> list[dict[str,
                 bubble_extracts, css, dark=(base == "dark"),
                 canvas_str=canvas,
                 canvas_rgb=canvas_rgb[:3] if canvas_rgb is not None else None,
+                accent_rgb=accent_rgb[:3] if accent_rgb is not None else None,
             )
         )
         # 非气泡类提取令牌（--chat-input-bg 等）原样透传：成对定稿只管

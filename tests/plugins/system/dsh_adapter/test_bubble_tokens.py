@@ -97,6 +97,30 @@ def test_bubble_tokens_paired_and_readable(tid):
 
 
 @pytest.mark.parametrize("tid", ALL_SKIN_IDS)
+def test_bubble_link_readable_on_user_face(tid):
+    """气泡内链接令牌：对用户面实色 ≥3（保用强调色或黑白择优两通道皆保证）。"""
+    variables = THEMES[tid]["variables"]
+    link = variables["--bubble-link"]
+    assert re.fullmatch(r"#[0-9a-fA-F]{6}", link), f"{tid} 链接色非 hex: {link}"
+    face = _face_solid_of(variables["--bubble-user-bg"], variables["--ds-bg-canvas"])
+    assert _ratio(link, face) >= 3, f"{tid} 链接 {link} 对面 {face} 不可读"
+
+
+def _face_solid_of(user_bg: str, canvas: str) -> str:
+    """面实色近似（与实现同口径：半透明合成到画布），独立解析。"""
+    m = re.fullmatch(r"#([0-9a-fA-F]{6})([0-9a-fA-F]{2})?", user_bg.strip())
+    if m and not m.group(2):
+        return user_bg.strip().lower()
+    fr, fg_, fb, fa = _hex_to_rgba(user_bg)
+    cr, cg, cb, _ = _hex_to_rgba(canvas)
+    return "#{:02x}{:02x}{:02x}".format(
+        round(fr * fa + cr * (1 - fa)),
+        round(fg_ * fa + cg * (1 - fa)),
+        round(fb * fa + cb * (1 - fa)),
+    )
+
+
+@pytest.mark.parametrize("tid", ALL_SKIN_IDS)
 def test_no_builtin_paint_leak(tid):
     """皮肤下的用户/AI 气泡面不得是内置主题涂料残留。"""
     variables = THEMES[tid]["variables"]
