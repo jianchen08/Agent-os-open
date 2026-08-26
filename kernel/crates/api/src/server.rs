@@ -4852,4 +4852,34 @@ mod tests {
             .unwrap();
         assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
     }
+
+    /// 无 store 路径（单测/兼容）：dispatch 直接入链执行（spawn_chain），
+    /// 不经持久化队列——消息仍被消费（队列语义被旁路）。
+    #[tokio::test]
+    async fn test_pending_input_no_store_dispatch_direct() {
+        let (state, _invoker, _store, _sqlite) = make_engine_state();
+        // 剥离 store：模拟无存储构造（单测/兼容路径）
+        let mut state = state;
+        state.store = None;
+        let dispatcher = crate::ws_session::EngineDispatcher::new(state);
+        use agentos_session::router::PipelineDispatcher;
+        // 不报错（直接入链执行）
+        dispatcher
+            .dispatch_user_input(
+                "thread-nostore-1",
+                "u1",
+                "无存储直发",
+                "",
+                "",
+                None,
+                None,
+                "agentos",
+                "",
+                PendingInputSource::User,
+            )
+            .await
+            .unwrap();
+        // 给链任务留出执行窗口（spawn 异步；无副作用可断言——不 panic 即验证路径）
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
 }
