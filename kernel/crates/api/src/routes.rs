@@ -838,6 +838,15 @@ pub async fn pending_inputs_delete_handler(
         message: "store not injected".to_string(),
     })?;
     let tenant_ctx = crate::server::request_tenant_ctx(state.store.as_ref(), &headers, "").await;
+    // 删除前读取条目 cmid：排队中的 REST chat 请求（http_ 前缀 cmid）据此收到
+    // 失败 outcome 解除挂起；条目已被消费循环 pop 时 list 查不到，不通知。
+    let cmid = store
+        .list_pending_inputs(&tenant_ctx.tenant_id, &pipeline_id)
+        .await
+        .unwrap_or_default()
+        .into_iter()
+        .find(|r| r.id == input_id)
+        .map(|r| r.client_message_id);
     let deleted = store
         .delete_pending_input(&tenant_ctx.tenant_id, &pipeline_id, &input_id)
         .await
@@ -848,6 +857,18 @@ pub async fn pending_inputs_delete_handler(
         return Err(ApiError::NotFound {
             message: format!("pending-inputs 条目不存在: {input_id}"),
         });
+    }
+    if let Some(cmid) = cmid {
+        crate::ws_session::notify_outcome_waiter(
+            &cmid,
+            crate::server::EngineOutcome {
+                content: format!("pending-inputs 条目 {input_id} 已在排队中被删除"),
+                final_assistant: None,
+                final_user: None,
+                failed: true,
+                degraded: false,
+            },
+        );
     }
     emit_pending_inputs_changed_endpoint(
         &state,
@@ -869,12 +890,32 @@ pub async fn pending_inputs_clear_handler(
         message: "store not injected".to_string(),
     })?;
     let tenant_ctx = crate::server::request_tenant_ctx(state.store.as_ref(), &headers, "").await;
+    // 清空前读取全部 cmid（同 delete：解除排队中 REST chat 请求的挂起）。
+    let cmids: Vec<String> = store
+        .list_pending_inputs(&tenant_ctx.tenant_id, &pipeline_id)
+        .await
+        .unwrap_or_default()
+        .into_iter()
+        .map(|r| r.client_message_id)
+        .collect();
     let deleted = store
         .clear_pending_inputs(&tenant_ctx.tenant_id, &pipeline_id)
         .await
         .map_err(|e| ApiError::Internal {
             message: format!("pending-inputs 清空失败: {e}"),
         })?;
+    for cmid in cmids {
+        crate::ws_session::notify_outcome_waiter(
+            &cmid,
+            crate::server::EngineOutcome {
+                content: format!("pending-inputs 队列已清空（{pipeline_id}）"),
+                final_assistant: None,
+                final_user: None,
+                failed: true,
+                degraded: false,
+            },
+        );
+    }
     emit_pending_inputs_changed_endpoint(
         &state,
         &pipeline_id,

@@ -28,6 +28,38 @@ use crate::routes::AppState;
 /// 全局 WS sink id 生成器（连接注册表去重/踢旧用）。
 static SINK_ID_SEQ: AtomicU64 = AtomicU64::new(1);
 
+/// REST chat 同步等待桥：client_message_id → outcome sender。
+///
+/// chat_handler 入队前注册（cmid 由其生成，`http_` 前缀与前端 uuid cmid 空间
+/// 区分）；消费循环一轮结束后按 rec.client_message_id 命中即发送并移除；
+/// DELETE/清空逐出排队条目时通知失败 outcome（防 REST 请求挂死）。remove 语义
+/// 先到先得：条目被消费循环 pop 后表行已删，DELETE 侧 list 查不到即不通知，
+/// 两个通知点天然互斥。进程内瞬态：重启即失，对应 HTTP 连接同断，无挂死窗口。
+static OUTCOME_WAITERS: std::sync::OnceLock<
+    std::sync::Mutex<std::collections::HashMap<String, tokio::sync::oneshot::Sender<crate::server::EngineOutcome>>>,
+> = std::sync::OnceLock::new();
+
+/// 注册同步等待者（chat_handler 专用）。
+pub(crate) fn register_outcome_waiter(
+    cmid: String,
+    tx: tokio::sync::oneshot::Sender<crate::server::EngineOutcome>,
+) {
+    OUTCOME_WAITERS
+        .get_or_init(Default::default)
+        .lock()
+        .expect("outcome waiters 锁中毒")
+        .insert(cmid, tx);
+}
+
+/// 通知等待者（命中即移除；未命中静默跳过——非 REST 路径 cmid 恒 miss）。
+pub(crate) fn notify_outcome_waiter(cmid: &str, outcome: crate::server::EngineOutcome) {
+    if let Some(map) = OUTCOME_WAITERS.get() {
+        if let Some(tx) = map.lock().expect("outcome waiters 锁中毒").remove(cmid) {
+            let _ = tx.send(outcome);
+        }
+    }
+}
+
 /// axum WebSocket 的 EventSink 适配。
 ///
 /// 通过无界 mpsc 通道转发文本帧：`run_ws_session` 的出站排空任务从接收端
@@ -338,20 +370,25 @@ impl EngineDispatcher {
         let exec_state = state.clone();
         let exec_thread = record.thread.clone();
         let exec_user = record.user_id.clone();
+        let cmid = record.client_message_id.clone();
         registry.enqueue(&chain_key, &chain_user, async move {
-            Self::run_pipeline_round(&exec_state, &tenant, &exec_thread, &exec_user, record).await;
+            let outcome =
+                Self::run_pipeline_round(&exec_state, &tenant, &exec_thread, &exec_user, record)
+                    .await;
+            notify_outcome_waiter(&cmid, outcome);
         });
     }
 
     /// 消费一条 pending 输入：发 stream_start + 引擎执行 + 推送结果（流式协议与
     /// 旧 dispatch 完全一致，参数从 rec 取——等待窗口内 PUT 的修改在此生效）。
+    /// 返回引擎 outcome——消费循环据此通知 REST chat 同步等待者。
     async fn run_pipeline_round(
         state: &AppState,
         tenant: &TenantContext,
         thread_id: &str,
         user_id: &str,
         rec: PendingInputRecord,
-    ) {
+    ) -> crate::server::EngineOutcome {
         // 生成 assistant message_id（内核权威，sidecar chunk + new_message 共用）。
         // 激活时才发 stream_start + 确定 message_id（等待窗口内不占位气泡）。
         let message_id = format!("a_{}", uuid::Uuid::new_v4().simple());
@@ -416,7 +453,7 @@ impl EngineDispatcher {
 
         let Some(session) = state.session.as_ref() else {
             tracing::warn!(thread = %exec_thread, "session 未启用，引擎结果无法推回前端");
-            return;
+            return outcome;
         };
 
         // 失败路径：引擎执行失败（executor.run Err）→ stream_error 收尾，
@@ -443,7 +480,7 @@ impl EngineDispatcher {
                     }),
                 )
                 .await;
-            return;
+            return outcome;
         }
 
         // 成功路径：new_message 携带本轮最终 assistant 消息的完整持久形态
@@ -519,6 +556,7 @@ impl EngineDispatcher {
                 }),
             )
             .await;
+        outcome
     }
 }
 
@@ -647,8 +685,11 @@ impl PipelineDispatcher for EngineDispatcher {
                     "consumed",
                 )
                 .await;
-                Self::run_pipeline_round(&exec_state, &exec_tenant, &exec_thread, &exec_user, rec)
-                    .await;
+                let cmid = rec.client_message_id.clone();
+                let outcome =
+                    Self::run_pipeline_round(&exec_state, &exec_tenant, &exec_thread, &exec_user, rec)
+                        .await;
+                notify_outcome_waiter(&cmid, outcome);
             }
         });
         Ok(())

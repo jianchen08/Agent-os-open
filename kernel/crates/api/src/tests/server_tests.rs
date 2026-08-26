@@ -3063,3 +3063,30 @@ use agentos_core::traits::MessageQueryOpts;
         // 给链任务留出执行窗口（spawn 异步；无副作用可断言——不 panic 即验证路径）
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
     }
+
+    /// REST chat waiter 桥（remove 先到先得语义）：命中 cmid 发送并移除；
+    /// 未命中 cmid 静默（非 REST 路径 cmid 恒 miss）；同 cmid 二次通知 miss。
+    #[tokio::test]
+    async fn test_outcome_waiter_bridge_remove_semantics() {
+        fn outcome(content: &str) -> crate::server::EngineOutcome {
+            crate::server::EngineOutcome {
+                content: content.to_string(),
+                final_assistant: None,
+                final_user: None,
+                failed: false,
+                degraded: false,
+            }
+        }
+        let (tx, mut rx) = tokio::sync::oneshot::channel();
+        // 唯一键：全局 static 表，避免与其他测试注册的 waiter 冲突。
+        crate::ws_session::register_outcome_waiter("http_waiter_t1".to_string(), tx);
+        // 未命中：静默跳过，不 panic、不影响已注册 waiter
+        crate::ws_session::notify_outcome_waiter("http_someone_else", outcome("other"));
+        assert!(rx.try_recv().is_err());
+        // 命中：发送并移除
+        crate::ws_session::notify_outcome_waiter("http_waiter_t1", outcome("done"));
+        let got = rx.try_recv().expect("命中 cmid 应送达 outcome");
+        assert_eq!(got.content, "done");
+        // 二次同 cmid：已移除，miss 不 panic
+        crate::ws_session::notify_outcome_waiter("http_waiter_t1", outcome("again"));
+    }

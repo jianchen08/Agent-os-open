@@ -52,6 +52,7 @@ use crate::session_routes::{
 };
 use agentos_http::auth::resolve_request_tenant_id;
 use agentos_http::error::ApiError;
+use agentos_session::router::PipelineDispatcher;
 
 /// WebSocket 消息请求体。
 #[derive(Debug, Deserialize, Serialize)]
@@ -1806,52 +1807,43 @@ async fn chat_handler(
         .await
         .map(|(uid, _, _, _)| uid)
         .unwrap_or_default();
-    // HTTP 路径同步返回 outcome，但执行必须入管道链——与 WS /
-    // chat.send_message 共用同一条 FIFO，消除 HTTP 与 WS 同会话并发 run 的竞态
-    // （ADR-2026-08-15）。
-    // key 与 process_via_engine_inner 的 effective_pipeline_id 同式（空则回退
-    // thread_id），保证跨入口落到同一条链。
-    let chain_key = if pipeline_id.is_empty() {
-        req.session_id.clone()
-    } else {
-        pipeline_id.clone()
-    };
-    let registry = crate::run_chain::RunChainRegistry::global();
-    registry.note_user_pipeline(&user_id, &chain_key);
-    let (tx, rx) = tokio::sync::oneshot::channel::<EngineOutcome>();
-    let exec_state = state.clone();
-    let exec_message = req.message.clone();
+    // HTTP 路径同步返回 outcome，执行与 WS / chat.send_message 走同一
+    // pending 队列消费路径（ADR-2026-08-26：入队先于激活，等待窗口可管），
+    // 消除 HTTP 与 WS 同会话并发 run 的竞态（ADR-2026-08-15 的 FIFO 语义不变）。
+    // 同步响应经 waiter 桥回传：cmid 为 `http_` 前缀（与前端 uuid cmid 空间
+    // 区分），消费完成或排队中被 DELETE/清空时发送。
     let exec_agent = if req.agent_id.is_empty() {
         "agentos".to_string()
     } else {
         req.agent_id.clone()
     };
-    let exec_history = req.history.clone();
-    let exec_pipeline = pipeline_id.clone();
-    let exec_session = req.session_id.clone();
-    let exec_user = user_id.clone();
-    registry.enqueue(&chain_key, &user_id, async move {
-        let outcome = agentos_tenant::scope(
-            tenant_ctx,
-            process_via_engine(
-                &exec_state,
-                &exec_message,
-                &exec_agent,
-                &exec_history,
-                &exec_pipeline,
-                &exec_session,
-                "",
-                &exec_user,
-                "",
-                None,
-                None,
-                "",
-            ),
+    let dispatcher =
+        crate::ws_session::EngineDispatcher::new(state.clone());
+    let cmid = format!("http_{}", &uuid::Uuid::new_v4().simple().to_string()[..16]);
+    let (tx, rx) = tokio::sync::oneshot::channel::<EngineOutcome>();
+    crate::ws_session::register_outcome_waiter(cmid.clone(), tx);
+    // tenant_ctx 仅供前段读 session；dispatcher 内部按 user_id 重新解析真实
+    // 租户（同源函数），不从此处传递。
+    if let Err(e) = dispatcher
+        .dispatch_user_input(
+            &req.session_id,
+            &user_id,
+            &req.message,
+            &pipeline_id,
+            "",
+            None,
+            None,
+            &exec_agent,
+            &cmid,
+            agentos_core::types::PendingInputSource::Http,
         )
-        .await;
-        let _ = tx.send(outcome);
-    });
-    // 任务 panic（rx 关闭）时给出明确错误而非挂死等待。
+        .await
+    {
+        return Err(ApiError::Internal {
+            message: format!("chat 派发失败: {e}"),
+        });
+    }
+    // 消费任务 panic（rx 关闭）时给出明确错误而非挂死等待。
     let outcome = rx.await.unwrap_or_else(|_| EngineOutcome {
         content: "[engine task terminated unexpectedly]".to_string(),
         final_assistant: None,
