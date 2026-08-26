@@ -194,10 +194,13 @@ class ContextBuildPlugin(IInputPlugin):
         # 运行时参数随 agent 配置装载（与 tool_ids 同装配点）：yaml 声明值
         # 注入顶层 state 键，stop_check（max_iterations/timeout_seconds）、
         # task_reminder（max_reminders）、llm_core（model_tier）读 state 消费；
-        # state 已有显式值（overlay/上游注入）优先，不覆盖。-1 = 无限制，
-        # 原值透传（stop_check 对 -1 有显式语义）。
+        # state 已有非空显式值（overlay/上游注入）优先，不覆盖；空串/None
+        # 视为未设置——step context 模板对缺失键渲染出 "" 且先于本插件落
+        # state，按"键存在即显式值"判优会令 yaml 值永远装不进去（llm_core
+        # 落 defaults.chat 兜底模型）。-1 = 无限制，原值透传（stop_check
+        # 对 -1 有显式语义）。
         for _key in ("model_tier", "max_iterations", "max_reminders", "timeout_seconds"):
-            if _key not in ctx.state and agent_cfg.get(_key) is not None:
+            if ctx.state.get(_key) in (None, "") and agent_cfg.get(_key) is not None:
                 updates[_key] = agent_cfg[_key]
         # agent 层级：yaml level（如 code_writer L3）覆盖插件默认 L1——子任务
         # 管道按目标 agent 定层级（L1 豁免会让 task_reminder 评估闸门旁路）。

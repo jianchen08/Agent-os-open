@@ -5,7 +5,9 @@
 1. **装载**：agent yaml 顶层声明的 model_tier / max_iterations /
    max_reminders / timeout_seconds → 顶层 state 键（stop_check /
    task_reminder / llm_core 读 state 消费）；
-2. **优先级**：state 已有显式值（overlay/上游注入）优先，yaml 不覆盖；
+2. **优先级**：state 已有非空显式值（overlay/上游注入）优先，yaml 不覆盖；
+   空串/None 视为未设置（step context 模板对缺失键渲染出 ""，先于本插件
+   落 state，不得挡住 yaml 装载）；
 3. **-1 语义**：无限制标记 -1 原值透传（不得被当作假值丢弃），
    未声明的键不注入（零兜底）。
 """
@@ -85,6 +87,28 @@ def test_state_explicit_value_wins_over_yaml(config_root, tmp_path):
     ).state_updates
     assert "model_tier" not in updates, "state 显式 model_tier 存在时 yaml 值不得覆盖"
     assert "max_iterations" not in updates, "state 显式 max_iterations 存在时 yaml 值不得覆盖"
+
+
+def test_state_empty_value_treated_as_unset(config_root, tmp_path):
+    """空值视为未设置：state 的空串/None（模板对缺失键的渲染产物）不挡 yaml 装载。
+
+    回归契约：prepare step 的 context 回显 ``model_tier: "{{state.model_tier}}"``
+    在本插件运行前把 "" merge 进 state——若按"键存在即显式值"判优，agent yaml
+    的 model_tier 永远装不进去，llm_core 落 defaults.chat 兜底模型。
+    """
+    _write_agent(
+        tmp_path / "agents",
+        "rt_empty",
+        "model_tier: large\nmax_iterations: 500\n",
+    )
+    cb = context_build_mod.ContextBuildPlugin(config={})
+    updates = asyncio.run(
+        cb.execute(
+            _ctx({"agent_id": "rt_empty", "model_tier": "", "max_iterations": None})
+        )
+    ).state_updates
+    assert updates.get("model_tier") == "large", "state 空串 model_tier 不得挡住 yaml 装载"
+    assert updates.get("max_iterations") == 500, "state None max_iterations 不得挡住 yaml 装载"
 
 
 def test_runtime_params_absent_not_injected(config_root, tmp_path):
