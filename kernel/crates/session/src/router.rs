@@ -1,9 +1,10 @@
-//! 入站路由——user_input/interaction_response/stop_generation 分发（ADR §7.2）。
+//! 入站路由——user_input/interaction_response/stop_generation/regenerate 分发（ADR §7.2）。
 //!
 //! 参考 0.1 `app_factory.py:320,431,486`。WS 入口收到消息后按 `type` 路由：
 //! - `user_input` → dispatch_user_input（转发到管道引擎）
 //! - `interaction_response` → dispatch_interaction_response（回复人工交互）
 //! - `stop_generation` → dispatch_stop（取消生成）
+//! - `regenerate` → dispatch_regenerate（重新生成/回退/编辑重发，批次 D）
 //! - `active_thread_changed` → dispatch_active_thread（切换选中会话，排队优先级键）
 //! - `heartbeat` → 心跳确认（不转发）
 //! - 其余 → 忽略
@@ -73,6 +74,25 @@ pub trait PipelineDispatcher: Send + Sync {
     /// 取消指定 thread 的生成。
     async fn dispatch_stop(&self, thread_id: &str) -> Result<(), String>;
 
+    /// 重新生成/回退/编辑重发（批次 D 原语）。
+    ///
+    /// 定位目标 user 消息 →（可选）set 改写内容 → 对其后全部槽位发 set(seq,null)
+    /// 截断 → 追加 patch_type='rollback' trace → 以显式 skip_user_append 标志重跑。
+    /// - user_message_id 缺省 = 最后一条 user 消息（重新生成）；
+    /// - 指定更早 user = 回退；带 new_content = 编辑重发。
+    /// pipeline_id 是消息路由键（同 user_input）；缺省由实现侧回退 thread 主管道。
+    /// 默认 no-op（测试 mock 无需关心）。
+    async fn dispatch_regenerate(
+        &self,
+        _user_id: &str,
+        _thread_id: &str,
+        _pipeline_id: &str,
+        _user_message_id: &str,
+        _new_content: Option<&str>,
+    ) -> Result<(), String> {
+        Ok(())
+    }
+
     /// 前端通知当前选中会话切换（排队优先级策略键）。
     ///
     /// 内核据此把该用户的活跃管道更新为当前选中的主管道——全局并发闸门有
@@ -128,6 +148,7 @@ impl InboundRouter {
             "user_input" => self.route_user_input(msg, user_id).await,
             "interaction_response" => self.route_interaction(msg).await,
             "stop_generation" => self.route_stop(msg).await,
+            "regenerate" => self.route_regenerate(msg, user_id).await,
             "active_thread_changed" => self.route_active_thread(msg, user_id).await,
             _ => RouteOutcome::Ignored,
         }
@@ -246,6 +267,49 @@ impl InboundRouter {
             _ => return RouteOutcome::Error("stop_generation 缺少 thread_id".into()),
         };
         match self.dispatcher.dispatch_stop(&thread_id).await {
+            Ok(()) => RouteOutcome::Handled,
+            Err(e) => RouteOutcome::Error(e),
+        }
+    }
+
+    /// regenerate——重新生成/回退/编辑重发（批次 D）。
+    ///
+    /// user_message_id 定位目标 user 消息（缺省=最后一条=重新生成，由实现侧
+    /// 解析）；new_content 非空 = 编辑重发（改写该消息内容后重跑）；pipeline_id
+    /// 同 user_input 兼容顶层与 data 信封两处（缺省由实现侧回退 thread 主管道）。
+    async fn route_regenerate(&self, msg: &Value, user_id: &str) -> RouteOutcome {
+        let thread_id = match msg.get("thread_id").and_then(|v| v.as_str()) {
+            Some(t) if !t.is_empty() => t.to_string(),
+            _ => return RouteOutcome::Error("regenerate 缺少 thread_id".into()),
+        };
+        let from_data = |k: &str| {
+            msg.get(k)
+                .and_then(|v| v.as_str())
+                .or_else(|| {
+                    msg.get("data")
+                        .and_then(|d| d.get(k))
+                        .and_then(|v| v.as_str())
+                })
+                .map(|s| s.to_string())
+        };
+        let pipeline_id = from_data("pipeline_id").unwrap_or_default();
+        let user_message_id = from_data("user_message_id").unwrap_or_default();
+        let new_content = msg.get("new_content").and_then(|v| v.as_str()).or_else(|| {
+            msg.get("data")
+                .and_then(|d| d.get("new_content"))
+                .and_then(|v| v.as_str())
+        });
+        match self
+            .dispatcher
+            .dispatch_regenerate(
+                user_id,
+                &thread_id,
+                &pipeline_id,
+                &user_message_id,
+                new_content,
+            )
+            .await
+        {
             Ok(()) => RouteOutcome::Handled,
             Err(e) => RouteOutcome::Error(e),
         }

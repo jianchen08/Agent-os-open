@@ -796,6 +796,12 @@ async fn process_via_engine_inner(
     // 1b. 多轮上下文装配（热路径 registry / 冷路径 checkpoint+traces+state+messages）
     //     + 本轮 user 消息入账（metadata 携带 client_message_id 幂等键，
     //     ADR 2026-08-21：随消息落库回显，前端据此对账去重乐观消息）。
+    //     skip_user_append：regenerate 重跑标志（批次 D，overlay 顶层键），
+    //     目标 user 消息已在截断后历史中，本轮不重复 append。
+    let skip_user_append = state_overlay
+        .and_then(|o| o.get("_skip_user_append"))
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
     let mut initial_state = stage_recover_history(
         initial_state,
         &store,
@@ -804,6 +810,7 @@ async fn process_via_engine_inner(
         effective_pipeline_id,
         &tenant_id,
         client_message_id,
+        skip_user_append,
     )
     .await;
 
@@ -1139,6 +1146,10 @@ fn apply_state_overlay(initial_state: &mut serde_json::Value, overlay: &serde_js
 ///      冷数据）按 effective_pipeline_id 恢复完整历史，后续轮走热路径。
 ///   ③ 客户端传的 history 仅在①②均为空（真·首轮）时兜底，向后兼容老客户端。
 /// 恢复失败 = bug（内存丢 + DB 读不到）：显式 error 暴露，不静默吞掉。
+///
+/// `skip_user_append`（批次 D 显式重跑标志，经 state_overlay 注入）：regenerate
+/// 重跑时目标 user 消息已在截断后历史中，跳过本轮 append——不借用 interrupted_tail
+/// 启发式（同文/同 cmid 判定只服务崩溃重放场景）。
 #[allow(clippy::too_many_arguments)]
 #[allow(clippy::too_many_arguments)]
 async fn stage_recover_history(
@@ -1149,6 +1160,7 @@ async fn stage_recover_history(
     effective_pipeline_id: &str,
     tenant_id: &str,
     client_message_id: &str,
+    skip_user_append: bool,
 ) -> serde_json::Value {
     let mut history_prefix: Vec<serde_json::Value> = Vec::new();
     let mut history_loaded = false;
@@ -1264,10 +1276,15 @@ async fn stage_recover_history(
         // 标量字段注入 state（GAP-3：跳过易变 per-run 键——修复前已写的旧
         // checkpoint 仍携带 message/input/suspended 等，覆盖会顶掉本轮新输入，
         // 导致重启后旧 user 消息被重放消费。键集与 checkpoint 瘦身同源）。
+        // 内部下划线键（_skip_user_append 等）同为 per-run 指令，不跨轮恢复——
+        // 上一轮的重跑标志泄漏到本轮会把正常消息吞掉（批次 D 显式重跑标志）。
         if let Some(rec_obj) = recovered.as_object_mut() {
             rec_obj.remove("messages");
             if let Some(init_obj) = initial_state.as_object_mut() {
                 for (k, v) in rec_obj.iter() {
+                    if k.starts_with('_') {
+                        continue;
+                    }
                     if agentos_engine::VOLATILE_RUN_KEYS.contains(&k.as_str()) {
                         continue;
                     }
@@ -1321,7 +1338,7 @@ async fn stage_recover_history(
     // user_input 轨迹后移除——首轮 user 由此进入审计/回放范围（ops 即轨迹）。
     // cmid 非空时随 metadata 落库（compute_message_id 纳入 metadata 参与 hash：
     // 同内容多次发送 record_id 各自唯一，顺带消除重复内容同 id 碰撞）。
-    if !interrupted_tail {
+    if !interrupted_tail && !skip_user_append {
         let mut user_msg = serde_json::json!({"role":"user","content":message});
         if !client_message_id.is_empty() {
             user_msg["metadata"] = serde_json::json!({"client_message_id": client_message_id});
@@ -4563,6 +4580,7 @@ mod tests {
             "pipe_cmid1",
             "tenant_cmid1",
             "0198-cmid-a",
+            false,
         )
         .await;
         let msgs = out["messages"].as_array().expect("messages 数组");
@@ -4584,6 +4602,7 @@ mod tests {
             "pipe_cmid1",
             "tenant_cmid1",
             "",
+            false,
         )
         .await;
         let user2 = out2["messages"]
@@ -4617,9 +4636,17 @@ mod tests {
                 .await
                 .unwrap();
             let st = json!({"pipeline_id": "p_it"});
-            let out =
-                stage_recover_history(st, &store, "ok", "t_it", "p_it", "tenant_it", incoming_cmid)
-                    .await;
+            let out = stage_recover_history(
+                st,
+                &store,
+                "ok",
+                "t_it",
+                "p_it",
+                "tenant_it",
+                incoming_cmid,
+                false,
+            )
+            .await;
             out["messages"].as_array().unwrap().len()
         }
         // ① 同 cmid 重派 → 吞（真·断线重试幂等）
@@ -4642,6 +4669,74 @@ mod tests {
         );
         // ④ 双方都无 cmid → 维持 GAP-3 同文判定（旧路径兼容）
         assert_eq!(run_case(None, "").await, 1, "无键路径维持同文判定");
+    }
+
+    /// 批次 D：regenerate 显式 skip_user_append——目标 user 消息已在截断后历史中，
+    /// 重跑不重复 append（不借用 interrupted_tail 启发式）。
+    #[tokio::test]
+    async fn test_stage_recover_history_skip_user_append() {
+        async fn run_case(
+            tail: serde_json::Value,
+            incoming: &str,
+            incoming_cmid: &str,
+            skip: bool,
+        ) -> usize {
+            let sqlite = Arc::new(agentos_engine::SqliteStore::open_memory().unwrap());
+            let store: Arc<dyn StorageBackend> = sqlite;
+            store
+                .apply_messages_ops_to_table(
+                    "p_skip",
+                    "tenant_skip",
+                    &[json!({"op": "set", "seq": 0, "msg": tail})],
+                )
+                .await
+                .unwrap();
+            let st = json!({"pipeline_id": "p_skip"});
+            let out = stage_recover_history(
+                st,
+                &store,
+                incoming,
+                "t_skip",
+                "p_skip",
+                "tenant_skip",
+                incoming_cmid,
+                skip,
+            )
+            .await;
+            out["messages"].as_array().unwrap().len()
+        }
+        let tail_with_cmid = json!({"role": "user", "content": "ok",
+                                    "metadata": {"client_message_id": "0198-skip"}});
+        // skip=false 尾部同文同 cmid → interrupted_tail 吞（既有幂等语义不变）
+        assert_eq!(
+            run_case(tail_with_cmid.clone(), "ok", "0198-skip", false).await,
+            1,
+            "非重跑路径维持既有 interrupted_tail 判定"
+        );
+        // skip=false 尾部不同文 → 正常 append（多轮对话基线）
+        assert_eq!(
+            run_case(
+                json!({"role": "user", "content": "旧问题"}),
+                "新问题",
+                "",
+                false
+            )
+            .await,
+            2,
+            "非重跑路径正常 append 新 user"
+        );
+        // skip=true 尾部不同文 → 不 append（显式命令，启发式不适用）
+        assert_eq!(
+            run_case(
+                json!({"role": "user", "content": "旧问题"}),
+                "新问题",
+                "",
+                true
+            )
+            .await,
+            1,
+            "skip_user_append 下不重复 append（重跑消息已在截断后历史）"
+        );
     }
 
     /// A2：stage_finalize 提取本轮 user 消息（含引擎分配的 seq + metadata.cmid），

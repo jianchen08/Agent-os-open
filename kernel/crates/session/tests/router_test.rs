@@ -11,12 +11,16 @@ use std::sync::Mutex;
 /// (thread_id, user_id, content, thinking_strength, client_message_id, agent_id)
 type UserInputRecord = (String, String, String, String, String, String);
 
+/// regenerate 记录：(thread_id, pipeline_id, user_message_id, new_content)
+type RegenerateRecord = (String, String, String, Option<String>);
+
 /// 记录型 mock dispatcher，捕获每次调用。
 #[derive(Default)]
 struct MockDispatcher {
     user_inputs: Arc<Mutex<Vec<UserInputRecord>>>,
     interactions: Arc<Mutex<Vec<(String, String)>>>, // (thread_id, request_id)
     stops: Arc<Mutex<Vec<String>>>,                  // thread_id
+    regenerates: Arc<Mutex<Vec<RegenerateRecord>>>,
 }
 
 #[async_trait]
@@ -58,6 +62,22 @@ impl PipelineDispatcher for MockDispatcher {
     }
     async fn dispatch_stop(&self, thread_id: &str) -> Result<(), String> {
         self.stops.lock().unwrap().push(thread_id.into());
+        Ok(())
+    }
+    async fn dispatch_regenerate(
+        &self,
+        _user_id: &str,
+        thread_id: &str,
+        pipeline_id: &str,
+        user_message_id: &str,
+        new_content: Option<&str>,
+    ) -> Result<(), String> {
+        self.regenerates.lock().unwrap().push((
+            thread_id.into(),
+            pipeline_id.into(),
+            user_message_id.into(),
+            new_content.map(|s| s.to_string()),
+        ));
         Ok(())
     }
 }
@@ -214,6 +234,60 @@ async fn stop_generation_routed_to_dispatcher() {
     let stops = dispatcher.stops.lock().unwrap();
     assert_eq!(stops.len(), 1);
     assert_eq!(stops[0], "thread-1");
+}
+
+// ── regenerate 路由（批次 D）：重新生成/回退/编辑重发 ──
+
+#[tokio::test]
+async fn regenerate_routed_with_default_target() {
+    // 缺省 user_message_id（=最后一条 user）→ 空串透传，实现侧解析
+    let (router, dispatcher) = router();
+    let msg = serde_json::json!({
+        "type": "regenerate",
+        "thread_id": "thread-1",
+        "pipeline_id": "p1",
+    });
+    let outcome = router.route(&msg, "user-A").await;
+    assert_eq!(outcome, RouteOutcome::Handled);
+    let regens = dispatcher.regenerates.lock().unwrap();
+    assert_eq!(regens.len(), 1);
+    assert_eq!(regens[0].0, "thread-1");
+    assert_eq!(regens[0].1, "p1");
+    assert_eq!(regens[0].2, "", "缺省 user_message_id → 空串（=重新生成）");
+    assert_eq!(regens[0].3, None, "无 new_content");
+}
+
+#[tokio::test]
+async fn regenerate_routed_with_edit_resend_content() {
+    // 编辑重发：指定目标 user 消息 + new_content（data 信封位置兼容）
+    let (router, dispatcher) = router();
+    let msg = serde_json::json!({
+        "type": "regenerate",
+        "thread_id": "thread-1",
+        "data": {
+            "pipeline_id": "p1",
+            "user_message_id": "mc_abc",
+            "new_content": "改写后的问题",
+        },
+    });
+    let outcome = router.route(&msg, "user-A").await;
+    assert_eq!(outcome, RouteOutcome::Handled);
+    let regens = dispatcher.regenerates.lock().unwrap();
+    assert_eq!(regens[0].1, "p1");
+    assert_eq!(regens[0].2, "mc_abc");
+    assert_eq!(regens[0].3.as_deref(), Some("改写后的问题"));
+}
+
+#[tokio::test]
+async fn regenerate_missing_thread_id_returns_error() {
+    let (router, dispatcher) = router();
+    let msg = serde_json::json!({"type": "regenerate"});
+    let outcome = router.route(&msg, "user-A").await;
+    assert!(matches!(outcome, RouteOutcome::Error(_)));
+    assert!(
+        dispatcher.regenerates.lock().unwrap().is_empty(),
+        "缺 thread_id 不应分发"
+    );
 }
 
 #[tokio::test]
