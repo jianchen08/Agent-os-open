@@ -58,7 +58,8 @@ class _FakeToolExecutor:
 
     async def call(self, method: str, params: dict[str, Any]) -> Any:
         self.calls.append((method, params))
-        return {"status": "ok"}
+        # tool-executor.invoke 信封（内核 ToolExecutionResult 序列化形态）
+        return {"success": True, "data": {"status": "ok"}}
 
 
 def _inject_tool_executor(server_mod: Any, handle: _FakeToolExecutor) -> None:
@@ -87,7 +88,7 @@ async def test_on_load_injects_capability_caller() -> None:
     params = {"tool_name": "llm.complete_stream", "args": {"model": "m", "messages": []}}
     # caller 契约：capability 短名（SDK 句柄组装全名，传全名会双重前缀）
     result = await plugin_mod._capability_caller("invoke", params)
-    assert result == {"status": "ok"}
+    assert result == {"success": True, "data": {"status": "ok"}}
     assert handle.calls == [("invoke", params)]
 
 

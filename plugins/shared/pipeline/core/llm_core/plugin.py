@@ -1002,13 +1002,30 @@ class LLMCore(ICorePlugin):
 
         # 调用 llm.complete_stream：流式事件经 llm_service 内部 event-bus
         # 推送，返回 dict 携带完整聚合响应；partial 非 None 表示流中断/取消。
+        # plugin_id 显式点名 llm_service（capability 声明在 services 轴，不依赖
+        # LLM 工具注册表反查）。
         params = {
             "tool_name": "llm.complete_stream",
+            "plugin_id": "llm_service",
             "args": kwargs,
         }
-        result = await caller("invoke", params)
+        envelope = await caller("invoke", params)
+        # tool-executor.invoke 返回 {success, data, error} 信封（内核 ToolResult
+        # 序列化）：success=false（工具未注册/执行失败）是错误不是空响应，
+        # fail-closed 抛出携带 error——否则盲取字段把失败伪装成"text 空的成功"。
+        if not isinstance(envelope, dict):
+            raise RuntimeError(
+                f"llm.complete_stream 信封形状异常: {type(envelope).__name__}"
+            )
+        if not envelope.get("success"):
+            raise RuntimeError(
+                f"llm.complete_stream 工具执行失败: {envelope.get('error') or envelope}"
+            )
+        result = envelope.get("data")
         if not isinstance(result, dict):
-            raise RuntimeError(f"llm.complete_stream 返回形状异常: {type(result).__name__}")
+            raise RuntimeError(
+                f"llm.complete_stream 返回形状异常: {type(result).__name__}"
+            )
 
         partial = result.get("partial")
         if partial is not None:

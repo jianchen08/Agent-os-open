@@ -53,7 +53,8 @@ class _FakeCaller:
 
     async def __call__(self, method: str, params: dict[str, Any]) -> Any:
         self.calls.append((method, params))
-        return self._result
+        # tool-executor.invoke 信封（内核 ToolExecutionResult 序列化形态）
+        return {"success": True, "data": self._result}
 
 
 def _partial_response(

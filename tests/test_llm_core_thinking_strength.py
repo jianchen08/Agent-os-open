@@ -112,7 +112,10 @@ class _CapturingCaller:
     async def __call__(self, method: str, params: dict[str, Any]) -> Any:
         self.captured_method = method
         self.captured_args = dict(params["args"])
+        # tool-executor.invoke 信封（内核 ToolExecutionResult 序列化形态）
         return {
+            "success": True,
+            "data": {
             "status": "streamed",
             "stream_id": "stream_test",
             "partial": None,
@@ -121,6 +124,7 @@ class _CapturingCaller:
             "thinking_text": None,
             "usage": {},
             "finish_reason": "stop",
+            },
         }
 
 
