@@ -136,8 +136,9 @@ async def test_partial_error_returns_status_error_message() -> None:
     assert msg["reasoning_content"] == "半截思考"
     # error 路径不置 ended（引擎继续推进）
     assert result.get("ended") is not True
-    # 调用通道：tool-executor.invoke → llm.complete_stream
-    assert caller.calls[0][0] == "tool-executor.invoke"
+    # 调用通道：capability 短名 invoke（SDK 句柄组装 tool-executor.invoke 全名，
+    # 传全名会双重前缀）→ llm.complete_stream
+    assert caller.calls[0][0] == "invoke"
     assert caller.calls[0][1]["tool_name"] == "llm.complete_stream"
 
 

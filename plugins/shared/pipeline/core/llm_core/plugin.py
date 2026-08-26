@@ -57,8 +57,9 @@ def set_capability_caller(caller: CapabilityCaller | None) -> None:
     LLM 调用（llm.complete_stream）据此经内核 tool-executor 转发到 llm_service。
 
     Args:
-        caller: 能力调用 async 函数（method 形如 "tool-executor.invoke"）；
-            传 None 清空
+        caller: 能力调用 async 函数（method 传 capability 短名——SDK 句柄
+            ``get_capability("tool-executor").call`` 内部组装
+            ``<capability>.<method>`` 全名，传全名会双重前缀）；传 None 清空
     """
     global _capability_caller
     _capability_caller = caller
@@ -1005,7 +1006,7 @@ class LLMCore(ICorePlugin):
             "tool_name": "llm.complete_stream",
             "args": kwargs,
         }
-        result = await caller("tool-executor.invoke", params)
+        result = await caller("invoke", params)
         if not isinstance(result, dict):
             raise RuntimeError(f"llm.complete_stream 返回形状异常: {type(result).__name__}")
 

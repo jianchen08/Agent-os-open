@@ -100,12 +100,17 @@ def test_strength_params_partial_model_config_falls_back() -> None:
 # ─────────────────── 集成：_call_llm 覆盖 kwargs ───────────────────
 
 class _CapturingCaller:
-    """伪 capability caller：记录 tool-executor.invoke 的 args，返回正常完成。"""
+    """伪 capability caller：记录 tool-executor 能力调用的 method 与 args。
+
+    method 契约：capability 短名（SDK 句柄内部组装 <capability>.<method> 全名，
+    传全名会双重前缀——真机 method not implemented 的回归形态）。"""
 
     def __init__(self) -> None:
         self.captured_args: dict[str, Any] = {}
+        self.captured_method: str | None = None
 
     async def __call__(self, method: str, params: dict[str, Any]) -> Any:
+        self.captured_method = method
         self.captured_args = dict(params["args"])
         return {
             "status": "streamed",
@@ -157,6 +162,8 @@ async def test_call_llm_applies_thinking_strength_params() -> None:
     )
 
     args = caller.captured_args
+    # capability 短名契约：传全名会被 SDK 拼成双重前缀（真机 not implemented）
+    assert caller.captured_method == "invoke"
     assert args["reasoning_effort"] == "high"
     # 采样参数不随强度覆盖（保持 default_params）
     assert args["temperature"] == 0.7
