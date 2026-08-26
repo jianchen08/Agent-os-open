@@ -8,10 +8,9 @@
   `memory` 模块的导入依赖（修复老版 _get_memory_service 第 629 行的 import
   在 try/except 之外的 bug，以及 _resolve_trigger_ratio 对
   memory.context_compressor 的硬导入）。
-- LLM 调用优先用进程内 `_llm_client`（LLMClient，由 server.py 在 on_load 时
-  从内核注入的 models config 构造）；`_llm_client` 为 None 时回退到经
-  `_capability_caller` 调 memory.compress 工具的旧路径。测试环境直接注入
-  llm_call_fn。
+- LLM 调用经 `_capability_caller` 调 memory.compress 工具（LLMClient 直连
+  HTTP 路径已退役——零生产消费者，LLM 面收敛由 llm_service 承接）。测试
+  环境直接注入 llm_call_fn。
 - 存储后端由 ctx.get_service("chunk_service") 改为模块级
   `_memory_backend: IMemoryBackend`（Hindsight/capability），通过
   `set_memory_backend()` 注入。L1/L2/STATE_SNAPSHOT 块以
@@ -85,8 +84,6 @@ CONTEXT_FORM_LABELS = {
 _memory_backend: Any | None = None
 # 能力调用句柄；server.py 注入后用于构建压缩 LLM 调用函数（memory.compress 回退路径）
 _capability_caller: CapabilityCaller | None = None
-# 进程内 LLM 客户端（压缩首选路径）；None 时回退到 _capability_caller
-_llm_client: Any | None = None
 
 
 def set_memory_backend(backend: Any | None) -> None:
@@ -114,20 +111,6 @@ def set_capability_caller(caller: CapabilityCaller | None) -> None:
     """
     global _capability_caller
     _capability_caller = caller
-
-
-def set_llm_client(client: Any | None) -> None:
-    """注入进程内 LLM 客户端（压缩首选路径）。
-
-    server.py 在 on_load 时从内核注入的 models config 构造 LLMClient 并注入；
-    测试环境可直接传 MagicMock。传 None 则回退到 _capability_caller 旧路径。
-
-    Args:
-        client: 暴露 ``chat_available`` 属性与 ``chat_completion(prompt, max_tokens)``
-                方法的客户端实例；传 None 清空
-    """
-    global _llm_client
-    _llm_client = client
 
 
 def _make_minimal_ctx(
@@ -1342,14 +1325,9 @@ class ContextWindowGuardPlugin(IInputPlugin):
             config: 插件配置字典（来自 pipeline yaml），支持以下键：
                 - enabled: 是否启用（默认 True）
                 - trigger_ratio: 触发压缩的阈值比例（不配则继承 system yaml）
-                - compression_model: 压缩专用模型 ID（如 minimax-m3），
-                  为空时回退到 llm.yaml 的 defaults.compression，再为空则用主模型
         """
         self._config = config or {}
         self._trigger_ratio = self._resolve_trigger_ratio(self._config.get("trigger_ratio"))
-        self._compression_model: str | None = self._resolve_compression_model(
-            self._config.get("compression_model"),
-        )
         # 实例级追踪：插件可能被重复实例化，state 不一定跨迭代持久化
         # 用实例变量做主存储，ctx.state 做辅助（重启恢复场景）
         self._tracked_msg_count: int = 0
@@ -1382,26 +1360,6 @@ class ContextWindowGuardPlugin(IInputPlugin):
 
         # ④ 代码默认（见 config/system/context_window_config.yaml）
         return 0.55
-
-    def _resolve_compression_model(self, explicit: str | None) -> str | None:
-        """解析压缩模型：插件配置优先，回退到 llm.yaml defaults.compression。
-
-        Args:
-            explicit: 插件配置中显式指定的 compression_model（可能为空）
-
-        Returns:
-            最终使用的模型 ID；若都为空则返回 None（运行时用主模型）
-        """
-        if explicit:
-            return explicit
-        # llm.yaml 经 plugin.json config_files（id="models"）注入为
-        # ``{"models": {...llm.yaml...}}`` 命名空间（内核 build_injected_config）。
-        models_ns = self._config.get("models")
-        if isinstance(models_ns, dict):
-            default_id = models_ns.get("defaults", {}).get("compression", "")
-            if default_id:
-                return default_id
-        return None
 
     @property
     def name(self) -> str:
@@ -2217,10 +2175,9 @@ class ContextWindowGuardPlugin(IInputPlugin):
                 context_window=context_window,
             )
             logger.debug(
-                "[%s] setup 完成: pipeline_id=%s, compression_model=%s",
+                "[%s] setup 完成: pipeline_id=%s",
                 self.name,
                 pipeline_id[:8] if pipeline_id else "无",
-                self._compression_model,
             )
         except Exception as exc:
             logger.error("[%s] setup 异常: %s", self.name, exc, exc_info=True)
@@ -2229,36 +2186,21 @@ class ContextWindowGuardPlugin(IInputPlugin):
 def _build_compress_llm_call_fn(caller: CapabilityCaller) -> LLMCallFn:
     """构建压缩用的 LLM 调用函数。
 
-    优先路径：进程内 `_llm_client`（LLMClient），直接调 chat_completion，
-    避免一次跨进程 tool-executor hop。fork 消息列表原样透传（llm_client
-    升级后支持列表，前缀 cache 复用前提）。
-    回退路径：经 capability_caller 调 memory.compress 工具（入参 {prompt, max_tokens}，
+    经 capability_caller 调 memory.compress 工具（入参 {prompt, max_tokens}，
     出参 {summary, degraded}）。该工具契约只收字符串——消息列表经
     ContextCompressor._format_messages 压平为带角色头/语义标签的文本
     （cache 收益丢失，理解质量保留，属可接受降级）。
 
+    进程内 LLMClient 首选路径已退役（2026-08-26：全仓零生产消费者，LLM 面
+    三处分散收敛由 llm_service 承接）。
+
     Args:
-        caller: 能力调用 async 函数 (method, params) -> Any（_llm_client 为 None 时启用）
+        caller: 能力调用 async 函数 (method, params) -> Any
 
     Returns:
         async (messages) -> response_text 的 LLM 调用函数；降级时返回空串
     """
-    import asyncio  # noqa: PLC0415
-
     async def _call(payload: str | list[dict[str, Any]]) -> str:
-        # ── 首选：进程内 LLMClient（消息列表原样透传）──
-        if _llm_client is not None:
-            if not getattr(_llm_client, "chat_available", False):
-                logger.info("[compress_llm_call] LLMClient chat 不可用，降级返回空串")
-                return ""
-            try:
-                summary = await asyncio.to_thread(_llm_client.chat_completion, payload, 8000)
-                return summary.strip() if summary else ""
-            except Exception as e:
-                logger.warning("[compress_llm_call] LLMClient chat_completion 失败: %s", e)
-                return ""
-
-        # ── 回退：capability_caller → memory.compress 工具（仅收字符串）──
         if isinstance(payload, list):
             prompt = ContextCompressor._format_messages(payload)
         else:

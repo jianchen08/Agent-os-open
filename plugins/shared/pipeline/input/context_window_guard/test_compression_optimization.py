@@ -18,6 +18,7 @@
 9. test_instruction_requires_five_part_json —— COMPACTION_INSTRUCTION 五段 JSON，
    旧占位符 {messages}/{state_snapshot}/{recent_process_blocks} 已删
 10. test_chat_completion_accepts_message_list —— llm_client 支持任意消息列表
+   （已退役：llm_client 全仓零生产消费者，本用例随其删除）
 11. test_fallback_flattens_message_list —— capability 回退路径列表压平为字符串
 12. test_compress_messages_threads_fork_context —— Service 把 fork 上下文传进压缩调用
 
@@ -528,94 +529,11 @@ class TestCompactionInstruction:
         assert "<current_state>" in instr
 
 
-class TestLLMClientMessageList:
-    """llm_client.chat_completion 升级为支持任意消息列表。"""
-
-    @staticmethod
-    def _models_config() -> dict[str, Any]:
-        return {
-            "models": {
-                "defaults": {"chat": "m-chat", "compression": "m-comp"},
-                "models": {
-                    "m-chat": {
-                        "api_base": "https://api.example.com/v1",
-                        "model_name": "chat-model",
-                        "provider": "p1",
-                    },
-                    "m-comp": {
-                        "api_base": "https://api.example.com/v1",
-                        "model_name": "comp-model",
-                        "provider": "p1",
-                    },
-                },
-                "providers": {"p1": {"keys": [{"api_key": "sk-x"}]}},
-            }
-        }
-
-    def test_chat_completion_accepts_message_list(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        """消息列表入参 → payload.messages 原样发送（fork 前缀复用前提）。"""
-        import llm_client as lc_mod
-
-        captured: dict[str, Any] = {}
-
-        class FakeResp:
-            def raise_for_status(self) -> None:
-                pass
-
-            def json(self) -> dict[str, Any]:
-                return {"choices": [{"message": {"content": "压缩结果"}}]}
-
-        def fake_post(url: str, json: dict | None = None, **kw: Any) -> FakeResp:
-            captured["url"] = url
-            captured["payload"] = json
-            return FakeResp()
-
-        monkeypatch.setattr(lc_mod.requests, "post", fake_post)
-        client = lc_mod.LLMClient(self._models_config(), default_role="compression")
-
-        msgs = [
-            {"role": "system", "content": "S"},
-            {"role": "user", "content": "U1"},
-            {"role": "user", "content": "指令"},
-        ]
-        out = client.chat_completion(msgs, 8000)
-
-        assert out == "压缩结果"
-        # 消息列表原样进 payload（不包成单 user 消息）
-        assert captured["payload"]["messages"] == msgs
-        assert captured["payload"]["max_tokens"] == 8000
-
-    def test_chat_completion_string_compat(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        """字符串入参保持旧行为：包成单条 user 消息（向后兼容）。"""
-        import llm_client as lc_mod
-
-        captured: dict[str, Any] = {}
-
-        class FakeResp:
-            def raise_for_status(self) -> None:
-                pass
-
-            def json(self) -> dict[str, Any]:
-                return {"choices": [{"message": {"content": "ok"}}]}
-
-        def fake_post(url: str, json: dict | None = None, **kw: Any) -> FakeResp:
-            captured["payload"] = json
-            return FakeResp()
-
-        monkeypatch.setattr(lc_mod.requests, "post", fake_post)
-        client = lc_mod.LLMClient(self._models_config())
-
-        out = client.chat_completion("一段 prompt", 500)
-
-        assert out == "ok"
-        assert captured["payload"]["messages"] == [{"role": "user", "content": "一段 prompt"}]
-
-
 class TestCapabilityFallbackFlattens:
     def test_fallback_flattens_message_list(self) -> None:
         """capability 回退路径（memory.compress 工具）把消息列表压平成字符串 prompt。"""
         mod = _load_cwg()
-        mod.set_llm_client(None)
+        mod.set_capability_caller(None)
 
         captured: dict[str, Any] = {}
 
@@ -636,24 +554,6 @@ class TestCapabilityFallbackFlattens:
         assert isinstance(prompt, str), "回退路径 prompt 应是字符串"
         assert "系统提示" in prompt
         assert "用户内容" in prompt
-
-    def test_primary_path_passes_list_through(self) -> None:
-        """首选路径（进程内 LLMClient）把消息列表原样传给 chat_completion。"""
-        mod = _load_cwg()
-        llm = MagicMock()
-        llm.chat_available = True
-        llm.chat_completion.return_value = "摘要文本"
-        mod.set_llm_client(llm)
-
-        async def _unused_caller(method: str, params: dict) -> Any:
-            raise AssertionError("capability_caller 不应在 LLMClient 可用时被调用")
-
-        fn = mod._build_compress_llm_call_fn(_unused_caller)
-        msgs = [{"role": "system", "content": "S"}, {"role": "user", "content": "U"}]
-        result = _run(fn(msgs))
-
-        assert result == "摘要文本"
-        llm.chat_completion.assert_called_once_with(msgs, 8000)
 
 
 class TestCompressionServiceForkThreading:

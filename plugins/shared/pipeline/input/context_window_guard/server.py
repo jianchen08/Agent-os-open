@@ -17,11 +17,9 @@ sys.path.insert(0, _this_dir)
 _shared_dir = os.path.join(_this_dir, "..", "..", "..")
 sys.path.insert(0, _shared_dir)
 
-from llm_client import LLMClient  # noqa: E402
 from plugin import (
     ContextWindowGuardPlugin,
     set_capability_caller,
-    set_llm_client,
     set_memory_backend,
 )  # noqa: E402
 
@@ -47,7 +45,7 @@ def get_instance() -> ContextWindowGuardPlugin:
 
 @plugin.on_load
 async def _on_load(params: dict) -> None:
-    """Initialize context_window_guard plugin + 注入记忆后端 + LLM 客户端。"""
+    """Initialize context_window_guard plugin + 注入记忆后端 + capability_caller。"""
     get_instance()  # 预热：构建插件单例（保持原 on_load 构造时机）
     backend = build_memory_backend(plugin)
     if backend:
@@ -59,14 +57,6 @@ async def _on_load(params: dict) -> None:
         set_capability_caller(caller)
     else:
         logger.warning("[context_window_guard_pipeline] capability_caller 未注入")
-    # 进程内 LLM 客户端（压缩首选路径）；用 compression 角色（defaults.compression）
-    try:
-        client = LLMClient(plugin.get_config(), default_role="compression")
-        set_llm_client(client)
-        if not client.chat_available:
-            logger.info("[context_window_guard_pipeline] LLMClient chat 未配置，压缩将走降级")
-    except Exception as e:
-        logger.warning("[context_window_guard_pipeline] LLMClient 构造失败: %s", e)
 
 
 @plugin.on_unload

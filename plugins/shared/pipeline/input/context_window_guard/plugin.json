@@ -19,19 +19,6 @@
   "priority": 50,
   "config_files": [
     {
-      "id": "models",
-      "path": "config/models/llm.yaml",
-      "label": "LLM 模型配置（压缩用 chat completions）",
-      "fields": [
-        {
-          "name": "defaults.chat",
-          "type": "string",
-          "label": "压缩用模型",
-          "description": "上下文压缩的 chat completions 模型 id"
-        }
-      ]
-    },
-    {
       "id": "context_window",
       "path": "config/system/context_window_config.yaml",
       "label": "上下文窗口配置",

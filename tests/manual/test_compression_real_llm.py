@@ -3,8 +3,8 @@
 流程:
 1. 构造超过触发阈值(128000 × 0.55 = 70400 tokens)的消息序列
 2. 加载真实 context_window_guard 插件
-3. 注入真实 LLM client:context_window_guard 进程内的 LLMClient.chat_completion
-   (直连 compression 模型)——压缩首选路径
+3. 注入 capability_caller（压缩 LLM 通道经 tool-executor → memory.compress 工具；
+   进程内 LLMClient 直连路径已退役——零生产消费者,LLM 面收敛由 llm_service 承接）
 4. 执行 execute(),验证真实输出:
    - 压缩是否触发
    - 消息数是否减少
@@ -19,6 +19,7 @@ import importlib.util
 import json
 import os
 import sys
+from typing import Any
 
 # ── 0. 加载路径 ──
 # 本文件在 tests/manual/, context_window_guard 插件在 plugins/shared/pipeline/input/
@@ -31,27 +32,24 @@ sys.path.insert(0, _SHARED_DIR)
 sys.path.insert(0, _GUARD_DIR)
 os.chdir(_PROJECT_ROOT)
 
-import yaml  # noqa: E402
 
+# ── 1. capability_caller（压缩唯一 LLM 通道）──
+def build_real_capability_caller() -> Any:
+    """构造经 tool-executor 调 memory.compress 工具的 capability_caller。
 
-# ── 1. 真实 LLM client (context_window_guard 进程内路径) ──
-def build_real_llm_client() -> object:
-    """构造真实 LLMClient，注入到 context_window_guard 的 set_llm_client。
-
-    使用 compression 角色（defaults.compression → minimax-m3）。
+    压缩执行时 plugin._get_memory_service 会把它包进
+    ``_build_compress_llm_call_fn``（入参 {prompt, max_tokens}，出参
+    {summary, degraded}）。手工 e2e 需注入真实 tool-executor 能力句柄
+    （参照 server.py on_load 的 make_capability_caller 接线——它把
+    plugin.get_capability("tool-executor").call 包成 (method, params) 形态）。
     """
-    from llm_client import LLMClient  # noqa: PLC0415
+    async def _caller(method: str, params: dict[str, Any]) -> Any:
+        raise RuntimeError(
+            "manual e2e 需注入真实 tool-executor caller 才能调 memory.compress；"
+            "请参照 server.py on_load 的 make_capability_caller 接线"
+        )
 
-    with open(os.path.join(_PROJECT_ROOT, "config/models/llm.yaml"), encoding="utf-8") as f:
-        cfg = yaml.safe_load(f)
-    models_cfg = {
-        "defaults": cfg.get("defaults", {}),
-        "models": cfg.get("models", {}),
-        "providers": cfg.get("providers", {}),
-    }
-    client = LLMClient({"models": models_cfg}, default_role="compression")
-    print(f"    [LLM] 使用压缩模型 {client.chat_model} @ {client.chat_api_base}, key={'有' if client.chat_api_key else '无'}")
-    return client
+    return _caller
 
 
 # ── 2. 真实后端 (记录写入,不落库) ──
@@ -84,9 +82,9 @@ async def main() -> None:
     sys.modules["cwg_plugin"] = mod
     spec.loader.exec_module(mod)
 
-    client = build_real_llm_client()
+    caller = build_real_capability_caller()
     backend = RecordingBackend()
-    mod.set_llm_client(client)
+    mod.set_capability_caller(caller)
     mod.set_memory_backend(backend)
 
     plugin = mod.ContextWindowGuardPlugin(config={})  # 默认 trigger_ratio 0.55
@@ -177,7 +175,7 @@ async def main() -> None:
         print(f"   tags: {s['tags']}")
         print(f"   content: {s['content'][:200]}")
 
-    # ── 7. 压缩块写入即代表 LLM 调用成功（进程内直调，无 caller.calls 记录）──
+    # ── 7. 压缩块写入即代表 LLM 调用成功（capability 通道，无 caller.calls 记录）──
     print("\n=== LLM 调用统计 ===")
     print(f"chunk 写入数(=LLM 调用成功数): {len(chunk_adds)}")
 

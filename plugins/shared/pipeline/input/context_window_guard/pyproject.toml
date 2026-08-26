@@ -5,7 +5,6 @@ description = "Lingxi AgentOS 0.2 plugin — pipeline_context_window_guard（uv 
 requires-python = ">=3.11"
 dependencies = [
     "agentos-plugin-sdk>=0.2.0",
-    "requests",
 ]
 
 # 本地 SDK 源映射（uv lock 解析必需——agentos-plugin-sdk 不在任何 registry）：
