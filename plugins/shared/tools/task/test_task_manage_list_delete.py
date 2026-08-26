@@ -39,6 +39,10 @@ sys.modules.pop("tool", None)
 import tool as _task_mod  # noqa: E402
 from tool import TaskTool  # noqa: E402
 
+# 模块级绑定（收集期路径已就位）：函数内裸名 import 在共跑车道里会因
+# sys.modules["state_machine"] 被前序套件替换而命中错误实现。
+from state_machine import InvalidTransitionError  # noqa: E402
+
 pytestmark = pytest.mark.unit
 
 
@@ -592,7 +596,6 @@ async def test_stop_permission_denied(tool: TaskTool, svc: Any) -> None:
 
 async def test_continue_invalid_transition_wrapped(tool: TaskTool) -> None:
     """continue 链内抛 InvalidTransitionError → INVALID_TRANSITION 结构化错误。"""
-    from state_machine import InvalidTransitionError
 
     async def broken(task_id: str) -> None:
         raise InvalidTransitionError("running", "pending")
@@ -898,7 +901,6 @@ async def test_continue_generic_exception_wrapped(tool: TaskTool) -> None:
 
 async def test_stop_invalid_transition_wrapped(tool: TaskTool) -> None:
     """stop 链内抛 InvalidTransitionError → INVALID_TRANSITION。"""
-    from state_machine import InvalidTransitionError
 
     _set_reader(tool, [])  # resolve 阶段读面正常
 
