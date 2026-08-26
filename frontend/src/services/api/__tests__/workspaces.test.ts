@@ -1,0 +1,139 @@
+/**
+ * 工作空间 API 服务测试
+ *
+ * 覆盖 /ext/workspace_service/workspaces/{container_task_id}* 端点封装：
+ * 详情、制品、文件树、创建/删除/重命名/移动条目、文件内容读取、
+ * IDE 打开降级（未实现时返回失败）。
+ */
+
+/* eslint-disable import-x/order */
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import * as workspacesApi from '@/services/api/workspaces'
+
+vi.mock('../client', () => {
+  const mockClient = {
+    get: vi.fn(),
+    post: vi.fn(),
+    delete: vi.fn(),
+  }
+  return { default: mockClient, apiClient: mockClient }
+})
+
+import apiClient from '@/services/api/client'
+
+const okResponse = (data: unknown) => ({ data })
+
+describe('工作空间 API', () => {
+  beforeEach(() => {
+    vi.clearAllMocks()
+  })
+
+  afterEach(() => {
+    vi.clearAllMocks()
+  })
+
+  describe('查询类接口', () => {
+    it('getWorkspace 请求详情端点（返回原始响应）', async () => {
+      vi.mocked(apiClient.get).mockResolvedValueOnce(okResponse({ id: 'ws1' }))
+
+      const result = await workspacesApi.getWorkspace('t1')
+
+      expect(result.data.id).toBe('ws1')
+      expect(apiClient.get).toHaveBeenCalledWith(
+        '/ext/workspace_service/workspaces/t1',
+      )
+    })
+
+    it('getWorkspaceArtifacts 请求制品端点', async () => {
+      vi.mocked(apiClient.get).mockResolvedValueOnce(okResponse({ items: [] }))
+
+      await workspacesApi.getWorkspaceArtifacts('t1')
+
+      expect(apiClient.get).toHaveBeenCalledWith(
+        '/ext/workspace_service/workspaces/t1/artifacts',
+      )
+    })
+
+    it('getFileTree 请求文件树端点', async () => {
+      vi.mocked(apiClient.get).mockResolvedValueOnce(okResponse({ tree: [] }))
+
+      await workspacesApi.getFileTree('t1')
+
+      expect(apiClient.get).toHaveBeenCalledWith(
+        '/ext/workspace_service/workspaces/t1/file-tree',
+      )
+    })
+  })
+
+  describe('条目操作', () => {
+    it('createEntry POST 文件/目录', async () => {
+      vi.mocked(apiClient.post).mockResolvedValueOnce(okResponse({ success: true }))
+
+      await workspacesApi.createEntry('t1', '/a/b.txt', 'file')
+
+      expect(apiClient.post).toHaveBeenCalledWith(
+        '/ext/workspace_service/workspaces/t1/create-entry',
+        { path: '/a/b.txt', type: 'file' },
+      )
+    })
+
+    it('deleteEntry DELETE 带路径载荷', async () => {
+      vi.mocked(apiClient.delete).mockResolvedValueOnce(okResponse({ success: true }))
+
+      await workspacesApi.deleteEntry('t1', '/a/b.txt')
+
+      expect(apiClient.delete).toHaveBeenCalledWith(
+        '/ext/workspace_service/workspaces/t1/entries',
+        { data: { path: '/a/b.txt' } },
+      )
+    })
+
+    it('renameEntry POST 旧路径与新名', async () => {
+      vi.mocked(apiClient.post).mockResolvedValueOnce(okResponse({ success: true }))
+
+      await workspacesApi.renameEntry('t1', '/a/old.txt', 'new.txt')
+
+      expect(apiClient.post).toHaveBeenCalledWith(
+        '/ext/workspace_service/workspaces/t1/rename-entry',
+        { old_path: '/a/old.txt', new_name: 'new.txt' },
+      )
+    })
+
+    it('moveEntry POST 源路径与目标目录', async () => {
+      vi.mocked(apiClient.post).mockResolvedValueOnce(okResponse({ success: true }))
+
+      await workspacesApi.moveEntry('t1', '/a/b.txt', '/c')
+
+      expect(apiClient.post).toHaveBeenCalledWith(
+        '/ext/workspace_service/workspaces/t1/move-entry',
+        { source_path: '/a/b.txt', destination_dir: '/c' },
+      )
+    })
+  })
+
+  describe('getWorkspaceFileContent - 文件内容', () => {
+    it('GET 文件内容端点并解包', async () => {
+      const resp = { success: true, content: 'hello' }
+      vi.mocked(apiClient.get).mockResolvedValueOnce(okResponse(resp))
+
+      const result = await workspacesApi.getWorkspaceFileContent('t1', '/a/b.txt')
+
+      expect(result.content).toBe('hello')
+      expect(apiClient.get).toHaveBeenCalledWith(
+        '/ext/workspace_service/workspaces/t1/file-content',
+        { params: { path: '/a/b.txt' } },
+      )
+    })
+  })
+
+  describe('openFileInIDE - IDE 打开（未实现降级）', () => {
+    it('返回失败结果且不发起请求', async () => {
+      const result = await workspacesApi.openFileInIDE()
+
+      expect(result.data.success).toBe(false)
+      expect(result.data.message).toContain('IDE 连接器尚未实现')
+      expect(apiClient.get).not.toHaveBeenCalled()
+      expect(apiClient.post).not.toHaveBeenCalled()
+    })
+  })
+})
