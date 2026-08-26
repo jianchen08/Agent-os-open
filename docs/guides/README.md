@@ -8,6 +8,7 @@
 | 我想… | 读哪篇 |
 |---|---|
 | 了解插件体系全景 / 选宿主形态 / 目录与注册机制 / 命名约定 | [plugin-development.md](plugin-development.md) |
+| 想懂内核契约文件怎么来的（traits.rs / 决策文档 / manifest 演进 / 契约间依赖） | [contract_files_tutorial.md](contract_files_tutorial.md)（含契约常见问答） |
 | 用 Python 写一个插件（工具 / 服务 / 管道步骤） | [plugin-sidecar-python.md](plugin-sidecar-python.md) |
 | 用 Rust 写高性能原生插件（cdylib） | [plugin-native-rust.md](plugin-native-rust.md) |
 | 不写代码，接入第三方 MCP 工具 | [plugin-external-mcp.md](plugin-external-mcp.md) |

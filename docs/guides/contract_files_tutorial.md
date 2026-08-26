@@ -9,31 +9,14 @@
 > - `.project/manifest_v2_schema.json` / `.project/mcp_extension_protocol.md` → 始终未作为独立文件产出；manifest 真值源 = `kernel/crates/core/src/traits.rs::PluginManifest`，协议文档 = `docs/plugin-protocol.md`
 > - `docs/guides/plugin_development_guide.md` / `plugin_development_standard.md`（0.1）→ 已删除；现行开发指南 = `docs/guides/` 分篇（见 [README.md](README.md)）
 > - 路由信号（`next_llm` / `next_tool` / `end` / `wait`）**已不驱动路由**：0.2 路由由管道 YAML 的 G10 DSL（`when`/`then`）按 state 条件裁决；`RouteType` / `PluginResult.route_signal` 为遗留类型（native 恒 None、引擎不读），manifest `route_signals` 声明位保留但执行面零消费
+> - `docs/guides/contract_qa.md`（契约设计 Q&A）→ 已删除：其回答基于旧版 traits.rs（755 行时期），`dependencies`/`DependencyResolver`/`LlmProvider`/三子 trait 等前提在当前代码中不存在；现行口径见本文"契约常见问答"与 [plugin-protocol.md](../plugin-protocol.md)
 > - `docs/ARCHITECTURE.md` → 已更新为 0.2 架构口径
 
 ---
 
 ## 〇、什么是"契约文件"？
 
-> 这一节是给完全没接触过插件化架构的读者铺底的。如果你已经懂 "接口" / "协议" / "schema"，可以直接跳到第一节。
-
-**生活里的契约**：
-你和房东签租房合同——合同上写清楚：每月几号交租、房子几平米、能不能养猫、退租提前几天通知。这份"合同"就是契约。租客照合同执行，房东照合同办事，双方都不需要见面也能合作。
-
-**软件里的契约**也是一回事**：
-灵汐 0.2 项目里，内核（Rust 写的那个）和插件（可以是 Rust、Python、MCP 边车）运行在不同进程、不同语言里。它们怎么知道彼此要做什么？靠的就是 **契约文件**——提前写死的"合同"。
-
-**契约文件长什么样？**
-
-| 形式 | 例子 | 你可以把它理解为 |
-|------|------|------------------|
-| JSON Schema | `manifest_v2_schema.json` | 一份"填表说明"，规定插件 manifest 字段必须长啥样 |
-| Markdown 协议文档 | `mcp_extension_protocol.md` | 一份"对话手册"，规定两边怎么说话 |
-| Rust trait 定义 | `kernel/crates/core/src/traits.rs` | 一份"接口合同"，Rust 编译器照此校验代码 |
-| Python 抽象基类 | `plugins/shared/pipeline/_base/plugin.py` | 一份"基类合同"，Python 解释器照此实例化插件 |
-| 教程/规范文档 | `docs/guides/`（分篇指南） | 一份"开发者手册"，告诉你怎么写代码 |
-
-**关键原则**：契约一旦定下来，**所有实现方都必须遵守**。这就是为什么灵汐把它们叫做"宪法"——后续所有插件、内核代码、Python SDK 都是围绕这些契约构建的。
+**契约文件 = 提前写死的"合同"**：内核（Rust）与插件（Python / Rust / 外部 MCP）运行在不同进程、不同语言里，靠契约约定彼此要做什么——Rust trait 规定接口签名（编译器静态校验）、`PluginManifest` 结构体规定 manifest 字段形状（加载期 fail-closed 校验）、协议文档规定通信方式。契约一旦定下，所有实现方必须遵守——所以项目里称它们为"宪法"。本教程按**"怎么来的 → 规定什么 → 什么场景用"**逐个解析。
 
 ---
 
@@ -337,113 +320,22 @@ pub mod types;   // 共享数据结构
 
 ### 2.7 Rust Trait 定义：`kernel/crates/core/src/traits.rs` ⭐
 
-> 这是**最重要的契约文件之一**。755 行，定义了 0.2 内核的全部 trait 抽象。Rust 编译器会照此 trait 静态校验代码合规性。
+> 最重要的契约文件：内核与插件之间的 Rust 语言级契约，编译器照此静态校验。
 
-#### 这是什么？
+当前核心 trait：
 
-插件和内核之间的**Rust 语言级契约**。每个 trait 规定"实现方必须提供哪些方法、每个方法的签名长什么样"。
+| Trait | 角色 | 什么场景用 |
+|---|---|---|
+| `PluginMeta` | 插件元信息（id / name / version / plugin_type / priority） | 内核从 manifest 构造 |
+| `PipelinePlugin` | **核心 trait**——管道插件统一入口 | 写 Rust 原生插件时实现（见 [guides/plugin-native-rust.md](plugin-native-rust.md)） |
+| `PluginInvoker` | 调用器：按 `host_type` 透明分发（in_process 直调 trait 对象 / sidecar 走 MCP tools/call），两条路径对引擎透明 | 引擎唯一调用入口 |
+| `CapabilityRegistry` | 能力注册表（tools / route_signals / http_routes，guarded 注册、禁用即结构性收回） | 插件能力注册与治理 |
+| `PluginLoader` | 发现 / 校验 / 加载 / 卸载 | 内核启动 + watcher 热发现 |
+| `HttpHandleCapability` / `StorageBackend` | `/ext/*` 端点插件处理能力 / 存储后端（SQLite driver 化） | HTTP 分发、存储切换 |
 
-#### 关键 trait 一览
+**口径说明**：三角色不拆 trait——`pipeline_role` 是 manifest 声明位 + Python 基类层（`plugins/shared/pipeline/_base/plugin.py`）概念；LLM 无内核 trait——调用归 `llm_service` 插件（一切皆插件）；插件间依赖无拓扑排序器——走 `requires_services` 能力角色 + boot 期闸。
 
-| Trait | 行号区间 | 角色 | 实际场景 |
-|-------|----------|------|----------|
-| `PluginMeta` | §1（25-47） | 插件元信息（id / name / version / plugin_type / error_policy / priority） | 内核从 manifest 提取后构造 `PluginMeta` 实例 |
-| `PluginType` / `PipelineRole` 枚举 | §1（49-71） | 区分 Pipeline / Tool / System；Input / Core / Output | 决定插件被哪种执行器调 |
-| `PipelinePlugin` | §2（82-112） | **核心 trait**——所有管道插件的入口 | 内核的 PluginInvoker 按 `dyn PipelinePlugin` 动态分发 |
-| `InputPipelinePlugin` / `CorePipelinePlugin` / `OutputPipelinePlugin` | §2（120-158） | 三个子 trait，固定 role() 返回值 | 按角色实现不同 execute 逻辑 |
-| `PluginInvoker` | §3（168-196） | **核心 trait**——插件调用器，按 host_type 透明分发 | 管道引擎唯一调用入口 |
-| `LifecycleHook` / `HookContext` | §3（198-250） | 生命周期钩子类型 + 上下文 | 对应 `__kernel_lifecycle_hook` 消息 |
-| `CapabilityRegistry` | §4（260-294） | 能力注册表——Tools / Resources / RouteSignals | 内核加载完插件后注册能力 |
-| `DependencyResolver` | §5（331-341） | 依赖解析器——拓扑排序 + 环检测 | 内核实例化插件前调用 |
-| `LlmProvider` | §6（384-412） | LLM 抽象层 + 流式 + 列表 | Core 插件的"模型调用方" |
-| `PluginLoader` | §7（568-589） | 插件加载器——发现 / 校验 / 加载 / 卸载 | 内核启动时调用 |
-| `PluginManifest` / `HostType` / `McpConfig` / `PluginStatus` | §7（591-755） | 运行时 manifest 表示 + 状态机 | 内核在内存中维护 |
-
-#### 每个关键 trait 详细讲解
-
-**`PipelinePlugin` trait**——管道插件的统一接口：
-
-```rust
-#[async_trait]
-pub trait PipelinePlugin: PluginMeta + Any {
-    fn role(&self) -> PipelineRole;
-    async fn execute(&self, ctx: &PluginContext) -> Result<PluginResult, PluginError>;
-    fn route_signals(&self) -> Vec<RouteType> { Vec::new() }  // 默认空
-    async fn on_load(&self) -> Result<(), PluginError> { Ok(()) }  // 默认空
-    async fn on_unload(&self) -> Result<(), PluginError> { Ok(()) }  // 默认空
-}
-```
-
-| 方法 | 必须实现？ | 含义 |
-|------|----------|------|
-| `role()` | ✅ | 返回 Input / Core / Output |
-| `execute()` | ✅ | 插件核心逻辑：拿到 ctx（PluginContext），返回 PluginResult |
-| `route_signals()` | ❌ 默认空 | 声明本插件可能产出哪些路由信号（仅 Output 角色有效） |
-| `on_load()` / `on_unload()` | ❌ 默认空 | 生命周期钩子，需要时再覆盖 |
-
-**`PluginInvoker` trait**——插件调用器：
-
-```rust
-#[async_trait]
-pub trait PluginInvoker: Send + Sync {
-    async fn invoke_pipeline_plugin(&self, plugin_id: &str, ctx: &PluginContext)
-        -> Result<PluginResult, PluginError>;
-    async fn invoke_tool(&self, plugin_id: &str, tool_name: &str, inputs: &serde_json::Value)
-        -> Result<ToolExecutionResult, PluginError>;
-    async fn send_lifecycle_hook(&self, plugin_id: &str, hook: LifecycleHook, context: &HookContext)
-        -> Result<(), PluginError>;
-}
-```
-
-> **关键洞察**：内核根据插件的 `host_type` 字段选择调用路径：
-> - `InProcess`（Rust 原生）：直接 `dyn PipelinePlugin::execute`，**零 IPC 开销**
-> - `Sidecar`（MCP 边车）：通过 rmcp 客户端走 MCP 协议 `tools/call("execute", {state, config})`
->
-> 两种路径对管道引擎透明——统一返回 `PluginResult`。这就是 0.2 "混合方案"的实现机制。
-
-**`CapabilityRegistry` trait**——能力注册表：
-
-```rust
-#[async_trait]
-pub trait CapabilityRegistry: Send + Sync {
-    fn register_tool(&self, plugin_id: &str, tool: ToolDescriptor);
-    fn unregister_tools(&self, plugin_id: &str);
-    fn get_tool(&self, name: &str) -> Option<ToolDescriptor>;
-    fn list_tools(&self) -> Vec<ToolDescriptor>;
-    fn list_tools_by_category(&self, category: &ToolCategory) -> Vec<ToolDescriptor>;
-    fn register_resource(&self, plugin_id: &str, resource: ResourceDescriptor);
-    fn unregister_resources(&self, plugin_id: &str);
-    fn list_resources(&self) -> Vec<ResourceDescriptor>;
-    fn register_route_signals(&self, plugin_id: &str, signals: Vec<RouteType>);
-    fn has_route_signal(&self, signal: &RouteType) -> bool;
-    fn clear_plugin(&self, plugin_id: &str);
-}
-```
-
-> 三类能力统一管理：Tools（供 LLM 选择调用）、Resources（数据源）、RouteSignals（路由表校验）。
-
-**`LlmProvider` trait**——LLM 抽象层：
-
-```rust
-#[async_trait]
-pub trait LlmProvider: Send + Sync {
-    async fn complete(&self, model: &str, messages: &[LlmMessage], options: &LlmOptions)
-        -> Result<LlmResponse, LlmError>;  // 非流式
-    async fn complete_stream(&self, model: &str, messages: &[LlmMessage], options: &LlmOptions)
-        -> Result<tokio::sync::mpsc::Receiver<LlmStreamChunk>, LlmError>;  // 流式
-    async fn list_models(&self) -> Result<Vec<ModelInfo>, LlmError>;
-}
-```
-
-> **设计原则（决策 4）**：LLM 实现会变（OpenAI / Anthropic / 本地模型），但"调用 LLM 返回文本"这个动作不变。抽象层长期保留，具体实现藏在各自模块。
-
-#### 实际场景
-
-- **Rust 插件作者**：实现 `InputPipelinePlugin` / `CorePipelinePlugin` / `OutputPipelinePlugin` 之一，覆盖 `execute()` 方法。编译时 Rust 编译器立刻告诉你"方法签名不对"。
-- **内核开发者**：`PipelinePlugin` 是 0.2 的"运行时类型"，所有插件都是 `dyn PipelinePlugin` 的化身。
-- **架构师**：所有 trait 的方法签名加在一起，就是 0.2 内核和插件的"完整对话手册"。
-
-> **来源**：[来源: kernel/crates/core/src/traits.rs, 全文 755 行]
+> **来源**：[来源: kernel/crates/core/src/traits.rs]
 
 ---
 
@@ -712,51 +604,18 @@ plugin.json manifest 全字段规范（字段总表 / capabilities / requires_se
 
 ---
 
-## 四、新手入门建议（按这份教程学习的顺序）
+## 契约常见问答（现行口径）
 
-如果你刚加入项目，建议按以下顺序阅读契约文件，每一步都建立在前一步的基础上：
-
-1. **第一周（建立全局心智）**：
-   - `docs/ARCHITECTURE.md` —— 看 0.2 现状
-   - `docs/working/_archive_0.2_migration/0.2_rust_plugin_solution.md §1-3` —— 看 0.2 要做什么、为什么（已归档）
-   - `docs/working/0.2插件体系核心决策.md` —— 看 9+1 条决策
-
-2. **第二周（理解接口）**：
-   - `kernel/crates/core/src/lib.rs` + `traits.rs` + `types.rs` —— Rust 契约全貌
-   - `plugins/shared/pipeline/_base/plugin.py` + SDK `pipeline_types.py` —— Python 侧契约
-
-3. **第三周（动手写第一个插件）**：
-   - `docs/guides/`（总览 + sidecar 分篇）—— 照示例走一遍
-   - `docs/plugin-protocol.md` §8 —— echo_tool 从零走查
-   - `config/templates/plugin_scaffold/*.py` —— 复制模板开始写
-
-4. **第四周（理解 MCP 协议）**：
-   - `docs/working/_archive_0.2_migration/0.2_rust_plugin_solution.md §3.1` —— 为什么选 MCP
-   - `docs/plugin-protocol.md` —— 统一协议与加载链路
-
-5. **里程碑门控**：
-   - `docs/0.2_rust_plugin_checkpoints.md CP-02` —— 理解"协议冻结"为什么是极高优先级
+- **插件之间怎么依赖？** 加载期不解析依赖图——manifest 声明 `requires_services`（能力角色名），boot 期闸校验无人提供即拒启；运行期插件不互调，数据经管道 state 传递、能力经服务调用（见 [plugin-protocol.md §2.3](../plugin-protocol.md)）。
+- **为什么有 input / core / output 三角色？** 管道三阶段语义的分工（预处理 / 核心执行 / 后处理）：manifest `pipeline_role` 声明、Python 基类层承载，内核不拆 trait。
+- **生命周期钩子有哪些？** `on_load` / `on_unload` / `on_pipeline_start` / `on_pipeline_end` / `on_error` / `domain_event`（manifest `capabilities.lifecycle_hooks` 声明）。
+- **InProcess 和 Sidecar 谁能选？** 所有插件类型双轨自选（ADR 2026-07-13）：低频/第三方用 sidecar，高频管道步骤基准后晋升 cdylib。
+- **内核为什么不直接集成 LiteLLM？** 一切皆插件——LLM 调用归 `llm_service` 插件（内部经 LiteLLM 做多模型路由），内核零 LLM 依赖。
 
 ---
 
-## 五、结语
+## 四、推荐阅读顺序
 
-读完这份教程，你应该理解了：
-
-- ✅ 灵汐 0.2 项目里有哪些契约文件、各自在哪
-- ✅ 每份契约文件定义了哪些东西、关键部分代表什么意思
-- ✅ 这些契约在项目里起什么作用、在真实开发场景里怎么用
-- ✅ 契约文件之间的依赖关系，以及如何按顺序学习
-
-**最重要的一点**：**契约 = 宪法**。一旦在 CP-02 协议冻结里程碑敲定，所有后续开发必须严格遵守。任何想"灵活变通"的代码都会在静态检查或运行时校验时被拦住。这正是 0.2 全面插件化能落地的基石。
-
-> **最后提醒**：本教程中标记为"⏳ task_02 待产出"的契约文件（`.project/manifest_v2_schema.json`、`.project/mcp_extension_protocol.md`），始终未作为独立文件产出——manifest 真值源是 `kernel/crates/core/src/traits.rs::PluginManifest`（配 `docs/plugin-protocol.md` 说明），MCP 协议以官方 MCP 标准为准。教程中相关章节按决策文档反向推导，仅供理解。
-
----
-
-**文档元信息**
-
-- 教程产出：`docs/guides/contract_files_tutorial.md`
-- 任务来源：`docs/tasks/task_02_contract_definition.md`
-- 调研日期：2026-07-13
-- 涵盖契约文件数：16 份（14 份已存在 + 2 份待产出）
+1. `docs/ARCHITECTURE.md`（0.2 现状）→ `docs/working/0.2插件体系核心决策.md`（9+1 条决策）
+2. `kernel/crates/core/src/traits.rs` + `types.rs`（Rust 契约）→ `plugins/shared/pipeline/_base/plugin.py` + SDK `pipeline_types.py`（Python 侧契约）
+3. 动手：[plugin-protocol.md §8](../plugin-protocol.md)（echo_tool 从零走查）→ `config/templates/plugin_scaffold/` 复制模板开写
