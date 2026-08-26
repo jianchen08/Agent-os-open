@@ -1,0 +1,17 @@
+# 排障 FAQ
+
+> 返回 [开发指南索引](README.md)。
+
+| 症状 | 根因与处置 |
+|---|---|
+| 新工具 LLM 看不到 | 三层过滤链逐层查：插件在 `config/plugins/default_profile.yaml` enabled？manifest 工具声明带齐 `input_schema`？工具名在目标 agent 的 `tool_ids` 里？ |
+| 改了 plugin.json 不生效 | `enabled_plugin_ids` 是启动快照——前端插件设置页关再开（re-enable，触发 G2 复核 + 重注册），或重启内核 |
+| 改了插件 Python 代码不生效 | sidecar 空闲 TTL 后才热重载；确认没在 stdout print（破坏 JSON-RPC，日志走 stderr）；急用就重启内核 |
+| sidecar 起不来，报 `PYPROJECT_MISSING` / `VENV_INTERPRETER_MISSING` | 插件目录缺 `pyproject.toml` 或 `.venv`——`uv sync --project <插件目录>` 重建；内核不回退 PATH 裸 python |
+| native 插件报产物缺失 | `host_type: in_process` 且 `native.artifact` 声明的 cdylib 不在插件目录——`cargo build --release` 后把产物复制到插件目录根，文件名与 `entry` 一致 |
+| 流式事件被网关拒绝 | manifest 未声明 `capabilities.streaming`（fail-closed），按 `docs/streaming-protocol.md` 补声明并 re-enable |
+| 工具结果前端渲染不对 | `output_schema` / `render` 声明缺失或与返回不符——契约 fail-closed，按实际返回结构补齐 |
+| service 方法别的插件调不到 | `services` 不进 LLM 面；调用方声明 `requires_services`（角色名），boot 期闸不满足内核拒启 |
+| 管道改完不生效 | 管道启动期编译——重启内核 |
+| agent 换了工具白名单不生效 | agent yaml 热生效但只对新任务；确认工具本身已启用（第一条） |
+| 前端插件表单/页面没更新 | ui_schema 变化需刷新前端页面 |
