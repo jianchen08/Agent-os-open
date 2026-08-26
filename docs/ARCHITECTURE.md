@@ -31,15 +31,38 @@
 
 ## 设计哲学
 
-灵汐的设计建立在三个核心原则之上：
+灵汐的设计建立在四个核心原则之上：
 
-### 1. 配置优于代码（Configuration over Code）
+### 1. 一切皆插件（Everything is a Plugin）
+
+内核（Rust 微内核）只是**执行基座**：管道解释执行、能力注册表、插件发现/装载/调用、SQLite 存储、会话/租户/HTTP 基础设施——不含任何业务能力。其余一切能力都以插件承载：
+
+| 能力 | 承载插件（示例） |
+|---|---|
+| LLM 调用 | `llm_service`（`llm.complete_stream` 服务）+ `pipeline_llm_core`（core 步骤） |
+| 工具执行 | `pipeline_tool_core`（Rust 原生）+ 各工具插件（26 个） |
+| 记忆 | `hindsight_memory` + `memory` 工具 |
+| 评估闸门 | `evaluation`（task_evaluate）+ `pipeline_task_reminder`（放行检测） |
+| 审批 / 人机交互 | `approval` + `human`（human-interaction） |
+| 触发器 | `trigger_setup` / `trigger_review` 工具 + `triggers_ext` |
+| IM 通道 | `channel_wecom` / `channel_feishu` / `channel_dingtalk` / `channel_qq` |
+| 连接器 | `connectors` |
+| 复盘 | `review` |
+| 隔离与工作区 | `isolation` + `pipeline_isolation_guard` / `pipeline_workspace_lifecycle` / `pipeline_environment_lifecycle` |
+| 监控与成本 | `monitoring` + `pipeline_cost_control` / `pipeline_track` |
+| 任务域 | `tasks`（task_service）+ `task_form` |
+| 主题 / 皮肤 / 页面 | `contributes.themes` / `ui_schema` / `http_endpoints`（如 `dsh_adapter`、`agent_manager`） |
+| Agent 配置加载 | `pipeline_context_build`（按 agent_id 自持加载 YAML） |
+
+判定口径：**改任何业务行为 = 加/改插件或配置，不动内核**。其余三原则都建立在这条之上——正因能力在插件里，才可能配置优于代码、状态可观测、可热替换。
+
+### 2. 配置优于代码（Configuration over Code）
 几乎所有运行时行为都通过 YAML / 配置文件定义。新增一个 Agent、调整一条管道、修改一个工具的可见面，都不应该需要改内核代码——Agent 是 YAML 数据，管道是 YAML 编排，工具面是白名单交集。
 
-### 2. 状态可观测（Observable State）
+### 3. 状态可观测（Observable State）
 管道的每一步决策都被显式建模（state 字段、路由转移、执行轨迹），分层可查（骨架 / L1 压缩块 / L0 原始记录，`read_execution_detail` 工具）。任意时刻可以回答："现在卡在哪一步？为什么？下一步会往哪走？"
 
-### 3. 可回滚、可热替换（Rollback & Hot Swap）
+### 4. 可回滚、可热替换（Rollback & Hot Swap）
 Agent 配置 mtime 缓存热生效；插件目录与 manifest 变更热发现自动注册/重注册；Python 插件进程空闲回收、代码改动热重载、崩溃自动拉起；内核不因单个配置加载失败而启动失败（降级 warn + 空配置）。
 
 ---
@@ -81,6 +104,8 @@ Agent 配置 mtime 缓存热生效；插件目录与 manifest 变更热发现自
 ---
 
 ## 核心子系统
+
+以下子系统**全部以插件承载**——内核只提供执行基座，各能力的插件归属见[设计哲学"一切皆插件"](#1-一切皆插件everything-is-a-plugin)表。
 
 ### 管道引擎（Pipeline Engine）
 
@@ -138,8 +163,8 @@ plugins:
     task_reminder: { max_reminders: 3, cooldown_seconds: 180 }     # per-plugin inputs
 ```
 
-- **消费分权**：内核只读 `tool_ids`（窄接口，注入工具 schema）；全量配置由管道 prepare 步的 `pipeline_context_build` 插件自持加载，注入 `context.system_prompt` / `tool_ids` / `context.agent_level` 等。
-- **agent_id 全链传导**：会话创建时写入 state，后续每轮按它取配置；切换会话 Agent 即整体切换人设/工具/约束。
+- **agent_id 的本质是执行上下文**：Agent 在内核中**没有运行时对象**——`agent_id` 只是执行上下文（pipeline state / `execution_context`）里的一个键，会话创建时写入 initial_state，随 `execution_context` 贯穿任务链全链传导。引擎对它只透传；agent 的全部语义由插件按这个键展开（见下条）。切换会话 Agent = 换一个上下文键，下一轮管道自然整体切换人设/工具/约束——不存在"注册/反注册 Agent"这类内核动作。
+- **消费分权（按 agent_id 展开的两侧）**：内核只读 `tool_ids`（窄接口，按 agent_id 解析后过滤注入工具 schema）；全量配置由管道 prepare 步的 `pipeline_context_build` 插件自持加载——按 `state.agent_id` 定位 YAML，注入 `context.system_prompt` / `tool_ids` / `context.agent_level` 等。
 - **多层协作**：主管（灵汐，L1）面向用户负责任务分类与派发；编排（L2）做多步骤编排与审查节点；执行（L3）是具体执行单元。
 
 配置方法见 [guides/agent-configuration.md](guides/agent-configuration.md)。

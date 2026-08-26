@@ -113,6 +113,8 @@ Agent configs (YAML) hot-apply via mtime caching — change prompts or tool whit
 
 ### 14. Plugin-based Pipeline Architecture — Every State of Agent Execution Is Yours to Control
 
+**Everything is a plugin**: the kernel is just an execution substrate (pipeline interpretation, capability registry, plugin loading, storage) — LLM calls, memory, evaluation, approval, triggers, channels, themes and every other capability live in plugins. Changing any business behavior means adding/modifying plugins or config, never the kernel.
+
 The kernel engine does only one thing: interpret `config/pipelines/autonomous.yaml`, holding a shared `state` dict and scheduling loop bodies. **"What each round does" is entirely up to plugins** — wherever you want to intervene in Agent execution, whatever you want to rewrite, skip, or terminate, you implement it as a plugin. No kernel code changes needed.
 
 ```

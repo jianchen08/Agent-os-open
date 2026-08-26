@@ -33,7 +33,7 @@ config/agents/
 
 - **内核只读一个键**：`tool_ids`（`kernel/crates/config/src/agent_loader.rs` 的 `resolve_agent_tool_ids` 窄接口，mtime 缓存热更新）。内核在构建 LLM 请求时按它过滤工具 schema 注入 `state["tool_schemas"]`。
 - **全量配置归 context_build 插件**：管道 prepare 步的 `pipeline_context_build` 按 `state.agent_id` 自行加载 yaml（`plugins/shared/pipeline/input/context_build/plugin.py`），注入 `context.system_prompt`（优先级：state 已有 > agent yaml > 插件默认）、`tool_ids`、`context.agent_name`、`context.agent_level` 等。
-- **agent_id 全链传导**：会话创建时写入 initial_state（默认 `agentos`），切换会话 Agent 即换 `agent_id`，后续每轮 prepare/core/post 都按它取配置。`execution_context`（workspace/隔离）同样随 initial_state 与任务参数透传。
+- **agent_id 的本质是执行上下文**：Agent 在内核中没有运行时对象——`agent_id` 只是执行上下文（pipeline state / `execution_context`）里的一个键，会话创建时写入 initial_state（默认 `agentos`），随 `execution_context` 贯穿任务链。引擎对它只透传，语义由插件按键展开（context_build 加载配置、内核 `tool_ids` 窄接口过滤工具面）；切换会话 Agent = 换一个上下文键，下一轮 prepare/core/post 自然整体切换人设/工具/约束。`execution_context`（workspace/隔离）同样随 initial_state 与任务参数透传。
 
 ## 4. 修改途径与生效条件
 
