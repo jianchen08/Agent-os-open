@@ -7,12 +7,10 @@
  *  （user 权威 record：id/sequence/content，引擎落库后提取）——前端据此按
  *  client_message_id 认领乐观 user 消息（recordId 双字段范式，UI 寻址 id 永不变），
  *  **不再驱逐**（旧驱逐路径 = 发送后用户消息消失的症状根因）。 */
-import { usePipelineMessageStore as pipelineStore } from '@/stores/pipelineMessageStore'
 import { mapBackendMessageToMessage } from '@/services/api/session'
+import { usePipelineMessageStore as pipelineStore } from '@/stores/pipelineMessageStore'
 import { loggers } from '@/utils/logger'
-
 import { resolvePipelineId } from '../router'
-
 import { extractMessageId, extractThreadId, mergeStreamingParts, stopPipelineStreaming } from './utils'
 
 /** 处理新消息事件 */

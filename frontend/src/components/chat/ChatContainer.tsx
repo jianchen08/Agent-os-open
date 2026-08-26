@@ -1,14 +1,14 @@
 /** 聊天容器组件 整合消息列表、Agent Tab 导航和输入区域的完整聊天界面。 */
 
 import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useShallow } from 'zustand/react/shallow'
 import { Loader2 } from '@/assets/icons'
+import { useAgentsQuery } from '@/hooks/queries/useAgentsQuery'
 import { useModelContextInfo } from '@/hooks/useModelContextInfo'
 import { getDefaults, getLLMConfig, type LLMDefaults } from '@/services/api/config'
 import { switchThinkingMode } from '@/services/api/thinkingMode'
 import { useAgentTabStore } from '@/stores/agentTabStore'
-import { useAgentsQuery } from '@/hooks/queries/useAgentsQuery'
 import { useContextUsageStore } from '@/stores/contextUsageStore'
-import { useShallow } from 'zustand/react/shallow'
 import { usePipelineMessageStore } from '@/stores/pipelineMessageStore'
 import { useSessionStore } from '@/stores/sessionStore'
 import {
@@ -28,6 +28,7 @@ import { AgentTabBar } from './AgentTabBar'
 import { ChatInput } from './ChatInput'
 import { GodotSelectionRow } from './GodotSelectionRow'
 import { MessageList } from './MessageList'
+import { PendingInputQueueBar } from './PendingInputQueueBar'
 import { VotingPanel } from './VotingPanel'
 import type { ChatContainerProps } from './types'
 import type { Agent, Message } from '@/types/models'
@@ -389,6 +390,11 @@ export const ChatContainer = ({
       >
         {/* Godot 选中引用（实时镜像：选中出现 / 取消消失；选中非空发送时插件随消息注入引用） */}
         <GodotSelectionRow threadId={activeTabId || sessionId} />
+        {/* 待处理输入队列条（ADR-2026-08-26）：执行中发送的消息在此排队，
+            点击条目内联编辑/删除/清空；消费激活后进主消息流 */}
+        {currentTabPipelineId && (
+          <PendingInputQueueBar pipelineId={currentTabPipelineId} />
+        )}
         {/* key 强制切换标签时重建 ChatInput，使每个标签的输入状态（text/attachments/pendingFiles）独立 */}
         <ChatInput
           key={`input-${activeTabId || sessionId}`}

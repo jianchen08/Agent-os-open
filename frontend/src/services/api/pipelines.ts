@@ -150,3 +150,56 @@ export async function fetchPipelinePluginCatalog(): Promise<PipelinePluginCatalo
   entries.sort((a, b) => a.id.localeCompare(b.id))
   return entries
 }
+
+// ── pending 输入队列（ADR-2026-08-26）──────────────────────────────
+
+/** pending 输入来源标注（与内核 PendingInputSource 同枚举） */
+export type PendingInputSource = 'user' | 'trigger' | 'task' | 'http' | 'system'
+
+/** pending 输入条目（等待窗口内可修改/删除；激活后进主消息流） */
+export interface PendingInputItem {
+  id: string
+  pipeline_id: string
+  content: string
+  source: PendingInputSource
+  created_at: string
+}
+
+/** GET /api/v1/pipelines/{id}/pending-inputs 响应 */
+export interface PendingInputsResponse {
+  items: PendingInputItem[]
+}
+
+/** 拉取某管道的待处理输入队列（FIFO 序） */
+export async function fetchPendingInputs(pipelineId: string): Promise<PendingInputItem[]> {
+  const response = await apiClient.get<PendingInputsResponse>(
+    `${API_ENDPOINTS.PIPELINES.RUNS.replace('/runs', '')}/${pipelineId}/pending-inputs`,
+  )
+  return response.data.items ?? []
+}
+
+/** 修改 pending 输入 content（等待窗口内生效；消费时从表取最新参数） */
+export async function updatePendingInput(
+  pipelineId: string,
+  inputId: string,
+  content: string,
+): Promise<void> {
+  await apiClient.put(
+    `${API_ENDPOINTS.PIPELINES.RUNS.replace('/runs', '')}/${pipelineId}/pending-inputs/${inputId}`,
+    { content },
+  )
+}
+
+/** 删除单条 pending 输入 */
+export async function deletePendingInput(pipelineId: string, inputId: string): Promise<void> {
+  await apiClient.delete(
+    `${API_ENDPOINTS.PIPELINES.RUNS.replace('/runs', '')}/${pipelineId}/pending-inputs/${inputId}`,
+  )
+}
+
+/** 清空某管道全部 pending 输入 */
+export async function clearPendingInputs(pipelineId: string): Promise<void> {
+  await apiClient.delete(
+    `${API_ENDPOINTS.PIPELINES.RUNS.replace('/runs', '')}/${pipelineId}/pending-inputs`,
+  )
+}

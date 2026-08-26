@@ -269,6 +269,16 @@ interface PipelineMessageState {
     metadata?: Record<string, unknown> | null
   }) => 'upgraded' | 'inserted' | 'skipped'
 
+  /** 无 cmid 注入消息（触发器/任务/HTTP，ADR-2026-08-26）补插 user 气泡：
+   *  按 id 幂等（重复事件不双插）；按 sequence 落位——保证触发器消息出现在
+   *  assistant 回复之前（与后端消息序一致）。 */
+  ensureInjectedUserMessage: (pipelineId: string, userRecord: {
+    id?: string
+    content?: unknown
+    sequence?: number
+    metadata?: Record<string, unknown> | null
+  }) => void
+
   /** 确认主数组乐观 user（旧内核无 user_message 回传的兼容路径）：按 cmid 把
    *  status='sending' 标记为 'completed'（后端已持久化；权威 id/seq 由对账补正）。
    *  无候选 → skipped（不插不建——后端记录由对账拉取）。 */
@@ -646,6 +656,48 @@ export const usePipelineMessageStore = create<PipelineMessageState>()(
       }
     })
     return act.kind === 'upgrade' ? 'upgraded' : 'inserted'
+  },
+
+  /** 无 cmid 注入消息（触发器/任务/HTTP）补插 user 气泡（ADR-2026-08-26）：
+   *  按 id 幂等；按 sequence 落位（触发器消息出现在 assistant 回复之前）。 */
+  ensureInjectedUserMessage: (pipelineId, userRecord) => {
+    const recordId = userRecord.id
+    if (!recordId) return
+    set((stateInner) => {
+      const msgs = stateInner.messagesByPipeline[pipelineId] || []
+      // 幂等：recordId 或同内容同 seq 已存在 → 跳过（重复事件不双插）
+      if (msgs.some((m) => m.recordId === recordId || m.id === recordId)) {
+        return stateInner
+      }
+      const content = typeof userRecord.content === 'string' ? userRecord.content : ''
+      const seq = userRecord.sequence
+      const msg = {
+        id: recordId,
+        recordId,
+        sessionId: stateInner.pipelineSessionMap[pipelineId] || '',
+        role: 'user' as const,
+        content,
+        timestamp: new Date().toISOString(),
+        status: 'completed' as const,
+        ...(seq != null ? { sequence: seq } : {}),
+        ...(userRecord.metadata ? { metadata: userRecord.metadata } : {}),
+      } as Message
+      // 按 sequence 落位：有 seq 则插到首个 seq 大于它的消息之前；
+      // 无 seq 追加尾部（与后端消息序一致：user 先于其 assistant 回复）。
+      let next: Message[]
+      if (seq != null) {
+        const idx = msgs.findIndex((m) => m.sequence != null && m.sequence > seq)
+        next = idx >= 0 ? [...msgs.slice(0, idx), msg, ...msgs.slice(idx)] : [...msgs, msg]
+      } else {
+        next = [...msgs, msg]
+      }
+      return {
+        messagesByPipeline: {
+          ...stateInner.messagesByPipeline,
+          [pipelineId]: capMessagesForMemory(next),
+        },
+      }
+    })
   },
 
   /** 确认主数组乐观 user（旧内核无 user_message 回传的兼容路径）。 */

@@ -458,7 +458,7 @@ export const ChatInput = ({
     const hasAttachments = attachments.length > 0
     const hasPendingFiles = pendingFiles.some((pf) => pf.status === 'success')
 
-    if ((!hasContent && !hasAttachments && !hasPendingFiles) || disabled || isExecuting) {
+    if ((!hasContent && !hasAttachments && !hasPendingFiles) || disabled) {
       return
     }
 
@@ -654,7 +654,6 @@ export const ChatInput = ({
   const canSend =
     (text.trim() || attachments.length > 0 || pendingFiles.some((pf) => pf.status === 'success')) &&
     !disabled &&
-    !isExecuting &&
     !isUploading
 
   return (
@@ -772,7 +771,7 @@ export const ChatInput = ({
                   ? 'Enter 发送 · Shift+Enter 换行 · 支持拖拽上传'
                   : 'Enter 发送 · Shift+Enter 换行'
           }
-          disabled={disabled || isExecuting}
+          disabled={disabled}
           rows={1}
           data-testid="chat-input-textarea"
           aria-label="消息输入"

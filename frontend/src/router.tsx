@@ -3,31 +3,32 @@
 import { lazy, Suspense, useEffect, useCallback } from 'react'
 import { createBrowserRouter, Navigate, useNavigate } from 'react-router-dom'
 import { GlobalInteractionOverlay } from './components/chat/GlobalInteractionOverlay'
-import { SchemaFullscreenHost } from './components/schema/SchemaFullscreenHost'
 import { ChatPanelShell } from './components/layout/ChatPanelShell'
 import { Sidebar } from './components/layout/Sidebar'
+import { SchemaFullscreenHost } from './components/schema/SchemaFullscreenHost'
 import { ROUTES } from './constants/routes'
+import { useAgentsQuery } from './hooks/queries/useAgentsQuery'
+import { useLongTermTasksQuery } from './hooks/queries/useLongTermTasksQuery'
+import { useSessionsQuery, readSessions } from './hooks/queries/useSessionsQuery'
 import { useConnectionStatus } from './hooks/useConnectionStatus'
 import { useRealtimeEvents } from './hooks/useRealtimeEvents'
 import { useWidgetEvents } from './hooks/useWidgetEvents'
-import { useSessionsQuery, readSessions } from './hooks/queries/useSessionsQuery'
-import { useAgentsQuery } from './hooks/queries/useAgentsQuery'
-import { useLongTermTasksQuery } from './hooks/queries/useLongTermTasksQuery'
 import { LoginPage } from './pages/auth/LoginPage'
 import { RegisterPage } from './pages/auth/RegisterPage'
 import { globalWS } from './services/websocket/GlobalWebSocket'
-import { openWorkspacePanelByPath } from './services/workspacePanelOpener'
-import { initStreamingEvents, destroyStreamingEvents } from './services/websocket/streamingEventService'
 import { flushStreamChunkBuffer } from './services/websocket/streaming/handlers/streamHandler'
-import { appendAttachmentRefs } from './utils/attachmentRefs'
-import { mainPipelineIdOf } from './utils/mappers'
+import { initStreamingEvents, destroyStreamingEvents } from './services/websocket/streamingEventService'
+import { openWorkspacePanelByPath } from './services/workspacePanelOpener'
 import { useAgentTabStore } from './stores/agentTabStore'
 import { useAuthStore } from './stores/authStore'
 import { useInteractionStore } from './stores/interactionStore'
+import { usePendingInputStore } from './stores/pendingInputStore'
 import { usePipelineMessageStore } from './stores/pipelineMessageStore'
 import { useSessionListStore } from './stores/sessionListStore'
 import { useSessionStore } from './stores/sessionStore'
 import { useUIStore } from './stores/uiStore'
+import { appendAttachmentRefs } from './utils/attachmentRefs'
+import { mainPipelineIdOf } from './utils/mappers'
 import { generateUUID } from './utils/uuid'
 import type { SendMessageParams } from './components/chat/types'
 import type { ReactNode } from 'react'
@@ -320,6 +321,20 @@ function HomePage(): ReactNode {
       // 与流式 assistant 同数组，靠状态机区分生命周期。new_message 事件携带
       // user_message 权威回传时按 cmid 认领（recordId 双字段范式，UI id 永不变）——
       // 不再有独立 pending 区（旧 pending 驱逐 = 发送后用户消息消失的症状根因）。
+      // ── busy 分支（ADR-2026-08-26）──
+      // 管道执行中（streaming）发送 → 消息照常走 WS（内核 pending 队列排队，
+      // 等待窗口内可编辑/删除/清空），但不建乐观气泡/不启动流式态——
+      // 队列条由 pending_inputs_changed 事件同步；消费激活时 stream_start
+      // 到达 → 现有流式协议接管（占位气泡 → 认领 → 回复）。
+      if (pipelineStore.isStreaming(targetPipelineId)) {
+        globalWS.sendUserInput(sid, contentWithRefs, {
+          enableThinking: params.enableThinking,
+          pipelineId: targetPipelineId,
+          clientMessageId: userMessageId,
+        })
+        usePendingInputStore.getState().load(targetPipelineId)
+        return
+      }
       pipelineStore.addMessage(targetPipelineId, {
         id: userMessageId,
         sessionId: sid,

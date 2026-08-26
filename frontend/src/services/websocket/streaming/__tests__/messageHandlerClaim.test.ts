@@ -173,3 +173,76 @@ describe('handleNewMessage 认领', () => {
     expect(assistant?.status).not.toBe('completed')
   })
 })
+
+/** 无 cmid 注入消息（触发器/任务/HTTP，ADR-2026-08-26）补插 user 气泡 */
+describe('handleNewMessage 注入消息补插', () => {
+  it('无 cmid 有 user_message → 补插 user 气泡（按 id 幂等 + 按 seq 落位）', () => {
+    const store = usePipelineMessageStore.getState()
+    // 前置：assistant 回复已在主数组（seq=2）
+    store.addMessage(PIPELINE, {
+      id: 'a_11111111111111111111111111111111',
+      sessionId: THREAD,
+      role: 'assistant',
+      content: '收到，开始执行。',
+      timestamp: new Date().toISOString(),
+      status: 'completed',
+      sequence: 2,
+    } as never)
+
+    // 触发器注入的 user 消息（无 cmid；user_message 权威回传）
+    const userRecord = {
+      id: 'mc_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+      content: '触发器：每天 9 点提醒喝水',
+      sequence: 1,
+      metadata: { source: 'trigger' },
+    }
+    handleNewMessage({
+      type: 'new_message',
+      data: {
+        pipeline_id: PIPELINE,
+        _threadId: THREAD,
+        message_id: 'a_11111111111111111111111111111111',
+        sequence: 2,
+        user_message: userRecord,
+        message: {
+          id: 'a_11111111111111111111111111111111',
+          role: 'assistant',
+          content: '收到，已设提醒',
+          sequence: 2,
+          timestamp: new Date().toISOString(),
+          status: 'completed',
+        },
+      },
+    })
+    const msgs = usePipelineMessageStore.getState().getMessages(PIPELINE)
+    const injected = msgs.find((m) => m.recordId === userRecord.id)
+    expect(injected).toBeDefined()
+    expect(injected?.content).toBe('触发器：每天 9 点提醒喝水')
+    // 位置：user(seq=1) 在 assistant(seq=2) 之前
+    const userIdx = msgs.findIndex((m) => m.recordId === userRecord.id)
+    const asstIdx = msgs.findIndex((m) => m.id === 'a_11111111111111111111111111111111')
+    expect(userIdx).toBeGreaterThanOrEqual(0)
+    expect(userIdx).toBeLessThan(asstIdx)
+
+    // 重复事件幂等：再次派发同 user_message → 不双插
+    handleNewMessage({
+      type: 'new_message',
+      data: {
+        pipeline_id: PIPELINE,
+        _threadId: THREAD,
+        sequence: 2,
+        user_message: userRecord,
+        message: {
+          id: 'a_11111111111111111111111111111111',
+          role: 'assistant',
+          content: '已完成',
+          sequence: 2,
+          timestamp: new Date().toISOString(),
+          status: 'completed',
+        },
+      },
+    })
+    const after = usePipelineMessageStore.getState().getMessages(PIPELINE)
+    expect(after.filter((m) => m.recordId === userRecord.id)).toHaveLength(1)
+  })
+})

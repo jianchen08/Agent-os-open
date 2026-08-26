@@ -2,15 +2,6 @@
 
 import { useEffect } from 'react'
 import { WS_SERVER_EVENTS } from '@/constants/websocket'
-import { globalWS } from '@/services/websocket/GlobalWebSocket'
-import * as tokenLifecycle from '@/services/auth/tokenLifecycle'
-import { useLayoutModeStore } from '@/stores/layoutModeStore'
-import { useLongTermTaskStore } from '@/stores/longTermTaskStore'
-import { useNotificationStore } from '@/stores/notificationStore'
-import { usePipelineMessageStore } from '@/stores/pipelineMessageStore'
-import { mainPipelineIdOf } from '@/utils/mappers'
-import { useSessionStore } from '@/stores/sessionStore'
-import { readSessions } from '@/hooks/queries/useSessionsQuery'
 import {
   readLongTermTasks,
   updateLongTermTasksCache,
@@ -20,6 +11,16 @@ import {
   invalidatePipelineRuns,
   invalidatePipelineStates,
 } from '@/hooks/queries/usePipelineRunsQuery'
+import { readSessions } from '@/hooks/queries/useSessionsQuery'
+import * as tokenLifecycle from '@/services/auth/tokenLifecycle'
+import { globalWS } from '@/services/websocket/GlobalWebSocket'
+import { useLayoutModeStore } from '@/stores/layoutModeStore'
+import { useLongTermTaskStore } from '@/stores/longTermTaskStore'
+import { useNotificationStore } from '@/stores/notificationStore'
+import { usePendingInputStore } from '@/stores/pendingInputStore'
+import { usePipelineMessageStore } from '@/stores/pipelineMessageStore'
+import { useSessionStore } from '@/stores/sessionStore'
+import { mainPipelineIdOf } from '@/utils/mappers'
 
 /** Hook to subscribe to real-time WebSocket events and update the layout store. Call once in a top-level component (e.g. FiveSpaceHomePage). */
 export function useRealtimeEvents(): void {
@@ -199,6 +200,21 @@ export function useRealtimeEvents(): void {
     globalWS.subscribe('user_input_send_timeout', handleUserInputSendTimeout)
 
     /**
+     * pending 输入队列同步（ADR-2026-08-26）：内核入队/消费/修改/删除时推送
+     * 全量列表，前端据此刷新队列条（执行中发送的消息在等待窗口内可见可管理）。
+     */
+    const handlePendingInputsChanged = (eventData: {
+      data?: { pipeline_id?: string; items?: unknown[] }
+    }) => {
+      const data = eventData?.data
+      const pipelineId = data?.pipeline_id
+      if (!pipelineId) return
+      const items = (data?.items ?? []) as import('@/services/api/pipelines').PendingInputItem[]
+      usePendingInputStore.getState().syncFromEvent(pipelineId, items)
+    }
+    globalWS.subscribe('pending_inputs_changed', handlePendingInputsChanged)
+
+    /**
      * 被同账号新连接替换（B10 单连接踢旧，code=4000）：本页已永久失联且不再
      * 自动重连——必须明示用户，否则页面静默装死、消息全黑洞。典型成因：
      * 同一浏览器开了多个前端标签页互踢。
@@ -255,6 +271,7 @@ export function useRealtimeEvents(): void {
       globalWS.unsubscribe(WS_SERVER_EVENTS.TASK_STATUS_CHANGED, handleTaskStatusChanged)
       globalWS.unsubscribe(WS_SERVER_EVENTS.TASK_DELETED, handleTaskDeleted)
       globalWS.unsubscribe('user_input_send_timeout', handleUserInputSendTimeout)
+      globalWS.unsubscribe('pending_inputs_changed', handlePendingInputsChanged)
       globalWS.unsubscribe('kicked_by_replacement', handleKickedByReplacement)
     }
   }, [bumpWorkspaceDataVersion])
