@@ -20,5 +20,6 @@
   "persistent_fields": [
     "termination_advisor.status",
     "termination_advisor.stop_reason"
-  ]
+  ],
+  "host_group": "light"
 }

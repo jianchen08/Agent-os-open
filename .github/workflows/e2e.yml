@@ -159,7 +159,8 @@ jobs:
             tests/e2e_02/test_05_pipeline_chat.py \
             tests/e2e_02/test_06_ws_stream.py \
             tests/e2e_02/test_07_plugin_lifecycle_e2e.py \
-            tests/e2e_02/test_08_task_state_flow.py
+            tests/e2e_02/test_08_task_state_flow.py \
+            tests/e2e_02/test_10_cohost_host_grouping.py
 
       - name: Show kernel log on failure
         if: failure()
