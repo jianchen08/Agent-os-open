@@ -32,7 +32,7 @@ wasm 轨已关闭。**能力以 capability 协议唯一定义一次，两轨差�
 
 1. **声明即注册**：`capabilities.tools` 里声明的工具自动注册进 LLM 工具面（经 `tool_ids` 过滤，见 §6）；`capabilities.services` 是内部服务方法元数据，**不进 LLM 面**。
 2. **工具契约 fail-closed**：工具必须带 `input_schema` + `output_schema` + `render`（前端渲染意图）；tool_core 执行后按 output_schema 校验，不通过即失败。
-3. **配置即快照**：`enabled_plugin_ids` 是启动期快照；改 `plugin.json` 后必须 re-enable（§7）。
+3. **改动热生效**：新建插件目录、修改 `plugin.json`、改插件 Python 代码都由内核 watcher 自动处理（发现→G2 校验→注册/重注册/respawn），无需 re-enable 或重启内核；仅 native cdylib 插件集合变更走 G8 自动重启（§7）。
 
 ## 4. 单插件标准布局
 
@@ -62,11 +62,11 @@ plugins/shared/pipeline/<role>/<name>/
 
 ## 5. 双根发现
 
-内置根 `plugins/shared/` + 用户根（环境变量 `AGENTOS_USER_PLUGINS_DIR` 或 OS 标准目录）。同 id 用户根覆盖内置。发现算法只把**直接含 plugin.json 的目录**当插件；无 manifest 的子目录只是父插件的 Python 模块。新建插件目录后内核 watcher 5-8s 热发现 manifest。
+内置根 `plugins/shared/` + 用户根（环境变量 `AGENTOS_USER_PLUGINS_DIR` 或 OS 标准目录）。同 id 用户根覆盖内置。发现算法只把**直接含 plugin.json 的目录**当插件；无 manifest 的子目录只是父插件的 Python 模块。watcher（notify 事件 300ms 防抖 + 60s 轮询兜底）热发现新插件并**自动注册**；已注册插件的 manifest 变更自动 revoke + 重注册（G2 漂移校验）。
 
 ## 6. LLM 能看到哪些工具：三层过滤链
 
-1. **启用快照**：内核启动时按 `manifest.enabled > config/plugins/default_profile.yaml > 默认 true` 算出 `enabled_plugin_ids`；禁用的插件整个不进注册表（工具/路由信号/HTTP 路由全不暴露）。`default_profile.yaml` 形如：
+1. **启用档案**：按 `manifest.enabled > config/plugins/default_profile.yaml > 默认 true` 判定启用；禁用的插件整个不进注册表（工具/路由信号/HTTP 路由全不暴露）。watcher 每轮 sync 从盘上**重读** profile（运行期改 default_profile.yaml 或前端开关即生效）。`default_profile.yaml` 形如：
    ```yaml
    plugins:
      simple_tools:
@@ -83,11 +83,14 @@ plugins/shared/pipeline/<role>/<name>/
 
 | 改了什么 | 需要做什么 |
 |---|---|
-| 新建插件目录 / 修改 plugin.json | 等 5-8s 热发现，然后 **re-enable**（前端插件设置页开关，或 `PUT /api/v1/plugins/{id}/enabled`）——会触发 G2 复核（spawn sidecar 校验声明与实现一致）并重注册能力 |
-| 改插件 Python 代码 | 空闲 TTL 后热重载（kill + respawn）；不确定就重启内核 |
+| 新建插件目录 / 修改 plugin.json | 无需动作：watcher 自动发现 + 注册/重注册（含 G2 漂移校验），秒级生效 |
+| 改插件 Python 代码 | 无需动作：invoker 检测到目录 mtime 变化即 kill + respawn，新代码生效 |
+| 增删 native（cdylib）插件 | 自动：watcher 触发 G8 优雅重启（排空 + 自拉活）；同 id 替换产物文件保守起见重启内核 |
 | 改 agent yaml | mtime 缓存热生效，下一个新任务/会话生效 |
-| 改管道 yaml（autonomous.yaml / config/steps/） | 无需重启：下次执行前 mtime 热重载（1s TTL；坏配置保留旧 + warn） |
+| 改管道 yaml（autonomous.yaml / config/steps/） | 无需重启：下次执行前 mtime 热重载（1s TTL；坏配置保留旧 + warn）。新插件热注册后在管道里引用其 id 即可编译 |
 | 前端新增 ui_schema/表单 | 前端刷新页面 |
+
+禁用中的插件（default_profile.yaml 或前端开关置 false）改完代码/manifest 不会注册——先启用，这是"禁用"语义本身。
 
 ## 8. 命名与 State 约定
 

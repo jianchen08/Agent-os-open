@@ -42,4 +42,4 @@
 - **工具 schema 声明即注册且必须全**：external MCP 工具缺 `input_schema` 拒注册（与内置工具的 warn 补空不同）。
 - 密钥走 `config_files` + `target: "env"` + `type: "secret"`，前端插件设置页出现密钥输入框，不落明文。
 - `auth.required: false` 时无凭据则跳过鉴权头。
-- 接入后同样走三层可见性链：default_profile 启用 + 工具名加进 agent `tool_ids`（见[总览](plugin-development.md#6-llm-能看到哪些工具三层过滤链)）。
+- 接入后 watcher 自动发现注册（默认启用），只需把工具名加进 agent `tool_ids`（见[总览](plugin-development.md#6-llm-能看到哪些工具三层过滤链)）。

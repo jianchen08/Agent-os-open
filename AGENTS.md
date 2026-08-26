@@ -48,8 +48,10 @@ commit 前的调查/验证工作尽量用未跟踪文件（`??` 状态）或文�
   `executor/general_agent.yaml`）的 `tool_ids` 白名单控制，新工具记得加入。
 - **权限模式**：5 种权限模式 + 参数级危险判定，纯插件前端（http_endpoints + form compact +
   human-interaction 确认）。会话隔离由 isolation_guard 容器落地。
-- **插件热发现**：新建/修改插件后内核热加载 manifest（5-8s），但 `enabled_plugin_ids`
-  是启动期快照——新插件需 reenable 重注册；前端 schema 需刷新页面才更新。
+- **插件热发现/热重载全链路**：新建插件目录、修改 plugin.json、改插件 Python 代码
+  均由 watcher 自动处理（发现→G2 校验→注册/重注册/respawn），无需 re-enable 或重启；
+  cdylib 集合变更走 G8 自动重启（同 id 换产物保守重启）；已知插件面取自共享
+  manifests 活集合（新插件热注册后管道引用即可编译）；前端 schema 需刷新页面才更新。
 - **多循环体/执行上下文**：`execution_context` 贯穿任务链（agent_id 全链传导）。
 
 ## 约定

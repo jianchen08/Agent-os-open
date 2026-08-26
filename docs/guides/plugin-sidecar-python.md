@@ -76,7 +76,7 @@ if __name__ == "__main__":
 
 工具函数就是普通函数，返回 dict（与 output_schema 对齐）。注册两种写法：`plugin.register_tool(name, schema, fn, desc)` 或 `@plugin.tool(name=..., schema=..., description=...)`。
 
-**接线清单**：建目录 → manifest + server.py + pyproject → `uv sync --project <目录>` → default_profile.yaml 置 enabled（或前端开关）→ 把工具名加进目标 agent 的 `tool_ids` → 新会话验证。
+**接线清单**：建目录 → manifest + server.py + pyproject → `uv sync --project <目录>` → 把工具名加进目标 agent 的 `tool_ids` → 新会话验证。注册无需任何动作：watcher 自动发现并注册（默认启用；profile 显式禁用的才需要启用开关）。
 
 ## 3. 示例 B：系统插件 / services / HTTP 端点（参考 `plugins/shared/system/llm/`）
 

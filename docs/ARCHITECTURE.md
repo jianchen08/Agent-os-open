@@ -40,7 +40,7 @@
 管道的每一步决策都被显式建模（state 字段、路由信号、执行轨迹），分层可查（骨架 / L1 压缩块 / L0 原始记录，`read_execution_detail` 工具）。任意时刻可以回答："现在卡在哪一步？为什么？下一步会往哪走？"
 
 ### 3. 可回滚、可热替换（Rollback & Hot Swap）
-Agent 配置 mtime 缓存热生效；插件目录热发现 + re-enable 即时重注册；Python 插件进程空闲回收、代码改动热重载、崩溃自动拉起；内核不因单个配置加载失败而启动失败（降级 warn + 空配置）。
+Agent 配置 mtime 缓存热生效；插件目录与 manifest 变更热发现自动注册/重注册；Python 插件进程空闲回收、代码改动热重载、崩溃自动拉起；内核不因单个配置加载失败而启动失败（降级 warn + 空配置）。
 
 ---
 
@@ -112,8 +112,8 @@ exit 循环体（单次）  workspace 收尾 + 环境释放（run_on_error，提
 - **宿主三轨**：Python sidecar（默认；独立进程、MCP over stdio、uv venv 单轨、懒启动/空闲回收/崩溃自愈/热重载）、Rust cdylib 原生（`in_process`；高频管道步骤晋升轨、永不 dlclose）、外部 MCP（`entry: "mcp:external"`；零代码直连第三方 MCP 服务）。
 - **能力声明**：`capabilities.tools`（进 LLM 面）/ `services`（内部服务，不进 LLM 面）/ `route_signals` / `lifecycle_hooks` / `streaming`（流式事件声明，fail-closed）。
 - **插件间耦合唯一轴**：`requires_services`（能力角色名，boot 期闸校验）。
-- **LLM 可见工具三层过滤**：启用快照（`config/plugins/default_profile.yaml`）→ 能力注册（缺 schema 的 external MCP 工具拒注册）→ Agent `tool_ids` 白名单（解析不出 = 空工具面，禁止静默全量）。
-- **G2 复核**：re-enable 时 spawn sidecar 校验 manifest 声明与实现一致，漂移按净化后 manifest 注册。
+- **LLM 可见工具三层过滤**：启用档案（`config/plugins/default_profile.yaml`，watcher 每轮 sync 重读）→ 能力注册（缺 schema 的 external MCP 工具拒注册）→ Agent `tool_ids` 白名单（解析不出 = 空工具面，禁止静默全量）。
+- **全链路热生效**：新插件自动发现注册、manifest 变更自动 revoke + 重注册（G2 漂移校验）、Python 代码改动 respawn、cdylib 集合变更 G8 优雅重启——插件改动无需 re-enable 或重启内核。
 
 协议全字段见 [plugin-protocol.md](plugin-protocol.md)；开发见 [guides/plugin-development.md](guides/plugin-development.md)。
 
