@@ -311,3 +311,19 @@ def test_create_without_credentials_401() -> None:
         ))
         assert resp["success"] is False and resp["data"]["status"] == 401, headers
     assert get_trigger_manager().list_all() == []
+
+
+def test_server_http_handle_forwards_headers_to_create() -> None:
+    """server.http.handle 入口 → 分发：headers 透传到 create 的 Bearer 解析。"""
+    import server as trigger_server  # noqa: PLC0415
+
+    resp = asyncio.run(trigger_server.http_handle(
+        path="/ext/trigger_setup_tool/triggers",
+        method="POST",
+        raw_body=_encode_body(_CREATE_BODY),
+        headers={"Authorization": f"Bearer {_token('u9', 'carol')}"},
+    ))
+    body = _unwrap(resp)
+    cfg = get_trigger_manager().get(body["trigger"]["trigger_id"])
+    assert cfg is not None
+    assert cfg.metadata["user_id"] == "u9"
