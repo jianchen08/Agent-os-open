@@ -6,10 +6,10 @@
 > **📍 现状勘误（相对 2026-07-13 调研时点的路径变更）**：
 > - `docs/0.2_rust_plugin_solution.md` → 已归档至 `docs/working/_archive_0.2_migration/0.2_rust_plugin_solution.md`
 > - `src/pipeline/plugin.py` / `src/pipeline/types.py` → 已随 0.1 `src/` 整体删除；0.2 等价契约：管道插件 Python 基类在 `plugins/shared/pipeline/_base/plugin.py`，类型定义在 `plugins/sdk/src/agentos_plugin_sdk/pipeline_types.py`
-> - `.project/manifest_v2_schema.json` / `.project/mcp_extension_protocol.md` → 始终未作为独立文件产出；manifest 真值源 = `kernel/crates/core/src/traits.rs::PluginManifest`，协议文档 = `docs/plugin-protocol.md`
+> - `.project/manifest_v2_schema.json` / `.project/mcp_extension_protocol.md` → 始终未作为独立文件产出；manifest 真值源 = `kernel/crates/core/src/traits.rs::PluginManifest`，协议文档 = `docs/guides/plugin-protocol.md`
 > - `docs/guides/plugin_development_guide.md` / `plugin_development_standard.md`（0.1）→ 已删除；现行开发指南 = `docs/guides/` 分篇（见 [README.md](README.md)）
 > - 路由信号（`next_llm` / `next_tool` / `end` / `wait`）**已不驱动路由**：0.2 路由由管道 YAML 的 G10 DSL（`when`/`then`）按 state 条件裁决；`RouteType` / `PluginResult.route_signal` 为遗留类型（native 恒 None、引擎不读），manifest `route_signals` 声明位保留但执行面零消费
-> - `docs/guides/contract_qa.md`（契约设计 Q&A）→ 已删除：其回答基于旧版 traits.rs（755 行时期），`dependencies`/`DependencyResolver`/`LlmProvider`/三子 trait 等前提在当前代码中不存在；具体做法见各分篇指南（依赖→[plugin-sidecar-python.md](plugin-sidecar-python.md) §4、宿主选型→[plugin-development.md](plugin-development.md) §2、字段→[plugin-protocol.md](../plugin-protocol.md)）
+> - `docs/guides/contract_qa.md`（契约设计 Q&A）→ 已删除：其回答基于旧版 traits.rs（755 行时期），`dependencies`/`DependencyResolver`/`LlmProvider`/三子 trait 等前提在当前代码中不存在；具体做法见各分篇指南（依赖→[plugin-sidecar-python.md](plugin-sidecar-python.md) §4、宿主选型→[plugin-development.md](plugin-development.md) §2、字段→[plugin-protocol.md](guides/plugin-protocol.md)）
 > - `docs/ARCHITECTURE.md` → 已更新为 0.2 架构口径
 
 ---
@@ -45,10 +45,10 @@
 | 12 | `config/templates/plugin_scaffold/input_plugin.py` | 脚手架模板 | Input 插件模板（含 `IInputPlugin`、enabled 默认 True） | ✅ 已存在 |
 | 13 | `config/templates/plugin_scaffold/output_plugin.py` | 脚手架模板 | Output 插件模板（含 `IOutputPlugin`、route_signals 声明） | ✅ 已存在 |
 | 14 | `docs/guides/`（分篇指南） | 完整教程 | 插件开发总览 / sidecar / native / 外部 MCP / 主题 / Agent 配置 / 管道配置 / 排障 | ✅ 已存在 |
-| 15 | `docs/plugin-protocol.md` | 协议权威 | plugin.json manifest 全字段 + echo_tool 从零走查 + SDK 速查 | ✅ 已存在 |
+| 15 | `docs/guides/plugin-protocol.md` | 协议权威 | plugin.json manifest 全字段 + echo_tool 从零走查 + SDK 速查 | ✅ 已存在 |
 | 16 | `docs/ARCHITECTURE.md` | 架构总览 | 0.2 架构总览（设计哲学 / 子系统 / 数据流 / 扩展点） | ✅ 已存在 |
 
-> **教程侧注**：表里 4 号和 5 号文件（`.project/` 下的 JSON Schema 和 MCP 扩展协议文档）未作为独立文件产出——manifest 真值源是 `kernel/crates/core/src/traits.rs::PluginManifest`（配 `docs/plugin-protocol.md` 说明）。下面讲解这两份"虚拟文件"的内容时，基于 [来源: docs/working/_archive_0.2_migration/0.2_rust_plugin_solution.md]、[来源: docs/working/0.2插件体系核心决策.md]、[来源: kernel/crates/core/src/traits.rs] 中已固化的字段名和决策反向推导，仅供理解。
+> **教程侧注**：表里 4 号和 5 号文件（`.project/` 下的 JSON Schema 和 MCP 扩展协议文档）未作为独立文件产出——manifest 真值源是 `kernel/crates/core/src/traits.rs::PluginManifest`（配 `docs/guides/plugin-protocol.md` 说明）。下面讲解这两份"虚拟文件"的内容时，基于 [来源: docs/working/_archive_0.2_migration/0.2_rust_plugin_solution.md]、[来源: docs/working/0.2插件体系核心决策.md]、[来源: kernel/crates/core/src/traits.rs] 中已固化的字段名和决策反向推导，仅供理解。
 
 ---
 
@@ -530,13 +530,13 @@ class {PluginClass}(IOutputPlugin):
 
 ---
 
-### 2.15 插件协议权威文档：`docs/plugin-protocol.md`
+### 2.15 插件协议权威文档：`docs/guides/plugin-protocol.md`
 
 #### 这是什么？
 
 plugin.json manifest 全字段规范（字段总表 / capabilities / requires_services / 外部 MCP 接入 / 双根发现 / config_refs / ui_schema）+ 从零开发 echo_tool 完整走查 + SDK 用法速查 + 调试 FAQ。命名规范与 State 命名空间约定的现行版本在 [guides/plugin-development.md §8](plugin-development.md#8-命名与-state-约定)。
 
-> **来源**：[来源: docs/plugin-protocol.md]
+> **来源**：[来源: docs/guides/plugin-protocol.md]
 
 ---
 
@@ -591,14 +591,14 @@ plugin.json manifest 全字段规范（字段总表 / capabilities / requires_se
 └─ config/templates/plugin_scaffold/*.py    ◄── 3 种插件模板
 
 规范层（开发者手册）
-├─ docs/plugin-protocol.md                  ◄── 协议权威
+├─ docs/guides/plugin-protocol.md                  ◄── 协议权威
 ├─ docs/guides/（分篇指南）                  ◄── 上手教程 + 排障
 └─ docs/ARCHITECTURE.md                     ◄── 架构总览
 ```
 
 **关键依赖**：
 
-- `docs/plugin-protocol.md` ⇄ `traits.rs::PluginManifest`：字段必须一一对应
+- `docs/guides/plugin-protocol.md` ⇄ `traits.rs::PluginManifest`：字段必须一一对应
 - `plugin_scaffold/*.py` ⇄ `plugins/shared/pipeline/_base/plugin.py`：模板必须继承该基类
 - SDK `pipeline_types.py` ⇄ 内核 `types.rs`：state 字段名两侧一致
 
@@ -608,4 +608,4 @@ plugin.json manifest 全字段规范（字段总表 / capabilities / requires_se
 
 1. `docs/ARCHITECTURE.md`（0.2 现状）→ `docs/working/0.2插件体系核心决策.md`（9+1 条决策）
 2. `kernel/crates/core/src/traits.rs` + `types.rs`（Rust 契约）→ `plugins/shared/pipeline/_base/plugin.py` + SDK `pipeline_types.py`（Python 侧契约）
-3. 动手：[plugin-protocol.md §8](../plugin-protocol.md)（echo_tool 从零走查）→ `config/templates/plugin_scaffold/` 复制模板开写
+3. 动手：[plugin-protocol.md §8](guides/plugin-protocol.md)（echo_tool 从零走查）→ `config/templates/plugin_scaffold/` 复制模板开写

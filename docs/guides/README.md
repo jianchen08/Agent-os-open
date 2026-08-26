@@ -3,7 +3,7 @@
 > 面向要在本仓库开发插件、配置 Agent 与管道的贡献者。按"要做什么"选择分篇阅读；
 > 所有示例均指向仓库内真实插件，可直接对照源码。
 >
-> **字段级权威**：`plugin.json` 全字段规范见 [docs/plugin-protocol.md](../plugin-protocol.md)。
+> **字段级权威**：`plugin.json` 全字段规范见 [docs/guides/plugin-protocol.md](guides/plugin-protocol.md)。
 
 | 我想… | 读哪篇 |
 |---|---|
@@ -22,8 +22,8 @@
 
 ## 规范与协议文档
 
-- `docs/plugin-protocol.md` — plugin.json manifest 全字段权威 + 从零开发 echo_tool 完整走查 + SDK 速查
-- `docs/streaming-protocol.md` — 流式事件协议与 `capabilities.streaming` 声明
+- `docs/guides/plugin-protocol.md` — plugin.json manifest 全字段权威 + 从零开发 echo_tool 完整走查 + SDK 速查
+- `docs/guides/streaming-protocol.md` — 流式事件协议与 `capabilities.streaming` 声明
 - `skin-plugin.md`（本目录）— 皮肤插件（CSS 注入 + hooks.mjs + 递送端点）
 - `docs/guides/theme-customization.md` — 主题使用侧说明（用户视角）
 - `config/pipelines/README.md` — 管道配置现状与修改须知

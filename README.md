@@ -101,7 +101,7 @@
 
 **插件即声明**：一个插件 = 一个目录 + 一份 `plugin.json` 清单（声明工具 / 服务 / 生命周期钩子 / HTTP 端点），内核统一发现、校验、注册。宿主双轨自选——Python 边车（独立进程，MCP over stdio，uv venv 隔离）或 Rust 原生（cdylib，进程内零 IPC）；还可零代码接入任意第三方 MCP 服务。插件错误由引擎统一兜底：sidecar 崩溃自动重启并重试一次，工具失败结果回喂 LLM 自我修正。
 
-开发文档：[docs/plugin-protocol.md](docs/plugin-protocol.md)（插件协议权威）· [docs/guides/README.md](docs/guides/README.md)（分篇上手教程）。
+开发文档：[docs/guides/plugin-protocol.md](docs/guides/plugin-protocol.md)（插件协议权威）· [docs/guides/README.md](docs/guides/README.md)（分篇上手教程）。
 
 ### 2. 全链热生效——不停机演进
 Agent 配置（YAML）mtime 缓存热生效，改提示词/工具白名单无需重启；插件目录与 manifest 变更热发现自动注册/重注册（文件监听 + 轮询兜底，秒级），Python 插件进程空闲自动回收、代码改动热重载、崩溃自动拉起；管道配置每次执行前检测文件变化自动重编译，坏配置自动回退旧版本并告警。
@@ -250,8 +250,7 @@ npm run dev    # 前端开发服务器运行在 http://localhost:6390（反代�
 |------|------|
 | [README_EN.md](README_EN.md) | English README |
 | [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | 系统架构详解 |
-| [docs/plugin-protocol.md](docs/plugin-protocol.md) | 插件协议开发者文档（plugin.json 全字段权威） |
-| [docs/guides/README.md](docs/guides/README.md) | 开发指南索引（插件 / 主题 / Agent / 管道配置 / 排障） |
+| [docs/guides/README.md](docs/guides/README.md) | 开发指南索引（插件协议权威 / 插件开发 / 主题 / Agent / 管道配置 / 排障） |
 | [docs/vision.md](docs/vision.md) · [docs/guides/logging.md](docs/guides/logging.md) | 项目愿景 · 日志体系 |
 | [ROADMAP.md](ROADMAP.md) | 版本路线图 |
 | [CONTRIBUTING.md](CONTRIBUTING.md) | 贡献指南 |

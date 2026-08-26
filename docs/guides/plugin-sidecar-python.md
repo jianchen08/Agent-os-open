@@ -1,7 +1,7 @@
 # Sidecar 插件开发（Python）
 
 > 返回 [开发指南索引](README.md)。前置阅读：[插件开发总览](plugin-development.md)。
-> manifest 全字段见 [docs/plugin-protocol.md](../plugin-protocol.md)。
+> manifest 全字段见 [docs/guides/plugin-protocol.md](guides/plugin-protocol.md)。
 
 ## 1. 运行时模型
 

@@ -101,7 +101,7 @@ Exit-transfer conditions and side-effect writes are fully declared in the pipeli
 
 **Plugins-as-declarations**: a plugin = a directory + a `plugin.json` manifest (declaring tools / services / lifecycle hooks / HTTP endpoints), uniformly discovered, validated, and registered by the kernel. Choose your hosting track freely — Python sidecar (separate process, MCP over stdio, uv venv isolation) or Rust native (cdylib, zero-IPC in-process); third-party MCP services plug in with zero code. Plugin errors are handled uniformly by the engine: crashed sidecars auto-restart with one retry; failed tool results are fed back to the LLM for self-correction.
 
-Dev docs: [docs/plugin-protocol.md](docs/plugin-protocol.md) (protocol authority) · [docs/guides/README.md](docs/guides/README.md) (step-by-step guides).
+Dev docs: [docs/guides/plugin-protocol.md](docs/guides/plugin-protocol.md) (protocol authority) · [docs/guides/README.md](docs/guides/README.md) (step-by-step guides).
 
 ### 2. Hot Configuration — Evolve Without Downtime
 Agent configs (YAML) hot-apply via mtime caching — change prompts or tool whitelists without restarting; plugin directories and manifest changes are hot-discovered and auto-(re)registered (file-watch + polling fallback, seconds-level); Python plugin processes are idle-collected, hot-reloaded on code change, and auto-revived after crashes. Pipeline configs hot-reload too — file changes are detected before each run and recompiled automatically; a broken config falls back to the last good one with a warning.
@@ -252,8 +252,7 @@ npm run dev    # frontend dev server at http://localhost:6390 (proxies to kernel
 |----------|-------------|
 | [README.md](README.md) | Chinese README |
 | [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | System architecture deep-dive |
-| [docs/plugin-protocol.md](docs/plugin-protocol.md) | Plugin protocol (authoritative plugin.json reference) |
-| [docs/guides/README.md](docs/guides/README.md) | Dev guides index (plugins / themes / Agent / pipeline config / troubleshooting) |
+| [docs/guides/README.md](docs/guides/README.md) | Dev guides index (plugin protocol authority / plugin dev / themes / Agent / pipeline config / troubleshooting) |
 | [ROADMAP.md](ROADMAP.md) | Version roadmap |
 | [CONTRIBUTING.md](CONTRIBUTING.md) | Contribution guide |
 | [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md) | Code of conduct |

@@ -2,7 +2,7 @@
 
 > 本文档面向**希望深入了解灵汐内部机制、进行二次开发或参与核心贡献**的开发者。
 > 0.2 架构：**Rust 微内核 + Python 插件 + React 前端**。插件开发协议见
-> [plugin-protocol.md](plugin-protocol.md)，上手教程见 [guides/README.md](guides/README.md)。
+> [plugin-protocol.md](guides/plugin-protocol.md)，上手教程见 [guides/README.md](guides/README.md)。
 
 ---
 
@@ -151,7 +151,7 @@ exit 循环体（单次）  workspace 收尾 + 环境释放（run_on_error，提
 - **LLM 可见工具三层过滤**：启用档案（`config/plugins/default_profile.yaml`，watcher 每轮 sync 重读）→ 能力注册（缺 schema 的 external MCP 工具拒注册）→ Agent `tool_ids` 白名单（解析不出 = 空工具面，禁止静默全量）。
 - **全链路热生效**：新插件自动发现注册、manifest 变更自动 revoke + 重注册（G2 漂移校验）、Python 代码改动 respawn、cdylib 集合变更 G8 优雅重启——插件改动无需 re-enable 或重启内核。
 
-协议全字段见 [plugin-protocol.md](plugin-protocol.md)；开发见 [guides/plugin-development.md](guides/plugin-development.md)。
+协议全字段见 [plugin-protocol.md](guides/plugin-protocol.md)；开发见 [guides/plugin-development.md](guides/plugin-development.md)。
 
 ### Agent 系统
 
@@ -287,8 +287,8 @@ plugins:
 | 调整管道编排 | 改 `config/pipelines/autonomous.yaml`（热重载，无需重启） | [guides/pipeline-configuration.md](guides/pipeline-configuration.md) |
 | 新增前端预设主题 | `frontend/src/config/themes/presets/` + index.ts 注册 | [guides/theme-development.md](guides/theme-development.md) |
 | 随插件分发主题/皮肤 | manifest `contributes.themes` | [guides/theme-development.md](guides/theme-development.md) |
-| 新增前端页面/表单 | manifest `ui_schema` / `http_endpoints` | [plugin-protocol.md](plugin-protocol.md) |
-| 插件间服务依赖 | manifest `requires_services`（能力角色名） | [plugin-protocol.md](plugin-protocol.md) |
+| 新增前端页面/表单 | manifest `ui_schema` / `http_endpoints` | [plugin-protocol.md](guides/plugin-protocol.md) |
+| 插件间服务依赖 | manifest `requires_services`（能力角色名） | [plugin-protocol.md](guides/plugin-protocol.md) |
 
 ---
 
@@ -320,7 +320,7 @@ plugins:
 
 ## 进一步阅读
 
-- [plugin-protocol.md](plugin-protocol.md) —— 插件协议权威文档
+- [plugin-protocol.md](guides/plugin-protocol.md) —— 插件协议权威文档
 - [guides/README.md](guides/README.md) —— 开发指南索引
 - [ROADMAP.md](../ROADMAP.md) —— 版本路线图与被否方案索引
 - [CONTRIBUTING.md](../CONTRIBUTING.md) —— 贡献流程

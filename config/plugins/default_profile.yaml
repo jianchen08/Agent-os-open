@@ -46,9 +46,6 @@ plugins:
     enabled: false
   visual_customization_demo:
     enabled: false
-  # widget 化全特性演示台：前端契约测试（WidgetDemo.plugin.test.tsx）直接读
-  # plugin.json 文件自持验证，不依赖运行态；按"界面不留 demo、禁用而非删代码"
-  # 裁定随其余演示插件一并禁用（侧边栏"Widget 演示"入口随之消失）。
   widget_demo:
     enabled: false
   task_form:
@@ -59,19 +56,12 @@ plugins:
     enabled: true
   omnisearch:
     enabled: true
-  # 装卸载生命周期 e2e 探针（tests/e2e_02/test_07_plugin_lifecycle_e2e.py）：
-  # 默认禁用，e2e 按需启停；非 e2e 场景永远保持 disabled。
   e2e_lifecycle_probe:
     enabled: false
-  # 任务失败自动回滚能力（create_checkpoint/record_operation/execute 三服务，
-  # 实现与测试完整）：当前全仓零消费者（无管道步骤/工具调用其服务），不随
-  # 内核启动加载（省 sidecar 开销）；出现消费者时 re-enable 重注册即可。
   rollback_service:
     enabled: false
-  # Godot 选中引用桥（推送接收/前端转发/管道 <reference> 注入）
   pipeline_godot_context:
     enabled: true
-  # Godot 编辑器执行面（godot-mcp-go 单 godot_run 工具，与选中引用配合）
   godot_mcp:
     enabled: true
 defaults:

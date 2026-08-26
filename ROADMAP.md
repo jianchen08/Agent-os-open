@@ -56,7 +56,7 @@
 > |------|------|------|
 > | **管道插件** | ✅ 已上线 | 管道内部的 Input / Core / Output 插件链，负责上下文注入、推理、后处理；出口转移由管道 YAML 的路由 DSL 裁决 |
 > | **系统级插件化** | ✅ 已上线 | 一切皆插件：Agent / 工具 / 通道 / 记忆 / 触发器全部插件承载，全链热插拔（watcher 自动发现注册） |
-> | **第三方插件协议** | ✅ 0.2 已落地 | manifest 驱动的统一插件协议（`plugin.json` + 双根发现 + 热插拔，见 [docs/plugin-protocol.md](docs/plugin-protocol.md)）：① 内部模块已完全插件化、可独立分发；② 灵汐作为插件嵌入外部宿主（游戏引擎、VS Code 等）的方向仍按规划推进 |
+> | **第三方插件协议** | ✅ 0.2 已落地 | manifest 驱动的统一插件协议（`plugin.json` + 双根发现 + 热插拔，见 [docs/guides/plugin-protocol.md](docs/guides/plugin-protocol.md)）：① 内部模块已完全插件化、可独立分发；② 灵汐作为插件嵌入外部宿主（游戏引擎、VS Code 等）的方向仍按规划推进 |
 
 ### 0.1.0 ✅ 已发布
 
