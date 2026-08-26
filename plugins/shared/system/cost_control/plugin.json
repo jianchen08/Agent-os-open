@@ -316,7 +316,9 @@
             "type": "poll",
             "intervalSeconds": 60
           },
-          "variant": "metric"
+          "variant": "metric",
+          "icon": "🎯",
+          "description": "预算使用百分比"
         }
       },
       {
@@ -333,7 +335,9 @@
             "type": "poll",
             "intervalSeconds": 60
           },
-          "variant": "metric"
+          "variant": "metric",
+          "icon": "📅",
+          "description": "今日 LLM Tokens（traces 账本）"
         }
       },
       {
@@ -350,7 +354,9 @@
             "type": "poll",
             "intervalSeconds": 60
           },
-          "variant": "metric"
+          "variant": "metric",
+          "icon": "📆",
+          "description": "本月 LLM Tokens（traces 账本）"
         }
       }
     ]

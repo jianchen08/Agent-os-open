@@ -243,7 +243,13 @@ export function useDataWidget(
       return
     }
     let cancelled = false
-    setState({ data: staticData, loading: true, error: null })
+    // 轮询重拉（reloadKey 变化）时保留已渲染数据：有旧值不置 loading、
+    // 不闪"加载中"占位（只有首挂载无数据才显示加载态）
+    setState((prev) => ({
+      data: prev.data ?? staticData,
+      loading: prev.data == null,
+      error: null,
+    }))
     fetchDatasourcePayload(uri)
       .then((payload) => {
         if (!cancelled) {
@@ -252,11 +258,12 @@ export function useDataWidget(
       })
       .catch((err: unknown) => {
         if (!cancelled) {
-          setState({
-            data: staticData,
+          setState((prev) => ({
+            // 刷新失败保留已渲染数据（避免整卡回退静态空值闪变）
+            data: prev.data ?? staticData,
             loading: false,
             error: err instanceof Error ? err.message : '数据加载失败',
-          })
+          }))
         }
       })
     return () => {

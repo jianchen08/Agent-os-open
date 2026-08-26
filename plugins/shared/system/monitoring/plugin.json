@@ -366,9 +366,11 @@
           "valueKey": "metrics.cpu_usage",
           "refresh": {
             "type": "poll",
-            "intervalSeconds": 10
+            "intervalSeconds": 30
           },
-          "variant": "metric"
+          "variant": "metric",
+          "icon": "🖥️",
+          "description": "CPU 使用率（psutil 实时）"
         }
       },
       {
@@ -382,9 +384,11 @@
           "valueKey": "metrics.memory.usage_percent",
           "refresh": {
             "type": "poll",
-            "intervalSeconds": 10
+            "intervalSeconds": 30
           },
-          "variant": "metric"
+          "variant": "metric",
+          "icon": "🧠",
+          "description": "内存占用（psutil 实时）"
         }
       },
       {
@@ -398,9 +402,11 @@
           "valueKey": "metrics.disk.usage_percent",
           "refresh": {
             "type": "poll",
-            "intervalSeconds": 10
+            "intervalSeconds": 30
           },
-          "variant": "metric"
+          "variant": "metric",
+          "icon": "💾",
+          "description": "磁盘占用（psutil 实时）"
         }
       },
       {
@@ -415,9 +421,11 @@
           "valueKey": "token_usage.total_tokens",
           "refresh": {
             "type": "poll",
-            "intervalSeconds": 30
+            "intervalSeconds": 60
           },
-          "variant": "metric"
+          "variant": "metric",
+          "icon": "🔤",
+          "description": "跨运行累计 LLM Tokens（traces 账本）"
         }
       },
       {

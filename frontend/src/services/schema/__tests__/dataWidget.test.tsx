@@ -124,6 +124,36 @@ describe('useDataWidget', () => {
     expect(screen.getByTestId('d').textContent).toContain('id')
   })
 
+  it('轮询重拉（reloadKey 变化）：保留已渲染数据、不闪 loading（有旧值静默刷新）', async () => {
+    let resolveFetch: ((v: { data: { value: number } }) => void) | undefined
+    apiGet.mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          resolveFetch = resolve
+        }),
+    )
+    function Host({ reloadKey = 0 }: { reloadKey?: number }) {
+      const r = useDataWidget({ datasourceUri: '/ext/x' }, 'scalar', reloadKey)
+      return (
+        <div>
+          <span data-testid="v">{JSON.stringify((r.data as { value?: number } | undefined)?.value)}</span>
+          <span data-testid="loading">{String(r.loading)}</span>
+        </div>
+      )
+    }
+    const { rerender } = render(<Host />)
+    expect(screen.getByTestId('loading').textContent).toBe('true')
+    resolveFetch?.({ data: { value: 1 } })
+    await waitFor(() => expect(screen.getByTestId('v').textContent).toBe('1'))
+    expect(screen.getByTestId('loading').textContent).toBe('false')
+    // 重拉：有旧值 → 不闪 loading、旧数据保留，直到新值到达
+    rerender(<Host reloadKey={1} />)
+    expect(screen.getByTestId('loading').textContent).toBe('false')
+    expect(screen.getByTestId('v').textContent).toBe('1')
+    resolveFetch?.({ data: { value: 2 } })
+    await waitFor(() => expect(screen.getByTestId('v').textContent).toBe('2'))
+  })
+
   it('非绝对 URI → 走 /api/v1/datasource 代理', async () => {
     apiGet.mockResolvedValue({ data: [{ id: 1 }] })
     function Host() {
