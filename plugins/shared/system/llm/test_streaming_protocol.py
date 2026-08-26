@@ -158,6 +158,47 @@ def test_text_then_reasoning_switches_block() -> None:
     assert events[3][1] == {"index": 1, "block_type": "reasoning"}
 
 
+def test_empty_text_chunk_is_ignored() -> None:
+    """空 content 的 text chunk 不产生事件（防御：adapter 不发空增量）。"""
+    t = StreamTranslator()
+    assert t.translate(_text("")) == []
+    assert t.translate({"type": "text"}) == []  # 缺 content 键同语义
+    assert t.translate(_text("x")) != []
+
+
+def test_empty_thinking_chunk_is_ignored() -> None:
+    """空 content 的 thinking chunk 不产生事件（不误开空块）。"""
+    t = StreamTranslator()
+    assert t.translate(_thinking("")) == []
+    assert t.translate({"type": "thinking"}) == []
+    assert t.translate(_thinking("x")) != []
+
+
+def test_text_after_tool_call_closes_all_tool_blocks() -> None:
+    """tool_call 后接 text：所有打开的 tool 块闭合（并行不残留），text 开新索引。"""
+    events = _events(
+        _tool_call(0, call_id="c0", name="f", arguments="{}"),
+        _tool_call(1, call_id="c1", name="g", arguments="{}"),
+        _text("after"),
+    )
+    assert _types(events) == [
+        "block_start",
+        "tool_call_delta",
+        "block_start",
+        "tool_call_delta",
+        "block_end",
+        "block_end",
+        "block_start",
+        "text_delta",
+        "block_end",
+        "finish",
+    ]
+    # 两个 tool 块（0/1）全部闭合（并行不残留），text 块索引 2
+    ends = [p["index"] for e, p in events if e == "block_end"]
+    assert ends == [1, 0, 2]
+    assert events[6][1] == {"index": 2, "block_type": "text"}
+
+
 def test_thinking_end_without_open_reasoning_is_noop() -> None:
     """无思考块时的 thinking_end 不产生事件（防御：adapter 只在有思考时发）。"""
     t = StreamTranslator()
