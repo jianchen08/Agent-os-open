@@ -1,3 +1,4 @@
+# @feature: FP-0.2.〇 管道引擎与插件执行模型 | @vision: V3 可嵌入 | @ci: manual
 """真实端到端压缩测试 — 真实 LLM 调用,不 mock。
 
 流程:

@@ -1,4 +1,4 @@
-# @ci: python-coverage
+# @feature: FP-0.2.二 内部模块统一 manifest 化 | @vision: V3 可嵌入 | @ci: python-coverage
 """fs_tools 工作空间约束测试（punch B5）。
 
 project_root 前缀校验（参考 download/tool.py 的 WorkspaceAwareMixin 语义）：

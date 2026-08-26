@@ -1,3 +1,4 @@
+# @feature: FP-0.2.〇 管道引擎与插件执行模型 | @vision: V3 可嵌入 | @ci: python-e2e
 """
 用户旅程 1：Kernel API 端点验证（HTTP 请求验证）
 

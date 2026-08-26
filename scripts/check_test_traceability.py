@@ -27,7 +27,8 @@ import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
-TRACEABILITY = ROOT / "docs" / "test_traceability.md"
+# 2026-08-26 目录归位(92248f07)后 test_traceability.md 移至 docs/working/
+TRACEABILITY = ROOT / "docs" / "working" / "test_traceability.md"
 T5_AUDIT = ROOT / "reports" / "audit_round3" / "T5_tests.md"
 BASELINE_FILE = ROOT / ".github" / "traceability-baseline.txt"
 

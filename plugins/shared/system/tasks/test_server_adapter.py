@@ -1,4 +1,4 @@
-# @feature: task_service MCP 适配层 | @vision: V3 可嵌入 | @ci: python-coverage
+# @feature: FP-0.2.〇 管道引擎与插件执行模型 | @vision: V3 可嵌入 | @ci: python-coverage
 """tasks/server.py 适配层行为测试——工具面委托与生命周期。
 
 走真实 TaskService（tmp data_dir，YAML 落盘真依赖）：

@@ -1,3 +1,4 @@
+# @feature: FP-0.2.〇 管道引擎与插件执行模型 | @vision: V3 可嵌入 | @ci: python-e2e
 """
 E2E 测试：Auth 登录全链路 + Chat 管道 + 插件工具加载（HTTP API 验证）
 

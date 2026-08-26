@@ -1,4 +1,4 @@
-# @feature: 评估闸门插件裁决 | @vision: V3 可嵌入 | @ci: python-coverage
+# @feature: FP-0.2.〇 管道引擎与插件执行模型 | @vision: V3 可嵌入 | @ci: python-coverage
 """task_reminder 行为面测试——execute 主流程编排与静态解析器。
 
 与 test_task_reminder_state.py（state 键契约）互补，本文件覆盖：

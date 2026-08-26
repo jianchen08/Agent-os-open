@@ -1,4 +1,4 @@
-# @feature: FP-0.2.插件合宿进程模型 | @ci: python-test
+# @feature: FP-0.2.〇 管道引擎与插件执行模型 | @ci: python-test
 """合宿宿主单元测试：watchdog、成员发现、成员加载 fail-fast、聚合命名空间。
 
 断行为不断实现：watchdog 用注入 fake clock + 缩短阈值/间隔参数化（禁止

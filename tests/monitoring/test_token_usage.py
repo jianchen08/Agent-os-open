@@ -1,3 +1,4 @@
+# @feature: FP-0.2.可观测性 可观测性基座 | @vision: V3 可嵌入 | @ci: python-coverage
 """monitoring /ext/monitoring/token-usage 从 traces 表聚合测试（G4）。
 
 2026-08-18 G4 修复：

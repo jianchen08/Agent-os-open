@@ -1,4 +1,4 @@
-# @feature: GAP-1 任务元数据 state 单一真值 | @vision: V3 可嵌入 | @ci: python-coverage
+# @feature: FP-0.2.〇 管道引擎与插件执行模型 | @vision: V3 可嵌入 | @ci: python-coverage
 """task_reminder 0.2 state 契约测试（GAP-1 接线修复）。
 
 0.2 定案：task = pipeline state 单一真值——任务管道的 state 出生即带

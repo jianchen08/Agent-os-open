@@ -1,4 +1,4 @@
-# @feature: FP-0.2.插件合宿进程模型 | @ci: python-e2e
+# @feature: FP-0.2.〇 管道引擎与插件执行模型 | @ci: python-e2e
 """E2E：合宿（co-hosting）进程监控——验证 light 插件共享宿主进程而非每插件一进程。
 
 真实内核（:9100）+ 真实 sidecar + 真实 LLM chat 全链路，psutil 进程级断言：

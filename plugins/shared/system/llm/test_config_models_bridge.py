@@ -1,4 +1,4 @@
-# @feature: LLM 配置注入桥 | @vision: V3 可嵌入 | @ci: python-coverage
+# @feature: FP-0.2.CFG 配置系统与插件配置注入 | @vision: V3 可嵌入 | @ci: python-coverage
 """llm/_config_models.py 配置注入桥行为测试。
 
 覆盖：

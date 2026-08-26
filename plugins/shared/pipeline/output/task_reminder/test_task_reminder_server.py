@@ -1,4 +1,4 @@
-# @feature: 评估闸门插件裁决 | @vision: V3 可嵌入 | @ci: python-coverage
+# @feature: FP-0.2.〇 管道引擎与插件执行模型 | @vision: V3 可嵌入 | @ci: python-coverage
 """task_reminder server.py 适配层测试——execute 工具入口与生命周期钩子。
 
 server.py 是纯接口适配层：把 MCP 工具调用翻译成 TaskReminder.execute 的

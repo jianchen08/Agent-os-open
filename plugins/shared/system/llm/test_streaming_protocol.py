@@ -1,4 +1,4 @@
-# @feature: FP-0.2.LLM 流式服务契约 | @vision: V3 可嵌入 | @ci: python-coverage
+# @feature: FP-0.2.二 内部模块统一 manifest 化 | @vision: V3 可嵌入 | @ci: python-coverage
 """llm.complete_stream 流式协议翻译测试（DSH 8 事件形态）。
 
 验证 ``StreamTranslator`` 把 adapter 归一化 chunk（thinking/text/tool_call/

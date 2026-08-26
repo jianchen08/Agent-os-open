@@ -1,3 +1,4 @@
+# @feature: FP-0.2.〇 管道引擎与插件执行模型 | @vision: V3 可嵌入 | @ci: python-test
 """llm_core tool_call 配对测试——猜测型匹配反模式收口（ADR 2026-08-21 同族裁决）。
 
 契约：tool result 的 tool_call_id 精确匹配失败时一律丢弃并 warn（fail-closed），

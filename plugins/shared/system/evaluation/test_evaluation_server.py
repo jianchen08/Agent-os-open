@@ -1,4 +1,4 @@
-# @feature: 评估服务读面与 stub 执行面 | @vision: V3 可嵌入 | @ci: python-coverage
+# @feature: FP-0.2.〇 管道引擎与插件执行模型 | @vision: V3 可嵌入 | @ci: python-coverage
 """evaluation 插件 server.py 行为测试。
 
 覆盖：

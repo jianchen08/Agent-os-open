@@ -1,3 +1,4 @@
+# @feature: FP-0.2.二 内部模块统一 manifest 化 | @vision: V3 可嵌入 | @ci: python-coverage
 """SDK 共享模块测试——error_classifier / stream_watchdog / adapter_config。
 
 这三个模块 2026-08-25 批5 从插件侧副本下沉到 SDK（插件自包含约束下禁止

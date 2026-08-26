@@ -1,3 +1,4 @@
+# @feature: FP-0.2.〇 管道引擎与插件执行模型 | @vision: V3 可嵌入 | @ci: python-test
 from tests._pipeline_plugin_path import add_plugin_dir
 
 add_plugin_dir("core", "tool_core")
