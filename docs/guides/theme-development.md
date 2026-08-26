@@ -70,4 +70,4 @@ export const myTheme: ThemeConfig = {
 
 ## 3. 皮肤（skin）
 
-`contributes.themes[].skin` 字段进一步激活皮肤能力：CSS 注入 + `hooks.mjs` 装饰层，样式经 `/ext/{pluginId}/styles/skin/...` 三条端点递送。开发规范见 [docs/skin-plugin.md](../skin-plugin.md)，运行时实现 `frontend/src/services/skinRuntime.ts`。
+`contributes.themes[].skin` 字段进一步激活皮肤能力：CSS 注入 + `hooks.mjs` 装饰层，样式经 `/ext/{pluginId}/styles/skin/...` 三条端点递送。开发规范见 [skin-plugin.md](skin-plugin.md)（本目录），运行时实现 `frontend/src/services/skinRuntime.ts`。

@@ -24,7 +24,7 @@
 
 - `docs/plugin-protocol.md` — plugin.json manifest 全字段权威 + 从零开发 echo_tool 完整走查 + SDK 速查
 - `docs/streaming-protocol.md` — 流式事件协议与 `capabilities.streaming` 声明
-- `docs/skin-plugin.md` — 皮肤插件（CSS 注入 + hooks.mjs + 递送端点）
+- `skin-plugin.md`（本目录）— 皮肤插件（CSS 注入 + hooks.mjs + 递送端点）
 - `docs/guides/theme-customization.md` — 主题使用侧说明（用户视角）
 - `config/pipelines/README.md` — 管道配置现状与修改须知
 

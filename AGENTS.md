@@ -68,7 +68,7 @@ commit**，不要留到"最后一起提交"。commit 前的调查/验证工作�
   （背景/决策/Alternatives Considered/影响/归档五段），**强制记录被否方案**。
 - **契约冻结**：0.2 定型后接口契约尽量冻结（能不动就不动）；动契约需 ADR + 兼容机制。
 - **被否方案索引**：`ROADMAP.md` 含 6 大类被否方案索引（90+ 项），动手前先查。
-- **决策记录**：DSH 借鉴 → 本仓 `docs/dsh_decision_records.md`；插件生态评估 →
+- **决策记录**：DSH 借鉴 → 本仓 `docs/working/dsh_decision_records.md`；插件生态评估 →
   `docs/plugin-protocol.md` 等。
 - **门禁**：机械门禁优先（测试/格式/覆盖率）；改造后必须本地补跑全部可验证车道，
   并如实区分"门禁绿"与"测试绿"。
@@ -134,5 +134,5 @@ commit**，不要留到"最后一起提交"。commit 前的调查/验证工作�
 - 改 agent 配置：`config/agents/main/`（agentos.yaml + persona/ + 提示词骨架）。
 - 查架构决策：`docs/decisions/` 按日期排序；被否方案先查 ROADMAP.md。
 - DSH 适配器（源码零改动、插件装载、升级）：`plugins/shared/system/dsh_adapter/`，
-  操作路径与决策见 `docs/dsh_decision_records.md`。
+  操作路径与决策见 `docs/working/dsh_decision_records.md`。
 - 本项目文档入口：`docs/` 下 ARCHITECTURE.md / vision.md / plugin-protocol.md 等。

@@ -353,13 +353,13 @@ export class LoginPage {
 
 ## 9. 测试追溯标记规范
 
-> 目的：把「愿景 → 架构 → 审查要求 → 功能点 → 测试 → CI」六层显式连起来。每个测试必须能反查它服务哪条愿景主线、哪个功能点、回应哪个审查问题、进哪个 CI job。中心载体为 `docs/test_traceability.md`，去中心化载体为本节定义的文件头标记。两者由 `scripts/check_test_traceability.py` 交叉校验。
+> 目的：把「愿景 → 架构 → 审查要求 → 功能点 → 测试 → CI」六层显式连起来。每个测试必须能反查它服务哪条愿景主线、哪个功能点、回应哪个审查问题、进哪个 CI job。中心载体为 `docs/working/test_traceability.md`，去中心化载体为本节定义的文件头标记。两者由 `scripts/check_test_traceability.py` 交叉校验。
 
 ### 9.1 标记四元组
 
 | 标记 | 必填 | 含义 | 取值 |
 |------|------|------|------|
-| `@feature` | **是** | 该测试服务的功能点 ID | 见 `docs/test_traceability.md` 表 A/B（如 `FP-0.2.〇`、`FP-DB`、`FP-MIGR`） |
+| `@feature` | **是** | 该测试服务的功能点 ID | 见 `docs/working/test_traceability.md` 表 A/B（如 `FP-0.2.〇`、`FP-DB`、`FP-MIGR`） |
 | `@vision` | 建议 | 该功能点服务的愿景主线 | `V1 可进化` / `V2 全能闭环` / `V3 可嵌入` / `V4 多用户` / `V5 可扮演` / `V6 可即用` |
 | `@audit` | 按需 | 回应的审查问题编号 | `T5#<n>`（对应 `reports/audit_round3/T5_tests.md` §⑨ 问题清单） |
 | `@ci` | 按需 | 该测试实际进入的 CI job | ci.yml job 名（如 `rust-test` / `python-coverage` / `frontend-test` / `timing`） |
@@ -389,7 +389,7 @@ export class LoginPage {
 
 ### 9.3 校验规则（CI 强制）
 
-1. 每个测试文件必须有 `@feature`，且其 ID 存在于 `docs/test_traceability.md` 表 A/B。
+1. 每个测试文件必须有 `@feature`，且其 ID 存在于 `docs/working/test_traceability.md` 表 A/B。
 2. `@vision` 若填，必须是 V1~V6 之一。
 3. `@audit` 若填，`T5#<n>` 的 `<n>` 必须是 `reports/audit_round3/T5_tests.md` §⑨ 表中存在的编号。
 4. 标记缺失或引用无效 → `scripts/check_test_traceability.py` 退出非 0 → CI 拦截。

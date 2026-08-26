@@ -252,7 +252,7 @@ npm run dev    # 前端开发服务器运行在 http://localhost:6390（反代�
 | [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | 系统架构详解 |
 | [docs/plugin-protocol.md](docs/plugin-protocol.md) | 插件协议开发者文档（plugin.json 全字段权威） |
 | [docs/guides/README.md](docs/guides/README.md) | 开发指南索引（插件 / 主题 / Agent / 管道配置 / 排障） |
-| [docs/vision.md](docs/vision.md) · [docs/logging.md](docs/logging.md) | 项目愿景 · 日志体系 |
+| [docs/vision.md](docs/vision.md) · [docs/guides/logging.md](docs/guides/logging.md) | 项目愿景 · 日志体系 |
 | [ROADMAP.md](ROADMAP.md) | 版本路线图 |
 | [CONTRIBUTING.md](CONTRIBUTING.md) | 贡献指南 |
 | [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md) | 贡献者行为准则 |
