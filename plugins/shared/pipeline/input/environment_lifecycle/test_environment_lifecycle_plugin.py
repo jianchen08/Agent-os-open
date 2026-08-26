@@ -70,12 +70,31 @@ class _FakeIsolationManager:
 
 
 def _install_fake_isolation() -> None:
-    """注入假 isolation.manager 模块，锁住真实系统插件导入。"""
+    """注入假 isolation.manager 模块，锁住真实系统插件导入。
+
+    覆写 sys.modules["isolation"/"isolation.manager"]——由 autouse fixture
+    _restore_isolation_modules 在每用例后还原原条目，否则共跑车里后续
+    真 isolation 测试（isolation_guard/container_landing 等）全部被毒化。
+    """
     fake_pkg = type(sys)("isolation")
     fake_mod = type(sys)("isolation.manager")
     fake_mod.IsolationManager = _FakeIsolationManager
     sys.modules["isolation"] = fake_pkg
     sys.modules["isolation.manager"] = fake_mod
+
+
+@pytest.fixture(autouse=True)
+def _restore_isolation_modules():
+    """还原被 _install_fake_isolation 覆写的 isolation 模块槽位。"""
+    saved = {n: sys.modules.get(n) for n in ("isolation", "isolation.manager")}
+    try:
+        yield
+    finally:
+        for n in ("isolation.manager", "isolation"):
+            sys.modules.pop(n, None)
+            mod = saved.get(n)
+            if mod is not None:
+                sys.modules[n] = mod
 
 
 def _load_plugin() -> Any:
