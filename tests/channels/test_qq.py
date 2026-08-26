@@ -471,3 +471,84 @@ class TestOneBotConnectServer:
         await client.disconnect()
         ws.close.assert_awaited_once()
         assert client._ws_connections == []
+
+    @pytest.mark.asyncio
+    async def test_disconnect_cancels_receive_task(self) -> None:
+        """_receive_task 未完成 → 取消并等待,资源释放。"""
+        import asyncio as _asyncio
+
+        client = OneBotClient()
+        client._session = None
+        client._ws_server = None
+
+        async def _never_done():
+            await _asyncio.sleep(10)
+
+        task = _asyncio.create_task(_never_done())
+        client._receive_task = task
+        await client.disconnect()
+        assert task.cancelled()
+        assert client._receive_task is None
+
+    @pytest.mark.asyncio
+    async def test_disconnect_closes_open_session(self) -> None:
+        """session 未关闭时断开 → close 调用并置 None。"""
+        client = OneBotClient()
+        session = MagicMock()
+        session.closed = False
+        session.close = AsyncMock()
+        client._session = session
+        await client.disconnect()
+        session.close.assert_awaited_once()
+        assert client._session is None
+
+    @pytest.mark.asyncio
+    async def test_connect_full_loop_start_and_stop(self, monkeypatch) -> None:
+        """真实 connect() 主循环:建站成功 → 服务循环 → disconnect 退出。"""
+        from aiohttp import web
+
+        client = OneBotClient()
+        client._max_retries = 3
+
+        calls = {"loop": 0}
+
+        class _FakeRunner:
+            def __init__(self, app):
+                self.cleanup_called = False
+
+            async def setup(self):
+                pass
+
+            async def cleanup(self):
+                self.cleanup_called = True
+
+        fake_runner = _FakeRunner(None)
+        fake_app = MagicMock()
+        monkeypatch.setattr(web, "Application", lambda: fake_app)
+        monkeypatch.setattr(web, "AppRunner", lambda app: fake_runner)
+        monkeypatch.setattr(web, "TCPSite", lambda runner, host, port: _FakeSite())
+
+        class _FakeSite:
+            async def start(self):
+                pass
+
+        async def _bounded_sleep(duration):
+            calls["loop"] += 1
+            if calls["loop"] >= 2:
+                client._running = False  # 两次循环后退出
+
+        # 用注入 sleep 计数逼近退出
+        import asyncio as _asyncio
+
+        async def _patched_sleep(duration):
+            calls["loop"] += 1
+            if calls["loop"] >= 2:
+                client._running = False
+            return await _asyncio.sleep(0)
+
+        monkeypatch.setattr(_asyncio, "sleep", _patched_sleep)
+        await client.connect()
+        assert calls["loop"] >= 2
+        assert client._ws_server is not None
+        await client.disconnect()
+        assert fake_runner.cleanup_called
