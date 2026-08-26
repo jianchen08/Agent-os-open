@@ -325,9 +325,9 @@
         "order": 20,
         "props": {
           "title": "今日用量",
-          "label": "今日使用率",
+          "label": "今日 Tokens",
           "datasourceUri": "/ext/cost_control/usage/statistics",
-          "valueKey": "global_stats.daily_usage_percent",
+          "valueKey": "global_stats.daily_tokens",
           "refresh": {
             "type": "poll",
             "intervalSeconds": 60
@@ -341,9 +341,9 @@
         "order": 30,
         "props": {
           "title": "本月用量",
-          "label": "本月使用率",
+          "label": "本月 Tokens",
           "datasourceUri": "/ext/cost_control/usage/statistics",
-          "valueKey": "global_stats.monthly_usage_percent",
+          "valueKey": "global_stats.monthly_tokens",
           "refresh": {
             "type": "poll",
             "intervalSeconds": 60

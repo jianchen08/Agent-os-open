@@ -487,21 +487,33 @@ class BudgetManager:
         )
 
     def get_usage_statistics(self) -> dict[str, Any]:
-        """获取使用统计"""
+        """获取使用统计（当日/本月/总消耗取 traces 账本真值，预算语义内存持有）。
+
+        账本真值在 traces.patch_data.llm_usage（2026-08-18 G5：内存账本无上游
+        record_usage，消耗改从 traces 聚合，与 monitoring token-usage 同源同量）。
+        内存 _global_*_usage 仍由 check_budget/record_usage 预留-兑付维护，
+        仅在 traces 聚合不可用（DB 缺失）时作为兜底基线。
+        """
         cost_rate = self.config.cost_rates.default
+
+        from server import _traces_daily_tokens, _trace_stats_dict  # noqa: PLC0415
+
+        traces = _trace_stats_dict()
+        daily = traces["daily"] or self._global_daily_usage
+        monthly = traces["monthly"] or self._global_monthly_usage
 
         return {
             "global": {
-                "daily_tokens": self._global_daily_usage,
-                "monthly_tokens": self._global_monthly_usage,
+                "daily_tokens": daily,
+                "monthly_tokens": monthly,
                 "daily_limit": self.config.global_budget.daily_token_limit,
                 "monthly_limit": self.config.global_budget.monthly_token_limit,
-                "daily_usage_percent": self._global_daily_usage / self.config.global_budget.daily_token_limit * 100,
-                "monthly_usage_percent": self._global_monthly_usage
+                "daily_usage_percent": daily / self.config.global_budget.daily_token_limit * 100,
+                "monthly_usage_percent": monthly
                 / self.config.global_budget.monthly_token_limit
                 * 100,
-                "estimated_daily_cost": (self._global_daily_usage / 1000) * cost_rate,
-                "estimated_monthly_cost": (self._global_monthly_usage / 1000) * cost_rate,
+                "estimated_daily_cost": (daily / 1000) * cost_rate,
+                "estimated_monthly_cost": (monthly / 1000) * cost_rate,
             },
             "tasks": {
                 task_id: {

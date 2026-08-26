@@ -66,6 +66,90 @@ def _serialize_status(status: BudgetStatus) -> dict[str, Any]:
     return data
 
 
+def _traces_daily_tokens() -> int:
+    """从 traces 表聚合当日 LLM token 用量（G5 账本替代源，同源同量）。
+
+    BudgetManager 内存账本无上游 record_usage（管道 track 走 record_metric，
+    不写此账本），今日消耗取 traces.patch_data.llm_usage（llm_core 每轮
+    落库的单轮用量，created_at 当日累计）——与 monitoring token-usage 同源。
+    DB 缺失降级 0（与 monitoring 同策略）。预算/限额语义仍由 BudgetManager
+    内存持有（check_budget/record_usage 的预留-兑付逻辑保留）。
+    """
+    import sqlite3
+
+    db_path = _resolve_project_root() / "agentos_kernel.db"
+    if not db_path.is_file():
+        return 0
+    try:
+        conn = sqlite3.connect(str(db_path))
+        try:
+            cur = conn.cursor()
+            cur.execute(
+                "SELECT COALESCE(SUM(json_extract(patch_data, '$.llm_usage.total_tokens')), 0)"
+                " FROM traces"
+                " WHERE json_extract(patch_data, '$.llm_usage') IS NOT NULL"
+                "   AND substr(created_at, 1, 10) = date('now')"
+            )
+            row = cur.fetchone()
+            return int(row[0]) if row else 0
+        finally:
+            conn.close()
+    except sqlite3.Error as exc:  # noqa: BLE001 — 查询失败降级 0（契约不破坏）
+        logger.warning("[cost_control] traces 当日用量聚合失败（降级 0）: %s", exc)
+        return 0
+
+
+def _trace_stats_dict() -> dict[str, Any]:
+    """从 traces 聚合全部用量（今日/本月/按模型/明细），供统计与报表。"""
+    import sqlite3
+
+    db_path = _resolve_project_root() / "agentos_kernel.db"
+    stats: dict[str, Any] = {
+        "daily": 0,
+        "monthly": 0,
+        "total": 0,
+        "by_model": {},
+        "records": [],
+    }
+    if not db_path.is_file():
+        return stats
+    try:
+        conn = sqlite3.connect(str(db_path))
+        try:
+            cur = conn.cursor()
+            cur.execute(
+                "SELECT json_extract(patch_data, '$.llm_usage.input_tokens'),"
+                "       json_extract(patch_data, '$.llm_usage.output_tokens'),"
+                "       json_extract(patch_data, '$.llm_usage.total_tokens'),"
+                "       json_extract(patch_data, '$.llm_model'),"
+                "       created_at"
+                " FROM traces WHERE json_extract(patch_data, '$.llm_usage') IS NOT NULL"
+            )
+            rows = cur.fetchall()
+            for inp, out, total, model, created_at in rows:
+                total = int(total) if total is not None else 0
+                stats["total"] += total
+                created = str(created_at or "")
+                if created[:10] == datetime.date.today().isoformat():
+                    stats["daily"] += total
+                if created[:7] == datetime.date.today().isoformat()[:7]:
+                    stats["monthly"] += total
+                model = str(model or "unknown")
+                stats["by_model"][model] = stats["by_model"].get(model, 0) + total
+                stats["records"].append(
+                    {
+                        "tokens": total,
+                        "model": model,
+                        "timestamp": created,
+                    }
+                )
+        finally:
+            conn.close()
+    except sqlite3.Error as exc:  # noqa: BLE001 — 查询失败降级全 0（契约不破坏）
+        logger.warning("[cost_control] traces 用量聚合失败（降级 0）: %s", exc)
+    return stats
+
+
 @plugin.on_load
 async def _on_load(params: dict[str, Any]) -> None:
     """插件加载时初始化预算管理器。"""
@@ -385,7 +469,8 @@ def _build_cost_report(stats_raw: dict[str, Any], period: str) -> dict[str, Any]
     """从 usage_statistics 派生 cost report（BudgetManager 无现成 report 方法）。
 
     对齐前端 CostReportResponse：period/start_date/end_date/total_tokens/total_cost/
-    by_model/by_task/daily_breakdown。
+    by_model/by_task/daily_breakdown。每日明细与按模型占比取 traces 聚合
+    （G5 同源），period 语义映射到 traces 的日/周/月窗。
     """
     g = stats_raw.get("global", {})
     today = datetime.date.today()
@@ -395,19 +480,23 @@ def _build_cost_report(stats_raw: dict[str, Any], period: str) -> dict[str, Any]
         start = today.replace(day=1)
     else:
         start = today
-    records = stats_raw.get("recent_records", [])
-    by_model: dict[str, dict[str, Any]] = {}
-    for r in records:
-        m = r.get("model", "unknown")
-        bucket = by_model.setdefault(m, {"tokens": 0, "cost": 0.0, "count": 0})
-        bucket["tokens"] += r.get("tokens", 0)
-        bucket["cost"] += r.get("cost", 0.0)
-        bucket["count"] += 1
+
+    # 消耗/按模型/明细取 traces 聚合（G5 同源，见 _trace_stats_dict）
+    trace_stats = _trace_stats_dict()
+    total_tokens = trace_stats["total"]
+    by_model = {
+        model: {"tokens": tokens, "cost": 0.0, "count": 1}
+        for model, tokens in trace_stats["by_model"].items()
+    }
+    # 消费记录：明细带 tokens/model/timestamp，供前端占比与列表
+    records = trace_stats["records"]
+    records.sort(key=lambda r: r["timestamp"], reverse=True)
+
     return {
         "period": period,
         "start_date": start.isoformat(),
         "end_date": today.isoformat(),
-        "total_tokens": g.get("daily_tokens", 0),
+        "total_tokens": total_tokens,
         "total_cost": g.get("estimated_daily_cost", 0.0),
         "by_model": by_model,
         "by_task": stats_raw.get("tasks", {}),

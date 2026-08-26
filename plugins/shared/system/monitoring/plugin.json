@@ -406,10 +406,10 @@
         "space": "monitoring",
         "order": 40,
         "props": {
-          "title": "LLM 请求",
-          "label": "请求数",
+          "title": "Token 用量",
+          "label": "累计 Tokens",
           "datasourceUri": "/ext/monitoring/token-usage",
-          "valueKey": "token_usage.request_count",
+          "valueKey": "token_usage.total_tokens",
           "refresh": {
             "type": "poll",
             "intervalSeconds": 30
