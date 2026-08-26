@@ -76,6 +76,9 @@ class FakeAdapter:
         usage: dict[str, Any] | None = None,
         finish_reason: str | None = "stop",
         chunk_delay: float = 0.0,
+        text: str | None = None,
+        tool_calls: list[dict[str, Any]] | None = None,
+        thinking_text: str | None = None,
     ) -> None:
         self._chunks = list(chunks or [])
         self._connect_exc = connect_exc
@@ -84,6 +87,9 @@ class FakeAdapter:
         self._usage = usage
         self._finish_reason = finish_reason
         self._chunk_delay = chunk_delay
+        self._text = text
+        self._tool_calls = tool_calls
+        self._thinking_text = thinking_text
         self.calls: list[dict[str, Any]] = []
 
     async def completion(self, **kwargs: Any) -> Any:
@@ -103,9 +109,9 @@ class FakeAdapter:
         if self._mid_stream_exc is not None:
             raise self._mid_stream_exc
         return SimpleNamespace(
-            text="",
-            tool_calls=[],
-            thinking_text=None,
+            text=self._text,
+            tool_calls=self._tool_calls or [],
+            thinking_text=self._thinking_text,
             usage=self._usage,
             finish_reason=self._finish_reason,
         )
@@ -325,6 +331,85 @@ class TestCompleteStream:
         result = self._call(mod, bus, FakeAdapter(chunks=[_text("hi")]))
         assert result["status"] == "streamed"
         assert mod._adapter.calls[0]["stream"] is True
+
+    # ── 返回值聚合契约：完整 LLMResponse 同构字段 ────────────────
+
+    def test_return_carries_full_text_response(self) -> None:
+        """纯文本响应：返回 dict 含 text/tool_calls/thinking_text/usage/finish_reason。"""
+        mod = _load_server()
+        bus = FakeBus()
+        usage = {"prompt_tokens": 5, "completion_tokens": 9, "total_tokens": 14, "cached_tokens": 0}
+        result = self._call(
+            mod,
+            bus,
+            FakeAdapter(
+                chunks=[_text("He"), _text("llo")],
+                text="Hello",
+                thinking_text="plan",
+                usage=usage,
+                finish_reason="stop",
+            ),
+        )
+
+        assert result["status"] == "streamed"
+        assert result["stream_id"].startswith("stream_")
+        assert result["text"] == "Hello"
+        assert result["tool_calls"] == []
+        assert result["thinking_text"] == "plan"
+        assert result["usage"] == usage
+        assert result["finish_reason"] == "stop"
+        # 流式推送保留（逐字事件不因聚合返回而消失；usage 在 finish 前）
+        events = [p["event"] for _, p in bus.emits]
+        assert events == ["block_start", "text_delta", "text_delta", "block_end", "usage", "finish"]
+
+    def test_return_carries_full_tool_call_response(self) -> None:
+        """工具调用响应（区分度输入）：tool_calls/finish_reason=tool_calls 如实回传。"""
+        mod = _load_server()
+        bus = FakeBus()
+        tool_calls = [
+            {
+                "id": "call_001",
+                "name": "bash",
+                "arguments": '{"cmd": "ls"}',
+            }
+        ]
+        result = self._call(
+            mod,
+            bus,
+            FakeAdapter(
+                chunks=[_text("x")],
+                text=None,
+                tool_calls=tool_calls,
+                thinking_text=None,
+                usage=None,
+                finish_reason="tool_calls",
+            ),
+        )
+
+        assert result["text"] is None
+        assert result["tool_calls"] == tool_calls
+        assert result["thinking_text"] is None
+        assert result["usage"] == {}
+        assert result["finish_reason"] == "tool_calls"
+
+    def test_return_maps_unknown_finish_reason_and_none_usage(self) -> None:
+        """未知 finish_reason 收敛为 stop、无 usage 空 dict（协议四值契约）。"""
+        mod = _load_server()
+        bus = FakeBus()
+        result = self._call(
+            mod,
+            bus,
+            FakeAdapter(
+                chunks=[_text("hi")],
+                text="hi",
+                tool_calls=[],
+                thinking_text=None,
+                usage=None,
+                finish_reason="content_filter",
+            ),
+        )
+        assert result["finish_reason"] == "stop"
+        assert result["usage"] == {}
 
 
 class TestCompleteRetired:

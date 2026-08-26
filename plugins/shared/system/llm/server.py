@@ -230,7 +230,8 @@ async def llm_complete_stream(
     Uses the KeyPoolAdapter internally for multi-key pooling, rate limiting,
     and automatic fallback. The stream is translated to the DSH 8-event
     protocol (block-indexed) and pushed via the event-bus channel; the
-    returned dict is a stream handle, not the content.
+    returned dict carries the full aggregated response (same shape as the
+    adapter's LLMResponse) for callers that need the complete output.
 
     Args:
         model: LiteLLM model identifier string.
@@ -240,8 +241,10 @@ async def llm_complete_stream(
         max_tokens: Maximum tokens to generate.
 
     Returns:
-        {"status": "streamed", "stream_id": <uuid>} — stream content flows
-        via event-bus events.
+        Dict with ``status`` / ``stream_id`` plus the full response:
+        ``text`` (str|None), ``tool_calls`` (list), ``thinking_text``
+        (str|None), ``usage`` (dict) and ``finish_reason`` (stop/length/
+        tool_calls/error). Chunk deltas also flow via event-bus events.
     """
     adapter = _ensure_adapter()
     stream_id = f"stream_{uuid.uuid4().hex}"
@@ -296,7 +299,15 @@ async def llm_complete_stream(
         if publisher is not None:
             await publisher.stop()
 
-    return {"status": "streamed", "stream_id": stream_id}
+    return {
+        "status": "streamed",
+        "stream_id": stream_id,
+        "text": response.text,
+        "tool_calls": response.tool_calls or [],
+        "thinking_text": response.thinking_text,
+        "usage": response.usage or {},
+        "finish_reason": map_finish_reason(getattr(response, "finish_reason", None)),
+    }
 
 
 @plugin.tool(
