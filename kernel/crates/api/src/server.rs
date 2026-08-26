@@ -19,7 +19,7 @@ use parking_lot::RwLock as ParkingRwLock;
 #[cfg(test)]
 use agentos_core::traits::MessageQueryOpts;
 use agentos_core::traits::{CapabilityRegistry, StorageBackend};
-use agentos_core::types::{PendingInputSource, PipelineConfig, StepLibrary, TenantContext};
+use agentos_core::types::{PipelineConfig, StepLibrary, TenantContext};
 use axum::{
     body::Body,
     extract::{
@@ -29,7 +29,7 @@ use axum::{
     http::{header, HeaderMap, HeaderValue, Method, StatusCode},
     middleware::{from_fn, from_fn_with_state, Next},
     response::{IntoResponse, Response},
-    routing::{get, post},
+    routing::{get, post, put},
     Router,
 };
 
@@ -40,7 +40,9 @@ use tracing::{debug, error, info, warn};
 use crate::auth::{login_handler, logout_handler, me_handler, refresh_handler, register_handler};
 use crate::routes::{
     actions_execute_handler, get_pipeline_config_with_etag, get_plugin_config_with_etag,
-    health_handler, metrics_prometheus_handler, pipelines_handler, pipelines_runs_handler,
+    health_handler, metrics_prometheus_handler, pending_inputs_clear_handler,
+    pending_inputs_delete_handler, pending_inputs_list_handler, pending_inputs_update_handler,
+    pipelines_handler, pipelines_runs_handler,
     pipelines_state_handler, plugins_contract_status_handler, plugins_set_enabled_handler,
     plugins_status_handler, put_pipeline_config_handler, put_plugin_config_handler, schema_handler,
     serve_upload_handler, system_restart_handler, tools_handler, validate_all_plugins_handler,
@@ -106,6 +108,15 @@ pub fn build_router(state: AppState) -> Router {
         .route("/api/v1/pipelines", get(pipelines_handler))
         .route("/api/v1/pipelines/runs", get(pipelines_runs_handler))
         .route("/api/v1/pipelines/state", get(pipelines_state_handler))
+        // pending 输入队列（ADR-2026-08-26）：等待窗口内查询/修改/删除/清空
+        .route(
+            "/api/v1/pipelines/{pipeline_id}/pending-inputs",
+            get(pending_inputs_list_handler).delete(pending_inputs_clear_handler),
+        )
+        .route(
+            "/api/v1/pipelines/{pipeline_id}/pending-inputs/{input_id}",
+            put(pending_inputs_update_handler).delete(pending_inputs_delete_handler),
+        )
         .route("/api/v1/tools", get(tools_handler))
         // P7: 管道配置查询/更新（内核承载 config/pipelines/*.yaml）
         .route(
@@ -1941,6 +1952,7 @@ async fn shutdown_signal(invoker: Option<Arc<dyn agentos_core::traits::PluginInv
 #[cfg(test)]
 mod tests {
     use super::*;
+    use agentos_core::types::PendingInputSource;
     use axum::body::Body;
     use axum::http::{Request, StatusCode};
     use serde_json::json;
@@ -4660,5 +4672,150 @@ mod tests {
         let empty = stage_finalize(&json!({"raw_result": "x"}), "t", "p", "t", "a");
         assert!(empty.final_user.is_none());
         assert!(empty.final_assistant.is_none());
+    }
+
+    // ── pending 输入端点（ADR-2026-08-26）：GET/PUT/DELETE/clear ──
+
+    /// 入队一条 pending（绕过 dispatcher 直写 store，端点测试用）。
+    async fn seed_pending(store: &Arc<dyn StorageBackend>, pid: &str, content: &str) -> String {
+        use agentos_core::types::PendingInputRecord;
+        let id = format!("p_seed_{}", &uuid::Uuid::new_v4().simple().to_string()[..8]);
+        store
+            .enqueue_pending_input(
+                "default",
+                pid,
+                &PendingInputRecord {
+                    id: id.clone(),
+                    pipeline_id: pid.to_string(),
+                    tenant_id: "default".to_string(),
+                    user_id: "u1".to_string(),
+                    content: content.to_string(),
+                    thread: format!("thread-{pid}"),
+                    source: agentos_core::types::PendingInputSource::User,
+                    agent_id: "agentos".to_string(),
+                    route_id: pid.to_string(),
+                    thinking_strength: String::new(),
+                    client_message_id: String::new(),
+                    execution_context: None,
+                    state_overlay: None,
+                    created_at: chrono::Utc::now().to_rfc3339(),
+                },
+            )
+            .await
+            .unwrap();
+        id
+    }
+
+    #[tokio::test]
+    async fn test_pending_inputs_endpoints_crud() {
+        let (state, _invoker, store, _sqlite) = make_engine_state();
+        let app = build_router(state);
+        let pid = "pipe-endpoint-1";
+
+        // 入队两条（FIFO 序）
+        let id1 = seed_pending(&store, pid, "第一条").await;
+        let id2 = seed_pending(&store, pid, "第二条").await;
+
+        // GET 列表
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/api/v1/pipelines/{pid}/pending-inputs"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = serde_json::from_slice::<serde_json::Value>(&axum::body::to_bytes(resp.into_body(), 1 << 20).await.unwrap()).unwrap();
+        let items = body["items"].as_array().unwrap();
+        assert_eq!(items.len(), 2, "两条 pending 输入");
+        assert_eq!(items[0]["content"], "第一条", "FIFO 序");
+        assert_eq!(items[1]["content"], "第二条");
+
+        // PUT 修改
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri(format!("/api/v1/pipelines/{pid}/pending-inputs/{id1}"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"content":"修改后"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let rows = store.list_pending_inputs("default", pid).await.unwrap();
+        assert_eq!(rows[0].content, "修改后", "PUT 覆盖 content");
+
+        // PUT 不存在 → 404
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri(format!("/api/v1/pipelines/{pid}/pending-inputs/ghost"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"content":"x"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+
+        // DELETE 单条
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("DELETE")
+                    .uri(format!("/api/v1/pipelines/{pid}/pending-inputs/{id2}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let rows = store.list_pending_inputs("default", pid).await.unwrap();
+        assert_eq!(rows.len(), 1, "删掉一条剩一条");
+
+        // DELETE 不存在 → 404
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("DELETE")
+                    .uri(format!("/api/v1/pipelines/{pid}/pending-inputs/ghost"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+
+        // clear 清空
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("DELETE")
+                    .uri(format!("/api/v1/pipelines/{pid}/pending-inputs"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert!(
+            store
+                .list_pending_inputs("default", pid)
+                .await
+                .unwrap()
+                .is_empty(),
+            "clear 后队列空"
+        );
     }
 }

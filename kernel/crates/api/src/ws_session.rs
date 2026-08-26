@@ -592,6 +592,16 @@ impl PipelineDispatcher for EngineDispatcher {
         {
             return Err(format!("pending 输入入队失败: {e}"));
         }
+        // 入队事件（pending_inputs_changed）：前端实时同步队列条。
+        emit_pending_inputs_changed(
+            &state,
+            thread_id,
+            &route_id,
+            &tenant.tenant_id,
+            &store,
+            "enqueued",
+        )
+        .await;
 
         // ADR-2026-08-15：后台执行必须经 RunChainRegistry 入链——裸 spawn 会让
         // 同会话两条消息并发跑（registry 回写 / msg_sequence 竞态）。链保证同
@@ -623,6 +633,16 @@ impl PipelineDispatcher for EngineDispatcher {
                         break;
                     }
                 };
+                // 消费事件：该条从队列条移入主消息流（前端据此同步）。
+                emit_pending_inputs_changed(
+                    &exec_state,
+                    &exec_thread,
+                    &exec_chain_key,
+                    &exec_tenant.tenant_id,
+                    &store,
+                    "consumed",
+                )
+                .await;
                 Self::run_pipeline_round(&exec_state, &exec_tenant, &exec_thread, &exec_user, rec)
                     .await;
             }
@@ -751,6 +771,56 @@ impl PipelineDispatcher for EngineDispatcher {
         debug!(user = user_id, thread = thread_id, pipeline = %route_id, "活跃管道已更新");
         Ok(())
     }
+}
+
+/// 推送 `pending_inputs_changed` 事件（ADR-2026-08-26）：入队/消费/修改/删除时
+/// 前端据 payload 的 items 全量列表同步队列条。事件坐标 = 派发 thread（与
+/// new_message 同款单播）；session 未接线时静默跳过（无连接可推）。
+async fn emit_pending_inputs_changed(
+    state: &AppState,
+    thread_id: &str,
+    pipeline_id: &str,
+    tenant_id: &str,
+    store: &Arc<dyn agentos_core::traits::StorageBackend>,
+    action: &str,
+) {
+    let Some(session) = state.session.as_ref() else {
+        return;
+    };
+    let items = match store.list_pending_inputs(tenant_id, pipeline_id).await {
+        Ok(rows) => rows
+            .into_iter()
+            .map(|r| {
+                serde_json::json!({
+                    "id": r.id,
+                    "pipeline_id": r.pipeline_id,
+                    "content": r.content,
+                    "source": r.source,
+                    "created_at": r.created_at,
+                })
+            })
+            .collect::<Vec<_>>(),
+        Err(e) => {
+            tracing::warn!(
+                pipeline = %pipeline_id,
+                error = %e,
+                "pending_inputs_changed 列表读取失败（事件跳过）"
+            );
+            Vec::new()
+        }
+    };
+    let _ = session
+        .emit_event(
+            thread_id,
+            "pending_inputs_changed",
+            serde_json::json!({
+                "pipeline_id": pipeline_id,
+                "thread_id": thread_id,
+                "action": action,
+                "items": items,
+            }),
+        )
+        .await;
 }
 
 /// 解析消息应路由到的真实 pipeline_id（防御性校验，后端不盲目信任前端数据）。

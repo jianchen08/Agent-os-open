@@ -754,7 +754,195 @@ pub async fn pipelines_runs_handler(
     Ok(axum::Json(json!({ "items": rows })))
 }
 
-/// state 摘要提取的字段白名单（phase/迭代/上下文——messages 等大字段不出口）。
+// ── pending 输入队列端点（ADR-2026-08-26）─────────────────────────
+// 等待窗口内（入队→激活）的管道消息可经此处查询/修改/删除/清空。
+// 全部按租户隔离；不存在条目返回 404（显示性错误，不静默）。
+
+/// GET /api/v1/pipelines/{pipeline_id}/pending-inputs——队列列表（FIFO 序）。
+pub async fn pending_inputs_list_handler(
+    axum::extract::State(state): axum::extract::State<AppState>,
+    axum::extract::Path(pipeline_id): axum::extract::Path<String>,
+    headers: axum::http::HeaderMap,
+) -> Result<axum::Json<serde_json::Value>, ApiError> {
+    let store = state.store.as_ref().ok_or_else(|| ApiError::NotFound {
+        message: "store not injected".to_string(),
+    })?;
+    let tenant_ctx = crate::server::request_tenant_ctx(state.store.as_ref(), &headers, "").await;
+    let rows = store
+        .list_pending_inputs(&tenant_ctx.tenant_id, &pipeline_id)
+        .await
+        .map_err(|e| ApiError::Internal {
+            message: format!("pending-inputs 查询失败: {e}"),
+        })?;
+    let items: Vec<serde_json::Value> = rows
+        .into_iter()
+        .map(|r| {
+            serde_json::json!({
+                "id": r.id,
+                "pipeline_id": r.pipeline_id,
+                "content": r.content,
+                "source": r.source,
+                "created_at": r.created_at,
+            })
+        })
+        .collect();
+    Ok(axum::Json(json!({ "items": items })))
+}
+
+/// PUT /api/v1/pipelines/{pipeline_id}/pending-inputs/{input_id}——修改 content。
+pub async fn pending_inputs_update_handler(
+    axum::extract::State(state): axum::extract::State<AppState>,
+    axum::extract::Path((pipeline_id, input_id)): axum::extract::Path<(String, String)>,
+    headers: axum::http::HeaderMap,
+    body: axum::extract::Json<serde_json::Value>,
+) -> Result<axum::Json<serde_json::Value>, ApiError> {
+    let store = state.store.as_ref().ok_or_else(|| ApiError::NotFound {
+        message: "store not injected".to_string(),
+    })?;
+    let content = body
+        .get("content")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| ApiError::BadRequest {
+            message: "content 必须为非空字符串".to_string(),
+        })?;
+    let tenant_ctx = crate::server::request_tenant_ctx(state.store.as_ref(), &headers, "").await;
+    let updated = store
+        .update_pending_input_content(&tenant_ctx.tenant_id, &pipeline_id, &input_id, content)
+        .await
+        .map_err(|e| ApiError::Internal {
+            message: format!("pending-inputs 修改失败: {e}"),
+        })?;
+    if !updated {
+        return Err(ApiError::NotFound {
+            message: format!("pending-inputs 条目不存在: {input_id}"),
+        });
+    }
+    emit_pending_inputs_changed_endpoint(
+        &state,
+        &pipeline_id,
+        &tenant_ctx.tenant_id,
+        "updated",
+    )
+    .await;
+    Ok(axum::Json(json!({ "status": "updated" })))
+}
+
+/// DELETE /api/v1/pipelines/{pipeline_id}/pending-inputs/{input_id}——删除单条。
+pub async fn pending_inputs_delete_handler(
+    axum::extract::State(state): axum::extract::State<AppState>,
+    axum::extract::Path((pipeline_id, input_id)): axum::extract::Path<(String, String)>,
+    headers: axum::http::HeaderMap,
+) -> Result<axum::Json<serde_json::Value>, ApiError> {
+    let store = state.store.as_ref().ok_or_else(|| ApiError::NotFound {
+        message: "store not injected".to_string(),
+    })?;
+    let tenant_ctx = crate::server::request_tenant_ctx(state.store.as_ref(), &headers, "").await;
+    let deleted = store
+        .delete_pending_input(&tenant_ctx.tenant_id, &pipeline_id, &input_id)
+        .await
+        .map_err(|e| ApiError::Internal {
+            message: format!("pending-inputs 删除失败: {e}"),
+        })?;
+    if !deleted {
+        return Err(ApiError::NotFound {
+            message: format!("pending-inputs 条目不存在: {input_id}"),
+        });
+    }
+    emit_pending_inputs_changed_endpoint(
+        &state,
+        &pipeline_id,
+        &tenant_ctx.tenant_id,
+        "deleted",
+    )
+    .await;
+    Ok(axum::Json(json!({ "status": "deleted" })))
+}
+
+/// DELETE /api/v1/pipelines/{pipeline_id}/pending-inputs——清空队列。
+pub async fn pending_inputs_clear_handler(
+    axum::extract::State(state): axum::extract::State<AppState>,
+    axum::extract::Path(pipeline_id): axum::extract::Path<String>,
+    headers: axum::http::HeaderMap,
+) -> Result<axum::Json<serde_json::Value>, ApiError> {
+    let store = state.store.as_ref().ok_or_else(|| ApiError::NotFound {
+        message: "store not injected".to_string(),
+    })?;
+    let tenant_ctx = crate::server::request_tenant_ctx(state.store.as_ref(), &headers, "").await;
+    let deleted = store
+        .clear_pending_inputs(&tenant_ctx.tenant_id, &pipeline_id)
+        .await
+        .map_err(|e| ApiError::Internal {
+            message: format!("pending-inputs 清空失败: {e}"),
+        })?;
+    emit_pending_inputs_changed_endpoint(
+        &state,
+        &pipeline_id,
+        &tenant_ctx.tenant_id,
+        "cleared",
+    )
+    .await;
+    Ok(axum::Json(json!({ "status": "cleared", "deleted": deleted })))
+}
+
+/// 端点变更后的 WS 事件推送（PUT/DELETE/clear 共用）：反射到该管道的会话
+/// thread 单播 `pending_inputs_changed`（与 ws_session.rs 同款 payload）。
+/// 会话未接线时静默跳过。
+async fn emit_pending_inputs_changed_endpoint(
+    state: &AppState,
+    pipeline_id: &str,
+    tenant_id: &str,
+    action: &str,
+) {
+    let Some(session) = state.session.as_ref() else {
+        return;
+    };
+    let Some(store) = state.store.as_ref() else {
+        return;
+    };
+    let items = match store.list_pending_inputs(tenant_id, pipeline_id).await {
+        Ok(rows) => rows
+            .into_iter()
+            .map(|r| {
+                serde_json::json!({
+                    "id": r.id,
+                    "pipeline_id": r.pipeline_id,
+                    "content": r.content,
+                    "source": r.source,
+                    "created_at": r.created_at,
+                })
+            })
+            .collect::<Vec<_>>(),
+        Err(e) => {
+            tracing::warn!(
+                pipeline = %pipeline_id,
+                error = %e,
+                "pending_inputs_changed 列表读取失败（事件跳过）"
+            );
+            Vec::new()
+        }
+    };
+    // thread 坐标：pipeline_sessions 反查（无则跳过——端点变更无坐标可推）。
+    let Some(thread_id) = store
+        .get_thread_id_by_pipeline(pipeline_id)
+        .await
+        .unwrap_or(None)
+    else {
+        return;
+    };
+    let _ = session
+        .emit_event(
+            &thread_id,
+            "pending_inputs_changed",
+            serde_json::json!({
+                "pipeline_id": pipeline_id,
+                "thread_id": thread_id,
+                "action": action,
+                "items": items,
+            }),
+        )
+        .await;
+}
 ///
 /// GAP-1（task = pipeline）：任务域 `task.*`（任务树展示）与 `lineage.*`
 /// （父子分组/溯源——任务树按 parent 分组聚合、根形式天然不进树的出口依赖）
