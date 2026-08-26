@@ -441,8 +441,28 @@
             "minLength": 1
           },
           "error": {
-            "type": "string",
-            "description": "错误描述"
+            "type": "object",
+            "description": "统一错误信封（单一真值源 config/error_codes.json）：{code, message, source, retryable, details, request_id}。code 为稳定机器码（如 ENGINE_RUN_FAILED），source 供前端渲染来源标签",
+            "required": ["code", "message", "source", "retryable"],
+            "properties": {
+              "code": {
+                "type": "string",
+                "minLength": 1
+              },
+              "message": {
+                "type": "string",
+                "minLength": 1
+              },
+              "source": {
+                "type": "string",
+                "enum": ["kernel", "plugin", "llm", "infra", "frontend"]
+              },
+              "retryable": {
+                "type": "boolean"
+              },
+              "details": {},
+              "request_id": {}
+            }
           },
           "persist": {
             "type": "boolean"

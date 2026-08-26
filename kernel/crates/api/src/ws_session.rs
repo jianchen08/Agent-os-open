@@ -462,6 +462,8 @@ impl PipelineDispatcher for EngineDispatcher {
 
             // 失败路径：引擎执行失败（executor.run Err）→ stream_error 收尾，
             // 前端立即解除生成态（不再依赖 90s 强制收尾兜底）。
+            // error 为统一错误信封（契约 streaming.json stream_error.error 锁 object，
+            // 单一真值源 config/error_codes.json；ENGINE_RUN_FAILED 可重试）。
             if outcome.failed {
                 let _ = session
                     .emit_event(
@@ -471,7 +473,14 @@ impl PipelineDispatcher for EngineDispatcher {
                             "pipeline_id": route_id,
                             "message_id": message_id,
                             "_threadId": exec_thread,
-                            "error": outcome.content,
+                            "error": {
+                                "code": "ENGINE_RUN_FAILED",
+                                "message": outcome.content,
+                                "source": "kernel",
+                                "retryable": true,
+                                "details": null,
+                                "request_id": null,
+                            },
                         }),
                     )
                     .await;

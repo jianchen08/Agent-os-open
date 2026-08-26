@@ -420,7 +420,20 @@ fn emit_tool_event(
         payload.insert("success".into(), Value::Bool(r.success));
         payload.insert("duration_ms".into(), json!((r.duration_ms * 10.0).round() / 10.0));
         if let Some(err) = &r.error {
-            payload.insert("error".into(), Value::String(err.clone()));
+            // 统一错误信封（单一真值源 config/error_codes.json）：前端按
+            // source 渲染来源标签、按 retryable 驱动重试。持久化 envelope
+            // （messages.rs）保持字符串，REST 历史消息契约不变。
+            payload.insert(
+                "error".into(),
+                json!({
+                    "code": "TOOL_EXEC_FAILED",
+                    "message": err,
+                    "source": "plugin",
+                    "retryable": false,
+                    "details": null,
+                    "request_id": null,
+                }),
+            );
         }
     }
 
@@ -436,6 +449,84 @@ fn emit_tool_event(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 捕获 host 调用的最小 mock（记录最后一次 call_capability 参数）。
+    struct CapturingHost {
+        last_params: std::sync::Mutex<Option<String>>,
+    }
+
+    impl HostServices for CapturingHost {
+        fn call_capability(
+            &self,
+            _capability: &str,
+            _method: &str,
+            params_json: &str,
+        ) -> Result<String, String> {
+            *self.last_params.lock().unwrap() = Some(params_json.to_string());
+            Ok("{}".into())
+        }
+    }
+
+    /// 统一错误模型：tool_result 失败事件的 error 为信封对象
+    /// （code=TOOL_EXEC_FAILED, source=plugin, retryable=false），
+    /// 前端据此渲染来源标签；成功事件不带 error 字段。
+    #[test]
+    fn test_emit_tool_event_failure_error_envelope() {
+        let host = CapturingHost {
+            last_params: std::sync::Mutex::new(None),
+        };
+        let state = json!({
+            "session_id": "sess-1",
+            "pipeline_id": "pipe-1",
+            "message_id": "msg-1",
+        });
+        let tc = ToolCall {
+            name: "bash_execute".into(),
+            args: json!({"command": "echo hi"}),
+            call_id: Some("call_abc".into()),
+        };
+        let result = ToolResult::failed("bash_execute", "command not found", 1.5);
+
+        emit_tool_event(Some(&host), &state, "tool_result", &tc, Some(&result));
+
+        let params: Value =
+            serde_json::from_str(host.last_params.lock().unwrap().as_deref().unwrap()).unwrap();
+        let payload = &params["payload"];
+        assert_eq!(payload["success"], false);
+        assert_eq!(payload["error"]["code"], "TOOL_EXEC_FAILED");
+        assert_eq!(payload["error"]["message"], "command not found");
+        assert_eq!(payload["error"]["source"], "plugin");
+        assert_eq!(payload["error"]["retryable"], false);
+        assert!(payload["error"]["details"].is_null());
+        assert!(payload["error"]["request_id"].is_null());
+    }
+
+    /// 成功路径不带 error 字段（前端按 success=true 渲染成功态）。
+    #[test]
+    fn test_emit_tool_event_success_has_no_error() {
+        let host = CapturingHost {
+            last_params: std::sync::Mutex::new(None),
+        };
+        let state = json!({
+            "session_id": "sess-1",
+            "pipeline_id": "pipe-1",
+            "message_id": "msg-1",
+        });
+        let tc = ToolCall {
+            name: "bash_execute".into(),
+            args: json!({"command": "echo hi"}),
+            call_id: Some("call_abc".into()),
+        };
+        let result = ToolResult::succeeded("bash_execute", json!({"status": "ok"}), 0.5);
+
+        emit_tool_event(Some(&host), &state, "tool_result", &tc, Some(&result));
+
+        let params: Value =
+            serde_json::from_str(host.last_params.lock().unwrap().as_deref().unwrap()).unwrap();
+        let payload = &params["payload"];
+        assert_eq!(payload["success"], true);
+        assert!(payload.get("error").is_none());
+    }
 
     /// task_observability 任务 2：invoke 参数必须携带 _call_context 路由键，
     /// bash 等长任务工具据此经 frontend.emit 推 tool_progress 进度。
