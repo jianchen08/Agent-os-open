@@ -47,6 +47,15 @@ _COLLIDING_NAMES = frozenset(
         "capabilities",
         "mm_types",
         "asr",
+        # cost_control 平铺模块族：llm/exceptions.py 与 cost_control/exceptions.py
+        # 同名（llm 测试先执行后残留 sys.modules，cost_control 模块级
+        # from exceptions import 命中错误模块）。逐出必须成族——
+        # exceptions 与 budget_manager/config/constants 一起删，否则
+        # budget_manager 缓存仍绑定旧 exceptions 类，pytest.raises 捕获
+        # 的新类与抛出类身份不一致（双实例）。
+        "exceptions",
+        "budget_manager",
+        "constants",
         # pipeline 是 namespace 包，剔除后会被各 conftest 的 sys.path[0] 重新定位
         "pipeline",
     }
