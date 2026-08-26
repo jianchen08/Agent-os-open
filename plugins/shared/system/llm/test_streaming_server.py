@@ -218,7 +218,7 @@ class TestCompleteStream:
         assert indices == {0}
 
     def test_finish_reason_error_on_mid_stream_exception(self) -> None:
-        """断流兜底：流中途抛异常 → 已推 chunk 照常 + 补发 finish{reason:error}，异常不吞。"""
+        """流中途异常：已累积内容 → 返回 error dict + partial 快照（异常不传播）。"""
         mod = _load_server()
         bus = FakeBus()
 
@@ -229,22 +229,30 @@ class TestCompleteStream:
         _inject(mod, "event-bus", bus)
         mod._adapter = adapter
 
-        with pytest.raises(Boom):
-            _run(
-                mod.llm_complete_stream(
-                    model="glm-5.2",
-                    messages=[{"role": "user", "content": "hi"}],
-                )
+        result = _run(
+            mod.llm_complete_stream(
+                model="glm-5.2",
+                messages=[{"role": "user", "content": "hi"}],
             )
+        )
 
+        # 已推 chunk 照常 + 补发 finish{reason:error}
         events = [p["event"] for _, p in bus.emits]
         assert "block_start" in events
         assert events[-1] == "finish"
         assert bus.emits[-1][1]["payload"]["reason"] == "error"
         assert events.count("finish") == 1
+        # 半截内容经返回值交付：partial 快照 + 语义字段
+        assert result["status"] == "error"
+        assert result["finish_reason"] == "error"
+        assert result["partial"]["text"] == "par"
+        assert result["partial"]["thinking_text"] is None
+        assert result["partial"]["tool_calls"] == []
+        assert result["llm_error_info"]["error_type"] == "Boom"
+        assert "boom" in result["llm_error_info"]["error_message"]
 
     def test_finish_reason_error_on_connect_exception(self) -> None:
-        """断流兜底（第二组）：adapter.completion 直接抛错 → 兜底 finish{reason:error}。"""
+        """断流兜底（第二组）：adapter.completion 直接抛错（零累积）→ 异常照常传播。"""
         mod = _load_server()
         bus = FakeBus()
 
@@ -441,6 +449,122 @@ class TestCompleteStream:
         assert captured["priority"] == 1  # L1 → 1
         # 透传键不得泄漏给 adapter（litellm 不认 agent_level）
         assert "agent_level" not in mod._adapter.calls[0]
+
+    # ── 取消轮询：run suspended → interrupted 半截返回 ──────────────
+
+
+class _FakeRunStatus:
+    """伪 pipeline-executor 能力句柄：get_run_status 按预设序列返回。"""
+
+    def __init__(self, statuses: list[dict[str, Any]]) -> None:
+        self._statuses = list(statuses)
+        self.calls: list[tuple[str, dict[str, Any]]] = []
+
+    async def call(self, method: str, params: dict[str, Any]) -> dict[str, Any]:
+        self.calls.append((method, params))
+        if self._statuses:
+            return self._statuses.pop(0)
+        return {"status": "running"}
+
+
+class TestCancelPolling:
+    """complete_stream 取消轮询：run suspended → interrupted 半截返回。"""
+
+    def test_run_suspended_mid_stream_returns_interrupted(self) -> None:
+        """流式期间轮询见 suspended → on_chunk 中断 → interrupted 返回 + partial 快照。"""
+        mod = _load_server()
+        bus = FakeBus()
+        # 起手 running → 首个轮询 suspended（chunk 间隔内停止）
+        run_status = _FakeRunStatus([{"status": "running"}, {"status": "suspended"}])
+        _inject(mod, "event-bus", bus)
+        _inject(mod, "pipeline-executor", run_status)
+        adapter = FakeAdapter(chunks=[_text("He"), _text("llo")], chunk_delay=0.1)
+        mod._adapter = adapter
+        old_interval = mod.CANCEL_POLL_INTERVAL_SECONDS
+        mod.CANCEL_POLL_INTERVAL_SECONDS = 0.02
+        try:
+            result = _run(
+                mod.llm_complete_stream(
+                    model="glm-5.2",
+                    messages=[{"role": "user", "content": "hi"}],
+                    run_id="run-abc",
+                )
+            )
+        finally:
+            mod.CANCEL_POLL_INTERVAL_SECONDS = old_interval
+
+        assert result["status"] == "interrupted"
+        assert result["finish_reason"] == "interrupted"
+        # 中断发生在第二个 chunk 处：两段均已累积（accumulate 先于取消检查）
+        assert result["partial"]["text"] == "Hello"
+        # run_id 不透传给 adapter（llm_service 内部消费键）
+        assert "run_id" not in adapter.calls[0]
+        # 轮询按 run_id 查询
+        assert run_status.calls[0][0] == "get_run_status"
+        assert run_status.calls[0][1] == {"run_id": "run-abc"}
+
+    def test_run_suspended_at_start_skips_llm_call(self) -> None:
+        """起手检查即 suspended → 不起 LLM 调用，直接 interrupted 返回。"""
+        mod = _load_server()
+        bus = FakeBus()
+        run_status = _FakeRunStatus([{"status": "suspended"}])
+        _inject(mod, "event-bus", bus)
+        _inject(mod, "pipeline-executor", run_status)
+        adapter = FakeAdapter(chunks=[_text("x")])
+        mod._adapter = adapter
+
+        result = _run(
+            mod.llm_complete_stream(
+                model="glm-5.2",
+                messages=[{"role": "user", "content": "hi"}],
+                run_id="run-abc",
+            )
+        )
+        assert result["status"] == "interrupted"
+        assert result["partial"]["text"] is None
+        # 未调用 adapter（不起空 LLM 调用）
+        assert adapter.calls == []
+        # 兜底 finish 已发（消费端终止等待）
+        events = [p["event"] for _, p in bus.emits]
+        assert events == ["finish"]
+
+    def test_run_polling_disabled_without_run_id(self) -> None:
+        """无 run_id → 不启动轮询（域门控），正常流式返回。"""
+        mod = _load_server()
+        bus = FakeBus()
+        run_status = _FakeRunStatus([{"status": "suspended"}])
+        _inject(mod, "event-bus", bus)
+        _inject(mod, "pipeline-executor", run_status)
+        adapter = FakeAdapter(chunks=[_text("hi")], text="hi")
+        mod._adapter = adapter
+
+        result = _run(
+            mod.llm_complete_stream(
+                model="glm-5.2",
+                messages=[{"role": "user", "content": "hi"}],
+            )
+        )
+        assert result["status"] == "streamed"
+        assert result["partial"] is None
+        # pipeline-executor 未被调用（门控生效）
+        assert run_status.calls == []
+        events = [p["event"] for _, p in bus.emits]
+        assert events[-1] == "finish"
+
+    def test_partial_none_on_normal_completion(self) -> None:
+        """正常完成：partial 恒为 None（半截快照只在异常/取消路径返回）。"""
+        mod = _load_server()
+        bus = FakeBus()
+        _inject(mod, "event-bus", bus)
+        mod._adapter = FakeAdapter(chunks=[_text("hi")], text="hi")
+        result = _run(
+            mod.llm_complete_stream(
+                model="glm-5.2",
+                messages=[{"role": "user", "content": "hi"}],
+            )
+        )
+        assert result["status"] == "streamed"
+        assert result["partial"] is None
 
 
 class TestCompleteRetired:

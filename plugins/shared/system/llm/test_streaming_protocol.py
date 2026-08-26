@@ -358,9 +358,10 @@ def test_translate_after_finish_is_noop() -> None:
         ("length", "length"),
         ("tool_calls", "tool_calls"),
         ("error", "error"),
+        ("interrupted", "interrupted"),
         ("content_filter", "stop"),
     ],
-    ids=["none", "stop", "length", "tool_calls", "error", "unknown-maps-stop"],
+    ids=["none", "stop", "length", "tool_calls", "error", "interrupted", "unknown-maps-stop"],
 )
 def test_finish_reason_mapping(raw: str | None, expected: str) -> None:
     """finish reason 词汇收敛：未知值（如 content_filter）映射 stop。"""

@@ -33,18 +33,20 @@ class StreamEvent:
 
 
 # finish reason 词汇收敛：LLM 返回的未知结束原因（如 content_filter）映射 stop，
-# 消费端只按 stop/length/tool_calls/error 四值渲染。
+# 消费端只按 stop/length/tool_calls/error/interrupted 五值渲染（interrupted =
+# 调用方停止，llm_core 取消路径的半截返回语义）。
 _FINISH_REASON_MAP: dict[str | None, str] = {
     None: "stop",
     "stop": "stop",
     "length": "length",
     "tool_calls": "tool_calls",
     "error": "error",
+    "interrupted": "interrupted",
 }
 
 
 def map_finish_reason(reason: str | None) -> str:
-    """把 adapter 返回的 finish_reason 收敛为协议四值之一。"""
+    """把 adapter 返回的 finish_reason 收敛为协议五值之一（stop/length/tool_calls/error/interrupted）。"""
     return _FINISH_REASON_MAP.get(reason, "stop")
 
 
