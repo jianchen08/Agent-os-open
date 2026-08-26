@@ -5,7 +5,7 @@
 本文件只做接口适配：调用老代码逻辑，通过 MCP SDK 暴露为工具。
 
 核心能力：
-- llm.complete: 统一 LLM 调用（非流式），支持 messages + tools
+- llm.complete_stream: 统一 LLM 调用（流式，DSH 8 事件协议经 event-bus 推送）
 - llm.health_check: 检查模型是否可用
 
 同时承载 thinking-mode 域与 config/llm 段 HTTP 面：
@@ -15,27 +15,37 @@ plugin.json ``http_endpoints`` 声明（/ext/llm_service/thinking-mode/** 与
 与 ``routes_llm_config.py``。
 
 [来源: docs/working/module_migration_plan.md §六 P2 迁移]
+[来源: docs/working/LLM流式服务契约与Native迁移评估_20260826.md §二]
 """
 from __future__ import annotations
 
+import asyncio
 import base64
+import contextlib
 import json
 import logging
 import os
 import sys
+import time as _time
+import uuid
 from typing import Any
 
 sys.path.insert(0, os.path.dirname(__file__))
 
-from _config_models import ModelConfigLoaderShim, set_config
+from _config_models import ModelConfigLoaderShim, set_config  # noqa: E402
+from streaming import StreamTranslator, map_finish_reason  # noqa: E402
 
-from agentos_plugin_sdk import AgentOSPlugin
+from agentos_plugin_sdk import AgentOSPlugin  # noqa: E402
 
 logger = logging.getLogger(__name__)
 plugin = AgentOSPlugin("llm_service")
 
 # 全局 Adapter 实例
 _adapter: Any = None
+
+# 流式心跳间隔：chunk 静默超过该阈值即发 keepalive 事件（超时探活）。
+# 消费端以 keepalive 区分"上游活着但慢"与"连接死了"。
+KEEPALIVE_INTERVAL_SECONDS: float = 30.0
 
 
 @plugin.on_load
@@ -85,8 +95,103 @@ class _ModelLoaderShim(ModelConfigLoaderShim):
     """
 
 
+def _resolve_envelope(arguments: dict[str, Any]) -> dict[str, str]:
+    """从工具参数解析事件信封路由键（thread_id/pipeline_id/message_id）。
+
+    调用方（tool_core 引擎路径）经 tool-executor._call_context 把前端路由键
+    （thread_id/pipeline_id/message_id）合入工具参数（内核 capability_router
+    透传契约）；直接调用（无上下文）时为空串——event-bus 推送仍携带键位，
+    由内核按 thread_id 空值丢弃/透传语义处理。
+    """
+    ctx = arguments.get("_call_context") or {}
+    return {
+        "thread_id": str(ctx.get("thread_id", "") or ""),
+        "pipeline_id": str(ctx.get("pipeline_id", "") or ""),
+        "message_id": str(ctx.get("message_id", "") or ""),
+    }
+
+
+class _StreamPublisher:
+    """流式事件推送器：Queue + 独立消费者（对照 llm_core/server.py 既有模式）。
+
+    litellm 流式循环同步密集调 on_chunk，若直接 await notify 推送，task 会堆积
+    到 LLM 循环结束才一起执行（事件循环没机会切换），导致所有 chunk 最后一次性
+    到达。Queue.put_nowait 是 O(1) 不阻塞，消费者协程 await get() 异步取出推送，
+    与流式循环并发，实现真正逐字实时推送。
+
+    fire-and-forget：notify 失败（通道关闭等）静默降级——流式出口不阻断
+    LLM 主流程。信封（thread_id/pipeline_id/message_id）由构造时确定，
+    sequence 进程内单调递增（仅调试定位，非消息权威 seq）。
+
+    心跳：独立心跳任务周期检查静默时长（距上个事件），超过
+    KEEPALIVE_INTERVAL_SECONDS 即发 keepalive 事件（超时探活）——消费端据此
+    区分"上游活着但慢"与"连接死了"。
+    """
+
+    def __init__(
+        self,
+        bus: Any,
+        envelope: dict[str, str],
+        keepalive_interval: float | None = None,
+    ) -> None:
+        self._bus = bus
+        # 信封在推送时补 sequence（int），故内部用宽松 dict
+        self._envelope: dict[str, Any] = dict(envelope)
+        # 模块级常量调用时读取（测试可 monkeypatch 模块属性生效）
+        self._keepalive_interval = (
+            keepalive_interval if keepalive_interval is not None else KEEPALIVE_INTERVAL_SECONDS
+        )
+        self._queue: asyncio.Queue[tuple[str, dict[str, Any]] | None] = asyncio.Queue()
+        self._seq = 0
+        self._last_event_monotonic = _time.monotonic()
+        self._consumer: asyncio.Task[None] | None = None
+        self._heartbeat: asyncio.Task[None] | None = None
+
+    def start(self) -> None:
+        """启动消费者与心跳协程（在调用方事件循环上）。"""
+        loop = asyncio.get_event_loop()
+        self._consumer = loop.create_task(self._consume())
+        self._heartbeat = loop.create_task(self._heartbeat_loop())
+
+    async def _consume(self) -> None:
+        while True:
+            item = await self._queue.get()
+            if item is None:
+                break  # 哨兵：流结束终止消费者
+            event, payload = item
+            try:
+                await self._bus.notify("emit", {"event": event, "payload": payload})
+            except Exception:
+                logger.debug("event-bus.emit 推送失败（fire-and-forget 降级）: %s", event)
+
+    async def _heartbeat_loop(self) -> None:
+        """周期检查静默时长：超过阈值发 keepalive（活跃流不打扰）。"""
+        while True:
+            await asyncio.sleep(self._keepalive_interval)
+            if _time.monotonic() - self._last_event_monotonic >= self._keepalive_interval:
+                self.put("keepalive", {})
+
+    def put(self, event: str, payload: dict[str, Any]) -> None:
+        """同步入队（O(1) 不阻塞，litellm 流式循环安全调用）。"""
+        envelope = dict(self._envelope)
+        envelope["sequence"] = self._seq
+        self._seq += 1
+        self._last_event_monotonic = _time.monotonic()
+        self._queue.put_nowait((event, {**envelope, **payload}))
+    async def stop(self) -> None:
+        """发哨兵并等待消费者排空剩余事件（保证不丢末尾）。"""
+        if self._heartbeat is not None:
+            self._heartbeat.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await self._heartbeat
+        self._queue.put_nowait(None)
+        if self._consumer is not None:
+            with contextlib.suppress(Exception):
+                await self._consumer
+
+
 @plugin.tool(
-    name="llm.complete",
+    name="llm.complete_stream",
     schema={
         "type": "object",
         "properties": {
@@ -106,19 +211,26 @@ class _ModelLoaderShim(ModelConfigLoaderShim):
         },
         "required": ["model", "messages"],
     },
-    description="Send a completion request to the LLM (non-streaming)",
+    description=(
+        "Send a streaming completion request to the LLM. "
+        "Stream events are emitted via event-bus (block_start/text_delta/"
+        "reasoning_delta/tool_call_delta/block_end/usage/finish/keepalive)."
+    ),
 )
-async def llm_complete(
+async def llm_complete_stream(
     model: str,
     messages: list[dict[str, Any]],
     tools: list[dict[str, Any]] | None = None,
     temperature: float = 0.7,
     max_tokens: int = 4096,
+    **kwargs: Any,
 ) -> dict[str, Any]:
-    """Execute an LLM completion request.
+    """Execute a streaming LLM completion request.
 
     Uses the KeyPoolAdapter internally for multi-key pooling, rate limiting,
-    and automatic fallback.
+    and automatic fallback. The stream is translated to the DSH 8-event
+    protocol (block-indexed) and pushed via the event-bus channel; the
+    returned dict is a stream handle, not the content.
 
     Args:
         model: LiteLLM model identifier string.
@@ -128,29 +240,63 @@ async def llm_complete(
         max_tokens: Maximum tokens to generate.
 
     Returns:
-        LLM response containing text, tool_calls, thinking_text, usage.
+        {"status": "streamed", "stream_id": <uuid>} — stream content flows
+        via event-bus events.
     """
     adapter = _ensure_adapter()
-    kwargs: dict[str, Any] = {
-        "temperature": temperature,
-        "max_tokens": max_tokens,
-    }
-    response = await adapter.completion(
-        model=model,
-        messages=messages,
-        tools=tools,
-        stream=False,
-        **kwargs,
-    )
+    stream_id = f"stream_{uuid.uuid4().hex}"
+    envelope = _resolve_envelope(kwargs)
 
-    # LLMResponse dataclass → dict
-    result: dict[str, Any] = {
-        "text": response.text,
-        "tool_calls": response.tool_calls or [],
-        "thinking_text": response.thinking_text,
-        "usage": response.usage or {},
-    }
-    return result
+    # event-bus 未注入时流式推送降级：chunk 仍经翻译器消费，仅不推送
+    # （返回值与信封语义不变，调用方不感知通道差异）。
+    try:
+        bus = plugin.get_capability("event-bus")
+    except KeyError:
+        bus = None
+
+    publisher = _StreamPublisher(bus, envelope) if bus is not None else None
+    translator = StreamTranslator()
+
+    def _on_chunk(chunk_data: dict[str, Any]) -> None:
+        """adapter 归一化 chunk → 翻译 → 入队推送（同步闭包，流循环安全）。"""
+        for event in translator.translate(chunk_data):
+            if publisher is not None:
+                publisher.put(event.event, event.payload)
+
+    # 收尾（含断流兜底）：闭块 → usage → finish；finish 幂等保证异常路径
+    # 补发的 finish{reason:error} 不会与正常路径重复。
+    def _finalize(reason: str, usage: dict[str, Any] | None = None) -> None:
+        for event in translator.finish(reason, usage=usage):
+            if publisher is not None:
+                publisher.put(event.event, event.payload)
+
+    if publisher is not None:
+        publisher.start()
+    try:
+        response = await adapter.completion(
+            model=model,
+            messages=messages,
+            tools=tools,
+            stream=True,
+            on_chunk=_on_chunk,
+            temperature=temperature,
+            max_tokens=max_tokens,
+        )
+        _finalize(
+            map_finish_reason(getattr(response, "finish_reason", None)),
+            usage=getattr(response, "usage", None),
+        )
+    except BaseException:
+        # 断流兜底：finish 前异常（网络/超时/上游错误）→ 补发 finish{reason:error}，
+        # 消费端据此终止等待（参考 DSH [DONE] 缺失 = STREAM_CLOSED 语义）。
+        # 异常照常向上传播（错误是值、应可恢复，由调用方错误链处理）。
+        _finalize("error")
+        raise
+    finally:
+        if publisher is not None:
+            await publisher.stop()
+
+    return {"status": "streamed", "stream_id": stream_id}
 
 
 @plugin.tool(

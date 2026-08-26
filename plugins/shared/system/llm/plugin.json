@@ -15,8 +15,8 @@
     ],
     "services": [
       {
-        "name": "llm.complete",
-        "description": "Send a completion request to LLM with messages and optional tools",
+        "name": "llm.complete_stream",
+        "description": "Send a streaming completion request to LLM with messages and optional tools (stream events via event-bus)",
         "input_schema": {
           "properties": {
             "model": {
