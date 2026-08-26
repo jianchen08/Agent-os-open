@@ -51,6 +51,7 @@ import { RjsfForm } from '@/services/schema/RjsfForm'
 import { parseYamlObject, serializeYaml } from '@/services/schema/yaml'
 import { cn } from '@/lib/utils'
 import { useAgentTabStore } from '@/stores/agentTabStore'
+import { useAuthStore } from '@/stores/authStore'
 import { usePipelineMessageStore } from '@/stores/pipelineMessageStore'
 import { useSessionStore } from '@/stores/sessionStore'
 import { toast } from '@/components/ui/sonner'
@@ -108,6 +109,9 @@ export function FormWidget(props: Record<string, unknown>) {
   const onChange = props.onChange as ((data: Record<string, unknown>) => void) | undefined
   const pipelineId = useActivePipelineId()
   const sessionId = useSessionStore((s) => s.activeSessionId)
+  // endpoint 直连走裸 fetch（不走 apiClient 拦截链），auth:user 的 /ext 端点
+  // 须自带 Bearer 凭据——缺头的请求会被内核 401 拒绝
+  const token = useAuthStore((s) => s.token)
 
   // ── datasource 模式（widget 化 T12）──
   const fieldsUri = props.fieldsUri as string | undefined
@@ -238,7 +242,10 @@ export function FormWidget(props: Record<string, unknown>) {
       try {
         const resp = await fetch(endpoint, {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
+          headers: {
+            'Content-Type': 'application/json',
+            ...(token ? { Authorization: `Bearer ${token}` } : {}),
+          },
           body: JSON.stringify({ pipeline_id: pipelineId, session_id: sessionId ?? '', ...(extraBody ?? {}), ...values }),
         })
         const data = (await resp.json()) as {

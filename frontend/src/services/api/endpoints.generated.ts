@@ -277,8 +277,9 @@
     'task_submit': '/ext/task_service/tasks/{task_id}/submit',
   } as const
 
-  /** trigger_setup_tool（Trigger Setup Tool）：plugin.json 声明 9 端点 */
+  /** trigger_setup_tool（Trigger Setup Tool）：plugin.json 声明 10 端点 */
   export const TRIGGER_SETUP_TOOL_ENDPOINTS = {
+    'trigger_pipelines': '/ext/trigger_setup_tool/pipelines',
     'trigger_create': '/ext/trigger_setup_tool/triggers',
     'trigger_list': '/ext/trigger_setup_tool/triggers',
     'trigger_stats': '/ext/trigger_setup_tool/triggers/stats',

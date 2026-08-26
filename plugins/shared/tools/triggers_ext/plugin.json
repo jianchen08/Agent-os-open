@@ -248,6 +248,15 @@
       "handler_capability": "http.handle",
       "timeout_ms": 5000,
       "description": "触发器统计（类型/状态计数）"
+    },
+    {
+      "route_id": "trigger_pipelines",
+      "method": "GET",
+      "path": "/ext/trigger_setup_tool/pipelines",
+      "auth": "user",
+      "handler_capability": "http.handle",
+      "timeout_ms": 5000,
+      "description": "目标管道下拉选项（state 聚合行 → {options:[{label,value}]}，创建表单 pipeline_id 字段 datasourceUri 消费）"
     }
   ],
   "ui_schema": {
@@ -260,29 +269,66 @@
         "props": {
           "title": "触发器列表",
           "datasourceUri": "/ext/trigger_setup_tool/triggers",
+          "columns": [
+            {
+              "key": "name",
+              "label": "名称",
+              "sortable": true
+            },
+            {
+              "key": "trigger_type",
+              "label": "类型",
+              "sortable": true
+            },
+            {
+              "key": "status",
+              "label": "状态",
+              "sortable": true
+            },
+            {
+              "key": "pipeline_id",
+              "label": "目标管道"
+            },
+            {
+              "key": "message",
+              "label": "触发消息"
+            },
+            {
+              "key": "fire_count",
+              "label": "已触发次数"
+            },
+            {
+              "key": "max_fires",
+              "label": "次数上限"
+            },
+            {
+              "key": "trigger_id",
+              "label": "ID"
+            }
+          ],
           "rowActions": [
             {
               "key": "trigger",
               "label": "触发",
-              "url": "/ext/trigger_setup_tool/triggers/{id}/trigger",
+              "url": "/ext/trigger_setup_tool/triggers/{trigger_id}/trigger",
               "successText": "已触发"
             },
             {
               "key": "enable",
               "label": "启用",
-              "url": "/ext/trigger_setup_tool/triggers/{id}/enable",
+              "url": "/ext/trigger_setup_tool/triggers/{trigger_id}/enable",
               "when": {
-                "key": "enabled",
-                "equals": false
+                "key": "status",
+                "equals": "pending"
               }
             },
             {
               "key": "disable",
               "label": "禁用",
-              "url": "/ext/trigger_setup_tool/triggers/{id}/disable",
+              "url": "/ext/trigger_setup_tool/triggers/{trigger_id}/disable",
               "when": {
-                "key": "enabled",
-                "equals": true
+                "key": "status",
+                "equals": "active"
               }
             },
             {
@@ -290,8 +336,14 @@
               "label": "删除",
               "variant": "destructive",
               "method": "DELETE",
-              "url": "/ext/trigger_setup_tool/triggers/{id}",
+              "url": "/ext/trigger_setup_tool/triggers/{trigger_id}",
               "confirm": "确认删除该触发器？"
+            }
+          ],
+          "watch": [
+            {
+              "event": "trigger_setup_tool.created",
+              "action": "reload"
             }
           ]
         }
@@ -303,42 +355,110 @@
         "order": 20,
         "props": {
           "title": "创建触发器",
+          "eventName": "trigger_setup_tool.created",
+          "successText": "触发器已创建，列表已刷新",
           "fields": [
             {
-              "name": "name",
-              "type": "input",
-              "label": "名称",
-              "required": true
+              "name": "pipeline_id",
+              "type": "select",
+              "label": "目标管道",
+              "datasourceUri": "/ext/trigger_setup_tool/pipelines",
+              "description": "触发时向该管道注入消息；留空则提交给当前激活管道"
             },
             {
-              "name": "type",
+              "name": "trigger_type",
               "type": "select",
               "label": "类型",
               "required": true,
               "options": [
                 {
-                  "label": "定时",
+                  "label": "延迟（指定秒数后）",
+                  "value": "delay"
+                },
+                {
+                  "label": "定时（指定时间点）",
                   "value": "schedule"
                 },
                 {
-                  "label": "事件",
+                  "label": "周期（按间隔重复）",
+                  "value": "interval"
+                },
+                {
+                  "label": "事件（监听域事件）",
                   "value": "event"
                 },
                 {
-                  "label": "手动",
-                  "value": "manual"
+                  "label": "条件（表达式为真）",
+                  "value": "condition"
                 }
               ]
             },
             {
-              "name": "config",
+              "name": "message",
               "type": "textarea",
-              "label": "配置 JSON",
-              "placeholder": "{\"cron\": \"0 * * * *\"}"
+              "label": "触发消息",
+              "required": true,
+              "description": "触发时注入目标管道的消息内容"
+            },
+            {
+              "name": "name",
+              "type": "input",
+              "label": "名称",
+              "description": "可选，便于识别"
+            },
+            {
+              "name": "delay_seconds",
+              "type": "number",
+              "label": "延迟秒数",
+              "min": 1,
+              "max": 86400,
+              "description": "类型=延迟 时必填（1-86400）"
+            },
+            {
+              "name": "schedule_time",
+              "type": "input",
+              "label": "定时时间",
+              "placeholder": "2026-08-27T15:00:00",
+              "description": "类型=定时 时必填，ISO 8601 格式，最远 7 天"
+            },
+            {
+              "name": "interval",
+              "type": "input",
+              "label": "周期间隔",
+              "placeholder": "30s / 5m / 1h / 1d",
+              "description": "类型=周期 时必填，最小 10 秒，最大 30 天"
+            },
+            {
+              "name": "event_type",
+              "type": "input",
+              "label": "监听事件",
+              "placeholder": "task_completed",
+              "description": "类型=事件 时必填，如 task_completed / task_failed"
+            },
+            {
+              "name": "condition",
+              "type": "input",
+              "label": "条件表达式",
+              "placeholder": "task.status == 'completed'",
+              "description": "类型=条件 时必填，对管道 state 聚合行求值"
+            },
+            {
+              "name": "max_count",
+              "type": "number",
+              "label": "最大触发次数",
+              "min": 0,
+              "description": "可选，0 或不填=无限（周期/事件/条件类型生效）"
+            },
+            {
+              "name": "max_time",
+              "type": "input",
+              "label": "最长运行时间",
+              "placeholder": "30m / 2h / 3d",
+              "description": "可选，到达后触发器自动停止"
             }
           ],
           "endpoint": "/ext/trigger_setup_tool/triggers",
-          "successText": "触发器已创建"
+          "submitLabel": "创建"
         }
       }
     ]

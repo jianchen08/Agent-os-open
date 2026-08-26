@@ -741,6 +741,23 @@ class TriggerManager:
 
         return [row for row in result if isinstance(row, dict)]
 
+    async def collect_state_rows(self) -> list[dict[str, Any]]:
+        """事件循环内直调 state provider 拉管道 state 聚合行（REST 消费形态）。
+
+        与条件轮询的 ``_fetch_state_rows``（后台线程经 run_coroutine_threadsafe
+        调度）同源；本方法在插件主事件循环内执行（http.handle 上下文），
+        awaitable provider 直接 await。桥未接通/返回形状异常抛错（fail-visible，
+        由调用方转 5xx，不静默空列表）。
+        """
+        if self._state_provider is None:
+            raise RuntimeError("state provider 未注入（server.py on_load 接线缺失）")
+        result = self._state_provider()
+        if inspect.isawaitable(result):
+            result = await result
+        if not isinstance(result, list):
+            raise RuntimeError(f"state provider 返回非列表: {type(result).__name__}")
+        return [row for row in result if isinstance(row, dict)]
+
     def _format_fire_info(self, trigger: TriggerConfig) -> str:
         """构造触发通知消息体（[触发器通知] 前缀 + 触发计数 + 用户消息）。"""
         fire_info = (

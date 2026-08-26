@@ -134,10 +134,10 @@ async def http_handle(
     headers: dict[str, str] | None = None,
     query: dict[str, str] | None = None,
 ) -> dict[str, Any]:
-    """REST 分发到 triggers 域 9 端点。"""
+    """REST 分发到 triggers 域端点（含 /pipelines 选项）。"""
     from http_api import handle_http_dispatch  # noqa: PLC0415
 
-    return await handle_http_dispatch(path, method, raw_body, query or {})
+    return await handle_http_dispatch(path, method, raw_body, query or {}, headers or {})
 
 
 if __name__ == "__main__":

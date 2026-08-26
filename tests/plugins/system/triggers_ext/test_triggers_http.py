@@ -1,7 +1,7 @@
 """triggers 域 REST 面测试（channel_api triggers stub 接真）。
 
-覆盖 http_api 9 端点：列表/创建（工具语义）/详情/更新/删除/
-enable/disable/手动触发/统计——进程内 TriggerManager 单例，
+覆盖 http_api 端点：列表/创建（工具语义 + Bearer user_id 解析）/管道选项/
+详情/更新/删除/enable/disable/手动触发/统计——进程内 TriggerManager 单例，
 fake 注入器验证 fire_manually 投递路径。
 """
 from __future__ import annotations
@@ -10,6 +10,7 @@ import asyncio
 import base64
 import json
 import sys
+import time
 from pathlib import Path
 from typing import Any
 
@@ -41,6 +42,13 @@ def _encode_body(payload: dict[str, Any]) -> str:
     return base64.b64encode(json.dumps(payload).encode("utf-8")).decode("ascii")
 
 
+def _token(user_id: str = "u1", username: str = "alice", *, expired: bool = False) -> str:
+    """内核 0.2 开发期 token：base64_nopad("access:{user_id}:{username}:{exp}")。"""
+    exp = int(time.time()) - 10 if expired else int(time.time()) + 600
+    payload = f"access:{user_id}:{username}:{exp}"
+    return base64.b64encode(payload.encode("utf-8")).decode("ascii").rstrip("=")
+
+
 def _make_trigger(
     trigger_id: str = "trigger_event_abc123def456",
     *,
@@ -59,12 +67,13 @@ def _make_trigger(
 
 @pytest.fixture(autouse=True)
 def _clean_manager():
-    """每用例重置单例注册表与注入器。"""
+    """每用例重置单例注册表与注入器/桥。"""
     mgr = get_trigger_manager()
     for cfg in mgr.list_all():
         mgr.unregister(cfg.trigger_id)
     mgr.set_injector(None)
     mgr.set_main_loop(None)
+    mgr.set_state_provider(None)
     yield
     for cfg in mgr.list_all():
         mgr.unregister(cfg.trigger_id)
@@ -228,3 +237,77 @@ def test_server_dispatch_fallthrough() -> None:
     resp = asyncio.run(http_api.handle_http_dispatch(
         "/ext/other/triggers", "GET"))
     assert resp["success"] is False and resp["data"]["status"] == 404
+
+
+# ── 管道选项（创建表单 pipeline_id 数据源）──────────────────────────
+
+
+def _fake_state_provider(rows: list[dict[str, Any]]) -> Any:
+    async def _provide() -> list[dict[str, Any]]:
+        return rows
+    return _provide
+
+
+def test_pipeline_options_label_and_value() -> None:
+    """display_name/name/task.goal 依次取显示名，value=pipeline_id；无 id 行跳过。"""
+    get_trigger_manager().set_state_provider(_fake_state_provider([
+        {"pipeline_id": "p1", "display_name": "会话A"},
+        {"pipeline_id": "p2", "name": "任务B"},
+        {"pipeline_id": "p3", "task.goal": "写周报"},
+        {"pipeline_id": "p4"},
+        {"display_name": "无管道行"},
+    ]))
+    body = _unwrap(asyncio.run(http_api.handle_http_dispatch(
+        "/ext/trigger_setup_tool/pipelines", "GET", "", None, {})))
+    assert body["options"] == [
+        {"label": "会话A（p1）", "value": "p1"},
+        {"label": "任务B（p2）", "value": "p2"},
+        {"label": "写周报（p3）", "value": "p3"},
+        {"label": "p4", "value": "p4"},
+    ]
+
+
+def test_pipeline_options_bridge_missing_500() -> None:
+    """state provider 未注入 → 500（fail-visible，不静默空选项）。"""
+    resp = asyncio.run(http_api.handle_http_dispatch(
+        "/ext/trigger_setup_tool/pipelines", "GET", "", None, {}))
+    assert resp["success"] is False and resp["data"]["status"] == 500
+
+
+# ── 创建（Bearer user_id 解析 → 触发器 metadata）───────────────────
+
+
+_CREATE_BODY = {
+    "trigger_type": "delay",
+    "delay_seconds": 60,
+    "message": "检查任务状态",
+    "pipeline_id": "p_target",
+    "name": "UI 创建的延迟触发器",
+}
+
+
+def test_create_with_bearer_token_records_user() -> None:
+    """Bearer token 的 user_id 落触发器 metadata（到期注入 chat.send_message 必需）。"""
+    for uid, username in (("u1", "alice"), ("u2", "bob")):
+        resp = asyncio.run(http_api.handle_http_dispatch(
+            "/ext/trigger_setup_tool/triggers", "POST",
+            _encode_body({**_CREATE_BODY, "name": f"trg-{uid}"}),
+            None, {"Authorization": f"Bearer {_token(uid, username)}"},
+        ))
+        body = _unwrap(resp)
+        cfg = get_trigger_manager().get(body["trigger"]["trigger_id"])
+        assert cfg is not None
+        assert cfg.pipeline_id == "p_target"
+        assert cfg.metadata["user_id"] == uid
+
+
+def test_create_without_credentials_401() -> None:
+    """缺 Bearer/过期 token → 401（注册到期必投递失败的触发器是静默债）。"""
+    for headers in (None, {}, {"Authorization": "Bearer not-a-token"},
+                    {"Authorization": f"Bearer {_token(expired=True)}"}):
+        resp = asyncio.run(http_api.handle_http_dispatch(
+            "/ext/trigger_setup_tool/triggers", "POST",
+            _encode_body(_CREATE_BODY), None, headers,
+        ))
+        assert resp["success"] is False and resp["data"]["status"] == 401, headers
+    assert get_trigger_manager().list_all() == []

@@ -125,7 +125,9 @@ export function TableWidget(props: Record<string, unknown>) {
   const rowData = (props.datasourceUri ? remote.data : undefined) as
     | { columns?: unknown; rows?: unknown }
     | undefined
-  const columns = extractColumns(rowData?.columns ?? props.columns)
+  // 声明列优先（插件 curated 列视图）；未声明时回退响应推断列（datasource 首行键）
+  const declaredColumns = extractColumns(props.columns)
+  const columns = declaredColumns.length > 0 ? declaredColumns : extractColumns(rowData?.columns)
   const rows = extractRows(rowData?.rows ?? props.data)
   const pageSize = (props.pageSize as number) ?? 10
   const title = props.title as string | undefined
