@@ -42,11 +42,10 @@ use crate::routes::{
     actions_execute_handler, get_pipeline_config_with_etag, get_plugin_config_with_etag,
     health_handler, metrics_prometheus_handler, pending_inputs_clear_handler,
     pending_inputs_delete_handler, pending_inputs_list_handler, pending_inputs_update_handler,
-    pipelines_handler, pipelines_runs_handler,
-    pipelines_state_handler, plugins_contract_status_handler, plugins_set_enabled_handler,
-    plugins_status_handler, put_pipeline_config_handler, put_plugin_config_handler, schema_handler,
-    serve_upload_handler, system_restart_handler, tools_handler, validate_all_plugins_handler,
-    AppState,
+    pipelines_handler, pipelines_runs_handler, pipelines_state_handler,
+    plugins_contract_status_handler, plugins_set_enabled_handler, plugins_status_handler,
+    put_pipeline_config_handler, put_plugin_config_handler, schema_handler, serve_upload_handler,
+    system_restart_handler, tools_handler, validate_all_plugins_handler, AppState,
 };
 use crate::session_routes::{
     create_session_handler, delete_session_handler, list_session_messages_handler,
@@ -772,6 +771,11 @@ async fn process_via_engine_inner(
         agentos_tenant::current().unwrap_or_else(|| TenantContext::new("default", "kernel"));
     let tenant_id = tenant.tenant_id.clone();
 
+    // run_id 权威生成点：注入 initial_state（插件侧 llm_core 取消轮询的定位锚，
+    // 见 聊天中断保留与重新生成回退方案 §四.1），并贯穿到 executor 构造——同一
+    // run 的两个消费面（state 轮询锚 vs runs 表落库）共享一个 uuid。
+    let run_id = uuid::Uuid::new_v4().to_string();
+
     // 1/1a/1a2/1a3. 初始 state 构造（含会话级/任务级 execution_context 注入 +
     // 自由 state overlay）。
     let initial_state = stage_build_initial_state(
@@ -785,6 +789,7 @@ async fn process_via_engine_inner(
         thinking_strength,
         execution_context,
         state_overlay,
+        &run_id,
     )
     .await;
 
@@ -816,6 +821,7 @@ async fn process_via_engine_inner(
         initial_state,
         agent_id,
         message,
+        &run_id,
     )
     .await
     {
@@ -984,6 +990,7 @@ async fn stage_build_initial_state(
     thinking_strength: &str,
     execution_context: Option<&serde_json::Value>,
     state_overlay: Option<&serde_json::Value>,
+    run_id: &str,
 ) -> serde_json::Value {
     let mut initial_state = serde_json::json!({
         "message": message,
@@ -993,6 +1000,9 @@ async fn stage_build_initial_state(
         "core_plugin": DEFAULT_CORE_PLUGIN,
         "ended": false,
         "suspended": false,
+        // run_id：本轮 run 的轮询定位锚（批次 C 注入，llm_core 取消轮询经
+        // pipeline-executor.get_run_status 查询它；跨轮被下一轮覆盖，属 per-run 键）。
+        "run_id": run_id,
         // 流式推送路由键：
         // - pipeline_id：前端消息路由键（前端 handleStreamStart 据此匹配占位气泡）
         // - session_id：WS 连接路由键（内核 session.emit_stream 据此定位前端 WS 连接）
@@ -1361,7 +1371,9 @@ fn stage_inject_agent_and_tools(
 
 /// 阶段 3：构造 PipelineExecutor 并执行 initial_state，返回 final_state。
 ///
-/// run_id / branch_id 用 uuid 保证多请求隔离；租户上下文从 task_local 读取
+/// branch_id 用固定 "main"；run_id 由调用方生成（process_via_engine_inner 权威
+/// 生成点，已注入 initial_state 供插件轮询），本函数只消费不再生成——保证
+/// state 里的轮询锚与 runs 表落库 id 是同一个 uuid。租户上下文从 task_local 读取
 /// （多租户 P0-4：调用方已在 agentos_tenant::scope 内）。
 /// Pull 热加载：按需重载管道配置（autonomous.yaml + steps）——每次 chat 执行前
 /// 检测配置 mtime，变了才重新加载到本次执行用的局部变量，不写回 AppState
@@ -1378,8 +1390,8 @@ async fn stage_execute(
     initial_state: serde_json::Value,
     agent_id: &str,
     message: &str,
+    run_id: &str,
 ) -> Result<serde_json::Value, EngineOutcome> {
-    let run_id = uuid::Uuid::new_v4().to_string();
     let branch_id = "main".to_string();
 
     // ── Pull 热加载（在 project_root 被 move 给 executor 之前算出 config_root）──
@@ -1392,7 +1404,7 @@ async fn stage_execute(
         tenant,
         known_ids.iter().cloned(),
         store.clone(),
-        run_id.clone(),
+        run_id.to_string(),
         branch_id,
     )
     // 分层持久化：从所有插件 manifest 的 persistent_fields 声明收集并集。
@@ -1470,7 +1482,7 @@ async fn stage_execute(
             // 历史悬空。（PipelineExecutor::run 当前不返回 Err，这是防御网；崩溃留下的
             // running 孤儿由内核启动 reap_orphan_runs 清扫。）
             if let Err(pe) = store
-                .update_run_status(&run_id, agentos_core::types::RunStatus::Failed, None, None)
+                .update_run_status(run_id, agentos_core::types::RunStatus::Failed, None, None)
                 .await
             {
                 warn!(run_id = %run_id, error = %pe, "update_run_status(Failed) 失败（继续）");
@@ -2676,8 +2688,7 @@ mod tests {
         };
 
         // 场景 A：manifests 未含插件 → 未知引用编译失败，降级空管道。
-        let root_a =
-            std::env::temp_dir().join(format!("hr_a_{}", uuid::Uuid::new_v4().simple()));
+        let root_a = std::env::temp_dir().join(format!("hr_a_{}", uuid::Uuid::new_v4().simple()));
         let config_a = write_cfg(&root_a);
         let state_a = AppState::new();
         let compiled_a = maybe_reload_compiled_pipeline(&state_a, &config_a).await;
@@ -2687,8 +2698,7 @@ mod tests {
         );
 
         // 场景 B：同 YAML，manifests store 已含该插件（热发现合并后）→ 编译成功。
-        let root_b =
-            std::env::temp_dir().join(format!("hr_b_{}", uuid::Uuid::new_v4().simple()));
+        let root_b = std::env::temp_dir().join(format!("hr_b_{}", uuid::Uuid::new_v4().simple()));
         let config_b = write_cfg(&root_b);
         let mut state_b = AppState::new();
         state_b.manifests = Arc::new(tokio::sync::RwLock::new(vec![mk_manifest_json(
@@ -3620,6 +3630,7 @@ mod tests {
             "",
             Some(&json!({"workspace": {"mode": "worktree"}})),
             Some(&overlay),
+            "run-abc",
         )
         .await;
         // execution_context 合并点（1a2）优先成立（overlay 不侵蚀其结构）
@@ -3636,6 +3647,7 @@ mod tests {
         assert_eq!(st["pipeline_id"], "pipe_new");
         assert_eq!(st["session_id"], "thread_new");
         assert_eq!(st["user_id"], "u1");
+        assert_eq!(st["run_id"], "run-abc", "run_id 注入为轮询定位锚（批次 C）");
     }
 
     #[test]
@@ -4729,7 +4741,12 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
-        let body = serde_json::from_slice::<serde_json::Value>(&axum::body::to_bytes(resp.into_body(), 1 << 20).await.unwrap()).unwrap();
+        let body = serde_json::from_slice::<serde_json::Value>(
+            &axum::body::to_bytes(resp.into_body(), 1 << 20)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
         let items = body["items"].as_array().unwrap();
         assert_eq!(items.len(), 2, "两条 pending 输入");
         assert_eq!(items[0]["content"], "第一条", "FIFO 序");

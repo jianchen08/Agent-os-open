@@ -452,9 +452,9 @@ impl EngineDispatcher {
             .as_ref()
             .and_then(|m| m.get("seq").and_then(|v| v.as_u64()))
             .unwrap_or(1);
-        let fa = outcome.final_assistant.clone().unwrap_or_else(|| {
-            serde_json::json!({"role": "assistant", "content": outcome.content})
-        });
+        let fa = outcome.final_assistant.clone().unwrap_or_else(
+            || serde_json::json!({"role": "assistant", "content": outcome.content}),
+        );
         // 认领回传：user 权威 record（id=compute_message_id 指纹 mc_/seq/内容/cmid）。
         // 表侧落库 id 与指纹一致（write_slot_to_table_locked 无 _message_id 注入时
         // 回落 compute_message_id），前端按 cmid 认领后记入独立 recordId 字段，
@@ -732,11 +732,59 @@ impl PipelineDispatcher for EngineDispatcher {
     }
 
     async fn dispatch_stop(&self, thread_id: &str) -> Result<(), String> {
-        // 取消生成：引擎层 cancel 接入待后续阶段
-        info!(
-            thread = thread_id,
-            "stop_generation 已接收（引擎取消接入待 P3+）"
-        );
+        // 停止 = 复用 suspend_pipeline 的落库路径（方案 §四.1，批次 C）：
+        // 把该管道最新 Running run 置 Suspended —— 这是传输信号，不是终态。
+        // llm_core 流式期间轮询到 suspended 后自行中断、落半截消息（status:
+        // interrupted）+ 置 ended=true，引擎既有 ended 边界检查让 run 优雅收尾
+        // （persist_run_end 覆写为 Completed）。无 Running run（run 已完成才点
+        // 停止）时幂等空转，行为同现状。
+        let Some(store) = self.state.store.as_ref() else {
+            return Ok(());
+        };
+        // 租户解析：WS 路径注册了 thread→user 映射，反查 user 后按用户租户
+        // 解析（run 落库在用户租户）；注册表无映射（冷启动/新连接未注册）回退
+        // default，与 suspend_pipeline 能力（current_or_default）语义一致。
+        let user_id = self
+            .state
+            .session
+            .as_ref()
+            .and_then(|s| s.registry().get_user_for_thread(thread_id));
+        let tenant_id = match user_id {
+            Some(uid) => crate::auth::resolve_tenant_id_by_user(Some(store), &uid).await,
+            None => "default".to_string(),
+        };
+        // pipeline_id 复用 resolve 路径（thread 的真实主管道；stop 消息不带 pipeline_id）。
+        let pipeline_id =
+            resolve_pipeline_id_for_thread(Some(store), thread_id, "", &tenant_id).await;
+        let runs = store
+            .list_runs_by_pipeline(&pipeline_id, &tenant_id)
+            .await
+            .map_err(|e| format!("stop_generation 查询 run 失败: {e}"))?;
+        let target = runs
+            .into_iter()
+            .find(|r| r.status == agentos_core::types::RunStatus::Running);
+        if let Some(run) = target {
+            store
+                .update_run_status(
+                    &run.run_id,
+                    agentos_core::types::RunStatus::Suspended,
+                    Some(&run.current_branch),
+                    Some(run.current_seq),
+                )
+                .await
+                .map_err(|e| format!("stop_generation 置 suspended 失败: {e}"))?;
+            info!(
+                thread = thread_id,
+                run_id = %run.run_id,
+                "stop_generation 已落地：run 置 suspended（信号，终态由引擎收尾）"
+            );
+        } else {
+            debug!(
+                thread = thread_id,
+                pipeline = %pipeline_id,
+                "stop_generation 无 running run（幂等空转）"
+            );
+        }
         Ok(())
     }
 
@@ -922,11 +970,13 @@ mod tests {
     use super::message_status_from_blob;
     use super::resolve_dispatch_agent;
     use super::resolve_pipeline_id_for_thread;
+    use super::EngineDispatcher;
     use agentos_core::traits::StorageBackend;
     use agentos_core::traits::{MessageQueryOpts, SessionListFilter};
     use agentos_core::types::{
         Branch, MessageRecord, RunRecord, RunStatus, SessionRecord, StorageError, TraceEntry,
     };
+    use agentos_session::router::PipelineDispatcher;
     use async_trait::async_trait;
     use std::sync::{Arc, Mutex};
 
@@ -1088,17 +1138,84 @@ mod tests {
     #[test]
     fn message_status_reads_from_blob() {
         // blob 带 status（中断/错误半截消息）→ 原样透传
-        let interrupted = serde_json::json!({"role": "assistant", "content": "半截", "status": "interrupted"});
-        assert_eq!(message_status_from_blob(&interrupted), serde_json::json!("interrupted"));
+        let interrupted =
+            serde_json::json!({"role": "assistant", "content": "半截", "status": "interrupted"});
+        assert_eq!(
+            message_status_from_blob(&interrupted),
+            serde_json::json!("interrupted")
+        );
         let errored = serde_json::json!({"role": "assistant", "content": "x", "status": "error"});
-        assert_eq!(message_status_from_blob(&errored), serde_json::json!("error"));
+        assert_eq!(
+            message_status_from_blob(&errored),
+            serde_json::json!("error")
+        );
     }
 
     #[test]
     fn message_status_defaults_to_completed_without_blob_status() {
         // 正常消息 blob 无 status → completed（既有行为不变）
         let plain = serde_json::json!({"role": "assistant", "content": "ok"});
-        assert_eq!(message_status_from_blob(&plain), serde_json::json!("completed"));
+        assert_eq!(
+            message_status_from_blob(&plain),
+            serde_json::json!("completed")
+        );
+    }
+
+    // ── dispatch_stop：停止 = 复用 suspend_pipeline 落库路径（批次 C）──
+    // 传输信号（Suspended → llm_core 轮询感知中断），不是终态。
+
+    fn stop_state(store: Arc<dyn StorageBackend>) -> EngineDispatcher {
+        let mut state = crate::routes::AppState::new();
+        state.store = Some(store);
+        EngineDispatcher::new(state)
+    }
+
+    async fn stop_running(store: Arc<dyn StorageBackend>, thread_id: &str) -> Result<(), String> {
+        stop_state(store).dispatch_stop(thread_id).await
+    }
+
+    #[tokio::test]
+    async fn dispatch_stop_suspends_latest_running_run() {
+        // 有 running run：按 thread 主管道定位并置 Suspended（传输信号）。
+        let store = Arc::new(agentos_engine::SqliteStore::open_memory().unwrap())
+            as Arc<dyn StorageBackend>;
+        store
+            .create_run("run-1", "cfg", "default")
+            .await
+            .unwrap();
+        store.set_run_pipeline("run-1", "p1").await.unwrap();
+        store.create_session(&session_record(Some("p1"))).await.unwrap();
+
+        stop_running(store.clone(), "T1").await.unwrap();
+
+        let run = store.get_run("run-1").await.unwrap();
+        assert_eq!(
+            run.status,
+            RunStatus::Suspended,
+            "stop 应把最新 running run 置 suspended"
+        );
+    }
+
+    #[tokio::test]
+    async fn dispatch_stop_no_running_run_is_idempotent_noop() {
+        // run 已完成才点停止（竞态）：无 Running run → 幂等空转，不报错、不动已完成 run。
+        let store = Arc::new(agentos_engine::SqliteStore::open_memory().unwrap())
+            as Arc<dyn StorageBackend>;
+        store
+            .create_run("run-1", "cfg", "default")
+            .await
+            .unwrap();
+        store.set_run_pipeline("run-1", "p1").await.unwrap();
+        store
+            .update_run_status("run-1", RunStatus::Completed, None, None)
+            .await
+            .unwrap();
+        store.create_session(&session_record(Some("p1"))).await.unwrap();
+
+        stop_running(store.clone(), "T1").await.unwrap();
+
+        let run = store.get_run("run-1").await.unwrap();
+        assert_eq!(run.status, RunStatus::Completed, "已完成 run 不被 stop 改写");
     }
 
     #[tokio::test]
