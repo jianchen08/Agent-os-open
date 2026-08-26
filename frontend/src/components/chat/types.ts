@@ -98,6 +98,12 @@ export interface ChatContainerProps {
   isLoadingMoreMessages?: boolean
   /** 加载更多历史消息回调 */
   onLoadMoreMessages?: () => void
+  /** 重新生成回调（最后一条 assistant 消息上「重新生成」触发） */
+  onRegenerate?: () => void
+  /** 回退回调（user 消息「回退」确认后触发，参数为目标 user 消息 ID） */
+  onRollbackTo?: (userMessageId: string) => void
+  /** 编辑重发回调（user 消息编辑保存后触发：截断 + 改内容 + 重跑） */
+  onEdit?: (messageId: string, newContent: string) => Promise<void> | void
 }
 
 /**
@@ -122,6 +128,12 @@ export interface MessageListProps {
   sessionId?: string
   /** 搜索查询（用于高亮显示） */
   searchQuery?: string
+  /** 编辑重发回调（下传给 MessageItem） */
+  onEdit?: (messageId: string, newContent: string) => Promise<void> | void
+  /** 重新生成回调（最后一条 assistant 消息上「重新生成」触发） */
+  onRegenerate?: () => void
+  /** 回退回调（user 消息「回退」确认后触发，参数为目标 user 消息 ID） */
+  onRollbackTo?: (userMessageId: string) => void
 }
 
 /**
@@ -144,6 +156,10 @@ export interface MessageItemProps {
   taskId?: string
   /** 编辑消息保存回调（消息编辑功能由调用方接入；不传则不显示编辑入口） */
   onEdit?: (messageId: string, newContent: string) => Promise<void> | void
+  /** 重新生成回调（最后一条 assistant 消息上「重新生成」触发） */
+  onRegenerate?: () => void
+  /** 回退回调（user 消息「回退」确认后触发，参数为目标 user 消息 ID） */
+  onRollbackTo?: (userMessageId: string) => void
 }
 
 /**

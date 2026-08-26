@@ -380,6 +380,23 @@ class GlobalWebSocketService {
     this._send({ type: 'stop_generation', thread_id: threadId, reason, pipeline_id: pipelineId })
   }
 
+  /** 重新生成：截断到目标 user 消息后重跑（缺省最后一条 user；带 new_content
+   *  为编辑重发——后端改写目标消息内容后重跑）。通知性消息：离线时入队，
+   *  重连后随 _flushQueue 发出。 */
+  sendRegenerate(threadId: string, opts?: {
+    pipelineId?: string
+    userMessageId?: string
+    newContent?: string
+  }): void {
+    this._send({
+      type: 'regenerate',
+      thread_id: threadId,
+      pipeline_id: opts?.pipelineId || '',
+      user_message_id: opts?.userMessageId || '',
+      new_content: opts?.newContent || '',
+    })
+  }
+
   /** 响应子 Agent 输入请求 */
   sendUserInputResponse(threadId: string, executionId: string, response: string): void {
     this._send({ type: 'user_input_response', thread_id: threadId, execution_id: executionId, response })

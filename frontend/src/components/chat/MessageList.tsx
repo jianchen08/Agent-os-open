@@ -46,6 +46,12 @@ export interface ExtendedMessageListProps extends MessageListProps {
   tabId?: string
   /** 当前 Tab 关联的任务 ID，用于工具卡片打开文件解析工作区 */
   taskId?: string
+  /** 编辑重发回调（下传给 MessageItem） */
+  onEdit?: (messageId: string, newContent: string) => Promise<void> | void
+  /** 重新生成回调（最后一条 assistant 消息上「重新生成」触发） */
+  onRegenerate?: () => void
+  /** 回退回调（user 消息「回退」确认后触发，参数为目标 user 消息 ID） */
+  onRollbackTo?: (userMessageId: string) => void
 }
 
 /**
@@ -62,6 +68,9 @@ export const MessageList = ({
   searchQuery,
   tabId,
   taskId,
+  onEdit,
+  onRegenerate,
+  onRollbackTo,
 }: ExtendedMessageListProps) => {
   /**
    * 渲染用消息：合并连续 assistant 为一个气泡（工具调用链显示为一条消息）。
@@ -151,11 +160,14 @@ export const MessageList = ({
             modelName={modelName}
             searchQuery={searchQuery}
             taskId={taskId}
+            onEdit={onEdit}
+            onRegenerate={onRegenerate}
+            onRollbackTo={onRollbackTo}
           />
         </div>
       )
     },
-    [isGenerating, modelName, searchQuery, taskId],
+    [isGenerating, modelName, searchQuery, taskId, onEdit, onRegenerate, onRollbackTo],
   )
 
   /** 把滚动位置钉到最底部 */

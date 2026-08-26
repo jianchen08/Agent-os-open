@@ -785,6 +785,91 @@ describe('GlobalWebSocketService', () => {
   })
 
   // ──────────────────────────────────────────────
+  // 7b. sendRegenerate 测试（批次 D：重新生成/回退/编辑重发入站协议）
+  // ──────────────────────────────────────────────
+  describe('sendRegenerate - 重新生成协议', () => {
+    async function setupConnected() {
+      const { service, connect, getLatestWs, disconnect } = await createService()
+      connect('test-token')
+      vi.advanceTimersByTime(100)
+      const ws = getLatestWs()!
+      simulateSuccessfulOpen(ws)
+      return { service, ws, disconnect }
+    }
+
+    function getSentMessages(ws: MockWebSocketInstance) {
+      return ws.send.mock.calls.map((call: string[]) => {
+        try { return JSON.parse(call[0]) } catch { return null }
+      })
+    }
+
+    it('重新生成：只传 thread_id 时按协议携带 pipeline_id/user_message_id（空串缺省）', async () => {
+      const { service, ws, disconnect } = await setupConnected()
+
+      service.sendRegenerate('thread-abc')
+
+      const messages = getSentMessages(ws)
+      const regen = messages.find((m: any) => m?.type === 'regenerate')
+
+      expect(regen).toBeDefined()
+      expect(regen.thread_id).toBe('thread-abc')
+      expect(regen.pipeline_id).toBe('')
+      expect(regen.user_message_id).toBe('')
+      expect(regen.new_content).toBe('')
+      disconnect()
+    })
+
+    it('回退：指定 user_message_id 定位截断点', async () => {
+      const { service, ws, disconnect } = await setupConnected()
+
+      service.sendRegenerate('thread-1', { pipelineId: 'pipe-x', userMessageId: 'u-42' })
+
+      const messages = getSentMessages(ws)
+      const regen = messages.find((m: any) => m?.type === 'regenerate')
+
+      expect(regen).toBeDefined()
+      expect(regen.thread_id).toBe('thread-1')
+      expect(regen.pipeline_id).toBe('pipe-x')
+      expect(regen.user_message_id).toBe('u-42')
+      expect(regen.new_content).toBe('')
+      disconnect()
+    })
+
+    it('编辑重发：携带 new_content 改写目标消息内容', async () => {
+      const { service, ws, disconnect } = await setupConnected()
+
+      service.sendRegenerate('thread-2', { pipelineId: 'pipe-y', userMessageId: 'u-7', newContent: '改写后的问题' })
+
+      const messages = getSentMessages(ws)
+      const regen = messages.find((m: any) => m?.type === 'regenerate')
+
+      expect(regen).toBeDefined()
+      expect(regen.user_message_id).toBe('u-7')
+      expect(regen.new_content).toBe('改写后的问题')
+      disconnect()
+    })
+
+    it('未连接时入队，重连后随 flushQueue 发出', async () => {
+      const { service, connect, getLatestWs, disconnect } = await createService()
+
+      // 未连接直接发送 → 入队
+      service.sendRegenerate('thread-3', { pipelineId: 'pipe-z' })
+
+      connect('test-token')
+      vi.advanceTimersByTime(100)
+      const ws = getLatestWs()!
+      simulateSuccessfulOpen(ws)
+
+      const messages = getSentMessages(ws)
+      const regen = messages.find((m: any) => m?.type === 'regenerate')
+      expect(regen).toBeDefined()
+      expect(regen.thread_id).toBe('thread-3')
+      expect(regen.pipeline_id).toBe('pipe-z')
+      disconnect()
+    })
+  })
+
+  // ──────────────────────────────────────────────
   // 8. useLayoutModeStore 同步测试
   // ──────────────────────────────────────────────
   describe('状态同步到 store', () => {

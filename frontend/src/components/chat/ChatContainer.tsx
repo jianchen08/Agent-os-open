@@ -103,6 +103,9 @@ export const ChatContainer = ({
   hasMoreMessages = false,
   isLoadingMoreMessages = false,
   onLoadMoreMessages,
+  onRegenerate,
+  onRollbackTo,
+  onEdit,
 }: ChatContainerProps) => {
   /** 搜索状态（从 uiStore 共享，Sidebar 中输入） */
   const searchQuery = useUIStore((s) => s.messageSearchQuery)
@@ -377,6 +380,9 @@ export const ChatContainer = ({
         sessionId={sessionId}
         searchQuery={searchQuery}
         taskId={activeTab?.taskId}
+        onEdit={onEdit}
+        onRegenerate={onRegenerate}
+        onRollbackTo={onRollbackTo}
       />
 
       {/* 活跃投票面板 */}

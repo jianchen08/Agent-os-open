@@ -395,6 +395,40 @@ function HomePage(): ReactNode {
     // 真正的 stream_end 丢失由更上层的 keepalive 看门狗（~180s）兜底，此处不重复。
   }, [])
 
+  /** 重新生成：截断到最后一条 user 消息后重跑。本地乐观截断 + WS regenerate。
+   *  后端未就绪时（批次 D 内核侧）WS 消息被忽略，本地截断仍即时生效。 */
+  const handleRegenerate = useCallback(() => {
+    const sid = useSessionStore.getState().activeSessionId
+    const ps = usePipelineMessageStore.getState()
+    const pipelineId = ps.activePipelineId
+    if (!sid || !pipelineId) return
+    const lastUserId = ps.findLastUserMessageId(pipelineId)
+    if (!lastUserId) return
+    ps.truncateMessagesAfter(pipelineId, lastUserId)
+    globalWS.sendRegenerate(sid, { pipelineId })
+  }, [])
+
+  /** 回退到指定 user 消息（该消息之后整体截断重跑） */
+  const handleRollbackTo = useCallback((userMessageId: string) => {
+    const sid = useSessionStore.getState().activeSessionId
+    const ps = usePipelineMessageStore.getState()
+    const pipelineId = ps.activePipelineId
+    if (!sid || !pipelineId) return
+    ps.truncateMessagesAfter(pipelineId, userMessageId)
+    globalWS.sendRegenerate(sid, { pipelineId, userMessageId })
+  }, [])
+
+  /** 编辑重发：改写目标 user 消息内容并截断其后重跑 */
+  const handleEditResend = useCallback(async (messageId: string, newContent: string) => {
+    const sid = useSessionStore.getState().activeSessionId
+    const ps = usePipelineMessageStore.getState()
+    const pipelineId = ps.activePipelineId
+    if (!sid || !pipelineId) return
+    ps.truncateMessagesAfter(pipelineId, messageId)
+    ps.updateMessage(pipelineId, messageId, { content: newContent })
+    globalWS.sendRegenerate(sid, { pipelineId, userMessageId: messageId, newContent })
+  }, [])
+
   /** 登出并跳转到登录页 */
   const handleLogout = useCallback(async () => {
     destroyStreamingEvents()
@@ -420,6 +454,9 @@ function HomePage(): ReactNode {
         isGenerating={false}
         onSendMessage={handleSendMessage}
         onStopGenerate={handleStopGenerate}
+        onRegenerate={handleRegenerate}
+        onRollbackTo={handleRollbackTo}
+        onEdit={handleEditResend}
         hasMoreMessages={hasMoreMessages}
         isLoadingMoreMessages={isLoadingMoreMessages}
         onLoadMoreMessages={() => {

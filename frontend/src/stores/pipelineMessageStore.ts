@@ -284,6 +284,11 @@ interface PipelineMessageState {
    *  无候选 → skipped（不插不建——后端记录由对账拉取）。 */
   confirmUserMessage: (pipelineId: string, cmid: string) => boolean
 
+  /** 获取指定管道中最后一条 user 消息（重新生成缺省目标） */
+  findLastUserMessageId: (pipelineId: string) => string | null
+  /** 乐观截断：保留到目标 user 消息（含）为止，其后消息全部移除（重新生成/回退/编辑重发本地即时反馈） */
+  truncateMessagesAfter: (pipelineId: string, userMessageId: string) => void
+
   /** 开始流式传输 */
   startStreaming: (pipelineId: string, messageId: string) => void
   /** 停止流式传输 */
@@ -768,6 +773,34 @@ export const usePipelineMessageStore = create<PipelineMessageState>()(
         messagesByPipeline: {
           ...state.messagesByPipeline,
           [pipelineId]: updatedMessages,
+        },
+      }
+    })
+  },
+
+  /** 获取指定管道中最后一条 user 消息 ID（重新生成缺省目标）。
+   *  tool 结果消息不参与：截断点只能是 user 消息边界（tool_calls/tool 配对完整性）。 */
+  findLastUserMessageId: (pipelineId: string) => {
+    const msgs = get().messagesByPipeline[pipelineId] || []
+    for (let i = msgs.length - 1; i >= 0; i--) {
+      if (msgs[i].role === 'user') return msgs[i].id
+    }
+    return null
+  },
+
+  /** 乐观截断：保留到目标 user 消息（含）为止，其后消息整体移除。
+   *  重新生成/回退/编辑重发的本地即时反馈（服务端 regenerate 落库后由对账收敛）。
+   *  找不到目标 user 消息 → 幂等跳过。 */
+  truncateMessagesAfter: (pipelineId: string, userMessageId: string) => {
+    set((state) => {
+      const msgs = state.messagesByPipeline[pipelineId] || []
+      const idx = msgs.findIndex((m) => m.id === userMessageId)
+      if (idx < 0) return state
+      const kept = msgs.slice(0, idx + 1)
+      return {
+        messagesByPipeline: {
+          ...state.messagesByPipeline,
+          [pipelineId]: kept,
         },
       }
     })

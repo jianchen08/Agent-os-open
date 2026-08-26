@@ -189,10 +189,6 @@ export const WS_SERVER_EVENTS = {
   SYSTEM_NOTIFICATION: 'system_notification',
   /** Agent 层级变更 - Phase 5 */
   AGENT_LEVEL_CHANGED: 'agent_level_changed',
-  /** 消息删除通知 */
-  MESSAGE_DELETED: 'message_deleted',
-  /** 消息更新通知 */
-  MESSAGE_UPDATED: 'message_updated',
   /** Schema 更新（模块 Schema 变更推送） */
   SCHEMA_UPDATED: 'schema_updated',
   /** 迭代开始 */
@@ -235,10 +231,8 @@ const WS_CLIENT_MESSAGES = {
   CANCEL: 'cancel',
   /** 用户输入响应（响应子 Agent 的输入请求）- 需求 1.3 */
   USER_INPUT_RESPONSE: 'user_input_response',
-  /** 执行控制（暂停/恢复/取消）- 需求 5.1, 5.2, 5.3 */
-  EXECUTION_CONTROL: 'execution_control',
-  /** 消息 ACK 确认（确认收到关键消息） */
-  MESSAGE_ACK: 'message_ack',
+  /** 重新生成（截断到目标 user 消息后重跑）：缺省 user_message_id = 最后一条 user */
+  REGENERATE: 'regenerate',
 } as const
 
 /**
@@ -362,24 +356,17 @@ export interface UserInputResponseMessage {
   response: string
 }
 
-/** 执行控制消息 - 需求 5.1, 5.2, 5.3 */
-export interface ExecutionControlMessage {
-  type: typeof WS_CLIENT_MESSAGES.EXECUTION_CONTROL
-  /** 执行 ID */
-  execution_id: string
-  /** 控制动作 */
-  action: 'pause' | 'resume' | 'cancel'
-  /** 操作原因 */
-  reason?: string
-}
-
-/** 消息 ACK 确认（前端确认收到关键消息） */
-export interface MessageAckMessage {
-  type: typeof WS_CLIENT_MESSAGES.MESSAGE_ACK
-  /** 被确认的消息 request_id */
-  request_id: string
-  /** 前端确认收到的时间戳 */
-  received_at: string
+/** 重新生成消息：截断到目标 user 消息后重跑（后端路由 + 截断 + 重放） */
+export interface RegenerateMessage {
+  type: typeof WS_CLIENT_MESSAGES.REGENERATE
+  /** 会话 ID */
+  thread_id: string
+  /** 管道 ID（重跑目标管道） */
+  pipeline_id?: string
+  /** 目标 user 消息 ID（缺省 = 最后一条 user 消息） */
+  user_message_id?: string
+  /** 编辑重发：改写目标 user 消息内容后重跑 */
+  new_content?: string
 }
 
 /** 客户端消息联合类型 */
@@ -389,8 +376,7 @@ export type WebSocketClientMessage =
   | HeartbeatMessage
   | CancelMessage
   | UserInputResponseMessage
-  | ExecutionControlMessage
-  | MessageAckMessage
+  | RegenerateMessage
 
 /** 状态变更事件 */
 export interface StateChangeEvent {
@@ -621,8 +607,6 @@ export type WebSocketServerEvent =
   | SubAgentWaitingInputEvent
   | SubAgentCompletedEvent
   | AgentLevelChangedEvent
-  | MessageDeletedEvent
-  | MessageUpdatedEvent
 
 /** 子 Agent 创建事件 - Phase 5 */
 export interface SubAgentCreatedEvent {
@@ -700,30 +684,4 @@ export interface AgentLevelChangedEvent {
   thread_id?: string
   /** 会话 ID */
   sessionId?: string
-}
-
-/** 消息删除事件 */
-export interface MessageDeletedEvent {
-  type: typeof WS_SERVER_EVENTS.MESSAGE_DELETED
-  /** 会话 ID */
-  sessionId: string
-  /** 消息 ID */
-  messageId: string
-  /** 删除的消息数量 */
-  deletedCount: number
-  /** 时间戳 */
-  timestamp: string
-}
-
-/** 消息更新事件 */
-export interface MessageUpdatedEvent {
-  type: typeof WS_SERVER_EVENTS.MESSAGE_UPDATED
-  /** 会话 ID */
-  sessionId: string
-  /** 消息 ID */
-  messageId: string
-  /** 新内容 */
-  content?: string
-  /** 时间戳 */
-  timestamp: string
 }

@@ -127,6 +127,8 @@ export const MessageItem = memo(function MessageItem({
   isLast = false,
   isGenerating = false,
   onEdit,
+  onRegenerate,
+  onRollbackTo,
   modelName,
   className = '',
   searchQuery,
@@ -583,6 +585,8 @@ export const MessageItem = memo(function MessageItem({
                 onCopy={handleCopy}
                 onEdit={handleEdit}
                 onContentUpdate={handleContentUpdate}
+                onRegenerate={onRegenerate}
+                onRollbackTo={onRollbackTo}
               />
             </div>
           )}
