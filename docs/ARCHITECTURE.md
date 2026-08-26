@@ -255,7 +255,7 @@ plugins:
 3. main 循环体 · prepare（Input 插件链）
    ├─ context_build：按 state.agent_id 加载 Agent yaml → context.system_prompt / tool_ids
    ├─ tool_schema：按 tool_ids 白名单注入工具 schema
-   ├─ memory_read：检索情景/语义记忆（关键词/标签）
+   ├─ memory_read：检索记忆（hindsight.recall）
    └─ prompt_build：分层组装提示词（system_prompt / tools / static_vars / 记忆 / 历史 / dynamic_vars）
 
 4. main 循环体 · core（pipeline_llm_core，流式）
