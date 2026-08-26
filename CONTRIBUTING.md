@@ -38,22 +38,22 @@
 
 1. **Fork 仓库** 并克隆到本地
 2. 创建特性分支：`git checkout -b feature/your-feature-name`
-3. 安装开发依赖：`pip install -e ".[dev]"`（运行时依赖已在 `pyproject.toml` 中全部声明，无需手动补装 FastAPI/Redis）
+3. 安装开发工具链：`pip install -e ".[dev]"`（pytest / ruff / mypy 等，根 `pyproject.toml` 声明）；改到某个 Python 插件时，在其目录执行 `uv sync --project <插件目录>` 建独立 venv（uv 单轨，内核不回退 PATH 裸 python）
 4. 阅读 [开发规范](#开发规范) 和 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)
 
 ### 编码流程
 
 ```bash
 # 1. 编写代码
-# 2. 添加/更新测试
-pytest tests/
+# 2. 添加/更新测试（插件行为测试写在插件侧，模式见 docs/guides/plugin-sidecar-python.md）
+python -m pytest tests/ -v
 
 # 3. 格式化代码
 ruff format .
 ruff check --fix .
 
-# 4. 类型检查
-mypy src/
+# 4. 类型检查（车道经 run_gates.py 统一持有）
+python scripts/run_gates.py --filter sdk-lint,sdk-mypy
 
 # 5. 提交
 git add .
@@ -185,16 +185,15 @@ pre-existing 红测。基线（`.github/pytest-failure-baseline.txt` /
 #### 快速参考
 
 ```bash
-# Python 单测（先确认 RED 失败，再实现到 GREEN 通过）
-PYTHONPATH=src:plugins:plugins/sdk/src \
-  python -m pytest tests/path/to/test.py::test_name -v
+# Python 单测（先确认 RED 失败，再实现到 GREEN 通过；插件运行时依赖走各自 venv，无需 PYTHONPATH）
+python -m pytest tests/path/to/test.py::test_name -v
 
 # Rust 单测
-cargo test -p agentos-engine <测试名>   # 单跑
+cargo test -p agentos-engine <测试名>   # 单跑（在 kernel/ 下）
 
-# 全量回归（对齐 CI）
-python -m pytest tests/plugins/ tests/suites/ plugins/ -v
-cargo test --all
+# 全量回归（对齐 CI 车道）
+python scripts/run_gates.py
+cargo test --all                         # 在 kernel/ 下
 ```
 
 ---
@@ -203,26 +202,19 @@ cargo test --all
 
 ```
 Agent-os/
-├── src/                  # 后端源码
-│   ├── pipeline/        # 管道引擎（路由信号、插件链、热替换）
-│   ├── agents/          # Agent 系统（注册表、YAML 加载、协作）
-│   ├── tools/           # 工具系统（内置工具、MCP 适配、注册表）
-│   ├── memory/          # 记忆系统（EPISODE/SEMANTIC、检索注入、复盘维护）
-│   ├── channels/        # 通道层（Web/CLI/API + 网关；含 IM 适配器实验代码）
-│   ├── skills/          # Skill 注册与发现
-│   ├── isolation/       # 工作区隔离（Docker/Host Provider、worktree）
-│   ├── triggers/        # 触发器系统（Cron/事件/间隔）
-│   ├── evaluation/      # 强制评估系统
-│   ├── plugins/         # 管道插件实现（input/output/core）
-│   ├── connectors/      # 外部工具连接器（VSCode/游戏引擎/ComfyUI）
-│   ├── infrastructure/  # 基础设施（任务执行、通知、恢复）
-│   └── ...              # auth / monitoring / llm / ui_schema 等
-├── skills/              # 可复用技能包（Skill 根目录）
+├── kernel/               # Rust 微内核（crates：api/config/core/engine/invoker/mcp/plugin-loader/session/...）
+├── plugins/
+│   ├── sdk/             # Python 插件 SDK（agentos_plugin_sdk）
+│   └── shared/
+│       ├── pipeline/    # 管道插件（input/core/output，含 Rust cdylib 原生插件）
+│       ├── tools/       # LLM 工具插件（26 个，含 external_mcp 零代码接入）
+│       └── system/      # 系统服务插件（LLM/记忆/审批/评估/通道…）
 ├── frontend/            # 前端源码（React 19 + Vite）
-├── config/              # 配置文件（agents/tools/pipelines/triggers/...）
-├── tests/               # 测试
-├── docs/                # 文档
-└── .github/             # Issue / PR 模板
+├── config/              # 运行配置（agents/pipelines/plugins/models/isolation/...）
+├── tests/               # Python 测试（plugins/suites/e2e_02/gates/unit/...）
+├── skills/              # 可复用技能包（Skill 根目录）
+├── docs/                # 文档（decisions/=ADR、guides/=开发指南）
+└── .github/             # Issue / PR 模板与 CI
 ```
 
 ---
