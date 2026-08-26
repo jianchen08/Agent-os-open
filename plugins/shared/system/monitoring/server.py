@@ -449,9 +449,9 @@ def _collect_token_usage() -> dict[str, Any]:
 
     import sqlite3
 
-    prompt = 0
-    completion = 0
-    total = 0
+    prompt = 0.0
+    completion = 0.0
+    total = 0.0
     db_path = _kernel_db_path()
     if os.path.isfile(db_path):
         conn = None

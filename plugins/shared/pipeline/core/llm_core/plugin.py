@@ -479,28 +479,8 @@ class LLMCore(ICorePlugin):
             # 由引擎 apply 到 state["messages"] + message_slots(不再返回全量 history)。
             appended_msg: dict[str, Any] | None = None
             if tool_calls:
-                # 预先解析 tool_call_id，确保 assistant 消息和 state 中的 raw_tool_calls 使用一致的 id
-                # 同时标准化 id 格式：部分模型返回非标准格式（如 call_function_xxx_1），
-                # 统一替换为 call_<hex> 格式，确保系统内一致且 API 兼容
-                resolved_ids: list[str] = []
-                for tc in tool_calls:
-                    raw_id = tc.get("id")
-                    if raw_id and _is_valid_tool_call_id(raw_id):
-                        resolved_ids.append(raw_id)
-                    else:
-                        std_id = f"call_{uuid.uuid4().hex[:24]}"
-                        resolved_ids.append(std_id)
-                        if raw_id:
-                            logger.info(
-                                "[%s] LLM 返回非标准 tool_call_id，已修正: %s → %s",
-                                self.name,
-                                raw_id,
-                                std_id,
-                            )
-
                 # 将解析后的 id 回写到 raw_tool_calls，供后续 tool_core 使用
-                for i, tc in enumerate(tool_calls):
-                    tc["id"] = resolved_ids[i]
+                resolved_ids = self._resolve_tool_call_ids(tool_calls)
 
                 # LLM 返回工具调用 -> append assistant 消息（含 tool_calls）
                 # 统一保留 reasoning_content 到内存（不管 provider）：
@@ -589,7 +569,155 @@ class LLMCore(ICorePlugin):
                     self.name,
                     _pipeline_id or "?",
                 )
+            # 流已开始后的中途失败：adapter 已把累积内容快照挂到异常对象，
+            # 半截内容走正常 ops 返回值落库（status:"error"），不再上抛。
+            # 流未开始（建连/首 chunk 阶段）或零累积内容时无快照 → 维持 raise。
+            partial = getattr(exc, "llm_partial_snapshot", None)
+            if partial is not None:
+                return self._build_partial_failure_result(partial, exc)
             raise
+
+    def _resolve_tool_call_ids(self, tool_calls: list[dict[str, Any]]) -> list[str]:
+        """解析并标准化 tool_call id，回写到入参列表并返回 id 序列。
+
+        部分模型返回非标准格式（如 call_function_xxx_1），统一替换为
+        ``call_<hex>`` 格式，确保系统内一致且 API 兼容；assistant 消息与
+        state 中的 raw_tool_calls 使用同一份 id。
+
+        Args:
+            tool_calls: 工具调用列表（原地回写 ``id`` 字段）
+
+        Returns:
+            与入参顺序一致的标准化 id 列表
+        """
+        resolved_ids: list[str] = []
+        for tc in tool_calls:
+            raw_id = tc.get("id")
+            if raw_id and _is_valid_tool_call_id(raw_id):
+                resolved_ids.append(raw_id)
+            else:
+                std_id = f"call_{uuid.uuid4().hex[:24]}"
+                resolved_ids.append(std_id)
+                if raw_id:
+                    logger.info(
+                        "[%s] LLM 返回非标准 tool_call_id，已修正: %s → %s",
+                        self.name,
+                        raw_id,
+                        std_id,
+                    )
+        for i, tc in enumerate(tool_calls):
+            tc["id"] = resolved_ids[i]
+        return resolved_ids
+
+    def _build_partial_failure_result(
+        self,
+        partial: dict[str, Any],
+        exc: Exception,
+    ) -> dict[str, Any]:
+        """流式中途失败 → 半截 assistant 消息落库（``status:"error"``）。
+
+        tool_calls 处理（硬约束：tool_calls/tool 配对完整性）：
+        - arguments JSON 未闭合（解析失败/空串）→ 从半截消息剥离该 tool_call；
+        - 已闭合 → 保留，并同步追加占位 tool 结果消息（工具未执行，
+          ``status:"interrupted"``），保证 history 永远配对完整。
+        ``raw_tool_calls`` 恒为空——错误中断的工具调用绝不交由 tool_core 执行；
+        ``raw_error`` 为 None——半截返回是正常落库（非错误轮次），错误信息
+        经 ``llm_error_info`` 随消息 blob 持久化。
+
+        Args:
+            partial: adapter 挂到异常对象的部分内容快照
+                （text / thinking_text / tool_calls / usage）
+            exc: 流消费期间抛出的原始异常
+
+        Returns:
+            合并到管道状态的部分结果字典
+        """
+        text = partial.get("text")
+        thinking_text = partial.get("thinking_text")
+
+        # 未闭合 tool_call 剥离：arguments 必须是完整 JSON 才保留
+        kept_calls: list[dict[str, Any]] = []
+        stripped = 0
+        for tc in partial.get("tool_calls") or []:
+            try:
+                json.loads(tc.get("arguments", ""))
+            except (ValueError, TypeError):
+                stripped += 1
+                continue
+            kept_calls.append(tc)
+
+        ops: list[dict[str, Any]] = []
+        partial_msg: dict[str, Any] = {
+            "role": "assistant",
+            "content": text or "",
+            "status": "error",
+            "llm_error_info": {
+                "error_type": type(exc).__name__,
+                "error_message": str(exc),
+            },
+        }
+        if thinking_text:
+            partial_msg["reasoning_content"] = thinking_text
+        if kept_calls:
+            resolved_ids = self._resolve_tool_call_ids(kept_calls)
+            partial_msg["tool_calls"] = [
+                {
+                    "id": resolved_ids[i],
+                    "type": "function",
+                    "function": {
+                        "name": tc.get("name", ""),
+                        "arguments": tc.get("arguments", ""),
+                    },
+                }
+                for i, tc in enumerate(kept_calls)
+            ]
+        ops.append({"op": "set", "msg": partial_msg})
+        # 占位 tool 结果：闭合的 tool_call 已保留在 assistant 消息里，必须补
+        # 配对结果消息（assistant 之后的槽位），否则下一轮请求 400
+        for tc in kept_calls:
+            ops.append(
+                {
+                    "op": "set",
+                    "msg": {
+                        "role": "tool",
+                        "tool_call_id": tc["id"],
+                        "content": "（生成中断，工具未执行）",
+                        "status": "interrupted",
+                    },
+                }
+            )
+
+        usage = partial.get("usage")
+        llm_usage: dict[str, Any] = {}
+        if usage:
+            llm_usage = {
+                "input_tokens": usage.get("prompt_tokens", 0),
+                "output_tokens": usage.get("completion_tokens", 0),
+                "total_tokens": usage.get("total_tokens", 0),
+                "cached_tokens": usage.get("cached_tokens", 0),
+            }
+
+        logger.warning(
+            "[%s] 流式中途失败，半截内容落库 status=error text=%d chars "
+            "thinking=%d chars tool_calls=%d 保留/%d 剥离",
+            self.name,
+            len(text or ""),
+            len(thinking_text or ""),
+            len(kept_calls),
+            stripped,
+        )
+        return {
+            StateKeys.RAW_RESULT: text,
+            StateKeys.RAW_ERROR: None,
+            StateKeys.RAW_TOOL_CALLS: [],
+            StateKeys.RAW_THINKING: thinking_text,
+            "messages": {"_ops": ops},
+            "llm_usage": llm_usage,
+            "context_window": self._context_window,
+            "llm_model": self._model,
+            "llm_provider": self._provider,
+            "llm_api_base": self._api_base,
+        }
 
     # 多模态引用→二进制的解析上限（与 preprocessor max_file_size 默认对齐，20MB）
     _MAX_IMAGE_BYTES = 20 * 1024 * 1024
