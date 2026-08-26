@@ -931,7 +931,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         Arc::new(step_library),
         invoker_dyn,
         store_dyn,
-        plugin_ids,
         project_root,
         enabled_snapshot,
     );
@@ -1140,6 +1139,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .with_initial_cdylib_ids(initial_cdylib_ids)
         .with_restart_hook(restart_hook)
         .with_manifests_store(state.manifests.clone())
+        .with_enabled_ids(state.enabled_plugin_ids.clone())
         .with_enablement(enablement.clone())
         // enablement 每次 sync 从盘上 profile 现读——boot 快照看不到
         // 运行期 PUT enabled 的写盘结果，卸载→重装按旧快照会把已禁用插件重新

@@ -574,6 +574,25 @@ fn deterministic_json(v: &serde_json::Value) -> String {
     }
 }
 
+/// 热发现注册结果并入 L1 启用集合：仅本轮新注册的插件（changed 的已在集合中；
+/// drifted 拒注册的不进）。空报告零成本返回。
+///
+/// 消费面：sessions schema 的 thread_fields contributes 过滤与 domain_event
+/// 点对点投递均按 `AppState.enabled_plugin_ids` 过滤——不并入则新插件这两个面
+/// 要等 PUT enabled 或重启才生效。
+pub(crate) async fn merge_report_into_enabled_ids(
+    report: &SyncReport,
+    enabled: &Arc<tokio::sync::RwLock<HashSet<String>>>,
+) {
+    if report.new_plugin_ids.is_empty() {
+        return;
+    }
+    enabled
+        .write()
+        .await
+        .extend(report.new_plugin_ids.iter().cloned());
+}
+
 /// store 感知的同步入口：`manifests_store` 传入 `AppState.manifests`
 /// 共享句柄时，本轮新注册插件的 manifest 会增量合并进 store（按 id 去重），
 /// 修复热发现后状态列表/重启用等 manifest 消费面看不到新插件的不一致。
@@ -865,6 +884,10 @@ pub struct PluginWatcher {
     /// 闸2·观测：热发现校验结果收口（boot 已收口全量；此处补热发现新插件的
     /// 契约状态）。None = 不记录（测试/旧行为）。
     contract_states: Option<Arc<crate::contract::ContractLedger>>,
+    /// L1 启用集合共享句柄（`AppState.enabled_plugin_ids`）：热发现注册的新插件
+    /// 即时并入——sessions thread_fields contributes 与 domain_event 点对点投递
+    /// 随热发现生效。None = 不同步（测试/旧行为，要等 PUT enabled 或重启）。
+    enabled_ids: Option<Arc<tokio::sync::RwLock<HashSet<String>>>>,
     debounce: Duration,
     poll_interval: Duration,
 }
@@ -889,6 +912,7 @@ impl PluginWatcher {
             enablement: None,
             profile_reload_root: None,
             contract_states: None,
+            enabled_ids: None,
             debounce: DEFAULT_DEBOUNCE,
             poll_interval: DEFAULT_POLL_INTERVAL,
         }
@@ -948,6 +972,17 @@ impl PluginWatcher {
         self
     }
 
+    /// 注入 L1 启用集合共享句柄：热发现注册的新插件即时并入（语义对齐
+    /// `PUT /plugins/{id}/enabled` 的集合更新），thread_fields / domain_event
+    /// 面随热发现生效，无需 re-enable 或重启。
+    pub fn with_enabled_ids(
+        mut self,
+        enabled: Arc<tokio::sync::RwLock<HashSet<String>>>,
+    ) -> Self {
+        self.enabled_ids = Some(enabled);
+        self
+    }
+
     /// 自定义防抖窗口（测试用短值加速）。
     pub fn with_debounce(mut self, debounce: Duration) -> Self {
         self.debounce = debounce;
@@ -982,6 +1017,7 @@ impl PluginWatcher {
             enablement,
             profile_reload_root,
             contract_states,
+            enabled_ids,
             debounce,
             poll_interval,
         } = self;
@@ -1058,6 +1094,11 @@ impl PluginWatcher {
                     }
                 };
                 sync_count_task.fetch_add(1, Ordering::Relaxed);
+                // 热发现注册的新插件并入 L1 启用集合（thread_fields /
+                // domain_event 面随热发现生效）。
+                if let Some(enabled) = enabled_ids.as_ref() {
+                    merge_report_into_enabled_ids(&report, enabled).await;
+                }
                 if !report.is_empty() || !report.drifted_plugins.is_empty() {
                     info!(
                         target: "plugin_watcher",
@@ -1707,6 +1748,19 @@ mod tests {
         assert!(auto_restart_env_enabled(Some("yes".to_string())));
         assert!(!auto_restart_env_enabled(Some("0".to_string())));
         assert!(!auto_restart_env_enabled(Some(" 0 ".to_string())));
+    }
+
+    /// 热发现注册的新插件并入 L1 启用集合（thread_fields / domain_event 面随热发现生效）。
+    #[tokio::test]
+    async fn merge_report_extends_enabled_ids() {
+        let enabled = Arc::new(tokio::sync::RwLock::new(HashSet::new()));
+        let mut report = SyncReport::default();
+        merge_report_into_enabled_ids(&report, &enabled).await;
+        assert!(enabled.read().await.is_empty(), "空报告不动集合");
+
+        report.new_plugin_ids = vec!["hot_new".to_string()];
+        merge_report_into_enabled_ids(&report, &enabled).await;
+        assert!(enabled.read().await.contains("hot_new"));
     }
 
     /// 触发决策：enabled + hook → 调用；enabled=false / 无 hook → 不调用。

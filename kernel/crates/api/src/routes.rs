@@ -59,7 +59,8 @@ pub struct SchemaResponse {
 /// 应用状态——通过 Axum State 共享。
 ///
 /// 集成插件系统后，持有能力注册表、管道引擎以及 0.2 引擎所需的运行期资源
-/// （pipeline_config / step_library / invoker / store / plugin_ids / project_root）。
+/// （pipeline_config / step_library / invoker / store / project_root）。已知插件
+/// id 集合不在此快照——经 `manifests` 共享存储现读（watcher 热发现即时可见）。
 #[derive(Clone)]
 pub struct AppState {
     pub config: serde_json::Value,
@@ -84,8 +85,6 @@ pub struct AppState {
     /// 与 `store`（trait object）互补：`store` 走业务语义方法，`db` 走表驱动动态访问。
     /// 构造处由 `with_db` 注入；None = 统一数据接口不可用（返回 503 语义的 400）。
     pub db: Option<Arc<agentos_engine::SqliteStore>>,
-    /// 已知插件 id 集合（命中规则③判定 + 启动期重名检测）
-    pub plugin_ids: Arc<std::collections::HashSet<String>>,
     /// 项目根目录（`{{path:...}}` 模板解析基准 + agent 配置加载基准）
     pub project_root: Option<PathBuf>,
     /// P2：会话协调器（连接注册表 / 事件总线 / 重放缓冲）。None = 降级 echo。
@@ -148,7 +147,6 @@ impl AppState {
             invoker: None,
             store: None,
             db: None,
-            plugin_ids: Arc::new(std::collections::HashSet::new()),
             project_root: None,
             enabled_plugin_ids: Arc::new(RwLock::new(std::collections::HashSet::new())),
             session: None,
@@ -178,7 +176,6 @@ impl AppState {
             invoker: None,
             store: None,
             db: None,
-            plugin_ids: Arc::new(std::collections::HashSet::new()),
             project_root: None,
             enabled_plugin_ids: Arc::new(RwLock::new(std::collections::HashSet::new())),
             session: None,
@@ -197,7 +194,7 @@ impl AppState {
     /// 构建集成了插件系统的 AppState。
     ///
     /// 注意：旧的 `with_plugins(manifests, registry, engine)` 三参签名扩展为含
-    /// pipeline_config / step_library / invoker / store / plugin_ids / project_root 的多参形式，
+    /// pipeline_config / step_library / invoker / store / project_root 的多参形式，
     /// 以便 chat 端点直接构造 [`agentos_engine::PipelineExecutor`]。
     #[allow(clippy::too_many_arguments)]
     pub fn with_plugins(
@@ -207,7 +204,6 @@ impl AppState {
         step_library: Arc<StepLibrary>,
         invoker: Arc<dyn PluginInvoker>,
         store: Arc<dyn StorageBackend>,
-        plugin_ids: std::collections::HashSet<String>,
         project_root: PathBuf,
         enabled_plugin_ids: std::collections::HashSet<String>,
     ) -> Self {
@@ -244,7 +240,6 @@ impl AppState {
             invoker: Some(invoker),
             store: Some(store),
             db: None,
-            plugin_ids: Arc::new(plugin_ids),
             project_root: Some(project_root),
             enabled_plugin_ids: Arc::new(RwLock::new(enabled_plugin_ids)),
             session: None,

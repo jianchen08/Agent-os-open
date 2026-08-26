@@ -530,6 +530,19 @@ fn compute_config_fingerprint(config_root: &std::path::Path) -> u64 {
     hasher.finish()
 }
 
+/// 已知插件 id 的**活集合**：从共享 manifests store 现读（watcher 热发现的
+/// 增量合并即时可见），供管道编译的命中规则③与 executor 的 step 解析使用——
+/// 新插件热注册后，管道 YAML 引用其 id 即可编译解析，无需重启内核。
+async fn live_plugin_ids(state: &AppState) -> std::collections::HashSet<String> {
+    state
+        .manifests
+        .read()
+        .await
+        .iter()
+        .map(|m| m.id.clone())
+        .collect()
+}
+
 /// Pull 热加载：按需重载并**编译**管道配置（G10 生产路径）。
 ///
 /// 每次 `process_via_engine` 执行前调用。返回本次执行应使用的
@@ -544,7 +557,7 @@ fn compute_config_fingerprint(config_root: &std::path::Path) -> u64 {
 /// 快照语义：在途 run 持调用时拿到的 `Arc` 跑完，新 run 取新产物——热重载对
 /// 正在执行的管道零影响。失败安全：任何 IO/解析/编译错误都回退到旧产物，
 /// 绝不因热重载让 chat 不可用。
-fn maybe_reload_compiled_pipeline(
+async fn maybe_reload_compiled_pipeline(
     state: &AppState,
     config_root: &std::path::Path,
 ) -> Arc<agentos_engine::compiler::CompiledPipeline> {
@@ -589,7 +602,7 @@ fn maybe_reload_compiled_pipeline(
 
     // 指纹变化 → 重新加载 + 校验 + 编译（G10：when AST / 引用 / 环在加载期暴露）
     info!("Pipeline config changed on disk, reloading + recompiling...");
-    let known_ids: std::collections::HashSet<String> = state.plugin_ids.iter().cloned().collect();
+    let known_ids = live_plugin_ids(state).await;
     let recompiled = load_and_compile(config_root, &known_ids);
     let new_compiled = match recompiled {
         Ok(c) => {
@@ -1359,12 +1372,13 @@ async fn stage_execute(
 
     // ── Pull 热加载（在 project_root 被 move 给 executor 之前算出 config_root）──
     let config_root = project_root.join("config");
-    let compiled = maybe_reload_compiled_pipeline(state, &config_root);
+    let compiled = maybe_reload_compiled_pipeline(state, &config_root).await;
+    let known_ids = live_plugin_ids(state).await;
     let executor = agentos_engine::PipelineExecutor::new(
         invoker,
         project_root,
         tenant,
-        state.plugin_ids.iter().cloned(),
+        known_ids.iter().cloned(),
         store.clone(),
         run_id.clone(),
         branch_id,
@@ -2613,6 +2627,68 @@ mod tests {
         }
     }
 
+    /// 测试用最小 manifest（serde 默认填可选字段，与 plugin_watcher 测试同构）。
+    fn mk_manifest_json(id: &str) -> agentos_core::traits::PluginManifest {
+        serde_json::from_value(serde_json::json!({
+            "id": id, "name": id, "version": "1.0.0",
+            "plugin_type": "pipeline", "language": "python",
+            "host_type": "sidecar", "entry": "x", "capabilities": {},
+        }))
+        .expect("valid manifest")
+    }
+
+    /// live_plugin_ids 反映 manifests store 的运行期变化（watcher 热发现合并后立即可见）。
+    #[tokio::test]
+    async fn live_plugin_ids_reflects_manifests_store() {
+        let mut state = AppState::new();
+        assert!(live_plugin_ids(&state).await.is_empty());
+        state
+            .manifests
+            .write()
+            .await
+            .push(mk_manifest_json("late_plugin"));
+        assert!(live_plugin_ids(&state).await.contains("late_plugin"));
+    }
+
+    /// 管道引用"启动后才热发现"的插件能编译成功——已知插件面取自 manifests store
+    /// 而非启动快照，新插件热注册后无需重启即可作为管道 step。
+    #[tokio::test]
+    async fn hot_reload_compiles_step_referencing_plugin_discovered_after_boot() {
+        let yaml = "name: t\nloop_bodies:\n  - id: main\n    steps:\n      - id: one\n        steps:\n          - late_plugin\n";
+        let write_cfg = |root: &std::path::Path| {
+            let cfg = root.join("config").join("pipelines");
+            std::fs::create_dir_all(&cfg).unwrap();
+            std::fs::write(cfg.join("autonomous.yaml"), yaml).unwrap();
+            root.join("config")
+        };
+
+        // 场景 A：manifests 未含插件 → 未知引用编译失败，降级空管道。
+        let root_a =
+            std::env::temp_dir().join(format!("hr_a_{}", uuid::Uuid::new_v4().simple()));
+        let config_a = write_cfg(&root_a);
+        let state_a = AppState::new();
+        let compiled_a = maybe_reload_compiled_pipeline(&state_a, &config_a).await;
+        assert!(
+            compiled_a.bodies.is_empty(),
+            "未知插件引用应编译失败并降级空管道"
+        );
+
+        // 场景 B：同 YAML，manifests store 已含该插件（热发现合并后）→ 编译成功。
+        let root_b =
+            std::env::temp_dir().join(format!("hr_b_{}", uuid::Uuid::new_v4().simple()));
+        let config_b = write_cfg(&root_b);
+        let mut state_b = AppState::new();
+        state_b.manifests = Arc::new(tokio::sync::RwLock::new(vec![mk_manifest_json(
+            "late_plugin",
+        )]));
+        let compiled_b = maybe_reload_compiled_pipeline(&state_b, &config_b).await;
+        assert_eq!(
+            compiled_b.bodies.len(),
+            1,
+            "热发现后的插件应可作为管道 step 编译"
+        );
+    }
+
     /// 构造带 store + mock invoker 的 AppState（enable_session 以启用 registry 路径）。
     /// 创建临时 config 目录 + autonomous.yaml（引用 mock LLM 插件），使
     /// maybe_reload_pipeline_configs 能加载真实配置（否则 load_pipeline_config
@@ -2667,9 +2743,10 @@ mod tests {
             checkpoint: Default::default(),
         });
         state.step_library = Arc::new(agentos_core::types::StepLibrary::default());
-        state.plugin_ids = Arc::new(std::collections::HashSet::from([
-            "mock_llm_core".to_string()
-        ]));
+        // 已知插件面 = 共享 manifests store（live_plugin_ids 现读，与热发现语义一致）
+        state.manifests = Arc::new(tokio::sync::RwLock::new(vec![mk_manifest_json(
+            "mock_llm_core",
+        )]));
         (state, invoker, store, sqlite)
     }
 
@@ -3174,9 +3251,10 @@ mod tests {
             checkpoint: Default::default(),
         });
         state.step_library = Arc::new(agentos_core::types::StepLibrary::default());
-        state.plugin_ids = Arc::new(std::collections::HashSet::from([
-            "mock_llm_core".to_string()
-        ]));
+        // 已知插件面 = 共享 manifests store（live_plugin_ids 现读，与热发现语义一致）
+        state.manifests = Arc::new(tokio::sync::RwLock::new(vec![mk_manifest_json(
+            "mock_llm_core",
+        )]));
 
         let pipe = "pipe_frank";
         let thread = "thread_frank";
