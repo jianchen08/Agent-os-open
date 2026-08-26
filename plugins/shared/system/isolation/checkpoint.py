@@ -221,10 +221,13 @@ class CheckpointManager:
                 )
                 return False
 
-        # 恢复文件
+        # 恢复文件（目标路径语义对齐 create：先 workspace 下解析，再回退 project_root）
+        workspace_path = self.project_root / checkpoint.workspace
         restored_count = 0
         for file_record in checkpoint.files:
-            original_file = self.project_root / file_record.original_path
+            original_file = workspace_path / file_record.original_path
+            if not original_file.parent.exists():
+                original_file = self.project_root / file_record.original_path
             backup_file = checkpoint_path / file_record.backup_path
 
             if backup_file.exists():
