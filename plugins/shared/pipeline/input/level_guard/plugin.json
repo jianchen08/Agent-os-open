@@ -16,5 +16,6 @@
     ]
   },
   "permissions": {},
-  "priority": 50
+  "priority": 50,
+  "host_group": "light"
 }

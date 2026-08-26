@@ -1,0 +1,13 @@
+[project]
+name = "agentos-cohost-host"
+version = "1.0.0"
+description = "Lingxi AgentOS co-hosting host base — shared venv for light group members (方案 §4.7)"
+requires-python = ">=3.11"
+dependencies = [
+    "agentos-plugin-sdk>=0.2.0",
+]
+
+# 本地 SDK 源映射（editable，与成员插件 pyproject 同轨）：
+# 合宿宿主加载成员依赖并集——light 准入已排除重依赖，并集 = SDK + 标准库级别。
+[tool.uv.sources]
+agentos-plugin-sdk = { path = "../../sdk", editable = true }

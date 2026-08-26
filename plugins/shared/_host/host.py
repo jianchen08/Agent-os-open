@@ -54,6 +54,11 @@ logger = logging.getLogger(__name__)
 
 # 成员发现扫描的分组目录（plugins/shared/ 下）
 _GROUP_ROOTS: tuple[str, ...] = ("system", "tools", "pipeline")
+# 扫描剪枝目录：每插件的 venv 与 node_modules 等重型目录不进索引（plugin.json
+# 只存在于插件目录根）；junction/符号链接目录也不进入（避免跟随外部仓库循环遍历）。
+_SCAN_PRUNE_DIRS: frozenset[str] = frozenset(
+    {".venv", "node_modules", "__pycache__", ".git", "target", "dist", "build"}
+)
 # 成员 server.py 在 sys.modules 的唯一模块名前缀（避免成员间 "server" 槽位互踩）
 _MEMBER_MODULE_PREFIX = "_cohost_member_"
 # watchdog：心跳停滞判定阈值默认值，环境变量 AGENTOS_HOST_WATCHDOG_SECS 可覆盖
@@ -120,13 +125,25 @@ def _scan_plugin_dirs(shared_root: Path) -> tuple[dict[str, Path], dict[str, Pat
         group_root = shared_root / group
         if not group_root.is_dir():
             continue
-        for manifest_path in sorted(group_root.rglob("plugin.json")):
-            plugin_dir = manifest_path.parent
+        # os.walk(followlinks=False) + 目录剪枝：不跟随目录 junction/符号链接，
+        # 跳过 .venv/node_modules 等重型目录——plugins/shared 下有指向外部仓库的
+        # junction（dsh_adapter/runtime/extra-tools 的 node_modules peer 装载区，
+        # rglob 曾实测卡死）且 97 插件各带 venv，全树扫描必须剪链+剪枝。
+        for root_dir, dirs, filenames in os.walk(group_root, followlinks=False):
+            dirs[:] = sorted(
+                d
+                for d in dirs
+                if d not in _SCAN_PRUNE_DIRS
+                and not os.path.islink(os.path.join(root_dir, d))
+            )
+            if "plugin.json" not in filenames:
+                continue
+            plugin_dir = Path(root_dir)
             if not (plugin_dir / "server.py").is_file():
                 continue
             by_dir_name[plugin_dir.name] = plugin_dir
             try:
-                manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+                manifest = json.loads((plugin_dir / "plugin.json").read_text(encoding="utf-8"))
             except (OSError, json.JSONDecodeError):
                 continue
             manifest_id = manifest.get("id") if isinstance(manifest, dict) else None

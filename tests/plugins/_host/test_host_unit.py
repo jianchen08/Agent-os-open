@@ -8,6 +8,7 @@
 
 from __future__ import annotations
 
+import os
 import time
 from pathlib import Path
 
@@ -156,6 +157,47 @@ class TestMemberDiscovery:
         (broken_dir / "server.py").write_text("plugin = None\n", encoding="utf-8")
         by_manifest, by_dir = host._scan_plugin_dirs(shared_tree)
         assert host._resolve_member_dir("corrupt", by_manifest, by_dir) == broken_dir
+
+    def test_venv_and_node_modules_pruned_from_scan(self, shared_tree: Path) -> None:
+        """重型目录（.venv/node_modules/__pycache__）不进扫描索引。
+
+        真实 plugins/shared 下每插件带 .venv、dsh_adapter 带 node_modules peer
+        装载区，全树扫描必须剪枝（卡死回归测试：曾因 rglob 跟随 junction 遍历
+        外部仓库实测挂起）。
+        """
+        venv_plugin = shared_tree / "tools" / "venv_holder"
+        venv_plugin.mkdir(parents=True)
+        (venv_plugin / "plugin.json").write_text('{"id": "venv_holder"}', encoding="utf-8")
+        (venv_plugin / "server.py").write_text("plugin = None\n", encoding="utf-8")
+        (venv_plugin / ".venv").mkdir()
+        (venv_plugin / ".venv" / "plugin.json").write_text(
+            '{"id": "fake_nested"}', encoding="utf-8"
+        )
+        (venv_plugin / "node_modules").mkdir()
+        (venv_plugin / "node_modules" / "plugin.json").write_text(
+            '{"id": "fake_nested2"}', encoding="utf-8"
+        )
+        by_manifest, by_dir = host._scan_plugin_dirs(shared_tree)
+        assert host._resolve_member_dir("venv_holder", by_manifest, by_dir) == venv_plugin
+        assert host._resolve_member_dir("fake_nested", by_manifest, by_dir) is None
+        assert host._resolve_member_dir("fake_nested2", by_manifest, by_dir) is None
+
+    def test_symlink_dir_not_followed(self, shared_tree: Path) -> None:
+        """符号链接目录不进入扫描（junction 循环剪链：rglob 曾实测卡死）。"""
+        if not hasattr(os, "symlink"):
+            pytest.skip("平台无 symlink")
+        outside = shared_tree.parent / "outside_repo"
+        outside.mkdir()
+        (outside / "plugin.json").write_text('{"id": "outside_id"}', encoding="utf-8")
+        (outside / "server.py").write_text("plugin = None\n", encoding="utf-8")
+        link_dir = shared_tree / "system" / "link_holder"
+        link_dir.mkdir()
+        try:
+            os.symlink(outside, link_dir / "linked", target_is_directory=True)
+        except OSError:
+            pytest.skip("symlink 创建失败（Windows 权限）")
+        by_manifest, by_dir = host._scan_plugin_dirs(shared_tree)
+        assert host._resolve_member_dir("outside_id", by_manifest, by_dir) is None
 
 
 # ── 成员加载与 fail-fast ─────────────────────────────────
