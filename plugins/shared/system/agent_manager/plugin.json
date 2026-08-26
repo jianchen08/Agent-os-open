@@ -113,7 +113,7 @@
       {
         "id": "agent_manager_agents",
         "title": "智能体",
-        "icon": "person",
+        "icon": "👤",
         "space": "workspace",
         "slot": "activity-bar",
         "order": 30,

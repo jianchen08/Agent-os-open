@@ -46,8 +46,11 @@ plugins:
     enabled: false
   visual_customization_demo:
     enabled: false
+  # widget 化全特性演示台：前端契约测试（WidgetDemo.plugin.test.tsx）直接读
+  # plugin.json 文件自持验证，不依赖运行态；按"界面不留 demo、禁用而非删代码"
+  # 裁定随其余演示插件一并禁用（侧边栏"Widget 演示"入口随之消失）。
   widget_demo:
-    enabled: true
+    enabled: false
   task_form:
     enabled: true
   dsh_adapter:
