@@ -4,7 +4,7 @@
 > 具体写法见 [sidecar（Python）](plugin-sidecar-python.md) / [native（Rust）](plugin-native-rust.md) /
 > [外部 MCP](plugin-external-mcp.md) 分篇。manifest 全字段见 [docs/plugin-protocol.md](../plugin-protocol.md)。
 
-**一切皆插件**：内核只是执行基座（管道解释执行、能力注册表、插件发现/装载/调用、存储、会话/租户/HTTP 基础设施），不含业务能力——LLM 调用、记忆、评估、审批、触发器、通道、主题、乃至 Agent 配置的加载本身，都以插件承载（能力→插件对照表见 [ARCHITECTURE.md 设计哲学](../ARCHITECTURE.md#1-一切皆插件everything-is-a-plugin)）。改任何业务行为 = 加/改插件或配置，不动内核。
+**一切皆插件**：内核只是执行基座（管道解释执行、能力注册表、插件发现/装载/调用、存储、会话/租户/HTTP 基础设施），不含业务能力——LLM 调用、记忆、评估、审批、触发器、通道、主题、乃至 Agent 配置的加载本身，都以插件承载（能力→插件对照表与"为什么一切皆插件"六条动因见 [ARCHITECTURE.md 设计哲学](../ARCHITECTURE.md#1-一切皆插件everything-is-a-plugin)：自进化落地机制、改动半径分离、故障隔离、语言生态自由、统一契约、治理单点）。改任何业务行为 = 加/改插件或配置，不动内核。
 
 ## 1. 插件类型（plugin_type）与目录
 
