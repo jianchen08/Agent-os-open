@@ -291,6 +291,100 @@ async fn regenerate_missing_thread_id_returns_error() {
 }
 
 #[tokio::test]
+async fn regenerate_default_noop_dispatcher_is_handled() {
+    // trait 默认实现（no-op）覆盖：未实现 dispatch_regenerate 的 dispatcher
+    // 收到 regenerate → Handled（向后兼容：旧实现不受新消息类型影响）
+    struct NoRegenerate;
+    #[async_trait]
+    impl PipelineDispatcher for NoRegenerate {
+        async fn dispatch_user_input(
+            &self,
+            _: &str,
+            _: &str,
+            _: &str,
+            _: &str,
+            _: &str,
+            _: Option<&serde_json::Value>,
+            _: Option<&serde_json::Value>,
+            _: &str,
+            _: &str,
+            _: PendingInputSource,
+        ) -> Result<(), String> {
+            Ok(())
+        }
+        async fn dispatch_interaction_response(
+            &self,
+            _: &str,
+            _: &str,
+            _: &serde_json::Value,
+        ) -> Result<(), String> {
+            Ok(())
+        }
+        async fn dispatch_stop(&self, _: &str) -> Result<(), String> {
+            Ok(())
+        }
+        // dispatch_regenerate 用 trait 默认实现（no-op）
+    }
+    let router = InboundRouter::new(Arc::new(NoRegenerate));
+    let msg = serde_json::json!({
+        "type": "regenerate",
+        "thread_id": "thread-1",
+        "user_message_id": "mc_x",
+    });
+    let outcome = router.route(&msg, "user-A").await;
+    assert_eq!(outcome, RouteOutcome::Handled, "默认实现应放行");
+}
+
+#[tokio::test]
+async fn regenerate_dispatcher_failure_returns_error() {
+    // route_regenerate 的 Err 分支：dispatcher 报错 → RouteOutcome::Error 透传
+    struct FailingRegenerate;
+    #[async_trait]
+    impl PipelineDispatcher for FailingRegenerate {
+        async fn dispatch_user_input(
+            &self,
+            _: &str,
+            _: &str,
+            _: &str,
+            _: &str,
+            _: &str,
+            _: Option<&serde_json::Value>,
+            _: Option<&serde_json::Value>,
+            _: &str,
+            _: &str,
+            _: PendingInputSource,
+        ) -> Result<(), String> {
+            Ok(())
+        }
+        async fn dispatch_interaction_response(
+            &self,
+            _: &str,
+            _: &str,
+            _: &serde_json::Value,
+        ) -> Result<(), String> {
+            Ok(())
+        }
+        async fn dispatch_stop(&self, _: &str) -> Result<(), String> {
+            Ok(())
+        }
+        async fn dispatch_regenerate(
+            &self,
+            _: &str,
+            _: &str,
+            _: &str,
+            _: &str,
+            _: Option<&str>,
+        ) -> Result<(), String> {
+            Err("boom".into())
+        }
+    }
+    let router = InboundRouter::new(Arc::new(FailingRegenerate));
+    let msg = serde_json::json!({"type": "regenerate", "thread_id": "thread-1"});
+    let outcome = router.route(&msg, "user-A").await;
+    assert!(matches!(outcome, RouteOutcome::Error(_)));
+}
+
+#[tokio::test]
 async fn heartbeat_returns_heartbeat_ack_outcome() {
     let (router, _dispatcher) = router();
     let msg = serde_json::json!({"type": "heartbeat"});
