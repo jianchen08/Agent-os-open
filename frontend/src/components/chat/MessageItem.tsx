@@ -15,6 +15,7 @@ import {
 } from '@/assets/icons'
 import { memo, useEffect, useRef, useState } from 'react'
 import ActivityCard from './ActivityCard'
+import { ErrorSourceBadge } from '@/components/shared/ErrorSourceBadge'
 import { ImageGallery } from '@/components/media/ImageGallery'
 import { LobeChatMarkdown } from '@/components/chat/LobeChatMarkdown'
 import { Avatar, AvatarFallback } from '@/components/ui/avatar'
@@ -534,6 +535,7 @@ export const MessageItem = memo(function MessageItem({
                         <span className="text-sm text-status-error">
                           {message.status === 'failed' ? '生成已中断' : '生成失败，请重试'}
                         </span>
+                        {message.error && <ErrorSourceBadge source={message.error.source} />}
                       </div>
                     ) : _displayFallback ? (
                       <div className="whitespace-pre-wrap break-words text-sm">{_displayFallback}</div>

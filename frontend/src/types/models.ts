@@ -156,8 +156,8 @@ export interface MessageToolCall {
   result?: unknown
   /** 结构化完整结果数据（后端 tool_result 事件的 result_data），供工具卡片渲染 diff 等 */
   resultData?: unknown
-  /** 错误信息 */
-  error?: string
+  /** 错误信息（统一错误信封对象或旧形态字符串，渲染端提取 message） */
+  error?: string | import('./api').ErrorEnvelope
   /** 开始时间 */
   started_at?: string
   /** 结束时间 */
@@ -293,6 +293,8 @@ export interface Message {
    *  mergeConsecutiveAssistantMessages 据此注入 tool_call part 的 resultData。 */
   toolResultData?: unknown
   toolError?: string
+  /** 统一错误信封（stream_error 事件落消息；source 渲染来源标签，retryable 驱动重试） */
+  error?: import('./api').ErrorEnvelope
   durationMs?: number
   /** 工具执行所在容器任务 ID（envelope metadata.container_task_id 投影）。 */
   containerTaskId?: string

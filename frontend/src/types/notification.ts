@@ -58,6 +58,8 @@ export interface NotificationItem {
   autoDismissMs?: number
   /** 来源标识（如 pipeline_id，用于关联流式事件） */
   sourceId?: string
+  /** 错误来源（统一错误模型 config/error_codes.json sources.enum，渲染来源标签） */
+  errorSource?: 'kernel' | 'plugin' | 'llm' | 'infra' | 'frontend'
 }
 
 /** 通知中心折叠状态 */

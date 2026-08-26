@@ -209,6 +209,16 @@ apiClient.interceptors.response.use(
         error.code ||
         'UNKNOWN_ERROR',
       message: errorMessage,
+      // 统一错误信封（config/error_codes.json 单一真值源）：source 供渲染
+      // 来源标签，retryable 驱动重试按钮；旧后端无这些字段时保持 undefined。
+      source:
+        typeof responseData?.error?.source === 'string'
+          ? (responseData.error.source as ApiError['source'])
+          : undefined,
+      retryable:
+        typeof responseData?.error?.retryable === 'boolean'
+          ? responseData.error.retryable
+          : undefined,
       details: error.response?.data,
     }
 
@@ -294,6 +304,8 @@ apiClient.interceptors.response.use(
         {
           code: apiError.code,
           details: apiError.details,
+          // 统一错误信封来源（config/error_codes.json）：通知中心渲染来源标签
+          source: apiError.source,
         },
       )
     }

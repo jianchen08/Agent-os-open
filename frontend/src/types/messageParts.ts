@@ -47,7 +47,8 @@ export interface ToolCallPart {
   /** 结构化完整结果数据（后端 tool_result 事件的 result_data），供工具卡片渲染 diff 等；
    *  result 字段为截断预览字符串，resultData 携带完整结构 */
   resultData?: unknown
-  error?: string
+  /** 错误信息（统一错误信封对象或旧形态字符串，渲染端提取 message） */
+  error?: string | import('./api').ErrorEnvelope
   durationMs?: number
   /** 仅历史消息（API 映射）使用；流式新建的 part 不赋值，渲染按数组顺序 */
   sequence?: number

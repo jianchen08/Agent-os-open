@@ -108,6 +108,34 @@ describe('client.ts 内核错误信封 {error:{code,message}} 解析（2026-08-2
     expect(context.code).toBe('ENGINE_FAILED')
   })
 
+  it('统一错误信封 source/retryable 透传（config/error_codes.json 单一真值源）', async () => {
+    const handler = getResponseErrorHandler()
+    await expect(
+      handler(
+        makeError(500, '/api/v1/sessions/abc', {
+          error: {
+            code: 'INTERNAL_ERROR',
+            message: 'io error: 磁盘写入失败',
+            source: 'kernel',
+            retryable: true,
+          },
+        }),
+      ),
+    ).rejects.toBeDefined()
+    const [, , , context] = reportErrorMock.mock.calls[0]
+    expect(context.code).toBe('INTERNAL_ERROR')
+    expect(context.source).toBe('kernel')
+  })
+
+  it('旧后端无 source 字段时保持 undefined（兼容不炸）', async () => {
+    const handler = getResponseErrorHandler()
+    await expect(
+      handler(makeError(400, '/api/v1/sessions', { error: { code: '400', message: '参数校验失败' } })),
+    ).rejects.toBeDefined()
+    const [, , , context] = reportErrorMock.mock.calls[0]
+    expect(context.source).toBeUndefined()
+  })
+
   it('非信封格式（{detail}）保持既有解析路径不变', async () => {
     const handler = getResponseErrorHandler()
     await expect(

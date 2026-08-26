@@ -23,6 +23,7 @@ import {
 } from '@/assets/icons'
 import { useEffect, useRef, useState } from 'react'
 import { TextDiffView } from '@/components/approval'
+import { ErrorSourceBadge } from '@/components/shared/ErrorSourceBadge'
 import { MarkdownRenderer } from '@/components/shared/markdown/MarkdownRenderer'
 import { FormWidget } from '@/components/schema/widgets/FormWidget'
 import { DiffBlock, ReadBlock, SearchBlock, TerminalBlock, WebBlock } from '@/components/vendor/dsh'
@@ -928,9 +929,16 @@ const ActivityCard: FC<ActivityCardProps> = ({
 
           {activity.error && (
             <div>
-              <div className="mb-1 text-xs font-medium text-status-error">错误</div>
+              <div className="mb-1 flex items-center gap-1.5">
+                <span className="text-xs font-medium text-status-error">错误</span>
+                {typeof activity.error === 'object' && activity.error !== null && (
+                  <ErrorSourceBadge source={(activity.error as { source?: string }).source} />
+                )}
+              </div>
               <pre className={`rounded bg-status-error/10 p-2 text-xs text-status-error ${TOOL_CONTENT_SCROLL_CLASS}`}>
-                {activity.error}
+                {typeof activity.error === 'object' && activity.error !== null
+                  ? (activity.error as { message?: string }).message ?? JSON.stringify(activity.error)
+                  : activity.error}
               </pre>
             </div>
           )}

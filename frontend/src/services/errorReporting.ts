@@ -174,6 +174,10 @@ class ErrorReportingService {
         priority: isServerError ? 'high' : 'normal',
         category: 'error',
         isBlocking: false,
+        // 统一错误信封来源（config/error_codes.json）：通知中心渲染来源标签。
+        // 取数路径：reportError(apiError) 直接取信封 source；字符串调用方经
+        // context.source 显式传入。
+        errorSource: typeof message === 'object' ? message.source : errorContext.source,
         // 一律自动消失（SERVER 10s / 其余 6s）：瞬时失败（如内核重启窗口）
         // 常驻挂屏会误导用户以为服务持续不可用，且无恢复机制清除。
         autoDismissMs: isServerError ? 10000 : 6000,

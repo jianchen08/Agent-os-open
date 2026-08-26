@@ -150,8 +150,13 @@ export function createStreamEndEvent(messageId: string, threadId: string) {
 
 /**
  * 创建流式输出错误事件
+ * error 支持统一错误信封对象（{code, message, source, retryable}）或旧形态字符串
  */
-export function createStreamErrorEvent(messageId: string, threadId: string, error: string) {
+export function createStreamErrorEvent(
+  messageId: string,
+  threadId: string,
+  error: string | { code: string; message: string; source?: string; retryable?: boolean },
+) {
   return {
     type: 'stream_error' as const,
     message_id: messageId,

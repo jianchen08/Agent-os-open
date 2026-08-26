@@ -56,4 +56,28 @@ describe('errorReporting 通知中心提示（2026-08-22）', () => {
     expect(n.priority).toBe('normal')
     expect(n.autoDismissMs).toBe(6000)
   })
+
+  it('ApiError 信封携带 source 时通知带来源标签（统一错误模型）', () => {
+    reportError({
+      code: 'INTERNAL_ERROR',
+      message: 'io error: 磁盘写入失败',
+      source: 'kernel',
+    })
+    const n = addNotificationMock.mock.calls[0][0]
+    expect(n.errorSource).toBe('kernel')
+  })
+
+  it('字符串调用方经 context.source 显式传入来源（通知中心渲染标签）', () => {
+    reportError('工具执行失败', ErrorType.SERVER, ErrorSeverity.ERROR, {
+      source: 'plugin',
+    })
+    const n = addNotificationMock.mock.calls[0][0]
+    expect(n.errorSource).toBe('plugin')
+  })
+
+  it('无来源信息时 errorSource 为 undefined（旧后端兼容，渲染未知标）', () => {
+    reportError('会话加载失败', ErrorType.SERVER, ErrorSeverity.ERROR)
+    const n = addNotificationMock.mock.calls[0][0]
+    expect(n.errorSource).toBeUndefined()
+  })
 })

@@ -25,6 +25,7 @@ import {
 } from '@/assets/icons'
 import { useCallback } from 'react'
 import { Button } from '@/components/ui/button'
+import { ErrorSourceBadge } from '@/components/shared/ErrorSourceBadge'
 import { cn } from '@/lib/utils'
 import { PRIORITY_STYLES } from '@/types/notification'
 import { resolveNotificationLayout } from '@/utils/notificationModes'
@@ -187,6 +188,7 @@ export function NotificationItemComponent({
               <span className={cn('text-sm font-semibold', !isRead && style.text)}>
                 {title}
               </span>
+              {notification.errorSource && <ErrorSourceBadge source={notification.errorSource} />}
               {!isRead && (
                 <span className="h-2 w-2 rounded-full bg-primary flex-shrink-0" />
               )}

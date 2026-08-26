@@ -133,7 +133,7 @@ function pickField(
 export interface RenderContext {
   args: SourceData
   result: SourceData
-  error?: string | null
+  error?: string | import('@/types/api').ErrorEnvelope | null
   duration_ms?: number | null
 }
 

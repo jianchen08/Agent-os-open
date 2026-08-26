@@ -326,10 +326,33 @@ export function handleStreamError(eventData: any) {
 
   if (!pipelineId) return
 
+  // 统一错误信封（config/error_codes.json）：error 可能为对象（{code, message,
+  // source, retryable}）或旧形态字符串——提前提取供消息落元数据与通知渲染。
+  const errorMsg = eventData?.data?.error || eventData?.error || '流式响应异常'
+  // error 为对象时提取 message 保留具体信息，不再降级成通用文案（错误透传收口）。
+  const errorText =
+    typeof errorMsg === 'string'
+      ? errorMsg
+      : typeof errorMsg?.message === 'string'
+        ? errorMsg.message
+        : '生成过程中发生错误，请重试'
+
   const messageId = extractMessageId(eventData)
   if (messageId) {
+    // error 为对象时落消息顶层 error 字段（source 渲染来源标签、retryable
+    // 驱动重试）；旧形态字符串不落（渲染端已按 status='error' 展示文案）。
+    const errorEnvelope =
+      typeof errorMsg === 'object' && errorMsg !== null
+        ? {
+            code: typeof errorMsg.code === 'string' ? errorMsg.code : 'UNKNOWN',
+            message: typeof errorMsg.message === 'string' ? errorMsg.message : errorText,
+            source: errorMsg.source,
+            retryable: errorMsg.retryable,
+          }
+        : undefined
     pipelineStore.getState().updateMessage(pipelineId, messageId, {
       status: 'error',
+      ...(errorEnvelope ? { error: errorEnvelope } : {}),
     } as any)
 
     // 将所有 streaming 状态的 part 标记为 done/error
@@ -351,21 +374,17 @@ export function handleStreamError(eventData: any) {
     }
   }
 
-  const errorMsg = eventData?.data?.error || eventData?.error || '流式响应异常'
-  // error 可能为对象（如 {code, message}）——提取 message 保留具体信息，
-  // 不再降级成通用文案（错误透传收口）。
-  const errorText =
-    typeof errorMsg === 'string'
-      ? errorMsg
-      : typeof errorMsg?.message === 'string'
-        ? errorMsg.message
-        : '生成过程中发生错误，请重试'
   useNotificationStore.getState().addNotification({
     title: '流式响应错误',
     message: errorText,
     priority: 'high',
     category: 'error',
     isBlocking: false,
+    // 统一错误信封来源（config/error_codes.json）：通知中心渲染来源标签
+    errorSource:
+      typeof errorMsg === 'object' && errorMsg !== null && typeof errorMsg.source === 'string'
+        ? errorMsg.source
+        : undefined,
   })
 }
 

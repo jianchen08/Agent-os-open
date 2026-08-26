@@ -200,10 +200,35 @@ export interface SendMessageResponse {
 }
 
 /**
+ * 错误来源（与 config/error_codes.json sources.enum 一致，单一真值源）
+ */
+export type ErrorSource = 'kernel' | 'plugin' | 'llm' | 'infra' | 'frontend'
+
+/**
+ * 统一错误信封（REST 与 WS 同构，单一真值源 config/error_codes.json）：
+ * code 为稳定机器码（非 HTTP 状态码），source 供前端渲染来源标签，
+ * retryable 驱动重试按钮，details/request_id 预留（P2 贯通）。
+ */
+export interface ErrorEnvelope {
+  /** 稳定机器码（如 RESOURCE_NOT_FOUND / ENGINE_RUN_FAILED） */
+  code: string
+  /** 人可读文案（后端原文透传不脱敏） */
+  message: string
+  /** 错误来源（内核/插件/LLM/基础设施/前端） */
+  source?: ErrorSource
+  /** 是否可重试 */
+  retryable?: boolean
+  /** 结构化上下文（可选） */
+  details?: unknown
+  /** 日志关联 ID（预留，当前恒 null） */
+  request_id?: string | null
+}
+
+/**
  * API错误响应
  */
-export interface ApiError {
-  /** 错误代码 */
+export interface ApiError extends ErrorEnvelope {
+  /** 错误代码（兼容旧形态：HTTP 状态码字符串或 axios 错误码） */
   code: string
   /** 错误消息 */
   message: string

@@ -15,6 +15,7 @@ import { toast } from '@/components/ui/sonner'
 import { commandDispatcher } from '@/services/schema/commandDispatcher'
 import { getGlobalImagePreviewCallback, getGlobalOpenFileCallback, safeParseResult } from '@/utils/toolCardRegistry'
 import type { ActivityAction, ActivityDetailBlock, DetailContentType } from '@/types/activity'
+import type { ErrorEnvelope } from '@/types/api'
 
 /** 卡片内容块声明（type 与 ActivityCard 现有 contentType 对齐） */
 export interface ChatCardBlockDecl {
@@ -112,7 +113,8 @@ export interface ToolCallContext {
   args?: Record<string, unknown>
   /** 原始结果（字符串会经 safeParseResult 解析 Python dict） */
   result?: unknown
-  error?: string
+  /** 错误信息（统一错误信封对象或旧形态字符串，卡片解释按需取 message） */
+  error?: string | ErrorEnvelope
   duration_ms?: number
   partial_output?: unknown
   /** 所属任务容器 ID（open_file 动作透传给文件打开回调，定位任务工作空间） */
