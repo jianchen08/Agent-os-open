@@ -189,9 +189,9 @@ plugins:
 
 ### 记忆系统
 
-- **情景记忆（EPISODE）**：对话压缩后的记忆，保留要点而非逐轮原文，会话切换不丢失。
-- **语义记忆（SEMANTIC）**：沉淀用户偏好、项目决策、外部知识导入，跨会话可用。
-- **0.2 落位**：记忆服务由 `hindsight_memory` 系统插件承载，LLM 侧经 `memory` 工具读写；管道侧 `pipeline_memory_read` 在 prepare 步按需注入。检索与注入策略由 hindsight 插件自持配置。
+- **承载**：`hindsight_memory` 系统插件——`hindsight.retain`（写入 + 后台抽取沉淀）、`hindsight.recall`（按 query 检索，`memory_type` 自由标签过滤）、`hindsight.reflect` / `hindsight.summarize` / `hindsight.import_document`（文档导入沉淀）等服务。
+- **读写面**：LLM 经 `memory` 工具读写（工具插件转调 hindsight 服务）；管道侧 `pipeline_memory_read` 在 prepare 步把检索结果按需注入上下文。
+- `memory_type` 是 recall 过滤用的自由字符串标签，无固定类型分类。
 
 ### 配置系统
 
