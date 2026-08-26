@@ -62,6 +62,11 @@ export function handleNewMessage(eventData: any) {
       // 权威 id/seq 由对账补正——不驱逐不删除）
       pipelineStore.getState().confirmUserMessage(pipelineId, confirmedCmid)
     }
+  } else if (userRecord?.id) {
+    // 无 cmid 的注入消息（触发器/任务/HTTP，ADR-2026-08-26）：user 权威回传
+    // 补插为 user 气泡——用户可见"给管道发了什么"。按 id 幂等（重复事件不双插）；
+    // 顺序按 sequence 落位（触发器消息出现在 assistant 回复之前，与后端消息序一致）。
+    pipelineStore.getState().ensureInjectedUserMessage(pipelineId, userRecord as never)
   }
 
   const messageId = extractMessageId(eventData)
@@ -100,7 +105,9 @@ export function handleNewMessage(eventData: any) {
     pipelineStore.getState().updateMessage(pipelineId, messageId, {
       content,
       parts: finalParts.length > 0 ? finalParts : undefined,
-      status: 'completed',
+      // 服务端权威 status（new_message 从消息 blob 读取：中断 interrupted /
+      // 错误 error），mapper 缺省 completed——不再无条件覆盖为 completed。
+      status: mapped.status || 'completed',
       sequence: backendSeq ?? existingMsg.sequence,
     } as any)
     return

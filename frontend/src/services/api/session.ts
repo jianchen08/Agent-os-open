@@ -285,6 +285,9 @@ export function mapBackendMessageToMessage(
     content: backendMessage.content,
     timestamp: backendMessage.timestamp,
     agentId: backendMessage.agentId,
+    // 服务端权威 status 透传（中断 interrupted / 错误 error 半截消息；
+    // 正常消息缺省 completed），前端 MessageItem 据此渲染中断/失败态。
+    status: (backendMessage.status || 'completed') as Message['status'],
     metadata: {
       ...backendMessage.metadata,
       ...(backendMessage.agentName ? { agentName: backendMessage.agentName } : {}),

@@ -489,7 +489,9 @@ impl EngineDispatcher {
                         "reasoningContent": fa.get("reasoning_content"),
                         "toolCalls": fa.get("tool_calls").unwrap_or(&serde_json::Value::Null),
                         "timestamp": chrono::Utc::now().to_rfc3339(),
-                        "status": "completed",
+                        // status 从消息 blob 读取：中断/错误半截消息落库时带
+                        // interrupted/error，正常消息缺省 completed（冷热同构）。
+                        "status": message_status_from_blob(&fa),
                         "thread_id": exec_thread,
                     },
                 }),
@@ -907,8 +909,17 @@ async fn resolve_pipeline_id_for_thread(
     thread_id.to_string()
 }
 
+/// new_message 事件 message.status 的取值规则：从消息 blob（final_assistant）
+/// 读取——中断/错误半截消息落库时带 interrupted/error，正常消息缺省 completed。
+fn message_status_from_blob(fa: &serde_json::Value) -> serde_json::Value {
+    fa.get("status")
+        .cloned()
+        .unwrap_or(serde_json::json!("completed"))
+}
+
 #[cfg(test)]
 mod tests {
+    use super::message_status_from_blob;
     use super::resolve_dispatch_agent;
     use super::resolve_pipeline_id_for_thread;
     use agentos_core::traits::StorageBackend;
@@ -1072,6 +1083,22 @@ mod tests {
         let store = Arc::new(mock) as Arc<dyn StorageBackend>;
         resolve_pipeline_id_for_thread(Some(&store), thread_id, frontend_pipeline_id, "tenant-1")
             .await
+    }
+
+    #[test]
+    fn message_status_reads_from_blob() {
+        // blob 带 status（中断/错误半截消息）→ 原样透传
+        let interrupted = serde_json::json!({"role": "assistant", "content": "半截", "status": "interrupted"});
+        assert_eq!(message_status_from_blob(&interrupted), serde_json::json!("interrupted"));
+        let errored = serde_json::json!({"role": "assistant", "content": "x", "status": "error"});
+        assert_eq!(message_status_from_blob(&errored), serde_json::json!("error"));
+    }
+
+    #[test]
+    fn message_status_defaults_to_completed_without_blob_status() {
+        // 正常消息 blob 无 status → completed（既有行为不变）
+        let plain = serde_json::json!({"role": "assistant", "content": "ok"});
+        assert_eq!(message_status_from_blob(&plain), serde_json::json!("completed"));
     }
 
     #[tokio::test]

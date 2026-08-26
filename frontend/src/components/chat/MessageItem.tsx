@@ -499,8 +499,12 @@ export const MessageItem = memo(function MessageItem({
               // 否则只剩头像/时间戳的空气泡，用户看不到"agent 正在等我审批"。
               const _waitingInteraction = isAssistant && hasPendingInteraction
               // 失败/中断消息不能隐藏：stream_error 标记 error 且无内容时，
-              // 隐藏会导致消息凭空消失（错误透传收口）。
-              const _isFailedMessage = message.status === 'error' || message.status === 'failed'
+              // 隐藏会导致消息凭空消失（错误透传收口）；interrupted（服务端
+              // 停止/中断半截消息）同理。
+              const _isFailedMessage =
+                message.status === 'error' ||
+                message.status === 'failed' ||
+                message.status === 'interrupted'
 
               if (
                 !isMessageStreaming &&
@@ -533,7 +537,7 @@ export const MessageItem = memo(function MessageItem({
                       <div className="flex items-center gap-2">
                         <AlertCircle className="h-icon-md w-icon-md text-status-error" />
                         <span className="text-sm text-status-error">
-                          {message.status === 'failed' ? '生成已中断' : '生成失败，请重试'}
+                          {message.status === 'error' ? '生成失败，请重试' : '生成已中断'}
                         </span>
                         {message.error && <ErrorSourceBadge source={message.error.source} />}
                       </div>

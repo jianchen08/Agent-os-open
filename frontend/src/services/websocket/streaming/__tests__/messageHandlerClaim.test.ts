@@ -135,4 +135,41 @@ describe('handleNewMessage 认领', () => {
     expect(user).toBeDefined()
     expect(user?.status).toBe('completed')
   })
+
+  it('服务端 status=interrupted（停止/中断半截消息）→ 前端保持 interrupted 不覆盖 completed', () => {
+    const store = usePipelineMessageStore.getState()
+    // 流式占位（stream_start 已建，半截内容已流出）
+    store.addMessage(PIPELINE, {
+      id: 'a_33333333333333333333333333333333',
+      sessionId: THREAD,
+      role: 'assistant',
+      content: '半截',
+      timestamp: new Date().toISOString(),
+      status: 'streaming',
+    } as never)
+
+    handleNewMessage({
+      data: {
+        pipeline_id: PIPELINE,
+        message_id: 'a_33333333333333333333333333333333',
+        _threadId: THREAD,
+        sequence: 7,
+        content: '半截',
+        message: {
+          id: 'a_33333333333333333333333333333333',
+          role: 'assistant',
+          content: '半截',
+          sequence: 7,
+          timestamp: new Date().toISOString(),
+          status: 'interrupted',
+        },
+      },
+    } as never)
+
+    const msgs = usePipelineMessageStore.getState().getMessages(PIPELINE)
+    const assistant = msgs.find((m) => m.id === 'a_33333333333333333333333333333333')
+    expect(assistant?.status).toBe('interrupted')
+    // 区分度：服务端 error 同样透传（非一律 completed）
+    expect(assistant?.status).not.toBe('completed')
+  })
 })
