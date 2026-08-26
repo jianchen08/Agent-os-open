@@ -1542,7 +1542,7 @@ class KeyPoolAdapter(_BaseLiteLLMAdapter):
         max_retries = len(pool.slots)
         last_exc: Exception | None = None
 
-        from exceptions import KeyPoolExhaustedError  # noqa: PLC0415
+        from exceptions import KeyPoolExhaustedError, LLMKeyUnresolvedError  # noqa: PLC0415
 
         try:
             for attempt in range(max_retries):
@@ -1555,6 +1555,12 @@ class KeyPoolAdapter(_BaseLiteLLMAdapter):
                     attempt + 1,
                     max_retries,
                 )
+                if "${" in slot.api_key:
+                    # fail-closed：占位符未解析（进程环境与 .env 均无值）时，
+                    # 字面量 ${VAR} 作为 key 发往上游只会得到无法排查的 401，
+                    # 发起 HTTP 前直接报配置错误。
+                    slot.release()
+                    raise LLMKeyUnresolvedError(model_str, provider_name, slot.api_key)
                 # 信号量释放：流式路径的真正传输在调用方消费 stream wrapper 期间，
                 # 故 release 推迟到 stream.aclose；非流式 finally 立即 release。
                 # 用 _defer_release 标志区分两条路径。
@@ -1666,10 +1672,30 @@ class KeyPoolAdapter(_BaseLiteLLMAdapter):
         会清除）则自动从 YAML 重建，确保模型配置变更对 KeyPoolAdapter 立即生效。
         """
         from _config_models import get_model_config_loader  # noqa: PLC0415
-        from router_factory import get_or_create_router  # noqa: PLC0415
+        from exceptions import LLMKeyUnresolvedError  # noqa: PLC0415
+        from router_factory import (  # noqa: PLC0415
+            get_key_pool,
+            get_or_create_router,
+            get_provider_for_model,
+        )
 
         model_loader = get_model_config_loader()
         router = get_or_create_router(model_loader)
+
+        # fail-closed：Router 部署烘入的 api_key（模型级优先，回退 provider 槽，
+        # 显式 kwargs 最高）若是未解析占位符，调用前直接报配置错误——同池路径
+        # 契约，占位符发往上游只会得到字面量 key 的 401。
+        model_str = str(kwargs.get("model", ""))
+        model_id = model_str.split("/", 1)[1] if "/" in model_str else model_str
+        provider = get_provider_for_model(model_id)
+        pool = get_key_pool(provider) if provider else None
+        slot_key = (pool.slots[0].api_key or "") if (pool and pool.slots) else ""
+        model_conf = model_loader.get_model_config(model_id)
+        model_key = str((model_conf or {}).get("api_key", "") or "")
+        effective_key = str(kwargs.get("api_key", "") or "") or model_key or slot_key
+        if "${" in effective_key:
+            raise LLMKeyUnresolvedError(model_str, provider, effective_key)
+
         return await router.acompletion(**kwargs)
 
     # aclose 超时上限（引用模块级常量，便于统一调整）。

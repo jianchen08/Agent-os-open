@@ -26,3 +26,22 @@ class KeyPoolExhaustedError(LLMResourceError):
         super().__init__(
             f"KeyPool '{pool_id}' 所有 key 不可用，等待 {timeout:.0f}s 后超时；不可用 key 诊断: {unavailable}"
         )
+
+
+class LLMKeyUnresolvedError(Exception):
+    """模型调用的 api_key 是未解析的 ``${VAR}`` 占位符。
+
+    占位符（进程环境与项目根 .env 双源均无值）发往上游只会得到以字面量
+    ``${VAR}`` 为 key 的鉴权 401，无法排查——发起 HTTP 前抛本错误（fail-closed），
+    携带 model/provider/占位符供定位与配置补全。
+    """
+
+    def __init__(self, model: str, provider: str, placeholder: str) -> None:
+        self.model = model
+        self.provider = provider
+        self.placeholder = placeholder
+        super().__init__(
+            f"模型 {model}（provider={provider or '未知'}）的 API key 未配置："
+            f"占位符 {placeholder} 在进程环境与项目根 .env 中均未解析。"
+            f"请配置该变量后重试（改 .env 需重启内核或触发 sidecar 重载生效）。"
+        )
