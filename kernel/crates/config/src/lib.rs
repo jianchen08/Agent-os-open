@@ -31,7 +31,7 @@ pub mod error;
 pub mod loader;
 pub mod pipeline;
 
-pub use agent_loader::load_agent_into_state;
+pub use agent_loader::{resolve_agent_tool_ids, AgentToolIdsError};
 pub use config_center::{AuditEntry, ConfigCenter, ConfigChangeEvent, ConfigEventType};
 pub use error::ConfigError;
 pub use loader::{CompositePluginYaml, ConfigLoader, StepConfig};

@@ -100,7 +100,6 @@ dependencies = [
 name = "agentos-engine"
 version = "0.2.0"
 dependencies = [
- "agentos-config",
  "agentos-core",
  "agentos-hooks",
  "agentos-invoker",
@@ -143,6 +142,7 @@ dependencies = [
  "chrono",
  "serde_json",
  "thiserror 2.0.18",
+ "tokio",
  "tracing",
 ]
 

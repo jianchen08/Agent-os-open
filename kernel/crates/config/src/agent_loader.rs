@@ -1,49 +1,59 @@
-//! Agent 配置加载器（泛化注入版）。
+//! Agent 配置加载器（tool_ids 窄接口版）。
 //!
-//! 设计依据：docs/working/重要设计/统一配置加载方案.md TDD-6 + 决策 4
+//! 设计依据：docs/working/内核服务与Agent绑定审计_20260826.md 变更#1（双轨收敛）
 //!
-//! 与 `pipeline::load_agent_config`（返回强类型 AgentConfig）互补：
-//! 本模块的 `load_agent_into_state` 把整个 agent yaml 顶层**泛化注入** state，
-//! 不挑字段——加字段不用改内核（解决扩展性问题）。
-//! 走 `ConfigCenter.load()`（享受 mtime 缓存 + 失败回滚 + 审计）。
+//! agent 全量配置的唯一事实源是 context_build 插件
+//! （plugins/shared/pipeline/input/context_build/plugin.py 自持加载）；内核不再
+//! 把整个 agent yaml 泛化注入 state，只保留"按 agent_id 解析 tool_ids 做工具面
+//! 过滤"的窄接口（K10：工具面是执行时契约，不是 agent 配置）。
+//! 走 `ConfigCenter.load()`（mtime 缓存 + 失败回滚 + 审计）。
 
 use crate::config_center::ConfigCenter;
 use crate::pipeline::find_agent_yaml;
-use serde_json::Value;
 use tracing::warn;
 
-/// 把 agent yaml 的所有顶层字段注入 state（泛化注入）。
+/// [`resolve_agent_tool_ids`] 的失败原因（K5 可见性：配置断链不得静默跳过）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AgentToolIdsError {
+    /// agent yaml 文件不存在（agent_id 打错字 / 文件未建）
+    Missing,
+    /// yaml 解析失败或顶层非对象（配置损坏）
+    Corrupt,
+}
+
+impl std::fmt::Display for AgentToolIdsError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Missing => write!(f, "agent yaml not found"),
+            Self::Corrupt => write!(f, "agent yaml parse failed or top-level is not an object"),
+        }
+    }
+}
+
+/// 按 `agent_id` 从 `config/agents/**/<agent_id>.yaml` 解析 `tool_ids`（K10 窄接口）。
 ///
 /// 走 ConfigCenter.load()（mtime 缓存 + 失败回滚 + 审计），用 find_agent_yaml
 /// 递归定位（支持 agents/main/xxx.yaml 分类子目录）。
 ///
-/// 注入语义：
-/// - 普通字段：`or_insert`（state 已有值不覆盖，调用方优先）
-/// - `core_plugin`：`insert` 直接覆盖（agent 能切换核心插件）
-///
-/// 失败可见性（K5）：文件不存在 / 解析失败 / 顶层非对象 → warn +
-/// state 标记 `_agent_config_missing = true`（诊断出口可见——不得静默跳过，
-/// agent_id 打错字/yaml 写坏会被下游默认提示词 + 全量工具面放大成"照跑"）。
-/// 加载成功时移除该标记（per-iteration 热加载自愈：跑图中修好 yaml，
-/// 下一轮迭代标记消失）。
-pub fn load_agent_into_state(cc: &ConfigCenter, state: &mut Value, agent_id: &str) {
-    /// 失败路径统一出口：warn + state 标记（要求 state 可变借用可用）。
-    fn mark_missing(state: &mut Value, agent_id: &str, reason: &str) {
+/// 返回语义：
+/// - `Ok(Some(tool_ids))`：yaml 带 `tool_ids` 键（含显式空表 = agent 声明零工具）
+/// - `Ok(None)`：yaml 存在且解析正常但无 `tool_ids` 键（白名单未声明）
+/// - `Err`：yaml 缺失 / 解析失败 / 顶层非对象（K5 失败可见：调用方负责把
+///   `_agent_config_missing` 标记写进 state 供诊断出口可见——agent_id 打错字/
+///   yaml 写坏会被下游默认提示词 + 全量工具面放大成"照跑"）
+pub fn resolve_agent_tool_ids(
+    cc: &ConfigCenter,
+    agent_id: &str,
+) -> Result<Option<Vec<String>>, AgentToolIdsError> {
+    let agents_dir = cc.config_root().join("agents");
+    let Some(path) = find_agent_yaml(&agents_dir, agent_id) else {
         warn!(
             target: "agent-config-load",
             agent_id = %agent_id,
-            reason = %reason,
-            "agent 配置加载失败，state 标记 _agent_config_missing（诊断出口可见）"
+            reason = "agent yaml not found",
+            "agent 配置加载失败（诊断出口可见）"
         );
-        if let Some(obj) = state.as_object_mut() {
-            obj.insert("_agent_config_missing".to_string(), Value::Bool(true));
-        }
-    }
-
-    let agents_dir = cc.config_root().join("agents");
-    let Some(path) = find_agent_yaml(&agents_dir, agent_id) else {
-        mark_missing(state, agent_id, "agent yaml not found");
-        return;
+        return Err(AgentToolIdsError::Missing);
     };
 
     // 转成相对 config_root 的路径，供 ConfigCenter.load() 用（享受 mtime 缓存）
@@ -56,42 +66,41 @@ pub fn load_agent_into_state(cc: &ConfigCenter, state: &mut Value, agent_id: &st
     let agent_cfg = match cc.load(&rel_path) {
         Ok(v) => v,
         Err(e) => {
-            // ConfigCenter 已保留旧缓存，但当前文件确实坏了：标记 + warn 暴露
-            mark_missing(state, agent_id, &format!("agent yaml parse failed: {e}"));
-            return;
+            // ConfigCenter 已保留旧缓存，但当前文件确实坏了：Err 暴露
+            warn!(
+                target: "agent-config-load",
+                agent_id = %agent_id,
+                reason = %format!("agent yaml parse failed: {e}"),
+                "agent 配置加载失败（诊断出口可见）"
+            );
+            return Err(AgentToolIdsError::Corrupt);
         }
     };
 
-    let Some(state_obj) = state.as_object_mut() else {
-        return;
-    };
     let Some(agent_obj) = agent_cfg.as_object() else {
         // 顶层非对象（如纯标量 yaml）：同样视为配置损坏
         warn!(
             target: "agent-config-load",
             agent_id = %agent_id,
-            "agent yaml 顶层非对象，state 标记 _agent_config_missing"
+            reason = "agent yaml top-level is not an object",
+            "agent 配置加载失败（诊断出口可见）"
         );
-        state_obj.insert("_agent_config_missing".to_string(), Value::Bool(true));
-        return;
+        return Err(AgentToolIdsError::Corrupt);
     };
 
-    for (k, v) in agent_obj {
-        if k == "core_plugin" {
-            // core_plugin 特殊：直接覆盖（agent 能切换核心插件，如换 LLM 提供商）
-            state_obj.insert(k.clone(), v.clone());
-        } else {
-            // 其余：or_insert（调用方注入优先，agent 配置仅补缺失）
-            state_obj.entry(k.clone()).or_insert(v.clone());
-        }
-    }
-    // 成功即自愈：清除历史失败标记（per-iteration 热加载修好 yaml 后消失）
-    state_obj.remove("_agent_config_missing");
+    Ok(agent_obj
+        .get("tool_ids")
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|t| t.as_str().map(str::to_string))
+                .collect()
+        }))
 }
 
 #[cfg(test)]
 mod tests {
-    //! TDD-6: load_agent_into_state 泛化注入测试。
+    //! resolve_agent_tool_ids 窄接口测试（审计变更#1 双轨收敛后重写）。
 
     use super::*;
     use std::path::PathBuf;
@@ -104,135 +113,122 @@ mod tests {
     }
 
     #[test]
-    fn test_injects_all_top_level_fields() {
-        // 契约：整个 yaml 顶层注入 state（不只 5 个，验证泛化）
+    fn resolves_tool_ids_from_yaml() {
+        // 契约：yaml 的 tool_ids 白名单被解析返回（工具面过滤的唯一输入）
         let temp = tempfile::tempdir().unwrap();
         let cc = setup(
             temp.path().to_path_buf(),
             "test_agent",
-            "system_prompt: 你是助手\ntool_ids: [file_read]\ncustom_field: hello\nnum: 42\n",
+            "system_prompt: 你是助手\ntool_ids: [file_read, bash_execute]\n",
         );
-        let mut state = serde_json::json!({});
 
-        load_agent_into_state(&cc, &mut state, "test_agent");
+        let ids = resolve_agent_tool_ids(&cc, "test_agent").unwrap().unwrap();
 
-        assert_eq!(state["system_prompt"], "你是助手");
-        assert_eq!(state["tool_ids"][0], "file_read");
-        assert_eq!(state["custom_field"], "hello", "自定义字段也应注入");
-        assert_eq!(state["num"], 42);
-    }
-
-    #[test]
-    fn test_does_not_override_existing_state_fields() {
-        // 契约：state 已有的字段不被覆盖（or_insert，调用方优先）
-        let temp = tempfile::tempdir().unwrap();
-        let cc = setup(temp.path().to_path_buf(), "a1", "system_prompt: agent值\n");
-        let mut state = serde_json::json!({"system_prompt": "调用方值"});
-
-        load_agent_into_state(&cc, &mut state, "a1");
-
-        assert_eq!(state["system_prompt"], "调用方值", "state 已有值不被覆盖");
-    }
-
-    #[test]
-    fn test_core_plugin_overrides_state() {
-        // 契约：core_plugin 直接覆盖 state（agent 能切换核心插件）
-        let temp = tempfile::tempdir().unwrap();
-        let cc = setup(
-            temp.path().to_path_buf(),
-            "a2",
-            "core_plugin: custom_llm\nsystem_prompt: hi\n",
+        assert_eq!(
+            ids,
+            vec!["file_read".to_string(), "bash_execute".to_string()]
         );
-        let mut state = serde_json::json!({"core_plugin": "default_llm"});
-
-        load_agent_into_state(&cc, &mut state, "a2");
-
-        assert_eq!(state["core_plugin"], "custom_llm", "core_plugin 应覆盖");
     }
 
     #[test]
-    fn test_missing_agent_marks_state() {
-        // 契约（K5）：agent 文件不存在时不再静默跳过——state 加
-        // _agent_config_missing 标记（诊断出口可见），其余字段不变。
+    fn explicit_empty_tool_ids_is_some_empty() {
+        // 契约：显式空表 = agent 声明零工具（Some([])），区别于"未声明"（Ok(None)）
+        let temp = tempfile::tempdir().unwrap();
+        let cc = setup(temp.path().to_path_buf(), "zero", "tool_ids: []\n");
+
+        let ids = resolve_agent_tool_ids(&cc, "zero").unwrap();
+
+        assert_eq!(ids, Some(vec![]));
+    }
+
+    #[test]
+    fn yaml_without_tool_ids_key_is_none() {
+        // 契约：yaml 正常但无 tool_ids 键 = 白名单未声明（Ok(None)，非配置损坏）
+        let temp = tempfile::tempdir().unwrap();
+        let cc = setup(temp.path().to_path_buf(), "no_tools", "name: t\n");
+
+        let ids = resolve_agent_tool_ids(&cc, "no_tools").unwrap();
+
+        assert_eq!(ids, None);
+    }
+
+    #[test]
+    fn missing_agent_is_error() {
+        // 契约（K5）：文件不存在 → Err(Missing)（调用方打 _agent_config_missing 标记）
         let temp = tempfile::tempdir().unwrap();
         let cc = ConfigCenter::new(temp.path().to_path_buf());
-        let mut state = serde_json::json!({"existing": true});
 
-        load_agent_into_state(&cc, &mut state, "nonexistent");
-
-        assert_eq!(state["existing"], true, "state 既有字段应不变");
         assert_eq!(
-            state["_agent_config_missing"], true,
-            "缺失 agent 应打 _agent_config_missing 标记"
+            resolve_agent_tool_ids(&cc, "nonexistent"),
+            Err(AgentToolIdsError::Missing)
         );
-        assert_eq!(state.as_object().unwrap().len(), 2);
     }
 
     #[test]
-    fn test_corrupt_agent_yaml_marks_state() {
-        // 契约（K5）：yaml 解析失败（缩进/语法坏）同样打标记，不静默。
+    fn corrupt_agent_yaml_is_error() {
+        // 契约（K5）：yaml 解析失败（缩进/语法坏）同样 Err，不返回半截配置
         let temp = tempfile::tempdir().unwrap();
         // tab 缩进在 YAML 里非法，稳定触发解析失败
         let cc = setup(temp.path().to_path_buf(), "broken", "a:\n\tb: 1\n");
-        let mut state = serde_json::json!({});
-
-        load_agent_into_state(&cc, &mut state, "broken");
 
         assert_eq!(
-            state["_agent_config_missing"], true,
-            "解析失败应打 _agent_config_missing 标记"
+            resolve_agent_tool_ids(&cc, "broken"),
+            Err(AgentToolIdsError::Corrupt)
         );
-        assert!(state.get("tool_ids").is_none(), "解析失败不得注入半截配置");
     }
 
     #[test]
-    fn test_successful_load_clears_missing_marker() {
-        // 契约（K5）：加载成功清除历史失败标记（per-iteration 热加载自愈）。
+    fn top_level_non_object_is_error() {
+        // 契约（K5）：顶层非对象（纯标量 yaml）= 配置损坏
         let temp = tempfile::tempdir().unwrap();
-        let cc = setup(temp.path().to_path_buf(), "a4", "v: 1\n");
-        let mut state = serde_json::json!({"_agent_config_missing": true});
+        let cc = setup(temp.path().to_path_buf(), "scalar", "42\n");
 
-        load_agent_into_state(&cc, &mut state, "a4");
-
-        assert_eq!(state["v"], 1);
-        assert!(
-            state.get("_agent_config_missing").is_none(),
-            "成功加载后标记应被移除"
+        assert_eq!(
+            resolve_agent_tool_ids(&cc, "scalar"),
+            Err(AgentToolIdsError::Corrupt)
         );
     }
 
     #[test]
-    fn test_finds_agent_in_subdirectory() {
+    fn finds_agent_in_subdirectory() {
         // 契约：支持 agents/main/xxx.yaml 分类子目录（find_agent_yaml 递归）
         let temp = tempfile::tempdir().unwrap();
         let agents_sub = temp.path().join("config/agents/main");
         std::fs::create_dir_all(&agents_sub).unwrap();
-        std::fs::write(agents_sub.join("deep.yaml"), "name: 深层Agent\n").unwrap();
+        std::fs::write(agents_sub.join("deep.yaml"), "tool_ids: [file_read]\n").unwrap();
 
         let cc = ConfigCenter::new(temp.path().join("config"));
-        let mut state = serde_json::json!({});
 
-        load_agent_into_state(&cc, &mut state, "deep");
-
-        assert_eq!(state["name"], "深层Agent", "子目录的 agent 也应找到");
+        let ids = resolve_agent_tool_ids(&cc, "deep").unwrap().unwrap();
+        assert_eq!(
+            ids,
+            vec!["file_read".to_string()],
+            "子目录的 agent 也应找到"
+        );
     }
 
     #[test]
-    fn test_rereads_after_file_change() {
-        // 契约：走 ConfigCenter.load → mtime 变了重读（per-iteration 场景的基础）
+    fn rereads_after_file_change() {
+        // 契约：走 ConfigCenter.load → mtime 变了重读（热重载语义保留）
         let temp = tempfile::tempdir().unwrap();
-        let cc = setup(temp.path().to_path_buf(), "a3", "v: 1\n");
-        let mut state = serde_json::json!({});
-
-        load_agent_into_state(&cc, &mut state, "a3");
-        assert_eq!(state["v"], 1);
+        let cc = setup(temp.path().to_path_buf(), "a3", "tool_ids: [file_read]\n");
+        assert_eq!(
+            resolve_agent_tool_ids(&cc, "a3").unwrap().unwrap(),
+            vec!["file_read".to_string()]
+        );
 
         // 改文件（确保 mtime 变化）
         std::thread::sleep(std::time::Duration::from_millis(50));
-        std::fs::write(temp.path().join("agents/a3.yaml"), "v: 2\n").unwrap();
+        std::fs::write(
+            temp.path().join("agents/a3.yaml"),
+            "tool_ids: [bash_execute]\n",
+        )
+        .unwrap();
 
-        let mut state2 = serde_json::json!({});
-        load_agent_into_state(&cc, &mut state2, "a3");
-        assert_eq!(state2["v"], 2, "mtime 变了应重读到新内容");
+        assert_eq!(
+            resolve_agent_tool_ids(&cc, "a3").unwrap().unwrap(),
+            vec!["bash_execute".to_string()],
+            "mtime 变了应重读到新内容"
+        );
     }
 }

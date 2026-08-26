@@ -23,7 +23,6 @@ chrono.workspace = true
 uuid.workspace = true
 sha2 = "0.10"
 rusqlite = { version = "0.32", features = ["bundled"] }
-agentos-config.workspace = true
 
 [dev-dependencies]
 tempfile = "3"

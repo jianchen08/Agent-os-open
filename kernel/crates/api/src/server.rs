@@ -1396,14 +1396,9 @@ async fn stage_execute(
             .map(|m| m.id.clone()),
     );
 
-    // 统一配置加载方案 TDD-7：注入 ConfigCenter，启用 per-iteration agent 热加载。
-    // 改 config/agents/<id>.yaml 后，正在跑的任务下一轮迭代立即用新配置。
-    let executor = if let Some(cc) = state.config_center.clone() {
-        executor.with_config_center(cc)
-    } else {
-        executor
-    };
-
+    // 双轨收敛（审计变更#1）：agent 全量配置唯一事实源 = context_build 插件，
+    // 引擎不再 per-iteration 注入 agent yaml；内核只经 resolve_agent_tool_ids
+    // 读 tool_ids 做工具面过滤（K10 窄接口）。
     info!(run_id = %run_id, agent_id = %agent_id, "Pipeline run started");
 
     // GAP-2：防御网路径的失败事件标签预捕获（run_compiled 会 move initial_state）。
@@ -1556,18 +1551,14 @@ fn extract_response_content(final_state: &serde_json::Value) -> String {
 const FRAMEWORK_ALWAYS_INCLUDE_TOOLS: &[&str] = &["spill_retrieve"];
 
 /// state 无 tool_ids 时按 `state.agent_id` 从 ConfigCenter 解析 agent yaml 的
-/// tool_ids（K10：内核侧工具面过滤的配置解析点，与 engine per-iteration
-/// `load_agent_into_state` 同一 yaml 同一语义）。
+/// tool_ids（K10：内核侧工具面过滤的配置解析点，窄接口——只读 tool_ids，不
+/// 注入 agent 全量配置；agent 配置唯一事实源在 sidecar context_build）。
 ///
 /// 返回：
 /// - `Some(集合)`：yaml 带 `tool_ids` 键（含显式空表 = agent 声明零工具）；
 /// - `None`：配置断链（无 config_center / 无 agent_id / yaml 缺失或损坏 /
 ///   yaml 无 tool_ids 键）。yaml 缺失或损坏时顺带把 `_agent_config_missing`
-///   标记写进真实 state（与 K5 引擎侧标记同键，诊断出口统一；引擎
-///   per-iteration 加载成功会自愈移除）。
-///
-/// scratch state：只借 `load_agent_into_state` 的定位/解析/失败语义，不把
-/// 整个 yaml 泛化注入真实 state——此阶段的 state 组装权在 sidecar context_build。
+///   标记写进真实 state（与 K5 同键，诊断出口统一）。
 fn resolve_agent_tool_ids(
     state: &mut serde_json::Value,
     app_state: &AppState,
@@ -1577,25 +1568,19 @@ fn resolve_agent_tool_ids(
         .get("agent_id")
         .and_then(|v| v.as_str())
         .map(str::to_string)?;
-    let mut scratch = serde_json::json!({});
-    agentos_config::load_agent_into_state(cc, &mut scratch, &agent_id);
-    if scratch.get("_agent_config_missing").is_some() {
-        if let Some(obj) = state.as_object_mut() {
-            obj.insert(
-                "_agent_config_missing".to_string(),
-                serde_json::Value::Bool(true),
-            );
+    match agentos_config::resolve_agent_tool_ids(cc, &agent_id) {
+        Ok(Some(ids)) => Some(ids.into_iter().collect()),
+        Ok(None) => None,
+        Err(_) => {
+            if let Some(obj) = state.as_object_mut() {
+                obj.insert(
+                    "_agent_config_missing".to_string(),
+                    serde_json::Value::Bool(true),
+                );
+            }
+            None
         }
-        return None;
     }
-    scratch
-        .get("tool_ids")
-        .and_then(|v| v.as_array())
-        .map(|arr| {
-            arr.iter()
-                .filter_map(|t| t.as_str().map(str::to_string))
-                .collect()
-        })
 }
 
 /// 注入工具 schema 到 state["tool_schemas"]（0.2 sidecar 架构适配）。
@@ -1814,15 +1799,13 @@ async fn chat_handler(
         let _ = tx.send(outcome);
     });
     // 任务 panic（rx 关闭）时给出明确错误而非挂死等待。
-    let outcome = rx
-        .await
-        .unwrap_or_else(|_| EngineOutcome {
-            content: "[engine task terminated unexpectedly]".to_string(),
-            final_assistant: None,
-            final_user: None,
-            failed: true,
-            degraded: false,
-        });
+    let outcome = rx.await.unwrap_or_else(|_| EngineOutcome {
+        content: "[engine task terminated unexpectedly]".to_string(),
+        final_assistant: None,
+        final_user: None,
+        failed: true,
+        degraded: false,
+    });
 
     let response = WsResponse {
         r#type: "message".to_string(),
