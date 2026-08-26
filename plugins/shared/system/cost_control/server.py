@@ -431,9 +431,68 @@ def _reshape_usage_statistics(raw: dict[str, Any]) -> dict[str, Any]:
 
     差异：插件用 ``global`` / ``tasks(dict)`` / ``sessions(dict)`` / 无 updated_at；
     前端期望 ``global_stats`` / ``tasks(array)`` / ``sessions(array)`` / 有 updated_at。
+
+    展示层叠加 traces 真值（G5）：消耗字段（daily/monthly/total）以 traces
+    聚合为准（与 monitoring token-usage 同源同量），预算语义（limit/percent/
+    cost 折算）仍基于 manager 内存限额；traces 不可用时回退 manager 账本。
     """
+    raw_global = raw.get("global", {})
+    daily_tokens = raw_global.get("daily_tokens", 0)
+    monthly_tokens = raw_global.get("monthly_tokens", 0)
+
+    import sqlite3
+
+    db_path = _resolve_project_root() / "agentos_kernel.db"
+    if db_path.is_file():
+        try:
+            conn = sqlite3.connect(str(db_path))
+            try:
+                cur = conn.cursor()
+                cur.execute(
+                    "SELECT COALESCE(SUM(json_extract(patch_data, '$.llm_usage.total_tokens')), 0)"
+                    " FROM traces"
+                    " WHERE json_extract(patch_data, '$.llm_usage') IS NOT NULL"
+                    "   AND substr(created_at, 1, 10) = date('now')"
+                )
+                row = cur.fetchone()
+                if row:
+                    daily_tokens = int(row[0])
+                cur.execute(
+                    "SELECT COALESCE(SUM(json_extract(patch_data, '$.llm_usage.total_tokens')), 0)"
+                    " FROM traces"
+                    " WHERE json_extract(patch_data, '$.llm_usage') IS NOT NULL"
+                    "   AND substr(created_at, 1, 7) = strftime('%Y-%m', 'now')"
+                )
+                row = cur.fetchone()
+                if row:
+                    monthly_tokens = int(row[0])
+            finally:
+                conn.close()
+        except sqlite3.Error as exc:  # noqa: BLE001 — 查询失败保留 manager 账本值
+            logger.warning("[cost_control] traces 消耗聚合失败（保留内存账本）: %s", exc)
+
+    daily_limit = raw_global.get("daily_limit", 0)
+    monthly_limit = raw_global.get("monthly_limit", 0)
+    daily_percent = (daily_tokens / daily_limit * 100) if daily_limit > 0 else 0.0
+    monthly_percent = (monthly_tokens / monthly_limit * 100) if monthly_limit > 0 else 0.0
+    # 费率（$/千 token）取自 manager 账本成本与其用量之比，traces 消耗按此重算成本
+    mgr_daily = raw_global.get("daily_tokens", 0)
+    mgr_daily_cost = raw_global.get("estimated_daily_cost", 0.0)
+    cost_rate = (mgr_daily_cost / mgr_daily * 1000) if mgr_daily > 0 else 0.0
+    daily_cost = (daily_tokens / 1000) * cost_rate
+    monthly_cost = (monthly_tokens / 1000) * cost_rate
+
     return {
-        "global_stats": raw.get("global", {}),
+        "global_stats": {
+            "daily_tokens": daily_tokens,
+            "monthly_tokens": monthly_tokens,
+            "daily_limit": daily_limit,
+            "monthly_limit": monthly_limit,
+            "daily_usage_percent": daily_percent,
+            "monthly_usage_percent": monthly_percent,
+            "estimated_daily_cost": daily_cost,
+            "estimated_monthly_cost": monthly_cost,
+        },
         "tasks": [
             {"task_id": tid, **stats}
             for tid, stats in raw.get("tasks", {}).items()
