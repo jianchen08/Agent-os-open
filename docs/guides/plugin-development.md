@@ -86,7 +86,7 @@ plugins/shared/pipeline/<role>/<name>/
 | 新建插件目录 / 修改 plugin.json | 等 5-8s 热发现，然后 **re-enable**（前端插件设置页开关，或 `PUT /api/v1/plugins/{id}/enabled`）——会触发 G2 复核（spawn sidecar 校验声明与实现一致）并重注册能力 |
 | 改插件 Python 代码 | 空闲 TTL 后热重载（kill + respawn）；不确定就重启内核 |
 | 改 agent yaml | mtime 缓存热生效，下一个新任务/会话生效 |
-| 改管道 yaml | **重启内核**（启动期编译 + 重名检测） |
+| 改管道 yaml（autonomous.yaml / config/steps/） | 无需重启：下次执行前 mtime 热重载（1s TTL；坏配置保留旧 + warn） |
 | 前端新增 ui_schema/表单 | 前端刷新页面 |
 
 ## 8. 命名与 State 约定

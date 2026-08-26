@@ -94,7 +94,8 @@ main 循环体（while） prepare：Input 插件链（context_build → tool_sch
 exit 循环体（单次）  workspace 收尾 + 环境释放（run_on_error，提前终止必经）
 ```
 
-- **G10 路由 DSL**（冻结）：条件永远 `when`、目标永远 `then`（`end` / `loop` / step id / 循环体 id）、附带写入 `set:`。配置在**加载期编译**（when 预编译 AST、引用静态解析、五类命名冲突启动即报），运行时零解析。
+- **G10 路由 DSL**（冻结）：条件永远 `when`、目标永远 `then`（`end` / `loop` / step id / 循环体 id）、附带写入 `set:`。配置在**加载期编译**（when 预编译 AST、引用静态解析、命名冲突启动即报），运行时零解析。
+- **Pull 热加载**：每次 chat 执行前检测 autonomous.yaml + `config/steps/` 的 mtime 指纹（1s TTL 门），变化即重新加载编译，改配置无需重启内核；热重载失败保留旧配置 + warn，在途 run 按快照跑完。
 - **step 三级命中**：管道 step id → 公共 step 库（`config/steps/`）→ 插件 id。
 - **4 种路由信号**：`next_llm` / `next_tool` / `end` / `wait`（仅 output 阶段插件产出，挂起支持审批后恢复）。
 - **并发模型**：RunChainRegistry 按 effective_pipeline_id 串行（同管道 FIFO、异管道并行、全局并发上限）。
@@ -247,7 +248,7 @@ plugins:
 | 零代码接第三方工具 | external MCP manifest（HTTP 远程 / 本地命令） | [guides/plugin-external-mcp.md](guides/plugin-external-mcp.md) |
 | 高性能管道步骤 | Rust cdylib 原生插件（in_process） | [guides/plugin-native-rust.md](guides/plugin-native-rust.md) |
 | 新增 Agent | `config/agents/` 对应层级写 yaml | [guides/agent-configuration.md](guides/agent-configuration.md) |
-| 调整管道编排 | 改 `config/pipelines/autonomous.yaml`（重启内核） | [guides/pipeline-configuration.md](guides/pipeline-configuration.md) |
+| 调整管道编排 | 改 `config/pipelines/autonomous.yaml`（热重载，无需重启） | [guides/pipeline-configuration.md](guides/pipeline-configuration.md) |
 | 新增前端预设主题 | `frontend/src/config/themes/presets/` + index.ts 注册 | [guides/theme-development.md](guides/theme-development.md) |
 | 随插件分发主题/皮肤 | manifest `contributes.themes` | [guides/theme-development.md](guides/theme-development.md) |
 | 新增前端页面/表单 | manifest `ui_schema` / `http_endpoints` | [plugin-protocol.md](plugin-protocol.md) |

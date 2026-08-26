@@ -12,6 +12,6 @@
 | 流式事件被网关拒绝 | manifest 未声明 `capabilities.streaming`（fail-closed），按 `docs/streaming-protocol.md` 补声明并 re-enable |
 | 工具结果前端渲染不对 | `output_schema` / `render` 声明缺失或与返回不符——契约 fail-closed，按实际返回结构补齐 |
 | service 方法别的插件调不到 | `services` 不进 LLM 面；调用方声明 `requires_services`（角色名），boot 期闸不满足内核拒启 |
-| 管道改完不生效 | 管道启动期编译——重启内核 |
+| 管道改完不生效 | 管道配置是热重载（每次执行前 mtime 检测，1s TTL），先确认文件已保存且配置能通过校验：坏 YAML / 命名冲突 / 编译错误会静默保留旧配置继续跑，内核日志有 warn |
 | agent 换了工具白名单不生效 | agent yaml 热生效但只对新任务；确认工具本身已启用（第一条） |
 | 前端插件表单/页面没更新 | ui_schema 变化需刷新前端页面 |

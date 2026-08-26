@@ -109,7 +109,7 @@ The Web frontend talks straight to the Rust kernel (HTTP / WebSocket); plugins c
 Loadable, reusable skill packages that can be injected into Agents on demand to gain new domain capabilities (document processing, PDF generation, etc.) without writing code.
 
 ### 13. Hot Configuration — Evolve Without Downtime
-Agent configs (YAML) hot-apply via mtime caching — change prompts or tool whitelists without restarting; plugin directories are hot-discovered (5-8s) and re-registered instantly via the plugin settings page toggle; Python plugin processes are idle-collected, hot-reloaded on code change, and auto-revived after crashes. Pipeline configs are compiled at kernel startup (restart the kernel after editing).
+Agent configs (YAML) hot-apply via mtime caching — change prompts or tool whitelists without restarting; plugin directories are hot-discovered (5-8s) and re-registered instantly via the plugin settings page toggle; Python plugin processes are idle-collected, hot-reloaded on code change, and auto-revived after crashes. Pipeline configs hot-reload too — file changes are detected before each run and recompiled automatically; a broken config falls back to the last good one with a warning.
 
 ### 14. Plugin-based Pipeline Architecture — Every State of Agent Execution Is Yours to Control
 

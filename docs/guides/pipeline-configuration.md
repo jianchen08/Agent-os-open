@@ -4,7 +4,7 @@
 
 ## 1. 现状
 
-`config/pipelines/autonomous.yaml` 是**唯一现役管道**：所有 Agent 共用它，差异全部由 Agent 配置（system_prompt / tool_ids / model_tier）体现。结构总览与修改须知见 `config/pipelines/README.md`。管道在内核启动期编译（`when` 预编译 AST、引用静态解析、重名冲突启动即 panic），运行时零解析——**改完必须重启内核**。
+`config/pipelines/autonomous.yaml` 是**唯一现役管道**：所有 Agent 共用它，差异全部由 Agent 配置（system_prompt / tool_ids / model_tier）体现。结构总览与修改须知见 `config/pipelines/README.md`。管道配置**启动期加载编译**（`when` 预编译 AST、引用静态解析、重名冲突启动即报），运行时零解析；且**每次执行前 Pull 热加载**——检测 autonomous.yaml 与 `config/steps/*.yaml` 的 mtime 指纹（1s TTL），变化即重新加载 + 编译，**改完无需重启内核**。热重载失败（坏 YAML / 命名冲突 / 编译错误）保留旧配置 + warn 不 panic；在途 run 按快照跑完不受影响（`server.rs::maybe_reload_compiled_pipeline`）。
 
 ## 2. 配置结构
 
@@ -68,7 +68,7 @@ next:
 ## 5. 修改流程与验证
 
 1. 改 `config/pipelines/autonomous.yaml`（或前端设置页"管道"可视化编辑器，写同一文件）。
-2. 重启内核（启动期编译 + 五类命名冲突检测：body/step id 重复、与插件 id 冲突、Phase 目标不存在）。
+2. **无需重启内核**：下一次 chat 执行前自动热重载（mtime 检测 1s TTL）。注意热重载失败是静默保守的——坏 YAML / 五类命名冲突（body/step id 重复、与插件 id 冲突、Phase 目标不存在）/ 编译错误都会**保留旧配置继续跑**，只在内核日志留 warn；启动期才会 fail-fast 退出。
 3. 跑回归：`pytest tests/test_tool_block_not_end_pipeline.py`（工具块不终结管道的核心行为闸）。
 
 ## 6. 规划中（尚未落地，勿按此编写集成）

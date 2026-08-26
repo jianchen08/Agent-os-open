@@ -35,7 +35,11 @@ system_prompt / tool_ids / model_tier）体现，管道文件不按 Agent 区分
 
 ## 修改与验证
 
-- 改完 `autonomous.yaml` 需重启内核（管道配置是启动期快照，热重载不覆盖）。
+- 改 `autonomous.yaml` / `config/steps/*.yaml` **无需重启内核**：每次 chat 执行前
+  Pull 热加载检测配置 mtime（1s TTL 门），变化即重新加载 + 编译（server.rs
+  `maybe_reload_compiled_pipeline`）。坏 YAML / 命名冲突 / 编译错误会保留旧配置
+  + warn（不 panic，改坏不致 chat 不可用）；在途 run 按快照跑完不受影响。
+  启动期加载与校验（含命名冲突 fail-fast）保留，作为首启校验与热重载失败兜底。
 - 改动后跑：`tests/test_tool_block_not_end_pipeline.py`（锁定现役管道
   为 G10 格式、不得回退旧 input_routes / target=end 拦截路由）。
 - 契约参考：`docs/working/重要设计/插件三轨一致性与Cordis机制迁移计划.md` §G10。
