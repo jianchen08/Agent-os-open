@@ -1188,5 +1188,4 @@ pub struct WatcherHandle {
 }
 
 #[cfg(test)]
-#[path = "tests/plugin_watcher_tests.rs"]
 mod tests;

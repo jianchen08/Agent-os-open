@@ -1423,5 +1423,4 @@ pub(crate) fn op_ledger_entry(op: &serde_json::Value) -> Option<serde_json::Valu
 // ═════════════════════════════════════════════════════════════════
 
 #[cfg(test)]
-#[path = "tests/pipeline_loop_tests.rs"]
 mod tests;

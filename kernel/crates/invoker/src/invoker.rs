@@ -2624,5 +2624,4 @@ impl PluginInvokerImpl {
 }
 
 #[cfg(test)]
-#[path = "tests/invoker_tests.rs"]
 mod tests;

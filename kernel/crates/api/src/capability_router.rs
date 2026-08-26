@@ -1527,7 +1527,6 @@ fn parse_labels_safe(raw: Option<&Value>) -> Result<Labels, McpError> {
 }
 
 #[cfg(test)]
-#[path = "tests/capability_router_tests.rs"]
 mod tests;
 
 /// 工具连续失败告警集成：tool-executor.invoke 结果 success=false
