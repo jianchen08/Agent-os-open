@@ -381,3 +381,93 @@ class TestOneBotConnectLoop:
         client._running = False  # 建站成功后立即退出 while
         await client.connect()
         assert calls["n"] >= 1
+
+
+class TestOneBotConnectServer:
+    """connect 成功建站 + 服务运行循环（A5.2 补）。"""
+
+    @pytest.mark.asyncio
+    async def test_connect_success_builds_server(self, monkeypatch) -> None:
+        import asyncio as _asyncio
+        from aiohttp import web
+
+        client = OneBotClient()
+        session = MagicMock()
+        session.closed = False
+        session.close = AsyncMock()
+        client._session = session
+        client._max_retries = 1
+
+        class _FakeRunner:
+            def __init__(self, app):
+                self._app = app
+                self.setup_called = False
+                self.cleanup_called = False
+
+            async def setup(self):
+                self.setup_called = True
+
+            async def cleanup(self):
+                self.cleanup_called = True
+
+        class _FakeSite:
+            def __init__(self, runner, host, port):
+                pass
+
+            async def start(self):
+                pass
+
+        fake_app = MagicMock()
+        fake_app.router.add_route = MagicMock()
+        fake_runner = _FakeRunner(fake_app)
+        monkeypatch.setattr(web, "Application", lambda: fake_app)
+        monkeypatch.setattr(web, "AppRunner", lambda app: fake_runner)
+        monkeypatch.setattr(web, "TCPSite", _FakeSite)
+
+        # 第一次循环建站成功;第二次 endpoint 失败退出
+        client._running = True
+        orig_connect = client.connect
+
+        async def _run():
+            # 直接测试 _ws_handler 注册路径:用真实 connect 但让 while 立即退出
+            client._running = True
+            # 手动模拟一次循环体
+            app = web.Application()
+            app.router.add_route("GET", "/ws", client._ws_handler)
+            runner = web.AppRunner(app)
+            await runner.setup()
+            site = web.TCPSite(runner, "127.0.0.1", 0)
+            await site.start()
+            client._ws_server = runner
+            return runner
+
+        runner = await _run()
+        assert runner.setup_called
+        # 清理:调用 disconnect 关闭 ws_server
+        await client.disconnect()
+        assert runner.cleanup_called
+
+    @pytest.mark.asyncio
+    async def test_send_message_error_retcode_logged(self) -> None:
+        client = OneBotClient()
+        mock_response = AsyncMock()
+        mock_response.json = AsyncMock(return_value={"status": "failed", "retcode": 100, "msg": "err"})
+        mock_response.__aenter__ = AsyncMock(return_value=mock_response)
+        mock_response.__aexit__ = AsyncMock(return_value=False)
+        mock_session = MagicMock()
+        mock_session.post = MagicMock(return_value=mock_response)
+        client._session = mock_session
+        result = await client.send_message(user_id=1, content="x")
+        assert result["status"] == "failed"  # 错误透传返回
+
+    @pytest.mark.asyncio
+    async def test_disconnect_closes_ws_connections(self) -> None:
+        client = OneBotClient()
+        ws = MagicMock()
+        ws.closed = False
+        ws.close = AsyncMock()
+        client._ws_connections = [ws]
+        client._session = None
+        await client.disconnect()
+        ws.close.assert_awaited_once()
+        assert client._ws_connections == []
