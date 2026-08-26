@@ -509,6 +509,14 @@ pub struct PluginManifest {
     pub language: String,
     /// 宿主类型——所有插件均支持 InProcess 和 Sidecar（ADR ⑧）
     pub host_type: HostType,
+    /// 宿主分组声明（合宿进程模型 §4.1）。
+    ///
+    /// `"light"` = 准入轻量合宿组（多插件共享宿主进程，宿主键 `group:light:{n}`，
+    /// 由 invoker 运行时动态装箱）；缺省 = 独占宿主（宿主键 `plugin:{plugin_id}`，
+    /// 现状语义，默认保守）。白名单制：声明 `light` 即插件作者担保
+    /// "无同步阻塞调用、无 C 扩展、无重依赖"，内核不做推断。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub host_group: Option<String>,
     pub entry: String,
     pub capabilities: ManifestCapabilities,
     /// 服务依赖（插件↔插件唯一耦合轴）。
@@ -1579,5 +1587,33 @@ mod tests {
             !s.contains("request_timeout_secs"),
             "None 字段不应序列化: {s}"
         );
+    }
+
+    #[test]
+    fn plugin_manifest_host_group_serde_roundtrip() {
+        // 合宿进程模型 §4.1：host_group 缺省 None（旧清单零迁移）；
+        // 显式 "light" → Some；None 不序列化输出（兼容旧清单）。
+        let base = serde_json::json!({
+            "id": "p", "name": "p", "version": "1", "plugin_type": "tool",
+            "language": "python", "host_type": "sidecar", "entry": "python s.py",
+            "capabilities": {}
+        });
+        let m: PluginManifest = serde_json::from_value(base).expect("缺省 host_group 应可解析");
+        assert_eq!(m.host_group, None, "缺省 = None（独占宿主，默认保守）");
+
+        let light = serde_json::json!({
+            "id": "p", "name": "p", "version": "1", "plugin_type": "tool",
+            "language": "python", "host_type": "sidecar", "entry": "python s.py",
+            "capabilities": {}, "host_group": "light"
+        });
+        let m2: PluginManifest =
+            serde_json::from_value(light).expect("host_group=light 应可解析");
+        assert_eq!(m2.host_group.as_deref(), Some("light"));
+
+        // 序列化往返：None 字段不输出
+        let s = serde_json::to_string(&m).unwrap();
+        assert!(!s.contains("host_group"), "None 字段不应序列化: {s}");
+        let s2 = serde_json::to_string(&m2).unwrap();
+        assert!(s2.contains("host_group"), "Some 字段应保留: {s2}");
     }
 }

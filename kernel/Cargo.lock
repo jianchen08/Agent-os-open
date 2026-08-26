@@ -251,6 +251,7 @@ dependencies = [
 name = "agentos-session"
 version = "0.2.0"
 dependencies = [
+ "agentos-core",
  "async-trait",
  "chrono",
  "parking_lot",

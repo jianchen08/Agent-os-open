@@ -15,6 +15,7 @@ from agentos_plugin_sdk.capability import (
     FrontendEmitter,
     MetricsReporter,
 )
+from agentos_plugin_sdk.cohost import CohostServer
 from agentos_plugin_sdk.enum_utils import safe_enum_value
 from agentos_plugin_sdk.logging import (
     ContextFilter,
@@ -66,6 +67,7 @@ __all__ = [
     "BuiltinTool",
     "CapabilityHandle",
     "CapabilityInjection",
+    "CohostServer",
     "ContextFilter",
     "EXECUTION_TRANSITIONS",
     "ExecutionResult",

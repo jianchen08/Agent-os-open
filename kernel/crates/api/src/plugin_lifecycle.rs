@@ -297,6 +297,7 @@ mod domain_event_tests {
             pipeline_role: None,
             language: "python".to_string(),
             host_type: HostType::Sidecar,
+            host_group: None,
             entry: "python server.py".to_string(),
             capabilities: ManifestCapabilities {
                 lifecycle_hooks: if declare_domain {
@@ -386,6 +387,7 @@ mod external_mcp_schema_gate_tests {
             pipeline_role: None,
             language: "external".to_string(),
             host_type: HostType::Sidecar,
+            host_group: None,
             entry: entry.to_string(),
             capabilities: ManifestCapabilities {
                 tools: vec![ToolCapability {

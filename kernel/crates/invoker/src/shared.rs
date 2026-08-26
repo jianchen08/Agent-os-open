@@ -114,6 +114,7 @@ mod tests {
             pipeline_role: None,
             language: "rust".to_string(),
             host_type: HostType::InProcess,
+            host_group: None,
             entry: String::new(),
             capabilities: ManifestCapabilities::default(),
             requires_services: vec![],

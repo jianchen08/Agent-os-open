@@ -48,6 +48,7 @@ fn manifest_with_files(plugin_id: &str, files: Vec<ConfigFileMapping>) -> Plugin
         pipeline_role: None,
         language: "python".to_string(),
         host_type: HostType::Sidecar,
+        host_group: None,
         entry: "python server.py".to_string(),
         capabilities: Default::default(),
         requires_services: vec![],

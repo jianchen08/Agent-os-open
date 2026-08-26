@@ -28,6 +28,7 @@ fn manifest(plugin_id: &str, plugin_type: PluginType, host_type: HostType) -> Pl
         pipeline_role: None,
         language: "python".to_string(),
         host_type,
+        host_group: None,
         entry: "server.py".to_string(),
         capabilities: ManifestCapabilities::default(),
         requires_services: vec![],

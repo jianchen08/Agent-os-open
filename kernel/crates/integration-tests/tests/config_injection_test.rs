@@ -203,6 +203,7 @@ fn make_sidecar_manifest(id: &str, entry: &str) -> PluginManifest {
         pipeline_role: None,
         language: "python".to_string(),
         host_type: agentos_core::traits::HostType::Sidecar,
+        host_group: None,
         entry: entry.to_string(),
         capabilities: Default::default(),
         requires_services: vec![],

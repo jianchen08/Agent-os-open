@@ -121,6 +121,7 @@ fn make_test_manifest(
         pipeline_role: None,
         language: "rust".to_string(),
         host_type,
+        host_group: None,
         entry: "test_plugin".to_string(),
         capabilities: ManifestCapabilities::default(),
         requires_services: vec![],

@@ -30,6 +30,111 @@ use tracing::{error, info, warn};
 /// （未用到也不检测——纯按需 pull。）
 const PLUGIN_FINGERPRINT_TTL: Duration = Duration::from_secs(1);
 
+/// 轻量合宿组名（合宿进程模型 §4.1：manifest.host_group 的唯一准入值）。
+const LIGHT_HOST_GROUP: &str = "light";
+
+/// 合宿宿主目录名（plugins/shared/_host/，host.py 由宿主侧任务承载）。
+const GROUP_HOST_DIR: &str = "_host";
+
+/// 单个 light 宿主的同时挂载成员数上限（合宿进程模型 §4.5）。
+/// 默认 6，可用环境变量 `AGENTOS_LIGHT_HOST_MAX_MEMBERS` 覆盖（<=0 视为无效回退默认）。
+const LIGHT_HOST_DEFAULT_MAX_MEMBERS: usize = 6;
+
+/// 读取 light 宿主挂载成员上限（环境变量优先）。
+fn light_host_max_members() -> usize {
+    std::env::var("AGENTOS_LIGHT_HOST_MAX_MEMBERS")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .filter(|n| *n > 0)
+        .unwrap_or(LIGHT_HOST_DEFAULT_MAX_MEMBERS)
+}
+
+/// light 宿主键：`group:light:{n}`（n 从 1 起，按装箱顺序分配；回收后槽位可复用）。
+fn light_host_key(slot: u64) -> String {
+    format!("group:{LIGHT_HOST_GROUP}:{slot}")
+}
+
+/// 从宿主键解析 light 组槽位号；非 light 组键返回 None。
+fn parse_light_slot(host_key: &str) -> Option<u64> {
+    host_key
+        .strip_prefix(&format!("group:{LIGHT_HOST_GROUP}:"))
+        .and_then(|n| n.parse().ok())
+}
+
+/// 独占宿主键：`plugin:{plugin_id}`（每插件独占宿主，现状语义统一走宿主键路径）。
+fn solo_host_key(plugin_id: &str) -> String {
+    format!("plugin:{plugin_id}")
+}
+
+/// light 组运行时装箱状态（合宿进程模型 §4.5）。
+///
+/// - `assignments`：分配表 {plugin_id → host_key}。粘性：成员一旦分配，宿主存活
+///   期间归属不变（respawn 按表重建成员集）；宿主被 idle GC 回收时其全部成员
+///   条目随之清除（槽位释放复用）。
+/// - `next_slot`：已开过的最大槽位号（只增）。装箱时从低槽位找"当前挂载数 <
+///   上限"的宿主塞入——已回收宿主（成员条目已清、计数归 0）自然优先复用，
+///   而不是无限开新组；全满才开新槽位。
+#[derive(Default)]
+struct LightPacking {
+    assignments: HashMap<String, String>,
+    next_slot: u64,
+}
+
+/// light 成员判定：host_group=="light" 且 sidecar 且非外部 MCP。
+///
+/// 外部 MCP（StreamableHttp 远端 / stdio 第三方命令）的进程归外部所有，
+/// 内核只是客户端（方案 §〇 三类宿主形态表），不进合宿组；host_type=InProcess
+/// 天生单进程无独立内存底座，同样不适用。缺省或其他 host_group 值一律独占（保守）。
+fn is_light_group_member(manifest: &PluginManifest) -> bool {
+    if manifest.host_group.as_deref() != Some(LIGHT_HOST_GROUP)
+        || manifest.host_type != HostType::Sidecar
+    {
+        return false;
+    }
+    let is_external = match manifest.mcp.as_ref() {
+        Some(cfg) => match cfg.transport {
+            agentos_core::traits::McpTransport::StreamableHttp => cfg
+                .endpoint
+                .as_ref()
+                .and_then(|e| e.url.as_ref())
+                .is_some(),
+            agentos_core::traits::McpTransport::Stdio => cfg
+                .endpoint
+                .as_ref()
+                .and_then(|e| e.command.as_ref())
+                .is_some(),
+        },
+        None => false,
+    };
+    !is_external
+}
+
+/// 合宿成员的 MCP 工具名命名空间（§4.2 第 3 条）：宿主把成员插件的每个工具
+/// 注册为 `{plugin_id}.{tool_name}`，调用侧拼前缀分发；独占宿主无前缀（现状不变）。
+fn namespaced_tool_name(manifest: &PluginManifest, tool_name: &str) -> String {
+    if is_light_group_member(manifest) {
+        format!("{}.{}", manifest.id, tool_name)
+    } else {
+        tool_name.to_string()
+    }
+}
+
+/// 从成员插件目录向上找合宿宿主目录（含 `_host` 子目录的最近祖先）。
+///
+/// 插件目录层级不固定（plugins/shared/<type>/<phase>/<name>），不能按固定
+/// 深度回溯；逐级向上探测 `_host` 子目录，到文件系统根仍无则 None。
+fn find_group_host_dir(member_dir: &Path) -> Option<std::path::PathBuf> {
+    let mut cur = Some(member_dir);
+    while let Some(dir) = cur {
+        let candidate = dir.join(GROUP_HOST_DIR);
+        if candidate.is_dir() {
+            return Some(candidate);
+        }
+        cur = dir.parent();
+    }
+    None
+}
+
 /// 计算插件指纹：对该插件目录下的**源码文件** + plugin.json 声明的 config_files 路径
 /// 取 mtime（秒级精度），拼接为字符串后做简单 hash。
 ///
@@ -404,11 +509,16 @@ impl agentos_native_sdk::HostServices for NativeHostServices {
 pub struct PluginInvokerImpl {
     /// 插件加载器（用于查找 manifest）
     loader: Arc<dyn PluginLoader>,
-    /// 已连接的 MCP 客户端 {plugin_id: McpClient}
+    /// 已连接的 MCP 客户端 {宿主键: McpClient}（合宿进程模型 §4.2）。
+    ///
+    /// 宿主键：light 合宿插件 → `group:light:{n}`（同宿主成员共享一个客户端/
+    /// 进程）；其余 sidecar → `plugin:{plugin_id}`（独占宿主，现状语义）。
     mcp_clients: RwLock<HashMap<String, Arc<tokio::sync::RwLock<McpClient>>>>,
-    /// per-plugin spawn 互斥锁（single-flight，防并发请求竞态 spawn 多个 sidecar）。
-    /// 同一 plugin_id 的 spawn 串行化：首个请求持锁 spawn 并写缓存，后续请求拿锁后
-    /// 二次查缓存命中直接复用。single-flight 锁保证并发触发只创建一个 sidecar。
+    /// per-host spawn 互斥锁（single-flight，防并发请求竞态 spawn 多个宿主进程）。
+    ///
+    /// 同一宿主键的 spawn 串行化：首个请求持锁 spawn 并写缓存，后续请求拿锁后
+    /// 二次查缓存命中直接复用；跨宿主并行互不阻塞（合宿进程模型 §4.2 第 4 条：
+    /// spawn 锁粒度从 per-plugin 改为 per-host-key）。
     spawn_locks: RwLock<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
     /// 崩溃回调（插件崩溃时调用）
     #[allow(clippy::type_complexity)]
@@ -426,14 +536,21 @@ pub struct PluginInvokerImpl {
     /// 原生插件加载器（task_11 N2）：host_type==InProcess 时用于加载/执行 cdylib。
     /// None 时原生插件调用返回 NATIVE_LOADER_NOT_CONFIGURED。
     native_loader: Option<Arc<NativePluginLoader>>,
-    /// Pull 热加载指纹缓存 {plugin_id: (上次指纹, 上次检测时刻)}。
+    /// Pull 热加载指纹缓存 {宿主键: (上次指纹, 上次检测时刻)}。
     /// 调用 sidecar 时比对：TTL 内跳过 stat（零开销），TTL 过后 stat mtime 比对，
     /// 指纹变化则 kill 旧进程走 respawn 路径加载新代码/配置。
     /// （未用到也不检测——纯按需 pull。）
+    /// 合宿宿主指纹 = 当前成员指纹并集 + 成员集本身（§4.6）：任一成员代码变更或
+    /// 成员集变化 → kill 整宿主 respawn。
     fingerprints: RwLock<HashMap<String, (u64, Instant)>>,
-    /// sidecar 最后调用时刻 {plugin_id: Instant}——空闲软卸载依据。
-    /// 每次 get_or_create_mcp_client 命中/创建时刷新；后台 GC 据此判定是否空闲超时。
+    /// 宿主最后调用时刻 {宿主键: Instant}——空闲软卸载依据（§4.8）。
+    ///
+    /// 合宿宿主按宿主键记账：组内任一成员被调即整组续命；宿主空闲 = 全部成员
+    /// 都空闲（即宿主键条目超时）。每次 get_or_create_mcp_client 命中/创建时
+    /// 刷新；后台 GC 据此判定是否空闲超时。
     last_used: RwLock<HashMap<String, Instant>>,
+    /// light 组运行时装箱状态（分配表 + 槽位计数，见 [`LightPacking`]）。
+    light_packing: RwLock<LightPacking>,
     // （原 PYTHONPATH 注入状态字段 `pythonpath_src` 已退役——SDK 由
     // per-plugin venv 的 editable install 解析，`resolve_pythonpath_src` 已删除，
     // `set_pythonpath_src` 保留为兼容 no-op。）
@@ -452,6 +569,7 @@ impl PluginInvokerImpl {
             native_loader: None,
             fingerprints: RwLock::new(HashMap::new()),
             last_used: RwLock::new(HashMap::new()),
+            light_packing: RwLock::new(LightPacking::default()),
         }
     }
 
@@ -687,6 +805,10 @@ impl PluginInvokerImpl {
                 code: Some("MISSING_INVOKE_ENTRY".to_string()),
                 source: Some("plugin-invoker".to_string()),
             })?;
+        // 合宿宿主以工具名命名空间区分成员（§4.2 第 3 条）：light 成员的每个
+        // 工具在宿主侧注册为 `{plugin_id}.{tool_name}`，调用侧拼前缀分发；
+        // 独占宿主无前缀（现状不变）。
+        let mcp_tool_name = namespaced_tool_name(manifest, tool_name);
 
         // Sidecar 模式：通过 MCP 客户端调用
         let client_arc = self.get_or_create_mcp_client(manifest).await?;
@@ -717,7 +839,7 @@ impl PluginInvokerImpl {
             "_log_ctx": log_ctx,
         });
 
-        let result = match client.call_tool(tool_name, &tool_args).await {
+        let result = match client.call_tool(&mcp_tool_name, &tool_args).await {
             Ok(v) => v,
             Err(e) => {
                 // ② 失败后复查存活：死亡（含在途死亡）→ PLUGIN_CRASHED（可透明恢复）；
@@ -775,7 +897,9 @@ impl PluginInvokerImpl {
             });
         }
 
-        let result = match client.call_tool(tool_name, inputs).await {
+        // 合宿宿主工具名命名空间前缀（§4.2 第 3 条，与 pipeline 路径同构）。
+        let mcp_tool_name = namespaced_tool_name(manifest, tool_name);
+        let result = match client.call_tool(&mcp_tool_name, inputs).await {
             Ok(v) => v,
             Err(e) => {
                 // ② 失败后复查存活（在途死亡 → PLUGIN_CRASHED；否则原
@@ -1114,16 +1238,21 @@ impl PluginInvokerImpl {
     /// handler。幂等：缓存无条目（从未 spawn / 已是 HTTP 无子进程 / 重复调用）
     /// 直接返回。
     pub async fn kill_sidecar_if_any(&self, plugin_id: &str) {
-        let Some(client) = self.mcp_clients.write().remove(plugin_id) else {
+        // 宿主粒度：light 成员 disable 连坐整组（其他成员下次调用 respawn，
+        // 分配表条目保留——reenable 后回到原宿主）。
+        let Some(host_key) = self.existing_host_key_for(plugin_id) else {
+            return;
+        };
+        let Some(client) = self.mcp_clients.write().remove(&host_key) else {
             return;
         };
         let kill_fut = async { client.write().await.kill().await };
         match tokio::time::timeout(Duration::from_secs(2), kill_fut).await {
             Ok(Ok(())) => {
-                info!("kill_sidecar_if_any: killed sidecar of disabled plugin {plugin_id}")
+                info!("kill_sidecar_if_any: killed host {host_key} of disabled plugin {plugin_id}")
             }
             Ok(Err(e)) => {
-                warn!("kill_sidecar_if_any: best-effort kill of {plugin_id} failed: {e}")
+                warn!("kill_sidecar_if_any: best-effort kill of {host_key} failed: {e}")
             }
             Err(_) => {
                 warn!("kill_sidecar_if_any: kill of {plugin_id} timed out (2s)")
@@ -1181,72 +1310,80 @@ impl PluginInvokerImpl {
         }
     }
 
-    /// 获取或创建 MCP 客户端（按需加载）。
+    /// 获取或创建 MCP 客户端（按需加载，宿主键粒度——合宿进程模型 §4.2）。
     ///
-    /// 并发安全：用 per-plugin spawn 锁（single-flight）保证同一 plugin_id 的 spawn
-    /// 串行化——并发触发只创建一个 sidecar，不遗留孤儿进程。
+    /// light 合宿插件首次调用时经 [`Self::resolve_host_key`] 动态装箱到
+    /// `group:light:{n}` 宿主；其余 sidecar 走 `plugin:{plugin_id}` 独占宿主。
+    /// 并发安全：用 per-host spawn 锁（single-flight）保证同一宿主键的 spawn
+    /// 串行化——并发触发只创建一个宿主进程，不遗留孤儿进程；跨宿主并行。
     async fn get_or_create_mcp_client(
         &self,
         manifest: &PluginManifest,
     ) -> Result<Arc<tokio::sync::RwLock<McpClient>>, PluginError> {
+        // 宿主键解析：light 首次调用装箱分配（粘性），此后命中分配表直读。
+        let host_key = self.resolve_host_key(manifest);
+
         // Fast path：无锁查缓存，命中且未死直接返回（热路径，避开 spawn 锁开销）。
         // 判死走 is_dead_sidecar 门控（pid=Some 且 !is_alive）：HTTP transport
         // （pid 恒 None、is_alive 恒 false——无子进程）不得误判为崩溃。
         {
             let cached = {
                 let clients = self.mcp_clients.read();
-                clients.get(&manifest.id).cloned()
+                clients.get(&host_key).cloned()
             };
             if let Some(client) = cached {
                 let client_guard = client.read().await;
                 if !Self::is_dead_sidecar(&client_guard).await {
-                    // ── Pull 热加载：TTL 门 + 指纹比对 ──
-                    // 缓存进程存活时，检查插件代码/配置是否变更。TTL 内跳过 stat（零开销），
-                    // TTL 过后 stat 目录 mtime，发现变化则 kill 旧进程走下面的 respawn 路径
-                    // 加载新代码/配置；没变则直接复用缓存进程。未用到也不检测——纯按需 pull。
-                    if self.is_plugin_stale(&manifest.id, manifest).await {
+                    // ── Pull 热加载：TTL 门 + 指纹比对（合宿宿主 = 成员指纹并集）──
+                    // 缓存进程存活时，检查宿主指纹是否变更。TTL 内跳过 stat（零开销），
+                    // TTL 过后 stat 目录 mtime，发现变化则 kill 旧进程走下面的 respawn
+                    // 路径加载新代码/配置；没变则直接复用缓存进程。未用到也不检测——纯按需 pull。
+                    if self.is_host_stale(&host_key, manifest).await {
                         info!(
-                            "Plugin code/config changed, reloading sidecar: {}",
-                            manifest.id
+                            "Host code/config or member set changed, reloading host: {}",
+                            host_key
                         );
-                        // 复用下方「进程已崩溃」的 kill+remove 逻辑：kill 旧进程后
-                        // 自然进入 slow path respawn 新进程（加载最新磁盘代码）。
+                        // 复用下方「进程已崩溃」的 kill+remove 逻辑：kill 旧宿主后
+                        // 自然进入 slow path respawn（合宿宿主按当前分配表重建成员集）。
                         drop(client_guard);
                         if let Err(e) = client.write().await.kill().await {
                             tracing::debug!(
-                                "hot-reload: best-effort kill of stale sidecar {} failed (will respawn): {e}",
-                                manifest.id
+                                "hot-reload: best-effort kill of stale host {} failed (will respawn): {e}",
+                                host_key
                             );
                         }
-                        self.mcp_clients.write().remove(&manifest.id);
+                        self.mcp_clients.write().remove(&host_key);
                         // 不调 notify_crash（这不是崩溃，是主动热更新）
                     } else {
-                        self.touch_last_used(&manifest.id);
+                        self.touch_last_used(&host_key);
                         return Ok(Arc::clone(&client));
                     }
                 } else {
-                    // stdio sidecar 真死（pid=Some 且进程退出）——显式 kill 旧客户端
+                    // stdio 宿主真死（pid=Some 且进程退出）——显式 kill 旧客户端
                     // 再创建新的；HTTP transport（pid=None）不会进此分支。
-                    error!("Plugin process crashed: {}", manifest.id);
+                    // 合宿宿主死亡 = 全组成员进程死，逐成员触发崩溃回调（能力卸载语义）。
+                    error!("Host process crashed: {}", host_key);
                     drop(client_guard);
                     if let Err(e) = client.write().await.kill().await {
                         tracing::debug!(
-                            "crash cleanup: best-effort kill of crashed sidecar {} failed: {e}",
-                            manifest.id
+                            "crash cleanup: best-effort kill of crashed host {} failed: {e}",
+                            host_key
                         );
                     }
-                    self.notify_crash(&manifest.id);
-                    self.mcp_clients.write().remove(&manifest.id);
+                    for member in self.host_members(&host_key) {
+                        self.notify_crash(&member);
+                    }
+                    self.mcp_clients.write().remove(&host_key);
                 }
             }
         }
 
-        // Slow path：拿 per-plugin spawn 锁，串行化同 plugin_id 的 spawn。
-        // 取（或创建）该 plugin 的专用锁 Arc——锁本身常驻 spawn_locks，不随调用释放。
+        // Slow path：拿 per-host spawn 锁，串行化同宿主键的 spawn。
+        // 取（或创建）该宿主的专用锁 Arc——锁本身常驻 spawn_locks，不随调用释放。
         let spawn_lock = {
             let mut locks = self.spawn_locks.write();
             locks
-                .entry(manifest.id.clone())
+                .entry(host_key.clone())
                 .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
                 .clone()
         };
@@ -1258,23 +1395,23 @@ impl PluginInvokerImpl {
         {
             let cached = {
                 let clients = self.mcp_clients.read();
-                clients.get(&manifest.id).cloned()
+                clients.get(&host_key).cloned()
             };
             if let Some(client) = cached {
                 let client_guard = client.read().await;
                 if !Self::is_dead_sidecar(&client_guard).await {
-                    self.touch_last_used(&manifest.id);
+                    self.touch_last_used(&host_key);
                     return Ok(Arc::clone(&client));
                 }
                 // 极端情况：double-check 时又崩溃——kill 后继续 spawn
                 drop(client_guard);
                 if let Err(e) = client.write().await.kill().await {
                     tracing::debug!(
-                        "double-check: best-effort kill of sidecar {} failed (will respawn): {e}",
-                        manifest.id
+                        "double-check: best-effort kill of host {} failed (will respawn): {e}",
+                        host_key
                     );
                 }
-                self.mcp_clients.write().remove(&manifest.id);
+                self.mcp_clients.write().remove(&host_key);
             }
         }
 
@@ -1343,14 +1480,31 @@ impl PluginInvokerImpl {
                 c
             }
             _ => {
-                let (command, args) = self.resolve_sidecar_command(manifest)?;
+                // 第四维分流（合宿进程模型 §4.2 第 2 条）：light 合宿成员 → 共享组
+                // 宿主命令（host.py）；独占 → 插件自身 sidecar 命令（现状语义）。
+                // 两形态共用同一 spawn 锁/判死/respawn 代码路径，仅命令与工作目录不同。
+                let (command, args, working_dir) = if is_light_group_member(manifest) {
+                    let slot = parse_light_slot(&host_key)
+                        .expect("light 成员宿主键必含槽位号（resolve_host_key 分配保证）");
+                    let members = self.host_members(&host_key);
+                    let (command, args, workdir) =
+                        self.resolve_group_host_command(LIGHT_HOST_GROUP, slot, &members)?;
+                    (command, args, Some(workdir))
+                } else {
+                    let (command, args) = self.resolve_sidecar_command(manifest)?;
+                    let workdir = self.loader.get_plugin_dir(&manifest.id);
+                    (command, args, workdir)
+                };
                 let mut c = McpClient::new_stdio(command, args)
-                    // plugin_id 用于 stderr 转发时区分 sidecar 日志来源（[plugin_id] 前缀）。
-                    .with_plugin_id(&manifest.id);
+                    // 宿主键用于 stderr 转发时区分宿主日志来源（[host_key] 前缀）——
+                    // 合宿连接是组共享进程，按宿主键归因日志。
+                    .with_plugin_id(&host_key);
 
                 // 应用 Capability 路由器（启用 sidecar→内核反向调用通道）。
                 // 用 PluginScopedRouter 包装，把 manifest.id 注入每次反向调用的 params，
                 // 内核侧 metrics.record 据此做命名空间（监控设计 §三 通道2 + §十 安全）。
+                // 合宿连接为共享连接，_plugin_id 锚定触发本次 spawn 的成员（G6
+                // 信任锚点语义保留；首批灰度成员为 guard 类，无反向调用需求）。
                 {
                     let router_guard = self.router.read();
                     if let Some(router) = router_guard.as_ref() {
@@ -1362,9 +1516,10 @@ impl PluginInvokerImpl {
                     }
                 }
 
-                // 设置工作目录为插件目录（确保 server.py 等相对路径可解析）
-                if let Some(plugin_dir) = self.loader.get_plugin_dir(&manifest.id) {
-                    c = c.with_working_dir(plugin_dir);
+                // 设置工作目录（light 合宿 = plugins/shared/_host/；独占 = 插件目录，
+                // 确保 server.py 等相对路径可解析）
+                if let Some(dir) = working_dir {
+                    c = c.with_working_dir(dir);
                 }
 
                 // PYTHONPATH 注入已整体退役：SDK 由 per-plugin venv 的 editable
@@ -1460,19 +1615,19 @@ impl PluginInvokerImpl {
         }
 
         info!(
-            "MCP client connected and initialized: plugin={}",
-            manifest.id
+            "MCP client connected and initialized: host={}, caller={}",
+            host_key, manifest.id
         );
 
         let client_arc = Arc::new(tokio::sync::RwLock::new(client));
 
-        // 缓存
+        // 缓存（按宿主键——合宿成员共享同一客户端条目）
         {
             let mut clients = self.mcp_clients.write();
-            clients.insert(manifest.id.clone(), Arc::clone(&client_arc));
+            clients.insert(host_key.clone(), Arc::clone(&client_arc));
         }
-        // 新 spawn 即"活跃"，记录最后调用时刻（空闲软卸载依据）
-        self.touch_last_used(&manifest.id);
+        // 新 spawn 即"活跃"，记录宿主最后调用时刻（空闲软卸载依据）
+        self.touch_last_used(&host_key);
 
         Ok(client_arc)
     }
@@ -1569,11 +1724,254 @@ impl PluginInvokerImpl {
         Ok((command, args))
     }
 
-    /// 检查插件进程健康状态。
+    // ── 宿主键路由（合宿进程模型 §4.2/§4.5）────────────────────────────
+
+    /// 解析插件的宿主键：light 合宿成员动态装箱到组宿主，其余独占。
+    ///
+    /// light 首次调用时经 [`Self::assign_light_host`] 装箱（粘性，宿主存活期间
+    /// 归属不变）；此后每次调用命中分配表直读。独占宿主键纯函数构造，无状态。
+    fn resolve_host_key(&self, manifest: &PluginManifest) -> String {
+        if is_light_group_member(manifest) {
+            self.assign_light_host(&manifest.id)
+        } else {
+            solo_host_key(&manifest.id)
+        }
+    }
+
+    /// light 插件装箱分配宿主键（粘性 + 未满宿主优先 + 溢出开新宿主）。
+    fn assign_light_host(&self, plugin_id: &str) -> String {
+        self.assign_light_host_with(plugin_id, light_host_max_members())
+    }
+
+    /// 装箱核心逻辑（max_members 参数化以便单测注入，不读环境变量）。
+    ///
+    /// 落点规则（§4.5）：
+    /// 1. 分配表已有该插件 → 返回既有宿主键（粘性，宿主存活期间归属不变）；
+    /// 2. 从槽位 1 起找"当前挂载数 < 上限"的宿主塞入——已 idle GC 回收的宿主
+    ///    （成员条目已清、计数归 0）自然优先复用，而不是无限开新组；
+    /// 3. 全部满 → 开新槽位（序号 = next_slot+1，装箱顺序即序号）。
+    fn assign_light_host_with(&self, plugin_id: &str, max_members: usize) -> String {
+        let mut packing = self.light_packing.write();
+        if let Some(host_key) = packing.assignments.get(plugin_id) {
+            return host_key.clone();
+        }
+        let mut counts: HashMap<u64, usize> = HashMap::new();
+        for host_key in packing.assignments.values() {
+            if let Some(slot) = parse_light_slot(host_key) {
+                *counts.entry(slot).or_default() += 1;
+            }
+        }
+        for slot in 1..=packing.next_slot {
+            if counts.get(&slot).copied().unwrap_or(0) < max_members {
+                let host_key = light_host_key(slot);
+                packing
+                    .assignments
+                    .insert(plugin_id.to_string(), host_key.clone());
+                return host_key;
+            }
+        }
+        packing.next_slot += 1;
+        let host_key = light_host_key(packing.next_slot);
+        packing
+            .assignments
+            .insert(plugin_id.to_string(), host_key.clone());
+        host_key
+    }
+
+    /// 列出宿主的全部成员 plugin_id（排序后返回，作为稳定契约喂给 spawn/指纹/GC）。
+    ///
+    /// - light 组宿主：分配表反查（成员集随装箱动态变化，respawn 按当前表重建）；
+    /// - 独占宿主：键内嵌的 plugin_id 本身。
+    fn host_members(&self, host_key: &str) -> Vec<String> {
+        if parse_light_slot(host_key).is_some() {
+            let packing = self.light_packing.read();
+            let mut members: Vec<String> = packing
+                .assignments
+                .iter()
+                .filter(|(_, hk)| hk.as_str() == host_key)
+                .map(|(pid, _)| pid.clone())
+                .collect();
+            members.sort();
+            members
+        } else {
+            host_key
+                .strip_prefix("plugin:")
+                .map(|pid| vec![pid.to_string()])
+                .unwrap_or_default()
+        }
+    }
+
+    /// 已 spawn 宿主的宿主键反查（kill/unload 入口按 plugin_id 进来时用）。
+    ///
+    /// 优先级：light 分配表条目（manifest 可能已不可得但分配仍在）→ manifest
+    /// 判定（light 未分配 = 从未 spawn，无宿主；InProcess 无 sidecar 宿主）→
+    /// 独占键兜底（manifest 缺失时保守按独占处理，命中缓存即生效）。
+    fn existing_host_key_for(&self, plugin_id: &str) -> Option<String> {
+        if let Some(host_key) = self
+            .light_packing
+            .read()
+            .assignments
+            .get(plugin_id)
+            .cloned()
+        {
+            return Some(host_key);
+        }
+        match self.loader.get_manifest(plugin_id) {
+            Some(m) if is_light_group_member(&m) => None,
+            Some(m) if m.host_type != HostType::Sidecar => None,
+            _ => Some(solo_host_key(plugin_id)),
+        }
+    }
+
+    /// 解析合宿宿主 spawn 命令（§4.2 第 2 条：`python host.py --group light
+    /// --slot {n} --members {逗号分隔成员列表}`）。
+    ///
+    /// 返回 (command, args, 工作目录)。工作目录固定为合宿宿主目录
+    /// `plugins/shared/_host/`（host.py 与共享 venv 的所在地，由宿主侧任务承载，
+    /// 内核只管 spawn 参数契约）；解释器走共享 venv（uv 单轨 fail-closed：
+    /// 缺 `.venv` 直接报错，不回退 PATH 裸 python）。
+    fn resolve_group_host_command(
+        &self,
+        group: &str,
+        slot: u64,
+        members: &[String],
+    ) -> Result<(String, Vec<String>, String), PluginError> {
+        // _host 目录定位：从任一成员插件目录向上找含 _host 子目录的祖先
+        // （插件目录层级不固定：plugins/shared/<type>/<phase>/<name>）。
+        let host_dir = members
+            .iter()
+            .filter_map(|pid| self.loader.get_plugin_dir(pid))
+            .find_map(|dir| find_group_host_dir(Path::new(&dir)))
+            .ok_or_else(|| PluginError {
+                message: format!(
+                    "light 合宿宿主目录 {GROUP_HOST_DIR}/ 未定位到（从成员 {:?} 插件目录向上探测均未命中）——\
+                     host.py 由合宿宿主侧任务承载，请确认 plugins/shared/_host/ 已就位",
+                    members
+                ),
+                code: Some("HOST_DIR_NOT_FOUND".to_string()),
+                source: Some("plugin-invoker".to_string()),
+            })?;
+        // 共享 venv 解释器（fail-closed，与 resolve_sidecar_command 的 uv 单轨同轨）。
+        let interpreter = find_venv_interpreter(&host_dir).ok_or_else(|| PluginError {
+            message: format!(
+                "light 合宿宿主 {} 的共享 venv 解释器缺失（探测 {}/.venv/Scripts/python.exe 与 \
+                 .venv/bin/python 均不存在）——共享 venv（plugins/shared/_host/.venv）由宿主侧任务构建",
+                host_dir.display(),
+                GROUP_HOST_DIR
+            ),
+            code: Some("HOST_VENV_MISSING".to_string()),
+            source: Some("plugin-invoker".to_string()),
+        })?;
+        let mut sorted_members = members.to_vec();
+        sorted_members.sort();
+        let args = vec![
+            "host.py".to_string(),
+            "--group".to_string(),
+            group.to_string(),
+            "--slot".to_string(),
+            slot.to_string(),
+            "--members".to_string(),
+            sorted_members.join(","),
+        ];
+        Ok((
+            interpreter.to_string_lossy().into_owned(),
+            args,
+            host_dir.to_string_lossy().into_owned(),
+        ))
+    }
+
+    /// 合宿宿主指纹：当前成员指纹并集 + 成员集本身（§4.5 第 4 条/§4.6）。
+    ///
+    /// 成员集排序后逐个并入（plugin_id + 各自目录指纹）；任一成员代码/配置
+    /// 变更（单成员指纹变）或成员集变化（新成员加入/移出）都会使宿主指纹变化，
+    /// 触发 kill 整宿主 respawn。成员 manifest 不可得（插件已被移除）按指纹 0
+    /// 纳入（对齐 resolve_fingerprint 拿不到目录返回 0 的哲学）。
+    fn host_union_fingerprint(&self, host_key: &str) -> u64 {
+        use std::collections::hash_map::DefaultHasher;
+        use std::hash::Hasher;
+        let mut hasher = DefaultHasher::new();
+        hasher.write(host_key.as_bytes());
+        for pid in self.host_members(host_key) {
+            let fp = match self.loader.get_manifest(&pid) {
+                Some(manifest) => self.resolve_fingerprint(&manifest),
+                None => 0,
+            };
+            hasher.write(pid.as_bytes());
+            hasher.write(b"|");
+            hasher.write(&fp.to_le_bytes());
+        }
+        hasher.finish()
+    }
+
+    /// 宿主过期检测（Pull 热加载，TTL 门 + 指纹比对——宿主键粒度）。
+    ///
+    /// 独占宿主指纹 = 插件自身指纹（现状语义）；light 宿主 = 成员指纹并集。
+    /// 首次调用（缓存无记录）写入指纹返回 false（首次走 spawn，必是最新）。
+    async fn is_host_stale(&self, host_key: &str, caller: &PluginManifest) -> bool {
+        let now = Instant::now();
+        // TTL 门 + 指纹比对在同一把读锁下原子完成（计算指纹前先快照缓存）。
+        let cached = self.fingerprints.read().get(host_key).cloned();
+        let current_fp = |hk: &str| {
+            if parse_light_slot(hk).is_some() {
+                self.host_union_fingerprint(hk)
+            } else {
+                self.resolve_fingerprint(caller)
+            }
+        };
+        match cached {
+            None => {
+                // 首次：写入指纹，不算过期（此时进程刚 spawn，必是最新）
+                let fp = current_fp(host_key);
+                self.fingerprints
+                    .write()
+                    .insert(host_key.to_string(), (fp, now));
+                false
+            }
+            Some((old_fp, last_check)) => {
+                // TTL 门：未到期直接复用
+                if now.duration_since(last_check) < PLUGIN_FINGERPRINT_TTL {
+                    return false;
+                }
+                // TTL 过期：算当前指纹比对
+                let new_fp = current_fp(host_key);
+                let stale = new_fp != old_fp;
+                // 无论是否过期都刷新检测时刻；指纹变了才更新缓存指纹
+                let to_store = if stale { new_fp } else { old_fp };
+                self.fingerprints
+                    .write()
+                    .insert(host_key.to_string(), (to_store, now));
+                stale
+            }
+        }
+    }
+
+    /// 宿主空闲回收阈值（组内全部成员的 idle_timeout_secs 聚合，§4.8）。
+    ///
+    /// 任一成员声明 `Some(0)`（永不空闲卸载）→ 宿主永不回收（连坐保护）；
+    /// 否则取成员声明/默认值的最严格（最大）阈值——任何成员要求保活更久，
+    /// 整组就保活更久（整组回收是连坐，宁晚勿早）。
+    fn host_idle_timeout_secs(&self, members: &[String]) -> u64 {
+        let mut max = 0;
+        for pid in members {
+            let secs = self.idle_timeout_secs_sync(pid);
+            if secs == 0 {
+                return 0;
+            }
+            max = max.max(secs);
+        }
+        max
+    }
+
+    /// 检查插件进程健康状态（宿主粒度：light 成员问健康 = 其所在宿主进程活着）。
     pub async fn check_health(&self, plugin_id: &str) -> bool {
+        let host_key = match self.existing_host_key_for(plugin_id) {
+            Some(hk) => hk,
+            // 从未分配宿主（未 spawn / InProcess / 非 sidecar）无进程可查。
+            None => return false,
+        };
         let client_arc = {
             let clients = self.mcp_clients.read();
-            clients.get(plugin_id).cloned()
+            clients.get(&host_key).cloned()
         };
         if let Some(client) = client_arc {
             let guard = client.read().await;
@@ -1621,16 +2019,20 @@ impl PluginInvokerImpl {
         }
     }
 
-    /// 刷新 sidecar 的最后调用时刻（调用即"活跃"，重置空闲计时）。
-    fn touch_last_used(&self, plugin_id: &str) {
+    /// 刷新宿主的最后调用时刻（调用即"活跃"，重置空闲计时——宿主键粒度）。
+    ///
+    /// 合宿宿主：组内任一成员被调即整组续命（last_used 按宿主键记账，
+    /// 宿主空闲 = 全部成员都空闲，§4.8）。
+    fn touch_last_used(&self, host_key: &str) {
         self.last_used
             .write()
-            .insert(plugin_id.to_string(), Instant::now());
+            .insert(host_key.to_string(), Instant::now());
     }
 
     /// 统一软卸载：按 host_type 分流，进程 kill 但 manifest 描述保留（下次调用重新 spawn）。
     ///
-    /// - sidecar：复用 force_unload_impl（kill 进程 + 清缓存）
+    /// - sidecar：卸载插件所在宿主（合宿 = kill 整组；独占 = kill 单进程），
+    ///   并回收分配表槽位（idle 语境 = 槽位释放复用，§4.8「回收即清空」）
     /// - InProcess（rust 原生 cdylib）：跳过（Windows dlclose 限制），返回 false
     ///
     /// 返回 true 表示已卸载，false 表示未卸载（不支持的类型或未加载）。
@@ -1642,13 +2044,13 @@ impl PluginInvokerImpl {
                 Ok(loaded) => loaded.manifest.host_type,
                 Err(_) => {
                     // 加载失败也可能意味着已不在——尝试清 sidecar 缓存
-                    return self.force_unload_impl(plugin_id).await.is_ok();
+                    return self.unload_plugin_host(plugin_id, true).await.is_ok();
                 }
             }
         };
 
         match host_type {
-            HostType::Sidecar => self.force_unload_impl(plugin_id).await.is_ok(),
+            HostType::Sidecar => self.unload_plugin_host(plugin_id, true).await.is_ok(),
             HostType::InProcess => {
                 // rust 原生 cdylib：dlclose 限制，不自动卸载
                 tracing::debug!(
@@ -1662,7 +2064,7 @@ impl PluginInvokerImpl {
 
     /// 启动后台空闲软卸载 GC 任务。
     ///
-    /// 每 30s 扫描 last_used，对空闲超过阈值的插件调 unload_if_idle
+    /// 每 30s 扫描 last_used（宿主键粒度），对空闲超过阈值的宿主整组回收
     /// （sidecar kill 进程，manifest 描述保留，下次调用重新 spawn）。
     /// 对齐 trait 文档声明的「空闲超时自动卸载」设计原则。
     ///
@@ -1670,7 +2072,7 @@ impl PluginInvokerImpl {
     pub fn start_idle_gc(self: &Arc<Self>) {
         let invoker = Arc::clone(self);
         tokio::spawn(async move {
-            // 扫描间隔：30s。比默认 300s 阈值短得多，保证空闲插件能在阈值后一个周期内被回收。
+            // 扫描间隔：30s。比默认 300s 阈值短得多，保证空闲宿主能在阈值后一个周期内被回收。
             let mut interval = tokio::time::interval(Duration::from_secs(30));
             interval.tick().await; // 跳过立即触发的第一次
             loop {
@@ -1681,39 +2083,40 @@ impl PluginInvokerImpl {
         info!("Plugin idle-unload GC task started (scan every 30s)");
     }
 
-    /// 单次 GC 扫描：收集所有已加载插件的 id + 最后调用时刻，对超时的软卸载。
+    /// 单次 GC 扫描：收集所有活跃宿主键 + 最后调用时刻，对超时的整组回收（§4.8）。
     async fn run_idle_gc_pass(&self) {
-        // 快照当前所有"活跃"插件 id，避免长时间持锁
+        // 快照当前所有"活跃"宿主键，避免长时间持锁
         let candidates: Vec<String> = {
-            let sidecar_ids: Vec<String> = self.last_used.read().keys().cloned().collect();
-            let mut all: Vec<String> = sidecar_ids;
-            all.sort();
-            all.dedup();
-            all
+            let mut keys: Vec<String> = self.last_used.read().keys().cloned().collect();
+            keys.sort();
+            keys.dedup();
+            keys
         };
 
         let now = Instant::now();
-        for plugin_id in candidates {
-            // sidecar 空闲判定
+        for host_key in candidates {
+            // 宿主空闲判定（合宿：整组续命语义下，宿主键条目过期 = 全部成员空闲）
             let idle_secs = self
                 .last_used
                 .read()
-                .get(&plugin_id)
+                .get(&host_key)
                 .map(|t| now.duration_since(*t).as_secs())
                 .unwrap_or(0);
             if idle_secs == 0 {
                 continue;
             }
-            let threshold = self.idle_timeout_secs_sync(&plugin_id);
-            // threshold == 0 表示该插件声明"永不空闲卸载"，跳过。
+            let members = self.host_members(&host_key);
+            let threshold = self.host_idle_timeout_secs(&members);
+            // threshold == 0 表示宿主持久保活（任一成员声明"永不空闲卸载"），跳过。
             if threshold != 0 && idle_secs > threshold {
                 info!(
-                    plugin_id = %plugin_id,
+                    host = %host_key,
+                    members = ?members,
                     idle_secs = idle_secs,
                     threshold = threshold,
-                    "Plugin idle-unloading (soft): exceeds idle timeout"
+                    "Host idle-unloading (soft): exceeds idle timeout"
                 );
-                let _ = self.unload_if_idle(&plugin_id).await;
+                let _ = self.unload_host(&host_key, true).await;
             }
         }
     }
@@ -1747,52 +2150,116 @@ impl PluginInvokerImpl {
     }
 
     /// 强制卸载插件的实现（供 trait 方法 force_unload 与内部热重载复用）。
+    ///
+    /// 宿主语义（合宿进程模型 §4.2）：kill 插件所在**宿主**——light 成员连坐整组
+    /// （组指纹变化触发整组 respawn 的对称面），独占成员杀单进程。分配表保留
+    /// （respawn 按当前表重建成员集，§4.5 第 2 条分配粘性），槽位回收只在
+    /// idle GC 路径（[`Self::unload_if_idle`]）发生。
     pub async fn force_unload_impl(&self, plugin_id: &str) -> Result<(), PluginError> {
-        // 旁路广播 OnUnload（杀进程/卸载之前）。与 get_or_create_mcp_client 里的 OnLoad
-        // emit 对称：观察层（审计日志 / `lifecycle.plugin_*` 指标）关注"插件进程即将被
-        // 卸载"这一事实。best-effort、非阻塞；未注入总线（`None`，如单测）时 no-op。
-        {
-            let bus_guard = self.hook_bus.read();
-            if let Some(bus) = bus_guard.as_ref() {
-                let mut ctx = HookContext::new();
-                ctx.set("plugin_id", json!(plugin_id));
-                bus.emit(LifecycleEvent {
-                    hook: LifecycleHook::OnUnload,
-                    ctx,
-                    target: EventTarget::Plugin(plugin_id.to_string()),
-                    ts: SystemTime::now(),
-                });
+        self.unload_plugin_host(plugin_id, false).await
+    }
+
+    /// 按插件 id 卸载其宿主（force_unload 与 unload_if_idle 的公共实现）。
+    ///
+    /// `reclaim_assignments`：idle 语境（GC 回收）为 true——连同清掉分配表内
+    /// 该宿主的全部成员条目，槽位释放供后续装箱复用（§4.8「回收即清空」）；
+    /// 热重载/崩溃恢复语境为 false——保留分配表，respawn 按表重建成员集。
+    async fn unload_plugin_host(
+        &self,
+        plugin_id: &str,
+        reclaim_assignments: bool,
+    ) -> Result<(), PluginError> {
+        match self.existing_host_key_for(plugin_id) {
+            Some(host_key) => self.unload_host(&host_key, reclaim_assignments).await,
+            None => {
+                // 无宿主（light 从未分配 / InProcess / manifest 已不可得且无分配）：
+                // 无进程可杀，仅做 loader 侧卸载 + OnUnload 旁路广播（与无缓存路径
+                // 的既有语义对齐）。
+                self.emit_lifecycle_unload(plugin_id);
+                let _ = self.loader.unload(plugin_id).await;
+                Ok(())
             }
+        }
+    }
+
+    /// 卸载宿主：kill 进程 + 清缓存/指纹/last_used（记账粒度全部按宿主键）。
+    ///
+    /// 宿主是进程所有权单位（方案 §〇）：合宿宿主的 kill 连坐全部成员——
+    /// OnUnload 旁路广播与 loader.unload 逐成员执行；分配表条目按
+    /// `reclaim_assignments` 决定是否释放（见 [`Self::unload_plugin_host`]）。
+    async fn unload_host(
+        &self,
+        host_key: &str,
+        reclaim_assignments: bool,
+    ) -> Result<(), PluginError> {
+        let members = self.host_members(host_key);
+
+        // 旁路广播 OnUnload（杀进程/卸载之前，逐成员）。与 get_or_create_mcp_client
+        // 里的 OnLoad emit 对称：观察层（审计日志 / `lifecycle.plugin_*` 指标）关注
+        // "插件进程即将被卸载"这一事实。best-effort、非阻塞；未注入总线（`None`，
+        // 如单测）时 no-op。
+        for member in &members {
+            self.emit_lifecycle_unload(member);
         }
 
         let client_arc = {
             let mut clients = self.mcp_clients.write();
-            clients.remove(plugin_id)
+            clients.remove(host_key)
         };
 
         if let Some(client_arc) = client_arc {
             let mut client = client_arc.write().await;
-            // 镜像 OnLoad 的 notifications/on_load：杀进程之前发 on_unload 给插件自己一个
+            // 镜像 OnLoad 的 notifications/on_load：杀进程之前发 on_unload 给宿主一个
             // 收尾机会（fire-and-forget，不等响应）。失败仅 warn 不阻断——进程可能已崩溃
             // 或不响应该通知，该杀仍杀（卸载语义不变）。
             let _ = client
                 .send_notification("notifications/on_unload", None)
                 .await
-                .inspect_err(|e| warn!("on_unload notification failed for {}: {}", plugin_id, e));
+                .inspect_err(|e| warn!("on_unload notification failed for {}: {}", host_key, e));
             if let Err(e) = client.kill().await {
-                warn!("Failed to kill crashed plugin {}: {}", plugin_id, e);
+                warn!("Failed to kill host {}: {}", host_key, e);
             }
         }
 
-        // 也通过 loader 卸载
-        let _ = self.loader.unload(plugin_id).await;
+        // 也通过 loader 卸载（宿主粒度：合宿组连坐全部成员）
+        for member in &members {
+            let _ = self.loader.unload(member).await;
+        }
 
-        // 清除指纹缓存 + last_used，下次调用重新计算并 respawn
-        self.fingerprints.write().remove(plugin_id);
-        self.last_used.write().remove(plugin_id);
+        // 清除指纹缓存 + last_used（宿主键），下次调用重新计算并 respawn
+        self.fingerprints.write().remove(host_key);
+        self.last_used.write().remove(host_key);
 
-        info!("Force unloaded plugin: {}", plugin_id);
+        // idle GC 回收语境：清分配表内该宿主的全部成员条目——槽位全部释放，
+        // 后续新插件装箱时优先复用（§4.5 第 3 条 / §4.8「回收即清空」）。
+        if reclaim_assignments {
+            self.light_packing
+                .write()
+                .assignments
+                .retain(|_, hk| hk.as_str() != host_key);
+        }
+
+        info!(
+            "Force unloaded host: {} (members: {:?}, reclaim_slots: {})",
+            host_key, members, reclaim_assignments
+        );
         Ok(())
+    }
+
+    /// 旁路广播单成员 OnUnload（unload_host 逐成员调用）。
+    fn emit_lifecycle_unload(&self, plugin_id: &str) {
+        let bus_guard = self.hook_bus.read();
+        let Some(bus) = bus_guard.as_ref() else {
+            return;
+        };
+        let mut ctx = HookContext::new();
+        ctx.set("plugin_id", json!(plugin_id));
+        bus.emit(LifecycleEvent {
+            hook: LifecycleHook::OnUnload,
+            ctx,
+            target: EventTarget::Plugin(plugin_id.to_string()),
+            ts: SystemTime::now(),
+        });
     }
 
     /// Pull 热加载核心：判断缓存的 sidecar 进程是否因代码/配置变更而过期。
@@ -2028,9 +2495,10 @@ impl PluginInvoker for PluginInvokerImpl {
                 source: None,
             });
         }
-        // 新 spawn 判定：校验前缓存里没有该插件的存活连接（本次会 spawn 新进程）
+        // 新 spawn 判定：校验前缓存里没有该插件所在宿主的存活连接（本次会 spawn 新进程）
+        let host_key_probe = self.resolve_host_key(manifest);
         let was_new = {
-            let cached = self.mcp_clients.read().get(plugin_id).cloned();
+            let cached = self.mcp_clients.read().get(&host_key_probe).cloned();
             match cached {
                 Some(client) => {
                     let guard = client.read().await;
@@ -2048,7 +2516,8 @@ impl PluginInvoker for PluginInvokerImpl {
                 source: None,
             })?
         };
-        // 本次新 spawn 的进程：校验完回收（kill + 移除缓存），懒加载语义不被破坏。
+        // 本次新 spawn 的宿主进程：校验完回收（kill + 移除缓存），懒加载语义不被
+        // 破坏（宿主粒度——light 探测会 spawn 整组宿主，校验完连同整组回收）。
         // 例外（2026-08-20）：声明了 lifecycle_hooks 的插件 on_load 有副作用
         // （起子进程/绑端口——hindsight-api 占 8420 即实测案例），探测完 kill 会
         // 把初始化成果毁掉且孤儿子进程占端口 → 此类插件不 kill，进程交 idle GC
@@ -2056,11 +2525,11 @@ impl PluginInvoker for PluginInvokerImpl {
         if was_new && manifest.capabilities.lifecycle_hooks.is_empty() {
             if let Err(e) = client.write().await.kill().await {
                 tracing::debug!(
-                    "G2 verify: best-effort kill of freshly spawned sidecar {} failed (idle GC will reap): {e}",
-                    plugin_id
+                    "G2 verify: best-effort kill of freshly spawned host {} failed (idle GC will reap): {e}",
+                    host_key_probe
                 );
             }
-            self.mcp_clients.write().remove(plugin_id);
+            self.mcp_clients.write().remove(&host_key_probe);
         }
         Ok(raw)
     }
@@ -2255,6 +2724,7 @@ mod tests {
             pipeline_role: None,
             language: "python".to_string(),
             host_type: HostType::Sidecar,
+            host_group: None,
             entry: entry.to_string(),
             capabilities: Default::default(),
             requires_services: vec![],
@@ -2277,6 +2747,13 @@ mod tests {
         }
     }
 
+    /// 构造 light 合宿 sidecar manifest（host_group="light"，合宿路由测试用）。
+    fn make_light_manifest(id: &str, entry: &str) -> PluginManifest {
+        let mut m = make_sidecar_manifest(id, entry);
+        m.host_group = Some("light".to_string());
+        m
+    }
+
     fn make_inprocess_manifest(id: &str) -> PluginManifest {
         PluginManifest {
             id: id.to_string(),
@@ -2287,6 +2764,7 @@ mod tests {
             pipeline_role: None,
             language: "rust".to_string(),
             host_type: HostType::InProcess,
+            host_group: None,
             entry: "test_entry".to_string(),
             capabilities: Default::default(),
             requires_services: vec![],
@@ -2667,6 +3145,7 @@ mod tests {
             pipeline_role: None,
             language: "yaml".to_string(),
             host_type: HostType::InProcess,
+            host_group: None,
             entry: String::new(),
             capabilities: Default::default(),
             requires_services: vec![],
@@ -2916,13 +3395,14 @@ mod tests {
 
         // 手工把 HTTP 客户端放进缓存（new_http 未连接态与连接后同构：
         // child 恒 None → pid 恒 None，判定只看 pid 门控）。
+        // 缓存键 = 宿主键（外部 MCP 不进合宿组 → 独占键 plugin:{id}）。
         let cached: Arc<tokio::sync::RwLock<McpClient>> = Arc::new(tokio::sync::RwLock::new(
             McpClient::new_http("http://127.0.0.1:9/mcp", HashMap::new(), None),
         ));
         invoker
             .mcp_clients
             .write()
-            .insert("http_cached".to_string(), Arc::clone(&cached));
+            .insert("plugin:http_cached".to_string(), Arc::clone(&cached));
 
         let got = invoker
             .get_or_create_mcp_client(&manifest)
@@ -2935,7 +3415,11 @@ mod tests {
             "fast path 必须返回缓存实例，不得逐出重建"
         );
         // 缓存条目未被移除/替换
-        let in_cache = invoker.mcp_clients.read().get("http_cached").cloned();
+        let in_cache = invoker
+            .mcp_clients
+            .read()
+            .get("plugin:http_cached")
+            .cloned();
         assert!(
             in_cache.map(|c| Arc::ptr_eq(&c, &cached)).unwrap_or(false),
             "缓存条目不得被移除"
@@ -2983,7 +3467,7 @@ mod tests {
         invoker
             .mcp_clients
             .write()
-            .insert("stdio_dead".to_string(), Arc::clone(&cached));
+            .insert("plugin:stdio_dead".to_string(), Arc::clone(&cached));
 
         tokio::time::sleep(std::time::Duration::from_millis(700)).await;
 
@@ -2996,7 +3480,7 @@ mod tests {
             "stdio 真死必须触发 notify_crash（一次）"
         );
         // 死实例被从缓存逐出
-        let in_cache = invoker.mcp_clients.read().get("stdio_dead").cloned();
+        let in_cache = invoker.mcp_clients.read().get("plugin:stdio_dead").cloned();
         assert!(
             !in_cache.map(|c| Arc::ptr_eq(&c, &cached)).unwrap_or(false),
             "死 sidecar 必须从缓存逐出"
@@ -3083,22 +3567,23 @@ mod tests {
         let live = spawn_long_lived_stdio_client().await;
         assert!(live.is_alive().await, "前置：长驻假 sidecar 必须存活");
         let live_arc = Arc::new(tokio::sync::RwLock::new(live));
+        // 缓存键 = 宿主键（独占：plugin:{id}；victim 无 manifest，走独占兜底键）
         invoker
             .mcp_clients
             .write()
-            .insert("victim".to_string(), Arc::clone(&live_arc));
+            .insert("plugin:victim".to_string(), Arc::clone(&live_arc));
 
         // 无缓存：no-op（不 panic、不影响其他条目）
         invoker.kill_sidecar_if_any("never_spawned").await;
         assert!(
-            invoker.mcp_clients.read().get("victim").is_some(),
+            invoker.mcp_clients.read().get("plugin:victim").is_some(),
             "非目标插件缓存不得被误删"
         );
 
         // 有缓存：kill + 移除
         invoker.kill_sidecar_if_any("victim").await;
         assert!(
-            invoker.mcp_clients.read().get("victim").is_none(),
+            invoker.mcp_clients.read().get("plugin:victim").is_none(),
             "目标插件缓存必须移除"
         );
         assert!(
@@ -3288,6 +3773,7 @@ mod tests {
             pipeline_role: None,
             language: "python".to_string(),
             host_type: HostType::Sidecar,
+            host_group: None,
             entry: "python server.py".to_string(),
             capabilities: Default::default(),
             requires_services: vec![],
@@ -4204,5 +4690,647 @@ mod tests {
             inner: Arc::new(RecordRouter { calls }),
         });
         assert_eq!(scoped.known_namespaces(), vec!["custom-ns".to_string()]);
+    }
+
+    // ── 合宿进程模型（§4.1/4.2/4.5/4.6/4.8）──
+    //
+    // 测试形态取舍（诚实记录）：完整"真 host.py 合宿"链路依赖宿主侧任务（host.py
+    // 未落地），这里测**路由/装箱/指纹/GC 逻辑层**——宿主键路由、装箱落点、槽位
+    // 复用、指纹并集敏感性与整宿主 respawn 触发、spawn 锁粒度、spawn 参数契约。
+    // 行为级验证用长驻假进程（spawn_long_lived_stdio_client）+ 手工塞缓存模拟
+    // 已 spawn 宿主，与既有 §3.2/§3.3 测试同构。
+
+    #[tokio::test]
+    async fn test_host_key_routing_light_vs_solo() {
+        // 宿主键路由（§4.2 第 1 条）：light → 组键；缺省/其他值/外部 MCP/InProcess
+        // → 独占键 plugin:{id}（四组有区分度输入一次覆盖）。
+        let loader = Arc::new(MockLoader::new());
+        let invoker = PluginInvokerImpl::new(loader);
+
+        // light sidecar → 首次装箱 group:light:1
+        let light = make_light_manifest("guard_a", "python server.py");
+        assert_eq!(invoker.resolve_host_key(&light), "group:light:1");
+
+        // 缺省 host_group → 独占键
+        let solo = make_sidecar_manifest("heavy_tool", "python server.py");
+        assert_eq!(invoker.resolve_host_key(&solo), "plugin:heavy_tool");
+
+        // 非 "light" 值（如 "heavy"）→ 保守独占
+        let mut non_light = make_sidecar_manifest("other_group", "python server.py");
+        non_light.host_group = Some("heavy".to_string());
+        assert_eq!(
+            invoker.resolve_host_key(&non_light),
+            "plugin:other_group"
+        );
+
+        // light 声明但外部 MCP（进程归外部所有）→ 独占键
+        let mut ext = make_light_manifest("ext_light", "external");
+        ext.mcp = Some(McpConfig {
+            transport: McpTransport::StreamableHttp,
+            endpoint: Some(McpEndpoint {
+                url: Some("http://127.0.0.1:9/mcp".to_string()),
+                ..Default::default()
+            }),
+            idle_timeout_secs: 300,
+            protocol_version: "2025-06-18".to_string(),
+            request_timeout_secs: None,
+        });
+        assert_eq!(invoker.resolve_host_key(&ext), "plugin:ext_light");
+    }
+
+    #[tokio::test]
+    async fn test_light_packing_fill_overflow_sticky() {
+        // 装箱落点（§4.5）：未满宿主优先塞入 → 溢出开新宿主 → 分配粘性。
+        // max_members=2 注入（不碰环境变量）。
+        let loader = Arc::new(MockLoader::new());
+        let invoker = PluginInvokerImpl::new(loader);
+
+        let assign = |pid: &str| invoker.assign_light_host_with(pid, 2);
+        // a,b 塞满 slot 1；c,d 塞满 slot 2；e 溢出开 slot 3
+        assert_eq!(assign("a"), "group:light:1", "首个成员开新宿主 slot 1");
+        assert_eq!(assign("b"), "group:light:1", "未满宿主优先塞入（粘性到 slot 1）");
+        assert_eq!(assign("c"), "group:light:2", "slot 1 满 → 溢出开新宿主");
+        assert_eq!(assign("d"), "group:light:2", "slot 2 未满继续塞");
+        assert_eq!(assign("e"), "group:light:3", "全部满 → 再开新宿主");
+
+        // 分配粘性：已分配成员重复查询返回原宿主（宿主存活期间归属不变）
+        assert_eq!(assign("a"), "group:light:1", "粘性：a 归属不变");
+        assert_eq!(assign("c"), "group:light:2", "粘性：c 归属不变");
+        // 成员集反查：slot 1 恰含 {a,b}（排序）
+        assert_eq!(
+            invoker.host_members("group:light:1"),
+            vec!["a".to_string(), "b".to_string()]
+        );
+    }
+
+    #[tokio::test]
+    async fn test_light_packing_slot_reuse_after_reclaim() {
+        // 槽位复用（§4.5 第 3 条）：宿主被回收（分配表条目清空）后槽位空出，
+        // 后续新插件装箱优先复用该宿主，而不是无限开新组。
+        let loader = Arc::new(MockLoader::new());
+        let invoker = PluginInvokerImpl::new(loader);
+
+        let assign = |pid: &str| invoker.assign_light_host_with(pid, 2);
+        assert_eq!(assign("a"), "group:light:1");
+        assert_eq!(assign("b"), "group:light:1");
+        assert_eq!(assign("c"), "group:light:2");
+        assert_eq!(assign("d"), "group:light:2");
+        assert_eq!(assign("e"), "group:light:3");
+
+        // idle GC 回收 slot 1（reclaim=true 清分配表成员条目）
+        invoker.unload_host("group:light:1", true).await.unwrap();
+        assert!(
+            invoker.host_members("group:light:1").is_empty(),
+            "回收后分配表成员条目必须清空"
+        );
+
+        // 新成员 f 落点 = 复用 slot 1（计数归 0 优先），不开 slot 4
+        assert_eq!(assign("f"), "group:light:1", "回收槽位优先复用");
+        // 被回收的老成员 a 重新分配也回 slot 1（分配条目已清，按未满规则落点）
+        assert_eq!(assign("a"), "group:light:1");
+    }
+
+    #[tokio::test]
+    async fn test_idle_gc_reclaims_whole_host_and_frees_slots() {
+        // idle GC 整组回收（§4.8）：宿主空闲（键条目超阈值）→ kill 宿主进程 +
+        // 清缓存/指纹/last_used + 分配表成员条目全部释放（槽位复用）。
+        let loader = Arc::new(MockLoader::new());
+        loader.add_manifest(make_light_manifest("guard_a", "python server.py"));
+        loader.add_manifest(make_light_manifest("guard_b", "python server.py"));
+        let invoker = PluginInvokerImpl::new(loader);
+
+        // 装箱 a,b → group:light:1；模拟已 spawn 宿主（长驻假进程入缓存）
+        invoker.resolve_host_key(&make_light_manifest("guard_a", "python server.py"));
+        invoker.resolve_host_key(&make_light_manifest("guard_b", "python server.py"));
+        let host_key = "group:light:1".to_string();
+        let live = spawn_long_lived_stdio_client().await;
+        let live_arc = Arc::new(tokio::sync::RwLock::new(live));
+        invoker
+            .mcp_clients
+            .write()
+            .insert(host_key.clone(), Arc::clone(&live_arc));
+        invoker.touch_last_used(&host_key);
+        invoker
+            .fingerprints
+            .write()
+            .insert(host_key.clone(), (42u64, Instant::now()));
+
+        // 回写旧时间戳：空闲 400s > 默认阈值 300s
+        invoker
+            .last_used
+            .write()
+            .insert(host_key.clone(), Instant::now() - Duration::from_secs(400));
+
+        invoker.run_idle_gc_pass().await;
+
+        assert!(
+            !live_arc.read().await.is_alive().await,
+            "整组空闲超时必须 kill 宿主进程"
+        );
+        assert!(
+            invoker.mcp_clients.read().get(&host_key).is_none(),
+            "回收即清空：mcp_clients 条目必须移除"
+        );
+        assert!(
+            invoker.last_used.read().get(&host_key).is_none(),
+            "回收即清空：last_used 条目必须移除"
+        );
+        assert!(
+            invoker.fingerprints.read().get(&host_key).is_none(),
+            "回收即清空：指纹条目必须移除"
+        );
+        assert!(
+            invoker.light_packing.read().assignments.is_empty(),
+            "回收即清空：分配表内该宿主全部成员条目必须释放"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_idle_gc_skips_host_with_never_unload_member() {
+        // 连坐保护（§4.8）：任一成员声明 idle_timeout_secs=0（永不卸载）→
+        // 宿主整组永不空闲回收（其他成员的 last_used 续命语义之外的第二道防线）。
+        let loader = Arc::new(MockLoader::new());
+        let mut never = make_light_manifest("never_idle", "python server.py");
+        never.lifecycle = Some(agentos_core::traits::PluginLifecycle {
+            idle_timeout_secs: Some(0),
+        });
+        loader.add_manifest(never);
+        loader.add_manifest(make_light_manifest("guard_b", "python server.py"));
+        let invoker = PluginInvokerImpl::new(loader);
+
+        invoker.resolve_host_key(&make_light_manifest("never_idle", "python server.py"));
+        invoker.resolve_host_key(&make_light_manifest("guard_b", "python server.py"));
+        let host_key = "group:light:1".to_string();
+        let live = spawn_long_lived_stdio_client().await;
+        let live_arc = Arc::new(tokio::sync::RwLock::new(live));
+        invoker
+            .mcp_clients
+            .write()
+            .insert(host_key.clone(), Arc::clone(&live_arc));
+        invoker
+            .last_used
+            .write()
+            .insert(host_key.clone(), Instant::now() - Duration::from_secs(400));
+
+        invoker.run_idle_gc_pass().await;
+
+        assert!(
+            live_arc.read().await.is_alive().await,
+            "含永不卸载成员的宿主不得被 GC 回收"
+        );
+        assert!(invoker.mcp_clients.read().get(&host_key).is_some());
+    }
+
+    #[tokio::test]
+    async fn test_host_union_fingerprint_sensitivity() {
+        // 指纹并集（§4.6）：宿主指纹 = 成员指纹并集 + 成员集本身——
+        // 成员代码变更、成员集变化均触发变化；同状态稳定。
+        let tmp = tempfile::tempdir().unwrap();
+        let dir_a = tmp.path().join("guard_a");
+        let dir_b = tmp.path().join("guard_b");
+        for d in [&dir_a, &dir_b] {
+            std::fs::create_dir_all(d).unwrap();
+            std::fs::write(d.join("server.py"), b"print(1)").unwrap();
+        }
+        let loader = Arc::new(MockLoader::new());
+        let manifest_a = make_light_manifest("guard_a", "python server.py");
+        let manifest_b = make_light_manifest("guard_b", "python server.py");
+        loader.add_manifest(manifest_a.clone());
+        loader.add_manifest(manifest_b.clone());
+        loader.plugin_dirs.write().insert(
+            "guard_a".to_string(),
+            dir_a.to_string_lossy().into_owned(),
+        );
+        loader.plugin_dirs.write().insert(
+            "guard_b".to_string(),
+            dir_b.to_string_lossy().into_owned(),
+        );
+        let invoker = PluginInvokerImpl::new(loader);
+
+        // 成员 {a}
+        invoker.resolve_host_key(&manifest_a);
+        let fp_a_only = invoker.host_union_fingerprint("group:light:1");
+        // 稳定性：同状态两次计算相同
+        assert_eq!(fp_a_only, invoker.host_union_fingerprint("group:light:1"));
+
+        // 成员集变化：加入 b → 指纹变化（成员集本身是指纹的一部分）
+        invoker.resolve_host_key(&manifest_b);
+        let fp_ab = invoker.host_union_fingerprint("group:light:1");
+        assert_ne!(fp_a_only, fp_ab, "新成员加入必须改变宿主指纹");
+
+        // 成员代码变更：a 的文件 mtime 变化 → 指纹变化
+        std::thread::sleep(std::time::Duration::from_secs_f64(1.1));
+        std::fs::write(dir_a.join("server.py"), b"print(2) # changed").unwrap();
+        let fp_ab_changed = invoker.host_union_fingerprint("group:light:1");
+        assert_ne!(
+            fp_ab, fp_ab_changed,
+            "任一成员代码变更必须改变宿主指纹（触发整宿主 respawn）"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_member_set_change_triggers_full_host_respawn() {
+        // 指纹并集触发整宿主 respawn（§4.6 行为级）：已 spawn 宿主（假进程入缓存）
+    // 在新成员加入分配表后，下次调用 fast path 判 stale → kill 整宿主 → 走 respawn
+        // 路径（_host 未落地 → HOST_DIR_NOT_FOUND，证明 respawn 真被触发）。
+        let loader = Arc::new(MockLoader::new());
+        let manifest_a = make_light_manifest("guard_a", "python server.py");
+        let manifest_b = make_light_manifest("guard_b", "python server.py");
+        loader.add_manifest(manifest_a.clone());
+        loader.add_manifest(manifest_b.clone());
+        let invoker = PluginInvokerImpl::new(loader);
+
+        let host_key = invoker.resolve_host_key(&manifest_a);
+        // 模拟已 spawn：假进程入缓存 + 指纹已记录（回写 2s 前，绕过 TTL 门）
+        let live = spawn_long_lived_stdio_client().await;
+        let live_arc = Arc::new(tokio::sync::RwLock::new(live));
+        invoker
+            .mcp_clients
+            .write()
+            .insert(host_key.clone(), Arc::clone(&live_arc));
+        invoker.fingerprints.write().insert(
+            host_key.clone(),
+            (invoker.host_union_fingerprint(&host_key), Instant::now() - Duration::from_secs(2)),
+        );
+
+        // 新成员 b 加入（成员集变化 → 宿主指纹必变）
+        invoker.resolve_host_key(&manifest_b);
+
+        let result = invoker.get_or_create_mcp_client(&manifest_a).await;
+        // respawn 被触发：host 命令解析先于 spawn 失败（_host 未落地，HOST_DIR_NOT_FOUND）
+        let err = match result {
+            Err(e) => e,
+            Ok(_) => panic!("成员集变化必须触发整宿主 respawn（走 spawn 路径），不得返回缓存实例"),
+        };
+        assert_eq!(
+            err.code.as_deref(),
+            Some("HOST_DIR_NOT_FOUND"),
+            "respawn 路径证据：{err}"
+        );
+        // 旧宿主进程被 kill + 缓存逐出
+        assert!(
+            !live_arc.read().await.is_alive().await,
+            "整宿主 respawn 必须 kill 旧进程"
+        );
+        assert!(invoker.mcp_clients.read().get(&host_key).is_none());
+    }
+
+    #[tokio::test]
+    async fn test_spawn_lock_per_host_granularity() {
+        // spawn 锁粒度（§4.2 第 4 条）：per-host-key——同宿主成员共享锁条目
+        // （串行 spawn），跨宿主各自独立锁条目（并行 spawn）。
+        // 锁粒度无外部可观察行为面（真并发 spawn 需 host.py 落地），这里以锁表
+        // 键集合 + 同宿主单条目为结构证据；spawn 尝试以 HOST_DIR_NOT_FOUND 失败，
+        // 锁条目创建于拿锁阶段，失败路径同样能观察粒度。
+        let loader = Arc::new(MockLoader::new());
+        let manifest_a = make_light_manifest("guard_a", "python server.py");
+        let manifest_b = make_light_manifest("guard_b", "python server.py");
+        let solo = make_sidecar_manifest("solo_tool", "definitely_missing_command_98765");
+        loader.add_manifest(manifest_a.clone());
+        loader.add_manifest(manifest_b.clone());
+        loader.add_manifest(solo.clone());
+        let invoker = PluginInvokerImpl::new(loader);
+
+        // 同宿主两个成员：spawn 失败（HOST_DIR_NOT_FOUND）但锁条目已按宿主键建立
+        let _ = invoker.get_or_create_mcp_client(&manifest_a).await;
+        let _ = invoker.get_or_create_mcp_client(&manifest_b).await;
+        // 独占宿主：另一个锁条目
+        let _ = invoker.get_or_create_mcp_client(&solo).await;
+
+        let mut keys: Vec<String> = invoker.spawn_locks.read().keys().cloned().collect();
+        keys.sort();
+        assert_eq!(
+            keys,
+            vec!["group:light:1".to_string(), "plugin:solo_tool".to_string()],
+            "同宿主（a/b 共享 group:light:1）单锁条目，跨宿主独立条目"
+        );
+        // 性质断言：锁条目数 < 已尝试 spawn 的插件数（3 个插件 2 个锁 = 同宿主共享）
+        assert!(invoker.spawn_locks.read().len() < 3);
+    }
+
+    #[tokio::test]
+    async fn test_resolve_group_host_command_contract() {
+        // 合宿宿主 spawn 参数契约（§4.2 第 2 条）：`python host.py --group light
+        // --slot {n} --members {逗号分隔成员列表}`，工作目录 plugins/shared/_host/，
+        // 解释器 = _host 共享 venv（uv 单轨 fail-closed）。
+        let tmp = tempfile::tempdir().unwrap();
+        // 造 plugins/shared/pipeline/input/guard_a + plugins/shared/_host/.venv 布局
+        let member_dir = tmp.path().join("pipeline").join("input").join("guard_a");
+        std::fs::create_dir_all(&member_dir).unwrap();
+        let host_dir = tmp.path().join("_host");
+        let interp = fake_venv(&host_dir, true);
+        std::fs::write(host_dir.join("host.py"), b"# host stub").unwrap();
+
+        let loader = Arc::new(MockLoader::new());
+        loader.plugin_dirs.write().insert(
+            "a_guard".to_string(),
+            member_dir.to_string_lossy().into_owned(),
+        );
+        loader.plugin_dirs.write().insert(
+            "b_guard".to_string(),
+            member_dir.to_string_lossy().into_owned(),
+        );
+        let invoker = PluginInvokerImpl::new(loader);
+
+        let (cmd, args, workdir) = invoker
+            .resolve_group_host_command("light", 3, &["b_guard".to_string(), "a_guard".to_string()])
+            .expect("参数契约解析应成功");
+        assert_eq!(cmd, interp.to_string_lossy().into_owned(), "解释器 = _host 共享 venv");
+        assert_eq!(
+            args,
+            vec![
+                "host.py".to_string(),
+                "--group".to_string(),
+                "light".to_string(),
+                "--slot".to_string(),
+                "3".to_string(),
+                "--members".to_string(),
+                // 成员列表排序（稳定契约：指纹/spawn/观测共用同一序）
+                "a_guard,b_guard".to_string(),
+            ]
+        );
+        assert_eq!(workdir, host_dir.to_string_lossy().into_owned());
+
+        // fail-closed：_host 目录缺失 → HOST_DIR_NOT_FOUND
+        let empty_loader = Arc::new(MockLoader::new());
+        let empty_dir = tempfile::tempdir().unwrap();
+        empty_loader.plugin_dirs.write().insert(
+            "ghost".to_string(),
+            empty_dir.path().to_string_lossy().into_owned(),
+        );
+        let invoker2 = PluginInvokerImpl::new(empty_loader);
+        let err = invoker2
+            .resolve_group_host_command("light", 1, &["ghost".to_string()])
+            .expect_err("无 _host 目录必须 fail-closed");
+        assert_eq!(err.code.as_deref(), Some("HOST_DIR_NOT_FOUND"));
+
+        // fail-closed：_host 存在但共享 venv 缺失 → HOST_VENV_MISSING
+        let bare_host = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(bare_host.path().join("_host")).unwrap();
+        let bare_member = bare_host.path().join("m");
+        std::fs::create_dir_all(&bare_member).unwrap();
+        let loader3 = Arc::new(MockLoader::new());
+        loader3.plugin_dirs.write().insert(
+            "m".to_string(),
+            bare_member.to_string_lossy().into_owned(),
+        );
+        let invoker3 = PluginInvokerImpl::new(loader3);
+        let err3 = invoker3
+            .resolve_group_host_command("light", 1, &["m".to_string()])
+            .expect_err("共享 venv 缺失必须 fail-closed");
+        assert_eq!(err3.code.as_deref(), Some("HOST_VENV_MISSING"));
+    }
+
+    #[test]
+    fn test_namespaced_tool_name_prefix() {
+        // 调用路由前缀（§4.2 第 3 条）：light 成员工具名拼 {plugin_id}. 前缀；
+        // 独占宿主（含 light 声明但外部 MCP 形态）无前缀。
+        let light = make_light_manifest("pause_guard", "python server.py");
+        assert_eq!(
+            namespaced_tool_name(&light, "check"),
+            "pause_guard.check"
+        );
+        // invoke_entry 本身带点号也整体作为后缀（前缀机制与入口名正交）
+        assert_eq!(
+            namespaced_tool_name(&light, "pause_guard.check"),
+            "pause_guard.pause_guard.check"
+        );
+
+        let solo = make_sidecar_manifest("llm_core", "python server.py");
+        assert_eq!(namespaced_tool_name(&solo, "llm_core.execute"), "llm_core.execute");
+
+        let mut ext = make_light_manifest("ext_light", "external");
+        ext.mcp = Some(McpConfig {
+            transport: McpTransport::StreamableHttp,
+            endpoint: Some(McpEndpoint {
+                url: Some("http://127.0.0.1:9/mcp".to_string()),
+                ..Default::default()
+            }),
+            idle_timeout_secs: 300,
+            protocol_version: "2025-06-18".to_string(),
+            request_timeout_secs: None,
+        });
+        assert_eq!(
+            namespaced_tool_name(&ext, "remote_tool"),
+            "remote_tool",
+            "外部 MCP 不进合宿组 → 无前缀"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_host_idle_timeout_members_aggregation() {
+        // 宿主空闲阈值聚合（§4.8）：任一成员 0 → 永不回收；否则取最严格（最大）。
+        let loader = Arc::new(MockLoader::new());
+        let mut never = make_sidecar_manifest("never_idle", "python server.py");
+        never.lifecycle = Some(agentos_core::traits::PluginLifecycle {
+            idle_timeout_secs: Some(0),
+        });
+        let mut custom = make_sidecar_manifest("custom_idle", "python server.py");
+        custom.lifecycle = Some(agentos_core::traits::PluginLifecycle {
+            idle_timeout_secs: Some(42),
+        });
+        loader.add_manifest(never);
+        loader.add_manifest(custom);
+        loader.add_manifest(make_sidecar_manifest("default_idle", "python server.py"));
+        let invoker = PluginInvokerImpl::new(loader);
+
+        // 任一成员永不卸载 → 0（GC 跳过）
+        assert_eq!(
+            invoker.host_idle_timeout_secs(&[
+                "never_idle".to_string(),
+                "custom_idle".to_string()
+            ]),
+            0
+        );
+        // 无 0 声明 → 取最大（默认 300 > 42）
+        assert_eq!(
+            invoker.host_idle_timeout_secs(&[
+                "custom_idle".to_string(),
+                "default_idle".to_string()
+            ]),
+            agentos_core::traits::default_idle_timeout()
+        );
+        // 单成员默认 → 300
+        assert_eq!(
+            invoker.host_idle_timeout_secs(&["default_idle".to_string()]),
+            agentos_core::traits::default_idle_timeout()
+        );
+    }
+
+    #[test]
+    fn test_light_host_max_members_env_and_default() {
+        // 上限配置（§4.5）：默认 6；AGENTOS_LIGHT_HOST_MAX_MEMBERS 覆盖；无效值回退。
+        // 仅本测试触碰该环境变量（其他测试全部走 assign_light_host_with 注入），无并发污染。
+        std::env::set_var("AGENTOS_LIGHT_HOST_MAX_MEMBERS", "3");
+        assert_eq!(light_host_max_members(), 3);
+        std::env::set_var("AGENTOS_LIGHT_HOST_MAX_MEMBERS", "0");
+        assert_eq!(
+            light_host_max_members(),
+            LIGHT_HOST_DEFAULT_MAX_MEMBERS,
+            "无效值（0）回退默认"
+        );
+        std::env::set_var("AGENTOS_LIGHT_HOST_MAX_MEMBERS", "not-a-number");
+        assert_eq!(
+            light_host_max_members(),
+            LIGHT_HOST_DEFAULT_MAX_MEMBERS,
+            "非数字回退默认"
+        );
+        std::env::remove_var("AGENTOS_LIGHT_HOST_MAX_MEMBERS");
+        assert_eq!(light_host_max_members(), LIGHT_HOST_DEFAULT_MAX_MEMBERS);
+    }
+
+    #[tokio::test]
+    async fn test_kill_sidecar_if_any_light_kills_whole_host() {
+        // disable 窄口 kill 的合宿语义：kill 整宿主（进程所有权单位），分配表保留
+        // （reenable 后同组成员回到原宿主 respawn）。
+        let loader = Arc::new(MockLoader::new());
+        let manifest_a = make_light_manifest("guard_a", "python server.py");
+        let manifest_b = make_light_manifest("guard_b", "python server.py");
+        loader.add_manifest(manifest_a.clone());
+        loader.add_manifest(manifest_b.clone());
+        let invoker = PluginInvokerImpl::new(loader);
+
+        let host_key = invoker.resolve_host_key(&manifest_a);
+        invoker.resolve_host_key(&manifest_b);
+        assert_eq!(host_key, "group:light:1");
+        let live = spawn_long_lived_stdio_client().await;
+        let live_arc = Arc::new(tokio::sync::RwLock::new(live));
+        invoker
+            .mcp_clients
+            .write()
+            .insert(host_key.clone(), Arc::clone(&live_arc));
+
+        invoker.kill_sidecar_if_any("guard_a").await;
+
+        assert!(
+            !live_arc.read().await.is_alive().await,
+            "disable 成员必须 kill 整宿主进程"
+        );
+        assert!(invoker.mcp_clients.read().get(&host_key).is_none());
+        // 分配表保留（窄口语义：不做指纹/分配清理，reenable 后 respawn 回原宿主）
+        assert_eq!(
+            invoker.light_packing.read().assignments.len(),
+            2,
+            "窄口 kill 不清分配表"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_force_unload_light_kills_host_keeps_assignments() {
+        // force_unload（热重载语境）对 light 成员：kill 整宿主 + 清缓存/指纹/
+        // last_used，但**保留分配表**——下次调用按表 respawn 同一宿主（§4.5 第 2
+        // 条"respawn 按表重建成员集"）。
+        let loader = Arc::new(MockLoader::new());
+        let manifest_a = make_light_manifest("guard_a", "python server.py");
+        loader.add_manifest(manifest_a.clone());
+        let invoker = PluginInvokerImpl::new(loader);
+
+        let host_key = invoker.resolve_host_key(&manifest_a);
+        let live = spawn_long_lived_stdio_client().await;
+        let live_arc = Arc::new(tokio::sync::RwLock::new(live));
+        invoker
+            .mcp_clients
+            .write()
+            .insert(host_key.clone(), Arc::clone(&live_arc));
+        invoker.touch_last_used(&host_key);
+
+        invoker.force_unload_impl("guard_a").await.unwrap();
+
+        assert!(!live_arc.read().await.is_alive().await, "必须 kill 宿主进程");
+        assert!(invoker.mcp_clients.read().get(&host_key).is_none());
+        assert!(invoker.last_used.read().get(&host_key).is_none());
+        assert!(
+            invoker
+                .light_packing
+                .read()
+                .assignments
+                .contains_key("guard_a"),
+            "热重载语境保留分配表（respawn 按表重建）"
+        );
+        // 下次调用仍路由到原宿主（分配粘性）
+        assert_eq!(invoker.resolve_host_key(&manifest_a), host_key);
+    }
+
+    #[tokio::test]
+    async fn test_unload_if_idle_light_reclaims_assignments() {
+        // unload_if_idle（idle 语境）对 light 成员：整组回收 + 槽位释放（分配表清空）。
+        let loader = Arc::new(MockLoader::new());
+        let manifest_a = make_light_manifest("guard_a", "python server.py");
+        loader.add_manifest(manifest_a.clone());
+        let invoker = PluginInvokerImpl::new(loader);
+
+        let host_key = invoker.resolve_host_key(&manifest_a);
+        let live = spawn_long_lived_stdio_client().await;
+        let live_arc = Arc::new(tokio::sync::RwLock::new(live));
+        invoker
+            .mcp_clients
+            .write()
+            .insert(host_key.clone(), Arc::clone(&live_arc));
+
+        let unloaded = invoker.unload_if_idle("guard_a").await;
+        assert!(unloaded, "sidecar 插件 idle 卸载应返回 true");
+        assert!(!live_arc.read().await.is_alive().await);
+        assert!(
+            invoker.light_packing.read().assignments.is_empty(),
+            "idle 语境回收即清空分配表（槽位释放）"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_existing_host_key_for_light_unassigned_is_none() {
+        // 宿主键反查：light 未分配（从未 spawn）→ None；分配后 → 组键；
+        // 独占 sidecar → plugin:{id}；InProcess → None；无 manifest → 独占兜底。
+        let loader = Arc::new(MockLoader::new());
+        let light = make_light_manifest("guard_a", "python server.py");
+        let solo = make_sidecar_manifest("solo_tool", "python server.py");
+        let native = make_inprocess_manifest("native_plug");
+        loader.add_manifest(light.clone());
+        loader.add_manifest(solo);
+        loader.add_manifest(native);
+        let invoker = PluginInvokerImpl::new(loader);
+
+        assert_eq!(
+            invoker.existing_host_key_for("guard_a"),
+            None,
+            "light 从未分配 = 从未 spawn，无宿主"
+        );
+        let host_key = invoker.resolve_host_key(&light);
+        assert_eq!(
+            invoker.existing_host_key_for("guard_a"),
+            Some(host_key.clone())
+        );
+        assert_eq!(
+            invoker.existing_host_key_for("solo_tool"),
+            Some("plugin:solo_tool".to_string())
+        );
+        assert_eq!(invoker.existing_host_key_for("native_plug"), None);
+        assert_eq!(
+            invoker.existing_host_key_for("ghost"),
+            Some("plugin:ghost".to_string()),
+            "无 manifest 时保守按独占兜底（命中缓存即生效）"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_check_health_light_via_host_process() {
+        // check_health 宿主粒度：light 成员健康 = 所在宿主进程存活；无宿主 → false。
+        let loader = Arc::new(MockLoader::new());
+        let light = make_light_manifest("guard_a", "python server.py");
+        loader.add_manifest(light.clone());
+        let invoker = PluginInvokerImpl::new(loader);
+
+        // 未 spawn：无宿主缓存 → false
+        invoker.resolve_host_key(&light);
+        assert!(!invoker.check_health("guard_a").await);
+
+        // 宿主进程存活 → true
+        let host_key = "group:light:1".to_string();
+        let live = spawn_long_lived_stdio_client().await;
+        let live_arc = Arc::new(tokio::sync::RwLock::new(live));
+        invoker
+            .mcp_clients
+            .write()
+            .insert(host_key, Arc::clone(&live_arc));
+        assert!(invoker.check_health("guard_a").await);
     }
 }

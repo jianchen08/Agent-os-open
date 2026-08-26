@@ -64,6 +64,7 @@ async fn app_with_deps() -> (
         pipeline_role: None,
         language: "python".to_string(),
         host_type: HostType::Sidecar,
+        host_group: None,
         entry: "python server.py".to_string(),
         capabilities: Default::default(),
         requires_services: vec![],
