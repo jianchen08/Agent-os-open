@@ -1,34 +1,10 @@
-# 前端测试基线（只许减不许增，见 scripts/check_frontend_baseline.py）
-# 2026-08-22 收紧（TanStack Query 数据层改造批次 0-2 触发，触碰即清）：
-#   - vitest_failures 73 → 3：历史演进（组件调和/多轮修复）后实测仅剩
-#     api-contracts C5 WebviewWidget 3 红（存量债，stash 实证非改造引入）。
-#     本地两次全量一致 3 failed / 2023 passed（Windows Node25）。
-# 阶段 3.8 推进（2026-08-13）：
-#   - 装回 axios-mock-adapter → session.test.ts 10 测试转绿
-#   - TextDiffView 测试按当前组件实现重写（组件已收敛为仅 unified 视图，
-#     testid 改 diff-line-${idx}+data-line-type）→ 14 测试转绿
-# eslint 74（chat_card 存量 error，待 lint:fix 逐组清零）
-# CI（Ubuntu + Node20）首次跑通后若计数有环境差异，以 CI 实测为准收紧。
-#
-# 覆盖率%（只升不降，ADR 2026-08-20 覆盖率棘轮门禁）：
-#   token=1 起手——无实测可依（本地 Node25 vitest 双 provider 均不出覆盖率
-#   产物 + CI 前端车道卡 pnpm 安装红）。CI 首绿产出 Lines% 后立即用
-#   实测+压力收紧（用户裁决：基线略高于实测留压力），此后缺数据即红。
-# 2026-08-22 收紧（CI 存量清零批）：
-#   - vitest_failures 3 → 0：api-contracts C5 WebviewWidget 三红修复
-#     （postUp 补 srcdoc 动态提取的 __wv_token + REST 用例改白名单内 /ext 路径；
-#     全量 2021 passed / 0 failed，与上批 commit 口径 2018+3=2021 总数一致）
-#   - eslint_errors 74 → 0：@eslint/js+globals 补 devDependencies 声明恢复
-#     可运行（pnpm 严格布局不可蹭传递依赖）后逐文件手工清零（chat_card 存量 +
-#     e2e/probe/src，含 mock-server await?? 优先级真 bug）；汇总口径 0 errors。
-#     同批修复 check_frontend_baseline 解析器全绿崩溃（Tests N passed 无
-#     failed 段返回 0 而非抛错）——收紧到 0 后全绿输出成为常态，旧解析器
-#     会让 CI 在全绿时误红。
-# 2026-08-26 校准（占位 token 兑现）：
-#   - vitest_coverage_pct 1.00 → 59.00：本地 Windows Node25 全量实测 Lines 59.0%
-#     （statements 57.6 / functions 53.6 / branches 51.1，frontend/coverage/
-#     coverage-summary.json）。写 floor(实测) 不虚压——CI（Ubuntu+Node22）首跑
-#     后按 Linux 实测按同公式重定（参照 python 侧 -0.55pp 历史差重定先例）。
+# 前端测试基线（vitest 失败数/eslint 错误数只减不增；
+# 覆盖率%只升不降。见 scripts/check_frontend_baseline.py）
 vitest_failures=0
 eslint_errors=0
-vitest_coverage_pct=59.00
+vitest_coverage_pct=59.99
+# 2026-08-27 收紧（气泡/主题修复批触发，触碰即清）：
+#   - vitest_coverage_pct 59.00 → 59.99：本地 Windows Node25 全量实测
+#     （themeService --bubble-link 发射 + 三预设修值 + 新测试车道）。
+#   - 同批修 check_frontend_baseline 覆盖率维度误杀：校准兑现(>1)后"已校准+缺数据=fail-loud"未区分调用面，lint 车道/本地裸跑恒红——
+#     维度启用收窄到提供 --vitest-file 的调用面（tests/gates 回归钉 5 例）。

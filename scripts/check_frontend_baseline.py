@@ -6,9 +6,10 @@ vitest 覆盖率%（Lines）只升不降。
 - .github/frontend-baseline.txt 记录基线（vitest_failures / eslint_errors /
   vitest_coverage_pct）
 - 失败数增加或覆盖率跌破基线 → CI 失败；治理后手动收紧基线（--init）
-- 覆盖率数据缺失（vitest 没跑 coverage）：基线仍是未校准 token（=1）时
-  警告放行；已校准（>1）则红——配置了 coverage 却不产数据 = 度量链断裂，
-  fail-loud（ADR 2026-08-20 覆盖率棘轮门禁）。
+- 覆盖率维度只在提供了 --vitest-file 的调用面启用：产物中解析不到 Lines%
+  时，基线未校准（token=1）警告放行、已校准（>1）则红——该产而未产 =
+  度量链断裂，fail-loud（ADR 2026-08-20）；lint 车道/本地裸跑无覆盖率
+  来源，维度直接跳过，不因"缺数据"误杀。
 
 用法：
     python scripts/check_frontend_baseline.py                                  # 本地：自跑 vitest+eslint 并检查
@@ -210,13 +211,19 @@ def main() -> int:
         print(f"\n✅ 失败数减少了（{', '.join(parts)}）")
         print("（基线不自动更新：请在 CI 验证后手动收紧 .github/frontend-baseline.txt）")
 
-    # 覆盖率维度（只升不降；未校准 token=1 时缺数据仅警告）
+    # 覆盖率维度（只升不降）。启用前提：本调用面声明了 vitest 产物来源
+    # （--vitest-file）——lint 车道/本地裸跑天然无覆盖率数据，"已校准+缺数据
+    # = fail-loud"只应命中"该产而未产"的 coverage 车道，不拦截其余车道
+    # （08-26 校准兑现后 lint 车道恒红即为二者混淆的回归）。
     if cur_c is None:
-        if base_c > 1:
-            print("\n❌ 覆盖率数据缺失：基线已校准（>1%）而 vitest 未产出覆盖率——度量链断裂，fail-loud")
-            failed = True
+        if args.vitest_file:
+            if base_c > 1:
+                print("\n❌ 覆盖率数据缺失：基线已校准（>1%）而 vitest 产物中解析不到 Lines%——度量链断裂，fail-loud")
+                failed = True
+            else:
+                print("\n⚠️ 覆盖率数据缺失且基线未校准（token=1）：警告放行；CI 首绿后立即用实测收紧基线")
         else:
-            print("\n⚠️ 覆盖率数据缺失且基线未校准（token=1）：警告放行；CI 首绿后立即用实测收紧基线")
+            print("\nℹ️ 本调用未提供 --vitest-file（lint 车道/本地模式）：覆盖率维度跳过")
     elif cur_c < base_c:
         print(f"\n❌ 覆盖率跌破基线：{cur_c:.2f}% < {base_c:.2f}%（只升不降）")
         failed = True

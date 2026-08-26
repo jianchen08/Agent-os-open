@@ -496,3 +496,75 @@ class TestFrontendCoverageParse:
         monkeypatch.setattr(fe_base, "BASELINE_FILE", bf)
         fe_base.write_baseline(3, 5, 52.9)
         assert fe_base.read_baseline() == (3, 5, 52.9)
+
+
+class TestFrontendBaselineGateDimensions:
+    """main() 级三调用面行为钉（2026-08-27 回归）：
+
+    覆盖率维度只在 --vitest-file 调用面启用。08-26 校准兑现（token 1→59）
+    后，"已校准+缺数据=fail-loud"曾误杀 lint 车道与本地裸跑——eslint 全绿
+    也 exit=1（lint 车道恒红）。"""
+
+    @staticmethod
+    def _calibrated(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        bf = tmp_path / "baseline.txt"
+        monkeypatch.setattr(fe_base, "BASELINE_FILE", bf)
+        fe_base.write_baseline(0, 0, 59.0)
+
+    @staticmethod
+    def _write(tmp_path: Path, name: str, content: str) -> str:
+        f = tmp_path / name
+        f.write_text(content, encoding="utf-8")
+        return str(f)
+
+    def _run(self, monkeypatch: pytest.MonkeyPatch, argv: list[str], capsys: pytest.CaptureFixture) -> int:
+        monkeypatch.setattr(sys, "argv", ["check_frontend_baseline", *argv])
+        return fe_base.main()
+
+    def test_lint_only_lane_skips_coverage_dimension(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
+    ) -> None:
+        """lint 车道（只传 --eslint-file）在已校准基线下不再被缺数据误杀。"""
+        self._calibrated(tmp_path, monkeypatch)
+        eslint = self._write(tmp_path, "lint.txt", "✖ 1215 problems (0 errors, 1215 warnings)")
+        assert self._run(monkeypatch, ["--eslint-file", eslint], capsys) == 0
+        assert "覆盖率维度跳过" in capsys.readouterr().out
+
+    def test_local_mode_without_files_skips_coverage_dimension(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
+    ) -> None:
+        """本地裸跑（无任何文件参数）同样跳过覆盖率维度。"""
+        self._calibrated(tmp_path, monkeypatch)
+        monkeypatch.setattr(fe_base, "count_vitest_failures", lambda: 0)
+        monkeypatch.setattr(fe_base, "count_eslint_errors", lambda: 0)
+        assert self._run(monkeypatch, [], capsys) == 0
+        assert "覆盖率维度跳过" in capsys.readouterr().out
+
+    def test_coverage_lane_unparseable_output_fails_loud_when_calibrated(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
+    ) -> None:
+        """coverage 车道给了 vitest 产物但解析不到 Lines%：度量链断裂保持 fail-loud。"""
+        self._calibrated(tmp_path, monkeypatch)
+        vitest = self._write(tmp_path, "v.txt", "Tests  3 failed | 1923 passed\n")
+        assert self._run(monkeypatch, ["--vitest-file", vitest], capsys) == 1
+
+    def test_coverage_lane_uncalibrated_token_still_warns_not_fails(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
+    ) -> None:
+        bf = tmp_path / "baseline.txt"
+        monkeypatch.setattr(fe_base, "BASELINE_FILE", bf)
+        fe_base.write_baseline(0, 0, 1.0)
+        vitest = self._write(tmp_path, "v.txt", "Tests  1926 passed\n")
+        assert self._run(monkeypatch, ["--vitest-file", vitest], capsys) == 0
+
+    def test_coverage_below_calibrated_baseline_still_fails(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
+    ) -> None:
+        """棘轮本体不受影响：实测跌破基线照旧红。"""
+        self._calibrated(tmp_path, monkeypatch)
+        vitest = self._write(
+            tmp_path,
+            "v.txt",
+            "Lines        : 41.00% ( 900/2227 )\nTests  0 failed | 2000 passed\n",
+        )
+        assert self._run(monkeypatch, ["--vitest-file", vitest], capsys) == 1
