@@ -381,7 +381,7 @@ class TestMemoryDomainDispatch:
 
     def test_single_memory_get_and_delete_routes(self, srv: Any) -> None:
         backend = MagicMock()
-        backend.search = AsyncMock(return_value=[_mem_item("m9")])
+        backend.get_documents = AsyncMock(return_value=[_doc_item("m9")])
         backend.delete = AsyncMock(return_value=True)
         _inject_backend(srv, backend)
 
@@ -390,6 +390,7 @@ class TestMemoryDomainDispatch:
         ))
         payload = json.loads(base64.b64decode(out["data"]["body"]).decode("utf-8"))
         assert payload["id"] == "m9"
+        assert payload["content"] == "content-m9"
 
         out = _run(srv._handle_memory_domain(
             "/ext/hindsight_memory_service/memory/m9", "DELETE", "", {}
@@ -417,7 +418,7 @@ class TestMemoryDomainDispatch:
 
     def test_missing_memory_404_detail(self, srv: Any) -> None:
         backend = MagicMock()
-        backend.search = AsyncMock(return_value=[])
+        backend.get_documents = AsyncMock(return_value=[])
         _inject_backend(srv, backend)
 
         out = _run(srv._handle_memory_domain(

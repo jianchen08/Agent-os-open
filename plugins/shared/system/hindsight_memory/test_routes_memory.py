@@ -197,19 +197,43 @@ class TestEpisodes:
         assert backend.get_documents.call_args.kwargs["limit"] == 10
 
     def test_get_episode_found(self, mod: Any) -> None:
-        backend = _backend_with([_m("e1", "intent", "episode")])
+        backend = _backend_documents([
+            _doc("e1", "intent text", "episode", tags=["a"], created_at="t0"),
+        ])
         mod.set_memory_backend(backend)
         result = _run(mod.get_episode("e1"))
         assert result["id"] == "e1"
-        assert result["intent_text"] == "intent"
+        assert result["intent_text"] == "intent text"
+        assert result["tags"] == ["a"]
+        assert result["created_at"] == "t0"
+        # 详情直查 documents 通路：document_id 精确取回，无条数上限
+        kwargs = backend.get_documents.call_args.kwargs
+        assert kwargs["document_id"] == "e1"
+        assert kwargs["limit"] == 1
 
     def test_get_episode_not_found_404(self, mod: Any) -> None:
-        backend = _backend_with([_m("e1")])
+        backend = _backend_documents([])
         mod.set_memory_backend(backend)
         with pytest.raises(mod.MemoryAPIError) as ei:
             _run(mod.get_episode("nope"))
         assert ei.value.status_code == 404
         assert ei.value.error_code == "MEM_NOTF_5001"
+
+    @pytest.mark.parametrize("episodes_fn", ["get_episode", "get_memory"])
+    def test_detail_never_touches_empty_query_recall(self, mod: Any, episodes_fn: str) -> None:
+        """详情端点不得经 recall 空查询链路（S13 伪 404 根因）。
+
+        旧实现 search(query="") 拉 top1000 线性过滤——sidecar 对空 query 直接
+        拒错，且第 1001 条之后的记录永远取不到。现契约：仅走
+        get_documents(document_id=...)，链路对任意位置的 id 都命中。
+        """
+        backend = MagicMock()
+        backend.search = AsyncMock(side_effect=RuntimeError("query must not be empty"))
+        backend.get_documents = AsyncMock(return_value=[_doc("deep-1001", "found me", "episode")])
+        mod.set_memory_backend(backend)
+        result = _run(getattr(mod, episodes_fn)("deep-1001"))
+        assert result["id"] == "deep-1001"
+        backend.search.assert_not_awaited()
 
     def test_get_episode_degrades_without_backend_404(self, mod: Any) -> None:
         with pytest.raises(mod.MemoryAPIError) as ei:
@@ -326,15 +350,23 @@ class TestSemanticConsolidateStats:
 
 class TestMemoryItem:
     def test_get_memory_found(self, mod: Any) -> None:
-        backend = _backend_with([_m("m1", "content", "episode", 0.5, tags=["x"])])
+        backend = _backend_documents([
+            _doc("m1", "content", "episode", tags=["x"], created_at="2026-08-21T00:00:00Z"),
+        ])
         mod.set_memory_backend(backend)
         result = _run(mod.get_memory("m1"))
         assert result["id"] == "m1"
         assert result["content"] == "content"
         assert result["memory_type"] == "episode"
+        assert result["tags"] == ["x"]
+        assert result["created_at"] == "2026-08-21T00:00:00Z"
+        # 直查通路无相关性排序语义，score 恒 0（不伪造评分）
+        assert result["score"] == 0.0
+        kwargs = backend.get_documents.call_args.kwargs
+        assert kwargs["document_id"] == "m1"
 
     def test_get_memory_not_found_404(self, mod: Any) -> None:
-        backend = _backend_with([_m("m1")])
+        backend = _backend_documents([])
         mod.set_memory_backend(backend)
         with pytest.raises(mod.MemoryAPIError) as ei:
             _run(mod.get_memory("nope"))

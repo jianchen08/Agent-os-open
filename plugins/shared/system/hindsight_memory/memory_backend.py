@@ -10,8 +10,10 @@ DROP 一并退役（2026-08-19 用户裁定：不留两套真值、禁用备用�
 设计要点：
 - 唯一外部依赖是注入的 capability_caller（async fn `(method, params) -> Any`），
   构造时传入，便于测试 mock；解耦插件全局状态。
-- 所有方法在能力调用失败时记告警并降级返回（空列表/空串/False），永不崩溃——
-  与 hindsight_memory/server.py 的韧性设计一致。
+- 异常策略分两档（现行为，与工具层假成功防线对齐）：写读判定面
+  add/search/get_documents 能力失败诚实上抛 RuntimeError——吞错降级会让上层
+  把失败包装成 success:true 的假成功；低风险面 delete/import_document 记告警后
+  降级返回（False / {chunks_imported: 0, error}），不阻断调用方主流程。
 - 不导入 hindsight 包或任何重依赖；仅用 stdlib + typing。
 
 [来源: docs/tasks Step 3 IMemoryBackend 端口 + 工厂]
@@ -70,7 +72,8 @@ class IMemoryBackend(ABC):
                 'append' 追加），服务端文档级操作
 
         Returns:
-            memory id；失败时返回空串（降级，不抛异常）。
+            memory id；能力失败（调用失败/服务端报错/未返回 id）上抛
+            RuntimeError，不返回空串假成功。
         """
         raise NotImplementedError
 
@@ -100,7 +103,7 @@ class IMemoryBackend(ABC):
 
         Returns:
             统一形态列表 [{id, content, score, memory_type, metadata}]；
-            失败/无结果返回 []（降级，不抛异常）。
+            无结果返回 []；能力失败上抛 RuntimeError。
         """
         raise NotImplementedError
 
@@ -149,7 +152,9 @@ class HindsightBackend(IMemoryBackend):
     """Hindsight sidecar 后端——经 tool-executor 调用 hindsight 工具。
 
     高质量向量检索；依赖 hindsight sidecar 进程在线且 hindsight 包可用。
-    所有能力调用失败时记告警并降级（空/False），不向上抛——与上层韧性约定一致。
+    异常策略见模块 docstring：add/search/get_documents 失败诚实上抛
+    RuntimeError（降级决策归工具层）；delete/import_document 告警后降级
+    （False / {chunks_imported: 0, error}），不向上抛。
 
     capability_caller 在构造时注入（async fn `(method, params) -> Any`），
     实际生产环境由插件把 tool-executor 能力句柄的 call 方法注入进来，

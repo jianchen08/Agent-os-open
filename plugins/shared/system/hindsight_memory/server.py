@@ -247,8 +247,11 @@ async def hindsight_retain(
             mem_id = document_id
         elif retain_async:
             mem_id = str(getattr(result, "operation_id", "") or "")
-        if not mem_id and getattr(result, "success", False):
-            mem_id = operation_id or ""
+        else:
+            # 同步且无 document_id：aretain 给真实 id 则透传；客户端未拿到
+            # id 时宁缺毋假——operation_id 是调用方幂等 id 不是落库锚点，
+            # 顶替回传会让 delete/update 定向通路打到不存在的锚点。
+            mem_id = str(getattr(result, "id", "") or "")
         return {"id": mem_id, "stored": True, "metadata": meta}
     except Exception as e:
         logger.warning("[hindsight.retain] 调用失败 | error=%s", e)
@@ -844,9 +847,10 @@ def _start_api_server(port: int, data_dir: str) -> tuple[subprocess.Popen[bytes]
         )
         raise RuntimeError("hindsight venv 未初始化")
     # 子进程 stderr 落盘不 DEVNULL：stderr 进 DEVNULL 会令崩溃原因
-    # 完全不可诊断。追加写 data 目录，崩溃时带 tail 进错误消息。
+    # 完全不可诊断。追加写 data 目录，崩溃时带 tail 进错误消息；父进程侧
+    # 句柄由 _wait_api_ready 在终态统一关闭（子进程自持 fd 副本继续写）。
     _stderr_path = os.path.join(data_dir, "hindsight_api_stderr.log")
-    _stderr_file = open(_stderr_path, "ab")  # noqa: SIM115
+    _stderr_file = open(_stderr_path, "ab")
     process = subprocess.Popen(
         [_venv_python, "-m", "hindsight_api.main",
          "--port", str(port), "--host", "127.0.0.1"],
@@ -867,35 +871,42 @@ async def _wait_api_ready(
     stderr_file: BinaryIO,
     stderr_path: str,
 ) -> None:
-    """轮询 /health 直至就绪（最多 60s）；子进程提前退出则带 stderr tail 抛错。"""
+    """轮询 /health 直至就绪（最多 60s）；子进程提前退出则带 stderr tail 抛错。
+
+    任一终态（就绪/超时/崩溃）关闭父进程侧 stderr 句柄——句柄不跨调用
+    存续；子进程持有自身 fd 副本，关闭不影响其继续向日志落盘。
+    """
     import asyncio as _aio  # noqa: PLC0415
     import urllib.request  # noqa: PLC0415
 
-    for _attempt in range(60):
-        await _aio.sleep(1)
-        try:
-            with urllib.request.urlopen(f"{base_url}/health", timeout=2) as resp:
-                if resp.status == 200:
-                    logger.info("[hindsight] 服务器就绪 (attempt=%d)", _attempt + 1)
-                    break
-        except Exception:
-            # 检查子进程是否已退出：带上 stderr tail（落盘日志最后 800
-            # 字符）——崩溃原因可见，不再只有裸 exit code。
-            if process.poll() is not None:
-                _tail = ""
-                try:
-                    stderr_file.flush()
-                    with open(stderr_path, "rb") as _f:
-                        _raw = _f.read()
-                    _tail = _raw[-800:].decode("utf-8", errors="replace")
-                except Exception:  # noqa: BLE001
-                    pass
-                raise RuntimeError(
-                    f"hindsight-api 子进程已退出 code={process.returncode}"
-                    f" stderr_tail={_tail!r}"
-                )
-    else:
-        raise RuntimeError("hindsight-api 服务器 60s 内未就绪")
+    try:
+        for _attempt in range(60):
+            await _aio.sleep(1)
+            try:
+                with urllib.request.urlopen(f"{base_url}/health", timeout=2) as resp:
+                    if resp.status == 200:
+                        logger.info("[hindsight] 服务器就绪 (attempt=%d)", _attempt + 1)
+                        break
+            except Exception:
+                # 检查子进程是否已退出：带上 stderr tail（落盘日志最后 800
+                # 字符）——崩溃原因可见，不再只有裸 exit code。
+                if process.poll() is not None:
+                    _tail = ""
+                    try:
+                        stderr_file.flush()
+                        with open(stderr_path, "rb") as _f:
+                            _raw = _f.read()
+                        _tail = _raw[-800:].decode("utf-8", errors="replace")
+                    except Exception:  # noqa: BLE001
+                        pass
+                    raise RuntimeError(
+                        f"hindsight-api 子进程已退出 code={process.returncode}"
+                        f" stderr_tail={_tail!r}"
+                    )
+        else:
+            raise RuntimeError("hindsight-api 服务器 60s 内未就绪")
+    finally:
+        stderr_file.close()
 
 
 @plugin.on_load

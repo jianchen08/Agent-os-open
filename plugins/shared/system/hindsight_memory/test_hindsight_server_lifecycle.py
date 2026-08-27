@@ -157,11 +157,22 @@ class TestRetainBranches:
         assert kwargs["update_mode"] == "append"
         assert result["id"] == "doc-1"
 
-    def test_retain_success_fallback_to_operation_id(self, srv: Any, mock_client: MagicMock) -> None:
-        """无 document_id 且非 async：result.success=True 且 operation_id 空 → 回传调用方 operation_id。"""
-        mock_client.aretain.return_value = MagicMock(operation_id="", success=True)
+    def test_retain_sync_no_document_id_returns_real_id_when_present(self, srv: Any, mock_client: MagicMock) -> None:
+        """同步无 document_id：aretain 回传真实落库 id → 原样透传。"""
+        mock_client.aretain.return_value = SimpleNamespace(success=True, id="doc-real")
+        result = _call_tool(srv, "hindsight.retain", bank_id="b", content="c")
+        assert result["id"] == "doc-real"
+
+    def test_retain_sync_without_document_id_never_returns_fake_id(self, srv: Any, mock_client: MagicMock) -> None:
+        """同步无 document_id 且客户端未给真实 id → 返回空串，不伪造。
+
+        operation_id 是调用方幂等 id，不是落库锚点——旧实现拿它顶 id 是
+        "原样回传假 id"（delete/update 定向通路会打到不存在的锚点）。
+        """
+        mock_client.aretain.return_value = SimpleNamespace(success=True)
         result = _call_tool(srv, "hindsight.retain", bank_id="b", content="c", operation_id="caller-op")
-        assert result["id"] == "caller-op"
+        assert result["id"] == ""
+        assert result["stored"] is True
 
     def test_retain_error_degrades(self, srv: Any, mock_client: MagicMock) -> None:
         """aretain 抛错 → {stored: False, error}（诚实失败）。"""
@@ -683,6 +694,44 @@ class TestOnLoad:
         # stderr 落盘文件可诊断（append 模式）
         stderr_file = subprocess.Popen.call_args.kwargs["stderr"]
         assert stderr_file.mode == "ab"
+
+    def test_wait_ready_closes_stderr_handle_on_success(self, srv: Any, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+        """就绪即返回 → 父进程侧 stderr 句柄关闭（子进程自持副本不受影响）。"""
+        monkeypatch.setattr(urllib.request, "urlopen", MagicMock(return_value=_FakeResponse()))
+        monkeypatch.setattr("asyncio.sleep", AsyncMock())
+        log = tmp_path / "s.log"
+        fh = open(log, "ab")
+        _run(srv._wait_api_ready("http://127.0.0.1:18420", SimpleNamespace(poll=lambda: None), fh, str(log)))
+        assert fh.closed
+
+    def test_wait_ready_closes_stderr_handle_on_timeout(self, srv: Any, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+        """60s 未就绪超时抛错 → 句柄同样关闭（泄漏面收口，S15）。"""
+        monkeypatch.setattr(urllib.request, "urlopen", MagicMock(side_effect=ConnectionError("down")))
+        monkeypatch.setattr("asyncio.sleep", AsyncMock())
+        log = tmp_path / "s.log"
+        fh = open(log, "ab")
+        with pytest.raises(RuntimeError, match="60s 内未就绪"):
+            _run(srv._wait_api_ready(
+                "http://127.0.0.1:18420",
+                SimpleNamespace(poll=lambda: None, returncode=None),
+                fh, str(log),
+            ))
+        assert fh.closed
+
+    def test_wait_ready_closes_stderr_handle_on_crash_and_tails_log(self, srv: Any, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+        """子进程提前退出 → 抛错带 stderr tail，句柄关闭。"""
+        log = tmp_path / "s.log"
+        log.write_bytes(b"panic-trace-" * 100)
+        monkeypatch.setattr(urllib.request, "urlopen", MagicMock(side_effect=ConnectionError("down")))
+        monkeypatch.setattr("asyncio.sleep", AsyncMock())
+        proc = SimpleNamespace(poll=lambda: 1, returncode=1)
+        fh = open(log, "ab")
+        with pytest.raises(RuntimeError) as ei:
+            _run(srv._wait_api_ready("http://127.0.0.1:18420", proc, fh, str(log)))
+        assert "code=1" in str(ei.value)
+        assert "stderr_tail" in str(ei.value)
+        assert "panic-trace" in str(ei.value)
+        assert fh.closed
 
     def test_missing_venv_degrades(self, srv: Any, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
         """venv python 缺失 → 初始化失败降级（_client=None + 告警），不崩。"""

@@ -24,8 +24,6 @@ logger = logging.getLogger(__name__)
 # 由 server.py http.handle 懒构建注入，测试直接赋值。
 _memory_backend: Any | None = None
 
-# 单条查询走 search 时的检索上限（后端 search top_k 语义）
-_FETCH_TOP_K = 1000
 # 列表面（documents 通路）单次取回上限＝sidecar hindsight.get_documents 工具
 # limit 的 schema maximum；列表无相关性排序语义，超出部分属分页范畴不做假分页
 _LISTING_LIMIT_CAP = 100
@@ -219,23 +217,26 @@ async def list_episodes(page: int = 1, page_size: int = 20) -> dict[str, Any]:
 
 
 async def get_episode(episode_id: str) -> dict[str, Any]:
-    """获取单个情景记忆（按 id 过滤后端 episode 检索结果）。"""
+    """获取单个情景记忆（documents 直查通路，document_id 精确取回）。
+
+    不经 recall：sidecar 对空 query 直接拒错，且"拉 top N 线性过滤 id"在第
+    N 条之外存在伪 404——直查按 id 定位，与列表面同数据源、无截断。
+    """
     backend = _get_memory_backend()
     if backend is not None:
-        results = await backend.search(
-            query="",
+        docs = await backend.get_documents(
             user_id=_resolve_user_id(),
-            top_k=_FETCH_TOP_K,
-            memory_type="episode",
+            document_id=episode_id,
+            limit=1,
         )
-        for m in results:
-            if m["id"] == episode_id:
-                metadata = m.get("metadata") or {}
+        for d in docs:
+            if str(d.get("id", "")) == episode_id:
+                m = _document_to_memory(d)
                 return {
                     "id": m["id"],
-                    "intent_text": m.get("content", ""),
-                    "tags": metadata.get("tags", []),
-                    "created_at": metadata.get("created_at", ""),
+                    "intent_text": m["content"],
+                    "tags": m["tags"],
+                    "created_at": m["created_at"],
                 }
     raise MemoryAPIError(404, "MEM_NOTF_5001", "未找到相关记忆")
 
@@ -357,7 +358,10 @@ async def search_memories_post(body: dict[str, Any] | None = None) -> dict[str, 
 
 
 async def get_memory(memory_id: str) -> dict[str, Any]:
-    """获取指定记忆条目的详情（按 id 过滤后端检索结果）。
+    """获取指定记忆条目的详情（documents 直查通路，document_id 精确取回）。
+
+    content 取 documents 面原文 original_text（recall 返回的是抽取后事实）；
+    直查无相关性排序语义，score 恒 0（不伪造评分）。
 
     Args:
         memory_id: 记忆 ID
@@ -370,15 +374,22 @@ async def get_memory(memory_id: str) -> dict[str, Any]:
     """
     backend = _get_memory_backend()
     if backend is not None:
-        results = await backend.search(
-            query="",
+        docs = await backend.get_documents(
             user_id=_resolve_user_id(),
-            top_k=_FETCH_TOP_K,
-            memory_type=None,
+            document_id=memory_id,
+            limit=1,
         )
-        for m in results:
-            if m["id"] == memory_id:
-                return _memory_to_response(m)
+        for d in docs:
+            if str(d.get("id", "")) == memory_id:
+                m = _document_to_memory(d)
+                return {
+                    "id": m["id"],
+                    "content": m["content"],
+                    "memory_type": m["memory_type"],
+                    "tags": m["tags"],
+                    "score": m["score"],
+                    "created_at": m["created_at"],
+                }
     raise MemoryAPIError(404, "MEM_NOTF_5001", "未找到相关记忆")
 
 
