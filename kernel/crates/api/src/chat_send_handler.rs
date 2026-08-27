@@ -77,7 +77,7 @@ pub struct ChatSendHandler {
 impl ChatSendHandler {
     /// 生产构造：带存储，注入分支用 pipeline_id 反查所属会话的真实 thread
     /// （坐标解析封装在接口内部黑盒，对外契约不含 thread 参数）。
-    /// 测试无存储场景传 `None`（等价旧 `new` 路径）。
+    /// 测试无存储场景传 `None`。
     pub fn with_store(
         dispatcher: Arc<dyn PipelineDispatcher>,
         store: Option<Arc<dyn StorageBackend>>,
@@ -121,6 +121,27 @@ impl CapabilityHandler for ChatSendHandler {
     }
 }
 
+/// `send_message` 顶层解析结果包（字段与 [`HANDLED_PARAM_NAMES`] 一一对应）。
+///
+/// 字符串/对象字段借用调用方 `params`（零拷贝）；`overlay` 是经
+/// [`validate_state_overlay`] 校验的 state 注入副本——创建分支会就地向其
+/// 合并 lineage 展开键与引擎身份键（task.id），出生固化后随派发透传。
+struct SendParams<'a> {
+    message: &'a str,
+    user_id: &'a str,
+    create: bool,
+    background: bool,
+    no_dispatch: bool,
+    supplied_pipeline_id: Option<&'a str>,
+    /// 归属会话声明，仅创建分支消费（None → 以引擎新 id 兼作派发坐标）。
+    ownership_thread: Option<&'a str>,
+    execution_context: Option<&'a Value>,
+    agent_id: String,
+    /// 原样引用：空值过滤由消费分支语义决定（创建必填、注入禁带）。
+    lineage: Option<&'a Value>,
+    overlay: Option<Value>,
+}
+
 impl ChatSendHandler {
     /// `chat.send_message`：投递消息到会话管道并跑一轮（GAP-1 阶段 1 管道创建契约）。
     ///
@@ -136,251 +157,36 @@ impl ChatSendHandler {
     /// 点号键，与 track.total_tokens 同款约定），经 dispatch → process_via_engine
     /// 的 execution_context 合并点（1a2）之后并入；保留字命中即协议错误。
     async fn send_message(&self, params: Value) -> Result<Value, McpError> {
-        let message = params
-            .get("message")
-            .and_then(|v| v.as_str())
-            .filter(|s| !s.is_empty())
-            .ok_or_else(|| McpError::Protocol {
-                message: "chat.send_message 缺少 message 参数".to_string(),
-            })?;
-        let user_id = params
-            .get("user_id")
-            .and_then(|v| v.as_str())
-            .filter(|s| !s.is_empty())
-            .ok_or_else(|| McpError::Protocol {
-                message: "chat.send_message 缺少 user_id 参数".to_string(),
-            })?;
-        let create_flag = params
-            .get("create")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(false);
-        // background（可选，默认 false）：派发改为 spawn 后台执行、响应立即
-        // 返回——任务派发（task_submit 创建 / UI resume·retry 注入）不能阻塞
-        // 等待整条管道跑完。触发器通知保持默认 await（投递确认语义）。
-        let background = params
-            .get("background")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(false);
-        // no_dispatch（可选，默认 false）：只把 state overlay 并入目标管道 state
-        // （registry + pipeline_state 表），不派发执行、不产生消息。用于容器任务
-        // 等"只登记不执行"的声明写入——提交者管道自持 task.owned.*，本管道插件
-        // 也能读它处理它。与 background 互斥（background 是派发语义）。
-        let no_dispatch = params
-            .get("no_dispatch")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(false);
-        let supplied_pid = params
-            .get("pipeline_id")
-            .and_then(|v| v.as_str())
-            .filter(|s| !s.is_empty());
-        // 归属会话（可选，仅创建分支消费）：调用方可声明新管道所属 thread（任务
-        // 管道传用户会话，随其路由/级联删除）；缺省以引擎新 id 作派发坐标（兼容
-        // 无会话上下文的调用，此类管道保持独立）。
-        let ownership_thread = params
-            .get("thread_id")
-            .and_then(|v| v.as_str())
-            .filter(|s| !s.is_empty())
-            .map(str::to_string);
-        // 任务级 execution_context（可选）：任务执行器从 task.metadata 组装
-        // （workspace_mode/isolation_level 等），随消息派发并入 initial_state，
-        // init 体 workspace_lifecycle / environment_lifecycle 插件消费。
-        let execution_context = params.get("execution_context").filter(|v| v.is_object());
+        // 阶段一：顶层参数解析与校验（纯校验零副作用，见 parse_send_params）。
+        let mut p = Self::parse_send_params(&params)?;
 
-        // agent_id（可选，默认 "agentos"）：任务派发按 target 选执行 agent——
-        // 引擎据此加载 config/agents/**/<agent_id>.yaml（人格/tool_ids）。
-        let agent_id = params
-            .get("agent_id")
-            .and_then(|v| v.as_str())
-            .filter(|s| !s.is_empty())
-            .unwrap_or("agentos")
-            .to_string();
+        // 阶段二：创建/注入双分支坐标解析（见 resolve_send_targets）。
+        let (pipeline_id, thread_id, created) = self.resolve_send_targets(&mut p).await?;
 
-        // state 注入（可选）：校验保留字后作为 overlay 透传。
-        let mut overlay = validate_state_overlay(params.get("state"))?;
-
-        let (pipeline_id, thread_id, created) = if create_flag || supplied_pid.is_none() {
-            // ── 创建分支 ──
-            if let Some(pid) = supplied_pid {
-                return Err(McpError::Protocol {
-                    message: format!(
-                        "chat.send_message 创建分支（create:true）不接受调用方传入 \
-                         pipeline_id（{pid}）——注入已有管道请去掉 create 并显式传 pipeline_id"
-                    ),
-                });
-            }
-            // 血缘二选一强制（补定案：出生结构性写入，非可选元数据）。
-            let lineage = params
-                .get("lineage")
-                .filter(|v| !v.is_null())
-                .ok_or_else(|| McpError::Protocol {
-                    message: "chat.send_message 创建新管道必须声明 lineage\
-                              （有父/根二选一，杜绝孤儿管道）"
-                        .to_string(),
-                })?;
-            let lineage_keys = parse_lineage(lineage)?;
-            let overlay_obj = overlay.get_or_insert_with(|| Value::Object(Map::new()));
-            if let Some(obj) = overlay_obj.as_object_mut() {
-                for (k, v) in lineage_keys {
-                    obj.insert(k, v);
-                }
-            }
-            // 三次定案：pipeline_id 由引擎生成（身份权威统一），uuid v4 simple
-            // 取前 12 位 hex（与 0.1 uuid4().hex[:12]、插件侧短 id 截断同长，
-            // 前端展示 slice(0,12) 原样透出）。
-            let pipeline_id = uuid::Uuid::new_v4().simple().to_string()[..12].to_string();
-            // GAP-1 统一（task = pipeline）：task.id 即管道 id——调用方派发时
-            // 尚不知道引擎身份，此处引擎强制注入（与 lineage 同级保护字段），
-            // 调用方预传的 task.id 一律覆盖为引擎 id（堵身份冒占）。
-            if let Some(obj) = overlay_obj.as_object_mut() {
-                obj.insert("task.id".to_string(), Value::String(pipeline_id.clone()));
-            }
-            // 新管道坐标：归属会话有声明则落真实 thread（任务管道随归属会话路由/级联，
-            // 前端 runs 快照据此定位归属）；缺省以引擎新 id 兼作派发坐标（resolve
-            // 链路对陌生 id 落回退分支 ③ 原样穿透到引擎 get_or_init 新 state）。
-            let thread_id = ownership_thread.unwrap_or_else(|| pipeline_id.clone());
-            (pipeline_id, thread_id, true)
-        } else if let Some(pid) = supplied_pid {
-            // ── 注入分支 ──
-            // lineage 是引擎出生写入的保护字段，注入已有管道不得携带（防覆写）。
-            if params.get("lineage").filter(|v| !v.is_null()).is_some() {
-                return Err(McpError::Protocol {
-                    message: "chat.send_message 注入已有管道不可携带 lineage\
-                              （血缘仅在创建时声明，创建后不可覆写）"
-                        .to_string(),
-                });
-            }
-            // 坐标解析（接口内部黑盒）：pipeline_id → 所属会话真实 thread。
-            // thread 是派生物，对外契约不含该参数；解析失败 = 孤儿/伪造 id。
-            let thread_id = self.resolve_inject_thread(pid).await?;
-            (pid.to_string(), thread_id, false)
-        } else {
-            unreachable!("supplied_pid 为 None 时已在创建分支 return/自生成 pipeline_id")
-        };
-
-        // 创建分支先落 pipeline↔thread 映射（F8）：映射须先于派发写入，
-        // 否则 dispatch 内 resolve_pipeline_id_for_thread 校验必失败——每次
-        // 任务派发刷一条“前端传来的 pipeline_id 不属于该 thread”误告警。
-        // 映射幂等（INSERT OR IGNORE），落库失败不阻断派发（引擎路径仍会
-        // 补写——此处只是消除误告警 + 提前可见性）。
         if created {
-            if let Some(store) = self.store.as_ref() {
-                let tenant_id =
-                    agentos_http::auth::resolve_tenant_id_by_user(Some(store), user_id).await;
-                if let Err(e) = store
-                    .link_pipeline_session(&pipeline_id, &thread_id, &tenant_id)
-                    .await
-                {
-                    tracing::warn!(
-                        target: "capability:chat",
-                        pipeline = %pipeline_id,
-                        thread = %thread_id,
-                        error = %e.to_string(),
-                        "chat.send_message 创建分支 pipeline↔thread 映射落库失败（引擎路径将补写）"
-                    );
-                }
-                // 出生字段持久化：lineage.* + task.*
-                // 出生即落 pipeline_state 表。引擎 persistent_fields 投影只覆盖
-                // 插件 manifest 声明键（track.* 等），任务域/血缘键不属于任何插件
-                // ——不在此落库则冷读（cold_state_row）无基线、registry 内存丢失后
-                // 任务面板归属链整行缺失（任务 running 但 state 聚合不出口）。
-                // 与 no_dispatch 分支同款逐键 upsert（幂等），失败 warn 不阻断派发。
-                if let Some(overlay_obj) = overlay.as_ref().and_then(|o| o.as_object()) {
-                    for (k, v) in overlay_obj {
-                        if let Err(e) = store
-                            .upsert_state_field(&pipeline_id, &tenant_id, k, v)
-                            .await
-                        {
-                            tracing::warn!(
-                                target: "capability:chat",
-                                pipeline = %pipeline_id,
-                                key = %k,
-                                error = %e.to_string(),
-                                "chat.send_message 出生字段持久化失败（内存态仍生效）"
-                            );
-                        }
-                    }
-                }
-            }
+            // 阶段三（仅创建分支）：pipeline↔thread 映射落库 + 出生字段
+            // 持久化（见 persist_created_pipeline；失败均不阻断派发）。
+            self.persist_created_pipeline(&p, &pipeline_id, &thread_id)
+                .await;
         }
 
         tracing::info!(
             target: "capability:chat",
             pipeline = %pipeline_id,
             thread = %thread_id,
-            user = %user_id,
-            msg_len = message.len(),
+            user = %p.user_id,
+            msg_len = p.message.len(),
             created,
-            agent = %agent_id,
-            has_execution_context = execution_context.is_some(),
-            has_state = overlay.is_some(),
+            agent = %p.agent_id,
+            has_execution_context = p.execution_context.is_some(),
+            has_state = p.overlay.is_some(),
             "chat.send_message 派发触发消息"
         );
 
-        // no_dispatch：只写 state 不派发（容器任务等"只登记不执行"的声明写入）。
-        // 目标管道 state 并入 overlay（registry 热路径 + pipeline_state 表冷兜底），
-        // 不产生消息、不触发引擎执行——提交者管道自持 task.owned.*，本管道插件
-        // 也能读它处理它。与 background 互斥（background 是派发语义）。
-        if no_dispatch {
-            if background {
-                return Err(McpError::Protocol {
-                    message:
-                        "chat.send_message no_dispatch 与 background 互斥（no_dispatch 不派发）"
-                            .to_string(),
-                });
-            }
-            let Some(overlay) = overlay.as_ref() else {
-                return Err(McpError::Protocol {
-                    message: "chat.send_message no_dispatch 必须携带 state（只写 state 不派发）"
-                        .to_string(),
-                });
-            };
-            let tenant_id =
-                agentos_http::auth::resolve_tenant_id_by_user(self.store.as_ref(), user_id).await;
-            let registry = agentos_session::pipeline_state_registry::global_registry();
-            let entry = registry.get(&tenant_id, &pipeline_id);
-            if let Some(entry) = entry {
-                let mut e = entry.write();
-                if let Some(obj) = e.state.as_object_mut() {
-                    for (k, v) in overlay.as_object().unwrap_or(&serde_json::Map::new()) {
-                        obj.insert(k.clone(), v.clone());
-                    }
-                }
-            } else {
-                // 冷路径：registry 未注册（重启后未再轮）——以 overlay 为基底注册
-                // 新条目（thread/agent 用坐标值），后续轮次 get_or_init 命中即读到。
-                let mut base = serde_json::Map::new();
-                for (k, v) in overlay.as_object().unwrap_or(&serde_json::Map::new()) {
-                    base.insert(k.clone(), v.clone());
-                }
-                registry.get_or_init(
-                    &tenant_id,
-                    &pipeline_id,
-                    &thread_id,
-                    &agent_id,
-                    serde_json::Value::Object(base),
-                );
-            }
-            // 冷兜底持久化：pipeline_state 表逐键 upsert（重启后冷恢复读它）。
-            if let Some(store) = self.store.as_ref() {
-                for (k, v) in overlay.as_object().unwrap_or(&serde_json::Map::new()) {
-                    if let Err(e) = store
-                        .upsert_state_field(&pipeline_id, &tenant_id, k, v)
-                        .await
-                    {
-                        tracing::warn!(
-                            target: "capability:chat",
-                            pipeline = %pipeline_id,
-                            key = %k,
-                            error = %e.to_string(),
-                            "chat.send_message no_dispatch state 持久化失败（内存态仍生效）"
-                        );
-                    }
-                }
-            }
-            return Ok(json!({
-                "status": "recorded",
-                "pipeline_id": pipeline_id,
-            }));
+        // 阶段四：no_dispatch 只登记不执行（容器任务等声明写入）。互斥与
+        // 必带 state 的协议校验在 record_no_dispatch 内完成。
+        if p.no_dispatch {
+            return self.record_no_dispatch(&p, &pipeline_id, &thread_id).await;
         }
 
         // 复用 WS 派发：thread_id 与 pipeline_id 各归其位——注入分支是解析出的
@@ -390,81 +196,20 @@ impl ChatSendHandler {
         // new_message，前端按既有协议流式渲染回复。
         // tenant 由 dispatch_user_input 用 user_id 反查（与 WS 路径同源）。
         // thinking_strength：HTTP 通道暂不携带（"" = 引擎不覆盖参数）。
-        //
-        // background：spawn 后台派发，响应立即返回——任务管道在 RunChain 上
-        // 照常 FIFO 执行。创建分支调用方即刻拿到 pipeline_id；注入分支（UI
-        // resume/retry）即刻返回 dispatched。派发失败仅告警。
-        if background {
-            let dispatcher = self.dispatcher.clone();
-            let pid = pipeline_id.clone();
-            let tid = thread_id.clone();
-            let uid = user_id.to_string();
-            let msg = message.to_string();
-            let ec = execution_context.cloned();
-            let ov = overlay.clone();
-            let aid = agent_id.clone();
-            // 会话协调器：派发失败推 system_notification 补报（统一错误模型
-            // 假成功显式化）。record_id 为前端 system 气泡唯一 id 来源
-            // （lifecycleHandlers 拒绝缺失）；未落库——实时可见，刷新后
-            // 由全量对账清理（无对应 API 记录即消失）。
-            let session = self.session.clone();
-            tokio::spawn(async move {
-                if let Err(e) = dispatcher
-                    .dispatch_user_input(
-                        &tid,
-                        &uid,
-                        &msg,
-                        &pid,
-                        "",
-                        ec.as_ref(),
-                        ov.as_ref(),
-                        &aid,
-                        "",
-                        PendingInputSource::Trigger,
-                    )
-                    .await
-                {
-                    tracing::error!(
-                        pipeline = %pid,
-                        thread = %tid,
-                        error = %e,
-                        "chat.send_message 后台派发失败（任务管道未启动）"
-                    );
-                    if let Some(session) = session {
-                        let _ = session
-                            .emit_event(
-                                &tid,
-                                "system_notification",
-                                serde_json::json!({
-                                    "pipeline_id": pid,
-                                    "thread_id": tid,
-                                    "record_id": format!("n_{pid}_dispatch_failed"),
-                                    "notification_id": "dispatch_failed",
-                                    "notificationType": "dispatch_failed",
-                                    "level": "error",
-                                    "content": format!("任务派发失败，管道未启动：{e}"),
-                                    "sequence": null,
-                                }),
-                            )
-                            .await;
-                    }
-                }
-            });
-            return Ok(json!({
-                "status": if created { "created" } else { "dispatched" },
-                "pipeline_id": pipeline_id,
-            }));
+        if p.background {
+            // 阶段五：后台派发，spawn 后响应立即返回（见 spawn_background_dispatch）。
+            return self.spawn_background_dispatch(&p, &pipeline_id, &thread_id, created);
         }
         self.dispatcher
             .dispatch_user_input(
                 &thread_id,
-                user_id,
-                message,
+                p.user_id,
+                p.message,
                 &pipeline_id,
                 "",
-                execution_context,
-                overlay.as_ref(),
-                &agent_id,
+                p.execution_context,
+                p.overlay.as_ref(),
+                &p.agent_id,
                 "",
                 PendingInputSource::Trigger,
             )
@@ -486,7 +231,8 @@ impl ChatSendHandler {
     /// 对外契约只含 `pipeline_id + message + user_id`——thread 是由坐标推导的
     /// 派生物，不该让调用方传（传了反而要被造伪）。解析失败 → [`McpError::Protocol`]：
     /// 宁可接口消费方报错，也不静默跑完把回复发到无人订阅的频道。
-    /// 无 store（`new()` 构造）回退现状：pipeline 兼作派发键（单测/兼容路径）。
+    /// 无 store 构造（with_store 传 None，单测/兼容路径）回退现状：
+    /// pipeline 兼作派发键。
     async fn resolve_inject_thread(&self, pipeline_id: &str) -> Result<String, McpError> {
         let Some(store) = self.store.as_ref() else {
             return Ok(pipeline_id.to_string());
@@ -925,7 +671,7 @@ mod tests {
                     "background": true,
                     "message": "执行任务「调研」。",
                     "user_id": "user_birth_persist",
-                    "state": {"task.goal": "调研", "task.status": "pending", "task.scope": "non_container"},
+                    "state": {"task.goal": "调研", "task.status": "pending", "task.parent_project_id": "proj0011"},
                     "lineage": {"parent_pipeline_id": "pipe_parent", "origin_session_id": "th_1"},
                 }),
             )
@@ -939,7 +685,7 @@ mod tests {
         let get = |k: &str| fields.get(k).expect(k);
         assert_eq!(get("task.goal"), "调研");
         assert_eq!(get("task.status"), "pending");
-        assert_eq!(get("task.scope"), "non_container");
+        assert_eq!(get("task.parent_project_id"), "proj0011");
         assert_eq!(get("task.id"), pid.as_str());
         assert_eq!(get("lineage.parent_pipeline_id"), "pipe_parent");
         assert_eq!(get("lineage.origin_session_id"), "th_1");
@@ -1506,7 +1252,7 @@ mod tests {
                     "state": {
                         "task.owned.c1d2e3f4a5b64789abcdef0123456789.title": "容器项目",
                         "task.owned.c1d2e3f4a5b64789abcdef0123456789.status": "active",
-                        "task.owned.c1d2e3f4a5b64789abcdef0123456789.scope": "container",
+                        "task.owned.c1d2e3f4a5b64789abcdef0123456789.submitted_by": "u1",
                     },
                 }),
             )
@@ -1527,8 +1273,8 @@ mod tests {
             "容器项目"
         );
         assert_eq!(
-            st.state["task.owned.c1d2e3f4a5b64789abcdef0123456789.scope"],
-            "container"
+            st.state["task.owned.c1d2e3f4a5b64789abcdef0123456789.submitted_by"],
+            "u1"
         );
         // 冷兜底：pipeline_state 表已持久化（重启后冷恢复读它）
         let fields = store

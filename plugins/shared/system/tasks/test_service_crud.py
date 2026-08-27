@@ -254,16 +254,11 @@ class TestCrud:
         assert svc.get_task(task.id) is None
 
     @pytest.mark.asyncio
-    async def test_delete_task_soft_deletes_container(self, svc: Any) -> None:
-        container = await svc.create_task(
-            title="容器", metadata={"task_scope": "container"},
-        )
-        child = await svc.create_task(title="子", parent_task_id=container.id)
-        assert await svc.delete_task(container.id) is True
-        fetched = svc.get_task(container.id)
-        assert fetched is not None
-        assert fetched.metadata.get("soft_deleted") is True
-        assert fetched.status.value == "failed"
+    async def test_delete_task_cascades_children(self, svc: Any) -> None:
+        parent = await svc.create_task(title="父")
+        child = await svc.create_task(title="子", parent_task_id=parent.id)
+        assert await svc.delete_task(parent.id) is True
+        assert svc.get_task(parent.id) is None  # 硬删（无软删分支）
         assert svc.get_task(child.id) is None  # 子任务级联清理
 
 

@@ -182,10 +182,10 @@ async def _seed_container(svc: Any, title: str = "容器项目", **meta: Any) ->
 class TestManifestHttpEndpoints:
     """plugin.json http_endpoints 声明与分发语义一致。"""
 
-    def test_declares_28_endpoints(self) -> None:
+    def test_declares_27_endpoints(self) -> None:
         manifest = json.loads((_PLUGIN_DIR / "plugin.json").read_text(encoding="utf-8"))
         eps = manifest["http_endpoints"]
-        assert len(eps) == 28, f"channel_api tasks(21)+projects(7)=28，实际 {len(eps)}"
+        assert len(eps) == 27, f"tasks(20)+projects(7)=27（containers 已随容器任务退役），实际 {len(eps)}"
 
     def test_namespace_auth_timeout(self) -> None:
         manifest = json.loads((_PLUGIN_DIR / "plugin.json").read_text(encoding="utf-8"))
@@ -200,7 +200,7 @@ class TestManifestHttpEndpoints:
         paths = {(e["method"], e["path"]) for e in manifest["http_endpoints"]}
         assert ("GET", "/ext/task_service/tasks") in paths
         assert ("POST", "/ext/task_service/tasks/root") in paths
-        assert ("GET", "/ext/task_service/tasks/containers") in paths
+        assert ("GET", "/ext/task_service/tasks/containers") not in paths  # 容器端点已退役
         assert ("PATCH", "/ext/task_service/tasks/{task_id}") in paths
         assert ("DELETE", "/ext/task_service/tasks/{task_id}") in paths
         assert ("POST", "/ext/task_service/tasks/{task_id}/cancel") in paths
@@ -313,7 +313,6 @@ class TestTasksEndpoints:
         assert t["pipeline_run_id"] == "pipe-0-2-task"
         # 会话锚点：lineage.origin_session_id 为真 thread id（非自身 pipeline_id）
         assert t["thread_id"] == "sess-real"
-        assert t["metadata"]["task_scope"] == "non_container"
 
     async def test_list_tasks_state_row_dedup(self, monkeypatch: pytest.MonkeyPatch,
                                               service: Any, hub: _FakeCapabilityHub) -> None:
@@ -369,18 +368,16 @@ class TestTasksEndpoints:
 
     # ── 2026-08-22 定案：容器任务 = 提交者管道自持（task.owned.*）──
 
-    async def test_list_tasks_merges_owned_container_tasks(self, monkeypatch: pytest.MonkeyPatch,
+    async def test_list_tasks_merges_owned_registered_tasks(self, monkeypatch: pytest.MonkeyPatch,
                                                            service: Any, hub: _FakeCapabilityHub) -> None:
-        """容器任务（task.owned.<id>.* 键）从提交者管道聚合行组装，不建管道。"""
+        """登记型任务（task.owned.<id>.* 键，如 review 复盘管道）从提交者管道聚合行组装。"""
         hub._responses["pipeline-state"] = {
             "list": [
                     {
                         "pipeline_id": "owner-pipe-1",
-                        "task.owned.c1d2e3f4a5b6.title": "容器项目",
-                        "task.owned.c1d2e3f4a5b6.status": "active",
-                        "task.owned.c1d2e3f4a5b6.scope": "container",
-                        "task.owned.c1d2e3f4a5b6.workspace": "D:/proj/x",
-                        "task.owned.c1d2e3f4a5b6.submitted_by": "u-1",
+                        "task.owned.c1d2e3f4a5b6.title": "复盘 task-9",
+                        "task.owned.c1d2e3f4a5b6.status": "running",
+                        "task.owned.c1d2e3f4a5b6.submitted_by": "review_system",
                         "lineage.origin_session_id": "sess-owner",
                         "thread_id": "owner-pipe-1",
                     }
@@ -392,43 +389,11 @@ class TestTasksEndpoints:
         assert resp["payload"]["total"] == 1
         t = items[0]
         assert t["id"] == "c1d2e3f4a5b6"
-        assert t["title"] == "容器项目"
-        assert t["status"] == "active"
-        assert t["metadata"]["task_scope"] == "container"
-        assert t["metadata"]["workspace"] == "D:/proj/x"
-        # 容器任务无执行管道：pipeline_run_id 指向提交者管道（归属定位用）
+        assert t["title"] == "复盘 task-9"
+        assert t["status"] == "running"
+        # 登记型任务无执行管道：pipeline_run_id 指向提交者管道（归属定位用）
         assert t["pipeline_run_id"] == "owner-pipe-1"
         assert t["thread_id"] == "sess-owner"
-
-    async def test_list_container_tasks_from_state(self, monkeypatch: pytest.MonkeyPatch,
-                                                    service: Any, hub: _FakeCapabilityHub) -> None:
-        """前端父容器下拉：容器任务从 state 聚合组装（YAML 面退役）。"""
-        hub._responses["pipeline-state"] = {
-            "list": [
-                    {
-                        "pipeline_id": "owner-pipe-1",
-                        "task.owned.c1d2e3f4a5b6.title": "容器项目",
-                        "task.owned.c1d2e3f4a5b6.status": "active",
-                        "task.owned.c1d2e3f4a5b6.scope": "container",
-                        "lineage.origin_session_id": "sess-owner",
-                        "thread_id": "owner-pipe-1",
-                    },
-                    {
-                        "pipeline_id": "pipe-other",
-                        "task.goal": "普通任务",
-                        "task.status": "running",
-                        "task.scope": "non_container",
-                        "lineage.origin_session_id": "sess-owner",
-                        "thread_id": "pipe-other",
-                    },
-                ]
-        }
-        resp = await _http(monkeypatch, service, hub, "/ext/task_service/tasks/containers")
-        assert resp["status"] == 200
-        containers = resp["payload"]
-        assert len(containers) == 1
-        assert containers[0]["id"] == "c1d2e3f4a5b6"
-        assert containers[0]["title"] == "容器项目"
 
     async def test_get_task_ok_and_404(self, monkeypatch: pytest.MonkeyPatch,
                                        service: Any, hub: _FakeCapabilityHub) -> None:
@@ -584,15 +549,6 @@ class TestTasksEndpoints:
                                  "project_id": "ffffffffffff", "target_id": "main"})
         assert resp["status"] == 404
         assert "不存在" in resp["payload"]["detail"]
-
-    async def test_list_container_tasks(self, monkeypatch: pytest.MonkeyPatch,
-                                        service: Any, hub: _FakeCapabilityHub) -> None:
-        c = await _seed_container(service, title="容器A")
-        await service.create_task(title="普通")
-        resp = await _http(monkeypatch, service, hub, "/ext/task_service/tasks/containers",
-                           query={"session_id": "sess-1"})
-        assert resp["status"] == 200
-        assert resp["payload"] == [{"id": c.id, "title": "容器A"}]
 
     async def test_update_task_reads_state_rows(self, monkeypatch: pytest.MonkeyPatch,
                                                 service: Any, hub: _FakeCapabilityHub) -> None:
@@ -966,13 +922,6 @@ class TestEdgeAndDegradedBranches:
         assert resp["status"] == 200
         assert resp["payload"] == {"items": [], "total": 0}
 
-    async def test_container_list_service_failure_empty(self, monkeypatch: pytest.MonkeyPatch,
-                                                        hub: _FakeCapabilityHub) -> None:
-        resp = await _http(monkeypatch, _CrashService(), hub,
-                           "/ext/task_service/tasks/containers")
-        assert resp["status"] == 200
-        assert resp["payload"] == []
-
     # ── 响应协议/身份解析辅助 ──
 
     def test_http_exc_response_uses_detail_attr(self) -> None:
@@ -1154,8 +1103,6 @@ class TestEdgeAndDegradedBranches:
         assert json.loads(base64.b64decode(r["data"]["body"])) == {"items": [], "total": 0}
         r = await http_api.handle_http("/ext/task_service/tasks/debug/all", "GET", "", {}, None)
         assert json.loads(base64.b64decode(r["data"]["body"])) == {"items": [], "total": 0}
-        r = await http_api.handle_http("/ext/task_service/tasks/containers", "GET", "", {}, None)
-        assert json.loads(base64.b64decode(r["data"]["body"])) == []
 
         # tasks 域写面 503
         r = await http_api.handle_http("/ext/task_service/tasks", "POST",
@@ -1207,12 +1154,13 @@ class TestEdgeAndDegradedBranches:
 
     # ── tasks 域 delete 容器软删消息 ──
 
-    async def test_delete_container_task_soft_message(self, monkeypatch: pytest.MonkeyPatch,
-                                                      service: Any, hub: _FakeCapabilityHub) -> None:
-        c = await _seed_container(service, title="软删容器")
-        resp = await _http(monkeypatch, service, hub, f"/ext/task_service/tasks/{c.id}", "DELETE")
+    async def test_delete_task_hard_message(self, monkeypatch: pytest.MonkeyPatch,
+                                            service: Any, hub: _FakeCapabilityHub) -> None:
+        t = await service.create_task(title="待删任务")
+        resp = await _http(monkeypatch, service, hub, f"/ext/task_service/tasks/{t.id}", "DELETE")
         assert resp["status"] == 200
-        assert resp["payload"]["message"] == "容器任务已标记删除"
+        assert "已删除" in resp["payload"]["message"]
+        assert service.get_task(t.id) is None
 
     # ── phase 映射 default ──
 

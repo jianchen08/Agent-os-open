@@ -196,15 +196,8 @@ class _TaskCrudMixin:
     async def delete_task(self, task_id: str) -> bool:
         """删除任务（级联清理关联管道与子任务资源）。
 
-        委托 soft_delete_container / hard_delete_task 完成完整级联清理，
-        与 task 工具层删除路径保持一致：
-          - 容器任务(task_scope=container): 软删除 + 级联清理子任务管道
-          - 非容器任务: 硬删除 + 清理自身管道文件 + 级联清理子任务
-
-        BUG-FIX-delete_task_pipeline_cascade:
-        原实现仅删除任务记录，不清理 task.pipeline_run_id 对应的管道执行文件、
-        不取消运行中的管道引擎、容器任务也不级联清理子任务管道，导致通过 API
-        删除任务时管道残留。现统一复用已验证的级联清理路径。
+        委托 hard_delete_task 完成完整级联清理（清理自身管道文件 + 级联清理子任务），
+        与 task 工具层删除路径保持一致。
 
         Args:
             task_id: 任务 ID
@@ -219,12 +212,9 @@ class _TaskCrudMixin:
         if task is None:
             return False
 
-        if (task.metadata or {}).get("task_scope") == "container":
-            await self.soft_delete_container(task_id)
-        else:
-            await self.hard_delete_task(task_id)
+        await self.hard_delete_task(task_id)
 
-        # soft/hard_delete 内部不触发 deleting→deleted 信号，
+        # hard_delete 内部不触发 deleting→deleted 信号，
         # 下游 WebSocket/回调依赖此状态变更，需在此保留对外契约。
         await self._emit_state_change(task_id, "deleting", "deleted")
         return True

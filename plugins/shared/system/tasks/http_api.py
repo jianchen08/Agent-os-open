@@ -23,7 +23,6 @@ dispatcher 调度的标准插件 HTTP 面模式，与 agent_manager/task_form �
 from __future__ import annotations
 
 import base64
-import json
 import logging
 import os
 import sys
@@ -33,6 +32,16 @@ from typing import Any
 from enum_utils import safe_enum_value
 from pydantic import BaseModel, Field
 from service_access import get_task_service
+
+# 共享层样板（plugins/shared/http_json.py）入 sys.path 后裸名导入。
+_SHARED_ROOT = os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", ".."))
+if _SHARED_ROOT not in sys.path:
+    sys.path.insert(0, _SHARED_ROOT)
+from http_json import (  # noqa: E402
+    decode_body as _decode_body,
+    json_response as _json_response,
+    ok as _ok,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -155,25 +164,9 @@ def validate_pagination(limit: int, offset: int, max_limit: int = 100) -> None:
 
 
 # ════════════════════════════════════════════════════════════
-# HTTP 响应协议（内核 dispatcher 契约，与 agent_manager/task_form 同款）
+# HTTP 响应协议（内核 dispatcher 契约）：公共实现 plugins/shared/http_json.py
+# （文件头已导入）；_http_exc_response 为本插件特有转换。
 # ════════════════════════════════════════════════════════════
-
-
-def _json_response(payload: Any, status: int = 200) -> dict[str, Any]:
-    """把任意 JSON 可序列化对象包成内核期望的 HttpHandleResponse（body base64）。"""
-    body_str = json.dumps(payload, default=str, ensure_ascii=False)
-    body_b64 = base64.b64encode(body_str.encode("utf-8")).decode("ascii")
-    return {
-        "status": status,
-        "headers": {"Content-Type": "application/json; charset=utf-8"},
-        "body": body_b64,
-        "body_encoding": "base64",
-    }
-
-
-def _ok(data: Any) -> dict[str, Any]:
-    """成功响应：{success, data}（ToolExecutionResult 契约）。"""
-    return {"success": True, "data": data}
 
 
 def _http_exc_response(exc: Exception) -> dict[str, Any]:
@@ -183,22 +176,6 @@ def _http_exc_response(exc: Exception) -> dict[str, Any]:
     if detail is None:
         detail = str(exc)
     return _ok(_json_response({"detail": detail}, int(status)))
-
-
-def _decode_body(raw_body: str) -> dict[str, Any]:
-    """解码 http.handle 的 raw_body（base64 或明文 JSON）为 dict。"""
-    if not raw_body:
-        return {}
-    try:
-        try:
-            decoded = base64.b64decode(raw_body).decode("utf-8")
-            if not decoded.lstrip().startswith(("{", "[")):
-                decoded = raw_body
-        except Exception:  # noqa: BLE001
-            decoded = raw_body
-        return json.loads(decoded) if decoded.strip() else {}
-    except json.JSONDecodeError as e:
-        raise ValueError(f"invalid JSON body: {e}") from e
 
 
 def _pydantic_to_dict(obj: Any) -> Any:
@@ -671,7 +648,6 @@ async def _list_tasks_from_state() -> list[dict[str, Any]] | None:
                 "parent_task_id": str(row.get("lineage.parent_pipeline_id") or "") or None,
                 "metadata": {
                     "session_id": _session_anchor(row),
-                    "task_scope": str(row.get("task.scope") or "non_container"),
                     "submitted_by": str(row.get("task.submitted_by") or ""),
                     # 父是容器任务（task.owned 声明）时：容器 project id（前端
                     # 任务树据此把子任务挂到容器节点下）
@@ -705,9 +681,6 @@ async def _list_tasks_from_state() -> list[dict[str, Any]] | None:
                     "parent_task_id": None,
                     "metadata": {
                         "session_id": _session_anchor(row),
-                        # 登记键带真实 scope（task_submit 写入）；缺省视为容器
-                        # （task.owned 通道的设计场景是容器任务登记）
-                        "task_scope": str(fields.get("scope") or "container"),
                         "submitted_by": str(fields.get("submitted_by") or ""),
                         "workspace": str(fields.get("workspace") or ""),
                     },
@@ -983,49 +956,6 @@ async def create_root_task(
     )
 
     return _task_to_response({"id": task_id, "title": body.title, "status": "pending"})
-
-
-async def list_container_tasks(
-    session_id: str = "",
-    _user: dict[str, Any] | None = None,
-) -> list[dict[str, Any]]:
-    """返回当前会话下所有 task_scope=container 的任务，供前端下拉选父容器。
-
-    容器任务 = 提交者管道自持的声明（task.owned.*），
-    从 state 聚合组装；YAML 私有存储已退役（0.2 容器任务不写 YAML）。
-    """
-
-    containers: list[dict[str, Any]] = []
-
-    state_tasks = await _list_tasks_from_state()
-    if state_tasks:
-        for t in state_tasks:
-            if t.get("metadata", {}).get("task_scope") != "container":
-                continue
-            if session_id and t.get("thread_id") != session_id:
-                continue
-            containers.append({"id": t["id"], "title": t["title"]})
-        return containers
-
-    # 降级：state 聚合不可用 → YAML 面（0.1 遗留容器任务）
-    task_service = _get_task_service()
-
-    if task_service is None:
-        return []
-
-    try:
-        tasks = await task_service.list_all(limit=1000, session_id=session_id or None)
-
-        for tm in tasks:
-            _meta = tm.metadata or {}
-
-            if _meta.get("task_scope") == "container":
-                containers.append({"id": tm.id, "title": tm.title})
-
-    except Exception as exc:
-        logger.warning("[list_container_tasks] 加载失败 | session=%s | error=%s", session_id, exc)
-
-    return containers
 
 
 def get_task(
@@ -1916,11 +1846,6 @@ async def handle_http(
                 return _ok(_json_response(_pydantic_to_dict(await create_root_task(
                     TaskRootCreate(**_decode_body(raw_body)), caller,
                 ))))
-            if sub == "/containers" and method == "GET":
-                return _ok(_json_response(await list_container_tasks(
-                    session_id=_qopt(q, "session_id") or "",
-                    _user=caller,
-                )))
             # /{task_id} 系列
             if sub.startswith("/") and len(sub) > 1:
                 rest = sub[1:]

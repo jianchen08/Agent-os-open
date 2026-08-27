@@ -204,18 +204,12 @@ async def test_get_list_l2_filters(tool: TaskTool) -> None:
     assert len(result.output["d"]) == 0, "L2 无上下文 → _check_permission 拒绝全部"
 
 
-async def test_get_list_scope_and_project_filters(tool: TaskTool) -> None:
-    """task_scope / project_id 过滤（user parent_task_id 过滤在 actions 文件已测）。"""
+async def test_get_list_project_filter(tool: TaskTool) -> None:
+    """project_id 过滤（user parent_task_id 过滤在 actions 文件已测）。"""
     rows = [
         _state_row(pipeline_id="p-a"),
-        _state_row(**{"pipeline_id": "p-b", "task.scope": "container"}),
+        _state_row(pipeline_id="p-b"),
     ]
-    _set_reader(tool, rows)
-    result = await tool.execute(
-        {"action": "get", "task_scope": "container", "parent_agent_level": 1}
-    )
-    assert result.success, result.error
-    assert [r[0] for r in result.output["d"]] == ["p-b"[:12]]
     _set_reader(tool, rows)
     result = await tool.execute(
         {"action": "get", "project_id": "proj-1", "parent_agent_level": 1}
@@ -471,20 +465,15 @@ async def test_delete_non_container_task(tool: TaskTool, svc: Any) -> None:
     assert svc.get_task(task.id) is None
 
 
-async def test_delete_container_task_soft_deletes(tool: TaskTool, svc: Any) -> None:
-    """delete 容器任务 → soft_delete_container（标记失败 + 软删标记）。"""
-    task = await svc.create_task(title="容器", metadata={"task_scope": "container"})
+async def test_delete_container_metadata_task_hard_deletes(tool: TaskTool, svc: Any) -> None:
+    """遗留容器元数据行同样走硬删（软删路径已随容器任务退役）。"""
+    task = await svc.create_task(title="遗留容器", metadata={"task_scope": "container"})
     result = await tool.execute(
         {"action": "delete", "task_id": task.id, "parent_agent_level": 1}
     )
     assert result.success, result.error
-    data = result.output
-    assert data["deleted"] is False
-    assert data["soft_deleted"] is True
-    after = svc.get_task(task.id)
-    assert after is not None
-    assert after.metadata.get("soft_deleted") is True
-    assert after.status.value == "failed"
+    assert result.output["deleted"] is True
+    assert svc.get_task(task.id) is None
 
 
 async def test_delete_state_task_via_pipeline_executor(tool: TaskTool) -> None:

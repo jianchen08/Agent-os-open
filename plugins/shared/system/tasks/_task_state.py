@@ -75,17 +75,13 @@ class _TaskStateMixin:
         与 start_task / complete_task 等具体方法不同，此方法接受任意 TaskStatus，
         通过 _TASK_TRANSITIONS 校验合法性后执行转换。
 
-        例外：容器任务（task_scope == "container"）跳过状态机校验，允许 L1
-        主 Agent / 任务管理工具在任意终态之间自由互转。容器本身只是子任务的
-        "集合"，不承载执行语义，强加状态机会导致 UI 无法纠正错误的容器状态。
-
         Args:
             task_id: 任务 ID
             target_status: 目标状态（TaskStatus 枚举）
 
         Raises:
             KeyError: 任务不存在
-            InvalidTransitionError: 当前状态不允许转换到目标状态（仅非容器任务）
+            InvalidTransitionError: 当前状态不允许转换到目标状态
         """
         if self._storage is None:
             raise KeyError(f"任务不存在: {task_id}")
@@ -99,17 +95,13 @@ class _TaskStateMixin:
         current = safe_enum_value(task.status)
         target = safe_enum_value(target_status)
 
-        # 容器任务：跳过状态机校验（仅作为子任务集合，状态由 L1 自由维护）
-        is_container = (task.metadata or {}).get("task_scope") == "container"
-
-        if not is_container:
-            allowed = _TASK_TRANSITIONS.get(current, [])
-            if target not in allowed:
-                raise InvalidTransitionError(
-                    current,
-                    target,
-                    f"不允许从 ''{current}'' 转换到 ''{target}''，合法目标: {allowed}",
-                )
+        allowed = _TASK_TRANSITIONS.get(current, [])
+        if target not in allowed:
+            raise InvalidTransitionError(
+                current,
+                target,
+                f"不允许从 ''{current}'' 转换到 ''{target}''，合法目标: {allowed}",
+            )
 
         task.status = TaskStatus(target)
         task.updated_at = datetime.now().isoformat()

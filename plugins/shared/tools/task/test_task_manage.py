@@ -92,7 +92,6 @@ def test_get_task_service_returns_0_2_service_without_infrastructure() -> None:
         "hard_delete_task",
         "cancel_task_cascade",
         "list_subtasks",
-        "soft_delete_container",
     ):
         assert hasattr(svc, method), f"0.2 TaskService 缺少 {method}"
 

@@ -234,8 +234,6 @@ class TaskTool(BuiltinTool):
             "retry_count": 0,
             "max_retries": 6,
         }
-        if row.get("task.scope"):
-            metadata["task_scope"] = str(row["task.scope"])
         if row.get("workspace"):
             metadata["workspace"] = str(row["workspace"])
         if isinstance(row.get("ws_meta"), dict):
@@ -272,7 +270,7 @@ class TaskTool(BuiltinTool):
         for row in rows:
             # 任务行判定与内核收紧口径一致（kernel server.rs has_task_marker：
             # k.startswith("task.") && !k.startswith("task.owned.")）——含
-            # task.* 但不含 task.owned.* 的行才是任务管道；只登记过容器子任务
+            # task.* 但不含 task.owned.* 的行才是任务管道
             # （task.owned.*）的聊天管道不算任务行，不返给 LLM。
             if not any(
                 str(k).startswith("task.") and not str(k).startswith("task.owned.")
@@ -304,8 +302,6 @@ class TaskTool(BuiltinTool):
                 "session_id": session_anchor,
                 "target_id": str(row.get("task.submitted_by") or ""),
             }
-            if row.get("task.scope"):
-                metadata["task_scope"] = str(row["task.scope"])
             if row.get("workspace"):
                 metadata["workspace"] = str(row["workspace"])
             if isinstance(row.get("ws_meta"), dict):
@@ -387,17 +383,9 @@ class TaskTool(BuiltinTool):
                             "- continue：继续执行（重试/恢复/注入指令，针对非容器任务）\n"
                             "- stop：停止任务（统一进入 stopped 状态，针对非容器任务）\n"
                             "- delete：删除任务\n"
-                            "- change：变更容器任务状态（仅L1，仅容器任务）。"
-                            "通过 status 参数指定目标状态，容器只是子任务集合，"
-                            "状态可自由变更（completed/failed/pending/running/stopped/timeout）。"
-                            "status=completed 时会清理子任务 worktree。"
+                            "- change：变更任务运行状态（仅L1）。"
+                            "通过 status 参数指定目标（suspended=挂起/running=恢复）。"
                         ),
-                    },
-                    "task_scope": {
-                        "type": "string",
-                        "enum": ["all", "container", "non_container"],
-                        "description": "任务范围过滤（get 列表模式时生效）",
-                        "default": "all",
                     },
                     "task_id": {
                         "type": "string",
@@ -443,7 +431,7 @@ class TaskTool(BuiltinTool):
                     },
                     "container_reason": {
                         "type": "string",
-                        "description": "容器操作原因（change 操作时填写，记录到任务 metadata）",
+                        "description": "变更原因（change 操作时填写，记录到任务 metadata）",
                     },
                     "include_details": {
                         "type": "boolean",
@@ -457,7 +445,7 @@ class TaskTool(BuiltinTool):
                     },
                     "parent_task_id": {
                         "type": "string",
-                        "description": "父任务 ID（get 列表模式时传入可筛选该容器下的子任务）",
+                        "description": "父任务 ID（get 列表模式时传入可筛选其下子任务）",
                     },
                     "project_id": {
                         "type": "string",
@@ -879,14 +867,6 @@ class TaskTool(BuiltinTool):
 
                 if not has_permission:
                     continue
-
-                task_scope = inputs.get("task_scope", "all")
-
-                if task_scope != "all":
-                    scope = task.metadata.get("task_scope", "non_container")
-
-                    if scope != task_scope:
-                        continue
 
                 project_id = inputs.get("project_id")
 
@@ -1440,14 +1420,6 @@ class TaskTool(BuiltinTool):
                 )
 
             reason = inputs.get("reason", "用户请求删除")
-
-            if task.metadata.get("task_scope") == "container":
-                result_data = await service.soft_delete_container(task_id, reason=reason)
-
-                return create_success_result(
-                    data=result_data,
-                    metadata={"action": "soft_delete_container"},
-                )
 
             result_data = await service.hard_delete_task(task_id, reason=reason)
 

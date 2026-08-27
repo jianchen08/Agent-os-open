@@ -232,7 +232,6 @@ class TestTriggerReviewDispatch:
         assert reg["pipeline_id"] == "task-9"
         assert reg["no_dispatch"] is True
         assert reg["state"]["task.owned.pipe_review_gen_1.title"] == "复盘 task-9"
-        assert reg["state"]["task.owned.pipe_review_gen_1.scope"] == "non_container"
         # state：复盘对象 + 复盘输入出生即入
         assert p["state"]["task.id"] == "task-9"
         assert p["state"]["review.summary"] == "复盘周报任务"

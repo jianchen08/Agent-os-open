@@ -834,34 +834,6 @@ class TestCleanupHelpers:
         )
         svc._cancel_pipeline("t-3")  # 不抛异常即通过
 
-    def test_is_child_of_container(self, svc: Any) -> None:
-        import asyncio
-
-        container = asyncio.run(svc.create_task(
-            title="容器", metadata={"task_scope": "container"},
-        ))
-        child = asyncio.run(svc.create_task(title="子", parent_task_id=container.id))
-        assert svc._is_child_of_container(child) is True
-        assert svc._is_child_of_container(container) is False
-        assert svc._is_child_of_container(asyncio.run(svc.create_task(title="独立"))) is False
-
-    def test_is_child_of_non_container_root(self, svc: Any) -> None:
-        """根任务存在但非容器 → False。"""
-        import asyncio
-
-        root = asyncio.run(svc.create_task(title="普通根"))
-        child = asyncio.run(svc.create_task(title="子", parent_task_id=root.id))
-        assert svc._is_child_of_container(child) is False
-
-    def test_is_child_of_missing_root(self, svc: Any) -> None:
-        """根任务记录已删（get_task 返回 None）→ False。"""
-        import asyncio
-
-        root = asyncio.run(svc.create_task(title="根"))
-        child = asyncio.run(svc.create_task(title="子", parent_task_id=root.id))
-        svc.hard_delete_sync(root.id)  # 直接删根记录，不级联
-        assert svc._is_child_of_container(child) is False
-
     def test_get_execution_record_storage_import(self, svc: Any, monkeypatch: pytest.MonkeyPatch) -> None:
         """_get_execution_record_storage 委托 infrastructure.service_access。"""
         sentinel = object()
@@ -998,35 +970,6 @@ class TestCleanupHelpers:
         monkeypatch.setattr(svc, "_cleanup_pipeline_file", lambda pid: False)
         stats = await svc._cascade_cleanup_subtasks(parent.id)
         assert stats["subtasks_deleted"] == 0
-
-    @pytest.mark.asyncio
-    async def test_soft_delete_container_missing(self, svc: Any) -> None:
-        result = await svc.soft_delete_container("missing")
-        assert "error" in result
-
-    @pytest.mark.asyncio
-    async def test_soft_delete_container_metadata_none(self, svc: Any, monkeypatch: pytest.MonkeyPatch) -> None:
-        """容器任务 metadata 为 None 时软删除仍落 soft_deleted 标记。"""
-        container = await svc.create_task(
-            title="容器", metadata={"task_scope": "container"},
-        )
-        container.metadata = None
-        await svc.save_task(container)
-        monkeypatch.setattr(svc, "_cancel_pipeline_recursive", lambda task_id: None)
-
-        async def _no_cascade(task_id: str, reason: str = "") -> int:
-            return 0
-
-        async def _no_cleanup(task_id: str, skip_workspace: bool = False, container_workspace: str = "") -> dict[str, Any]:
-            return {"subtasks_deleted": 0}
-
-        monkeypatch.setattr(svc, "cancel_task_cascade", _no_cascade)
-        monkeypatch.setattr(svc, "_cascade_cleanup_subtasks", _no_cleanup)
-        result = await svc.soft_delete_container(container.id)
-        assert result["soft_deleted"] is True
-        fetched = svc.get_task(container.id)
-        assert fetched.metadata["soft_deleted"] is True
-        assert fetched.error == "已取消: 用户请求删除"
 
     @pytest.mark.asyncio
     async def test_hard_delete_task_missing(self, svc: Any) -> None:
@@ -1255,23 +1198,6 @@ class TestCleanupHelpers:
         result = await svc._cleanup_subtask_worktrees(container, [child])
         assert result["error_count"] == 1
         assert any("子任务" in e for e in result["errors"])
-
-    @pytest.mark.asyncio
-    async def test_hard_delete_task_skips_workspace_for_container_child(
-        self, svc: Any, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        container = await svc.create_task(
-            title="容器", metadata={"task_scope": "container"},
-        )
-        child = await svc.create_task(
-            title="子", parent_task_id=container.id,
-            metadata={"workspace": "ws-child"},
-        )
-        monkeypatch.setattr(svc, "_cleanup_pipeline_file", lambda pid: False)
-        result = await svc.hard_delete_task(child.id)
-        assert result["deleted"] is True
-        assert result["cleanup"] == {"skipped": "容器子任务不清理工作空间"}
-        assert svc.get_task(child.id) is None
 
     @pytest.mark.asyncio
     async def test_cleanup_task_resources_isolation_path(

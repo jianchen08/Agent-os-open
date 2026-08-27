@@ -365,20 +365,6 @@ class TestTaskServiceDelete:
         """删除不存在的返回 False。"""
         assert await self.svc.delete_task("不存在") is False
 
-    @pytest.mark.asyncio
-    async def test_delete_container_soft(self) -> None:
-        """容器任务软删除。"""
-        container = await self.svc.create_task(
-            title="容器", metadata={"task_scope": "container"},
-        )
-        await self.svc.create_task(title="子", parent_task_id=container.id)
-        result = await self.svc.delete_task(container.id)
-        assert result is True
-        fetched = self.svc.get_task(container.id)
-        assert fetched is not None
-        assert fetched.metadata.get("soft_deleted") is True
-
-
 # ═══════════════════════════════════════════════════════════
 # 5. TimerManager 验证
 # ═══════════════════════════════════════════════════════════
@@ -483,10 +469,8 @@ class TestListTasksFromStateDedup:
         assert len([t for t in out if str(t["id"]) == "child-pipe"]) == 1
         child = by_id["child-pipe"]
         assert child["parent_task_id"] == "parent-pipe"
-        assert child["metadata"]["task_scope"] == "non_container"
-        # 纯容器声明（无 state 行）仍出口，scope 缺省 container
+        # 登记声明（无 state 行）仍出口（scope 键已随容器任务退役）
         proj = by_id["proj-1"]
-        assert proj["metadata"]["task_scope"] == "container"
         assert proj["parent_task_id"] is None
 
 

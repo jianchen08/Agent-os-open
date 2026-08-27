@@ -818,13 +818,8 @@ pub async fn pending_inputs_update_handler(
             message: format!("pending-inputs 条目不存在: {input_id}"),
         });
     }
-    emit_pending_inputs_changed_endpoint(
-        &state,
-        &pipeline_id,
-        &tenant_ctx.tenant_id,
-        "updated",
-    )
-    .await;
+    emit_pending_inputs_changed_endpoint(&state, &pipeline_id, &tenant_ctx.tenant_id, "updated")
+        .await;
     Ok(axum::Json(json!({ "status": "updated" })))
 }
 
@@ -840,10 +835,23 @@ pub async fn pending_inputs_delete_handler(
     let tenant_ctx = crate::server::request_tenant_ctx(state.store.as_ref(), &headers, "").await;
     // 删除前读取条目 cmid：排队中的 REST chat 请求（http_ 前缀 cmid）据此收到
     // 失败 outcome 解除挂起；条目已被消费循环 pop 时 list 查不到，不通知。
-    let cmid = store
+    // fail-closed：列表读取失败 = 无法识别待通知 cmid → 跳过删除并报 503，
+    // 绝不带病删除（那会丢 cmid 让 waiter 挂死至超时）；条目保留则消费循环
+    // 稍后仍能正常 pop 执行并回传 outcome。
+    let records = store
         .list_pending_inputs(&tenant_ctx.tenant_id, &pipeline_id)
         .await
-        .unwrap_or_default()
+        .map_err(|e| {
+            tracing::warn!(
+                pipeline = %pipeline_id,
+                error = %e,
+                "pending-inputs 删除前置列表读取失败，跳过删除（防 REST chat waiter 挂死）"
+            );
+            ApiError::ServiceUnavailable {
+                message: "pending-inputs 暂时不可用（存储异常），请稍后重试".to_string(),
+            }
+        })?;
+    let cmid = records
         .into_iter()
         .find(|r| r.id == input_id)
         .map(|r| r.client_message_id);
@@ -870,13 +878,8 @@ pub async fn pending_inputs_delete_handler(
             },
         );
     }
-    emit_pending_inputs_changed_endpoint(
-        &state,
-        &pipeline_id,
-        &tenant_ctx.tenant_id,
-        "deleted",
-    )
-    .await;
+    emit_pending_inputs_changed_endpoint(&state, &pipeline_id, &tenant_ctx.tenant_id, "deleted")
+        .await;
     Ok(axum::Json(json!({ "status": "deleted" })))
 }
 
@@ -891,10 +894,20 @@ pub async fn pending_inputs_clear_handler(
     })?;
     let tenant_ctx = crate::server::request_tenant_ctx(state.store.as_ref(), &headers, "").await;
     // 清空前读取全部 cmid（同 delete：解除排队中 REST chat 请求的挂起）。
+    // fail-closed 同删除分支：读取失败跳过清空并报 503，不丢 cmid 挂死 waiter。
     let cmids: Vec<String> = store
         .list_pending_inputs(&tenant_ctx.tenant_id, &pipeline_id)
         .await
-        .unwrap_or_default()
+        .map_err(|e| {
+            tracing::warn!(
+                pipeline = %pipeline_id,
+                error = %e,
+                "pending-inputs 清空前列表读取失败，跳过清空（防 REST chat waiter 挂死）"
+            );
+            ApiError::ServiceUnavailable {
+                message: "pending-inputs 暂时不可用（存储异常），请稍后重试".to_string(),
+            }
+        })?
         .into_iter()
         .map(|r| r.client_message_id)
         .collect();
@@ -916,14 +929,11 @@ pub async fn pending_inputs_clear_handler(
             },
         );
     }
-    emit_pending_inputs_changed_endpoint(
-        &state,
-        &pipeline_id,
-        &tenant_ctx.tenant_id,
-        "cleared",
-    )
-    .await;
-    Ok(axum::Json(json!({ "status": "cleared", "deleted": deleted })))
+    emit_pending_inputs_changed_endpoint(&state, &pipeline_id, &tenant_ctx.tenant_id, "cleared")
+        .await;
+    Ok(axum::Json(
+        json!({ "status": "cleared", "deleted": deleted }),
+    ))
 }
 
 /// 端点变更后的 WS 事件推送（PUT/DELETE/clear 共用）：反射到该管道的会话
@@ -1021,11 +1031,9 @@ const STATE_SUMMARY_KEYS: &[&str] = &[
     "task.status",
     "task.id",
     "task.ended_at",
-    // 任务域补充：scope/提交人/容器父是任务行
-    // 元数据（面板徽标 + 容器挂树依据）；workspace/ws_meta 是
-    // workspace_lifecycle init 写入的工作空间坐标（任务面板"打开工作空间"
-    // 按钮的数据源），均为小标量/小对象，安全出口。
-    "task.scope",
+    // 任务域补充：提交人/项目挂靠是任务行元数据（任务树挂项目节点依据）；
+    // workspace/ws_meta 是 workspace_lifecycle init 写入的工作空间坐标
+    // （任务面板"打开工作空间"按钮的数据源），均为小标量/小对象，安全出口。
     "task.submitted_by",
     "task.parent_project_id",
     // task.priority/task.max_retries 不再出口：执行层零消费者——无调度队列
@@ -1084,8 +1092,9 @@ pub(crate) fn summarize_state(state: &serde_json::Value) -> serde_json::Value {
 /// 顺序对齐 `stage_recover_history` 的冷恢复（checkpoint 标量 → pipeline_state 表
 /// 补充，表的最新值覆盖 checkpoint 里的出生/过期值，如 `task.status` pending →
 /// completed）。registry 未命中（重启后未再轮）时 `/pipelines/state` 与
-/// `pipeline-state.list` 的 DB 兜底共用；无 checkpoint / 读取失败返回 None
-/// （读面降级不崩，调用方跳过该行）。
+/// `pipeline-state.list` 的 DB 兜底共用；无 checkpoint 返回 None。读取失败
+/// 同样返回 None（任务树读面降级不崩，调用方跳过该行），但两类失败各留
+/// warn 痕迹——与「确实无档」的 Ok(None) 可区分，静默缺行可从日志定位。
 ///
 /// 无 checkpoint 但 `pipeline_state` 表有行时以表行为基线：running 中任务
 /// interval 未到不会有 checkpoint，整行丢弃会看不到刚提交的任务（出生字段
@@ -1098,12 +1107,26 @@ pub(crate) async fn cold_state_row(
     let ckpt = match store.load_latest_checkpoint(pipeline_id, tenant_id).await {
         Ok(Some((_step, c))) => Some(c),
         Ok(None) => None,
-        Err(_) => None,
+        Err(e) => {
+            tracing::warn!(
+                pipeline_id = %pipeline_id,
+                error = %e,
+                "load_latest_checkpoint 冷读失败，按无 checkpoint 处理（仅表行基线）"
+            );
+            None
+        }
     };
-    let fields = store
-        .load_pipeline_state(pipeline_id, tenant_id)
-        .await
-        .ok()?;
+    let fields = match store.load_pipeline_state(pipeline_id, tenant_id).await {
+        Ok(fields) => fields,
+        Err(e) => {
+            tracing::warn!(
+                pipeline_id = %pipeline_id,
+                error = %e,
+                "load_pipeline_state 冷读失败，跳过该行"
+            );
+            return None;
+        }
+    };
     let mut merged = ckpt.unwrap_or_else(|| serde_json::json!({}));
     if let Some(obj) = merged.as_object_mut() {
         for (k, v) in fields {
@@ -2345,13 +2368,12 @@ mod state_summary_tests {
     fn test_summarize_state_exports_task_owned_prefix_and_workspace() {
         // task.owned.<id>.<field>（提交者管道自持的
         // 任务登记，键含动态管道 id）按前缀整段出口；workspace/ws_meta/
-        // task.scope 等任务行元数据出口（面板徽标 + 打开工作空间按钮数据源）。
+        // task.parent_project_id 等任务行元数据出口（任务树挂项目节点 +
+        // 打开工作空间按钮数据源）。
         let state = json!({
             "pipeline_id": "p3",
             "task.owned.ae7b430f.title": "AI行业近月发展调研",
             "task.owned.ae7b430f.status": "running",
-            "task.owned.ae7b430f.scope": "non_container",
-            "task.scope": "non_container",
             "task.submitted_by": "u1",
             "workspace": "D:/ws/copy_1",
             "ws_meta": {"path": "D:/ws/copy_1", "mode": "worktree"},
@@ -2360,8 +2382,6 @@ mod state_summary_tests {
         let s = summarize_state(&state);
         assert_eq!(s["task.owned.ae7b430f.title"], "AI行业近月发展调研");
         assert_eq!(s["task.owned.ae7b430f.status"], "running");
-        assert_eq!(s["task.owned.ae7b430f.scope"], "non_container");
-        assert_eq!(s["task.scope"], "non_container");
         assert_eq!(s["task.submitted_by"], "u1");
         assert_eq!(s["workspace"], "D:/ws/copy_1");
         assert_eq!(s["ws_meta"]["mode"], "worktree");
@@ -2566,5 +2586,483 @@ mod plugin_profile_write_tests {
             "其他插件启停设置必须保留"
         );
         assert_eq!(doc["plugins"]["target_plugin"]["enabled"], true);
+    }
+}
+
+#[cfg(test)]
+mod pending_inputs_failure_tests {
+    //! 扫描 2026-08-27 辖区一 Should#18：pending-inputs 删除/清空前
+    //! `list_pending_inputs(...).unwrap_or_default()` 吞 DB 错 → cmid 丢 →
+    //! 排队中的 REST chat waiter 永不通知（挂死至超时）。
+    //! 修复契约：列表读取失败 = 无法安全逐出 → 跳过删除/清空并返回 503，
+    //! 排队条目保留（消费循环稍后仍会正常 pop 执行并回传 outcome），不再丢 cmid。
+
+    use super::*;
+    use agentos_core::traits::StorageBackend;
+    use agentos_core::types::{PendingInputRecord, PendingInputSource};
+    use axum::http::HeaderMap;
+
+    /// 委托真实 SqliteStore 的探针 store：仅 list_pending_inputs 可注入故障，
+    /// 其余方法全部转发真实实现（删除/清空走真库，非全 mock）。
+    struct PendingProbeStore {
+        inner: std::sync::Arc<agentos_engine::SqliteStore>,
+        fail_list: std::sync::atomic::AtomicBool,
+    }
+
+    impl PendingProbeStore {
+        fn new() -> Self {
+            Self {
+                inner: std::sync::Arc::new(agentos_engine::SqliteStore::open_memory().unwrap()),
+                fail_list: std::sync::atomic::AtomicBool::new(false),
+            }
+        }
+
+        async fn seed(&self, pipeline_id: &str, id: &str, cmid: &str) {
+            StorageBackend::enqueue_pending_input(
+                self.inner.as_ref(),
+                "default",
+                pipeline_id,
+                &PendingInputRecord {
+                    id: id.to_string(),
+                    pipeline_id: pipeline_id.to_string(),
+                    tenant_id: "default".to_string(),
+                    user_id: "u1".to_string(),
+                    content: "排队输入".to_string(),
+                    thread: "thread-probe".to_string(),
+                    source: PendingInputSource::Trigger,
+                    agent_id: "agentos".to_string(),
+                    route_id: pipeline_id.to_string(),
+                    thinking_strength: String::new(),
+                    client_message_id: cmid.to_string(),
+                    execution_context: None,
+                    state_overlay: None,
+                    created_at: chrono::Utc::now().to_rfc3339(),
+                },
+            )
+            .await
+            .unwrap();
+        }
+
+        async fn listed(&self, pipeline_id: &str) -> Vec<PendingInputRecord> {
+            StorageBackend::list_pending_inputs(self.inner.as_ref(), "default", pipeline_id)
+                .await
+                .unwrap()
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl StorageBackend for PendingProbeStore {
+        async fn list_pending_inputs(
+            &self,
+            tenant_id: &str,
+            pipeline_id: &str,
+        ) -> Result<Vec<PendingInputRecord>, agentos_core::types::StorageError> {
+            if self.fail_list.load(std::sync::atomic::Ordering::SeqCst) {
+                return Err(agentos_core::types::StorageError::Database(
+                    "injected list failure".to_string(),
+                ));
+            }
+            StorageBackend::list_pending_inputs(self.inner.as_ref(), tenant_id, pipeline_id).await
+        }
+        async fn delete_pending_input(
+            &self,
+            tenant_id: &str,
+            pipeline_id: &str,
+            input_id: &str,
+        ) -> Result<bool, agentos_core::types::StorageError> {
+            StorageBackend::delete_pending_input(
+                self.inner.as_ref(),
+                tenant_id,
+                pipeline_id,
+                input_id,
+            )
+            .await
+        }
+        async fn clear_pending_inputs(
+            &self,
+            tenant_id: &str,
+            pipeline_id: &str,
+        ) -> Result<usize, agentos_core::types::StorageError> {
+            StorageBackend::clear_pending_inputs(self.inner.as_ref(), tenant_id, pipeline_id).await
+        }
+        async fn get_thread_id_by_pipeline(
+            &self,
+            pipeline_id: &str,
+        ) -> Result<Option<String>, agentos_core::types::StorageError> {
+            StorageBackend::get_thread_id_by_pipeline(self.inner.as_ref(), pipeline_id).await
+        }
+
+        // ── trait 必需（无默认）方法：转发真实 store，保持行为真实性 ──
+        async fn get_run(
+            &self,
+            run_id: &str,
+        ) -> Result<agentos_core::types::RunRecord, agentos_core::types::StorageError> {
+            self.inner.get_run(run_id).await
+        }
+        async fn get_messages_by_pipeline(
+            &self,
+            pipeline_id: &str,
+            opts: agentos_core::traits::MessageQueryOpts,
+        ) -> Result<Vec<agentos_core::types::MessageRecord>, agentos_core::types::StorageError>
+        {
+            self.inner.get_messages_by_pipeline(pipeline_id, opts).await
+        }
+        async fn get_blob(
+            &self,
+            blob_id: &str,
+        ) -> Result<Vec<u8>, agentos_core::types::StorageError> {
+            self.inner.get_blob(blob_id).await
+        }
+        async fn append_trace(
+            &self,
+            entry: agentos_core::types::TraceEntry,
+        ) -> Result<(), agentos_core::types::StorageError> {
+            self.inner.append_trace(entry).await
+        }
+        async fn create_branch(
+            &self,
+            branch: agentos_core::types::Branch,
+        ) -> Result<(), agentos_core::types::StorageError> {
+            self.inner.create_branch(branch).await
+        }
+        async fn update_run_status(
+            &self,
+            run_id: &str,
+            status: agentos_core::types::RunStatus,
+            branch: Option<&str>,
+            seq: Option<u32>,
+        ) -> Result<(), agentos_core::types::StorageError> {
+            self.inner
+                .update_run_status(run_id, status, branch, seq)
+                .await
+        }
+        async fn create_run(
+            &self,
+            run_id: &str,
+            config_hash: &str,
+            tenant_id: &str,
+        ) -> Result<(), agentos_core::types::StorageError> {
+            StorageBackend::create_run(self.inner.as_ref(), run_id, config_hash, tenant_id).await
+        }
+        async fn store_blob(
+            &self,
+            data: &[u8],
+            mime_type: &str,
+        ) -> Result<String, agentos_core::types::StorageError> {
+            StorageBackend::store_blob(self.inner.as_ref(), data, mime_type).await
+        }
+        async fn create_session(
+            &self,
+            session: &agentos_core::types::SessionRecord,
+        ) -> Result<(), agentos_core::types::StorageError> {
+            self.inner.create_session(session).await
+        }
+        async fn get_session(
+            &self,
+            thread_id: &str,
+        ) -> Result<Option<agentos_core::types::SessionRecord>, agentos_core::types::StorageError>
+        {
+            self.inner.get_session(thread_id).await
+        }
+        async fn list_sessions(
+            &self,
+            filter: agentos_core::traits::SessionListFilter,
+        ) -> Result<Vec<agentos_core::types::SessionRecord>, agentos_core::types::StorageError>
+        {
+            self.inner.list_sessions(filter).await
+        }
+        async fn update_session(
+            &self,
+            session: &agentos_core::types::SessionRecord,
+        ) -> Result<(), agentos_core::types::StorageError> {
+            self.inner.update_session(session).await
+        }
+        async fn delete_session(
+            &self,
+            thread_id: &str,
+        ) -> Result<(), agentos_core::types::StorageError> {
+            self.inner.delete_session(thread_id).await
+        }
+        async fn link_pipeline_session(
+            &self,
+            pipeline_id: &str,
+            thread_id: &str,
+            tenant_id: &str,
+        ) -> Result<(), agentos_core::types::StorageError> {
+            self.inner
+                .link_pipeline_session(pipeline_id, thread_id, tenant_id)
+                .await
+        }
+        async fn list_pipeline_ids_by_thread(
+            &self,
+            thread_id: &str,
+            tenant_id: &str,
+        ) -> Result<Vec<String>, agentos_core::types::StorageError> {
+            self.inner
+                .list_pipeline_ids_by_thread(thread_id, tenant_id)
+                .await
+        }
+        async fn get_step_traces_by_thread(
+            &self,
+            thread_id: &str,
+            tenant_id: &str,
+        ) -> Result<Vec<agentos_core::types::TraceEntry>, agentos_core::types::StorageError>
+        {
+            self.inner
+                .get_step_traces_by_thread(thread_id, tenant_id)
+                .await
+        }
+        async fn create_user(
+            &self,
+            user: &agentos_core::types::UserRecord,
+        ) -> Result<(), agentos_core::types::StorageError> {
+            self.inner.create_user(user).await
+        }
+        async fn get_user_by_id(
+            &self,
+            user_id: &str,
+        ) -> Result<Option<agentos_core::types::UserRecord>, agentos_core::types::StorageError>
+        {
+            self.inner.get_user_by_id(user_id).await
+        }
+        async fn get_user_by_username(
+            &self,
+            username: &str,
+        ) -> Result<Option<agentos_core::types::UserRecord>, agentos_core::types::StorageError>
+        {
+            self.inner.get_user_by_username(username).await
+        }
+        async fn list_users(
+            &self,
+        ) -> Result<Vec<agentos_core::types::UserRecord>, agentos_core::types::StorageError>
+        {
+            self.inner.list_users().await
+        }
+        async fn update_last_login(
+            &self,
+            user_id: &str,
+        ) -> Result<(), agentos_core::types::StorageError> {
+            self.inner.update_last_login(user_id).await
+        }
+        async fn delete_user(
+            &self,
+            user_id: &str,
+        ) -> Result<bool, agentos_core::types::StorageError> {
+            self.inner.delete_user(user_id).await
+        }
+    }
+
+    fn probe_state(store: std::sync::Arc<PendingProbeStore>) -> AppState {
+        let mut state = AppState::new();
+        let dyn_store: std::sync::Arc<dyn StorageBackend> = store;
+        state.store = Some(dyn_store);
+        state
+    }
+
+    fn probe_record(id: &str) -> PendingInputRecord {
+        PendingInputRecord {
+            id: id.to_string(),
+            pipeline_id: "pipe-fail-del".to_string(),
+            tenant_id: "default".to_string(),
+            user_id: "u1".to_string(),
+            content: "x".to_string(),
+            thread: "thread-probe".to_string(),
+            source: PendingInputSource::Trigger,
+            agent_id: "agentos".to_string(),
+            route_id: "pipe-fail-del".to_string(),
+            thinking_strength: String::new(),
+            client_message_id: String::new(),
+            execution_context: None,
+            state_overlay: None,
+            created_at: chrono::Utc::now().to_rfc3339(),
+        }
+    }
+
+    #[tokio::test]
+    async fn delete_with_failing_list_returns_503_and_keeps_entry() {
+        let probe = std::sync::Arc::new(PendingProbeStore::new());
+        probe.seed("pipe-fail-del", "pi_del_1", "").await;
+        probe
+            .fail_list
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        let state = probe_state(probe.clone());
+
+        let resp = pending_inputs_delete_handler(
+            axum::extract::State(state),
+            axum::extract::Path(("pipe-fail-del".to_string(), "pi_del_1".to_string())),
+            HeaderMap::new(),
+        )
+        .await;
+
+        match resp {
+            Ok(body) => panic!("list 故障时不得照常删除伪装成功，实际 {:?}", body.0),
+            Err(e) => assert!(
+                matches!(e, ApiError::ServiceUnavailable { .. }),
+                "应返回 503，实际 {e:?}"
+            ),
+        }
+        probe
+            .fail_list
+            .store(false, std::sync::atomic::Ordering::SeqCst);
+        assert_eq!(
+            probe.listed("pipe-fail-del").await.len(),
+            1,
+            "队列条目必须保留——消费循环稍后仍可正常执行并回传 outcome"
+        );
+    }
+
+    #[tokio::test]
+    async fn clear_with_failing_list_returns_503_and_keeps_entries() {
+        let probe = std::sync::Arc::new(PendingProbeStore::new());
+        StorageBackend::enqueue_pending_input(
+            probe.inner.as_ref(),
+            "default",
+            "pipe-fail-clr",
+            &probe_record("pi_c_1"),
+        )
+        .await
+        .unwrap();
+        StorageBackend::enqueue_pending_input(
+            probe.inner.as_ref(),
+            "default",
+            "pipe-fail-clr",
+            &probe_record("pi_c_2"),
+        )
+        .await
+        .unwrap();
+        probe
+            .fail_list
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        let state = probe_state(probe.clone());
+
+        let resp = pending_inputs_clear_handler(
+            axum::extract::State(state),
+            axum::extract::Path("pipe-fail-clr".to_string()),
+            HeaderMap::new(),
+        )
+        .await;
+
+        match resp {
+            Ok(body) => panic!("list 故障时不得照常清空伪装成功，实际 {:?}", body.0),
+            Err(e) => assert!(
+                matches!(e, ApiError::ServiceUnavailable { .. }),
+                "应返回 503，实际 {e:?}"
+            ),
+        }
+        probe
+            .fail_list
+            .store(false, std::sync::atomic::Ordering::SeqCst);
+        assert_eq!(
+            probe.listed("pipe-fail-clr").await.len(),
+            2,
+            "清空失败不得破坏排队条目"
+        );
+    }
+
+    #[tokio::test]
+    async fn delete_with_healthy_list_notifies_rest_waiter() {
+        // 正向对照：list 正常 → 删除成功 + REST chat waiter 收到失败 outcome
+        // （这正是故障分支要保护的那条通知链）。
+        let probe = std::sync::Arc::new(PendingProbeStore::new());
+        probe
+            .seed("pipe-fail-del", "pi_del_ok", "http_probe_notify_1")
+            .await;
+        let state = probe_state(probe);
+
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        crate::ws_session::register_outcome_waiter("http_probe_notify_1".to_string(), tx);
+
+        let resp = pending_inputs_delete_handler(
+            axum::extract::State(state),
+            axum::extract::Path(("pipe-fail-del".to_string(), "pi_del_ok".to_string())),
+            HeaderMap::new(),
+        )
+        .await;
+
+        assert!(resp.is_ok(), "list 正常时删除应成功");
+        let outcome = tokio::time::timeout(std::time::Duration::from_secs(2), rx)
+            .await
+            .expect("waiter 应被通知")
+            .expect("outcome 通道不应关闭");
+        assert!(outcome.failed, "逐出的排队条目应对 REST 请求回失败 outcome");
+    }
+}
+
+#[cfg(test)]
+mod cold_state_row_tests {
+    //! cold_state_row 对外契约锁（Should#7 重构后防漂移）：checkpoint 基线 +
+    //! pipeline_state 表行覆盖的合并顺序、表行-only 基线、双空真孤儿不出口。
+    //! 两类 DB 故障路径维持返回 None 不变（调用方跳行），仅新增 warn 留痕。
+
+    use super::*;
+    use agentos_core::traits::StorageBackend;
+    use std::sync::Arc;
+
+    fn sqlite() -> Arc<agentos_engine::SqliteStore> {
+        Arc::new(agentos_engine::SqliteStore::open_memory().unwrap())
+    }
+
+    #[tokio::test]
+    async fn table_fields_override_stale_checkpoint_scalars() {
+        let store = sqlite();
+        let dyn_store: Arc<dyn StorageBackend> = store.clone();
+        let ckpt = serde_json::json!({ "task.status": "pending", "agent.id": "agentos" });
+        StorageBackend::save_checkpoint(dyn_store.as_ref(), "pipe-cold", "default", 3, &ckpt)
+            .await
+            .unwrap();
+        // 出生字段已过期：表行最新值必须覆盖（completed 赢过 pending）
+        StorageBackend::upsert_state_field(
+            dyn_store.as_ref(),
+            "pipe-cold",
+            "default",
+            "task.status",
+            &serde_json::json!("completed"),
+        )
+        .await
+        .unwrap();
+
+        let row = cold_state_row(&dyn_store, "pipe-cold", "default")
+            .await
+            .expect("有持久痕迹应出口");
+        assert_eq!(
+            row["task.status"], "completed",
+            "表行最新值覆盖 checkpoint 过期值"
+        );
+        assert_eq!(
+            row["agent.id"], "agentos",
+            "checkpoint 独有字段保留（表未写不覆盖）"
+        );
+    }
+
+    #[tokio::test]
+    async fn fields_only_without_checkpoint_still_emits_row() {
+        // running 中任务 interval 未到无 checkpoint：只靠表行基线可见
+        let store = sqlite();
+        let dyn_store: Arc<dyn StorageBackend> = store.clone();
+        StorageBackend::upsert_state_field(
+            dyn_store.as_ref(),
+            "pipe-cold-b",
+            "default",
+            "title",
+            &serde_json::json!("刚提交的任务"),
+        )
+        .await
+        .unwrap();
+
+        let row = cold_state_row(&dyn_store, "pipe-cold-b", "default")
+            .await
+            .expect("表行单独在场即出口");
+        assert_eq!(row["title"], "刚提交的任务");
+    }
+
+    #[tokio::test]
+    async fn orphan_without_any_persisted_trace_returns_none() {
+        let dyn_store: Arc<dyn StorageBackend> = sqlite();
+        assert!(
+            cold_state_row(&dyn_store, "pipe-orphan", "default")
+                .await
+                .is_none(),
+            "checkpoint 与表行双空 = 真孤儿不出口"
+        );
     }
 }

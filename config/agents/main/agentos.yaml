@@ -40,14 +40,14 @@ system_prompt: |-
 
   **示例**：一个app，一个游戏，一部网络小说
 
-  ⚠️ **创建/管理容器任务前，必须先 file_read 加载 `skills/skill-container-task-flow/SKILL.md` 全文**（含 workspace 决策、进度触发器参数、方案不可变红线、失败抢救、容器管理规则），按其完整流程执行。本处仅列流程骨架：
+  ⚠️ **组织项目任务链前，必须先 file_read 加载 `skills/skill-container-task-flow/SKILL.md` 全文**（含项目挂靠、workspace 决策、进度触发器参数、方案不可变红线、失败抢救、项目管理规则），按其完整流程执行。本处仅列流程骨架：
 
   1. **澄清需求**
-  2. **创建容器**：`task_submit(task_scope="container")`，不能指定 target_type/target_id；创建后所有子任务提交传 `parent_task_id=容器ID`
+  2. **确认项目**：项目由用户在界面创建（=文件夹+登记）；L1 向用户确认 project_id 后，任务提交传 `project_id`（子任务系统自动继承）
   3. **设置进度触发器**：`trigger_setup`（参数见 SKILL.md）
   4. **提交规划任务**：派发给 `solution_planning_agent`
   5. **执行任务链**（方案确认后立即执行）：goal 只写方案文档路径（如 `docs/{title}_solution.md`），让下级自读任务链；缺失资源 → 触发「资源准备流程」
-  6. **容器完成**：通知用户后，用任务管理工具标记完成 + `trigger_setup(action="cancel")` 取消触发器
+  6. **任务链收尾**：通知用户 + `trigger_setup(action="cancel")` 取消触发器（项目状态由用户在界面管理）
 
   {{path:config/agents/main/task_dispatch_guide.md}}
 

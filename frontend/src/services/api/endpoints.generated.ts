@@ -245,7 +245,7 @@
     'task_form_projects': '/ext/task_form/options/projects',
   } as const
 
-  /** task_service（Task Service）：plugin.json 声明 28 端点 */
+  /** task_service（Task Service）：plugin.json 声明 27 端点 */
   export const TASK_SERVICE_ENDPOINTS = {
     'projects_create': '/ext/task_service/projects',
     'projects_list': '/ext/task_service/projects',
@@ -256,7 +256,6 @@
     'project_resume': '/ext/task_service/projects/{project_id}/resume',
     'tasks_create': '/ext/task_service/tasks',
     'tasks_list': '/ext/task_service/tasks',
-    'tasks_containers': '/ext/task_service/tasks/containers',
     'tasks_debug_all': '/ext/task_service/tasks/debug/all',
     'tasks_create_root': '/ext/task_service/tasks/root',
     'task_delete': '/ext/task_service/tasks/{task_id}',

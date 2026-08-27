@@ -155,7 +155,7 @@
       },
       {
         "name": "task.delete",
-        "description": "Delete a task (soft delete for containers, hard delete otherwise)",
+        "description": "Delete a task (hard delete with cascade cleanup)",
         "input_schema": {
           "properties": {
             "task_id": {
@@ -234,17 +234,7 @@
       "handler_capability": "http.handle",
       "timeout_ms": 5000,
       "max_concurrency": 4,
-      "description": "tasks 域：手动创建根任务（container/non_container）"
-    },
-    {
-      "route_id": "tasks_containers",
-      "method": "GET",
-      "path": "/ext/task_service/tasks/containers",
-      "auth": "user",
-      "handler_capability": "http.handle",
-      "timeout_ms": 5000,
-      "max_concurrency": 8,
-      "description": "tasks 域：列出容器任务（query: session_id）"
+      "description": "tasks 域：手动创建根任务（project_id 可选挂靠项目）"
     },
     {
       "route_id": "task_get",

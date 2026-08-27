@@ -50,16 +50,6 @@ class _TaskCleanupMixin:
         for subtask in subtasks:
             self._cancel_pipeline_recursive(subtask.id)
 
-    def _is_child_of_container(self, task: Any) -> bool:
-        """判断非容器任务是否属于某个容器任务的子树。"""
-        root_id = self.get_root_task_id(task.id)
-        if root_id is None or root_id == task.id:
-            return False
-        root_task = self.get_task(root_id)
-        if root_task is None:
-            return False
-        return root_task.metadata.get("task_scope") == "container"
-
     async def _cleanup_task_resources(
         self,
         task_id: str,
@@ -505,57 +495,6 @@ class _TaskCleanupMixin:
 
         return stats
 
-    async def soft_delete_container(self, task_id: str, reason: str = "用户请求删除") -> dict[str, Any]:
-        """软删除容器任务（标记取消 + 级联清理子任务）。
-
-        Args:
-            task_id: 任务 ID
-            reason: 删除原因
-
-        Returns:
-            操作结果字典
-        """
-        from task_types import TaskStatus  # noqa: PLC0415
-
-        task = self.get_task(task_id)
-        if task is None:
-            return {"error": f"任务不存在: {task_id}"}
-
-        old_status = task.status.value
-        task_title = task.title
-
-        task.status = TaskStatus.FAILED
-        task.error = f"已取消: {reason}"
-        if task.metadata is None:
-            task.metadata = {}
-        task.metadata["soft_deleted"] = True
-        await self.save_task(task)
-
-        self._cancel_pipeline_recursive(task_id)
-        cascaded = await self.cancel_task_cascade(task_id, reason=reason)
-
-        container_workspace = (task.metadata or {}).get("workspace", "")
-        cascade_stats = await self._cascade_cleanup_subtasks(
-            task_id,
-            skip_workspace=False,
-            container_workspace=container_workspace,
-        )
-
-        result: dict[str, Any] = {
-            "task_id": task_id,
-            "deleted": False,
-            "soft_deleted": True,
-            "old_status": old_status,
-            "title": task_title,
-            "reason": reason,
-            "message": "容器任务已标记删除（软删除）",
-            "pipeline_file_cleaned": False,
-            "cascade_cleanup": cascade_stats,
-        }
-        if cascaded > 0:
-            result["cascaded_subtasks"] = cascaded
-        return result
-
     async def hard_delete_task(  # noqa: PLR0912
         self, task_id: str, reason: str = "用户请求删除"
     ) -> dict[str, Any]:
@@ -575,9 +514,6 @@ class _TaskCleanupMixin:
         old_status = task.status.value
         task_title = task.title
 
-        is_child_of_container = self._is_child_of_container(task)
-        skip_workspace = is_child_of_container
-
         self._cancel_pipeline_recursive(task_id)
 
         cascade_stats: dict[str, Any] = {
@@ -590,7 +526,7 @@ class _TaskCleanupMixin:
         if subtasks:
             cascade_stats = await self._cascade_cleanup_subtasks(
                 task_id,
-                skip_workspace=skip_workspace,
+                skip_workspace=False,
                 container_workspace="",
             )
 
@@ -598,14 +534,11 @@ class _TaskCleanupMixin:
         if task.pipeline_run_id:
             pipeline_cleaned = self._cleanup_pipeline_file(task.pipeline_run_id)
 
-        if not skip_workspace:
-            workspace = task.metadata.get("workspace")
-            cleanup_results = await self._cleanup_task_resources(
-                task_id=task_id,
-                workspace=workspace,
-            )
-        else:
-            cleanup_results = {"skipped": "容器子任务不清理工作空间"}
+        workspace = task.metadata.get("workspace")
+        cleanup_results = await self._cleanup_task_resources(
+            task_id=task_id,
+            workspace=workspace,
+        )
 
         await self.hard_delete(task_id)
 

@@ -111,7 +111,7 @@ async def _on_load(_params: dict[str, Any]) -> None:
                 },
                 'container_reason': {
                     'type': 'string',
-                    'description': '容器操作原因（change 操作时填写，记录到任务 metadata）',
+                    'description': '变更原因（change 操作时填写，记录到任务 metadata）',
                 },
                 'include_details': {
                     'type': 'boolean',
@@ -125,7 +125,7 @@ async def _on_load(_params: dict[str, Any]) -> None:
                 },
                 'parent_task_id': {
                     'type': 'string',
-                    'description': '父任务 ID（get 列表模式时传入可筛选该容器下的子任务）',
+                    'description': '父任务 ID（get 列表模式时传入可筛选其下子任务）',
                 },
                 'project_id': {
                     'type': 'string',
