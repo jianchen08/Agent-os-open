@@ -737,7 +737,7 @@ fn make_executor(invoker: Arc<dyn PluginInvoker>, plugin_ids: &[&str]) -> Pipeli
 }
 
 /// 按调用次数依次返回预设 state_updates 的 invoker（超出后返回空）。
-/// 用于模拟插件跨轮行为序列（如 task_reminder 提醒注入 → 评估放行）。
+/// 用于模拟插件跨轮行为序列（如置位 → 清除标志）。
 struct SequenceInvoker {
     counter: Arc<AtomicUsize>,
     results: Vec<HashMap<String, serde_json::Value>>,
@@ -1836,14 +1836,13 @@ async fn set_run_pipeline_failure_counts_persist_failure_and_run_continues() {
     );
 }
 
-// ── task_reminder 续跑标志路由（评估闸门断链修复）──
+// ── 路由机制：条件分支先于兜底 end 命中时 loop 续跑（不绑定特定插件）──
 
-/// 构造 post 组合节点路由：与 config/pipelines/autonomous.yaml 的 post.next
-/// 同构——工具调用轮 loop、工具执行后回 LLM、_has_new_llm_input 续跑、
-/// 其余 end。
-fn post_routed_body(steps: Vec<StepItem>) -> PipelineConfig {
+/// 构造带"条件 loop 分支 + 兜底 end"的 step 路由：验证路由按序首中即停、
+/// 条件分支命中时循环续跑、未命中时兜底 end。
+fn routed_loop_body(steps: Vec<StepItem>) -> PipelineConfig {
     let config = PipelineConfig {
-        name: "post_route".into(),
+        name: "routed_loop".into(),
         loop_bodies: vec![LoopBody {
             id: "main".into(),
             steps: vec![PipelineStep {
@@ -1853,33 +1852,10 @@ fn post_routed_body(steps: Vec<StepItem>) -> PipelineConfig {
                 context: HashMap::new(),
                 routes: vec![
                     Route {
-                        when: "raw_tool_calls != [] and raw_tool_calls != None".into(),
+                        when: "flag == true".into(),
                         then: agentos_core::types::RouteAction {
                             next: RouteNext::Loop,
-                            set: updates(&[
-                                ("core_type", json!("tool_execute")),
-                                ("core_plugin", json!("pipeline_tool_core")),
-                            ]),
-                        },
-                    },
-                    Route {
-                        when: "core_type == 'tool_execute'".into(),
-                        then: agentos_core::types::RouteAction {
-                            next: RouteNext::Loop,
-                            set: updates(&[
-                                ("core_type", json!("llm_call")),
-                                ("core_plugin", json!("pipeline_llm_core")),
-                            ]),
-                        },
-                    },
-                    Route {
-                        when: "_has_new_llm_input == true".into(),
-                        then: agentos_core::types::RouteAction {
-                            next: RouteNext::Loop,
-                            set: updates(&[
-                                ("core_type", json!("llm_call")),
-                                ("core_plugin", json!("pipeline_llm_core")),
-                            ]),
+                            set: updates(&[("core_type", json!("llm_call"))]),
                         },
                     },
                     Route {
@@ -1902,61 +1878,52 @@ fn post_routed_body(steps: Vec<StepItem>) -> PipelineConfig {
 }
 
 #[tokio::test]
-async fn reminder_flag_routes_loop_instead_of_end() {
-    // 纯文本轮（无工具调用、core_type=llm_call）但 _has_new_llm_input=true
-    // （task_reminder 刚注入评估提醒）→ 路由必须 loop 回 LLM，不得命中兜底 end。
-    // 回归：修复前该轮命中兜底 end，提醒被吞、任务未评估即 completed。
-    // 序列模拟真实 task_reminder：第 1 轮注入提醒置位标志，第 2 轮评估证据
-    // 放行清除标志（恒置位会无限循环——真实插件不会这样）。
+async fn conditional_loop_route_beats_fallback_end() {
+    // 条件分支（flag=true）排在兜底 end 之前：命中时 loop 续跑而非 end。
+    // 序列模拟插件跨轮行为：第 1 轮置位 flag，第 2 轮清除（恒置位会无限循环）。
     let counter = Arc::new(AtomicUsize::new(0));
     let invoker = Arc::new(SequenceInvoker {
         counter: counter.clone(),
         results: vec![
-            // 第 1 轮：task_reminder 注入提醒
-            updates(&[
-                ("evaluate_reminder_count", json!(1)),
-                ("_has_new_llm_input", json!(true)),
-            ]),
-            // 第 2 轮：评估证据放行，清除标志
-            updates(&[("_has_new_llm_input", json!(false))]),
+            updates(&[("flag", json!(true))]),
+            updates(&[("flag", json!(false))]),
         ],
     });
-    let executor = make_executor(invoker.clone() as Arc<dyn PluginInvoker>, &["reminder"]);
-    let config = post_routed_body(vec!["reminder".into()]);
+    let executor = make_executor(invoker.clone() as Arc<dyn PluginInvoker>, &["p"]);
+    let config = routed_loop_body(vec!["p".into()]);
     let state = executor
         .run_compiled(
             &compile_pipeline(&config, &StepLibrary::default(), &executor.plugin_ids)
                 .expect("compile should succeed"),
-            json!({ "core_type": "llm_call", "raw_tool_calls": [] }),
+            json!({}),
         )
         .await
         .unwrap();
-    // 提醒轮后继续循环（插件被再次调用），评估放行后才正常 end
+    // 条件分支命中 → 续跑一轮；标志清除后兜底 end
     assert_eq!(counter.load(Ordering::SeqCst), 2);
     assert_eq!(state["ended"], json!(true));
     assert_eq!(state["core_type"], json!("llm_call"));
 }
 
 #[tokio::test]
-async fn reminder_flag_cleared_ends_normally() {
-    // 评估证据放行后 _has_new_llm_input=false（task_reminder 清除标志）→
-    // 纯文本轮命中兜底 end，不无限循环。
-    let fixture = Fixture::build(&["reminder"]);
+async fn fallback_end_when_condition_never_matches() {
+    // 条件分支未命中（flag=false）→ 兜底 end，不无限循环。
+    let fixture = Fixture::build(&["p"]);
     fixture.invoker.set_result(
-        "reminder",
+        "p",
         PluginResult {
-            state_updates: updates(&[("_has_new_llm_input", json!(false))]),
+            state_updates: updates(&[("flag", json!(false))]),
             ..Default::default()
         },
     );
-    let config = post_routed_body(vec!["reminder".into()]);
+    let config = routed_loop_body(vec!["p".into()]);
     let state = fixture
         .run(
             &config,
             &StepLibrary::default(),
-            json!({ "core_type": "llm_call", "raw_tool_calls": [] }),
+            json!({}),
         )
         .await;
-    assert_eq!(fixture.invoker.call_count("reminder"), 1);
+    assert_eq!(fixture.invoker.call_count("p"), 1);
     assert_eq!(state["ended"], json!(true));
 }
