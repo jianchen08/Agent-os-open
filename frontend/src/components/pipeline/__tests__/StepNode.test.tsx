@@ -170,4 +170,71 @@ describe('StepNode', () => {
       args: [[...STEP_PATH, 'loop_config', 'enabled'], true],
     })
   })
+
+  // ── G9 项级 when 门对象条目（{name, when}）回归 ──────────────────────
+
+  it('G9 对象条目（{name, when}）正常渲染为 chip 并带 when 门徽标（崩溃回归）', () => {
+    renderStep(
+      {
+        id: 'core',
+        steps: [
+          'pipeline_llm_core',
+          { name: 'pipeline_tool_cache', when: 'raw_tool_calls != [] and raw_tool_calls != None' },
+          '{{state.core_plugin}}',
+        ],
+      },
+      ops,
+    )
+
+    expect(screen.getByText('pipeline_tool_cache')).toBeInTheDocument()
+    const gate = screen.getByTitle('项级 when 门：raw_tool_calls != [] and raw_tool_calls != None')
+    expect(gate).toBeInTheDocument()
+    expect(screen.getByText('3 个引用')).toBeInTheDocument()
+  })
+
+  it('G9 对象条目的移除 ops 按原始下标操作', () => {
+    renderStep(
+      { id: 'core', steps: ['pipeline_llm_core', { name: 'pipeline_tool_cache' }] },
+      ops,
+    )
+
+    const chip = screen.getByText('pipeline_tool_cache').closest('span.group') as HTMLElement
+    fireEvent.click(within(chip).getByLabelText('移除'))
+    expect(calls.at(-1)).toEqual({
+      op: 'remove',
+      args: [[...STEP_PATH, 'steps', 1]],
+    })
+  })
+
+  it('畸形条目（缺 name）降级展示不崩溃', () => {
+    renderStep({ id: 'core', steps: ['pipeline_llm_core', { when: 'True' }, 42] }, ops)
+
+    expect(screen.getAllByTitle(/无法识别的 steps 条目/)).toHaveLength(2)
+    expect(screen.getByText('llm_core')).toBeInTheDocument()
+  })
+
+  it('step 级 hooks 只读展示（事件 + run 目标）', () => {
+    renderStep(
+      {
+        id: 'core',
+        steps: [],
+        hooks: [
+          { on: 'stream_chunk', run: 'stream_duplicate_check.on_chunk' },
+          { on: 'run_start', run: 'watcher' },
+        ],
+      },
+      ops,
+    )
+
+    const region = screen.getByTestId('pipe-hooks-step:core')
+    expect(within(region).getByText('stream_chunk')).toBeInTheDocument()
+    expect(within(region).getByText('stream_duplicate_check.on_chunk')).toBeInTheDocument()
+    expect(within(region).getByText('run_start')).toBeInTheDocument()
+    expect(within(region).getAllByText('hook')).toHaveLength(2)
+  })
+
+  it('无 hooks 声明显示空态', () => {
+    renderStep({ id: 'core', steps: [] }, ops)
+    expect(screen.getByTestId('pipe-hooks-empty-step:core')).toBeInTheDocument()
+  })
 })

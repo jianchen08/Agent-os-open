@@ -35,11 +35,16 @@ export interface RouteRule {
   }
 }
 
-/** 管道 step 节点（组合节点；原子执行单元是 steps 里的字符串引用） */
+/** 管道 step 节点（组合节点；原子执行单元是 steps 里的引用） */
 export interface PipelineStepV2 {
   id: string
-  /** 引用列表：管道 step id / 公共 step 库 id / 插件名 / "{{...}}" 动态模板 */
-  steps?: string[]
+  /**
+   * 引用列表：管道 step id / 公共 step 库 id / 插件名 / "{{...}}" 动态模板；
+   * 条目形态两态——字符串直引，或 G9 项级 when 门对象（{name, when}）。
+   */
+  steps?: (string | Record<string, unknown>)[]
+  /** step 级钩子（管道步骤服务化提案 §3.6：{on, run}，P1 只读展示） */
+  hooks?: PipeHookEntry[]
   /** 自由 key-value（模板字符串），merge 进 state 供插件读取 */
   context?: Record<string, unknown>
   /** step 级路由分支 */
@@ -48,10 +53,49 @@ export interface PipelineStepV2 {
   loop_config?: LoopConfigV2
 }
 
+/** 钩子声明条目（on = 事件名，run = 插件id[.方法]） */
+export interface PipeHookEntry {
+  on: string
+  run: string
+}
+
+/** steps 引用条目归一化视图 */
+export interface NormalizedStepRef {
+  name: string
+  /** G9 项级 when 门（对象条目专属；字符串直引无门） */
+  when?: string
+  /** 原始条目是否为对象形态（when 门） */
+  gated: boolean
+}
+
+/**
+ * steps 引用条目归一化：字符串直引 → {name}；G9 项级 when 门对象
+ * （{name, when}）→ {name, when, gated}；其余畸形条目 → undefined
+ * （渲染层降级展示，不崩溃）。
+ */
+export function normalizeStepRef(entry: unknown): NormalizedStepRef | undefined {
+  if (typeof entry === 'string') {
+    return entry ? { name: entry, gated: false } : undefined
+  }
+  if (entry !== null && typeof entry === 'object') {
+    const obj = entry as Record<string, unknown>
+    if (typeof obj.name === 'string' && obj.name) {
+      return {
+        name: obj.name,
+        ...(typeof obj.when === 'string' && obj.when ? { when: obj.when } : {}),
+        gated: true,
+      }
+    }
+  }
+  return undefined
+}
+
 /** 循环体（内核 LoopBody） */
 export interface LoopBodyV2 {
   id: string
   steps: PipelineStepV2[]
+  /** 体级钩子（管道步骤服务化提案 §3.6，P1 只读展示） */
+  hooks?: PipeHookEntry[]
   loop_config?: LoopConfigV2
   /** 循环体结束转移（默认顺序进下一个体） */
   exit_routes?: RouteRule[]

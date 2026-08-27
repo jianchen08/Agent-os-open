@@ -10,6 +10,7 @@ import { useState } from 'react'
 import { Plus, RotateCcw, ShieldCheck } from '@/assets/icons'
 import { Badge } from '@/components/ui/badge'
 import { Input } from '@/components/ui/input'
+import { PipeHooksDisplay } from './PipeHooksDisplay'
 import { RouteRulesEditor } from './RouteRulesEditor'
 import { StepNode } from './StepNode'
 import type { PipelinePluginCatalogEntry } from '@/services/api/pipelines'
@@ -162,6 +163,12 @@ export function LoopBodyCard({
             knownPhaseIds={knownPhaseIds}
             label="exit_routes（循环体结束转移；不配 = 默认顺序进下一个体）"
           />
+          <section>
+            <h4 className="text-foreground mb-1.5 text-xs font-medium">
+              hooks（体级钩子，只读）
+            </h4>
+            <PipeHooksDisplay hooks={body?.hooks} scopeHint={`body:${body?.id ?? bodyIndex}`} />
+          </section>
         </div>
       )}
 

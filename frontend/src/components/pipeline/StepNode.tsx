@@ -20,10 +20,11 @@ import {
 } from '@/assets/icons'
 import { Badge } from '@/components/ui/badge'
 import { Input } from '@/components/ui/input'
-import { resolveRef } from '@/services/pipeline/model'
+import { resolveRef, normalizeStepRef } from '@/services/pipeline/model'
 import { openWorkspacePanel } from '@/services/workspacePanelOpener'
 import { KeyValueEditor } from './KeyValueEditor'
 import { PluginPickerDialog } from './PluginPickerDialog'
+import { PipeHooksDisplay } from './PipeHooksDisplay'
 import { RouteRulesEditor } from './RouteRulesEditor'
 import type { PipelinePluginCatalogEntry } from '@/services/api/pipelines'
 import type { Path, PipelineEditorOps, PipelineStepV2 } from '@/services/pipeline/model'
@@ -52,6 +53,8 @@ function shortName(id: string): string {
 /** 单条 steps 引用的 chip（含上移/下移/移除；插件类附配置深链） */
 function RefChip({
   itemRef,
+  when,
+  gated,
   kind,
   entry,
   onRemove,
@@ -60,6 +63,10 @@ function RefChip({
   onOpenConfig,
 }: {
   itemRef: string
+  /** G9 项级 when 门条件（对象条目专属） */
+  when?: string
+  /** 原始条目是否为对象形态（when 门） */
+  gated?: boolean
   kind: 'plugin' | 'step' | 'template' | 'unknown'
   // eslint-disable-next-line @typescript-eslint/no-explicit-any -- 目录条目仅取显示字段
   entry?: any
@@ -70,6 +77,14 @@ function RefChip({
 }) {
   const base =
     'group inline-flex max-w-full items-center gap-1.5 rounded-full border px-2 py-0.5 text-xs'
+  const gateBadge = gated ? (
+    <span
+      className="text-muted-foreground shrink-0 text-[10px] font-mono"
+      title={`项级 when 门：${when ?? '（空）'}`}
+    >
+      ?when
+    </span>
+  ) : null
 
   if (kind === 'template') {
     return (
@@ -79,6 +94,7 @@ function RefChip({
       >
         <Zap className="h-3 w-3 shrink-0" />
         <span className="truncate font-mono">{itemRef}</span>
+        {gateBadge}
         <ChipActions onRemove={onRemove} onMoveUp={onMoveUp} onMoveDown={onMoveDown} />
       </span>
     )
@@ -92,6 +108,7 @@ function RefChip({
       >
         <span className="text-muted-foreground shrink-0 text-[10px]">step</span>
         <span className="truncate font-mono">{itemRef}</span>
+        {gateBadge}
         <ChipActions onRemove={onRemove} onMoveUp={onMoveUp} onMoveDown={onMoveDown} />
       </span>
     )
@@ -105,6 +122,7 @@ function RefChip({
       >
         <span className="shrink-0 text-[10px]">?</span>
         <span className="truncate font-mono">{itemRef}</span>
+        {gateBadge}
         <ChipActions onRemove={onRemove} onMoveUp={onMoveUp} onMoveDown={onMoveDown} />
       </span>
     )
@@ -139,6 +157,7 @@ function RefChip({
       />
       <span className="text-foreground truncate font-medium">{shortName(itemRef)}</span>
       <span className={`shrink-0 text-[10px] ${role.className}`}>{role.label}</span>
+      {gateBadge}
       {onOpenConfig && (
         <button
           type="button"
@@ -322,13 +341,35 @@ export function StepNode({
 
       {/* 插件组合区 */}
       <div className="flex flex-wrap items-center gap-1.5" role="group" aria-label="插件组合">
-        {refs.map((itemRef, i) => {
-          const resolution = resolveRef(itemRef, catalog, knownStepIdSet)
+        {refs.map((rawEntry, i) => {
+          // 条目两态归一化：字符串直引 / G9 项级 when 门对象 {name, when}；
+          // 畸形条目（无 name 等）降级展示，不崩溃
+          const normalized = normalizeStepRef(rawEntry)
+          if (normalized === undefined) {
+            return (
+              <span
+                key={`malformed-${i}`}
+                className="group inline-flex max-w-full items-center gap-1.5 rounded-full border border-[rgba(251,191,36,0.4)] px-2 py-0.5 text-xs text-status-warning"
+                title={`无法识别的 steps 条目（缺 name 字段）：${JSON.stringify(rawEntry)}`}
+              >
+                <span className="shrink-0 text-[10px]">!</span>
+                <span className="truncate font-mono">条目 #{i + 1}</span>
+                <ChipActions
+                  onRemove={() => ops.remove([...stepsPath, i])}
+                  onMoveUp={() => ops.move(stepsPath, i, -1)}
+                  onMoveDown={() => ops.move(stepsPath, i, 1)}
+                />
+              </span>
+            )
+          }
+          const resolution = resolveRef(normalized.name, catalog, knownStepIdSet)
           const entry = resolution.catalogEntry as PipelinePluginCatalogEntry | undefined
           return (
             <RefChip
-              key={`${itemRef}-${i}`}
-              itemRef={itemRef}
+              key={`${normalized.name}-${i}`}
+              itemRef={normalized.name}
+              when={normalized.when}
+              gated={normalized.gated}
               kind={resolution.kind}
               entry={entry}
               onRemove={() => ops.remove([...stepsPath, i])}
@@ -414,6 +455,13 @@ export function StepNode({
               </label>
               <span className="text-[10px]">-1 = 无限</span>
             </div>
+          </section>
+
+          <section>
+            <h4 className="text-foreground mb-1.5 text-xs font-medium">
+              hooks（step 级钩子，只读）
+            </h4>
+            <PipeHooksDisplay hooks={step?.hooks} scopeHint={`step:${step?.id ?? ''}`} />
           </section>
 
           <RouteRulesEditor
