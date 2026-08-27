@@ -103,8 +103,8 @@ export function DebugTasksPage({ embedded }: { embedded?: boolean } = {}) {
     try {
       await resumeTask(taskId)
       void queryClient.invalidateQueries({ queryKey: queryKeys.debugTasks })
-    } catch (err: any) {
-      setActionError(err.message || '恢复任务失败')
+    } catch (err: unknown) {
+      setActionError(err instanceof Error ? err.message : '恢复任务失败')
     } finally {
       setResumingIds((prev) => {
         const next = new Set(prev)

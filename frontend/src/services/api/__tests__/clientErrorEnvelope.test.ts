@@ -103,9 +103,9 @@ describe('client.ts 内核错误信封 {error:{code,message}} 解析（2026-08-2
     await expect(
       handler(makeError(500, '/api/v1/sessions/abc', { error: { code: 'ENGINE_FAILED', message: '引擎执行失败' } })),
     ).rejects.toBeDefined()
-    const [message, , , context] = reportErrorMock.mock.calls[0]
+    const [message, options] = reportErrorMock.mock.calls[0] as [string, { code?: string }]
     expect(message).toBe('引擎执行失败')
-    expect(context.code).toBe('ENGINE_FAILED')
+    expect(options.code).toBe('ENGINE_FAILED')
   })
 
   it('统一错误信封 source/retryable 透传（config/error_codes.json 单一真值源）', async () => {
@@ -122,9 +122,12 @@ describe('client.ts 内核错误信封 {error:{code,message}} 解析（2026-08-2
         }),
       ),
     ).rejects.toBeDefined()
-    const [, , , context] = reportErrorMock.mock.calls[0]
-    expect(context.code).toBe('INTERNAL_ERROR')
-    expect(context.source).toBe('kernel')
+    const [, options] = reportErrorMock.mock.calls[0] as [
+      string,
+      { code?: string; source?: string },
+    ]
+    expect(options.code).toBe('INTERNAL_ERROR')
+    expect(options.source).toBe('kernel')
   })
 
   it('旧后端无 source 字段时保持 undefined（兼容不炸）', async () => {
@@ -132,8 +135,8 @@ describe('client.ts 内核错误信封 {error:{code,message}} 解析（2026-08-2
     await expect(
       handler(makeError(400, '/api/v1/sessions', { error: { code: '400', message: '参数校验失败' } })),
     ).rejects.toBeDefined()
-    const [, , , context] = reportErrorMock.mock.calls[0]
-    expect(context.source).toBeUndefined()
+    const [, options] = reportErrorMock.mock.calls[0] as [{}, { source?: string }]
+    expect(options.source).toBeUndefined()
   })
 
   it('非信封格式（{detail}）保持既有解析路径不变', async () => {
@@ -141,8 +144,8 @@ describe('client.ts 内核错误信封 {error:{code,message}} 解析（2026-08-2
     await expect(
       handler(makeError(422, '/api/v1/sessions', { detail: '校验失败' })),
     ).rejects.toBeDefined()
-    const [message, , , context] = reportErrorMock.mock.calls[0]
+    const [message, options] = reportErrorMock.mock.calls[0] as [string, { code?: string }]
     expect(message).toBe('校验失败')
-    expect(context.code).toBe('422')
+    expect(options.code).toBe('422')
   })
 })

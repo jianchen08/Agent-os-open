@@ -244,7 +244,9 @@ export const ChatInput = ({
         if (error instanceof Error) {
           errorMessage = error.message
         }
-        reportError(errorMessage, ErrorType.NETWORK, ErrorSeverity.ERROR, {
+        reportError(errorMessage, {
+          type: ErrorType.NETWORK,
+          severity: ErrorSeverity.ERROR,
           componentName: 'ChatInput',
           operation: 'uploadVoiceFile',
         })
@@ -378,7 +380,9 @@ export const ChatInput = ({
           errorMessage = error
         }
 
-        reportError(errorMessage, ErrorType.NETWORK, ErrorSeverity.ERROR, {
+        reportError(errorMessage, {
+          type: ErrorType.NETWORK,
+          severity: ErrorSeverity.ERROR,
           componentName: 'ChatInput',
           operation: 'uploadFile',
           fileName: pendingFile.file.name,

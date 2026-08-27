@@ -137,7 +137,7 @@ describe('评估指标 API - evaluationMetrics', () => {
     vi.clearAllMocks()
   })
 
-  it('getEvaluationMetrics 归一化缺失字段', async () => {
+  it("getEvaluationMetrics 直接透传（S3 改判：缺失字段不再伪造空串/0，由后端契约保证全量）", async () => {
     const resp = {
       metrics: [
         {
@@ -177,12 +177,10 @@ describe('评估指标 API - evaluationMetrics', () => {
 
     const result = await getEvaluationMetrics({ skip: 0, limit: 20 })
 
+    // 直接透传：响应对象与请求方原样一致（不做 ''/0 补齐）
     expect(result.total).toBe(2)
-    expect(result.metrics[0].category).toBe('quality')
-    expect(result.metrics[1].category).toBe('legacy_type')
-    expect(result.metrics[1].usage_count).toBe(0)
-    expect(result.metrics[1].success_count).toBe(0)
-    expect(result.metrics[1].created_at).toBe('')
+    expect(result.metrics[0]).toBe(resp.metrics[0])
+    expect(result.metrics[1]).toBe(resp.metrics[1])
     expect(apiClient.get).toHaveBeenCalledWith('/ext/evaluation_service/metrics', {
       params: { skip: 0, limit: 20 },
     })

@@ -181,8 +181,6 @@ export const API_ENDPOINTS = {
     CREATE: TASK_SERVICE_ENDPOINTS.tasks_create,
     /** 手动创建根任务（用户以 L1 身份发起，为 L2+ 提供 task 上下文） */
     CREATE_ROOT: TASK_SERVICE_ENDPOINTS.tasks_create_root,
-    /** 列出会话的容器任务（供新建子任务选父容器） */
-    CONTAINERS: TASK_SERVICE_ENDPOINTS.tasks_containers,
     /** 获取任务详情 */
     GET: (id: string) => TASK_SERVICE_ENDPOINTS.task_get.replace('{task_id}', id),
     /** 更新任务 */

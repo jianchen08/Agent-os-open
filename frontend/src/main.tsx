@@ -8,7 +8,12 @@
 import { StrictMode } from 'react'
 import { createRoot } from 'react-dom/client'
 import { ImagePreviewHost } from '@/components/chat/ImagePreviewHost'
-import { installGlobalErrorListeners } from '@/services/errorReporting'
+import {
+  installGlobalErrorListeners,
+  reportError,
+  ErrorSeverity,
+  ErrorType,
+} from '@/services/errorReporting'
 import { openFile } from '@/services/fileOpener'
 import { registerGlobalOpenFileCallback } from '@/utils/toolCardRegistry'
 import { App } from './App'
@@ -63,7 +68,15 @@ async function bootstrap() {
   try {
     await initializeTheme()
   } catch (error) {
-    console.error('主题初始化失败:', error)
+    // 初始化失败统一走 reportError：通知中心可见（Must#10），不再只落 console
+    reportError(error instanceof Error ? error.message : '主题初始化失败', {
+      type: ErrorType.CLIENT,
+      severity: ErrorSeverity.ERROR,
+      component: 'main',
+      action: 'initializeTheme',
+      source: 'frontend',
+      message_detail: String(error),
+    })
   }
 
   // 预注册工作区面板 widget（顶栏可打开设置/监控等，不依赖登录）
@@ -72,14 +85,28 @@ async function bootstrap() {
     const { initializeWidgets } = await import('@/services/schema/registerWidgets')
     initializeWidgets()
   } catch (error) {
-    console.error('Widget 预注册失败:', error)
+    reportError(error instanceof Error ? error.message : 'Widget 预注册失败', {
+      type: ErrorType.CLIENT,
+      severity: ErrorSeverity.ERROR,
+      component: 'main',
+      action: 'initializeWidgets',
+      source: 'frontend',
+      message_detail: String(error),
+    })
   }
 
   // 注册全局文件打开回调
   registerGlobalOpenFileCallback(async (filePath: string, containerTaskId?: string) => {
     const result = await openFile(filePath, { containerTaskId })
     if (!result.success) {
-      console.error('[main] 打开文件失败:', result.message)
+      reportError(result.message || '打开文件失败', {
+        type: ErrorType.CLIENT,
+        severity: ErrorSeverity.ERROR,
+        component: 'main',
+        action: 'openFile',
+        source: 'frontend',
+        filePath,
+      })
     }
   })
 
@@ -98,11 +125,25 @@ async function bootstrap() {
       const { initializeGrowthLoop } = await import('@/services/modules/GrowthLoop')
       await initializeGrowthLoop()
     } catch (error) {
-      console.error('自生长闭环初始化失败:', error)
+      reportError(error instanceof Error ? error.message : '自生长闭环初始化失败', {
+        type: ErrorType.CLIENT,
+        severity: ErrorSeverity.ERROR,
+        component: 'main',
+        action: 'initializeGrowthLoop',
+        source: 'frontend',
+        message_detail: String(error),
+      })
     }
   }
 }
 
 bootstrap().catch((error) => {
-  console.error('应用初始化失败:', error)
+  reportError(error instanceof Error ? error.message : '应用初始化失败', {
+    type: ErrorType.CLIENT,
+    severity: ErrorSeverity.ERROR,
+    component: 'main',
+    action: 'bootstrap',
+    source: 'frontend',
+    message_detail: String(error),
+  })
 })

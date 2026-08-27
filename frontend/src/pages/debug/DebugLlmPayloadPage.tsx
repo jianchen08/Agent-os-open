@@ -14,13 +14,22 @@ import { useLlmPayloadDiagQuery } from '@/hooks/queries/useDebugQueries'
 import { getPayloadDiagFile } from '@/services/api/llmPayload'
 import type { PayloadDiagItem } from '@/services/api/llmPayload'
 
+/** LLM content 分段（OpenAI 视觉块形态 {type:'text', text}） */
+interface ContentBlock {
+  text?: unknown
+}
+
 /** 从消息 content 提取纯文本（string 或分段数组） */
 function contentText(content: unknown): string {
   if (typeof content === 'string') return content
   if (Array.isArray(content)) {
     return content
       .map((part) =>
-        typeof part === 'string' ? part : part && typeof part === 'object' ? String((part as any).text ?? '') : '',
+        typeof part === 'string'
+          ? part
+          : part && typeof part === 'object'
+            ? String((part as ContentBlock).text ?? '')
+            : '',
       )
       .filter(Boolean)
       .join('\n')
@@ -28,10 +37,18 @@ function contentText(content: unknown): string {
   return ''
 }
 
+/** 工具调用条目（OpenAI 形态：{id, function: {name, arguments}}） */
+interface ToolCallItem {
+  id?: string
+  function?: { name?: string; arguments?: string }
+}
+
 /** 单条消息渲染（角色徽章 + 内容预览 + 工具调用/思考折叠） */
-function MessageItem({ msg, index }: { msg: Record<string, any>; index: number }) {
+function MessageItem({ msg, index }: { msg: Record<string, unknown>; index: number }) {
   const text = contentText(msg.content)
-  const toolCalls = Array.isArray(msg.tool_calls) ? msg.tool_calls : null
+  const role = typeof msg.role === 'string' ? msg.role : '?'
+  const name = typeof msg.name === 'string' ? msg.name : null
+  const toolCalls = Array.isArray(msg.tool_calls) ? (msg.tool_calls as ToolCallItem[]) : null
   const reasoning = typeof msg.reasoning_content === 'string' ? msg.reasoning_content : null
 
   return (
@@ -39,9 +56,9 @@ function MessageItem({ msg, index }: { msg: Record<string, any>; index: number }
       <div className="mb-1 flex items-center gap-2">
         <span className="bg-accent/40 rounded px-1.5 py-0.5 font-mono text-xs">#{index}</span>
         <span className="bg-primary/10 text-primary rounded px-1.5 py-0.5 text-xs font-medium">
-          {msg.role || '?'}
+          {role}
         </span>
-        {msg.name && <span className="text-muted-foreground text-xs">{msg.name}</span>}
+        {name && <span className="text-muted-foreground text-xs">{name}</span>}
       </div>
       {text && (
         <pre className="max-h-40 overflow-auto whitespace-pre-wrap break-words rounded bg-accent/20 p-2 font-mono text-xs">
@@ -50,10 +67,10 @@ function MessageItem({ msg, index }: { msg: Record<string, any>; index: number }
       )}
       {toolCalls && (
         <div className="mt-1 space-y-1">
-          {toolCalls.map((tc: any, i: number) => (
-            <div key={tc.id ?? i} className="bg-accent/20 rounded p-1.5 font-mono text-xs break-all">
-              🔧 {tc.function?.name ?? `call-${i}`}
-              {tc.function?.arguments && (
+          {toolCalls.map((tc, i) => (
+            <div key={tc?.id ?? i} className="bg-accent/20 rounded p-1.5 font-mono text-xs break-all">
+              🔧 {tc?.function?.name ?? `call-${i}`}
+              {tc?.function?.arguments && (
                 <span className="text-muted-foreground"> {String(tc.function.arguments).slice(0, 200)}</span>
               )}
             </div>
@@ -76,7 +93,7 @@ function MessageItem({ msg, index }: { msg: Record<string, any>; index: number }
 
 /** 快照详情：解析后的请求体（model/messages/参数）+ 原始 JSON 折叠 */
 function PayloadDetail({ item }: { item: PayloadDiagItem }) {
-  const [body, setBody] = useState<Record<string, any> | null>(null)
+  const [body, setBody] = useState<Record<string, unknown> | null>(null)
   const [raw, setRaw] = useState('')
   const [error, setError] = useState<string | null>(null)
   const [loading, setLoading] = useState(true)
@@ -96,8 +113,8 @@ function PayloadDetail({ item }: { item: PayloadDiagItem }) {
           setError('快照 JSON 解析失败')
         }
       }
-    } catch (err: any) {
-      setError(err.message || '读取快照失败')
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : '读取快照失败')
     } finally {
       setLoading(false)
     }
@@ -111,12 +128,12 @@ function PayloadDetail({ item }: { item: PayloadDiagItem }) {
   if (error) return <div className="py-2"><ErrorState message={error} /></div>
   if (!body) return null
 
-  const messages: Record<string, any>[] = Array.isArray(body.messages) ? body.messages : []
+  const messages: Record<string, unknown>[] = Array.isArray(body.messages) ? (body.messages as Record<string, unknown>[]) : []
 
   return (
     <div className="mt-2 space-y-2">
       <div className="flex flex-wrap gap-1.5 text-xs">
-        <span className="bg-primary/10 text-primary rounded px-1.5 py-0.5 font-mono">{body.model || item.model}</span>
+        <span className="bg-primary/10 text-primary rounded px-1.5 py-0.5 font-mono">{String(body.model ?? '') || item.model}</span>
         {Object.keys(body)
           .filter((k) => k !== 'messages' && k !== 'model')
           .map((k) => (

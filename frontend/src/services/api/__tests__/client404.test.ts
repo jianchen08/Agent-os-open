@@ -106,7 +106,8 @@ describe('client.ts 404 收敛行为（P4）', () => {
     ).rejects.toBeDefined()
     // G6-a：内核 datasource 路由已接管，404 = 数据源未命中，与其他 404 一致收敛
     expect(reportErrorMock).toHaveBeenCalledTimes(1)
-    const [, , severity] = reportErrorMock.mock.calls[0]
+    const [, options] = reportErrorMock.mock.calls[0] as [{}, { severity?: string }]
+    const severity = options?.severity
     expect(severity).toBe('warning')
   })
 
@@ -116,7 +117,8 @@ describe('client.ts 404 收敛行为（P4）', () => {
       handler(make404Error('/api/v1/unknown-endpoint')),
     ).rejects.toBeDefined()
     expect(reportErrorMock).toHaveBeenCalledTimes(1)
-    const [, , severity] = reportErrorMock.mock.calls[0]
+    const [, options] = reportErrorMock.mock.calls[0] as [{}, { severity?: string }]
+    const severity = options?.severity
     expect(severity).toBe('warning')
   })
 
@@ -129,7 +131,8 @@ describe('client.ts 404 收敛行为（P4）', () => {
     }
     await expect(handler(err)).rejects.toBeDefined()
     expect(reportErrorMock).toHaveBeenCalledTimes(1)
-    const [, , severity] = reportErrorMock.mock.calls[0]
+    const [, options] = reportErrorMock.mock.calls[0] as [{}, { severity?: string }]
+    const severity = options?.severity
     expect(severity).toBe('error')
   })
 })

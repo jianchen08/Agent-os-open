@@ -541,9 +541,24 @@ export function PipelineManagerWidget(_rawProps: Record<string, unknown>) {
    *  （主管道=主标签、子管道=已有子标签跳转/无则新建），无归属 → 创建独立标签。 */
   const handleEntryClick = useCallback(async (entry: PipelineViewEntry) => {
     const pipelineId = entry.pipelineId || entry.key
-    // 会话列表未加载时先拉取（防止把有归属管道误判为孤儿而在当前会话建标签）
+    // 会话列表未加载时先拉取；拉取失败即阻断跳转——继续执行会把有归属管道
+    // 误判为孤儿而在当前会话新建重复标签（L540 注释要避免的正是这个后果）。
     if (readSessions().length === 0) {
-      await ensureSessionsLoaded().catch(() => {})
+      try {
+        await ensureSessionsLoaded()
+      } catch (e) {
+        console.error('[PipelineManager] 会话列表拉取失败，中止定位', e)
+        useNotificationStore.getState().addNotification({
+          title: '无法定位对话',
+          message: `会话列表加载失败，请稍后重试（管道 ${pipelineId.slice(0, 12)}）`,
+          priority: 'normal',
+          category: 'alert',
+          isBlocking: false,
+          autoDismissMs: 5000,
+          sourceLabel: '前端',
+        })
+        return
+      }
     }
     const hasSession =
       !!entry.threadId
@@ -573,6 +588,7 @@ export function PipelineManagerWidget(_rawProps: Record<string, unknown>) {
               category: 'alert',
               isBlocking: false,
               autoDismissMs: 5000,
+              sourceLabel: '前端',
             })
           })
       }

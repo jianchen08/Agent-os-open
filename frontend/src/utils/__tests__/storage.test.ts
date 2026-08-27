@@ -7,6 +7,7 @@
  */
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { loggers } from '@/utils/logger'
 import { storage, uiStorage } from '@/utils/storage'
 import { STORAGE_KEYS } from '@/constants/storage'
 
@@ -60,12 +61,15 @@ describe('storage 单例', () => {
       expect(storage.getItem('flag2')).toBe(false)
     })
 
-    it('无法解析的损坏 JSON 返回 null 并记录错误', () => {
+    it('无法解析的损坏 JSON 返回 null 并告警一次（warn-once 契约）', () => {
       localStorage.setItem('broken', '{oops')
-      const consoleSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
+      const warnSpy = vi.spyOn(loggers.storage, 'warn').mockImplementation(() => {})
       expect(storage.getItem('broken')).toBeNull()
-      expect(consoleSpy).toHaveBeenCalled()
-      consoleSpy.mockRestore()
+      expect(warnSpy).toHaveBeenCalledTimes(1)
+      // warn-once：同会话第二次失败不再重复告警
+      expect(storage.getItem('broken')).toBeNull()
+      expect(warnSpy).toHaveBeenCalledTimes(1)
+      warnSpy.mockRestore()
     })
   })
 
@@ -97,31 +101,27 @@ describe('storage 单例', () => {
   })
 
   describe('异常容错', () => {
-    it('setItem 抛异常时记录错误不冒泡', () => {
+    it('setItem 抛异常时记录错误不冒泡（warn-once 标志或已被先前失败消耗，仅断行为）', () => {
       // setup.ts 的 MemoryStorage shim 是普通类实例，需 spy 实例方法而非 Storage.prototype
       const setItemSpy = vi
         .spyOn(localStorage, 'setItem')
         .mockImplementation(() => {
           throw new Error('QuotaExceededError')
         })
-      const consoleSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
+      // 会话级 warn-once 标志可能被前面的失败用例先行消耗——严格次数语义
+      // 在「损坏 JSON 返回 null 并告警一次」用例覆盖，这里只断不冒泡。
       expect(() => storage.setItem('k', 'v')).not.toThrow()
-      expect(consoleSpy).toHaveBeenCalled()
       setItemSpy.mockRestore()
-      consoleSpy.mockRestore()
     })
 
-    it('getItem 抛异常时返回 null 不冒泡', () => {
+    it('getItem 抛异常时返回 null 不冒泡（同上，仅断行为）', () => {
       const getItemSpy = vi
         .spyOn(localStorage, 'getItem')
         .mockImplementation(() => {
           throw new Error('SecurityError')
         })
-      const consoleSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
       expect(storage.getItem('k')).toBeNull()
-      expect(consoleSpy).toHaveBeenCalled()
       getItemSpy.mockRestore()
-      consoleSpy.mockRestore()
     })
   })
 })

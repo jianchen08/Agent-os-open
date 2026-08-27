@@ -5,12 +5,17 @@ import { persist } from 'zustand/middleware'
 import { createTolerantStorage } from '@/utils/tolerantStorage'
 import type { Artifact } from '@/types/artifact'
 import type { Workspace, FileTreeNode } from '@/types/workspace'
-import { apiClient } from '@/services/api/client'
 import {
   createEntry as apiCreateEntry,
   deleteEntry as apiDeleteEntry,
   renameEntry as apiRenameEntry,
   moveEntry as apiMoveEntry,
+  getWorkspace as apiGetWorkspace,
+  getWorkspaceFileTree as apiGetFileTree,
+  getWorkspaceArtifacts as apiGetArtifacts,
+  type WorkspacePayload,
+  type FileTreeNodePayload,
+  type ArtifactPayload,
 } from '@/services/api/workspaces'
 
 interface WorkspaceState {
@@ -55,9 +60,6 @@ interface WorkspaceActions {
   clearCache: () => void
 }
 
-import { WORKSPACE_SERVICE_ENDPOINTS as W } from '@/services/api/endpoints.generated'
-const API_BASE = W.workspaces_get
-
 export const useWorkspaceStore = create<WorkspaceState & WorkspaceActions>()(
   persist(
     (set, get) => ({
@@ -71,11 +73,12 @@ export const useWorkspaceStore = create<WorkspaceState & WorkspaceActions>()(
   fetchWorkspace: async (containerTaskId) => {
     set({ loading: true, error: null })
     try {
-      // 必须走 apiClient 而非裸 fetch：自动带 Authorization 头（请求拦截器）、
+      // 服务层统一走 apiClient：自动带 Authorization 头（请求拦截器）、
       // 401 进入统一 token 刷新链路、5xx/429 自动重试。
-      const { data } = await apiClient.get(`${API_BASE.replace('{container_task_id}', containerTaskId)}`)
+      const data = await apiGetWorkspace(containerTaskId)
       if (data.error) {
-        set({ loading: false, error: data.error.message })
+        const envelope = data.error as { message?: string }
+        set({ loading: false, error: envelope.message ?? '工作空间加载失败' })
         return null
       }
       const ws = _normalizeWorkspace(data)
@@ -92,8 +95,8 @@ export const useWorkspaceStore = create<WorkspaceState & WorkspaceActions>()(
 
   fetchFileTree: async (containerTaskId) => {
     try {
-      const { data } = await apiClient.get(`${API_BASE}/${containerTaskId}/file-tree`)
-      const tree = (data.tree || []).map(_normalizeFileTreeNode)
+      const { tree } = await apiGetFileTree(containerTaskId)
+      const normalized = tree.map(_normalizeFileTreeNode)
       // 更新缓存中的文件树
       set((state) => {
         const ws = state.workspaces[containerTaskId]
@@ -101,13 +104,13 @@ export const useWorkspaceStore = create<WorkspaceState & WorkspaceActions>()(
           return {
             workspaces: {
               ...state.workspaces,
-              [containerTaskId]: { ...ws, fileTree: tree },
+              [containerTaskId]: { ...ws, fileTree: normalized },
             },
           }
         }
         return state
       })
-      return tree
+      return normalized
     } catch {
       return []
     }
@@ -115,8 +118,8 @@ export const useWorkspaceStore = create<WorkspaceState & WorkspaceActions>()(
 
   fetchWorkspaceArtifacts: async (containerTaskId) => {
     try {
-      const { data } = await apiClient.get(`${API_BASE}/${containerTaskId}/artifacts`)
-      return (data.items || []).map(_normalizeArtifact)
+      const { items } = await apiGetArtifacts(containerTaskId)
+      return items.map(_normalizeArtifact)
     } catch {
       return []
     }
@@ -242,26 +245,30 @@ export const useWorkspaceStore = create<WorkspaceState & WorkspaceActions>()(
   ),
 )
 
-function _normalizeWorkspace(data: Record<string, any>): Workspace {
-  if (!data.id) {
+function _normalizeWorkspace(data: WorkspacePayload): Workspace {
+  const id = typeof data.id === 'string' ? data.id : ''
+  if (!id) {
     console.error('[workspaceStore] _normalizeWorkspace: id 字段缺失', data)
   }
   return {
-    id: data.id ?? '',
-    containerTaskId: data.containerTaskId ?? '',
-    sessionId: data.sessionId ?? '',
-    title: data.title ?? '',
-    description: data.description ?? '',
-    fileTree: (data.fileTree ?? []).map(_normalizeFileTreeNode),
-    createdAt: data.createdAt ?? '',
-    updatedAt: data.updatedAt ?? '',
+    id,
+    containerTaskId: typeof data.containerTaskId === 'string' ? data.containerTaskId : '',
+    sessionId: typeof data.sessionId === 'string' ? data.sessionId : '',
+    title: typeof data.title === 'string' ? data.title : '',
+    description: typeof data.description === 'string' ? data.description : '',
+    fileTree: (Array.isArray(data.fileTree) ? (data.fileTree as FileTreeNodePayload[]) : []).map(
+      _normalizeFileTreeNode,
+    ),
+    createdAt: typeof data.createdAt === 'string' ? data.createdAt : '',
+    updatedAt: typeof data.updatedAt === 'string' ? data.updatedAt : '',
   }
 }
 
-function _normalizeFileTreeNode(data: Record<string, any>): FileTreeNode {
+function _normalizeFileTreeNode(data: FileTreeNodePayload): FileTreeNode {
   return {
     name: data.name ?? '',
-    type: data.type ?? 'file',
+    // 契约外值回退 'file'（树节点仅渲染目录/文件两态）
+    type: data.type === 'directory' ? 'directory' : 'file',
     path: data.path ?? '',
     artifactId: data.artifactId,
     children: data.children ? data.children.map(_normalizeFileTreeNode) : undefined,
@@ -269,21 +276,29 @@ function _normalizeFileTreeNode(data: Record<string, any>): FileTreeNode {
   }
 }
 
-function _normalizeArtifact(data: Record<string, any>): Artifact {
-  if (!data.id) {
+/** 契约内制品类型（ArtifactType 联合的字面量表，用于运行时校验） */
+const ARTIFACT_TYPES = ['text', 'image', 'video', 'code', 'document', 'data', 'composite'] as const
+
+function _normalizeArtifact(data: ArtifactPayload): Artifact {
+  const id = typeof data.id === 'string' ? data.id : ''
+  if (!id) {
     console.error('[workspaceStore] _normalizeArtifact: id 字段缺失', data)
   }
+  const rawType = typeof data.artifactType === 'string' ? data.artifactType : ''
   return {
-    id: data.id ?? '',
-    taskId: data.taskId ?? '',
-    title: data.title ?? '',
-    artifactType: data.artifactType ?? 'text',
-    content: data.content ?? '',
-    filePath: data.filePath,
-    version: data.version ?? 1,
-    parentArtifactId: data.parentArtifactId,
-    metadata: data.metadata ?? {},
-    createdAt: data.createdAt ?? '',
-    updatedAt: data.updatedAt ?? '',
+    id,
+    taskId: typeof data.taskId === 'string' ? data.taskId : '',
+    title: typeof data.title === 'string' ? data.title : '',
+    // 契约外类型回退 'text'
+    artifactType: (ARTIFACT_TYPES as readonly string[]).includes(rawType)
+      ? (rawType as Artifact['artifactType'])
+      : 'text',
+    content: typeof data.content === 'string' ? data.content : '',
+    filePath: typeof data.filePath === 'string' ? data.filePath : undefined,
+    version: typeof data.version === 'number' ? data.version : 1,
+    parentArtifactId: typeof data.parentArtifactId === 'string' ? data.parentArtifactId : undefined,
+    metadata: (data.metadata as Record<string, unknown> | undefined) ?? {},
+    createdAt: typeof data.createdAt === 'string' ? data.createdAt : '',
+    updatedAt: typeof data.updatedAt === 'string' ? data.updatedAt : '',
   }
 }

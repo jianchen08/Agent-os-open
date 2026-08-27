@@ -222,7 +222,7 @@ function HomePage(): ReactNode {
   // _status 订阅独立 effect：只注册一次，避免随 token 变化反复订阅/取消
   useEffect(() => {
     const handleStatusChange = (data: { status: string }) => {
-      useSessionStore.setState({ wsStatus: data.status as any })
+      useSessionStore.setState({ wsStatus: data.status })
     }
     globalWS.subscribe('_status', handleStatusChange)
     return () => {
@@ -265,6 +265,7 @@ function HomePage(): ReactNode {
         category: 'error',
         isBlocking: false,
         autoDismissMs: 8000,
+        sourceLabel: '前端',
       })
     }
   }, [createSession, handleSelectSession])

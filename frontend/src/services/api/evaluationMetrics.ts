@@ -50,14 +50,11 @@ export async function getEvaluationMetrics(params?: {
     API_ENDPOINTS.EVALUATION.METRICS,
     { params },
   )
+  // 后端评估服务保证 metric 字段全量返回（category/usage_count/success_count/
+  // created_at 恒存在，见 plugins/shared/system/evaluation/server.py 的列表组装），
+  // 直接透传；不再以 ''/0 伪造补齐缺失字段（伪造会让「无统计」与「未上报」不可区分）。
   return {
-    metrics: response.data.metrics.map((item) => ({
-      ...item,
-      category: (item as any).category || (item as any).metric_type || '',
-      usage_count: (item as any).usage_count ?? 0,
-      success_count: (item as any).success_count ?? 0,
-      created_at: (item as any).created_at ?? '',
-    })),
+    metrics: response.data.metrics,
     total: response.data.total,
   }
 }

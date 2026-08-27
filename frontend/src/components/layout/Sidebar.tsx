@@ -34,7 +34,7 @@ import {
 import { useSessionsQuery } from '@/hooks/queries/useSessionsQuery'
 import { cn } from '@/lib/utils'
 import { searchGlobal, type SessionSearchHit, type MessageSearchHit } from '@/services/api/search'
-import { reportError } from '@/services/errorReporting'
+import { reportError, ErrorSeverity, ErrorType } from '@/services/errorReporting'
 import { contributionRegistry } from '@/services/schema/ContributionRegistry'
 import { evaluateWhen } from '@/services/schema/whenExpression'
 import { openWorkspacePanel, openWorkspacePanelByPath } from '@/services/workspacePanelOpener'
@@ -314,7 +314,8 @@ export const Sidebar = memo<SidebarProps>(({ isMobile = false }) => {
         }
       } catch (error) {
         reportError(error instanceof Error ? error.message : String(error), {
-          type: 'server',
+          type: ErrorType.SERVER,
+          severity: ErrorSeverity.ERROR,
           componentName: 'Sidebar',
           operation: sessionId ? 'saveSessionEdit' : 'createSession',
           sessionId: sessionId || undefined,
@@ -342,7 +343,8 @@ export const Sidebar = memo<SidebarProps>(({ isMobile = false }) => {
         await copySession(session.id)
       } catch (error) {
         reportError(error instanceof Error ? error.message : String(error), {
-          type: 'server',
+          type: ErrorType.SERVER,
+          severity: ErrorSeverity.ERROR,
           componentName: 'Sidebar',
           operation: 'copySession',
           sessionId: session.id,

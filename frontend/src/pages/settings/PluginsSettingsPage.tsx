@@ -63,7 +63,9 @@ interface ToolCapability {
   input_schema?: Record<string, unknown>
 }
 
-/** 类型主题：卡片徽标 + 图标方块共用一套配色（市场化后图标可由 manifest 声明替换） */
+/** 类型主题：卡片徽标 + 图标方块共用一套配色。
+ *  半透明底/边框用 color-mix 绑定 ds 语义令牌（同 ActivityCard 模式），
+ *  跟随主题切换；fallback 与旧硬编码 hex 一致，令牌缺席时渲染不变。 */
 function typeTheme(configType: string): {
   label: string
   badgeClass: string
@@ -75,9 +77,9 @@ function typeTheme(configType: string): {
     return {
       label: 'Pipeline',
       badgeClass:
-        'bg-[rgba(167,139,250,0.15)] text-[var(--ds-accent-ai,#A78BFA)] border-[rgba(167,139,250,0.35)]',
+        'bg-[color-mix(in_srgb,var(--ds-accent-ai,#A78BFA)_15%,transparent)] text-[var(--ds-accent-ai,#A78BFA)] border-[color-mix(in_srgb,var(--ds-accent-ai,#A78BFA)_35%,transparent)]',
       boxClass:
-        'bg-[rgba(167,139,250,0.12)] border-[rgba(167,139,250,0.35)] text-[var(--ds-accent-ai,#A78BFA)]',
+        'bg-[color-mix(in_srgb,var(--ds-accent-ai,#A78BFA)_12%,transparent)] border-[color-mix(in_srgb,var(--ds-accent-ai,#A78BFA)_35%,transparent)] text-[var(--ds-accent-ai,#A78BFA)]',
       Icon: Zap,
     }
   }
@@ -85,9 +87,9 @@ function typeTheme(configType: string): {
     return {
       label: 'Tool',
       badgeClass:
-        'bg-[rgba(34,211,238,0.12)] text-[var(--ds-accent-primary,#22D3EE)] border-[rgba(34,211,238,0.35)]',
+        'bg-[color-mix(in_srgb,var(--ds-accent-primary,#22D3EE)_12%,transparent)] text-[var(--ds-accent-primary,#22D3EE)] border-[color-mix(in_srgb,var(--ds-accent-primary,#22D3EE)_35%,transparent)]',
       boxClass:
-        'bg-[rgba(34,211,238,0.10)] border-[rgba(34,211,238,0.35)] text-[var(--ds-accent-primary,#22D3EE)]',
+        'bg-[color-mix(in_srgb,var(--ds-accent-primary,#22D3EE)_10%,transparent)] border-[color-mix(in_srgb,var(--ds-accent-primary,#22D3EE)_35%,transparent)] text-[var(--ds-accent-primary,#22D3EE)]',
       Icon: Wrench,
     }
   }
@@ -95,9 +97,9 @@ function typeTheme(configType: string): {
     return {
       label: 'System',
       badgeClass:
-        'bg-[rgba(96,165,250,0.12)] text-[var(--ds-status-info,#60A5FA)] border-[rgba(96,165,250,0.35)]',
+        'bg-[color-mix(in_srgb,var(--ds-status-info,#60A5FA)_12%,transparent)] text-[var(--ds-status-info,#60A5FA)] border-[color-mix(in_srgb,var(--ds-status-info,#60A5FA)_35%,transparent)]',
       boxClass:
-        'bg-[rgba(96,165,250,0.10)] border-[rgba(96,165,250,0.35)] text-[var(--ds-status-info,#60A5FA)]',
+        'bg-[color-mix(in_srgb,var(--ds-status-info,#60A5FA)_10%,transparent)] border-[color-mix(in_srgb,var(--ds-status-info,#60A5FA)_35%,transparent)] text-[var(--ds-status-info,#60A5FA)]',
       Icon: Settings,
     }
   }
@@ -338,9 +340,11 @@ export function PluginsSettingsPage() {
                   key={plugin.plugin_id}
                   className="rounded-lg border p-3"
                   style={{
-                    background: plugin.enabled ? 'var(--ds-bg-panel, #0A1226)' : 'rgba(148,163,184,0.04)',
+                    background: plugin.enabled
+                      ? 'var(--ds-bg-panel, #0A1226)'
+                      : 'color-mix(in srgb, var(--muted-foreground, #94a3b8) 4%, transparent)',
                     borderColor: plugin.error
-                      ? 'rgba(248,113,113,0.55)'
+                      ? 'color-mix(in srgb, var(--ds-status-error, #F87171) 55%, transparent)'
                       : 'var(--ds-border-subtle, rgba(148,163,184,0.12))',
                     opacity: plugin.enabled ? 1 : 0.6,
                   }}
@@ -450,7 +454,7 @@ export function PluginsSettingsPage() {
                       <span className="text-muted-foreground font-mono text-[10px]">@{tool.plugin_id}</span>
                     )}
                     {tool.category && (
-                      <span className="rounded border border-[rgba(34,211,238,0.35)] bg-[rgba(34,211,238,0.12)] px-1.5 py-0.5 font-mono text-[10px]">
+                      <span className="rounded border-[color-mix(in_srgb,var(--ds-accent-primary,#22D3EE)_35%,transparent)] bg-[color-mix(in_srgb,var(--ds-accent-primary,#22D3EE)_12%,transparent)] border px-1.5 py-0.5 font-mono text-[10px]">
                         {tool.category}
                       </span>
                     )}

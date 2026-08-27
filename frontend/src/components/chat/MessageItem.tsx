@@ -172,7 +172,7 @@ export const MessageItem = memo(function MessageItem({
     try {
       await navigator.clipboard.writeText(versionContent ?? message.content)
     } catch (err) {
-      reportError(err as string, {
+      reportError(err instanceof Error ? err.message : String(err), {
         type: ErrorType.CLIENT,
         componentName: 'MessageItem',
         operation: 'copyToClipboard',

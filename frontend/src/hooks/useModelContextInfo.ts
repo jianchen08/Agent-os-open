@@ -14,6 +14,8 @@ interface UseModelContextInfoResult {
   isValid: boolean
   /** 是否正在加载模型配置 */
   isLoading: boolean
+  /** 配置加载失败信息；null 且 isValid=false 表示配置里确实没有该模型（两种状态可区分） */
+  error: string | null
   /** 刷新模型配置（手动触发） */
   refresh: () => void
 }
@@ -25,19 +27,22 @@ interface UseModelContextInfoResult {
  * 由调用方决定如何显示，绝不用默认值冒充真实模型。
  *
  * @param modelName - 当前使用的模型名称
- * @returns context_window、有效性、加载状态和刷新方法
+ * @returns context_window、有效性、加载状态、错误态和刷新方法
  */
 export function useModelContextInfo(modelName: string | undefined): UseModelContextInfoResult {
   const [modelsCache, setModelsCache] = useState<Record<string, ModelConfig>>({})
   const [isLoading, setIsLoading] = useState(false)
+  const [error, setError] = useState<string | null>(null)
 
   const fetchModels = useCallback(async () => {
     setIsLoading(true)
+    setError(null)
     try {
       const result = await getModels()
       setModelsCache(result.models)
-    } catch (error) {
-      console.error('获取模型配置失败:', error)
+    } catch (e) {
+      // 失败进 error 态：消费方可区分「接口失败」与「配置无此模型」
+      setError(e instanceof Error ? e.message : '获取模型配置失败')
     } finally {
       setIsLoading(false)
     }
@@ -54,6 +59,7 @@ export function useModelContextInfo(modelName: string | undefined): UseModelCont
     contextWindow: cached?.context_window || 0,
     isValid,
     isLoading,
+    error,
     refresh: fetchModels,
   }
 }

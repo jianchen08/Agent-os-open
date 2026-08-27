@@ -313,9 +313,10 @@ export function DebugExecutionRecordsPage({ embedded }: { embedded?: boolean } =
                         <td className="max-w-[320px] truncate px-4 py-2 text-xs">
                           {extractContentText(record.message_data) || (
                             <span className="text-muted-foreground">
-                              {Array.isArray((record.message_data as any)?.tool_calls)
-                                ? `工具调用 ×${(record.message_data as any).tool_calls.length}`
-                                : '--'}
+                              {(() => {
+                                const toolCalls = (record.message_data as Record<string, unknown> | undefined)?.tool_calls
+                                return Array.isArray(toolCalls) ? `工具调用 ×${toolCalls.length}` : '--'
+                              })()}
                             </span>
                           )}
                         </td>

@@ -122,12 +122,12 @@ function makeStablePartKey(part: MessagePart, index: number): string {
   const seq = part.sequence ?? index
   switch (part.type) {
     case 'text': {
-      const content = part.content || (part as any).text || ''
+      const content = part.content
       const contentPrefix = content.substring(0, 16)
       return `part-text-${seq}-${contentPrefix}`
     }
     case 'thinking': {
-      const content = part.content || (part as any).thinking?.content || ''
+      const content = part.content
       const contentPrefix = content.substring(0, 16)
       return `part-thinking-${seq}-${contentPrefix}`
     }
@@ -155,7 +155,7 @@ export function buildFragmentsFromParts(message: Message, taskId?: string): Rend
     const stableKey = makeStablePartKey(part, i)
     switch (part.type) {
       case 'text': {
-        const textContent = part.content || (part as any).text || ''
+        const textContent = part.content
         if (textContent && textContent.trim()) {
           fragments.push({
             type: 'text',
@@ -169,7 +169,7 @@ export function buildFragmentsFromParts(message: Message, taskId?: string): Rend
       }
 
       case 'thinking': {
-        const thinkContent = part.content || (part as any).thinking?.content || ''
+        const thinkContent = part.content
         if (!thinkContent.trim()) break
         fragments.push({
           type: 'thinking',
@@ -301,7 +301,9 @@ export function useMessageRender(options: UseMessageRenderOptions): MessageRende
       fragments: [],
       displayContent: versionContent ?? message.content,
     }
-    // 即使 parts 和 content 没有变化，造成不必要的重渲染。
+    // content 是 displayContent 的回退源：message.content 与 parts 内文本同源
+    // （parts 缺失时 entire content 兜底），依赖缺失会导致编辑/流式更新后
+    // 显示旧内容。
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [message.parts, message.content, versionContent, taskId])
 

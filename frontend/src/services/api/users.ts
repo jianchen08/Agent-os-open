@@ -11,7 +11,7 @@
 
 import { API_ENDPOINTS } from '@/constants/api'
 import apiClient from '@/services/api/client'
-import { reportError } from '@/services/errorReporting'
+import { reportError, ErrorSeverity, ErrorType } from '@/services/errorReporting'
 
 export interface User {
   id: string
@@ -43,9 +43,11 @@ export async function getUsers(skip: number = 0, limit: number = 100): Promise<U
     })
     return response.data
   } catch (error) {
-    reportError('获取用户列表失败', 'validation', 'error', {
+    reportError('获取用户列表失败', {
+      type: ErrorType.VALIDATION,
+      severity: ErrorSeverity.ERROR,
       code: 'GET_USERS_FAILED',
-    })
+        })
     throw error
   }
 }
@@ -55,9 +57,11 @@ export async function getUserStats(): Promise<UserStats> {
     const response = await apiClient.get<UserStats>(API_ENDPOINTS.USERS.STATS)
     return response.data
   } catch (error) {
-    reportError('获取用户统计失败', 'validation', 'error', {
+    reportError('获取用户统计失败', {
+      type: ErrorType.VALIDATION,
+      severity: ErrorSeverity.ERROR,
       code: 'GET_STATS_FAILED',
-    })
+        })
     throw error
   }
 }
@@ -74,9 +78,11 @@ export async function createUser(data: CreateUserRequest): Promise<User> {
     })
     return response.data
   } catch (error) {
-    reportError('创建用户失败', 'validation', 'error', {
+    reportError('创建用户失败', {
+      type: ErrorType.VALIDATION,
+      severity: ErrorSeverity.ERROR,
       code: 'CREATE_USER_FAILED',
-    })
+        })
     throw error
   }
 }
@@ -88,9 +94,11 @@ export async function updateUserActiveStatus(userId: string, isActive: boolean):
     })
     return response.data
   } catch (error) {
-    reportError('更新用户状态失败', 'validation', 'error', {
+    reportError('更新用户状态失败', {
+      type: ErrorType.VALIDATION,
+      severity: ErrorSeverity.ERROR,
       code: 'UPDATE_STATUS_FAILED',
-    })
+        })
     throw error
   }
 }
@@ -100,9 +108,11 @@ export async function deleteUser(userId: string): Promise<{ message: string }> {
     const response = await apiClient.delete<{ message: string }>(API_ENDPOINTS.USERS.DELETE(userId))
     return response.data
   } catch (error) {
-    reportError('删除用户失败', 'validation', 'error', {
+    reportError('删除用户失败', {
+      type: ErrorType.VALIDATION,
+      severity: ErrorSeverity.ERROR,
       code: 'DELETE_USER_FAILED',
-    })
+        })
     throw error
   }
 }

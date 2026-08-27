@@ -28,6 +28,9 @@ function getPreviewColors(theme: ThemeInfo) {
     return { bg: '#f8fafc', primary: '#2563eb', text: '#0f172a' }
   }
   return { bg: '#0f172a', primary: '#3b82f6', text: '#f8fafc' }
+  // 色板预览语义豁免（S9）：以上静态 hex 是「主题本体预览样本」——缩略色块
+  // 必须恒定可辨、不随当前主题令牌联动（否则深浅主题互看时样本失真）；
+  // 后端未下发 preview 元数据时按 light/dark 家族给静态近似值。
 }
 
 function ThemeSwatch({

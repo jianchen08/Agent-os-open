@@ -61,8 +61,7 @@ describe('useModelContextInfo', () => {
     expect(result.current.isValid).toBe(false)
   })
 
-  it('加载失败：console.error 且 contextWindow=0、isValid=false', async () => {
-    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
+  it('加载失败：进 error 态（可区分「接口失败」与「配置无此模型」）', async () => {
     getModelsMock.mockRejectedValue(new Error('fetch failed'))
 
     const { result } = renderHook(() => useModelContextInfo('gpt-4o'))
@@ -70,8 +69,30 @@ describe('useModelContextInfo', () => {
     await waitFor(() => expect(result.current.isLoading).toBe(false))
     expect(result.current.contextWindow).toBe(0)
     expect(result.current.isValid).toBe(false)
-    expect(errorSpy).toHaveBeenCalled()
-    errorSpy.mockRestore()
+    // S4 收口：失败必须置 error 态，不再与「未知模型」同表现
+    expect(result.current.error).toContain('fetch failed')
+  })
+
+  it('配置成功但无此模型：error=null（与失败态互斥，语义可区分）', async () => {
+    getModelsMock.mockResolvedValue({ models: {} })
+
+    const { result } = renderHook(() => useModelContextInfo('no-such-model'))
+    await waitFor(() => expect(result.current.isLoading).toBe(false))
+
+    expect(result.current.isValid).toBe(false)
+    expect(result.current.error).toBeNull()
+  })
+
+  it('刷新成功后清除上一次的 error 态', async () => {
+    getModelsMock.mockRejectedValueOnce(new Error('boom'))
+    getModelsMock.mockResolvedValueOnce({ models: { 'gpt-4o': { context_window: 9000 } } })
+
+    const { result } = renderHook(() => useModelContextInfo('gpt-4o'))
+    await waitFor(() => expect(result.current.error).toContain('boom'))
+
+    result.current.refresh()
+    await waitFor(() => expect(result.current.contextWindow).toBe(9000))
+    expect(result.current.error).toBeNull()
   })
 
   it('refresh 手动触发重新拉取', async () => {

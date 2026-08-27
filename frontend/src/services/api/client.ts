@@ -33,7 +33,9 @@ async function clearAuthAndRedirect(): Promise<void> {
   triggerAuthExpired()
 
   // 报告认证错误
-  reportError('认证已过期，请重新登录', ErrorType.AUTHENTICATION, ErrorSeverity.WARNING, {
+  reportError('认证已过期，请重新登录', {
+    type: ErrorType.AUTHENTICATION,
+    severity: ErrorSeverity.WARNING,
     code: '401',
   })
 
@@ -151,12 +153,11 @@ apiClient.interceptors.response.use(
         if (isDefinitelyAuthFailure(refreshError)) {
           await clearAuthAndRedirect()
         } else {
-          reportError(
-            '网络异常，认证刷新暂时失败，请检查网络后重试',
-            ErrorType.NETWORK,
-            ErrorSeverity.WARNING,
-            { showToast: false },
-          )
+          reportError('网络异常，认证刷新暂时失败，请检查网络后重试', {
+            type: ErrorType.NETWORK,
+            severity: ErrorSeverity.WARNING,
+            showToast: false,
+          })
         }
         return Promise.reject(refreshError)
       }
@@ -230,15 +231,12 @@ apiClient.interceptors.response.use(
       const delayTime = Math.min(1000 * Math.pow(2, originalRequest._retryCount - 1), 5000)
 
       // 报告重试信息（不显示Toast，只记录到控制台）
-      reportError(
-        `请求失败，${delayTime}ms 后进行第 ${originalRequest._retryCount} 次重试`,
-        ErrorType.NETWORK,
-        ErrorSeverity.INFO,
-        {
-          showToast: false,
-          code: apiError.code,
-        },
-      )
+      reportError(`请求失败，${delayTime}ms 后进行第 ${originalRequest._retryCount} 次重试`, {
+        type: ErrorType.NETWORK,
+        severity: ErrorSeverity.INFO,
+        showToast: false,
+        code: apiError.code,
+      })
 
       // 等待后重试
       await new Promise((resolve) => setTimeout(resolve, delayTime))
@@ -289,23 +287,21 @@ apiClient.interceptors.response.use(
       if (import.meta.env.DEV && error.response?.status === 404) {
         console.warn(`[API-404] requestUrl=${requestUrl} status=404`)
       }
-      reportError(
-        apiError.message,
-        errorType,
+      reportError(apiError.message, {
+        type: errorType,
         // P4: 404 多为非业务路径（端点未实现/资源不存在），降级为 WARNING 收敛告警噪音；
         // 认证失败保持 WARNING；5xx/网络错误保持 ERROR
-        error.response?.status === 404
-          ? ErrorSeverity.WARNING
-          : errorType === ErrorType.AUTHENTICATION
+        severity:
+          error.response?.status === 404
             ? ErrorSeverity.WARNING
-            : ErrorSeverity.ERROR,
-        {
-          code: apiError.code,
-          details: apiError.details,
-          // 统一错误信封来源（config/error_codes.json）：通知中心渲染来源标签
-          source: apiError.source,
-        },
-      )
+            : errorType === ErrorType.AUTHENTICATION
+              ? ErrorSeverity.WARNING
+              : ErrorSeverity.ERROR,
+        code: apiError.code,
+        details: apiError.details,
+        // 统一错误信封来源（config/error_codes.json）：通知中心渲染来源标签
+        source: apiError.source,
+      })
     }
 
     return Promise.reject(apiError)

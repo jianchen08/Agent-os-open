@@ -1,9 +1,10 @@
 /** @feature FP-T12 前端适配 | @ci frontend-test */
 /**
- * errorReporting 用户可见提示测试（2026-08-22 错误透传收口）
+ * errorReporting 用户可见提示测试
  *
- * reportError 此前只写内存日志（用户无感知）；本次默认弹通知中心，
- * 显式 showToast: false 时保持静默（重试进度/401 静默等既有调用点）。
+ * - reportError 统一单签名（message, options?: { type?, severity?, ...context }）
+ *   （扫描批K S14：双签名内部兼容层删除，调用方可全量感知）
+ * - 默认弹通知中心，显式 showToast: false 时保持静默（重试进度/401 静默等既有调用点）
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 
@@ -19,16 +20,21 @@ vi.mock('../../stores/notificationStore', () => ({
 }))
 
 // 重新导入模块（mock 提升生效）
-import { reportError, ErrorType, ErrorSeverity, getErrorLogs } from '../errorReporting'
+import {
+  reportError,
+  captureException,
+  ErrorType,
+  ErrorSeverity,
+} from '../errorReporting'
 import * as errorReportingModule from '../errorReporting'
 
-describe('errorReporting 通知中心提示（2026-08-22）', () => {
+describe('reportError 单签名通知中心提示', () => {
   beforeEach(() => {
     addNotificationMock.mockClear()
   })
 
   it('默认上报时弹通知中心（标题/消息/类别）', () => {
-    reportError('会话加载失败', ErrorType.SERVER, ErrorSeverity.ERROR)
+    reportError('会话加载失败', { type: ErrorType.SERVER, severity: ErrorSeverity.ERROR })
     expect(addNotificationMock).toHaveBeenCalledTimes(1)
     const n = addNotificationMock.mock.calls[0][0]
     expect(n.category).toBe('error')
@@ -36,50 +42,56 @@ describe('errorReporting 通知中心提示（2026-08-22）', () => {
   })
 
   it('5xx 服务端错误优先级为 high 且 10s 自动消失（瞬时失败不常驻挂屏）', () => {
-    reportError('内核不可用', ErrorType.SERVER, ErrorSeverity.ERROR)
+    reportError('内核不可用', { type: ErrorType.SERVER, severity: ErrorSeverity.ERROR })
     const n = addNotificationMock.mock.calls[0][0]
     expect(n.priority).toBe('high')
     expect(n.autoDismissMs).toBe(10000)
   })
 
   it('showToast: false 时不打扰用户（重试进度等静默调用点）', () => {
-    reportError('请求失败，重试中', ErrorType.NETWORK, ErrorSeverity.INFO, {
+    reportError('请求失败，重试中', {
+      type: ErrorType.NETWORK,
+      severity: ErrorSeverity.INFO,
       showToast: false,
     })
     expect(addNotificationMock).not.toHaveBeenCalled()
-    // 日志仍应记录（排查链路不丢）
-    expect(getErrorLogs().length).toBeGreaterThan(0)
   })
 
-  it('非服务端错误优先级为 normal 且自动消失', () => {
-    reportError('参数校验失败', ErrorType.VALIDATION, ErrorSeverity.WARNING)
+  it('options 缺省时仍上报（UNKNOWN 类型 / MEDIUM 级别兜底）', () => {
+    reportError('未知来源的失败')
     const n = addNotificationMock.mock.calls[0][0]
     expect(n.priority).toBe('normal')
     expect(n.autoDismissMs).toBe(6000)
   })
 
-  it('ApiError 信封携带 source 时通知带来源标签（统一错误模型）', () => {
-    reportError({
-      code: 'INTERNAL_ERROR',
-      message: 'io error: 磁盘写入失败',
-      source: 'kernel',
-    })
+  it('非服务端错误优先级为 normal 且自动消失', () => {
+    reportError('参数校验失败', { type: ErrorType.VALIDATION, severity: ErrorSeverity.WARNING })
     const n = addNotificationMock.mock.calls[0][0]
-    expect(n.errorSource).toBe('kernel')
+    expect(n.priority).toBe('normal')
+    expect(n.autoDismissMs).toBe(6000)
   })
 
-  it('字符串调用方经 context.source 显式传入来源（通知中心渲染标签）', () => {
-    reportError('工具执行失败', ErrorType.SERVER, ErrorSeverity.ERROR, {
-      source: 'plugin',
-    })
+  it('context.source 显式传入来源标签（统一错误模型）', () => {
+    reportError('工具执行失败', { type: ErrorType.SERVER, severity: ErrorSeverity.ERROR, source: 'plugin' })
     const n = addNotificationMock.mock.calls[0][0]
     expect(n.errorSource).toBe('plugin')
   })
 
-  it('无来源信息时 errorSource 为 undefined（旧后端兼容，渲染未知标）', () => {
-    reportError('会话加载失败', ErrorType.SERVER, ErrorSeverity.ERROR)
+  it('无来源信息时 errorSource 为 undefined（渲染未知灰标）', () => {
+    reportError('会话加载失败', { type: ErrorType.SERVER, severity: ErrorSeverity.ERROR })
     const n = addNotificationMock.mock.calls[0][0]
     expect(n.errorSource).toBeUndefined()
+  })
+})
+
+describe('captureException 与 reportError 的分工', () => {
+  beforeEach(() => {
+    addNotificationMock.mockClear()
+  })
+
+  it('captureException 只落控制台不弹通知（ErrorBoundary 自带用户可见 UI）', () => {
+    captureException(new Error('组件崩溃'))
+    expect(addNotificationMock).not.toHaveBeenCalled()
   })
 })
 

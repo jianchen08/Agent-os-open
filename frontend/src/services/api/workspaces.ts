@@ -55,6 +55,52 @@ export interface WorkspaceFileContentResponse {
   message?: string
 }
 
+/* ── 读接口（扫描批K S8：store 手拼 URL 收口到服务层，端点/鉴权单一出口） ── */
+
+/** 工作空间原始载荷（后端 camelCase 返回；字段可缺省由 store 归一化兜底） */
+export type WorkspacePayload = Record<string, unknown>
+
+/** 工作空间详情（workspaces_get） */
+export async function getWorkspace(containerTaskId: string): Promise<WorkspacePayload> {
+  const response = await apiClient.get<WorkspacePayload>(
+    W.workspaces_get.replace('{container_task_id}', containerTaskId),
+  )
+  return response.data
+}
+
+/** 文件树节点原始载荷 */
+export interface FileTreeNodePayload {
+  name?: string
+  type?: string
+  path?: string
+  artifactId?: string
+  children?: FileTreeNodePayload[]
+  metadata?: Record<string, unknown>
+}
+
+/** 工作空间目录树（workspaces_file_tree） */
+export async function getWorkspaceFileTree(
+  containerTaskId: string,
+): Promise<{ tree: FileTreeNodePayload[] }> {
+  const response = await apiClient.get<{ tree?: FileTreeNodePayload[] }>(
+    W.workspaces_file_tree.replace('{container_task_id}', containerTaskId),
+  )
+  return { tree: response.data?.tree ?? [] }
+}
+
+/** 制品条目原始载荷 */
+export type ArtifactPayload = Record<string, unknown>
+
+/** 工作空间全部制品（workspaces_artifacts；无制品时 items 为空数组） */
+export async function getWorkspaceArtifacts(
+  containerTaskId: string,
+): Promise<{ items: ArtifactPayload[] }> {
+  const response = await apiClient.get<{ items?: ArtifactPayload[] }>(
+    W.workspaces_artifacts.replace('{container_task_id}', containerTaskId),
+  )
+  return { items: response.data?.items ?? [] }
+}
+
 /**
  * 获取工作空间文件内容
  *

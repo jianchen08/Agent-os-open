@@ -17,7 +17,6 @@ import { getFileEditorData, registerFileEditor, removeFileEditorData, updateFile
 import { useLayoutModeStore } from '@/stores/layoutModeStore'
 import { useNotificationStore } from '@/stores/notificationStore'
 import { useSessionStore } from '@/stores/sessionStore'
-import { useThemeStore } from '@/stores/themeStore'
 import { cn } from '@/lib/utils'
 import { useUIStore } from '@/stores/uiStore'
 import { AlertBanner, useLayoutAlerts, type AlertBannerItem } from './AlertBanner'
@@ -26,7 +25,7 @@ import { FullscreenOverlay } from './FullscreenOverlay'
 import { WorkspaceHost } from './WorkspaceHost'
 import { CodeEditor } from '../workspace/CodeEditor'
 import { FilePreview } from '../workspace/FilePreview'
-import type { LayoutConfig, FloatingWindowInstance, WorkspaceTab  } from '@/types/layout'
+import type { WorkspaceTab  } from '@/types/layout'
 import type { AgentTab } from '@/types/task'
 
 /** Props for the FiveSpaceLayout component */
@@ -64,7 +63,6 @@ export function FiveSpaceLayout({
   onShowThemePanel: _onShowThemePanel,
   onLogout: _onLogout,
 }: FiveSpaceLayoutProps) {
-  const themeConfig = useThemeStore((s) => s.themeConfig)
   const sidebarCollapsed = useUIStore((s) => s.sidebarCollapsed)
   const workspaceCollapsed = useUIStore((s) => s.workspaceCollapsed)
   const setWorkspaceCollapsed = useUIStore((s) => s.setWorkspaceCollapsed)
@@ -159,19 +157,9 @@ export function FiveSpaceLayout({
     closeWorkspaceTab(tabId)
   }, [closeWorkspaceTab])
 
-  // Layout resolution
-  // themeConfig 异步解析（主题从 store/API 加载），刷新后会在首帧后才就位。
-  // 若 layoutConfig 直接依赖 themeConfig，则 resolved 会随 themeConfig 到达而重算，
-  // 导致已渲染的面板像素宽度被覆盖（Splitter.Panel 的 size 是受控的）→ 面板宽度跳动。
-  // 首次解析出有效 layoutConfig 后冻结，之后 themeConfig 变化不再重算面板宽度。
-  // themeConfig 的布局字段基本是静态的（min/max/default 宽度），无需跟随重算；
-  // 面板宽度只在用户主动操作（拖拽改 ratio）或窗口 resize 时变。
-  const themeLayoutRaw = (themeConfig as any)?.layout
-  const frozenLayoutRef = useRef<LayoutConfig | null>(null)
-  if (!frozenLayoutRef.current) {
-    frozenLayoutRef.current = safeLoadLayout(themeLayoutRaw)
-  }
-  const layoutConfig = frozenLayoutRef.current
+  // Layout：ThemeConfig 不承载布局域（预设/校验产物均无 layout 字段），布局恒为
+  // 内置默认值（面板宽度只随用户拖拽 ratio 或窗口 resize 变，与主题加载时序无关）。
+  const layoutConfig = safeLoadLayout(undefined)
   // 两档断点：< mobile（768px）移动形态；≥ mobile 桌面/平板（触屏桌面）同一形态
   const isMobile = isMobileViewport(viewportWidth, layoutConfig.breakpoints.mobile)
 
@@ -478,6 +466,7 @@ export function FiveSpaceLayout({
                   category: 'alert',
                   isBlocking: false,
                   autoDismissMs: 6000,
+                  sourceLabel: '前端',
                 })
               }
             } catch {
@@ -533,10 +522,8 @@ export function FiveSpaceLayout({
 
   // Render floating window content：接通 PageRenderer（widget/schema 分发），
   // 兜底兼容旧 FloatingWindowInstance（widgetRegistry）与占位。
-  const renderFloatingContent = useCallback(
-    (window: FloatingWindowInstance) => renderFloatingWindowContent(window),
-    [],
-  )
+  // renderFloatingWindowContent 是模块级纯函数（无 props 闭包），直接作 renderContent 传引用。
+  const renderFloatingContent = renderFloatingWindowContent
 
   // Handle ESC key for fullscreen exit and mobile workspace close
   useEffect(() => {

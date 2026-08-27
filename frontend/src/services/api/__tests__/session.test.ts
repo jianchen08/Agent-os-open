@@ -172,6 +172,17 @@ describe('会话和消息API服务', () => {
       await expect(getMessages('')).rejects.toThrow('会话ID不能为空')
     })
 
+    it('响应缺 has_more 字段时应抛协议违反错误（S1 fail-closed）', async () => {
+      const sessionId = 'session-no-hasmore'
+      // 旧信封形态（裸 messages 数组）或缺失 has_more 均为协议违反，
+      // 默认 false 会让分页游标误判「没有更多历史」静默丢入口
+      mockAxios.onGet(API_ENDPOINTS.MESSAGES.LIST(sessionId)).reply(200, {
+        messages: [],
+        total: 0,
+      })
+      await expect(getMessages(sessionId)).rejects.toThrow('协议违反')
+    })
+
     it('应该在会话不存在时抛出异常', async () => {
       const sessionId = 'non-existent-session'
 

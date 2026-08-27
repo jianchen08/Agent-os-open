@@ -2,10 +2,20 @@
  * 本地存储工具函数（localStorage封装）
  */
 
+import { loggers } from './logger'
 import { STORAGE_KEYS } from '../constants/storage'
 
 export { STORAGE_KEYS }
 export type StorageKey = (typeof STORAGE_KEYS)[keyof typeof STORAGE_KEYS]
+
+/** 存储失败告警只发一次（对齐 tolerantStorage 约定）：配额满/禁用时每次 set/get
+ *  都告警会刷屏，但完全静默会让「状态未持久化」不可察觉。 */
+let storageWarned = false
+function warnStorageOnce(message: string, detail: unknown): void {
+  if (storageWarned) return
+  storageWarned = true
+  loggers.storage.warn('[storage] %s detail=%o', message, detail)
+}
 
 /**
  * 存储服务类
@@ -26,7 +36,7 @@ class StorageService {
       const serializedValue = JSON.stringify(value)
       localStorage.setItem(key, serializedValue)
     } catch (error) {
-      console.error(`存储数据失败 [${key}]:`, error)
+      warnStorageOnce(`存储数据失败 [${key}]`, error)
     }
   }
 
@@ -71,11 +81,11 @@ class StorageService {
         if (serializedValue === 'false') {
           return false as T
         }
-        console.error(`读取数据失败 [${key}]:`, parseError)
+        warnStorageOnce(`解析数据失败 [${key}]`, parseError)
         return null
       }
     } catch (error) {
-      console.error(`读取数据失败 [${key}]:`, error)
+      warnStorageOnce(`读取数据失败 [${key}]`, error)
       return null
     }
   }
@@ -88,7 +98,7 @@ class StorageService {
     try {
       localStorage.removeItem(key)
     } catch (error) {
-      console.error(`删除数据失败 [${key}]:`, error)
+      warnStorageOnce(`删除数据失败 [${key}]`, error)
     }
   }
 
@@ -99,7 +109,7 @@ class StorageService {
     try {
       localStorage.clear()
     } catch (error) {
-      console.error('清空存储失败:', error)
+      warnStorageOnce('清空存储失败', error)
     }
   }
 

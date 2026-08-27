@@ -1120,11 +1120,11 @@ export const usePipelineMessageStore = create<PipelineMessageState>()(
         if (options?.after_sequence !== undefined) {
           get().appendMessages(pipelineId, mainMessages)
         } else if (options?.before_sequence !== undefined) {
-          const hasMoreOlder = (apiResult as any)?.has_more ?? false
+          const hasMoreOlder = apiResult.has_more
           get().prependMessages(pipelineId, mainMessages, hasMoreOlder)
         } else {
           // 首次冷启动：从 API 响应读取 has_more，避免首次返回 <50 条时被错误地标记为无更多历史消息
-          const hasMoreOlder = (apiResult as any)?.has_more ?? false
+          const hasMoreOlder = apiResult.has_more
           get().initFromAPI(pipelineId, mainMessages, hasMoreOlder)
         }
       } catch (err: any) {

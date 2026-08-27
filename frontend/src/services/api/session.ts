@@ -575,6 +575,14 @@ export async function getMessages(
     const mapped = rawMessages.map((msg: BackendMessageResponse) =>
       mapBackendMessageToMessage(msg, sessionId),
     )
+    // has_more 为信封必带字段（kernel session_routes.rs 恒回 {messages,total,has_more}，
+    // 空列表同样回 false）；缺失/类型不符属协议违反，fail-closed 抛错而非默认 false
+    // （false 会让分页游标误判「没有更多历史」，静默丢失入口）。
+    if (typeof payload.has_more !== 'boolean') {
+      throw new Error(
+        `获取消息列表失败：响应缺少 has_more 字段（协议违反）(session=${sessionId})`,
+      )
+    }
     // 数据层不合并：mergeConsecutiveAssistantMessages 会把子管道 50 条连续
     // assistant+tool 合成 1-2 条，合并后只保留组内第一条的 sequence，中间
     // sequence 丢失 → before_sequence 游标跳过中间消息 → 「加载到上面消息丢失」。
@@ -582,7 +590,7 @@ export async function getMessages(
     return {
       messages: mapped,
       total: payload.total ?? rawMessages.length,
-      has_more: payload.has_more ?? false,
+      has_more: payload.has_more,
     }
   }, options)
 }

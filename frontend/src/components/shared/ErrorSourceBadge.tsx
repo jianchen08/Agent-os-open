@@ -23,11 +23,14 @@ const ERROR_SOURCE_STYLE: Record<ErrorSource, string> = {
   frontend: 'bg-status-info/10 text-status-info border-status-info/30',
 }
 
-/** 未知来源兜底（旧后端/未带 source 的错误） */
+/** 未知来源样式（source 缺失或非枚举值时的灰标） */
 const UNKNOWN_SOURCE_STYLE = 'bg-muted/30 text-muted-foreground border-border/40'
 
 /**
- * 来源标签徽标。source 缺失时渲染「未知」灰标（旧后端兼容，不炸渲染）。
+ * 来源标签徽标。错误信封契约中 source 为可选字段（types/api.ts ErrorEnvelope），
+ * 缺失/非枚举值时渲染「未知」灰标，不做枚举外猜测。
+ * DEBT(backend): 后端全量补齐 source 后可删「未知」分支——触发条件：
+ * config/error_codes.json sources 枚举在所有错误产生路径强制填充并通过 e2e 校验。
  */
 export function ErrorSourceBadge({ source }: { source?: ErrorSource | string }) {
   const normalized = isErrorSource(source) ? source : undefined

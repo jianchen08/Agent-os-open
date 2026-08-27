@@ -194,8 +194,8 @@ function toElectronOpenOptions(
 ): ElectronOpenWindowOptions {
   const size = resolveSize(page, opts)
   const position = resolvePosition(size, opts)
-  const origin =
-    typeof window !== 'undefined' ? window.location.origin : 'http://localhost:5188'
+  // Vite SPA：构建产物只运行在浏览器/WebView，window 恒存在（无 SSR 分支）
+  const origin = window.location.origin
 
   return {
     // 用 page.id + 计数器作为请求 id（与 main.ts 注册表 key 对齐）；

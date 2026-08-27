@@ -569,15 +569,8 @@ export function compileThemeVariables(config: ThemeConfig): string {
  * 将主题配置批量应用到 document.documentElement
  *
  * @param config - 主题配置
- * @param debug - 是否输出调试信息
  */
-export function applyTheme(config: ThemeConfig, debug = false): void {
-  if (debug) {
-    console.group('🎨 应用主题')
-    console.log('主题 ID:', config.id)
-    console.log('主题名称:', config.name)
-  }
-
+export function applyTheme(config: ThemeConfig): void {
   const root = document.documentElement
 
   // 设置主题类名（用于 Tailwind 的 dark 模式）
@@ -608,11 +601,6 @@ export function applyTheme(config: ThemeConfig, debug = false): void {
       root.style.setProperty('--bg-main-gradient', 'none')
       document.body.style.background = config.backgrounds.main.value
     }
-  }
-
-  if (debug) {
-    console.log(`✅ 应用了 ${varEntries.length} 个 CSS 变量`)
-    console.groupEnd()
   }
 }
 

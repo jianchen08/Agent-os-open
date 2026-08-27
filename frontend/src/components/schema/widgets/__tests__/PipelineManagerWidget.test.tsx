@@ -14,7 +14,10 @@
 import { fireEvent, screen, waitFor } from '@testing-library/react'
 import { describe, expect, it, vi, beforeEach } from 'vitest'
 import { PipelineManagerWidget } from '@/components/schema/widgets/PipelineManagerWidget'
+import { useAgentTabStore } from '@/stores/agentTabStore'
 import { useLayoutModeStore } from '@/stores/layoutModeStore'
+import { useNotificationStore } from '@/stores/notificationStore'
+import { navigateToPipeline } from '@/services/pipelineNavigator'
 import { renderWithProviders } from '@/test/renderWithProviders'
 
 vi.mock('@/services/api/tasks', () => ({
@@ -176,7 +179,12 @@ const seed = vi.hoisted(() => {
   const mockUseAllTasksQuery = vi.fn(() => ({ data: FAKE_ALL_TASKS }))
   const mockUsePipelineRunsQuery = vi.fn(() => ({ data: FAKE_RUNS }))
   const mockUsePipelineStatesQuery = vi.fn(() => ({ data: FAKE_STATES }))
+  /** 会话缓存读数与 ensureSessionsLoaded（S1 阻断用例需按用例覆写） */
+  const mockReadSessions = vi.fn(() => [] as unknown[])
+  const mockEnsureSessionsLoaded = vi.fn(() => Promise.resolve([] as unknown[]))
   return {
+    mockReadSessions,
+    mockEnsureSessionsLoaded,
     FAKE_RUNS,
     FAKE_STATES,
     FAKE_ALL_TASKS,
@@ -205,8 +213,8 @@ vi.mock('@/hooks/queries/useLongTermTasksQuery', () => ({
 // 会话列表走真实 query 会打真实 HTTP——mock 为空列表（widget 仅用标题映射）
 vi.mock('@/hooks/queries/useSessionsQuery', () => ({
   useSessionsQuery: () => ({ data: [] }),
-  readSessions: () => [],
-  ensureSessionsLoaded: () => Promise.resolve([]),
+  readSessions: seed.mockReadSessions,
+  ensureSessionsLoaded: seed.mockEnsureSessionsLoaded,
 }))
 
 vi.mock('@/stores/contextUsageStore', () => ({
@@ -420,5 +428,36 @@ describe('PipelineManagerWidget', () => {
     renderWithProviders(<PipelineManagerWidget />)
     await screen.findAllByText('会话 th-plain')
     expect(screen.queryByTitle(/打开工作空间/)).toBeNull()
+  })
+
+  it('S1 会话拉取失败即阻断定位：不误建独立标签，且给出可见通知', async () => {
+    // 会话缓存为空 → 点击条目先 ensureSessionsLoaded；此时 rejects
+    seed.mockReadSessions.mockReturnValue([])
+    seed.mockEnsureSessionsLoaded.mockRejectedValue(new Error('sessions fetch boom'))
+    // 会话归属条目：thread_id=th-sess，若不阻断会被误判孤儿 → openSubAgentTab
+    seed.mockUsePipelineRunsQuery.mockReturnValue({
+      data: {
+        mainRun: {
+          pipeline_id: 'blockPipe',
+          run_id: 'run-block',
+          thread_id: 'th-sess',
+          status: 'running',
+          started_at: '2026-08-24T00:00:00Z',
+        },
+      },
+    })
+    seed.mockUseAllTasksQuery.mockReturnValue({ data: [] })
+    seed.mockUsePipelineStatesQuery.mockReturnValue({ data: {} })
+
+    const tabsBefore = useAgentTabStore.getState().tabs.length
+    renderWithProviders(<PipelineManagerWidget />)
+    fireEvent.click((await screen.findAllByText('会话 th-sess'))[0])
+
+    await waitFor(() => {
+      expect(useNotificationStore.getState().notifications.some((n) => n.title === '无法定位对话')).toBe(true)
+    })
+    // 未走导航链路，也未把有归属管道当孤儿建子标签
+    expect(navigateToPipeline).not.toHaveBeenCalled()
+    expect(useAgentTabStore.getState().tabs.slice(tabsBefore)).toHaveLength(0)
   })
 })

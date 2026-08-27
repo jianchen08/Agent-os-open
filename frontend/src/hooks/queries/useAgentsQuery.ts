@@ -62,7 +62,8 @@ async function fetchAgentsMapped(): Promise<Agent[]> {
     return mapAndDedupeAgents(data)
   } catch (error) {
     const errorMsg = error instanceof Error ? error.message : '获取 Agent 列表失败'
-    reportError(errorMsg, ErrorType.SERVER, undefined, {
+    reportError(errorMsg, {
+      type: ErrorType.SERVER,
       componentName: 'useAgentsQuery',
       operation: 'fetchAgents',
     })

@@ -17,6 +17,17 @@ vi.mock('@/components/shared/markdown/MarkdownRenderer', () => ({
   ),
 }))
 
+// 详情弹窗薄壳 mock：跳过 radix Dialog 的 jsdom 不兼容面（portal/动画），
+// 只保留「open 时渲染内容」的行为断言所需
+vi.mock('@/components/ui/dialog', () => ({
+  Dialog: ({ open, children }: { open?: boolean; children?: React.ReactNode }) =>
+    open ? <div data-testid="dialog-root">{children}</div> : null,
+  DialogContent: ({ children }: { children?: React.ReactNode }) => <div>{children}</div>,
+  DialogHeader: ({ children }: { children?: React.ReactNode }) => <div>{children}</div>,
+  DialogTitle: ({ children }: { children?: React.ReactNode }) => <div>{children}</div>,
+  DialogFooter: ({ children }: { children?: React.ReactNode }) => <div>{children}</div>,
+}))
+
 function makeInteraction(overrides: Partial<PendingInteraction> = {}): PendingInteraction {
   return {
     requestId: 'req-1',
@@ -185,39 +196,49 @@ describe('InteractionCard 特性驱动渲染', () => {
   })
 })
 
-describe('选项缺 id 的 debug 留痕（FE13：宽松契约保留 + 违规率可统计）', () => {
-  it('缺 id 选项点选：仍按 label 回退提交，并 console.debug 一次', () => {
-    const debugSpy = vi.spyOn(console, 'debug').mockImplementation(() => {})
-    try {
-      const props = cardProps(
-        makeInteraction({ options: [{ label: '唯一方案' }] } as Partial<PendingInteraction>),
-      )
-      render(<InteractionCard {...props} />)
-      fireEvent.click(screen.getByText('唯一方案'))
-      // 行为不变：label 兜底提交
-      expect(props.onRespondChoice).toHaveBeenCalledWith('唯一方案')
-      // 留痕：缺 id 的违规可统计
-      expect(debugSpy).toHaveBeenCalledWith(
-        expect.stringContaining('交互选项缺 id'),
-        '唯一方案',
-      )
-    } finally {
-      debugSpy.mockRestore()
-    }
+describe('选项缺 id 的 fail-closed 处置（FE13 改判：人工确认核心流程不猜测提交）', () => {
+  it('缺 id 选项渲染为禁用，点击不触发 onRespondChoice（label 回退已废除）', () => {
+    const props = cardProps(
+      makeInteraction({ options: [{ label: '唯一方案' }] } as unknown as PendingInteraction),
+    )
+    render(<InteractionCard {...props} />)
+    const button = screen.getByText('唯一方案').closest('button')!
+    // 缺 id → 禁用（fail-closed），用户可感知而非静默选错
+    expect(button).toBeDisabled()
+    expect(button.getAttribute('title')).toContain('缺少 id')
+    fireEvent.click(screen.getByText('唯一方案'))
+    expect(props.onRespondChoice).not.toHaveBeenCalled()
   })
 
-  it('带 id 选项点选：不触发 debug', () => {
-    const debugSpy = vi.spyOn(console, 'debug').mockImplementation(() => {})
-    try {
-      const props = cardProps(
-        makeInteraction({ options: [{ id: 'opt-1', label: '方案一' }] } as Partial<PendingInteraction>),
-      )
-      render(<InteractionCard {...props} />)
-      fireEvent.click(screen.getByText('方案一'))
-      expect(props.onRespondChoice).toHaveBeenCalledWith('opt-1')
-      expect(debugSpy).not.toHaveBeenCalled()
-    } finally {
-      debugSpy.mockRestore()
-    }
+  it('缺 id 与带 id 选项并存：仅缺 id 的被禁用，正常项照常提交', () => {
+    const props = cardProps(
+      makeInteraction({
+        options: [
+          { label: '无id项' },
+          { id: 'opt-1', label: '方案一' },
+        ],
+      } as unknown as PendingInteraction),
+    )
+    render(<InteractionCard {...props} />)
+    expect(screen.getByText('无id项').closest('button')).toBeDisabled()
+    fireEvent.click(screen.getByText('方案一'))
+    expect(props.onRespondChoice).toHaveBeenCalledTimes(1)
+    expect(props.onRespondChoice).toHaveBeenCalledWith('opt-1')
+  })
+
+  it('长描述缺 id 选项同样被禁用——无法经详情弹窗路径绕过（fail-closed 全路径收口）', () => {
+    const props = cardProps(
+      // choice 内置 features 含 options_detail：长描述（≥20 字符）本应先弹详情窗
+      makeInteraction({
+        options: [{ label: '复杂方案', description: '该方案包含多阶段执行细节，需要用户逐条确认后再继续。' }],
+      } as unknown as PendingInteraction),
+    )
+    render(<InteractionCard {...props} />)
+    const button = screen.getByText('复杂方案').closest('button')!
+    expect(button).toBeDisabled()
+    fireEvent.click(button)
+    // 既不弹窗也不提交
+    expect(screen.queryByTestId('dialog-root')).not.toBeInTheDocument()
+    expect(props.onRespondChoice).not.toHaveBeenCalled()
   })
 })

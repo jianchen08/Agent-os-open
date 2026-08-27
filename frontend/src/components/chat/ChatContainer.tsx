@@ -9,6 +9,7 @@ import { getDefaults, getLLMConfig, type LLMDefaults } from '@/services/api/conf
 import { switchThinkingMode } from '@/services/api/thinkingMode'
 import { useAgentTabStore } from '@/stores/agentTabStore'
 import { useContextUsageStore } from '@/stores/contextUsageStore'
+import { useNotificationStore } from '@/stores/notificationStore'
 import { usePipelineMessageStore } from '@/stores/pipelineMessageStore'
 import { useSessionStore } from '@/stores/sessionStore'
 import {
@@ -34,6 +35,27 @@ import type { ChatContainerProps } from './types'
 import type { Agent, Message } from '@/types/models'
 
 const EMPTY_MESSAGES: Message[] = []
+
+/**
+ * 一次性降级提示（S4）：同一 key 整个应用生命周期只弹一次通知，
+ * 避免重复失败（轮询重试/多 Tab 切换）刷屏；失败本身仍可从控制台看到。
+ */
+const degradedNotifiedKeys = new Set<string>()
+function notifyDegradedOnce(
+  key: string,
+  payload: { title: string; message: string; priority?: 'low' | 'normal' | 'high' },
+): void {
+  if (degradedNotifiedKeys.has(key)) return
+  degradedNotifiedKeys.add(key)
+  const { priority = 'normal', ...rest } = payload
+  useNotificationStore.getState().addNotification({
+    ...rest,
+    priority,
+    category: 'alert',
+    isBlocking: false,
+    autoDismissMs: 6000,
+  })
+}
 
 /** 合并连续的 assistant 消息 将多个连续的 assistant 消息合并为一条，整合 content 和 parts。 */
 /** 活跃投票面板列表 从 votingStore 获取当前会话的活跃投票并渲染。 */
@@ -131,8 +153,8 @@ export const ChatContainer = ({
 
   /**
    * P8 模型显示：LLM 默认配置中的模型分级映射（large/medium/small → 具体模型名）。
-   * 从 llm_service 的 config/llm/defaults 读取 tiers，失败时静默（tiers 为 undefined，
-   * resolveModelDisplayName 会原样返回 model 值，不阻塞主流程）。
+   * 从 llm_service 的 config/llm/defaults 读取 tiers，失败时降级（tiers 为 undefined，
+   * resolveModelDisplayName 原样返回 model 值），一次性提示用户模型名未解析。
    */
   const [llmDefaults, setLlmDefaults] = useState<LLMDefaults | null>(null)
   useEffect(() => {
@@ -142,7 +164,10 @@ export const ChatContainer = ({
         if (!cancelled) setLlmDefaults(data)
       })
       .catch(() => {
-        // 静默：模型名解析失败不影响主流程（回退显示原始值）
+        notifyDegradedOnce('chat-llm-defaults', {
+          title: '模型信息获取失败',
+          message: '无法解析模型分级配置，标签将显示原始模型键',
+        })
       })
     return () => {
       cancelled = true
@@ -150,7 +175,7 @@ export const ChatContainer = ({
   }, [])
 
   /** 完整 LLM 配置（models: model_id → ModelConfig，含 default_params）：
-   *  供「新会话/切管道标签时，从管道实际参数反向映射思考强度」。失败静默。 */
+   *  供「新会话/切管道标签时，从管道实际参数反向映射思考强度」。失败降级为默认强度。 */
   const [llmConfig, setLlmConfig] = useState<Awaited<ReturnType<typeof getLLMConfig>> | null>(null)
   useEffect(() => {
     let cancelled = false
@@ -159,7 +184,10 @@ export const ChatContainer = ({
         if (!cancelled) setLlmConfig(data)
       })
       .catch(() => {
-        // 静默：参数映射失败回退默认强度，不影响主流程
+        notifyDegradedOnce('chat-llm-config', {
+          title: 'LLM 配置获取失败',
+          message: '思考强度无法按管道参数自动映射，已回退默认档位',
+        })
       })
     return () => {
       cancelled = true
@@ -258,17 +286,19 @@ export const ChatContainer = ({
   /**
    * 切换思考强度（覆盖当前标签对应管道的思考模式）：
    * 1. 本地标签级记忆（localStorage，随路由联动）
-   * 2. 调后端 switchThinkingMode 覆盖管道思考模式（参谋接口，失败静默——
-   *    本地记忆不受阻，实际参数由消息级 thinking_strength 路由）
+   * 2. 调后端 switchThinkingMode 覆盖管道思考模式（参谋接口）——失败不影响
+   *    本地强度记忆（实际参数由消息级 thinking_strength 路由），一次性提示用户。
    */
   const handleThinkingStrengthChange = useCallback(
     (strength: ThinkingStrength) => {
       const tabId = useAgentTabStore.getState().activeTabId
       if (tabId) setThinkingStrength(tabId, strength)
-      const model = useAgentTabStore.getState().activeTabId ? effectiveModelName : ''
-      if (model && model !== 'unknown') {
-        switchThinkingMode(model, STRENGTH_TO_ENABLE[strength]).catch(() => {
-          // 后端覆盖失败不影响本地强度记忆（发送时仍按强度路由参数）
+      if (tabId && effectiveModelName && effectiveModelName !== 'unknown') {
+        switchThinkingMode(effectiveModelName, STRENGTH_TO_ENABLE[strength]).catch(() => {
+          notifyDegradedOnce('chat-thinking-sync', {
+            title: '思考强度同步失败',
+            message: '本次切换仅保存在本地，下轮请求可能沿用管道原档位',
+          })
         })
       }
     },
@@ -280,15 +310,11 @@ export const ChatContainer = ({
   const effectiveTokenCount = effectiveTokenUsage
 
   /**
-   * 统一消息源：保留所有消息（含 tool）。
-   * tool 消息不再在此过滤——渲染层（MessageList）的 mergeConsecutiveAssistantMessages
-   * 需要它们来把 tool 结果注入 assistant 的 tool_call part。旧架构在数据层
-   * （apiGetMessages）就合并删除了 tool，所以这里 filter 是兜底；现在数据层
-   * 不合并，filter 会把 tool 消息全删导致子管道消息大量丢失。
+   * 统一消息源：保留所有消息（含 tool）——渲染层 MessageList 的
+   * mergeConsecutiveAssistantMessages 需要 tool 消息来把结果注入
+   * assistant 的 tool_call part，在此过滤会导致子管道消息大量丢失。
    */
-  const activeMessages = useMemo(() => {
-    return pipelineMessages
-  }, [pipelineMessages])
+  const activeMessages = pipelineMessages
 
   /** 将 store Tab 映射为 AgentTabBar 所需格式 */
   const barTabs = useMemo(
@@ -328,7 +354,7 @@ export const ChatContainer = ({
         return true
       }
 
-      if (message.parts?.some((part) => part.type === 'tool_call' && (part as any).name?.toLowerCase().includes(query))) {
+      if (message.parts?.some((part) => part.type === 'tool_call' && part.name.toLowerCase().includes(query))) {
         return true
       }
 

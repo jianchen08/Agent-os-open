@@ -18,9 +18,30 @@ vi.mock('../client', () => ({
   },
 }))
 
+import { ErrorSeverity, ErrorType } from '@/services/errorReporting'
+
 const reportErrorMock = vi.fn()
 vi.mock('../../errorReporting', () => ({
   reportError: (...args: unknown[]) => reportErrorMock(...args),
+  ErrorType: {
+    NETWORK: 'network',
+    VALIDATION: 'validation',
+    AUTHENTICATION: 'authentication',
+    AUTHORIZATION: 'authorization',
+    NOT_FOUND: 'not_found',
+    SERVER: 'server',
+    CLIENT: 'client',
+    UNKNOWN: 'unknown',
+  },
+  ErrorSeverity: {
+    LOW: 'low',
+    MEDIUM: 'medium',
+    HIGH: 'high',
+    CRITICAL: 'critical',
+    INFO: 'info',
+    WARNING: 'warning',
+    ERROR: 'error',
+  },
 }))
 
 import apiClient from '@/services/api/client'
@@ -72,10 +93,12 @@ describe('用户管理 API', () => {
       await expect(usersApi.getUsers()).rejects.toThrow('Network Error')
       expect(reportErrorMock).toHaveBeenCalledWith(
         '获取用户列表失败',
-        'validation',
-        'error',
-        { code: 'GET_USERS_FAILED' },
-      )
+        {
+         type: ErrorType.VALIDATION,
+         severity: ErrorSeverity.ERROR,
+         code: 'GET_USERS_FAILED'
+        },
+        )
     })
   })
 
@@ -96,10 +119,12 @@ describe('用户管理 API', () => {
       await expect(usersApi.getUserStats()).rejects.toThrow('Network Error')
       expect(reportErrorMock).toHaveBeenCalledWith(
         '获取用户统计失败',
-        'validation',
-        'error',
-        { code: 'GET_STATS_FAILED' },
-      )
+        {
+         type: ErrorType.VALIDATION,
+         severity: ErrorSeverity.ERROR,
+         code: 'GET_STATS_FAILED'
+        },
+        )
     })
   })
 
@@ -138,10 +163,12 @@ describe('用户管理 API', () => {
       ).rejects.toThrow('Network Error')
       expect(reportErrorMock).toHaveBeenCalledWith(
         '创建用户失败',
-        'validation',
-        'error',
-        { code: 'CREATE_USER_FAILED' },
-      )
+        {
+         type: ErrorType.VALIDATION,
+         severity: ErrorSeverity.ERROR,
+         code: 'CREATE_USER_FAILED'
+        },
+        )
     })
   })
 
@@ -163,10 +190,12 @@ describe('用户管理 API', () => {
       await expect(usersApi.updateUserActiveStatus('u1', true)).rejects.toThrow('Network Error')
       expect(reportErrorMock).toHaveBeenCalledWith(
         '更新用户状态失败',
-        'validation',
-        'error',
-        { code: 'UPDATE_STATUS_FAILED' },
-      )
+        {
+         type: ErrorType.VALIDATION,
+         severity: ErrorSeverity.ERROR,
+         code: 'UPDATE_STATUS_FAILED'
+        },
+        )
     })
   })
 
@@ -186,10 +215,12 @@ describe('用户管理 API', () => {
       await expect(usersApi.deleteUser('u1')).rejects.toThrow('Network Error')
       expect(reportErrorMock).toHaveBeenCalledWith(
         '删除用户失败',
-        'validation',
-        'error',
-        { code: 'DELETE_USER_FAILED' },
-      )
+        {
+         type: ErrorType.VALIDATION,
+         severity: ErrorSeverity.ERROR,
+         code: 'DELETE_USER_FAILED'
+        },
+        )
     })
   })
 })

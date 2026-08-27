@@ -127,37 +127,39 @@ export function InteractionCard({
         {/* 选项按钮组（options 特性）：点选即回调；长描述（options_detail）走详情弹窗 */}
         {hasOptions && !isDone && (
           <div className="flex flex-wrap gap-2">
-            {interaction.options!.map((opt, i) => (
-              <Button
-                key={opt.id ?? opt.label ?? i}
-                variant="outline"
-                size="sm"
-                disabled={isSubmitting}
+            {interaction.options!.map((opt, i) => {
+              // 后端协议要求 options 携带稳定 id；LLM 传参差异可能缺失。
+              // 人工确认属核心流程，回传展示文案会因 label 重复选错项——
+              // 缺 id 的选项一律禁用并提示（fail-closed），不做回退猜测。
+              const hasId = typeof opt.id === 'string' && opt.id.length > 0
+              return (
+                <Button
+                  key={hasId ? opt.id : `missing-id-${i}`}
+                  variant="outline"
+                  size="sm"
+                  disabled={isSubmitting || !hasId}
+                  title={!hasId ? '该选项缺少 id（后端契约违规），已禁用' : undefined}
                   onClick={() => {
                     // AC-1.2-3: 短 description（<20字符）直接执行选择；长描述（>=20字符）弹窗展示详情
                     if (features.has('options_detail') && opt.description && opt.description.length >= 20) {
                       setDetailOption(opt)
                     } else {
-                      // 后端 options 可能缺 id（LLM 传参差异）——label 兜底；父层已绑定 requestId。
-                      // 缺 id 时 debug 留痕统计违规率（回传是提交数据非展示文案，label 重复可能选错）
-                      if (!opt.id) {
-                        console.debug('[InteractionCard] 交互选项缺 id，回退 label 提交: label=%s', opt.label)
-                      }
-                      onRespondChoice(opt.id ?? opt.label ?? String(i))
+                      onRespondChoice(opt.id)
                     }
                   }}
-                className="text-sm"
-              >
-                <span className="flex flex-col items-start gap-0.5">
-                  <span>{opt.label}</span>
-                  {opt.description && (
-                    <span className="text-xs text-muted-foreground line-clamp-1 text-left">
-                      {opt.description}
-                    </span>
-                  )}
-                </span>
-              </Button>
-            ))}
+                  className="text-sm"
+                >
+                  <span className="flex flex-col items-start gap-0.5">
+                    <span>{opt.label}</span>
+                    {opt.description && (
+                      <span className="text-xs text-muted-foreground line-clamp-1 text-left">
+                        {opt.description}
+                      </span>
+                    )}
+                  </span>
+                </Button>
+              )
+            })}
           </div>
         )}
 
@@ -248,14 +250,11 @@ export function InteractionCard({
             </Button>
             <Button
               size="sm"
-              disabled={isSubmitting}
+              disabled={isSubmitting || !detailOption?.id}
+              title={!detailOption?.id ? '该选项缺少 id（后端契约违规），已禁用' : undefined}
               onClick={() => {
                 if (detailOption) {
-                  // 同上：缺 id 回退 label 提交时 debug 留痕（统计后端契约违规率）
-                  if (!detailOption.id) {
-                    console.debug('[InteractionCard] 弹窗确认选项缺 id，回退 label 提交: label=%s', detailOption.label)
-                  }
-                  onRespondChoice(detailOption.id ?? detailOption.label ?? '')
+                  onRespondChoice(detailOption.id)
                   setDetailOption(null)
                 }
               }}
