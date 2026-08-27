@@ -1244,7 +1244,7 @@ class TaskEvaluateTool(BuiltinTool):
                 return list(ac.keys())
         return []
 
-    def _get_input_params(self, task: Any) -> tuple[dict[str, dict[str, Any]], list[str]]:  # noqa: PLR0912
+    def _get_input_params(self, task: Any) -> tuple[dict[str, dict[str, Any]], list[str]]:
         """从任务模型的 acceptance_criteria 中提取各指标的输入参数。
 
         对于 input_params 为空的指标，自动从任务描述中构建 criteria
@@ -1260,20 +1260,7 @@ class TaskEvaluateTool(BuiltinTool):
         Returns:
             (key=metric_id, value=input_params 的字典, criteria 兜底 metric_id 列表)
         """
-        params: dict[str, dict[str, Any]] = {}
-        criteria_fallback_ids: list[str] = []
-        ac = {}
-        if task.metadata and "acceptance_criteria" in task.metadata:
-            ac = task.metadata["acceptance_criteria"]
-            if isinstance(ac, dict):
-                _non_param_keys = {"expected_output", "pass_threshold", "description"}
-                for metric_id, config in ac.items():
-                    if isinstance(config, dict):
-                        if "input_params" in config:
-                            params[metric_id] = config["input_params"]
-                        else:
-                            # LLM may put params at top level; filter known non-param keys
-                            params[metric_id] = {k: v for k, v in config.items() if k not in _non_param_keys}
+        params, ac = self._extract_raw_input_params(task)
 
         task_desc = ""
         if hasattr(task, "description") and task.description:
@@ -1281,7 +1268,7 @@ class TaskEvaluateTool(BuiltinTool):
         elif hasattr(task, "title") and task.title:
             task_desc = task.title
 
-        all_metric_ids = set()
+        all_metric_ids: set[str] = set()
         if task.metadata and "evaluation_metric_ids" in task.metadata:
             all_metric_ids = set(task.metadata["evaluation_metric_ids"])
         if isinstance(ac, dict):
@@ -1291,11 +1278,57 @@ class TaskEvaluateTool(BuiltinTool):
         ws_meta = (task.metadata or {}).get("ws_meta") if task.metadata else None
         workspace_abs: str | None = ws_meta.get("path") if ws_meta else None
 
-        for metric_id in all_metric_ids:
+        criteria_fallback_ids = self._inject_fallbacks_and_placeholders(
+            params, all_metric_ids, task, task_desc, workspace_abs,
+        )
+        self._apply_tool_id_templates(params, all_metric_ids, workspace_abs)
+        return params, criteria_fallback_ids
+
+    @staticmethod
+    def _extract_raw_input_params(
+        task: Any,
+    ) -> tuple[dict[str, dict[str, Any]], dict[str, Any]]:
+        """提取各指标的原始输入参数（占位符替换前的形态）。
+
+        config.input_params 存在则直接采用；否则视为 LLM 把参数平铺在顶层，
+        过滤 expected_output/pass_threshold/description 等已知非参数键后整体采纳。
+        返回 (params, acceptance_criteria 原始对象——非 dict 形态归一为空 dict)。
+        """
+        params: dict[str, dict[str, Any]] = {}
+        ac: dict[str, Any] = {}
+        if task.metadata and "acceptance_criteria" in task.metadata:
+            candidate = task.metadata["acceptance_criteria"]
+            if isinstance(candidate, dict):
+                ac = candidate
+                non_param_keys = {"expected_output", "pass_threshold", "description"}
+                for metric_id, config in candidate.items():
+                    if isinstance(config, dict):
+                        if "input_params" in config:
+                            params[metric_id] = config["input_params"]
+                        else:
+                            params[metric_id] = {
+                                k: v for k, v in config.items() if k not in non_param_keys
+                            }
+        return params, ac
+
+    def _inject_fallbacks_and_placeholders(
+        self,
+        params: dict[str, dict[str, Any]],
+        metric_ids: set[str],
+        task: Any,
+        task_desc: str,
+        workspace_abs: str | None,
+    ) -> list[str]:
+        """criteria 任务描述兜底 + workspace 注入 + {{workspace}}/{{task_id}} 占位符替换。
+
+        质量闸门用了任务描述兜底必须可见——静默顶替会掩盖配置漏配，故收集
+        兜底 metric_id 列表返回给调用方显式标记。
+        """
+        criteria_fallback_ids: list[str] = []
+        for metric_id in metric_ids:
             p = params.get(metric_id, {})
             if not p.get("criteria") and task_desc:
                 p.setdefault("criteria", task_desc)
-                # 质量闸门用了任务描述兜底必须可见——静默顶替会掩盖配置漏配
                 criteria_fallback_ids.append(metric_id)
                 logger.warning(
                     "[TaskEvaluate] 指标未配置 criteria，已用任务描述兜底 | task_id=%s | metric_id=%s",
@@ -1311,12 +1344,21 @@ class TaskEvaluateTool(BuiltinTool):
                     val = val.replace("{{task_id}}", task.id)  # noqa: PLW2901
                     p[key] = val
             params[metric_id] = p
+        return criteria_fallback_ids
 
-        # Resolve {tool_id} template from workspace files（
-        # 唯一候选可用，0/多候选拒绝——绝不"取第一个文件"猜测被评估工具，
-        # 猜测会把评估打到错误对象，错误放行或错误失败）
+    def _apply_tool_id_templates(
+        self,
+        params: dict[str, dict[str, Any]],
+        metric_ids: set[str],
+        workspace_abs: str | None,
+    ) -> None:
+        """解析参数值中的 ``{tool_id}`` 模板并原地写回。
+
+        唯一候选可用，0/多候选拒绝——绝不"取第一个文件"猜测被评估工具，
+        猜测会把评估打到错误对象，错误放行或错误失败。
+        """
         tool_id_candidates = self._resolve_tool_id_candidates(workspace_abs)
-        for metric_id in all_metric_ids:
+        for metric_id in metric_ids:
             p = params.get(metric_id, {})
             uses_template = any(
                 isinstance(val, str) and "{tool_id}" in val for val in p.values()
@@ -1333,8 +1375,6 @@ class TaskEvaluateTool(BuiltinTool):
                 if isinstance(val, str):
                     p[key] = val.replace("{tool_id}", tool_id_candidates[0])
             params[metric_id] = p
-
-        return params, criteria_fallback_ids
 
     @staticmethod
     def _resolve_tool_id_candidates(workspace_abs: str | None) -> list[str]:

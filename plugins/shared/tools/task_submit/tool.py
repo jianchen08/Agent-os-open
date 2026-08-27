@@ -30,7 +30,7 @@ logger = logging.getLogger(__name__)
 # 内核能力经 sidecar 注入，服务解析统一走 _get_service_provider：
 # - task_worker：已退役（0.1 执行驱动）；任务执行经 chat.send_message
 #   创建管道（GAP-1 统一：task = pipeline，run 终态回写任务状态）。
-# - agent_registry：由 agent_manager 插件提供（2026-08-20 插件化收敛）——
+# - agent_registry：由 agent_manager 插件提供——
 #   server.py on_load 经 tool-executor（显式 plugin_id=agent_manager）注入
 #   _agent_registry_lookup（async agent_id -> config dict | None）；未注入/
 #   查询失败 → None，调用方回退磁盘 rglob（行为不劣化）。
@@ -55,7 +55,7 @@ def _get_service_provider() -> Any:
     return _ServiceProviderShim()
 
 
-# ── agent_registry 查询钩子（agent_manager 服务注入，P4 收敛 2026-08-20）──
+# ── agent_registry 查询钩子（agent_manager 服务注入，P4 收敛）──
 _agent_registry_lookup: Any = None
 
 
@@ -1474,7 +1474,7 @@ class TaskSubmitTool(BuiltinTool):
             pipeline_id,
             title,
         )
-        # 语义统一（2026-08-22 定案）：任务 id 写"自己的管道"（提交者管道）state——
+        # 语义统一：任务 id 写"自己的管道"（提交者管道）state——
         # task.owned.<id> 自持（本管道插件也能读它处理它）；执行管道 state 收
         # task.assigned（收到上级的任务 id，引擎注入 task.id 即管道身份）。
         # 写入通道：chat.send_message 注入分支 + no_dispatch（只写 state 不派发）。
@@ -1576,7 +1576,7 @@ class TaskSubmitTool(BuiltinTool):
         if parent_agent_level == 1 and parent_task_id is not None:
             task_service = self._get_task_service()
             if task_service and task_service.get_task(parent_task_id) is None:
-                # GAP-1 统一（2026-08-22）：登记型任务 = 提交者管道自持的声明
+                # GAP-1 统一：登记型任务 = 提交者管道自持的声明
                 # （task.owned.*），不在 YAML 存储——存在性校验加 state 聚合兜底
                 if not await self._parent_exists_in_state(parent_task_id):
                     logger.error("[TaskSubmit] parent_task_id 不存在: %s", parent_task_id)
@@ -1684,13 +1684,14 @@ class TaskSubmitTool(BuiltinTool):
             return list(dependencies)
         known = {str(r.get("pipeline_id") or "") for r in rows}
         return [d for d in dependencies if d not in known]
-    def _build_metadata(  # noqa: PLR0912
+    def _build_metadata(
         self,
         inputs: dict[str, Any],
         goal: dict[str, Any],
         acceptance_criteria: dict[str, Any],
     ) -> dict[str, Any]:
-        """构建任务元数据。"""
+        """构建任务元数据：按「验收标准 → 会话/层级 → 执行直传字段 →
+        execution_context → 执行者 → inherit 资源继承」六组装配。"""
         metadata: dict[str, Any] = {}
 
         # 存储验收标准（供 task_evaluate 使用）
@@ -1714,57 +1715,64 @@ class TaskSubmitTool(BuiltinTool):
         if parent_agent_level:
             metadata["submitted_by_level"] = parent_agent_level
 
-        # 存储执行相关参数
-        # workspace：仅存 agent 显式值（param_inject 已跳过注入、容器直接子任务
-        # 已被拒绝清除），inherit_workspace_from 回写的旧路径同样落账
-        if inputs.get("workspace"):
-            metadata["workspace"] = inputs["workspace"]
-        if inputs.get("max_retries"):
-            metadata["max_retries"] = inputs["max_retries"]
-        # 项目挂靠键（task_manage 过滤面；state 面 task.parent_project_id 同值双写）
-        if inputs.get("project_id"):
-            metadata["project_id"] = inputs["project_id"]
-        # 工作空间拓扑（worktree/plain）：agent 显式选择，仅普通任务可填
-        if inputs.get("workspace_mode"):
-            metadata["workspace_mode"] = inputs["workspace_mode"]
-        # 执行环境隔离（isolated/non_isolated）：agent 显式选择，仅普通任务可填
-        if inputs.get("isolation_level"):
-            metadata["isolation_level"] = inputs["isolation_level"]
+        # 显式执行类直传字段：真值才落账（workspace 仅存 agent 显式值——param_inject
+        # 已跳过注入、容器直接子任务已被拒绝清除；inherit_workspace_from 回写的旧
+        # 路径同样落账；project_id 为项目挂靠键，state 面 task.parent_project_id
+        # 同值双写；workspace_mode/isolation_level 为 agent 显式选择）
+        for key in (
+            "workspace",
+            "max_retries",
+            "project_id",
+            "workspace_mode",
+            "isolation_level",
+            "target_id",
+            "user_id",
+        ):
+            if inputs.get(key):
+                metadata[key] = inputs[key]
 
-        # 结构化 execution_context（任务级）：供任务执行器经 chat.send_message
-        # 透传 → 内核 initial_state 并入 → init 体 workspace_lifecycle /
-        # environment_lifecycle 插件消费。
-        _ec: dict[str, Any] = {}
+        task_ec = self._task_level_execution_context(inputs)
+        if task_ec:
+            metadata["execution_context"] = task_ec
+
+        self._attach_inherit_metadata(metadata, inputs)
+        return metadata
+
+    @staticmethod
+    def _task_level_execution_context(inputs: dict[str, Any]) -> dict[str, Any]:
+        """结构化 execution_context（任务级）：供任务执行器经 chat.send_message
+        透传 → 内核 initial_state 并入 → init 体 workspace_lifecycle /
+        environment_lifecycle 插件消费。
+
+        - workspace：显式路径带 source_path；无显式（继承父链）但有拓扑声明时
+          source_path 留空；
+        - isolation：执行环境隔离级别；
+        - parent_task_id：供 init 体插件做容器直接子任务的父链查询
+          （0.2 sidecar 无 task_service，插件经此重建最小 task_tree）。
+        """
+        ec: dict[str, Any] = {}
         if inputs.get("workspace"):
-            _ec["workspace"] = {
+            ec["workspace"] = {
                 "source_path": inputs["workspace"],
                 "mode": inputs.get("workspace_mode") or "worktree",
                 "explicit": True,
             }
         elif inputs.get("workspace_mode"):
             # 无显式 workspace（继承父链）但有拓扑声明
-            _ec["workspace"] = {
+            ec["workspace"] = {
                 "source_path": "",
                 "mode": inputs.get("workspace_mode") or "worktree",
             }
         if inputs.get("isolation_level"):
-            _ec["isolation"] = {"level": inputs["isolation_level"]}
-        # 父任务链信息：供 init 体插件做容器直接子任务的父链查询
-        # （0.2 sidecar 无 task_service，插件经此重建最小 task_tree）
+            ec["isolation"] = {"level": inputs["isolation_level"]}
         if inputs.get("parent_task_id"):
-            _ec["parent_task_id"] = inputs["parent_task_id"]
-        if _ec:
-            metadata["execution_context"] = _ec
+            ec["parent_task_id"] = inputs["parent_task_id"]
+        return ec
 
-        # 存储执行者信息
-        if inputs.get("target_id"):
-            metadata["target_id"] = inputs["target_id"]
-
-        if inputs.get("user_id"):
-            metadata["user_id"] = inputs["user_id"]
-
-        # 存储 inherit 资源继承配置（供管道引擎读取）
-        # schema 已平铺：兼容扁平的 inherit_from/inherit_mode 与旧式 inherit 对象
+    @staticmethod
+    def _attach_inherit_metadata(metadata: dict[str, Any], inputs: dict[str, Any]) -> None:
+        """存储 inherit 资源继承配置（供管道引擎读取）；pipe 模式附带宽照键
+        ``inherit_pipe_from``（mode 可能是字符串或含 "pipe" 的列表）。"""
         inherit_config = inputs.get("inherit")
         if not isinstance(inherit_config, dict) and (
             inputs.get("inherit_from") is not None or inputs.get("inherit_mode") is not None
@@ -1775,13 +1783,12 @@ class TaskSubmitTool(BuiltinTool):
             }
         if isinstance(inherit_config, dict) and inherit_config.get("from"):
             metadata["inherit"] = inherit_config
-            # mode 可能是 "pipe" 字符串，也可能是包含 "pipe" 的列表
-            _mode = inherit_config.get("mode", "")
-            _is_pipe = _mode == "pipe" or (isinstance(_mode, (list, tuple)) and "pipe" in _mode)
-            if _is_pipe:
+            mode_value = inherit_config.get("mode", "")
+            is_pipe = mode_value == "pipe" or (
+                isinstance(mode_value, (list, tuple)) and "pipe" in mode_value
+            )
+            if is_pipe:
                 metadata["inherit_pipe_from"] = inherit_config["from"]
-
-        return metadata
 
     async def _validate_target_agent(
         self,
@@ -1868,7 +1875,7 @@ class TaskSubmitTool(BuiltinTool):
     async def _get_agent_config_from_registry(self, target_id: str) -> Any | None:
         """从 agent_registry（agent_manager 的 agent.get 服务）查找 Agent 配置。
 
-        P4 收敛（2026-08-20）：查询钩子由 server.py on_load 注入（tool-executor
+        P4 收敛：查询钩子由 server.py on_load 注入（tool-executor
         显式 plugin_id=agent_manager）；未注入/服务不可用/未命中 → None（磁盘回退）。
         """
         lookup = _agent_registry_lookup

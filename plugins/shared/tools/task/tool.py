@@ -40,6 +40,53 @@ def _status_value(status: Any) -> str:
     return status.value if hasattr(status, "value") else str(status)
 
 
+def _resolve_status_value(raw: str, task_ref: str) -> Any:
+    """task.status 串 → TaskStatus；内核新增状态而本地枚举副本未同步（漂移）时
+    保留原串展示（不再静默变 PENDING 触发错误的可操作动作），warning 留痕。"""
+    try:
+        return TaskStatus(raw)
+    except (ValueError, AttributeError):
+        logger.warning(
+            "[TaskTool] 未知任务状态（枚举副本与内核漂移？），保留原串展示 | status=%s | task=%s",
+            raw,
+            task_ref,
+        )
+        return raw
+
+
+def _pick_session_anchor(pid: str, origin_sess: str, row_thread: str) -> tuple[str, bool]:
+    """聚合行会话锚点取舍，返回 (anchor, 是否降级命中 pipeline_id)。
+
+    任务管道无 sessions 行，其 thread_id 恒等于自身 pipeline_id；出生侧
+    lineage.origin_session_id 修正后为真 thread id。取「不等于自身
+    pipeline_id」的那个，两侧语义偏差互为兜底。
+    """
+    anchor = (
+        origin_sess
+        if origin_sess and origin_sess != pid
+        else (row_thread if row_thread and row_thread != pid else origin_sess or row_thread)
+    )
+    return anchor, not anchor or anchor == pid
+
+
+def _append_workspace_meta(metadata: dict[str, Any], row: dict[str, Any]) -> None:
+    """把聚合行的 workspace / ws_meta 原样并入任务元数据（原地追加，缺省跳过）。"""
+    if row.get("workspace"):
+        metadata["workspace"] = str(row["workspace"])
+    if isinstance(row.get("ws_meta"), dict):
+        metadata["ws_meta"] = row["ws_meta"]
+
+
+def _is_task_pipeline_row(row: dict[str, Any]) -> bool:
+    """任务行判定，与内核收紧口径一致（kernel server.rs has_task_marker：
+    k.startswith("task.") && !k.startswith("task.owned.")）——含 task.* 但不含
+    task.owned.* 的行才是任务管道；task.owned.* 的聊天管道不算任务行。"""
+    return any(
+        str(k).startswith("task.") and not str(k).startswith("task.owned.")
+        for k in row
+    )
+
+
 # ── GAP-1 统一：能力注入点（server.py on_load）──
 # chat_sender：chat.send_message（注入/重试驱动）；state_reader：pipeline-state.list
 # （任务状态/子链读面）；pipeline_executor：pipeline-executor（stop→suspend_pipeline /
@@ -202,57 +249,7 @@ class TaskTool(BuiltinTool):
         )
         if row is None:
             return None
-        status_str = str(row.get("task.status") or "pending")
-        try:
-            status: Any = TaskStatus(status_str)
-        except (ValueError, AttributeError):
-            # 内核新增状态而本地枚举副本未同步 → 保留原串展示（不再静默变
-            # PENDING 触发错误的可操作动作），warning 留痕提示同步枚举
-            logger.warning(
-                "[TaskTool] 未知任务状态（枚举副本与内核漂移？），保留原串展示 | status=%s | task=%s",
-                status_str,
-                task_id,
-            )
-            status = status_str
-        # 会话锚点取舍：任务管道无 sessions 行，其 thread_id 恒等于自身
-        # pipeline_id；出生侧 lineage.origin_session_id 修正后为真 thread id。
-        # 取「不等于自身 pipeline_id」的那个，两侧语义偏差互为兜底。
-        pid = str(row.get("pipeline_id") or "")
-        origin_sess = str(row.get("lineage.origin_session_id") or "")
-        row_thread = str(row.get("thread_id") or "")
-        anchor = (
-            origin_sess
-            if origin_sess and origin_sess != pid
-            else (row_thread if row_thread and row_thread != pid else origin_sess or row_thread)
-        )
-        if not anchor or anchor == pid:
-            # 三段式兜底命中 pid 充当 session_id：语义降级，debug 留痕
-            logger.debug("[TaskTool] 会话锚点兜底命中 pipeline_id 充当 session_id | task=%s", task_id)
-        metadata: dict[str, Any] = {
-            "session_id": anchor,
-            "target_id": str(row.get("task.submitted_by") or ""),
-            "retry_count": 0,
-            "max_retries": 6,
-        }
-        if row.get("workspace"):
-            metadata["workspace"] = str(row["workspace"])
-        if isinstance(row.get("ws_meta"), dict):
-            metadata["ws_meta"] = row["ws_meta"]
-        # task = pipeline：父管道即父任务坐标（L2 归属过滤/权限校验消费）
-        parent_pipe = str(row.get("lineage.parent_pipeline_id") or "") or None
-        raw_error = row.get("raw_error")
-        return TaskModel(
-            id=task_id,
-            title=str(row.get("task.goal") or task_id),
-            status=status,
-            metadata=metadata,
-            pipeline_run_id=pid,
-            parent_pipeline_id=parent_pipe,
-            parent_task_id=parent_pipe,
-            completed_at=str(row.get("task.ended_at") or "") or None,
-            agent_name="",
-            error=str(raw_error) if raw_error else None,
-        )
+        return self._state_row_to_task(row, log_degraded_anchor=True)
 
     async def _list_tasks_from_state(self) -> list[TaskModel] | None:
         """从 state 聚合批量组装任务对象（GAP-1 单一真值的列表读面）。
@@ -268,61 +265,56 @@ class TaskTool(BuiltinTool):
             return None
         out: list[TaskModel] = []
         for row in rows:
-            # 任务行判定与内核收紧口径一致（kernel server.rs has_task_marker：
-            # k.startswith("task.") && !k.startswith("task.owned.")）——含
-            # task.* 但不含 task.owned.* 的行才是任务管道
+            # 任务行判定与内核收紧口径一致（kernel server.rs has_task_marker）：
+            # 含 task.* 但不含 task.owned.* 的行才是任务管道；task.owned.*
             # （task.owned.*）的聊天管道不算任务行，不返给 LLM。
-            if not any(
-                str(k).startswith("task.") and not str(k).startswith("task.owned.")
-                for k in row
-            ):
+            if not _is_task_pipeline_row(row):
                 continue
             pid = str(row.get("pipeline_id") or "")
             if not pid:
                 continue
-            status_raw = str(row.get("task.status") or "pending")
-            try:
-                status: Any = TaskStatus(status_raw)
-            except (ValueError, AttributeError):
-                # 同 _get_task_from_state：枚举漂移保留原串展示 + warning
-                logger.warning(
-                    "[TaskTool] 未知任务状态（枚举副本与内核漂移？），保留原串展示 | status=%s | task=%s",
-                    status_raw,
-                    pid,
-                )
-                status = status_raw
-            origin_sess = str(row.get("lineage.origin_session_id") or "")
-            row_thread = str(row.get("thread_id") or "")
-            session_anchor = (
-                origin_sess
-                if origin_sess and origin_sess != pid
-                else (row_thread if row_thread and row_thread != pid else origin_sess or row_thread)
-            )
-            metadata: dict[str, Any] = {
-                "session_id": session_anchor,
-                "target_id": str(row.get("task.submitted_by") or ""),
-            }
-            if row.get("workspace"):
-                metadata["workspace"] = str(row["workspace"])
-            if isinstance(row.get("ws_meta"), dict):
-                metadata["ws_meta"] = row["ws_meta"]
-            parent_pipe = str(row.get("lineage.parent_pipeline_id") or "") or None
-            raw_error = row.get("raw_error")
-            out.append(
-                TaskModel(
-                    id=pid,
-                    title=str(row.get("task.goal") or pid),
-                    status=status,
-                    metadata=metadata,
-                    pipeline_run_id=pid,
-                    parent_pipeline_id=parent_pipe,
-                    parent_task_id=parent_pipe,
-                    completed_at=str(row.get("task.ended_at") or "") or None,
-                    agent_name="",
-                    error=str(raw_error) if raw_error else None,
-                )
-            )
+            out.append(self._state_row_to_task(row))
         return out
+
+    def _state_row_to_task(
+        self, row: dict[str, Any], *, log_degraded_anchor: bool = False
+    ) -> TaskModel:
+        """聚合行 → TaskModel（两个 state 读面共用的字段装配）。
+
+        会话锚点取舍：任务管道无 sessions 行，其 thread_id 恒等于自身
+        pipeline_id；出生侧 lineage.origin_session_id 修正后为真 thread id。
+        取「不等于自身 pipeline_id」的那个，两侧语义偏差互为兜底。
+        log_degraded_anchor=True 时（单任务 get 面）对锚点降级打 debug 留痕。
+        """
+        pid = str(row.get("pipeline_id") or "")
+        anchor, degraded = _pick_session_anchor(
+            pid,
+            str(row.get("lineage.origin_session_id") or ""),
+            str(row.get("thread_id") or ""),
+        )
+        if degraded and log_degraded_anchor:
+            # 三段式兜底命中 pid 充当 session_id：语义降级，debug 留痕
+            logger.debug("[TaskTool] 会话锚点兜底命中 pipeline_id 充当 session_id | task=%s", row.get("pipeline_id") or "")
+        metadata = {
+            "session_id": anchor,
+            "target_id": str(row.get("task.submitted_by") or ""),
+        }
+        _append_workspace_meta(metadata, row)
+        parent_pipe = str(row.get("lineage.parent_pipeline_id") or "") or None
+        raw_error = row.get("raw_error")
+        return TaskModel(
+            id=pid,
+            title=str(row.get("task.goal") or pid),
+            status=_resolve_status_value(str(row.get("task.status") or "pending"), pid),
+            metadata=metadata,
+            pipeline_run_id=pid,
+            parent_pipeline_id=parent_pipe,
+            parent_task_id=parent_pipe,
+            completed_at=str(row.get("task.ended_at") or "") or None,
+            agent_name="",
+            error=str(raw_error) if raw_error else None,
+        )
+
 
     def _get_task_service(self) -> TaskService:
         """获取共享的 TaskService 实例。
@@ -805,123 +797,29 @@ class TaskTool(BuiltinTool):
                 error_code="GET_FAILED",
             )
 
-    async def _get_task_list(  # noqa: PLR0912,PLR0915
+    async def _get_task_list(
         self, inputs: dict[str, Any], parent_agent_level: int
     ) -> ToolExecutionResult:
-        """获取任务列表简表。"""
+        """获取任务列表简表。
 
+        顺序契约：全量拉取 → 过滤 → 排序（_list_all_tasks_sorted 已排）→
+        末端截断。limit 不能先于过滤应用：先截断会拿到「最老的 N 条」，
+        当前 session 的任务集中在新创建批次时会被全部过滤掉返回空列表。
+        """
         try:
-            status_filter = inputs.get("status")
-
-            pipeline_id = inputs.get("pipeline_id")
-
-            user_parent_task_id = inputs.get("parent_task_id")
-
-            limit = inputs.get("limit", 50)
-
-            show_all = inputs.get("show_all", False)
-
-            # 列表顺序：先拉全量 → 过滤 → 排序（list_all 已做）→ 末端截断。
-
-            # 不能先按 limit 截断再过滤：那样会拿到「最老的 N 条」而非「最新的 N 条」，
-
-            # 当当前 session 的任务集中在新创建批次时，截断后会被全部过滤掉返回空列表。
-
             tasks = await self._list_all_tasks_sorted()
+            filtered = self._filter_visible_tasks(tasks, inputs, parent_agent_level)
 
-            # 过滤
-
-            filtered = []
-
-            for task in tasks:
-                if status_filter and _status_value(task.status) != status_filter:
-                    continue
-
-                if parent_agent_level == 1:
-                    session_id_val = inputs.get("session_id")
-
-                    if session_id_val and task.metadata.get("session_id") != session_id_val:
-                        continue
-
-                    if not show_all:
-                        submitted_by = (task.metadata or {}).get("submitted_by_level")
-
-                        if submitted_by is not None and submitted_by != 1:
-                            continue
-
-                elif parent_agent_level == 2:
-                    if pipeline_id:  # noqa: SIM102
-                        if pipeline_id not in (task.parent_pipeline_id, task.pipeline_run_id):
-                            continue
-
-                    if inputs.get("parent_task_id"):  # noqa: SIM102
-                        if task.parent_task_id != inputs["parent_task_id"]:
-                            continue
-
-                if user_parent_task_id and task.parent_task_id != user_parent_task_id:
-                    continue
-
-                # P0-3 纵深防御：用统一的 _check_permission 收口越权过滤，
-                # 覆盖既有 ad-hoc 过滤未捕获的边界（如 L2 无 parent_task_id 时的遗留任务）。
-                has_permission, _ = self._check_permission(task, parent_agent_level, inputs)
-
-                if not has_permission:
-                    continue
-
-                project_id = inputs.get("project_id")
-
-                if project_id:
-                    meta_project = task.metadata.get("project_id")
-
-                    if meta_project != project_id:
-                        continue
-
-                filtered.append(task)
-
-            # 末端截断：在所有过滤维度都通过之后才应用 limit，避免截断窗口
-
-            # 落在被过滤掉的老任务上导致返回空集合。
-
+            # 末端截断：在所有过滤维度都通过之后才应用 limit（顺序契约见 docstring）
+            limit = inputs.get("limit", 50)
             if limit and len(filtered) > limit:
                 filtered = filtered[:limit]
 
-            # 构建简表（task_id 短化：LLM 展示/回传用短 id，入口前缀解析恢复全 id）
-
-            task_ids = [self._short(t.id) for t in filtered]
-
-            titles = [t.title for t in filtered]
-
-            statuses = [_status_value(t.status) for t in filtered]
-
-            priorities = [t.priority.value if hasattr(t.priority, "value") else t.priority for t in filtered]
-
-            target_names = [t.metadata.get("target_name", "") for t in filtered]
-
-            latest_actions = []
-
-            elapsed_list = []
-
-            for t in filtered:
-                activity = self._get_latest_activity(t)
-
-                latest_actions.append(activity["action"] if activity else "-")
-
-                elapsed_list.append(self._format_elapsed(self._calc_elapsed_seconds(t)))
-
             return create_success_result(
                 data={
-                    "d": [
-                        [
-                            task_ids[i],
-                            titles[i],
-                            statuses[i],
-                            priorities[i],
-                            target_names[i],
-                            latest_actions[i],
-                            elapsed_list[i],
-                        ]
-                        for i in range(len(task_ids))
-                    ],
+                    "d": [self._task_list_row(t) for t in filtered],
+                    # task_id 短化在 _task_list_row 内完成：LLM 展示/回传用短 id，
+                    # 入口前缀解析恢复全 id
                     "hint": "任务正在后台执行中，请勿频繁调用此工具查看状态，任务完成后会自动更新。",
                 },
                 metadata={"action": "get_task_list"},
@@ -934,6 +832,84 @@ class TaskTool(BuiltinTool):
                 error=f"列出任务失败: {str(e)}",
                 error_code="LIST_FAILED",
             )
+
+    def _filter_visible_tasks(
+        self,
+        tasks: list[TaskModel],
+        inputs: dict[str, Any],
+        parent_agent_level: int,
+    ) -> list[TaskModel]:
+        """列表可见性过滤：状态/session/层级归属/权限/项目五维，逐任务短路跳过。
+
+        过滤语义保持拆分前顺序（首个命中的 continue 生效即止）：
+        状态 → L1(session/非根提交过滤,show_all 放行) → L2(pipeline/显式
+        parent 归属) → 用户显式 parent_task_id → P0-3 权限收口 → project_id 元数据。
+        """
+        status_filter = inputs.get("status")
+        pipeline_id = inputs.get("pipeline_id")
+        requested_parent_task_id = inputs.get("parent_task_id")
+        session_id_val = inputs.get("session_id")
+        project_id = inputs.get("project_id")
+
+        filtered: list[TaskModel] = []
+        for task in tasks:
+            if status_filter and _status_value(task.status) != status_filter:
+                continue
+
+            if parent_agent_level == 1:
+                if session_id_val and task.metadata.get("session_id") != session_id_val:
+                    continue
+
+                if not inputs.get("show_all", False):
+                    submitted_by = (task.metadata or {}).get("submitted_by_level")
+
+                    if submitted_by is not None and submitted_by != 1:
+                        continue
+
+            elif parent_agent_level == 2:
+                if pipeline_id and pipeline_id not in (task.parent_pipeline_id, task.pipeline_run_id):
+                    continue
+
+                explicit_parent = inputs.get("parent_task_id")
+                if explicit_parent and task.parent_task_id != explicit_parent:
+                    continue
+
+            if requested_parent_task_id and task.parent_task_id != requested_parent_task_id:
+                continue
+
+            # P0-3 纵深防御：用统一的 _check_permission 收口越权过滤，
+            # 覆盖既有 ad-hoc 过滤未捕获的边界（如 L2 无 parent_task_id 时的遗留任务）。
+            has_permission, _ = self._check_permission(task, parent_agent_level, inputs)
+
+            if not has_permission:
+                continue
+
+            if project_id:
+                meta_project = task.metadata.get("project_id")
+
+                if meta_project != project_id:
+                    continue
+
+            filtered.append(task)
+        return filtered
+
+    def _task_list_row(self, task: TaskModel) -> list[Any]:
+        """单任务 → 7 列简表行（短id/标题/状态/优先级/目标/最近动作/耗时）。"""
+        activity = self._get_latest_activity(task)
+
+        priority = (
+            task.priority.value if hasattr(task.priority, "value") else task.priority
+        )
+        return [
+            self._short(task.id),
+            task.title,
+            _status_value(task.status),
+            priority,
+            task.metadata.get("target_name", ""),
+            activity["action"] if activity else "-",
+            self._format_elapsed(self._calc_elapsed_seconds(task)),
+        ]
+
 
     # ── continue：继续执行（合并旧 retry/inject/resume）──
 
