@@ -300,6 +300,12 @@ class GlobalWebSocketService {
     /** 思考强度（off/low/medium/high；内核透传 → llm_core 路由模型参数） */
     thinkingStrength?: 'off' | 'low' | 'medium' | 'high'
     clientMessageId?: string
+    /**
+     * 消息级 execution_context（{workspace:{source_path,mode}, isolation:{level}}）：
+     * 会话执行选项编辑后的最新值随身携带，内核 1a2 合并点优先于会话级注入。
+     * 不带则后端按 thread metadata 出生值注入（与旧行为一致）。
+     */
+    executionContext?: Record<string, unknown>
   }): void {
     const msg: PendingMessage = {
       type: 'user_input',
@@ -310,6 +316,7 @@ class GlobalWebSocketService {
       enable_thinking: opts?.enableThinking || false,
       thinking_strength: opts?.thinkingStrength || '',
       client_message_id: opts?.clientMessageId || '',
+      ...(opts?.executionContext ? { execution_context: opts.executionContext } : {}),
     }
 
     this._send(msg)

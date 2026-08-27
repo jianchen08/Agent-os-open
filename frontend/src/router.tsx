@@ -16,6 +16,7 @@ import { useWidgetEvents } from './hooks/useWidgetEvents'
 import { LoginPage } from './pages/auth/LoginPage'
 import { RegisterPage } from './pages/auth/RegisterPage'
 import { globalWS } from './services/websocket/GlobalWebSocket'
+import { loadSessionExecutionOptions } from './services/sessionExecutionOptions'
 import { flushStreamChunkBuffer } from './services/websocket/streaming/handlers/streamHandler'
 import { initStreamingEvents, destroyStreamingEvents } from './services/websocket/streamingEventService'
 import { openWorkspacePanelByPath } from './services/workspacePanelOpener'
@@ -338,6 +339,7 @@ function HomePage(): ReactNode {
           enableThinking: params.enableThinking,
           pipelineId: targetPipelineId,
           clientMessageId: userMessageId,
+          executionContext: loadSessionExecutionOptions(sid)?.executionContext,
         })
         usePendingInputStore.getState().load(targetPipelineId)
         return
@@ -373,6 +375,7 @@ function HomePage(): ReactNode {
         enableThinking: params.enableThinking,
         pipelineId: targetPipelineId,
         clientMessageId: userMessageId,
+        executionContext: loadSessionExecutionOptions(sid)?.executionContext,
       })
     },
     [],

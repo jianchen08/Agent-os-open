@@ -16,6 +16,7 @@ import {
   updateSession as updateSessionApi,
 } from '@/services/api/session'
 import { globalWS } from '@/services/websocket/GlobalWebSocket'
+import { clearSessionExecutionOptions } from '@/services/sessionExecutionOptions'
 import { loggers } from '@/utils/logger'
 import { uiStorage, STORAGE_KEYS } from '@/utils/storage'
 import { useAgentStore } from './agentStore'
@@ -32,14 +33,11 @@ const logger = loggers.sessionStore
 
 interface CreateSessionOptions {
   agentId?: string
-  /** 会话工作空间绝对路径（项目目录） */
-  workspace?: string
-  /** 会话工作空间拓扑：worktree（默认）/ plain */
-  workspaceMode?: 'worktree' | 'plain'
-  /** 会话隔离模式：isolated（容器）/ non_isolated（宿主+审批） */
-  isolationMode?: 'isolated' | 'non_isolated'
-  /** 插件贡献字段的通用值（透传 metadata，供 execution_context 消费） */
-  extra?: Record<string, string>
+  /**
+   * 插件表单值整包（metadata 存储形状，键由各插件 thread_fields 的
+   * x_metadata_key 声明，modal 层映射；本 store 与 API 层不感知具体字段）。
+   */
+  fieldMetadata?: Record<string, string>
 }
 
 interface SessionListState {
@@ -87,10 +85,7 @@ export const useSessionListStore = create<SessionListState>()((_, get) => ({
     const newSession = await createSessionApi({
       title: sessionTitle,
       agentId: options?.agentId,
-      workspace: options?.workspace,
-      workspaceMode: options?.workspaceMode,
-      extra: options?.extra,
-      isolationMode: options?.isolationMode,
+      fieldMetadata: options?.fieldMetadata,
     })
 
     updateSessionsCache((prev) => [...prev, newSession])
@@ -193,6 +188,8 @@ export const useSessionListStore = create<SessionListState>()((_, get) => ({
 
       // 6. 调用后端删除 API
       await deleteSessionApi(id)
+      // 执行选项本地快照随会话删除（残留键会被同名会话覆写，但显式清理更干净）
+      clearSessionExecutionOptions(id)
 
       // 7. 更新缓存与会话选中态
       updateSessionsCache((prev) => prev.filter((session) => session.id !== id))

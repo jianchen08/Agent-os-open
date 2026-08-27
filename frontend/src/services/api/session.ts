@@ -19,6 +19,23 @@ export interface ThreadField {
   required?: boolean
   options?: Array<{ label: string; value: string }>
   description?: string
+  /**
+   * 值写入 thread metadata 的存储键（缺省 = name）。声明驱动：字段可来自
+   * 不同插件，存储位置由各自表达（存量约定 workspace_mode/isolation_mode
+   * 为 snake_case，与内核注入段的读取键一致）。
+   */
+  x_metadata_key?: string
+  /**
+   * 消息级 execution_context 的生效路径（'.' 分隔，如 workspace.mode）；
+   * 未声明的字段不进 execution_context 协议面。
+   */
+  x_execution_path?: string
+  /**
+   * 值守卫（插件以表达约束自己的字段依赖）：
+   * requires 指向的另一声明字段为空时，本字段值回退为 on_empty
+   * （如工作空间拓扑 worktree 依赖工作空间目录已填写，空则 plain）。
+   */
+  x_guard?: { requires: string; on_empty: string }
 }
 
 /** 获取线程创建表单字段 schema（内置 + 插件贡献聚合） */
@@ -479,14 +496,13 @@ export async function getSessions(options: RetryOptions = {}): Promise<Session[]
 export interface CreateSessionOptions {
   title?: string
   agentId?: string
-  /** 会话工作空间绝对路径（项目目录；空 = 默认目录自动生成） */
-  workspace?: string
-  /** 会话工作空间拓扑：worktree（默认）/ plain */
-  workspaceMode?: 'worktree' | 'plain'
-  /** 会话隔离模式：isolated（容器）/ non_isolated（宿主） */
-  isolationMode?: 'isolated' | 'non_isolated'
-  /** 插件贡献字段的通用值（透传 metadata，供 execution_context 消费） */
-  extra?: Record<string, string>
+  /**
+   * 插件表单值整包（metadata 存储形状）。键 = 各插件 thread_fields 声明的
+   * x_metadata_key（缺省 name），由表单层按声明映射——本层不感知具体字段。
+   * 整体并入 metadata 落库（内核 create_session 合并默认后持久化，
+   * initial_state 组装 execution_context 时按消费插件读取）。
+   */
+  fieldMetadata?: Record<string, string>
 }
 
 export async function createSession(
@@ -505,25 +521,8 @@ export async function createSession(
       requestData.agent_id = options.agentId
     }
 
-    // 工作空间/拓扑/隔离随 metadata 落库（内核 create_session 只持久化 metadata，
-    // initial_state 组装 execution_context 时从 metadata 读取——顶层字段无消费者）。
-    // 拓扑/隔离不依赖工作空间填写：未填空间时默认目录自动生成后同样生效。
-    const sessionCtx: Record<string, string> = {}
-    if (options.workspace !== undefined && options.workspace !== '') {
-      sessionCtx.workspace = options.workspace
-    }
-    if (options.workspaceMode !== undefined) {
-      sessionCtx.workspace_mode = options.workspaceMode
-    }
-    if (options.isolationMode !== undefined) {
-      sessionCtx.isolation_mode = options.isolationMode
-    }
-    if (Object.keys(sessionCtx).length > 0 || (options.extra && Object.keys(options.extra).length > 0)) {
-      requestData.metadata = {
-        ...(requestData.metadata || {}),
-        ...sessionCtx,
-        ...(options.extra || {}),
-      }
+    if (options.fieldMetadata && Object.keys(options.fieldMetadata).length > 0) {
+      requestData.metadata = { ...(options.fieldMetadata ?? {}) }
     }
 
     const response = await apiClient.post<ThreadCreateResponse>(

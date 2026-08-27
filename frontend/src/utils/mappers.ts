@@ -26,6 +26,8 @@ export interface ThreadStateResponse {
   agent_id?: string | null
   /** 会话工作空间绝对路径 */
   workspace?: string | null
+  /** 会话工作空间拓扑 */
+  workspace_mode?: 'worktree' | 'plain' | null
   /** 会话隔离模式 */
   isolation_mode?: 'isolated' | 'non_isolated' | null
   /** 消息数量 */
@@ -68,8 +70,19 @@ export function mapThreadToSession(thread: Thread | ThreadStateResponse): Sessio
     status: legacyStatus || thread.current_state || undefined,
     metadata: metadata,
     agentId: thread.agent_id || null,
-    workspace: (thread as ThreadStateResponse).workspace ?? null,
-    isolationMode: (thread as ThreadStateResponse).isolation_mode ?? null,
+    // 工作空间/拓扑/隔离创建时随前端写入 thread metadata（内核 create 只持久化
+    // metadata，顶层字段无来源）——回显一律以 metadata 为真值源兜底。
+    workspace:
+      (thread as ThreadStateResponse).workspace ??
+      (metadata.workspace as string | undefined) ??
+      null,
+    workspaceMode:
+      ((thread as ThreadStateResponse).workspace_mode ??
+        metadata.workspace_mode) ?? null,
+    isolationMode:
+      (thread as ThreadStateResponse).isolation_mode ??
+      (metadata.isolation_mode as 'isolated' | 'non_isolated' | undefined) ??
+      null,
     pipelineIds: (thread as ThreadStateResponse).pipeline_ids || [],
     activePipelineId: (thread as ThreadStateResponse).active_pipeline_id || null,
     pinned: metadata.pinned === true,

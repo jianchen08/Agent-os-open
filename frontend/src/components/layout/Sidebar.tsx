@@ -20,7 +20,7 @@ import { LoginModal } from '@/components/auth/LoginModal'
 import { NotificationCenter } from '@/components/chat/NotificationCenter'
 import { PluginStatusItems } from '@/components/layout/StatusItems'
 import { ThemeButton } from '@/components/layout/ThemeButton'
-import { SessionEditModal, type SessionCreateOptions } from '@/components/session/SessionEditModal'
+import { SessionEditModal, type SessionFormOptions } from '@/components/session/SessionEditModal'
 import { SessionList } from '@/components/session/SessionList'
 import { SessionSearch } from '@/components/session/SessionSearch'
 import {
@@ -35,6 +35,7 @@ import { useSessionsQuery } from '@/hooks/queries/useSessionsQuery'
 import { cn } from '@/lib/utils'
 import { searchGlobal, type SessionSearchHit, type MessageSearchHit } from '@/services/api/search'
 import { reportError, ErrorSeverity, ErrorType } from '@/services/errorReporting'
+import { saveSessionExecutionOptions } from '@/services/sessionExecutionOptions'
 import { contributionRegistry } from '@/services/schema/ContributionRegistry'
 import { evaluateWhen } from '@/services/schema/whenExpression'
 import { openWorkspacePanel, openWorkspacePanelByPath } from '@/services/workspacePanelOpener'
@@ -289,24 +290,30 @@ export const Sidebar = memo<SidebarProps>(({ isMobile = false }) => {
       sessionId: string | null,
       title: string,
       agentId: string | null,
-      options?: SessionCreateOptions,
+      options?: SessionFormOptions,
     ) => {
       setIsSaving(true)
       try {
         if (sessionId) {
-          // 编辑已有会话 — 两个操作必须串行，避免竞争
+          // 编辑已有会话 — 标题/Agent 走服务端；插件表单值保存为本地整包
+          // 快照（values + 已组装的 executionContext），下一次发消息以消息级
+          // execution_context 生效（执行字段本质是主管道 state 的执行上下文
+          // 声明，服务端 PATCH 会话不承载）。
           await renameSession(sessionId, title)
           await updateSessionAgent(sessionId, agentId)
+          saveSessionExecutionOptions(sessionId, {
+            values: options?.fieldMetadata ?? {},
+            ...(options?.executionContext
+              ? { executionContext: options.executionContext }
+              : {}),
+          })
           setModal(null)
         } else {
           // 新建会话：createSession 内部已设置 activeSessionId，
           // ChatContainer 会随 activeSessionId 自动渲染，无需 navigate。
           await createSession(title || undefined, {
             agentId: agentId || undefined,
-            workspace: options?.workspace,
-            workspaceMode: options?.workspaceMode,
-            isolationMode: options?.isolationMode,
-            extra: options?.extra,
+            fieldMetadata: options?.fieldMetadata,
           })
           setModal(null)
         }

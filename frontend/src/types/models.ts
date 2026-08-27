@@ -77,6 +77,8 @@ export interface Session {
   agentId?: string | null
   /** 会话工作空间绝对路径（项目目录） */
   workspace?: string | null
+  /** 会话工作空间拓扑：worktree（隔离副本）/ plain（直接操作目录）；未填空间时恒 plain */
+  workspaceMode?: 'worktree' | 'plain' | null
   /** 会话隔离模式：isolated（容器）/ non_isolated（宿主+审批） */
   isolationMode?: 'isolated' | 'non_isolated' | null
   /** 关联的管道 ID 列表 */

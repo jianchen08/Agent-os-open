@@ -72,3 +72,42 @@ describe('mapThreadToSession 协议违反收口（S2 改判行为）', () => {
     }
   })
 })
+
+describe('mapThreadToSession 执行选项回显（metadata 兜底）', () => {
+  it('后端无顶层字段时从 metadata 恢复 workspace/workspace_mode/isolation_mode', () => {
+    // 事实契约：这些值创建时随前端写入 thread metadata，响应只有 metadata 键
+    const s = mapThreadToSession({
+      ...baseThread,
+      metadata: {
+        workspace: 'D:/proj/demo',
+        workspace_mode: 'worktree',
+        isolation_mode: 'isolated',
+      },
+    } as ThreadStateResponse)
+    expect(s.workspace).toBe('D:/proj/demo')
+    expect(s.workspaceMode).toBe('worktree')
+    expect(s.isolationMode).toBe('isolated')
+  })
+
+  it('两源皆缺 → 三字段为 null（不伪造默认拓扑/隔离），有顶层字段时顶层优先', () => {
+    const empty = mapThreadToSession({ ...baseThread, metadata: {} } as ThreadStateResponse)
+    expect(empty.workspace).toBeNull()
+    expect(empty.workspaceMode).toBeNull()
+    expect(empty.isolationMode).toBeNull()
+
+    const topFirst = mapThreadToSession({
+      ...baseThread,
+      workspace: 'D:/top/level',
+      metadata: { workspace: 'D:/in/metadata' },
+    } as ThreadStateResponse)
+    expect(topFirst.workspace).toBe('D:/top/level')
+  })
+
+  it('isolation_mode 仅接受合法枚举语义（值原样透传，由 UI 层锁定选择集）', () => {
+    const s = mapThreadToSession({
+      ...baseThread,
+      metadata: { isolation_mode: 'non_isolated' },
+    } as ThreadStateResponse)
+    expect(['isolated', 'non_isolated']).toContain(s.isolationMode)
+  })
+})
