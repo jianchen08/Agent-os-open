@@ -151,11 +151,11 @@ pub async fn me_handler(
         message: "缺少认证信息".to_string(),
     })?;
 
-    let (_, username, exp) = decode_token(&token).ok_or(ApiError::Unauthorized {
+    let t = decode_token(&token).ok_or(ApiError::Unauthorized {
         message: "无效的认证令牌".to_string(),
     })?;
 
-    if is_token_expired(exp) {
+    if is_token_expired(t.exp) {
         return Err(ApiError::Unauthorized {
             message: "认证令牌已过期".to_string(),
         });
@@ -164,7 +164,7 @@ pub async fn me_handler(
     // token 校验场景无 tenant scope，用 username 跨租户查询（token 自带 username）。
     // find_user_by_username 已 fail-closed（store 存在未命中不回退内置表，K4），
     // 此处不得再叠 user_id 命中内置的回退——否则换库后旧 token 依旧合法。
-    let user = find_user_by_username(state.store.as_ref(), &username)
+    let user = find_user_by_username(state.store.as_ref(), &t.username)
         .await
         .ok_or(ApiError::Unauthorized {
             message: "用户不存在".to_string(),
@@ -186,12 +186,11 @@ pub async fn refresh_handler(
     State(state): State<AppState>,
     Json(req): Json<RefreshRequest>,
 ) -> Result<Json<RefreshResponse>, ApiError> {
-    let (_, username, exp) =
-        decode_token(&req.refresh_token).ok_or_else(|| ApiError::Unauthorized {
-            message: "无效的刷新令牌".to_string(),
-        })?;
+    let t = decode_token(&req.refresh_token).ok_or_else(|| ApiError::Unauthorized {
+        message: "无效的刷新令牌".to_string(),
+    })?;
 
-    if is_token_expired(exp) {
+    if is_token_expired(t.exp) {
         return Err(ApiError::Unauthorized {
             message: "刷新令牌已过期".to_string(),
         });
@@ -199,7 +198,7 @@ pub async fn refresh_handler(
 
     // find_user_by_username fail-closed（store 存在未命中不回退内置表，K4）——
     // refresh 也是 token 校验路径：已删除用户不得借内置表换发新 token。
-    let user = find_user_by_username(state.store.as_ref(), &username)
+    let user = find_user_by_username(state.store.as_ref(), &t.username)
         .await
         .ok_or(ApiError::Unauthorized {
             message: "用户不存在".to_string(),
@@ -805,10 +804,11 @@ mod tests {
             created_at: String::new(),
         };
         let token = encode_token(TokenType::Access, &user, 3600);
-        let (uid, uname, exp) = decode_token(&token).unwrap();
-        assert_eq!(uid, "test-id");
-        assert_eq!(uname, "testuser");
-        assert!(exp > chrono::Utc::now().timestamp() as u64);
+        let t = decode_token(&token).unwrap();
+        assert_eq!(t.token_type, "access");
+        assert_eq!(t.user_id, "test-id");
+        assert_eq!(t.username, "testuser");
+        assert!(t.exp > chrono::Utc::now().timestamp() as u64);
     }
 
     #[test]
@@ -855,14 +855,14 @@ mod tests {
         let access_token = json["access_token"].as_str().expect("应有 access_token");
 
         // token 解出的 user_id 应能在 DB 查到 alice
-        let (user_id, username, _) = decode_token(access_token).unwrap();
-        assert_eq!(username, "alice");
+        let t = decode_token(access_token).unwrap();
+        assert_eq!(t.username, "alice");
         let user = store
             .get_user_by_username("alice")
             .await
             .expect("查询不应出错")
             .expect("alice 应已持久化");
-        assert_eq!(user.user_id, user_id);
+        assert_eq!(user.user_id, t.user_id);
         assert_eq!(user.username, "alice");
         // 一用户一租户：tenant_id == user_id
         assert_eq!(
@@ -983,7 +983,7 @@ mod tests {
         let token = json["access_token"].as_str().unwrap();
 
         // resolve_tenant_id_by_user 应返回 eve 的真实 tenant（= user_id，非 default）
-        let (user_id, _, _) = decode_token(token).unwrap();
+        let user_id = decode_token(token).unwrap().user_id;
         // 用内置函数验证：find_user_by_id 需 store，这里用 get_user_by_username 间接
         // eve 的 tenant_id 应 ≠ DEFAULT_TENANT_ID（一用户一租户）
         assert_ne!(

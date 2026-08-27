@@ -61,9 +61,11 @@ pub struct WsRequest {
     pub message: String,
     #[serde(default)]
     pub session_id: String,
-    /// 可选对话历史（多轮上下文）。客户端传入前几轮的 messages（OpenAI 格式），
-    /// 内核注入 state.messages 供 LLM 看到上下文。0.2 内核暂不自动持久化历史，
-    /// 由客户端维护会话历史并每轮带上（与 0.1 文件存储的按 session 加载等价）。
+    /// 可选对话历史（OpenAI 格式 messages）。现状契约：内核不消费——执行历史由
+    /// `process_via_engine` 按 registry/store 权威装配进 state.messages；本字段
+    /// 仅保持携带它的旧载荷可正常反序列化（收下忽略）。
+    /// DEBT-死链：字段与 `process_via_engine` 的 history/_history 参数均零读取，
+    /// 删除需联动唯一生产调用点 ws_session.rs（并行批次在制），到点单独清刀。
     #[serde(default)]
     pub history: Vec<serde_json::Value>,
     /// 可选 agent_id（默认 agentos）。指定执行 agent（如 general_agent 触发 bash 隔离）。
@@ -1143,7 +1145,6 @@ fn apply_state_overlay(initial_state: &mut serde_json::Value, overlay: &serde_js
 ///      写回，LLM 插件负责 append assistant 回复）→ 直接复用 entry.state["messages"]。
 ///   ② 冷路径：registry 未命中（重启/新会话/内存丢失）→ 从 messages 表（持久化
 ///      冷数据）按 effective_pipeline_id 恢复完整历史，后续轮走热路径。
-///   ③ 客户端传的 history 仅在①②均为空（真·首轮）时兜底，向后兼容老客户端。
 /// 恢复失败 = bug（内存丢 + DB 读不到）：显式 error 暴露，不静默吞掉。
 ///
 /// `skip_user_append`（批次 D 显式重跑标志，经 state_overlay 注入）：regenerate
@@ -1817,8 +1818,7 @@ async fn chat_handler(
     } else {
         req.agent_id.clone()
     };
-    let dispatcher =
-        crate::ws_session::EngineDispatcher::new(state.clone());
+    let dispatcher = crate::ws_session::EngineDispatcher::new(state.clone());
     let cmid = format!("http_{}", &uuid::Uuid::new_v4().simple().to_string()[..16]);
     let (tx, rx) = tokio::sync::oneshot::channel::<EngineOutcome>();
     crate::ws_session::register_outcome_waiter(cmid.clone(), tx);

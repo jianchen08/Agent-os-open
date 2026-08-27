@@ -93,7 +93,27 @@ pub fn encode_token(token_type: TokenType, user: &BuiltInUser, ttl_secs: u64) ->
     base64::engine::general_purpose::STANDARD_NO_PAD.encode(payload.as_bytes())
 }
 
-pub fn decode_token(token: &str) -> Option<(String, String, u64)> {
+/// 解码后的 token 载荷。type 前缀随同一次 base64 解码一并取出——access 门禁
+/// 经 [`DecodedToken::is_access`] 判定，不再对同一 token 二次解码（原
+/// `is_access_token` 需单独解码判型）。前缀不参与解码合法性判定：任何四段载荷
+/// 可解，类型白名单由消费点执行（与既有验收集一致）。
+#[derive(Debug, Clone, PartialEq)]
+pub struct DecodedToken {
+    /// 载荷首段原样字符串（"access"/"refresh"/其他）。
+    pub token_type: String,
+    pub user_id: String,
+    pub username: String,
+    pub exp: u64,
+}
+
+impl DecodedToken {
+    /// access 类型判定：首段前缀为 "access"；refresh 及未知前缀均否。
+    pub fn is_access(&self) -> bool {
+        self.token_type == TokenType::Access.prefix()
+    }
+}
+
+pub fn decode_token(token: &str) -> Option<DecodedToken> {
     use base64::Engine;
     let decoded = base64::engine::general_purpose::STANDARD_NO_PAD
         .decode(token.trim())
@@ -104,7 +124,12 @@ pub fn decode_token(token: &str) -> Option<(String, String, u64)> {
         return None;
     }
     let exp: u64 = parts[3].parse().ok()?;
-    Some((parts[1].to_string(), parts[2].to_string(), exp))
+    Some(DecodedToken {
+        token_type: parts[0].to_string(),
+        user_id: parts[1].to_string(),
+        username: parts[2].to_string(),
+        exp,
+    })
 }
 
 pub fn is_token_expired(exp: u64) -> bool {
@@ -123,9 +148,9 @@ pub async fn resolve_request_tenant_id(
     headers: &HeaderMap,
 ) -> String {
     if let Some(token) = extract_bearer_token(headers) {
-        if let Some((user_id, _, exp)) = decode_token(&token) {
-            if !is_token_expired(exp) {
-                return resolve_tenant_id_by_user(store, &user_id).await;
+        if let Some(t) = decode_token(&token) {
+            if !is_token_expired(t.exp) {
+                return resolve_tenant_id_by_user(store, &t.user_id).await;
             }
         }
     }
@@ -145,16 +170,16 @@ pub async fn resolve_request_user(
     let token = extract_bearer_token(headers).ok_or(ApiError::Unauthorized {
         message: "缺少认证信息".to_string(),
     })?;
-    let (_, username, exp) = decode_token(&token).ok_or(ApiError::Unauthorized {
+    let t = decode_token(&token).ok_or(ApiError::Unauthorized {
         message: "无效的认证令牌".to_string(),
     })?;
-    if is_token_expired(exp) {
+    if is_token_expired(t.exp) {
         return Err(ApiError::Unauthorized {
             message: "认证令牌已过期".to_string(),
         });
     }
     // 必须是 access token（拒绝 refresh token 用于管理面）
-    if !is_access_token(&token) {
+    if !t.is_access() {
         return Err(ApiError::Unauthorized {
             message: "无效的认证令牌".to_string(),
         });
@@ -163,7 +188,7 @@ pub async fn resolve_request_user(
     // find_user_by_username 自身 fail-closed（store 存在未命中不回退内置表），
     // 此处不得再叠 or_else 内置回退——否则换库后已签发 token 依旧把"用户已
     // 不存在"伪装成合法内置用户（K4，对齐 find_user_by_credentials 2026-08-19 裁决）。
-    let user = find_user_by_username(store, &username)
+    let user = find_user_by_username(store, &t.username)
         .await
         .ok_or(ApiError::Unauthorized {
             message: "用户不存在".to_string(),
@@ -304,37 +329,24 @@ pub struct VerifiedUser {
 ///（已有 store 的 async 上下文）里由 `resolve_tenant_id_by_user` 权威解析。
 /// 任一校验失败返回 `None`（调用方按 ADR §7.2 以 4001 拒绝握手）。
 pub fn verify_access_token(token: &str) -> Option<VerifiedUser> {
-    let (user_id, username, exp) = decode_token(token)?;
-    if is_token_expired(exp) {
+    let t = decode_token(token)?;
+    if is_token_expired(t.exp) {
         return None;
     }
     // payload 必须是 access token（拒绝 refresh token 用于 WS 鉴权）
-    if !is_access_token(token) {
+    if !t.is_access() {
         return None;
     }
     // tenant_id：内置 admin 直接回填；动态用户先留空（dispatch 时权威解析）。
     // user_id/username 已从 token 解出，握手注册连接用它们即可。
     let tenant_id = default_users()
         .into_iter()
-        .find(|u| u.id == user_id)
+        .find(|u| u.id == t.user_id)
         .map(|u| u.tenant_id)
         .unwrap_or_default();
     Some(VerifiedUser {
-        user_id,
-        username,
+        user_id: t.user_id,
+        username: t.username,
         tenant_id,
     })
-}
-
-/// 判断 token 是否为 access 类型（payload 首段为 "access"）。
-pub fn is_access_token(token: &str) -> bool {
-    use base64::Engine;
-    let decoded = base64::engine::general_purpose::STANDARD_NO_PAD
-        .decode(token.trim())
-        .ok();
-    let payload = decoded.and_then(|b| String::from_utf8(b).ok());
-    match payload {
-        Some(s) => s.split(':').next() == Some("access"),
-        None => false,
-    }
 }
