@@ -175,8 +175,6 @@ export const Sidebar = memo<SidebarProps>(({ isMobile = false }) => {
     (s) => s.notifications.filter((n) => !n.isRead).length,
   )
 
-  // 注：0.1 的 WS session_update 事件订阅已删除（0.2 内核无该事件发射源，
-  // 休眠路径；会话列表刷新由 query 挂载/操作触发，见 task_kernel_cleanup_and_split 任务 2）。
 
   /**
    * 统一搜索：防抖调用后端搜索 API（monitoring 插件 search）。

@@ -7,8 +7,8 @@
  *   宿主在此容器内挂载）。
  * - 未声明 pluginId 时，渲染占位提示，引导接入 pluginId / connector。
  *
- * 接入路径（WebviewWidget 通道；webcomponent 已于 0.2 废弃删除）：
- *   1) 插件提供 webview URL → 本组件在挂载点渲染 iframe。
+ * 接入路径：WebviewWidget 通道——插件提供 webview URL，
+ * 本组件在挂载点渲染 iframe。
  *   （本骨架仅预留挂载点容器，不实例化 xterm / iframe；完整实现见后续 Phase。）
  *
  * Props 契约（flat，与 TableWidget 一致；由 registerWidgets 以

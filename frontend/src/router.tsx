@@ -34,8 +34,7 @@ import { generateUUID } from './utils/uuid'
 import type { SendMessageParams } from './components/chat/types'
 import type { ReactNode } from 'react'
 
-// 设置已工作区页签化：唯一 UI = SettingsHubWidget（settings_hub），
-// 无独立路由页（SettingsPage/PluginConfigRoute 及 /settings/* 路由已删除）。
+// 设置承载：唯一 UI = SettingsHubWidget（settings_hub）工作区页签，无独立路由页。
 // 聊天容器懒加载：ChatContainer 依赖链包含 @lobehub/ui 全量入口（EmojiPicker→
 // @emoji-mart/data 3.2MB、Markdown→highlight.js 197 语言）与 react-syntax-highlighter
 // 全量 Prism（300 语言）、mermaid，静态导入会让 /login 等公共页也必须加载整个聊天
@@ -149,9 +148,8 @@ function HomePage(): ReactNode {
   // widget_event 全局订阅（内核 PluginWidgetBroadcaster 推送 + 插件 widget 交互）
   useWidgetEvents()
 
-  // 长期任务列表 query 化：5s 兜底轮询由 useLongTermTasksQuery 的
-  // refetchInterval 承担（页面隐藏自动暂停，等价旧 useTaskPolling 的 document.hidden
-  // 跳过）；WS 断连期间任务状态变化靠此兜底对账恢复
+  // 长期任务列表：5s 兜底轮询由 useLongTermTasksQuery 的 refetchInterval
+  // 承担（页面隐藏自动暂停）；WS 断连期间任务状态变化靠此兜底对账恢复
   useLongTermTasksQuery()
 
   // 统一 VS Code 壳（无 classic / five-space 双模式）
@@ -292,12 +290,11 @@ function HomePage(): ReactNode {
 
       const pipelineStore = usePipelineMessageStore.getState()
 
-      // 管道 ID 是会话的唯一路由键。源头取值：以会话权威 activePipelineId 为准
-      // （不按 pipelineIds[0] 位置猜测——排序不保证主管道在前时
-      // 会发进错误管道）；缺失且恰一个管道才取唯一元素；多管道解析失败即
-      // 终止发送（fail-closed，沿用下方"缺失终止"式样，不落 params 猜测值）。
-      // 不再依赖 ChatContainer 闭包传入的 params.pipelineId（它来自
-      // activeTab.pipelineRunId，新建/切换会话后渲染时序可能导致闭包持有旧 tab）。
+      // 管道 ID 是会话的唯一路由键。本函数以会话权威值解析目标管道：
+      // activePipelineId 优先（不按 pipelineIds[0] 位置猜测——排序不保证主管道在
+      // 前时会发进错误管道）；缺失且恰一个管道才取唯一元素；解析失败即终止发送
+      // （fail-closed，不落 params 猜测值）。闭包 params.pipelineId 不作依据——
+      // 新建/切换会话后渲染时序可能使其滞后于当前 Tab。
       const sessionForPid = sessions.find((s) => s.id === sid)
       const targetPipelineId = sessionForPid ? mainPipelineIdOf(sessionForPid) : undefined
       if (!targetPipelineId) {
@@ -328,10 +325,9 @@ function HomePage(): ReactNode {
       const contentWithRefs = appendAttachmentRefs(params.content, params.attachments)
 
       // [来源: docs/decisions/2026-08-22-streaming-protocol-rewrite.md] 单一消息数组：
-      // 乐观 user 消息直接进主数组（status='sending'），
-      // 与流式 assistant 同数组，靠状态机区分生命周期。new_message 事件携带
-      // user_message 权威回传时按 cmid 认领（recordId 双字段范式，UI id 永不变）——
-      // 不再有独立 pending 区（旧 pending 驱逐 = 发送后用户消息消失的症状根因）。
+      // 乐观 user、流式 assistant 全在 messagesByPipeline 同一数组，靠 status
+      // 状态机区分生命周期；独立 pending 区不存在。new_message 事件携带
+      // user_message 权威回传时按 cmid 认领（recordId 双字段范式，UI id 永不变）。
       // ── busy 分支（ADR-2026-08-26）──
       // 管道执行中（streaming）发送 → 消息照常走 WS（内核 pending 队列排队，
       // 等待窗口内可编辑/删除/清空），但不建乐观气泡/不启动流式态——

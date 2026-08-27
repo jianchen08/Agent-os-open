@@ -520,8 +520,7 @@ export function FiveSpaceLayout({
     [activeSessionId, handleTaskNodeClick, workspaceRefreshKey],
   )
 
-  // Render floating window content：接通 PageRenderer（widget/schema 分发），
-  // 兜底兼容旧 FloatingWindowInstance（widgetRegistry）与占位。
+  // 浮动窗内容分发：PageRenderer 按 widget/schema 分发，未命中落占位。
   // renderFloatingWindowContent 是模块级纯函数（无 props 闭包），直接作 renderContent 传引用。
   const renderFloatingContent = renderFloatingWindowContent
 

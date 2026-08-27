@@ -256,8 +256,8 @@ export function FormWidget(props: Record<string, unknown>) {
           message?: string
         }
         // endpoint 响应协议：error/reason = 失败；unchanged=true = 无变更（仅
-        // 权限模式等切换端点用）；其余一律视为成功（通用表单端点返回创建对象等，
-        // 旧实现把非 switched 响应误判为失败是该模式的既有缺陷）
+        // 权限模式等切换端点用）；其余一律视为成功（通用表单端点的成功
+        // 响应体是创建/更新对象，无 switched 字段）
         if (data.error || data.reason) {
           setStatus('error')
           setStatusText(failureText ?? data.reason ?? data.error ?? '提交失败')
