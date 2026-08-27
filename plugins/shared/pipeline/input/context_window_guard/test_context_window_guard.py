@@ -656,3 +656,107 @@ class TestFallbackObservability:
             messages = asyncio.run(plugin._trim_covered_messages(ctx, []))
         assert messages == [], "检索失败按无历史处理（行为保持）"
         assert any("记忆后端检索失败" in r.getMessage() for r in caplog.records)
+
+
+# ═══════════════════════════════════════════════════════════
+# 11. 保存失败 fail-closed：该批原消息不计入删除
+# ═══════════════════════════════════════════════════════════
+
+
+class _FlakyBackend:
+    """指定序号的 add 调用抛错、其余照常记录的伪 IMemoryBackend。"""
+
+    def __init__(self, fail_calls: set[int]) -> None:
+        self.add_count = 0
+        self.fail_calls = fail_calls
+        self.successful_adds: list[dict[str, Any]] = []
+
+    async def add(self, **kwargs: Any) -> str:
+        self.add_count += 1
+        if self.add_count in self.fail_calls:
+            raise RuntimeError("backend write boom")
+        self.successful_adds.append(kwargs)
+        return f"mem-{self.add_count}"
+
+    async def search(self, **kwargs: Any) -> list[dict[str, Any]]:
+        return []
+
+
+def _saved_seqs_from_backend(backend: _FlakyBackend) -> set[int]:
+    """从成功落库的 chunk tags（"seq:a-b"）还原已获摘要覆盖的消息 seq 集合。"""
+    seqs: set[int] = set()
+    for call in backend.successful_adds:
+        if call.get("memory_type") != "chunk":
+            continue
+        for tag in call.get("tags", []):
+            if isinstance(tag, str) and tag.startswith("seq:") and "-" in tag[4:]:
+                a, b = tag[4:].split("-", 1)
+                seqs.update(range(int(a), int(b) + 1))
+    return seqs
+
+
+def _round_messages() -> list[dict[str, Any]]:
+    """4 条各约 200 token 的消息（seq 1-4）。
+
+    recent 预算 300 → 尾部仅 m4 留守，old = [m1,m2,m3]；
+    context_window=800 → 批预算 400 → 两批：b0=[m1]，b1=[m2,m3]。
+    """
+    roles = ["user", "assistant", "user", "assistant"]
+    return [
+        {"role": roles[i], "content": "A" * 400, "seq": i + 1} for i in range(4)
+    ]
+
+
+class TestSaveFailureKeepsMessages:
+    def _service(self, mod: Any, backend: _FlakyBackend) -> Any:
+        async def fake_llm(payload: list) -> str:
+            return _valid_compress_json()
+
+        svc = mod.CompressionService(backend=backend, llm_call_fn=fake_llm)
+        svc.setup(pipeline_id="pipe-sf", session_id="sess-sf")
+        return svc
+
+    def _run_round(self, mod: Any, backend: _FlakyBackend) -> Any:
+        svc = self._service(mod, backend)
+        return mod.CompressionService._do_compress_round(
+            svc,
+            _round_messages(),
+            800,
+            {"recent": 300},
+        )
+
+    def test_all_saves_fail_deletes_nothing(self) -> None:
+        """全部批次落库失败 → 整轮返回 None，不产生任何删除。"""
+        result = _run(self._run_round(_load_plugin_module(), _FlakyBackend(set(range(1, 100)))))
+        assert result is None, "摘要未落库时不得返回删除列表"
+
+    def test_partial_save_failure_keeps_failed_batch(self) -> None:
+        """首个保存调用失败（b0 整批失败）、b1 成功：
+
+        - 删除列表只含 b1 覆盖的 seq；
+        - 失败批次的原消息按原文保留在返回消息里。
+        """
+        backend = _FlakyBackend({1})
+        mod = _load_plugin_module()
+        result = _run(self._run_round(mod, backend))
+        assert result is not None, "任一批次成功即应产出压缩结果"
+        _, deleted = result
+
+        # 上游用 deleted_seqs emit set(seq,null)；未删的 seq 在引擎存储中
+        # 原样留存——这就是失败批次"原消息保留"的可观察出口。
+        saved = _saved_seqs_from_backend(backend)
+        assert saved == {2, 3}, f"成功批次的覆盖范围应可从落库 tags 还原: {saved}"
+        assert sorted(deleted) == [2, 3], (
+            f"删除列表必须只含落库成功的批次，实际: {deleted}"
+        )
+        # fail-closed 性质：删除集合 ⊆ 成功摘要覆盖集合（无摘要背书的 seq 不得被删）
+        assert set(deleted) <= saved
+        assert 1 not in deleted, "落库失败的批次（seq=1）不得进入删除列表"
+
+    def test_all_saves_succeed_baseline(self) -> None:
+        """对照基线：全部落库成功 → 全部 old seq 进入删除列表。"""
+        backend = _FlakyBackend(set())
+        result = _run(self._run_round(_load_plugin_module(), backend))
+        assert result is not None
+        _, deleted = result
+        assert sorted(deleted) == [1, 2, 3]

@@ -168,13 +168,17 @@ class WorkspaceService:
 
         return {"tree": [n.to_dict() for n in tree]}
 
-    async def resolve_container_task(self, task_id: str) -> str:
+    async def resolve_container_task(self, task_id: str) -> str | None:
         """解析任务到容器任务（GAP-1 统一：父链 = lineage.parent_pipeline_id）。
 
         读 state 聚合行（task = pipeline）：无父（根形式）→ 自身；task.scope ==
         container → 自身；否则沿 lineage.parent_pipeline_id 向上找最近的容器
         任务。读面未注入 → fail-closed 返回自身（0.1 task_service 镜像回退已随
         2026-08-22 全库管道数据清空退役）。
+
+        Returns:
+            容器任务 id；state 聚合行解析抛错时返回 None——调用方必须区分
+            "解析失败"与"无父=自身"，未解析 id 不充当容器 id 使用。
         """
         try:
             rows = await self._read_state_rows()
@@ -199,9 +203,13 @@ class WorkspaceService:
                     return current_id
                 current_id = str(row.get("lineage.parent_pipeline_id") or "")
             return task_id
-        except Exception:
-            logger.warning("[WorkspaceService] 解析容器任务失败 | task_id=%s", task_id)
-            return task_id
+        except Exception as exc:
+            logger.warning(
+                "[WorkspaceService] 解析容器任务失败（返回 None，不伪装成容器 id）| task_id=%s | err=%s",
+                task_id,
+                exc,
+            )
+            return None
 
     async def _get_child_task_ids(self, container_task_id: str) -> set[str]:
         """获取容器任务下所有子任务 ID（GAP-1 统一：子链 = lineage 分组）。"""

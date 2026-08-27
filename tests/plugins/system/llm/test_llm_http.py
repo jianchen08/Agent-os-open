@@ -774,3 +774,65 @@ def test_non_llm_path_404(server: Any, llm_yaml: Path) -> None:
         _call(server, path="/ext/llm_service/other", method="GET")
     )
     assert status == 404
+
+
+# ── llm.yaml 缺失/损坏：显式报错，禁止伪造空配置（假 fallback 治理）──
+
+
+def _health_via_http(server: Any, rtm: Any, yaml_path: Path) -> tuple[int, Any]:
+    """把 rtm._LLM_YAML 重定向到指定路径后走 healthz，返回 (status, body)。"""
+    saved = rtm._LLM_YAML
+    rtm._LLM_YAML = yaml_path
+    try:
+        return _decode_http(
+            _call(server, path="/ext/llm_service/thinking-mode/healthz", method="GET")
+        )
+    finally:
+        rtm._LLM_YAML = saved
+
+
+class TestThinkingModeConfigErrors:
+    def test_missing_llm_yaml_health_errors(
+        self, server: Any, rtm: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """llm.yaml 缺失 → health 返回 500 明确报错，不得 status=ok 0 模型。"""
+        missing = tmp_path / "no_such_llm.yaml"
+        assert not missing.exists()
+        status, body = _health_via_http(server, rtm, missing)
+        assert status == 500
+        assert "llm.yaml 不存在" in body["detail"]
+
+    def test_missing_llm_yaml_models_endpoint_errors_too(
+        self, server: Any, rtm: Any, tmp_path: Path
+    ) -> None:
+        """缺失在列表端点同样报错——任何路由都不吃伪造空配置。"""
+        missing = tmp_path / "absent.yaml"
+        saved = rtm._LLM_YAML
+        rtm._LLM_YAML = missing
+        try:
+            status, body = _decode_http(
+                _call(server, path="/ext/llm_service/thinking-mode/models", method="GET")
+            )
+        finally:
+            rtm._LLM_YAML = saved
+        assert status == 500
+        assert "不存在" in body["detail"] or "无有效配置" in body["detail"]
+
+    def test_empty_llm_yaml_is_malformed_not_ok(
+        self, server: Any, rtm: Any, tmp_path: Path
+    ) -> None:
+        """/空内容 yaml 解析为 None → 按无效配置报错（不伪造 defaults）。"""
+        empty = tmp_path / "empty.yaml"
+        empty.write_text("", encoding="utf-8")
+        status, body = _health_via_http(server, rtm, empty)
+        assert status == 500
+        assert "无有效配置" in body["detail"]
+
+    def test_valid_yaml_health_still_ok(
+        self, server: Any, rtm: Any, llm_yaml: Path
+    ) -> None:
+        """对照基线：夹具 yaml 正常时 health ok 且正确计数 reasoning 模型。"""
+        status, body = _health_via_http(server, rtm, llm_yaml)
+        assert status == 200
+        assert body["status"] == "ok"
+        assert body["available_models"] >= 1

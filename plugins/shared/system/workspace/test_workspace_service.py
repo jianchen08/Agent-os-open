@@ -288,6 +288,32 @@ class TestWorkspaceResolveContainerTask:
         monkeypatch.setattr(svc, "_read_state_rows", read_rows, raising=False)
         assert _run(svc.resolve_container_task("leaf")) == "mid"
 
+    def test_resolve_read_error_returns_none_not_task_id(self, monkeypatch, caplog) -> None:
+        """state 聚合行解析抛错 → 返回 None；未解析 id 不得伪装成容器 id。"""
+        import logging
+
+        svc = WorkspaceService()
+
+        async def read_rows_boom():
+            raise RuntimeError("聚合行损坏")
+
+        monkeypatch.setattr(svc, "_read_state_rows", read_rows_boom, raising=False)
+        with caplog.at_level(logging.WARNING):
+            assert _run(svc.resolve_container_task("t-broken")) is None
+        assert any("解析容器任务失败" in r.getMessage() for r in caplog.records), (
+            "失败必须留痕可观测"
+        )
+
+    def test_resolve_read_success_and_failure_disambiguated(self, monkeypatch) -> None:
+        """区分度对照：同一输入，成功路径返回 id、异常路径返回 None（两值可区分）。"""
+        svc_ok = WorkspaceService()
+
+        async def read_rows():
+            return [{"pipeline_id": "t1"}]  # 无父 → 自身即容器
+
+        monkeypatch.setattr(svc_ok, "_read_state_rows", read_rows, raising=False)
+        assert _run(svc_ok.resolve_container_task("t1")) == "t1"
+
     def test_child_ids_aggregate_descendants_from_state(self, monkeypatch) -> None:
         """子链聚合：lineage 分组 BFS 全量后代。"""
         svc = WorkspaceService()

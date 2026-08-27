@@ -8,8 +8,9 @@
 2. evaluation.get_result：run→get 往返、未知 id 错误；
 3. http.handle：metrics 列表（yaml 读面 + category/status 过滤 + 分页 +
    非法分页参数回退）、单项 404、内置只读 DELETE 405、未知 path 404；
-4. 读面底层：_load_metrics 缺文件/坏 yaml 回退空表、_project_root
-   环境变量与上溯兜底、_metric_to_response 字段补齐默认值。
+4. 读面底层：_load_metrics 缺文件/坏 yaml 上抛、空内容=真空注册表、
+   读失败经 http.handle 转 500 错误信封（配置损坏 ≠ 无指标）、
+   _project_root 环境变量与上溯兜底、_metric_to_response 字段补齐默认值。
 """
 from __future__ import annotations
 
@@ -22,6 +23,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+import yaml
 
 pytestmark = pytest.mark.unit
 
@@ -298,15 +300,64 @@ class TestHttpHandleSingleAndErrors:
         assert {"file_check", "bash_check", "semantic_check", "human_review"} == set(reg["metrics"])
 
 
-class TestReadFaceHelpers:
-    def test_load_metrics_missing_file_and_bad_yaml(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-        # 无 yaml 的根 → 空表不抛
+class TestHttpHandleMetricsReadFailure:
+    """指标 yaml 读失败 → 500 错误信封；真空注册表仍 200（两者必须可区分）。"""
+
+    def test_list_endpoint_config_broken_error_envelope(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         srv = _load_server_module(monkeypatch, tmp_path)
-        assert srv._load_metrics() == []
+        env = asyncio.run(
+            srv.http_handle(path="/ext/evaluation_service/metrics", method="GET")
+        )
+        assert env["success"] is False, "配置损坏不得伪装成空指标列表"
+        assert env["data"]["status"] == 500
+        assert "评估指标配置读取失败" in env["error"]
+
+    def test_single_endpoint_config_broken_error_envelope(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        srv = _load_server_module(monkeypatch, tmp_path)
+        env = asyncio.run(
+            srv.http_handle(path="/ext/evaluation_service/metrics/m_x", method="GET")
+        )
+        assert env["success"] is False
+        assert env["data"]["status"] == 500
+
+    def test_list_endpoint_real_empty_registry_still_200(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        cfg = tmp_path / "config" / "evaluation"
+        cfg.mkdir(parents=True)
+        (cfg / "evaluation_metrics.yaml").write_text("metrics: []\n", encoding="utf-8")
+        srv = _load_server_module(monkeypatch, tmp_path)
+        _, body = _decode_body(
+            asyncio.run(
+                srv.http_handle(path="/ext/evaluation_service/metrics", method="GET")
+            )
+        )
+        assert body == {"metrics": [], "total": 0}
+
+
+class TestReadFaceHelpers:
+    def test_load_metrics_missing_or_bad_yaml_raises(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        """缺文件/坏 yaml → 上抛（配置损坏 ≠ 无指标）。"""
+        srv = _load_server_module(monkeypatch, tmp_path)
+        with pytest.raises(OSError):
+            srv._load_metrics()
 
         bad = tmp_path / "config" / "evaluation"
         bad.mkdir(parents=True)
         (bad / "evaluation_metrics.yaml").write_text("metrics: [ {name: ,", encoding="utf-8")
+        with pytest.raises(yaml.YAMLError):
+            srv._load_metrics()
+
+    def test_load_metrics_empty_content_is_real_empty(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        """解析成功但注册表为空（空 metrics/空文件）→ 返回 []，与损坏可区分。"""
+        cfg = tmp_path / "config" / "evaluation"
+        cfg.mkdir(parents=True)
+        srv = _load_server_module(monkeypatch, tmp_path)
+        (cfg / "evaluation_metrics.yaml").write_text("metrics: []\n", encoding="utf-8")
         assert srv._load_metrics() == []
 
     def test_project_root_env_wins_and_upward_fallback(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

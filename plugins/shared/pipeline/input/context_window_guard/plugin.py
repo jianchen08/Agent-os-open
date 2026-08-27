@@ -990,8 +990,9 @@ class CompressionService:
 
         Returns:
             (pure_system + recent 组成的消息列表, 被删消息的 seq 列表)；
-            无需压缩返回 None。被删消息 = old_msgs + 遗留 old_blocks，
-            外层据此生成 set(seq, null) ops。
+            无需压缩或全部批次落库失败返回 None。被删消息 = 落库成功的
+            批次 + 遗留 old_blocks，外层据此生成 set(seq, null) ops；
+            落库失败的批次原消息保留（fail-closed）。
         """
         pure_system_msgs: list[dict[str, Any]] = []
         old_blocks: list[dict[str, Any]] = []
@@ -1038,6 +1039,10 @@ class CompressionService:
         num_batches = max(1, -(-old_tokens // batch_budget))  # 向上取整
 
         any_success = False
+        # 摘要已成功落库的批次。落库失败的批次绝不入删除列表：
+        # save 失败意味着本批摘要未进 memory backend，此时删原消息
+        # = "摘要未落库 + 原消息已删"，知识不可恢复丢失（fail-closed）。
+        saved_msgs: list[dict[str, Any]] = []
 
         for batch_idx in range(num_batches):
             start = batch_idx * len(old_msgs) // num_batches
@@ -1064,16 +1069,24 @@ class CompressionService:
                     context_window=context_window,
                 )
             except Exception as exc:
-                logger.warning("[CompressionService] 保存压缩块失败: %s", exc)
+                logger.error(
+                    "[CompressionService] 第 %d 批压缩块保存失败，本批 %d 条原消息保留不删除: %s",
+                    batch_idx + 1,
+                    len(batch),
+                    exc,
+                )
+                continue
 
+            saved_msgs.extend(batch)
             any_success = True
 
         if not any_success:
             return None
 
-        # 被删消息 seq 列表：被压缩的 old_msgs + 遗留 old_blocks（旧摘要 system）
+        # 被删消息 seq 列表：仅摘要落库成功的批次 + 遗留 old_blocks
+        # （旧摘要 system，新摘要生成后由调用方置换）。
         deleted_seqs: list[int] = [
-            m["seq"] for m in (old_msgs + old_blocks) if isinstance(m.get("seq"), int)
+            m["seq"] for m in (saved_msgs + old_blocks) if isinstance(m.get("seq"), int)
         ]
         return pure_system_msgs + recent_msgs, deleted_seqs
 

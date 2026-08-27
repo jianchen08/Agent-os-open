@@ -58,12 +58,26 @@ def _get_llm_data() -> dict[str, Any]:
     本模块只走 sidecar（http.handle）形态，恒直接读 YAML（无内存缓存，
     思考模式接口调用频率低，且保证配置写入后立即生效）。返回结构：
     {models: {...}, defaults: {...}, ...}。
+
+    llm.yaml 缺失或内容为空/非映射 → 抛 ThinkingModeAPIError(500)：配置
+    缺失必须显式报错，禁止伪造 {"models": {}} 让 health 假 ok、前端把
+    "配置损坏"误读成"无可用思考模型"。
     """
     if not _LLM_YAML.exists():
-        logger.warning("llm.yaml 不存在: %s", _LLM_YAML)
-        return {"models": {}, "defaults": {}}
+        raise ThinkingModeAPIError(
+            status_code=500,
+            error_code="LLM_CONFIG_MISSING",
+            message=f"llm.yaml 不存在: {_LLM_YAML}",
+        )
     with open(_LLM_YAML, encoding="utf-8") as f:
-        return yaml.safe_load(f) or {"models": {}, "defaults": {}}
+        data = yaml.safe_load(f)
+    if not isinstance(data, dict):
+        raise ThinkingModeAPIError(
+            status_code=500,
+            error_code="LLM_CONFIG_MALFORMED",
+            message=f"llm.yaml 内容为空或不是映射，无有效配置: {_LLM_YAML}",
+        )
+    return data
 
 
 def health() -> dict[str, Any]:

@@ -90,7 +90,15 @@ class ContextBuildPlugin(IInputPlugin):
         return None
 
     def _load_agent_config(self, agent_id: str) -> dict[str, Any]:
-        """按 agent_id 加载 agent yaml（缓存 + mtime 失效）。失败返回空 dict。"""
+        """按 agent_id 加载 agent yaml（缓存 + mtime 失效）。
+
+        目录不存在 / 未命中 yaml → 返回空 dict（无配置属合法形态，按默认运行）；
+        yaml 存在但读取/解析失败 → 上抛终止：此时把人格/system_prompt/tool_ids
+        整体静默换成默认值 = 配置错误被伪装成"无配置 agent"，必须让管道失败可见。
+
+        Raises:
+            RuntimeError: agent yaml 读取或解析失败（原异常经 __cause__ 保留）。
+        """
         import os
         import yaml as _yaml
         from pathlib import Path
@@ -116,13 +124,9 @@ class ContextBuildPlugin(IInputPlugin):
             with open(path, encoding="utf-8") as f:
                 data = _yaml.safe_load(f) or {}
         except Exception as exc:
-            # 找到但解析失败 = 配置错误：agent 人格整体取默认值必须可见
-            logger.error(
-                "[context_build] agent yaml 解析失败（按默认配置降级运行）| path=%s | error=%s",
-                path,
-                exc,
-            )
-            return {}
+            raise RuntimeError(
+                f"[context_build] agent yaml 解析失败，管道终止 | path={path} | agent_id={agent_id}"
+            ) from exc
         if not isinstance(data, dict):
             data = {}
         self._agent_yaml_cache[str(path)] = (mtime, data)

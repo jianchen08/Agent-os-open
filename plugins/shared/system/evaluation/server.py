@@ -75,15 +75,29 @@ def _error(message: str, status: int = 503) -> dict[str, Any]:
 
 
 def _load_metrics() -> list[dict[str, Any]]:
-    """读汇总 yaml 的 metrics 数组。读失败返回空列表（不抛，由调用方决定语义）。"""
+    """读汇总 yaml 的 metrics 数组。
+
+    文件不存在/不可读/解析失败 → 抛出（配置损坏 ≠ 无指标，由
+    :func:`_load_metrics_checked` 转 5xx 错误信封）；解析成功但内容为空
+    （空文件/无 metrics 键）→ 真实空注册表，返回 []。
+    """
     yaml_path = os.path.join(_project_root(), _METRICS_YAML)
-    try:
-        with open(yaml_path, encoding="utf-8") as f:
-            data = yaml.safe_load(f) or {}
-    except (OSError, yaml.YAMLError):
-        return []
+    with open(yaml_path, encoding="utf-8") as f:
+        data = yaml.safe_load(f) or {}
     metrics = data.get("metrics", []) if isinstance(data, dict) else []
     return [m for m in metrics if isinstance(m, dict)]
+
+
+def _load_metrics_checked() -> tuple[list[dict[str, Any]], dict[str, Any] | None]:
+    """读指标表并把读失败翻译成 HTTP 错误信封。
+
+    Returns:
+        (metrics, None) = 读成功；( [], error_envelope) = 读失败（500）。
+    """
+    try:
+        return _load_metrics(), None
+    except (OSError, yaml.YAMLError) as exc:
+        return [], _error(f"评估指标配置读取失败: {exc}", 500)
 
 
 def _metric_to_response(raw: dict[str, Any]) -> dict[str, Any]:
@@ -306,7 +320,10 @@ async def http_handle(
 
     # GET /ext/evaluation_service/metrics —— 列表（支持 category/status/limit/skip 过滤）
     if path == "/ext/evaluation_service/metrics" and method == "GET":
-        metrics = [_metric_to_response(m) for m in _load_metrics()]
+        raw_metrics, read_err = _load_metrics_checked()
+        if read_err is not None:
+            return read_err
+        metrics = [_metric_to_response(m) for m in raw_metrics]
         # 过滤
         category = q.get("category")
         if category:
@@ -331,7 +348,10 @@ async def http_handle(
     prefix = "/ext/evaluation_service/metrics/"
     if path.startswith(prefix) and method == "GET":
         metric_id = path[len(prefix) :]
-        for m in _load_metrics():
+        raw_metrics, read_err = _load_metrics_checked()
+        if read_err is not None:
+            return read_err
+        for m in raw_metrics:
             if str(m.get("name", m.get("id", ""))) == metric_id:
                 return _ok(_json_response(_metric_to_response(m)))
         return _error(f"评估指标 '{metric_id}' 不存在", 404)
