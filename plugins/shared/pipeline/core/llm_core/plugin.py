@@ -218,19 +218,22 @@ class LLMCore(ICorePlugin):
         return 50
 
     def _apply_model_from_state(self, state: dict[str, Any]) -> None:
-        """从管道 state 动态解析本次调用的模型并更新 self（0.2 适配）。
+        """从管道 state 动态解析本次调用的模型并更新 self。
 
-        0.1 由 ``plugin_resolver.apply_agent_model_override`` 在管道启动前
-        一次性覆盖 llm_call 实例；0.2 sidecar 无 plugin_resolver，改为
-        execute 时从 state 读 model_id/model_tier 动态解析。
+        每次执行时从 state 读 model_id / model_tier，解析完整配置后**整体替换**
+        实例字段（provider/model_name/api_base/api_key/…）——换模型即整套配置
+        切换，禁止用上一模型的 api_base 兜底：跨 provider 复用端点会把请求发给
+        错误的供应商（静默串味），缺配必须显式报错终止本次调用。
 
         优先级：``state.model_id`` > ``state.model_tier``(→ defaults.tiers)
-        > ``llm.yaml defaults.chat``。任一命中即用其 model_id 查
-        ``get_llm_core_config`` 更新 provider/model_name/api_base/api_key 等；
-        全部缺失则保持构造时的默认配置不变（不阻断，由调用方降级）。
+        > ``llm.yaml defaults.chat``。任一命中即按其 model_id 查
+        ``get_llm_core_config``；全部缺失则保持构造时的默认配置不变（不阻断）。
 
         Args:
             state: 管道状态字典，读 ``model_id`` / ``model_tier``。
+
+        Raises:
+            RuntimeError: 命中的模型配置缺 api_base（换模型不得带病切换）。
         """
         # 已锁定同一 model_id 则跳过（避免每轮重复解析）
         resolved_id = state.get("model_id", "")
@@ -253,18 +256,26 @@ class LLMCore(ICorePlugin):
             )
             return
 
+        # 先整体验证再落字段：任何缺失配置都在触碰实例状态前显式失败，
+        # 不留半套改动（部分旧值 + 部分新值是更难排查的串味形态）。
+        api_base = llm_conf.get("api_base")
+        if not api_base:
+            raise RuntimeError(
+                f"[{self.name}] 模型 {resolved_id} 缺少 api_base 配置，"
+                f"拒绝以模型 {self._model_id} 的端点兜底（跨 provider 串味）；"
+                f"请在 llm.yaml models.{resolved_id} 或其 provider 段补齐"
+            )
+
         self._model_id = resolved_id
-        self._provider = llm_conf.get("provider", self._provider)
-        self._model = llm_conf.get("model_name", self._model)
-        self._api_base = llm_conf.get("api_base") or self._api_base
-        self._api_key = llm_conf.get("api_key") or self._api_key
-        self._context_window = llm_conf.get("context_window") or self._context_window
-        if llm_conf.get("default_params"):
-            self._default_params = llm_conf["default_params"]
+        self._provider = llm_conf.get("provider", "")
+        self._model = llm_conf.get("model_name", "")
+        self._api_base = api_base
+        self._api_key = llm_conf.get("api_key") or ""
+        self._context_window = llm_conf.get("context_window")
+        self._default_params = llm_conf.get("default_params") or {}
         # 模型级思考强度路由规则（llm.yaml models.<id>.thinking_strength_params）：
         # 随模型解析更新；未配置 → None（_call_llm 回退内置默认表）。
-        if "thinking_strength_params" in llm_conf:
-            self._thinking_strength_params = llm_conf["thinking_strength_params"]
+        self._thinking_strength_params = llm_conf.get("thinking_strength_params")
         logger.info(
             "[%s] model resolved: model_id=%s provider=%s model=%s",
             self.name,
@@ -296,7 +307,7 @@ class LLMCore(ICorePlugin):
 
         return get_model_config_loader().get_default_chat_model()
 
-    async def execute(self, ctx: PluginContext) -> dict[str, Any]:  # noqa: PLR0912,PLR0915
+    async def execute(self, ctx: PluginContext) -> dict[str, Any]:  # type: ignore[override]  # noqa: PLR0912,PLR0915
         """执行 LLM 调用，返回原始结果。
 
         调用 LLM 后，将 assistant 回复 append 到 messages 中。
@@ -883,34 +894,14 @@ class LLMCore(ICorePlugin):
         if len(normalized_messages) < len(messages):
             self._writeback_cleaned_history(ctx.state, messages, normalized_messages)
 
-        # 主动修复：Phase 1-4 转换后仍可能存在遗漏（极端边界情况），
-        # 此处主动修复而非仅做诊断日志。
-        if self._provider == "minimax":
-            fix_count = 0
-            for _i, _m in enumerate(normalized_messages):
-                if _i > 0 and _m.get("role") == "system":
-                    logger.warning(
-                        "[%s] MiniMax 主动修复: 非首位 system→user idx=%d, content=%s",
-                        self.name,
-                        _i,
-                        str(_m.get("content", ""))[:200],
-                    )
-                    _m["role"] = "user"
-                    _m.pop("name", None)
-                    fix_count += 1
-            if fix_count:
-                logger.warning(
-                    "[%s] MiniMax 主动修复了 %d 条遗漏的 system 消息",
-                    self.name,
-                    fix_count,
-                )
-
         logger.info(
             "[%s] Sending %d messages to LLM",
             self.name,
             len(normalized_messages),
         )
 
+        # 每消息仅输出结构化摘要（角色/长度/预览）到 DEBUG——完整内容已在
+        # 管道 state/trace 落库，INFO 全量打印属日志噪音且放大隐私面。
         for idx, msg in enumerate(normalized_messages):
             role = msg.get("role", "?")
             content = msg.get("content", "")
@@ -924,17 +915,10 @@ class LLMCore(ICorePlugin):
                     tc_str = json.dumps(tc_list, ensure_ascii=False, default=str)
                 except (TypeError, ValueError):
                     tc_str = str(tc_list)
-                logger.info(
-                    "%s tool_calls=%s",
-                    prefix,
-                    tc_str if tc_list else "[]",
-                )
+                logger.debug("%s tool_calls=%d chars=%s", prefix, len(tc_list), len(tc_str))
             else:
-                logger.info(
-                    "%s content=%s",
-                    prefix,
-                    str(content) or "",
-                )
+                preview = repr(str(content)[:80]) if content else ""
+                logger.debug("%s content_len=%d preview=%s", prefix, len(str(content)), preview)
 
         # 服务调用参数：model 用 yaml key（model_id）做 deployment 匹配，
         # 保证 model_name 重名时（官方与 apigo 同底模）能路由到正确 provider。

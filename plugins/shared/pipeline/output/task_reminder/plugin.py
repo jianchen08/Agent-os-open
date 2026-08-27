@@ -8,7 +8,7 @@ from typing import Any
 
 from enum_utils import safe_enum_value
 from pipeline.plugin import IOutputPlugin, OutputResult, PluginContext
-from pipeline.types import RouteSignal
+from pipeline.types import ACTIVE_TASK_STATUSES, RouteSignal
 
 logger = logging.getLogger(__name__)
 
@@ -226,10 +226,10 @@ class TaskReminder(IOutputPlugin):
             # 任务终态不落 completed，标 pending_evaluation（task_completed 通知
             # 上级照发携带该状态，上级可催评估/重派）。有评估证据则不写，
             # 内核补默认 completed。
-            state_updates = {}
-            if not self._has_successful_task_evaluate(state.get("messages", [])) and not state.get(
-                "evaluation.detected_result"
-            ):
+            # 不变式：走到此处说明上方闸门已判明 messages 无成功的 task_evaluate
+            # （有则已提前放行返回），唯一剩余证据源 = evaluation.detected_result。
+            state_updates: dict[str, Any] = {}
+            if not state.get("evaluation.detected_result"):
                 state_updates["task.status"] = "pending_evaluation"
                 logger.warning(
                     "TaskReminder[iter=%s][task=%s]: max_reminders reached without evaluation, "
@@ -286,8 +286,10 @@ class TaskReminder(IOutputPlugin):
     def _has_successful_task_evaluate(messages: list) -> bool:
         """messages 中是否存在成功的 task_evaluate 工具调用。
 
-        assistant tool_calls 含 name=task_evaluate 且对应 role=tool 结果
-        内容带 success:true（task_evaluate 成功返回 {"success": true,...}）。
+        assistant tool_calls 含 name=task_evaluate 且对应 role=tool 结果为
+        JSON 载荷、顶层 success 字段布尔值为 true（task_evaluate 成功返回
+        {"success": true,...}）。结构化精确判定：非 JSON 载荷（模型复述字段
+        名的散文/打字稿）或非布尔 success 值均不构成评估证据。
         """
         eval_call_ids = set()
         for msg in messages:
@@ -302,10 +304,19 @@ class TaskReminder(IOutputPlugin):
         for msg in messages:
             if not isinstance(msg, dict) or msg.get("role") != "tool":
                 continue
-            if msg.get("tool_call_id") in eval_call_ids:
-                content = str(msg.get("content", ""))
-                if '"success": true' in content or '"success":true' in content:
-                    return True
+            if msg.get("tool_call_id") not in eval_call_ids:
+                continue
+            content = msg.get("content", "")
+            if not isinstance(content, str):
+                # 多模态块等非字符串载荷无 JSON 语义 → TypeError 显式失败路径
+                continue
+            try:
+                parsed = json.loads(content)
+            except (json.JSONDecodeError, TypeError):
+                # 散文/损坏 JSON 不构成证据（子串命中是误判来源）
+                continue
+            if isinstance(parsed, dict) and parsed.get("success") is True:
+                return True
         return False
 
     @staticmethod
@@ -389,10 +400,9 @@ class TaskReminder(IOutputPlugin):
         # 本轮 reminder 并留下可见日志。
         subtasks = task_service.list_subtasks(task_id)
 
-        active_statuses = {"pending", "running", "evaluating", "scheduled"}
         for st in subtasks:
             status = safe_enum_value(st.status)
-            if status in active_statuses:
+            if status in ACTIVE_TASK_STATUSES:
                 return True
         return False
 
@@ -458,7 +468,15 @@ class TaskReminder(IOutputPlugin):
         return "\n".join(parts)
 
     def _apply_runtime_config(self, ctx: PluginContext) -> None:
-        """从 Agent 配置覆盖运行时参数。"""
+        """从 Agent 配置覆盖运行时参数（每次 execute 复位后应用）。
+
+        同 sidecar 实例被多个 agent 管道连续复用：先回构造默认值再应用本管道
+        state / plugin_configs 注入的 max_reminders / evaluation_mode——前一
+        agent 的配置不得残留到下一 agent。
+        """
+        self._max_reminders = self._config.get("max_reminders", 10)
+        self._evaluation_mode = self._config.get("evaluation_mode", False)
+
         agent_max_reminders = ctx.state.get("max_reminders")
         if agent_max_reminders is not None and agent_max_reminders > 0:
             self._max_reminders = agent_max_reminders

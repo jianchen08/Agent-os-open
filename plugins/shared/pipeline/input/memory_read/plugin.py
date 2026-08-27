@@ -224,56 +224,51 @@ class MemoryReadPlugin(IInputPlugin):
     ) -> str:
         """摘要注入（SUMMARY）。
 
-        优先调用注入的 summarizer 服务（如 memory sidecar 暴露的 summarize 能力），
-        不可用时降级为检索结果拼接。
-
-        Args:
-            ctx: 插件执行上下文
-            backend: IMemoryBackend 实例
-            top_k: 返回数量
-            memory_type: 记忆类型
-            user_id: 用户 ID
-
-        Returns:
-            摘要文本
+        单一主通道：经注入的 capability_caller 跨进程调 hindsight.summarize
+        （recall + reflect 真摘要）。caller 未注入（sidecar 接线缺失/测试环境）
+        或调用失败时降级为检索结果拼接——拼接只是通道不可用时的环境降级，
+        不是并行的第二事实源。
         """
-        # 优先使用注入的 summarizer 服务（签名: async summarize(memory_type, top_k, user_id) -> str）
-        summarizer = None
+        if _capability_caller is None:
+            return await self._fallback_retrieval_concat(
+                ctx, backend, top_k, memory_type, user_id
+            )
+
         try:
-            summarizer = ctx.get_service("memory_summarizer")
-        except KeyError:
-            pass
+            query = ctx.state.get("user_message", "")
+            params = {
+                "tool_name": "hindsight.summarize",
+                "args": {
+                    "bank_id": user_id,
+                    "query": query,
+                    "top_k": top_k,
+                    "memory_type": memory_type,
+                },
+            }
+            result = await _capability_caller("tool-executor.invoke", params)
+            if isinstance(result, dict) and result.get("summary"):
+                return str(result["summary"])
+            logger.warning(
+                "[%s] hindsight.summarize 无有效摘要，降级检索拼接 | error=%s",
+                self.name,
+                result.get("error") if isinstance(result, dict) else result,
+            )
+        except Exception as e:
+            # 主通道故障 → 环境降级拼接；错误留 warning 可见，不伪装成"无记忆"
+            logger.warning(
+                "[%s] hindsight.summarize 调用失败，降级检索拼接: %s", self.name, e
+            )
+        return await self._fallback_retrieval_concat(ctx, backend, top_k, memory_type, user_id)
 
-        if summarizer is not None and hasattr(summarizer, "summarize"):
-            try:
-                return await summarizer.summarize(memory_type=memory_type, top_k=top_k, user_id=user_id)
-            except Exception as e:
-                logger.warning("[%s] summarizer 服务调用失败，降级拼接: %s", self.name, e)
-
-        # 其次：经 capability_caller 跨进程调 hindsight.summarize（recall + reflect 真摘要）
-        if _capability_caller is not None:
-            try:
-                query = ctx.state.get("user_message", "")
-                params = {
-                    "tool_name": "hindsight.summarize",
-                    "args": {
-                        "bank_id": user_id,
-                        "query": query,
-                        "top_k": top_k,
-                        "memory_type": memory_type,
-                    },
-                }
-                result = await _capability_caller("tool-executor.invoke", params)
-                if isinstance(result, dict) and result.get("summary"):
-                    return str(result["summary"])
-                if isinstance(result, dict) and result.get("error"):
-                    logger.warning(
-                        "[%s] hindsight.summarize 不可用降级拼接: %s", self.name, result.get("error")
-                    )
-            except Exception as e:
-                logger.warning("[%s] hindsight.summarize 调用失败，降级拼接: %s", self.name, e)
-
-        # 兜底：检索后拼接（hindsight 不可用 / 无 caller 时的保险路径）
+    async def _fallback_retrieval_concat(
+        self,
+        ctx: PluginContext,
+        backend: Any,
+        top_k: int,
+        memory_type: str,
+        user_id: str,
+    ) -> str:
+        """主通道不可用时拼接检索内容兜底。"""
         query = ctx.state.get("user_message", "")
         if query:
             results = await backend.search(query=query, user_id=user_id, top_k=top_k, memory_type=memory_type)

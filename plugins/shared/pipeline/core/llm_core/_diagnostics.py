@@ -264,3 +264,91 @@ def _sync_diag_handlers() -> None:
         if isinstance(h, logging.FileHandler):
             _diag_logger.addHandler(h)
             _diag_logger.setLevel(logging.DEBUG)
+
+
+# ── 流式接收端点诊断（自 adapter._process_chunk / _consume_stream 收口）───────
+# 契约：纯诊断路径，任何检视异常吞掉并记 debug（"诊断不阻断流"）；
+# 但不得再裸 pass——失败必须留 debug 痕迹。logger 经参数注入（adapter 在调用点
+# 解析其模块级 _diag_logger/_stream_logger），保证测试对 adapter logger 名的
+# monkeypatch 继续生效。
+
+
+def log_stream_chunk_trace(
+    class_name: str,
+    chunk_idx: int,
+    chunk: Any,
+    diag_logger: Any,
+) -> None:
+    """记录单 chunk 摘要（content/reasoning/tool_calls/usage 有无）。"""
+    delta = getattr(getattr(chunk, "choices", [None])[0], "delta", None)
+    tc = getattr(delta, "tool_calls", None)
+    usage = getattr(chunk, "usage", None)
+    if not (chunk_idx <= 1 or tc or usage):
+        return
+    rc = getattr(delta, "reasoning_content", None)
+    ct = getattr(delta, "content", None)
+    diag_logger.debug(
+        "[%s] chunk #%d: content=%s reasoning=%s tc=%s usage=%s",
+        class_name,
+        chunk_idx,
+        repr((ct or "")[:40]),
+        repr((rc or "")[:40]) if rc else "-",
+        "Y" if tc else "-",
+        "Y" if usage else "-",
+    )
+
+
+def stream_recv_chunk_diag(
+    chunk: Any,
+    *,
+    recv_seq: int,
+    recv_tc_count: int,
+    first_chunk: bool,
+    stream_logger: Any,
+) -> tuple[int, Any]:
+    """接收端点诊断：检查单个 chunk 是否携带 tool_calls / finish_reason。
+
+    Returns:
+        ``(更新后的 recv_tc_count, 本 chunk 的 finish_reason 或 None)``。
+        finish_reason 与 tool_calls 无关：终止 chunk（stop/length）不携带
+        tool_calls 也须上报（output_truncated 依赖 length 判定）。
+    """
+    where = "首chunk, " if first_chunk else ""
+    fr_out: Any = None
+    try:
+        rc = chunk.choices[0] if chunk.choices else None
+        if rc is None:
+            return recv_tc_count, None
+        d = getattr(rc, "delta", None)
+        fr = getattr(rc, "finish_reason", None)
+        tc = getattr(d, "tool_calls", None) if d else None
+
+        if tc:
+            recv_tc_count += 1
+            summaries: list[str] = []
+            for tci in tc:
+                fn = getattr(tci, "function", None)
+                name = getattr(fn, "name", "?") if fn else "?"
+                args = getattr(fn, "arguments", "") if fn else ""
+                summaries.append(f"{name}(args={len(args)}c)")
+            stream_logger.debug(
+                "[STREAM][RECV] #%d tool_calls 到达(%s%d个): %s",
+                recv_seq,
+                where,
+                len(tc),
+                ", ".join(summaries),
+            )
+        if fr:
+            # 先落返回值再打日志：诊断 logger 异常不得丢 finish_reason。
+            fr_out = fr
+            stream_logger.debug(
+                "[STREAM][RECV] #%d finish=%s (%s累计tc=%d)",
+                recv_seq,
+                fr,
+                where,
+                recv_tc_count,
+            )
+    except Exception as exc:
+        # 检视异常（如 arguments=None → len 失败）：吞掉但记 debug，不阻断流。
+        logger.debug("[recv_diag] chunk 诊断失败（已忽略）: %s", exc)
+    return recv_tc_count, fr_out

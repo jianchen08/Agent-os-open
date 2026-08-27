@@ -335,6 +335,69 @@ class TestTaskEvaluateEvidence:
         )
 
 
+class TestEvaluateEvidencePrecision:
+    """评估证据判定必须是结构化精确判定（json 解析后核对字段值）。
+
+    子串匹配会把「正文引用了 'success': true 字样」误判为已成功评估，
+    让提醒闸门放行跳过评估。
+    """
+
+    def _messages_with_eval(self, content: Any) -> list[dict[str, Any]]:
+        return [
+            {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [
+                    {"id": "call-p", "function": {"name": "task_evaluate"}}
+                ],
+            },
+            {"role": "tool", "tool_call_id": "call-p", "content": content},
+        ]
+
+    def test_feedback_mentioning_success_literal_is_not_evidence(self) -> None:
+        """失败 payload 附带的说明文字含 '"success": true' 字样不构成证据。
+
+        （载荷整体非法 JSON——真实场景是模型在 error/feedback 里复述字段名）
+        """
+        msgs = self._messages_with_eval(
+            'task_evaluate 失败：{"success": false}; 正确格式示例: "success": true'
+        )
+        assert TaskReminder._has_successful_task_evaluate(msgs) is False
+
+    def test_non_json_tool_content_is_not_evidence(self) -> None:
+        """工具结果是普通散文（不可解析 JSON）→ 不是证据，也不崩溃。"""
+        msgs = self._messages_with_eval("评估完成，一切正常, output says '\"success\": true'")
+        assert TaskReminder._has_successful_task_evaluate(msgs) is False
+
+    def test_non_string_content_type_error_is_not_evidence(self) -> None:
+        """content 为非字符串（如多模态块列表）→ TypeError 显式失败路径，不算证据。"""
+        msgs = self._messages_with_eval([{"type": "text", "text": '{"success": true}'}])
+        assert TaskReminder._has_successful_task_evaluate(msgs) is False
+
+    def test_string_true_is_not_boolean_success(self) -> None:
+        """success 字段为字符串 "true" 而非布尔 true → 精确判定不算证据。"""
+        msgs = self._messages_with_eval('{"success": "true"}')
+        assert TaskReminder._has_successful_task_evaluate(msgs) is False
+
+    def test_exhausted_reminders_with_fake_literal_marks_pending_evaluation(
+        self,
+    ) -> None:
+        """端到端：唯一 task_evaluate 结果是带子串的失败 payload → 提醒耗尽后
+        仍应裁决 pending_evaluation（放行 = 漏评任务被标 completed 的事故面）。"""
+        import asyncio
+
+        plugin = TaskReminder(config={"max_reminders": 2})
+        state = _base_task_state(
+            evaluate_reminder_count=2,
+            messages=self._messages_with_eval(
+                '{"success": false, "error": "missing \'success\': true marker"}'
+            ),
+        )
+        result = asyncio.run(plugin.execute(_ctx(state)))
+        assert result.route_signal is not None
+        assert result.state_updates.get("task.status") == "pending_evaluation"
+
+
 class TestMaxRemindersExhausted:
     def test_exhausted_without_evidence_marks_pending_evaluation(self) -> None:
         import asyncio

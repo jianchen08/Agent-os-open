@@ -112,7 +112,10 @@ def _json_response(payload: dict, status: int = 200) -> dict:
 def _decode_body(raw_body: str) -> dict:
     """解码 http.handle 的 raw_body（内核 dispatcher 恒 base64 编码；兼容明文）为 dict。
 
-    非法 JSON 抛 ValueError（调用方转 400）。
+    解码探测：先按 base64 试解，解出内容以 { / [ 开头才判定为编码体，
+    否则原样当作明文 JSON——base64.alphabet 之外的明文（含空白）必然在
+    这里落入 pass 分支，属正常路径而非吞错。非法 JSON 最终由下方
+    json.loads 转 ValueError（调用方转 400）。
     """
     if not raw_body:
         return {}
@@ -122,6 +125,7 @@ def _decode_body(raw_body: str) -> dict:
         if attempt.lstrip().startswith(("{", "[")):
             decoded = attempt
     except (ValueError, UnicodeDecodeError):
+        # 非 base64 载荷（明文直传的调用方）→ 保持原文交给 json.loads 判定
         pass
     try:
         parsed = json.loads(decoded) if decoded.strip() else {}

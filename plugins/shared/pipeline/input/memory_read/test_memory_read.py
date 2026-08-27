@@ -287,3 +287,53 @@ class TestSummaryInjection:
         injected = result.state_updates["memory.retrieved"]
         assert isinstance(injected, str)
         assert "记忆内容1" in injected
+
+
+class TestSingleSummaryChannel:
+    """SUMMARY 摘要单主通道契约（S16 收敛）。
+
+    历史上存在并存双通道：ctx 服务 memory_summarizer 与 capability caller
+    （hindsight.summarize），两路语义漂移。现行契约：capability caller 是
+    唯一主通道，任何同名 ctx 服务不得抢跑。
+    """
+
+    def _make_ctx_with_service(self, services: dict[str, Any]) -> Any:
+        return PluginContext(
+            state={"user_message": "总结偏好", "user_id": "u-1"},
+            config={},
+            _services=services,
+        )
+
+    def test_capability_caller_is_single_main_channel(self) -> None:
+        """caller 可用时即使注册了 memory_summarizer 服务也走 caller 主通道。"""
+        mod = _load_plugin_module()
+        mod.set_memory_backend(FakeBackend(results=[_SAMPLE]))
+        mod.set_capability_caller(FakeCaller({"summary": "主通道摘要", "recalled": 3}))
+
+        class _ShadowSummarizer:
+            async def summarize(self, **kwargs: Any) -> str:
+                return "旁路服务摘要（应被弃用）"
+
+        plugin = mod.MemoryReadPlugin(config={"inject_type": "summary"})
+        result = _run(plugin.execute(self._make_ctx_with_service({"memory_summarizer": _ShadowSummarizer()})))
+
+        assert result.state_updates["memory.retrieved"] == "主通道摘要"
+
+    def test_service_alone_does_not_satisfy_summary(self) -> None:
+        """只注册 memory_summarizer（无 caller）→ 不走该服务，落降级拼接。"""
+        mod = _load_plugin_module()
+        backend = FakeBackend(results=[_SAMPLE])
+        mod.set_memory_backend(backend)
+        mod.set_capability_caller(None)
+
+        class _ShadowSummarizer:
+            async def summarize(self, **kwargs: Any) -> str:
+                return "旁路服务摘要"
+
+        plugin = mod.MemoryReadPlugin(config={"inject_type": "summary"})
+        result = _run(plugin.execute(self._make_ctx_with_service({"memory_summarizer": _ShadowSummarizer()})))
+
+        injected = result.state_updates["memory.retrieved"]
+        assert isinstance(injected, str)
+        assert "记忆内容1" in injected, "无主通道时应为检索拼接而非旁路服务产物"
+        assert backend.search_calls, "降级拼接应有真实检索发生"

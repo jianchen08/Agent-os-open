@@ -169,6 +169,11 @@ class ContextBuildPlugin(IInputPlugin):
         """
         updates: dict[str, Any] = {}
 
+        # 同 sidecar 实例被多个 agent 管道连续复用：先复位实例层级默认值，
+        # 再按本管道 agent yaml 覆盖（下方第 2 步）——前一 agent 的 level
+        # 不得残留到下一 agent。
+        self._agent_level = self._config.get("agent_level", "L1")
+
         # 1. 系统提示词：优先 state 注入；否则按 state.agent_id 加载 agent yaml
         #    （agent 配置自持——内核不再读 yaml，只负责把 agent_id 放进 state）；
         #    最终回退插件配置默认。

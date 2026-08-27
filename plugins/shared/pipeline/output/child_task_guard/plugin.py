@@ -17,7 +17,7 @@ from typing import Any
 
 from enum_utils import safe_enum_value
 from pipeline.plugin import IOutputPlugin, OutputResult, PluginContext
-from pipeline.types import RouteSignal
+from pipeline.types import ACTIVE_TASK_STATUSES, RouteSignal
 
 logger = logging.getLogger(__name__)
 
@@ -152,8 +152,8 @@ class ChildTaskGuard(IOutputPlugin):
         Returns:
             (has_active, active_child_ids) 元组
         """
-        # 活跃态与 TaskStatus 枚举对齐（pending/running/evaluating）
-        active_statuses = {"pending", "running", "evaluating"}
+        # 活跃态全集 = pipeline.types.ACTIVE_TASK_STATUSES（与 TaskStatus 枚举对齐）
+        active_statuses = ACTIVE_TASK_STATUSES
         seen_ids: set[str] = set()
 
         # GAP-1 统一：主路径读 state 聚合（task = pipeline，lineage 即父链）——

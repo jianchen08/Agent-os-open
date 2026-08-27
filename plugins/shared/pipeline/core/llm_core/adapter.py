@@ -21,18 +21,20 @@ from typing import Any, Protocol, runtime_checkable
 
 import litellm
 
-# 诊断与审计基础设施（task_kernel_cleanup_and_split 3b：自本模块拆出，
-# logger 名保持 "adapter.*"，见 _diagnostics.py）。
+# 诊断与审计基础设施（自本模块拆出，logger 名保持 "adapter.*"，见 _diagnostics.py）。
 from _diagnostics import (
     _diag_logger,
     _log_prompt_body,
     _stream_logger,
     _sync_diag_handlers,
+    log_stream_chunk_trace,
+    stream_recv_chunk_diag,
 )
 
 # 提供者适配插件注册表（3a：MiniMax 角色修正 / DeepSeek extra_body 透传 /
 # <think/> 提取均按模型名分发到 llm_provider_* 插件，llm_core 不绑定提供者）。
 from _provider_registry import apply_pre_send, extract_thinking_from_content
+
 from agentos_plugin_sdk.stream_watchdog import StreamHardTimeout
 
 litellm.suppress_debug_info = True
@@ -772,25 +774,7 @@ class _BaseLiteLLMAdapter:
         if _chunk_idx <= 1 or _chunk_idx % 200 == 0:
             _sync_diag_handlers()
             if _diag_logger.handlers:
-                _delta = getattr(
-                    getattr(chunk, "choices", [None])[0],
-                    "delta",
-                    None,
-                )
-                _tc = getattr(_delta, "tool_calls", None)
-                _usage = getattr(chunk, "usage", None)
-                if _chunk_idx <= 1 or _tc or _usage:
-                    _rc = getattr(_delta, "reasoning_content", None)
-                    _ct = getattr(_delta, "content", None)
-                    _diag_logger.debug(
-                        "[%s] chunk #%d: content=%s reasoning=%s tc=%s usage=%s",
-                        type(self).__name__,
-                        _chunk_idx,
-                        repr((_ct or "")[:40]),
-                        repr((_rc or "")[:40]) if _rc else "-",
-                        "Y" if _tc else "-",
-                        "Y" if _usage else "-",
-                    )
+                log_stream_chunk_trace(type(self).__name__, _chunk_idx, chunk, _diag_logger)
         # 收集流式 usage（通常在最后一个 chunk）
         if hasattr(chunk, "usage") and chunk.usage:
             _prompt_details = getattr(chunk.usage, "prompt_tokens_details", None)
@@ -935,38 +919,17 @@ class _BaseLiteLLMAdapter:
                 inter_chunk_timeout,
             )
             _hard_timeout.arm()
-            # 接收端点诊断（首个 chunk）
+            # 接收端点诊断（首个 chunk）：tool_calls / finish_reason 到达检查
             state.recv_seq += 1
-            try:
-                _rc0 = chunk.choices[0] if chunk.choices else None
-                if _rc0 is not None:
-                    _d0 = getattr(_rc0, "delta", None)
-                    _fr0 = getattr(_rc0, "finish_reason", None)
-                    _tc0 = getattr(_d0, "tool_calls", None) if _d0 else None
-                    if _tc0:
-                        state.recv_tc_count += 1
-                        _tc_summary0 = []
-                        for _tci in _tc0:
-                            _fn0 = getattr(_tci, "function", None)
-                            _tc_name0 = getattr(_fn0, "name", "?") if _fn0 else "?"
-                            _tc_args0 = getattr(_fn0, "arguments", "") if _fn0 else ""
-                            _tc_summary0.append(f"{_tc_name0}(args={len(_tc_args0)}c)")
-                        _stream_logger.debug(
-                            "[STREAM][RECV] #%d tool_calls 到达(首chunk, %d个): %s",
-                            state.recv_seq,
-                            len(_tc0),
-                            ", ".join(_tc_summary0),
-                        )
-                    if _fr0:
-                        state.finish_reason = _fr0
-                        _stream_logger.debug(
-                            "[STREAM][RECV] #%d finish=%s (首chunk, 累计tc=%d)",
-                            state.recv_seq,
-                            _fr0,
-                            state.recv_tc_count,
-                        )
-            except Exception:
-                pass
+            state.recv_tc_count, _fr0 = stream_recv_chunk_diag(
+                chunk,
+                recv_seq=state.recv_seq,
+                recv_tc_count=state.recv_tc_count,
+                first_chunk=True,
+                stream_logger=_stream_logger,
+            )
+            if _fr0:
+                state.finish_reason = _fr0
 
             # 后续 chunk：逐次超时，每个 chunk 到达即重置计时器。
             # 活跃推理 chunk 间隔远小于 timeout 故不误触发；仅真正静默（死连接）累计满 timeout。
@@ -1007,41 +970,17 @@ class _BaseLiteLLMAdapter:
                     _hard_timeout.reset()
                 if await self._process_chunk(chunk, state):
                     break
-                # ── 接收端点诊断：每个 chunk 检查 delta.tool_calls 是否到达 ──
+                # ── 接收端点诊断：每个 chunk 检查 tool_calls / finish_reason 到达 ──
                 state.recv_seq += 1
-                try:
-                    _rc = chunk.choices[0] if chunk.choices else None
-                    if _rc is not None:
-                        _d = getattr(_rc, "delta", None)
-                        _fr = getattr(_rc, "finish_reason", None)
-                        _tc = getattr(_d, "tool_calls", None) if _d else None
-                        if _tc:
-                            state.recv_tc_count += 1
-                            # 打印完整 tool_call 内容（name + arguments 长度 + 预览）
-                            _tc_summary = []
-                            for _tci in _tc:
-                                _fn = getattr(_tci, "function", None)
-                                _tc_name = getattr(_fn, "name", "?") if _fn else "?"
-                                _tc_args = getattr(_fn, "arguments", "") if _fn else ""
-                                _tc_summary.append(f"{_tc_name}(args={len(_tc_args)}c)")
-                            _stream_logger.debug(
-                                "[STREAM][RECV] #%d tool_calls 到达(%d个): %s",
-                                state.recv_seq,
-                                len(_tc),
-                                ", ".join(_tc_summary),
-                            )
-                        # finish_reason 与 tool_calls 无关：终止 chunk（stop/length）
-                        # 不携带 tool_calls 也须记录（output_truncated 依赖 length 判定）
-                        if _fr:
-                            state.finish_reason = _fr
-                            _stream_logger.debug(
-                                "[STREAM][RECV] #%d finish=%s (累计tc=%d)",
-                                state.recv_seq,
-                                _fr,
-                                state.recv_tc_count,
-                            )
-                except Exception:
-                    pass
+                state.recv_tc_count, _fr = stream_recv_chunk_diag(
+                    chunk,
+                    recv_seq=state.recv_seq,
+                    recv_tc_count=state.recv_tc_count,
+                    first_chunk=False,
+                    stream_logger=_stream_logger,
+                )
+                if _fr:
+                    state.finish_reason = _fr
         finally:
             # 取消心跳探针任务（避免任务泄漏：超时/异常/正常结束都要清理）
             if _heartbeat_task is not None and not _heartbeat_task.done():

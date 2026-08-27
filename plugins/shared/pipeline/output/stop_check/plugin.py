@@ -266,6 +266,10 @@ class StopCheckPlugin(IOutputPlugin):
         当 state["task_status"] 未被更新时，通过查询 task_service 获取
         任务的真实状态。为避免频繁数据库访问，每 3 次迭代查询一次。
 
+        服务获取：优先 ctx 公共服务面注册的 task_service；未注册（sidecar
+        布局无跨进程任务服务）时回退进程内 tasks.service_access 单例。
+        查询失败记 warning（与正常运行轮次区分可见），本轮按未终态继续。
+
         Args:
             ctx: 插件执行上下文
 
@@ -280,50 +284,76 @@ class StopCheckPlugin(IOutputPlugin):
         if not task_id:
             return ""
 
+        task_service = self._get_task_service(ctx)
+        if task_service is None:
+            return ""
+
         try:
-            task_service = ctx._services.get("task_service")
-            if task_service is None:
-                return ""
-
             task = task_service.get_task(task_id)
-            if task is None:
-                return ""
-
-            status = task.status
-            if hasattr(status, "value"):
-                status = status.value
-            status = str(status)
-
-            if status in self._TERMINAL_STATUSES:
-                logger.info(
-                    "[%s] Task actual status is terminal: %s (task=%s, detected via task_service query, iter=%d)",
-                    self.name,
-                    status,
-                    task_id,
-                    iteration,
-                )
-                return status
         except Exception as exc:
-            logger.debug(
-                "[%s] Failed to query task actual status: %s",
+            logger.warning(
+                "[%s] TaskService 状态查询失败，本轮按未终态继续 | task=%s | %s: %s",
                 self.name,
+                task_id,
+                type(exc).__name__,
                 exc,
             )
+            return ""
+
+        if task is None:
+            return ""
+
+        status = task.status
+        if hasattr(status, "value"):
+            status = status.value
+        status = str(status)
+
+        if status in self._TERMINAL_STATUSES:
+            logger.info(
+                "[%s] Task actual status is terminal: %s (task=%s, detected via task_service query, iter=%d)",
+                self.name,
+                status,
+                task_id,
+                iteration,
+            )
+            return status
 
         return ""
 
+    def _get_task_service(self, ctx: PluginContext) -> Any | None:
+        """获取 TaskService 实例（公共服务面优先，进程内单例兜底）。
+
+        Returns:
+            服务实例；两侧均不可用时 None（查询通道缺失，跳过本轮实际状态检查）
+        """
+        try:
+            return ctx.get_service("task_service")
+        except KeyError:
+            pass
+        # sidecar 无注册服务：回退公共 service_access 单例；
+        # 单例初始化失败返回 None（service_access 自身已记日志），不抛。
+        try:
+            from tasks.service_access import get_task_service  # noqa: PLC0415
+        except ImportError:
+            return None
+        return get_task_service()
+
     def _apply_runtime_config(self, ctx: PluginContext) -> None:
-        """从 Agent 配置覆盖运行时参数。
+        """从 Agent 配置覆盖运行时参数（每次 execute 复位后应用）。
 
-        优先使用 Agent YAML 中配置的 max_iterations / timeout_seconds
-        覆盖构造时的默认值。特殊值 -1 表示无限制。
+        同 sidecar 实例被多个 agent 管道连续复用：先回构造默认值再应用本管道
+        state 注入的 max_iterations / timeout_seconds 覆盖——前一 agent 注入的
+        阈值不得残留到下一 agent。特殊值 -1 表示无限制。
 
-        重置 _start_time，防止共享插件实例在子管道（如评估管道）中
-        因 elapsed 时间已超过 timeout_seconds 而误触发超时终止。
+        重置 _start_time（新 pipeline_id 首次出现时），防止共享实例在子管道
+        （如评估管道）中因 elapsed 时间已超过 timeout_seconds 而误触发超时终止。
 
         Args:
             ctx: 插件执行上下文
         """
+        self._max_iterations = self._config.get("max_iterations", 20)
+        self._max_duration = self._config.get("max_duration_seconds", 600)
+
         agent_max_iter = ctx.state.get("max_iterations")
         if agent_max_iter is not None:
             self._max_iterations = agent_max_iter

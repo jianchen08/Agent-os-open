@@ -62,6 +62,12 @@ class ErrorPolicy(Enum):
     RETRY = "retry"
 
 
+# 任务"活跃"状态全集（与 tasks.types.TaskStatus 枚举语义对齐：未到终态且
+# 未停摆）：pending / running / evaluating。任务域插件（task_reminder 活跃
+# 子任务判定、child_task_guard 挂起判定等）统一引用此常量，禁止各自散定义。
+ACTIVE_TASK_STATUSES = frozenset({"pending", "running", "evaluating"})
+
+
 @dataclass
 class RouteSignal:
     """路由信号数据类。
