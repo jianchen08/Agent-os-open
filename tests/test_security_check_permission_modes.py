@@ -13,6 +13,7 @@
 
 from __future__ import annotations
 
+from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
@@ -30,6 +31,13 @@ from plugin import SecurityCheckPlugin  # noqa: E402
 pytestmark = pytest.mark.unit
 
 
+@pytest.fixture(autouse=True)
+def _restore_cap_routing():
+    """每个测试结束后摘除显式注入的审批通道，恢复按 plugin 引用自动解析。"""
+    yield
+    sc_mod.set_human_interaction_cap(None)
+
+
 def _make_plugin(mode_default: str = "default", rules: list[dict[str, Any]] | None = None) -> Any:
     """构造插件：mock 轨道 1（policy 非命令类）+ 注入轨道 2 数据源 + 审批 mock。"""
     mock_policy = MagicMock()
@@ -44,13 +52,26 @@ def _make_plugin(mode_default: str = "default", rules: list[dict[str, Any]] | No
     return p
 
 
-def _mock_approval(plugin_mod: Any, selected: str = "approved_once") -> None:
-    """mock _get_human_interaction_cap 返回假 capability（审批直接返回 selected）。"""
+def _mock_approval(selected: str = "approved_once") -> Any:
+    """经公开装配缝注入假 human-interaction capability，返回服务边界观察器。
+
+    观察器的 ``requests`` 记录发往交互服务的每次 create_choice 请求载荷，
+    是"是否弹了审批"的可观察副作用；空列表 = 全程未发起审批。
+    """
+    requests: list[dict[str, Any]] = []
+
+    async def _call(name: str, params: dict, **kwargs: Any):
+        if name == "create_choice":
+            requests.append(dict(params))
+            return {"request_id": f"req-{len(requests)}"}
+        if name == "wait_for_choice":
+            return {"selected_option": selected}
+        raise AssertionError(f"unexpected cap.call: {name}")
+
     fake_cap = AsyncMock()
-    fake_cap.call.side_effect = lambda name, params: (
-        {"request_id": "r1"} if name == "create_choice" else {"selected_option": selected}
-    )
-    plugin_mod._get_human_interaction_cap = MagicMock(return_value=fake_cap)  # type: ignore[method-assign]
+    fake_cap.call.side_effect = _call
+    sc_mod.set_human_interaction_cap(fake_cap)
+    return SimpleNamespace(requests=requests)
 
 
 def _ctx(state: dict[str, Any]) -> PluginContext:
@@ -78,47 +99,50 @@ def _clear_session_modes() -> None:
 class TestDefaultMode:
     @pytest.mark.asyncio
     async def test_危险命令弹审批(self) -> None:
-        _mock_approval(sc_mod)
+        svc = _mock_approval()
         p = _make_plugin()
         result = await p.execute(_ctx(_tool_state("bash_execute", {"command": "rm -rf /x"})))
-        fake_cap = sc_mod._get_human_interaction_cap()
-        assert fake_cap.call.await_count >= 1
+        assert len(svc.requests) >= 1
         assert result.state_updates["security.decision"]["allowed"] is True
 
     @pytest.mark.asyncio
     async def test_无会话模式时用配置默认(self) -> None:
         _clear_session_modes()
-        _mock_approval(sc_mod)
+        svc = _mock_approval()
         p = _make_plugin(mode_default="default")
         result = await p.execute(_ctx(_tool_state("bash_execute", {"command": "rm -rf /x"})))
-        assert sc_mod._get_human_interaction_cap().call.await_count >= 1
+        # 配置默认模式为 default：危险命令走审批链，交互服务恰好收到一次审批请求
+        assert len(svc.requests) == 1
+        decision = result.state_updates["security.decision"]
+        assert decision["allowed"] is True
+        assert decision["reason"] == "approved"
 
 
 class TestAcceptEdits:
     @pytest.mark.asyncio
     async def test_文件类放行(self) -> None:
-        _mock_approval(sc_mod)
+        svc = _mock_approval()
         p = _make_plugin()
         _set_pipeline_mode("p1", "accept_edits")
         result = await p.execute(_ctx(_tool_state("file_write", {"path": "/etc/hosts", "content": "x"})))
         assert result.state_updates["security.decision"]["allowed"] is True
         assert "tool_results" not in result.state_updates
-        assert sc_mod._get_human_interaction_cap().call.await_count == 0
+        assert len(svc.requests) == 0, "accept_edits 下文件类放行不得发起审批请求"
 
     @pytest.mark.asyncio
     async def test_命令类仍弹审批(self) -> None:
-        _mock_approval(sc_mod)
+        svc = _mock_approval()
         p = _make_plugin()
         _set_pipeline_mode("p1", "accept_edits")
         result = await p.execute(_ctx(_tool_state("bash_execute", {"command": "rm -rf /x"})))
-        assert sc_mod._get_human_interaction_cap().call.await_count >= 1
+        assert len(svc.requests) >= 1
         assert result.state_updates["security.decision"]["allowed"] is True
 
 
 class TestAutoMode:
     @pytest.mark.asyncio
     async def test_block规则自动拒绝不弹审批(self) -> None:
-        _mock_approval(sc_mod)
+        svc = _mock_approval()
         p = _make_plugin(
             rules=[
                 {
@@ -132,13 +156,13 @@ class TestAutoMode:
         )
         _set_pipeline_mode("p1", "auto")
         result = await p.execute(_ctx(_tool_state("bash_execute", {"command": "rm -rf danger-x /a"})))
-        assert sc_mod._get_human_interaction_cap().call.await_count == 0
+        assert len(svc.requests) == 0, "block 规则自动拒绝不得发起审批请求"
         assert result.state_updates["security.decision"]["allowed"] is True
         assert "tool_results" in result.state_updates
 
     @pytest.mark.asyncio
     async def test_needs_approval规则弹审批(self) -> None:
-        _mock_approval(sc_mod)
+        svc = _mock_approval()
         p = _make_plugin(
             rules=[
                 {
@@ -152,48 +176,48 @@ class TestAutoMode:
         )
         _set_pipeline_mode("p1", "auto")
         result = await p.execute(_ctx(_tool_state("bash_execute", {"command": "rm -rf /x"})))
-        assert sc_mod._get_human_interaction_cap().call.await_count >= 1
+        assert len(svc.requests) >= 1
         assert result.state_updates["security.decision"]["allowed"] is True
 
 
 class TestPlanMode:
     @pytest.mark.asyncio
     async def test_写类自动拒绝不弹审批(self) -> None:
-        _mock_approval(sc_mod)
+        svc = _mock_approval()
         p = _make_plugin()
         _set_pipeline_mode("p1", "plan")
         result = await p.execute(_ctx(_tool_state("file_write", {"path": "/etc/hosts", "content": "x"})))
-        assert sc_mod._get_human_interaction_cap().call.await_count == 0
+        assert len(svc.requests) == 0
         assert "tool_results" in result.state_updates
 
     @pytest.mark.asyncio
     async def test_bash命令自动拒绝不弹审批(self) -> None:
-        _mock_approval(sc_mod)
+        svc = _mock_approval()
         p = _make_plugin()
         _set_pipeline_mode("p1", "plan")
         result = await p.execute(_ctx(_tool_state("bash_execute", {"command": "rm -rf /x"})))
-        assert sc_mod._get_human_interaction_cap().call.await_count == 0
+        assert len(svc.requests) == 0
         assert "tool_results" in result.state_updates
 
     @pytest.mark.asyncio
     async def test_读类放行(self) -> None:
-        _mock_approval(sc_mod)
+        svc = _mock_approval()
         p = _make_plugin()
         _set_pipeline_mode("p1", "plan")
         result = await p.execute(_ctx(_tool_state("file_read", {"path": "/etc/passwd"})))
         assert result.state_updates["security.decision"]["allowed"] is True
         assert "tool_results" not in result.state_updates
-        assert sc_mod._get_human_interaction_cap().call.await_count == 0
+        assert len(svc.requests) == 0
 
 
 class TestBypassMode:
     @pytest.mark.asyncio
     async def test_危险命令放行不弹审批(self) -> None:
-        _mock_approval(sc_mod)
+        svc = _mock_approval()
         p = _make_plugin()
         _set_pipeline_mode("p1", "bypass")
         result = await p.execute(_ctx(_tool_state("bash_execute", {"command": "rm -rf /x"})))
-        assert sc_mod._get_human_interaction_cap().call.await_count == 0
+        assert len(svc.requests) == 0
         assert result.state_updates["security.decision"]["allowed"] is True
         assert "tool_results" not in result.state_updates
 
@@ -201,16 +225,16 @@ class TestBypassMode:
 class TestModePriority:
     @pytest.mark.asyncio
     async def test_会话模式优先于配置默认(self) -> None:
-        _mock_approval(sc_mod)
+        svc = _mock_approval()
         p = _make_plugin(mode_default="default")
         _set_pipeline_mode("p1", "bypass")
         result = await p.execute(_ctx(_tool_state("bash_execute", {"command": "rm -rf /x"})))
-        assert sc_mod._get_human_interaction_cap().call.await_count == 0
+        assert len(svc.requests) == 0
 
     @pytest.mark.asyncio
     async def test_不同会话互不影响(self) -> None:
-        _mock_approval(sc_mod)
+        svc = _mock_approval()
         p = _make_plugin(mode_default="default")
         _set_pipeline_mode("p1", "bypass")
         result = await p.execute(_ctx(_tool_state("bash_execute", {"command": "rm -rf /x"}, pipeline_id="p2")))
-        assert sc_mod._get_human_interaction_cap().call.await_count >= 1
+        assert len(svc.requests) >= 1

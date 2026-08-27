@@ -5,7 +5,7 @@
 
 安全检查维度：
 1. 路径遍历检测（内置，不依赖配置规则）
-2. 工作目录边界检查（内置，workspace 路径从 config 读取）
+2. 敏感系统目录黑名单 + CMD nul 重定向检测（内置）
 3. 配置规则匹配（通用引擎，从 YAML 加载）
 
 对于 needs_approval 规则，插件内部通过 human_interaction 服务
@@ -24,7 +24,6 @@ import re
 import urllib.parse
 from typing import Any
 
-from models import Priority, ResponseType  # noqa: F401
 from service import (
     InteractionCancelledError,
     InteractionDeniedError,
@@ -34,6 +33,9 @@ from service import (
 # server.py 的 on_load 注入 plugin 引用，据此拿 human-interaction capability。
 _PLUGIN_REF: Any = None
 
+# 显式注入的 human-interaction capability handle（公开装配缝，优先于自动解析）。
+_HUMAN_INTERACTION_CAP: Any = None
+
 
 def _set_plugin_ref(ref: Any) -> None:
     """由 server.py on_load 调用，注入 AgentOSPlugin 实例引用。"""
@@ -41,8 +43,20 @@ def _set_plugin_ref(ref: Any) -> None:
     _PLUGIN_REF = ref
 
 
+def set_human_interaction_cap(cap: Any) -> None:
+    """注入 human-interaction capability handle（公开装配缝）。
+
+    生产路径经 server.py on_load 注入 plugin 引用后按名自动解析，不经本函数；
+    显式设定的 handle 优先于自动解析。传 None 恢复自动解析。
+    """
+    global _HUMAN_INTERACTION_CAP  # noqa: PLW0603
+    _HUMAN_INTERACTION_CAP = cap
+
+
 def _get_human_interaction_cap() -> Any | None:
     """获取 human-interaction capability handle，未注入返回 None。"""
+    if _HUMAN_INTERACTION_CAP is not None:
+        return _HUMAN_INTERACTION_CAP
     if _PLUGIN_REF is None:
         return None
     try:
@@ -167,7 +181,7 @@ class SecurityCheckPlugin(IInputPlugin):
 
     检查顺序：
     1. 路径遍历检测（内置）
-    2. 工作目录边界检查（内置）
+    2. 敏感系统目录黑名单 + nul 重定向检测（内置）
     3. 配置规则匹配（通用引擎）
 
     优先级：70（校验级，在参数注入之后）
@@ -184,7 +198,6 @@ class SecurityCheckPlugin(IInputPlugin):
         Args:
             config: 插件配置字典，支持以下键：
                 - enabled: 是否启用安全检查（默认 True）
-                - workspace: 允许的工作目录
                 - max_path_depth: 最大路径深度（默认 10）
                 - rules_path: 规则配置文件路径（默认 config/isolation/security_rules.yaml）
                 - rules: 直接传入规则列表（如果提供则不从文件加载）
@@ -196,7 +209,6 @@ class SecurityCheckPlugin(IInputPlugin):
         """
         self._config = config or {}
         self._enabled = self._config.get("enabled", True)
-        self._workspace = self._config.get("workspace", "")
         self._max_path_depth = self._config.get("max_path_depth", 10)
         self._fuzzy_tool_matching = self._config.get("fuzzy_tool_matching", False)
         self._path_params = self._config.get(
@@ -219,7 +231,6 @@ class SecurityCheckPlugin(IInputPlugin):
                 "cmd",
             ],
         )
-        self._allowed_base_paths = self._config.get("allowed_base_paths", ["skills"])
 
         # 本管道内已记忆"通过"的命令指纹集合。
         # 作用域为单管道实例：每个 PipelineEngine 创建时 fork() 出独立插件实例
@@ -261,11 +272,15 @@ class SecurityCheckPlugin(IInputPlugin):
         },
     ]
 
-    def _load_rules(self) -> list[dict[str, Any]]:  # type: ignore[return]
+    def _load_rules(self) -> list[dict[str, Any]]:
         """从配置或 YAML 文件加载安全规则。
 
         优先使用 config 中直接提供的 rules 列表，
         否则从 rules_path 指定的 YAML 文件加载。
+
+        YAML 无 rules 键、数据形状不符或加载异常时一律回退内联默认规则：
+        规则缺位 = 安全闸门失效（_match_rules 迭代 None 直接 TypeError），
+        本方法在任何路径下都不允许返回 None。
 
         Returns:
             安全规则列表，每条规则包含 name、tools、params、action、patterns
@@ -279,6 +294,7 @@ class SecurityCheckPlugin(IInputPlugin):
         # 这里只需兜底防御 ConfigCenter 抛出意外异常（如未初始化）。
         rules_path = self._config.get("rules_path", "config/isolation/security_rules.yaml")
         rel = rules_path.replace("config/", "", 1) if rules_path.startswith("config/") else rules_path
+        data: Any = None
         try:
             from config.config_center import get_config_center  # noqa: PLC0415
             # P1-7 DEBT(task_11): 🔴 高危——安全规则直读，迁移需 manifest 加 config_files
@@ -286,14 +302,19 @@ class SecurityCheckPlugin(IInputPlugin):
             # 见 docs/working/p1_7_config_center_migration_checklist.md #1，整体延后 P6。
 
             data = get_config_center().get(rel)
-            if data and "rules" in data:
-                return data["rules"]
-        except Exception:
-            logger.warning("[%s] No rules found in %s，回退内联默认规则", self.name, rules_path)
-            return list(self._DEFAULT_RULES)
-        except Exception:
-            logger.warning("[%s] Rules file load failed: %s，回退内联默认规则", self.name, rules_path)
-            return list(self._DEFAULT_RULES)
+        except Exception as exc:
+            logger.warning("[%s] Rules file load failed: %s", self.name, exc)
+
+        yaml_rules = data.get("rules") if isinstance(data, dict) else None
+        if yaml_rules:
+            return yaml_rules
+
+        logger.warning(
+            "[%s] No rules found in %s，回退内联默认规则",
+            self.name,
+            rules_path,
+        )
+        return list(self._DEFAULT_RULES)
 
     @property
     def name(self) -> str:
@@ -1170,48 +1191,6 @@ class SecurityCheckPlugin(IInputPlugin):
 
         return ""
 
-    def _check_workspace_boundary(self, args: dict[str, Any], workspace: str | None = None) -> str:
-        """检查文件操作是否在允许的目录边界内（内置安全机制）。
-
-        对绝对路径检查是否在 workspace 或 allowed_base_paths 目录范围内，
-        使用 realpath 解析符号链接，防止通过符号链接绕过边界。
-
-        支持动态 workspace：优先使用传入的 workspace 参数（来自 state），
-        回退到实例属性 self._workspace（来自配置），确保 worktree 模式下
-        不会因路径与配置不一致而误判为越界。
-
-        allowed_base_paths 支持项目内相对目录（如 skills），
-        用于允许 Agent 访问项目级资源（如 Skill 脚本）。
-
-        Args:
-            args: 工具参数
-            workspace: 动态 workspace 路径（来自 state），为 None 时回退到配置值
-
-        Returns:
-            拦截原因字符串，空字符串表示通过
-        """
-        effective_workspace = workspace or self._workspace
-        if not effective_workspace:
-            return ""
-
-        allowed_bases = [os.path.realpath(effective_workspace)]
-        for extra in self._allowed_base_paths:
-            abs_extra = extra if os.path.isabs(extra) else os.path.join(_PROJECT_ROOT, extra)  # noqa: PTH117
-            allowed_bases.append(os.path.realpath(abs_extra))
-
-        for key in self._path_params:
-            if key in args:
-                path = str(args[key])
-                if os.path.isabs(path):  # noqa: PTH117
-                    real_path = os.path.normcase(os.path.realpath(path))
-                    if not any(
-                        real_path == os.path.normcase(base) or real_path.startswith(os.path.normcase(base) + os.sep)
-                        for base in allowed_bases
-                    ):
-                        return f"Path outside allowed boundaries: {path}"
-
-        return ""
-
     def _check_sensitive_paths(self, args: dict[str, Any]) -> str:
         """检查路径参数是否命中敏感系统目录黑名单（内置安全机制）。
 
@@ -1272,7 +1251,7 @@ class SecurityCheckPlugin(IInputPlugin):
         return ""
 
     def _is_dangerous_tool(self, ctx: PluginContext, tool_name: str, tool_args: dict[str, Any] | None = None) -> bool:
-        """判定工具调用是否属于危险操作（host 模式下需要参数审批把关）。
+        r"""判定工具调用是否属于危险操作（host 模式下需要参数审批把关）。
 
         双轨判定（满足任一即为危险）：
         1. policy.execution == "command_in_container" —— bash 等命令执行类
@@ -1314,7 +1293,7 @@ class SecurityCheckPlugin(IInputPlugin):
     _OP_ARGS = ("operation", "op", "action")
 
     def _args_hit_dangerous_ops(self, tool_args: dict[str, Any] | None, ops: list[str]) -> bool:
-        """按参数内容判定是否命中 dangerous_operations 声明。
+        r"""按参数内容判定是否命中 dangerous_operations 声明。
 
         声明格式（与 config/tools/builtin_tools_config.yaml 对齐）：
         - ``read:/etc/`` / ``write:C:\Windows\``：操作:路径前缀，匹配路径参数

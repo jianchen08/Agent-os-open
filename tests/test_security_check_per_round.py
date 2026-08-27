@@ -25,7 +25,7 @@ import plugin as sc_mod  # noqa: E402
 不仅是返回值。
 """
 
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock
 
 import pytest
 from pipeline.plugin import PluginContext
@@ -33,11 +33,18 @@ from pipeline.plugin import PluginContext
 pytestmark = pytest.mark.unit
 
 
-def _approval_svc(sequence: list[dict]):
-    """构造 human-interaction capability mock，按 sequence 依次返回审批结果。
+@pytest.fixture(autouse=True)
+def _restore_cap_routing():
+    """每个测试结束后摘除显式注入的审批通道，恢复按 plugin 引用自动解析。"""
+    yield
+    sc_mod.set_human_interaction_cap(None)
 
-    0.2 审批走 capability 调用（security_check._get_human_interaction_cap →
-    hi_cap.call("create_choice"/"wait_for_choice")），本 helper 模拟该形状。
+
+def _approval_svc(sequence: list[dict]):
+    """构造假 human-interaction capability 并经公开装配缝注入，按 sequence 返回审批结果。
+
+    审批请求经 capability 调用（sc_mod.set_human_interaction_cap 显式注入 →
+    hi_cap.call("create_choice"/"wait_for_choice")），本 helper 模拟该服务形状。
     每次 wait_for_choice 消费 sequence 中一项，用于模拟多轮审批。
 
     Args:
@@ -45,7 +52,7 @@ def _approval_svc(sequence: list[dict]):
 
     Returns:
         (cap, create_call_count) —— cap 为假 capability 对象，
-        create_call_count 为 create_choice 被调用次数的可观测计数器。
+        create_call_count 为 create_choice 次数的可观测计数器。
     """
     it = iter(sequence)
     counter = [0]
@@ -68,6 +75,7 @@ def _approval_svc(sequence: list[dict]):
 
     cap = AsyncMock()
     cap.call.side_effect = _call  # 与 permission_modes 同款：side_effect 挂在 .call 属性上
+    sc_mod.set_human_interaction_cap(cap)
     return cap, _Counter()
 
 
@@ -92,7 +100,7 @@ class TestPerRoundApproval:
     """契约：同一插件实例跨轮调用，每轮危险命令都要审批。"""
 
     @pytest.mark.asyncio
-    async def test_second_round_still_triggers_approval(self, monkeypatch):
+    async def test_second_round_still_triggers_approval(self):
         """第一轮审批通过后，第二轮换不同危险命令 → 必须再次审批。
 
         契约：审批状态不得跨轮驻留 state 使第二轮跳过（每轮独立检查 →
@@ -104,7 +112,6 @@ class TestPerRoundApproval:
             {"selected_option": "approved_once"},
             {"selected_option": "approved_once"},
         ])
-        monkeypatch.setattr(sc_mod, "_get_human_interaction_cap", lambda: cap)
 
         plugin = SecurityCheckPlugin(config={"enabled": True, "rules": []})
 
@@ -122,7 +129,7 @@ class TestPerRoundApproval:
         )
 
     @pytest.mark.asyncio
-    async def test_residual_decision_does_not_skip(self, monkeypatch):
+    async def test_residual_decision_does_not_skip(self):
         """state 中预先残留 security.decision 也不应跳过检查。
 
         直接验证幂等检查已被删除：手动注入 allowed=True 的旧决策，
@@ -131,7 +138,6 @@ class TestPerRoundApproval:
         SecurityCheckPlugin = sc_mod.SecurityCheckPlugin
 
         cap, create = _approval_svc([{"selected_option": "approved_once"}])
-        monkeypatch.setattr(sc_mod, "_get_human_interaction_cap", lambda: cap)
 
         plugin = SecurityCheckPlugin(config={"enabled": True, "rules": []})
         ctx = _ctx_for("bash_execute", "rm -rf /tmp/evil")
@@ -151,12 +157,11 @@ class TestSignatureMemory:
     """体验增强契约：approved_remember 记忆精确指纹，本管道内同命令免批。"""
 
     @pytest.mark.asyncio
-    async def test_remembered_command_skips_approval(self, monkeypatch):
+    async def test_remembered_command_skips_approval(self):
         """approved_remember 后，同工具+同命令再次调用 → 不再审批（放行）。"""
         SecurityCheckPlugin = sc_mod.SecurityCheckPlugin
 
         cap, create = _approval_svc([{"selected_option": "approved_remember"}])
-        monkeypatch.setattr(sc_mod, "_get_human_interaction_cap", lambda: cap)
 
         plugin = SecurityCheckPlugin(config={"enabled": True, "rules": []})
 
@@ -173,7 +178,7 @@ class TestSignatureMemory:
         assert r2.state_updates.get("security.decision", {}).get("allowed") is True
 
     @pytest.mark.asyncio
-    async def test_approved_once_does_not_remember(self, monkeypatch):
+    async def test_approved_once_does_not_remember(self):
         """approved_once 不记忆 → 同命令再次调用仍要审批。"""
         SecurityCheckPlugin = sc_mod.SecurityCheckPlugin
 
@@ -181,7 +186,6 @@ class TestSignatureMemory:
             {"selected_option": "approved_once"},
             {"selected_option": "approved_once"},
         ])
-        monkeypatch.setattr(sc_mod, "_get_human_interaction_cap", lambda: cap)
 
         plugin = SecurityCheckPlugin(config={"enabled": True, "rules": []})
 
@@ -196,7 +200,7 @@ class TestSignatureMemory:
         assert create.calls == 2, "approved_once 未记忆，同命令仍应审批"
 
     @pytest.mark.asyncio
-    async def test_different_path_still_requires_approval(self, monkeypatch):
+    async def test_different_path_still_requires_approval(self):
         """记忆命令 A 后，命令 B（路径不同）→ 仍要审批（精确匹配，不模糊）。"""
         SecurityCheckPlugin = sc_mod.SecurityCheckPlugin
 
@@ -204,7 +208,6 @@ class TestSignatureMemory:
             {"selected_option": "approved_remember"},
             {"selected_option": "approved_once"},
         ])
-        monkeypatch.setattr(sc_mod, "_get_human_interaction_cap", lambda: cap)
 
         plugin = SecurityCheckPlugin(config={"enabled": True, "rules": []})
 
@@ -219,7 +222,7 @@ class TestSignatureMemory:
         assert create.calls == 2, "不同路径的命令必须重新审批"
 
     @pytest.mark.asyncio
-    async def test_whitespace_normalized_to_same_signature(self, monkeypatch):
+    async def test_whitespace_normalized_to_same_signature(self):
         """命令多余空白归一化为同一指纹 → 免审批。
 
         "curl   http://x"（多空格）与 "rm -rf /tmp/x"（单空格）视为同命令。
@@ -227,7 +230,6 @@ class TestSignatureMemory:
         SecurityCheckPlugin = sc_mod.SecurityCheckPlugin
 
         cap, create = _approval_svc([{"selected_option": "approved_remember"}])
-        monkeypatch.setattr(sc_mod, "_get_human_interaction_cap", lambda: cap)
 
         plugin = SecurityCheckPlugin(config={"enabled": True, "rules": []})
 
@@ -258,14 +260,13 @@ class TestLabelBasedSelection:
     """
 
     @pytest.mark.asyncio
-    async def test_label_remember_triggers_signature_memory(self, monkeypatch):
+    async def test_label_remember_triggers_signature_memory(self):
         """提交 label '本管道内同命令免批' → 等价 approved_remember → 记忆指纹。"""
         SecurityCheckPlugin = sc_mod.SecurityCheckPlugin
 
         cap, create = _approval_svc(
             [{"selected_option": "本管道内同命令免批"}]
         )
-        monkeypatch.setattr(sc_mod, "_get_human_interaction_cap", lambda: cap)
 
         plugin = SecurityCheckPlugin(config={"enabled": True, "rules": []})
 
@@ -281,14 +282,13 @@ class TestLabelBasedSelection:
         assert r2.state_updates.get("security.decision", {}).get("allowed") is True
 
     @pytest.mark.asyncio
-    async def test_label_once_does_not_remember(self, monkeypatch):
+    async def test_label_once_does_not_remember(self):
         """提交 label '仅本次执行' → 等价 approved_once → 不记忆指纹。"""
         SecurityCheckPlugin = sc_mod.SecurityCheckPlugin
 
         cap, create = _approval_svc(
             [{"selected_option": "仅本次执行"}, {"selected_option": "仅本次执行"}]
         )
-        monkeypatch.setattr(sc_mod, "_get_human_interaction_cap", lambda: cap)
 
         plugin = SecurityCheckPlugin(config={"enabled": True, "rules": []})
 
@@ -303,12 +303,11 @@ class TestLabelBasedSelection:
         assert create.calls == 2, "label 路径 approved_once 未记忆，同命令仍应审批"
 
     @pytest.mark.asyncio
-    async def test_label_denied_soft_blocks(self, monkeypatch):
+    async def test_label_denied_soft_blocks(self):
         """提交 label '拒绝执行' → 等价 denied → 软拦截，不放行。"""
         SecurityCheckPlugin = sc_mod.SecurityCheckPlugin
 
         cap, _create = _approval_svc([{"selected_option": "拒绝执行"}])
-        monkeypatch.setattr(sc_mod, "_get_human_interaction_cap", lambda: cap)
 
         plugin = SecurityCheckPlugin(config={"enabled": True, "rules": []})
 
