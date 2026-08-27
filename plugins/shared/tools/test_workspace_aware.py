@@ -25,7 +25,8 @@ pytestmark = pytest.mark.unit
 _TOOLS_DIR = Path(__file__).resolve().parent  # plugins/shared/tools/
 _SYSTEM_DIR = _TOOLS_DIR.parent / "system"
 _ISOLATION_DIR = _SYSTEM_DIR / "isolation"
-for _p in (_TOOLS_DIR, _SYSTEM_DIR, _ISOLATION_DIR):
+_DOWNLOAD_DIR = _TOOLS_DIR / "download"  # 插件自带策略模块所在目录
+for _p in (_TOOLS_DIR, _SYSTEM_DIR, _ISOLATION_DIR, _DOWNLOAD_DIR):
     if str(_p) not in sys.path:
         sys.path.insert(0, str(_p))
 

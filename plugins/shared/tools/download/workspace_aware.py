@@ -11,17 +11,10 @@
 import logging
 import platform
 import re
-import sys
 from pathlib import Path
 from typing import Any
 
 _logger = logging.getLogger(__name__)
-
-# 自带策略模块与本模块同目录；server.py 已把插件目录放入 sys.path，
-# 独立装载（测试经 spec_from_file_location）时由此处自举补齐。
-_THIS_DIR = str(Path(__file__).resolve().parent)
-if _THIS_DIR not in sys.path:
-    sys.path.insert(0, _THIS_DIR)
 
 # 策略层不可用（自带策略模块缺失）的一次性告警开关：fail-closed 拒绝所有路径操作，
 # 但告警只发一次，避免每个请求重复刷屏。

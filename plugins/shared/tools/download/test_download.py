@@ -652,7 +652,7 @@ class TestPathPolicyFailClosed:
         monkeypatch.setattr(
             mixin_cls,
             "_get_policy_manager",
-            classmethod(lambda cls: None),
+            classmethod(lambda _cls: None),
         )
         wa_mod = sys.modules.get("workspace_aware")
         if wa_mod is not None and hasattr(wa_mod, "_policy_unavailable_warned"):
@@ -664,7 +664,8 @@ class TestPathPolicyFailClosed:
         tool = DownloadTool()
         r = _run(tool.execute({"url": "https://example.com/file.zip", "save_path": str(tmp_path / "out")}))
         assert not r.success
-        assert "拒绝" in r.error and "权限" in r.error
+        assert "拒绝" in r.error
+        assert "权限" in r.error
 
     def test_execute_denial_precedes_network_and_write(self, monkeypatch, tmp_path: Path) -> None:
         """拒绝发生在联网与落盘之前——不可用状态下不产生任何副作用。"""

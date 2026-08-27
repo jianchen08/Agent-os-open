@@ -22,6 +22,11 @@ import pytest
 pytestmark = pytest.mark.unit
 
 _TOOLS_DIR = Path(__file__).resolve().parent.parent  # plugins/shared/tools/
+_DOWNLOAD_DIR = _TOOLS_DIR / "download"
+# 平铺插件目录自治：自带策略模块与其消费方（workspace_aware）都在插件目录，
+# 由本测试显式挂载——host 端等价物是 server.py 的 sys.path 引导。
+if str(_DOWNLOAD_DIR) not in sys.path:
+    sys.path.insert(0, str(_DOWNLOAD_DIR))
 
 
 def _load_module():
