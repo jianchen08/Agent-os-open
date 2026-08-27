@@ -93,11 +93,6 @@ export async function cancelLongTermTask(taskId: string, reason?: string): Promi
   return response.data
 }
 
-/** 删除长期任务 */
-export async function deleteLongTermTask(taskId: string): Promise<void> {
-  await apiClient.delete(API_ENDPOINTS.TASKS.DELETE(taskId))
-}
-
 /** 将 Task 转换为 Project 格式 */
 export function taskToProject(task: Task) {
   return {

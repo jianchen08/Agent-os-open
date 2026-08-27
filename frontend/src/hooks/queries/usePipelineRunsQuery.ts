@@ -94,27 +94,12 @@ export function readPipelineRuns(): Record<string, PipelineRunInfo> {
   return queryClient.getQueryData<Record<string, PipelineRunInfo>>(queryKeys.pipelineRuns) ?? {}
 }
 
-/** 非组件环境读当前缓存的 states 摘要（无缓存返回空对象） */
-export function readPipelineStates(): Record<string, PipelineStateInfo> {
-  return queryClient.getQueryData<Record<string, PipelineStateInfo>>(queryKeys.pipelineStates) ?? {}
-}
-
 /** 更新缓存的 runs 注册表（WS 流式事件增量写；无缓存视同 {}） */
 export function updatePipelineRunsCache(
   updater: (prev: Record<string, PipelineRunInfo>) => Record<string, PipelineRunInfo>,
 ): void {
   queryClient.setQueryData<Record<string, PipelineRunInfo>>(
     queryKeys.pipelineRuns,
-    (prev) => updater(prev ?? {}),
-  )
-}
-
-/** 更新缓存的 states 摘要（无缓存视同 {}） */
-export function updatePipelineStatesCache(
-  updater: (prev: Record<string, PipelineStateInfo>) => Record<string, PipelineStateInfo>,
-): void {
-  queryClient.setQueryData<Record<string, PipelineStateInfo>>(
-    queryKeys.pipelineStates,
     (prev) => updater(prev ?? {}),
   )
 }

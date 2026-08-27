@@ -2,7 +2,7 @@
  * 成本控制 API 服务测试
  *
  * 覆盖 /ext/cost_control/* 端点封装：预算状态、使用统计、成本配置、
- * 成本报表、预算重置，以及 costControlApi 聚合导出。
+ * 成本报表、预算重置。
  */
 
 /* eslint-disable import-x/order */
@@ -168,16 +168,6 @@ describe('成本控制 API', () => {
       expect(apiClient.post).toHaveBeenCalledWith('/ext/cost_control/budget/reset', null, {
         params: { session_id: 's1' },
       })
-    })
-  })
-
-  describe('costControlApi 聚合导出', () => {
-    it('导出全部 5 个函数', () => {
-      expect(typeof costControlApiModule.costControlApi.getBudgetStatus).toBe('function')
-      expect(typeof costControlApiModule.costControlApi.getUsageStatistics).toBe('function')
-      expect(typeof costControlApiModule.costControlApi.getCostConfig).toBe('function')
-      expect(typeof costControlApiModule.costControlApi.getCostReport).toBe('function')
-      expect(typeof costControlApiModule.costControlApi.resetBudget).toBe('function')
     })
   })
 })

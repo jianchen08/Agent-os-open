@@ -5,7 +5,6 @@
  * - getUsers(skip, limit): 获取用户列表
  * - getUserStats(): 获取用户统计
  * - createUser(data): 创建用户（含 email 可选字段）
- * - updateUserRole(userId, role): 更新用户角色
  * - updateUserActiveStatus(userId, isActive): 更新用户激活状态
  * - deleteUser(userId): 删除用户
  */
@@ -77,20 +76,6 @@ export async function createUser(data: CreateUserRequest): Promise<User> {
   } catch (error) {
     reportError('创建用户失败', 'validation', 'error', {
       code: 'CREATE_USER_FAILED',
-    })
-    throw error
-  }
-}
-
-export async function updateUserRole(userId: string, role: 'admin' | 'user'): Promise<User> {
-  try {
-    const response = await apiClient.put<User>(API_ENDPOINTS.USERS.UPDATE_ROLE(userId), null, {
-      params: { role },
-    })
-    return response.data
-  } catch (error) {
-    reportError('更新用户角色失败', 'validation', 'error', {
-      code: 'UPDATE_ROLE_FAILED',
     })
     throw error
   }

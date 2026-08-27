@@ -145,31 +145,6 @@ describe('用户管理 API', () => {
     })
   })
 
-  describe('updateUserRole - 更新角色', () => {
-    it('PUT 角色到用户子路径', async () => {
-      vi.mocked(apiClient.put).mockResolvedValueOnce(okResponse({ ...user, role: 'admin' }))
-
-      const result = await usersApi.updateUserRole('u1', 'admin')
-
-      expect(result.role).toBe('admin')
-      expect(apiClient.put).toHaveBeenCalledWith('/ext/user_admin/users/u1/role', null, {
-        params: { role: 'admin' },
-      })
-    })
-
-    it('失败时上报错误并重新抛出', async () => {
-      vi.mocked(apiClient.put).mockRejectedValueOnce(new Error('Network Error'))
-
-      await expect(usersApi.updateUserRole('u1', 'user')).rejects.toThrow('Network Error')
-      expect(reportErrorMock).toHaveBeenCalledWith(
-        '更新用户角色失败',
-        'validation',
-        'error',
-        { code: 'UPDATE_ROLE_FAILED' },
-      )
-    })
-  })
-
   describe('updateUserActiveStatus - 更新激活状态', () => {
     it('PUT 激活状态到用户子路径', async () => {
       vi.mocked(apiClient.put).mockResolvedValueOnce(okResponse({ ...user, is_active: false }))

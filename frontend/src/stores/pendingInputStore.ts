@@ -103,9 +103,3 @@ export const usePendingInputStore = create<PendingInputStore>((set, get) => ({
     }))
   },
 }))
-
-/** 取某管道队列条数（组件渲染用；空管道返回 0） */
-export function pendingInputCount(pipelineId: string | undefined | null): number {
-  if (!pipelineId) return 0
-  return usePendingInputStore.getState().byPipeline[pipelineId]?.length ?? 0
-}

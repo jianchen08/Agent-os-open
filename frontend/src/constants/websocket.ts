@@ -43,27 +43,6 @@ const WS_BASE_URL = import.meta.env.VITE_WS_BASE_URL || deriveWsUrl(API_BASE_URL
  */
 export const PROTOCOL_VERSION = '3.0.0'
 
-// ---- ACK 配置 ----
-
-/**
- * ACK 确认超时时间（毫秒）
- */
-export const WS_ACK_TIMEOUT = 10_000
-
-/**
- * ACK 确认最大重试次数
- */
-export const WS_ACK_MAX_RETRIES = 3
-
-/**
- * 需要 ACK 确认的服务端事件类型集合
- */
-export const WS_ACK_REQUIRED_EVENTS: ReadonlySet<string> = new Set([
-  'interaction_request',
-  'approval_required',
-  'approval_request',
-])
-
 /**
  * 构建全局 WebSocket 连接 URL（不带 thread_id）
  *
@@ -236,7 +215,7 @@ const WS_CLIENT_MESSAGES = {
 } as const
 
 /**
- * 审批决策类型
+ * 审批决策常量（单一事实来源）
  */
 export const APPROVAL_DECISIONS = {
   /** 批准 */
@@ -247,6 +226,9 @@ export const APPROVAL_DECISIONS = {
   MODIFY: 'modify',
 } as const
 
+/** 审批决策类型（从 APPROVAL_DECISIONS 派生，避免同值漂移） */
+export type ApprovalDecisionType = (typeof APPROVAL_DECISIONS)[keyof typeof APPROVAL_DECISIONS]
+
 /**
  * WebSocket事件类型
  */
@@ -254,9 +236,6 @@ export type WebSocketServerEventType = (typeof WS_SERVER_EVENTS)[keyof typeof WS
 
 export type WebSocketClientMessageType =
   (typeof WS_CLIENT_MESSAGES)[keyof typeof WS_CLIENT_MESSAGES]
-
-/** 审批决策类型（仅 ApprovalMessage 内部使用） */
-type ApprovalDecisionType = 'approve' | 'reject' | 'modify'
 
 /**
  * WebSocket错误码枚举

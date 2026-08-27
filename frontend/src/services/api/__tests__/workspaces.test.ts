@@ -2,8 +2,7 @@
  * 工作空间 API 服务测试
  *
  * 覆盖 /ext/workspace_service/workspaces/{container_task_id}* 端点封装：
- * 详情、制品、文件树、创建/删除/重命名/移动条目、文件内容读取、
- * IDE 打开降级（未实现时返回失败）。
+ * 创建/删除/重命名/移动条目、文件内容读取。
  */
 
 /* eslint-disable import-x/order */
@@ -30,39 +29,6 @@ describe('工作空间 API', () => {
 
   afterEach(() => {
     vi.clearAllMocks()
-  })
-
-  describe('查询类接口', () => {
-    it('getWorkspace 请求详情端点（返回原始响应）', async () => {
-      vi.mocked(apiClient.get).mockResolvedValueOnce(okResponse({ id: 'ws1' }))
-
-      const result = await workspacesApi.getWorkspace('t1')
-
-      expect(result.data.id).toBe('ws1')
-      expect(apiClient.get).toHaveBeenCalledWith(
-        '/ext/workspace_service/workspaces/t1',
-      )
-    })
-
-    it('getWorkspaceArtifacts 请求制品端点', async () => {
-      vi.mocked(apiClient.get).mockResolvedValueOnce(okResponse({ items: [] }))
-
-      await workspacesApi.getWorkspaceArtifacts('t1')
-
-      expect(apiClient.get).toHaveBeenCalledWith(
-        '/ext/workspace_service/workspaces/t1/artifacts',
-      )
-    })
-
-    it('getFileTree 请求文件树端点', async () => {
-      vi.mocked(apiClient.get).mockResolvedValueOnce(okResponse({ tree: [] }))
-
-      await workspacesApi.getFileTree('t1')
-
-      expect(apiClient.get).toHaveBeenCalledWith(
-        '/ext/workspace_service/workspaces/t1/file-tree',
-      )
-    })
   })
 
   describe('条目操作', () => {
@@ -123,17 +89,6 @@ describe('工作空间 API', () => {
         '/ext/workspace_service/workspaces/t1/file-content',
         { params: { path: '/a/b.txt' } },
       )
-    })
-  })
-
-  describe('openFileInIDE - IDE 打开（未实现降级）', () => {
-    it('返回失败结果且不发起请求', async () => {
-      const result = await workspacesApi.openFileInIDE()
-
-      expect(result.data.success).toBe(false)
-      expect(result.data.message).toContain('IDE 连接器尚未实现')
-      expect(apiClient.get).not.toHaveBeenCalled()
-      expect(apiClient.post).not.toHaveBeenCalled()
     })
   })
 })

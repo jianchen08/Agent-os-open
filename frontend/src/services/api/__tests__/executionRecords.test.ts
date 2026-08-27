@@ -1,8 +1,8 @@
 /**
  * Execution Records API 服务测试
  *
- * 覆盖 /ext/monitoring/execution/records* 端点封装：分组概要、列表、会话列表、
- * 单条记录（失败降级 null）、记录树、子记录（空数据兜底 []）、清空（破坏性操作）。
+ * 覆盖 /ext/monitoring/execution/records* 端点封装：列表、会话列表、
+ * 单条记录（失败降级 null）、子记录（空数据兜底 []）、清空（破坏性操作）。
  */
 
 /* eslint-disable import-x/order */
@@ -27,37 +27,6 @@ describe('Execution Records API', () => {
 
   afterEach(() => {
     vi.clearAllMocks()
-  })
-
-  describe('getRecordGroupSummary - 分组概要', () => {
-    it('不带 sessionId 时请求无查询参数', async () => {
-      const resp = { groups: [], total_groups: 0 }
-      vi.mocked(apiClient.get).mockResolvedValueOnce(okResponse(resp))
-
-      const result = await executionRecordsApi.getRecordGroupSummary()
-
-      expect(result).toEqual(resp)
-      expect(apiClient.get).toHaveBeenCalledWith(
-        '/ext/monitoring/execution/records/group-summary',
-        { params: {} },
-      )
-    })
-
-    it('带 sessionId 时透传查询参数', async () => {
-      const resp = {
-        groups: [{ parent_record_id: 'p1', record_count: 2, earliest_time: null }],
-        total_groups: 1,
-      }
-      vi.mocked(apiClient.get).mockResolvedValueOnce(okResponse(resp))
-
-      const result = await executionRecordsApi.getRecordGroupSummary('s1')
-
-      expect(result.total_groups).toBe(1)
-      expect(apiClient.get).toHaveBeenCalledWith(
-        '/ext/monitoring/execution/records/group-summary',
-        { params: { session_id: 's1' } },
-      )
-    })
   })
 
   describe('getExecutionRecords - 列表', () => {
@@ -130,33 +99,6 @@ describe('Execution Records API', () => {
 
       expect(result).toBeNull()
       consoleSpy.mockRestore()
-    })
-  })
-
-  describe('getExecutionTree - 记录树', () => {
-    it('默认 maxDepth=5', async () => {
-      const resp = { tree: [], total: 0, session_id: 's1', max_depth: 5 }
-      vi.mocked(apiClient.get).mockResolvedValueOnce(okResponse(resp))
-
-      const result = await executionRecordsApi.getExecutionTree('s1')
-
-      expect(result.max_depth).toBe(5)
-      expect(apiClient.get).toHaveBeenCalledWith(
-        '/ext/monitoring/execution/records/tree/s1',
-        { params: { max_depth: 5 } },
-      )
-    })
-
-    it('自定义 maxDepth', async () => {
-      const resp = { tree: [], total: 0, session_id: 's1', max_depth: 3 }
-      vi.mocked(apiClient.get).mockResolvedValueOnce(okResponse(resp))
-
-      await executionRecordsApi.getExecutionTree('s1', 3)
-
-      expect(apiClient.get).toHaveBeenCalledWith(
-        '/ext/monitoring/execution/records/tree/s1',
-        { params: { max_depth: 3 } },
-      )
     })
   })
 

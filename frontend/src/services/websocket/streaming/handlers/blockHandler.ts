@@ -453,13 +453,3 @@ export function clearBlockStateForMessage(pipelineId: string, messageId: string)
   flushPendingForMessage(messageId)
   _blockStates.delete(stateKey(pipelineId, messageId))
 }
-
-/** 测试/收尾入口：清空全部块状态与待刷写队列 */
-export function clearAllBlockStates(): void {
-  if (_flushRafId !== null) {
-    cancelAnimationFrame(_flushRafId)
-    _flushRafId = null
-  }
-  _pendingFlush.clear()
-  _blockStates.clear()
-}

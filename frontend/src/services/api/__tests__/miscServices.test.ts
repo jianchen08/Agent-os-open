@@ -1,25 +1,19 @@
 /**
- * 小型 API 服务测试（ASR / 全局搜索 / 会话 Token 用量 / Payload 诊断 / 评估指标）
+ * 小型 API 服务测试（ASR / 全局搜索 / Payload 诊断 / 评估指标）
  *
- * 覆盖五个此前无测试的端点封装：
+ * 覆盖四个此前无测试的端点封装：
  * - asr.transcribeAudio：multipart 上传、503 静默降级 null、其余错误抛出
  * - search.searchGlobal：查询参数透传 + requestWithRetry 包装
- * - sessions：会话 Token 总量 / 上下文 Token 用量（可选父记录参数）
  * - llmPayload：payload 快照列表 / 单文件读取
- * - evaluationMetrics：指标列表字段归一化、单条详情、删除（失败降级 false）
+ * - evaluationMetrics：指标列表字段归一化
  */
 
 /* eslint-disable import-x/order */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { transcribeAudio } from '@/services/api/asr'
 import { searchGlobal } from '@/services/api/search'
-import { getSessionTotalTokenUsage, getContextTokenUsage } from '@/services/api/sessions'
 import { getPayloadDiagList, getPayloadDiagFile } from '@/services/api/llmPayload'
-import {
-  getEvaluationMetrics,
-  getEvaluationMetric,
-  deleteEvaluationMetric,
-} from '@/services/api/evaluationMetrics'
+import { getEvaluationMetrics } from '@/services/api/evaluationMetrics'
 
 vi.mock('../client', () => ({
   default: {
@@ -99,58 +93,6 @@ describe('全局搜索 API - searchGlobal', () => {
     expect(apiClient.get).toHaveBeenCalledWith('/ext/monitoring/search', {
       params: { q: 'q', type: 'message', limit: 5 },
     })
-  })
-})
-
-describe('会话 Token 用量 API - sessions', () => {
-  beforeEach(() => {
-    vi.clearAllMocks()
-  })
-
-  afterEach(() => {
-    vi.clearAllMocks()
-  })
-
-  it('getSessionTotalTokenUsage 请求总量端点', async () => {
-    const resp = {
-      session_id: 's1',
-      total_tokens: 100,
-      prompt_tokens: 60,
-      completion_tokens: 40,
-      request_count: 2,
-    }
-    vi.mocked(apiClient.get).mockResolvedValueOnce(okResponse(resp))
-
-    const result = await getSessionTotalTokenUsage('s1')
-
-    expect(result.total_tokens).toBe(100)
-    expect(apiClient.get).toHaveBeenCalledWith(
-      '/ext/monitoring/sessions/s1/total-token-usage',
-    )
-  })
-
-  it('getContextTokenUsage 无父记录时不带查询参数', async () => {
-    const resp = { current_context_tokens: 50, is_estimated: false, model: 'm' }
-    vi.mocked(apiClient.get).mockResolvedValueOnce(okResponse(resp))
-
-    const result = await getContextTokenUsage('s1')
-
-    expect(result.current_context_tokens).toBe(50)
-    expect(apiClient.get).toHaveBeenCalledWith(
-      '/ext/monitoring/sessions/s1/context-token-usage',
-      { params: undefined },
-    )
-  })
-
-  it('getContextTokenUsage 带父记录时透传参数', async () => {
-    vi.mocked(apiClient.get).mockResolvedValueOnce(okResponse({}))
-
-    await getContextTokenUsage('s1', 'p1')
-
-    expect(apiClient.get).toHaveBeenCalledWith(
-      '/ext/monitoring/sessions/s1/context-token-usage',
-      { params: { parent_execution_record_id: 'p1' } },
-    )
   })
 })
 
@@ -244,32 +186,5 @@ describe('评估指标 API - evaluationMetrics', () => {
     expect(apiClient.get).toHaveBeenCalledWith('/ext/evaluation_service/metrics', {
       params: { skip: 0, limit: 20 },
     })
-  })
-
-  it('getEvaluationMetric 请求单条详情', async () => {
-    const metric = { id: 'm1', name: 'correctness', description: 'd' }
-    vi.mocked(apiClient.get).mockResolvedValueOnce(okResponse(metric))
-
-    const result = await getEvaluationMetric('m1')
-
-    expect(result.id).toBe('m1')
-    expect(apiClient.get).toHaveBeenCalledWith('/ext/evaluation_service/metrics/m1')
-  })
-
-  it('deleteEvaluationMetric 成功返回 true', async () => {
-    vi.mocked(apiClient.delete).mockResolvedValueOnce(okResponse({}))
-
-    const result = await deleteEvaluationMetric('m1')
-
-    expect(result).toBe(true)
-    expect(apiClient.delete).toHaveBeenCalledWith('/ext/evaluation_service/metrics/m1')
-  })
-
-  it('deleteEvaluationMetric 失败降级返回 false', async () => {
-    vi.mocked(apiClient.delete).mockRejectedValueOnce(new Error('Network Error'))
-
-    const result = await deleteEvaluationMetric('m1')
-
-    expect(result).toBe(false)
   })
 })

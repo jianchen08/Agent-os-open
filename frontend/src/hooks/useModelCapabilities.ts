@@ -154,7 +154,7 @@ export function useModelCapabilities(modelName: string | undefined) {
 }
 
 /**
- * 清除能力缓存（用于测试或强制刷新）
+ * 清除模块级能力缓存，保证各用例互不串扰
  */
 export function clearCapabilitiesCache() {
   capabilitiesCache.clear()

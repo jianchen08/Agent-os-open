@@ -245,14 +245,3 @@ export async function resetBudget(params?: BudgetStatusParams): Promise<BudgetRe
   )
   return response.data
 }
-
-/**
- * 成本控制 API 对象（用于导出）
- */
-export const costControlApi = {
-  getBudgetStatus,
-  getUsageStatistics,
-  getCostConfig,
-  getCostReport,
-  resetBudget,
-}

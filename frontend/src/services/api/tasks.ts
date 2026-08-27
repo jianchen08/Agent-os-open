@@ -5,16 +5,11 @@
  */
 
 import { API_ENDPOINTS } from '@/constants/api'
-import { TASK_SERVICE_ENDPOINTS } from './endpoints.generated'
 import apiClient from '@/services/api/client'
 import type {
-  AcceptanceCriterion,
-  GetPhaseOutputResponse,
   GetProjectsResponse,
-  GetTaskACsResponse,
   GetTaskPhaseResponse,
   Project,
-  TaskPhase,
 } from '@/types/task'
 
 /**
@@ -66,43 +61,6 @@ export interface TaskInfo {
 }
 
 /**
- * 任务调试信息类型 - 包含所有原始字段
- */
-export interface TaskDebugInfo {
-  id: string
-  parent_task_id: string | null
-  execution_record_id: string | null
-  user_id: string | null
-  session_id: string | null
-  title: string
-  goal: Record<string, unknown> | null
-  target_type: string | null
-  target_id: string | null
-  target_name: string | null
-  priority: number
-  dependencies: string[] | null
-  due_date: string | null
-  retry_count: number
-  max_retries: number
-  evaluation_metric_ids: string[] | null
-  status: string
-  started_at: string | null
-  completed_at: string | null
-  created_at: string
-  updated_at: string
-  metadata: Record<string, unknown> | null
-  tags: string[] | null
-}
-
-/**
- * 任务调试列表响应
- */
-export interface TaskDebugListResponse {
-  items: TaskDebugInfo[]
-  total: number
-}
-
-/**
  * 任务列表响应
  */
 export interface TaskListResponse {
@@ -129,17 +87,6 @@ export async function getTasks(params?: {
 }
 
 /**
- * 获取单个任务
- *
- * @param id 任务 ID
- * @returns 任务详情
- */
-export async function getTask(id: string): Promise<TaskInfo> {
-  const response = await apiClient.get<TaskInfo>(API_ENDPOINTS.TASKS.GET(id))
-  return response.data
-}
-
-/**
  * 删除任务
  *
  * @param id 任务 ID
@@ -152,23 +99,6 @@ export async function deleteTask(id: string): Promise<boolean> {
   } catch {
     return false
   }
-}
-
-/**
- * 获取任务调试数据（全字段）
- *
- * @param params 查询参数
- * @returns 任务调试列表
- */
-export async function getTasksDebug(params?: {
-  skip?: number
-  limit?: number
-  sort_by?: string
-  sort_order?: 'asc' | 'desc'
-  status?: string
-}): Promise<TaskDebugListResponse> {
-  const response = await apiClient.get<TaskDebugListResponse>(TASK_SERVICE_ENDPOINTS.tasks_debug_all, { params })
-  return response.data
 }
 
 // ============================================================================
@@ -188,17 +118,6 @@ export async function fetchProjects(params?: {
 }): Promise<GetProjectsResponse> {
   const response = await apiClient.get<GetProjectsResponse>(API_ENDPOINTS.PROJECTS.LIST, { params })
   return response.data
-}
-
-/**
- * 获取项目详情
- *
- * @param projectId 项目 ID
- * @returns 项目详情
- */
-export async function fetchProject(projectId: string): Promise<Project> {
-  const response = await apiClient.get<{ project: Project }>(API_ENDPOINTS.PROJECTS.GET(projectId))
-  return response.data.project
 }
 
 /**
@@ -250,32 +169,6 @@ export async function createRootTask(payload: {
 }): Promise<TaskInfo> {
   const response = await apiClient.post<TaskInfo>(API_ENDPOINTS.TASKS.CREATE_ROOT, payload)
   return response.data
-}
-
-/**
- * 列出会话的容器任务（供新建子任务选父容器）
- *
- * @param sessionId 会话 ID（=thread_id）
- * @returns 容器任务列表（id + title）
- */
-export async function getContainerTasks(
-  sessionId: string,
-): Promise<Array<{ id: string; title: string }>> {
-  const response = await apiClient.get<Array<{ id: string; title: string }>>(
-    API_ENDPOINTS.TASKS.CONTAINERS,
-    { params: { session_id: sessionId } },
-  )
-  return response.data
-}
-
-/**
- * 删除项目
- *
- * @param projectId 项目 ID
- * @returns 是否成功
- */
-export async function deleteProject(projectId: string): Promise<void> {
-  await apiClient.delete(API_ENDPOINTS.PROJECTS.DELETE(projectId))
 }
 
 /**
@@ -337,54 +230,6 @@ export async function fetchTaskPhase(taskId: string): Promise<GetTaskPhaseRespon
     API_ENDPOINTS.TASK_PHASES.GET_STATUS(taskId),
   )
   return response.data
-}
-
-/**
- * 获取阶段产物
- *
- * @param taskId 任务 ID
- * @param phase 阶段名称
- * @returns 阶段产物
- */
-export async function fetchPhaseOutput(
-  taskId: string,
-  phase: TaskPhase,
-): Promise<GetPhaseOutputResponse> {
-  const response = await apiClient.get<GetPhaseOutputResponse>(
-    API_ENDPOINTS.TASK_PHASES.GET_OUTPUT(taskId, phase),
-  )
-  return response.data
-}
-
-// ============================================================================
-// 验收标准（AC）API
-// ============================================================================
-
-/**
- * 获取任务所有验收标准
- *
- * @param taskId 任务 ID
- * @returns AC 列表
- */
-export async function fetchTaskACs(taskId: string): Promise<GetTaskACsResponse> {
-  const response = await apiClient.get<GetTaskACsResponse>(
-    API_ENDPOINTS.TASK_EVALUATION.LIST(taskId),
-  )
-  return response.data
-}
-
-/**
- * 获取验收标准评估结果
- *
- * @param taskId 任务 ID
- * @param acId AC ID
- * @returns 验收标准信息
- */
-export async function fetchACResult(taskId: string, acId: string): Promise<AcceptanceCriterion> {
-  const response = await apiClient.get<{ acceptance_criterion: AcceptanceCriterion }>(
-    API_ENDPOINTS.TASK_EVALUATION.GET_RESULT(taskId, acId),
-  )
-  return response.data.acceptance_criterion
 }
 
 // ============================================================================

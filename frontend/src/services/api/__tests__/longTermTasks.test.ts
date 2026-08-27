@@ -72,13 +72,6 @@ describe('longTermTasks API 端点路径（4c 迁移：/ext/task_service/tasks�
     expect(postMock.mock.calls[0][0]).toBe('/ext/task_service/tasks/t1/cancel')
   })
 
-  it('deleteLongTermTask 请求 DELETE /ext/task_service/tasks/{id}', async () => {
-    await longTermTaskApi.deleteLongTermTask('t1')
-
-    expect(deleteMock).toHaveBeenCalledTimes(1)
-    expect(deleteMock.mock.calls[0][0]).toBe('/ext/task_service/tasks/t1')
-  })
-
   it('pause/resume 请求 PATCH /ext/task_service/tasks/{id}', async () => {
     await longTermTaskApi.pauseLongTermTask('t1')
     await longTermTaskApi.resumeLongTermTask('t1')

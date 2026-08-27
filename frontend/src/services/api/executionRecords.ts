@@ -63,52 +63,6 @@ export interface SessionsListResponse {
 }
 
 /**
- * 执行记录树形结构响应
- */
-export interface ExecutionRecordTreeResponse {
-  tree: ExecutionRecord[]
-  total: number
-  session_id: string
-  max_depth: number
-}
-
-/**
- * 分组概要信息
- */
-export interface RecordGroupSummary {
-  parent_record_id: string
-  record_count: number
-  earliest_time: string | null
-  first_record?: ExecutionRecord
-}
-
-/**
- * 分组概要响应
- */
-export interface RecordGroupSummaryResponse {
-  groups: RecordGroupSummary[]
-  total_groups: number
-}
-
-/**
- * 获取执行记录分组概要
- *
- * @param sessionId 会话ID（可选）
- * @returns 分组概要列表
- */
-export async function getRecordGroupSummary(
-  sessionId?: string,
-): Promise<RecordGroupSummaryResponse> {
-  const params: Record<string, string> = {}
-  if (sessionId) params.session_id = sessionId
-  const response = await apiClient.get<RecordGroupSummaryResponse>(
-    MONITORING_ENDPOINTS.mon_execution_records_group_summary,
-    { params },
-  )
-  return response.data
-}
-
-/**
  * 获取执行记录列表
  *
  * @param params 查询参数
@@ -147,24 +101,6 @@ export async function getExecutionRecord(recordId: string): Promise<ExecutionRec
     console.error('[ExecutionRecordsAPI] 获取执行记录失败:', error)
     return null
   }
-}
-
-/**
- * 获取执行记录树（嵌套结构）
- *
- * @param sessionId 会话ID
- * @param maxDepth 最大深度
- * @returns 执行记录树
- */
-export async function getExecutionTree(
-  sessionId: string,
-  maxDepth: number = 5,
-): Promise<ExecutionRecordTreeResponse> {
-  const response = await apiClient.get<ExecutionRecordTreeResponse>(
-    MONITORING_ENDPOINTS.mon_execution_records_tree.replace('{session_id}', sessionId),
-    { params: { max_depth: maxDepth } },
-  )
-  return response.data
 }
 
 /**

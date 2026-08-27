@@ -95,29 +95,3 @@ export async function getEvaluationMetrics(params?: {
     total: response.data.total,
   }
 }
-
-/**
- * 获取单个评估指标
- *
- * @param id 指标 ID
- * @returns 评估指标详情
- */
-export async function getEvaluationMetric(id: string): Promise<EvaluationMetric> {
-  const response = await apiClient.get<EvaluationMetric>(API_ENDPOINTS.EVALUATION.METRIC(id))
-  return response.data
-}
-
-/**
- * 删除评估指标
- *
- * @param id 指标 ID
- * @returns 是否成功
- */
-export async function deleteEvaluationMetric(id: string): Promise<boolean> {
-  try {
-    await apiClient.delete(API_ENDPOINTS.EVALUATION.METRIC(id))
-    return true
-  } catch {
-    return false
-  }
-}

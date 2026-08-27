@@ -198,58 +198,6 @@ export interface ActivityCardProps {
 }
 
 /**
- * 状态文本映射
- */
-export const STATUS_TEXT_MAP: Record<ActivityStatus, string> = {
-  pending: '等待中',
-  running: '执行中',
-  completed: '已完成',
-  failed: '失败',
-  cancelled: '已取消',
-}
-
-/**
- * 活动类型文本映射
- */
-export const ACTIVITY_TYPE_TEXT_MAP: Record<ActivityType, string> = {
-  tool_call: '工具调用',
-  task_created: '任务创建',
-  task_phase: '任务阶段',
-  task_completed: '任务完成',
-  task_failed: '任务失败',
-  agent_thinking: '思考过程',
-  custom: '自定义',
-}
-
-/**
- * 获取状态颜色类名
- */
-export function getStatusColorClass(status: ActivityStatus): string {
-  const colorMap: Record<ActivityStatus, string> = {
-    pending: 'text-status-warning',
-    running: 'text-status-info',
-    completed: 'text-status-success',
-    failed: 'text-status-error',
-    cancelled: 'text-status-pending',
-  }
-  return colorMap[status] || colorMap.pending
-}
-
-/**
- * 获取状态背景色类名
- */
-export function getStatusBgColorClass(status: ActivityStatus): string {
-  const colorMap: Record<ActivityStatus, string> = {
-    pending: 'bg-status-warning/10',
-    running: 'bg-status-info/10',
-    completed: 'bg-status-success/10',
-    failed: 'bg-status-error/10',
-    cancelled: 'bg-status-pending/10',
-  }
-  return colorMap[status] || colorMap.pending
-}
-
-/**
  * 格式化时长
  *
  * 后端 duration_ms 为 f64 浮点（tool_core ToolResult.duration_ms），此处统一
@@ -269,11 +217,4 @@ export function formatDuration(ms: number): string {
   const minutes = Math.floor(seconds / 60)
   const remainingSeconds = Math.round(seconds % 60)
   return remainingSeconds > 0 ? `${minutes}m ${remainingSeconds}s` : `${minutes}m`
-}
-
-/**
- * 获取状态文本
- */
-export function getStatusText(status: ActivityStatus): string {
-  return STATUS_TEXT_MAP[status] || '未知'
 }

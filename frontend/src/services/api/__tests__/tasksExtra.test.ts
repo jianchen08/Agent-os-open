@@ -1,8 +1,7 @@
 /**
  * 任务管理 API 补充测试（tasks.ts 未覆盖函数）
  *
- * 覆盖：任务列表/详情/删除/调试、项目详情/删除/暂停/恢复、根任务创建、
- * 容器任务列表、阶段产物、验收标准列表/结果、任务暂停/恢复/取消。
+ * 覆盖：任务列表/删除、项目暂停/恢复、根任务创建、任务暂停/恢复/取消。
  */
 
 /* eslint-disable import-x/order */
@@ -62,17 +61,6 @@ describe('任务管理 API 补充', () => {
     })
   })
 
-  describe('getTask - 任务详情', () => {
-    it('请求单任务端点并解包', async () => {
-      vi.mocked(apiClient.get).mockResolvedValueOnce(okResponse(taskInfo))
-
-      const result = await taskApi.getTask('t1')
-
-      expect(result.id).toBe('t1')
-      expect(apiClient.get).toHaveBeenCalledWith('/ext/task_service/tasks/t1')
-    })
-  })
-
   describe('deleteTask - 删除任务', () => {
     it('成功返回 true', async () => {
       vi.mocked(apiClient.delete).mockResolvedValueOnce(okResponse({}))
@@ -89,32 +77,6 @@ describe('任务管理 API 补充', () => {
       const result = await taskApi.deleteTask('t1')
 
       expect(result).toBe(false)
-    })
-  })
-
-  describe('getTasksDebug - 任务调试数据', () => {
-    it('请求 debug/all 端点并透传参数', async () => {
-      const resp = { items: [], total: 0 }
-      vi.mocked(apiClient.get).mockResolvedValueOnce(okResponse(resp))
-
-      const result = await taskApi.getTasksDebug({ skip: 0, limit: 10, sort_by: 'created_at', sort_order: 'desc' })
-
-      expect(result).toEqual(resp)
-      expect(apiClient.get).toHaveBeenCalledWith('/ext/task_service/tasks/debug/all', {
-        params: { skip: 0, limit: 10, sort_by: 'created_at', sort_order: 'desc' },
-      })
-    })
-  })
-
-  describe('fetchProject - 项目详情', () => {
-    it('解包 project 字段', async () => {
-      const project = { id: 'p1', title: '项目1' }
-      vi.mocked(apiClient.get).mockResolvedValueOnce(okResponse({ project }))
-
-      const result = await taskApi.fetchProject('p1')
-
-      expect(result).toEqual(project)
-      expect(apiClient.get).toHaveBeenCalledWith('/ext/task_service/projects/p1')
     })
   })
 
@@ -137,29 +99,7 @@ describe('任务管理 API 补充', () => {
     })
   })
 
-  describe('getContainerTasks - 容器任务列表', () => {
-    it('按 session_id 请求并解包', async () => {
-      const containers = [{ id: 'c1', title: '容器1' }]
-      vi.mocked(apiClient.get).mockResolvedValueOnce(okResponse(containers))
-
-      const result = await taskApi.getContainerTasks('s1')
-
-      expect(result).toEqual(containers)
-      expect(apiClient.get).toHaveBeenCalledWith('/ext/task_service/tasks/containers', {
-        params: { session_id: 's1' },
-      })
-    })
-  })
-
-  describe('项目暂停/恢复/删除', () => {
-    it('deleteProject DELETE 项目端点', async () => {
-      vi.mocked(apiClient.delete).mockResolvedValueOnce(okResponse({}))
-
-      await taskApi.deleteProject('p1')
-
-      expect(apiClient.delete).toHaveBeenCalledWith('/ext/task_service/projects/p1')
-    })
-
+  describe('项目暂停/恢复', () => {
     it('pauseProject POST 暂停端点并解包', async () => {
       const project = { id: 'p1', title: '项目1' }
       vi.mocked(apiClient.post).mockResolvedValueOnce(okResponse({ project }))
@@ -178,42 +118,6 @@ describe('任务管理 API 补充', () => {
 
       expect(result.id).toBe('p1')
       expect(apiClient.post).toHaveBeenCalledWith('/ext/task_service/projects/p1/resume')
-    })
-  })
-
-  describe('fetchPhaseOutput - 阶段产物', () => {
-    it('请求阶段产物端点', async () => {
-      const resp = { phase: 'execute', output: { key: 'v' } }
-      vi.mocked(apiClient.get).mockResolvedValueOnce(okResponse(resp))
-
-      const result = await taskApi.fetchPhaseOutput('t1', 'execute')
-
-      expect(result.phase).toBe('execute')
-      expect(apiClient.get).toHaveBeenCalledWith('/ext/task_service/tasks/t1/phase/execute/output')
-    })
-  })
-
-  describe('验收标准', () => {
-    it('fetchTaskACs 请求 AC 列表端点', async () => {
-      const resp = { items: [], total: 0 }
-      vi.mocked(apiClient.get).mockResolvedValueOnce(okResponse(resp))
-
-      const result = await taskApi.fetchTaskACs('t1')
-
-      expect(result).toEqual(resp)
-      expect(apiClient.get).toHaveBeenCalledWith('/ext/task_service/tasks/t1/ac')
-    })
-
-    it('fetchACResult 解包 acceptance_criterion 字段', async () => {
-      const ac = { id: 'ac1', title: 'AC1' }
-      vi.mocked(apiClient.get).mockResolvedValueOnce(okResponse({ acceptance_criterion: ac }))
-
-      const result = await taskApi.fetchACResult('t1', 'ac1')
-
-      expect(result).toEqual(ac)
-      expect(apiClient.get).toHaveBeenCalledWith(
-        '/ext/task_service/tasks/t1/ac/ac1/result',
-      )
     })
   })
 

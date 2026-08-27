@@ -140,32 +140,3 @@ export const themeList: ThemeInfo[] = [
     },
   },
 ]
-
-/**
- * 获取主题配置
- *
- * @param themeId - 主题 ID
- * @returns 主题配置，如果不存在则返回 null
- */
-export function getThemeById(themeId: string): ThemeConfig | null {
-  return presetThemes[themeId] || null
-}
-
-/**
- * 获取所有预设主题
- *
- * @returns 预设主题数组
- */
-export function getAllPresetThemes(): ThemeConfig[] {
-  return Object.values(presetThemes)
-}
-
-/**
- * 检查主题是否存在
- *
- * @param themeId - 主题 ID
- * @returns 是否存在
- */
-export function hasTheme(themeId: string): boolean {
-  return themeId in presetThemes
-}

@@ -100,14 +100,6 @@ export interface AgentSchemaResponse {
   fields: UIInputFormField[]
 }
 
-/** Agent 配置读取响应（GET agent_manager agents/{id}/config） */
-export interface AgentConfigResponse {
-  /** Agent ID */
-  config_id: string
-  /** 配置文件 yaml 原文 */
-  yaml: string
-}
-
 /** Agent 配置写回响应（PUT agent_manager agents/{id}/config） */
 export interface AgentConfigUpdateResponse {
   /** Agent ID */
@@ -128,25 +120,6 @@ export async function getAgentSchema(
 ): Promise<AgentSchemaResponse> {
   return requestWithRetry(async () => {
     const response = await apiClient.get<AgentSchemaResponse>(API_ENDPOINTS.AGENTS.SCHEMA)
-    return response.data
-  }, options)
-}
-
-/**
- * 读取 Agent 配置 yaml 原文
- *
- * @param agentId - Agent ID（对应 config/agents 目录下的 yaml 配置文件名）
- */
-export async function getAgentConfig(
-  agentId: string,
-  options: RetryOptions = {},
-): Promise<AgentConfigResponse> {
-  if (!agentId || agentId.trim().length === 0) {
-    throw new Error('Agent ID 不能为空')
-  }
-
-  return requestWithRetry(async () => {
-    const response = await apiClient.get<AgentConfigResponse>(API_ENDPOINTS.AGENTS.CONFIG(agentId))
     return response.data
   }, options)
 }
