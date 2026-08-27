@@ -147,12 +147,21 @@ class TestRootTask:
         assert meta["path"] == str(ws)
 
     def test_plain_mode_direct_directory(self, tmp_path: Path) -> None:
-        ws = tmp_path / "plain_ws"
+        ws = tmp_path / "ws_plain"
         ws.mkdir()
         m = _make_manager(tmp_path, ws_root=tmp_path / "wsroot")
-        meta = m._start_root_task("r1", str(ws), {"workspace_mode": "plain", "task_id": "r1"})
+        meta = m._start_root_task("r1", str(ws), {"workspace_mode": "plain"})
         assert meta["mode"] == "plain"
         assert meta["path"] == str(ws)
+
+    def test_plain_with_uncreated_path_creates_dir(self, tmp_path: Path) -> None:
+        """plain 收到未建路径（上游解析的「工作区根/{task_id}」）→ 服务负责创建目录。"""
+        ws = tmp_path / "wsroot" / "task_plain_new"
+        m = _make_manager(tmp_path, ws_root=tmp_path / "wsroot")
+        meta = m._start_root_task("task_plain_new", str(ws), {"workspace_mode": "plain"})
+        assert meta["mode"] == "plain"
+        assert meta["path"] == str(ws)
+        assert ws.exists()
 
     def test_plain_no_explicit_workspace_creates_dir(self, tmp_path: Path) -> None:
         m = _make_manager(tmp_path, ws_root=tmp_path / "wsroot")
@@ -182,24 +191,23 @@ class TestRootTask:
         assert ws_dir != repo
         assert (ws_dir / "README.md").exists()
 
-    def test_sparse_worktree_when_large(self, tmp_path: Path) -> None:
+    def test_worktree_full_checkout_with_large_file(self, tmp_path: Path) -> None:
+        """大文件项目同样走全量 worktree：git 自管 checkout，无大小预扫描/sparse 决策。"""
         repo = tmp_path / "repo"
         _git_init(repo)
-        # 造大文件超过 sparse 阈值
+        # tracked 大文件直接随 worktree checkout（不因体积改走别的路径）
         big = repo / "big.bin"
-        big.write_bytes(b"\x00" * 200 * 1024 * 1024)
+        big.write_bytes(b"\x00" * 4 * 1024 * 1024)
         import subprocess
 
         subprocess.run(["git", "add", "-A"], cwd=repo, check=True, capture_output=True, text=True)
         subprocess.run(["git", "commit", "-m", "big"], cwd=repo, check=True, capture_output=True, text=True)
-        m = _make_manager(
-            tmp_path,
-            ws_root=tmp_path / "wsroot",
-            config={"sparse_threshold_mb": 1},
-        )
+        m = _make_manager(tmp_path, ws_root=tmp_path / "wsroot")
         meta = m._start_root_task("r1", str(repo), {"task_id": "r1", "_has_explicit_workspace": True})
         assert meta["mode"] == "worktree"
-        assert Path(meta["path"]).exists()
+        ws_dir = Path(meta["path"])
+        assert ws_dir.exists()
+        assert (ws_dir / "big.bin").exists()  # 全量 checkout，tracked 大文件在工作区内
 
 
 class TestSkillsCopy:

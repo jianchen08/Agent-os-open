@@ -1508,10 +1508,11 @@ class TaskSubmitTool(BuiltinTool):
         对齐 0.1 执行语义（task_executor）：任务默认隔离执行——
         - isolation 默认 isolated（0.1 coordinator.default_level；显式
           isolation_level 优先）。
-        - workspace 默认声明 source_path 空 = 执行管道按「工作空间根/{task_id}」
-          兜底创建（workspace_lifecycle._bootstrap，对齐 0.1 _resolve_task_
-          workspace）；显式 workspace/workspace_mode 优先（挂项目任务的
-          workspace 已解析为项目文件夹 = 显式 worktree 源）。
+        - workspace 声明语义：无显式 workspace（含 workspace_mode 未选）时
+          mode 留空——执行管道落「工作空间根/{task_id}」默认目录（plain 拓扑，
+          workspace_lifecycle._bootstrap 的 mode 缺省 plain）。worktree 拓扑
+          仅在显式 workspace 或显式 workspace_mode='worktree' 下成立
+          （源 = workspace 路径 / 项目根）；显式 workspace 时 mode 缺省 worktree。
         """
         _ec: dict[str, Any] = {}
         if inputs.get("workspace"):
@@ -1523,7 +1524,7 @@ class TaskSubmitTool(BuiltinTool):
         else:
             _ec["workspace"] = {
                 "source_path": "",
-                "mode": inputs.get("workspace_mode") or "worktree",
+                "mode": inputs.get("workspace_mode") or "",
                 "explicit": False,
             }
         level = inputs.get("isolation_level") or "isolated"
@@ -1758,10 +1759,10 @@ class TaskSubmitTool(BuiltinTool):
                 "explicit": True,
             }
         elif inputs.get("workspace_mode"):
-            # 无显式 workspace（继承父链）但有拓扑声明
+            # 无显式 workspace（继承父链）但有拓扑声明（显式选择才落）
             ec["workspace"] = {
                 "source_path": "",
-                "mode": inputs.get("workspace_mode") or "worktree",
+                "mode": inputs["workspace_mode"],
             }
         if inputs.get("isolation_level"):
             ec["isolation"] = {"level": inputs["isolation_level"]}

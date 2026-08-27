@@ -408,6 +408,36 @@ async def test_ordinary_root_task_accepts_all_three(tool_module, tmp_proj):
 
 
 @pytest.mark.asyncio
+async def test_ordinary_root_task_without_workspace_leaves_mode_empty(tool_module):
+    """普通根任务无显式空间字段：mode 留空——执行管道落「工作空间根/{task_id}」
+    默认目录（plain 拓扑）。worktree 仅显式 workspace / workspace_mode 下成立，
+    不做缺省声明（无 workspace 即无 worktree）。"""
+    service = FakeTaskService()
+    tool, captured = make_tool(tool_module, service)
+
+    result = await tool.execute(base_inputs(parent_agent_level=1))
+    assert result.success, result.error
+    ec = captured["params"]["execution_context"]
+    assert ec["workspace"]["explicit"] is False
+    assert ec["workspace"]["source_path"] == ""
+    assert ec["workspace"]["mode"] == ""
+
+
+@pytest.mark.asyncio
+async def test_workspace_mode_without_source_passthrough(tool_module):
+    """无 workspace 路径但显式选了拓扑：mode 按声明透传（显式选择才成立）。"""
+    service = FakeTaskService()
+    tool, captured = make_tool(tool_module, service)
+
+    result = await tool.execute(base_inputs(parent_agent_level=1, workspace_mode="worktree"))
+    assert result.success, result.error
+    ec = captured["params"]["execution_context"]
+    assert ec["workspace"]["mode"] == "worktree"
+    assert ec["workspace"]["explicit"] is False
+    assert ec["workspace"]["source_path"] == ""
+
+
+@pytest.mark.asyncio
 async def test_ordinary_root_task_plain_mode(tool_module, tmp_proj):
     """普通根任务：plain 拓扑显式选择（与隔离解耦，两者独立透传）。"""
     service = FakeTaskService()

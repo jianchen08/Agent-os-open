@@ -98,7 +98,6 @@ def test_root_task_default_mode_is_worktree(manager_cls):
     manager._ensure_git_user = lambda *a, **k: None
     manager._run_git = lambda *a, **k: (0, "ok")
     manager._guard_root_branch = lambda *a, **k: False
-    manager._calc_project_size = lambda *a, **k: 1
     manager._worktree_add_with_repair = lambda *a, **k: None
     manager._ensure_dir_and_git = lambda *a, **k: None
     meta = manager._start_root_task(
@@ -138,7 +137,7 @@ def test_init_container_workspace_always_copies(manager_cls):
     assert Path(meta["path"]) == Path("/tmp/ws_root") / "container_container_1"
 
 
-# ── 2026-08-24 裁定：模式未指定 → 默认 worktree；无显式 workspace 时源=项目根 ──
+# ── 拓扑缺省：显式 workspace → worktree；无显式 → plain（工作区根/{task_id}）──
 
 def _stub_worktree_manager(manager_cls, base_path: Path):
     """构造 manager 并 stub worktree 路径上全部 git 依赖（不真建 worktree）。
@@ -156,39 +155,33 @@ def _stub_worktree_manager(manager_cls, base_path: Path):
         "",
     )
     manager._guard_root_branch = lambda *a, **k: False
-    manager._calc_project_size = lambda *a, **k: 1
     manager._git_init_and_initial_commit = lambda *a, **k: True
     manager._worktree_add_with_repair = lambda *a, **k: None
     manager._get_workspace_root = lambda: base_path / ".ai_workspaces"
     return manager
 
 
-def test_root_task_no_explicit_ws_default_mode_builds_worktree(manager_cls, tmp_path):
-    """2026-08-24 裁定：未指定 workspace_mode（无显式 workspace）→ 项目根上建 worktree。
-
-    source_path 由 plugin._bootstrap 解析为项目根；_start_root_task 必须走
-    worktree 建立分支（mode=worktree，path 落在 ws_base 下含 __wt_ 的目录），
-    而不是 plain 空目录。
+def test_root_task_no_explicit_ws_defaults_plain(manager_cls, tmp_path):
+    """无显式 workspace 且未指定拓扑 → 缺省 plain：直接操作传入目录
+    （上游 plugin 已解析为「工作区根/{task_id}」），不建 worktree。
+    worktree 仅显式 workspace / workspace_mode 下成立。
     """
     project_root = tmp_path / "project"
     project_root.mkdir()
     manager = _stub_worktree_manager(manager_cls, project_root)
-    # 显式断言 worktree 建立被触发（不建真实 worktree，仅验证调用）
-    worktree_called = []
+    worktree_called: list[tuple] = []
+    manager._worktree_add_with_repair = lambda *a, **k: worktree_called.append(a)
 
-    def _fake_worktree_add(repo_path, branch, ws_dir, task_id):
-        worktree_called.append((str(repo_path), branch, str(ws_dir)))
-
-    manager._worktree_add_with_repair = _fake_worktree_add
+    ws_dir = project_root / ".ai_workspaces" / "task_no_mode"
+    ws_dir.mkdir(parents=True)
     meta = manager._start_root_task(
         "task_no_mode",
-        str(project_root),
+        str(ws_dir),
         {},  # 无 workspace_mode / 无 _has_explicit_workspace
     )
-    assert meta["mode"] == "worktree", "未指定模式应默认 worktree"
-    assert meta["project_root"] == str(project_root), "worktree 源应为项目根"
-    assert "__wt_" in meta["path"], f"worktree 应建于工作区根下的 __wt_ 目录: {meta['path']}"
-    assert worktree_called and worktree_called[0][0] == str(project_root)
+    assert meta["mode"] == "plain", "无显式 workspace 缺省拓扑应为 plain"
+    assert meta["path"] == str(ws_dir)
+    assert not worktree_called, "缺省 plain 不触发 worktree 建立"
 
 
 def test_root_task_explicit_plain_no_ws_no_git_ops(manager_cls, tmp_path):

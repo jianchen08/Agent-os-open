@@ -20,7 +20,6 @@ logger = logging.getLogger(__name__)
 
 # 排除的目录（不参与场景检测、复制和大小计算）
 _SKIP_DIRS = frozenset({".git", ".ai_workspaces", "__pycache__", ".pytest_cache", "data"})
-_SKIP_EXTENSIONS = frozenset({".bak", ".pyc", ".pyo"})
 _WIN_RESERVED_NAMES = frozenset(
     {
         "nul",
@@ -48,7 +47,6 @@ _WIN_RESERVED_NAMES = frozenset(
         "LPT9",
     }
 )
-_SPARSE_THRESHOLD_BYTES = 50 * 1024 * 1024  # sparse checkout 大小阈值（50MB）
 _GIT_TIMEOUT = 30  # git 命令执行超时（秒）
 _GIT_INIT_TIMEOUT = 120  # git init/add/commit 超时（秒），初始化操作耗时更长
 
@@ -96,7 +94,6 @@ class _GitOpsMixin:
     - self._main_branch: str
     - self._merge_locks: dict[str, threading.Lock]
     - self._global_lock: threading.Lock
-    - self._size_cache: dict[str, tuple[float, int]]
     - self._ws_meta_store: Any
     - self._task_tree: Any
     - self._resource_merge: Any
@@ -447,61 +444,6 @@ class _GitOpsMixin:
             return h.strip() if h else None
         return None
 
-    def _effective_skip_dirs(self) -> frozenset[str]:
-        """合并硬编码排除目录和配置文件中的 worktree_exclude_patterns。"""
-        ws_cfg = self._config.get("workspace", {})
-        extra = frozenset(ws_cfg.get("worktree_exclude_patterns", []))
-        return _SKIP_DIRS | extra
-
-    @staticmethod
-    def _dir_files_size(subtree: Path, root: Path, skip: frozenset[str]) -> int:
-        """统计单个子树内计入的文件大小（rglob 展开）。
-
-        目录不可读或单文件 stat 失败 → 跳过该部分继续累计（保留已扫到的量）。
-        """
-        size = 0
-        try:
-            for f in subtree.rglob("*"):
-                try:
-                    if not f.is_file():
-                        continue
-                    if any(p in skip for p in f.relative_to(root).parts):
-                        continue
-                    size += f.stat().st_size
-                except Exception:
-                    continue
-        except (OSError, PermissionError):
-            return size
-        return size
-
-    def _calc_project_size(self, project_root: str, task_id: str) -> int:
-        """计算项目工作文件总大小（不含 .git），两轮扫描策略 + 增量缓存"""
-        root = Path(project_root)
-        skip = self._effective_skip_dirs()
-        if project_root in self._size_cache:
-            cached_mtime, cached_size = self._size_cache[project_root]
-            git_dir = root / ".git"
-            cur = git_dir.stat().st_mtime if git_dir.exists() else root.stat().st_mtime
-            if cur == cached_mtime:
-                return cached_size
-        total = 0
-        try:
-            for item in root.iterdir():
-                if item.name in skip:
-                    continue
-                if item.is_file():
-                    with contextlib.suppress(Exception):
-                        total += item.stat().st_size
-                elif item.is_dir():
-                    total += self._dir_files_size(item, root, skip)
-        except (OSError, PermissionError) as exc:
-            logger.warning("[WorkspaceLifecycle] 项目大小计算中断: %s", exc)
-        git_dir = root / ".git"
-        mtime = git_dir.stat().st_mtime if git_dir.exists() else root.stat().st_mtime
-        self._size_cache[project_root] = (mtime, total)
-        logger.debug("[WorkspaceLifecycle] 项目大小: root=%s, size=%d, task=%s", project_root, total, task_id)
-        return total
-
     def _worktree_add_with_repair(
         self,
         repo_path: Path,
@@ -590,25 +532,6 @@ class _GitOpsMixin:
                 logger.info("[WorkspaceLifecycle] 符号链接已创建: %s -> %s", dst, src)
             except Exception as e:
                 logger.warning("[WorkspaceLifecycle] 创建符号链接失败: %s -> %s, error=%s", src, dst, e)
-
-    def _setup_sparse_worktree(self, ws_dir: Path, project_root: Path, branch: str):
-        """为大项目设置 sparse-checkout worktree，排除目录通过符号链接关联（Windows 用 junction point 降级）
-
-        白名单必须包含 .gitignore 等基础设施文件：如果 sparse checkout 不包含 .gitignore，
-        worktree 分支上就没有这个文件，git merge 时会把 project_root 的 .gitignore 当作
-        "被删除"处理，导致 .gitignore 丢失，后续 git add -A 会跟踪 data/ 等本应排除的目录。
-        """
-        self._run_git("worktree", "add", "--no-checkout", "-b", branch, str(ws_dir), cwd=project_root)
-        self._run_git("sparse-checkout", "init", "--cone", cwd=ws_dir)
-        whitelist = self._config.get("workspace", {}).get("worktree_include_patterns", ["src", "config"])
-        mandatory = [".gitignore", ".gitattributes", ".gitmodules"]
-        for m in mandatory:
-            if m not in whitelist:
-                whitelist = whitelist + [m]
-        if whitelist:
-            self._run_git("sparse-checkout", "set", *whitelist, cwd=ws_dir)
-        self._run_git("checkout", "HEAD", cwd=ws_dir)
-        self._link_worktree_dependencies(ws_dir, project_root)
 
     def _detect_scenario(self, workspace: str, task_data: dict) -> tuple[str, str]:
         """检测工作空间场景

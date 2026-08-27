@@ -35,8 +35,6 @@ class WorkspaceLifecycleManager(_GitOpsMixin, _MergeOpsMixin):
         # 按 project_root 粒度的并发锁
         self._merge_locks: dict[str, Any] = {}
         self._global_lock = __import__("threading").Lock()
-        # 项目大小计算缓存 {project_root: (mtime, size)}
-        self._size_cache: dict[str, tuple[float, int]] = {}
         # 记录项目根目录的主分支，用于守卫 auto-save 不写入错误分支
         self._main_branch: str = ""
         try:
@@ -78,21 +76,20 @@ class WorkspaceLifecycleManager(_GitOpsMixin, _MergeOpsMixin):
     def _start_subtask(self, task_id: str, workspace: str, task_data: dict) -> dict:
         """子任务启动：共享父工作空间。
 
-        拓扑由 workspace_mode 决定（与隔离解耦）：
-        - plain → 直接共享宿主目录（挂项目任务的 workspace 已解析为项目文件夹）
-        - 其他（默认 worktree 语义的父链共享）→ 共享父任务工作空间
+        拓扑由 workspace_mode 显式声明决定（与隔离解耦）：
+        - 显式 plain → 直接共享宿主目录（挂项目任务的 workspace 已解析为项目文件夹）
+        - 未声明 / 其他 → 共享父任务工作空间（父链 ws_meta 为权威，
+          入参 workspace 仅作父链缺失时的兜底）
         """
-        _ws_mode = self._resolve_ws_mode(task_data)
-        if _ws_mode == "plain":
-            if workspace:
-                meta = {"mode": "shared", "path": workspace}
-                self._ws_meta_store[task_id] = meta
-                logger.debug(
-                    "[WorkspaceLifecycle] plain 拓扑(子任务): 共享目录 task_id=%s, path=%s",
-                    task_id,
-                    workspace,
-                )
-                return meta
+        if task_data.get("workspace_mode", "") == "plain" and workspace:
+            meta = {"mode": "shared", "path": workspace}
+            self._ws_meta_store[task_id] = meta
+            logger.debug(
+                "[WorkspaceLifecycle] plain 拓扑(子任务): 共享目录 task_id=%s, path=%s",
+                task_id,
+                workspace,
+            )
+            return meta
 
         parent_path = workspace
         parent_meta: dict = {}
@@ -165,14 +162,16 @@ class WorkspaceLifecycleManager(_GitOpsMixin, _MergeOpsMixin):
             )
 
     def _resolve_ws_mode(self, task_data: dict) -> Any:
-        """workspace_mode 拓扑决策：显式指定优先，缺省走配置默认（worktree）。
-
-        plain 不建 worktree、不切分支；task_id + project_root 让
-        on_before_evaluate 把产出 commit 到当前分支（与隔离解耦）。
+        """workspace_mode 拓扑决策：显式声明优先；缺省按显式性分叉——
+        显式 workspace → worktree（从源项目分叉隔离副本）；无显式 → plain
+        （「工作空间根/{task_id}」目录，上游 plugin 已解析路径）。两者均与隔离解耦。
         """
-        return task_data.get("workspace_mode", "") or self._config.get("workspace", {}).get(
-            "default_mode", "worktree"
-        )
+        explicit_mode = task_data.get("workspace_mode", "")
+        if explicit_mode:
+            return explicit_mode
+        if task_data.get("_has_explicit_workspace", False):
+            return self._config.get("workspace", {}).get("default_mode", "worktree")
+        return "plain"
 
     def _inherit_root_workspace(self, task_id: str, workspace: str, task_data: dict) -> dict | None:
         """inherit_workspace_from 解析命中：复用旧任务工作空间并继承其 ws_meta。
@@ -209,6 +208,11 @@ class WorkspaceLifecycleManager(_GitOpsMixin, _MergeOpsMixin):
 
         # 显式 workspace 的 plain：直接操作该目录（无 git worktree/branch）
         if _ws_mode == "plain" and workspace:
+            ws_path = Path(workspace)
+            if not ws_path.exists():
+                # 上游解析的「工作区根/{task_id}」路径此时可能未建——工作空间
+                # 由本服务负责创建（worktree 路径由 git worktree add 建目录）
+                ws_path.mkdir(parents=True, exist_ok=True)
             meta = {
                 "mode": "plain",
                 "path": workspace,
@@ -321,16 +325,14 @@ class WorkspaceLifecycleManager(_GitOpsMixin, _MergeOpsMixin):
             logger.warning("[WorkspaceLifecycle] 跳过项目根目录 auto-save: 分支守卫检测到变更, task_id=%s", task_id)
 
     def _create_worktree_root(self, ws_base: Path, root_path: Path, task_id: str) -> dict:
-        """在就绪仓库上建任务 worktree（超阈值走 sparse），返回 worktree 模式的 ws_meta。"""
+        """在就绪仓库上建任务 worktree，返回 worktree 模式的 ws_meta。
+
+        全量 checkout 由 git 自管（共享对象库，只展开 tracked 文件）——
+        不预扫项目大小做 sparse 决策。
+        """
         branch = f"task/{task_id}"
         ws_dir = ws_base / _safe_ws_name(root_path.name, task_id)
-        project_size = self._calc_project_size(str(root_path), task_id)
-        threshold = self._config.get("workspace", {}).get("sparse_threshold_mb", 50) * 1024 * 1024
-
-        if project_size > threshold:
-            self._setup_sparse_worktree(ws_dir, root_path, branch)
-        else:
-            self._worktree_add_with_repair(root_path, branch, ws_dir, task_id)
+        self._worktree_add_with_repair(root_path, branch, ws_dir, task_id)
         self._ensure_git_user(ws_dir)
         return {"mode": "worktree", "path": str(ws_dir), "branch": branch, "project_root": str(root_path)}
 

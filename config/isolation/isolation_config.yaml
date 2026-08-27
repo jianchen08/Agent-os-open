@@ -4,31 +4,6 @@ workspace:
   # ".ai_workspaces"）；绝对路径原样使用。禁止把开发者本机绝对路径入库。
   root: .ai_workspaces
   nesting_mode: shared
-  sparse_threshold_mb: 500
-  worktree_include_patterns:
-  - src
-  - config
-  - tests
-  - frontend
-  - skills
-  - pyproject.toml
-  - package.json
-  - Cargo.toml
-  - go.mod
-  worktree_exclude_patterns:
-  - .venv
-  - node_modules
-  - build
-  - dist
-  - .gradle
-  - target
-  - .idea
-  - .vscode
-  - __pycache__
-  - .pytest_cache
-  - .mypy_cache
-  - .tox
-  - data
   large_file_threshold_mb: 50
   worktree_link_patterns:
   - assets
