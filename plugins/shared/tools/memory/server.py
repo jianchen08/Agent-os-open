@@ -145,7 +145,7 @@ def _owner_from_inputs(inputs: dict[str, Any]) -> str | None:
     schema=_MEMORY_SCHEMA,
     description=_MEMORY_DESCRIPTION,
 )
-async def memory(**kwargs):
+async def memory(**kwargs: dict[str, Any]) -> dict[str, Any]:
     # IDOR 防护接线（B6）：从内核注入参数解析可信身份后注入工具；
     # 无注入时 MemoryTool 对敏感 action（store/import/update/delete）明确拒绝。
     t = MemoryTool(memory_backend=_get_memory_backend())

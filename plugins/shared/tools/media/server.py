@@ -130,7 +130,7 @@ def _get_tool(name: str) -> Any:
     schema={"type": "object", "properties": {"prompt": {"type": "string"}, "size": {"type": "string"}, "n": {"type": "integer", "default": 1}}, "required": ["prompt"]},
     description="图片生成",
 )
-async def image_generate(**kwargs):
+async def image_generate(**kwargs: dict[str, Any]) -> dict[str, Any]:
     result = await _get_tool("image_generate").execute(kwargs)
     return result.output if result.success else {"error": result.error}
 
@@ -139,7 +139,7 @@ async def image_generate(**kwargs):
     schema={"type": "object", "properties": {"prompt": {"type": "string"}, "duration": {"type": "integer", "default": 30}}, "required": ["prompt"]},
     description="音乐生成",
 )
-async def music_generate(**kwargs):
+async def music_generate(**kwargs: dict[str, Any]) -> dict[str, Any]:
     result = await _get_tool("music_generate").execute(kwargs)
     return result.output if result.success else {"error": result.error}
 
@@ -148,7 +148,7 @@ async def music_generate(**kwargs):
     schema={"type": "object", "properties": {"prompt": {"type": "string"}, "duration": {"type": "integer", "default": 5}}, "required": ["prompt"]},
     description="视频生成",
 )
-async def video_generate(**kwargs):
+async def video_generate(**kwargs: dict[str, Any]) -> dict[str, Any]:
     result = await _get_tool("video_generate").execute(kwargs)
     return result.output if result.success else {"error": result.error}
 
@@ -157,7 +157,7 @@ async def video_generate(**kwargs):
     schema={"type": "object", "properties": {"text": {"type": "string"}, "voice": {"type": "string"}, "speed": {"type": "number", "default": 1.0}}, "required": ["text"]},
     description="文本转语音",
 )
-async def tts_generate(**kwargs):
+async def tts_generate(**kwargs: dict[str, Any]) -> dict[str, Any]:
     result = await _get_tool("tts_generate").execute(kwargs)
     return result.output if result.success else {"error": result.error}
 

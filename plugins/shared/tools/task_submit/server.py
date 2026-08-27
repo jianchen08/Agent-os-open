@@ -88,7 +88,7 @@ _TASK_SUBMIT_DEF = TaskSubmitTool.get_tool_definition()
     schema=_TASK_SUBMIT_DEF.input_schema,
     description=_TASK_SUBMIT_DEF.description,
 )
-async def task_submit(**kwargs):
+async def task_submit(**kwargs: dict[str, Any]) -> dict[str, Any]:
     """任务提交。"""
     tool = TaskSubmitTool()
     result = await tool.execute(kwargs)

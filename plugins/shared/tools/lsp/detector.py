@@ -100,7 +100,10 @@ class IDEDetector:
                             )
                 except (psutil.NoSuchProcess, psutil.AccessDenied):
                     continue
-        except Exception:
+        except (psutil.Error, OSError):
+            # 探测面的既定降级契约：枚举竞态（ZombieProcess 等 psutil.Error 族）
+            # 与 OS 级迭代错误（OSError，含进程中途消亡的底层报错）都按
+            # "未检出"处理；其余异常不属于该面，不在此吞掉。
             pass
 
         return None
@@ -184,7 +187,8 @@ class IDEDetector:
                             break
                 except (psutil.NoSuchProcess, psutil.AccessDenied):
                     continue
-        except Exception:
+        except (psutil.Error, OSError):
+            # 同 _detect_by_process：按"未检出任何 IDE"返回空列表。
             pass
 
         return results

@@ -16,6 +16,7 @@ import asyncio
 import atexit
 import logging
 import time
+from typing import Any
 
 from tool import BashTool
 
@@ -182,7 +183,7 @@ def _atexit_cleanup() -> None:
     "手动后台化会使进程脱离管理）。读文件/看目录用 file_read、搜文件内容/文件名用 enhanced_search。"
     "危险命令（rm -rf /、format、dd if= 等）会被拦截。Windows 与 Linux/Mac 语法可能不同。",
 )
-async def bash_execute(**kwargs):
+async def bash_execute(**kwargs: dict[str, Any]) -> dict[str, Any]:
     """执行 Shell 命令（0.2 MCP 入口）。
 
     所有调用共享同一个 BashTool 单例——进程状态跨调用保持。

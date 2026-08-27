@@ -1226,7 +1226,11 @@ class ProcessManager:
                 if _pid == pid:
                     proc_info.exit_code = os.WEXITSTATUS(_status) if os.WIFEXITED(_status) else 1
                     proc_info.status = "completed" if proc_info.exit_code == 0 else "error"
-        except Exception:
+        except OSError:
+            # 探测对象是刚结束的子进程：waitpid ECHILD / OpenProcess 句柄失效
+            # 都以 OSError 族暴露。本轮探测视为"仍未观测到退出"，状态留待
+            # asyncio transport 的 returncode 兜底；非 OS 异常不属于该竞态面，
+            # 不在此吞掉。
             pass
 
     # ── WSL 直连支持 ──────────────────────────────────────────────

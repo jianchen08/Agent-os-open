@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import sys
+from typing import Any
 
 sys.path.insert(0, os.path.dirname(__file__))
 
@@ -20,7 +21,7 @@ plugin = AgentOSPlugin("resource_search_tool")
     schema={"type": "object", "properties": {"query": {"type": "string"}, "resource_type": {"type": "string"}, "mode": {"type": "string", "default": "simple"}, "limit": {"type": "integer", "default": 20}}, "required": ["resource_type"]},
     description="搜索系统内资源",
 )
-async def resource_search(**kwargs):
+async def resource_search(**kwargs: dict[str, Any]) -> dict[str, Any]:
     from tool import ResourceSearchTool  # noqa: PLC0415
     t = ResourceSearchTool()
     result = await t.execute(kwargs)

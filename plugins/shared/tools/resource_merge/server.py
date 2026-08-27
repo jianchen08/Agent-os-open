@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import sys
+from typing import Any
 
 sys.path.insert(0, os.path.dirname(__file__))
 
@@ -40,7 +41,7 @@ plugin = AgentOSPlugin("resource_merge_tool")
     },
     description="基于 git worktree 的资源合并与回滚",
 )
-async def resource_merge(**kwargs):
+async def resource_merge(**kwargs: dict[str, Any]) -> dict[str, Any]:
     """资源合并与回滚。"""
     from tool import ResourceMergeTool  # noqa: PLC0415
 

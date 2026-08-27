@@ -153,7 +153,7 @@ async def _on_load(_params: dict[str, Any]) -> None:
         },
     description="任务管理工具",
 )
-async def task_manage(**kwargs):
+async def task_manage(**kwargs: dict[str, Any]) -> dict[str, Any]:
     """任务管理。"""
     from tool import TaskTool  # noqa: PLC0415
 

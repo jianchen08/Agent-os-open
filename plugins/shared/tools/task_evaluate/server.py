@@ -89,7 +89,7 @@ async def _on_load(_params: dict[str, Any]) -> None:
         },
     description="任务评估工具",
 )
-async def task_evaluate(**kwargs):
+async def task_evaluate(**kwargs: dict[str, Any]) -> dict[str, Any]:
     """任务评估。"""
     from tool import TaskEvaluateTool  # noqa: PLC0415
 

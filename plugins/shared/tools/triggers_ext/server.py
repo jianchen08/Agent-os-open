@@ -106,7 +106,7 @@ async def _on_domain_event(params: dict[str, Any]) -> None:
     schema=_TRIGGER_SETUP_SCHEMA,
     description=_TRIGGER_SETUP_DESCRIPTION,
 )
-async def trigger_setup(**kwargs):
+async def trigger_setup(**kwargs: dict[str, Any]) -> dict[str, Any]:
     t = TriggerSetupTool()
     result = await t.execute(kwargs)
     return result.output if result.success else {"error": result.error}
