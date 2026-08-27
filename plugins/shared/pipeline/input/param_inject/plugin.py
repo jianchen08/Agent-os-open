@@ -64,15 +64,29 @@ def classify_args_parse_failure(raw: str) -> str:
 
 
 def _resolve_project_root() -> Path | None:
-    """推导 Agent OS 项目根目录。"""
+    """推导 Agent OS 项目根目录。
+
+    AGENTOS_CONFIG_ROOT（内核启动发布，指向 <project_root>/config）优先；
+    回退自本文件向上找含 config/isolation 的祖先目录（对齐
+    isolation.workspace.find_project_root 的标记法）。0.1 的 config+src
+    双标记在 0.2 布局恒失配（仓库根无 src/）——函数恒 None，
+    {{project_root}} 模板替换与 project_root 回退注入双双失效。
+    """
+    import os  # noqa: PLC0415
+
     if _resolve_project_root._cached is not None:
         return _resolve_project_root._cached
 
-    current = Path(__file__).resolve()
-    for parent in current.parents:
-        if (parent / "config").is_dir() and (parent / "src").is_dir():
+    env_root = os.environ.get("AGENTOS_CONFIG_ROOT")
+    if env_root:
+        p = Path(env_root)
+        if (p / "isolation").is_dir():
+            _resolve_project_root._cached = p.parent
+            return _resolve_project_root._cached
+    for parent in Path(__file__).resolve().parents:
+        if (parent / "config" / "isolation").is_dir():
             _resolve_project_root._cached = parent
-            return parent
+            return _resolve_project_root._cached
 
     return None
 
@@ -244,9 +258,14 @@ class ParamInjectPlugin(IInputPlugin):
                 if isolation_level:
                     args["isolation_level"] = isolation_level
 
-                # 注入 project_root：从 state 获取 Agent OS 项目根目录
-                # 供 workspace_aware 等工具使用，与 workspace 注入同源
+                # 注入 project_root：state 权威值优先（任务管道 = 工作空间）；
+                # 缺省回退内核自解析的项目根（与 {{project_root}} 模板替换同源）
+                # ——主会话管道可能未跑 init 体（state 无 project_root），
+                # 文件工具的锚点不能因此缺失（缺注入时工具侧 fail-closed 拒绝）。
                 project_root = ctx.state.get("project_root", "")
+                if not project_root:
+                    _pr = _resolve_project_root()
+                    project_root = str(_pr) if _pr is not None else ""
                 if project_root:
                     args["project_root"] = project_root
 

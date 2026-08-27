@@ -90,10 +90,48 @@ async def test_workspace_init_idempotent(plugins):
 
 
 @pytest.mark.asyncio
-async def test_workspace_init_no_context_noop(plugins):
-    """init：无 execution_context.workspace 声明时零产出。"""
+async def test_workspace_init_main_session_injects_project_root(plugins):
+    """init：主会话（无 task.id、无显式工作区）注入项目根锚点。
+
+    agent 配置引用的 skills/... 等相对路径以仓库根为基准——project_root 入
+    state 后经 param_inject 到达文件工具与 prompt_build。历史缺陷：主会话
+    state 无 project_root，相对路径以 sidecar cwd 解析报 File not found，
+    前端按仓库根解析同一路径却能打开。
+    """
     result = await plugins["ws"].execute(plugins["ctx_factory"]({"current_phase": "init"}))
+    updates = result.state_updates
+    assert "project_root" in updates, "主会话必须注入项目根锚点"
+    root = Path(updates["project_root"])
+    # 性质：解析结果必须是含 config/isolation 的真实仓库根（find_project_root 契约）
+    assert root.is_absolute()
+    assert (root / "config" / "isolation").is_dir()
+
+
+@pytest.mark.asyncio
+async def test_workspace_init_main_session_project_root_idempotent(plugins):
+    """init：主会话 state 已有 project_root 时不重复注入。"""
+    result = await plugins["ws"].execute(
+        plugins["ctx_factory"]({"current_phase": "init", "project_root": "D:/already/set"})
+    )
     assert result.state_updates == {}
+
+
+@pytest.mark.asyncio
+async def test_workspace_init_task_without_ws_declaration_unchanged(plugins):
+    """init：有 task.id 但无 workspace 声明 → 走既有默认工作区创建
+    （workspace 三件套），不得回落成主会话的仓库根锚点。"""
+    result = await plugins["ws"].execute(
+        plugins["ctx_factory"](
+            {
+                "current_phase": "init",
+                "task.id": "t1",
+                "execution_context": {"workspace": {"explicit": False, "mode": "", "source_path": ""}},
+            }
+        )
+    )
+    updates = result.state_updates
+    assert "workspace" in updates, "任务管道必须创建任务工作区（非仅仓库根锚点）"
+    assert "ws_meta" in updates
 
 
 @pytest.mark.asyncio

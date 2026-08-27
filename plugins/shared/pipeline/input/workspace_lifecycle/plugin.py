@@ -231,10 +231,37 @@ class WorkspaceLifecyclePlugin(IInputPlugin):
             return PluginResult()
 
         ec = state.get("execution_context")
+        ws_spec = ec.get("workspace") if isinstance(ec, dict) else None
+
+        # ── 主会话（无任务身份、无显式工作区）项目根锚点 ──
+        # 主会话没有任务工作区（workspace 语义留给任务管道），但 agent 配置
+        # 引用的 skills/... 等相对路径以仓库根为基准：project_root 注入 state
+        # 后经 param_inject 到达文件工具（file_read/enhanced_search 锚定）与
+        # prompt_build（config/rules 项目文件注入）。历史缺陷：主会话 state
+        # 无 project_root，相对路径以 sidecar cwd 解析报 File not found——
+        # 而前端按仓库根解析同一相对路径能打开（「agent 读不到、前端点得开」）。
+        _explicit_source = ws_spec.get("source_path") or "" if isinstance(ws_spec, dict) else ""
+        if not state.get("task.id") and not _explicit_source and not state.get("project_root"):
+            try:
+                _ensure_isolation_path()
+                from isolation.workspace import find_project_root  # noqa: PLC0415
+
+                _repo_root = str(find_project_root())
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "[WorkspaceLifecycle] 主会话项目根解析失败，文件工具将无锚点 | error=%s",
+                    exc,
+                )
+                return PluginResult()
+            logger.info(
+                "[WorkspaceLifecycle] init 主会话注入项目根锚点 | project_root=%s",
+                _repo_root,
+            )
+            return PluginResult(state_updates={"project_root": _repo_root})
+
         if not isinstance(ec, dict):
             logger.debug("[WorkspaceLifecycle] 无 execution_context，跳过工作空间创建")
             return PluginResult()
-        ws_spec = ec.get("workspace")
         if not isinstance(ws_spec, dict):
             logger.debug("[WorkspaceLifecycle] execution_context 无 workspace 声明，跳过")
             return PluginResult()
