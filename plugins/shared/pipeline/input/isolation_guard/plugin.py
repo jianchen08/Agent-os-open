@@ -331,6 +331,17 @@ class IsolationGuard(IInputPlugin):
                 workspace=workspace,
                 isolation_level=iso_types.IsolationLevel.CONTAINER,
             )
+            # 创建失败时 manager 返回 ERROR 状态的占位环境（env_id 是内存假 id，
+            # docker 里并无此容器）——注入它会让 bash 报"No such container"这种
+            # 无法理解的错误；此处转 blocked 并留真实原因日志。
+            if getattr(env, "status", "") == iso_types.EnvironmentStatus.ERROR.value:
+                logger.warning(
+                    "[%s] 容器创建失败（环境 ERROR 状态）| workspace=%s | detail=%s",
+                    self.name,
+                    workspace,
+                    (getattr(env, "provider_info", {}) or {}).get("error", ""),
+                )
+                return None
             return getattr(env, "env_id", None) or getattr(env, "environment_id", None)
         except Exception as exc:
             logger.warning(

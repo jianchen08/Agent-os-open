@@ -739,6 +739,10 @@ class IsolationManager:
         容器名取 workspace 路径的最后一段（如 container_036fa__wt_726def4a），
         兜底用 task_id。
 
+        docker 容器名只允许 [a-zA-Z0-9][a-zA-Z0-9_.-]：最后一段含中文等非法
+        字符时（如 D:\\myproject\\修仙游戏）改用 workspace 的 md5 前 12 位，
+        保证合法且同一 workspace 稳定复用同一容器。
+
         Args:
             workspace: workspace 绝对路径
             task_id: 任务 ID（workspace 为空时兜底）
@@ -752,7 +756,15 @@ class IsolationManager:
             name = PurePath(workspace).name or task_id
         else:
             name = task_id
-        return f"{IsolationManager.CONTAINER_NAME_PREFIX}{name}"
+        import re  # noqa: PLC0415
+
+        sanitized = re.sub(r"[^a-zA-Z0-9_.-]", "", name).lstrip(".-")
+        if not sanitized or sanitized != name:
+            import hashlib  # noqa: PLC0415
+
+            seed = workspace if workspace else name
+            sanitized = hashlib.md5(seed.encode("utf-8")).hexdigest()[:12]
+        return f"{IsolationManager.CONTAINER_NAME_PREFIX}{sanitized}"
 
     async def _find_existing_container(self, container_name: str) -> IsolationEnvironment | None:
         """查找已存在的容器（异步外壳：线程池+硬超时防 daemon 假死阻塞）。

@@ -424,6 +424,24 @@ class TestNaming:
         assert mod.IsolationManager._workspace_to_container_name(None, "t1") == "cua-t1"
         assert mod.IsolationManager._workspace_to_container_name("", "t1") == "cua-t1"
 
+    def test_workspace_to_container_name_non_ascii_hashed(self) -> None:
+        """中文等 docker 非法字符 → md5 短 hash（合法且同一 workspace 稳定）。"""
+        import hashlib
+
+        mod = _load_manager()
+        ws = r"D:\myproject\修仙游戏"
+        name = mod.IsolationManager._workspace_to_container_name(ws, "session")
+        assert name == "cua-" + hashlib.md5(ws.encode("utf-8")).hexdigest()[:12]
+        # 稳定性：同 workspace 多次调用一致
+        assert name == mod.IsolationManager._workspace_to_container_name(ws, "other-task")
+
+    def test_workspace_to_container_name_illegal_chars_hashed(self) -> None:
+        """含空格/括号等非法字符 → 同样 hash 化，纯合法名保持原样。"""
+        mod = _load_manager()
+        bad = mod.IsolationManager._workspace_to_container_name(r"C:\proj\my app (2)", "t1")
+        assert bad.startswith("cua-") and " " not in bad and "(" not in bad
+        assert mod.IsolationManager._workspace_to_container_name("/proj/ws_v1.0", "t1") == "cua-ws_v1.0"
+
     def test_get_env_and_list(self) -> None:
         mod = _load_manager()
         mgr = _make_manager(mod)

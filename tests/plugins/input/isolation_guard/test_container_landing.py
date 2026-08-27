@@ -52,6 +52,24 @@ def _fake_manager(container_id: str | None = "container-abc", exc: Exception | N
     return SimpleNamespace(get_or_create_environment=_get_or_create)
 
 
+def _error_env_manager(error: str = "Invalid container name") -> Any:
+    """构造返回 ERROR 占位环境的假 manager（容器创建失败路径的真实形态）。
+
+    manager 对创建失败返回 status=error 的占位环境（env_id 是
+    "docker-<task_id>" 形状的内存假 id，docker 里并无此容器）。
+    """
+    env = SimpleNamespace(
+        env_id="docker-session",
+        status="error",
+        provider_info={"error": error},
+    )
+
+    async def _get_or_create(**kwargs: Any) -> Any:
+        return env
+
+    return SimpleNamespace(get_or_create_environment=_get_or_create)
+
+
 def _base_state(**overrides: Any) -> dict[str, Any]:
     """主会话（无 task_id，L1 缺省）tool_execute 状态：workspace + isolated。"""
     base = {
@@ -230,6 +248,23 @@ class TestContainerUnavailable:
         assert contexts[0]["reason"] == "container_create_failed"
         assert result.state_updates["isolation.blocked"] is True
         # 不注入 _container_id（工具不会被放行到裸跑）
+        assert StateKeys.RAW_TOOL_CALLS not in result.state_updates
+
+    @pytest.mark.asyncio
+    async def test_ERROR占位环境不注入标blocked(self) -> None:
+        """manager 返回 ERROR 占位环境（创建失败）→ 不把假 env_id 注入工具。
+
+        回归锚：中文 workspace 曾使容器创建失败，guard 把 ERROR 占位环境的
+        env_id（docker-<task_id>，如 docker-session）当容器 id 注入，bash
+        报晦涩的 No such container: docker-session。
+        """
+        guard = _make_guard()
+        guard._manager = _error_env_manager("Invalid container name (cua-修仙游戏)")
+        result = await guard.execute(_ctx(_base_state()))
+
+        contexts = result.state_updates["execution_contexts"]
+        assert contexts[0]["blocked"] is True
+        assert contexts[0]["reason"] == "container_create_failed"
         assert StateKeys.RAW_TOOL_CALLS not in result.state_updates
 
     @pytest.mark.asyncio
