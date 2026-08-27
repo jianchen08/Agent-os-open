@@ -559,7 +559,7 @@ _media_review_service: Any = None
 
 # 响应封装/请求解析助手（json_response/_ok/_error(protocol_error)/_decode_body/
 # _parse_multipart）：公共实现 plugins/shared/http_json.py（文件头已导入）。
-# `_error` 参数序统一为 (message, status)——原本地实现为反序 (status, message)。
+# `_error` 沿公共实现 http_json.error 的参数序 (message, status)。
 
 
 def get_media_review_service() -> Any:
@@ -723,7 +723,6 @@ async def _reviews_media_review(raw_body: str, headers: dict[str, str] | None) -
             )
         )
     finally:
-        # 清理临时文件
         if os.path.isfile(tmp_path):  # noqa: PTH113
             os.remove(tmp_path)  # noqa: PTH107
         if os.path.isdir(tmp_dir):  # noqa: PTH112
@@ -745,7 +744,6 @@ async def _reviews_media_metadata(review_id: str) -> dict[str, Any]:
     review_results = metadata.get("media_review_results", {})
     media_files = metadata.get("media_files", [])
 
-    # 如果有存储的审阅结果，直接返回
     if review_results:
         return {
             "review_id": review_id,
@@ -813,7 +811,6 @@ async def _reviews_add_attachments(review_id: str, body: dict[str, Any]) -> dict
     if not files:
         return {"error": {"code": "INVALID", "message": "files 列表不能为空"}}
 
-    # 更新 media_files
     media_files = review.metadata.get("media_files", [])
     review_results = review.metadata.get("media_review_results", {})
 
@@ -867,7 +864,6 @@ async def _reviews_add_attachments(review_id: str, body: dict[str, Any]) -> dict
             }
         )
 
-    # 更新审批的 metadata
     review.metadata["media_files"] = media_files
     review.metadata["media_review_results"] = review_results
 

@@ -99,7 +99,6 @@ class WorkspaceService:
 
         items: list[dict[str, Any]] = []
 
-        # 获取容器任务关联的所有子任务
         task_ids = await self._get_child_task_ids(container_task_id)
         # 包含容器任务自身
         task_ids.add(container_task_id)
@@ -158,7 +157,6 @@ class WorkspaceService:
         else:
             tree = []
 
-        # 更新工作空间的文件树缓存
         ws = self._workspaces.get(container_task_id)
         if ws:
             ws.file_tree = tree

@@ -263,7 +263,6 @@ class PermissionPolicyManager:
         read_config = config.get("read", {})
         write_config = config.get("write", {})
 
-        # 创建读取权限
         read_scope = PermissionScope(read_config.get("scope", "project"))
         read_permission = ReadPermission(
             scope=read_scope,
@@ -271,7 +270,6 @@ class PermissionPolicyManager:
             custom_paths=read_config.get("custom_paths"),
         )
 
-        # 创建写入权限
         write_scope = PermissionScope(write_config.get("scope", "workspace"))
         write_permission = WritePermission(
             scope=write_scope,

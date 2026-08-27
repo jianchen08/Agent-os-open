@@ -118,12 +118,10 @@ class SceneManager:
         Raises:
             ValueError: 指定的场景不存在
         """
-        # 验证目标场景存在
         target = self._persistence.get_scene(scene_id)
         if target is None:
             raise ValueError(f"场景不存在: {scene_id}")
 
-        # 保存前一场景状态（取消活跃标记）
         if self._active_scene_id and self._active_scene_id != scene_id:
             prev_scene = self._persistence.get_scene(self._active_scene_id)
             if prev_scene:
@@ -132,7 +130,6 @@ class SceneManager:
                 self._persistence.save_scene(prev_scene)
                 logger.debug("自动保存场景状态: %s", prev_scene.name)
 
-        # 激活目标场景
         target.is_active = True
         target.updated_at = datetime.now().isoformat()
         self._persistence.save_scene(target)
@@ -156,7 +153,6 @@ class SceneManager:
         if scene is None:
             return False
 
-        # 如果删除的是活跃场景，清除活跃状态
         if self._active_scene_id == scene_id:
             self._active_scene_id = None
 

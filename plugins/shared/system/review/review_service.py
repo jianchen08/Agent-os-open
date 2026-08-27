@@ -168,7 +168,6 @@ class ReviewService:
 
         self._feedbacks[review_id] = feedback
 
-        # 更新审批状态
         from datetime import UTC, datetime  # noqa: PLC0415
 
         now = datetime.now(UTC).isoformat()

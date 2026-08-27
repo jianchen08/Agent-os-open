@@ -152,7 +152,6 @@ class PermissionChecker:
 
     def _normalize_path(self, path: str) -> str:
         """标准化路径"""
-        # 如果是相对路径，转换为绝对路径
         abs_path = (self._project_root / path).resolve() if not os.path.isabs(path) else Path(path).resolve()  # noqa: PTH117
 
         # 使用 normpath 处理路径分隔符
@@ -207,7 +206,6 @@ def check_write_permission(
     """检查写入权限（便捷函数）"""
     checker = PermissionChecker(project_root)
 
-    # 如果传入的是字典，转换为策略对象
     if isinstance(policy, dict):
         from permission_policy import (  # noqa: PLC0415
             PermissionPolicyType,

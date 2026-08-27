@@ -1010,7 +1010,6 @@ class IsolationManager:
             "tool_name": tool_name,
         }
 
-        # 获取或创建环境。
         # docker create/pull 超时（subprocess.TimeoutExpired）不能向上冒泡为 Core
         # 异常——engine_chain 会当 transient 处理而不熔断。这里把建环境整体 try：
         # 未达阈值返回失败 result（走正常路径回 LLM，LLM 可自行调整）；
@@ -1114,7 +1113,6 @@ class IsolationManager:
                     env, rebuild_kwargs, operation, original_error=result.error
                 )
 
-            # 更新最后使用时间
             env.last_used_at = datetime.now(UTC).isoformat()
 
             return result

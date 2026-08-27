@@ -188,7 +188,6 @@ class CheckpointManager:
 
         workspace_path = self.project_root / workspace
 
-        # 如果工作目录不存在，返回空检查点
         if not workspace_path.exists():
             logger.warning(f"[CheckpointManager] 工作目录不存在，跳过备份 | workspace={workspace}")
             self._save_manifest(checkpoint_path, checkpoint)
@@ -221,7 +220,6 @@ class CheckpointManager:
             logger.warning(f"[CheckpointManager] 检查点不存在 | task_id={task_id}")
             return False
 
-        # 加载检查点
         checkpoint = self._load_manifest(manifest_path)
 
         # F-ISO-1: manifest 篡改防护——任一 original_path/backup_path 越界即整体拒绝，零落盘
@@ -254,7 +252,6 @@ class CheckpointManager:
                 except Exception as e:
                     logger.error(f"[CheckpointManager] 恢复文件失败 | file={file_record.original_path} | error={e}")
 
-        # 更新状态
         checkpoint.status = "restored"
         self._save_manifest(checkpoint_path, checkpoint)
 
@@ -317,23 +314,18 @@ class CheckpointManager:
 
     def _should_ignore(self, file_path: Path) -> bool:
         """判断文件是否应该被忽略"""
-        # 忽略隐藏文件
         if file_path.name.startswith("."):
             return True
 
-        # 忽略 __pycache__ 目录
         if "__pycache__" in file_path.parts:
             return True
 
-        # 忽略 node_modules 目录
         if "node_modules" in file_path.parts:
             return True
 
-        # 忽略 .git 目录
         if ".git" in file_path.parts:
             return True
 
-        # 忽略检查点目录
         return self.CHECKPOINT_DIR in file_path.parts
 
     def _calculate_checksum(self, file_path: Path) -> str:

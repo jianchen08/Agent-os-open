@@ -116,7 +116,6 @@ class ImageReviewer:
         # ---- EXIF 提取 ----
         exif = ImageReviewer._extract_exif(img)
 
-        # 计算宽高比
         aspect_ratio = width / height if height > 0 else 0.0
 
         is_valid = len(errors) == 0

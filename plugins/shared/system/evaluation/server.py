@@ -312,7 +312,6 @@ async def http_handle(
         if read_err is not None:
             return read_err
         metrics = [_metric_to_response(m) for m in raw_metrics]
-        # 过滤
         category = q.get("category")
         if category:
             metrics = [m for m in metrics if m["category"] == category]
@@ -322,7 +321,6 @@ async def http_handle(
         metric_type = q.get("metric_type")
         if metric_type:
             metrics = [m for m in metrics if m["evaluator_type"] == metric_type]
-        # 分页
         total = len(metrics)
         try:
             skip = int(q.get("skip", 0))
