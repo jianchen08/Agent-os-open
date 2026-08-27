@@ -168,3 +168,54 @@ async def test_read_log_no_pid_returns_failure(tool):
 
     assert not result.success
     assert result.error_code == "MISSING_PID"
+
+
+# ============================================================
+# get_output：日志读取失败与"无日志/无输出"显式区分
+# ============================================================
+
+
+def _register_completed_process(pm, pid: int, log_file):
+    """向 active_processes 注册一个已完成进程（get_output 走 _read_log_lines 路径）。"""
+    info = ProcessInfo(
+        pid=pid,
+        command="ls",
+        start_time=0.0,
+        log_file=log_file,
+        status="completed",
+    )
+    pm.active_processes[pid] = info
+    return info
+
+
+def test_get_output_marks_io_error_when_log_unreadable(pm, tmp_path):
+    """日志路径存在但不可读（IO 错误）→ 返回显式错误标识，不静默成空输出。
+
+    用目录冒充日志文件：exists() 为真但 open() 必抛 IsADirectoryError(OSError)，
+    是不依赖权限位的跨平台确定性构造。
+    """
+    log_as_dir = pm.log_dir / "bash_42.log"
+    log_as_dir.mkdir(parents=True)
+    _register_completed_process(pm, 42, log_as_dir)
+
+    out = pm.get_output(42)
+
+    assert "日志读取失败" in out
+    assert str(log_as_dir) in out
+
+
+def test_get_output_empty_when_no_log(pm, tmp_path):
+    """磁盘降级读：文件缺失 → 空串（既有契约，区分于 IO 错误）。"""
+    assert pm.get_output(99999) == ""
+
+
+def test_get_output_returns_lines_without_comments(pm, tmp_path):
+    """正常读取：行拼接、过滤 # 注释头（性质：内容行数与输入一致）。"""
+    log_file = _write_log_file(pm.log_dir, 7, "echo hi", "line1\nline2\n")
+    _register_completed_process(pm, 7, log_file)
+
+    out = pm.get_output(7)
+
+    assert "line1" in out
+    assert "line2" in out
+    assert "# Command:" not in out

@@ -152,18 +152,24 @@ class ProcessManager:
         except OSError as e:
             logger.warning(f"日志追加写入失败（不影响命令执行） | file={log_file} | error={e}")
 
-    def _read_log_lines(self, log_file: Path) -> list[str]:
-        """读取日志所有行"""
+    def _read_log_lines(self, log_file: Path) -> list[str] | None:
+        """读取日志所有行。
+
+        返回 None = 文件存在但读取失败（OSError，权限/被占用等）——与
+        「无日志」（文件缺失，返回 []）显式区分，调用方须给可识别的
+        错误标识，不得把读取故障静默当成“进程无输出”。
+        """
         if not log_file.exists():
             return []
 
         try:
             with open(log_file, encoding="utf-8", errors="replace") as f:
                 lines = f.readlines()
-                # 过滤掉注释行
-                return [line.rstrip() for line in lines if not line.startswith("#")]
-        except Exception:
-            return []
+        except OSError as e:
+            logger.warning(f"日志读取失败 | file={log_file} | error={e}")
+            return None
+        # 过滤掉注释行
+        return [line.rstrip() for line in lines if not line.startswith("#")]
 
     # 摘要压缩只喂尾部窗口的行数上限（防大日志全量读取，评审 H-issue）
     TAIL_SUMMARY_LINES: ClassVar[int] = 5000
@@ -781,6 +787,10 @@ class ProcessManager:
             self._touch_access(pid)
             self._sync_poll_process(proc_info)
         lines = self._read_log_lines(proc_info.log_file)
+        if lines is None:
+            return (
+                f"⚠️ 日志读取失败（IO 错误），不代表进程无输出 | log={proc_info.log_file}"
+            )
         raw_output = "\n".join(lines)
         raw_output = raw_output.replace("\x00", "")
         return raw_output

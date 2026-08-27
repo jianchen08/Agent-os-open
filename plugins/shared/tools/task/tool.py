@@ -35,6 +35,15 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+class StateRowsReadError(RuntimeError):
+    """state 聚合读面故障（桥已注入但本次读取失败/返回非列表形态）。
+
+    与「聚合里没有该任务」（各读面返回 None）显式区分：读取故障须在
+    execute 边界翻译为 SERVICE_UNAVAILABLE 显式错误，不得落入"任务
+    不存在"路径误导 LLM 重建任务。
+    """
+
+
 def _status_value(status: Any) -> str:
     """状态 → 展示值（TaskStatus 取 .value；枚举漂移保留的原串直通）。"""
     return status.value if hasattr(status, "value") else str(status)
@@ -219,7 +228,12 @@ class TaskTool(BuiltinTool):
         ]
 
     async def _read_state_rows(self) -> list[dict[str, Any]] | None:
-        """读管道 state 聚合行（pipeline-state.list；None = 桥未就绪）。"""
+        """读管道 state 聚合行（pipeline-state.list）。
+
+        返回 None = 桥未注入（injection point 未接线，调用方按既有回落
+        路径处理）；抛 StateRowsReadError = 桥已注入但本次读取失败（桥内
+        异常 / 返回非列表）——与「聚合里没有该任务」严格区分。
+        """
         reader = _state_reader
         if reader is None:
             return None
@@ -227,10 +241,15 @@ class TaskTool(BuiltinTool):
             rows = reader()
             if asyncio.iscoroutine(rows):
                 rows = await rows
-            return [r for r in rows if isinstance(r, dict)] if isinstance(rows, list) else None
-        except Exception as exc:  # noqa: BLE001 — 读面降级不崩
+        except Exception as exc:
             logger.warning("[TaskTool] state 聚合读取失败: %s", exc)
-            return None
+            raise StateRowsReadError(f"state 聚合读取失败：{exc}") from exc
+        if not isinstance(rows, list):
+            logger.warning(
+                "[TaskTool] state 聚合返回非列表形态 | type=%s", type(rows).__name__
+            )
+            raise StateRowsReadError("state 聚合返回非列表形态")
+        return [r for r in rows if isinstance(r, dict)]
 
     async def _get_task_from_state(self, task_id: str) -> TaskModel | None:
         """从 state 聚合行组装任务对象（GAP-1 统一：task = pipeline）。
@@ -510,31 +529,43 @@ class TaskTool(BuiltinTool):
         # ── 短 id 入参解析（LLM 工具面 id 短化契约）──
         # LLM 回传的 task_id / task_ids / parent_task_id 可能是短 id（12 位前缀），
         # 统一经 state 聚合前缀唯一解析回全 id（精确命中原样；多命中歧义报错；
-        # 无命中原样让既有"任务不存在"路径处理）。解析在 action 分派前收口。
-        resolve_err = await self._resolve_input_ids(inputs)
-        if resolve_err:
+        # 无命中且桥健康时由读取层判定存在性）。解析在 action 分派前收口。
+        #
+        # state 聚合读面故障的统一翻译点：任何 action 在读取层失败都回
+        # SERVICE_UNAVAILABLE 显式错误信封，绝不落入"任务不存在"分支。
+        try:
+            resolve_err = await self._resolve_input_ids(inputs)
+            if resolve_err:
+                return create_failure_result(
+                    error=resolve_err,
+                    error_code="AMBIGUOUS_TASK_ID",
+                )
+
+            if task_ids and isinstance(task_ids, list) and action in ("continue", "stop", "delete"):
+                return await self._batch_tasks(inputs, parent_agent_level)
+
+            if action == "get":
+                return await self._get_task(inputs, parent_agent_level)
+
+            if action == "continue":
+                return await self._continue_task(inputs, parent_agent_level)
+
+            if action == "stop":
+                return await self._stop_task(inputs, parent_agent_level)
+
+            if action == "delete":
+                return await self._delete_task(inputs, parent_agent_level)
+
+            if action == "change":
+                return await self._change_status(inputs, parent_agent_level)
+        except StateRowsReadError as exc:
             return create_failure_result(
-                error=resolve_err,
-                error_code="AMBIGUOUS_TASK_ID",
+                error=(
+                    f"任务状态聚合暂不可读（{exc}）。这是读面故障而非任务缺失，"
+                    "请稍后重试；不要据此重建任务。"
+                ),
+                error_code="SERVICE_UNAVAILABLE",
             )
-
-        if task_ids and isinstance(task_ids, list) and action in ("continue", "stop", "delete"):
-            return await self._batch_tasks(inputs, parent_agent_level)
-
-        if action == "get":
-            return await self._get_task(inputs, parent_agent_level)
-
-        if action == "continue":
-            return await self._continue_task(inputs, parent_agent_level)
-
-        if action == "stop":
-            return await self._stop_task(inputs, parent_agent_level)
-
-        if action == "delete":
-            return await self._delete_task(inputs, parent_agent_level)
-
-        if action == "change":
-            return await self._change_status(inputs, parent_agent_level)
 
         return create_failure_result(
             error=f"不支持的操作: {action}",
@@ -549,7 +580,9 @@ class TaskTool(BuiltinTool):
         """
         rows = await self._read_state_rows()
         if rows is None:
-            return None  # 聚合不可用：原样放行，既有"任务不存在"路径处理
+            # 桥未注入（injection point 未接线）：无聚合数据可解析，原样放行
+            # 走调用方既有的回落路径。读取故障走 StateRowsReadError，不在此列。
+            return None
 
         from id_utils import resolve_id  # noqa: PLC0415
 
@@ -1286,27 +1319,34 @@ class TaskTool(BuiltinTool):
                 logger.warning("[TaskTool] suspend_pipeline 失败（继续尝试级联）: %s", exc)
 
             cascaded = 0
-            rows = await self._read_state_rows()
-            if rows is not None:
-                for row in rows:
-                    if str(row.get("lineage.parent_pipeline_id") or "") == task_id:
-                        child_id = str(row.get("pipeline_id") or "")
-                        if not child_id:
-                            continue
-                        try:
-                            await _pipeline_executor(
-                                {
-                                    "method": "suspend_pipeline",
-                                    "params": {"pipeline_id": child_id},
-                                }
-                            )
-                            cascaded += 1
-                        except Exception as exc:  # noqa: BLE001
-                            logger.warning(
-                                "[TaskTool] 级联挂起子管道失败 | pipeline_id=%s | err=%s",
-                                child_id,
-                                exc,
-                            )
+            try:
+                rows = await self._read_state_rows()
+            except StateRowsReadError as exc:
+                # 主流程（任务已挂起）之后的尽力而为级联：读取失败不回卷
+                # stop 结果，warning 留痕跳过级联枚举——区别于"无子管道"。
+                logger.warning(
+                    "[TaskTool] 级联子管道枚举读取失败（主流程已完成挂起）: %s", exc
+                )
+                rows = []
+            for row in rows or []:
+                if str(row.get("lineage.parent_pipeline_id") or "") == task_id:
+                    child_id = str(row.get("pipeline_id") or "")
+                    if not child_id:
+                        continue
+                    try:
+                        await _pipeline_executor(
+                            {
+                                "method": "suspend_pipeline",
+                                "params": {"pipeline_id": child_id},
+                            }
+                        )
+                        cascaded += 1
+                    except Exception as exc:  # noqa: BLE001
+                        logger.warning(
+                            "[TaskTool] 级联挂起子管道失败 | pipeline_id=%s | err=%s",
+                            child_id,
+                            exc,
+                        )
 
             result_data: dict[str, Any] = {
                 "task_id": task_id,

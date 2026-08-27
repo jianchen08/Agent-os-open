@@ -858,3 +858,58 @@ async def test_batch_delete_success(tool: TaskTool, svc: Any) -> None:
     assert all(r["success"] for r in data["results"])
     assert svc.get_task(t1.id) is None
     assert svc.get_task(t2.id) is None
+
+
+# ──────────────── state 聚合读面故障：显式区分"读不可用"与"不存在" ────────────────
+
+
+async def test_get_state_read_error_returns_service_unavailable(
+    tool: TaskTool, svc: Any
+) -> None:
+    """state 桥已注入但读取抛错 → SERVICE_UNAVAILABLE。
+
+    读取故障不得走"任务不存在"路径误导 LLM 重建任务；错误文案不出现
+    "不存在"字样。
+    """
+
+    async def boom() -> Any:
+        raise RuntimeError("pipeline-state 桥故障")
+
+    _task_mod.set_state_reader(boom)
+
+    result = await tool.execute(
+        {"action": "get", "task_id": "nope-999999", "parent_agent_level": 1}
+    )
+    assert not result.success
+    assert result.error_code == "SERVICE_UNAVAILABLE"
+    assert result.error is not None
+    assert "不存在" not in result.error
+
+
+async def test_get_state_malformed_rows_treated_as_read_error(
+    tool: TaskTool, svc: Any
+) -> None:
+    """state 桥返回非列表形态 → 按"读面形状违约"显式报错，同读不可用处理。"""
+
+    _task_mod.set_state_reader(lambda: "junk-not-a-list")
+
+    result = await tool.execute(
+        {"action": "get", "task_id": "nope-999999", "parent_agent_level": 1}
+    )
+    assert not result.success
+    assert result.error_code == "SERVICE_UNAVAILABLE"
+    assert result.error is not None
+    assert "不存在" not in result.error
+
+
+async def test_state_bridge_absent_keeps_legacy_fallback(
+    tool: TaskTool, svc: Any
+) -> None:
+    """冻结契约：桥未注入（injection 未接线）→ 回落旧 service，仍报任务不存在。"""
+    assert _task_mod._state_reader is None
+
+    result = await tool.execute(
+        {"action": "get", "task_id": "ghost-id-000001", "parent_agent_level": 1}
+    )
+    assert not result.success
+    assert result.error_code == "TASK_NOT_FOUND"

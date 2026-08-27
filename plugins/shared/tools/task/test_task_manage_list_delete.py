@@ -738,22 +738,28 @@ async def test_change_resume_executor_missing(tool: TaskTool) -> None:
 # ─────────────────────────── 其它内部入口 ───────────────────────────
 
 
-async def test_read_state_rows_exception_degrades_to_none(tool: TaskTool, caplog: Any) -> None:
-    """state 读面抛异常 → 返回 None（读面降级不崩）+ warning 留痕。"""
+async def test_read_state_rows_exception_raises_read_error(
+    tool: TaskTool, caplog: Any
+) -> None:
+    """state 读面抛异常 → StateRowsReadError（与"无任务"显式区分）+ warning 留痕。"""
+
     async def broken() -> list[dict[str, Any]]:
         raise RuntimeError("read rows broken")
 
     _task_mod.set_state_reader(broken)
-    with caplog.at_level(logging.WARNING):
-        rows = await tool._read_state_rows()
-    assert rows is None
+    with caplog.at_level(logging.WARNING), pytest.raises(
+        _task_mod.StateRowsReadError
+    ) as exc_info:
+        await tool._read_state_rows()
+    assert "read rows broken" in str(exc_info.value)
     assert any("state 聚合读取失败" in r.getMessage() for r in caplog.records)
 
 
-async def test_read_state_rows_non_list_returns_none(tool: TaskTool) -> None:
-    """读面返回非 list（如 dict）→ None（形状不合法降级）。"""
+async def test_read_state_rows_non_list_raises_read_error(tool: TaskTool) -> None:
+    """读面返回非 list（如 dict）→ 形状违约按读取故障处理，不降级成"无任务"。"""
     _task_mod.set_state_reader(lambda: {"pipeline_id": "x"})
-    assert await tool._read_state_rows() is None
+    with pytest.raises(_task_mod.StateRowsReadError):
+        await tool._read_state_rows()
 
 
 async def test_get_all_tasks_uses_service(tool: TaskTool, svc: Any) -> None:
