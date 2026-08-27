@@ -14,9 +14,9 @@ from pathlib import Path
 
 import pytest
 
-pytestmark = pytest.mark.unit
-
 from agentos_plugin_sdk.workspace_aware import WorkspaceAwareMixin
+
+pytestmark = pytest.mark.unit
 
 
 class _Tool(WorkspaceAwareMixin):
