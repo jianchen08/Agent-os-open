@@ -3,7 +3,7 @@
 
 背景（为什么这些测试重要）：
 - 编码：bat 必须为 UTF-8 + CRLF（.gitattributes 铁律，见
-  docs/dsh_decision_records.md），任何代码页下都不会乱码。
+  docs/working/dsh_decision_records.md），任何代码页下都不会乱码。
 - kernel 等待机制：轮询 /health 直到就绪（最多 60s），未就绪则报错退出、
   不启动前端（不得在 kernel 未就绪时启动前端导致 vite 代理 ECONNREFUSED）。
 

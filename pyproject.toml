@@ -43,8 +43,8 @@ dev = [
     "pytest-cov>=4.0",
     "mypy>=1.10",
     "ruff>=0.5",
-    # fastapi：仅 tests/test_config_management.py、tests/test_new_project_e2e.py
-    # 两个测试文件 import（TestClient/声明式 schema），运行测试才需要
+    # fastapi：tests/test_new_project_e2e.py import（TestClient/声明式
+    # schema），运行测试才需要
     "fastapi>=0.110",
     # e2e（tests/e2e_02）：WS 流式链路测试需要
     "websockets>=13.0",
@@ -105,7 +105,7 @@ packages = []
 # 行长度配置
 line-length = 120
 # 目标 Python 版本
-target-version = "py310"
+target-version = "py311"
 # 排除的目录
 extend-exclude = [
     ".git",

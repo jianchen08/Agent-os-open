@@ -11,6 +11,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import sys
 
@@ -66,8 +67,11 @@ class TestExtractQqText:
 
 
 class TestQQInputAdapter:
-    def test_raw_to_state_private(self) -> None:
-        state = QQInputAdapter._raw_to_state(
+    @pytest.mark.asyncio
+    async def test_raw_envelope_full(self) -> None:
+        """私聊原始报文经 enqueue→receive 得到管道信封。"""
+        adapter = QQInputAdapter()
+        await adapter.enqueue_message(
             {
                 "user_id": 123456,
                 "message_id": "mid-1",
@@ -75,6 +79,7 @@ class TestQQInputAdapter:
                 "message": "在吗",
             }
         )
+        state = await adapter.receive()
         assert state["user_input"] == "在吗"
         assert state["_channel_type"] == "qq"
         assert state["_channel_user_id"] == "123456"
@@ -82,15 +87,23 @@ class TestQQInputAdapter:
         assert state["iteration"] == 1
         assert "_group_id" not in state
 
-    def test_raw_to_state_group(self) -> None:
-        state = QQInputAdapter._raw_to_state(
+    @pytest.mark.asyncio
+    async def test_raw_group_fields(self) -> None:
+        """群消息报文携带群号与群类型。"""
+        adapter = QQInputAdapter()
+        await adapter.enqueue_message(
             {"user_id": 1, "message_id": "m", "message_type": "group", "group_id": 999, "message": "x"}
         )
+        state = await adapter.receive()
         assert state["_message_type"] == "group"
         assert state["_group_id"] == 999
 
-    def test_raw_to_state_defaults(self) -> None:
-        state = QQInputAdapter._raw_to_state({})
+    @pytest.mark.asyncio
+    async def test_raw_empty_defaults(self) -> None:
+        """空报文降级为默认私聊信封。"""
+        adapter = QQInputAdapter()
+        await adapter.enqueue_message({})
+        state = await adapter.receive()
         assert state["user_input"] == ""
         assert state["_channel_user_id"] == ""
         assert state["_message_type"] == "private"
@@ -219,12 +232,7 @@ class TestOneBotClient:
     def test_init_and_is_connected(self) -> None:
         client = OneBotClient(ws_port=8082)
         assert client.is_connected is False
-        assert client._http_api_url == "http://127.0.0.1:5700"
-
-    def test_build_message_text_and_array(self) -> None:
-        assert OneBotClient._build_message("hi") == [{"type": "text", "data": {"text": "hi"}}]
-        segs = [{"type": "image", "data": {"file": "x.png"}}]
-        assert OneBotClient._build_message(segs) == segs
+        # 构造期 HTTP API 配置的生效由 send_message 请求 URL 断言承载
 
     @pytest.mark.asyncio
     async def test_send_message_private(self) -> None:
@@ -239,12 +247,30 @@ class TestOneBotClient:
 
         result = await client.send_message(user_id=123, content="hi")
         assert result == {"status": "ok", "retcode": 0}
+        # 默认构造的 HTTP API 地址（OneBot 标准端口 5700）经发送行为可观察
         url = mock_session.post.call_args[0][0]
-        assert url.endswith("/send_msg")
+        assert url == "http://127.0.0.1:5700/send_msg"
         body = mock_session.post.call_args[1]["json"]
         assert body["message_type"] == "private"
         assert body["user_id"] == 123
         assert body["message"] == [{"type": "text", "data": {"text": "hi"}}]
+
+    @pytest.mark.asyncio
+    async def test_send_message_array_segments_passthrough(self) -> None:
+        """消息段数组直通 OneBot 报文（不包 text 段包装）。"""
+        client = OneBotClient()
+        mock_response = AsyncMock()
+        mock_response.json = AsyncMock(return_value={"status": "ok"})
+        mock_response.__aenter__ = AsyncMock(return_value=mock_response)
+        mock_response.__aexit__ = AsyncMock(return_value=False)
+        mock_session = MagicMock()
+        mock_session.post = MagicMock(return_value=mock_response)
+        client._session = mock_session
+
+        segs = [{"type": "image", "data": {"file": "x.png"}}]
+        await client.send_message(user_id=123, content=segs)
+        body = mock_session.post.call_args[1]["json"]
+        assert body["message"] == segs
 
     @pytest.mark.asyncio
     async def test_send_message_group_uses_group_id(self) -> None:
@@ -269,20 +295,61 @@ class TestOneBotClient:
             await client.send_message(user_id=1, content="x")
 
     @pytest.mark.asyncio
-    async def test_handle_event_message_and_non_message(self) -> None:
+    async def test_ws_frames_filtered_and_dispatched(self, monkeypatch) -> None:
+        """WS 帧 → 事件分发契约：message 帧送达回调、notice 帧被过滤、
+        回调缺位不抛（连接循环存续）。"""
+        from aiohttp import web
+
         client = OneBotClient()
-        got = []
+        message_frame = json.dumps({"post_type": "message", "user_id": 1})
+        notice_frame = json.dumps({"post_type": "notice"})
+
+        class _FakeWS:
+            def __init__(self, msgs):
+                self._msgs = list(msgs)
+                self.closed = False
+
+            async def prepare(self, request):
+                return None
+
+            def __aiter__(self):
+                return self
+
+            async def __anext__(self):
+                if not self._msgs:
+                    raise StopAsyncIteration
+                return self._msgs.pop(0)
+
+        request = MagicMock()
+        request.remote = "127.0.0.1"
+
+        got: list[dict] = []
 
         async def cb(data):
             got.append(data)
 
         client.on_message = cb
-        await client._handle_event({"post_type": "message", "user_id": 1})
-        assert len(got) == 1
-        await client._handle_event({"post_type": "notice"})
-        assert len(got) == 1
+        fake_ws = _FakeWS(
+            [
+                MagicMock(type=aiohttp.WSMsgType.TEXT, data=message_frame),
+                MagicMock(type=aiohttp.WSMsgType.TEXT, data=notice_frame),
+                MagicMock(type=aiohttp.WSMsgType.CLOSED),
+            ]
+        )
+        monkeypatch.setattr(web, "WebSocketResponse", lambda: fake_ws)
+        await client._ws_handler(request)
+        assert [e["post_type"] for e in got] == ["message"]
+
+        # 回调缺位：message 帧不再投递，但处理不抛
         client.on_message = None
-        await client._handle_event({"post_type": "message"})  # 不抛
+        fake_ws_none_cb = _FakeWS(
+            [
+                MagicMock(type=aiohttp.WSMsgType.TEXT, data=message_frame),
+                MagicMock(type=aiohttp.WSMsgType.CLOSED),
+            ]
+        )
+        monkeypatch.setattr(web, "WebSocketResponse", lambda: fake_ws_none_cb)
+        await client._ws_handler(request)  # 不抛
 
     @pytest.mark.asyncio
     async def test_disconnect_cleanup(self) -> None:
@@ -293,11 +360,11 @@ class TestOneBotClient:
         client._session = session
         ws_server = AsyncMock()  # cleanup 是 async 方法
         client._ws_server = ws_server
-        client._receive_task = None
+        await client.disconnect()
+        # 幂等契约：第二次 disconnect 不再重复释放资源，也不抛
         await client.disconnect()
         session.close.assert_awaited_once()
         ws_server.cleanup.assert_awaited_once()
-        assert client._session is None and client._ws_server is None
 
 
 class TestOneBotWebSocket:
@@ -343,8 +410,8 @@ class TestOneBotWebSocket:
         request.remote = "127.0.0.1"
         result = await client._ws_handler(request)
         assert got and got[0]["post_type"] == "message"
-        # 处理器内部 append 后 finally 移除——列表回到空
-        assert client._ws_connections == []
+        # 处理器内部 append 后 finally 移除——连接不再存活（公共观察面）
+        assert client.is_connected is False
         assert result.closed is False
 
     @pytest.mark.asyncio
@@ -411,26 +478,28 @@ class TestOneBotConnectLoop:
 
     @pytest.mark.asyncio
     async def test_start_receive_loop_background(self) -> None:
-        import asyncio as _asyncio
-
+        """start_receive_loop 后台托管 connect：异步启动且阻塞期间可被 disconnect 及时回收。"""
         client = OneBotClient()
-        client.connect = AsyncMock()
+        started = asyncio.Event()
+
+        async def _blocking_connect() -> None:
+            started.set()
+            await asyncio.sleep(3600)
+
+        client.connect = _blocking_connect
         await client.start_receive_loop()
-        assert client._receive_task is not None
-        await client._receive_task
-        client.connect.assert_awaited_once()
-        client._receive_task = None
+        await asyncio.wait_for(started.wait(), timeout=5)
+        await asyncio.wait_for(client.disconnect(), timeout=5)
 
     @pytest.mark.asyncio
     async def test_connect_retries_on_server_error(self, monkeypatch) -> None:
         from aiohttp import web
 
-        client = OneBotClient()
+        client = OneBotClient(max_retries=2)
         session = MagicMock()
         session.closed = False
         session.close = AsyncMock()
         client._session = session
-        client._max_retries = 2
 
         calls = {"n": 0}
 
@@ -455,7 +524,6 @@ class TestOneBotConnectLoop:
 
         monkeypatch.setattr(web.AppRunner, "setup", _setup)
         monkeypatch.setattr(web.AppRunner, "cleanup", AsyncMock())
-        client._running = False  # 建站成功后立即退出 while
         await client.connect()
         assert calls["n"] >= 1
 
@@ -468,12 +536,11 @@ class TestOneBotConnectServer:
         import asyncio as _asyncio
         from aiohttp import web
 
-        client = OneBotClient()
+        client = OneBotClient(max_retries=1)
         session = MagicMock()
         session.closed = False
         session.close = AsyncMock()
         client._session = session
-        client._max_retries = 1
 
         class _FakeRunner:
             def __init__(self, app):
@@ -501,14 +568,8 @@ class TestOneBotConnectServer:
         monkeypatch.setattr(web, "AppRunner", lambda app: fake_runner)
         monkeypatch.setattr(web, "TCPSite", _FakeSite)
 
-        # 第一次循环建站成功;第二次 endpoint 失败退出
-        client._running = True
-        orig_connect = client.connect
-
+        # 建站成功路径：手动驱动一次真实注册流程
         async def _run():
-            # 直接测试 _ws_handler 注册路径:用真实 connect 但让 while 立即退出
-            client._running = True
-            # 手动模拟一次循环体
             app = web.Application()
             app.router.add_route("GET", "/ws", client._ws_handler)
             runner = web.AppRunner(app)
@@ -555,16 +616,44 @@ class TestOneBotConnectServer:
         assert result == {"status": "ok", "retcode": 0}
 
     @pytest.mark.asyncio
-    async def test_disconnect_closes_ws_connections(self) -> None:
+    async def test_disconnect_closes_ws_connections(self, monkeypatch) -> None:
+        """经真实 ws_handler 注册的连接，disconnect 时被统一关闭。"""
+        from aiohttp import web
+
         client = OneBotClient()
-        ws = MagicMock()
-        ws.closed = False
-        ws.close = AsyncMock()
-        client._ws_connections = [ws]
-        client._session = None
-        await client.disconnect()
-        ws.close.assert_awaited_once()
-        assert client._ws_connections == []
+
+        class _BlockedWS:
+            def __init__(self):
+                self.closed = False
+                self.close = AsyncMock()
+
+            async def prepare(self, request):
+                return None
+
+            def __aiter__(self):
+                return self
+
+            async def __anext__(self):
+                await asyncio.sleep(0.01)
+                if self.close.await_count:
+                    raise StopAsyncIteration
+                return MagicMock(type=aiohttp.WSMsgType.TEXT, data="{}")
+
+        blocked = _BlockedWS()
+        monkeypatch.setattr(web, "WebSocketResponse", lambda: blocked)
+        request = MagicMock()
+        request.remote = "127.0.0.1"
+        handler_task = asyncio.create_task(client._ws_handler(request))
+
+        async def _wait_registered():
+            while not client.is_connected:
+                await asyncio.sleep(0)
+
+        await asyncio.wait_for(_wait_registered(), timeout=2)
+        await asyncio.wait_for(client.disconnect(), timeout=2)
+        blocked.close.assert_awaited_once()
+        # 连接已被服务端关闭，接收循环自然收尾
+        await asyncio.wait_for(handler_task, timeout=2)
 
     @pytest.mark.asyncio
     async def test_disconnect_cancels_receive_task(self) -> None:
@@ -582,7 +671,6 @@ class TestOneBotConnectServer:
         client._receive_task = task
         await client.disconnect()
         assert task.cancelled()
-        assert client._receive_task is None
 
     @pytest.mark.asyncio
     async def test_disconnect_closes_open_session(self) -> None:
@@ -594,15 +682,16 @@ class TestOneBotConnectServer:
         client._session = session
         await client.disconnect()
         session.close.assert_awaited_once()
-        assert client._session is None
+        # 会话已释放：再次发送报"未初始化"而非静默成功
+        with pytest.raises(RuntimeError, match="Session not initialized"):
+            await client.send_message(user_id=1, content="x")
 
     @pytest.mark.asyncio
     async def test_connect_full_loop_start_and_stop(self, monkeypatch) -> None:
         """真实 connect() 主循环:建站成功 → 服务循环 → disconnect 退出。"""
         from aiohttp import web
 
-        client = OneBotClient()
-        client._max_retries = 3
+        client = OneBotClient(max_retries=3)
 
         calls = {"loop": 0}
 
@@ -643,6 +732,5 @@ class TestOneBotConnectServer:
         monkeypatch.setattr(_asyncio, "sleep", _patched_sleep)
         await client.connect()
         assert calls["loop"] >= 2
-        assert client._ws_server is not None
         await client.disconnect()
         assert fake_runner.cleanup_called

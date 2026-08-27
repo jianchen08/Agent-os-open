@@ -50,12 +50,19 @@ def _unified_response(channel: str = "feishu") -> UnifiedResponse:
 
 
 class TestRegistration:
-    def test_register_adapter(self) -> None:
+    @pytest.mark.asyncio
+    async def test_register_adapter_routes_to_registered_output(self) -> None:
+        """注册后该渠道响应经其输出适配器投递（注册行为经路由可观察）。"""
         gateway = ChannelGateway()
-        mock_adapter = MagicMock()
-        mock_adapter.channel_type = "feishu"
-        gateway.register_adapter("feishu", mock_adapter)
-        assert "feishu" in gateway._adapters
+        adapter = MagicMock()
+        adapter.channel_type = "feishu"
+        adapter.output_adapter = AsyncMock()
+        gateway.register_adapter("feishu", adapter)
+
+        result = await gateway.send_response(_unified_response())
+
+        assert result["sent"] is True
+        adapter.output_adapter.send.assert_awaited_once()
 
     def test_register_duplicate_adapter_raises(self) -> None:
         gateway = ChannelGateway()
@@ -133,6 +140,25 @@ class TestHandleMessageOutcome:
         )
         assert result_dt["handled"] is True
         assert handler.called
+
+    @pytest.mark.asyncio
+    async def test_handle_message_builds_channel_state_envelope(self) -> None:
+        """标准化产物的管道初始 state 信封：输入、渠道与统一用户标识。"""
+        gateway = ChannelGateway()
+        states: list[dict[str, Any]] = []
+
+        async def _handler(state: dict[str, Any]) -> None:
+            states.append(dict(state))
+
+        gateway.on_pipeline_request = _handler
+
+        await gateway.handle_message("feishu", _feishu_text_event("hello envelope"))
+
+        state = states[0]
+        assert state["user_input"] == "hello envelope"
+        assert state["_channel_type"] == "feishu"
+        assert state["_channel_user_id"] == "ou_test"
+        assert state["_unified_user_id"] == "feishu:ou_test"
 
     @pytest.mark.asyncio
     async def test_unsupported_channel_returns_failure_value(self) -> None:

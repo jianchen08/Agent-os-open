@@ -3,6 +3,8 @@
 
 from __future__ import annotations
 
+import json
+
 import pytest
 
 pytestmark = pytest.mark.unit  # 0.2 TDD 分层：单元测试
@@ -120,6 +122,31 @@ class TestMessageNormalizer:
         }
         result = self.normalizer.normalize("feishu", raw)
         assert result.content_type == "text"
+
+    def test_normalize_feishu_post_message(self) -> None:
+        """飞书富文本（post）消息提取纯文本。"""
+        raw = {
+            "header": {"event_id": "evt-003", "event_type": "im.message.receive_v1"},
+            "event": {
+                "sender": {"sender_id": {"open_id": "ou_post"}},
+                "message": {
+                    "message_id": "msg-003",
+                    "message_type": "post",
+                    "content": json.dumps({
+                        "content": [
+                            [{"text": "Hello "}, {"text": "World"}],
+                            [{"text": "Second line"}],
+                        ]
+                    }),
+                    "create_time": "1700000000000",
+                },
+            },
+        }
+        result = self.normalizer.normalize("feishu", raw)
+        assert result.content_type == "text"
+        assert "Hello" in result.content
+        assert "World" in result.content
+        assert "Second line" in result.content
 
     # ── 钉钉消息标准化 ──────────────────────────────
 

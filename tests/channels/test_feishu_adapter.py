@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from unittest.mock import AsyncMock
 
 import pytest
@@ -19,11 +20,12 @@ from stream_client import FeishuStreamClient
 class TestFeishuInputAdapter:
     """FeishuInputAdapter 测试。"""
 
-    def test_init(self) -> None:
-        """测试初始化。"""
+    @pytest.mark.asyncio
+    async def test_init(self) -> None:
+        """初始化后队列为空：receive 在超时窗口内取不到任何消息。"""
         adapter = FeishuInputAdapter()
-        assert adapter is not None
-        assert hasattr(adapter, "_message_queue")
+        with pytest.raises(asyncio.TimeoutError):
+            await asyncio.wait_for(adapter.receive(), timeout=0.05)
 
     @pytest.mark.asyncio
     async def test_enqueue_and_receive(self) -> None:
@@ -75,8 +77,9 @@ class TestFeishuOutputAdapter:
 
         chunk = {"text": "Hello ", "type": "token"}
         await adapter.send_stream(chunk)
-        # 流式消息应累积并发送
-        assert adapter._accumulated_text == "Hello "
+        # 流式消息应只累积不投递（公共只读观察面）
+        assert adapter.accumulated_text() == "Hello "
+        client.send_message.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_send_with_error(self) -> None:

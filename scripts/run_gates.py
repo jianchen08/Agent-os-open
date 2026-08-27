@@ -268,6 +268,20 @@ GATES: list[Gate] = [
         env=_PLUGINS_ENV,
     ),
     Gate(
+        # 渠道三件 per-file 100%（DSH 口径，2026-08-26 覆盖率裁决；批F-1 接线）：
+        # wecom/qq/dingtalk 每个源文件行+函数+分支三维全绿或显式豁免，
+        # 消费 plugins-coverage 产出的 coverage.xml（tests/channels 在插桩基集内）。
+        id="channel-per-file-coverage",
+        label="渠道三件 per-file 覆盖率 100%（行+函数+分支，豁免可见）",
+        domain="plugins",
+        command=(
+            sys.executable,
+            "scripts/check_channel_per_file_coverage.py",
+            "--check",
+        ),
+        needs=("plugins-coverage",),
+    ),
+    Gate(
         id="plugins-heavy",
         label="重型套件免插桩（94 插件子进程冒烟矩阵）+ 失败数基线锁",
         domain="plugins",

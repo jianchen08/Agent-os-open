@@ -144,6 +144,13 @@ class BufferedChannelOutputAdapter(IOutputAdapter):
         """
         self._channel_user_id = user_id
 
+    def accumulated_text(self) -> str:
+        """当前已累积但尚未投递的流式文本（只读观察面）。
+
+        供调用方/监控观测缓冲积压；flush 或 end 投递后归零。
+        """
+        return self._accumulated_text
+
     def _resolve_target(self, raw_user_id: str) -> Any | None:
         """校验/规范化发送目标。
 

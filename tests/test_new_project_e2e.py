@@ -138,7 +138,6 @@ def _init_project_root(project_dir: Path) -> str:
     Returns:
         初始 commit 的 hash 值
     """
-    # 模拟系统创建目录
     project_dir.mkdir(parents=True, exist_ok=True)
 
     # 模拟 git init（mode=project_root 的核心操作）
@@ -152,7 +151,6 @@ def _init_project_root(project_dir: Path) -> str:
     readme_path = project_dir / "README.md"
     readme_path.write_text("# New Project\n", encoding="utf-8")
 
-    # 初始 commit
     _run_git("add", "-A", cwd=project_dir)
     _run_git("commit", "-m", _INIT_COMMIT_MSG, cwd=project_dir)
 
@@ -332,31 +330,25 @@ class TestNewProjectE2E:
         # 初始化项目（mkdir + git init + 初始 commit）
         initial_commit = _init_project_root(project_dir)
 
-        # 验证：目录已创建
         assert project_dir.exists(), "项目目录应已创建"
         assert project_dir.is_dir(), "项目路径应为目录"
 
         # ── 步骤 3：验证 mode=project_root 状态 ──
-        # 项目目录存在且有 .git
         assert (project_dir / ".git").exists(), "初始化后应有 .git 目录"
         assert (project_dir / ".git").is_dir(), ".git 应为目录（非 worktree 文件）"
 
-        # 验证初始 commit
         assert len(initial_commit) >= 7, f"初始 commit hash 有效: {initial_commit}"
 
-        # 验证当前分支为 main
         branch_result = _run_git("branch", "--show-current", cwd=project_dir)
         assert branch_result.stdout.strip() == "main", (
             f"初始分支应为 main，实际: {branch_result.stdout.strip()}"
         )
 
-        # 验证 README.md 存在
         assert (project_dir / "README.md").exists(), "初始 README.md 应存在"
 
         # ── 步骤 4：子任务创建 feature 分支 → mode=branch ──
         _create_feature_branch(project_dir)
 
-        # 验证：当前分支为 feature
         branch_result = _run_git("branch", "--show-current", cwd=project_dir)
         assert branch_result.stdout.strip() == _FEATURE_BRANCH, (
             f"子任务应在 feature 分支上，实际: {branch_result.stdout.strip()}"

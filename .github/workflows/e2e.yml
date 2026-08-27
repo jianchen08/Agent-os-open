@@ -62,7 +62,10 @@ jobs:
   # ── Python E2E（内核二进制 + 内存库 + e2e_02 功能点）──────────
   # 从 ci.yml python-e2e 迁入（原 needs: rust-build 跨 workflow 失效，
   # 改为本 workflow 内自建内核；rust-cache 共享 key 兜底避免全量重编）。
-  # 覆盖 tests/e2e_02 功能点级 e2e：审批闭环、管道 chat、WS 流式全链路。
+  # 覆盖 tests/e2e_02 全部 Python e2e（01 内核 API/02 认证与管道 chat/
+  # 04 审批闭环/05 管道/06 WS 流式/07 插件生命周期/08 任务状态/
+  # 09 Godot 选中桥/10 合宿分组）；02 前端浏览器套件依赖 Vite dev
+  # server 与 Chromium，本车道不提供，故不在列。
   # 依赖真实 LLM 的用例带 skipif 守卫：无 secrets.ZHIPU_API_KEY 时自动跳过。
   e2e:
     name: Python E2E (kernel + e2e_02, real LLM)
@@ -155,11 +158,14 @@ jobs:
           PYTHONPATH: ${{ github.workspace }}/plugins:${{ github.workspace }}/plugins/sdk/src
         run: |
           uv run --frozen python -m pytest -q \
+            tests/e2e_02/test_01_kernel_api.py \
+            tests/e2e_02/test_02_auth_pipeline_e2e.py \
             tests/e2e_02/test_04_approval_flow.py \
             tests/e2e_02/test_05_pipeline_chat.py \
             tests/e2e_02/test_06_ws_stream.py \
             tests/e2e_02/test_07_plugin_lifecycle_e2e.py \
             tests/e2e_02/test_08_task_state_flow.py \
+            tests/e2e_02/test_09_godot_selection_bridge.py \
             tests/e2e_02/test_10_cohost_host_grouping.py
 
       - name: Show kernel log on failure

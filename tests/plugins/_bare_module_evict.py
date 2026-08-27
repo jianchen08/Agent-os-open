@@ -16,11 +16,10 @@ from __future__ import annotations
 
 import sys
 
-# 已知的平铺模块名（跨插件可能冲突）。保守覆盖所有插件常见同名模块。
-# 2026-08-23 串扰簇修复扩容：workspace/adapter/tool/capabilities/mm_types/asr。
-# - adapter：7 个插件同名（multimodal vs llm/llm_core 等），multimodal 的
-#   capabilities.py ``from adapter import ClaudeVisionAdapter`` 曾命中
-#   llm_core/adapter.py 缓存而 ImportError；
+# 已知的平铺模块名（跨插件同名冲突，逐出名单必须覆盖全部常见名）：
+# - adapter：7 个插件同名（multimodal vs llm/llm_core 等）——逐出缺失时
+#   multimodal 的 capabilities.py ``from adapter import ClaudeVisionAdapter``
+#   会命中其他渠道的缓存模块而 ImportError；
 # - tool：12 个插件同名（bash vs task_evaluate 等）；
 # - workspace：特殊——system/workspace/ 是**无 __init__.py 的 namespace 包**，
 #   而 tasks/workspace.py、isolation/workspace.py 是裸模块。PathFinder 规则：

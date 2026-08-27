@@ -16,8 +16,6 @@ import base64
 import hashlib
 import hmac
 import struct
-import sys
-import time
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -80,12 +78,18 @@ def _signature(timestamp: str, nonce: str, msg_encrypt: str) -> str:
 
 
 class TestWecomCrypto:
-    def test_init_decodes_key(self) -> None:
+    def test_init_config_wiring_via_behavior(self) -> None:
+        """构造四要素（token/aes_key/iv/corp_id）全部经行为生效：
+        token 被签名校验消费、aes_key(IV=key[:16]) 被解密消费、corp_id 被 CorpID 校验消费。"""
         c = _make_encrypto()
-        assert c._token == _TOKEN
-        assert c._corp_id == _CORP_ID
-        assert len(c._aes_key) == 32
-        assert c._iv == c._aes_key[:16]
+        msg_xml = "<xml><Content>wiring</Content></xml>"
+        enc = _encrypt_message(msg_xml)
+        ts, nonce = "1700000000", "abc wiring"
+        # token：用同一 token 计算的签名通过，篡改即失败
+        assert c.verify_signature(ts, nonce, enc, _signature(ts, nonce, enc)) is True
+        assert c.verify_signature(ts, nonce, enc, "bad") is False
+        # aes_key/iv/corp_id：外部按 AES-CBC(key[:16]) + corp 尾部拼装加密的报文可完整解出
+        assert c.decrypt_message(f"<xml><Encrypt><![CDATA[{enc}]]></Encrypt></xml>") == msg_xml
 
     def test_verify_signature_ok_and_mismatch(self) -> None:
         c = _make_encrypto()
@@ -507,23 +511,75 @@ class TestWeComStreamClient:
         result = await client.send_message("u1", "hi")
         assert result == {"errcode": 0}
 
-    @pytest.mark.asyncio
-    async def test_ensure_token_fresh_and_expired(self) -> None:
-        client = WeComStreamClient(corp_id=_CORP_ID, agent_id=1, secret="s")
-        client._session = MagicMock()
-        client._access_token = "tok"
-        client._token_expires = time.time() + 7000
-        await client._ensure_token()  # 未过期 → 不发请求
-        client._session.get.assert_not_called()
+    @staticmethod
+    def _resp(payload: dict) -> AsyncMock:
+        resp = AsyncMock()
+        resp.json = AsyncMock(return_value=payload)
+        resp.__aenter__ = AsyncMock(return_value=resp)
+        resp.__aexit__ = AsyncMock(return_value=False)
+        return resp
 
-        client._token_expires = time.time() + 10  # 过期
-        mock_response = AsyncMock()
-        mock_response.json = AsyncMock(return_value={"errcode": 0, "access_token": "new", "expires_in": 7200})
-        mock_response.__aenter__ = AsyncMock(return_value=mock_response)
-        mock_response.__aexit__ = AsyncMock(return_value=False)
-        client._session.get = MagicMock(return_value=mock_response)
-        await client._ensure_token()
-        assert client._access_token == "new"
+    @staticmethod
+    def _routing_get_session(token_payloads: list[dict]) -> MagicMock:
+        """按端点路由的假会话：gettoken 依次消费 token_payloads，其余端点回成功。"""
+        queue = iter(token_payloads)
+        session = MagicMock()
+        session.closed = False
+
+        def _get(url: str, **_kw):
+            if "gettoken" in url:
+                return TestWeComStreamClient._resp(next(queue))
+            return TestWeComStreamClient._resp({"errcode": 0})
+
+        session.get = MagicMock(side_effect=_get)
+        # 发送走 POST（/cgi-bin/message/send），统一回成功
+        session.post = MagicMock(return_value=TestWeComStreamClient._resp({"errcode": 0}))
+        return session
+
+    @pytest.mark.asyncio
+    async def test_send_message_fetches_and_caches_token(self, monkeypatch) -> None:
+        """首次发送取 token（corpid/secret 参与请求），未过期时第二次发送不再取。"""
+        now = [1000.0]
+        monkeypatch.setattr("stream_client.time.time", lambda: now[0])
+        client = WeComStreamClient(corp_id=_CORP_ID, agent_id=1, secret="s")
+        session = self._routing_get_session([{"errcode": 0, "access_token": "tok-1", "expires_in": 7200}])
+        client._session = session
+
+        result = await client.send_message("u1", "hi")
+        assert result == {"errcode": 0}
+        await client.send_message("u2", "hi again")
+
+        token_urls = [c[0][0] for c in session.get.call_args_list if "gettoken" in c[0][0]]
+        assert len(token_urls) == 1  # 取 token 仅一次
+        assert f"corpid={_CORP_ID}" in token_urls[0]
+        send_urls = [c[0][0] for c in session.post.call_args_list]
+        assert len(send_urls) == 2
+        assert all(u.endswith("access_token=tok-1") for u in send_urls)
+
+    @pytest.mark.asyncio
+    async def test_send_message_refreshes_expiring_token(self, monkeypatch) -> None:
+        """expire 推进到过期后，再次发送会重新取 token 且 URL 携带新 access_token。"""
+        now = [1000.0]
+        monkeypatch.setattr("stream_client.time.time", lambda: now[0])
+        client = WeComStreamClient(corp_id=_CORP_ID, agent_id=1, secret="s")
+        session = self._routing_get_session(
+            [
+                {"errcode": 0, "access_token": "tok-1", "expires_in": 7200},
+                {"errcode": 0, "access_token": "tok-2", "expires_in": 7200},
+            ]
+        )
+        client._session = session
+        await client.send_message("u1", "hi")
+
+        now[0] += 7200  # 推进到 token 过期
+        await client.send_message("u1", "hi again")
+
+        token_urls = [c[0][0] for c in session.get.call_args_list if "gettoken" in c[0][0]]
+        assert len(token_urls) == 2  # 首次 + 过期后重取
+        send_urls = [c[0][0] for c in session.post.call_args_list]
+        assert len(send_urls) == 2
+        assert send_urls[0].endswith("access_token=tok-1")
+        assert send_urls[1].endswith("access_token=tok-2")
 
     @pytest.mark.asyncio
     async def test_ensure_token_error_raises(self) -> None:
@@ -555,7 +611,9 @@ class TestWeComStreamClient:
         await client.connect()
         assert client.is_connected
         await client.disconnect()
-        assert client._session is None
+        # 会话已释放：再次发送报"未初始化"而非静默成功
+        with pytest.raises(RuntimeError, match="Session not initialized"):
+            await client.send_message("u1", "hi")
 
     @pytest.mark.asyncio
     async def test_trigger_on_message_with_and_without_callback(self) -> None:

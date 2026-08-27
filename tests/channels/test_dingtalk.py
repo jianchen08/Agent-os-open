@@ -11,9 +11,9 @@ import asyncio
 import aiohttp
 import hashlib
 import hmac
+import json
 import os
 import sys
-import time
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -150,8 +150,8 @@ class TestDingTalkOutputAdapter:
         chunk2 = {"text": "World", "type": "token"}
         await adapter.send_stream(chunk1)
         await adapter.send_stream(chunk2)
-        # 流式消息应累积但不发送
-        assert adapter._accumulated_text == "Hello World"
+        # 流式消息应累积但不发送（经公共只读观察面断言缓冲内容）
+        assert adapter.accumulated_text() == "Hello World"
         client.send_message.assert_not_called()
 
     @pytest.mark.asyncio
@@ -162,7 +162,8 @@ class TestDingTalkOutputAdapter:
         adapter.set_channel_user_id("user_dt_1")
         await adapter.send_stream({"text": "完整", "flush": True})
         client.send_message.assert_awaited_once_with("user_dt_1", "完整")
-        assert adapter._accumulated_text == ""
+        # 投递后缓冲归零（公共只读观察面）
+        assert adapter.accumulated_text() == ""
 
     @pytest.mark.asyncio
     async def test_send_stream_flush_without_user_id_skips(self) -> None:
@@ -205,10 +206,9 @@ class TestDingTalkStreamClient:
     """DingTalkStreamClient 测试（Mock 外部调用）。"""
 
     def test_init(self) -> None:
-        """测试初始化。"""
+        """测试初始化：未连接状态可观察；client_id/secret 的生效由
+        send_message 报文 robotCode 与签名算法测试以行为承载。"""
         client = DingTalkStreamClient(client_id="test_id", client_secret="test_secret")
-        assert client._client_id == "test_id"
-        assert client._client_secret == "test_secret"
         assert client.is_connected is False
 
     @pytest.mark.asyncio
@@ -277,36 +277,89 @@ class TestDingTalkStreamClient:
 class TestDingTalkStreamClientExtended:
     """token/端点/事件处理等未覆盖分支。"""
 
-    def _client(self) -> DingTalkStreamClient:
-        return DingTalkStreamClient(client_id="test_id", client_secret="test_secret")
+    def _client(self, **kwargs: object) -> DingTalkStreamClient:
+        return DingTalkStreamClient(client_id="test_id", client_secret="test_secret", **kwargs)
+
+    @staticmethod
+    def _frames(*events: dict) -> list:
+        """事件序列 → WS TEXT 帧（末尾接 CLOSE 帧，令接收循环自然退出）。"""
+        return [_Msg(aiohttp.WSMsgType.TEXT, json.dumps(e)) for e in events] + [
+            _Msg(aiohttp.WSMsgType.CLOSED)
+        ]
+
+    @staticmethod
+    def _response(payload: dict) -> AsyncMock:
+        resp = AsyncMock()
+        resp.json = AsyncMock(return_value=payload)
+        resp.__aenter__ = AsyncMock(return_value=resp)
+        resp.__aexit__ = AsyncMock(return_value=False)
+        return resp
+
+    @staticmethod
+    def _post_url(call_args) -> str:
+        return call_args[0][0]
+
+    @staticmethod
+    def _routing_session(token_payloads: list[dict]) -> MagicMock:
+        """按端点路由的假会话：oauth2 请求依次消费 token_payloads，其余端点回成功。"""
+        session = MagicMock()
+        session.closed = False
+        queue = iter(token_payloads)
+
+        def _post(url: str, **_kw):
+            if "oauth2/accessToken" in url:
+                return TestDingTalkStreamClientExtended._response(next(queue))
+            return TestDingTalkStreamClientExtended._response({"code": "0", "message": "ok"})
+
+        session.post = MagicMock(side_effect=_post)
+        return session
 
     @pytest.mark.asyncio
-    async def test_ensure_token_fresh_skips_request(self) -> None:
+    async def test_send_message_reuses_cached_token(self, monkeypatch) -> None:
+        """token 缓存行为（经公共 send_message 观察）：token 未过期时两次发送
+        只发生一次取 token 请求，第二次直接命中发送端点且携带同一 token。"""
         client = self._client()
-        client._access_token = "tok"
-        client._token_expires = time.time() + 7000
-        client._session = MagicMock()
-        await client._ensure_token()
-        client._session.post.assert_not_called()
+        now = [1000.0]
+        monkeypatch.setattr("stream_client.time.time", lambda: now[0])
+        session = self._routing_session([{"accessToken": "tok-1", "expireIn": 7200}])
+        client._session = session
+
+        await client.send_message("u1", "hi")
+        await client.send_message("u2", "hi")
+
+        urls = [self._post_url(c) for c in session.post.call_args_list]
+        send_calls = [c for c in session.post.call_args_list if "batchSend" in self._post_url(c)]
+        assert len(send_calls) == 2
+        # 取 token 仅一次；取 token 请求携带应用凭证；两次发送均命中批量发送端点
+        assert sum(1 for u in urls if "oauth2/accessToken" in u) == 1
+        auth_call = next(c for c in session.post.call_args_list if "oauth2/accessToken" in self._post_url(c))
+        assert auth_call[1]["json"]["appKey"] == "test_id"
+        headers_seen = [c[1]["headers"]["x-acs-dingtalk-access-token"] for c in send_calls]
+        assert headers_seen == ["tok-1", "tok-1"]
 
     @pytest.mark.asyncio
-    async def test_ensure_token_refreshes(self) -> None:
+    async def test_send_message_refreshes_expiring_token(self, monkeypatch) -> None:
+        """token 过期刷新行为：expireIn 耗尽后再次发送会重新取 token，
+        新 token 出现在后续请求头中。"""
         client = self._client()
-        client._access_token = "old"
-        client._token_expires = time.time() - 10
-        mock_response = AsyncMock()
-        mock_response.json = AsyncMock(return_value={"accessToken": "new", "expireIn": 7200})
-        mock_response.__aenter__ = AsyncMock(return_value=mock_response)
-        mock_response.__aexit__ = AsyncMock(return_value=False)
-        mock_session = MagicMock()
-        mock_session.post = MagicMock(return_value=mock_response)
-        client._session = mock_session
-        await client._ensure_token()
-        assert client._access_token == "new"
-        url = mock_session.post.call_args[0][0]
-        assert "oauth2/accessToken" in url
-        body = mock_session.post.call_args[1]["json"]
-        assert body["appKey"] == "test_id"
+        now = [1000.0]
+        monkeypatch.setattr("stream_client.time.time", lambda: now[0])
+        session = self._routing_session(
+            [{"accessToken": "tok-1", "expireIn": 7200}, {"accessToken": "tok-2", "expireIn": 7200}]
+        )
+        client._session = session
+        await client.send_message("u1", "hi")
+
+        now[0] += 7200  # 推进到 token 过期
+        await client.send_message("u1", "hi")
+
+        send_calls = [c for c in session.post.call_args_list if "batchSend" in self._post_url(c)]
+        auth_urls = [u for u in map(self._post_url, session.post.call_args_list) if "oauth2/accessToken" in u]
+        assert len(auth_urls) == 2  # 首次 + 过期后重取
+        assert (
+            send_calls[0][1]["headers"]["x-acs-dingtalk-access-token"] == "tok-1"
+            and send_calls[1][1]["headers"]["x-acs-dingtalk-access-token"] == "tok-2"
+        )
 
     @pytest.mark.asyncio
     async def test_ensure_token_no_session_raises(self) -> None:
@@ -372,37 +425,44 @@ class TestDingTalkStreamClientExtended:
 
     @pytest.mark.asyncio
     async def test_handle_event_message_and_ack(self) -> None:
+        """带 eventId 的消息事件经接收循环送达回调，并按协议回 ACK。"""
         client = self._client()
-        client._ws = AsyncMock()
-        client._ws.closed = False
-        client._ws.send_json = AsyncMock()
         got = []
 
         async def cb(data):
             got.append(data)
 
         client.on_message = cb
-        # 带 eventId → 先发 ACK 再回调 payload
-        await client._handle_event(
-            {
-                "code": "1",
-                "headers": {"eventType": "message", "eventId": "ev-1"},
-                "data": {"msgtype": "text", "text": {"content": "hi"}},
-            }
+        ws = _FakeWs(
+            self._frames(
+                {
+                    "code": "1",
+                    "headers": {"eventType": "message", "eventId": "ev-1"},
+                    "data": {"msgtype": "text", "text": {"content": "hi"}},
+                }
+            )
         )
+        ws.send_json = AsyncMock()
+        client._ws = ws
+        await client._receive_loop()
         assert got and got[0]["msgtype"] == "text"
-        client._ws.send_json.assert_awaited_once()
-        ack = client._ws.send_json.call_args[0][0]
+        ack = ws.send_json.call_args[0][0]
         assert ack["message"] == "OK" and ack["data"] == "ack"
 
     @pytest.mark.asyncio
     async def test_handle_event_non_message_and_no_callback(self) -> None:
+        """非消息事件不触发回调；消息事件在无回调时不抛（循环存续）。"""
         client = self._client()
-        client._ws = AsyncMock()
-        client._ws.closed = False
-        await client._handle_event({"headers": {"eventType": "task_update"}})  # 非消息不回调
         client.on_message = None
-        await client._handle_event({"headers": {"eventType": "message"}, "data": {}})  # 不抛
+        ws = _FakeWs(
+            self._frames(
+                {"headers": {"eventType": "task_update"}},
+                {"headers": {"eventType": "message"}, "data": {}},
+            )
+        )
+        ws.send_json = AsyncMock()
+        client._ws = ws
+        await client._receive_loop()  # 不抛
 
     @pytest.mark.asyncio
     async def test_disconnect_with_ws_and_task(self) -> None:
@@ -420,7 +480,12 @@ class TestDingTalkStreamClientExtended:
         await client.disconnect()
         ws.close.assert_awaited_once()
         session.close.assert_awaited_once()
-        assert client._ws is None and client._session is None and client._receive_task is None
+        # 断开后资源释放的公共可观察面：后台任务被取消、连接标记断开、
+        # 再次发送报"会话未初始化"而非静默成功
+        assert task.cancelled() is True
+        assert client.is_connected is False
+        with pytest.raises(RuntimeError, match="Session not initialized"):
+            await client.send_message("u1", "hi")
 
     def test_receive_loop_no_ws_returns(self) -> None:
         client = self._client()
@@ -459,8 +524,8 @@ class TestExtractDingtalkText:
 class TestDingTalkStreamLoop:
     """_receive_loop 消息迭代与连接重试（A5.2 补）。"""
 
-    def _client(self) -> DingTalkStreamClient:
-        return DingTalkStreamClient(client_id="test_id", client_secret="test_secret")
+    def _client(self, **kwargs: object) -> DingTalkStreamClient:
+        return DingTalkStreamClient(client_id="test_id", client_secret="test_secret", **kwargs)
 
     @pytest.mark.asyncio
     async def test_receive_loop_text_and_error_messages(self) -> None:
@@ -488,16 +553,16 @@ class TestDingTalkStreamLoop:
     async def test_connect_retries_and_gives_up(self, monkeypatch) -> None:
         import stream_client as sc
 
-        client = self._client()
+        client = self._client(max_retries=2)
         client._ensure_token = AsyncMock()
         fake_session = MagicMock()
         fake_session.ws_connect = AsyncMock(side_effect=OSError("conn refused"))
         # connect() 内部 aiohttp.ClientSession() 新建真实会话——monkeypatch 工厂
         monkeypatch.setattr(sc.aiohttp, "ClientSession", lambda: fake_session)
         client._get_endpoint = AsyncMock(return_value="wss://fake")
-        client._max_retries = 2
         await client.connect()  # 重试耗尽后正常退出
-        assert client._ws is None
+        # 重试耗尽的公共可观察面：从未连接成功；连接尝试次数与 max_retries 一致
+        assert client.is_connected is False
         assert fake_session.ws_connect.call_count == 2
 
 
@@ -528,8 +593,8 @@ class TestReceiveLoopFailureContract:
     失败计数，且循环保持存活（一条坏消息不得杀死整个通道监听）。
     """
 
-    def _client(self) -> DingTalkStreamClient:
-        return DingTalkStreamClient(client_id="test_id", client_secret="test_secret")
+    def _client(self, **kwargs: object) -> DingTalkStreamClient:
+        return DingTalkStreamClient(client_id="test_id", client_secret="test_secret", **kwargs)
 
     @pytest.mark.asyncio
     async def test_callback_failure_visible_and_loop_survives(self, caplog) -> None:
@@ -598,14 +663,14 @@ class TestReceiveLoopFailureContract:
 class TestDingTalkConnectPath:
     """connect 循环端点/连接/接收全路径（A5.2 补）。"""
 
-    def _client(self) -> DingTalkStreamClient:
-        return DingTalkStreamClient(client_id="test_id", client_secret="test_secret")
+    def _client(self, **kwargs: object) -> DingTalkStreamClient:
+        return DingTalkStreamClient(client_id="test_id", client_secret="test_secret", **kwargs)
 
     @pytest.mark.asyncio
     async def test_connect_success_path(self, monkeypatch) -> None:
         import stream_client as sc
 
-        client = self._client()
+        client = self._client(max_retries=1)
         client._ensure_token = AsyncMock()
         fake_session = MagicMock()
         fake_session.ws_connect = AsyncMock(return_value=_FakeWs([]))
@@ -613,33 +678,40 @@ class TestDingTalkConnectPath:
         # 第一次循环端点成功；第二次端点空 → RuntimeError → 重试耗尽退出 while
         client._get_endpoint = AsyncMock(side_effect=["wss://fake", ""])
         client._receive_loop = AsyncMock()  # 直接返回，避免真实迭代
-        client._max_retries = 1
         await client.connect()
         assert fake_session.ws_connect.call_count == 1
         client._receive_loop.assert_awaited_once()
+
     @pytest.mark.asyncio
     async def test_connect_endpoint_failure_retries(self, monkeypatch) -> None:
         import stream_client as sc
 
-        client = self._client()
+        client = self._client(max_retries=1)
         client._ensure_token = AsyncMock()
         fake_session = MagicMock()
         fake_session.ws_connect = AsyncMock()
         monkeypatch.setattr(sc.aiohttp, "ClientSession", lambda: fake_session)
         client._get_endpoint = AsyncMock(return_value="")  # 端点为空 → RuntimeError
-        client._max_retries = 1
         await client.connect()
         assert fake_session.ws_connect.call_count == 0  # 端点失败不尝试连接
 
     @pytest.mark.asyncio
     async def test_start_receive_loop_background_task(self) -> None:
+        """start_receive_loop 后台托管连接：connect 被异步启动且阻塞期间
+        disconnect 能及时回收（后台任务生命周期由客户端接管）。"""
         client = self._client()
-        client.connect = AsyncMock()
+        started = asyncio.Event()
+
+        async def _blocking_connect() -> None:
+            started.set()
+            await asyncio.sleep(3600)
+
+        client.connect = _blocking_connect
         await client.start_receive_loop()
-        assert client._receive_task is not None
-        await client._receive_task
-        client.connect.assert_awaited_once()
-        client._receive_task = None
+        await asyncio.wait_for(started.wait(), timeout=5)
+        # 阻塞中的后台任务经 disconnect 及时取消回收（限时完成即证明）
+        await asyncio.wait_for(client.disconnect(), timeout=5)
+        assert client.is_connected is False
 
     @pytest.mark.asyncio
     async def test_get_endpoint_no_session_raises(self) -> None:

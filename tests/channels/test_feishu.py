@@ -32,9 +32,10 @@ from stream_client import FeishuStreamClient
 class TestFeishuInputAdapter:
     """FeishuInputAdapter 输入适配器测试。"""
 
-    def test_receive_text_message(self) -> None:
-        """接收文本消息 → state。"""
-        FeishuInputAdapter()
+    @pytest.mark.asyncio
+    async def test_receive_text_message(self) -> None:
+        """飞书文本事件经 enqueue→receive 得到管道信封。"""
+        adapter = FeishuInputAdapter()
         raw_msg = {
             "header": {"event_id": "evt-1", "event_type": "im.message.receive_v1"},
             "event": {
@@ -47,11 +48,12 @@ class TestFeishuInputAdapter:
                 },
             },
         }
-        # 直接测试 _raw_to_state 静态方法
-        state = FeishuInputAdapter._raw_to_state(raw_msg)
+        await adapter.enqueue_message(raw_msg)
+        state = await adapter.receive()
         assert state["user_input"] == "hello feishu"
         assert state["_channel_type"] == "feishu"
         assert state["_channel_user_id"] == "ou_test"
+        assert state["session_id"] == "evt-1"
 
     @pytest.mark.asyncio
     async def test_receive_empty_queue(self) -> None:
@@ -142,8 +144,8 @@ class TestFeishuOutputAdapter:
         chunk2 = {"text": "World", "type": "token"}
         await adapter.send_stream(chunk1)
         await adapter.send_stream(chunk2)
-        # 流式消息应累积但不发送
-        assert adapter._accumulated_text == "Hello World"
+        # 流式消息应累积但不发送（公共只读观察面）
+        assert adapter.accumulated_text() == "Hello World"
         client.send_message.assert_not_called()
 
     @pytest.mark.asyncio
@@ -157,8 +159,8 @@ class TestFeishuOutputAdapter:
         await adapter.send_stream(chunk)
         client.send_message.assert_called_once()
         assert client.send_message.call_args[0][1] == "Hello"
-        # 发送后累积文本清空
-        assert adapter._accumulated_text == ""
+        # 发送后累积文本清空（公共只读观察面）
+        assert adapter.accumulated_text() == ""
 
 
 # ═══════════════════════════════════════════════════════════
@@ -209,10 +211,9 @@ class TestFeishuStreamClient:
     """FeishuStreamClient 测试（Mock 外部调用）。"""
 
     def test_init(self) -> None:
-        """测试初始化。"""
+        """测试初始化：未连接状态可观察；app_id/app_secret 的生效由
+        取 token 报文体与发送鉴权头的行为断言承载（见 stream_client 测试）。"""
         client = FeishuStreamClient(app_id="test_id", app_secret="test_secret")
-        assert client._app_id == "test_id"
-        assert client._app_secret == "test_secret"
         assert client.is_connected is False
 
     @pytest.mark.asyncio

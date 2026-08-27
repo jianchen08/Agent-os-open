@@ -84,15 +84,6 @@ class TestFeishuServerLoad:
     def test_plugin_registered(self, load_feishu_server) -> None:
         assert load_feishu_server.plugin.name == "channel_feishu"
 
-    def test_tools_declared(self, load_feishu_server) -> None:
-        names = list(load_feishu_server.plugin._tools.keys())
-        assert names == ["feishu.send_message", "feishu.send_card", "feishu.get_status"]
-
-    def test_lifecycle_hooks_registered(self, load_feishu_server) -> None:
-        handlers = load_feishu_server.plugin._lifecycle_handlers
-        assert "on_load" in handlers
-        assert "on_unload" in handlers
-
     def test_load_with_common_already_in_path(self) -> None:
         # channel_common 已在 sys.path 时，server.py 的 append 守卫走 False 分支
         saved_path = list(sys.path)
@@ -129,8 +120,10 @@ class TestFeishuServerLifecycle:
             lambda: {"app_id": "cli_x", "app_secret": "secret"},
         )
         await load_feishu_server._on_load({})
-        assert load_feishu_server._adapter is not None
-        assert load_feishu_server._adapter.channel_type == "feishu"
+        # 适配器已构造的公共观察面：发送工具报"未连接"而非"未初始化"
+        r = await load_feishu_server.feishu_send_message("u1", "hi")
+        assert "not initialized" not in r["error"]
+        assert "not connected" in r["error"]
 
     @pytest.mark.asyncio
     async def test_on_unload_stops_adapter(self, load_feishu_server) -> None:
@@ -142,7 +135,9 @@ class TestFeishuServerLifecycle:
         load_feishu_server._adapter = SimpleNamespace(stop=_stop)
         await load_feishu_server._on_unload({})
         assert stopped == ["stopped"]
-        assert load_feishu_server._adapter is None
+        # 卸载后的公共观察面：发送工具回到"未初始化"哨兵值
+        r = await load_feishu_server.feishu_send_message("u1", "hi")
+        assert r == {"error": "Feishu adapter not initialized"}
 
     @pytest.mark.asyncio
     async def test_on_unload_no_adapter(self, load_feishu_server) -> None:

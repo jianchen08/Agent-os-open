@@ -68,46 +68,87 @@ class _FakeWS:
 
 
 class TestToken:
-    """tenant_access_token 获取与缓存。"""
+    """tenant_access_token 获取与缓存（经公共 send_message 流程观察）。"""
+
+    @staticmethod
+    def _routing_session(token_payloads: list[dict[str, Any]]) -> MagicMock:
+        """按端点路由的假会话：auth 端点依次消费 token_payloads，其余端点回成功。"""
+        queue = iter(token_payloads)
+        session = _fake_session()
+
+        def _post(url: str, **_kw: Any) -> MagicMock:
+            if url.endswith("/auth/v3/tenant_access_token/internal"):
+                return _fake_response(next(queue))
+            return _fake_response({"code": 0, "msg": "ok"})
+
+        session.post = MagicMock(side_effect=_post)
+        return session
 
     @pytest.mark.asyncio
-    async def test_ensure_token_fetches_and_caches(self, monkeypatch) -> None:
-        client = _make_client()
-        client._session = _fake_session()
-        client._session.post.return_value = _fake_response(
-            {"tenant_access_token": "tok-1", "expire": 7200}
-        )
+    async def test_send_message_fetches_and_caches_token(self, monkeypatch) -> None:
+        """首次发送取 token（携带应用凭证），token 未过期时第二次发送不再请求。"""
         fake_now = [1000.0]
         monkeypatch.setattr("stream_client.time.time", lambda: fake_now[0])
+        client = _make_client()
+        session = self._routing_session(
+            [{"tenant_access_token": "tok-1", "expire": 7200}]
+        )
+        client._session = session
 
-        await client._ensure_token()
-        assert client._tenant_token == "tok-1"
-        assert client._token_expires == 1000.0 + 7200
-        url = client._session.post.call_args[0][0]
-        assert url.endswith("/open-apis/auth/v3/tenant_access_token/internal")
-        body = client._session.post.call_args[1]["json"]
+        first = await client.send_message("ou_1", "hello", "text")
+        assert first == {"code": 0, "msg": "ok"}
+        result = await client.send_message("ou_2", "hello again", "text")
+        assert result == {"code": 0, "msg": "ok"}
+
+        calls = session.post.call_args_list
+        auth_calls = [
+            c
+            for c in calls
+            if c[0][0].endswith("/open-apis/auth/v3/tenant_access_token/internal")
+        ]
+        assert len(auth_calls) == 1
+        # 取 token 请求的端点与凭证体
+        auth_url = auth_calls[0][0][0]
+        assert auth_url.endswith("/open-apis/auth/v3/tenant_access_token/internal")
+        body = auth_calls[0][1]["json"]
         assert body == {"app_id": "cli_test", "app_secret": "secret"}
-
-        # 缓存命中：token 未过期（距过期 >60s）不再请求
-        client._session.post.reset_mock()
-        await client._ensure_token()
-        client._session.post.assert_not_called()
+        # 两次发送均携带同一（缓存的）token
+        send_headers = [
+            c[1]["headers"]["Authorization"]
+            for c in calls
+            if "im/v1/messages?" in c[0][0] or c[0][0].endswith("/im/v1/messages")
+        ]
+        assert send_headers == ["Bearer tok-1", "Bearer tok-1"]
 
     @pytest.mark.asyncio
-    async def test_ensure_token_refreshes_when_expiring(self, monkeypatch) -> None:
-        client = _make_client()
-        client._session = _fake_session()
-        client._session.post.return_value = _fake_response(
-            {"tenant_access_token": "tok-2", "expire": 7200}
-        )
+    async def test_send_message_refreshes_expiring_token(self, monkeypatch) -> None:
+        """expire 推进到过期后，再次发送会重新取 token 并使用新 token。"""
         fake_now = [1000.0]
         monkeypatch.setattr("stream_client.time.time", lambda: fake_now[0])
+        client = _make_client()
+        session = self._routing_session(
+            [{"tenant_access_token": "tok-1", "expire": 7200}, {"tenant_access_token": "tok-2", "expire": 7200}]
+        )
+        client._session = session
+        await client.send_message("ou_1", "hi")
 
-        client._tenant_token = "tok-old"
-        client._token_expires = 1000.0 + 30  # 距过期 30s < 60s 阈值
-        await client._ensure_token()
-        assert client._tenant_token == "tok-2"
-        assert client._session.post.call_count == 1
+        fake_now[0] += 7200  # 推进到 token 过期
+        result = await client.send_message("ou_1", "hi again")
+        assert result == {"code": 0, "msg": "ok"}
+
+        calls = session.post.call_args_list
+        auth_calls = [
+            c
+            for c in calls
+            if c[0][0].endswith("/open-apis/auth/v3/tenant_access_token/internal")
+        ]
+        assert len(auth_calls) == 2  # 首次 + 过期后重取
+        send_headers = [
+            c[1]["headers"]["Authorization"]
+            for c in calls
+            if "im/v1/messages?" in c[0][0] or c[0][0].endswith("/im/v1/messages")
+        ]
+        assert send_headers == ["Bearer tok-1", "Bearer tok-2"]
 
     @pytest.mark.asyncio
     async def test_ensure_token_without_session_raises(self) -> None:
@@ -284,7 +325,7 @@ class TestEndpoint:
 
 
 class TestReceiveLoop:
-    """WebSocket 接收循环与事件分发。"""
+    """WebSocket 接收循环与事件分发（事件经 WS 帧注入，行为面为回调与 ACK）。"""
 
     @staticmethod
     def _ws_msg(msg_type: Any, data: Any = None) -> SimpleNamespace:
@@ -298,28 +339,38 @@ class TestReceiveLoop:
     def _close_msg() -> SimpleNamespace:
         return SimpleNamespace(type=aiohttp.WSMsgType.CLOSED, data=None)
 
+    @classmethod
+    def _event_ws(cls, events: list[dict[str, Any]]) -> _FakeWS:
+        """事件序列 → 可迭代的假 WS（每事件一帧 TEXT，末尾 CLOSE 令循环退出）。"""
+        msgs = [cls._text_msg(json.dumps(e)) for e in events]
+        msgs.append(cls._close_msg())
+        return _FakeWS(msgs)
+
     @pytest.mark.asyncio
     async def test_handle_text_event_dispatches_to_callback(self) -> None:
+        """schema 2.0 文本事件：先回 ACK，再把 payload 送达回调。"""
         client = _make_client()
-        client._ws = MagicMock()
-        client._ws.closed = False
-        client._ws.send_json = AsyncMock()
+        ws = self._event_ws(
+            [
+                {
+                    "schema": "2.0",
+                    "header": {"event_id": "evt-1"},
+                    "headers": {"event_type": "im.message.receive_v1"},
+                    "data": {"message": {"content": "hi"}},
+                }
+            ]
+        )
+        client._ws = ws
         received: list[dict[str, Any]] = []
 
         async def _cb(payload: dict[str, Any]) -> None:
             received.append(payload)
 
         client.on_message = _cb
-        event = {
-            "schema": "2.0",
-            "header": {"event_id": "evt-1"},
-            "headers": {"event_type": "im.message.receive_v1"},
-            "data": {"message": {"content": "hi"}},
-        }
-        await client._handle_event(event)
+        await client._receive_loop()
         assert received == [{"message": {"content": "hi"}}]
         # schema 2.0 需回 ACK
-        client._ws.send_json.assert_awaited_once_with(
+        ws.send_json.assert_awaited_once_with(
             {"schema": "2.0", "header": {"event_id": "evt-1"}}
         )
 
@@ -327,54 +378,58 @@ class TestReceiveLoop:
     async def test_handle_event_no_callback_still_acks(self) -> None:
         # schema 2.0 事件无论有无回调都需回 ACK（协议要求）
         client = _make_client()
-        client._ws = _FakeWS([])
-        client.on_message = None
-        await client._handle_event(
-            {"schema": "2.0", "header": {"event_id": "evt-2"}, "headers": {"event_type": "x"}}
+        ws = self._event_ws(
+            [{"schema": "2.0", "header": {"event_id": "evt-2"}, "headers": {"event_type": "x"}}]
         )
-        client._ws.send_json.assert_awaited_once_with(
+        client._ws = ws
+        client.on_message = None
+        await client._receive_loop()
+        ws.send_json.assert_awaited_once_with(
             {"schema": "2.0", "header": {"event_id": "evt-2"}}
         )
 
     @pytest.mark.asyncio
     async def test_handle_event_unknown_type_skipped(self) -> None:
         client = _make_client()
-        client._ws = MagicMock()
-        client._ws.closed = False
-        client._ws.send_json = AsyncMock()
+        ws = self._event_ws([{"headers": {"event_type": "im.chat.updated"}, "data": {"x": 1}}])
+        client._ws = ws
         called: list[dict[str, Any]] = []
 
         async def _cb(payload: dict[str, Any]) -> None:
             called.append(payload)
 
         client.on_message = _cb
-        await client._handle_event(
-            {"headers": {"event_type": "im.chat.updated"}, "data": {"x": 1}}
-        )
+        await client._receive_loop()
         assert called == []
 
     @pytest.mark.asyncio
     async def test_handle_event_ws_closed_skips_ack(self) -> None:
+        # 连接已关闭：事件照常经循环分发但无法回 ACK（协议降级路径）
         client = _make_client()
+
+        async def _iter_events() -> Any:
+            yield self._text_msg(
+                json.dumps({"schema": "2.0", "header": {}, "headers": {"event_type": "x"}})
+            )
+            yield self._close_msg()
+
         ws = MagicMock()
         ws.closed = True
+        ws.__aiter__ = lambda *_a: _iter_events()
         ws.send_json = AsyncMock()
         client._ws = ws
         client.on_message = None
-        await client._handle_event(
-            {"schema": "2.0", "header": {}, "headers": {"event_type": "x"}}
-        )
+        await client._receive_loop()
         ws.send_json.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_handle_event_message_type_no_callback(self) -> None:
         # 消息事件但未注册回调 → 静默跳过
         client = _make_client()
-        client._ws = _FakeWS([])
+        ws = self._event_ws([{"headers": {"event_type": "im.message.receive_v1"}, "data": {"m": 1}}])
+        client._ws = ws
         client.on_message = None
-        await client._handle_event(
-            {"headers": {"event_type": "im.message.receive_v1"}, "data": {"m": 1}}
-        )
+        await client._receive_loop()  # 不抛
 
     @pytest.mark.asyncio
     async def test_receive_loop_text_and_close(self) -> None:
@@ -498,11 +553,13 @@ class TestConnectDisconnect:
 
     @pytest.mark.asyncio
     async def test_connect_retries_then_gives_up(self, monkeypatch) -> None:
+        """端点持续为空 → 按重试预算逐次请求端点后放弃（每次尝试一次端点请求）。"""
         client = _make_client(max_retries=2, base_delay=0.01)
         session = _fake_session()
+        session.post.return_value = _fake_response({"data": {}})  # 端点为空
         monkeypatch.setattr(_stream_client_mod.aiohttp, "ClientSession", lambda: session)
         client._ensure_token = AsyncMock()
-        client._get_endpoint = AsyncMock(return_value="")
+
         sleeps: list[float] = []
         original_sleep = asyncio.sleep
 
@@ -513,18 +570,26 @@ class TestConnectDisconnect:
         monkeypatch.setattr(_stream_client_mod.asyncio, "sleep", _fake_sleep)
 
         await client.connect()
-        # 2 次重试：第 1 次失败后 sleep，第 2 次失败后退出
-        assert client._get_endpoint.await_count == 2
+        # 2 次尝试各发起 1 次端点请求；仅第 1 次失败后退避
+        assert session.post.call_count == 2
         assert sleeps == [0.01]
+        assert client.is_connected is False
 
     @pytest.mark.asyncio
     async def test_start_receive_loop_spawns_background_task(self) -> None:
+        """start_receive_loop 后台托管 connect：异步启动且阻塞期间可被 disconnect 及时回收。"""
+        started = asyncio.Event()
+
+        async def _blocking_connect() -> None:
+            started.set()
+            await asyncio.sleep(3600)
+
         client = _make_client()
-        client.connect = AsyncMock()
+        client.connect = _blocking_connect
         await client.start_receive_loop()
-        assert client._receive_task is not None
-        await client._receive_task
-        client.connect.assert_awaited_once()
+        await asyncio.wait_for(started.wait(), timeout=5)
+        await asyncio.wait_for(client.disconnect(), timeout=5)
+        assert client.is_connected is False
 
     @pytest.mark.asyncio
     async def test_disconnect_closes_ws_and_session(self) -> None:
@@ -536,14 +601,14 @@ class TestConnectDisconnect:
         session.close = AsyncMock()
         client._ws = ws
         client._session = session
-        client._running = True
 
         await client.disconnect()
-        assert client._running is False
         ws.close.assert_awaited_once()
         session.close.assert_awaited_once()
-        assert client._ws is None
-        assert client._session is None
+        # 资源释放的公共可观察面：连接标记断开，再发送报"会话未初始化"
+        assert client.is_connected is False
+        with pytest.raises(RuntimeError, match="Session not initialized"):
+            await client.send_message("ou_1", "hi")
 
     @pytest.mark.asyncio
     async def test_disconnect_cancels_receive_task(self) -> None:
@@ -555,7 +620,6 @@ class TestConnectDisconnect:
 
         await client.disconnect()
         assert task.cancelled() is True
-        assert client._receive_task is None
 
     @pytest.mark.asyncio
     async def test_disconnect_idempotent(self) -> None:

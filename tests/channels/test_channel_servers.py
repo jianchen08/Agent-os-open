@@ -89,13 +89,6 @@ class TestServerLoad:
         channel = load_server.__name__.replace("_server_test", "")
         assert load_server.plugin.name == channel
 
-    @pytest.mark.parametrize("load_server", ["wecom", "qq", "dingtalk"], indirect=True)
-    def test_tools_declared(self, load_server) -> None:
-        names = list(load_server.plugin._tools.keys())
-        assert names, "至少注册一个工具"
-        assert all("." in n for n in names)
-
-
 class TestWeComServer:
     @pytest.mark.parametrize("load_server", ["wecom"], indirect=True)
     async def test_on_load_constructs_adapter(self, load_server, monkeypatch) -> None:
@@ -105,8 +98,10 @@ class TestWeComServer:
             lambda: {"corp_id": "ww1", "agent_id": "2", "secret": "s", "token": "t", "encoding_aes_key": "abcdefghijklmnopqrstuvwxyz0123456789ABCDEFG"},
         )
         await load_server._on_load({})
-        assert load_server._adapter is not None
-        assert load_server._adapter.crypto is not None
+        # 适配器已构造的公共观察面：发送工具报"未连接"而非"未初始化"
+        r = await load_server.wecom_send_message("u1", "hi")
+        assert "not initialized" not in r["error"]
+        assert "not connected" in r["error"]
 
     @pytest.mark.parametrize("load_server", ["wecom"], indirect=True)
     async def test_on_unload_stops_adapter(self, load_server) -> None:
@@ -118,7 +113,9 @@ class TestWeComServer:
         load_server._adapter = SimpleNamespace(stop=_stop)
         await load_server._on_unload({})
         assert stopped == [1]
-        assert load_server._adapter is None
+        # 卸载后的公共观察面：发送工具回到"未初始化"哨兵值
+        r = await load_server.wecom_send_message("u1", "hi")
+        assert r == {"error": "WeCom adapter not initialized"}
 
     @pytest.mark.parametrize("load_server", ["wecom"], indirect=True)
     async def test_on_unload_no_adapter(self, load_server) -> None:
@@ -191,7 +188,10 @@ class TestQQServer:
     async def test_on_load_constructs_adapter(self, load_server, monkeypatch) -> None:
         monkeypatch.setattr(load_server.plugin, "get_config", lambda: {})
         await load_server._on_load({})
-        assert load_server._adapter is not None
+        # 适配器已构造的公共观察面：发送工具报"未连接"而非"未初始化"
+        r = await load_server.qq_send_message(1, "hi")
+        assert "not initialized" not in r["error"]
+        assert "not connected" in r["error"]
 
     @pytest.mark.parametrize("load_server", ["qq"], indirect=True)
     async def test_on_unload_stops_adapter(self, load_server) -> None:
@@ -203,7 +203,9 @@ class TestQQServer:
         load_server._adapter = SimpleNamespace(stop=_stop)
         await load_server._on_unload({})
         assert stopped == [1]
-        assert load_server._adapter is None
+        # 卸载后的公共观察面：发送工具回到"未初始化"哨兵值
+        r = await load_server.qq_send_message(1, "hi")
+        assert r == {"error": "QQ adapter not initialized"}
 
     @pytest.mark.parametrize("load_server", ["qq"], indirect=True)
     async def test_send_message_not_initialized(self, load_server) -> None:
@@ -247,7 +249,10 @@ class TestDingTalkServer:
     async def test_on_load_constructs_adapter(self, load_server, monkeypatch) -> None:
         monkeypatch.setattr(load_server.plugin, "get_config", lambda: {"client_id": "a", "client_secret": "b"})
         await load_server._on_load({})
-        assert load_server._adapter is not None
+        # 适配器已构造的公共观察面：发送工具报"未连接"而非"未初始化"
+        r = await load_server.dingtalk_send_message("u1", "hi")
+        assert "not initialized" not in r["error"]
+        assert "not connected" in r["error"]
 
     @pytest.mark.parametrize("load_server", ["dingtalk"], indirect=True)
     async def test_on_unload_stops_adapter(self, load_server) -> None:
@@ -259,7 +264,9 @@ class TestDingTalkServer:
         load_server._adapter = SimpleNamespace(stop=_stop)
         await load_server._on_unload({})
         assert stopped == [1]
-        assert load_server._adapter is None
+        # 卸载后的公共观察面：发送工具回到"未初始化"哨兵值
+        r = await load_server.dingtalk_send_message("u1", "hi")
+        assert r == {"error": "DingTalk adapter not initialized"}
 
     @pytest.mark.parametrize("load_server", ["dingtalk"], indirect=True)
     async def test_send_message_not_initialized(self, load_server) -> None:

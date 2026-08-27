@@ -70,7 +70,7 @@ class TestDingTalkOutputAdapter:
 
         chunk = {"text": "Hello ", "type": "token"}
         await adapter.send_stream(chunk)
-        assert adapter._accumulated_text == "Hello "
+        assert adapter.accumulated_text() == "Hello "
 
 
 class TestDingTalkAdapter:

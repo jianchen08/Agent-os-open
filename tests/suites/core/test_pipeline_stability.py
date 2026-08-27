@@ -13,7 +13,7 @@
 
 注：原 D6（build_initial_state extra_state 参数传递）已删除——依赖 0.1 的
 ``pipeline.state_builder``，该模块在 0.2 架构中不存在（state 组装改由 kernel/plugins
-各自处理，无统一 Python 入口）。缺口见 docs/test_cleanup_0.2.md。
+各自处理，无统一 Python 入口）。缺口见 docs/working/_archive_0.2_migration/test_cleanup_0.2.md。
 """
 
 from __future__ import annotations

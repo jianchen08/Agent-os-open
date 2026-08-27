@@ -115,7 +115,7 @@ class TestOutputSendStreamEnd:
         adapter.set_channel_user_id("ou_1")
         await adapter.send_stream({"text": "final", "type": "end"})
         client.send_message.assert_awaited_once_with("ou_1", "final")
-        assert adapter._accumulated_text == ""
+        assert adapter.accumulated_text() == ""
 
     @pytest.mark.asyncio
     async def test_flush_without_user_id_skips(self) -> None:
@@ -123,8 +123,8 @@ class TestOutputSendStreamEnd:
         adapter = FeishuOutputAdapter(stream_client=client)
         await adapter.send_stream({"text": "orphan", "flush": True})
         client.send_message.assert_not_called()
-        # 无 user_id 时累积文本保留
-        assert adapter._accumulated_text == "orphan"
+        # 无 user_id 时累积文本保留待后续投递
+        assert adapter.accumulated_text() == "orphan"
 
     @pytest.mark.asyncio
     async def test_flush_with_empty_accumulation_skips(self) -> None:

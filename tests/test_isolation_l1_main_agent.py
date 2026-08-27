@@ -20,8 +20,8 @@ from unittest.mock import MagicMock, patch
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "plugins" / "shared"))
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "plugins" / "shared" / "pipeline" / "input" / "isolation_guard"))
 
-# 收集期防线：此前收集的平铺套件可能把 pipeline/types.py 装进裸名 "types"
-# 缓存（其顶层相对导入必炸），导入 SimpleNamespace 前恢复 stdlib 绑定。
+# 收集期防线：平铺套件可能把 pipeline/types.py 装进裸名 "types" 缓存
+# （其顶层相对导入必炸），导入 SimpleNamespace 前恢复 stdlib 绑定。
 from tests._stdlib_guard import ensure_stdlib_module
 
 ensure_stdlib_module("types")
