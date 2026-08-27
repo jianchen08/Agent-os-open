@@ -23,7 +23,7 @@ interface TaskListApiResponse {
 }
 
 /** 全量任务拉取间隔（ms）：与管道注册表轮询同频 */
-export const PIPELINE_ALL_TASKS_INTERVAL = 30_000
+const PIPELINE_ALL_TASKS_INTERVAL = 30_000
 
 /** queryFn：拉取全量任务列表（不过滤 long-term） */
 async function fetchAllTasks(): Promise<Record<string, unknown>[]> {

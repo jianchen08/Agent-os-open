@@ -33,7 +33,7 @@ export function isRetryableError(error: any): boolean {
 }
 
 /** 延迟函数 */
-export function delay(ms: number): Promise<void> {
+function delay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms))
 }
 

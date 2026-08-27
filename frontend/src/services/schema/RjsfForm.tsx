@@ -253,7 +253,7 @@ export function toRjsf(fields: UIInputFormField[]): {
  * 该字段 ui:options.datasourceUri 变化 → RJSF 必重渲该 widget → AsyncSelect
  * 的 effect 依赖（resolvedUri/depKey）变化 → 自动重拉。
  */
-export function resolveAsyncSelectOptions(
+function resolveAsyncSelectOptions(
   fields: UIInputFormField[],
   uiSchema: UiSchema,
   formData: Record<string, unknown>,

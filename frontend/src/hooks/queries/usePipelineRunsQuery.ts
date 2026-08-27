@@ -30,7 +30,7 @@ import { queryKeys } from '@/services/query/queryKeys'
 import type { PipelineRunInfo } from '@/types/pipeline'
 
 /** 管道快照兜底轮询间隔（ms）：与旧 pipelineRegistryStore 一致 */
-export const PIPELINE_REGISTRY_REFRESH_INTERVAL = 30_000
+const PIPELINE_REGISTRY_REFRESH_INTERVAL = 30_000
 
 /** 运行条目 key：pipeline_id 优先，缺失回退 run_id（原 registry 同款） */
 function entryKey(item: PipelineRunInfo): string {

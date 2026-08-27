@@ -71,10 +71,8 @@ export const useWorkspaceStore = create<WorkspaceState & WorkspaceActions>()(
   fetchWorkspace: async (containerTaskId) => {
     set({ loading: true, error: null })
     try {
-      // // 改用 apiClient 替代裸 fetch，确保：
-      // 1. 自动带 Authorization 头（请求拦截器）
-      // 2. 401 时走统一的 token 刷新链路（避免认证失效时静默失败）
-      // 3. 享受 5xx/429 重试机制
+      // 必须走 apiClient 而非裸 fetch：自动带 Authorization 头（请求拦截器）、
+      // 401 进入统一 token 刷新链路、5xx/429 自动重试。
       const { data } = await apiClient.get(`${API_BASE.replace('{container_task_id}', containerTaskId)}`)
       if (data.error) {
         set({ loading: false, error: data.error.message })

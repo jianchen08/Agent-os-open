@@ -216,7 +216,9 @@ class GlobalWebSocketService {
         }
         this._emit('*', data)
       } catch {
-        // 非 JSON 消息忽略
+        // 非 JSON 帧忽略（豁免：底层 ping/探活等非 JSON 载荷属正常路径），
+        // 仅 debug 留痕便于排查意外帧
+        _wsLogger.debug('[WS_RAW] 收到非 JSON 帧，忽略')
       }
     }
 
@@ -252,10 +254,10 @@ class GlobalWebSocketService {
 
       if (!this._disposed) {
         // 后端 token 无效/过期时以 code=4001 关闭连接，前端需先刷新 token 再重连。
-        // 任何掉线（含 1006、心跳超时 2002、4001）都先检查 token 是否已过期：
-        // 已建立连接掉了（wasConnected=true）也可能是 token 过期后才掉，旧逻辑的
-        // !wasConnected 门控会让此类掉线用过期 token 硬连 → 4001 → 崩溃。isExpired
-        // 只在真过期时返回 true，未过期时不触发刷新，安全。
+        // 对所有掉线（含 1006、心跳超时 2002、4001）都先检查 token 是否过期再重连，
+        // 不以「是否成功建立过连接」作门控：长连接存活期内 token 也可能过期才掉线，
+        // 用过期 token 硬连会被后端再次以 4001 拒绝。isExpired 只在真过期时返回
+        // true，未过期不会触发多余刷新。
         let authRejected = event.code === 4001
         if (!authRejected) {
           authRejected = isExpired()

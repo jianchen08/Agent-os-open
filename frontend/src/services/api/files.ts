@@ -4,50 +4,35 @@ import apiClient from '@/services/api/client'
 import { ARTIFACTS_ENDPOINTS, MULTIMODAL_SERVICE_ENDPOINTS } from './endpoints.generated'
 import type { ModelCapabilities } from '@/types/capabilities'
 
-/** 文件上传响应 */
 export interface FileUploadResponse {
-  /** 文件唯一标识 */
   file_id: string
-  /** 原始文件名 */
   filename: string
-  /** MIME类型 */
   mime_type: string
   /** 媒体类型（image/document/audio/video） */
   media_type: string
   /** 文件大小（字节） */
   size: number
-  /** 文件访问 URL */
   url: string
 }
 
-/** 模型文件能力响应（扩展版） */
 export interface FileCapabilityResponse {
-  /** 模型名称 */
   model_name: string
-  /** 是否支持图片 */
   supports_image: boolean
-  /** 支持的图片类型 */
   supported_image_types: string[]
   /** 最大图片大小（字节） */
   max_image_size: number
   // 音频、视频能力（真正的多模态能力）
-  /** 是否支持音频 */
   supports_audio?: boolean
-  /** 是否支持视频 */
   supports_video?: boolean
-  /** 支持的音频类型 */
   supported_audio_types?: string[]
-  /** 支持的视频类型 */
   supported_video_types?: string[]
   /** 最大音频大小（字节） */
   max_audio_size?: number
   /** 最大视频大小（字节） */
   max_video_size?: number
-  /** 是否为多模态模型 */
   is_multimodal?: boolean
 }
 
-/** 上传文件 */
 export async function uploadFile(file: File, modelName?: string): Promise<FileUploadResponse> {
   const formData = new FormData()
   formData.append('file', file)
@@ -67,7 +52,7 @@ export async function uploadFile(file: File, modelName?: string): Promise<FileUp
   return response.data
 }
 
-/** 获取模型文件能力 静默处理 404，避免控制台报错 */
+/** 获取模型文件能力（404 视为端点不存在，返回全 False 能力而不抛错） */
 export async function getModelCapabilities(modelName: string): Promise<FileCapabilityResponse> {
   try {
     const response = await apiClient.get<FileCapabilityResponse>(MULTIMODAL_SERVICE_ENDPOINTS.mm_files_capabilities, {

@@ -531,10 +531,9 @@ export function compileThemeVariables(config: ThemeConfig): string {
   vars.push(`--panel-solid: ${colorToHslSolid(c.background.elevated)}`)
   vars.push(`--primary: ${colorToHsl(c.primary)}`)
   // 主色/次色/强调色的前景（其底上的文字）：黑白择优计算。
-  // 曾经取 bubble.user_text / text.primary 等声明值——那些值是对着气泡底/正文底
-  // 调的，压在 primary/secondary/accent 上在多个主题撞色（deep-space 2.34 /
-  // pixel-art 2.23 / moe-soft 2.36），且无任何校验兜底；成对声明交给主题作者
-  // 并由对比度门禁测试把关，前景配对在此单点计算保证恒可读。
+  // 不取 bubble.user_text / text.primary 等声明值——那些值对着气泡底/正文底调校，
+  // 直接压在 primary/secondary/accent 底上会撞色且无校验兜底；成对精调交给主题
+  // 作者并由对比度门禁测试把关，前景在此单点按对比度择优保证任意主题恒可读。
   vars.push(`--primary-foreground: ${colorToHsl(contrastPick(c.primary))}`)
   vars.push(`--secondary: ${colorToHsl(c.secondary)}`)
   vars.push(`--secondary-foreground: ${colorToHsl(contrastPick(c.secondary))}`)

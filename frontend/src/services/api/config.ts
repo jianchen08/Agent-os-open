@@ -2,29 +2,6 @@
  * 配置管理 API 服务
  *
  * 提供 LLM 配置和上下文窗口配置的管理接口，与后端 /api/v1/config/* 端点对齐
- *
- * 暴露接口：
- * - getLLMConfig(options): LLMConfigResponse - 获取 LLM 配置
- * - getProviders(options): 提供商列表 - 获取提供商列表
- * - getModels(options): 模型列表 - 获取模型列表
- * - getDefaults(options): LLMDefaults - 获取默认配置
- * - getContextWindowConfig(options): ContextWindowConfig - 获取上下文窗口配置
- * - updateContextWindowConfig(data, options): ContextWindowConfig - 更新上下文窗口配置
- * - resetContextWindowConfig(options): ContextWindowConfig - 重置上下文窗口配置
- * - saveLLMDefaults(defaults, options): LLMDefaults - 保存 LLM 默认配置
- * - addModel(modelId, config, options): 模型列表 - 添加新模型
- * - updateModel(modelId, config, options): 模型列表 - 更新模型配置
- * - deleteModel(modelId, options): 模型列表 - 删除模型
- * - updateProviderConfig(providerId, config, options): 提供商配置 - 更新提供商配置
- * - addProvider(providerId, config, options): 提供商列表 - 添加提供商
- * - deleteProvider(providerId, options): 提供商列表 - 删除提供商
- * - ModelConfig - LLM 模型配置类型
- * - ProviderConfig - 提供商配置类型
- * - LLMDefaults - LLM 默认配置类型
- * - LLMConfigResponse - LLM 配置响应类型
- * - ContextWindowConfig - 上下文窗口配置类型
- * - EndpointConfig - API 端点配置类型
- * - RateLimitConfig - 限流配置类型
  */
 
 import { API_ENDPOINTS } from '@/constants/api'
@@ -32,23 +9,15 @@ import apiClient from '@/services/api/client'
 import { requestWithRetry } from '@/utils/retry'
 import type { RetryOptions } from '@/utils/retry'
 
-/**
- * LLM 模型配置类型
- */
 export interface ModelConfig {
-  /** 提供商 */
   provider: string
-  /** 模型名称 */
   model_name: string
-  /** 显示名称 */
   display_name: string
-  /** API 基础 URL */
   api_base?: string
   /** 上下文窗口大小（token 数） */
   context_window?: number
   /** 是否推理模型（支持 thinking/reasoning） */
   reasoning_model?: boolean
-  /** 默认参数 */
   default_params?: Record<string, unknown>
 }
 
@@ -58,7 +27,6 @@ export interface ModelConfig {
  * 注意：后端返回时 api_key 已脱敏（mask），前端拿到的是掩码值如 `sk-****1234`。
  */
 export interface ProviderKeyEntry {
-  /** Key 标识 */
   id: string
   /** API 密钥（后端返回时已脱敏） */
   api_key: string
@@ -66,7 +34,6 @@ export interface ProviderKeyEntry {
   rpm?: number
   /** Token 配额（0 = 不限） */
   token_quota?: number
-  /** 最大并发数 */
   max_concurrent?: number
 }
 
@@ -81,9 +48,7 @@ export interface ProviderKeyEntry {
 export interface ProviderConfig {
   /** 提供商类型（litellm 前缀，如 openai/deepseek/zai/minimax） */
   type: string
-  /** API 基础 URL */
   api_base?: string
-  /** API Key 列表（后端返回时 api_key 已脱敏） */
   keys: ProviderKeyEntry[]
   /** 是否已配置可用的 API Key（按环境变量解析结果） */
   has_key?: boolean
@@ -93,33 +58,23 @@ export interface ProviderConfig {
 
 /** 远端模型条目（GET /llm/providers/{id}/remote-models 返回） */
 export interface RemoteModel {
-  /** 模型 ID（远端真实模型名） */
+  /** 远端真实模型名 */
   id: string
   /** 归属方（可能为空） */
   owned_by: string
 }
 
-/**
- * LLM 默认配置类型
- */
 export interface LLMDefaults {
-  /** 默认模型 */
+  /** 默认对话模型 */
   chat: string
-  /** 模型分级 */
+  /** 模型分级：tier 名 → 该级默认模型 ID */
   tiers: Record<string, string>
-  /** 嵌入模型 */
   embedding: string
 }
 
-/**
- * LLM 配置响应类型
- */
 export interface LLMConfigResponse {
-  /** 模型配置 */
   models: Record<string, ModelConfig>
-  /** 提供商配置 */
   providers: Record<string, ProviderConfig>
-  /** 默认配置 */
   defaults: LLMDefaults
 }
 
@@ -276,4 +231,3 @@ export async function deleteProvider(
     return response.data.providers
   }, options)
 }
-

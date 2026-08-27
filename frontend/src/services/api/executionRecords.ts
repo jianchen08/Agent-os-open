@@ -88,10 +88,8 @@ export async function getExecutionRecordsSessions(): Promise<SessionsListRespons
 }
 
 /**
- * 获取单个执行记录
- *
  * @param recordId 记录ID
- * @returns 执行记录详情
+ * @returns 执行记录详情（端点失败时返回 null）
  */
 export async function getExecutionRecord(recordId: string): Promise<ExecutionRecord | null> {
   try {
@@ -103,12 +101,6 @@ export async function getExecutionRecord(recordId: string): Promise<ExecutionRec
   }
 }
 
-/**
- * 获取子执行记录
- *
- * @param parentId 父记录ID
- * @returns 子记录列表
- */
 export async function getChildrenRecords(parentId: string): Promise<ExecutionRecord[]> {
   const response = await apiClient.get<ExecutionRecord[]>(
     MONITORING_ENDPOINTS.mon_execution_record_children.replace('{record_id}', parentId),

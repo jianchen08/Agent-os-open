@@ -4,12 +4,12 @@ import { apiClient } from '@/services/api/client'
 import { API_ENDPOINTS } from '@/constants/api'
 import type { Task, TaskStatus } from '@/types/task'
 
-/** 长期任务列表响应 */
 export interface LongTermTasksResponse {
   items: Task[]
   total: number
 }
 
+/** 任务列表响应结构（匹配后端 list_tasks 返回格式） */
 /** 任务列表响应结构（匹配后端 list_tasks 返回格式） */
 interface TaskListApiResponse {
   items: Task[]
@@ -48,13 +48,11 @@ export async function fetchLongTermTasks(params?: {
   }
 }
 
-/** 切换自动执行开关 */
 export async function toggleAutoExecute(taskId: string, enabled: boolean): Promise<Task> {
-  // 先获取当前任务
   const response = await apiClient.get<Task>(API_ENDPOINTS.TASKS.GET(taskId))
   const task = response.data
 
-  // 更新标签
+  // 开关用 auto-execute 标签承载：置 enabled 追加标签，否则移除
   const tags = task.tags || []
   const newTags = enabled
     ? [...tags.filter((t) => t !== 'auto-execute'), 'auto-execute']
@@ -67,7 +65,8 @@ export async function toggleAutoExecute(taskId: string, enabled: boolean): Promi
   return updateResponse.data
 }
 
-/** 暂停长期任务 */
+/** 长期任务的暂停/恢复不走独立端点，直接 PATCH 任务状态：blocked=暂停、running=恢复 */
+
 export async function pauseLongTermTask(taskId: string): Promise<Task> {
   const response = await apiClient.patch<Task>(API_ENDPOINTS.TASKS.UPDATE(taskId), {
     status: 'blocked',
@@ -85,7 +84,6 @@ export async function resumeLongTermTask(taskId: string): Promise<Task> {
   return response.data
 }
 
-/** 取消长期任务 */
 export async function cancelLongTermTask(taskId: string, reason?: string): Promise<Partial<Task>> {
   const response = await apiClient.post<Partial<Task>>(API_ENDPOINTS.TASKS.CANCEL(taskId), {
     reason: reason || '用户取消',
@@ -93,7 +91,6 @@ export async function cancelLongTermTask(taskId: string, reason?: string): Promi
   return response.data
 }
 
-/** 将 Task 转换为 Project 格式 */
 export function taskToProject(task: Task) {
   return {
     id: task.id,
@@ -111,7 +108,6 @@ export function taskToProject(task: Task) {
   }
 }
 
-/** 映射 Task 状态到 Project 状态 */
 function mapTaskStatusToProjectStatus(status: TaskStatus): string {
   const statusMap: Record<string, string> = {
     pending: 'planning',

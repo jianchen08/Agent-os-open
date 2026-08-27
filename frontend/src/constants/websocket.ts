@@ -41,7 +41,7 @@ const WS_BASE_URL = import.meta.env.VITE_WS_BASE_URL || deriveWsUrl(API_BASE_URL
  *
  * 与后端 PROTOCOL_VERSION 保持一致，用于版本协商。
  */
-export const PROTOCOL_VERSION = '3.0.0'
+const PROTOCOL_VERSION = '3.0.0'
 
 /**
  * 构建全局 WebSocket 连接 URL（不带 thread_id）

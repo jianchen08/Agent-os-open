@@ -225,7 +225,7 @@ export function evalSource(ctx: ToolCallContext, expr?: string): unknown {
 const TEMPLATE_RE = /\{\{\s*([^}]+?)\s*\}\}/g
 
 /** 渲染 {{ expr | filter:arg }} 模板 */
-export function renderTemplate(template: string, ctx: ToolCallContext): string {
+function renderTemplate(template: string, ctx: ToolCallContext): string {
   return template.replace(TEMPLATE_RE, (_m, expr: string) => {
     const [path, ...filterParts] = expr.split('|').map((s) => s.trim())
     const value = evalPath(ctx, path)

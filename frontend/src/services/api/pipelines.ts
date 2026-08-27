@@ -4,7 +4,6 @@ import { API_ENDPOINTS } from '@/constants/api'
 import { apiClient } from '@/services/api/client'
 import type { PipelineRunInfo, PipelineStatus } from '@/types/pipeline'
 
-/** 管道运行快照响应 */
 export interface PipelineRunsResponse {
   items: PipelineRunInfo[]
 }

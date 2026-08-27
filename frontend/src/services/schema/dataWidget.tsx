@@ -166,7 +166,7 @@ export interface WsRefreshConfig {
 }
 
 /** 从组件 props 解析 WS 推送声明；非 ws/缺 channel → null */
-export function parseWsRefresh(props: Record<string, unknown>): WsRefreshConfig | null {
+function parseWsRefresh(props: Record<string, unknown>): WsRefreshConfig | null {
   const r = props.refresh
   if (!r || typeof r !== 'object') return null
   const cfg = r as Record<string, unknown>

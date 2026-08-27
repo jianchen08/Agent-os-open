@@ -19,7 +19,6 @@ export interface PayloadDiagItem {
   model: string
   /** messages 字节 hash（前缀缓存诊断用） */
   msgs_hash: string
-  /** 消息条数 */
   msg_count: number
   /** 文件大小（字节） */
   size?: number

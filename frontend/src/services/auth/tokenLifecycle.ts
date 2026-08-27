@@ -170,9 +170,10 @@ export async function ensureFreshToken(): Promise<string | null> {
 const TOKEN_REFRESH_MAX_LEAD_MS = 5 * 60 * 1000
 
 /**
- * 续期失败重试参数。旧逻辑刷新失败一次即清 timer 永久放弃，只剩反应式路径
- * （401/WS 4001）兜底——而 WS 已建立时连接不会因 token 过期立即断，token 到期
- * 后没有任何触发点，直到下一次断线重连才 4001。
+ * 续期失败重试参数：30s 起步指数退避、5min 封顶、连续失败最多 10 次。
+ * 调度不可因单次刷新失败永久放弃——WS 已建立时连接不会因 token 过期立即断开，
+ * 若只剩反应式路径（401/WS 4001），token 到期后没有任何触发点，直到下一次
+ * 断线重连才有机会恢复。
  */
 const REFRESH_RETRY_BASE_MS = 30_000
 const REFRESH_RETRY_MAX_MS = 5 * 60 * 1000

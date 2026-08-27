@@ -2,7 +2,6 @@
  * API端点常量定义
  *
  * 与后端API端点对齐，确保前后端一致性。
- * Requirements: 1.1, 1.2, 1.4, 1.5
  *
  * 插件端点唯一真值源 = plugin.json http_endpoints 声明（生成物投影），
  * 本文件只 import 生成物投影（endpoints.generated.ts），不手写 /ext 字面量

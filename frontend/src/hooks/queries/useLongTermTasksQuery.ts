@@ -23,7 +23,7 @@ import { queryKeys } from '@/services/query/queryKeys'
 import type { Task } from '@/types/task'
 
 /** 长期任务列表兜底轮询间隔（ms）：与旧 useTaskPolling 默认一致 */
-export const LONG_TERM_TASKS_REFRESH_INTERVAL = 5_000
+const LONG_TERM_TASKS_REFRESH_INTERVAL = 5_000
 
 /** 获取长期任务列表（queryFn：箭头包裹隔离 fetchLongTermTasks 的可选参） */
 async function fetchTasksForQuery(): Promise<Task[]> {

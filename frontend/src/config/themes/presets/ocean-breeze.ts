@@ -51,8 +51,8 @@ export const oceanBreezeTheme: ThemeConfig = {
 
     bubble: {
       // 用户气泡与聊天区同族浅青渐变 + 深海绿文字：清新浅底主题里气泡内
-      // 的页面级内容色（链接 hsl(--primary)/行内码 hsl(--muted)）保持可读，
-      // 不再压近黑重面（曾自深空复制暗渐变，链接近不可读且与主题脱节）
+      // 的页面级内容色（链接 hsl(--primary)/行内码 hsl(--muted)）保持可读；
+      // 气泡底必须与本主题同族浅色，压暗色重面会让这些内容色不可读且与主题脱节
       user_bg: 'linear-gradient(135deg, #d8f4ec 0%, #c6ede3 55%, #bceadd 100%)',
       user_text: '#0d3d38',
       user_radius: '1.25rem 1.25rem 1.25rem 0.25rem',

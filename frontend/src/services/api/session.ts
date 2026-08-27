@@ -15,13 +15,9 @@ export interface ThreadField {
   name: string
   /** 字段类型：string/textarea/number/select/multiselect */
   type: string
-  /** 展示标签 */
   label?: string
-  /** 是否必填 */
   required?: boolean
-  /** select 选项 */
   options?: Array<{ label: string; value: string }>
-  /** 描述/占位提示 */
   description?: string
 }
 
@@ -37,15 +33,11 @@ export async function getThreadSchema(
   }, retryOptions)
 }
 
-/** 后端线程创建请求类型 */
 interface ThreadCreateRequest {
-  /** 线程标题（可选） */
   title?: string
-  /** 用户意图（可选，兼容旧接口） */
+  /** 用户意图（兼容旧接口） */
   intent?: string
-  /** 元数据（可选） */
   metadata?: Record<string, unknown>
-  /** 绑定的 Agent ID（可选）- Requirements: 6.1 */
   agent_id?: string
   /** 会话工作空间绝对路径（项目目录） */
   workspace?: string
@@ -53,23 +45,14 @@ interface ThreadCreateRequest {
   isolation_mode?: 'isolated' | 'non_isolated'
 }
 
-/** 后端线程创建响应类型 */
 interface ThreadCreateResponse {
-  /** 线程ID */
   thread_id: string
-  /** 创建时间 */
   created_at: string
-  /** 当前状态 */
   current_state?: string
-  /** 用户意图 */
   intent?: string | null
-  /** 更新时间 */
   updated_at?: string
-  /** 绑定的 Agent ID - Requirements: 6.3 */
   agent_id?: string | null
-  /** 关联的管道 ID 列表 */
   pipeline_ids?: string[]
-  /** 当前活跃的管道 ID */
   active_pipeline_id?: string | null
 }
 
@@ -114,7 +97,6 @@ export interface BackendMessageResponse {
   }>
 }
 
-/** 参数验证错误 */
 class ValidationError extends Error {
   constructor(message: string) {
     super(message)
@@ -122,7 +104,6 @@ class ValidationError extends Error {
   }
 }
 
-/** 验证会话ID */
 function validateSessionId(sessionId: string): void {
   if (!sessionId || sessionId.trim().length === 0) {
     throw new ValidationError('会话ID不能为空')
@@ -299,7 +280,9 @@ export function mapBackendMessageToMessage(
   }
 }
 
-/** 消除合并组内 part.sequence 的冲突，保持每条消息内 parts 的逻辑顺序 渲染层（buildFragmentsFromParts）按 part.sequence 数值升序渲染， */
+/** 消除合并组内 part.sequence 的冲突，保持每条消息内 parts 的逻辑顺序
+ * （渲染层 buildFragmentsFromParts 按 part.sequence 数值升序渲染）。
+ */
 function dedupePartSequences(partsByMessage: any[][]): any[] {
   const result: any[] = []
   const seen = new Set<number>()
@@ -460,11 +443,8 @@ export async function getSessions(options: RetryOptions = {}): Promise<Session[]
   }, options)
 }
 
-/** 创建会话选项 */
 export interface CreateSessionOptions {
-  /** 会话标题（可选） */
   title?: string
-  /** 绑定的 Agent ID（可选） */
   agentId?: string
   /** 会话工作空间绝对路径（项目目录；空 = 默认目录自动生成） */
   workspace?: string
@@ -523,7 +503,6 @@ export async function createSession(
       },
     )
 
-    // 将创建响应转换为ThreadStateResponse格式，然后映射为Session
     const threadState: ThreadStateResponse = {
       thread_id: response.data.thread_id,
       current_state: response.data.current_state || 'created',
@@ -540,7 +519,6 @@ export async function createSession(
 }
 
 export async function deleteSession(sessionId: string, options: RetryOptions = {}): Promise<void> {
-  // 参数验证
   validateSessionId(sessionId)
 
   return requestWithRetry(async () => {
@@ -563,11 +541,9 @@ export async function getMessages(
   },
   options: RetryOptions = {},
 ): Promise<{ messages: Message[]; total: number; has_more: boolean }> {
-  // 参数验证
   validateSessionId(sessionId)
 
   return requestWithRetry(async () => {
-    // 构建查询参数
     const params: Record<string, any> = {}
     if (filters) {
       if (filters.agentId) params.agent_id = filters.agentId
@@ -611,29 +587,19 @@ export async function getMessages(
   }, options)
 }
 
-/** 后端线程更新请求类型 */
 interface ThreadUpdateRequest {
-  /** 用户意图/标题（可选） */
+  /** 用户意图/标题（后端 intent 字段兼作会话标题） */
   intent?: string
-  /** 绑定的 Agent ID（可选）- Requirements: 6.2 */
   agent_id?: string | null
-  /** 元数据（可选） */
   metadata?: Record<string, unknown>
 }
 
-/** 后端线程更新响应类型 */
 interface ThreadUpdateResponse {
-  /** 线程ID */
   thread_id: string
-  /** 当前状态 */
   current_state: string
-  /** 用户意图 */
   intent: string | null
-  /** 创建时间 */
   created_at: string
-  /** 更新时间 */
   updated_at: string
-  /** 绑定的 Agent ID - Requirements: 6.3 */
   agent_id?: string | null
 }
 
@@ -642,11 +608,10 @@ export async function updateSessionAgent(
   agentId: string | null,
   options: RetryOptions = {},
 ): Promise<Session> {
-  // 参数验证
   validateSessionId(sessionId)
 
   return requestWithRetry(async () => {
-    // PATCH 现在返回完整的 ThreadResponse，无需二次 GET
+    // PATCH 返回完整的 ThreadResponse，无需二次 GET
     const response = await apiClient.patch<ThreadStateResponse>(
       API_ENDPOINTS.SESSIONS.UPDATE_AGENT(sessionId),
       { agent_id: agentId },
@@ -658,11 +623,8 @@ export async function updateSessionAgent(
 
 /** 更新会话选项 */
 interface UpdateSessionOptions extends RetryOptions {
-  /** 会话标题（可选） */
   title?: string
-  /** Agent ID（可选） */
   agentId?: string | null
-  /** 元数据（可选） */
   metadata?: Record<string, unknown>
 }
 
@@ -672,11 +634,9 @@ export async function updateSession(
 ): Promise<Session> {
   const { title, agentId, metadata, ...retryOptions } = options
 
-  // 参数验证
   validateSessionId(sessionId)
 
   return requestWithRetry(async () => {
-    // 构造更新请求
     const requestData: ThreadUpdateRequest = {}
     if (title !== undefined) {
       requestData.intent = title
@@ -693,7 +653,6 @@ export async function updateSession(
       requestData,
     )
 
-    // 将更新响应转换为ThreadStateResponse格式，然后映射为Session
     const threadState: ThreadStateResponse = {
       thread_id: response.data.thread_id || sessionId,
       current_state: response.data.current_state,

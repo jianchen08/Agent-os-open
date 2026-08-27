@@ -3,9 +3,7 @@
 import apiClient from '@/services/api/client'
 import { MULTIMODAL_SERVICE_ENDPOINTS } from './endpoints.generated'
 
-/** 转写结果 */
 export interface TranscriptionResult {
-  /** 转写得到的文本 */
   text: string
 }
 

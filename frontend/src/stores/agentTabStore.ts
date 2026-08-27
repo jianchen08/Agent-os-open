@@ -238,9 +238,9 @@ export const useAgentTabStore = create<AgentTabState>((set, get) => ({
         }
         return tab
       })
-      // 不变量：主标签（main-${sessionId}）必须存在——旧 localStorage 数据可能
-      // 只存了子标签（历史版本/异常写入），缺失时补建，否则主管道跳转会找不到
-      // 主标签而误走"新建子标签"路径（统一跳转逻辑依赖此不变量）。
+      // 不变量：主标签（main-${sessionId}）必须存在。持久化恢复的 tab 列表若
+      // 只含子标签、缺失主标签，则在此补建——统一跳转逻辑按主标签定位主管道，
+      // 缺失时会被误判为新会话而走"新建子标签"路径。
       if (!tabs.some((t) => t.agentLevel === 1)) {
         tabs = [
           {

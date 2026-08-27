@@ -240,7 +240,7 @@ export function moveArrayItem<T>(root: T, arrayPath: Path, index: number, delta:
 }
 
 /** 读取 path 处的值（任一层缺失返回 undefined） */
-export function getAtPath(root: unknown, path: Path): unknown {
+function getAtPath(root: unknown, path: Path): unknown {
   let cursor: unknown = root
   for (const seg of path) {
     if (cursor === null || typeof cursor !== 'object') return undefined

@@ -56,7 +56,7 @@ export function isWebviewMessage(data: unknown): data is WebviewMessage {
  * 令牌在每次 WebviewWidget 挂载时由宿主生成并注入 iframe（bootstrap 变量），
  * 其它网页无法得知 → 彻底封死"任意 null-origin 页面伪造消息调用宿主 REST"面。
  */
-export function validateWebviewToken(msg: WebviewMessage, expectedToken: string): boolean {
+function validateWebviewToken(msg: WebviewMessage, expectedToken: string): boolean {
   return (
     typeof msg.__wv_token === 'string' &&
     msg.__wv_token.length > 0 &&

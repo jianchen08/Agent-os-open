@@ -1,4 +1,4 @@
-/** API客户端配置 创建axios实例并配置请求/响应拦截器 */
+/** API 客户端：axios 实例 + 拦截器（认证头注入、401 刷新重放、指数退避重试、统一错误信封） */
 
 import axios, { type AxiosError, type AxiosInstance, type InternalAxiosRequestConfig } from 'axios'
 import { API_BASE_URL, API_TIMEOUT } from '../../constants/api'
@@ -14,7 +14,7 @@ import type { ApiError } from '../../types/api'
 // （refresh → services/api/auth → 本文件），因此本文件可静态 import 它，
 // 不构成静态循环依赖。
 
-/** 清除认证信息并重定向到登录页 增加停止自生长闭环轮询 */
+/** 清除认证状态：停止 growth loop 轮询、清令牌、通知 store 并重定向登录页 */
 async function clearAuthAndRedirect(): Promise<void> {
   try {
     const { destroyGrowthLoop } = await import('../modules/GrowthLoop')
@@ -56,7 +56,6 @@ function isDefinitelyAuthFailure(error: unknown): boolean {
   return false
 }
 
-/** 创建axios实例 */
 const apiClient: AxiosInstance = axios.create({
   baseURL: API_BASE_URL,
   timeout: API_TIMEOUT,
@@ -118,7 +117,6 @@ apiClient.interceptors.response.use(
     }
 
     // 如果是401错误且未重试过，尝试刷新token
-    // Requirements: 2.3
     if (error.response?.status === 401 && !originalRequest._retry) {
       // 检查是否是 refresh_token 刷新请求本身失败
       const isRefreshTokenRequest = originalRequest.url?.includes('/auth/refresh')

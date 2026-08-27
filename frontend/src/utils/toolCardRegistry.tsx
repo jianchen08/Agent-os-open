@@ -155,7 +155,8 @@ export function enhanceActivityWithToolConfig(
   if (declared) {
     const ctx: ToolCallContext = {
       args: toolCall.tool_args,
-      // resultData 优先（流式结构化完整数据，未截断）；缺失时回退 result（历史/兜底）。
+      // resultData 优先：流式结构化的完整数据（未经截断）；其缺失时回退
+      // result 文本字段（历史消息从 DB 加载或工具本身无结构化结果的场景）。
       result: toolCall.resultData ?? toolCall.result,
       error: toolCall.error,
       duration_ms: toolCall.duration_ms,

@@ -59,7 +59,7 @@ export async function getTokenUsage(options: RetryOptions = {}): Promise<TokenUs
   }, options)
 }
 
-export async function getCacheStats(options: RetryOptions = {}): Promise<CacheStats> {
+async function getCacheStats(options: RetryOptions = {}): Promise<CacheStats> {
   return requestWithRetry(async () => {
     const response = await apiClient.get<CacheStatsResponse>(
       API_ENDPOINTS.MONITORING.CACHE_STATS,

@@ -1,4 +1,4 @@
-/** 认证 API 服务 暴露接口： */
+/** 认证 API 服务 */
 
 import apiClient from './client'
 import { API_ENDPOINTS } from '../../constants/api'
@@ -62,17 +62,14 @@ export async function login(
   password: string,
   options: RetryOptions = {},
 ): Promise<LoginResponse> {
-  // 参数验证
   validateUsername(username)
   validatePassword(password)
 
-  // 构造请求数据
   const requestData: LoginRequest = {
     username: username.trim(),
     password,
   }
 
-  // 发送请求（带重试）
   return requestWithRetry(async () => {
     const response = await apiClient.post<LoginResponse>(API_ENDPOINTS.AUTH.LOGIN, requestData)
     return response.data
@@ -85,19 +82,16 @@ export async function register(
   email: string,
   options: RetryOptions = {},
 ): Promise<RegisterResponse> {
-  // 参数验证
   validateUsername(username)
   validatePassword(password)
   validateEmail(email)
 
-  // 构造请求数据
   const requestData: RegisterRequest = {
     username: username.trim(),
     password,
     email: email.trim(),
   }
 
-  // 发送请求（带重试）
   return requestWithRetry(async () => {
     const response = await apiClient.post<RegisterResponse>(
       API_ENDPOINTS.AUTH.REGISTER,
@@ -111,24 +105,21 @@ export async function refreshToken(
   token: string,
   options: RetryOptions = {},
 ): Promise<RefreshResponse> {
-  // 参数验证
   validateRefreshToken(token)
 
-  // 构造请求数据（与后端RefreshRequest对齐）
   const requestData: RefreshRequest = {
     refresh_token: token,
   }
 
-  // 发送请求（带重试）
   return requestWithRetry(async () => {
     const response = await apiClient.post<RefreshResponse>(
       API_ENDPOINTS.AUTH.REFRESH_TOKEN,
       requestData,
       {
-        // // refresh 请求显式清除 Authorization 头。client.ts 的请求拦截器会对所有请求
-        // 注入 Authorization: Bearer <access_token>，若不覆盖，后端旧逻辑会从头里
-        // 取到 access token（type=access）→ 误判为「期望 refresh 类型」401。
-        // refresh token 走 body 传递，Authorization 头应留空。
+        // Authorization 显式置空串：client.ts 请求拦截器对非空值一律注入
+        // Bearer <access_token>，会把 access token 带进 refresh 请求 → 后端
+        // 判定「期望 refresh 类型」直接 401。空串被拦截器识别为「不带认证」，
+        // refresh_token 只经 body 传递。
         headers: { Authorization: '' },
       },
     )
@@ -141,13 +132,11 @@ export async function logout(
   logoutAll: boolean = false,
   options: RetryOptions = {},
 ): Promise<LogoutResponse> {
-  // 构造请求数据
   const requestData: LogoutRequest = {
     refresh_token: refreshTokenValue,
     logout_all: logoutAll,
   }
 
-  // 发送请求（带重试）
   return requestWithRetry(async () => {
     const response = await apiClient.post<LogoutResponse>(API_ENDPOINTS.AUTH.LOGOUT, requestData)
     return response.data
@@ -155,7 +144,6 @@ export async function logout(
 }
 
 export async function getCurrentUser(options: RetryOptions = {}): Promise<UserInfoResponse> {
-  // 发送请求（带重试）
   return requestWithRetry(async () => {
     const response = await apiClient.get<UserInfoResponse>(API_ENDPOINTS.AUTH.ME)
     return response.data

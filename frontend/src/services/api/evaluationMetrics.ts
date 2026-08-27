@@ -7,72 +7,38 @@
 import { API_ENDPOINTS } from '@/constants/api'
 import apiClient from '@/services/api/client'
 
-/**
- * 评估指标类型
- */
 export interface EvaluationMetric {
-  /** 指标 ID */
   id: string
-  /** 指标名称（唯一） */
   name: string
-  /** 指标描述 */
   description: string
-  /** 指标分类 */
   category: string
-  /** 评估器类型 */
   evaluator_type: string
-  /** 评估器标识 */
   evaluator_id: string
-  /** 默认配置 */
   default_config?: Record<string, unknown>
-  /** 输入参数 Schema */
   input_schema?: Record<string, unknown>
-  /** 默认通过阈值 */
   default_pass_threshold?: number
-  /** 包含的低级指标 */
+  /** 复合指标包含的子指标 ID 列表 */
   includes?: string[]
-  /** 前置依赖 */
+  /** 前置依赖的指标 ID 列表 */
   requires?: string[]
-  /** 指标层级 */
   level: number
-  /** 是否红线指标 */
   is_red_line: boolean
-  /** 默认权重 */
   default_weight: number
-  /** 来源 */
   source: string
-  /** 状态 */
   status: string
-  /** 标签 */
   tags?: string[]
-  /** 使用次数 */
   usage_count: number
-  /** 成功次数 */
   success_count: number
-  /** 平均执行时间 */
   avg_execution_time?: number
-  /** 创建时间 */
   created_at: string
-  /** 更新时间 */
   updated_at?: string
 }
 
-/**
- * 评估指标列表响应
- */
 export interface EvaluationMetricsListResponse {
-  /** 指标列表 */
   metrics: EvaluationMetric[]
-  /** 总数量 */
   total: number
 }
 
-/**
- * 获取评估指标列表
- *
- * @param params 查询参数
- * @returns 评估指标列表
- */
 export async function getEvaluationMetrics(params?: {
   skip?: number
   limit?: number
