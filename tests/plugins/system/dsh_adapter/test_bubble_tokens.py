@@ -43,11 +43,7 @@ def _composite(face_hex: str, canvas_hex: str) -> str:
     """半透明面合成到画布上的实色（测试侧独立实现）。"""
     fr, fg_, fb, fa = _hex_to_rgba(face_hex)
     cr, cg, cb, _ = _hex_to_rgba(canvas_hex)
-    return "#{:02x}{:02x}{:02x}".format(
-        round(fr * fa + cr * (1 - fa)),
-        round(fg_ * fa + cg * (1 - fa)),
-        round(fb * fa + cb * (1 - fa)),
-    )
+    return f"#{round(fr * fa + cr * (1 - fa)):02x}{round(fg_ * fa + cg * (1 - fa)):02x}{round(fb * fa + cb * (1 - fa)):02x}"
 
 
 def _rel_lum(hex6: str) -> float:
@@ -83,15 +79,11 @@ def test_bubble_tokens_paired_and_readable(tid):
         assert re.fullmatch(r"#[0-9a-fA-F]{6}", text), f"{tid} {role} 文字令牌非 hex: {text}"
         if bg.startswith("color-mix("):
             # 画布玻璃缺省：与 MessageItem 平铺态文档化回退同配方（--card 即画布）
-            assert bg == f"color-mix(in srgb, {canvas_raw} 80%, transparent)", (
-                f"{tid} AI 玻璃面配方漂移: {bg}"
-            )
+            assert bg == f"color-mix(in srgb, {canvas_raw} 80%, transparent)", f"{tid} AI 玻璃面配方漂移: {bg}"
             face_solid = canvas_raw
         else:
             parsed = _parse_css_color(bg)
-            face_solid = (
-                bg if parsed[3] >= 1 else _composite(bg, canvas_raw)
-            )
+            face_solid = bg if parsed[3] >= 1 else _composite(bg, canvas_raw)
         assert face_solid is not None
         assert _ratio(text, face_solid) >= 4.5, f"{tid} {role} 气泡文字对面对比度不足"
 
@@ -113,11 +105,7 @@ def _face_solid_of(user_bg: str, canvas: str) -> str:
         return user_bg.strip().lower()
     fr, fg_, fb, fa = _hex_to_rgba(user_bg)
     cr, cg, cb, _ = _hex_to_rgba(canvas)
-    return "#{:02x}{:02x}{:02x}".format(
-        round(fr * fa + cr * (1 - fa)),
-        round(fg_ * fa + cg * (1 - fa)),
-        round(fb * fa + cb * (1 - fa)),
-    )
+    return f"#{round(fr * fa + cr * (1 - fa)):02x}{round(fg_ * fa + cg * (1 - fa)):02x}{round(fb * fa + cb * (1 - fa)):02x}"
 
 
 @pytest.mark.parametrize("tid", ALL_SKIN_IDS)
@@ -156,6 +144,77 @@ def test_text_not_same_as_face_seed():
     for tid in ("dsh-skin-matrix", "dsh-skin-xp"):
         variables = THEMES[tid]["variables"]
         assert variables["--bubble-user-text"] != variables["--bubble-user-bg"]
+
+
+def _hsl_to_rgb(value: str) -> tuple[int, int, int]:
+    """'H S% L%' 串 → rgb（测试侧独立实现）。"""
+    h, s, lig = (float(x.replace("%", "")) for x in value.split())
+    h /= 360
+    s /= 100
+    lig /= 100
+    if s == 0:
+        v = round(255 * lig)
+        return (v, v, v)
+    q = lig * (1 + s) if lig < 0.5 else lig + s - lig * s
+    p = 2 * lig - q
+
+    def chan(t: float) -> float:
+        t %= 1
+        if t < 1 / 6:
+            return p + (q - p) * 6 * t
+        if t < 1 / 2:
+            return q
+        if t < 2 / 3:
+            return p + (q - p) * (2 / 3 - t) * 6
+        return p
+
+    return (
+        round(255 * chan(h + 1 / 3)),
+        round(255 * chan(h)),
+        round(255 * chan(h - 1 / 3)),
+    )
+
+
+@pytest.mark.parametrize("tid", ALL_SKIN_IDS)
+def test_primary_accent_readable_on_card_faces(tid):
+    """强调色作为文字的配对强制：--primary 压在卡面/画布族上 ≥4.5。
+
+    工具卡标题/文件链接/操作按钮以 text-primary 消费 --primary，底为
+    bg-card（=画布）与 bg-muted 派生面——铁律与文本令牌一致：对画布与
+    派生面双面达标。
+    """
+    variables = THEMES[tid]["variables"]
+    primary = _hsl_to_rgb(variables["--primary"])
+    for face_key in ("--card", "--muted"):
+        face = _hsl_to_rgb(variables[face_key])
+        face_hex = "#{:02x}{:02x}{:02x}".format(*face)
+        primary_hex = "#{:02x}{:02x}{:02x}".format(*primary)
+        assert _ratio(primary_hex, face_hex) >= 4.5, (
+            f"{tid} --primary={variables['--primary']} 对 {face_key}={variables[face_key]} "
+            f"对比度不足（强调色作文字隐形）"
+        )
+
+
+def _hex_to_rgb(value: str) -> tuple[int, int, int]:
+    m = re.fullmatch(r"#([0-9a-fA-F]{6})", value.strip())
+    assert m, f"非 #rrggbb 颜色: {value}"
+    h = m.group(1)
+    return (int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16))
+
+
+@pytest.mark.parametrize(
+    "tid",
+    ["dsh-skin-cyber-night", "dsh-skin-whale-mom", "dsh-skin-matrix"],
+)
+def test_primary_brand_preserved_when_already_readable(tid):
+    """达标皮肤的 --primary 与皮肤原 accent（--ds-accent-primary）等值——
+    enforce 只动不达标色，品牌识别不受扰（hsl 串往返允许 ±1 量化漂移）。"""
+    variables = THEMES[tid]["variables"]
+    got = _hsl_to_rgb(variables["--primary"])
+    want = _hex_to_rgb(variables["--ds-accent-primary"])
+    assert all(abs(a - b) <= 1 for a, b in zip(got, want, strict=True)), (
+        f"{tid} --primary={variables['--primary']} 偏离原 accent {want}"
+    )
 
 
 class TestPickSkinAliasBranches:

@@ -653,19 +653,19 @@ def _hex_to_hsl(hexc: str) -> str:
         return hexc.strip()
     r, g, b = (c / 255 for c in rgb)
     mx, mn = max(r, g, b), min(r, g, b)
-    l = (mx + mn) / 2
+    lum = (mx + mn) / 2
     if mx == mn:
         hue = sat = 0.0
     else:
         d = mx - mn
-        sat = d / (2 - mx - mn) if l > 0.5 else d / (mx + mn)
+        sat = d / (2 - mx - mn) if lum > 0.5 else d / (mx + mn)
         if mx == r:
             hue = ((g - b) / d + (6 if g < b else 0)) / 6
         elif mx == g:
             hue = ((b - r) / d + 2) / 6
         else:
             hue = ((r - g) / d + 4) / 6
-    return f"{round(hue * 360)} {round(sat * 100)}% {round(l * 100)}%"
+    return f"{round(hue * 360)} {round(sat * 100)}% {round(lum * 100)}%"
 
 
 def _luminance(hexc: str) -> float:
@@ -1143,13 +1143,20 @@ def _build_shadcn_bridge(
         variables["--region-workspace-muted-fg"] = ch_muted
     if accent_rgb is not None:
         accent_solid = (accent_rgb[0], accent_rgb[1], accent_rgb[2])
-        accent_fg_seed = (255, 255, 255) if _wcag_luminance(accent_solid) < 0.6 else (0, 0, 0)
-        accent_fg_hex = _enforce_contrast(accent_fg_seed, [accent_solid])
-        variables["--primary"] = _hex_to_hsl(accent)
+        # --primary/--accent/--ring 压在卡面上同时作为文字消费（工具卡标题/
+        # 文件链接/操作按钮 text-primary，底 = bg-card 画布与 bg-muted 派生面）
+        # ——与文本令牌同一铁律：对画布族双面强制 ≥4.5；原值达标原样保留
+        # （品牌不受扰），accent≈画布同族的皮肤文字不再隐形
+        primary_hex = _enforce_contrast(accent_solid, [canvas_solid, canvas_shift])
+        primary_parsed = _parse_css_color(primary_hex)
+        primary_solid = primary_parsed[:3] if primary_parsed is not None else accent_solid
+        accent_fg_seed = (255, 255, 255) if _wcag_luminance(primary_solid) < 0.6 else (0, 0, 0)
+        accent_fg_hex = _enforce_contrast(accent_fg_seed, [primary_solid])
+        variables["--primary"] = _hex_to_hsl(primary_hex)
         variables["--primary-foreground"] = _hex_to_hsl(accent_fg_hex)
-        variables["--accent"] = _hex_to_hsl(accent)
+        variables["--accent"] = _hex_to_hsl(primary_hex)
         variables["--accent-foreground"] = _hex_to_hsl(accent_fg_hex)
-        variables["--ring"] = _hex_to_hsl(accent)
+        variables["--ring"] = _hex_to_hsl(primary_hex)
 
 
 def _build_theme_entry(skin: dict[str, Any], base: str, variables: dict[str, str]) -> dict[str, Any]:
@@ -1253,7 +1260,6 @@ def skins_to_plugin_themes(base_dir: str | Path | None = None) -> list[dict[str,
         # 气泡令牌成对定稿（底色+配对文字，跟皮收口）——见
         # _resolve_bubble_variables；置于 shadcn 桥之后（画布实色已解析）
         canvas_rgb = _parse_css_color(canvas) if canvas else None
-        text_rgb = _parse_css_color(text) if text else None
         accent_rgb = _parse_css_color(accent) if accent else None
         variables.update(
             _resolve_bubble_variables(
