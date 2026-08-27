@@ -32,17 +32,49 @@ export function getAllPresetThemes(): ThemeConfig[] {
   return Object.values(presetThemes)
 }
 
+/** 编译各变量域共享的派生量（深浅族决定多组成对变量的取值） */
+interface CompileCtx {
+  config: ThemeConfig
+  /** 深色族标记：hover 叠加层 / 遮罩 / 代码底等成对值按此二选一 */
+  isDarkTheme: boolean
+  /** hover 叠加层颜色值：--hover-overlay 与 --ds-bg-hover 共用 */
+  hoverOverlay: string
+}
+
 /**
  * 编译主题配置为 CSS 变量字符串
  *
- * 将主题配置转换为 CSS 变量声明，用于批量设置到 DOM
+ * 将主题配置转换为 CSS 变量声明，用于批量设置到 DOM。
+ * 变量域各自独立成段函数，此处只负责派生量计算与固定顺序组合——
+ * 子函数的 push 顺序即最终 CSS 变量顺序。
  *
  * @param config - 主题配置
  * @returns CSS 变量字符串
  */
 export function compileThemeVariables(config: ThemeConfig): string {
+  const ctx: CompileCtx = {
+    config,
+    isDarkTheme: config.category === 'dark',
+    hoverOverlay:
+      config.category === 'dark' ? 'rgba(255, 255, 255, 0.06)' : 'rgba(15, 23, 42, 0.06)',
+  }
   const vars: string[] = []
+  pushCoreColorVars(vars, ctx)
+  pushComponentVars(vars, ctx)
+  pushGlobalSurfaceVars(vars, ctx)
+  pushDeepSpaceBridgeVars(vars, ctx)
+  pushAccentGlowVars(vars, ctx)
+  pushCodeBlockVars(vars, ctx)
+  pushTypographyVars(vars, ctx)
+  pushAreaBackgroundVars(vars, ctx)
+  pushRadiusShadowVars(vars, ctx)
+  pushShadcnBridgeVars(vars, ctx)
+  pushEffectVars(vars, ctx)
+  return vars.join('; ')
+}
 
+/** 基础颜色 + 选中态 + background/text/border/status 映射 + 消息气泡 */
+function pushCoreColorVars(vars: string[], { config }: CompileCtx): void {
   // === 基础颜色 ===
   vars.push(`--primary: ${config.colors.primary}`)
   vars.push(`--secondary: ${config.colors.secondary}`)
@@ -132,7 +164,10 @@ export function compileThemeVariables(config: ThemeConfig): string {
   if (config.colors.bubble.ai_padding) {
     vars.push(`--bubble-ai-padding: ${config.colors.bubble.ai_padding}`)
   }
+}
 
+/** 组件样式（button/input/card/badge/dialog/tabs/toast/progress/dropdown/glow） */
+function pushComponentVars(vars: string[], { config }: CompileCtx): void {
   // === 组件样式：按钮 ===
   if (config.components.button?.variants) {
     const variants = config.components.button.variants
@@ -350,7 +385,10 @@ export function compileThemeVariables(config: ThemeConfig): string {
       }
     })
   }
+}
 
+/** 全局合成面：边框线型 / hover 叠加层 / 遮罩层 */
+function pushGlobalSurfaceVars(vars: string[], { config, isDarkTheme, hoverOverlay }: CompileCtx): void {
   // === 全局边框线型 ===
   // Tailwind preflight 将 border-style 写死 solid，颜色类（border-border 等）无法
   // 控制线型；输出 --border-line-style 并在 index.css 全局覆盖，
@@ -360,8 +398,6 @@ export function compileThemeVariables(config: ThemeConfig): string {
   // === 悬停叠加层 ===
   // 替代散布在侧边栏/面板的硬编码 bg-white/5（浅色主题下白上叠白不可见）：
   // 深色主题叠白、浅色主题叠深，保证任何主题下 hover 反馈可见。
-  const isDarkTheme = config.category === 'dark'
-  const hoverOverlay = isDarkTheme ? 'rgba(255, 255, 255, 0.06)' : 'rgba(15, 23, 42, 0.06)'
   vars.push(`--hover-overlay: ${hoverOverlay}`)
 
   // === 遮罩层 ===
@@ -376,7 +412,10 @@ export function compileThemeVariables(config: ThemeConfig): string {
   // 媒体查看器（lightbox）底幕：恒定深色以保证图片对比度，
   // 仅深浅略调（浅色主题带一点蓝调而非死黑）
   vars.push(`--overlay-strong: ${isDarkTheme ? 'rgba(0, 0, 0, 0.8)' : 'rgba(15, 23, 42, 0.78)'}`)
+}
 
+/** Deep Space v2 桥接变量（--ds-*）：非深空主题下引用面统一覆写接入主题系统 */
+function pushDeepSpaceBridgeVars(vars: string[], { config, hoverOverlay }: CompileCtx): void {
   // === Deep Space v2 桥接变量（--ds-*） ===
   // 组件大量引用 deep-space-v2.css 的 --ds-* 变量（该文件按 .dark/.light class 定死取值，
   // 不覆写则非深空主题下这些区域不跟随主题）。
@@ -424,7 +463,10 @@ export function compileThemeVariables(config: ThemeConfig): string {
     vars.push(`--ds-r-xl: ${br.xl}`)
     vars.push(`--ds-r-bubble: ${br.xl}`)
   }
+}
 
+/** 动画/辉光语义色（--accent-* 与工具类消费的 --shadow-glow-*） */
+function pushAccentGlowVars(vars: string[], { config }: CompileCtx): void {
   // === 动画/辉光语义色 ===
   // theme.css 静态定义了 --accent-*（引擎未跑时兜底），tailwind 的
   // border-flow 动画与 glow-running/waiting 工具类引用它们 —— 此处按主题覆写，
@@ -437,11 +479,17 @@ export function compileThemeVariables(config: ThemeConfig): string {
     vars.push(`--shadow-glow-running: ${config.components.glow.running}`)
     vars.push(`--shadow-glow-waiting: ${config.components.glow.waiting}`)
   }
+}
 
+/** 代码块底色：深色主题固定深底（兼容语法高亮配色），浅色用主题 input 色 */
+function pushCodeBlockVars(vars: string[], { config, isDarkTheme }: CompileCtx): void {
   // === 代码块底色 ===
   // 深色主题固定深底（兼容语法高亮配色）；浅色主题用主题 input 色（淡主题色调）
   vars.push(`--code-bg: ${isDarkTheme ? 'rgba(15, 23, 42, 0.85)' : config.colors.background.input}`)
+}
 
+/** 字体族 + 字号阶梯（Tailwind 工具类与语义阶梯双套输出） */
+function pushTypographyVars(vars: string[], { config }: CompileCtx): void {
   // === 字体族 ===
   // 主题字体接入全局：body 与 Tailwind font-ui/font-code 均消费这两个变量，
   // 未输出时消费端回退 design-tokens.css 的 --font-family / --font-family-mono。
@@ -478,7 +526,10 @@ export function compileThemeVariables(config: ThemeConfig): string {
     vars.push(`--font-size-title: ${fs.lg}`)
     vars.push(`--font-size-page-title: ${fs.xl}`)
   }
+}
 
+/** 区域背景（侧边栏 / 聊天区）：backgrounds 缺省回退 colors.background 对应色 */
+function pushAreaBackgroundVars(vars: string[], { config }: CompileCtx): void {
   // === 区域背景（侧边栏 / 聊天区） ===
   // backgrounds.sidebar/chat 是主题的区域背景配置；缺省时回退 colors.background
   // 对应色，保证浅色/深色基础主题下变量始终有值。
@@ -497,7 +548,10 @@ export function compileThemeVariables(config: ThemeConfig): string {
     vars.push(`--chat-bg-image: ${isGradientBg ? chatAreaBg : 'none'}`)
     vars.push(`--chat-bg-color: ${isGradientBg ? 'transparent' : chatAreaBg}`)
   }
+}
 
+/** 圆角 + 阴影按层级展开 */
+function pushRadiusShadowVars(vars: string[], { config }: CompileCtx): void {
   // === 圆角 ===
   if (config.components.borderRadius) {
     Object.entries(config.components.borderRadius).forEach(([key, value]) => {
@@ -517,8 +571,10 @@ export function compileThemeVariables(config: ThemeConfig): string {
       }
     })
   }
+}
 
-  // === shadcn/ui 桥接映射 ===
+/** shadcn/ui 桥接映射：HSL 原始格式变量（shadcn 经 hsl(var(--xxx)) 消费） */
+function pushShadcnBridgeVars(vars: string[], { config }: CompileCtx): void {
   // 将自定义主题变量映射到 shadcn/ui 组件期望的 HSL 原始格式变量
   // shadcn/ui 通过 hsl(var(--xxx)) 消费这些变量，所以这里存储的是不带 hsl() 包裹的原始值
   const c = config.colors
@@ -544,8 +600,10 @@ export function compileThemeVariables(config: ThemeConfig): string {
   vars.push(`--border: ${colorToHsl(c.border.default)}`)
   vars.push(`--input: ${colorToHsl(c.background.input)}`)
   vars.push(`--ring: ${colorToHsl(c.primary)}`)
+}
 
-  // === 视觉效果（effects）→ 全局过渡/动画语义变量 ===
+/** 视觉效果（effects）→ 全局过渡/动画语义变量 */
+function pushEffectVars(vars: string[], { config }: CompileCtx): void {
   // effects.transitionDuration 是主题级过渡时长基准；effects.animations=false 时
   // 全站过渡归零（无障碍主题如 high-contrast 据此关闭动画）。
   // 组件统一引用 var(--transition-*) / var(--transition-easing)，由 effects 单点驱动。
@@ -559,8 +617,6 @@ export function compileThemeVariables(config: ThemeConfig): string {
   vars.push(`--transition-fast: ${Math.round(d * 0.6)}ms ${easing}`)
   vars.push(`--transition-base: ${d}ms ${easing}`)
   vars.push(`--transition-slow: ${Math.round(d * 1.5)}ms ${easing}`)
-
-  return vars.join('; ')
 }
 
 /**

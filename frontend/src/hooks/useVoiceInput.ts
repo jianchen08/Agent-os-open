@@ -8,6 +8,7 @@
  */
 
 import { useCallback, useEffect, useRef, useState } from 'react'
+import type { Dispatch, SetStateAction } from 'react'
 import { transcribeAudio } from '@/services/api/asr'
 import type {
   SpeechRecognitionConstructor,
@@ -29,6 +30,65 @@ function getSpeechRecognition(): SpeechRecognitionConstructor | null {
   if (typeof window === 'undefined') return null
 
   return window.SpeechRecognition || window.webkitSpeechRecognition || null
+}
+
+/** 识别错误的处置决策：文案/类型 + 是否需要切服务端 ASR 降级 */
+interface RecognitionErrorDecision {
+  errorMessage: string
+  errorType: VoiceInputError['type']
+  shouldFallbackToServer: boolean
+}
+
+/** 手动停止场景下可吞掉的停止相关错误（不视为故障） */
+const STOP_RELATED_ERRORS = ['aborted', 'no-speech', 'network', 'service-not-allowed']
+
+/** 纯函数：SpeechRecognition 错误码 → 用户文案 + 错误类型 + 降级决策（映射表） */
+function decideRecognitionError(error: string): RecognitionErrorDecision | 'ignore' {
+  switch (error) {
+    case 'not-allowed':
+    case 'permission-denied':
+      return {
+        errorMessage: '麦克风权限被拒绝，请在浏览器设置中允许访问麦克风',
+        errorType: 'permission_denied',
+        shouldFallbackToServer: false,
+      }
+    case 'no-speech':
+      return 'ignore'
+    case 'audio-capture':
+      return {
+        errorMessage: '无法捕获音频，请检查麦克风设备',
+        errorType: 'transcription_failed',
+        shouldFallbackToServer: false,
+      }
+    case 'network':
+      // 浏览器云端语音服务不可达，自动降级到服务端 ASR
+      return { errorMessage: '', errorType: 'transcription_failed', shouldFallbackToServer: true }
+    case 'aborted':
+      return 'ignore'
+    case 'service-not-allowed':
+      // 语音识别服务不可用，自动降级到服务端 ASR
+      return { errorMessage: '', errorType: 'transcription_failed', shouldFallbackToServer: true }
+    default:
+      return {
+        errorMessage: '语音识别失败',
+        errorType: 'transcription_failed',
+        shouldFallbackToServer: false,
+      }
+  }
+}
+
+/** 启动录音计时器（每秒 +1；重复启动时先清旧定时器） */
+function startDurationTimer(
+  timerRef: { current: ReturnType<typeof setInterval> | null },
+  setRecordingDuration: Dispatch<SetStateAction<number>>,
+): void {
+  if (timerRef.current) {
+    clearInterval(timerRef.current)
+  }
+  setRecordingDuration(0)
+  timerRef.current = setInterval(() => {
+    setRecordingDuration((prev) => prev + 1)
+  }, 1000)
 }
 
 /**
@@ -141,13 +201,8 @@ export function useVoiceInput(options: UseVoiceInputOptions = {}): UseVoiceInput
     setState('transcribing')
 
     // 启动录音计时器
-    if (durationTimerRef.current) {
-      clearInterval(durationTimerRef.current)
-    }
+    startDurationTimer(durationTimerRef, setRecordingDuration)
     setRecordingDuration(0)
-    durationTimerRef.current = setInterval(() => {
-      setRecordingDuration((prev) => prev + 1)
-    }, 1000)
 
     try {
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true })
@@ -237,41 +292,16 @@ export function useVoiceInput(options: UseVoiceInputOptions = {}): UseVoiceInput
     }
 
     recognition.onerror = (event: SpeechRecognitionErrorEvent) => {
-      if (isManualStopRef.current) {
-        const stopRelatedErrors = ['aborted', 'no-speech', 'network', 'service-not-allowed']
-        if (stopRelatedErrors.includes(event.error)) {
-          return
-        }
+      if (isManualStopRef.current && STOP_RELATED_ERRORS.includes(event.error)) {
+        return
       }
 
-      let errorMessage = '语音识别失败'
-      let errorType: VoiceInputError['type'] = 'transcription_failed'
-      let shouldFallbackToServer = false
-
-      switch (event.error) {
-        case 'not-allowed':
-        case 'permission-denied':
-          errorMessage = '麦克风权限被拒绝，请在浏览器设置中允许访问麦克风'
-          errorType = 'permission_denied'
-          break
-        case 'no-speech':
-          return
-        case 'audio-capture':
-          errorMessage = '无法捕获音频，请检查麦克风设备'
-          break
-        case 'network':
-          // 浏览器云端语音服务不可达，自动降级到服务端 ASR
-          shouldFallbackToServer = true
-          break
-        case 'aborted':
-          return
-        case 'service-not-allowed':
-          // 语音识别服务不可用，自动降级到服务端 ASR
-          shouldFallbackToServer = true
-          break
+      const decision = decideRecognitionError(event.error)
+      if (decision === 'ignore') {
+        return
       }
 
-      if (shouldFallbackToServer) {
+      if (decision.shouldFallbackToServer) {
         // 停止浏览器识别，切换到服务端 ASR 降级模式
         if (recognitionRef.current) {
           try {
@@ -284,7 +314,7 @@ export function useVoiceInput(options: UseVoiceInputOptions = {}): UseVoiceInput
         return
       }
 
-      handleError(errorType, errorMessage)
+      handleError(decision.errorType, decision.errorMessage)
     }
 
     return recognition
@@ -301,13 +331,7 @@ export function useVoiceInput(options: UseVoiceInputOptions = {}): UseVoiceInput
     isManualStopRef.current = false
 
     // 启动录音计时器（两种模式通用）
-    if (durationTimerRef.current) {
-      clearInterval(durationTimerRef.current)
-    }
-    setRecordingDuration(0)
-    durationTimerRef.current = setInterval(() => {
-      setRecordingDuration((prev) => prev + 1)
-    }, 1000)
+    startDurationTimer(durationTimerRef, setRecordingDuration)
 
     if (supportsAudio) {
       try {

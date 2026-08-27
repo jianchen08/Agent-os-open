@@ -125,20 +125,13 @@ function numericBounds(field: UIInputFormField): { minimum?: number; maximum?: n
  * 未知 type 回退 string；datasourceUri 字段走 asyncSelect widget（去掉枚举约束，
  * 保留 type——RJSF 对无 type 的 property 不渲染 widget；值统一字符串化）。
  */
-export function toRjsf(fields: UIInputFormField[]): {
-  schema: RJSFSchema
-  uiSchema: UiSchema
-} {
-  const properties: Record<string, unknown> = {}
-  const uiSchema: UiSchema = {}
-  const required: string[] = []
+/** 单字段 → RJSF property + widget 声明（类型分派表；未知 type 回退 string） */
+function fieldToRjsfProperty(field: UIInputFormField): { prop: Record<string, unknown>; ui: UiSchema } {
+  const prop: Record<string, unknown> = { title: field.label ?? field.name }
+  if (field.description) prop.description = field.description
+  const ui: UiSchema = {}
 
-  for (const field of fields) {
-    const prop: Record<string, unknown> = { title: field.label ?? field.name }
-    if (field.description) prop.description = field.description
-    const ui: UiSchema = {}
-
-    switch (field.type) {
+  switch (field.type) {
       case 'textarea':
         prop.type = 'string'
         ui['ui:widget'] = 'textarea'
@@ -199,36 +192,54 @@ export function toRjsf(fields: UIInputFormField[]): {
       default:
         prop.type = 'string'
         break
+  }
+
+  // datasourceUri：覆盖为异步下拉。保留 type（RJSF 对无 type 的 property 不渲染
+  // widget）；选项运行期拉取，故去掉枚举约束，值统一字符串化（对齐旧原生 select 语义）
+  if (field.datasourceUri) {
+    delete prop.oneOf
+    delete prop.items
+    if (field.type === 'multiselect' || field.type === 'checkbox') {
+      prop.type = 'array'
+      prop.uniqueItems = true
+    } else {
+      prop.type = 'string'
     }
+    ui['ui:widget'] = 'asyncSelect'
+    ui['ui:options'] = {
+      ...(typeof ui['ui:options'] === 'object' && ui['ui:options'] !== null
+        ? (ui['ui:options'] as Record<string, unknown>)
+        : {}),
+      datasourceUri: field.datasourceUri,
+      // 级联依赖（缺口 G2）：datasourceUri 可含 {{其他字段}} 模板引用（自动推断），
+      // 也可显式声明 dependsOn——依赖字段值变化时本字段选项自动重拉
+      dependsOn: field.dependsOn ?? [],
+      fallbackOptions: field.options ?? [],
+      multiple: field.type === 'multiselect' || field.type === 'checkbox',
+    }
+  }
+
+  if (field.placeholder) ui['ui:placeholder'] = field.placeholder
+  return { prop, ui }
+}
+
+/**
+ * 字段定义数组 → RJSF { schema, uiSchema }
+ *
+ * 未知 type 回退 string；datasourceUri 字段走 asyncSelect widget。
+ */
+export function toRjsf(fields: UIInputFormField[]): {
+  schema: RJSFSchema
+  uiSchema: UiSchema
+} {
+  const properties: Record<string, unknown> = {}
+  const uiSchema: UiSchema = {}
+  const required: string[] = []
+
+  for (const field of fields) {
+    const { prop, ui } = fieldToRjsfProperty(field)
 
     if (field.validation?.pattern) prop.pattern = field.validation.pattern
-
-    // datasourceUri：覆盖为异步下拉。保留 type（RJSF 对无 type 的 property 不渲染
-    // widget）；选项运行期拉取，故去掉枚举约束，值统一字符串化（对齐旧原生 select 语义）
-    if (field.datasourceUri) {
-      delete prop.oneOf
-      delete prop.items
-      if (field.type === 'multiselect' || field.type === 'checkbox') {
-        prop.type = 'array'
-        prop.uniqueItems = true
-      } else {
-        prop.type = 'string'
-      }
-      ui['ui:widget'] = 'asyncSelect'
-      ui['ui:options'] = {
-        ...(typeof ui['ui:options'] === 'object' && ui['ui:options'] !== null
-          ? (ui['ui:options'] as Record<string, unknown>)
-          : {}),
-        datasourceUri: field.datasourceUri,
-        // 级联依赖（缺口 G2）：datasourceUri 可含 {{其他字段}} 模板引用（自动推断），
-        // 也可显式声明 dependsOn——依赖字段值变化时本字段选项自动重拉
-        dependsOn: field.dependsOn ?? [],
-        fallbackOptions: field.options ?? [],
-        multiple: field.type === 'multiselect' || field.type === 'checkbox',
-      }
-    }
-
-    if (field.placeholder) ui['ui:placeholder'] = field.placeholder
     properties[field.name] = prop
     uiSchema[field.name] = ui
     if (field.required) required.push(field.name)

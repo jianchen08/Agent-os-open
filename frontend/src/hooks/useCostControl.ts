@@ -26,17 +26,25 @@ export function useCostControl() {
   const [isLoading, setIsLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
-  /** 获取预算状态 */
-  const fetchBudgetStatus = useCallback(
-    async (params?: { task_id?: string; session_id?: string }) => {
+  /**
+   * 共享取数骨架：loading/error 状态机 + 异常透传。
+   * 五个 fetch 差异点只有 API 调用、结果落点和失败文案——
+   * 统一在此，消费侧各自薄包装（消除复制漂移）。
+   */
+  const run = useCallback(
+    async <T>(
+      fallbackMessage: string,
+      action: () => Promise<T>,
+      apply?: (data: T) => void,
+    ): Promise<T> => {
       setIsLoading(true)
       setError(null)
       try {
-        const status = await getBudgetStatus(params)
-        setBudgetStatus(status)
-        return status
+        const data = await action()
+        apply?.(data)
+        return data
       } catch (err: unknown) {
-        const message = err instanceof Error ? err.message : '获取预算状态失败'
+        const message = err instanceof Error ? err.message : fallbackMessage
         setError(message)
         throw err
       } finally {
@@ -46,95 +54,52 @@ export function useCostControl() {
     [],
   )
 
+  /** 获取预算状态 */
+  const fetchBudgetStatus = useCallback(
+    (params?: { task_id?: string; session_id?: string }) =>
+      run('获取预算状态失败', () => getBudgetStatus(params), setBudgetStatus),
+    [run],
+  )
+
   /** 获取使用统计 */
-  const fetchUsageStatistics = useCallback(async () => {
-    setIsLoading(true)
-    setError(null)
-    try {
-      const stats = await getUsageStatistics()
-      setUsageStats(stats)
-      return stats
-    } catch (err: unknown) {
-      const message = err instanceof Error ? err.message : '获取使用统计失败'
-      setError(message)
-      throw err
-    } finally {
-      setIsLoading(false)
-    }
-  }, [])
+  const fetchUsageStatistics = useCallback(
+    () => run('获取使用统计失败', getUsageStatistics, setUsageStats),
+    [run],
+  )
 
   /** 获取成本配置 */
-  const fetchCostConfig = useCallback(async () => {
-    setIsLoading(true)
-    setError(null)
-    try {
-      const config = await getCostConfig()
-      setCostConfig(config)
-      return config
-    } catch (err: unknown) {
-      const message = err instanceof Error ? err.message : '获取成本配置失败'
-      setError(message)
-      throw err
-    } finally {
-      setIsLoading(false)
-    }
-  }, [])
+  const fetchCostConfig = useCallback(
+    () => run('获取成本配置失败', getCostConfig, setCostConfig),
+    [run],
+  )
 
   /** 获取成本报表 */
   const fetchCostReport = useCallback(
-    async (params?: { period?: 'daily' | 'weekly' | 'monthly' }) => {
-      setIsLoading(true)
-      setError(null)
-      try {
-        const report = await getCostReport(params)
-        setCostReport(report)
-        return report
-      } catch (err: unknown) {
-        const message = err instanceof Error ? err.message : '获取成本报表失败'
-        setError(message)
-        throw err
-      } finally {
-        setIsLoading(false)
-      }
-    },
-    [],
+    (params?: { period?: 'daily' | 'weekly' | 'monthly' }) =>
+      run('获取成本报表失败', () => getCostReport(params), setCostReport),
+    [run],
   )
 
   /** 重置预算 */
   const resetBudgetData = useCallback(
-    async (params?: { task_id?: string; session_id?: string }) => {
-      setIsLoading(true)
-      setError(null)
-      try {
+    async (params?: { task_id?: string; session_id?: string }) =>
+      run('重置预算失败', async () => {
         const result = await resetBudget(params)
         // 重置后刷新预算状态
         await fetchBudgetStatus(params)
         return result
-      } catch (err: unknown) {
-        const message = err instanceof Error ? err.message : '重置预算失败'
-        setError(message)
-        throw err
-      } finally {
-        setIsLoading(false)
-      }
-    },
-    [fetchBudgetStatus],
+      }),
+    [run, fetchBudgetStatus],
   )
 
   /** 刷新所有成本控制数据 */
-  const refreshAll = useCallback(async () => {
-    setIsLoading(true)
-    setError(null)
-    try {
-      await Promise.all([fetchBudgetStatus(), fetchUsageStatistics(), fetchCostConfig()])
-    } catch (err: unknown) {
-      const message = err instanceof Error ? err.message : '刷新数据失败'
-      setError(message)
-      throw err
-    } finally {
-      setIsLoading(false)
-    }
-  }, [fetchBudgetStatus, fetchUsageStatistics, fetchCostConfig])
+  const refreshAll = useCallback(
+    async () =>
+      run('刷新数据失败', async () => {
+        await Promise.all([fetchBudgetStatus(), fetchUsageStatistics(), fetchCostConfig()])
+      }),
+    [run, fetchBudgetStatus, fetchUsageStatistics, fetchCostConfig],
+  )
 
   // 初始化时加载数据
   useEffect(() => {

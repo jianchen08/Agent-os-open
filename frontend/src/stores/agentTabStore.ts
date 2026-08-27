@@ -210,6 +210,53 @@ interface AgentTabState {
   loadTabMessages: (tabId: string, pipelineRunId?: string) => Promise<void>
 }
 
+/** 构建会话主标签（新会话/恢复补建共用，避免字面量复制漂移） */
+function buildMainTab(
+  sessionId: string,
+  mainPipelineId: string | null,
+  mainAgentId: ReturnType<typeof getMainAgentId>,
+): AgentTab {
+  return {
+    id: `main-${sessionId}`,
+    agentId: mainAgentId, agentName: '主Agent', agentLevel: 1,
+    taskId: undefined, parentRecordId: undefined,
+    pipelineRunId: mainPipelineId || undefined,
+    path: ['主Agent'], status: 'running', hasUnread: false,
+    canClose: false, messages: [],
+  }
+}
+
+/**
+ * 由持久化快照构建初始标签面：
+ * - 恢复分支：主管道 pipelineRunId/agentId 以 session 提供的最新值为准；
+ *   不变量——主标签（main-<sessionId>）缺失时补建（否则统一跳转会误判
+ *   新会话而走"新建子标签"路径）。
+ * - 新会话分支：只建主标签。
+ */
+function buildInitialTabs(
+  sessionId: string,
+  saved: { tabs: AgentTab[]; activeTabId: string | null } | null,
+  mainPipelineId: string | null,
+  mainAgentId: ReturnType<typeof getMainAgentId>,
+): { tabs: AgentTab[]; activeTabId: string | null } {
+  if (saved && saved.tabs.length > 0) {
+    // 子 Tab 缺 pipelineRunId 时保持 undefined（不污染）
+    let tabs = saved.tabs.map((tab) => {
+      if (tab.agentLevel === 1) {
+        return { ...tab, pipelineRunId: mainPipelineId || undefined, agentId: mainAgentId }
+      }
+      return tab
+    })
+    if (!tabs.some((t) => t.agentLevel === 1)) {
+      tabs = [buildMainTab(sessionId, mainPipelineId, mainAgentId), ...tabs]
+    }
+    return { tabs, activeTabId: saved.activeTabId || tabs[0].id }
+  }
+
+  const mainTab = buildMainTab(sessionId, mainPipelineId, mainAgentId)
+  return { tabs: [mainTab], activeTabId: mainTab.id }
+}
+
 /** Agent Tab Store */
 export const useAgentTabStore = create<AgentTabState>((set, get) => ({
   tabs: [],
@@ -225,49 +272,7 @@ export const useAgentTabStore = create<AgentTabState>((set, get) => ({
     const mainPipelineId = getMainPipelineId(sessionId)
     const mainAgentId = getMainAgentId(sessionId)
 
-    let tabs: AgentTab[]
-    let activeTabId: string | null
-
-    if (saved && saved.tabs.length > 0) {
-      // 主管道 pipelineRunId 始终用 session 提供的最新 ID（与 fetchMessages 一致）
-      // agentId 同步为 session 的主 agent（消除旧缓存写死的空串）
-      // 子 Tab 缺 pipelineRunId 时保持 undefined（不污染）
-      tabs = saved.tabs.map((tab) => {
-        if (tab.agentLevel === 1) {
-          return { ...tab, pipelineRunId: mainPipelineId || undefined, agentId: mainAgentId }
-        }
-        return tab
-      })
-      // 不变量：主标签（main-${sessionId}）必须存在。持久化恢复的 tab 列表若
-      // 只含子标签、缺失主标签，则在此补建——统一跳转逻辑按主标签定位主管道，
-      // 缺失时会被误判为新会话而走"新建子标签"路径。
-      if (!tabs.some((t) => t.agentLevel === 1)) {
-        tabs = [
-          {
-            id: `main-${sessionId}`,
-            agentId: mainAgentId, agentName: '主Agent', agentLevel: 1,
-            taskId: undefined, parentRecordId: undefined,
-            pipelineRunId: mainPipelineId || undefined,
-            path: ['主Agent'], status: 'running', hasUnread: false,
-            canClose: false, messages: [],
-          },
-          ...tabs,
-        ]
-      }
-      activeTabId = saved.activeTabId || tabs[0].id
-    } else {
-      // 新会话：建主 Tab
-      const mainTab: AgentTab = {
-        id: `main-${sessionId}`,
-        agentId: mainAgentId, agentName: '主Agent', agentLevel: 1,
-        taskId: undefined, parentRecordId: undefined,
-        pipelineRunId: mainPipelineId || undefined,
-        path: ['主Agent'], status: 'running', hasUnread: false,
-        canClose: false, messages: [],
-      }
-      tabs = [mainTab]
-      activeTabId = mainTab.id
-    }
+    const { tabs, activeTabId } = buildInitialTabs(sessionId, saved, mainPipelineId, mainAgentId)
 
     // 从 tabs 重建 pipelineTabMap（保证一致性）
     const newPipelineTabMap: Record<string, string> = {}

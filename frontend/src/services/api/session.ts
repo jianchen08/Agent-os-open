@@ -117,86 +117,92 @@ function validateSessionId(sessionId: string): void {
  * （messageHandler）都经它生成 parts[]——流式收到的消息与刷新后从数据库加载
  * 的数据形态一致，不再有两套 parts 构造逻辑。
  */
-export function mapBackendMessageToMessage(
+/** 工具结果消息（role=tool）映射：结果/结构化 envelope/错误/耗时字段投影 */
+function buildToolResultMessage(
   backendMessage: BackendMessageResponse,
   sessionId: string,
 ): Message {
-  if (backendMessage.role === 'tool') {
+  return {
+    id: backendMessage.id,
+    sessionId: sessionId,
+    sequence: backendMessage.sequence ?? 0,
+    role: 'tool',
+    content: backendMessage.content,
+    timestamp: backendMessage.timestamp,
+    agentId: backendMessage.agentId,
+    status: backendMessage.status || 'completed',
+    toolCallId: backendMessage.toolCallId,
+    toolName: backendMessage.toolName,
+    toolArgs: backendMessage.toolArgs,
+    // tool 消息的结果：后端把执行结果放在 content 里（分层持久化投影），
+    // 旧路径放在 toolResult 字段。这里取 toolResult，为空则用 content 兜底，
+    // 保证 merge 函数能把结果注入 assistant 的 tool_call part（ActivityCard 显示）。
+    toolResult: backendMessage.toolResult ?? backendMessage.content,
+    // 结构化结果 envelope（tool_result_json 投影）：与流式 result_data 同源，
+    // merge 时注入 tool_call part 的 resultData。null 归一为 undefined
+    // （对齐流式 handler 的 ?? 语义，失败工具双侧均为 undefined）。
+    toolResultData: backendMessage.toolResultData ?? undefined,
+    // 后端新字段为 error（tool-role 消息携带 status + error），旧字段为 toolError。
+    // 优先取 error、兼容兜底，mergeConsecutiveAssistantMessages 据 toolError 判定失败。
+    toolError: backendMessage.error ?? backendMessage.toolError,
+    durationMs: backendMessage.toolDurationMs ?? backendMessage.durationMs,
+    containerTaskId: backendMessage.containerTaskId,
+    metadata: backendMessage.metadata,
+  } as Message
+}
+
+/** 持久化 toolCalls 子项归一：兼容 ToolCallItem 与 OpenAI 双格式 → 前端 MessageToolCall */
+function normalizePersistedToolCalls(
+  rawList: Array<Record<string, unknown>>,
+): MessageToolCall[] {
+  return rawList.map((tc: any) => {
+    const fn = tc.function || {}
+    // OpenAI 规范的 arguments 是 JSON 字符串（持久化 rebuild 强制转字符串），
+    // 解析回对象——与流式路径的 args（事件 payload 对象）结构一致。
+    // 解析失败（截断/损坏数据）保留原值降级，不中断整批消息映射。
+    let toolArgs = tc.toolArgs || fn.arguments || {}
+    if (typeof toolArgs === 'string') {
+      try {
+        toolArgs = JSON.parse(toolArgs)
+      } catch {
+        // 非法 JSON：降级保留字符串
+      }
+    }
     return {
-      id: backendMessage.id,
-      sessionId: sessionId,
-      sequence: backendMessage.sequence ?? 0,
-      role: 'tool',
-      content: backendMessage.content,
-      timestamp: backendMessage.timestamp,
-      agentId: backendMessage.agentId,
-      status: backendMessage.status || 'completed',
-      toolCallId: backendMessage.toolCallId,
-      toolName: backendMessage.toolName,
-      toolArgs: backendMessage.toolArgs,
-      // tool 消息的结果：后端把执行结果放在 content 里（分层持久化投影），
-      // 旧路径放在 toolResult 字段。这里取 toolResult，为空则用 content 兜底，
-      // 保证 merge 函数能把结果注入 assistant 的 tool_call part（ActivityCard 显示）。
-      toolResult: backendMessage.toolResult ?? backendMessage.content,
-      // 结构化结果 envelope（tool_result_json 投影）：与流式 result_data 同源，
-      // merge 时注入 tool_call part 的 resultData。null 归一为 undefined
-      // （对齐流式 handler 的 ?? 语义，失败工具双侧均为 undefined）。
-      toolResultData: backendMessage.toolResultData ?? undefined,
-      // 后端新字段为 error（tool-role 消息携带 status + error），旧字段为 toolError。
-      // 优先取 error、兼容兜底，mergeConsecutiveAssistantMessages 据 toolError 判定失败。
-      toolError: backendMessage.error ?? backendMessage.toolError,
-      durationMs: backendMessage.toolDurationMs ?? backendMessage.durationMs,
-      containerTaskId: backendMessage.containerTaskId,
-      metadata: backendMessage.metadata,
-    } as Message
-  }
+      call_id: (tc.callId || tc.id || '') as string,
+      tool_name: (tc.toolName || fn.name || '') as string,
+      tool_args: toolArgs as Record<string, unknown>,
+      status: (tc.status || 'completed') as 'pending' | 'running' | 'completed' | 'failed',
+      result: tc.result,
+      resultData: tc.resultData,
+      error: tc.error as string | undefined,
+      duration_ms: tc.durationMs as number | undefined,
+      containerTaskId: tc.containerTaskId as string | undefined,
+    }
+  })
+}
 
-  let toolCalls: MessageToolCall[] | undefined
-  if (backendMessage.toolCalls && Array.isArray(backendMessage.toolCalls)) {
-    // toolCalls 子项兼容两种格式：
-    // - ToolCallItem 模型（Python 后端 routes_threads）：callId/toolName/toolArgs/...
-    // - OpenAI 格式（分层持久化 tool_calls_json）：id/function.name/function.arguments
-    toolCalls = backendMessage.toolCalls.map((tc: any) => {
-      const fn = tc.function || {}
-      // OpenAI 规范的 arguments 是 JSON 字符串（持久化 rebuild 强制转字符串），
-      // 解析回对象——与流式路径的 args（事件 payload 对象）结构一致。
-      // 解析失败（截断/损坏数据）保留原值降级，不中断整批消息映射。
-      let toolArgs = tc.toolArgs || fn.arguments || {}
-      if (typeof toolArgs === 'string') {
-        try {
-          toolArgs = JSON.parse(toolArgs)
-        } catch {
-          // 非法 JSON：降级保留字符串
-        }
-      }
-      return {
-        call_id: (tc.callId || tc.id || '') as string,
-        tool_name: (tc.toolName || fn.name || '') as string,
-        tool_args: toolArgs as Record<string, unknown>,
-        status: (tc.status || 'completed') as 'pending' | 'running' | 'completed' | 'failed',
-        result: tc.result,
-        resultData: tc.resultData,
-        error: tc.error as string | undefined,
-        duration_ms: tc.durationMs as number | undefined,
-        containerTaskId: tc.containerTaskId as string | undefined,
-      }
-    })
-  }
-
-  // 从 metadata 或顶层 reasoning_content 恢复思考内容。
-  // 后端分层持久化把 reasoning_content 作为顶层字段返回（assistant 消息的思考过程）；
-  // 兼容旧路径 metadata.thinkingContent。
-  let thinking: Message['thinking'] = undefined
-  const metadata = backendMessage.metadata
+/** 思考内容恢复：顶层 reasoning_content 优先，兼容旧 metadata.thinkingContent */
+function deriveThinking(backendMessage: BackendMessageResponse): Message['thinking'] {
   const reasoningContent = backendMessage.reasoningContent
   const thinkingStr =
-    reasoningContent || (metadata?.thinkingContent as string | undefined)
+    reasoningContent ||
+    ((backendMessage.metadata?.thinkingContent ?? undefined) as string | undefined)
   if (thinkingStr && typeof thinkingStr === 'string' && thinkingStr.length > 0) {
-    thinking = {
-      content: thinkingStr,
-      isThinking: false,
-    }
+    return { content: thinkingStr, isThinking: false }
   }
+  return undefined
+}
+
+/** 组装非 tool 消息的 parts[]（思考 → 正文/system → tool_call，sequence 递增） */
+function assembleNonToolParts(params: {
+  backendMessage: BackendMessageResponse
+  isSystemMsg: boolean
+  thinking: Message['thinking']
+  toolCalls?: MessageToolCall[]
+}): MessagePart[] {
+  const { backendMessage, isSystemMsg, thinking, toolCalls } = params
+  const metadata = backendMessage.metadata
 
   const parts: MessagePart[] = []
   let seq = 0
@@ -209,8 +215,6 @@ export function mapBackendMessageToMessage(
       sequence: seq++,
     })
   }
-
-  const isSystemMsg = checkIsSystemMessage(backendMessage.role, metadata)
 
   if (backendMessage.content?.trim()) {
     if (isSystemMsg) {
@@ -255,6 +259,35 @@ export function mapBackendMessageToMessage(
       })
     }
   }
+
+  return parts
+}
+
+/**
+ * 后端消息 → 前端 Message 共享映射。
+ *
+ * 冷热路径同构的唯一入口：DB 历史加载（getMessages）与 new_message 流式事件
+ * （messageHandler）都经它生成 parts[]——流式收到的消息与刷新后从数据库加载
+ * 的数据形态一致，不再有两套 parts 构造逻辑。
+ *
+ * 按 role 分派：tool 结果消息走独立投影；其余消息组装通用 parts[]。
+ */
+export function mapBackendMessageToMessage(
+  backendMessage: BackendMessageResponse,
+  sessionId: string,
+): Message {
+  if (backendMessage.role === 'tool') {
+    return buildToolResultMessage(backendMessage, sessionId)
+  }
+
+  const toolCalls =
+    backendMessage.toolCalls && Array.isArray(backendMessage.toolCalls)
+      ? normalizePersistedToolCalls(backendMessage.toolCalls)
+      : undefined
+  const thinking = deriveThinking(backendMessage)
+  const metadata = backendMessage.metadata
+  const isSystemMsg = checkIsSystemMessage(backendMessage.role, metadata)
+  const parts = assembleNonToolParts({ backendMessage, isSystemMsg, thinking, toolCalls })
 
   const effectiveRole = isSystemMsg ? 'system' : backendMessage.role as Message['role']
 
