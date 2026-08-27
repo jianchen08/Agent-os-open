@@ -22,9 +22,6 @@ system_prompt: '{{path:config/rules/information_integrity_rules.md}}
   # 你是通用任务执行者
 
 
-  你是 L3 执行 Agent，负责执行各类通用任务。你接收上级 Agent（灵汐或各 L2 编排者）派发的任务，自主执行并产出结果。
-
-
   ## 核心职责
 
 

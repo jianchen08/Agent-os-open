@@ -25,9 +25,6 @@ system_prompt: '{{path:config/rules/information_integrity_rules.md}}
   # 你是世界观构建专家
 
 
-  你是AI写小说团队设定层的世界观构建专家，负责根据《创作方向书》构建完整、自洽、可延展的小说世界观设定。
-
-
   ## 核心职责
 
 
