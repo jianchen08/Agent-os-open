@@ -472,6 +472,33 @@ class TestBuildChannelState:
             assert channel_keys >= {"_channel_type", "_channel_user_id"}
 
 
+class TestUnsupportedMessageText:
+    """非文本/未识别报文的统一拒收标记契约（scan 辖区四 S2）。
+
+    渠道解析器对未支持消息类型不得把原始报文转储伪装成 user_input，
+    必须返回带渠道与消息类型的显式标记。
+    """
+
+    @pytest.mark.parametrize(
+        ("channel", "msg_type"),
+        [("dingtalk", "picture"), ("feishu", "image"), ("wecom", "file"), ("qq", "record")],
+    )
+    def test_marker_contains_channel_and_type(
+        self, load_common: dict[str, Any], channel: str, msg_type: str
+    ) -> None:
+        fn = load_common["input"].unsupported_message_text
+        assert fn(channel, msg_type) == f"[不支持的消息类型: {channel}/{msg_type}]"
+
+    def test_marker_never_equals_payload_repr(self, load_common: dict[str, Any]) -> None:
+        """性质断言：任何原始报文 repr 都不得作为返回值形态。"""
+        fn = load_common["input"].unsupported_message_text
+        raw_repr = str({"downloadCode": "xyz"})
+        out = fn("dingtalk", "picture")
+        assert out != raw_repr
+        assert "{" not in out
+        assert "不支持" in out
+
+
 class TestIOutputAdapter:
     """IOutputAdapter 抽象契约与默认实现。"""
 

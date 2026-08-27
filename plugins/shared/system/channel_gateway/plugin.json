@@ -7,13 +7,7 @@
   "host_type": "sidecar",
   "entry": "python server.py",
   "capabilities": {
-    "tools": [],
-    "route_signals": [],
-    "lifecycle_hooks": [
-      "on_load",
-      "on_unload"
-    ],
-    "services": [
+    "tools": [
       {
         "name": "gateway.handle_message",
         "description": "Handle incoming message from any registered channel, normalize and route to pipeline",
@@ -76,7 +70,13 @@
           "type": "object"
         }
       }
-    ]
+    ],
+    "route_signals": [],
+    "lifecycle_hooks": [
+      "on_load",
+      "on_unload"
+    ],
+    "services": []
   },
   "permissions": {},
   "priority": 50,

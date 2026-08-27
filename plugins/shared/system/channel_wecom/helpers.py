@@ -6,6 +6,8 @@ import logging
 import xml.etree.ElementTree as ET
 from typing import Any
 
+from input_adapter import unsupported_message_text
+
 logger = logging.getLogger(__name__)
 
 
@@ -77,5 +79,6 @@ def _extract_wecom_text(  # noqa: PLR0911
         return f"[位置] {label}" if label else "[位置]"
     if msg_type == "link":
         return raw.get("Description", content)
-    # 其他类型降级
-    return content or str(raw)
+    # 未枚举类型没有可信文本来源：返回显式拒收标记，
+    # 不把 Content 残值或原始报文转储当 user_input
+    return unsupported_message_text("wecom", msg_type)

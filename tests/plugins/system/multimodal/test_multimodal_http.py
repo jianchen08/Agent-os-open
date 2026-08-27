@@ -114,6 +114,7 @@ class _FakeCap:
 
     def __init__(self, model_name: str) -> None:
         self.model_name = model_name
+        self.degraded = False
         self.supports_image = True
         self.supports_audio = False
         self.supports_video = True
@@ -133,6 +134,7 @@ def test_files_capabilities_default_model(server: Any, monkeypatch: pytest.Monke
 
     assert status == 200
     assert body["model_name"] == "default"
+    assert body["degraded"] is False
     assert body["supports_image"] is True
     assert body["supports_audio"] is False
     assert body["supports_video"] is True

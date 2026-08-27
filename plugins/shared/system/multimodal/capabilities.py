@@ -9,6 +9,8 @@
 - ModelCapabilityRegistry：注册表类
 """
 
+import logging
+
 from adapter import (
     ClaudeVisionAdapter,
     DefaultAdapter,
@@ -16,6 +18,8 @@ from adapter import (
     OpenAIVisionAdapter,
 )
 from mm_types import ModelCapability
+
+logger = logging.getLogger(__name__)
 
 
 class ModelCapabilityRegistry:
@@ -60,21 +64,23 @@ class ModelCapabilityRegistry:
     def get_capability(cls, model_name: str) -> ModelCapability:
         """获取模型能力。
 
-        从 llm.yaml 的 multimodal 配置读取；未配置则返回默认空能力。
+        从 llm.yaml 的 multimodal 配置读取；未配置则返回默认空能力；
+        配置源（llm_config）不可导入时按默认空能力降级——记 WARNING 并
+        置 degraded=True，调用方可区分"未配置"与"配置断链"。
 
         Args:
             model_name: 模型 alias（如 glm-5.2）或底层 model_name（如 GLM-5.2）
 
         Returns:
-            ModelCapability 实例（未配置时返回全 False 的默认能力）
+            ModelCapability 实例（降级时 degraded=True）
         """
         try:
             from llm_config import get_llm_config  # noqa: PLC0415
         except ImportError:
-            get_llm_config = None  # type: ignore[assignment]
-
-        if get_llm_config is None:
-            return ModelCapability(model_name=model_name)
+            logger.warning(
+                "llm_config 不可导入，多模态能力按默认空能力降级(degraded=True)：model=%s", model_name
+            )
+            return ModelCapability(model_name=model_name, degraded=True)
 
         mgr = get_llm_config()
         model = mgr.find_model_by_name_or_alias(model_name)
@@ -104,13 +110,21 @@ class ModelCapabilityRegistry:
 
     @classmethod
     def get_adapter_for_model(cls, model_name: str) -> MultimodalAdapter:
-        """根据模型名称获取适配器（provider 从 llm.yaml 配置推断）"""
+        """根据模型名称获取适配器（provider 从 llm.yaml 配置推断）。
+
+        router_factory 不可导入时按 default 降级——记 WARNING；DefaultAdapter
+        本身携带 degraded=True（附件会被丢弃），调用方可感知。
+        """
         try:
             from router_factory import get_provider_for_model  # noqa: PLC0415
         except ImportError:
-            get_provider_for_model = None  # type: ignore[assignment]
-
-        provider = (get_provider_for_model(model_name) if get_provider_for_model else None) or "default"
+            logger.warning(
+                "router_factory 不可导入，无法解析 provider，附件将走 DefaultAdapter 丢弃：model=%s",
+                model_name,
+            )
+            provider = "default"
+        else:
+            provider = get_provider_for_model(model_name) or "default"
         return cls.get_adapter(provider)
 
     @classmethod

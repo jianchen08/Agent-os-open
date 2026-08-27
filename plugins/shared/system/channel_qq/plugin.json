@@ -10,13 +10,7 @@
     "idle_timeout_secs": 0
   },
   "capabilities": {
-    "tools": [],
-    "route_signals": [],
-    "lifecycle_hooks": [
-      "on_load",
-      "on_unload"
-    ],
-    "services": [
+    "tools": [
       {
         "name": "qq.send_message",
         "description": "Send a message to a QQ user or group via OneBot HTTP API",
@@ -58,7 +52,13 @@
           "type": "object"
         }
       }
-    ]
+    ],
+    "route_signals": [],
+    "lifecycle_hooks": [
+      "on_load",
+      "on_unload"
+    ],
+    "services": []
   },
   "permissions": {},
   "priority": 50,

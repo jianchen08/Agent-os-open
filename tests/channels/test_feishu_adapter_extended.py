@@ -41,8 +41,27 @@ class TestExtractText:
     def test_text_type_missing_key_returns_empty(self) -> None:
         assert _extract_text("text", '{"title": "x"}') == ""
 
-    def test_other_type_missing_key_returns_raw_content(self) -> None:
-        assert _extract_text("image", '{"image_key": "k"}') == '{"image_key": "k"}'
+    def test_other_type_missing_key_returns_typed_marker(self) -> None:
+        """非文本类型缺 text 键 → 显式拒收标记（不回退原始 JSON 串）。"""
+        out = _extract_text("image", '{"image_key": "k"}')
+        assert out == "[不支持的消息类型: feishu/image]"
+        assert "{" not in out
+
+    @pytest.mark.parametrize(
+        ("msg_type", "content"),
+        [
+            ("post", '{"title": "t", "content": [[{"tag": "text", "text": "b"}]]}'),
+            ("share_chat", '{"chat_id": "oc_x"}'),
+            ("audio", '{"file_key": "fk", "duration": 100}'),
+        ],
+    )
+    def test_nontext_types_without_text_key_get_marker(self, msg_type: str, content: str) -> None:
+        """≥3 组区分输入：所有无 text 键的非文本类型统一标记。"""
+        assert _extract_text(msg_type, content) == f"[不支持的消息类型: feishu/{msg_type}]"
+
+    def test_nontext_type_with_text_key_still_uses_text(self) -> None:
+        """post 等类型报文带 text 键时仍取原文（既有行为保留）。"""
+        assert _extract_text("post", '{"text": "post body"}') == "post body"
 
 
 class TestRawToStateFallbacks:

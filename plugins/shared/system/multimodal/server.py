@@ -106,7 +106,7 @@ async def multimodal_convert(
                 url=att.get("url"),
             ))
     messages = adapter.convert(content, att_list)
-    return {"messages": messages, "count": len(messages)}
+    return {"messages": messages, "count": len(messages), "degraded": adapter.degraded}
 
 
 @plugin.tool(
@@ -125,6 +125,7 @@ async def multimodal_capability(model_name: str) -> dict[str, Any]:
     capability = ModelCapabilityRegistry.get_capability(model_name)
     return {
         "model_name": capability.model_name,
+        "degraded": capability.degraded,
         "supports_image": capability.supports_image,
         "supports_audio": capability.supports_audio,
         "supports_video": capability.supports_video,
@@ -192,6 +193,7 @@ def _files_capabilities_payload(model_name: str) -> dict[str, Any]:
     cap = ModelCapabilityRegistry.get_capability(model_name)
     return {
         "model_name": model_name,
+        "degraded": cap.degraded,
         "supports_image": cap.supports_image,
         "supports_audio": cap.supports_audio,
         "supports_video": cap.supports_video,

@@ -10,13 +10,7 @@
     "idle_timeout_secs": 0
   },
   "capabilities": {
-    "tools": [],
-    "route_signals": [],
-    "lifecycle_hooks": [
-      "on_load",
-      "on_unload"
-    ],
-    "services": [
+    "tools": [
       {
         "name": "wecom.send_message",
         "description": "Send a text message to a WeCom user via HTTP API",
@@ -85,7 +79,13 @@
           "type": "object"
         }
       }
-    ]
+    ],
+    "route_signals": [],
+    "lifecycle_hooks": [
+      "on_load",
+      "on_unload"
+    ],
+    "services": []
   },
   "permissions": {},
   "priority": 50,

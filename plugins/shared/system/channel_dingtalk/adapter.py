@@ -18,7 +18,7 @@ import uuid
 from typing import Any
 
 from base_combo_adapter import BaseComboAdapter
-from input_adapter import QueuedChannelInputAdapter, build_channel_state
+from input_adapter import QueuedChannelInputAdapter, build_channel_state, unsupported_message_text
 from output_adapter import BufferedChannelOutputAdapter
 from stream_client import DingTalkStreamClient
 
@@ -150,5 +150,6 @@ def _extract_dingtalk_text(msg_type: str, raw: dict[str, Any]) -> str:
         return raw.get("text", {}).get("content", "")
     if msg_type == "richText":
         return raw.get("richText", {}).get("content", "")
-    # 其他类型降级
-    return str(raw.get(msg_type, ""))
+    # 其余类型（picture/audio/video/file/markdown 等）没有可提取的纯文本：
+    # 返回显式拒收标记，不把原始报文转储当 user_input
+    return unsupported_message_text("dingtalk", msg_type)

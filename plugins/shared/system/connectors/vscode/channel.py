@@ -9,6 +9,7 @@ VSCode 消息通道
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import urllib.error
@@ -61,6 +62,9 @@ class VSCodeChannel:
     async def send_request(self, endpoint: str, data: dict[str, Any]) -> dict[str, Any]:
         """发送 HTTP 请求到 VSCode 扩展。
 
+        阻塞 IO（urlopen）经线程池执行——事件循环在整个请求窗口内保持
+        可调度，客户端 timeout 对线程内请求仍然生效。
+
         Args:
             endpoint: API 端点路径
             data: 请求数据
@@ -83,10 +87,9 @@ class VSCodeChannel:
         )
 
         try:
-            with urllib.request.urlopen(req, timeout=self.timeout) as resp:
-                response_data = json.loads(resp.read().decode("utf-8"))
-                self._logger.debug(f"请求成功: {endpoint}")
-                return response_data
+            response_data = await asyncio.to_thread(self._post, req)
+            self._logger.debug(f"请求成功: {endpoint}")
+            return response_data
         except urllib.error.URLError as e:
             self._logger.error(f"请求失败: {endpoint}, 错误: {e}")
             msg = f"VSCode 扩展连接失败 ({url}): {e}"
@@ -96,20 +99,26 @@ class VSCodeChannel:
             msg = f"VSCode 扩展请求超时 ({url})"
             raise TimeoutError(msg) from e
 
+    def _post(self, req: urllib.request.Request) -> dict[str, Any]:
+        """执行阻塞 POST 并解析 JSON 响应（在线程池中运行）。"""
+        with urllib.request.urlopen(req, timeout=self.timeout) as resp:
+            return json.loads(resp.read().decode("utf-8"))
+
     async def listen_for_context(self) -> ConnectorContext:
         """监听并获取 VSCode 当前上下文。
 
-        通过轮询 /context 端点获取 VSCode 当前状态。
+        内部链路只传播错误：获取失败（连接断/超时）上抛给调用方，
+        不伪造空上下文——"无上下文"与"获取失败"必须可区分。
 
         Returns:
             VSCode 当前上下文
+
+        Raises:
+            ConnectionError: VSCode 扩展连接失败
+            TimeoutError: 请求超时
         """
-        try:
-            response = await self.send_request("/context", {})
-            return self._parse_context(response)
-        except (ConnectionError, TimeoutError):
-            self._logger.warning("获取上下文失败，返回空上下文")
-            return ConnectorContext()
+        response = await self.send_request("/context", {})
+        return self._parse_context(response)
 
     def _parse_context(self, data: dict[str, Any]) -> ConnectorContext:
         """解析上下文数据。

@@ -10,13 +10,7 @@
     "idle_timeout_secs": 0
   },
   "capabilities": {
-    "tools": [],
-    "route_signals": [],
-    "lifecycle_hooks": [
-      "on_load",
-      "on_unload"
-    ],
-    "services": [
+    "tools": [
       {
         "name": "feishu.send_message",
         "description": "Send a text message to a Feishu user via API",
@@ -75,7 +69,13 @@
           "type": "object"
         }
       }
-    ]
+    ],
+    "route_signals": [],
+    "lifecycle_hooks": [
+      "on_load",
+      "on_unload"
+    ],
+    "services": []
   },
   "permissions": {},
   "priority": 50,

@@ -98,6 +98,10 @@ class ModelCapability(BaseModel):
     """
 
     model_name: str = Field(..., description="模型名称")
+    degraded: bool = Field(
+        default=False,
+        description="能力数据是否因配置源缺失而按默认值降级；True 时字段值不可作为多模态路由依据",
+    )
     supports_image: bool = Field(default=False, description="是否支持图片")
     supports_audio: bool = Field(default=False, description="是否支持音频")
     supports_video: bool = Field(default=False, description="是否支持视频")

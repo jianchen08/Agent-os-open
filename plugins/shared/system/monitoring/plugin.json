@@ -10,13 +10,7 @@
     "idle_timeout_secs": 0
   },
   "capabilities": {
-    "tools": [],
-    "route_signals": [],
-    "lifecycle_hooks": [
-      "on_load",
-      "on_unload"
-    ],
-    "services": [
+    "tools": [
       {
         "name": "monitoring.get_metrics",
         "description": "Get current system performance metrics (CPU, memory, disk, network, LLM, tools, tasks)",
@@ -109,7 +103,13 @@
           "type": "object"
         }
       }
-    ]
+    ],
+    "route_signals": [],
+    "lifecycle_hooks": [
+      "on_load",
+      "on_unload"
+    ],
+    "services": []
   },
   "permissions": {},
   "priority": 40,

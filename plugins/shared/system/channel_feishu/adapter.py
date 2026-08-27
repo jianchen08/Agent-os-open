@@ -19,7 +19,7 @@ import uuid
 from typing import Any
 
 from base_combo_adapter import BaseComboAdapter
-from input_adapter import QueuedChannelInputAdapter, build_channel_state
+from input_adapter import QueuedChannelInputAdapter, build_channel_state, unsupported_message_text
 from output_adapter import BufferedChannelOutputAdapter
 from stream_client import FeishuStreamClient
 
@@ -156,4 +156,9 @@ def _extract_text(msg_type: str, content_str: str) -> str:
 
     if msg_type == "text":
         return parsed.get("text", "")
-    return parsed.get("text", content_str)
+    text = parsed.get("text")
+    if isinstance(text, str) and text.strip():
+        return text
+    # 非文本类型（image/post/share_chat 等）无可用纯文本：
+    # 返回显式拒收标记，不把 content JSON 串当 user_input
+    return unsupported_message_text("feishu", msg_type)

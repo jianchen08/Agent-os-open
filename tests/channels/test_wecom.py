@@ -207,9 +207,27 @@ class TestWeComHelpers:
         assert _extract_wecom_text("location", "", {}) == "[位置]"
         assert _extract_wecom_text("link", "desc", {"Description": "描述"}) == "描述"
         assert _extract_wecom_text("link", "desc", {}) == "desc"
-        # 未知类型 → 内容或整个消息兜底
-        assert _extract_wecom_text("unknown", "x", {}) == "x"
-        assert _extract_wecom_text("unknown", "", {"k": "v"}) == str({"k": "v"})
+        # 未知类型 → 显式拒收标记（不把内容/原始报文转储当 user_input）
+        marker = _extract_wecom_text("unknown_type", "", {"k": "v"})
+        assert marker == "[不支持的消息类型: wecom/unknown_type]"
+        assert "{" not in marker
+
+
+class TestNonTextFallbackMarker:
+    """非文本/未识别报文的类型标记契约（scan 辖区四 S2）。"""
+
+    def test_unknown_type_marker_independent_of_payload(self) -> None:
+        """带不带 Content、raw 是否为空，未知类型都只产出标记。"""
+        for content, raw in (("x", {}), ("", {"k": "v"}), ("x", {"MsgType": "magic"})):
+            out = _extract_wecom_text("unknown_type", content, raw)
+            assert out == "[不支持的消息类型: wecom/unknown_type]"
+
+    def test_enumerated_types_keep_bracket_labels(self) -> None:
+        """既有 [图片]/[语音]/[视频]/[位置] 标记语义不变（仅 unknown 收口）。"""
+        assert _extract_wecom_text("image", "", {}) == "[图片]"
+        assert _extract_wecom_text("voice", "", {}) == "[语音]"
+        assert _extract_wecom_text("video", "", {}) == "[视频]"
+        assert _extract_wecom_text("location", "", {}) == "[位置]"
 
 
 # ═══════════════════════════════════════════════════════════

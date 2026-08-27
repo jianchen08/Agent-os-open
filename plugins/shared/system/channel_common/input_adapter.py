@@ -1,10 +1,10 @@
 """输入适配器基类模块（channel_common 渠道共享包）。
 
-单一事实源：channel_{cli,dingtalk,feishu,qq,wecom}/input_adapter.py 的
-一致拷贝收敛为本文件。
-消费方经 server.py 把本目录 sys.path.**append** 注入（绝不 insert(0)——模块名
-抢占事故纪律，见 docs/working/渠道合流C1C2与CLI插件化方案_20260819.md §三）。
-防复发守卫：scripts/check_channel_copy_guard.py 禁止本模块名重回 channel_* 目录。
+单一事实源：四渠道的输入适配器公共实现只在本文维护，各渠道插件目录不得再放
+同名 input_adapter.py（scripts/check_channel_copy_guard.py 守卫复制回潮）。
+路径注入契约：本目录由各渠道 server.py 以 sys.path.append 引入、绝不 insert(0)——
+本目录模块名是通用名，insert(0) 会遮蔽其他目录的同名模块，
+谁在前谁生效。完整背景见 docs/working/渠道合流C1C2与CLI插件化方案_20260819.md §三。
 
 定义所有输入适配器的抽象接口，负责从外部系统接收请求
 并转换为管道可处理的初始 state。
@@ -130,6 +130,23 @@ def build_channel_state(
         **extra,
         "_raw_message": raw_message,
     }
+
+
+def unsupported_message_text(channel_type: str, msg_type: str) -> str:
+    """未支持/未识别消息类型的统一拒收标记。
+
+    非文本报文不得转储成字符串伪装成 user_input 喂给下游——
+    返回带渠道与消息类型的显式标记，让调用方与用户能识别
+    "这条消息未被解析"而非当作真实输入。
+
+    Args:
+        channel_type: 渠道标识（dingtalk/feishu/wecom 等）
+        msg_type: 原始消息类型字段值
+
+    Returns:
+        形如 "[不支持的消息类型: dingtalk/picture]" 的标记串
+    """
+    return f"[不支持的消息类型: {channel_type}/{msg_type}]"
 
 
 class QueuedChannelInputAdapter(IInputAdapter):

@@ -1,19 +1,16 @@
 """
 多模态模型适配器
 
+适配器契约：convert() 把文本 + 附件转成各提供商的消息块格式；
+get_capability() 报告该适配器面向的模型能力。经 DefaultAdapter
+转换的附件会被全部丢弃——它恒以 degraded=True 标记，调用方据此感知
+附件未随消息送达。
+
 暴露接口：
-- convert(self, content: str, attachments: list[AttachmentInfo]) -> list[dict]：convert功能
-- get_capability(self) -> ModelCapability：get_capability功能
-- convert(self, content: str, attachments: list[AttachmentInfo]) -> list[dict]：convert功能
-- get_capability(self) -> ModelCapability：get_capability功能
-- convert(self, content: str, attachments: list[AttachmentInfo]) -> list[dict]：convert功能
-- get_capability(self) -> ModelCapability：get_capability功能
-- convert(self, content: str, attachments: list[AttachmentInfo]) -> list[dict]：convert功能
-- get_capability(self) -> ModelCapability：get_capability功能
-- MultimodalAdapter：MultimodalAdapter类
-- OpenAIVisionAdapter：OpenAIVisionAdapter类
-- ClaudeVisionAdapter：ClaudeVisionAdapter类
-- DefaultAdapter：DefaultAdapter类
+- MultimodalAdapter：多模态适配器抽象基类
+- OpenAIVisionAdapter：OpenAI Vision 格式适配器
+- ClaudeVisionAdapter：Anthropic Claude Vision 格式适配器
+- DefaultAdapter：纯文本降级适配器（丢弃附件，degraded=True）
 """
 
 from abc import ABC, abstractmethod
@@ -30,7 +27,13 @@ class MultimodalAdapter(ABC):
     子类需要实现:
         - convert(): 将内容和附件转换为模型特定格式
         - get_capability(): 返回模型的多模态能力
+
+    Attributes:
+        degraded: True 表示该适配器会丢弃附件（降级面），调用方必须可感知。
     """
+
+    #: 子类置 True 表示附件将被丢弃（见 DefaultAdapter）
+    degraded: bool = False
 
     @abstractmethod
     def convert(self, content: str, attachments: list[AttachmentInfo]) -> list[dict]:
@@ -152,11 +155,16 @@ class DefaultAdapter(MultimodalAdapter):
 
     用于不支持多模态的模型，仅返回文本内容，忽略所有附件。
 
+    附件丢弃必须可感知：本适配器 degraded 恒为 True，
+    经 get_adapter()/get_adapter_for_model() 取得的实例携带该标记。
+
     适用场景:
         - 纯文本模型（如 deepseek-chat、gpt-3.5-turbo）
         - 不支持多模态的模型
         - 未知模型的降级处理
     """
+
+    degraded = True
 
     def convert(self, content: str, attachments: list[AttachmentInfo]) -> list[dict]:
         """转换为纯文本格式"""

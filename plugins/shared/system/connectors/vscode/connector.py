@@ -132,20 +132,23 @@ class VSCodeConnector(BaseConnector, ConfigSubscriberMixin):
     async def get_context(self) -> ConnectorContext:
         """获取 VSCode 当前上下文。
 
+        成功时置 ACTIVE 状态；获取失败（连接断/超时）原样上抛——
+        是否降级由调用方（工具面）决定并标记，连接器层不伪造空上下文。
+
         Returns:
             包含活动文件、选中文本、光标位置等的上下文对象
+
+        Raises:
+            ConnectionError: VSCode 扩展连接失败
+            TimeoutError: 获取上下文请求超时
         """
         if not self.is_connected:
             self._logger.warning("连接器未连接，返回空上下文")
             return ConnectorContext()
 
-        try:
-            context = await self._channel.listen_for_context()
-            self._set_state(ConnectorState.ACTIVE)
-            return context
-        except Exception as e:
-            self._logger.error(f"获取上下文失败: {e}")
-            return ConnectorContext()
+        context = await self._channel.listen_for_context()
+        self._set_state(ConnectorState.ACTIVE)
+        return context
 
     async def execute_action(self, action: ConnectorAction) -> ActionResult:
         """向 VSCode 发送操作指令。

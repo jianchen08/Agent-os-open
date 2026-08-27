@@ -517,8 +517,9 @@ class TestExtractDingtalkText:
     def test_variants(self) -> None:
         assert _extract_dingtalk_text("text", {"text": {"content": "hi"}}) == "hi"
         assert _extract_dingtalk_text("richText", {"richText": {"content": "rich"}}) == "rich"
-        assert _extract_dingtalk_text("other", {"other": "x"}) == "x"
-        assert _extract_dingtalk_text("other", {}) == ""
+        # 未识别类型 → 显式拒收标记（不再把报文值当文本透传）
+        assert _extract_dingtalk_text("other", {"other": "x"}) == "[不支持的消息类型: dingtalk/other]"
+        assert _extract_dingtalk_text("other", {}) == "[不支持的消息类型: dingtalk/other]"
 
 
 class TestDingTalkStreamLoop:
@@ -732,3 +733,21 @@ class TestDingTalkConnectPath:
         client = self._client()
         client._ws = None
         await client._receive_loop()  # 直接返回
+
+
+class TestNonTextFallbackMarker:
+    """非文本/未识别报文不得转储为 user_input（scan 辖区四 S2）。"""
+
+    def test_unknown_type_returns_typed_marker(self) -> None:
+        out = _extract_dingtalk_text("picture", {"picture": {"downloadCode": "x"}})
+        assert out == "[不支持的消息类型: dingtalk/picture]"
+
+    def test_text_and_rich_text_unchanged(self) -> None:
+        assert _extract_dingtalk_text("text", {"text": {"content": "hi"}}) == "hi"
+        assert _extract_dingtalk_text("richText", {"richText": {"content": "rich"}}) == "rich"
+
+    def test_missing_payload_no_repr_leak(self) -> None:
+        out = _extract_dingtalk_text("audio", {})
+        assert out.startswith("[")
+        assert "{" not in out
+        assert "None" not in out
