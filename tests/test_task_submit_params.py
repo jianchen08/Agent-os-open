@@ -477,6 +477,27 @@ async def test_ordinary_task_registers_owned_to_owner_pipeline(tool_module):
     assert reg["state"][f"task.owned.{full_pid}.status"] == "running"
 
 
+@pytest.mark.asyncio
+async def test_dispatch_failure_returns_failure_envelope(tool_module):
+    """派发失败（管道未创建）= 核心流程失败：失败信封（DISPATCH_FAILED），不以 success 掩盖。"""
+    service = FakeTaskService()
+    tool, captured = make_tool(tool_module, service)
+
+    async def failing_sender(params: dict) -> dict:
+        if params.get("no_dispatch"):
+            return {"status": "recorded", "pipeline_id": params.get("pipeline_id", "")}
+        return {"status": "error", "message": "engine unavailable"}
+
+    tool_module.set_chat_sender(failing_sender)
+    result = await tool.execute(base_inputs(parent_agent_level=1))
+    assert not result.success
+    assert result.error_code == "DISPATCH_FAILED"
+    # 失败可见：错误文案含原因与重试指引，不出现「已提交」成功语
+    assert "执行管道未能创建" in result.error
+    assert "重试" in result.error
+    assert "已提交" not in result.error
+
+
 # ── schema ─────────────────────────────────────────────────────
 
 

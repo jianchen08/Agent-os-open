@@ -1277,26 +1277,28 @@ class TaskSubmitTool(BuiltinTool):
                 "子任务完成后系统会自动通知你并恢复执行。"
                 "在此期间请不要再调用任何工具（包括 task_manage），直接输出纯文本等待即可。"
             )
-        else:
-            result_data = {
-                "task_id": "",
-                "title": goal["title"],
-                "status": "submitted",
-                "target_id": target_id,
-                "message": (
-                    f"任务 [{goal['title']}] 已校验并提交，但执行管道未能创建"
-                    f"（{dispatch.get('warning', '未知原因')}）。"
-                    "任务当前不会自动执行；可稍后重试提交。"
-                ),
-                "warning": dispatch.get("warning", "执行管道未创建"),
-            }
-        # 工作空间路径仅对 L1 返回（L2/L3 的 workspace 参数本身被隐藏，回显内部路径属信息泄漏）；
-        # 统一后无 YAML ws_meta（空间初始化归执行管道 workspace_lifecycle），仅回显提交参数。
-        if parent_agent_level == 1:
-            result_data["workspace"] = workspace or ""
+            # 工作空间路径仅对 L1 返回（L2/L3 的 workspace 参数本身被隐藏，回显内部路径属信息泄漏）；
+            # 统一后无 YAML ws_meta（空间初始化归执行管道 workspace_lifecycle），仅回显提交参数。
+            if parent_agent_level == 1:
+                result_data["workspace"] = workspace or ""
 
-        return create_success_result(
-            data=result_data,
+            return create_success_result(
+                data=result_data,
+                metadata={
+                    "action": "task_submit",
+                    "task_scope": task_scope,
+                },
+            )
+
+        # 派发失败（管道未创建）= 核心流程失败：任务不存在，失败信封让调用方
+        # 感知并可重试，不得以 success 掩盖。
+        return create_failure_result(
+            error=(
+                f"任务 [{goal['title']}] 已校验，但执行管道未能创建"
+                f"（{dispatch.get('warning', '未知原因')}）。"
+                "任务当前不会自动执行；可稍后重试提交。"
+            ),
+            error_code="DISPATCH_FAILED",
             metadata={
                 "action": "task_submit",
                 "task_scope": task_scope,

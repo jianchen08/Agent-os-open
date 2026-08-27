@@ -33,7 +33,7 @@ from scene.models import (  # noqa: E402
     SceneUpdateRequest,
     SceneWidgetConfig,
 )
-from scene.persistence import ScenePersistence  # noqa: E402
+from scene.persistence import ScenePersistence, SceneStorageError  # noqa: E402
 from scene.templates import PRESET_TEMPLATES, get_template, list_templates
 
 # ============================================================
@@ -460,6 +460,37 @@ class TestScenePersistence:
     def test_get_nonexistent_scene(self, persistence: ScenePersistence) -> None:
         """获取不存在的场景返回 None。"""
         assert persistence.get_scene("nonexistent") is None
+
+    def test_corrupted_file_save_fails_closed(
+        self, persistence: ScenePersistence, tmp_storage: Path
+    ) -> None:
+        """JSON 损坏：save_scene 上抛且不落盘（读改写不得把损坏当空库清空数据）。"""
+        persistence.save_scene(Scene(name="存量场景"))
+        json_file = tmp_storage / "scenes.json"
+        corrupted = "{corrupted"
+        json_file.write_text(corrupted, encoding="utf-8")
+
+        with pytest.raises(SceneStorageError):
+            persistence.save_scene(Scene(name="新场景"))
+        # 原文件原样保留，未被"空库+单个新场景"覆盖
+        assert json_file.read_text(encoding="utf-8") == corrupted
+
+    def test_corrupted_file_load_fails_visible(
+        self, persistence: ScenePersistence, tmp_storage: Path
+    ) -> None:
+        """JSON 损坏：读面同样上抛（失败可见），不伪装成空场景列表。"""
+        (tmp_storage / "scenes.json").write_text("[1, 2,", encoding="utf-8")
+        with pytest.raises(SceneStorageError):
+            persistence.load_scenes()
+        with pytest.raises(SceneStorageError):
+            persistence.get_scene("any")
+
+    def test_empty_file_is_empty_store(
+        self, persistence: ScenePersistence, tmp_storage: Path
+    ) -> None:
+        """空内容文件是合法空库边界：返回空不抛。"""
+        (tmp_storage / "scenes.json").write_text("   ", encoding="utf-8")
+        assert persistence.load_scenes() == []
 
     def test_json_file_format(self, tmp_storage: Path) -> None:
         """验证 JSON 文件格式正确。"""

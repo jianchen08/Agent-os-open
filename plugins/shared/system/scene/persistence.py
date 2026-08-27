@@ -28,6 +28,14 @@ from tenant_data import DEFAULT_TENANT, tenant_data_root  # noqa: E402
 logger = logging.getLogger(__name__)
 
 
+class SceneStorageError(RuntimeError):
+    """场景存储读失败（文件损坏/IO 错误）。
+
+    读失败必须上抛（fail-closed）：save_scene 是读改写全量落盘，
+    把读失败当空库会静默清空全部场景数据。
+    """
+
+
 class ScenePersistence:
     """场景 JSON 文件持久化管理。
 
@@ -76,22 +84,30 @@ class ScenePersistence:
         self.storage_path.mkdir(parents=True, exist_ok=True)
 
     def _read_all_raw(self) -> dict[str, Any]:
-        """读取所有场景原始数据。
+        """读取所有场景原始数据；读失败上抛（fail-closed，不伪造空库）。
+
+        仅「文件不存在/内容为空」是合法空库；JSON 损坏或 IO 错误抛
+        SceneStorageError，防止读改写落盘把损坏当空库清空数据。
 
         Returns:
             包含所有场景数据的字典，格式为 {"scenes": {scene_id: scene_dict}}
+
+        Raises:
+            SceneStorageError: scenes.json 损坏或不可读。
         """
         if not self.scenes_file.exists():
             return {"scenes": {}}
 
         try:
             content = self.scenes_file.read_text(encoding="utf-8")
-            if not content.strip():
-                return {"scenes": {}}
-            return json.loads(content)
-        except (json.JSONDecodeError, OSError) as exc:
-            logger.error("读取场景数据失败: %s", exc)
+        except OSError as exc:
+            raise SceneStorageError(f"读取场景数据文件失败: {exc}") from exc
+        if not content.strip():
             return {"scenes": {}}
+        try:
+            return json.loads(content)
+        except json.JSONDecodeError as exc:
+            raise SceneStorageError(f"场景数据文件损坏（非合法 JSON）: {exc}") from exc
 
     def _write_all_raw(self, data: dict[str, Any]) -> None:
         """写入所有场景原始数据。

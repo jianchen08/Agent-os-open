@@ -462,7 +462,17 @@ pub fn insert_row_inner(
         Value::Object(obj.clone())
     } else {
         let pk_str = row_id.as_str().unwrap_or_default();
-        get_row_inner(conn, table, pk_str, tenant_id).unwrap_or(Value::Object(obj.clone()))
+        match get_row_inner(conn, table, pk_str, tenant_id) {
+            Ok(row) => row,
+            // 回查 NotFound：INSERT 已生效，回显负载（DB 侧默认值/触发器改写不可见）
+            Err(ApiError::NotFound { .. }) => Value::Object(obj.clone()),
+            // DB 读错误不得伪装成功——报错说明行已写入，由调用方决策
+            Err(e) => {
+                return Err(ApiError::Internal {
+                    message: format!("插入已执行但回查失败: {e}"),
+                });
+            }
+        }
     };
     Ok(json!({ "row": full_row, "row_id": row_id }))
 }
@@ -858,6 +868,32 @@ pub fn clear_execution_data_inner(conn: &Connection) -> Result<Value, ApiError> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn insert_readback_notfound_falls_back_to_payload() {
+        let store = agentos_engine::SqliteStore::open_memory().unwrap();
+        store
+            .with_conn(|conn| {
+                conn.execute_batch(
+                    "CREATE TABLE t_trig (id TEXT PRIMARY KEY, v TEXT);
+                     CREATE TRIGGER t_del AFTER INSERT ON t_trig
+                     BEGIN DELETE FROM t_trig WHERE id = NEW.id; END;",
+                )
+                .map_err(|e| e.to_string())?;
+                let out = insert_row_inner(
+                    conn,
+                    "t_trig",
+                    &json!({"id": "x1", "v": "hello"}),
+                    "default",
+                )
+                .map_err(|e| format!("{e:?}"))?;
+                // INSERT 已生效、回查 NotFound：回显负载（不报错——行确实写入过）
+                assert_eq!(out["row"]["v"], "hello");
+                assert_eq!(out["row_id"], "x1");
+                Ok::<(), String>(())
+            })
+            .unwrap();
+    }
 
     #[test]
     fn quote_ident_escapes_double_quote() {
