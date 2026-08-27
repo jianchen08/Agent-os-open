@@ -87,7 +87,7 @@ pub struct AppState {
     pub db: Option<Arc<agentos_engine::SqliteStore>>,
     /// 项目根目录（`{{path:...}}` 模板解析基准 + agent 配置加载基准）
     pub project_root: Option<PathBuf>,
-    /// P2：会话协调器（连接注册表 / 事件总线 / 重放缓冲）。None = 降级 echo。
+    /// P2：会话协调器（连接注册表 / 事件总线 / 重放缓冲）。None = WS 入口 503 拒连。
     pub session: Option<Arc<agentos_session::SessionCoordinator>>,
     /// 管道 state 内存常驻注册表（对齐 0.1 EngineRegistry）。
     /// 按 (tenant_id, pipeline_id) 常驻 state，使多轮对话历史跨轮延续。
@@ -171,11 +171,10 @@ impl AppState {
         }
     }
 
-    /// 构建集成了插件系统的 AppState。
+    /// 构建集成了插件系统的 AppState（生产装配入口）。
     ///
-    /// 注意：旧的 `with_plugins(manifests, registry, engine)` 三参签名扩展为含
-    /// pipeline_config / step_library / invoker / store / project_root 的多参形式，
-    /// 以便 chat 端点直接构造 [`agentos_engine::PipelineExecutor`]。
+    /// 多参签名保证能力面非空：registry / invoker / store / project_root 均为
+    /// 必传，chat 端点据 `state` 字段直接构造 [`agentos_engine::PipelineExecutor`]。
     #[allow(clippy::too_many_arguments)]
     pub fn with_plugins(
         manifests: Vec<PluginManifest>,
@@ -187,7 +186,8 @@ impl AppState {
         project_root: PathBuf,
         enabled_plugin_ids: std::collections::HashSet<String>,
     ) -> Self {
-        // 从 manifest 构建 config JSON（兼容旧的 config-based handler）
+        // 从 manifest 构建 config JSON：schema（agents/pipelines 聚合、routes 面）
+        // 与 tools_handler 在 registry 未装配时的回退数据源。
         let agents: Vec<serde_json::Value> = manifests
             .iter()
             .filter(|m| m.plugin_type == PluginType::System)
@@ -272,9 +272,9 @@ impl AppState {
 
     /// 启用会话内核（连接注册表 / 事件总线 / 重放缓冲 + 入站路由）。
     ///
-    /// 在 `with_plugins` 后调用，注入 SessionCoordinator 与基于引擎的
-    /// 入站分发器。ws_handler 据此承载真实 WS 会话；未调用时 ws_handler
-    /// 降级为旧 echo/engine 路径（兼容）。
+    /// 在 `with_plugins` 后调用，注入 SessionCoordinator 与入站分发器
+    /// （EngineDispatcher）。ws_handler 据此承载真实 WS 会话；未调用时
+    /// WS 连接在握手前被拒（503，见 server.rs ws_handler）。
     pub fn enable_session_with(self, session: Arc<agentos_session::SessionCoordinator>) -> Self {
         // 管道 state 常驻注册表（与 session 同生命期，一起启用）。
         let self_with_session = Self {
@@ -691,7 +691,8 @@ pub async fn pipelines_handler(
 /// runs × message_slots × pipeline_sessions × pipeline_run_summaries 四表联结
 /// （store.list_pipelines_inner）：run → pipeline 映射经 message_slots.run_id，
 /// pipeline → 会话经 pipeline_sessions，消耗账本经 pipeline_run_summaries
-/// （sidecar 汇总写入，可为空）。无消息槽的 run（旧引擎 start_run 占位）被过滤。
+/// （sidecar 汇总写入，可为空）。无消息槽的 run 被过滤——run→pipeline 映射
+/// 依赖 message_slots，无槽记录无法归属管道。
 /// 返回按 started_at 倒序的运行列表，供前端管道管理面板初始化/兜底刷新。
 ///
 /// 查询参数：`status`（可选：running/suspended/completed/failed）、
@@ -1222,7 +1223,8 @@ pub async fn tools_handler(
             })
             .collect()
     } else {
-        // fallback: 从 config 获取（兼容旧逻辑）
+        // registry 未装配（测试装配路径）→ 从 config 的 tools 数组回退，
+        // 响应信封仍为 {items, total}。
         state
             .config
             .get("tools")
