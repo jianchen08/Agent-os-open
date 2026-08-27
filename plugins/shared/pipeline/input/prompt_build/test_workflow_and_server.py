@@ -7,7 +7,7 @@
     - _build_system_content：语言指令（已知/未知）、tools 开关、static_vars 开关、占位符
     - _read_dir_entries：非目录、OSError、扩展名过滤、超大文件跳过、读取失败、空目录
     - _resolve_target_path：空路径
-    - _local_compression_config：guard 导入成功路径 / yaml 成功读取 / 失败回退
+    - _compression_config：单一实现直连 guard（yaml 读取成功/回退默认）
     - _resolve_placeholders 占位符解析超时降级
     - _resolve_routed_var：无 route_key、嵌套 path/retrieval/content dict、路径缺失、None 值规范化
     - server.py：工具注册、execute 工具、on_load/on_unload 生命周期
@@ -37,7 +37,7 @@ if _SHARED_DIR not in sys.path:
     sys.path.insert(0, _SHARED_DIR)
 _INPUT_DIR = str(Path(__file__).resolve().parents[1])  # plugins/shared/pipeline/input/
 if _INPUT_DIR not in sys.path:
-    sys.path.insert(0, _INPUT_DIR)  # 供 _local_compression_config 导入 context_window_guard
+    sys.path.insert(0, _INPUT_DIR)  # 供 _compression_config 导入 context_window_guard
 
 from pipeline.plugin import PluginContext, PluginResult  # noqa: E402
 
@@ -359,7 +359,7 @@ class TestCompressionConfigSuccess:
             }
         })()
         monkeypatch.setitem(sys.modules, "config.config_center", fake_cc)
-        cfg = _mod._LocalCompressionConfig.from_yaml_config(1000)
+        cfg = _mod._compression_config(1000)
         assert (cfg.compress_trigger_ratio, cfg.l1_ratio, cfg.l2_ratio, cfg.recent_ratio) == (0.6, 0.2, 0.07, 0.3)
 
     def test_from_yaml_config_empty_data_defaults(self, monkeypatch) -> None:
@@ -367,40 +367,43 @@ class TestCompressionConfigSuccess:
         fake_cc = types.ModuleType("config.config_center")
         fake_cc.get_config_center = lambda: type("CC", (), {"get": lambda self, _p: None})()
         monkeypatch.setitem(sys.modules, "config.config_center", fake_cc)
-        cfg = _mod._LocalCompressionConfig.from_yaml_config(8000)
+        cfg = _mod._compression_config(8000)
         assert cfg.compress_trigger_ratio == 0.55
-        assert cfg.get_budgets() == {"recent": int(8000 * 0.18), "L1": int(8000 * 0.1), "L2": int(8000 * 0.05)}
+        budgets = cfg.get_budgets()
+        assert budgets["recent"] == int(8000 * 0.18)
+        assert budgets["L1"] == int(8000 * 0.1)
+        assert budgets["L2"] == int(8000 * 0.05)
 
     def test_trigger_threshold_and_budget_scale(self) -> None:
         """触发阈值与预算随 context_window 线性增长（性质断言）。"""
-        small = _mod._LocalCompressionConfig(context_window=1000)
-        large = _mod._LocalCompressionConfig(context_window=2000)
+        from context_window_guard.plugin import CompressionConfig
+
+        small = CompressionConfig(context_window=1000)
+        large = CompressionConfig(context_window=2000)
         assert large.get_trigger_threshold() == 2 * small.get_trigger_threshold()
         assert large.get_budgets()["L1"] == 2 * small.get_budgets()["L1"]
         assert small.get_trigger_threshold() == int(1000 * 0.55)
 
-    def test_local_compression_config_prefers_guard(self, monkeypatch) -> None:
-        """_local_compression_config 优先复用 context_window_guard 的 CompressionConfig。"""
+    def test_compression_config_reuses_guard(self, monkeypatch) -> None:
+        """_compression_config 单一实现：直接复用 context_window_guard 的 CompressionConfig。"""
         fake_cc = types.ModuleType("config.config_center")
         fake_cc.get_config_center = lambda: type("CC", (), {"get": lambda self, _p: None})()
         monkeypatch.setitem(sys.modules, "config.config_center", fake_cc)
-        cfg = _mod._local_compression_config(64000)
+        cfg = _mod._compression_config(64000)
         assert type(cfg).__module__ == "context_window_guard.plugin"
         assert cfg.get_budgets()["L1"] == int(64000 * 0.1)
 
-    def test_local_compression_config_guard_failure_falls_back(self, monkeypatch) -> None:
-        """guard 不可用时回退到本文件 _LocalCompressionConfig。"""
-        def boom_import(name: str, *a: Any, **k: Any) -> Any:
-            if name == "context_window_guard.plugin":
-                raise ImportError("guard not available")
-            return __import__(name, *a, **k)
+    def test_compression_config_failure_falls_back_to_defaults(self, caplog, monkeypatch) -> None:
+        """配置中心不可达 → 回退代码默认并 warning 留痕，不抛异常。"""
+        import logging
 
-        monkeypatch.setattr(
-            "builtins.__import__",
-            boom_import,
-        )
-        cfg = _mod._local_compression_config(64000)
-        assert isinstance(cfg, _mod._LocalCompressionConfig)
+        monkeypatch.setitem(sys.modules, "config.config_center", None)  # 模拟配置中心不可达
+        with caplog.at_level(logging.WARNING):
+            cfg = _mod._compression_config(64000)
+        assert cfg.context_window == 64000
+        assert cfg.get_trigger_threshold() == int(64000 * 0.55), "回退代码默认阈值"
+        msgs = [r.getMessage() for r in caplog.records if r.levelno >= logging.WARNING]
+        assert any("压缩预算配置读取失败" in m for m in msgs)
 
 
 # ═══════════════════════════════════════════════════════════

@@ -1350,9 +1350,9 @@ class ContextWindowGuardPlugin(IInputPlugin):
         """解析 trigger_ratio：pipeline 显式值 → system yaml → 代码默认。
 
         三层覆盖链路中 ②→③ 的衔接：当 pipeline yaml 没配 trigger_ratio 时，
-        从 system 的 context_window_config.yaml 继承 compress_trigger_ratio。
-        Step 4 修复：改用本文件内联的 CompressionConfig，不再导入
-        memory.context_compressor（0.2 中不存在）。
+        从 system 的 context_window_config.yaml 继承 compress_trigger_ratio；
+        yaml 不可达时 from_yaml_config 自带回退（返回代码默认 0.55），
+        故此处无需再包异常防御。
 
         Args:
             explicit: pipeline yaml 显式配置的 trigger_ratio（可能为 None）
@@ -1364,15 +1364,8 @@ class ContextWindowGuardPlugin(IInputPlugin):
         if explicit is not None:
             return explicit
 
-        # ③ System YAML fallback（用本文件内联的 CompressionConfig）
-        try:
-            sys_config = CompressionConfig.from_yaml_config(context_window=128000)
-            return sys_config.compress_trigger_ratio
-        except Exception:
-            pass
-
-        # ④ 代码默认（见 config/system/context_window_config.yaml）
-        return 0.55
+        # ③ System YAML fallback（内联 CompressionConfig，内部已含读取失败回退）
+        return CompressionConfig.from_yaml_config(context_window=128000).compress_trigger_ratio
 
     @property
     def name(self) -> str:
@@ -2211,7 +2204,9 @@ def _build_compress_llm_call_fn(caller: CapabilityCaller) -> LLMCallFn:
         caller: 能力调用 async 函数 (method, params) -> Any
 
     Returns:
-        async (messages) -> response_text 的 LLM 调用函数；降级时返回空串
+        async (messages) -> response_text 的 LLM 调用函数；
+        memory.compress 调用失败时抛 RuntimeError 并携带原因
+        （禁止把调用错误伪装成空响应——上游会把空串诊断为"LLM 空响应"）
     """
     async def _call(payload: str | list[dict[str, Any]]) -> str:
         if isinstance(payload, list):
@@ -2225,8 +2220,7 @@ def _build_compress_llm_call_fn(caller: CapabilityCaller) -> LLMCallFn:
         try:
             result = await caller("tool-executor.invoke", params)
         except Exception as e:
-            logger.warning("[compress_llm_call] memory.compress 调用失败: %s", e)
-            return ""
+            raise RuntimeError(f"[compress_llm_call] memory.compress 调用失败: {e}") from e
         if isinstance(result, dict):
             if result.get("degraded"):
                 logger.info(
@@ -2239,18 +2233,3 @@ def _build_compress_llm_call_fn(caller: CapabilityCaller) -> LLMCallFn:
         return str(result) if result else ""
 
     return _call
-
-
-# ── 兼容老测试/外部调用：保留 create_compress_llm_call_fn 公共入口 ──
-def create_compress_llm_call_fn(caller: CapabilityCaller) -> LLMCallFn:
-    """公共入口：从 capability_caller 构建压缩 LLM 调用函数。
-
-    供 server.py / 测试直接调用（模块内别名，避免直接引用下划线函数）。
-
-    Args:
-        caller: 能力调用 async 函数 (method, params) -> Any
-
-    Returns:
-        async (prompt) -> response_text
-    """
-    return _build_compress_llm_call_fn(caller)

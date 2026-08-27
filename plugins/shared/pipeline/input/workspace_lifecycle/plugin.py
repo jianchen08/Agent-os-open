@@ -78,16 +78,13 @@ async def refresh_state_rows() -> None:
 class _ExecutionContextTaskTree:
     """task_tree 接口的 state 直读实现（GAP-1 统一：task = pipeline）。
 
-    服务内部 `_find_container_workspace` / `_start_subtask` 依赖
-    `task_tree.get_task(task_id)` 返回带 `parent_task_id` / `metadata` 的对象——
-    统一后不再伪造（0.1 的 task_tree.get_task 仿真已退役），改为读管道
-    state 聚合行（lineage.parent_pipeline_id = 父链、task.scope = 容器标记）：
+    服务内部 `_start_subtask` 依赖 `task_tree.get_task(task_id)` 返回带
+    `parent_task_id` / `metadata` 的对象——统一后不再伪造（0.1 的
+    task_tree.get_task 仿真已退役），改为读管道 state 聚合行
+    （lineage.parent_pipeline_id = 父链）：
 
     - `get_task(当前任务)` → `parent_task_id`（state 顶层扁平键
       `lineage.parent_pipeline_id`，引擎出生写入）；
-    - `get_task(父任务)` → `metadata.task_scope`（父行 `task.scope`，
-      经 state 聚合读取）+ `container_workspace`（工作空间根推导
-      `container_{parent_id}`），供容器直接子任务定位容器空间；
     - 聚合不可用 → None（服务内部已有 try/except 兜底）。
     """
 
@@ -103,9 +100,8 @@ class _ExecutionContextTaskTree:
 
     def get_task(self, task_id: str):
         state = self._plugin._last_state or {}
-        # 0.2 统一：任务身份 = pipeline_id，引擎注入 state 的扁平键是 task.id（点号键），
-        # 兼容顶层 task_id（0.1 遗留）
-        current_id = state.get("task_id") or state.get("task.id")
+        # 0.2 统一：任务身份 = pipeline_id，引擎注入 state 的扁平键是 task.id（点号键）
+        current_id = state.get("task.id")
         rows = self._read_rows()
         row = next(
             (r for r in rows if str(r.get("pipeline_id") or "") == task_id),
@@ -121,20 +117,7 @@ class _ExecutionContextTaskTree:
         # return——此处 row 必非 None，assert 仅供类型收窄。
         assert row is not None
         parent_id = str(row.get("lineage.parent_pipeline_id") or "")
-        scope = str(row.get("task.scope") or "")
-        if task_id == current_id or task_id == parent_id or scope:
-            if scope == "container" or task_id == parent_id:
-                try:
-                    container_path = str(self._manager._get_workspace_root() / f"container_{task_id}")
-                except Exception:
-                    container_path = ""
-                return SimpleNamespace(
-                    id=task_id,
-                    parent_task_id=parent_id or None,
-                    metadata={"task_scope": "container", "container_workspace": container_path},
-                )
-            return SimpleNamespace(id=task_id, parent_task_id=parent_id or None, metadata={})
-        return None
+        return SimpleNamespace(id=task_id, parent_task_id=parent_id or None, metadata={})
 
     def save_task(self, task: Any) -> Any:
         """持久化 no-op（ws_meta 由 state 承载——YAML 只读镜像，统一后不写）。"""
@@ -260,8 +243,8 @@ class WorkspaceLifecyclePlugin(IInputPlugin):
         # 模式未指定 → 默认 worktree（不是 plain）。
         mode = ws_spec.get("mode") or "worktree"
         # 0.2 统一：任务身份 = pipeline_id，引擎注入 state 的扁平键是 task.id
-        # （点号键）；兼容顶层 task_id（0.1 遗留）。缺 task 上下文 = 主会话纯解析。
-        task_id = state.get("task_id") or state.get("task.id") or ""
+        # （点号键）。缺 task 上下文 = 主会话纯解析。
+        task_id = state.get("task.id") or ""
         # 工作流服务基础路径 = 项目根：sidecar cwd 是插件目录（非项目根），
         # 用 source_path（task 创建时带的项目根）作为 base_path 修正。
         manager = self._get_manager(base_path_hint=source_path)
@@ -298,10 +281,9 @@ class WorkspaceLifecyclePlugin(IInputPlugin):
             return PluginResult()
 
         if manager is not None and task_id:
-            # 任务管道：调 0.1 工作空间服务真实创建（对齐 0.1 task_executor 契约：
-            # on_task_start(task_id, workspace, task_data) 分发 root/subtask；
-            # container_copy 拓扑走 init_container_workspace）。
-            # task_data 字段形态与 0.1 task_submit → task_data 一致。
+            # 任务管道：调工作空间服务真实创建（对齐 task_executor 契约：
+            # on_task_start(task_id, workspace, task_data) 分发 root/subtask）。
+            # task_data 字段形态与 task_submit → task_data 一致。
             task_data = {
                 "is_root": True,
                 "workspace_mode": mode,
@@ -310,13 +292,7 @@ class WorkspaceLifecyclePlugin(IInputPlugin):
                 "_inherit_workspace_resolved": False,
             }
             try:
-                if mode == "container_copy":
-                    # 容器任务空间：复制源项目到容器空间（0.1 init_container_workspace）
-                    ws_meta = await ctx_await(
-                        manager.init_container_workspace, task_id, source_path, task_data
-                    )
-                else:
-                    ws_meta = await ctx_await(manager.on_task_start, task_id, source_path, task_data)
+                ws_meta = await ctx_await(manager.on_task_start, task_id, source_path, task_data)
                 if isinstance(ws_meta, dict) and ws_meta.get("path"):
                     updates = {
                         "workspace": ws_meta["path"],
@@ -391,7 +367,7 @@ class WorkspaceLifecyclePlugin(IInputPlugin):
         ws_meta = state.get("ws_meta") if isinstance(state.get("ws_meta"), dict) else {}
         if ws_meta.get("mode") != "worktree":
             return PluginResult()
-        task_id = state.get("task_id") or state.get("task.id") or ""
+        task_id = state.get("task.id") or ""
         if not task_id:
             return PluginResult()
         manager = self._get_manager()

@@ -12,7 +12,14 @@
 from __future__ import annotations
 
 import logging
+import os
+import sys
 from typing import Any
+
+# 共享层自举（plugins/shared/ —— project_registry 所在，与 storage.py 同模式）。
+_SHARED_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+if _SHARED_ROOT not in sys.path:
+    sys.path.insert(0, _SHARED_ROOT)
 
 logger = logging.getLogger(__name__)
 
@@ -60,7 +67,7 @@ def get_project_registry() -> Any:
     if _project_registry_instance is not None:
         return _project_registry_instance
     try:
-        from projects import ProjectRegistry  # noqa: PLC0415
+        from project_registry import ProjectRegistry  # noqa: PLC0415
 
         _project_registry_instance = ProjectRegistry()
         return _project_registry_instance

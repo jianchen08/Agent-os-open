@@ -6,7 +6,7 @@
     - path 类型：绝对路径文件、相对路径文件（project_root）、目录遍历、读取失败留痕
     - reference/content/空 type 类型；tags 触发检索
     - 压缩加载：无 pipeline_id / 后端异常降级、预算耗尽跳过、去重、L1→L2 降级、
-      keywords 兜底块（恒空）、_estimate_tokens_for_budget 上下界、_parse_seq 各种形态
+      _estimate_tokens_for_budget 上下界、_parse_seq 各种形态
     - 动态变量：agent 配置 > 插件默认、字符串形式、placeholder 类型、session/agent/
       model/reference/routed 类型、enabled=false 跳过、非 dict 跳过、content 为空跳过
     - 工具估算：空串 0；非空至少 1 且 len//2 上界

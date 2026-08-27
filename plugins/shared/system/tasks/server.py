@@ -14,6 +14,10 @@ import sys
 from typing import Any
 
 sys.path.insert(0, os.path.dirname(__file__))
+# 共享层自举（plugins/shared/ —— project_registry 所在，与 storage.py 同模式）。
+_SHARED_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+if _SHARED_ROOT not in sys.path:
+    sys.path.insert(0, _SHARED_ROOT)
 
 # tasks/projects 域 HTTP 面自持。
 # http_api 内部懒 import server.plugin 取能力句柄，此处顶层 import 无环。
@@ -47,7 +51,7 @@ async def _on_load(params: dict[str, Any]) -> None:
     _service = TaskService(data_dir=config.get("data_dir"))
     # 容器任务实体遗留数据清除（幂等；project = 文件夹+登记 模型落地后，
     # 容器任务行/挂靠引用/container_* 隔离副本不再有写入方，此处只清不改）。
-    from projects import purge_legacy_container_data  # noqa: PLC0415
+    from project_registry import purge_legacy_container_data  # noqa: PLC0415
 
     purge_stats = purge_legacy_container_data(_service.storage)
     logger.info("TaskService initialized | legacy_purge=%s", purge_stats)

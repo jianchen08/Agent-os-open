@@ -16,6 +16,11 @@ _this_dir = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, _this_dir)
 _shared_dir = os.path.join(_this_dir, "..", "..", "..")
 sys.path.insert(0, _shared_dir)
+# pipeline/input 目录：plugin.py 压缩预算配置经 context_window_guard.plugin 复用
+# （兄弟插件互相导入的路径前提；缺它则单实现收敛的 import 不可达）
+_input_dir = os.path.dirname(_this_dir)
+if _input_dir not in sys.path:
+    sys.path.insert(0, _input_dir)
 
 from plugin import PromptBuildPlugin, set_memory_backend  # noqa: E402
 

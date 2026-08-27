@@ -453,38 +453,6 @@ class _GitOpsMixin:
         extra = frozenset(ws_cfg.get("worktree_exclude_patterns", []))
         return _SKIP_DIRS | extra
 
-    def _copy_project_to_container(self, container_path: Path, src: Path | None = None) -> int:
-        """从指定源目录复制文件到容器空间，跳过排除目录和扩展名。返回复制的文件数。"""
-        _src = src if src is not None else self._base_path
-        if not _src.exists():
-            return 0
-        skip = self._effective_skip_dirs()
-        count = 0
-        try:
-            for item in _src.rglob("*"):
-                try:
-                    if not item.is_file():
-                        continue
-                    if item.name in _WIN_RESERVED_NAMES:
-                        continue
-                    rel = item.relative_to(cast(Path, src))
-                    if any(p in skip for p in rel.parts):
-                        continue
-                    if item.suffix in _SKIP_EXTENSIONS:
-                        continue
-                    target = container_path / rel
-                    target.parent.mkdir(parents=True, exist_ok=True)
-                    shutil.copy2(str(item), str(target))
-                    count += 1
-                except (OSError, PermissionError, ValueError):
-                    # WinError 1920 / 权限 / 路径过长：跳过单个文件，不中断整个复制
-                    logger.debug("[WorkspaceLifecycle] 复制跳过: %s", item)
-                    continue
-        except (OSError, PermissionError) as exc:
-            # 遍历本身失败（如根目录权限）：记录并返回已复制的数量
-            logger.warning("[WorkspaceLifecycle] 项目遍历中断: %s", exc)
-        return count
-
     def _calc_project_size(self, project_root: str, task_id: str) -> int:
         """计算项目工作文件总大小（不含 .git），两轮扫描策略 + 增量缓存"""
         root = Path(project_root)
@@ -664,29 +632,3 @@ class _GitOpsMixin:
                 except PermissionError:
                     pass
         return ("existing_project" if has_files else "new_project"), str(path)
-
-    def _find_container_workspace(self, task_id: str) -> str | None:
-        """查找父容器任务的工作空间路径。
-
-        先尝试 restore_ws_meta 从持久化恢复，再查找。
-        """
-        try:
-            task = self._task_tree.get_task(task_id)
-            if not task or not task.parent_task_id:
-                return None
-            parent_task = self._task_tree.get_task(task.parent_task_id)
-            if not parent_task:
-                return None
-            if parent_task.metadata.get("task_scope") != "container":
-                return None
-
-            self.restore_ws_meta(parent_task.id)
-
-            parent_meta = self._ws_meta_store.get(parent_task.id, {})
-            container_ws = parent_meta.get("path", "")
-            if not container_ws:
-                container_ws = parent_task.metadata.get("container_workspace", "")
-            return container_ws if container_ws else None
-        except Exception as e:
-            logger.warning("[WorkspaceLifecycle] _find_container_workspace 失败: task_id=%s, error=%s", task_id, e)
-            return None

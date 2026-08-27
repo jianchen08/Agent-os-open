@@ -6,11 +6,12 @@ compress 已从独立 sidecar (plugins/shared/system/memory/) 迁入 context_win
 与原 6 个用例语义对齐（进程内 LLMClient 首选路径已退役——零生产消费者，
 LLM 面收敛由 llm_service 承接）：
 
-1. capability_caller 为 None 时降级返回空串
-2. capability_caller 抛异常时降级返回空串
-3. capability_caller 正常时返回其 summary 文本（strip 语义保留）
-4. 工具返回 degraded=True 时降级返回空串
-5. 消息列表被压平成字符串 prompt 传给工具
+1. capability_caller 抛异常时上抛 RuntimeError 并携带原因（不伪装空响应）
+2. capability_caller 正常时返回其 summary 文本（strip 语义保留）
+3. 工具返回 degraded=True 时降级返回空串（工具契约内的降级信号）
+4. 消息列表被压平成字符串 prompt 传给工具
+5. 压缩服务级失败路径：调用异常沿链路上抛，由 compress_messages 顶层捕获
+   （error 日志 + 返回 None，本轮压缩显式跳过）
 
 测试不依赖真实 LLM——通过 monkeypatch 模块级 _capability_caller 实现。
 """
@@ -75,32 +76,54 @@ def mod() -> Any:
 
 
 # ═══════════════════════════════════════════════════════════
-# 1. 降级（capability_caller 为 None / 抛异常）
+# 1. 调用失败传播（错误要么处理要么传播，禁止伪装成空响应）
 # ═══════════════════════════════════════════════════════════
 
 
-class TestCompressDegrade:
-    def test_compress_without_caller_degrades(self, mod: Any) -> None:
-        """capability_caller 为 None 时返回空串。"""
-        mod.set_capability_caller(None)
-
-        async def _bad_caller(method: str, params: dict) -> Any:
-            raise RuntimeError("no caller")
-
-        fn = mod._build_compress_llm_call_fn(_bad_caller)
-        result = _await(fn("compress this"))
-        assert result == ""
-
-    def test_compress_caller_exception_degrades(self, mod: Any) -> None:
-        """capability_caller 抛异常时降级返回空串。"""
-        mod.set_capability_caller(None)
+class TestCompressCallerFailure:
+    @pytest.mark.parametrize(
+        ("src_exc", "case_id"),
+        [
+            (RuntimeError("boom-upstream"), "runtime"),
+            (ValueError("bad-args"), "value"),
+            (TimeoutError("llm-timed-out"), "timeout"),
+        ],
+        ids=["runtime", "value", "timeout"],
+    )
+    def test_compress_caller_exception_raises(self, mod: Any, src_exc: Exception, case_id: str) -> None:
+        """capability_caller 抛异常 → RuntimeError 上抛并携带原因（不伪装空响应）。"""
 
         async def _raising_caller(method: str, params: dict) -> Any:
-            raise RuntimeError("boom-upstream")
+            raise src_exc
 
         fn = mod._build_compress_llm_call_fn(_raising_caller)
-        result = _await(fn("compress this"))
-        assert result == ""
+        with pytest.raises(RuntimeError) as exc_info:
+            _await(fn("compress this"))
+        assert "memory.compress 调用失败" in str(exc_info.value), "须标明失败点"
+        assert str(src_exc) in str(exc_info.value), "须携带根因"
+
+    def test_service_compress_failure_returns_none_with_cause_logged(self, mod: Any, caplog: Any) -> None:
+        """压缩服务级失败路径：调用异常沿链路上抛并携带根因，由
+        _build_compression_content 显式捕获留痕、跳过该批；全部批次失败时
+        compress_messages 返回 None（本轮压缩显式跳过）。"""
+        import logging
+
+        async def _failing_fn(_payload: Any) -> str:
+            raise RuntimeError("memory.compress down")
+
+        svc = mod.CompressionService(llm_call_fn=_failing_fn, backend=None)
+        # 总量远超 context_window*trigger_ratio，确保进入压缩轮
+        messages = [
+            {"role": "user", "content": "a" * 120},
+            {"role": "assistant", "content": "b" * 120},
+            {"role": "user", "content": "c" * 3600},
+        ]
+        with caplog.at_level(logging.WARNING):
+            out = _await(svc.compress_messages(messages, context_window=100))
+        assert out is None, "调用失败应显式跳过本轮压缩，而非以空摘要继续"
+        msgs = [r.getMessage() for r in caplog.records if r.levelno >= logging.WARNING]
+        assert any("压缩失败" in m for m in msgs), "失败必须显式留痕"
+        assert any("memory.compress down" in m for m in msgs), "根因必须随链路抵达处置层，不得翻译成空响应"
 
 
 # ═══════════════════════════════════════════════════════════

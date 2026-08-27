@@ -45,55 +45,6 @@ class WorkspaceLifecycleManager(_GitOpsMixin, _MergeOpsMixin):
         except Exception:
             logger.warning("[WorkspaceLifecycle] __init__ 中记录主分支失败", exc_info=True)
 
-    # ── 内部工具方法 ──────────────────────────────────────────────
-
-    def _ensure_dir_and_git(self, path: Path) -> None:
-        """确保目录存在且有 git 初始化。"""
-        if not path.exists():
-            path.mkdir(parents=True, exist_ok=True)
-        if not (path / ".git").exists():
-            if not self._git_init_and_initial_commit(path, "chore: initial container project"):
-                raise RuntimeError(f"容器空间初始化失败（git init）: {path}")
-        else:
-            self._ensure_git_user(path)
-
-    # ── 容器空间初始化 ──────────────────────────────────────────
-
-    def init_container_workspace(self, container_task_id: str, workspace: str | None, task_data: dict) -> dict:
-        """容器任务的空间初始化（由 TaskWorker 在跳过执行前调用）。
-
-        容器任务不直接执行、不可选隔离/拓扑（task_submit 已拒绝）→
-        恒为隔离复制：把源项目复制到容器空间并 git init。
-        """
-        ws_base = self._get_workspace_root()
-
-        path = ws_base / f"container_{container_task_id}"
-        if not path.exists():
-            path.mkdir(parents=True, exist_ok=True)
-            if workspace:
-                src_path = Path(workspace)
-                if not src_path.is_absolute():
-                    src_path = self._base_path / src_path
-                copied = self._copy_project_to_container(path, src=src_path)
-                logger.debug(
-                    "[WorkspaceLifecycle] 容器空间已复制文件: task_id=%s, files=%d", container_task_id, copied
-                )
-            if not self._git_init_and_initial_commit(path, "chore: initial container project"):
-                raise RuntimeError(f"容器空间初始化失败（git init）: {path}")
-        else:
-            self._ensure_dir_and_git(path)
-
-        meta = {
-            "mode": "project_root",
-            "path": str(path),
-            "branch": "main",
-            "project_root": str(path),
-            "is_container_workspace": True,
-        }
-        self._ws_meta_store[container_task_id] = meta
-        logger.debug("[WorkspaceLifecycle] 容器空间已初始化: task_id=%s, path=%s", container_task_id, path)
-        return meta
-
     # ── 任务启动 ──────────────────────────────────────────────
 
     def on_task_start(self, task_id: str, workspace: str, task_data: dict) -> dict:
@@ -126,26 +77,23 @@ class WorkspaceLifecycleManager(_GitOpsMixin, _MergeOpsMixin):
         return meta
 
     def _start_subtask(self, task_id: str, workspace: str, task_data: dict) -> dict:
-        """子任务启动：通过 TaskService API 查找父任务，共享父工作空间
+        """子任务启动：共享父工作空间。
 
         拓扑由 workspace_mode 决定（与隔离解耦）：
-        - plain → 直接共享宿主目录（容器空间或显式 workspace）
+        - plain → 直接共享宿主目录（挂项目任务的 workspace 已解析为项目文件夹）
         - 其他（默认 worktree 语义的父链共享）→ 共享父任务工作空间
         """
         _ws_mode = task_data.get("workspace_mode", "") or self._config.get("workspace", {}).get(
             "default_mode", "worktree"
         )
         if _ws_mode == "plain":
-            container_ws = self._find_container_workspace(task_id)
-            host_path = container_ws or workspace
-            if host_path:
-                meta = {"mode": "shared", "path": host_path}
+            if workspace:
+                meta = {"mode": "shared", "path": workspace}
                 self._ws_meta_store[task_id] = meta
                 logger.debug(
-                    "[WorkspaceLifecycle] plain 拓扑(子任务): 共享目录 task_id=%s, path=%s, container_ws=%s",
+                    "[WorkspaceLifecycle] plain 拓扑(子任务): 共享目录 task_id=%s, path=%s",
                     task_id,
-                    host_path,
-                    container_ws,
+                    workspace,
                 )
                 return meta
 
@@ -246,83 +194,26 @@ class WorkspaceLifecycleManager(_GitOpsMixin, _MergeOpsMixin):
         # plain 模式不建 worktree、不切分支，但通过 task_id + project_root
         # 让 on_before_evaluate 把产出 commit 到当前分支，
         # 避免改动被后续任务的 auto-save 混入错误的 commit message。
-        # 默认（未指定/配置缺省）→ worktree 拓扑（隔离副本）。
+        # 默认（未指定/配置缺省）→ worktree 拓扑。
         _ws_mode = task_data.get("workspace_mode", "") or self._config.get("workspace", {}).get(
             "default_mode", "worktree"
         )
         if _ws_mode == "plain":
-            container_ws = self._find_container_workspace(task_id)
-            host_path = container_ws or workspace
-            if host_path:
+            if workspace:
                 meta = {
                     "mode": "plain",
-                    "path": host_path,
+                    "path": workspace,
                     "task_id": task_id,
-                    "project_root": host_path,
+                    "project_root": workspace,
                 }
                 self._ws_meta_store[task_id] = meta
                 logger.debug(
                     "[WorkspaceLifecycle] plain 拓扑: 直接操作目录 "
-                    "task_id=%s, path=%s, container_ws=%s（无 git worktree/branch）",
+                    "task_id=%s, path=%s（无 git worktree/branch）",
                     task_id,
-                    host_path,
-                    container_ws,
+                    workspace,
                 )
                 return meta
-        container_ws = None
-        if not task_data.get("_inherit_workspace_resolved"):
-            container_ws = self._find_container_workspace(task_id)
-        if container_ws:
-            container_path = Path(container_ws).resolve()
-            if not (container_path / ".git").exists():  # noqa: SIM102
-                if not self._git_init_and_initial_commit(container_path, "chore: init container repo"):
-                    raise RuntimeError(f"容器空间 git 初始化失败: {container_path}")
-            self._ensure_git_user(container_path)
-            rc_head, _, _ = self._run_git("rev-parse", "HEAD", cwd=container_path)
-            if rc_head != 0:
-                logger.debug(
-                    "[WorkspaceLifecycle] 容器空间 .git 存在但无提交，执行 initial commit: task_id=%s, path=%s",
-                    task_id,
-                    container_path,
-                )
-                if not self._git_init_and_initial_commit(container_path, "chore: init container repo"):
-                    raise RuntimeError(f"容器空间初始化失败（已有 .git 但无提交记录）: {container_path}")
-            elif self._guard_root_branch(container_path):
-                self._autosave_before_worktree(container_path, f"chore: auto-save before subtask {task_id}", task_id)
-            else:
-                logger.warning("[WorkspaceLifecycle] 跳过容器空间 auto-save: 分支守卫检测到变更")
-
-            branch = f"task/{task_id}"
-            ws_dir = container_path.parent / _safe_ws_name(container_path.name, task_id)
-            project_size = self._calc_project_size(str(container_path), task_id)
-            threshold = self._config.get("workspace", {}).get("sparse_threshold_mb", 50) * 1024 * 1024
-
-            if project_size > threshold:
-                self._setup_sparse_worktree(ws_dir, container_path, branch)
-            else:
-                self._worktree_add_with_repair(container_path, branch, ws_dir, task_id)
-            self._ensure_git_user(ws_dir)
-            meta = {"mode": "worktree", "path": str(ws_dir), "branch": branch, "project_root": str(container_path)}
-            self._ws_meta_store[task_id] = meta
-            return meta
-
-        # 检测到父任务是容器但找不到工作空间时，报错而非静默降级
-        # 但 inherit_workspace_from 场景跳过此检查——继承的任务有自己指定的工作空间
-        if not task_data.get("_inherit_workspace_resolved"):
-            try:
-                task = self._task_tree.get_task(task_id)
-                if task and task.parent_task_id:
-                    parent_task = self._task_tree.get_task(task.parent_task_id)
-                    if parent_task and parent_task.metadata.get("task_scope") == "container":
-                        raise RuntimeError(
-                            f"父任务 {task.parent_task_id} 是容器任务，"
-                            f"但未找到容器工作空间（可能初始化失败）。"
-                            f"子任务 {task_id} 无法创建工作空间。"
-                        )
-            except RuntimeError:
-                raise
-            except Exception:
-                logger.warning("[WorkspaceLifecycle] 工作空间初始化异常", exc_info=True)
 
         # PLAIN 拓扑：直接操作项目目录，不创建 worktree 隔离
         # 同上：保留 task_id + project_root，供 on_before_evaluate 用准确的
@@ -349,7 +240,7 @@ class WorkspaceLifecycleManager(_GitOpsMixin, _MergeOpsMixin):
             )
             return meta
 
-        # 无显式 workspace 且无容器：
+        # 无显式 workspace：
         # - 显式 plain → plain 空目录（只创建目录，不做 git 操作）
         # - 默认/显式 worktree → 落到下方 worktree 建立分支，源 = 调用方传入的
         #   workspace（plugin._bootstrap 已把无显式场景的 workspace 解析为项目根，
@@ -357,7 +248,7 @@ class WorkspaceLifecycleManager(_GitOpsMixin, _MergeOpsMixin):
         #   worktree 建不起来时由下方分支的 git 前置步骤 fail-honest 抛错，
         #   上层（plugin._bootstrap）捕获后降级为 plain。
         has_explicit_workspace = task_data.get("_has_explicit_workspace", False)
-        if _ws_mode == "plain" and not has_explicit_workspace and not container_ws:
+        if _ws_mode == "plain" and not has_explicit_workspace:
             ws_base = self._get_workspace_root()
             plain_path = ws_base / task_id
             plain_path.mkdir(parents=True, exist_ok=True)

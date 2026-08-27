@@ -4,7 +4,7 @@
 
 产出：
     - state["system_message"]: 一条 SystemMessage（不含历史消息和动态变量）
-    - state["compression_messages"]: 压缩层独立消息列表（L1/L2/KEYWORDS）
+    - state["compression_messages"]: 压缩层独立消息列表（L1/L2）
     - state["prompt.dynamic_vars"]: 动态变量消息 dict（LLMCore 直接追加在历史消息之后）
 
 构建顺序（_build_system_content）：
@@ -23,9 +23,8 @@ Step 6 重建要点（相对 0.1 的变化）：
   `_memory_backend: IMemoryBackend`（Hindsight/Kernel），通过 set_memory_backend()
   注入——与 context_window_guard Step 4 的模式一致。L1/L2/STATE_SNAPSHOT 块以
   memory_type="chunk" 落库，metadata.tags 含 pipeline:{id} / L1|L2 / seq:{start}-{end}。
-- 压缩预算配置不再导入 0.2 中不存在的 memory.context_compressor（老版 line 873 的
-  import 在 try/except 之外直接 ImportError），改用本文件内联的
-  _LocalCompressionConfig（读 config/system/context_window_config.yaml，失败回退默认）。
+- 压缩预算配置复用兄弟插件 context_window_guard 内联的 CompressionConfig
+  （单一实现：读 config/system/context_window_config.yaml，失败回退默认）。
 - {{retrieval:...}} 占位符的向量检索由 ctx.get_service("retriever") 改为
   _memory_backend.search。
 """
@@ -36,7 +35,6 @@ import asyncio
 import fnmatch
 import logging
 import re
-from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -96,93 +94,16 @@ LANGUAGE_INSTRUCTIONS: dict[str, str] = {
 
 
 # ═══════════════════════════════════════════════════════════
-# 压缩预算配置（从 0.1 memory/context_compressor.py 移植的最小实现）
+# 压缩预算配置（单一实现：复用 context_window_guard 的 CompressionConfig）
 # ═══════════════════════════════════════════════════════════
 
 
-@dataclass
-class _LocalCompressionConfig:
-    """压缩预算最小配置（prompt_build 本地实现）。
+def _compression_config(context_window: int) -> Any:
+    """构建压缩预算配置（context_window_guard 为宿主的单一实现）。
 
-    Step 6 修复：0.2 中不存在 memory.context_compressor（老版 line 873 的
-    ``from memory.context_compressor import CompressionConfig`` 在 try/except 之外，
-    直接 ImportError）。本类从 config/system/context_window_config.yaml 读取
-    budgets.l1/l2/recent 与 compress_trigger_ratio；读取失败回退到代码默认
-    （与 context_window_guard Step 4 内联的 CompressionConfig 行为一致）。
-
-    Attributes:
-        context_window: 模型上下文窗口大小
-        compress_trigger_ratio: 压缩触发比例（默认 0.55，见 config/system/context_window_config.yaml）
-        l1_ratio: L1 预算比例
-        l2_ratio: L2 预算比例
-        recent_ratio: 最近原文预算比例
-    """
-
-    context_window: int = 128000
-    compress_trigger_ratio: float = 0.55  # 见 config/system/context_window_config.yaml
-    l1_ratio: float = 0.1
-    l2_ratio: float = 0.05
-    recent_ratio: float = 0.18
-
-    @classmethod
-    def from_yaml_config(cls, context_window: int) -> _LocalCompressionConfig:
-        """从 config/system/context_window_config.yaml 加载预算配置。
-
-        通过 ConfigCenter 读取（统一缓存 + 热重载），路径由 ConfigCenter 解析。
-        读取失败时回退到代码默认（与 0.1 行为一致）。
-
-        Args:
-            context_window: 当前模型上下文窗口大小
-
-        Returns:
-            填充好预算比例的 _LocalCompressionConfig
-        """
-        try:
-            from config.config_center import get_config_center  # noqa: PLC0415
-
-            yaml_data = get_config_center().get("system/context_window_config.yaml") or {}
-            budgets = yaml_data.get("budgets", {})
-            return cls(
-                context_window=context_window,
-                compress_trigger_ratio=yaml_data.get("compress_trigger_ratio", 0.55),
-                l1_ratio=budgets.get("l1", 0.1),
-                l2_ratio=budgets.get("l2", 0.05),
-                recent_ratio=budgets.get("recent", 0.18),
-            )
-        except Exception as e:
-            logger.warning(
-                "[prompt_build] 压缩预算配置读取失败，回退代码默认 | path=system/context_window_config.yaml | error=%s",
-                e,
-            )
-            return cls(context_window=context_window)
-
-    def get_budgets(self) -> dict[str, int]:
-        """计算各部分实际 token 预算。
-
-        Returns:
-            各层 token 预算字典 {recent, L1, L2}
-        """
-        return {
-            "recent": int(self.context_window * self.recent_ratio),
-            "L1": int(self.context_window * self.l1_ratio),
-            "L2": int(self.context_window * self.l2_ratio),
-        }
-
-    def get_trigger_threshold(self) -> int:
-        """获取触发压缩的 token 阈值。
-
-        Returns:
-            触发阈值 = context_window * compress_trigger_ratio
-        """
-        return int(self.context_window * self.compress_trigger_ratio)
-
-
-def _local_compression_config(context_window: int) -> Any:
-    """构建压缩预算配置（prompt_build 本地入口）。
-
-    优先复用相邻插件 context_window_guard 内联的 CompressionConfig
-    （Step 4 已内联到其 plugin.py，两插件目录为兄弟关系）；不可导入时
-    回退到本文件内联的 _LocalCompressionConfig 最小实现。
+    字段、yaml 键与回退语义均以 guard 内联的 CompressionConfig 为准
+    （读 config/system/context_window_config.yaml，读取失败回退代码默认），
+    本插件不再维护本地副本。
 
     Args:
         context_window: 当前模型上下文窗口大小
@@ -190,12 +111,9 @@ def _local_compression_config(context_window: int) -> Any:
     Returns:
         带 get_budgets()/get_trigger_threshold() 的配置对象
     """
-    try:
-        from context_window_guard.plugin import CompressionConfig  # noqa: PLC0415
+    from context_window_guard.plugin import CompressionConfig  # noqa: PLC0415
 
-        return CompressionConfig.from_yaml_config(context_window)
-    except Exception:
-        return _LocalCompressionConfig.from_yaml_config(context_window)
+    return CompressionConfig.from_yaml_config(context_window)
 
 
 class PromptBuildPlugin(IInputPlugin):
@@ -406,7 +324,7 @@ class PromptBuildPlugin(IInputPlugin):
 
         顺序：system_prompt -> language -> tools_description -> static_vars
         不含 recent_messages 和 dynamic_vars。
-        压缩层（L2/L1/KEYWORDS）通过 compression_messages 独立消息输出。
+        压缩层（L2/L1）通过 compression_messages 独立消息输出。
 
         记忆/知识不再自动拼入：memory.retrieved / knowledge.context 不在此追加，
         注入提示词只能由 static_vars 声明 retrieval/tags opt-in（_retrieve_by_tags）。
@@ -1094,7 +1012,7 @@ class PromptBuildPlugin(IInputPlugin):
         """加载压缩块和状态快照为独立消息列表。
 
         每个块一条消息（XML 包裹），组装顺序：L2(老→新) → L1(老→新) → state_snapshot。
-        预算不足时从 L1 → L2 降级，L2 也不够则丢弃（state_snapshot.keywords 兜底）。
+        预算不足时从 L1 → L2 降级，L2 也不够则丢弃。
 
         Returns:
             独立消息列表
@@ -1128,7 +1046,7 @@ class PromptBuildPlugin(IInputPlugin):
 
         # ── 预算计算 ──
         context_window = ctx.state.get("context_window", 128000)
-        config = _local_compression_config(context_window)
+        config = _compression_config(context_window)
         budgets = config.get_budgets()
         trigger_tokens = config.get_trigger_threshold()
 
@@ -1175,42 +1093,35 @@ class PromptBuildPlugin(IInputPlugin):
             deduped.append(chunk)
             high_water = chunk["seq_start"]
 
-        # ── 预算分配：新→老，L1→L2→keywords 兜底 ──
+        # ── 预算分配：新→老，L1→L2 ──
         # 用 sequence_end 排序：自增整数，语义绝对可靠，不受跨进程/容器时钟漂移影响
         sorted_chunks = sorted(deduped, key=lambda c: c["seq_end"], reverse=True)
         l1_used = 0
         l2_used = 0
         l1_blocks: list = []
         l2_blocks: list = []
-        dropped_keywords: list[tuple[str, list[str]]] = []  # (seq, keywords) 被丢弃块的兜底
 
         for chunk in sorted_chunks:
             l1_content = chunk["l1_content"] or ""
             l2_content = chunk["l2_content"] or ""
-            # 新后端不落 keywords 标签（0.1 chunk_service 的 keywords 字段已取消），恒为空
-            keywords: list[str] = []
             seq = chunk["seq"]
 
             l1_tokens = self._estimate_tokens_for_budget(l1_content) if l1_content else 0
             l2_tokens = self._estimate_tokens_for_budget(l2_content) if l2_content else 0
 
             if l1_budget > 0 and l1_used + l1_tokens <= l1_budget and l1_content:
-                l1_blocks.append((seq, l1_content, keywords))
+                l1_blocks.append((seq, l1_content))
                 l1_used += l1_tokens
             elif l2_budget > 0 and l2_used + l2_tokens <= l2_budget and l2_content:
-                l2_blocks.append((seq, l2_content, keywords))
+                l2_blocks.append((seq, l2_content))
                 l2_used += l2_tokens
-            elif keywords:
-                # keywords 兜底档：L1/L2 都放不下时，至少保留关键词索引供检索
-                dropped_keywords.append((seq, keywords))
-            # else: 完全无内容且无 keywords，真正丢弃
+            # else: L1/L2 都放不下或内容为空，丢弃该块
 
         # ── 组装消息：L2(老→新) → L1(老→新) ──
         l2_blocks.reverse()
         l1_blocks.reverse()
-        dropped_keywords.reverse()  # 老→新，与上面一致
 
-        for seq, content, _kw in l2_blocks:
+        for seq, content in l2_blocks:
             messages.append(
                 {
                     "role": "system",
@@ -1221,7 +1132,7 @@ class PromptBuildPlugin(IInputPlugin):
                 }
             )
 
-        for seq, content, _kw in l1_blocks:
+        for seq, content in l1_blocks:
             messages.append(
                 {
                     "role": "system",
@@ -1232,34 +1143,15 @@ class PromptBuildPlugin(IInputPlugin):
                 }
             )
 
-        # keywords 兜底块：被丢弃的 L1/L2 块至少保留关键词索引
-        if dropped_keywords:
-            index_lines = []
-            for seq, kws in dropped_keywords:
-                top_kws = ", ".join(kws[:5])  # 每块最多 5 个关键词，控制体积
-                index_lines.append(f"[seq {seq}] {top_kws}")
-            messages.append(
-                {
-                    "role": "system",
-                    "name": "compressed",
-                    "content": '<compressed level="KEYWORDS">\n'
-                    "## 已降级块的关键词索引（L1/L2 预算不足，仅保留关键词）\n" + "\n".join(index_lines) + "\n"
-                    "</compressed>",
-                    # 语义标记（内部字段）：记忆库检索内容；llm_core 发送前清理
-                    "_context_form": "recall",
-                }
-            )
-
-        # ── 状态快照（含 keywords 合并）──
+        # ── 状态快照 ──
         state_msgs = await self._load_state_snapshot_message(ctx, pipeline_run_id)
         messages.extend(state_msgs)
 
         logger.debug(
-            "[%s] 压缩消息: L1=%d块 L2=%d块 keywords兜底=%d块 state_snapshot=%s",
+            "[%s] 压缩消息: L1=%d块 L2=%d块 state_snapshot=%s",
             self.name,
             len(l1_blocks),
             len(l2_blocks),
-            len(dropped_keywords),
             "有" if state_msgs else "无",
         )
         return messages

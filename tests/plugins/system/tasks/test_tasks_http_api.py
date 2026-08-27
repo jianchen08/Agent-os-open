@@ -66,7 +66,7 @@ def _isolate_tasks_plugin_modules():
         "enum_utils",
         "workspace",
         "service_access",
-        "projects",
+        "project_registry",
         "_task_cleanup",
         "_task_crud",
         "_task_state",
@@ -666,7 +666,7 @@ class TestPhaseAndAceEndpoints:
 @pytest.fixture
 def registry(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Any:
     """临时目录 ProjectRegistry + 注入 http_api（避免触碰真实数据目录）。"""
-    import projects as projects_mod
+    import project_registry as projects_mod
 
     reg = projects_mod.ProjectRegistry(data_dir=tmp_path / "tasks")
     import http_api
@@ -724,7 +724,7 @@ class TestProjectsLifecycle:
 
     async def test_list_projects(self, monkeypatch: pytest.MonkeyPatch,
                                  service: Any, hub: _FakeCapabilityHub, registry: Any) -> None:
-        import projects as projects_mod
+        import project_registry as projects_mod
 
         registry.save(projects_mod.ProjectModel(title="项目A", submitted_by="u-1"))
         registry.save(projects_mod.ProjectModel(title="项目B", auto_execute=True))
@@ -738,7 +738,7 @@ class TestProjectsLifecycle:
     async def test_list_projects_status_filter(self, monkeypatch: pytest.MonkeyPatch,
                                                service: Any, hub: _FakeCapabilityHub,
                                                registry: Any) -> None:
-        import projects as projects_mod
+        import project_registry as projects_mod
 
         registry.save(projects_mod.ProjectModel(title="暂停的", status="paused"))
         registry.save(projects_mod.ProjectModel(title="运行中"))
@@ -750,7 +750,7 @@ class TestProjectsLifecycle:
     async def test_get_project_with_subtasks(self, monkeypatch: pytest.MonkeyPatch,
                                              service: Any, hub: _FakeCapabilityHub,
                                              registry: Any) -> None:
-        import projects as projects_mod
+        import project_registry as projects_mod
 
         p = registry.save(projects_mod.ProjectModel(title="项目C"))
         hub._responses["pipeline-state"] = {
@@ -776,7 +776,7 @@ class TestProjectsLifecycle:
     async def test_pause_resume_project_suspends_children(
             self, monkeypatch: pytest.MonkeyPatch, service: Any, hub: _FakeCapabilityHub,
             registry: Any) -> None:
-        import projects as projects_mod
+        import project_registry as projects_mod
 
         p = registry.save(projects_mod.ProjectModel(title="项目D"))
         hub._responses["pipeline-state"] = {
@@ -814,7 +814,7 @@ class TestProjectsLifecycle:
 
     async def test_toggle_auto_execute(self, monkeypatch: pytest.MonkeyPatch,
                                        service: Any, hub: _FakeCapabilityHub, registry: Any) -> None:
-        import projects as projects_mod
+        import project_registry as projects_mod
 
         p = registry.save(projects_mod.ProjectModel(title="项目E"))  # auto_execute 默认 False
         resp = await _http(monkeypatch, service, hub,
@@ -1219,7 +1219,7 @@ class TestEdgeAndDegradedBranches:
     async def test_list_projects_bad_limit_fallback(self, monkeypatch: pytest.MonkeyPatch,
                                                     service: Any, hub: _FakeCapabilityHub,
                                                     registry: Any) -> None:
-        import projects as projects_mod
+        import project_registry as projects_mod
 
         registry.save(projects_mod.ProjectModel(title="A"))
         resp = await _http(monkeypatch, service, hub, "/ext/task_service/projects",
@@ -1231,7 +1231,7 @@ class TestEdgeAndDegradedBranches:
     async def test_list_projects_page_offset(self, monkeypatch: pytest.MonkeyPatch,
                                              service: Any, hub: _FakeCapabilityHub,
                                              registry: Any) -> None:
-        import projects as projects_mod
+        import project_registry as projects_mod
 
         registry.save(projects_mod.ProjectModel(title="P1", created_at="2026-01-01T00:00:00"))
         registry.save(projects_mod.ProjectModel(title="P2", created_at="2026-02-01T00:00:00"))

@@ -1,13 +1,17 @@
-"""项目登记 — project = 真实文件夹 + 登记行（YAML 持久化）。
+"""项目登记 — project = 真实文件夹 + 登记行（YAML 持久化，跨插件共享真值源）。
 
 模型契约（docs/decisions/2026-08-27-project-folder-registration.md）：
 - project 不是任务系统实体：不占 task_id、无状态机、无管道；
 - 登记行是 id ↔ 文件夹路径的最薄账本（任务树分组/工作空间定位/生命周期键）；
-- 子任务挂靠键 = 任务行 ``metadata.project_id``（task_manage 过滤同键）；
+- 子任务挂靠键 = 任务行 ``metadata.project_id``（state 面
+  ``task.parent_project_id`` 同值，task_submit 双写）；
 - 项目文件夹是 git 主工作树，子任务 worktree（branch=task/{task_id}）从它分叉。
 
-存储：与 TaskStorage 同根的 ``projects/`` 子目录，每项目一个 YAML 文件，
-内存 dict + 文件持久化，同步 API（对齐 TaskStorage 模式）。
+共享面：tasks（登记读写/文件夹创建）、isolation / pipeline / workspace（只读
+解析 project_id → path）三方插件进程隔离，本模块是登记文件的唯一访问实现
+（sys.path 自举引用，与 tenant_data.py 同模式）。
+
+存储：``{tasks 数据根}/projects/{project_id}.yaml``（与 TaskStorage 同根）。
 """
 
 from __future__ import annotations
@@ -25,8 +29,9 @@ from typing import Any
 
 import yaml
 
-# 多租户数据根咽喉点（plugins/shared/tenant_data.py），与 storage.py 同款自举。
-_SHARED_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+# 多租户数据根咽喉点（plugins/shared/tenant_data.py）。本文件位于
+# plugins/shared/project_registry.py，上溯 1 级即 plugins/shared/。
+_SHARED_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__)))
 if _SHARED_ROOT not in sys.path:
     sys.path.insert(0, _SHARED_ROOT)
 from tenant_data import DEFAULT_TENANT, tenant_data_root  # noqa: E402
@@ -60,30 +65,33 @@ class ProjectModel:
     session_id: str = ""
 
 
+def registry_data_dir(data_dir: str | Path | None = None, tenant_id: str | None = None) -> Path:
+    """登记文件目录（与 TaskStorage 同根的 projects/ 子目录，解析优先级一致）。
+
+    显式 data_dir > ``TASKS_STORAGE_DIR`` env > 多租户根 ``data/{tenant_id}/tasks``。
+    """
+    if data_dir is not None:
+        resolved = data_dir
+    else:
+        env_dir = os.environ.get("TASKS_STORAGE_DIR")
+        if env_dir:
+            resolved = env_dir
+        else:
+            resolved = tenant_data_root(tenant_id or DEFAULT_TENANT, "tasks")
+    return Path(resolved) / "projects"
+
+
 class ProjectRegistry:
     """项目登记簿 — 内存缓存 + YAML 文件持久化。
 
     Attributes:
         _projects: 内存中的登记行缓存（project_id → ProjectModel）
-        _data_dir: 登记文件目录（与 TaskStorage 同根的 projects/ 子目录）
+        _data_dir: 登记文件目录
     """
 
     def __init__(self, data_dir: str | Path | None = None, tenant_id: str | None = None) -> None:
-        """初始化登记簿。
-
-        data_dir 解析优先级与 TaskStorage 一致：显式参数 > ``TASKS_STORAGE_DIR``
-        env > 多租户根 ``data/{tenant_id}/tasks``；登记文件落其下 ``projects/``。
-        """
-        if data_dir is not None:
-            resolved = data_dir
-        else:
-            env_dir = os.environ.get("TASKS_STORAGE_DIR")
-            if env_dir:
-                resolved = env_dir
-            else:
-                resolved = tenant_data_root(tenant_id or DEFAULT_TENANT, "tasks")
         self._projects: dict[str, ProjectModel] = {}
-        self._data_dir = Path(resolved) / "projects"
+        self._data_dir = registry_data_dir(data_dir, tenant_id)
         self._data_dir.mkdir(parents=True, exist_ok=True)
         self._load_all()
 
@@ -129,14 +137,36 @@ class ProjectRegistry:
         return True
 
 
+def load_project_paths() -> dict[str, str]:
+    """轻量只读解析：project_id → 文件夹路径（isolation/pipeline/workspace 侧用）。
+
+    每次直读登记目录（文件量小）；目录不可达/损坏文件跳过并留痕。
+    """
+    paths: dict[str, str] = {}
+    data_dir = registry_data_dir()
+    if not data_dir.is_dir():
+        return paths
+    for yaml_file in data_dir.glob("*.yaml"):
+        try:
+            data = yaml.safe_load(yaml_file.read_text(encoding="utf-8"))
+            if not isinstance(data, dict):
+                continue
+            pid = str(data.get("id") or yaml_file.stem)
+            path = str(data.get("path") or "")
+            if path:
+                paths[pid] = path
+        except Exception as exc:  # noqa: BLE001 — 单文件损坏不阻断其余登记解析
+            logger.warning("解析项目登记失败: %s — %s", yaml_file, exc)
+    return paths
+
+
 # ════════════════════════════════════════════════════════════
 # 项目文件夹解析与创建
 # ════════════════════════════════════════════════════════════
 
 
 def _isolation_config_path() -> Path:
-    """定位 isolation_config.yaml（与 isolation/workspace.py 同语义的独立实现，
-    插件进程隔离不可跨插件 import；配置文件是共享真值源）。"""
+    """定位 isolation_config.yaml（配置文件是共享真值源；workspace.root 同源）。"""
     env_root = os.environ.get("AGENTOS_CONFIG_ROOT")
     if env_root:
         p = Path(env_root) / "isolation" / "isolation_config.yaml"
@@ -146,15 +176,15 @@ def _isolation_config_path() -> Path:
         candidate = ancestor / "config" / "isolation" / "isolation_config.yaml"
         if candidate.exists():
             return candidate
-    return Path(__file__).resolve().parent.parent.parent / "config" / "isolation" / "isolation_config.yaml"
+    return Path(__file__).resolve().parent.parent / "config" / "isolation" / "isolation_config.yaml"
 
 
-def _project_root_of_tree() -> Path:
+def project_root_of_tree() -> Path:
     """仓库根（含 config/ 目录的最近祖先）。"""
     for ancestor in Path(__file__).resolve().parents:
         if (ancestor / "config").is_dir():
             return ancestor
-    return Path(__file__).resolve().parent.parent.parent
+    return Path(__file__).resolve().parent.parent
 
 
 def workspace_base_dir() -> Path:
@@ -171,7 +201,7 @@ def workspace_base_dir() -> Path:
     except Exception as exc:  # noqa: BLE001 — 配置缺失走缺省值
         logger.warning("[projects] 读取 workspace.root 失败，使用缺省 .ai_workspaces | err=%s", exc)
     p = Path(root)
-    return p if p.is_absolute() else _project_root_of_tree() / p
+    return p if p.is_absolute() else project_root_of_tree() / p
 
 
 def _slugify(title: str) -> str:
@@ -214,7 +244,7 @@ def remove_project_folder(path: str) -> bool:
     校验：不得为盘符根/仓库根/工作空间基本身——命中拒绝删除返回 False。
     """
     target = Path(path).resolve()
-    guarded = {str(workspace_base_dir().resolve()).lower(), str(_project_root_of_tree().resolve()).lower()}
+    guarded = {str(workspace_base_dir().resolve()).lower(), str(project_root_of_tree().resolve()).lower()}
     target_s = str(target).lower()
     if target_s in guarded or (os.name == "nt" and re.fullmatch(r"[a-z]:\\", target_s)):
         logger.warning("[projects] 拒绝删除受保护路径: %s", path)
@@ -233,7 +263,7 @@ def remove_project_folder(path: str) -> bool:
 
 
 def purge_legacy_container_data(task_storage: Any) -> dict[str, int]:
-    """清除容器任务实体的遗留数据（插件启动时调用，幂等）。
+    """清除容器任务实体的遗留数据（tasks 插件启动时调用，幂等）。
 
     范围（ADR 2026-08-27：不迁移直接清除）：
     1. TaskStorage 中 ``metadata.task_scope == "container"`` 的任务行；

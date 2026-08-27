@@ -49,6 +49,12 @@ _SHARED_DIR = str(_PLUGIN_DIR.parents[2])
 if _SHARED_DIR not in sys.path:
     sys.path.insert(0, _SHARED_DIR)
 
+# pipeline/input 目录（prompt_build 经 context_window_guard.plugin 复用 CompressionConfig，
+# 跨插件用例加载 prompt_build 时导入方向为 guard → 可达性由本目录保证）
+_INPUT_DIR = str(_PLUGIN_DIR.parents[0])
+if _INPUT_DIR not in sys.path:
+    sys.path.insert(0, _INPUT_DIR)
+
 # llm_core 插件目录（import adapter / _message_normalizer 用）
 _LLM_CORE_DIR = str(_PLUGIN_DIR.parents[1] / "core" / "llm_core")
 if _LLM_CORE_DIR not in sys.path:

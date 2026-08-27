@@ -602,17 +602,35 @@ def _container_to_host_path(container_path: str) -> str:
 
 
 async def _resolve_workspace_path(container_task_id: str) -> str | None:
-    """解析工作空间路径（三层通道，先 state 真值后 task_service 镜像）。
+    """解析工作空间路径（三层通道，先登记后 state 真值再 task_service 镜像）。
 
     1. ``_local`` 特例 → 项目根；
-    2. state 聚合行（pipeline-state 读面）：按 pipeline_id 取 ``ws_meta.path``
-       / ``workspace``——会话管道等无任务记录的管道走此通道（所有有工作区的
-       管道都可关联）；
-    3. TaskService 任务 metadata.ws_meta.path（镜像回退）。
+    2. 项目登记通道：id 命中登记行 → 项目文件夹（project = 文件夹+登记，
+       ADR 2026-08-27）；
+    3. state 聚合行（pipeline-state 读面）：按 pipeline_id 取 ``ws_meta.path``
+       / ``workspace``——任务管道（worktree 副本/plain 目录）走此通道；
+    4. TaskService 任务 metadata.ws_meta.path（镜像回退）。
     """
     # 特殊处理 _local 工作空间
     if container_task_id == "_local":
         return str(_get_project_root())
+
+    # 项目登记通道（projectId 直查项目文件夹）
+    try:
+        _SHARED_ROOT = str(Path(__file__).resolve().parents[3])
+        if _SHARED_ROOT not in sys.path:
+            sys.path.insert(0, _SHARED_ROOT)
+        from project_registry import load_project_paths  # noqa: PLC0415
+
+        project_path = load_project_paths().get(container_task_id)
+        if project_path:
+            return project_path
+    except Exception as exc:  # noqa: BLE001 — 登记通道失败不阻断后续通道
+        logger.warning(
+            "项目登记通道解析失败 | container_task_id=%s err=%s",
+            container_task_id,
+            exc,
+        )
 
     # state 聚合行通道（任务管道的 state 真值也覆盖——task = pipeline）
     service = get_workspace_service()

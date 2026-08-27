@@ -163,25 +163,26 @@ class TestWorkspaceArtifacts:
         assert result == {"items": [], "total": 0}
 
     def test_list_artifacts_aggregates_tasks(self, monkeypatch) -> None:
-        """聚合容器任务自身 + 子任务的制品（子链来自 state 聚合行）。"""
+        """聚合项目名下子任务的制品（挂靠键 = state 行 task.parent_project_id）。"""
         svc = WorkspaceService()
-        _run(svc.get_or_create_workspace("root-task"))
+        _run(svc.get_or_create_workspace("proj-1"))
 
         async def read_rows():
             return [
-                {"pipeline_id": "root-task"},
-                {"pipeline_id": "child-1", "lineage.parent_pipeline_id": "root-task"},
-                {"pipeline_id": "child-2", "lineage.parent_pipeline_id": "root-task"},
+                {"pipeline_id": "proj-1"},
+                {"pipeline_id": "child-1", "task.parent_project_id": "proj-1"},
+                {"pipeline_id": "child-2", "task.parent_project_id": "proj-1"},
+                {"pipeline_id": "other", "task.parent_project_id": "proj-2"},
             ]
 
         monkeypatch.setattr(svc, "_read_state_rows", read_rows, raising=False)
         art = _FakeArtifactService()
         _inject_artifact_service(art)
 
-        result = _run(svc.list_artifacts_by_workspace("root-task"))
+        result = _run(svc.list_artifacts_by_workspace("proj-1"))
 
         assert result["total"] == 3
-        assert set(art.calls) == {"root-task", "child-1", "child-2"}
+        assert set(art.calls) == {"proj-1", "child-1", "child-2"}
 
     def test_list_artifacts_state_reader_missing_fails_closed(self) -> None:
         """state 读面未注入 → 仅容器任务自身（legacy 镜像回退已退役）。"""
@@ -247,88 +248,33 @@ class TestWorkspaceFileTree:
         monkeypatch.setattr(os, "listdir", real_listdir)
 
 
-class TestWorkspaceResolveContainerTask:
-    def test_resolve_state_reader_missing_fails_closed(self, caplog) -> None:
-        """state 读面未注入 → fail-closed 返回自身（0.1 镜像回退已退役）。"""
+class TestProjectChildAggregation:
+    def test_child_ids_by_parent_project_key(self, monkeypatch) -> None:
+        """子链聚合：挂靠键 = state 行 task.parent_project_id（单跳，不递归）。"""
+        svc = WorkspaceService()
+        rows = [
+            {"pipeline_id": "proj-1"},
+            {"pipeline_id": "child-1", "task.parent_project_id": "proj-1"},
+            {"pipeline_id": "child-2", "task.parent_project_id": "proj-1"},
+            {"pipeline_id": "other", "task.parent_project_id": "proj-2"},
+            {"pipeline_id": "no-project"},
+        ]
+
+        async def read_rows():
+            return rows
+
+        monkeypatch.setattr(svc, "_read_state_rows", read_rows, raising=False)
+        assert _run(svc._get_child_task_ids("proj-1")) == {"child-1", "child-2"}
+
+    def test_child_ids_state_reader_missing_fails_closed(self, caplog) -> None:
+        """state 读面未注入 → fail-closed 空集并留痕。"""
         import logging
 
         _reset_state_reader()
         svc = WorkspaceService()
         with caplog.at_level(logging.WARNING):
-            assert _run(svc.resolve_container_task("t1")) == "t1"
+            assert _run(svc._get_child_task_ids("proj-1")) == set()
         assert any("读面未注入" in r.getMessage() for r in caplog.records)
-
-    def test_resolve_walks_lineage_to_root(self, monkeypatch) -> None:
-        """state 聚合行：沿 lineage.parent_pipeline_id 爬到根形式任务。"""
-        svc = WorkspaceService()
-        rows = [
-            {"pipeline_id": "root"},
-            {"pipeline_id": "mid", "lineage.parent_pipeline_id": "root"},
-            {"pipeline_id": "leaf", "lineage.parent_pipeline_id": "mid"},
-        ]
-
-        async def read_rows():
-            return rows
-
-        monkeypatch.setattr(svc, "_read_state_rows", read_rows, raising=False)
-        assert _run(svc.resolve_container_task("leaf")) == "root"
-
-    def test_resolve_stops_at_container_scope(self, monkeypatch) -> None:
-        """链上最近的 task.scope=container 任务即容器任务。"""
-        svc = WorkspaceService()
-        rows = [
-            {"pipeline_id": "root"},
-            {"pipeline_id": "mid", "lineage.parent_pipeline_id": "root", "task.scope": "container"},
-            {"pipeline_id": "leaf", "lineage.parent_pipeline_id": "mid"},
-        ]
-
-        async def read_rows():
-            return rows
-
-        monkeypatch.setattr(svc, "_read_state_rows", read_rows, raising=False)
-        assert _run(svc.resolve_container_task("leaf")) == "mid"
-
-    def test_resolve_read_error_returns_none_not_task_id(self, monkeypatch, caplog) -> None:
-        """state 聚合行解析抛错 → 返回 None；未解析 id 不得伪装成容器 id。"""
-        import logging
-
-        svc = WorkspaceService()
-
-        async def read_rows_boom():
-            raise RuntimeError("聚合行损坏")
-
-        monkeypatch.setattr(svc, "_read_state_rows", read_rows_boom, raising=False)
-        with caplog.at_level(logging.WARNING):
-            assert _run(svc.resolve_container_task("t-broken")) is None
-        assert any("解析容器任务失败" in r.getMessage() for r in caplog.records), (
-            "失败必须留痕可观测"
-        )
-
-    def test_resolve_read_success_and_failure_disambiguated(self, monkeypatch) -> None:
-        """区分度对照：同一输入，成功路径返回 id、异常路径返回 None（两值可区分）。"""
-        svc_ok = WorkspaceService()
-
-        async def read_rows():
-            return [{"pipeline_id": "t1"}]  # 无父 → 自身即容器
-
-        monkeypatch.setattr(svc_ok, "_read_state_rows", read_rows, raising=False)
-        assert _run(svc_ok.resolve_container_task("t1")) == "t1"
-
-    def test_child_ids_aggregate_descendants_from_state(self, monkeypatch) -> None:
-        """子链聚合：lineage 分组 BFS 全量后代。"""
-        svc = WorkspaceService()
-        rows = [
-            {"pipeline_id": "root"},
-            {"pipeline_id": "mid", "lineage.parent_pipeline_id": "root"},
-            {"pipeline_id": "leaf", "lineage.parent_pipeline_id": "mid"},
-            {"pipeline_id": "other", "lineage.parent_pipeline_id": "elsewhere"},
-        ]
-
-        async def read_rows():
-            return rows
-
-        monkeypatch.setattr(svc, "_read_state_rows", read_rows, raising=False)
-        assert _run(svc._get_child_task_ids("root")) == {"mid", "leaf"}
 
 
 # ═══════════════════════════════════════════════════════════

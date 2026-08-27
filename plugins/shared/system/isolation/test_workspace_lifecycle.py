@@ -93,36 +93,6 @@ def _git_init(repo: Path, branch: str = "main") -> None:
     subprocess.run(["git", "commit", "-m", "init"], cwd=repo, check=True, capture_output=True, text=True)
 
 
-class TestInitContainerWorkspace:
-    def test_creates_container_with_copy(self, tmp_path: Path) -> None:
-        src = tmp_path / "src"
-        src.mkdir()
-        (src / "a.txt").write_text("x", encoding="utf-8")
-        m = _make_manager(tmp_path, ws_root=tmp_path / "wsroot")
-        meta = m.init_container_workspace("c1", str(src), {})
-        assert meta["mode"] == "project_root"
-        assert meta["is_container_workspace"] is True
-        ws = Path(meta["path"])
-        assert ws.exists()
-        assert (ws / "a.txt").exists()
-        assert (ws / ".git").exists()
-        assert m._ws_meta_store["c1"] == meta
-
-    def test_existing_path_reuses(self, tmp_path: Path) -> None:
-        m = _make_manager(tmp_path, ws_root=tmp_path / "wsroot")
-        m.init_container_workspace("c1", None, {})
-        # 第二次调用走已存在分支
-        meta = m.init_container_workspace("c1", None, {})
-        assert meta["mode"] == "project_root"
-        assert Path(meta["path"]).exists()
-
-    def test_git_init_failure_raises(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-        m = _make_manager(tmp_path, ws_root=tmp_path / "wsroot")
-        monkeypatch.setattr(m, "_git_init_and_initial_commit", lambda *a, **k: False)
-        with pytest.raises(RuntimeError, match="git init"):
-            m.init_container_workspace("c1", None, {})
-
-
 class TestOnTaskStart:
     def test_reuses_existing_meta(self, tmp_path: Path) -> None:
         ws = tmp_path / "existing_ws"

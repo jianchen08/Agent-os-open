@@ -1620,7 +1620,7 @@ async def create_project(
 
     非 git 文件夹会 git init（子任务 worktree 前提）；git init 失败创建整体失败。
     """
-    from projects import ProjectModel, ensure_project_folder  # noqa: PLC0415
+    from project_registry import ProjectModel, ensure_project_folder  # noqa: PLC0415
 
     body = dict(body or {})
     goal = str(body.get("goal") or body.get("title") or "").strip()
@@ -1769,7 +1769,7 @@ async def delete_project(
 
     文件夹删除带路径安全校验（盘符根/仓库根/工作空间基目录拒删）。
     """
-    from projects import remove_project_folder  # noqa: PLC0415
+    from project_registry import remove_project_folder  # noqa: PLC0415
 
     registry = _get_project_registry()
     project = _get_project_or_404(registry, project_id)

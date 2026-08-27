@@ -36,6 +36,10 @@ _SHARED_DIR = str(_PLUGIN_DIR.parents[2])  # plugins/shared/
 if _SHARED_DIR not in sys.path:
     sys.path.insert(0, _SHARED_DIR)
 
+_INPUT_DIR = str(_PLUGIN_DIR.parents[0])  # plugins/shared/pipeline/input/
+if _INPUT_DIR not in sys.path:
+    sys.path.insert(0, _INPUT_DIR)  # 供 _compression_config 导入 context_window_guard
+
 from pipeline.plugin import PluginContext  # noqa: E402
 
 
@@ -209,14 +213,11 @@ class TestStateSnapshotMessage:
 
 class TestLocalConfigParser:
     def test_local_config_parser(self) -> None:
-        """本地压缩配置读取 yaml（读不到时回退默认），返回有效预算。
-
-        关键回归：不再导入 0.2 中不存在的 memory.context_compressor。
-        """
+        """压缩预算配置读取 yaml（读不到时回退默认），返回有效预算（单一实现直连 guard）。"""
         mod = _load_plugin_module()
         sys.modules.pop("memory.context_compressor", None)
 
-        cfg = mod._local_compression_config(128000)
+        cfg = mod._compression_config(128000)
         budgets = cfg.get_budgets()
 
         assert budgets["recent"] == int(128000 * 0.18), "recent 预算应为 23040"
@@ -354,7 +355,7 @@ class TestCompressionConfigFallbackWarns:
         mod = _load_plugin_module()
         monkeypatch.setitem(sys.modules, "config.config_center", None)  # 模拟配置中心不可达
         with caplog.at_level(logging.WARNING):
-            cfg = mod._LocalCompressionConfig.from_yaml_config(64000)
+            cfg = mod._compression_config(64000)
         assert cfg.context_window == 64000, "回退代码默认（行为保持）"
         msgs = [r.getMessage() for r in caplog.records if r.levelno >= logging.WARNING]
         assert any("压缩预算配置读取失败" in m for m in msgs)

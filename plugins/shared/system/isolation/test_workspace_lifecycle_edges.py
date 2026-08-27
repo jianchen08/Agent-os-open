@@ -134,40 +134,6 @@ class TestInitEdges:
         assert "记录主分支失败" in caplog.text
         assert m._main_branch == ""
 
-    def test_ensure_dir_and_git_new_and_existing(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """_ensure_dir_and_git：新目录创建 + git init；已有 .git 只配置用户。"""
-        m = _make_manager(tmp_path, tmp_path / "wsroot")
-        fresh = tmp_path / "newdir"
-        m._ensure_dir_and_git(fresh)
-        assert fresh.exists()
-        assert (fresh / ".git").exists()
-        # 已有 git 仓库 → else 分支只 _ensure_git_user
-        repo = tmp_path / "repo"
-        _git_init(repo)
-        m._ensure_dir_and_git(repo)
-        rc, out, _ = m._run_git("config", "user.name", cwd=repo)
-        assert rc == 0 and out == "Agent OS"
-
-    def test_ensure_dir_and_git_init_failure_raises(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        m = _make_manager(tmp_path, tmp_path / "wsroot")
-        monkeypatch.setattr(m, "_git_init_and_initial_commit", lambda *a, **k: False)
-        with pytest.raises(RuntimeError, match="git init"):
-            m._ensure_dir_and_git(tmp_path / "other")
-
-    def test_init_container_workspace_relative_src(self, tmp_path: Path) -> None:
-        """相对 workspace 源路径基于 base_path 解析并复制。"""
-        rel = tmp_path / "rel_src"
-        rel.mkdir()
-        (rel / "a.txt").write_text("x", encoding="utf-8")
-        m = _make_manager(tmp_path, tmp_path / "wsroot")
-        meta = m.init_container_workspace("c1", "rel_src", {})
-        assert (Path(meta["path"]) / "a.txt").exists()
-        assert (Path(meta["path"]) / ".git").exists()
-
 
 # ═══════════════════════════════════════════════════════════
 # 任务启动：子任务分发 / 父任务查找失败
@@ -247,116 +213,32 @@ class TestSkillsCopyEdges:
 
 
 # ═══════════════════════════════════════════════════════════
-# _start_root_task：容器空间 / 缺失目录 / .git 无提交 / 分支守卫
+# _start_root_task：显式 workspace / 缺失目录 / .git 无提交 / 分支守卫
 # ═══════════════════════════════════════════════════════════
 
 
 class TestRootTaskEdges:
-    def _container_manager(self, tmp_path: Path, repo: Path, task_id: str = "c1") -> WorkspaceLifecycleManager:  # type: ignore[valid-type]
-        parent = _FakeTask("parent", metadata={"task_scope": "container"})
-        child = _FakeTask(task_id, parent_task_id="parent")
-        meta_store = {"parent": {"path": str(repo), "mode": "project_root"}}
-        return _make_manager(
-            tmp_path, tmp_path / "wsroot", tasks={"parent": parent, task_id: child}, meta_store=meta_store
-        )
-
-    def test_root_task_container_worktree_flow(self, tmp_path: Path) -> None:
-        """容器父任务存在且空间有效 → worktree 拓扑 + auto-save 守卫放行。"""
-        repo = tmp_path / "container_repo"
-        _git_init(repo)
-        m = self._container_manager(tmp_path, repo)
-        meta = m._start_root_task("c1", "unused", {"task_id": "c1"})
+    def test_root_task_project_folder_worktree_branches_from_project(self, tmp_path: Path) -> None:
+        """挂项目任务：worktree 从项目文件夹分叉（branch=task/{id} 落项目仓库），
+        worktree 目录在工作空间根下，项目主工作树不被污染。"""
+        proj = tmp_path / "myproj"
+        _git_init(proj)
+        (proj / "src.txt").write_text("s", encoding="utf-8")
+        subprocess.run(["git", "add", "-A"], cwd=proj, check=True, capture_output=True, text=True)
+        subprocess.run(["git", "commit", "-m", "add src"], cwd=proj, check=True, capture_output=True, text=True)
+        m = _make_manager(tmp_path, tmp_path / "wsroot")
+        meta = m._start_root_task("r1", str(proj), {"task_id": "r1", "_has_explicit_workspace": True})
         assert meta["mode"] == "worktree"
-        assert meta["branch"] == "task/c1"
-        assert Path(meta["path"]).exists()
-        assert Path(meta["path"]) != repo
-        assert Path(meta["path"]).parent == repo.parent
-
-    def test_root_task_container_git_without_commit_recovers(self, tmp_path: Path) -> None:
-        """容器空间 .git 存在但无提交 → 补 initial commit 后建 worktree。"""
-        repo = tmp_path / "container_repo"
-        _git_init(repo, with_commit=False)
-        m = self._container_manager(tmp_path, repo)
-        meta = m._start_root_task("c1", "unused", {"task_id": "c1"})
-        assert meta["mode"] == "worktree"
-        assert Path(meta["path"]).exists()
-
-    def test_root_task_container_branch_guard_skips_autosave(
-        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
-    ) -> None:
-        """容器空间在 feature 分支上 → 分支守卫拒绝 auto-save（warning），仍建 worktree。"""
-        repo = tmp_path / "guarded_repo"
-        _git_init(repo)
-        # base_path 与容器空间一致 + 已记录主分支 main，再切到 feature
-        parent = _FakeTask("parent", metadata={"task_scope": "container"})
-        child = _FakeTask("c1", parent_task_id="parent")
-        meta_store = {"parent": {"path": str(repo), "mode": "project_root"}}
-        m = WorkspaceLifecycleManager(
-            None,
-            {"workspace": {"root": str(tmp_path / "wsroot")}},
-            _FakeTree({child.id: child, "parent": parent}),
-            meta_store,
-            base_path=str(repo),
-        )
-        subprocess.run(["git", "checkout", "-b", "feature"], cwd=repo, check=True, capture_output=True, text=True)
-        with caplog.at_level(logging.WARNING):
-            meta = m._start_root_task("c1", "unused", {"task_id": "c1"})
-        assert meta["mode"] == "worktree"
-        assert "分支守卫检测到变更" in caplog.text
-
-    def test_root_task_container_git_init_failure_raises(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """容器空间无 .git 且 git init 失败 → 显式抛错。"""
-        repo = tmp_path / "container_repo"
-        repo.mkdir(parents=True)
-        m = self._container_manager(tmp_path, repo)
-        monkeypatch.setattr(m, "_git_init_and_initial_commit", lambda *a, **k: False)
-        with pytest.raises(RuntimeError, match="容器空间 git 初始化失败"):
-            m._start_root_task("c1", "unused", {"task_id": "c1"})
-
-    def test_root_task_container_no_commit_init_failure_raises(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """容器空间 .git 存在但无提交，且补 initial commit 失败 → 显式抛错。"""
-        repo = tmp_path / "container_repo"
-        _git_init(repo, with_commit=False)
-        m = self._container_manager(tmp_path, repo)
-        monkeypatch.setattr(m, "_git_init_and_initial_commit", lambda *a, **k: False)
-        with pytest.raises(RuntimeError, match="已有 .git 但无提交记录"):
-            m._start_root_task("c1", "unused", {"task_id": "c1"})
-
-    def test_root_task_container_sparse_worktree_when_large(self, tmp_path: Path) -> None:
-        """容器空间超过 sparse 阈值 → sparse-checkout worktree。"""
-        repo = tmp_path / "container_repo"
-        _git_init(repo)
-        big = repo / "big.bin"
-        big.write_bytes(b"\x00" * 2 * 1024 * 1024)
-        subprocess.run(["git", "add", "-A"], cwd=repo, check=True, capture_output=True, text=True)
-        subprocess.run(["git", "commit", "-m", "big"], cwd=repo, check=True, capture_output=True, text=True)
-        m = self._container_manager(tmp_path, repo)
-        m._config = {"workspace": {"default_mode": "worktree", "root": str(tmp_path / "wsroot"), "sparse_threshold_mb": 1}}
-        meta = m._start_root_task("c1", "unused", {"task_id": "c1"})
-        assert meta["mode"] == "worktree"
-        assert Path(meta["path"]).exists()
-
-    def test_root_task_container_parent_without_workspace_raises(self, tmp_path: Path) -> None:
-        """父任务是容器任务但找不到容器空间 → 显式报错不静默降级。"""
-        parent = _FakeTask("parent", metadata={"task_scope": "container"})
-        child = _FakeTask("c1", parent_task_id="parent")
-        # meta_store 无 parent 记录 → _find_container_workspace 返回 None
-        m = _make_manager(tmp_path, tmp_path / "wsroot", tasks={child.id: child, "parent": parent})
-        with pytest.raises(RuntimeError, match="父任务 parent 是容器任务"):
-            m._start_root_task("c1", "unused", {"task_id": "c1"})
-
-    def test_root_task_container_check_tree_failure_warns(self, tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
-        """容器父任务检测抛非 RuntimeError 异常 → warning 后继续走常规路径。"""
-        tree = _RaisingTree(ValueError("tree down"))
-        m = _make_manager(tmp_path, tmp_path / "wsroot", tree=tree)
-        with caplog.at_level(logging.WARNING):
-            meta = m._start_root_task("r1", str(tmp_path / "non_git_ws"), {"task_id": "r1"})
-        assert "工作空间初始化异常" in caplog.text
-        assert meta["mode"] == "plain"  # 非 git 项目根 → 降级 plain 空目录
+        assert meta["branch"] == "task/r1"
+        assert meta["project_root"] == str(proj)
+        # worktree 目录落在工作空间根（不在项目文件夹内制造垃圾目录）
+        assert Path(meta["path"]).parent == tmp_path / "wsroot"
+        # 分支挂在项目仓库上（worktree 的 git 源 = 项目文件夹）
+        rc, out, _ = m._run_git("branch", "--list", "task/r1", cwd=proj)
+        assert rc == 0 and "task/r1" in out
+        # 项目主工作树保持干净（分支隔离，不被任务写入）
+        rc_s, out_s, _ = m._run_git("status", "--porcelain", cwd=proj)
+        assert rc_s == 0 and out_s.strip() == ""
 
     def test_root_task_explicit_missing_dir_initialized(self, tmp_path: Path) -> None:
         """显式 workspace 目录不存在 → 创建目录 + git init + worktree。"""
