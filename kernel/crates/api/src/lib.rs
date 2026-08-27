@@ -25,6 +25,7 @@ pub mod routes;
 pub mod run_chain;
 pub mod server;
 pub mod session_routes;
+pub mod sidecar_warmup;
 pub mod tools;
 pub mod ws_session;
 

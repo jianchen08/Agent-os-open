@@ -891,8 +891,23 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // 引用环——不阻断启动：warn 留痕，运行时热重载路径（server.rs
     // maybe_reload_compiled_pipeline）在每次请求前重新加载+编译，配置修复后
     // 自动生效；修复前 chat 走空管道降级（与"缺省配置下内核可启动"一致）。
-    if let Err(compile_err) = agentos_api::server::load_and_compile(&config_root, &plugin_ids) {
-        warn!("管道加载期编译失败（内核继续启动，修复配置后热重载自动生效）: {compile_err}");
+    match agentos_api::server::load_and_compile(&config_root, &plugin_ids) {
+        Ok(compiled) => {
+            // boot 后台预热：管道引用的 sidecar 宿主提前 spawn 进缓存，消除
+            // "启动后首次消息"的管道链串行冷启动（每宿主 spawn→initialize 秒级，
+            // 实测首条消息 41.5s vs 第二条 1.9s）。预热集只含管道引用插件
+            // （referenced_plugin_ids 单一来源）——工具/服务插件保持纯懒加载，
+            // idle GC 治理不变。预热须在 set_router 之后（spawn 的宿主拿到完整
+            // capabilities 声明，反向调用不空快照）。
+            agentos_api::sidecar_warmup::spawn_pipeline_sidecar_warmup(
+                invoker.clone(),
+                Arc::new(compiled),
+                enabled_manifests.clone(),
+            );
+        }
+        Err(compile_err) => {
+            warn!("管道加载期编译失败（内核继续启动，修复配置后热重载自动生效）: {compile_err}");
+        }
     }
 
     // 构建 AppState（注入 pipeline_config / step_library / invoker / store / plugin_ids / project_root）

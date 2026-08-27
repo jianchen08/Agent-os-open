@@ -1255,6 +1255,22 @@ impl PluginInvokerImpl {
         *self.hook_bus.write() = Some(bus);
     }
 
+    /// 预热插件宿主：确保 sidecar 已 spawn 并完成 initialize 握手（幂等——
+    /// 缓存命中直接返回，不重 spawn；single-flight 语义与正常调用路径同一把
+    /// per-host 锁，与在途调用并发安全）。
+    ///
+    /// boot 后台预热用：把"启动后首次调用"的宿主冷启动（spawn→MCP initialize
+    /// 每宿主秒级）提前到用户尚未发消息的窗口。**不执行任何插件逻辑**——
+    /// 仅建连；native（InProcess）无进程模型，no-op Ok。预热宿主仍受 idle GC
+    /// 治理（长时间未用自动回收，懒 spawn 兜底），预热只是提前触发不改变
+    /// 生命周期语义。失败返回 Err 交调用方记日志跳过。
+    pub async fn warmup_sidecar(&self, manifest: &PluginManifest) -> Result<(), PluginError> {
+        if manifest.host_type != HostType::Sidecar {
+            return Ok(());
+        }
+        self.get_or_create_mcp_client(manifest).await.map(|_| ())
+    }
+
     /// 旁路广播 OnError 给总线订阅者（审计 / `lifecycle.plugin_error_total` 计数）。
     ///
     /// 与 OnLoad 的旁路 emit 对称：插件 execute/call 返回 `Err` 时由调用方（
@@ -1340,9 +1356,8 @@ impl PluginInvokerImpl {
 
         // 连接 + initialize 握手 + on_load 通知/总线广播 → 按宿主键注册缓存
         // （细节见 connect_initialize_and_cache）。
-        Ok(self
-            .connect_initialize_and_cache(client, &host_key, manifest)
-            .await?)
+        self.connect_initialize_and_cache(client, &host_key, manifest)
+            .await
     }
 
     /// Fast path 复用判定（无锁查缓存）：命中且存活按指纹新旧二分——

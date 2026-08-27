@@ -104,6 +104,48 @@ impl CompiledPipeline {
             .filter(|h| &h.scope == scope && h.event == event)
             .collect()
     }
+
+    /// 编译产物引用的全部插件 id——boot sidecar 预热集的单一来源。
+    ///
+    /// 覆盖：各循环体步骤项（`Plugin` 项；`Composite` 项查统一步骤池递归展开，
+    /// 步骤 id 级 visited 防御池内环）+ step_hooks 装载表的 run 目标。
+    /// `Dynamic` 项运行时才解析出插件名，不在此列（懒 spawn 兜底）。
+    pub fn referenced_plugin_ids(&self) -> HashSet<String> {
+        fn visit(
+            step: &CompiledStep,
+            pipe: &CompiledPipeline,
+            ids: &mut HashSet<String>,
+            seen: &mut HashSet<String>,
+        ) {
+            if !seen.insert(step.id.clone()) {
+                return;
+            }
+            for item in &step.items {
+                match item {
+                    CompiledItem::Plugin { plugin_id, .. } => {
+                        ids.insert(plugin_id.clone());
+                    }
+                    CompiledItem::Composite { step_id, .. } => {
+                        if let Some(sub) = pipe.find_step(step_id) {
+                            visit(sub, pipe, ids, seen);
+                        }
+                    }
+                    CompiledItem::Dynamic { .. } => {}
+                }
+            }
+        }
+        let mut ids = HashSet::new();
+        for body in &self.bodies {
+            for step in &body.steps {
+                let mut seen = HashSet::new();
+                visit(step, self, &mut ids, &mut seen);
+            }
+        }
+        for hook in &self.step_hooks {
+            ids.insert(hook.plugin_id.clone());
+        }
+        ids
+    }
 }
 
 /// 步骤服务注册表（服务化提案 §3.2 第③级命中的数据层）。
@@ -634,7 +676,8 @@ impl Compiler<'_> {
                             "步骤 '{}' 引用的插件 '{}' 为复合体（声明了 capabilities.tools/services/steps），\
                              未在其 capabilities.steps 中显式声明该步骤名——复合体须显式声明 \
                              capabilities.steps（含本步骤名）才能被管道步骤引用，禁止隐式默认",
-                            step.id, item.name()
+                            step.id,
+                            item.name()
                         ),
                     });
                 }
@@ -683,7 +726,7 @@ impl Compiler<'_> {
                     return Err(CompileError {
                         location,
                         message: format!("while 表达式语法错误: {msg}"),
-                    })
+                    });
                 }
             },
         };
@@ -1366,8 +1409,8 @@ mod tests {
                 input_schema: None,
             },
         ]);
-        let index = build_step_service_index(&[with_caps(manifest("task_service"), caps)])
-            .expect("ok");
+        let index =
+            build_step_service_index(&[with_caps(manifest("task_service"), caps)]).expect("ok");
         let r = index.resolve("task.inject_params").expect("命中");
         assert_eq!(r.plugin_id, "task_service");
         // method 存步骤 name 本身（SDK 侧按 name 分发，不发明 type 字段）
@@ -1592,11 +1635,9 @@ mod tests {
             compile_pipeline(&config, &StepLibrary::default(), &plugins(&["alpha"])).expect("ok");
         // 未声明 hooks → 空表，查询恒空（发射点零开销短路）
         assert!(compiled.step_hooks.is_empty());
-        assert!(
-            compiled
-                .hooks_for(&HookScope::Body("main".into()), "stream_chunk")
-                .is_empty()
-        );
+        assert!(compiled
+            .hooks_for(&HookScope::Body("main".into()), "stream_chunk")
+            .is_empty());
     }
 
     // ── 四级命中接线（服务化提案 §3.2/§3.4：index 注入 → method 携带）──
@@ -1629,7 +1670,10 @@ mod tests {
         let index = build_step_service_index(&[composite]).expect("ok");
         let config = single_body(
             "p",
-            vec![make_step("s", vec![StepItem::Bare("task.inject_params".into())])],
+            vec![make_step(
+                "s",
+                vec![StepItem::Bare("task.inject_params".into())],
+            )],
         );
         let compiled = compile_pipeline_with_hooks(
             &config,
@@ -1740,5 +1784,70 @@ mod tests {
             }
             other => panic!("expected Plugin, got {other:?}"),
         }
+    }
+
+    /// referenced_plugin_ids：Plugin 项 + Composite 池递归 + hooks 目标全收集；
+    /// Dynamic 模板与未被引用的插件不进集合（预热集只含确定性引用）。
+    #[test]
+    fn referenced_plugin_ids_covers_steps_composite_and_hooks() {
+        let config = single_body(
+            "p",
+            vec![
+                make_step("s1", vec![StepItem::Bare("alpha".into())]),
+                make_step("outer", vec![StepItem::Bare("inner".into())]),
+                make_step("s2", vec![StepItem::Bare("{{state.dyn}}".into())]),
+            ],
+        );
+        // inner 为库 step（进统一步骤池），展开到 beta
+        let mut lib = StepLibrary::default();
+        lib.steps.insert(
+            "inner".into(),
+            make_step("inner", vec![StepItem::Bare("beta".into())]),
+        );
+        let plugin_ids = plugins(&["alpha", "beta", "gamma", "delta"]);
+        let compiled = compile_pipeline_with_hooks(
+            &config,
+            &lib,
+            &plugin_ids,
+            None,
+            &[(
+                "main".into(),
+                vec![HookFile {
+                    on: "after_step".into(),
+                    run: "gamma.before".into(),
+                }],
+            )],
+            &[],
+        )
+        .expect("ok");
+
+        let ids = compiled.referenced_plugin_ids();
+        assert!(ids.contains("alpha"), "Plugin 项直引: {ids:?}");
+        assert!(
+            ids.contains("beta"),
+            "Composite 池递归展开 inner→beta: {ids:?}"
+        );
+        assert!(ids.contains("gamma"), "hooks run 目标: {ids:?}");
+        // 性质断言：确定性引用集 ⊆ 编译传入插件集，且不含未引用插件/步骤 id
+        assert!(ids.is_subset(&plugin_ids), "引用集须为插件 id: {ids:?}");
+        assert!(!ids.contains("delta"), "未引用插件不进预热集: {ids:?}");
+        assert!(
+            !ids.contains("inner") && !ids.contains("outer") && !ids.contains("s1"),
+            "步骤 id 不是插件 id（inner 若被当插件收集说明 Composite 未展开或误收 id）: {ids:?}"
+        );
+        // Dynamic 模板运行时才解析——不产生确定性引用（{{state.dyn}} 里 dyn 不该出现）
+        assert!(!ids.contains("dyn"), "Dynamic 模板名不进集合: {ids:?}");
+    }
+
+    /// referenced_plugin_ids：空管道 + 无 hooks = 空集（空集短路性质）。
+    #[test]
+    fn referenced_plugin_ids_empty_pipeline_yields_empty() {
+        let compiled = compile_pipeline(
+            &single_body("p", vec![]),
+            &StepLibrary::default(),
+            &plugins(&["alpha"]),
+        )
+        .expect("ok");
+        assert!(compiled.referenced_plugin_ids().is_empty());
     }
 }

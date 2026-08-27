@@ -2689,3 +2689,73 @@ async fn test_check_health_light_via_host_process() {
         .insert(host_key, Arc::clone(&live_arc));
     assert!(invoker.check_health("guard_a").await);
 }
+
+/// warmup_sidecar：native（InProcess）无进程模型 → no-op Ok，不触发加载/缓存。
+#[tokio::test]
+async fn warmup_sidecar_native_is_noop() {
+    let loader = Arc::new(MockLoader::new());
+    let invoker = PluginInvokerImpl::new(loader.clone());
+    let mut m = make_sidecar_manifest("native_x", "server.py");
+    m.host_type = HostType::InProcess;
+    invoker
+        .warmup_sidecar(&m)
+        .await
+        .expect("native 预热 no-op Ok");
+    assert!(
+        invoker.mcp_clients.read().is_empty(),
+        "no-op 不应产生宿主缓存"
+    );
+}
+
+/// warmup_sidecar：宿主已缓存存活 → 幂等命中（复用同一实例，不 kill 不 respawn）。
+/// boot 预热与首条消息并发场景的行为锚点：single-flight/缓存路径与正常调用同源。
+#[tokio::test]
+async fn warmup_sidecar_reuses_cached_host_without_respawn() {
+    let loader = Arc::new(MockLoader::new());
+    let manifest = make_sidecar_manifest("warm_hot", "python server.py");
+    loader.add_manifest(manifest.clone());
+    let invoker = PluginInvokerImpl::new(loader);
+
+    let live = spawn_long_lived_stdio_client().await;
+    let arc = Arc::new(tokio::sync::RwLock::new(live));
+    invoker
+        .mcp_clients
+        .write()
+        .insert("plugin:warm_hot".to_string(), Arc::clone(&arc));
+
+    invoker
+        .warmup_sidecar(&manifest)
+        .await
+        .expect("缓存命中应 Ok");
+    // 性质断言：同一宿主实例被复用（缓存仍是原 Arc）且进程仍活（未 kill）
+    let still = invoker
+        .mcp_clients
+        .read()
+        .get("plugin:warm_hot")
+        .cloned()
+        .expect("幂等命中后缓存条目保留");
+    assert!(Arc::ptr_eq(&still, &arc), "幂等命中不得 respawn 换实例");
+    assert!(
+        arc.read().await.is_alive().await,
+        "复用路径不得 kill 存活宿主"
+    );
+}
+
+/// warmup_sidecar：宿主构建失败（无插件目录 → 解释器缺失）→ Err 传播不吞
+/// （调用方据此记日志跳过，懒 spawn 仍是运行期兜底）。
+#[tokio::test]
+async fn warmup_sidecar_spawn_failure_propagates() {
+    let loader = Arc::new(MockLoader::new());
+    let manifest = make_sidecar_manifest("warm_missing_venv", "python server.py");
+    loader.add_manifest(manifest.clone());
+    let invoker = PluginInvokerImpl::new(loader);
+    let result = invoker.warmup_sidecar(&manifest).await;
+    assert!(
+        result.is_err(),
+        "venv 缺失的失败必须传播（不吞、不假成功）: {result:?}"
+    );
+    assert!(
+        invoker.mcp_clients.read().is_empty(),
+        "失败后不得残留缓存条目"
+    );
+}
