@@ -458,21 +458,36 @@ async def test_call_llm_message_logging_branches() -> None:
     assert caller.calls[0][1]["tool_name"] == "llm.complete_stream"
 
 
-async def test_call_llm_tool_schemas_logged() -> None:
-    """state.tool_schemas 非空 → 日志记录工具名（不影响调用参数）。"""
+async def test_call_llm_tool_schemas_passed_to_service() -> None:
+    """state.tool_schemas 非空 → 经 kwargs["tools"] 透传给 llm.complete_stream。"""
     caller = _FakeCaller({"success": True, "data": _ok_response()})
     plugin = _make_plugin(caller)
+    schemas = [
+        {"type": "function", "function": {"name": "bash"}},
+        {"type": "function", "function": {"name": "read_file"}},
+    ]
     await plugin._call_llm(  # noqa: SLF001
         [{"role": "user", "content": "hi"}],
         _make_ctx(
             {
                 **_base_state(),
-                "tool_schemas": [
-                    {"type": "function", "function": {"name": "bash"}},
-                    {"type": "function", "function": {"name": "read_file"}},
-                ],
+                "tool_schemas": schemas,
             }
         ),
         stream=False,
     )
+    assert caller.calls[0][1]["args"]["model"] == "deepseek-v3"
+    assert caller.calls[0][1]["args"]["tools"] == schemas
+
+
+async def test_call_llm_tool_schemas_empty_not_carried() -> None:
+    """state.tool_schemas 为空 → tools 以 None 透传（不进 llm.complete_stream 请求体）。"""
+    caller = _FakeCaller({"success": True, "data": _ok_response()})
+    plugin = _make_plugin(caller)
+    await plugin._call_llm(  # noqa: SLF001
+        [{"role": "user", "content": "hi"}],
+        _make_ctx(_base_state()),
+        stream=False,
+    )
+    assert "tools" not in caller.calls[0][1]["args"]
     assert caller.calls[0][1]["args"]["model"] == "deepseek-v3"

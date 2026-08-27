@@ -974,6 +974,11 @@ class LLMCore(ICorePlugin):
                 len(tool_schemas),
                 ", ".join(t.get("function", {}).get("name", "?") for t in tool_schemas),
             )
+            # tools 透传：llm.complete_stream 的 tools 形参接收工具 schema，litellm
+            # 据此发 function calling 请求（内核 inject_tool_schemas 已按 agent
+            # tool_ids 注入 state.tool_schemas）。空面不携带该键——形参默认 None，
+            # 也不触发 capability input_schema 对 tools 的 array 校验。
+            kwargs["tools"] = tool_schemas
 
         # 调用前记录模型/API 信息
         model_str = self._model
