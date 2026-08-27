@@ -31,7 +31,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "plugins" / "sha
 from isolation_types import IsolationLevel
 from pipeline.plugin import PluginContext
 from pipeline.types import StateKeys
-from plugin import IsolationGuard
+import plugin as plugin_module  # noqa: E402  # 模块对象引用：裸名串扰治理会 evict 后重 import，字符串 patch 会打到新对象
+from plugin import IsolationGuard  # noqa: E402
 
 
 def _make_ctx(tool="bash_execute"):
@@ -66,9 +67,13 @@ def _make_auto_plugin(detected=False):
 
     Args:
         detected: __init__ 阶段 _detect_docker 的返回值（模拟启动时的检测结果）
+
+    自动检测路径的复检会触发引擎自愈（ensure_docker_engine），测试环境不
+    真实拉起 WSL/docker，统一 mock 掉。
     """
     with patch("decider.IsolationDecider"), \
-         patch.object(IsolationGuard, "_detect_docker", return_value=detected):
+         patch.object(IsolationGuard, "_detect_docker", return_value=detected), \
+         patch("plugin.ensure_docker_engine"):
         return IsolationGuard(config={})
 
 
@@ -160,3 +165,35 @@ async def test_true_state_does_not_recheck():
     probe.assert_not_called()
     contexts = result.state_updates["execution_contexts"]
     assert contexts[0].get("provider") == "docker"
+
+
+# ---------------------------------------------------------------------------
+# 5. 引擎自愈：复检路径先确保引擎存活再探测（插件运行时维护引擎）
+# ---------------------------------------------------------------------------
+
+
+async def test_recheck_triggers_engine_self_heal():
+    """复检路径先触发引擎自愈（wsl_health.ensure_docker_engine）再探测。"""
+    plugin = _make_auto_plugin(detected=False)
+    _container_policy(plugin)
+    plugin._detect_docker = MagicMock(return_value=False)  # 复检阶段钉死不可用
+    plugin._docker_checked_at = time.monotonic() - 9999
+
+    with patch.object(plugin_module, "ensure_docker_engine") as ensure_mock:
+        await plugin.execute(_make_ctx())
+
+    ensure_mock.assert_called_once()
+
+
+async def test_engine_self_heal_error_does_not_break_recheck():
+    """自愈抛异常不阻断复检与决策（降级保持，只留日志）。"""
+    plugin = _make_auto_plugin(detected=False)
+    _container_policy(plugin)
+    plugin._detect_docker = MagicMock(return_value=False)  # 复检仍不可用
+    plugin._docker_checked_at = time.monotonic() - 9999
+
+    with patch.object(plugin_module, "ensure_docker_engine", side_effect=RuntimeError("boom")):
+        result = await plugin.execute(_make_ctx())
+
+    contexts = result.state_updates["execution_contexts"]
+    assert contexts[0].get("blocked") is True  # 仍拦截（docker 不可用），未崩

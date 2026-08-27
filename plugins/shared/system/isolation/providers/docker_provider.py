@@ -16,6 +16,7 @@ from isolation_types import (
     IsolationLevel,
 )
 from providers.base import IsolationProvider
+from wsl_health import ensure_docker_engine
 
 logger = logging.getLogger(__name__)
 
@@ -158,6 +159,12 @@ class DockerProvider(IsolationProvider):
             )
             if proc.returncode != 0:
                 err = proc.stderr.decode("utf-8", errors="replace") if proc.stderr else ""
+                # 引擎自愈（同步阻塞，放 executor）：docker 不可达多为 WSL VM
+                # 被空闲回收所致，拉起引擎后再判；仍不可达才报错。
+                recovered = await loop.run_in_executor(None, ensure_docker_engine)
+                if recovered:
+                    self._docker_available = True
+                    return True, None
                 return False, f"Docker daemon 未运行: {err}"
             self._docker_available = True
             return True, None

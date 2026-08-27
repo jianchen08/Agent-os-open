@@ -271,10 +271,40 @@ class TestIsAvailable:
         monkeypatch.setattr(
             subprocess, "run", lambda *a, **kw: _Completed(1, b"", b"cannot connect")
         )
+        # 自愈（wsl_health.ensure_docker_engine）属外部依赖，此处 mock 为未恢复
+        monkeypatch.setattr(_MOD, "ensure_docker_engine", lambda: False)
         ok, err = _run(_provider().is_available())
         assert ok is False
         assert "Docker daemon 未运行" in (err or "")
         assert "cannot connect" in (err or "")
+
+    def test_daemon_recovered_by_self_heal(self, monkeypatch: Any) -> None:
+        """探测失败但引擎自愈成功（WSL VM 被拉起）→ 可用，不再报错。"""
+        monkeypatch.setattr(_MOD.shutil, "which", lambda _: "docker")
+        monkeypatch.setattr(
+            subprocess, "run", lambda *a, **kw: _Completed(1, b"", b"cannot connect")
+        )
+        monkeypatch.setattr(_MOD, "ensure_docker_engine", lambda: True)
+        provider = _provider()
+        ok, err = _run(provider.is_available())
+        assert ok is True
+        assert err is None
+        assert provider._docker_available is True
+
+    def test_self_heal_exception_reports_failure(self, monkeypatch: Any) -> None:
+        """自愈抛异常（如 wsl 不可用）→ 如实报失败，不崩。"""
+        monkeypatch.setattr(_MOD.shutil, "which", lambda _: "docker")
+        monkeypatch.setattr(
+            subprocess, "run", lambda *a, **kw: _Completed(1, b"", b"cannot connect")
+        )
+
+        def _boom() -> bool:
+            raise OSError("wsl unavailable")
+
+        monkeypatch.setattr(_MOD, "ensure_docker_engine", _boom)
+        ok, err = _run(_provider().is_available())
+        assert ok is False
+        assert "wsl unavailable" in (err or "")
 
     def test_cli_missing_raises_filenotfound(self, monkeypatch: Any) -> None:
         monkeypatch.setattr(_MOD.shutil, "which", lambda _: "docker")

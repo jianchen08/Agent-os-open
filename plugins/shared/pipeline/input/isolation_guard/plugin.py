@@ -34,6 +34,7 @@ from decider import IsolationDecider
 from isolation_types import IsolationLevel
 from pipeline.plugin import IInputPlugin, PluginContext, PluginResult
 from pipeline.types import StateKeys
+from wsl_health import ensure_docker_engine
 
 logger = logging.getLogger(__name__)
 
@@ -127,6 +128,17 @@ class IsolationGuard(IInputPlugin):
             self._manager = None
         return self._manager
 
+    def _ensure_engine(self) -> None:
+        """引擎自愈：docker 不可达时尝试拉起 WSL 保活会话唤醒引擎。
+
+        幂等（wsl_health.ensure_docker_engine 内部冷却），仅在复检路径
+        （当前不可用 + 越过复检冷却）触发；失败只留日志不阻断复检。
+        """
+        try:
+            ensure_docker_engine()
+        except Exception as exc:  # noqa: BLE001 - 自愈失败不阻断管道
+            logger.warning("[%s] 引擎自愈失败: %s", self.name, exc)
+
     @staticmethod
     def _detect_docker() -> bool:
         """同步检测 Docker 是否可用（CLI 存在 + daemon 运行）。
@@ -200,6 +212,7 @@ class IsolationGuard(IInputPlugin):
         if self._docker_auto and not self._docker_available:
             now = time.monotonic()
             if now - self._docker_checked_at >= self._RECHECK_COOLDOWN:
+                self._ensure_engine()  # 引擎自愈：先确保引擎存活再探测
                 self._docker_available = self._detect_docker()
                 self._docker_checked_at = now
                 if self._docker_available:

@@ -16,6 +16,7 @@ from __future__ import annotations
 import logging
 import os
 import subprocess
+import time
 from dataclasses import dataclass
 
 logger = logging.getLogger(__name__)
@@ -216,6 +217,100 @@ def get_wsl_ip() -> str | None:
     except Exception as e:
         logger.warning("[wsl_health] get_wsl_ip exception: %s", e)
     return None
+
+
+# ── 引擎自愈（插件运行时维护 docker/WSL 引擎存活）─────────────────────
+# WSL2 VM 在最后一个 wsl.exe 客户端退出后按 vmIdleTimeout（默认 60s）回收
+# （microsoft/WSL#9968：配置大值也拦不住回收），dockerd 随 systemd 关闭 →
+# Windows 侧 DOCKER_HOST=tcp://localhost:2375 拒绝连接。唯一可靠维护手段 =
+# 常驻保活会话（wsl.exe ... sleep infinity）持有 VM。本段提供幂等拉起，
+# 供 DockerProvider.is_available / isolation_guard 复检调用：插件在自身
+# 运行周期内维护引擎存活，不依赖外部计划任务/Startup。
+_ENGINE_ENSURE_COOLDOWN = 30.0
+# 上一次真正拉起/等待的单调时钟（模块级：跨插件实例共享，防多实例风暴）
+_last_engine_ensure: float = 0.0
+# Windows 隐藏窗口标志（sidecar 拉起 wsl.exe 时不闪控制台）
+_CREATE_NO_WINDOW = 0x08000000
+
+
+def is_docker_reachable(timeout: float = 5.0) -> bool:
+    """docker daemon 是否可经当前 DOCKER_HOST 配置访问（docker version）。"""
+    try:
+        result = subprocess.run(
+            ["docker", "version", "--format", "{{.Server.Version}}"],
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            creationflags=_CREATE_NO_WINDOW,
+        )
+        return result.returncode == 0
+    except Exception as e:
+        logger.warning("[wsl_health] docker 可达性探测异常: %s", e)
+        return False
+
+
+def _keepalive_running() -> bool:
+    """是否已有 WSL 保活会话（wsl.exe 命令行含 sleep infinity）。"""
+    try:
+        result = subprocess.run(
+            [
+                "powershell",
+                "-NoProfile",
+                "-Command",
+                "(Get-CimInstance Win32_Process -Filter \"Name='wsl.exe'\" | "
+                "Where-Object { $_.CommandLine -match 'sleep infinity' } | "
+                "Measure-Object).Count",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=30,
+            creationflags=_CREATE_NO_WINDOW,
+        )
+        if result.returncode != 0:
+            logger.warning(
+                "[wsl_health] 保活会话探测失败: %s", result.stderr.strip()[:200]
+            )
+            return False
+        return int(result.stdout.strip()) >= 1
+    except Exception as e:
+        logger.warning("[wsl_health] 保活会话探测异常: %s", e)
+        return False
+
+
+def ensure_docker_engine(timeout: float = 30.0) -> bool:
+    """确保 docker 引擎可达（幂等，供插件运行时自愈调用）。
+
+    幂等语义：
+    - docker 已可达 → 直接 True（零成本快路径）；
+    - 冷却窗口（_ENGINE_ENSURE_COOLDOWN）内不重复拉起，防多插件/多轮次风暴；
+    - 保活会话已存在 → 只等待 daemon 就绪（dockerd 由 WSL systemd 随 VM 启动）；
+    - 无保活会话 → detached 拉起一个持有 VM 后等待就绪。
+
+    返回最终可达性；阻塞最长 timeout 秒（Windows 专用：wsl.exe/powershell，
+    与模块既有函数同假设；调用方应放线程池或依赖冷却保证低成本）。
+    """
+    global _last_engine_ensure
+    if is_docker_reachable():
+        return True
+    now = time.monotonic()
+    if now - _last_engine_ensure < _ENGINE_ENSURE_COOLDOWN:
+        logger.info("[wsl_health] 引擎自愈冷却中，跳过拉起")
+        return False
+    _last_engine_ensure = now
+    if _keepalive_running():
+        logger.info("[wsl_health] 保活会话存在但 docker 不可达，等待 daemon 就绪")
+    else:
+        subprocess.Popen(
+            ["wsl.exe", "-d", _WSL_DISTRO, "--exec", "/bin/sh", "-c", "sleep infinity"],
+            creationflags=_CREATE_NO_WINDOW,
+        )
+        logger.info("[wsl_health] 已拉起 WSL 保活会话（%s），等待 docker 就绪", _WSL_DISTRO)
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if is_docker_reachable(timeout=3.0):
+            return True
+        time.sleep(2)
+    return False
 
 
 def setup_port_forward(
