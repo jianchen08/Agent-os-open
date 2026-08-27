@@ -93,11 +93,9 @@ fn is_light_group_member(manifest: &PluginManifest) -> bool {
     }
     let is_external = match manifest.mcp.as_ref() {
         Some(cfg) => match cfg.transport {
-            agentos_core::traits::McpTransport::StreamableHttp => cfg
-                .endpoint
-                .as_ref()
-                .and_then(|e| e.url.as_ref())
-                .is_some(),
+            agentos_core::traits::McpTransport::StreamableHttp => {
+                cfg.endpoint.as_ref().and_then(|e| e.url.as_ref()).is_some()
+            }
             agentos_core::traits::McpTransport::Stdio => cfg
                 .endpoint
                 .as_ref()
@@ -502,6 +500,10 @@ impl agentos_native_sdk::HostServices for NativeHostServices {
     }
 }
 
+/// 共享 MCP 客户端句柄：宿主键粒度缓存条目——外层 [`RwLock`] 护表，内层
+/// tokio RwLock 护连接本身的并发读（一次 execute 持读锁全程）。
+type SharedMcpClient = Arc<tokio::sync::RwLock<McpClient>>;
+
 /// PluginInvoker 实现。
 ///
 /// 管理插件实例和 MCP 客户端连接，按 host_type 透明分发调用。
@@ -513,7 +515,7 @@ pub struct PluginInvokerImpl {
     ///
     /// 宿主键：light 合宿插件 → `group:light:{n}`（同宿主成员共享一个客户端/
     /// 进程）；其余 sidecar → `plugin:{plugin_id}`（独占宿主，现状语义）。
-    mcp_clients: RwLock<HashMap<String, Arc<tokio::sync::RwLock<McpClient>>>>,
+    mcp_clients: RwLock<HashMap<String, SharedMcpClient>>,
     /// per-host spawn 互斥锁（single-flight，防并发请求竞态 spawn 多个宿主进程）。
     ///
     /// 同一宿主键的 spawn 串行化：首个请求持锁 spawn 并写缓存，后续请求拿锁后
@@ -551,9 +553,6 @@ pub struct PluginInvokerImpl {
     last_used: RwLock<HashMap<String, Instant>>,
     /// light 组运行时装箱状态（分配表 + 槽位计数，见 [`LightPacking`]）。
     light_packing: RwLock<LightPacking>,
-    // （原 PYTHONPATH 注入状态字段 `pythonpath_src` 已退役——SDK 由
-    // per-plugin venv 的 editable install 解析，`resolve_pythonpath_src` 已删除，
-    // `set_pythonpath_src` 保留为兼容 no-op。）
 }
 
 impl PluginInvokerImpl {
@@ -571,20 +570,6 @@ impl PluginInvokerImpl {
             last_used: RwLock::new(HashMap::new()),
             light_packing: RwLock::new(LightPacking::default()),
         }
-    }
-
-    /// 兼容 no-op：PYTHONPATH 注入已整体退役——SDK 由 per-plugin venv 的
-    /// editable install 解析，注入链路已删除（两套解析路径并存是版本不同步
-    /// 事故温床）。
-    ///
-    /// **保留本方法签名仅为内核 main（crates/api）装配代码兼容**——调用是无害的：
-    /// 只打一条诊断日志（运维据此发现旧装配残留），不再影响任何 sidecar 环境。
-    pub fn set_pythonpath_src(&self, project_root: impl Into<std::path::PathBuf>) {
-        let path = project_root.into();
-        warn!(
-            path = %path.display(),
-            "set_pythonpath_src: PYTHONPATH 注入已退役（uv 单轨批 D），本调用为兼容 no-op"
-        );
     }
 
     /// 链式注入原生插件加载器（启动期装配用）。
@@ -1323,62 +1308,15 @@ impl PluginInvokerImpl {
         // 宿主键解析：light 首次调用装箱分配（粘性），此后命中分配表直读。
         let host_key = self.resolve_host_key(manifest);
 
-        // Fast path：无锁查缓存，命中且未死直接返回（热路径，避开 spawn 锁开销）。
-        // 判死走 is_dead_sidecar 门控（pid=Some 且 !is_alive）：HTTP transport
-        // （pid 恒 None、is_alive 恒 false——无子进程）不得误判为崩溃。
-        {
-            let cached = {
-                let clients = self.mcp_clients.read();
-                clients.get(&host_key).cloned()
-            };
-            if let Some(client) = cached {
-                let client_guard = client.read().await;
-                if !Self::is_dead_sidecar(&client_guard).await {
-                    // ── Pull 热加载：TTL 门 + 指纹比对（合宿宿主 = 成员指纹并集）──
-                    // 缓存进程存活时，检查宿主指纹是否变更。TTL 内跳过 stat（零开销），
-                    // TTL 过后 stat 目录 mtime，发现变化则 kill 旧进程走下面的 respawn
-                    // 路径加载新代码/配置；没变则直接复用缓存进程。未用到也不检测——纯按需 pull。
-                    if self.is_host_stale(&host_key, manifest).await {
-                        info!(
-                            "Host code/config or member set changed, reloading host: {}",
-                            host_key
-                        );
-                        // 复用下方「进程已崩溃」的 kill+remove 逻辑：kill 旧宿主后
-                        // 自然进入 slow path respawn（合宿宿主按当前分配表重建成员集）。
-                        drop(client_guard);
-                        if let Err(e) = client.write().await.kill().await {
-                            tracing::debug!(
-                                "hot-reload: best-effort kill of stale host {} failed (will respawn): {e}",
-                                host_key
-                            );
-                        }
-                        self.mcp_clients.write().remove(&host_key);
-                        // 不调 notify_crash（这不是崩溃，是主动热更新）
-                    } else {
-                        self.touch_last_used(&host_key);
-                        return Ok(Arc::clone(&client));
-                    }
-                } else {
-                    // stdio 宿主真死（pid=Some 且进程退出）——显式 kill 旧客户端
-                    // 再创建新的；HTTP transport（pid=None）不会进此分支。
-                    // 合宿宿主死亡 = 全组成员进程死，逐成员触发崩溃回调（能力卸载语义）。
-                    error!("Host process crashed: {}", host_key);
-                    drop(client_guard);
-                    if let Err(e) = client.write().await.kill().await {
-                        tracing::debug!(
-                            "crash cleanup: best-effort kill of crashed host {} failed: {e}",
-                            host_key
-                        );
-                    }
-                    for member in self.host_members(&host_key) {
-                        self.notify_crash(&member);
-                    }
-                    self.mcp_clients.write().remove(&host_key);
-                }
-            }
+        // Fast path：无锁查缓存，命中且未死直接复用（热路径，避开 spawn 锁开销）；
+        // 已死/宿主指纹过期就地 kill+驱逐，落到 slow path respawn。判死与复活
+        // 门控细节见 reuse_cached_host_fast_path。
+        if let Some(client) = self.reuse_cached_host_fast_path(&host_key, manifest).await {
+            return Ok(client);
         }
 
-        // Slow path：拿 per-host spawn 锁，串行化同宿主键的 spawn。
+        // Slow path：拿 per-host spawn 锁，串行化同宿主键的 spawn（single-flight
+        // ——并发触发只创建一个宿主进程，不遗留孤儿进程；跨宿主并行）。
         // 取（或创建）该宿主的专用锁 Arc——锁本身常驻 spawn_locks，不随调用释放。
         let spawn_lock = {
             let mut locks = self.spawn_locks.write();
@@ -1389,61 +1327,128 @@ impl PluginInvokerImpl {
         };
         let _spawn_guard = spawn_lock.lock().await;
 
-        // Double-check：持 spawn 锁后再查缓存——前一个持锁者可能已创建好 client。
-        // 命中则直接复用，避免重复 spawn。判死与 fast path 同用 is_dead_sidecar
-        // 门控（HTTP transport 不判死，防误报）。
-        {
-            let cached = {
-                let clients = self.mcp_clients.read();
-                clients.get(&host_key).cloned()
-            };
-            if let Some(client) = cached {
-                let client_guard = client.read().await;
-                if !Self::is_dead_sidecar(&client_guard).await {
-                    self.touch_last_used(&host_key);
-                    return Ok(Arc::clone(&client));
-                }
-                // 极端情况：double-check 时又崩溃——kill 后继续 spawn
-                drop(client_guard);
-                if let Err(e) = client.write().await.kill().await {
-                    tracing::debug!(
-                        "double-check: best-effort kill of host {} failed (will respawn): {e}",
-                        host_key
-                    );
-                }
-                self.mcp_clients.write().remove(&host_key);
-            }
+        // Double-check：持 spawn 锁后再查缓存——前一个持锁者可能已创建好 client，
+        // 命中即复用避免重复 spawn（判死门控与 fast path 同款；极端情况 double-check
+        // 时又崩溃 → kill 后继续走下方 spawn）。细节见 reuse_fresh_host_locked。
+        if let Some(client) = self.reuse_fresh_host_locked(&host_key).await {
+            return Ok(client);
         }
 
-        // 创建新的 MCP 客户端（持有 spawn 锁，保证串行）
-        //
-        // 传输三路分流（由 manifest.mcp 决定）：
-        // ① mcp.transport=StreamableHttp + endpoint.url → 外部远程 MCP，走 HTTP（不 spawn）。
-        // ② mcp.transport=Stdio + endpoint.command → 外部本地第三方命令 MCP（如 npx），
-        //    spawn endpoint.command（不经 parse_entry，entry 仅作语义标记）。
-        // ③ 其余（无 mcp 配置的项目自带 sidecar）→ parse_entry(entry) → stdio。
+        // 构造新客户端（持有 spawn 锁保证串行）：传输三路分流由 manifest.mcp
+        // 决定（HTTP 远程 / 外部 stdio 命令 / 项目自带 sidecar），见 build_mcp_client。
+        let client = self.build_mcp_client(&host_key, manifest)?;
+
+        // 连接 + initialize 握手 + on_load 通知/总线广播 → 按宿主键注册缓存
+        // （细节见 connect_initialize_and_cache）。
+        Ok(self
+            .connect_initialize_and_cache(client, &host_key, manifest)
+            .await?)
+    }
+
+    /// Fast path 复用判定（无锁查缓存）：命中且存活按指纹新旧二分——
+    ///
+    /// - **新鲜**：`touch_last_used` 后返回 Some（直接复用，零 spawn）。
+    /// - **Pull 热加载触发**（TTL 过后 stat mtime 发现变化）：kill 旧宿主并驱逐，
+    ///   不调 notify_crash（主动热更新非崩溃），返回 None 进 slow path respawn；
+    ///   合宿宿主按当前分配表重建成员集。TTL 门 + 指纹比对语义：合宿宿主 =
+    ///   成员指纹并集；未用到也不检测——纯按需 pull。
+    /// - **stdio 宿主真死**（pid=Some 且进程退出；HTTP transport pid=None 恒不进
+    ///   此分支）：error 留痕 + kill 驱逐；合宿宿主死亡 = 全组成员进程死，逐成员
+    ///   触发崩溃回调（能力卸载语义）。返回 None 进 slow path。
+    /// - **未命中**：直接 None（无副作用）。
+    async fn reuse_cached_host_fast_path(
+        &self,
+        host_key: &str,
+        manifest: &PluginManifest,
+    ) -> Option<SharedMcpClient> {
+        let cached = {
+            let clients = self.mcp_clients.read();
+            clients.get(host_key).cloned()
+        };
+        let client = cached?;
+        let client_guard = client.read().await;
+        if Self::is_dead_sidecar(&client_guard).await {
+            error!("Host process crashed: {}", host_key);
+            drop(client_guard);
+            if let Err(e) = client.write().await.kill().await {
+                tracing::debug!(
+                    "crash cleanup: best-effort kill of crashed host {} failed: {e}",
+                    host_key
+                );
+            }
+            for member in self.host_members(host_key) {
+                self.notify_crash(&member);
+            }
+            self.mcp_clients.write().remove(host_key);
+            return None;
+        }
+        if !self.is_host_stale(host_key, manifest).await {
+            self.touch_last_used(host_key);
+            return Some(Arc::clone(&client));
+        }
+        info!(
+            "Host code/config or member set changed, reloading host: {}",
+            host_key
+        );
+        drop(client_guard);
+        if let Err(e) = client.write().await.kill().await {
+            tracing::debug!(
+                "hot-reload: best-effort kill of stale host {} failed (will respawn): {e}",
+                host_key
+            );
+        }
+        self.mcp_clients.write().remove(host_key);
+        None
+    }
+
+    /// Double-check 复用判定（持 spawn 锁后调用）：前一个持锁者可能已创建好
+    /// client。命中且存活 → touch 后返回 Some；又崩溃 → kill+驱逐返回 None 继续
+    /// spawn。判死与 fast path 同用 is_dead_sidecar 门控（HTTP transport 不判死，
+    /// 防误报）；不做指纹 staleness 检测（刚 spawn/校验过的进程无需 stat）。
+    async fn reuse_fresh_host_locked(&self, host_key: &str) -> Option<SharedMcpClient> {
+        let cached = {
+            let clients = self.mcp_clients.read();
+            clients.get(host_key).cloned()
+        };
+        let client = cached?;
+        let client_guard = client.read().await;
+        if !Self::is_dead_sidecar(&client_guard).await {
+            self.touch_last_used(host_key);
+            return Some(Arc::clone(&client));
+        }
+        drop(client_guard);
+        if let Err(e) = client.write().await.kill().await {
+            tracing::debug!(
+                "double-check: best-effort kill of host {} failed (will respawn): {e}",
+                host_key
+            );
+        }
+        self.mcp_clients.write().remove(host_key);
+        None
+    }
+
+    /// 构造新 MCP 客户端（未连接）：传输三路分流（由 manifest.mcp 决定）——
+    ///
+    /// ① mcp.transport=StreamableHttp + endpoint.url → 外部远程 MCP，走 HTTP
+    ///    （不 spawn），见 [`Self::build_http_transport_client`]；
+    /// ② mcp.transport=Stdio + endpoint.command → 外部本地第三方命令 MCP
+    ///    （如 npx），spawn endpoint.command（不经 parse_entry，entry 仅作语义
+    ///    标记），见 [`Self::build_external_stdio_transport_client`]；
+    /// ③ 其余（无 mcp 配置的项目自带 sidecar）→ parse_entry(entry) → stdio，
+    ///    见 [`Self::build_sidecar_transport_client`]。
+    ///
+    /// 尾部统一应用插件级调用超时（manifest.mcp.request_timeout_secs）：长等待
+    /// 业务（human-interaction.wait_for_choice 的 24h 审批等）必须显式声明，
+    /// 否则内核 MCP client 300s 默认兜底先于用户操作掐断调用（-32001 超时 →
+    /// 审批作废 → 引擎重试弹窗循环）。
+    fn build_mcp_client(
+        &self,
+        host_key: &str,
+        manifest: &PluginManifest,
+    ) -> Result<McpClient, PluginError> {
         let mut client = match manifest.mcp.as_ref() {
             Some(cfg) if cfg.transport == agentos_core::traits::McpTransport::StreamableHttp => {
-                let ep = cfg.endpoint.as_ref().ok_or_else(|| PluginError {
-                    message: format!(
-                        "插件 {} 声明 streamable_http 但缺 endpoint.url",
-                        manifest.id
-                    ),
-                    code: Some("MCP_CONFIG_INVALID".to_string()),
-                    source: Some("plugin-invoker".to_string()),
-                })?;
-                let url = ep.url.clone().ok_or_else(|| PluginError {
-                    message: format!("插件 {} 的 streamable_http endpoint 缺 url", manifest.id),
-                    code: Some("MCP_CONFIG_INVALID".to_string()),
-                    source: Some("plugin-invoker".to_string()),
-                })?;
-                tracing::info!(
-                    "[invoker] 插件 {} 走 HTTP transport（外部 MCP）| url={}",
-                    manifest.id,
-                    url
-                );
-                McpClient::new_http(url, ep.headers.clone(), ep.auth.clone())
-                    .with_plugin_id(&manifest.id)
+                Self::build_http_transport_client(cfg, manifest)?
             }
             Some(cfg)
                 if cfg.transport == agentos_core::traits::McpTransport::Stdio
@@ -1453,104 +1458,154 @@ impl PluginInvokerImpl {
                         .and_then(|e| e.command.as_ref())
                         .is_some() =>
             {
-                // 外部本地第三方命令 MCP（如 npx playwright）：spawn endpoint.command。
-                let ep = cfg.endpoint.as_ref().expect("checked above");
-                let command = ep.command.clone().unwrap_or_default();
-                tracing::info!(
-                    "[invoker] 插件 {} 走外部 stdio 命令 | command={} {}",
-                    manifest.id,
-                    command,
-                    ep.args.join(" ")
-                );
-                let mut c =
-                    McpClient::new_stdio(command, ep.args.clone()).with_plugin_id(&manifest.id);
-                // env 值含 ${ENV_VAR} 占位 → 解析（缺失则启动失败早暴露）。
-                let mut extra_env: Vec<(String, String)> = Vec::new();
-                for (k, v) in &ep.env {
-                    let resolved = resolve_env_placeholders(v).map_err(|e| PluginError {
-                        message: format!("插件 {} env 解析失败: {}", manifest.id, e),
-                        code: Some("MCP_CONFIG_INVALID".to_string()),
-                        source: Some("plugin-invoker".to_string()),
-                    })?;
-                    extra_env.push((k.clone(), resolved));
-                }
-                if !extra_env.is_empty() {
-                    c = c.with_extra_env(extra_env);
-                }
-                c
+                Self::build_external_stdio_transport_client(cfg, manifest)?
             }
-            _ => {
-                // 第四维分流（合宿进程模型 §4.2 第 2 条）：light 合宿成员 → 共享组
-                // 宿主命令（host.py）；独占 → 插件自身 sidecar 命令（现状语义）。
-                // 两形态共用同一 spawn 锁/判死/respawn 代码路径，仅命令与工作目录不同。
-                let (command, args, working_dir) = if is_light_group_member(manifest) {
-                    let slot = parse_light_slot(&host_key)
-                        .expect("light 成员宿主键必含槽位号（resolve_host_key 分配保证）");
-                    let members = self.host_members(&host_key);
-                    let (command, args, workdir) =
-                        self.resolve_group_host_command(LIGHT_HOST_GROUP, slot, &members)?;
-                    (command, args, Some(workdir))
-                } else {
-                    let (command, args) = self.resolve_sidecar_command(manifest)?;
-                    let workdir = self.loader.get_plugin_dir(&manifest.id);
-                    (command, args, workdir)
-                };
-                let mut c = McpClient::new_stdio(command, args)
-                    // 宿主键用于 stderr 转发时区分宿主日志来源（[host_key] 前缀）——
-                    // 合宿连接是组共享进程，按宿主键归因日志。
-                    .with_plugin_id(&host_key);
-
-                // 应用 Capability 路由器（启用 sidecar→内核反向调用通道）。
-                // 用 PluginScopedRouter 包装，把 manifest.id 注入每次反向调用的 params，
-                // 内核侧 metrics.record 据此做命名空间（监控设计 §三 通道2 + §十 安全）。
-                // 合宿连接为共享连接，_plugin_id 锚定触发本次 spawn 的成员（G6
-                // 信任锚点语义保留；首批灰度成员为 guard 类，无反向调用需求）。
-                {
-                    let router_guard = self.router.read();
-                    if let Some(router) = router_guard.as_ref() {
-                        let scoped: Arc<dyn CapabilityRouter> = Arc::new(PluginScopedRouter {
-                            plugin_id: manifest.id.clone(),
-                            inner: Arc::clone(router),
-                        });
-                        c = c.with_router(scoped);
-                    }
-                }
-
-                // 设置工作目录（light 合宿 = plugins/shared/_host/；独占 = 插件目录，
-                // 确保 server.py 等相对路径可解析）
-                if let Some(dir) = working_dir {
-                    c = c.with_working_dir(dir);
-                }
-
-                // PYTHONPATH 注入已整体退役：SDK 由 per-plugin venv 的 editable
-                // install 解析，两套解析路径并存是版本不同步事故温床。
-                // 这里只透传日志配置 env（进程级常量，适合走 env；per-request 上下文
-                // 走 JSON-RPC）。仅当父进程已设置时透传，否则让 sidecar SDK 用其默认
-                // （INFO + stderr）。SDK 启动时读这些 env 调用 setup_logging，使 sidecar
-                // 日志走统一基础设施。
-                let mut extra_env: Vec<(String, String)> = Vec::new();
-                for key in &["LOG_LEVEL", "LOG_JSON", "LOG_FORMAT"] {
-                    if let Ok(val) = std::env::var(key) {
-                        if !val.is_empty() {
-                            extra_env.push(((*key).to_string(), val));
-                        }
-                    }
-                }
-                if !extra_env.is_empty() {
-                    c = c.with_extra_env(extra_env);
-                }
-                c
-            }
+            _ => self.build_sidecar_transport_client(host_key, manifest)?,
         };
 
-        // 插件级调用超时（manifest.mcp.request_timeout_secs）：长等待业务
-        // （human-interaction.wait_for_choice 的 24h 审批等）必须显式声明，
-        // 否则内核 MCP client 300s 默认兜底先于用户操作掐断调用（-32001 超时
-        // → 审批作废 → 引擎重试弹窗循环）。
         if let Some(secs) = manifest.mcp.as_ref().and_then(|m| m.request_timeout_secs) {
             client = client.with_request_timeout(std::time::Duration::from_secs(secs));
         }
+        Ok(client)
+    }
 
+    /// 分流①：外部远程 HTTP MCP 客户端。endpoint.url 缺失即协议级配置错误
+    /// （fail-closed，MCP_CONFIG_INVALID），不降级不回退。
+    fn build_http_transport_client(
+        cfg: &agentos_core::traits::McpConfig,
+        manifest: &PluginManifest,
+    ) -> Result<McpClient, PluginError> {
+        let ep = cfg.endpoint.as_ref().ok_or_else(|| PluginError {
+            message: format!(
+                "插件 {} 声明 streamable_http 但缺 endpoint.url",
+                manifest.id
+            ),
+            code: Some("MCP_CONFIG_INVALID".to_string()),
+            source: Some("plugin-invoker".to_string()),
+        })?;
+        let url = ep.url.clone().ok_or_else(|| PluginError {
+            message: format!("插件 {} 的 streamable_http endpoint 缺 url", manifest.id),
+            code: Some("MCP_CONFIG_INVALID".to_string()),
+            source: Some("plugin-invoker".to_string()),
+        })?;
+        tracing::info!(
+            "[invoker] 插件 {} 走 HTTP transport（外部 MCP）| url={}",
+            manifest.id,
+            url
+        );
+        Ok(
+            McpClient::new_http(url, ep.headers.clone(), ep.auth.clone())
+                .with_plugin_id(&manifest.id),
+        )
+    }
+
+    /// 分流②：外部本地第三方命令 MCP（如 npx playwright）——spawn
+    /// endpoint.command。env 值含 ${ENV_VAR} 占位 → 解析（缺失则启动失败早暴露）。
+    fn build_external_stdio_transport_client(
+        cfg: &agentos_core::traits::McpConfig,
+        manifest: &PluginManifest,
+    ) -> Result<McpClient, PluginError> {
+        let ep = cfg.endpoint.as_ref().expect("checked above");
+        let command = ep.command.clone().unwrap_or_default();
+        tracing::info!(
+            "[invoker] 插件 {} 走外部 stdio 命令 | command={} {}",
+            manifest.id,
+            command,
+            ep.args.join(" ")
+        );
+        let mut c = McpClient::new_stdio(command, ep.args.clone()).with_plugin_id(&manifest.id);
+        let mut extra_env: Vec<(String, String)> = Vec::new();
+        for (k, v) in &ep.env {
+            let resolved = resolve_env_placeholders(v).map_err(|e| PluginError {
+                message: format!("插件 {} env 解析失败: {}", manifest.id, e),
+                code: Some("MCP_CONFIG_INVALID".to_string()),
+                source: Some("plugin-invoker".to_string()),
+            })?;
+            extra_env.push((k.clone(), resolved));
+        }
+        if !extra_env.is_empty() {
+            c = c.with_extra_env(extra_env);
+        }
+        Ok(c)
+    }
+
+    /// 分流③：项目自带 sidecar 的 stdio 客户端。第四维分流（合宿进程模型 §4.2
+    /// 第 2 条）：light 合宿成员 → 共享组宿主命令（host.py）；独占 → 插件自身
+    /// sidecar 命令（现状语义）。两形态共用同一 spawn 锁/判死/respawn 代码路径，
+    /// 仅命令与工作目录不同。
+    fn build_sidecar_transport_client(
+        &self,
+        host_key: &str,
+        manifest: &PluginManifest,
+    ) -> Result<McpClient, PluginError> {
+        let (command, args, working_dir) = if is_light_group_member(manifest) {
+            let slot = parse_light_slot(host_key)
+                .expect("light 成员宿主键必含槽位号（resolve_host_key 分配保证）");
+            let members = self.host_members(host_key);
+            let (command, args, workdir) =
+                self.resolve_group_host_command(LIGHT_HOST_GROUP, slot, &members)?;
+            (command, args, Some(workdir))
+        } else {
+            let (command, args) = self.resolve_sidecar_command(manifest)?;
+            let workdir = self.loader.get_plugin_dir(&manifest.id);
+            (command, args, workdir)
+        };
+        let mut c = McpClient::new_stdio(command, args)
+            // 宿主键用于 stderr 转发时区分宿主日志来源（[host_key] 前缀）——
+            // 合宿连接是组共享进程，按宿主键归因日志。
+            .with_plugin_id(host_key);
+
+        // 应用 Capability 路由器（启用 sidecar→内核反向调用通道）。
+        // 用 PluginScopedRouter 包装，把 manifest.id 注入每次反向调用的 params，
+        // 内核侧 metrics.record 据此做命名空间（监控设计 §三 通道2 + §十 安全）。
+        // 合宿连接为共享连接，_plugin_id 锚定触发本次 spawn 的成员（G6
+        // 信任锚点语义保留；首批灰度成员为 guard 类，无反向调用需求）。
+        {
+            let router_guard = self.router.read();
+            if let Some(router) = router_guard.as_ref() {
+                let scoped: Arc<dyn CapabilityRouter> = Arc::new(PluginScopedRouter {
+                    plugin_id: manifest.id.clone(),
+                    inner: Arc::clone(router),
+                });
+                c = c.with_router(scoped);
+            }
+        }
+
+        // 设置工作目录（light 合宿 = plugins/shared/_host/；独占 = 插件目录，
+        // 确保 server.py 等相对路径可解析）
+        if let Some(dir) = working_dir {
+            c = c.with_working_dir(dir);
+        }
+
+        // PYTHONPATH 注入已整体退役：SDK 由 per-plugin venv 的 editable
+        // install 解析，两套解析路径并存是版本不同步事故温床。
+        // 这里只透传日志配置 env（进程级常量，适合走 env；per-request 上下文
+        // 走 JSON-RPC）。仅当父进程已设置时透传，否则让 sidecar SDK 用其默认
+        // （INFO + stderr）。SDK 启动时读这些 env 调用 setup_logging，使 sidecar
+        // 日志走统一基础设施。
+        let mut extra_env: Vec<(String, String)> = Vec::new();
+        for key in &["LOG_LEVEL", "LOG_JSON", "LOG_FORMAT"] {
+            if let Ok(val) = std::env::var(key) {
+                if !val.is_empty() {
+                    extra_env.push(((*key).to_string(), val));
+                }
+            }
+        }
+        if !extra_env.is_empty() {
+            c = c.with_extra_env(extra_env);
+        }
+        Ok(c)
+    }
+
+    /// 新客户端激活链：connect → 装载配置 → initialize 握手 → on_load 直调 +
+    /// 总线旁路广播 → 按宿主键写入缓存并记活跃时刻。成功即返回可复用句柄
+    /// （拿走客户端所有权——连接后的进程句柄归宿主键缓存条目所有）。
+    async fn connect_initialize_and_cache(
+        &self,
+        mut client: McpClient,
+        host_key: &str,
+        manifest: &PluginManifest,
+    ) -> Result<SharedMcpClient, PluginError> {
         client.connect().await.map_err(|e| PluginError {
             message: format!("MCP connect failed: {}", e),
             code: Some("MCP_CONNECT_FAILED".to_string()),
@@ -1624,10 +1679,10 @@ impl PluginInvokerImpl {
         // 缓存（按宿主键——合宿成员共享同一客户端条目）
         {
             let mut clients = self.mcp_clients.write();
-            clients.insert(host_key.clone(), Arc::clone(&client_arc));
+            clients.insert(host_key.to_string(), Arc::clone(&client_arc));
         }
         // 新 spawn 即"活跃"，记录宿主最后调用时刻（空闲软卸载依据）
-        self.touch_last_used(&host_key);
+        self.touch_last_used(host_key);
 
         Ok(client_arc)
     }
@@ -2431,14 +2486,25 @@ impl PluginInvoker for PluginInvokerImpl {
 
         match manifest.host_type {
             HostType::Sidecar => {
-                // Sidecar：经 MCP notification 发送（fire-and-forget）。
-                if let Ok(client_arc) = self.get_or_create_mcp_client(manifest).await {
-                    let client = client_arc.read().await;
-                    if client.is_alive().await {
-                        let hook_method = format!("notifications/{hook_name}");
-                        if let Err(e) = client.send_notification(&hook_method, Some(tags)).await {
-                            warn!("Lifecycle notification failed for {}: {}", plugin_id, e);
+                // Sidecar：经 MCP notification 发送（fire-and-forget）。客户端获取/
+                // 创建失败同样仅 warn——对齐下方 InProcess 分支与 fire-and-forget
+                // 语义（不阻断管道），但失败必须留痕、不得静默。
+                match self.get_or_create_mcp_client(manifest).await {
+                    Ok(client_arc) => {
+                        let client = client_arc.read().await;
+                        if client.is_alive().await {
+                            let hook_method = format!("notifications/{hook_name}");
+                            if let Err(e) = client.send_notification(&hook_method, Some(tags)).await
+                            {
+                                warn!("Lifecycle notification failed for {}: {}", plugin_id, e);
+                            }
                         }
+                    }
+                    Err(e) => {
+                        warn!(
+                            "Lifecycle hook {hook_name} not delivered for {}: {}",
+                            plugin_id, e
+                        );
                     }
                 }
             }

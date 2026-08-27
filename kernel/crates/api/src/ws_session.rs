@@ -36,7 +36,12 @@ static SINK_ID_SEQ: AtomicU64 = AtomicU64::new(1);
 /// 先到先得：条目被消费循环 pop 后表行已删，DELETE 侧 list 查不到即不通知，
 /// 两个通知点天然互斥。进程内瞬态：重启即失，对应 HTTP 连接同断，无挂死窗口。
 static OUTCOME_WAITERS: std::sync::OnceLock<
-    std::sync::Mutex<std::collections::HashMap<String, tokio::sync::oneshot::Sender<crate::server::EngineOutcome>>>,
+    std::sync::Mutex<
+        std::collections::HashMap<
+            String,
+            tokio::sync::oneshot::Sender<crate::server::EngineOutcome>,
+        >,
+    >,
 > = std::sync::OnceLock::new();
 
 /// 注册同步等待者（chat_handler 专用）。
@@ -393,26 +398,10 @@ impl EngineDispatcher {
         // 激活时才发 stream_start + 确定 message_id（等待窗口内不占位气泡）。
         let message_id = format!("a_{}", uuid::Uuid::new_v4().simple());
 
+        // 阶段①激活：注册事件单播坐标并广播 stream_start（见 announce_stream_start）。
+        // session 未接线的部署形态整段跳过：仅引擎执行，无前端播报。
         if let Some(session) = state.session.as_ref() {
-            // 事件单播坐标注册：推送最终落点是 user 级 WS 连接，thread 只是
-            // thread→user 反查索引（connection_registry）。前端 WS 已按当前会话
-            // thread 注册；注入路径（触发器 chat.send_message）只持有管道唯一
-            // 坐标（12hex pipeline_id）作派发键，若不注册则 send_to_thread 反查
-            // 无 user、事件被丢弃——表现为「LLM 日志有、前端收不到」（2026-08-19）。
-            // 幂等注册：派发键（thread_id）与 route_id 双坐标均直达 user。
-            session.register_thread(thread_id, user_id);
-            session.register_thread(&rec.route_id, user_id);
-            let _ = session
-                .emit_event(
-                    thread_id,
-                    "stream_start",
-                    serde_json::json!({
-                        "pipeline_id": rec.route_id,
-                        "message_id": message_id,
-                        "_threadId": thread_id,
-                    }),
-                )
-                .await;
+            announce_stream_start(session, thread_id, &rec.route_id, user_id, &message_id).await;
         }
         // 执行 agent：任务派发显式指定；主会话路径空串 → 按线程绑定解析
         // （registry → DB sessions.agent_id → agentos，2026-08-24 阶段1）。
@@ -457,136 +446,228 @@ impl EngineDispatcher {
         };
 
         // 失败路径：引擎执行失败（executor.run Err）→ stream_error 收尾，
-        // 前端立即解除生成态（不再依赖 90s 强制收尾兜底）。
-        // error 为统一错误信封（契约 streaming.json stream_error.error 锁 object，
-        // 单一真值源 config/error_codes.json；ENGINE_RUN_FAILED 可重试）。
+        // 前端立即解除生成态（不再依赖 90s 强制收尾兜底）。error 为统一错误
+        // 信封（契约 streaming.json stream_error.error 锁 object，单一真值源
+        // config/error_codes.json；ENGINE_RUN_FAILED 可重试）。
         if outcome.failed {
-            let _ = session
-                .emit_event(
-                    &exec_thread,
-                    "stream_error",
-                    serde_json::json!({
-                        "pipeline_id": rec.route_id,
-                        "message_id": message_id,
-                        "_threadId": exec_thread,
-                        "error": {
-                            "code": "ENGINE_RUN_FAILED",
-                            "message": outcome.content,
-                            "source": "kernel",
-                            "retryable": true,
-                            "details": null,
-                            "request_id": null,
-                        },
-                    }),
-                )
-                .await;
+            emit_stream_error_event(
+                session,
+                &exec_thread,
+                &rec.route_id,
+                &message_id,
+                "ENGINE_RUN_FAILED",
+                &outcome.content,
+            )
+            .await;
             return outcome;
         }
 
         // 空回复防线：run 结束但没有任何 assistant 消息（LLM 调用失败被引擎
-        // error_policy warn+继续吞掉、或 core 轮次无产出）→ 不发 new_message
-        // （旧路径把 outcome.content 兜底当 assistant 内容回发；content 无
-        // raw_result 时是用户输入原文，前端表现为 assistant 气泡回显用户消息
-        // ——模拟回复）。fail-closed：stream_error 显式报错，前端标记失败。
+        // error_policy warn+继续吞掉、或 core 轮次无产出）→ 不发 new_message、
+        // 不把 outcome.content 兜底当 assistant 内容回发——content 无 raw_result
+        // 时是用户输入原文，回发即前端 assistant 气泡回显用户消息。fail-closed：
+        // stream_error 显式报错（NO_ASSISTANT_REPLY），前端标记失败。
         if outcome.final_assistant.is_none() {
             let mut failed_outcome = outcome;
             failed_outcome.failed = true;
-            failed_outcome.content = "本轮管道结束但未产生任何回复（LLM 调用失败或未执行），请检查 LLM 配置与密钥".to_string();
-            let _ = session
-                .emit_event(
-                    &exec_thread,
-                    "stream_error",
-                    serde_json::json!({
-                        "pipeline_id": rec.route_id,
-                        "message_id": message_id,
-                        "_threadId": exec_thread,
-                        "error": {
-                            "code": "NO_ASSISTANT_REPLY",
-                            "message": failed_outcome.content,
-                            "source": "kernel",
-                            "retryable": true,
-                            "details": null,
-                            "request_id": null,
-                        },
-                    }),
-                )
-                .await;
+            failed_outcome.content =
+                "本轮管道结束但未产生任何回复（LLM 调用失败或未执行），请检查 LLM 配置与密钥"
+                    .to_string();
+            emit_stream_error_event(
+                session,
+                &exec_thread,
+                &rec.route_id,
+                &message_id,
+                "NO_ASSISTANT_REPLY",
+                &failed_outcome.content,
+            )
+            .await;
             return failed_outcome;
         }
 
-        // 成功路径：new_message 携带本轮最终 assistant 消息的完整持久形态
-        // （content/reasoningContent/toolCalls/sequence），前端与 DB 加载共用
-        // 同一个 mapper 生成 parts——流式事件与历史加载冷热同构。
-        let seq = outcome
-            .final_assistant
-            .as_ref()
-            .and_then(|m| m.get("seq").and_then(|v| v.as_u64()))
-            .unwrap_or(1);
-        let fa = outcome.final_assistant.clone().expect("final_assistant gated above");
-        // 认领回传：user 权威 record（id=compute_message_id 指纹 mc_/seq/内容/cmid）。
-        // 表侧落库 id 与指纹一致（write_slot_to_table_locked 无 _message_id 注入时
-        // 回落 compute_message_id），前端按 cmid 认领后记入独立 recordId 字段，
-        // UI 寻址 id 保持前端 uuid 不变（ADR 2026-08-22 双字段范式）。
-        let user_record = outcome.final_user.as_ref().map(|u| {
-            serde_json::json!({
-                "id": agentos_core::ids::compute_message_id(u),
-                "content": u.get("content").cloned().unwrap_or(serde_json::Value::Null),
-                "sequence": u.get("seq").and_then(|v| v.as_u64()).unwrap_or(0),
-                "metadata": u.get("metadata").cloned().unwrap_or(serde_json::Value::Null),
-            })
-        });
-        let delivered = session
-            .emit_event(
-                &exec_thread,
-                "new_message",
-                serde_json::json!({
-                    "pipeline_id": rec.route_id,
-                    "message_id": message_id,
-                    "_threadId": exec_thread,
-                    // 触发本轮的 user 消息幂等键（ADR 2026-08-21）：前端据此
-                    // 精确认领对应乐观 user 消息（非 FIFO 猜测）。
-                    "client_message_id": rec.client_message_id,
-                    "sequence": seq,
-                    "content": outcome.content,
-                    "user_message": user_record,
-                    "message": {
-                        "id": message_id,
-                        "role": fa["role"],
-                        "content": outcome.content,
-                        "sequence": seq,
-                        "reasoningContent": fa.get("reasoning_content"),
-                        "toolCalls": fa.get("tool_calls").unwrap_or(&serde_json::Value::Null),
-                        "timestamp": chrono::Utc::now().to_rfc3339(),
-                        // status 从消息 blob 读取：中断/错误半截消息落库时带
-                        // interrupted/error，正常消息缺省 completed（冷热同构）。
-                        "status": message_status_from_blob(&fa),
-                        "thread_id": exec_thread,
-                    },
-                }),
-            )
-            .await;
-        info!(
-            thread = %exec_thread,
-            delivered = delivered,
-            "new_message 推送完成"
-        );
+        // 阶段④成功出口：new_message（最终 assistant 完整持久形态）+ stream_end
+        // 终止信号，事件构造见 emit_new_message_event / emit_stream_end_event
+        // （事件信封三键同构：pipeline_id/message_id/_threadId）。
+        // seq 直传不伪造（对齐 server.rs 冷恢复「不做缺 seq 补位」契约）：assistant
+        // 元素自带引擎分配的稳定 seq；契约外缺失时发 null 挂空占位而非假序号——
+        // 前端对 null final_sequence 有显式守卫（挂空等待对账纠正），伪造序号反而
+        // 会污染排序与断线补漏游标。
+        let seq = assistant_authoritative_seq(outcome.final_assistant.as_ref());
+        emit_new_message_event(
+            session,
+            &exec_thread,
+            &rec.route_id,
+            &message_id,
+            &rec.client_message_id,
+            &outcome,
+            seq.clone(),
+        )
+        .await;
 
         // stream_end 收尾：成功路径的终止信号（携带 final_sequence 同步占位 seq），
         // 前端 handleStreamEnd 据此终止流式状态并做最终合并。
-        let _ = session
-            .emit_event(
-                &exec_thread,
-                "stream_end",
-                serde_json::json!({
-                    "pipeline_id": rec.route_id,
-                    "message_id": message_id,
-                    "_threadId": exec_thread,
-                    "final_sequence": seq,
-                }),
-            )
-            .await;
+        emit_stream_end_event(session, &exec_thread, &rec.route_id, &message_id, seq).await;
         outcome
     }
+}
+
+/// assistant 消息的权威 seq 提取（new_message / stream_end 共用）：
+/// 元素带 seq → 原值；契约外缺失 → null（绝不伪造默认序号，对齐 server.rs
+/// 冷恢复「不做缺 seq 补位」零兼容契约——假序号会污染前端排序与断线补漏游标）。
+fn assistant_authoritative_seq(final_assistant: Option<&serde_json::Value>) -> serde_json::Value {
+    final_assistant
+        .and_then(|m| m.get("seq"))
+        .and_then(|v| v.as_u64())
+        .into()
+}
+
+/// 阶段①激活：注册事件单播坐标并广播 stream_start。
+///
+/// 事件单播坐标注册：推送最终落点是 user 级 WS 连接，thread 只是 thread→user
+/// 反查索引（connection_registry）。前端 WS 已按当前会话 thread 注册；注入路径
+/// （触发器 chat.send_message）只持有管道唯一坐标（12hex pipeline_id）作派发键，
+/// 若不注册则 send_to_thread 反查无 user、事件被丢弃——表现为「LLM 日志有、
+/// 前端收不到」。幂等注册：派发键（thread_id）与 route_id 双坐标均直达 user。
+async fn announce_stream_start(
+    session: &SessionCoordinator,
+    thread_id: &str,
+    route_id: &str,
+    user_id: &str,
+    message_id: &str,
+) {
+    session.register_thread(thread_id, user_id);
+    session.register_thread(route_id, user_id);
+    let _ = session
+        .emit_event(
+            thread_id,
+            "stream_start",
+            serde_json::json!({
+                "pipeline_id": route_id,
+                "message_id": message_id,
+                "_threadId": thread_id,
+            }),
+        )
+        .await;
+}
+
+/// 失败出口统一收尾：stream_error 事件（ENGINE_RUN_FAILED / NO_ASSISTANT_REPLY
+/// 两出口共用构造）。error 信封锁 object——契约 streaming.json，单一真值源
+/// config/error_codes.json；code 可重试语义由各调用点注释声明。
+async fn emit_stream_error_event(
+    session: &SessionCoordinator,
+    thread_id: &str,
+    route_id: &str,
+    message_id: &str,
+    code: &str,
+    error_message: &str,
+) {
+    let _ = session
+        .emit_event(
+            thread_id,
+            "stream_error",
+            serde_json::json!({
+                "pipeline_id": route_id,
+                "message_id": message_id,
+                "_threadId": thread_id,
+                "error": {
+                    "code": code,
+                    "message": error_message,
+                    "source": "kernel",
+                    "retryable": true,
+                    "details": null,
+                    "request_id": null,
+                },
+            }),
+        )
+        .await;
+}
+
+/// 成功出口主体：new_message 携带本轮最终 assistant 消息的完整持久形态
+/// （content/reasoningContent/toolCalls/sequence），前端与 DB 加载共用同一个
+/// mapper 生成 parts——流式事件与历史加载冷热同构。
+async fn emit_new_message_event(
+    session: &SessionCoordinator,
+    thread_id: &str,
+    route_id: &str,
+    message_id: &str,
+    client_message_id: &str,
+    outcome: &crate::server::EngineOutcome,
+    seq: serde_json::Value,
+) {
+    let fa = outcome
+        .final_assistant
+        .clone()
+        .expect("final_assistant gated above");
+    // 认领回传：user 权威 record（id=compute_message_id 指纹 mc_/seq/内容/cmid）。
+    // 表侧落库 id 与指纹一致（write_slot_to_table_locked 无 _message_id 注入时
+    // 回落 compute_message_id），前端按 cmid 认领后记入独立 recordId 字段，
+    // UI 寻址 id 保持前端 uuid 不变（ADR 2026-08-22 双字段范式）。
+    let user_record = outcome.final_user.as_ref().map(|u| {
+        serde_json::json!({
+            "id": agentos_core::ids::compute_message_id(u),
+            "content": u.get("content").cloned().unwrap_or(serde_json::Value::Null),
+            "sequence": u.get("seq").and_then(|v| v.as_u64()).unwrap_or(0),
+            "metadata": u.get("metadata").cloned().unwrap_or(serde_json::Value::Null),
+        })
+    });
+    let delivered = session
+        .emit_event(
+            thread_id,
+            "new_message",
+            serde_json::json!({
+                "pipeline_id": route_id,
+                "message_id": message_id,
+                "_threadId": thread_id,
+                // 触发本轮的 user 消息幂等键（ADR 2026-08-21）：前端据此
+                // 精确认领对应乐观 user 消息（非 FIFO 猜测）。
+                "client_message_id": client_message_id,
+                "sequence": seq,
+                "content": outcome.content,
+                "user_message": user_record,
+                "message": {
+                    "id": message_id,
+                    "role": fa["role"],
+                    "content": outcome.content,
+                    "sequence": seq,
+                    "reasoningContent": fa.get("reasoning_content"),
+                    "toolCalls": fa.get("tool_calls").unwrap_or(&serde_json::Value::Null),
+                    "timestamp": chrono::Utc::now().to_rfc3339(),
+                    // status 从消息 blob 读取：中断/错误半截消息落库时带
+                    // interrupted/error，正常消息缺省 completed（冷热同构）。
+                    "status": message_status_from_blob(&fa),
+                    "thread_id": thread_id,
+                },
+            }),
+        )
+        .await;
+    info!(
+        thread = %thread_id,
+        delivered = delivered,
+        "new_message 推送完成"
+    );
+}
+
+/// 成功出口终止信号：stream_end（携带 final_sequence 同步占位 seq），
+/// 前端 handleStreamEnd 据此终止流式状态并做最终合并。
+async fn emit_stream_end_event(
+    session: &SessionCoordinator,
+    thread_id: &str,
+    route_id: &str,
+    message_id: &str,
+    final_sequence: serde_json::Value,
+) {
+    let _ = session
+        .emit_event(
+            thread_id,
+            "stream_end",
+            serde_json::json!({
+                "pipeline_id": route_id,
+                "message_id": message_id,
+                "_threadId": thread_id,
+                "final_sequence": final_sequence,
+            }),
+        )
+        .await;
 }
 
 #[async_trait::async_trait]
@@ -715,9 +796,14 @@ impl PipelineDispatcher for EngineDispatcher {
                 )
                 .await;
                 let cmid = rec.client_message_id.clone();
-                let outcome =
-                    Self::run_pipeline_round(&exec_state, &exec_tenant, &exec_thread, &exec_user, rec)
-                        .await;
+                let outcome = Self::run_pipeline_round(
+                    &exec_state,
+                    &exec_tenant,
+                    &exec_thread,
+                    &exec_user,
+                    rec,
+                )
+                .await;
                 notify_outcome_waiter(&cmid, outcome);
             }
         });
@@ -1203,6 +1289,7 @@ fn message_status_from_blob(fa: &serde_json::Value) -> serde_json::Value {
 
 #[cfg(test)]
 mod tests {
+    use super::assistant_authoritative_seq;
     use super::find_target_user_seq;
     use super::message_status_from_blob;
     use super::resolve_dispatch_agent;
@@ -1938,5 +2025,40 @@ mod tests {
     async fn dispatch_agent_no_registry_no_db_defaults_agentos() {
         let mock = ResolveMock::new(Ok(vec![]), None);
         assert_eq!(resolve_agent(None, Some(mock), "").await, "agentos");
+    }
+
+    // ── assistant 权威 seq 提取（扫描 2026-08-27 跨辖区 #20 契约对齐）──
+
+    #[test]
+    fn assistant_seq_missing_yields_null_not_fake_one() {
+        // 旧实现 unwrap_or(1) 向前端伪造序号；契约 = 缺失挂 null（不补位）。
+        let no_seq = serde_json::json!({"role": "assistant", "content": "x"});
+        assert!(
+            assistant_authoritative_seq(Some(&no_seq)).is_null(),
+            "元素缺 seq 必须发 null，不得伪造默认序号"
+        );
+        assert!(
+            assistant_authoritative_seq(None).is_null(),
+            "无 assistant 消息同样 null"
+        );
+    }
+
+    #[test]
+    fn assistant_seq_passes_through_authoritative_value_identity() {
+        // 直传恒等性质：有 seq 时输出值与输入完全一致（多量级采样）
+        for seq in [1u64, 7, 4_000_000_000_000] {
+            let fa = serde_json::json!({"role": "assistant", "seq": seq});
+            assert_eq!(
+                assistant_authoritative_seq(Some(&fa)),
+                serde_json::json!(seq),
+                "带 seq 元素必须原值直传"
+            );
+            let other = serde_json::json!({"role": "assistant", "seq": seq + 1});
+            assert_ne!(
+                assistant_authoritative_seq(Some(&fa)),
+                assistant_authoritative_seq(Some(&other)),
+                "不同 seq 输入产生不同输出（非常量映射）"
+            );
+        }
     }
 }
