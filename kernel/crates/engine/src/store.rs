@@ -398,23 +398,18 @@ fn slot_row_to_record(
 fn extract_content_string(msg: &serde_json::Value) -> String {
     match msg.get("content") {
         Some(serde_json::Value::String(s)) => s.clone(),
-        Some(serde_json::Value::Array(parts)) => {
-            // 多 part：拼接 text/thinking 的内容
-            let mut buf = String::new();
-            for p in parts {
-                if let Some(t) = p.get("type").and_then(|v| v.as_str()) {
-                    if t == "text" || t == "thinking" {
-                        if let Some(txt) = p.get("text").and_then(|v| v.as_str()) {
-                            if !buf.is_empty() {
-                                buf.push('\n');
-                            }
-                            buf.push_str(txt);
-                        }
-                    }
-                }
-            }
-            buf
-        }
+        // 多 part：拼接 text/thinking 的内容
+        Some(serde_json::Value::Array(parts)) => parts
+            .iter()
+            .filter(|p| {
+                matches!(
+                    p.get("type").and_then(|v| v.as_str()),
+                    Some("text" | "thinking")
+                )
+            })
+            .filter_map(|p| p.get("text").and_then(|v| v.as_str()))
+            .collect::<Vec<_>>()
+            .join("\n"),
         _ => String::new(),
     }
 }
@@ -2755,6 +2750,40 @@ mod tests {
             parse_patch_type("unknown_future_type", "tool_1"),
             PatchType::StateUpdate
         );
+    }
+
+    #[test]
+    fn test_extract_content_string() {
+        // 字符串 content 原样透传
+        assert_eq!(extract_content_string(&json!({"content": "你好"})), "你好");
+        // 多 part：仅拼接 text/thinking，按出现顺序 \n 连接；其余 part 与
+        // 非字符串 text 丢弃
+        let multi = json!({"content": [
+            {"type": "thinking", "text": "内心"},
+            {"type": "text", "text": "正文一"},
+            {"type": "text", "text": null},
+            {"type": "tool_use", "id": "t1"},
+            {"type": "text", "text": "正文二"}
+        ]});
+        assert_eq!(extract_content_string(&multi), "内心\n正文一\n正文二");
+        // 性质：拼接段数 == text/thinking 且 text 为字符串的 part 数
+        let kept: Vec<&serde_json::Value> = multi["content"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|p| {
+                matches!(
+                    p.get("type").and_then(|v| v.as_str()),
+                    Some("text" | "thinking")
+                ) && p.get("text").and_then(|v| v.as_str()).is_some()
+            })
+            .collect();
+        let out = extract_content_string(&multi);
+        assert_eq!(out.matches('\n').count(), kept.len() - 1);
+        assert!(!out.contains("tool"));
+        // 非 string/array 的 content 与缺失 content 均为空串
+        assert_eq!(extract_content_string(&json!({"content": 42})), "");
+        assert_eq!(extract_content_string(&json!({"role": "user"})), "");
     }
 
     #[test]

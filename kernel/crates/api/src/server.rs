@@ -61,13 +61,6 @@ pub struct WsRequest {
     pub message: String,
     #[serde(default)]
     pub session_id: String,
-    /// 可选对话历史（OpenAI 格式 messages）。现状契约：内核不消费——执行历史由
-    /// `process_via_engine` 按 registry/store 权威装配进 state.messages；本字段
-    /// 仅保持携带它的旧载荷可正常反序列化（收下忽略）。
-    /// DEBT-死链：字段与 `process_via_engine` 的 history/_history 参数均零读取，
-    /// 删除需联动唯一生产调用点 ws_session.rs（并行批次在制），到点单独清刀。
-    #[serde(default)]
-    pub history: Vec<serde_json::Value>,
     /// 可选 agent_id（默认 agentos）。指定执行 agent（如 general_agent 触发 bash 隔离）。
     #[serde(default)]
     pub agent_id: String,
@@ -708,7 +701,6 @@ pub(crate) async fn process_via_engine(
     state: &AppState,
     message: &str,
     agent_id: &str,
-    history: &[serde_json::Value],
     pipeline_id: &str,
     thread_id: &str,
     message_id: &str,
@@ -724,7 +716,6 @@ pub(crate) async fn process_via_engine(
         state,
         message,
         agent_id,
-        history,
         pipeline_id,
         thread_id,
         message_id,
@@ -744,7 +735,6 @@ async fn process_via_engine_inner(
     state: &AppState,
     message: &str,
     agent_id: &str,
-    _history: &[serde_json::Value],
     pipeline_id: &str,
     thread_id: &str,
     message_id: &str,

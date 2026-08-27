@@ -427,7 +427,6 @@ impl EngineDispatcher {
                 state,
                 &rec.content,
                 &exec_agent,
-                &[],
                 &rec.route_id,
                 &exec_thread,
                 &message_id,
@@ -496,8 +495,7 @@ impl EngineDispatcher {
         // 插件错误可见性：本轮管道执行中插件失败（引擎 warn+继续的假成功）在
         // new_message 前逐个发射 plugin_error 事件——非终止信号，前端只弹通知
         // 不标记消息失败（消息本身正常收尾）。
-        emit_plugin_error_events(session, &exec_thread, &rec.route_id, &message_id, &outcome)
-            .await;
+        emit_plugin_error_events(session, &exec_thread, &rec.route_id, &message_id, &outcome).await;
         emit_new_message_event(
             session,
             &exec_thread,

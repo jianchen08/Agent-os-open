@@ -1,7 +1,8 @@
 //! 能力注册表 + 服务依赖解析（服务唯一轴）
 //!
 
-use std::collections::{HashMap, HashSet};
+use std::cmp::Reverse;
+use std::collections::{BinaryHeap, HashMap, HashSet};
 use std::sync::Arc;
 
 use agentos_core::traits::{
@@ -742,26 +743,22 @@ pub fn sort_manifests_topologically(
         }
     }
 
-    // Kahn's algorithm（tie-break：manifest id 字典序）。
-    let mut queue: Vec<usize> = (0..manifests.len())
+    // Kahn's algorithm（tie-break：manifest id 字典序）。就绪集用 min-heap 承载
+    // `(id, 输入序)`，堆顶恒为当前最小 id——输出序与逐轮字典序挑选一致；均摊
+    // O((V+E)·log V)。等 id 时按输入序稳定弹出（id 全局唯一时无差异）。
+    let mut ready: BinaryHeap<Reverse<(&str, usize)>> = (0..manifests.len())
         .filter(|&i| in_degree[i] == 0)
+        .map(|i| Reverse((manifests[i].id.as_str(), i)))
         .collect();
-    queue.sort_by_key(|&i| manifests[i].id.clone());
     let mut remaining = in_degree.clone();
     let mut result: Vec<usize> = Vec::with_capacity(manifests.len());
-    while let Some(node) = queue.first().cloned() {
-        queue.remove(0);
+    while let Some(Reverse((_, node))) = ready.pop() {
         result.push(node);
         if let Some(neighbors) = graph.get(&node) {
             for &nb in neighbors {
                 remaining[nb] -= 1;
                 if remaining[nb] == 0 {
-                    let pos = queue
-                        .binary_search_by(|&j| {
-                            manifests[j].id.as_str().cmp(manifests[nb].id.as_str())
-                        })
-                        .unwrap_or_else(|e| e);
-                    queue.insert(pos, nb);
+                    ready.push(Reverse((manifests[nb].id.as_str(), nb)));
                 }
             }
         }
@@ -1029,6 +1026,44 @@ mod tests {
             Err(e) => panic!("期望 Cycle，得 {e:?}"),
             Ok(_) => panic!("期望环检测失败"),
         }
+    }
+
+    #[test]
+    fn test_topo_sort_output_order_chain_with_free_node() {
+        // 链 + 独立节点，输入乱序插入：输出必须是"字典序 tie-break 的依赖序"
+        // 全序列（不只是相对序）。就绪集每轮取最小 id：a_base 先于独立节点
+        // d_free 弹出后解锁 b_mid，故 d_free 排到整条链之后。
+        let mut c_final = svc_manifest("c_final", &[]);
+        c_final.requires_services = vec!["b.mid".into()];
+        let mut b_mid = svc_manifest("b_mid", &["b.mid"]);
+        b_mid.requires_services = vec!["a.base".into()];
+        let d_free = svc_manifest("d_free", &[]);
+        let a_base = svc_manifest("a_base", &["a.base"]);
+
+        let sorted = sort_manifests_topologically(&[c_final, b_mid, d_free, a_base]).unwrap();
+        let ids: Vec<&str> = sorted.iter().map(|m| m.id.as_str()).collect();
+        assert_eq!(ids, vec!["a_base", "b_mid", "c_final", "d_free"]);
+    }
+
+    #[test]
+    fn test_topo_sort_output_order_diamond_tiebreak() {
+        // 菱形：单提供者两消费者在同一轮解锁 → 按 id 字典序排；另一独立节点
+        // 先于提供者弹出。锁序性质：任一依赖边提供者位置严格先于消费者。
+        let w_root = svc_manifest("w_root", &["w.any"]);
+        let mut x_c1 = svc_manifest("x_c1", &[]);
+        x_c1.requires_services = vec!["w.any".into()];
+        let mut y_c2 = svc_manifest("y_c2", &[]);
+        y_c2.requires_services = vec!["w.any".into()];
+        let v_early = svc_manifest("v_early", &[]);
+
+        let sorted = sort_manifests_topologically(&[y_c2, v_early, x_c1, w_root]).unwrap();
+        let ids: Vec<&str> = sorted.iter().map(|m| m.id.as_str()).collect();
+        assert_eq!(ids, vec!["v_early", "w_root", "x_c1", "y_c2"]);
+
+        // 性质断言：所有 (提供者→消费者) 边在输出中保持先后
+        let pos = |id: &str| ids.iter().position(|&i| i == id).unwrap();
+        assert!(pos("v_early") < pos("w_root"));
+        assert!(pos("w_root") < pos("x_c1") && pos("w_root") < pos("y_c2"));
     }
 
     #[test]
