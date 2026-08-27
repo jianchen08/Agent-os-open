@@ -64,12 +64,11 @@ providers:
     # 容器资源配额默认按引擎宿主动态计算（hardware_profile adaptive：
     # daemon 所在机器，本机即 WSL VM；单容器 = 宿主一半资源 / max_environments，
     # 按 12/24GB 阈值分 low/mid/high 三档）。本段不写 limits 即用动态值。
-    # 需要显式指定时取消注释下方 limits（显式配置优先于动态值）：
-    # limits:
-    #   memory: 2g
-    #   cpus: '2.0'
-    # AO_CONTAINER_MEMORY / AO_CONTAINER_CPUS / AO_MAX_ENVIRONMENTS 环境变量
-    # 优先级最高（见 plugins/shared/system/isolation/hardware_profile.py）。
+    # 显式 limits 优先于动态值（Rust 开发向：engine 冷编译峰值 ~700MB，
+    # 留余量给全 workspace 并行，配 2g/2.0）；AO_* 环境变量优先级最高。
+    limits:
+      memory: 2g
+      cpus: '2.0'
     publish_ports: []
     # 首次需要隔离环境时，若本地无镜像则自动 docker build（默认开）。
     # BuildKit 缓存(--mount=type=cache)会复用本机已下载的 apt/pip/playwright 包，

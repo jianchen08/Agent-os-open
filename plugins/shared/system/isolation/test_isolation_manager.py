@@ -1126,6 +1126,45 @@ class TestProviderConfig:
         mod = _load_manager()
         assert mod._load_provider_config() == {"host": {"enabled": False}}
 
+    def test_extract_providers_config_dir_nested(self) -> None:
+        """get_config() 全量配置（目录嵌套结构）→ providers 提取。"""
+        mod = _load_manager()
+        full = {
+            "isolation": {
+                "isolation_config": {
+                    "providers": {"cua": {"limits": {"memory": "2g", "cpus": "2.0"}}}
+                },
+                "isolation_policy": {"default_level": "isolated"},
+            },
+            "agents": {"main": {"model": "x"}},
+        }
+        out = mod.extract_providers_config(full)
+        assert out == {"providers": {"cua": {"limits": {"memory": "2g", "cpus": "2.0"}}}}
+
+    def test_extract_providers_config_flat_fallback(self) -> None:
+        """平铺结构（isolation_config.providers 顶层）兼容。"""
+        mod = _load_manager()
+        full = {"isolation_config": {"providers": {"host": {"enabled": False}}}}
+        assert mod.extract_providers_config(full) == {"providers": {"host": {"enabled": False}}}
+
+    def test_extract_providers_config_missing_returns_empty(self) -> None:
+        """无 providers（空/缺键/非 dict）→ 空 provider 配置（自适应兜底）。"""
+        mod = _load_manager()
+        assert mod.extract_providers_config({}) == {}
+        assert mod.extract_providers_config({"isolation": {}}) == {}
+        assert mod.extract_providers_config({"isolation": {"isolation_config": {"a": 1}}}) == {}
+
+    def test_providers_config_override_injected(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """providers_config_override 注入 → 创建 provider 用显式 limits。"""
+        monkeypatch.setattr("sys.argv", ["x"])  # noqa: PLW2101 - 防 get_resource_profile 相关副作用
+        mod = _load_manager()
+        mgr = mod.IsolationManager(
+            providers_config_override={"providers": {"cua": {"limits": {"memory": "3g", "cpus": "3.0"}}}}
+        )
+        docker = mgr._providers[IsolationLevel.CONTAINER]
+        assert docker._config["memory_limit"] == "3g"
+        assert docker._config["cpu_limit"] == "3.0"
+
     def test_create_providers_default_host_and_docker(self) -> None:
         mod = _load_manager()
         providers = mod._create_providers_from_config({})

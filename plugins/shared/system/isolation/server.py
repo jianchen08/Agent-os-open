@@ -8,9 +8,11 @@
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 import sys
+from pathlib import Path
 from typing import Any
 
 sys.path.insert(0, os.path.dirname(__file__))
@@ -23,7 +25,7 @@ from isolation_types import (
 )
 
 # 直接导入同目录的老代码（文件就在旁边，不需要额外路径前缀）
-from manager import IsolationManager
+from manager import IsolationManager, extract_providers_config
 from permission_checker import PermissionChecker
 from permission_policy import PermissionPolicyManager
 
@@ -36,19 +38,27 @@ plugin = AgentOSPlugin("isolation_service")
 _manager: IsolationManager | None = None
 _checkpoint_mgr: CheckpointManager | None = None
 _permission_checker: PermissionChecker | None = None
+_config_watcher_task: asyncio.Task[Any] | None = None
 
 
 @plugin.on_load
 async def _on_load(params: dict[str, Any]) -> None:
     """初始化隔离管理器。"""
-    global _manager, _checkpoint_mgr, _permission_checker
+    global _manager, _checkpoint_mgr, _permission_checker, _config_watcher_task
 
     config = plugin.get_config()
     logger.info("[isolation] 加载插件，配置项数: %d", len(config))
 
-    # 初始化隔离管理器（老代码内部 try/except 会优雅处理 ConfigCenter 缺失）
-    _manager = IsolationManager()
+    # 初始化隔离管理器。get_config() 含内核按 config_files 注入的
+    # isolation_config.yaml 快照（providers.cua.limits 显式配额等），
+    # 经 override 通路生效（config 中心在插件侧不可达，见 P1-7 DEBT）。
+    _manager = IsolationManager(providers_config_override=extract_providers_config(config))
     await _manager.start()
+
+    # 配置热更新：前端设置页保存 isolation_config.yaml 后按 mtime 重建 manager，
+    # 新环境创建即用新配额（存量容器由 _find_existing_container 复用找回）。
+    if _config_watcher_task is None or _config_watcher_task.done():
+        _config_watcher_task = asyncio.create_task(_watch_config_reload())
 
     # 初始化检查点管理器
     _checkpoint_mgr = CheckpointManager(project_root=os.getcwd())
@@ -57,6 +67,39 @@ async def _on_load(params: dict[str, Any]) -> None:
     _permission_checker = PermissionChecker()
 
     logger.info("[isolation] 隔离服务已启动")
+
+
+async def _watch_config_reload() -> None:
+    """轮询 isolation_config.yaml mtime，变化时重建 IsolationManager。
+
+    内核 PUT 配置端点直写磁盘 yaml 无通知，get_config() 是启动快照——
+    轻量轮询（5s）让前端保存的配额改动无需重启插件即生效。
+    """
+    global _manager
+    cfg_path = Path(__file__).resolve().parents[4] / "config" / "isolation" / "isolation_config.yaml"
+    last_mtime: float | None = None
+    while True:
+        try:
+            mtime = cfg_path.stat().st_mtime
+            if last_mtime is not None and mtime != last_mtime:
+                logger.info("[isolation] 检测到隔离配置变更，重建隔离管理器 | file=%s", cfg_path)
+                import yaml  # noqa: PLC0415
+
+                raw = yaml.safe_load(cfg_path.read_text(encoding="utf-8")) or {}
+                new_manager = IsolationManager(
+                    providers_config_override=extract_providers_config({"isolation": {"isolation_config": raw}})
+                )
+                await new_manager.start()
+                old = _manager
+                _manager = new_manager
+                if old:
+                    await old.stop()
+                last_mtime = mtime
+            elif last_mtime is None:
+                last_mtime = mtime
+        except OSError:
+            pass  # 文件暂不可读（原子写窗口），下轮再试
+        await asyncio.sleep(5)
 
 
 @plugin.on_unload

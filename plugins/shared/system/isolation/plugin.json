@@ -229,7 +229,38 @@
     {
       "id": "isolation_config",
       "path": "config/isolation/isolation_config.yaml",
-      "label": "隔离配置"
+      "label": "隔离配置",
+      "fields": [
+        {
+          "name": "providers.cua.limits.memory",
+          "type": "string",
+          "label": "容器内存限制",
+          "description": "如 2g / 989m；留空 = 按引擎宿主动态自适应",
+          "placeholder": "2g"
+        },
+        {
+          "name": "providers.cua.limits.cpus",
+          "type": "string",
+          "label": "容器 CPU 数",
+          "description": "如 2.0；留空 = 按引擎宿主动态自适应",
+          "placeholder": "2.0"
+        },
+        {
+          "name": "providers.cua.image",
+          "type": "string",
+          "label": "容器镜像",
+          "placeholder": "agentos:latest"
+        },
+        {
+          "name": "coordinator.default_level",
+          "type": "select",
+          "label": "默认隔离级别",
+          "options": [
+            "isolated",
+            "non_isolated"
+          ]
+        }
+      ]
     },
     {
       "id": "isolation_policy",

@@ -48,6 +48,29 @@ def _load_provider_config() -> dict[str, Any]:
         return {}
 
 
+def extract_providers_config(full_config: dict[str, Any]) -> dict[str, Any]:
+    """从插件 get_config() 的全量配置里提取隔离提供者配置。
+
+    get_config() = 内核 load_config 注入的全系统配置快照：config/ 目录树 →
+    {目录名: {文件 stem: {…yaml 内容…}}}。隔离插件声明的 isolation_config.yaml
+    落位 `isolation.isolation_config.providers`；兜底兼容平铺结构
+    （`isolation_config.providers`，单文件目录形态）。
+
+    Returns:
+        {"providers": {...}}（供 _create_providers_from_config 使用）；
+        找不到时返回空 providers（调用方走默认/自适应）。
+    """
+    iso_cfg: dict[str, Any] = {}
+    if isinstance(full_config.get("isolation"), dict):
+        iso_entry = full_config["isolation"]
+        if isinstance(iso_entry.get("isolation_config"), dict):
+            iso_cfg = iso_entry["isolation_config"]
+    if not iso_cfg and isinstance(full_config.get("isolation_config"), dict):
+        iso_cfg = full_config["isolation_config"]
+    providers = iso_cfg.get("providers")
+    return {"providers": providers} if isinstance(providers, dict) else {}
+
+
 def _create_providers_from_config(
     providers_config: dict[str, Any] | None = None,
     profile: dict[str, Any] | None = None,
@@ -158,8 +181,16 @@ class IsolationManager:
         decider: IsolationDecider | None = None,
         config_path: str | None = None,
         task_repository=None,
+        providers_config_override: dict[str, Any] | None = None,
     ):
-        """初始化管理器"""
+        """初始化管理器
+
+        Args:
+            providers_config_override: 提供者配置（{"providers": {...}} 形状，
+                来自插件 get_config() 显式注入）。非 None 时优先于 config_path
+                读取（config 中心在插件侧不可达时的配置通路，见
+                P1-7 DEBT 与 extract_providers_config）。
+        """
         # 硬件自适应：启动时检测硬件，计算资源配额
         # profile 决定容器内存/CPU/数量上限，保护低配机不被压垮
         try:
@@ -181,8 +212,13 @@ class IsolationManager:
         if providers is not None:
             self._providers = providers
         else:
-            providers_config = None
-            if config_path:
+            providers_config: dict[str, Any] | None = None
+            if providers_config_override is not None:
+                # override 约定形状 {"providers": {...}}（与 extract_providers_config
+                # 对齐）；解包后交给 _create_providers_from_config。
+                embedded = providers_config_override.get("providers")
+                providers_config = embedded if isinstance(embedded, dict) else providers_config_override
+            elif config_path:
                 try:
                     from config.config_center import get_config_center  # noqa: PLC0415
                     # P1-7 DEBT(task_11): 🔴 高危——隔离提供者配置直读（动态 path 分支），
