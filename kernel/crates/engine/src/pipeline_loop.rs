@@ -826,10 +826,19 @@ impl PipelineExecutor {
             .and_then(|v| v.as_str())
             .unwrap_or("");
         if !run_pipeline_id.is_empty() {
-            let _ = self
+            if let Err(e) = self
                 .store
                 .set_run_pipeline(&self.run_id, run_pipeline_id)
-                .await;
+                .await
+            {
+                warn!(
+                    run_id = %self.run_id,
+                    pipeline_id = %run_pipeline_id,
+                    error = %e,
+                    "set_run_pipeline 归属登记失败（继续执行）"
+                );
+                self.metrics.inc_persist_failure();
+            }
         }
 
         // pipeline_id 从 state 读（server.rs:261 注入，前端创建会话时生成、每轮回传）。

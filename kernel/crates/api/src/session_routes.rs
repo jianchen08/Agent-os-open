@@ -23,12 +23,15 @@ use agentos_http::error::ApiError;
 
 /// GET /api/v1/sessions — 会话列表。
 ///
-/// 域2持久化：优先从 sessions 表读（重启后可恢复），DB 空时回退内存 registry
-/// （兼容 store 未配置或历史场景）。返回结构对齐前端 Session 类型。
+/// 域2持久化：优先从 sessions 表读（重启后可恢复）。DB 查询失败 → 503
+/// （对齐同文件 [`map_messages_query_failure`] 先例——「存储挂了」不得回退内存
+/// registry 伪装成 200 陈旧列表，前端必须能区分故障与空）；DB 正常但空 → 回退
+/// 内存 registry（兼容 store 未配置或历史场景，显式兼容契约非吞错）。
+/// 返回结构对齐前端 Session 类型。
 pub async fn list_sessions_handler(
     State(state): State<AppState>,
     headers: HeaderMap,
-) -> Json<Value> {
+) -> Result<Json<Value>, ApiError> {
     let now = chrono::Utc::now().to_rfc3339();
     let mut threads: Vec<Value> = Vec::new();
 
@@ -85,9 +88,7 @@ pub async fn list_sessions_handler(
                 }
             }
             Ok(_) => {}
-            Err(e) => {
-                tracing::warn!(error = %e, "list_sessions 查询失败，回退内存 registry");
-            }
+            Err(e) => return Err(map_sessions_list_failure(e)),
         }
     }
 
@@ -120,7 +121,22 @@ pub async fn list_sessions_handler(
     }
 
     let total = threads.len();
-    Json(json!({ "threads": threads, "total": total }))
+    Ok(Json(json!({ "threads": threads, "total": total })))
+}
+
+/// 会话列表查询失败 → ApiError（对齐 [`map_messages_query_failure`] 先例：DB
+/// 故障不得回退内存 registry 把陈旧列表伪装成 200 假成功）。
+///
+/// 存储依赖故障 → 503（前端可渲染错误态并重试）；细节留服务端 warn（含底层
+/// 错误串），对外文案不泄漏内部结构。
+fn map_sessions_list_failure(e: agentos_core::types::StorageError) -> ApiError {
+    tracing::warn!(
+        error = %e,
+        "list_sessions 查询失败，返回 503（不再回退内存 registry 假成功）"
+    );
+    ApiError::ServiceUnavailable {
+        message: "会话列表暂时不可用（存储异常），请稍后重试".to_string(),
+    }
 }
 
 /// SessionRecord → 前端 Session JSON（对齐 mappers.ts:12-35）。
@@ -937,6 +953,240 @@ mod messages_query_tests {
         ] {
             assert!(matches!(
                 map_messages_query_failure("p", e),
+                ApiError::ServiceUnavailable { .. }
+            ));
+        }
+    }
+}
+
+#[cfg(test)]
+mod sessions_list_tests {
+    //! 扫描 2026-08-27 辖区一 Should#6：list_sessions DB 故障 → 503，不再回退
+    //! 内存 registry 把「存储挂了」伪装成 200 陈旧列表（假成功）；DB 正常但空
+    //! → 内存 registry 兼容回退契约保持不变（显式兼容语义非吞错）。
+
+    use super::*;
+    use agentos_core::traits::StorageBackend;
+    use axum::extract::State;
+
+    /// list_sessions 恒故障的存储 mock。其余必需方法以 unreachable! 桩实现——
+    /// 错误路径若意外耦合了其他存储调用会在此炸出（比静默 NotFound 更诚实）。
+    struct ErrListStore;
+
+    #[async_trait::async_trait]
+    impl StorageBackend for ErrListStore {
+        async fn list_sessions(
+            &self,
+            _filter: agentos_core::traits::SessionListFilter,
+        ) -> Result<Vec<agentos_core::types::SessionRecord>, agentos_core::types::StorageError>
+        {
+            Err(agentos_core::types::StorageError::Database(
+                "injected sessions list failure".to_string(),
+            ))
+        }
+        async fn get_run(
+            &self,
+            _run_id: &str,
+        ) -> Result<agentos_core::types::RunRecord, agentos_core::types::StorageError> {
+            unreachable!("list_sessions 错误路径不应触碰其他存储方法")
+        }
+        async fn get_messages_by_pipeline(
+            &self,
+            _pipeline_id: &str,
+            _opts: agentos_core::traits::MessageQueryOpts,
+        ) -> Result<Vec<agentos_core::types::MessageRecord>, agentos_core::types::StorageError>
+        {
+            unreachable!("list_sessions 错误路径不应触碰其他存储方法")
+        }
+        async fn get_blob(
+            &self,
+            _blob_id: &str,
+        ) -> Result<Vec<u8>, agentos_core::types::StorageError> {
+            unreachable!("list_sessions 错误路径不应触碰其他存储方法")
+        }
+        async fn append_trace(
+            &self,
+            _entry: agentos_core::types::TraceEntry,
+        ) -> Result<(), agentos_core::types::StorageError> {
+            unreachable!("list_sessions 错误路径不应触碰其他存储方法")
+        }
+        async fn create_branch(
+            &self,
+            _branch: agentos_core::types::Branch,
+        ) -> Result<(), agentos_core::types::StorageError> {
+            unreachable!("list_sessions 错误路径不应触碰其他存储方法")
+        }
+        async fn update_run_status(
+            &self,
+            _run_id: &str,
+            _status: agentos_core::types::RunStatus,
+            _branch: Option<&str>,
+            _seq: Option<u32>,
+        ) -> Result<(), agentos_core::types::StorageError> {
+            unreachable!("list_sessions 错误路径不应触碰其他存储方法")
+        }
+        async fn create_run(
+            &self,
+            _run_id: &str,
+            _config_hash: &str,
+            _tenant_id: &str,
+        ) -> Result<(), agentos_core::types::StorageError> {
+            unreachable!("list_sessions 错误路径不应触碰其他存储方法")
+        }
+        async fn store_blob(
+            &self,
+            _data: &[u8],
+            _mime_type: &str,
+        ) -> Result<String, agentos_core::types::StorageError> {
+            unreachable!("list_sessions 错误路径不应触碰其他存储方法")
+        }
+        async fn create_session(
+            &self,
+            _session: &agentos_core::types::SessionRecord,
+        ) -> Result<(), agentos_core::types::StorageError> {
+            unreachable!("list_sessions 错误路径不应触碰其他存储方法")
+        }
+        async fn get_session(
+            &self,
+            _thread_id: &str,
+        ) -> Result<Option<agentos_core::types::SessionRecord>, agentos_core::types::StorageError>
+        {
+            unreachable!("list_sessions 错误路径不应触碰其他存储方法")
+        }
+        async fn update_session(
+            &self,
+            _session: &agentos_core::types::SessionRecord,
+        ) -> Result<(), agentos_core::types::StorageError> {
+            unreachable!("list_sessions 错误路径不应触碰其他存储方法")
+        }
+        async fn delete_session(
+            &self,
+            _thread_id: &str,
+        ) -> Result<(), agentos_core::types::StorageError> {
+            unreachable!("list_sessions 错误路径不应触碰其他存储方法")
+        }
+        async fn link_pipeline_session(
+            &self,
+            _pipeline_id: &str,
+            _thread_id: &str,
+            _tenant_id: &str,
+        ) -> Result<(), agentos_core::types::StorageError> {
+            unreachable!("list_sessions 错误路径不应触碰其他存储方法")
+        }
+        async fn list_pipeline_ids_by_thread(
+            &self,
+            _thread_id: &str,
+            _tenant_id: &str,
+        ) -> Result<Vec<String>, agentos_core::types::StorageError> {
+            unreachable!("list_sessions 错误路径不应触碰其他存储方法")
+        }
+        async fn get_step_traces_by_thread(
+            &self,
+            _thread_id: &str,
+            _tenant_id: &str,
+        ) -> Result<Vec<agentos_core::types::TraceEntry>, agentos_core::types::StorageError>
+        {
+            unreachable!("list_sessions 错误路径不应触碰其他存储方法")
+        }
+        async fn create_user(
+            &self,
+            _user: &agentos_core::types::UserRecord,
+        ) -> Result<(), agentos_core::types::StorageError> {
+            unreachable!("list_sessions 错误路径不应触碰其他存储方法")
+        }
+        async fn get_user_by_id(
+            &self,
+            _user_id: &str,
+        ) -> Result<Option<agentos_core::types::UserRecord>, agentos_core::types::StorageError>
+        {
+            unreachable!("list_sessions 错误路径不应触碰其他存储方法")
+        }
+        async fn get_user_by_username(
+            &self,
+            _username: &str,
+        ) -> Result<Option<agentos_core::types::UserRecord>, agentos_core::types::StorageError>
+        {
+            unreachable!("list_sessions 错误路径不应触碰其他存储方法")
+        }
+        async fn list_users(
+            &self,
+        ) -> Result<Vec<agentos_core::types::UserRecord>, agentos_core::types::StorageError>
+        {
+            unreachable!("list_sessions 错误路径不应触碰其他存储方法")
+        }
+        async fn update_last_login(
+            &self,
+            _user_id: &str,
+        ) -> Result<(), agentos_core::types::StorageError> {
+            unreachable!("list_sessions 错误路径不应触碰其他存储方法")
+        }
+        async fn delete_user(
+            &self,
+            _user_id: &str,
+        ) -> Result<bool, agentos_core::types::StorageError> {
+            unreachable!("list_sessions 错误路径不应触碰其他存储方法")
+        }
+    }
+
+    #[tokio::test]
+    async fn db_error_returns_503_not_stale_registry_list() {
+        // registry 预置陈旧线程：修复前该数据会以 200「成功」出口。
+        let mut state = AppState::new();
+        state.store = Some(std::sync::Arc::new(ErrListStore) as std::sync::Arc<dyn StorageBackend>);
+        state.session = Some(std::sync::Arc::new(
+            agentos_session::SessionCoordinator::new(),
+        ));
+        state
+            .session
+            .as_ref()
+            .unwrap()
+            .registry()
+            .register_thread("thread-stale-1", "u1");
+
+        let resp = list_sessions_handler(State(state), HeaderMap::new()).await;
+
+        match resp {
+            Ok(body) => panic!("DB 故障不得回退内存 registry 假成功，实际 {:?}", body.0),
+            Err(e) => assert!(
+                matches!(e, ApiError::ServiceUnavailable { .. }),
+                "DB 故障应映射 503，实际 {e:?}"
+            ),
+        }
+    }
+
+    #[tokio::test]
+    async fn empty_db_falls_back_to_memory_registry_with_200() {
+        // DB 正常但空 → 内存 registry 兼容回退不变（区分此契约与上例故障短路）。
+        let store = std::sync::Arc::new(agentos_engine::SqliteStore::open_memory().unwrap());
+        let mut state = AppState::new();
+        state.store = Some(store as std::sync::Arc<dyn StorageBackend>);
+        state.session = Some(std::sync::Arc::new(
+            agentos_session::SessionCoordinator::new(),
+        ));
+        state
+            .session
+            .as_ref()
+            .unwrap()
+            .registry()
+            .register_thread("thread-mem-1", "u1");
+
+        let resp = list_sessions_handler(State(state), HeaderMap::new())
+            .await
+            .expect("DB 空属正常场景应 200");
+
+        assert_eq!(resp.0["total"], 1);
+        assert_eq!(resp.0["threads"][0]["thread_id"], "thread-mem-1");
+    }
+
+    #[test]
+    fn map_sessions_list_failure_covers_storage_error_kinds() {
+        for e in [
+            agentos_core::types::StorageError::Database("db".to_string()),
+            agentos_core::types::StorageError::Io("io".to_string()),
+            agentos_core::types::StorageError::Serialization("ser".to_string()),
+        ] {
+            assert!(matches!(
+                map_sessions_list_failure(e),
                 ApiError::ServiceUnavailable { .. }
             ));
         }
