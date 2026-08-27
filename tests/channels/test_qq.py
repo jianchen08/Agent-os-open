@@ -168,6 +168,25 @@ class TestQQOutputAdapter:
         await out.send_stream({"text": "x", "flush": True})
         client.send_message.assert_not_called()
 
+    @pytest.mark.asyncio
+    async def test_send_propagates_send_failure(self) -> None:
+        """底层发送失败 → 异常传播给调用方（适配器不吞错，管道可感知丢消息）。"""
+        client = self._client()
+        client.send_message = AsyncMock(side_effect=RuntimeError("OneBot send message failed: retcode=100"))
+        out = QQOutputAdapter(client)
+        with pytest.raises(RuntimeError, match="OneBot send message failed"):
+            await out.send({"raw_result": "hello", "_channel_user_id": "123"})
+
+    @pytest.mark.asyncio
+    async def test_send_stream_flush_propagates_send_failure(self) -> None:
+        """流式 flush 发送失败 → 异常传播，不静默丢弃累积文本。"""
+        client = self._client()
+        client.send_message = AsyncMock(side_effect=RuntimeError("OneBot send message failed"))
+        out = QQOutputAdapter(client)
+        out.set_channel_user_id("321")
+        with pytest.raises(RuntimeError, match="OneBot send message failed"):
+            await out.send_stream({"text": "完整", "flush": True})
+
 
 # ═══════════════════════════════════════════════════════════
 # QQAdapter 组合
@@ -328,6 +347,64 @@ class TestOneBotWebSocket:
         assert client._ws_connections == []
         assert result.closed is False
 
+    @pytest.mark.asyncio
+    async def test_ws_handler_callback_failure_visible_and_loop_survives(
+        self, caplog, monkeypatch
+    ) -> None:
+        """回调异常分级契约：error 级记录+失败计数，连接循环不终结、后续事件照常送达。"""
+        import logging
+
+        from aiohttp import web
+
+        client = OneBotClient()
+        processed: list[dict] = []
+        calls = {"n": 0}
+
+        async def cb(data):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise ValueError("callback boom")
+            processed.append(data)
+
+        client.on_message = cb
+
+        class _FakeWS:
+            def __init__(self, msgs):
+                self._msgs = list(msgs)
+                self.closed = False
+
+            async def prepare(self, request):
+                return None
+
+            def __aiter__(self):
+                return self
+
+            async def __anext__(self):
+                if not self._msgs:
+                    raise StopAsyncIteration
+                return self._msgs.pop(0)
+
+        fake_ws = _FakeWS(
+            [
+                MagicMock(type=aiohttp.WSMsgType.TEXT, data=json.dumps({"post_type": "message", "m": 1})),
+                MagicMock(type=aiohttp.WSMsgType.TEXT, data=json.dumps({"post_type": "message", "m": 2})),
+                MagicMock(type=aiohttp.WSMsgType.CLOSED),
+            ]
+        )
+        monkeypatch.setattr(web, "WebSocketResponse", lambda: fake_ws)
+        request = MagicMock()
+        request.remote = "127.0.0.1"
+
+        with caplog.at_level("WARNING", logger="onebot_client"):
+            await client._ws_handler(request)
+
+        # 核心行为不变量：首条回调失败后连接循环仍在跑，第二条消息照常送达
+        # （OneBot 契约：on_message 回调接收完整事件对象）
+        assert processed == [{"post_type": "message", "m": 2}]
+        # 失败可见性：error 级以上记录 + 公开失败计数递增
+        assert client.failed_event_count == 1
+        assert any(r.levelno >= logging.ERROR for r in caplog.records)
+
 
 class TestOneBotConnectLoop:
     """connect 重试循环与后台任务（A5.2 补）。"""
@@ -448,7 +525,8 @@ class TestOneBotConnectServer:
         assert runner.cleanup_called
 
     @pytest.mark.asyncio
-    async def test_send_message_error_retcode_logged(self) -> None:
+    async def test_send_message_api_error_raises(self) -> None:
+        """status!=ok 且 retcode!=0 → RuntimeError 上抛（契约：发送失败可感知）。"""
         client = OneBotClient()
         mock_response = AsyncMock()
         mock_response.json = AsyncMock(return_value={"status": "failed", "retcode": 100, "msg": "err"})
@@ -457,8 +535,24 @@ class TestOneBotConnectServer:
         mock_session = MagicMock()
         mock_session.post = MagicMock(return_value=mock_response)
         client._session = mock_session
-        result = await client.send_message(user_id=1, content="x")
-        assert result["status"] == "failed"  # 错误透传返回
+
+        with pytest.raises(RuntimeError, match="retcode=100"):
+            await client.send_message(user_id=1, content="x")
+
+    @pytest.mark.asyncio
+    async def test_send_message_success_returns_result(self) -> None:
+        """成功响应正常返回（行为不变量：失败上抛不改成功路径）。"""
+        client = OneBotClient()
+        mock_response = AsyncMock()
+        mock_response.json = AsyncMock(return_value={"status": "ok", "retcode": 0})
+        mock_response.__aenter__ = AsyncMock(return_value=mock_response)
+        mock_response.__aexit__ = AsyncMock(return_value=False)
+        mock_session = MagicMock()
+        mock_session.post = MagicMock(return_value=mock_response)
+        client._session = mock_session
+
+        result = await client.send_message(user_id=123, content="hi")
+        assert result == {"status": "ok", "retcode": 0}
 
     @pytest.mark.asyncio
     async def test_disconnect_closes_ws_connections(self) -> None:

@@ -295,6 +295,25 @@ class TestWeComOutputAdapter:
         await out.send_stream({"text": "", "type": "end"})
         client.send_message.assert_awaited_once()
 
+    @pytest.mark.asyncio
+    async def test_send_propagates_send_failure(self) -> None:
+        """底层发送失败 → 异常传播给调用方（适配器不吞错，管道可感知丢消息）。"""
+        client = self._client()
+        client.send_message = AsyncMock(side_effect=RuntimeError("WeCom send message failed: errcode=40016"))
+        out = WeComOutputAdapter(client)
+        with pytest.raises(RuntimeError, match="WeCom send message failed"):
+            await out.send({"raw_result": "hello", "_channel_user_id": "u1"})
+
+    @pytest.mark.asyncio
+    async def test_send_stream_flush_propagates_send_failure(self) -> None:
+        """流式 flush 发送失败 → 异常传播，不静默丢弃累积文本。"""
+        client = self._client()
+        client.send_message = AsyncMock(side_effect=RuntimeError("WeCom send message failed"))
+        out = WeComOutputAdapter(client)
+        out.set_channel_user_id("u9")
+        with pytest.raises(RuntimeError, match="WeCom send message failed"):
+            await out.send_stream({"text": "完整", "flush": True})
+
 
 # ═══════════════════════════════════════════════════════════
 # WeComAdapter 组合
@@ -453,7 +472,8 @@ class TestWeComStreamClient:
             await client.send_message("u1", "hi")
 
     @pytest.mark.asyncio
-    async def test_send_message_error_errcode_logged(self) -> None:
+    async def test_send_message_api_error_raises_and_logs(self) -> None:
+        """API errcode 非 0 → RuntimeError 上抛（契约：发送失败可感知，不得静默返回）。"""
         client = WeComStreamClient(corp_id=_CORP_ID, agent_id=1, secret="s")
         client._ensure_token = AsyncMock()
         client._access_token = "tok"
@@ -466,8 +486,26 @@ class TestWeComStreamClient:
         mock_session.closed = False
         client._session = mock_session
 
+        with pytest.raises(RuntimeError, match="errcode=40016"):
+            await client.send_message("u1", "hi")
+
+    @pytest.mark.asyncio
+    async def test_send_message_success_errcode_zero_returns_result(self) -> None:
+        """成功 errcode=0 正常返回结果（行为不变量：失败上抛不改成功路径）。"""
+        client = WeComStreamClient(corp_id=_CORP_ID, agent_id=1, secret="s")
+        client._ensure_token = AsyncMock()
+        client._access_token = "tok"
+        mock_response = AsyncMock()
+        mock_response.json = AsyncMock(return_value={"errcode": 0})
+        mock_response.__aenter__ = AsyncMock(return_value=mock_response)
+        mock_response.__aexit__ = AsyncMock(return_value=False)
+        mock_session = MagicMock()
+        mock_session.post = MagicMock(return_value=mock_response)
+        mock_session.closed = False
+        client._session = mock_session
+
         result = await client.send_message("u1", "hi")
-        assert result["errcode"] == 40016  # 错误码透传返回，不抛
+        assert result == {"errcode": 0}
 
     @pytest.mark.asyncio
     async def test_ensure_token_fresh_and_expired(self) -> None:

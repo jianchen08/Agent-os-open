@@ -91,6 +91,25 @@ class TestFeishuOutputAdapter:
         client.send_message.assert_called_once()
         assert "Something went wrong" in client.send_message.call_args[0][1]
 
+    @pytest.mark.asyncio
+    async def test_send_propagates_send_failure(self) -> None:
+        """底层发送失败 → 异常传播给调用方（适配器不吞错，管道可感知丢消息）。"""
+        client = AsyncMock(spec=FeishuStreamClient)
+        client.send_message.side_effect = RuntimeError("Feishu send message failed: code=99991")
+        adapter = FeishuOutputAdapter(stream_client=client)
+        with pytest.raises(RuntimeError, match="Feishu send message failed"):
+            await adapter.send({"raw_result": "hello", "_channel_user_id": "ou_test"})
+
+    @pytest.mark.asyncio
+    async def test_send_stream_flush_propagates_send_failure(self) -> None:
+        """流式 flush 发送失败 → 异常传播，不静默丢弃累积文本。"""
+        client = AsyncMock(spec=FeishuStreamClient)
+        client.send_message.side_effect = RuntimeError("Feishu send message failed")
+        adapter = FeishuOutputAdapter(stream_client=client)
+        adapter.set_channel_user_id("ou_test")
+        with pytest.raises(RuntimeError, match="Feishu send message failed"):
+            await adapter.send_stream({"text": "完整", "flush": True})
+
 
 class TestFeishuAdapter:
     """FeishuAdapter 组合模式测试。"""

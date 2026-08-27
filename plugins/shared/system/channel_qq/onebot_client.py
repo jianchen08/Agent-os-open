@@ -79,6 +79,9 @@ class OneBotClient:
         self._running = False
         self._receive_task: asyncio.Task[None] | None = None
 
+        # 接收循环内事件处理失败计数（可观测指标，供告警/DLQ 接线）
+        self.failed_event_count = 0
+
         self.on_message: MessageCallback | None = None
 
     @property
@@ -189,7 +192,8 @@ class OneBotClient:
             OneBot API 响应字典
 
         Raises:
-            RuntimeError: session 未初始化
+            RuntimeError: 会话未初始化，或 OneBot API 返回 status!=ok 且
+                retcode!=0（发送失败必须可感知，调用方据此处理重试/告警）
         """
         if self._session is None:
             raise RuntimeError("Session not initialized")
@@ -217,6 +221,10 @@ class OneBotClient:
                     result.get("retcode"),
                     result.get("msg", ""),
                 )
+                raise RuntimeError(
+                    f"OneBot send message failed: status={result.get('status')}, "
+                    f"retcode={result.get('retcode')}, msg={result.get('msg', '')}"
+                )
             return result
 
     # ── WebSocket 处理 ──────────────────────────────────────
@@ -243,13 +251,28 @@ class OneBotClient:
         )
 
         try:
+            # 事件循环吞错治理契约（fail-visible 与连接存活的平衡）：
+            # - 协议解析失败（坏帧）：warning 记录后跳过该帧，不计入回调失败；
+            # - 事件处理本体（on_message 回调链）异常：error 级记录并累计
+            #   ``failed_event_count``，但不向上终结 WS 连接——一条坏消息不得
+            #   杀死整个通道监听。失败经由计数与 error 日志对外可见。
             async for msg in ws:
                 if msg.type == aiohttp.WSMsgType.TEXT:
                     try:
                         data = json.loads(msg.data)
+                    except json.JSONDecodeError as exc:
+                        logger.warning("Malformed JSON event skipped: %s", exc)
+                        continue
+                    try:
                         await self._handle_event(data)
                     except Exception as exc:
-                        logger.warning("Error handling OneBot event: %s", exc)
+                        self.failed_event_count += 1
+                        logger.error(
+                            "OneBot event processing failed (#%d): %s",
+                            self.failed_event_count,
+                            exc,
+                            exc_info=True,
+                        )
                 elif msg.type in (
                     aiohttp.WSMsgType.CLOSED,
                     aiohttp.WSMsgType.ERROR,

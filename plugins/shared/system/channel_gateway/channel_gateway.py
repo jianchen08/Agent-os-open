@@ -132,73 +132,89 @@ class ChannelGateway:
         self,
         channel_type: str,
         raw_message: dict[str, Any],
-    ) -> None:
+    ) -> dict[str, Any]:
         """统一消息入口。
 
         将渠道原始消息标准化为 UnifiedMessage，获取/创建会话，
         构建管道初始 state，并通过回调传递给管道引擎。
 
+        失败语义契约（fail-closed）：可预期失败——渠道不支持、管道
+        回调未接线——返回 ``{"handled": False, "error": ...}`` 失败值；
+        管道回调自身的异常原样传播给调用方。本方法不吞任何异常，
+        调用方必须能区分"已处理"与"已丢弃"。
+
         Args:
             channel_type: 来源通道类型
             raw_message: 渠道原始消息字典
+
+        Returns:
+            成功：``{"handled": True, "session_id": ...}``；
+            失败：``{"handled": False, "error": <原因>}``
         """
         try:
             # 1. 标准化消息
             unified = self._normalizer.normalize(channel_type, raw_message)
-
-            # 2. 获取或创建跨通道会话
-            session_id = self._session_bridge.get_or_create_session(
-                unified_user_id=unified.unified_user_id,
-                channel_type=channel_type,
-            )
-
-            # 3. 更新活跃通道
-            self._session_bridge.switch_channel(unified.unified_user_id, channel_type)
-
-            # 4. 构建管道初始 state
-            initial_state = create_initial_state(
-                **{
-                    "user_input": unified.content,
-                    StateKeys.SESSION_ID: session_id,
-                    "_channel_type": unified.channel_type,
-                    "_channel_user_id": unified.channel_user_id,
-                    "_unified_user_id": unified.unified_user_id,
-                    "_message_id": unified.message_id,
-                    "_raw_message": unified.raw_message,
-                }
-            )
-
-            logger.info(
-                "Message handled: channel=%s, user=%s, session=%s, content_len=%d",
-                channel_type,
-                unified.unified_user_id,
-                session_id,
-                len(unified.content),
-            )
-
-            # 5. 传递给管道引擎
-            if self.on_pipeline_request:
-                await self.on_pipeline_request(initial_state)
-            else:
-                logger.warning("No pipeline request handler set, message dropped")
-
         except ValueError as exc:
             logger.error("Failed to handle message from %s: %s", channel_type, exc)
-        except Exception as exc:
-            logger.error(
-                "Unexpected error handling message from %s: %s",
-                channel_type,
-                exc,
-                exc_info=True,
-            )
+            return {"handled": False, "error": str(exc)}
 
-    async def send_response(self, response: UnifiedResponse) -> None:
+        # 2. 获取或创建跨通道会话
+        session_id = self._session_bridge.get_or_create_session(
+            unified_user_id=unified.unified_user_id,
+            channel_type=channel_type,
+        )
+
+        # 3. 更新活跃通道
+        self._session_bridge.switch_channel(unified.unified_user_id, channel_type)
+
+        # 4. 构建管道初始 state
+        initial_state = create_initial_state(
+            **{
+                "user_input": unified.content,
+                StateKeys.SESSION_ID: session_id,
+                "_channel_type": unified.channel_type,
+                "_channel_user_id": unified.channel_user_id,
+                "_unified_user_id": unified.unified_user_id,
+                "_message_id": unified.message_id,
+                "_raw_message": unified.raw_message,
+            }
+        )
+
+        logger.info(
+            "Message handled: channel=%s, user=%s, session=%s, content_len=%d",
+            channel_type,
+            unified.unified_user_id,
+            session_id,
+            len(unified.content),
+        )
+
+        # 5. 传递给管道引擎；未接线即丢消息，必须如实上报失败
+        if not self.on_pipeline_request:
+            logger.warning("No pipeline request handler set, message dropped")
+            return {
+                "handled": False,
+                "error": "pipeline request handler not configured",
+            }
+
+        await self.on_pipeline_request(initial_state)
+        return {"handled": True, "session_id": session_id}
+
+    async def send_response(self, response: UnifiedResponse) -> dict[str, Any]:
         """发送响应到指定渠道。
 
         将 UnifiedResponse 反标准化为渠道格式，通过对应适配器发送。
 
+        失败语义契约（fail-closed）：目标渠道无适配器/output 适配器未
+        初始化时返回 ``{"sent": False, "error": ...}`` 失败值；底层适配
+        器发送失败的异常原样传播。本方法不吞异常，调用方必须能区分
+        "已发送"与"未送达"。
+
         Args:
             response: 统一响应
+
+        Returns:
+            成功：``{"sent": True}``；
+            失败：``{"sent": False, "error": <原因>}``
         """
         adapter = self._adapters.get(response.channel_type)
         if adapter is None:
@@ -206,40 +222,38 @@ class ChannelGateway:
                 "No adapter for channel %s, cannot send response",
                 response.channel_type,
             )
-            return
-
-        try:
-            # 反标准化
-            channel_payload = self._normalizer.denormalize(response.channel_type, response)
-
-            # 通过适配器的 output_adapter 发送
-            output_adapter = adapter.output_adapter
-            if output_adapter is None:
-                logger.error(
-                    "output_adapter 未初始化: channel=%s",
-                    response.channel_type,
-                )
-                return
-
-            state = {
-                StateKeys.RAW_RESULT: response.content,
-                "_channel_user_id": "",
-                "_channel_type": response.channel_type,
-                "_response_payload": channel_payload,
-                "ended": True,
+            return {
+                "sent": False,
+                "error": f"no adapter registered for channel {response.channel_type}",
             }
 
-            await output_adapter.send(state)
-
-            logger.debug(
-                "Response sent: channel=%s, type=%s",
-                response.channel_type,
-                response.content_type,
-            )
-
-        except Exception as exc:
+        output_adapter = adapter.output_adapter
+        if output_adapter is None:
             logger.error(
-                "Failed to send response to %s: %s",
+                "output_adapter 未初始化: channel=%s",
                 response.channel_type,
-                exc,
             )
+            return {
+                "sent": False,
+                "error": f"output_adapter not initialized for channel {response.channel_type}",
+            }
+
+        # 反标准化后经适配器的 output_adapter 发送；发送失败异常向上传播
+        channel_payload = self._normalizer.denormalize(response.channel_type, response)
+
+        state = {
+            StateKeys.RAW_RESULT: response.content,
+            "_channel_user_id": "",
+            "_channel_type": response.channel_type,
+            "_response_payload": channel_payload,
+            "ended": True,
+        }
+
+        await output_adapter.send(state)
+
+        logger.debug(
+            "Response sent: channel=%s, type=%s",
+            response.channel_type,
+            response.content_type,
+        )
+        return {"sent": True}

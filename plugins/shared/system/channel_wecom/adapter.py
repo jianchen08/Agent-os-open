@@ -136,8 +136,14 @@ class WeComOutputAdapter(IOutputAdapter):
     async def send(self, state: dict[str, Any]) -> None:
         """输出管道最终 state 到企业微信。
 
+        失败语义契约：底层渠道 API 发送失败时异常原样传播（不吞错、
+        不静默丢消息），管道/gateway 调用方可感知未送达。
+
         Args:
             state: 管道最终 state 字典
+
+        Raises:
+            RuntimeError: 渠道 API 发送失败（经 WeComStreamClient.send_message 契约上抛）
         """
         user_id = state.get("_channel_user_id", self._channel_user_id)
         if not user_id:

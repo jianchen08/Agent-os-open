@@ -126,7 +126,8 @@ class WeComStreamClient:
             企业微信 API 响应字典
 
         Raises:
-            RuntimeError: 未连接或发送失败
+            RuntimeError: 会话未初始化、token 获取失败或企业微信 API 返回
+                非 0 errcode（发送失败必须可感知，调用方据此处理重试/告警）
         """
         await self._ensure_token()
 
@@ -145,6 +146,9 @@ class WeComStreamClient:
                     "WeCom send message failed: errcode=%s, errmsg=%s",
                     errcode,
                     result.get("errmsg", ""),
+                )
+                raise RuntimeError(
+                    f"WeCom send message failed: errcode={errcode}, errmsg={result.get('errmsg', '')}"
                 )
             return result
 

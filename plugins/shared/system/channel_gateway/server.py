@@ -74,12 +74,16 @@ async def gateway_handle_message(
         raw_message: Channel-specific raw message dictionary
 
     Returns:
-        Result dict indicating success
+        Result dict reflecting the real outcome: success carries
+        ``handled: True`` (plus ``session_id``), failure carries
+        ``handled: False`` and an ``error`` description. Failures are
+        never masked as success.
     """
     if _gateway is None:
         return {"error": "Gateway not initialized"}
-    await _gateway.handle_message(channel_type, raw_message)
-    return {"handled": True, "channel": channel_type}
+    result = await _gateway.handle_message(channel_type, raw_message)
+    result["channel"] = channel_type
+    return result
 
 
 @plugin.tool(
@@ -115,7 +119,9 @@ async def gateway_send_response(
         content_type: Response content type ("text" or "card")
 
     Returns:
-        Result dict indicating success
+        Result dict reflecting the real outcome: success carries
+        ``sent: True``, failure carries ``sent: False`` and an ``error``
+        description. Failures are never masked as success.
     """
     if _gateway is None:
         return {"error": "Gateway not initialized"}
@@ -125,8 +131,9 @@ async def gateway_send_response(
         content=content,
         content_type=content_type,
     )
-    await _gateway.send_response(response)
-    return {"sent": True, "channel": channel_type}
+    result = await _gateway.send_response(response)
+    result["channel"] = channel_type
+    return result
 
 
 @plugin.tool(

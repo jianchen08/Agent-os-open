@@ -288,16 +288,18 @@ class TestChannelGateway:
 
     @pytest.mark.asyncio
     async def test_handle_message_normalization_error(self) -> None:
-        """消息标准化失败时的错误处理（不支持的渠道不抛异常）。"""
+        """消息标准化失败时的错误处理（不支持渠道 → 失败值，消息不进管道）。"""
         handler = AsyncMock()
         self.gateway.on_pipeline_request = handler
-        # 不支持的渠道，normalize 会抛 ValueError，handle_message 内部捕获
-        await self.gateway.handle_message("slack", {"data": "test"})
+        # 不支持的渠道，normalize 会抛 ValueError，handle_message 返回失败值
+        result = await self.gateway.handle_message("slack", {"data": "test"})
+        assert result["handled"] is False
+        assert result["error"]
         handler.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_send_response_no_adapter(self) -> None:
-        """无适配器时的日志警告（不抛异常）。"""
+        """无适配器时返回结构化失败值（sent=False + error），不抛异常。"""
         response = UnifiedResponse(
             message_id="msg-001",
             channel_type="nonexistent",
@@ -306,8 +308,9 @@ class TestChannelGateway:
             card_config=None,
             metadata={},
         )
-        # 不应抛异常，只记录日志
-        await self.gateway.send_response(response)
+        result = await self.gateway.send_response(response)
+        assert result["sent"] is False
+        assert "error" in result
 
     @pytest.mark.asyncio
     async def test_handle_message_normalizes_and_routes(self) -> None:

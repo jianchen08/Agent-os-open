@@ -80,6 +80,9 @@ class DingTalkStreamClient:
         self._running = False
         self._receive_task: asyncio.Task[None] | None = None
 
+        # 接收循环内事件处理失败计数（可观测指标，供告警/DLQ 接线）
+        self.failed_event_count = 0
+
         self.on_message: MessageCallback | None = None
 
     @property
@@ -168,7 +171,8 @@ class DingTalkStreamClient:
             钉钉 API 响应字典
 
         Raises:
-            RuntimeError: 未连接或发送失败
+            RuntimeError: 会话未初始化或钉钉 API 返回非 0 错误码
+                （发送失败必须可感知，调用方据此处理重试/告警）
         """
         await self._ensure_token()
 
@@ -190,11 +194,15 @@ class DingTalkStreamClient:
 
         async with self._session.post(url, json=body, headers=headers) as resp:
             result = await resp.json()
-            if result.get("code") and result.get("code") != "0":
+            code = result.get("code")
+            if code and code != "0":
                 logger.error(
                     "DingTalk send message failed: code=%s, msg=%s",
-                    result.get("code"),
+                    code,
                     result.get("message"),
+                )
+                raise RuntimeError(
+                    f"DingTalk send message failed: code={code}, message={result.get('message', '')}"
                 )
             return result
 
@@ -270,7 +278,15 @@ class DingTalkStreamClient:
         return base64.b64encode(hmac_code).decode("utf-8")
 
     async def _receive_loop(self) -> None:
-        """接收消息循环。"""
+        """接收消息循环。
+
+        吞错治理契约（fail-visible 与循环存活的平衡）：
+        - 协议解析失败（坏帧）：warning 记录后跳过该帧，不计入回调失败；
+        - 事件处理本体（on_message 回调链）异常：error 级记录并累计
+          ``failed_event_count``，但不向上终结连接循环——一条坏消息不得
+          杀死整个通道监听（否则所有后续消息永久中断）。失败经由计数
+          与 error 日志对外可见，而非静默丢弃。
+        """
         if self._ws is None:
             return
 
@@ -278,9 +294,19 @@ class DingTalkStreamClient:
             if msg.type == aiohttp.WSMsgType.TEXT:
                 try:
                     data = json.loads(msg.data)
+                except json.JSONDecodeError as exc:
+                    logger.warning("Malformed JSON message skipped: %s", exc)
+                    continue
+                try:
                     await self._handle_event(data)
                 except Exception as exc:
-                    logger.warning("Error handling stream message: %s", exc)
+                    self.failed_event_count += 1
+                    logger.error(
+                        "Stream message processing failed (#%d): %s",
+                        self.failed_event_count,
+                        exc,
+                        exc_info=True,
+                    )
             elif msg.type in (
                 aiohttp.WSMsgType.CLOSED,
                 aiohttp.WSMsgType.ERROR,

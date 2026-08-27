@@ -154,16 +154,28 @@ class TestSendMessage:
         assert body["content"] == json.dumps(card)
 
     @pytest.mark.asyncio
-    async def test_send_message_error_code_logged_and_returned(self, caplog) -> None:
+    async def test_send_message_api_error_raises_and_logs(self, caplog) -> None:
+        """API 错误码 → RuntimeError 上抛且 error 日志记录（发送失败可感知）。"""
         client = _make_client()
         client._session = _fake_session()
         client._session.post.return_value = _fake_response({"code": 99991, "msg": "bad"})
         client._tenant_token = "tok"
 
-        with caplog.at_level("ERROR", logger="stream_client"):
-            result = await client.send_message("ou_1", "hi")
-        assert result == {"code": 99991, "msg": "bad"}
+        with caplog.at_level("ERROR", logger="stream_client"), pytest.raises(
+            RuntimeError, match="code=99991"
+        ):
+            await client.send_message("ou_1", "hi")
         assert "Feishu send message failed" in caplog.text
+
+    @pytest.mark.asyncio
+    async def test_send_message_success_code_zero_returns_result(self) -> None:
+        """成功码 0 正常返回（行为不变量：失败上抛不改成功路径）。"""
+        client = _make_client()
+        client._session = _fake_session()
+        client._session.post.return_value = _fake_response({"code": 0, "msg": "ok"})
+        client._tenant_token = "tok"
+        result = await client.send_message("ou_1", "hi")
+        assert result == {"code": 0, "msg": "ok"}
 
     @pytest.mark.asyncio
     async def test_send_message_without_session_raises(self) -> None:
@@ -201,15 +213,17 @@ class TestSendCard:
         assert body["content"] == json.dumps(card)
 
     @pytest.mark.asyncio
-    async def test_send_card_error_code_logged(self, caplog) -> None:
+    async def test_send_card_api_error_raises_and_logs(self, caplog) -> None:
+        """卡片发送 API 错误码 → RuntimeError 上抛（与 send_message 同契约）。"""
         client = _make_client()
         client._session = _fake_session()
         client._session.post.return_value = _fake_response({"code": 1, "msg": "fail"})
         client._tenant_token = "tok"
 
-        with caplog.at_level("ERROR", logger="stream_client"):
-            result = await client.send_card("ou_1", {"elements": []})
-        assert result == {"code": 1, "msg": "fail"}
+        with caplog.at_level("ERROR", logger="stream_client"), pytest.raises(
+            RuntimeError, match="code=1"
+        ):
+            await client.send_card("ou_1", {"elements": []})
         assert "Feishu send card failed" in caplog.text
 
     @pytest.mark.asyncio
@@ -386,23 +400,41 @@ class TestReceiveLoop:
         client._ws = _FakeWS([self._text_msg("{not json")])
         with caplog.at_level("WARNING", logger="stream_client"):
             await client._receive_loop()
-        assert "Error handling stream message" in caplog.text
+        assert "Malformed JSON" in caplog.text
 
     @pytest.mark.asyncio
-    async def test_receive_loop_callback_error_warns(self, caplog) -> None:
-        # 回调抛非 JSONDecodeError 异常 → 走 except 的 Exception 分支
+    async def test_receive_loop_callback_failure_visible_and_loop_survives(
+        self, caplog
+    ) -> None:
+        """回调异常分级契约：error 级记录+失败计数，循环不终结、后续消息照常送达。"""
+        import logging
+
         client = _make_client()
-        client._ws = _FakeWS(
-            [self._text_msg(json.dumps({"headers": {"event_type": ""}, "data": {"m": 1}}))]
-        )
+        processed: list[dict[str, Any]] = []
+        calls = {"n": 0}
 
         async def _cb(payload: dict[str, Any]) -> None:
-            raise ValueError("boom")
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise ValueError("boom")
+            processed.append(payload)
 
         client.on_message = _cb
+        client._ws = _FakeWS(
+            [
+                self._text_msg(json.dumps({"headers": {"event_type": ""}, "data": {"m": 1}})),
+                self._text_msg(json.dumps({"headers": {"event_type": ""}, "data": {"m": 2}})),
+                self._close_msg(),
+            ]
+        )
         with caplog.at_level("WARNING", logger="stream_client"):
             await client._receive_loop()
-        assert "Error handling stream message" in caplog.text
+
+        # 核心行为不变量：首条回调失败后循环仍在跑，第二条消息照常送达
+        assert processed == [{"m": 2}]
+        # 失败可见性：error 级以上记录 + 公开失败计数递增
+        assert client.failed_event_count == 1
+        assert any(r.levelno >= logging.ERROR for r in caplog.records)
 
     @pytest.mark.asyncio
     async def test_receive_loop_no_ws_returns(self) -> None:

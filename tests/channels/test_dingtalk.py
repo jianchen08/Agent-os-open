@@ -108,6 +108,26 @@ class TestDingTalkOutputAdapter:
         assert "Something went wrong" in client.send_message.call_args[0][1]
 
     @pytest.mark.asyncio
+    async def test_send_propagates_send_failure(self) -> None:
+        """底层发送失败 → 异常传播给调用方（适配器不吞错，管道可感知丢消息）。"""
+        client = AsyncMock(spec=DingTalkStreamClient)
+        client.send_message.side_effect = RuntimeError("DingTalk send message failed: code=400")
+        adapter = DingTalkOutputAdapter(stream_client=client)
+        state = {"raw_result": "hello", "_channel_user_id": "user_dt_1"}
+        with pytest.raises(RuntimeError, match="DingTalk send message failed"):
+            await adapter.send(state)
+
+    @pytest.mark.asyncio
+    async def test_send_stream_flush_propagates_send_failure(self) -> None:
+        """流式 flush 发送失败 → 异常传播，不静默丢弃累积文本。"""
+        client = AsyncMock(spec=DingTalkStreamClient)
+        client.send_message.side_effect = RuntimeError("DingTalk send message failed")
+        adapter = DingTalkOutputAdapter(stream_client=client)
+        adapter.set_channel_user_id("user_dt_1")
+        with pytest.raises(RuntimeError, match="DingTalk send message failed"):
+            await adapter.send_stream({"text": "完整", "flush": True})
+
+    @pytest.mark.asyncio
     async def test_send_no_user_id(self) -> None:
         """无 user_id 时跳过。"""
         client = AsyncMock(spec=DingTalkStreamClient)
@@ -319,7 +339,8 @@ class TestDingTalkStreamClientExtended:
         assert await client._get_endpoint() == ""
 
     @pytest.mark.asyncio
-    async def test_send_message_error_code_returned(self) -> None:
+    async def test_send_message_api_error_raises(self) -> None:
+        """API 返回错误码 → RuntimeError 上抛（契约：发送失败可感知，不得静默返回）。"""
         client = self._client()
         client._ensure_token = AsyncMock()
         client._access_token = "tok"
@@ -330,8 +351,24 @@ class TestDingTalkStreamClientExtended:
         mock_session = MagicMock()
         mock_session.post = MagicMock(return_value=mock_response)
         client._session = mock_session
+        with pytest.raises(RuntimeError, match=r"code=400"):
+            await client.send_message("u1", "hi")
+
+    @pytest.mark.asyncio
+    async def test_send_message_success_code_zero_returns_result(self) -> None:
+        """成功码 "0" 正常返回结果（行为不变量：失败上抛不改成功路径）。"""
+        client = self._client()
+        client._ensure_token = AsyncMock()
+        client._access_token = "tok"
+        mock_response = AsyncMock()
+        mock_response.json = AsyncMock(return_value={"code": "0", "message": "ok"})
+        mock_response.__aenter__ = AsyncMock(return_value=mock_response)
+        mock_response.__aexit__ = AsyncMock(return_value=False)
+        mock_session = MagicMock()
+        mock_session.post = MagicMock(return_value=mock_response)
+        client._session = mock_session
         result = await client.send_message("u1", "hi")
-        assert result["code"] == "400"  # 错误码透传，不抛
+        assert result["code"] == "0"
 
     @pytest.mark.asyncio
     async def test_handle_event_message_and_ack(self) -> None:
@@ -484,6 +521,78 @@ class _FakeWs:
         if not self._msgs:
             raise StopAsyncIteration
         return self._msgs.pop(0)
+
+
+class TestReceiveLoopFailureContract:
+    """接收循环分级处置契约：解析错 warn+跳过；回调异常 error 级可见+
+    失败计数，且循环保持存活（一条坏消息不得杀死整个通道监听）。
+    """
+
+    def _client(self) -> DingTalkStreamClient:
+        return DingTalkStreamClient(client_id="test_id", client_secret="test_secret")
+
+    @pytest.mark.asyncio
+    async def test_callback_failure_visible_and_loop_survives(self, caplog) -> None:
+        import logging
+
+        client = self._client()
+        client._running = True
+        processed: list[dict] = []
+        calls = {"n": 0}
+
+        async def cb(data):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise ValueError("callback boom")
+            processed.append(data)
+
+        client.on_message = cb
+        client._ws = _FakeWs(
+            [
+                _Msg(aiohttp.WSMsgType.TEXT, '{"headers": {"eventType": "message"}, "data": {"m": 1}}'),
+                _Msg(aiohttp.WSMsgType.TEXT, '{"headers": {"eventType": "message"}, "data": {"m": 2}}'),
+                _Msg(aiohttp.WSMsgType.CLOSED),
+            ]
+        )
+        with caplog.at_level("WARNING", logger="stream_client"):
+            await client._receive_loop()
+
+        # 核心行为不变量：首条回调失败后，循环仍在跑，第二条消息照常送达
+        assert processed == [{"m": 2}]
+        # 失败可见性：error 级以上记录 + 公开失败计数递增
+        assert client.failed_event_count == 1
+        assert any(r.levelno >= logging.ERROR for r in caplog.records)
+
+    @pytest.mark.asyncio
+    async def test_malformed_json_is_warning_not_error(self, caplog) -> None:
+        """解析错归 warning 且不计入回调失败计数（两级分离）。"""
+        import logging
+
+        client = self._client()
+        client._running = True
+        got: list[dict] = []
+
+        async def cb(data):
+            got.append(data)
+
+        client.on_message = cb
+        client._ws = _FakeWs(
+            [
+                _Msg(aiohttp.WSMsgType.TEXT, "{bad json"),
+                _Msg(aiohttp.WSMsgType.TEXT, '{"headers": {"eventType": "message"}, "data": {"m": 9}}'),
+                _Msg(aiohttp.WSMsgType.CLOSED),
+            ]
+        )
+        with caplog.at_level("WARNING", logger="stream_client"):
+            await client._receive_loop()
+
+        assert got == [{"m": 9}]
+        assert client.failed_event_count == 0
+        bad_json_records = [r for r in caplog.records if "Malformed JSON" in r.message]
+        assert bad_json_records
+        assert all(
+            r.levelno == logging.WARNING for r in bad_json_records
+        )
 
 
 class TestDingTalkConnectPath:
