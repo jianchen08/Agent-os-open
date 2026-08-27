@@ -107,6 +107,7 @@ class TestEnvOverrides:
 class TestDetectHardwareFallback:
     def test_fallback_default_when_all_detection_fails(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setattr(_MOD, "_read_cgroup_memory_limit_gb", lambda: None)
+        monkeypatch.setattr(_MOD, "_read_docker_host_resources", lambda: None)
         monkeypatch.setattr(_MOD, "_read_sysconf_memory_gb", lambda: None)
         monkeypatch.setattr(_MOD, "_read_windows_memory_gb", lambda: None)
         monkeypatch.setattr(_MOD.os, "cpu_count", lambda: None)
@@ -117,6 +118,7 @@ class TestDetectHardwareFallback:
 
     def test_sysconf_path(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setattr(_MOD, "_read_cgroup_memory_limit_gb", lambda: None)
+        monkeypatch.setattr(_MOD, "_read_docker_host_resources", lambda: None)
         monkeypatch.setattr(_MOD, "_read_sysconf_memory_gb", lambda: 16.0)
         hw = detect_hardware()
         assert hw["total_memory_gb"] == 16.0
@@ -124,11 +126,65 @@ class TestDetectHardwareFallback:
 
     def test_windows_path(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setattr(_MOD, "_read_cgroup_memory_limit_gb", lambda: None)
+        monkeypatch.setattr(_MOD, "_read_docker_host_resources", lambda: None)
         monkeypatch.setattr(_MOD, "_read_sysconf_memory_gb", lambda: None)
         monkeypatch.setattr(_MOD, "_read_windows_memory_gb", lambda: 24.0)
         hw = detect_hardware()
         assert hw["total_memory_gb"] == 24.0
         assert hw["source"] == "windows"
+
+
+class TestDetectHardwareDockerHost:
+    """docker 引擎宿主检测（WSL VM / Desktop VM 才是容器实际消耗的资源）。"""
+
+    def test_docker_host_preferred_over_windows(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(_MOD, "_read_cgroup_memory_limit_gb", lambda: None)
+        monkeypatch.setattr(_MOD, "_read_docker_host_resources", lambda: (5.8, 4))
+        monkeypatch.setattr(_MOD, "_read_sysconf_memory_gb", lambda: None)
+        monkeypatch.setattr(_MOD, "_read_windows_memory_gb", lambda: 31.8)
+        hw = detect_hardware()
+        assert hw["total_memory_gb"] == 5.8
+        assert hw["cpu_count"] == 4
+        assert hw["source"] == "docker-host"
+
+    def test_docker_host_failure_falls_back_to_windows(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(_MOD, "_read_cgroup_memory_limit_gb", lambda: None)
+        monkeypatch.setattr(_MOD, "_read_docker_host_resources", lambda: None)
+        monkeypatch.setattr(_MOD, "_read_sysconf_memory_gb", lambda: None)
+        monkeypatch.setattr(_MOD, "_read_windows_memory_gb", lambda: 24.0)
+        hw = detect_hardware()
+        assert hw["total_memory_gb"] == 24.0
+        assert hw["source"] == "windows"
+
+    def test_read_docker_resources_parses(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        class _Completed:
+            def __init__(self, rc: int, out: str) -> None:
+                self.returncode = rc
+                self.stdout = out
+                self.stderr = ""
+
+        monkeypatch.setattr(_MOD.subprocess, "run", lambda *a, **kw: _Completed(0, "6214492160 4"))
+        assert _MOD._read_docker_host_resources() == (6214492160 / 1024**3, 4)
+
+    def test_read_docker_resources_failures_return_none(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # 非零返回码
+        monkeypatch.setattr(
+            _MOD.subprocess, "run",
+            lambda *a, **kw: type("G", (), {"returncode": 1, "stdout": "", "stderr": ""})(),
+        )
+        assert _MOD._read_docker_host_resources() is None
+
+        # CLI 缺失
+        def _missing(*a: Any, **kw: Any) -> Any:
+            raise FileNotFoundError
+
+        monkeypatch.setattr(_MOD.subprocess, "run", _missing)
+        assert _MOD._read_docker_host_resources() is None
+
+        # 非法输出
+        garbage = type("G", (), {"returncode": 0, "stdout": "not-a-number x", "stderr": ""})()
+        monkeypatch.setattr(_MOD.subprocess, "run", lambda *a, **kw: garbage)
+        assert _MOD._read_docker_host_resources() is None
 
 
 class TestCgroupV2Reader:

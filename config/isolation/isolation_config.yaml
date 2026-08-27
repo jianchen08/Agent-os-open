@@ -61,9 +61,12 @@ providers:
   cua:
     enabled: true
     image: agentos:latest
-    limits:
-      memory: 512m
-      cpus: '0.5'
+    # 容器资源配额由 hardware_profile 按引擎宿主动态计算（daemon 所在机器，
+    # 本机即 WSL VM）：单容器 = 宿主一半资源 / max_environments，按 12/24GB
+    # 阈值分 low/mid/high 三档。本段不再写死 limits——写死会误导读者以为
+    # 生效，实际被 adaptive profile 覆盖。手动指定用环境变量
+    # AO_CONTAINER_MEMORY / AO_CONTAINER_CPUS / AO_MAX_ENVIRONMENTS
+    # （见 plugins/shared/system/isolation/hardware_profile.py docstring）。
     publish_ports: []
     # 首次需要隔离环境时，若本地无镜像则自动 docker build（默认开）。
     # BuildKit 缓存(--mount=type=cache)会复用本机已下载的 apt/pip/playwright 包，

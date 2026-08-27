@@ -21,6 +21,7 @@ from __future__ import annotations
 import logging
 import math
 import os
+import subprocess
 from typing import Any
 
 logger = logging.getLogger(__name__)
@@ -146,11 +147,40 @@ def _read_cgroup_cpu_count() -> int | None:
     return None
 
 
+def _read_docker_host_resources() -> tuple[float, int] | None:
+    """docker 引擎宿主的实际资源（容器真正消耗的机器）。
+
+    docker info 的 MemTotal/NCPU 即 daemon 所在机器的物理资源——WSL VM、
+    Docker Desktop VM 或裸机。接 Windows/macOS 壳时比本机探测更准
+    （如本机内存 32GB 但 WSL VM 只分到 6GB，按 32GB 算配额会撑爆 VM）。
+    """
+    try:
+        result = subprocess.run(
+            ["docker", "info", "--format", "{{.MemTotal}} {{.NCPU}}"],
+            capture_output=True,
+            text=True,
+            timeout=3,
+        )
+        if result.returncode != 0:
+            return None
+        parts = result.stdout.split()
+        if len(parts) != 2:
+            return None
+        mem_total = int(parts[0])
+        ncpu = int(parts[1])
+        if mem_total <= 0 or ncpu <= 0:
+            return None
+        return mem_total / (1024**3), ncpu
+    except (ValueError, OSError, subprocess.TimeoutExpired):
+        return None
+
+
 def detect_hardware() -> dict[str, Any]:
     """检测运行环境的实际可用资源。
 
-    优先级：cgroup limit > sysconf > 默认值
-    容器内会用 cgroup（更准），裸机会退化到 sysconf。
+    优先级：cgroup（容器内）> docker 引擎宿主 > sysconf > Windows API > 默认
+    容器内会用 cgroup（更准），Windows/macOS 壳下用 daemon 宿主
+    （WSL/Desktop VM 才是容器实际消耗的资源），裸机会退化到 sysconf。
 
     Returns:
         {
@@ -163,9 +193,15 @@ def detect_hardware() -> dict[str, Any]:
     # 检测是否在容器内
     is_container = os.path.exists("/.dockerenv") or os.path.exists("/proc/1/cgroup")  # noqa: PTH110
 
-    # 内存：优先 cgroup，再 sysconf（Linux/macOS），再 Windows API
+    # 内存：cgroup > docker 引擎宿主 > sysconf（Linux/macOS）> Windows API
     mem_gb = _read_cgroup_memory_limit_gb()
     source = "cgroup"
+    docker_cpu: int | None = None
+    if mem_gb is None:
+        docker_res = _read_docker_host_resources()
+        if docker_res is not None:
+            mem_gb, docker_cpu = docker_res
+            source = "docker-host"
     if mem_gb is None:
         mem_gb = _read_sysconf_memory_gb()
         source = "sysconf"
@@ -177,10 +213,10 @@ def detect_hardware() -> dict[str, Any]:
         mem_gb = 8.0
         source = "default(fallback)"
 
-    # CPU：优先 cgroup
+    # CPU：cgroup > docker 引擎宿主 > 本机
     cpu_count = _read_cgroup_cpu_count()
     if cpu_count is None:
-        cpu_count = os.cpu_count() or 4
+        cpu_count = docker_cpu or os.cpu_count() or 4
 
     result = {
         "total_memory_gb": round(mem_gb, 1),
