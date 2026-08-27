@@ -2,7 +2,7 @@
 """llm_core 提供者拆分回归测试（task_kernel_cleanup_and_split 3a/3b）。
 
 结构断言：`adapter.py` 不再包含任何具体提供者 hack 与诊断机制——已迁至
-`llm_provider_*` 插件（deepseek/minimax/keypool）与 `_diagnostics.py`，
+`llm_provider_*` 插件（deepseek/minimax）与 `_diagnostics.py`，
 防止回退（llm_core 不绑定提供者）。
 
 行为断言：迁移后的 provider 插件与注册表（`_provider_registry`）行为与
@@ -75,15 +75,12 @@ def test_adapter_no_longer_contains_provider_hacks() -> None:
 
 
 def test_provider_plugins_are_standalone_packages() -> None:
-    """三个 provider 插件各自独立可导入。"""
+    """provider 插件各自独立可导入（keypool 已删——system/llm 有活跃同功能实现）。"""
     # 执行期再恢复一次 sys.path/adapter 缓存（收集期之后车道内其他测试可能再次改写）。
     _reclaim_llm_core_path()
-    import llm_provider_keypool  # noqa: PLC0415
-
     assert callable(ensure_role_safety)
     assert callable(ds_extract_thinking)
     assert callable(move_to_extra_body)
-    assert llm_provider_keypool.KeyPoolAdapter is not None
 
 
 # ─────────────────── 行为断言（与拆分前等价） ───────────────────
