@@ -35,8 +35,9 @@ const REFRESH_TOKEN_TTL_SECS: u64 = 7 * 24 * 60 * 60; // 7 days
 // upgrade: 接入正式认证后替换为 JWT/HMAC 签名 + 密钥轮换。
 // 前端 client.ts 仅注入 Bearer 头，不解析 token 内容（已验证 NEED-1），
 // 因此该方案在开发阶段安全。
-// 再导出面（2026-08-24 清理）：外部 crate 零消费，仅保留 ws_session.rs（并发 WIP
-// 不可触碰）仍经 `crate::auth::` 引用的两个符号；其余符号本文件内私有 use。
+// 再导出面：外部 crate 零消费；ws_session 经 `crate::auth::` 引用
+// verify_access_token / resolve_tenant_id_by_user 两符号（WS 握手鉴权与
+// user→tenant 解析），其余符号本文件内私有 use。
 #[cfg(test)]
 use agentos_http::auth::DEFAULT_TENANT_ID;
 use agentos_http::auth::{

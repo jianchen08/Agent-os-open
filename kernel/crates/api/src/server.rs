@@ -1151,7 +1151,6 @@ fn apply_state_overlay(initial_state: &mut serde_json::Value, overlay: &serde_js
 /// 重跑时目标 user 消息已在截断后历史中，跳过本轮 append——不借用 interrupted_tail
 /// 启发式（同文/同 cmid 判定只服务崩溃重放场景）。
 #[allow(clippy::too_many_arguments)]
-#[allow(clippy::too_many_arguments)]
 async fn stage_recover_history(
     mut initial_state: serde_json::Value,
     store: &Arc<dyn StorageBackend>,
@@ -1721,10 +1720,8 @@ fn inject_tool_schemas(state: &mut serde_json::Value, app_state: &AppState) {
             // LLM 严格校验工具 schema:parameters 必须是 type:object 的 JSON Schema。
             // 注意（K9 勘误）：注册路径（plugin_lifecycle / agentos-kernel 启动循环）
             // 对缺 input_schema 的 manifest 工具按 {} 补注册，{} 是 object——本过滤
-            // 对这些工具**恒不触发**（注册路径对缺 input_schema 的 manifest
-            // 工具按 {} 补注册，{} 是 object），
-            // 真正的防线在注册期的 warn + 启动报告计数，此处过滤只拦"注册后 schema
-            // 被改写成非 object"的极端形态。
+            // 对这些工具**恒不触发**；真正的防线在注册期的 warn + 启动报告计数，
+            // 此处过滤只拦"注册后 schema 被改写成非 object"的极端形态。
             t.input_schema.is_object()
         })
         .map(|t| {

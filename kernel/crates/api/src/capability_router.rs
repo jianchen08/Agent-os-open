@@ -144,7 +144,7 @@ impl KernelCapabilityRouter {
 
     /// 注入流式声明查询器（启用 event-bus.emit 的 streaming 声明闸）：
     /// (plugin_id) → 该插件的 capabilities.streaming 声明（None = 未声明）。
-    /// 未声明即拒其流式事件（fail-closed，与当年 resources「声明即接入」同构）。
+    /// 未声明即拒其流式事件（fail-closed：能力面一律声明即接入，声明缺位不放行）。
     /// 闭包实现方共享 manifests RwLock——watcher 热发现同步可见。
     pub fn with_streaming_declaration_lookup(
         mut self,
@@ -1390,7 +1390,19 @@ impl KernelCapabilityRouter {
                 } else if let Some(tracker) = &self.tool_failure_tracker {
                     tracker.record(tool_name, true, "");
                 }
-                Ok(serde_json::to_value(result).unwrap_or_else(|_| json!({"success": false})))
+                // 序列化失败 = ToolExecutionResult 信封无法编码（契约 bug 级异常）：
+                // 以 success=false 占位信封返回（sidecar 侧拿到显式失败而非挂起），
+                // 但必须 error 可见——伪造信封不允许静默。
+                Ok(serde_json::to_value(result).unwrap_or_else(|e| {
+                    tracing::error!(
+                        target: "tool-executor",
+                        tool = %tool_name,
+                        plugin = %plugin_id,
+                        error = %e,
+                        "工具结果序列化失败，降级 success=false 占位信封返回"
+                    );
+                    json!({"success": false})
+                }))
             }
             Err(e) => Ok(json!({
                 "success": false,
