@@ -6,12 +6,18 @@
 //! 1. **when 表达式预编译**：所有门/路由条件在编译期 tokenize + parse 成
 //!    [`condition::Expr`] AST（`eval_condition` 每次调用都重 parse 的税被消灭）；
 //!    语法错误在加载期报错（带 step/body 定位），不再"静默 false 死路由"。
-//! 2. **三级命中静态解析**：step 列表项的引用在编译期判定为
-//!    [`CompiledItem::Plugin`]（插件）/ [`CompiledItem::Composite`]（管道/库 step，
-//!    运行时查统一步骤池递归）/ [`CompiledItem::Dynamic`]（`{{state.xxx}}` 模板名，
-//!    运行时渲染后查池/插件——显式保留的动态点）；未知引用在加载期报错。
-//! 3. **引用环检测**：composite 递归引用图 DFS，环 → 编译错误（运行时递归不死循环）。
-//! 4. **转移目标校验**：`RouteNext::Phase/Step` 目标存在性在此复核（api 层
+//! 2. **四级命中静态解析**：step 列表项的引用在编译期判定为
+//!    [`CompiledItem::Plugin`]（③ 已注册步骤服务 / ④ 插件名直引）/
+//!    [`CompiledItem::Composite`]（管道/库 step，运行时查统一步骤池递归）/
+//!    [`CompiledItem::Dynamic`]（`{{state.xxx}}` 模板名，运行时渲染后查池/插件——
+//!    显式保留的动态点）；未知引用在加载期报错。
+//! 3. **步骤服务索引**：聚合全部启用插件 manifests 的 `capabilities.steps`（显式）
+//!    与单入口插件隐式默认注册（服务化提案 §3.3），名字全局查重；复合体
+//!    （tools/services/steps）隐式关闭——管道按插件 id 直引 → 编译错误（强制自白）。
+//! 4. **hooks 装载表**：管道 YAML 的 hooks 声明编译为 [`HookEntry`] 分发表
+//!    （声明位置即作用域，服务化提案 §3.6），运行时查表直派；空集零开销。
+//! 5. **引用环检测**：composite 递归引用图 DFS，环 → 编译错误（运行时递归不死循环）。
+//! 6. **转移目标校验**：`RouteNext::Phase/Step` 目标存在性在此复核（api 层
 //!    `validate_no_name_conflicts` 已查 Phase，此处双保险 + Step 目标）。
 //!
 //! 编译是纯函数（`compile_pipeline`），无 IO 无时序，可同步单测。
@@ -20,6 +26,7 @@
 
 use std::collections::{HashMap, HashSet};
 
+use agentos_core::traits::PluginManifest;
 use agentos_core::types::{
     CheckpointConfig, LoopBody, LoopConfig, PipelineConfig, PipelineStep, Route, RouteNext,
     StepLibrary,
@@ -56,6 +63,9 @@ pub struct CompiledPipeline {
     /// 源 [`PipelineConfig`] 的确定性指纹（[`pipeline_config_hash`]，SHA-256 前 16 hex）。
     /// 编译期一次算好随计划走，run 落 runs.config_hash 用。
     pub config_hash: String,
+    /// hooks 装载表（服务化提案 §3.6）：管道 YAML 的 hooks 声明编译产物，
+    /// 运行时按 (作用域, 事件) 查表直派。空 = 未声明任何钩子（发射点零开销）。
+    pub step_hooks: Vec<HookEntry>,
     steps: Vec<CompiledStep>,
     step_index: HashMap<String, usize>,
 }
@@ -74,6 +84,218 @@ impl CompiledPipeline {
     /// 全部循环体 id（供外部诊断）。
     pub fn body_ids(&self) -> Vec<&str> {
         self.bodies.iter().map(|b| b.id.as_str()).collect()
+    }
+
+    /// 查 hooks 装载表：`(作用域, 事件名)` → 命中条目（引用）。
+    ///
+    /// 空表（未声明任何钩子）提前返回空 Vec——发射点先查表再决定是否进入
+    /// 分发分支，无钩子配置的主干零开销（服务化提案 §3.6 空集短路）。
+    pub fn hooks_for(&self, scope: &HookScope, event: &str) -> Vec<&HookEntry> {
+        if self.step_hooks.is_empty() {
+            return Vec::new();
+        }
+        self.step_hooks
+            .iter()
+            .filter(|h| &h.scope == scope && h.event == event)
+            .collect()
+    }
+}
+
+/// 步骤服务注册表（服务化提案 §3.2 第③级命中的数据层）。
+///
+/// 编译期聚合全部启用插件 manifests 的 `capabilities.steps`（显式条目）与
+/// 单入口插件的隐式默认注册（§3.3），名字全局查重；运行时按 step 名查
+/// `{plugin_id, method}` 静态绑定，零反射。
+#[derive(Debug, Clone, Default)]
+pub struct StepServiceIndex {
+    entries: HashMap<String, ResolvedStep>,
+}
+
+/// 已解析的步骤服务：step 名 → 实现定位。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolvedStep {
+    /// 提供该步骤服务的插件 id。
+    pub plugin_id: String,
+    /// 目标方法标识：`Some(步骤 name)` = 显式注册（SDK 侧按 name 分发，
+    /// sidecar 经 ctx 约定字段 `_step_method` 透传）；`None` = 默认 execute
+    /// 入口（隐式默认注册，§3.3）。
+    pub method: Option<String>,
+}
+
+impl StepServiceIndex {
+    /// 按 step 名查已注册步骤服务（命中规则③）。
+    pub fn resolve(&self, step_name: &str) -> Option<&ResolvedStep> {
+        self.entries.get(step_name)
+    }
+
+    /// 全部已注册 step 名（诊断/测试用）。
+    pub fn names(&self) -> Vec<&str> {
+        let mut names: Vec<&str> = self.entries.keys().map(|s| s.as_str()).collect();
+        names.sort();
+        names
+    }
+}
+
+/// 聚合全部启用插件 manifests 构建步骤服务索引（服务化提案 §3.2/§3.3）。
+///
+/// 规则：
+/// - **显式条目**：`capabilities.steps[].name` → `{plugin_id, method: Some(name)}`
+///   （method 存步骤 name 本身——SDK 侧按 name 分发，不发明 type 字段）；
+/// - **隐式默认**：未声明 steps 且无 tools/services 的插件自动生成
+///   `{name: <插件id>, plugin_id: <插件id>, method: None}`（None = 默认 execute
+///   入口）；声明了 tools/services 或 ≥2 个 steps 的复合体隐式关闭——管道按
+///   插件 id 直引 → 编译错误（fail-closed，强制自白条款）；
+/// - **名字全局查重**：显式之间、显式与隐式之间冲突 → 编译错误（含双方来源 id）。
+///
+/// 纯函数（无 IO 无时序），可同步单测。
+pub fn build_step_service_index(
+    manifests: &[PluginManifest],
+) -> Result<StepServiceIndex, CompileError> {
+    let mut entries: HashMap<String, ResolvedStep> = HashMap::new();
+    for manifest in manifests {
+        let caps = &manifest.capabilities;
+        let explicit = &caps.steps;
+        let composite = !caps.tools.is_empty() || !caps.services.is_empty();
+        if explicit.is_empty() && !composite {
+            // 隐式默认注册：单入口纯步骤插件（无 tools/services/steps），
+            // name = 插件 id，method = None（默认 execute 入口）。
+            let entry = ResolvedStep {
+                plugin_id: manifest.id.clone(),
+                method: None,
+            };
+            if let Some(prev) = entries.insert(manifest.id.clone(), entry) {
+                return Err(CompileError {
+                    location: "步骤服务索引".to_string(),
+                    message: format!(
+                        "步骤服务名 '{}' 冲突：插件 '{}' 的隐式默认注册与插件 '{}' 的注册重复",
+                        manifest.id, manifest.id, prev.plugin_id
+                    ),
+                });
+            }
+            continue;
+        }
+        for step in explicit {
+            let entry = ResolvedStep {
+                plugin_id: manifest.id.clone(),
+                method: Some(step.name.clone()),
+            };
+            if let Some(prev) = entries.insert(step.name.clone(), entry) {
+                return Err(CompileError {
+                    location: "步骤服务索引".to_string(),
+                    message: format!(
+                        "步骤服务名 '{}' 冲突：插件 '{}' 与插件 '{}' 重复声明",
+                        step.name, manifest.id, prev.plugin_id
+                    ),
+                });
+            }
+        }
+    }
+    Ok(StepServiceIndex { entries })
+}
+
+/// hooks 作用域（服务化提案 §3.6：声明位置即作用域，分发粒度 = 声明粒度）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum HookScope {
+    /// 管道级：整个循环体生命周期的观察者（`loop_bodies[].hooks`）。
+    Body(String),
+    /// step 级：仅该 step 执行期间触发（`loop_bodies[].steps[].hooks`，
+    /// 复合键 `"<body id>:<step id>"`）。
+    Step(String),
+}
+
+/// hooks 装载表条目（编译产物）：作用域 + 事件 → 插件方法。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HookEntry {
+    pub scope: HookScope,
+    /// 事件名（P1 挂桩阶段任意字符串合法，P2 收敛为枚举白名单）。
+    pub event: String,
+    /// 提供该钩子的插件 id。
+    pub plugin_id: String,
+    /// 目标方法：`Some(method)` = `run: <插件id>.<method>` 点号后缀；
+    /// `None` = 裸插件名（默认 execute 入口）。
+    pub method: Option<String>,
+}
+
+/// 管道 YAML 的 hooks 声明形态（`{on: <事件>, run: <插件id>[.<method>]}`）。
+///
+/// 反序列化输入（api 层 `PipelineFile` 解析后经 [`compile_step_hooks`] 编译）；
+/// 事件名暂不设白名单（P1 挂桩阶段任意字符串合法，P2 收敛枚举）。
+#[derive(Debug, Clone, serde::Deserialize)]
+pub struct HookFile {
+    pub on: String,
+    pub run: String,
+}
+
+/// 编译 hooks 声明为装载表（服务化提案 §3.6 编译期装载表）。
+///
+/// - `run` 解析：`<插件id>.<method>` 点号前缀为插件 id、后缀为 method；
+///   裸插件名 = method None（默认 execute 入口）；
+/// - 未启用/未知插件 id → 编译错误（fail-closed，不静默丢弃）；
+/// - 空 hooks 零开销：返回空 Vec（发射点提前短路）。
+///
+/// `body_hooks` / `step_hooks` 为各作用域已解析的声明（api 层 yaml 结构
+/// 归一后传入；`step_hooks` 键为 `"<body id>:<step id>"` 复合键）。
+pub fn compile_step_hooks(
+    body_hooks: &[(String, Vec<HookFile>)],
+    step_hooks: &[(String, Vec<HookFile>)],
+    plugin_ids: &HashSet<String>,
+) -> Result<Vec<HookEntry>, CompileError> {
+    let mut out = Vec::new();
+    for (body_id, hooks) in body_hooks {
+        for hook in hooks {
+            out.push(compile_hook_entry(
+                HookScope::Body(body_id.clone()),
+                hook,
+                plugin_ids,
+            )?);
+        }
+    }
+    for (step_key, hooks) in step_hooks {
+        for hook in hooks {
+            out.push(compile_hook_entry(
+                HookScope::Step(step_key.clone()),
+                hook,
+                plugin_ids,
+            )?);
+        }
+    }
+    Ok(out)
+}
+
+/// 编译单条 hooks 声明（`run` 三形态解析 + 插件存在性校验）。
+fn compile_hook_entry(
+    scope: HookScope,
+    hook: &HookFile,
+    plugin_ids: &HashSet<String>,
+) -> Result<HookEntry, CompileError> {
+    let (plugin_id, method) = match hook.run.split_once('.') {
+        Some((plugin, method)) if !plugin.is_empty() && !method.is_empty() => {
+            (plugin.to_string(), Some(method.to_string()))
+        }
+        _ => (hook.run.clone(), None),
+    };
+    if !plugin_ids.contains(&plugin_id) {
+        return Err(CompileError {
+            location: format!("hooks 作用域 '{}'", scope_label(&scope)),
+            message: format!(
+                "hooks run 目标插件 '{}' 未启用/未知（事件 '{}'）",
+                plugin_id, hook.on
+            ),
+        });
+    }
+    Ok(HookEntry {
+        scope,
+        event: hook.on.clone(),
+        plugin_id,
+        method,
+    })
+}
+
+/// 作用域的人读标签（诊断定位用）：`循环体 'main'` / `step 'main:core'`。
+fn scope_label(scope: &HookScope) -> String {
+    match scope {
+        HookScope::Body(id) => format!("循环体 '{id}'"),
+        HookScope::Step(key) => format!("step '{key}'"),
     }
 }
 
@@ -174,6 +396,24 @@ pub fn compile_pipeline(
         pool_ids: HashSet::new(),
     };
     compiler.compile(config, step_library)
+}
+
+/// 编译管道 + hooks 装载表（服务化提案 §3.6 编译期装载表）。
+///
+/// 在 [`compile_pipeline`] 基础上附加 hooks 编译：`body_hooks` / `step_hooks`
+/// 为各作用域已反序列化的 hooks 声明（api 层 yaml 结构归一后传入，键为
+/// 循环体 id / `"<body id>:<step id>"` 复合键）。未声明 hooks 时传空切片，
+/// 产物 `step_hooks` 为空 Vec（发射点零开销短路）。
+pub fn compile_pipeline_with_hooks(
+    config: &PipelineConfig,
+    step_library: &StepLibrary,
+    plugin_ids: &HashSet<String>,
+    body_hooks: &[(String, Vec<HookFile>)],
+    step_hooks: &[(String, Vec<HookFile>)],
+) -> Result<CompiledPipeline, CompileError> {
+    let mut compiled = compile_pipeline(config, step_library, plugin_ids)?;
+    compiled.step_hooks = compile_step_hooks(body_hooks, step_hooks, plugin_ids)?;
+    Ok(compiled)
 }
 
 struct Compiler<'a> {
@@ -305,6 +545,7 @@ impl Compiler<'_> {
             bodies,
             checkpoint: config.checkpoint.clone(),
             config_hash: pipeline_config_hash(config),
+            step_hooks: Vec::new(),
             steps: self.steps,
             step_index: self.step_index,
         })
@@ -524,8 +765,65 @@ fn detect_cycle(graph: &HashMap<usize, Vec<usize>>, n: usize) -> Option<usize> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use agentos_core::traits::{
+        HostType, ManifestCapabilities, PluginType, StepCapability, ToolCapability,
+    };
     use agentos_core::types::{LoopBody, PipelineConfig, Route, RouteAction, StepItem};
     use serde_json::json;
+
+    /// 构造测试 manifest（默认单入口纯步骤插件形状：无 tools/services/steps）。
+    fn manifest(id: &str) -> PluginManifest {
+        PluginManifest {
+            id: id.to_string(),
+            name: format!("Test {id}"),
+            description: None,
+            version: "1.0.0".to_string(),
+            plugin_type: PluginType::Pipeline,
+            pipeline_role: None,
+            language: "python".to_string(),
+            host_type: HostType::Sidecar,
+            host_group: None,
+            entry: "server.py".to_string(),
+            capabilities: Default::default(),
+            requires_services: vec![],
+            permissions: Default::default(),
+            priority: 100,
+            mcp: None,
+            lifecycle: None,
+            native: None,
+            granted_capabilities: vec![],
+            requires_content: None,
+            invoke_entry: None,
+            config_files: vec![],
+            http_endpoints: vec![],
+            ui_schema: None,
+            contributes: None,
+            enabled: None,
+            activation: None,
+            provides: None,
+            persistent_fields: vec![],
+        }
+    }
+
+    /// 给 manifest 设置 capabilities（steps/tools/services）。
+    fn with_caps(mut m: PluginManifest, caps: ManifestCapabilities) -> PluginManifest {
+        m.capabilities = caps;
+        m
+    }
+
+    fn steps_caps(steps: Vec<StepCapability>) -> ManifestCapabilities {
+        ManifestCapabilities {
+            steps,
+            ..Default::default()
+        }
+    }
+
+    fn tools_caps(tools: Vec<ToolCapability>) -> ManifestCapabilities {
+        ManifestCapabilities {
+            tools,
+            ..Default::default()
+        }
+    }
 
     fn make_step(id: &str, items: Vec<StepItem>) -> PipelineStep {
         PipelineStep {
@@ -979,5 +1277,254 @@ mod tests {
         let h1 = pipeline_config_hash(&mk("a"));
         let h2 = pipeline_config_hash(&mk("c"));
         assert_eq!(h1, h2, "HashMap 插入序不得影响指纹");
+    }
+
+    // ── 步骤服务索引（服务化提案 §3.2/§3.3）──
+
+    #[test]
+    fn step_index_explicit_entries_resolve() {
+        let caps = steps_caps(vec![
+            StepCapability {
+                name: "task.inject_params".into(),
+                description: Some("注入任务参数".into()),
+                input_schema: None,
+            },
+            StepCapability {
+                name: "task.remind".into(),
+                description: None,
+                input_schema: None,
+            },
+        ]);
+        let index = build_step_service_index(&[with_caps(manifest("task_service"), caps)])
+            .expect("ok");
+        let r = index.resolve("task.inject_params").expect("命中");
+        assert_eq!(r.plugin_id, "task_service");
+        // method 存步骤 name 本身（SDK 侧按 name 分发，不发明 type 字段）
+        assert_eq!(r.method.as_deref(), Some("task.inject_params"));
+        let r2 = index.resolve("task.remind").expect("命中");
+        assert_eq!(r2.plugin_id, "task_service");
+        assert_eq!(r2.method.as_deref(), Some("task.remind"));
+        assert!(index.resolve("ghost").is_none());
+        assert_eq!(index.names(), vec!["task.inject_params", "task.remind"]);
+    }
+
+    #[test]
+    fn step_index_implicit_default_for_single_entry_plugins() {
+        // 单入口纯步骤插件（无 tools/services/steps）→ 隐式默认注册 name=插件 id
+        let index = build_step_service_index(&[manifest("alpha"), manifest("beta")]).expect("ok");
+        let r = index.resolve("alpha").expect("隐式注册");
+        assert_eq!(r.plugin_id, "alpha");
+        assert_eq!(r.method, None, "None = 默认 execute 入口");
+        assert_eq!(index.resolve("beta").expect("隐式注册").plugin_id, "beta");
+        assert_eq!(index.names(), vec!["alpha", "beta"]);
+    }
+
+    #[test]
+    fn step_index_composite_without_explicit_steps_fails_closed() {
+        // 声明了 tools 的复合体：隐式默认对其关闭（§3.3 fail-closed）——索引
+        // 不为其伪造 {name: 插件id} 条目，管道按插件 id 直引 → resolve 落空 →
+        // 编译期报错（强制自白条款）。索引构建本身不报错：纯工具插件
+        // （tools 非空、永不当管道步骤）合法存在，不能因无 steps 而炸掉索引。
+        let composite = with_caps(
+            manifest("task_service"),
+            tools_caps(vec![agentos_core::traits::ToolCapability {
+                name: "task_submit".into(),
+                description: None,
+                input_schema: None,
+                output_schema: None,
+                category: None,
+                ui: None,
+                render: None,
+                smoke: None,
+            }]),
+        );
+        let index = build_step_service_index(&[composite]).expect("复合体不阻断索引构建");
+        assert!(
+            index.resolve("task_service").is_none(),
+            "复合体无隐式默认条目（引用即编译错误）"
+        );
+        assert!(index.names().is_empty());
+    }
+
+    #[test]
+    fn step_index_composite_with_explicit_steps_registers_them() {
+        // 复合体显式声明 steps → 正常注册（多能力合一插件的正规形态）
+        let composite = with_caps(
+            manifest("task_service"),
+            ManifestCapabilities {
+                steps: vec![StepCapability {
+                    name: "task.remind".into(),
+                    description: None,
+                    input_schema: None,
+                }],
+                tools: vec![agentos_core::traits::ToolCapability {
+                    name: "task_submit".into(),
+                    description: None,
+                    input_schema: None,
+                    output_schema: None,
+                    category: None,
+                    ui: None,
+                    render: None,
+                    smoke: None,
+                }],
+                ..Default::default()
+            },
+        );
+        let index = build_step_service_index(&[composite]).expect("ok");
+        let r = index.resolve("task.remind").expect("显式步骤注册");
+        assert_eq!(r.plugin_id, "task_service");
+        assert_eq!(r.method.as_deref(), Some("task.remind"));
+        // 插件 id 本身不是步骤名（除非显式声明）
+        assert!(index.resolve("task_service").is_none());
+    }
+
+    #[test]
+    fn step_index_explicit_duplicate_names_conflict() {
+        let a = with_caps(
+            manifest("plugin_a"),
+            steps_caps(vec![StepCapability {
+                name: "task.remind".into(),
+                description: None,
+                input_schema: None,
+            }]),
+        );
+        let b = with_caps(
+            manifest("plugin_b"),
+            steps_caps(vec![StepCapability {
+                name: "task.remind".into(),
+                description: None,
+                input_schema: None,
+            }]),
+        );
+        let err = build_step_service_index(&[a, b]).unwrap_err();
+        assert!(err.message.contains("task.remind"), "err: {err}");
+        assert!(err.message.contains("plugin_a"), "err: {err}");
+        assert!(err.message.contains("plugin_b"), "err: {err}");
+    }
+
+    #[test]
+    fn step_index_explicit_vs_implicit_conflict() {
+        // 插件 A 显式声明 step 名 = 插件 B 的 id → 显式与隐式冲突
+        let a = with_caps(
+            manifest("plugin_a"),
+            steps_caps(vec![StepCapability {
+                name: "alpha".into(),
+                description: None,
+                input_schema: None,
+            }]),
+        );
+        let b = manifest("alpha");
+        let err = build_step_service_index(&[a, b]).unwrap_err();
+        assert!(err.message.contains("alpha"), "err: {err}");
+        assert!(err.message.contains("plugin_a"), "err: {err}");
+        assert!(err.message.contains("alpha"), "err: {err}");
+    }
+
+    #[test]
+    fn step_index_empty_manifests_yields_empty_index() {
+        let index = build_step_service_index(&[]).expect("ok");
+        assert!(index.resolve("anything").is_none());
+        assert!(index.names().is_empty());
+    }
+
+    // ── hooks 装载表（服务化提案 §3.6）──
+
+    #[test]
+    fn hooks_compile_two_level_scopes() {
+        let plugin_ids = plugins(&["watcher", "w2"]);
+        let body_hooks = vec![(
+            "main".to_string(),
+            vec![HookFile {
+                on: "stream_chunk".into(),
+                run: "watcher.on_chunk".into(),
+            }],
+        )];
+        let step_hooks = vec![(
+            "main:core".to_string(),
+            vec![HookFile {
+                on: "stream_chunk".into(),
+                run: "w2.on_chunk".into(),
+            }],
+        )];
+        let entries = compile_step_hooks(&body_hooks, &step_hooks, &plugin_ids).expect("ok");
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0].scope, HookScope::Body("main".to_string()));
+        assert_eq!(entries[0].event, "stream_chunk");
+        assert_eq!(entries[0].plugin_id, "watcher");
+        assert_eq!(entries[0].method.as_deref(), Some("on_chunk"));
+        assert_eq!(entries[1].scope, HookScope::Step("main:core".to_string()));
+        assert_eq!(entries[1].plugin_id, "w2");
+        assert_eq!(entries[1].method.as_deref(), Some("on_chunk"));
+    }
+
+    #[test]
+    fn hooks_run_three_forms() {
+        let plugin_ids = plugins(&["watcher", "bare"]);
+        // ① 点号双段：插件.method；② 裸插件名：method None（默认 execute 入口）
+        let body_hooks = vec![
+            (
+                "main".to_string(),
+                vec![
+                    HookFile {
+                        on: "evt".into(),
+                        run: "watcher.on_chunk".into(),
+                    },
+                    HookFile {
+                        on: "evt2".into(),
+                        run: "bare".into(),
+                    },
+                ],
+            ),
+            (
+                "other".to_string(),
+                vec![HookFile {
+                    on: "evt3".into(),
+                    run: "watcher".into(),
+                }],
+            ),
+        ];
+        let entries = compile_step_hooks(&body_hooks, &[], &plugin_ids).expect("ok");
+        assert_eq!(entries.len(), 3);
+        assert_eq!(entries[0].method.as_deref(), Some("on_chunk"));
+        assert_eq!(entries[1].method, None, "裸插件名 = 默认 execute 入口");
+        assert_eq!(entries[2].method, None);
+    }
+
+    #[test]
+    fn hooks_unknown_plugin_is_compile_error() {
+        let plugin_ids = plugins(&["watcher"]);
+        let body_hooks = vec![(
+            "main".to_string(),
+            vec![HookFile {
+                on: "stream_chunk".into(),
+                run: "ghost.on_chunk".into(),
+            }],
+        )];
+        let err = compile_step_hooks(&body_hooks, &[], &plugin_ids).unwrap_err();
+        assert!(err.message.contains("ghost"), "err: {err}");
+        assert!(err.message.contains("stream_chunk"), "err: {err}");
+    }
+
+    #[test]
+    fn hooks_empty_config_yields_zero_entries() {
+        let entries = compile_step_hooks(&[], &[], &plugins(&["watcher"])).expect("ok");
+        assert!(entries.is_empty(), "空 hooks 零条目");
+    }
+
+    #[test]
+    fn compiled_pipeline_hooks_for_queries_and_empty_short_circuit() {
+        let config = single_body(
+            "p",
+            vec![make_step("s", vec![StepItem::Bare("alpha".into())])],
+        );
+        let compiled =
+            compile_pipeline(&config, &StepLibrary::default(), &plugins(&["alpha"])).expect("ok");
+        // 未声明 hooks → 空表，查询恒空（发射点零开销短路）
+        assert!(compiled.step_hooks.is_empty());
+        assert!(
+            compiled
+                .hooks_for(&HookScope::Body("main".into()), "stream_chunk")
+                .is_empty()
+        );
     }
 }

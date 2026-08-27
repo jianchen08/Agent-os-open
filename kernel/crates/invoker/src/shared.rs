@@ -5,7 +5,7 @@
 
 use agentos_core::traits::{PluginLoader, PluginManifest};
 use agentos_core::types::{PluginContext, PluginError};
-use serde_json::Value;
+use serde_json::{json, Value};
 use tracing::warn;
 
 /// 加载 manifest 声明的 `config_files` 并按命名空间合并（与 sidecar spawn 同逻辑）。
@@ -94,6 +94,32 @@ pub fn resolve_config_path<'a>(full_config: &'a Value, path: &str) -> Option<&'a
         current = current.get(seg)?;
     }
     Some(current)
+}
+
+/// 步骤服务调用的约定字段键（服务化提案 §3.4 传输通道）。
+///
+/// 管道步骤具名调用时，ctx.config 对象携带本键（值为步骤 name），SDK 侧据此
+/// 分发到对应注册函数；未携带/值为 execute 时走现行 execute 路径。对齐既有
+/// 先例：`tool_call_json`（invoker.rs send_hook_via_execute 注释明示的
+/// 「约定字段表达特殊调用」模式）——本设计是该模式的第二次应用。
+pub const STEP_METHOD_KEY: &str = "_step_method";
+
+/// 构造步骤服务调用的额外 config：在既有 config 对象上设置约定字段
+/// `_step_method`（值为步骤 name），幂等（重复设置覆盖为最新值）。
+///
+/// 非对象 config（如标量/数组）不合法——步骤服务调用方（引擎接线）恒传
+/// 对象形态；防御性处理：非对象时包成 `{"_step_method": <name>}` 新对象
+/// （与 `_plugin_id` 注入先例同构，见 PluginScopedRouter）。
+pub fn with_step_method(mut config: Value, step_method: &str) -> Value {
+    if let Some(obj) = config.as_object_mut() {
+        obj.insert(
+            STEP_METHOD_KEY.to_string(),
+            Value::String(step_method.to_string()),
+        );
+        config
+    } else {
+        json!({ STEP_METHOD_KEY: step_method })
+    }
 }
 
 #[cfg(test)]
@@ -217,5 +243,37 @@ mod tests {
         );
         assert_eq!(resolve_config_path(&full, "x\\y"), Some(&json!(7)));
         assert_eq!(resolve_config_path(&full, "missing"), None);
+    }
+
+    // ── 步骤服务约定字段透传（服务化提案 §3.4）──
+
+    /// 幂等设置：既有 config 对象保留原键，_step_method 覆盖为最新值。
+    #[test]
+    fn with_step_method_sets_idempotently_and_preserves_keys() {
+        let config = json!({"inputs": {"k": "v"}, "other": 1});
+        let once = with_step_method(config.clone(), "task.remind");
+        assert_eq!(once.get(STEP_METHOD_KEY), Some(&json!("task.remind")));
+        assert_eq!(once.get("other"), Some(&json!(1)), "原键保留");
+        assert_eq!(once.get("inputs"), Some(&json!({"k": "v"})), "原键保留");
+        // 幂等：重复设置覆盖为最新值，不产生重复键
+        let twice = with_step_method(once, "task.inject_params");
+        assert_eq!(
+            twice.get(STEP_METHOD_KEY),
+            Some(&json!("task.inject_params"))
+        );
+        assert_eq!(twice.get("other"), Some(&json!(1)));
+        assert_eq!(twice.as_object().map(|o| o.len()), Some(3), "键数不变");
+    }
+
+    /// 非对象 config（防御分支）：包成新对象，不 panic 不吞。
+    #[test]
+    fn with_step_method_wraps_non_object_config() {
+        let wrapped = with_step_method(json!(42), "task.remind");
+        assert_eq!(wrapped.get(STEP_METHOD_KEY), Some(&json!("task.remind")));
+        let wrapped_arr = with_step_method(json!([1, 2]), "task.remind");
+        assert_eq!(
+            wrapped_arr.get(STEP_METHOD_KEY),
+            Some(&json!("task.remind"))
+        );
     }
 }

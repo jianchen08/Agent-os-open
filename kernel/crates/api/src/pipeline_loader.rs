@@ -134,17 +134,58 @@ impl PipelineFile {
     /// 归一为内部 [`PipelineConfig`]（`next`/`while` → `exit_routes`/`while_cond`）。
     #[allow(clippy::wrong_self_convention)] // 消费型转换（File 结构一次性归一到内部类型）
     fn to_internal(self) -> Result<PipelineConfig, PipelineLoadError> {
+        self.to_internal_with_hooks().map(|(cfg, _)| cfg)
+    }
+
+    /// 归一为内部 [`PipelineConfig`] + hooks 声明（服务化提案 §3.6，单次解析）。
+    ///
+    /// hooks 不进入 [`PipelineConfig`]（引擎类型零改动）：body 级 hooks 按
+    /// 循环体 id 收集，step 级 hooks 按 `"<body id>:<step id>"` 复合键收集，
+    /// 供编译期 [`agentos_engine::compiler::compile_step_hooks`] 消费。
+    #[allow(clippy::wrong_self_convention)] // 消费型转换（File 结构一次性归一到内部类型）
+    fn to_internal_with_hooks(
+        self,
+    ) -> Result<(PipelineConfig, PipelineHooks), PipelineLoadError> {
         let body_ids: HashSet<String> = self.loop_bodies.iter().map(|b| b.id.clone()).collect();
         let mut loop_bodies = Vec::with_capacity(self.loop_bodies.len());
+        let mut body_hooks = Vec::new();
+        let mut step_hooks = Vec::new();
         for body in self.loop_bodies {
-            loop_bodies.push(body.to_internal(&body_ids)?);
+            let body_id = body.id.clone();
+            let (body_internal, body_hooks_internal, step_hooks_internal) =
+                body.to_internal_with_hooks(&body_ids)?;
+            if !body_hooks_internal.is_empty() {
+                body_hooks.push((body_id.clone(), body_hooks_internal));
+            }
+            loop_bodies.push(body_internal);
+            for (step_id, hooks) in step_hooks_internal {
+                step_hooks.push((format!("{body_id}:{step_id}"), hooks));
+            }
         }
-        Ok(PipelineConfig {
-            name: self.name,
-            loop_bodies,
-            checkpoint: self.checkpoint,
-        })
+        Ok((
+            PipelineConfig {
+                name: self.name,
+                loop_bodies,
+                checkpoint: self.checkpoint,
+            },
+            PipelineHooks {
+                body_hooks,
+                step_hooks,
+            },
+        ))
     }
+}
+
+/// hooks 声明聚合（服务化提案 §3.6）：body 级 + step 级（复合键 `"<body id>:<step id>"`）。
+///
+/// 由 [`load_pipeline_with_hooks`] 单次解析产出，供编译期
+/// [`agentos_engine::compiler::compile_step_hooks`] 消费；未声明 hooks 时两表皆空。
+#[derive(Debug, Default)]
+pub struct PipelineHooks {
+    /// 管道级 hooks：`(循环体 id, 声明列表)`。
+    pub body_hooks: Vec<(String, Vec<agentos_engine::compiler::HookFile>)>,
+    /// step 级 hooks：`("<body id>:<step id>" 复合键, 声明列表)`。
+    pub step_hooks: Vec<(String, Vec<agentos_engine::compiler::HookFile>)>,
 }
 
 /// 循环体 YAML 形态。
@@ -162,11 +203,27 @@ struct LoopBodyFile {
     next: Vec<TransitionFile>,
     #[serde(default)]
     run_on_error: bool,
+    /// 管道级 hooks（服务化提案 §3.6）：整个循环体生命周期的观察者。
+    #[serde(default)]
+    hooks: Vec<agentos_engine::compiler::HookFile>,
 }
 
 #[allow(clippy::wrong_self_convention)] // 消费型转换
 impl LoopBodyFile {
-    fn to_internal(self, body_ids: &HashSet<String>) -> Result<LoopBody, PipelineLoadError> {
+    /// 归一为内部 [`LoopBody`] + body 级 hooks + step 级 hooks
+    /// （`(step id, 声明列表)`）。
+    #[allow(clippy::wrong_self_convention)] // 消费型转换
+    fn to_internal_with_hooks(
+        self,
+        body_ids: &HashSet<String>,
+    ) -> Result<
+        (
+            LoopBody,
+            Vec<agentos_engine::compiler::HookFile>,
+            Vec<(String, Vec<agentos_engine::compiler::HookFile>)>,
+        ),
+        PipelineLoadError,
+    > {
         // step 级转移的 Step 目标判定需要本 body 的 step id 全集
         let local_step_ids: HashSet<String> = self.steps.iter().map(|s| s.id.clone()).collect();
         let location = format!("循环体 '{}'", self.id);
@@ -178,16 +235,26 @@ impl LoopBodyFile {
         }
 
         let mut steps = Vec::with_capacity(self.steps.len());
+        let mut step_hooks = Vec::new();
         for step in self.steps {
-            steps.push(step.to_internal(body_ids, &local_step_ids, &location)?);
+            let (step_internal, hooks) =
+                step.to_internal_with_hooks(body_ids, &local_step_ids, &location)?;
+            if !hooks.is_empty() {
+                step_hooks.push((step_internal.id.clone(), hooks));
+            }
+            steps.push(step_internal);
         }
-        Ok(LoopBody {
-            id: self.id,
-            steps,
-            while_cond: self.while_cond,
-            exit_routes: next_routes,
-            run_on_error: self.run_on_error,
-        })
+        Ok((
+            LoopBody {
+                id: self.id,
+                steps,
+                while_cond: self.while_cond,
+                exit_routes: next_routes,
+                run_on_error: self.run_on_error,
+            },
+            self.hooks,
+            step_hooks,
+        ))
     }
 }
 
@@ -208,6 +275,9 @@ struct StepFile {
     /// step 级循环（组合节点自带循环，如批量处理）。
     #[serde(default)]
     loop_config: Option<LoopConfig>,
+    /// step 级 hooks（服务化提案 §3.6）：仅该 step 执行期间触发。
+    #[serde(default)]
+    hooks: Vec<agentos_engine::compiler::HookFile>,
 }
 
 #[allow(clippy::wrong_self_convention)] // 消费型转换
@@ -218,19 +288,34 @@ impl StepFile {
         local_step_ids: &HashSet<String>,
         body_location: &str,
     ) -> Result<PipelineStep, PipelineLoadError> {
+        self.to_internal_with_hooks(body_ids, local_step_ids, body_location)
+            .map(|(s, _)| s)
+    }
+
+    /// 归一为内部 [`PipelineStep`] + step 级 hooks。
+    #[allow(clippy::wrong_self_convention)] // 消费型转换
+    fn to_internal_with_hooks(
+        self,
+        body_ids: &HashSet<String>,
+        local_step_ids: &HashSet<String>,
+        body_location: &str,
+    ) -> Result<(PipelineStep, Vec<agentos_engine::compiler::HookFile>), PipelineLoadError> {
         let location = format!("{body_location} / step '{}'", self.id);
         let mut next_routes: Vec<Route> = Vec::with_capacity(self.next.len());
         for t in self.next {
             next_routes.push(t.into_route(body_ids, Some(local_step_ids), &location)?);
         }
-        Ok(PipelineStep {
-            id: self.id,
-            steps: self.steps,
-            when: self.when,
-            context: self.context,
-            routes: next_routes,
-            loop_config: self.loop_config,
-        })
+        Ok((
+            PipelineStep {
+                id: self.id,
+                steps: self.steps,
+                when: self.when,
+                context: self.context,
+                routes: next_routes,
+                loop_config: self.loop_config,
+            },
+            self.hooks,
+        ))
     }
 }
 
@@ -259,6 +344,40 @@ pub fn load_pipeline_config(config_root: &Path) -> Result<PipelineConfig, Pipeli
         .map_err(|e| PipelineLoadError::ParseYaml(path.clone(), e.to_string()))?;
     let config = file.to_internal().map_err(|e| e.with_path(path.clone()))?;
     Ok(config)
+}
+
+/// 加载管道配置 + hooks 声明（服务化提案 §3.6，单次解析）。
+///
+/// 与 [`load_pipeline_config`] 同源（同一 YAML 文件、同一解析层），额外返回
+/// hooks 聚合（body 级 + step 级复合键），供编译期
+/// [`agentos_engine::compiler::compile_pipeline_with_hooks`] 消费。
+/// 文件缺失时返回默认配置 + 空 hooks（与 [`load_pipeline_config`] 降级一致）。
+pub fn load_pipeline_with_hooks(
+    config_root: &Path,
+) -> Result<(PipelineConfig, PipelineHooks), PipelineLoadError> {
+    let path = config_root.join("pipelines").join("autonomous.yaml");
+    if !path.exists() {
+        tracing::warn!(
+            "Pipeline config not found at {}, using default (empty loop bodies)",
+            path.display()
+        );
+        return Ok((
+            PipelineConfig {
+                name: "default".to_string(),
+                loop_bodies: Vec::new(),
+                checkpoint: Default::default(),
+            },
+            PipelineHooks::default(),
+        ));
+    }
+    let raw = std::fs::read_to_string(&path)
+        .map_err(|e| PipelineLoadError::ReadFile(path.clone(), e.to_string()))?;
+    let file: PipelineFile = serde_yaml::from_str(&raw)
+        .map_err(|e| PipelineLoadError::ParseYaml(path.clone(), e.to_string()))?;
+    let (config, hooks) = file
+        .to_internal_with_hooks()
+        .map_err(|e| e.with_path(path.clone()))?;
+    Ok((config, hooks))
 }
 
 /// 加载公共 step 库（`config/steps/*.yaml` → [`StepLibrary`]）。
@@ -556,6 +675,73 @@ loop_bodies:
         let tmp = TempDir::new().unwrap();
         let cfg = load_pipeline_config(tmp.path()).expect("missing config should not error");
         assert!(cfg.loop_bodies.is_empty());
+    }
+
+    /// hooks 声明解析（服务化提案 §3.6）：body 级 + step 级复合键 + 空配置零条目。
+    #[test]
+    fn test_load_pipeline_with_hooks_parses_two_level_scopes() {
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path();
+        let yaml = r#"
+name: hook_pipeline
+loop_bodies:
+  - id: main
+    hooks:
+      - on: stream_chunk
+        run: watcher.on_chunk
+    steps:
+      - id: core
+        hooks:
+          - on: stream_chunk
+            run: w2.on_chunk
+      - id: plain
+"#;
+        fs::create_dir_all(root.join("pipelines")).unwrap();
+        fs::write(root.join("pipelines/autonomous.yaml"), yaml).unwrap();
+
+        let (cfg, hooks) = load_pipeline_with_hooks(root).expect("should load");
+        assert_eq!(cfg.name, "hook_pipeline");
+        assert_eq!(cfg.loop_bodies.len(), 1);
+        // body 级 hooks：按循环体 id 收集
+        assert_eq!(hooks.body_hooks.len(), 1);
+        assert_eq!(hooks.body_hooks[0].0, "main");
+        assert_eq!(hooks.body_hooks[0].1.len(), 1);
+        assert_eq!(hooks.body_hooks[0].1[0].on, "stream_chunk");
+        assert_eq!(hooks.body_hooks[0].1[0].run, "watcher.on_chunk");
+        // step 级 hooks：复合键 "<body id>:<step id>"，未声明 hooks 的 step 不产生条目
+        assert_eq!(hooks.step_hooks.len(), 1);
+        assert_eq!(hooks.step_hooks[0].0, "main:core");
+        assert_eq!(hooks.step_hooks[0].1[0].run, "w2.on_chunk");
+    }
+
+    /// hooks 空配置 → 两表皆空（发射点零开销短路）。
+    #[test]
+    fn test_load_pipeline_with_hooks_empty_yields_zero_entries() {
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path();
+        let yaml = r#"
+name: plain_pipeline
+loop_bodies:
+  - id: main
+    steps:
+      - id: core
+"#;
+        fs::create_dir_all(root.join("pipelines")).unwrap();
+        fs::write(root.join("pipelines/autonomous.yaml"), yaml).unwrap();
+
+        let (_cfg, hooks) = load_pipeline_with_hooks(root).expect("should load");
+        assert!(hooks.body_hooks.is_empty());
+        assert!(hooks.step_hooks.is_empty());
+    }
+
+    /// hooks 文件缺失 → 默认配置 + 空 hooks（与 load_pipeline_config 降级一致）。
+    #[test]
+    fn test_load_pipeline_with_hooks_missing_returns_default() {
+        let tmp = TempDir::new().unwrap();
+        let (cfg, hooks) = load_pipeline_with_hooks(tmp.path()).expect("missing should not error");
+        assert!(cfg.loop_bodies.is_empty());
+        assert!(hooks.body_hooks.is_empty());
+        assert!(hooks.step_hooks.is_empty());
     }
 
     /// 坏 YAML → 返回 ParseYaml 错误（含路径）。
