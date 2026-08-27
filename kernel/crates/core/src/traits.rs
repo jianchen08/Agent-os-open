@@ -829,6 +829,14 @@ pub struct ManifestCapabilities {
     /// provides 命名空间。wire 协议不变（仍是 MCP tools/call，ADR D.3）。
     #[serde(default)]
     pub services: Vec<ServiceCapability>,
+    /// 管道步骤服务声明（管道步骤服务化提案 2026-08-27 §3.1）：
+    /// 管道步骤成为显式注册的服务（capabilities.steps），引用与实现解耦
+    /// （G10 第③级命中 → 已注册步骤服务）。与 tools/services 并存合法
+    /// （多能力合一插件的正规形态）。step 名全局唯一（编译期查重，冲突
+    /// 启动报错）；不含 phase/orchestration 类字段（被否方案 #1：编排位置
+    /// 属管道配置，manifest 只声明存在性与签名）。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub steps: Vec<StepCapability>,
     /// `resources` 能力声明已删除（全链无消费方）；serde 默认忽略未知字段，
     /// 旧 manifest 里的 `capabilities.resources` 条目不影响解析。
     #[serde(default)]
@@ -876,6 +884,24 @@ pub struct ServiceCapability {
     /// 服务出参形状（提供方在代码里声明了才填，不伪造）。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub output_schema: Option<serde_json::Value>,
+}
+
+/// 管道步骤服务声明（capabilities.steps，管道步骤服务化提案 2026-08-27 §3.1）。
+///
+/// 结构是 ServiceCapability 的前三字段（name/description/input_schema）——
+/// 语义为"管道步骤服务"：G10 第③级按 name 命中后调用
+/// `{plugin_id, method}` 对应实现（sidecar 经 ctx 约定字段分发）。
+/// 与 execute 返回契约相同（state/config 入参出参）。不含 phase/orchestration
+/// 字段（被否方案 #1）——编排位置属管道配置。
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct StepCapability {
+    /// 全局唯一步骤名（建议 `<域>.<动作>` 命名空间化；无点号裸名预留兼容层）。
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    /// per-step inputs 契约（可选；None = 未声明）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub input_schema: Option<serde_json::Value>,
 }
 
 /// 配置文件映射项（ADR §4.2/§4.3 `config_files[]`）。
@@ -1543,5 +1569,70 @@ mod tests {
         assert!(!s.contains("host_group"), "None 字段不应序列化: {s}");
         let s2 = serde_json::to_string(&m2).unwrap();
         assert!(s2.contains("host_group"), "Some 字段应保留: {s2}");
+    }
+
+    /// capabilities.steps 契约（管道步骤服务化提案 §3.1）：带 steps 的
+    /// manifest 反序列化 → 序列化 → 反序列化一致（roundtrip 幂等）。
+    #[test]
+    fn manifest_steps_serde_roundtrip() {
+        let json = serde_json::json!({
+            "id": "task_service",
+            "name": "Task Service",
+            "version": "1.0.0",
+            "plugin_type": "pipeline",
+            "language": "python",
+            "host_type": "sidecar",
+            "entry": "python server.py",
+            "capabilities": {
+                "steps": [
+                    {
+                        "name": "task.inject_params",
+                        "description": "注入任务参数",
+                        "input_schema": {"type": "object", "properties": {"params": {"type": "string"}}}
+                    },
+                    { "name": "task.remind", "description": "评估闸门推进" }
+                ]
+            }
+        });
+        let m: PluginManifest = serde_json::from_value(json).expect("带 steps 的 manifest 应可解析");
+        assert_eq!(m.capabilities.steps.len(), 2);
+        assert_eq!(m.capabilities.steps[0].name, "task.inject_params");
+        assert_eq!(m.capabilities.steps[0].description.as_deref(), Some("注入任务参数"));
+        assert!(m.capabilities.steps[0].input_schema.is_some());
+        assert_eq!(m.capabilities.steps[1].name, "task.remind");
+        assert_eq!(m.capabilities.steps[1].input_schema, None);
+
+        // roundtrip：序列化后重新反序列化，再序列化产物逐字节一致
+        // （None 字段不输出、空 input_schema 不输出，但语义等价）
+        let s = serde_json::to_string(&m).unwrap();
+        assert!(s.contains("task.inject_params"), "序列化应保留步骤名: {s}");
+        let m2: PluginManifest = serde_json::from_str(&s).expect("序列化产物应可重新解析");
+        let s2 = serde_json::to_string(&m2).unwrap();
+        assert_eq!(s, s2, "roundtrip 后序列化产物应逐字节一致");
+    }
+
+    /// 向后兼容：旧 manifest 无 capabilities.steps 键 → 反序列化成功且 steps 为空
+    /// （serde(default) 兜底，存量 25+ 管道插件零迁移）。
+    #[test]
+    fn manifest_without_steps_backward_compat() {
+        let json = serde_json::json!({
+            "id": "legacy_pipeline",
+            "name": "Legacy",
+            "version": "1.0.0",
+            "plugin_type": "pipeline",
+            "language": "python",
+            "host_type": "sidecar",
+            "entry": "python server.py",
+            "capabilities": {"services": [{"name": "svc.health"}]}
+        });
+        let m: PluginManifest =
+            serde_json::from_value(json).expect("无 steps 键的旧 manifest 应可解析");
+        assert!(
+            m.capabilities.steps.is_empty(),
+            "旧 manifest 缺省 steps 应为空（隐式默认注册兜底）"
+        );
+        // 无 steps 时不输出 steps 键（旧清单兼容输出）
+        let s = serde_json::to_string(&m).unwrap();
+        assert!(!s.contains("\"steps\""), "空 steps 不应序列化输出: {s}");
     }
 }

@@ -3,7 +3,7 @@
 //! 实现双根扫描、manifest 解析校验、按需加载。
 //!
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use agentos_core::traits::{LoadedPlugin, PluginLoader, PluginManifest, PluginStatus, PluginType};
@@ -272,6 +272,31 @@ impl PluginLoaderImpl {
                 plugin_id: manifest.id.clone(),
                 reason: "language is required".to_string(),
             });
+        }
+
+        // ── capabilities.steps 校验（管道步骤服务化提案 2026-08-27 §3.1）：
+        // step 名非空 + 同一 manifest 内唯一（全局唯一由 G10 编译期查重，
+        // 启动报错）。空名/重名是声明错误，加载期显式报出，不拖到命中期 ──
+        let mut seen_steps: HashSet<&str> = HashSet::new();
+        for step in &manifest.capabilities.steps {
+            if step.name.trim().is_empty() {
+                return Err(LoaderError::ManifestValidation {
+                    plugin_id: manifest.id.clone(),
+                    reason: format!(
+                        "capabilities.steps 存在空 name（description={:?}）——步骤名必填且非空白",
+                        step.description
+                    ),
+                });
+            }
+            if !seen_steps.insert(step.name.as_str()) {
+                return Err(LoaderError::ManifestValidation {
+                    plugin_id: manifest.id.clone(),
+                    reason: format!(
+                        "capabilities.steps 存在重复 name: '{}'——step 名同一 manifest 内必须唯一（全局唯一由 G10 编译期查重）",
+                        step.name
+                    ),
+                });
+            }
         }
 
         // 组合插件 entry 可为空（ADR ⑥）
@@ -881,7 +906,7 @@ fn validate_env_field_coverage(manifest: &PluginManifest) -> Result<(), LoaderEr
 #[cfg(test)]
 mod tests {
     use super::*;
-    use agentos_core::traits::{HostType, ProvidedCapabilityHost};
+    use agentos_core::traits::{HostType, ProvidedCapabilityHost, StepCapability};
     use std::fs;
 
     fn create_test_plugin_dir(root: &Path, id: &str, plugin_type: &str) {
@@ -1118,6 +1143,166 @@ mod tests {
             persistent_fields: vec![],
         };
         assert!(loader.validate_manifest(&manifest).is_ok());
+    }
+
+    /// capabilities.steps 校验（管道步骤服务化提案 §3.1）：空 name 报错，
+    /// 且错误文案包含违规 plugin id。
+    #[test]
+    fn test_manifest_validation_steps_empty_name_rejected() {
+        let loader = PluginLoaderImpl::new("/tmp/nonexistent", None);
+        let mut manifest = PluginManifest {
+            id: "steps_bad".to_string(),
+            name: "Steps Bad".to_string(),
+            description: None,
+            version: "1.0.0".to_string(),
+            plugin_type: PluginType::Pipeline,
+            pipeline_role: None,
+            language: "rust".to_string(),
+            host_type: HostType::InProcess,
+            host_group: None,
+            entry: "test_entry".to_string(),
+            capabilities: Default::default(),
+            requires_services: vec![],
+            permissions: Default::default(),
+            priority: 100,
+            mcp: None,
+            lifecycle: None,
+            native: None,
+            granted_capabilities: vec![],
+            requires_content: None,
+            invoke_entry: None,
+            config_files: vec![],
+            http_endpoints: vec![],
+            ui_schema: None,
+            contributes: None,
+            enabled: None,
+            activation: None,
+            provides: None,
+            persistent_fields: vec![],
+        };
+        manifest.capabilities.steps = vec![StepCapability {
+            name: "  ".to_string(),
+            description: None,
+            input_schema: None,
+        }];
+        let err = loader.validate_manifest(&manifest).expect_err("空 step name 必须拒绝");
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("steps_bad"),
+            "错误文案应包含违规 plugin id: {msg}"
+        );
+        assert!(msg.contains("空 name"), "错误文案应说明原因: {msg}");
+    }
+
+    /// capabilities.steps 校验：同一 manifest 内 name 重复报错（全局唯一由
+    /// G10 编译期查重），文案含 plugin id 与重复名。
+    #[test]
+    fn test_manifest_validation_steps_duplicate_name_rejected() {
+        let loader = PluginLoaderImpl::new("/tmp/nonexistent", None);
+        let mut manifest = PluginManifest {
+            id: "steps_dup".to_string(),
+            name: "Steps Dup".to_string(),
+            description: None,
+            version: "1.0.0".to_string(),
+            plugin_type: PluginType::Pipeline,
+            pipeline_role: None,
+            language: "rust".to_string(),
+            host_type: HostType::InProcess,
+            host_group: None,
+            entry: "test_entry".to_string(),
+            capabilities: Default::default(),
+            requires_services: vec![],
+            permissions: Default::default(),
+            priority: 100,
+            mcp: None,
+            lifecycle: None,
+            native: None,
+            granted_capabilities: vec![],
+            requires_content: None,
+            invoke_entry: None,
+            config_files: vec![],
+            http_endpoints: vec![],
+            ui_schema: None,
+            contributes: None,
+            enabled: None,
+            activation: None,
+            provides: None,
+            persistent_fields: vec![],
+        };
+        manifest.capabilities.steps = vec![
+            StepCapability {
+                name: "task.remind".to_string(),
+                description: None,
+                input_schema: None,
+            },
+            StepCapability {
+                name: "task.remind".to_string(),
+                description: Some("重复".to_string()),
+                input_schema: None,
+            },
+        ];
+        let err = loader.validate_manifest(&manifest).expect_err("重复 step name 必须拒绝");
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("steps_dup"),
+            "错误文案应包含违规 plugin id: {msg}"
+        );
+        assert!(
+            msg.contains("task.remind"),
+            "错误文案应指明重复的步骤名: {msg}"
+        );
+    }
+
+    /// capabilities.steps 校验：合法声明（非空且唯一）通过。
+    #[test]
+    fn test_manifest_validation_steps_valid_ok() {
+        let loader = PluginLoaderImpl::new("/tmp/nonexistent", None);
+        let mut manifest = PluginManifest {
+            id: "steps_ok".to_string(),
+            name: "Steps Ok".to_string(),
+            description: None,
+            version: "1.0.0".to_string(),
+            plugin_type: PluginType::Pipeline,
+            pipeline_role: None,
+            language: "rust".to_string(),
+            host_type: HostType::InProcess,
+            host_group: None,
+            entry: "test_entry".to_string(),
+            capabilities: Default::default(),
+            requires_services: vec![],
+            permissions: Default::default(),
+            priority: 100,
+            mcp: None,
+            lifecycle: None,
+            native: None,
+            granted_capabilities: vec![],
+            requires_content: None,
+            invoke_entry: None,
+            config_files: vec![],
+            http_endpoints: vec![],
+            ui_schema: None,
+            contributes: None,
+            enabled: None,
+            activation: None,
+            provides: None,
+            persistent_fields: vec![],
+        };
+        manifest.capabilities.steps = vec![
+            StepCapability {
+                name: "task.inject_params".to_string(),
+                description: None,
+                input_schema: None,
+            },
+            StepCapability {
+                name: "task.remind".to_string(),
+                description: None,
+                input_schema: None,
+            },
+        ];
+        assert!(
+            loader.validate_manifest(&manifest).is_ok(),
+            "合法 steps 声明应通过校验"
+        );
     }
 
     #[test]
