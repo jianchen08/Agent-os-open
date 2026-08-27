@@ -1842,22 +1842,108 @@ pub async fn plugins_set_enabled_handler(
         .join("plugins")
         .join("default_profile.yaml");
 
-    // 读现有 profile：文件缺失/空白 → 全新 Mapping（首次落盘，无存量可破坏）；
-    // 文件存在但解析失败/非 Mapping → 422 拒绝写入（K1：不得用硬编码模板顶替
-    // 并覆写，profile 里其他插件的启停设置会被物理清空；损坏现场必须保留给运维
-    // 排查，不得静默重建）。其余读失败（权限等）→ 500，同样不写。
-    let mut doc: serde_yaml::Value = match std::fs::read_to_string(&profile_path) {
-        Ok(raw) if raw.trim().is_empty() => serde_yaml::Value::Mapping(serde_yaml::Mapping::new()),
+    let mut doc = load_profile_doc(&profile_path)?;
+    apply_enabled_patch(&mut doc, &plugin_id, new_enabled);
+
+    // 写回：序列化失败直接报错（K1：不得 unwrap_or_default() 把空串写盘，
+    // 物理清空整个 profile——序列化对 Mapping 几乎不会失败，但兜底不得是破坏性写）。
+    let new_raw = serde_yaml::to_string(&doc).map_err(|e| ApiError::Internal {
+        message: format!("序列化 default_profile.yaml 失败：{e}"),
+    })?;
+    // A12：写盘失败 → 5xx 统一错误信封（不再 200 + success:false 混装，
+    // 前端无法据状态码区分"已生效"与"根本没写进去"）。
+    std::fs::write(&profile_path, new_raw).map_err(|e| {
+        tracing::error!(
+            target: "plugin-enablement",
+            plugin_id = %plugin_id,
+            error = %e,
+            "写入 profile 失败"
+        );
+        ApiError::Internal {
+            message: format!("写入 profile 失败: {e}"),
+        }
+    })?;
+
+    // ── 热加载：立即改内存状态，不用重启 ──
+    // 1) 改 enabled_plugin_ids（schema 出口的 contributes/configs 立即生效）
+    {
+        let mut ids = state.enabled_plugin_ids.write().await;
+        if new_enabled {
+            ids.insert(plugin_id.clone());
+        } else {
+            ids.remove(&plugin_id);
+        }
+    }
+    // 2) 注册表对称热更新（G1 enable 对称化 + M1 scope 结构性收回）：
+    //    禁用 → scope revoke（全部注册 guard 一次性收回）+ clear_plugin 兜底
+    //           + broadcaster 绑定移除（零残留）；
+    //    启用 → 立即重注册 tools/route_signals/http_routes（guarded，入新 scope）。
+    //    /ext/{*rest} 通配分发是注册表数据驱动（http_dispatcher），路由树无需
+    //    重启重建。
+    let mut registered = serde_json::Value::Null;
+    if let Some(registry) = &state.capability_registry {
+        if new_enabled {
+            registered = reenable_hot_path(&state, registry, &plugin_id).await;
+        } else {
+            disable_hot_path(&state, registry, &plugin_id).await;
+        }
+    }
+    let restart_needed = false; // 双向即时生效（G1）
+    tracing::info!(
+        target: "plugin-enablement",
+        "plugin {} enabled={} (hot-reloaded: contributes + registry updated, restart={})",
+        plugin_id, new_enabled, restart_needed
+    );
+    // 剩余项清仓 D2：schema 变更推送——enable/disable 已改变 schema 聚合
+    // （tools/contributes/configs），best-effort 广播 widget_event
+    // {schema, changed} 让前端增量重载（前端消费见 resync.ts）。
+    // 失败静默（观察层不拖垮主流程：session 未启用/无连接时 broadcast
+    // 返回 0，不视为错误）。
+    if let Some(session) = &state.session {
+        let _ = session
+            .broadcast_widget(
+                "schema",
+                "changed",
+                json!({ "plugin_id": plugin_id, "enabled": new_enabled }),
+                "kernel",
+            )
+            .await;
+    }
+    Ok(axum::Json(json!({
+        "success": true,
+        "plugin_id": plugin_id,
+        "enabled": new_enabled,
+        "restart_required": restart_needed,
+        "registered": registered,
+        "message": if new_enabled {
+            format!("已启用插件 {}（立即生效）", plugin_id)
+        } else {
+            format!("已禁用插件 {}（立即生效）", plugin_id)
+        },
+    })))
+}
+
+/// 读 default_profile.yaml 为 serde_yaml 文档。
+///
+/// 文件缺失/空白 → 全新 Mapping（首次落盘，无存量可破坏）；文件存在但解析
+/// 失败/顶层非 Mapping → 422 拒绝写入（K1：不得用硬编码模板顶替并覆写，
+/// profile 里其他插件的启停设置会被物理清空；损坏现场必须保留给运维排查，
+/// 不得静默重建）。其余读失败（权限等）→ 500，同样不写。
+fn load_profile_doc(profile_path: &std::path::Path) -> Result<serde_yaml::Value, ApiError> {
+    match std::fs::read_to_string(profile_path) {
+        Ok(raw) if raw.trim().is_empty() => {
+            Ok(serde_yaml::Value::Mapping(serde_yaml::Mapping::new()))
+        }
         Ok(raw) => match serde_yaml::from_str::<serde_yaml::Value>(&raw) {
-            Ok(v @ serde_yaml::Value::Mapping(_)) => v,
+            Ok(v @ serde_yaml::Value::Mapping(_)) => Ok(v),
             Ok(_) => {
                 tracing::error!(
                     path = %profile_path.display(),
                     "default_profile.yaml 顶层非 Mapping，拒绝覆写（profile corrupted）"
                 );
-                return Err(ApiError::UnprocessableEntity {
+                Err(ApiError::UnprocessableEntity {
                     message: "profile corrupted, refusing to overwrite".to_string(),
-                });
+                })
             }
             Err(e) => {
                 tracing::error!(
@@ -1865,23 +1951,25 @@ pub async fn plugins_set_enabled_handler(
                     error = %e,
                     "default_profile.yaml 解析失败，拒绝覆写（profile corrupted）"
                 );
-                return Err(ApiError::UnprocessableEntity {
+                Err(ApiError::UnprocessableEntity {
                     message: "profile corrupted, refusing to overwrite".to_string(),
-                });
+                })
             }
         },
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            serde_yaml::Value::Mapping(serde_yaml::Mapping::new())
+            Ok(serde_yaml::Value::Mapping(serde_yaml::Mapping::new()))
         }
-        Err(e) => {
-            return Err(ApiError::Internal {
-                message: format!("读取 default_profile.yaml 失败：{e}"),
-            })
-        }
-    };
+        Err(e) => Err(ApiError::Internal {
+            message: format!("读取 default_profile.yaml 失败：{e}"),
+        }),
+    }
+}
 
-    // 改 plugins.<id>.enabled（手动操作 serde_yaml Mapping）
-    if let serde_yaml::Value::Mapping(ref mut top) = doc {
+/// 在 profile 文档 `plugins.<plugin_id>.enabled` 处打启用补丁。
+///
+/// plugins 键 / 插件条目不存在则逐级创建（手动操作 serde_yaml Mapping）。
+fn apply_enabled_patch(doc: &mut serde_yaml::Value, plugin_id: &str, new_enabled: bool) {
+    if let serde_yaml::Value::Mapping(ref mut top) = *doc {
         // 确保 plugins 键存在且是 Mapping
         let plugins_key = serde_yaml::Value::String("plugins".into());
         if !top.contains_key(&plugins_key) {
@@ -1891,7 +1979,7 @@ pub async fn plugins_set_enabled_handler(
             );
         }
         if let Some(serde_yaml::Value::Mapping(ref mut plugins_map)) = top.get_mut(&plugins_key) {
-            let pid_key = serde_yaml::Value::String(plugin_id.clone());
+            let pid_key = serde_yaml::Value::String(plugin_id.to_owned());
             // 确保该插件条目存在
             if !plugins_map.contains_key(&pid_key) {
                 plugins_map.insert(
@@ -1907,184 +1995,119 @@ pub async fn plugins_set_enabled_handler(
             }
         }
     }
+}
 
-    // 写回：序列化失败直接报错（K1：不得 unwrap_or_default() 把空串写盘，
-    // 物理清空整个 profile——序列化对 Mapping 几乎不会失败，但兜底不得是破坏性写）。
-    let new_raw = serde_yaml::to_string(&doc).map_err(|e| ApiError::Internal {
-        message: format!("序列化 default_profile.yaml 失败：{e}"),
-    })?;
-    match std::fs::write(&profile_path, new_raw) {
-        Ok(_) => {
-            // ── 热加载：立即改内存状态，不用重启 ──
-            // 1) 改 enabled_plugin_ids（schema 出口的 contributes/configs 立即生效）
-            {
-                let mut ids = state.enabled_plugin_ids.write().await;
-                if new_enabled {
-                    ids.insert(plugin_id.clone());
-                } else {
-                    ids.remove(&plugin_id);
+/// 启用热路径：注册闸 G2 复核后按（净化后）manifest 重注册 tools/http_routes。
+///
+/// 判定失败（漂移）→ 用净化后 manifest 注册，禁止把"声明与实现不服"的能力在
+/// 启用时带进来；观测失败（重试后仍 spawn/list 失败）≠ 判定失败 → 按声明注册，
+/// 账本标记校验未完成。返回 registered 账目 `{tools, http_routes}`
+/// （manifest 未找到 → null 并告警，不重注册）。
+async fn reenable_hot_path(
+    state: &AppState,
+    registry: &Arc<CapabilityRegistryImpl>,
+    plugin_id: &str,
+) -> serde_json::Value {
+    let mut registered = serde_json::Value::Null;
+    match state
+        .manifests
+        .read()
+        .await
+        .iter()
+        .find(|m| m.id == plugin_id)
+    {
+        Some(m) => {
+            let mut manifest_for_register = m.clone();
+            let mut g2_outcome: Option<crate::plugin_watcher::G2VerifyOutcome> = None;
+            if let Some(invoker) = &state.invoker {
+                let outcome =
+                    crate::plugin_watcher::g2_verify_and_sanitize(invoker.as_ref(), m.clone())
+                        .await;
+                g2_outcome = Some(outcome.clone());
+                if outcome.drift {
+                    tracing::warn!(
+                        target: "plugin-enablement",
+                        plugin = %plugin_id,
+                        rejected = ?outcome.rejected_tools,
+                        spawn_failed = outcome.spawn_failed,
+                        "注册闸 G2：启用复核判定声明与实现不一致，按净化后能力注册（需修改插件）"
+                    );
+                    manifest_for_register = outcome.manifest;
+                } else if outcome.spawn_failed {
+                    tracing::warn!(
+                        target: "plugin-enablement",
+                        plugin = %plugin_id,
+                        "注册闸 G2：启用复核观测失败——按声明注册，账本标记校验未完成（待复验）"
+                    );
                 }
             }
-            // 2) 注册表对称热更新（G1 enable 对称化 + M1 scope 结构性收回）：
-            //    禁用 → scope revoke（全部注册 guard 一次性收回）+ clear_plugin 兜底
-            //           + broadcaster 绑定移除（零残留）；
-            //    启用 → 立即重注册 tools/route_signals/http_routes（guarded，入新 scope）。
-            //    /ext/{*rest} 通配分发是注册表数据驱动（http_dispatcher），路由树无需
-            //    重启重建。
-            let mut registered = serde_json::Value::Null;
-            if let Some(registry) = &state.capability_registry {
-                use agentos_core::traits::CapabilityRegistry;
-                if new_enabled {
-                    match state
-                        .manifests
-                        .read()
-                        .await
-                        .iter()
-                        .find(|m| m.id == plugin_id)
-                    {
-                        Some(m) => {
-                            // 注册闸 G2 复核（reenable 复用注册校验，不另设校验层）：
-                            // sidecar tool 插件先 spawn 校验。判定失败（漂移）→ 用净化后
-                            // manifest 重注册，禁止把"声明与实现不服"的能力在启用时带
-                            // 进来；观测失败（重试后仍 spawn/list 失败）≠ 判定失败
-                            // → 按声明注册，账本标记校验未完成。
-                            let mut manifest_for_register = m.clone();
-                            let mut g2_outcome: Option<crate::plugin_watcher::G2VerifyOutcome> =
-                                None;
-                            if let Some(invoker) = &state.invoker {
-                                let outcome = crate::plugin_watcher::g2_verify_and_sanitize(
-                                    invoker.as_ref(),
-                                    m.clone(),
-                                )
-                                .await;
-                                g2_outcome = Some(outcome.clone());
-                                if outcome.drift {
-                                    tracing::warn!(
-                                        target: "plugin-enablement",
-                                        plugin = %plugin_id,
-                                        rejected = ?outcome.rejected_tools,
-                                        spawn_failed = outcome.spawn_failed,
-                                        "注册闸 G2：启用复核判定声明与实现不一致，按净化后能力注册（需修改插件）"
-                                    );
-                                    manifest_for_register = outcome.manifest;
-                                } else if outcome.spawn_failed {
-                                    tracing::warn!(
-                                        target: "plugin-enablement",
-                                        plugin = %plugin_id,
-                                        "注册闸 G2：启用复核观测失败——按声明注册，账本标记校验未完成（待复验）"
-                                    );
-                                }
-                            }
-                            // 闸2·观测：启用复核结果收口（无 invoker = not_covered 缺省）
-                            state.contract_states.upsert(
-                                crate::contract::PluginContractState::derived(
-                                    m,
-                                    true,
-                                    g2_outcome.as_ref(),
-                                ),
-                            );
-                            let (tools, http_routes) =
-                                crate::plugin_lifecycle::reenable_plugin_capabilities(
-                                    &manifest_for_register,
-                                    registry,
-                                    &state.plugin_scopes,
-                                );
-                            tracing::info!(
-                                target: "plugin-enablement",
-                                "plugin {} re-enabled: re-registered tools={} http_routes={}",
-                                plugin_id, tools, http_routes
-                            );
-                            registered = serde_json::json!({
-                                "tools": tools, "http_routes": http_routes
-                            });
-                        }
-                        None => {
-                            tracing::warn!(
-                                target: "plugin-enablement",
-                                "plugin {} enabled but manifest not found; nothing re-registered",
-                                plugin_id
-                            );
-                        }
-                    }
-                } else {
-                    // M1：先经 scope 收回全部登记（registry 四维 + broadcaster 绑定），
-                    // 再 clear_plugin 兜底（scope 无登记的直连注册路径仍被覆盖）。
-                    // 闸2·观测：禁用收口登记 not_covered（enabled=false，账本旧值作废）。
-                    if let Some(m) = state
-                        .manifests
-                        .read()
-                        .await
-                        .iter()
-                        .find(|m| m.id == plugin_id)
-                    {
-                        state
-                            .contract_states
-                            .upsert(crate::contract::PluginContractState::not_covered(m, false));
-                    }
-                    state.plugin_scopes.revoke(&plugin_id);
-                    if let Some(bindings) = &state.widget_bindings {
-                        remove_plugin_bindings(bindings, &plugin_id);
-                    }
-                    registry.clear_plugin(&plugin_id);
-                    // G3：动态注册随 scope/clear_plugin 结构性收回（动态注册是
-                    // state 域数据不落内核，re-enable 后插件经 on_load/运行时自行重建）。
-                    // 禁用即杀该插件缓存 sidecar——窄口
-                    // kill_sidecar_if_any（只 kill 进程 + 移除缓存，不走 force_unload
-                    // 的 OnUnload 广播/loader.unload/指纹清理，"仅禁用"语义下插件
-                    // 仍在 loader 内、热发现不失效）；sidecar 按调用懒 spawn，reenable
-                    // 后下次调用自然重生。
-                    if let Some(invoker) = state.invoker.as_ref() {
-                        invoker.kill_sidecar_if_any(&plugin_id).await;
-                    }
-                }
-            }
-            let restart_needed = false; // 双向即时生效（G1）
+            // 闸2·观测：启用复核结果收口（无 invoker = not_covered 缺省）
+            state
+                .contract_states
+                .upsert(crate::contract::PluginContractState::derived(
+                    m,
+                    true,
+                    g2_outcome.as_ref(),
+                ));
+            let (tools, http_routes) = crate::plugin_lifecycle::reenable_plugin_capabilities(
+                &manifest_for_register,
+                registry,
+                &state.plugin_scopes,
+            );
             tracing::info!(
                 target: "plugin-enablement",
-                "plugin {} enabled={} (hot-reloaded: contributes + registry updated, restart={})",
-                plugin_id, new_enabled, restart_needed
+                "plugin {} re-enabled: re-registered tools={} http_routes={}",
+                plugin_id, tools, http_routes
             );
-            // 剩余项清仓 D2：schema 变更推送——enable/disable 已改变 schema 聚合
-            // （tools/contributes/configs），best-effort 广播 widget_event
-            // {schema, changed} 让前端增量重载（前端消费见 resync.ts）。
-            // 失败静默（观察层不拖垮主流程：session 未启用/无连接时 broadcast
-            // 返回 0，不视为错误）。
-            if let Some(session) = &state.session {
-                let _ = session
-                    .broadcast_widget(
-                        "schema",
-                        "changed",
-                        json!({ "plugin_id": plugin_id, "enabled": new_enabled }),
-                        "kernel",
-                    )
-                    .await;
-            }
-            Ok(axum::Json(json!({
-                "success": true,
-                "plugin_id": plugin_id,
-                "enabled": new_enabled,
-                "restart_required": restart_needed,
-                "registered": registered,
-                "message": if new_enabled {
-                    format!("已启用插件 {}（立即生效）", plugin_id)
-                } else {
-                    format!("已禁用插件 {}（立即生效）", plugin_id)
-                },
-            })))
+            registered = serde_json::json!({
+                "tools": tools, "http_routes": http_routes
+            });
         }
-        // A12：写盘失败 → 5xx 统一错误信封（不再 200 + success:false 混装，
-        // 前端无法据状态码区分"已生效"与"根本没写进去"）。
-        Err(e) => {
-            tracing::error!(
+        None => {
+            tracing::warn!(
                 target: "plugin-enablement",
-                plugin_id = %plugin_id,
-                error = %e,
-                "写入 profile 失败"
+                "plugin {} enabled but manifest not found; nothing re-registered",
+                plugin_id
             );
-            Err(ApiError::Internal {
-                message: format!("写入 profile 失败: {e}"),
-            })
         }
+    }
+    registered
+}
+
+/// 禁用热路径：M1 scope 收回全部登记（registry 四维 + broadcaster 绑定）+
+/// clear_plugin 兜底（scope 无登记的直连注册路径仍被覆盖）+ sidecar 窄口击杀。
+///
+/// 闸2·观测：禁用收口登记 not_covered（账本旧值作废）。sidecar 走
+/// kill_sidecar_if_any（只 kill 进程 + 移除缓存，不走 force_unload 的 OnUnload
+/// 广播/loader.unload/指纹清理——"仅禁用"语义下插件仍在 loader 内、热发现不
+/// 失效）；sidecar 按调用懒 spawn，reenable 后下次调用自然重生。
+async fn disable_hot_path(
+    state: &AppState,
+    registry: &Arc<CapabilityRegistryImpl>,
+    plugin_id: &str,
+) {
+    use agentos_core::traits::CapabilityRegistry;
+
+    if let Some(m) = state
+        .manifests
+        .read()
+        .await
+        .iter()
+        .find(|m| m.id == plugin_id)
+    {
+        state
+            .contract_states
+            .upsert(crate::contract::PluginContractState::not_covered(m, false));
+    }
+    state.plugin_scopes.revoke(plugin_id);
+    if let Some(bindings) = &state.widget_bindings {
+        remove_plugin_bindings(bindings, plugin_id);
+    }
+    registry.clear_plugin(plugin_id);
+    // G3：动态注册随 scope/clear_plugin 结构性收回（动态注册是
+    // state 域数据不落内核，re-enable 后插件经 on_load/运行时自行重建）。
+    if let Some(invoker) = state.invoker.as_ref() {
+        invoker.kill_sidecar_if_any(plugin_id).await;
     }
 }
 

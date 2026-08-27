@@ -1,4 +1,4 @@
-//! # Lingxi API — HTTP/WebSocket API 服务器
+//! # AgentOS API — HTTP/WebSocket API 服务器
 //!
 //! 基于 Axum 0.8 构建，提供 RESTful API 和 WebSocket 流式响应。
 //!

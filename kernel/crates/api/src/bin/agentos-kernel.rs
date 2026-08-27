@@ -1,4 +1,4 @@
-//! Lingxi AgentOS 0.2 内核二进制入口。
+//! AgentOS 0.2 内核二进制入口。
 //!
 //! 启动 Axum HTTP/WebSocket API 服务器，提供 /health、/api/v1/* 端点和 /ws WebSocket。
 //!
@@ -88,7 +88,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let addr: SocketAddr = format!("{}:{}", host, port).parse()?;
 
     info!(target: "agentos-kernel", "========================================");
-    info!(target: "agentos-kernel", "  Lingxi AgentOS 0.2 内核启动");
+    info!(target: "agentos-kernel", "  AgentOS 0.2 内核启动");
     info!(target: "agentos-kernel", "  监听地址: http://{}", addr);
     info!(target: "agentos-kernel", "  健康检查: http://{}/health", addr);
     info!(target: "agentos-kernel", "  WebSocket: ws://{}/ws", addr);
@@ -451,20 +451,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let native_loader = Arc::new(NativePluginLoader::new());
     let invoker =
         Arc::new(PluginInvokerImpl::new(loader_arc.clone()).set_native_loader(native_loader));
-    // 显式注入 PYTHONPATH 候选目录：sidecar SDK 统一用 `from src.core.logging import`
-    // 这种带 src. 前缀的 import，要让其解析成功，sys.path 必须含 src/ 的**父目录**
-    // （project_root），而非 src/ 本身（否则 Python 在 <src>/src/core 找模块，报
-    // `No module named 'src.core'`）。AGENTOS_PLUGINS_DIR 环境变量推算不可靠
-    // （不同启动方式 .sh / IDE 未必设置该变量，会导致 sidecar 启动即 import 失败、
-    // initialize 卡到超时），这里由内核直接从已知 plugins_dir 推算 project_root 注入，
-    // 不依赖外部环境。plugins/shared → plugins/ → project_root。
-    if let Some(project_root) = plugins_dir
-        .parent()
-        .and_then(|p| p.parent())
-        .filter(|p| p.join("src").is_dir())
-    {
-        invoker.set_pythonpath_src(project_root);
-    }
     // 启动插件空闲软卸载 GC（生命周期管理：用到才加载 + 长时间不用自动 kill 进程，
     // manifest 保留，下次调用重新 spawn）。每 30s 扫描，阈值默认 300s。
     invoker.start_idle_gc();

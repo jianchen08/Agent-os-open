@@ -26,7 +26,10 @@ import json
 import logging
 import os
 import sys
-from typing import Any
+from typing import TYPE_CHECKING, Any, BinaryIO
+
+if TYPE_CHECKING:
+    import subprocess
 
 # 本地模块可达性：插件目录加入 sys.path（与 memory/server.py 同款做法）
 _THIS_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -802,6 +805,99 @@ def _apply_llm_env() -> None:
         os.environ["HINDSIGHT_API_RERANKER_PROVIDER"] = "rrf"
 
 
+def _hindsight_api_up(base_url: str) -> bool:
+    """探测既有 hindsight-api /health 是否就绪（幂等复用常驻实例）。"""
+    import urllib.request  # noqa: PLC0415
+
+    try:
+        with urllib.request.urlopen(f"{base_url}/health", timeout=2) as resp:
+            return resp.status == 200
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def _start_api_server(port: int, data_dir: str) -> tuple[subprocess.Popen[bytes], BinaryIO, str]:
+    """以 hindsight 专用 venv 启动 hindsight-api 子进程。
+
+    返回 (进程句柄, stderr 文件句柄, stderr 落盘路径)；venv python 缺失时抛 RuntimeError。
+    """
+    import subprocess  # noqa: PLC0415
+
+    # 启动 hindsight-api 服务器子进程(pg0 嵌入式 PG + uvicorn HTTP)
+    # 用 hindsight 专用 venv（.venv-hindsight）的 python 起子进程：venv 内
+    # fastmcp 解析到其匹配的 mcp 1.x（request_ctx 等），与宿主 sidecar 的
+    # AgentOS SDK（mcp>=2.0,<3）完全隔离——mcp 1.x/2.0 生态互斥问题正解
+    # 在此。当前为「双 venv」布局：.venv=SDK 轨（invoker 启动 server.py
+    # 用），.venv-hindsight=API 服务器栈（requirements.txt 锁版本）。
+    _venv_python = os.path.join(_THIS_DIR, ".venv-hindsight", "Scripts", "python.exe")
+    if not os.path.isfile(_venv_python):
+        # Unix 布局回退探测（与 invoker resolve_sidecar_command 同款双布局）
+        _unix_python = os.path.join(_THIS_DIR, ".venv-hindsight", "bin", "python")
+        if os.path.isfile(_unix_python):
+            _venv_python = _unix_python
+    if not os.path.isfile(_venv_python):
+        logger.error(
+            "[hindsight] API 服务器 venv python 缺失（%s），hindsight-api 无法"
+            "启动。创建方式：uv venv .venv-hindsight --python 3.12 && "
+            "uv pip install -r requirements.txt（依赖清单见 requirements.txt）",
+            _venv_python,
+        )
+        raise RuntimeError("hindsight venv 未初始化")
+    # 子进程 stderr 落盘不 DEVNULL：stderr 进 DEVNULL 会令崩溃原因
+    # 完全不可诊断。追加写 data 目录，崩溃时带 tail 进错误消息。
+    _stderr_path = os.path.join(data_dir, "hindsight_api_stderr.log")
+    _stderr_file = open(_stderr_path, "ab")  # noqa: SIM115
+    process = subprocess.Popen(
+        [_venv_python, "-m", "hindsight_api.main",
+         "--port", str(port), "--host", "127.0.0.1"],
+        stdout=subprocess.DEVNULL,
+        stderr=_stderr_file,
+        env=os.environ.copy(),
+    )
+    logger.info(
+        "[hindsight] hindsight-api 子进程已启动 PID=%s port=%s stderr_log=%s",
+        process.pid, port, _stderr_path,
+    )
+    return process, _stderr_file, _stderr_path
+
+
+async def _wait_api_ready(
+    base_url: str,
+    process: subprocess.Popen[bytes],
+    stderr_file: BinaryIO,
+    stderr_path: str,
+) -> None:
+    """轮询 /health 直至就绪（最多 60s）；子进程提前退出则带 stderr tail 抛错。"""
+    import asyncio as _aio  # noqa: PLC0415
+    import urllib.request  # noqa: PLC0415
+
+    for _attempt in range(60):
+        await _aio.sleep(1)
+        try:
+            with urllib.request.urlopen(f"{base_url}/health", timeout=2) as resp:
+                if resp.status == 200:
+                    logger.info("[hindsight] 服务器就绪 (attempt=%d)", _attempt + 1)
+                    break
+        except Exception:
+            # 检查子进程是否已退出：带上 stderr tail（落盘日志最后 800
+            # 字符）——崩溃原因可见，不再只有裸 exit code。
+            if process.poll() is not None:
+                _tail = ""
+                try:
+                    stderr_file.flush()
+                    with open(stderr_path, "rb") as _f:
+                        _raw = _f.read()
+                    _tail = _raw[-800:].decode("utf-8", errors="replace")
+                except Exception:  # noqa: BLE001
+                    pass
+                raise RuntimeError(
+                    f"hindsight-api 子进程已退出 code={process.returncode}"
+                    f" stderr_tail={_tail!r}"
+                )
+    else:
+        raise RuntimeError("hindsight-api 服务器 60s 内未就绪")
+
+
 @plugin.on_load
 async def _on_load(params: dict[str, Any]) -> None:
     """启动 hindsight-api 服务器(pg0 嵌入式 PG)并创建 HTTP 客户端。
@@ -841,86 +937,14 @@ async def _on_load(params: dict[str, Any]) -> None:
     base_url = f"http://127.0.0.1:{port}"
 
     try:
-        import subprocess  # noqa: PLC0415
-        import urllib.request as _ur  # noqa: PLC0415
-
-        # 幂等连接既有服务：插件重载/重启时 8420 可能已有健康 hindsight-api
+        # 幂等连接既有服务：插件重载/重启时端口可能已有健康 hindsight-api
         # （外部/上次实例常驻），直接复用而非再 spawn（端口冲突 + 首启 pg0
         # 建库慢会拖垮 on_load 轮询超时）。
-        _already_up = False
-        try:
-            with _ur.urlopen(f"{base_url}/health", timeout=2) as _resp:
-                _already_up = _resp.status == 200
-        except Exception:
-            _already_up = False
-        if _already_up:
+        if _hindsight_api_up(base_url):
             logger.info("[hindsight] 复用既有 hindsight-api 服务 %s", base_url)
         else:
-            # 启动 hindsight-api 服务器子进程(pg0 嵌入式 PG + uvicorn HTTP)
-            # 用 hindsight 专用 venv（.venv-hindsight）的 python 起子进程：venv 内
-            # fastmcp 解析到其匹配的 mcp 1.x（request_ctx 等），与宿主 sidecar 的
-            # AgentOS SDK（mcp>=2.0,<3）完全隔离——mcp 1.x/2.0 生态互斥问题正解
-            # 在此。当前为「双 venv」布局：.venv=SDK 轨（invoker 启动 server.py
-            # 用），.venv-hindsight=API 服务器栈（requirements.txt 锁版本）。
-            _venv_python = os.path.join(_THIS_DIR, ".venv-hindsight", "Scripts", "python.exe")
-            if not os.path.isfile(_venv_python):
-                # Unix 布局回退探测（与 invoker resolve_sidecar_command 同款双布局）
-                _unix_python = os.path.join(_THIS_DIR, ".venv-hindsight", "bin", "python")
-                if os.path.isfile(_unix_python):
-                    _venv_python = _unix_python
-            if not os.path.isfile(_venv_python):
-                logger.error(
-                    "[hindsight] API 服务器 venv python 缺失（%s），hindsight-api 无法"
-                    "启动。创建方式：uv venv .venv-hindsight --python 3.12 && "
-                    "uv pip install -r requirements.txt（依赖清单见 requirements.txt）",
-                    _venv_python,
-                )
-                raise RuntimeError("hindsight venv 未初始化")
-            # 子进程 stderr 落盘不 DEVNULL：stderr 进 DEVNULL 会令崩溃原因
-            # 完全不可诊断。追加写 data 目录，崩溃时带 tail 进错误消息。
-            _stderr_path = os.path.join(data_dir, "hindsight_api_stderr.log")
-            _stderr_file = open(_stderr_path, "ab")  # noqa: SIM115
-            _api_process = subprocess.Popen(
-                [_venv_python, "-m", "hindsight_api.main",
-                 "--port", str(port), "--host", "127.0.0.1"],
-                stdout=subprocess.DEVNULL,
-                stderr=_stderr_file,
-                env=os.environ.copy(),
-            )
-            logger.info(
-                "[hindsight] hindsight-api 子进程已启动 PID=%s port=%s stderr_log=%s",
-                _api_process.pid, port, _stderr_path,
-            )
-
-            # 等待服务器就绪(轮询 /health,最多 60s)
-            import asyncio as _aio  # noqa: PLC0415
-            import urllib.request  # noqa: PLC0415
-
-            for _attempt in range(60):
-                await _aio.sleep(1)
-                try:
-                    with urllib.request.urlopen(f"{base_url}/health", timeout=2) as resp:
-                        if resp.status == 200:
-                            logger.info("[hindsight] 服务器就绪 (attempt=%d)", _attempt + 1)
-                            break
-                except Exception:
-                    # 检查子进程是否已退出：带上 stderr tail（落盘日志最后 800
-                    # 字符）——崩溃原因可见，不再只有裸 exit code。
-                    if _api_process.poll() is not None:
-                        _tail = ""
-                        try:
-                            _stderr_file.flush()
-                            with open(_stderr_path, "rb") as _f:
-                                _raw = _f.read()
-                            _tail = _raw[-800:].decode("utf-8", errors="replace")
-                        except Exception:  # noqa: BLE001
-                            pass
-                        raise RuntimeError(
-                            f"hindsight-api 子进程已退出 code={_api_process.returncode}"
-                            f" stderr_tail={_tail!r}"
-                        )
-            else:
-                raise RuntimeError("hindsight-api 服务器 60s 内未就绪")
+            _api_process, _stderr_file, _stderr_path = _start_api_server(port, data_dir)
+            await _wait_api_ready(base_url, _api_process, _stderr_file, _stderr_path)
 
         # 创建 HTTP 客户端
         from hindsight_client import Hindsight  # type: ignore
