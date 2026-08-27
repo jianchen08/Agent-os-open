@@ -15,11 +15,34 @@ import { useLayoutModeStore } from '@/stores/layoutModeStore'
 import { useNotificationStore } from '@/stores/notificationStore'
 import { usePipelineMessageStore } from '@/stores/pipelineMessageStore'
 import { useUIStore } from '@/stores/uiStore'
+import { readAgents } from '@/hooks/queries/useAgentsQuery'
 import { playNotificationSound } from '@/utils/audioNotification'
 import type { PendingInteraction } from '@/stores/interactionStore'
 
 /** 模块级标志位：防止多个组件调用 useInteractionHandler 时重复注册 WebSocket 事件订阅 */
 let _isSubscribed = false
+
+/**
+ * 解析交互请求的人类可读来源：优先管道元数据里的 Agent 名称（sub_agent_created
+ * 事件下发），其次 agents 缓存按 agentId/configId 匹配，最后回退 agentId 原文。
+ * 解析不到时返回空串（渲染层不显示来源标签）。
+ */
+function resolveInteractionSourceLabel(parsed: {
+  agentId: string
+  pipelineId?: string
+}): string {
+  const pipelineMeta = parsed.pipelineId
+    ? usePipelineMessageStore.getState().pipelines[parsed.pipelineId]
+    : undefined
+  if (pipelineMeta?.agentName) return pipelineMeta.agentName
+  if (parsed.agentId) {
+    const matched = readAgents().find(
+      (a) => a.id === parsed.agentId || a.configId === parsed.agentId,
+    )
+    return matched?.name || parsed.agentId
+  }
+  return ''
+}
 
 /**
  * 把后端 `/interaction/pending` 返回的 record（嵌套结构）适配为 `parseInteractionEvent` 期望的扁平结构。
@@ -219,6 +242,7 @@ export function useInteractionHandler(sessionId: string | undefined) {
           priority: (parsed.priority as 'high' | 'normal' | 'low') || 'high',
           category: 'alert',
           isBlocking: false,
+          sourceLabel: resolveInteractionSourceLabel(parsed),
         })
         requestToNotificationMap.set(parsed.requestId, notifId)
       } else {
@@ -248,6 +272,7 @@ export function useInteractionHandler(sessionId: string | undefined) {
           category: 'alert',
           isBlocking: false,
           autoDismissMs: 8000,
+          sourceLabel: resolveInteractionSourceLabel(parsed),
         })
       })
 

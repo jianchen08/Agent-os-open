@@ -109,4 +109,32 @@ describe('NotificationItem 声明驱动渲染', () => {
     )
     expect(screen.getByRole('button', { name: '确认继续' })).toBeInTheDocument()
   })
+
+  it('sourceLabel 存在时渲染来源标签', () => {
+    render(
+      <NotificationItemComponent
+        notification={makeNotification({ sourceLabel: '灵汐' })}
+      />,
+    )
+    expect(screen.getByTestId('notification-source-label')).toHaveTextContent('灵汐')
+  })
+
+  it('sourceLabel 缺失时不渲染来源标签', () => {
+    render(
+      <NotificationItemComponent
+        notification={makeNotification()}
+      />,
+    )
+    expect(screen.queryByTestId('notification-source-label')).not.toBeInTheDocument()
+  })
+
+  it('折叠模式也显示来源标签', () => {
+    render(
+      <NotificationItemComponent
+        notification={makeNotification({ sourceLabel: '子任务' })}
+        isCollapsed
+      />,
+    )
+    expect(screen.getByText('子任务')).toBeInTheDocument()
+  })
 })

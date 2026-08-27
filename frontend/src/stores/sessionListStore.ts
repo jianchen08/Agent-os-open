@@ -340,6 +340,7 @@ export const useSessionListStore = create<SessionListState>()((_, get) => ({
         category: 'error',
         isBlocking: false,
         autoDismissMs: 5000,
+        sourceLabel: '前端',
       })
     })
   },
@@ -374,6 +375,7 @@ export const useSessionListStore = create<SessionListState>()((_, get) => ({
         category: 'error',
         isBlocking: false,
         autoDismissMs: 5000,
+        sourceLabel: '前端',
       })
     })
   },
@@ -414,6 +416,7 @@ export const useSessionListStore = create<SessionListState>()((_, get) => ({
         category: 'error',
         isBlocking: false,
         autoDismissMs: 5000,
+        sourceLabel: '前端',
       })
     }
   },

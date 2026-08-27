@@ -60,6 +60,8 @@ export interface NotificationItem {
   sourceId?: string
   /** 错误来源（统一错误模型 config/error_codes.json sources.enum，渲染来源标签） */
   errorSource?: 'kernel' | 'plugin' | 'llm' | 'infra' | 'frontend'
+  /** 人类可读来源（如 Agent 名称/「前端」），渲染来源标签 */
+  sourceLabel?: string
 }
 
 /** 通知中心折叠状态 */

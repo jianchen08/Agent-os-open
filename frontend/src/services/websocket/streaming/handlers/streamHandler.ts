@@ -155,6 +155,7 @@ export function handleStreamEnd(eventData: any) {
               priority: 'normal',
               category: 'alert',
               isBlocking: false,
+              sourceLabel: '系统',
             })
           }
         }

@@ -148,6 +148,7 @@ async function reloadContributionRegistry(): Promise<void> {
         priority: 'normal',
         isBlocking: false,
         autoDismissMs: 10_000,
+        sourceLabel: '前端',
       })
     }
   }

@@ -17,6 +17,8 @@ import { MemoryRouter } from 'react-router-dom'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { useInteractionHandler } from '@/hooks/useInteractionHandler'
 import { useInteractionStore } from '@/stores/interactionStore'
+import { useNotificationStore } from '@/stores/notificationStore'
+import { usePipelineMessageStore } from '@/stores/pipelineMessageStore'
 
 // ---------------------------------------------------------------------------
 //  可变 mock：在测试内动态切换 /interaction/pending 的返回内容
@@ -90,6 +92,8 @@ describe('交互刷新恢复', () => {
     apiGetMock.mockClear()
     // 清空 store（action 引用稳定，setState 重置数据即可）
     useInteractionStore.setState({ pendingInteractions: [] })
+    useNotificationStore.setState({ notifications: [] })
+    usePipelineMessageStore.setState({ pipelines: {} })
   })
 
   it('conversation 模式 record 应恢复到 interactionStore', async () => {
@@ -150,6 +154,46 @@ describe('交互刷新恢复', () => {
         (i) => i.requestId === 'req-notif',
       ),
     ).toBe(false)
+  })
+
+  it('notification 模式通知带来源标签：优先管道元数据 agentName', async () => {
+    usePipelineMessageStore.getState().registerPipeline({
+      pipelineId: 'pipe-1',
+      sessionId: 'sess-1',
+      level: 2,
+      tabId: 'tab-1',
+      agentName: '代码执行员',
+      status: 'running',
+      parentId: null,
+      unreadCount: 0,
+    })
+    pendingResponse.items = [makeRecord({ id: 'req-notif-src', mode: 'notification' })]
+
+    renderHook(() => useInteractionHandler('sess-1'), { wrapper: MemoryRouterWrapper })
+
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 50))
+    })
+
+    const notif = useNotificationStore
+      .getState()
+      .notifications.find((n) => n.title === '恢复的对话')
+    expect(notif?.sourceLabel).toBe('代码执行员')
+  })
+
+  it('notification 模式通知来源标签：无管道元数据时回退 agentId', async () => {
+    pendingResponse.items = [makeRecord({ id: 'req-notif-fb', mode: 'notification' })]
+
+    renderHook(() => useInteractionHandler('sess-1'), { wrapper: MemoryRouterWrapper })
+
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 50))
+    })
+
+    const notif = useNotificationStore
+      .getState()
+      .notifications.find((n) => n.title === '恢复的对话')
+    expect(notif?.sourceLabel).toBe('agent-1')
   })
 
   it('request_id 缺失时应用顶层 id 兜底（normalizeRecord 映射正确）', async () => {

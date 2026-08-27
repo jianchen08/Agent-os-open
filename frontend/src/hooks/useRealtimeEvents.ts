@@ -75,6 +75,7 @@ export function useRealtimeEvents(): void {
               category: 'error',
               isBlocking: false,
               autoDismissMs: 8000,
+              sourceLabel: '前端',
             })
           }
         })
@@ -195,6 +196,7 @@ export function useRealtimeEvents(): void {
         category: 'error',
         isBlocking: false,
         autoDismissMs: 10000,
+        sourceLabel: '前端',
       })
     }
     globalWS.subscribe('user_input_send_timeout', handleUserInputSendTimeout)
@@ -227,6 +229,7 @@ export function useRealtimeEvents(): void {
         category: 'error',
         isBlocking: false,
         autoDismissMs: 0, // 常驻：静默装死比打扰更糟
+        sourceLabel: '前端',
       })
     }
     globalWS.subscribe('kicked_by_replacement', handleKickedByReplacement)

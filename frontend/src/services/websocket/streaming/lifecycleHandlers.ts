@@ -139,6 +139,7 @@ export async function handleReconnected(): Promise<void> {
       category: 'alert',
       isBlocking: false,
       autoDismissMs: 10000,
+      sourceLabel: '前端',
     })
   }
 }
@@ -258,6 +259,7 @@ function checkCacheDrop(pipelineId: string, prevRatio: number, nextRatio: number
       isBlocking: false,
       sessionId: pipelineId,
       autoDismissMs: 15000,
+      sourceLabel: '系统',
     })
     loggers.websocket.warn(
       '[COST_UPDATE] cache 命中率骤降: pipeline=%s %.1f%% → %.1f%%',

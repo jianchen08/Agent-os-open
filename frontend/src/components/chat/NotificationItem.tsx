@@ -137,6 +137,11 @@ export function NotificationItemComponent({
       >
         {IconComponent && <IconComponent className={cn('h-icon-sm w-icon-sm flex-shrink-0', style.text)} />}
         <span className="truncate flex-1">{title}</span>
+        {notification.sourceLabel && (
+          <span className="text-[10px] text-muted-foreground border border-border/40 rounded px-1 py-px flex-shrink-0">
+            {notification.sourceLabel}
+          </span>
+        )}
         {hasInteraction && (
           <span className="text-[10px] text-primary font-medium shrink-0">点击处理</span>
         )}
@@ -188,6 +193,14 @@ export function NotificationItemComponent({
               <span className={cn('text-sm font-semibold', !isRead && style.text)}>
                 {title}
               </span>
+              {notification.sourceLabel && (
+                <span
+                  className="inline-flex items-center rounded border border-border/40 bg-muted/30 px-1 py-px text-[10px] font-medium leading-none text-muted-foreground"
+                  data-testid="notification-source-label"
+                >
+                  {notification.sourceLabel}
+                </span>
+              )}
               {notification.errorSource && <ErrorSourceBadge source={notification.errorSource} />}
               {!isRead && (
                 <span className="h-2 w-2 rounded-full bg-primary flex-shrink-0" />
