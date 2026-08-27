@@ -200,6 +200,112 @@ def _local_degrade_report(
     },
     description="Trigger a review for a completed task and generate experience report",
 )
+def _build_review_pipeline_params(
+    review_id: str, task_id: str, summary: str, artifacts: list[str], metrics: dict[str, Any]
+) -> dict[str, Any]:
+    """构造 review_agent 管道的 chat.send_message 参数（含血缘与 state 预置）。"""
+    return {
+        "create": True,
+        "background": True,
+        "message": (
+            f"对任务 {task_id} 进行深度复盘。" + "\n" + f"任务摘要：{summary}"
+            + ("\n" + "产物：" + ", ".join(artifacts) if artifacts else "")
+            + ("\n" + f"指标：{json.dumps(metrics, ensure_ascii=False)}" if metrics else "")
+            + "\n" + "请产出结构化复盘报告（总结 / 教训 lessons / 建议 recommendations）。"
+        ),
+        "user_id": "review_system",
+        "state": {
+            "task.id": task_id,
+            "review.id": review_id,
+            "review.summary": summary,
+            "review.artifacts": artifacts,
+            "review.metrics": metrics,
+        },
+        # 血缘：根形式（系统组件，诚实声明复盘来源——不伪造父/默认 session）
+        "lineage": {"root": True, "origin": {"kind": "plugin", "source": "review"}},
+    }
+
+
+async def _register_review_pipeline_owner(chat: Any, task_id: str, pipeline_id: str) -> None:
+    """触发方登记（管道树数据链）：把新管道 id 记回任务管道 state。
+
+    复盘管道是任务管道的子管道——按 task.owned.<id>.* 键面写回
+    （与 task_submit 同款契约），前端任务树据此挂载；失败仅告警不影响复盘。
+    """
+    try:
+        await chat.call(
+            "send_message",
+            {
+                "pipeline_id": task_id,
+                "message": f"登记复盘管道（{pipeline_id}）。",
+                "user_id": "review_system",
+                "no_dispatch": True,
+                "state": {
+                    f"task.owned.{pipeline_id}.title": f"复盘 {task_id}",
+                    f"task.owned.{pipeline_id}.status": "running",
+                    f"task.owned.{pipeline_id}.created_at": _now_iso(),
+                    f"task.owned.{pipeline_id}.submitted_by": "review_system",
+                },
+            },
+        )
+    except Exception as exc:  # noqa: BLE001 — 登记失败不影响复盘
+        logger.warning(
+            "[Review] 复盘管道登记到任务管道失败（不影响执行）| task=%s | err=%s",
+            task_id,
+            exc,
+        )
+
+
+async def _dispatch_review_pipeline(
+    review_id: str, task_id: str, summary: str, artifacts: list[str], metrics: dict[str, Any]
+) -> dict[str, Any] | None:
+    """派发 review_agent 管道并落 running 报告，返回 running 响应或 None 走降级。
+
+    深度复盘经 chat.send_message 创建分支派发；派发成功 → 报告 running，
+    get_report 轮询真实完成才落 completed。chat 能力缺席/派发失败 → None。
+    """
+    try:
+        chat = plugin.get_capability("chat")
+    except KeyError:
+        return None
+    if chat is None:
+        return None
+
+    params = _build_review_pipeline_params(review_id, task_id, summary, artifacts, metrics)
+    try:
+        resp = await chat.call("send_message", params)
+        pipeline_id = str(resp.get("pipeline_id") or "") if isinstance(resp, dict) else ""
+    except Exception as exc:  # noqa: BLE001 — 派发失败降级，不崩复盘入口
+        logger.error("[Review] 复盘管道派发失败 review_id=%s: %s", review_id, exc)
+        pipeline_id = ""
+    if not pipeline_id:
+        return None
+
+    if task_id:
+        await _register_review_pipeline_owner(chat, task_id, pipeline_id)
+
+    _reports[review_id] = {
+        "review_id": review_id,
+        "task_id": task_id,
+        "summary": summary,
+        "artifacts": artifacts,
+        "metrics": metrics,
+        "lessons": [],
+        "recommendations": [],
+        "status": "running",
+        "mode": "pipeline",
+        "pipeline_id": pipeline_id,
+        "created_at": time.time(),
+    }
+    logger.info("[Review] 复盘管道已创建 review_id=%s pipeline_id=%s", review_id, pipeline_id)
+    return {
+        "review_id": review_id,
+        "status": "running",
+        "mode": "pipeline",
+        "pipeline_id": pipeline_id,
+    }
+
+
 async def trigger_review(
     task_id: str,
     summary: str,
@@ -218,101 +324,17 @@ async def trigger_review(
         - degraded (local_degrade): 降级产出基础报告（不报 completed，防轮询方误判）
     """
     review_id = f"review_{uuid.uuid4().hex[:8]}"
-    artifacts = artifacts or []
-    metrics = metrics or {}
+    artifacts_l = artifacts or []
+    metrics_l = metrics or {}
 
-    # ── GAP-1：深度复盘经 chat.send_message 起 review_agent 管道 ──
-    # 不再"启动即 completed（乐观，空 lessons）"：派发成功 → 报告 running，
-    # get_report 轮询复盘管道状态（pipeline-state 聚合）真实完成才落 completed。
-    # chat capability 缺席 / 派发失败 → local_degrade 兜底（保留既有降级语义）。
-    try:
-        chat = plugin.get_capability("chat")
-    except KeyError:
-        chat = None
-    if chat is not None:
-        params = {
-            "create": True,
-            "background": True,
-            "message": (
-                f"对任务 {task_id} 进行深度复盘。" + "\n" + f"任务摘要：{summary}"
-                + ("\n" + "产物：" + ", ".join(artifacts) if artifacts else "")
-                + ("\n" + f"指标：{json.dumps(metrics, ensure_ascii=False)}" if metrics else "")
-                + "\n" + "请产出结构化复盘报告（总结 / 教训 lessons / 建议 recommendations）。"
-            ),
-            "user_id": "review_system",
-            "state": {
-                "task.id": task_id,
-                "review.id": review_id,
-                "review.summary": summary,
-                "review.artifacts": artifacts,
-                "review.metrics": metrics,
-            },
-            # 血缘：根形式（系统组件，诚实声明复盘来源——不伪造父/默认 session）
-            "lineage": {"root": True, "origin": {"kind": "plugin", "source": "review"}},
-        }
-        try:
-            resp = await chat.call("send_message", params)
-            pipeline_id = (
-                str(resp.get("pipeline_id") or "") if isinstance(resp, dict) else ""
-            )
-        except Exception as exc:  # noqa: BLE001 — 派发失败降级，不崩复盘入口
-            logger.error(
-                "[Review] 复盘管道派发失败 review_id=%s: %s", review_id, exc
-            )
-            pipeline_id = ""
-        if pipeline_id:
-            # 触发方登记（管道树数据链）：复盘管道是任务管道的子管道——把新管道
-            # id 记回任务管道 state（task.owned.<id>.*，与 task_submit 同款契约），
-            # 前端任务树据此把复盘管道挂到被复盘任务下。
-            if task_id:
-                try:
-                    await chat.call(
-                        "send_message",
-                        {
-                            "pipeline_id": task_id,
-                            "message": f"登记复盘管道（{pipeline_id}）。",
-                            "user_id": "review_system",
-                            "no_dispatch": True,
-                            "state": {
-                                f"task.owned.{pipeline_id}.title": f"复盘 {task_id}",
-                                f"task.owned.{pipeline_id}.status": "running",
-                                f"task.owned.{pipeline_id}.created_at": _now_iso(),
-                                f"task.owned.{pipeline_id}.submitted_by": "review_system",
-                            },
-                        },
-                    )
-                except Exception as exc:  # noqa: BLE001 — 登记失败不影响复盘
-                    logger.warning(
-                        "[Review] 复盘管道登记到任务管道失败（不影响执行）| task=%s | err=%s",
-                        task_id,
-                        exc,
-                    )
-            _reports[review_id] = {
-                "review_id": review_id,
-                "task_id": task_id,
-                "summary": summary,
-                "artifacts": artifacts,
-                "metrics": metrics,
-                "lessons": [],
-                "recommendations": [],
-                "status": "running",
-                "mode": "pipeline",
-                "pipeline_id": pipeline_id,
-                "created_at": time.time(),
-            }
-            logger.info(
-                "[Review] 复盘管道已创建 review_id=%s pipeline_id=%s",
-                review_id,
-                pipeline_id,
-            )
-            return {
-                "review_id": review_id,
-                "status": "running",
-                "mode": "pipeline",
-                "pipeline_id": pipeline_id,
-            }
+    # ── GAP-1：深度复盘经 chat.send_message 起 review_agent 管道；
+    # 不再"启动即 completed（乐观，空 lessons）"；降级兜底语义见
+    # _dispatch_review_pipeline / _local_degrade_report。──
+    running = await _dispatch_review_pipeline(review_id, task_id, summary, artifacts_l, metrics_l)
+    if running is not None:
+        return running
 
-    report = _local_degrade_report(review_id, task_id, summary, artifacts, metrics)
+    report = _local_degrade_report(review_id, task_id, summary, artifacts_l, metrics_l)
     _reports[review_id] = report
     return {
         "review_id": review_id,
@@ -873,6 +895,42 @@ async def _reviews_add_attachments(review_id: str, body: dict[str, Any]) -> dict
         "HTTP endpoint handler for /ext/review_service/** (reviews domain 9 endpoints)"
     ),
 )
+async def _route_reviews_collection(
+    path: str, method: str, q: dict[str, str], raw_body: str, headers: dict[str, str] | None
+) -> dict[str, Any] | None:
+    """media-review 与集合级（create/list）路由，未命中返回 None。"""
+    if path == f"{_PREFIX}/media-review" and method == "POST":
+        # multipart（file + media_type）——handler 自产完整响应
+        return await _reviews_media_review(raw_body, headers)
+    if path == _PREFIX and method == "POST":
+        body = _decode_body(raw_body) or {}
+        return _ok(_json_response(await _reviews_create(body)))
+    if path == _PREFIX and method == "GET":
+        try:
+            limit = int(q["limit"]) if "limit" in q else 50
+        except (TypeError, ValueError):
+            limit = 50
+        return _ok(_json_response(await _reviews_list(task_id=q.get("task_id", ""), limit=limit)))
+    return None
+
+
+async def _route_review_item_actions(
+    rid: str, action: str, method: str, raw_body: str
+) -> dict[str, Any] | None:
+    """/{review_id}/{action} 动作表分发，未命中返回 None。"""
+    actions: dict[tuple[str, str], Any] = {
+        ("feedback", "POST"): lambda: _reviews_submit_feedback(rid, _decode_body(raw_body) or {}),
+        ("viewed", "POST"): lambda: _reviews_mark_viewed(rid),
+        ("cancel", "POST"): lambda: _reviews_cancel(rid, _decode_body(raw_body) or {}),
+        ("media-metadata", "GET"): lambda: _reviews_media_metadata(rid),
+        ("attachments", "POST"): lambda: _reviews_add_attachments(rid, _decode_body(raw_body) or {}),
+    }
+    fn = actions.get((action, method))
+    if fn is None:
+        return None
+    return _ok(_json_response(await fn()))
+
+
 async def http_handle(
     path: str = "",
     method: str = "GET",
@@ -888,33 +946,12 @@ async def http_handle(
     """
     del plugin_id
     q = query or {}
-
-    def _qint(key: str, default: int) -> int:
-        try:
-            return int(q[key]) if key in q else default
-        except (TypeError, ValueError):
-            return default
-
     try:
-        # POST /media-review（multipart：file + media_type）
-        # POST /media-review（multipart：file + media_type）——handler 自产完整响应
-        if path == f"{_PREFIX}/media-review" and method == "POST":
-            return await _reviews_media_review(raw_body, headers)
-        # POST ""（create）
-        if path == _PREFIX and method == "POST":
-            body = _decode_body(raw_body) or {}
-            return _ok(_json_response(await _reviews_create(body)))
-        # GET ""（list，query: task_id/limit）
-        if path == _PREFIX and method == "GET":
-            return _ok(
-                _json_response(
-                    await _reviews_list(
-                        task_id=q.get("task_id", ""),
-                        limit=_qint("limit", 50),
-                    )
-                )
-            )
-        # /{review_id} 系列
+        collection = await _route_reviews_collection(path, method, q, raw_body, headers)
+        if collection is not None:
+            return collection
+
+        # /{review_id} 系列：单级 GET 详情；二级动作表分发
         if path.startswith(_PREFIX + "/"):
             rest = path[len(_PREFIX) + 1 :]
             if "/" not in rest:
@@ -922,19 +959,9 @@ async def http_handle(
                     return _ok(_json_response(await _reviews_get(rest)))
             else:
                 rid, action = rest.split("/", 1)
-                if action == "feedback" and method == "POST":
-                    body = _decode_body(raw_body) or {}
-                    return _ok(_json_response(await _reviews_submit_feedback(rid, body)))
-                if action == "viewed" and method == "POST":
-                    return _ok(_json_response(await _reviews_mark_viewed(rid)))
-                if action == "cancel" and method == "POST":
-                    body = _decode_body(raw_body) or {}
-                    return _ok(_json_response(await _reviews_cancel(rid, body)))
-                if action == "media-metadata" and method == "GET":
-                    return _ok(_json_response(await _reviews_media_metadata(rid)))
-                if action == "attachments" and method == "POST":
-                    body = _decode_body(raw_body) or {}
-                    return _ok(_json_response(await _reviews_add_attachments(rid, body)))
+                routed = await _route_review_item_actions(rid, action, method, raw_body)
+                if routed is not None:
+                    return routed
 
         logger.warning("review http.handle: no route for path=%s method=%s", path, method)
         return _ok(_json_response({"error": "not found", "path": path}, 404))

@@ -105,6 +105,64 @@ class CheckpointManager:
             and ".." not in p.parts
         )
 
+    @staticmethod
+    def _rel_or_none(file_path: Path, base: Path) -> str | None:
+        """文件相对 base 的路径字符串；不在 base 下返回 None。"""
+        try:
+            return str(file_path.relative_to(base))
+        except ValueError:
+            return None
+
+    def _collect_workspace_files(self, workspace_path: Path) -> list[str]:
+        """枚举工作目录下应备份的文件（rglob 全量，跳过 ignore 规则）。
+
+        相对路径优先相对于 workspace 计算——workspace 可能是 project_root 的
+        worktree（兄弟目录而非子目录）；两者皆不在时用绝对路径兜底，不中断
+        备份流程。
+        """
+        collected: list[str] = []
+        for file_path in workspace_path.rglob("*"):
+            if not (file_path.is_file() and not self._should_ignore(file_path)):
+                continue
+            rel = self._rel_or_none(file_path, workspace_path)
+            if rel is None:
+                rel = self._rel_or_none(file_path, self.project_root)
+            collected.append(rel if rel is not None else str(file_path))
+        return collected
+
+    def _backup_one_file(
+        self,
+        checkpoint_path: Path,
+        backup_path: Path,
+        workspace_path: Path,
+        file_rel_path: str,
+    ) -> CheckpointFile | None:
+        """备份单个文件（workspace 解析优先、project_root 回退），失败返回 None 留痕。"""
+        # 先尝试从 workspace 解析（worktree 场景），再回退 project_root
+        original_file = workspace_path / file_rel_path
+        if not original_file.exists():
+            original_file = self.project_root / file_rel_path
+        if not original_file.exists():
+            return None
+
+        try:
+            checksum = self._calculate_checksum(original_file)
+
+            backup_file = backup_path / file_rel_path
+            backup_file.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(original_file, backup_file)
+
+            return CheckpointFile(
+                original_path=file_rel_path,
+                backup_path=str(backup_file.relative_to(checkpoint_path)),
+                checksum=checksum,
+                size=original_file.stat().st_size,
+                modified_at=datetime.fromtimestamp(original_file.stat().st_mtime, UTC).isoformat(),
+            )
+        except Exception as e:
+            logger.error(f"[CheckpointManager] 备份文件失败 | file={file_rel_path} | error={e}")
+            return None
+
     def create_checkpoint(
         self,
         task_id: str,
@@ -136,55 +194,13 @@ class CheckpointManager:
             self._save_manifest(checkpoint_path, checkpoint)
             return checkpoint
 
-        # 如果没有指定文件列表，备份整个工作目录
-        if files_to_backup is None:
-            files_to_backup = []
-            for file_path in workspace_path.rglob("*"):
-                if file_path.is_file() and not self._should_ignore(file_path):
-                    # 优先相对于 workspace 计算，因为 workspace 可能是
-                    # project_root 的 worktree（兄弟目录而非子目录），
-                    # 此时相对于 project_root 会抛 ValueError。
-                    try:
-                        rel = file_path.relative_to(workspace_path)
-                    except ValueError:
-                        try:
-                            rel = file_path.relative_to(self.project_root)
-                        except ValueError:
-                            # 既不在 workspace 也不在 project_root 下，
-                            # 用绝对路径兜底，避免中断整个备份流程
-                            rel = file_path
-                    files_to_backup.append(str(rel))
+        # 没有指定文件列表 → 备份整个工作目录
+        targets = files_to_backup if files_to_backup is not None else self._collect_workspace_files(workspace_path)
 
-        # 备份文件
-        for file_rel_path in files_to_backup:
-            # 先尝试从 workspace 解析（worktree 场景），再回退 project_root
-            original_file = workspace_path / file_rel_path
-            if not original_file.exists():
-                original_file = self.project_root / file_rel_path
-            if not original_file.exists():
-                continue
-
-            try:
-                # 计算校验和
-                checksum = self._calculate_checksum(original_file)
-
-                # 复制到备份目录
-                backup_file = backup_path / file_rel_path
-                backup_file.parent.mkdir(parents=True, exist_ok=True)
-                shutil.copy2(original_file, backup_file)
-
-                # 记录文件信息
-                checkpoint.files.append(
-                    CheckpointFile(
-                        original_path=file_rel_path,
-                        backup_path=str(backup_file.relative_to(checkpoint_path)),
-                        checksum=checksum,
-                        size=original_file.stat().st_size,
-                        modified_at=datetime.fromtimestamp(original_file.stat().st_mtime, UTC).isoformat(),
-                    )
-                )
-            except Exception as e:
-                logger.error(f"[CheckpointManager] 备份文件失败 | file={file_rel_path} | error={e}")
+        for file_rel_path in targets:
+            record = self._backup_one_file(checkpoint_path, backup_path, workspace_path, file_rel_path)
+            if record is not None:
+                checkpoint.files.append(record)
 
         self._save_manifest(checkpoint_path, checkpoint)
 

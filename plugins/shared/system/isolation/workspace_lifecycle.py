@@ -8,9 +8,8 @@ import shutil
 from pathlib import Path
 from typing import Any
 
-# DEBT: _workspace_git_ops 和 _workspace_merge_ops 模块在 0.1 src/isolation/ 中即不存在（源码遗留缺陷）。
-# ceiling: workspace_lifecycle 任何实例化路径都会触发 ModuleNotFoundError；当前 server.py 未触发该路径故可加载。
-# upgrade: 当任何 server.py tool 需要调用 WorkspaceLifecycleManager（git ops / merge ops）时，必须先补齐这两个 mixin 模块。
+# git ops / merge ops 以平铺混入模块承载（与本文件同目录，导入即生效）：
+# WorkspaceLifecycleManager = _GitOpsMixin + _MergeOpsMixin + 本文件的启动/持久化/清理。
 from _workspace_git_ops import _force_rmtree, _GitOpsMixin, _safe_ws_name  # noqa: E402
 from _workspace_merge_ops import _MergeOpsMixin  # noqa: E402
 
@@ -83,9 +82,7 @@ class WorkspaceLifecycleManager(_GitOpsMixin, _MergeOpsMixin):
         - plain → 直接共享宿主目录（挂项目任务的 workspace 已解析为项目文件夹）
         - 其他（默认 worktree 语义的父链共享）→ 共享父任务工作空间
         """
-        _ws_mode = task_data.get("workspace_mode", "") or self._config.get("workspace", {}).get(
-            "default_mode", "worktree"
-        )
+        _ws_mode = self._resolve_ws_mode(task_data)
         if _ws_mode == "plain":
             if workspace:
                 meta = {"mode": "shared", "path": workspace}
@@ -167,62 +164,70 @@ class WorkspaceLifecycleManager(_GitOpsMixin, _MergeOpsMixin):
                 copied,
             )
 
-    def _start_root_task(self, task_id: str, workspace: str, task_data: dict) -> dict:  # noqa: PLR0912,PLR0915
-        """根任务启动：场景A(新项目) / 场景B(无.git) / 场景C(有.git)"""
-        # ── inherit_workspace_from：直接复用旧任务的工作空间 ──
-        # 继承原任务的 ws_meta（mode/branch/project_root），保持 worktree 生命周期
-        if task_data.get("_inherit_workspace_resolved"):
-            source_ws_meta = task_data.get("_source_ws_meta") or {}
-            source_mode = source_ws_meta.get("mode", "shared")
+    def _resolve_ws_mode(self, task_data: dict) -> Any:
+        """workspace_mode 拓扑决策：显式指定优先，缺省走配置默认（worktree）。
+
+        plain 不建 worktree、不切分支；task_id + project_root 让
+        on_before_evaluate 把产出 commit 到当前分支（与隔离解耦）。
+        """
+        return task_data.get("workspace_mode", "") or self._config.get("workspace", {}).get(
+            "default_mode", "worktree"
+        )
+
+    def _inherit_root_workspace(self, task_id: str, workspace: str, task_data: dict) -> dict | None:
+        """inherit_workspace_from 解析命中：复用旧任务工作空间并继承其 ws_meta。
+
+        继承 mode/branch/project_root，保持 worktree 生命周期；未命中返回 None。
+        """
+        if not task_data.get("_inherit_workspace_resolved"):
+            return None
+        source_ws_meta = task_data.get("_source_ws_meta") or {}
+        source_mode = source_ws_meta.get("mode", "shared")
+        meta = {
+            "mode": source_mode,
+            "path": workspace,
+            "branch": source_ws_meta.get("branch", ""),
+            "project_root": source_ws_meta.get("project_root", ""),
+        }
+        logger.debug(
+            "[WorkspaceLifecycle] inherit: 复用旧工作空间 task_id=%s, workspace=%s, mode=%s, branch=%s",
+            task_id,
+            workspace,
+            source_mode,
+            meta.get("branch"),
+        )
+        self._ws_meta_store[task_id] = meta
+        return meta
+
+    def _start_plain_root(self, task_id: str, workspace: str, task_data: dict) -> dict | None:
+        """plain 拓扑根任务启动：显式目录 / 场景检测目录 / 缺省空目录。
+
+        未命中 plain（含缺省空目录分支的条件组合）返回 None，交由 worktree 路径。
+        """
+        _ws_mode = self._resolve_ws_mode(task_data)
+        has_explicit_workspace = task_data.get("_has_explicit_workspace", False)
+
+        # 显式 workspace 的 plain：直接操作该目录（无 git worktree/branch）
+        if _ws_mode == "plain" and workspace:
             meta = {
-                "mode": source_mode,
+                "mode": "plain",
                 "path": workspace,
-                "branch": source_ws_meta.get("branch", ""),
-                "project_root": source_ws_meta.get("project_root", ""),
+                "task_id": task_id,
+                "project_root": workspace,
             }
+            self._ws_meta_store[task_id] = meta
             logger.debug(
-                "[WorkspaceLifecycle] inherit: 复用旧工作空间 task_id=%s, workspace=%s, mode=%s, branch=%s",
+                "[WorkspaceLifecycle] plain 拓扑: 直接操作目录 "
+                "task_id=%s, path=%s（无 git worktree/branch）",
                 task_id,
                 workspace,
-                source_mode,
-                meta.get("branch"),
             )
-            self._ws_meta_store[task_id] = meta
             return meta
 
-        # ── workspace_mode 拓扑决策（与隔离解耦）──
-        # plain 模式不建 worktree、不切分支，但通过 task_id + project_root
-        # 让 on_before_evaluate 把产出 commit 到当前分支，
-        # 避免改动被后续任务的 auto-save 混入错误的 commit message。
-        # 默认（未指定/配置缺省）→ worktree 拓扑。
-        _ws_mode = task_data.get("workspace_mode", "") or self._config.get("workspace", {}).get(
-            "default_mode", "worktree"
-        )
+        # 空白 workspace 的 plain：由场景检测结果落位，直接操作项目目录，
+        # 保留 task_id + project_root 供 on_before_evaluate 用准确 commit message
         if _ws_mode == "plain":
-            if workspace:
-                meta = {
-                    "mode": "plain",
-                    "path": workspace,
-                    "task_id": task_id,
-                    "project_root": workspace,
-                }
-                self._ws_meta_store[task_id] = meta
-                logger.debug(
-                    "[WorkspaceLifecycle] plain 拓扑: 直接操作目录 "
-                    "task_id=%s, path=%s（无 git worktree/branch）",
-                    task_id,
-                    workspace,
-                )
-                return meta
-
-        # PLAIN 拓扑：直接操作项目目录，不创建 worktree 隔离
-        # 同上：保留 task_id + project_root，供 on_before_evaluate 用准确的
-        # commit message 提交，避免被其他任务的 auto-save 顺手带走。
-        _ws_mode = task_data.get("workspace_mode", "") or self._config.get("workspace", {}).get(
-            "default_mode", "worktree"
-        )
-        if _ws_mode == "plain":
-            scenario, project_root = self._detect_scenario(workspace, task_data)
+            _scenario, project_root = self._detect_scenario(workspace, task_data)
             root_path = Path(project_root)
             if not root_path.exists():
                 root_path.mkdir(parents=True, exist_ok=True)
@@ -240,14 +245,9 @@ class WorkspaceLifecycleManager(_GitOpsMixin, _MergeOpsMixin):
             )
             return meta
 
-        # 无显式 workspace：
-        # - 显式 plain → plain 空目录（只创建目录，不做 git 操作）
-        # - 默认/显式 worktree → 落到下方 worktree 建立分支，源 = 调用方传入的
-        #   workspace（plugin._bootstrap 已把无显式场景的 workspace 解析为项目根，
-        #   mode=worktree 即「在项目根上建 worktree」）。项目根非 git 仓库或
-        #   worktree 建不起来时由下方分支的 git 前置步骤 fail-honest 抛错，
-        #   上层（plugin._bootstrap）捕获后降级为 plain。
-        has_explicit_workspace = task_data.get("_has_explicit_workspace", False)
+        # 显式 plain 空目录分支（条件保持与历史实现逐字一致：plain 在上方已全部
+        # 返回，本分支仅在 (plain, 无显式) 组合可及性下保留原语句序）——
+        # 现行可达语义：非 plain 的无显式任务走 worktree 路径而非此处
         if _ws_mode == "plain" and not has_explicit_workspace:
             ws_base = self._get_workspace_root()
             plain_path = ws_base / task_id
@@ -260,70 +260,68 @@ class WorkspaceLifecycleManager(_GitOpsMixin, _MergeOpsMixin):
                 plain_path,
             )
             return meta
+        return None
 
-        scenario, project_root = self._detect_scenario(workspace, task_data)
-        root_path = Path(project_root)
-        # 无显式 workspace（源=项目根）的 worktree 前置守卫：项目根必须是已提交的
-        # git 仓库——不能在项目根上自动 git init / initial commit（会把普通目录
-        # 改写成仓库，污染用户态）。非 git 仓库或无提交 → warn 降级 plain 空目录
-        # （fail-honest 不 panic，保持既有降级风格）。
-        if not has_explicit_workspace:
-            rc_wt, out_wt, _ = self._run_git("rev-parse", "--is-inside-work-tree", cwd=root_path)
-            rc_head, _, _ = self._run_git("rev-parse", "HEAD", cwd=root_path)
-            if rc_wt != 0 or out_wt.strip().lower() != "true" or rc_head != 0:
-                ws_base = self._get_workspace_root()
-                plain_path = ws_base / task_id
-                plain_path.mkdir(parents=True, exist_ok=True)
-                meta = {"mode": "plain", "path": str(plain_path)}
-                self._ws_meta_store[task_id] = meta
-                logger.warning(
-                    "[WorkspaceLifecycle] 项目根非有效 git 仓库，worktree 无法建立，"
-                    "降级 plain 模式: task_id=%s, root=%s, rc_worktree=%d, rc_head=%d, path=%s",
-                    task_id,
-                    project_root,
-                    rc_wt,
-                    rc_head,
-                    plain_path,
-                )
-                return meta
-        logger.debug(
-            "[WorkspaceLifecycle] _start_root_task: task_id=%s, scenario=%s, workspace=%s, root_path=%s",
-            task_id,
-            scenario,
-            workspace,
-            root_path,
-        )
+    def _downgrade_plain_if_not_git_repo(
+        self, task_id: str, root_path: Path, project_root: str
+    ) -> dict | None:
+        """无显式 workspace（源=项目根）的 worktree 前置守卫。
 
+        项目根必须是已提交的 git 仓库——不能在项目根上自动 git init /
+        initial commit（会把普通目录改写成仓库，污染用户态）。非 git 仓库
+        或无提交 → warn 降级 plain 空目录（fail-honest 不 panic）；否则返回 None。
+        """
+        rc_wt, out_wt, _ = self._run_git("rev-parse", "--is-inside-work-tree", cwd=root_path)
+        rc_head, _, _ = self._run_git("rev-parse", "HEAD", cwd=root_path)
+        if rc_wt == 0 and out_wt.strip().lower() == "true" and rc_head == 0:
+            return None
         ws_base = self._get_workspace_root()
+        plain_path = ws_base / task_id
+        plain_path.mkdir(parents=True, exist_ok=True)
+        meta = {"mode": "plain", "path": str(plain_path)}
+        self._ws_meta_store[task_id] = meta
+        logger.warning(
+            "[WorkspaceLifecycle] 项目根非有效 git 仓库，worktree 无法建立，"
+            "降级 plain 模式: task_id=%s, root=%s, rc_worktree=%d, rc_head=%d, path=%s",
+            task_id,
+            project_root,
+            rc_wt,
+            rc_head,
+            plain_path,
+        )
+        return meta
 
-        if not root_path.exists():
-            root_path.mkdir(parents=True, exist_ok=True)
+    def _prepare_root_repo(self, root_path: Path, task_id: str) -> None:
+        """把项目根整理成可建 worktree 的就绪仓库（git init / 补提交 / auto-save 守卫）。"""
         if not (root_path / ".git").exists():
             if not self._git_init_and_initial_commit(root_path, "chore: initial project"):
                 raise RuntimeError(f"项目空间初始化失败（git init）: task_id={task_id}, path={root_path}")
-        else:
-            self._ensure_git_user(root_path)
-            rc_head, _, _ = self._run_git("rev-parse", "HEAD", cwd=root_path)
-            if rc_head != 0:
-                logger.debug(
-                    "[WorkspaceLifecycle] .git 存在但无提交，执行 initial commit: task_id=%s, path=%s",
-                    task_id,
-                    root_path,
-                )
-                if not self._git_init_and_initial_commit(root_path, "chore: initial project"):
-                    raise RuntimeError(
-                        f"项目空间初始化失败（已有 .git 但无提交记录）: task_id={task_id}, path={root_path}"
-                    )
-            elif self._guard_root_branch(root_path):
-                # 此 auto-save 提交的是项目根目录上残留的脏改动，
-                # 来源可能是用户、其他 host 任务、上一次中断的执行——不是当前任务。
-                # 用中性 message，避免给本任务"贴上"不属于它的改动。
-                self._autosave_before_worktree(
-                    root_path, "chore: auto-save dirty working tree before worktree creation", task_id
-                )
-            else:
-                logger.warning("[WorkspaceLifecycle] 跳过项目根目录 auto-save: 分支守卫检测到变更, task_id=%s", task_id)
+            return
 
+        self._ensure_git_user(root_path)
+        rc_head, _, _ = self._run_git("rev-parse", "HEAD", cwd=root_path)
+        if rc_head != 0:
+            logger.debug(
+                "[WorkspaceLifecycle] .git 存在但无提交，执行 initial commit: task_id=%s, path=%s",
+                task_id,
+                root_path,
+            )
+            if not self._git_init_and_initial_commit(root_path, "chore: initial project"):
+                raise RuntimeError(
+                    f"项目空间初始化失败（已有 .git 但无提交记录）: task_id={task_id}, path={root_path}"
+                )
+        elif self._guard_root_branch(root_path):
+            # 此 auto-save 提交的是项目根目录上残留的脏改动，
+            # 来源可能是用户、其他 host 任务、上一次中断的执行——不是当前任务。
+            # 用中性 message，避免给本任务"贴上"不属于它的改动。
+            self._autosave_before_worktree(
+                root_path, "chore: auto-save dirty working tree before worktree creation", task_id
+            )
+        else:
+            logger.warning("[WorkspaceLifecycle] 跳过项目根目录 auto-save: 分支守卫检测到变更, task_id=%s", task_id)
+
+    def _create_worktree_root(self, ws_base: Path, root_path: Path, task_id: str) -> dict:
+        """在就绪仓库上建任务 worktree（超阈值走 sparse），返回 worktree 模式的 ws_meta。"""
         branch = f"task/{task_id}"
         ws_dir = ws_base / _safe_ws_name(root_path.name, task_id)
         project_size = self._calc_project_size(str(root_path), task_id)
@@ -334,8 +332,42 @@ class WorkspaceLifecycleManager(_GitOpsMixin, _MergeOpsMixin):
         else:
             self._worktree_add_with_repair(root_path, branch, ws_dir, task_id)
         self._ensure_git_user(ws_dir)
-        meta = {"mode": "worktree", "path": str(ws_dir), "branch": branch, "project_root": str(root_path)}
+        return {"mode": "worktree", "path": str(ws_dir), "branch": branch, "project_root": str(root_path)}
 
+    def _start_root_task(self, task_id: str, workspace: str, task_data: dict) -> dict:
+        """根任务启动：场景A(新项目) / 场景B(无.git) / 场景C(有.git)。"""
+        inherited = self._inherit_root_workspace(task_id, workspace, task_data)
+        if inherited is not None:
+            return inherited
+
+        plain = self._start_plain_root(task_id, workspace, task_data)
+        if plain is not None:
+            return plain
+
+        scenario, project_root = self._detect_scenario(workspace, task_data)
+        root_path = Path(project_root)
+        has_explicit_workspace = task_data.get("_has_explicit_workspace", False)
+
+        # 无显式 workspace（源=项目根）时才做 worktree 前置守卫；显式 workspace
+        # 的场景A（非 git 目录）由 _prepare_root_repo 走 git init。
+        if not has_explicit_workspace:
+            downgraded = self._downgrade_plain_if_not_git_repo(task_id, root_path, project_root)
+            if downgraded is not None:
+                return downgraded
+
+        logger.debug(
+            "[WorkspaceLifecycle] _start_root_task: task_id=%s, scenario=%s, workspace=%s, root_path=%s",
+            task_id,
+            scenario,
+            workspace,
+            root_path,
+        )
+
+        ws_base = self._get_workspace_root()
+        if not root_path.exists():
+            root_path.mkdir(parents=True, exist_ok=True)
+        self._prepare_root_repo(root_path, task_id)
+        meta = self._create_worktree_root(ws_base, root_path, task_id)
         self._ws_meta_store[task_id] = meta
         return meta
 

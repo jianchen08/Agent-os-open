@@ -349,7 +349,60 @@ class _MergeOpsMixin:
 
     # ── 10. 合并验证 ─────────────────────────────────────────────
 
-    def _verify_merge_result(  # noqa: PLR0912
+    @staticmethod
+    def _first_missing_paths(proj_path: Path, expected: list[str]) -> list[str]:
+        """按声明序找出前若干个未落地的目标文件（上限 10 个早退）。"""
+        missing: list[str] = []
+        for rel_str in expected:
+            if not (proj_path / rel_str).exists():
+                missing.append(rel_str)
+            if len(missing) >= 10:
+                break
+        return missing
+
+    @staticmethod
+    def _same_name_sibling_exists(target: Path) -> bool:
+        """模糊匹配：同名目录下搜索同名文件（git 输出编码不一致时路径不完全匹配）。"""
+        parent = target.parent
+        target_name = target.name
+        if not (parent.exists() and target_name):
+            return False
+        try:
+            return any(existing.name == target_name for existing in parent.iterdir())
+        except OSError:
+            return False
+
+    def _missing_branch_diff_files(self, branch: str, proj_path: Path) -> list[str]:
+        """对 git_merge 分支 diff 应达清单做磁盘核验，返回前 10 个缺失项。
+
+        --diff-filter=AMRC 只校验应到达目标的文件（新增/修改/重命名新路径/复制），
+        排除删除(D)。否则任务正确删除的废弃文件合并后本就不存在，
+        会被 exists() 误判为「文件未到达目标」，导致重组/清理类任务必然合并失败。
+        """
+        rc, diff_out, _ = self._run_git(
+            "-c",
+            "core.quotepath=false",
+            "diff",
+            "--name-only",
+            "--diff-filter=AMRC",
+            branch + "~1",
+            branch,
+            cwd=proj_path,
+        )
+        if rc != 0 or not diff_out.strip():
+            return []
+        branch_files = set(diff_out.strip().splitlines())
+        missing: list[str] = []
+        for f in branch_files:
+            f_stripped = f.strip().strip('"')
+            target = proj_path / f_stripped
+            if not target.exists() and not self._same_name_sibling_exists(target):
+                missing.append(f_stripped)
+            if len(missing) >= 10:
+                break
+        return missing
+
+    def _verify_merge_result(
         self,
         workspace: str,
         project_root: str,
@@ -369,56 +422,14 @@ class _MergeOpsMixin:
 
         merged_files = merge_result.get("merged_files", [])
         if method == "copy" and merged_files:
-            missing = []
-            for rel_str in merged_files:
-                target_file = proj_path / rel_str
-                if not target_file.exists():
-                    missing.append(rel_str)
-                if len(missing) >= 10:
-                    break
+            missing = self._first_missing_paths(proj_path, merged_files)
             if missing:
                 return False, f"copy_merge 文件验证失败: {len(missing)} 个文件未到达目标，前几个: {missing[:5]}"
 
         if method == "git_merge" and branch:
-            # --diff-filter=AMRC 只校验应到达目标的文件（新增/修改/重命名新路径/复制），
-            # 排除删除(D)。否则任务正确删除的废弃文件合并后本就不存在，
-            # 会被 exists() 误判为「文件未到达目标」，导致重组/清理类任务必然合并失败。
-            rc, diff_out, _ = self._run_git(
-                "-c",
-                "core.quotepath=false",
-                "diff",
-                "--name-only",
-                "--diff-filter=AMRC",
-                branch + "~1",
-                branch,
-                cwd=proj_path,
-            )
-            if rc == 0 and diff_out.strip():
-                branch_files = set(diff_out.strip().splitlines())
-                missing = []
-                for f in branch_files:
-                    f_stripped = f.strip().strip('"')
-                    target = proj_path / f_stripped
-                    if not target.exists():
-                        # 模糊匹配：在同名目录下搜索文件名包含目标名的文件
-                        # 处理 git 输出编码不一致导致路径不完全匹配的情况
-                        parent = target.parent
-                        target_name = target.name
-                        found = False
-                        if parent.exists() and target_name:
-                            try:
-                                for existing in parent.iterdir():
-                                    if existing.name == target_name:
-                                        found = True
-                                        break
-                            except OSError:
-                                pass
-                        if not found:
-                            missing.append(f_stripped)
-                    if len(missing) >= 10:
-                        break
-                if missing:
-                    return False, f"git_merge 文件验证失败: {len(missing)} 个文件未到达目标"
+            missing = self._missing_branch_diff_files(branch, proj_path)
+            if missing:
+                return False, f"git_merge 文件验证失败: {len(missing)} 个文件未到达目标"
 
         return True, "验证通过"
 

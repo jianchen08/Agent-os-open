@@ -1766,6 +1766,162 @@ async def _dispatch_task_ac(task_id: str, parts: list[str], method: str) -> dict
     raise APIError(404, "API_NOTF_2004", f"task ac route not found: /{'/'.join(parts)}")
 
 
+async def _route_projects_domain(
+    sub: str, method: str, q: dict[str, str], raw_body: str, caller: dict[str, Any]
+) -> dict[str, Any] | None:
+    """projects 域路由（/ext/task_service/projects 后的 sub），未命中返回 None。
+
+    GET/POST 列表与创建（"" 或 "/"）；/{pid} GET/DELETE；/{pid}/{action} POST
+    （auto-execute/pause/resume）。
+    """
+    if sub in ("", "/") and method == "GET":
+        limit = _qint(q, "limit", 20)
+        return _ok(_json_response(await list_projects(
+            limit=limit if limit is not None else 20,
+            offset=_qint(q, "offset", 0) or 0,
+            page=_qint(q, "page", None),
+            status=_qopt(q, "status"),
+            session_id=_qopt(q, "session_id"),
+            _user=caller,
+        )))
+    if sub in ("", "/") and method == "POST":
+        body = _decode_body(raw_body)
+        return _ok(_json_response(await create_project(body, caller)))
+    if sub.startswith("/") and "/" not in sub[1:]:
+        pid = sub[1:]
+        if method == "GET":
+            return _ok(_json_response(await get_project(pid, caller)))
+        if method == "DELETE":
+            return _ok(_json_response(await delete_project(pid, q, caller)))
+    elif sub.startswith("/") and "/" in sub[1:]:
+        pid, action = sub[1:].split("/", 1)
+        project_actions: dict[tuple[str, str], Any] = {
+            ("auto-execute", "POST"): lambda: toggle_auto_execute(pid, _decode_body(raw_body), caller),
+            ("pause", "POST"): lambda: pause_project(pid, caller),
+            ("resume", "POST"): lambda: resume_project(pid, caller),
+        }
+        handler = project_actions.get((action, method))
+        if handler is not None:
+            return _ok(_json_response(await handler()))
+    return None
+
+
+async def _route_tasks_collection(
+    sub: str, method: str, q: dict[str, str], raw_body: str, caller: dict[str, Any]
+) -> dict[str, Any] | None:
+    """tasks 域字面量集合路由（列表/创建/debug/root），未命中返回 None。"""
+    if sub in ("", "/") and method == "GET":
+        limit = _qint(q, "limit", 20)
+        skip = _qint(q, "skip", None) if "skip" in q else None
+        return _ok(_json_response(_pydantic_to_dict(await list_tasks(
+            status=_qopt(q, "status"),
+            priority=_qint(q, "priority", None),
+            session_id=_qopt(q, "session_id"),
+            limit=limit if limit is not None else 20,
+            offset=_qint(q, "offset", 0) or 0,
+            skip=skip,
+            _user=caller,
+        ))))
+    if sub in ("", "/") and method == "POST":
+        return _ok(_json_response(_pydantic_to_dict(await create_task(
+            TaskCreate(**_decode_body(raw_body)), caller,
+        ))))
+    if sub == "/debug/all" and method == "GET":
+        return _ok(_json_response(await get_tasks_debug(
+            skip=_qint(q, "skip", 0) or 0,
+            limit=_qint(q, "limit", 100) or 100,
+            sort_by=_qopt(q, "sort_by") or "created_at",
+            sort_order=_qopt(q, "sort_order") or "desc",
+            status=_qopt(q, "status"),
+            session_id=_qopt(q, "session_id"),
+        )))
+    if sub == "/root" and method == "POST":
+        return _ok(_json_response(_pydantic_to_dict(await create_root_task(
+            TaskRootCreate(**_decode_body(raw_body)), caller,
+        ))))
+    return None
+
+
+# /{task_id}/{action} 路由说明：submit/pause/resume/cancel 为 (method,action)
+# 分发表成员；evaluate 退役恒 410 在表前单列；cancel 需请求体故取 raw_body。
+
+
+async def _route_task_actions(
+    tid: str, action: str, method: str, raw_body: str, caller: dict[str, Any]
+) -> dict[str, Any] | None:
+    """派发 /{task_id}/{action} 二段路径，未命中返回 None。"""
+    if action == "evaluate" and method == "POST":
+        # 0.2 评估闸门已插件化：评估由 task_evaluate 工具承载
+        # （plugins/shared/tools/task_evaluate），本端点退役恒 410，
+        # 明确报错替代旧"评估引擎不可用"降级假成功。
+        raise APIError(
+            status_code=410,
+            error_code="API_GONE_2006",
+            message=(
+                f"任务 {tid} 的 HTTP 评估端点已下线"
+                "（0.2 评估已插件化）：请改用 task_evaluate 工具执行评估"
+            ),
+        )
+
+    async def _submit() -> dict[str, Any]:
+        return _ok(_json_response(_pydantic_to_dict(await submit_task(tid, caller))))
+
+    async def _pause() -> dict[str, Any]:
+        return _ok(_json_response(await pause_task(tid, caller)))
+
+    async def _resume() -> dict[str, Any]:
+        return _ok(_json_response(await resume_task(tid, caller)))
+
+    async def _cancel() -> dict[str, Any]:
+        return _ok(_json_response(await cancel_task(tid, _decode_body(raw_body), caller)))
+
+    handlers: dict[tuple[str, str], Any] = {
+        ("submit", "POST"): _submit,
+        ("pause", "POST"): _pause,
+        ("resume", "POST"): _resume,
+        ("cancel", "POST"): _cancel,
+    }
+    handler = handlers.get((action, method))
+    if handler is None:
+        return None
+    return await handler()
+
+
+async def _route_tasks_domain(
+    sub: str, method: str, q: dict[str, str], raw_body: str, caller: dict[str, Any]
+) -> dict[str, Any] | None:
+    """tasks 域路由（/ext/task_service/tasks 后的 sub），未命中返回 None。"""
+    collection = await _route_tasks_collection(sub, method, q, raw_body, caller)
+    if collection is not None:
+        return collection
+
+    # /{task_id} 系列
+    if not (sub.startswith("/") and len(sub) > 1):
+        return None
+    parts = sub[1:].split("/")
+    tid = parts[0]
+    # 单级 /{task_id}（前端 UPDATE 用 PATCH）
+    if len(parts) == 1:
+        if method == "GET":
+            return _ok(_json_response(_pydantic_to_dict(get_task(tid, caller))))
+        if method == "PATCH":
+            return _ok(_json_response(_pydantic_to_dict(await update_task(
+                tid, TaskUpdate(**_decode_body(raw_body)), caller,
+            ))))
+        if method == "DELETE":
+            return _ok(_json_response(await delete_task(tid, caller)))
+        return None
+    # 二段以上：action 路由优先；phase/ac 为子资源树分发
+    routed = await _route_task_actions(tid, parts[1], method, raw_body, caller)
+    if routed is not None:
+        return routed
+    if parts[1] == "phase":
+        return _ok(_json_response(await _dispatch_task_phase(tid, parts[2:], method)))
+    if parts[1] == "ac":
+        return _ok(_json_response(await _dispatch_task_ac(tid, parts[2:], method)))
+    return None
+
+
 async def handle_http(
     path: str,
     method: str,
@@ -1776,120 +1932,24 @@ async def handle_http(
     """http.handle 按 path 分发（tasks 域 21 端点 + projects 域 7 端点）。
 
     返回 ToolExecutionResult{success, data}；业务异常转带 status 的响应。
+    域内细粒度匹配委托 _route_projects_domain/_route_tasks_domain。
     """
     q = query or {}
     caller = _resolve_caller(headers)
 
     try:
-        # ── projects 域（/ext/task_service/projects...）──
         if path.startswith(f"{_PREFIX}/projects"):
-            sub = path[len(f"{_PREFIX}/projects"):]
-            if sub in ("", "/") and method == "GET":
-                limit = _qint(q, "limit", 20)
-                return _ok(_json_response(await list_projects(
-                    limit=limit if limit is not None else 20,
-                    offset=_qint(q, "offset", 0) or 0,
-                    page=_qint(q, "page", None),
-                    status=_qopt(q, "status"),
-                    session_id=_qopt(q, "session_id"),
-                    _user=caller,
-                )))
-            if sub in ("", "/") and method == "POST":
-                body = _decode_body(raw_body)
-                return _ok(_json_response(await create_project(body, caller)))
-            if sub.startswith("/") and "/" not in sub[1:]:
-                pid = sub[1:]
-                if method == "GET":
-                    return _ok(_json_response(await get_project(pid, caller)))
-                if method == "DELETE":
-                    return _ok(_json_response(await delete_project(pid, q, caller)))
-            elif sub.startswith("/") and "/" in sub[1:]:
-                pid, action = sub[1:].split("/", 1)
-                if action == "auto-execute" and method == "POST":
-                    body = _decode_body(raw_body)
-                    return _ok(_json_response(await toggle_auto_execute(pid, body, caller)))
-                if action == "pause" and method == "POST":
-                    return _ok(_json_response(await pause_project(pid, caller)))
-                if action == "resume" and method == "POST":
-                    return _ok(_json_response(await resume_project(pid, caller)))
-
-        # ── tasks 域（/ext/task_service/tasks...）──
+            resp = await _route_projects_domain(
+                path[len(f"{_PREFIX}/projects"):], method, q, raw_body, caller
+            )
+            if resp is not None:
+                return resp
         if path.startswith(f"{_PREFIX}/tasks"):
-            sub = path[len(f"{_PREFIX}/tasks"):]
-            # 顶层路由
-            if sub in ("", "/") and method == "GET":
-                limit = _qint(q, "limit", 20)
-                skip = _qint(q, "skip", None) if "skip" in q else None
-                return _ok(_json_response(_pydantic_to_dict(await list_tasks(
-                    status=_qopt(q, "status"),
-                    priority=_qint(q, "priority", None),
-                    session_id=_qopt(q, "session_id"),
-                    limit=limit if limit is not None else 20,
-                    offset=_qint(q, "offset", 0) or 0,
-                    skip=skip,
-                    _user=caller,
-                ))))
-            if sub in ("", "/") and method == "POST":
-                return _ok(_json_response(_pydantic_to_dict(await create_task(
-                    TaskCreate(**_decode_body(raw_body)), caller,
-                ))))
-            if sub == "/debug/all" and method == "GET":
-                return _ok(_json_response(await get_tasks_debug(
-                    skip=_qint(q, "skip", 0) or 0,
-                    limit=_qint(q, "limit", 100) or 100,
-                    sort_by=_qopt(q, "sort_by") or "created_at",
-                    sort_order=_qopt(q, "sort_order") or "desc",
-                    status=_qopt(q, "status"),
-                    session_id=_qopt(q, "session_id"),
-                )))
-            if sub == "/root" and method == "POST":
-                return _ok(_json_response(_pydantic_to_dict(await create_root_task(
-                    TaskRootCreate(**_decode_body(raw_body)), caller,
-                ))))
-            # /{task_id} 系列
-            if sub.startswith("/") and len(sub) > 1:
-                rest = sub[1:]
-                parts = rest.split("/")
-                tid = parts[0]
-                # 单级 /{task_id}
-                if len(parts) == 1:
-                    if method == "GET":
-                        return _ok(_json_response(_pydantic_to_dict(get_task(tid, caller))))
-                    if method == "PATCH":  # 前端 UPDATE 用 PATCH
-                        return _ok(_json_response(_pydantic_to_dict(await update_task(
-                            tid, TaskUpdate(**_decode_body(raw_body)), caller,
-                        ))))
-                    if method == "DELETE":
-                        return _ok(_json_response(await delete_task(tid, caller)))
-                # /{task_id}/submit|evaluate|pause|resume|cancel
-                if len(parts) == 2:
-                    action = parts[1]
-                    if action == "submit" and method == "POST":
-                        return _ok(_json_response(_pydantic_to_dict(await submit_task(tid, caller))))
-                    if action == "evaluate" and method == "POST":
-                        # 0.2 评估闸门已插件化：评估由 task_evaluate 工具承载
-                        # （plugins/shared/tools/task_evaluate），本端点退役恒 410，
-                        # 明确报错替代旧"评估引擎不可用"降级假成功。
-                        raise APIError(
-                            status_code=410,
-                            error_code="API_GONE_2006",
-                            message=(
-                                f"任务 {tid} 的 HTTP 评估端点已下线"
-                                "（0.2 评估已插件化）：请改用 task_evaluate 工具执行评估"
-                            ),
-                        )
-                    if action == "pause" and method == "POST":
-                        return _ok(_json_response(await pause_task(tid, caller)))
-                    if action == "resume" and method == "POST":
-                        return _ok(_json_response(await resume_task(tid, caller)))
-                    if action == "cancel" and method == "POST":
-                        body = _decode_body(raw_body)
-                        return _ok(_json_response(await cancel_task(tid, body, caller)))
-                # task_phase：/{task_id}/phase... 与 /{task_id}/ac...
-                if len(parts) >= 2 and parts[1] == "phase":
-                    return _ok(_json_response(await _dispatch_task_phase(tid, parts[2:], method)))
-                if len(parts) >= 2 and parts[1] == "ac":
-                    return _ok(_json_response(await _dispatch_task_ac(tid, parts[2:], method)))
+            resp = await _route_tasks_domain(
+                path[len(f"{_PREFIX}/tasks"):], method, q, raw_body, caller
+            )
+            if resp is not None:
+                return resp
 
         logger.warning("tasks http.handle: no route for path=%s method=%s", path, method)
         return _ok(_json_response({"error": "not found", "path": path}, 404))

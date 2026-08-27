@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import functools
 import logging
 import os
 import sys
@@ -583,6 +584,75 @@ def _api_error_response(exc: Exception) -> dict[str, Any]:
     },
     description="HTTP endpoint handler for /ext/llm_service/** (thinking-mode + config/llm domains)",
 )
+async def _handle_thinking_mode(path: str, method: str, raw_body: str) -> dict[str, Any]:
+    """thinking-mode 域 6 端点：字面量 (sub,method) 表 + 两个 GET 前缀参数路由。"""
+    import routes_thinking_mode as rtm  # noqa: PLC0415
+
+    sub = path[len(_THINKING_MODE_PREFIX):]
+    literal = {
+        ("GET", "/healthz"): rtm.health,
+        ("GET", "/models"): rtm.list_models,
+        ("POST", "/switch"): functools.partial(rtm.switch_mode, _decode_body(raw_body)),
+        ("POST", "/recommendations"): functools.partial(
+            rtm.recommendations, _decode_body(raw_body) or None
+        ),
+    }
+    handler = literal.get((method, sub))
+    if handler is not None:
+        return _ok(_json_response(handler()))
+    prefixed_get = (
+        ("/models/", rtm.get_model_info),
+        ("/check/", rtm.check_support),
+    )
+    for prefix, fn in prefixed_get:
+        if method == "GET" and sub.startswith(prefix):
+            return _ok(_json_response(fn(sub[len(prefix):])))
+    logger.warning("llm http.handle: no thinking-mode route for sub=%s method=%s", sub, method)
+    return _ok(_json_response({"error": "not found", "path": path}, 404))
+
+
+async def _handle_config_llm(path: str, method: str, raw_body: str) -> dict[str, Any]:
+    """config/llm 段 13 端点：字面量 (sub,method) 表 + providers/models 参数族。"""
+    import routes_llm_config as rlc  # noqa: PLC0415
+
+    sub = path[len(_CONFIG_LLM_PREFIX):]  # "" / "/providers" / "/models/xxx" ...
+    literal = {
+        ("GET", ""): rlc.get_llm_config,
+        ("GET", "/providers"): rlc.get_providers,
+        ("POST", "/providers"): functools.partial(rlc.add_provider, _decode_body(raw_body)),
+        ("GET", "/provider-types"): rlc.get_provider_types,
+        ("GET", "/models"): rlc.get_models,
+        ("POST", "/models"): functools.partial(rlc.add_model, _decode_body(raw_body)),
+        ("GET", "/defaults"): rlc.get_defaults,
+        ("PUT", "/defaults"): functools.partial(rlc.save_defaults, _decode_body(raw_body)),
+    }
+    handler = literal.get((method, sub))
+    if handler is not None:
+        return _ok(_json_response(handler()))
+
+    # 参数族：/providers/{id}/remote-models（先判，防被 {id} 前缀吞）、{id} 写删
+    if method == "GET" and sub.startswith("/providers/") and sub.endswith("/remote-models"):
+        provider_id = sub[len("/providers/"):-len("/remote-models")]
+        return _ok(_json_response(rlc.get_remote_models(provider_id)))
+    parametric = (
+        ("/providers/", "PUT", True, rlc.update_provider),
+        ("/providers/", "DELETE", False, rlc.delete_provider),
+        ("/models/", "PUT", True, rlc.update_model),
+        ("/models/", "DELETE", False, rlc.delete_model),
+    )
+    for prefix, want_method, needs_body, fn in parametric:
+        if method != want_method or not sub.startswith(prefix):
+            continue
+        arg = sub[len(prefix):]
+        return (
+            _ok(_json_response(fn(arg, _decode_body(raw_body))))
+            if needs_body
+            else _ok(_json_response(fn(arg)))
+        )
+    logger.warning("llm http.handle: no config/llm route for sub=%s method=%s", sub, method)
+    return _ok(_json_response({"error": "not found", "path": path}, 404))
+
+
 async def http_handle(
     path: str = "",
     method: str = "GET",
@@ -597,73 +667,14 @@ async def http_handle(
     config/llm/** 逐项对齐（前端消费同一响应形态）；auth 由 http_endpoints
     auth=user 声明（dispatcher 层），handler 不读 _user。业务异常
     （status_code 属性）转对应 HTTP 状态，错误 body 形态与 FastAPI 版一致
-    （``{"detail": ...}``）。
+    （``{"detail": ...}``）。域内匹配委托 _handle_thinking_mode/_handle_config_llm。
     """
+    del plugin_id, query
     try:
-        # ── thinking-mode 域 ──
         if path.startswith(_THINKING_MODE_PREFIX):
-            import routes_thinking_mode as rtm  # noqa: PLC0415
-
-            sub = path[len(_THINKING_MODE_PREFIX):]
-            if sub == "/healthz" and method == "GET":
-                return _ok(_json_response(rtm.health()))
-            if sub == "/models" and method == "GET":
-                return _ok(_json_response(rtm.list_models()))
-            if sub.startswith("/models/") and method == "GET":
-                model_name = sub[len("/models/"):]
-                return _ok(_json_response(rtm.get_model_info(model_name)))
-            if sub.startswith("/check/") and method == "GET":
-                model_name = sub[len("/check/"):]
-                return _ok(_json_response(rtm.check_support(model_name)))
-            if sub == "/switch" and method == "POST":
-                return _ok(_json_response(rtm.switch_mode(_decode_body(raw_body))))
-            if sub == "/recommendations" and method == "POST":
-                recs_body = _decode_body(raw_body) or None
-                return _ok(_json_response(rtm.recommendations(recs_body)))
-
-            logger.warning("llm http.handle: no thinking-mode route for sub=%s method=%s", sub, method)
-            return _ok(_json_response({"error": "not found", "path": path}, 404))
-
-        # ── config/llm 段 ──
+            return await _handle_thinking_mode(path, method, raw_body)
         if path.startswith(_CONFIG_LLM_PREFIX):
-            import routes_llm_config as rlc  # noqa: PLC0415
-
-            sub = path[len(_CONFIG_LLM_PREFIX):]  # "" / "/providers" / "/models/xxx" ...
-            if sub == "" and method == "GET":
-                return _ok(_json_response(rlc.get_llm_config()))
-            if sub == "/providers" and method == "GET":
-                return _ok(_json_response(rlc.get_providers()))
-            if sub == "/providers" and method == "POST":
-                return _ok(_json_response(rlc.add_provider(_decode_body(raw_body))))
-            if sub == "/provider-types" and method == "GET":
-                return _ok(_json_response(rlc.get_provider_types()))
-            if sub.startswith("/providers/") and sub.endswith("/remote-models") and method == "GET":
-                provider_id = sub[len("/providers/"):-len("/remote-models")]
-                return _ok(_json_response(rlc.get_remote_models(provider_id)))
-            if sub.startswith("/providers/") and method == "PUT":
-                provider_id = sub[len("/providers/"):]
-                return _ok(_json_response(rlc.update_provider(provider_id, _decode_body(raw_body))))
-            if sub.startswith("/providers/") and method == "DELETE":
-                provider_id = sub[len("/providers/"):]
-                return _ok(_json_response(rlc.delete_provider(provider_id)))
-            if sub == "/models" and method == "GET":
-                return _ok(_json_response(rlc.get_models()))
-            if sub == "/models" and method == "POST":
-                return _ok(_json_response(rlc.add_model(_decode_body(raw_body))))
-            if sub.startswith("/models/") and method == "PUT":
-                model_id = sub[len("/models/"):]
-                return _ok(_json_response(rlc.update_model(model_id, _decode_body(raw_body))))
-            if sub.startswith("/models/") and method == "DELETE":
-                model_id = sub[len("/models/"):]
-                return _ok(_json_response(rlc.delete_model(model_id)))
-            if sub == "/defaults" and method == "GET":
-                return _ok(_json_response(rlc.get_defaults()))
-            if sub == "/defaults" and method == "PUT":
-                return _ok(_json_response(rlc.save_defaults(_decode_body(raw_body))))
-
-            logger.warning("llm http.handle: no config/llm route for sub=%s method=%s", sub, method)
-            return _ok(_json_response({"error": "not found", "path": path}, 404))
-
+            return await _handle_config_llm(path, method, raw_body)
         return _ok(_json_response({"error": "not found", "path": path}, 404))
     except Exception as exc:  # noqa: BLE001
         if hasattr(exc, "status_code"):

@@ -453,6 +453,27 @@ class _GitOpsMixin:
         extra = frozenset(ws_cfg.get("worktree_exclude_patterns", []))
         return _SKIP_DIRS | extra
 
+    @staticmethod
+    def _dir_files_size(subtree: Path, root: Path, skip: frozenset[str]) -> int:
+        """统计单个子树内计入的文件大小（rglob 展开）。
+
+        目录不可读或单文件 stat 失败 → 跳过该部分继续累计（保留已扫到的量）。
+        """
+        size = 0
+        try:
+            for f in subtree.rglob("*"):
+                try:
+                    if not f.is_file():
+                        continue
+                    if any(p in skip for p in f.relative_to(root).parts):
+                        continue
+                    size += f.stat().st_size
+                except Exception:
+                    continue
+        except (OSError, PermissionError):
+            return size
+        return size
+
     def _calc_project_size(self, project_root: str, task_id: str) -> int:
         """计算项目工作文件总大小（不含 .git），两轮扫描策略 + 增量缓存"""
         root = Path(project_root)
@@ -472,18 +493,7 @@ class _GitOpsMixin:
                     with contextlib.suppress(Exception):
                         total += item.stat().st_size
                 elif item.is_dir():
-                    try:
-                        for f in item.rglob("*"):
-                            try:
-                                if not f.is_file():
-                                    continue
-                                if any(p in skip for p in f.relative_to(root).parts):
-                                    continue
-                                total += f.stat().st_size
-                            except Exception:
-                                continue
-                    except (OSError, PermissionError):
-                        continue
+                    total += self._dir_files_size(item, root, skip)
         except (OSError, PermissionError) as exc:
             logger.warning("[WorkspaceLifecycle] 项目大小计算中断: %s", exc)
         git_dir = root / ".git"
