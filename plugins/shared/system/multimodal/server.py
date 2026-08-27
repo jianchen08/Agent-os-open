@@ -14,7 +14,6 @@ HTTP 面（audio + files 域）：
 from __future__ import annotations
 
 import base64
-import json
 import logging
 import os
 import sys
@@ -22,10 +21,23 @@ from typing import Any
 
 sys.path.insert(0, os.path.dirname(__file__))
 
+# http.handle 响应封装 + multipart 解析（内核 HttpHandleResponse/ToolExecutionResult
+# 样板）：公共实现 plugins/shared/http_json.py，经共享层自举裸名导入。
+# `_error` = protocol_error：本插件上传面协议级错误契约（success:true 包
+# HTTP status + 结构化错误体），参数序与 review 一致统一为 (message, status)。
+_SHARED_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+if _SHARED_ROOT not in sys.path:
+    sys.path.insert(0, _SHARED_ROOT)
 # capabilities.py 的 get_capability() / get_adapter_for_model() 已改为可选导入：
 # 先尝试 from llm_config / from router_factory（本地未提供时 ImportError），
 # 找不到则走 fallback（返回默认空能力 / DefaultAdapter）。
 from capabilities import ModelCapabilityRegistry  # noqa: E402
+from http_json import (  # noqa: E402
+    json_response as _json_response,
+    ok as _ok,
+    parse_multipart as _parse_multipart,
+    protocol_error as _error,
+)
 from mm_types import AttachmentInfo, MediaType  # noqa: E402
 
 from agentos_plugin_sdk import AgentOSPlugin  # noqa: E402
@@ -168,71 +180,11 @@ async def multimodal_transcribe(audio_base64: str, mime_type: str = "audio/webm"
 
 
 # ── HTTP 端点（http.handle）—— 前端 /ext/multimodal_service/** 入口 ────────
-# audio 1 + files 2 端点自持。返回
-# ToolExecutionResult{success,data}，data 为 HttpHandleResponse{status,headers,
-# body,body_encoding}（body base64）——与既有 17 插件 http.handle 契约一致。
-
-
-def _json_response(payload: Any, status: int = 200) -> dict[str, Any]:
-    """把任意 JSON 可序列化对象包成内核期望的 HttpHandleResponse（body base64）。"""
-    body_str = json.dumps(payload, default=str, ensure_ascii=False)
-    body_b64 = base64.b64encode(body_str.encode("utf-8")).decode("ascii")
-    return {
-        "status": status,
-        "headers": {"Content-Type": "application/json; charset=utf-8"},
-        "body": body_b64,
-        "body_encoding": "base64",
-    }
-
-
-def _ok(data: Any) -> dict[str, Any]:
-    """成功响应：{success, data}（ToolExecutionResult 契约）。"""
-    return {"success": True, "data": data}
-
-
-def _error(status: int, message: str) -> dict[str, Any]:
-    """错误响应：{success:true, data:{status, body}}（插件全权控制响应形态）。"""
-    return _ok(_json_response({"error": {"code": str(status), "message": message}}, status))
-
-
-def _parse_multipart(content_type: str, body_bytes: bytes) -> dict[str, Any]:
-    """解析 multipart/form-data（内核透传的 raw_body base64 解码后的字节）。
-
-    返回 {字段名: 值}；文件字段值为 {filename, content_type, data(bytes)}，
-    普通字段为 str。用 email.parser 解析（标准库，无外部依赖）——
-    与 channel_api server._parse_multipart 同构。
-    """
-    import email  # noqa: PLC0415
-    from email.policy import default as default_policy  # noqa: PLC0415
-
-    header = f"Content-Type: {content_type}\r\n\r\n".encode()
-    msg = email.message_from_bytes(header + body_bytes, policy=default_policy)
-    fields: dict[str, Any] = {}
-    if not msg.is_multipart():
-        return fields
-    parts = msg.get_payload()
-    if not isinstance(parts, list):  # pragma: no cover —— 防御 typeshed
-        return fields
-    for part in parts:
-        if not isinstance(part, email.message.Message):  # pragma: no cover
-            continue
-        name = part.get_param("name", header="content-disposition")
-        if not isinstance(name, str):
-            continue
-        filename = part.get_filename()
-        if filename is not None:
-            data = part.get_payload(decode=True) or b""
-            fields[name] = {
-                "filename": filename,
-                "content_type": part.get_content_type(),
-                "data": data,
-            }
-        else:
-            payload = part.get_payload(decode=True)
-            fields[name] = (
-                payload.decode("utf-8", errors="replace") if isinstance(payload, bytes) else ""
-            )
-    return fields
+# 响应封装/请求解析助手（json_response/_ok/_error(protocol_error)/_parse_multipart）：
+# 公共实现 plugins/shared/http_json.py（文件头已导入）。
+# `_error` 参数序统一为 (message, status)——原本地实现为反序 (status, message)。
+# 返回 ToolExecutionResult{success,data}，data 为 HttpHandleResponse{status,
+# headers,body,body_encoding}（body base64）——与既有 17 插件 http.handle 契约一致。
 
 
 def _files_capabilities_payload(model_name: str) -> dict[str, Any]:
@@ -284,7 +236,7 @@ async def http_handle(
         try:
             body_bytes = base64.b64decode(raw_body) if raw_body else b""
         except Exception as exc:  # noqa: BLE001
-            return _error(400, f"invalid upload body: {exc}")
+            return _error(f"invalid upload body: {exc}", 400)
 
         content_type = ""
         for k, v in (headers or {}).items():
@@ -292,16 +244,16 @@ async def http_handle(
                 content_type = str(v)
                 break
         if "multipart/form-data" not in content_type:
-            return _error(400, "asr requires multipart/form-data")
+            return _error("asr requires multipart/form-data", 400)
 
         try:
             fields = _parse_multipart(content_type, body_bytes)
         except Exception as exc:  # noqa: BLE001  # pragma: no cover —— email.parser 对任意字节几乎不抛
-            return _error(400, f"multipart parse failed: {exc}")  # pragma: no cover
+            return _error(f"multipart parse failed: {exc}", 400)  # pragma: no cover
 
         file_field = fields.get("file")
         if not isinstance(file_field, dict) or not file_field.get("data"):
-            return _error(400, "missing or empty 'file' field")
+            return _error("missing or empty 'file' field", 400)
 
         from asr import get_asr_service  # noqa: PLC0415
 
@@ -345,7 +297,7 @@ async def http_handle(
         }))
 
     logger.warning("http.handle: no route for path=%s method=%s", path, method)
-    return _error(404, "not found")
+    return _error("not found", 404)
 
 
 if __name__ == "__main__":

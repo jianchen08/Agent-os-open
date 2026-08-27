@@ -20,9 +20,7 @@ plugin.json ``http_endpoints`` 声明（/ext/llm_service/thinking-mode/** 与
 from __future__ import annotations
 
 import asyncio
-import base64
 import contextlib
-import json
 import logging
 import os
 import sys
@@ -32,10 +30,20 @@ from typing import Any
 
 sys.path.insert(0, os.path.dirname(__file__))
 
+# http.handle 响应封装（内核 HttpHandleResponse/ToolExecutionResult 样板）：
+# 公共实现 plugins/shared/http_json.py，经共享层自举裸名导入。
+_SHARED_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+if _SHARED_ROOT not in sys.path:
+    sys.path.insert(0, _SHARED_ROOT)
 from _config_models import (  # noqa: E402
     ModelConfigLoaderShim,
     get_config,
     set_config,
+)
+from http_json import (  # noqa: E402
+    decode_body as _decode_body,
+    json_response as _json_response,
+    ok as _ok,
 )
 from streaming import StreamTranslator, map_finish_reason  # noqa: E402
 
@@ -544,43 +552,7 @@ async def llm_health_check(model: str) -> dict[str, Any]:
         return {"healthy": False, "model": model, "error": str(exc)}
 
 
-# ══ http.handle 响应封装（内核 HttpHandleResponse 约定，与 workspace/monitoring 同款）══
-
-
-def _json_response(payload: Any, status: int = 200) -> dict[str, Any]:
-    """包成内核期望的 HttpHandleResponse（body base64）。"""
-    body_str = json.dumps(payload, default=str, ensure_ascii=False)
-    body_b64 = base64.b64encode(body_str.encode("utf-8")).decode("ascii")
-    return {
-        "status": status,
-        "headers": {"Content-Type": "application/json; charset=utf-8"},
-        "body": body_b64,
-        "body_encoding": "base64",
-    }
-
-
-def _ok(data: Any) -> dict[str, Any]:
-    return {"success": True, "data": data}
-
-
-def _error(message: str, status: int = 503) -> dict[str, Any]:
-    return {"success": False, "error": message, "data": _json_response({"error": message}, status)}
-
-
-def _decode_body(raw_body: str) -> dict[str, Any]:
-    """解码 http.handle 的 raw_body（base64 或明文 JSON）为 dict。"""
-    if not raw_body:
-        return {}
-    try:
-        try:
-            decoded = base64.b64decode(raw_body).decode("utf-8")
-            if not decoded.lstrip().startswith(("{", "[")):
-                decoded = raw_body
-        except Exception:  # noqa: BLE001
-            decoded = raw_body
-        return json.loads(decoded) if decoded.strip() else {}
-    except json.JSONDecodeError as exc:
-        raise ValueError(f"invalid JSON body: {exc}") from exc
+# ══ http.handle 响应封装：公共实现 plugins/shared/http_json.py（文件头已导入）══
 
 
 # ══ 域分发（thinking-mode + config/llm）══

@@ -162,32 +162,12 @@ impl AppState {
         }
     }
 
+    /// 指定 config、其余字段取默认值的构造器（`..Self::new()` 基底收敛，
+    /// 加字段只改 [`AppState::new`] 一处）。
     pub fn with_config(config: serde_json::Value) -> Self {
         Self {
             config,
-            manifests: Arc::new(RwLock::new(Vec::new())),
-            capability_registry: None,
-            pipeline_config: Arc::new(PipelineConfig {
-                name: "default".to_string(),
-                loop_bodies: Vec::new(),
-                checkpoint: Default::default(),
-            }),
-            step_library: Arc::new(StepLibrary::default()),
-            invoker: None,
-            store: None,
-            db: None,
-            project_root: None,
-            enabled_plugin_ids: Arc::new(RwLock::new(std::collections::HashSet::new())),
-            session: None,
-            inbound_router: None,
-            http_handler: None,
-            metrics: None,
-            plugin_dirs: Arc::new(HashMap::new()),
-            config_center: None,
-            plugin_scopes: Arc::new(PluginScopeRegistry::new()),
-            widget_bindings: None,
-            contract_states: Arc::new(crate::contract::ContractLedger::new()),
-            kernel_capability_contracts: None,
+            ..Self::new()
         }
     }
 
@@ -231,6 +211,8 @@ impl AppState {
             "routes": {},
         });
 
+        // 注入面字段覆盖基底默认；其余（session/http_handler/metrics/plugin_dirs/
+        // config_center 等）经 `..Self::new()` 收敛，加字段只改 [`AppState::new`] 一处。
         Self {
             config,
             manifests: Arc::new(RwLock::new(manifests)),
@@ -239,19 +221,9 @@ impl AppState {
             step_library,
             invoker: Some(invoker),
             store: Some(store),
-            db: None,
             project_root: Some(project_root),
             enabled_plugin_ids: Arc::new(RwLock::new(enabled_plugin_ids)),
-            session: None,
-            inbound_router: None,
-            http_handler: None,
-            metrics: None,
-            plugin_dirs: Arc::new(HashMap::new()),
-            config_center: None,
-            plugin_scopes: Arc::new(PluginScopeRegistry::new()),
-            widget_bindings: None,
-            contract_states: Arc::new(crate::contract::ContractLedger::new()),
-            kernel_capability_contracts: None,
+            ..Self::new()
         }
     }
 

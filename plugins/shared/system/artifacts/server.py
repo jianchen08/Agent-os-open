@@ -16,7 +16,6 @@ plugin.json ``http_endpoints`` 声明（/ext/artifacts/**，auth:user）。
 from __future__ import annotations
 
 import base64
-import json
 import logging
 import os
 import sys
@@ -51,86 +50,16 @@ async def _on_load(params: dict[str, Any]) -> None:
     logger.info("artifacts 插件已加载（制品 + 批注域 HTTP 面）")
 
 
-# ══ http.handle 响应封装（内核 HttpHandleResponse 约定，与 agent_manager 同款）══
-
-
-def _json_response(payload: Any, status: int = 200) -> dict[str, Any]:
-    """包成内核期望的 HttpHandleResponse（body base64）。"""
-    body_str = json.dumps(payload, default=str, ensure_ascii=False)
-    body_b64 = base64.b64encode(body_str.encode("utf-8")).decode("ascii")
-    return {
-        "status": status,
-        "headers": {"Content-Type": "application/json; charset=utf-8"},
-        "body": body_b64,
-        "body_encoding": "base64",
-    }
-
-
-def _ok(data: Any) -> dict[str, Any]:
-    return {"success": True, "data": data}
-
-
-def _error(message: str, status: int = 503) -> dict[str, Any]:
-    return {"success": False, "error": message, "data": _json_response({"error": message}, status)}
-
-
-def _decode_body(raw_body: str) -> dict[str, Any]:
-    """解码 http.handle 的 raw_body（base64 或明文 JSON）为 dict。"""
-    if not raw_body:
-        return {}
-    decoded = raw_body
-    try:
-        attempt = base64.b64decode(raw_body).decode("utf-8")
-        if attempt.lstrip().startswith(("{", "[")):
-            decoded = attempt
-    except (ValueError, UnicodeDecodeError):
-        pass
-    try:
-        parsed = json.loads(decoded) if decoded.strip() else {}
-    except json.JSONDecodeError as exc:
-        raise ValueError(f"invalid JSON body: {exc}") from exc
-    return parsed if isinstance(parsed, dict) else {}
-
-
-def _parse_multipart(content_type: str, body_bytes: bytes) -> dict[str, Any]:
-    """解析 multipart/form-data（内核透传的 raw_body base64 解码后的字节）。
-
-    返回 {字段名: 值}；文件字段值为 {filename, content_type, data(bytes)}，
-    普通字段为 str。用 email.parser 解析（标准库，无需外部依赖）。
-    """
-    import email  # noqa: PLC0415
-    from email.policy import default as default_policy  # noqa: PLC0415
-
-    # 构造一个完整 multipart 消息让 email 解析
-    header = f"Content-Type: {content_type}\r\n\r\n".encode()
-    msg = email.message_from_bytes(header + body_bytes, policy=default_policy)
-    fields: dict[str, Any] = {}
-    if not msg.is_multipart():
-        return fields
-    parts = msg.get_payload()
-    if not isinstance(parts, list):  # pragma: no cover —— 防御 typeshed（multipart 时恒 list）
-        return fields
-    for part in parts:
-        if not isinstance(part, email.message.Message):  # pragma: no cover —— 同上防御
-            continue
-        name = part.get_param("name", header="content-disposition")
-        if not isinstance(name, str):
-            continue
-        filename = part.get_filename()
-        if filename is not None:
-            # 文件字段
-            data = part.get_payload(decode=True) or b""
-            fields[name] = {
-                "filename": filename,
-                "content_type": part.get_content_type(),
-                "data": data,
-            }
-        else:
-            # 普通字段
-            payload = part.get_payload(decode=True)
-            fields[name] = payload.decode("utf-8", errors="replace") if isinstance(payload, bytes) else ""
-    return fields
-
+# http.handle 响应封装（内核 HttpHandleResponse/ToolExecutionResult 样板）+
+# multipart 解析：公共实现 plugins/shared/http_json.py——与上方 tenant_data
+# 同一共享层自举，裸名导入（文件头同款 noqa: E402）。
+from http_json import (  # noqa: E402
+    decode_body as _decode_body,
+    error as _error,
+    json_response as _json_response,
+    ok as _ok,
+    parse_multipart as _parse_multipart,
+)
 
 # ══ 多模态文件存储单例 + 上传 ══
 

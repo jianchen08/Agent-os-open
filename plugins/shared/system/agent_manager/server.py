@@ -27,7 +27,6 @@ from __future__ import annotations
 
 import base64
 import hashlib
-import json
 import logging
 import os
 import re
@@ -45,6 +44,18 @@ plugin = AgentOSPlugin("agent_manager")
 
 sys.path.insert(0, os.path.dirname(__file__))
 
+# http.handle 响应封装（内核 HttpHandleResponse/ToolExecutionResult 样板）：
+# 公共实现 plugins/shared/http_json.py，经共享层自举裸名导入。
+_SHARED_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+if _SHARED_ROOT not in sys.path:
+    sys.path.insert(0, _SHARED_ROOT)
+from http_json import (  # noqa: E402
+    decode_body as _decode_body,
+    error as _error,
+    json_response as _json_response,
+    ok as _ok,
+)
+
 # ── 目录定位：AGENTOS_CONFIG_ROOT（内核启动写入，sidecar 继承进程环境）优先；
 #    回退 __file__ 上溯项目根（与 context_build/task_form 同款防御）。──
 _PLUGIN_DIR = Path(__file__).resolve().parent
@@ -60,26 +71,6 @@ def _agents_dir() -> Path:
     if root:
         return Path(root) / "agents"
     return _PROJECT_ROOT / "config" / "agents"
-
-
-def _json_response(payload: Any, status: int = 200) -> dict[str, Any]:
-    """包成内核期望的 HttpHandleResponse（body base64）。"""
-    body_str = json.dumps(payload, default=str, ensure_ascii=False)
-    body_b64 = base64.b64encode(body_str.encode("utf-8")).decode("ascii")
-    return {
-        "status": status,
-        "headers": {"Content-Type": "application/json; charset=utf-8"},
-        "body": body_b64,
-        "body_encoding": "base64",
-    }
-
-
-def _ok(data: Any) -> dict[str, Any]:
-    return {"success": True, "data": data}
-
-
-def _error(message: str, status: int = 503) -> dict[str, Any]:
-    return {"success": False, "error": message, "data": _json_response({"error": message}, status)}
 
 
 # ══ 定位与扫描（routes.rs collect_yaml_files / resolve_agent_yaml_path +
@@ -363,24 +354,6 @@ def _require_admin(headers: dict[str, str] | None) -> tuple[int, str] | None:
 # ══ http.handle 分发（/ext/agent_manager/** 入口）══
 
 _CONFIG_PATH_RE = re.compile(r"^/ext/agent_manager/agents/(?P<id>[^/]+)/config$")
-
-
-def _decode_body(raw_body: str) -> dict[str, Any]:
-    """解码 http.handle 的 raw_body（base64 或明文 JSON）为 dict。"""
-    if not raw_body:
-        return {}
-    decoded = raw_body
-    try:
-        attempt = base64.b64decode(raw_body).decode("utf-8")
-        if attempt.lstrip().startswith(("{", "[")):
-            decoded = attempt
-    except (ValueError, UnicodeDecodeError):
-        pass
-    try:
-        parsed = json.loads(decoded) if decoded.strip() else {}
-    except json.JSONDecodeError as exc:
-        raise ValueError(f"invalid JSON body: {exc}") from exc
-    return parsed if isinstance(parsed, dict) else {}
 
 
 @plugin.tool(

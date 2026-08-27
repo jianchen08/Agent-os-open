@@ -17,8 +17,6 @@ agent_manager/monitoring 同款），plugin.json ``http_endpoints`` 声明
 
 from __future__ import annotations
 
-import base64
-import json
 import logging
 import os
 import subprocess
@@ -30,6 +28,18 @@ sys.path.insert(0, os.path.dirname(__file__))
 _SYSTEM_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 if _SYSTEM_DIR not in sys.path:
     sys.path.insert(0, _SYSTEM_DIR)
+
+# http.handle 响应封装（内核 HttpHandleResponse/ToolExecutionResult 样板）：
+# 公共实现 plugins/shared/http_json.py，经共享层自举裸名导入。
+_SHARED_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+if _SHARED_ROOT not in sys.path:
+    sys.path.insert(0, _SHARED_ROOT)
+from http_json import (  # noqa: E402
+    decode_body as _decode_body,
+    error as _error,
+    json_response as _json_response,
+    ok as _ok,
+)
 
 # 直接导入同目录老代码
 from workspace_service import WorkspaceService, get_workspace_service, set_state_reader  # noqa: E402
@@ -70,45 +80,7 @@ async def _on_unload(params: dict[str, Any]) -> None:
     logger.info("工作空间服务已卸载")
 
 
-# ══ http.handle 响应封装（内核 HttpHandleResponse 约定，与 agent_manager 同款）══
-
-
-def _json_response(payload: Any, status: int = 200) -> dict[str, Any]:
-    """包成内核期望的 HttpHandleResponse（body base64）。"""
-    body_str = json.dumps(payload, default=str, ensure_ascii=False)
-    body_b64 = base64.b64encode(body_str.encode("utf-8")).decode("ascii")
-    return {
-        "status": status,
-        "headers": {"Content-Type": "application/json; charset=utf-8"},
-        "body": body_b64,
-        "body_encoding": "base64",
-    }
-
-
-def _ok(data: Any) -> dict[str, Any]:
-    return {"success": True, "data": data}
-
-
-def _error(message: str, status: int = 503) -> dict[str, Any]:
-    return {"success": False, "error": message, "data": _json_response({"error": message}, status)}
-
-
-def _decode_body(raw_body: str) -> dict[str, Any]:
-    """解码 http.handle 的 raw_body（base64 或明文 JSON）为 dict。"""
-    if not raw_body:
-        return {}
-    decoded = raw_body
-    try:
-        attempt = base64.b64decode(raw_body).decode("utf-8")
-        if attempt.lstrip().startswith(("{", "[")):
-            decoded = attempt
-    except (ValueError, UnicodeDecodeError):
-        pass
-    try:
-        parsed = json.loads(decoded) if decoded.strip() else {}
-    except json.JSONDecodeError as exc:
-        raise ValueError(f"invalid JSON body: {exc}") from exc
-    return parsed if isinstance(parsed, dict) else {}
+# ══ http.handle 响应封装：公共实现 plugins/shared/http_json.py（文件头已导入）══
 
 
 # ══ workspaces 域 ══

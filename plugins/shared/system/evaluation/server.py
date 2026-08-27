@@ -9,9 +9,8 @@
 
 from __future__ import annotations
 
-import base64
-import json
 import os
+import sys
 import time
 import uuid
 from typing import Any
@@ -21,6 +20,17 @@ import yaml
 from agentos_plugin_sdk import AgentOSPlugin
 
 plugin = AgentOSPlugin("evaluation_service")
+
+# http.handle 响应封装（内核 HttpHandleResponse/ToolExecutionResult 样板）：
+# 公共实现 plugins/shared/http_json.py，经共享层自举裸名导入。
+_SHARED_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+if _SHARED_ROOT not in sys.path:
+    sys.path.insert(0, _SHARED_ROOT)
+from http_json import (  # noqa: E402
+    error as _error,
+    json_response as _json_response,
+    ok as _ok,
+)
 
 # ── HTTP 端点（http.handle）—— 前端 /ext/evaluation_service/metrics 入口 ──────
 # 内核 http_dispatcher 透传：dispatcher 把 HttpHandleRequest（method/path/raw_body/
@@ -50,28 +60,6 @@ def _project_root() -> str:
             break
         cur = parent
     return os.getcwd()
-
-
-def _json_response(payload: Any, status: int = 200) -> dict[str, Any]:
-    """把任意 JSON 可序列化对象包成内核期望的 HttpHandleResponse（body base64）。"""
-    body_str = json.dumps(payload, default=str, ensure_ascii=False)
-    body_b64 = base64.b64encode(body_str.encode("utf-8")).decode("ascii")
-    return {
-        "status": status,
-        "headers": {"Content-Type": "application/json; charset=utf-8"},
-        "body": body_b64,
-        "body_encoding": "base64",
-    }
-
-
-def _ok(data: Any) -> dict[str, Any]:
-    """成功响应：{success, data}（ToolExecutionResult 契约）。"""
-    return {"success": True, "data": data}
-
-
-def _error(message: str, status: int = 503) -> dict[str, Any]:
-    """错误响应：{success:false, error}。503 表示 sidecar 未就绪。"""
-    return {"success": False, "error": message, "data": _json_response({"error": message}, status)}
 
 
 def _load_metrics() -> list[dict[str, Any]]:

@@ -22,7 +22,6 @@ bank_id 是多租户隔离 key（来自内核的 tenant_id），缺省回落到�
 from __future__ import annotations
 
 import asyncio
-import base64
 import json
 import logging
 import os
@@ -33,6 +32,18 @@ from typing import Any
 _THIS_DIR = os.path.dirname(os.path.abspath(__file__))
 if _THIS_DIR not in sys.path:
     sys.path.insert(0, _THIS_DIR)
+
+# http.handle 响应封装 + multipart 解析（内核 HttpHandleResponse/ToolExecutionResult
+# 样板）：公共实现 plugins/shared/http_json.py，经共享层自举裸名导入。
+_SHARED_ROOT = os.path.abspath(os.path.join(_THIS_DIR, "..", ".."))
+if _SHARED_ROOT not in sys.path:
+    sys.path.insert(0, _SHARED_ROOT)
+from http_json import (  # noqa: E402
+    decode_body as _decode_body,
+    json_response as _json_response,
+    ok as _ok,
+    parse_multipart as _parse_multipart,
+)
 
 from agentos_plugin_sdk import AgentOSPlugin  # noqa: E402
 
@@ -969,77 +980,9 @@ async def _on_unload(params: dict[str, Any]) -> None:
 
 # ═══════════════════════════════════════════════════════════
 # HTTP 展示面（前端记忆页消费，B3 收口：记忆数据接成熟 Hindsight）
+# 响应封装/请求解析助手（json_response/_ok/_decode_body/_parse_multipart）：
+# 公共实现 plugins/shared/http_json.py（文件头已导入）。
 # ═══════════════════════════════════════════════════════════
-
-def _json_response(payload: Any, status: int = 200) -> dict[str, Any]:
-    """包成内核期望的 HttpHandleResponse（body base64）。"""
-    body_str = json.dumps(payload, default=str, ensure_ascii=False)
-    body_b64 = base64.b64encode(body_str.encode("utf-8")).decode("ascii")
-    return {
-        "status": status,
-        "headers": {"Content-Type": "application/json; charset=utf-8"},
-        "body": body_b64,
-        "body_encoding": "base64",
-    }
-
-
-def _ok(data: Any) -> dict[str, Any]:
-    return {"success": True, "data": data}
-
-
-def _decode_body(raw_body: str) -> dict[str, Any]:
-    """解码 http.handle 的 raw_body（base64 或明文 JSON）为 dict。"""
-    if not raw_body:
-        return {}
-    try:
-        try:
-            decoded = base64.b64decode(raw_body).decode("utf-8")
-            if not decoded.lstrip().startswith(("{", "[")):
-                decoded = raw_body
-        except Exception:  # noqa: BLE001
-            decoded = raw_body
-        return json.loads(decoded) if decoded.strip() else {}
-    except json.JSONDecodeError as e:
-        raise ValueError(f"invalid JSON body: {e}") from e
-
-
-def _parse_multipart(content_type: str, body_bytes: bytes) -> dict[str, Any]:
-    """解析 multipart/form-data（内核透传的 raw_body base64 解码后的字节）。
-
-    返回 {字段名: 值}；文件字段值为 {filename, content_type, data(bytes)}，
-    普通字段为 str。用 email.parser 解析（标准库，无需外部依赖）。
-    """
-    import email  # noqa: PLC0415
-    from email.policy import default as default_policy  # noqa: PLC0415
-
-    header = f"Content-Type: {content_type}\r\n\r\n".encode()
-    msg = email.message_from_bytes(header + body_bytes, policy=default_policy)
-    fields: dict[str, Any] = {}
-    if not msg.is_multipart():
-        return fields
-    parts = msg.get_payload()
-    if not isinstance(parts, list):  # pragma: no cover —— 防御 typeshed（multipart 时恒 list）
-        return fields
-    for part in parts:
-        if not isinstance(part, email.message.Message):  # pragma: no cover —— 同上防御
-            continue
-        name = part.get_param("name", header="content-disposition")
-        if not isinstance(name, str):
-            continue
-        filename = part.get_filename()
-        if filename is not None:
-            data = part.get_payload(decode=True) or b""
-            fields[name] = {
-                "filename": filename,
-                "content_type": part.get_content_type(),
-                "data": data,
-            }
-        else:
-            payload = part.get_payload(decode=True)
-            fields[name] = (
-                payload.decode("utf-8", errors="replace") if isinstance(payload, bytes) else ""
-            )
-    return fields
 
 
 # ── memory 域：IMemoryBackend 懒构建注入 ────────────────────────────────────
