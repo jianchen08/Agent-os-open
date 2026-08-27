@@ -1384,7 +1384,7 @@ pub trait StorageBackend: Send + Sync {
         Ok(0)
     }
 
-    /// 域2：session 标签夹（对齐 0.1 SessionModel）─────────────────────
+    // 域2：session 标签夹（对齐 0.1 SessionModel）─────────────────────
     // 解耦：session 只持 pipeline_ids 引用列表，不反向 join messages。
 
     /// 创建会话（对齐 0.1 SessionModel + MemoryStore.set_session）。
