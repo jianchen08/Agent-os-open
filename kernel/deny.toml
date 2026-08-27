@@ -1,0 +1,70 @@
+# cargo-deny 门禁配置（Rust 依赖安全审计门禁，报告 §二 #1 建议 1-3）。
+# 放 workspace 根（kernel/，与报告建议一致）；由 scripts/run_gates.py 的
+# rust-deny gate 与 .github/workflows/ci.yml 的 rust-deny job 驱动。
+#
+# 版本口径：钉 cargo-deny 0.20.2（CI 用 taiki-e/install-action 预编译产物，
+# 本地同版本）。注意 0.20.x 不能从源码编译——需 rustc 1.88+，而本仓
+# rust-toolchain.toml 钉 1.85；0.18.3（最后支持 1.85 的版本）的 rustsec 无法
+# 解析 advisory-db 新增的 CVSS 4.0 条目，已弃用。
+# 0.20.x 语义：vulnerability 类公告一律 Deny（无开关，只能 ignore 基线放行）；
+# unmaintained/unsound 为 Scope 枚举（all/workspace/transitive/none）；
+# yanked 为 LintLevel。ignore 基线 = 显式 allow + reason 注释（不允许静默
+# 忽略），随对应治理项清理后移除。
+
+[advisories]
+# unmaintained/unsound 为 Scope 枚举（all/workspace/transitive/none）：
+# "all" = 全部 crate 的 unmaintained 公告报错（0.20.2 默认即 all，显式写明
+# 契约）；unsound 默认 workspace（0.20.2 默认，显式写明契约）。
+unmaintained = "all"
+unsound = "workspace"
+yanked = "warn"
+# advisory-db 拉取走系统 git 可执行文件：本机 gitoxide 内置拉取在代理网络下
+# 流式解包失败（failed to fill whole buffer），git CLI 稳定（CI 亦预装 git）。
+git-fetch-with-cli = true
+# 存量公告基线：逐条显式 allow + reason（报告 §二 #1 建议 3 + §二 #2 三步走
+# 短期阶段）。首跑以 `cargo deny check` 实际输出为准回填；随治理项清理后移除。
+# 注：serde_yaml 0.9.34+deprecated 的弃用标记无对应 RUSTSEC 公告（advisory-db
+# 无该条目，RUSTSEC-2018-0005 已由 0.9.34 修复），故无需 ignore——迁移跟踪
+# 见报告 §二 #2 三步走（serde_yaml2/yaml-peg 评估，避开 serde_yml/
+# serde_yaml_ng）；tokio-tungstenite/tungstenite 双版本无公告报警，由
+# [bans] multiple-versions = "warn" 覆盖，随报告 §六 批次 A 第 2 条升级后收紧。
+ignore = [
+    # idna 0.5.0（经 url 2.5.2 → reqwest 传递）：Punycode 标签掩码漏洞。
+    # 修复需 url ≥2.5.4（idna ≥1.0.3），属 reqwest 依赖面升级，随依赖
+    # 例行升级处理（非本仓直接依赖，无安全利用面——本仓不做 host 比较
+    # 权限检查）；升级完成后移除本条。
+    { id = "RUSTSEC-2024-0421", reason = "idna 0.5.0 via url 2.5.2 (reqwest 传递依赖)；修复需 url>=2.5.4，随依赖例行升级处理，升级后移除" },
+    # instant 0.1.13（经 notify-types → notify 7 传递）：unmaintained，
+    # 作者推荐 web-time。notify 7 上游未跟进，无安全风险（仅维护状态），
+    # 随 notify 升级或依赖面调整处理；处理完成后移除本条。
+    { id = "RUSTSEC-2024-0384", reason = "instant 0.1.13 via notify-types (notify 7 传递依赖)；unmaintained 无安全风险，随 notify 升级处理，升级后移除" },
+]
+
+[licenses]
+# Rust 生态常规白名单（首跑报错为准逐步补，每条注明触发 crate）
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Unicode-3.0",
+    "CDLA-Permissive-2.0",
+    # notify 7.0.0 声明 CC0-1.0（文件系统监听，热重载核心依赖）
+    "CC0-1.0",
+    # option-ext 0.2.0 声明 MPL-2.0（notify 传递依赖）
+    "MPL-2.0",
+]
+
+[bans]
+# 多版本 = warn：tokio-tungstenite 0.24/0.29 等双版本是生态常态（报告 §一），
+# 随报告 §六 批次 A 第 2 条（tokio-tungstenite 0.24→0.29 对齐，api crate 占用
+# 中延后）清理后收紧为 deny——升级完成后回看本表。
+multiple-versions = "warn"
+
+[sources]
+# 只允许 crates.io 官方 index；git/其他 registry 外源一律 deny（本仓锁文件无外源）
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = []

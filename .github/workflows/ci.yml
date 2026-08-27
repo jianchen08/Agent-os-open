@@ -225,6 +225,43 @@ jobs:
           workspaces: kernel
           shared-key: agentos-0.2
 
+  # ── Rust Dependency Audit（cargo-deny 门禁）──────────────────────────────
+  # Rust 依赖安全审计（rust_dependency_review 报告 §二 #1）：RUSTSEC 公告 +
+  # licenses 白名单 + bans 多版本 + sources 外源，配置 kernel/deny.toml
+  # （workspace 根）；存量 advisory 基线在 deny.toml 显式 allow + reason，
+  # 随对应治理项清理后移除。taiki-e/install-action 与 cargo-llvm-cov 同款；
+  # 版本钉 0.20.2（预编译产物，无需本地 rustc 版本匹配——0.20.x 源码编译需
+  # rustc 1.88+，本仓 rust-toolchain.toml 钉 1.85；0.18.3 的 rustsec 无法解析
+  # advisory-db 新增 CVSS 4.0 条目，已弃用）。
+  rust-deny:
+    name: Rust Deny (cargo-deny 依赖审计)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Install Rust toolchain
+        run: rustup show
+        working-directory: kernel
+
+      - name: Install cargo-deny
+        uses: taiki-e/install-action@5b4d68e2e660441203ab128a23676f1e4faf1532 # v2
+        with:
+          tool: cargo-deny@0.20.2
+
+      - name: Set up Python (gate runner)
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: "3.11"
+
+      - name: Run gates (rust-deny)
+        run: python scripts/run_gates.py --filter rust-deny
+
+      - name: Cache Rust artifacts
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        with:
+          workspaces: kernel
+          shared-key: agentos-0.2
+
   # ── Python Lint（插件 SDK）─────────────────────────────────
   # 注：sdk-mypy 的路径参数由 run_gates.py 统一持有（cwd=plugins/sdk 下
   # mypy src/agentos_plugin_sdk）。
@@ -639,6 +676,7 @@ jobs:
       - rust-build
       - rust-test
       - rust-coverage
+      - rust-deny
       - python-lint
       - python-test
       - python-coverage

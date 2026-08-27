@@ -182,6 +182,20 @@ GATES: list[Gate] = [
         ),
         needs=("kernel-coverage",),
     ),
+    Gate(
+        # Rust 依赖安全审计门禁（rust_dependency_review 报告 §二 #1）：RUSTSEC
+        # 公告 + licenses 白名单 + bans 多版本 + sources 外源，配置 kernel/deny.toml
+        # （workspace 根）。存量 advisory 基线在 deny.toml [advisories] ignore 逐条
+        # 显式 allow + reason（不允许静默忽略），随对应治理项清理后移除。
+        # 版本注意：钉 0.20.2（CI 的 taiki-e/install-action 预编译产物，本地
+        # 同版本）。0.20.x 不能从源码编译（需 rustc 1.88+，本仓钉 1.85）；
+        # 0.18.3 的 rustsec 无法解析 advisory-db 新增 CVSS 4.0 条目，已弃用。
+        id="rust-deny",
+        label="cargo deny check（RUSTSEC 公告 + licenses + bans + sources）",
+        domain="kernel",
+        cwd="kernel",
+        command=("cargo", "deny", "check"),
+    ),
     # ── 插件 SDK（plugins/sdk，独立包）────────────────────────────────
     Gate(
         id="sdk-lint",
