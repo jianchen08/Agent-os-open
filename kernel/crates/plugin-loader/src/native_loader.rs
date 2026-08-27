@@ -38,7 +38,7 @@ type CreateFn = unsafe extern "C" fn() -> *mut ();
 pub struct NativePlugin {
     /// Library 句柄——以 ManuallyDrop 持有，**drop 阶段刻意不释放**（见模块注释：
     /// Windows 上 dlclose 带 Rust 静态的 cdylib 会 AV）。进程退出时由 OS 回收。
-    #[allow(dead_code)]
+    /// 下划线前缀即死代码豁免（保活字段永不读取）。
     _lib: std::mem::ManuallyDrop<Library>,
     /// 插件构造出的 trait 对象。
     instance: Box<dyn PipelinePlugin>,
@@ -204,7 +204,6 @@ impl NativePluginLoader {
     }
 
     /// 列出已加载插件 ID（调试用）。
-    #[allow(dead_code)]
     pub fn list_loaded(&self) -> Vec<String> {
         self.loaded.read().keys().cloned().collect()
     }

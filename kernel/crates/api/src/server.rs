@@ -763,8 +763,12 @@ async fn process_via_engine_inner(
     } else {
         pipeline_id
     };
-    let tenant =
-        agentos_tenant::current().unwrap_or_else(|| TenantContext::new("default", "kernel"));
+    // 缺失租户上下文回退 default 是契约内兜底（非错误路径）；debug 留痕供
+    // 排查"消息落错租户"类问题时定位缺失点。
+    let tenant = agentos_tenant::current().unwrap_or_else(|| {
+        tracing::debug!("process_via_engine 无租户上下文，回退 default/kernel");
+        TenantContext::new("default", "kernel")
+    });
     let tenant_id = tenant.tenant_id.clone();
 
     // run_id 权威生成点：注入 initial_state（插件侧 llm_core 取消轮询的定位锚，

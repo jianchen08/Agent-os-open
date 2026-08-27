@@ -948,12 +948,21 @@ async fn emit_pending_inputs_changed_endpoint(
             Vec::new()
         }
     };
-    // thread 坐标：pipeline_sessions 反查（无则跳过——端点变更无坐标可推）。
-    let Some(thread_id) = store
-        .get_thread_id_by_pipeline(pipeline_id)
-        .await
-        .unwrap_or(None)
-    else {
+    // thread 坐标：pipeline_sessions 反查（无会话则跳过——端点变更无坐标可推）。
+    // 存储故障（Err）与"无会话"（None）分开处理：Err 静默丢弃会让事件坐标
+    // 反查失败无从排查。
+    let thread_id = match store.get_thread_id_by_pipeline(pipeline_id).await {
+        Ok(t) => t,
+        Err(e) => {
+            tracing::warn!(
+                pipeline = %pipeline_id,
+                error = %e,
+                "pending_inputs_changed thread 坐标反查失败（事件跳过）"
+            );
+            return;
+        }
+    };
+    let Some(thread_id) = thread_id else {
         return;
     };
     let _ = session

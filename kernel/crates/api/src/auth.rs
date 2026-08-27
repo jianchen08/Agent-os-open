@@ -8,9 +8,8 @@
 //! - POST /api/v1/auth/register → 同 login
 //!
 //! 用户解析与 token 编解码已下沉至 `agentos_http::auth`（2026-08，db-admin 拆分）：
-//! api 与 db-admin 共用同一实现（鉴权单一来源），本模块以 `pub use` 再导出
-//! 保持既有引用不变（ws_session.rs / server.rs 的
-//! `resolve_request_user` / `verify_access_token` / `resolve_tenant_id_by_user` 等）。
+//! api 与 db-admin 共用同一实现（鉴权单一来源），消费方（ws_session.rs 等）
+//! 直接从 `agentos_http::auth` 引入，本模块不再转发。
 
 use axum::extract::State;
 use axum::http::HeaderMap;
@@ -35,16 +34,15 @@ const REFRESH_TOKEN_TTL_SECS: u64 = 7 * 24 * 60 * 60; // 7 days
 // upgrade: 接入正式认证后替换为 JWT/HMAC 签名 + 密钥轮换。
 // 前端 client.ts 仅注入 Bearer 头，不解析 token 内容（已验证 NEED-1），
 // 因此该方案在开发阶段安全。
-// 再导出面：外部 crate 零消费；ws_session 经 `crate::auth::` 引用
-// verify_access_token / resolve_tenant_id_by_user 两符号（WS 握手鉴权与
-// user→tenant 解析），其余符号本文件内私有 use。
+// 引用面：本模块只登录/登出端点所需符号；ws_session 经 `agentos_http::auth`
+// 直接引用 verify_access_token（WS 握手鉴权）与 resolve_tenant_id_by_user
+// （user→tenant 解析）。
 #[cfg(test)]
 use agentos_http::auth::DEFAULT_TENANT_ID;
 use agentos_http::auth::{
     decode_token, default_users, encode_token, extract_bearer_token, find_user_by_credentials,
     find_user_by_username, is_token_expired, BuiltInUser, TokenType,
 };
-pub use agentos_http::auth::{resolve_tenant_id_by_user, verify_access_token};
 
 // ─── 请求 / 响应类型（与前端 types/api.ts 对齐）─────────────────────
 
@@ -300,6 +298,7 @@ pub async fn register_handler(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use agentos_http::auth::verify_access_token;
     use axum::body::Body;
     use axum::http::{Method, Request, StatusCode};
     use serde_json::json;

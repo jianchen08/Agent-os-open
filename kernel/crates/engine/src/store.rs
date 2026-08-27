@@ -203,11 +203,21 @@ CREATE INDEX IF NOT EXISTS idx_pending_pipeline
 /// 任务 7 收敛后 slots 是纯索引表；旧库的宽表（含 role/content_preview/tool_calls_json
 /// 等内容列）数据格式不再支持——按零兼容原则直接丢弃（承诺过"清库重跑"），不写迁移。
 fn migrate_drop_legacy_message_slots(conn: &Connection) -> Result<(), StorageError> {
-    let has_legacy_col: bool = conn
-        .prepare("PRAGMA table_info(message_slots)")?
-        .query_map([], |row| row.get::<_, String>(1))?
-        .filter_map(|r| r.ok())
-        .any(|col| col == "content_preview" || col == "tool_calls_json");
+    // 行级读取失败必须显式留痕：filter_map(.ok()) 会把失败行静默丢掉，
+    // 可能让残留旧列逃过检测、误判"无旧列"而跳过重建。
+    let mut has_legacy_col = false;
+    let mut stmt = conn.prepare("PRAGMA table_info(message_slots)")?;
+    let rows = stmt.query_map([], |row| row.get::<_, String>(1))?;
+    for r in rows {
+        match r {
+            Ok(col) => {
+                if col == "content_preview" || col == "tool_calls_json" {
+                    has_legacy_col = true;
+                }
+            }
+            Err(e) => warn!(error = %e, "message_slots 列信息行读取失败，该行不计入旧 schema 检测"),
+        }
+    }
     if has_legacy_col {
         warn!("message_slots 含旧内容列（零兼容），DROP 重建——旧槽位数据被丢弃");
         conn.execute("DROP TABLE message_slots", [])?;
@@ -233,11 +243,23 @@ fn migrate_add_run_pipeline_id(conn: &Connection) -> Result<(), StorageError> {
 /// 仅在列缺失时执行 `ALTER TABLE ... ADD COLUMN`，幂等。blob 表不加（内容寻址，靠上游归属）。
 fn migrate_add_tenant_id(conn: &Connection) -> Result<(), StorageError> {
     for table in ["traces", "branches"] {
-        let has_col: bool = conn
-            .prepare(&format!("PRAGMA table_info({})", table))?
-            .query_map([], |row| row.get::<_, String>(1))?
-            .filter_map(|r| r.ok())
-            .any(|col| col == "tenant_id");
+        // 行级读取失败必须显式留痕（不吞）：判断结果只取可读行，失败时保守跳过
+        // ALTER——列存在性不明时不做可能自撞"duplicate column"的补列。
+        let mut has_col = false;
+        let mut stmt = conn.prepare(&format!("PRAGMA table_info({})", table))?;
+        let rows = stmt.query_map([], |row| row.get::<_, String>(1))?;
+        for r in rows {
+            match r {
+                Ok(col) => {
+                    if col == "tenant_id" {
+                        has_col = true;
+                    }
+                }
+                Err(e) => {
+                    warn!(table = table, error = %e, "列信息行读取失败，该行不计入 tenant_id 检测")
+                }
+            }
+        }
         if !has_col {
             conn.execute(
                 &format!(
@@ -368,9 +390,9 @@ fn slot_row_to_record(
         content_preview: Some(content_preview),
         created_at,
         pipeline_id,
-        tool_calls_json: msg
-            .get("tool_calls")
-            .map(|tc| serde_json::to_string(tc).unwrap_or_default()),
+        tool_calls_json: msg.get("tool_calls").map(|tc| {
+            serde_json::to_string(tc).expect("serde_json Value serialization is infallible")
+        }),
         tool_call_id: msg
             .get("tool_call_id")
             .and_then(|v| v.as_str())
@@ -382,9 +404,9 @@ fn slot_row_to_record(
         status,
         error,
         // envelope 随消息持久化（tool_result 字段），读时提取
-        tool_result_json: msg
-            .get("tool_result")
-            .map(|tr| serde_json::to_string(tr).unwrap_or_default()),
+        tool_result_json: msg.get("tool_result").map(|tr| {
+            serde_json::to_string(tr).expect("serde_json Value serialization is infallible")
+        }),
         // 自定义元数据随 blob 全文持久化，读时原样提取（user 消息的
         // client_message_id 幂等键契约，ADR 2026-08-21）
         metadata: msg.get("metadata").filter(|m| m.is_object()).cloned(),
@@ -645,23 +667,30 @@ impl SqliteStore {
             ) = row?;
 
             if let Some(ref meta_str) = metadata_str {
-                if let Ok(meta) = serde_json::from_str::<serde_json::Value>(meta_str) {
-                    if meta
-                        .get("pending_interaction_request_id")
-                        .and_then(|v| v.as_str())
-                        == Some(request_id)
-                    {
-                        return Ok(Some(RunRecord {
-                            run_id,
-                            config_hash,
-                            status: RunStatus::Suspended,
-                            tenant_id,
-                            created_at,
-                            ended_at,
-                            current_branch,
-                            current_seq,
-                            metadata: Some(meta),
-                        }));
+                // metadata JSON 腐败的 run 显式留痕后跳过——静默 continue 会让
+                // 挂起 run 因不可读元数据而永远找不到。
+                match serde_json::from_str::<serde_json::Value>(meta_str) {
+                    Ok(meta) => {
+                        if meta
+                            .get("pending_interaction_request_id")
+                            .and_then(|v| v.as_str())
+                            == Some(request_id)
+                        {
+                            return Ok(Some(RunRecord {
+                                run_id,
+                                config_hash,
+                                status: RunStatus::Suspended,
+                                tenant_id,
+                                created_at,
+                                ended_at,
+                                current_branch,
+                                current_seq,
+                                metadata: Some(meta),
+                            }));
+                        }
+                    }
+                    Err(e) => {
+                        warn!(run_id = %run_id, error = %e, "runs.metadata JSON 腐败，跳过该 run 的 request_id 匹配")
                     }
                 }
             }
@@ -893,7 +922,8 @@ impl SqliteStore {
     ) -> Result<(), StorageError> {
         // 整条消息（含 role/content/tool_calls/reasoning_content/tool_result envelope）
         // 序列化进 blob——消息是不可变值，全文唯一存储在 blobs。
-        let msg_json = serde_json::to_string(msg).unwrap_or_default();
+        let msg_json =
+            serde_json::to_string(msg).expect("serde_json Value serialization is infallible");
         let (blob_id, _) = self.ensure_blob_locked(conn, &msg_json)?;
         // A1：内核注入的流式 message_id 优先（流式占位与 DB record_id 对齐），
         // 缺省回退内容指纹。preferred_id 只影响 record_id，blob 全文不含它。
@@ -1091,7 +1121,8 @@ impl SqliteStore {
         value: &serde_json::Value,
     ) -> Result<(), StorageError> {
         let conn = self.conn.lock();
-        let value_json = serde_json::to_string(value).unwrap_or_else(|_| "null".into());
+        let value_json =
+            serde_json::to_string(value).expect("serde_json Value serialization is infallible");
         let now = chrono::Utc::now().to_rfc3339();
         conn.execute(
             "INSERT INTO pipeline_state (pipeline_id, field_key, field_value, tenant_id, updated_at) \
@@ -1117,8 +1148,18 @@ impl SqliteStore {
             .collect::<Result<Vec<_>, _>>()?;
         let mut map = std::collections::HashMap::new();
         for (k, v) in rows {
-            if let Ok(val) = serde_json::from_str::<serde_json::Value>(&v) {
-                map.insert(k, val);
+            // 字段 JSON 腐败显式留痕后丢弃——静默丢字段会让冷启动重建悄悄缺值。
+            match serde_json::from_str::<serde_json::Value>(&v) {
+                Ok(val) => {
+                    map.insert(k, val);
+                }
+                Err(e) => warn!(
+                    pipeline_id = %pipeline_id,
+                    tenant_id = %tenant_id,
+                    field = %k,
+                    error = %e,
+                    "pipeline_state 字段 JSON 腐败，重建时跳过该字段"
+                ),
             }
         }
         Ok(map)
@@ -1160,7 +1201,8 @@ impl SqliteStore {
                 input.user_id,
                 input.content,
                 input.thread,
-                serde_json::to_string(&input.source).unwrap_or_else(|_| "\"user\"".into()),
+                serde_json::to_string(&input.source)
+                    .expect("serde_json Value serialization is infallible"),
                 input.agent_id,
                 input.route_id,
                 input.thinking_strength,
@@ -1171,6 +1213,39 @@ impl SqliteStore {
             ],
         )?;
         Ok(())
+    }
+
+    /// pending 行 source 列解析。腐败值显式留痕后保守回退 user 标注——
+    /// 不留痕会把"读不懂"伪装成真实来源，操作面无从发现。
+    fn parse_pending_source(raw: &str, row_id: &str) -> PendingInputSource {
+        serde_json::from_str(raw).unwrap_or_else(|e| {
+            warn!(
+                id = %row_id,
+                raw = %raw,
+                error = %e,
+                "pending 输入 source 腐败，回退 user 标注"
+            );
+            PendingInputSource::User
+        })
+    }
+
+    /// pending 行可选 JSON 列（execution_context / state_overlay）解析。
+    /// 腐败值显式留痕后丢弃该字段（None）——载荷注入失败必须可观测。
+    fn parse_pending_optional_json(
+        raw: Option<&str>,
+        row_id: &str,
+        field: &str,
+    ) -> Option<serde_json::Value> {
+        let Some(s) = raw else {
+            return None;
+        };
+        match serde_json::from_str(s) {
+            Ok(v) => Some(v),
+            Err(e) => {
+                warn!(id = %row_id, field = field, error = %e, "pending 输入 JSON 字段腐败，丢弃");
+                None
+            }
+        }
     }
 
     /// 取队首（FIFO：created_at, id 升序）第一条 pending 输入并删除（消费瞬态）。
@@ -1233,6 +1308,10 @@ impl SqliteStore {
             "DELETE FROM pipeline_pending_inputs WHERE id=?1 AND tenant_id=?2",
             rusqlite::params![id, tenant_id],
         )?;
+        let source = Self::parse_pending_source(&source, &id);
+        let execution_context =
+            Self::parse_pending_optional_json(ec.as_deref(), &id, "execution_context");
+        let state_overlay = Self::parse_pending_optional_json(ov.as_deref(), &id, "state_overlay");
         Ok(Some(PendingInputRecord {
             id,
             pipeline_id: pid,
@@ -1240,13 +1319,13 @@ impl SqliteStore {
             user_id: uid,
             content,
             thread,
-            source: serde_json::from_str(&source).unwrap_or(PendingInputSource::User),
+            source,
             agent_id: agent,
             route_id,
             thinking_strength: thinking,
             client_message_id: cmid,
-            execution_context: ec.and_then(|s| serde_json::from_str(&s).ok()),
-            state_overlay: ov.and_then(|s| serde_json::from_str(&s).ok()),
+            execution_context,
+            state_overlay,
             created_at: created,
         }))
     }
@@ -1305,6 +1384,11 @@ impl SqliteStore {
                     ov,
                     created,
                 )| {
+                    let source = Self::parse_pending_source(&source, &id);
+                    let execution_context =
+                        Self::parse_pending_optional_json(ec.as_deref(), &id, "execution_context");
+                    let state_overlay =
+                        Self::parse_pending_optional_json(ov.as_deref(), &id, "state_overlay");
                     PendingInputRecord {
                         id,
                         pipeline_id: rid,
@@ -1312,13 +1396,13 @@ impl SqliteStore {
                         user_id: uid,
                         content,
                         thread,
-                        source: serde_json::from_str(&source).unwrap_or(PendingInputSource::User),
+                        source,
                         agent_id: agent,
                         route_id,
                         thinking_strength: thinking,
                         client_message_id: cmid,
-                        execution_context: ec.and_then(|s| serde_json::from_str(&s).ok()),
-                        state_overlay: ov.and_then(|s| serde_json::from_str(&s).ok()),
+                        execution_context,
+                        state_overlay,
                         created_at: created,
                     }
                 },
@@ -1410,7 +1494,8 @@ impl SqliteStore {
             }
             obj.insert("ckpt_max_seq".to_string(), serde_json::json!(max_seq));
         }
-        let state_json = serde_json::to_string(&slim).unwrap_or_else(|_| "{}".into());
+        let state_json =
+            serde_json::to_string(&slim).expect("serde_json Value serialization is infallible");
         let now = chrono::Utc::now().to_rfc3339();
         // INSERT OR REPLACE：同一 step 重放幂等
         conn.execute(
@@ -1531,10 +1616,9 @@ impl SqliteStore {
     ) -> Result<(), StorageError> {
         let pipeline_ids_json = serde_json::to_string(&session.pipeline_ids)
             .map_err(|e| StorageError::Database(format!("serialize pipeline_ids: {e}")))?;
-        let metadata_json = session
-            .metadata
-            .as_ref()
-            .map(|v| serde_json::to_string(v).unwrap_or_else(|_| "null".to_string()));
+        let metadata_json = session.metadata.as_ref().map(|v| {
+            serde_json::to_string(v).expect("serde_json Value serialization is infallible")
+        });
         let conn = self.conn.lock();
         conn.execute(
             "INSERT INTO sessions (thread_id, title, intent, current_state, agent_id, active_pipeline_id, pipeline_ids, metadata, tenant_id, created_at, updated_at, last_active_at)
@@ -2313,8 +2397,8 @@ impl StorageBackend for SqliteStore {
             PatchType::Lifecycle => "lifecycle",
             PatchType::Rollback => "rollback",
         };
-        let patch_data_str =
-            serde_json::to_string(&entry.patch_data).unwrap_or_else(|_| "{}".to_string());
+        let patch_data_str = serde_json::to_string(&entry.patch_data)
+            .expect("serde_json Value serialization is infallible");
         conn.execute(
             "INSERT INTO traces (trace_id, run_id, branch_id, seq_in_branch, plugin_id, patch_type, patch_data, tenant_id, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
             rusqlite::params![

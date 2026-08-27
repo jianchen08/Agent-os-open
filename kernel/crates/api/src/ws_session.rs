@@ -22,8 +22,8 @@ use serde_json::json;
 use tokio::sync::mpsc;
 use tracing::{debug, info, warn};
 
-use crate::auth::verify_access_token;
 use crate::routes::AppState;
+use agentos_http::auth::verify_access_token;
 
 /// 全局 WS sink id 生成器（连接注册表去重/踢旧用）。
 static SINK_ID_SEQ: AtomicU64 = AtomicU64::new(1);
@@ -741,7 +741,7 @@ impl PipelineDispatcher for EngineDispatcher {
         // 表现为「刷新后历史消息不显示」。
         // 从 self.state.store 查持久化用户的 tenant_id（一用户一租户 = user_id）。
         let tenant_id =
-            crate::auth::resolve_tenant_id_by_user(self.state.store.as_ref(), user_id).await;
+            agentos_http::auth::resolve_tenant_id_by_user(self.state.store.as_ref(), user_id).await;
         let state = self.state.clone();
         let content = content.to_string();
         // pipeline_id 是前端消息路由键，引擎回推流式事件时用它定位占位气泡。
@@ -959,7 +959,7 @@ impl PipelineDispatcher for EngineDispatcher {
             .as_ref()
             .and_then(|s| s.registry().get_user_for_thread(thread_id));
         let tenant_id = match user_id {
-            Some(uid) => crate::auth::resolve_tenant_id_by_user(Some(store), &uid).await,
+            Some(uid) => agentos_http::auth::resolve_tenant_id_by_user(Some(store), &uid).await,
             None => "default".to_string(),
         };
         // pipeline_id 复用 resolve 路径（thread 的真实主管道；stop 消息不带 pipeline_id）。
@@ -1007,7 +1007,7 @@ impl PipelineDispatcher for EngineDispatcher {
         // 前端传值经 resolve 校验（防残留旧值把优先级挪到别的管道），失败回退
         // 该 thread 的真实主管道；纯内存写入，即时返回不占收包循环。
         let tenant_id =
-            crate::auth::resolve_tenant_id_by_user(self.state.store.as_ref(), user_id).await;
+            agentos_http::auth::resolve_tenant_id_by_user(self.state.store.as_ref(), user_id).await;
         let route_id = resolve_pipeline_id_for_thread(
             self.state.store.as_ref(),
             thread_id,
@@ -1048,7 +1048,7 @@ impl PipelineDispatcher for EngineDispatcher {
         let Some(store) = self.state.store.as_ref() else {
             return Err("regenerate disabled: kernel store not injected".to_string());
         };
-        let tenant_id = crate::auth::resolve_tenant_id_by_user(Some(store), user_id).await;
+        let tenant_id = agentos_http::auth::resolve_tenant_id_by_user(Some(store), user_id).await;
         let route_id =
             resolve_pipeline_id_for_thread(Some(store), thread_id, pipeline_id, &tenant_id).await;
         if route_id.is_empty() {

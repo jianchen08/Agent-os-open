@@ -793,7 +793,6 @@ mod agent_binding_tests {
     async fn create_and_patch_agent(
         router: &axum::Router,
         state: &AppState,
-        store: &std::sync::Arc<agentos_engine::SqliteStore>,
         token: &str,
         create_agent: Option<&str>,
         patch_agent: &str,
@@ -850,7 +849,6 @@ mod agent_binding_tests {
             serde_json::from_slice(&axum::body::to_bytes(patch.into_body(), 8192).await.unwrap())
                 .unwrap();
         assert_eq!(patched["agent_id"].as_str(), Some(patch_agent));
-        let _ = store;
         (thread_id, pipeline_id)
     }
 
@@ -859,7 +857,7 @@ mod agent_binding_tests {
         let (router, state, store) = setup().await;
         let token = admin_token(&router).await;
         let (thread_id, pipeline_id) =
-            create_and_patch_agent(&router, &state, &store, &token, None, "general_agent").await;
+            create_and_patch_agent(&router, &state, &token, None, "general_agent").await;
 
         // ① registry 热绑定
         let registry = state.session.as_ref().unwrap().registry();
@@ -900,7 +898,6 @@ mod agent_binding_tests {
         let (_, pipeline_id) = create_and_patch_agent(
             &router,
             &state,
-            &store,
             &token,
             Some("general_agent"),
             "general_agent",
