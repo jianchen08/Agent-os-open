@@ -197,6 +197,16 @@ impl InboundRouter {
         let client_message_id = field_or_data(msg, "client_message_id")
             .unwrap_or("")
             .to_string();
+        // execution_context：消息级执行上下文（{workspace:{source_path,mode},
+        // isolation:{level}}），会话执行选项编辑后的最新值随消息生效——引擎合并
+        // 点（1a2）优先于 thread metadata 会话级注入。顶层优先、data 信封兜底；
+        // 缺失为 None = 后端按出生值注入（与旧客户端行为一致）。state_overlay
+        // 仍仅服务端内部路径使用，WS 入站不收。
+        let execution_context = msg
+            .get("data")
+            .and_then(|d| d.get("execution_context"))
+            .filter(|v| v.is_object())
+            .or_else(|| msg.get("execution_context").filter(|v| v.is_object()));
         match self
             .dispatcher
             .dispatch_user_input(
@@ -205,7 +215,7 @@ impl InboundRouter {
                 &content,
                 &pipeline_id,
                 &thinking_strength,
-                None,
+                execution_context,
                 None,
                 // 空串 = 未指定，agent 解析归 dispatcher
                 // 实现侧（线程绑定 registry → DB sessions.agent_id → agentos）。
@@ -321,5 +331,111 @@ impl InboundRouter {
             Ok(()) => RouteOutcome::Handled,
             Err(e) => RouteOutcome::Error(e),
         }
+    }
+}
+
+#[cfg(test)]
+mod user_input_ec_tests {
+    //! route_user_input 的 execution_context 透传：消息级执行上下文（会话
+    //! 执行选项编辑后的最新值）随前端 user_input 到达 dispatcher——顶层与
+    //! data 信封两处解析，缺失为 None（后端回退 thread metadata 出生值）。
+
+    use super::*;
+    use serde_json::json;
+    use std::sync::Mutex;
+
+    #[derive(Default)]
+    struct RecordingDispatcher {
+        last_execution_context: Mutex<Option<Value>>,
+    }
+
+    #[async_trait]
+    impl PipelineDispatcher for RecordingDispatcher {
+        async fn dispatch_user_input(
+            &self,
+            _thread_id: &str,
+            _user_id: &str,
+            _content: &str,
+            _pipeline_id: &str,
+            _thinking_strength: &str,
+            execution_context: Option<&Value>,
+            _state_overlay: Option<&Value>,
+            _agent_id: &str,
+            _client_message_id: &str,
+            _source: PendingInputSource,
+        ) -> Result<(), String> {
+            *self.last_execution_context.lock().unwrap() = execution_context.cloned();
+            Ok(())
+        }
+
+        async fn dispatch_interaction_response(
+            &self,
+            _thread_id: &str,
+            _request_id: &str,
+            _response: &Value,
+        ) -> Result<(), String> {
+            Ok(())
+        }
+
+        async fn dispatch_stop(&self, _thread_id: &str) -> Result<(), String> {
+            Ok(())
+        }
+    }
+
+    fn router() -> (InboundRouter, Arc<RecordingDispatcher>) {
+        let d = Arc::new(RecordingDispatcher::default());
+        (InboundRouter::new(d.clone()), d)
+    }
+
+    fn base_msg() -> Value {
+        json!({
+            "type": "user_input",
+            "thread_id": "thread-abc123",
+            "content": "hi",
+            "pipeline_id": "p1",
+        })
+    }
+
+    #[tokio::test]
+    async fn top_level_execution_context_is_forwarded() {
+        let (r, d) = router();
+        let mut msg = base_msg();
+        msg["execution_context"] = json!({
+            "workspace": { "source_path": "D:/proj/demo", "mode": "worktree" },
+            "isolation": { "level": "isolated" },
+        });
+        assert_eq!(r.route(&msg, "u1").await, RouteOutcome::Handled);
+        let got = d.last_execution_context.lock().unwrap().clone();
+        assert_eq!(
+            got.as_ref().and_then(|v| v.get("workspace")).cloned(),
+            Some(json!({ "source_path": "D:/proj/demo", "mode": "worktree" }))
+        );
+    }
+
+    #[tokio::test]
+    async fn data_envelope_execution_context_is_forwarded() {
+        let (r, d) = router();
+        let mut msg = base_msg();
+        msg["data"] = json!({ "execution_context": { "isolation": { "level": "non_isolated" } } });
+        assert_eq!(r.route(&msg, "u1").await, RouteOutcome::Handled);
+        let got = d.last_execution_context.lock().unwrap().clone();
+        assert_eq!(
+            got.as_ref().and_then(|v| v.get("isolation")).cloned(),
+            Some(json!({ "level": "non_isolated" }))
+        );
+    }
+
+    #[tokio::test]
+    async fn missing_execution_context_is_none_not_error() {
+        let (r, d) = router();
+        // 旧客户端不带该字段 → None（非对象值同样按缺失处理）
+        assert_eq!(r.route(&base_msg(), "u1").await, RouteOutcome::Handled);
+        assert!(d.last_execution_context.lock().unwrap().is_none());
+
+        let (r2, d2) = router();
+        let mut bad = base_msg();
+        bad["execution_context"] = json!("not-an-object");
+        assert_eq!(r2.route(&bad, "u1").await, RouteOutcome::Handled);
+        assert!(d2.last_execution_context.lock().unwrap().is_none());
     }
 }
