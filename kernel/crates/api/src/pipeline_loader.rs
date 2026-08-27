@@ -1121,13 +1121,16 @@ loop_bodies:
         );
         assert_eq!(post.routes[5].then.next, RouteNext::End);
         assert_eq!(post.routes[5].when, "True", "缺省 when 归一为 True");
-        // 动态 core_plugin 项保留（引擎动态点）
+        // 动态 core_plugin 项保留（引擎动态点；tool_cache 接线后位于其前列）
         let core = main
             .steps
             .iter()
             .find(|s| s.id == "core")
             .expect("core step");
-        assert_eq!(core.steps[0].name(), "{{state.core_plugin}}");
+        assert!(
+            core.steps.iter().any(|s| s.name() == "{{state.core_plugin}}"),
+            "core 步骤应保留动态 core_plugin 项"
+        );
         // steps 库可加载
         let lib = load_step_library(&root).expect("steps 库应能加载");
         assert!(
