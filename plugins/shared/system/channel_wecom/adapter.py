@@ -1,18 +1,19 @@
 """企业微信通道适配器。
 
 实现 IInputAdapter 和 IOutputAdapter 接口，将企业微信回调消息
-适配为管道引擎可用的输入/输出通道。
+适配为管道引擎可用的输入/输出通道。收发骨架来自 channel_common
+共享包（QueuedChannelInputAdapter / BufferedChannelOutputAdapter），
+本文件只承载企业微信特有的差异点：原始报文解析、HTTP API 投递
+与回调加解密处理。
 
 采用组合模式（与 FeishuAdapter/DingTalkAdapter 一致）：
 - WeComInputAdapter: 从消息队列获取消息
-- WeComOutputAdapter: 通过 HTTP API 发送消息（0.2 C1 合流迁入本文件，
-  接口 IOutputAdapter 来自 channel_common 共享包）
+- WeComOutputAdapter: 通过 HTTP API 发送消息
 - WeComAdapter: 组合入口，管理生命周期 + 处理回调
 """
 
 from __future__ import annotations
 
-import asyncio
 import logging
 import uuid
 from typing import Any
@@ -24,49 +25,15 @@ from helpers import (
     _extract_wecom_text,
     _parse_message_xml,
 )
-from input_adapter import IInputAdapter
-from output_adapter import IOutputAdapter
+from input_adapter import QueuedChannelInputAdapter, build_channel_state
+from output_adapter import BufferedChannelOutputAdapter
 from stream_client import WeComStreamClient
-
-from agentos_plugin_sdk.pipeline_types import StateKeys
 
 logger = logging.getLogger(__name__)
 
 
-class WeComInputAdapter(IInputAdapter):
-    """企业微信输入适配器。
-
-    从企业微信消息队列中获取消息，转换为管道初始 state。
-    使用 asyncio.Queue 作为消息缓冲区。
-
-    Attributes:
-        _message_queue: 消息缓冲队列
-    """
-
-    def __init__(self) -> None:
-        """初始化企业微信输入适配器。"""
-        self._message_queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
-
-    async def enqueue_message(self, raw_message: dict[str, Any]) -> None:
-        """将企业微信消息放入处理队列。
-
-        由 WeComStreamClient 的 on_message 回调调用。
-
-        Args:
-            raw_message: 企业微信回调消息数据（已解密的 XML 解析结果）
-        """
-        await self._message_queue.put(raw_message)
-
-    async def receive(self) -> dict[str, Any]:
-        """从队列中取出下一条企业微信消息，转换为管道初始 state。
-
-        阻塞等待直到有消息可用。
-
-        Returns:
-            管道初始 state 字典
-        """
-        raw_message = await self._message_queue.get()
-        return self._raw_to_state(raw_message)
+class WeComInputAdapter(QueuedChannelInputAdapter):
+    """企业微信输入适配器：队列缓冲 + 回调报文解析（_raw_to_state）。"""
 
     @staticmethod
     def _raw_to_state(raw: dict[str, Any]) -> dict[str, Any]:
@@ -88,32 +55,24 @@ class WeComInputAdapter(IInputAdapter):
         # 提取文本内容
         user_input = _extract_wecom_text(msg_type, content, raw)
 
-        session_id = str(msg_id)
-
-        return {
-            "user_input": user_input,
-            StateKeys.CORE_TYPE: "llm_call",
-            StateKeys.SESSION_ID: session_id,
-            StateKeys.SHOULD_STOP: False,
-            "iteration": 1,
-            "_channel_type": "wecom",
-            "_channel_user_id": from_user,
-            "_agent_id": agent_id,
-            "_to_user": to_user,
-            "_raw_message": raw,
-        }
+        return build_channel_state(
+            channel_type="wecom",
+            user_input=user_input,
+            session_id=str(msg_id),
+            channel_user_id=from_user,
+            raw_message=raw,
+            _agent_id=agent_id,
+            _to_user=to_user,
+        )
 
 
-class WeComOutputAdapter(IOutputAdapter):
-    """企业微信输出适配器。
+class WeComOutputAdapter(BufferedChannelOutputAdapter):
+    """企业微信输出适配器：经 WeComStreamClient 的 HTTP API 投递文本。
 
-    通过企业微信 HTTP API 发送管道处理结果。
-
-    Attributes:
-        _stream_client: 企业微信客户端
-        _channel_user_id: 当前消息的目标用户 ID
-        _accumulated_text: 流式累积的文本
+    目标用户标识为企业微信 UserID。
     """
+
+    channel_name = "wecom"
 
     def __init__(self, stream_client: WeComStreamClient) -> None:
         """初始化企业微信输出适配器。
@@ -121,62 +80,12 @@ class WeComOutputAdapter(IOutputAdapter):
         Args:
             stream_client: 企业微信客户端实例
         """
+        super().__init__()
         self._stream_client = stream_client
-        self._channel_user_id: str = ""
-        self._accumulated_text: str = ""
 
-    def set_channel_user_id(self, user_id: str) -> None:
-        """设置当前消息的目标用户 ID。
-
-        Args:
-            user_id: 企业微信用户 UserID
-        """
-        self._channel_user_id = user_id
-
-    async def send(self, state: dict[str, Any]) -> None:
-        """输出管道最终 state 到企业微信。
-
-        失败语义契约：底层渠道 API 发送失败时异常原样传播（不吞错、
-        不静默丢消息），管道/gateway 调用方可感知未送达。
-
-        Args:
-            state: 管道最终 state 字典
-
-        Raises:
-            RuntimeError: 渠道 API 发送失败（经 WeComStreamClient.send_message 契约上抛）
-        """
-        user_id = state.get("_channel_user_id", self._channel_user_id)
-        if not user_id:
-            logger.warning("No user_id for wecom output, skipping")
-            return
-
-        error = state.get(StateKeys.RAW_ERROR)
-        if error:
-            await self._stream_client.send_message(user_id, f"❌ 错误: {error}")
-            return
-
-        # 发送正常结果
-        result = state.get(StateKeys.RAW_RESULT, "")
-        if result:
-            await self._stream_client.send_message(user_id, str(result))
-
-    async def send_stream(self, chunk: dict[str, Any]) -> None:
-        """流式输出 chunk 到企业微信。
-
-        企业微信不支持逐 token 流式推送，因此累积文本，
-        在流结束时一次性发送。
-
-        Args:
-            chunk: 流式数据块
-        """
-        text = chunk.get("text", "")
-        self._accumulated_text += text
-
-        # 如果标记了 flush 或 stream end，发送累积内容
-        if chunk.get("flush", False) or chunk.get("type") == "end":  # noqa: SIM102
-            if self._channel_user_id and self._accumulated_text:
-                await self._stream_client.send_message(self._channel_user_id, self._accumulated_text)
-                self._accumulated_text = ""
+    async def _deliver(self, target: Any, text: str, state: dict[str, Any]) -> None:
+        """经企业微信客户端投递（纯文本通道，不消费 state）。"""
+        await self._stream_client.send_message(target, text)
 
 
 class WeComAdapter(BaseComboAdapter):

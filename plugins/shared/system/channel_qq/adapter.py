@@ -1,12 +1,14 @@
 """QQ 通道适配器。
 
 实现 IInputAdapter 和 IOutputAdapter 接口，将 QQ（OneBot v11 协议）消息
-适配为管道引擎可用的输入/输出通道。
+适配为管道引擎可用的输入/输出通道。收发骨架来自 channel_common
+共享包（QueuedChannelInputAdapter / BufferedChannelOutputAdapter），
+本文件只承载 QQ 特有的差异点：原始报文解析、数字用户号校验与
+OneBot API 投递（含 private/group 消息类型路由）。
 
 采用组合模式（与 FeishuAdapter/DingTalkAdapter 一致）：
 - QQInputAdapter: 从消息队列获取消息，转换为管道初始 state
-- QQOutputAdapter: 通过 OneBot HTTP API 发送响应（0.2 C1 合流迁入本文件，
-  接口 IOutputAdapter 来自 channel_common 共享包）
+- QQOutputAdapter: 通过 OneBot HTTP API 发送响应
 - QQAdapter: 组合入口，管理生命周期
 
 消息流：
@@ -16,56 +18,21 @@ receive() → 管道 state → 管道处理 → output_adapter.send() → HTTP A
 
 from __future__ import annotations
 
-import asyncio
 import logging
 import uuid
 from typing import Any
 
 from base_combo_adapter import BaseComboAdapter
 from helpers import _extract_qq_text
-from input_adapter import IInputAdapter
+from input_adapter import QueuedChannelInputAdapter, build_channel_state
 from onebot_client import OneBotClient
-from output_adapter import IOutputAdapter
-
-from agentos_plugin_sdk.pipeline_types import StateKeys
+from output_adapter import BufferedChannelOutputAdapter
 
 logger = logging.getLogger(__name__)
 
 
-class QQInputAdapter(IInputAdapter):
-    """QQ 输入适配器。
-
-    从 QQ 消息队列中获取消息，转换为管道初始 state。
-    使用 asyncio.Queue 作为消息缓冲区。
-
-    Attributes:
-        _message_queue: 消息缓冲队列
-    """
-
-    def __init__(self) -> None:
-        """初始化 QQ 输入适配器。"""
-        self._message_queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
-
-    async def enqueue_message(self, raw_message: dict[str, Any]) -> None:
-        """将 QQ 消息放入处理队列。
-
-        由 OneBotClient 的 on_message 回调调用。
-
-        Args:
-            raw_message: OneBot v11 消息事件数据
-        """
-        await self._message_queue.put(raw_message)
-
-    async def receive(self) -> dict[str, Any]:
-        """从队列中取出下一条 QQ 消息，转换为管道初始 state。
-
-        阻塞等待直到有消息可用。
-
-        Returns:
-            管道初始 state 字典
-        """
-        raw_message = await self._message_queue.get()
-        return self._raw_to_state(raw_message)
+class QQInputAdapter(QueuedChannelInputAdapter):
+    """QQ 输入适配器：队列缓冲 + OneBot v11 报文解析（_raw_to_state）。"""
 
     @staticmethod
     def _raw_to_state(raw: dict[str, Any]) -> dict[str, Any]:
@@ -87,39 +54,32 @@ class QQInputAdapter(IInputAdapter):
         # 提取文本内容
         user_input = _extract_qq_text(raw)
 
-        # 使用 message_id 作为 session_id
-        session_id = message_id
-
-        state: dict[str, Any] = {
-            "user_input": user_input,
-            StateKeys.CORE_TYPE: "llm_call",
-            StateKeys.SESSION_ID: session_id,
-            StateKeys.SHOULD_STOP: False,
-            "iteration": 1,
-            "_channel_type": "qq",
-            "_channel_user_id": user_id,
-            "_message_type": message_type,
-            "_raw_message": raw,
-        }
-
+        extra: dict[str, Any] = {"_message_type": message_type}
         # 群消息额外携带 group_id
         if group_id is not None:
-            state["_group_id"] = group_id
+            extra["_group_id"] = group_id
 
-        return state
+        return build_channel_state(
+            channel_type="qq",
+            user_input=user_input,
+            session_id=message_id,
+            channel_user_id=user_id,
+            raw_message=raw,
+            **extra,
+        )
 
 
-class QQOutputAdapter(IOutputAdapter):
-    """QQ 输出适配器。
+class QQOutputAdapter(BufferedChannelOutputAdapter):
+    """QQ 输出适配器：经 OneBot HTTP API 投递文本。
 
-    通过 OneBot HTTP API 发送管道处理结果。
-
-    Attributes:
-        _onebot_client: OneBot 客户端
-        _channel_user_id: 当前消息的目标用户 ID
-        _message_type: 当前消息类型（private/group）
-        _accumulated_text: 流式累积的文本
+    渠道特有语义：
+    - 目标用户号必须为整数，非数字目标跳过投递；
+    - 消息类型按来源路由（private/group）：send() 路径优先取
+      state 的 _message_type，回退实例属性；stream 路径无 state，
+      直接使用实例属性。
     """
+
+    channel_name = "QQ"
 
     def __init__(self, onebot_client: OneBotClient) -> None:
         """初始化 QQ 输出适配器。
@@ -127,18 +87,9 @@ class QQOutputAdapter(IOutputAdapter):
         Args:
             onebot_client: OneBot 客户端实例
         """
+        super().__init__()
         self._onebot_client = onebot_client
-        self._channel_user_id: str = ""
         self._message_type: str = "private"
-        self._accumulated_text: str = ""
-
-    def set_channel_user_id(self, user_id: str) -> None:
-        """设置当前消息的目标用户 ID。
-
-        Args:
-            user_id: QQ 用户号
-        """
-        self._channel_user_id = user_id
 
     def set_message_type(self, message_type: str) -> None:
         """设置当前消息类型。
@@ -148,77 +99,29 @@ class QQOutputAdapter(IOutputAdapter):
         """
         self._message_type = message_type
 
-    async def send(self, state: dict[str, Any]) -> None:
-        """输出管道最终 state 到 QQ。
-
-        失败语义契约：底层 OneBot API 发送失败时异常原样传播（不吞错、
-        不静默丢消息），管道/gateway 调用方可感知未送达。
+    def _resolve_target(self, raw_user_id: str) -> int | None:
+        """OneBot API 要求数字用户号，非数字目标视为无效。
 
         Args:
-            state: 管道最终 state 字典
+            raw_user_id: state 内解析到的原始用户标识
 
-        Raises:
-            RuntimeError: OneBot API 发送失败（经 OneBotClient.send_message
-                契约上抛）
+        Returns:
+            整数用户号；非数字返回 None（调用方跳过投递）
         """
-        user_id_str = state.get("_channel_user_id", self._channel_user_id)
-        if not user_id_str:
-            logger.warning("No user_id for QQ output, skipping")
-            return
-
         try:
-            user_id = int(user_id_str)
+            return int(raw_user_id)
         except (ValueError, TypeError):
-            logger.warning("Invalid QQ user_id: %s, skipping", user_id_str)
-            return
+            logger.warning("Invalid QQ user_id: %s, skipping", raw_user_id)
+            return None
 
+    async def _deliver(self, target: Any, text: str, state: dict[str, Any]) -> None:
+        """经 OneBot 客户端投递，消息类型按消息来源路由。"""
         msg_type = state.get("_message_type", self._message_type)
-
-        error = state.get(StateKeys.RAW_ERROR)
-        if error:
-            await self._onebot_client.send_message(
-                user_id=user_id,
-                content=f"❌ 错误: {error}",
-                message_type=msg_type,
-            )
-            return
-
-        # 发送正常结果
-        result = state.get(StateKeys.RAW_RESULT, "")
-        if result:
-            await self._onebot_client.send_message(
-                user_id=user_id,
-                content=str(result),
-                message_type=msg_type,
-            )
-
-    async def send_stream(self, chunk: dict[str, Any]) -> None:
-        """流式输出 chunk 到 QQ。
-
-        QQ 不支持逐 token 流式推送，因此累积文本，
-        在流结束时一次性发送。
-
-        Args:
-            chunk: 流式数据块
-        """
-        text = chunk.get("text", "")
-        self._accumulated_text += text
-
-        # 如果标记了 flush 或 stream end，发送累积内容
-        should_flush = chunk.get("flush", False) or chunk.get("type") == "end"
-        if should_flush and self._channel_user_id and self._accumulated_text:
-            try:
-                user_id = int(self._channel_user_id)
-            except (ValueError, TypeError):
-                logger.warning("Invalid QQ user_id for stream: %s", self._channel_user_id)
-                return
-
-            await self._onebot_client.send_message(
-                user_id=user_id,
-                content=self._accumulated_text,
-                message_type=self._message_type,
-            )
-            self._accumulated_text = ""
+        await self._onebot_client.send_message(
+            user_id=target,
+            content=text,
+            message_type=msg_type,
+        )
 
 
 class QQAdapter(BaseComboAdapter):

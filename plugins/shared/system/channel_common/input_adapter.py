@@ -14,10 +14,18 @@
 - health_check(): 检查适配器是否健康
 - is_connected: 适配器是否已连接
 - get_status(): 获取适配器状态信息
+
+具体实现沉淀：
+- QueuedChannelInputAdapter: 队列缓冲型 IM 渠道（dingtalk/feishu/wecom/qq）
+  共用的收消息机制，渠道差异点（原始报文解析）保留在子类 _raw_to_state。
+- build_channel_state(): 四渠道同构的管道初始 state 公共信封构造器。
 """
 
+import asyncio
 from abc import ABC, abstractmethod
 from typing import Any
+
+from agentos_plugin_sdk.pipeline_types import StateKeys
 
 
 class IInputAdapter(ABC):
@@ -84,3 +92,92 @@ class IInputAdapter(ABC):
             "connected": self.is_connected,
             "healthy": True,
         }
+
+
+def build_channel_state(
+    *,
+    channel_type: str,
+    user_input: str,
+    session_id: str,
+    channel_user_id: str,
+    raw_message: dict[str, Any],
+    **extra: Any,
+) -> dict[str, Any]:
+    """组装四渠道同构的管道初始 state 公共信封。
+
+    渠道特有的附加键经 **extra 注入（如 dingtalk 的 _sender_id、
+    qq 的 _message_type），置于公共键之后。
+
+    Args:
+        channel_type: 通道类型标识（dingtalk/feishu/wecom/qq）
+        user_input: 提取后的用户输入文本
+        session_id: 会话唯一标识
+        channel_user_id: 渠道用户标识（回复目标）
+        raw_message: 原始报文（透传给管道供调试/追踪）
+        **extra: 渠道特有附加键
+
+    Returns:
+        管道初始 state 字典
+    """
+    return {
+        "user_input": user_input,
+        StateKeys.CORE_TYPE: "llm_call",
+        StateKeys.SESSION_ID: session_id,
+        StateKeys.SHOULD_STOP: False,
+        "iteration": 1,
+        "_channel_type": channel_type,
+        "_channel_user_id": channel_user_id,
+        **extra,
+        "_raw_message": raw_message,
+    }
+
+
+class QueuedChannelInputAdapter(IInputAdapter):
+    """队列缓冲型输入适配器公共基类（dingtalk/feishu/wecom/qq 共用）。
+
+    沉淀四渠道逐字复制的收消息机制：
+
+    - asyncio.Queue 缓冲外部回调投递的原始报文；
+    - enqueue_message(): 供渠道客户端的 on_message 回调写入；
+    - receive(): 阻塞取下一条并经子类 _raw_to_state 转为管道 state。
+
+    渠道差异点（原始报文字段解析）保留在子类 _raw_to_state，
+    信封组装统一走 build_channel_state()。
+    """
+
+    def __init__(self) -> None:
+        """初始化输入适配器：创建消息缓冲队列。"""
+        self._message_queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
+
+    async def enqueue_message(self, raw_message: dict[str, Any]) -> None:
+        """将原始消息放入处理队列。
+
+        由各渠道客户端（Stream 客户端 / OneBot 客户端）的
+        on_message 回调调用。
+
+        Args:
+            raw_message: 渠道原始消息事件数据
+        """
+        await self._message_queue.put(raw_message)
+
+    async def receive(self) -> dict[str, Any]:
+        """从队列中取出下一条渠道消息，转换为管道初始 state。
+
+        阻塞等待直到有消息可用。
+
+        Returns:
+            管道初始 state 字典
+        """
+        return self._raw_to_state(await self._message_queue.get())
+
+    @staticmethod
+    @abstractmethod
+    def _raw_to_state(raw: dict[str, Any]) -> dict[str, Any]:
+        """将渠道原始消息转换为管道 state（渠道各自实现解析）。
+
+        Args:
+            raw: 渠道原始消息事件数据
+
+        Returns:
+            管道初始 state 字典（经 build_channel_state 组装）
+        """

@@ -1,7 +1,9 @@
 """飞书通道适配器。
 
 实现 IInputAdapter 和 IOutputAdapter 接口，将飞书 Stream 消息
-适配为管道引擎可用的输入/输出通道。
+适配为管道引擎可用的输入/输出通道。收发骨架来自 channel_common
+共享包（QueuedChannelInputAdapter / BufferedChannelOutputAdapter），
+本文件只承载飞书特有的差异点：原始报文解析与 Stream 客户端投递。
 
 采用组合模式（与 WebSocketAdapter 一致）：
 - FeishuInputAdapter: 从飞书消息队列获取消息
@@ -11,55 +13,21 @@
 
 from __future__ import annotations
 
-import asyncio
+import json  # noqa: PLC0415
 import logging
 import uuid
 from typing import Any
 
 from base_combo_adapter import BaseComboAdapter
-from input_adapter import IInputAdapter
-from output_adapter import IOutputAdapter
+from input_adapter import QueuedChannelInputAdapter, build_channel_state
+from output_adapter import BufferedChannelOutputAdapter
 from stream_client import FeishuStreamClient
-
-from agentos_plugin_sdk.pipeline_types import StateKeys
 
 logger = logging.getLogger(__name__)
 
 
-class FeishuInputAdapter(IInputAdapter):
-    """飞书输入适配器。
-
-    从飞书消息队列中获取消息，转换为管道初始 state。
-    使用 asyncio.Queue 作为消息缓冲区。
-
-    Attributes:
-        _message_queue: 消息缓冲队列
-    """
-
-    def __init__(self) -> None:
-        """初始化飞书输入适配器。"""
-        self._message_queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
-
-    async def enqueue_message(self, raw_message: dict[str, Any]) -> None:
-        """将飞书消息放入处理队列。
-
-        由 FeishuStreamClient 的 on_message 回调调用。
-
-        Args:
-            raw_message: 飞书 im.message.receive_v1 事件数据
-        """
-        await self._message_queue.put(raw_message)
-
-    async def receive(self) -> dict[str, Any]:
-        """从队列中取出下一条飞书消息，转换为管道初始 state。
-
-        阻塞等待直到有消息可用。
-
-        Returns:
-            管道初始 state 字典
-        """
-        raw_message = await self._message_queue.get()
-        return self._raw_to_state(raw_message)
+class FeishuInputAdapter(QueuedChannelInputAdapter):
+    """飞书输入适配器：队列缓冲 + 飞书信封解析（_raw_to_state）。"""
 
     @staticmethod
     def _raw_to_state(raw: dict[str, Any]) -> dict[str, Any]:
@@ -84,28 +52,22 @@ class FeishuInputAdapter(IInputAdapter):
 
         session_id = raw.get("header", {}).get("event_id", uuid.uuid4().hex[:12])
 
-        return {
-            "user_input": user_input,
-            StateKeys.CORE_TYPE: "llm_call",
-            StateKeys.SESSION_ID: session_id,
-            StateKeys.SHOULD_STOP: False,
-            "iteration": 1,
-            "_channel_type": "feishu",
-            "_channel_user_id": open_id,
-            "_raw_message": raw,
-        }
+        return build_channel_state(
+            channel_type="feishu",
+            user_input=user_input,
+            session_id=session_id,
+            channel_user_id=open_id,
+            raw_message=raw,
+        )
 
 
-class FeishuOutputAdapter(IOutputAdapter):
-    """飞书输出适配器。
+class FeishuOutputAdapter(BufferedChannelOutputAdapter):
+    """飞书输出适配器：经 FeishuStreamClient 投递文本。
 
-    通过飞书 Stream 客户端发送管道处理结果。
-
-    Attributes:
-        _stream_client: 飞书 Stream 客户端
-        _channel_user_id: 当前消息的目标用户 ID
-        _accumulated_text: 流式累积的文本
+    目标用户标识为飞书 open_id。
     """
+
+    channel_name = "feishu"
 
     def __init__(self, stream_client: FeishuStreamClient) -> None:
         """初始化飞书输出适配器。
@@ -113,62 +75,12 @@ class FeishuOutputAdapter(IOutputAdapter):
         Args:
             stream_client: 飞书 Stream 客户端实例
         """
+        super().__init__()
         self._stream_client = stream_client
-        self._channel_user_id: str = ""
-        self._accumulated_text: str = ""
 
-    def set_channel_user_id(self, user_id: str) -> None:
-        """设置当前消息的目标用户 ID。
-
-        Args:
-            user_id: 飞书用户 open_id
-        """
-        self._channel_user_id = user_id
-
-    async def send(self, state: dict[str, Any]) -> None:
-        """输出管道最终 state 到飞书。
-
-        失败语义契约：底层渠道 API 发送失败时异常原样传播（不吞错、
-        不静默丢消息），管道/gateway 调用方可感知未送达。
-
-        Args:
-            state: 管道最终 state 字典
-
-        Raises:
-            RuntimeError: 渠道 API 发送失败（经 FeishuStreamClient.send_message 契约上抛）
-        """
-        user_id = state.get("_channel_user_id", self._channel_user_id)
-        if not user_id:
-            logger.warning("No user_id for feishu output, skipping")
-            return
-
-        error = state.get(StateKeys.RAW_ERROR)
-        if error:
-            await self._stream_client.send_message(user_id, f"❌ 错误: {error}")
-            return
-
-        # 发送正常结果
-        result = state.get(StateKeys.RAW_RESULT, "")
-        if result:
-            await self._stream_client.send_message(user_id, str(result))
-
-    async def send_stream(self, chunk: dict[str, Any]) -> None:
-        """流式输出 chunk 到飞书。
-
-        飞书不完全支持逐 token 流式推送，因此累积文本，
-        在流结束时一次性发送。如果 chunk 中有 flush 标记则立即发送。
-
-        Args:
-            chunk: 流式数据块
-        """
-        text = chunk.get("text", "")
-        self._accumulated_text += text
-
-        # 如果标记了 flush 或 stream end，发送累积内容
-        if chunk.get("flush", False) or chunk.get("type") == "end":  # noqa: SIM102
-            if self._channel_user_id and self._accumulated_text:
-                await self._stream_client.send_message(self._channel_user_id, self._accumulated_text)
-                self._accumulated_text = ""
+    async def _deliver(self, target: Any, text: str, state: dict[str, Any]) -> None:
+        """经飞书 Stream 客户端投递（纯文本通道，不消费 state）。"""
+        await self._stream_client.send_message(target, text)
 
 
 class FeishuAdapter(BaseComboAdapter):
@@ -237,8 +149,6 @@ def _extract_text(msg_type: str, content_str: str) -> str:
     Returns:
         提取的纯文本
     """
-    import json  # noqa: PLC0415
-
     try:
         parsed = json.loads(content_str)
     except (json.JSONDecodeError, TypeError):
