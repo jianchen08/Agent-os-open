@@ -1030,6 +1030,9 @@ class _BaseLiteLLMAdapter:
                                 len(_tc),
                                 ", ".join(_tc_summary),
                             )
+                        # finish_reason 与 tool_calls 无关：终止 chunk（stop/length）
+                        # 不携带 tool_calls 也须记录（output_truncated 依赖 length 判定）
+                        if _fr:
                             state.finish_reason = _fr
                             _stream_logger.debug(
                                 "[STREAM][RECV] #%d finish=%s (累计tc=%d)",

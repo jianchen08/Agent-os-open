@@ -997,7 +997,7 @@ class LLMCore(ICorePlugin):
         # 任务域暂停走任务既有机制（pause_guard/suspend_pipeline），不被
         # 聊天停止误伤。
         run_id = ctx.state.get("run_id", "") or ""
-        if run_id and not ctx.state.get("task_id"):
+        if run_id and not ctx.state.get(StateKeys.TASK_ID):
             kwargs["run_id"] = run_id
 
         # 调用 llm.complete_stream：流式事件经 llm_service 内部 event-bus
