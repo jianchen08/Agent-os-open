@@ -1651,13 +1651,13 @@ impl SqliteStore {
         Ok(())
     }
 
-    /// 级联删除会话及其全部关联数据（主管道 + 子任务管道的 messages/traces/runs/state）。
+    /// 级联删除会话及其全部关联数据（主管道 + 子任务管道的执行数据，含 state）。
     ///
     /// 通过 `pipeline_sessions` 映射表按 thread_id 找到该会话下所有 pipeline_id
-    /// （主管道 + 子管道，无需父子关系），再级联清理它们产生的 messages / traces /
-    /// branches / runs，最后删映射表与 sessions 行。
-    /// 无记录时同样返回 Ok(())（幂等）。tenant_id 由调用方在 spawn_blocking 前解析。
-    /// 单次事务包裹，失败回滚。
+    /// （主管道 + 子管道，无需父子关系；sessions.pipeline_ids JSON 兜底防主管道
+    /// 未写映射），整组交给 [`Self::delete_pipelines_cascade`] 清理，最后删
+    /// sessions 行。无记录时同样返回 Ok(())（幂等）。tenant_id 由调用方在
+    /// spawn_blocking 前解析。单次事务包裹，失败回滚。
     fn delete_session_inner(&self, thread_id: &str, tenant_id: &str) -> Result<(), StorageError> {
         let mut conn = self.conn.lock();
         let tx = conn
@@ -1678,43 +1678,10 @@ impl SqliteStore {
                 .map_err(|e| StorageError::Database(format!("commit: {e}")));
         }
 
-        // 3. 收集这些 pipeline_id 产生的 run_id（traces/branches/summaries/runs 按 run_id 删）
-        let run_ids: Vec<String> = run_ids_of_pipelines(&tx, &pipeline_ids, tenant_id)?;
+        // 2. 级联清理全部关联管道的执行数据，清单见 delete_pipelines_cascade
+        Self::delete_pipelines_cascade(&tx, &pipeline_ids, tenant_id)?;
 
-        if !run_ids.is_empty() {
-            Self::delete_in_clause(
-                &tx,
-                "DELETE FROM traces WHERE run_id IN ({placeholders})",
-                &run_ids,
-                "",
-            )?;
-            Self::delete_in_clause(
-                &tx,
-                "DELETE FROM branches WHERE run_id IN ({placeholders})",
-                &run_ids,
-                "",
-            )?;
-            Self::delete_in_clause(
-                &tx,
-                "DELETE FROM runs WHERE run_id IN ({placeholders})",
-                &run_ids,
-                "",
-            )?;
-        }
-
-        // 4. messages 按 pipeline_id 删（含主管道 + 子管道）
-        Self::delete_in_clause(
-            &tx,
-            "DELETE FROM message_slots WHERE pipeline_id IN ({placeholders}) AND tenant_id = ?",
-            &pipeline_ids,
-            tenant_id,
-        )?;
-
-        // 5. 清映射表 + 删 sessions 行
-        tx.execute(
-            "DELETE FROM pipeline_sessions WHERE thread_id = ?1 AND tenant_id = ?2",
-            rusqlite::params![thread_id, tenant_id],
-        )?;
+        // 3. 删 sessions 行
         tx.execute(
             "DELETE FROM sessions WHERE thread_id = ?1 AND tenant_id = ?2",
             rusqlite::params![thread_id, tenant_id],
@@ -1726,11 +1693,9 @@ impl SqliteStore {
 
     /// 按 pipeline_id 删除单条管道的全部执行数据（任务删除语义）。
     ///
-    /// 0.2 任务 = 管道（GAP-1）：删除任务即删除其管道数据。清理范围对齐
-    /// `delete_session_inner` 的级联（runs/traces/branches/message_slots/
-    /// pipeline_sessions），另补 `pipeline_state`/`pipeline_checkpoints`
-    /// 两张 state 表（会话删除按 thread 级联时这两张表由 clear-all 兜底，
-    /// 单管道删除必须自清，否则冷读兜底会从残留 checkpoint 重建幽灵任务）。
+    /// 0.2 任务 = 管道（GAP-1）：删除任务即删除其管道数据。级联清单与
+    /// `delete_session_inner` 共用 [`Self::delete_pipelines_cascade`]，
+    /// 两份清单不得各自增删表。
     /// 单次事务包裹，失败回滚；无记录时返回 Ok(())（幂等）。
     fn delete_pipeline_inner(
         &self,
@@ -1742,55 +1707,48 @@ impl SqliteStore {
             .transaction()
             .map_err(|e| StorageError::Database(format!("begin tx: {e}")))?;
 
-        // 1. 收集该管道产生的 run_id（traces/branches/runs 按 run_id 删）
-        let run_ids: Vec<String> =
-            run_ids_of_pipelines(&tx, &[pipeline_id.to_string()], tenant_id)?;
-
-        if !run_ids.is_empty() {
-            Self::delete_in_clause(
-                &tx,
-                "DELETE FROM traces WHERE run_id IN ({placeholders})",
-                &run_ids,
-                "",
-            )?;
-            Self::delete_in_clause(
-                &tx,
-                "DELETE FROM branches WHERE run_id IN ({placeholders})",
-                &run_ids,
-                "",
-            )?;
-            Self::delete_in_clause(
-                &tx,
-                "DELETE FROM runs WHERE run_id IN ({placeholders})",
-                &run_ids,
-                "",
-            )?;
-        }
-
-        // 2. messages 按 pipeline_id 删
-        tx.execute(
-            "DELETE FROM message_slots WHERE pipeline_id = ?1 AND tenant_id = ?2",
-            rusqlite::params![pipeline_id, tenant_id],
-        )?;
-
-        // 3. state 表（pipeline_state 标量 + checkpoint 快照）——冷读兜底数据源
-        tx.execute(
-            "DELETE FROM pipeline_state WHERE pipeline_id = ?1 AND tenant_id = ?2",
-            rusqlite::params![pipeline_id, tenant_id],
-        )?;
-        tx.execute(
-            "DELETE FROM pipeline_checkpoints WHERE pipeline_id = ?1 AND tenant_id = ?2",
-            rusqlite::params![pipeline_id, tenant_id],
-        )?;
-
-        // 4. 清映射表（任务管道 thread_id = pipeline_id 自持映射）
-        tx.execute(
-            "DELETE FROM pipeline_sessions WHERE pipeline_id = ?1 AND tenant_id = ?2",
-            rusqlite::params![pipeline_id, tenant_id],
-        )?;
+        Self::delete_pipelines_cascade(&tx, &[pipeline_id.to_string()], tenant_id)?;
 
         tx.commit()
             .map_err(|e| StorageError::Database(format!("commit: {e}")))
+    }
+
+    /// 会话删除 / 任务删除共用的管道级联清理：删净一组管道在全部执行数据表中的行。
+    ///
+    /// run 域（traces/branches/runs）按 message_slots 反查的 run_id 删；
+    /// 管道域（message_slots/pipeline_state/pipeline_checkpoints/
+    /// pipeline_pending_inputs/pipeline_sessions）按 pipeline_id 删。
+    /// state 两表与 pending 队列不清会留幽灵任务：任务列表从 pipeline_state
+    /// 的 `task.*` 键派生；pending 队列重启后会被消费续跑，令已删任务复活。
+    /// `blobs` 是内容寻址去重存储、无管道外键，不入级联（仅 clear-all 清）。
+    /// 事务由调用方开启；`pipeline_ids` 须非空（空 IN 列表非法）。
+    fn delete_pipelines_cascade(
+        tx: &rusqlite::Transaction<'_>,
+        pipeline_ids: &[String],
+        tenant_id: &str,
+    ) -> Result<(), StorageError> {
+        // run 域数据按 run_id 删
+        let run_ids: Vec<String> = run_ids_of_pipelines(tx, pipeline_ids, tenant_id)?;
+        if !run_ids.is_empty() {
+            for sql in [
+                "DELETE FROM traces WHERE run_id IN ({placeholders})",
+                "DELETE FROM branches WHERE run_id IN ({placeholders})",
+                "DELETE FROM runs WHERE run_id IN ({placeholders})",
+            ] {
+                Self::delete_in_clause(tx, sql, &run_ids, "")?;
+            }
+        }
+        // 管道域数据按 pipeline_id 删
+        for sql in [
+            "DELETE FROM message_slots WHERE pipeline_id IN ({placeholders}) AND tenant_id = ?",
+            "DELETE FROM pipeline_state WHERE pipeline_id IN ({placeholders}) AND tenant_id = ?",
+            "DELETE FROM pipeline_checkpoints WHERE pipeline_id IN ({placeholders}) AND tenant_id = ?",
+            "DELETE FROM pipeline_pending_inputs WHERE pipeline_id IN ({placeholders}) AND tenant_id = ?",
+            "DELETE FROM pipeline_sessions WHERE pipeline_id IN ({placeholders}) AND tenant_id = ?",
+        ] {
+            Self::delete_in_clause(tx, sql, pipeline_ids, tenant_id)?;
+        }
+        Ok(())
     }
 
     /// 辅助：按 IN (?, ?, ...) 占位符执行 DELETE。
@@ -3030,6 +2988,115 @@ mod tests {
         );
     }
 
+    /// 回归测试：delete_session 级联必须覆盖 state 两表与 pending 输入队列
+    /// （pipeline_state / pipeline_checkpoints / pipeline_pending_inputs）。
+    ///
+    /// 任务列表从 pipeline_state 的 `task.*` 键派生，pending 队列重启后被
+    /// 消费续跑——任一残留都会让已删会话的任务以幽灵形态存活（重启也不
+    /// 消失）。隔离对照：其他会话管道的同表行不得误删。
+    #[tokio::test]
+    async fn test_delete_session_cascades_state_and_pending_tables() {
+        let store = SqliteStore::open_memory().unwrap();
+        let tid = "thread-ghost-cascade";
+        let now = chrono::Utc::now().to_rfc3339();
+
+        {
+            let conn = store.conn.lock();
+            conn.execute(
+                "INSERT INTO sessions (thread_id, title, current_state, tenant_id, created_at, updated_at) \
+                 VALUES (?1, ?2, 'active', 'default', ?3, ?3)",
+                rusqlite::params![tid, "ghost-cascade", now],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO pipeline_sessions (pipeline_id, thread_id, tenant_id, created_at) \
+                 VALUES ('p-ghost', ?1, 'default', ?2)",
+                rusqlite::params![tid, now],
+            )
+            .unwrap();
+            // 隔离对照：属于其他会话的管道
+            conn.execute(
+                "INSERT INTO pipeline_sessions (pipeline_id, thread_id, tenant_id, created_at) \
+                 VALUES ('p-keep', 'thread-other', 'default', ?1)",
+                rusqlite::params![now],
+            )
+            .unwrap();
+            // 目标管道：state 标量 + checkpoint 快照 + pending 输入各一行（应全删）
+            conn.execute(
+                "INSERT INTO pipeline_state (tenant_id, pipeline_id, field_key, field_value, updated_at) \
+                 VALUES ('default', 'p-ghost', 'task.status', 'running', ?1)",
+                rusqlite::params![now],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO pipeline_checkpoints (tenant_id, pipeline_id, checkpoint_id, step_no, state_json, created_at) \
+                 VALUES ('default', 'p-ghost', 'cp-ghost', 0, '{}', ?1)",
+                rusqlite::params![now],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO pipeline_pending_inputs (id, pipeline_id, tenant_id, user_id, content, thread, source, created_at) \
+                 VALUES ('pin-ghost', 'p-ghost', 'default', 'u1', 'hi', ?1, 'chat', ?2)",
+                rusqlite::params![tid, now],
+            )
+            .unwrap();
+            // 对照管道：同表各留一行（不应误删）
+            conn.execute(
+                "INSERT INTO pipeline_state (tenant_id, pipeline_id, field_key, field_value, updated_at) \
+                 VALUES ('default', 'p-keep', 'task.status', 'running', ?1)",
+                rusqlite::params![now],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO pipeline_checkpoints (tenant_id, pipeline_id, checkpoint_id, step_no, state_json, created_at) \
+                 VALUES ('default', 'p-keep', 'cp-keep', 0, '{}', ?1)",
+                rusqlite::params![now],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO pipeline_pending_inputs (id, pipeline_id, tenant_id, user_id, content, thread, source, created_at) \
+                 VALUES ('pin-keep', 'p-keep', 'default', 'u1', 'hi', 'thread-other', 'chat', ?1)",
+                rusqlite::params![now],
+            )
+            .unwrap();
+        }
+
+        store.delete_session(tid).await.unwrap();
+
+        let conn = store.conn.lock();
+        let count = |sql: &str| -> i64 { conn.query_row(sql, [], |r| r.get::<_, i64>(0)).unwrap() };
+        assert_eq!(
+            count("SELECT COUNT(*) FROM pipeline_state WHERE pipeline_id = 'p-ghost'"),
+            0,
+            "目标管道 state 应删除（任务面板幽灵行数据源）"
+        );
+        assert_eq!(
+            count("SELECT COUNT(*) FROM pipeline_checkpoints WHERE pipeline_id = 'p-ghost'"),
+            0,
+            "目标管道 checkpoint 应删除（冷读兜底会重建幽灵任务）"
+        );
+        assert_eq!(
+            count("SELECT COUNT(*) FROM pipeline_pending_inputs WHERE pipeline_id = 'p-ghost'"),
+            0,
+            "目标管道 pending 输入应删除（重启后被消费令任务复活）"
+        );
+        assert_eq!(
+            count("SELECT COUNT(*) FROM pipeline_state WHERE pipeline_id = 'p-keep'"),
+            1,
+            "其他会话管道 state 不应误删"
+        );
+        assert_eq!(
+            count("SELECT COUNT(*) FROM pipeline_checkpoints WHERE pipeline_id = 'p-keep'"),
+            1,
+            "其他会话管道 checkpoint 不应误删"
+        );
+        assert_eq!(
+            count("SELECT COUNT(*) FROM pipeline_pending_inputs WHERE pipeline_id = 'p-keep'"),
+            1,
+            "其他会话管道 pending 输入不应误删"
+        );
+    }
+
     /// 回归测试：损坏的 SQLite 文件不应导致 kernel 启动崩溃（issue: kernel 启动后 /health 不响应）。
     ///
     /// 背景：`.kernel_02.log` 末行 `Error: Database("database disk image is malformed")` ——
@@ -3095,7 +3162,7 @@ mod tests {
 
     /// 任务删除语义：delete_pipeline 按 pipeline_id 级联清空
     /// runs/traces/branches/message_slots/pipeline_state/pipeline_checkpoints/
-    /// pipeline_sessions，单事务；无记录时幂等返回 Ok。
+    /// pipeline_pending_inputs/pipeline_sessions，单事务；无记录时幂等返回 Ok。
     #[tokio::test]
     async fn test_delete_pipeline_cascades_all_data() {
         let store = SqliteStore::open_memory().unwrap();
@@ -3139,6 +3206,11 @@ mod tests {
                 rusqlite::params![pid, now],
             )
             .unwrap();
+            conn.execute(
+                "INSERT INTO pipeline_pending_inputs (id, pipeline_id, tenant_id, user_id, content, thread, source, created_at)                  VALUES ('pin-del-1', ?1, 'default', 'u1', 'hi', 'thread-del', 'chat', ?2)",
+                rusqlite::params![pid, now],
+            )
+            .unwrap();
         }
 
         store.delete_pipeline(pid).await.unwrap();
@@ -3163,6 +3235,11 @@ mod tests {
             count("SELECT COUNT(*) FROM pipeline_checkpoints"),
             0,
             "checkpoints 应删除"
+        );
+        assert_eq!(
+            count("SELECT COUNT(*) FROM pipeline_pending_inputs"),
+            0,
+            "pending 输入应删除"
         );
     }
 
