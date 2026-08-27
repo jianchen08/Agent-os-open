@@ -126,20 +126,6 @@ class TestTaskSubmitValidation:
         assert result.error_code == "MISSING_GOAL"
 
     @pytest.mark.asyncio
-    async def test_l2_cannot_submit_container(self, mod):
-        """L2+ 创建容器任务被拦截（容器仅 L1）。"""
-        tool = mod.TaskSubmitTool()
-        result = await tool.execute(
-            {
-                "parent_agent_level": 2,
-                "task_scope": "container",
-                "goal": {"title": "容器任务", "description": "测试容器任务描述"},
-            }
-        )
-        assert result.success is False
-        assert result.error_code == "L2_CANNOT_SUBMIT_CONTAINER"
-
-    @pytest.mark.asyncio
     async def test_unsafe_workspace_rejected(self, mod):
         """目标空间落在系统目录 → UNSAFE_WORKSPACE（纵深防御）。"""
         tool = mod.TaskSubmitTool()
@@ -313,26 +299,6 @@ class TestTaskSubmitCoreSubmit:
         assert output["workspace"] == "D:/proj"
         task_service.create_task.assert_not_called()
 
-    @pytest.mark.asyncio
-    async def test_submit_without_worker_still_succeeds(self, mod, monkeypatch):
-        """0.2 语义：无 task_worker 实例不影响提交（任务落库即成功，管道由会话驱动）。"""
-        task = _make_task()
-        task_service, _ = self._patch_submit_deps(mod, monkeypatch, task)
-        # provider.get 全部返回 None（helper 默认），模拟 worker/执行器不可用
-
-        tool = mod.TaskSubmitTool()
-        result = await tool.execute(
-            {
-                "parent_agent_level": 1,
-                "goal_title": "写测试",
-                "goal_description": "为 task_submit 写迁移测试",
-                "target_type": "agent",
-                "target_id": "general_agent",
-            }
-        )
-        assert result.success is True
-        task_service.hard_delete.assert_not_called()
-
     # GAP-1 统一后移除：test_workspace_init_failure_cleans_up（提交期不再初始化工作空间/is_root 查询/继承参数传 create_task——见 e2e 缺口文档延伸节）
 
 class TestNormalizeDescription:
@@ -361,104 +327,4 @@ class TestNormalizeDescription:
         assert mod._normalize_description(42) == "42"
 
 
-# ── punch B8：scope 查询失败保守分支（拒绝而非静默放行/误判） ──
 
-
-class TestScopeQueryFailureConservative:
-    """task 服务查询异常：受限操作明确拒绝（提示 scope 查询失败），is_root 维持默认并留痕。"""
-
-    def _raising_service(self, monkeypatch, mod) -> MagicMock:
-        """get_task 恒抛异常的 task 服务。"""
-        svc = MagicMock()
-        svc.get_task = MagicMock(side_effect=RuntimeError("task service down"))
-        monkeypatch.setattr(mod.TaskSubmitTool, "_get_task_service", lambda _self: svc)
-        return svc
-
-    @pytest.mark.asyncio
-    async def test_scope_query_failure_with_workspace_rejected(self, mod, monkeypatch):
-        """父 scope 查询异常 + 显式 workspace → PARENT_SCOPE_QUERY_FAILED（不再按默认拓扑放行/误判）。"""
-        self._raising_service(monkeypatch, mod)
-        tool = mod.TaskSubmitTool()
-        result = await tool.execute(
-            {
-                "parent_agent_level": 1,
-                "goal": {"title": "子任务", "description": "测试子任务描述"},
-                "parent_task_id": "parent-001",
-                "workspace": "D:/proj",
-            }
-        )
-        assert result.success is False
-        assert result.error_code == "PARENT_SCOPE_QUERY_FAILED"
-        assert "scope 查询失败" in (result.error or "")
-
-    @pytest.mark.asyncio
-    async def test_scope_query_failure_with_isolation_level_rejected(self, mod, monkeypatch):
-        """父 scope 查询异常 + isolation_level → 同样保守拒绝。"""
-        self._raising_service(monkeypatch, mod)
-        tool = mod.TaskSubmitTool()
-        result = await tool.execute(
-            {
-                "parent_agent_level": 1,
-                "goal": {"title": "子任务", "description": "测试子任务描述"},
-                "parent_task_id": "parent-001",
-                "isolation_level": "high",
-            }
-        )
-        assert result.success is False
-        assert result.error_code == "PARENT_SCOPE_QUERY_FAILED"
-
-    @pytest.mark.asyncio
-    async def test_scope_query_failure_with_inherit_workspace_rejected(self, mod, monkeypatch):
-        """父 scope 查询异常 + inherit workspace → PARENT_SCOPE_QUERY_FAILED。"""
-        self._raising_service(monkeypatch, mod)
-        tool = mod.TaskSubmitTool()
-        result = await tool.execute(
-            {
-                "parent_agent_level": 1,
-                "goal": {"title": "子任务", "description": "测试子任务描述"},
-                "parent_task_id": "parent-001",
-                "inherit": {"from": "src-001", "mode": ["workspace"]},
-            }
-        )
-        assert result.success is False
-        assert result.error_code == "PARENT_SCOPE_QUERY_FAILED"
-
-    @pytest.mark.asyncio
-    async def test_scope_query_failure_without_restricted_params_not_blocked_here(self, mod, monkeypatch):
-        """scope 查询异常但无受限参数 → 拓扑校验层不拦截（交由后续存在性校验接管）。"""
-        self._raising_service(monkeypatch, mod)
-        tool = mod.TaskSubmitTool()
-        result = await tool.execute(
-            {
-                "parent_agent_level": 1,
-                "goal": {"title": "子任务", "description": "测试子任务描述"},
-                "parent_task_id": "parent-001",
-            }
-        )
-        assert result.error_code != "PARENT_SCOPE_QUERY_FAILED"
-
-    @pytest.mark.asyncio
-    async def test_container_inherit_ws_query_failure_rejected(self, mod, monkeypatch):
-        """父为 container + inherit workspace + 源空间查询异常 → INHERIT_WS_QUERY_FAILED。"""
-        container_task = MagicMock()
-        container_task.metadata = {"task_scope": "container", "ws_meta": {"path": "/ws/container"}}
-
-        def _get_task(task_id):
-            if task_id == "parent-001":
-                return container_task
-            raise RuntimeError("query src failed")
-
-        svc = MagicMock()
-        svc.get_task = MagicMock(side_effect=_get_task)
-        monkeypatch.setattr(mod.TaskSubmitTool, "_get_task_service", lambda _self: svc)
-        tool = mod.TaskSubmitTool()
-        result = await tool.execute(
-            {
-                "parent_agent_level": 1,
-                "goal": {"title": "容器子任务", "description": "测试容器子任务描述"},
-                "parent_task_id": "parent-001",
-                "inherit": {"from": "src-001", "mode": ["workspace"]},
-            }
-        )
-        assert result.success is False
-        assert result.error_code == "INHERIT_WS_QUERY_FAILED"

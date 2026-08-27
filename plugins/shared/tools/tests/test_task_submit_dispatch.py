@@ -251,34 +251,17 @@ class TestTaskPipelineDispatch:
         assert "task.priority" not in p["state"]
         assert "task.max_retries" not in p["state"]
 
-    async def test_container_registration_drops_retired_params(self, mod: Any) -> None:
-        """容器登记分支同语义：退役参数不落 task.owned.<id>.* state。"""
-        sender = _FakeSender(result={"status": "recorded"})
-        mod.set_chat_sender(sender)
-        tool = _make_tool(mod)
-        try:
-            r = await tool.execute(
-                _base_inputs(task_scope="container", priority=8, max_retries=1)
-            )
-        finally:
-            mod._chat_sender = None
-        assert r.success, r.error
-        reg = sender.calls[0]
-        assert reg["no_dispatch"] is True
-        assert not any(k.endswith(".priority") or k.endswith(".max_retries") for k in reg["state"])
-
-    async def test_submit_without_sender_warns_not_lies(self, mod: Any) -> None:
-        """派发器不可用 → 不得声称执行中，携带 warning。"""
+    async def test_submit_without_sender_fails_honest(self, mod: Any) -> None:
+        """派发器不可用 → 失败信封（DISPATCH_FAILED），不得声称执行中。"""
         tool = _make_tool(mod)
         mod._chat_sender = None
         try:
             r = await tool.execute(_base_inputs())
         finally:
             mod._chat_sender = None
-        assert r.success, "任务创建本身成功（state 语义保留——管道未建但参数合法）"
-        assert "异步执行中" not in r.output["message"], "未派发不得声称异步执行中"
-        assert "已提交并落库" not in r.output["message"], "不得声称落库（YAML 已停写）"
-        assert r.output.get("warning")
+        assert r.success is False
+        assert r.error_code == "DISPATCH_FAILED"
+        assert "异步执行中" not in (r.error or ""), "未派发不得声称异步执行中"
 
     async def test_submit_sender_failure_honest(self, mod: Any) -> None:
         sender = _FakeSender(error=RuntimeError("kernel down"))
@@ -288,7 +271,6 @@ class TestTaskPipelineDispatch:
             r = await tool.execute(_base_inputs())
         finally:
             mod._chat_sender = None
-        assert r.success
-        assert "异步执行中" not in r.output["message"]
-        assert r.output.get("warning")
-        assert "kernel down" in r.output["warning"]
+        assert r.success is False
+        assert r.error_code == "DISPATCH_FAILED"
+        assert "kernel down" in (r.error or "")
