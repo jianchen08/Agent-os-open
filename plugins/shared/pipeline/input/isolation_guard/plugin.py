@@ -34,7 +34,6 @@ from decider import IsolationDecider
 from isolation_types import IsolationLevel
 from pipeline.plugin import IInputPlugin, PluginContext, PluginResult
 from pipeline.types import StateKeys
-from wsl_health import ensure_docker_engine
 
 logger = logging.getLogger(__name__)
 
@@ -133,8 +132,13 @@ class IsolationGuard(IInputPlugin):
 
         幂等（wsl_health.ensure_docker_engine 内部冷却），仅在复检路径
         （当前不可用 + 越过复检冷却）触发；失败只留日志不阻断复检。
+        wsl_health 位于 system/isolation（本目录无副本），须先注入路径
+        再延迟导入（同 _get_manager 的懒加载模式）。
         """
         try:
+            _ensure_isolation_path()
+            from wsl_health import ensure_docker_engine  # noqa: PLC0415
+
             ensure_docker_engine()
         except Exception as exc:  # noqa: BLE001 - 自愈失败不阻断管道
             logger.warning("[%s] 引擎自愈失败: %s", self.name, exc)

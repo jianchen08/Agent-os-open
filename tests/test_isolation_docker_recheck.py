@@ -21,8 +21,11 @@
 # isolation_guard 插件位于 plugins/shared/pipeline/input/isolation_guard/（0.2 平铺 import）
 import sys
 import time
+import types
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
+
+import pytest
 
 import tests._isolation_path  # noqa: F401  # 注入 isolation 插件目录到 sys.path
 
@@ -33,6 +36,19 @@ from pipeline.plugin import PluginContext
 from pipeline.types import StateKeys
 import plugin as plugin_module  # noqa: E402  # 模块对象引用：裸名串扰治理会 evict 后重 import，字符串 patch 会打到新对象
 from plugin import IsolationGuard  # noqa: E402
+
+
+@pytest.fixture(autouse=True)
+def _fake_wsl_health(monkeypatch: pytest.MonkeyPatch) -> types.SimpleNamespace:
+    """引擎自愈在插件内延迟 import wsl_health（路径注入后），测试环境用 fake 占位。
+
+    复检路径触发 _ensure_engine 时命中 fake，不真实拉起 WSL/docker
+    （wsl_health 自身行为由 plugins/shared/system/isolation/test_wsl_health.py 覆盖）。
+    """
+    fake = types.SimpleNamespace()
+    fake.ensure_docker_engine = MagicMock()
+    monkeypatch.setitem(sys.modules, "wsl_health", fake)
+    return fake
 
 
 def _make_ctx(tool="bash_execute"):
@@ -72,8 +88,7 @@ def _make_auto_plugin(detected=False):
     真实拉起 WSL/docker，统一 mock 掉。
     """
     with patch("decider.IsolationDecider"), \
-         patch.object(IsolationGuard, "_detect_docker", return_value=detected), \
-         patch("plugin.ensure_docker_engine"):
+         patch.object(IsolationGuard, "_detect_docker", return_value=detected):
         return IsolationGuard(config={})
 
 
@@ -172,28 +187,27 @@ async def test_true_state_does_not_recheck():
 # ---------------------------------------------------------------------------
 
 
-async def test_recheck_triggers_engine_self_heal():
+async def test_recheck_triggers_engine_self_heal(_fake_wsl_health: types.SimpleNamespace):
     """复检路径先触发引擎自愈（wsl_health.ensure_docker_engine）再探测。"""
     plugin = _make_auto_plugin(detected=False)
     _container_policy(plugin)
     plugin._detect_docker = MagicMock(return_value=False)  # 复检阶段钉死不可用
     plugin._docker_checked_at = time.monotonic() - 9999
 
-    with patch.object(plugin_module, "ensure_docker_engine") as ensure_mock:
-        await plugin.execute(_make_ctx())
+    await plugin.execute(_make_ctx())
 
-    ensure_mock.assert_called_once()
+    _fake_wsl_health.ensure_docker_engine.assert_called_once()
 
 
-async def test_engine_self_heal_error_does_not_break_recheck():
+async def test_engine_self_heal_error_does_not_break_recheck(_fake_wsl_health: types.SimpleNamespace):
     """自愈抛异常不阻断复检与决策（降级保持，只留日志）。"""
     plugin = _make_auto_plugin(detected=False)
     _container_policy(plugin)
     plugin._detect_docker = MagicMock(return_value=False)  # 复检仍不可用
     plugin._docker_checked_at = time.monotonic() - 9999
+    _fake_wsl_health.ensure_docker_engine.side_effect = RuntimeError("boom")
 
-    with patch.object(plugin_module, "ensure_docker_engine", side_effect=RuntimeError("boom")):
-        result = await plugin.execute(_make_ctx())
+    result = await plugin.execute(_make_ctx())
 
     contexts = result.state_updates["execution_contexts"]
     assert contexts[0].get("blocked") is True  # 仍拦截（docker 不可用），未崩
