@@ -63,6 +63,13 @@ pub fn spawn_pipeline_sidecar_warmup(
         info!(target: "sidecar-warmup", "管道无 sidecar 引用，boot 预热空集跳过");
         return;
     }
+    // 预分配先行（§合宿装箱正确性）：合宿宿主的 --members 与组指纹取分配表
+    // 实时快照——先分配完全体目标再并发 warmup，每个组宿主一次 spawn 即装载
+    // 完整成员集；若边分配边 spawn，先到成员把宿主以单成员集定型，后到成员
+    // 在指纹 TTL 内被快速路径短路复用（宿主里没有该成员，预热假成功）。
+    for m in &targets {
+        invoker.preassign_host_key(m);
+    }
     info!(
         target: "sidecar-warmup",
         total,

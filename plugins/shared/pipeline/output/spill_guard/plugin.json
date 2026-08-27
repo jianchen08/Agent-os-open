@@ -7,6 +7,7 @@
   "pipeline_role": "output",
   "language": "rust",
   "host_type": "in_process",
+  "host_group": "light",
   "entry": "pipeline_spill_guard_native.dll",
   "invoke_entry": "plugin_execute",
   "native": {

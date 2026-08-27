@@ -2759,3 +2759,58 @@ async fn warmup_sidecar_spawn_failure_propagates() {
         "失败后不得残留缓存条目"
     );
 }
+
+/// preassign_host_key：批量预分配定型装箱——合宿组宿主一次 spawn 即装载完整
+/// 成员集的前提。solo 成员不写分配表（纯键构造无状态）。
+#[tokio::test]
+async fn preassign_host_key_batches_light_packing_before_spawn() {
+    let loader = Arc::new(MockLoader::new());
+    let invoker = PluginInvokerImpl::new(loader);
+
+    // 7 个 light 成员批量预分配（上限走默认 6）：前 6 填满 slot 1，第 7 溢出 slot 2
+    let members: Vec<_> = (0..7)
+        .map(|i| make_light_manifest(&format!("m{i}"), "python server.py"))
+        .collect();
+    for m in &members {
+        invoker.preassign_host_key(m);
+    }
+    let assignments = invoker.light_packing.read();
+    let slot1 = assignments
+        .assignments
+        .values()
+        .filter(|hk| hk.as_str() == "group:light:1")
+        .count();
+    let slot2 = assignments
+        .assignments
+        .values()
+        .filter(|hk| hk.as_str() == "group:light:2")
+        .count();
+    assert_eq!(
+        slot1, 6,
+        "预分配定型：slot 1 装满 6 成员（非边 spawn 边分配的单成员）"
+    );
+    assert_eq!(slot2, 1, "溢出成员开 slot 2");
+    drop(assignments);
+
+    // 幂等：重复预分配不改归属（粘性）
+    for m in &members {
+        invoker.preassign_host_key(m);
+    }
+    assert_eq!(
+        invoker.host_members("group:light:1").len(),
+        6,
+        "重复预分配不改分配表"
+    );
+
+    // solo 成员预分配：纯键构造，不写分配表
+    let solo = make_sidecar_manifest("solo_x", "python server.py");
+    invoker.preassign_host_key(&solo);
+    assert!(
+        !invoker
+            .light_packing
+            .read()
+            .assignments
+            .contains_key("solo_x"),
+        "solo 不进 light 分配表"
+    );
+}

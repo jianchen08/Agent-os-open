@@ -1271,6 +1271,18 @@ impl PluginInvokerImpl {
         self.get_or_create_mcp_client(manifest).await.map(|_| ())
     }
 
+    /// 预分配宿主键（纯内存，无 IO 无 spawn）：light 成员写入装箱分配表，
+    /// solo 成员仅构造键（无状态）。
+    ///
+    /// 批量预热**必须先逐个预分配、再并发 warmup**：合宿宿主 spawn 的
+    /// `--members` 与组指纹取自分配表实时快照——若边分配边 spawn，先到的
+    /// 成员会把宿主以"单成员集"spawn 定型，后到成员在指纹 TTL（1s）内被
+    /// 快速路径短路复用，宿主里实际没有该成员（预热假成功）。预分配先行
+    /// 让每个组宿主一次 spawn 即装载完整成员集，组指纹一次定型零 respawn。
+    pub fn preassign_host_key(&self, manifest: &PluginManifest) {
+        self.resolve_host_key(manifest);
+    }
+
     /// 旁路广播 OnError 给总线订阅者（审计 / `lifecycle.plugin_error_total` 计数）。
     ///
     /// 与 OnLoad 的旁路 emit 对称：插件 execute/call 返回 `Err` 时由调用方（

@@ -6,6 +6,7 @@
   "pipeline_role": "output",
   "language": "rust",
   "host_type": "in_process",
+  "host_group": "light",
   "entry": "pipeline_sensitive_checker_native.dll",
   "invoke_entry": "plugin_execute",
   "native": {

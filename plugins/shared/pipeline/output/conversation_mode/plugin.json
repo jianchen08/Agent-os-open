@@ -5,6 +5,7 @@
   "plugin_type": "pipeline",
   "language": "python",
   "host_type": "sidecar",
+  "host_group": "light",
   "entry": "python server.py",
   "invoke_entry": "conversation_mode.execute",
   "capabilities": {
