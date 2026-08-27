@@ -10,6 +10,7 @@ import { useContextKeys } from '@/stores/contextKeysStore'
 import type { Message } from '@/types/models'
 import type { MessagePart, ToolCallPart } from '@/types/messageParts'
 import { decideClaim } from '@/streaming/claim'
+import { compareMessages } from '@/utils/messageOrder'
 
 const logger = loggers.sessionStore
 
@@ -364,22 +365,9 @@ function filterBlankMessages(messages: Message[]): Message[] {
   })
 }
 
-/** 排序键优先级：sequence → timestamp → id（确保 sequence/timestamp 相同时排序稳定）。 */
-function compareMessages(a: Message, b: Message): number {
-  const seqA = a.sequence ?? Number.MAX_SAFE_INTEGER
-  const seqB = b.sequence ?? Number.MAX_SAFE_INTEGER
-  if (seqA !== seqB) {
-    return seqA - seqB
-  }
-  const timeDiff = new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime()
-  if (timeDiff !== 0) {
-    return timeDiff
-  }
-  // 第三级排序用 id，确保排序稳定
-  const idA = a.id || ''
-  const idB = b.id || ''
-  return idA < idB ? -1 : idA > idB ? 1 : 0
-}
+/** 排序键优先级：sequence → timestamp → id（确保 sequence/timestamp 相同时排序稳定）。
+ *  实现与渲染层共用（@/utils/messageOrder），单一真值源。 */
+export { compareMessages }
 
 /** 合并两个已排序数组，返回新的已排序数组 */
 function mergeSorted(a: Message[], b: Message[]): Message[] {

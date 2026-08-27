@@ -177,6 +177,33 @@ describe('MessageList', () => {
       expect(screen.getByTestId('message-item-msg-3')).toBeInTheDocument()
     })
 
+    it('事件乱序到达仍按 sequence 时序渲染（DSH orderedVisible 同款兜底）', () => {
+      // 模拟事件到达顺序 ≠ 时序：seq=3 先到、seq=1/2 后到（且时间戳不同步）
+      const messages = [
+        makeMessage({ id: 'm3', role: 'user', content: '第三条（先到）', sequence: 3, timestamp: new Date(Date.now() + 1000).toISOString() }),
+        makeMessage({ id: 'm1', role: 'user', content: '第一条', sequence: 1 }),
+        makeMessage({ id: 'm2', role: 'assistant', content: '第二条', sequence: 2 }),
+      ]
+      const { container } = render(<MessageList {...defaultProps} messages={messages} />)
+
+      const order = [...container.querySelectorAll('[data-msg-id]')].map((el) => el.getAttribute('data-msg-id'))
+      expect(order).toEqual(['m1', 'm2', 'm3'])
+    })
+
+    it('无 sequence 消息按 timestamp 排序，且排在有 sequence 消息之后', () => {
+      const base = Date.now()
+      const messages = [
+        makeMessage({ id: 'no-seq-late', role: 'user', content: '无seq晚', sequence: undefined, timestamp: new Date(base + 5000).toISOString() }),
+        makeMessage({ id: 's2', role: 'assistant', content: 'seq2', sequence: 2, timestamp: new Date(base).toISOString() }),
+        makeMessage({ id: 's1', role: 'user', content: 'seq1', sequence: 1, timestamp: new Date(base).toISOString() }),
+        makeMessage({ id: 'no-seq-early', role: 'user', content: '无seq早', sequence: undefined, timestamp: new Date(base + 1000).toISOString() }),
+      ]
+      const { container } = render(<MessageList {...defaultProps} messages={messages} />)
+
+      const order = [...container.querySelectorAll('[data-msg-id]')].map((el) => el.getAttribute('data-msg-id'))
+      expect(order).toEqual(['s1', 's2', 'no-seq-early', 'no-seq-late'])
+    })
+
     it('多轮工具调用消息流渲染：user + 单一合并 assistant 气泡（回归）', () => {
       // 对应用户反馈 bug：多轮工具调用中 AI 消息只剩一条、tool 消息不显示。
       // 现行契约（与流式渲染同构）：mergeConsecutiveAssistantMessages 把一个对话轮次

@@ -19,6 +19,7 @@ import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } fr
 import { Loader2 } from '@/assets/icons'
 import { cn } from '@/lib/utils'
 import { mergeConsecutiveAssistantMessages } from '@/services/api/session'
+import { compareMessages } from '@/utils/messageOrder'
 import { MessageItem } from './MessageItem'
 import type { MessageListProps } from './types'
 import type { Message } from '@/types/models'
@@ -77,12 +78,18 @@ export const MessageList = ({
   onJumpConsumed,
 }: ExtendedMessageListProps) => {
   /**
-   * 渲染用消息：合并连续 assistant 为一个气泡（工具调用链显示为一条消息）。
-   * 只影响渲染，不改 store 的原始数据——store 保持原始 sequence 保证
-   * before_sequence 翻页正常（数据层不合并，渲染层合并，彻底解耦）。
+   * 渲染用消息：先按权威时序排序，再合并连续 assistant 为一个气泡
+   * （工具调用链显示为一条消息）。
+   *
+   * 排序兜底（[来源: deepseek-harness-rc8 chat-snapshot-builder.orderedVisible]）：
+   * 渲染顺序 = sequence→timestamp→id 时序，与事件到达顺序解耦——流式事件乱序/
+   * 延迟到达（通知、注入消息、跨管道交错）不会让新到达的气泡挤到错误位置。
+   * store 保持原始 sequence 保证 before_sequence 翻页正常（数据层不重排、
+   * 渲染层排序，彻底解耦）。
    */
   const displayMessages = useMemo(() => {
-    const merged = mergeConsecutiveAssistantMessages(messages)
+    const ordered = [...messages].sort(compareMessages)
+    const merged = mergeConsecutiveAssistantMessages(ordered)
     // 渲染层跳过"已被吸收"的 tool 消息：若该 tool 消息的 toolCallId 已出现在
     // 前一个 assistant 的 tool_call part（merge 注入了结果，渲染为 ActivityCard），
     // 则独立 tool 卡片冗余，跳过。与流式渲染保持一致（流式时 tool 结果直接更新
