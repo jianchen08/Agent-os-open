@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """Memory 工具 MCP 服务端——接口适配层（0.2 重写版）。
 
-- 后端：通过 memory_backend.get_memory_backend 工厂构建 IMemoryBackend
-  （默认 hindsight，降级 kernel），capability_caller 取自内核注入的
-  tool-executor / service-registry 能力句柄（与 context_window_guard 注入同款做法）。
+- 后端：本插件自持客户端 ``backend.py`` 经 tool-executor.invoke 调用
+  hindsight_memory_service（invoke 信封 {success,data} 解包；media 插件
+  同款模式——不 import 其它插件源码模块），capability_caller 取自内核
+  注入的 tool-executor 能力句柄。
 - 能力未注入 / 后端构建失败时降级：MemoryTool 未注入后端返回
   {"error": "memory backend 未注入"}，sidecar 永不崩溃。
 - 工具 schema 与 tool.py 的 get_tool_definition() 保持一致（8 个 action）。
@@ -18,14 +19,6 @@ import sys
 from typing import Any
 
 sys.path.insert(0, os.path.dirname(__file__))
-
-# hindsight_memory 插件目录（memory_backend.py 所在处）加入 sys.path，
-# 供 get_memory_backend 工厂导入。
-_HINDSIGHT_MEMORY_DIR = os.path.abspath(
-    os.path.join(os.path.dirname(__file__), '..', '..', 'system', 'hindsight_memory')
-)
-if _HINDSIGHT_MEMORY_DIR not in sys.path:
-    sys.path.insert(0, _HINDSIGHT_MEMORY_DIR)
 
 # 加载本目录 tool.py 的 MemoryTool：显式路径 + 唯一模块名（不用裸
 # `from tool import ...`——同一进程里其它插件目录的 tool.py 会抢先占用
@@ -94,7 +87,7 @@ def _bind_caller(handle: Any, cap_name: str) -> Any:
 
 
 def _build_memory_backend() -> Any | None:
-    """构建 IMemoryBackend；能力缺失/构建失败时返回 None（工具降级，不崩溃）。"""
+    """构建 HindsightBackend；能力缺失/构建失败时返回 None（工具降级，不崩溃）。"""
     caller = _make_capability_caller()
     if caller is None:
         logger.warning(
@@ -102,7 +95,7 @@ def _build_memory_backend() -> Any | None:
         )
         return None
     try:
-        from memory_backend import get_memory_backend  # noqa: PLC0415
+        from backend import get_memory_backend  # noqa: PLC0415
 
         return get_memory_backend(
             config=plugin.get_config() or {},

@@ -1,8 +1,8 @@
 """记忆工具（0.2 重写版）。
 
 0.1 的记忆服务（memory.service.MemoryService）已在 0.2 中删除，本模块改为
-注入式 IMemoryBackend（见 plugins/shared/system/hindsight_memory/memory_backend.py
-定义的端口：add / search / delete / import_document，全部 async）。
+注入式记忆后端（端口形状：add / search / delete / import_document，全部
+async；生产实现在同目录 backend.py——经 tool-executor.invoke 调 hindsight）。
 Tool / ToolExecutionResult / 枚举 / 结果工厂均从 ``agentos_plugin_sdk`` 导入
 （与 download/tool.py 的导入清单对齐；SDK 字段覆盖本地版用法）。
 
