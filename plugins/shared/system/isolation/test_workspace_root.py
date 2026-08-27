@@ -5,9 +5,8 @@
 1. get_workspace_base_dir：配置驱动——isolation_config.yaml 的 workspace.root
    （绝对路径原样 / 相对路径相对项目根 / 配置缺失回退 .ai_workspaces）
 2. _isolation_config_path：AGENTOS_CONFIG_ROOT 优先，回退祖先目录查找
-   （不硬编码父目录层数——旧链 config.config_center 在 sidecar venv 不存在，
-   workspace.root 恒被缺省吞掉，是"配置 D:/myproject vs 实际 .ai_workspaces"
-   偏差根因，文件回退是修复主体）
+   （不硬编码父目录层数；sidecar venv 无 config.config_center，直读会断，
+   文件回退是主读路径）
 3. 找不到配置时缺省回退，不 panic
 
 测试不依赖真实内核——直接加载 workspace.py。
@@ -180,10 +179,23 @@ class TestWorkspaceBaseDir:
             assert base.name == expected_name, f"root={root_val} 时应解析到 {expected_name}，实际 {base}"
 
     def test_real_repo_config_is_loaded(self) -> None:
-        """真身仓库配置可被读到（文件回退链路通）——修复前的 config_center 断链点。"""
-        assert get_workspace_config_root() != _default_ws_root, (
-            "仓库配置 isolation_config.yaml 存在 workspace.root，不应回退缺省——"
-            "若回退说明文件回退链仍断（config_center 不可用时）"
+        """真身仓库配置可被读到：解析值与磁盘 isolation_config.yaml 的 workspace.root 一致。"""
+        import yaml
+
+        raw = yaml.safe_load(_CFG_FILE.read_text(encoding="utf-8")) or {}
+        expected = str((raw.get("workspace") or {}).get("root") or _default_ws_root)
+        assert get_workspace_config_root() == expected, (
+            "get_workspace_config_root 应等于磁盘配置的 workspace.root（文件回退链路通；"
+            f"磁盘值={expected!r}，实际={get_workspace_config_root()!r}）"
         )
         base = get_workspace_base_dir()
         assert Path(base).is_absolute(), f"基目录应为绝对路径，实际: {base}"
+        expected_path = Path(expected)
+        if not expected_path.is_absolute():
+            assert Path(base) == _REPO_ROOT / expected_path, (
+                f"基目录应相对仓库根解析到 {expected}，实际: {base}"
+            )
+        else:
+            assert Path(base) == expected_path, (
+                f"绝对 root 应原样使用，实际: {base}"
+            )

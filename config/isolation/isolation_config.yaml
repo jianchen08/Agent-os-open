@@ -1,5 +1,8 @@
 workspace:
-  root: D:/myproject
+  # 工作空间基目录（所有 worktree/container/plain 工作区的父目录）。
+  # 相对路径相对项目根解析（隔离插件 get_workspace_base_dir 的代码缺省即
+  # ".ai_workspaces"）；绝对路径原样使用。禁止把开发者本机绝对路径入库。
+  root: .ai_workspaces
   nesting_mode: shared
   sparse_threshold_mb: 500
   worktree_include_patterns:

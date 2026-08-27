@@ -630,3 +630,47 @@ class TestLocalServerIntegration:
         assert r.success
         assert r.metadata["resumed"] is True
         assert (save_dir / "f.bin").stat().st_size == len(payload)
+
+
+# ═══════════════════════════════════════════════════════════
+# 路径权限校验 fail-closed（scan批B：安全控制失效必须对外显式失败）
+# ═══════════════════════════════════════════════════════════
+
+
+class TestPathPolicyFailClosed:
+    """策略层不可用 → execute 失败信封携带拒绝原因（错误传播到用户提示）。
+
+    对照组：策略层可用时同形输入走完整下载成功（见上方分段/流式下载用例，
+    走真实自带 permission_policy 默认策略）。不可用态经 _get_policy_manager
+    接缝注入——生产中任何加载失败最终都落在"manager 为 None"这一状态。
+    """
+
+    @staticmethod
+    def _disable_policy_layer(monkeypatch) -> None:
+        mixin_cls = next(c for c in DownloadTool.__mro__ if c.__name__ == "WorkspaceAwareMixin")
+        monkeypatch.setattr(mixin_cls, "_policy_manager", None)
+        monkeypatch.setattr(
+            mixin_cls,
+            "_get_policy_manager",
+            classmethod(lambda cls: None),
+        )
+        wa_mod = sys.modules.get("workspace_aware")
+        if wa_mod is not None and hasattr(wa_mod, "_policy_unavailable_warned"):
+            monkeypatch.setattr(wa_mod, "_policy_unavailable_warned", False)
+
+    def test_execute_denies_with_visible_reason(self, monkeypatch, tmp_path: Path) -> None:
+        """校验层不可用时请求被拒（不再静默放行），原因进入失败信封。"""
+        self._disable_policy_layer(monkeypatch)
+        tool = DownloadTool()
+        r = _run(tool.execute({"url": "https://example.com/file.zip", "save_path": str(tmp_path / "out")}))
+        assert not r.success
+        assert "拒绝" in r.error and "权限" in r.error
+
+    def test_execute_denial_precedes_network_and_write(self, monkeypatch, tmp_path: Path) -> None:
+        """拒绝发生在联网与落盘之前——不可用状态下不产生任何副作用。"""
+        self._disable_policy_layer(monkeypatch)
+        save_dir = tmp_path / "never_created"
+        tool = DownloadTool()
+        r = _run(tool.execute({"url": "https://example.com/file.zip", "save_path": str(save_dir)}))
+        assert not r.success
+        assert not save_dir.exists(), "fail-closed 拒绝不得创建目录"

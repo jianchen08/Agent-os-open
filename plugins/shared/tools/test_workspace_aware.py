@@ -5,7 +5,7 @@
 1. _init_workspace：workspace / project_root / base_path / cwd 四种来源
 2. resolve_path：绝对路径 / Git Bash 风格 / 前缀去重 / 后缀去重
 3. _format_output_path / get_working_dir / _infer_project_root
-4. check_path_allowed：未初始化拒绝、isolation 不可用降级放行、
+4. check_path_allowed：未初始化拒绝、策略层不可用 fail-closed 拒绝、
    真实 PermissionPolicyManager 的 root_task / subtask 策略差异
 
 测试不依赖真实内核——策略走 permission_policy 的代码默认值。
@@ -190,13 +190,17 @@ class TestCheckPathAllowed:
         ok, msg = tool.check_path_allowed("x.txt", operation="write")
         assert ok is False and "未初始化" in msg
 
-    def test_isolation_unavailable_degrades_open(self, monkeypatch) -> None:
-        """isolation.permission_policy 不可导入 → 降级放行。"""
+    def test_policy_layer_unavailable_fails_closed(self, monkeypatch) -> None:
+        """策略层不可用 → fail-closed 拒绝（安全控制的失效模式是拒绝不是放行）。"""
         tool = _Tool()
         tool._init_workspace({"workspace": "ws"})
-        monkeypatch.setattr(_MOD.WorkspaceAwareMixin, "_get_policy_manager", classmethod(lambda cls: None))
+        monkeypatch.setattr(_MOD.WorkspaceAwareMixin, "_get_policy_manager", classmethod(lambda _cls: None))
         ok, msg = tool.check_path_allowed("x.txt", operation="write")
-        assert ok is True and msg == ""
+        assert not ok
+        assert "拒绝" in msg
+        ok, msg = tool.check_path_allowed("x.txt", operation="read")
+        assert not ok
+        assert "拒绝" in msg
 
     def test_root_task_policy_allows_project_write(self, tmp_path: Path) -> None:
         """L1/缺省 → root_task 策略：写整个项目放行。"""

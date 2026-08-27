@@ -11,24 +11,33 @@
 import logging
 import platform
 import re
+import sys
 from pathlib import Path
 from typing import Any
 
 _logger = logging.getLogger(__name__)
 
-# isolation 插件不可用降级放行的一次性告警开关（多层防线同时哑火必须可观测）
-_isolation_degrade_warned = False
+# 自带策略模块与本模块同目录；server.py 已把插件目录放入 sys.path，
+# 独立装载（测试经 spec_from_file_location）时由此处自举补齐。
+_THIS_DIR = str(Path(__file__).resolve().parent)
+if _THIS_DIR not in sys.path:
+    sys.path.insert(0, _THIS_DIR)
+
+# 策略层不可用（自带策略模块缺失）的一次性告警开关：fail-closed 拒绝所有路径操作，
+# 但告警只发一次，避免每个请求重复刷屏。
+_policy_unavailable_warned = False
 
 
-def _warn_isolation_degraded() -> None:
-    """isolation 降级放行一次性留痕（避免每次路径校验刷屏）。"""
-    global _isolation_degrade_warned
-    if _isolation_degrade_warned:
+def _warn_policy_unavailable(detail: str) -> None:
+    """策略层不可用时一次性 warning 留痕（拒绝本身每次照常执行）。"""
+    global _policy_unavailable_warned
+    if _policy_unavailable_warned:
         return
-    _isolation_degrade_warned = True
+    _policy_unavailable_warned = True
     _logger.warning(
-        "[workspace_aware] isolation 插件不可用，路径权限校验降级放行"
-        "（本层与 security_check 第二道防线同时哑火时将不可观测，仅提示一次）"
+        "[workspace_aware] 路径权限校验层不可用，已按 fail-closed 拒绝后续"
+        "路径操作（仅提示一次）| detail=%s",
+        detail,
     )
 
 
@@ -48,14 +57,18 @@ class WorkspaceAwareMixin:
 
     @classmethod
     def _get_policy_manager(cls):
-        """获取缓存的 PermissionPolicyManager 单例（从配置文件加载策略）。"""
+        """获取缓存的 PermissionPolicyManager 单例（从配置文件加载策略）。
+
+        策略模块为插件自带的平铺镜像（permission_policy.py，与 server.py 同目录，
+        sys.path 已含插件目录）。加载失败返回 None，调用方按 fail-closed 拒绝。
+        """
         if cls._policy_manager is None:
             try:
-                from isolation.permission_policy import PermissionPolicyManager  # noqa: PLC0415
+                from permission_policy import PermissionPolicyManager  # noqa: PLC0415
 
                 cls._policy_manager = PermissionPolicyManager()
-            except ImportError:
-                _warn_isolation_degraded()
+            except Exception as e:
+                _warn_policy_unavailable(f"permission_policy 加载失败: {e!r}")
                 return None
         return cls._policy_manager
 
@@ -70,6 +83,9 @@ class WorkspaceAwareMixin:
         根据 agent 层级选取对应策略（L1/缺省→root_task, L2+→subtask），
         再按操作类型（read/write）调用 PermissionChecker 决策。
         通过返回 (True, "")，拒绝返回 (False, 错误原因)。
+
+        fail-closed 契约：策略层不可用（模块缺失/加载失败）时拒绝路径操作
+        并给出可传播给用户的错误原因——安全控制的失效模式是拒绝而不是放行。
 
         Args:
             path: 待校验的文件路径（绝对路径或相对于 project_root 的相对路径）
@@ -87,14 +103,13 @@ class WorkspaceAwareMixin:
 
         policy_manager = self._get_policy_manager()
         if policy_manager is None:
-            # isolation 插件不可用时，放行（降级策略）
-            return True, ""
+            return False, "路径权限校验层不可用（权限策略模块加载失败），已按安全策略拒绝该操作"
 
         policy_name = policy_manager.get_policy_name_for_agent_level(agent_level)
         policy = policy_manager.get_policy(policy_name)
 
         try:
-            from isolation.permission_checker import PermissionChecker  # noqa: PLC0415
+            from permission_checker import PermissionChecker  # noqa: PLC0415
 
             checker = PermissionChecker(str(project_root))
 
@@ -111,9 +126,9 @@ class WorkspaceAwareMixin:
                     policy,
                 )
             return ok, err
-        except ImportError:
-            _warn_isolation_degraded()
-            return True, ""
+        except Exception as e:
+            _warn_policy_unavailable(f"permission_checker 执行失败: {e!r}")
+            return False, f"路径权限校验执行失败，已按安全策略拒绝该操作: {e}"
 
     def _init_workspace(self, inputs: dict[str, Any]) -> None:
         """从输入参数初始化工作空间和项目根路径。

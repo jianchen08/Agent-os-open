@@ -222,7 +222,7 @@ class DownloadTool(WorkspaceAwareMixin, BuiltinTool):
     async def execute(self, inputs: dict[str, Any]) -> ToolResult:  # noqa: PLR0911
         """执行下载"""
         # 初始化 workspace 上下文（供 check_path_allowed 决策；
-        # isolation 插件不可用时降级放行——与 web_ext 一致）。
+        # 权限策略随插件自带，校验层不可用时按 fail-closed 拒绝）。
         self._init_workspace(inputs)
 
         url = (inputs.get("url") or "").strip()
