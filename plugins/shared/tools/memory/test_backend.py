@@ -202,7 +202,8 @@ async def test_import_document_failure_degrades_with_error_field(
 
 def test_factory_requires_caller() -> None:
     """capability_caller 缺失 → ValueError（fail loudly）。"""
-    for cfg in ({}, None):
+    cases: tuple[dict[str, Any] | None, ...] = ({}, None)
+    for cfg in cases:
         with pytest.raises(ValueError, match="capability_caller 必须注入"):
             get_memory_backend(config=cfg, capability_caller=None)
 
