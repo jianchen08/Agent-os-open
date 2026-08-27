@@ -1,0 +1,4 @@
+Hello, MiniMax-M3!
+这是第一行。
+Line 4: 测试中英文 mixed content (MODIFIED)
+Line 5: 1234567890APPEND LINE: 这是追加的新行

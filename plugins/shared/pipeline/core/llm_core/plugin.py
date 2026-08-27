@@ -988,10 +988,22 @@ class LLMCore(ICorePlugin):
         # 推送，返回 dict 携带完整聚合响应；partial 非 None 表示流中断/取消。
         # plugin_id 显式点名 llm_service（capability 声明在 services 轴，不依赖
         # LLM 工具注册表反查）。
+        # 流式事件路由键（_call_context）：llm_service 侧 _resolve_envelope 只读
+        # arguments["_call_context"]；内核 tool-executor 把 params 级 _call_context
+        # 合入 args（args 级同名字段按内建键剥离——防伪造），故必须放 params 顶层。
+        # 键与 tool_core 的读取面一致（state["session_id"]/["thread_id"]/
+        # ["pipeline_id"]/["message_id"]——引擎每轮注入本轮 a_ 消息 id）。
         params = {
             "tool_name": "llm.complete_stream",
             "plugin_id": "llm_service",
             "args": kwargs,
+            "_call_context": {
+                "thread_id": ctx.state.get("session_id")
+                or ctx.state.get("thread_id", "")
+                or "",
+                "pipeline_id": ctx.state.get("pipeline_id", "") or "",
+                "message_id": ctx.state.get("message_id", "") or "",
+            },
         }
         envelope = await caller("invoke", params)
         # tool-executor.invoke 返回 {success, data, error} 信封（内核 ToolResult

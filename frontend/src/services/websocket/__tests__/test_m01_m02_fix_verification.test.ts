@@ -21,6 +21,7 @@ const mocks = vi.hoisted(() => {
     updatePart: vi.fn(),
     finalizeMessage: vi.fn(),
     stopStreaming: vi.fn(),
+    removeMessage: vi.fn(),
     registerPipeline: vi.fn(),
     findStreamingPartIndex: vi.fn(() => -1),
     appendToPart: vi.fn(),
@@ -74,6 +75,7 @@ function resetAllMocks(): void {
   mocks.pipelineMethods.updatePart.mockClear()
   mocks.pipelineMethods.finalizeMessage.mockClear()
   mocks.pipelineMethods.stopStreaming.mockClear()
+  mocks.pipelineMethods.removeMessage.mockClear()
   mocks.pipelineMethods.registerPipeline.mockClear()
   mocks.addNotification.mockClear()
   mocks.updateUsage.mockClear()
@@ -88,89 +90,28 @@ function resetAllMocks(): void {
 // handler 与订阅均为零消费者死代码；缺 pipelineId 按 threadId 清管道的兜底属
 // 「清别人状态」反模式，一并废除。
 
-describe('M-02: handleStreamEnd - stream_end 空内容 fallback', () => {
+describe('M-02: handleStreamEnd - 空轮次收尾（逐轮模型）', () => {
   beforeEach(() => {
     resetAllMocks()
-    // 默认：存在一条 content 为空的 streaming 占位消息（模拟空气泡场景）
+    // 默认：存在一条 content 为空的 streaming 占位消息（init/exit 等无产出轮次）
     mocks.pipelineMethods.getMessages.mockReturnValue([
       { id: 'msg-1', content: '', parts: [], status: 'streaming' },
     ])
   })
 
-  it('stream_end 携带空 parts + 空 full_content + 消息无 content 时，应追加 warning system part', () => {
+  it('空轮次 stream_end（无 new_message 无内容）→ 静默移除占位，不追加警示卡/不弹通知', () => {
     handleStreamEnd({
       data: { pipeline_id: 'pipe-001', parts: [], full_content: '' },
       message_id: 'msg-1',
       _threadId: 'thread-1',
     })
 
-    expect(mocks.pipelineMethods.appendPart).toHaveBeenCalledTimes(1)
-    const callArgs = mocks.pipelineMethods.appendPart.mock.calls[0]
-    expect(callArgs[0]).toBe('pipe-001')
-    expect(callArgs[1]).toBe('msg-1')
-    const part = callArgs[2]
-    expect(part.type).toBe('system')
-    expect(part.content).toBe('AI 回复内容为空，请重试')
-    expect(part.level).toBe('warning')
-  })
-
-  it('空内容 fallback 应通过 notificationStore 通知用户', () => {
-    handleStreamEnd({
-      data: { pipeline_id: 'pipe-001', parts: [], full_content: '' },
-      message_id: 'msg-1',
-    })
-
-    expect(mocks.addNotification).toHaveBeenCalledTimes(1)
-    const arg = mocks.addNotification.mock.calls[0][0]
-    expect(arg.message).toContain('为空')
-    expect(arg.priority).toBe('normal')
-    expect(arg.category).toBe('alert')
-  })
-
-  it('空内容 fallback 后消息收尾且不残留空白 content（按当前契约：空 parts 数组不触发 merge 分支）', () => {
-    handleStreamEnd({
-      data: { pipeline_id: 'pipe-001', parts: [], full_content: '' },
-      message_id: 'msg-1',
-    })
-
-    expect(mocks.pipelineMethods.updateMessage).toHaveBeenCalled()
-    const payload = mocks.pipelineMethods.updateMessage.mock.calls[0][2]
-    // 当前契约：serverParts 为空数组时走 fallback（appendPart 警告 + 仅收尾状态），
-    // 不用空数组显式覆盖 parts（parts 保持本地值，避免清空已有 part）
-    expect(payload.parts).toBeUndefined()
-    expect(payload.status).toBe('completed')
-    // 关键：不应把 content 显式设置为空字符串（避免空气泡）
-    expect(payload.content).toBeUndefined()
-  })
-
-  it('full_content 非空时不应触发空内容 fallback', () => {
-    handleStreamEnd({
-      data: { pipeline_id: 'pipe-001', parts: [{ type: 'text', content: 'hi' }], full_content: 'hi' },
-      message_id: 'msg-1',
-    })
-
-    expect(mocks.pipelineMethods.appendPart).not.toHaveBeenCalled()
-    expect(mocks.addNotification).not.toHaveBeenCalled()
-    // 正常路径应把 full_content 写入 content
-    const payload = mocks.pipelineMethods.updateMessage.mock.calls[0][2]
-    expect(payload.content).toBe('hi')
-  })
-
-  it('消息本身已有 content 时不应触发 fallback（即使 full_content 为空）', () => {
-    mocks.pipelineMethods.getMessages.mockReturnValue([
-      { id: 'msg-1', content: '已有内容', parts: [], status: 'streaming' },
-    ])
-
-    handleStreamEnd({
-      data: { pipeline_id: 'pipe-001', parts: [], full_content: '' },
-      message_id: 'msg-1',
-    })
-
+    expect(mocks.pipelineMethods.removeMessage).toHaveBeenCalledWith('pipe-001', 'msg-1')
     expect(mocks.pipelineMethods.appendPart).not.toHaveBeenCalled()
     expect(mocks.addNotification).not.toHaveBeenCalled()
   })
 
-  it('空内容 stream_end 仍应正常终止 pipeline streaming 状态', () => {
+  it('空轮次收尾仍正常终止 pipeline streaming 状态', () => {
     handleStreamEnd({
       data: { pipeline_id: 'pipe-001', parts: [], full_content: '' },
       message_id: 'msg-1',
@@ -180,13 +121,42 @@ describe('M-02: handleStreamEnd - stream_end 空内容 fallback', () => {
     expect(mocks.pipelineMethods.stopStreaming).toHaveBeenCalledWith('pipe-001')
   })
 
-  it('full_content 为 null（缺失）且消息无 content 时也应触发 fallback', () => {
+  it('full_content 为 null（缺失）且消息无内容时同样移除占位', () => {
     handleStreamEnd({
       data: { pipeline_id: 'pipe-001', parts: [] },
       message_id: 'msg-1',
     })
 
-    expect(mocks.pipelineMethods.appendPart).toHaveBeenCalledTimes(1)
-    expect(mocks.pipelineMethods.appendPart.mock.calls[0][2].content).toBe('AI 回复内容为空，请重试')
+    expect(mocks.pipelineMethods.removeMessage).toHaveBeenCalledWith('pipe-001', 'msg-1')
+    expect(mocks.addNotification).not.toHaveBeenCalled()
+  })
+
+  it('full_content 非空时走正常收尾，不误删消息', () => {
+    handleStreamEnd({
+      data: { pipeline_id: 'pipe-001', parts: [{ type: 'text', content: 'hi' }], full_content: 'hi' },
+      message_id: 'msg-1',
+    })
+
+    expect(mocks.pipelineMethods.removeMessage).not.toHaveBeenCalled()
+    expect(mocks.pipelineMethods.appendPart).not.toHaveBeenCalled()
+    expect(mocks.addNotification).not.toHaveBeenCalled()
+    // 正常路径应把 full_content 写入 content
+    const payload = mocks.pipelineMethods.updateMessage.mock.calls[0][2]
+    expect(payload.content).toBe('hi')
+  })
+
+  it('消息本身已有 content 时不应移除（即使 full_content 为空）', () => {
+    mocks.pipelineMethods.getMessages.mockReturnValue([
+      { id: 'msg-1', content: '已有内容', parts: [], status: 'streaming' },
+    ])
+
+    handleStreamEnd({
+      data: { pipeline_id: 'pipe-001', parts: [], full_content: '' },
+      message_id: 'msg-1',
+    })
+
+    expect(mocks.pipelineMethods.removeMessage).not.toHaveBeenCalled()
+    expect(mocks.pipelineMethods.appendPart).not.toHaveBeenCalled()
+    expect(mocks.addNotification).not.toHaveBeenCalled()
   })
 })

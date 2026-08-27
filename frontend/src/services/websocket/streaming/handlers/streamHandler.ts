@@ -139,24 +139,19 @@ export function handleStreamEnd(eventData: any) {
               } as any)
             }
           } else {
-            // 空内容兜底：补一条 warning 并收尾，避免占位消息卡在 streaming。
-            pipelineStore.getState().appendPart(pipelineId, messageId, {
-              type: 'system',
-              content: 'AI 回复内容为空，请重试',
-              level: 'warning',
-              notificationType: 'empty_reply',
-            })
-            pipelineStore.getState().updateMessage(pipelineId, messageId, {
-              status: 'completed',
-            } as any)
-            useNotificationStore.getState().addNotification({
-              title: '回复内容为空',
-              message: 'AI 生成的回复内容为空，请重新发送或重试',
-              priority: 'normal',
-              category: 'alert',
-              isBlocking: false,
-              sourceLabel: '系统',
-            })
+            // 空轮次收尾：stream_end 前未收到 new_message 的占位是「本轮无产出」
+            // （引擎轮次模型：init/exit 等无消息轮次照常发 stream_end），该消息未
+            // 持久化、也不参与重放——静默移除占位。真实「整轮无回复」由 stream_error
+            // (NO_ASSISTANT_REPLY) 显式通知，此处不再补空回复提示（旧形态会为每个
+            // 前处理轮次弹一次「回复内容为空」通知）。
+            _debugLogger.warn(
+              '[STREAM_END] 空轮次无消息，移除占位: pipeline=%s msgId=%s',
+              pipelineId.slice(0, 12), messageId.slice(0, 12),
+            )
+            const current = pipelineStore.getState().getMessages(pipelineId)
+            if (current.find((m: any) => m.id === messageId)) {
+              pipelineStore.getState().removeMessage(pipelineId, messageId)
+            }
           }
         }
       } else {

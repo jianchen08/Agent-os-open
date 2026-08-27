@@ -480,6 +480,44 @@ async def test_call_llm_tool_schemas_passed_to_service() -> None:
     assert caller.calls[0][1]["args"]["tools"] == schemas
 
 
+async def test_call_llm_call_context_carries_round_routing_keys() -> None:
+    """params 级 _call_context 携带本轮路由键（thread/pipeline/message）——
+    llm_service 流式事件信封（_resolve_envelope）只读它；args 级同名键会被内核
+    按内建键剥离，故必须在 params 顶层。"""
+    caller = _FakeCaller({"success": True, "data": _ok_response()})
+    plugin = _make_plugin(caller)
+    await plugin._call_llm(  # noqa: SLF001
+        [{"role": "user", "content": "hi"}],
+        _make_ctx(
+            {
+                **_base_state(),
+                "session_id": "thread-abc",
+                "pipeline_id": "p_rounds",
+                "message_id": "a_round1",
+            }
+        ),
+        stream=False,
+    )
+    ctx = caller.calls[0][1]["_call_context"]
+    assert ctx == {
+        "thread_id": "thread-abc",
+        "pipeline_id": "p_rounds",
+        "message_id": "a_round1",
+    }
+    # 键缺失时不得损坏调用（空串兜底；pipeline_id 随 _base_state 一起存在）
+    caller2 = _FakeCaller({"success": True, "data": _ok_response()})
+    plugin2 = _make_plugin(caller2)
+    await plugin2._call_llm(  # noqa: SLF001
+        [{"role": "user", "content": "hi"}],
+        _make_ctx(_base_state()),
+        stream=False,
+    )
+    ctx2 = caller2.calls[0][1]["_call_context"]
+    assert ctx2["thread_id"] == ""
+    assert ctx2["message_id"] == ""
+    assert ctx2["pipeline_id"] == _base_state()["pipeline_id"]
+
+
 async def test_call_llm_tool_schemas_empty_not_carried() -> None:
     """state.tool_schemas 为空 → tools 以 None 透传（不进 llm.complete_stream 请求体）。"""
     caller = _FakeCaller({"success": True, "data": _ok_response()})

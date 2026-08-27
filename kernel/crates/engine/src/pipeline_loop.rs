@@ -82,6 +82,11 @@ pub struct PipelineExecutor {
     /// 携带 pipeline_id/run_id 标签）——spill_guard 的原文清理（spill_retrieve
     /// sidecar 收通知删 `{base}/{pipeline_id}/`）依赖此通道。空集零开销。
     pipeline_end_hooks: Vec<String>,
+    /// 轮次观察点（DSH 形态：循环体一次迭代 = 一轮消息；见 [`crate::round_events`]）。
+    /// None = 零开销（非聊天路径/测试默认不接线）。
+    round_events: Option<Arc<dyn crate::round_events::RoundEvents>>,
+    /// 轮次序号（per-run 从 1 递增，fetch_add 后取 1 基）。
+    round_counter: AtomicI64,
 }
 
 impl PipelineExecutor {
@@ -117,6 +122,8 @@ impl PipelineExecutor {
             total_step_no: AtomicI64::new(0),
             ops_ledger: parking_lot::Mutex::new(Vec::new()),
             pipeline_end_hooks: Vec::new(),
+            round_events: None,
+            round_counter: AtomicI64::new(0),
         }
     }
 
@@ -129,6 +136,14 @@ impl PipelineExecutor {
         plugin_ids: impl IntoIterator<Item = String>,
     ) -> Self {
         self.pipeline_end_hooks = plugin_ids.into_iter().collect();
+        self
+    }
+
+    /// 注入轮次观察点（聊天路径：api 层桥接为 stream_start/new_message/stream_end）。
+    ///
+    /// 不调用为零开销（引擎不感知事件协议，仅回调）。
+    pub fn with_round_events(mut self, round_events: Arc<dyn crate::round_events::RoundEvents>) -> Self {
+        self.round_events = Some(round_events);
         self
     }
 
@@ -319,8 +334,12 @@ impl PipelineExecutor {
                 iteration += 1;
                 // checkpoint 计数在 persist_step_trace 里按「配置 step」推进
                 // （每执行一个配置 step +1，达 interval_steps 落档），此处不再按轮计数。
+                let assistant_before = count_role(state, "assistant");
+                let (round_index, round_id, round_start) = self.round_start_event(state).await;
                 self.execute_steps(&body.steps, state, compiled, ignore_ended)
                     .await?;
+                self.round_end_event(state, round_index, round_id, &round_start, assistant_before)
+                    .await;
                 if truthy_flag(state, "suspended") {
                     break;
                 }
@@ -329,11 +348,72 @@ impl PipelineExecutor {
                 }
             }
         } else {
-            // 单次执行（前处理/后处理体）
+            // 单次执行（前处理/后处理体）：同样构成一轮（消息事件语义与循环迭代一致）
+            let assistant_before = count_role(state, "assistant");
+            let (round_index, round_id, round_start) = self.round_start_event(state).await;
             self.execute_steps(&body.steps, state, compiled, ignore_ended)
                 .await?;
+            self.round_end_event(state, round_index, round_id, &round_start, assistant_before)
+                .await;
         }
         Ok(iteration)
+    }
+
+    /// 轮次开始边界（DSH 形态：一次 body 执行 = 一条消息）：分配本轮消息 id 并注入
+    /// state。llm_core 经 _call_context 携带、tool_core 直接读——本条消息的全部
+    /// 流式/工具事件按本轮 id 精确寻址；`_assistant_id_assigned` 每轮复位，使本轮
+    /// 首个 assistant 追加 op 携带本轮 id 作 record_id（流式占位与 DB 重载逐轮同构）。
+    async fn round_start_event(
+        &self,
+        state: &mut serde_json::Value,
+    ) -> (i64, String, crate::round_events::RoundStart) {
+        let round_index = self.round_counter.fetch_add(1, Ordering::Relaxed) + 1;
+        let round_id = format!("a_{}", uuid::Uuid::new_v4().simple());
+        if let Some(obj) = state.as_object_mut() {
+            obj.insert("message_id".into(), serde_json::json!(round_id));
+            obj.insert("_assistant_id_assigned".into(), serde_json::json!(false));
+        }
+        let start = crate::round_events::RoundStart {
+            round_index,
+            message_id: round_id.clone(),
+            pipeline_id: state_str(state, "pipeline_id").unwrap_or_default(),
+            thread_id: state_str(state, "session_id")
+                .or_else(|| state_str(state, "thread_id"))
+                .unwrap_or_default(),
+        };
+        if let Some(ev) = &self.round_events {
+            ev.on_round_start(start.clone()).await;
+        }
+        (round_index, round_id, start)
+    }
+
+    /// 轮次结束边界：本轮新增了 assistant 才携带其完整持久形态（None = 本轮
+    /// 无产出，消费方只发 stream_end 收尾，不发 new_message）。user 消息在
+    /// 每轮都携带——消费方（api 桥接）只在首个有产出的轮次附认领回传。
+    async fn round_end_event(
+        &self,
+        state: &serde_json::Value,
+        round_index: i64,
+        round_id: String,
+        start: &crate::round_events::RoundStart,
+        assistant_before: usize,
+    ) {
+        if let Some(ev) = &self.round_events {
+            let assistant = if count_role(state, "assistant") > assistant_before {
+                last_role(state, "assistant")
+            } else {
+                None
+            };
+            ev.on_round_end(crate::round_events::RoundEnd {
+                round_index,
+                message_id: round_id,
+                pipeline_id: start.pipeline_id.clone(),
+                thread_id: start.thread_id.clone(),
+                assistant,
+                user_message: last_role(state, "user"),
+            })
+            .await;
+        }
     }
 
     /// 向声明 `on_pipeline_end` 的插件分发管道结束钩子（best-effort）。
@@ -1272,6 +1352,41 @@ fn truthy_flag(state: &serde_json::Value, key: &str) -> bool {
         .and_then(|o| o.get(key))
         .and_then(|v| v.as_bool())
         .unwrap_or(false)
+}
+
+/// 读取 state[key] 的字符串（缺失/非 string 返回 None）。
+fn state_str(state: &serde_json::Value, key: &str) -> Option<String> {
+    state
+        .as_object()
+        .and_then(|o| o.get(key))
+        .and_then(|v| v.as_str())
+        .map(str::to_string)
+}
+
+/// state["messages"] 中指定 role 的消息数。
+fn count_role(state: &serde_json::Value, role: &str) -> usize {
+    state
+        .get("messages")
+        .and_then(|v| v.as_array())
+        .map(|a| {
+            a.iter()
+                .filter(|m| m.get("role").and_then(|r| r.as_str()) == Some(role))
+                .count()
+        })
+        .unwrap_or(0)
+}
+
+/// state["messages"] 中指定 role 的最后一条消息（倒序首个；无则 None）。
+fn last_role(state: &serde_json::Value, role: &str) -> Option<serde_json::Value> {
+    state
+        .get("messages")
+        .and_then(|v| v.as_array())
+        .and_then(|a| {
+            a.iter()
+                .rev()
+                .find(|m| m.get("role").and_then(|r| r.as_str()) == Some(role))
+                .cloned()
+        })
 }
 
 /// 计算 step 执行前后的 state diff：返回 after 中相对 before 变更的顶层 key 及其新值。

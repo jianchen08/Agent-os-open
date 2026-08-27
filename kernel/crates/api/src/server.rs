@@ -829,6 +829,7 @@ async fn process_via_engine_inner(
         agent_id,
         message,
         &run_id,
+        user_id,
     )
     .await
     {
@@ -1402,8 +1403,33 @@ async fn stage_execute(
     agent_id: &str,
     message: &str,
     run_id: &str,
+    user_id: &str,
 ) -> Result<serde_json::Value, EngineOutcome> {
     let branch_id = "main".to_string();
+
+    // 轮次观察点桥接（一轮 = 一条消息）：session 未接线的部署形态不挂（仅引擎执行）。
+    // 线程/管道坐标从 initial_state 取（WS 路径与注入路径同一来源）。
+    let round_events = state.session.as_ref().map(|session| {
+        let thread_id = initial_state
+            .get("session_id")
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty())
+            .or_else(|| initial_state.get("thread_id").and_then(|v| v.as_str()))
+            .unwrap_or("")
+            .to_string();
+        let route_id = initial_state
+            .get("pipeline_id")
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
+            .unwrap_or_else(|| thread_id.clone());
+        Arc::new(crate::ws_session::SessionRoundEvents::new(
+            session.clone(),
+            thread_id,
+            route_id,
+            user_id.to_string(),
+        )) as Arc<dyn agentos_engine::RoundEvents>
+    });
 
     // ── Pull 热加载（在 project_root 被 move 给 executor 之前算出 config_root）──
     let config_root = project_root.join("config");
@@ -1444,6 +1470,12 @@ async fn stage_execute(
             })
             .map(|m| m.id.clone()),
     );
+    // 轮次观察点（None = 未接线）：chat 会话路径逐轮发流式事件。
+    let executor = if let Some(ev) = round_events {
+        executor.with_round_events(ev)
+    } else {
+        executor
+    };
 
     // 双轨收敛（审计变更#1）：agent 全量配置唯一事实源 = context_build 插件，
     // 引擎不再 per-iteration 注入 agent yaml；内核只经 resolve_agent_tool_ids

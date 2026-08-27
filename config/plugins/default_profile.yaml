@@ -64,5 +64,7 @@ plugins:
     enabled: true
   godot_mcp:
     enabled: true
+  agentos-builtin-tools:
+    enabled: true
 defaults:
   enabled: true
