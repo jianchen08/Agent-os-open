@@ -2145,10 +2145,14 @@ class ContextWindowGuardPlugin(IInputPlugin):
         context_window = ctx.state.get("context_window", 128000)
         config = CompressionConfig.from_yaml_config(context_window)
 
-        # 构建 LLM 调用函数：经 capability_caller 调 memory.compress 工具
+        # 构建 LLM 调用函数：经 capability_caller 调 llm.complete_stream
+        # （llm_service 服务轴）。model 解析链与 llm_core 同款：
+        # state.model_id > state.model_tier(→ defaults.tiers) > defaults.chat。
         llm_call_fn = None
         if _capability_caller is not None:
-            llm_call_fn = _build_compress_llm_call_fn(_capability_caller)
+            llm_call_fn = _build_compress_llm_call_fn(
+                _capability_caller, model_id=_resolve_compress_model(ctx)
+            )
 
         try:
             return CompressionService(
@@ -2189,47 +2193,102 @@ class ContextWindowGuardPlugin(IInputPlugin):
             logger.error("[%s] setup 异常: %s", self.name, exc, exc_info=True)
 
 
-def _build_compress_llm_call_fn(caller: CapabilityCaller) -> LLMCallFn:
+def _resolve_compress_model(ctx: PluginContext) -> str:
+    """解析压缩用模型 id（与 llm_core 同款链路）。
+
+    优先级：state.model_id > state.model_tier(→ llm.yaml defaults.tiers)
+    > llm.yaml defaults.chat；全部缺失返回空串（llm_service 默认 chat 兜底）。
+
+    模型配置经 _config_models loader 读取（llm_core server.py 注入的
+    llm.yaml 配置 shim 同源；本 sidecar 未注入时 loader 返回空配置，
+    解析结果为空串 → llm_service 兜底）。
+
+    Args:
+        ctx: 插件执行上下文，读 model_id/model_tier
+
+    Returns:
+        model_id（可为空串）
+    """
+    resolved = ctx.state.get("model_id", "")
+    if not resolved:
+        tier = ctx.state.get("model_tier", "")
+        if tier:
+            try:
+                from _config_models import get_model_config_loader  # noqa: PLC0415
+
+                resolved = get_model_config_loader().resolve_tier(tier)
+            except ImportError:
+                logger.debug(
+                    "[context_window_guard] _config_models 不可达（llm.yaml 未注入），"
+                    "压缩模型走 llm_service 默认 chat"
+                )
+                return ""
+    if not resolved:
+        try:
+            from _config_models import get_model_config_loader  # noqa: PLC0415
+
+            resolved = get_model_config_loader().get_default_chat_model()
+        except ImportError:
+            return ""
+    return resolved or ""
+
+
+def _build_compress_llm_call_fn(caller: CapabilityCaller, model_id: str = "") -> LLMCallFn:
     """构建压缩用的 LLM 调用函数。
 
-    经 capability_caller 调 memory.compress 工具（入参 {prompt, max_tokens}，
-    出参 {summary, degraded}）。该工具契约只收字符串——消息列表经
-    ContextCompressor._format_messages 压平为带角色头/语义标签的文本
-    （cache 收益丢失，理解质量保留，属可接受降级）。
+    经 capability_caller 调 llm.complete_stream（llm_service 服务轴，与
+    llm_core 同款调用形态）：tool-executor.invoke 携带 plugin_id 显式点名
+    llm_service，返回 {success, data, error} 信封；data 是聚合响应 dict
+    （text/tool_calls/thinking_text/usage/finish_reason/partial），压缩取
+    data.text 为摘要。
 
-    进程内 LLMClient 首选路径已退役（2026-08-26：全仓零生产消费者，LLM 面
-    三处分散收敛由 llm_service 承接）。
+    model 参数由调用方从 state 解析（model_id → model_tier → defaults.chat），
+    空串时 llm_service 按默认 chat 兜底。
 
     Args:
         caller: 能力调用 async 函数 (method, params) -> Any
+        model_id: 压缩用模型 id（空 = llm_service 默认 chat）
 
     Returns:
         async (messages) -> response_text 的 LLM 调用函数；
-        memory.compress 调用失败时抛 RuntimeError 并携带原因
+        llm.complete_stream 调用失败时抛 RuntimeError 并携带原因
         （禁止把调用错误伪装成空响应——上游会把空串诊断为"LLM 空响应"）
     """
     async def _call(payload: str | list[dict[str, Any]]) -> str:
+        # llm.complete_stream 收消息数组；字符串形态包成单条 user 消息
         if isinstance(payload, list):
-            prompt = ContextCompressor._format_messages(payload)
+            messages = payload
         else:
-            prompt = payload
+            messages = [{"role": "user", "content": payload}]
         params = {
-            "tool_name": "memory.compress",
-            "args": {"prompt": prompt, "max_tokens": 8000},
+            "tool_name": "llm.complete_stream",
+            "plugin_id": "llm_service",
+            "args": {"model": model_id, "messages": messages, "max_tokens": 8000},
         }
         try:
             result = await caller("tool-executor.invoke", params)
         except Exception as e:
-            raise RuntimeError(f"[compress_llm_call] memory.compress 调用失败: {e}") from e
-        if isinstance(result, dict):
-            if result.get("degraded"):
-                logger.info(
-                    "[compress_llm_call] memory.compress 降级: %s",
-                    result.get("error", ""),
-                )
-                return ""
-            return str(result.get("summary", "") or "")
-        # 兼容直接返回字符串的形态
-        return str(result) if result else ""
+            raise RuntimeError(f"[compress_llm_call] llm.complete_stream 调用失败: {e}") from e
+        if not isinstance(result, dict):
+            raise RuntimeError(
+                f"[compress_llm_call] llm.complete_stream 信封形状异常: {type(result).__name__}"
+            )
+        # tool-executor.invoke 返回 {success, data, error} 信封（对齐 llm_core）：
+        # success=false（服务未注册/执行失败）是错误不是空响应，fail-closed 抛出。
+        if not result.get("success"):
+            raise RuntimeError(
+                f"[compress_llm_call] llm.complete_stream 工具执行失败: {result.get('error') or result}"
+            )
+        data = result.get("data")
+        if not isinstance(data, dict):
+            raise RuntimeError(
+                f"[compress_llm_call] llm.complete_stream 返回形状异常: {type(data).__name__}"
+            )
+        # 流中断/取消：半截内容不可作压缩摘要（压缩须全文理解），显式放弃
+        if data.get("partial") is not None:
+            raise RuntimeError(
+                "[compress_llm_call] llm.complete_stream 流中断（partial），放弃压缩"
+            )
+        return str(data.get("text") or "")
 
     return _call

@@ -1,11 +1,17 @@
 """工具缓存写入 Output 插件。
 
-在管道 output 阶段（工具执行完成之后）读取 raw_tool_calls + tool_results，
+在管道 output 阶段（工具执行完成之后）读取 tool_core 的调用快照
+（``_executed_tool_calls``）+ 执行结果（``tool_results``），
 将成功的结果写入 tool_cache（input 阶段）共享的模块级单例缓存。
 
 接通 tool_cache 的写入断路：tool_cache.put() 原本无调用方，
 本插件是它的生产调用方。下一轮 LLM 若再次产出相同工具调用，
 tool_cache 命中缓存直接返回，跳过实际执行。
+
+数据源说明：raw_tool_calls 由 llm_core 产出、tool_core 执行后**清空**
+（对齐 tool_core Rust 实现 lib.rs:106）；post 链读 raw_tool_calls 恒为空。
+tool_core 执行时把执行前的调用列表快照写入 ``_executed_tool_calls``，
+本插件以它为写入源（与结果按下标配对）。
 
 依赖关系：
     - 与 tool_cache（input）共享 _GLOBAL_CACHE（模块级单例字典）
@@ -13,7 +19,7 @@ tool_cache 命中缓存直接返回，跳过实际执行。
     - 失败的工具调用（result 含 error）不写缓存
 
 State 命名空间：
-    - 只读 raw_tool_calls / tool_results，不写 state（纯副作用：写缓存）
+    - 只读 _executed_tool_calls / tool_results，不写 state（纯副作用：写缓存）
 """
 
 from __future__ import annotations
@@ -69,7 +75,7 @@ class ToolCacheWriter(IOutputPlugin):
     async def execute(self, ctx: PluginContext) -> OutputResult:
         """执行缓存写入。
 
-        读取 raw_tool_calls + tool_results，把成功的工具调用结果写入
+        读取 _executed_tool_calls + tool_results，把成功的工具调用结果写入
         tool_cache 共享的模块级单例缓存。
 
         Args:
@@ -82,9 +88,11 @@ class ToolCacheWriter(IOutputPlugin):
             return OutputResult()
 
         tool_results = ctx.state.get(StateKeys.TOOL_RESULTS, [])
-        raw_tool_calls = ctx.state.get(StateKeys.RAW_TOOL_CALLS, [])
+        # 工具调用快照：tool_core（Rust）执行后清空 raw_tool_calls，
+        # 执行前的调用列表在 _executed_tool_calls（lib.rs:107）。
+        executed_calls = ctx.state.get("_executed_tool_calls", [])
 
-        if not tool_results or not raw_tool_calls:
+        if not tool_results or not executed_calls:
             return OutputResult()
 
         # 延迟导入 tool_cache（input 端），复用其模块级单例缓存 + put 逻辑
@@ -113,11 +121,11 @@ class ToolCacheWriter(IOutputPlugin):
         written = 0
         skipped_exclude = 0
         skipped_error = 0
-        call_count = len(raw_tool_calls)
+        call_count = len(executed_calls)
         result_count = len(tool_results)
 
         for i in range(min(call_count, result_count)):
-            tool_call = raw_tool_calls[i]
+            tool_call = executed_calls[i]
             result = tool_results[i]
 
             # 失败的工具调用不缓存（result 含 error 字段）

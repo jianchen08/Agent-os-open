@@ -98,14 +98,27 @@ def make_cache_key(tool_call: dict[str, Any]) -> str:
     使用 (tool_name + sorted_args_json) 的 MD5 哈希作为 key，
     确保相同参数的工具调用命中同一缓存条目。
 
+    参数读取兼容两种生产形状：
+    - 0.2 llm_core 产出 OpenAI 风格 {"id", "name", "arguments"}（arguments
+      是 JSON 字符串）；
+    - 工具链/测试构造的 {"name", "args"}（args 是 dict）。
+    arguments 字符串先 json.loads 解析为 dict 再参与 key 组装，
+    保证两种形状下同参调用 key 一致（否则字符串原文参与哈希，
+    同一调用在查询/写入两端 key 分叉）。
+
     Args:
-        tool_call: 工具调用描述，包含 name 和 args
+        tool_call: 工具调用描述，包含 name 和 args/arguments
 
     Returns:
         MD5 哈希字符串
     """
     tool_name = tool_call.get("name", "")
-    args = tool_call.get("args", {})
+    args = tool_call.get("args", tool_call.get("arguments", {}))
+    if isinstance(args, str):
+        try:
+            args = json.loads(args)
+        except (TypeError, ValueError):
+            args = {"_raw": args}
     raw = f"{tool_name}:{json.dumps(args, sort_keys=True, ensure_ascii=False, default=str)}"
     return hashlib.md5(raw.encode("utf-8")).hexdigest()
 
@@ -216,9 +229,69 @@ class ToolCache(IInputPlugin):
             state_updates={
                 "cache_hit": True,
                 StateKeys.TOOL_RESULTS: cached_results,
+                # 命中即视为工具已消费：清空 raw_tool_calls（对齐 tool_core
+                # 执行后清空），否则 post 链路由见非空调用会再派 tool_execute，
+                # 与 tool_cache 命中形成死循环
+                StateKeys.RAW_TOOL_CALLS: [],
+                # 补 messages 配对：llm_core 已 append assistant(tool_calls)
+                # 消息，这里追加 role=tool 结果消息（对齐 tool_core
+                # messages::rebuild 的产物形状）——否则 LLM 下一轮看不到工具
+                # 结果会重发同一调用，再次命中缓存，形成死循环
+                "messages": self._build_tool_result_messages(ctx, tool_calls, cached_results),
             },
             skip_remaining=True,
         )
+
+    def _build_tool_result_messages(
+        self,
+        ctx: PluginContext,
+        tool_calls: list[dict[str, Any]],
+        cached_results: list[Any],
+    ) -> dict[str, Any]:
+        """构造缓存命中的 tool 结果消息 ops（对齐 tool_core messages::rebuild 形状）。
+
+        tool_core 正常路径在 execute 后重建 messages：assistant(tool_calls) 由
+        llm_core 已 append，tool_core 追加 role=tool 配对消息（content 为结果
+        序列化文本、tool_result envelope 为完整结果）。本方法对齐该形状，
+        用引擎的 _ops 增量形态（set 无 seq = append）追加配对消息。
+
+        Args:
+            ctx: 插件执行上下文
+            tool_calls: 本轮 raw_tool_calls（含 id）
+            cached_results: 缓存命中的结果列表（与 tool_calls 按下标配对）
+
+        Returns:
+            messages ops 字典（{"_ops": [...]}）
+        """
+        ops: list[dict[str, Any]] = []
+        for i, tc in enumerate(tool_calls):
+            if i >= len(cached_results):
+                break
+            result = cached_results[i]
+            call_id = tc.get("id") or f"call_{i}"
+            # 内容序列化对齐 tool_core serialize_for_content（JSON 文本）
+            content = result
+            if not isinstance(result, str):
+                try:
+                    content = json.dumps(result, ensure_ascii=False, default=str)
+                except (TypeError, ValueError):
+                    content = str(result)
+            tool_msg: dict[str, Any] = {
+                "role": "tool",
+                "tool_call_id": call_id,
+                "content": content,
+                "tool_result": {
+                    "call_id": call_id,
+                    "tool_name": tc.get("name", ""),
+                    "success": True,
+                    "error": None,
+                    "data": result if not isinstance(result, str) else {"content": result},
+                    "metadata": None,
+                    "duration_ms": 0.0,
+                },
+            }
+            ops.append({"op": "set", "msg": tool_msg})
+        return {"_ops": ops}
 
     def put(self, tool_call: dict[str, Any], result: Any) -> None:
         """将工具执行结果写入缓存。

@@ -898,7 +898,8 @@ loop_bodies:
             "bodies: {:?}",
             cfg.loop_bodies.iter().map(|b| &b.id).collect::<Vec<_>>()
         );
-        // main / post：DSL next 归一为 routes（3 条：loop + loop + end）
+        // main / post：DSL next 归一为 routes（6 条：对话挂起 + 对话结束 +
+        // loop + loop + loop + end）
         let main = cfg
             .loop_bodies
             .iter()
@@ -911,14 +912,29 @@ loop_bodies:
             .iter()
             .find(|s| s.id == "post")
             .expect("post step");
-        assert_eq!(post.routes.len(), 3, "post next 三条");
+        assert_eq!(post.routes.len(), 6, "post next 六条");
+        // 对话模式分支（2026-08-27 接线 conversation_mode 时新增，置顶）
         assert_eq!(post.routes[0].then.next, RouteNext::Loop);
         assert_eq!(
             post.routes[0].when,
+            "conversation_mode == True and raw_tool_calls == []"
+        );
+        assert_eq!(
+            post.routes[0].then.set.get("suspended"),
+            Some(&serde_json::json!(true)),
+            "对话挂起经 set suspended=true 表达"
+        );
+        assert_eq!(
+            post.routes[1].when,
+            "conversation_mode == True and raw_tool_calls != []"
+        );
+        // 既有工具调用/回 LLM 分支顺序不变
+        assert_eq!(
+            post.routes[2].when,
             "raw_tool_calls != [] and raw_tool_calls != None"
         );
-        assert_eq!(post.routes[2].then.next, RouteNext::End);
-        assert_eq!(post.routes[2].when, "True", "缺省 when 归一为 True");
+        assert_eq!(post.routes[5].then.next, RouteNext::End);
+        assert_eq!(post.routes[5].when, "True", "缺省 when 归一为 True");
         // 动态 core_plugin 项保留（引擎动态点）
         let core = main
             .steps

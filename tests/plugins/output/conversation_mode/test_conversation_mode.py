@@ -1,8 +1,9 @@
 # @feature: FP-0.2.〇 管道引擎 | @vision: V3 可嵌入 | @ci: python-coverage
-"""ConversationModeDetector 单元测试——对话模式激活/循环/结束三态机。
+"""ConversationModeDetector 单元测试——对话模式激活检测。
 
-覆盖：未激活时从 tool_results 检测激活信号、已激活无工具调用产生 wait、
-已激活有工具调用清除状态、_extract_conversation_flag 多层字段提取。
+覆盖：未激活时从 tool_results 检测激活信号、_extract_conversation_flag
+多层字段提取。已激活态的对话循环判断（纯文本→wait / 工具调用→清状态）
+由管道配置路由承载（autonomous.yaml post 链 next 分支），插件不再持有。
 """
 
 from __future__ import annotations
@@ -110,7 +111,7 @@ class TestExtractFlag:
 
 class TestActivation:
     @pytest.mark.asyncio
-    async def test_tool_results带激活信号则激活并wait(self) -> None:
+    async def test_tool_results带激活信号则激活并挂起(self) -> None:
         from plugin import ConversationModeDetector
 
         d = ConversationModeDetector()
@@ -124,8 +125,9 @@ class TestActivation:
         )
         assert result.state_updates[StateKeys.CONVERSATION_MODE] is True
         assert result.state_updates[StateKeys.CONVERSATION_ROUND] == 1
-        assert result.route_signal is not None
-        assert result.route_signal.route_type == "wait"
+        # 挂起经 state.suspended 表达（route_signal 全链零消费，引擎见
+        # suspended 即停轮；per-run 键下轮派发自动复位）
+        assert result.state_updates["suspended"] is True
         assert result.skip_remaining is True
 
     @pytest.mark.asyncio
@@ -189,82 +191,13 @@ class TestActivation:
 
 
 # ============================================================
-# 已激活态：对话循环 / 对话结束
+# 已激活态：判断已搬管道配置路由，插件不再持有
 # ============================================================
 
-
-class TestActiveConversation:
-    @pytest.mark.asyncio
-    async def test_已激活无工具调用产生wait并递增round(self) -> None:
-        from plugin import ConversationModeDetector
-
-        d = ConversationModeDetector()
-        result = await d.execute(
-            _ctx(
-                {
-                    StateKeys.CONVERSATION_MODE: True,
-                    StateKeys.CONVERSATION_ROUND: 2,
-                    StateKeys.RAW_TOOL_CALLS: [],  # 纯文本回复
-                }
-            )
-        )
-        assert result.state_updates[StateKeys.CONVERSATION_ROUND] == 3
-        assert result.route_signal.route_type == "wait"
-        assert "round 3" in result.route_signal.reason
-        assert result.skip_remaining is True
-
-    @pytest.mark.asyncio
-    async def test_已激活无round默认从1开始(self) -> None:
-        from plugin import ConversationModeDetector
-
-        d = ConversationModeDetector()
-        result = await d.execute(
-            _ctx(
-                {
-                    StateKeys.CONVERSATION_MODE: True,
-                    StateKeys.RAW_TOOL_CALLS: [],
-                }
-            )
-        )
-        # 无 CONVERSATION_ROUND → state.get 返回 0 → +1 = 1
-        assert result.state_updates[StateKeys.CONVERSATION_ROUND] == 1
-
-    @pytest.mark.asyncio
-    async def test_已激活有工具调用则清除对话模式(self) -> None:
-        from plugin import ConversationModeDetector
-
-        d = ConversationModeDetector()
-        result = await d.execute(
-            _ctx(
-                {
-                    StateKeys.CONVERSATION_MODE: True,
-                    StateKeys.CONVERSATION_ROUND: 5,
-                    StateKeys.RAW_TOOL_CALLS: [{"name": "file_write"}],
-                }
-            )
-        )
-        assert result.state_updates[StateKeys.CONVERSATION_MODE] is False
-        assert result.state_updates[StateKeys.CONVERSATION_ROUND] == 0
-        # 不产生 wait（让 next_tool 路由接管）
-        assert result.route_signal is None
-        assert result.skip_remaining is False
-
-    @pytest.mark.asyncio
-    async def test_激活优先级高于tool_results检测(self) -> None:
-        """已激活态下，即使 tool_results 又带激活信号，也走激活态分支。"""
-        from plugin import ConversationModeDetector
-
-        d = ConversationModeDetector()
-        result = await d.execute(
-            _ctx(
-                {
-                    StateKeys.CONVERSATION_MODE: True,
-                    StateKeys.RAW_TOOL_CALLS: [],
-                    StateKeys.TOOL_RESULTS: [_tool_result_with_conv("data")],
-                }
-            )
-        )
-        # 走的是 _handle_active_conversation，不是激活分支（round 递增而非重置为 1）
-        assert StateKeys.CONVERSATION_MODE not in result.state_updates or \
-            result.state_updates.get(StateKeys.CONVERSATION_MODE) is not False
-        assert result.route_signal.route_type == "wait"
+# autonomous.yaml post 链 next 分支承载已激活态两分支（DSL 表达式）：
+# - when: "conversation_mode == True and raw_tool_calls == []" →
+#   then: loop + set: {suspended: true}（挂起等待用户下一条消息）
+# - when: "conversation_mode == True and raw_tool_calls != []" →
+#   then: loop + set: {conversation_mode: false, conversation_round: 0}
+# 表达式在引擎 condition.rs 求值（缺失键 → None → False），语义与原插件
+# 布尔判断一致；DSL 求值属引擎车道（Rust 测试），此处不重复。

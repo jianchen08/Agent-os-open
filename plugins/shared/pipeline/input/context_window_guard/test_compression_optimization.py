@@ -536,8 +536,8 @@ class TestCompactionInstruction:
 
 
 class TestCapabilityFallbackFlattens:
-    def test_fallback_flattens_message_list(self) -> None:
-        """capability 回退路径（memory.compress 工具）把消息列表压平成字符串 prompt。"""
+    def test_fallback_passes_message_list(self) -> None:
+        """capability 路径（llm.complete_stream）把消息列表原样透传。"""
         mod = _load_cwg()
         mod.set_capability_caller(None)
 
@@ -545,7 +545,7 @@ class TestCapabilityFallbackFlattens:
 
         async def _caller(method: str, params: dict) -> Any:
             captured.update(params)
-            return {"summary": "回退摘要", "degraded": False}
+            return {"success": True, "data": {"text": "回退摘要", "finish_reason": "stop"}}
 
         fn = mod._build_compress_llm_call_fn(_caller)
         payload = [
@@ -555,11 +555,9 @@ class TestCapabilityFallbackFlattens:
         result = _run(fn(payload))
 
         assert result == "回退摘要"
-        assert captured["tool_name"] == "memory.compress"
-        prompt = captured["args"]["prompt"]
-        assert isinstance(prompt, str), "回退路径 prompt 应是字符串"
-        assert "系统提示" in prompt
-        assert "用户内容" in prompt
+        assert captured["tool_name"] == "llm.complete_stream"
+        assert captured["plugin_id"] == "llm_service"
+        assert captured["args"]["messages"] == payload
 
 
 class TestCompressionServiceForkThreading:

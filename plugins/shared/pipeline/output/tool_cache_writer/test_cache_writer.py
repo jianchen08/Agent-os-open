@@ -93,11 +93,15 @@ def clear_cache() -> None:
     _cache_now().clear()
 
 
-def make_ctx(raw_tool_calls: list[dict], tool_results: list) -> PluginContext:
-    """构造带工具调用 state 的上下文。"""
+def make_ctx(executed_calls: list[dict], tool_results: list) -> PluginContext:
+    """构造带工具调用快照 state 的上下文。
+
+    writer 读 ``_executed_tool_calls``（tool_core 执行后 raw_tool_calls
+    被清空，执行前的调用列表快照在该键），tool_results 按下标配对。
+    """
     return PluginContext(
         state={
-            StateKeys.RAW_TOOL_CALLS: raw_tool_calls,
+            "_executed_tool_calls": executed_calls,
             StateKeys.TOOL_RESULTS: tool_results,
         }
     )
@@ -115,11 +119,12 @@ async def test_writer_write_then_cache_hit() -> None:
     writer = ToolCacheWriter(config={})
     cache = _fresh_tool_cache(config={})
 
-    # 模拟工具执行完成：raw_tool_calls + tool_results（2026-08-22 起 file_read
-    # 按路径读类型排除出缓存，示例改用纯查询工具 web_search）
-    raw_tool_calls = [{"name": "web_search", "args": {"query": "agentos"}}]
+    # 模拟工具执行完成：_executed_tool_calls + tool_results（2026-08-22 起
+    # file_read 按路径读类型排除出缓存，示例改用纯查询工具 web_search；
+    # 调用形状贴近生产：llm_core 产出 OpenAI 风格 {name, arguments}）
+    executed_calls = [{"name": "web_search", "arguments": '{"query": "agentos"}'}]
     tool_results = [{"content": "hello world"}]
-    ctx = make_ctx(raw_tool_calls, tool_results)
+    ctx = make_ctx(executed_calls, tool_results)
 
     # writer 写缓存
     await writer.execute(ctx)
@@ -127,13 +132,30 @@ async def test_writer_write_then_cache_hit() -> None:
 
     # 下一轮：tool_cache 查同样调用，应命中
     ctx2 = PluginContext(
-        state={StateKeys.RAW_TOOL_CALLS: raw_tool_calls},
+        state={StateKeys.RAW_TOOL_CALLS: [{"name": "web_search", "arguments": '{"query": "agentos"}'}]},
     )
     result = await cache.execute(ctx2)
 
     assert result.state_updates.get("cache_hit") is True
     assert result.state_updates.get(StateKeys.TOOL_RESULTS) == [{"content": "hello world"}]
     assert result.skip_remaining is True
+
+
+@pytest.mark.asyncio
+async def test_writer_noop_when_raw_tool_calls_cleared() -> None:
+    """tool_core 执行后 raw_tool_calls 被清空：无 _executed_tool_calls 时 writer 空转。"""
+    clear_cache()
+    writer = ToolCacheWriter(config={})
+
+    ctx = PluginContext(
+        state={
+            # 生产 post 链形状：raw_tool_calls 已被 tool_core 清空为 []
+            StateKeys.RAW_TOOL_CALLS: [],
+            StateKeys.TOOL_RESULTS: [{"content": "hello world"}],
+        }
+    )
+    await writer.execute(ctx)
+    assert len(_cache_now()) == 0
 
 
 # ══════════════════════════════════════════════════
@@ -147,9 +169,9 @@ async def test_exclude_tools_not_cached() -> None:
     clear_cache()
     writer = ToolCacheWriter(config={})
 
-    raw_tool_calls = [{"name": "bash_execute", "args": {"command": "ls"}}]
+    executed_calls = [{"name": "bash_execute", "args": {"command": "ls"}}]
     tool_results = [{"output": "file1\nfile2"}]
-    ctx = make_ctx(raw_tool_calls, tool_results)
+    ctx = make_ctx(executed_calls, tool_results)
 
     await writer.execute(ctx)
 
@@ -162,9 +184,9 @@ async def test_custom_exclude_tools() -> None:
     clear_cache()
     writer = ToolCacheWriter(config={"exclude_tools": ["my_unsafe_tool"]})
 
-    raw_tool_calls = [{"name": "my_unsafe_tool", "args": {}}]
+    executed_calls = [{"name": "my_unsafe_tool", "args": {}}]
     tool_results = ["result"]
-    ctx = make_ctx(raw_tool_calls, tool_results)
+    ctx = make_ctx(executed_calls, tool_results)
 
     await writer.execute(ctx)
 
@@ -182,9 +204,9 @@ async def test_failed_tool_call_not_cached() -> None:
     clear_cache()
     writer = ToolCacheWriter(config={})
 
-    raw_tool_calls = [{"name": "file_read", "args": {"path": "/nonexistent"}}]
+    executed_calls = [{"name": "file_read", "args": {"path": "/nonexistent"}}]
     tool_results = [{"error": "file not found"}]
-    ctx = make_ctx(raw_tool_calls, tool_results)
+    ctx = make_ctx(executed_calls, tool_results)
 
     await writer.execute(ctx)
 
@@ -225,15 +247,15 @@ async def test_ttl_expiry() -> None:
     cache = _fresh_tool_cache(config={"default_ttl": 0})  # 立即过期
     writer = ToolCacheWriter(config={"default_ttl": 0})
 
-    raw_tool_calls = [{"name": "file_read", "args": {"path": "x"}}]
+    executed_calls = [{"name": "file_read", "args": {"path": "x"}}]
     tool_results = ["data"]
 
-    await writer.execute(make_ctx(raw_tool_calls, tool_results))
+    await writer.execute(make_ctx(executed_calls, tool_results))
 
     # 等一下让时间推进
     time.sleep(0.01)
 
-    ctx = PluginContext(state={StateKeys.RAW_TOOL_CALLS: raw_tool_calls})
+    ctx = PluginContext(state={StateKeys.RAW_TOOL_CALLS: executed_calls})
     result = await cache.execute(ctx)
 
     # TTL=0 已过期，不应命中
@@ -254,9 +276,9 @@ async def test_max_size_eviction() -> None:
 
     # 写 3 个不同工具调用，max_size=2 应淘汰最老的
     for i in range(3):
-        raw = [{"name": "file_read", "args": {"path": f"file{i}"}}]
+        executed = [{"name": "file_read", "args": {"path": f"file{i}"}}]
         res = [f"data{i}"]
-        await writer.execute(make_ctx(raw, res))
+        await writer.execute(make_ctx(executed, res))
 
     # 全局缓存不应超过 max_size（可能因 LRU 淘汰到 2 条）
     assert len(_cache_now()) <= 2
@@ -269,7 +291,7 @@ async def test_max_size_eviction() -> None:
 
 @pytest.mark.asyncio
 async def test_empty_inputs_no_op() -> None:
-    """raw_tool_calls 或 tool_results 为空时不写缓存。"""
+    """_executed_tool_calls 或 tool_results 为空时不写缓存。"""
     clear_cache()
     writer = ToolCacheWriter(config={})
 
@@ -277,7 +299,7 @@ async def test_empty_inputs_no_op() -> None:
     await writer.execute(make_ctx([{"name": "file_read", "args": {}}], []))
     assert len(_cache_now()) == 0
 
-    # 空 raw_tool_calls
+    # 空 _executed_tool_calls
     await writer.execute(make_ctx([], ["data"]))
     assert len(_cache_now()) == 0
 
@@ -318,10 +340,48 @@ async def test_file_read_not_cached() -> None:
     clear_cache()
     writer = ToolCacheWriter(config={})
 
-    raw_tool_calls = [{"name": "file_read", "args": {"path": "src/a.py"}}]
+    executed_calls = [{"name": "file_read", "args": {"path": "src/a.py"}}]
     tool_results = [{"output": "# 第一版内容"}]
-    ctx = make_ctx(raw_tool_calls, tool_results)
+    ctx = make_ctx(executed_calls, tool_results)
 
     await writer.execute(ctx)
 
     assert len(_cache_now()) == 0, "file_read 不应被缓存（读→写→再读会命中陈旧内容）"
+
+
+@pytest.mark.asyncio
+async def test_cache_hit_appends_tool_result_messages() -> None:
+    """命中缓存时补 messages 配对（role=tool），避免 LLM 重发调用死循环。"""
+    clear_cache()
+    cache = _fresh_tool_cache(config={})
+
+    # 预置缓存：web_search(query=agentos) → "cached answer"
+    cache.put(
+        {"name": "web_search", "args": {"query": "agentos"}},
+        {"content": "cached answer"},
+    )
+
+    # 模拟 llm_core 已 append assistant(tool_calls) 后进入 core step：
+    # raw_tool_calls 含 id（OpenAI 风格）
+    ctx = PluginContext(
+        state={
+            StateKeys.RAW_TOOL_CALLS: [
+                {"id": "call_abc", "name": "web_search", "arguments": '{"query": "agentos"}'}
+            ],
+        }
+    )
+    result = await cache.execute(ctx)
+
+    assert result.state_updates.get("cache_hit") is True
+    assert result.state_updates.get(StateKeys.TOOL_RESULTS) == [{"content": "cached answer"}]
+    # raw_tool_calls 清空（工具已消费，防 post 路由再派 tool_execute 死循环）
+    assert result.state_updates.get(StateKeys.RAW_TOOL_CALLS) == []
+    # messages 配对：role=tool + tool_call_id 与调用 id 一致 + tool_result envelope
+    ops = result.state_updates["messages"]["_ops"]
+    assert len(ops) == 1
+    msg = ops[0]["msg"]
+    assert msg["role"] == "tool"
+    assert msg["tool_call_id"] == "call_abc"
+    assert msg["tool_result"]["tool_name"] == "web_search"
+    assert msg["tool_result"]["success"] is True
+    assert result.skip_remaining is True

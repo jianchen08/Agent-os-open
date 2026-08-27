@@ -2,15 +2,17 @@
 """压缩 LLM 调用函数测试（从 memory/test_compress.py 迁移）。
 
 compress 已从独立 sidecar (plugins/shared/system/memory/) 迁入 context_window_guard
-进程内。本测试验证 _build_compress_llm_call_fn 的 capability_caller 回退路径，
+进程内。本测试验证 _build_compress_llm_call_fn 的 capability_caller 路径，
 与原 6 个用例语义对齐（进程内 LLMClient 首选路径已退役——零生产消费者，
 LLM 面收敛由 llm_service 承接）：
 
 1. capability_caller 抛异常时上抛 RuntimeError 并携带原因（不伪装空响应）
-2. capability_caller 正常时返回其 summary 文本（strip 语义保留）
-3. 工具返回 degraded=True 时降级返回空串（工具契约内的降级信号）
-4. 消息列表被压平成字符串 prompt 传给工具
-5. 压缩服务级失败路径：调用异常沿链路上抛，由 compress_messages 顶层捕获
+2. tool-executor 信封 success=false（服务未注册/执行失败）→ 上抛
+3. 流中断（partial 非 None）→ 上抛（半截内容不可作压缩摘要）
+4. 正常时返回 data.text（llm.complete_stream 聚合响应）
+5. 消息列表原样透传（不再压平成字符串 prompt）
+6. model_id 参数透传（空串兜底 llm_service 默认 chat）
+7. 压缩服务级失败路径：调用异常沿链路上抛，由 compress_messages 顶层捕获
    （error 日志 + 返回 None，本轮压缩显式跳过）
 
 测试不依赖真实 LLM——通过 monkeypatch 模块级 _capability_caller 实现。
@@ -99,8 +101,34 @@ class TestCompressCallerFailure:
         fn = mod._build_compress_llm_call_fn(_raising_caller)
         with pytest.raises(RuntimeError) as exc_info:
             _await(fn("compress this"))
-        assert "memory.compress 调用失败" in str(exc_info.value), "须标明失败点"
+        assert "llm.complete_stream 调用失败" in str(exc_info.value), "须标明失败点"
         assert str(src_exc) in str(exc_info.value), "须携带根因"
+
+    def test_envelope_success_false_raises(self, mod: Any) -> None:
+        """tool-executor 信封 success=false（服务未注册/执行失败）→ 上抛，不伪装空响应。"""
+
+        async def _caller(method: str, params: dict) -> Any:
+            return {"success": False, "error": "llm_service not registered"}
+
+        fn = mod._build_compress_llm_call_fn(_caller)
+        with pytest.raises(RuntimeError) as exc_info:
+            _await(fn("compress this"))
+        assert "工具执行失败" in str(exc_info.value)
+        assert "llm_service not registered" in str(exc_info.value)
+
+    def test_partial_interrupted_raises(self, mod: Any) -> None:
+        """流中断（partial 非 None）→ 上抛（半截内容不可作压缩摘要）。"""
+
+        async def _caller(method: str, params: dict) -> Any:
+            return {
+                "success": True,
+                "data": {"status": "interrupted", "partial": {"text": "half"}},
+            }
+
+        fn = mod._build_compress_llm_call_fn(_caller)
+        with pytest.raises(RuntimeError) as exc_info:
+            _await(fn("compress this"))
+        assert "流中断" in str(exc_info.value)
 
     def test_service_compress_failure_returns_none_with_cause_logged(self, mod: Any, caplog: Any) -> None:
         """压缩服务级失败路径：调用异常沿链路上抛并携带根因，由
@@ -109,7 +137,7 @@ class TestCompressCallerFailure:
         import logging
 
         async def _failing_fn(_payload: Any) -> str:
-            raise RuntimeError("memory.compress down")
+            raise RuntimeError("llm.complete_stream down")
 
         svc = mod.CompressionService(llm_call_fn=_failing_fn, backend=None)
         # 总量远超 context_window*trigger_ratio，确保进入压缩轮
@@ -123,47 +151,58 @@ class TestCompressCallerFailure:
         assert out is None, "调用失败应显式跳过本轮压缩，而非以空摘要继续"
         msgs = [r.getMessage() for r in caplog.records if r.levelno >= logging.WARNING]
         assert any("压缩失败" in m for m in msgs), "失败必须显式留痕"
-        assert any("memory.compress down" in m for m in msgs), "根因必须随链路抵达处置层，不得翻译成空响应"
+        assert any("llm.complete_stream down" in m for m in msgs), "根因必须随链路抵达处置层，不得翻译成空响应"
 
 
 # ═══════════════════════════════════════════════════════════
-# 2. 正常路径：capability_caller 返回 summary
+# 2. 正常路径：capability_caller 返回 text
 # ═══════════════════════════════════════════════════════════
 
 
 class TestCompressHappyPath:
     def test_compress_returns_summary(self, mod: Any) -> None:
-        """capability_caller 正常时返回其 summary 文本。"""
+        """capability_caller 正常时返回其 text 文本。"""
         mod.set_capability_caller(None)
 
         async def _caller(method: str, params: dict) -> Any:
             assert method == "tool-executor.invoke"
-            assert params["tool_name"] == "memory.compress"
-            assert params["args"]["prompt"] == "compress this"
-            return {"summary": "  compressed text  ", "degraded": False}
+            assert params["tool_name"] == "llm.complete_stream"
+            assert params["plugin_id"] == "llm_service"
+            assert params["args"]["messages"] == [{"role": "user", "content": "compress this"}]
+            return {"success": True, "data": {"text": "  compressed text  ", "finish_reason": "stop"}}
 
         fn = mod._build_compress_llm_call_fn(_caller)
         result = _await(fn("compress this"))
         assert result == "  compressed text  "
 
-    def test_compress_degraded_returns_empty(self, mod: Any) -> None:
-        """capability_caller 返回 degraded=True 时降级返回空串。"""
+    def test_message_list_passthrough(self, mod: Any) -> None:
+        """消息列表原样透传给 llm.complete_stream（不再压平成字符串）。"""
+        mod.set_capability_caller(None)
+
+        captured: dict[str, Any] = {}
+
+        async def _caller(method: str, params: dict) -> Any:
+            captured.update(params)
+            return {"success": True, "data": {"text": "摘要", "finish_reason": "stop"}}
+
+        fn = mod._build_compress_llm_call_fn(_caller)
+        payload = [
+            {"role": "system", "content": "系统提示"},
+            {"role": "user", "content": "用户内容"},
+        ]
+        result = _await(fn(payload))
+
+        assert result == "摘要"
+        assert captured["args"]["messages"] == payload
+
+    def test_model_id_passthrough(self, mod: Any) -> None:
+        """model_id 参数透传给 llm.complete_stream（空串兜底默认 chat）。"""
         mod.set_capability_caller(None)
 
         async def _caller(method: str, params: dict) -> Any:
-            return {"summary": "", "degraded": True, "error": "no chat key"}
+            assert params["args"]["model"] == "deepseek-v4"
+            return {"success": True, "data": {"text": "ok", "finish_reason": "stop"}}
 
-        fn = mod._build_compress_llm_call_fn(_caller)
+        fn = mod._build_compress_llm_call_fn(_caller, model_id="deepseek-v4")
         result = _await(fn("compress this"))
-        assert result == ""
-
-    def test_compress_string_result_compat(self, mod: Any) -> None:
-        """兼容直接返回字符串的形态。"""
-        mod.set_capability_caller(None)
-
-        async def _caller(method: str, params: dict) -> Any:
-            return "plain string summary"
-
-        fn = mod._build_compress_llm_call_fn(_caller)
-        result = _await(fn("compress this"))
-        assert result == "plain string summary"
+        assert result == "ok"
