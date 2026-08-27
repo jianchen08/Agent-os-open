@@ -35,7 +35,7 @@ Deep Space v2 App Shell 主布局（对齐 Ardot 设计稿 B/C 区），将应�
 
 ```
 外部 props (chatContent / sidebarContent)
-  → AppHeader (TitleBar)
+  → FiveSpaceLayout 内联 TitleBar
   → SideBar 插槽 | Chat Splitter | WorkspacePanel
   → StatusBar (connectionStatus / activeExecutions / pendingInteractions)
 useThemeStore.themeConfig → safeLoadLayout → resolveLayout
@@ -54,8 +54,7 @@ useLayoutModeStore → workspaceTabs / floatingWindows / connectionStatus
 
 | 文件 | 职责 |
 |------|------|
-| `FiveSpaceLayout.tsx` | App Shell 主布局编排 |
-| `AppHeader.tsx` | TitleBar 32px |
+| `FiveSpaceLayout.tsx` | App Shell 主布局编排（TitleBar 内联实现） |
 | `Sidebar.tsx` | 会话侧栏 288px，折叠置顶 |
 | `StatusBar.tsx` | 底栏 22px 状态与指标 |
 | `DockBar.tsx` | 保留导出（兼容/其他入口），主壳不再挂载 |
@@ -73,5 +72,4 @@ useLayoutModeStore → workspaceTabs / floatingWindows / connectionStatus
 | `FiveSpaceLayout` | 主布局组件 |
 | `FiveSpaceLayoutProps` | chatContent / sidebarContent / onToggleMode / 主题与登出 |
 | `StatusBar` / `StatusBarProps` | 底栏组件 |
-| `AppHeader` | 顶栏组件 |
 | `Sidebar` | 会话侧栏 |

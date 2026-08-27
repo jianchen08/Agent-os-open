@@ -66,7 +66,7 @@ test.describe('旅程11：附件上传与预览', () => {
     // 等待附件出现在预览区（确认上传流程启动）
     await expect(page.locator('text=e2e-doc-').first()).toBeVisible({ timeout: 15_000 });
 
-    // 轮询等待上传完成（FileUploadZone 的 loading spinner 消失），替代固定 3s sleep。
+    // 轮询等待上传完成（ChatInput 附件区的 loading spinner 消失），替代固定 3s sleep。
     // 先尽力等 spinner 出现（上传启动；上传极快时可能跳过），再轮询其消失。
     const uploadSpinner = page.locator('.animate-spin');
     await uploadSpinner.first().waitFor({ state: 'visible', timeout: 3_000 }).catch(() => {});

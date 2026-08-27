@@ -3,7 +3,6 @@
  */
 
 import type { Message, MessageRole, MessageToolCall, ThinkingContent } from '@/types/models'
-import type { ThinkingModeState } from '@/types/thinkingMode'
 
 /**
  * 消息内容类型
@@ -72,24 +71,10 @@ export interface ChatContainerProps {
   sessionId: string
   /** 是否正在加载 */
   isLoading?: boolean
-  /** 是否正在生成回复 */
-  isGenerating?: boolean
   /** 发送消息回调 */
   onSendMessage: (params: SendMessageParams) => Promise<void>
   /** 停止生成回调 */
   onStopGenerate?: () => void
-  /** 当前 Token 使用量（prompt tokens） */
-  currentTokenUsage?: number
-  /** 最大 Token 限制 */
-  maxTokens?: number
-  /** 上一轮生成的 completion tokens */
-  completionTokens?: number
-  /** 上一轮总 tokens */
-  totalTokens?: number
-  /** 思考模式状态 */
-  thinkingMode?: ThinkingModeState
-  /** 思考模式切换回调 */
-  toggleThinkingMode?: (enabled: boolean) => Promise<void>
   /** 自定义类名 */
   className?: string
   /** 是否还有更多历史消息 */
@@ -214,8 +199,6 @@ export interface ChatInputProps {
   isGenerating?: boolean
   /** 执行状态（用于 smart 模式） */
   executionState?: ExecutionState
-  /** 占位文本 */
-  placeholder?: string
   /** 发送消息回调 */
   onSendMessage: (params: SendMessageParams) => void
   /** 停止生成回调 */
@@ -230,8 +213,6 @@ export interface ChatInputProps {
   currentTokenUsage?: number
   /** 最大 Token 限制 */
   maxTokens?: number
-  /** 上一轮生成的 completion tokens */
-  completionTokens?: number
   /** 上一轮总 tokens */
   totalTokens?: number
   /** 是否启用思考模式切换 */

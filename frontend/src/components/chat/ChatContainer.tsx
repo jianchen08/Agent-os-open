@@ -94,11 +94,8 @@ function mapStoreTabsToBarFormat(
 export const ChatContainer = ({
   sessionId,
   isLoading = false,
-  isGenerating: _isGenerating = false,
   onSendMessage,
   onStopGenerate,
-  currentTokenUsage: _externalTokenUsage = 0,
-  maxTokens: _externalMaxTokens = 0,
   className = '',
   hasMoreMessages = false,
   isLoadingMoreMessages = false,
@@ -418,12 +415,10 @@ export const ChatContainer = ({
             onSendMessage({ ...params, pipelineId: pid })
           }}
           onStopGenerate={onStopGenerate}
-          placeholder="输入消息，按 Enter 发送..."
           enableThinkingMode={true}
           modelName={effectiveModelName}
           currentTokenUsage={effectiveTokenCount}
           maxTokens={effectiveMaxTokens}
-          completionTokens={pipelineUsage?.completionTokens ?? 0}
           totalTokens={pipelineUsage?.totalTokens ?? 0}
           cachedTokens={pipelineUsage?.cachedTokens ?? 0}
           hitRatio={pipelineUsage?.hitRatio ?? 0}

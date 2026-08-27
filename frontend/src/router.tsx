@@ -22,6 +22,7 @@ import { openWorkspacePanelByPath } from './services/workspacePanelOpener'
 import { useAgentTabStore } from './stores/agentTabStore'
 import { useAuthStore } from './stores/authStore'
 import { useInteractionStore } from './stores/interactionStore'
+import { useNotificationStore } from './stores/notificationStore'
 import { usePendingInputStore } from './stores/pendingInputStore'
 import { usePipelineMessageStore } from './stores/pipelineMessageStore'
 import { useSessionListStore } from './stores/sessionListStore'
@@ -256,6 +257,15 @@ function HomePage(): ReactNode {
       await handleSelectSession(newSession.id)
     } catch (error) {
       console.error('创建会话失败:', error)
+      // apiClient 拦截器构造的是普通 ApiError（非 Error 实例），直接读 .message
+      useNotificationStore.getState().addNotification({
+        title: '创建会话失败',
+        message: (error as { message?: string })?.message ?? '请检查网络连接后重试',
+        priority: 'high',
+        category: 'error',
+        isBlocking: false,
+        autoDismissMs: 8000,
+      })
     }
   }, [createSession, handleSelectSession])
 
@@ -449,9 +459,6 @@ function HomePage(): ReactNode {
       <ChatContainer
         sessionId={activeSessionId}
         isLoading={isSessionLoading}
-        // NOTE: ChatContainer 内部使用 effectiveIsGenerating (基于 activePipelineId)
-        // 此 prop 仅作兼容保留，实际不影响输入框状态
-        isGenerating={false}
         onSendMessage={handleSendMessage}
         onStopGenerate={handleStopGenerate}
         onRegenerate={handleRegenerate}

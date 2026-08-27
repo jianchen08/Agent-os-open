@@ -11,7 +11,6 @@ import { render, renderHook } from '@testing-library/react'
 import React from 'react'
 import type { RenderFragment } from '@/components/chat/hooks/useMessageRender'
 import type { InteractionCardProps } from '@/components/chat/InteractionCard'
-import type { SubAgentCardProps } from '@/components/chat/SubAgentCard'
 import type { ActivityCardProps, ActivityData  } from '@/types/activity'
 import type { Message, MessageToolCall, ThinkingContent } from '@/types/models'
 import type { MessagePart, PartState, ToolCallPartState } from '@/types/messageParts'
@@ -486,33 +485,6 @@ export async function renderInteractionCard(props: Partial<InteractionCardProps>
   }
 
   return render(React.createElement(InteractionCard, fullProps))
-}
-
-/**
- * 渲染 SubAgentCard 的辅助函数
- *
- * @param props - SubAgentCardProps 的部分属性
- * @returns render 结果
- */
-export async function renderSubAgentCard(props: Partial<SubAgentCardProps>) {
-  const { SubAgentCard } = await import('@/components/chat/SubAgentCard')
-
-  const fullProps: SubAgentCardProps = {
-    data: {
-      id: 'agent-1',
-      name: '子 Agent',
-      agentLevel: 2,
-      status: 'running',
-      ...props.data,
-    },
-    mode: props.mode ?? 'summary',
-    expandable: props.expandable ?? true,
-    onExpand: props.onExpand,
-    onOpenDetail: props.onOpenDetail,
-    className: props.className,
-  }
-
-  return render(React.createElement(SubAgentCard, fullProps))
 }
 
 /**
