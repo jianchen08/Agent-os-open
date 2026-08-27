@@ -22,14 +22,14 @@ import pytest
 
 PLUGINS_BASE = Path(__file__).resolve().parent.parent.parent / "plugins" / "shared" / "system"
 
-# channel_api 已随退役方案物理删除（2026-08-21 六批次落地），不再列入
+# channel_api 已随退役方案物理删除（2026-08-21 六批次落地），不再列入；
+# channel_gateway 已随 2026-08-27 清理批删除（0.1 遗留统一网关，零消费者）
 CHANNELS = [
     "channel_dingtalk",
     "channel_feishu",
     "channel_wecom",
     "channel_cli",
     "channel_qq",
-    "channel_gateway",
 ]
 
 
@@ -124,8 +124,7 @@ class TestAdapterClasses:
                 if k in (module, "adapter", "stream_client", "card_builder", "crypto",
                          "helpers", "output_adapter", "_base_output_adapter",
                          "onebot_client", "input_adapter", "base_combo_adapter",
-                         "pipeline_types", "channel_gateway", "message_normalizer",
-                         "unified_types", "session_bridge")
+                         "pipeline_types")
             ]
             for k in keys_to_clear:
                 del sys.modules[k]
@@ -181,18 +180,6 @@ class TestAdapterClasses:
         mod = self._import_from_channel("channel_qq", "onebot_client")
         assert hasattr(mod, "OneBotClient")
 
-    def test_gateway_importable(self) -> None:
-        """ChannelGateway 及相关模块可导入。"""
-        mod = self._import_from_channel("channel_gateway", "channel_gateway")
-        assert hasattr(mod, "ChannelGateway")
-        ut = self._import_from_channel("channel_gateway", "unified_types")
-        assert hasattr(ut, "UnifiedMessage")
-        assert hasattr(ut, "UnifiedResponse")
-        sb = self._import_from_channel("channel_gateway", "session_bridge")
-        assert hasattr(sb, "SessionBridge")
-        mn = self._import_from_channel("channel_gateway", "message_normalizer")
-        assert hasattr(mn, "MessageNormalizer")
-
     def test_dingtalk_adapter_instantiable(self) -> None:
         """DingTalkAdapter 可实例化。"""
         mod = self._import_from_channel("channel_dingtalk", "adapter")
@@ -223,11 +210,3 @@ class TestAdapterClasses:
             http_api_url="http://test:5700",
         )
         assert adapter.channel_type == "qq"
-
-    def test_gateway_instantiable(self) -> None:
-        """ChannelGateway 可实例化。"""
-        mod = self._import_from_channel("channel_gateway", "channel_gateway")
-        gateway = mod.ChannelGateway()
-        assert hasattr(gateway, "register_adapter")
-        assert hasattr(gateway, "handle_message")
-        assert hasattr(gateway, "send_response")

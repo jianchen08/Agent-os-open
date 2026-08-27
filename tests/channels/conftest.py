@@ -20,7 +20,6 @@ _SYSTEM_DIR = _REPO_ROOT / "plugins" / "shared" / "system"
 # 通道插件名 → 目录
 _CHANNEL_DIRS: dict[str, Path] = {
     "feishu": _SYSTEM_DIR / "channel_feishu",
-    "gateway": _SYSTEM_DIR / "channel_gateway",
     "dingtalk": _SYSTEM_DIR / "channel_dingtalk",
     "qq": _SYSTEM_DIR / "channel_qq",
     "wecom": _SYSTEM_DIR / "channel_wecom",
@@ -44,10 +43,6 @@ _AMBIGUOUS_MODULES = {
     "pipeline_types",
     "stream_client",
     "card_builder",
-    "channel_gateway",
-    "message_normalizer",
-    "session_bridge",
-    "unified_types",
     # helpers：wecom/qq 两通道目录各有 helpers.py，跨通道先入缓存会互相命中
     "helpers",
     # workspace：跨目录同名（tasks/workspace.py、isolation/workspace.py 模块
