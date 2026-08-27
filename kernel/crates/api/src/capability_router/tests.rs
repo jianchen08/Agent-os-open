@@ -1779,3 +1779,170 @@ async fn test_suspend_resume_pipeline_by_id() {
     )
     .await;
 }
+
+// ── transient.* 四方法（ADR 2026-08-27 方案 §2.3）──────────────────
+// 中间态内存寄存器能力面：set/get/list/clear。tenant 取
+// agentos_tenant::current_or_default（测试无 scope 时 = default）。
+
+fn router_plain() -> KernelCapabilityRouter {
+    KernelCapabilityRouter::with_metrics(MetricsAggregator::new())
+}
+
+#[tokio::test]
+async fn transient_set_get_roundtrip() {
+    let router = router_plain();
+    let res = router
+        .handle(
+            "transient",
+            "set",
+            json!({
+                "pipeline_id": "pipe_t1",
+                "key": "chunk:mc_a",
+                "value": {"text_len": 3},
+            }),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res["status"], "set");
+    let got = router
+        .handle(
+            "transient",
+            "get",
+            json!({"pipeline_id": "pipe_t1", "key": "chunk:mc_a"}),
+        )
+        .await
+        .unwrap();
+    assert_eq!(got["found"], true);
+    assert_eq!(got["value"]["text_len"], json!(3));
+    // 未写的键 found=false、value=null
+    let miss = router
+        .handle(
+            "transient",
+            "get",
+            json!({"pipeline_id": "pipe_t1", "key": "chunk:mc_b"}),
+        )
+        .await
+        .unwrap();
+    assert_eq!(miss["found"], false);
+    assert_eq!(miss["value"], json!(null));
+    // 清理后 get 落空
+    router
+        .handle(
+            "transient",
+            "clear",
+            json!({"pipeline_id": "pipe_t1", "key": "chunk:mc_a"}),
+        )
+        .await
+        .unwrap();
+    let after = router
+        .handle(
+            "transient",
+            "get",
+            json!({"pipeline_id": "pipe_t1", "key": "chunk:mc_a"}),
+        )
+        .await
+        .unwrap();
+    assert_eq!(after["found"], false);
+}
+
+#[tokio::test]
+async fn transient_set_overwrites_same_key() {
+    let router = router_plain();
+    router
+        .handle(
+            "transient",
+            "set",
+            json!({"pipeline_id": "pipe_t2", "key": "progress:1", "value": {"pct": 10}}),
+        )
+        .await
+        .unwrap();
+    router
+        .handle(
+            "transient",
+            "set",
+            json!({"pipeline_id": "pipe_t2", "key": "progress:1", "value": {"pct": 80}}),
+        )
+        .await
+        .unwrap();
+    let got = router
+        .handle(
+            "transient",
+            "get",
+            json!({"pipeline_id": "pipe_t2", "key": "progress:1"}),
+        )
+        .await
+        .unwrap();
+    assert_eq!(got["value"]["pct"], json!(80), "同 key 覆盖取最新值");
+}
+
+#[tokio::test]
+async fn transient_list_enumerates_pipeline_states() {
+    let router = router_plain();
+    router
+        .handle(
+            "transient",
+            "set",
+            json!({"pipeline_id": "pipe_t3", "key": "chunk:mc_a", "value": {"text_len": 3}}),
+        )
+        .await
+        .unwrap();
+    router
+        .handle(
+            "transient",
+            "set",
+            json!({"pipeline_id": "pipe_t3", "key": "progress:1", "value": {"pct": 50}}),
+        )
+        .await
+        .unwrap();
+    let rows = router
+        .handle(
+            "transient",
+            "list",
+            json!({"pipeline_id": "pipe_t3"}),
+        )
+        .await
+        .unwrap();
+    let states = rows["transient_states"].as_array().unwrap();
+    assert_eq!(states.len(), 2);
+    let keys: Vec<&str> = states
+        .iter()
+        .filter_map(|r| r["key"].as_str())
+        .collect();
+    assert!(keys.contains(&"chunk:mc_a"));
+    assert!(keys.contains(&"progress:1"));
+    // 未写过的管道返回空数组（而非错误）
+    let empty = router
+        .handle("transient", "list", json!({"pipeline_id": "pipe_ghost"}))
+        .await
+        .unwrap();
+    assert_eq!(empty["transient_states"].as_array().unwrap().len(), 0);
+}
+
+#[tokio::test]
+async fn transient_missing_params_rejected() {
+    let router = router_plain();
+    // 缺 pipeline_id / key / value 各档
+    let r1 = router
+        .handle("transient", "set", json!({"key": "k"}))
+        .await;
+    assert!(r1.is_err(), "缺 pipeline_id 必须报错");
+    let r2 = router
+        .handle("transient", "get", json!({"pipeline_id": "p"}))
+        .await;
+    assert!(r2.is_err(), "缺 key 必须报错");
+    let r3 = router.handle("transient", "list", json!({})).await;
+    assert!(r3.is_err(), "缺 pipeline_id 必须报错");
+    let r4 = router
+        .handle("transient", "clear", json!({"pipeline_id": "p"}))
+        .await;
+    assert!(r4.is_err(), "缺 key 必须报错");
+    // 空串等同缺参
+    let r5 = router
+        .handle(
+            "transient",
+            "set",
+            json!({"pipeline_id": "", "key": "k", "value": 1}),
+        )
+        .await;
+    assert!(r5.is_err(), "空 pipeline_id 必须报错");
+}

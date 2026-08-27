@@ -351,6 +351,14 @@ impl CapabilityRouter for KernelCapabilityRouter {
             // ── pipeline-state.update：任务域写面（仅允许 task.* 前缀键）──
             ("pipeline-state", "update") => self.handle_pipeline_state_update(params).await,
 
+            // ── transient：插件中间态内存寄存器（ADR 2026-08-27，方案 §2.3）──
+            // 中间态不落库、引擎内存持有、用完即清；插件 manifest 声明
+            // capabilities.transient_state 即接入（复用声明→校验闸）。
+            ("transient", "set") => self.handle_transient_set(params).await,
+            ("transient", "get") => self.handle_transient_get(params).await,
+            ("transient", "list") => self.handle_transient_list(params).await,
+            ("transient", "clear") => self.handle_transient_clear(params).await,
+
             // ── tenant-context：多租户上下文查询（F-TENANT-B-KERNEL）──
             // Python 侧 `plugins/shared/tenant_data.py` 经此能力取当前租户决定数据根；
             // 无活跃 task_local 时回退 "default"（与 Python 侧回退一致，永不报错）。
@@ -1527,6 +1535,106 @@ impl KernelCapabilityRouter {
             }
         }
         Ok(json!({"status": "updated", "pipeline_id": pipeline_id}))
+    }
+
+    // ── transient.*：插件中间态内存寄存器四方法（ADR 2026-08-27 方案 §2.3）──
+    // 中间态不落库：A 键值区（per-(tenant,pipeline) → per-key）+ B 运行上下文
+    // 登记区（message→step 归属，供钩子最小作用域装载）；tenant 取
+    // agentos_tenant::current_or_default（与 tenant-context/pipeline-state 同源）。
+    // 节流是写面内建语义：同 key 连续写合并为"最新值 + 最后更新时间"。
+
+    /// transient.set：写/覆盖一个中间态键（value 任意 JSON）。
+    async fn handle_transient_set(&self, params: Value) -> Result<Value, McpError> {
+        let pipeline_id = params
+            .get("pipeline_id")
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty())
+            .ok_or_else(|| McpError::Protocol {
+                message: "transient.set 缺少 pipeline_id 参数".to_string(),
+            })?;
+        let key = params
+            .get("key")
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty())
+            .ok_or_else(|| McpError::Protocol {
+                message: "transient.set 缺少 key 参数".to_string(),
+            })?;
+        let value = params.get("value").cloned().unwrap_or(Value::Null);
+        let tenant_id = agentos_tenant::current_or_default("default").tenant_id;
+        agentos_engine::global_registry().set(&tenant_id, pipeline_id, key, value);
+        Ok(json!({"status": "set", "pipeline_id": pipeline_id, "key": key}))
+    }
+
+    /// transient.get：引擎步骤/条件读一个中间态键（None → null）。
+    async fn handle_transient_get(&self, params: Value) -> Result<Value, McpError> {
+        let pipeline_id = params
+            .get("pipeline_id")
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty())
+            .ok_or_else(|| McpError::Protocol {
+                message: "transient.get 缺少 pipeline_id 参数".to_string(),
+            })?;
+        let key = params
+            .get("key")
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty())
+            .ok_or_else(|| McpError::Protocol {
+                message: "transient.get 缺少 key 参数".to_string(),
+            })?;
+        let tenant_id = agentos_tenant::current_or_default("default").tenant_id;
+        let value = agentos_engine::global_registry().get(&tenant_id, pipeline_id, key);
+        let found = value.is_some();
+        Ok(json!({
+            "pipeline_id": pipeline_id,
+            "key": key,
+            "value": value.unwrap_or(Value::Null),
+            "found": found,
+        }))
+    }
+
+    /// transient.list：枚举该管道全部存活中间态（前端 F5 刷新恢复数据源）。
+    async fn handle_transient_list(&self, params: Value) -> Result<Value, McpError> {
+        let pipeline_id = params
+            .get("pipeline_id")
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty())
+            .ok_or_else(|| McpError::Protocol {
+                message: "transient.list 缺少 pipeline_id 参数".to_string(),
+            })?;
+        let tenant_id = agentos_tenant::current_or_default("default").tenant_id;
+        let rows: Vec<Value> = agentos_engine::global_registry()
+            .list(&tenant_id, pipeline_id)
+            .into_iter()
+            .map(|(key, value, updated_at)| {
+                json!({
+                    "key": key,
+                    "value": value,
+                    "updated_at_ms": updated_at.elapsed().as_millis(),
+                })
+            })
+            .collect();
+        Ok(json!({"pipeline_id": pipeline_id, "transient_states": rows}))
+    }
+
+    /// transient.clear：显式清一个中间态键（stream_end 处理器清 chunk 键）。
+    async fn handle_transient_clear(&self, params: Value) -> Result<Value, McpError> {
+        let pipeline_id = params
+            .get("pipeline_id")
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty())
+            .ok_or_else(|| McpError::Protocol {
+                message: "transient.clear 缺少 pipeline_id 参数".to_string(),
+            })?;
+        let key = params
+            .get("key")
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty())
+            .ok_or_else(|| McpError::Protocol {
+                message: "transient.clear 缺少 key 参数".to_string(),
+            })?;
+        let tenant_id = agentos_tenant::current_or_default("default").tenant_id;
+        agentos_engine::global_registry().clear(&tenant_id, pipeline_id, key);
+        Ok(json!({"status": "cleared", "pipeline_id": pipeline_id, "key": key}))
     }
 }
 
