@@ -54,7 +54,7 @@ const DialogContent = React.forwardRef<
         border: 'var(--dialog-border, 1px solid rgba(255, 255, 255, 0.1))',
       }}
       className={cn(
-        'data-[state=open]:animate-in data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=open]:fade-in-0 data-[state=closed]:zoom-out-95 data-[state=open]:zoom-in-95 flex flex-col duration-200',
+        'data-[state=open]:animate-in data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=open]:fade-in-0 data-[state=closed]:zoom-out-95 data-[state=open]:zoom-in-95 flex max-h-[90vh] flex-col overflow-y-auto duration-200',
         className,
       )}
       {...props}
