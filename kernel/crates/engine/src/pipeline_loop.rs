@@ -346,32 +346,36 @@ impl PipelineExecutor {
                 // checkpoint 计数在 persist_step_trace 里按「配置 step」推进
                 // （每执行一个配置 step +1，达 interval_steps 落档），此处不再按轮计数。
                 let assistant_before = count_role(state, "assistant");
-                let (round_index, round_id, round_start) = if let Some((ri, rid, rs)) =
-                    open_round.take()
-                {
-                    // 续轮（工具迭代）：沿用本轮 id，不新发 stream_start
-                    if let Some(obj) = state.as_object_mut() {
-                        obj.insert("message_id".into(), serde_json::json!(rid));
+                // 先判迭代类型（post 路由写入的契约），再决定开轮/续轮：
+                // 工具迭代沿用打开轮（tool 事件挂 LLM 轮消息）；LLM/其它迭代
+                // 一律新开轮——先续后判会让下一次 LLM 迭代误沿上一轮的 id
+                // （工具卡重复建到 LLM 轮消息的根因，2026-08-27 真机复现）。
+                let next_is_tool = state_str(state, "core_plugin").as_deref() == Some("pipeline_tool_core");
+                let (round_index, round_id, round_start) = if next_is_tool {
+                    if let Some((ri, rid, rs)) = open_round.take() {
+                        if let Some(obj) = state.as_object_mut() {
+                            obj.insert("message_id".into(), serde_json::json!(rid));
+                        }
+                        (ri, rid, rs)
+                    } else {
+                        // 异常形态（无打开轮却先跑工具迭代）：兜底开一轮（记录完整
+                        // 性优先；正常 DSL 流不会走到此处）。
+                        self.round_start_event(state).await
                     }
-                    (ri, rid, rs)
-                } else if state_str(state, "core_plugin").as_deref() != Some("pipeline_tool_core") {
-                    self.round_start_event(state).await
                 } else {
-                    // 异常形态（无打开轮却先跑工具迭代）：仍开一轮兜底（记录完整
-                    // 性优先；正常 DSL 流不会走到此处）。
+                    open_round = None;
                     self.round_start_event(state).await
                 };
                 self.execute_steps(&body.steps, &body.id, state, compiled, ignore_ended)
                     .await?;
                 if count_role(state, "assistant") > assistant_before {
-                    // 本轮产出 assistant → 回合闭合：新消息 + 工具事件均发布收敛
-                    self.round_end_event(state, round_index, round_id, &round_start, assistant_before)
+                    // 本轮（LLM 回合）产出 assistant → 发终态事件（new_message/stream_end）。
+                    // 回合保持「打开」直到下一个 LLM 迭代（随后的工具迭代仍沿用本轮
+                    // message_id——工具事件挂本轮消息，与 new_message.toolCalls 同卡位）。
+                    self.round_end_event(state, round_index, round_id.clone(), &round_start, assistant_before)
                         .await;
-                    open_round = None;
-                } else {
-                    // 无产出（工具迭代）：回合保持打开，工具事件挂在打开轮消息上
-                    open_round = Some((round_index, round_id, round_start));
                 }
+                open_round = Some((round_index, round_id, round_start));
                 if truthy_flag(state, "suspended") {
                     break;
                 }

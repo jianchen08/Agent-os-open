@@ -317,10 +317,14 @@ async fn test_tool_iteration_reuses_open_round() {
     // invoker 按调用序：llm#1 带工具，tool#1 出工具结果，llm#2 纯文本
     struct AltInvoker {
         calls: Mutex<Vec<String>>,
+        tool_iter_message_id: Mutex<Option<String>>,
     }
     impl AltInvoker {
         fn new() -> Self {
-            Self { calls: Mutex::new(Vec::new()) }
+            Self {
+                calls: Mutex::new(Vec::new()),
+                tool_iter_message_id: Mutex::new(None),
+            }
         }
     }
     #[async_trait]
@@ -328,9 +332,18 @@ async fn test_tool_iteration_reuses_open_round() {
         async fn invoke_pipeline_plugin(
             &self,
             plugin_id: &str,
-            _ctx: &PluginContext,
+            ctx: &PluginContext,
         ) -> Result<PluginResult, PluginError> {
             self.calls.lock().unwrap().push(plugin_id.to_string());
+            if plugin_id == "pipeline_tool_core" {
+                // 工具迭代应沿用打开轮的 message_id（工具事件挂 LLM 轮消息）
+                let mid = ctx
+                    .state
+                    .get("message_id")
+                    .and_then(|v| v.as_str())
+                    .map(str::to_string);
+                *self.tool_iter_message_id.lock().unwrap() = mid;
+            }
             let count = self
                 .calls
                 .lock()
@@ -405,9 +418,10 @@ async fn test_tool_iteration_reuses_open_round() {
     }
 
     let invoker = Arc::new(AltInvoker::new());
+    let invoker2 = invoker.clone();
     let store_dyn: Arc<dyn StorageBackend> = store;
     let executor = PipelineExecutor::new(
-        invoker as Arc<dyn PluginInvoker>,
+        invoker2 as Arc<dyn PluginInvoker>,
         Path::new(".").to_path_buf(),
         agentos_core::types::TenantContext::new("tenant_test", "session_test"),
         vec!["pipeline_llm_core".to_string(), "pipeline_tool_core".to_string()],
@@ -490,6 +504,12 @@ async fn test_tool_iteration_reuses_open_round() {
     assert_eq!(
         final_state.get("message_id").and_then(|v| v.as_str()),
         Some(starts[1].message_id.as_str())
+    );
+    // 工具迭代执行时的 state.message_id == 第一轮 id（工具事件挂 LLM 轮消息；
+    // 若工具迭代被错误地开成新轮，此处会是另一个 id——尾部重复卡根因锚）
+    assert_eq!(
+        invoker.tool_iter_message_id.lock().unwrap().as_deref(),
+        Some(starts[0].message_id.as_str())
     );
 }
 
