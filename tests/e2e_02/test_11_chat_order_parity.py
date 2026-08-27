@@ -116,17 +116,40 @@ def _fetch_backend_assistants(token, session_id):
     return assistants, msgs
 
 
+def _target_token(auth_token):
+    """测试身份选择：
+    - 默认 admin（CI / 无同身份浏览器共存的干净环境）；
+    - E2E_PARITY_USERNAME 设置时改为该用户的登录 token——本地与用户浏览器
+      共存时，同身份的新 WS 连接会 4000 replaced_by_new_connection 互踢，
+      需用预提升为 admin 的独立用户（本地手工提升，见 run 说明）。
+    """
+    username = os.environ.get("E2E_PARITY_USERNAME")
+    if not username:
+        return auth_token
+    from e2e_helpers import http_post_json
+
+    status, body, _ = http_post_json(
+        f"{KERNEL_URL}/api/v1/auth/login",
+        {"username": username, "password": os.environ.get("E2E_PARITY_PASSWORD", "parity12345")},
+        timeout=10,
+    )
+    if status != 200 or not isinstance(body, dict) or not body.get("access_token"):
+        raise RuntimeError(f"E2E_PARITY_USERNAME 登录失败: status={status}, body={str(body)[:200]}")
+    return body["access_token"]
+
+
 class TestChatOrderParity:
     """聊天消息顺序对等（真实 LLM 全链路）。"""
 
     @pytest.mark.timeout(360)
     def test_round_order_matches_backend(self, auth_token, cleanup_sessions):
-        session = create_session(auth_token, title="e2e-order-parity")
+        token = _target_token(auth_token)
+        session = create_session(token, title="e2e-order-parity")
         cleanup_sessions(session["thread_id"])
         sid = session["thread_id"]
 
         async def _run():
-            url = ws_chat_url(auth_token)
+            url = ws_chat_url(token)
             import websockets
 
             async with websockets.connect(url, max_size=10 * 1024 * 1024) as ws:
@@ -146,6 +169,7 @@ class TestChatOrderParity:
                 })
 
         events = asyncio.run(_run())
+        backend_assistants, _ = _fetch_backend_assistants(token, sid)
         seen_types, starts, new_messages, ends, deltas_total, deltas_with_mid = _rounds_from_events(events)
 
         # ── 1. 事件链完整性 ──
@@ -181,7 +205,6 @@ class TestChatOrderParity:
         )
 
         # ── 4. 顺序对等：事件流 new_message 顺序 == 后端 assistant 记录 seq 升序 ──
-        backend_assistants, _ = _fetch_backend_assistants(auth_token, sid)
         assert len(backend_assistants) == len(new_messages), (
             f"后端 assistant 记录数 {len(backend_assistants)} 应等于 new_message 轮数 "
             f"{len(new_messages)}（消息不丢不重）"

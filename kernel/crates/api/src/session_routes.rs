@@ -526,10 +526,19 @@ pub async fn list_session_messages_handler(
     // 传了 pipeline_run_id 就用它，否则回退路径 id；再回退线程的 active_pipeline_id
     // （GAP-1 统一修复：thread_id 与 pipeline_id 不同值时按 active 管道查——
     // 引擎落库用 resolve 后的 active_pipeline_id，直接拿 thread_id 查会落空）。
+    // 会话查询按租户过滤：request_tenant_ctx 之后的 scope 内执行（task_local 缺失
+    // 时 current_or_default("default") 会把非 default 租户的会话查成 None）。
+    let tenant_ctx = crate::server::request_tenant_ctx(state.store.as_ref(), &headers, &id).await;
     let explicit_pid = q.pipeline_run_id.clone();
     let mut target_pid = explicit_pid.unwrap_or_else(|| id.clone());
     if q.pipeline_run_id.is_none() {
-        if let Ok(Some(sess)) = store.get_session(&id).await {
+        let store_for_sess = store.clone();
+        let id_for_sess = id.clone();
+        let sess = agentos_tenant::scope(tenant_ctx.clone(), async move {
+            store_for_sess.get_session(&id_for_sess).await
+        })
+        .await;
+        if let Ok(Some(sess)) = sess {
             if let Some(active) = sess.active_pipeline_id.as_deref() {
                 if !active.is_empty() {
                     target_pid = active.to_string();
@@ -546,7 +555,6 @@ pub async fn list_session_messages_handler(
 
     // 多租户：get_messages_by_pipeline 按 task_local tenant 过滤，需在请求租户 scope 内执行。
     // scope 缺失时（task_local 未设 → current_or_default("default")），永远只读 default 租户。
-    let tenant_ctx = crate::server::request_tenant_ctx(state.store.as_ref(), &headers, &id).await;
     let tenant_id = tenant_ctx.tenant_id.clone();
     let store_clone = store.clone();
     let target_pid_for_scope = target_pid.clone();
