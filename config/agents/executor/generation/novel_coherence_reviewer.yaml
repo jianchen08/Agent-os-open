@@ -101,7 +101,6 @@ static_vars:
   enabled: true
   items:
   - '{{rules}}'
-  - '{{path:config/templates/coherence_review_template.md}}'
 dynamic_vars:
   enabled: true
   items:
@@ -176,7 +175,6 @@ deliverables:
 - name: coherence_review_report
   description: 章节连贯性审核报告，包含四维度评分、问题汇总和审核结论
   template_source: knowledge
-  template_name: config/templates/coherence_review_template.md
   output_path: '{{workspace}}/coherence_review_{chapter_number}.md'
   type: markdown
   required: true

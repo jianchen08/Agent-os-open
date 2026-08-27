@@ -43,10 +43,11 @@ class TestRegisterEnum:
     """register_enum 相关测试。"""
 
     def test_register_enum_success(self) -> None:
-        """正常注册枚举不应抛出异常。"""
+        """正常注册后可通过读取 API 取回枚举，成员值一致。"""
         slot = PluginTypeSlot()
         slot.register_enum("retry", "status", ["pending", "running", "done"])
-        # 不抛出异常即通过
+        cls = slot.get_enum_class("retry", "status")
+        assert [m.value for m in cls] == ["pending", "running", "done"]
 
     def test_register_enum_duplicate_raises_value_error(self) -> None:
         """重复注册同一 namespace+name 应抛出 ValueError。"""
@@ -56,19 +57,22 @@ class TestRegisterEnum:
             slot.register_enum("retry", "status", ["pending", "done"])
 
     def test_register_enum_different_namespace_same_name_ok(self) -> None:
-        """不同命名空间下相同 name 可以注册。"""
+        """不同命名空间下相同 name 可以注册，且各自取回互不串扰。"""
         slot = PluginTypeSlot()
         slot.register_enum("retry", "status", ["pending", "done"])
-        slot.register_enum("circuit", "status", ["closed", "open"])  # 不抛异常
+        slot.register_enum("circuit", "status", ["closed", "open"])
+        assert slot.get_enum_class("retry", "status").PENDING.value == "pending"
+        assert slot.get_enum_class("circuit", "status").CLOSED.value == "closed"
 
 
 class TestRegisterConstant:
     """register_constant 相关测试。"""
 
     def test_register_constant_success(self) -> None:
-        """正常注册常量。"""
+        """正常注册常量后可按原值取回。"""
         slot = PluginTypeSlot()
         slot.register_constant("retry", "max_attempts", 3)
+        assert slot.get_constant("retry", "max_attempts") == 3
 
     def test_register_constant_duplicate_raises_value_error(self) -> None:
         """重复注册同一 namespace+key 应抛出 ValueError。"""
@@ -78,21 +82,26 @@ class TestRegisterConstant:
             slot.register_constant("retry", "max_attempts", 5)
 
     def test_register_constant_various_types(self) -> None:
-        """常量值可以是任意类型。"""
+        """常量值可以是任意类型，各类型注册后原值往返。"""
         slot = PluginTypeSlot()
         slot.register_constant("ns", "int_val", 42)
         slot.register_constant("ns", "str_val", "hello")
         slot.register_constant("ns", "list_val", [1, 2, 3])
         slot.register_constant("ns", "none_val", None)
+        assert slot.get_constant("ns", "int_val") == 42
+        assert slot.get_constant("ns", "str_val") == "hello"
+        assert slot.get_constant("ns", "list_val") == [1, 2, 3]
+        assert slot.get_constant("ns", "none_val") is None
 
 
 class TestRegisterStateKey:
     """register_state_key 相关测试。"""
 
     def test_register_state_key_success(self) -> None:
-        """正常注册 state key。"""
+        """正常注册 state key 后默认值进入初始状态面。"""
         slot = PluginTypeSlot()
         slot.register_state_key("retry", "attempt_count", default=0)
+        assert slot.get_initial_state_defaults()["retry.attempt_count"] == 0
 
     def test_register_state_key_duplicate_raises_value_error(self) -> None:
         """重复注册同一 namespace+key 应抛出 ValueError。"""
@@ -113,9 +122,11 @@ class TestRegisterHandler:
     """register_handler 相关测试。"""
 
     def test_register_handler_success(self) -> None:
-        """正常注册处理函数。"""
+        """正常注册处理函数后可取回同一函数对象。"""
         slot = PluginTypeSlot()
-        slot.register_handler("retry", "on_failure", lambda: None)
+        fn = lambda: None  # noqa: E731
+        slot.register_handler("retry", "on_failure", fn)
+        assert slot.get_handler("retry", "on_failure") is fn
 
     def test_register_handler_duplicate_raises_value_error(self) -> None:
         """重复注册同一 namespace+name 应抛出 ValueError。"""
@@ -347,12 +358,14 @@ class TestIPluginRegisterTypes:
     """IPlugin.register_types hook 方法测试。"""
 
     def test_register_types_default_noop(self) -> None:
-        """基类 register_types 默认空实现不报错。"""
+        """基类 register_types 默认空实现无副作用，槽位保持空白可继续注册。"""
         from pipeline.plugin import IPlugin
 
         slot = PluginTypeSlot()
-        # 不应抛出异常
         IPlugin.register_types(slot)
+        assert slot.list_namespaces() == []
+        slot.register_constant("ns", "k", 1)
+        assert slot.get_constant("ns", "k") == 1
 
     def test_plugin_subclass_override_register_types(self) -> None:
         """插件子类可以覆盖 register_types。"""

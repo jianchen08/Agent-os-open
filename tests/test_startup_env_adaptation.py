@@ -82,6 +82,8 @@ class TestComposeStandardNaming:
 
     def test_no_explicit_name_field(self, content):
         """不应有顶层 name 字段（否则 project name 被锁死成字面量）"""
+        # 前置：内容非空且含 services 定义，保证负向扫描不是空转通过
+        assert "services:" in content
         # 逐行检查，避免误命中注释里的 "name:" 或 service 内字段
         for line in content.splitlines():
             stripped = line.lstrip()

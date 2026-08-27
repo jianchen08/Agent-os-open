@@ -149,8 +149,13 @@ def test_status_pushed_via_frontend() -> None:
 
 
 def test_silent_without_frontend() -> None:
+    """无 frontend 服务：不推送事件，但终止判定逻辑照常产出。"""
     plugin = _make_plugin()
-    asyncio.run(plugin._do_work(_ctx(_base_state())))  # 不抛即通过
+    updates = asyncio.run(plugin._do_work(_ctx(_base_state())))
+    assert "should_stop" not in updates
+    status = _status(updates)
+    assert status["convergence"] == "converging"
+    assert status["should_stop"] is False
 
 
 def test_disabled_returns_empty() -> None:

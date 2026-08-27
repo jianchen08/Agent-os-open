@@ -47,7 +47,6 @@ system_prompt: |-
   - 理解小说类型、题材、核心设定的方向和约束
 
   ### 2. 设计升级体系
-  {{path:config/templates/novel_system_design_template.md}}
 
   **升级体系设计规则（必须严格遵守）**：
 
@@ -227,7 +226,6 @@ deliverables:
 - name: system_design
   description: 体系设计文档，包含升级体系、战斗系统和经济系统的完整设计
   template_source: knowledge
-  template_name: config/templates/novel_system_design_template.md
   output_path: '{{workspace}}/docs/system_design.md'
   type: markdown
   required: true

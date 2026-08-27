@@ -78,7 +78,6 @@ static_vars:
   enabled: true
   items:
   - '{{rules}}'
-  - '{{path:config/templates/character_design_template.md}}'
 dynamic_vars:
   enabled: true
   items:
@@ -139,7 +138,6 @@ deliverables:
 - name: character_design
   description: 角色设定文档，包含所有角色卡片和关系矩阵
   template_source: knowledge
-  template_name: config/templates/character_design_template.md
   output_path: '{{workspace}}/docs/character_design.md'
   type: markdown
   required: true

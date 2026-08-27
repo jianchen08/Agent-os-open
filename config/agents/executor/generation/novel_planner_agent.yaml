@@ -88,7 +88,6 @@ static_vars:
   enabled: true
   items:
   - '{{rules}}'
-  - '{{path:config/templates/creation_direction_template.md}}'
 dynamic_vars:
   enabled: true
   items:
@@ -153,7 +152,6 @@ deliverables:
 - name: 创作方向书
   description: 结构化的创作方向文档，包含题材定位、核心卖点、风格定位、创新点和竞品分析
   template_source: knowledge
-  template_name: config/templates/creation_direction_template.md
   output_path: '{{workspace}}/docs/{title}_创作方向书.md'
   type: markdown
   required: true

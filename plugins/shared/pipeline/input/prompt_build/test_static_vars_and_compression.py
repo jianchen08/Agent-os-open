@@ -3,7 +3,8 @@
 
 覆盖既有测试未触达的行为面：
     - 静态变量：字符串形式（{{...}}）、dict 形式（enabled=false 跳过）、模型信息行
-    - path 类型：绝对路径文件、相对路径文件（project_root）、目录遍历、读取失败留痕
+    - path 类型：绝对路径文件、相对路径文件（project_root）、目录遍历、读取失败留痕、
+      路径不存在落空告警
     - reference/content/空 type 类型；tags 触发检索
     - 压缩加载：无 pipeline_id / 后端异常降级、预算耗尽跳过、去重、L1→L2 降级、
       _estimate_tokens_for_budget 上下界、_parse_seq 各种形态
@@ -205,20 +206,29 @@ class TestResolveSingleVar:
         out = _run(plugin._resolve_single_var_content(ctx, var_def, "", {}))
         assert out.startswith("<plugin>") and out.endswith("</plugin>")
 
-    def test_path_file_relative_project_root(self) -> None:
-        """path 类型相对路径经 project_root 解析。"""
+    def test_path_file_relative_project_root(self, caplog) -> None:
+        """path 类型相对路径经 project_root 解析，且存在时不产生落空告警。"""
+        import logging
+
         plugin = make_plugin()
         ctx = make_ctx({"project_root": str(_THIS_DIR)})
         var_def = {"type": "path", "name": "p", "path": "plugin.py"}
-        out = _run(plugin._resolve_single_var_content(ctx, var_def, "", {}))
+        with caplog.at_level(logging.WARNING):
+            out = _run(plugin._resolve_single_var_content(ctx, var_def, "", {}))
         assert "<plugin>" in out
+        assert not any("知识注入落空" in r.getMessage() for r in caplog.records)
 
-    def test_path_missing_file(self) -> None:
-        """path 类型找不到文件/目录 → 空串。"""
+    def test_path_missing_file_warns(self, caplog) -> None:
+        """path 类型找不到文件/目录 → 空串 + warning 留痕。"""
+        import logging
+
         plugin = make_plugin()
         ctx = make_ctx({"project_root": str(_THIS_DIR)})
         var_def = {"type": "path", "name": "p", "path": "definitely-missing-xyz.md"}
-        assert _run(plugin._resolve_single_var_content(ctx, var_def, "", {})) == ""
+        with caplog.at_level(logging.WARNING):
+            out = _run(plugin._resolve_single_var_content(ctx, var_def, "", {}))
+        assert out == ""
+        assert any("definitely-missing-xyz.md" in r.getMessage() for r in caplog.records if r.levelno >= logging.WARNING)
 
     def test_path_file_read_error_warns(self, caplog, monkeypatch, tmp_path) -> None:
         """path 类型文件读取失败 → warning 留痕 + 空串。"""

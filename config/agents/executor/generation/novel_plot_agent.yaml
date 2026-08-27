@@ -130,7 +130,6 @@ static_vars:
   enabled: true
   items:
   - '{{rules}}'
-  - '{{path:config/templates/plot_planning_template.md}}'
 dynamic_vars:
   enabled: true
   items:
@@ -213,7 +212,6 @@ deliverables:
 - name: plot_planning
   description: 情节规划产出物（含粗纲、细纲、爽点分布图、伏笔追踪表、钩子分布总览）
   template_source: knowledge
-  template_name: config/templates/plot_planning_template.md
   output_path: '{{workspace}}/{novel_title}_plot_planning.md'
   type: markdown
   required: true

@@ -188,7 +188,6 @@ static_vars:
   enabled: true
   items:
   - '{{rules}}'
-  - '{{path:config/templates/world_setting_template.md}}'
 dynamic_vars:
   enabled: true
   items:
@@ -243,7 +242,6 @@ deliverables:
 - name: world_setting
   description: 世界设定文档，包含四层构建法的完整世界观设定和升级体系设计
   template_source: knowledge
-  template_name: config/templates/world_setting_template.md
   output_path: '{{workspace}}/docs/{title}_世界设定.md'
   type: markdown
   required: true

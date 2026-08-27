@@ -477,8 +477,12 @@ class PromptBuildPlugin(IInputPlugin):
                 if dir_content:
                     content = f'<files dir="{file_path}">\n{dir_content}\n</files>'
             else:
-                logger.debug(
-                    "[%s] path 类型变量跳过 | name=%s | path=%s | project_root=%s",
+                # 配置声明的注入路径不存在 = 注入落空，非空 path 须 warning 留痕
+                # （与本插件"未识别占位符""memory_service 缺失致知识注入落空"同口径）
+                log_missing = logger.warning if file_path.strip() else logger.debug
+                log_missing(
+                    "[%s] path 类型变量解析失败（文件/目录不存在），知识注入落空"
+                    " | name=%s | path=%s | project_root=%s",
                     self.name,
                     var_name,
                     file_path,

@@ -81,8 +81,10 @@ def test_on_output_task_done_keeps_running(pm, tmp_path):
 
 def test_on_output_task_done_unknown_pid_no_error(pm):
     """pid 不在 active_processes 时不应报错（幂等）。"""
-    # 不应抛异常
     pm._on_output_task_done(99999, _DoneTask())
+    # 未知 pid 不应被登记，注册表保持原状
+    assert 99999 not in pm.active_processes
+    assert pm.get_process_info(99999) is None
 
 
 def test_cleared_pid_get_process_info_returns_none(pm, tmp_path):

@@ -115,7 +115,6 @@ static_vars:
   enabled: true
   items:
   - '{{rules}}'
-  - '{{path:config/templates/novel_style_review_template.md}}'
 dynamic_vars:
   enabled: true
   items:
@@ -181,7 +180,6 @@ deliverables:
 - name: style_review_report
   description: 文风审核报告
   template_source: knowledge
-  template_name: config/templates/novel_style_review_template.md
   output_path: '{{workspace}}/reviews/{chapter_title}_style_review.md'
   type: markdown
   required: true

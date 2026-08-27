@@ -350,17 +350,27 @@ async def test_container_backend_kill_force_false_uses_sigterm():
 
 @pytest.mark.asyncio
 async def test_container_backend_kill_handles_already_dead():
-    """docker exec kill 返回非零（进程已退出）→ 不抛异常。"""
+    """docker exec kill 返回非零（进程已退出）→ 不抛异常，kill 命令仍完整发出。"""
     backend = ContainerProcessBackend(container_id="abc")
 
+    captured: list = []
+
     async def fake_run_cmd(args, timeout=30):
+        captured.append(args)
         return 1, b"", b"no such process"
 
     backend._run_cmd = fake_run_cmd  # type: ignore[attr-defined]
-    # 不应抛
-    await backend.kill(
-        WorkUnit(pid=999, command="x", metadata={"container_id": "abc"})
-    )
+    # 非零退出码被容忍：默认 force=True 发 SIGKILL，连杀两次均不抛（幂等）
+    for _ in range(2):
+        await backend.kill(
+            WorkUnit(pid=999, command="x", metadata={"container_id": "abc"})
+        )
+
+    assert len(captured) == 2
+    cmd_str = " ".join(captured[0])
+    assert "sh" in cmd_str, f"应经 sh -c 走内建 kill: {cmd_str}"
+    assert "-c" in cmd_str
+    assert "kill -9 999" in cmd_str, f"force 默认 True 应发 SIGKILL: {cmd_str}"
 
 
 @pytest.mark.asyncio

@@ -193,11 +193,18 @@ class TestLogCollector:
             collector.stop()
 
     def test_double_stop_safe(self) -> None:
-        """重复 stop 不会报错。"""
+        """重复 stop 不报错且幂等：仅第一次 stop 移除 handler。"""
         collector = LogCollector()
         collector.start()
-        collector.stop()
-        collector.stop()  # 不应抛异常
+        count_active = len(logging.root.handlers)
+        try:
+            collector.stop()
+            assert len(logging.root.handlers) == count_active - 1
+            collector.stop()  # 幂等：handler 计数不再变化
+            assert len(logging.root.handlers) == count_active - 1
+            assert collector.active is False
+        finally:
+            collector.stop()
 
     def test_captures_warning_logs(self) -> None:
         """默认捕获 WARNING 及以上级别的日志。"""

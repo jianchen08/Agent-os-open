@@ -458,9 +458,16 @@ class TestConfigSubscriberMixin:
         assert len(center._watches["new.yaml"]) == 1
 
     def test_unsubscribe_when_not_subscribed(self) -> None:
-        """未订阅时 unsubscribe 不报错。"""
+        """未订阅时 unsubscribe 不报错、不产生订阅，且后续可正常订阅。"""
+        center = MockConfigCenter()
         conn = ConfigurableConnector()
-        conn.unsubscribe_config()  # 不应抛异常
+        conn.unsubscribe_config()  # no-op
+        assert center._watches == {}
+        # no-op 后订阅功能未被破坏（与 test_subscribe_fires_callback 同契约）
+        conn.subscribe_config(center, "x.yaml")
+        center.fire_change("x.yaml", "modified", "/config/x.yaml")
+        assert len(conn.config_events) == 1
+        assert conn.config_events[0]["event_type"] == "modified"
 
 
 # ── 通道适配器标准方法测试 ────────────────────────────────────────────────

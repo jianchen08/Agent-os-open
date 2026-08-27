@@ -115,12 +115,16 @@ async def test_report_metrics_skips_tool_round() -> None:
 
 @pytest.mark.asyncio
 async def test_report_metrics_no_service_silent() -> None:
-    """metrics 服务未注入：静默跳过，不抛异常。"""
+    """metrics 服务未注入：静默跳过（不抛、不写 state）。"""
     plugin = TrackPlugin()
-    ctx = _make_ctx(_base_state(), {})
+    state = _base_state()
+    snapshot = dict(state)
+    ctx = _make_ctx(state, {})
 
     usage = plugin._collect_token_usage(ctx)
-    await plugin._try_report_metrics(ctx, usage)  # 不抛即通过
+    assert await plugin._try_report_metrics(ctx, usage) is None
+    # 跳过不得有任何 state 副作用
+    assert ctx.state == snapshot
 
 
 @pytest.mark.asyncio
