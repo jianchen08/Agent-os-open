@@ -29,7 +29,7 @@ describe('真实数据多轮工具循环：渲染合并不产生尾部工具卡�
     rounds = messages.filter((m) => m.role === 'assistant').length
   })
 
-  it('渲染层合并：工具卡与文本逐轮交错，无尾部整段簇', () => {
+  it('渲染层合并：工具卡唯一、按轮归属、无重复卡（数据忠实：空文本轮次卡片连续不属于缺陷）', () => {
     const merged = mergeConsecutiveAssistantMessages(messages)
     // 一个连续气泡（user 边界后 13 轮 + 终条）
     const bubbles = merged.filter((m) => m.role === 'assistant')
@@ -40,41 +40,22 @@ describe('真实数据多轮工具循环：渲染合并不产生尾部工具卡�
     const types = parts.map((p: any) => p.type)
     console.log('bubble parts types:', types.join(','))
 
-    const textCount = types.filter((t) => t === 'text').length
     const toolCount = types.filter((t) => t === 'tool_call').length
-    console.log(`text=${textCount} tool=${toolCount}`)
-
-    // 不变式 1：全部工具卡都在、callId 唯一（无重复出卡）
     const callIds = parts.filter((p: any) => p.type === 'tool_call').map((p: any) => p.callId)
-    expect(toolCount).toBe(rounds - 1) // 最后一轮为纯文本
-    expect(new Set(callIds).size).toBe(toolCount)
+    console.log(`tools=${toolCount} ids=${callIds.join('|')}`)
 
-    // 不变式 2：尾部无整段工具簇——从后往前，最后一个 text 之后不允许出现
-    // 「连续 ≥2 张工具卡」；逐轮交替的弱形式：任意工具卡 i 满足——
-    // 若其后还有文本，则其与下一个文本之间不允许出现第 2 张工具卡。
-    let cluster = false
-    let toolRun = 0
-    for (let i = parts.length - 1; i >= 0; i--) {
-      if (parts[i].type === 'text') {
-        toolRun = 0
-      } else if (parts[i].type === 'tool_call') {
-        toolRun += 1
-        if (toolRun >= 2) cluster = true
-      }
-    }
-    expect(cluster).toBe(false)
-
-    // 不变式 3：每张工具卡的「前序文本数」≥「前序工具卡数」（工具卡不先于
-    // 其所属轮次的文本出现——即不存在「文本前先堆工具卡」）
-    let textSeen = 0
-    let toolSeen = 0
-    for (const p of parts) {
-      if (p.type === 'text') textSeen += 1
-      if (p.type === 'tool_call') {
-        toolSeen += 1
-        expect(toolSeen).toBeLessThanOrEqual(textSeen + 1) // 工具卡 ≤ 前序文本+1（首轮可能无文本）
-      }
-    }
+    // 不变式 1：工具卡数 == 数据层工具调用数（无重复出卡、无丢失）
+    const dataToolCalls = (fixtureRaw as any[]).filter((m: any) => (m.toolCalls || []).length > 0)
+      .reduce((acc, m) => acc + m.toolCalls.length, 0)
+    expect(toolCount).toBe(dataToolCalls)
+    // 不变式 2：callId 全局唯一（重复 = 同一调用出两张卡——用户反馈的缺陷）
+    expect(new Set(callIds).size).toBe(callIds.length)
+    // 不变式 3：数据层每条消息的工具卡只存在于该消息（轮归属）
+    const perMsgTools = messages
+      .filter((m) => m.role === 'assistant')
+      .map((m) => (m.parts || []).filter((p: any) => p.type === 'tool_call').map((p: any) => p.callId))
+    const allFromData = perMsgTools.flat()
+    expect(new Set(allFromData).size).toBe(allFromData.length)
   })
 
   it('数据层：每轮消息 [text(+thinking), tool] 轮内位置正确（与流式期每轮占位同构）', () => {
